@@ -116,6 +116,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("AOLcoIkQDgM", Gen5Driver::GraphicsDriverQueryResourceRegistrationUserMemoryRequirements);
 	LIB_FUNC("F0Y42t-3e18", Gen5Driver::GraphicsDriverInitResourceRegistration);
 	LIB_FUNC("U9ueyEhSkF4", Gen5Driver::GraphicsDriverRegisterDefaultOwner);
+	LIB_FUNC("F0ZXt5q0ZTA", Gen5Driver::GraphicsDriverGetDefaultOwner);
+	LIB_FUNC("uJziRsODk1c", Gen5Driver::GraphicsDriverGetResourceRegistrationMaxNameLength);
 	LIB_FUNC("X-Nm5KLREeg", Gen5Driver::GraphicsDriverRegisterOwner);
 	LIB_FUNC("W5z4eZrjEas", Gen5Driver::GraphicsDriverRegisterResource);
 	LIB_FUNC("UglJIZjGssM", Gen5Driver::GraphicsDriverSubmitDcb);

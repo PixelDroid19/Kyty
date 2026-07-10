@@ -2437,6 +2437,10 @@ int KYTY_SYSV_ABI GraphicsDriverInitResourceRegistration(void* memory, size_t si
 	return OK;
 }
 
+// Handle reserved for the driver's default resource owner. Named owners are
+// allocated above it so their handles never collide with the default.
+static constexpr uint32_t GRAPHICS_DEFAULT_OWNER = 1;
+
 int KYTY_SYSV_ABI GraphicsDriverRegisterDefaultOwner(uint32_t options)
 {
 	if (options != 0)
@@ -2449,6 +2453,35 @@ int KYTY_SYSV_ABI GraphicsDriverRegisterDefaultOwner(uint32_t options)
 	return OK;
 }
 
+// sce::Agc::ResourceRegistration::getDefaultOwner(unsigned int*): returns the
+// handle of the driver's default owner through the output pointer.
+int KYTY_SYSV_ABI GraphicsDriverGetDefaultOwner(uint32_t* owner)
+{
+	if (owner == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	*owner = GRAPHICS_DEFAULT_OWNER;
+	return OK;
+}
+
+// Maximum length, including the terminator, accepted for a registered resource
+// name. Names passed to resource registration are bounded by this value.
+static constexpr uint32_t GRAPHICS_RESOURCE_NAME_MAX = 256;
+
+// sce::Agc::ResourceRegistration::getMaxNameLength(unsigned int*).
+int KYTY_SYSV_ABI GraphicsDriverGetResourceRegistrationMaxNameLength(uint32_t* max_length)
+{
+	if (max_length == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	*max_length = GRAPHICS_RESOURCE_NAME_MAX;
+	return OK;
+}
+
 int KYTY_SYSV_ABI GraphicsDriverRegisterOwner(uint32_t* owner, const char* name)
 {
 	if (owner == nullptr || name == nullptr || name[0] == '\0')
@@ -2456,7 +2489,7 @@ int KYTY_SYSV_ABI GraphicsDriverRegisterOwner(uint32_t* owner, const char* name)
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
-	static std::atomic<uint32_t> next_owner {2};
+	static std::atomic<uint32_t> next_owner {GRAPHICS_DEFAULT_OWNER + 1};
 	*owner = next_owner.fetch_add(1, std::memory_order_relaxed);
 	return OK;
 }

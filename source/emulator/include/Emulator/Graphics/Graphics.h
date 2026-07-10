@@ -133,6 +133,8 @@ int KYTY_SYSV_ABI GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(
                                                                                  uint32_t max_owners);
 int KYTY_SYSV_ABI GraphicsDriverInitResourceRegistration(void* memory, size_t size, uint32_t max_owners);
 int KYTY_SYSV_ABI GraphicsDriverRegisterDefaultOwner(uint32_t options);
+int KYTY_SYSV_ABI GraphicsDriverGetDefaultOwner(uint32_t* owner);
+int KYTY_SYSV_ABI GraphicsDriverGetResourceRegistrationMaxNameLength(uint32_t* max_length);
 int KYTY_SYSV_ABI GraphicsDriverRegisterOwner(uint32_t* owner, const char* name);
 int KYTY_SYSV_ABI GraphicsDriverRegisterResource(uint32_t* resource, uint32_t owner, const void* base, uint64_t size, const char* name,
                                                  uint32_t type, uint64_t user_data);
