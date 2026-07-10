@@ -58,4 +58,35 @@ TEST(EmulatorGraphicsPackets, RejectsInvalidPacketInputs)
 	EXPECT_EQ(Gen5::GraphicsEncodeDispatch(command, 4, 1, 1, 1, 0), 0u);
 }
 
+TEST(EmulatorGraphicsPackets, SizesResourceRegistrationMemory)
+{
+	size_t small = 0;
+	size_t large = 0;
+
+	EXPECT_LT(Gen5Driver::GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(nullptr, 32, 4), 0);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(&small, 32, 4), 0);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(&large, 64, 8), 0);
+	EXPECT_GT(small, 0u);
+	EXPECT_GT(large, small);
+	EXPECT_EQ(small % 64u, 0u);
+
+	std::unique_ptr<uint8_t[]> memory(new uint8_t[small]);
+	EXPECT_LT(Gen5Driver::GraphicsDriverInitResourceRegistration(nullptr, small, 4), 0);
+	EXPECT_LT(Gen5Driver::GraphicsDriverInitResourceRegistration(memory.get(), 0, 4), 0);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverInitResourceRegistration(memory.get(), small, 4), 0);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverRegisterDefaultOwner(0), 0);
+	EXPECT_LT(Gen5Driver::GraphicsDriverRegisterDefaultOwner(1), 0);
+	uint32_t owner = 0;
+	EXPECT_LT(Gen5Driver::GraphicsDriverRegisterOwner(nullptr, "runtime"), 0);
+	EXPECT_LT(Gen5Driver::GraphicsDriverRegisterOwner(&owner, nullptr), 0);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverRegisterOwner(&owner, "runtime"), 0);
+	EXPECT_GT(owner, 0u);
+	uint8_t  resource_memory[64] = {};
+	uint32_t resource            = 0;
+	EXPECT_LT(Gen5Driver::GraphicsDriverRegisterResource(nullptr, owner, resource_memory, sizeof(resource_memory), "buffer", 1, 0), 0);
+	EXPECT_LT(Gen5Driver::GraphicsDriverRegisterResource(&resource, owner, nullptr, sizeof(resource_memory), "buffer", 1, 0), 0);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverRegisterResource(&resource, owner, resource_memory, sizeof(resource_memory), "buffer", 1, 0), 0);
+	EXPECT_GT(resource, 0u);
+}
+
 UT_END();

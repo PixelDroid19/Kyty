@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -2386,6 +2387,92 @@ struct Packet
 	uint32_t  dw_num;
 	uint8_t   pad[4];
 };
+
+int KYTY_SYSV_ABI GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(size_t* size, uint32_t max_resources,
+                                                                                 uint32_t max_owners)
+{
+	if (size == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	constexpr size_t header_bytes       = 256;
+	constexpr size_t resource_bytes     = 64;
+	constexpr size_t owner_bytes        = 64;
+	constexpr size_t required_alignment = 64;
+	constexpr size_t max_size = std::numeric_limits<size_t>::max();
+	auto checked_add_scaled = [](size_t current, uint32_t count, size_t stride, size_t* result) {
+		if (count != 0 && stride > (std::numeric_limits<size_t>::max() - current) / static_cast<size_t>(count))
+		{
+			return false;
+		}
+		*result = current + static_cast<size_t>(count) * stride;
+		return true;
+	};
+
+	size_t unaligned = header_bytes;
+	if (!checked_add_scaled(unaligned, max_resources, resource_bytes, &unaligned) ||
+	    !checked_add_scaled(unaligned, max_owners, owner_bytes, &unaligned) || unaligned > max_size - (required_alignment - 1))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	*size = (unaligned + required_alignment - 1) & ~(required_alignment - 1);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverInitResourceRegistration(void* memory, size_t size, uint32_t max_owners)
+{
+	if (memory == nullptr || size == 0 || max_owners == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	static std::atomic<void*>    registration_memory {nullptr};
+	static std::atomic<size_t>   registration_size {0};
+	static std::atomic<uint32_t> registration_max_owners {0};
+	registration_memory.store(memory, std::memory_order_release);
+	registration_size.store(size, std::memory_order_release);
+	registration_max_owners.store(max_owners, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverRegisterDefaultOwner(uint32_t options)
+{
+	if (options != 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	static std::atomic<bool> default_owner_registered {false};
+	default_owner_registered.store(true, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverRegisterOwner(uint32_t* owner, const char* name)
+{
+	if (owner == nullptr || name == nullptr || name[0] == '\0')
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	static std::atomic<uint32_t> next_owner {2};
+	*owner = next_owner.fetch_add(1, std::memory_order_relaxed);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverRegisterResource(uint32_t* resource, uint32_t owner, const void* base, uint64_t size, const char* name,
+                                                 uint32_t /*type*/, uint64_t /*user_data*/)
+{
+	if (resource == nullptr || owner == 0 || base == nullptr || size == 0 || name == nullptr || name[0] == '\0')
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	static std::atomic<uint32_t> next_resource {1};
+	*resource = next_resource.fetch_add(1, std::memory_order_relaxed);
+	return OK;
+}
 
 int KYTY_SYSV_ABI GraphicsDriverSubmitDcb(const Packet* packet)
 {
