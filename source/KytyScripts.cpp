@@ -96,6 +96,12 @@ static void run_script(const String& lua_file_name, const StringList& args)
 
 int main(int argc, char* argv[])
 {
+#ifdef __APPLE__
+	// Unbuffered stdout so diagnostics survive hard faults (SIGILL/SEGV) that
+	// bypass the normal flush path under Rosetta 2.
+	setvbuf(stdout, nullptr, _IONBF, 0);
+#endif
+
 	mem_set_max_size(static_cast<size_t>(2048) * 1024 * 1024 - 1);
 
 	auto& slist = *SubsystemsList::Instance();

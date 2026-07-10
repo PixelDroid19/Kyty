@@ -89,6 +89,23 @@ bool     Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nu
 bool     FlushInstructionCache(uint64_t address, uint64_t size);
 bool     PatchReplace(uint64_t vaddr, uint64_t value);
 
+// Diagnostic single-step tracer (macOS/Rosetta): logs the next `steps` guest
+// instructions on the current thread via the x86 trap flag. No-op elsewhere.
+void SetGuestTrace(int steps);
+
+// Diagnostic timer profiler (macOS/Rosetta): periodically logs the guest
+// instruction pointer of the running thread; locates spinning guest loops.
+void StartGuestProfiler();
+
+// Flexible-memory demand paging (macOS): register a reserved range, then map its
+// pages lazily from the fault handler on first write. TryDemandMap returns true if
+// vaddr fell in a registered range and its page was mapped (retry the instruction).
+void RegisterDemandRange(uint64_t addr, uint64_t size);
+bool TryDemandMap(uint64_t vaddr);
+
+// Async-signal-safe fatal fault report + terminate (no allocator use).
+void FatalFault(uint64_t vaddr, uint64_t rip);
+
 } // namespace VirtualMemory
 
 } // namespace Kyty::Core
