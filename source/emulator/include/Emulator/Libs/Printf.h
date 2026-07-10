@@ -22,6 +22,12 @@ libc_printf_ctx_func_t   GetPrintfCtxFunc();
 libc_snprintf_ctx_func_t GetSnrintfCtxFunc();
 libc_vprintf_func_t      GetVprintfFunc();
 
+// Formats into out (bounded by out_size) using Kyty's own conversion of the guest
+// VaList, returning the length that would be written. Every guest printf-family
+// export shares this path so formatting behaves identically and never hands the
+// guest's register-save area to the host libc formatter.
+int Format(char* out, size_t out_size, const char* format, VaList* va_list);
+
 } // namespace Kyty::Libs
 
 #endif // KYTY_EMU_ENABLED

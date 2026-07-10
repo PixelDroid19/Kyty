@@ -182,31 +182,47 @@ static KYTY_SYSV_ABI int      c_remove(const char* p)
 }
 
 // --- printf / scanf family ---------------------------------------------------
-// On the x86-64 SysV ABI the host `va_list` layout is bit-identical to Kyty's
-// VaList, so once the fixed args are consumed we hand &ctx.va_list straight to
-// the host v* functions and let host libc do the formatting (correct %f/%d/%s).
+// Every formatted output export converts the guest VaList through Kyty's own
+// formatter (Printf::Format). The guest register-save area is never handed to the
+// host libc formatter: that walks memory with host assumptions and faults on the
+// guest's frame. A large but finite cap stands in for the unbounded sprintf/
+// vsprintf buffer contract, which trusts the caller-provided destination.
+static constexpr size_t C_UNBOUNDED_FORMAT = 0x10000;
+
 static KYTY_SYSV_ABI int c_snprintf(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
 	char*       s   = VaArg_ptr<char>(&ctx.va_list);
 	size_t      n   = VaArg_size_t(&ctx.va_list);
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
-	return ::vsnprintf(s, n, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+	return Format(s, n, fmt, &ctx.va_list);
 }
 static KYTY_SYSV_ABI int c_sprintf(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
 	char*       s   = VaArg_ptr<char>(&ctx.va_list);
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
-	return ::vsprintf(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+	return Format(s, C_UNBOUNDED_FORMAT, fmt, &ctx.va_list);
 }
 static KYTY_SYSV_ABI int c_fprintf(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
 	FILE*       f   = VaArg_ptr<FILE>(&ctx.va_list);
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
-	return ::vfprintf(f, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+
+	char      buffer[C_UNBOUNDED_FORMAT];
+	const int written = Format(buffer, sizeof(buffer), fmt, &ctx.va_list);
+
+	if (f == nullptr || written < 0)
+	{
+		return written;
+	}
+	::fwrite(buffer, 1, static_cast<size_t>(written), f);
+	return written;
 }
+// scanf parses a guest input string into guest output pointers. Kyty has no input
+// converter yet; forward to the host, which reads the guest string and writes back
+// through the pointer arguments. This is input parsing, not output formatting.
 static KYTY_SYSV_ABI int c_sscanf(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
@@ -214,16 +230,14 @@ static KYTY_SYSV_ABI int c_sscanf(VA_ARGS)
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
 	return ::vsscanf(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
 }
-// vsprintf(char* s, const char* fmt, va_list ap): guest passes ap as a pointer
-// to its (SysV-layout) va_list. vsnprintf_s(dst, dstsz, count, fmt, ap).
 static KYTY_SYSV_ABI int c_vsprintf(char* s, const char* fmt, VaList* ap)
 {
-	return ::vsprintf(s, fmt, *reinterpret_cast<va_list*>(ap));
+	return Format(s, C_UNBOUNDED_FORMAT, fmt, ap);
 }
 static KYTY_SYSV_ABI int c_vsnprintf_s(char* s, size_t dn, size_t count, const char* fmt, VaList* ap)
 {
 	size_t n = (count + 1 < dn) ? count + 1 : dn;
-	return ::vsnprintf(s, n, fmt, *reinterpret_cast<va_list*>(ap));
+	return Format(s, n, fmt, ap);
 }
 
 // --- stdlib ------------------------------------------------------------------

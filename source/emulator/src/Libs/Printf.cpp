@@ -508,6 +508,13 @@ static inline unsigned int _strnlen_s(const char* str, size_t maxsize)
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* format, VaList* va_list)
 {
+	// A null format is invalid input from the guest; report the C error return
+	// instead of dereferencing it.
+	if (format == nullptr)
+	{
+		return -1;
+	}
+
 	Vector<char> buffer;
 
 	uint32_t flags     = 0;
@@ -789,7 +796,13 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 			case 's':
 			{
 				// const char*  p = va_arg(va, char*);
-				const char*  p = VaArg_ptr<const char>(va_list);
+				const char* p = VaArg_ptr<const char>(va_list);
+				// The C library renders a null %s argument as the literal "(null)"
+				// rather than dereferencing it; guest error handlers depend on this.
+				if (p == nullptr)
+				{
+					p = "(null)";
+				}
 				unsigned int l = _strnlen_s(p, precision != 0u ? precision : static_cast<size_t>(-1));
 				// pre padding
 				if ((flags & FLAGS_PRECISION) != 0u)
@@ -913,6 +926,11 @@ libc_snprintf_ctx_func_t GetSnrintfCtxFunc()
 libc_vprintf_func_t GetVprintfFunc()
 {
 	return kyty_vprintf;
+}
+
+int Format(char* out, size_t out_size, const char* format, VaList* va_list)
+{
+	return kyty_printf_internal(true, out, out_size, format, va_list);
 }
 
 } // namespace Kyty::Libs
