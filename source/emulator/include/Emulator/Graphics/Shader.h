@@ -187,6 +187,7 @@ enum class ShaderInstructionType : uint32_t
 	VInterpP1F32,
 	VInterpP2F32,
 	VLogF32,
+	VLshlAddU32,
 	VLshlB32,
 	VLshlrevB32,
 	VLshrB32,
@@ -490,8 +491,7 @@ public:
 
 	[[nodiscard]] bool HasAnyOf(std::initializer_list<ShaderInstructionType> types) const
 	{
-		return std::any_of(types.begin(), types.end(),
-		                   [this](auto type)
+		return std::any_of(types.begin(), types.end(), [this](auto type)
 		                   { return m_instructions.Contains(type, [](auto inst, auto type) { return inst.type == type; }); });
 	}
 

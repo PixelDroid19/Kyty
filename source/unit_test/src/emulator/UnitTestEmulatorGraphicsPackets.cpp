@@ -1,7 +1,10 @@
+#include "Kyty/UnitTest.h"
+
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
-#include "Kyty/UnitTest.h"
+#include "Emulator/Graphics/ShaderParse.h"
 
 UT_BEGIN(EmulatorGraphicsPackets);
 
@@ -45,6 +48,28 @@ TEST(EmulatorGraphicsPackets, EncodesDispatch)
 	EXPECT_EQ(command[2], 3u);
 	EXPECT_EQ(command[3], 4u);
 	EXPECT_EQ(command[4], 0x41u);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesGen5LshlAddU32)
+{
+	const uint32_t shader[] = {0xd7460003u, 0x040a0300u, 0xbf810000u};
+
+	Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	Config::SetNextGen(true);
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VLshlAddU32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2);
+	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.dst.register_id, 3);
+	EXPECT_EQ(instruction.src[0].register_id, 0);
+	EXPECT_EQ(instruction.src[1].register_id, 1);
+	EXPECT_EQ(instruction.src[2].register_id, 2);
 }
 
 TEST(EmulatorGraphicsPackets, RejectsInvalidPacketInputs)

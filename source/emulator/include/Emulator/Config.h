@@ -43,6 +43,7 @@ void Load(const Scripts::ScriptVar& cfg);
 
 void SetNextGen(bool mode);
 
+bool     IsInitialized();
 uint32_t GetScreenWidth();
 uint32_t GetScreenHeight();
 bool     IsNeo();
