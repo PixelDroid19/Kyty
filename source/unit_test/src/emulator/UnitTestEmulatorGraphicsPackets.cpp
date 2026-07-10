@@ -76,6 +76,14 @@ TEST(EmulatorGraphicsPackets, SizesResourceRegistrationMemory)
 	EXPECT_EQ(Gen5Driver::GraphicsDriverInitResourceRegistration(memory.get(), small, 4), 0);
 	EXPECT_EQ(Gen5Driver::GraphicsDriverRegisterDefaultOwner(0), 0);
 	EXPECT_LT(Gen5Driver::GraphicsDriverRegisterDefaultOwner(1), 0);
+	uint32_t default_owner = 0;
+	EXPECT_LT(Gen5Driver::GraphicsDriverGetDefaultOwner(nullptr), 0);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverGetDefaultOwner(&default_owner), 0);
+	EXPECT_GT(default_owner, 0u);
+	uint32_t max_name = 0;
+	EXPECT_LT(Gen5Driver::GraphicsDriverGetResourceRegistrationMaxNameLength(nullptr), 0);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverGetResourceRegistrationMaxNameLength(&max_name), 0);
+	EXPECT_GT(max_name, 0u);
 	uint32_t owner = 0;
 	EXPECT_LT(Gen5Driver::GraphicsDriverRegisterOwner(nullptr, "runtime"), 0);
 	EXPECT_LT(Gen5Driver::GraphicsDriverRegisterOwner(&owner, nullptr), 0);
