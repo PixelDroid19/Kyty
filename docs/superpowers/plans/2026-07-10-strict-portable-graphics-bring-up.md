@@ -116,7 +116,7 @@ git commit -m "docs: centralize portable emulator workflow"
 - Produces: `State::SetGenericScissorTl`, `SetGenericScissorBr`,
   `SetModeControl`, and `SetBlendControl`.
 
-- [ ] **Step 1: Write failing state-decoder tests**
+- [x] **Step 1: Write failing state-decoder tests**
 
 ```cpp
 #include "Emulator/Graphics/GraphicsState.h"
@@ -160,7 +160,7 @@ Add `src/emulator/*.cpp` to the unit-test glob, add
 `${CMAKE_SOURCE_DIR}/emulator/include` as a private include directory, and add
 `UT_LINK(EmulatorGraphicsState);` to `UnitTest.cpp`.
 
-- [ ] **Step 2: Run the filtered test and verify failure**
+- [x] **Step 2: Run the filtered test and verify failure**
 
 Run:
 
@@ -174,7 +174,7 @@ _build_macos/fc_script "{kyty_run_tests()}" --gtest_filter=EmulatorGraphicsState
 Expected: compilation fails because `GraphicsState.h` or the `State` functions
 do not yet exist.
 
-- [ ] **Step 3: Implement focused decoders**
+- [x] **Step 3: Implement focused decoders**
 
 `GraphicsState.h` declares the four functions under
 `Kyty::Libs::Graphics::State`. `GraphicsState.cpp` decodes fields exclusively
@@ -182,7 +182,7 @@ through the constants in `Pm4.h` and updates the existing `HW::Context` setters.
 The TL and BR scissor registers update their halves independently so indirect
 register ordering does not destroy state.
 
-- [ ] **Step 4: Route direct and indirect packets through the shared functions**
+- [x] **Step 4: Route direct and indirect packets through the shared functions**
 
 Replace field decoding inside `hw_ctx_set_generic_scissor`,
 `hw_ctx_set_mode_control`, and `hw_ctx_set_blend_control` with calls to the
@@ -199,7 +199,7 @@ g_hw_ctx_indirect_func[Pm4::CB_BLEND0_CONTROL] =
     [](KYTY_HW_CTX_INDIRECT_ARGS) { State::SetBlendControl(*cp->GetCtx(), 0, value); };
 ```
 
-- [ ] **Step 5: Run focused tests and build**
+- [x] **Step 5: Run focused tests and build**
 
 Run:
 

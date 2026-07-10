@@ -10,6 +10,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Pm4.h"
@@ -1483,19 +1484,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_blend_control)
 
 	uint32_t param = (cmd_offset - Pm4::CB_BLEND0_CONTROL) / 1;
 
-	HW::BlendControl r;
-
-	r.color_srcblend  = (buffer[0] >> Pm4::CB_BLEND0_CONTROL_COLOR_SRCBLEND_SHIFT) & Pm4::CB_BLEND0_CONTROL_COLOR_SRCBLEND_MASK;
-	r.color_comb_fcn  = (buffer[0] >> Pm4::CB_BLEND0_CONTROL_COLOR_COMB_FCN_SHIFT) & Pm4::CB_BLEND0_CONTROL_COLOR_COMB_FCN_MASK;
-	r.color_destblend = (buffer[0] >> Pm4::CB_BLEND0_CONTROL_COLOR_DESTBLEND_SHIFT) & Pm4::CB_BLEND0_CONTROL_COLOR_DESTBLEND_MASK;
-	r.alpha_srcblend  = (buffer[0] >> Pm4::CB_BLEND0_CONTROL_ALPHA_SRCBLEND_SHIFT) & Pm4::CB_BLEND0_CONTROL_ALPHA_SRCBLEND_MASK;
-	r.alpha_comb_fcn  = (buffer[0] >> Pm4::CB_BLEND0_CONTROL_ALPHA_COMB_FCN_SHIFT) & Pm4::CB_BLEND0_CONTROL_ALPHA_COMB_FCN_MASK;
-	r.alpha_destblend = (buffer[0] >> Pm4::CB_BLEND0_CONTROL_ALPHA_DESTBLEND_SHIFT) & Pm4::CB_BLEND0_CONTROL_ALPHA_DESTBLEND_MASK;
-	r.separate_alpha_blend =
-	    ((buffer[0] >> Pm4::CB_BLEND0_CONTROL_SEPARATE_ALPHA_BLEND_SHIFT) & Pm4::CB_BLEND0_CONTROL_SEPARATE_ALPHA_BLEND_MASK) != 0;
-	r.enable = ((buffer[0] >> Pm4::CB_BLEND0_CONTROL_ENABLE_SHIFT) & Pm4::CB_BLEND0_CONTROL_ENABLE_MASK) != 0;
-
-	cp->GetCtx()->SetBlendControl(param, r);
+	State::SetBlendControl(*cp->GetCtx(), param, buffer[0]);
 
 	return 1;
 }
@@ -1785,14 +1774,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_generic_scissor)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0026900);
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SC_GENERIC_SCISSOR_TL);
 
-	int left   = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(buffer[0], PA_SC_GENERIC_SCISSOR_TL, TL_X)));
-	int top    = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(buffer[0], PA_SC_GENERIC_SCISSOR_TL, TL_Y)));
-	int right  = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(buffer[1], PA_SC_GENERIC_SCISSOR_BR, BR_X)));
-	int bottom = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(buffer[1], PA_SC_GENERIC_SCISSOR_BR, BR_Y)));
-
-	bool window_offset_disable = KYTY_PM4_GET(buffer[0], PA_SC_GENERIC_SCISSOR_TL, WINDOW_OFFSET_DISABLE) != 0;
-
-	cp->GetCtx()->SetGenericScissor(left, top, right, bottom, !window_offset_disable);
+	State::SetGenericScissorTl(*cp->GetCtx(), buffer[0]);
+	State::SetGenericScissorBr(*cp->GetCtx(), buffer[1]);
 
 	return 2;
 }
@@ -1851,21 +1834,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_mode_control)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SU_SC_MODE_CNTL);
 
-	HW::ModeControl r;
-
-	r.cull_front               = KYTY_PM4_GET(buffer[0], PA_SU_SC_MODE_CNTL, CULL_FRONT) != 0;
-	r.cull_back                = KYTY_PM4_GET(buffer[0], PA_SU_SC_MODE_CNTL, CULL_BACK) != 0;
-	r.face                     = KYTY_PM4_GET(buffer[0], PA_SU_SC_MODE_CNTL, FACE) != 0;
-	r.poly_mode                = KYTY_PM4_GET(buffer[0], PA_SU_SC_MODE_CNTL, POLY_MODE);
-	r.polymode_front_ptype     = KYTY_PM4_GET(buffer[0], PA_SU_SC_MODE_CNTL, POLYMODE_FRONT_PTYPE);
-	r.polymode_back_ptype      = KYTY_PM4_GET(buffer[0], PA_SU_SC_MODE_CNTL, POLYMODE_BACK_PTYPE);
-	r.poly_offset_front_enable = KYTY_PM4_GET(buffer[0], PA_SU_SC_MODE_CNTL, POLY_OFFSET_FRONT_ENABLE) != 0;
-	r.poly_offset_back_enable  = KYTY_PM4_GET(buffer[0], PA_SU_SC_MODE_CNTL, POLY_OFFSET_BACK_ENABLE) != 0;
-	r.vtx_window_offset_enable = KYTY_PM4_GET(buffer[0], PA_SU_SC_MODE_CNTL, VTX_WINDOW_OFFSET_ENABLE) != 0;
-	r.provoking_vtx_last       = KYTY_PM4_GET(buffer[0], PA_SU_SC_MODE_CNTL, PROVOKING_VTX_LAST) != 0;
-	r.persp_corr_dis           = KYTY_PM4_GET(buffer[0], PA_SU_SC_MODE_CNTL, PERSP_CORR_DIS) != 0;
-
-	cp->GetCtx()->SetModeControl(r);
+	State::SetModeControl(*cp->GetCtx(), buffer[0]);
 
 	return 1;
 }
@@ -3512,6 +3481,23 @@ static void graphics_init_jmp_tables_cx_indirect()
 	{
 		func = nullptr;
 	}
+
+	g_hw_ctx_indirect_func[Pm4::PA_SC_GENERIC_SCISSOR_TL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		State::SetGenericScissorTl(*cp->GetCtx(), value);
+	};
+	g_hw_ctx_indirect_func[Pm4::PA_SC_GENERIC_SCISSOR_BR] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		State::SetGenericScissorBr(*cp->GetCtx(), value);
+	};
+	g_hw_ctx_indirect_func[Pm4::PA_SU_SC_MODE_CNTL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		State::SetModeControl(*cp->GetCtx(), value);
+	};
+	g_hw_ctx_indirect_func[Pm4::CB_BLEND0_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		State::SetBlendControl(*cp->GetCtx(), 0, value);
+	};
 
 	for (auto cmd_offset = Pm4::SPI_PS_INPUT_CNTL_0; cmd_offset <= Pm4::SPI_PS_INPUT_CNTL_31; cmd_offset++)
 	{
