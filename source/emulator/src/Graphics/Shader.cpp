@@ -1829,7 +1829,21 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 
 	ShaderParsedUsage usage;
 
-	ShaderParseUsage(regs->cs_regs.data_addr, &usage, &info->bind, regs->cs_user_sgpr, regs->cs_regs.user_sgpr);
+	if (Config::IsNextGen())
+	{
+		// PS5 shaders describe their resources through the mapped shader user-data
+		// block, not an embedded usage-slot table.
+		ShaderMappedData data;
+		if (auto iter = g_shader_map->find(regs->cs_regs.data_addr); iter != g_shader_map->end())
+		{
+			data = iter->second;
+		}
+		EXIT_NOT_IMPLEMENTED(data.user_data == nullptr);
+		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(regs->cs_regs.user_sgpr));
+	} else
+	{
+		ShaderParseUsage(regs->cs_regs.data_addr, &usage, &info->bind, regs->cs_user_sgpr, regs->cs_regs.user_sgpr);
+	}
 
 	EXIT_NOT_IMPLEMENTED(usage.samplers > 0);
 	EXIT_NOT_IMPLEMENTED(usage.fetch || usage.vertex_buffer || usage.vertex_attrib);
@@ -2513,23 +2527,38 @@ ShaderCode ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegi
 
 	EXIT_NOT_IMPLEMENTED(regs->cs_regs.user_sgpr > regs->cs_user_sgpr.count);
 
-	const auto* header = GetBinaryInfo(src);
+	uint32_t hash0 = 0;
+	uint32_t crc32 = 0;
 
-	EXIT_NOT_IMPLEMENTED(header == nullptr);
+	if (Config::IsNextGen())
+	{
+		// PS5 shaders carry their identity in the shader checksum register rather
+		// than an embedded binary-info block.
+		hash0 = (regs->cs_regs.chksum >> 32u) & 0xffffffffu;
+		crc32 = regs->cs_regs.chksum & 0xffffffffu;
+	} else
+	{
+		const auto* header = GetBinaryInfo(src);
 
-	bi_print("ShaderParseCS():ShaderBinaryInfo", *header);
+		EXIT_NOT_IMPLEMENTED(header == nullptr);
+
+		bi_print("ShaderParseCS():ShaderBinaryInfo", *header);
+
+		hash0 = header->hash0;
+		crc32 = header->crc32;
+	}
 
 	ShaderCode code;
 	code.SetType(ShaderType::Compute);
 
-	code.SetCrc32(header->crc32);
-	code.SetHash0(header->hash0);
+	code.SetCrc32(crc32);
+	code.SetHash0(hash0);
 	// shader_parse(0, src, nullptr, &code);
 	ShaderParse(src, &code);
 
 	if (g_debug_printfs != nullptr)
 	{
-		auto id = (static_cast<uint64_t>(header->hash0) << 32u) | header->crc32;
+		auto id = (static_cast<uint64_t>(hash0) << 32u) | crc32;
 		if (auto index = g_debug_printfs->Find(id, [](auto cmd, auto id) { return cmd.id == id; }); g_debug_printfs->IndexValid(index))
 		{
 			code.GetDebugPrintfs() = g_debug_printfs->At(index).cmds;
@@ -2938,17 +2967,24 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 
 	EXIT_NOT_IMPLEMENTED(src == nullptr);
 
-	const auto* header = GetBinaryInfo(src);
-
-	EXIT_NOT_IMPLEMENTED(header == nullptr);
-
 	ShaderId ret;
 	ret.ids.Expand(64);
 
-	ret.hash0 = header->hash0;
-	ret.crc32 = header->crc32;
+	if (Config::IsNextGen())
+	{
+		ret.hash0 = (regs->cs_regs.chksum >> 32u) & 0xffffffffu;
+		ret.crc32 = regs->cs_regs.chksum & 0xffffffffu;
+	} else
+	{
+		const auto* header = GetBinaryInfo(src);
 
-	ret.ids.Add(header->length);
+		EXIT_NOT_IMPLEMENTED(header == nullptr);
+
+		ret.hash0 = header->hash0;
+		ret.crc32 = header->crc32;
+
+		ret.ids.Add(header->length);
+	}
 
 	ret.ids.Add(input_info->workgroup_register);
 	ret.ids.Add(input_info->thread_ids_num);

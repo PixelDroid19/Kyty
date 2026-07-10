@@ -4965,15 +4965,43 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	if (ShaderIsDisabled(sh_ctx->GetCs().cs_regs.data_addr))
+	const auto& cs_disable_regs = sh_ctx->GetCs().cs_regs;
+	const bool  cs_disabled     = (cs_disable_regs.chksum != 0 ? ShaderIsDisabled2(cs_disable_regs.data_addr, cs_disable_regs.chksum)
+	                                                           : ShaderIsDisabled(cs_disable_regs.data_addr));
+	if (cs_disabled)
 	{
 		return;
 	}
 
-	EXIT_NOT_IMPLEMENTED(mode != 0);
+	// COMPUTE_DISPATCH_INITIATOR bits. COMPUTE_SHADER_EN must be set to dispatch.
+	// USE_THREAD_DIMENSIONS means the packet carries thread counts instead of
+	// group counts, so they are divided by the shader's threadgroup size. The
+	// remaining bits observed (FORCE_START_AT_000, ORDER_MODE, wave ordering) are
+	// hardware scheduling hints that do not change the dispatched grid.
+	constexpr uint32_t DISPATCH_COMPUTE_SHADER_EN      = 0x01u;
+	constexpr uint32_t DISPATCH_PARTIAL_TG_EN          = 0x02u;
+	constexpr uint32_t DISPATCH_FORCE_START_AT_000     = 0x04u;
+	constexpr uint32_t DISPATCH_USE_THREAD_DIMENSIONS  = 0x20u;
+	constexpr uint32_t DISPATCH_ORDER_MODE             = 0x40u;
+	constexpr uint32_t DISPATCH_KNOWN_BITS = DISPATCH_COMPUTE_SHADER_EN | DISPATCH_PARTIAL_TG_EN | DISPATCH_FORCE_START_AT_000 |
+	                                         DISPATCH_USE_THREAD_DIMENSIONS | DISPATCH_ORDER_MODE;
+
+	EXIT_NOT_IMPLEMENTED((mode & DISPATCH_COMPUTE_SHADER_EN) == 0);
+	EXIT_NOT_IMPLEMENTED((mode & ~DISPATCH_KNOWN_BITS) != 0);
 
 	const auto& cs_regs = sh_ctx->GetCs();
 	const auto& sh_regs = ctx->GetShaderRegisters();
+
+	if ((mode & DISPATCH_USE_THREAD_DIMENSIONS) != 0)
+	{
+		const uint32_t lx = cs_regs.cs_regs.num_thread_x;
+		const uint32_t ly = cs_regs.cs_regs.num_thread_y;
+		const uint32_t lz = cs_regs.cs_regs.num_thread_z;
+		EXIT_NOT_IMPLEMENTED(lx == 0 || ly == 0 || lz == 0);
+		thread_group_x = (thread_group_x + lx - 1) / lx;
+		thread_group_y = (thread_group_y + ly - 1) / ly;
+		thread_group_z = (thread_group_z + lz - 1) / lz;
+	}
 
 	ShaderComputeInputInfo input_info;
 	ShaderGetInputInfoCS(&cs_regs, &sh_regs, &input_info);
