@@ -1649,7 +1649,7 @@ int KYTY_SYSV_ABI Ngs2SystemCreateWithAllocator(const Ngs2SystemOption* option, 
 	printf("\t sample_rate       = %u\n", option->sample_rate);
 	printf("\t alloc_handler     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->alloc_handler));
 	printf("\t free_handler      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->free_handler));
-	printf("\t user_data         = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->user_data));
+	printf("\t user_data         = 0x%016" PRIx64 "\n", static_cast<uint64_t>(allocator->user_data));
 
 	Ngs2ContextBufferInfo buf {};
 	buf.host_buffer      = nullptr;
@@ -1697,7 +1697,7 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 	printf("\t max_matrices           = %u\n", option->max_matrices);
 	printf("\t max_ports              = %u\n", option->max_ports);
 	printf("\t host_buffer            = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer_info->host_buffer));
-	printf("\t host_buffer_size      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer_info->host_buffer_size));
+	printf("\t host_buffer_size      = 0x%016" PRIx64 "\n", static_cast<uint64_t>(buffer_info->host_buffer_size));
 
 	auto* ngs    = reinterpret_cast<Ngs2Internal*>(system_handle);
 	auto* rack   = static_cast<Ngs2RackInternal*>(buffer_info->host_buffer);
@@ -1779,7 +1779,7 @@ int KYTY_SYSV_ABI Ngs2RackCreateWithAllocator(uintptr_t system_handle, uint32_t 
 	printf("\t max_ports              = %u\n", option->max_ports);
 	printf("\t alloc_handler          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->alloc_handler));
 	printf("\t free_handler           = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->free_handler));
-	printf("\t user_data              = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->user_data));
+	printf("\t user_data              = 0x%016" PRIx64 "\n", static_cast<uint64_t>(allocator->user_data));
 
 	Ngs2ContextBufferInfo buf {};
 	buf.host_buffer      = nullptr;
@@ -1875,7 +1875,15 @@ int KYTY_SYSV_ABI Ngs2RackGetVoiceHandle(uintptr_t rack_handle, uint32_t voice_i
 	PRINT_NAME();
 
 	EXIT_NOT_IMPLEMENTED(handle == nullptr);
-	EXIT_NOT_IMPLEMENTED(rack_handle == 0);
+	// The game creates its NGS2 rack via NIDs Kyty doesn't implement (they resolve to
+	// permissive stubs returning 0), so rack_handle is null. Audio is off the critical
+	// path to a frame; fail gracefully instead of aborting so the game keeps running.
+	if (rack_handle == 0)
+	{
+		printf("\t WARNING: Ngs2RackGetVoiceHandle with null rack — returning error\n");
+		*handle = 0;
+		return 0x802a0102; // NGS2 invalid-handle style error
+	}
 
 	printf("\t voice_id = %u\n", voice_id);
 
