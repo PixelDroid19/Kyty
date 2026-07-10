@@ -32,7 +32,6 @@ constexpr uint32_t FLAGS_SHORT     = (1U << 7U);
 constexpr uint32_t FLAGS_LONG      = (1U << 8U);
 constexpr uint32_t FLAGS_LONG_LONG = (1U << 9U);
 constexpr uint32_t FLAGS_PRECISION = (1U << 10U);
-constexpr uint32_t FLAGS_ADAPT_EXP = (1U << 11U);
 
 constexpr size_t   PRINTF_NTOA_BUFFER_SIZE        = 32U;
 constexpr size_t   PRINTF_FTOA_BUFFER_SIZE        = 32U;
@@ -421,33 +420,6 @@ static size_t _etoa(out_fct_type out, Vector<char>* buffer, size_t idx, size_t m
 	// the exponent format is "%+03d" and largest value is "307", so set aside 4-5 characters
 	unsigned int minwidth = ((expval < 100) && (expval > -100)) ? 4U : 5U;
 
-	// in "%g" mode, "prec" is the number of *significant figures* not decimals
-	if ((flags & FLAGS_ADAPT_EXP) != 0u)
-	{
-		// do we want to fall-back to "%f" mode?
-		if ((value >= 1e-4) && (value < 1e6))
-		{
-			if (static_cast<int>(prec) > expval)
-			{
-				prec = static_cast<unsigned>(static_cast<int>(prec) - expval - 1);
-			} else
-			{
-				prec = 0;
-			}
-			flags |= FLAGS_PRECISION; // make sure _ftoa respects precision
-			// no characters in exponent
-			minwidth = 0U;
-			expval   = 0;
-		} else
-		{
-			// we use one sigfig for the whole part
-			if ((prec > 0) && ((flags & FLAGS_PRECISION) != 0u))
-			{
-				--prec;
-			}
-		}
-	}
-
 	// will everything fit?
 	unsigned int fwidth = width;
 	if (width > minwidth)
@@ -473,7 +445,7 @@ static size_t _etoa(out_fct_type out, Vector<char>* buffer, size_t idx, size_t m
 
 	// output the floating part
 	const size_t start_idx = idx;
-	idx                    = _ftoa(out, buffer, idx, maxlen, negative ? -value : value, prec, fwidth, flags & ~FLAGS_ADAPT_EXP);
+	idx                    = _ftoa(out, buffer, idx, maxlen, negative ? -value : value, prec, fwidth, flags);
 
 	// output the exponent part
 	if (minwidth != 0u)
@@ -491,6 +463,78 @@ static size_t _etoa(out_fct_type out, Vector<char>* buffer, size_t idx, size_t m
 				out(' ', buffer, idx++, maxlen);
 			}
 		}
+	}
+	return idx;
+}
+
+static char* _append_unsigned_decimal(char* output, unsigned int value)
+{
+	char         reversed[10];
+	unsigned int count = 0;
+	do
+	{
+		reversed[count++] = static_cast<char>('0' + value % 10U);
+		value /= 10U;
+	} while (value != 0U);
+
+	while (count != 0U)
+	{
+		*output++ = reversed[--count];
+	}
+	return output;
+}
+
+// `%g` has rules that differ materially from `%e`: precision counts
+// significant digits, the exponent threshold depends on that precision, and
+// trailing zeroes are removed unless `#` is present. Once the guest double has
+// been decoded from its SysV va_list, the host C formatter provides that
+// portable libc contract without sharing an incompatible host va_list.
+static size_t _gtoa(out_fct_type out, Vector<char>* buffer, size_t idx, size_t maxlen, double value, unsigned int prec, unsigned int width,
+                    unsigned int flags)
+{
+	char  format[32];
+	char* cursor = format;
+	*cursor++    = '%';
+	if ((flags & FLAGS_LEFT) != 0U)
+	{
+		*cursor++ = '-';
+	}
+	if ((flags & FLAGS_PLUS) != 0U)
+	{
+		*cursor++ = '+';
+	} else if ((flags & FLAGS_SPACE) != 0U)
+	{
+		*cursor++ = ' ';
+	}
+	if ((flags & FLAGS_HASH) != 0U)
+	{
+		*cursor++ = '#';
+	}
+	if ((flags & FLAGS_ZEROPAD) != 0U)
+	{
+		*cursor++ = '0';
+	}
+	if (width != 0U)
+	{
+		cursor = _append_unsigned_decimal(cursor, width);
+	}
+	if ((flags & FLAGS_PRECISION) != 0U)
+	{
+		*cursor++ = '.';
+		cursor    = _append_unsigned_decimal(cursor, prec);
+	}
+	*cursor++ = (flags & FLAGS_UPPERCASE) != 0U ? 'G' : 'g';
+	*cursor   = '\0';
+
+	const int required = snprintf(nullptr, 0, format, value);
+	EXIT_IF(required < 0);
+	Vector<char> formatted(static_cast<uint32_t>(required) + 1U);
+	const int    written = snprintf(formatted.GetData(), formatted.Size(), format, value);
+	EXIT_IF(written != required);
+
+	for (int i = 0; i < written; i++)
+	{
+		out(formatted.At(static_cast<uint32_t>(i)), buffer, idx++, maxlen);
 	}
 	return idx;
 }
@@ -755,17 +799,20 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 				break;
 			case 'e':
 			case 'E':
-			case 'g':
-			case 'G':
-				if ((*format == 'g') || (*format == 'G'))
-				{
-					flags |= FLAGS_ADAPT_EXP;
-				}
-				if ((*format == 'E') || (*format == 'G'))
+				if (*format == 'E')
 				{
 					flags |= FLAGS_UPPERCASE;
 				}
 				idx = _etoa(out, &buffer, idx, maxlen, VaArg_double(va_list), precision, width, flags);
+				format++;
+				break;
+			case 'g':
+			case 'G':
+				if (*format == 'G')
+				{
+					flags |= FLAGS_UPPERCASE;
+				}
+				idx = _gtoa(out, &buffer, idx, maxlen, VaArg_double(va_list), precision, width, flags);
 				format++;
 				break;
 			case 'c':
