@@ -160,6 +160,17 @@ TEST(EmulatorGraphicsPackets, ReusesFourComponentBufferFunctionType)
 	EXPECT_NE(source.FindIndex("%function_tbuffer_load_store_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%function_tbuffer_load_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%function_tbuffer_store_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpSGreaterThanEqual %bool %tbuf_s_f_xyzw_11 %int_75"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpSLessThanEqual %bool %tbuf_s_f_xyzw_11 %int_77"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, ClassifiesGen5FourComponent32BitBufferFormats)
+{
+	EXPECT_FALSE(ShaderIsGen5FourComponent32BitBufferFormat(74));
+	EXPECT_TRUE(ShaderIsGen5FourComponent32BitBufferFormat(75));
+	EXPECT_TRUE(ShaderIsGen5FourComponent32BitBufferFormat(76));
+	EXPECT_TRUE(ShaderIsGen5FourComponent32BitBufferFormat(77));
+	EXPECT_FALSE(ShaderIsGen5FourComponent32BitBufferFormat(78));
 }
 
 TEST(EmulatorGraphicsPackets, AllowsRegionScalarsOnlyInsideSrtRange)

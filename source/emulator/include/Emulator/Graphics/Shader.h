@@ -546,6 +546,8 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 	return x | (y << 3u) | (z << 6u) | (w << 9u);
 }
 
+bool ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
+
 inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 {
 	return (swizzle >> (channel * 3u)) & 0x7u;

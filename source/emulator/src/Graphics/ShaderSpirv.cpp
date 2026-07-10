@@ -780,9 +780,13 @@ constexpr char TBUFFER_LOAD_FORMAT_XYZW[] = R"(
 %tbuf_l_f_xyzw_174 = OpVariable %_ptr_Function_int Function
 %tbuf_l_f_xyzw_176 = OpVariable %_ptr_Function_int Function
 %tbuf_l_f_xyzw_161 = OpLoad %int %tbuf_l_f_xyzw_62
-%tbuf_l_f_xyzw_163 = OpIEqual %bool %tbuf_l_f_xyzw_161 %int_119
+%tbuf_l_f_xyzw_162 = OpSGreaterThanEqual %bool %tbuf_l_f_xyzw_161 %int_75
+%tbuf_l_f_xyzw_163 = OpSLessThanEqual %bool %tbuf_l_f_xyzw_161 %int_77
+%tbuf_l_f_xyzw_160 = OpLogicalAnd %bool %tbuf_l_f_xyzw_162 %tbuf_l_f_xyzw_163
+%tbuf_l_f_xyzw_159 = OpIEqual %bool %tbuf_l_f_xyzw_161 %int_119
+%tbuf_l_f_xyzw_158 = OpLogicalOr %bool %tbuf_l_f_xyzw_160 %tbuf_l_f_xyzw_159
    OpSelectionMerge %tbuf_l_f_xyzw_165 None
-   OpBranchConditional %tbuf_l_f_xyzw_163 %tbuf_l_f_xyzw_164 %tbuf_l_f_xyzw_165
+   OpBranchConditional %tbuf_l_f_xyzw_158 %tbuf_l_f_xyzw_164 %tbuf_l_f_xyzw_165
 %tbuf_l_f_xyzw_164 = OpLabel
 %tbuf_l_f_xyzw_171 = OpLoad %int %tbuf_l_f_xyzw_58
    OpStore %tbuf_l_f_xyzw_170 %tbuf_l_f_xyzw_171
@@ -961,9 +965,13 @@ constexpr char TBUFFER_STORE_FORMAT_XYZW[] = R"(
  %tbuf_s_f_xyzw_9 = OpFunctionParameter %_ptr_Function_int
 %tbuf_s_f_xyzw_10 = OpLabel
 %tbuf_s_f_xyzw_11 = OpLoad %int %tbuf_s_f_xyzw_9
-%tbuf_s_f_xyzw_12 = OpIEqual %bool %tbuf_s_f_xyzw_11 %int_119
+%tbuf_s_f_xyzw_12 = OpSGreaterThanEqual %bool %tbuf_s_f_xyzw_11 %int_75
+%tbuf_s_f_xyzw_16 = OpSLessThanEqual %bool %tbuf_s_f_xyzw_11 %int_77
+%tbuf_s_f_xyzw_17 = OpLogicalAnd %bool %tbuf_s_f_xyzw_12 %tbuf_s_f_xyzw_16
+%tbuf_s_f_xyzw_18 = OpIEqual %bool %tbuf_s_f_xyzw_11 %int_119
+%tbuf_s_f_xyzw_19 = OpLogicalOr %bool %tbuf_s_f_xyzw_17 %tbuf_s_f_xyzw_18
                OpSelectionMerge %tbuf_s_f_xyzw_14 None
-               OpBranchConditional %tbuf_s_f_xyzw_12 %tbuf_s_f_xyzw_13 %tbuf_s_f_xyzw_14
+               OpBranchConditional %tbuf_s_f_xyzw_19 %tbuf_s_f_xyzw_13 %tbuf_s_f_xyzw_14
 %tbuf_s_f_xyzw_13 = OpLabel
 %tbuf_s_f_xyzw_15 = OpFunctionCall %void %buffer_store_float4 %tbuf_s_f_xyzw_1 %tbuf_s_f_xyzw_2 %tbuf_s_f_xyzw_3 %tbuf_s_f_xyzw_4 %tbuf_s_f_xyzw_5 %tbuf_s_f_xyzw_6 %tbuf_s_f_xyzw_7 %tbuf_s_f_xyzw_8
                OpBranch %tbuf_s_f_xyzw_14
@@ -8112,6 +8120,9 @@ void Spirv::FindConstants()
 		AddConstantInt(31);
 		AddConstantInt(36);
 		AddConstantInt(39);
+		AddConstantInt(75);
+		AddConstantInt(76);
+		AddConstantInt(77);
 		AddConstantInt(92);
 		AddConstantInt(95);
 		AddConstantInt(119);

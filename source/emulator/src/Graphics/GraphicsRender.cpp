@@ -4174,7 +4174,8 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 		if (gen5)
 		{
 			EXIT_NOT_IMPLEMENTED(r.OutOfBounds() != 0);
-			EXIT_NOT_IMPLEMENTED(!((r.Stride() == 16 && r.DstSelXYZW() == DstSel(4, 5, 6, 7) && r.Format() == 77)));
+			EXIT_NOT_IMPLEMENTED(
+			    !(r.Stride() == 16 && r.DstSelXYZW() == DstSel(4, 5, 6, 7) && ShaderIsGen5FourComponent32BitBufferFormat(r.Format())));
 		} else
 		{
 			EXIT_NOT_IMPLEMENTED(!((r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 0) && r.Dfmt() == 4 && r.Nfmt() == 4) ||

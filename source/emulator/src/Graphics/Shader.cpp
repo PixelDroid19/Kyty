@@ -34,6 +34,13 @@ KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>
 
 namespace Kyty::Libs::Graphics {
 
+bool ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format)
+{
+	// GFX10+ unified formats 75, 76 and 77 are 32_32_32_32 with UINT,
+	// SINT and FLOAT number interpretation respectively.
+	return format >= 75 && format <= 77;
+}
+
 struct ShaderBinaryInfo
 {
 	uint8_t  signature[7];
