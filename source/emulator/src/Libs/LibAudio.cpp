@@ -114,6 +114,7 @@ namespace Ngs2 = Audio::Ngs2;
 LIB_DEFINE(InitAudio_1_Ngs2)
 {
 	LIB_FUNC("mPYgU4oYpuY", Ngs2::Ngs2SystemCreateWithAllocator);
+	LIB_FUNC("pgFAiLR5qT4", Ngs2::Ngs2SystemQueryBufferSize);
 	LIB_FUNC("U546k6orxQo", Ngs2::Ngs2RackCreateWithAllocator);
 	LIB_FUNC("cLV4aiT9JpA", Ngs2::Ngs2RackCreate);
 	LIB_FUNC("0eFLVCfWVds", Ngs2::Ngs2RackQueryBufferSize);
