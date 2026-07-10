@@ -28,6 +28,45 @@ TEST(EmulatorNp, ValidatesAndCreatesStableHandles)
 	int32_t trophy_handle = 0;
 	EXPECT_EQ(NpTrophy2::CreateHandle(&trophy_handle), 0);
 	EXPECT_GT(trophy_handle, 0);
+	EXPECT_EQ(NpTrophy2::RegisterContext(trophy_context, trophy_handle, 0), 0);
+	EXPECT_LT(NpTrophy2::RegisterContext(0, trophy_handle, 0), 0);
+}
+
+TEST(EmulatorNp, OwnsLocalUniversalDataEvents)
+{
+	using namespace NpUniversalDataSystem;
+
+	Event*               event      = nullptr;
+	EventPropertyObject* properties = nullptr;
+
+	EXPECT_LT(CreateEvent(nullptr, 0, &event, &properties), 0);
+	EXPECT_LT(CreateEvent("runtime.event", 0, nullptr, &properties), 0);
+	EXPECT_EQ(CreateEvent("runtime.event", 0, &event, &properties), 0);
+	ASSERT_NE(event, nullptr);
+	ASSERT_NE(properties, nullptr);
+	EXPECT_EQ(EventPropertyObjectSetInt32(properties, "count", 3), 0);
+	EXPECT_EQ(EventPropertyObjectSetString(properties, "state", "ready"), 0);
+	EXPECT_EQ(PostEvent(1, 1, event, 0), 0);
+	EXPECT_EQ(DestroyEvent(event), 0);
+}
+
+TEST(EmulatorNp, InitializesGameIntentIdempotently)
+{
+	EXPECT_EQ(NpGameIntent::Initialize(), 0);
+	EXPECT_EQ(NpGameIntent::Initialize(), 0);
+}
+
+TEST(EmulatorNp, InitializesEntitlementAccessWithCleanBootState)
+{
+	uint8_t init_parameters[0x40] = {};
+	uint8_t boot_parameters[0x20];
+	memset(boot_parameters, 0xa5, sizeof(boot_parameters));
+
+	EXPECT_EQ(NpEntitlementAccess::Initialize(init_parameters, boot_parameters), 0);
+	for (auto value: boot_parameters)
+	{
+		EXPECT_EQ(value, 0);
+	}
 }
 
 UT_END();

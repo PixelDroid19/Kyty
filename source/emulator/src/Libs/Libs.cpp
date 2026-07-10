@@ -28,6 +28,12 @@ LIB_DEFINE(InitSaveDataNative_1);
 namespace NpUniversalDataSystem {
 LIB_DEFINE(InitNpUniversalDataSystem_1);
 } // namespace NpUniversalDataSystem
+namespace NpGameIntent {
+LIB_DEFINE(InitNpGameIntent_1);
+} // namespace NpGameIntent
+namespace NpEntitlementAccess {
+LIB_DEFINE(InitNpEntitlementAccess_1);
+} // namespace NpEntitlementAccess
 namespace NpTrophy2 {
 LIB_DEFINE(InitNpTrophy2_1);
 } // namespace NpTrophy2
@@ -52,6 +58,8 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libPad_1", InitPad_1);
 	LIB_CHECK(U"libPlayGo_1", InitPlayGo_1);
 	LIB_CHECK(U"libNpUniversalDataSystem_1", NpUniversalDataSystem::InitNpUniversalDataSystem_1);
+	LIB_CHECK(U"libNpGameIntent_1", NpGameIntent::InitNpGameIntent_1);
+	LIB_CHECK(U"libNpEntitlementAccess_1", NpEntitlementAccess::InitNpEntitlementAccess_1);
 	LIB_CHECK(U"libNpTrophy2_1", NpTrophy2::InitNpTrophy2_1);
 	if (id == U"libSaveData_1")
 	{
@@ -83,6 +91,8 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(InitPad_1);
 	LIB_LOAD(InitPlayGo_1);
 	LIB_LOAD(NpUniversalDataSystem::InitNpUniversalDataSystem_1);
+	LIB_LOAD(NpGameIntent::InitNpGameIntent_1);
+	LIB_LOAD(NpEntitlementAccess::InitNpEntitlementAccess_1);
 	LIB_LOAD(NpTrophy2::InitNpTrophy2_1);
 	LIB_LOAD(InitSaveData_1);
 	LIB_LOAD(SaveDataNative::InitSaveDataNative_1);

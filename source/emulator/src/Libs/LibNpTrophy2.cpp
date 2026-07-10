@@ -38,10 +38,16 @@ int KYTY_SYSV_ABI CreateHandle(int32_t* handle)
 	return OK;
 }
 
+int KYTY_SYSV_ABI RegisterContext(int32_t context, int32_t handle, uint64_t options)
+{
+	return (context > 0 && handle > 0 && options == 0 ? OK : error_invalid_argument);
+}
+
 LIB_DEFINE(InitNpTrophy2_1)
 {
 	LIB_FUNC("Bagshr7OQ6Q", CreateContext);
 	LIB_FUNC("Gz1rmUZpROM", CreateHandle);
+	LIB_FUNC("bIDov3wBu5Q", RegisterContext);
 }
 
 } // namespace Kyty::Libs::NpTrophy2
