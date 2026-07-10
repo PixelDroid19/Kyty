@@ -8,6 +8,9 @@
 #include "Kyty/Sys/SysHeap.h"
 #include "Kyty/Sys/SysSync.h"
 
+#include <atomic>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <cstdlib>
 #include <new>
 
@@ -58,8 +61,22 @@ struct MemBlockInfoT
 	pattern_t  right_pattern;
 };
 
+#ifdef __APPLE__
+// NOT a C++ thread_local: under Rosetta 2 a thread_local resolves through the gs
+// segment (macOS TSD), which is invalid on a guest thread, so the access faults.
+// Keep the recursion guard per-thread (needed so the tracker's own allocations
+// don't recurse) using a segment-free slot keyed by the kernel thread id.
+static int  g_mem_depth_slots[256] = {0};
+static bool g_mem_tracker_enabled  = true;
+static int& mem_depth()
+{
+	return g_mem_depth_slots[static_cast<uint64_t>(::syscall(SYS_thread_selfid)) & 0xFFu];
+}
+#define g_mem_depth mem_depth()
+#else
 thread_local int  g_mem_depth           = 0;
 thread_local bool g_mem_tracker_enabled = true;
+#endif
 
 static Hashmap<uintptr_t, MemBlockInfoT*>* g_mem_map         = nullptr;
 static int                                 g_mem_state       = 0;

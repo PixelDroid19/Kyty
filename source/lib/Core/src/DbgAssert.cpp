@@ -105,6 +105,7 @@ int dbg_exit_handler(char const* file, int line, const char* f, ...)
 
 void dbg_exit(int status)
 {
+	::fflush(nullptr);
 	std::_Exit(status);
 }
 

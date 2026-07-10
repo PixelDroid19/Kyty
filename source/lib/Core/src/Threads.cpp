@@ -8,6 +8,9 @@
 #include "Kyty/Core/Vector.h"
 
 #include <atomic>
+#include <map>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <chrono>             // IWYU pragma: keep
 #include <condition_variable> // IWYU pragma: keep
 #include <mutex>
@@ -823,8 +826,28 @@ void CondVar::SignalAll()
 
 int Thread::GetThreadIdUnique()
 {
+#ifdef __APPLE__
+	// A C++ thread_local resolves through the gs segment (macOS TSD). On a guest
+	// thread executed by Rosetta 2, gs points at the guest's own storage, not the
+	// macOS TSD, so a thread_local access faults. Derive a stable per-thread id from
+	// the kernel thread id (thread_selfid syscall — segment-free) mapped to a small
+	// int, so this works from HLE code running on any thread.
+	uint64_t                       os_tid = static_cast<uint64_t>(::syscall(SYS_thread_selfid));
+	static Mutex                   s_mtx;
+	static std::map<uint64_t, int> s_ids;
+	LockGuard                      lock(s_mtx);
+	auto                           it = s_ids.find(os_tid);
+	if (it != s_ids.end())
+	{
+		return it->second;
+	}
+	int id       = ++g_thread_counter;
+	s_ids[os_tid] = id;
+	return id;
+#else
 	static thread_local int tid = ++g_thread_counter;
 	return tid;
+#endif
 }
 
 } // namespace Kyty::Core
