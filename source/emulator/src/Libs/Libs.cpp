@@ -8,6 +8,8 @@ namespace LibcInternal {
 LIB_DEFINE(InitLibcInternal_1);
 } // namespace LibcInternal
 
+LIB_DEFINE(InitLibC_1);
+
 LIB_DEFINE(InitAppContent_1);
 LIB_DEFINE(InitAudio_1);
 LIB_DEFINE(InitDbgAddressSanitizer_1);
@@ -29,6 +31,7 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 {
 	LIB_CHECK(U"libAppContent_1", InitAppContent_1);
 	LIB_CHECK(U"libAudio_1", InitAudio_1);
+	LIB_CHECK(U"libc_1", InitLibC_1);
 	LIB_CHECK(U"libc_internal_1", LibcInternal::InitLibcInternal_1);
 	LIB_CHECK(U"libDbgAddressSanitizer_1", InitDbgAddressSanitizer_1);
 	LIB_CHECK(U"libDebug_1", InitDebug_1);
@@ -52,6 +55,7 @@ void InitAll(Loader::SymbolDatabase* s)
 {
 	LIB_LOAD(InitAudio_1);
 	LIB_LOAD(InitAppContent_1);
+	LIB_LOAD(InitLibC_1);
 	LIB_LOAD(LibcInternal::InitLibcInternal_1);
 	LIB_LOAD(InitDbgAddressSanitizer_1);
 	LIB_LOAD(InitDebug_1);
