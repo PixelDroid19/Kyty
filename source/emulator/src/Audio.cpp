@@ -1641,6 +1641,56 @@ int KYTY_SYSV_ABI Ngs2SystemQueryBufferSize(const Ngs2SystemOption* option, Ngs2
 	return OK;
 }
 
+int KYTY_SYSV_ABI Ngs2SystemCreate(const Ngs2SystemOption* option, const Ngs2ContextBufferInfo* buffer_info, uintptr_t* handle)
+{
+	PRINT_NAME();
+
+	constexpr int32_t NGS2_ERROR_INVALID_OUT_ADDRESS    = static_cast<int32_t>(0x804a0053u);
+	constexpr int32_t NGS2_ERROR_INVALID_OPTION_SIZE    = static_cast<int32_t>(0x804a0081u);
+	constexpr int32_t NGS2_ERROR_INVALID_BUFFER_INFO    = static_cast<int32_t>(0x804a0206u);
+	constexpr int32_t NGS2_ERROR_INVALID_BUFFER_ADDRESS = static_cast<int32_t>(0x804a0207u);
+	constexpr int32_t NGS2_ERROR_INVALID_BUFFER_SIZE    = static_cast<int32_t>(0x804a0209u);
+
+	if (buffer_info == nullptr)
+	{
+		return NGS2_ERROR_INVALID_BUFFER_INFO;
+	}
+	if (handle == nullptr)
+	{
+		return NGS2_ERROR_INVALID_OUT_ADDRESS;
+	}
+	if (option != nullptr && option->size != sizeof(Ngs2SystemOption))
+	{
+		return NGS2_ERROR_INVALID_OPTION_SIZE;
+	}
+	if (buffer_info->host_buffer == nullptr)
+	{
+		return NGS2_ERROR_INVALID_BUFFER_ADDRESS;
+	}
+	if (buffer_info->host_buffer_size < sizeof(Ngs2Internal))
+	{
+		return NGS2_ERROR_INVALID_BUFFER_SIZE;
+	}
+
+	auto* ngs = new (buffer_info->host_buffer) Ngs2Internal;
+	if (option != nullptr)
+	{
+		ngs->option = *option;
+	} else
+	{
+		ngs->option.size              = sizeof(Ngs2SystemOption);
+		ngs->option.max_grain_samples = 512;
+		ngs->option.num_grain_samples = 256;
+		ngs->option.sample_rate       = 48000;
+	}
+
+	ngs->next  = g_ngs_list;
+	g_ngs_list = ngs;
+	*handle    = reinterpret_cast<uintptr_t>(ngs);
+
+	return OK;
+}
+
 int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption* option, Ngs2ContextBufferInfo* buffer_info)
 {
 	PRINT_NAME();
