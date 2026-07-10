@@ -132,21 +132,25 @@ int KYTY_SYSV_ABI SaveDataInitialize3(const void* /*init*/)
 	return OK;
 }
 
-int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id, const void* option, uint32_t* resource)
+int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id, uint64_t reserved, uint32_t* resource)
 {
 	PRINT_NAME();
 
 	printf("\t user_id  = %d\n", user_id);
-	printf("\t option   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(option));
+	printf("\t reserved = 0x%016" PRIx64 "\n", reserved);
 	printf("\t resource = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(resource));
 
-	if (resource == nullptr || reinterpret_cast<uintptr_t>(resource) < 0x10000u)
+	// The resource handle is delivered through the return value (observed: the
+	// caller passes a null third argument and consumes the returned id). Allocate a
+	// non-zero handle; also mirror it to the optional output when one is provided.
+	const uint32_t handle = g_next_transaction_resource.fetch_add(1, std::memory_order_relaxed) + 1;
+
+	if (resource != nullptr && reinterpret_cast<uintptr_t>(resource) >= 0x10000u)
 	{
-		return SAVE_DATA_ERROR_PARAMETER;
+		*resource = handle;
 	}
 
-	*resource = g_next_transaction_resource.fetch_add(1, std::memory_order_relaxed) + 1;
-	return OK;
+	return static_cast<int>(handle);
 }
 
 int KYTY_SYSV_ABI SaveDataMount(const SaveDataMount* mount, SaveDataMountResult* mount_result)
