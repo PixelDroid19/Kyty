@@ -55,4 +55,17 @@ TEST(EmulatorAudio, CreatesNgs2SystemInProvidedBuffer)
 	storage.release();
 }
 
+TEST(EmulatorAudio, RejectsNullNgs2RackHandle)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uintptr_t voice_handle = UINTPTR_MAX;
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(0, 0, &voice_handle), static_cast<int32_t>(0x804a0261u));
+	EXPECT_EQ(voice_handle, 0u);
+}
+
 UT_END();

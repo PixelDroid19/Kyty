@@ -1563,9 +1563,10 @@ enum class Ngs2VoicePlayEvent
 
 struct Ngs2VoiceInternal
 {
-	Ngs2VoicePlayEvent event = Ngs2VoicePlayEvent::None;
-	Ngs2VoicePlayState state = Ngs2VoicePlayState::Empty;
-	Ngs2RackInternal*  rack  = nullptr;
+	Ngs2VoicePlayEvent event           = Ngs2VoicePlayEvent::None;
+	Ngs2VoicePlayState state           = Ngs2VoicePlayState::Empty;
+	Ngs2RackInternal*  rack            = nullptr;
+	uint32_t           last_command[3] = {};
 };
 
 struct Ngs2VoiceParamHeader
@@ -1631,6 +1632,20 @@ static const Ngs2RackOption* Ngs2ResolveRackOption(uint32_t rack_id, const Ngs2R
 	default_mastering->rack_option.size       = sizeof(Ngs2MasteringRackOption);
 	default_mastering->rack_option.max_voices = 1;
 	return &default_mastering->rack_option;
+}
+
+static uint32_t Ngs2GetRackMaxVoices(uint32_t rack_id, const Ngs2RackOption* option)
+{
+	EXIT_IF(option == nullptr);
+
+	if (rack_id == 0x4001 && option->size == 0x518)
+	{
+		uint32_t max_voices = 0;
+		memcpy(&max_voices, reinterpret_cast<const uint8_t*>(option) + 0xb8, sizeof(max_voices));
+		return max_voices;
+	}
+
+	return option->max_voices;
 }
 
 int KYTY_SYSV_ABI Ngs2SystemQueryBufferSize(const Ngs2SystemOption* option, Ngs2ContextBufferInfo* buffer_info)
@@ -1720,9 +1735,10 @@ int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption
 	EXIT_NOT_IMPLEMENTED(option == nullptr);
 
 	printf("\t rack_id    = 0x%" PRIx32 "\n", rack_id);
-	printf("\t max_voices = %u\n", option->max_voices);
+	const uint32_t max_voices = Ngs2GetRackMaxVoices(rack_id, option);
+	printf("\t max_voices = %u\n", max_voices);
 
-	buffer_info->host_buffer_size = sizeof(Ngs2RackInternal) + sizeof(Ngs2VoiceInternal) * option->max_voices;
+	buffer_info->host_buffer_size = sizeof(Ngs2RackInternal) + sizeof(Ngs2VoiceInternal) * max_voices;
 
 	return OK;
 }
@@ -1789,6 +1805,7 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 	EXIT_NOT_IMPLEMENTED(option->size < sizeof(Ngs2RackOption));
 
 	printf("\t rack_id                = 0x%" PRIx32 "\n", rack_id);
+	printf("\t option_size            = 0x%016" PRIx64 "\n", static_cast<uint64_t>(option->size));
 	printf("\t name                   = %.16s\n", option->name);
 	printf("\t flags                  = %u\n", option->flags);
 	printf("\t max_grain_samples      = %u\n", option->max_grain_samples);
@@ -1818,7 +1835,9 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 			rack->type            = Ngs2RackType::Submixer;
 			break;
 		case 0x2001:
-			EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2ReverbRackOption));
+			// Gen5 appends an opaque 0x30-byte extension to the reverb option.
+			// The common and reverb fields consumed here retain their prefix layout.
+			EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2ReverbRackOption) && option->size != 0xb8);
 			rack->option.reverb = *reinterpret_cast<const Ngs2ReverbRackOption*>(option);
 			rack->type          = Ngs2RackType::Reverb;
 			break;
@@ -1845,13 +1864,14 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 
 	printf("\t type                   = %s\n", Core::EnumName(rack->type).C_Str());
 
-	rack->allocator = Ngs2BufferAllocator();
-	rack->ngs       = ngs;
+	rack->allocator                = Ngs2BufferAllocator();
+	rack->ngs                      = ngs;
+	rack->option.common.max_voices = Ngs2GetRackMaxVoices(rack_id, option);
 
 	rack->next   = g_racks_list;
 	g_racks_list = rack;
 
-	for (uint32_t i = 0; i < option->max_voices; i++)
+	for (uint32_t i = 0; i < rack->option.common.max_voices; i++)
 	{
 		voices[i].rack  = rack;
 		voices[i].event = Ngs2VoicePlayEvent::None;
@@ -1983,14 +2003,10 @@ int KYTY_SYSV_ABI Ngs2RackGetVoiceHandle(uintptr_t rack_handle, uint32_t voice_i
 	PRINT_NAME();
 
 	EXIT_NOT_IMPLEMENTED(handle == nullptr);
-	// The game creates its NGS2 rack via NIDs Kyty doesn't implement (they resolve to
-	// permissive stubs returning 0), so rack_handle is null. Audio is off the critical
-	// path to a frame; fail gracefully instead of aborting so the game keeps running.
 	if (rack_handle == 0)
 	{
-		printf("\t WARNING: Ngs2RackGetVoiceHandle with null rack — returning error\n");
 		*handle = 0;
-		return 0x802a0102; // NGS2 invalid-handle style error
+		return static_cast<int32_t>(0x804a0261u);
 	}
 
 	printf("\t voice_id = %u\n", voice_id);
@@ -2092,6 +2108,41 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 		param = reinterpret_cast<const Ngs2VoiceParamHeader*>(reinterpret_cast<uintptr_t>(param) + param->next);
 	}
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* commands, uint32_t num_commands)
+{
+	PRINT_NAME();
+
+	constexpr int32_t NGS2_ERROR_INVALID_VOICE_HANDLE    = static_cast<int32_t>(0x804a0300u);
+	constexpr int32_t NGS2_ERROR_INVALID_CONTROL_ADDRESS = static_cast<int32_t>(0x804a0309u);
+
+	if (voice_handle == 0)
+	{
+		return NGS2_ERROR_INVALID_VOICE_HANDLE;
+	}
+	if (num_commands == 0)
+	{
+		return OK;
+	}
+	if (commands == nullptr)
+	{
+		return NGS2_ERROR_INVALID_CONTROL_ADDRESS;
+	}
+
+	EXIT_NOT_IMPLEMENTED(num_commands != 1);
+
+	auto*           voice   = reinterpret_cast<Ngs2VoiceInternal*>(voice_handle);
+	const auto*     command = static_cast<const uint32_t*>(commands);
+	Core::LockGuard lock(voice->rack->ngs->mutex);
+	for (int i = 0; i < 3; i++)
+	{
+		voice->last_command[i] = command[i];
+	}
+
+	printf("\t command = {%08" PRIx32 ", %08" PRIx32 ", %08" PRIx32 "}\n", voice->last_command[0], voice->last_command[1],
+	       voice->last_command[2]);
 	return OK;
 }
 
