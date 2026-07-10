@@ -121,6 +121,7 @@ LIB_DEFINE(InitAudio_1_Ngs2)
 	LIB_FUNC("0eFLVCfWVds", Ngs2::Ngs2RackQueryBufferSize);
 	LIB_FUNC("MwmHz8pAdAo", Ngs2::Ngs2RackGetVoiceHandle);
 	LIB_FUNC("uu94irFOGpA", Ngs2::Ngs2VoiceControl);
+	LIB_FUNC("AbYvTOZ8Pts", Ngs2::Ngs2VoiceRunCommands);
 	LIB_FUNC("-TOuuAQ-buE", Ngs2::Ngs2VoiceGetState);
 	LIB_FUNC("i0VnXM-C9fc", Ngs2::Ngs2SystemRender);
 }
