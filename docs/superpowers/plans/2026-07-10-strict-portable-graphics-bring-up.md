@@ -234,7 +234,7 @@ git commit -m "graphics: share direct and indirect state decoders"
   `hwVSPCmp5tM`; invalid arguments return `KERNEL_ERROR_EINVAL`, absent ranges
   return `KERNEL_ERROR_ENOENT`.
 
-- [ ] **Step 1: Write the failing contract test**
+- [x] **Step 1: Write the failing contract test**
 
 ```cpp
 TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
@@ -254,13 +254,13 @@ TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
 
 Register it with `UT_LINK(EmulatorKernelMemory);`.
 
-- [ ] **Step 2: Run the filtered test and verify failure**
+- [x] **Step 2: Run the filtered test and verify failure**
 
 Run: `_build_macos/fc_script "{kyty_run_tests()}" --gtest_filter=EmulatorKernelMemory.*`
 
 Expected: build failure for the missing checked-release declaration.
 
-- [ ] **Step 3: Implement guest-error behavior**
+- [x] **Step 3: Implement guest-error behavior**
 
 Add `KernelCheckedReleaseDirectMemory`. Share the actual release operation with
 `KernelReleaseDirectMemory`, but return `KERNEL_ERROR_ENOENT` instead of aborting
@@ -273,7 +273,7 @@ Register:
 LIB_FUNC("hwVSPCmp5tM", Memory::KernelCheckedReleaseDirectMemory);
 ```
 
-- [ ] **Step 4: Run tests and build**
+- [x] **Step 4: Run tests and build**
 
 Run:
 

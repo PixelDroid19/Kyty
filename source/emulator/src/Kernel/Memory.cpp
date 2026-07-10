@@ -657,13 +657,8 @@ int KYTY_SYSV_ABI KernelAllocateMainDirectMemory(size_t len, size_t alignment, i
 	return OK;
 }
 
-int KYTY_SYSV_ABI KernelReleaseDirectMemory(int64_t start, size_t len)
+static int release_direct_memory(int64_t start, size_t len)
 {
-	PRINT_NAME();
-
-	printf("\t start = 0x%016" PRIx64 "\n", start);
-	printf("\t len   = 0x%016" PRIx64 "\n", len);
-
 	EXIT_IF(g_physical_memory == nullptr);
 
 	if (start < 0 || len == 0)
@@ -677,7 +672,10 @@ int KYTY_SYSV_ABI KernelReleaseDirectMemory(int64_t start, size_t len)
 
 	bool result = g_physical_memory->Release(start, len, &vaddr, &size, &gpu_mode);
 
-	EXIT_NOT_IMPLEMENTED(!result);
+	if (!result)
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
 
 	if (vaddr != 0 || size != 0)
 	{
@@ -696,6 +694,26 @@ int KYTY_SYSV_ABI KernelReleaseDirectMemory(int64_t start, size_t len)
 	}
 
 	return OK;
+}
+
+int KYTY_SYSV_ABI KernelReleaseDirectMemory(int64_t start, size_t len)
+{
+	PRINT_NAME();
+
+	printf("\t start = 0x%016" PRIx64 "\n", start);
+	printf("\t len   = 0x%016" PRIx64 "\n", len);
+
+	return release_direct_memory(start, len);
+}
+
+int KYTY_SYSV_ABI KernelCheckedReleaseDirectMemory(int64_t start, size_t len)
+{
+	PRINT_NAME();
+
+	printf("\t start = 0x%016" PRIx64 "\n", start);
+	printf("\t len   = 0x%016" PRIx64 "\n", len);
+
+	return release_direct_memory(start, len);
 }
 
 int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment)

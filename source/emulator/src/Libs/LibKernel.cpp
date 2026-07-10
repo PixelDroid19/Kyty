@@ -576,6 +576,7 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("L-Q3LEjIbgA", Memory::KernelMapDirectMemory);
 	LIB_FUNC("NcaWUxfMNIQ", Memory::KernelMapNamedDirectMemory);
 	LIB_FUNC("MBuItvba6z8", Memory::KernelReleaseDirectMemory);
+	LIB_FUNC("hwVSPCmp5tM", Memory::KernelCheckedReleaseDirectMemory);
 	LIB_FUNC("WFcfL2lzido", Memory::KernelQueryMemoryProtection);
 	LIB_FUNC("BHouLQzh0X0", Memory::KernelDirectMemoryQuery);
 	LIB_FUNC("aNz11fnnzi4", Memory::KernelAvailableFlexibleMemorySize);
