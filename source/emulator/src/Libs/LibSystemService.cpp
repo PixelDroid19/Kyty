@@ -103,6 +103,21 @@ static int KYTY_SYSV_ABI SystemServiceHideSplashScreen()
 	return OK;
 }
 
+static int KYTY_SYSV_ABI SystemServiceReceiveEvent(void* event)
+{
+	PRINT_NAME();
+
+	if (event == nullptr)
+	{
+		return SYSTEM_SERVICE_ERROR_PARAMETER;
+	}
+
+	// No host-originated system-service events are pending. Reporting no event is
+	// distinct from successful delivery and leaves the guest-owned event storage
+	// untouched.
+	return SYSTEM_SERVICE_ERROR_NO_EVENT;
+}
+
 static int KYTY_SYSV_ABI SystemServiceParamGetInt(int param_id, int* value)
 {
 	PRINT_NAME();
@@ -166,6 +181,7 @@ static int KYTY_SYSV_ABI SystemServiceGetDisplaySafeAreaInfo(SystemServiceDispla
 LIB_DEFINE(InitSystemService_1)
 {
 	LIB_FUNC("Vo5V8KAwCmk", SystemService::SystemServiceHideSplashScreen);
+	LIB_FUNC("656LMQSrg6U", SystemService::SystemServiceReceiveEvent);
 	LIB_FUNC("fZo48un7LK4", SystemService::SystemServiceParamGetInt);
 	LIB_FUNC("rPo6tV8D9bM", SystemService::SystemServiceGetStatus);
 	LIB_FUNC("1n37q1Bvc5Y", SystemService::SystemServiceGetDisplaySafeAreaInfo);
