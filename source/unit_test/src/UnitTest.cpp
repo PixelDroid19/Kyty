@@ -10,6 +10,7 @@ UT_LINK(EmulatorGraphicsState);
 UT_LINK(EmulatorKernelMemory);
 UT_LINK(EmulatorGraphicsPackets);
 UT_LINK(EmulatorKernelProcess);
+UT_LINK(EmulatorNp);
 
 KYTY_SUBSYSTEM_INIT(UnitTest)
 {

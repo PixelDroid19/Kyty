@@ -2533,13 +2533,7 @@ void KYTY_SYSV_ABI KernelSetThreadDtors(thread_dtors_func_t dtors)
 
 int KYTY_SYSV_ABI KernelUsleep(KernelUseconds microseconds)
 {
-	PRINT_NAME();
-	printf("\tusleep: %u\n", microseconds);
-	Core::Timer t;
-	t.Start();
 	Core::Thread::SleepMicro(microseconds);
-	double ts = t.GetTimeS();
-	printf("\tactual: %g microseconds\n", ts * 1000000.0);
 	return OK;
 }
 
