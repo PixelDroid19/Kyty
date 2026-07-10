@@ -2,6 +2,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Graphics.h"
+#include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
@@ -106,6 +107,35 @@ TEST(EmulatorGraphicsPackets, ParsesBufferStoreFormatXyzw)
 	EXPECT_EQ(instruction.src[1].size, 4u);
 	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::IntegerInlineConstant);
 	EXPECT_EQ(instruction.src[2].constant.u, 0u);
+}
+
+TEST(EmulatorGraphicsPackets, ClassifiesDirectBufferStoreAsReadWrite)
+{
+	const uint32_t shader[] = {0xe01c2000u, 0x80000004u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	EXPECT_EQ(ShaderGetDirectStorageUsage(code, 0), ShaderStorageUsage::ReadWrite);
+	EXPECT_EQ(ShaderGetDirectStorageUsage(code, 4), ShaderStorageUsage::Unknown);
+}
+
+TEST(EmulatorGraphicsPackets, AllowsRegionScalarsOnlyInsideSrtRange)
+{
+	ShaderUserData user_data {};
+	user_data.srt_size_dw = 8;
+
+	EXPECT_TRUE(ShaderCanBindDirectSgpr(&user_data, 4, HW::UserSgprType::Region));
+	EXPECT_FALSE(ShaderCanBindDirectSgpr(&user_data, 8, HW::UserSgprType::Region));
+	EXPECT_TRUE(ShaderCanBindDirectSgpr(&user_data, 8, HW::UserSgprType::Unknown));
 }
 
 TEST(EmulatorGraphicsPackets, RejectsInvalidPacketInputs)

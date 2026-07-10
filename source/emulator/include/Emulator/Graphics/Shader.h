@@ -19,6 +19,7 @@ struct VertexShaderInfo;
 struct PixelShaderInfo;
 struct ComputeShaderInfo;
 struct ShaderRegisters;
+enum class UserSgprType;
 } // namespace HW
 
 enum class ShaderType
@@ -1006,8 +1007,10 @@ struct ShaderMappedData
 void ShaderInit();
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
 
-void             ShaderCalcBindingIndices(ShaderBindResources* bind);
-void             ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info);
+void               ShaderCalcBindingIndices(ShaderBindResources* bind);
+ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register);
+bool               ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type);
+void               ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info);
 void             ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
                                       ShaderPixelInputInfo* ps_info);
 void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderComputeInputInfo* info);
