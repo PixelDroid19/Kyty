@@ -163,6 +163,7 @@ uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounterFrequency();
 
 namespace Posix {
 
+int KYTY_SYSV_ABI   getpid();
 int KYTY_SYSV_ABI   pthread_create(LibKernel::Pthread* thread, const LibKernel::PthreadAttr* attr, LibKernel::pthread_entry_func_t entry,
                                    void* arg);
 int KYTY_SYSV_ABI   pthread_join(LibKernel::Pthread thread, void** value);
