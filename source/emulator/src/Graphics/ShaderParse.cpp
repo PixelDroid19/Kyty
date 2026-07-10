@@ -2103,7 +2103,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 				KYTY_NI("v_xad_b32")
 			};
 			break;
-		case 0x346: KYTY_NI("v_lshl_add_u32"); break;
+		case 0x346: inst.type = ShaderInstructionType::VLshlAddU32; break;
 		case 0x347: KYTY_NI("v_add_lshl_u32"); break;
 		case 0x34B: KYTY_NI("v_fma_f16"); break;
 		case 0x351: KYTY_NI("v_min3_f16"); break;

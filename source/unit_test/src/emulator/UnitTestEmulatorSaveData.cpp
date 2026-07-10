@@ -8,7 +8,10 @@ UT_BEGIN(EmulatorSaveData);
 
 TEST(EmulatorSaveData, CreatesTransactionResourceThroughReturnValue)
 {
-	Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	const auto first  = Libs::SaveData::SaveDataCreateTransactionResource(0);

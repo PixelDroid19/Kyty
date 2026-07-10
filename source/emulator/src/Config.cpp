@@ -199,6 +199,11 @@ void SetNextGen(bool mode)
 	g_config->next_gen = mode;
 }
 
+bool IsInitialized()
+{
+	return g_config != nullptr;
+}
+
 bool IsNextGen()
 {
 	return g_config->next_gen;
