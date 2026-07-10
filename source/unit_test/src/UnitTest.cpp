@@ -6,6 +6,7 @@ UT_LINK(CoreCharString);
 UT_LINK(CoreCharString8);
 UT_LINK(CoreMSpace);
 UT_LINK(CoreDateTime);
+UT_LINK(EmulatorGraphicsState);
 
 KYTY_SUBSYSTEM_INIT(UnitTest)
 {

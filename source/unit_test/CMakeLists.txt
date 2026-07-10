@@ -2,6 +2,7 @@ file(GLOB unit_test_src
     "include/*.h"
     "src/*.cpp"
     "src/core/*.cpp"
+    "src/emulator/*.cpp"
 )
 
 if (MSVC AND CLANG)
@@ -12,6 +13,7 @@ add_library(unit_test STATIC ${unit_test_src})
 
 target_link_libraries(unit_test core)
 target_link_libraries(unit_test math)
+target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/emulator/include")
 
 #target_include_directories(unit_test PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -30,5 +32,4 @@ list(APPEND check_headers
 clang_tidy_check(unit_test "" "${check_headers}" "${inc_headers}")
 
 include_what_you_use(unit_test "${inc_headers}")
-
 
