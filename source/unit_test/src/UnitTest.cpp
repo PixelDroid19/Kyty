@@ -12,6 +12,7 @@ UT_LINK(EmulatorKernelMemory);
 UT_LINK(EmulatorGraphicsPackets);
 UT_LINK(EmulatorKernelProcess);
 UT_LINK(EmulatorNp);
+UT_LINK(EmulatorLibcPrintf);
 
 KYTY_SUBSYSTEM_INIT(UnitTest)
 {
