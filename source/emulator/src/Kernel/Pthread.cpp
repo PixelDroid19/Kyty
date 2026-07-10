@@ -26,6 +26,7 @@
 #endif
 
 #include <pthread.h>
+#include <unistd.h>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #include <pthread_time.h>
@@ -380,7 +381,7 @@ static void pthread_attr_dbg_print(const PthreadAttr* src)
 	printf("\tsched_priority = %d\n", param.sched_priority);
 	printf("\tpolicy         = %d\n", policy);
 	printf("\tstack_addr     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(stack_addr));
-	printf("\tstack_size    = %" PRIu64 "\n", reinterpret_cast<uint64_t>(stack_size));
+	printf("\tstack_size    = %" PRIu64 "\n", static_cast<uint64_t>(stack_size));
 }
 
 static void usec_to_timespec(struct timespec* ts, KernelUseconds usec)
@@ -388,6 +389,40 @@ static void usec_to_timespec(struct timespec* ts, KernelUseconds usec)
 	ts->tv_sec  = usec / 1000000;
 	ts->tv_nsec = static_cast<decltype(ts->tv_nsec)>((usec % 1000000) * 1000);
 }
+
+#ifdef __APPLE__
+// macOS has no pthread_rwlock_timedrdlock/timedwrlock; emulate them by polling
+// with try-locks. The timespec here is a relative timeout (see usec_to_timespec).
+static int rwlock_timedlock_poll(pthread_rwlock_t* lock, const timespec* t, bool write)
+{
+	uint64_t timeout_us = static_cast<uint64_t>(t->tv_sec) * 1000000u + static_cast<uint64_t>(t->tv_nsec) / 1000u;
+	uint64_t waited_us  = 0;
+	for (;;)
+	{
+		int result = (write ? pthread_rwlock_trywrlock(lock) : pthread_rwlock_tryrdlock(lock));
+		if (result != EBUSY)
+		{
+			return result;
+		}
+		if (waited_us >= timeout_us)
+		{
+			return ETIMEDOUT;
+		}
+		usleep(100);
+		waited_us += 100;
+	}
+}
+
+static int pthread_rwlock_timedrdlock(pthread_rwlock_t* lock, const timespec* t)
+{
+	return rwlock_timedlock_poll(lock, t, false);
+}
+
+static int pthread_rwlock_timedwrlock(pthread_rwlock_t* lock, const timespec* t)
+{
+	return rwlock_timedlock_poll(lock, t, true);
+}
+#endif
 
 static void sec_to_timeval(KernelTimeval* ts, double sec)
 {
@@ -405,7 +440,16 @@ void* PthreadStaticObjects::CreateObject(void* addr, PthreadStaticObject::Type t
 {
 	Core::LockGuard lock(m_mutex);
 
-	if (addr == nullptr || *static_cast<void**>(addr) != nullptr)
+	// A statically-initialized pthread object holds a small sentinel, not a real
+	// handle: 0 = default initializer, 1 = adaptive, etc. (matches the FreeBSD/Orbis
+	// PTHREAD_*_INITIALIZER values). Once initialized, the slot holds a real heap
+	// pointer (a large address). Initialize on any sentinel; treat a large value as
+	// an already-created object. Treating the sentinel 1 as a pointer would fault.
+	if (addr == nullptr)
+	{
+		return addr;
+	}
+	if (uint64_t v = *static_cast<uint64_t*>(addr); v >= 0x100000)
 	{
 		return addr;
 	}
@@ -835,6 +879,11 @@ int KYTY_SYSV_ABI PthreadMutexTrylock(PthreadMutex* mutex)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
+
+	// Lazily initialize a statically-initialized mutex (sentinel), like PthreadMutexLock.
+	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
+	EXIT_IF(pthread_static_objects == nullptr);
+	mutex = static_cast<PthreadMutex*>(pthread_static_objects->CreateObject(mutex, PthreadStaticObject::Type::Mutex));
 
 	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
 
@@ -1405,6 +1454,12 @@ int KYTY_SYSV_ABI PthreadRwlockRdlock(PthreadRwlock* rwlock)
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	{
+		auto* so = g_pthread_context->GetPthreadStaticObjects();
+		EXIT_IF(so == nullptr);
+		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
+	}
+
 	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
 
 	int result = pthread_rwlock_rdlock(&(*rwlock)->p);
@@ -1427,6 +1482,12 @@ int KYTY_SYSV_ABI PthreadRwlockTimedrdlock(PthreadRwlock* rwlock, KernelUseconds
 	if (rwlock == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
+	}
+
+	{
+		auto* so = g_pthread_context->GetPthreadStaticObjects();
+		EXIT_IF(so == nullptr);
+		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
 	}
 
 	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
@@ -1457,6 +1518,12 @@ int KYTY_SYSV_ABI PthreadRwlockTimedwrlock(PthreadRwlock* rwlock, KernelUseconds
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	{
+		auto* so = g_pthread_context->GetPthreadStaticObjects();
+		EXIT_IF(so == nullptr);
+		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
+	}
+
 	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
 
 	timespec t {};
@@ -1485,6 +1552,12 @@ int KYTY_SYSV_ABI PthreadRwlockTryrdlock(PthreadRwlock* rwlock)
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	{
+		auto* so = g_pthread_context->GetPthreadStaticObjects();
+		EXIT_IF(so == nullptr);
+		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
+	}
+
 	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
 
 	int result = pthread_rwlock_tryrdlock(&(*rwlock)->p);
@@ -1508,6 +1581,12 @@ int KYTY_SYSV_ABI PthreadRwlockTrywrlock(PthreadRwlock* rwlock)
 	if (rwlock == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
+	}
+
+	{
+		auto* so = g_pthread_context->GetPthreadStaticObjects();
+		EXIT_IF(so == nullptr);
+		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
 	}
 
 	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
@@ -1543,6 +1622,12 @@ int KYTY_SYSV_ABI PthreadRwlockUnlock(PthreadRwlock* rwlock)
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	{
+		auto* so = g_pthread_context->GetPthreadStaticObjects();
+		EXIT_IF(so == nullptr);
+		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
+	}
+
 	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
 
 	int result = pthread_rwlock_unlock(&(*rwlock)->p);
@@ -1574,6 +1659,12 @@ int KYTY_SYSV_ABI PthreadRwlockWrlock(PthreadRwlock* rwlock)
 	if (rwlock == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
+	}
+
+	{
+		auto* so = g_pthread_context->GetPthreadStaticObjects();
+		EXIT_IF(so == nullptr);
+		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
 	}
 
 	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
@@ -1801,6 +1892,11 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	// Lazily initialize a statically-initialized cond (sentinel), like the other paths.
+	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
+	EXIT_IF(pthread_static_objects == nullptr);
+	cond = static_cast<PthreadCond*>(pthread_static_objects->CreateObject(cond, PthreadStaticObject::Type::Cond));
+
 	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
 
 	int result = pthread_cond_signal(&(*cond)->p);
@@ -1846,6 +1942,13 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, K
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
+
+	// Lazily initialize statically-initialized cond/mutex (sentinel values), same as
+	// PthreadCondWait; otherwise the sentinel would be dereferenced as a handle.
+	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
+	EXIT_IF(pthread_static_objects == nullptr);
+	cond  = static_cast<PthreadCond*>(pthread_static_objects->CreateObject(cond, PthreadStaticObject::Type::Cond));
+	mutex = static_cast<PthreadMutex*>(pthread_static_objects->CreateObject(mutex, PthreadStaticObject::Type::Mutex));
 
 	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
 	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
