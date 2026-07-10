@@ -65,6 +65,15 @@ struct GraphicContext
 	VkPhysicalDevice         physical_device = nullptr;
 	VkDevice                 device          = nullptr;
 	VulkanQueueInfo          queues[QUEUES_NUM];
+
+	// VK_EXT_color_write_enable is unavailable on some drivers (notably MoltenVK
+	// on Apple Silicon). When false, color write masking falls back to being
+	// baked into the pipeline instead of set as dynamic state.
+	bool color_write_enable_supported = true;
+
+	// VK_EXT_depth_clip_enable is likewise absent on MoltenVK. When false, the
+	// intended "depth clip disabled" state is emulated with core depthClampEnable.
+	bool depth_clip_enable_supported = true;
 };
 
 struct VulkanMemory

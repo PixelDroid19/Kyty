@@ -1397,6 +1397,8 @@ static VulkanQueues VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surfa
 		family++;
 	}
 
+	// Preferred path: assign each role a dedicated (unshared) queue, consuming it
+	// from the pool. This works on desktop GPUs that expose many queues/families.
 	for (uint32_t i = 0; i < graphics_num; i++)
 	{
 		if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.graphics == b; }); qs.available.IndexValid(index))
@@ -1434,6 +1436,43 @@ static VulkanQueues VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surfa
 			qs.family_used[qs.available.At(index).family]++;
 			qs.present.Add(qs.available.At(index));
 			qs.available.RemoveAt(index);
+		}
+	}
+
+	// Fallback for GPUs that expose a single queue family with a single queue
+	// (notably Metal via MoltenVK on Apple Silicon): the one queue supports
+	// graphics, compute, transfer and present, so share it across every role
+	// that could not be given a dedicated queue above.
+	{
+		bool      have_shared = false;
+		QueueInfo shared;
+		if (!qs.graphics.IsEmpty())
+		{
+			shared      = qs.graphics.At(0);
+			have_shared = true;
+		} else if (!qs.available.IsEmpty())
+		{
+			shared = qs.available.At(0);
+			qs.family_used[shared.family]++;
+			qs.graphics.Add(shared);
+			qs.available.RemoveAt(0);
+			have_shared = true;
+		}
+
+		if (have_shared)
+		{
+			if (qs.compute.IsEmpty())
+			{
+				qs.compute.Add(shared);
+			}
+			if (qs.transfer.IsEmpty())
+			{
+				qs.transfer.Add(shared);
+			}
+			if (qs.present.IsEmpty() && shared.present)
+			{
+				qs.present.Add(shared);
+			}
 		}
 	}
 
@@ -1495,8 +1534,9 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 
 		if (color_write_ext.colorWriteEnable != VK_TRUE)
 		{
-			printf("colorWriteEnable is not supported\n");
-			skip_device = true;
+			// Not fatal: without VK_EXT_color_write_enable (e.g. MoltenVK) we bake
+			// the color write mask into the pipeline instead of using dynamic state.
+			printf("colorWriteEnable is not supported (using pipeline fallback)\n");
 		}
 
 		if (device_features2.features.fragmentStoresAndAtomics != VK_TRUE)
@@ -1529,8 +1569,16 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 
 			for (const char* ext: device_extensions)
 			{
+				// These extensions are optional (absent on MoltenVK); the renderer
+				// uses core-Vulkan fallbacks when they are missing.
+				if (strcmp(ext, VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME) == 0 ||
+				    strcmp(ext, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME) == 0)
+				{
+					continue;
+				}
 				if (!available_extensions.Contains(ext, [](auto p, auto ext) { return strcmp(p.extensionName, ext) == 0; }))
 				{
+					printf("Vulkan device extension missing: %s\n", ext);
 					skip_device = true;
 					break;
 				}
@@ -1582,8 +1630,9 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 
 		if (!skip_device && !CheckFormat(device, VK_FORMAT_D24_UNORM_S8_UINT, true, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
 		{
-			printf("Format VK_FORMAT_D24_UNORM_S8_UINT cannot be used as depth buffer\n");
-			skip_device = true;
+			// Apple GPUs / MoltenVK do not support D24_UNORM_S8_UINT; D32_SFLOAT_S8_UINT
+			// (validated above) is used instead, so this is not fatal.
+			printf("Format VK_FORMAT_D24_UNORM_S8_UINT cannot be used as depth buffer (using D32_SFLOAT_S8_UINT)\n");
 		}
 
 		if (!skip_device &&
@@ -1669,7 +1718,8 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 }
 
 static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VulkanExtensions* r,
-                                   const VulkanQueues& queues, const Vector<const char*>& device_extensions)
+                                   const VulkanQueues& queues, const Vector<const char*>& device_extensions,
+                                   bool color_write_enable_supported)
 {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(r == nullptr);
@@ -1702,6 +1752,9 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	VkPhysicalDeviceFeatures device_features {};
 	device_features.fragmentStoresAndAtomics = VK_TRUE;
 	device_features.samplerAnisotropy        = VK_TRUE;
+	// Needed for the depthClipEnable=FALSE fallback when VK_EXT_depth_clip_enable
+	// is unavailable (MoltenVK).
+	device_features.depthClamp = VK_TRUE;
 	// device_features.shaderImageGatherExtended = VK_TRUE;
 
 	VkPhysicalDeviceColorWriteEnableFeaturesEXT color_write_ext {};
@@ -1711,7 +1764,7 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 
 	VkDeviceCreateInfo create_info {};
 	create_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-	create_info.pNext                   = &color_write_ext;
+	create_info.pNext                   = (color_write_enable_supported ? &color_write_ext : nullptr);
 	create_info.flags                   = 0;
 	create_info.pQueueCreateInfos       = queue_create_info.GetDataConst();
 	create_info.queueCreateInfoCount    = queue_create_info_num;
@@ -2198,6 +2251,41 @@ static void VulkanCreate(WindowContext* ctx)
 		EXIT("Could not find suitable device");
 	}
 
+	// Detect VK_EXT_color_write_enable support; drop it from the enabled extension
+	// list when absent (MoltenVK) so device creation still succeeds.
+	{
+		uint32_t dev_ext_count = 0;
+		vkEnumerateDeviceExtensionProperties(ctx->graphic_ctx.physical_device, nullptr, &dev_ext_count, nullptr);
+		Vector<VkExtensionProperties> dev_exts(dev_ext_count);
+		dev_exts.Memset(0);
+		vkEnumerateDeviceExtensionProperties(ctx->graphic_ctx.physical_device, nullptr, &dev_ext_count, dev_exts.GetData());
+
+		auto has_ext = [&](const char* name) {
+			return dev_exts.Contains(name, [](auto s, auto l) { return strcmp(s.extensionName, l) == 0; });
+		};
+		auto drop_ext = [&](const char* name) {
+			if (auto idx = device_extensions.Find(name, [](auto s, auto l) { return strcmp(s, l) == 0; });
+			    device_extensions.IndexValid(idx))
+			{
+				device_extensions.RemoveAt(idx);
+			}
+		};
+
+		ctx->graphic_ctx.color_write_enable_supported = has_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME);
+		if (!ctx->graphic_ctx.color_write_enable_supported)
+		{
+			drop_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME);
+			printf("VK_EXT_color_write_enable absent: baking color write mask into pipelines\n");
+		}
+
+		ctx->graphic_ctx.depth_clip_enable_supported = has_ext(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
+		if (!ctx->graphic_ctx.depth_clip_enable_supported)
+		{
+			drop_ext(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
+			printf("VK_EXT_depth_clip_enable absent: using depthClampEnable fallback\n");
+		}
+	}
+
 	VkPhysicalDeviceProperties device_properties {};
 	vkGetPhysicalDeviceProperties(ctx->graphic_ctx.physical_device, &device_properties);
 
@@ -2206,7 +2294,8 @@ static void VulkanCreate(WindowContext* ctx)
 	memcpy(ctx->device_name, device_properties.deviceName, sizeof(ctx->device_name));
 	memcpy(ctx->processor_name, Core::GetSystemInfo().ProcessorName.C_Str(), sizeof(ctx->processor_name));
 
-	ctx->graphic_ctx.device = VulkanCreateDevice(ctx->graphic_ctx.physical_device, ctx->surface, &r, queues, device_extensions);
+	ctx->graphic_ctx.device = VulkanCreateDevice(ctx->graphic_ctx.physical_device, ctx->surface, &r, queues, device_extensions,
+	                                             ctx->graphic_ctx.color_write_enable_supported);
 	if (ctx->graphic_ctx.device == nullptr)
 	{
 		EXIT("Could not create device");
