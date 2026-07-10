@@ -1400,8 +1400,8 @@ int KYTY_SYSV_ABI GraphicsInit(uint32_t* state, uint32_t ver)
 	printf("\t ver   = %u\n", ver);
 
 	EXIT_NOT_IMPLEMENTED(state == nullptr);
-	// Gen5 tables were authored for AGC ver 8; Dead Cells uses ver 10. Accept it
-	// and proceed with the ver-8 defaults (bring-up) rather than aborting.
+	// Gen5 tables were authored for AGC ver 8. Other versions currently reuse
+	// those register defaults while their version-specific tables are modeled.
 	if (ver != 8)
 	{
 		printf("\t WARNING: AGC ver %u != 8, using ver-8 register defaults\n", ver);
