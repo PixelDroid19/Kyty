@@ -2652,7 +2652,12 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.dst.size    = 2;
 			break;
 		case 0x06: KYTY_NI("buffer_store_format_xyz"); break;
-		case 0x07: KYTY_NI("buffer_store_format_xyzw"); break;
+		case 0x07:
+			inst.type        = ShaderInstructionType::BufferStoreFormatXyzw;
+			inst.format      = ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 4;
+			break;
 		case 0x08: KYTY_NI("buffer_load_ubyte"); break;
 		case 0x09: KYTY_NI("buffer_load_sbyte"); break;
 		case 0x0A: KYTY_NI("buffer_load_ushort"); break;

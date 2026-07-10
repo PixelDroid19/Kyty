@@ -712,6 +712,44 @@ constexpr char BUFFER_STORE_FLOAT2[] = R"(
                OpFunctionEnd
 )";
 
+constexpr char BUFFER_STORE_FLOAT4[] = R"(
+                      ; void buffer_store_float4(in float p1, in float p2, in float p3, in float p4, in int index, in int offset, in int stride, in int buffer_index)
+%buffer_store_float4 = OpFunction %void None %function_buffer_store_float4
+         %buf_s_f4_1 = OpFunctionParameter %_ptr_Function_float
+         %buf_s_f4_2 = OpFunctionParameter %_ptr_Function_float
+         %buf_s_f4_3 = OpFunctionParameter %_ptr_Function_float
+         %buf_s_f4_4 = OpFunctionParameter %_ptr_Function_float
+         %buf_s_f4_5 = OpFunctionParameter %_ptr_Function_int
+         %buf_s_f4_6 = OpFunctionParameter %_ptr_Function_int
+         %buf_s_f4_7 = OpFunctionParameter %_ptr_Function_int
+         %buf_s_f4_8 = OpFunctionParameter %_ptr_Function_int
+        %buf_s_f4_10 = OpLabel
+        %buf_s_f4_11 = OpLoad %int %buf_s_f4_6
+        %buf_s_f4_12 = OpLoad %int %buf_s_f4_5
+        %buf_s_f4_13 = OpLoad %int %buf_s_f4_7
+        %buf_s_f4_14 = OpIMul %int %buf_s_f4_12 %buf_s_f4_13
+        %buf_s_f4_15 = OpIAdd %int %buf_s_f4_11 %buf_s_f4_14
+        %buf_s_f4_16 = OpSDiv %int %buf_s_f4_15 %int_4
+        %buf_s_f4_17 = OpLoad %int %buf_s_f4_8
+        %buf_s_f4_18 = OpLoad %float %buf_s_f4_1
+        %buf_s_f4_19 = OpAccessChain %_ptr_StorageBuffer_float %buf %buf_s_f4_17 %int_0 %buf_s_f4_16
+               OpStore %buf_s_f4_19 %buf_s_f4_18
+        %buf_s_f4_20 = OpIAdd %int %buf_s_f4_16 %int_1
+        %buf_s_f4_21 = OpLoad %float %buf_s_f4_2
+        %buf_s_f4_22 = OpAccessChain %_ptr_StorageBuffer_float %buf %buf_s_f4_17 %int_0 %buf_s_f4_20
+               OpStore %buf_s_f4_22 %buf_s_f4_21
+        %buf_s_f4_23 = OpIAdd %int %buf_s_f4_16 %int_2
+        %buf_s_f4_24 = OpLoad %float %buf_s_f4_3
+        %buf_s_f4_25 = OpAccessChain %_ptr_StorageBuffer_float %buf %buf_s_f4_17 %int_0 %buf_s_f4_23
+               OpStore %buf_s_f4_25 %buf_s_f4_24
+        %buf_s_f4_26 = OpIAdd %int %buf_s_f4_16 %int_3
+        %buf_s_f4_27 = OpLoad %float %buf_s_f4_4
+        %buf_s_f4_28 = OpAccessChain %_ptr_StorageBuffer_float %buf %buf_s_f4_17 %int_0 %buf_s_f4_26
+               OpStore %buf_s_f4_28 %buf_s_f4_27
+               OpReturn
+               OpFunctionEnd
+)";
+
 constexpr char TBUFFER_LOAD_FORMAT_XYZW[] = R"(
              ; Function tbuffer_load_format_xyzw
              ; void tbuffer_load_format_xyzw(out float p1, out float p2, out float p3, out float p4, 
@@ -905,6 +943,31 @@ constexpr char TBUFFER_STORE_FORMAT_XY[] = R"(
         %tbuf_s_f_xy_182 = OpFunctionCall %void %buffer_store_float2 %tbuf_s_f_xy_170 %tbuf_s_f_xy_172 %tbuf_s_f_xy_174 %tbuf_s_f_xy_176 %tbuf_s_f_xy_178 %tbuf_s_f_xy_180
                OpBranch %tbuf_s_f_xy_169
         %tbuf_s_f_xy_169 = OpLabel
+               OpReturn
+               OpFunctionEnd
+)";
+
+constexpr char TBUFFER_STORE_FORMAT_XYZW[] = R"(
+; void tbuffer_store_format_xyzw(in float p1, in float p2, in float p3, in float p4, in int index, in int offset, in int stride, in int buffer_index, in int dfmt_nfmt)
+%tbuffer_store_format_xyzw = OpFunction %void None %function_tbuffer_store_format_xyzw
+ %tbuf_s_f_xyzw_1 = OpFunctionParameter %_ptr_Function_float
+ %tbuf_s_f_xyzw_2 = OpFunctionParameter %_ptr_Function_float
+ %tbuf_s_f_xyzw_3 = OpFunctionParameter %_ptr_Function_float
+ %tbuf_s_f_xyzw_4 = OpFunctionParameter %_ptr_Function_float
+ %tbuf_s_f_xyzw_5 = OpFunctionParameter %_ptr_Function_int
+ %tbuf_s_f_xyzw_6 = OpFunctionParameter %_ptr_Function_int
+ %tbuf_s_f_xyzw_7 = OpFunctionParameter %_ptr_Function_int
+ %tbuf_s_f_xyzw_8 = OpFunctionParameter %_ptr_Function_int
+ %tbuf_s_f_xyzw_9 = OpFunctionParameter %_ptr_Function_int
+%tbuf_s_f_xyzw_10 = OpLabel
+%tbuf_s_f_xyzw_11 = OpLoad %int %tbuf_s_f_xyzw_9
+%tbuf_s_f_xyzw_12 = OpIEqual %bool %tbuf_s_f_xyzw_11 %int_119
+               OpSelectionMerge %tbuf_s_f_xyzw_14 None
+               OpBranchConditional %tbuf_s_f_xyzw_12 %tbuf_s_f_xyzw_13 %tbuf_s_f_xyzw_14
+%tbuf_s_f_xyzw_13 = OpLabel
+%tbuf_s_f_xyzw_15 = OpFunctionCall %void %buffer_store_float4 %tbuf_s_f_xyzw_1 %tbuf_s_f_xyzw_2 %tbuf_s_f_xyzw_3 %tbuf_s_f_xyzw_4 %tbuf_s_f_xyzw_5 %tbuf_s_f_xyzw_6 %tbuf_s_f_xyzw_7 %tbuf_s_f_xyzw_8
+               OpBranch %tbuf_s_f_xyzw_14
+%tbuf_s_f_xyzw_14 = OpLabel
                OpReturn
                OpFunctionEnd
 )";
@@ -2198,6 +2261,82 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen)
 		                   .ReplaceStr("<src1_value3>", src1_value3.value)
 		                   .ReplaceStr("<p0>", dst_value0.value)
 		                   .ReplaceStr("<p1>", dst_value1.value);
+
+		return true;
+	}
+
+	return false;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+
+	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
+	{
+		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+
+		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
+		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
+		auto    dst_value2  = operand_variable_to_str(inst.dst, 2);
+		auto    dst_value3  = operand_variable_to_str(inst.dst, 3);
+		auto    src0_value  = operand_variable_to_str(inst.src[0]);
+		auto    src1_value0 = operand_variable_to_str(inst.src[1], 0);
+		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
+		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
+		String8 offset      = spirv->GetConstant(inst.src[2]);
+
+		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
+		EXIT_NOT_IMPLEMENTED(dst_value1.type != SpirvType::Float);
+		EXIT_NOT_IMPLEMENTED(dst_value2.type != SpirvType::Float);
+		EXIT_NOT_IMPLEMENTED(dst_value3.type != SpirvType::Float);
+		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
+		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
+		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		EXIT_NOT_IMPLEMENTED(src1_value3.type != SpirvType::Uint);
+
+		static const char* text = R"(
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+               OpSelectionMerge %t278_<index> None
+               OpBranchConditional %exec_lo_b_<index> %t277_<index> %t278_<index>
+		%t277_<index> = OpLabel
+
+        %t100_<index> = OpLoad %float %<src0>
+        %t101_<index> = OpBitcast %int %t100_<index>
+               OpStore %temp_int_1 %t101_<index>
+        %t148_<index> = OpLoad %uint %<src1_value1>
+        %t150_<index> = OpShiftRightLogical %uint %t148_<index> %int_16
+        %t152_<index> = OpBitwiseAnd %uint %t150_<index> %uint_0x00003fff
+        %t153_<index> = OpBitcast %int %t152_<index>
+               OpStore %temp_int_3 %t153_<index>
+        %t155_<index> = OpLoad %uint %<src1_value0>
+        %t156_<index> = OpBitcast %int %t155_<index>
+               OpStore %temp_int_4 %t156_<index>
+               OpStore %temp_int_2 %<offset>
+		%t206_<index> = OpLoad %uint %<src1_value3>
+        %t208_<index> = OpShiftRightLogical %uint %t206_<index> %int_12
+        %t210_<index> = OpBitwiseAnd %uint %t208_<index> %uint_127
+        %t211_<index> = OpBitcast %int %t210_<index>
+               OpStore %temp_int_5 %t211_<index>
+        %t110_<index> = OpFunctionCall %void %tbuffer_store_format_xyzw %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
+
+               OpBranch %t278_<index>
+        %t278_<index> = OpLabel
+)";
+		*dst_source += String8(text)
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<src0>", src0_value.value)
+		                   .ReplaceStr("<offset>", offset)
+		                   .ReplaceStr("<src1_value0>", src1_value0.value)
+		                   .ReplaceStr("<src1_value1>", src1_value1.value)
+		                   .ReplaceStr("<src1_value3>", src1_value3.value)
+		                   .ReplaceStr("<p0>", dst_value0.value)
+		                   .ReplaceStr("<p1>", dst_value1.value)
+		                   .ReplaceStr("<p2>", dst_value2.value)
+		                   .ReplaceStr("<p3>", dst_value3.value);
 
 		return true;
 	}
@@ -6188,6 +6327,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen,    ShaderInstructionType::BufferStoreDword,     ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferStoreFormatX_Vdata1VaddrSvSoffsIdxen,  ShaderInstructionType::BufferStoreFormatX,   ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen, ShaderInstructionType::BufferStoreFormatXy,  ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen,        {""}},
+    {Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen, ShaderInstructionType::BufferStoreFormatXyzw, ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen,      {""}},
 
     {Recompile_Fetch,                                       ShaderInstructionType::FetchX,               ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {""}},
     {Recompile_Fetch,                                       ShaderInstructionType::FetchXy,              ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen,        {""}},
@@ -7018,9 +7158,11 @@ void Spirv::WriteTypes()
     %function_tbuffer_load_format_xyzw = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
     %function_buffer_load_store_float1 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
     %function_buffer_load_store_float2 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
+          %function_buffer_store_float4 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
           %function_buffer_load_float4 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
  %function_tbuffer_load_store_format_x = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
 %function_tbuffer_load_store_format_xy = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
+ %function_tbuffer_store_format_xyzw = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
           %function_sbuffer_load_dword = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_2 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_4 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
@@ -7920,12 +8062,14 @@ void Spirv::WriteFunctions()
 	}
 
 	if (m_code.HasAnyOf({ShaderInstructionType::BufferStoreDword, ShaderInstructionType::BufferStoreFormatX,
-	                     ShaderInstructionType::BufferStoreFormatXy}))
+	                     ShaderInstructionType::BufferStoreFormatXy, ShaderInstructionType::BufferStoreFormatXyzw}))
 	{
 		m_source += BUFFER_STORE_FLOAT1;
 		m_source += BUFFER_STORE_FLOAT2;
+		m_source += BUFFER_STORE_FLOAT4;
 		m_source += TBUFFER_STORE_FORMAT_X;
 		m_source += TBUFFER_STORE_FORMAT_XY;
+		m_source += TBUFFER_STORE_FORMAT_XYZW;
 	}
 
 	if (m_code.HasAnyOf({ShaderInstructionType::SBufferLoadDword, ShaderInstructionType::SBufferLoadDwordx2,

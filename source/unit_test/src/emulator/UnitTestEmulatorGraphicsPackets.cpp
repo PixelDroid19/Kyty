@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Log.h"
 
 UT_BEGIN(EmulatorGraphicsPackets);
 
@@ -54,8 +55,12 @@ TEST(EmulatorGraphicsPackets, ParsesGen5LshlAddU32)
 {
 	const uint32_t shader[] = {0xd7460003u, 0x040a0300u, 0xbf810000u};
 
-	Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
 	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	ShaderCode code;
 	code.SetType(ShaderType::Compute);
@@ -70,6 +75,37 @@ TEST(EmulatorGraphicsPackets, ParsesGen5LshlAddU32)
 	EXPECT_EQ(instruction.src[0].register_id, 0);
 	EXPECT_EQ(instruction.src[1].register_id, 1);
 	EXPECT_EQ(instruction.src[2].register_id, 2);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesBufferStoreFormatXyzw)
+{
+	const uint32_t shader[] = {0xe01c2000u, 0x80010004u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::BufferStoreFormatXyzw);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen);
+	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.dst.register_id, 0);
+	EXPECT_EQ(instruction.dst.size, 4u);
+	EXPECT_EQ(instruction.src[0].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.src[0].register_id, 4);
+	EXPECT_EQ(instruction.src[1].type, ShaderOperandType::Sgpr);
+	EXPECT_EQ(instruction.src[1].register_id, 4);
+	EXPECT_EQ(instruction.src[1].size, 4u);
+	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::IntegerInlineConstant);
+	EXPECT_EQ(instruction.src[2].constant.u, 0u);
 }
 
 TEST(EmulatorGraphicsPackets, RejectsInvalidPacketInputs)
