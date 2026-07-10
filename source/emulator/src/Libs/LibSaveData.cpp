@@ -7,6 +7,7 @@
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Libs/SaveData.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
 #include <atomic>
@@ -20,8 +21,8 @@ LIB_VERSION("SaveData", 1, "SaveData", 1, 1);
 namespace SaveData {
 
 // TODO(): specify dir at launcher
-static constexpr char32_t SAVE_DATA_DIR[]   = U"_SaveData";
-static constexpr char32_t SAVE_DATA_POINT[] = U"/savedata0";
+static constexpr char32_t    SAVE_DATA_DIR[]   = U"_SaveData";
+static constexpr char32_t    SAVE_DATA_POINT[] = U"/savedata0";
 static std::atomic<uint32_t> g_next_transaction_resource {0};
 
 struct SceSaveDataDirName
@@ -132,25 +133,13 @@ int KYTY_SYSV_ABI SaveDataInitialize3(const void* /*init*/)
 	return OK;
 }
 
-int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id, uint64_t reserved, uint32_t* resource)
+int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id)
 {
 	PRINT_NAME();
 
 	printf("\t user_id  = %d\n", user_id);
-	printf("\t reserved = 0x%016" PRIx64 "\n", reserved);
-	printf("\t resource = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(resource));
 
-	// The resource handle is delivered through the return value (observed: the
-	// caller passes a null third argument and consumes the returned id). Allocate a
-	// non-zero handle; also mirror it to the optional output when one is provided.
-	const uint32_t handle = g_next_transaction_resource.fetch_add(1, std::memory_order_relaxed) + 1;
-
-	if (resource != nullptr && reinterpret_cast<uintptr_t>(resource) >= 0x10000u)
-	{
-		*resource = handle;
-	}
-
-	return static_cast<int>(handle);
+	return static_cast<int>(g_next_transaction_resource.fetch_add(1, std::memory_order_relaxed) + 1);
 }
 
 int KYTY_SYSV_ABI SaveDataMount(const SaveDataMount* mount, SaveDataMountResult* mount_result)
@@ -296,10 +285,10 @@ int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResul
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	String mount_dir   = String(SAVE_DATA_DIR) + U"/" + dir_name;
-	String mount_point = SAVE_DATA_POINT;
-	const bool existed = Core::File::IsDirectoryExisting(mount_dir);
-	const bool create  = (mount->mount_mode & 0x04u) != 0;
+	String     mount_dir         = String(SAVE_DATA_DIR) + U"/" + dir_name;
+	String     mount_point       = SAVE_DATA_POINT;
+	const bool existed           = Core::File::IsDirectoryExisting(mount_dir);
+	const bool create            = (mount->mount_mode & 0x04u) != 0;
 	const bool create_if_missing = (mount->mount_mode & 0x20u) != 0;
 
 	if (!existed && !create && !create_if_missing)

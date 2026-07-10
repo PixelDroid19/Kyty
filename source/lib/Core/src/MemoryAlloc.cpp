@@ -43,11 +43,90 @@ constexpr int MEM_ALLOC_ALIGN = 16;
 [[maybe_unused]] constexpr int STACK_CHECK_FROM = 2;
 #endif
 
-static SysCS*        g_mem_cs          = nullptr;
-static bool          g_mem_initialized = false;
-static sys_heap_id_t g_default_heap    = nullptr;
-static size_t        g_mem_max_size    = 0;
+static SysCS*                                  g_mem_cs          = nullptr;
+static bool                                    g_mem_initialized = false;
+static sys_heap_id_t                           g_default_heap    = nullptr;
+static size_t                                  g_mem_max_size    = 0;
 static MemoryAllocDetail::ThreadDomainRegistry g_guest_thread_domains;
+
+enum class MemBlockDomain : uint32_t
+{
+	System,
+	Tracked
+};
+
+struct alignas(std::max_align_t) MemBlockHeader
+{
+	uint64_t       magic;
+	MemBlockDomain domain;
+	uint32_t       reserved;
+};
+
+static constexpr uint64_t mem_block_magic = 0x4b5954594d454d31ull;
+
+static MemBlockHeader* mem_block_header(void* ptr)
+{
+	return static_cast<MemBlockHeader*>(ptr) - 1;
+}
+
+static void mem_block_init(MemBlockHeader* header, MemBlockDomain domain)
+{
+	EXIT_IF(header == nullptr);
+	header->magic    = mem_block_magic;
+	header->domain   = domain;
+	header->reserved = 0;
+}
+
+static void mem_block_check(const MemBlockHeader* header)
+{
+	EXIT_IF(header == nullptr || header->magic != mem_block_magic);
+}
+
+static void* mem_system_alloc(size_t size)
+{
+	// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
+	auto* header = static_cast<MemBlockHeader*>(std::malloc(sizeof(MemBlockHeader) + size));
+	if (header != nullptr)
+	{
+		mem_block_init(header, MemBlockDomain::System);
+	}
+	return header != nullptr ? header + 1 : nullptr;
+}
+
+static void* mem_system_realloc(void* ptr, size_t size)
+{
+	if (ptr == nullptr)
+	{
+		return mem_system_alloc(size);
+	}
+
+	auto* header = mem_block_header(ptr);
+	mem_block_check(header);
+	EXIT_IF(header->domain != MemBlockDomain::System);
+
+	// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
+	header = static_cast<MemBlockHeader*>(std::realloc(header, sizeof(MemBlockHeader) + size));
+	if (header != nullptr)
+	{
+		mem_block_init(header, MemBlockDomain::System);
+	}
+	return header != nullptr ? header + 1 : nullptr;
+}
+
+static void mem_system_free(void* ptr)
+{
+	if (ptr == nullptr)
+	{
+		return;
+	}
+
+	auto* header = mem_block_header(ptr);
+	mem_block_check(header);
+	EXIT_IF(header->domain != MemBlockDomain::System);
+	header->magic = 0;
+	// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
+	std::free(header);
+}
 
 static uint64_t mem_current_thread_token()
 {
@@ -113,23 +192,23 @@ public:
 		g_mem_cs->Enter();
 
 #ifdef MEM_TRACKER
-	#ifdef __APPLE__
+#ifdef __APPLE__
 		m_thread_token = mem_current_thread_token();
 		g_mem_recursion_state.Enter(m_thread_token);
-	#else
+#else
 		g_mem_depth++;
-	#endif
+#endif
 #endif
 	}
 
 	~MemLock()
 	{
 #ifdef MEM_TRACKER
-	#ifdef __APPLE__
+#ifdef __APPLE__
 		g_mem_recursion_state.Leave(m_thread_token);
-	#else
+#else
 		g_mem_depth--;
-	#endif
+#endif
 #endif
 
 		g_mem_cs->Leave();
@@ -141,11 +220,11 @@ public:
 	// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
 	[[nodiscard]] bool IsRecursive() const
 	{
-	#ifdef __APPLE__
+#ifdef __APPLE__
 		return g_mem_recursion_state.Depth() > 1;
-	#else
+#else
 		return g_mem_depth > 1;
-	#endif
+#endif
 	}
 #endif
 
@@ -224,23 +303,23 @@ static void mem_init()
 	g_mem_cs = new (std::malloc(sizeof(SysCS))) SysCS;
 	g_mem_cs->Init();
 #ifdef MEM_TRACKER
-	#ifdef __APPLE__
+#ifdef __APPLE__
 	const auto init_thread_token = mem_current_thread_token();
 	g_mem_recursion_state.Enter(init_thread_token);
-	#else
+#else
 	g_mem_depth++;
-	#endif
+#endif
 	g_mem_map = new Hashmap<uintptr_t, MemBlockInfoT*>;
 #endif
 
 	g_default_heap = sys_heap_create();
 
 #ifdef MEM_TRACKER
-	#ifdef __APPLE__
+#ifdef __APPLE__
 	g_mem_recursion_state.Leave(init_thread_token);
-	#else
+#else
 	g_mem_depth--;
-	#endif
+#endif
 #endif
 }
 
@@ -301,13 +380,13 @@ void* mem_alloc(size_t size)
 		// tracker lock (a guest thread could exit while holding it). The system
 		// allocator is thread-safe on every supported platform.
 		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
-		return mem_alloc_check_alignment(std::malloc(size));
+		return mem_alloc_check_alignment(mem_system_alloc(size));
 	}
 #if defined(MEM_TRACKER) && defined(__APPLE__)
 	if (g_mem_recursion_state.IsOwnedBy(mem_current_thread_token()))
 	{
 		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
-		return mem_alloc_check_alignment(std::malloc(size));
+		return mem_alloc_check_alignment(mem_system_alloc(size));
 	}
 #endif
 	MemLock lock;
@@ -319,7 +398,7 @@ void* mem_alloc(size_t size)
 	if (lock.IsRecursive() || !g_mem_tracker_enabled)
 	{
 		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
-		void* r = std::malloc(size);
+		void* r = mem_system_alloc(size);
 		KYTY_MDBG("- std alloc -", r);
 		return mem_alloc_check_alignment(r);
 	}
@@ -327,9 +406,10 @@ void* mem_alloc(size_t size)
 #endif
 
 #ifdef MEM_TRACKER
-	void* ptr = sys_heap_alloc(g_default_heap, size + PATTERN_SIZE * PATTERNS_NUM);
+	auto* base = static_cast<MemBlockHeader*>(sys_heap_alloc(g_default_heap, sizeof(MemBlockHeader) + size + PATTERN_SIZE * PATTERNS_NUM));
+	void* ptr  = (base != nullptr ? base + 1 : nullptr);
 #else
-	void* ptr  = sys_heap_alloc(g_default_heap, size);
+	void* ptr = sys_heap_alloc(g_default_heap, size);
 #endif
 
 	if (ptr == nullptr)
@@ -338,6 +418,7 @@ void* mem_alloc(size_t size)
 	}
 
 #ifdef MEM_TRACKER
+	mem_block_init(base, MemBlockDomain::Tracked);
 
 	// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
 	auto* info = static_cast<MemBlockInfoT*>(std::malloc(sizeof(MemBlockInfoT)));
@@ -373,19 +454,23 @@ void* mem_realloc(void* ptr, size_t size)
 	}
 
 	mem_init();
-	if (mem_guest_thread_is_active())
+	if (ptr == nullptr)
 	{
-		// See mem_alloc: guest domain reallocations must not enter the tracker or
-		// take its lock. A block allocated in the same domain came from the system
-		// allocator, so std::realloc is the matching, thread-safe operation.
-		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
-		return mem_alloc_check_alignment(std::realloc(ptr, size));
+		return mem_alloc(size);
 	}
+
+	auto* header = mem_block_header(ptr);
+	mem_block_check(header);
+	if (header->domain == MemBlockDomain::System)
+	{
+		return mem_alloc_check_alignment(mem_system_realloc(ptr, size));
+	}
+	EXIT_IF(header->domain != MemBlockDomain::Tracked);
+
 #if defined(MEM_TRACKER) && defined(__APPLE__)
 	if (g_mem_recursion_state.IsOwnedBy(mem_current_thread_token()))
 	{
-		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
-		return mem_alloc_check_alignment(std::realloc(ptr, size));
+		EXIT("tracked allocation reached recursive allocator path\n");
 	}
 #endif
 	MemLock lock;
@@ -396,23 +481,19 @@ void* mem_realloc(void* ptr, size_t size)
 
 	if (lock.IsRecursive() || !g_mem_tracker_enabled)
 	{
-
-		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
-		void* ptr2 = std::realloc(ptr, size);
-		KYTY_MDBG("- std realloc old -", ptr);
-		KYTY_MDBG("- std realloc new -", ptr2);
-		return mem_alloc_check_alignment(ptr2);
+		EXIT("tracked allocation reached untracked allocator path\n");
 	}
 
-	if (ptr != nullptr && g_mem_map->Find(reinterpret_cast<uintptr_t>(ptr)) == nullptr)
+	if (g_mem_map->Find(reinterpret_cast<uintptr_t>(ptr)) == nullptr)
 	{
-		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
-		return mem_alloc_check_alignment(std::realloc(ptr, size));
+		EXIT("tracked allocation is missing from the tracker\n");
 	}
 #endif
 
 #ifdef MEM_TRACKER
-	void* ptr2 = sys_heap_realloc(g_default_heap, ptr, size + PATTERN_SIZE * PATTERNS_NUM);
+	auto* base2 =
+	    static_cast<MemBlockHeader*>(sys_heap_realloc(g_default_heap, header, sizeof(MemBlockHeader) + size + PATTERN_SIZE * PATTERNS_NUM));
+	void* ptr2 = (base2 != nullptr ? base2 + 1 : nullptr);
 #else
 	void* ptr2 = sys_heap_realloc(g_default_heap, ptr, size);
 #endif
@@ -423,6 +504,8 @@ void* mem_realloc(void* ptr, size_t size)
 	}
 
 #ifdef MEM_TRACKER
+	mem_block_init(base2, MemBlockDomain::Tracked);
+
 	if (ptr != nullptr)
 	{
 		MemBlockInfoT* const* info_p = g_mem_map->Find(reinterpret_cast<uintptr_t>(ptr));
@@ -488,23 +571,24 @@ void mem_free(void* ptr)
 {
 
 	EXIT_IF(!g_mem_initialized);
-
-	if (mem_guest_thread_is_active())
+	if (ptr == nullptr)
 	{
-		// See mem_alloc: guest domain frees must not enter the tracker or take its
-		// lock. Blocks reaching mem_free on a guest thread were allocated in the
-		// same domain from the system allocator, so std::free is the matching,
-		// thread-safe operation and cannot orphan the tracker mutex.
-		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
-		std::free(ptr);
 		return;
 	}
+
+	auto* header = mem_block_header(ptr);
+	mem_block_check(header);
+	if (header->domain == MemBlockDomain::System)
+	{
+		mem_system_free(ptr);
+		return;
+	}
+	EXIT_IF(header->domain != MemBlockDomain::Tracked);
+
 #if defined(MEM_TRACKER) && defined(__APPLE__)
 	if (g_mem_recursion_state.IsOwnedBy(mem_current_thread_token()))
 	{
-		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
-		std::free(ptr);
-		return;
+		EXIT("tracked allocation reached recursive allocator path\n");
 	}
 #endif
 	MemLock lock;
@@ -528,7 +612,8 @@ void mem_free(void* ptr)
 #endif
 
 #ifdef MEM_TRACKER
-		sys_heap_free(g_default_heap, ptr);
+		header->magic = 0;
+		sys_heap_free(g_default_heap, header);
 #else
 	sys_heap_free(g_default_heap, ptr);
 #endif
@@ -536,12 +621,7 @@ void mem_free(void* ptr)
 #ifdef MEM_TRACKER
 	} else
 	{
-		if (ptr != nullptr)
-		{
-			// printf("free: %x\n", uintptr_t(ptr));
-			// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
-			std::free(ptr);
-		}
+		EXIT("tracked allocation is missing from the tracker\n");
 	}
 
 	KYTY_MDBG("- mem_free -", ptr);
@@ -695,7 +775,7 @@ void operator delete[](void* block) noexcept
 	Kyty::Core::mem_free(block);
 }
 #else
-//#error "haha"
+// #error "haha"
 #endif
 
 extern "C" {

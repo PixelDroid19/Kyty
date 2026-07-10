@@ -10,8 +10,8 @@ UT_BEGIN(CoreMemoryAlloc);
 TEST(CoreMemoryAlloc, RecursionStateUsesTheCompleteThreadToken)
 {
 	Core::MemoryAllocDetail::RecursionState state;
-	constexpr uint64_t first_token  = 0x000000010000001eu;
-	constexpr uint64_t second_token = 0x000000020000001eu;
+	constexpr uint64_t                      first_token  = 0x000000010000001eu;
+	constexpr uint64_t                      second_token = 0x000000020000001eu;
 
 	EXPECT_FALSE(state.IsOwnedBy(first_token));
 	state.Enter(first_token);
@@ -31,8 +31,8 @@ TEST(CoreMemoryAlloc, RecursionStateUsesTheCompleteThreadToken)
 TEST(CoreMemoryAlloc, GuestDomainUsesCompleteThreadTokens)
 {
 	Core::MemoryAllocDetail::ThreadDomainRegistry registry;
-	constexpr uint64_t first_token  = 0x000000010000001eu;
-	constexpr uint64_t second_token = 0x000000020000001eu;
+	constexpr uint64_t                            first_token  = 0x000000010000001eu;
+	constexpr uint64_t                            second_token = 0x000000020000001eu;
 
 	EXPECT_TRUE(registry.Add(first_token));
 	EXPECT_TRUE(registry.Add(second_token));
@@ -100,8 +100,13 @@ TEST(CoreMemoryAlloc, TrackedBlockFreesCorrectlyInsideGuestDomain)
 {
 	// Allocated outside a guest domain, so the debug tracker owns the block.
 	Core::mem_tracker_enable();
+	Core::MemStats before {};
+	Core::mem_get_stat(&before);
 	auto* memory = static_cast<uint8_t*>(Core::mem_alloc(64));
 	ASSERT_NE(memory, nullptr);
+	Core::MemStats allocated {};
+	Core::mem_get_stat(&allocated);
+	ASSERT_EQ(allocated.blocks_num, before.blocks_num + 1);
 	for (uint8_t index = 0; index < 64; ++index)
 	{
 		memory[index] = index;
@@ -114,7 +119,9 @@ TEST(CoreMemoryAlloc, TrackedBlockFreesCorrectlyInsideGuestDomain)
 	Core::mem_free(memory);
 	Core::mem_guest_thread_leave();
 
-	SUCCEED();
+	Core::MemStats released {};
+	Core::mem_get_stat(&released);
+	EXPECT_EQ(released.blocks_num, before.blocks_num);
 }
 
 TEST(CoreMemoryAlloc, ConcurrentTrackerRecursionIsThreadIsolated)
@@ -122,39 +129,41 @@ TEST(CoreMemoryAlloc, ConcurrentTrackerRecursionIsThreadIsolated)
 	constexpr int thread_count = 320;
 	constexpr int iterations   = 64;
 
-	std::atomic<int>  ready {0};
-	std::atomic<bool> start {false};
-	std::atomic<bool> valid {true};
+	std::atomic<int>         ready {0};
+	std::atomic<bool>        start {false};
+	std::atomic<bool>        valid {true};
 	std::vector<std::thread> threads;
 	threads.reserve(thread_count);
 
 	for (int thread_index = 0; thread_index < thread_count; ++thread_index)
 	{
-		threads.emplace_back([thread_index, &ready, &start, &valid]() {
-			ready.fetch_add(1, std::memory_order_release);
-			while (!start.load(std::memory_order_acquire))
-			{
-				std::this_thread::yield();
-			}
+		threads.emplace_back(
+		    [thread_index, &ready, &start, &valid]()
+		    {
+			    ready.fetch_add(1, std::memory_order_release);
+			    while (!start.load(std::memory_order_acquire))
+			    {
+				    std::this_thread::yield();
+			    }
 
-			for (int iteration = 0; iteration < iterations; ++iteration)
-			{
-				const auto size = static_cast<size_t>(32 + ((thread_index + iteration) & 63));
-				auto*      data = static_cast<uint8_t*>(Core::mem_alloc(size));
-				for (size_t index = 0; index < size; ++index)
-				{
-					data[index] = static_cast<uint8_t>(thread_index + iteration + static_cast<int>(index));
-				}
-				for (size_t index = 0; index < size; ++index)
-				{
-					if (data[index] != static_cast<uint8_t>(thread_index + iteration + static_cast<int>(index)))
-					{
-						valid.store(false, std::memory_order_relaxed);
-					}
-				}
-				Core::mem_free(data);
-			}
-		});
+			    for (int iteration = 0; iteration < iterations; ++iteration)
+			    {
+				    const auto size = static_cast<size_t>(32 + ((thread_index + iteration) & 63));
+				    auto*      data = static_cast<uint8_t*>(Core::mem_alloc(size));
+				    for (size_t index = 0; index < size; ++index)
+				    {
+					    data[index] = static_cast<uint8_t>(thread_index + iteration + static_cast<int>(index));
+				    }
+				    for (size_t index = 0; index < size; ++index)
+				    {
+					    if (data[index] != static_cast<uint8_t>(thread_index + iteration + static_cast<int>(index)))
+					    {
+						    valid.store(false, std::memory_order_relaxed);
+					    }
+				    }
+				    Core::mem_free(data);
+			    }
+		    });
 	}
 
 	while (ready.load(std::memory_order_acquire) != thread_count)
