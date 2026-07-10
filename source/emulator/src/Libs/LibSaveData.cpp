@@ -9,6 +9,8 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
+#include <atomic>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs {
@@ -20,6 +22,7 @@ namespace SaveData {
 // TODO(): specify dir at launcher
 static constexpr char32_t SAVE_DATA_DIR[]   = U"_SaveData";
 static constexpr char32_t SAVE_DATA_POINT[] = U"/savedata0";
+static std::atomic<uint32_t> g_next_transaction_resource {0};
 
 struct SceSaveDataDirName
 {
@@ -52,6 +55,18 @@ struct SaveDataMount2
 	uint32_t                  mount_mode;
 	uint8_t                   reserved[32];
 	int                       pad2;
+};
+
+struct SaveDataMount3
+{
+	int32_t                   user_id;
+	int32_t                   pad;
+	const SceSaveDataDirName* dir_name;
+	uint64_t                  blocks;
+	uint64_t                  system_blocks;
+	uint32_t                  mount_mode;
+	uint32_t                  resource;
+	uint32_t                  mode;
 };
 
 struct SaveDataMountResult
@@ -114,6 +129,23 @@ int KYTY_SYSV_ABI SaveDataInitialize3(const void* /*init*/)
 
 	// EXIT_NOT_IMPLEMENTED(init != nullptr);
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id, const void* option, uint32_t* resource)
+{
+	PRINT_NAME();
+
+	printf("\t user_id  = %d\n", user_id);
+	printf("\t option   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(option));
+	printf("\t resource = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(resource));
+
+	if (resource == nullptr || reinterpret_cast<uintptr_t>(resource) < 0x10000u)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	*resource = g_next_transaction_resource.fetch_add(1, std::memory_order_relaxed) + 1;
 	return OK;
 }
 
@@ -245,6 +277,55 @@ int KYTY_SYSV_ABI SaveDataMount2(const SaveDataMount2* mount, SaveDataMountResul
 	return OK;
 }
 
+int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult* mount_result)
+{
+	PRINT_NAME();
+
+	if (mount == nullptr || mount_result == nullptr || mount->dir_name == nullptr || mount->user_id < 0)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	String dir_name = String::FromUtf8(mount->dir_name->data);
+	if (dir_name.IsEmpty())
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	String mount_dir   = String(SAVE_DATA_DIR) + U"/" + dir_name;
+	String mount_point = SAVE_DATA_POINT;
+	const bool existed = Core::File::IsDirectoryExisting(mount_dir);
+	const bool create  = (mount->mount_mode & 0x04u) != 0;
+	const bool create_if_missing = (mount->mount_mode & 0x20u) != 0;
+
+	if (!existed && !create && !create_if_missing)
+	{
+		return SAVE_DATA_ERROR_NOT_FOUND;
+	}
+	if (existed && create)
+	{
+		return SAVE_DATA_ERROR_EXISTS;
+	}
+	if (!existed)
+	{
+		Core::File::CreateDirectories(mount_dir);
+		if (!Core::File::IsDirectoryExisting(mount_dir))
+		{
+			return SAVE_DATA_ERROR_INTERNAL;
+		}
+	}
+
+	LibKernel::FileSystem::Mount(mount_dir, mount_point);
+	memset(mount_result, 0, sizeof(*mount_result));
+	const int written = snprintf(mount_result->mount_point.data, sizeof(mount_result->mount_point.data), "%s", mount_point.C_Str());
+	if (written < 0 || written >= static_cast<int>(sizeof(mount_result->mount_point.data)))
+	{
+		return SAVE_DATA_ERROR_INTERNAL;
+	}
+	mount_result->mount_status = (create_if_missing && !existed ? 1u : 0u);
+	return OK;
+}
+
 int KYTY_SYSV_ABI SaveDataUmount(const SaveDataMountPoint* mount_point)
 {
 	PRINT_NAME();
@@ -316,13 +397,36 @@ LIB_DEFINE(InitSaveData_1)
 	LIB_FUNC("ZkZhskCPXFw", SaveData::SaveDataInitialize);
 	LIB_FUNC("l1NmDeDpNGU", SaveData::SaveDataInitialize2);
 	LIB_FUNC("TywrFKCoLGY", SaveData::SaveDataInitialize3);
+	LIB_FUNC("gjRZNnw0JPE", SaveData::SaveDataCreateTransactionResource);
 	LIB_FUNC("32HQAQdwM2o", SaveData::SaveDataMount);
 	LIB_FUNC("0z45PIH+SNI", SaveData::SaveDataMount2);
+	LIB_FUNC("ZP4e7rlzOUk", SaveData::SaveDataMount3);
 	LIB_FUNC("BMR4F-Uek3E", SaveData::SaveDataUmount);
 	LIB_FUNC("85zul--eGXs", SaveData::SaveDataSetParam);
 	LIB_FUNC("65VH0Qaaz6s", SaveData::SaveDataGetMountInfo);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
 }
+
+namespace SaveDataNative {
+
+LIB_VERSION("SaveData_native", 1, "SaveData_native", 1, 1);
+
+LIB_DEFINE(InitSaveDataNative_1)
+{
+	LIB_FUNC("ZkZhskCPXFw", SaveData::SaveDataInitialize);
+	LIB_FUNC("l1NmDeDpNGU", SaveData::SaveDataInitialize2);
+	LIB_FUNC("TywrFKCoLGY", SaveData::SaveDataInitialize3);
+	LIB_FUNC("gjRZNnw0JPE", SaveData::SaveDataCreateTransactionResource);
+	LIB_FUNC("32HQAQdwM2o", SaveData::SaveDataMount);
+	LIB_FUNC("0z45PIH+SNI", SaveData::SaveDataMount2);
+	LIB_FUNC("ZP4e7rlzOUk", SaveData::SaveDataMount3);
+	LIB_FUNC("BMR4F-Uek3E", SaveData::SaveDataUmount);
+	LIB_FUNC("85zul--eGXs", SaveData::SaveDataSetParam);
+	LIB_FUNC("65VH0Qaaz6s", SaveData::SaveDataGetMountInfo);
+	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
+}
+
+} // namespace SaveDataNative
 
 } // namespace Kyty::Libs
 

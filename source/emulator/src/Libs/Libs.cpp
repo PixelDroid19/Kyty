@@ -22,6 +22,15 @@ LIB_DEFINE(InitNet_1);
 LIB_DEFINE(InitPad_1);
 LIB_DEFINE(InitPlayGo_1);
 LIB_DEFINE(InitSaveData_1);
+namespace SaveDataNative {
+LIB_DEFINE(InitSaveDataNative_1);
+} // namespace SaveDataNative
+namespace NpUniversalDataSystem {
+LIB_DEFINE(InitNpUniversalDataSystem_1);
+} // namespace NpUniversalDataSystem
+namespace NpTrophy2 {
+LIB_DEFINE(InitNpTrophy2_1);
+} // namespace NpTrophy2
 LIB_DEFINE(InitSysmodule_1);
 LIB_DEFINE(InitSystemService_1);
 LIB_DEFINE(InitUserService_1);
@@ -42,7 +51,14 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libNet_1", InitNet_1);
 	LIB_CHECK(U"libPad_1", InitPad_1);
 	LIB_CHECK(U"libPlayGo_1", InitPlayGo_1);
-	LIB_CHECK(U"libSaveData_1", InitSaveData_1);
+	LIB_CHECK(U"libNpUniversalDataSystem_1", NpUniversalDataSystem::InitNpUniversalDataSystem_1);
+	LIB_CHECK(U"libNpTrophy2_1", NpTrophy2::InitNpTrophy2_1);
+	if (id == U"libSaveData_1")
+	{
+		InitSaveData_1(s);
+		SaveDataNative::InitSaveDataNative_1(s);
+		return true;
+	}
 	LIB_CHECK(U"libSysmodule_1", InitSysmodule_1);
 	LIB_CHECK(U"libSystemService_1", InitSystemService_1);
 	LIB_CHECK(U"libUserService_1", InitUserService_1);
@@ -66,7 +82,10 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(InitNet_1);
 	LIB_LOAD(InitPad_1);
 	LIB_LOAD(InitPlayGo_1);
+	LIB_LOAD(NpUniversalDataSystem::InitNpUniversalDataSystem_1);
+	LIB_LOAD(NpTrophy2::InitNpTrophy2_1);
 	LIB_LOAD(InitSaveData_1);
+	LIB_LOAD(SaveDataNative::InitSaveDataNative_1);
 	LIB_LOAD(InitSysmodule_1);
 	LIB_LOAD(InitSystemService_1);
 	LIB_LOAD(InitUserService_1);
