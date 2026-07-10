@@ -159,6 +159,14 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 		}
 	}
 
+	// Start the search at search_start, not below it: with no prior allocations
+	// free_pos is 0, which would fail the `free_pos >= search_start` check and make
+	// the first direct-memory allocation spuriously fail (seen as HashLink OOM).
+	if (free_pos < search_start)
+	{
+		free_pos = search_start;
+	}
+
 	free_pos = get_aligned_pos(free_pos, alignment);
 
 	if (free_pos >= search_start && free_pos + len <= search_end)
@@ -425,7 +433,9 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	EXIT_IF(g_flexible_memory == nullptr);
 
 	EXIT_NOT_IMPLEMENTED(addr_in_out == nullptr);
-	EXIT_NOT_IMPLEMENTED(flags != 0);
+	// PS5 titles pass flags such as 0x8000 (fixed-address request); accept the
+	// known bits instead of bailing. Unknown bits still trip the assert.
+	EXIT_NOT_IMPLEMENTED((flags & ~static_cast<int>(0x8000)) != 0);
 
 	VirtualMemory::Mode     mode     = VirtualMemory::Mode::NoAccess;
 	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
@@ -695,9 +705,11 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 	EXIT_IF(g_physical_memory == nullptr);
 
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
-	EXIT_NOT_IMPLEMENTED(flags != 0 && flags != 0x10);
 
-	bool fixed = (flags == 0x10);
+	// The fixed-address request is bit 0x10; accept any other flag bits rather than
+	// bailing (PS5 titles pass e.g. 0x11 = fixed + no-overwrite).
+	bool fixed = (flags & 0x10) != 0;
+	printf("\t flags        = 0x%x (fixed=%d)\n", flags, fixed ? 1 : 0);
 
 	VirtualMemory::Mode     mode     = VirtualMemory::Mode::NoAccess;
 	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
@@ -847,7 +859,7 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 	auto vaddr = reinterpret_cast<uint64_t>(addr);
 
 	printf("\t addr = 0x%016" PRIx64 "\n", vaddr);
-	printf("\t len  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(len));
+	printf("\t len  = 0x%016" PRIx64 "\n", static_cast<uint64_t>(len));
 
 	VirtualMemory::Mode     mode     = VirtualMemory::Mode::NoAccess;
 	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
