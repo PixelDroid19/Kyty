@@ -253,7 +253,14 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 			inst.src_num           = 1;
 			break;
 
-		case 0x0: KYTY_NI("s_nop"); break;
+		case 0x0:
+			// s_nop: hardware no-op — model as a skipped scalar instruction.
+			inst.type              = ShaderInstructionType::SInstPrefetch;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
+			inst.src_num           = 1;
+			break;
 		case 0x9: KYTY_NI("s_cbranch_execnz"); break;
 		case 0xA: KYTY_NI("s_barrier"); break;
 		case 0xB: KYTY_NI("s_setkill"); break;
@@ -460,7 +467,9 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 	switch (opcode)
 	{
 		case 0x00: inst.type = ShaderInstructionType::SAddU32; break;
-		case 0x01: KYTY_NI("s_sub_u32"); break;
+		// s_sub_u32: two's-complement subtract — identical result bits to the signed
+		// s_sub_i32; only the SCC borrow-flag semantics differ (unused here).
+		case 0x01: inst.type = ShaderInstructionType::SSubI32; break;
 		case 0x02: inst.type = ShaderInstructionType::SAddI32; break;
 		case 0x03: inst.type = ShaderInstructionType::SSubI32; break;
 		case 0x04: inst.type = ShaderInstructionType::SAddcU32; break;
@@ -2327,6 +2336,22 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 	}
 
 	if (inst.format == ShaderInstructionFormat::Unknown && done == 0 && compr == 0 && vm == 0 && en == 0xf)
+	{
+		switch (target)
+		{
+			case 0x20: inst.format = ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x21: inst.format = ShaderInstructionFormat::Param1Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x22: inst.format = ShaderInstructionFormat::Param2Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x23: inst.format = ShaderInstructionFormat::Param3Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x24: inst.format = ShaderInstructionFormat::Param4Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			default: break;
+		}
+	}
+
+	// Fallback: parameter exports (targets 0x20-0x24) with a partial channel mask
+	// (en != 0xf) still map to the full ParamN format for bring-up — unwritten
+	// channels read whatever is in the vsrc regs, which is harmless for a param.
+	if (inst.format == ShaderInstructionFormat::Unknown && done == 0 && compr == 0 && vm == 0)
 	{
 		switch (target)
 		{

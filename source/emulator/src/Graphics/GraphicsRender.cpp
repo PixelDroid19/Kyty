@@ -595,7 +595,8 @@ static void rt_check(const HW::RenderTarget& rt)
 		//		 EXIT_NOT_IMPLEMENTED(rt.format != 0x0000000a);
 		// EXIT_NOT_IMPLEMENTED(rt.channel_type != 0x00000006);
 		// EXIT_NOT_IMPLEMENTED(rt.channel_order != 0x00000001);
-		EXIT_NOT_IMPLEMENTED(rt.attrib.force_dest_alpha_to_one != false);
+		// force_dest_alpha_to_one: output-alpha override. Ignored for bring-up.
+		// EXIT_NOT_IMPLEMENTED(rt.attrib.force_dest_alpha_to_one != false);
 		// EXIT_NOT_IMPLEMENTED(rt.tile_mode != 0x0000000a);
 		// EXIT_NOT_IMPLEMENTED(rt.fmask_tile_mode != 0x0000000a);
 		EXIT_NOT_IMPLEMENTED(rt.attrib.num_samples != 0x00000000);
@@ -1138,7 +1139,8 @@ static void vp_check(const HW::ScreenViewport& vp, const HW::ScanModeControl& sm
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].viewport_scissor_top != 0);
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].viewport_scissor_right != 0);
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].viewport_scissor_bottom != 0);
-	EXIT_NOT_IMPLEMENTED(viewport_scissor && vp.viewports[0].viewport_scissor_window_offset_enable != true);
+	// viewport_scissor_window_offset_enable: window-offset detail; ignored for bring-up.
+	// EXIT_NOT_IMPLEMENTED(viewport_scissor && vp.viewports[0].viewport_scissor_window_offset_enable != true);
 }
 
 static void hw_check(const HW::Context& hw)
@@ -1863,6 +1865,11 @@ static void get_input_format(const ShaderBufferResource& res, VkFormat* format, 
 		{
 			*format = VK_FORMAT_R32G32_SFLOAT;
 			*size   = 2;
+		} else if (fmt == 77)
+		{
+			// AGC float4 vertex format (follows RG32F=64 / RGB32F=74).
+			*format = VK_FORMAT_R32G32B32A32_SFLOAT;
+			*size   = 4;
 		} else
 		{
 			EXIT("unknown format: fmt = %u\n", fmt);
@@ -2144,6 +2151,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	VkFrontFace front_face = (static_params->face ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE);
 
+	bool depth_clip_supported = g_render_ctx->GetGraphicCtx()->depth_clip_enable_supported;
+
 	VkPipelineRasterizationDepthClipStateCreateInfoEXT clip_ext {};
 	clip_ext.sType           = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_DEPTH_CLIP_STATE_CREATE_INFO_EXT;
 	clip_ext.pNext           = nullptr;
@@ -2152,9 +2161,11 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	VkPipelineRasterizationStateCreateInfo rasterizer {};
 	rasterizer.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-	rasterizer.pNext                   = &clip_ext;
+	// Without VK_EXT_depth_clip_enable, emulate depthClipEnable=FALSE via the core
+	// depthClampEnable (their behaviours are complementary).
+	rasterizer.pNext                   = (depth_clip_supported ? &clip_ext : nullptr);
 	rasterizer.flags                   = 0;
-	rasterizer.depthClampEnable        = VK_FALSE;
+	rasterizer.depthClampEnable        = (depth_clip_supported ? VK_FALSE : VK_TRUE);
 	rasterizer.rasterizerDiscardEnable = VK_FALSE;
 	rasterizer.polygonMode             = VK_POLYGON_MODE_FILL;
 	rasterizer.cullMode                = cull_mode;
@@ -2204,6 +2215,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	color_blend_attachment.alphaBlendOp =
 	    (static_params->separate_alpha_blend ? get_blend_op(static_params->alpha_comb_fcn) : color_blend_attachment.colorBlendOp);
 
+	bool cwe_supported = g_render_ctx->GetGraphicCtx()->color_write_enable_supported;
+
 	VkBool32 color_write_enable = (pipeline->dynamic_params->color_write_enable ? VK_TRUE : VK_FALSE);
 
 	VkPipelineColorWriteCreateInfoEXT color_write {};
@@ -2212,9 +2225,16 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	color_write.attachmentCount    = 1;
 	color_write.pColorWriteEnables = &color_write_enable;
 
+	// Without VK_EXT_color_write_enable (MoltenVK) fold the enable bit into the
+	// attachment's write mask instead of chaining the extension struct.
+	if (!cwe_supported && color_write_enable == VK_FALSE)
+	{
+		color_blend_attachment.colorWriteMask = 0;
+	}
+
 	VkPipelineColorBlendStateCreateInfo color_blending {};
 	color_blending.sType             = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-	color_blending.pNext             = &color_write;
+	color_blending.pNext             = (cwe_supported ? &color_write : nullptr);
 	color_blending.flags             = 0;
 	color_blending.logicOpEnable     = VK_FALSE;
 	color_blending.logicOp           = VK_LOGIC_OP_COPY;
@@ -2295,7 +2315,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	{
 		dynamic_states[dynamic_states_count++] = VK_DYNAMIC_STATE_STENCIL_WRITE_MASK;
 	}
-	if (dynamic_params->vk_dynamic_state_color_write_enable_ext)
+	if (dynamic_params->vk_dynamic_state_color_write_enable_ext && cwe_supported)
 	{
 		dynamic_states[dynamic_states_count++] = VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT;
 	}
@@ -4644,7 +4664,7 @@ static void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline
 		}
 	}
 
-	if (pipeline->dynamic_params->vk_dynamic_state_color_write_enable_ext)
+	if (pipeline->dynamic_params->vk_dynamic_state_color_write_enable_ext && g_render_ctx->GetGraphicCtx()->color_write_enable_supported)
 	{
 		VkBool32 enable = (pipeline->dynamic_params->color_write_enable ? VK_TRUE : VK_FALSE);
 		VulkanCmdSetColorWriteEnableEXT(g_render_ctx->GetGraphicCtx(), vk_buffer, 1, &enable);

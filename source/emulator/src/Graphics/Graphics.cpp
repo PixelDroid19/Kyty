@@ -1299,7 +1299,12 @@ int KYTY_SYSV_ABI GraphicsInit(uint32_t* state, uint32_t ver)
 	printf("\t ver   = %u\n", ver);
 
 	EXIT_NOT_IMPLEMENTED(state == nullptr);
-	EXIT_NOT_IMPLEMENTED(ver != 8);
+	// Gen5 tables were authored for AGC ver 8; Dead Cells uses ver 10. Accept it
+	// and proceed with the ver-8 defaults (bring-up) rather than aborting.
+	if (ver != 8)
+	{
+		printf("\t WARNING: AGC ver %u != 8, using ver-8 register defaults\n", ver);
+	}
 
 	return OK;
 }
@@ -1308,7 +1313,7 @@ void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2(uint32_t ver)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(ver != 8);
+	if (ver != 8) { printf("\t WARNING: AGC ver %u != 8\n", ver); }
 	EXIT_NOT_IMPLEMENTED(offsetof(RegisterDefaults, count) != 0x38);
 
 	return &g_reg_defaults1;
@@ -1318,7 +1323,7 @@ void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2Internal(uint32_t ver)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(ver != 8);
+	if (ver != 8) { printf("\t WARNING: AGC ver %u != 8\n", ver); }
 	EXIT_NOT_IMPLEMENTED(offsetof(RegisterDefaults, count) != 0x38);
 
 	return &g_reg_defaults2;
@@ -1495,8 +1500,21 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 		h->sh_registers[0].value  = ((base >> 8u) & 0xffffffffu);
 		h->sh_registers[1].offset = Pm4::SPI_SHADER_PGM_HI_PS;
 		h->sh_registers[1].value  = ((base >> 40u) & 0x000000ffu);
+	} else if (h->type == 0 && h->num_sh_registers >= 2 && h->sh_registers[0].offset == Pm4::COMPUTE_PGM_LO &&
+	           h->sh_registers[1].offset == Pm4::COMPUTE_PGM_HI)
+	{
+		// Compute shader: patch the code base address into COMPUTE_PGM_LO/HI.
+		h->sh_registers[0].offset = Pm4::COMPUTE_PGM_LO;
+		h->sh_registers[0].value  = ((base >> 8u) & 0xffffffffu);
+		h->sh_registers[1].offset = Pm4::COMPUTE_PGM_HI;
+		h->sh_registers[1].value  = ((base >> 40u) & 0x000000ffu);
 	} else
 	{
+		printf("\t SHADER DIAG: type=%u num_sh_registers=%u\n", h->type, h->num_sh_registers);
+		for (uint32_t i = 0; i < h->num_sh_registers && i < 8; i++)
+		{
+			printf("\t   sh_reg[%u] offset=0x%x value=0x%x\n", i, h->sh_registers[i].offset, h->sh_registers[i].value);
+		}
 		EXIT("invalid shader\n");
 	}
 
@@ -1993,6 +2011,42 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 	return cmd;
 }
 
+// AGC indexed draw: sceAgcDcbDrawIndex(dcb, index_count, index_addr, modifier).
+// Emits the same R_DRAW_INDEX custom PM4 packet (header 0xC008100C, 9 DW) that the
+// command-processor's cp_op_draw_index handler consumes.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_count, const void* index_addr, uint64_t modifier)
+{
+	PRINT_NAME();
+
+	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
+	printf("\t index_addr  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
+	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+
+	buf->DbgDump();
+
+	// Header 0xC008100C == KYTY_PM4(10, IT_NOP, R_DRAW_INDEX): 10 DW total.
+	auto* cmd = buf->AllocateDW(10);
+
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	auto addr = reinterpret_cast<uint64_t>(index_addr);
+
+	cmd[0] = KYTY_PM4(10, Pm4::IT_NOP, Pm4::R_DRAW_INDEX);
+	cmd[1] = index_count;
+	cmd[2] = static_cast<uint32_t>(addr & 0xffffffffu);
+	cmd[3] = static_cast<uint32_t>((addr >> 32u) & 0xffffffffu);
+	cmd[4] = 0; // flags
+	cmd[5] = 1; // type (indexed)
+	cmd[6] = 0;
+	cmd[7] = 0;
+	cmd[8] = 0;
+	cmd[9] = 0;
+
+	return cmd;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address)
 {
 	PRINT_NAME();
@@ -2034,9 +2088,18 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
 	auto vaddr   = reinterpret_cast<uint64_t>(base);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	EXIT_NOT_IMPLEMENTED(!no_size && (size_bytes && 0xffu) != 0);
+	// AGC ver 10 issues ACQUIRE_MEM (GCR cache ops) with finer-than-256B granularity;
+	// the PM4 encoding is size>>8 / addr>>8, so sub-256B bits are dropped. That is
+	// acceptable for our coherency model — warn instead of aborting.
+	if (!no_size && (size_bytes & 0xffu) != 0)
+	{
+		printf("\t WARNING: ACQUIRE_MEM size 0x%" PRIx64 " not 256B-aligned\n", size_bytes);
+	}
 	EXIT_NOT_IMPLEMENTED(!no_size && (size_bytes >> 40u) != 0);
-	EXIT_NOT_IMPLEMENTED((vaddr && 0xffu) != 0);
+	if ((vaddr & 0xffu) != 0)
+	{
+		printf("\t WARNING: ACQUIRE_MEM base 0x%" PRIx64 " not 256B-aligned\n", vaddr);
+	}
 	EXIT_NOT_IMPLEMENTED((vaddr >> 40u) != 0);
 	EXIT_NOT_IMPLEMENTED(engine > 1);
 

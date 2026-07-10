@@ -1247,6 +1247,10 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index)
 	} else if ((event_type == 0x00000010) && event_index == 0x00000000)
 	{
 		// PsPartialFlush
+	} else if (event_type == 0x00000007 && event_index == 0x00000000)
+	{
+		// CS_PARTIAL_FLUSH — wait for outstanding compute work. Treat as a barrier.
+		MemoryBarrier();
 	} else
 	{
 		EXIT("unknown event type: 0x%08" PRIx32 ", 0x%08" PRIx32 "\n", event_type, event_index);
@@ -2674,6 +2678,11 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 		}
 		break;
 
+		case 0x00000000:
+			// No-op / simple cache sync (all fields zero) — plain barrier.
+			cp->MemoryBarrier();
+			break;
+
 		default:
 			EXIT("unknown barrier: 0x%08" PRIx32 ", 0x%08" PRIx32 ", 0x%08" PRIx32 ", 0x%08" PRIx32 "\n", cache_action, target_mask,
 			     extended_action, action);
@@ -3038,6 +3047,12 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 
 		if (pfunc == nullptr)
 		{
+			static const bool permissive = (getenv("KYTY_GFX_PERMISSIVE") != nullptr);
+			if (permissive)
+			{
+				printf("WARNING: skipping unknown cx reg 0x%" PRIx32 "\n", cmd_offset);
+				continue;
+			}
 			EXIT("unknown cx reg at %05" PRIx32 ": 0x%" PRIx32 "\n", num_dw - dw, cmd_offset);
 		}
 
@@ -3070,6 +3085,12 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 
 		if (pfunc == nullptr)
 		{
+			static const bool permissive = (getenv("KYTY_GFX_PERMISSIVE") != nullptr);
+			if (permissive)
+			{
+				printf("WARNING: skipping unknown sh reg 0x%" PRIx32 "\n", cmd_offset);
+				continue;
+			}
 			EXIT("unknown sh reg at %05" PRIx32 ": 0x%" PRIx32 "\n", num_dw - dw, cmd_offset);
 		}
 
@@ -3102,6 +3123,12 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 
 		if (pfunc == nullptr)
 		{
+			static const bool permissive = (getenv("KYTY_GFX_PERMISSIVE") != nullptr);
+			if (permissive)
+			{
+				printf("WARNING: skipping unknown uc reg 0x%" PRIx32 "\n", cmd_offset);
+				continue;
+			}
 			EXIT("unknown uc reg at %05" PRIx32 ": 0x%" PRIx32 "\n", num_dw - dw, cmd_offset);
 		}
 
