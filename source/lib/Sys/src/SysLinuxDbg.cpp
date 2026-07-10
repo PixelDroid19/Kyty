@@ -12,6 +12,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
+#include <pthread.h>
+#endif
+
 namespace Kyty {
 
 static thread_local sys_dbg_stack_info_t g_stack = {0};
@@ -26,6 +32,31 @@ void sys_stack_usage_print(sys_dbg_stack_info_t& stack)
 	printf("stack: (0x%" PRIx64 ", %" PRIu64 ")\n", static_cast<uint64_t>(stack.commited_addr), static_cast<uint64_t>(stack.commited_size));
 	printf("code: (0x%" PRIx64 ", %" PRIu64 ")\n", static_cast<uint64_t>(stack.code_addr), static_cast<uint64_t>(stack.code_size));
 }
+
+#ifdef __APPLE__
+
+void sys_stack_usage(sys_dbg_stack_info_t& s)
+{
+	memset(&s, 0, sizeof(sys_dbg_stack_info_t));
+
+	pthread_t self       = pthread_self();
+	auto      stack_top  = reinterpret_cast<uintptr_t>(pthread_get_stackaddr_np(self));
+	size_t    stack_size = pthread_get_stacksize_np(self);
+
+	s.addr          = stack_top - stack_size;
+	s.total_size    = stack_size;
+	s.commited_addr = s.addr;
+	s.commited_size = stack_size;
+
+	const auto*   mh        = reinterpret_cast<const struct mach_header_64*>(_dyld_get_image_header(0));
+	unsigned long code_size = 0;
+	uint8_t*      code      = getsegmentdata(mh, "__TEXT", &code_size);
+
+	s.code_addr = reinterpret_cast<uintptr_t>(code);
+	s.code_size = code_size;
+}
+
+#else
 
 void sys_stack_usage(sys_dbg_stack_info_t& s)
 {
@@ -134,6 +165,8 @@ void sys_stack_usage(sys_dbg_stack_info_t& s)
 
 	result = fclose(f);
 }
+
+#endif
 
 void sys_get_code_info(uintptr_t* addr, size_t* size)
 {

@@ -10,6 +10,19 @@ elseif(MSVC AND CLANG)
 	else()
 		set_target_properties(vulkan-1 PROPERTIES IMPORTED_IMPLIB "${CMAKE_CURRENT_SOURCE_DIR}/lib/vulkan-1.lib")
 	endif()	
+elseif(APPLE)
+	# On macOS, Vulkan is provided by MoltenVK (universal x86_64+arm64 dylib bundled
+	# in lib/macos). Do not search system paths: Homebrew's libvulkan is arm64-only
+	# and the emulator must link as x86_64 for Rosetta 2.
+	find_library(Vulkan_Lib
+		NAMES MoltenVK vulkan
+		PATHS "${CMAKE_CURRENT_SOURCE_DIR}/lib/macos" "$ENV{VULKAN_SDK}/lib"
+		NO_DEFAULT_PATH
+	)
+	if(NOT Vulkan_Lib)
+		message(FATAL_ERROR "libMoltenVK not found. Place libMoltenVK.dylib in 3rdparty/vulkan/lib/macos or set VULKAN_SDK")
+	endif()
+	set_target_properties(vulkan-1 PROPERTIES IMPORTED_LOCATION ${Vulkan_Lib})
 elseif(LINUX)
 	find_library(Vulkan_Lib vulkan)
     set_target_properties(vulkan-1 PROPERTIES IMPORTED_LOCATION ${Vulkan_Lib})
@@ -338,7 +351,10 @@ set(SPIRV_TOOLS_OPT_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/source/opt/wrap_opkill.cpp
 )
 
-if (LINUX)
+if (APPLE)
+    set_source_files_properties(${SPIRV_SOURCES} PROPERTIES COMPILE_FLAGS "-Os -DSPIRV_MAC")
+    set_source_files_properties(${SPIRV_TOOLS_OPT_SOURCES} PROPERTIES COMPILE_FLAGS "-Os -DSPIRV_MAC")
+elseif (LINUX)
     set_source_files_properties(${SPIRV_SOURCES} PROPERTIES COMPILE_FLAGS "-Os -DSPIRV_LINUX")
     set_source_files_properties(${SPIRV_TOOLS_OPT_SOURCES} PROPERTIES COMPILE_FLAGS "-Os -DSPIRV_LINUX")
 elseif (MSVC)
