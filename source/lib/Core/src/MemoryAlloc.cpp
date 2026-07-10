@@ -178,13 +178,15 @@ static pattern_t pattern_next()
 	return g_mem_patterns[g_pattern_id++ % g_mem_patterns.Size()];
 }
 
+// The overflow guard follows the block. The user pointer is the allocation base
+// (no leading guard), so any code path can free it with the plain system
+// allocator regardless of which domain allocated it.
 static void pattern_write(MemBlockInfoT* info)
 {
 	auto* ptr = reinterpret_cast<uint8_t*>(info->addr);
 	for (int i = 0; i < 4; i++)
 	{
-		(reinterpret_cast<pattern_t*>(ptr - PATTERN_SIZE * PATTERNS_NUM))[i] = info->left_pattern;
-		(reinterpret_cast<pattern_t*>(ptr + info->size))[i]                  = info->right_pattern;
+		(reinterpret_cast<pattern_t*>(ptr + info->size))[i] = info->right_pattern;
 	}
 }
 
@@ -194,8 +196,7 @@ static bool pattern_check(MemBlockInfoT* info)
 
 	for (int i = 0; i < 4; i++)
 	{
-		if ((reinterpret_cast<pattern_t*>(ptr - PATTERN_SIZE * PATTERNS_NUM))[i] != info->left_pattern ||
-		    (reinterpret_cast<pattern_t*>(ptr + info->size))[i] != info->right_pattern)
+		if ((reinterpret_cast<pattern_t*>(ptr + info->size))[i] != info->right_pattern)
 		{
 			return false;
 		}
@@ -326,8 +327,7 @@ void* mem_alloc(size_t size)
 #endif
 
 #ifdef MEM_TRACKER
-	auto* ptr_p = static_cast<pattern_t*>(sys_heap_alloc(g_default_heap, size + PATTERN_SIZE * PATTERNS_NUM * 2));
-	void* ptr   = ptr_p + PATTERNS_NUM;
+	void* ptr = sys_heap_alloc(g_default_heap, size + PATTERN_SIZE * PATTERNS_NUM);
 #else
 	void* ptr  = sys_heap_alloc(g_default_heap, size);
 #endif
@@ -412,9 +412,7 @@ void* mem_realloc(void* ptr, size_t size)
 #endif
 
 #ifdef MEM_TRACKER
-	auto* ptr2_b = static_cast<pattern_t*>(sys_heap_realloc(
-	    g_default_heap, ptr != nullptr ? (static_cast<pattern_t*>(ptr)) - PATTERNS_NUM : nullptr, size + PATTERN_SIZE * PATTERNS_NUM * 2));
-	void* ptr2   = ptr2_b + PATTERNS_NUM;
+	void* ptr2 = sys_heap_realloc(g_default_heap, ptr, size + PATTERN_SIZE * PATTERNS_NUM);
 #else
 	void* ptr2 = sys_heap_realloc(g_default_heap, ptr, size);
 #endif
@@ -530,7 +528,7 @@ void mem_free(void* ptr)
 #endif
 
 #ifdef MEM_TRACKER
-		sys_heap_free(g_default_heap, ptr != nullptr ? (static_cast<pattern_t*>(ptr)) - PATTERNS_NUM : nullptr);
+		sys_heap_free(g_default_heap, ptr);
 #else
 	sys_heap_free(g_default_heap, ptr);
 #endif

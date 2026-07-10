@@ -96,6 +96,27 @@ TEST(CoreMemoryAlloc, GuestDomainRoutesAllOperationsToTheSystemAllocator)
 	EXPECT_FALSE(Core::mem_guest_thread_is_active());
 }
 
+TEST(CoreMemoryAlloc, TrackedBlockFreesCorrectlyInsideGuestDomain)
+{
+	// Allocated outside a guest domain, so the debug tracker owns the block.
+	Core::mem_tracker_enable();
+	auto* memory = static_cast<uint8_t*>(Core::mem_alloc(64));
+	ASSERT_NE(memory, nullptr);
+	for (uint8_t index = 0; index < 64; ++index)
+	{
+		memory[index] = index;
+	}
+
+	// A different subsystem frees the same block while this thread is inside a
+	// guest domain. The freed base must be the block's real allocation base
+	// regardless of who allocated it, or the system allocator aborts.
+	Core::mem_guest_thread_enter();
+	Core::mem_free(memory);
+	Core::mem_guest_thread_leave();
+
+	SUCCEED();
+}
+
 TEST(CoreMemoryAlloc, ConcurrentTrackerRecursionIsThreadIsolated)
 {
 	constexpr int thread_count = 320;
