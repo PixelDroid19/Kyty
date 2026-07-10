@@ -68,4 +68,33 @@ TEST(EmulatorAudio, RejectsNullNgs2RackHandle)
 	EXPECT_EQ(voice_handle, 0u);
 }
 
+TEST(EmulatorAudio, ReadsGen5CustomRackVoiceCountFromCommonOptionBlock)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	alignas(uint64_t) uint8_t raw_option_one[0x518]     = {};
+	alignas(uint64_t) uint8_t raw_option_two[0x518]     = {};
+	*reinterpret_cast<size_t*>(raw_option_one)          = sizeof(raw_option_one);
+	*reinterpret_cast<size_t*>(raw_option_two)          = sizeof(raw_option_two);
+	*reinterpret_cast<uint32_t*>(raw_option_one + 0x50) = 1;
+	*reinterpret_cast<uint32_t*>(raw_option_two + 0x50) = 2;
+
+	// This field is part of the custom extension, not the common max-voices field.
+	*reinterpret_cast<uint32_t*>(raw_option_one + 0xb8) = 7;
+	*reinterpret_cast<uint32_t*>(raw_option_two + 0xb8) = 7;
+
+	alignas(uint64_t) uint64_t raw_info_one[8] = {};
+	alignas(uint64_t) uint64_t raw_info_two[8] = {};
+	auto*                      info_one        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info_one);
+	auto*                      info_two        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info_two);
+
+	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option_one), info_one), 0);
+	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option_two), info_two), 0);
+	EXPECT_GT(raw_info_two[1], raw_info_one[1]);
+}
+
 UT_END();

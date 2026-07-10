@@ -1640,8 +1640,10 @@ static uint32_t Ngs2GetRackMaxVoices(uint32_t rack_id, const Ngs2RackOption* opt
 
 	if (rack_id == 0x4001 && option->size == 0x518)
 	{
+		// Gen5 custom-rack options place the common numeric fields after a
+		// 0x30-byte extension. flags starts at 0x48, so max_voices is at 0x50.
 		uint32_t max_voices = 0;
-		memcpy(&max_voices, reinterpret_cast<const uint8_t*>(option) + 0xb8, sizeof(max_voices));
+		memcpy(&max_voices, reinterpret_cast<const uint8_t*>(option) + 0x50, sizeof(max_voices));
 		return max_voices;
 	}
 
