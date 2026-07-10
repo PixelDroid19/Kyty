@@ -1298,7 +1298,18 @@ static void ShaderGetGdsPointer(ShaderGdsResources* info, bool* direct_sgprs, in
 	info->pointers_num++;
 }
 
-static void ShaderGetDirectSgpr(ShaderDirectSgprsResources* info, int start_index, const HW::UserSgprInfo& user_sgpr)
+bool ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type)
+{
+	if (type == HW::UserSgprType::Unknown)
+	{
+		return true;
+	}
+
+	return user_data != nullptr && start_register >= 0 && start_register < user_data->srt_size_dw && type == HW::UserSgprType::Region;
+}
+
+static void ShaderGetDirectSgpr(ShaderDirectSgprsResources* info, int start_index, const HW::UserSgprInfo& user_sgpr,
+                                const ShaderUserData* user_data)
 {
 	EXIT_IF(info == nullptr);
 
@@ -1311,7 +1322,7 @@ static void ShaderGetDirectSgpr(ShaderDirectSgprsResources* info, int start_inde
 	info->start_register[index] = start_index;
 
 	auto type = user_sgpr.type[start_index];
-	EXIT_NOT_IMPLEMENTED(type != HW::UserSgprType::Unknown);
+	EXIT_NOT_IMPLEMENTED(!ShaderCanBindDirectSgpr(user_data, start_index, type));
 
 	info->sgprs[index].field = user_sgpr.value[start_index];
 
@@ -1358,6 +1369,44 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	}
 
 	EXIT_IF((bind->push_constant_size % 16) != 0);
+}
+
+ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register)
+{
+	ShaderStorageUsage usage = ShaderStorageUsage::Unknown;
+
+	for (const auto& inst: code.GetInstructions())
+	{
+		bool is_load  = false;
+		bool is_store = false;
+		switch (inst.type)
+		{
+			case ShaderInstructionType::BufferLoadDword:
+			case ShaderInstructionType::BufferLoadFormatX:
+			case ShaderInstructionType::BufferLoadFormatXy:
+			case ShaderInstructionType::BufferLoadFormatXyz:
+			case ShaderInstructionType::BufferLoadFormatXyzw: is_load = true; break;
+			case ShaderInstructionType::BufferStoreDword:
+			case ShaderInstructionType::BufferStoreFormatX:
+			case ShaderInstructionType::BufferStoreFormatXy:
+			case ShaderInstructionType::BufferStoreFormatXyzw: is_store = true; break;
+			default: break;
+		}
+
+		if ((!is_load && !is_store) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
+		    inst.src[1].register_id != start_register || inst.src[1].size != 4)
+		{
+			continue;
+		}
+
+		if (is_store)
+		{
+			return ShaderStorageUsage::ReadWrite;
+		}
+		usage = ShaderStorageUsage::ReadOnly;
+	}
+
+	return usage;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1495,7 +1544,7 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 	{
 		if (direct_sgprs[i])
 		{
-			ShaderGetDirectSgpr(&bind->direct_sgprs, i, user_sgpr);
+			ShaderGetDirectSgpr(&bind->direct_sgprs, i, user_sgpr, nullptr);
 			info->direct_sgprs++;
 		}
 	}
@@ -1503,7 +1552,8 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
-                       const HW::UserSgprInfo& user_sgpr, int user_sgpr_num)
+                       const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
+                       int user_data_register_base = 0)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -1526,7 +1576,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 
 	EXIT_NOT_IMPLEMENTED(user_data == nullptr);
 	EXIT_NOT_IMPLEMENTED(user_data->eud_size_dw != 0);
-	EXIT_NOT_IMPLEMENTED(user_data->srt_size_dw != 0);
+	EXIT_NOT_IMPLEMENTED(user_data->srt_size_dw > user_sgpr_num);
 
 	uint32_t* extended_buffer = nullptr;
 
@@ -1561,7 +1611,25 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				direct_sgprs[info->vertex_attrib_reg + 1] = false;
 				break;
 
-			default: EXIT("unknown usage type: 0x%04" PRIx16 "\n", type);
+			default:
+			{
+				const auto usage =
+				    (code != nullptr ? ShaderGetDirectStorageUsage(*code, reg + user_data_register_base) : ShaderStorageUsage::Unknown);
+				if (usage == ShaderStorageUsage::Unknown)
+				{
+					EXIT("unknown usage type: 0x%04" PRIx16 "\n", type);
+				}
+				ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, reg, bind->storage_buffers.buffers_num, usage, user_sgpr,
+				                       extended_buffer);
+				if (usage == ShaderStorageUsage::ReadWrite)
+				{
+					info->storage_buffers_readwrite++;
+				} else
+				{
+					info->storage_buffers_readonly++;
+				}
+				break;
+			}
 		}
 	}
 
@@ -1620,7 +1688,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	{
 		if (direct_sgprs[i])
 		{
-			ShaderGetDirectSgpr(&bind->direct_sgprs, i, user_sgpr);
+			ShaderGetDirectSgpr(&bind->direct_sgprs, i, user_sgpr, user_data);
 			info->direct_sgprs++;
 		}
 	}
@@ -1839,7 +1907,10 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			data = iter->second;
 		}
 		EXIT_NOT_IMPLEMENTED(data.user_data == nullptr);
-		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(regs->cs_regs.user_sgpr));
+		ShaderCode code;
+		code.SetType(ShaderType::Compute);
+		ShaderParse(reinterpret_cast<const uint32_t*>(regs->cs_regs.data_addr), &code);
+		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(regs->cs_regs.user_sgpr), &code);
 	} else
 	{
 		ShaderParseUsage(regs->cs_regs.data_addr, &usage, &info->bind, regs->cs_user_sgpr, regs->cs_regs.user_sgpr);
@@ -1847,7 +1918,6 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 
 	EXIT_NOT_IMPLEMENTED(usage.samplers > 0);
 	EXIT_NOT_IMPLEMENTED(usage.fetch || usage.vertex_buffer || usage.vertex_attrib);
-	EXIT_NOT_IMPLEMENTED(usage.direct_sgprs > 0);
 
 	ShaderCalcBindingIndices(&info->bind);
 }
