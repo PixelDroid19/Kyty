@@ -3,6 +3,7 @@
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/File.h"
 #include "Kyty/Core/String.h"
+#include "Kyty/Core/Vector.h"
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
@@ -835,6 +836,105 @@ struct Label
 	volatile uint64_t m_value;
 	uint64_t          m_reserved[3];
 };
+
+static bool copy_and_sort_sh_registers(const ShaderRegister* regs, uint32_t num_regs, Vector<ShaderRegister>* sorted)
+{
+	if (regs == nullptr || sorted == nullptr || num_regs == 0 || num_regs > 4096)
+	{
+		return false;
+	}
+
+	for (uint32_t i = 0; i < num_regs; i++)
+	{
+		if (regs[i].offset >= Pm4::SH_NUM)
+		{
+			return false;
+		}
+		sorted->Add(regs[i]);
+	}
+
+	sorted->Sort([](const ShaderRegister& left, const ShaderRegister& right) { return left.offset < right.offset; });
+	return true;
+}
+
+uint32_t GraphicsGetShRegistersPacketSize(const ShaderRegister* regs, uint32_t num_regs)
+{
+	Vector<ShaderRegister> sorted;
+	if (!copy_and_sort_sh_registers(regs, num_regs, &sorted))
+	{
+		return 0;
+	}
+
+	uint32_t groups = 1;
+	for (uint32_t i = 1; i < sorted.Size(); i++)
+	{
+		if (sorted[i].offset != sorted[i - 1].offset + 1)
+		{
+			groups++;
+		}
+	}
+	return num_regs + groups * 2;
+}
+
+uint32_t GraphicsEncodeShRegisters(uint32_t* cmd, uint32_t capacity_dw, const ShaderRegister* regs, uint32_t num_regs)
+{
+	Vector<ShaderRegister> sorted;
+	if (!copy_and_sort_sh_registers(regs, num_regs, &sorted))
+	{
+		return 0;
+	}
+
+	uint32_t required_dw = num_regs + 2;
+	for (uint32_t i = 1; i < sorted.Size(); i++)
+	{
+		if (sorted[i].offset != sorted[i - 1].offset + 1)
+		{
+			required_dw += 2;
+		}
+	}
+	if (cmd == nullptr || capacity_dw < required_dw)
+	{
+		return 0;
+	}
+
+	uint32_t output = 0;
+	uint32_t begin  = 0;
+	while (begin < sorted.Size())
+	{
+		uint32_t end = begin + 1;
+		while (end < sorted.Size() && sorted[end].offset == sorted[end - 1].offset + 1)
+		{
+			end++;
+		}
+
+		const uint32_t value_count = end - begin;
+		cmd[output++]              = KYTY_PM4(value_count + 2, Pm4::IT_SET_SH_REG, 0);
+		cmd[output++]              = sorted[begin].offset;
+		for (uint32_t i = begin; i < end; i++)
+		{
+			cmd[output++] = sorted[i].value;
+		}
+		begin = end;
+	}
+
+	return output;
+}
+
+uint32_t GraphicsEncodeDispatch(uint32_t* cmd, uint32_t capacity_dw, uint32_t group_x, uint32_t group_y, uint32_t group_z,
+                                uint32_t modifier)
+{
+	if (cmd == nullptr || capacity_dw < 5)
+	{
+		return 0;
+	}
+
+	cmd[0] = KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, 0);
+	cmd[1] = group_x;
+	cmd[2] = group_y;
+	cmd[3] = group_z;
+	cmd[4] = (modifier & 0xA038u) | 0x41u;
+	return 5;
+}
 
 static RegisterDefaultInfo g_cx_reg_info1[] = {
     /* 0 */ {0xE24F806D, {{Pm4::CB_COLOR_CONTROL, 0x00cc0010}}},
@@ -1773,6 +1873,58 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, u
 	} else
 	{
 		memcpy(cmd + 2, values, static_cast<size_t>(num_values) * 4);
+	}
+
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegistersDirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs)
+{
+	PRINT_NAME();
+
+	printf("\t buf      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
+	printf("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
+	printf("\t num_regs = %" PRIu32 "\n", num_regs);
+
+	if (buf == nullptr || regs == nullptr || num_regs == 0 || num_regs > 4096)
+	{
+		return nullptr;
+	}
+
+	Vector<ShaderRegister> copied;
+	for (uint32_t i = 0; i < num_regs; i++)
+	{
+		copied.Add({regs[i].offset, regs[i].value});
+	}
+
+	const uint32_t size_dw = GraphicsGetShRegistersPacketSize(copied.GetData(), copied.Size());
+	if (size_dw == 0)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(size_dw);
+	if (cmd == nullptr || GraphicsEncodeShRegisters(cmd, size_dw, copied.GetData(), copied.Size()) != size_dw)
+	{
+		return nullptr;
+	}
+
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsCbDispatch(CommandBuffer* buf, uint32_t group_x, uint32_t group_y, uint32_t group_z, uint32_t modifier)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(5);
+	if (cmd == nullptr || GraphicsEncodeDispatch(cmd, 5, group_x, group_y, group_z, modifier) != 5)
+	{
+		return nullptr;
 	}
 
 	return cmd;
