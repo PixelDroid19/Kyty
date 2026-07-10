@@ -8,11 +8,16 @@
 #include "Kyty/Sys/SysHeap.h"
 #include "Kyty/Sys/SysSync.h"
 
-#include <atomic>
-#include <sys/syscall.h>
-#include <unistd.h>
 #include <cstdlib>
 #include <new>
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#include <pthread.h>
+#ifndef __APPLE__
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+#endif
 
 namespace Kyty::Core {
 
@@ -42,6 +47,20 @@ static SysCS*        g_mem_cs          = nullptr;
 static bool          g_mem_initialized = false;
 static sys_heap_id_t g_default_heap    = nullptr;
 static size_t        g_mem_max_size    = 0;
+static MemoryAllocDetail::ThreadDomainRegistry g_guest_thread_domains;
+
+static uint64_t mem_current_thread_token()
+{
+#ifdef __APPLE__
+	uint64_t token = 0;
+	EXIT_IF(pthread_threadid_np(nullptr, &token) != 0);
+	return token;
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return static_cast<uint64_t>(GetCurrentThreadId());
+#else
+	return static_cast<uint64_t>(::syscall(SYS_gettid));
+#endif
+}
 
 #ifdef MEM_TRACKER
 
@@ -62,17 +81,11 @@ struct MemBlockInfoT
 };
 
 #ifdef __APPLE__
-// NOT a C++ thread_local: under Rosetta 2 a thread_local resolves through the gs
-// segment (macOS TSD), which is invalid on a guest thread, so the access faults.
-// Keep the recursion guard per-thread (needed so the tracker's own allocations
-// don't recurse) using a segment-free slot keyed by the kernel thread id.
-static int  g_mem_depth_slots[256] = {0};
-static bool g_mem_tracker_enabled  = true;
-static int& mem_depth()
-{
-	return g_mem_depth_slots[static_cast<uint64_t>(::syscall(SYS_thread_selfid)) & 0xFFu];
-}
-#define g_mem_depth mem_depth()
+// Guest execution can replace the TLS segment expected by native C++ code.
+// pthread_threadid_np returns the complete kernel thread token without compiler
+// TLS, while RecursionState avoids both hashed slots and tracker self-recursion.
+static MemoryAllocDetail::RecursionState g_mem_recursion_state;
+static bool                              g_mem_tracker_enabled = true;
 #else
 thread_local int  g_mem_depth           = 0;
 thread_local bool g_mem_tracker_enabled = true;
@@ -100,14 +113,23 @@ public:
 		g_mem_cs->Enter();
 
 #ifdef MEM_TRACKER
+	#ifdef __APPLE__
+		m_thread_token = mem_current_thread_token();
+		g_mem_recursion_state.Enter(m_thread_token);
+	#else
 		g_mem_depth++;
+	#endif
 #endif
 	}
 
 	~MemLock()
 	{
 #ifdef MEM_TRACKER
+	#ifdef __APPLE__
+		g_mem_recursion_state.Leave(m_thread_token);
+	#else
 		g_mem_depth--;
+	#endif
 #endif
 
 		g_mem_cs->Leave();
@@ -119,8 +141,17 @@ public:
 	// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
 	[[nodiscard]] bool IsRecursive() const
 	{
+	#ifdef __APPLE__
+		return g_mem_recursion_state.Depth() > 1;
+	#else
 		return g_mem_depth > 1;
+	#endif
 	}
+#endif
+
+private:
+#if defined(MEM_TRACKER) && defined(__APPLE__)
+	uint64_t m_thread_token = 0;
 #endif
 };
 
@@ -188,27 +219,48 @@ static void mem_init()
 	g_pattern_id = static_cast<int>(rand() % g_mem_patterns.Size()); // NOLINT(cert-msc30-c,cert-msc50-cpp)
 #endif
 
-#ifdef MEM_TRACKER
-	g_mem_depth++;
-
-#endif
 	// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
 	g_mem_cs = new (std::malloc(sizeof(SysCS))) SysCS;
 	g_mem_cs->Init();
 #ifdef MEM_TRACKER
+	#ifdef __APPLE__
+	const auto init_thread_token = mem_current_thread_token();
+	g_mem_recursion_state.Enter(init_thread_token);
+	#else
+	g_mem_depth++;
+	#endif
 	g_mem_map = new Hashmap<uintptr_t, MemBlockInfoT*>;
 #endif
 
 	g_default_heap = sys_heap_create();
 
 #ifdef MEM_TRACKER
+	#ifdef __APPLE__
+	g_mem_recursion_state.Leave(init_thread_token);
+	#else
 	g_mem_depth--;
+	#endif
 #endif
 }
 
 void core_memory_init()
 {
 	mem_init();
+}
+
+void mem_guest_thread_enter()
+{
+	EXIT_IF(!g_guest_thread_domains.Add(mem_current_thread_token()));
+}
+
+void mem_guest_thread_leave()
+{
+	EXIT_IF(!g_guest_thread_domains.Remove(mem_current_thread_token()));
+}
+
+bool mem_guest_thread_is_active()
+{
+	return g_guest_thread_domains.Contains(mem_current_thread_token());
 }
 
 void* mem_alloc_check_alignment(void* ptr)
@@ -240,6 +292,23 @@ void* mem_alloc(size_t size)
 	}
 
 	mem_init();
+	if (mem_guest_thread_is_active())
+	{
+		// Guest execution may replace the native TLS segment or leave through a
+		// guest control transfer while native code is mid-call. Keep its HLE
+		// allocations out of the host-only stack-tracing tracker and never take the
+		// tracker lock (a guest thread could exit while holding it). The system
+		// allocator is thread-safe on every supported platform.
+		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
+		return mem_alloc_check_alignment(std::malloc(size));
+	}
+#if defined(MEM_TRACKER) && defined(__APPLE__)
+	if (g_mem_recursion_state.IsOwnedBy(mem_current_thread_token()))
+	{
+		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
+		return mem_alloc_check_alignment(std::malloc(size));
+	}
+#endif
 	MemLock lock;
 
 #ifdef MEM_TRACKER
@@ -253,6 +322,7 @@ void* mem_alloc(size_t size)
 		KYTY_MDBG("- std alloc -", r);
 		return mem_alloc_check_alignment(r);
 	}
+
 #endif
 
 #ifdef MEM_TRACKER
@@ -303,6 +373,21 @@ void* mem_realloc(void* ptr, size_t size)
 	}
 
 	mem_init();
+	if (mem_guest_thread_is_active())
+	{
+		// See mem_alloc: guest domain reallocations must not enter the tracker or
+		// take its lock. A block allocated in the same domain came from the system
+		// allocator, so std::realloc is the matching, thread-safe operation.
+		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
+		return mem_alloc_check_alignment(std::realloc(ptr, size));
+	}
+#if defined(MEM_TRACKER) && defined(__APPLE__)
+	if (g_mem_recursion_state.IsOwnedBy(mem_current_thread_token()))
+	{
+		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
+		return mem_alloc_check_alignment(std::realloc(ptr, size));
+	}
+#endif
 	MemLock lock;
 
 #ifdef MEM_TRACKER
@@ -317,6 +402,12 @@ void* mem_realloc(void* ptr, size_t size)
 		KYTY_MDBG("- std realloc old -", ptr);
 		KYTY_MDBG("- std realloc new -", ptr2);
 		return mem_alloc_check_alignment(ptr2);
+	}
+
+	if (ptr != nullptr && g_mem_map->Find(reinterpret_cast<uintptr_t>(ptr)) == nullptr)
+	{
+		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
+		return mem_alloc_check_alignment(std::realloc(ptr, size));
 	}
 #endif
 
@@ -400,6 +491,24 @@ void mem_free(void* ptr)
 
 	EXIT_IF(!g_mem_initialized);
 
+	if (mem_guest_thread_is_active())
+	{
+		// See mem_alloc: guest domain frees must not enter the tracker or take its
+		// lock. Blocks reaching mem_free on a guest thread were allocated in the
+		// same domain from the system allocator, so std::free is the matching,
+		// thread-safe operation and cannot orphan the tracker mutex.
+		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
+		std::free(ptr);
+		return;
+	}
+#if defined(MEM_TRACKER) && defined(__APPLE__)
+	if (g_mem_recursion_state.IsOwnedBy(mem_current_thread_token()))
+	{
+		// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
+		std::free(ptr);
+		return;
+	}
+#endif
 	MemLock lock;
 
 #ifdef MEM_TRACKER

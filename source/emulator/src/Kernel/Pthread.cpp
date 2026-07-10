@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DateTime.h"
+#include "Kyty/Core/MemoryAlloc.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/String.h"
@@ -2026,6 +2027,8 @@ static void cleanup_thread(void* arg)
 		thread_dtors();
 	}
 
+	Core::mem_guest_thread_leave();
+
 	thread->almost_done = true;
 }
 
@@ -2037,6 +2040,7 @@ static void* run_thread(void* arg)
 	thread->unique_id = Core::Thread::GetThreadIdUnique();
 
 	g_pthread_self = thread;
+	Core::mem_guest_thread_enter();
 
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
 	pthread_cleanup_push(cleanup_thread, thread);
