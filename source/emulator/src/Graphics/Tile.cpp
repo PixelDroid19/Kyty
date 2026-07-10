@@ -1198,16 +1198,54 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		}
 	}
 
-	if (total_size != nullptr && total_size->size == 0)
 	{
-		Core::StringList list;
-		list.Add(String::FromPrintf("format = %u", format));
-		list.Add(String::FromPrintf("width  = %u", width));
-		list.Add(String::FromPrintf("height = %u", height));
-		list.Add(String::FromPrintf("pitch  = %u", pitch));
-		list.Add(String::FromPrintf("levels = %u", levels));
-		list.Add(String::FromPrintf("tile   = %u", tile));
-		EXIT("unknown format:\n%s\n", list.Concat(U'\n').C_Str());
+		// Reaching here means the precomputed table has no entry for this texture
+		// (a matching entry would have returned above). Fall back to a generic
+		// linear size derived from the format's bytes-per-texel, summed over mip
+		// levels, and fill whichever outputs the caller requested.
+		uint32_t bpp = 4; // default: 32-bit texel (e.g. RGBA8, format 56)
+		switch (format)
+		{
+			case 56: bpp = 4; break; // R8G8B8A8
+			default:
+				printf("Tile: no size table for format %u, assuming %u bytes/texel\n", format, bpp);
+				break;
+		}
+
+		auto align_up = [](uint64_t v, uint64_t a) -> uint64_t { return (v + a - 1u) & ~(a - 1u); };
+
+		// Linear layout: pitch already carries the row stride from the caller. Keep
+		// the estimate tight (no coarse dimension rounding) so it does not swallow
+		// neighbouring buffers in the GPU-memory overlap tracker.
+		uint32_t row = (pitch != 0 ? pitch : width);
+		uint64_t total = 0;
+		for (uint32_t l = 0; l < levels; l++)
+		{
+			uint32_t lw  = row >> l;
+			uint32_t lh  = height >> l;
+			uint64_t lsz = static_cast<uint64_t>(lw == 0 ? 1 : lw) * (lh == 0 ? 1 : lh) * bpp;
+			if (level_sizes != nullptr)
+			{
+				level_sizes[l].offset = total;
+				level_sizes[l].size   = lsz;
+			}
+			total += lsz;
+		}
+
+		if (total_size != nullptr)
+		{
+			total_size->size  = align_up(total, 256);
+			total_size->align = 256;
+		}
+
+		if (padded_size != nullptr)
+		{
+			for (uint32_t l = 0; l < levels; l++)
+			{
+				padded_size[l].width  = (width >> l) == 0 ? 1 : (width >> l);
+				padded_size[l].height = (height >> l) == 0 ? 1 : (height >> l);
+			}
+		}
 	}
 }
 
