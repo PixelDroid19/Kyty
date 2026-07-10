@@ -82,6 +82,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("h9z6+0hEydk", Gen5::GraphicsSuspendPoint);
 
 	LIB_FUNC("n2fD4A+pb+g", Gen5::GraphicsCbSetShRegisterRangeDirect);
+	LIB_FUNC("UZbQjYAwwXM", Gen5::GraphicsCbSetShRegistersDirect);
+	LIB_FUNC("k3GhuSNmBLU", Gen5::GraphicsCbDispatch);
 	LIB_FUNC("wr23dPKyWc0", Gen5::GraphicsCbReleaseMem);
 	LIB_FUNC("TRO721eVt4g", Gen5::GraphicsDcbResetQueue);
 	LIB_FUNC("MWiElSNE8j8", Gen5::GraphicsDcbWaitUntilSafeForRendering);

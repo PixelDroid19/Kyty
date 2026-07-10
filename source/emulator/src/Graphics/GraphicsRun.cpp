@@ -2670,7 +2670,12 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_direct)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0071020);
+	const bool standard = (cmd_id == KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, 0));
+	const bool custom   = (cmd_id == 0xC0071020);
+
+	EXIT_NOT_IMPLEMENTED(!standard && !custom);
+	EXIT_NOT_IMPLEMENTED(standard && dw < 5);
+	EXIT_NOT_IMPLEMENTED(custom && dw < 9);
 
 	uint32_t thread_group_x = buffer[0];
 	uint32_t thread_group_y = buffer[1];
@@ -2679,7 +2684,7 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_direct)
 
 	cp->DispatchDirect(thread_group_x, thread_group_y, thread_group_z, mode);
 
-	return 8;
+	return (standard ? 4 : 8);
 }
 
 KYTY_CP_OP_PARSER(cp_op_dispatch_reset)
@@ -4241,6 +4246,7 @@ static void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_ACQUIRE_MEM]             = cp_op_acquire_mem;
 	g_cp_op_func[Pm4::IT_SET_CONTEXT_REG]         = cp_op_set_context_reg;
 	g_cp_op_func[Pm4::IT_SET_SH_REG]              = cp_op_set_shader_reg;
+	g_cp_op_func[Pm4::IT_DISPATCH_DIRECT]          = cp_op_dispatch_direct;
 	g_cp_op_func[Pm4::IT_SET_UCONFIG_REG]         = cp_op_set_uconfig_reg;
 	g_cp_op_func[Pm4::IT_WRITE_CONST_RAM]         = cp_op_write_const_ram;
 	g_cp_op_func[Pm4::IT_DUMP_CONST_RAM]          = cp_op_dump_const_ram;

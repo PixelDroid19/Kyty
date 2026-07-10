@@ -308,20 +308,20 @@ git commit -m "kernel: implement checked direct memory release"
   `GraphicsCbDispatch` for standard `IT_DISPATCH_DIRECT`, and a shared dispatch
   decoder accepting both standard and existing custom packet envelopes.
 
-- [ ] **Step 1: Add failing packet-encoder tests**
+- [x] **Step 1: Add failing packet-encoder tests**
 
 Test pure helpers that encode into caller-provided DWORD spans. For contiguous
 SH registers `{0x20c, A}, {0x20d, B}`, assert a four-DWORD `IT_SET_SH_REG`
 packet. For dispatch `(2, 3, 4, 0)`, assert five DWORDs and mode `0x41` after
 applying the verified modifier mask.
 
-- [ ] **Step 2: Verify the focused test fails**
+- [x] **Step 2: Verify the focused test fails**
 
 Run: `_build_macos/fc_script "{kyty_run_tests()}" --gtest_filter=EmulatorGraphicsPackets.*`
 
 Expected: missing encoder/helper symbols.
 
-- [ ] **Step 3: Implement packet helpers and HLE wrappers**
+- [x] **Step 3: Implement packet helpers and HLE wrappers**
 
 The SH helper sorts a copied register list, groups only consecutive offsets,
 and emits one `IT_SET_SH_REG` packet per group. It rejects zero entries,
@@ -340,13 +340,13 @@ cmd[4] = (modifier & 0xA038u) | 0x41u;
 
 Register the confirmed NIDs in `LibGraphicsDriver.cpp`.
 
-- [ ] **Step 4: Centralize dispatch parsing**
+- [x] **Step 4: Centralize dispatch parsing**
 
 Register `IT_DISPATCH_DIRECT` in `g_cp_op_func`. Make the standard and custom
 envelopes validate their own header/length and call one function that forwards
 the four decoded values to `CommandProcessor::DispatchDirect`.
 
-- [ ] **Step 5: Run focused tests and build**
+- [x] **Step 5: Run focused tests and build**
 
 Run:
 

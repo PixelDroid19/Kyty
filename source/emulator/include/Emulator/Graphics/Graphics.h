@@ -91,8 +91,15 @@ int KYTY_SYSV_ABI   GraphicsCreateInterpolantMapping(ShaderRegister* regs, const
 int KYTY_SYSV_ABI   GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t* cmd, int type);
 int KYTY_SYSV_ABI   GraphicsSuspendPoint();
 
+uint32_t GraphicsGetShRegistersPacketSize(const ShaderRegister* regs, uint32_t num_regs);
+uint32_t GraphicsEncodeShRegisters(uint32_t* cmd, uint32_t capacity_dw, const ShaderRegister* regs, uint32_t num_regs);
+uint32_t GraphicsEncodeDispatch(uint32_t* cmd, uint32_t capacity_dw, uint32_t group_x, uint32_t group_y, uint32_t group_z,
+                                uint32_t modifier);
+
 uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, uint32_t offset, const uint32_t* values,
                                                            uint32_t num_values);
+uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegistersDirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs);
+uint32_t* KYTY_SYSV_ABI GraphicsCbDispatch(CommandBuffer* buf, uint32_t group_x, uint32_t group_y, uint32_t group_z, uint32_t modifier);
 uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action, uint16_t gcr_cntl, uint8_t dst, uint8_t cache_policy,
                                              const volatile Label* address, uint8_t data_sel, uint64_t data, uint16_t gds_offset,
                                              uint16_t gds_size, uint8_t interrupt, uint32_t interrupt_ctx_id);

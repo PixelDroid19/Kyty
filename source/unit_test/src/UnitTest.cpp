@@ -8,6 +8,7 @@ UT_LINK(CoreMSpace);
 UT_LINK(CoreDateTime);
 UT_LINK(EmulatorGraphicsState);
 UT_LINK(EmulatorKernelMemory);
+UT_LINK(EmulatorGraphicsPackets);
 
 KYTY_SUBSYSTEM_INIT(UnitTest)
 {
