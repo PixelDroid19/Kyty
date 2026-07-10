@@ -47,6 +47,11 @@ KYTY_HASH_DEFINE_INT(int64_t);
 KYTY_HASH_DEFINE_INT(uint64_t);
 KYTY_HASH_DEFINE_INT(char16_t);
 KYTY_HASH_DEFINE_INT(char32_t);
+#ifdef __APPLE__
+// On LP64 Darwin, unsigned long (size_t/uintptr_t) is a distinct type from uint64_t
+KYTY_HASH_DEFINE_INT(long);
+KYTY_HASH_DEFINE_INT(unsigned long);
+#endif
 KYTY_HASH_DEFINE_PTR(int8_t*);
 KYTY_HASH_DEFINE_PTR(uint8_t*);
 KYTY_HASH_DEFINE_PTR(int16_t*);

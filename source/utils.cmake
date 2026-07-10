@@ -86,7 +86,10 @@ set(KYTY_WARNINGS_ARE_ERRORS ON)
 set(KYTY_C_FLAGS "")
 set(KYTY_CPP_FLAGS "")
 
-SET(CMAKE_NINJA_FORCE_RESPONSE_FILE 1 CACHE INTERNAL "")
+if(NOT APPLE)
+	# macOS ar/ranlib do not understand @response files
+	SET(CMAKE_NINJA_FORCE_RESPONSE_FILE 1 CACHE INTERNAL "")
+endif()
 
 if(MSVC)
 	if(CMAKE_CXX_FLAGS MATCHES "/W[0-4]")
@@ -117,6 +120,18 @@ if(MSVC)
 
 	set(KYTY_C_FLAGS "${KYTY_CPP_FLAGS}")
 	
+elseif(MACOS)
+
+	set(KYTY_WARNINGS_ARE_ERRORS OFF)
+	set(KYTY_CPP_FLAGS "${KYTY_CPP_FLAGS} -fno-rtti -fno-exceptions -fcolor-diagnostics -g -fno-strict-aliasing -fno-omit-frame-pointer -Wall -fmessage-length=0")
+
+	add_link_options("-g")
+
+	unset(CMAKE_CXX_STANDARD_LIBRARIES CACHE)
+	unset(CMAKE_C_STANDARD_LIBRARIES CACHE)
+
+	set(KYTY_C_FLAGS "${KYTY_CPP_FLAGS}")
+
 elseif(MINGW OR LINUX)
 
 	if (CLANG)

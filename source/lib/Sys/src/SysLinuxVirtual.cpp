@@ -16,6 +16,11 @@
 #include <pthread.h>
 #include <sys/mman.h>
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
+
 // IWYU pragma: no_include <asm/mman-common.h>
 // IWYU pragma: no_include <asm/mman.h>
 // IWYU pragma: no_include <bits/pthread_types.h>
@@ -47,7 +52,7 @@ void sys_virtual_init()
 	pthread_mutexattr_t attr {};
 
 	pthread_mutexattr_init(&attr);
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
 	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_FAST_NP);
 #else
 	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_NORMAL);
@@ -194,6 +199,31 @@ uint64_t sys_virtual_alloc_aligned(uint64_t address, uint64_t size, VirtualMemor
 	return ret_addr;
 }
 
+#ifdef __APPLE__
+
+[[maybe_unused]] static bool is_mmaped(void* ptr, size_t length)
+{
+	// Returns true if any existing mapping overlaps [ptr, ptr + length)
+	auto                           address     = reinterpret_cast<mach_vm_address_t>(ptr);
+	mach_vm_size_t                 region_size = 0;
+	vm_region_basic_info_data_64_t info {};
+	mach_msg_type_number_t         count       = VM_REGION_BASIC_INFO_COUNT_64;
+	mach_port_t                    object_name = MACH_PORT_NULL;
+
+	kern_return_t kr =
+	    mach_vm_region(mach_task_self(), &address, &region_size, VM_REGION_BASIC_INFO_64,
+	                   reinterpret_cast<vm_region_info_t>(&info), &count, &object_name);
+
+	if (kr != KERN_SUCCESS)
+	{
+		return false;
+	}
+
+	return address < reinterpret_cast<mach_vm_address_t>(ptr) + length;
+}
+
+#else
+
 [[maybe_unused]] static bool is_mmaped(void* ptr, size_t length)
 {
 	FILE* file = fopen("/proc/self/maps", "r");
@@ -226,6 +256,8 @@ uint64_t sys_virtual_alloc_aligned(uint64_t address, uint64_t size, VirtualMemor
 	return ret;
 }
 
+#endif
+
 bool sys_virtual_alloc_fixed(uint64_t address, uint64_t size, VirtualMemory::Mode mode)
 {
 	EXIT_IF(g_allocs == nullptr);
@@ -236,6 +268,12 @@ bool sys_virtual_alloc_fixed(uint64_t address, uint64_t size, VirtualMemory::Mod
 #ifdef KYTY_FIXED_NOREPLACE
 	// NOLINTNEXTLINE
 	void* ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANON, -1, 0);
+#elif defined(__APPLE__)
+	// macOS ignores a plain address hint (only MAP_FIXED honours a specific
+	// address) and has no MAP_FIXED_NOREPLACE. The PS5 guest address space is
+	// managed by Kyty, so the requested address is free on the host; MAP_FIXED
+	// there is safe. The return value is validated against `addr` below.
+	void* ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
 #else
 	// NOLINTNEXTLINE
 	void* ptr = (is_mmaped(reinterpret_cast<void*>(addr), size)

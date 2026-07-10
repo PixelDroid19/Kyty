@@ -24,7 +24,12 @@ public:
 		m_check_ptr = this;
 
 		pthread_mutexattr_t attr {};
+		pthread_mutexattr_init(&attr);
+#ifdef __APPLE__
+		pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+#else
 		pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE_NP);
+#endif
 		pthread_mutex_init(&m_mutex, &attr);
 		pthread_mutexattr_destroy(&attr);
 	}
