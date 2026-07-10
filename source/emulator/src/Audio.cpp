@@ -1529,6 +1529,7 @@ enum class Ngs2RackType
 	Submixer,
 	Mastering,
 	Reverb,
+	CustomSampler,
 	CustomSubmixer,
 };
 
@@ -1615,6 +1616,23 @@ struct Ngs2SamplerVoiceState
 static Ngs2Internal*     g_ngs_list   = nullptr;
 static Ngs2RackInternal* g_racks_list = nullptr;
 
+static const Ngs2RackOption* Ngs2ResolveRackOption(uint32_t rack_id, const Ngs2RackOption* option,
+                                                   Ngs2MasteringRackOption* default_mastering)
+{
+	if (option != nullptr)
+	{
+		return option;
+	}
+	if (rack_id != 0x3000 || default_mastering == nullptr)
+	{
+		return nullptr;
+	}
+
+	default_mastering->rack_option.size       = sizeof(Ngs2MasteringRackOption);
+	default_mastering->rack_option.max_voices = 1;
+	return &default_mastering->rack_option;
+}
+
 int KYTY_SYSV_ABI Ngs2SystemQueryBufferSize(const Ngs2SystemOption* option, Ngs2ContextBufferInfo* buffer_info)
 {
 	PRINT_NAME();
@@ -1695,8 +1713,11 @@ int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(option == nullptr);
 	EXIT_NOT_IMPLEMENTED(buffer_info == nullptr);
+
+	Ngs2MasteringRackOption default_mastering {};
+	option = Ngs2ResolveRackOption(rack_id, option, &default_mastering);
+	EXIT_NOT_IMPLEMENTED(option == nullptr);
 
 	printf("\t rack_id    = 0x%" PRIx32 "\n", rack_id);
 	printf("\t max_voices = %u\n", option->max_voices);
@@ -1755,12 +1776,15 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(option == nullptr);
 	EXIT_NOT_IMPLEMENTED(buffer_info == nullptr);
 	EXIT_NOT_IMPLEMENTED(handle == nullptr);
 	EXIT_NOT_IMPLEMENTED(buffer_info->host_buffer == nullptr);
 	EXIT_NOT_IMPLEMENTED(buffer_info->host_buffer_size == 0);
 	EXIT_NOT_IMPLEMENTED(system_handle == 0);
+
+	Ngs2MasteringRackOption default_mastering {};
+	option = Ngs2ResolveRackOption(rack_id, option, &default_mastering);
+	EXIT_NOT_IMPLEMENTED(option == nullptr);
 
 	EXIT_NOT_IMPLEMENTED(option->size < sizeof(Ngs2RackOption));
 
@@ -1802,6 +1826,14 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 			EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2MasteringRackOption));
 			rack->option.mastering = *reinterpret_cast<const Ngs2MasteringRackOption*>(option);
 			rack->type             = Ngs2RackType::Mastering;
+			break;
+		case 0x4001:
+			// The Gen5 custom-sampler option extends the common ABI to 0x518
+			// bytes. Only the common prefix is consumed here; the undocumented
+			// extension remains opaque until a supported operation needs it.
+			EXIT_NOT_IMPLEMENTED(option->size != 0x518);
+			rack->option.common = *option;
+			rack->type          = Ngs2RackType::CustomSampler;
 			break;
 		case 0x4002:
 			EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2CustomSubmixerRackOption));
