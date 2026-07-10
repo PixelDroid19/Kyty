@@ -888,6 +888,9 @@ constexpr uint32_t SPI_SHADER_PGM_HI_LS            = 0x149;
 constexpr uint32_t COMPUTE_START_X                 = 0x204;
 constexpr uint32_t COMPUTE_START_Y                 = 0x205;
 constexpr uint32_t COMPUTE_START_Z                 = 0x206;
+constexpr uint32_t COMPUTE_NUM_THREAD_X            = 0x207;
+constexpr uint32_t COMPUTE_NUM_THREAD_Y            = 0x208;
+constexpr uint32_t COMPUTE_NUM_THREAD_Z            = 0x209;
 constexpr uint32_t COMPUTE_PGM_LO                  = 0x20C;
 constexpr uint32_t COMPUTE_PGM_HI                  = 0x20D;
 
@@ -926,6 +929,7 @@ constexpr uint32_t COMPUTE_DESTINATION_EN_SE3 = 0x21A;
 constexpr uint32_t COMPUTE_USER_ACCUM_0       = 0x224;
 constexpr uint32_t COMPUTE_PGM_RSRC3          = 0x228;
 constexpr uint32_t COMPUTE_SHADER_CHKSUM      = 0x22A;
+constexpr uint32_t COMPUTE_SHADER_CHKSUM_HI   = 0x22B;
 constexpr uint32_t COMPUTE_USER_DATA_0        = 0x240;
 constexpr uint32_t COMPUTE_USER_DATA_15       = 0x24F;
 constexpr uint32_t COMPUTE_DISPATCH_TUNNEL    = 0x27D;

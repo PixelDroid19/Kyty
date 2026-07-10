@@ -2186,6 +2186,28 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_z)
 	return 2;
 }
 
+// Shared decoders for the compute program resource registers, used both by the
+// packed shader-setup packet and by the individual COMPUTE_PGM_RSRC* registers a
+// guest-built command buffer writes.
+static void decode_compute_pgm_rsrc1(HW::CsStageRegisters& r, uint32_t value)
+{
+	r.vgprs = (value >> Pm4::COMPUTE_PGM_RSRC1_VGPRS_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_VGPRS_MASK;
+	r.sgprs = (value >> Pm4::COMPUTE_PGM_RSRC1_SGPRS_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_SGPRS_MASK;
+	r.bulky = (value >> Pm4::COMPUTE_PGM_RSRC1_BULKY_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_BULKY_MASK;
+}
+
+static void decode_compute_pgm_rsrc2(HW::CsStageRegisters& r, uint32_t value)
+{
+	r.scratch_en     = (value >> Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_MASK;
+	r.user_sgpr      = (value >> Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_MASK;
+	r.tgid_x_en      = (value >> Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_MASK;
+	r.tgid_y_en      = (value >> Pm4::COMPUTE_PGM_RSRC2_TGID_Y_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TGID_Y_EN_MASK;
+	r.tgid_z_en      = (value >> Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_MASK;
+	r.tg_size_en     = (value >> Pm4::COMPUTE_PGM_RSRC2_TG_SIZE_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TG_SIZE_EN_MASK;
+	r.tidig_comp_cnt = (value >> Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_MASK;
+	r.lds_size       = (value >> Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_MASK;
+}
+
 KYTY_HW_SH_PARSER(hw_sh_set_cs_shader)
 {
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC017101C);
@@ -2194,25 +2216,77 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_shader)
 
 	HW::CsStageRegisters r {};
 
-	r.data_addr      = (static_cast<uint64_t>(buffer[1]) << 8u) | (static_cast<uint64_t>(buffer[2]) << 40u);
-	r.vgprs          = (buffer[3] >> Pm4::COMPUTE_PGM_RSRC1_VGPRS_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_VGPRS_MASK;
-	r.sgprs          = (buffer[3] >> Pm4::COMPUTE_PGM_RSRC1_SGPRS_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_SGPRS_MASK;
-	r.bulky          = (buffer[3] >> Pm4::COMPUTE_PGM_RSRC1_BULKY_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_BULKY_MASK;
-	r.scratch_en     = (buffer[4] >> Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_MASK;
-	r.user_sgpr      = (buffer[4] >> Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_MASK;
-	r.tgid_x_en      = (buffer[4] >> Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_MASK;
-	r.tgid_y_en      = (buffer[4] >> Pm4::COMPUTE_PGM_RSRC2_TGID_Y_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TGID_Y_EN_MASK;
-	r.tgid_z_en      = (buffer[4] >> Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_MASK;
-	r.tg_size_en     = (buffer[4] >> Pm4::COMPUTE_PGM_RSRC2_TG_SIZE_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TG_SIZE_EN_MASK;
-	r.tidig_comp_cnt = (buffer[4] >> Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_MASK;
-	r.lds_size       = (buffer[4] >> Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_MASK;
-	r.num_thread_x   = buffer[5];
-	r.num_thread_y   = buffer[6];
-	r.num_thread_z   = buffer[7];
+	r.data_addr = (static_cast<uint64_t>(buffer[1]) << 8u) | (static_cast<uint64_t>(buffer[2]) << 40u);
+	decode_compute_pgm_rsrc1(r, buffer[3]);
+	decode_compute_pgm_rsrc2(r, buffer[4]);
+	r.num_thread_x = buffer[5];
+	r.num_thread_y = buffer[6];
+	r.num_thread_z = buffer[7];
 
 	cp->GetShCtx()->SetCsShader(r, shader_modifier);
 
 	return 24;
+}
+
+// COMPUTE_PGM_LO/HI: shader code address, written as individual registers.
+KYTY_HW_SH_PARSER(hw_sh_set_cs_pgm)
+{
+	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
+	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::COMPUTE_PGM_LO || reg_num != 2);
+
+	auto& r     = cp->GetShCtx()->CsRegs();
+	r.data_addr = (static_cast<uint64_t>(buffer[0]) << 8u) | (static_cast<uint64_t>(buffer[1]) << 40u);
+
+	return reg_num;
+}
+
+// COMPUTE_PGM_RSRC1/RSRC2: compute program resource descriptors.
+KYTY_HW_SH_PARSER(hw_sh_set_cs_rsrc)
+{
+	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
+
+	auto& r = cp->GetShCtx()->CsRegs();
+	for (uint32_t i = 0; i < reg_num; i++)
+	{
+		const uint32_t offset = cmd_offset + i;
+		switch (offset)
+		{
+			case Pm4::COMPUTE_PGM_RSRC1: decode_compute_pgm_rsrc1(r, buffer[i]); break;
+			case Pm4::COMPUTE_PGM_RSRC2: decode_compute_pgm_rsrc2(r, buffer[i]); break;
+			case Pm4::COMPUTE_PGM_RSRC3: r.rsrc3 = buffer[i]; break;
+			case Pm4::COMPUTE_SHADER_CHKSUM:
+				r.chksum = (r.chksum & 0xffffffff00000000ull) | static_cast<uint64_t>(buffer[i]);
+				break;
+			case Pm4::COMPUTE_SHADER_CHKSUM_HI:
+				r.chksum = (r.chksum & 0x00000000ffffffffull) | (static_cast<uint64_t>(buffer[i]) << 32u);
+				break;
+			default: EXIT("unexpected compute rsrc register 0x%08" PRIx32 "\n", offset);
+		}
+	}
+
+	return reg_num;
+}
+
+KYTY_HW_SH_PARSER(hw_sh_set_cs_num_thread)
+{
+	// COMPUTE_NUM_THREAD_X/Y/Z, written as a run of individual registers by a
+	// guest-built command buffer. Decode each component into the compute state.
+	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
+
+	for (uint32_t i = 0; i < reg_num; i++)
+	{
+		const uint32_t offset = cmd_offset + i;
+		const uint32_t value  = buffer[i];
+		switch (offset)
+		{
+			case Pm4::COMPUTE_NUM_THREAD_X: cp->GetShCtx()->SetCsNumThreadX(value); break;
+			case Pm4::COMPUTE_NUM_THREAD_Y: cp->GetShCtx()->SetCsNumThreadY(value); break;
+			case Pm4::COMPUTE_NUM_THREAD_Z: cp->GetShCtx()->SetCsNumThreadZ(value); break;
+			default: EXIT("unexpected compute thread register 0x%08" PRIx32 "\n", offset);
+		}
+	}
+
+	return reg_num;
 }
 
 KYTY_HW_SH_PARSER(hw_sh_set_cs_user_sgpr)
@@ -4204,6 +4278,17 @@ static void graphics_init_jmp_tables()
 		g_hw_sh_func[Pm4::COMPUTE_USER_DATA_0 + slot * 1]       = hw_sh_set_cs_user_sgpr;
 		g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_GS_0 + slot * 1] = hw_sh_set_gs_user_sgpr;
 	}
+
+	g_hw_sh_func[Pm4::COMPUTE_NUM_THREAD_X] = hw_sh_set_cs_num_thread;
+	g_hw_sh_func[Pm4::COMPUTE_NUM_THREAD_Y] = hw_sh_set_cs_num_thread;
+	g_hw_sh_func[Pm4::COMPUTE_NUM_THREAD_Z] = hw_sh_set_cs_num_thread;
+	g_hw_sh_func[Pm4::COMPUTE_PGM_LO]       = hw_sh_set_cs_pgm;
+	g_hw_sh_func[Pm4::COMPUTE_PGM_HI]       = hw_sh_set_cs_pgm;
+	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC1]    = hw_sh_set_cs_rsrc;
+	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC2]    = hw_sh_set_cs_rsrc;
+	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC3]    = hw_sh_set_cs_rsrc;
+	g_hw_sh_func[Pm4::COMPUTE_SHADER_CHKSUM]    = hw_sh_set_cs_rsrc;
+	g_hw_sh_func[Pm4::COMPUTE_SHADER_CHKSUM_HI] = hw_sh_set_cs_rsrc;
 
 	for (auto& func: g_hw_uc_func)
 	{

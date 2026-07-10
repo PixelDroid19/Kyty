@@ -499,6 +499,13 @@ struct CsStageRegisters
 	uint8_t  tg_size_en     = 0;
 	uint8_t  tidig_comp_cnt = 0;
 	uint8_t  lds_size       = 0;
+	// Wave-packing hints (shared VGPR count, instruction prefetch). Recorded for
+	// completeness; the GCN->SPIR-V path re-derives register allocation, so these
+	// do not affect the computed result.
+	uint32_t rsrc3          = 0;
+	// Shader identity checksum. The shader is located by its code address, so this
+	// is recorded for identification only.
+	uint64_t chksum         = 0;
 };
 
 struct EsStageRegisters
@@ -962,6 +969,17 @@ public:
 		m_cs.cs_regs            = cs_regs;
 		m_cs.cs_shader_modifier = shader_modifier;
 	}
+
+	// Compute threadgroup dimensions written as individual COMPUTE_NUM_THREAD_*
+	// registers by guest-built command buffers (as opposed to the packed shader
+	// setup packet).
+	void SetCsNumThreadX(uint32_t value) { m_cs.cs_regs.num_thread_x = value; }
+	void SetCsNumThreadY(uint32_t value) { m_cs.cs_regs.num_thread_y = value; }
+	void SetCsNumThreadZ(uint32_t value) { m_cs.cs_regs.num_thread_z = value; }
+
+	// Mutable access to the compute register file for the standard-PM4 register
+	// decoders, which fill it field by field instead of through the packed packet.
+	CsStageRegisters& CsRegs() { return m_cs.cs_regs; }
 
 	void SetVsUserSgpr(uint32_t id, uint32_t value, UserSgprType type)
 	{
