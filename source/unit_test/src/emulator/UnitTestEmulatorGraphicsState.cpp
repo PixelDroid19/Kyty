@@ -5,6 +5,10 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Config.h"
+#include "Emulator/Libs/Errno.h"
+#include "Emulator/Log.h"
+
 UT_BEGIN(EmulatorGraphicsState);
 
 using namespace Libs::Graphics;
@@ -89,6 +93,45 @@ TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 	query.type                 = Loader::SymbolType::Func;
 
 	EXPECT_NE(symbols.Find(query), nullptr);
+}
+
+TEST(EmulatorGraphicsState, ReportsNoSystemServiceEventWithoutFabricatingOne)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libSystemService_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"656LMQSrg6U";
+	query.library              = U"SystemService";
+	query.library_version      = 1;
+	query.module               = U"SystemService";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* record = symbols.Find(query);
+	ASSERT_NE(record, nullptr);
+
+	using ReceiveEventFunc = int (*)(void*);
+	auto    receive_event  = reinterpret_cast<ReceiveEventFunc>(record->vaddr);
+	uint8_t event[64]      = {};
+	for (auto& value: event)
+	{
+		value = 0xa5;
+	}
+
+	EXPECT_EQ(receive_event(nullptr), Libs::SystemService::SYSTEM_SERVICE_ERROR_PARAMETER);
+	EXPECT_EQ(receive_event(event), Libs::SystemService::SYSTEM_SERVICE_ERROR_NO_EVENT);
+	for (const auto value: event)
+	{
+		EXPECT_EQ(value, 0xa5);
+	}
 }
 
 UT_END();
