@@ -495,6 +495,12 @@ namespace Posix {
 
 LIB_VERSION("Posix", 1, "libkernel", 1, 1);
 
+int KYTY_SYSV_ABI getpid()
+{
+	constexpr int guest_process_id = 0xBAD1;
+	return guest_process_id;
+}
+
 int KYTY_SYSV_ABI clock_gettime(int clock_id, LibKernel::KernelTimespec* time)
 {
 	PRINT_NAME();
@@ -521,6 +527,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("lLMT9vJAck0", clock_gettime);
 	LIB_FUNC("yS8U2TGCe1A", nanosleep);
 	LIB_FUNC("E6ao34wPw+U", stat);
+	LIB_FUNC("HoLVWNanBBc", getpid);
 
 	LIB_FUNC("OxhIB8LB-PQ", Posix::pthread_create);
 	LIB_FUNC("h9CcP3J0oVM", Posix::pthread_join);
@@ -695,6 +702,7 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("8OnWXlgQlvo", LibKernel::KernelRtldThreadAtexitDecrement);
 	LIB_FUNC("959qrazPIrg", LibKernel::KernelGetProcParam);
 	LIB_FUNC("9BcDykPmo1I", LibKernel::get_error_addr);
+	LIB_FUNC("HoLVWNanBBc", Posix::getpid);
 	LIB_FUNC("bnZxYgAFeA0", LibKernel::KernelGetSanitizerNewReplaceExternal);
 	LIB_FUNC("ca7v6Cxulzs", LibKernel::KernelSetGPO);
 	LIB_FUNC("DRuBt2pvICk", LibKernel::read);
