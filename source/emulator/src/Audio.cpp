@@ -1615,6 +1615,32 @@ struct Ngs2SamplerVoiceState
 static Ngs2Internal*     g_ngs_list   = nullptr;
 static Ngs2RackInternal* g_racks_list = nullptr;
 
+int KYTY_SYSV_ABI Ngs2SystemQueryBufferSize(const Ngs2SystemOption* option, Ngs2ContextBufferInfo* buffer_info)
+{
+	PRINT_NAME();
+
+	constexpr int32_t NGS2_ERROR_INVALID_OUT_ADDRESS = static_cast<int32_t>(0x804a0053u);
+	constexpr int32_t NGS2_ERROR_INVALID_OPTION_SIZE = static_cast<int32_t>(0x804a0081u);
+
+	if (buffer_info == nullptr)
+	{
+		return NGS2_ERROR_INVALID_OUT_ADDRESS;
+	}
+	if (option != nullptr && option->size != sizeof(Ngs2SystemOption))
+	{
+		return NGS2_ERROR_INVALID_OPTION_SIZE;
+	}
+
+	buffer_info->host_buffer      = nullptr;
+	buffer_info->host_buffer_size = sizeof(Ngs2Internal);
+	for (auto& value: buffer_info->reserved)
+	{
+		value = 0;
+	}
+
+	return OK;
+}
+
 int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption* option, Ngs2ContextBufferInfo* buffer_info)
 {
 	PRINT_NAME();
