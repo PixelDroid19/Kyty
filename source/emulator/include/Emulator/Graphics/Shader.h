@@ -42,6 +42,7 @@ enum class ShaderInstructionType : uint32_t
 	BufferStoreDword,
 	BufferStoreFormatX,
 	BufferStoreFormatXy,
+	BufferStoreFormatXyzw,
 	DsAppend,
 	DsConsume,
 	Exp,
