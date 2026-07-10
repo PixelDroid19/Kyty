@@ -2,6 +2,7 @@
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/String.h"
+#include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Math/Rand.h"
 
 #include "Emulator/Common.h"
@@ -18,6 +19,8 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 
 #include <cstdlib>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -315,9 +318,54 @@ static void KYTY_SYSV_ABI KernelDebugRaiseExceptionOnReleaseMode(int /*c1*/, int
 	PRINT_NAME();
 }
 
-static void KYTY_SYSV_ABI KernelDebugRaiseException(int /*c1*/, int /*c2*/)
+static void KYTY_SYSV_ABI KernelDebugRaiseException(uint64_t c1, uint64_t c2)
 {
 	PRINT_NAME();
+	printf(FG_BRIGHT_RED "KernelDebugRaiseException: error=0x%016" PRIx64 " arg=0x%016" PRIx64
+	                     ", return addr=%p" DEFAULT "\n",
+	       c1, c2, __builtin_return_address(0));
+}
+
+static KYTY_SYSV_ABI int KernelIsAddressSanitizerEnabled()
+{
+	PRINT_NAME();
+	return 0;
+}
+
+// PS5 libkernel v1.1 NID 4h6F1LLbTiw (name undocumented). Determined by
+// observation: the libc heap allocator calls it as f(addr, len, prot, flags)
+// where `addr` is an address the allocator pre-computed inside a range it has
+// already reserved, and uses the returned pointer directly as the base of that
+// region (linking free-list nodes at base+0x10/+0x18). The mapping already
+// exists, so the contract is to return the requested address unchanged.
+static KYTY_SYSV_ABI uint64_t KernelInternalMemoryMap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags)
+{
+	PRINT_NAME();
+	printf("\taddr=0x%" PRIx64 " len=0x%" PRIx64 " prot=0x%" PRIx64 " flags=0x%" PRIx64 " tid=%lld\n", addr, len, prot, flags, (long long)::syscall(SYS_thread_selfid));
+	// Register the range for demand paging: the guest allocator expects zero-filled
+	// read/write memory across the whole region, but pre-mapping it all changes what
+	// the allocator's header check reads (triggering an abort) and a blind CPU memset
+	// faults on the reserved-but-unbacked pages. Instead we zero just the leading
+	// header the allocator inspects now, and map the rest lazily when the guest first
+	// writes to it (see the fault handler's demand-map path).
+	if (addr != 0 && len != 0)
+	{
+		Core::VirtualMemory::RegisterDemandRange(addr, len);
+		uint64_t clear = len < 0x10000 ? len : 0x10000;
+		memset(reinterpret_cast<void*>(addr), 0, clear);
+	}
+#ifdef __APPLE__
+	if (getenv("KYTY_TRACE_LIBC") != nullptr)
+	{
+		Core::VirtualMemory::SetGuestTrace(1500);
+		__asm__ __volatile__("pushfq; orq $0x100,(%rsp); popfq");
+	}
+	if (getenv("KYTY_PROF") != nullptr)
+	{
+		Core::VirtualMemory::StartGuestProfiler();
+	}
+#endif
+	return addr;
 }
 
 static void KYTY_SYSV_ABI exit(int code)
@@ -656,6 +704,8 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("lLMT9vJAck0", LibKernel::clock_gettime);
 	LIB_FUNC("NNtFaKJbPt0", LibKernel::close);
 	LIB_FUNC("OMDRKKAZ8I4", LibKernel::KernelDebugRaiseException);
+	LIB_FUNC("jh+8XiK4LeE", LibKernel::KernelIsAddressSanitizerEnabled);
+	LIB_FUNC("4h6F1LLbTiw", LibKernel::KernelInternalMemoryMap);
 	LIB_FUNC("Ou3iL1abvng", LibKernel::stack_chk_fail);
 	LIB_FUNC("p5EcQeEeJAE", LibKernel::KernelRtldSetApplicationHeapAPI);
 	LIB_FUNC("pB-yGZ2nQ9o", LibKernel::KernelSetThreadAtexitCount);

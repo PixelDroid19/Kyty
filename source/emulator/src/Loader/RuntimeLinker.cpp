@@ -18,6 +18,9 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Profiler.h"
 
+#include <cstring>
+#include <utility>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::LibKernel {
@@ -25,6 +28,106 @@ void SetProgName(const String& name);
 } // namespace Kyty::Libs::LibKernel
 
 namespace Kyty::Loader {
+
+// Permissive bring-up mode: when enabled (env var KYTY_STUB_MISSING=1), imported
+// functions that have no HLE implementation resolve to a stub that returns 0
+// instead of aborting when first called. Lets a title boot past unimplemented
+// syscalls so we can observe the next real blocker. Each missing NID is logged once.
+static bool g_stub_missing_funcs = [] {
+	const char* e = getenv("KYTY_STUB_MISSING");
+	return e != nullptr && e[0] == '1';
+}();
+
+// A real, statically-compiled no-op callable. When a missing-function stub is
+// used as a *function pointer* (callback / vtable entry / function-table getter
+// result) and then called, control lands here and returns 0. This must be a
+// genuine compiled function — under Rosetta 2 a runtime-generated code page is
+// not translatable and executing it faults as SIGILL.
+static KYTY_SYSV_ABI int64_t kyty_missing_callable()
+{
+	return 0;
+}
+
+// Zeroed data page returned by missing-function stubs for the case where the
+// caller treats the result as an output/struct pointer and writes through it.
+static uint64_t kyty_stub_scratch_addr()
+{
+	static uint64_t addr = Core::VirtualMemory::Alloc(0, 0x10000, Core::VirtualMemory::Mode::ReadWrite);
+	return addr;
+}
+
+// The value a missing-function returns. Callers use it in two incompatible ways:
+// as a data pointer (needs writable memory) or as a function pointer (needs real
+// executable code). We prime the first qword of the scratch page with the address
+// of kyty_missing_callable, so a caller that reads a function pointer out of the
+// returned struct and calls it also lands on real code.
+static KYTY_SYSV_ABI int64_t kyty_missing_func_stub()
+{
+	uint64_t scratch = kyty_stub_scratch_addr();
+	if (scratch != 0)
+	{
+		reinterpret_cast<uint64_t*>(scratch)[0] = reinterpret_cast<uint64_t>(kyty_missing_callable);
+	}
+	return static_cast<int64_t>(reinterpret_cast<uint64_t>(kyty_missing_callable));
+}
+
+// --- Per-symbol missing-function stubs ---------------------------------------
+// A pool of statically-compiled stubs, one address per index, so that when the
+// guest actually *calls* a missing function we can log which NID it was (the
+// single shared stub above can't know its own identity). Each stub logs once on
+// first call then behaves like kyty_missing_func_stub. Static compilation is
+// required — a runtime-generated code page is not translatable under Rosetta 2.
+constexpr int KYTY_MISSING_STUB_MAX = 2048;
+static const char* g_missing_stub_names[KYTY_MISSING_STUB_MAX] = {};
+static const char* g_missing_stub_libs[KYTY_MISSING_STUB_MAX]  = {};
+static bool        g_missing_stub_hit[KYTY_MISSING_STUB_MAX]   = {};
+
+template <int I>
+static KYTY_SYSV_ABI int64_t kyty_missing_stub_impl()
+{
+	if (!g_missing_stub_hit[I])
+	{
+		g_missing_stub_hit[I] = true;
+		printf(FG_BRIGHT_RED "CALLED missing stub: %s [%s]" DEFAULT "\n",
+		       g_missing_stub_names[I] != nullptr ? g_missing_stub_names[I] : "?",
+		       g_missing_stub_libs[I] != nullptr ? g_missing_stub_libs[I] : "?");
+	}
+	return kyty_missing_func_stub();
+}
+
+using kyty_stub_fn_t = KYTY_SYSV_ABI int64_t (*)();
+
+template <int... Is>
+static constexpr void fill_stub_table(kyty_stub_fn_t* t, std::integer_sequence<int, Is...> /*seq*/)
+{
+	((t[Is] = &kyty_missing_stub_impl<Is>), ...);
+}
+
+static kyty_stub_fn_t* get_missing_stub_table()
+{
+	static kyty_stub_fn_t table[KYTY_MISSING_STUB_MAX];
+	static bool           init = false;
+	if (!init)
+	{
+		fill_stub_table(table, std::make_integer_sequence<int, KYTY_MISSING_STUB_MAX>{});
+		init = true;
+	}
+	return table;
+}
+
+// Assign the next stub slot to a named missing symbol; returns its callable addr.
+static uint64_t assign_missing_stub(const char* name, const char* lib)
+{
+	static int next = 0;
+	if (next >= KYTY_MISSING_STUB_MAX)
+	{
+		return reinterpret_cast<uint64_t>(kyty_missing_func_stub);
+	}
+	int i                     = next++;
+	g_missing_stub_names[i]   = name;
+	g_missing_stub_libs[i]    = lib;
+	return reinterpret_cast<uint64_t>(get_missing_stub_table()[i]);
+}
 
 #pragma pack(1)
 
@@ -202,8 +305,12 @@ void KYTY_SYSV_ABI sys_stack_walk_x86(uint64_t rbp, void** stack, int* depth)
 
 static void kyty_exception_handler(const Core::VirtualMemory::ExceptionHandler::ExceptionInfo* info)
 {
-	printf("kyty_exception_handler: %016" PRIx64 "\n", info->exception_address);
-
+	// This runs in a signal handler and MUST stay async-signal-safe on the common
+	// path: the GPU memory watcher faults on every write to tracked graphics memory,
+	// and calling printf/malloc here (as the old debug print did) dead-locks against
+	// the allocator lock the faulting guest code may already hold. Handle the GPU
+	// write case first and return without allocating; only the fatal paths below
+	// (which terminate the process anyway) use printf.
 	if (info->type == Core::VirtualMemory::ExceptionHandler::ExceptionType::AccessViolation)
 	{
 		if (info->access_violation_type == Core::VirtualMemory::ExceptionHandler::AccessViolationType::Write &&
@@ -212,16 +319,19 @@ static void kyty_exception_handler(const Core::VirtualMemory::ExceptionHandler::
 			return;
 		}
 
-		if (info->rbp != 0)
+		// Lazily back a reserved flexible-memory page the guest just touched.
+		if (Core::VirtualMemory::TryDemandMap(info->access_violation_vaddr))
 		{
-			Core::Singleton<Loader::RuntimeLinker>::Instance()->StackTrace(info->rbp);
+			return;
 		}
 
-		EXIT("Access violation: %s [%016" PRIx64 "] %s\n", Core::EnumName(info->access_violation_type).C_Str(),
-		     info->access_violation_vaddr, (info->access_violation_vaddr == g_invalid_memory ? "(Unpatched object)" : ""));
+		// Real access violation. Report async-signal-safe and terminate: this runs in
+		// a signal handler and the faulting thread may hold the allocator lock, so
+		// printf/StackTrace (which allocate) would dead-lock instead of reporting.
+		Core::VirtualMemory::FatalFault(info->access_violation_vaddr, info->exception_address);
 	}
 
-	EXIT("Unknown exception!!! (%08" PRIx32 ")", info->exception_win_code);
+	Core::VirtualMemory::FatalFault(0, info->exception_address);
 }
 
 static void encode_id_64(uint16_t in_id, String* out_id)
@@ -890,6 +1000,18 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 				out_info->vaddr    = 0;
 				out_info->name     = SymbolDatabase::GenerateName(sr);
 				out_info->dbg_name = U"";
+
+				if (g_stub_missing_funcs && type == SymbolType::Func)
+				{
+					static Core::Mutex s_log_mutex;
+					Core::LockGuard    log_lock(s_log_mutex);
+					printf(FG_BRIGHT_YELLOW "STUB (missing): %s [%s]" DEFAULT "\n", sr.name.C_Str(), sr.library.C_Str());
+					// Persist the name/lib strings for the lifetime of the process so the
+					// per-symbol call-time stub can print them. String::C_Str() returns a
+					// transient buffer, so copy it immediately with ::strdup.
+					out_info->vaddr    = assign_missing_stub(::strdup(sr.name.C_Str()), ::strdup(sr.library.C_Str()));
+					out_info->dbg_name = U"kyty_missing_func_stub";
+				}
 			}
 		} else
 		{
@@ -1071,8 +1193,18 @@ uint8_t* RuntimeLinker::TlsGetAddr(Program* program)
 
 	if (tls == nullptr)
 	{
-		tls = new uint8_t[program->tls.image_size];
+		// Layout: [TLS image][TCB]. The thread pointer (fs base) is at tls + image_size
+		// and points at the TCB, whose fields (self-pointer at [0], stack canary at
+		// [0x28], etc.) the guest reads as fs:[0], fs:[0x28]. The TCB must therefore be
+		// allocated and zero-initialised past the image, with the self-pointer set;
+		// otherwise those reads land in unallocated memory (observed as 0xAAAA garbage).
+		constexpr uint64_t tcb_size = 0x1000;
+		tls                         = new uint8_t[program->tls.image_size + tcb_size];
 		std::memcpy(tls, reinterpret_cast<void*>(program->tls.image_vaddr), program->tls.image_size);
+		auto* tcb = tls + program->tls.image_size;
+		std::memset(tcb, 0, tcb_size);
+		// TCB self-pointer (fs:[0] == fs base)
+		*reinterpret_cast<uint64_t*>(tcb) = reinterpret_cast<uint64_t>(tcb);
 	}
 
 	uint8_t* ret = tls;
