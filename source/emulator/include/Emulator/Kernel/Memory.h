@@ -24,6 +24,7 @@ int KYTY_SYSV_ABI    KernelAllocateDirectMemory(int64_t search_start, int64_t se
                                                 int64_t* phys_addr_out);
 int KYTY_SYSV_ABI    KernelAllocateMainDirectMemory(size_t len, size_t alignment, int memory_type, int64_t* phys_addr_out);
 int KYTY_SYSV_ABI    KernelReleaseDirectMemory(int64_t start, size_t len);
+int KYTY_SYSV_ABI    KernelCheckedReleaseDirectMemory(int64_t start, size_t len);
 int KYTY_SYSV_ABI    KernelMapDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment);
 int KYTY_SYSV_ABI    KernelMapNamedDirectMemory(void** addr, size_t len, int prot, int flags, off_t direct_memory_start, size_t alignment,
                                                 const char* name);
