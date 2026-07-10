@@ -6,6 +6,7 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
 
 UT_BEGIN(EmulatorGraphicsPackets);
@@ -126,6 +127,39 @@ TEST(EmulatorGraphicsPackets, ClassifiesDirectBufferStoreAsReadWrite)
 
 	EXPECT_EQ(ShaderGetDirectStorageUsage(code, 0), ShaderStorageUsage::ReadWrite);
 	EXPECT_EQ(ShaderGetDirectStorageUsage(code, 4), ShaderStorageUsage::Unknown);
+}
+
+TEST(EmulatorGraphicsPackets, ReusesFourComponentBufferFunctionType)
+{
+	const uint32_t shader[] = {0xd7460003u, 0x040a0300u, 0xd7460003u, 0x040a0300u, 0xe01c2000u, 0x80000004u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0]                         = 1;
+	input.threads_num[1]                         = 1;
+	input.threads_num[2]                         = 1;
+	input.bind.storage_buffers.buffers_num       = 1;
+	input.bind.storage_buffers.start_register[0] = 0;
+	input.bind.storage_buffers.usages[0]         = ShaderStorageUsage::ReadWrite;
+	input.bind.push_constant_size                = 16;
+	const auto source                            = SpirvGenerateSource(code, nullptr, nullptr, &input);
+
+	EXPECT_NE(source.FindIndex("%function_buffer_load_store_float4 = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%function_buffer_load_float4 = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%function_buffer_store_float4 = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%function_tbuffer_load_store_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%function_tbuffer_load_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%function_tbuffer_store_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, AllowsRegionScalarsOnlyInsideSrtRange)
