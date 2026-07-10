@@ -4,6 +4,8 @@
 #include "Emulator/Config.h"
 #include "Emulator/Log.h"
 
+#include <memory>
+
 UT_BEGIN(EmulatorAudio);
 
 using namespace Libs::Audio;
@@ -33,6 +35,24 @@ TEST(EmulatorAudio, QueriesDefaultNgs2SystemBufferContract)
 	EXPECT_EQ(raw_info[7], UINT64_MAX);
 
 	EXPECT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, nullptr), static_cast<int32_t>(0x804a0053u));
+}
+
+TEST(EmulatorAudio, CreatesNgs2SystemInProvidedBuffer)
+{
+	alignas(uint64_t) uint64_t raw_info[8] = {};
+	auto*                      info        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, info), 0);
+
+	std::unique_ptr<uint8_t[]> storage(new uint8_t[raw_info[1]]);
+	raw_info[0]      = reinterpret_cast<uintptr_t>(storage.get());
+	uintptr_t handle = 0;
+
+	EXPECT_EQ(Ngs2::Ngs2SystemCreate(nullptr, info, &handle), 0);
+	EXPECT_EQ(handle, reinterpret_cast<uintptr_t>(storage.get()));
+	EXPECT_EQ(Ngs2::Ngs2SystemCreate(nullptr, nullptr, &handle), static_cast<int32_t>(0x804a0206u));
+	EXPECT_EQ(Ngs2::Ngs2SystemCreate(nullptr, info, nullptr), static_cast<int32_t>(0x804a0053u));
+
+	storage.release();
 }
 
 UT_END();
