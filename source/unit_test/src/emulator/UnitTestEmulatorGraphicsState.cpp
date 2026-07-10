@@ -1,6 +1,8 @@
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
+#include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/SymbolDatabase.h"
 #include "Kyty/UnitTest.h"
 
 UT_BEGIN(EmulatorGraphicsState);
@@ -70,6 +72,23 @@ TEST(EmulatorGraphicsState, DecodesBlendControl)
 	EXPECT_EQ(blend.alpha_destblend, 8);
 	EXPECT_TRUE(blend.separate_alpha_blend);
 	EXPECT_TRUE(blend.enable);
+}
+
+TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libVideoOut_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"CBiu4mCE1DA";
+	query.library              = U"VideoOut";
+	query.library_version      = 1;
+	query.module               = U"VideoOut";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	EXPECT_NE(symbols.Find(query), nullptr);
 }
 
 UT_END();
