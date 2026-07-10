@@ -921,7 +921,9 @@ void RuntimeLinker::Execute()
 
 		printf("stack_addr = %" PRIx64 "\n", reinterpret_cast<uint64_t>(&p));
 
+		Core::mem_guest_thread_enter();
 		run_entry(entry, &p, ProgramExitHandler);
+		Core::mem_guest_thread_leave();
 	}
 }
 

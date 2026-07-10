@@ -6,6 +6,7 @@ UT_LINK(CoreCharString);
 UT_LINK(CoreCharString8);
 UT_LINK(CoreMSpace);
 UT_LINK(CoreDateTime);
+UT_LINK(CoreMemoryAlloc);
 UT_LINK(EmulatorGraphicsState);
 UT_LINK(EmulatorKernelMemory);
 UT_LINK(EmulatorGraphicsPackets);
