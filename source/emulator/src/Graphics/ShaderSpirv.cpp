@@ -606,7 +606,7 @@ constexpr char BUFFER_LOAD_FLOAT4[] = R"(
              ;	p3 = buf[buffer_index].data[addr+2];
              ;	p4 = buf[buffer_index].data[addr+3];
              ;}
-%buffer_load_float4 = OpFunction %void None %function_buffer_load_float4
+%buffer_load_float4 = OpFunction %void None %function_buffer_load_store_float4
   %buf_l_f4_21 = OpFunctionParameter %_ptr_Function_float
   %buf_l_f4_22 = OpFunctionParameter %_ptr_Function_float
   %buf_l_f4_23 = OpFunctionParameter %_ptr_Function_float
@@ -714,7 +714,7 @@ constexpr char BUFFER_STORE_FLOAT2[] = R"(
 
 constexpr char BUFFER_STORE_FLOAT4[] = R"(
                       ; void buffer_store_float4(in float p1, in float p2, in float p3, in float p4, in int index, in int offset, in int stride, in int buffer_index)
-%buffer_store_float4 = OpFunction %void None %function_buffer_store_float4
+%buffer_store_float4 = OpFunction %void None %function_buffer_load_store_float4
          %buf_s_f4_1 = OpFunctionParameter %_ptr_Function_float
          %buf_s_f4_2 = OpFunctionParameter %_ptr_Function_float
          %buf_s_f4_3 = OpFunctionParameter %_ptr_Function_float
@@ -760,7 +760,7 @@ constexpr char TBUFFER_LOAD_FORMAT_XYZW[] = R"(
              ; 		buffer_load_float4(p1, p2, p3, p4, index, offset, stride, buffer_index);
              ; 	}
              ; }
-%tbuffer_load_format_xyzw = OpFunction %void None %function_tbuffer_load_format_xyzw
+%tbuffer_load_format_xyzw = OpFunction %void None %function_tbuffer_load_store_format_xyzw
 %tbuf_l_f_xyzw_54 = OpFunctionParameter %_ptr_Function_float
 %tbuf_l_f_xyzw_55 = OpFunctionParameter %_ptr_Function_float
 %tbuf_l_f_xyzw_56 = OpFunctionParameter %_ptr_Function_float
@@ -949,7 +949,7 @@ constexpr char TBUFFER_STORE_FORMAT_XY[] = R"(
 
 constexpr char TBUFFER_STORE_FORMAT_XYZW[] = R"(
 ; void tbuffer_store_format_xyzw(in float p1, in float p2, in float p3, in float p4, in int index, in int offset, in int stride, in int buffer_index, in int dfmt_nfmt)
-%tbuffer_store_format_xyzw = OpFunction %void None %function_tbuffer_store_format_xyzw
+%tbuffer_store_format_xyzw = OpFunction %void None %function_tbuffer_load_store_format_xyzw
  %tbuf_s_f_xyzw_1 = OpFunctionParameter %_ptr_Function_float
  %tbuf_s_f_xyzw_2 = OpFunctionParameter %_ptr_Function_float
  %tbuf_s_f_xyzw_3 = OpFunctionParameter %_ptr_Function_float
@@ -7155,14 +7155,12 @@ void Spirv::WriteTypes()
                %function_b_f_f = OpTypeFunction %bool %float %float
                  %function_i_i = OpTypeFunction %int %int %int
                %function_shift = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint
-    %function_tbuffer_load_format_xyzw = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
+%function_tbuffer_load_store_format_xyzw = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
     %function_buffer_load_store_float1 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
     %function_buffer_load_store_float2 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
-          %function_buffer_store_float4 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
-          %function_buffer_load_float4 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
+     %function_buffer_load_store_float4 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
  %function_tbuffer_load_store_format_x = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
 %function_tbuffer_load_store_format_xy = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
- %function_tbuffer_store_format_xyzw = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
           %function_sbuffer_load_dword = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_2 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_4 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
