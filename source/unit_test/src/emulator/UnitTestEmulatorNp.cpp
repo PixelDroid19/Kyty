@@ -1,6 +1,8 @@
 #include "Emulator/Libs/Np.h"
 #include "Kyty/UnitTest.h"
 
+#include <cstring>
+
 UT_BEGIN(EmulatorNp);
 
 using namespace Libs;
@@ -56,17 +58,79 @@ TEST(EmulatorNp, InitializesGameIntentIdempotently)
 	EXPECT_EQ(NpGameIntent::Initialize(), 0);
 }
 
+// Runs alphabetically before Initializes* so the module is still uninitialized.
+TEST(EmulatorNp, GetAddcontEntitlementInfoRejectsBeforeInitialize)
+{
+	using namespace NpEntitlementAccess;
+
+	UnifiedEntitlementLabel label {};
+	AddcontEntitlementInfo  info {};
+	std::memcpy(label.data, "DEADCELLSBADSEED", 16);
+
+	EXPECT_EQ(GetAddcontEntitlementInfo(0, &label, &info), ERROR_NOT_INITIALIZED);
+}
+
 TEST(EmulatorNp, InitializesEntitlementAccessWithCleanBootState)
 {
+	using namespace NpEntitlementAccess;
+
 	uint8_t init_parameters[0x40] = {};
 	uint8_t boot_parameters[0x20];
 	memset(boot_parameters, 0xa5, sizeof(boot_parameters));
 
-	EXPECT_EQ(NpEntitlementAccess::Initialize(init_parameters, boot_parameters), 0);
+	EXPECT_EQ(Initialize(nullptr, boot_parameters), ERROR_PARAMETER);
+	EXPECT_EQ(Initialize(init_parameters, nullptr), ERROR_PARAMETER);
+	EXPECT_EQ(Initialize(init_parameters, boot_parameters), 0);
 	for (auto value: boot_parameters)
 	{
 		EXPECT_EQ(value, 0);
 	}
+}
+
+TEST(EmulatorNp, GetAddcontEntitlementInfoValidatesArguments)
+{
+	using namespace NpEntitlementAccess;
+
+	uint8_t init_parameters[0x40] = {};
+	uint8_t boot_parameters[0x20] = {};
+	ASSERT_EQ(Initialize(init_parameters, boot_parameters), 0);
+
+	UnifiedEntitlementLabel label {};
+	AddcontEntitlementInfo  info {};
+	std::memcpy(label.data, "DEADCELLSBADSEED", 16);
+
+	EXPECT_EQ(GetAddcontEntitlementInfo(0, nullptr, &info), ERROR_PARAMETER);
+	EXPECT_EQ(GetAddcontEntitlementInfo(0, &label, nullptr), ERROR_PARAMETER);
+
+	UnifiedEntitlementLabel empty {};
+	EXPECT_EQ(GetAddcontEntitlementInfo(0, &empty, &info), ERROR_PARAMETER);
+
+	UnifiedEntitlementLabel no_nul {};
+	std::memset(no_nul.data, 'A', sizeof(no_nul.data));
+	EXPECT_EQ(GetAddcontEntitlementInfo(0, &no_nul, &info), ERROR_PARAMETER);
+
+	UnifiedEntitlementLabel bad_pad = label;
+	bad_pad.padding[0]             = 1;
+	EXPECT_EQ(GetAddcontEntitlementInfo(0, &bad_pad, &info), ERROR_PARAMETER);
+}
+
+TEST(EmulatorNp, GetAddcontEntitlementInfoReportsMissingEntitlement)
+{
+	using namespace NpEntitlementAccess;
+
+	uint8_t init_parameters[0x40] = {};
+	uint8_t boot_parameters[0x20] = {};
+	ASSERT_EQ(Initialize(init_parameters, boot_parameters), 0);
+
+	UnifiedEntitlementLabel label {};
+	AddcontEntitlementInfo  info {};
+	std::memset(&info, 0xa5, sizeof(info));
+	std::memcpy(label.data, "DEADCELLSBADSEED", 16);
+
+	// Sentinel must survive: missing entitlement must not write a fabricated record.
+	const auto before = info;
+	EXPECT_EQ(GetAddcontEntitlementInfo(0, &label, &info), ERROR_NO_ENTITLEMENT);
+	EXPECT_EQ(std::memcmp(&info, &before, sizeof(info)), 0);
 }
 
 UT_END();
