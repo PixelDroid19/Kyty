@@ -2,8 +2,11 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Dialog.h"
+#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/SaveData.h"
 #include "Emulator/Log.h"
+
+#include <cstring>
 
 UT_BEGIN(EmulatorSaveData);
 
@@ -50,6 +53,32 @@ TEST(EmulatorSaveData, SaveDataDialogInitializeRequiresCommonDialog)
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogTerminate(), 0);
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogUpdateStatus(), CommonDialog::STATUS_NONE);
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogTerminate(), CommonDialog::ERROR_NOT_INITIALIZED);
+}
+
+TEST(EmulatorSaveData, GetMountInfoValidatesAndReportsCapacity)
+{
+	using namespace Libs::SaveData;
+
+	SaveDataMountInfo info {};
+	EXPECT_EQ(SaveDataGetMountInfo(nullptr, &info), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+	EXPECT_EQ(SaveDataGetMountInfo(reinterpret_cast<const SaveDataMountPoint*>("/savedata0"), nullptr),
+	          Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+
+	SaveDataMountPoint mount {};
+	std::memcpy(mount.data, "/savedata0", 11);
+	EXPECT_EQ(SaveDataGetMountInfo(&mount, &info), 0);
+	EXPECT_GT(info.blocks, 0u);
+	EXPECT_GT(info.free_blocks, 0u);
+	EXPECT_LE(info.free_blocks, info.blocks);
+}
+
+TEST(EmulatorSaveData, GetEventResultReportsEmptyQueue)
+{
+	using namespace Libs::SaveData;
+
+	uint8_t event[128] = {};
+	EXPECT_EQ(SaveDataGetEventResult(nullptr, nullptr), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+	EXPECT_EQ(SaveDataGetEventResult(nullptr, event), Libs::SaveData::SAVE_DATA_ERROR_NOT_FOUND);
 }
 
 UT_END();

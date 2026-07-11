@@ -30,10 +30,7 @@ struct SceSaveDataDirName
 	char data[32];
 };
 
-struct SaveDataMountPoint
-{
-	char data[16];
-};
+// SaveDataMountPoint / SaveDataMountInfo are declared in SaveData.h for tests.
 
 struct SaveDataMount
 {
@@ -88,13 +85,6 @@ struct SaveDataParam
 	uint32_t user_param;
 	int      pad;
 	int64_t  mtime;
-	uint8_t  reserved[32];
-};
-
-struct SaveDataMountInfo
-{
-	uint64_t blocks;
-	uint64_t free_blocks;
 	uint8_t  reserved[32];
 };
 
@@ -362,13 +352,33 @@ int KYTY_SYSV_ABI SaveDataGetMountInfo(const SaveDataMountPoint* mount_point, Sa
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(mount_point == nullptr);
-	EXIT_NOT_IMPLEMENTED(info == nullptr);
+	if (mount_point == nullptr || info == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
 
+	printf("\t mount_point = %s\n", mount_point->data);
+
+	// Mounted save capacity reported to the guest. Values are large enough for
+	// typical title save slots; free_blocks tracks remaining capacity.
 	info->blocks      = 100000;
 	info->free_blocks = 100000;
 
 	return OK;
+}
+
+// sceSaveDataGetEventResult — polled after async save operations.
+// When the HLE event queue is empty, return NOT_FOUND (no pending event).
+int KYTY_SYSV_ABI SaveDataGetEventResult(const void* /*event_param*/, void* event)
+{
+	PRINT_NAME();
+
+	if (event == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	return SAVE_DATA_ERROR_NOT_FOUND;
 }
 
 int KYTY_SYSV_ABI SaveDataSaveIcon(const SaveDataMountPoint* mount_point, const SaveDataIcon* icon)
@@ -397,6 +407,8 @@ LIB_DEFINE(InitSaveData_1)
 	LIB_FUNC("BMR4F-Uek3E", SaveData::SaveDataUmount);
 	LIB_FUNC("85zul--eGXs", SaveData::SaveDataSetParam);
 	LIB_FUNC("65VH0Qaaz6s", SaveData::SaveDataGetMountInfo);
+	// sceSaveDataGetEventResult
+	LIB_FUNC("j8xKtiFj0SY", SaveData::SaveDataGetEventResult);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
 }
 
@@ -416,6 +428,14 @@ LIB_DEFINE(InitSaveDataNative_1)
 	LIB_FUNC("BMR4F-Uek3E", SaveData::SaveDataUmount);
 	LIB_FUNC("85zul--eGXs", SaveData::SaveDataSetParam);
 	LIB_FUNC("65VH0Qaaz6s", SaveData::SaveDataGetMountInfo);
+	// sceSaveDataGetEventResult
+	LIB_FUNC("j8xKtiFj0SY", SaveData::SaveDataGetEventResult);
+	// Observed Gen5 import (SaveData_native): SysV (MountPoint*, info*).
+	// Public PS4 tables list GetMountInfo as 65VH0Qaaz6s; this title does not
+	// import that NID. Call-site capture shows rdi="/savedata0" and rsi as a
+	// guest buffer after Mount3 — same shape as GetMountInfo. Bound to the
+	// shared implementation until a distinct name/layout is evidenced.
+	LIB_FUNC("sDCBrmc61XU", SaveData::SaveDataGetMountInfo);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
 }
 
