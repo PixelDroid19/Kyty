@@ -696,6 +696,8 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_OBJECT("djxxOmW6-aw", &LibKernel::g_progname);
 
 	LIB_FUNC("1jfXLRVzisc", LibKernel::KernelUsleep);
+	// sceKernelNanosleep (NID verified against the public PS5 stub name).
+	LIB_FUNC("QvsZxomvUHs", LibKernel::KernelNanosleep);
 	LIB_FUNC("6c3rCVE-fTU", LibKernel::open);
 	LIB_FUNC("6xVpy0Fdq+I", LibKernel::sigprocmask);
 	LIB_FUNC("6Z83sYWFlA8", LibKernel::exit);

@@ -305,4 +305,66 @@ TEST(EmulatorGraphicsState, ReversesGpuMemoryOverlapRelations)
 	EXPECT_EQ(GpuMemoryReverseOverlap(GpuMemoryOverlapType::None), GpuMemoryOverlapType::None);
 }
 
+TEST(EmulatorGraphicsState, AllowsOnlyObservedTextureStorageAliases)
+{
+	EXPECT_TRUE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Equals,
+	                                               GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                               GpuMemoryObjectType::StorageBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::IsContainedWithin,
+	                                                GpuMemoryObjectType::StorageBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                GpuMemoryObjectType::RenderTexture));
+}
+
+// Captured Gen5 WriteBack topology: RW StorageBuffer with 8 VertexBuffer
+// Crosses/IsContainedWithin parents plus one Equals RenderTexture peer.
+// Policy must accept the set, recompute via Equals (not self), and invalidate
+// the partial-overlap VertexBuffers — without inventing None/Max relations.
+TEST(EmulatorGraphicsState, WriteBackClassifiesMultiParentStorageTopology)
+{
+	EXPECT_EQ(GpuMemoryWriteBackParentActionFor(GpuMemoryOverlapType::Equals), GpuMemoryWriteBackParentAction::PropagateEquals);
+	EXPECT_EQ(GpuMemoryWriteBackParentActionFor(GpuMemoryOverlapType::Crosses), GpuMemoryWriteBackParentAction::InvalidateOnly);
+	EXPECT_EQ(GpuMemoryWriteBackParentActionFor(GpuMemoryOverlapType::IsContainedWithin), GpuMemoryWriteBackParentAction::InvalidateOnly);
+	EXPECT_EQ(GpuMemoryWriteBackParentActionFor(GpuMemoryOverlapType::None), GpuMemoryWriteBackParentAction::Unsupported);
+
+	// Empty: recompute self only.
+	bool     recompute = false;
+	uint32_t equals    = 99;
+	uint32_t inv       = 99;
+	ASSERT_TRUE(GpuMemoryWriteBackClassifyParents(nullptr, 0, &recompute, &equals, &inv));
+	EXPECT_TRUE(recompute);
+	EXPECT_EQ(equals, 0u);
+	EXPECT_EQ(inv, 0u);
+
+	// Observed multi-parent list (order matches CreateObject link dump).
+	const GpuMemoryOverlapType observed[] = {
+	    GpuMemoryOverlapType::Crosses,           // VB
+	    GpuMemoryOverlapType::IsContainedWithin, // VB
+	    GpuMemoryOverlapType::IsContainedWithin, // VB
+	    GpuMemoryOverlapType::IsContainedWithin, // VB
+	    GpuMemoryOverlapType::IsContainedWithin, // VB
+	    GpuMemoryOverlapType::IsContainedWithin, // VB
+	    GpuMemoryOverlapType::IsContainedWithin, // VB
+	    GpuMemoryOverlapType::Crosses,           // VB
+	    GpuMemoryOverlapType::Equals,            // RenderTexture peer
+	};
+	ASSERT_TRUE(GpuMemoryWriteBackClassifyParents(observed, static_cast<uint32_t>(sizeof(observed) / sizeof(observed[0])), &recompute,
+	                                              &equals, &inv));
+	EXPECT_FALSE(recompute);
+	EXPECT_EQ(equals, 1u);
+	EXPECT_EQ(inv, 8u);
+
+	// Only partial overlaps: still recompute self after GPU->CPU write-back.
+	const GpuMemoryOverlapType only_vb[] = {GpuMemoryOverlapType::Crosses, GpuMemoryOverlapType::IsContainedWithin};
+	ASSERT_TRUE(GpuMemoryWriteBackClassifyParents(only_vb, 2, &recompute, &equals, &inv));
+	EXPECT_TRUE(recompute);
+	EXPECT_EQ(equals, 0u);
+	EXPECT_EQ(inv, 2u);
+
+	// Unsupported relation must fail closed.
+	const GpuMemoryOverlapType bad[] = {GpuMemoryOverlapType::Equals, GpuMemoryOverlapType::None};
+	EXPECT_FALSE(GpuMemoryWriteBackClassifyParents(bad, 2, &recompute, &equals, &inv));
+}
+
 UT_END();

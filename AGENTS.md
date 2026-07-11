@@ -260,7 +260,18 @@ frames around the 30 FPS range when console function logging is disabled. The
 post-Play loading path has advanced through several Gen5 PM4/HLE seams
 (full-range AcquireMem, tile mode 27 sizing, Type0/Type2 walk, VideoOut handle
 0, ReleaseMem data_sel 1, payload-address offsets by opcode, index-buffer
-updates). **Always re-capture the first strict fail on the current HEAD**—do
+updates). A captured post-Play resource-registration blocker was an existing
+Texture containing a new StorageBuffer; that exact relation is now represented
+by an explicit alias policy and a focused regression test. The policy does not
+authorize the inverse containment direction or arbitrary texture/buffer
+overlap. The `QvsZxomvUHs` import is now registered as the evidenced
+`sceKernelNanosleep` contract, and WriteBack now classifies the observed
+multi-parent alias topology explicitly. The latest strict visual capture
+reaches the loading card with correct pixels, but does not reach a controllable
+scene: the same `ThreadFlag` event is polled with a 40 ms timeout and never
+observably receives bit `0x1`. Treat that as the current synchronization
+frontier; identify the producer or missing contract before changing wait
+semantics. **Always re-capture the first strict fail on the current HEAD**—do
 not trust this paragraph after code or fixture changes. This is not yet
 gameplay acceptance. Diagnostic input, permissive state handling, and console
 logging are evidence tools only; they do not constitute a supported runtime
@@ -318,11 +329,15 @@ CURRENT FRONTIER
   are already exercised.
 - The private 2D test workload reaches a recognizable menu and responds to the
   first Play/Normal-Mode transitions.
-- A recent strict run stops after that transition in
-  `GraphicsRun.cpp::cp_op_acquire_mem`, in the full-target barrier case. The
-  observed cache-control word is `0x00008280`; the implementation already
-  recognizes the known invalidate bits but still rejects a non-zero packet
-  range. Capture the complete packet again before changing semantics.
+- A recent post-Play capture stopped while registering a StorageBuffer fully
+  contained by an existing Texture. The exact `Texture + Contains +
+  StorageBuffer` relation is covered by `GpuMemoryAllowsTextureStorageAlias`;
+  keep the inverse and unrelated containment relations strict until separately
+  evidenced. The libkernel nanosleep seam and multi-parent WriteBack topology
+  are now covered. The current capture reaches the loading card, then polls a
+  `ThreadFlag` event for bit `0x1` with 40 ms timeouts without an observed set;
+  capture the event producer and the missing synchronization contract before
+  changing wait behavior.
 - A silent-logging visual run has shown roughly 30 FPS at the menu. Do not
   compare that number with console-logging runs: per-call logging can dominate
   the frame loop. Measure gameplay with logging configuration recorded.

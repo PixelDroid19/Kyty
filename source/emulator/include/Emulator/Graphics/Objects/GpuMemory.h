@@ -72,6 +72,93 @@ inline GpuMemoryOverlapType GpuMemoryReverseOverlap(GpuMemoryOverlapType relatio
 	return GpuMemoryOverlapType::None;
 }
 
+// A texture-backed storage view is a distinct GPU object that may share the
+// same allocation. Keep this policy explicit: only the relations observed in
+// the Gen5 resource stream are accepted, while other containment directions
+// remain strict errors until their producer contract is captured.
+inline bool GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                               GpuMemoryObjectType incoming_type)
+{
+	if (existing_type == GpuMemoryObjectType::StorageBuffer && relation == GpuMemoryOverlapType::Equals &&
+	    (incoming_type == GpuMemoryObjectType::RenderTexture || incoming_type == GpuMemoryObjectType::StorageTexture ||
+	     incoming_type == GpuMemoryObjectType::Texture))
+	{
+		return true;
+	}
+
+	return existing_type == GpuMemoryObjectType::Texture && relation == GpuMemoryOverlapType::Contains &&
+	       incoming_type == GpuMemoryObjectType::StorageBuffer;
+}
+
+// WriteBack (GPU -> CPU) hash bookkeeping for aliased objects.
+//
+// Observed Gen5 topology (private title after post-menu load): a RW
+// StorageBuffer write-back target shares guest memory with several
+// VertexBuffers (Crosses / IsContainedWithin) and often one Equals peer
+// (RenderTexture / StorageTexture / Texture). WriteBack still maps GPU memory
+// once; hash policy is:
+//   - Equals parents: invalidate + re-hash from CPU (same as single-parent path)
+//   - Crosses / Contains / IsContainedWithin: invalidate only (partial overlap)
+//   - no parents or only non-Equals: recompute self hash from CPU after write-back
+// Any other relation is unsupported and must fail structurally.
+enum class GpuMemoryWriteBackParentAction : uint8_t
+{
+	PropagateEquals, // full hash recompute via Update (Equals alias)
+	InvalidateOnly,  // zero hash; next use reloads from CPU
+	Unsupported
+};
+
+inline GpuMemoryWriteBackParentAction GpuMemoryWriteBackParentActionFor(GpuMemoryOverlapType relation)
+{
+	switch (relation)
+	{
+		case GpuMemoryOverlapType::Equals: return GpuMemoryWriteBackParentAction::PropagateEquals;
+		case GpuMemoryOverlapType::Crosses:
+		case GpuMemoryOverlapType::Contains:
+		case GpuMemoryOverlapType::IsContainedWithin: return GpuMemoryWriteBackParentAction::InvalidateOnly;
+		case GpuMemoryOverlapType::None:
+		case GpuMemoryOverlapType::Max: return GpuMemoryWriteBackParentAction::Unsupported;
+	}
+	return GpuMemoryWriteBackParentAction::Unsupported;
+}
+
+// Returns false if any parent relation is unsupported for WriteBack.
+// out_recompute_self is true when no Equals parent exists (self hash after write-back).
+// out_equals_count / out_invalidate_count classify parents for callers that walk the list.
+inline bool GpuMemoryWriteBackClassifyParents(const GpuMemoryOverlapType* relations, uint32_t count, bool* out_recompute_self,
+                                              uint32_t* out_equals_count, uint32_t* out_invalidate_count)
+{
+	if (out_recompute_self == nullptr || out_equals_count == nullptr || out_invalidate_count == nullptr)
+	{
+		return false;
+	}
+	*out_recompute_self  = true;
+	*out_equals_count    = 0;
+	*out_invalidate_count = 0;
+	if (relations == nullptr || count == 0)
+	{
+		return true;
+	}
+	for (uint32_t i = 0; i < count; i++)
+	{
+		switch (GpuMemoryWriteBackParentActionFor(relations[i]))
+		{
+			case GpuMemoryWriteBackParentAction::PropagateEquals:
+				(*out_equals_count)++;
+				*out_recompute_self = false;
+				break;
+			case GpuMemoryWriteBackParentAction::InvalidateOnly: (*out_invalidate_count)++; break;
+			case GpuMemoryWriteBackParentAction::Unsupported: return false;
+		}
+	}
+	// Only non-Equals parents: still recompute self after GPU->CPU write-back.
+	if (*out_equals_count == 0)
+	{
+		*out_recompute_self = true;
+	}
+	return true;
+}
+
 struct GpuMemoryObject
 {
 	GpuMemoryObjectType type = GpuMemoryObjectType::Invalid;

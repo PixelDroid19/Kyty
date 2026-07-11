@@ -27,6 +27,28 @@ int KYTY_SYSV_ABI AudioOutGetPortState(int handle, AudioOutPortState* state);
 
 } // namespace AudioOut
 
+// Gen5 AudioOut2 library (same module AudioOut_v1.1, distinct library AudioOut2_v1).
+namespace AudioOut2 {
+
+int KYTY_SYSV_ABI AudioOut2Initialize();
+int KYTY_SYSV_ABI AudioOut2ContextResetParam(void* param);
+int KYTY_SYSV_ABI AudioOut2ContextQueryMemory(const void* param, uint64_t* size_out);
+int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64_t size, int32_t* handle_out);
+int KYTY_SYSV_ABI AudioOut2ContextDestroy(int32_t handle);
+int KYTY_SYSV_ABI AudioOut2ContextAdvance(int32_t handle);
+int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, const void* data);
+int KYTY_SYSV_ABI AudioOut2ContextGetQueueLevel(int32_t handle, uint32_t* used, uint32_t* available);
+int KYTY_SYSV_ABI AudioOut2PortCreate(int32_t context, const void* param, int32_t* port_out);
+int KYTY_SYSV_ABI AudioOut2PortDestroy(int32_t port);
+int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr);
+int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* user_out);
+int KYTY_SYSV_ABI AudioOut2UserDestroy(int32_t user);
+// Residual AudioOut2 NIDs imported by Gen5 titles whose names are not yet
+// triangulated; log SysV args and return SCE_OK so boot can proceed.
+int KYTY_SYSV_ABI AudioOut2LogAndOk(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3);
+
+} // namespace AudioOut2
+
 namespace AudioIn {
 
 int KYTY_SYSV_ABI AudioInOpen(int user_id, uint32_t type, uint32_t index, uint32_t len, uint32_t freq, uint32_t param);

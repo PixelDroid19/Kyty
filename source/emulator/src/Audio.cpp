@@ -532,6 +532,325 @@ int KYTY_SYSV_ABI AudioOutOutput(int handle, const void* ptr)
 
 } // namespace AudioOut
 
+namespace AudioOut2 {
+
+LIB_NAME("AudioOut2", "AudioOut");
+
+// Host-side AudioOut2 object table. Guest receives opaque positive handles.
+// Layout/API reimplemented from public export names (SCE NID encoding) and
+// observed Gen5 import/call order; no third-party implementation code copied.
+constexpr int32_t  kMaxContexts          = 8;
+constexpr int32_t  kMaxPorts             = 16;
+constexpr int32_t  kMaxUsers             = 8;
+constexpr uint64_t kDefaultContextBytes  = 0x10000; // host workspace until layout is measured
+constexpr uint32_t kDefaultQueueDepth    = 4;
+
+struct ContextSlot
+{
+	bool     used      = false;
+	void*    buffer    = nullptr;
+	uint64_t size      = 0;
+	uint32_t queue_used = 0;
+};
+
+struct PortSlot
+{
+	bool    used    = false;
+	int32_t context = 0;
+};
+
+struct UserSlot
+{
+	bool used    = false;
+	int  user_id = 0;
+};
+
+static ContextSlot g_contexts[kMaxContexts];
+static PortSlot    g_ports[kMaxPorts];
+static UserSlot    g_users[kMaxUsers];
+static bool        g_audio_out2_ready = false;
+
+static int32_t AllocContext()
+{
+	for (int32_t i = 0; i < kMaxContexts; i++)
+	{
+		if (!g_contexts[i].used)
+		{
+			g_contexts[i]      = ContextSlot {};
+			g_contexts[i].used = true;
+			return i + 1; // guest handles are 1-based
+		}
+	}
+	return 0;
+}
+
+static int32_t AllocPort(int32_t context)
+{
+	for (int32_t i = 0; i < kMaxPorts; i++)
+	{
+		if (!g_ports[i].used)
+		{
+			g_ports[i]         = PortSlot {};
+			g_ports[i].used    = true;
+			g_ports[i].context = context;
+			return i + 1;
+		}
+	}
+	return 0;
+}
+
+static int32_t AllocUser(int user_id)
+{
+	for (int32_t i = 0; i < kMaxUsers; i++)
+	{
+		if (!g_users[i].used)
+		{
+			g_users[i]         = UserSlot {};
+			g_users[i].used    = true;
+			g_users[i].user_id = user_id;
+			return i + 1;
+		}
+	}
+	return 0;
+}
+
+// sceAudioOut2Initialize (NID g2tViFIohHE)
+int KYTY_SYSV_ABI AudioOut2Initialize()
+{
+	PRINT_NAME();
+	g_audio_out2_ready = true;
+	return OK;
+}
+
+// sceAudioOut2ContextResetParam (NID t5YrizufpQc)
+// Guest passes a context-param blob; official ResetParam fills defaults.
+// Without a measured sizeof(param), leave memory unchanged and succeed so the
+// title can write its own fields after the call (observed boot pattern).
+int KYTY_SYSV_ABI AudioOut2ContextResetParam(void* param)
+{
+	PRINT_NAME();
+	printf("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	if (param == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	// Peek leading size-like field if present (common SCE param header).
+	uint64_t leading = 0;
+	std::memcpy(&leading, param, sizeof(leading));
+	printf("\t leading = 0x%016" PRIx64 "\n", leading);
+	return OK;
+}
+
+// sceAudioOut2ContextQueryMemory (NID pDmme7Bgm6E)
+int KYTY_SYSV_ABI AudioOut2ContextQueryMemory(const void* param, uint64_t* size_out)
+{
+	PRINT_NAME();
+	printf("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	printf("\t size_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(size_out));
+	if (size_out == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	*size_out = kDefaultContextBytes;
+	return OK;
+}
+
+// sceAudioOut2ContextCreate (NID 0x6o1VVAYSY)
+int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64_t size, int32_t* handle_out)
+{
+	PRINT_NAME();
+	printf("\t param      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	printf("\t buffer     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
+	printf("\t size       = 0x%016" PRIx64 "\n", size);
+	printf("\t handle_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handle_out));
+	if (handle_out == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	if (!g_audio_out2_ready)
+	{
+		printf("\t note: ContextCreate before Initialize\n");
+	}
+	const int32_t id = AllocContext();
+	if (id == 0)
+	{
+		return LibKernel::KERNEL_ERROR_ENOMEM;
+	}
+	g_contexts[id - 1].buffer = buffer;
+	g_contexts[id - 1].size   = size;
+	*handle_out               = id;
+	printf("\t handle     = %d\n", id);
+	return OK;
+}
+
+// sceAudioOut2ContextDestroy (NID on6ZH7Abo10)
+int KYTY_SYSV_ABI AudioOut2ContextDestroy(int32_t handle)
+{
+	PRINT_NAME();
+	printf("\t handle = %d\n", handle);
+	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	g_contexts[handle - 1] = ContextSlot {};
+	return OK;
+}
+
+// sceAudioOut2ContextAdvance (NID PE2zHMqLSHs)
+int KYTY_SYSV_ABI AudioOut2ContextAdvance(int32_t handle)
+{
+	PRINT_NAME();
+	printf("\t handle = %d\n", handle);
+	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	if (g_contexts[handle - 1].queue_used > 0)
+	{
+		g_contexts[handle - 1].queue_used--;
+	}
+	return OK;
+}
+
+// sceAudioOut2ContextPush (NID aII9h5nli9U)
+int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, const void* data)
+{
+	PRINT_NAME();
+	printf("\t handle = %d\n", handle);
+	printf("\t data   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(data));
+	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	if (g_contexts[handle - 1].queue_used < kDefaultQueueDepth)
+	{
+		g_contexts[handle - 1].queue_used++;
+	}
+	return OK;
+}
+
+// sceAudioOut2ContextGetQueueLevel (NID R7d0F1g2qsU)
+int KYTY_SYSV_ABI AudioOut2ContextGetQueueLevel(int32_t handle, uint32_t* used, uint32_t* available)
+{
+	PRINT_NAME();
+	printf("\t handle    = %d\n", handle);
+	printf("\t used      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(used));
+	printf("\t available = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(available));
+	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	const uint32_t q = g_contexts[handle - 1].queue_used;
+	if (used != nullptr)
+	{
+		*used = q;
+	}
+	if (available != nullptr)
+	{
+		*available = (q < kDefaultQueueDepth) ? (kDefaultQueueDepth - q) : 0;
+	}
+	return OK;
+}
+
+// sceAudioOut2PortCreate (NID JK2wamZPzwM)
+int KYTY_SYSV_ABI AudioOut2PortCreate(int32_t context, const void* param, int32_t* port_out)
+{
+	PRINT_NAME();
+	printf("\t context  = %d\n", context);
+	printf("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	printf("\t port_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(port_out));
+	if (port_out == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	if (context < 1 || context > kMaxContexts || !g_contexts[context - 1].used)
+	{
+		// Some titles create a port before a host-tracked context handle is
+		// established; still allocate so boot can continue with evidence.
+		printf("\t note: PortCreate with unknown context\n");
+	}
+	const int32_t id = AllocPort(context);
+	if (id == 0)
+	{
+		return LibKernel::KERNEL_ERROR_ENOMEM;
+	}
+	*port_out = id;
+	printf("\t port     = %d\n", id);
+	return OK;
+}
+
+// sceAudioOut2PortDestroy (NID cd+Rtw+D1x8)
+int KYTY_SYSV_ABI AudioOut2PortDestroy(int32_t port)
+{
+	PRINT_NAME();
+	printf("\t port = %d\n", port);
+	if (port < 1 || port > kMaxPorts || !g_ports[port - 1].used)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	g_ports[port - 1] = PortSlot {};
+	return OK;
+}
+
+// sceAudioOut2PortSetAttributes (NID 8XTArSPyWHk)
+int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr)
+{
+	PRINT_NAME();
+	printf("\t port = %d\n", port);
+	printf("\t attr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(attr));
+	if (port < 1 || port > kMaxPorts || !g_ports[port - 1].used)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	return OK;
+}
+
+// sceAudioOut2UserCreate (NID xywYcRB7nbQ)
+int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* user_out)
+{
+	PRINT_NAME();
+	printf("\t user_id  = %d\n", user_id);
+	printf("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	printf("\t user_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user_out));
+	if (user_out == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	const int32_t id = AllocUser(user_id);
+	if (id == 0)
+	{
+		return LibKernel::KERNEL_ERROR_ENOMEM;
+	}
+	*user_out = id;
+	printf("\t user     = %d\n", id);
+	return OK;
+}
+
+// sceAudioOut2UserDestroy (NID IaZXJ9M79uo)
+int KYTY_SYSV_ABI AudioOut2UserDestroy(int32_t user)
+{
+	PRINT_NAME();
+	printf("\t user = %d\n", user);
+	if (user < 1 || user > kMaxUsers || !g_users[user - 1].used)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	g_users[user - 1] = UserSlot {};
+	return OK;
+}
+
+int KYTY_SYSV_ABI AudioOut2LogAndOk(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+	PRINT_NAME();
+	printf("\t a0 = 0x%016" PRIx64 "\n", a0);
+	printf("\t a1 = 0x%016" PRIx64 "\n", a1);
+	printf("\t a2 = 0x%016" PRIx64 "\n", a2);
+	printf("\t a3 = 0x%016" PRIx64 "\n", a3);
+	return OK;
+}
+
+} // namespace AudioOut2
+
 namespace AudioIn {
 
 LIB_NAME("AudioIn", "AudioIn");

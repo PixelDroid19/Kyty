@@ -17,3 +17,8 @@ cmake-build-*/
 # Local run configs and generated logs (contain machine-specific game paths)
 _run/
 *.log
+
+# Private emulator runtime state and compatibility evidence
+_SaveData/
+_gpu_memory.db
+_scratch_playable/
