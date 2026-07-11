@@ -143,6 +143,47 @@ TEST(EmulatorGraphicsState, ResolvesViewportAndGenericScissorWithoutScreenState)
 	EXPECT_EQ(scissor.bottom, 216);
 }
 
+TEST(EmulatorGraphicsState, RequiresAnActiveDepthStencilOperationForTargetBinding)
+{
+	HW::DepthRenderTarget target;
+	target.z_info.tile_surface_enable = true;
+
+	HW::RenderControl render_control;
+	HW::DepthControl  depth_control;
+	depth_control.z_write_enable = true;
+
+	auto usage = State::ResolveDepthStencilUsage(target, render_control, depth_control);
+	EXPECT_FALSE(usage.target_active);
+	EXPECT_FALSE(usage.depth_write_enable);
+
+	depth_control.z_enable = true;
+	usage                  = State::ResolveDepthStencilUsage(target, render_control, depth_control);
+	EXPECT_TRUE(usage.target_active);
+	EXPECT_TRUE(usage.depth_write_enable);
+
+	depth_control.z_write_enable = false;
+	usage                        = State::ResolveDepthStencilUsage(target, render_control, depth_control);
+	EXPECT_TRUE(usage.target_active);
+	EXPECT_FALSE(usage.depth_write_enable);
+
+	depth_control                = {};
+	depth_control.stencil_enable = true;
+	usage                        = State::ResolveDepthStencilUsage(target, render_control, depth_control);
+	EXPECT_TRUE(usage.target_active);
+	EXPECT_FALSE(usage.depth_write_enable);
+
+	depth_control                         = {};
+	render_control.depth_compress_disable = true;
+	usage                                 = State::ResolveDepthStencilUsage(target, render_control, depth_control);
+	EXPECT_TRUE(usage.target_active);
+	EXPECT_FALSE(usage.depth_write_enable);
+
+	target.z_info.tile_surface_enable = false;
+	usage                             = State::ResolveDepthStencilUsage(target, render_control, depth_control);
+	EXPECT_FALSE(usage.target_active);
+	EXPECT_FALSE(usage.depth_write_enable);
+}
+
 TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 {
 	Loader::SymbolDatabase symbols;
