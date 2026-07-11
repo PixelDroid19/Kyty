@@ -11,6 +11,8 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Shader.h"
 
+#include <cstring>
+
 #ifdef KYTY_EMU_ENABLED
 
 #define KYTY_RECOMPILER_ARGS                                                                                                               \
@@ -42,23 +44,23 @@ constexpr char FUNC_FETCH_4[] = R"(
        ; p3 = attr.z;
        ; p4 = attr.w;
        ; }
-%fetch_f1_f1_f1_f1_vf4_ = OpFunction %void None %function_fetch4 
+%fetch_f1_f1_f1_f1_vf4_ = OpFunction %void None %function_fetch4
  %fetch_p1 = OpFunctionParameter %_ptr_Function_float
  %fetch_p2 = OpFunctionParameter %_ptr_Function_float
  %fetch_p3 = OpFunctionParameter %_ptr_Function_float
  %fetch_p4 = OpFunctionParameter %_ptr_Function_float
 %fetch_attr = OpFunctionParameter %_ptr_Function_v4float
 %fetch_label = OpLabel
- %fetch_20 = OpAccessChain %_ptr_Function_float %fetch_attr %uint_0 
+ %fetch_20 = OpAccessChain %_ptr_Function_float %fetch_attr %uint_0
  %fetch_21 = OpLoad %float %fetch_20
              OpStore %fetch_p1 %fetch_21
- %fetch_23 = OpAccessChain %_ptr_Function_float %fetch_attr %uint_1 
+ %fetch_23 = OpAccessChain %_ptr_Function_float %fetch_attr %uint_1
  %fetch_24 = OpLoad %float %fetch_23
              OpStore %fetch_p2 %fetch_24
- %fetch_26 = OpAccessChain %_ptr_Function_float %fetch_attr %uint_2 
+ %fetch_26 = OpAccessChain %_ptr_Function_float %fetch_attr %uint_2
  %fetch_27 = OpLoad %float %fetch_26
-             OpStore %fetch_p3 %fetch_27 
- %fetch_29 = OpAccessChain %_ptr_Function_float %fetch_attr %uint_3 
+             OpStore %fetch_p3 %fetch_27
+ %fetch_29 = OpAccessChain %_ptr_Function_float %fetch_attr %uint_3
  %fetch_30 = OpLoad %float %fetch_29
              OpStore %fetch_p4 %fetch_30
              OpReturn
@@ -133,7 +135,7 @@ constexpr char FUNC_FETCH_1[] = R"(
 constexpr char FUNC_ABS_DIFF[] = R"(
                     ; uint abs_diff(uint u1, uint u2)
                     ; {
-                    ; 	return max(u1,u2)-min(u1,u2);	
+                    ; 	return max(u1,u2)-min(u1,u2);
                     ; }
 %abs_diff = OpFunction %uint None %function_u_u
          %abs_diff_18 = OpFunctionParameter %uint
@@ -198,12 +200,12 @@ constexpr char FUNC_ADDC[] = R"(
 )";
 
 constexpr char FUNC_LSHL_ADD[] = R"(
-                  ; uvec2 lshl_add(uint a, uint b, uint n)                                
-                  ; {                                                                 
-                  ; 	uint cc = 0;                                                  
-                  ; 	uint sum = uaddCarry(a << n, b, cc);                           
+                  ; uvec2 lshl_add(uint a, uint b, uint n)
+                  ; {
+                  ; 	uint cc = 0;
+                  ; 	uint sum = uaddCarry(a << n, b, cc);
                   ; 	return uvec2(sum, ((a >> (32-n)) !=0) ? 1u : cc);
-                  ; }                                                                
+                  ; }
         %lshl_add = OpFunction %v2uint None %function_u2_u_u_u
          %ladd_25 = OpFunctionParameter %uint
          %ladd_26 = OpFunctionParameter %uint
@@ -246,7 +248,7 @@ constexpr char FUNC_MIPMAP[] = R"(
          %mipmap = OpFunction %v2uint None %function_u2_u_u_u
          %mipmap_33 = OpFunctionParameter %uint
          %mipmap_16 = OpFunctionParameter %uint
-         %mipmap_18 = OpFunctionParameter %uint		 
+         %mipmap_18 = OpFunctionParameter %uint
          %mipmap_14 = OpLabel
                OpSelectionMerge %mipmap_188 None
                OpSwitch %uint_0 %mipmap_191
@@ -573,7 +575,7 @@ constexpr char BUFFER_LOAD_FLOAT1[] = R"(
              ; 	p1 = buf[buffer_index].data[addr+0];
              ; }
 %buffer_load_float1 = OpFunction %void None %function_buffer_load_store_float1
-         %buf_l_f1_11 = OpFunctionParameter %_ptr_Function_float 
+         %buf_l_f1_11 = OpFunctionParameter %_ptr_Function_float
          %buf_l_f1_12 = OpFunctionParameter %_ptr_Function_int
          %buf_l_f1_13 = OpFunctionParameter %_ptr_Function_int
          %buf_l_f1_14 = OpFunctionParameter %_ptr_Function_int
@@ -597,7 +599,7 @@ constexpr char BUFFER_LOAD_FLOAT1[] = R"(
 
 constexpr char BUFFER_LOAD_FLOAT4[] = R"(
              ; Function buffer_load_float4
-             ;void buffer_load_float4(out float p1, out float p2, out float p3, out float p4, in int index, 
+             ;void buffer_load_float4(out float p1, out float p2, out float p3, out float p4, in int index,
              ;                                in int offset, in int stride, in int buffer_index)
              ;{
              ;	int addr = (offset + index * stride)/4;
@@ -620,13 +622,13 @@ constexpr char BUFFER_LOAD_FLOAT4[] = R"(
   %buf_l_f4_45 = OpLoad %int %buf_l_f4_26
   %buf_l_f4_46 = OpLoad %int %buf_l_f4_25
   %buf_l_f4_47 = OpLoad %int %buf_l_f4_27
-  %buf_l_f4_48 = OpIMul %int %buf_l_f4_46 %buf_l_f4_47 
-  %buf_l_f4_49 = OpIAdd %int %buf_l_f4_45 %buf_l_f4_48 
-  %buf_l_f4_51 = OpSDiv %int %buf_l_f4_49 %int_4 
+  %buf_l_f4_48 = OpIMul %int %buf_l_f4_46 %buf_l_f4_47
+  %buf_l_f4_49 = OpIAdd %int %buf_l_f4_45 %buf_l_f4_48
+  %buf_l_f4_51 = OpSDiv %int %buf_l_f4_49 %int_4
         OpStore %buf_l_f4_44 %buf_l_f4_51
   %buf_l_f4_58 = OpLoad %int %buf_l_f4_28
   %buf_l_f4_63 = OpAccessChain %_ptr_StorageBuffer_float %buf %buf_l_f4_58 %int_0 %buf_l_f4_51
-  %buf_l_f4_64 = OpLoad %float %buf_l_f4_63 
+  %buf_l_f4_64 = OpLoad %float %buf_l_f4_63
         OpStore %buf_l_f4_21 %buf_l_f4_64
   %buf_l_f4_65 = OpLoad %int %buf_l_f4_28
   %buf_l_f4_68 = OpIAdd %int %buf_l_f4_51 %int_1
@@ -644,7 +646,7 @@ constexpr char BUFFER_LOAD_FLOAT4[] = R"(
   %buf_l_f4_82 = OpLoad %float %buf_l_f4_81
         OpStore %buf_l_f4_24 %buf_l_f4_82
         OpReturn
-        OpFunctionEnd 
+        OpFunctionEnd
 			)";
 
 constexpr char BUFFER_STORE_FLOAT1[] = R"(
@@ -655,12 +657,12 @@ constexpr char BUFFER_STORE_FLOAT1[] = R"(
              ; }
 %buffer_store_float1 = OpFunction %void None %function_buffer_load_store_float1
          %buf_s_f1_18 = OpFunctionParameter %_ptr_Function_float
-         %buf_s_f1_19 = OpFunctionParameter %_ptr_Function_int 
-         %buf_s_f1_20 = OpFunctionParameter %_ptr_Function_int 
-         %buf_s_f1_21 = OpFunctionParameter %_ptr_Function_int 
-         %buf_s_f1_22 = OpFunctionParameter %_ptr_Function_int 
+         %buf_s_f1_19 = OpFunctionParameter %_ptr_Function_int
+         %buf_s_f1_20 = OpFunctionParameter %_ptr_Function_int
+         %buf_s_f1_21 = OpFunctionParameter %_ptr_Function_int
+         %buf_s_f1_22 = OpFunctionParameter %_ptr_Function_int
          %buf_s_f1_24 = OpLabel
-         %buf_s_f1_64 = OpVariable %_ptr_Function_int Function 
+         %buf_s_f1_64 = OpVariable %_ptr_Function_int Function
          %buf_s_f1_65 = OpLoad %int %buf_s_f1_20
          %buf_s_f1_66 = OpLoad %int %buf_s_f1_19
          %buf_s_f1_67 = OpLoad %int %buf_s_f1_21
@@ -752,7 +754,7 @@ constexpr char BUFFER_STORE_FLOAT4[] = R"(
 
 constexpr char TBUFFER_LOAD_FORMAT_XYZW[] = R"(
              ; Function tbuffer_load_format_xyzw
-             ; void tbuffer_load_format_xyzw(out float p1, out float p2, out float p3, out float p4, 
+             ; void tbuffer_load_format_xyzw(out float p1, out float p2, out float p3, out float p4,
              ;                               in int index, in int offset, in int stride, in int buffer_index, in int dfmt_nfmt)
              ; {
              ; 	if (dfmt_nfmt == 119) // dfmt = 14, nfmt = 7
@@ -821,12 +823,12 @@ constexpr char TBUFFER_LOAD_FORMAT_X[] = R"(
              ; }
 %tbuffer_load_format_x = OpFunction %void None %function_tbuffer_load_store_format_x
          %tbuf_l_f_x_26 = OpFunctionParameter %_ptr_Function_float
-         %tbuf_l_f_x_27 = OpFunctionParameter %_ptr_Function_int 
-         %tbuf_l_f_x_28 = OpFunctionParameter %_ptr_Function_int 
-         %tbuf_l_f_x_29 = OpFunctionParameter %_ptr_Function_int 
-         %tbuf_l_f_x_30 = OpFunctionParameter %_ptr_Function_int 
-         %tbuf_l_f_x_31 = OpFunctionParameter %_ptr_Function_int 
-         %tbuf_l_f_x_33 = OpLabel 
+         %tbuf_l_f_x_27 = OpFunctionParameter %_ptr_Function_int
+         %tbuf_l_f_x_28 = OpFunctionParameter %_ptr_Function_int
+         %tbuf_l_f_x_29 = OpFunctionParameter %_ptr_Function_int
+         %tbuf_l_f_x_30 = OpFunctionParameter %_ptr_Function_int
+         %tbuf_l_f_x_31 = OpFunctionParameter %_ptr_Function_int
+         %tbuf_l_f_x_33 = OpLabel
          %tbuf_l_f_x_82 = OpVariable %_ptr_Function_float Function
          %tbuf_l_f_x_83 = OpVariable %_ptr_Function_int Function
          %tbuf_l_f_x_85 = OpVariable %_ptr_Function_int Function
@@ -865,7 +867,7 @@ constexpr char TBUFFER_STORE_FORMAT_X[] = R"(
              ; 	}
              ; }
 %tbuffer_store_format_x = OpFunction %void None %function_tbuffer_load_store_format_x
-         %tbuf_s_f_x_34 = OpFunctionParameter %_ptr_Function_float 
+         %tbuf_s_f_x_34 = OpFunctionParameter %_ptr_Function_float
          %tbuf_s_f_x_35 = OpFunctionParameter %_ptr_Function_int
          %tbuf_s_f_x_36 = OpFunctionParameter %_ptr_Function_int
          %tbuf_s_f_x_37 = OpFunctionParameter %_ptr_Function_int
@@ -1085,7 +1087,7 @@ constexpr char SBUFFER_LOAD_DWORD_4[] = R"(
 )";
 
 constexpr char SBUFFER_LOAD_DWORD_8[] = R"(
-                     ; void sbuffer_load_dwordx8(out uint p1, out uint p2, out uint p3, out uint p4, 
+                     ; void sbuffer_load_dwordx8(out uint p1, out uint p2, out uint p3, out uint p4,
                      ;                           out uint p5, out uint p6, out uint p7, out uint p8, in int offset, in int buffer_index)
                      ; {
                      ; 	int addr = offset/4;
@@ -1166,7 +1168,7 @@ constexpr char SBUFFER_LOAD_DWORD_8[] = R"(
 )";
 
 constexpr char SBUFFER_LOAD_DWORD_16[] = R"(
-                     ; void sbuffer_load_dwordx16(out uint p1, out uint p2, out uint p3, out uint p4, 
+                     ; void sbuffer_load_dwordx16(out uint p1, out uint p2, out uint p3, out uint p4,
                      ;                            out uint p5, out uint p6, out uint p7, out uint p8,
                      ;                            out uint p9, out uint p10, out uint p11, out uint p12,
                      ;                            out uint p13, out uint p14, out uint p15, out uint p16, in int offset, in int buffer_index)
@@ -1314,12 +1316,12 @@ constexpr char SBUFFER_LOAD_DWORD_16[] = R"(
 
 constexpr char EMBEDDED_SHADER_VS_0[] = R"(
                ; #version 450
-               ; 
-               ; void main() 
+               ;
+               ; void main()
                ; {
                ; 	float x = gl_VertexIndex == 0 || gl_VertexIndex == 2 ? 1.0 : -1.0;
                ; 	float y = gl_VertexIndex == 2 || gl_VertexIndex == 3 ? -1.0 : 1.0;
-               ; 
+               ;
                ;     gl_Position = vec4(x,y, 0.0, 1.0);
                ; }
 
@@ -1397,9 +1399,9 @@ constexpr char EMBEDDED_SHADER_VS_0[] = R"(
 
 constexpr char EMBEDDED_SHADER_PS_0[] = R"(
                ; #version 450
-               ; 
+               ;
                ; layout(location = 0) out vec4 outColor;
-               ; 
+               ;
                ; void main() {
                ; 	outColor = vec4(0);
                ; }
@@ -1981,14 +1983,14 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword_Vdata1VaddrSvSoffsIdxen)
                OpStore %temp_int_3 %t153_<index>
         %t155_<index> = OpLoad %uint %<src1_value0>
         %t156_<index> = OpBitcast %int %t155_<index>
-               OpStore %temp_int_4 %t156_<index>                
+               OpStore %temp_int_4 %t156_<index>
                OpStore %temp_int_2 %<offset>
 		;%t206_<index> = OpLoad %uint %<src1_value3>
         ;%t208_<index> = OpShiftRightLogical %uint %t206_<index> %int_12
         ;%t210_<index> = OpBitwiseAnd %uint %t208_<index> %uint_127
         ;%t211_<index> = OpBitcast %int %t210_<index>
         ;       OpStore %temp_int_5 %t211_<index>
-        %t110_<index> = OpFunctionCall %void %buffer_load_float1 %<p0> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 
+        %t110_<index> = OpFunctionCall %void %buffer_load_float1 %<p0> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4
 )";
 		*dst_source += String8(text)
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
@@ -2043,14 +2045,14 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
                OpStore %temp_int_3 %t153_<index>
         %t155_<index> = OpLoad %uint %<src1_value0>
         %t156_<index> = OpBitcast %int %t155_<index>
-               OpStore %temp_int_4 %t156_<index>                
+               OpStore %temp_int_4 %t156_<index>
                OpStore %temp_int_2 %<offset>
 		%t206_<index> = OpLoad %uint %<src1_value3>
         %t208_<index> = OpShiftRightLogical %uint %t206_<index> %int_12
         %t210_<index> = OpBitwiseAnd %uint %t208_<index> %uint_127
         %t211_<index> = OpBitcast %int %t210_<index>
                OpStore %temp_int_5 %t211_<index>
-        %t110_<index> = OpFunctionCall %void %tbuffer_load_format_x %<p0> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5 
+        %t110_<index> = OpFunctionCall %void %tbuffer_load_format_x %<p0> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
 )";
 		*dst_source += String8(text)
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
@@ -2161,7 +2163,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen)
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
                OpSelectionMerge %t278_<index> None
-               OpBranchConditional %exec_lo_b_<index> %t277_<index> %t278_<index>       
+               OpBranchConditional %exec_lo_b_<index> %t277_<index> %t278_<index>
 		%t277_<index> = OpLabel
 
         %t100_<index> = OpLoad %float %<src0>
@@ -2174,16 +2176,16 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen)
                OpStore %temp_int_3 %t153_<index>
         %t155_<index> = OpLoad %uint %<src1_value0>
         %t156_<index> = OpBitcast %int %t155_<index>
-               OpStore %temp_int_4 %t156_<index>                
+               OpStore %temp_int_4 %t156_<index>
                OpStore %temp_int_2 %<offset>
 		;%t206_<index> = OpLoad %uint %<src1_value3>
         ;%t208_<index> = OpShiftRightLogical %uint %t206_<index> %int_12
         ;%t210_<index> = OpBitwiseAnd %uint %t208_<index> %uint_127
         ;%t211_<index> = OpBitcast %int %t210_<index>
         ;       OpStore %temp_int_5 %t211_<index>
-        %t110_<index> = OpFunctionCall %void %buffer_store_float1 %<p0> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 
+        %t110_<index> = OpFunctionCall %void %buffer_store_float1 %<p0> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4
 
-               OpBranch %t278_<index>			   
+               OpBranch %t278_<index>
         %t278_<index> = OpLabel
 )";
 		*dst_source += String8(text)
@@ -2230,7 +2232,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatX_Vdata1VaddrSvSoffsIdxen)
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
                OpSelectionMerge %t278_<index> None
-               OpBranchConditional %exec_lo_b_<index> %t277_<index> %t278_<index>       
+               OpBranchConditional %exec_lo_b_<index> %t277_<index> %t278_<index>
 		%t277_<index> = OpLabel
 
         %t100_<index> = OpLoad %float %<src0>
@@ -2243,16 +2245,16 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatX_Vdata1VaddrSvSoffsIdxen)
                OpStore %temp_int_3 %t153_<index>
         %t155_<index> = OpLoad %uint %<src1_value0>
         %t156_<index> = OpBitcast %int %t155_<index>
-               OpStore %temp_int_4 %t156_<index>                
+               OpStore %temp_int_4 %t156_<index>
                OpStore %temp_int_2 %<offset>
 		%t206_<index> = OpLoad %uint %<src1_value3>
         %t208_<index> = OpShiftRightLogical %uint %t206_<index> %int_12
         %t210_<index> = OpBitwiseAnd %uint %t208_<index> %uint_127
         %t211_<index> = OpBitcast %int %t210_<index>
                OpStore %temp_int_5 %t211_<index>
-        %t110_<index> = OpFunctionCall %void %tbuffer_store_format_x %<p0> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5 
+        %t110_<index> = OpFunctionCall %void %tbuffer_store_format_x %<p0> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
 
-               OpBranch %t278_<index>			   
+               OpBranch %t278_<index>
         %t278_<index> = OpLabel
 )";
 		*dst_source += String8(text)
@@ -2300,7 +2302,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen)
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
                OpSelectionMerge %t278_<index> None
-               OpBranchConditional %exec_lo_b_<index> %t277_<index> %t278_<index>       
+               OpBranchConditional %exec_lo_b_<index> %t277_<index> %t278_<index>
 		%t277_<index> = OpLabel
 
         %t100_<index> = OpLoad %float %<src0>
@@ -2313,16 +2315,16 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen)
                OpStore %temp_int_3 %t153_<index>
         %t155_<index> = OpLoad %uint %<src1_value0>
         %t156_<index> = OpBitcast %int %t155_<index>
-               OpStore %temp_int_4 %t156_<index>                
+               OpStore %temp_int_4 %t156_<index>
                OpStore %temp_int_2 %<offset>
 		%t206_<index> = OpLoad %uint %<src1_value3>
         %t208_<index> = OpShiftRightLogical %uint %t206_<index> %int_12
         %t210_<index> = OpBitwiseAnd %uint %t208_<index> %uint_127
         %t211_<index> = OpBitcast %int %t210_<index>
                OpStore %temp_int_5 %t211_<index>
-        %t110_<index> = OpFunctionCall %void %tbuffer_store_format_xy %<p0> %<p1> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5 
+        %t110_<index> = OpFunctionCall %void %tbuffer_store_format_xy %<p0> %<p1> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
 
-               OpBranch %t278_<index>			   
+               OpBranch %t278_<index>
         %t278_<index> = OpLabel
 )";
 		*dst_source += String8(text)
@@ -2519,11 +2521,38 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt0OffOffComprVmDone)
 	return true;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt0Vsrc0Vsrc1ComprVmDone)
+// Null MRT1-3 export (en=0, done=1): no channels written. Recognized as a
+// successful no-op so the export sequence can complete.
+KYTY_RECOMPILER_FUNC(Recompile_Exp_MrtNullDone)
 {
 	const auto& inst = code.GetInstructions().At(index);
+	EXIT_NOT_IMPLEMENTED(inst.src_num > 0);
+	return true;
+}
 
-	EXIT_NOT_IMPLEMENTED(spirv->GetPsInputInfo()->target_output_mode[0] != 4);
+// Compressed half2 MRT export → Location <mrt>. param[0] is the SPIR-V output
+// variable name (outColor, outColor1, …).
+KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	const auto* info = spirv->GetPsInputInfo();
+	EXIT_NOT_IMPLEMENTED(info == nullptr);
+	EXIT_NOT_IMPLEMENTED(param[0] == nullptr);
+
+	// MRT index from trailing digit of outColor / outColorN.
+	int mrt = 0;
+	if (param[0][0] != '\0' && strcmp(param[0], "outColor") != 0)
+	{
+		const char* p = param[0];
+		while (*p != '\0' && (*p < '0' || *p > '9'))
+		{
+			p++;
+		}
+		EXIT_NOT_IMPLEMENTED(*p == '\0');
+		mrt = *p - '0';
+	}
+	EXIT_NOT_IMPLEMENTED(mrt < 0 || mrt > 7);
+	EXIT_NOT_IMPLEMENTED(info->target_output_mode[mrt] != 4);
 
 	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.src[0]));
 	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.src[1]));
@@ -2535,33 +2564,50 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt0Vsrc0Vsrc1ComprVmDone)
 	// TODO() check EXEC
 
 	static const char* text = R"(
-         %t1_<index> = OpLoad %float %<src0> 
+         %t1_<index> = OpLoad %float %<src0>
          %t2_<index> = OpBitcast %uint %t1_<index>
          %t3_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t2_<index>
-         %t4_<index> = OpCompositeExtract %float %t3_<index> 0 
-         %t5_<index> = OpCompositeExtract %float %t3_<index> 1 
-         %t6_<index> = OpLoad %float %<src1> 
-         %t7_<index> = OpBitcast %uint %t6_<index> 
-         %t8_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t7_<index> 
-         %t9_<index> = OpCompositeExtract %float %t8_<index> 0 
-         %t10_<index> = OpCompositeExtract %float %t8_<index> 1 
-         %t11_<index> = OpCompositeConstruct %v4float %t4_<index> %t5_<index> %t9_<index> %t10_<index> 
-               OpStore %outColor %t11_<index>
+         %t4_<index> = OpCompositeExtract %float %t3_<index> 0
+         %t5_<index> = OpCompositeExtract %float %t3_<index> 1
+         %t6_<index> = OpLoad %float %<src1>
+         %t7_<index> = OpBitcast %uint %t6_<index>
+         %t8_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t7_<index>
+         %t9_<index> = OpCompositeExtract %float %t8_<index> 0
+         %t10_<index> = OpCompositeExtract %float %t8_<index> 1
+         %t11_<index> = OpCompositeConstruct %v4float %t4_<index> %t5_<index> %t9_<index> %t10_<index>
+               OpStore %<mrt> %t11_<index>
 )";
 
 	*dst_source += String8(text)
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                   .ReplaceStr("<src0>", src0_value.value)
-	                   .ReplaceStr("<src1>", src1_value.value);
+	                   .ReplaceStr("<src1>", src1_value.value)
+	                   .ReplaceStr("<mrt>", param[0]);
 
 	return true;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone)
+// Full float32 MRT export → Location <mrt>.
+KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3)
 {
 	const auto& inst = code.GetInstructions().At(index);
+	const auto* info = spirv->GetPsInputInfo();
+	EXIT_NOT_IMPLEMENTED(info == nullptr);
+	EXIT_NOT_IMPLEMENTED(param[0] == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(spirv->GetPsInputInfo()->target_output_mode[0] != 9);
+	int mrt = 0;
+	if (strcmp(param[0], "outColor") != 0)
+	{
+		const char* p = param[0];
+		while (*p != '\0' && (*p < '0' || *p > '9'))
+		{
+			p++;
+		}
+		EXIT_NOT_IMPLEMENTED(*p == '\0');
+		mrt = *p - '0';
+	}
+	EXIT_NOT_IMPLEMENTED(mrt < 0 || mrt > 7);
+	EXIT_NOT_IMPLEMENTED(info->target_output_mode[mrt] != 9);
 
 	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.src[0]));
 	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.src[1]));
@@ -2581,8 +2627,8 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone)
          %t1_<index> = OpLoad %float %<src1>
          %t2_<index> = OpLoad %float %<src2>
          %t3_<index> = OpLoad %float %<src3>
-         %t11_<index> = OpCompositeConstruct %v4float %t0_<index> %t1_<index> %t2_<index> %t3_<index> 
-               OpStore %outColor %t11_<index>
+         %t11_<index> = OpCompositeConstruct %v4float %t0_<index> %t1_<index> %t2_<index> %t3_<index>
+               OpStore %<mrt> %t11_<index>
 )";
 
 	*dst_source += String8(text)
@@ -2590,7 +2636,8 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone)
 	                   .ReplaceStr("<src0>", src0_value.value)
 	                   .ReplaceStr("<src1>", src1_value.value)
 	                   .ReplaceStr("<src2>", src2_value.value)
-	                   .ReplaceStr("<src3>", src3_value.value);
+	                   .ReplaceStr("<src3>", src3_value.value)
+	                   .ReplaceStr("<mrt>", param[0]);
 
 	return true;
 }
@@ -3137,7 +3184,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLzO_Vdata3Vaddr4StSsDmask7)
          %90_<index> = OpLoad %float %<src0_value0>
          %91_<index> = OpBitcast %int %90_<index>
          %98_<index> = OpBitFieldSExtract %int %91_<index> %int_0 %int_6
-        %101_<index> = OpBitFieldSExtract %int %91_<index> %int_8 %int_6		
+        %101_<index> = OpBitFieldSExtract %int %91_<index> %int_8 %int_6
         %102_<index> = OpCompositeConstruct %v2int %98_<index> %101_<index>
 
          %130_<index> = OpConvertSToF %v2float %102_<index>
@@ -3492,7 +3539,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B64_Sdst2Ssrc02Ssrc12)
 		return false;
 	}
 
-	static const char* text = R"(    
+	static const char* text = R"(
     <load0>
     <load1>
     <load2>
@@ -3568,7 +3615,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Lshl_B64_Sdst2Ssrc02Ssrc1)
      OpStore %temp_uint_3 %t1_<index>
      OpStore %temp_uint_4 %t22_<index>
 %t_<index> = OpFunctionCall %void %shift_left %temp_uint_0 %temp_uint_1 %temp_uint_2 %temp_uint_3 %temp_uint_4
-%r0_<index> = OpLoad %uint %temp_uint_0 
+%r0_<index> = OpLoad %uint %temp_uint_0
 %r1_<index> = OpLoad %uint %temp_uint_1
      OpStore %<dst0> %r0_<index>
      OpStore %<dst1> %r1_<index>
@@ -3636,7 +3683,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Lshr_B64_Sdst2Ssrc02Ssrc1)
      OpStore %temp_uint_3 %t1_<index>
      OpStore %temp_uint_4 %t22_<index>
 %t_<index> = OpFunctionCall %void %shift_right %temp_uint_0 %temp_uint_1 %temp_uint_2 %temp_uint_3 %temp_uint_4
-%r0_<index> = OpLoad %uint %temp_uint_0 
+%r0_<index> = OpLoad %uint %temp_uint_0
 %r1_<index> = OpLoad %uint %temp_uint_1
      OpStore %<dst0> %r0_<index>
      OpStore %<dst1> %r1_<index>
@@ -3703,7 +3750,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_U64_Sdst2Ssrc02Ssrc1)
  %ts_<index> = OpBitFieldUExtract %uint %t2_<index> %uint_16 %uint_7
 %tn0_<index> = OpISub %uint %uint_64 %to_<index>
 %ts2_<index> = OpExtInst %uint %GLSL_std_450 UMin %ts_<index> %tn0_<index>
-%tn1_<index> = OpISub %uint %uint_64 %ts2_<index> 
+%tn1_<index> = OpISub %uint %uint_64 %ts2_<index>
 %tn2_<index> = OpISub %uint %tn1_<index> %to_<index>
      OpStore %temp_uint_2 %t0_<index>
      OpStore %temp_uint_3 %t1_<index>
@@ -3711,7 +3758,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_U64_Sdst2Ssrc02Ssrc1)
 %tf1_<index> = OpFunctionCall %void %shift_left %temp_uint_0 %temp_uint_1 %temp_uint_2 %temp_uint_3 %temp_uint_4
      OpStore %temp_uint_4 %tn1_<index>
 %tf2_<index> = OpFunctionCall %void %shift_right %temp_uint_2 %temp_uint_3 %temp_uint_0 %temp_uint_1 %temp_uint_4
- %r0_<index> = OpLoad %uint %temp_uint_2 
+ %r0_<index> = OpLoad %uint %temp_uint_2
  %r1_<index> = OpLoad %uint %temp_uint_3
      OpStore %<dst0> %r0_<index>
      OpStore %<dst1> %r1_<index>
@@ -3916,7 +3963,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SAndSaveexecB64_Sdst2Ssrc02)
         %t194_<index> = OpBitwiseAnd %uint %t0_<index> %t190_<index>
                OpStore %exec_lo %t194_<index>
         %t197_<index> = OpBitwiseAnd %uint %t1_<index> %t191_<index>
-               OpStore %exec_hi %t197_<index>    
+               OpStore %exec_hi %t197_<index>
         <execz>
         <scc>
 )";
@@ -4010,29 +4057,45 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDword_SdstSvSoffset)
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[1]));
-
 		auto    dst_value   = operand_variable_to_str(inst.dst);
 		auto    src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		String8 offset      = spirv->GetConstant(inst.src[1]);
+		String8 index_str   = String8::FromPrintf("%u", index);
+		String8 load1;
 
 		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
 		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Uint);
 		EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+		if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+		{
+			return false;
+		}
 
-		static const char* text = R"(
+		static const char* text_plain = R"(
+        <load1>
         %t100_<index> = OpLoad %uint %<src0_value0>
         %t101_<index> = OpBitcast %int %t100_<index>
                OpStore %temp_int_2 %t101_<index>
-        %t102_<index> = OpBitcast %int %<offset>
+        %t102_<index> = OpBitcast %int %t1_<index>
                OpStore %temp_int_1 %t102_<index>
-        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword %<p0> %temp_int_1 %temp_int_2 
+        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword %<p0> %temp_int_1 %temp_int_2
 )";
+		static const char* text_imm = R"(
+        <load1>
+        %t1imm_<index> = OpIAdd %uint %t1_<index> %<imm>
+        %t100_<index> = OpLoad %uint %<src0_value0>
+        %t101_<index> = OpBitcast %int %t100_<index>
+               OpStore %temp_int_2 %t101_<index>
+        %t102_<index> = OpBitcast %int %t1imm_<index>
+               OpStore %temp_int_1 %t102_<index>
+        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword %<p0> %temp_int_1 %temp_int_2
+)";
+		const char* text = (inst.smem_imm_offset != 0) ? text_imm : text_plain;
 		*dst_source += String8(text)
-		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
-		                   .ReplaceStr("<offset>", offset)
+		                   .ReplaceStr("<load1>", load1)
+		                   .ReplaceStr("<index>", index_str)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value)
-		                   .ReplaceStr("<p0>", dst_value.value);
+		                   .ReplaceStr("<p0>", dst_value.value)
+		                   .ReplaceStr("<imm>", spirv->GetConstantUint(static_cast<uint32_t>(inst.smem_imm_offset)));
 
 		return true;
 	}
@@ -4047,33 +4110,47 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx2_Sdst2SvSoffset)
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[1]));
-
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
 		auto    src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		String8 offset      = spirv->GetConstant(inst.src[1]);
+		String8 index_str   = String8::FromPrintf("%u", index);
+		String8 load1;
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
 		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Uint);
 		EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+		if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+		{
+			return false;
+		}
 
-		EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
-
-		static const char* text = R"(
+		static const char* text_plain = R"(
+        <load1>
         %t100_<index> = OpLoad %uint %<src0_value0>
         %t101_<index> = OpBitcast %int %t100_<index>
                OpStore %temp_int_2 %t101_<index>
-        %t102_<index> = OpBitcast %int %<offset>
+        %t102_<index> = OpBitcast %int %t1_<index>
                OpStore %temp_int_1 %t102_<index>
-        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_2 %<p0> %<p1> %temp_int_1 %temp_int_2 
+        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_2 %<p0> %<p1> %temp_int_1 %temp_int_2
 )";
+		static const char* text_imm = R"(
+        <load1>
+        %t1imm_<index> = OpIAdd %uint %t1_<index> %<imm>
+        %t100_<index> = OpLoad %uint %<src0_value0>
+        %t101_<index> = OpBitcast %int %t100_<index>
+               OpStore %temp_int_2 %t101_<index>
+        %t102_<index> = OpBitcast %int %t1imm_<index>
+               OpStore %temp_int_1 %t102_<index>
+        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_2 %<p0> %<p1> %temp_int_1 %temp_int_2
+)";
+		const char* text = (inst.smem_imm_offset != 0) ? text_imm : text_plain;
 		*dst_source += String8(text)
-		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
-		                   .ReplaceStr("<offset>", offset)
+		                   .ReplaceStr("<load1>", load1)
+		                   .ReplaceStr("<index>", index_str)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value)
 		                   .ReplaceStr("<p0>", dst_value0.value)
-		                   .ReplaceStr("<p1>", dst_value1.value);
+		                   .ReplaceStr("<p1>", dst_value1.value)
+		                   .ReplaceStr("<imm>", spirv->GetConstantUint(static_cast<uint32_t>(inst.smem_imm_offset)));
 
 		return true;
 	}
@@ -4121,7 +4198,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
                OpStore %temp_int_2 %t101_<index>
         %t102_<index> = OpBitcast %int %t1_<index>
                OpStore %temp_int_1 %t102_<index>
-        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_4 %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2 
+        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_4 %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2
 )";
 		static const char* text_imm = R"(
         <load1>
@@ -4131,7 +4208,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
                OpStore %temp_int_2 %t101_<index>
         %t102_<index> = OpBitcast %int %t1imm_<index>
                OpStore %temp_int_1 %t102_<index>
-        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_4 %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2 
+        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_4 %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2
 )";
 		const char* text = (inst.smem_imm_offset != 0) ? text_imm : text_plain;
 		*dst_source += String8(text)
@@ -4180,7 +4257,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
                OpStore %temp_int_2 %t101_<index>
         %t102_<index> = OpBitcast %int %<offset>
                OpStore %temp_int_1 %t102_<index>
-        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_8 %<p0> %<p1> %<p2> %<p3> %<p4> %<p5> %<p6> %<p7> %temp_int_1 %temp_int_2 
+        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_8 %<p0> %<p1> %<p2> %<p3> %<p4> %<p5> %<p6> %<p7> %temp_int_1 %temp_int_2
 )";
 
 		for (int i = 0; i < 8; i++)
@@ -4228,7 +4305,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
                OpStore %temp_int_2 %t101_<index>
         %t102_<index> = OpBitcast %int %<offset>
                OpStore %temp_int_1 %t102_<index>
-        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_16 %<p0> %<p1> %<p2> %<p3> %<p4> %<p5> %<p6> %<p7> %<p8> %<p9> %<p10> %<p11> %<p12> %<p13> %<p14> %<p15> %temp_int_1 %temp_int_2 
+        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_16 %<p0> %<p1> %<p2> %<p3> %<p4> %<p5> %<p6> %<p7> %<p8> %<p9> %<p10> %<p11> %<p12> %<p13> %<p14> %<p15> %temp_int_1 %temp_int_2
 )";
 
 		for (int i = 0; i < 16; i++)
@@ -4709,7 +4786,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SMulkI32_SVdstSVsrc0)
 		return false;
 	}
 
-	static const char* text = R"(    
+	static const char* text = R"(
     <load0>
     <load_dst>
 %t_<index> = OpIMul %int %tdst_<index> %t0_<index>
@@ -4745,7 +4822,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SMovB32_SVdstSVsrc0)
 		return false;
 	}
 
-	static const char* text = R"(    
+	static const char* text = R"(
     <load0>
     OpStore %<dst> %t0_<index>
 )";
@@ -4781,7 +4858,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SMovB64_Sdst2Ssrc02)
 		return false;
 	}
 
-	static const char* text = R"(    
+	static const char* text = R"(
     <load0>
     <load1>
     OpStore %<dst0> %t0_<index>
@@ -4823,29 +4900,29 @@ KYTY_RECOMPILER_FUNC(Recompile_SSwappcB64_Sdst2Ssrc02)
 			{
 				case 1:
 					text = R"(
-				         %t1_<index> = OpLoad %float %<attr> 
-				                       OpStore %temp_float %t1_<index> 
+				         %t1_<index> = OpLoad %float %<attr>
+				                       OpStore %temp_float %t1_<index>
 				         %t2_<index> = OpFunctionCall %void %fetch_f1_f1_ %<p0> %temp_float
 				)";
 					break;
 				case 2:
 					text = R"(
-				         %t1_<index> = OpLoad %v2float %<attr> 
-				                       OpStore %temp_v2float %t1_<index> 
+				         %t1_<index> = OpLoad %v2float %<attr>
+				                       OpStore %temp_v2float %t1_<index>
 				         %t2_<index> = OpFunctionCall %void %fetch_f1_f1_vf2_ %<p0> %<p1> %temp_v2float
 				)";
 					break;
 				case 3:
 					text = R"(
-				         %t1_<index> = OpLoad %v3float %<attr> 
-				                       OpStore %temp_v3float %t1_<index> 
+				         %t1_<index> = OpLoad %v3float %<attr>
+				                       OpStore %temp_v3float %t1_<index>
 				         %t2_<index> = OpFunctionCall %void %fetch_f1_f1_f1_vf3_ %<p0> %<p1> %<p2> %temp_v3float
 				)";
 					break;
 				case 4:
 					text = R"(
-				         %t1_<index> = OpLoad %v4float %<attr> 
-				                       OpStore %temp_v4float %t1_<index> 
+				         %t1_<index> = OpLoad %v4float %<attr>
+				                       OpStore %temp_v4float %t1_<index>
 				         %t2_<index> = OpFunctionCall %void %fetch_f1_f1_f1_f1_vf4_ %<p0> %<p1> %<p2> %<p3> %temp_v4float
 				)";
 					break;
@@ -4991,10 +5068,10 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatX_Vdata1VaddrSvSoffsIdxenFloat1)
                OpStore %temp_int_3 %t153_<index>
         %t155_<index> = OpLoad %uint %<src1_value0>
         %t156_<index> = OpBitcast %int %t155_<index>
-               OpStore %temp_int_4 %t156_<index>                
-               OpStore %temp_int_2 %<offset> 
+               OpStore %temp_int_4 %t156_<index>
+               OpStore %temp_int_2 %<offset>
                OpStore %temp_int_5 %int_36
-        %t110_<index> = OpFunctionCall %void %tbuffer_load_format_x %<p0> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5 
+        %t110_<index> = OpFunctionCall %void %tbuffer_load_format_x %<p0> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
 )";
 		*dst_source += String8(text)
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
@@ -5047,10 +5124,10 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxenFloa
                OpStore %temp_int_3 %t153_<index>
         %t155_<index> = OpLoad %uint %<src1_value0>
         %t156_<index> = OpBitcast %int %t155_<index>
-               OpStore %temp_int_4 %t156_<index>                
-               OpStore %temp_int_2 %<offset> 
+               OpStore %temp_int_4 %t156_<index>
+               OpStore %temp_int_2 %<offset>
                OpStore %temp_int_5 %int_119
-        %t110_<index> = OpFunctionCall %void %tbuffer_load_format_xyzw %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5 
+        %t110_<index> = OpFunctionCall %void %tbuffer_load_format_xyzw %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
 )";
 		*dst_source += String8(text)
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
@@ -5111,10 +5188,10 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4Vaddr2SvSoffsOffenIdx
         %t155_<index> = OpLoad %uint %<src1_value0>
         %t156_<index> = OpBitcast %int %t155_<index>
       %offset_<index> = OpIAdd %int %to101_<index> %<offset>
-               OpStore %temp_int_4 %t156_<index>                
-               OpStore %temp_int_2 %offset_<index> 
+               OpStore %temp_int_4 %t156_<index>
+               OpStore %temp_int_2 %offset_<index>
                OpStore %temp_int_5 %int_119
-        %t110_<index> = OpFunctionCall %void %tbuffer_load_format_xyzw %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5 
+        %t110_<index> = OpFunctionCall %void %tbuffer_load_format_xyzw %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
 )";
 		*dst_source += String8(text)
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
@@ -5479,7 +5556,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCndmaskB32_VdstVsrc0Vsrc1Smask2)
 
 	// TODO() check VSKIP
 
-	static const char* text = R"(    
+	static const char* text = R"(
     <load0>
     <load1>
     %t22_<index> = OpLoad %uint %<src0>
@@ -5532,7 +5609,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPkrtzF16F32_SVdstSVsrc0SVsrc1)
 	// TODO() check VSKIP
 	// TODO() check DX10_CLAMP
 
-	static const char* text = R"(    
+	static const char* text = R"(
     <load0>
     <load1>
     %t0u_<index> = OpBitcast %uint %t0_<index>
@@ -5541,7 +5618,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPkrtzF16F32_SVdstSVsrc0SVsrc1)
     %t1u_<index> = OpBitcast %uint %t1_<index>
     %t1uu_<index> = OpBitwiseAnd %uint %t1u_<index> %uint_0xffffe000
     %t1f_<index> = OpBitcast %float %t1uu_<index>
-    %t2_<index> = OpCompositeConstruct %v2float %t0f_<index> %t1f_<index> 
+    %t2_<index> = OpCompositeConstruct %v2float %t0f_<index> %t1f_<index>
     %t3_<index> = OpExtInst %uint %GLSL_std_450 PackHalf2x16 %t2_<index>
     %t4_<index> = OpBitcast %float %t3_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
@@ -5584,7 +5661,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VInterpP2F32_VdstVsrcAttrChan)
 	// TODO() check VSKIP
 	// TODO() check EXEC
 
-	static const char* text = R"(    
+	static const char* text = R"(
          <load0>
          %t1_<index> = OpLoad %float %t0_<index>
                        OpStore %<dst> %t1_<index>
@@ -5615,7 +5692,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VInterpMovF32_VdstVsrcAttrChan)
 	// TODO() check VSKIP
 	// TODO() check EXEC
 
-	static const char* text = R"(    
+	static const char* text = R"(
          <load0>
          %t1_<index> = OpLoad %float %t0_<index>
                        OpStore %<dst> %t1_<index>
@@ -5725,7 +5802,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VMbcntHiU32B32_SVdstSVsrc0SVsrc1)
 
 	// TODO() check VSKIP
 
-	static const char* text = R"(    
+	static const char* text = R"(
 	    <load0>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
@@ -5765,7 +5842,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VMbcntLoU32B32_SVdstSVsrc0SVsrc1)
 
 	// TODO() check VSKIP
 
-	static const char* text = R"(    
+	static const char* text = R"(
 	    <load0>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
@@ -5804,7 +5881,7 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_B32_SVdstSVsrc0)
 
 	// TODO() check VSKIP
 
-	static const char* text = R"(    
+	static const char* text = R"(
               <load0>
               <param0>
               %tf_<index> = OpBitcast %float %t_<index>
@@ -5845,7 +5922,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovB32_SVdstSVsrc0)
 
 	// TODO() check VSKIP
 
-	static const char* text = R"(    
+	static const char* text = R"(
     <load0>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
@@ -5954,7 +6031,7 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_SVdstSVsrc0)
 	// TODO() check DX10_CLAMP
 	// TODO() check IEEE
 
-	static const char* text = R"(    
+	static const char* text = R"(
     <load0>
     <param0>
     <param1>
@@ -6119,7 +6196,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvt_XXX_F32_SVdstSVsrc0)
 	// TODO() check EXEC
 	// TODO() check SP_DENORM_IN
 
-	static const char* text = R"(    
+	static const char* text = R"(
     <load0>
     <param0>
     <param1>
@@ -6163,7 +6240,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32_XXX_SVdstSVsrc0)
 	// TODO() check VSKIP
 	// TODO() check SP_ROUND
 
-	static const char* text = R"(    
+	static const char* text = R"(
     <load0>
     <param0>
     <param1>
@@ -6290,7 +6367,7 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1)
         %t208_<index> = OpCompositeExtract %uint %t_<index> 1
         %t209_<index> = OpCompositeExtract %uint %t_<index> 0
         %t210_<index> = OpBitcast %float %t209_<index>
-               OpStore %<dst> %t210_<index>		   
+               OpStore %<dst> %t210_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
@@ -6333,29 +6410,29 @@ KYTY_RECOMPILER_FUNC(Recompile_Fetch)
 		{
 			case 1:
 				text = R"(
-				         %t1_<index> = OpLoad %float %<attr> 
-				                       OpStore %temp_float %t1_<index> 
+				         %t1_<index> = OpLoad %float %<attr>
+				                       OpStore %temp_float %t1_<index>
 				         %t2_<index> = OpFunctionCall %void %fetch_f1_f1_ %<p0> %temp_float
 				)";
 				break;
 			case 2:
 				text = R"(
-				         %t1_<index> = OpLoad %v2float %<attr> 
-				                       OpStore %temp_v2float %t1_<index> 
+				         %t1_<index> = OpLoad %v2float %<attr>
+				                       OpStore %temp_v2float %t1_<index>
 				         %t2_<index> = OpFunctionCall %void %fetch_f1_f1_vf2_ %<p0> %<p1> %temp_v2float
 				)";
 				break;
 			case 3:
 				text = R"(
-				         %t1_<index> = OpLoad %v3float %<attr> 
-				                       OpStore %temp_v3float %t1_<index> 
+				         %t1_<index> = OpLoad %v3float %<attr>
+				                       OpStore %temp_v3float %t1_<index>
 				         %t2_<index> = OpFunctionCall %void %fetch_f1_f1_f1_vf3_ %<p0> %<p1> %<p2> %temp_v3float
 				)";
 				break;
 			case 4:
 				text = R"(
-				         %t1_<index> = OpLoad %v4float %<attr> 
-				                       OpStore %temp_v4float %t1_<index> 
+				         %t1_<index> = OpLoad %v4float %<attr>
+				                       OpStore %temp_v4float %t1_<index>
 				         %t2_<index> = OpFunctionCall %void %fetch_f1_f1_f1_f1_vf4_ %<p0> %<p1> %<p2> %<p3> %temp_v4float
 				)";
 				break;
@@ -6448,8 +6525,17 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_DsConsume_VdstGds,                          ShaderInstructionType::DsConsume,           ShaderInstructionFormat::VdstGds,                        {""}},
 
     {Recompile_Exp_Mrt0OffOffComprVmDone,                  ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0OffOffComprVmDone,          {""}},
-    {Recompile_Exp_Mrt0Vsrc0Vsrc1ComprVmDone,              ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone,      {""}},
-    {Recompile_Exp_Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone,         ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone, {""}},
+    {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt1OffOffComprVmDone,          {""}},
+    {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt2OffOffComprVmDone,          {""}},
+    {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt3OffOffComprVmDone,          {""}},
+    {Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1,                   ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone,      {"outColor"}},
+    {Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1,                   ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt1Vsrc0Vsrc1ComprVm,          {"outColor1"}},
+    {Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1,                   ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt2Vsrc0Vsrc1ComprVm,          {"outColor2"}},
+    {Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1,                   ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt3Vsrc0Vsrc1ComprVm,          {"outColor3"}},
+    {Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3,          ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone, {"outColor"}},
+    {Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3,          ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm,     {"outColor1"}},
+    {Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3,          ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm,     {"outColor2"}},
+    {Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3,          ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm,     {"outColor3"}},
     {Recompile_Exp_Param_XXX_Vsrc0Vsrc1Vsrc2Vsrc3,         ShaderInstructionType::Exp,                 ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3,     {"param0"}},
     {Recompile_Exp_Param_XXX_Vsrc0Vsrc1Vsrc2Vsrc3,         ShaderInstructionType::Exp,                 ShaderInstructionFormat::Param1Vsrc0Vsrc1Vsrc2Vsrc3,     {"param1"}},
     {Recompile_Exp_Param_XXX_Vsrc0Vsrc1Vsrc2Vsrc3,         ShaderInstructionType::Exp,                 ShaderInstructionFormat::Param2Vsrc0Vsrc1Vsrc2Vsrc3,     {"param2"}},
@@ -6943,11 +7029,11 @@ void Spirv::WriteHeader()
 {
 	static const char* header = R"(
                 ; Header
-                OpCapability Shader  
-                OpCapability ImageQuery              
+                OpCapability Shader
+                OpCapability ImageQuery
                 <Extensions>
                 <Imports>
-                OpMemoryModel Logical GLSL450 
+                OpMemoryModel Logical GLSL450
                 OpEntryPoint <Type> %main "main" <Variables>
                 <ExecutionModes>
 )";
@@ -6998,9 +7084,18 @@ void Spirv::WriteHeader()
 	switch (m_code.GetType())
 	{
 		case ShaderType::Pixel:
+			// Location 0 always uses %outColor (legacy name). Additional RTs that
+			// have a non-zero target_output_mode are declared as %outColorN.
 			vars.Add("%outColor");
 			if (m_ps_input_info != nullptr)
 			{
+				for (int rt = 1; rt < 8; rt++)
+				{
+					if (m_ps_input_info->target_output_mode[rt] != 0)
+					{
+						vars.Add(String8::FromPrintf("%%outColor%d", rt));
+					}
+				}
 				for (uint32_t i = 0; i < m_ps_input_info->input_num; i++)
 				{
 					vars.Add(String8::FromPrintf("%%attr%d", i));
@@ -7080,7 +7175,7 @@ void Spirv::WriteAnnotations()
                OpDecorate %gl_VertexIndex BuiltIn VertexIndex
                OpDecorate %gl_InstanceIndex BuiltIn InstanceIndex
                OpMemberDecorate %gl_PerVertex 0 BuiltIn Position
-               OpMemberDecorate %gl_PerVertex 1 BuiltIn PointSize 
+               OpMemberDecorate %gl_PerVertex 1 BuiltIn PointSize
                OpMemberDecorate %gl_PerVertex 2 BuiltIn ClipDistance
                OpMemberDecorate %gl_PerVertex 3 BuiltIn CullDistance
                OpDecorate %gl_PerVertex Block
@@ -7102,6 +7197,13 @@ void Spirv::WriteAnnotations()
 		case ShaderType::Pixel:
 			if (m_ps_input_info != nullptr)
 			{
+				for (int rt = 1; rt < 8; rt++)
+				{
+					if (m_ps_input_info->target_output_mode[rt] != 0)
+					{
+						vars.Add(String8::FromPrintf("OpDecorate %%outColor%d Location %d", rt, rt));
+					}
+				}
 				for (uint32_t i = 0; i < m_ps_input_info->input_num; i++)
 				{
 					EXIT_NOT_IMPLEMENTED((m_ps_input_info->interpolator_settings[i] & ~static_cast<uint32_t>(0x41fu)) != 0);
@@ -7225,15 +7327,15 @@ void Spirv::WriteTypes()
 {
 	static const char* types = R"(
                                ; Types
-                         %void = OpTypeVoid 
+                         %void = OpTypeVoid
                         %float = OpTypeFloat 32
-                          %int = OpTypeInt 32 1 
+                          %int = OpTypeInt 32 1
                          %uint = OpTypeInt 32 0
-                         %bool = OpTypeBool 
+                         %bool = OpTypeBool
                       %v2float = OpTypeVector %float 2
-                      %v3float = OpTypeVector %float 3 
+                      %v3float = OpTypeVector %float 3
                       %v4float = OpTypeVector %float 4
-                       %v2uint = OpTypeVector %uint 2 
+                       %v2uint = OpTypeVector %uint 2
                        %v3uint = OpTypeVector %uint 3
                        %v4uint = OpTypeVector %uint 4
                         %v2int = OpTypeVector %int 2
@@ -7257,9 +7359,9 @@ void Spirv::WriteTypes()
      %_ptr_StorageBuffer_float = OpTypePointer StorageBuffer %float
       %_ptr_StorageBuffer_uint = OpTypePointer StorageBuffer %uint
                      %ResTypeI = OpTypeStruct %int %int
-                     %ResTypeU = OpTypeStruct %uint %uint                       
+                     %ResTypeU = OpTypeStruct %uint %uint
                 %function_void = OpTypeFunction %void
-              %function_fetch1 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float 
+              %function_fetch1 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float
               %function_fetch2 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_v2float
               %function_fetch3 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_v3float
               %function_fetch4 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_v4float
@@ -7282,10 +7384,10 @@ void Spirv::WriteTypes()
        %function_sbuffer_load_dword_16 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
 )";
 
-	static const char* pixel_types = R"(	
+	static const char* pixel_types = R"(
 )";
 
-	static const char* vertex_types = R"(	
+	static const char* vertex_types = R"(
             %array_length = OpConstant %uint 1
         %int_per_vertex_0 = OpConstant %int 0
        %_arr_float_uint_1 = OpTypeArray %float %array_length
@@ -7293,7 +7395,7 @@ void Spirv::WriteTypes()
 %_ptr_Output_gl_PerVertex = OpTypePointer Output %gl_PerVertex
 )";
 
-	static const char* compute_types = R"(	
+	static const char* compute_types = R"(
 )";
 
 	m_source += types;
@@ -7306,7 +7408,7 @@ void Spirv::WriteTypes()
 		default: EXIT("unknown type: %s\n", Core::EnumName8(m_code.GetType()).c_str()); break;
 	}
 
-	static const char* storage_buffers_types = R"(	
+	static const char* storage_buffers_types = R"(
                                %buffers_runtimearr_float = OpTypeRuntimeArray %float
                                            %BufferObject = OpTypeStruct %buffers_runtimearr_float
                          %buffers_num_uint_<buffers_num> = OpConstant %uint <buffers_num>
@@ -7320,7 +7422,7 @@ void Spirv::WriteTypes()
                      %_arr_ImageS_uint_<buffers_num> = OpTypeArray %ImageS %textures2D_S_uint_<buffers_num>
 %_ptr_UniformConstant__arr_ImageS_uint_<buffers_num> = OpTypePointer UniformConstant %_arr_ImageS_uint_<buffers_num>
                         %_ptr_UniformConstant_ImageS = OpTypePointer UniformConstant %ImageS
-                                       %SampledImage = OpTypeSampledImage %ImageS	
+                                       %SampledImage = OpTypeSampledImage %ImageS
 )";
 
 	static const char* textures_loaded_types = R"(
@@ -7328,10 +7430,10 @@ void Spirv::WriteTypes()
                     %textures2D_L_uint_<buffers_num> = OpConstant %uint <buffers_num>
                      %_arr_ImageL_uint_<buffers_num> = OpTypeArray %ImageL %textures2D_L_uint_<buffers_num>
 %_ptr_UniformConstant__arr_ImageL_uint_<buffers_num> = OpTypePointer UniformConstant %_arr_ImageL_uint_<buffers_num>
-                        %_ptr_UniformConstant_ImageL = OpTypePointer UniformConstant %ImageL	
+                        %_ptr_UniformConstant_ImageL = OpTypePointer UniformConstant %ImageL
 )";
 
-	static const char* samplers_types = R"(	
+	static const char* samplers_types = R"(
                                              %Sampler = OpTypeSampler
                          %samplers_uint_<buffers_num> = OpConstant %uint <buffers_num>
                      %_arr_Sampler_uint_<buffers_num> = OpTypeArray %Sampler %samplers_uint_<buffers_num>
@@ -7339,18 +7441,18 @@ void Spirv::WriteTypes()
                         %_ptr_UniformConstant_Sampler = OpTypePointer UniformConstant %Sampler
 )";
 
-	static const char* gds_types = R"(	
+	static const char* gds_types = R"(
             %gds_runtimearr_uint = OpTypeRuntimeArray %uint
                     %GDS = OpTypeStruct %gds_runtimearr_uint
             %_ptr_StorageBuffer_GDS = OpTypePointer StorageBuffer %GDS
 )";
 
-	static const char* vsharp_types = R"(	
+	static const char* vsharp_types = R"(
          %vsharp_buffers_num_uint_<buffers_num> = OpConstant %uint <buffers_num>
                              %vsharp_num_uint_4 = OpConstant %uint 4
                         %vsharp_arr_uint_uint_4 = OpTypeArray %uint %vsharp_num_uint_4
 %vsharp_arr__arr_uint_uint_4_uint_<buffers_num> = OpTypeArray %vsharp_arr_uint_uint_4 %vsharp_buffers_num_uint_<buffers_num>
-                                %BufferResource = OpTypeStruct %vsharp_arr__arr_uint_uint_4_uint_<buffers_num>           
+                                %BufferResource = OpTypeStruct %vsharp_arr__arr_uint_uint_4_uint_<buffers_num>
               %_ptr_PushConstant_BufferResource = OpTypePointer PushConstant %BufferResource
                         %_ptr_PushConstant_uint = OpTypePointer PushConstant %uint
 )";
@@ -7391,7 +7493,7 @@ void Spirv::WriteConstants()
 {
 	FindConstants();
 
-	static const char* comment = R"(	
+	static const char* comment = R"(
     ; Constants
          %true = OpConstantTrue %bool
         %false = OpConstantFalse %bool
@@ -7411,24 +7513,35 @@ void Spirv::WriteGlobalVariables()
 	static const char* pixel_variables   = R"(
               ;Variables
    %outColor = OpVariable %_ptr_Output_v4float Output
-               <Variables> 
+               <Variables>
 )";
 	static const char* vertex_variables  = R"(
               ;Variables
-    %gl_VertexIndex = OpVariable %_ptr_Input_int Input 
+    %gl_VertexIndex = OpVariable %_ptr_Input_int Input
   %gl_InstanceIndex = OpVariable %_ptr_Input_int Input
       %outPerVertex = OpVariable %_ptr_Output_gl_PerVertex Output
-            ; %param0 = OpVariable %_ptr_Output_v4float Output            
+            ; %param0 = OpVariable %_ptr_Output_v4float Output
                <Variables>
 )";
 	static const char* compute_variables = R"(
               ;Variables
-%gl_LocalInvocationID = OpVariable %_ptr_Input_v3uint Input 
-      %gl_WorkGroupID = OpVariable %_ptr_Input_v3uint Input           
+%gl_LocalInvocationID = OpVariable %_ptr_Input_v3uint Input
+      %gl_WorkGroupID = OpVariable %_ptr_Input_v3uint Input
                <Variables>
 )";
 
 	Core::StringList8 vars;
+
+	if (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr)
+	{
+		for (int rt = 1; rt < 8; rt++)
+		{
+			if (m_ps_input_info->target_output_mode[rt] != 0)
+			{
+				vars.Add(String8::FromPrintf("%%outColor%d = OpVariable %%_ptr_Output_v4float Output", rt));
+			}
+		}
+	}
 
 	if (m_bind != nullptr)
 	{
@@ -7518,7 +7631,7 @@ void Spirv::WriteMainProlog()
                    ; Function main
                    ; Prolog
        %main       = OpFunction %void None %function_void
-       %main_label = OpLabel 
+       %main_label = OpLabel
 )";
 
 	m_source += text;
@@ -7529,7 +7642,7 @@ void Spirv::WriteLocalVariables()
 {
 	FindVariables();
 
-	static const char* comment = R"(	
+	static const char* comment = R"(
     ; Registers
 )";
 
@@ -7568,10 +7681,10 @@ void Spirv::WriteLocalVariables()
 		static const char* text = R"(
        %vertex_index_int = OpLoad %int %gl_VertexIndex
            %vertex_index = OpBitcast %float %vertex_index_int
-                           OpStore %<v> %vertex_index           
+                           OpStore %<v> %vertex_index
        %instance_index_int = OpLoad %int %gl_InstanceIndex
            %instance_index = OpBitcast %float %instance_index_int
-                           OpStore %<i> %instance_index           
+                           OpStore %<i> %instance_index
 )";
 		if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog)
 		{
@@ -7593,13 +7706,13 @@ void Spirv::WriteLocalVariables()
 	{
 		if (m_ps_input_info != nullptr && m_ps_input_info->ps_pos_xy)
 		{
-			static const char* text = R"(  
+			static const char* text = R"(
          %FragCoord_px = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0
          %FragCoord_x = OpLoad %float %FragCoord_px
                OpStore %v2 %FragCoord_x
          %FragCoord_py = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_1
          %FragCoord_y = OpLoad %float %FragCoord_py
-               OpStore %v3 %FragCoord_y     
+               OpStore %v3 %FragCoord_y
 )";
 			m_source += text;
 		}
@@ -7611,13 +7724,13 @@ void Spirv::WriteLocalVariables()
 		%LocalInvocationID_114_<i> = OpAccessChain %_ptr_Input_uint %gl_LocalInvocationID %uint_<i>
         %LocalInvocationID_115_<i> = OpLoad %uint %LocalInvocationID_114_<i>
         %LocalInvocationID_116_<i> = OpBitcast %float %LocalInvocationID_115_<i>
-               OpStore %v<i> %LocalInvocationID_116_<i>		   
+               OpStore %v<i> %LocalInvocationID_116_<i>
 )";
 
 		static const char* text_group_id = R"(
         %WorkGroupID_120_<i> = OpAccessChain %_ptr_Input_uint %gl_WorkGroupID %uint_<i>
         %WorkGroupID_121_<i> = OpLoad %uint %WorkGroupID_120_<i>
-               OpStore %<WorkGroupReg> %WorkGroupID_121_<i>       
+               OpStore %<WorkGroupReg> %WorkGroupID_121_<i>
 )";
 		if (m_cs_input_info != nullptr)
 		{
@@ -8217,6 +8330,11 @@ void Spirv::FindConstants()
 			{
 				AddConstant(inst.src[i]);
 			}
+		}
+		// SMEM dual-offset path adds SGPR soffset + signed imm in SPIR-V.
+		if (inst.smem_imm_offset != 0)
+		{
+			AddConstantUint(static_cast<uint32_t>(inst.smem_imm_offset));
 		}
 	}
 	// Attribute-table dwords materialized by SLoad from fetch_attrib_reg.
