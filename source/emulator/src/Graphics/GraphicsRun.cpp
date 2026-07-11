@@ -3544,6 +3544,18 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_64)
 	auto  func = buffer[6];
 	auto  poll = buffer[7];
 
+	// Post-Play path encodes ReleaseMem(data_sel=1,data=1,addr=null) then
+	// WaitRegMem(size=0,op=0,cmp=3,ref=1,mask=~0,addr=null) as a label fence.
+	// Guest returns the packet header (SizeDw consumes it) but does not call
+	// GetDataPacketPayloadAddress/EopPatch on these packets before submit, so
+	// the address field stays zero. Fail with the full body for the next
+	// patching/ABI investigation rather than dereferencing null.
+	if (addr == nullptr)
+	{
+		EXIT("WaitRegMem64 null addr body=%08x %08x %08x %08x %08x %08x %08x %08x\n", buffer[0], buffer[1], buffer[2], buffer[3],
+		     buffer[4], buffer[5], buffer[6], buffer[7]);
+	}
+
 	cp->WaitRegMem64(func, addr, ref, mask, poll);
 
 	return 8;

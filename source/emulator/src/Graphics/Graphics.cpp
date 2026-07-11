@@ -1869,7 +1869,25 @@ int KYTY_SYSV_ABI GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t*
 	// path with the same relative payload offset.
 	EXIT_NOT_IMPLEMENTED(type != 0 && type != 1);
 
-	*addr = cmd + 2;
+	const uint32_t header = cmd[0];
+	const uint32_t r      = KYTY_PM4_R(header);
+	printf("\t header = 0x%08" PRIx32 " r = 0x%02" PRIx32 "\n", header, r);
+
+	// WaitMem stores the 64-bit address in the first body dwords (cmd+1).
+	// ReleaseMem stores action/gcr then address at cmd+3 (matches EopPatch).
+	// Default remains cmd+2 for WriteData / SET_SH_REG-style consumers.
+	if (r == Pm4::R_WAIT_MEM_64 || r == Pm4::R_WAIT_MEM_32)
+	{
+		*addr = cmd + 1;
+	}
+	else if (r == Pm4::R_RELEASE_MEM)
+	{
+		*addr = cmd + 3;
+	}
+	else
+	{
+		*addr = cmd + 2;
+	}
 
 	return OK;
 }
