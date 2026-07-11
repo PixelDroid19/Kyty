@@ -11,6 +11,9 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
+#include <cstring>
+#include <vector>
+
 UT_BEGIN(EmulatorGraphicsPackets);
 
 using namespace Libs::Graphics;
@@ -463,6 +466,71 @@ TEST(EmulatorGraphicsPackets, SizesGen5RotatedXTexture800x320)
 	TileGetTextureSize2(56, 800, 320, 800, 1, 27, &size, nullptr, nullptr);
 	EXPECT_EQ(size.size, 0x150000u);
 	EXPECT_EQ(size.align, 65536u);
+}
+
+// SW_64KB_R_X within-block addressing for 4 BPE must be a bijection over a
+// 128x128 block and must keep every texel inside the 64 KiB block. Golden low
+// offsets come from Mesa MIT ADDRLIB (16-pipe, no RbPlus) pattern evaluation.
+TEST(EmulatorGraphicsPackets, Sw64kRx4bppWithinBlockIsBijective)
+{
+	constexpr uint32_t k_block = 128u;
+	bool               seen[65536] {};
+	uint32_t           unique = 0;
+	for (uint32_t y = 0; y < k_block; y++)
+	{
+		for (uint32_t x = 0; x < k_block; x++)
+		{
+			const uint64_t off = TileGetSw64kRxOffset(x, y, k_block, 4);
+			ASSERT_LT(off, 65536u);
+			ASSERT_EQ(off % 4u, 0u);
+			ASSERT_FALSE(seen[off]);
+			seen[off] = true;
+			unique++;
+		}
+	}
+	EXPECT_EQ(unique, k_block * k_block);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 0, k_block, 4), 0u);
+	EXPECT_EQ(TileGetSw64kRxOffset(1, 0, k_block, 4), 4u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x10u);
+	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0x14u);
+}
+
+// Detile round-trip: tile a gradient with the inverse of the offset function
+// and recover the original linear image.
+TEST(EmulatorGraphicsPackets, Sw64kRx4bppDetileRoundTrip)
+{
+	constexpr uint32_t k_w     = 160u;
+	constexpr uint32_t k_h     = 96u;
+	constexpr uint32_t k_bpp   = 4u;
+	TileSizeAlign      size {};
+	TileGetRenderTargetSize(k_w, k_h, k_w, 0x1b, k_bpp, &size);
+	ASSERT_GT(size.size, 0u);
+
+	std::vector<uint8_t> linear(static_cast<size_t>(k_w) * k_h * k_bpp);
+	std::vector<uint8_t> tiled(size.size, 0);
+	std::vector<uint8_t> out(linear.size(), 0xAAu);
+
+	for (uint32_t y = 0; y < k_h; y++)
+	{
+		for (uint32_t x = 0; x < k_w; x++)
+		{
+			const uint32_t v   = (x * 3u + y * 5u) & 0xffu;
+			const size_t   idx = (static_cast<size_t>(y) * k_w + x) * k_bpp;
+			linear[idx + 0]    = static_cast<uint8_t>(v);
+			linear[idx + 1]    = static_cast<uint8_t>(v ^ 0x11u);
+			linear[idx + 2]    = static_cast<uint8_t>(v ^ 0x22u);
+			linear[idx + 3]    = 0xffu;
+			const uint64_t off = TileGetSw64kRxOffset(x, y, k_w, k_bpp);
+			ASSERT_LT(off + k_bpp, static_cast<uint64_t>(size.size) + 1u);
+			std::memcpy(tiled.data() + off, linear.data() + idx, k_bpp);
+		}
+	}
+
+	TileConvertSw64kRxToLinear(out.data(), tiled.data(), k_w, k_h, k_w, k_bpp);
+	EXPECT_EQ(out, linear);
+
+	// Multi-block: second block along X starts at 64 KiB for 128-wide blocks.
+	EXPECT_EQ(TileGetSw64kRxOffset(128, 0, k_w, k_bpp), 65536u);
 }
 
 
