@@ -10,6 +10,8 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <cstdlib>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Controller {
@@ -386,9 +388,24 @@ void ControllerAxis(int id, Axis axis, int value)
 	g_controller->Axis(id, axis, value);
 }
 
+// SCE_PAD_ERROR_* (public Sony codes; used for ordinary guest failures, not EXIT).
+constexpr int PAD_ERROR_INVALID_HANDLE     = static_cast<int>(0x80920003u);
+constexpr int PAD_ERROR_NOT_INITIALIZED    = static_cast<int>(0x80920005u);
+constexpr int PAD_ERROR_DEVICE_NO_HANDLE   = static_cast<int>(0x80920008u);
+
+// Virtual keyboard/gamepad id: always connected after PadOpen so titles see a pad
+// without requiring a physical SDL controller (playability on hosts with only a keyboard).
+constexpr int kVirtualPadId = 0;
+constexpr int kPrimaryHandle = 1;
+
+static bool g_pad_initialized = false;
+static bool g_pad_opened      = false;
+
 int KYTY_SYSV_ABI PadInit()
 {
 	PRINT_NAME();
+
+	g_pad_initialized = true;
 
 	return OK;
 }
@@ -397,14 +414,63 @@ int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param)
 {
 	PRINT_NAME();
 
+	if (!g_pad_initialized)
+	{
+		return PAD_ERROR_NOT_INITIALIZED;
+	}
+
+	// user_id -1: no logged-in user → no handle (same contract as SCE docs / other HLEs).
+	if (user_id == -1)
+	{
+		return PAD_ERROR_DEVICE_NO_HANDLE;
+	}
+
 	EXIT_NOT_IMPLEMENTED(user_id != 1);
 	EXIT_NOT_IMPLEMENTED(type != 0);
 	EXIT_NOT_IMPLEMENTED(index != 0);
 	EXIT_NOT_IMPLEMENTED(param != nullptr);
 
-	int handle = 1;
+	// Ensure a virtual pad is present for keyboard input and for connected=true.
+	EXIT_IF(g_controller == nullptr);
+	bool connected       = false;
+	int  connected_count = 0;
+	g_controller->GetConnectionInfo(&connected, &connected_count);
+	if (!connected)
+	{
+		g_controller->Connect(kVirtualPadId);
+	}
 
-	return handle;
+	// Real OS returns ALREADY_OPENED on re-open; guest must use GetHandle for the prior handle.
+	// Dead Cells still polls Open each frame — return the live handle so ReadState keeps working,
+	// matching observed guest usage (Open → ReadState without GetHandle).
+	if (g_pad_opened)
+	{
+		return kPrimaryHandle;
+	}
+
+	g_pad_opened = true;
+
+	return kPrimaryHandle;
+}
+
+int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index)
+{
+	PRINT_NAME();
+
+	if (!g_pad_initialized)
+	{
+		return PAD_ERROR_NOT_INITIALIZED;
+	}
+	if (user_id == -1)
+	{
+		return PAD_ERROR_DEVICE_NO_HANDLE;
+	}
+	if (!g_pad_opened || user_id != 1 || type != 0 || index != 0)
+	{
+		return PAD_ERROR_DEVICE_NO_HANDLE;
+	}
+
+	return kPrimaryHandle;
 }
 
 int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable)
@@ -438,8 +504,9 @@ int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformati
 	info->stick_dead_zone_left  = controller_get_axis(-32768, 32767, 8000) - 128;
 	info->stick_dead_zone_right = controller_get_axis(-32768, 32767, 8000) - 128;
 	info->connection_type       = 0;
-	info->connected_count       = (connected_count > 255 ? 255 : connected_count);
-	info->connected             = connected;
+	// After PadOpen the virtual pad is always present for keyboard hosts.
+	info->connected_count       = (connected_count > 0 ? (connected_count > 255 ? 255 : connected_count) : 1);
+	info->connected             = true;
 	info->device_class          = 0;
 
 	return OK;
@@ -460,7 +527,36 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	EXIT_NOT_IMPLEMENTED(handle != 1);
 	EXIT_NOT_IMPLEMENTED(data == nullptr);
 
-	data->buttons                = state.buttons;
+	// Optional diagnostic: pulse confirm buttons so multi-screen splash/title
+	// flows can advance without a physical pad (KYTY_AUTO_CROSS=1).
+	// Applied after ReadState so the guest-visible sample is authoritative.
+	uint32_t auto_buttons = 0;
+	if (const char* auto_cross = std::getenv("KYTY_AUTO_CROSS"); auto_cross != nullptr && auto_cross[0] == '1')
+	{
+		static uint64_t first_read = 0;
+		const uint64_t  now        = LibKernel::KernelGetProcessTime();
+		if (first_read == 0)
+		{
+			first_read = now;
+		}
+		// Start after 2s; hold 300ms every 1.5s. Cross is primary confirm; Options
+		// covers titles that skip splash via the Options button only.
+		const uint64_t elapsed = now - first_read;
+		if (elapsed > 1'500'000ull)
+		{
+			// Pulse confirm bits (300ms on / 1.2s off) so edge-triggered UIs see presses.
+			const uint64_t cycle = (elapsed - 1'500'000ull) % 1'500'000ull;
+			if (cycle < 300'000ull)
+			{
+				auto_buttons = PAD_BUTTON_CROSS | PAD_BUTTON_CIRCLE | PAD_BUTTON_OPTIONS |
+				               PAD_BUTTON_TRIANGLE | PAD_BUTTON_SQUARE;
+			}
+		}
+	}
+
+	const uint64_t now_ts = LibKernel::KernelGetProcessTime();
+
+	data->buttons                = state.buttons | auto_buttons;
 	data->left_stick_x           = state.axes[static_cast<int>(Axis::LeftX)];
 	data->left_stick_y           = state.axes[static_cast<int>(Axis::LeftY)];
 	data->right_stick_x          = state.axes[static_cast<int>(Axis::RightX)];
@@ -471,9 +567,10 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	data->orientation_y          = 0.0f;
 	data->orientation_z          = 0.0f;
 	data->orientation_w          = 1.0f;
+	// Resting DualSense gravity (m/s^2); zero accel can look like a disconnected IMU sample.
 	data->acceleration_x         = 0.0f;
 	data->acceleration_y         = 0.0f;
-	data->acceleration_z         = 0.0f;
+	data->acceleration_z         = 9.8f;
 	data->angular_velocity_x     = 0.0f;
 	data->angular_velocity_y     = 0.0f;
 	data->angular_velocity_z     = 0.0f;
@@ -484,9 +581,10 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	data->touch_data_touch1_x    = 0;
 	data->touch_data_touch1_y    = 0;
 	data->touch_data_touch1_id   = 2;
-	data->connected              = connected;
-	data->timestamp              = state.time;
-	data->connected_count        = connected_count;
+	data->connected              = true;
+	// Always refresh timestamp so held samples still look live to edge/time logic.
+	data->timestamp              = now_ts;
+	data->connected_count        = (connected_count > 0 ? connected_count : 1);
 	data->device_unique_data_len = 0;
 
 	return OK;
@@ -546,6 +644,35 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 	}
 
 	return ret_num;
+}
+
+int KYTY_SYSV_ABI PadSetVibrationMode(int handle, int mode)
+{
+	PRINT_NAME();
+
+	if (handle != kPrimaryHandle)
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+
+	printf("\t mode = %d\n", mode);
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadSetTriggerEffect(int handle, const void* param)
+{
+	PRINT_NAME();
+
+	if (handle != kPrimaryHandle)
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+
+	// DualSense adaptive-trigger program: accepted and ignored (no host hardware).
+	(void)param;
+
+	return OK;
 }
 
 int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param)

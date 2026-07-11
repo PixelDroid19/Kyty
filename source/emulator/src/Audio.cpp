@@ -366,7 +366,9 @@ int KYTY_SYSV_ABI AudioOutOpen(int user_id, int type, int index, uint32_t len, u
 	printf("\t freq    = %u\n", freq);
 
 	EXIT_NOT_IMPLEMENTED(user_id != 255 && user_id != 1);
-	EXIT_NOT_IMPLEMENTED(type != 0 && type != 1 && type != 3 && type != 4);
+	// Port types observed on Gen5 titles: 0 MAIN, 1 BGM, 3 PERSONAL, 4 PADSPK,
+	// and 10 (PS5 pad/haptic-adjacent open after PADSPK; stored as opaque type).
+	EXIT_NOT_IMPLEMENTED(type != 0 && type != 1 && type != 3 && type != 4 && type != 10);
 	EXIT_NOT_IMPLEMENTED(index != 0);
 
 	Audio::Format format = Audio::Format::Unknown;
@@ -443,6 +445,8 @@ int KYTY_SYSV_ABI AudioOutGetPortState(int handle, AudioOutPortState* state)
 			state->channel = 0;
 			break;
 		case 4:
+		case 10:
+			// PADSPK and Gen5 type-10 pad/haptic ports report tertiary/pad routing.
 			state->output  = 4;
 			state->channel = 1;
 			break;
