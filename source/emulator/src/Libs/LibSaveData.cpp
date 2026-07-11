@@ -11,6 +11,8 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 
 #include <atomic>
+#include <mutex>
+#include <unordered_set>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -24,6 +26,8 @@ namespace SaveData {
 static constexpr char32_t    SAVE_DATA_DIR[]   = U"_SaveData";
 static constexpr char32_t    SAVE_DATA_POINT[] = U"/savedata0";
 static std::atomic<uint32_t> g_next_transaction_resource {0};
+static std::mutex              g_transaction_mutex;
+static std::unordered_set<int32_t> g_transaction_resources;
 
 struct SceSaveDataDirName
 {
@@ -129,7 +133,45 @@ int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id)
 
 	printf("\t user_id  = %d\n", user_id);
 
-	return static_cast<int>(g_next_transaction_resource.fetch_add(1, std::memory_order_relaxed) + 1);
+	if (user_id < 0)
+	{
+		return SAVE_DATA_ERROR_INVALID_LOGIN_USER;
+	}
+
+	const int32_t id = static_cast<int32_t>(g_next_transaction_resource.fetch_add(1, std::memory_order_relaxed) + 1);
+	{
+		std::lock_guard<std::mutex> lock(g_transaction_mutex);
+		g_transaction_resources.insert(id);
+	}
+	printf("\t resource = %d\n", id);
+	return id;
+}
+
+// NID uW4vfTwMQVo (SaveData_native). Observed SysV: rdi=resource-or-user (1),
+// rsi=MountPoint* "/savedata0" after Mount3/GetMountInfo/file create.
+// Bound as transaction-resource release: resource handles come from
+// CreateTransactionResource (first id is 1). Mount pointer is validated when
+// provided so a null second arg still fails cleanly.
+int KYTY_SYSV_ABI SaveDataDeleteTransactionResource(int32_t resource, const SaveDataMountPoint* mount_point)
+{
+	PRINT_NAME();
+
+	printf("\t resource    = %d\n", resource);
+	printf("\t mount_point = %s\n", (mount_point != nullptr ? mount_point->data : "(null)"));
+
+	if (resource <= 0)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	std::lock_guard<std::mutex> lock(g_transaction_mutex);
+	const auto it = g_transaction_resources.find(resource);
+	if (it == g_transaction_resources.end())
+	{
+		return SAVE_DATA_ERROR_NOT_FOUND;
+	}
+	g_transaction_resources.erase(it);
+	return OK;
 }
 
 int KYTY_SYSV_ABI SaveDataMount(const SaveDataMount* mount, SaveDataMountResult* mount_result)
@@ -436,6 +478,9 @@ LIB_DEFINE(InitSaveDataNative_1)
 	// guest buffer after Mount3 — same shape as GetMountInfo. Bound to the
 	// shared implementation until a distinct name/layout is evidenced.
 	LIB_FUNC("sDCBrmc61XU", SaveData::SaveDataGetMountInfo);
+	// NID uW4vfTwMQVo: SysV rdi=1 (first CreateTransactionResource id / user),
+	// rsi=MountPoint* "/savedata0". Treated as transaction-resource release.
+	LIB_FUNC("uW4vfTwMQVo", SaveData::SaveDataDeleteTransactionResource);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
 }
 
