@@ -1073,9 +1073,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			}
 
 			// Multi-parent StorageBuffer where every parent is either an observed
-			// Texture↔Storage alias or a VertexBuffer storage-share relation.
-			// create_all_the_same rejects mixed parent types; this policy links
-			// them (same as multi_vertex_storage_alias / TextureStorageAlias).
+			// Texture↔Storage alias, VertexBuffer storage-share, or surface share
+			// (including IsContainedWithin). create_all_the_same rejects mixed
+			// parent types; this policy links them.
 			bool multi_mixed_storage_alias = (info.type == GpuMemoryObjectType::StorageBuffer && !others.IsEmpty());
 			if (multi_mixed_storage_alias)
 			{
@@ -1087,14 +1087,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					const bool texture_alias =
 					    GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type);
 					const bool vertex_share = GpuMemoryAllowsVertexStorageShare(o.object.type, obj.relation, info.type);
-					// Captured: new StorageBuffer Contained by co-located larger
-					// StorageBuffer + RenderTexture (same guest base/size pair).
-					const bool surface_contains =
-					    (o.object.type == GpuMemoryObjectType::StorageBuffer || o.object.type == GpuMemoryObjectType::RenderTexture ||
-					     o.object.type == GpuMemoryObjectType::Texture || o.object.type == GpuMemoryObjectType::StorageTexture) &&
-					    (obj.relation == OverlapType::Contains || obj.relation == OverlapType::Crosses ||
-					     obj.relation == OverlapType::Equals);
-					if (!texture_alias && !vertex_share && !surface_contains)
+					const bool surface_share =
+					    GpuMemoryAllowsStorageSurfaceShare(o.object.type, obj.relation, info.type);
+					if (!texture_alias && !vertex_share && !surface_share)
 					{
 						multi_mixed_storage_alias = false;
 						break;
@@ -1121,6 +1116,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
+			// Multi-parent RenderTexture: surface peers/parents (SB/RT/Texture)
+			// and partial VertexBuffers. Captured after Param5: SB Equals +
+			// SB Contains + RT Contains (and permutations).
 			bool multi_render_target_alias = (info.type == GpuMemoryObjectType::RenderTexture && !others.IsEmpty());
 			if (multi_render_target_alias)
 			{
@@ -1129,14 +1127,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					const auto& h = heap.objects[obj.object_id];
 					EXIT_IF(h.free);
 					const auto& o = h.info;
-					const bool vertex_cross = o.object.type == GpuMemoryObjectType::VertexBuffer &&
-					                         (obj.relation == OverlapType::Crosses || obj.relation == OverlapType::IsContainedWithin);
-					const bool storage_equal = o.object.type == GpuMemoryObjectType::StorageBuffer && obj.relation == OverlapType::Equals;
-					// Captured: RenderTexture over Texture Crosses + StorageBuffer Equals.
-					const bool texture_cross = o.object.type == GpuMemoryObjectType::Texture &&
-					                           (obj.relation == OverlapType::Crosses || obj.relation == OverlapType::Contains ||
-					                            obj.relation == OverlapType::IsContainedWithin);
-					if (!vertex_cross && !storage_equal && !texture_cross)
+					if (!GpuMemoryAllowsRenderTargetSurfaceAlias(o.object.type, obj.relation, info.type))
 					{
 						multi_render_target_alias = false;
 						break;
