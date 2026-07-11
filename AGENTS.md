@@ -248,34 +248,56 @@ When switching private fixtures (or adding a second root):
 
 The local reference workload reaches Vulkan device creation, guest engine
 startup, Gen5 shader creation, indexed draws, VideoOut submission, repeated
-swapchain presentation, and execution beyond the initial logo sequence. Recent
-strict work corrected sub-second wall-clock time, keyboard/controller merging,
-read-only storage-buffer overlap tracking, Gen5 resource unregistration, and
-pixel-input default interpolation.
+swapchain presentation, logos, a recognizable menu, Play / mode selection
+(discovery auto-input is not acceptance), loading-card presentation, and a deep
+post-Play GPU/HLE chain under **strict** flags (no `KYTY_STUB_MISSING`, no
+`KYTY_GFX_PERMISSIVE`).
 
-Strict execution currently reaches a recognizable menu, accepts the first
-interactive menu transitions (including Play / mode selection with diagnostic
-auto-input only as a discovery aid), creates Gen5 render targets, and presents
-frames around the 30 FPS range when console function logging is disabled. The
-post-Play loading path has advanced through several Gen5 PM4/HLE seams
-(full-range AcquireMem, tile mode 27 sizing, Type0/Type2 walk, VideoOut handle
-0, ReleaseMem data_sel 1, payload-address offsets by opcode, index-buffer
-updates). A captured post-Play resource-registration blocker was an existing
-Texture containing a new StorageBuffer; that exact relation is now represented
-by an explicit alias policy and a focused regression test. The policy does not
-authorize the inverse containment direction or arbitrary texture/buffer
-overlap. The `QvsZxomvUHs` import is now registered as the evidenced
-`sceKernelNanosleep` contract, and WriteBack now classifies the observed
-multi-parent alias topology explicitly. The latest strict visual capture
-reaches the loading card with correct pixels, but does not reach a controllable
-scene: the same `ThreadFlag` event is polled with a 40 ms timeout and never
-observably receives bit `0x1`. Treat that as the current synchronization
-frontier; identify the producer or missing contract before changing wait
-semantics. **Always re-capture the first strict fail on the current HEAD**—do
-not trust this paragraph after code or fixture changes. This is not yet
-gameplay acceptance. Diagnostic input, permissive state handling, and console
-logging are evidence tools only; they do not constitute a supported runtime
-mode or a performance claim.
+Recent strict bring-up (evidence-backed, focused tests where noted) includes:
+
+- GpuMemory multi-parent alias policies (Texture/Storage/Vertex/RenderTexture
+  relations as captured; inverse or unobserved relations stay strict).
+- Gen5 tile mode 27 (`SW_64KB_R_X`) **size** and **CPU detile for 4 bpp** sample
+  textures (16-pipe non-RbPlus pattern table reimplemented from public MIT
+  ADDRLIB vocabulary; visual sample quality still needs post-playability QA).
+- Gen5 EUD: direct resource type 5 as EUD pointer when `eud_size_dw != 0` and
+  `srt_size_dw == 0`; overflow sharp offsets map through EUD base
+  `round_up(user_sgpr_num, 4)`.
+- Multi-RT `CB_SHADER_MASK` full-channel nibbles (`0` or `0xf` per RT).
+- EXP Param5 (`0x25`) and multi-MRT compressed / null EXP for MRT0–3 (including
+  `done=0` / `vm=0` variants observed on load).
+- `v_cvt_i32_f32` (VOP1 `0x8` / VOP3 `0x188`).
+- SMEM dual offset (SGPR soffset + 21-bit imm) and variable-offset
+  `s_buffer_load_dword` / `x2` / `x4` with imm constants registered for SPIR-V.
+- PS user SGPR window up to 32; CB blend1–7, BufferLoadFormatXyzw, and related
+  register/shader contracts from earlier cycles.
+
+**First strict fail on recent Linux Release+Silent+AUTO_CROSS discovery runs
+(always re-capture on HEAD):** SPIR-V optimizer rejects a post-Play pixel
+shader with
+
+`Back-edges (…) can only be formed between a block and a loop header`
+
+after multi-MRT recompile succeeds far enough to emit an unconditional
+**backward `S_BRANCH`**. The emitter places the destination label and a plain
+`OpBranch` back-edge without structured `OpLoopMerge` / continue targets
+(`ShaderSpirv.cpp` `WriteLabel` / `Recompile_SBranch_Label`; note the existing
+CFG TODO on `S_CBRANCH`). This is a **shader SPIR-V structured-control-flow**
+blocker, not yet the `ThreadFlag` wait.
+
+`ThreadFlag` bit `0x1` (mode `0x21`, 40 ms waits, no observed Set in earlier
+captures) remains a **later** suspected synchronization symptom: do not fake
+the bit from `WaitEventFlag`, timers, or the render loop. Identify the producer
+only after the GPU/shader chain no longer aborts earlier.
+
+Linux host path builds with `_build_linux` / Ninja Release; macOS continues to
+use `_build_macos`. Default `scripts/run_guest.lua` uses `PrintfDirection =
+'Silent'` for usable FPS; Console logging is evidence-only and destroys
+frame-time comparability.
+
+**Always re-capture the first strict fail on the current HEAD.** This is not
+gameplay acceptance. Diagnostic input, stubs, permissive GPU skips, and
+console logging are not supported runtime modes.
 
 ## Architecture map
 
@@ -324,25 +346,23 @@ and preservation of working behavior outrank speed or line-count reduction.
 
 CURRENT FRONTIER
 
-- The build and Vulkan device/swapchain path work on the current macOS host.
-- Gen5 shader creation, indexed draws, VideoOut submission, and repeated flips
-  are already exercised.
-- The private 2D test workload reaches a recognizable menu and responds to the
-  first Play/Normal-Mode transitions.
-- A recent post-Play capture stopped while registering a StorageBuffer fully
-  contained by an existing Texture. The exact `Texture + Contains +
-  StorageBuffer` relation is covered by `GpuMemoryAllowsTextureStorageAlias`;
-  keep the inverse and unrelated containment relations strict until separately
-  evidenced. The libkernel nanosleep seam and multi-parent WriteBack topology
-  are now covered. The current capture reaches the loading card, then polls a
-  `ThreadFlag` event for bit `0x1` with 40 ms timeouts without an observed set;
-  capture the event producer and the missing synchronization contract before
-  changing wait behavior.
-- A silent-logging visual run has shown roughly 30 FPS at the menu. Do not
-  compare that number with console-logging runs: per-call logging can dominate
-  the frame loop. Measure gameplay with logging configuration recorded.
-- The runtime is not yet accepted as playable. Do not claim success merely
-  because a window, menu, non-black frame, or one draw appears.
+- Build works on Linux (`_build_linux`) and macOS (`_build_macos`); use the host
+  you are on. Prefer Release + `PrintfDirection=Silent` for wall-clock.
+- Vulkan device/swapchain, Gen5 shaders, indexed draws, VideoOut flips, logos,
+  recognizable menu, Play/mode transitions (AUTO_CROSS is discovery only), and
+  loading-card pixels are exercised under strict flags.
+- GpuMemory multi-parent policies, tile-27 size+4bpp detile, Gen5 EUD type-5,
+  multi-RT CB_SHADER_MASK nibbles, EXP Param5 + multi-MRT compr/null MRT0–3,
+  `v_cvt_i32_f32`, SMEM dual-offset and variable SBuffer loads are in tree with
+  focused tests where added. Do not regress them.
+- **First strict fail (re-capture on HEAD):** SPIR-V optimize fails on a PS with
+  a backward `S_BRANCH` — missing structured loop (`OpLoopMerge` / continue).
+  See `ShaderSpirv.cpp` `WriteLabel` / `Recompile_SBranch_Label`.
+- **Later symptom only:** `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms) with no
+  observed Set. Never fabricate the signal. Trace the producer after earlier
+  GPU/shader aborts are gone.
+- Menu silent FPS has been ~30–45 on capable hosts; never compare to Console
+  logging. Not playable yet.
 
 IMMEDIATE OBJECTIVE AND SUCCESS CONDITION
 
@@ -377,18 +397,22 @@ bounded diagnostic facility with tests.
 
 PRIMARY ORDER OF WORK (DO NOT REORDER)
 
-1. Reproduce the strict frontier with the current checkout and private fixture.
-2. Fix the first strict failure using a documented hypothesis and a focused
-   deterministic test or sanitized packet fixture.
+1. Reproduce the strict frontier with the current checkout and private fixture
+   (`$KYTY_GUEST_ROOT` only; never name the title in commits).
+2. Fix the first strict failure (currently SPIR-V loop CFG unless re-capture
+   shows otherwise) with a documented hypothesis and a focused deterministic
+   test or sanitized shader/packet fixture.
 3. Re-run strict execution and advance one failure at a time until the title
-   reaches the first controllable gameplay scene.
-4. Prove input, camera/character movement, at least one action, stable flips,
-   correct geometry/colors, and absence of validation errors.
+   reaches the first controllable gameplay scene under the playability table.
+4. Prove real keyboard/controller press+release, movement both ways, one
+   action, stable flips, correct geometry/colors, no device-loss, validation
+   clean where available. Record Silent FPS + resolution + shader cache.
 5. Freeze this working frontier with regression/characterization tests and a
-   short evidence report.
-6. Only after steps 1-5 pass, modularize oversized files one seam at a time.
-   Every extraction must be behavior-neutral and must preserve the frozen
-   gameplay evidence.
+   short evidence report (untracked scratch; no private paths in Git).
+6. **Only after steps 1–5 pass and gameplay is reproducible from a baseline
+   commit**, modularize oversized files one seam at a time. Every extraction
+   must be behavior-neutral and must preserve the frozen gameplay evidence.
+   Do not start modularization while a post-Play strict blocker is open.
 
 PHASE GATES AND REQUIRED DELIVERABLES
 
@@ -583,9 +607,29 @@ Do not move to refactoring until all rows below have evidence from a strict run:
 ARCHITECTURE FREEZE AND MODULARIZATION PLAN
 
 After the acceptance gate, record a baseline commit, test output, strict
-frontier, and visual/performance measurements. Then inventory large modules by
-responsibility, mutable state, callers, and tests. Likely seams are:
+frontier, and visual/performance measurements. **Do not start file
+decomposition while a post-Play (or earlier) strict blocker is open** — first
+reach reproducible controllable gameplay, freeze it, then modularize.
 
+Approximate line counts (recount with `wc -l` before planning; snapshot ~2026-07):
+
+| File | ~Lines |
+| `ShaderSpirv.cpp` | 8490 |
+| `GraphicsRender.cpp` | 5740 |
+| `GraphicsRun.cpp` | 4530 |
+| `ShaderParse.cpp` | 3520 |
+| `Shader.cpp` | 3350 |
+| `Pthread.cpp` | 2810 |
+| `Graphics.cpp` | 2740 |
+| `Audio.cpp` | 2720 |
+| `Window.cpp` | 2700 |
+
+Then inventory large modules by responsibility, mutable state, callers, and
+tests. Likely seams are:
+
+- `ShaderSpirv.cpp`: Op emitters; EXP/MRT; SMEM/SBuffer; **structured CFG
+  (loops/if)**; constant pool; entry/annotations. Highest risk/priority after
+  playability because it is the largest and owns the open loop CFG debt.
 - `GraphicsRun.cpp`: packet envelope/parser, opcode decoders, cache/barrier
   semantics, and normalized-state mutation. Extract only after identifying the
   shared state contract; direct and indirect paths must call the same decoder.
@@ -594,6 +638,7 @@ responsibility, mutable state, callers, and tests. Likely seams are:
 - `GraphicsRender.cpp`: render planning, resource binding, pipeline creation,
   synchronization, and presentation preparation. A planner should consume
   normalized state and explicit host capabilities, not read global Vulkan state.
+- `ShaderParse.cpp`: per-encoding parsers and opcode tables only.
 - `Tile.cpp`: format/block geometry, surface-size calculation, address/swizzle
   math, and conversion. Keep one descriptor/layout model and test it without
   Vulkan.
