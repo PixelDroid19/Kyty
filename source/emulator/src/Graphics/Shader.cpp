@@ -1106,6 +1106,23 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 
 	EXIT_IF(info == nullptr || attrib == nullptr || buffer == nullptr);
 
+	info->fetch_attrib_data_num = 0;
+
+	uint32_t max_semantic = 0;
+	for (uint32_t i = 0; i < num_input_semantics; i++)
+	{
+		if (input_semantics[i].semantic + 1u > max_semantic)
+		{
+			max_semantic = input_semantics[i].semantic + 1u;
+		}
+	}
+	EXIT_NOT_IMPLEMENTED(max_semantic > static_cast<uint32_t>(ShaderVertexInputInfo::RES_MAX));
+	for (uint32_t i = 0; i < max_semantic; i++)
+	{
+		info->fetch_attrib_data[i] = attrib[i];
+	}
+	info->fetch_attrib_data_num = static_cast<int>(max_semantic);
+
 	for (uint32_t i = 0; i < num_input_semantics; i++)
 	{
 		const auto& in = input_semantics[i];
@@ -2943,6 +2960,11 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_inline));
 	ret.ids.Add(input_info->resources_num);
 	ret.ids.Add(input_info->export_count);
+	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_data_num));
+	for (int i = 0; i < input_info->fetch_attrib_data_num; i++)
+	{
+		ret.ids.Add(input_info->fetch_attrib_data[i]);
+	}
 
 	for (int i = 0; i < input_info->resources_num; i++)
 	{

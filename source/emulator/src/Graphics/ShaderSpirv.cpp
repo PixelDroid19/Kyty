@@ -4431,154 +4431,177 @@ KYTY_RECOMPILER_FUNC(Recompile_SEndpgm_Empty)
 	return true;
 }
 
+// Materialize S_LOAD of `dword_count` dwords from the extended user-data mapping
+// (push-constant vsharp slots). Shared by SLoadDword / x2 / x4 / x8.
+static bool recompile_sload_from_extended(uint32_t index, const ShaderInstruction& inst, Spirv* spirv, String8* dst_source, int dword_count)
+{
+	const auto* bind_info = spirv->GetBindInfo();
+	if (bind_info == nullptr || !bind_info->extended.used)
+	{
+		return false;
+	}
+
+	const auto* vs_info    = spirv->GetVsInputInfo();
+	int         shift_regs = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
+
+	EXIT_NOT_IMPLEMENTED(shift_regs != 0);
+	EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[1]));
+	EXIT_NOT_IMPLEMENTED(inst.src[0].register_id != bind_info->extended.start_register);
+
+	// TODO() check pointer
+
+	EXIT_NOT_IMPLEMENTED(dword_count <= 0 || dword_count > 8);
+	EXIT_NOT_IMPLEMENTED(inst.dst.size != dword_count);
+
+	SpirvValue dst_value[8];
+	for (int i = 0; i < dword_count; i++)
+	{
+		dst_value[i] = (dword_count == 1 ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, i));
+		EXIT_NOT_IMPLEMENTED(dst_value[i].type != SpirvType::Uint);
+	}
+
+	auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
+	auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
+	int  offset      = static_cast<int>(inst.src[1].constant.u >> 2u);
+
+	EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Uint);
+	EXIT_NOT_IMPLEMENTED(src0_value1.type != SpirvType::Uint);
+
+	static const char* text = R"(
+		         %vsharp_<index>_<reg> = OpAccessChain %_ptr_PushConstant_uint %vsharp %int_0 %int_<buffer> %int_<field>
+		         %vsharp_<index>_value_<reg> = OpLoad %uint %vsharp_<index>_<reg>
+		               OpStore %<reg> %vsharp_<index>_value_<reg>
+				)";
+
+	for (int i = 0; i < dword_count; i++)
+	{
+		int buffer = 0;
+		int field  = 0;
+		spirv->GetMappedIndex(offset + i, &buffer, &field);
+
+		*dst_source += String8(text)
+		                   .ReplaceStr("<reg>", dst_value[i].value)
+		                   .ReplaceStr("<buffer>", String8::FromPrintf("%d", buffer))
+		                   .ReplaceStr("<field>", String8::FromPrintf("%d", field))
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u_%d", index, i));
+	}
+
+	return true;
+}
+
+// Materialize S_LOAD from the Gen5 vertex attribute table (fetch_attrib_reg).
+// Destinations receive the snapshotted guest dwords so later SBfe/SLshl see defined values.
+static bool recompile_sload_from_fetch_attrib(uint32_t index, const ShaderInstruction& inst, Spirv* spirv, String8* dst_source,
+                                              int dword_count)
+{
+	const auto* vs_info = spirv->GetVsInputInfo();
+	if (vs_info == nullptr || !vs_info->fetch_embedded || vs_info->fetch_external || vs_info->fetch_inline)
+	{
+		return false;
+	}
+
+	int shift_regs = (vs_info->gs_prolog ? 8 : 0);
+	if (inst.src[0].register_id != vs_info->fetch_attrib_reg + shift_regs)
+	{
+		return false;
+	}
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[1]));
+	EXIT_NOT_IMPLEMENTED(dword_count <= 0 || dword_count > 4);
+	EXIT_NOT_IMPLEMENTED(inst.dst.size != dword_count);
+
+	int dword_index = static_cast<int>(inst.src[1].constant.u >> 2u);
+	EXIT_NOT_IMPLEMENTED(dword_index < 0);
+	EXIT_NOT_IMPLEMENTED(dword_index + dword_count > vs_info->fetch_attrib_data_num);
+
+	static const char* text = R"(
+		         %sload_attr_<index> = OpBitcast %uint %<const>
+		               OpStore %<reg> %sload_attr_<index>
+				)";
+
+	for (int i = 0; i < dword_count; i++)
+	{
+		auto dst = (dword_count == 1 ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, i));
+		EXIT_NOT_IMPLEMENTED(dst.type != SpirvType::Uint);
+
+		uint32_t value = vs_info->fetch_attrib_data[dword_index + i];
+		*dst_source += String8(text)
+		                   .ReplaceStr("<reg>", dst.value)
+		                   .ReplaceStr("<const>", spirv->GetConstantUint(value))
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u_%d", index, i));
+	}
+
+	return true;
+}
+
+// fetch_buffer_reg SLoads feed DetectFetch buffer-descriptor tracking; destinations
+// are not consumed after BufferLoad→Fetch rewrite. Keep as recognized no-op.
+static bool recompile_sload_fetch_buffer_meta(const ShaderInstruction& inst, Spirv* spirv)
+{
+	const auto* vs_info = spirv->GetVsInputInfo();
+	if (vs_info == nullptr || !vs_info->fetch_embedded || vs_info->fetch_external || vs_info->fetch_inline)
+	{
+		return false;
+	}
+
+	int shift_regs = (vs_info->gs_prolog ? 8 : 0);
+	return inst.src[0].register_id == vs_info->fetch_buffer_reg + shift_regs;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_SLoadDword_SdstSbaseSoffset)
 {
-	const auto& inst    = code.GetInstructions().At(index);
-	const auto* vs_info = spirv->GetVsInputInfo();
+	const auto& inst = code.GetInstructions().At(index);
 
-	int shift_regs = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
-
-	return (vs_info != nullptr && vs_info->fetch_embedded && !vs_info->fetch_external && !vs_info->fetch_inline &&
-	        (inst.src[0].register_id == vs_info->fetch_attrib_reg + shift_regs ||
-	         inst.src[0].register_id == vs_info->fetch_buffer_reg + shift_regs));
+	if (recompile_sload_from_fetch_attrib(index, inst, spirv, dst_source, 1))
+	{
+		return true;
+	}
+	if (recompile_sload_fetch_buffer_meta(inst, spirv))
+	{
+		return true;
+	}
+	return recompile_sload_from_extended(index, inst, spirv, dst_source, 1);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_SLoadDwordx2_Sdst2Ssrc02Ssrc1)
 {
-	const auto& inst    = code.GetInstructions().At(index);
-	const auto* vs_info = spirv->GetVsInputInfo();
+	const auto& inst = code.GetInstructions().At(index);
 
-	int shift_regs = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
-
-	return (vs_info != nullptr && vs_info->fetch_embedded && !vs_info->fetch_external && !vs_info->fetch_inline &&
-	        (inst.src[0].register_id == vs_info->fetch_attrib_reg + shift_regs ||
-	         inst.src[0].register_id == vs_info->fetch_buffer_reg + shift_regs));
+	if (recompile_sload_from_fetch_attrib(index, inst, spirv, dst_source, 2))
+	{
+		return true;
+	}
+	if (recompile_sload_fetch_buffer_meta(inst, spirv))
+	{
+		return true;
+	}
+	return recompile_sload_from_extended(index, inst, spirv, dst_source, 2);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_SLoadDwordx4_Sdst4SbaseSoffset)
 {
-	const auto& inst    = code.GetInstructions().At(index);
-	const auto* vs_info = spirv->GetVsInputInfo();
+	const auto& inst = code.GetInstructions().At(index);
 
-	int shift_regs = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
-
-	if (vs_info != nullptr && vs_info->fetch_embedded && !vs_info->fetch_external && !vs_info->fetch_inline &&
-	    (inst.src[0].register_id == vs_info->fetch_attrib_reg + shift_regs ||
-	     inst.src[0].register_id == vs_info->fetch_buffer_reg + shift_regs))
+	if (recompile_sload_from_fetch_attrib(index, inst, spirv, dst_source, 4))
 	{
 		return true;
 	}
-
-	const auto* bind_info = spirv->GetBindInfo();
-
-	if (bind_info != nullptr && bind_info->extended.used)
+	if (recompile_sload_fetch_buffer_meta(inst, spirv))
 	{
-		EXIT_NOT_IMPLEMENTED(shift_regs != 0);
-		EXIT_NOT_IMPLEMENTED(inst.src[1].type != ShaderOperandType::LiteralConstant);
-		EXIT_NOT_IMPLEMENTED(inst.src[0].register_id != bind_info->extended.start_register);
-
-		// TODO() check pointer
-
-		SpirvValue dst_value[4];
-
-		for (int i = 0; i < 4; i++)
-		{
-			dst_value[i] = operand_variable_to_str(inst.dst, i);
-		}
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		int  offset      = static_cast<int>(inst.src[1].constant.u >> 2u);
-
-		EXIT_NOT_IMPLEMENTED(dst_value[0].type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src0_value1.type != SpirvType::Uint);
-
-		static const char* text = R"(
-		         %vsharp_<index>_<reg> = OpAccessChain %_ptr_PushConstant_uint %vsharp %int_0 %int_<buffer> %int_<field>
-		         %vsharp_<index>_value_<reg> = OpLoad %uint %vsharp_<index>_<reg>
-		               OpStore %<reg> %vsharp_<index>_value_<reg>
-				)";
-
-		for (int i = 0; i < 4; i++)
-		{
-			int buffer = 0;
-			int field  = 0;
-			spirv->GetMappedIndex(offset + i, &buffer, &field);
-
-			*dst_source += String8(text)
-			                   .ReplaceStr("<reg>", dst_value[i].value)
-			                   .ReplaceStr("<buffer>", String8::FromPrintf("%d", buffer))
-			                   .ReplaceStr("<field>", String8::FromPrintf("%d", field))
-			                   .ReplaceStr("<index>", String8::FromPrintf("%u", index));
-		}
-
 		return true;
 	}
-
-	return false;
+	return recompile_sload_from_extended(index, inst, spirv, dst_source, 4);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_SLoadDwordx8_Sdst8SbaseSoffset)
 {
-	const auto& inst    = code.GetInstructions().At(index);
-	const auto* vs_info = spirv->GetVsInputInfo();
+	const auto& inst = code.GetInstructions().At(index);
 
-	int shift_regs = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
-
-	if (vs_info != nullptr && vs_info->fetch_embedded && !vs_info->fetch_external && !vs_info->fetch_inline &&
-	    (inst.src[0].register_id == vs_info->fetch_attrib_reg + shift_regs ||
-	     inst.src[0].register_id == vs_info->fetch_buffer_reg + shift_regs))
+	if (recompile_sload_fetch_buffer_meta(inst, spirv))
 	{
 		return true;
 	}
-
-	const auto* bind_info = spirv->GetBindInfo();
-
-	if (bind_info != nullptr && bind_info->extended.used)
-	{
-		EXIT_NOT_IMPLEMENTED(shift_regs != 0);
-		EXIT_NOT_IMPLEMENTED(inst.src[1].type != ShaderOperandType::LiteralConstant);
-		EXIT_NOT_IMPLEMENTED(inst.src[0].register_id != bind_info->extended.start_register);
-
-		// TODO() check pointer
-
-		SpirvValue dst_value[8];
-
-		for (int i = 0; i < 8; i++)
-		{
-			dst_value[i] = operand_variable_to_str(inst.dst, i);
-		}
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		int  offset      = static_cast<int>(inst.src[1].constant.u >> 2u);
-
-		EXIT_NOT_IMPLEMENTED(dst_value[0].type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src0_value1.type != SpirvType::Uint);
-
-		static const char* text = R"(
-		         %vsharp_<index>_<reg> = OpAccessChain %_ptr_PushConstant_uint %vsharp %int_0 %int_<buffer> %int_<field>
-		         %vsharp_<index>_value_<reg> = OpLoad %uint %vsharp_<index>_<reg>
-		               OpStore %<reg> %vsharp_<index>_value_<reg>
-				)";
-
-		for (int i = 0; i < 8; i++)
-		{
-			int buffer = 0;
-			int field  = 0;
-			spirv->GetMappedIndex(offset + i, &buffer, &field);
-
-			*dst_source += String8(text)
-			                   .ReplaceStr("<reg>", dst_value[i].value)
-			                   .ReplaceStr("<buffer>", String8::FromPrintf("%d", buffer))
-			                   .ReplaceStr("<field>", String8::FromPrintf("%d", field))
-			                   .ReplaceStr("<index>", String8::FromPrintf("%u", index));
-		}
-
-		return true;
-	}
-
-	return false;
+	return recompile_sload_from_extended(index, inst, spirv, dst_source, 8);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_SMulkI32_SVdstSVsrc0)
@@ -8111,6 +8134,14 @@ void Spirv::FindConstants()
 			{
 				AddConstant(inst.src[i]);
 			}
+		}
+	}
+	// Attribute-table dwords materialized by SLoad from fetch_attrib_reg.
+	if (m_vs_input_info != nullptr)
+	{
+		for (int i = 0; i < m_vs_input_info->fetch_attrib_data_num; i++)
+		{
+			AddConstantUint(m_vs_input_info->fetch_attrib_data[i]);
 		}
 	}
 	if (m_vs_input_info != nullptr || m_ps_input_info != nullptr || m_cs_input_info != nullptr)
