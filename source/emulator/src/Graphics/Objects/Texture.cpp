@@ -177,7 +177,9 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 
 	if (fmt != 0)
 	{
-		EXIT_NOT_IMPLEMENTED(tile != 0);
+		// Gen5: tile 0 = linear; tile 27 (0x1b) = SW_64KB_R_X. Other modes
+		// remain unsupported until their layout is evidenced and detiled.
+		EXIT_NOT_IMPLEMENTED(tile != 0 && tile != 27);
 
 		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, nullptr);
 	} else
@@ -240,6 +242,12 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		if (tile == 0)
 		{
 			UtilFillImage(ctx, vk_obj, reinterpret_cast<void*>(*vaddr), *size, regions, static_cast<uint64_t>(vk_layout));
+		} else if (tile == 27)
+		{
+			// SW_64KB_R_X CPU upload requires a detile path that is not yet
+			// implemented. Render-target aliases are handled before create via
+			// FindRenderTexture; pure sample textures must fail loudly here.
+			EXIT("unsupported Gen5 texture detile for tile mode 27 (size=0x%" PRIx64 ", %" PRIu64 "x%" PRIu64 ")\n", *size, width, height);
 		}
 	}
 }

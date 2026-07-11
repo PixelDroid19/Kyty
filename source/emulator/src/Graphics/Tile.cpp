@@ -1237,10 +1237,47 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 	}
 
 	{
-		// Reaching here means the precomputed table has no entry for this texture
-		// (a matching entry would have returned above). Fall back to a generic
-		// linear size derived from the format's bytes-per-texel, summed over mip
-		// levels, and fill whichever outputs the caller requested.
+		// Reaching here means the precomputed table has no entry for this texture.
+		// Mode 27 (SW_64KB_R_X) shares the 64 KiB rotated-X block geometry with
+		// Gen5 render targets — never fall through to linear byte arithmetic.
+		if (tile == 0x1bu)
+		{
+			uint32_t bpp = 4;
+			switch (format)
+			{
+				case 56: bpp = 4; break; // R8G8B8A8
+				default:
+					EXIT("unsupported Gen5 tiled texture format %u for tile mode 27\n", format);
+			}
+
+			EXIT_NOT_IMPLEMENTED(levels != 1);
+
+			TileSizeAlign rt {};
+			TileGetRenderTargetSize(width, height, pitch != 0 ? pitch : width, tile, bpp, &rt);
+			EXIT_NOT_IMPLEMENTED(rt.size == 0);
+
+			if (total_size != nullptr)
+			{
+				*total_size = rt;
+			}
+			if (level_sizes != nullptr)
+			{
+				level_sizes[0].offset = 0;
+				level_sizes[0].size   = rt.size;
+			}
+			if (padded_size != nullptr)
+			{
+				// Block grids for 4-byte texels are 128x128 elements (see
+				// TileGetRenderTargetSize). Pad dimensions to complete blocks.
+				padded_size[0].width  = ((width + 127u) / 128u) * 128u;
+				padded_size[0].height = ((height + 127u) / 128u) * 128u;
+			}
+			return;
+		}
+
+		// Linear fallback for tile 0 (and only tile 0).
+		EXIT_NOT_IMPLEMENTED(tile != 0);
+
 		uint32_t bpp = 4; // default: 32-bit texel (e.g. RGBA8, format 56)
 		switch (format)
 		{
