@@ -308,6 +308,10 @@ static KYTY_SYSV_ABI int c_vsprintf(char* s, const char* fmt, VaList* ap)
 {
 	return Format(s, C_UNBOUNDED_FORMAT, fmt, ap);
 }
+static KYTY_SYSV_ABI int c_vsnprintf(char* s, size_t n, const char* fmt, VaList* ap)
+{
+	return Format(s, n, fmt, ap);
+}
 static KYTY_SYSV_ABI int c_vsnprintf_s(char* s, size_t dn, size_t count, const char* fmt, VaList* ap)
 {
 	size_t n = (count + 1 < dn) ? count + 1 : dn;
@@ -573,6 +577,7 @@ LIB_DEFINE(InitLibcInternal_1)
 	LIB_FUNC("MUjC4lbHrK4", LibcInternal::fflush);
 	LIB_FUNC("8zTFvBIAIN8", LibcInternal::memset);
 	LIB_FUNC("eLdDw6l0-bU", LibcInternal::snprintf);
+	LIB_FUNC("Q2V+iqvjgC0", LibC::c_vsnprintf);
 
 	LIB_FUNC("tsvEmnenz48", LibC::cxa_atexit);
 	LIB_FUNC("H2e8t5ScQGc", LibC::cxa_finalize);
@@ -651,6 +656,7 @@ LIB_DEFINE(InitLibC_1)
 
 	// printf / scanf family
 	LIB_FUNC("eLdDw6l0-bU", LibC::c_snprintf);
+	LIB_FUNC("Q2V+iqvjgC0", LibC::c_vsnprintf); // vsnprintf (Gen5 libc_v1)
 	LIB_FUNC("tcVi5SivF7Q", LibC::c_sprintf);
 	LIB_FUNC("fffwELXNVFA", LibC::c_fprintf);
 	LIB_FUNC("1Pk0qZQGeWo", LibC::c_sscanf);
