@@ -1604,6 +1604,20 @@ struct Ngs2VoicePortMatrixParam
 	int32_t              matrix_id;
 };
 
+// Common voice-control param id 0x0007. Layout matches the PS4 NGS2
+// VoiceCallback parameter block (header + handler + data + flags + reserved).
+// Observed at the Gen5 frontier with size 32 immediately after a custom-sampler
+// class param (0x40010000). Handler invocation is not performed until a
+// guest-visible dependency on the callback is evidenced.
+struct Ngs2VoiceCallbackParam
+{
+	Ngs2VoiceParamHeader header;
+	uintptr_t            callback_handler;
+	uintptr_t            callback_data;
+	uint32_t             flags;
+	uint32_t             reserved;
+};
+
 struct Ngs2VoiceState
 {
 	uint32_t state_flags;
@@ -2113,6 +2127,15 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 						printf("\t event = %u\n", event->event_id);
 						break;
 					}
+					case 0x0007:
+					{
+						EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2VoiceCallbackParam));
+						const auto* cb = reinterpret_cast<const Ngs2VoiceCallbackParam*>(param);
+						printf("\t callback_handler = 0x%016" PRIx64 "\n", static_cast<uint64_t>(cb->callback_handler));
+						printf("\t callback_data    = 0x%016" PRIx64 "\n", static_cast<uint64_t>(cb->callback_data));
+						printf("\t flags            = 0x%08" PRIx32 "\n", cb->flags);
+						break;
+					}
 					default: EXIT("unknown id: 0x%04" PRIx32 "\n", cid);
 				}
 				break;
@@ -2121,7 +2144,20 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 			case 0x2000: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Submixer); break;
 			case 0x2001: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Reverb); break;
 			case 0x3000: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Mastering); break;
-			case 0x4000: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSubmixer); break;
+			// 0x4000 class params are used both for CustomSubmixer (historical
+			// Kyty path) and for CustomSampler module params. Observed Gen5
+			// sequence on a CustomSampler voice: 0x40010000 → 0x00000007 →
+			// 0x40010001 → 0x00000005 → 0x40001300 (size 48). Type-check only
+			// until a field of the 48-byte block is shown to affect guest state.
+			case 0x4000:
+				EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSubmixer &&
+				                     voice->rack->type != Ngs2RackType::CustomSampler);
+				break;
+			// Gen5 custom-sampler rack (created via rack_id 0x4001). Observed
+			// VoiceControl param id 0x40010000 with size 40 after logo path.
+			// Accept like other rack-class ids: type-check only until a field
+			// of this 40-byte block is shown to affect guest-visible state.
+			case 0x4001: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSampler); break;
 			case 0x4002: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSubmixer); break;
 			default: EXIT("unknown rack_id: 0x%" PRIx32 "\n", rack_id);
 		}
