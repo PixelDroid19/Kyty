@@ -92,6 +92,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("UZbQjYAwwXM", Gen5::GraphicsCbSetShRegistersDirect);
 	LIB_FUNC("k3GhuSNmBLU", Gen5::GraphicsCbDispatch);
 	LIB_FUNC("wr23dPKyWc0", Gen5::GraphicsCbReleaseMem);
+	// IxYiarKlXxM: PM4 packet size in dwords (see GraphicsGetDataPacketSizeDw).
+	LIB_FUNC("IxYiarKlXxM", Gen5::GraphicsGetDataPacketSizeDw);
 	LIB_FUNC("TRO721eVt4g", Gen5::GraphicsDcbResetQueue);
 	LIB_FUNC("MWiElSNE8j8", Gen5::GraphicsDcbWaitUntilSafeForRendering);
 	LIB_FUNC("pFLArOT53+w", Gen5::GraphicsDcbSetShRegisterDirect);

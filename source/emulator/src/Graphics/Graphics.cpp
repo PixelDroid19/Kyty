@@ -1906,6 +1906,40 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t nu
 	return buf->AllocateDW(num_dw);
 }
 
+// Graphics5 NID IxYiarKlXxM. Observed SysV on post-logo path:
+//   rdi = pointer to a complete type-3 PM4 packet (WaitFlipDone header
+//         0xC0051018, len=7, r=R_WAIT_FLIP_DONE)
+//   rsi = rdi - 0x1c (points 7 DW earlier into the same CB stream)
+//   rdx = 0
+//   rcx = rdi + 0x1c (points at the following ReleaseMem packet)
+// rsi/rcx match ±packet-size pointer arithmetic residuals, not extra inputs.
+// Same utility family as GetDataPacketPayloadAddress: decode PM4 header length.
+uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
+{
+	PRINT_NAME();
+
+	printf("\t cmd = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+
+	if (cmd == nullptr)
+	{
+		return 0;
+	}
+
+	const uint32_t header = cmd[0];
+	printf("\t header = 0x%08" PRIx32 "\n", header);
+
+	// Type-3 PM4 packet (top 2 bits = 0b11). Reject non-packets rather than
+	// inventing a size for random memory.
+	if ((header >> 30u) != 3u)
+	{
+		EXIT("GraphicsGetDataPacketSizeDw: not a type-3 PM4 header: 0x%08" PRIx32 "\n", header);
+	}
+
+	const uint32_t size_dw = KYTY_PM4_LEN(header);
+	printf("\t size_dw = %" PRIu32 "\n", size_dw);
+	return size_dw;
+}
+
 
 
 int KYTY_SYSV_ABI GraphicsAgcDriverUnknownKRzWekV120()
