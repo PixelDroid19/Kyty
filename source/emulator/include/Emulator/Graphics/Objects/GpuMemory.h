@@ -157,6 +157,49 @@ inline bool GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType existing_typ
 	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin);
 }
 
+// Incoming RenderTexture sharing guest memory with existing surfaces or partial
+// VertexBuffers. Captured multi-parent sets after Param5:
+//   - StorageBuffer Equals + StorageBuffer Contains + RenderTexture Contains
+//   - RenderTexture Contains + StorageBuffer Contains + StorageBuffer Equals
+inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                    GpuMemoryObjectType incoming_type)
+{
+	if (incoming_type != GpuMemoryObjectType::RenderTexture)
+	{
+		return false;
+	}
+	if (existing_type == GpuMemoryObjectType::StorageBuffer || existing_type == GpuMemoryObjectType::RenderTexture ||
+	    existing_type == GpuMemoryObjectType::Texture || existing_type == GpuMemoryObjectType::StorageTexture)
+	{
+		return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
+		       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
+	}
+	if (existing_type == GpuMemoryObjectType::VertexBuffer)
+	{
+		return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin;
+	}
+	return false;
+}
+
+// Incoming StorageBuffer overlapping existing color/depth surfaces (not only
+// Texture alias / Vertex share). Captured: RT+SB Crosses and IsContainedWithin
+// multi-parent set during the same load path as RenderTexture surface alias.
+inline bool GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                              GpuMemoryObjectType incoming_type)
+{
+	if (incoming_type != GpuMemoryObjectType::StorageBuffer)
+	{
+		return false;
+	}
+	if (existing_type != GpuMemoryObjectType::StorageBuffer && existing_type != GpuMemoryObjectType::RenderTexture &&
+	    existing_type != GpuMemoryObjectType::Texture && existing_type != GpuMemoryObjectType::StorageTexture)
+	{
+		return false;
+	}
+	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
+	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
+}
+
 // WriteBack (GPU -> CPU) hash bookkeeping for aliased objects.
 //
 // Observed Gen5 topology (private title after post-menu load): a RW
