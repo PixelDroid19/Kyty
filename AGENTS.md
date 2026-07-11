@@ -344,6 +344,37 @@ CURRENT FRONTIER
 - The runtime is not yet accepted as playable. Do not claim success merely
   because a window, menu, non-black frame, or one draw appears.
 
+IMMEDIATE OBJECTIVE AND SUCCESS CONDITION
+
+Your first assignment is not refactoring. It is to advance the strict loading
+frontier into a controllable gameplay scene without changing guest-visible
+behavior through diagnostics or fabricated success. The current evidence is:
+
+- one event named `ThreadFlag` is created with initial bits `0x0`;
+- the loading path repeatedly waits for bit `0x1` using mode `0x21` and a
+  40,000-microsecond timeout;
+- those waits time out and no corresponding `KernelSetEventFlag` call was
+  observed in the capture;
+- rendering and audio loops remain alive, so the visible loading screen is a
+  symptom of an unfinished producer/worker contract, not proof that
+  `KernelWaitEventFlag` should fabricate completion.
+
+Trace the owner and intended producer of that event. Determine whether the
+missing signal is caused by a worker that never starts, a worker that exits or
+blocks earlier, an unresolved/misregistered export, an incorrect ABI/return
+value, an unprocessed async command, or a producer writing through another
+synchronization primitive. The first falsifiable hypothesis should name the
+producer and predict the exact call/state transition that will set bit `0x1`.
+Evidence that no such producer exists, or that it reaches an earlier strict
+failure, disproves that hypothesis and establishes the next frontier.
+
+Do not solve this by setting the bit in `KernelWaitEventFlag`, treating timeout
+as success, signalling from a timer, adding a title-specific branch, or
+weakening event semantics. Instrument create/wait/set/cancel/delete and worker
+lifecycle temporarily when needed, keep those probes in ignored scratch only,
+and remove them before committing unless they are converted into a general,
+bounded diagnostic facility with tests.
+
 PRIMARY ORDER OF WORK (DO NOT REORDER)
 
 1. Reproduce the strict frontier with the current checkout and private fixture.
@@ -358,6 +389,86 @@ PRIMARY ORDER OF WORK (DO NOT REORDER)
 6. Only after steps 1-5 pass, modularize oversized files one seam at a time.
    Every extraction must be behavior-neutral and must preserve the frozen
    gameplay evidence.
+
+PHASE GATES AND REQUIRED DELIVERABLES
+
+Phase 0 — Baseline and reproducibility:
+
+- Record HEAD, branch, `git status --short`, build result, focused test result,
+  host GPU/capability summary, logging mode, resolution, and shader-cache state.
+- Confirm no permissive/stub/trap-skip environment variable is active.
+- Reproduce the loading frontier twice so a one-off race is not mistaken for a
+  stable contract.
+- Save all raw output beneath ignored scratch. The tracked report contains only
+  sanitized facts, durations, counts, and source locations.
+
+Phase 1 — Resolve the synchronization frontier:
+
+- Map `ThreadFlag` creation to the guest call site and owning subsystem.
+- Map every possible producer path to its HLE export, worker entry point,
+  queue/command input, and expected `SetEventFlag` or equivalent completion.
+- Capture thread start/exit and the last successful contract on the producer
+  thread. The first earlier failure on that thread supersedes the wait timeout.
+- Add a deterministic test for the evidenced missing contract before changing
+  implementation. A generic EventFlag test alone is insufficient if EventFlag
+  itself is behaving correctly and the producer never runs.
+- Implement one semantic change and prove the signal now originates from the
+  real producer. Record the next strict frontier.
+
+Phase 2 — Reach and prove gameplay:
+
+- Advance one strict blocker at a time through loading and scene creation.
+- Use real keyboard/controller press and release edges for acceptance.
+- Demonstrate a controllable character, movement in both directions, and at
+  least one jump/attack/interact action while frames continue presenting.
+- Inspect the scene for correct geometry, colors, texture interpretation,
+  viewport/scissor behavior, and stable frame progression.
+- Run with Vulkan validation where supported and record zero relevant errors,
+  no device loss, no render-thread timeout, and no stuck GPU label.
+- Measure performance only with silent function logging, fixed resolution, and
+  recorded cache state. Do not make a target FPS claim from console logging.
+
+Phase 3 — Freeze the working frontier:
+
+- Add characterization tests for every compatibility seam required to reach
+  gameplay, using sanitized packets/descriptors/ABI arguments only.
+- Create a sanitized frontier report containing commit, commands, test counts,
+  input sequence, frame/flip evidence, validation result, and performance
+  conditions. Do not include the private fixture identity.
+- Establish a baseline commit before any architectural extraction. If the
+  strict scenario cannot be reproduced from that commit, the freeze is invalid.
+
+Phase 4 — Architecture inventory:
+
+- Measure files and functions, but classify them by responsibility, mutable
+  state, ownership, threading, callers, dependencies, and existing tests.
+- Current size signals include `ShaderSpirv.cpp` (~8,290 lines),
+  `GraphicsRender.cpp` (~5,725), `GraphicsRun.cpp` (~4,521),
+  `ShaderParse.cpp` (~3,473), `Shader.cpp` (~3,186), `Pthread.cpp` (~2,807),
+  `Graphics.cpp` (~2,740), `Audio.cpp` (~2,716), `Window.cpp` (~2,539), and
+  `GpuMemory.cpp` (~2,515). Recount before planning; these numbers are a
+  snapshot, not acceptance thresholds.
+- Produce an extraction table for each candidate: responsibility to move,
+  proposed typed interface, inputs/outputs, owner, thread contract, error
+  contract, mutable globals removed or retained, dependency direction,
+  characterization tests, and strict-runtime verification command.
+- Reject any boundary that cannot be described without generic `Utils`,
+  `Common`, `Manager`, forwarding aliases, or bidirectional dependencies.
+
+Phase 5 — Incremental modularization:
+
+- Extract one cohesive responsibility per commit. Do not combine behavior
+  changes with file movement or rename campaigns.
+- Add characterization coverage first, move the implementation second, delete
+  the old implementation in the same change, then rebuild and re-run gameplay.
+- Preserve public behavior and one source of truth. Direct and indirect PM4
+  paths must still share decoders; all surface consumers must still share one
+  layout model; renderer policy must still depend on explicit capabilities.
+- Revert an extraction if build, focused tests, menu, loading time, gameplay,
+  input, frame output, validation state, or performance materially regresses.
+- Update module documentation after each accepted extraction: purpose, public
+  interface, invariants, ownership, thread safety, dependency direction, error
+  behavior, and tests. Comments must explain contracts, not restate code.
 
 NON-NEGOTIABLE RULES
 
@@ -492,6 +603,41 @@ responsibility, mutable state, callers, and tests. Likely seams are:
 - `source/emulator/src/Libs/`: one cohesive HLE library per subsystem, with
   centralized registration and contract tests for each new export.
 
+Recommended extraction order after the gameplay freeze is based on dependency
+direction, not file size:
+
+1. Extract pure packet/descriptor decoding and layout calculations that can be
+   tested without Vulkan or global runtime state.
+2. Separate normalized-state mutation from PM4 envelope walking so direct and
+   indirect packets call the same typed decoders.
+3. Separate shader instruction decoding and intermediate representation from
+   SPIR-V emission. Split `ShaderSpirv.cpp` by cohesive emission domains only
+   after tests characterize shared type, control-flow, resource, and capability
+   contracts.
+4. Separate GPU-memory relation classification and write-back policy from
+   Vulkan object lifetime, keeping exact alias relations typed and tested.
+5. Separate render planning from Vulkan execution/resource creation, passing an
+   immutable normalized draw/dispatch plan plus explicit host capabilities.
+6. Split host window/surface/input/audio/platform adapters only at existing OS
+   boundaries; guest semantics must not move into platform files.
+7. Revisit large kernel/HLE files last, one subsystem contract at a time, once
+   gameplay no longer depends on unresolved ABI behavior in that seam.
+
+For every proposed new module, write this contract before creating the file:
+
+```text
+Purpose:
+Public API:
+Inputs and outputs:
+State and ownership:
+Threading and synchronization:
+Error/unsupported behavior:
+Allowed dependencies:
+Forbidden dependencies:
+Characterization tests:
+Strict runtime checkpoint:
+```
+
 Line count is a signal, not the goal. Do not split an atomic eight-line
 function. Do split a long function that mixes parsing, state mutation,
 allocation, Vulkan calls, and logging. Each extracted function/module must have
@@ -536,6 +682,12 @@ End every auxiliary-agent session with:
 - Regression checks and performance measurement conditions.
 - Exact next blocker and one proposed falsifiable hypothesis.
 - Explicit statement that no diagnostic flag was required for acceptance.
+- Phase and gate status: baseline, synchronization, gameplay, freeze,
+  inventory, or extraction.
+- If gameplay is not reached, the exact producer-side first failure and one
+  falsifiable next hypothesis; never report the loading screen as success.
+- If modularization began, the frozen gameplay commit and before/after evidence
+  proving the extraction was behavior-neutral.
 
 If a required fact cannot be evidenced, stop at a structured unsupported error,
 report the blocker, and do not paper over it with a fallback or broad refactor.
