@@ -4112,7 +4112,9 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
 			return false;
 		}
 
-		static const char* text = R"(
+		// Optional SMEM immediate: final byte offset = SGPR soffset + signed imm
+		// (captured s_buffer_load_dwordx4 s[…], s[…], s24 offset:0x10).
+		static const char* text_plain = R"(
         <load1>
         %t100_<index> = OpLoad %uint %<src0_value0>
         %t101_<index> = OpBitcast %int %t100_<index>
@@ -4121,14 +4123,25 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
                OpStore %temp_int_1 %t102_<index>
         %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_4 %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2 
 )";
+		static const char* text_imm = R"(
+        <load1>
+        %t1imm_<index> = OpIAdd %uint %t1_<index> %<imm>
+        %t100_<index> = OpLoad %uint %<src0_value0>
+        %t101_<index> = OpBitcast %int %t100_<index>
+               OpStore %temp_int_2 %t101_<index>
+        %t102_<index> = OpBitcast %int %t1imm_<index>
+               OpStore %temp_int_1 %t102_<index>
+        %t110_<index> = OpFunctionCall %void %sbuffer_load_dword_4 %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2 
+)";
+		const char* text = (inst.smem_imm_offset != 0) ? text_imm : text_plain;
 		*dst_source += String8(text)
-		                   //.ReplaceStr("<offset>", offset)
 		                   .ReplaceStr("<load1>", load1)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value)
 		                   .ReplaceStr("<p0>", dst_value0.value)
 		                   .ReplaceStr("<p1>", dst_value1.value)
 		                   .ReplaceStr("<p2>", dst_value2.value)
 		                   .ReplaceStr("<p3>", dst_value3.value)
+		                   .ReplaceStr("<imm>", spirv->GetConstantUint(static_cast<uint32_t>(inst.smem_imm_offset)))
 		                   .ReplaceStr("<index>", index_str);
 
 		return true;

@@ -2373,8 +2373,9 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 	{
 		printf("%s", dst->DbgDump().c_str());
 		EXIT("%s\n"
-		     "unknown exp target: 0x%02" PRIx32 " at addr 0x%08" PRIx32 " (hash0 = 0x%08" PRIx32 ", crc32 = 0x%08" PRIx32 ")\n",
-		     dst->DbgDump().c_str(), target, pc, dst->GetHash0(), dst->GetCrc32());
+		     "unknown exp target: 0x%02" PRIx32 " done=%u compr=%u vm=%u en=0x%x at addr 0x%08" PRIx32
+		     " (hash0 = 0x%08" PRIx32 ", crc32 = 0x%08" PRIx32 ")\n",
+		     dst->DbgDump().c_str(), target, done, compr, vm, en, pc, dst->GetHash0(), dst->GetCrc32());
 	}
 
 	dst->GetInstructions().Add(inst);
@@ -2425,9 +2426,16 @@ KYTY_SHADER_PARSER(shader_parse_smem)
 		inst.src[1].type       = ShaderOperandType::IntegerInlineConstant;
 		inst.src[1].constant.i = s.x;
 		inst.src[1].size       = 0;
-	} else
+	} else if (offset != 0)
 	{
-		EXIT_NOT_IMPLEMENTED(offset != 0);
+		// Legal SMEM: SGPR/M0 soffset plus 21-bit signed immediate.
+		// Captured: s_buffer_load_dwordx4 with s24 + imm 0x10.
+		struct
+		{
+			int x : 21;
+		} s {};
+		s.x                 = offset;
+		inst.smem_imm_offset = s.x;
 	}
 
 	switch (opcode)
