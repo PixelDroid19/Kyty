@@ -456,6 +456,16 @@ TEST(EmulatorGraphicsPackets, SizesGen5RotatedXSampleTextures)
 	EXPECT_EQ(size_zero_pitch.align, size.align);
 }
 
+// Captured first fail after GPU chain: format 56, 800x320, tile 27 → 0x150000.
+TEST(EmulatorGraphicsPackets, SizesGen5RotatedXTexture800x320)
+{
+	TileSizeAlign size {};
+	TileGetTextureSize2(56, 800, 320, 800, 1, 27, &size, nullptr, nullptr);
+	EXPECT_EQ(size.size, 0x150000u);
+	EXPECT_EQ(size.align, 65536u);
+}
+
+
 // Post-Play DCB fragment after CB/DB meta EVENT_WRITE: a run of Type0
 // single-register writes (10 dwords) then WaitFlipDone (0xC0051018). Walking
 // with Pm4NonType3PacketDwords must land on the Type3 header.
