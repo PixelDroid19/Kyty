@@ -4235,7 +4235,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		if (gen5)
 		{
-			EXIT_NOT_IMPLEMENTED(!(r.TileMode() == 0));
+			// Observed post-Play: TileMode=27 (SW_64KB_R_X), format 56, non-pow2 sizes.
+			// Only linear (0) is fully wired for Gen5 sample textures today.
+			if (r.TileMode() != 0)
+			{
+				EXIT("unsupported Gen5 texture tile mode %u (format=%u %ux%u)\n",
+				     r.TileMode(), r.Format(), r.Width5() + 1u, r.Height5() + 1u);
+			}
 			EXIT_NOT_IMPLEMENTED(r.Format() != 56);
 			EXIT_NOT_IMPLEMENTED(r.PerfMod5() != 7 && r.PerfMod5() != 0);
 			EXIT_NOT_IMPLEMENTED(r.BCSwizzle() != 0);
