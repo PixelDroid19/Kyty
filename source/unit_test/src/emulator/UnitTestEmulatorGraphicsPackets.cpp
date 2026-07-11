@@ -302,6 +302,41 @@ TEST(EmulatorGraphicsPackets, ResolvesDataPacketPayloadAddressByOpcode)
 	EXPECT_EQ(payload, write_data + 2);
 }
 
+// Post-Play: WaitMem address stays 0; preceding ReleaseMem is EopPatched.
+// Resolve Wait to the Release address when packets are contiguous.
+TEST(EmulatorGraphicsPackets, ResolvesNullWaitMemAddressFromPrecedingRelease)
+{
+	uint32_t stream[16] = {};
+	// ReleaseMem with patched label address 0x00000001268815d0.
+	stream[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	stream[1] = 0x14u;
+	stream[2] = 0x00010000u; // data_sel=1
+	stream[3] = 0x268815d0u;
+	stream[4] = 0x00000001u;
+	stream[5] = 1u;
+	stream[6] = 0u;
+	// WaitMem64 with null address (body starts at stream[8]).
+	stream[7]  = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	stream[8]  = 0u;
+	stream[9]  = 0u;
+	stream[10] = 0xffffffffu;
+	stream[11] = 0u;
+	stream[12] = 1u;
+	stream[13] = 0u;
+	stream[14] = 3u;
+	stream[15] = 10u;
+
+	uint64_t* resolved = Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 8);
+	ASSERT_NE(resolved, nullptr);
+	EXPECT_EQ(reinterpret_cast<uint64_t>(resolved), 0x00000001268815d0ull);
+
+	// Non-contiguous / wrong previous packet → no invent.
+	EXPECT_EQ(Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 1), nullptr);
+	stream[3] = 0;
+	stream[4] = 0;
+	EXPECT_EQ(Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 8), nullptr);
+}
+
 // Encoder accepts data_sel=1 (32-bit immediate). Packet layout stores data_sel
 // in bits 23:16 of dword 2 and the immediate in dwords 5..6.
 TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1Immediate32)

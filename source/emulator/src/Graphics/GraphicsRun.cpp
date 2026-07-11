@@ -561,10 +561,16 @@ void CommandProcessor::BufferFlush()
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 	EXIT_IF(m_buffer[m_current_buffer] == nullptr);
 
-	m_buffer[m_current_buffer]->End();
-	m_buffer[m_current_buffer]->Execute();
+	// Submit the current Vulkan buffer, then wait for *that* submission before
+	// rotating. Waiting only on the next slot left EOP label events (and their
+	// host memory writes) incomplete when WaitRegMem polled immediately after
+	// flush — observed as post-Play loading soft-lock: val stays 0 for ref=1.
+	const int submitted = m_current_buffer;
+	m_buffer[submitted]->End();
+	m_buffer[submitted]->Execute();
+	m_buffer[submitted]->WaitForFence();
 
-	m_current_buffer = (m_current_buffer + 1) % VK_BUFFERS_NUM;
+	m_current_buffer = (submitted + 1) % VK_BUFFERS_NUM;
 
 	EXIT_IF(m_buffer[m_current_buffer] == nullptr);
 
@@ -671,27 +677,42 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 
 	BufferFlush();
 
-	while (((*addr) & mask) != ref)
+	// Unbounded polls freeze loading screens while the window still flips.
+	// Bound the wait so a stuck label becomes a structured fail with values.
+	constexpr int kMaxIters = 500000; // ~5s at 10us sleep
+	for (int i = 0; i < kMaxIters; i++)
 	{
+		if (((*addr) & mask) == ref)
+		{
+			return;
+		}
 		Core::Thread::SleepMicro(10);
 	}
+	EXIT("WaitRegMem32 timeout addr=%p val=0x%08" PRIx32 " ref=0x%08" PRIx32 " mask=0x%08" PRIx32 "\n", static_cast<const void*>(addr),
+	     *addr, ref, mask);
 }
 
 void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll)
 {
 	EXIT_NOT_IMPLEMENTED(func != 3);
 	EXIT_NOT_IMPLEMENTED(poll != 10);
-	// Observed post-Play WaitMem packet with addr=0 after ReleaseMem data_sel=1.
-	// Do not dereference null; fail with enough context to implement register
-	// waits or address patching if that is the intended guest form.
+	// Null address is rejected: post-Play null fences must be bound at encode
+	// (ReleaseMem data_sel=1 + WaitRegMem size=0) or patched by the guest.
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
 
 	BufferFlush();
 
-	while (((*addr) & mask) != ref)
+	constexpr int kMaxIters = 500000; // ~5s at 10us sleep
+	for (int i = 0; i < kMaxIters; i++)
 	{
+		if (((*addr) & mask) == ref)
+		{
+			return;
+		}
 		Core::Thread::SleepMicro(10);
 	}
+	EXIT("WaitRegMem64 timeout addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64 " mask=0x%016" PRIx64 "\n", static_cast<const void*>(addr),
+	     *addr, ref, mask);
 }
 
 void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom)
@@ -2784,6 +2805,21 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 		}
 		break;
 
+		case 0x00007fc0:
+		{
+			// target_mask:     0x00007fc0 (all rt and depth)
+			// extended_action: none
+			// action:          none
+			// Observed immediately after the post-Play WaitMem fence advances
+			// into the loading path (cache_action word is only the target mask).
+			EXIT_IF(target_mask != 0x00007fc0);
+			EXIT_IF(extended_action != 0x00000000);
+			EXIT_IF(action != 0x00);
+
+			cp->MemoryBarrier();
+		}
+		break;
+
 		case 0x00000000:
 			// No-op / simple cache sync (all fields zero) — plain barrier.
 			cp->MemoryBarrier();
@@ -3544,12 +3580,13 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_64)
 	auto  func = buffer[6];
 	auto  poll = buffer[7];
 
-	// Post-Play path encodes ReleaseMem(data_sel=1,data=1,addr=null) then
-	// WaitRegMem(size=0,op=0,cmp=3,ref=1,mask=~0,addr=null) as a label fence.
-	// Guest returns the packet header (SizeDw consumes it) but does not call
-	// GetDataPacketPayloadAddress/EopPatch on these packets before submit, so
-	// the address field stays zero. Fail with the full body for the next
-	// patching/ABI investigation rather than dereferencing null.
+	// Post-Play: WaitMem often keeps address=0 while the preceding contiguous
+	// ReleaseMem is EopPatched to the real Label*. Inherit that address.
+	if (addr == nullptr)
+	{
+		addr = Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(buffer);
+	}
+
 	if (addr == nullptr)
 	{
 		EXIT("WaitRegMem64 null addr body=%08x %08x %08x %08x %08x %08x %08x %08x\n", buffer[0], buffer[1], buffer[2], buffer[3],
