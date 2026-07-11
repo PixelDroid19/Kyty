@@ -93,12 +93,14 @@ bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic*
                                      const ShaderSemantic* inputs, uint32_t input_count);
 int KYTY_SYSV_ABI   GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t* cmd, int type);
 int KYTY_SYSV_ABI   GraphicsSuspendPoint();
+// Patches the address field of a Gen5 ReleaseMem end-of-pipe packet.
+int KYTY_SYSV_ABI   GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, uint64_t address);
 // Graphics5 NID LtTouSCZjHM: allocate dwords in a CommandBuffer (cursor_up).
 // Observed SysV: rdi=CommandBuffer*, rsi=num_dw (e.g. 10). Returns dword*.
 uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw);
-// Graphics5 NID IxYiarKlXxM: PM4 type-3 packet size in dwords (header length field).
-// Observed rdi → complete WaitFlipDone packet (0xC0051018); rsi/rcx held ±7 DW
-// neighbors (residuals from stream arithmetic). Returns dword count.
+// Graphics5 NIDs IxYiarKlXxM / 3KDcnM3lrcU: PM4 type-3 packet size in dwords.
+// IxYiar: rdi → WaitFlipDone (0xC0051018). 3KDcn: rdi → WaitMem64 (0xC0071058).
+// Sibling registers held stream neighbors as residuals. Returns dword count.
 uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd);
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
 int KYTY_SYSV_ABI   GraphicsAgcDriverUnknownKRzWekV120();

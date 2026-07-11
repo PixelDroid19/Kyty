@@ -4022,11 +4022,15 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		pitch  = width;
 
 		Graphics::TileSizeAlign size32 {};
-		Graphics::TileGetVideoOutSize(width, height, pitch, tile, true, &size32);
+		Graphics::TileGetRenderTargetSize(width, height, pitch, rt.attrib3.tile_mode, (rt.info.format == 0x1 ? 1u : 4u), &size32);
 
 		size = size32.size;
 
-		EXIT_NOT_IMPLEMENTED(size == 0);
+		if (size == 0)
+		{
+			EXIT("unsupported Gen5 render-target layout: width=%" PRIu32 ", height=%" PRIu32 ", pitch=%" PRIu32 ", tile=%s, neo=%s\n",
+			     width, height, pitch, tile ? "true" : "false", rt.info.neo_mode ? "true" : "false");
+		}
 	} else
 	{
 		switch (rt.attrib.tile_mode)

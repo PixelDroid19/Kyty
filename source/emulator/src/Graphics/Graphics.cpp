@@ -1883,6 +1883,28 @@ int KYTY_SYSV_ABI GraphicsSuspendPoint()
 	return OK;
 }
 
+int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, uint64_t address)
+{
+	PRINT_NAME();
+
+	if (cmd == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	const uint32_t header = cmd[0];
+	if ((header >> 30u) != 3u || ((header >> 8u) & 0xffu) != Pm4::IT_NOP || KYTY_PM4_R(header) != Pm4::R_RELEASE_MEM ||
+	    KYTY_PM4_LEN(header) < 7u)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	// ReleaseMem stores the 64-bit destination address in payload dwords 1..2.
+	cmd[3] = static_cast<uint32_t>(address & 0xffffffffu);
+	cmd[4] = static_cast<uint32_t>(address >> 32u);
+	return OK;
+}
+
 // Graphics5 NID LtTouSCZjHM. Captured strict SysV entry:
 //   rdi = CommandBuffer* (bottom/top/cursor_up/cursor_down/callback layout)
 //   rsi = 10 (num dwords)
@@ -1939,6 +1961,8 @@ uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 	printf("\t size_dw = %" PRIu32 "\n", size_dw);
 	return size_dw;
 }
+
+
 
 
 

@@ -69,6 +69,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("23LRUSvYu1M", Gen5::GraphicsInit);
 	LIB_FUNC("2JtWUUiYBXs", Gen5::GraphicsGetRegisterDefaults2);
 	LIB_FUNC("wRbq6ZjNop4", Gen5::GraphicsGetRegisterDefaults2Internal);
+	// 3KDcnM3lrcU: same PM4 size utility as IxYiarKlXxM (WaitMem64 packet observed).
+	LIB_FUNC("3KDcnM3lrcU", Gen5::GraphicsGetDataPacketSizeDw);
 	LIB_FUNC("f3dg2CSgRKY", Gen5::GraphicsCreateShader);
 	LIB_FUNC("vcmNN+AAXnY", Gen5::GraphicsSetCxRegIndirectPatchSetAddress);
 	LIB_FUNC("Qrj4c+61z4A", Gen5::GraphicsSetShRegIndirectPatchSetAddress);
@@ -87,12 +89,13 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("HV4j+E0MBHE", Gen5::GraphicsCreateInterpolantMapping);
 	LIB_FUNC("V++UgBtQhn0", Gen5::GraphicsGetDataPacketPayloadAddress);
 	LIB_FUNC("h9z6+0hEydk", Gen5::GraphicsSuspendPoint);
+	LIB_FUNC("0fWWK5uG9rQ", Gen5::GraphicsAgcQueueEndOfPipeActionPatchAddress);
 
 	LIB_FUNC("n2fD4A+pb+g", Gen5::GraphicsCbSetShRegisterRangeDirect);
 	LIB_FUNC("UZbQjYAwwXM", Gen5::GraphicsCbSetShRegistersDirect);
 	LIB_FUNC("k3GhuSNmBLU", Gen5::GraphicsCbDispatch);
 	LIB_FUNC("wr23dPKyWc0", Gen5::GraphicsCbReleaseMem);
-	// IxYiarKlXxM: PM4 packet size in dwords (see GraphicsGetDataPacketSizeDw).
+	// IxYiarKlXxM / 3KDcnM3lrcU: PM4 packet size in dwords.
 	LIB_FUNC("IxYiarKlXxM", Gen5::GraphicsGetDataPacketSizeDw);
 	LIB_FUNC("TRO721eVt4g", Gen5::GraphicsDcbResetQueue);
 	LIB_FUNC("MWiElSNE8j8", Gen5::GraphicsDcbWaitUntilSafeForRendering);

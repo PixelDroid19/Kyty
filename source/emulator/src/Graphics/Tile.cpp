@@ -747,6 +747,44 @@ void TileGetVideoOutSize(uint32_t width, uint32_t height, uint32_t pitch, bool t
 	size->align = ret_align;
 }
 
+void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t tile_mode, uint32_t bytes_per_texel,
+                             TileSizeAlign* size)
+{
+	EXIT_IF(size == nullptr);
+
+	size->size  = 0;
+	size->align = 0;
+
+	if (tile_mode != 0x1bu || (bytes_per_texel != 1u && bytes_per_texel != 2u && bytes_per_texel != 4u && bytes_per_texel != 8u &&
+	                          bytes_per_texel != 16u))
+	{
+		return;
+	}
+
+	// A 64 KiB swizzle block holds these element grids for 1/2/4/8/16-byte
+	// texels. The block geometry is independent of the host GPU.
+	static constexpr uint32_t block_width[]  = {256, 256, 128, 128, 64};
+	static constexpr uint32_t block_height[] = {256, 128, 128, 64, 64};
+	uint32_t                  element_log2   = 0;
+	uint32_t                  element_size   = bytes_per_texel;
+	while (element_size > 1u)
+	{
+		element_size >>= 1u;
+		element_log2++;
+	}
+
+	const uint32_t effective_pitch = (pitch != 0 ? pitch : width);
+	const uint64_t blocks_x        = (static_cast<uint64_t>(effective_pitch) + block_width[element_log2] - 1u) /
+	                           block_width[element_log2];
+	const uint64_t blocks_y = (static_cast<uint64_t>(height) + block_height[element_log2] - 1u) / block_height[element_log2];
+	const uint64_t total = blocks_x * blocks_y * 65536u;
+	if (total <= UINT32_MAX)
+	{
+		size->size  = static_cast<uint32_t>(total);
+		size->align = 65536u;
+	}
+}
+
 struct TextureInfoPadded
 {
 	uint32_t width  = 0;

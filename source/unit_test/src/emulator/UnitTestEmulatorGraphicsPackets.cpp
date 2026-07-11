@@ -7,6 +7,8 @@
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
+#include "Emulator/Graphics/Tile.h"
+#include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
 UT_BEGIN(EmulatorGraphicsPackets);
@@ -212,6 +214,38 @@ TEST(EmulatorGraphicsPackets, ReportsType3Pm4PacketSizeInDwords)
 	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(&wait_mem64), 9u);
 
 	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(nullptr), 0u);
+}
+
+TEST(EmulatorGraphicsPackets, PatchesReleaseMemEndOfPipeAddress)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t command[7] = {};
+	command[0]           = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+
+	EXPECT_EQ(Gen5::GraphicsAgcQueueEndOfPipeActionPatchAddress(command, 0x123456789abcdef0ull), 0);
+	EXPECT_EQ(command[3], 0x9abcdef0u);
+	EXPECT_EQ(command[4], 0x12345678u);
+
+	command[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	EXPECT_NE(Gen5::GraphicsAgcQueueEndOfPipeActionPatchAddress(command, 1), 0);
+	EXPECT_EQ(Gen5::GraphicsAgcQueueEndOfPipeActionPatchAddress(nullptr, 1), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+TEST(EmulatorGraphicsPackets, SizesGen5RotatedXRenderTargets)
+{
+	TileSizeAlign size {};
+	TileGetRenderTargetSize(161, 109, 161, 0x1b, 4, &size);
+
+	EXPECT_EQ(size.size, 131072u);
+	EXPECT_EQ(size.align, 65536u);
+
+	TileGetRenderTargetSize(1920, 1080, 1920, 0x1b, 4, &size);
+	EXPECT_EQ(size.size, 8847360u);
 }
 
 TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
