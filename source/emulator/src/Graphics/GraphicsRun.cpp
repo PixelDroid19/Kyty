@@ -667,6 +667,7 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 {
 	EXIT_NOT_IMPLEMENTED(func != 3);
 	EXIT_NOT_IMPLEMENTED(poll != 10);
+	EXIT_NOT_IMPLEMENTED(addr == nullptr);
 
 	BufferFlush();
 
@@ -680,6 +681,10 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 {
 	EXIT_NOT_IMPLEMENTED(func != 3);
 	EXIT_NOT_IMPLEMENTED(poll != 10);
+	// Observed post-Play WaitMem packet with addr=0 after ReleaseMem data_sel=1.
+	// Do not dereference null; fail with enough context to implement register
+	// waits or address patching if that is the intended guest form.
+	EXIT_NOT_IMPLEMENTED(addr == nullptr);
 
 	BufferFlush();
 
@@ -1210,6 +1215,12 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	} else if (eop_event_type == 0x04 && cache_action == 0x00 && event_index == 0x05 && source32 && !with_interrupt)
 	{
 		GraphicsRenderWriteAtEndOfPipe32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value);
+	} else if ((eop_event_type == 0x14 && event_index == 0x00) && cache_action == 0x00 && source32 && !with_interrupt)
+	{
+		// Custom ReleaseMem data_sel=1: CACHE_FLUSH_AND_INV_TS-style 32-bit
+		// immediate label write (observed post-WaitUntilSafe, data=1).
+		GraphicsRenderWriteAtEndOfPipe32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr),
+		                                 static_cast<uint32_t>(value));
 	} else if (((eop_event_type == 0x04 && event_index == 0x05) || (eop_event_type == 0x28 && event_index == 0x05) ||
 	            (eop_event_type == 0x2f && event_index == 0x06) || (eop_event_type == 0x14 && event_index == 0x00) ||
 	            (eop_event_type == 0x28 && event_index == 0x00)) &&
@@ -3374,9 +3385,19 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 		uint32_t gcr_cntl = buffer[1] & 0xffffu;
 		uint32_t data_sel = (buffer[1] >> 16u) & 0xffu;
 
-		EXIT_NOT_IMPLEMENTED(data_sel != 2 && data_sel != 3);
+		// data_sel matches GraphicsCbReleaseMem: 1 = 32-bit immediate (observed
+		// post-WaitUntilSafe: gcr=0, data=1), 2 = 64-bit immediate, 3 = counter.
+		if (data_sel == 1)
+		{
+			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0000);
 
-		if (data_sel == 2)
+			cache_action       = 0x00;
+			cache_policy       = 0;
+			event_index        = 0;
+			event_write_dest   = 0;
+			event_write_source = 1; // 32-bit immediate
+			interrupt_selector = 0;
+		} else if (data_sel == 2)
 		{
 			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0200);
 			EXIT_NOT_IMPLEMENTED((buffer[0] >> 8u) != 0x3);
@@ -3403,6 +3424,9 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 			event_write_dest   = 0;
 			event_write_source = 4;
 			interrupt_selector = 0;
+		} else
+		{
+			EXIT("unsupported ReleaseMem data_sel=%u event=%u gcr=%u\n", data_sel, eop_event_type, gcr_cntl);
 		}
 	}
 

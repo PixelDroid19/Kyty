@@ -267,6 +267,49 @@ TEST(EmulatorGraphicsPackets, PatchesReleaseMemEndOfPipeAddress)
 	EXPECT_EQ(Gen5::GraphicsAgcQueueEndOfPipeActionPatchAddress(nullptr, 1), Libs::LibKernel::KERNEL_ERROR_EINVAL);
 }
 
+// Encoder accepts data_sel=1 (32-bit immediate). Packet layout stores data_sel
+// in bits 23:16 of dword 2 and the immediate in dwords 5..6.
+TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1Immediate32)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	// Observed post-Play: action=0x14, gcr=0, data_sel=1, data=1.
+	const auto* label = reinterpret_cast<const volatile Gen5::Label*>(static_cast<uintptr_t>(0x100));
+	uint32_t*   cmd =
+	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x14, 0, 1, 0, label, 1, 1, 0, 1, 0, 0);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
+	EXPECT_EQ(cmd[1], 0x14u);
+	EXPECT_EQ(cmd[2], 0x00010000u); // gcr=0 | data_sel=1 << 16
+	EXPECT_EQ(cmd[3], 0x100u);
+	EXPECT_EQ(cmd[4], 0u);
+	EXPECT_EQ(cmd[5], 1u);
+	EXPECT_EQ(cmd[6], 0u);
+}
+
 TEST(EmulatorGraphicsPackets, SizesGen5RotatedXRenderTargets)
 {
 	TileSizeAlign size {};
