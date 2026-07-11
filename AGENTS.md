@@ -43,13 +43,17 @@ that succeeds without exercising the runtime is not compatibility.
 ## Current verified frontier
 
 The local reference workload reaches Vulkan device creation, guest engine
-startup, Gen5 shader creation, indexed draws, VideoOut submission, and repeated
-swapchain presentation.
+startup, Gen5 shader creation, indexed draws, VideoOut submission, repeated
+swapchain presentation, and execution beyond the initial logo sequence. Recent
+strict work corrected sub-second wall-clock time, keyboard/controller merging,
+read-only storage-buffer overlap tracking, Gen5 resource unregistration, and
+pixel-input default interpolation.
 
-Strict execution currently encounters confirmed but unimplemented HLE and Gen5
-state paths before a correct frame. Diagnostic execution can present pixels,
-but the image is corrupted because important GPU state and surface semantics are
-not yet complete. Diagnostic flags do not constitute a supported runtime mode.
+Strict execution still encounters confirmed but unimplemented HLE and graphics
+paths before a playable frame. The first observed frontier after the initial
+sequence is an entitlement-access guest API whose ABI and guest-visible result
+must be evidenced before implementation. Diagnostic execution can present
+pixels, but diagnostic flags do not constitute a supported runtime mode.
 
 Always reproduce the current frontier. Do not rely on this paragraph after code
 or fixture changes.
@@ -84,6 +88,52 @@ Keep guest API decoding, guest GPU semantics, normalized state, Vulkan objects,
 and host platform adapters conceptually separate even where legacy files still
 contain more than one responsibility. Improve the seam being touched; do not
 perform unrelated mass refactors.
+
+## Delivery order
+
+Compatibility work and architecture work have a strict order:
+
+1. Advance the strict runtime one evidenced failure at a time.
+2. Reach a recognizable menu without diagnostic behavior changes.
+3. Prove real controller input, stable frame progression, and representative
+   gameplay without Vulkan errors or fabricated guest results.
+4. Freeze the working frontier with focused regression and characterization
+   tests.
+5. Only then decompose oversized modules incrementally, re-running the strict
+   scenario after every extraction.
+
+Do not postpone a necessary correctness seam solely because it lives in a large
+file. Conversely, do not mix broad file decomposition into an unresolved
+compatibility change. A refactor is not evidence that the runtime improved.
+
+## Module and function boundaries
+
+- A function has one observable purpose and one reason to change. Separate
+  packet decoding, validation, state mutation, resource layout, Vulkan object
+  creation, synchronization, and diagnostic formatting.
+- A source file owns one cohesive capability. Large legacy translation units
+  are migration sources, not patterns for new centralized implementations.
+- Line count is a review signal, not a mechanical rule. Do not split an
+  eight-line function that expresses one atomic operation, and do not keep an
+  eight-thousand-line module merely because individual functions are short.
+- Before extracting code, identify the proposed module's inputs, outputs,
+  ownership, error contract, threading contract, and tests. If those cannot be
+  stated concisely, the boundary is not ready.
+- Extract behavior behind narrow typed interfaces. Do not create generic
+  `Utils`, `Common`, `Manager`, compatibility aliases, forwarding layers, or
+  duplicate old/new implementations.
+- Keep dependency direction explicit: guest descriptor decoding feeds
+  normalized state; normalized state feeds resource and render planning; host
+  capabilities select a semantically equivalent Vulkan strategy. Host details
+  never flow backward into guest semantics.
+- Add characterization tests before moving existing behavior. The extraction
+  commit must be behavior-neutral, and the focused tests plus strict scenario
+  must show the same or later frontier.
+- Delete the superseded implementation in the same extraction. There is no
+  permanent legacy path, hidden fallback, or feature flag selecting duplicate
+  semantics.
+- Document public module contracts and non-obvious hardware invariants. Avoid
+  comments that merely restate code or contain private workload information.
 
 ## Required workflow
 
@@ -143,6 +193,20 @@ For graphics changes, a successful build and non-black pixels are insufficient.
 Verify geometry, colors, resource interpretation, completed flips, absence of
 Vulkan errors, and a recognizable correctly proportioned frame. Preserve local
 visual evidence outside Git.
+
+### 6. Refactor only behind a frozen frontier
+
+After strict menu and gameplay acceptance exists, inventory oversized modules
+with line counts, responsibilities, dependency direction, mutable globals, and
+test coverage. Select one cohesive extraction at a time. For each extraction:
+
+1. Record the pre-refactor strict frontier and focused test results.
+2. Add missing characterization tests without changing behavior.
+3. Move one responsibility behind a narrow interface.
+4. Remove the original implementation rather than leaving an alias.
+5. Build, run focused tests, and reproduce the strict frontier.
+6. Revert the extraction if the frontier, frame, input, or validation state
+   regresses.
 
 ## HLE and ABI rules
 
@@ -253,3 +317,7 @@ Before committing a behavior change:
 8. Existing working behavior was rechecked.
 9. The commit message describes emulator behavior without identifying a private
    compatibility fixture.
+10. Any refactor preserves the frozen strict frontier and leaves one active
+    implementation of each behavior.
+11. New or extracted modules have a documented responsibility, ownership model,
+    dependency direction, and focused tests.
