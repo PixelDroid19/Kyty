@@ -277,6 +277,7 @@ enum FormatByte : uint64_t
 	Param2, // param2
 	Param3, // param3
 	Param4, // param4
+	Param5, // param5 — Gen5 VS export target 0x25
 	Mrt0,   // mrt_color0
 	Prim,   // prim
 	Off,    // off
@@ -317,6 +318,7 @@ enum Format : uint64_t
 	Param2Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param2, S0, S1, S2, S3}),
 	Param3Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param3, S0, S1, S2, S3}),
 	Param4Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param4, S0, S1, S2, S3}),
+	Param5Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param5, S0, S1, S2, S3}),
 	Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done        = FormatDefine({Pos0, S0, S1, S2, S3, Done}),
 	PrimVsrc0OffOffOffDone              = FormatDefine({Prim, S0, Off, Off, Off, Done}),
 	Saddr                               = FormatDefine({S0A2}),
