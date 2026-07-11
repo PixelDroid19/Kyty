@@ -631,6 +631,52 @@ bool TileGetDepthSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t 
 				return true;
 			}
 		}
+
+		// Fallback formula for non-table Gen5 dimensions (captured 642x362
+		// D32+S8 htile). Depth body matches table entries for z_format 3:
+		//   size = width * AlignUp(height, 128) * bpp, align 65536.
+		// Stencil plane: AlignUp(w,256)*AlignUp(h,256), align 65536.
+		// HTILE: coarse 8x8 cells * 8 bytes, aligned to 32 KiB (table density
+		// for 720p); keep table path preferred for known resolutions.
+		const auto align_up = [](uint32_t v, uint32_t a) -> uint32_t { return (v + a - 1u) / a * a; };
+		uint32_t   bpp      = 0;
+		if (z_format == 3)
+		{
+			bpp = 4;
+		} else if (z_format == 1)
+		{
+			bpp = 2;
+		} else if (z_format != 0)
+		{
+			*depth_size   = TileSizeAlign();
+			*htile_size   = TileSizeAlign();
+			*stencil_size = TileSizeAlign();
+			return false;
+		}
+		const uint32_t h_pad     = align_up(height, 128);
+		const uint32_t depth_pitch = (z_format == 1) ? align_up(width, 256) : width;
+		depth_size->size         = (bpp == 0) ? 0 : depth_pitch * h_pad * bpp;
+		depth_size->align        = 65536;
+		if (stencil_format != 0)
+		{
+			stencil_size->size  = align_up(width, 256) * align_up(height, 256);
+			stencil_size->align = 65536;
+		} else
+		{
+			*stencil_size = TileSizeAlign();
+		}
+		if (htile)
+		{
+			const uint32_t cells_x = align_up(width, 8) / 8;
+			const uint32_t cells_y = h_pad / 8;
+			const uint32_t raw     = cells_x * cells_y * 8u;
+			htile_size->size       = align_up(raw, 32768);
+			htile_size->align      = 32768;
+		} else
+		{
+			*htile_size = TileSizeAlign();
+		}
+		return depth_size->size != 0 || stencil_size->size != 0;
 	} else if (neo)
 	{
 		for (const auto& i: infos_neo)

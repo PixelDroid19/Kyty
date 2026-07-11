@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cinttypes>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -39,6 +41,14 @@ bool ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format)
 	// GFX10+ unified formats 75, 76 and 77 are 32_32_32_32 with UINT,
 	// SINT and FLOAT number interpretation respectively.
 	return format >= 75 && format <= 77;
+}
+
+bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
+{
+	// Captured STORAGE_FMT_FAIL: stride=4, DstSel(R,0,0,1), format=20.
+	// Treat format 20 as a 32-bit single-component buffer view until more
+	// Gen5 format IDs are captured.
+	return format == 20;
 }
 
 uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format)
@@ -1192,8 +1202,16 @@ static void ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sg
 	int  index    = info->buffers_num;
 	bool extended = (extended_buffer != nullptr);
 
-	EXIT_NOT_IMPLEMENTED(!extended && start_index >= 16);
-	EXIT_NOT_IMPLEMENTED(extended && !(start_index >= 16));
+	// With Gen5 32-user-SGPR windows, slots 16..31 are direct user SGPRs (not
+	// necessarily a separate EUD pointer). Only require extended when an
+	// extended_buffer is supplied.
+	if (extended)
+	{
+		EXIT_NOT_IMPLEMENTED(start_index < 16);
+	} else
+	{
+		EXIT_NOT_IMPLEMENTED(start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX);
+	}
 
 	info->start_register[index] = start_index;
 	info->slots[index]          = slot;
@@ -1206,7 +1224,10 @@ static void ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sg
 		for (int j = 0; j < 4; j++)
 		{
 			auto type = user_sgpr.type[start_index + j];
-			EXIT_NOT_IMPLEMENTED(type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region);
+			// Region/Vsharp markers may be unset when SGPRs were bulk-written;
+			// Unknown is accepted for Gen5 full-window loads (reg_num=30).
+			EXIT_NOT_IMPLEMENTED(type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region &&
+			                     type != HW::UserSgprType::Unknown);
 
 			direct_sgprs[start_index + j] = false;
 		}
@@ -1231,8 +1252,13 @@ static void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sg
 	int  index    = info->textures_num;
 	bool extended = (extended_buffer != nullptr);
 
-	EXIT_NOT_IMPLEMENTED(!extended && start_index >= 16);
-	EXIT_NOT_IMPLEMENTED(extended && !(start_index >= 16));
+	if (extended)
+	{
+		EXIT_NOT_IMPLEMENTED(start_index < 16);
+	} else
+	{
+		EXIT_NOT_IMPLEMENTED(start_index < 0 || start_index + 7 >= HW::UserSgprInfo::SGPRS_MAX);
+	}
 
 	info->desc[index].start_register = start_index;
 	info->desc[index].extended       = extended;
@@ -1256,7 +1282,8 @@ static void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sg
 		for (int j = 0; j < 8; j++)
 		{
 			auto type = user_sgpr.type[start_index + j];
-			EXIT_NOT_IMPLEMENTED(type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region);
+			EXIT_NOT_IMPLEMENTED(type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region &&
+			                     type != HW::UserSgprType::Unknown);
 
 			direct_sgprs[start_index + j] = false;
 		}
@@ -1285,8 +1312,13 @@ static void ShaderGetSampler(ShaderSamplerResources* info, bool* direct_sgprs, i
 	int  index    = info->samplers_num;
 	bool extended = (extended_buffer != nullptr);
 
-	EXIT_NOT_IMPLEMENTED(!extended && start_index >= 16);
-	EXIT_NOT_IMPLEMENTED(extended && !(start_index >= 16));
+	if (extended)
+	{
+		EXIT_NOT_IMPLEMENTED(start_index < 16);
+	} else
+	{
+		EXIT_NOT_IMPLEMENTED(start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX);
+	}
 
 	info->start_register[index] = start_index;
 	info->extended[index]       = extended;
@@ -1297,7 +1329,8 @@ static void ShaderGetSampler(ShaderSamplerResources* info, bool* direct_sgprs, i
 		for (int j = 0; j < 4; j++)
 		{
 			auto type = user_sgpr.type[start_index + j];
-			EXIT_NOT_IMPLEMENTED(type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region);
+			EXIT_NOT_IMPLEMENTED(type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region &&
+			                     type != HW::UserSgprType::Unknown);
 
 			direct_sgprs[start_index + j] = false;
 		}
@@ -1619,7 +1652,16 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	info->direct_sgprs              = 0;
 
 	EXIT_NOT_IMPLEMENTED(user_data == nullptr);
-	EXIT_NOT_IMPLEMENTED(user_data->eud_size_dw != 0);
+	// Captured Gen5: eud_size_dw=12, srt_size_dw=0, user_sgpr_num=30. Resource
+	// descriptors are already written into the user-SGPR window (V#/S# layouts
+	// at slots 0..29). No separate EUD pointer is required for this case —
+	// offsets index user_sgpr directly (extended_buffer stays null).
+	if (user_data->eud_size_dw != 0)
+	{
+		EXIT_NOT_IMPLEMENTED(user_data->srt_size_dw != 0);
+		EXIT_NOT_IMPLEMENTED(user_sgpr_num <= 0);
+		EXIT_NOT_IMPLEMENTED(static_cast<uint32_t>(user_sgpr_num) < user_data->eud_size_dw);
+	}
 	EXIT_NOT_IMPLEMENTED(user_data->srt_size_dw > user_sgpr_num);
 
 	uint32_t* extended_buffer = nullptr;
@@ -1657,11 +1699,17 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 
 			default:
 			{
-				const auto usage =
-				    (code != nullptr ? ShaderGetDirectStorageUsage(*code, reg + user_data_register_base) : ShaderStorageUsage::Unknown);
-				if (usage == ShaderStorageUsage::Unknown)
+				// When the instruction stream is unavailable (VS/PS Gen5 path),
+				// default to ReadOnly rather than failing. CS passes &code and
+				// reclassifies stores as ReadWrite via ShaderGetDirectStorageUsage.
+				auto usage = ShaderStorageUsage::ReadOnly;
+				if (code != nullptr)
 				{
-					EXIT("unknown usage type: 0x%04" PRIx16 "\n", type);
+					usage = ShaderGetDirectStorageUsage(*code, reg + user_data_register_base);
+					if (usage == ShaderStorageUsage::Unknown)
+					{
+						EXIT("unknown usage type: 0x%04" PRIx16 "\n", type);
+					}
 				}
 				ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, reg, bind->storage_buffers.buffers_num, usage, user_sgpr,
 				                       extended_buffer);
