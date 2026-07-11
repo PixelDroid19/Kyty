@@ -50,6 +50,13 @@ void TileGetVideoOutSize(uint32_t width, uint32_t height, uint32_t pitch, bool t
 // swizzle blocks rather than treated as a linear byte span.
 void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t tile_mode, uint32_t bytes_per_texel,
                              TileSizeAlign* size);
+// Byte offset of texel (x,y) inside a Gen5 SW_64KB_R_X (tile mode 27) surface.
+// pitch_elems is the element pitch used for the block grid (0 → width).
+// Currently supported: 4-byte texels only.
+uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element);
+// Detile SW_64KB_R_X into tightly packed linear rows of width*bytes_per_element.
+void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
+                                uint32_t bytes_per_element);
 void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile,
                         bool neo, TileSizeAlign* total_size, TileSizeOffset* level_sizes, TilePaddedSize* padded_size);
 void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile,

@@ -244,10 +244,24 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			UtilFillImage(ctx, vk_obj, reinterpret_cast<void*>(*vaddr), *size, regions, static_cast<uint64_t>(vk_layout));
 		} else if (tile == 27)
 		{
-			// SW_64KB_R_X CPU upload requires a detile path that is not yet
-			// implemented. Render-target aliases are handled before create via
-			// FindRenderTexture; pure sample textures must fail loudly here.
-			EXIT("unsupported Gen5 texture detile for tile mode 27 (size=0x%" PRIx64 ", %" PRIu64 "x%" PRIu64 ")\n", *size, width, height);
+			// SW_64KB_R_X sample texture: detile into tightly packed linear rows
+			// then upload. Render-target aliases still prefer FindRenderTexture
+			// before create; this path covers pure CPU-backed sample textures.
+			EXIT_NOT_IMPLEMENTED(fmt != 56); // R8G8B8A8 only until other formats are evidenced
+			EXIT_NOT_IMPLEMENTED(levels != 1);
+			const uint32_t bpp          = 4u;
+			const uint32_t pitch_elems  = (pitch != 0u ? static_cast<uint32_t>(pitch) : static_cast<uint32_t>(width));
+			const uint64_t linear_bytes = static_cast<uint64_t>(width) * height * bpp;
+			auto*          temp_buf     = new uint8_t[linear_bytes];
+			TileConvertSw64kRxToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), static_cast<uint32_t>(width),
+			                           static_cast<uint32_t>(height), pitch_elems, bpp);
+			// Region describes the linear buffer: offset 0, pitch = width.
+			regions[0].offset = 0;
+			regions[0].pitch  = static_cast<uint32_t>(width);
+			regions[0].width  = static_cast<uint32_t>(width);
+			regions[0].height = static_cast<uint32_t>(height);
+			UtilFillImage(ctx, vk_obj, temp_buf, linear_bytes, regions, static_cast<uint64_t>(vk_layout));
+			delete[] temp_buf;
 		}
 	}
 }
