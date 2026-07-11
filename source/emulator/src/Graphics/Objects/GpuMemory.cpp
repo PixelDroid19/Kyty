@@ -953,6 +953,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				case ObjectsRelation(GpuMemoryObjectType::StorageBuffer, OverlapType::Equals, GpuMemoryObjectType::StorageTexture):
 				case ObjectsRelation(GpuMemoryObjectType::StorageBuffer, OverlapType::Equals, GpuMemoryObjectType::Texture):
 				case ObjectsRelation(GpuMemoryObjectType::VideoOutBuffer, OverlapType::Equals, GpuMemoryObjectType::StorageBuffer):
+				// Observed Gen5 alias: Texture 0x100 created at the base of an
+				// active VertexBuffer 0x580 (relation Contains). Keep both views
+				// linked rather than deleting the heavily-used vertex buffer.
+				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::Texture):
+				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Equals, GpuMemoryObjectType::Texture):
 				{
 					overlap = true;
 					break;
