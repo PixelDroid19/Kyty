@@ -283,6 +283,51 @@ TEST(EmulatorGraphicsPackets, MaterializesFetchAttribSLoadDwordAndX2)
 	EXPECT_NE(source.FindIndex("0xa1b2c303"), Core::STRING8_INVALID_INDEX);
 }
 
+// Gen5 SMEM: s_buffer_load_dwordx8 s[32:39], s[8:11], 0; s_nop; s_endpgm
+// Encoding matches the SMRD opcode table (0x0B); recompiler already supports Sdst8SvSoffset.
+TEST(EmulatorGraphicsPackets, ParsesGen5SBufferLoadDwordx8)
+{
+	// word0: enc=0x3d, op=0x0B, sdst=32, sbase=4 → s[8:11]; word1: null soffset, imm 0
+	// s_nop (sopp) then s_endpgm so SEndpgm recompiler's index>=2 path is satisfied.
+	const uint32_t shader[] = {0xf42c0804u, 0xfa000000u, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	ShaderParse(shader, &code);
+
+	ASSERT_GE(code.GetInstructions().Size(), 2u);
+	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::SBufferLoadDwordx8);
+	EXPECT_EQ(code.GetInstructions().At(0).format, ShaderInstructionFormat::Sdst8SvSoffset);
+	EXPECT_EQ(code.GetInstructions().At(0).dst.register_id, 32);
+	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 8);
+	EXPECT_EQ(code.GetInstructions().At(0).src[0].register_id, 8);
+	EXPECT_EQ(code.GetInstructions().At(0).src[0].size, 4);
+
+	ShaderVertexInputInfo input {};
+	input.bind.storage_buffers.buffers_num       = 1;
+	input.bind.storage_buffers.start_register[0] = 8;
+	input.bind.storage_buffers.extended[0]       = false;
+	input.bind.storage_buffers.usages[0]         = ShaderStorageUsage::Constant;
+	input.bind.storage_buffers.binding_index     = 0;
+	input.bind.push_constant_size                = 16;
+	input.bind.descriptor_set_slot               = 0;
+
+	const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+
+	// Helper and call site must exist; stores happen inside the helper via pointer params.
+	EXPECT_NE(source.FindIndex("%sbuffer_load_dword_8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpFunctionCall %void %sbuffer_load_dword_8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%s32"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%s39"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorGraphicsPackets, RejectsInvalidPacketInputs)
 {
 	const ShaderRegister outside_sh_space[] = {{Pm4::SH_NUM, 1u}};

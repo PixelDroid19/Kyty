@@ -2447,15 +2447,31 @@ KYTY_SHADER_PARSER(shader_parse_smem)
 			break;
 		case 0x03: KYTY_NI("s_load_dwordx8"); break;
 		case 0x04: KYTY_NI("s_load_dwordx16"); break;
-		case 0x08: KYTY_NI("s_buffer_load_dword"); break;
-		case 0x09: KYTY_NI("s_buffer_load_dwordx2"); break;
+		case 0x08:
+			inst.type        = ShaderInstructionType::SBufferLoadDword;
+			inst.format      = ShaderInstructionFormat::SdstSvSoffset;
+			inst.src[0].size = 4;
+			inst.dst.size    = 1;
+			break;
+		case 0x09:
+			inst.type        = ShaderInstructionType::SBufferLoadDwordx2;
+			inst.format      = ShaderInstructionFormat::Sdst2SvSoffset;
+			inst.src[0].size = 4;
+			inst.dst.size    = 2;
+			break;
 		case 0x0a:
 			inst.type        = ShaderInstructionType::SBufferLoadDwordx4;
 			inst.format      = ShaderInstructionFormat::Sdst4SvSoffset;
 			inst.src[0].size = 4;
 			inst.dst.size    = 4;
 			break;
-		case 0x0B: KYTY_NI("s_buffer_load_dwordx8"); break;
+		case 0x0B:
+			// Gen5 SMEM mirrors GCN SMRD encoding: s_buffer_load_dwordx8 s[dst:dst+7], s[base:base+3], offset
+			inst.type        = ShaderInstructionType::SBufferLoadDwordx8;
+			inst.format      = ShaderInstructionFormat::Sdst8SvSoffset;
+			inst.src[0].size = 4;
+			inst.dst.size    = 8;
+			break;
 		case 0x0c:
 			inst.type        = ShaderInstructionType::SBufferLoadDwordx16;
 			inst.format      = ShaderInstructionFormat::Sdst16SvSoffset;

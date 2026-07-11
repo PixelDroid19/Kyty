@@ -444,6 +444,36 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 	       (key->repeat ? "repeat" : ""), key->scan_code, key->key_code, key->mod);
 #endif
 
+	// Virtual pad (id 0): keyboard maps to DualShock buttons so splash/menus are skippable
+	// without a physical controller. Repeat is ignored to avoid stuck buttons.
+	if (!key->repeat && (key->down || key->up))
+	{
+		const bool     down   = key->down;
+		uint32_t       button = 0;
+		switch (key->key_code)
+		{
+			case SDLK_RETURN:
+			case SDLK_z: button = Controller::PAD_BUTTON_CROSS; break;
+			case SDLK_ESCAPE:
+			case SDLK_x: button = Controller::PAD_BUTTON_CIRCLE; break;
+			case SDLK_c: button = Controller::PAD_BUTTON_SQUARE; break;
+			case SDLK_v: button = Controller::PAD_BUTTON_TRIANGLE; break;
+			case SDLK_UP: button = Controller::PAD_BUTTON_UP; break;
+			case SDLK_DOWN: button = Controller::PAD_BUTTON_DOWN; break;
+			case SDLK_LEFT: button = Controller::PAD_BUTTON_LEFT; break;
+			case SDLK_RIGHT: button = Controller::PAD_BUTTON_RIGHT; break;
+			case SDLK_q: button = Controller::PAD_BUTTON_L1; break;
+			case SDLK_e: button = Controller::PAD_BUTTON_R1; break;
+			case SDLK_TAB:
+			case SDLK_BACKSPACE: button = Controller::PAD_BUTTON_OPTIONS; break;
+			default: break;
+		}
+		if (button != 0)
+		{
+			Controller::ControllerButton(0, button, down);
+		}
+	}
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS || KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	if (key->down && key->key_code == SDLK_ESCAPE)
 	{
