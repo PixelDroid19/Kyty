@@ -1627,6 +1627,41 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 	}
 }
 
+// Gen5 direct-resource type 5 is the EUD pointer when eud_size_dw != 0 and
+// srt_size_dw == 0. Captured post-detile PS: user_sgpr_num=30, eud=12, type5 at
+// SGPR 0x1c holds a guest pointer whose first 8 dwords are two S# descriptors
+// for sharp sampler offsets 0x20 and 0x24.
+static constexpr uint16_t k_gen5_eud_direct_type = 5;
+
+static bool Gen5HasEudPointer(const ShaderUserData* user_data)
+{
+	return user_data != nullptr && user_data->eud_size_dw != 0 && user_data->srt_size_dw == 0 &&
+	       user_data->direct_resource_count > k_gen5_eud_direct_type &&
+	       user_data->direct_resource_offset[k_gen5_eud_direct_type] != 0xffff;
+}
+
+// Virtual base of EUD data in the sharp-offset address space: user_sgpr_num
+// rounded up to a multiple of 4 (30 → 32). Captured S#@0x20 maps to eud[0].
+static int Gen5EudOffsetBase(int user_sgpr_num)
+{
+	EXIT_NOT_IMPLEMENTED(user_sgpr_num <= 0);
+	return (user_sgpr_num + 3) & ~3;
+}
+
+static bool Gen5SharpNeedsEud(int offset_dw, int dwords, int user_sgpr_num)
+{
+	return offset_dw < 0 || offset_dw + dwords > user_sgpr_num;
+}
+
+// ShaderGet* extended path indexes extended_buffer[start - 16]. Remap a Gen5
+// sharp offset so that eud[0] is addressed as start=16.
+static int Gen5EudApiIndex(int offset_dw, int user_sgpr_num)
+{
+	const int eud_base = Gen5EudOffsetBase(user_sgpr_num);
+	EXIT_NOT_IMPLEMENTED(offset_dw < eud_base);
+	return 16 + (offset_dw - eud_base);
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
@@ -1652,15 +1687,20 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	info->direct_sgprs              = 0;
 
 	EXIT_NOT_IMPLEMENTED(user_data == nullptr);
-	// Captured Gen5: eud_size_dw=12, srt_size_dw=0, user_sgpr_num=30. Resource
-	// descriptors are already written into the user-SGPR window (V#/S# layouts
-	// at slots 0..29). No separate EUD pointer is required for this case —
-	// offsets index user_sgpr directly (extended_buffer stays null).
+	// Two Gen5 EUD layouts are evidenced:
+	// 1) No type-5 pointer: descriptors live in the user-SGPR window; eud_size
+	//    must fit in that window (earlier capture: eud=12, user_sgpr_num=30).
+	// 2) Type-5 pointer: overflow sharp offsets are fetched from guest memory
+	//    at that pointer (post-detile: S#@0x20/0x24 in a 12-dword EUD).
+	const bool has_eud_ptr = Gen5HasEudPointer(user_data);
 	if (user_data->eud_size_dw != 0)
 	{
 		EXIT_NOT_IMPLEMENTED(user_data->srt_size_dw != 0);
 		EXIT_NOT_IMPLEMENTED(user_sgpr_num <= 0);
-		EXIT_NOT_IMPLEMENTED(static_cast<uint32_t>(user_sgpr_num) < user_data->eud_size_dw);
+		if (!has_eud_ptr)
+		{
+			EXIT_NOT_IMPLEMENTED(static_cast<uint32_t>(user_sgpr_num) < user_data->eud_size_dw);
+		}
 	}
 	EXIT_NOT_IMPLEMENTED(user_data->srt_size_dw > user_sgpr_num);
 
@@ -1697,6 +1737,26 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				direct_sgprs[info->vertex_attrib_reg + 1] = false;
 				break;
 
+			case k_gen5_eud_direct_type:
+				if (has_eud_ptr)
+				{
+					EXIT_NOT_IMPLEMENTED(bind->extended.used);
+					EXIT_NOT_IMPLEMENTED(reg < 0 || reg + 1 >= user_sgpr_num);
+					bind->extended.used           = true;
+					bind->extended.slot           = static_cast<int>(type);
+					bind->extended.start_register = reg;
+					bind->extended.data.fields[0] = user_sgpr.value[reg];
+					bind->extended.data.fields[1] = user_sgpr.value[reg + 1];
+					EXIT_NOT_IMPLEMENTED(bind->extended.data.Base() == 0);
+					extended_buffer =
+					    reinterpret_cast<uint32_t*>(static_cast<uintptr_t>(bind->extended.data.Base()));
+					info->extended_buffer              = true;
+					direct_sgprs[reg]                  = false;
+					direct_sgprs[reg + 1]              = false;
+					break;
+				}
+				// No EUD pointer: fall through as a storage buffer.
+				// fallthrough
 			default:
 			{
 				// When the instruction stream is unavailable (VS/PS Gen5 path),
@@ -1711,8 +1771,9 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 						EXIT("unknown usage type: 0x%04" PRIx16 "\n", type);
 					}
 				}
+				// Direct storage always indexes user_sgpr (pass null extended).
 				ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, reg, bind->storage_buffers.buffers_num, usage, user_sgpr,
-				                       extended_buffer);
+				                       nullptr);
 				if (usage == ShaderStorageUsage::ReadWrite)
 				{
 					info->storage_buffers_readwrite++;
@@ -1735,8 +1796,18 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 
 			EXIT_NOT_IMPLEMENTED(user_data->sharp_resource_offset[0][slot].size != 0);
-			ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, user_data->sharp_resource_offset[0][slot].offset_dw, slot,
-			                       ShaderTextureUsage::ReadOnly, user_sgpr, extended_buffer);
+			const int        off    = user_data->sharp_resource_offset[0][slot].offset_dw;
+			constexpr int    dwords = 8;
+			const uint32_t*  ebuf   = nullptr;
+			int              api    = off;
+			if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
+			{
+				EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+				api  = Gen5EudApiIndex(off, user_sgpr_num);
+				ebuf = extended_buffer;
+				EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+			}
+			ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, api, slot, ShaderTextureUsage::ReadOnly, user_sgpr, ebuf);
 			info->textures2D_readonly++;
 			EXIT_NOT_IMPLEMENTED(bind->textures2D.desc[bind->textures2D.textures_num - 1].texture.Type() != 9);
 		}
@@ -1754,8 +1825,18 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 
 			EXIT_NOT_IMPLEMENTED(user_data->sharp_resource_offset[2][slot].size != 1);
-			ShaderGetSampler(&bind->samplers, direct_sgprs, user_data->sharp_resource_offset[2][slot].offset_dw, slot, user_sgpr,
-			                 extended_buffer);
+			const int       off    = user_data->sharp_resource_offset[2][slot].offset_dw;
+			constexpr int   dwords = 4;
+			const uint32_t* ebuf   = nullptr;
+			int             api    = off;
+			if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
+			{
+				EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+				api  = Gen5EudApiIndex(off, user_sgpr_num);
+				ebuf = extended_buffer;
+				EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+			}
+			ShaderGetSampler(&bind->samplers, direct_sgprs, api, slot, user_sgpr, ebuf);
 			info->samplers++;
 		}
 	}
@@ -1770,8 +1851,18 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 
 			EXIT_NOT_IMPLEMENTED(user_data->sharp_resource_offset[3][slot].size != 1);
-			ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, user_data->sharp_resource_offset[3][slot].offset_dw, slot,
-			                       ShaderStorageUsage::Constant, user_sgpr, extended_buffer);
+			const int       off    = user_data->sharp_resource_offset[3][slot].offset_dw;
+			constexpr int   dwords = 4;
+			const uint32_t* ebuf   = nullptr;
+			int             api    = off;
+			if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
+			{
+				EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+				api  = Gen5EudApiIndex(off, user_sgpr_num);
+				ebuf = extended_buffer;
+				EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+			}
+			ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant, user_sgpr, ebuf);
 			info->storage_buffers_constant++;
 		}
 	}
