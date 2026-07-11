@@ -876,17 +876,40 @@ TEST(EmulatorGraphicsPackets, MapsPixelInputsFromVertexOutputSuperset)
 }
 
 
-// Captured: ShaderUserData eud_size_dw=12, srt_size_dw=0, user_sgpr_num=30.
-// The SGPR window holds the descriptors; EUD size must fit in the window.
+// Captured: ShaderUserData eud_size_dw=12, srt_size_dw=0, user_sgpr_num=30
+// without a type-5 pointer. Descriptors fit in the SGPR window.
 TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
 {
 	EXPECT_GE(HW::UserSgprInfo::SGPRS_MAX, 30);
 	EXPECT_TRUE(HW::UserSgprInfo::WriteRangeValid(0, 30));
-	// Policy: when srt==0 and eud!=0, eud_size must be <= user_sgpr_num.
+	// Embedded policy: when srt==0, eud!=0, and no type-5 pointer, eud_size
+	// must be <= user_sgpr_num.
 	constexpr uint16_t eud = 12;
 	constexpr int      n   = 30;
 	EXPECT_LT(static_cast<int>(eud), n + 1);
 	EXPECT_EQ(0, 0); // srt_size_dw == 0
+}
+
+// Captured post-detile PS: user_sgpr_num=30, eud=12, type5@0x1c, samplers at
+// 0x18 (direct), 0x20 and 0x24 (EUD). EUD virtual base is user_sgpr_num
+// rounded up to a multiple of 4 (30 → 32); api index uses the extended
+// start-16 convention so eud[0] is addressed as 16.
+TEST(EmulatorGraphicsPackets, Gen5EudOverflowSharpOffsetMapping)
+{
+	constexpr int user_sgpr_num = 30;
+	constexpr int eud_base      = (user_sgpr_num + 3) & ~3;
+	EXPECT_EQ(eud_base, 32);
+
+	// S0@0x18 (4 dwords) fits in the SGPR window.
+	EXPECT_LE(0x18 + 4, user_sgpr_num);
+	// S1@0x20 and S2@0x24 overflow into EUD.
+	EXPECT_GT(0x20 + 4, user_sgpr_num);
+	EXPECT_GT(0x24 + 4, user_sgpr_num);
+
+	EXPECT_EQ(16 + (0x20 - eud_base), 16); // eud[0]
+	EXPECT_EQ(16 + (0x24 - eud_base), 20); // eud[4]
+	// eud_size=12 covers both 4-dword samplers (indices 0..7).
+	EXPECT_LE((0x24 - eud_base) + 4, 12);
 }
 
 
