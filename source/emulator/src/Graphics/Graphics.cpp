@@ -1904,6 +1904,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t nu
 	return buf->AllocateDW(num_dw);
 }
 
+
+
 int KYTY_SYSV_ABI GraphicsAgcDriverUnknownKRzWekV120()
 {
 	// Called immediately before the first indexed draw on observed Gen5 boots.
@@ -2022,7 +2024,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED(dst != 1);
-	EXIT_NOT_IMPLEMENTED(data_sel != 2 && data_sel != 3);
+	// data_sel: 1 = 32-bit immediate (observed after WaitUntilSafe path with
+	// data=1), 2/3 = 64-bit/counter forms previously exercised by the same
+	// packet encoder. Packet layout already stores data in DW5/DW6.
+	EXIT_NOT_IMPLEMENTED(data_sel != 1 && data_sel != 2 && data_sel != 3);
 	EXIT_NOT_IMPLEMENTED(gds_offset != 0);
 	EXIT_NOT_IMPLEMENTED(gds_size != 1);
 	EXIT_NOT_IMPLEMENTED(interrupt != 0);
@@ -2395,7 +2400,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 	printf("\t poll_cycles      = %" PRIu32 "\n", poll_cycles);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	EXIT_NOT_IMPLEMENTED(size != 1);
+	// size 0 = 32-bit memory wait (observed after ReleaseMem data_sel=1),
+	// size 1 = 64-bit wait (existing path). Encode 32-bit waits with zeroed
+	// high halves in the same R_WAIT_MEM_64 packet layout the CP already runs.
+	EXIT_NOT_IMPLEMENTED(size != 0 && size != 1);
 	EXIT_NOT_IMPLEMENTED(op != 1);
 	EXIT_NOT_IMPLEMENTED(cache_policy != 0);
 

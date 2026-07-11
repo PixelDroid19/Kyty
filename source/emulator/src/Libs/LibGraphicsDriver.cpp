@@ -78,6 +78,11 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("vRoArM9zaIk", Gen5::GraphicsSetUcRegIndirectPatchAddRegisters);
 	// LtTouSCZjHM: CommandBuffer dword allocation (see GraphicsCbAllocateDwords).
 	LIB_FUNC("LtTouSCZjHM", Gen5::GraphicsCbAllocateDwords);
+	// WmAc2MEj6Io: observed SysV (CommandBuffer*, 0, 3) after 10-dword allocate.
+	// Same shape as DcbWaitUntilSafeForRendering(buf, video_out_handle, index).
+	// Distinct NID from MWiElSNE8j8; bound to the shared encoder until a
+	// divergent packet layout is evidenced.
+	LIB_FUNC("WmAc2MEj6Io", Gen5::GraphicsDcbWaitUntilSafeForRendering);
 	LIB_FUNC("D9sr1xGUriE", Gen5::GraphicsCreatePrimState);
 	LIB_FUNC("HV4j+E0MBHE", Gen5::GraphicsCreateInterpolantMapping);
 	LIB_FUNC("V++UgBtQhn0", Gen5::GraphicsGetDataPacketPayloadAddress);
