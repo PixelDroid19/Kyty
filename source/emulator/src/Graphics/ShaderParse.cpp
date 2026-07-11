@@ -963,7 +963,7 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x05: inst.type = ShaderInstructionType::VCvtF32I32; break;
 		case 0x06: inst.type = ShaderInstructionType::VCvtF32U32; break;
 		case 0x07: inst.type = ShaderInstructionType::VCvtU32F32; break;
-		case 0x08: KYTY_NI("v_cvt_i32_f32"); break;
+		case 0x08: inst.type = ShaderInstructionType::VCvtI32F32; break;
 		case 0x09: KYTY_NI("v_mov_fed_b32"); break;
 		case 0x0A: KYTY_NI("v_cvt_f16_f32"); break;
 		case 0x0b: inst.type = ShaderInstructionType::VCvtF32F16; break;
@@ -2158,10 +2158,10 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x182: KYTY_NI("v_readfirstlane_b32"); break;
 		case 0x183: KYTY_NI("v_cvt_i32_f64"); break;
 		case 0x184: KYTY_NI("v_cvt_f64_i32"); break;
-		case 0x185: KYTY_NI("v_cvt_f32_i32"); break;
-		case 0x186: KYTY_NI("v_cvt_f32_u32"); break;
-		case 0x187: KYTY_NI("v_cvt_u32_f32"); break;
-		case 0x188: KYTY_NI("v_cvt_i32_f32"); break;
+		case 0x185: inst.type = ShaderInstructionType::VCvtF32I32; break;
+		case 0x186: inst.type = ShaderInstructionType::VCvtF32U32; break;
+		case 0x187: inst.type = ShaderInstructionType::VCvtU32F32; break;
+		case 0x188: inst.type = ShaderInstructionType::VCvtI32F32; break;
 		case 0x189: KYTY_NI("v_mov_fed_b32"); break;
 		case 0x18A: KYTY_NI("v_cvt_f16_f32"); break;
 		case 0x18B: KYTY_NI("v_cvt_f32_f16"); break;

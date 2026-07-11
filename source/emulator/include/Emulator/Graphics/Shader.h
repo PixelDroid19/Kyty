@@ -179,6 +179,7 @@ enum class ShaderInstructionType : uint32_t
 	VCvtF32Ubyte1,
 	VCvtF32Ubyte2,
 	VCvtF32Ubyte3,
+	VCvtI32F32,
 	VCvtPkrtzF16F32,
 	VCvtU32F32,
 	VExpF32,
