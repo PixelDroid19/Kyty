@@ -425,12 +425,6 @@ static int pthread_rwlock_timedwrlock(pthread_rwlock_t* lock, const timespec* t)
 }
 #endif
 
-static void sec_to_timeval(KernelTimeval* ts, double sec)
-{
-	ts->tv_sec  = static_cast<int64_t>(sec);
-	ts->tv_usec = static_cast<int64_t>((sec - static_cast<double>(ts->tv_sec)) * 1000000.0);
-}
-
 static void sec_to_timespec(KernelTimespec* ts, double sec)
 {
 	ts->tv_sec  = static_cast<int64_t>(sec);
@@ -2481,14 +2475,10 @@ int KYTY_SYSV_ABI KernelGettimeofday(KernelTimeval* tp)
 		return KERNEL_ERROR_EFAULT;
 	}
 
-	// timespec t {};
-	// int result = clock_gettime(CLOCK_REALTIME, &t);
-	// tp->tv_sec  = t.tv_sec;
-	// tp->tv_usec = t.tv_nsec / 1000;
-
-	int  result = 0;
-	auto dt     = Core::DateTime::FromSystemUTC();
-	sec_to_timeval(tp, dt.ToUnix());
+	timespec t {};
+	int      result = clock_gettime(CLOCK_REALTIME, &t);
+	tp->tv_sec       = t.tv_sec;
+	tp->tv_usec      = t.tv_nsec / 1000;
 
 	if (result == 0)
 	{

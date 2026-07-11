@@ -771,6 +771,11 @@ enum class ShaderStorageUsage
 	ReadWrite,
 };
 
+inline bool ShaderStorageUsageIsReadOnly(ShaderStorageUsage usage)
+{
+	return usage == ShaderStorageUsage::Constant || usage == ShaderStorageUsage::ReadOnly;
+}
+
 enum class ShaderTextureUsage
 {
 	Unknown,

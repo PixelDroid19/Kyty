@@ -48,6 +48,30 @@ enum class GpuMemoryScenario
 	TextureTriplet
 };
 
+enum class GpuMemoryOverlapType : uint64_t
+{
+	None,
+	Equals,
+	Crosses,
+	Contains,
+	IsContainedWithin,
+	Max
+};
+
+inline GpuMemoryOverlapType GpuMemoryReverseOverlap(GpuMemoryOverlapType relation)
+{
+	switch (relation)
+	{
+		case GpuMemoryOverlapType::Equals: return GpuMemoryOverlapType::Equals;
+		case GpuMemoryOverlapType::Crosses: return GpuMemoryOverlapType::Crosses;
+		case GpuMemoryOverlapType::Contains: return GpuMemoryOverlapType::IsContainedWithin;
+		case GpuMemoryOverlapType::IsContainedWithin: return GpuMemoryOverlapType::Contains;
+		case GpuMemoryOverlapType::None:
+		case GpuMemoryOverlapType::Max: return GpuMemoryOverlapType::None;
+	}
+	return GpuMemoryOverlapType::None;
+}
+
 struct GpuMemoryObject
 {
 	GpuMemoryObjectType type = GpuMemoryObjectType::Invalid;
@@ -107,6 +131,18 @@ bool  GpuMemoryCheckAccessViolation(uint64_t vaddr, uint64_t size);
 bool  GpuMemoryWatcherEnabled();
 
 Vector<GpuMemoryObject> GpuMemoryFindObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, bool exact, bool only_first);
+
+inline bool GpuMemoryCanShareReadOnlyStorageViews(uint64_t existing_addr, uint64_t existing_size, bool existing_read_only,
+                                                   uint64_t incoming_addr, uint64_t incoming_size, bool incoming_read_only)
+{
+	if (!existing_read_only || !incoming_read_only || existing_size == 0 || incoming_size == 0 ||
+	    (existing_addr == incoming_addr && existing_size == incoming_size))
+	{
+		return false;
+	}
+	return incoming_addr >= existing_addr ? incoming_addr - existing_addr < existing_size
+	                                      : existing_addr - incoming_addr < incoming_size;
+}
 
 bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem);
 void VulkanFree(GraphicContext* ctx, VulkanMemory* mem);

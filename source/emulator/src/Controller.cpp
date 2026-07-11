@@ -164,33 +164,37 @@ void GameController::Disconnect(int id)
 
 void GameController::CheckActive()
 {
-	bool reset = false;
+	bool reset          = false;
+	bool next_connected = false;
+	int  next_active    = CONTROLLER_KEYBOARD_ID;
 
-	if (m_connected)
+	// A real SDL controller owns axes and its own buttons when present. The
+	// keyboard remains an independent button source and is merged in Button().
+	for (uint32_t i = 0; i < m_connected_ids.Size(); i++)
 	{
-		if (m_connected_ids.IsEmpty())
+		const int id = m_connected_ids.At(i);
+		if (id != CONTROLLER_KEYBOARD_ID)
 		{
-			m_active_id = -1;
-			m_connected = false;
-			reset       = true;
-		} else
-		{
-			if (m_connected_ids.At(0) != m_active_id)
-			{
-				m_active_id = m_connected_ids.At(0);
-				m_connected_count++;
-				reset = true;
-			}
+			next_active    = id;
+			next_connected = true;
+			break;
 		}
-	} else
+	}
+
+	if (!next_connected && m_connected_ids.Contains(CONTROLLER_KEYBOARD_ID))
 	{
-		if (!m_connected_ids.IsEmpty())
+		next_connected = true;
+	}
+
+	if (m_connected != next_connected || (next_connected && m_active_id != next_active))
+	{
+		m_active_id = next_active;
+		m_connected = next_connected;
+		if (next_connected)
 		{
-			m_active_id = m_connected_ids.At(0);
-			m_connected = true;
 			m_connected_count++;
-			reset = true;
 		}
+		reset = true;
 	}
 
 	if (reset)
@@ -234,7 +238,7 @@ void GameController::Button(int id, uint32_t button, bool down)
 {
 	Core::LockGuard lock(m_mutex);
 
-	if (m_active_id == id)
+	if (m_active_id == id || id == CONTROLLER_KEYBOARD_ID)
 	{
 		auto state = GetLastState();
 
@@ -395,7 +399,6 @@ constexpr int PAD_ERROR_DEVICE_NO_HANDLE   = static_cast<int>(0x80920008u);
 
 // Virtual keyboard/gamepad id: always connected after PadOpen so titles see a pad
 // without requiring a physical SDL controller (playability on hosts with only a keyboard).
-constexpr int kVirtualPadId = 0;
 constexpr int kPrimaryHandle = 1;
 
 static bool g_pad_initialized = false;
@@ -439,7 +442,7 @@ int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param)
 	g_controller->GetConnectionInfo(&connected, &connected_count);
 	if (!connected)
 	{
-		g_controller->Connect(kVirtualPadId);
+		g_controller->Connect(CONTROLLER_KEYBOARD_ID);
 	}
 
 	// Real OS returns ALREADY_OPENED on re-open; guest must use GetHandle for the prior handle.
@@ -531,12 +534,12 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	EXIT_NOT_IMPLEMENTED(handle != 1);
 	EXIT_NOT_IMPLEMENTED(data == nullptr);
 
-	// Optional diagnostic: pulse Cross so multi-screen splash/title flows can
-	// advance without a physical pad (KYTY_AUTO_CROSS=1). Applied after ReadState
-	// so the guest-visible sample is authoritative. Only Cross (not multi-button
-	// chords). Observed pattern is PadOpen + two PadReadState per tick — put the
-	// pressed sample on the second read so within-tick edge detect (curr & ~prev)
-	// still sees a rising edge.
+	// Optional diagnostic (KYTY_AUTO_CROSS=1): synthesize button edges so multi-
+	// screen splash/title flows can advance without a physical pad. Continuous
+	// hold only yields one rising edge — later logos (e.g. after Motion Twin)
+	// never see a new press. Observed pattern is PadOpen + two PadReadState per
+	// tick: release on the first read and press on the second so both
+	// within-tick (curr & ~prev) and frame-to-frame edge detectors fire.
 	uint32_t auto_buttons = 0;
 	g_reads_since_open++;
 	if (const char* auto_cross = std::getenv("KYTY_AUTO_CROSS"); auto_cross != nullptr && auto_cross[0] == '1')
@@ -548,11 +551,24 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 			first_read = now;
 		}
 		const uint64_t elapsed = now - first_read;
-		// Hold Cross continuously after 3s (level trigger). Edge-based UIs still
-		// see a rising edge once when the hold begins.
-		if (elapsed > 3'000'000ull)
+		// Warm up 2s, then 1s period: 250ms press window, 750ms release.
+		if (elapsed > 2'000'000ull)
 		{
-			auto_buttons = PAD_BUTTON_CROSS;
+			const uint64_t period = 1'000'000ull;
+			const uint64_t phase  = (elapsed - 2'000'000ull) % period;
+			const bool     press  = phase < 250'000ull;
+			// Second read of the open cycle carries the press; first stays released.
+			if (press && g_reads_since_open >= 2)
+			{
+				auto_buttons = PAD_BUTTON_CROSS;
+				// Every 4th period also pulse Options|TouchPad for UIs that
+				// only listen on those (still only on the pressed sample).
+				const uint64_t period_index = (elapsed - 2'000'000ull) / period;
+				if ((period_index % 4ull) == 3ull)
+				{
+					auto_buttons |= PAD_BUTTON_OPTIONS | PAD_BUTTON_TOUCH_PAD;
+				}
+			}
 		}
 	}
 
@@ -588,7 +604,6 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	data->timestamp              = now_ts;
 	data->connected_count        = (connected_count > 0 ? connected_count : 1);
 	data->device_unique_data_len = 0;
-
 	return OK;
 }
 
