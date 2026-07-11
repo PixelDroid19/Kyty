@@ -547,6 +547,7 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 }
 
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
+bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
 // Linear Gen5 texture row pitch in texels: 256-byte aligned rows (GFX linear surface rule).
 uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format);
 

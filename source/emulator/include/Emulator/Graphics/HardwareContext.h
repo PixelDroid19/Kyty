@@ -592,10 +592,13 @@ enum class UserSgprType
 
 struct UserSgprInfo
 {
-	static constexpr int SGPRS_MAX = 16;
+	// Gen5/GFX10+ allow up to 32 user SGPRs when USER_SGPR_MSB is set. Captured
+	// SET_SH_REG: SPI_SHADER_USER_DATA_PS_0 with reg_num=30 (cmd_id 0xc01e7600).
+	// VS/GS/CS tables may still only register 16 slots in the jump table.
+	static constexpr int SGPRS_MAX = 32;
 
-	// SET_SH_REG may write all 16 user SGPRs in one packet (reg_num == 16 at
-	// slot 0). Reject only when the write window leaves the [0, SGPRS_MAX) range.
+	// SET_SH_REG may write a contiguous window of user SGPRs. Reject only when
+	// the write leaves the [0, SGPRS_MAX) range.
 	static constexpr bool WriteRangeValid(uint32_t slot, uint32_t reg_num)
 	{
 		return reg_num > 0 && slot < static_cast<uint32_t>(SGPRS_MAX) &&

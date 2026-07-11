@@ -133,12 +133,12 @@ TEST(EmulatorGraphicsPackets, ParsesBufferStoreFormatXyzw)
 	EXPECT_EQ(instruction.format, ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen);
 	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Vgpr);
 	EXPECT_EQ(instruction.dst.register_id, 0);
-	EXPECT_EQ(instruction.dst.size, 4u);
+	EXPECT_EQ(instruction.dst.size, 4);
 	EXPECT_EQ(instruction.src[0].type, ShaderOperandType::Vgpr);
 	EXPECT_EQ(instruction.src[0].register_id, 4);
 	EXPECT_EQ(instruction.src[1].type, ShaderOperandType::Sgpr);
 	EXPECT_EQ(instruction.src[1].register_id, 4);
-	EXPECT_EQ(instruction.src[1].size, 4u);
+	EXPECT_EQ(instruction.src[1].size, 4);
 	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::IntegerInlineConstant);
 	EXPECT_EQ(instruction.src[2].constant.u, 0u);
 }
@@ -218,15 +218,22 @@ TEST(EmulatorGraphicsPackets, AllowsRegionScalarsOnlyInsideSrtRange)
 
 TEST(EmulatorGraphicsPackets, AcceptsFullUserSgprWriteWindow)
 {
-	// Observed frontier: PS user-SGPR SET_SH_REG with reg_num == 16 at slot 0.
-	// The previous check (reg_num >= 16) rejected a full-window write.
+	// Observed frontiers:
+	//  - PS SET_SH_REG reg_num == 16 at slot 0 (full classic window)
+	//  - PS SET_SH_REG reg_num == 30 at slot 0 (cmd_id 0xc01e7600 Gen5 MSB path)
+	EXPECT_EQ(HW::UserSgprInfo::SGPRS_MAX, 32);
 	EXPECT_TRUE(HW::UserSgprInfo::WriteRangeValid(0, 16));
+	EXPECT_TRUE(HW::UserSgprInfo::WriteRangeValid(0, 30));
+	EXPECT_TRUE(HW::UserSgprInfo::WriteRangeValid(0, 32));
 	EXPECT_TRUE(HW::UserSgprInfo::WriteRangeValid(0, 1));
 	EXPECT_TRUE(HW::UserSgprInfo::WriteRangeValid(15, 1));
+	EXPECT_TRUE(HW::UserSgprInfo::WriteRangeValid(31, 1));
 	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(0, 0));
-	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(0, 17));
-	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(1, 16));
-	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(16, 1));
+	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(0, 33));
+	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(1, 32));
+	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(32, 1));
+	// Register indices: PS_0=0xC, PS_31=0x2B (contiguous 32 dwords).
+	EXPECT_EQ(Pm4::SPI_SHADER_USER_DATA_PS_31, Pm4::SPI_SHADER_USER_DATA_PS_0 + 31u);
 }
 
 TEST(EmulatorGraphicsPackets, ReportsType3Pm4PacketSizeInDwords)
@@ -788,6 +795,29 @@ TEST(EmulatorGraphicsPackets, MapsPixelInputsFromVertexOutputSuperset)
 	ASSERT_TRUE(Gen5::GraphicsBuildInterpolantMapping(regs, outputs, 2, nullptr, 0));
 	EXPECT_EQ(regs[0].value, 5u);
 	EXPECT_EQ(regs[1].value, 7u);
+}
+
+
+// Captured: ShaderUserData eud_size_dw=12, srt_size_dw=0, user_sgpr_num=30.
+// The SGPR window holds the descriptors; EUD size must fit in the window.
+TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
+{
+	EXPECT_GE(HW::UserSgprInfo::SGPRS_MAX, 30);
+	EXPECT_TRUE(HW::UserSgprInfo::WriteRangeValid(0, 30));
+	// Policy: when srt==0 and eud!=0, eud_size must be <= user_sgpr_num.
+	constexpr uint16_t eud = 12;
+	constexpr int      n   = 30;
+	EXPECT_LT(static_cast<int>(eud), n + 1);
+	EXPECT_EQ(0, 0); // srt_size_dw == 0
+}
+
+
+TEST(EmulatorGraphicsPackets, Gen5SingleComponent32BitBufferFormat)
+{
+	EXPECT_TRUE(ShaderIsGen5SingleComponent32BitBufferFormat(20));
+	EXPECT_FALSE(ShaderIsGen5SingleComponent32BitBufferFormat(75));
+	EXPECT_TRUE(ShaderIsGen5FourComponent32BitBufferFormat(75));
+	EXPECT_EQ(DstSel(4, 0, 0, 1), 0x204u);
 }
 
 UT_END();

@@ -2490,7 +2490,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_ps_shader)
 
 KYTY_HW_SH_PARSER(hw_sh_set_ps_user_sgpr)
 {
-	EXIT_NOT_IMPLEMENTED(!(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_PS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_PS_15));
+	EXIT_NOT_IMPLEMENTED(!(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_PS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_PS_31));
 
 	uint32_t slot = (cmd_offset - Pm4::SPI_SHADER_USER_DATA_PS_0) / 1;
 
@@ -3721,10 +3721,17 @@ static void graphics_init_jmp_tables_cx_indirect()
 	{
 		State::SetModeControl(*cp->GetCtx(), value);
 	};
-	g_hw_ctx_indirect_func[Pm4::CB_BLEND0_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	// Direct path registers CB_BLEND0..7; indirect must share the same decoder
+	// (captured: CB_BLEND1_CONTROL = 0x1e1 after post-menu load).
+	for (uint32_t slot = 0; slot < 8; slot++)
 	{
-		State::SetBlendControl(*cp->GetCtx(), 0, value);
-	};
+		const uint32_t blend_reg = Pm4::CB_BLEND0_CONTROL + slot;
+		g_hw_ctx_indirect_func[blend_reg] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+		{
+			const uint32_t blend_slot = cmd_offset - Pm4::CB_BLEND0_CONTROL;
+			State::SetBlendControl(*cp->GetCtx(), blend_slot, value);
+		};
+	}
 
 	for (auto cmd_offset = Pm4::SPI_PS_INPUT_CNTL_0; cmd_offset <= Pm4::SPI_PS_INPUT_CNTL_31; cmd_offset++)
 	{
@@ -4422,9 +4429,13 @@ static void graphics_init_jmp_tables()
 	for (uint32_t slot = 0; slot < 16; slot++)
 	{
 		g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_VS_0 + slot * 1] = hw_sh_set_vs_user_sgpr;
-		g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_PS_0 + slot * 1] = hw_sh_set_ps_user_sgpr;
 		g_hw_sh_func[Pm4::COMPUTE_USER_DATA_0 + slot * 1]       = hw_sh_set_cs_user_sgpr;
 		g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_GS_0 + slot * 1] = hw_sh_set_gs_user_sgpr;
+	}
+	// PS user data is 32 dwords on Gen5 (SPI_SHADER_USER_DATA_PS_0..31).
+	for (uint32_t slot = 0; slot < 32; slot++)
+	{
+		g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_PS_0 + slot * 1] = hw_sh_set_ps_user_sgpr;
 	}
 
 	g_hw_sh_func[Pm4::COMPUTE_NUM_THREAD_X] = hw_sh_set_cs_num_thread;

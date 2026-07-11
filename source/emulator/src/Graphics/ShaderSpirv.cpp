@@ -2067,6 +2067,71 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
 	return false;
 }
 
+// buffer_load_format_xyzw v[0:3], v4, s[0:3], 0, idxen — same addressing as
+// BufferLoadFormatX but four-component destination (captured post-menu load).
+KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+
+	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
+	{
+		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+
+		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
+		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
+		auto    dst_value2  = operand_variable_to_str(inst.dst, 2);
+		auto    dst_value3  = operand_variable_to_str(inst.dst, 3);
+		auto    src0_value  = operand_variable_to_str(inst.src[0]);
+		auto    src1_value0 = operand_variable_to_str(inst.src[1], 0);
+		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
+		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
+		String8 offset      = spirv->GetConstant(inst.src[2]);
+
+		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
+		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
+		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
+		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		EXIT_NOT_IMPLEMENTED(src1_value3.type != SpirvType::Uint);
+
+		static const char* text = R"(
+        %t100_<index> = OpLoad %float %<src0>
+        %t101_<index> = OpBitcast %int %t100_<index>
+               OpStore %temp_int_1 %t101_<index>
+        %t148_<index> = OpLoad %uint %<src1_value1>
+        %t150_<index> = OpShiftRightLogical %uint %t148_<index> %int_16
+        %t152_<index> = OpBitwiseAnd %uint %t150_<index> %uint_0x00003fff
+        %t153_<index> = OpBitcast %int %t152_<index>
+               OpStore %temp_int_3 %t153_<index>
+        %t155_<index> = OpLoad %uint %<src1_value0>
+        %t156_<index> = OpBitcast %int %t155_<index>
+               OpStore %temp_int_4 %t156_<index>
+               OpStore %temp_int_2 %<offset>
+        %t206_<index> = OpLoad %uint %<src1_value3>
+        %t208_<index> = OpShiftRightLogical %uint %t206_<index> %int_12
+        %t210_<index> = OpBitwiseAnd %uint %t208_<index> %uint_127
+        %t211_<index> = OpBitcast %int %t210_<index>
+               OpStore %temp_int_5 %t211_<index>
+        %t110_<index> = OpFunctionCall %void %tbuffer_load_format_xyzw %<p0> %<p1> %<p2> %<p3> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
+)";
+		*dst_source += String8(text)
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<src0>", src0_value.value)
+		                   .ReplaceStr("<offset>", offset)
+		                   .ReplaceStr("<src1_value0>", src1_value0.value)
+		                   .ReplaceStr("<src1_value1>", src1_value1.value)
+		                   .ReplaceStr("<src1_value3>", src1_value3.value)
+		                   .ReplaceStr("<p0>", dst_value0.value)
+		                   .ReplaceStr("<p1>", dst_value1.value)
+		                   .ReplaceStr("<p2>", dst_value2.value)
+		                   .ReplaceStr("<p3>", dst_value3.value);
+
+		return true;
+	}
+
+	return false;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
@@ -6355,6 +6420,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 	    // clang-format off
     {Recompile_BufferLoadDword_Vdata1VaddrSvSoffsIdxen,     ShaderInstructionType::BufferLoadDword,      ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen,   ShaderInstructionType::BufferLoadFormatX,    ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {""}},
+    {Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen, ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen,    ShaderInstructionType::BufferStoreDword,     ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferStoreFormatX_Vdata1VaddrSvSoffsIdxen,  ShaderInstructionType::BufferStoreFormatX,   ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen, ShaderInstructionType::BufferStoreFormatXy,  ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen,        {""}},

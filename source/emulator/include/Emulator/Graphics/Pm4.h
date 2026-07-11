@@ -775,6 +775,8 @@ constexpr uint32_t SPI_SHADER_PGM_RSRC2_PS_SHARED_VGPR_CNT_MASK           = 0xF;
 
 constexpr uint32_t SPI_SHADER_USER_DATA_PS_0  = 0xC;
 constexpr uint32_t SPI_SHADER_USER_DATA_PS_15 = 0x1B;
+// Gen5 extends PS user data to 32 dwords (0xC..0x2B) when USER_SGPR_MSB is set.
+constexpr uint32_t SPI_SHADER_USER_DATA_PS_31 = 0x2B;
 constexpr uint32_t SPI_SHADER_USER_ACCUM_PS_0 = 0x32;
 constexpr uint32_t SPI_SHADER_PGM_LO_VS       = 0x48;
 constexpr uint32_t SPI_SHADER_PGM_HI_VS       = 0x49;

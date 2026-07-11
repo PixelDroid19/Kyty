@@ -859,6 +859,9 @@ String GpuMemory::create_dbg_exit(const String& msg, const uint64_t* vaddr, cons
 	}
 
 	list.Add(String::FromPrintf("\t info.type = %s", Core::EnumName(type).C_Str()));
+	// Parent type is required to diagnose create_all_the_same failures (same
+	// relation can pair with mixed object types). Heap is not available here;
+	// callers that have heap context should prefer the typed dump below.
 	for (const auto& d: others)
 	{
 		list.Add(String::FromPrintf("\t id = %d, rel = %s", d.object_id, Core::EnumName(d.relation).C_Str()));
@@ -890,6 +893,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	bool overlap             = false;
 	bool delete_all          = false;
 	bool create_from_objects = false;
+	// VertexBuffer ids to free when a multi-parent Texture mixes reclaim with
+	// surface-link parents (see multi_texture_mixed).
+	Vector<int> texture_reclaim_vertex_ids;
 
 	GpuMemoryScenario scenario = GpuMemoryScenario::Common;
 
@@ -944,10 +950,16 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			auto& o = h.info;
 
 			if (o.object.type == GpuMemoryObjectType::StorageBuffer && info.type == GpuMemoryObjectType::StorageBuffer &&
-			    GpuMemoryCanShareReadOnlyStorageViews(h.block.vaddr[0], h.block.size[0], o.read_only, vaddr[0], size[0], info.read_only))
+			    (obj.relation == OverlapType::Equals ||
+			     GpuMemoryCanShareReadOnlyStorageViews(h.block.vaddr[0], h.block.size[0], o.read_only, vaddr[0], size[0], info.read_only)))
 			{
+				// Equals: same guest range re-registered as StorageBuffer (captured
+				// post-menu). RO share: partial overlapping RO views.
 				overlap = true;
 			} else if (GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type))
+			{
+				overlap = true;
+			} else if (GpuMemoryAllowsVertexContainedInSurface(o.object.type, obj.relation, info.type))
 			{
 				overlap = true;
 			} else
@@ -984,6 +996,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					// sees the same guest memory without reclaiming the vertex object.
 					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::StorageBuffer):
 					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::StorageBuffer):
+					// Existing VertexBuffer fully contains a new StorageBuffer view
+					// (relation Contains). Reclaim the vertex object so the storage
+					// view owns the range; multi-parent path links instead when a
+					// Texture alias coexists.
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::StorageBuffer):
 					// Large Texture superseding VertexBuffers that live inside its
 				// address range (observed 1 MiB texture over multiple VBs).
 				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
@@ -1042,10 +1059,63 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					const auto& h = heap.objects[obj.object_id];
 					EXIT_IF(h.free);
 					const auto& o = h.info;
+					// Contains: existing larger VertexBuffer fully covers the new
+					// StorageBuffer (observed multi-parent load path alongside
+					// Texture Contains). Crosses/IsContainedWithin already covered.
 					if (o.object.type != GpuMemoryObjectType::VertexBuffer ||
-					    (obj.relation != OverlapType::Crosses && obj.relation != OverlapType::IsContainedWithin))
+					    (obj.relation != OverlapType::Crosses && obj.relation != OverlapType::IsContainedWithin &&
+					     obj.relation != OverlapType::Contains))
 					{
 						multi_vertex_storage_alias = false;
+						break;
+					}
+				}
+			}
+
+			// Multi-parent StorageBuffer where every parent is either an observed
+			// Texture↔Storage alias or a VertexBuffer storage-share relation.
+			// create_all_the_same rejects mixed parent types; this policy links
+			// them (same as multi_vertex_storage_alias / TextureStorageAlias).
+			bool multi_mixed_storage_alias = (info.type == GpuMemoryObjectType::StorageBuffer && !others.IsEmpty());
+			if (multi_mixed_storage_alias)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& h = heap.objects[obj.object_id];
+					EXIT_IF(h.free);
+					const auto& o = h.info;
+					const bool texture_alias =
+					    GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type);
+					const bool vertex_share = GpuMemoryAllowsVertexStorageShare(o.object.type, obj.relation, info.type);
+					// Captured: new StorageBuffer Contained by co-located larger
+					// StorageBuffer + RenderTexture (same guest base/size pair).
+					const bool surface_contains =
+					    (o.object.type == GpuMemoryObjectType::StorageBuffer || o.object.type == GpuMemoryObjectType::RenderTexture ||
+					     o.object.type == GpuMemoryObjectType::Texture || o.object.type == GpuMemoryObjectType::StorageTexture) &&
+					    (obj.relation == OverlapType::Contains || obj.relation == OverlapType::Crosses ||
+					     obj.relation == OverlapType::Equals);
+					if (!texture_alias && !vertex_share && !surface_contains)
+					{
+						multi_mixed_storage_alias = false;
+						break;
+					}
+				}
+			}
+
+			// Multi-parent VertexBuffer Contained in StorageBuffer/RenderTexture
+			// (and similar surfaces). Observed: new VB 0x480 inside a 0x60000
+			// StorageBuffer+RenderTexture Equals pair at the same guest base.
+			bool multi_vertex_in_surface = (info.type == GpuMemoryObjectType::VertexBuffer && !others.IsEmpty());
+			if (multi_vertex_in_surface)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& h = heap.objects[obj.object_id];
+					EXIT_IF(h.free);
+					const auto& o = h.info;
+					if (!GpuMemoryAllowsVertexContainedInSurface(o.object.type, obj.relation, info.type))
+					{
+						multi_vertex_in_surface = false;
 						break;
 					}
 				}
@@ -1062,7 +1132,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					const bool vertex_cross = o.object.type == GpuMemoryObjectType::VertexBuffer &&
 					                         (obj.relation == OverlapType::Crosses || obj.relation == OverlapType::IsContainedWithin);
 					const bool storage_equal = o.object.type == GpuMemoryObjectType::StorageBuffer && obj.relation == OverlapType::Equals;
-					if (!vertex_cross && !storage_equal)
+					// Captured: RenderTexture over Texture Crosses + StorageBuffer Equals.
+					const bool texture_cross = o.object.type == GpuMemoryObjectType::Texture &&
+					                           (obj.relation == OverlapType::Crosses || obj.relation == OverlapType::Contains ||
+					                            obj.relation == OverlapType::IsContainedWithin);
+					if (!vertex_cross && !storage_equal && !texture_cross)
 					{
 						multi_render_target_alias = false;
 						break;
@@ -1087,12 +1161,93 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
-			if (multi_ro_storage_share || multi_vertex_storage_alias || multi_render_target_alias)
+			// DepthStencilBuffer with multi-plane vaddrs that Cross Texture and
+			// StorageBuffer (captured: depth/stencil/htile vs large Texture +
+			// 0x8000 Storage at the htile plane). Reclaim parents so the DS
+			// object owns the guest ranges.
+			bool multi_depth_stencil_reclaim = (info.type == GpuMemoryObjectType::DepthStencilBuffer && !others.IsEmpty());
+			if (multi_depth_stencil_reclaim)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& h = heap.objects[obj.object_id];
+					EXIT_IF(h.free);
+					const auto& o = h.info;
+					const bool surface = o.object.type == GpuMemoryObjectType::Texture ||
+					                     o.object.type == GpuMemoryObjectType::StorageBuffer ||
+					                     o.object.type == GpuMemoryObjectType::StorageTexture ||
+					                     o.object.type == GpuMemoryObjectType::RenderTexture ||
+					                     o.object.type == GpuMemoryObjectType::VertexBuffer;
+					const bool rel_ok  = obj.relation == OverlapType::Crosses || obj.relation == OverlapType::Contains ||
+					                    obj.relation == OverlapType::IsContainedWithin || obj.relation == OverlapType::Equals;
+					if (!surface || !rel_ok)
+					{
+						multi_depth_stencil_reclaim = false;
+						break;
+					}
+				}
+			}
+
+			// Texture with mixed parents: reclaim VertexBuffers (delete) and link
+			// StorageBuffer/RenderTexture surfaces that Contain/Cross/Equals the
+			// new Texture. Captured 7-parent set: 5 VBs + SB Contains + RT Contains.
+			bool multi_texture_mixed = (info.type == GpuMemoryObjectType::Texture && !others.IsEmpty());
+			if (multi_texture_mixed)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& h = heap.objects[obj.object_id];
+					EXIT_IF(h.free);
+					const auto& o = h.info;
+					if (GpuMemoryAllowsTextureReclaimVertex(o.object.type, obj.relation, info.type))
+					{
+						texture_reclaim_vertex_ids.Add(obj.object_id);
+						continue;
+					}
+					if (GpuMemoryAllowsTextureContainedInSurface(o.object.type, obj.relation, info.type))
+					{
+						continue;
+					}
+					multi_texture_mixed = false;
+					break;
+				}
+			}
+
+			if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias || multi_vertex_in_surface ||
+			    multi_render_target_alias)
 			{
 				overlap = true;
-			} else if (multi_texture_reclaim)
+			} else if (multi_texture_reclaim || multi_depth_stencil_reclaim)
 			{
 				delete_all = true;
+			} else if (multi_texture_mixed)
+			{
+				// Drop reclaimed VBs from the link set; free them after create.
+				if (texture_reclaim_vertex_ids.Size() == others.Size())
+				{
+					delete_all = true;
+				} else
+				{
+					Vector<OverlappedBlock> keep;
+					for (const auto& obj: others)
+					{
+						bool reclaim = false;
+						for (int id: texture_reclaim_vertex_ids)
+						{
+							if (id == obj.object_id)
+							{
+								reclaim = true;
+								break;
+							}
+						}
+						if (!reclaim)
+						{
+							keep.Add(obj);
+						}
+					}
+					others  = keep;
+					overlap = true;
+				}
 			} else if (create_generate_mips(others, info.type, heap_id))
 			{
 				overlap             = true;
@@ -1109,6 +1264,25 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				if (!create_all_the_same(others, heap_id))
 				{
+					// Typed dump: create_all_the_same fails on mixed parent types
+					// even when every relation is the same (observed multi-parent
+					// StorageBuffer with two Contains parents of different kinds).
+					std::fprintf(stderr, "GpuMemory !create_all_the_same: new type=%s parents=%u\n",
+					             Core::EnumName(info.type).C_Str(), static_cast<unsigned>(others.Size()));
+					for (int vi = 0; vi < vaddr_num; vi++)
+					{
+						std::fprintf(stderr, "  new range[%d]: vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", vi, vaddr[vi], size[vi]);
+					}
+					for (const auto& d: others)
+					{
+						const auto& oh = heap.objects[d.object_id];
+						const auto& oi = oh.info;
+						std::fprintf(stderr,
+						             "  parent id=%d type=%s rel=%s read_only=%d vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
+						             d.object_id, Core::EnumName(oi.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
+						             oi.read_only ? 1 : 0, oh.block.vaddr[0], oh.block.size[0]);
+					}
+					std::fflush(stderr);
 					EXIT("%s\n", create_dbg_exit(U"!create_all_the_same", vaddr, size, vaddr_num, others, info.type).C_Str());
 				}
 
@@ -1150,6 +1324,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		for (const auto& obj: others)
 		{
 			destructors.Add(Free(heap_id, obj.object_id));
+		}
+	} else if (!texture_reclaim_vertex_ids.IsEmpty())
+	{
+		// Selective free from multi_texture_mixed (VertexBuffers only).
+		for (int id: texture_reclaim_vertex_ids)
+		{
+			destructors.Add(Free(heap_id, id));
 		}
 	}
 

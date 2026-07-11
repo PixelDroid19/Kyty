@@ -76,6 +76,11 @@ inline GpuMemoryOverlapType GpuMemoryReverseOverlap(GpuMemoryOverlapType relatio
 // same allocation. Keep this policy explicit: only the relations observed in
 // the Gen5 resource stream are accepted, while other containment directions
 // remain strict errors until their producer contract is captured.
+//
+// Observed relations (strict captures):
+//   - Texture Contains StorageBuffer (full sub-allocation view)
+//   - Texture Crosses StorageBuffer (partial range view; same link policy)
+// Inverse StorageBuffer Equals Texture/RenderTexture/StorageTexture also allowed.
 inline bool GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                GpuMemoryObjectType incoming_type)
 {
@@ -86,8 +91,70 @@ inline bool GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType existing_type
 		return true;
 	}
 
-	return existing_type == GpuMemoryObjectType::Texture && relation == GpuMemoryOverlapType::Contains &&
-	       incoming_type == GpuMemoryObjectType::StorageBuffer;
+	if (existing_type != GpuMemoryObjectType::Texture || incoming_type != GpuMemoryObjectType::StorageBuffer)
+	{
+		return false;
+	}
+
+	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses;
+}
+
+// VertexBuffer parent of an incoming StorageBuffer (multi-parent link path).
+// Matches CreateObject multi_vertex_storage_alias / multi_mixed_storage_alias.
+inline bool GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                              GpuMemoryObjectType incoming_type)
+{
+	if (existing_type != GpuMemoryObjectType::VertexBuffer || incoming_type != GpuMemoryObjectType::StorageBuffer)
+	{
+		return false;
+	}
+	return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
+	       relation == GpuMemoryOverlapType::Contains;
+}
+
+// Incoming VertexBuffer fully or partially covered by an existing storage or
+// render-target allocation (captured: VB Contained in StorageBuffer +
+// RenderTexture that share the same guest range).
+inline bool GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                    GpuMemoryObjectType incoming_type)
+{
+	if (incoming_type != GpuMemoryObjectType::VertexBuffer)
+	{
+		return false;
+	}
+	if (existing_type != GpuMemoryObjectType::StorageBuffer && existing_type != GpuMemoryObjectType::RenderTexture &&
+	    existing_type != GpuMemoryObjectType::Texture && existing_type != GpuMemoryObjectType::StorageTexture)
+	{
+		return false;
+	}
+	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
+	       relation == GpuMemoryOverlapType::Equals;
+}
+
+// Incoming Texture covered by existing StorageBuffer/RenderTexture (or Equals).
+// Used with multi-parent Texture create that also reclaims VertexBuffers.
+inline bool GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                     GpuMemoryObjectType incoming_type)
+{
+	if (incoming_type != GpuMemoryObjectType::Texture)
+	{
+		return false;
+	}
+	if (existing_type != GpuMemoryObjectType::StorageBuffer && existing_type != GpuMemoryObjectType::RenderTexture &&
+	    existing_type != GpuMemoryObjectType::StorageTexture && existing_type != GpuMemoryObjectType::Texture)
+	{
+		return false;
+	}
+	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
+	       relation == GpuMemoryOverlapType::Equals;
+}
+
+// VertexBuffer parent of an incoming Texture that should be reclaimed (delete).
+inline bool GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::VertexBuffer && incoming_type == GpuMemoryObjectType::Texture &&
+	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin);
 }
 
 // WriteBack (GPU -> CPU) hash bookkeeping for aliased objects.

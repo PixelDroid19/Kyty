@@ -2,6 +2,7 @@
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Libs/Libs.h"
@@ -68,17 +69,23 @@ TEST(EmulatorGraphicsState, DecodesBlendControl)
 	                       (1u << Pm4::CB_BLEND0_CONTROL_SEPARATE_ALPHA_BLEND_SHIFT) |
 	                       (1u << Pm4::CB_BLEND0_CONTROL_ENABLE_SHIFT);
 
-	State::SetBlendControl(context, 0, value);
-
-	const auto& blend = context.GetBlendControl(0);
-	EXPECT_EQ(blend.color_srcblend, 5);
-	EXPECT_EQ(blend.color_comb_fcn, 3);
-	EXPECT_EQ(blend.color_destblend, 6);
-	EXPECT_EQ(blend.alpha_srcblend, 7);
-	EXPECT_EQ(blend.alpha_comb_fcn, 2);
-	EXPECT_EQ(blend.alpha_destblend, 8);
-	EXPECT_TRUE(blend.separate_alpha_blend);
-	EXPECT_TRUE(blend.enable);
+	// Slot 0 and slot 1 (CB_BLEND1_CONTROL = 0x1e1, captured on indirect CX path)
+	// share the same decoder.
+	for (uint32_t slot = 0; slot < 8; slot++)
+	{
+		State::SetBlendControl(context, slot, value);
+		const auto& blend = context.GetBlendControl(slot);
+		EXPECT_EQ(blend.color_srcblend, 5) << "slot " << slot;
+		EXPECT_EQ(blend.color_comb_fcn, 3) << "slot " << slot;
+		EXPECT_EQ(blend.color_destblend, 6) << "slot " << slot;
+		EXPECT_EQ(blend.alpha_srcblend, 7) << "slot " << slot;
+		EXPECT_EQ(blend.alpha_comb_fcn, 2) << "slot " << slot;
+		EXPECT_EQ(blend.alpha_destblend, 8) << "slot " << slot;
+		EXPECT_TRUE(blend.separate_alpha_blend) << "slot " << slot;
+		EXPECT_TRUE(blend.enable) << "slot " << slot;
+	}
+	// Register spacing matches direct+indirect jump tables.
+	EXPECT_EQ(Pm4::CB_BLEND0_CONTROL + 1u, 0x1e1u);
 }
 
 TEST(EmulatorGraphicsState, IntersectsEnabledScissorRectangles)
@@ -311,10 +318,62 @@ TEST(EmulatorGraphicsState, AllowsOnlyObservedTextureStorageAliases)
 	                                               GpuMemoryObjectType::Texture));
 	EXPECT_TRUE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
 	                                               GpuMemoryObjectType::StorageBuffer));
+	// Captured post-menu path: StorageBuffer registration that Crosses an
+	// existing Texture (partial guest range) must link, not EXIT.
+	EXPECT_TRUE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
+	                                               GpuMemoryObjectType::StorageBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::IsContainedWithin,
 	                                                GpuMemoryObjectType::StorageBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
 	                                                GpuMemoryObjectType::RenderTexture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Equals,
+	                                                GpuMemoryObjectType::StorageBuffer));
+}
+
+// Multi-parent StorageBuffer: each parent must independently pass texture-alias
+// or vertex-share. Mixed Texture Contains + Vertex Contains is the observed
+// create_all_the_same failure class under post-menu load.
+TEST(EmulatorGraphicsState, AllowsMixedTextureVertexStorageParents)
+{
+	EXPECT_TRUE(GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
+	                                              GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
+	                                              GpuMemoryObjectType::StorageBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                               GpuMemoryObjectType::StorageBuffer));
+	// Both sides of a mixed multi-parent set must be acceptable.
+	EXPECT_TRUE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                               GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
+	                                              GpuMemoryObjectType::StorageBuffer));
+}
+
+// Captured: VertexBuffer Contained by co-located StorageBuffer + RenderTexture.
+TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
+{
+	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
+	                                                   GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Contains,
+	                                                   GpuMemoryObjectType::VertexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::VertexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                    GpuMemoryObjectType::VertexBuffer));
+}
+
+// Captured: Texture over 5 VBs (reclaim) + StorageBuffer/RenderTexture Contains (link).
+TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
+{
+	EXPECT_TRUE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
+	                                               GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                               GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
+	                                                GpuMemoryObjectType::Texture));
 }
 
 // Captured Gen5 WriteBack topology: RW StorageBuffer with 8 VertexBuffer
@@ -365,6 +424,53 @@ TEST(EmulatorGraphicsState, WriteBackClassifiesMultiParentStorageTopology)
 	// Unsupported relation must fail closed.
 	const GpuMemoryOverlapType bad[] = {GpuMemoryOverlapType::Equals, GpuMemoryOverlapType::None};
 	EXPECT_FALSE(GpuMemoryWriteBackClassifyParents(bad, 2, &recompute, &equals, &inv));
+}
+
+
+// CB_TARGET_MASK 0x0000ffff (RT0..RT3 full) must still yield RT0 nibble 0xF
+// for the single-attachment pipeline write mask.
+TEST(EmulatorGraphicsState, TargetMaskRt0NibbleFromMultiTarget)
+{
+	constexpr uint32_t multi = 0x0000ffffu;
+	EXPECT_EQ(multi & 0xFu, 0xFu);
+	EXPECT_EQ(0x00000000u & 0xFu, 0x0u);
+	EXPECT_EQ(0x0000000Fu & 0xFu, 0xFu);
+	// Partial RT0 channels
+	EXPECT_EQ(0x00000005u & 0xFu, 0x5u);
+}
+
+
+// Gen5 depth size: table path for 1280x720 D32S8, formula path for 642x362
+// (captured DEPTH_SIZE_FAIL).
+TEST(EmulatorGraphicsState, TileGetDepthSizeNextGenNonTable)
+{
+	using namespace Kyty::Libs::Graphics;
+	TileSizeAlign stencil {}, htile {}, depth {};
+	ASSERT_TRUE(TileGetDepthSize(1280, 720, 0, 3, 1, true, true, true, &stencil, &htile, &depth));
+	EXPECT_EQ(depth.size, 3932160u);
+	EXPECT_EQ(stencil.size, 983040u);
+	// Captured non-table surface.
+	ASSERT_TRUE(TileGetDepthSize(642, 362, 0, 3, 1, true, true, true, &stencil, &htile, &depth));
+	EXPECT_GT(depth.size, 0u);
+	EXPECT_EQ(depth.size % 4u, 0u);
+	EXPECT_EQ(depth.align, 65536u);
+	EXPECT_GT(stencil.size, 0u);
+	EXPECT_EQ(stencil.align, 65536u);
+	EXPECT_GT(htile.size, 0u);
+}
+
+
+// Captured DepthStencilBuffer create (3 vaddrs) Crossing Texture + StorageBuffer.
+TEST(EmulatorGraphicsState, DepthStencilReclaimParentsAreSurfaces)
+{
+	// Document the accepted parent types for multi_depth_stencil_reclaim.
+	const GpuMemoryObjectType ok[] = {GpuMemoryObjectType::Texture, GpuMemoryObjectType::StorageBuffer,
+	                                  GpuMemoryObjectType::RenderTexture, GpuMemoryObjectType::VertexBuffer};
+	for (auto t : ok)
+	{
+		EXPECT_NE(t, GpuMemoryObjectType::DepthStencilBuffer);
+	}
+	EXPECT_EQ(GpuMemoryOverlapType::Crosses, GpuMemoryOverlapType::Crosses);
 }
 
 UT_END();

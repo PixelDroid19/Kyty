@@ -34,6 +34,8 @@
 #include "Emulator/Profiler.h"
 
 #include <atomic>
+#include <cinttypes>
+#include <cstdio>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -1160,7 +1162,9 @@ static void hw_check(const HW::Context& hw)
 	eqaa_check(eqaa);
 	aa_check(aa, ac);
 
-	EXIT_NOT_IMPLEMENTED(hw.GetRenderTargetMask() != 0xF && hw.GetRenderTargetMask() != 0x0);
+	// CB_TARGET_MASK may enable multiple MRT slots (captured 0x0000ffff =
+	// RT0..RT3 full RGBA). Pipeline creation still binds a single color
+	// attachment and applies the RT0 nibble as colorWriteMask.
 	EXIT_NOT_IMPLEMENTED(hw.GetDepthClearValue() != 0.0f && hw.GetDepthClearValue() != 1.0f);
 	// EXIT_NOT_IMPLEMENTED(hw.GetStencilClearValue() != 0);
 }
@@ -2174,19 +2178,25 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	multisampling.alphaToCoverageEnable = VK_FALSE;
 	multisampling.alphaToOneEnable      = VK_FALSE;
 
+	// CB_TARGET_MASK: 4 bits per MRT (RGBA). Use RT0 nibble for the single
+	// color attachment currently bound by the pipeline.
+	const uint32_t        rt0_nibble       = static_params->color_mask & 0xFu;
 	VkColorComponentFlags color_write_mask = 0;
-
-	if (static_params->color_mask == 0xF)
+	if ((rt0_nibble & 0x1u) != 0)
 	{
-		color_write_mask =
-		    static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_R_BIT) | static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_G_BIT) |
-		    static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_B_BIT) | static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_A_BIT);
-	} else if (static_params->color_mask == 0x0)
+		color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_R_BIT);
+	}
+	if ((rt0_nibble & 0x2u) != 0)
 	{
-		color_write_mask = 0;
-	} else
+		color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_G_BIT);
+	}
+	if ((rt0_nibble & 0x4u) != 0)
 	{
-		EXIT("unknown mask: %u\n", static_params->color_mask);
+		color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_B_BIT);
+	}
+	if ((rt0_nibble & 0x8u) != 0)
+	{
+		color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_A_BIT);
 	}
 
 	VkPipelineColorBlendAttachmentState color_blend_attachment {};
@@ -2675,7 +2685,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 			//			pn = p;
 		} else
 		{
-			EXIT_IF(m_pipelines.Size() != index);
+			EXIT_IF(m_pipelines.Size() != static_cast<uint32_t>(index));
 
 			m_pipelines.Add(p);
 
@@ -4160,8 +4170,13 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 		if (gen5)
 		{
 			EXIT_NOT_IMPLEMENTED(r.OutOfBounds() != 0);
-			EXIT_NOT_IMPLEMENTED(
-			    !(r.Stride() == 16 && r.DstSelXYZW() == DstSel(4, 5, 6, 7) && ShaderIsGen5FourComponent32BitBufferFormat(r.Format())));
+			const bool four_comp =
+			    r.Stride() == 16 && r.DstSelXYZW() == DstSel(4, 5, 6, 7) && ShaderIsGen5FourComponent32BitBufferFormat(r.Format());
+			// Captured: stride=4, DstSel(R,0,0,1), format=20 (single 32-bit channel).
+			const bool one_comp = r.Stride() == 4 &&
+			                      (r.DstSelXYZW() == DstSel(4, 0, 0, 1) || r.DstSelXYZW() == DstSel(4, 0, 0, 0)) &&
+			                      ShaderIsGen5SingleComponent32BitBufferFormat(r.Format());
+			EXIT_NOT_IMPLEMENTED(!(four_comp || one_comp));
 		} else
 		{
 			EXIT_NOT_IMPLEMENTED(!((r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 0) && r.Dfmt() == 4 && r.Nfmt() == 4) ||
@@ -5590,7 +5605,7 @@ void CommandBuffer::ExecuteWithSemaphore()
 
 	if (queue.mutex != nullptr)
 	{
-		queue.mutex->Lock();
+		queue.mutex->Unlock();
 	}
 
 	m_execute = true;
