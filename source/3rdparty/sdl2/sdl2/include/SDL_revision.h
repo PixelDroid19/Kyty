@@ -1,2 +1,6 @@
-#define SDL_REVISION "https://github.com/libsdl-org/SDL.git@cb46e1b3f06a08d57b4ccd83127d1ec3139e1c0f"
+#ifdef SDL_VENDOR_INFO
+#define SDL_REVISION SDL_VENDOR_INFO
+#else
+#define SDL_REVISION ""
+#endif
 #define SDL_REVISION_NUMBER 0
