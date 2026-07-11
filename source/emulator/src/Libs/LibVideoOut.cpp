@@ -23,6 +23,16 @@ static void InitVideoOutCommon(Loader::SymbolDatabase* symbols, int module_versi
 
 	add("Up36PTk687E", reinterpret_cast<uint64_t>(VideoOut::VideoOutOpen), U"VideoOut::VideoOutOpen");
 	add("CBiu4mCE1DA", reinterpret_cast<uint64_t>(VideoOut::VideoOutSetFlipRate), U"VideoOut::VideoOutSetFlipRate");
+	add("uquVH4-Du78", reinterpret_cast<uint64_t>(VideoOut::VideoOutClose), U"VideoOut::VideoOutClose");
+	add("6kPnj51T62Y", reinterpret_cast<uint64_t>(VideoOut::VideoOutGetResolutionStatus), U"VideoOut::VideoOutGetResolutionStatus");
+	add("i6-sR91Wt-4", reinterpret_cast<uint64_t>(VideoOut::VideoOutSetBufferAttribute), U"VideoOut::VideoOutSetBufferAttribute");
+	add("HXzjK9yI30k", reinterpret_cast<uint64_t>(VideoOut::VideoOutAddFlipEvent), U"VideoOut::VideoOutAddFlipEvent");
+	add("Xru92wHJRmg", reinterpret_cast<uint64_t>(VideoOut::VideoOutAddVblankEvent), U"VideoOut::VideoOutAddVblankEvent");
+	add("w3BY+tAEiQY", reinterpret_cast<uint64_t>(VideoOut::VideoOutRegisterBuffers), U"VideoOut::VideoOutRegisterBuffers");
+	add("U46NwOiJpys", reinterpret_cast<uint64_t>(VideoOut::VideoOutSubmitFlip), U"VideoOut::VideoOutSubmitFlip");
+	add("SbU3dwp80lQ", reinterpret_cast<uint64_t>(VideoOut::VideoOutGetFlipStatus), U"VideoOut::VideoOutGetFlipStatus");
+	add("1FZBKy8HeNU", reinterpret_cast<uint64_t>(VideoOut::VideoOutGetVblankStatus), U"VideoOut::VideoOutGetVblankStatus");
+	add("MTxxrOCeSig", reinterpret_cast<uint64_t>(VideoOut::VideoOutSetWindowModeMargins), U"VideoOut::VideoOutSetWindowModeMargins");
 }
 
 namespace LibGen4 {
@@ -33,16 +43,6 @@ LIB_DEFINE(InitVideoOut_1)
 {
 	PRINT_NAME_ENABLE(true);
 
-	LIB_FUNC("uquVH4-Du78", VideoOut::VideoOutClose);
-	LIB_FUNC("6kPnj51T62Y", VideoOut::VideoOutGetResolutionStatus);
-	LIB_FUNC("i6-sR91Wt-4", VideoOut::VideoOutSetBufferAttribute);
-	LIB_FUNC("HXzjK9yI30k", VideoOut::VideoOutAddFlipEvent);
-	LIB_FUNC("Xru92wHJRmg", VideoOut::VideoOutAddVblankEvent);
-	LIB_FUNC("w3BY+tAEiQY", VideoOut::VideoOutRegisterBuffers);
-	LIB_FUNC("U46NwOiJpys", VideoOut::VideoOutSubmitFlip);
-	LIB_FUNC("SbU3dwp80lQ", VideoOut::VideoOutGetFlipStatus);
-	LIB_FUNC("1FZBKy8HeNU", VideoOut::VideoOutGetVblankStatus);
-	LIB_FUNC("MTxxrOCeSig", VideoOut::VideoOutSetWindowModeMargins);
 	InitVideoOutCommon(s, 0, 0);
 }
 

@@ -975,10 +975,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::VertexBuffer):
 				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::VertexBuffer):
 				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::VertexBuffer):
-				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::IndexBuffer):
-				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::IndexBuffer):
-				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::IndexBuffer):
-				// Large Texture superseding VertexBuffers that live inside its
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::IndexBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::IndexBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::IndexBuffer):
+					// Gen5 alias observed when a storage view crosses an active vertex
+					// allocation. Keep both resource views linked so the storage access
+					// sees the same guest memory without reclaiming the vertex object.
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::StorageBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::StorageBuffer):
+					// Large Texture superseding VertexBuffers that live inside its
 				// address range (observed 1 MiB texture over multiple VBs).
 				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
 				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::Texture):
@@ -1028,9 +1033,65 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
-			if (multi_ro_storage_share)
+			bool multi_vertex_storage_alias = (info.type == GpuMemoryObjectType::StorageBuffer && !others.IsEmpty());
+			if (multi_vertex_storage_alias)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& h = heap.objects[obj.object_id];
+					EXIT_IF(h.free);
+					const auto& o = h.info;
+					if (o.object.type != GpuMemoryObjectType::VertexBuffer ||
+					    (obj.relation != OverlapType::Crosses && obj.relation != OverlapType::IsContainedWithin))
+					{
+						multi_vertex_storage_alias = false;
+						break;
+					}
+				}
+			}
+
+			bool multi_render_target_alias = (info.type == GpuMemoryObjectType::RenderTexture && !others.IsEmpty());
+			if (multi_render_target_alias)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& h = heap.objects[obj.object_id];
+					EXIT_IF(h.free);
+					const auto& o = h.info;
+					const bool vertex_cross = o.object.type == GpuMemoryObjectType::VertexBuffer &&
+					                         (obj.relation == OverlapType::Crosses || obj.relation == OverlapType::IsContainedWithin);
+					const bool storage_equal = o.object.type == GpuMemoryObjectType::StorageBuffer && obj.relation == OverlapType::Equals;
+					if (!vertex_cross && !storage_equal)
+					{
+						multi_render_target_alias = false;
+						break;
+					}
+				}
+			}
+
+			bool multi_texture_reclaim = (info.type == GpuMemoryObjectType::Texture && !others.IsEmpty());
+			if (multi_texture_reclaim)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& h = heap.objects[obj.object_id];
+					EXIT_IF(h.free);
+					const auto& o = h.info;
+					if (o.object.type != GpuMemoryObjectType::VertexBuffer ||
+					    (obj.relation != OverlapType::Crosses && obj.relation != OverlapType::IsContainedWithin))
+					{
+						multi_texture_reclaim = false;
+						break;
+					}
+				}
+			}
+
+			if (multi_ro_storage_share || multi_vertex_storage_alias || multi_render_target_alias)
 			{
 				overlap = true;
+			} else if (multi_texture_reclaim)
+			{
+				delete_all = true;
 			} else if (create_generate_mips(others, info.type, heap_id))
 			{
 				overlap             = true;

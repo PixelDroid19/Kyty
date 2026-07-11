@@ -51,6 +51,14 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 
 	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
+	if (tiled && params[RenderTextureObject::PARAM_WRITE_BACK] == 0)
+	{
+		// A tiled color target without write-back is GPU-owned: its first
+		// consumer is a render pass, not a CPU upload. Preserve the undefined
+		// image layout and let the render pass establish the attachment contents.
+		return;
+	}
+
 	if (tiled && buffer_is_tiled(*vaddr, *size))
 	{
 		EXIT_NOT_IMPLEMENTED(width != pitch);

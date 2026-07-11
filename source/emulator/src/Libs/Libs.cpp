@@ -41,6 +41,9 @@ LIB_DEFINE(InitSysmodule_1);
 LIB_DEFINE(InitSystemService_1);
 LIB_DEFINE(InitUserService_1);
 LIB_DEFINE(InitVideoOut_1);
+LIB_DEFINE(InitUlt_1);
+LIB_DEFINE(InitCes_1);
+LIB_DEFINE(InitShare_1);
 
 bool Init(const String& id, Loader::SymbolDatabase* s)
 {
@@ -71,6 +74,9 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libSystemService_1", InitSystemService_1);
 	LIB_CHECK(U"libUserService_1", InitUserService_1);
 	LIB_CHECK(U"libVideoOut_1", InitVideoOut_1);
+	LIB_CHECK(U"libUlt_1", InitUlt_1);
+	LIB_CHECK(U"libCes_1", InitCes_1);
+	LIB_CHECK(U"libShare_1", InitShare_1);
 
 	return false;
 }
@@ -100,6 +106,9 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(InitSystemService_1);
 	LIB_LOAD(InitUserService_1);
 	LIB_LOAD(InitVideoOut_1);
+	LIB_LOAD(InitUlt_1);
+	LIB_LOAD(InitCes_1);
+	LIB_LOAD(InitShare_1);
 }
 
 } // namespace Kyty::Libs

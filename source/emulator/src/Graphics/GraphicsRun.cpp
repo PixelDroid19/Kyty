@@ -2709,9 +2709,16 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			// target_mask:     0x00007fc0 (all rt and depth)
 			// extended_action: 0x06000000 (Flush Cb & Db)
 			// action:          0x00 (none)
-			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x280); // kGl0ScalarInvalidate & kGl1Invalidate
-			EXIT_NOT_IMPLEMENTED(size_lo != 0);
-			EXIT_NOT_IMPLEMENTED(base_lo != 0);
+			// Gen5 emits the same GL0/GL1 invalidate bits with an additional
+			// 0x8000 cache-control qualifier on this full-target barrier.
+			if ((gcr_cntl & ~0x8000u) != 0x280u)
+			{
+				EXIT("unsupported full-target barrier gcr_cntl=0x%08" PRIx32 "\n", gcr_cntl);
+			}
+			if (size_lo != 0 || base_lo != 0)
+			{
+				EXIT("unsupported full-target barrier range: base=0x%08" PRIx32 ", size=0x%08" PRIx32 "\n", base_lo, size_lo);
+			}
 
 			EXIT_IF(target_mask != 0x00007fc0);
 			EXIT_IF(extended_action != 0x06000000);

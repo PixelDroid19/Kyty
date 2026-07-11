@@ -67,8 +67,80 @@ static KYTY_SYSV_ABI void init_env()
 // against Kyty's HLE "libc" instead of its own libc.prx.
 static KYTY_SYSV_ABI void*  c_malloc(size_t size) { return ::malloc(size); }
 static KYTY_SYSV_ABI void*  c_calloc(size_t n, size_t size) { return ::calloc(n, size); }
-static KYTY_SYSV_ABI void*  c_realloc(void* p, size_t size) { return ::realloc(p, size); }
-static KYTY_SYSV_ABI void   c_free(void* p) { ::free(p); }
+
+struct AlignedAllocationHeader
+{
+	uint64_t magic;
+	void*    base;
+	size_t   size;
+	size_t   alignment;
+};
+
+static constexpr uint64_t ALIGNED_ALLOCATION_MAGIC = 0x4b595459414c4e47ull;
+
+static AlignedAllocationHeader* aligned_header(void* ptr)
+{
+	if (ptr == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* header = reinterpret_cast<AlignedAllocationHeader*>(reinterpret_cast<uintptr_t>(ptr) - sizeof(AlignedAllocationHeader));
+	return (header->magic == ALIGNED_ALLOCATION_MAGIC ? header : nullptr);
+}
+
+static KYTY_SYSV_ABI void* c_memalign(size_t alignment, size_t size)
+{
+	if (alignment < alignof(void*) || (alignment & (alignment - 1)) != 0 ||
+	    size > SIZE_MAX - alignment - sizeof(AlignedAllocationHeader))
+	{
+		return nullptr;
+	}
+
+	const size_t total = size + alignment - 1 + sizeof(AlignedAllocationHeader);
+	void*       base  = ::malloc(total);
+	if (base == nullptr)
+	{
+		return nullptr;
+	}
+
+	const auto raw     = reinterpret_cast<uintptr_t>(base) + sizeof(AlignedAllocationHeader);
+	const auto aligned = (raw + alignment - 1) & ~(alignment - 1);
+	auto*      header  = reinterpret_cast<AlignedAllocationHeader*>(aligned - sizeof(AlignedAllocationHeader));
+	*header            = {ALIGNED_ALLOCATION_MAGIC, base, size, alignment};
+	return reinterpret_cast<void*>(aligned);
+}
+
+static KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
+{
+	if (auto* header = aligned_header(p); header != nullptr)
+	{
+		if (size == 0)
+		{
+			::free(header->base);
+			return nullptr;
+		}
+
+		void* replacement = c_memalign(header->alignment, size);
+		if (replacement != nullptr)
+		{
+			::memcpy(replacement, p, (header->size < size ? header->size : size));
+			::free(header->base);
+		}
+		return replacement;
+	}
+	return ::realloc(p, size);
+}
+
+static KYTY_SYSV_ABI void c_free(void* p)
+{
+	if (auto* header = aligned_header(p); header != nullptr)
+	{
+		::free(header->base);
+		return;
+	}
+	::free(p);
+}
 static KYTY_SYSV_ABI void*  c_memcpy(void* d, const void* s, size_t n) { return ::memcpy(d, s, n); }
 static KYTY_SYSV_ABI int    c_memcpy_s(void* d, size_t dn, const void* s, size_t n) { return (::memcpy(d, s, n < dn ? n : dn), 0); }
 static KYTY_SYSV_ABI void*  c_memmove(void* d, const void* s, size_t n) { return ::memmove(d, s, n); }
@@ -89,6 +161,7 @@ static KYTY_SYSV_ABI void   c_srand(unsigned int seed) { ::srand(seed); }
 // C++ operator new/delete (mangled _Znwm/_ZdlPv), forwarded to the host allocator.
 static KYTY_SYSV_ABI void* cxx_new(size_t size) { return ::malloc(size != 0 ? size : 1); }
 static KYTY_SYSV_ABI void  cxx_delete(void* p) { ::free(p); }
+static KYTY_SYSV_ABI void* cxx_new_array(size_t size) { return ::malloc(size != 0 ? size : 1); }
 
 // --- Additional string / memory ---------------------------------------------
 static KYTY_SYSV_ABI int   c_bcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
@@ -537,6 +610,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("2X5agFjKxMc", LibC::c_calloc);
 	LIB_FUNC("Y7aJ1uydPMo", LibC::c_realloc);
 	LIB_FUNC("tIhsqj0qsFE", LibC::c_free);
+	LIB_FUNC("Ujf3KzMvRmI", LibC::c_memalign);
 	LIB_FUNC("Q3VBxCXhUHs", LibC::c_memcpy);
 	LIB_FUNC("NFLs+dRJGNg", LibC::c_memcpy_s);
 	LIB_FUNC("8zTFvBIAIN8", LibC::c_memset);
@@ -549,6 +623,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("ob5xAW4ln-0", LibC::c_strchr);
 	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);    // operator new(size_t)
 	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete); // operator delete(void*)
+	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);    // operator new[](size_t)
 
 	// string / memory
 	LIB_FUNC("+P6FRGH4LfA", LibC::c_memmove);
