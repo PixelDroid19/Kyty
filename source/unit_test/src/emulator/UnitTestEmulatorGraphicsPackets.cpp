@@ -267,6 +267,41 @@ TEST(EmulatorGraphicsPackets, PatchesReleaseMemEndOfPipeAddress)
 	EXPECT_EQ(Gen5::GraphicsAgcQueueEndOfPipeActionPatchAddress(nullptr, 1), Libs::LibKernel::KERNEL_ERROR_EINVAL);
 }
 
+// Observed post-Play: guest encodes WaitMem/ReleaseMem with a placeholder then
+// patches the address through GetDataPacketPayloadAddress. WaitMem stores the
+// 64-bit address in the first body dwords (cmd+1); ReleaseMem stores it after
+// action/gcr (cmd+3). Default consumers keep the historical cmd+2 payload.
+TEST(EmulatorGraphicsPackets, ResolvesDataPacketPayloadAddressByOpcode)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t  wait_mem[9]    = {};
+	uint32_t  release_mem[7] = {};
+	uint32_t  write_data[6]  = {};
+	uint32_t* payload        = nullptr;
+
+	wait_mem[0] = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	ASSERT_EQ(Gen5::GraphicsGetDataPacketPayloadAddress(&payload, wait_mem, 1), 0);
+	EXPECT_EQ(payload, wait_mem + 1);
+
+	wait_mem[0] = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WAIT_MEM_32);
+	ASSERT_EQ(Gen5::GraphicsGetDataPacketPayloadAddress(&payload, wait_mem, 0), 0);
+	EXPECT_EQ(payload, wait_mem + 1);
+
+	release_mem[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	ASSERT_EQ(Gen5::GraphicsGetDataPacketPayloadAddress(&payload, release_mem, 1), 0);
+	EXPECT_EQ(payload, release_mem + 3);
+
+	// WriteData keeps the historical payload base at cmd+2 (address field).
+	write_data[0] = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WRITE_DATA);
+	ASSERT_EQ(Gen5::GraphicsGetDataPacketPayloadAddress(&payload, write_data, 1), 0);
+	EXPECT_EQ(payload, write_data + 2);
+}
+
 // Encoder accepts data_sel=1 (32-bit immediate). Packet layout stores data_sel
 // in bits 23:16 of dword 2 and the immediate in dwords 5..6.
 TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1Immediate32)
