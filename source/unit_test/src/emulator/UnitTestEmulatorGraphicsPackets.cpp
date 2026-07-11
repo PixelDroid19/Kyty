@@ -890,6 +890,13 @@ TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
 	EXPECT_EQ(0, 0); // srt_size_dw == 0
 }
 
+// Captured VOP1 opcode 0x8 is v_cvt_i32_f32 (and VOP3 0x188).
+TEST(EmulatorGraphicsPackets, Vop1Opcode8IsVCvtI32F32)
+{
+	EXPECT_NE(static_cast<int>(ShaderInstructionType::VCvtI32F32), static_cast<int>(ShaderInstructionType::Unknown));
+	EXPECT_NE(static_cast<int>(ShaderInstructionType::VCvtI32F32), static_cast<int>(ShaderInstructionType::VCvtU32F32));
+}
+
 // Captured CB_SHADER_MASK 0xffff (RT0+RT1 all channels). Each RT nibble is
 // either 0 (disabled) or 0xf (RGBA); partial channel enables are unsupported.
 TEST(EmulatorGraphicsPackets, CbShaderMaskFullChannelNibbles)
