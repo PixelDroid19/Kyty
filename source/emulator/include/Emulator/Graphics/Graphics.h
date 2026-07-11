@@ -93,6 +93,9 @@ bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic*
                                      const ShaderSemantic* inputs, uint32_t input_count);
 int KYTY_SYSV_ABI   GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t* cmd, int type);
 int KYTY_SYSV_ABI   GraphicsSuspendPoint();
+// Graphics5 NID LtTouSCZjHM: allocate dwords in a CommandBuffer (cursor_up).
+// Observed SysV: rdi=CommandBuffer*, rsi=num_dw (e.g. 10). Returns dword*.
+uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw);
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
 int KYTY_SYSV_ABI   GraphicsAgcDriverUnknownKRzWekV120();
 
