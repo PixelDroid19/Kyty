@@ -3,6 +3,7 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Kyty/UnitTest.h"
@@ -201,6 +202,26 @@ TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 	query.type                 = Loader::SymbolType::Func;
 
 	EXPECT_NE(symbols.Find(query), nullptr);
+}
+
+// WaitFlipDone body observed post-Play: handle=0, index=3 while Open() left
+// only slot 1 opened. Resolve handle 0 to that sole open port.
+TEST(EmulatorGraphicsState, ResolvesVideoOutHandleZeroToSoleOpenPort)
+{
+	using Kyty::Libs::VideoOut::VideoOutResolveHandle;
+
+	const bool only_one[] = {false, true};
+	EXPECT_EQ(VideoOutResolveHandle(0, only_one, 2), 1);
+	EXPECT_EQ(VideoOutResolveHandle(1, only_one, 2), 1);
+
+	const bool none[] = {false, false};
+	EXPECT_EQ(VideoOutResolveHandle(0, none, 2), 0);
+
+	const bool both[] = {true, true};
+	EXPECT_EQ(VideoOutResolveHandle(0, both, 2), 0); // ambiguous
+
+	const bool only_zero[] = {true, false};
+	EXPECT_EQ(VideoOutResolveHandle(0, only_zero, 2), 0);
 }
 
 TEST(EmulatorGraphicsState, ReportsNoSystemServiceEventWithoutFabricatingOne)

@@ -35,6 +35,11 @@ void                    VideoOutInit(uint32_t width, uint32_t height);
 VideoOutBufferImageInfo VideoOutGetImage(uint64_t addr);
 void                    VideoOutWaitFlipDone(int handle, int index);
 
+// Pure helper: map handle 0 to the sole opened slot when exactly one port is
+// open (Gen5 WaitUntilSafe encodes handle 0 while Open returns 1). Non-zero
+// handles pass through. Ambiguous (0 or 2+ open) returns 0 unchanged.
+int VideoOutResolveHandle(int handle, const bool* opened, int num_slots);
+
 KYTY_SYSV_ABI int  VideoOutOpen(int user_id, int bus_type, int index, const void* param);
 KYTY_SYSV_ABI int  VideoOutClose(int handle);
 KYTY_SYSV_ABI int  VideoOutGetResolutionStatus(int handle, VideoOutResolutionStatus* status);

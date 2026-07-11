@@ -190,6 +190,7 @@ public:
 	int             Open();
 	void            Close(int handle);
 	VideoOutConfig* Get(int handle);
+	int             ResolveHandle(int handle) const;
 
 	VideoOutBufferImageInfo FindImage(const void* buffer);
 
@@ -361,10 +362,42 @@ void VideoOutContext::Close(int handle)
 
 VideoOutConfig* VideoOutContext::Get(int handle)
 {
-	EXIT_NOT_IMPLEMENTED(handle >= VIDEO_OUT_NUM_MAX);
+	handle = ResolveHandle(handle);
+	EXIT_NOT_IMPLEMENTED(handle < 0 || handle >= VIDEO_OUT_NUM_MAX);
 	EXIT_NOT_IMPLEMENTED(!m_video_out_ctx[handle].opened);
 
 	return m_video_out_ctx + handle;
+}
+
+int VideoOutContext::ResolveHandle(int handle) const
+{
+	bool opened[VIDEO_OUT_NUM_MAX] = {};
+	for (int i = 0; i < VIDEO_OUT_NUM_MAX; i++)
+	{
+		opened[i] = m_video_out_ctx[i].opened;
+	}
+	return VideoOutResolveHandle(handle, opened, VIDEO_OUT_NUM_MAX);
+}
+
+int VideoOutResolveHandle(int handle, const bool* opened, int num_slots)
+{
+	if (handle != 0 || opened == nullptr || num_slots <= 0)
+	{
+		return handle;
+	}
+	int sole = -1;
+	for (int i = 0; i < num_slots; i++)
+	{
+		if (opened[i])
+		{
+			if (sole >= 0)
+			{
+				return 0; // ambiguous
+			}
+			sole = i;
+		}
+	}
+	return sole >= 0 ? sole : 0;
 }
 
 void VideoOutContext::VblankBegin()
