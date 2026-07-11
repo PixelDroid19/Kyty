@@ -3820,12 +3820,13 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 	TileSizeAlign htile_size {};
 	TileSizeAlign depth_size {};
 
-	bool neo        = Config::IsNeo();
-	bool ps5        = Config::IsNextGen();
-	bool htile      = z.z_info.tile_surface_enable;
-	bool decompress = htile && (rc.depth_compress_disable || rc.stencil_compress_disable);
+	bool       neo        = Config::IsNeo();
+	bool       ps5        = Config::IsNextGen();
+	bool       htile      = z.z_info.tile_surface_enable;
+	bool       decompress = htile && (rc.depth_compress_disable || rc.stencil_compress_disable);
+	const auto usage      = State::ResolveDepthStencilUsage(z, rc, dc);
 
-	if (dc.z_enable || dc.z_write_enable || dc.stencil_enable || decompress)
+	if (usage.target_active)
 	{
 		switch (z.z_info.format * 2 + z.stencil_info.format)
 		{
@@ -3891,7 +3892,7 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 	r->depth_clear_enable   = rc.depth_clear_enable;
 	r->depth_clear_value    = hw.GetDepthClearValue();
 	r->depth_test_enable    = dc.z_enable;
-	r->depth_write_enable   = dc.z_write_enable;
+	r->depth_write_enable   = usage.depth_write_enable;
 	r->depth_compare_op     = static_cast<VkCompareOp>(dc.zfunc);
 
 	r->depth_bounds_test_enable = dc.depth_bounds_enable;

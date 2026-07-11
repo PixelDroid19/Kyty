@@ -65,6 +65,18 @@ ScissorRect ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanMod
 	return resolved;
 }
 
+DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, const HW::RenderControl& render_control,
+                                           const HW::DepthControl& depth_control)
+{
+	const bool decompress =
+	    target.z_info.tile_surface_enable && (render_control.depth_compress_disable || render_control.stencil_compress_disable);
+
+	DepthStencilUsage usage;
+	usage.target_active      = depth_control.z_enable || depth_control.stencil_enable || decompress;
+	usage.depth_write_enable = depth_control.z_enable && depth_control.z_write_enable;
+	return usage;
+}
+
 void SetGenericScissorTl(HW::Context& context, uint32_t value)
 {
 	const auto& viewport = context.GetScreenViewport();
