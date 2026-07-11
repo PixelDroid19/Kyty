@@ -302,6 +302,46 @@ TEST(EmulatorGraphicsPackets, ResolvesDataPacketPayloadAddressByOpcode)
 	EXPECT_EQ(payload, write_data + 2);
 }
 
+// Post-Play load path: WriteData with cache_policy=2 packs into the same
+// control layout as cache_policy=0 (dst | policy<<8 | increment<<16 | confirm<<24).
+TEST(EmulatorGraphicsPackets, EncodesWriteDataCachePolicy2ControlWord)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	uint32_t             data[2]     = {0x11111111u, 0x22222222u};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd = Gen5::GraphicsDcbWriteData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4, 2, 0x124e80f40ull, data, 2, 0, 1);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WRITE_DATA));
+	EXPECT_EQ(cmd[1], 0x01000204u);
+	EXPECT_EQ(cmd[2], 0x24e80f40u);
+	EXPECT_EQ(cmd[3], 0x00000001u);
+	EXPECT_EQ(cmd[4], 0x11111111u);
+	EXPECT_EQ(cmd[5], 0x22222222u);
+}
+
 // Post-Play: WaitMem address stays 0; preceding ReleaseMem is EopPatched.
 // Resolve Wait to the Release address when packets are contiguous.
 TEST(EmulatorGraphicsPackets, ResolvesNullWaitMemAddressFromPrecedingRelease)

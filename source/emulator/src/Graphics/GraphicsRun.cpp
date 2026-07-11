@@ -719,8 +719,31 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 {
 	Core::LockGuard lock(m_mutex);
 
-	EXIT_NOT_IMPLEMENTED(!custom && write_control != 0x04100500);
-	EXIT_NOT_IMPLEMENTED(custom && write_control != 0x01000004);
+	// Non-custom IT_WRITE_DATA: historical control word.
+	if (!custom && write_control != 0x04100500)
+	{
+		EXIT("WriteData non-custom write_control=0x%08" PRIx32 " dw_num=%u dst=%p\n", write_control, dw_num,
+		     static_cast<void*>(dst));
+	}
+
+	// Custom R_WRITE_DATA control = dst | cache_policy<<8 | increment<<16 |
+	// write_confirm<<24 (matches GraphicsDcbWriteData). Software CP always
+	// performs an immediate host memcpy; cache_policy is accepted when it is a
+	// form already emitted by the encoder.
+	//   0x01000004 — dst=4, cache_policy=0, write_confirm=1
+	//   0x01000204 — dst=4, cache_policy=2, write_confirm=1 (post-Play load)
+	if (custom)
+	{
+		const uint32_t dst_sel       = write_control & 0xffu;
+		const uint32_t cache_policy  = (write_control >> 8u) & 0xffu;
+		const uint32_t increment     = (write_control >> 16u) & 0xffu;
+		const uint32_t write_confirm = (write_control >> 24u) & 0xffu;
+		if (dst_sel != 4u || increment != 0u || write_confirm != 1u || (cache_policy != 0u && cache_policy != 2u))
+		{
+			EXIT("WriteData custom write_control=0x%08" PRIx32 " dw_num=%u dst=%p\n", write_control, dw_num,
+			     static_cast<void*>(dst));
+		}
+	}
 
 	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
 
