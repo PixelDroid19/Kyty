@@ -890,6 +890,17 @@ TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
 	EXPECT_EQ(0, 0); // srt_size_dw == 0
 }
 
+// Captured first fail after EUD bind: EXP target 0x25 is Param5.
+TEST(EmulatorGraphicsPackets, ExpTarget0x25IsParam5)
+{
+	EXPECT_NE(static_cast<uint64_t>(ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3),
+	          static_cast<uint64_t>(ShaderInstructionFormat::Unknown));
+	EXPECT_NE(static_cast<uint64_t>(ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3),
+	          static_cast<uint64_t>(ShaderInstructionFormat::Param4Vsrc0Vsrc1Vsrc2Vsrc3));
+	// GCN/GFX10: parameter exports occupy targets 0x20 + N.
+	EXPECT_EQ(0x20 + 5, 0x25);
+}
+
 // Captured post-detile PS: user_sgpr_num=30, eud=12, type5@0x1c, samplers at
 // 0x18 (direct), 0x20 and 0x24 (EUD). EUD virtual base is user_sgpr_num
 // rounded up to a multiple of 4 (30 → 32); api index uses the extended
