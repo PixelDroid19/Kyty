@@ -76,6 +76,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("d-6uF9sZDIU", Gen5::GraphicsSetCxRegIndirectPatchAddRegisters);
 	LIB_FUNC("z2duB-hHQSM", Gen5::GraphicsSetShRegIndirectPatchAddRegisters);
 	LIB_FUNC("vRoArM9zaIk", Gen5::GraphicsSetUcRegIndirectPatchAddRegisters);
+	// LtTouSCZjHM: CommandBuffer dword allocation (see GraphicsCbAllocateDwords).
+	LIB_FUNC("LtTouSCZjHM", Gen5::GraphicsCbAllocateDwords);
 	LIB_FUNC("D9sr1xGUriE", Gen5::GraphicsCreatePrimState);
 	LIB_FUNC("HV4j+E0MBHE", Gen5::GraphicsCreateInterpolantMapping);
 	LIB_FUNC("V++UgBtQhn0", Gen5::GraphicsGetDataPacketPayloadAddress);

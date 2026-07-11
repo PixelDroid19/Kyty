@@ -1881,6 +1881,29 @@ int KYTY_SYSV_ABI GraphicsSuspendPoint()
 	return OK;
 }
 
+// Graphics5 NID LtTouSCZjHM. Captured strict SysV entry:
+//   rdi = CommandBuffer* (bottom/top/cursor_up/cursor_down/callback layout)
+//   rsi = 10 (num dwords)
+//   rdx+ residual (rdx matched CB top once; not treated as an argument)
+// Neighboring import NIDs are SetShRegIndirectPatch* and DcbResetQueue.
+// Matches free-function form of CommandBuffer::AllocateDW used by every
+// packet encoder: reserve space, advance cursor_up, return write pointer.
+uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw)
+{
+	PRINT_NAME();
+
+	printf("\t buf    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
+	printf("\t num_dw = %" PRIu32 "\n", num_dw);
+
+	if (buf == nullptr || num_dw == 0)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	return buf->AllocateDW(num_dw);
+}
+
 int KYTY_SYSV_ABI GraphicsAgcDriverUnknownKRzWekV120()
 {
 	// Called immediately before the first indexed draw on observed Gen5 boots.

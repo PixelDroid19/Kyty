@@ -196,6 +196,43 @@ TEST(EmulatorGraphicsPackets, AcceptsFullUserSgprWriteWindow)
 	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(16, 1));
 }
 
+TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
+{
+	// Layout matches Gen5::CommandBuffer in Graphics.cpp (non-virtual methods).
+	// Observed NID LtTouSCZjHM: (CommandBuffer*, num_dw=10) → dword*.
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t            storage[64] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 64;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 64;
+
+	EXPECT_EQ(Gen5::GraphicsCbAllocateDwords(nullptr, 10), nullptr);
+	EXPECT_EQ(Gen5::GraphicsCbAllocateDwords(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0), nullptr);
+
+	uint32_t* first = Gen5::GraphicsCbAllocateDwords(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 10);
+	ASSERT_NE(first, nullptr);
+	EXPECT_EQ(first, storage);
+	EXPECT_EQ(cb.cursor_up, storage + 10);
+
+	uint32_t* second = Gen5::GraphicsCbAllocateDwords(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4);
+	ASSERT_NE(second, nullptr);
+	EXPECT_EQ(second, storage + 10);
+	EXPECT_EQ(cb.cursor_up, storage + 14);
+}
+
 // GFX linear surfaces pad rows to 256 bytes. For RGBA8 (format 56) that is a
 // 64-texel pitch alignment — width alone is wrong for non-pow2 sizes.
 TEST(EmulatorGraphicsPackets, AlignsGen5LinearTexturePitchTo256ByteRows)
