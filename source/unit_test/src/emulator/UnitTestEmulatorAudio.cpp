@@ -161,6 +161,16 @@ TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 	*reinterpret_cast<uint32_t*>(custom_module_blob + 4) = 0x40001300u;
 	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(custom_module_blob)), 0);
 
+	// Observed GetState size 48 for CustomSampler (same block as Sampler, not 80).
+	alignas(uint64_t) uint8_t state_blob[48] = {};
+	for (auto& b: state_blob)
+	{
+		b = 0xa5;
+	}
+	EXPECT_EQ(Ngs2::Ngs2VoiceGetState(voice, reinterpret_cast<Ngs2::Ngs2VoiceState*>(state_blob), sizeof(state_blob)), 0);
+	// state_flags at offset 0 should be written (Empty → 0).
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(state_blob), 0u);
+
 	// Keep buffers alive for the process-global NGS lists used by HLE.
 	sys_storage.release();
 	rack_storage.release();

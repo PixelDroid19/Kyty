@@ -1635,6 +1635,8 @@ struct Ngs2SamplerVoiceState
 	const void*    waveform_data;
 };
 
+
+
 static Ngs2Internal*     g_ngs_list   = nullptr;
 static Ngs2RackInternal* g_racks_list = nullptr;
 
@@ -2357,6 +2359,10 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 
 	switch (voice->rack->type)
 	{
+		// Gen5 CustomSampler (rack 0x4001) GetState was observed with state_size 48,
+		// matching the standard Sampler voice-state block on this ABI. Fill the
+		// same fields; do not invent the larger PS4 custom-state layout (80).
+		case Ngs2RackType::CustomSampler:
 		case Ngs2RackType::Sampler:
 		{
 			EXIT_NOT_IMPLEMENTED(state_size != sizeof(Ngs2SamplerVoiceState));
@@ -2372,6 +2378,7 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 			sampler->peak_height         = 0.0f;
 			sampler->reserved            = 0;
 			sampler->num_decoded_samples = 0;
+			sampler->decoded_data_size   = 0;
 			sampler->user_data           = 0;
 			sampler->waveform_data       = nullptr;
 			printf("\t state_flags = %u\n", sampler->voice_state.state_flags);
