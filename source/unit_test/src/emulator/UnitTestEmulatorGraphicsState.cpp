@@ -78,6 +78,71 @@ TEST(EmulatorGraphicsState, DecodesBlendControl)
 	EXPECT_TRUE(blend.enable);
 }
 
+TEST(EmulatorGraphicsState, IntersectsEnabledScissorRectangles)
+{
+	HW::Context context;
+	context.SetScreenScissor(5, 15, 180, 200);
+	context.SetGenericScissor(20, 5, 170, 190, false);
+	context.SetViewportScissor(0, 10, 25, 160, 180, false);
+
+	HW::ScanModeControl mode;
+	mode.vport_scissor_enable = true;
+
+	const auto scissor = State::ResolveScissor(context.GetScreenViewport(), mode, 0);
+	EXPECT_EQ(scissor.left, 20);
+	EXPECT_EQ(scissor.top, 25);
+	EXPECT_EQ(scissor.right, 160);
+	EXPECT_EQ(scissor.bottom, 180);
+}
+
+TEST(EmulatorGraphicsState, IgnoresViewportScissorWhenDisabled)
+{
+	HW::Context context;
+	context.SetScreenScissor(5, 15, 180, 200);
+	context.SetGenericScissor(20, 5, 170, 190, false);
+	context.SetViewportScissor(0, 40, 50, 100, 120, false);
+
+	HW::ScanModeControl mode;
+	mode.vport_scissor_enable = false;
+
+	const auto scissor = State::ResolveScissor(context.GetScreenViewport(), mode, 0);
+	EXPECT_EQ(scissor.left, 20);
+	EXPECT_EQ(scissor.top, 15);
+	EXPECT_EQ(scissor.right, 170);
+	EXPECT_EQ(scissor.bottom, 190);
+}
+
+TEST(EmulatorGraphicsState, RepresentsEmptyScissorIntersectionWithoutUnsignedWrap)
+{
+	HW::Context context;
+	context.SetScreenScissor(0, 0, 10, 10);
+	context.SetGenericScissor(20, 30, 40, 50, false);
+
+	HW::ScanModeControl mode;
+
+	const auto scissor = State::ResolveScissor(context.GetScreenViewport(), mode, 0);
+	EXPECT_EQ(scissor.left, 20);
+	EXPECT_EQ(scissor.top, 30);
+	EXPECT_EQ(scissor.right, 20);
+	EXPECT_EQ(scissor.bottom, 30);
+}
+
+TEST(EmulatorGraphicsState, ResolvesViewportAndGenericScissorWithoutScreenState)
+{
+	HW::Context context;
+	context.SetGenericScissor(0, 0, 384, 216, false);
+	context.SetViewportScissor(0, 0, 0, 384, 216, false);
+
+	HW::ScanModeControl mode;
+	mode.vport_scissor_enable = true;
+
+	const auto scissor = State::ResolveScissor(context.GetScreenViewport(), mode, 0);
+	EXPECT_EQ(scissor.left, 0);
+	EXPECT_EQ(scissor.top, 0);
+	EXPECT_EQ(scissor.right, 384);
+	EXPECT_EQ(scissor.bottom, 216);
+}
+
 TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 {
 	Loader::SymbolDatabase symbols;
