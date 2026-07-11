@@ -813,7 +813,16 @@ static void ps_check(const HW::PsStageRegisters& ps, const HW::ShaderRegisters& 
 	EXIT_NOT_IMPLEMENTED(sh.ps_input_addr != 0x00000002 && sh.ps_input_addr != 0x00000302);
 	// EXIT_NOT_IMPLEMENTED(ps.m_spiPsInControl != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(sh.baryc_cntl != 0x00000000 && sh.baryc_cntl != 0x01000000);
-	EXIT_NOT_IMPLEMENTED(sh.m_cbShaderMask != 0x0000000f);
+	// CB_SHADER_MASK: 4 enable bits per RT0..RT7. Captured values: 0xf (RT0)
+	// and 0xffff (RT0+RT1). Partial nibble channel masks are not yet modeled.
+	{
+		const uint32_t mask = sh.m_cbShaderMask;
+		for (uint32_t rt = 0; rt < 8u; rt++)
+		{
+			const uint32_t nibble = (mask >> (rt * 4u)) & 0xfu;
+			EXIT_NOT_IMPLEMENTED(nibble != 0u && nibble != 0xfu);
+		}
+	}
 
 	EXIT_NOT_IMPLEMENTED(sh.db_shader_control.other_bits != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(sh.m_paScShaderControl != 0x00000000);
