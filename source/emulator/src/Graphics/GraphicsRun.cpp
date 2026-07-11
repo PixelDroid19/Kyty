@@ -1242,9 +1242,16 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index)
 		// CacheFlushAndInvEvent
 		// FlushAndInvalidateCbPixelData
 		MemoryBarrier();
-	} else if ((event_type == 0x0000002c) && event_index == 0x00000007)
-	{ // NOLINT
-	  // FlushAndInvalidateDbMeta
+	} else if (event_type == 0x0000002c && (event_index == 0x00000000 || event_index == 0x00000007))
+	{
+		// FLUSH_AND_INV_DB_META — index 7 was already accepted; post-Play also
+		// emits index 0 on EVENT_WRITE.
+		MemoryBarrier();
+	} else if (event_type == 0x0000002e && (event_index == 0x00000000 || event_index == 0x00000007))
+	{
+		// FLUSH_AND_INV_CB_META — observed post-Play EVENT_WRITE (index 0).
+		// Ensure color-target metadata/data are coherent for later samples.
+		MemoryBarrier();
 	} else if ((event_type == 0x00000010) && event_index == 0x00000000)
 	{
 		// PsPartialFlush

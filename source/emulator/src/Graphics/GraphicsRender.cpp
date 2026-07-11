@@ -4235,13 +4235,9 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		if (gen5)
 		{
-			// Observed post-Play: TileMode=27 (SW_64KB_R_X), format 56, non-pow2 sizes.
-			// Only linear (0) is fully wired for Gen5 sample textures today.
-			if (r.TileMode() != 0)
-			{
-				EXIT("unsupported Gen5 texture tile mode %u (format=%u %ux%u)\n",
-				     r.TileMode(), r.Format(), r.Width5() + 1u, r.Height5() + 1u);
-			}
+			// Observed post-Play sample textures: TileMode 0 (linear) and 27
+			// (SW_64KB_R_X / 0x1b), format 56 RGBA8, Type 9 2D.
+			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 27);
 			EXIT_NOT_IMPLEMENTED(r.Format() != 56);
 			EXIT_NOT_IMPLEMENTED(r.PerfMod5() != 7 && r.PerfMod5() != 0);
 			EXIT_NOT_IMPLEMENTED(r.BCSwizzle() != 0);
@@ -4292,12 +4288,15 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		bool          neo        = Config::IsNeo();
 		auto          width  = (gen5 ? r.Width5() : r.Width4()) + 1;
 		auto          height = (gen5 ? r.Height5() : r.Height4()) + 1;
+		auto          tile       = r.TileMode();
 		// Gen5 linear rows are 256-byte aligned (e.g. RGBA8 pitch = align(width, 64)).
 		// Using width alone mis-unpacks non-pow2 logos into horizontal bands.
-		auto pitch = (gen5 ? ShaderGen5LinearTexturePitch(width, r.Format()) : r.Pitch() + 1);
+		// Mode 27 (SW_64KB_R_X) uses block geometry; Pitch() is 0 in the observed
+		// descriptors and size is derived from width/height + 64 KiB blocks.
+		auto pitch = (!gen5 ? r.Pitch() + 1
+		                    : (tile == 27 ? width : ShaderGen5LinearTexturePitch(width, r.Format())));
 		auto          base_level = r.BaseLevel();
 		auto          levels     = r.LastLevel() + 1;
-		auto          tile       = r.TileMode();
 		auto          dfmt       = (gen5 ? 0 : r.Dfmt());
 		auto          nfmt       = (gen5 ? 0 : r.Nfmt());
 		auto          fmt        = (gen5 ? r.Format() : 0);

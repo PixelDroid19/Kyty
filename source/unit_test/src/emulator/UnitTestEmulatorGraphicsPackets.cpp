@@ -279,6 +279,23 @@ TEST(EmulatorGraphicsPackets, SizesGen5RotatedXRenderTargets)
 	EXPECT_EQ(size.size, 8847360u);
 }
 
+// Observed post-Play sample texture: format 56, 157x102, tile 27 (SW_64KB_R_X).
+// Size must match the render-target 64 KiB block geometry, not a linear span.
+TEST(EmulatorGraphicsPackets, SizesGen5RotatedXSampleTextures)
+{
+	TileSizeAlign size {};
+	TileGetTextureSize2(56, 157, 102, 157, 1, 27, &size, nullptr, nullptr);
+
+	EXPECT_EQ(size.size, 131072u);
+	EXPECT_EQ(size.align, 65536u);
+
+	// Pitch 0 means "use width" for block pitch — same total as explicit width.
+	TileSizeAlign size_zero_pitch {};
+	TileGetTextureSize2(56, 157, 102, 0, 1, 27, &size_zero_pitch, nullptr, nullptr);
+	EXPECT_EQ(size_zero_pitch.size, size.size);
+	EXPECT_EQ(size_zero_pitch.align, size.align);
+}
+
 TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 {
 	// Layout matches Gen5::CommandBuffer in Graphics.cpp (non-virtual methods).
