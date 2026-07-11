@@ -26,6 +26,48 @@ LIB_DEFINE(InitAudio_1_AudioOut)
 
 } // namespace LibAudioOut
 
+namespace LibAudioOut2 {
+
+// Distinct library AudioOut2_v1, same module AudioOut_v1.1 (Gen5 import shape).
+LIB_VERSION("AudioOut2", 1, "AudioOut", 1, 1);
+
+namespace AudioOut2 = Audio::AudioOut2;
+
+LIB_DEFINE(InitAudio_1_AudioOut2)
+{
+	// Named exports (SCE NID encoding of public sceAudioOut2* symbols).
+	LIB_FUNC("g2tViFIohHE", AudioOut2::AudioOut2Initialize);          // Initialize
+	LIB_FUNC("t5YrizufpQc", AudioOut2::AudioOut2ContextResetParam);    // ContextResetParam
+	LIB_FUNC("pDmme7Bgm6E", AudioOut2::AudioOut2ContextQueryMemory);   // ContextQueryMemory
+	LIB_FUNC("0x6o1VVAYSY", AudioOut2::AudioOut2ContextCreate);        // ContextCreate
+	LIB_FUNC("on6ZH7Abo10", AudioOut2::AudioOut2ContextDestroy);       // ContextDestroy
+	LIB_FUNC("PE2zHMqLSHs", AudioOut2::AudioOut2ContextAdvance);       // ContextAdvance
+	LIB_FUNC("aII9h5nli9U", AudioOut2::AudioOut2ContextPush);          // ContextPush
+	LIB_FUNC("R7d0F1g2qsU", AudioOut2::AudioOut2ContextGetQueueLevel); // ContextGetQueueLevel
+	LIB_FUNC("JK2wamZPzwM", AudioOut2::AudioOut2PortCreate);           // PortCreate
+	LIB_FUNC("cd+Rtw+D1x8", AudioOut2::AudioOut2PortDestroy);          // PortDestroy
+	LIB_FUNC("8XTArSPyWHk", AudioOut2::AudioOut2PortSetAttributes);    // PortSetAttributes
+	LIB_FUNC("xywYcRB7nbQ", AudioOut2::AudioOut2UserCreate);           // UserCreate
+	LIB_FUNC("IaZXJ9M79uo", AudioOut2::AudioOut2UserDestroy);          // UserDestroy
+
+	// Residual NIDs adjacent to AudioOut2 imports on a Gen5 eboot; names not
+	// yet resolved. Log-and-OK until triangulated.
+	LIB_FUNC("45ggEzakPJQ", AudioOut2::AudioOut2LogAndOk);
+	LIB_FUNC("fZOeZIOEmLw", AudioOut2::AudioOut2LogAndOk);
+	LIB_FUNC("fFxGkxF2bVo", AudioOut2::AudioOut2LogAndOk);
+	LIB_FUNC("TUuiYS2kE8s", AudioOut2::AudioOut2LogAndOk);
+	LIB_FUNC("TU-d9PfIHPM", AudioOut2::AudioOut2LogAndOk);
+	LIB_FUNC("jbz9I9vkqkk", AudioOut2::AudioOut2LogAndOk);
+	LIB_FUNC("3BytPOQgVKc", AudioOut2::AudioOut2LogAndOk);
+	LIB_FUNC("Ec63y59l9tw", AudioOut2::AudioOut2LogAndOk);
+	LIB_FUNC("fYapWA9xVmA", AudioOut2::AudioOut2LogAndOk);
+	LIB_FUNC("Bagshr7OQ6Q", AudioOut2::AudioOut2LogAndOk);
+	LIB_FUNC("Gz1rmUZpROM", AudioOut2::AudioOut2LogAndOk);
+	LIB_FUNC("sysY2FHYff4", AudioOut2::AudioOut2LogAndOk);
+}
+
+} // namespace LibAudioOut2
+
 namespace LibAudioIn {
 
 LIB_VERSION("AudioIn", 1, "AudioIn", 1, 1);
@@ -136,6 +178,7 @@ LIB_DEFINE(InitAudio_1_Ngs2)
 LIB_DEFINE(InitAudio_1)
 {
 	LibAudioOut::InitAudio_1_AudioOut(s);
+	LibAudioOut2::InitAudio_1_AudioOut2(s);
 	LibAudioIn::InitAudio_1_AudioIn(s);
 	LibVoiceQoS::InitAudio_1_VoiceQoS(s);
 	LibAjm::InitAudio_1_Ajm(s);

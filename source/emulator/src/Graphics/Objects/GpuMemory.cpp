@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <vulkan/vk_enum_string_helper.h>
 
 //#define XXH_INLINE_ALL
@@ -946,12 +947,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			    GpuMemoryCanShareReadOnlyStorageViews(h.block.vaddr[0], h.block.size[0], o.read_only, vaddr[0], size[0], info.read_only))
 			{
 				overlap = true;
+			} else if (GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type))
+			{
+				overlap = true;
 			} else
 			switch (ObjectsRelation(o.object.type, obj.relation, info.type))
 			{
-				case ObjectsRelation(GpuMemoryObjectType::StorageBuffer, OverlapType::Equals, GpuMemoryObjectType::RenderTexture):
-				case ObjectsRelation(GpuMemoryObjectType::StorageBuffer, OverlapType::Equals, GpuMemoryObjectType::StorageTexture):
-				case ObjectsRelation(GpuMemoryObjectType::StorageBuffer, OverlapType::Equals, GpuMemoryObjectType::Texture):
 				case ObjectsRelation(GpuMemoryObjectType::VideoOutBuffer, OverlapType::Equals, GpuMemoryObjectType::StorageBuffer):
 				// Observed Gen5 alias: Texture 0x100 created at the base of an
 				// active VertexBuffer 0x580 (relation Contains). Keep both views
@@ -1244,6 +1245,41 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		for (const auto& obj: others)
 		{
 			Link(heap_id, index, obj.object_id, obj.relation, scenario);
+		}
+
+		// Evidence: multi-parent alias graphs break WriteBack's single-Equals
+		// parent contract. Log the producer link set when a write-back-capable
+		// object ends up with more than one parent. Always go to stderr so Silent
+		// PrintfDirection runs still capture this evidence.
+		const auto& created = heap.objects[index];
+		if (created.info.write_back_func != nullptr && !created.info.read_only && created.others.Size() > 1)
+		{
+			const auto type_name = Core::EnumName(created.info.object.type);
+			std::fprintf(stderr, "GpuMemory CreateObject multi-parent write-back link:\n");
+			std::fprintf(stderr, "\t new: heap=%d id=%d type=%s read_only=%s others=%u\n", heap_id, index, type_name.C_Str(),
+			             (created.info.read_only ? "true" : "false"), static_cast<unsigned>(created.others.Size()));
+			for (int vi = 0; vi < created.block.vaddr_num; vi++)
+			{
+				std::fprintf(stderr, "\t new range[%d]: vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", vi, created.block.vaddr[vi],
+				             created.block.size[vi]);
+			}
+			for (uint32_t oi = 0; oi < created.others.Size(); oi++)
+			{
+				const auto& other  = created.others.At(static_cast<int>(oi));
+				const auto& parent = heap.objects[other.object_id];
+				std::fprintf(stderr, "\t parent[%u]: id=%d type=%s relation=%s read_only=%s\n", oi, other.object_id,
+				             Core::EnumName(parent.info.object.type).C_Str(), Core::EnumName(other.relation).C_Str(),
+				             (parent.info.read_only ? "true" : "false"));
+				if (!parent.free)
+				{
+					for (int vi = 0; vi < parent.block.vaddr_num; vi++)
+					{
+						std::fprintf(stderr, "\t parent[%u] range[%d]: vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", oi, vi,
+						             parent.block.vaddr[vi], parent.block.size[vi]);
+					}
+				}
+			}
+			std::fflush(stderr);
 		}
 	}
 
@@ -1823,49 +1859,99 @@ void GpuMemory::WriteBack(GraphicContext* ctx, CommandProcessor* cp)
 			auto& o     = h.info;
 			auto& block = h.block;
 
+			// Classify alias parents before touching GPU memory. Gen5 can attach
+			// many VertexBuffer Crosses/IsContainedWithin links plus one Equals
+			// RenderTexture peer to a RW StorageBuffer; only Equals parents get
+			// full hash propagation (see GpuMemoryWriteBackClassifyParents).
+			constexpr uint32_t kMaxWriteBackParents = 64;
+			EXIT_NOT_IMPLEMENTED(h.others.Size() > kMaxWriteBackParents);
+			GpuMemoryOverlapType parent_rels[kMaxWriteBackParents] {};
+			for (uint32_t oi = 0; oi < h.others.Size(); oi++)
+			{
+				parent_rels[oi] = h.others.At(static_cast<int>(oi)).relation;
+			}
+			bool     recompute_self   = true;
+			uint32_t equals_count     = 0;
+			uint32_t invalidate_count = 0;
+			if (!GpuMemoryWriteBackClassifyParents(parent_rels, static_cast<uint32_t>(h.others.Size()), &recompute_self, &equals_count,
+			                                       &invalidate_count))
+			{
+				std::fprintf(stderr, "GpuMemory WriteBack unsupported parent relation in alias topology:\n");
+				std::fprintf(stderr, "\t self: heap=%d id=%d type=%s others=%u\n", obj.heap_id, obj.object_id,
+				             Core::EnumName(o.object.type).C_Str(), static_cast<unsigned>(h.others.Size()));
+				for (uint32_t oi = 0; oi < h.others.Size(); oi++)
+				{
+					const auto& other = h.others.At(static_cast<int>(oi));
+					std::fprintf(stderr, "\t other[%u]: id=%d relation=%s type=%s\n", oi, other.object_id,
+					             Core::EnumName(other.relation).C_Str(),
+					             Core::EnumName(heap.objects[other.object_id].info.object.type).C_Str());
+				}
+				std::fflush(stderr);
+				EXIT("WriteBack unsupported parent relation\n");
+			}
+
 			o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
 			o.cpu_update_time = get_current_time();
 
-			if (!h.others.IsEmpty())
+			// Invalidate / propagate each parent according to its relation.
+			for (uint32_t oi = 0; oi < h.others.Size(); oi++)
 			{
-				EXIT_NOT_IMPLEMENTED(h.others.Size() != 1);
-				EXIT_NOT_IMPLEMENTED(h.others.At(0).relation != OverlapType::Equals);
-
-				auto& o2 = heap.objects[h.others.At(0).object_id].info;
-
+				const auto& other  = h.others.At(static_cast<int>(oi));
+				auto&       parent = heap.objects[other.object_id];
+				EXIT_IF(parent.free);
+				auto& o2 = parent.info;
 				o2.cpu_update_time = o.cpu_update_time;
 				o2.submit_id       = 0;
-				for (int vi = 0; vi < block.vaddr_num; vi++)
+				for (int vi = 0; vi < parent.block.vaddr_num; vi++)
 				{
 					o2.hash[vi] = 0;
 				}
-				Update(o.submit_id, ctx, obj.heap_id, h.others.At(0).object_id);
-
-				for (int vi = 0; vi < block.vaddr_num; vi++)
+				if (GpuMemoryWriteBackParentActionFor(other.relation) == GpuMemoryWriteBackParentAction::PropagateEquals)
 				{
-					printf("WriteBack (GPU -> CPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 ", old_hash = 0x%016" PRIx64
-					       ", new_hash = 0x%016" PRIx64 "\n",
-					       Core::EnumName(o.object.type).C_Str(), block.vaddr[vi], block.size[vi], o.hash[vi], o2.hash[vi]);
-
-					o.hash[vi] = o2.hash[vi];
+					Update(o.submit_id, ctx, obj.heap_id, other.object_id);
 				}
-			} else
+			}
+
+			if (recompute_self)
 			{
 				for (int vi = 0; vi < block.vaddr_num; vi++)
 				{
 					uint64_t new_hash = 0;
-
 					if (o.check_hash)
 					{
 						new_hash = calc_hash(reinterpret_cast<const uint8_t*>(block.vaddr[vi]), block.size[vi]);
 					}
-
-					printf("WriteBack (GPU -> CPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 ", old_hash = 0x%016" PRIx64
-					       ", new_hash = 0x%016" PRIx64 "\n",
-					       Core::EnumName(o.object.type).C_Str(), block.vaddr[vi], block.size[vi], o.hash[vi], new_hash);
-
+					printf("WriteBack (GPU -> CPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64
+					       ", old_hash = 0x%016" PRIx64 ", new_hash = 0x%016" PRIx64 ", equals=%u invalidate=%u\n",
+					       Core::EnumName(o.object.type).C_Str(), block.vaddr[vi], block.size[vi], o.hash[vi], new_hash, equals_count,
+					       invalidate_count);
 					o.hash[vi] = new_hash;
 				}
+			} else
+			{
+				// Prefer the first Equals parent's new hash for self tracking
+				// (same guest range as this object when relation is Equals).
+				bool copied = false;
+				for (uint32_t oi = 0; oi < h.others.Size() && !copied; oi++)
+				{
+					const auto& other = h.others.At(static_cast<int>(oi));
+					if (other.relation != OverlapType::Equals)
+					{
+						continue;
+					}
+					const auto& o2 = heap.objects[other.object_id].info;
+					for (int vi = 0; vi < block.vaddr_num; vi++)
+					{
+						const uint64_t new_hash = o2.hash[vi];
+						printf("WriteBack (GPU -> CPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64
+						       ", old_hash = 0x%016" PRIx64 ", new_hash = 0x%016" PRIx64 ", equals=%u invalidate=%u\n",
+						       Core::EnumName(o.object.type).C_Str(), block.vaddr[vi], block.size[vi], o.hash[vi], new_hash, equals_count,
+						       invalidate_count);
+						o.hash[vi] = new_hash;
+					}
+					copied = true;
+				}
+				EXIT_IF(!copied);
 			}
 
 			o.in_use = false;
