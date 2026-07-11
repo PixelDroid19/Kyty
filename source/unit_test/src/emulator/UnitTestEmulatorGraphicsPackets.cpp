@@ -890,6 +890,17 @@ TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
 	EXPECT_EQ(0, 0); // srt_size_dw == 0
 }
 
+// Captured EXP target 0x03: MRT3 compressed (half2), done may be 0.
+TEST(EmulatorGraphicsPackets, ExpTarget0x03IsMrt3Compr)
+{
+	EXPECT_NE(static_cast<uint64_t>(ShaderInstructionFormat::Mrt3Vsrc0Vsrc1ComprVm),
+	          static_cast<uint64_t>(ShaderInstructionFormat::Unknown));
+	EXPECT_NE(static_cast<uint64_t>(ShaderInstructionFormat::Mrt3Vsrc0Vsrc1ComprVm),
+	          static_cast<uint64_t>(ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone));
+	// GCN/GFX10 color MRT targets are 0x00 + N.
+	EXPECT_EQ(0x00 + 3, 0x03);
+}
+
 // Captured s_buffer_load_dwordx4 with SGPR soffset + imm 0x10.
 TEST(EmulatorGraphicsPackets, SmemImmOffsetFieldDefaultsZero)
 {

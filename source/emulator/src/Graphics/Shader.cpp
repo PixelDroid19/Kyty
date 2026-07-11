@@ -15,13 +15,13 @@
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Profiler.h"
 
+
 #include "spirv-tools/libspirv.h"
 #include "spirv-tools/libspirv.hpp"
 #include "spirv-tools/optimizer.hpp"
 
 #include <algorithm>
 #include <atomic>
-#include <cstdio>
 #include <cinttypes>
 #include <string>
 #include <unordered_map>
@@ -264,8 +264,17 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Empty: return "Empty"; break;
 		case ShaderInstructionFormat::Imm: return "Imm"; break;
 		case ShaderInstructionFormat::Mrt0OffOffComprVmDone: return "Mrt0OffOffComprVmDone"; break;
+		case ShaderInstructionFormat::Mrt1OffOffComprVmDone: return "Mrt1OffOffComprVmDone"; break;
+		case ShaderInstructionFormat::Mrt2OffOffComprVmDone: return "Mrt2OffOffComprVmDone"; break;
+		case ShaderInstructionFormat::Mrt3OffOffComprVmDone: return "Mrt3OffOffComprVmDone"; break;
 		case ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone: return "Mrt0Vsrc0Vsrc1ComprVmDone"; break;
+		case ShaderInstructionFormat::Mrt1Vsrc0Vsrc1ComprVm: return "Mrt1Vsrc0Vsrc1ComprVm"; break;
+		case ShaderInstructionFormat::Mrt2Vsrc0Vsrc1ComprVm: return "Mrt2Vsrc0Vsrc1ComprVm"; break;
+		case ShaderInstructionFormat::Mrt3Vsrc0Vsrc1ComprVm: return "Mrt3Vsrc0Vsrc1ComprVm"; break;
 		case ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone: return "Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone"; break;
+		case ShaderInstructionFormat::Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
+		case ShaderInstructionFormat::Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
+		case ShaderInstructionFormat::Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
 		case ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3: return "Param0Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param1Vsrc0Vsrc1Vsrc2Vsrc3: return "Param1Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param2Vsrc0Vsrc1Vsrc2Vsrc3: return "Param2Vsrc0Vsrc1Vsrc2Vsrc3"; break;
@@ -375,6 +384,9 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::Param4: s = "param4"; break;
 			case ShaderInstructionFormat::Param5: s = "param5"; break;
 			case ShaderInstructionFormat::Mrt0: s = "mrt_color0"; break;
+			case ShaderInstructionFormat::Mrt1: s = "mrt_color1"; break;
+			case ShaderInstructionFormat::Mrt2: s = "mrt_color2"; break;
+			case ShaderInstructionFormat::Mrt3: s = "mrt_color3"; break;
 			case ShaderInstructionFormat::Prim: s = "prim"; break;
 			case ShaderInstructionFormat::Off: s = "off"; break;
 			case ShaderInstructionFormat::Compr: s = "compr"; break;
@@ -783,7 +795,13 @@ static void vs_check(const HW::VertexShaderInfo& vs, const HW::ShaderRegisters& 
 
 static void ps_check(const HW::PsStageRegisters& ps, const HW::ShaderRegisters& sh)
 {
-	EXIT_NOT_IMPLEMENTED(sh.target_output_mode[0] != 4 && sh.target_output_mode[0] != 9);
+	// target_output_mode[i]: 0 = unused RT, 4 = half/compr export, 9 = float32.
+	// Captured multi-RT PS sets mode on several slots (MRT0..MRT3).
+	for (int i = 0; i < 8; i++)
+	{
+		const uint8_t mode = sh.target_output_mode[i];
+		EXIT_NOT_IMPLEMENTED(mode != 0 && mode != 4 && mode != 9);
+	}
 	EXIT_NOT_IMPLEMENTED(sh.db_shader_control.conservative_z_export_value != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(sh.db_shader_control.shader_z_behavior != 0x00000001 && sh.db_shader_control.shader_z_behavior != 0x00000000);
 	// EXIT_NOT_IMPLEMENTED(ps.shader_kill_enable != false);
@@ -944,8 +962,10 @@ static bool SpirvRun(const String8& src, Vector<uint32_t>* dst, String8* err_msg
 
 	if (optimize && !opt.Run(spirv.data(), spirv.size(), &spirv))
 	{
-		printf("Optimize failed\n");
-		*err_msg = String8::FromPrintf("Optimize failed\n");
+		printf("Optimize failed: %s
+", error_msg.c_str());
+		*err_msg = String8::FromPrintf("Optimize failed: %s
+", error_msg.c_str());
 		return false;
 	}
 

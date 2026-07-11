@@ -280,6 +280,9 @@ enum FormatByte : uint64_t
 	Param4, // param4
 	Param5, // param5 — Gen5 VS export target 0x25
 	Mrt0,   // mrt_color0
+	Mrt1,   // mrt_color1
+	Mrt2,   // mrt_color2
+	Mrt3,   // mrt_color3 — captured EXP target 0x03
 	Prim,   // prim
 	Off,    // off
 	Compr,  // compr
@@ -312,8 +315,21 @@ enum Format : uint64_t
 	Imm                                 = FormatDefine({S0}),
 	Label                               = FormatDefine({L}),
 	Mrt0OffOffComprVmDone               = FormatDefine({Mrt0, Off, Off, Compr, Vm, Done}),
+	// Null MRT export (en=0): no channels written; often ends the export sequence.
+	// MRT0 retains the kill-linked form; MRT1-3 are no-op stores.
+	Mrt1OffOffComprVmDone               = FormatDefine({Mrt1, Off, Off, Compr, Vm, Done}),
+	Mrt2OffOffComprVmDone               = FormatDefine({Mrt2, Off, Off, Compr, Vm, Done}),
+	Mrt3OffOffComprVmDone               = FormatDefine({Mrt3, Off, Off, Compr, Vm, Done}),
+	// Compressed half2 MRT export (en=0xf, compr=1). Done may be 0 or 1;
+	// the "Done" token in the Mrt0 format name is historical.
 	Mrt0Vsrc0Vsrc1ComprVmDone           = FormatDefine({Mrt0, S0, S1, Compr, Vm, Done}),
+	Mrt1Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt1, S0, S1, Compr, Vm}),
+	Mrt2Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt2, S0, S1, Compr, Vm}),
+	Mrt3Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt3, S0, S1, Compr, Vm}),
 	Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone      = FormatDefine({Mrt0, S0, S1, S2, S3, Vm, Done}),
+	Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt1, S0, S1, S2, S3, Vm}),
+	Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt2, S0, S1, S2, S3, Vm}),
+	Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt3, S0, S1, S2, S3, Vm}),
 	Param0Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param0, S0, S1, S2, S3}),
 	Param1Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param1, S0, S1, S2, S3}),
 	Param2Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param2, S0, S1, S2, S3}),

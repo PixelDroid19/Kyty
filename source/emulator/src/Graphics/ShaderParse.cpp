@@ -2305,37 +2305,78 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 
 	inst.type = ShaderInstructionType::Exp;
 
-	switch (target)
+	// Color MRT targets 0x00-0x03 (mrt_color0..3). Compressed half2 uses two
+	// VGPRs (en=0xf, compr=1); full float uses four. Captured Gen5 also exports
+	// MRT2/MRT3 with done=0 and vm=0, so neither done nor vm is required for
+	// color MRT forms other than the kill path.
+	if (target <= 0x03u)
 	{
-		case 0x00:
-			if (done != 0 && compr != 0 && vm != 0 && en == 0x0)
+		if (done != 0 && compr != 0 && en == 0x0u)
+		{
+			// Null export (no channels). MRT0 may be linked to discard→OpKill;
+			// MRT1-3 are no-ops that close the export sequence (captured MRT3).
+			static const ShaderInstructionFormat::Format k_null[] = {
+			    ShaderInstructionFormat::Mrt0OffOffComprVmDone,
+			    ShaderInstructionFormat::Mrt1OffOffComprVmDone,
+			    ShaderInstructionFormat::Mrt2OffOffComprVmDone,
+			    ShaderInstructionFormat::Mrt3OffOffComprVmDone,
+			};
+			// Historical MRT0 kill path also required vm=1; keep that gate for RT0.
+			if (target == 0x00u)
 			{
-				inst.format  = ShaderInstructionFormat::Mrt0OffOffComprVmDone;
+				if (vm != 0)
+				{
+					inst.format  = k_null[0];
+					inst.src_num = 0;
+				}
+			} else
+			{
+				inst.format  = k_null[target];
 				inst.src_num = 0;
-			} else if (done != 0 && compr != 0 && vm != 0 && en == 0xf)
-			{
-				inst.format  = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone;
-				inst.src_num = 2;
-			} else if (done != 0 && compr == 0 && vm != 0 && en == 0xf)
-			{
-				inst.format = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone;
+			}
+		} else if (compr != 0 && en == 0xfu)
+		{
+			static const ShaderInstructionFormat::Format k_compr[] = {
+			    ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone,
+			    ShaderInstructionFormat::Mrt1Vsrc0Vsrc1ComprVm,
+			    ShaderInstructionFormat::Mrt2Vsrc0Vsrc1ComprVm,
+			    ShaderInstructionFormat::Mrt3Vsrc0Vsrc1ComprVm,
 			};
-			break;
-		case 0x0c:
-			if (done != 0 && en == 0xf)
-			{
-				inst.format = ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done;
+			inst.format  = k_compr[target];
+			inst.src_num = 2;
+		} else if (compr == 0 && en == 0xfu)
+		{
+			static const ShaderInstructionFormat::Format k_full[] = {
+			    ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone,
+			    ShaderInstructionFormat::Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm,
+			    ShaderInstructionFormat::Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm,
+			    ShaderInstructionFormat::Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm,
 			};
-			break;
-		case 0x14:
-			if (done != 0 && en == 0x1)
+			// MRT0 full form historically required done=1; keep that for RT0 only.
+			if (target == 0x00u)
 			{
-				inst.format  = ShaderInstructionFormat::PrimVsrc0OffOffOffDone;
-				inst.src_num = 1;
-			};
-			break;
-
-		default: break;
+				if (done != 0)
+				{
+					inst.format = k_full[0];
+				}
+			} else
+			{
+				inst.format = k_full[target];
+			}
+		}
+	} else if (target == 0x0cu)
+	{
+		if (done != 0 && en == 0xfu)
+		{
+			inst.format = ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done;
+		}
+	} else if (target == 0x14u)
+	{
+		if (done != 0 && en == 0x1u)
+		{
+			inst.format  = ShaderInstructionFormat::PrimVsrc0OffOffOffDone;
+			inst.src_num = 1;
+		}
 	}
 
 	if (inst.format == ShaderInstructionFormat::Unknown && done == 0 && compr == 0 && vm == 0 && en == 0xf)
