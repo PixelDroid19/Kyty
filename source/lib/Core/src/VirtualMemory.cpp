@@ -569,6 +569,13 @@ uint64_t Alloc(uint64_t address, uint64_t size, Mode mode)
 
 uint64_t AllocAligned(uint64_t address, uint64_t size, Mode mode, uint64_t alignment)
 {
+	// An alignment of zero means that the caller does not request an additional
+	// constraint. Keep that contract portable instead of passing zero to the
+	// platform-specific aligned allocator, where it is invalid.
+	if (alignment == 0)
+	{
+		return Alloc(address, size, mode);
+	}
 	return sys_virtual_alloc_aligned(address, size, mode, alignment);
 }
 

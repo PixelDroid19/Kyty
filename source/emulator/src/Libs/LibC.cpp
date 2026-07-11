@@ -84,6 +84,7 @@ static KYTY_SYSV_ABI char*  c_strcat(char* d, const char* s) { return ::strcat(d
 static KYTY_SYSV_ABI char*  c_strchr(const char* s, int c) { return const_cast<char*>(::strchr(s, c)); }
 static KYTY_SYSV_ABI char*  c_strrchr(const char* s, int c) { return const_cast<char*>(::strrchr(s, c)); }
 static KYTY_SYSV_ABI size_t c_strnlen(const char* s, size_t n) { return ::strnlen(s, n); }
+static KYTY_SYSV_ABI void   c_srand(unsigned int seed) { ::srand(seed); }
 
 // C++ operator new/delete (mangled _Znwm/_ZdlPv), forwarded to the host allocator.
 static KYTY_SYSV_ABI void* cxx_new(size_t size) { return ::malloc(size != 0 ? size : 1); }
@@ -587,6 +588,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("SRI6S9B+-a4", LibC::c_atof);
 	LIB_FUNC("AEJdIVZTEmo", LibC::c_qsort);
 	LIB_FUNC("L1SBTkC+Cvw", LibC::c_abort);
+	LIB_FUNC("VPbJwTCgME0", LibC::c_srand);
 
 	// time
 	LIB_FUNC("wLlFkwG9UcQ", LibC::c_time);
