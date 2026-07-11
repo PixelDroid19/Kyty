@@ -41,6 +41,26 @@ bool ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format)
 	return format >= 75 && format <= 77;
 }
 
+uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format)
+{
+	// GFX linear surfaces force a 256-byte row pitch alignment. Format 56 is
+	// R8G8B8A8 (4 Bpp); other formats fall back to 4 Bpp until more are wired.
+	uint32_t bpp = 4;
+	switch (format)
+	{
+		case 56: bpp = 4; break;
+		default: bpp = 4; break;
+	}
+	EXIT_IF(bpp == 0);
+	const uint32_t align_px = 256u / bpp;
+	EXIT_IF(align_px == 0);
+	if (width == 0)
+	{
+		return align_px;
+	}
+	return ((width + align_px - 1u) / align_px) * align_px;
+}
+
 struct ShaderBinaryInfo
 {
 	uint8_t  signature[7];
