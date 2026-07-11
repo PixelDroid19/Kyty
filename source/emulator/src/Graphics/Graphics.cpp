@@ -1865,7 +1865,9 @@ int KYTY_SYSV_ABI GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t*
 
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
-	EXIT_NOT_IMPLEMENTED(type != 1);
+	// type 1: payload at cmd+2 (existing). type 0 observed on the post-logo
+	// path with the same relative payload offset.
+	EXIT_NOT_IMPLEMENTED(type != 0 && type != 1);
 
 	*addr = cmd + 2;
 
