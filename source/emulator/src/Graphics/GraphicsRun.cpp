@@ -2297,7 +2297,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_user_sgpr)
 
 	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
 
-	EXIT_NOT_IMPLEMENTED(reg_num >= HW::UserSgprInfo::SGPRS_MAX);
+	EXIT_NOT_IMPLEMENTED(!HW::UserSgprInfo::WriteRangeValid(slot, reg_num));
 
 	for (uint32_t i = 0; i < reg_num; i++)
 	{
@@ -2400,7 +2400,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_ps_user_sgpr)
 
 	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
 
-	EXIT_NOT_IMPLEMENTED(reg_num >= HW::UserSgprInfo::SGPRS_MAX);
+	EXIT_NOT_IMPLEMENTED(!HW::UserSgprInfo::WriteRangeValid(slot, reg_num));
 
 	for (uint32_t i = 0; i < reg_num; i++)
 	{
@@ -2484,7 +2484,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_vs_user_sgpr)
 
 	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
 
-	EXIT_NOT_IMPLEMENTED(reg_num >= HW::UserSgprInfo::SGPRS_MAX);
+	EXIT_NOT_IMPLEMENTED(!HW::UserSgprInfo::WriteRangeValid(slot, reg_num));
 
 	for (uint32_t i = 0; i < reg_num; i++)
 	{
@@ -2503,7 +2503,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_gs_user_sgpr)
 
 	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
 
-	EXIT_NOT_IMPLEMENTED(reg_num >= HW::UserSgprInfo::SGPRS_MAX);
+	EXIT_NOT_IMPLEMENTED(!HW::UserSgprInfo::WriteRangeValid(slot, reg_num));
 
 	for (uint32_t i = 0; i < reg_num; i++)
 	{
