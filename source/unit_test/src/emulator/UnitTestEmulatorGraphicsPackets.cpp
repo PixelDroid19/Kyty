@@ -296,6 +296,35 @@ TEST(EmulatorGraphicsPackets, SizesGen5RotatedXSampleTextures)
 	EXPECT_EQ(size_zero_pitch.align, size.align);
 }
 
+// Post-Play DCB fragment after CB/DB meta EVENT_WRITE: a run of Type0
+// single-register writes (10 dwords) then WaitFlipDone (0xC0051018). Walking
+// with Pm4NonType3PacketDwords must land on the Type3 header.
+TEST(EmulatorGraphicsPackets, WalksGen5Type0RunBeforeWaitFlipDone)
+{
+	const uint32_t stream[] = {
+	    0x00000001u, 0x00000007u, 0x00000007u, 0x00000000u, 0x00000080u, 0x00000080u, 0x00000001u, 0x00000001u,
+	    0x01fe0000u, 0x00000000u, 0xc0051018u, 0x00000000u, 0x00000003u, 0x00000000u, 0x00000000u, 0x00000000u,
+	    0x00000000u,
+	};
+
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0xc0051018u), 0u); // Type3
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0x80000000u), 1u); // Type2
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0x00000001u), 2u); // Type0
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0x01fe0000u), 2u); // Type0 (single body)
+
+	uint32_t off = 0;
+	while (off < 10u)
+	{
+		const uint32_t step = Pm4::Pm4NonType3PacketDwords(stream[off]);
+		ASSERT_EQ(step, 2u);
+		ASSERT_LE(off + step, static_cast<uint32_t>(sizeof(stream) / sizeof(stream[0])));
+		off += step;
+	}
+	EXPECT_EQ(off, 10u);
+	EXPECT_EQ(stream[off], 0xc0051018u);
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(stream[off]), 0u);
+}
+
 TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 {
 	// Layout matches Gen5::CommandBuffer in Graphics.cpp (non-virtual methods).
