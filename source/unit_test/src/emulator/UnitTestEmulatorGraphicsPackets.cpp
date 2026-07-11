@@ -196,6 +196,24 @@ TEST(EmulatorGraphicsPackets, AcceptsFullUserSgprWriteWindow)
 	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(16, 1));
 }
 
+TEST(EmulatorGraphicsPackets, ReportsType3Pm4PacketSizeInDwords)
+{
+	// WaitFlipDone header observed at IxYiarKlXxM frontier: 0xC0051018 → len 7.
+	const uint32_t wait_flip = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE);
+	EXPECT_EQ(wait_flip, 0xC0051018u);
+	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(&wait_flip), 7u);
+
+	const uint32_t release_mem = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	EXPECT_EQ(release_mem, 0xC0051060u);
+	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(&release_mem), 7u);
+
+	const uint32_t wait_mem64 = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	EXPECT_EQ(wait_mem64, 0xC0071058u);
+	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(&wait_mem64), 9u);
+
+	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(nullptr), 0u);
+}
+
 TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 {
 	// Layout matches Gen5::CommandBuffer in Graphics.cpp (non-virtual methods).
