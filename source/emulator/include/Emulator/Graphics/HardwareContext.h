@@ -594,6 +594,14 @@ struct UserSgprInfo
 {
 	static constexpr int SGPRS_MAX = 16;
 
+	// SET_SH_REG may write all 16 user SGPRs in one packet (reg_num == 16 at
+	// slot 0). Reject only when the write window leaves the [0, SGPRS_MAX) range.
+	static constexpr bool WriteRangeValid(uint32_t slot, uint32_t reg_num)
+	{
+		return reg_num > 0 && slot < static_cast<uint32_t>(SGPRS_MAX) &&
+		       reg_num <= static_cast<uint32_t>(SGPRS_MAX) - slot;
+	}
+
 	uint32_t     value[SGPRS_MAX] = {0};
 	UserSgprType type[SGPRS_MAX]  = {};
 	uint32_t     count            = 0;

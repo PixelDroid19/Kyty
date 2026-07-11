@@ -183,6 +183,19 @@ TEST(EmulatorGraphicsPackets, AllowsRegionScalarsOnlyInsideSrtRange)
 	EXPECT_TRUE(ShaderCanBindDirectSgpr(&user_data, 8, HW::UserSgprType::Unknown));
 }
 
+TEST(EmulatorGraphicsPackets, AcceptsFullUserSgprWriteWindow)
+{
+	// Observed frontier: PS user-SGPR SET_SH_REG with reg_num == 16 at slot 0.
+	// The previous check (reg_num >= 16) rejected a full-window write.
+	EXPECT_TRUE(HW::UserSgprInfo::WriteRangeValid(0, 16));
+	EXPECT_TRUE(HW::UserSgprInfo::WriteRangeValid(0, 1));
+	EXPECT_TRUE(HW::UserSgprInfo::WriteRangeValid(15, 1));
+	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(0, 0));
+	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(0, 17));
+	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(1, 16));
+	EXPECT_FALSE(HW::UserSgprInfo::WriteRangeValid(16, 1));
+}
+
 // GFX linear surfaces pad rows to 256 bytes. For RGBA8 (format 56) that is a
 // 64-texel pitch alignment — width alone is wrong for non-pow2 sizes.
 TEST(EmulatorGraphicsPackets, AlignsGen5LinearTexturePitchTo256ByteRows)
