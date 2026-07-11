@@ -4174,7 +4174,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 		EXIT_NOT_IMPLEMENTED(size == 0);
 		EXIT_NOT_IMPLEMENTED((size & 0x3u) != 0);
 
-		bool read_only = (gen5 ? false : (r.MemoryType() == 0x10));
+		bool read_only = ShaderStorageUsageIsReadOnly(storage_buffers.usages[i]);
 
 		EXIT_NOT_IMPLEMENTED(read_only && !(storage_buffers.usages[i] == ShaderStorageUsage::ReadOnly ||
 		                                    storage_buffers.usages[i] == ShaderStorageUsage::Constant));

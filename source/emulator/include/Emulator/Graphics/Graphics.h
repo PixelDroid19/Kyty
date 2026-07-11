@@ -13,6 +13,7 @@ namespace Kyty::Libs::Graphics {
 
 struct Shader;
 struct ShaderRegister;
+struct ShaderSemantic;
 
 KYTY_SUBSYSTEM_DEFINE(Graphics);
 
@@ -88,6 +89,8 @@ int KYTY_SYSV_ABI   GraphicsSetUcRegIndirectPatchAddRegisters(uint32_t* cmd, uin
 int KYTY_SYSV_ABI   GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegister* uc_regs, const Shader* hs, const Shader* gs,
                                             uint32_t prim_type);
 int KYTY_SYSV_ABI   GraphicsCreateInterpolantMapping(ShaderRegister* regs, const Shader* gs, const Shader* ps);
+bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic* outputs, uint32_t output_count,
+                                     const ShaderSemantic* inputs, uint32_t input_count);
 int KYTY_SYSV_ABI   GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t* cmd, int type);
 int KYTY_SYSV_ABI   GraphicsSuspendPoint();
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
@@ -140,6 +143,7 @@ int KYTY_SYSV_ABI GraphicsDriverGetResourceRegistrationMaxNameLength(uint32_t* m
 int KYTY_SYSV_ABI GraphicsDriverRegisterOwner(uint32_t* owner, const char* name);
 int KYTY_SYSV_ABI GraphicsDriverRegisterResource(uint32_t* resource, uint32_t owner, const void* base, uint64_t size, const char* name,
                                                  uint32_t type, uint64_t user_data);
+int KYTY_SYSV_ABI GraphicsDriverUnregisterResource(uint32_t resource);
 
 } // namespace Gen5Driver
 

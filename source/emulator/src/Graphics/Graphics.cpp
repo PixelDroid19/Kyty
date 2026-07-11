@@ -1755,6 +1755,80 @@ int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegiste
 	return OK;
 }
 
+bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic* outputs, uint32_t output_count,
+	                                     const ShaderSemantic* inputs, uint32_t input_count)
+{
+	if (regs == nullptr || output_count > 32 || input_count > 32 || (output_count != 0 && outputs == nullptr) ||
+	    (input_count != 0 && inputs == nullptr))
+	{
+		return false;
+	}
+
+	for (uint32_t i = 0; i < 32; i++)
+	{
+		regs[i].offset = Pm4::SPI_PS_INPUT_CNTL_0 + i;
+		regs[i].value  = 0;
+	}
+	if (inputs == nullptr && input_count == 0)
+	{
+		for (uint32_t output_index = 0; output_index < output_count; output_index++)
+		{
+			const auto& output = outputs[output_index];
+			if (output.hardware_mapping >= 32 || output.size_in_elements != 0 || output.is_f16 != 0 || output.is_flat_shaded != 0 ||
+			    output.is_linear != 0 || output.is_custom != 0 || output.static_vb_index != 0 || output.static_attribute != 0 ||
+			    output.default_value != 0 || output.default_value_hi != 0)
+			{
+				return false;
+			}
+			regs[output_index].value = output.hardware_mapping;
+		}
+		return true;
+	}
+
+	for (uint32_t input_index = 0; input_index < input_count; input_index++)
+	{
+		const auto& input = inputs[input_index];
+		if (input.hardware_mapping != 0 || input.size_in_elements != 0 || input.is_f16 != 0 || input.is_linear != 0 ||
+		    input.is_custom != 0 || input.static_vb_index != 0 || input.static_attribute != 0 || input.default_value > 3 ||
+		    input.default_value_hi != 0)
+		{
+			printf("Unsupported pixel input semantic: index=%u semantic=%u mapping=%u size=%u f16=%u linear=%u custom=%u static=%u/%u default=%u/%u\n",
+			       input_index, input.semantic, input.hardware_mapping, input.size_in_elements, input.is_f16, input.is_linear,
+			       input.is_custom, input.static_vb_index, input.static_attribute, input.default_value, input.default_value_hi);
+			return false;
+		}
+
+		const ShaderSemantic* output = nullptr;
+		for (uint32_t output_index = 0; output_index < output_count; output_index++)
+		{
+			if (outputs[output_index].semantic == input.semantic)
+			{
+				output = &outputs[output_index];
+				break;
+			}
+		}
+		if (output == nullptr)
+		{
+			// OFFSET 0x20 selects a hardware default parameter instead of a vertex export.
+			regs[input_index].value = 0x20u | (input.default_value << 8u);
+			continue;
+		}
+		if (output->hardware_mapping >= 32 || output->size_in_elements != 0 || output->is_f16 != 0 ||
+		    output->is_flat_shaded != 0 || output->is_linear != 0 || output->is_custom != 0 || output->static_vb_index != 0 ||
+		    output->static_attribute != 0 || output->default_value != 0 || output->default_value_hi != 0)
+		{
+			printf("Unsupported vertex output semantic: semantic=%u mapping=%u size=%u f16=%u flat=%u linear=%u custom=%u static=%u/%u default=%u/%u\n",
+			       output->semantic, output->hardware_mapping, output->size_in_elements, output->is_f16, output->is_flat_shaded,
+			       output->is_linear, output->is_custom, output->static_vb_index, output->static_attribute, output->default_value,
+			       output->default_value_hi);
+			return false;
+		}
+
+		regs[input_index].value = output->hardware_mapping | (input.is_flat_shaded != 0 ? 0x400u : 0u);
+	}
+	return true;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int KYTY_SYSV_ABI GraphicsCreateInterpolantMapping(ShaderRegister* regs, const Shader* gs, const Shader* ps)
 {
@@ -1772,45 +1846,11 @@ int KYTY_SYSV_ABI GraphicsCreateInterpolantMapping(ShaderRegister* regs, const S
 	EXIT_NOT_IMPLEMENTED(ps != nullptr && ps->type != 1);
 
 	EXIT_NOT_IMPLEMENTED(sizeof(ShaderSemantic) != 4);
-	EXIT_NOT_IMPLEMENTED(ps != nullptr && gs->num_output_semantics != ps->num_input_semantics);
 	EXIT_NOT_IMPLEMENTED(ps != nullptr && ps->num_output_semantics != 0);
 
-	for (uint16_t i = 0; i < 32; i++)
-	{
-		regs[i].offset = Pm4::SPI_PS_INPUT_CNTL_0 + i;
-		regs[i].value  = 0;
-
-		if (i < static_cast<int>(gs->num_output_semantics))
-		{
-			EXIT_NOT_IMPLEMENTED(gs->output_semantics[i].semantic != 15 + i);
-			EXIT_NOT_IMPLEMENTED(gs->output_semantics[i].hardware_mapping != i);
-			EXIT_NOT_IMPLEMENTED(gs->output_semantics[i].size_in_elements != 0);
-			EXIT_NOT_IMPLEMENTED(gs->output_semantics[i].is_f16 != 0);
-			EXIT_NOT_IMPLEMENTED(gs->output_semantics[i].is_flat_shaded != 0);
-			EXIT_NOT_IMPLEMENTED(gs->output_semantics[i].is_linear != 0);
-			EXIT_NOT_IMPLEMENTED(gs->output_semantics[i].is_custom != 0);
-			EXIT_NOT_IMPLEMENTED(gs->output_semantics[i].static_vb_index != 0);
-			EXIT_NOT_IMPLEMENTED(gs->output_semantics[i].static_attribute != 0);
-			EXIT_NOT_IMPLEMENTED(gs->output_semantics[i].default_value != 0);
-			EXIT_NOT_IMPLEMENTED(gs->output_semantics[i].default_value_hi != 0);
-			bool flat = false;
-			if (ps != nullptr)
-			{
-				EXIT_NOT_IMPLEMENTED(ps->input_semantics[i].semantic != gs->output_semantics[i].semantic);
-				EXIT_NOT_IMPLEMENTED(ps->input_semantics[i].hardware_mapping != 0);
-				EXIT_NOT_IMPLEMENTED(ps->input_semantics[i].size_in_elements != 0);
-				EXIT_NOT_IMPLEMENTED(ps->input_semantics[i].is_f16 != 0);
-				EXIT_NOT_IMPLEMENTED(ps->input_semantics[i].is_linear != 0);
-				EXIT_NOT_IMPLEMENTED(ps->input_semantics[i].is_custom != 0);
-				EXIT_NOT_IMPLEMENTED(ps->input_semantics[i].static_vb_index != 0);
-				EXIT_NOT_IMPLEMENTED(ps->input_semantics[i].static_attribute != 0);
-				EXIT_NOT_IMPLEMENTED(ps->input_semantics[i].default_value != 0);
-				EXIT_NOT_IMPLEMENTED(ps->input_semantics[i].default_value_hi != 0);
-				flat = ps->input_semantics[i].is_flat_shaded != 0;
-			}
-			regs[i].value = i | (flat ? 0x400u : 0u);
-		}
-	}
+	const ShaderSemantic* inputs      = (ps != nullptr ? ps->input_semantics : nullptr);
+	const uint32_t        input_count = (ps != nullptr ? ps->num_input_semantics : 0);
+	EXIT_NOT_IMPLEMENTED(!GraphicsBuildInterpolantMapping(regs, gs->output_semantics, gs->num_output_semantics, inputs, input_count));
 
 	return OK;
 }
@@ -2389,6 +2429,9 @@ namespace Gen5Driver {
 
 LIB_NAME("Graphics5Driver", "Graphics5Driver");
 
+static Core::Mutex     g_resource_registration_mutex;
+static Vector<uint32_t> g_registered_resources;
+
 struct Packet
 {
 	uint32_t* addr;
@@ -2512,6 +2555,27 @@ int KYTY_SYSV_ABI GraphicsDriverRegisterResource(uint32_t* resource, uint32_t ow
 
 	static std::atomic<uint32_t> next_resource {1};
 	*resource = next_resource.fetch_add(1, std::memory_order_relaxed);
+	{
+		Core::LockGuard lock(g_resource_registration_mutex);
+		g_registered_resources.Add(*resource);
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverUnregisterResource(uint32_t resource)
+{
+	if (resource == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	Core::LockGuard lock(g_resource_registration_mutex);
+	const auto      index = g_registered_resources.Find(resource);
+	if (!g_registered_resources.IndexValid(index))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	g_registered_resources.RemoveAt(index);
 	return OK;
 }
 

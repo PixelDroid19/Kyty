@@ -10,6 +10,8 @@
 
 namespace Kyty::Libs::Controller {
 
+constexpr int CONTROLLER_KEYBOARD_ID = -1;
+
 KYTY_SUBSYSTEM_DEFINE(Controller);
 
 constexpr uint32_t PAD_BUTTON_L3        = 0x00000002;

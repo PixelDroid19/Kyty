@@ -376,6 +376,42 @@ TEST(EmulatorGraphicsPackets, SizesResourceRegistrationMemory)
 	EXPECT_LT(Gen5Driver::GraphicsDriverRegisterResource(&resource, owner, nullptr, sizeof(resource_memory), "buffer", 1, 0), 0);
 	EXPECT_EQ(Gen5Driver::GraphicsDriverRegisterResource(&resource, owner, resource_memory, sizeof(resource_memory), "buffer", 1, 0), 0);
 	EXPECT_GT(resource, 0u);
+	EXPECT_LT(Gen5Driver::GraphicsDriverUnregisterResource(0), 0);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverUnregisterResource(resource), 0);
+	EXPECT_LT(Gen5Driver::GraphicsDriverUnregisterResource(resource), 0);
+}
+
+TEST(EmulatorGraphicsPackets, MapsPixelInputsFromVertexOutputSuperset)
+{
+	ShaderSemantic outputs[2] {};
+	outputs[0].semantic         = 15;
+	outputs[0].hardware_mapping = 5;
+	outputs[1].semantic         = 16;
+	outputs[1].hardware_mapping = 7;
+
+	ShaderSemantic inputs[1] {};
+	inputs[0].semantic       = 15;
+	inputs[0].is_flat_shaded = 1;
+
+	ShaderRegister regs[32] {};
+	ASSERT_TRUE(Gen5::GraphicsBuildInterpolantMapping(regs, outputs, 2, inputs, 1));
+	EXPECT_EQ(regs[0].offset, Pm4::SPI_PS_INPUT_CNTL_0);
+	EXPECT_EQ(regs[0].value, 5u | 0x400u);
+	EXPECT_EQ(regs[1].offset, Pm4::SPI_PS_INPUT_CNTL_0 + 1);
+	EXPECT_EQ(regs[1].value, 0u);
+
+	inputs[0].semantic = 17;
+	inputs[0].default_value = 0;
+	ASSERT_TRUE(Gen5::GraphicsBuildInterpolantMapping(regs, outputs, 2, inputs, 1));
+	EXPECT_EQ(regs[0].value, 0x20u);
+
+	inputs[0].default_value = 3;
+	ASSERT_TRUE(Gen5::GraphicsBuildInterpolantMapping(regs, outputs, 2, inputs, 1));
+	EXPECT_EQ(regs[0].value, 0x320u);
+
+	ASSERT_TRUE(Gen5::GraphicsBuildInterpolantMapping(regs, outputs, 2, nullptr, 0));
+	EXPECT_EQ(regs[0].value, 5u);
+	EXPECT_EQ(regs[1].value, 7u);
 }
 
 UT_END();

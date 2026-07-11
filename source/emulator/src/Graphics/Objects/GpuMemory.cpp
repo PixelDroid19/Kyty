@@ -26,16 +26,7 @@ namespace Kyty::Libs::Graphics {
 
 constexpr int VADDR_BLOCKS_MAX = 3;
 
-enum class OverlapType : uint64_t
-{
-	None,
-	Equals,
-	Crosses,
-	Contains,
-	IsContainedWithin,
-
-	Max
-};
+using OverlapType = GpuMemoryOverlapType;
 
 constexpr uint64_t ObjectsRelation(GpuMemoryObjectType b, OverlapType relation, GpuMemoryObjectType a)
 {
@@ -594,14 +585,8 @@ static uint64_t get_current_time()
 
 void GpuMemory::Link(int heap_id, int id1, int id2, OverlapType rel, GpuMemoryScenario scenario)
 {
-	OverlapType other_rel = OverlapType::None;
-	switch (rel)
-	{
-		case OverlapType::Equals: other_rel = OverlapType::Equals; break;
-		case OverlapType::IsContainedWithin: other_rel = OverlapType::Contains; break;
-		case OverlapType::Contains: other_rel = OverlapType::IsContainedWithin; break;
-		default: EXIT("invalid rel: %s\n", Core::EnumName(rel).C_Str());
-	}
+	OverlapType other_rel = GpuMemoryReverseOverlap(rel);
+	EXIT_IF(other_rel == OverlapType::None);
 
 	auto& heap = m_heaps[heap_id];
 
@@ -957,6 +942,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			EXIT_IF(h.free);
 			auto& o = h.info;
 
+			if (o.object.type == GpuMemoryObjectType::StorageBuffer && info.type == GpuMemoryObjectType::StorageBuffer &&
+			    GpuMemoryCanShareReadOnlyStorageViews(h.block.vaddr[0], h.block.size[0], o.read_only, vaddr[0], size[0], info.read_only))
+			{
+				overlap = true;
+			} else
 			switch (ObjectsRelation(o.object.type, obj.relation, info.type))
 			{
 				case ObjectsRelation(GpuMemoryObjectType::StorageBuffer, OverlapType::Equals, GpuMemoryObjectType::RenderTexture):

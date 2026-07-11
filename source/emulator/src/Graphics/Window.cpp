@@ -470,7 +470,7 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 		}
 		if (button != 0)
 		{
-			Controller::ControllerButton(0, button, down);
+			Controller::ControllerButton(Controller::CONTROLLER_KEYBOARD_ID, button, down);
 		}
 	}
 
