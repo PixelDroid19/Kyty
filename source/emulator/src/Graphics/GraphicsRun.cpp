@@ -1005,10 +1005,44 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 			break;
 		}
 
-		EXIT_NOT_IMPLEMENTED(dw < 2);
 		EXIT_NOT_IMPLEMENTED(dw > num_dw);
 
 		auto cmd_id = *cmd++;
+		dw -= 1;
+
+		// PM4 packet type in bits [31:30]:
+		//   3 = Type3 (IT_* opcodes) — primary path
+		//   2 = Type2 NOP padding — header only
+		//   0 = Type0 register write — header + 1 body dword (single register)
+		// Observed post-Play stream: a run of Type0 single-register writes
+		// (including header 0x01fe0000) immediately before WaitFlipDone.
+		// Multi-register Type0 (COUNT field != 0 in the classical sense) is not
+		// yet required; Gen5 emits the single-register form exclusively here.
+		const uint32_t pkt_type = cmd_id >> 30u;
+		if (pkt_type != 3u)
+		{
+			if (pkt_type == 2u)
+			{
+				// Type2 filler: no body.
+				continue;
+			}
+			if (pkt_type == 0u)
+			{
+				// Type0 single-register write: always one body dword.
+				// Classical GCN COUNT field is 0 for this form (body = COUNT+1).
+				// A non-zero COUNT field has been observed (0x01fe0000) with still
+				// exactly one following dword before the next Type3 — consume one
+				// body dword and ignore the COUNT field until multi-reg Type0 is
+				// evidenced with a bounded body that matches the stream.
+				EXIT_NOT_IMPLEMENTED(dw < 1);
+				cmd += 1;
+				dw -= 1;
+				continue;
+			}
+			EXIT("unknown PM4 packet type %u (cmd_id=0x%08" PRIx32 ")\n", pkt_type, cmd_id);
+		}
+
+		EXIT_NOT_IMPLEMENTED(dw < 1);
 
 		auto op = (cmd_id >> 8u) & 0xffu;
 
@@ -1016,15 +1050,15 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 
 		if (pfunc == nullptr)
 		{
-			EXIT("unknown op\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32 "\n", num_dw - dw, cmd_id);
+			EXIT("unknown op\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32 "\n", num_dw - dw - 1, cmd_id);
 		}
 
-		auto s = pfunc(this, cmd_id, cmd, dw, num_dw);
+		auto s = pfunc(this, cmd_id, cmd, dw + 1, num_dw);
 
-		// printf("\t %05" PRIx32 ": %u\n", num_dw - dw, s);
+		// printf("\t %05" PRIx32 ": %u\n", num_dw - dw - 1, s);
 
 		cmd += s;
-		dw -= s + 1;
+		dw -= s;
 	}
 }
 

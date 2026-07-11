@@ -997,6 +997,12 @@ constexpr uint32_t UC_NUM = 0x3FFF + 1;
 
 void DumpPm4PacketStream(Core::File* file, uint32_t* cmd_buffer, uint32_t start_dw, uint32_t num_dw);
 
+// PM4 header type in bits [31:30]. Returns how many dwords the packet occupies
+// (header included) for non-Type3 packets, or 0 if the header is Type3 (caller
+// must decode the IT_* length). Type2 is a single-dword NOP. Type0 is treated
+// as a single-register write (header + 1 body dword) — see GraphicsRun.
+uint32_t Pm4NonType3PacketDwords(uint32_t cmd_id);
+
 } // namespace Kyty::Libs::Graphics::Pm4
 
 #endif // KYTY_EMU_ENABLED

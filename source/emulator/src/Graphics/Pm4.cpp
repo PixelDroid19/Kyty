@@ -104,6 +104,25 @@ static void init_names()
 	}
 }
 
+uint32_t Pm4NonType3PacketDwords(uint32_t cmd_id)
+{
+	const uint32_t pkt_type = cmd_id >> 30u;
+	if (pkt_type == 3u)
+	{
+		return 0; // Type3: caller uses KYTY_PM4_LEN / opcode handlers
+	}
+	if (pkt_type == 2u)
+	{
+		return 1; // Type2 NOP padding
+	}
+	if (pkt_type == 0u)
+	{
+		// Type0 single-register write (header + 1 body dword).
+		return 2;
+	}
+	return 0; // Type1 reserved — not a valid skip size
+}
+
 void DumpPm4PacketStream(Core::File* file, uint32_t* cmd_buffer, uint32_t start_dw, uint32_t num_dw)
 {
 	init_names();
