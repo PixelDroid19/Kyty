@@ -548,14 +548,11 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 			first_read = now;
 		}
 		const uint64_t elapsed = now - first_read;
-		if (elapsed > 2'000'000ull)
+		// Hold Cross continuously after 3s (level trigger). Edge-based UIs still
+		// see a rising edge once when the hold begins.
+		if (elapsed > 3'000'000ull)
 		{
-			const uint64_t cycle = (elapsed - 2'000'000ull) % 2'000'000ull;
-			// 400ms press window every 2s.
-			if (cycle < 400'000ull && g_reads_since_open >= 2)
-			{
-				auto_buttons = PAD_BUTTON_CROSS;
-			}
+			auto_buttons = PAD_BUTTON_CROSS;
 		}
 	}
 
