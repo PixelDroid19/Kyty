@@ -12,6 +12,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -1098,16 +1099,6 @@ static void vp_check(const HW::ScreenViewport& vp, const HW::ScanModeControl& sm
 	// EXIT_NOT_IMPLEMENTED(smc.vport_scissor_enable);
 	EXIT_NOT_IMPLEMENTED(smc.line_stipple_enable);
 
-	bool generic_scissor =
-	    (vp.generic_scissor_left != 0 || vp.generic_scissor_top != 0 || vp.generic_scissor_right != 0 || vp.generic_scissor_bottom != 0);
-	bool screen_scissor =
-	    (vp.screen_scissor_left != 0 || vp.screen_scissor_top != 0 || vp.screen_scissor_right != 0 || vp.screen_scissor_bottom != 0);
-	bool viewport_scissor = (vp.viewports[0].viewport_scissor_left != 0 || vp.viewports[0].viewport_scissor_top != 0 ||
-	                         vp.viewports[0].viewport_scissor_right != 0 || vp.viewports[0].viewport_scissor_bottom != 0);
-
-	EXIT_NOT_IMPLEMENTED(viewport_scissor && (generic_scissor || screen_scissor));
-	EXIT_NOT_IMPLEMENTED(viewport_scissor && (!smc.vport_scissor_enable));
-
 	EXIT_NOT_IMPLEMENTED(vp.viewports[0].zmin > 0.000000);
 	EXIT_NOT_IMPLEMENTED(vp.viewports[0].zmax != 1.000000);
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].xscale != 960.000000);
@@ -1117,10 +1108,6 @@ static void vp_check(const HW::ScreenViewport& vp, const HW::ScanModeControl& sm
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].zscale != 0.500000);
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].zoffset != 0.500000);
 	EXIT_NOT_IMPLEMENTED(vp.transform_control != 1087);
-	EXIT_NOT_IMPLEMENTED(generic_scissor && !(vp.screen_scissor_left <= vp.generic_scissor_left));
-	EXIT_NOT_IMPLEMENTED(generic_scissor && !(vp.screen_scissor_top <= vp.generic_scissor_top));
-	EXIT_NOT_IMPLEMENTED(generic_scissor && !(vp.screen_scissor_right >= vp.generic_scissor_right));
-	EXIT_NOT_IMPLEMENTED(generic_scissor && !(vp.screen_scissor_bottom >= vp.generic_scissor_bottom));
 	// EXIT_NOT_IMPLEMENTED(vp.hw_offset_x != 60);
 	// EXIT_NOT_IMPLEMENTED(vp.hw_offset_y != 32);
 	// EXIT_NOT_IMPLEMENTED(fabsf(vp.guard_band_horz_clip - 33.133327f) > 0.001f);
@@ -2557,15 +2544,16 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 
 	Core::LockGuard lock(m_mutex);
 
-	const auto&               vs_regs    = sh_ctx->GetVs();
-	const auto&               ps_regs    = sh_ctx->GetPs();
-	const auto&               sh_regs    = ctx->GetShaderRegisters();
-	const HW::BlendColor&     bclr       = ctx->GetBlendColor();
-	const HW::ScreenViewport& vp         = ctx->GetScreenViewport();
-	const auto&               bc         = ctx->GetBlendControl(0);
-	uint32_t                  color_mask = ctx->GetRenderTargetMask();
-	const HW::ModeControl&    mc         = ctx->GetModeControl();
-	const auto&               cc         = ctx->GetColorControl();
+	const auto&                vs_regs    = sh_ctx->GetVs();
+	const auto&                ps_regs    = sh_ctx->GetPs();
+	const auto&                sh_regs    = ctx->GetShaderRegisters();
+	const HW::BlendColor&      bclr       = ctx->GetBlendColor();
+	const HW::ScreenViewport&  vp         = ctx->GetScreenViewport();
+	const HW::ScanModeControl& smc        = ctx->GetScanModeControl();
+	const auto&                bc         = ctx->GetBlendControl(0);
+	uint32_t                   color_mask = ctx->GetRenderTargetMask();
+	const HW::ModeControl&     mc         = ctx->GetModeControl();
+	const auto&                cc         = ctx->GetColorControl();
 
 	if (Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
@@ -2591,25 +2579,18 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 
 	EXIT_NOT_IMPLEMENTED(depth->depth_test_enable && ps_input_info->ps_execute_on_noop);
 
-	bool generic_scissor =
-	    (vp.generic_scissor_left != 0 || vp.generic_scissor_top != 0 || vp.generic_scissor_right != 0 || vp.generic_scissor_bottom != 0);
-	bool viewport_scissor = (vp.viewports[0].viewport_scissor_left != 0 || vp.viewports[0].viewport_scissor_top != 0 ||
-	                         vp.viewports[0].viewport_scissor_right != 0 || vp.viewports[0].viewport_scissor_bottom != 0);
+	const auto scissor = State::ResolveScissor(vp, smc, 0);
 
-	p.static_params->viewport_scale[0]  = vp.viewports[0].xscale;
-	p.static_params->viewport_scale[1]  = vp.viewports[0].yscale;
-	p.static_params->viewport_scale[2]  = vp.viewports[0].zscale;
-	p.static_params->viewport_offset[0] = vp.viewports[0].xoffset;
-	p.static_params->viewport_offset[1] = vp.viewports[0].yoffset;
-	p.static_params->viewport_offset[2] = vp.viewports[0].zoffset;
-	p.static_params->scissor_ltrb[0] =
-	    (viewport_scissor ? vp.viewports[0].viewport_scissor_left : (generic_scissor ? vp.generic_scissor_left : vp.screen_scissor_left));
-	p.static_params->scissor_ltrb[1] =
-	    (viewport_scissor ? vp.viewports[0].viewport_scissor_top : (generic_scissor ? vp.generic_scissor_top : vp.screen_scissor_top));
-	p.static_params->scissor_ltrb[2]          = (viewport_scissor ? vp.viewports[0].viewport_scissor_right
-	                                                              : (generic_scissor ? vp.generic_scissor_right : vp.screen_scissor_right));
-	p.static_params->scissor_ltrb[3]          = (viewport_scissor ? vp.viewports[0].viewport_scissor_bottom
-	                                                              : (generic_scissor ? vp.generic_scissor_bottom : vp.screen_scissor_bottom));
+	p.static_params->viewport_scale[0]        = vp.viewports[0].xscale;
+	p.static_params->viewport_scale[1]        = vp.viewports[0].yscale;
+	p.static_params->viewport_scale[2]        = vp.viewports[0].zscale;
+	p.static_params->viewport_offset[0]       = vp.viewports[0].xoffset;
+	p.static_params->viewport_offset[1]       = vp.viewports[0].yoffset;
+	p.static_params->viewport_offset[2]       = vp.viewports[0].zoffset;
+	p.static_params->scissor_ltrb[0]          = scissor.left;
+	p.static_params->scissor_ltrb[1]          = scissor.top;
+	p.static_params->scissor_ltrb[2]          = scissor.right;
+	p.static_params->scissor_ltrb[3]          = scissor.bottom;
 	p.static_params->topology                 = topology;
 	p.static_params->with_depth               = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	p.static_params->depth_test_enable        = depth->depth_test_enable;

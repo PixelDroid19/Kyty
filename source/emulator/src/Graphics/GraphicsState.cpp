@@ -4,9 +4,66 @@
 
 #include "Emulator/Graphics/Pm4.h"
 
+#include <algorithm>
+#include <iterator>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics::State {
+
+namespace {
+
+[[nodiscard]] bool IsActive(const ScissorRect& scissor)
+{
+	return scissor.left != 0 || scissor.top != 0 || scissor.right != 0 || scissor.bottom != 0;
+}
+
+} // namespace
+
+ScissorRect ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanModeControl& mode, uint32_t viewport_id)
+{
+	EXIT_IF(viewport_id >= std::size(viewport.viewports));
+
+	ScissorRect resolved {};
+	bool        has_scissor = false;
+
+	const auto include = [&resolved, &has_scissor](const ScissorRect& scissor)
+	{
+		if (!IsActive(scissor))
+		{
+			return;
+		}
+
+		if (!has_scissor)
+		{
+			resolved    = scissor;
+			has_scissor = true;
+			return;
+		}
+
+		resolved.left   = std::max(resolved.left, scissor.left);
+		resolved.top    = std::max(resolved.top, scissor.top);
+		resolved.right  = std::min(resolved.right, scissor.right);
+		resolved.bottom = std::min(resolved.bottom, scissor.bottom);
+	};
+
+	include({viewport.screen_scissor_left, viewport.screen_scissor_top, viewport.screen_scissor_right, viewport.screen_scissor_bottom});
+	include({viewport.generic_scissor_left, viewport.generic_scissor_top, viewport.generic_scissor_right, viewport.generic_scissor_bottom});
+
+	if (mode.vport_scissor_enable)
+	{
+		const auto& vport = viewport.viewports[viewport_id];
+		include({vport.viewport_scissor_left, vport.viewport_scissor_top, vport.viewport_scissor_right, vport.viewport_scissor_bottom});
+	}
+
+	if (has_scissor)
+	{
+		resolved.right  = std::max(resolved.left, resolved.right);
+		resolved.bottom = std::max(resolved.top, resolved.bottom);
+	}
+
+	return resolved;
+}
 
 void SetGenericScissorTl(HW::Context& context, uint32_t value)
 {
