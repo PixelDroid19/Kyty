@@ -200,6 +200,64 @@ TEST(EmulatorGraphicsPackets, ReusesFourComponentBufferFunctionType)
 	EXPECT_NE(source.FindIndex("OpSLessThanEqual %bool %tbuf_s_f_xyzw_11 %int_77"), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, StructuresBackwardSBranchAsLoopHeader)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+
+	ShaderInstruction nop;
+	nop.pc                = 0;
+	nop.type              = ShaderInstructionType::SInstPrefetch;
+	nop.format            = ShaderInstructionFormat::Imm;
+	nop.src_num           = 1;
+	nop.src[0].type       = ShaderOperandType::LiteralConstant;
+	nop.src[0].constant.u = 0;
+
+	ShaderInstruction header;
+	header.pc                = 4;
+	header.type              = ShaderInstructionType::SInstPrefetch;
+	header.format            = ShaderInstructionFormat::Imm;
+	header.src_num           = 1;
+	header.src[0].type       = ShaderOperandType::LiteralConstant;
+	header.src[0].constant.u = 0;
+
+	ShaderInstruction branch;
+	branch.pc                = 8;
+	branch.type              = ShaderInstructionType::SBranch;
+	branch.format            = ShaderInstructionFormat::Label;
+	branch.src_num           = 1;
+	branch.src[0].type       = ShaderOperandType::LiteralConstant;
+	branch.src[0].constant.i = -8;
+
+	ShaderInstruction end;
+	end.pc     = 12;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	code.GetInstructions().Add(nop);
+	code.GetInstructions().Add(header);
+	code.GetInstructions().Add(branch);
+	code.GetInstructions().Add(end);
+	code.GetLabels().Add(ShaderLabel(branch));
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 1;
+	input.threads_num[1] = 1;
+	input.threads_num[2] = 1;
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+
+	EXPECT_NE(source.FindIndex("OpBranch %label_0004_0008"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoopMerge %loop_merge_0008 %loop_continue_0008 None"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorGraphicsPackets, ClassifiesGen5FourComponent32BitBufferFormats)
 {
 	EXPECT_FALSE(ShaderIsGen5FourComponent32BitBufferFormat(74));
