@@ -144,18 +144,88 @@ namespace Kyty::Libs::NpEntitlementAccess {
 
 LIB_VERSION("NpEntitlementAccess", 1, "NpEntitlementAccess", 1, 1);
 
-int KYTY_SYSV_ABI Initialize(const void* /*init_parameters*/, void* boot_parameters)
+// Boot parameter block cleared on Initialize. Size matches observed guest
+// SceNpEntitlementAccessBootParam buffer (32 bytes reserved).
+static constexpr size_t kBootParametersSize = 0x20;
+
+static std::atomic<bool> g_entitlement_initialized {false};
+
+static bool LabelHasNulTerminator(const char* data, size_t size)
 {
-	if (boot_parameters != nullptr)
+	for (size_t i = 0; i < size; i++)
 	{
-		std::memset(boot_parameters, 0, 0x20);
+		if (data[i] == '\0')
+		{
+			return true;
+		}
 	}
+	return false;
+}
+
+static bool LabelPaddingIsZero(const char padding[3])
+{
+	return padding[0] == 0 && padding[1] == 0 && padding[2] == 0;
+}
+
+static bool IsValidUnifiedLabel(const UnifiedEntitlementLabel* label)
+{
+	if (label == nullptr)
+	{
+		return false;
+	}
+	if (label->data[0] == '\0')
+	{
+		return false;
+	}
+	if (!LabelHasNulTerminator(label->data, sizeof(label->data)))
+	{
+		return false;
+	}
+	if (!LabelPaddingIsZero(label->padding))
+	{
+		return false;
+	}
+	return true;
+}
+
+int KYTY_SYSV_ABI Initialize(const void* init_parameters, void* boot_parameters)
+{
+	// Both arguments are required. Boot storage is zeroed for the guest.
+	if (init_parameters == nullptr || boot_parameters == nullptr)
+	{
+		return ERROR_PARAMETER;
+	}
+
+	std::memset(boot_parameters, 0, kBootParametersSize);
+	g_entitlement_initialized.store(true, std::memory_order_release);
 	return OK;
+}
+
+int KYTY_SYSV_ABI GetAddcontEntitlementInfo(ServiceLabel /*service_label*/, const UnifiedEntitlementLabel* entitlement_label,
+                                            AddcontEntitlementInfo* info)
+{
+	if (!g_entitlement_initialized.load(std::memory_order_acquire))
+	{
+		return ERROR_NOT_INITIALIZED;
+	}
+
+	// Null label/info or an ill-formed unified label are guest PARAMETER errors.
+	if (!IsValidUnifiedLabel(entitlement_label) || info == nullptr)
+	{
+		return ERROR_PARAMETER;
+	}
+
+	// No local entitlement catalog is registered. Base titles without addcont
+	// packages correctly receive NO_ENTITLEMENT; the output buffer is left
+	// untouched so residual guest data is not misinterpreted as a result.
+	return ERROR_NO_ENTITLEMENT;
 }
 
 LIB_DEFINE(InitNpEntitlementAccess_1)
 {
 	LIB_FUNC("jO8DM8oyego", Initialize);
+	// sceNpEntitlementAccessGetAddcontEntitlementInfo
+	LIB_FUNC("xddD23+8TfQ", GetAddcontEntitlementInfo);
 }
 
 } // namespace Kyty::Libs::NpEntitlementAccess
