@@ -995,7 +995,34 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			}
 		} else
 		{
-			if (create_generate_mips(others, info.type, heap_id))
+			// Multiple existing blocks. Gen5 constant/storage views often create a
+			// partial RO StorageBuffer that is Contained in one larger RO view and
+			// Crosses another adjacent RO view (observed: new 0x70 inside 0x80 and
+			// crossing a neighbor 0x70). The single-overlap path already allows
+			// each share; require every parent to be an RO StorageBuffer that
+			// shares safely before treating the multi-overlap as linkable.
+			bool multi_ro_storage_share = (info.type == GpuMemoryObjectType::StorageBuffer && info.read_only);
+			if (multi_ro_storage_share)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& h = heap.objects[obj.object_id];
+					EXIT_IF(h.free);
+					const auto& o = h.info;
+					if (o.object.type != GpuMemoryObjectType::StorageBuffer ||
+					    !GpuMemoryCanShareReadOnlyStorageViews(h.block.vaddr[0], h.block.size[0], o.read_only, vaddr[0], size[0],
+					                                          info.read_only))
+					{
+						multi_ro_storage_share = false;
+						break;
+					}
+				}
+			}
+
+			if (multi_ro_storage_share)
+			{
+				overlap = true;
+			} else if (create_generate_mips(others, info.type, heap_id))
 			{
 				overlap             = true;
 				create_from_objects = true;

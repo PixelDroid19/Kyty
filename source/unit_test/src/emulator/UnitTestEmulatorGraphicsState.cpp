@@ -258,6 +258,21 @@ TEST(EmulatorGraphicsState, SharesOverlappingReadOnlyStorageViews)
 	EXPECT_FALSE(GpuMemoryCanShareReadOnlyStorageViews(0x1000, 0x80, true, 0x1010, 0x70, false));
 	EXPECT_FALSE(GpuMemoryCanShareReadOnlyStorageViews(0x1000, 0x80, true, 0x1080, 0x20, true));
 	EXPECT_FALSE(GpuMemoryCanShareReadOnlyStorageViews(0x1000, 0x80, true, 0x1000, 0x80, true));
+
+	// Observed multi-parent RO StorageBuffer geometry: a 0x70 view Contained in
+	// a 0x80 parent and Crossing a neighboring 0x70 parent. Both parents must
+	// individually share so CreateObject can link them without inventing a
+	// single-parent policy.
+	constexpr uint64_t parent_contains_addr = 0x12267d9a0ull;
+	constexpr uint64_t parent_contains_size = 0x80ull;
+	constexpr uint64_t parent_crosses_addr  = 0x12267d9c0ull;
+	constexpr uint64_t parent_crosses_size  = 0x70ull;
+	constexpr uint64_t child_addr           = 0x12267d9b0ull;
+	constexpr uint64_t child_size           = 0x70ull;
+	EXPECT_TRUE(GpuMemoryCanShareReadOnlyStorageViews(parent_contains_addr, parent_contains_size, true, child_addr, child_size, true));
+	EXPECT_TRUE(GpuMemoryCanShareReadOnlyStorageViews(parent_crosses_addr, parent_crosses_size, true, child_addr, child_size, true));
+	EXPECT_FALSE(GpuMemoryCanShareReadOnlyStorageViews(parent_contains_addr, parent_contains_size, false, child_addr, child_size, true));
+	EXPECT_FALSE(GpuMemoryCanShareReadOnlyStorageViews(parent_crosses_addr, parent_crosses_size, true, child_addr, child_size, false));
 }
 
 TEST(EmulatorGraphicsState, ReversesGpuMemoryOverlapRelations)
