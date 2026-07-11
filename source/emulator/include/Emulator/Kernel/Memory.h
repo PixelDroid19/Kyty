@@ -3,8 +3,10 @@
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/Subsystems.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/Objects/GpuMemory.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -15,6 +17,10 @@ KYTY_SUBSYSTEM_DEFINE(Memory);
 using callback_func_t = void (*)(uintptr_t addr, size_t size);
 
 void RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func);
+
+// Decode Orbis/PS5 mprotect/mmap protection bits into host VirtualMemory mode
+// and GpuMemoryMode. Returns false for unsupported prot values.
+bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode);
 
 int KYTY_SYSV_ABI    KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags, const char* name);
 int KYTY_SYSV_ABI    KernelMapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags);

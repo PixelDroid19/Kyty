@@ -870,6 +870,32 @@ int KYTY_SYSV_ABI KernelAvailableFlexibleMemorySize(size_t* size)
 	return OK;
 }
 
+bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode)
+{
+	EXIT_IF(mode == nullptr || gpu_mode == nullptr);
+
+	// Orbis/PS5 protection mixes CPU bits (low nibble) with GPU/AMPR-style
+	// high bits. Historical forms: 0x11 = CPU_READ|GPU_READ, 0x12 =
+	// CPU_WRITE|GPU_READ. Observed Gen5 boot: 0xC2 = CPU_WRITE | high AMPR
+	// flags (0xC0); map CPU write to host ReadWrite and GPU to ReadWrite.
+	switch (prot)
+	{
+		case 0x11:
+			*mode     = VirtualMemory::Mode::Read;
+			*gpu_mode = Graphics::GpuMemoryMode::Read;
+			return true;
+		case 0x12:
+			*mode     = VirtualMemory::Mode::ReadWrite;
+			*gpu_mode = Graphics::GpuMemoryMode::Read;
+			return true;
+		case 0xC2:
+			*mode     = VirtualMemory::Mode::ReadWrite;
+			*gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
+			return true;
+		default: return false;
+	}
+}
+
 int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 {
 	PRINT_NAME();
@@ -882,25 +908,9 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 	VirtualMemory::Mode     mode     = VirtualMemory::Mode::NoAccess;
 	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
 
-	// Orbis/PS5 protection mixes CPU bits (low nibble) with GPU/AMPR-style
-	// high bits. Historical forms: 0x11 = CPU_READ|GPU_READ, 0x12 =
-	// CPU_WRITE|GPU_READ. Observed Gen5 boot: 0xC2 = CPU_WRITE | high AMPR
-	// flags (0xC0); map CPU write to host ReadWrite and GPU to ReadWrite.
-	switch (prot)
+	if (!KernelDecodeMprotectProt(prot, &mode, &gpu_mode))
 	{
-		case 0x11:
-			mode     = VirtualMemory::Mode::Read;
-			gpu_mode = Graphics::GpuMemoryMode::Read;
-			break;
-		case 0x12:
-			mode     = VirtualMemory::Mode::ReadWrite;
-			gpu_mode = Graphics::GpuMemoryMode::Read;
-			break;
-		case 0xC2:
-			mode     = VirtualMemory::Mode::ReadWrite;
-			gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
-			break;
-		default: EXIT("unknown prot: 0x%x (%d)\n", prot, prot);
+		EXIT("unknown prot: 0x%x (%d)\n", prot, prot);
 	}
 
 	VirtualMemory::Mode old_mode {};
