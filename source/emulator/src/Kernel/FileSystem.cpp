@@ -116,9 +116,20 @@ void FileDescriptors::DeleteDescriptor(int d)
 
 	EXIT_IF(!m_files.IndexValid(index));
 	EXIT_IF(m_files.At(index) == nullptr);
-	EXIT_IF(m_files.At(index)->opened);
 
-	delete m_files.At(index);
+	// Allow cleanup of descriptors that opened the host file but never
+	// published opened=true (failed create/truncate paths).
+	auto* file = m_files.At(index);
+	if (file->opened || !file->f.IsInvalid())
+	{
+		if (!file->directory)
+		{
+			file->f.Close();
+		}
+		file->opened = false;
+	}
+
+	delete file;
 	m_files[index] = nullptr;
 }
 

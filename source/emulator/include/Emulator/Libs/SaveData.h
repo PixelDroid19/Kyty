@@ -9,7 +9,21 @@
 
 namespace Kyty::Libs::SaveData {
 
+struct SaveDataMountPoint
+{
+	char data[16];
+};
+
+struct SaveDataMountInfo
+{
+	uint64_t blocks;
+	uint64_t free_blocks;
+	uint8_t  reserved[32];
+};
+
 int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id);
+int KYTY_SYSV_ABI SaveDataGetMountInfo(const SaveDataMountPoint* mount_point, SaveDataMountInfo* info);
+int KYTY_SYSV_ABI SaveDataGetEventResult(const void* event_param, void* event);
 
 } // namespace Kyty::Libs::SaveData
 

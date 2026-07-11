@@ -62,7 +62,13 @@ File::File(): m_p(new FilePrivate)
 
 File::~File()
 {
-	EXIT_IF(m_p->f != nullptr);
+	// Close any still-open handle. Callers should Close() explicitly when
+	// possible, but RAII must not crash the process if a descriptor is
+	// destroyed while open (e.g. failed open/create cleanup paths).
+	if (m_p->f != nullptr)
+	{
+		Close();
+	}
 
 	Delete(m_p);
 }
