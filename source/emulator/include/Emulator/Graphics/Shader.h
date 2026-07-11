@@ -873,16 +873,20 @@ struct ShaderVertexInputInfo
 	ShaderVertexDestination resources_dst[RES_MAX];
 	ShaderVertexInputBuffer buffers[RES_MAX];
 	ShaderBindResources     bind;
-	int                     resources_num    = 0;
-	int                     fetch_shader_reg = 0;
-	int                     fetch_attrib_reg = 0;
-	int                     fetch_buffer_reg = 0;
-	int                     buffers_num      = 0;
-	int                     export_count     = 0;
-	bool                    fetch_external   = false;
-	bool                    fetch_embedded   = false;
-	bool                    fetch_inline     = false;
-	bool                    gs_prolog        = false;
+	// Raw guest attribute-table dwords (byte-offset/4 from fetch_attrib_reg).
+	// Snapshot for SLoad materialization; same memory ShaderParseAttrib consumes.
+	uint32_t                fetch_attrib_data[RES_MAX] = {};
+	int                     fetch_attrib_data_num      = 0;
+	int                     resources_num              = 0;
+	int                     fetch_shader_reg           = 0;
+	int                     fetch_attrib_reg           = 0;
+	int                     fetch_buffer_reg           = 0;
+	int                     buffers_num                = 0;
+	int                     export_count               = 0;
+	bool                    fetch_external             = false;
+	bool                    fetch_embedded             = false;
+	bool                    fetch_inline               = false;
+	bool                    gs_prolog                  = false;
 };
 
 struct ShaderComputeInputInfo

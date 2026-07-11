@@ -183,6 +183,94 @@ TEST(EmulatorGraphicsPackets, AllowsRegionScalarsOnlyInsideSrtRange)
 	EXPECT_TRUE(ShaderCanBindDirectSgpr(&user_data, 8, HW::UserSgprType::Unknown));
 }
 
+// Gen5 SMEM: SLoadDwordx2 s[4:5], s[0:1], 0; SLoadDword s6, s[0:1], 8; s_endpgm
+// s[0:1] is the extended user-data pointer; offsets 0 and 8 map into push-constant vsharp.
+TEST(EmulatorGraphicsPackets, MaterializesExtendedSLoadDwordAndX2)
+{
+	const uint32_t shader[] = {0xf4040100u, 0xfa000000u, 0xf4000180u, 0xfa000008u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::SLoadDwordx2);
+	EXPECT_EQ(code.GetInstructions().At(1).type, ShaderInstructionType::SLoadDword);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0]                         = 1;
+	input.threads_num[1]                         = 1;
+	input.threads_num[2]                         = 1;
+	input.bind.extended.used                     = true;
+	input.bind.extended.start_register           = 0;
+	input.bind.storage_buffers.buffers_num       = 1;
+	input.bind.storage_buffers.start_register[0] = 16;
+	input.bind.storage_buffers.extended[0]       = true;
+	input.bind.storage_buffers.usages[0]         = ShaderStorageUsage::Constant;
+	input.bind.push_constant_size                = 16;
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+
+	// Destinations must be real stores, not comment-only no-ops.
+	EXPECT_NE(source.FindIndex("OpStore %s4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %s5"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %s6"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_PushConstant_uint %vsharp"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %uint"), Core::STRING8_INVALID_INDEX);
+}
+
+// Gen5 SMEM from fetch_attrib_reg (+gs_prolog shift): loads attribute-table dwords into SGPRs.
+TEST(EmulatorGraphicsPackets, MaterializesFetchAttribSLoadDwordAndX2)
+{
+	// SLoadDwordx2 s[48:49], s[14:15], 0; SLoadDword s50, s[14:15], 8; s_endpgm
+	const uint32_t shader[] = {0xf4040c07u, 0xfa000000u, 0xf4000c87u, 0xfa000008u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::SLoadDwordx2);
+	EXPECT_EQ(code.GetInstructions().At(0).src[0].register_id, 14);
+	EXPECT_EQ(code.GetInstructions().At(1).type, ShaderInstructionType::SLoadDword);
+	EXPECT_EQ(code.GetInstructions().At(1).dst.register_id, 50);
+
+	ShaderVertexInputInfo input {};
+	input.fetch_embedded        = true;
+	input.gs_prolog             = true;
+	input.fetch_attrib_reg      = 6; // physical s14 with +8 shift
+	input.fetch_buffer_reg      = 4; // physical s12
+	// Values >= 256 so SPIR-V emits hex constants (see Spirv::AddConstant).
+	input.fetch_attrib_data[0]  = 0xa1b2c301u;
+	input.fetch_attrib_data[1]  = 0xa1b2c302u;
+	input.fetch_attrib_data[2]  = 0xa1b2c303u;
+	input.fetch_attrib_data_num = 3;
+
+	const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpStore %s48"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %s49"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %s50"), Core::STRING8_INVALID_INDEX);
+	// Sanitized table values must appear as SPIR-V uint constants used by the stores.
+	EXPECT_NE(source.FindIndex("0xa1b2c301"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("0xa1b2c302"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("0xa1b2c303"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorGraphicsPackets, RejectsInvalidPacketInputs)
 {
 	const ShaderRegister outside_sh_space[] = {{Pm4::SH_NUM, 1u}};
