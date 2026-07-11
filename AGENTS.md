@@ -218,6 +218,32 @@ is not done.
 - Claiming playability with AUTO_CROSS, stubs, or permissive GPU skips.
 - Leaving permanent dual implementations or feature-flagged legacy paths.
 
+### Multi-title bring-up
+
+When switching private fixtures (or adding a second root):
+
+1. Keep each title’s root in an **env var only** (`$KYTY_GUEST_ROOT` or a second
+   untracked env). Never write absolute private paths into tracked files.
+2. Re-capture the first strict fail for **that** title; do not assume the other
+   title’s frontier applies.
+3. Prefer HLE exports that are **named and sized** (measure APIs, standard libc)
+   before open-ended stubs. Unknown Share/Ampr NIDs may log arguments and return
+   success only when that is the smallest way to reach the next evidenced fail—
+   document residual name/ABI debt in scratch, not as playability claims.
+4. After any dependency bump (SDL, etc.), re-run **both** focused unit filters
+   and the primary title’s strict path before claiming no regression.
+
+### Vendored dependency bumps
+
+- Prefer official upstream releases into `source/3rdparty/` behind the existing
+  CMake wrappers (static SDL, etc.).
+- **One high-impact dep at a time** (SDL first). Rebuild `fc_script`, focused
+  tests, then the primary strict fixture.
+- Hold Vulkan headers and other ABI-sensitive pins unless MoltenVK/runtime is
+  revalidated. Prefer SDL2 over SDL3 for this tree.
+- Commit messages: host/build behavior only (e.g. `build: upgrade vendored SDL2
+  to 2.32.10`), never private title names.
+
 ## Current verified frontier
 
 The local reference workload reaches Vulkan device creation, guest engine

@@ -10,9 +10,17 @@ using namespace Libs;
 
 TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
 {
-	Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-	LibKernel::Memory::MemorySubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	static bool memory_inited = false;
+	if (!memory_inited)
+	{
+		LibKernel::Memory::MemorySubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		memory_inited = true;
+	}
 
 	int64_t address = 0;
 	ASSERT_EQ(LibKernel::Memory::KernelAllocateDirectMemory(0x10000, 0x40000, 0x10000, 0x10000, 12, &address), OK);

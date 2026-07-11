@@ -44,6 +44,7 @@ LIB_DEFINE(InitVideoOut_1);
 LIB_DEFINE(InitUlt_1);
 LIB_DEFINE(InitCes_1);
 LIB_DEFINE(InitShare_1);
+LIB_DEFINE(InitAmpr_1);
 
 bool Init(const String& id, Loader::SymbolDatabase* s)
 {
@@ -77,6 +78,7 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libUlt_1", InitUlt_1);
 	LIB_CHECK(U"libCes_1", InitCes_1);
 	LIB_CHECK(U"libShare_1", InitShare_1);
+	LIB_CHECK(U"libAmpr_1", InitAmpr_1);
 
 	return false;
 }
@@ -109,6 +111,7 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(InitUlt_1);
 	LIB_LOAD(InitCes_1);
 	LIB_LOAD(InitShare_1);
+	LIB_LOAD(InitAmpr_1);
 }
 
 } // namespace Kyty::Libs
