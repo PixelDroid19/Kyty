@@ -183,6 +183,18 @@ TEST(EmulatorGraphicsPackets, AllowsRegionScalarsOnlyInsideSrtRange)
 	EXPECT_TRUE(ShaderCanBindDirectSgpr(&user_data, 8, HW::UserSgprType::Unknown));
 }
 
+// GFX linear surfaces pad rows to 256 bytes. For RGBA8 (format 56) that is a
+// 64-texel pitch alignment — width alone is wrong for non-pow2 sizes.
+TEST(EmulatorGraphicsPackets, AlignsGen5LinearTexturePitchTo256ByteRows)
+{
+	// 348-wide RGBA8 logo: 348*4 = 1392 -> next 256-byte boundary is 1536 bytes = 384 texels.
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(348, 56), 384u);
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(1, 56), 64u);
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(64, 56), 64u);
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(65, 56), 128u);
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(1280, 56), 1280u);
+}
+
 // Gen5 SMEM: SLoadDwordx2 s[4:5], s[0:1], 0; SLoadDword s6, s[0:1], 8; s_endpgm
 // s[0:1] is the extended user-data pointer; offsets 0 and 8 map into push-constant vsharp.
 TEST(EmulatorGraphicsPackets, MaterializesExtendedSLoadDwordAndX2)

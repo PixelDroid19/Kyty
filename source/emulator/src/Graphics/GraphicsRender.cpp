@@ -4280,9 +4280,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		TileSizeAlign size {};
 		auto          addr       = (gen5 ? r.Base40() : r.Base38());
 		bool          neo        = Config::IsNeo();
-		auto          width      = (gen5 ? r.Width5() : r.Width4()) + 1;
-		auto          height     = (gen5 ? r.Height5() : r.Height4()) + 1;
-		auto          pitch      = (gen5 ? width : r.Pitch() + 1);
+		auto          width  = (gen5 ? r.Width5() : r.Width4()) + 1;
+		auto          height = (gen5 ? r.Height5() : r.Height4()) + 1;
+		// Gen5 linear rows are 256-byte aligned (e.g. RGBA8 pitch = align(width, 64)).
+		// Using width alone mis-unpacks non-pow2 logos into horizontal bands.
+		auto pitch = (gen5 ? ShaderGen5LinearTexturePitch(width, r.Format()) : r.Pitch() + 1);
 		auto          base_level = r.BaseLevel();
 		auto          levels     = r.LastLevel() + 1;
 		auto          tile       = r.TileMode();
