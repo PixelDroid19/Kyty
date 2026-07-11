@@ -5029,6 +5029,13 @@ void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer,
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
 
 	LabelSet(buffer, label);
+
+	// Sequential software CP: ReleaseMem data_sel=1 waits (post-Play loading
+	// fence) poll this address after BufferFlush. Relying only on the Label
+	// thread's vkGetEventStatus→store left val=0 for ~5s (loading soft-lock)
+	// even after waiting on the submitted fence. Publish the immediate now so
+	// WaitRegMem can observe ref after the same flush orders GPU work.
+	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t dw_offset,

@@ -1901,6 +1901,32 @@ int KYTY_SYSV_ABI GraphicsSuspendPoint()
 	return OK;
 }
 
+uint64_t* GraphicsResolveWaitMemAddressFromPrecedingRelease(const uint32_t* wait_body)
+{
+	if (wait_body == nullptr)
+	{
+		return nullptr;
+	}
+
+	// wait_body[0] is the first body dword after the WaitMem64 header.
+	// Contiguous post-Play fence layout (dwords):
+	//   [rel_hdr][a][gcr|ds][addr_lo][addr_hi][data_lo][data_hi][wait_hdr][addr...]
+	// so the ReleaseMem header sits 8 dwords before wait_body[0].
+	const uint32_t* release = wait_body - 8;
+	if (release[0] != KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM))
+	{
+		return nullptr;
+	}
+
+	const uint64_t addr = release[3] | (static_cast<uint64_t>(release[4]) << 32u);
+	if (addr == 0)
+	{
+		return nullptr;
+	}
+
+	return reinterpret_cast<uint64_t*>(addr);
+}
+
 int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, uint64_t address)
 {
 	PRINT_NAME();

@@ -110,6 +110,12 @@ uint32_t GraphicsEncodeShRegisters(uint32_t* cmd, uint32_t capacity_dw, const Sh
 uint32_t GraphicsEncodeDispatch(uint32_t* cmd, uint32_t capacity_dw, uint32_t group_x, uint32_t group_y, uint32_t group_z,
                                 uint32_t modifier);
 
+// Post-Play loading: WaitRegMem is often encoded with address=0 while the
+// immediately preceding ReleaseMem receives the real Label* via EopPatch.
+// If wait body address is null and the previous packet is R_RELEASE_MEM with a
+// non-null address, return that address; otherwise nullptr.
+uint64_t* GraphicsResolveWaitMemAddressFromPrecedingRelease(const uint32_t* wait_body);
+
 uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, uint32_t offset, const uint32_t* values,
                                                            uint32_t num_values);
 uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegistersDirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs);
