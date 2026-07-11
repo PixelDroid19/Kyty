@@ -40,6 +40,184 @@ that succeeds without exercising the runtime is not compatibility.
 8. **Report reality.** Distinguish verified behavior, captured evidence,
    hypotheses, and untested assumptions in code reviews and handoffs.
 
+## Investigation and advancement methodology
+
+This section is the practical operating system for agents and humans advancing
+the PS5 path. It does not replace the invariants above; it explains *how* to
+obey them day to day. Speed without this loop is noise.
+
+### Core principle: one frontier, one failure, one hypothesis
+
+Compatibility is a chain. The only unit of progress is **advancing the first
+strict failure** while preserving everything behind it. Parallel “also fix”
+branches, multi-hypothesis edits, and opportunistic refactors inside an open
+failure destroy the signal that the next run is comparable.
+
+Before any code change, answer out loud (or in the session handoff):
+
+1. **What is the current verified frontier?** (last place the title runs without
+   diagnostic flags)
+2. **What is the first strict failure after that frontier?** (exact file, line,
+   values)
+3. **What single producer created the bad state?** (encoder, parser, HLE ABI,
+   layout, resource update—not only the assertion that fired)
+4. **What one falsifiable hypothesis will I test next?**
+5. **What evidence would prove the hypothesis wrong?**
+
+If any answer is missing, investigate first. Do not edit.
+
+### How plans are formed
+
+Plans are ordered checklists, not wish lists:
+
+1. **Baseline** — clean tree, known HEAD, green focused tests, working build.
+2. **Reproduce** — strict run of the private fixture; capture the *first* fail
+   completely under an untracked scratch directory.
+3. **Classify** — HLE/ABI, PM4 encode, PM4 parse, surface layout, GPU memory
+   relation, shader, VideoOut, sync/label, or host Vulkan.
+4. **Hypothesize** — one cause, expected packet/state delta, success criterion.
+5. **Test-first** — smallest deterministic fixture or unit test that fails for
+   that cause.
+6. **Minimal implement** — only the behavior the test (and capture) require.
+7. **Verify** — focused green, then strict re-run; expect the same or a *later*
+   frontier.
+8. **Commit or revert** — commit evidenced behavior; revert failed experiments
+   before trying the next hypothesis.
+9. **Handoff** — frontier note: previous fail, new fail or checkpoint, residual
+   hypothesis, no private paths.
+
+Do not plan modularization, performance campaigns, or multi-NID sweeps while a
+strict post-Play (or earlier) blocker is open. Delivery order below is absolute.
+
+### Focus before advancing
+
+- **Stay on the first failure.** Logs after a crash are often wreckage, not
+  new work items.
+- **Name the seam.** Touch only the module that owns the bad contract
+  (e.g. packet encoder vs CP parser vs GpuMemory update). Cross-cutting drive-bys
+  are out of scope for that cycle.
+- **Prefer producers over symptoms.** A null WaitRegMem address is fixed by
+  finding who should write the address (guest patch HLE, adjacent ReleaseMem,
+  encoder contract)—not by making the waiter skip null.
+- **Freeze working behavior.** If menu reach, flips, or focused tests regress,
+  stop and undo before inventing a second fix.
+- **Reject “make it continue” patches.** Silent success, assumed RGBA8, linear
+  tile, or fabricated labels without a documented encode/execute contract are
+  not progress.
+
+### Investigation loop (read-only until evidence is enough)
+
+1. **Baseline comparison**
+   ```bash
+   git status --short
+   git log -5 --oneline --decorate
+   ninja -C _build_macos fc_script
+   ```
+2. **Strict reproduce** (no `KYTY_STUB_MISSING`, no `KYTY_GFX_PERMISSIVE`):
+   ```bash
+   _build_macos/fc_script scripts/run_guest.lua "$KYTY_GUEST_ROOT"
+   # Optional silent runner for speed; record that logging was Silent.
+   ```
+3. **Capture the full fail** outside Git: message, file:line, PM4 header/body,
+   register values, submit id / command offset when available, and whether
+   AUTO_CROSS or other diagnostics were set (diagnostics never count as
+   acceptance).
+4. **Map encode → execute.** For GPU issues, locate:
+   - HLE builder in `Graphics.cpp` (guest call, arguments, returned pointer)
+   - Packet dwords at encode time
+   - Whether the guest patches later (`GetDataPacketPayloadAddress`, EopPatch,
+     direct stores through the returned header)
+   - CP parser in `GraphicsRun.cpp` and the values at execute time
+5. **Use Silent vs Console deliberately.** `PrintfDirection = Silent` is for
+   wall-clock and long runs; it hides HLE prints. For encode/patch sequences,
+   use Console or temporary `stderr` probes that do not depend on Printf, then
+   **delete probes before commit**.
+6. **Compare working vs failing forms.** Same export with non-null address
+   earlier in the run is ABI evidence; a post-Play null pair is a different
+   contract to explain, not a free pass to invent addresses.
+7. **Consult references only for names and patterns.** SharpEmu, RPCSX wiki,
+   Vulkan/AMD docs inform vocabulary; every PS5-specific claim must reappear
+   in a local capture or test. No GPL code paste.
+
+### Hypothesis and trial-and-error discipline
+
+Trial and error is allowed; **uncontrolled** trial and error is not.
+
+| Rule | Practice |
+| --- | --- |
+| One variable | Change a single contract (offset, accepted bit, opcode case). |
+| Falsifiable | “If PayloadAddress returns cmd+1 for WaitMem, guest patches non-null.” |
+| Time-box | If the capture does not move after a clean experiment, stop and re-classify. |
+| Revert failed experiments | Do not stack dead ends; `git diff` should only show the live hypothesis. |
+| Record negatives | “Return payload not header breaks SizeDw” is permanent evidence. |
+| Prefer structure over silence | Unknown stays `EXIT` / guest error with body dump, not success. |
+
+When a hypothesis fails, write one line: *hypothesis, observation, next
+hypothesis*. Then remove the code from that experiment before coding the next.
+
+### Debug and execution tactics
+
+- **First failure only.** Fix order is boot → logos → menu → Play/load →
+  gameplay. Never jump ahead because a later log line looks interesting.
+- **Encoder dump vs CP dump.** Print or test packet dwords at HLE return *and*
+  at parser entry; many bugs are “guest never patched” vs “parser wrong layout.”
+- **Adjacent packets.** ReleaseMem/WaitRegMem, WaitFlipDone neighbors, and
+  SizeDw residual registers (pointer arithmetic at ±packet size) often explain
+  deferred address fills.
+- **Return-value contracts.** Gen5 builders often return the **packet header**
+  for SizeDw / EopPatch. Returning a mid-packet payload pointer can “fix” a
+  store test and break SizeDw—prove return use from capture.
+- **Thread races.** Render-thread IndexBuffer update vs CP-thread WaitRegMem
+  can both be real; fix the first process exit, then re-run for the next.
+- **Input.** `KYTY_AUTO_CROSS` is discovery only. Acceptance needs real edges
+  or an explicitly recorded non-claim.
+- **Performance.** Never compare FPS under Console logging to Silent; record
+  logging mode, resolution, and shader-cache state.
+- **Scratch evidence.** Save logs under untracked `_scratch_playable/` or a
+  session scratch dir. Never commit guest paths, title IDs, screenshots, or raw
+  multi-megabyte logs.
+
+### Red → green → strict
+
+For every semantic change:
+
+1. **Red** — add or extend a unit test with sanitized PM4/HLE args that fails
+   for the missing contract.
+2. **Green** — implement the minimum; focused filter passes.
+3. **Strict** — rebuild `fc_script`, rerun the private fixture, confirm the
+   old fail is gone and no earlier fail returned.
+4. **Regress** — re-run GraphicsPackets/GraphicsState (and other touched
+   suites). Unfiltered full suite may include a historical date-dependent test;
+   do not use it to hide new failures.
+5. **Commit** — message describes emulator behavior only
+   (`fix(graphics): …`), no fixture identity.
+
+If strict does not advance, the change is not done—even if unit tests pass.
+
+### What “done” means for one cycle
+
+A cycle is complete when **either**:
+
+- **(A) Frontier advanced:** the previous first fail no longer occurs under
+  strict flags; a new first fail or a stable checkpoint is captured; focused
+  tests pass; change is committed; or
+- **(B) Blocker documented:** evidence is insufficient to implement without
+  inventing; the fail remains structured and informative; capture and
+  residual hypothesis are recorded; temporary probes are removed.
+
+“Process survived” or “non-black frame once” without a strict, flag-free path
+is not done.
+
+### Anti-patterns (do not do these)
+
+- Editing while the fail is unreproduced on the current HEAD.
+- Multiple hypotheses in one commit.
+- Keeping a failed experiment “just in case.”
+- Broad renames/refactors on an open compatibility blocker.
+- Vendor or OS branches inside guest decode/layout.
+- Claiming playability with AUTO_CROSS, stubs, or permissive GPU skips.
+- Leaving permanent dual implementations or feature-flagged legacy paths.
+
 ## Current verified frontier
 
 The local reference workload reaches Vulkan device creation, guest engine
@@ -50,18 +228,17 @@ read-only storage-buffer overlap tracking, Gen5 resource unregistration, and
 pixel-input default interpolation.
 
 Strict execution currently reaches a recognizable menu, accepts the first
-interactive menu transitions, creates Gen5 render targets, and presents frames
-around the 30 FPS range when console function logging is disabled. The latest
-strict frontier is a full-target `cp_op_acquire_mem` barrier after entering the
-post-menu render path: the observed `gcr_cntl` includes the known invalidate
-bits plus an additional qualifier, and the packet range fields still require
-fresh capture and semantic validation. This is not yet gameplay acceptance.
-Diagnostic input, permissive state handling, and console logging are evidence
-tools only; they do not constitute a supported runtime mode or a performance
-claim.
-
-Always reproduce the current frontier. Do not rely on this paragraph after code
-or fixture changes.
+interactive menu transitions (including Play / mode selection with diagnostic
+auto-input only as a discovery aid), creates Gen5 render targets, and presents
+frames around the 30 FPS range when console function logging is disabled. The
+post-Play loading path has advanced through several Gen5 PM4/HLE seams
+(full-range AcquireMem, tile mode 27 sizing, Type0/Type2 walk, VideoOut handle
+0, ReleaseMem data_sel 1, payload-address offsets by opcode, index-buffer
+updates). **Always re-capture the first strict fail on the current HEAD**—do
+not trust this paragraph after code or fixture changes. This is not yet
+gameplay acceptance. Diagnostic input, permissive state handling, and console
+logging are evidence tools only; they do not constitute a supported runtime
+mode or a performance claim.
 
 ## Architecture map
 
