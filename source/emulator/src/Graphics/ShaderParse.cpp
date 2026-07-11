@@ -1136,7 +1136,10 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 	switch (opcode)
 	{
 		case 0x00:
-			EXIT_NOT_IMPLEMENTED(next_gen);
+			// Observed post-Play Gen5 shader word 0x00000009:
+			// v_cndmask_b32 v0, s9, v0 — VOP2 OP=0 (legacy/VI encoding).
+			// Desktop GFX10 moved cndmask to OP=1; Gen5 still emits OP=0
+			// (and OP=1 is also accepted below for next_gen).
 			inst.type        = ShaderInstructionType::VCndmaskB32;
 			inst.format      = ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2;
 			inst.src[2].type = ShaderOperandType::VccLo;
@@ -1735,7 +1738,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 
 		/* VOP2 using VOP3 encoding */
 		case 0x100:
-			EXIT_NOT_IMPLEMENTED(next_gen);
+			// VOP3 encoding of VOP2 OP=0 cndmask — same dual-encoding as e32.
 			inst.type        = ShaderInstructionType::VCndmaskB32;
 			inst.format      = ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2;
 			inst.src_num     = 3;

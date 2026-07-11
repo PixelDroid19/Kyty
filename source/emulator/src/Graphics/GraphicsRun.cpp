@@ -2715,9 +2715,13 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			{
 				EXIT("unsupported full-target barrier gcr_cntl=0x%08" PRIx32 "\n", gcr_cntl);
 			}
-			if (size_lo != 0 || base_lo != 0)
+			// AGC size_bytes == -1 encodes as size_lo == 0 (full range). The base
+			// dword is still written from the guest pointer (observed post-Play
+			// frontier: base_lo=1, size_lo=0). Only a non-zero size selects a
+			// ranged barrier, which is not yet supported for this cache action.
+			if (size_lo != 0)
 			{
-				EXIT("unsupported full-target barrier range: base=0x%08" PRIx32 ", size=0x%08" PRIx32 "\n", base_lo, size_lo);
+				EXIT("unsupported full-target barrier range: base=0x%08" PRIx64 ", size=0x%08" PRIx64 "\n", base_lo, size_lo);
 			}
 
 			EXIT_IF(target_mask != 0x00007fc0);

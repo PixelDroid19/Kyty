@@ -81,6 +81,37 @@ TEST(EmulatorGraphicsPackets, ParsesGen5LshlAddU32)
 	EXPECT_EQ(instruction.src[2].register_id, 2);
 }
 
+// Captured post-Play Gen5 VOP2 word 0x00000009 at pc=0x64:
+// OP=0, vdst=v0, vsrc1=v0, src0=s9 → v_cndmask_b32 v0, s9, v0 (legacy OP encoding).
+TEST(EmulatorGraphicsPackets, ParsesGen5Vop2Op0AsCndmask)
+{
+	const uint32_t shader[] = {0x00000009u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VCndmaskB32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2);
+	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.dst.register_id, 0);
+	EXPECT_EQ(instruction.src[0].type, ShaderOperandType::Sgpr);
+	EXPECT_EQ(instruction.src[0].register_id, 9);
+	EXPECT_EQ(instruction.src[1].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.src[1].register_id, 0);
+	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::VccLo);
+	EXPECT_EQ(instruction.src_num, 3);
+}
+
 TEST(EmulatorGraphicsPackets, ParsesBufferStoreFormatXyzw)
 {
 	const uint32_t shader[] = {0xe01c2000u, 0x80010004u, 0xbf810000u};
@@ -283,6 +314,50 @@ TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 	ASSERT_NE(second, nullptr);
 	EXPECT_EQ(second, storage + 10);
 	EXPECT_EQ(cb.cursor_up, storage + 14);
+}
+
+// GraphicsDcbAcquireMem encodes size_bytes == -1 as size_lo == 0 (full range)
+// while still writing base >> 8. Observed post-Play full-target barrier:
+// cache_action 0x06007fc0, base_lo=1, size_lo=0 (guest base 0x100, size -1).
+TEST(EmulatorGraphicsPackets, EncodesFullRangeAcquireMemWithNonZeroBase)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[64] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 64;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 64;
+
+	const auto* base = reinterpret_cast<const volatile void*>(static_cast<uintptr_t>(0x100));
+	uint32_t*   cmd  = Gen5::GraphicsDcbAcquireMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0, 0x06007fc0u, 0x280u, base,
+	                                               static_cast<uint64_t>(-1), 400);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_ACQUIRE_MEM));
+	EXPECT_EQ(cmd[1], 0x06007fc0u);
+	EXPECT_EQ(cmd[2], 0u); // size_lo: full-range sentinel
+	EXPECT_EQ(cmd[3], 0u);
+	EXPECT_EQ(cmd[4], 1u); // base_lo: 0x100 >> 8
+	EXPECT_EQ(cmd[5], 0u);
+	EXPECT_EQ(cmd[6], 10u); // poll_cycles / 40
+	EXPECT_EQ(cmd[7], 0x280u);
 }
 
 // GFX linear surfaces pad rows to 256 bytes. For RGBA8 (format 56) that is a
