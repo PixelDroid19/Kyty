@@ -49,11 +49,16 @@ strict work corrected sub-second wall-clock time, keyboard/controller merging,
 read-only storage-buffer overlap tracking, Gen5 resource unregistration, and
 pixel-input default interpolation.
 
-Strict execution still encounters confirmed but unimplemented HLE and graphics
-paths before a playable frame. The first observed frontier after the initial
-sequence is an entitlement-access guest API whose ABI and guest-visible result
-must be evidenced before implementation. Diagnostic execution can present
-pixels, but diagnostic flags do not constitute a supported runtime mode.
+Strict execution currently reaches a recognizable menu, accepts the first
+interactive menu transitions, creates Gen5 render targets, and presents frames
+around the 30 FPS range when console function logging is disabled. The latest
+strict frontier is a full-target `cp_op_acquire_mem` barrier after entering the
+post-menu render path: the observed `gcr_cntl` includes the known invalidate
+bits plus an additional qualifier, and the packet range fields still require
+fresh capture and semantic validation. This is not yet gameplay acceptance.
+Diagnostic input, permissive state handling, and console logging are evidence
+tools only; they do not constitute a supported runtime mode or a performance
+claim.
 
 Always reproduce the current frontier. Do not rely on this paragraph after code
 or fixture changes.
@@ -88,6 +93,235 @@ Keep guest API decoding, guest GPU semantics, normalized state, Vulkan objects,
 and host platform adapters conceptually separate even where legacy files still
 contain more than one responsibility. Improve the seam being touched; do not
 perform unrelated mass refactors.
+
+## Auxiliary-agent handoff prompt
+
+The following prompt is the canonical brief for an auxiliary agent. Give the
+agent a private guest root through `KYTY_GUEST_ROOT`; never paste that path,
+title identifiers, binaries, keys, save data, shaders, textures, screenshots,
+or logs into tracked files or commit messages.
+
+```text
+You are a senior emulator/runtime engineer working inside the Kyty repository.
+Your mission is to advance the strict PS5 runtime from the current menu frontier
+to a genuinely playable frame, then freeze that frontier and only afterward
+perform carefully bounded modularization. Correctness, evidence, portability,
+and preservation of working behavior outrank speed or line-count reduction.
+
+CURRENT FRONTIER
+
+- The build and Vulkan device/swapchain path work on the current macOS host.
+- Gen5 shader creation, indexed draws, VideoOut submission, and repeated flips
+  are already exercised.
+- The private 2D test workload reaches a recognizable menu and responds to the
+  first Play/Normal-Mode transitions.
+- A recent strict run stops after that transition in
+  `GraphicsRun.cpp::cp_op_acquire_mem`, in the full-target barrier case. The
+  observed cache-control word is `0x00008280`; the implementation already
+  recognizes the known invalidate bits but still rejects a non-zero packet
+  range. Capture the complete packet again before changing semantics.
+- A silent-logging visual run has shown roughly 30 FPS at the menu. Do not
+  compare that number with console-logging runs: per-call logging can dominate
+  the frame loop. Measure gameplay with logging configuration recorded.
+- The runtime is not yet accepted as playable. Do not claim success merely
+  because a window, menu, non-black frame, or one draw appears.
+
+PRIMARY ORDER OF WORK (DO NOT REORDER)
+
+1. Reproduce the strict frontier with the current checkout and private fixture.
+2. Fix the first strict failure using a documented hypothesis and a focused
+   deterministic test or sanitized packet fixture.
+3. Re-run strict execution and advance one failure at a time until the title
+   reaches the first controllable gameplay scene.
+4. Prove input, camera/character movement, at least one action, stable flips,
+   correct geometry/colors, and absence of validation errors.
+5. Freeze this working frontier with regression/characterization tests and a
+   short evidence report.
+6. Only after steps 1-5 pass, modularize oversized files one seam at a time.
+   Every extraction must be behavior-neutral and must preserve the frozen
+   gameplay evidence.
+
+NON-NEGOTIABLE RULES
+
+- Read this entire AGENTS.md before editing. Do not weaken its invariants.
+- Reproduce before editing. Capture the first strict error, packet/register
+  values, submit ID, command offset, guest call path, and relevant state.
+- Never invent a NID, ABI, structure layout, register meaning, tile mode,
+  pitch, alignment, return code, or synchronization result. Triangulate from
+  guest evidence, local call sites, upstream references, and a test.
+- Never use `KYTY_STUB_MISSING`, `KYTY_GFX_PERMISSIVE`, trap skipping, default
+  success, assumed RGBA8/linear layout, fabricated resources, or placeholder
+  shaders in acceptance runs. They are discovery-only diagnostics.
+- One behavior has one implementation. Direct and indirect PM4 paths share a
+  decoder; all resource consumers share one descriptor-to-layout calculation.
+- An unsupported behavior must fail structurally and informatively. Do not
+  hide it behind a generic fallback, compatibility alias, vendor check, or
+  duplicated legacy path.
+- Guest semantics remain platform-neutral. macOS, Linux, Windows, Vulkan
+  extension, and GPU-vendor details belong at explicit host seams.
+- AMD, Intel, NVIDIA, and Apple are capability inputs, never correctness
+  policy switches. Select strategies from features, limits, formats, queues,
+  and tested semantic alternatives.
+- Do not add private fixture paths, title IDs, keys, binaries, saves, assets,
+  screenshots, crash dumps, or raw logs to Git. Keep them under an ignored
+  local directory and refer to them only as `$KYTY_GUEST_ROOT`.
+- Do not use a commit message that identifies the private workload. Describe
+  emulator behavior, for example `fix(graphics): validate Gen5 barrier range`.
+- Preserve existing working behavior. If an experiment regresses menu reach,
+  pixels, input, flips, or build, remove/revert the experiment before trying
+  the next hypothesis.
+
+REPRODUCTION AND VERIFICATION COMMANDS
+
+```bash
+git status --short
+git log -5 --oneline --decorate
+cmake -S source -B _build_macos -G Ninja
+ninja -C _build_macos fc_script
+
+# Focused tests; avoid the historical date-dependent unfiltered suite.
+_build_macos/fc_script '{kyty_run_tests()}' \
+  --gtest_filter=<Suite>.<Test>
+
+# Strict integration run. The fixture root is private and untracked.
+_build_macos/fc_script scripts/run_guest.lua "$KYTY_GUEST_ROOT"
+```
+
+For performance characterization, make a temporary untracked copy of the Lua
+runner with `PrintfDirection = 'Silent'`, record that fact, and compare the
+same scene with the same resolution and shader-cache state. Never treat a
+diagnostic auto-input pulse as real playability. For visual evidence, keep
+captures outside the repository and record only dimensions, frame count,
+average/minimum FPS, input sequence, and whether the image is recognizable.
+
+STRICT DEBUG LOOP
+
+For each failure:
+
+1. Save the complete failure text outside Git.
+2. Locate the producer of the bad value, not just the assertion that noticed it.
+3. State one falsifiable hypothesis and the expected packet/state change.
+4. Add the smallest failing unit test or sanitized PM4/surface fixture.
+5. Implement the smallest evidenced semantic change.
+6. Run the focused test, rebuild, then rerun the strict workload.
+7. Update the frontier note with verified facts, remaining hypothesis, and
+   exact next experiment.
+
+GEN5 GRAPHICS CHECKLIST
+
+- Validate PM4 envelope, packet type, opcode/register, declared length, and
+  payload bounds before decoding fields.
+- Normalize direct/indirect state through one decoder and report unknown
+  register, packet, submit ID, and command offset.
+- For `AcquireMem`, classify cache action, target mask, extended action, GCR
+  control, base, size, and stall mode independently. Prove whether non-zero
+  range fields are legal for the observed full-target barrier; do not simply
+  mask them away.
+- For ReleaseMem/WaitRegMem/WriteData patch helpers, validate the packet's own
+  sub-op and patch only the evidenced payload dwords. Return the guest error
+  for invalid packets.
+- For every surface, derive format, bytes per element/block, dimensions, pitch,
+  mip count, tile mode, metadata, sample count, size, and alignment in one
+  layout function. Use it for allocation, overlap tracking, CPU upload,
+  detiling, and write-back.
+- Treat mode 27 (`SW_64KB_R_X`) as a real tiled layout. Do not replace it with
+  linear memory or a four-byte assumption. Add round-trip/layout tests for
+  representative non-power-of-two dimensions.
+- For GPU-memory aliases, model the exact relation and object types observed:
+  Equals, Crosses, Contains, and IsContainedWithin are not interchangeable.
+  Link or reclaim only when the producer/consumer semantics are evidenced.
+- A GPU-owned render target with no write-back must not be spuriously uploaded
+  from CPU memory. Its first use must be a validated render-pass transition.
+
+PLAYABILITY ACCEPTANCE GATE
+
+Do not move to refactoring until all rows below have evidence from a strict run:
+
+| Area | Required evidence |
+| --- | --- |
+| Boot | No missing-import stub, trap skip, or permissive register skip |
+| Menu | Recognizable, correctly proportioned image and completed flips |
+| Input | Real keyboard/controller press and release edges, not auto-pulse |
+| Play path | Play -> mode selection -> loading -> controllable scene |
+| Simulation | Character movement plus one attack/jump/interact action |
+| Rendering | Correct colors, geometry, target interpretation, and no black/corrupt frame |
+| Sync | No render-thread timeout, stuck label, or unbounded wait |
+| Vulkan | No validation errors where validation is available; no device-loss |
+| Performance | FPS/frametime measured with logging mode and resolution recorded |
+| Portability | No guest-state or tile-layout branch keyed to one OS/GPU vendor |
+| Regression | Existing focused unit tests and prior menu evidence still pass |
+
+ARCHITECTURE FREEZE AND MODULARIZATION PLAN
+
+After the acceptance gate, record a baseline commit, test output, strict
+frontier, and visual/performance measurements. Then inventory large modules by
+responsibility, mutable state, callers, and tests. Likely seams are:
+
+- `GraphicsRun.cpp`: packet envelope/parser, opcode decoders, cache/barrier
+  semantics, and normalized-state mutation. Extract only after identifying the
+  shared state contract; direct and indirect paths must call the same decoder.
+- `Graphics.cpp`: Gen5 packet builders, ABI-facing patch helpers, and pure
+  packet encoders. Keep ABI registration out of packet math.
+- `GraphicsRender.cpp`: render planning, resource binding, pipeline creation,
+  synchronization, and presentation preparation. A planner should consume
+  normalized state and explicit host capabilities, not read global Vulkan state.
+- `Tile.cpp`: format/block geometry, surface-size calculation, address/swizzle
+  math, and conversion. Keep one descriptor/layout model and test it without
+  Vulkan.
+- `GpuMemory.cpp`: relation classification, lifetime/linking, allocation, and
+  update/write-back policy. Deepen the module behind typed relation/layout
+  contracts; do not create a generic `Utils` or `Manager` bucket.
+- `source/emulator/src/Libs/`: one cohesive HLE library per subsystem, with
+  centralized registration and contract tests for each new export.
+
+Line count is a signal, not the goal. Do not split an atomic eight-line
+function. Do split a long function that mixes parsing, state mutation,
+allocation, Vulkan calls, and logging. Each extracted function/module must have
+one purpose, explicit inputs/outputs, ownership, thread contract, error
+contract, and a focused test. Delete the superseded implementation in the same
+change; do not leave permanent forwarding aliases or duplicate semantics.
+
+REFERENCES AND HOW TO USE THEM
+
+Use references for behavioral facts, architecture patterns, and test ideas;
+never copy incompatible or GPL implementation code into Kyty:
+
+- SharpEmu: https://github.com/par274/sharpemu — PS4/PS5 export naming,
+  ABI evidence, Gen5 AGC packet patch contracts, and strict failure reporting.
+- RPCSX: https://github.com/RPCSX/rpcsx and its wiki — Linux-first portability,
+  runtime boundaries, logging, and compatibility transparency.
+- EmuC0re: https://github.com/egycnq/EmuC0re — small emulator seams and
+  bring-up discipline; do not infer PS5 GPU behavior from its unrelated target.
+- Ryubing/Ryujinx: https://git.ryujinx.app/projects/Ryubing/ryujinx — mature
+  separation of guest services, translator/cache boundaries, capability-aware
+  host rendering, and regression-oriented compatibility work.
+- Vulkan specification and refpages: https://registry.khronos.org/vulkan/ —
+  authoritative synchronization, image layout, format, feature, and limit
+  semantics.
+- AMD GPUOpen/Adrenalin GPU documentation: https://gpuopen.com/ — public GPU
+  terminology and cache/tiling concepts; verify every PS5-specific claim
+  against Kyty evidence rather than assuming desktop AMD equivalence.
+
+For each borrowed fact, record the URL, license/provenance, exact behavior
+learned, and the local test that confirms it. Do not copy GPL code; reimplement
+the verified behavior using Kyty's types and MIT-compatible source.
+
+HANDOFF REPORT TEMPLATE
+
+End every auxiliary-agent session with:
+
+- Commit/base revision (no private fixture names).
+- Build and focused-test commands plus pass/fail output.
+- Strict command and first failure or verified gameplay checkpoint.
+- Evidence table: verified fact, source, local reproduction, confidence.
+- Files changed and why each belongs to the seam.
+- Regression checks and performance measurement conditions.
+- Exact next blocker and one proposed falsifiable hypothesis.
+- Explicit statement that no diagnostic flag was required for acceptance.
+
+If a required fact cannot be evidenced, stop at a structured unsupported error,
+report the blocker, and do not paper over it with a fallback or broad refactor.
+```
 
 ## Delivery order
 
