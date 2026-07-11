@@ -1571,6 +1571,8 @@ struct Ngs2VoiceInternal
 	Ngs2VoicePlayState state           = Ngs2VoicePlayState::Empty;
 	Ngs2RackInternal*  rack            = nullptr;
 	uint32_t           last_command[3] = {};
+	// Render ticks spent in Playing (approximate natural end for short voices).
+	uint32_t           play_ticks      = 0;
 };
 
 struct Ngs2VoiceParamHeader
@@ -1964,7 +1966,10 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 				switch (voice.event)
 				{
 					case Ngs2VoicePlayEvent::None:
-						if (voice.state == Ngs2VoicePlayState::Playing || voice.state == Ngs2VoicePlayState::Stopped)
+						// Keep Playing until a Stop event or natural end (below). Only
+						// advance Stopped → Empty when idle so callers that poll state
+						// still observe a finished voice.
+						if (voice.state == Ngs2VoicePlayState::Stopped)
 						{
 							voice.state = Ngs2VoicePlayState::Empty;
 						}
@@ -1972,7 +1977,8 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 					case Ngs2VoicePlayEvent::Play:
 						if (voice.state == Ngs2VoicePlayState::Empty)
 						{
-							voice.state = Ngs2VoicePlayState::Playing;
+							voice.state       = Ngs2VoicePlayState::Playing;
+							voice.play_ticks = 0;
 						}
 						break;
 					case Ngs2VoicePlayEvent::Pause:
@@ -1997,6 +2003,18 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 					case Ngs2VoicePlayEvent::Kill: voice.state = Ngs2VoicePlayState::Empty; break;
 				}
 				voice.event = Ngs2VoicePlayEvent::None;
+
+				// Without sample-accurate envelopes, end short logo/jingle voices after
+				// enough SystemRender ticks (~2s at 48 kHz / 256-frame AudioOut blocks).
+				if (voice.state == Ngs2VoicePlayState::Playing)
+				{
+					voice.play_ticks++;
+					if (voice.play_ticks >= 400)
+					{
+						voice.state       = Ngs2VoicePlayState::Stopped;
+						voice.play_ticks = 0;
+					}
+				}
 			}
 		}
 	}
@@ -2149,6 +2167,34 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 
 	printf("\t command = {%08" PRIx32 ", %08" PRIx32 ", %08" PRIx32 "}\n", voice->last_command[0], voice->last_command[1],
 	       voice->last_command[2]);
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2GeomResetSourceParam(void* out_source_param)
+{
+	PRINT_NAME();
+
+	// sceNgs2GeomResetSourceParam: clear guest source defaults. Layout is opaque to HLE;
+	// titles zero-init themselves or overwrite fields after reset. Return success.
+	(void)out_source_param;
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2GeomResetListenerParam(void* out_listener_param)
+{
+	PRINT_NAME();
+
+	(void)out_listener_param;
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2GeomCalcListener(const void* listener_param, void* out_work, uint32_t flags)
+{
+	PRINT_NAME();
+
+	printf("\t flags = %u\n", flags);
+	(void)listener_param;
+	(void)out_work;
 	return OK;
 }
 
