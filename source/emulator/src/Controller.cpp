@@ -400,6 +400,8 @@ constexpr int kPrimaryHandle = 1;
 
 static bool g_pad_initialized = false;
 static bool g_pad_opened      = false;
+// Counts PadReadState calls since last PadOpen (many titles Open then Read twice per tick).
+static int  g_reads_since_open = 0;
 
 int KYTY_SYSV_ABI PadInit()
 {
@@ -443,6 +445,8 @@ int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param)
 	// Real OS returns ALREADY_OPENED on re-open; guest must use GetHandle for the prior handle.
 	// Observed Gen5 titles poll Open each frame and then ReadState with that handle, so return
 	// the live handle instead of ALREADY_OPENED for this Open → ReadState pattern.
+	g_reads_since_open = 0;
+
 	if (g_pad_opened)
 	{
 		return kPrimaryHandle;
@@ -527,10 +531,14 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	EXIT_NOT_IMPLEMENTED(handle != 1);
 	EXIT_NOT_IMPLEMENTED(data == nullptr);
 
-	// Optional diagnostic: pulse confirm buttons so multi-screen splash/title
-	// flows can advance without a physical pad (KYTY_AUTO_CROSS=1).
-	// Applied after ReadState so the guest-visible sample is authoritative.
+	// Optional diagnostic: pulse Cross so multi-screen splash/title flows can
+	// advance without a physical pad (KYTY_AUTO_CROSS=1). Applied after ReadState
+	// so the guest-visible sample is authoritative. Only Cross (not multi-button
+	// chords). Observed pattern is PadOpen + two PadReadState per tick — put the
+	// pressed sample on the second read so within-tick edge detect (curr & ~prev)
+	// still sees a rising edge.
 	uint32_t auto_buttons = 0;
+	g_reads_since_open++;
 	if (const char* auto_cross = std::getenv("KYTY_AUTO_CROSS"); auto_cross != nullptr && auto_cross[0] == '1')
 	{
 		static uint64_t first_read = 0;
@@ -539,17 +547,14 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 		{
 			first_read = now;
 		}
-		// Start after 2s; hold 300ms every 1.5s. Cross is primary confirm; Options
-		// covers titles that skip splash via the Options button only.
 		const uint64_t elapsed = now - first_read;
-		if (elapsed > 1'500'000ull)
+		if (elapsed > 2'000'000ull)
 		{
-			// Pulse confirm bits (300ms on / 1.2s off) so edge-triggered UIs see presses.
-			const uint64_t cycle = (elapsed - 1'500'000ull) % 1'500'000ull;
-			if (cycle < 300'000ull)
+			const uint64_t cycle = (elapsed - 2'000'000ull) % 2'000'000ull;
+			// 400ms press window every 2s.
+			if (cycle < 400'000ull && g_reads_since_open >= 2)
 			{
-				auto_buttons = PAD_BUTTON_CROSS | PAD_BUTTON_CIRCLE | PAD_BUTTON_OPTIONS |
-				               PAD_BUTTON_TRIANGLE | PAD_BUTTON_SQUARE;
+				auto_buttons = PAD_BUTTON_CROSS;
 			}
 		}
 	}

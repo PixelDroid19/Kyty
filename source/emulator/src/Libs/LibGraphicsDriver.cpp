@@ -125,11 +125,28 @@ LIB_DEFINE(InitGraphicsDriver_1)
 
 } // namespace LibGen5Driver
 
+namespace LibAgc {
+
+// Guest imports libSceAgc; module name "Agc" matches the strip of Sce/lib prefixes.
+LIB_VERSION("Agc", 1, "Agc", 1, 1);
+
+namespace Gen5 = Graphics::Gen5;
+
+LIB_DEFINE(InitGraphicsDriver_1)
+{
+	PRINT_NAME_ENABLE(true);
+
+	LIB_FUNC("-KRzWekV120", Gen5::GraphicsAgcDriverUnknownKRzWekV120);
+}
+
+} // namespace LibAgc
+
 LIB_DEFINE(InitGraphicsDriver_1)
 {
 	LibGen4::InitGraphicsDriver_1(s);
 	LibGen5::InitGraphicsDriver_1(s);
 	LibGen5Driver::InitGraphicsDriver_1(s);
+	LibAgc::InitGraphicsDriver_1(s);
 }
 
 } // namespace Kyty::Libs

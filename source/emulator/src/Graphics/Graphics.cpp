@@ -1841,6 +1841,14 @@ int KYTY_SYSV_ABI GraphicsSuspendPoint()
 	return OK;
 }
 
+int KYTY_SYSV_ABI GraphicsAgcDriverUnknownKRzWekV120()
+{
+	// Called immediately before the first indexed draw on observed Gen5 boots.
+	// Real semantics unknown; return success so the draw path continues.
+	PRINT_NAME();
+	return OK;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, uint32_t offset, const uint32_t* values, uint32_t num_values)
 {
 	PRINT_NAME();
