@@ -890,6 +890,15 @@ TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
 	EXPECT_EQ(0, 0); // srt_size_dw == 0
 }
 
+// Captured s_buffer_load_dwordx4 with SGPR soffset + imm 0x10.
+TEST(EmulatorGraphicsPackets, SmemImmOffsetFieldDefaultsZero)
+{
+	ShaderInstruction inst {};
+	EXPECT_EQ(inst.smem_imm_offset, 0);
+	inst.smem_imm_offset = 0x10;
+	EXPECT_EQ(inst.smem_imm_offset, 0x10);
+}
+
 // Captured VOP1 opcode 0x8 is v_cvt_i32_f32 (and VOP3 0x188).
 TEST(EmulatorGraphicsPackets, Vop1Opcode8IsVCvtI32F32)
 {

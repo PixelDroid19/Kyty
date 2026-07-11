@@ -421,6 +421,9 @@ struct ShaderInstruction
 	int                             src_num = 0;
 	ShaderOperand                   dst;
 	ShaderOperand                   dst2;
+	// SMEM: signed immediate offset added to SGPR soffset when both are present
+	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
+	int32_t smem_imm_offset = 0;
 };
 
 class ShaderLabel
