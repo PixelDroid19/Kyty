@@ -2404,7 +2404,9 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 	// size 1 = 64-bit wait (existing path). Encode 32-bit waits with zeroed
 	// high halves in the same R_WAIT_MEM_64 packet layout the CP already runs.
 	EXIT_NOT_IMPLEMENTED(size != 0 && size != 1);
-	EXIT_NOT_IMPLEMENTED(op != 1);
+	// op 0/1: observed memory-wait forms (op=0 size=0 cmp=3 ref=1 mask=~0 after
+	// ReleaseMem data_sel=1; op=1 was the prior path). Packet encoding is shared.
+	EXIT_NOT_IMPLEMENTED(op != 0 && op != 1);
 	EXIT_NOT_IMPLEMENTED(cache_policy != 0);
 
 	buf->DbgDump();
