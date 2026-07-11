@@ -4354,7 +4354,27 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 
 	EXIT_NOT_IMPLEMENTED(code.ReadBlock(ShaderLabel(inst).GetDst()).is_discard);
 
-	String8 label = ShaderLabel(inst).ToString();
+	const auto branch = ShaderLabel(inst);
+	String8   label  = branch.ToString();
+
+	if (branch.GetDst() < inst.pc)
+	{
+		String8 continue_label = String8::FromPrintf("loop_continue_%04" PRIx32, inst.pc);
+		String8 merge_label    = String8::FromPrintf("loop_merge_%04" PRIx32, inst.pc);
+
+		static const char* loop_text = R"(
+                OpBranch %<continue>
+       %<continue> = OpLabel
+                OpBranch %<label>
+       %<merge> = OpLabel
+)";
+
+		*dst_source += String8(loop_text)
+		                   .ReplaceStr("<continue>", continue_label)
+		                   .ReplaceStr("<label>", label)
+		                   .ReplaceStr("<merge>", merge_label);
+		return true;
+	}
 
 	static const char* text = R"(
                 OpBranch %<label>
@@ -7948,6 +7968,24 @@ void Spirv::WriteLabel(int index)
 				m_source +=
 				    String8(text).ReplaceStr("<branch>", (skip_branch ? "" : "OpBranch %<label>")).ReplaceStr("<label>", label.ToString());
 				labels_num++;
+
+				bool backward_sbranch = false;
+				for (const auto& source_inst: instructions)
+				{
+					if (source_inst.pc == label.GetSrc())
+					{
+						backward_sbranch = source_inst.type == ShaderInstructionType::SBranch;
+						break;
+					}
+				}
+
+				if (backward_sbranch && label.GetSrc() > label.GetDst())
+				{
+					String8 continue_label = String8::FromPrintf("loop_continue_%04" PRIx32, label.GetSrc());
+					String8 merge_label    = String8::FromPrintf("loop_merge_%04" PRIx32, label.GetSrc());
+					m_source += String8::FromPrintf("               OpLoopMerge %%%s %%%s None\n", merge_label.c_str(),
+					                              continue_label.c_str());
+				}
 
 				if (discard)
 				{
