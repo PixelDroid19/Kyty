@@ -12,6 +12,7 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <atomic>
+#include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -2170,13 +2171,85 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 	return OK;
 }
 
+// Layout from PS4 NGS2 geom headers (vector = 3 floats; see OrbisNgs2Geom*Param).
+struct Ngs2GeomVector
+{
+	float x = 0;
+	float y = 0;
+	float z = 0;
+};
+struct Ngs2GeomCone
+{
+	float inner_level  = 0;
+	float inner_angle  = 0;
+	float outer_level  = 0;
+	float outer_angle  = 0;
+};
+struct Ngs2GeomRolloff
+{
+	uint32_t model              = 0;
+	float    max_distance       = 0;
+	float    rolloff_factor     = 0;
+	float    reference_distance = 0;
+};
+struct Ngs2GeomListenerParam
+{
+	Ngs2GeomVector position {};
+	Ngs2GeomVector orient_front {};
+	Ngs2GeomVector orient_up {};
+	Ngs2GeomVector velocity {};
+	float          sound_speed = 0;
+	uint32_t       reserved[2] = {};
+};
+struct Ngs2GeomSourceParam
+{
+	Ngs2GeomVector  position {};
+	Ngs2GeomVector  velocity {};
+	Ngs2GeomVector  direction {};
+	Ngs2GeomCone    cone {};
+	Ngs2GeomRolloff rolloff {};
+	float           doppler_factor = 0;
+	float           fbw_level      = 0;
+	float           lfe_level      = 0;
+	float           max_level      = 0;
+	float           min_level      = 0;
+	float           radius         = 0;
+	uint32_t        num_speakers   = 0;
+	uint32_t        matrix_format  = 0;
+	uint32_t        reserved[2]    = {};
+};
+struct Ngs2GeomListenerWork
+{
+	float          matrix[4][4] = {};
+	Ngs2GeomVector velocity {};
+	float          sound_speed = 0;
+	uint32_t       coordinate  = 0;
+	uint32_t       reserved[3] = {};
+};
+
 int KYTY_SYSV_ABI Ngs2GeomResetSourceParam(void* out_source_param)
 {
 	PRINT_NAME();
 
-	// sceNgs2GeomResetSourceParam: clear guest source defaults. Layout is opaque to HLE;
-	// titles zero-init themselves or overwrite fields after reset. Return success.
-	(void)out_source_param;
+	// Sony reset: zero then set identity-ish defaults for a non-spatialised source.
+	if (out_source_param != nullptr)
+	{
+		auto* p             = static_cast<Ngs2GeomSourceParam*>(out_source_param);
+		*p                  = Ngs2GeomSourceParam {};
+		p->cone.inner_level = 1.0f;
+		p->cone.outer_level = 1.0f;
+		p->cone.outer_angle = 3.14159265f; // 180 deg — omnidirectional default
+		p->rolloff.max_distance       = 1000.0f;
+		p->rolloff.rolloff_factor     = 1.0f;
+		p->rolloff.reference_distance = 1.0f;
+		p->doppler_factor              = 1.0f;
+		p->fbw_level                  = 1.0f;
+		p->lfe_level                  = 1.0f;
+		p->max_level                  = 1.0f;
+		p->min_level                  = 0.0f;
+		p->radius                     = 0.0f;
+		p->num_speakers               = 2;
+	}
 	return OK;
 }
 
@@ -2184,7 +2257,14 @@ int KYTY_SYSV_ABI Ngs2GeomResetListenerParam(void* out_listener_param)
 {
 	PRINT_NAME();
 
-	(void)out_listener_param;
+	if (out_listener_param != nullptr)
+	{
+		auto* p             = static_cast<Ngs2GeomListenerParam*>(out_listener_param);
+		*p                  = Ngs2GeomListenerParam {};
+		p->orient_front.z   = -1.0f; // look down -Z
+		p->orient_up.y      = 1.0f;
+		p->sound_speed      = 340.0f;
+	}
 	return OK;
 }
 
@@ -2193,8 +2273,38 @@ int KYTY_SYSV_ABI Ngs2GeomCalcListener(const void* listener_param, void* out_wor
 	PRINT_NAME();
 
 	printf("\t flags = %u\n", flags);
-	(void)listener_param;
-	(void)out_work;
+	if (out_work != nullptr)
+	{
+		auto* w = static_cast<Ngs2GeomListenerWork*>(out_work);
+		*w      = Ngs2GeomListenerWork {};
+		// Identity 4x4
+		w->matrix[0][0] = w->matrix[1][1] = w->matrix[2][2] = w->matrix[3][3] = 1.0f;
+		if (listener_param != nullptr)
+		{
+			const auto* p = static_cast<const Ngs2GeomListenerParam*>(listener_param);
+			w->velocity   = p->velocity;
+			w->sound_speed = p->sound_speed;
+		} else
+		{
+			w->sound_speed = 340.0f;
+		}
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2GeomApply(const void* listener_work, const void* source_param, void* out_attrib, uint32_t flags)
+{
+	PRINT_NAME();
+
+	printf("\t flags = %u\n", flags);
+	(void)listener_work;
+	(void)source_param;
+	if (out_attrib != nullptr)
+	{
+		// Attribute is large (level matrix); zero the first 8 floats of levels + pitch.
+		std::memset(out_attrib, 0, 4 + 8 * 8 * 4);
+		*static_cast<float*>(out_attrib) = 1.0f; // pitchRatio
+	}
 	return OK;
 }
 

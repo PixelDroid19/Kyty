@@ -90,6 +90,8 @@ int KYTY_SYSV_ABI   GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegis
 int KYTY_SYSV_ABI   GraphicsCreateInterpolantMapping(ShaderRegister* regs, const Shader* gs, const Shader* ps);
 int KYTY_SYSV_ABI   GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t* cmd, int type);
 int KYTY_SYSV_ABI   GraphicsSuspendPoint();
+// libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
+int KYTY_SYSV_ABI   GraphicsAgcDriverUnknownKRzWekV120();
 
 uint32_t GraphicsGetShRegistersPacketSize(const ShaderRegister* regs, uint32_t num_regs);
 uint32_t GraphicsEncodeShRegisters(uint32_t* cmd, uint32_t capacity_dw, const ShaderRegister* regs, uint32_t num_regs);

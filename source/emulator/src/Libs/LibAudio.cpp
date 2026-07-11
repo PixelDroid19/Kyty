@@ -128,6 +128,7 @@ LIB_DEFINE(InitAudio_1_Ngs2)
 	LIB_FUNC("0lbbayqDNoE", Ngs2::Ngs2GeomResetSourceParam);
 	LIB_FUNC("7Lcfo8SmpsU", Ngs2::Ngs2GeomResetListenerParam);
 	LIB_FUNC("1WsleK-MTkE", Ngs2::Ngs2GeomCalcListener);
+	LIB_FUNC("eF8yRCC6W64", Ngs2::Ngs2GeomApply);
 }
 
 } // namespace LibNgs2
