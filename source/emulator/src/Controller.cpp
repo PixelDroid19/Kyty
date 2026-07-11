@@ -441,8 +441,8 @@ int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param)
 	}
 
 	// Real OS returns ALREADY_OPENED on re-open; guest must use GetHandle for the prior handle.
-	// Dead Cells still polls Open each frame — return the live handle so ReadState keeps working,
-	// matching observed guest usage (Open → ReadState without GetHandle).
+	// Observed Gen5 titles poll Open each frame and then ReadState with that handle, so return
+	// the live handle instead of ALREADY_OPENED for this Open → ReadState pattern.
 	if (g_pad_opened)
 	{
 		return kPrimaryHandle;
