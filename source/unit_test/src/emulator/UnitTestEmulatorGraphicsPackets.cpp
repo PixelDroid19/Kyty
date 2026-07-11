@@ -890,6 +890,28 @@ TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
 	EXPECT_EQ(0, 0); // srt_size_dw == 0
 }
 
+// Captured CB_SHADER_MASK 0xffff (RT0+RT1 all channels). Each RT nibble is
+// either 0 (disabled) or 0xf (RGBA); partial channel enables are unsupported.
+TEST(EmulatorGraphicsPackets, CbShaderMaskFullChannelNibbles)
+{
+	auto nibble_ok = [](uint32_t mask) {
+		for (uint32_t rt = 0; rt < 8u; rt++)
+		{
+			const uint32_t n = (mask >> (rt * 4u)) & 0xfu;
+			if (n != 0u && n != 0xfu)
+			{
+				return false;
+			}
+		}
+		return true;
+	};
+	EXPECT_TRUE(nibble_ok(0x0000000fu));
+	EXPECT_TRUE(nibble_ok(0x0000ffffu));
+	EXPECT_TRUE(nibble_ok(0x00000000u));
+	EXPECT_FALSE(nibble_ok(0x00000001u)); // partial RT0
+	EXPECT_FALSE(nibble_ok(0x000000f1u));
+}
+
 // Captured first fail after EUD bind: EXP target 0x25 is Param5.
 TEST(EmulatorGraphicsPackets, ExpTarget0x25IsParam5)
 {
