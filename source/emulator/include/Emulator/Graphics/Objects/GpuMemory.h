@@ -184,6 +184,8 @@ inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing
 // Incoming StorageBuffer overlapping existing color/depth surfaces (not only
 // Texture alias / Vertex share). Captured: RT+SB Crosses and IsContainedWithin
 // multi-parent set during the same load path as RenderTexture surface alias.
+// Also captured dual-strict after VOP1 SDWA: StorageBuffer 0x8000 Crosses an
+// active DepthStencilBuffer (htile/depth plane view) — link, do not reclaim DS.
 inline bool GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                               GpuMemoryObjectType incoming_type)
 {
@@ -192,7 +194,8 @@ inline bool GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType existing_type
 		return false;
 	}
 	if (existing_type != GpuMemoryObjectType::StorageBuffer && existing_type != GpuMemoryObjectType::RenderTexture &&
-	    existing_type != GpuMemoryObjectType::Texture && existing_type != GpuMemoryObjectType::StorageTexture)
+	    existing_type != GpuMemoryObjectType::Texture && existing_type != GpuMemoryObjectType::StorageTexture &&
+	    existing_type != GpuMemoryObjectType::DepthStencilBuffer)
 	{
 		return false;
 	}

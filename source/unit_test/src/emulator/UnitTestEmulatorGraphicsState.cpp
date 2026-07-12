@@ -379,6 +379,7 @@ TEST(EmulatorGraphicsState, AllowsRenderTargetMultiSurfaceParents)
 }
 
 // Captured: StorageBuffer with RT+SB Crosses and IsContainedWithin parents.
+// Also dual-strict after VOP1 SDWA: SB 0x8000 Crosses DepthStencilBuffer.
 TEST(EmulatorGraphicsState, AllowsStorageSurfaceShareWithContainedWithin)
 {
 	EXPECT_TRUE(GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Crosses,
@@ -386,6 +387,8 @@ TEST(EmulatorGraphicsState, AllowsStorageSurfaceShareWithContainedWithin)
 	EXPECT_TRUE(GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::IsContainedWithin,
 	                                               GpuMemoryObjectType::StorageBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::IsContainedWithin,
+	                                               GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
 	                                               GpuMemoryObjectType::StorageBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
 	                                                GpuMemoryObjectType::StorageBuffer));
