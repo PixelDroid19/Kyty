@@ -18,6 +18,8 @@ enum class RenderTextureFormat : uint64_t
 	R8G8B8A8Srgb,
 	B8G8R8A8Unorm,
 	B8G8R8A8Srgb,
+	// CB COLOR_16_16_16_16 (format 0xc) + NUMBER_FLOAT (channel_type 7).
+	R16G16B16A16Sfloat,
 };
 
 class RenderTextureObject: public GpuObject

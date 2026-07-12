@@ -1099,10 +1099,10 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 	EXIT_NOT_IMPLEMENTED(omod != 0);
 	EXIT_NOT_IMPLEMENTED(src0_sel != 6);
 	EXIT_NOT_IMPLEMENTED(src0_sext != 0);
-	EXIT_NOT_IMPLEMENTED(src0_neg != 0);
+	// SDWA src0/src1 NEG bits map to operand.negate (same as VOP3).
+	// Captured post-Play Gen5 VOP2 SDWA sets src0_neg; SPIR-V already emits OpFNegate.
 	EXIT_NOT_IMPLEMENTED(src1_sel != 6);
 	EXIT_NOT_IMPLEMENTED(src1_sext != 0);
-	EXIT_NOT_IMPLEMENTED(src1_neg != 0);
 
 	ShaderInstruction inst;
 	inst.pc      = pc;
@@ -1128,6 +1128,8 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 
 	inst.src[0].absolute = (src0_abs != 0);
 	inst.src[1].absolute = (src1_abs != 0);
+	inst.src[0].negate   = (src0_neg != 0);
+	inst.src[1].negate   = (src1_neg != 0);
 
 	inst.dst.clamp = (clmp != 0);
 
@@ -2499,7 +2501,15 @@ KYTY_SHADER_PARSER(shader_parse_smem)
 			inst.src[0].size = 2;
 			inst.dst.size    = 4;
 			break;
-		case 0x03: KYTY_NI("s_load_dwordx8"); break;
+		case 0x03:
+			// Captured post-Play Gen5 SMEM: s_load_dwordx8 s[dst:dst+7], s[base:base+1], offset
+			// at shader PC 0x18 (hash0 0x210003f0). Recompiler already handles x8 via
+			// Sdst8SbaseSoffset / recompile_sload_from_extended.
+			inst.type        = ShaderInstructionType::SLoadDwordx8;
+			inst.format      = ShaderInstructionFormat::Sdst8SbaseSoffset;
+			inst.src[0].size = 2;
+			inst.dst.size    = 8;
+			break;
 		case 0x04: KYTY_NI("s_load_dwordx16"); break;
 		case 0x08:
 			inst.type        = ShaderInstructionType::SBufferLoadDword;
@@ -3124,10 +3134,24 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 					inst.dst.size = 1;
 					break;
 				}
+				case 0x2:
+				{
+					// Captured post-Play image_sample with dmask 0x2 (G only).
+					inst.format   = ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2;
+					inst.dst.size = 1;
+					break;
+				}
 				case 0x3:
 				{
 					inst.format   = ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3;
 					inst.dst.size = 2;
+					break;
+				}
+				case 0x4:
+				{
+					// Captured post-Play image_sample with dmask 0x4 (B only).
+					inst.format   = ShaderInstructionFormat::Vdata1Vaddr3StSsDmask4;
+					inst.dst.size = 1;
 					break;
 				}
 				case 0x5:

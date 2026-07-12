@@ -2781,6 +2781,110 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask1)
 	return false;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask2)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+
+	if (bind_info != nullptr && bind_info->textures2D.textures2d_sampled_num > 0 && bind_info->samplers.samplers_num > 0)
+	{
+		auto dst_value0  = operand_variable_to_str(inst.dst);
+		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
+		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
+		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
+		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
+
+		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
+		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
+		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
+		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+
+		// dmask 0x2 → sample and keep G (component 1).
+		static const char* text = R"(
+         %t24_<index> = OpLoad %uint %<src1_value0>
+         %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %t24_<index>
+         %t27_<index> = OpLoad %ImageS %t26_<index>
+         %t33_<index> = OpLoad %uint %<src2_value0>
+         %t35_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %t33_<index>
+         %t36_<index> = OpLoad %Sampler %t35_<index>
+         %t38_<index> = OpSampledImage %SampledImage %t27_<index> %t36_<index>
+         %t39_<index> = OpLoad %float %<src0_value0>
+         %t40_<index> = OpLoad %float %<src0_value1>
+         %t42_<index> = OpCompositeConstruct %v2float %t39_<index> %t40_<index>
+         %t43_<index> = OpImageSampleImplicitLod %v4float %t38_<index> %t42_<index>
+               OpStore %temp_v4float %t43_<index>
+         %t46_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_1
+         %t47_<index> = OpLoad %float %t46_<index>
+               OpStore %<dst_value0> %t47_<index>
+)";
+		*dst_source += String8(text)
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<src0_value0>", src0_value0.value)
+		                   .ReplaceStr("<src0_value1>", src0_value1.value)
+		                   .ReplaceStr("<src0_value2>", src0_value2.value)
+		                   .ReplaceStr("<src1_value0>", src1_value0.value)
+		                   .ReplaceStr("<src2_value0>", src2_value0.value)
+		                   .ReplaceStr("<dst_value0>", dst_value0.value);
+
+		return true;
+	}
+
+	return false;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask4)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+
+	if (bind_info != nullptr && bind_info->textures2D.textures2d_sampled_num > 0 && bind_info->samplers.samplers_num > 0)
+	{
+		auto dst_value0  = operand_variable_to_str(inst.dst);
+		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
+		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
+		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
+		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
+
+		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
+		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
+		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
+		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+
+		// dmask 0x4 → sample and keep B (component 2).
+		static const char* text = R"(
+         %t24_<index> = OpLoad %uint %<src1_value0>
+         %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %t24_<index>
+         %t27_<index> = OpLoad %ImageS %t26_<index>
+         %t33_<index> = OpLoad %uint %<src2_value0>
+         %t35_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %t33_<index>
+         %t36_<index> = OpLoad %Sampler %t35_<index>
+         %t38_<index> = OpSampledImage %SampledImage %t27_<index> %t36_<index>
+         %t39_<index> = OpLoad %float %<src0_value0>
+         %t40_<index> = OpLoad %float %<src0_value1>
+         %t42_<index> = OpCompositeConstruct %v2float %t39_<index> %t40_<index>
+         %t43_<index> = OpImageSampleImplicitLod %v4float %t38_<index> %t42_<index>
+               OpStore %temp_v4float %t43_<index>
+         %t46_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_2
+         %t47_<index> = OpLoad %float %t46_<index>
+               OpStore %<dst_value0> %t47_<index>
+)";
+		*dst_source += String8(text)
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<src0_value0>", src0_value0.value)
+		                   .ReplaceStr("<src0_value1>", src0_value1.value)
+		                   .ReplaceStr("<src0_value2>", src0_value2.value)
+		                   .ReplaceStr("<src1_value0>", src1_value0.value)
+		                   .ReplaceStr("<src2_value0>", src2_value0.value)
+		                   .ReplaceStr("<dst_value0>", dst_value0.value);
+
+		return true;
+	}
+
+	return false;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask8)
 {
 	const auto& inst      = code.GetInstructions().At(index);
@@ -4359,6 +4463,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 
 	if (branch.GetDst() < inst.pc)
 	{
+		// Unconditional backward S_BRANCH is an infinite structured loop: the
+		// merge block is unreachable from the back-edge path. Terminate it so
+		// the next guest basic block can open with its own OpLabel without
+		// leaving the merge unterminated (SPIR-V "block must end with a branch").
 		String8 continue_label = String8::FromPrintf("loop_continue_%04" PRIx32, inst.pc);
 		String8 merge_label    = String8::FromPrintf("loop_merge_%04" PRIx32, inst.pc);
 
@@ -4367,6 +4475,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
        %<continue> = OpLabel
                 OpBranch %<label>
        %<merge> = OpLabel
+                OpUnreachable
 )";
 
 		*dst_source += String8(loop_text)
@@ -6567,6 +6676,8 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 
     {Recompile_ImageLoad_Vdata4Vaddr3StDmaskF,             ShaderInstructionType::ImageLoad,           ShaderInstructionFormat::Vdata4Vaddr3StDmaskF,           {""}},
     {Recompile_ImageSample_Vdata1Vaddr3StSsDmask1,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1,         {""}},
+    {Recompile_ImageSample_Vdata1Vaddr3StSsDmask2,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2,         {""}},
+    {Recompile_ImageSample_Vdata1Vaddr3StSsDmask4,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata1Vaddr3StSsDmask4,         {""}},
     {Recompile_ImageSample_Vdata1Vaddr3StSsDmask8,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata1Vaddr3StSsDmask8,         {""}},
     {Recompile_ImageSample_Vdata2Vaddr3StSsDmask3,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3,         {""}},
     {Recompile_ImageSample_Vdata2Vaddr3StSsDmask5,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata2Vaddr3StSsDmask5,         {""}},
@@ -7981,10 +8092,18 @@ void Spirv::WriteLabel(int index)
 
 				if (backward_sbranch && label.GetSrc() > label.GetDst())
 				{
+					// SPIR-V requires OpLoopMerge to be immediately followed by
+					// OpBranch or OpBranchConditional. The guest body becomes a
+					// dedicated successor so the header is a valid structured
+					// loop construct (same pattern as the embedded mipmap helper).
 					String8 continue_label = String8::FromPrintf("loop_continue_%04" PRIx32, label.GetSrc());
 					String8 merge_label    = String8::FromPrintf("loop_merge_%04" PRIx32, label.GetSrc());
-					m_source += String8::FromPrintf("               OpLoopMerge %%%s %%%s None\n", merge_label.c_str(),
-					                              continue_label.c_str());
+					String8 body_label     = String8::FromPrintf("loop_body_%04" PRIx32, label.GetSrc());
+					m_source += String8::FromPrintf("               OpLoopMerge %%%s %%%s None\n"
+					                              "               OpBranch %%%s\n"
+					                              "       %%%s = OpLabel\n",
+					                              merge_label.c_str(), continue_label.c_str(), body_label.c_str(),
+					                              body_label.c_str());
 				}
 
 				if (discard)

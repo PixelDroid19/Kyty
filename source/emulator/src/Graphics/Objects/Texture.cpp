@@ -56,9 +56,18 @@ static VkFormat get_texture_format(uint32_t dfmt, uint32_t nfmt, uint32_t fmt)
 		EXIT("unknown format: nfmt = %u, dfmt = %u\n", nfmt, dfmt);
 	} else
 	{
+		// Gen5 unified image formats (UfmtGFX10).
+		if (fmt == 14)
+		{
+			return VK_FORMAT_R8G8_UNORM;
+		}
 		if (fmt == 56)
 		{
 			return VK_FORMAT_R8G8B8A8_UNORM;
+		}
+		if (fmt == 71)
+		{
+			return VK_FORMAT_R16G16B16A16_SFLOAT;
 		}
 		EXIT("unknown format: fmt = %u\n", fmt);
 	}
@@ -247,7 +256,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// SW_64KB_R_X sample texture: detile into tightly packed linear rows
 			// then upload. Render-target aliases still prefer FindRenderTexture
 			// before create; this path covers pure CPU-backed sample textures.
-			EXIT_NOT_IMPLEMENTED(fmt != 56); // R8G8B8A8 only until other formats are evidenced
+			// CPU detile path only has the 4 BPE SW_64KB_R_X pattern. Format 71
+			// (RGBA16F) is accepted for size/FindRenderTexture aliasing; pure CPU
+			// upload of 8 BPE tiled samples remains unsupported.
+			EXIT_NOT_IMPLEMENTED(fmt != 56);
 			EXIT_NOT_IMPLEMENTED(levels != 1);
 			const uint32_t bpp          = 4u;
 			const uint32_t pitch_elems  = (pitch != 0u ? static_cast<uint32_t>(pitch) : static_cast<uint32_t>(width));

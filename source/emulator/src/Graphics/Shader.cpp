@@ -51,16 +51,22 @@ bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 	return format == 20;
 }
 
-uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format)
+uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 {
-	// GFX linear surfaces force a 256-byte row pitch alignment. Format 56 is
-	// R8G8B8A8 (4 Bpp); other formats fall back to 4 Bpp until more are wired.
-	uint32_t bpp = 4;
+	// UfmtGFX10 unified image formats observed as sample textures.
 	switch (format)
 	{
-		case 56: bpp = 4; break;
-		default: bpp = 4; break;
+		case 14: return 2; // UFMT_8_8_UNORM
+		case 56: return 4; // UFMT_8_8_8_8_UNORM
+		case 71: return 8; // UFMT_16_16_16_16_FLOAT
+		default: return 0;
 	}
+}
+
+uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format)
+{
+	// GFX linear surfaces force a 256-byte row pitch alignment.
+	const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
 	EXIT_IF(bpp == 0);
 	const uint32_t align_px = 256u / bpp;
 	EXIT_IF(align_px == 0);
@@ -306,6 +312,8 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxenFloat4: return "Vdata4VaddrSvSoffsIdxenFloat4"; break;
 		case ShaderInstructionFormat::Vdata4Vaddr2SvSoffsOffenIdxenFloat4: return "Vdata4Vaddr2SvSoffsOffenIdxenFloat4"; break;
 		case ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1: return "Vdata1Vaddr3StSsDmask1"; break;
+		case ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2: return "Vdata1Vaddr3StSsDmask2"; break;
+		case ShaderInstructionFormat::Vdata1Vaddr3StSsDmask4: return "Vdata1Vaddr3StSsDmask4"; break;
 		case ShaderInstructionFormat::Vdata1Vaddr3StSsDmask8: return "Vdata1Vaddr3StSsDmask8"; break;
 		case ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3: return "Vdata2Vaddr3StSsDmask3"; break;
 		case ShaderInstructionFormat::Vdata2Vaddr3StSsDmask5: return "Vdata2Vaddr3StSsDmask5"; break;
@@ -393,6 +401,8 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::Vm: s = "vm"; break;
 			case ShaderInstructionFormat::L: s = String8::FromPrintf("label_%04" PRIx32, inst.pc + 4 + inst.src[0].constant.i); break;
 			case ShaderInstructionFormat::Dmask1: s = "dmask:0x1"; break;
+			case ShaderInstructionFormat::Dmask2: s = "dmask:0x2"; break;
+			case ShaderInstructionFormat::Dmask4: s = "dmask:0x4"; break;
 			case ShaderInstructionFormat::Dmask8: s = "dmask:0x8"; break;
 			case ShaderInstructionFormat::Dmask3: s = "dmask:0x3"; break;
 			case ShaderInstructionFormat::Dmask5: s = "dmask:0x5"; break;
@@ -962,10 +972,8 @@ static bool SpirvRun(const String8& src, Vector<uint32_t>* dst, String8* err_msg
 
 	if (optimize && !opt.Run(spirv.data(), spirv.size(), &spirv))
 	{
-		printf("Optimize failed: %s
-", error_msg.c_str());
-		*err_msg = String8::FromPrintf("Optimize failed: %s
-", error_msg.c_str());
+		printf("Optimize failed: %s\n", error_msg.c_str());
+		*err_msg = String8::FromPrintf("Optimize failed: %s\n", error_msg.c_str());
 		return false;
 	}
 

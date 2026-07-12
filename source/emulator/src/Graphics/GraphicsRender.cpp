@@ -594,7 +594,10 @@ static void rt_check(const HW::RenderTarget& rt)
 		EXIT_NOT_IMPLEMENTED(rt.info.cmask_tile_mode_neo != 0x00000000);
 		EXIT_NOT_IMPLEMENTED(rt.info.blend_bypass != false);
 		// EXIT_NOT_IMPLEMENTED(rt.info.blend_clamp != false);
-		EXIT_NOT_IMPLEMENTED(rt.info.round_mode != false);
+		// ROUND_MODE (CB_COLOR*_INFO bit 18): truncate vs round when writing
+		// fixed-point blend results. Captured post-Play RTs set it true.
+		// Layout-neutral; host blend uses Vulkan's fixed conversion. Accept both.
+		// EXIT_NOT_IMPLEMENTED(rt.info.round_mode != false);
 		//		 EXIT_NOT_IMPLEMENTED(rt.format != 0x0000000a);
 		// EXIT_NOT_IMPLEMENTED(rt.channel_type != 0x00000006);
 		// EXIT_NOT_IMPLEMENTED(rt.channel_order != 0x00000001);
@@ -4031,8 +4034,22 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		height = rt.attrib2.height + 1;
 		pitch  = width;
 
+		// CB_COLOR FORMAT field: 0x1 = COLOR_8 (1 Bpp), 0xa = COLOR_8_8_8_8 (4),
+		// 0xc = COLOR_16_16_16_16 (8). TileGetRenderTargetSize needs exact Bpp.
+		uint32_t rt_bpp = 4u;
+		if (rt.info.format == 0x1u)
+		{
+			rt_bpp = 1u;
+		} else if (rt.info.format == 0xcu)
+		{
+			rt_bpp = 8u;
+		} else if (rt.info.format != 0xau)
+		{
+			EXIT("unsupported Gen5 CB format for size: 0x%" PRIx32 "\n", rt.info.format);
+		}
+
 		Graphics::TileSizeAlign size32 {};
-		Graphics::TileGetRenderTargetSize(width, height, pitch, rt.attrib3.tile_mode, (rt.info.format == 0x1 ? 1u : 4u), &size32);
+		Graphics::TileGetRenderTargetSize(width, height, pitch, rt.attrib3.tile_mode, rt_bpp, &size32);
 
 		size = size32.size;
 
@@ -4093,6 +4110,10 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		} else if (rt.info.format == 0x1 && rt.info.channel_type == 0x0 && rt.info.channel_order == 0x0)
 		{
 			rt_format = RenderTextureFormat::R8Unorm;
+		} else if (rt.info.format == 0xc && rt.info.channel_type == 0x7 && rt.info.channel_order == 0x0)
+		{
+			// Captured post-Play HDR/intermediate RT: COLOR_16_16_16_16 + FLOAT.
+			rt_format = RenderTextureFormat::R16G16B16A16Sfloat;
 		} else
 		{
 			EXIT("%s\n unknown format\n", rt_print("RenderTarget", rt).Concat(U"").C_Str());
@@ -4250,10 +4271,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		if (gen5)
 		{
-			// Observed post-Play sample textures: TileMode 0 (linear) and 27
-			// (SW_64KB_R_X / 0x1b), format 56 RGBA8, Type 9 2D.
+			// Observed sample textures (UfmtGFX10):
+			// - Tile 0/27, format 56 = 8_8_8_8_UNORM (RGBA8)
+			// - Tile 0, format 14 = 8_8_UNORM (RG8), 2048x4096 linear atlas
+			// - Tile 27, format 71 = 16_16_16_16_FLOAT (RGBA16F), 642x362 alias of RT
 			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 27);
-			EXIT_NOT_IMPLEMENTED(r.Format() != 56);
+			EXIT_NOT_IMPLEMENTED(r.Format() != 56 && r.Format() != 14 && r.Format() != 71);
 			EXIT_NOT_IMPLEMENTED(r.PerfMod5() != 7 && r.PerfMod5() != 0);
 			EXIT_NOT_IMPLEMENTED(r.BCSwizzle() != 0);
 			EXIT_NOT_IMPLEMENTED(r.BaseArray5() != 0);

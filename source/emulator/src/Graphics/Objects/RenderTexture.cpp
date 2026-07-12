@@ -178,6 +178,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		case static_cast<uint64_t>(RenderTextureFormat::R8G8B8A8Srgb): vk_format = VK_FORMAT_R8G8B8A8_SRGB; break;
 		case static_cast<uint64_t>(RenderTextureFormat::B8G8R8A8Unorm): vk_format = VK_FORMAT_B8G8R8A8_UNORM; break;
 		case static_cast<uint64_t>(RenderTextureFormat::B8G8R8A8Srgb): vk_format = VK_FORMAT_B8G8R8A8_SRGB; break;
+		case static_cast<uint64_t>(RenderTextureFormat::R16G16B16A16Sfloat): vk_format = VK_FORMAT_R16G16B16A16_SFLOAT; break;
 		default: EXIT("unknown format: %" PRIu64 "\n", pixel_format);
 	}
 
@@ -308,6 +309,7 @@ static void* create2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint
 		case static_cast<uint64_t>(RenderTextureFormat::R8G8B8A8Srgb): vk_format = VK_FORMAT_R8G8B8A8_SRGB; break;
 		case static_cast<uint64_t>(RenderTextureFormat::B8G8R8A8Unorm): vk_format = VK_FORMAT_B8G8R8A8_UNORM; break;
 		case static_cast<uint64_t>(RenderTextureFormat::B8G8R8A8Srgb): vk_format = VK_FORMAT_B8G8R8A8_SRGB; break;
+		case static_cast<uint64_t>(RenderTextureFormat::R16G16B16A16Sfloat): vk_format = VK_FORMAT_R16G16B16A16_SFLOAT; break;
 		default: EXIT("unknown format: %" PRIu64 "\n", pixel_format);
 	}
 

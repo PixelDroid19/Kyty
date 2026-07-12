@@ -295,6 +295,8 @@ enum FormatByte : uint64_t
 	Dmask3, // dmask:0x3
 	Dmask5, // dmask:0x5
 	Dmask9, // dmask:0x9
+	Dmask4, // dmask:0x4 (B channel only)
+	Dmask2, // dmask:0x2 (G channel only)
 	Gds,    // gds
 };
 
@@ -355,6 +357,8 @@ enum Format : uint64_t
 	SVdstSVsrc0                         = FormatDefine({D, S0}),
 	SVdstSVsrc0SVsrc1                   = FormatDefine({D, S0, S1}),
 	Vdata1Vaddr3StSsDmask1              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask1}),
+	Vdata1Vaddr3StSsDmask2              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask2}),
+	Vdata1Vaddr3StSsDmask4              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask4}),
 	Vdata1Vaddr3StSsDmask8              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask8}),
 	Vdata1VaddrSvSoffsIdxen             = FormatDefine({D, S0, S1A4, S2, Idxen}),
 	Vdata1VaddrSvSoffsIdxenFloat1       = FormatDefine({D, S0, S1A4, S2, Idxen, Float1}),
@@ -570,6 +574,8 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
+// Bytes per texel for Gen5 unified image formats used as sample textures (0 if unknown).
+uint32_t ShaderGen5TextureBytesPerElement(uint32_t format);
 // Linear Gen5 texture row pitch in texels: 256-byte aligned rows (GFX linear surface rule).
 uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format);
 

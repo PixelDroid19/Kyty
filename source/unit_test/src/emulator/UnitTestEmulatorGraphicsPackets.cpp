@@ -84,6 +84,38 @@ TEST(EmulatorGraphicsPackets, ParsesGen5LshlAddU32)
 	EXPECT_EQ(instruction.src[2].register_id, 2);
 }
 
+// VOP2 SDWA with SRC0_NEG (bit 20 of SDWA control). Captured post-Play path
+// hits EXIT_NOT_IMPLEMENTED(src0_neg != 0) until negate is wired like VOP3.
+TEST(EmulatorGraphicsPackets, ParsesVop2SdwaSrc0Negate)
+{
+	// v_add_f32 v0, |−v2|, v1 with SDWA: src0=SDWA(249), opcode=3.
+	const uint32_t word0 = (0x03u << 25u) | (0u << 17u) | (1u << 9u) | 249u;
+	const uint32_t word1 = 2u | (6u << 8u) | (6u << 16u) | (1u << 20u) | (0u << 23u) | (6u << 24u);
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VAddF32);
+	EXPECT_EQ(instruction.src[0].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.src[0].register_id, 2);
+	EXPECT_TRUE(instruction.src[0].negate);
+	EXPECT_FALSE(instruction.src[0].absolute);
+	EXPECT_EQ(instruction.src[1].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.src[1].register_id, 1);
+	EXPECT_FALSE(instruction.src[1].negate);
+}
+
 // Captured post-Play Gen5 VOP2 word 0x00000009 at pc=0x64:
 // OP=0, vdst=v0, vsrc1=v0, src0=s9 → v_cndmask_b32 v0, s9, v0 (legacy OP encoding).
 TEST(EmulatorGraphicsPackets, ParsesGen5Vop2Op0AsCndmask)
@@ -255,7 +287,17 @@ TEST(EmulatorGraphicsPackets, StructuresBackwardSBranchAsLoopHeader)
 	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
 
 	EXPECT_NE(source.FindIndex("OpBranch %label_0004_0008"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpLoopMerge %loop_merge_0008 %loop_continue_0008 None"), Core::STRING8_INVALID_INDEX);
+	// OpLoopMerge must be immediately followed by a branch into the body block.
+	const auto merge_idx = source.FindIndex("OpLoopMerge %loop_merge_0008 %loop_continue_0008 None");
+	EXPECT_NE(merge_idx, Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpBranch %loop_body_0008", merge_idx), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%loop_body_0008 = OpLabel", merge_idx), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpBranch %loop_continue_0008"), Core::STRING8_INVALID_INDEX);
+	const auto merge_label_idx = source.FindIndex("%loop_merge_0008 = OpLabel");
+	EXPECT_NE(merge_label_idx, Core::STRING8_INVALID_INDEX);
+	// Merge of an unconditional backward branch is unreachable; it must end
+	// with a terminator before any subsequent guest block label.
+	EXPECT_NE(source.FindIndex("OpUnreachable", merge_label_idx), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, ClassifiesGen5FourComponent32BitBufferFormats)
@@ -712,6 +754,121 @@ TEST(EmulatorGraphicsPackets, AlignsGen5LinearTexturePitchTo256ByteRows)
 	EXPECT_EQ(ShaderGen5LinearTexturePitch(64, 56), 64u);
 	EXPECT_EQ(ShaderGen5LinearTexturePitch(65, 56), 128u);
 	EXPECT_EQ(ShaderGen5LinearTexturePitch(1280, 56), 1280u);
+	// Format 14 = UFMT_8_8_UNORM (2 Bpp): 256/2 = 128-texel row alignment.
+	EXPECT_EQ(ShaderGen5TextureBytesPerElement(14), 2u);
+	EXPECT_EQ(ShaderGen5TextureBytesPerElement(56), 4u);
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(1, 14), 128u);
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(128, 14), 128u);
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(129, 14), 256u);
+	// Captured loading atlas: 2048x4096 RG8 linear (format 14, tile 0).
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(2048, 14), 2048u);
+}
+
+// Captured post-Play sample texture: format 14 (RG8), 2048x4096, linear tile 0.
+// Size must be pitch*height*2 with 256-byte row alignment (pitch == width here).
+TEST(EmulatorGraphicsPackets, SizesGen5LinearRg8Texture2048x4096)
+{
+	TileSizeAlign size {};
+	const uint32_t width  = 2048;
+	const uint32_t height = 4096;
+	const uint32_t pitch  = ShaderGen5LinearTexturePitch(width, 14);
+	TileGetTextureSize2(14, width, height, pitch, 1, 0, &size, nullptr, nullptr);
+	EXPECT_EQ(pitch, 2048u);
+	EXPECT_EQ(size.size, static_cast<uint64_t>(pitch) * height * 2u);
+	EXPECT_NE(size.size, 0u);
+}
+
+// Captured post-Play intermediate RT: 642x362 (attrib2 0x281/0x169), tile 0x1b,
+// COLOR_16_16_16_16 (format 0xc) → 8 Bpp, SW_64KB_R_X block grid 128x64.
+// Matching sample texture format 71 (UFMT_16_16_16_16_FLOAT) must size equal so
+// FindRenderTexture can alias the RT.
+TEST(EmulatorGraphicsPackets, SizesGen5RotatedXRenderTargetRgba16Float)
+{
+	TileSizeAlign size {};
+	const uint32_t width  = 0x281u + 1u;
+	const uint32_t height = 0x169u + 1u;
+	EXPECT_EQ(width, 642u);
+	EXPECT_EQ(height, 362u);
+	TileGetRenderTargetSize(width, height, width, 0x1bu, 8u, &size);
+	// blocks_x = ceil(642/128)=6, blocks_y = ceil(362/64)=6, size = 6*6*65536
+	EXPECT_EQ(size.size, 6u * 6u * 65536u);
+	EXPECT_EQ(size.align, 65536u);
+	EXPECT_EQ(ShaderGen5TextureBytesPerElement(71), 8u);
+	TileSizeAlign tex {};
+	TileGetTextureSize2(71, width, height, width, 1, 27, &tex, nullptr, nullptr);
+	EXPECT_EQ(tex.size, size.size);
+	EXPECT_EQ(tex.align, size.align);
+}
+
+// CB_COLOR0_INFO.ROUND_MODE is bit 18; captured post-Play RTs set it.
+// Decoder uses KYTY_PM4_GET — keep the shift/mask contract locked.
+TEST(EmulatorGraphicsPackets, DecodesCbColorInfoRoundModeBit)
+{
+	const uint32_t round_on  = 1u << Pm4::CB_COLOR0_INFO_ROUND_MODE_SHIFT;
+	const uint32_t round_off = 0u;
+	EXPECT_EQ(Pm4::CB_COLOR0_INFO_ROUND_MODE_SHIFT, 18u);
+	EXPECT_EQ(Pm4::CB_COLOR0_INFO_ROUND_MODE_MASK, 1u);
+	EXPECT_EQ(KYTY_PM4_GET(round_on, CB_COLOR0_INFO, ROUND_MODE), 1u);
+	EXPECT_EQ(KYTY_PM4_GET(round_off, CB_COLOR0_INFO, ROUND_MODE), 0u);
+	// Adjacent blend_bypass (bit 16) must not alias into ROUND_MODE.
+	const uint32_t blend_bypass = 1u << Pm4::CB_COLOR0_INFO_BLEND_BYPASS_SHIFT;
+	EXPECT_EQ(KYTY_PM4_GET(blend_bypass, CB_COLOR0_INFO, ROUND_MODE), 0u);
+}
+
+// image_sample (MIMG op 0x20) with single-channel dmasks — captured post-Play
+// with dmask 0x4 then 0x2 at sequential PCs.
+TEST(EmulatorGraphicsPackets, ParsesImageSampleSingleChannelDmasks)
+{
+	// MIMG encoding: bits[31:26]=0x3c, opcode bits[24:18], dmask bits[11:8].
+	const uint32_t enc = 0x3cu << 26u;
+	const uint32_t dmask4 = enc | (0x20u << 18u) | (0x4u << 8u);
+	const uint32_t dmask2 = enc | (0x20u << 18u) | (0x2u << 8u);
+	const uint32_t word1  = 0u;
+	const uint32_t shader[] = {dmask4, word1, dmask2, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::ImageSample);
+	EXPECT_EQ(code.GetInstructions().At(0).format, ShaderInstructionFormat::Vdata1Vaddr3StSsDmask4);
+	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 1);
+	EXPECT_EQ(code.GetInstructions().At(1).type, ShaderInstructionType::ImageSample);
+	EXPECT_EQ(code.GetInstructions().At(1).format, ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2);
+	EXPECT_EQ(code.GetInstructions().At(1).dst.size, 1);
+}
+
+// Gen5 SMEM opcode 0x3: s_load_dwordx8 s[4:11], s[0:1], 0 — captured at PC 0x18.
+TEST(EmulatorGraphicsPackets, ParsesSmembSLoadDwordx8)
+{
+	// Same envelope as MaterializesExtendedSLoadDwordAndX2 x2 word, opcode 1→3.
+	const uint32_t shader[] = {0xf40c0100u, 0xfa000000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::SLoadDwordx8);
+	EXPECT_EQ(inst.format, ShaderInstructionFormat::Sdst8SbaseSoffset);
+	EXPECT_EQ(inst.dst.size, 8);
+	EXPECT_EQ(inst.src[0].size, 2);
 }
 
 // Gen5 SMEM: SLoadDwordx2 s[4:5], s[0:1], 0; SLoadDword s6, s[0:1], 8; s_endpgm

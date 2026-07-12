@@ -5,6 +5,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Graphics/AsyncJob.h"
+#include "Emulator/Graphics/Shader.h"
 #include "Emulator/Profiler.h"
 
 #if KYTY_COMPILER != KYTY_COMPILER_CLANG && KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -1390,13 +1391,11 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		// Gen5 render targets — never fall through to linear byte arithmetic.
 		if (tile == 0x1bu)
 		{
-			uint32_t bpp = 4;
-			switch (format)
-			{
-				case 56: bpp = 4; break; // R8G8B8A8
-				default:
-					EXIT("unsupported Gen5 tiled texture format %u for tile mode 27\n", format);
-			}
+			const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
+			EXIT_NOT_IMPLEMENTED(bpp == 0);
+			// Detile currently only implements the 4 BPE swizzle pattern; 8 BPE
+			// sample textures observed as aliases of COLOR_16_16_16_16 RTs still
+			// need a correct size for FindRenderTexture / GpuMemory linking.
 
 			EXIT_NOT_IMPLEMENTED(levels != 1);
 
@@ -1415,10 +1414,12 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			}
 			if (padded_size != nullptr)
 			{
-				// Block grids for 4-byte texels are 128x128 elements (see
-				// TileGetRenderTargetSize). Pad dimensions to complete blocks.
-				padded_size[0].width  = ((width + 127u) / 128u) * 128u;
-				padded_size[0].height = ((height + 127u) / 128u) * 128u;
+				// Block geometry from TileGetRenderTargetSize: 4 BPE → 128x128,
+				// 8 BPE → 128x64 elements per 64 KiB block.
+				const uint32_t block_w = 128u;
+				const uint32_t block_h = (bpp == 8u ? 64u : 128u);
+				padded_size[0].width  = ((width + block_w - 1u) / block_w) * block_w;
+				padded_size[0].height = ((height + block_h - 1u) / block_h) * block_h;
 			}
 			return;
 		}
@@ -1426,14 +1427,8 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		// Linear fallback for tile 0 (and only tile 0).
 		EXIT_NOT_IMPLEMENTED(tile != 0);
 
-		uint32_t bpp = 4; // default: 32-bit texel (e.g. RGBA8, format 56)
-		switch (format)
-		{
-			case 56: bpp = 4; break; // R8G8B8A8
-			default:
-				printf("Tile: no size table for format %u, assuming %u bytes/texel\n", format, bpp);
-				break;
-		}
+		const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
+		EXIT_NOT_IMPLEMENTED(bpp == 0);
 
 		auto align_up = [](uint64_t v, uint64_t a) -> uint64_t { return (v + a - 1u) & ~(a - 1u); };
 
