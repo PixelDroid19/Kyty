@@ -100,6 +100,90 @@ static VirtualMemory::Mode get_protection_flag(int mode)
 	}
 }
 
+static uintptr_t align_up(uintptr_t addr, uint64_t alignment)
+{
+	return (addr + alignment - 1) & ~(alignment - 1);
+}
+
+// GpuMemory page ids pack vaddr>>14 into a uint32, so guest addresses must fit
+// below 2^46. Linux free mmap commonly returns ~0x7f... which is outside that
+// window and aborts on the first GPU-backed VideoOut registration. Keep free
+// guest placements in a low window modeled after Windows SYSTEM_MANAGED, below
+// the typical eboot base at 0x9_0000_0000.
+static constexpr uint64_t kGuestVaMax  = (1ull << 46) - 1ull;
+static constexpr uintptr_t kGuestHeapLo = 0x0000040000ull;
+static constexpr uintptr_t kGuestHeapHi = 0x0800000000ull;
+
+static bool guest_va_compatible(uint64_t addr, uint64_t size)
+{
+	if (addr == 0 || size == 0)
+	{
+		return false;
+	}
+	if (addr > kGuestVaMax)
+	{
+		return false;
+	}
+	if (addr + size - 1ull > kGuestVaMax)
+	{
+		return false;
+	}
+	return true;
+}
+
+static void track_alloc(uintptr_t ret_addr, uint64_t size, int protect)
+{
+	pthread_mutex_lock(&g_virtual_mutex);
+	(*g_allocs)[ret_addr] = size;
+	uintptr_t page_start  = ret_addr >> 12u;
+	uintptr_t page_end    = (ret_addr + size - 1) >> 12u;
+	for (uintptr_t page = page_start; page <= page_end; page++)
+	{
+		(*g_protects)[page] = protect;
+	}
+	pthread_mutex_unlock(&g_virtual_mutex);
+}
+
+static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, uint64_t alignment)
+{
+	if (alignment == 0)
+	{
+		alignment = 0x1000;
+	}
+
+	// Always honor the requested alignment (e.g. 2 MiB GPU heaps).
+	uintptr_t start = (prefer != 0) ? prefer : kGuestHeapLo;
+	if (start < kGuestHeapLo)
+	{
+		start = kGuestHeapLo;
+	}
+	start = align_up(start, alignment);
+
+	// Large flexible/direct heaps are demand-backed; avoid immediate commit checks.
+	const int flags_base = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE;
+
+	for (uintptr_t a = start; a + size <= kGuestHeapHi && a + size - 1 <= kGuestVaMax; a += alignment)
+	{
+#ifdef KYTY_FIXED_NOREPLACE
+		// NOLINTNEXTLINE
+		void* ptr = mmap(reinterpret_cast<void*>(a), size, protect, MAP_FIXED_NOREPLACE | flags_base, -1, 0);
+#else
+		// NOLINTNEXTLINE
+		void* ptr = mmap(reinterpret_cast<void*>(a), size, protect, MAP_FIXED | flags_base, -1, 0);
+		if (ptr != MAP_FAILED && reinterpret_cast<uintptr_t>(ptr) != a)
+		{
+			munmap(ptr, size);
+			ptr = MAP_FAILED;
+		}
+#endif
+		if (ptr != MAP_FAILED)
+		{
+			return ptr;
+		}
+	}
+	return MAP_FAILED;
+}
+
 uint64_t sys_virtual_alloc(uint64_t address, uint64_t size, VirtualMemory::Mode mode)
 {
 	EXIT_IF(g_allocs == nullptr);
@@ -108,29 +192,31 @@ uint64_t sys_virtual_alloc(uint64_t address, uint64_t size, VirtualMemory::Mode 
 
 	int protect = get_protection_flag(mode);
 
-	void* ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_PRIVATE | MAP_ANON, -1, 0); // NOLINT
+	void* ptr = nullptr;
+	if (addr == 0)
+	{
+		ptr = mmap_in_guest_window(0, size, protect, 0x1000);
+	} else
+	{
+		// NOLINTNEXTLINE
+		ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_PRIVATE | MAP_ANON, -1, 0);
+		auto ret_addr = reinterpret_cast<uintptr_t>(ptr);
+		if (ptr != MAP_FAILED && !guest_va_compatible(ret_addr, size))
+		{
+			munmap(ptr, size);
+			ptr = mmap_in_guest_window(addr, size, protect, 0x1000);
+		}
+	}
 
 	auto ret_addr = reinterpret_cast<uintptr_t>(ptr);
 
 	if (ptr != MAP_FAILED)
 	{
-		pthread_mutex_lock(&g_virtual_mutex);
-		(*g_allocs)[ret_addr] = size;
-		uintptr_t page_start  = ret_addr >> 12u;
-		uintptr_t page_end    = (ret_addr + size - 1) >> 12u;
-		for (uintptr_t page = page_start; page <= page_end; page++)
-		{
-			(*g_protects)[page] = protect;
-		}
-		pthread_mutex_unlock(&g_virtual_mutex);
+		track_alloc(ret_addr, size, protect);
+		return ret_addr;
 	}
 
-	return ret_addr;
-}
-
-static uintptr_t align_up(uintptr_t addr, uint64_t alignment)
-{
-	return (addr + alignment - 1) & ~(alignment - 1);
+	return 0;
 }
 
 uint64_t sys_virtual_alloc_aligned(uint64_t address, uint64_t size, VirtualMemory::Mode mode, uint64_t alignment)
@@ -145,57 +231,50 @@ uint64_t sys_virtual_alloc_aligned(uint64_t address, uint64_t size, VirtualMemor
 	auto addr    = static_cast<uintptr_t>(address);
 	int  protect = get_protection_flag(mode);
 
-	void* ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_PRIVATE | MAP_ANON, -1, 0); // NOLINT
+	void*     ptr      = MAP_FAILED;
+	uintptr_t ret_addr = 0;
 
-	auto ret_addr = reinterpret_cast<uintptr_t>(ptr);
-
-	if (ptr != MAP_FAILED && ((ret_addr & (alignment - 1)) != 0))
+	if (addr == 0)
 	{
-		munmap(ptr, size);
-
-		ptr      = mmap(reinterpret_cast<void*>(addr), size + alignment, protect, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0); // NOLINT
+		ptr = mmap_in_guest_window(0, size, protect, alignment);
 		ret_addr = reinterpret_cast<uintptr_t>(ptr);
-		if (ptr != MAP_FAILED)
+	} else
+	{
+		// NOLINTNEXTLINE
+		ptr      = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_PRIVATE | MAP_ANON, -1, 0);
+		ret_addr = reinterpret_cast<uintptr_t>(ptr);
+
+		if (ptr != MAP_FAILED && (((ret_addr & (alignment - 1)) != 0) || !guest_va_compatible(ret_addr, size)))
 		{
-			munmap(ptr, size + alignment);
-			auto aligned_addr = align_up(ret_addr, alignment);
-#ifdef KYTY_FIXED_NOREPLACE
-			// NOLINTNEXTLINE
-			ptr      = mmap(reinterpret_cast<void*>(aligned_addr), size, protect, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANON, -1, 0);
-#else
-			// NOLINTNEXTLINE
-			ptr = mmap(reinterpret_cast<void*>(aligned_addr), size, protect, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
-#endif
-			ret_addr = reinterpret_cast<uintptr_t>(ptr);
-			if (ptr == MAP_FAILED)
-			{
-				[[maybe_unused]] int err = errno;
-				// printf("mmap failed: %d\n", err);
-			}
-			if (ptr != MAP_FAILED && ((ret_addr & (alignment - 1)) != 0))
-			{
-				munmap(ptr, size);
-				ret_addr = 0;
-				ptr      = MAP_FAILED;
-			}
+			munmap(ptr, size);
+			ptr      = MAP_FAILED;
+			ret_addr = 0;
+		}
+
+		if (ptr == MAP_FAILED)
+		{
+			// Prefer the caller's hint when it is already in the guest window.
+			const uintptr_t prefer = guest_va_compatible(addr, size) ? addr : 0;
+			ptr                    = mmap_in_guest_window(prefer, size, protect, alignment);
+			ret_addr               = reinterpret_cast<uintptr_t>(ptr);
 		}
 	}
 
-	if (ptr == MAP_FAILED)
+	if (ptr == MAP_FAILED || ((ret_addr & (alignment - 1)) != 0) || !guest_va_compatible(ret_addr, size))
 	{
-		return sys_virtual_alloc_aligned(address, size, mode, alignment << 1u);
+		if (ptr != MAP_FAILED)
+		{
+			munmap(ptr, size);
+		}
+		// Widening alignment can recover from awkward free-space fragmentation.
+		if (alignment < (1ull << 30))
+		{
+			return sys_virtual_alloc_aligned(address, size, mode, alignment << 1u);
+		}
+		return 0;
 	}
 
-	pthread_mutex_lock(&g_virtual_mutex);
-	(*g_allocs)[ret_addr] = size;
-	uintptr_t page_start  = ret_addr >> 12u;
-	uintptr_t page_end    = (ret_addr + size - 1) >> 12u;
-	for (uintptr_t page = page_start; page <= page_end; page++)
-	{
-		(*g_protects)[page] = protect;
-	}
-	pthread_mutex_unlock(&g_virtual_mutex);
-
+	track_alloc(ret_addr, size, protect);
 	return ret_addr;
 }
 

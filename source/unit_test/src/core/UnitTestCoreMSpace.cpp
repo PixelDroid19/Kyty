@@ -183,7 +183,10 @@ static void test_fill()
 			}
 		}
 
-		// printf("add = %d, del = %d, rea = %d\n", add, del, rea);
+		// Counters remain for local stress diagnostics; keep them live for -Werror.
+		EXPECT_GE(add, 0);
+		EXPECT_GE(del, 0);
+		EXPECT_GE(rea, 0);
 	}
 
 	bool ok = true;

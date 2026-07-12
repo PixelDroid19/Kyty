@@ -9,11 +9,46 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <unordered_set>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::LibKernel::EventFlag {
 
 LIB_NAME("libkernel", "libkernel");
+
+// Live EventFlag object registry. Guest may pass a garbage pointer when a
+// waiter races ahead of CreateEventFlag; never dereference unregistered
+// handles (observed Linux VibrationTrackThread SIGSEGV on 0xcccccccc…).
+static Core::Mutex                          g_event_flag_registry_mutex;
+static std::unordered_set<KernelEventFlag>  g_live_event_flags;
+
+static bool EventFlagIsLive(KernelEventFlag ef)
+{
+	if (ef == nullptr)
+	{
+		return false;
+	}
+	Core::LockGuard lock(g_event_flag_registry_mutex);
+	return g_live_event_flags.find(ef) != g_live_event_flags.end();
+}
+
+static void EventFlagRegister(KernelEventFlag ef)
+{
+	EXIT_IF(ef == nullptr);
+	Core::LockGuard lock(g_event_flag_registry_mutex);
+	g_live_event_flags.insert(ef);
+}
+
+static void EventFlagUnregister(KernelEventFlag ef)
+{
+	if (ef == nullptr)
+	{
+		return;
+	}
+	Core::LockGuard lock(g_event_flag_registry_mutex);
+	g_live_event_flags.erase(ef);
+}
 
 class KernelEventFlagPrivate
 {
@@ -294,8 +329,10 @@ int KYTY_SYSV_ABI KernelCreateEventFlag(KernelEventFlag* ef, const char* name, u
 	}
 
 	*ef = new KernelEventFlagPrivate(String::FromUtf8(name), single, fifo, init_pattern);
+	EventFlagRegister(*ef);
 
 	printf("\tEventFlag create: %s\n", name);
+	printf("\tEventFlag ptr    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(*ef));
 
 	return OK;
 }
@@ -304,11 +341,12 @@ int KYTY_SYSV_ABI KernelDeleteEventFlag(KernelEventFlag ef)
 {
 	PRINT_NAME();
 
-	if (ef == nullptr)
+	if (!EventFlagIsLive(ef))
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
 
+	EventFlagUnregister(ef);
 	delete ef;
 
 	return OK;
@@ -319,8 +357,9 @@ int KYTY_SYSV_ABI KernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, 
 {
 	PRINT_NAME();
 
-	if (ef == nullptr)
+	if (!EventFlagIsLive(ef))
 	{
+		printf("\tEventFlag wait: invalid handle 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ef));
 		return KERNEL_ERROR_ESRCH;
 	}
 
@@ -367,7 +406,7 @@ int KYTY_SYSV_ABI KernelPollEventFlag(KernelEventFlag ef, uint64_t bit_pattern, 
 {
 	PRINT_NAME();
 
-	if (ef == nullptr)
+	if (!EventFlagIsLive(ef))
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
@@ -415,7 +454,7 @@ int KYTY_SYSV_ABI KernelSetEventFlag(KernelEventFlag ef, uint64_t bit_pattern)
 {
 	PRINT_NAME();
 
-	if (ef == nullptr)
+	if (!EventFlagIsLive(ef))
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
@@ -429,7 +468,7 @@ int KYTY_SYSV_ABI KernelClearEventFlag(KernelEventFlag ef, uint64_t bit_pattern)
 {
 	PRINT_NAME();
 
-	if (ef == nullptr)
+	if (!EventFlagIsLive(ef))
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
@@ -443,7 +482,7 @@ int KYTY_SYSV_ABI KernelCancelEventFlag(KernelEventFlag ef, uint64_t set_pattern
 {
 	PRINT_NAME();
 
-	if (ef == nullptr)
+	if (!EventFlagIsLive(ef))
 	{
 		return KERNEL_ERROR_ESRCH;
 	}

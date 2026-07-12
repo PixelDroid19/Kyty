@@ -2072,7 +2072,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegistersDirect(CommandBuffer* buf, const
 	Vector<ShaderRegister> copied;
 	for (uint32_t i = 0; i < num_regs; i++)
 	{
-		copied.Add({regs[i].offset, regs[i].value});
+		copied.Add(ShaderRegister {regs[i].offset, regs[i].value});
 	}
 
 	const uint32_t size_dw = GraphicsGetShRegistersPacketSize(copied.GetData(), copied.Size());

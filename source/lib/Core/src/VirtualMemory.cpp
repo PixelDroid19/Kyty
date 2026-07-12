@@ -1,10 +1,16 @@
+// glibc exposes REG_* gregset indices only under feature-test macros.
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Kyty/Sys/SysVirtual.h"
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #define KYTY_HAS_EXCEPTIONS
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+// POSIX SIGSEGV/SIGBUS path for flexible-memory demand paging and GPU watches.
 #define KYTY_HAS_SIGNAL_EXCEPTIONS
 #endif
 
@@ -18,7 +24,9 @@
 #include <sys/time.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <sys/ucontext.h>
+#include <ucontext.h>
+#include <cstdio>
+#include <cstdint>
 #endif
 
 // IWYU pragma: no_include <basetsd.h>
@@ -160,8 +168,58 @@ public:
 
 ExceptionHandler::handler_func_t ExceptionHandlerPrivate::g_vec_func = nullptr;
 
-// Single-step tracer (macOS/Rosetta): TF-based instruction trace of guest code,
-// used to diagnose libc faults that lldb cannot reach under Rosetta 2. Armed by
+// Platform register accessors for POSIX ucontext (Darwin vs Linux glibc x86_64).
+#if defined(__APPLE__)
+static inline uint64_t uc_get_rip(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rip); }
+static inline void     uc_set_rip(ucontext_t* uc, uint64_t v) { uc->uc_mcontext->__ss.__rip = static_cast<__uint64_t>(v); }
+static inline uint64_t uc_get_rbp(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rbp); }
+static inline uint64_t uc_get_rsp(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rsp); }
+static inline uint64_t uc_get_rax(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rax); }
+static inline uint64_t uc_get_rbx(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rbx); }
+static inline uint64_t uc_get_rcx(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rcx); }
+static inline uint64_t uc_get_rdx(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rdx); }
+static inline uint64_t uc_get_rsi(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rsi); }
+static inline uint64_t uc_get_rdi(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rdi); }
+static inline uint64_t uc_get_r8(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__r8); }
+static inline uint64_t uc_get_r9(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__r9); }
+static inline uint64_t uc_get_r10(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__r10); }
+static inline uint64_t uc_get_r11(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__r11); }
+static inline uint64_t uc_get_r12(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__r12); }
+static inline uint64_t uc_get_r13(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__r13); }
+static inline uint64_t uc_get_r14(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__r14); }
+static inline uint64_t uc_get_r15(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__r15); }
+static inline uint64_t uc_get_err(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__es.__err); }
+static inline uint64_t uc_get_rflags(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rflags); }
+static inline void     uc_set_rflags(ucontext_t* uc, uint64_t v) { uc->uc_mcontext->__ss.__rflags = static_cast<__uint64_t>(v); }
+static inline long     host_tid() { return ::syscall(SYS_thread_selfid); }
+#elif defined(__linux__)
+static inline uint64_t uc_get_rip(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RIP]); }
+static inline void     uc_set_rip(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_RIP] = static_cast<greg_t>(v); }
+static inline uint64_t uc_get_rbp(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RBP]); }
+static inline uint64_t uc_get_rsp(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RSP]); }
+static inline uint64_t uc_get_rax(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RAX]); }
+static inline uint64_t uc_get_rbx(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RBX]); }
+static inline uint64_t uc_get_rcx(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RCX]); }
+static inline uint64_t uc_get_rdx(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RDX]); }
+static inline uint64_t uc_get_rsi(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RSI]); }
+static inline uint64_t uc_get_rdi(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RDI]); }
+static inline uint64_t uc_get_r8(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_R8]); }
+static inline uint64_t uc_get_r9(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_R9]); }
+static inline uint64_t uc_get_r10(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_R10]); }
+static inline uint64_t uc_get_r11(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_R11]); }
+static inline uint64_t uc_get_r12(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_R12]); }
+static inline uint64_t uc_get_r13(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_R13]); }
+static inline uint64_t uc_get_r14(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_R14]); }
+static inline uint64_t uc_get_r15(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_R15]); }
+static inline uint64_t uc_get_err(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_ERR]); }
+static inline uint64_t uc_get_rflags(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_EFL]); }
+static inline void     uc_set_rflags(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_EFL] = static_cast<greg_t>(v); }
+static inline long     host_tid() { return ::syscall(SYS_gettid); }
+#else
+#error "KYTY_HAS_SIGNAL_EXCEPTIONS requires Apple or Linux x86_64 ucontext accessors"
+#endif
+
+// Single-step tracer: TF-based instruction trace of guest code. Armed by
 // SetGuestTrace(); logs guest-range instruction pointers until the budget runs out.
 static thread_local int g_trace_guest = 0; // remaining guest instructions to log
 static thread_local int g_trace_total = 0; // hard cap on total single-steps
@@ -172,13 +230,13 @@ void SetGuestTrace(int steps)
 	g_trace_total = steps * 200; // allow stepping through HLE/return code in between
 }
 
-// Timer-based guest profiler (macOS/Rosetta): samples the instruction pointer of
+// Timer-based guest profiler: samples the instruction pointer of
 // whatever thread is running when SIGPROF fires. Unlike TF single-step it survives
 // guest popfq/pushf, so it can locate a spinning guest loop. Gated by StartGuestProfiler().
 static void kyty_sigprof_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontext)
 {
 	auto*    uc  = static_cast<ucontext_t*>(ucontext);
-	uint64_t rip = uc->uc_mcontext->__ss.__rip;
+	uint64_t rip = uc_get_rip(uc);
 	static int n = 0;
 	if (n++ < 200)
 	{
@@ -205,23 +263,22 @@ void StartGuestProfiler()
 static void kyty_sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontext)
 {
 	auto*    uc  = static_cast<ucontext_t*>(ucontext);
-	auto&    s   = uc->uc_mcontext->__ss;
-	uint64_t rip = s.__rip;
+	uint64_t rip = uc_get_rip(uc);
 	if (g_trace_guest <= 0 || g_trace_total <= 0)
 	{
-		s.__rflags &= ~0x100ull;
+		uc_set_rflags(uc, uc_get_rflags(uc) & ~0x100ull);
 		return;
 	}
 	g_trace_total--;
 	if (rip >= 0x900000000ull && rip < 0x920000000ull) // any guest module
 	{
-		printf("TRACE %016llx\n", rip);
+		printf("TRACE %016llx\n", static_cast<unsigned long long>(rip));
 		g_trace_guest--;
 	}
-	s.__rflags |= 0x100ull;
+	uc_set_rflags(uc, uc_get_rflags(uc) | 0x100ull);
 }
 
-// Demand-paged ranges (macOS): flexible-memory regions the guest reserves but that
+// Demand-paged ranges: flexible-memory regions the guest reserves but that
 // are backed lazily. On a write fault inside one, the touched page is mapped RW
 // (zero-filled) and the faulting instruction retried — mirroring PS5 flexible memory.
 struct DemandRange
@@ -307,8 +364,7 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 
 	if (sig == SIGILL)
 	{
-		auto&    s   = uc->uc_mcontext->__ss;
-		uint64_t rip = s.__rip;
+		uint64_t rip = uc_get_rip(uc);
 		// A guest ud2 (0F 0B) is the trap the compiler emits after a call it believes
 		// is noreturn — here, sceKernelDebugRaiseException. On real hardware certain
 		// debug-raise codes are soft: the kernel logs and RESUMES past the trap. When
@@ -320,15 +376,23 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 			if (code[0] == 0x0F && code[1] == 0x0B)
 			{
 				sigsafe_fault("SKIP-UD2 @rip", rip, 0);
-				s.__rip = rip + 2;
+				uc_set_rip(uc, rip + 2);
 				return;
 			}
 		}
-		printf("\n=== SIGILL @ rip=0x%016llx ===\n", s.__rip);
-		printf("rax=0x%016llx rbx=0x%016llx rcx=0x%016llx rdx=0x%016llx\n", s.__rax, s.__rbx, s.__rcx, s.__rdx);
-		printf("rsi=0x%016llx rdi=0x%016llx rbp=0x%016llx rsp=0x%016llx\n", s.__rsi, s.__rdi, s.__rbp, s.__rsp);
-		printf("r8 =0x%016llx r9 =0x%016llx r10=0x%016llx r11=0x%016llx\n", s.__r8, s.__r9, s.__r10, s.__r11);
-		printf("r12=0x%016llx r13=0x%016llx r14=0x%016llx r15=0x%016llx\n", s.__r12, s.__r13, s.__r14, s.__r15);
+		printf("\n=== SIGILL @ rip=0x%016llx ===\n", static_cast<unsigned long long>(rip));
+		printf("rax=0x%016llx rbx=0x%016llx rcx=0x%016llx rdx=0x%016llx\n", static_cast<unsigned long long>(uc_get_rax(uc)),
+		       static_cast<unsigned long long>(uc_get_rbx(uc)), static_cast<unsigned long long>(uc_get_rcx(uc)),
+		       static_cast<unsigned long long>(uc_get_rdx(uc)));
+		printf("rsi=0x%016llx rdi=0x%016llx rbp=0x%016llx rsp=0x%016llx\n", static_cast<unsigned long long>(uc_get_rsi(uc)),
+		       static_cast<unsigned long long>(uc_get_rdi(uc)), static_cast<unsigned long long>(uc_get_rbp(uc)),
+		       static_cast<unsigned long long>(uc_get_rsp(uc)));
+		printf("r8 =0x%016llx r9 =0x%016llx r10=0x%016llx r11=0x%016llx\n", static_cast<unsigned long long>(uc_get_r8(uc)),
+		       static_cast<unsigned long long>(uc_get_r9(uc)), static_cast<unsigned long long>(uc_get_r10(uc)),
+		       static_cast<unsigned long long>(uc_get_r11(uc)));
+		printf("r12=0x%016llx r13=0x%016llx r14=0x%016llx r15=0x%016llx\n", static_cast<unsigned long long>(uc_get_r12(uc)),
+		       static_cast<unsigned long long>(uc_get_r13(uc)), static_cast<unsigned long long>(uc_get_r14(uc)),
+		       static_cast<unsigned long long>(uc_get_r15(uc)));
 		::fflush(nullptr);
 		signal(SIGILL, SIG_DFL);
 		return;
@@ -337,12 +401,12 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 	ExceptionHandler::ExceptionInfo einfo {};
 
 	einfo.type              = ExceptionHandler::ExceptionType::AccessViolation;
-	einfo.exception_address = static_cast<uint64_t>(uc->uc_mcontext->__ss.__rip);
-	einfo.rbp               = static_cast<uint64_t>(uc->uc_mcontext->__ss.__rbp);
+	einfo.exception_address = uc_get_rip(uc);
+	einfo.rbp               = uc_get_rbp(uc);
 
 	einfo.access_violation_vaddr = reinterpret_cast<uint64_t>(info->si_addr);
 
-	uint64_t err = uc->uc_mcontext->__es.__err;
+	uint64_t err = uc_get_err(uc);
 	if ((err & 0x10u) != 0)
 	{
 		einfo.access_violation_type = ExceptionHandler::AccessViolationType::Execute;
@@ -359,15 +423,14 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 		static int n = 0;
 		if (n++ < 60)
 		{
-			auto& ss = uc->uc_mcontext->__ss;
 			sigsafe_fault(einfo.access_violation_type == ExceptionHandler::AccessViolationType::Write ? "FAULTW" : "FAULTR",
-			              einfo.access_violation_vaddr, ss.__rip);
-			sigsafe_fault("  rdi/rsi", ss.__rdi, ss.__rsi);
-			sigsafe_fault("  tid", static_cast<uint64_t>(::syscall(SYS_thread_selfid)), 0);
+			              einfo.access_violation_vaddr, uc_get_rip(uc));
+			sigsafe_fault("  rdi/rsi", uc_get_rdi(uc), uc_get_rsi(uc));
+			sigsafe_fault("  tid", static_cast<uint64_t>(host_tid()), 0);
 			// Scan the stack for the nearest fc_script (Kyty HLE) and guest return
 			// addresses, to identify which HLE call and which guest instruction led here.
-			auto* sp     = reinterpret_cast<uint64_t*>(ss.__rsp);
-			int   n_hle  = 0;
+			auto* sp    = reinterpret_cast<uint64_t*>(uc_get_rsp(uc));
+			int   n_hle = 0;
 			for (int i = 0; i < 512 && n_hle < 5; i++)
 			{
 				uint64_t v = sp[i];

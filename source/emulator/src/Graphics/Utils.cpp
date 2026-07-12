@@ -240,8 +240,10 @@ void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchai
 	swapchain_image.image  = dst_swapchain->swapchain_images[dst_swapchain->current_index];
 	swapchain_image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-	                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	// Use the tracked source layout; hardcoding COLOR_ATTACHMENT_OPTIMAL fails
+	// when the flip source is still GENERAL/TRANSFER_* (Linux present races).
+	// Restore color-attachment so the next render pass sees a stable layout.
+	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	set_image_layout(vk_buffer, &swapchain_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 

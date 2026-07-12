@@ -36,6 +36,7 @@
 #include "SDL_vulkan.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vulkan/vk_enum_string_helper.h>
@@ -2014,10 +2015,32 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	EXIT_NOT_IMPLEMENTED(r->formats.IsEmpty());
 
 	VkExtent2D extent {};
-	extent.width  = std::clamp(width, r->capabilities.minImageExtent.width, r->capabilities.maxImageExtent.width);
-	extent.height = std::clamp(height, r->capabilities.minImageExtent.height, r->capabilities.maxImageExtent.height);
+	// Surface extents: only clamp when the max bound is usable (min <= max).
+	const auto& min_ext = r->capabilities.minImageExtent;
+	const auto& max_ext = r->capabilities.maxImageExtent;
+	if (min_ext.width <= max_ext.width)
+	{
+		extent.width = std::clamp(width, min_ext.width, max_ext.width);
+	} else
+	{
+		extent.width = width;
+	}
+	if (min_ext.height <= max_ext.height)
+	{
+		extent.height = std::clamp(height, min_ext.height, max_ext.height);
+	} else
+	{
+		extent.height = height;
+	}
 
-	image_count = std::clamp(image_count, r->capabilities.minImageCount, r->capabilities.maxImageCount);
+	// Vulkan: maxImageCount == 0 means no upper limit (only min applies).
+	if (r->capabilities.maxImageCount == 0)
+	{
+		image_count = std::max(image_count, r->capabilities.minImageCount);
+	} else if (r->capabilities.minImageCount <= r->capabilities.maxImageCount)
+	{
+		image_count = std::clamp(image_count, r->capabilities.minImageCount, r->capabilities.maxImageCount);
+	}
 
 	VkSwapchainCreateInfoKHR create_info {};
 	create_info.sType         = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -2048,16 +2071,51 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	create_info.pQueueFamilyIndices   = nullptr;
 	create_info.preTransform          = r->capabilities.currentTransform;
 	create_info.compositeAlpha        = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-	create_info.presentMode           = VK_PRESENT_MODE_FIFO_KHR;
-	create_info.clipped               = VK_TRUE;
-	create_info.oldSwapchain          = nullptr;
+	// Capability-driven present mode: prefer MAILBOX (low-latency triple-buffer)
+	// then IMMEDIATE, else FIFO (guaranteed vsync). Hardcoding FIFO alone can
+	// couple host present to display refresh with only minImageCount images.
+	create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+	for (const auto mode: r->present_modes)
+	{
+		if (mode == VK_PRESENT_MODE_MAILBOX_KHR)
+		{
+			create_info.presentMode = mode;
+			break;
+		}
+		if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR)
+		{
+			create_info.presentMode = mode;
+		}
+	}
+	// MAILBOX needs ≥3 images to avoid degenerating into FIFO-like blocking.
+	if (create_info.presentMode == VK_PRESENT_MODE_MAILBOX_KHR && image_count < 3)
+	{
+		image_count = 3;
+		if (r->capabilities.maxImageCount == 0)
+		{
+			image_count = std::max(image_count, r->capabilities.minImageCount);
+		} else if (r->capabilities.minImageCount <= r->capabilities.maxImageCount)
+		{
+			image_count = std::clamp(image_count, r->capabilities.minImageCount, r->capabilities.maxImageCount);
+		}
+		create_info.minImageCount = image_count;
+	}
+	create_info.clipped      = VK_TRUE;
+	create_info.oldSwapchain = nullptr;
 
 	*swapchain_format = create_info.imageFormat;
 	*swapchain_extent = extent;
 
 	VkSwapchainKHR swapchain = nullptr;
 
-	vkCreateSwapchainKHR(device, &create_info, nullptr, &swapchain);
+	const VkResult create_result = vkCreateSwapchainKHR(device, &create_info, nullptr, &swapchain);
+	if (create_result != VK_SUCCESS || swapchain == nullptr)
+	{
+		printf("vkCreateSwapchainKHR failed: result = %d\n", static_cast<int>(create_result));
+		return nullptr;
+	}
+	printf("Swapchain presentMode=%d extent=%ux%u minImageCount=%u\n", static_cast<int>(create_info.presentMode), extent.width,
+	       extent.height, create_info.minImageCount);
 
 	vkGetSwapchainImagesKHR(device, swapchain, swapchain_images_count, nullptr);
 	EXIT_NOT_IMPLEMENTED(*swapchain_images_count == 0);
@@ -2162,6 +2220,54 @@ static VulkanSwapchain* VulkanCreateSwapchain(GraphicContext* ctx, uint32_t imag
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 
 	return s;
+}
+
+// Rebuild swapchain after surface state changes (e.g. first SDL_ShowWindow on
+// X11/Mesa). Keeps present fence/semaphore; replaces images/views only.
+static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uint32_t image_count)
+{
+	EXIT_IF(g_window_ctx == nullptr);
+	EXIT_IF(ctx == nullptr);
+	EXIT_IF(s == nullptr);
+	EXIT_IF(ctx->device == nullptr);
+
+	Core::LockGuard lock(g_window_ctx->mutex);
+
+	vkDeviceWaitIdle(ctx->device);
+
+	if (s->swapchain_image_views != nullptr)
+	{
+		for (uint32_t i = 0; i < s->swapchain_images_count; i++)
+		{
+			vkDestroyImageView(ctx->device, s->swapchain_image_views[i], nullptr);
+		}
+		delete[] s->swapchain_image_views;
+		s->swapchain_image_views = nullptr;
+	}
+	delete[] s->swapchain_images;
+	s->swapchain_images       = nullptr;
+	s->swapchain_images_count = 0;
+
+	const VkSwapchainKHR old = s->swapchain;
+	s->swapchain             = nullptr;
+
+	VulkanGetSurfaceCapabilities(ctx->physical_device, g_window_ctx->surface, g_window_ctx->surface_capabilities);
+
+	s->swapchain = VulkanCreateSwapchainInternal(ctx->device, g_window_ctx->surface, ctx->screen_width, ctx->screen_height, image_count,
+	                                             g_window_ctx->surface_capabilities, &s->swapchain_format, &s->swapchain_extent,
+	                                             &s->swapchain_images, &s->swapchain_image_views, &s->swapchain_images_count);
+	if (s->swapchain == nullptr)
+	{
+		EXIT("Could not recreate swapchain");
+	}
+
+	if (old != nullptr)
+	{
+		vkDestroySwapchainKHR(ctx->device, old, nullptr);
+	}
+
+	s->current_index = static_cast<uint32_t>(-1);
+	printf("Swapchain recreated: %ux%u images=%u\n", s->swapchain_extent.width, s->swapchain_extent.height, s->swapchain_images_count);
 }
 
 static void VulkanCreate(WindowContext* ctx)
@@ -2434,10 +2540,35 @@ void WindowUpdateTitle()
 	static bool has_title_id = Loader::SystemContentParamSfoGetString("TITLE_ID", title_id, sizeof(title_id));
 	static bool has_app_ver  = Loader::SystemContentParamSfoGetString("APP_VER", app_ver, sizeof(app_ver));
 
+	const int    frame_num = g_window_ctx->game->m_frame_num;
+	const double fps_now   = g_window_ctx->game->m_current_fps;
+	const double t         = g_window_ctx->game->m_current_time_seconds;
+
+	// Optional host-side FPS probe for Silent runs (window title is not logged).
+	// Enable with KYTY_FPS_LOG=1; writes once per second to stderr only.
+	static const bool k_fps_log = (std::getenv("KYTY_FPS_LOG") != nullptr && std::getenv("KYTY_FPS_LOG")[0] == '1');
+	if (k_fps_log)
+	{
+		static double s_last_log_time = 0.0;
+		if (t - s_last_log_time >= 1.0)
+		{
+			std::fprintf(stderr, "KYTY_FPS_LOG frame=%d fps=%.3f t=%.3f\n", frame_num, fps_now, t);
+			s_last_log_time = t;
+		}
+	}
+
+	// Throttle title updates: X11/Wayland SDL_SetWindowTitle is a round-trip and
+	// was invoked every present. Match the FPS EMA window (~4 Hz).
+	static double s_last_title_time = -1.0;
+	if (s_last_title_time >= 0.0 && (t - s_last_title_time) < FPS_UPDATE_TIME)
+	{
+		return;
+	}
+	s_last_title_time = t;
+
 	auto fps = String::FromPrintf("%s%s%s%s%s%s[%s] [%s], frame: %d, fps: %f", (has_title ? title : ""), (has_title ? ", " : ""),
 	                              (has_title_id ? title_id : ""), (has_title_id ? ", " : ""), (has_app_ver ? app_ver : ""),
-	                              (has_app_ver ? ", " : ""), g_window_ctx->device_name, g_window_ctx->processor_name,
-	                              g_window_ctx->game->m_frame_num, g_window_ctx->game->m_current_fps);
+	                              (has_app_ver ? ", " : ""), g_window_ctx->device_name, g_window_ctx->processor_name, frame_num, fps_now);
 
 	SDL_SetWindowTitle(g_window_ctx->window, fps.C_Str());
 }
@@ -2450,13 +2581,24 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	EXIT_IF(g_window_ctx == nullptr);
 	EXIT_IF(g_window_ctx->swapchain == nullptr);
 
+	bool just_shown = false;
 	if (g_window_ctx->window_hidden)
 	{
 		WindowUpdateIcon();
 
 		SDL_ShowWindow(g_window_ctx->window);
+		// Drain SDL events so the surface size/visibility settle before acquire.
+		SDL_PumpEvents();
 
 		g_window_ctx->window_hidden = false;
+		just_shown                  = true;
+	}
+
+	// First present after ShowWindow often returns OUT_OF_DATE/SUBOPTIMAL on
+	// Linux (X11/Wayland/Mesa) when the swapchain was built for a hidden window.
+	if (just_shown)
+	{
+		VulkanRecreateSwapchain(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, 2);
 	}
 
 	g_window_ctx->swapchain->current_index = static_cast<uint32_t>(-1);
@@ -2465,6 +2607,25 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	                                    /*g_window_ctx->swapchain->present_complete_semaphore*/ nullptr,
 	                                    g_window_ctx->swapchain->present_complete_fence, &g_window_ctx->swapchain->current_index);
 
+	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+	{
+		printf("vkAcquireNextImageKHR: result = %d, recreating swapchain\n", static_cast<int>(result));
+		VulkanRecreateSwapchain(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, 2);
+		g_window_ctx->swapchain->current_index = static_cast<uint32_t>(-1);
+		result = vkAcquireNextImageKHR(g_window_ctx->graphic_ctx.device, g_window_ctx->swapchain->swapchain, UINT64_MAX, nullptr,
+		                               g_window_ctx->swapchain->present_complete_fence, &g_window_ctx->swapchain->current_index);
+	}
+
+	// SUBOPTIMAL is usable; only hard-fail other errors.
+	if (result == VK_SUBOPTIMAL_KHR)
+	{
+		result = VK_SUCCESS;
+	}
+
+	if (result != VK_SUCCESS)
+	{
+		printf("vkAcquireNextImageKHR failed: result = %d\n", static_cast<int>(result));
+	}
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 	EXIT_NOT_IMPLEMENTED(g_window_ctx->swapchain->current_index == static_cast<uint32_t>(-1));
 

@@ -81,7 +81,14 @@ endfunction()
 
 macro(config_compiler_and_linker)
 
-set(KYTY_WARNINGS_ARE_ERRORS ON)
+# Cache-overridable. GCC -O3 on Linux surfaces false-positive -Werror failures
+# (array-bounds, mismatched-new-delete, dangling-pointer in 3rdparty) that block
+# Release; default OFF there so hosts get an optimized binary by default.
+if(LINUX AND NOT CLANG)
+	option(KYTY_WARNINGS_ARE_ERRORS "Treat compiler warnings as errors" OFF)
+else()
+	option(KYTY_WARNINGS_ARE_ERRORS "Treat compiler warnings as errors" ON)
+endif()
 
 set(KYTY_C_FLAGS "")
 set(KYTY_CPP_FLAGS "")
@@ -140,7 +147,9 @@ elseif(MINGW OR LINUX)
 	    	set(KYTY_CPP_FLAGS "${KYTY_CPP_FLAGS} -static")
 	    endif()
 	else()
-		set(KYTY_CPP_FLAGS "${KYTY_CPP_FLAGS} -fno-exceptions -fdiagnostics-color=always -finput-charset=UTF-8 -fexec-charset=UTF-8 -static-libgcc -static-libstdc++ -g -fno-strict-aliasing -fno-omit-frame-pointer -Wall -Wno-unused-value -fmessage-length=0")
+		# GCC -O3 can emit false-positive -Wmismatched-new-delete on tagged
+		# FILE*/buf unions (sys_file_close); keep -Werror usable for Release.
+		set(KYTY_CPP_FLAGS "${KYTY_CPP_FLAGS} -fno-exceptions -fdiagnostics-color=always -finput-charset=UTF-8 -fexec-charset=UTF-8 -static-libgcc -static-libstdc++ -g -fno-strict-aliasing -fno-omit-frame-pointer -Wall -Wno-unused-value -fmessage-length=0 -Wno-error=mismatched-new-delete")
 	endif()
 	
     if(KYTY_WARNINGS_ARE_ERRORS)

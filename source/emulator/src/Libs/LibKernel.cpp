@@ -341,7 +341,14 @@ static KYTY_SYSV_ABI int KernelIsAddressSanitizerEnabled()
 static KYTY_SYSV_ABI uint64_t KernelInternalMemoryMap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags)
 {
 	PRINT_NAME();
-	printf("\taddr=0x%" PRIx64 " len=0x%" PRIx64 " prot=0x%" PRIx64 " flags=0x%" PRIx64 " tid=%lld\n", addr, len, prot, flags, (long long)::syscall(SYS_thread_selfid));
+#if defined(__APPLE__)
+	const long long host_tid = static_cast<long long>(::syscall(SYS_thread_selfid));
+#elif defined(__linux__)
+	const long long host_tid = static_cast<long long>(::syscall(SYS_gettid));
+#else
+	const long long host_tid = static_cast<long long>(::getpid());
+#endif
+	printf("\taddr=0x%" PRIx64 " len=0x%" PRIx64 " prot=0x%" PRIx64 " flags=0x%" PRIx64 " tid=%lld\n", addr, len, prot, flags, host_tid);
 	// Register the range for demand paging: the guest allocator expects zero-filled
 	// read/write memory across the whole region, but pre-mapping it all changes what
 	// the allocator's header check reads (triggering an abort) and a blind CPU memset

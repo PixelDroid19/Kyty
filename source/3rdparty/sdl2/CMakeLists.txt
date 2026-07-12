@@ -24,6 +24,9 @@ if (LINUX)
 	target_compile_definitions(SDL2-static PRIVATE SDL_VIDEO_DRIVER_X11_SUPPORTS_GENERIC_EVENTS)
 	target_compile_options(SDL2-static PRIVATE -Wno-unused-variable)
     else()
-	target_compile_options(SDL2-static PRIVATE -Wno-unused-variable -Wno-unused-function)
+	# GCC 16 + system bsearch: SDL_bsearch returns void* from const void* bsearch.
+	# Kyty builds third_party with -Werror; keep SDL buildable without vendored patches.
+	target_compile_options(SDL2-static PRIVATE -Wno-unused-variable -Wno-unused-function
+	                       -Wno-error=discarded-qualifiers)
     endif()
 endif()

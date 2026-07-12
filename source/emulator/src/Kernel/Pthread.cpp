@@ -2097,13 +2097,13 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 		result = pthread_create(&(*thread)->p, &(*attr)->p, run_thread, *thread);
 	}
 
-	if (result == 0)
-	{
-		while (!(*thread)->started)
-		{
-			Core::Thread::SleepMicro(1000);
-		}
-	}
+	// Do not wait for the child to enter its guest entry. Real pthread_create
+	// returns as soon as the thread is constructed; the parent may still run
+	// setup (e.g. sceKernelCreateEventFlag "ThreadFlag") before the child is
+	// scheduled. Waiting for `started` inverted that order on Linux: the
+	// VibrationTrackThread reached KernelWaitEventFlag with an uninitialized
+	// handle (observed poison 0xcccccccc00007fff) and SIGSEGV'd in Mutex::Lock.
+	// unique_id may still be -1 in the create log until the child runs.
 
 	printf("\tthread create: %s, id = %d, %d\n", (*thread)->name.C_Str(), (*thread)->unique_id, result);
 

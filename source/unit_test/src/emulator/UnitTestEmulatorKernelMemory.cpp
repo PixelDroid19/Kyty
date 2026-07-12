@@ -1,10 +1,12 @@
 #include "Emulator/Config.h"
+#include "Emulator/Kernel/EventFlag.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
+#include "Kyty/Core/Threads.h"
 #include "Kyty/UnitTest.h"
 
 #include <cstring>
@@ -274,6 +276,47 @@ TEST(EmulatorKernelMemory, ResolvesAmprResidualBootNids)
 		query.type                 = Loader::SymbolType::Func;
 		EXPECT_NE(symbols.Find(query), nullptr) << nid;
 	}
+}
+
+// Live EventFlag registry: Wait/Set/Delete on garbage handles must return
+// ESRCH without dereferencing (Linux VibrationTrackThread poison pointer).
+// Create/Wait/Set/Delete on a real flag exercises the shipped registry path.
+TEST(EmulatorKernelMemory, EventFlagRejectsUnregisteredHandles)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	static bool threads_inited = false;
+	if (!threads_inited)
+	{
+		Core::ThreadsSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		threads_inited = true;
+	}
+
+	using namespace LibKernel::EventFlag;
+
+	// Poison pointer observed on Linux vibration wait before CreateEventFlag.
+	auto* poison = reinterpret_cast<KernelEventFlag>(static_cast<uintptr_t>(0xcccccccc00007fffULL));
+	EXPECT_EQ(KernelWaitEventFlag(poison, 1, 0x21, nullptr, nullptr), LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(KernelSetEventFlag(poison, 1), LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(KernelDeleteEventFlag(poison), LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(KernelWaitEventFlag(nullptr, 1, 0x21, nullptr, nullptr), LibKernel::KERNEL_ERROR_ESRCH);
+
+	KernelEventFlag ef = nullptr;
+	ASSERT_EQ(KernelCreateEventFlag(&ef, "UnitTestThreadFlag", 0x10, 0, nullptr), OK);
+	ASSERT_NE(ef, nullptr);
+
+	// Timeout=0 poll-style wait on empty bits returns TimedOut path.
+	LibKernel::KernelUseconds zero = 0;
+	EXPECT_EQ(KernelWaitEventFlag(ef, 1, 0x01, nullptr, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
+	EXPECT_EQ(KernelSetEventFlag(ef, 1), OK);
+	zero = 0;
+	EXPECT_EQ(KernelWaitEventFlag(ef, 1, 0x21, nullptr, &zero), OK);
+	EXPECT_EQ(KernelDeleteEventFlag(ef), OK);
+	// After delete, same pointer is no longer live.
+	EXPECT_EQ(KernelWaitEventFlag(ef, 1, 0x01, nullptr, nullptr), LibKernel::KERNEL_ERROR_ESRCH);
 }
 
 UT_END();

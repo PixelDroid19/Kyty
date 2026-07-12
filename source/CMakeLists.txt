@@ -2,6 +2,15 @@ cmake_minimum_required(VERSION 3.12)
 
 project(Kyty)
 
+# Single-config generators (Ninja/Make) with an empty build type produce an
+# unoptimized binary (-g only). Default to Release so Linux/macOS hosts match
+# the intended performance profile; override with -DCMAKE_BUILD_TYPE=Debug.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+	set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
+	set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
+	message(STATUS "CMAKE_BUILD_TYPE not set; defaulting to Release")
+endif()
+
 if(CMAKE_SYSTEM_NAME MATCHES ".*Linux")
 	set(LINUX TRUE)
 endif()
