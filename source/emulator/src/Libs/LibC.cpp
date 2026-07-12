@@ -398,6 +398,10 @@ static KYTY_SYSV_ABI void c_cxa_guard_release(uint64_t* g)
 {
 	*reinterpret_cast<volatile uint8_t*>(g) = 1;
 }
+static KYTY_SYSV_ABI void c_cxa_guard_abort(uint64_t* g)
+{
+	*reinterpret_cast<volatile uint8_t*>(g) = 0;
+}
 static KYTY_SYSV_ABI void c_Xout_of_range(const char* msg)
 {
 	EXIT("std::out_of_range: %s\n", msg != nullptr ? msg : "");
@@ -756,6 +760,7 @@ LIB_DEFINE(InitLibC_1)
 	// C++ runtime
 	LIB_FUNC("3GPpjQdAMTw", LibC::c_cxa_guard_acquire);
 	LIB_FUNC("9rAeANT2tyE", LibC::c_cxa_guard_release);
+	LIB_FUNC("2emaaluWzUw", LibC::c_cxa_guard_abort);
 	LIB_FUNC("ozMAr28BwSY", LibC::c_Xout_of_range);
 	LIB_FUNC("tQIo+GIPklo", LibC::c_Xlength_error);
 

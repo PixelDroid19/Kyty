@@ -125,6 +125,9 @@ int KYTY_SYSV_ABI SaveDataInitialize3(const void* /*init*/)
 	return OK;
 }
 
+// Gen5 ABI (NID gjRZNnw0JPE): rdi=user_id; return value is the resource id (>0).
+// Call site: test eax,eax / js error / mov [global], eax — so 0 would be stored
+// as a bogus handle. Negative values are errors (INVALID_LOGIN_USER etc.).
 int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id)
 {
 	PRINT_NAME();
