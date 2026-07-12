@@ -49,15 +49,17 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	auto width = params[RenderTextureObject::PARAM_WIDTH];
 	// auto height = params[RenderTextureObject::PARAM_HEIGHT];
 
-	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
-
+	// GPU-owned tiled RT (no write-back): first consumer is a render pass.
+	// Create leaves layout UNDEFINED once; Update must not force UNDEFINED again.
+	// StorageBuffer WriteBack invalidates alias parents (hash/submit_id), which
+	// re-enters Update. Marking UNDEFINED then transitioning to COLOR_ATTACHMENT
+	// discards prior render-pass contents (white intermediate targets).
 	if (tiled && params[RenderTextureObject::PARAM_WRITE_BACK] == 0)
 	{
-		// A tiled color target without write-back is GPU-owned: its first
-		// consumer is a render pass, not a CPU upload. Preserve the undefined
-		// image layout and let the render pass establish the attachment contents.
 		return;
 	}
+
+	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	if (tiled && buffer_is_tiled(*vaddr, *size))
 	{
