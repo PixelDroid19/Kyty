@@ -3209,6 +3209,13 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 					inst.dst.size = 2;
 					break;
 				}
+				case 0xb:
+				{
+					// Captured post-NGS2 path: image_sample dmask 0xb = R+G+A (3 comps).
+					inst.format   = ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB;
+					inst.dst.size = 3;
+					break;
+				}
 				case 0xf:
 				{
 					inst.format   = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;

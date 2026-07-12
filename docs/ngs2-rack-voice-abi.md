@@ -25,7 +25,7 @@ On the 64-bit SysV layout used by this emulator, the classic
 host_buffer_size = sizeof(Ngs2RackInternal) + sizeof(Ngs2VoiceInternal) * max_voices
 ```
 
-Voices are laid out contiguously after the rack header.  
+Voices are laid out contiguously after the rack header.
 `Ngs2RackGetVoiceHandle(rack, voice_id, out)` returns a pointer into that array
 when `voice_id < max_voices`.
 
