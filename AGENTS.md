@@ -251,49 +251,79 @@ startup, Gen5 shader creation, indexed draws, VideoOut submission, repeated
 swapchain presentation, logos, a recognizable menu, Play / mode selection
 (discovery auto-input is not acceptance), loading-card presentation, and a deep
 post-Play GPU/HLE chain under **strict** flags (no `KYTY_STUB_MISSING`, no
-`KYTY_GFX_PERMISSIVE`).
+`KYTY_GFX_PERMISSIVE`). Linux Release+Silent dual-strict has sustained
+**gameplay-era frames** for 90–180 s (~11–13 FPS Silent, AUTO_CROSS discovery
+only) without a process-killing structural EXIT on recent captures.
 
 Recent strict bring-up (evidence-backed, focused tests where noted) includes:
 
 - GpuMemory multi-parent alias policies (Texture/Storage/Vertex/RenderTexture
   relations as captured; inverse or unobserved relations stay strict).
+- GpuMemory: multi-parent VertexBuffer with surface link + peer VB reclaim;
+  Texture mixed parents (VB reclaim/link, SB/RT/Texture
+  Contains/IsContainedWithin/Crosses); **IndexBuffer Contained in Texture**
+  (and other surfaces) **links**, does not reclaim the Texture
+  (`GpuMemoryAllowsIndexContainedInSurface`; captured IB size `0xe4`).
+- WriteBack multi-parent classification: Equals → propagate hash; Crosses /
+  Contains / IsContainedWithin → invalidate only (partial overlap).
+- GPU-owned tiled RenderTexture (no write-back): `update_func` must **not**
+  force `VK_IMAGE_LAYOUT_UNDEFINED` on Update re-entry. StorageBuffer WriteBack
+  invalidates alias parents; UNDEFINED→COLOR transitions **discard** prior
+  render-pass contents (user-visible white intermediate world with HUD still
+  drawing). Create still starts UNDEFINED once.
 - Gen5 tile mode 27 (`SW_64KB_R_X`) **size** and **CPU detile for 4 bpp** sample
   textures (16-pipe non-RbPlus pattern table reimplemented from public MIT
   ADDRLIB vocabulary; visual sample quality still needs post-playability QA).
+- Gen5 sample formats in PrepareTextures: Ufmt 56 (RGBA8), 14 (RG8 linear
+  pitch), 71 (RGBA16F RT alias). Tile 27 pure CPU upload remains format-56 only.
 - Gen5 EUD: direct resource type 5 as EUD pointer when `eud_size_dw != 0` and
   `srt_size_dw == 0`; overflow sharp offsets map through EUD base
   `round_up(user_sgpr_num, 4)`.
 - Multi-RT `CB_SHADER_MASK` full-channel nibbles (`0` or `0xf` per RT).
-- EXP Param5 (`0x25`) and multi-MRT compressed / null EXP for MRT0–3 (including
-  `done=0` / `vm=0` variants observed on load).
-- `v_cvt_i32_f32` (VOP1 `0x8` / VOP3 `0x188`).
+- EXP Param5 (`0x25`) / Param6 (`0x26`) and multi-MRT compressed / null EXP for
+  MRT0–3 (including `done=0` / `vm=0` variants observed on load).
+- SPIR-V structured loops for backward `S_BRANCH` (`OpLoopMerge` + body +
+  continue / unreachable as required); do not regress CFG.
+- `v_cvt_i32_f32` (VOP1 `0x8` / VOP3 `0x188`); VOP1/VOP2 SDWA (encoding 249).
 - SMEM dual offset (SGPR soffset + 21-bit imm) and variable-offset
   `s_buffer_load_dword` / `x2` / `x4` with imm constants registered for SPIR-V.
+- `image_sample` dmasks including single-channel `0x2`/`0x4` and `0xb` (R+G+A).
+- Gen5 extended NGS2 rack `max_voices` at option offset `+0x50` when option size
+  ≥ `0xb0` (focused Audio tests).
 - PS user SGPR window up to 32; CB blend1–7, BufferLoadFormatXyzw, and related
   register/shader contracts from earlier cycles.
 
 **First strict fail on recent Linux Release+Silent+AUTO_CROSS discovery runs
-(always re-capture on HEAD):** SPIR-V optimizer rejects a post-Play pixel
-shader with
+(always re-capture on HEAD):** none observed within 90–180 s dual-strict after
+`dd64b41` (IndexBuffer-in-Texture). Prior first fail was
 
-`Back-edges (…) can only be formed between a block and a loop header`
+`unknown relation: Texture - Contains - IndexBuffer`
 
-after multi-MRT recompile succeeds far enough to emit an unconditional
-**backward `S_BRANCH`**. The emitter places the destination label and a plain
-`OpBranch` back-edge without structured `OpLoopMerge` / continue targets
-(`ShaderSpirv.cpp` `WriteLabel` / `Recompile_SBranch_Label`; note the existing
-CFG TODO on `S_CBRANCH`). This is a **shader SPIR-V structured-control-flow**
-blocker, not yet the `ThreadFlag` wait.
+at ~frame 1540 (single-parent GpuMemory CreateObject). That policy is in tree.
+Re-capture may still surface a **later** GpuMemory multi-parent topology, an
+unsupported shader/format, or a host fault; treat the first EXIT or structured
+error on the current HEAD as the unit of work.
+
+**Visual residual (not a process EXIT):** gameplay **HUD/UI can be correct while
+the world is white**. First hypothesis addressed by preserving GPU-owned RT
+layout across Update (`b86c730`). If white remains after that commit, next
+evidence targets are texture CPU reload after WriteBack invalidation, intermediate
+format-71 sampling, and clear/composite — not ThreadFlag fabrication.
 
 `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms waits, no observed Set in earlier
 captures) remains a **later** suspected synchronization symptom: do not fake
 the bit from `WaitEventFlag`, timers, or the render loop. Identify the producer
-only after the GPU/shader chain no longer aborts earlier.
+only after the GPU/shader chain no longer aborts earlier. EventFlag **handle
+registry** (reject unregistered/garbage pointers with `ESRCH`) is host safety,
+not a substitute for Set.
 
 Linux host path builds with `_build_linux` / Ninja Release; macOS continues to
-use `_build_macos`. Default `scripts/run_guest.lua` uses `PrintfDirection =
-'Silent'` for usable FPS; Console logging is evidence-only and destroys
-frame-time comparability.
+use `_build_macos`. Prefer default `CMAKE_BUILD_TYPE=Release` on single-config
+generators. Default `scripts/run_guest.lua` uses `PrintfDirection = 'Silent'`
+for usable FPS; Console logging is evidence-only and destroys frame-time
+comparability. Session evidence may live under a local untracked directory
+(e.g. Documents `Kyty-implementer/` copy of implementer scratch); never commit
+guest paths, title IDs, raw multi-megabyte logs, or `_Shaders/` dumps.
 
 **Always re-capture the first strict fail on the current HEAD.** This is not
 gameplay acceptance. Diagnostic input, stubs, permissive GPU skips, and
@@ -349,59 +379,52 @@ CURRENT FRONTIER
 - Build works on Linux (`_build_linux`) and macOS (`_build_macos`); use the host
   you are on. Prefer Release + `PrintfDirection=Silent` for wall-clock.
 - Vulkan device/swapchain, Gen5 shaders, indexed draws, VideoOut flips, logos,
-  recognizable menu, Play/mode transitions (AUTO_CROSS is discovery only), and
-  loading-card pixels are exercised under strict flags.
-- GpuMemory multi-parent policies, tile-27 size+4bpp detile, Gen5 EUD type-5,
-  multi-RT CB_SHADER_MASK nibbles, EXP Param5 + multi-MRT compr/null MRT0–3,
-  `v_cvt_i32_f32`, SMEM dual-offset and variable SBuffer loads are in tree with
-  focused tests where added. Do not regress them.
-- **First strict fail (re-capture on HEAD):** SPIR-V optimize fails on a PS with
-  a backward `S_BRANCH` — missing structured loop (`OpLoopMerge` / continue).
-  See `ShaderSpirv.cpp` `WriteLabel` / `Recompile_SBranch_Label`.
+  recognizable menu, Play/mode transitions (AUTO_CROSS is discovery only),
+  loading-card pixels, and deep post-Play GPU/HLE into gameplay-era frames are
+  exercised under strict flags. Silent gameplay-era FPS ~11–13 on the reference
+  Linux host is not acceptance; never compare to Console logging.
+- In tree (do not regress): GpuMemory multi-parent (VB reclaim + surface link;
+  Texture mixed parents; IndexBuffer-in-Texture link; WriteBack parent
+  classify); GPU-owned RT layout preserve on Update; tile-27 size+4bpp detile;
+  Gen5 EUD type-5; formats 14/56/71; multi-RT CB_SHADER_MASK; EXP Param5/6 +
+  multi-MRT; structured SPIR-V loops; `v_cvt_i32_f32`; SDWA; SMEM dual-offset +
+  variable SBuffer; image_sample dmasks 0x2/0x4/0xb; NGS2 extended max_voices.
+- **First strict fail (re-capture on HEAD):** none fixed in the last 90–180 s
+  dual-strict after IndexBuffer-in-Texture. Always re-capture; next EXIT or
+  structured unsupported is the unit of work.
+- **Visual residual:** HUD/UI may work while world is white. Prefer layout /
+  texture / RT alias evidence over inventing clears or ThreadFlag. RT UNDEFINED
+  discard after SB WriteBack parent invalidation is already fixed — re-verify.
 - **Later symptom only:** `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms) with no
-  observed Set. Never fabricate the signal. Trace the producer after earlier
-  GPU/shader aborts are gone.
-- Menu silent FPS has been ~30–45 on capable hosts; never compare to Console
-  logging. Not playable yet.
+  observed Set. Never fabricate the signal. EventFlag live-handle registry
+  (garbage → ESRCH) is not Set. Trace the producer after earlier GPU/shader
+  aborts are gone.
 
 IMMEDIATE OBJECTIVE AND SUCCESS CONDITION
 
-Your first assignment is not refactoring. It is to advance the strict loading
-frontier into a controllable gameplay scene without changing guest-visible
-behavior through diagnostics or fabricated success. The current evidence is:
+Advance the strict post-Play path to a **controllable, correctly rendered**
+gameplay scene without diagnostics or fabricated success. Process survival and
+HUD-only correctness are not playability.
 
-- one event named `ThreadFlag` is created with initial bits `0x0`;
-- the loading path repeatedly waits for bit `0x1` using mode `0x21` and a
-  40,000-microsecond timeout;
-- those waits time out and no corresponding `KernelSetEventFlag` call was
-  observed in the capture;
-- rendering and audio loops remain alive, so the visible loading screen is a
-  symptom of an unfinished producer/worker contract, not proof that
-  `KernelWaitEventFlag` should fabricate completion.
+If dual-strict shows a process EXIT, that is first priority (GpuMemory, shader,
+format, HLE). If the process survives but the world is wrong (e.g. white world
+with working HUD), treat that as the rendering frontier: identify the first
+bad producer (RT layout, texture update after WriteBack, sample format, clear,
+composite) with capture evidence — do not paper over with permissive flags.
 
-Trace the owner and intended producer of that event. Determine whether the
-missing signal is caused by a worker that never starts, a worker that exits or
-blocks earlier, an unresolved/misregistered export, an incorrect ABI/return
-value, an unprocessed async command, or a producer writing through another
-synchronization primitive. The first falsifiable hypothesis should name the
-producer and predict the exact call/state transition that will set bit `0x1`.
-Evidence that no such producer exists, or that it reaches an earlier strict
-failure, disproves that hypothesis and establishes the next frontier.
+`ThreadFlag` remains deferred while earlier GPU/render issues dominate:
 
-Do not solve this by setting the bit in `KernelWaitEventFlag`, treating timeout
-as success, signalling from a timer, adding a title-specific branch, or
-weakening event semantics. Instrument create/wait/set/cancel/delete and worker
-lifecycle temporarily when needed, keep those probes in ignored scratch only,
-and remove them before committing unless they are converted into a general,
-bounded diagnostic facility with tests.
+- one event named `ThreadFlag` is created with initial bits `0x0` in older
+  captures;
+- loading/wait mode `0x21` for bit `0x1` with 40 ms timeout was observed;
+- do not Set the bit from Wait, timers, or the render loop.
 
 PRIMARY ORDER OF WORK (DO NOT REORDER)
 
 1. Reproduce the strict frontier with the current checkout and private fixture
    (`$KYTY_GUEST_ROOT` only; never name the title in commits).
-2. Fix the first strict failure (currently SPIR-V loop CFG unless re-capture
-   shows otherwise) with a documented hypothesis and a focused deterministic
-   test or sanitized shader/packet fixture.
+2. Fix the first strict failure (re-capture on HEAD) with a documented
+   hypothesis and a focused deterministic test or sanitized fixture.
 3. Re-run strict execution and advance one failure at a time until the title
    reaches the first controllable gameplay scene under the playability table.
 4. Prove real keyboard/controller press+release, movement both ways, one
