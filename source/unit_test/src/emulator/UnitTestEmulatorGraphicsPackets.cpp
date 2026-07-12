@@ -1165,6 +1165,34 @@ TEST(EmulatorGraphicsPackets, ExpTarget0x25IsParam5)
 	EXPECT_EQ(0x20 + 5, 0x25);
 }
 
+// Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
+// at VS PC 0x264. Same ParamN path as 0x20+N; real ShaderParse entry (not a re-impl).
+TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)
+{
+	// EXP encoding: bits[31:26]=0x3e, target bits[9:4], en bits[3:0].
+	const uint32_t word0 = (0x3eu << 26u) | (0x26u << 4u) | 0xfu;
+	const uint32_t word1 = 0x03020100u; // v0..v3
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::Exp);
+	EXPECT_EQ(inst.format, ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3);
+	EXPECT_EQ(inst.src_num, 4);
+	EXPECT_EQ(0x20 + 6, 0x26);
+}
+
 // Captured post-detile PS: user_sgpr_num=30, eud=12, type5@0x1c, samplers at
 // 0x18 (direct), 0x20 and 0x24 (EUD). EUD virtual base is user_sgpr_num
 // rounded up to a multiple of 4 (30 → 32); api index uses the extended
