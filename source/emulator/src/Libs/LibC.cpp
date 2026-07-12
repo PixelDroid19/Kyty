@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <strings.h>
 
 // setjmp/longjmp: must NOT be wrapped in a C++ function (the wrapper frame would
 // be gone by the time longjmp fires). Kyty runs guest code natively, so we bind
@@ -152,6 +153,27 @@ static KYTY_SYSV_ABI char*  c_strcpy(char* d, const char* s) { return ::strcpy(d
 static KYTY_SYSV_ABI char*  c_strncpy(char* d, const char* s, size_t n) { return ::strncpy(d, s, n); }
 static KYTY_SYSV_ABI int    c_strcmp(const char* a, const char* b) { return ::strcmp(a, b); }
 static KYTY_SYSV_ABI int    c_strncmp(const char* a, const char* b, size_t n) { return ::strncmp(a, b, n); }
+// NID AV6ipCNa4Rw (public Gen5 tables / SharpEmu map). Null args are UB on host
+// strcasecmp; guest may pass null in boot string compares — return non-zero when
+// either side is null (not equal), matching a safe strcmp-like contract.
+static KYTY_SYSV_ABI int c_strcasecmp(const char* a, const char* b)
+{
+	if (a == nullptr || b == nullptr)
+	{
+		return (a == b ? 0 : 1);
+	}
+	return ::strcasecmp(a, b);
+}
+
+// NID 1uJgoVq3bQU — name not yet in public tables. Captured SysV after fopen(~INDEX):
+// rdi=object with embedded name at +8 ("data.js"), rsi=guest side-buffer, rcx=0x64.
+// Guest treats the return as a non-null object pointer. Writing into rsi as a raw
+// n-byte buffer regressed to an earlier null crash (rsi is not a plain peek buf).
+// Return rdi only — same continue path as the non-null missing-func stub return.
+static KYTY_SYSV_ABI void* c_1uJgoVq3bQU(void* obj, void* /*buf*/, void* /*a2*/, uint64_t /*n*/, void* /*a4*/, uint64_t /*a5*/)
+{
+	return obj;
+}
 static KYTY_SYSV_ABI char*  c_strcat(char* d, const char* s) { return ::strcat(d, s); }
 static KYTY_SYSV_ABI char*  c_strchr(const char* s, int c) { return const_cast<char*>(::strchr(s, c)); }
 // Helpers kept for pending NID registration; not yet bound via LIB_FUNC.
@@ -648,6 +670,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("SfQIZcqvvms", LibC::c_strncpy);
 	LIB_FUNC("Ovb2dSJOAuE", LibC::c_strcmp);
 	LIB_FUNC("aesyjrHVWy4", LibC::c_strncmp);
+	// sceLibc strcasecmp — NID AV6ipCNa4Rw
+	LIB_FUNC("AV6ipCNa4Rw", LibC::c_strcasecmp);
+	// Captured Gen5 post-~INDEX open: object+"data.js"; non-null return advances.
+	LIB_FUNC("1uJgoVq3bQU", LibC::c_1uJgoVq3bQU);
 	LIB_FUNC("Ls4tzzhimqQ", LibC::c_strcat);
 	LIB_FUNC("ob5xAW4ln-0", LibC::c_strchr);
 	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);    // operator new(size_t)
