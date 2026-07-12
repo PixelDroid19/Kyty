@@ -1743,6 +1743,29 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 		ret.mem         = o.mem;
 	}
 
+	// Drop bidirectional alias links before recycling the slot. Multi-parent
+	// reclaim (VB/Texture delete_all) otherwise leaves free object_ids in peer
+	// others lists; WriteBack then EXIT_IF(parent.free) on those dangling links
+	// (captured dual-strict after GPU-owned RT WriteBack skip).
+	for (const auto& other: h.others)
+	{
+		auto& peer = heap.objects[other.object_id];
+		if (peer.free)
+		{
+			continue;
+		}
+		Vector<OverlappedBlock> keep;
+		for (const auto& e: peer.others)
+		{
+			if (e.object_id != object_id)
+			{
+				keep.Add(e);
+			}
+		}
+		peer.others = keep;
+	}
+	h.others.Clear();
+
 	h.free             = true;
 	h.next_free_id     = heap.first_free_id;
 	heap.first_free_id = object_id;
@@ -2141,12 +2164,19 @@ void GpuMemory::WriteBack(GraphicContext* ctx, CommandProcessor* cp)
 			o.cpu_update_time = get_current_time();
 
 			// Invalidate / propagate each parent according to its relation.
+			// GPU-owned tiled RTs: do not zero hash/submit — CPU cannot rebuild
+			// tile-27 color targets; captured SB multi-parent write-back links
+			// always include RT Contains/Crosses parents after load.
 			for (uint32_t oi = 0; oi < h.others.Size(); oi++)
 			{
 				const auto& other  = h.others.At(static_cast<int>(oi));
 				auto&       parent = heap.objects[other.object_id];
 				EXIT_IF(parent.free);
 				auto& o2 = parent.info;
+				if (GpuMemorySkipWriteBackParentInvalidate(o2.object.type, o2.params))
+				{
+					continue;
+				}
 				o2.cpu_update_time = o.cpu_update_time;
 				o2.submit_id       = 0;
 				for (int vi = 0; vi < parent.block.vaddr_num; vi++)

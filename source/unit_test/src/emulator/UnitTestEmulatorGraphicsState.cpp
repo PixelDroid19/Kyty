@@ -3,7 +3,9 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Tile.h"
+#include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
@@ -440,6 +442,34 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	                                                GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
 	                                             GpuMemoryObjectType::Texture));
+}
+
+// Captured multi-parent SB write-back always links GPU-owned tiled RTs
+// (PARAM_TILED=1, PARAM_WRITE_BACK=0). Those parents must skip hash invalidate.
+TEST(EmulatorGraphicsState, SkipWriteBackInvalidateForGpuOwnedRenderTexture)
+{
+	uint64_t gpu_owned[8] = {};
+	gpu_owned[3]          = 1; // PARAM_TILED
+	gpu_owned[6]          = 0; // PARAM_WRITE_BACK
+	EXPECT_TRUE(GpuMemoryIsGpuOwnedRenderTextureParams(gpu_owned));
+	EXPECT_TRUE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::RenderTexture, gpu_owned));
+
+	uint64_t cpu_wb[8] = {};
+	cpu_wb[3]          = 1;
+	cpu_wb[6]          = 1;
+	EXPECT_FALSE(GpuMemoryIsGpuOwnedRenderTextureParams(cpu_wb));
+	EXPECT_FALSE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::RenderTexture, cpu_wb));
+
+	EXPECT_FALSE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::Texture, gpu_owned));
+	EXPECT_FALSE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::VertexBuffer, gpu_owned));
+}
+
+TEST(EmulatorGraphicsState, UsesTrackedLayoutWhenUploadingOverExistingImage)
+{
+	VulkanImage image(VulkanImageType::Texture);
+	image.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	EXPECT_EQ(UtilGetImageUploadSourceLayout(&image), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 // Captured Gen5 WriteBack topology: RW StorageBuffer with 8 VertexBuffer
