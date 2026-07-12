@@ -115,6 +115,9 @@ inline bool GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType existing_type,
 // Incoming VertexBuffer fully or partially covered by an existing storage or
 // render-target allocation (captured: VB Contained in StorageBuffer +
 // RenderTexture that share the same guest range).
+// Also captured multi-parent create: new VB 0x12500 with parents
+// SB/RT IsContainedWithin (surface sits inside the new VB range) and
+// SB/RT Crosses — link all surface directions rather than EXIT.
 inline bool GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                     GpuMemoryObjectType incoming_type)
 {
@@ -128,11 +131,24 @@ inline bool GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType existing
 		return false;
 	}
 	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
-	       relation == GpuMemoryOverlapType::Equals;
+	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
-// Incoming Texture covered by existing StorageBuffer/RenderTexture (or Equals).
+// Peer VertexBuffer overlapping an incoming VertexBuffer: reclaim (delete) the
+// older VB. Captured multi-parent set mixes surface links with VB
+// IsContainedWithin + Crosses parents of the same new VertexBuffer.
+inline bool GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                              GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::VertexBuffer && incoming_type == GpuMemoryObjectType::VertexBuffer &&
+	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
+	        relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals);
+}
+
+// Incoming Texture overlapping existing StorageBuffer/RenderTexture/Texture.
 // Used with multi-parent Texture create that also reclaims VertexBuffers.
+// Captured: SB/RT Contains + SB/RT IsContainedWithin (larger texture over a
+// second surface pair); Texture Crosses peer Texture.
 inline bool GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                      GpuMemoryObjectType incoming_type)
 {
@@ -146,7 +162,7 @@ inline bool GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType existin
 		return false;
 	}
 	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
-	       relation == GpuMemoryOverlapType::Equals;
+	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
 // VertexBuffer parent of an incoming Texture that should be reclaimed (delete).
@@ -155,6 +171,16 @@ inline bool GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType existing_typ
 {
 	return existing_type == GpuMemoryObjectType::VertexBuffer && incoming_type == GpuMemoryObjectType::Texture &&
 	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin);
+}
+
+// Larger VertexBuffer fully covering an incoming Texture: keep both linked
+// (single-parent path already allows Contains/Equals). Captured multi-parent
+// Texture 0x1000 with VB Contains + SB Contains + RT Contains.
+inline bool GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                             GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::VertexBuffer && incoming_type == GpuMemoryObjectType::Texture &&
+	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals);
 }
 
 // Incoming RenderTexture sharing guest memory with existing surfaces or partial

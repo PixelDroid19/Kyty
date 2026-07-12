@@ -1121,6 +1121,33 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
+			// Multi-parent VertexBuffer with mixed surface parents (link) and peer
+			// VertexBuffers (reclaim). Captured after dmask 0xb load path:
+			// SB/RT Contains or IsContainedWithin/Crosses + VB IsContainedWithin +
+			// VB Crosses → create_all_the_same rejects mixed relations/types.
+			Vector<int> vertex_reclaim_vertex_ids;
+			bool multi_vertex_mixed = (info.type == GpuMemoryObjectType::VertexBuffer && !others.IsEmpty());
+			if (multi_vertex_mixed)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& h = heap.objects[obj.object_id];
+					EXIT_IF(h.free);
+					const auto& o = h.info;
+					if (GpuMemoryAllowsVertexReclaimVertex(o.object.type, obj.relation, info.type))
+					{
+						vertex_reclaim_vertex_ids.Add(obj.object_id);
+						continue;
+					}
+					if (GpuMemoryAllowsVertexContainedInSurface(o.object.type, obj.relation, info.type))
+					{
+						continue;
+					}
+					multi_vertex_mixed = false;
+					break;
+				}
+			}
+
 			// Multi-parent RenderTexture: surface peers/parents (SB/RT/Texture)
 			// and partial VertexBuffers. Captured after Param5: SB Equals +
 			// SB Contains + RT Contains (and permutations).
@@ -1184,9 +1211,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
-			// Texture with mixed parents: reclaim VertexBuffers (delete) and link
-			// StorageBuffer/RenderTexture surfaces that Contain/Cross/Equals the
-			// new Texture. Captured 7-parent set: 5 VBs + SB Contains + RT Contains.
+			// Texture with mixed parents: reclaim peer VBs (Crosses/IsContainedWithin),
+			// link larger VBs that Contain the texture, and link SB/RT surfaces.
+			// Captured: VB Contains + SB Contains + RT Contains (0x1000 texture).
 			bool multi_texture_mixed = (info.type == GpuMemoryObjectType::Texture && !others.IsEmpty());
 			if (multi_texture_mixed)
 			{
@@ -1198,6 +1225,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					if (GpuMemoryAllowsTextureReclaimVertex(o.object.type, obj.relation, info.type))
 					{
 						texture_reclaim_vertex_ids.Add(obj.object_id);
+						continue;
+					}
+					if (GpuMemoryAllowsTextureLinkVertex(o.object.type, obj.relation, info.type))
+					{
 						continue;
 					}
 					if (GpuMemoryAllowsTextureContainedInSurface(o.object.type, obj.relation, info.type))
@@ -1243,6 +1274,40 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					}
 					others  = keep;
 					overlap = true;
+				}
+			} else if (multi_vertex_mixed)
+			{
+				// Drop reclaimed peer VBs; keep surface parents linked.
+				if (vertex_reclaim_vertex_ids.Size() == others.Size())
+				{
+					delete_all = true;
+				} else if (vertex_reclaim_vertex_ids.IsEmpty())
+				{
+					// All parents were surfaces (should have been multi_vertex_in_surface).
+					overlap = true;
+				} else
+				{
+					Vector<OverlappedBlock> keep;
+					for (const auto& obj: others)
+					{
+						bool reclaim = false;
+						for (int id: vertex_reclaim_vertex_ids)
+						{
+							if (id == obj.object_id)
+							{
+								reclaim = true;
+								break;
+							}
+						}
+						if (!reclaim)
+						{
+							keep.Add(obj);
+						}
+					}
+					// Reuse texture_reclaim_vertex_ids free path after create.
+					texture_reclaim_vertex_ids = vertex_reclaim_vertex_ids;
+					others                     = keep;
+					overlap                    = true;
 				}
 			} else if (create_generate_mips(others, info.type, heap_id))
 			{
