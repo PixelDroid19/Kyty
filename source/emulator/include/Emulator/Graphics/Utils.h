@@ -6,6 +6,7 @@
 #include "Emulator/Common.h"
 
 #include <utility>
+#include <vulkan/vulkan_core.h>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -22,6 +23,8 @@ struct VulkanBuffer;
 struct VulkanImage;
 struct DepthStencilVulkanImage;
 struct VulkanSwapchain;
+
+VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 
 struct BufferImageCopy
 {
