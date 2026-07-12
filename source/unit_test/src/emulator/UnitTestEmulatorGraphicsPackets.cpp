@@ -846,6 +846,29 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleSingleChannelDmasks)
 	EXPECT_EQ(code.GetInstructions().At(1).dst.size, 1);
 }
 
+// Captured after NGS2 voice fix: image_sample dmask 0xb (R+G+A) at PC 0x40.
+TEST(EmulatorGraphicsPackets, ParsesImageSampleDmaskB)
+{
+	const uint32_t word0 = (0x3cu << 26u) | (0x20u << 18u) | (0xbu << 8u);
+	const uint32_t shader[] = {word0, 0u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::ImageSample);
+	EXPECT_EQ(code.GetInstructions().At(0).format, ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB);
+	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 3);
+}
+
 // Gen5 SMEM opcode 0x3: s_load_dwordx8 s[4:11], s[0:1], 0 — captured at PC 0x18.
 TEST(EmulatorGraphicsPackets, ParsesSmembSLoadDwordx8)
 {

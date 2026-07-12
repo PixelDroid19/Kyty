@@ -298,6 +298,7 @@ enum FormatByte : uint64_t
 	Dmask9, // dmask:0x9
 	Dmask4, // dmask:0x4 (B channel only)
 	Dmask2, // dmask:0x2 (G channel only)
+	DmaskB, // dmask:0xb (R+G+A, three components)
 	Gds,    // gds
 };
 
@@ -369,6 +370,7 @@ enum Format : uint64_t
 	Vdata2Vaddr3StSsDmask9              = FormatDefine({DA2, S0A3, S1A8, S2A4, Dmask9}),
 	Vdata2VaddrSvSoffsIdxen             = FormatDefine({DA2, S0, S1A4, S2, Idxen}),
 	Vdata3Vaddr3StSsDmask7              = FormatDefine({DA3, S0A3, S1A8, S2A4, Dmask7}),
+	Vdata3Vaddr3StSsDmaskB              = FormatDefine({DA3, S0A3, S1A8, S2A4, DmaskB}),
 	Vdata3Vaddr4StSsDmask7              = FormatDefine({DA3, S0A4, S1A8, S2A4, Dmask7}),
 	Vdata3VaddrSvSoffsIdxen             = FormatDefine({DA3, S0, S1A4, S2, Idxen}),
 	Vdata4Vaddr2SvSoffsOffenIdxenFloat4 = FormatDefine({DA4, S0A2, S1A4, S2, Offen, Idxen, Float4}),
