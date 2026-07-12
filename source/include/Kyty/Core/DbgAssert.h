@@ -29,7 +29,13 @@ bool dbg_is_debugger_present();
 
 } // namespace Kyty::Core
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS || KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+// Prefer trap/exit over writing address 1: GCC -O3 -Werror=array-bounds treats
+// *(volatile int*)1 as an out-of-bounds store when ASSERT_HALT is inlined.
+#if defined(__GNUC__) || defined(__clang__)
+#define ASSERT_HALT()                                                                                                                      \
+	(Kyty::Core::dbg_is_debugger_present() ? (::fflush(nullptr), __builtin_trap(), 1)                                                      \
+	                                       : (Kyty::Core::dbg_exit(321), 1))
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS || KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #define ASSERT_HALT()                                                                                                                      \
 	(Kyty::Core::dbg_is_debugger_present() ? (::fflush(nullptr), *(reinterpret_cast<volatile int*>(1)) = 0)                                \
 	                                       : (Kyty::Core::dbg_exit(321), 1))

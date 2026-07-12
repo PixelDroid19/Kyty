@@ -327,7 +327,7 @@ int GameController::ReadStates(ControllerState* states, int states_num, bool* fl
 	EXIT_IF(flag == nullptr);
 	EXIT_IF(count == nullptr);
 	EXIT_IF(states == nullptr);
-	EXIT_IF(states_num < 1 || states_num > STATES_MAX);
+	EXIT_IF(states_num < 1 || states_num > static_cast<int>(STATES_MAX));
 
 	Core::LockGuard lock(m_mutex);
 

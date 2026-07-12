@@ -12,7 +12,10 @@ local cfg = {
 	ShaderOptimizationType = 'Performance';
 	ShaderLogDirection = 'Silent';
 	CommandBufferDumpEnabled = false;
-	PrintfDirection = 'Console';
+	-- Silent is required for usable host FPS. Console HLE logging can drop a
+	-- Release build from ~40+ FPS to ~1 FPS on the same host/GPU. Use Console
+	-- only when debugging a specific guest call sequence.
+	PrintfDirection = 'Silent';
 	ProfilerDirection = 'None';
 }
 

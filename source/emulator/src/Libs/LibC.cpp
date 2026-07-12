@@ -154,8 +154,12 @@ static KYTY_SYSV_ABI int    c_strcmp(const char* a, const char* b) { return ::st
 static KYTY_SYSV_ABI int    c_strncmp(const char* a, const char* b, size_t n) { return ::strncmp(a, b, n); }
 static KYTY_SYSV_ABI char*  c_strcat(char* d, const char* s) { return ::strcat(d, s); }
 static KYTY_SYSV_ABI char*  c_strchr(const char* s, int c) { return const_cast<char*>(::strchr(s, c)); }
-static KYTY_SYSV_ABI char*  c_strrchr(const char* s, int c) { return const_cast<char*>(::strrchr(s, c)); }
-static KYTY_SYSV_ABI size_t c_strnlen(const char* s, size_t n) { return ::strnlen(s, n); }
+// Helpers kept for pending NID registration; not yet bound via LIB_FUNC.
+[[maybe_unused]] static KYTY_SYSV_ABI char*  c_strrchr(const char* s, int c)
+{
+	return const_cast<char*>(::strrchr(s, c));
+}
+[[maybe_unused]] static KYTY_SYSV_ABI size_t c_strnlen(const char* s, size_t n) { return ::strnlen(s, n); }
 static KYTY_SYSV_ABI void   c_srand(unsigned int seed) { ::srand(seed); }
 
 // C++ operator new/delete (mangled _Znwm/_ZdlPv), forwarded to the host allocator.
