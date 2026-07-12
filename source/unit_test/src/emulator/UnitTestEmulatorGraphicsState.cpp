@@ -349,16 +349,25 @@ TEST(EmulatorGraphicsState, AllowsMixedTextureVertexStorageParents)
 }
 
 // Captured: VertexBuffer Contained by co-located StorageBuffer + RenderTexture.
+// Multi-parent load also uses surface IsContainedWithin/Crosses + peer VB reclaim.
 TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
 {
 	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                                   GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Contains,
 	                                                   GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                   GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Crosses,
+	                                                   GpuMemoryObjectType::VertexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
 	                                                    GpuMemoryObjectType::VertexBuffer));
-	EXPECT_FALSE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::IsContainedWithin,
-	                                                    GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
+	                                              GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                              GpuMemoryObjectType::VertexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
+	                                               GpuMemoryObjectType::VertexBuffer));
 }
 
 // Captured post-Param5: RenderTexture with SB Equals + SB/RT Contains parents.
@@ -395,18 +404,27 @@ TEST(EmulatorGraphicsState, AllowsStorageSurfaceShareWithContainedWithin)
 }
 
 // Captured: Texture over 5 VBs (reclaim) + StorageBuffer/RenderTexture Contains (link).
+// Also VB Contains texture (link larger VB) mixed with SB/RT Contains.
 TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 {
 	EXPECT_TRUE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
 	                                               GpuMemoryObjectType::Texture));
 	EXPECT_TRUE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
 	                                               GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
+	                                            GpuMemoryObjectType::Texture));
 	EXPECT_TRUE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                                    GpuMemoryObjectType::Texture));
 	EXPECT_TRUE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Contains,
 	                                                    GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                    GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
+	                                                    GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                                GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
+	                                             GpuMemoryObjectType::Texture));
 }
 
 // Captured Gen5 WriteBack topology: RW StorageBuffer with 8 VertexBuffer
