@@ -4,6 +4,7 @@
 #include "Kyty/Core/MagicEnum.h"
 #include "Kyty/Core/Vector.h"
 
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Loader {
@@ -67,12 +68,40 @@ void SymbolDatabase::DbgDump(const String& folder, const String& file_name)
 
 const SymbolRecord* SymbolDatabase::Find(const SymbolResolve& s) const
 {
-	auto index = m_map.Get(GenerateName(s), decltype(m_symbols)::INVALID_INDEX);
-	if (!m_symbols.IndexValid(index))
+	const String key   = GenerateName(s);
+	const auto   index = m_map.Get(key, decltype(m_symbols)::INVALID_INDEX);
+	if (m_symbols.IndexValid(index))
 	{
-		return nullptr;
+		return &m_symbols.At(index);
 	}
-	return &m_symbols.At(index);
+
+	// Fallback when the hashmap misses a key that is present in m_symbols.
+	// Observed for some Gen5 NIDs (e.g. NpTrophy2 Fbshr7OQ6Q): Put/Get key
+	// mismatch while DbgDump still lists the record. Prefer the vector scan
+	// over a silent unresolved PLT so HLE registrations remain authoritative.
+	for (const auto& sym: m_symbols)
+	{
+		if (sym.name == key)
+		{
+			return &sym;
+		}
+	}
+
+	// Last resort: match on NID-only prefix (before first '[').
+	const uint32_t bracket = key.FindIndex(U'[');
+	if (bracket != Core::STRING_INVALID_INDEX && bracket > 0)
+	{
+		const String nid = key.Left(bracket);
+		for (const auto& sym: m_symbols)
+		{
+			if (sym.name.StartsWith(nid + U"["))
+			{
+				return &sym;
+			}
+		}
+	}
+
+	return nullptr;
 }
 
 } // namespace Kyty::Loader

@@ -93,6 +93,7 @@ namespace Kyty::Libs::NpTrophy2 {
 int KYTY_SYSV_ABI CreateContext(int32_t* context, int32_t user_id, uint32_t service_label, uint64_t options);
 int KYTY_SYSV_ABI CreateHandle(int32_t* handle);
 int KYTY_SYSV_ABI RegisterContext(int32_t context, int32_t handle, uint64_t options);
+int KYTY_SYSV_ABI RegisterUnlockCallback(void* callback, void* userdata);
 
 } // namespace Kyty::Libs::NpTrophy2
 
