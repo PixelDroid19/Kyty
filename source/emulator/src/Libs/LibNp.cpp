@@ -109,6 +109,8 @@ int KYTY_SYSV_ABI DestroyEvent(Event* event)
 LIB_DEFINE(InitNpUniversalDataSystem_1)
 {
 	LIB_FUNC("sjaobBgqeB4", Initialize);
+	// Captured Gen5 TrophyManager thread: dual NID for Initialize.
+	LIB_FUNC("AUIHb7jUX3I", Initialize);
 	LIB_FUNC("5zBnau1uIEo", CreateContext);
 	LIB_FUNC("hT0IAEvN+M0", CreateHandle);
 	LIB_FUNC("tpFJ8LIKvPw", RegisterContext);

@@ -37,6 +37,7 @@ TEST(EmulatorSaveData, SaveDataDialogInitializeRequiresCommonDialog)
 	EXPECT_EQ(CommonDialog::CommonDialogInitialize(), CommonDialog::ERROR_ALREADY_SYSTEM_INITIALIZED);
 
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogInitialize(), 0);
+	EXPECT_EQ(SaveDataDialog::SaveDataDialogGetStatus(), CommonDialog::STATUS_INITIALIZED);
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogUpdateStatus(), CommonDialog::STATUS_INITIALIZED);
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogInitialize(), CommonDialog::ERROR_ALREADY_INITIALIZED);
 
@@ -99,6 +100,47 @@ TEST(EmulatorSaveData, DeleteTransactionResourceTracksCreateHandles)
 	EXPECT_EQ(SaveDataDeleteTransactionResource(resource, &mount), 0);
 	// Double-delete must not invent success.
 	EXPECT_EQ(SaveDataDeleteTransactionResource(resource, &mount), Libs::SaveData::SAVE_DATA_ERROR_NOT_FOUND);
+}
+
+TEST(EmulatorSaveData, DirNameSearchValidatesAndReportsHits)
+{
+	using namespace Libs::SaveData;
+
+	SaveDataDirNameSearchResult result {};
+	EXPECT_EQ(SaveDataDirNameSearch(nullptr, &result), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+	EXPECT_EQ(SaveDataDirNameSearch(reinterpret_cast<const SaveDataDirNameSearchCond*>(0x1), nullptr),
+	          Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+
+	SaveDataDirNameSearchCond cond {};
+	cond.user_id = 1;
+	cond.key     = 0;
+	cond.order   = 0;
+	// Invalid sort key/order must fail with PARAMETER.
+	cond.key = 99;
+	EXPECT_EQ(SaveDataDirNameSearch(&cond, &result), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+	cond.key   = 0;
+	cond.order = 9;
+	EXPECT_EQ(SaveDataDirNameSearch(&cond, &result), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+	cond.order = 0;
+
+	SaveDataDirName names[4] = {};
+	result.dir_names         = names;
+	result.dir_names_num     = 4;
+	// Host `_SaveData` may or may not exist; contract is success with set_num
+	// capped by dir_names_num and hit_num >= set_num.
+	EXPECT_EQ(SaveDataDirNameSearch(&cond, &result), 0);
+	EXPECT_LE(result.set_num, result.dir_names_num);
+	EXPECT_GE(result.hit_num, result.set_num);
+
+	// Filter for a name that cannot exist: exact match yields empty hits.
+	SaveDataDirName filter {};
+	std::memcpy(filter.data, "__kyty_no_such_save__", 21);
+	cond.dir_name    = &filter;
+	result.hit_num   = 99;
+	result.set_num   = 99;
+	EXPECT_EQ(SaveDataDirNameSearch(&cond, &result), 0);
+	EXPECT_EQ(result.hit_num, 0u);
+	EXPECT_EQ(result.set_num, 0u);
 }
 
 UT_END();

@@ -13,6 +13,7 @@
 #include "SDL_system.h"
 
 #include <cerrno>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utime.h>
@@ -645,9 +646,62 @@ void sys_file_find_files(const String& /*path*/, Vector<sys_file_find_t>& /*out*
 	EXIT("not implemented\n");
 }
 
-void sys_file_get_dents(const String& /*path*/, Kyty::Vector<sys_dir_entry_t>& /*out*/)
+void sys_file_get_dents(const String& path, Kyty::Vector<sys_dir_entry_t>& out)
 {
-	EXIT("not implemented\n");
+	const String real_name = get_internal_name(path);
+	const auto   path_utf8 = real_name.utf8_str();
+	DIR*         dir       = opendir(path_utf8.GetData());
+	if (dir == nullptr)
+	{
+		return;
+	}
+
+	// readdir is sufficient for save-root enumeration (not reentrant concurrent).
+	for (;;)
+	{
+		errno               = 0;
+		const dirent* entry = readdir(dir);
+		if (entry == nullptr)
+		{
+			break;
+		}
+
+		sys_dir_entry_t r {};
+		r.name = String::FromUtf8(entry->d_name);
+
+		if (entry->d_type == DT_DIR)
+		{
+			r.is_file = false;
+		} else if (entry->d_type == DT_REG)
+		{
+			r.is_file = true;
+		} else if (entry->d_type == DT_UNKNOWN || entry->d_type == DT_LNK)
+		{
+			// Fallback when d_type is unavailable or for symlinks.
+			String full = real_name;
+			if (!full.EndsWith(U"/"))
+			{
+				full += U"/";
+			}
+			full += r.name;
+			struct stat s
+			{
+			};
+			if (0 != stat(full.utf8_str().GetData(), &s))
+			{
+				continue;
+			}
+			r.is_file = !S_ISDIR(s.st_mode);
+		} else
+		{
+			// Skip sockets, fifos, devices for host directory listings.
+			continue;
+		}
+
+		out.Add(r);
+	}
+
+	closedir(dir);
 }
 
 bool sys_file_copy_file(const String& /*src*/, const String& /*dst*/)
