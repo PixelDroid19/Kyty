@@ -2381,6 +2381,9 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 		}
 	}
 
+	// GCN/GFX: parameter exports use targets 0x20+N (N = param index). SharpEmu
+	// treats targets in [32,64) the same way (fact only; no code copied). Captured
+	// post-Play VS: target 0x26 en=0xf done=0 compr=0 vm=0 → Param6.
 	if (inst.format == ShaderInstructionFormat::Unknown && done == 0 && compr == 0 && vm == 0 && en == 0xf)
 	{
 		switch (target)
@@ -2391,13 +2394,14 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 			case 0x23: inst.format = ShaderInstructionFormat::Param3Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			case 0x24: inst.format = ShaderInstructionFormat::Param4Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			case 0x25: inst.format = ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x26: inst.format = ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			default: break;
 		}
 	}
 
-	// Fallback: parameter exports (targets 0x20-0x25) with a partial channel mask
-	// (en != 0xf) still map to the full ParamN format for bring-up — unwritten
-	// channels read whatever is in the vsrc regs, which is harmless for a param.
+	// Fallback: parameter exports with a partial channel mask (en != 0xf) still
+	// map to the full ParamN format for bring-up — unwritten channels read
+	// whatever is in the vsrc regs, which is harmless for a param.
 	if (inst.format == ShaderInstructionFormat::Unknown && done == 0 && compr == 0 && vm == 0)
 	{
 		switch (target)
@@ -2408,6 +2412,7 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 			case 0x23: inst.format = ShaderInstructionFormat::Param3Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			case 0x24: inst.format = ShaderInstructionFormat::Param4Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			case 0x25: inst.format = ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x26: inst.format = ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			default: break;
 		}
 	}
