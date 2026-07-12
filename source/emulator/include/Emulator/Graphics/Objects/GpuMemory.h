@@ -261,6 +261,30 @@ inline bool GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType existing_type
 //   - Crosses / Contains / IsContainedWithin: invalidate only (partial overlap)
 //   - no parents or only non-Equals: recompute self hash from CPU after write-back
 // Any other relation is unsupported and must fail structurally.
+//
+// GPU-owned tiled RenderTextures (PARAM_TILED set, PARAM_WRITE_BACK clear) have
+// no CPU upload path. Captured multi-parent write-back links always pair a RW
+// StorageBuffer with RT Contains/Crosses parents on the post-Play path. Zeroing
+// those parents' hash/submit_id only forces a no-op Update (after layout fix) or
+// historically discarded contents via UNDEFINED. Skip parent invalidate entirely
+// for that class — GPU image remains source of truth.
+//
+// RenderTextureObject param slots (must stay in sync with RenderTexture.h):
+//   PARAM_TILED = 3, PARAM_WRITE_BACK = 6
+inline bool GpuMemoryIsGpuOwnedRenderTextureParams(const uint64_t* params)
+{
+	if (params == nullptr)
+	{
+		return false;
+	}
+	return params[3] != 0 && params[6] == 0;
+}
+
+inline bool GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType parent_type, const uint64_t* parent_params)
+{
+	return parent_type == GpuMemoryObjectType::RenderTexture && GpuMemoryIsGpuOwnedRenderTextureParams(parent_params);
+}
+
 enum class GpuMemoryWriteBackParentAction : uint8_t
 {
 	PropagateEquals, // full hash recompute via Update (Equals alias)
