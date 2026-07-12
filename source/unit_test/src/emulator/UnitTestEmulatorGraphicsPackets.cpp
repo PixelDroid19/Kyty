@@ -1165,6 +1165,35 @@ TEST(EmulatorGraphicsPackets, ExpTarget0x25IsParam5)
 	EXPECT_EQ(0x20 + 5, 0x25);
 }
 
+// VOP1 SDWA: src0 encoding 249 + control dword. Captured after Param6 as
+// "unknown operand: 249" until VOP1 shares VOP2's SDWA decode for src0.
+TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0)
+{
+	// v_mov_b32 v0, -v2 with SDWA: opcode 1 (mov), src0=249.
+	// VOP1: bits[24:17]=vdst, bits[16:9]=op, bits[8:0]=src0; encoding via VOP2 trampoline 0x3f.
+	const uint32_t word0 = (0x3fu << 25u) | (0u << 17u) | (0x01u << 9u) | 249u;
+	const uint32_t word1 = 2u | (6u << 8u) | (6u << 16u) | (1u << 20u); // src vgpr2, DWORD, src0_neg
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::VMovB32);
+	EXPECT_EQ(inst.src[0].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(inst.src[0].register_id, 2);
+	EXPECT_TRUE(inst.src[0].negate);
+}
+
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
 // at VS PC 0x264. Same ParamN path as 0x20+N; real ShaderParse entry (not a re-impl).
 TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)
