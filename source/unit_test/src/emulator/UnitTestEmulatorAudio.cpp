@@ -97,6 +97,58 @@ TEST(EmulatorAudio, ReadsGen5CustomRackVoiceCountFromCommonOptionBlock)
 	EXPECT_GT(raw_info_two[1], raw_info_one[1]);
 }
 
+// Captured dual-strict: reverb rack 0x2001 option size 0xb8 has max_voices=0 at
+// the classic +0x20 field but max_voices=16 at the Gen5 extended +0x50 field.
+// Query/Create must size and index voices from +0x50 so GetVoiceHandle(id) works.
+TEST(EmulatorAudio, ReadsGen5ExtendedReverbRackVoiceCountAndHandles)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	alignas(uint64_t) uint64_t raw_sys_info[8] = {};
+	auto*                      sys_info        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_sys_info);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, sys_info), 0);
+	std::unique_ptr<uint8_t[]> sys_storage(new uint8_t[raw_sys_info[1]]);
+	raw_sys_info[0]  = reinterpret_cast<uintptr_t>(sys_storage.get());
+	uintptr_t system = 0;
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, sys_info, &system), 0);
+
+	// Classic max_voices at +0x20 left 0; extended field at +0x50 is the real count.
+	alignas(uint64_t) uint8_t raw_option[0xb8] = {};
+	*reinterpret_cast<size_t*>(raw_option)     = sizeof(raw_option);
+	*reinterpret_cast<uint32_t*>(raw_option + 0x20) = 0;
+	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = 16;
+
+	alignas(uint64_t) uint64_t raw_rack_info[8] = {};
+	auto*                      rack_info        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x2001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info), 0);
+	// Must allocate room for 16 voices, not zero.
+	EXPECT_GT(raw_rack_info[1], sizeof(void*) * 8u);
+
+	std::unique_ptr<uint8_t[]> rack_storage(new uint8_t[raw_rack_info[1]]);
+	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.get());
+	uintptr_t rack   = 0;
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x2001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info, &rack), 0);
+
+	uintptr_t voice0 = 0;
+	uintptr_t voice15 = 0;
+	uintptr_t voice16 = UINTPTR_MAX;
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, &voice0), 0);
+	EXPECT_NE(voice0, 0u);
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 15, &voice15), 0);
+	EXPECT_NE(voice15, 0u);
+	EXPECT_NE(voice15, voice0);
+	// Out of range is a guest error, not a process exit.
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 16, &voice16), static_cast<int32_t>(0x804a0300u));
+	EXPECT_EQ(voice16, 0u);
+
+	sys_storage.release();
+	rack_storage.release();
+}
+
 TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 {
 	if (!Config::IsInitialized())
