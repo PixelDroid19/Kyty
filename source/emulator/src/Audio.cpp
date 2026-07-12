@@ -1980,15 +1980,24 @@ static uint32_t Ngs2GetRackMaxVoices(uint32_t rack_id, const Ngs2RackOption* opt
 {
 	EXIT_IF(option == nullptr);
 
-	if (rack_id == 0x4001 && option->size == 0x518)
+	// Gen5 rack options may insert a 0x30-byte extension after `size` before the
+	// common name/flags/max_voices fields. The base Ngs2RackOption is 0x80 bytes
+	// on this ABI; any option->size >= 0xb0 (0x80+0x30) is treated as extended.
+	// Observed: custom sampler 0x4001 size 0x518 → max_voices at +0x50 = 256;
+	// reverb 0x2001 size 0xb8 → same offset (standard option->max_voices is 0).
+	const bool extended = (option->size >= 0xb0u);
+	if (extended)
 	{
-		// Gen5 custom-rack options place the common numeric fields after a
-		// 0x30-byte extension. flags starts at 0x48, so max_voices is at 0x50.
 		uint32_t max_voices = 0;
 		memcpy(&max_voices, reinterpret_cast<const uint8_t*>(option) + 0x50, sizeof(max_voices));
-		return max_voices;
+		if (max_voices != 0)
+		{
+			return max_voices;
+		}
 	}
 
+	// Fallback: classic prefix layout (max_voices at +0x20 after size+name+flags+grain).
+	(void)rack_id;
 	return option->max_voices;
 }
 
@@ -2374,7 +2383,17 @@ int KYTY_SYSV_ABI Ngs2RackGetVoiceHandle(uintptr_t rack_handle, uint32_t voice_i
 	auto* rack   = reinterpret_cast<Ngs2RackInternal*>(rack_handle);
 	auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack_handle + sizeof(Ngs2RackInternal));
 
-	EXIT_NOT_IMPLEMENTED(voice_id >= rack->option.common.max_voices);
+	const uint32_t max_voices = rack->option.common.max_voices;
+	printf("\t max_voices = %u\n", max_voices);
+
+	// Ordinary invalid index is a guest error, not an emulator invariant break.
+	// Captured: reverb rack 0x2001 extended option size 0xb8 → max_voices 16 at
+	// +0x50; GetVoiceHandle for voice_id in [0,15] must succeed after Create.
+	if (max_voices == 0 || voice_id >= max_voices)
+	{
+		*handle = 0;
+		return static_cast<int32_t>(0x804a0300u); // SCE_NGS2_ERROR_INVALID_VOICE_HANDLE
+	}
 
 	EXIT_IF(voices[voice_id].rack != rack);
 
