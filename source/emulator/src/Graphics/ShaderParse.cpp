@@ -937,19 +937,45 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	uint32_t src0   = (buffer[0] >> 0u) & 0x1ffu;
 	uint32_t opcode = (buffer[0] >> 9u) & 0xffu;
 
+	// SDWA uses src0 encoding 249 and a second control dword (same layout as VOP2
+	// for src0/dst fields). Captured post-Play: unknown operand 249 until handled.
+	const bool sdwa = (src0 == 249u);
+	uint32_t   size = (sdwa ? 2u : 1u);
+
+	src0               = (sdwa ? (buffer[1] >> 0u) & 0xffu : src0);
+	uint32_t dst_sel   = (sdwa ? (buffer[1] >> 8u) & 0x7u : 6u);
+	uint32_t dst_u     = (sdwa ? (buffer[1] >> 11u) & 0x3u : 2u);
+	uint32_t clmp      = (sdwa ? (buffer[1] >> 13u) & 0x1u : 0u);
+	uint32_t omod      = (sdwa ? (buffer[1] >> 14u) & 0x3u : 0u);
+	uint32_t src0_sel  = (sdwa ? (buffer[1] >> 16u) & 0x7u : 6u);
+	uint32_t src0_sext = (sdwa ? (buffer[1] >> 19u) & 0x1u : 0u);
+	uint32_t src0_neg  = (sdwa ? (buffer[1] >> 20u) & 0x1u : 0u);
+	uint32_t src0_abs  = (sdwa ? (buffer[1] >> 21u) & 0x1u : 0u);
+	uint32_t s0        = (sdwa ? (buffer[1] >> 23u) & 0x1u : 1u);
+
+	EXIT_NOT_IMPLEMENTED(dst_sel != 6);
+	EXIT_NOT_IMPLEMENTED(sdwa && dst_sel == 6 && dst_u != 0);
+	EXIT_NOT_IMPLEMENTED(omod != 0);
+	EXIT_NOT_IMPLEMENTED(src0_sel != 6);
+	EXIT_NOT_IMPLEMENTED(src0_sext != 0);
+
 	ShaderInstruction inst;
 	inst.pc      = pc;
-	inst.src[0]  = operand_parse(src0);
+	// Non-SDWA: 9-bit src0 is already SGPR/VGPR encoded. SDWA: 8-bit + s0 flag
+	// (s0==0 → VGPR, same as VOP2 SDWA).
+	inst.src[0]  = operand_parse(sdwa ? (src0 + (s0 == 0 ? 256u : 0u)) : src0);
 	inst.dst     = operand_parse(vdst + 256);
 	inst.src_num = 1;
-
-	uint32_t size = 1;
 
 	if (inst.src[0].type == ShaderOperandType::LiteralConstant)
 	{
 		inst.src[0].constant.u = buffer[size];
 		size++;
 	}
+
+	inst.src[0].absolute = (src0_abs != 0);
+	inst.src[0].negate   = (src0_neg != 0);
+	inst.dst.clamp       = (clmp != 0);
 
 	inst.format = ShaderInstructionFormat::SVdstSVsrc0;
 
