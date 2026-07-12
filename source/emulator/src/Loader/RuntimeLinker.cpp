@@ -1,4 +1,5 @@
 #include "Emulator/Loader/RuntimeLinker.h"
+#include <cstdio>
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -636,26 +637,68 @@ static KYTY_MS_ABI uint8_t* TlsMainGetAddr()
 	return RuntimeLinker::TlsGetAddr(g_tls_main_program) + g_tls_main_program->tls.image_size;
 }
 
+uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size)
+{
+	if (code == nullptr || size < 8)
+	{
+		return 0;
+	}
+
+	// SysV TLS GD call half is "data16 data16 rex64 call rel32":
+	//   66 66 48 e8 xx xx xx xx
+	// Some PS5 images encode the REX.W as a third 0x66 instead:
+	//   66 66 66 e8 xx xx xx xx
+	// That form is executed as a 16-bit near call on host CPUs (return push of
+	// 2 bytes, IP low 16-bit wrap to ~0x3ffe). Restore REX.W.
+	uint64_t       rewritten = 0;
+	const uint64_t last      = size - 8;
+	for (uint64_t i = 0; i <= last; i++)
+	{
+		if (code[i] == 0x66 && code[i + 1] == 0x66 && code[i + 2] == 0x66 && code[i + 3] == 0xe8)
+		{
+			code[i + 2] = 0x48;
+			rewritten++;
+			i += 7; // skip remainder of this 8-byte site
+		}
+	}
+	return rewritten;
+}
+
 static void PatchProgram(Program* program, uint64_t address, uint64_t size)
 {
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->elf == nullptr);
 
+	// Always rewrite broken TLS GD call prefixes on executable segments, even
+	// when the TLS handler is not yet published — the relative targets already
+	// land on the handler slot Kyty allocates after base_size_aligned.
+	if (!program->elf->IsShared() && size >= 8)
+	{
+		auto*              start_ptr = reinterpret_cast<uint8_t*>(address);
+		const uint64_t rex_sites = LoaderRewriteTlsGdCallRexPrefix(start_ptr, size);
+		if (rex_sites != 0)
+		{
+			std::fprintf(stderr, "Patch tls GD call REX.W at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, rex_sites);
+			printf("Patch tls GD call REX.W at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, rex_sites);
+		}
+	}
+
 	if (!program->elf->IsShared() && program->tls.handler_vaddr != 0)
 	{
+		auto* start_ptr = reinterpret_cast<uint8_t*>(address);
+
 		// Replace:
 		//   mov rax, qword ptr fs:[0x00]
 		// with:
 		//   call <handler>
 		//   mov rax,rax
 		//   nop
-		// TODO() sometimes prefix 666666 is present
+		// TODO() sometimes prefix 666666 is present before the FS load
 		const uint8_t tls_pattern[9] = {0x64, 0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00};
 
 		EXIT_IF(Jit::Call9::GetSize() != sizeof(tls_pattern));
 
-		auto* start_ptr = reinterpret_cast<uint8_t*>(address);
-		auto* end_ptr   = start_ptr + size - sizeof(tls_pattern);
+		auto* end_ptr = start_ptr + size - sizeof(tls_pattern);
 
 		for (auto* ptr = start_ptr; ptr < end_ptr; ptr++)
 		{
@@ -893,6 +936,51 @@ void RuntimeLinker::Execute()
 
 	RelocateAll();
 	StartAllModules();
+
+	// After load+reloc the main image is final. Rewrite TLS GD call prefixes
+	// on executable LOAD segments only (never the whole base_size — that would
+	// re-Protect the GOT/data with the first page's mode and fault PLT loads).
+	{
+		Core::LockGuard lock(m_mutex);
+		for (auto* program: m_programs)
+		{
+			if (program == nullptr || program->elf == nullptr || program->elf->IsShared() || program->base_vaddr == 0)
+			{
+				continue;
+			}
+			const auto* ehdr = program->elf->GetEhdr();
+			const auto* phdr = program->elf->GetPhdr();
+			if (ehdr == nullptr || phdr == nullptr)
+			{
+				continue;
+			}
+			uint64_t total_sites = 0;
+			for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
+			{
+				if (phdr[i].p_memsz == 0 || (phdr[i].p_type != PT_LOAD && phdr[i].p_type != PT_OS_RELRO))
+				{
+					continue;
+				}
+				const auto mode = get_mode(phdr[i].p_flags);
+				if (!Core::VirtualMemory::IsExecute(mode))
+				{
+					continue;
+				}
+				const uint64_t seg_addr = phdr[i].p_vaddr + program->base_vaddr;
+				const uint64_t seg_size = get_aligned_size(phdr + i);
+				Core::VirtualMemory::Mode old_mode {};
+				Core::VirtualMemory::Protect(seg_addr, seg_size, Core::VirtualMemory::Mode::ExecuteReadWrite, &old_mode);
+				total_sites += LoaderRewriteTlsGdCallRexPrefix(reinterpret_cast<uint8_t*>(seg_addr), seg_size);
+				Core::VirtualMemory::Protect(seg_addr, seg_size, old_mode);
+				Core::VirtualMemory::FlushInstructionCache(seg_addr, seg_size);
+			}
+			if (total_sites != 0)
+			{
+				std::fprintf(stderr, "Patch tls GD call REX.W on main image: %" PRIu64 " site(s)\n", total_sites);
+				printf("Patch tls GD call REX.W on main image: %" PRIu64 " site(s)\n", total_sites);
+			}
+		}
+	}
 
 	printf(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
 	printf(FG_BRIGHT_YELLOW "--- Execute: " BOLD BG_BLUE "%s" BG_DEFAULT NO_BOLD DEFAULT "\n", "Main");

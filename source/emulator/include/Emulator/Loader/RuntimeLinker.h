@@ -182,6 +182,13 @@ private:
 	Core::Mutex      m_mutex;
 };
 
+// Rewrite PS5 TLS-call sites that encode three 0x66 prefixes before E8
+// (66 66 66 E8 rel32) into the SysV form 66 66 48 E8 (REX.W). Observed on a
+// post-Play Gen5 eboot: every such site targets the TLS handler; three 0x66
+// prefixes execute as a 16-bit CALL on the host (IP 0x3ffe, misaligned stack).
+// Returns the number of sites rewritten. Pure buffer transform for unit tests.
+uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size);
+
 } // namespace Kyty::Loader
 
 #endif // KYTY_EMU_ENABLED
