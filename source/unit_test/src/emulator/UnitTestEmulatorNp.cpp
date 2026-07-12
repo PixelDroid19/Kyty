@@ -32,6 +32,9 @@ TEST(EmulatorNp, ValidatesAndCreatesStableHandles)
 	EXPECT_GT(trophy_handle, 0);
 	EXPECT_EQ(NpTrophy2::RegisterContext(trophy_context, trophy_handle, 0), 0);
 	EXPECT_LT(NpTrophy2::RegisterContext(0, trophy_handle, 0), 0);
+	// RegisterUnlockCallback accepts any callback pointer (including null) for HLE.
+	EXPECT_EQ(NpTrophy2::RegisterUnlockCallback(nullptr, nullptr), 0);
+	EXPECT_EQ(NpTrophy2::RegisterUnlockCallback(reinterpret_cast<void*>(0x1), nullptr), 0);
 }
 
 TEST(EmulatorNp, OwnsLocalUniversalDataEvents)
