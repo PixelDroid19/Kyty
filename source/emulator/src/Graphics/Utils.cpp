@@ -12,6 +12,12 @@
 
 namespace Kyty::Libs::Graphics {
 
+VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image)
+{
+	EXIT_IF(image == nullptr);
+	return image->layout;
+}
+
 static void set_image_layout(VkCommandBuffer buffer, VulkanImage* dst_image, uint32_t base_level, uint32_t levels,
                              VkImageAspectFlags aspect_mask, VkImageLayout old_image_layout, VkImageLayout new_image_layout)
 {
@@ -93,7 +99,7 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
-	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 	VkBufferImageCopy region {};
@@ -174,7 +180,8 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanIm
 		index++;
 	}
 
-	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
+	                 UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 	vkCmdCopyBufferToImage(vk_buffer, src_buffer->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, index, region);
@@ -192,7 +199,8 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 
 	EXIT_NOT_IMPLEMENTED(regions.Size() >= 16);
 
-	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
+	                 UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 	for (const auto& r: regions)
