@@ -65,6 +65,8 @@ struct SaveDataDirNameSearchResult
 	int32_t             pad2;
 };
 
+// Gen5 call site: mov edi, user_id; call; test eax,eax; js error; store eax as resource id.
+// Positive return is the resource handle (not 0/OK).
 int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id);
 int KYTY_SYSV_ABI SaveDataGetMountInfo(const SaveDataMountPoint* mount_point, SaveDataMountInfo* info);
 int KYTY_SYSV_ABI SaveDataGetEventResult(const void* event_param, void* event);
