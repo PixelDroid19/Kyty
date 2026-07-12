@@ -962,6 +962,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			} else if (GpuMemoryAllowsVertexContainedInSurface(o.object.type, obj.relation, info.type))
 			{
 				overlap = true;
+			} else if (GpuMemoryAllowsStorageSurfaceShare(o.object.type, obj.relation, info.type))
+			{
+				// Single-parent RT/DS/Texture/SB share with an incoming StorageBuffer
+				// (captured DepthStencilBuffer Crosses StorageBuffer 0x8000).
+				overlap = true;
 			} else
 			switch (ObjectsRelation(o.object.type, obj.relation, info.type))
 			{
