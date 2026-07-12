@@ -651,6 +651,10 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("JaRMy+QcpeU", LibKernel::PthreadAttrGetdetachstate);
 	LIB_FUNC("Ru36fiTtJzA", LibKernel::PthreadAttrGetstackaddr);
 	LIB_FUNC("-fA+7ZlGDQs", LibKernel::PthreadAttrGetstacksize);
+	// Captured post-TLS REX fix on Gen5 eboot: worker thread after Attr set/get
+	// stack fields calls a 3-arg PLT (attr, void**, size_t*) matching
+	// PthreadAttrGetstack; import NID -quPa4SEJUw (strict Unpatched otherwise).
+	LIB_FUNC("-quPa4SEJUw", LibKernel::PthreadAttrGetstack);
 	LIB_FUNC("txHtngJ+eyc", LibKernel::PthreadAttrGetguardsize);
 	LIB_FUNC("UTXzJbWhhTE", LibKernel::PthreadAttrSetstacksize);
 	LIB_FUNC("-Wreprtu0Qs", LibKernel::PthreadAttrSetdetachstate);

@@ -57,6 +57,7 @@ struct SaveDataDialogParam
 
 int KYTY_SYSV_ABI SaveDataDialogInitialize();
 int KYTY_SYSV_ABI SaveDataDialogOpen(const SaveDataDialogParam* param);
+int KYTY_SYSV_ABI SaveDataDialogGetStatus();
 int KYTY_SYSV_ABI SaveDataDialogUpdateStatus();
 int KYTY_SYSV_ABI SaveDataDialogTerminate();
 int KYTY_SYSV_ABI SaveDataDialogProgressBarSetValue(int target, uint32_t rate);

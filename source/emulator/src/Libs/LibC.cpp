@@ -414,6 +414,17 @@ static KYTY_SYSV_ABI int puts(const char* s)
 	return GetPrintfStdFunc()("%s\n", s);
 }
 
+// Guest FILE* is not always a host FILE*. Log path uses the host printf
+// sink; the stream argument is accepted for ABI compatibility only.
+static KYTY_SYSV_ABI int c_fputs(const char* s, FILE* /*stream*/)
+{
+	if (s == nullptr)
+	{
+		return EOF;
+	}
+	return GetPrintfStdFunc()("%s", s);
+}
+
 static KYTY_SYSV_ABI void catchReturnFromMain(int status)
 {
 	PRINT_NAME();
@@ -453,6 +464,8 @@ void KYTY_SYSV_ABI cxa_finalize(void* d)
 		}
 	}
 }
+
+
 
 } // namespace LibC
 
@@ -594,6 +607,7 @@ LIB_DEFINE(InitLibcInternal_1)
 
 LIB_USING(LibC);
 
+
 LIB_DEFINE(InitLibC_1)
 {
 	// Re-enabled for the macOS/Rosetta bring-up: HLE-ing the "libc" module lets the
@@ -610,6 +624,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("hcuQgD53UxM", LibC::libc_printf);
 	LIB_FUNC("MUjC4lbHrK4", LibcInternal::fflush);
 	LIB_FUNC("YQ0navp+YIc", LibC::puts);
+	// Captured Gen5 after DirNameSearch/strtol: rdi=formatted log line
+	// with trailing CR/LF, rsi=stream-like pointer — fputs ABI.
+	LIB_FUNC("QrZZdJ8XsX0", LibC::c_fputs);
 	LIB_FUNC("XKRegsFpEpk", LibC::catchReturnFromMain);
 	LIB_FUNC("tsvEmnenz48", LibC::cxa_atexit);
 	LIB_FUNC("H2e8t5ScQGc", LibC::cxa_finalize);
@@ -626,6 +643,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("DfivPArhucg", LibC::c_memcmp);
 	LIB_FUNC("j4ViWNHEgww", LibC::c_strlen);
 	LIB_FUNC("6sJWiWSRuqk", LibC::c_strncpy);
+	// Captured Gen5 boot after SaveDataInitialize3: 3-arg call with dest buffer,
+	// "SAVEDATA00" src, n=0x20 — same ABI as strncpy (second NID for same export).
+	LIB_FUNC("SfQIZcqvvms", LibC::c_strncpy);
 	LIB_FUNC("Ovb2dSJOAuE", LibC::c_strcmp);
 	LIB_FUNC("aesyjrHVWy4", LibC::c_strncmp);
 	LIB_FUNC("Ls4tzzhimqQ", LibC::c_strcat);
@@ -670,6 +690,9 @@ LIB_DEFINE(InitLibC_1)
 	// stdlib
 	LIB_FUNC("2vDqwBlpF-o", LibC::c_strtod);
 	LIB_FUNC("mXlxhmLNMPg", LibC::c_strtol);
+	// Captured Gen5 after SaveDataDirNameSearch: SysV (char* "00", endptr=null, base=10)
+	// — same ABI as strtol (second NID for same export).
+	LIB_FUNC("zlfEH8FmyUA", LibC::c_strtol);
 	LIB_FUNC("SRI6S9B+-a4", LibC::c_atof);
 	LIB_FUNC("AEJdIVZTEmo", LibC::c_qsort);
 	LIB_FUNC("L1SBTkC+Cvw", LibC::c_abort);

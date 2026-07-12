@@ -11,6 +11,8 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 
 #include <atomic>
+#include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <unordered_set>
 
@@ -29,12 +31,8 @@ static std::atomic<uint32_t> g_next_transaction_resource {0};
 static std::mutex              g_transaction_mutex;
 static std::unordered_set<int32_t> g_transaction_resources;
 
-struct SceSaveDataDirName
-{
-	char data[32];
-};
-
-// SaveDataMountPoint / SaveDataMountInfo are declared in SaveData.h for tests.
+// SaveDataMountPoint / SaveDataMountInfo / SaveDataDirName* search types
+// are declared in SaveData.h for tests and HLE registration.
 
 struct SaveDataMount
 {
@@ -50,25 +48,25 @@ struct SaveDataMount
 
 struct SaveDataMount2
 {
-	int                       user_id;
-	int                       pad;
-	const SceSaveDataDirName* dir_name;
-	uint64_t                  blocks;
-	uint32_t                  mount_mode;
-	uint8_t                   reserved[32];
-	int                       pad2;
+	int                     user_id;
+	int                     pad;
+	const SaveDataDirName*  dir_name;
+	uint64_t                blocks;
+	uint32_t                mount_mode;
+	uint8_t                 reserved[32];
+	int                     pad2;
 };
 
 struct SaveDataMount3
 {
-	int32_t                   user_id;
-	int32_t                   pad;
-	const SceSaveDataDirName* dir_name;
-	uint64_t                  blocks;
-	uint64_t                  system_blocks;
-	uint32_t                  mount_mode;
-	uint32_t                  resource;
-	uint32_t                  mode;
+	int32_t                user_id;
+	int32_t                pad;
+	const SaveDataDirName* dir_name;
+	uint64_t               blocks;
+	uint64_t               system_blocks;
+	uint32_t               mount_mode;
+	uint32_t               resource;
+	uint32_t               mode;
 };
 
 struct SaveDataMountResult
@@ -171,6 +169,94 @@ int KYTY_SYSV_ABI SaveDataDeleteTransactionResource(int32_t resource, const Save
 		return SAVE_DATA_ERROR_NOT_FOUND;
 	}
 	g_transaction_resources.erase(it);
+	return OK;
+}
+
+// NID dyIhnXq-0SM — sceSaveDataDirNameSearch (public NID tables; SaveData_native
+// Gen5 import after CreateTransactionResource + 64 KiB direct-memory map).
+// Lists host directories under `_SaveData` that match an optional name filter.
+// Empty host root yields hit_num/set_num = 0 with OK (first-boot path).
+int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, SaveDataDirNameSearchResult* result)
+{
+	PRINT_NAME();
+
+	if (cond == nullptr || result == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	// Sort enums: DIRNAME=0 … FREE_BLOCKS=5; order ASCENT=0 / DESCENT=1.
+	if (cond->key > 5u || cond->order > 1u)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	printf("\t user_id       = %d\n", cond->user_id);
+	printf("\t title_id      = %s\n", (cond->title_id != nullptr ? cond->title_id->data : "(null)"));
+	printf("\t dir_name_pat  = %s\n", (cond->dir_name != nullptr ? cond->dir_name->data : "(null)"));
+	printf("\t key/order     = %u/%u\n", cond->key, cond->order);
+	printf("\t dir_names_num = %u\n", result->dir_names_num);
+
+	result->hit_num = 0;
+	result->set_num = 0;
+
+	const String root = SAVE_DATA_DIR;
+	if (!Core::File::IsDirectoryExisting(root))
+	{
+		return OK;
+	}
+
+	const char* filter = (cond->dir_name != nullptr ? cond->dir_name->data : nullptr);
+	const bool  filter_active = (filter != nullptr && filter[0] != '\0');
+
+	const auto entries = Core::File::GetDirEntries(root);
+	uint32_t   written = 0;
+
+	for (const auto& entry: entries)
+	{
+		if (entry.is_file)
+		{
+			continue;
+		}
+
+		const String name = entry.name;
+		if (name.IsEmpty() || name == U"." || name == U".." || name.StartsWith(U"sce_"))
+		{
+			continue;
+		}
+
+		// utf8_str() owns the buffer; C_Str macro would dangle after the expression.
+		const auto  name_utf8 = name.utf8_str();
+		const char* name_c    = name_utf8.GetData();
+		if (name_c == nullptr)
+		{
+			continue;
+		}
+		if (filter_active)
+		{
+			// Exact match; wildcard filter not required for first-boot enumeration.
+			if (std::strcmp(name_c, filter) != 0)
+			{
+				continue;
+			}
+		}
+
+		result->hit_num++;
+		if (result->dir_names != nullptr && written < result->dir_names_num)
+		{
+			std::memset(&result->dir_names[written], 0, sizeof(SaveDataDirName));
+			std::snprintf(result->dir_names[written].data, sizeof(result->dir_names[written].data), "%s", name_c);
+			if (result->infos != nullptr)
+			{
+				result->infos[written].blocks      = 100000;
+				result->infos[written].free_blocks = 100000;
+			}
+			written++;
+		}
+	}
+
+	result->set_num = written;
+	printf("\t hit_num = %u set_num = %u\n", result->hit_num, result->set_num);
 	return OK;
 }
 
@@ -449,6 +535,8 @@ LIB_DEFINE(InitSaveData_1)
 	LIB_FUNC("BMR4F-Uek3E", SaveData::SaveDataUmount);
 	LIB_FUNC("85zul--eGXs", SaveData::SaveDataSetParam);
 	LIB_FUNC("65VH0Qaaz6s", SaveData::SaveDataGetMountInfo);
+	// sceSaveDataDirNameSearch
+	LIB_FUNC("dyIhnXq-0SM", SaveData::SaveDataDirNameSearch);
 	// sceSaveDataGetEventResult
 	LIB_FUNC("j8xKtiFj0SY", SaveData::SaveDataGetEventResult);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
@@ -481,6 +569,8 @@ LIB_DEFINE(InitSaveDataNative_1)
 	// NID uW4vfTwMQVo: SysV rdi=1 (first CreateTransactionResource id / user),
 	// rsi=MountPoint* "/savedata0". Treated as transaction-resource release.
 	LIB_FUNC("uW4vfTwMQVo", SaveData::SaveDataDeleteTransactionResource);
+	// NID dyIhnXq-0SM: sceSaveDataDirNameSearch (boot save enumeration).
+	LIB_FUNC("dyIhnXq-0SM", SaveData::SaveDataDirNameSearch);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
 }
 

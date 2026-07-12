@@ -99,6 +99,15 @@ int KYTY_SYSV_ABI SaveDataDialogOpen(const SaveDataDialogParam* param)
 	return OK;
 }
 
+// sceSaveDataDialogGetStatus — read-only status (does not drive the dialog).
+// NID ERKzksauAJA on SaveDataDialog / SaveDataDialog.native.
+int KYTY_SYSV_ABI SaveDataDialogGetStatus()
+{
+	PRINT_NAME();
+
+	return g_status.load(std::memory_order_acquire);
+}
+
 int KYTY_SYSV_ABI SaveDataDialogUpdateStatus()
 {
 	PRINT_NAME();
