@@ -962,6 +962,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			} else if (GpuMemoryAllowsVertexContainedInSurface(o.object.type, obj.relation, info.type))
 			{
 				overlap = true;
+			} else if (GpuMemoryAllowsIndexContainedInSurface(o.object.type, obj.relation, info.type))
+			{
+				// Texture/RT/SB Contains (or other surface overlap) an IndexBuffer.
+				// Captured: Texture Contains IB 0xe4 — link, do not delete Texture.
+				overlap = true;
 			} else if (GpuMemoryAllowsStorageSurfaceShare(o.object.type, obj.relation, info.type))
 			{
 				// Single-parent RT/DS/Texture/SB share with an incoming StorageBuffer

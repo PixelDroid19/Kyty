@@ -348,6 +348,21 @@ TEST(EmulatorGraphicsState, AllowsMixedTextureVertexStorageParents)
 	                                              GpuMemoryObjectType::StorageBuffer));
 }
 
+// Captured dual-strict post-RT layout fix: Texture Contains IndexBuffer 0xe4.
+TEST(EmulatorGraphicsState, AllowsIndexContainedInTextureSurface)
+{
+	EXPECT_TRUE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                   GpuMemoryObjectType::IndexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses,
+	                                                   GpuMemoryObjectType::IndexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::IsContainedWithin,
+	                                                   GpuMemoryObjectType::IndexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::IndexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::VertexBuffer));
+}
+
 // Captured: VertexBuffer Contained by co-located StorageBuffer + RenderTexture.
 // Multi-parent load also uses surface IsContainedWithin/Crosses + peer VB reclaim.
 TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)

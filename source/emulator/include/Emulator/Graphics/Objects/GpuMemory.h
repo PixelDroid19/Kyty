@@ -134,6 +134,27 @@ inline bool GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType existing
 	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
+// Incoming IndexBuffer inside an existing surface allocation. Captured post-Play
+// dual-strict: Texture Contains IndexBuffer (vaddr size 0xe4 under a larger
+// Texture). Link both — never reclaim the Texture for a tiny index range.
+// Same surface types as VertexContainedInSurface; peer IndexBuffer reclaim stays
+// on the ObjectsRelation delete_all path.
+inline bool GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                   GpuMemoryObjectType incoming_type)
+{
+	if (incoming_type != GpuMemoryObjectType::IndexBuffer)
+	{
+		return false;
+	}
+	if (existing_type != GpuMemoryObjectType::StorageBuffer && existing_type != GpuMemoryObjectType::RenderTexture &&
+	    existing_type != GpuMemoryObjectType::Texture && existing_type != GpuMemoryObjectType::StorageTexture)
+	{
+		return false;
+	}
+	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
+	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
+}
+
 // Peer VertexBuffer overlapping an incoming VertexBuffer: reclaim (delete) the
 // older VB. Captured multi-parent set mixes surface links with VB
 // IsContainedWithin + Crosses parents of the same new VertexBuffer.
