@@ -869,6 +869,80 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleDmaskB)
 	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 3);
 }
 
+// Captured Gen5 MIMG-NSA image_sample instructions. The third dword supplies
+// ADDR1, so these coordinates are v2/v5 and v5/v4 rather than contiguous
+// v2/v3 and v5/v6. The following instruction must start after all three dwords.
+TEST(EmulatorGraphicsPackets, ParsesImageSampleNonSequentialAddresses)
+{
+	const uint32_t shader[] = {
+	    0xf080040au, 0x00a20602u, 0x00000005u,
+	    0xf0800f0au, 0x00800005u, 0x00000004u,
+	    0xbf810000u,
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	const auto& first = code.GetInstructions().At(0);
+	EXPECT_EQ(first.pc, 0u);
+	EXPECT_EQ(first.type, ShaderInstructionType::ImageSample);
+	EXPECT_EQ(first.mimg_address_num, 5);
+	EXPECT_EQ(first.mimg_address[0].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(first.mimg_address[0].register_id, 2);
+	EXPECT_EQ(first.mimg_address[1].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(first.mimg_address[1].register_id, 5);
+
+	const auto& second = code.GetInstructions().At(1);
+	EXPECT_EQ(second.pc, 12u);
+	EXPECT_EQ(second.type, ShaderInstructionType::ImageSample);
+	EXPECT_EQ(second.mimg_address_num, 5);
+	EXPECT_EQ(second.mimg_address[0].register_id, 5);
+	EXPECT_EQ(second.mimg_address[1].register_id, 4);
+	EXPECT_EQ(code.GetInstructions().At(2).pc, 24u);
+}
+
+TEST(EmulatorGraphicsPackets, MaterializesImageSampleNonSequentialCoordinates)
+{
+	const uint32_t shader[] = {
+	    0xbf800000u,
+	    0xf080040au, 0x00a20602u, 0x00000005u,
+	    0xbf810000u,
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ShaderPixelInputInfo input {};
+	input.bind.push_constant_size                   = 48;
+	input.bind.textures2D.textures_num              = 1;
+	input.bind.textures2D.textures2d_sampled_num    = 1;
+	input.bind.textures2D.desc[0].start_register    = 8;
+	input.bind.samplers.samplers_num                = 1;
+	input.bind.samplers.start_register[0]           = 20;
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpLoad %float %v2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpLoad %float %v3"), Core::STRING8_INVALID_INDEX);
+}
+
 // Gen5 SMEM opcode 0x3: s_load_dwordx8 s[4:11], s[0:1], 0 — captured at PC 0x18.
 TEST(EmulatorGraphicsPackets, ParsesSmembSLoadDwordx8)
 {

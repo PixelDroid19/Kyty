@@ -445,6 +445,11 @@ struct ShaderInstruction
 	int                             src_num = 0;
 	ShaderOperand                   dst;
 	ShaderOperand                   dst2;
+	// Encoded MIMG NSA address slots in order, including VADDR as address 0.
+	// Empty for the normal sequential encoding; trailing slots may be unused by
+	// the selected opcode and resource dimension.
+	ShaderOperand mimg_address[13];
+	int           mimg_address_num = 0;
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;
