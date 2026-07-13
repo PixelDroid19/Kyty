@@ -3067,6 +3067,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	uint32_t glc    = (buffer[0] >> 13u) & 0x1u;
 	uint32_t unrm   = (buffer[0] >> 12u) & 0x1u;
 	uint32_t dmask  = (buffer[0] >> 8u) & 0xfu;
+	uint32_t nsa    = next_gen ? ((buffer[0] >> 1u) & 0x3u) : 0u;
 
 	uint32_t ssamp = (buffer[1] >> 21u) & 0x1fu; // S#
 	uint32_t srsrc = (buffer[1] >> 16u) & 0x1fu; // T#
@@ -3082,7 +3083,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	EXIT_NOT_IMPLEMENTED(unrm == 1);
 	// EXIT_NOT_IMPLEMENTED(dmask != 0xf && dmask != 0x7);
 
-	uint32_t size = 2;
+	uint32_t size = 2 + nsa;
 
 	ShaderInstruction inst;
 	inst.pc      = pc;
@@ -3091,6 +3092,19 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	inst.src[0]  = operand_parse(vaddr + 256);
 	inst.src[1]  = operand_parse(srsrc * 4);
 	inst.src[2]  = operand_parse(ssamp * 4);
+
+	if (nsa != 0)
+	{
+		const uint32_t encoded_address_num = 1 + nsa * 4;
+		inst.mimg_address_num = static_cast<int>(encoded_address_num);
+		inst.mimg_address[0]  = operand_parse(vaddr + 256);
+		for (uint32_t address = 1; address < encoded_address_num; address++)
+		{
+			const uint32_t encoded = address - 1;
+			const uint32_t vgpr    = (buffer[2 + encoded / 4] >> ((encoded % 4) * 8u)) & 0xffu;
+			inst.mimg_address[address] = operand_parse(vgpr + 256);
+		}
+	}
 
 	switch (opcode)
 	{

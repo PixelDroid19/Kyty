@@ -1741,6 +1741,17 @@ static SpirvValue operand_variable_to_str(ShaderOperand op, int shift)
 	return ret;
 }
 
+static SpirvValue mimg_address_to_str(const ShaderInstruction& inst, int address)
+{
+	EXIT_IF(address < 0);
+	if (inst.mimg_address_num != 0)
+	{
+		EXIT_IF(address >= inst.mimg_address_num);
+		return operand_variable_to_str(inst.mimg_address[address]);
+	}
+	return operand_variable_to_str(inst.src[0], address);
+}
+
 static bool operand_is_exec(ShaderOperand op)
 {
 	switch (op.type)
@@ -2735,9 +2746,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask1)
 	if (bind_info != nullptr && bind_info->textures2D.textures2d_sampled_num > 0 && bind_info->samplers.samplers_num > 0)
 	{
 		auto dst_value0  = operand_variable_to_str(inst.dst);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -2789,9 +2800,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask2)
 	if (bind_info != nullptr && bind_info->textures2D.textures2d_sampled_num > 0 && bind_info->samplers.samplers_num > 0)
 	{
 		auto dst_value0  = operand_variable_to_str(inst.dst);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -2841,9 +2852,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask4)
 	if (bind_info != nullptr && bind_info->textures2D.textures2d_sampled_num > 0 && bind_info->samplers.samplers_num > 0)
 	{
 		auto dst_value0  = operand_variable_to_str(inst.dst);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -2893,9 +2904,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask8)
 	if (bind_info != nullptr && bind_info->textures2D.textures2d_sampled_num > 0 && bind_info->samplers.samplers_num > 0)
 	{
 		auto dst_value0  = operand_variable_to_str(inst.dst);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -2948,9 +2959,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmask3)
 	{
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -3007,9 +3018,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmask5)
 	{
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -3066,9 +3077,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmask9)
 	{
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -3127,9 +3138,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata3Vaddr3StSsDmask7)
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
 		auto dst_value2  = operand_variable_to_str(inst.dst, 2);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -3192,9 +3203,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata3Vaddr3StSsDmaskB)
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
 		auto dst_value2  = operand_variable_to_str(inst.dst, 2);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -3253,9 +3264,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata3Vaddr3StSsDmask7)
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
 		auto dst_value2  = operand_variable_to_str(inst.dst, 2);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -3319,10 +3330,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLzO_Vdata3Vaddr4StSsDmask7)
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
 		auto dst_value2  = operand_variable_to_str(inst.dst, 2);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
-		auto src0_value3 = operand_variable_to_str(inst.src[0], 3);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
+		auto src0_value3 = mimg_address_to_str(inst, 3);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -3402,9 +3413,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF)
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
 		auto dst_value2  = operand_variable_to_str(inst.dst, 2);
 		auto dst_value3  = operand_variable_to_str(inst.dst, 3);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -3472,9 +3483,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_Vdata4Vaddr3StDmaskF)
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
 		auto dst_value2  = operand_variable_to_str(inst.dst, 2);
 		auto dst_value3  = operand_variable_to_str(inst.dst, 3);
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
@@ -3540,8 +3551,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_Vdata4Vaddr3StDmaskF)
 		auto dst_value2 = operand_variable_to_str(inst.dst, 2);
 		auto dst_value3 = operand_variable_to_str(inst.dst, 3);
 
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
 
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value2 = operand_variable_to_str(inst.src[1], 2);
@@ -3608,9 +3619,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 		auto dst_value2 = operand_variable_to_str(inst.dst, 2);
 		auto dst_value3 = operand_variable_to_str(inst.dst, 3);
 
-		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
-		auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-		auto src0_value2 = operand_variable_to_str(inst.src[0], 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
 
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value2 = operand_variable_to_str(inst.src[1], 2);
