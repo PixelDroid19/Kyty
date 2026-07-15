@@ -6,6 +6,8 @@ target_include_directories(kyty_devtools_core PUBLIC
 
 target_sources(kyty_devtools_core PRIVATE
 	src/Telemetry/Event.cpp
+	src/Telemetry/EventRing.cpp
+	src/Telemetry/WriterRegistry.cpp
 	src/Time/MonotonicClockPosix.cpp
 )
 
