@@ -15,9 +15,11 @@ class Image;
 namespace Kyty::Loader {
 
 void                   SystemContentLoadParamSfo(const String& file_name);
+bool                   SystemContentLoadParamJson(const String& file_name);
 bool                   SystemContentParamSfoGetInt(const char* name, int32_t* value);
 bool                   SystemContentParamSfoGetString(const char* name, String* value);
 bool                   SystemContentParamSfoGetString(const char* name, char* value, size_t value_size);
+bool                   SystemContentGetMetadata(String* title_id, String* app_version);
 Libs::Graphics::Image* SystemContentGetIcon();
 bool                   SystemContentGetChunksNum(uint32_t* num);
 

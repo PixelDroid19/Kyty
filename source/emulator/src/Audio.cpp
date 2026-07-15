@@ -6,6 +6,7 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Semaphore.h"
 #include "Emulator/Libs/Errno.h"
@@ -815,6 +816,13 @@ int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* u
 	if (user_out == nullptr)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	void* output_start = nullptr;
+	void* output_end   = nullptr;
+	if (LibKernel::Memory::KernelQueryMemoryProtection(user_out, &output_start, &output_end, nullptr) != OK ||
+	    reinterpret_cast<uintptr_t>(user_out) > reinterpret_cast<uintptr_t>(output_end) - sizeof(*user_out) + 1)
+	{
+		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
 	const int32_t id = AllocUser(user_id);
 	if (id == 0)

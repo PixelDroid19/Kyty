@@ -68,7 +68,7 @@ TEST(EmulatorNp, GetAddcontEntitlementInfoRejectsBeforeInitialize)
 
 	UnifiedEntitlementLabel label {};
 	AddcontEntitlementInfo  info {};
-	std::memcpy(label.data, "DEADCELLSBADSEED", 16);
+	std::memcpy(label.data, "TEST_ENTITLEMENT", 16);
 
 	EXPECT_EQ(GetAddcontEntitlementInfo(0, &label, &info), ERROR_NOT_INITIALIZED);
 }
@@ -100,7 +100,7 @@ TEST(EmulatorNp, GetAddcontEntitlementInfoValidatesArguments)
 
 	UnifiedEntitlementLabel label {};
 	AddcontEntitlementInfo  info {};
-	std::memcpy(label.data, "DEADCELLSBADSEED", 16);
+	std::memcpy(label.data, "TEST_ENTITLEMENT", 16);
 
 	EXPECT_EQ(GetAddcontEntitlementInfo(0, nullptr, &info), ERROR_PARAMETER);
 	EXPECT_EQ(GetAddcontEntitlementInfo(0, &label, nullptr), ERROR_PARAMETER);
@@ -128,7 +128,7 @@ TEST(EmulatorNp, GetAddcontEntitlementInfoReportsMissingEntitlement)
 	UnifiedEntitlementLabel label {};
 	AddcontEntitlementInfo  info {};
 	std::memset(&info, 0xa5, sizeof(info));
-	std::memcpy(label.data, "DEADCELLSBADSEED", 16);
+	std::memcpy(label.data, "TEST_ENTITLEMENT", 16);
 
 	// Sentinel must survive: missing entitlement must not write a fabricated record.
 	const auto before = info;

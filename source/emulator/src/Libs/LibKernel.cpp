@@ -668,6 +668,7 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("8+s5BzZjxSg", LibKernel::PthreadAttrGetaffinity);
 	LIB_FUNC("nsYoNRywwNg", LibKernel::PthreadAttrInit);
 	LIB_FUNC("JaRMy+QcpeU", LibKernel::PthreadAttrGetdetachstate);
+	LIB_FUNC("FXPWHNk8Of0", LibKernel::PthreadAttrGetschedparam);
 	LIB_FUNC("Ru36fiTtJzA", LibKernel::PthreadAttrGetstackaddr);
 	LIB_FUNC("-fA+7ZlGDQs", LibKernel::PthreadAttrGetstacksize);
 	// Captured post-TLS REX fix on Gen5 eboot: worker thread after Attr set/get
