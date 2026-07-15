@@ -278,6 +278,7 @@ SupervisorResult RunSupervisor(const SupervisorOptions& options) noexcept
 	bool                stall_bundle_done = false;
 	uint64_t            bundle_gen        = 1;
 	uint64_t            samples           = 0;
+	uint64_t            last_heartbeat_ns = 0;
 	ProtocolReadLossState read_loss {};
 
 	for (;;)
@@ -344,6 +345,14 @@ SupervisorResult RunSupervisor(const SupervisorOptions& options) noexcept
 			have_pub  = true;
 			(void)ReadTimeline(mapping.View(), &read_loss, &tl);
 			last_tl = tl;
+			uint64_t publication_heartbeat = 0;
+			if (ReadPublicationHeartbeat(mapping.View(), &publication_heartbeat) == ProtocolResult::Ok)
+			{
+				last_heartbeat_ns = publication_heartbeat;
+			} else
+			{
+				last_heartbeat_ns = 0;
+			}
 		}
 
 		ProtocolHealthSnapshot health {};
@@ -357,31 +366,14 @@ SupervisorResult RunSupervisor(const SupervisorOptions& options) noexcept
 		}
 		in.process        = obs.status;
 		in.sample_time_ns = MonoNs();
-		// Heartbeat: use latest progress last_change max as publisher liveness proxy.
-		uint64_t hb = in.sample_time_ns;
-		if (have_pub && last_pub.progress.count > 0u)
+		// A valid publication carries the worker-owned monotonic heartbeat. Keep the
+		// last valid value when a sample races an in-progress double-buffer swap;
+		// a valid progress snapshot with no heartbeat is a protocol rejection.
+		in.heartbeat_ns = last_heartbeat_ns != 0u ? last_heartbeat_ns : in.sample_time_ns;
+		if (pr == ProtocolResult::Ok && last_heartbeat_ns == 0u)
 		{
-			hb = 0;
-			for (uint32_t i = 0; i < last_pub.progress.count; ++i)
-			{
-				if (last_pub.progress.entries[i].record.last_change_ns > hb)
-				{
-					hb = last_pub.progress.entries[i].record.last_change_ns;
-				}
-			}
-			if (hb == 0u)
-			{
-				hb = in.sample_time_ns;
-			}
+			in.heartbeat_ns = 0u;
 		}
-		// For blocked-lane, last_change is frozen; parent sample time advances so
-		// heartbeat based on last_change becomes stale. Prefer sample time when
-		// publications keep succeeding (publisher is alive).
-		if (pr == ProtocolResult::Ok)
-		{
-			hb = in.sample_time_ns;
-		}
-		in.heartbeat_ns = hb;
 
 		StallResult sr = Observe(in, settings, &clf);
 

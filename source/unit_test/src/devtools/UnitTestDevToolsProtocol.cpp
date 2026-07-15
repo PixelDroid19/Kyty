@@ -204,12 +204,16 @@ TEST(DevToolsProtocol, ProgressPublicationRoundTrips)
 	pub.gpu_fault.state = GpuFaultState::NotObserved;
 	pub.measurement.frame_count = 12;
 	pub.writer_loss.aggregate_ring.total = 4;
+	uint64_t publication_heartbeat = 0;
+	EXPECT_EQ(ReadPublicationHeartbeat({map.data(), map.size()}, &publication_heartbeat), ProtocolResult::Rejected);
 
 	ASSERT_EQ(PublishProgress(mut, pub), ProtocolResult::Ok);
-	uint64_t publication_heartbeat = 0;
 	std::memcpy(&publication_heartbeat, map.data() + kProtocolPublicationHeartbeatOffset,
 	            sizeof(publication_heartbeat));
 	EXPECT_NE(publication_heartbeat, 0u);
+	uint64_t read_heartbeat = 0;
+	ASSERT_EQ(ReadPublicationHeartbeat({map.data(), map.size()}, &read_heartbeat), ProtocolResult::Ok);
+	EXPECT_EQ(read_heartbeat, publication_heartbeat);
 
 	ProgressPublication out {};
 	ProtocolReadLossState loss {};
