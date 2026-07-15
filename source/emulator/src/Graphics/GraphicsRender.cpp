@@ -5787,6 +5787,7 @@ void CommandBuffer::WaitForFence()
 		auto* device = g_render_ctx->GetGraphicCtx()->device;
 
 		vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, UINT64_MAX);
+		LabelDrainCompleted();
 		vkResetFences(device, 1, &m_pool->fences[m_index]);
 
 		m_execute = false;
@@ -5802,6 +5803,7 @@ void CommandBuffer::WaitForFenceAndReset()
 		auto* device = g_render_ctx->GetGraphicCtx()->device;
 
 		vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, UINT64_MAX);
+		LabelDrainCompleted();
 		vkResetFences(device, 1, &m_pool->fences[m_index]);
 		vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 
