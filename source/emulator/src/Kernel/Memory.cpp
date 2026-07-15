@@ -893,10 +893,11 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 {
 	EXIT_IF(mode == nullptr || gpu_mode == nullptr);
 
-	// Orbis/PS5 protection mixes CPU bits (low nibble) with GPU/AMPR-style
-	// high bits. Historical forms: 0x11 = CPU_READ|GPU_READ, 0x12 =
-	// CPU_WRITE|GPU_READ. Observed Gen5 boot: 0xC2 = CPU_WRITE | high AMPR
-	// flags (0xC0); map CPU write to host ReadWrite and GPU to ReadWrite.
+	// Orbis/PS5 protection mixes CPU bits (low nibble) with AMPR access bits.
+	// The Gen5 title emits the explicit 0x42/0x82/0xC2 family from one
+	// allocation path: 0x40/0x80/0xC0 select AMPR read, write, or read-write,
+	// while 0x02 keeps the CPU mapping writable. GpuMemoryMode is Kyty's
+	// normalized access-direction representation for the same range tracking.
 	switch (prot)
 	{
 		case 0x11:
@@ -906,6 +907,14 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 		case 0x12:
 			*mode     = VirtualMemory::Mode::ReadWrite;
 			*gpu_mode = Graphics::GpuMemoryMode::Read;
+			return true;
+		case 0x42:
+			*mode     = VirtualMemory::Mode::ReadWrite;
+			*gpu_mode = Graphics::GpuMemoryMode::Read;
+			return true;
+		case 0x82:
+			*mode     = VirtualMemory::Mode::ReadWrite;
+			*gpu_mode = Graphics::GpuMemoryMode::Write;
 			return true;
 		case 0xC2:
 			*mode     = VirtualMemory::Mode::ReadWrite;
