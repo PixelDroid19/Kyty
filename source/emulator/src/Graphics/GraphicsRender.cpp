@@ -1861,6 +1861,8 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
 	}
 
 	VkSamplerCreateInfo sampler_info {};
+	const auto          sampler_comparison =
+	    State::ResolveSamplerComparison(r.DepthCompareFunc(), State::ImageSampleOperation::Regular);
 
 	auto get_warp = [](uint8_t clamp)
 	{
@@ -1896,8 +1898,8 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
 	sampler_info.mipLodBias              = static_cast<float>(static_cast<int16_t>((r.LodBias() ^ 0x2000u) - 0x2000u)) / 256.0f;
 	sampler_info.anisotropyEnable        = (aniso ? VK_TRUE : VK_FALSE);
 	sampler_info.maxAnisotropy           = aniso_ratio;
-	sampler_info.compareEnable           = VK_TRUE;
-	sampler_info.compareOp               = static_cast<VkCompareOp>(r.DepthCompareFunc());
+	sampler_info.compareEnable           = sampler_comparison.enabled ? VK_TRUE : VK_FALSE;
+	sampler_info.compareOp               = static_cast<VkCompareOp>(sampler_comparison.function);
 	sampler_info.minLod                  = min_lod;
 	sampler_info.maxLod                  = max_lod;
 	sampler_info.borderColor             = border;

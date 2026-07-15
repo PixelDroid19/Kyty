@@ -769,4 +769,12 @@ TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 0, false), Gen5SampleBacking::GuestMemoryTexture);
 }
 
+TEST(EmulatorGraphicsState, RegularImageSamplingDisablesSamplerComparison)
+{
+	using namespace Kyty::Libs::Graphics::State;
+	const auto comparison = ResolveSamplerComparison(0, ImageSampleOperation::Regular);
+	EXPECT_FALSE(comparison.enabled);
+	EXPECT_EQ(comparison.function, 0);
+}
+
 UT_END();

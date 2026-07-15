@@ -165,6 +165,11 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 	return Gen5SampleBacking::GuestMemoryTexture;
 }
 
+SamplerComparison ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation)
+{
+	return {operation == ImageSampleOperation::DepthReference, depth_compare_function};
+}
+
 void SetGenericScissorTl(HW::Context& context, uint32_t value)
 {
 	const auto& viewport = context.GetScreenViewport();
