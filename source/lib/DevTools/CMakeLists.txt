@@ -9,6 +9,9 @@ target_sources(kyty_devtools_core PRIVATE
 	src/Telemetry/EventRing.cpp
 	src/Telemetry/WriterRegistry.cpp
 	src/Telemetry/Progress.cpp
+	src/Diagnostics/Checksum.cpp
+	src/Diagnostics/ProcessStatus.cpp
+	src/Diagnostics/StallClassifier.cpp
 	src/Time/MonotonicClockPosix.cpp
 )
 
