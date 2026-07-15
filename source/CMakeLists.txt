@@ -187,6 +187,7 @@ if(NOT ${KYTY_PROJECT_NAME} MATCHES "Build_Tools" AND NOT MACOS)
 endif()
 add_subdirectory(lib)
 add_subdirectory(devtools)
+add_subdirectory(agent)
 
 # The emulator may consume the portable diagnostics core, but the process
 # supervisor is a launcher-side concern. Keep tests and emulator free of that

@@ -33,7 +33,11 @@ The command writes an ignored directory such as
 `_scratch_playable/captures/` containing:
 
 * `guest-*.log`: the complete guest log;
-* `frame-*.png`: bounded screenshots with frame numbers;
+* `native_frames/*.bmp`: emulator-native readbacks of the emulated `VideoOut`
+  source image, never screenshots of the desktop or window compositor;
+* `*.bmp.json`: per-frame metadata with title/version when the loaded content
+  exposes it, build revision, Vulkan format, source extent, present count, and
+  capture milestone;
 * `capture-*.json`: a sanitized manifest containing commit, host, capture
   configuration, artifact names, and deterministic image metrics.
 
@@ -68,10 +72,22 @@ This is diagnostic evidence, not a compatibility run. If the guest never reaches
 `--min-frame`, the command now writes an `incomplete` manifest with the error,
 log, and any screenshots already captured instead of discarding the session.
 
-`--key-at FRAME:KEY` sends a single press/release edge to the guest window when
-the reported frame reaches `FRAME`; it is repeatable and recorded in the
-manifest. This makes menu-dismissal and scene selection reproducible without
-hardcoding game-specific input into the emulator.
+The capture runner arms `KYTY_NATIVE_CAPTURE_FIRST_PRESENT=1` and uses a
+trigger file for later samples. The emulator waits for the presentation submit
+fence, reads the source image through `UtilFillBuffer`, and emits a structured
+`KYTY_NATIVE_CAPTURE` log line. This keeps the pixel source inside the
+emulator; the external runner only coordinates timing and manifest collection.
+
+For **realtime agent control** without Python or `xdotool`, start the emulator
+with `KYTY_AGENT_SOCK` and use the native `kyty_agent` CLI (`docs/agent-tools.md`).
+That path talks to the emulator over a local Unix socket for `status`,
+`capture`, pad edges, and structured events while the guest is running.
+
+`--key-at FRAME:KEY` still schedules a single press/release edge through
+`xdotool` when that host exposes a controllable window. Prefer `kyty_agent pad`
+when the agent socket is available. If host input control is unavailable, the
+manifest records `input_error` instead of claiming that an input edge was
+delivered.
 
 Strict captures refuse `KYTY_STUB_MISSING` and `KYTY_GFX_PERMISSIVE`. Use
 `--allow-diagnostics` only for an exploratory run and do not use that manifest

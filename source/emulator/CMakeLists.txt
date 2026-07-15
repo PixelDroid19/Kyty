@@ -21,6 +21,18 @@ target_sources(emulator PRIVATE
 	src/DevTools/RuntimeSubsystem.cpp
 	include/Emulator/DevTools/Runtime.h
 	include/Emulator/DevTools/RuntimeSubsystem.h
+	src/Agent/EventRing.cpp
+	src/Agent/Protocol.cpp
+	src/Agent/StallWatch.cpp
+	src/Agent/FrameScore.cpp
+	src/Agent/AgentServer.cpp
+	src/Agent/AgentSubsystem.cpp
+	include/Emulator/Agent/EventRing.h
+	include/Emulator/Agent/Protocol.h
+	include/Emulator/Agent/StallWatch.h
+	include/Emulator/Agent/FrameScore.h
+	include/Emulator/Agent/AgentServer.h
+	include/Emulator/Agent/AgentSubsystem.h
 )
 add_dependencies(emulator KytyBuildInfo)
 

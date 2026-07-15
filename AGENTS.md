@@ -182,8 +182,15 @@ hypothesis*. Then remove the code from that experiment before coding the next.
   store test and break SizeDw—prove return use from capture.
 - **Thread races.** Render-thread IndexBuffer update vs CP-thread WaitRegMem
   can both be real; fix the first process exit, then re-run for the next.
-- **Input.** `KYTY_AUTO_CROSS` is discovery only. Acceptance needs real edges
-  or an explicitly recorded non-claim.
+- **Input.** `KYTY_AUTO_CROSS` and `kyty_agent` pad tools are discovery /
+  diagnostic_input only. Acceptance needs real edges or an explicitly recorded
+  non-claim.
+- **Visual / stall gate (agent tools).** When presents advance but the frame
+  looks wrong, or FPS collapses on a loading card, use opt-in `kyty_agent`
+  (`KYTY_AGENT_SOCK` + `KYTY_NATIVE_CAPTURE_DIR`): `watch` for stalls,
+  `capture`/`score` for hot yellow-red corruption / white-world regression /
+  entropy collapse. Exit `1` + `healthy:false` is a diagnostic frontier signal,
+  not gameplay acceptance. Details: `docs/agent-tools.md`.
 - **Performance.** Never compare FPS under Console logging to Silent; record
   logging mode, resolution, and shader-cache state.
 - **Scratch evidence.** Save logs under untracked `_scratch_playable/` or a
@@ -232,7 +239,8 @@ is not done.
 - Keeping a failed experiment “just in case.”
 - Broad renames/refactors on an open compatibility blocker.
 - Vendor or OS branches inside guest decode/layout.
-- Claiming playability with AUTO_CROSS, stubs, or permissive GPU skips.
+- Claiming playability with AUTO_CROSS, agent pad/`score`, stubs, or permissive
+  GPU skips.
 - Leaving permanent dual implementations or feature-flagged legacy paths.
 
 ### Multi-title bring-up
@@ -287,8 +295,9 @@ Recent strict bring-up (evidence-backed, focused tests where noted) includes:
 - GPU-owned tiled RenderTexture (no write-back): `update_func` must **not**
   force `VK_IMAGE_LAYOUT_UNDEFINED` on Update re-entry. StorageBuffer WriteBack
   invalidates alias parents; UNDEFINED→COLOR transitions **discard** prior
-  render-pass contents (user-visible white intermediate world with HUD still
-  drawing). Create still starts UNDEFINED once.
+  render-pass contents (was a user-visible white intermediate world with HUD
+  still drawing; that white residual is no longer the primary bad state after
+  `b86c730`). Create still starts UNDEFINED once.
 - Gen5 tile mode 27 (`SW_64KB_R_X`) **size** and **CPU detile for 4 bpp** sample
   textures (16-pipe non-RbPlus pattern table reimplemented from public MIT
   ADDRLIB vocabulary; visual sample quality still needs post-playability QA).
@@ -323,11 +332,18 @@ unsupported shader/format, a host fault, or an earlier bad rendered state; treat
 the first evidenced strict failure or bad rendered state on the current HEAD as
 the unit of work.
 
-**Visual residual (not a process EXIT):** gameplay **HUD/UI can be correct while
-the world is white**. First hypothesis addressed by preserving GPU-owned RT
-layout across Update (`b86c730`). If white remains after that commit, next
-evidence targets are texture CPU reload after WriteBack invalidation, intermediate
-format-71 sampling, and clear/composite — not ThreadFlag fabrication.
+**Visual residual (not a process EXIT):** gameplay **HUD/character/UI can be
+correct while the world shows hot yellow/red slabs and bloom blowout** (score
+verdict `hot_corruption`). Presents and input prompts still advance — that is
+not proof the world is correct. Detect with `kyty_agent capture` / `score`.
+
+Prior white-world residual (HUD OK, near-white world) was addressed by preserving
+GPU-owned RT layout across Update (`b86c730`) and is **no longer** the first
+evidenced bad rendered state on recent captures. If `white_world` reappears,
+treat it as a regression of that seam. Current evidence targets for
+`hot_corruption` are intermediate format-71 sampling, lighting/bloom composite,
+texture CPU reload after WriteBack invalidation, and clear paths — not
+ThreadFlag fabrication.
 
 `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms waits, no observed Set in earlier
 captures) remains a **later** suspected synchronization symptom: do not fake
@@ -345,9 +361,9 @@ comparability. Session evidence may live under a local untracked directory
 guest paths, title IDs, raw multi-megabyte logs, or `_Shaders/` dumps.
 
 **Always re-capture the first strict failure or bad rendered state on the current
-HEAD.** This is not gameplay acceptance. Diagnostic input, stubs, permissive
-GPU skips, trap skipping, and console logging are not supported acceptance
-modes.
+HEAD.** This is not gameplay acceptance. Diagnostic input (`KYTY_AUTO_CROSS`,
+`kyty_agent` pad), stubs, permissive GPU skips, trap skipping, console logging,
+and a `score`/`healthy:true` alone are not supported acceptance modes.
 
 ## Architecture map
 
@@ -371,6 +387,9 @@ modes.
   memory tracking.
 - `source/emulator/src/Graphics/VideoOut.cpp` and `Window.cpp`: display buffers,
   Vulkan device/swapchain setup, and presentation.
+- `source/emulator/src/Agent/`: opt-in realtime agent socket (status, pad overlay,
+  native capture, stall watch, frame score). Client: `source/agent/` →
+  `kyty_agent`. Contract: `docs/agent-tools.md`.
 - `source/lib/`: reusable host runtime, platform, threading, memory, filesystem,
   math, and script infrastructure.
 - `source/unit_test/`: GoogleTest registration and deterministic fixtures.
@@ -475,8 +494,9 @@ Before declaring the primary workload playable or starting broad extraction:
   both directions and at least one jump, attack, or interaction while frames
   continue presenting. Discovery auto-input is not acceptance.
 - Verify geometry, colors, texture interpretation, viewport/scissor behavior,
-  stable flips, and scene progression. HUD-only rendering, a white world,
-  channel swaps, saturation/fringing, or a non-black frame is not success.
+  stable flips, and scene progression. HUD-only rendering, hot yellow/red world
+  corruption, a white-world regression, channel swaps, saturation/fringing, or a
+  non-black frame is not success.
 - Record no device loss, stuck GPU label, render-thread timeout, or relevant
   Vulkan validation error on a host where validation is available.
 - Record resolution, Silent logging mode, shader-cache state, frame/flip counts,
@@ -673,10 +693,48 @@ test coverage. Select one cohesive extraction at a time. For each extraction:
   it is evidence-only, not an acceptance mode.
 - `KYTY_SKIP_UD2=1`: skips a guest trap for diagnostics and invalidates normal
   execution.
+- `KYTY_AGENT_SOCK=/abs/path.sock`: enables the realtime `kyty_agent` Unix
+  socket. Unset = no agent thread (default). Pair with
+  `KYTY_NATIVE_CAPTURE_DIR=/abs/dir` for VideoOut BMP capture + frame score.
+  Pad overlay is diagnostic_input (same acceptance rule as `KYTY_AUTO_CROSS`).
 
 No diagnostic flag is enabled by default or cited by itself as proof of
 compatibility. Behavior-changing flags are absent from acceptance; passive
-observability may remain only after equivalence is proven.
+observability may remain only after equivalence is proven. A `score` /
+`healthy:false` result is evidence of a bad rendered state class, not proof of
+a root cause and not gameplay acceptance.
+
+### Realtime agent tools (`kyty_agent`)
+
+Opt-in local control/observe loop for agents debugging live sessions. Full
+contract: `docs/agent-tools.md`. Focused tests: `AgentTools.*`.
+
+```bash
+export KYTY_AGENT_SOCK=/tmp/kyty-agent.sock
+export KYTY_NATIVE_CAPTURE_DIR=/abs/path/to/_scratch_playable/native_frames
+# launch fc_script / run_guest.lua as usual, then:
+kyty_agent doctor
+kyty_agent status
+kyty_agent watch --seconds 10 --min-fps 2    # loading / present stalls
+kyty_agent capture                           # BMP + score (exit 1 if unhealthy)
+kyty_agent score                             # re-score last capture
+kyty_agent pad tap cross                     # diagnostic_input only
+```
+
+Use when:
+
+- **Stall:** UI stuck (e.g. Loading) and FPS collapses → `watch` classifies
+  `present_stalled` / `frame_stalled` / `low_fps` and may attach capture+score.
+- **Bad rendered state with UI alive:** yellow/red slabs / bloom blowout
+  (`hot_corruption`; current residual) or a white-world regression →
+  `capture`/`score`. Stop pad sweeps; form one producer hypothesis from the
+  hint metrics.
+- **Which progress lane died?** Prefer `kyty_devtools` passive stall bundles in
+  addition to agent tools; do not merge agent pad into the supervisor.
+
+Agent tools must not wake EventFlags, fabricate ThreadFlag, skip traps, or be
+cited alone as playability. Absolute socket/capture paths only; never put private
+fixture identity in tracked files.
 
 ## Native diagnostics and live-update rules
 

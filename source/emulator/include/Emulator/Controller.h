@@ -59,10 +59,38 @@ void ControllerDisconnect(int id);
 void ControllerButton(int id, uint32_t button, bool down);
 void ControllerAxis(int id, Axis axis, int value);
 
+// Diagnostic agent overlay (KYTY_AGENT_SOCK tools). OR-ed into PadReadState/PadRead
+// separately from KYTY_AUTO_CROSS. Not gameplay acceptance.
+bool AgentPadButtonFromName(const char* name, uint32_t* out_button);
+bool AgentPadAxisFromName(const char* name, Axis* out_axis);
+void AgentPadSetButton(uint32_t button, bool down);
+void AgentPadSetAxis(Axis axis, uint8_t value);
+bool AgentPadScheduleTap(uint32_t button);
+void AgentPadClear();
+void AgentPadGetState(uint32_t* buttons, uint8_t* axes);
+
+// Counts guest pad samples that actually incorporated a non-neutral agent
+// overlay. This is observability only: it never changes guest input state.
+struct AgentPadReadStats
+{
+	uint64_t read_state_samples = 0;
+	uint64_t read_samples       = 0;
+	uint64_t delivered_taps     = 0;
+	bool     tap_pending        = false;
+};
+
+void AgentPadGetReadStats(AgentPadReadStats* out);
+
+// Applies one PadReadState-equivalent overlay sample (advances tap FSM).
+// Test/observability helper; does not touch SDL or guest memory.
+void AgentPadApplyReadStateSample(uint32_t* buttons);
+
 int KYTY_SYSV_ABI PadInit();
 int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param);
 int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index);
 int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable);
+int KYTY_SYSV_ABI PadSetTiltCorrectionState(int handle, bool enable);
+int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable);
 int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformation* info);
 int KYTY_SYSV_ABI PadReadState(int handle, PadData* data);
 int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num);

@@ -25,6 +25,7 @@ import platform
 import re
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -48,6 +49,13 @@ DIAGNOSTIC_ENV = (
     "KYTY_FRAMEBUFFER_EVIDENCE",
     "KYTY_VIDEOOUT_EVIDENCE",
     "KYTY_FPS_LOG",
+    "KYTY_NATIVE_CAPTURE_DIR",
+    "KYTY_NATIVE_CAPTURE_FIRST_PRESENT",
+    "KYTY_NATIVE_CAPTURE_NOW",
+    "KYTY_NATIVE_CAPTURE_EVERY",
+    "KYTY_NATIVE_CAPTURE_TRIGGER",
+    "KYTY_NATIVE_TELEMETRY",
+    "KYTY_INPUT_LOG",
 )
 
 
@@ -137,7 +145,57 @@ class Image:
         self.backend = backend
 
 
+def load_native_bmp(path: Path) -> Image:
+    data = path.read_bytes()
+    if len(data) < 54 or data[:2] != b"BM":
+        raise RuntimeError(f"not a BMP capture: {path}")
+
+    bits_offset = struct.unpack_from("<I", data, 10)[0]
+    dib_size = struct.unpack_from("<I", data, 14)[0]
+    width = struct.unpack_from("<i", data, 18)[0]
+    height_raw = struct.unpack_from("<i", data, 22)[0]
+    planes = struct.unpack_from("<H", data, 26)[0]
+    bits_per_pixel = struct.unpack_from("<H", data, 28)[0]
+    compression = struct.unpack_from("<I", data, 30)[0]
+    if width <= 0 or height_raw == 0 or planes != 1 or bits_per_pixel != 32:
+        raise RuntimeError(f"unsupported native BMP geometry: {path}")
+    if compression not in (0, 3):
+        raise RuntimeError(f"unsupported native BMP compression: {path}")
+
+    height = abs(height_raw)
+    mask_offset = 14 + 40
+    if dib_size >= 56:
+        mask_offset = 14 + 40
+    elif compression == 3:
+        mask_offset = 14 + dib_size
+    if mask_offset + 16 > len(data):
+        raise RuntimeError(f"native BMP masks are truncated: {path}")
+    red_mask, green_mask, blue_mask, alpha_mask = struct.unpack_from("<IIII", data, mask_offset)
+    if compression == 0:
+        red_mask, green_mask, blue_mask, alpha_mask = 0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000
+
+    row_stride = width * 4
+    if bits_offset + row_stride * height > len(data):
+        raise RuntimeError(f"native BMP pixels are truncated: {path}")
+
+    def channel(value: int, mask: int, default: int = 0) -> int:
+        if mask == 0:
+            return default
+        shift = (mask & -mask).bit_length() - 1
+        maximum = mask >> shift
+        return ((value & mask) >> shift) * 255 // maximum
+
+    def pixel(x: int, y: int) -> tuple[int, int, int]:
+        stored_y = height - 1 - y if height_raw > 0 else y
+        value = struct.unpack_from("<I", data, bits_offset + stored_y * row_stride + x * 4)[0]
+        return channel(value, red_mask), channel(value, green_mask), channel(value, blue_mask)
+
+    return Image(width, height, pixel, "native-bmp")
+
+
 def load_image(path: Path) -> Image:
+    if path.suffix.lower() == ".bmp":
+        return load_native_bmp(path)
     try:
         from PIL import Image as PILImage  # type: ignore
 
@@ -331,28 +389,42 @@ def find_window(exclude: set[str] | None = None) -> tuple[str, int] | None:
     return max(candidates, key=lambda item: item[1]) if candidates else None
 
 
-def window_frame(window_id: str) -> int | None:
-    xdotool = shutil.which("xdotool")
-    if not xdotool:
-        return None
-    title = run_text([xdotool, "getwindowname", window_id])
-    match = re.search(r"frame:\s*(\d+)", title)
-    return int(match.group(1)) if match else None
+def send_scheduled_key(window_id: str | None, key: str) -> None:
+    if sys.platform == "darwin":
+        raise RuntimeError("real input scheduling is unavailable on macOS; use a physical keyboard or controller")
 
-
-def capture_window(window_id: str, output: Path) -> None:
-    importer = shutil.which("import")
-    if not importer:
-        raise RuntimeError("capture requires ImageMagick import")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.check_call([importer, "-window", window_id, str(output)])
-
-
-def send_scheduled_key(window_id: str, key: str) -> None:
+    if window_id is None:
+        raise RuntimeError("input scheduling requires a target window")
     xdotool = shutil.which("xdotool")
     if not xdotool:
         raise RuntimeError("input scheduling requires xdotool")
     subprocess.check_call([xdotool, "key", "--window", window_id, key], stderr=subprocess.DEVNULL)
+
+
+NATIVE_CAPTURE_RE = re.compile(
+    r"KYTY_NATIVE_CAPTURE milestone=(?P<milestone>\w+) frame=(?P<frame>\d+) "
+    r"present=(?P<present>\d+) file=(?P<file>.*?) format=(?P<format>\S+) "
+    r"size=(?P<width>\d+)x(?P<height>\d+)"
+)
+PRESENT_TELEMETRY_RE = re.compile(r"KYTY_PRESENT_TELEMETRY frame=(?P<frame>\d+)")
+
+
+def native_runtime_events(log_path: Path) -> tuple[list[dict[str, Any]], int | None]:
+    try:
+        raw = log_path.read_bytes()
+    except OSError:
+        return [], None
+    text = raw[-262144:].decode("utf-8", errors="replace")
+    events: list[dict[str, Any]] = []
+    for match in NATIVE_CAPTURE_RE.finditer(text):
+        event = match.groupdict()
+        event["frame"] = int(event["frame"])
+        event["present"] = int(event["present"])
+        event["width"] = int(event["width"])
+        event["height"] = int(event["height"])
+        events.append(event)
+    telemetry_frames = [int(match.group("frame")) for match in PRESENT_TELEMETRY_RE.finditer(text)]
+    return events, (telemetry_frames[-1] if telemetry_frames else None)
 
 
 def run_capture(args: argparse.Namespace) -> int:
@@ -395,7 +467,10 @@ def run_capture(args: argparse.Namespace) -> int:
     env.pop("KYTY_STUB_MISSING", None)
     env.pop("KYTY_GFX_PERMISSIVE", None)
     env["KYTY_AUTO_CROSS"] = "1" if args.auto_cross else "0"
-    env["SDL_VIDEODRIVER"] = "x11"
+    env["KYTY_NATIVE_CAPTURE_DIR"] = str(output / "native_frames")
+    env["KYTY_NATIVE_CAPTURE_FIRST_PRESENT"] = "1"
+    env["KYTY_NATIVE_CAPTURE_TRIGGER"] = str(output / "capture-now.trigger")
+    env["KYTY_NATIVE_TELEMETRY"] = "1"
     if args.rt_evidence:
         env["KYTY_RT_EVIDENCE"] = "1"
     if args.rt_evidence_ps:
@@ -426,9 +501,12 @@ def run_capture(args: argparse.Namespace) -> int:
         env["KYTY_PIPELINE_DUMP_FOLDER"] = str(output / "pipelines")
 
     command = [str(executable), "scripts/run_guest.lua", str(guest_root)]
+    if sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
+        executable_kind = run_text(["file", str(executable)], timeout=5)
+        if "x86_64" in executable_kind:
+            command = ["arch", "-x86_64", *command]
     started_utc = utc_now()
     started = time.monotonic()
-    existing_windows = set(window_ids())
     previous_sigterm = signal.getsignal(signal.SIGTERM)
 
     def abort(_signum: int, _frame: Any) -> None:
@@ -445,44 +523,70 @@ def run_capture(args: argparse.Namespace) -> int:
             start_new_session=(os.name == "posix"),
         )
     captures: list[dict[str, Any]] = []
+    startup_captures: list[dict[str, Any]] = []
     capture_error: str | None = None
     scheduled = sorted(args.key_at or [])
     sent_keys: list[dict[str, Any]] = []
+    seen_native_files: set[str] = set()
+    input_window: tuple[str, int] | None = None
+    input_error: str | None = None
     try:
         deadline = time.monotonic() + args.max_wait
-        frame = None
+        frame: int | None = None
+        next_trigger_time = 0.0
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise RuntimeError(f"guest exited early with code {process.returncode}; see {log_path}")
-            found = find_window(existing_windows)
-            if found:
-                frame = window_frame(found[0])
-                if frame is not None:
-                    while scheduled and frame >= scheduled[0][0]:
-                        target_frame, key = scheduled.pop(0)
-                        send_scheduled_key(found[0], key)
-                        sent_keys.append({"frame": frame, "target_frame": target_frame, "key": key})
-                if frame is not None and frame >= args.min_frame:
-                    break
-            time.sleep(1)
-        if frame is None or frame < args.min_frame:
-            raise RuntimeError(f"timed out at frame {frame}; see {log_path}")
-        for index in range(args.samples):
-            if process.poll() is not None:
-                raise RuntimeError(f"guest exited during capture with code {process.returncode}; see {log_path}")
-            found = find_window(existing_windows)
-            if not found:
-                raise RuntimeError("game window disappeared during capture")
-            window_id = found[0]
-            frame = window_frame(window_id)
-            image_path = output / f"frame-{stamp}-{index:03d}.png"
-            capture_window(window_id, image_path)
-            metrics = score_image(image_path)
-            metrics["path"] = str(image_path.relative_to(output))
-            metrics["frame"] = frame
-            captures.append(metrics)
-            if index + 1 < args.samples:
-                time.sleep(args.interval)
+            events, telemetry_frame = native_runtime_events(log_path)
+            if telemetry_frame is not None:
+                frame = telemetry_frame
+
+            for event in events:
+                event_path = Path(event["file"])
+                if event["file"] in seen_native_files or not event_path.exists():
+                    continue
+                seen_native_files.add(event["file"])
+                frame = max(frame or 0, event["frame"])
+                metrics = score_image(event_path)
+                metrics["path"] = str(event_path.relative_to(output))
+                metrics["frame"] = event["frame"]
+                metrics["present"] = event["present"]
+                metrics["milestone"] = event["milestone"]
+                if event["frame"] < args.min_frame:
+                    startup_captures.append(metrics)
+                else:
+                    captures.append(metrics)
+
+            if scheduled and input_window is None and sys.platform != "darwin":
+                try:
+                    input_window = find_window()
+                except RuntimeError as exc:
+                    input_error = str(exc)
+                    scheduled.clear()
+            while scheduled and frame is not None and frame >= scheduled[0][0]:
+                target_frame, key = scheduled.pop(0)
+                if sys.platform == "darwin":
+                    try:
+                        send_scheduled_key(None, key)
+                    except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
+                        input_error = str(exc)
+                    continue
+                if input_window is None:
+                    input_error = input_error or "real input scheduling unavailable: xdotool window control is not available"
+                    continue
+                send_scheduled_key(input_window[0], key)
+                sent_keys.append({"frame": frame, "target_frame": target_frame, "key": key})
+
+            if frame is not None and frame >= args.min_frame and len(captures) < args.samples:
+                if time.monotonic() >= next_trigger_time and not (output / "capture-now.trigger").exists():
+                    (output / "capture-now.trigger").touch()
+                    next_trigger_time = time.monotonic() + max(args.interval, 0.25)
+
+            if len(captures) >= args.samples:
+                break
+            time.sleep(0.25)
+        if len(captures) < args.samples:
+            raise RuntimeError(f"timed out at frame {frame} with {len(captures)}/{args.samples} native captures; see {log_path}")
     except KeyboardInterrupt:
         capture_error = "capture interrupted"
     except RuntimeError as exc:
@@ -529,33 +633,19 @@ def run_capture(args: argparse.Namespace) -> int:
             "shader_validation": args.shader_validation,
             "command_buffer_dump": args.command_buffer_dump,
             "pipeline_dump": args.pipeline_dump,
+            "native_capture": True,
+            "native_capture_format": "BMP",
             "strict_environment": not args.allow_diagnostics,
-            "strict_compatibility_candidate": (
-                not args.allow_diagnostics
-                and not args.auto_cross
-                and not any(
-                    (
-                        args.rt_evidence,
-                        args.rt_evidence_ps,
-                        args.framebuffer_evidence,
-                        args.videoout_evidence,
-                        args.tex_probe,
-                        args.lightbuf_probe,
-                        args.shader_probe_crc,
-                        args.key_at,
-                        args.vulkan_validation,
-                        args.shader_validation,
-                        args.command_buffer_dump,
-                        args.pipeline_dump,
-                    )
-                )
-            ),
+            "strict_compatibility_candidate": False,
         },
         "artifacts": {
             "log": str(log_path.relative_to(output)),
-            "screenshots": [str(item["path"]) for item in captures],
+            "screenshots": [str(item["path"]) for item in startup_captures + captures],
+            "native_capture_directory": str((output / "native_frames").relative_to(output)),
         },
         "input": sent_keys,
+        "input_error": input_error,
+        "startup_captures": startup_captures,
         "captures": captures,
         "aggregate": aggregate,
         "status": "ok" if capture_error is None else "incomplete",

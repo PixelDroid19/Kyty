@@ -10,8 +10,11 @@
 #include "Kyty/Core/Vector.h"
 #include "Kyty/Core/VirtualMemory.h"
 
+#include "KytyBuildInfo.h"
+
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
+#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Image.h"
@@ -37,9 +40,18 @@
 #include "SDL_vulkan.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <ctime>
 #include <string>
+#include <system_error>
+#include <vector>
+
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#endif
 #include <vulkan/vk_enum_string_helper.h>
 #include <vulkan/vk_platform.h>
 
@@ -244,9 +256,408 @@ struct WindowContext
 	Core::Mutex   mutex;
 	bool          graphic_initialized = false;
 	Core::CondVar graphic_initialized_condvar;
+
+	struct NativeCapture
+	{
+		std::filesystem::path directory;
+		std::filesystem::path trigger_file;
+		bool                  first_present = false;
+		uint32_t              every_present = 0;
+		bool                  telemetry     = false;
+		bool                  first_pending = false;
+		bool                  manual_pending = false;
+		uint64_t              sequence      = 0;
+		uint64_t              present_count = 0;
+		double                last_log_time = 0.0;
+		uint64_t              last_present_steady_ms = 0;
+		uint64_t              last_frame_steady_ms   = 0;
+		int                   last_seen_frame        = -1;
+
+		Core::Mutex   result_mutex;
+		Core::CondVar result_cv;
+		uint64_t      request_id    = 0;
+		uint64_t      completed_id  = 0;
+		bool          last_ok       = false;
+		std::string   last_path;
+		std::string   last_milestone;
+		std::string   last_format;
+		uint32_t      last_width  = 0;
+		uint32_t      last_height = 0;
+		int           last_frame  = 0;
+		uint64_t      last_present = 0;
+		std::string   last_error_code;
+		std::string   last_error_message;
+	} native_capture;
 };
 
 static WindowContext* g_window_ctx = nullptr;
+
+static uint64_t WindowSteadyMs()
+{
+	using clock = std::chrono::steady_clock;
+	return static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count());
+}
+
+static bool NativeCaptureEnvEnabled(const char* name)
+{
+	const char* value = std::getenv(name);
+	return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
+
+static uint32_t NativeCaptureEnvPositive(const char* name)
+{
+	const char* value = std::getenv(name);
+	if (value == nullptr || value[0] == '\0')
+	{
+		return 0;
+	}
+
+	char* end = nullptr;
+	const auto parsed = std::strtoul(value, &end, 10);
+	if (end == value || *end != '\0' || parsed == 0 || parsed > UINT32_MAX)
+	{
+		return 0;
+	}
+	return static_cast<uint32_t>(parsed);
+}
+
+static std::string NativeCaptureSanitize(std::string value, const char* fallback)
+{
+	for (auto& character: value)
+	{
+		const auto c = static_cast<unsigned char>(character);
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'))
+		{
+			character = '_';
+		}
+	}
+	if (value.empty())
+	{
+		value = fallback;
+	}
+	if (value.size() > 64)
+	{
+		value.resize(64);
+	}
+	return value;
+}
+
+static std::string NativeCaptureUtcStamp()
+{
+	const auto now = std::chrono::system_clock::now();
+	const auto tt  = std::chrono::system_clock::to_time_t(now);
+
+	std::tm utc {};
+#if defined(_WIN32)
+	gmtime_s(&utc, &tt);
+#else
+	gmtime_r(&tt, &utc);
+#endif
+
+	char stamp[32] {};
+	std::strftime(stamp, sizeof(stamp), "%Y%m%dT%H%M%SZ", &utc);
+	return stamp;
+}
+
+static const char* NativeCaptureFormatName(VkFormat format)
+{
+	switch (format)
+	{
+		case VK_FORMAT_B8G8R8A8_SRGB: return "VK_FORMAT_B8G8R8A8_SRGB";
+		case VK_FORMAT_R8G8B8A8_SRGB: return "VK_FORMAT_R8G8B8A8_SRGB";
+		default: return "VK_FORMAT_UNSUPPORTED";
+	}
+}
+
+static uint64_t NativeCaptureHostPeakRssBytes()
+{
+#if defined(_WIN32)
+	return 0;
+#else
+	struct rusage usage {};
+	if (getrusage(RUSAGE_SELF, &usage) != 0)
+	{
+		return 0;
+	}
+#if defined(__APPLE__)
+	return static_cast<uint64_t>(usage.ru_maxrss);
+#else
+	return static_cast<uint64_t>(usage.ru_maxrss) * 1024u;
+#endif
+#endif
+}
+
+static void NativeCaptureConfigure(WindowContext* ctx)
+{
+	EXIT_IF(ctx == nullptr);
+
+	const char* directory = std::getenv("KYTY_NATIVE_CAPTURE_DIR");
+	if (directory == nullptr || directory[0] == '\0')
+	{
+		return;
+	}
+
+	std::error_code error;
+	ctx->native_capture.directory = std::filesystem::absolute(directory, error);
+	if (error)
+	{
+		ctx->native_capture.directory = directory;
+	}
+
+	if (const char* trigger = std::getenv("KYTY_NATIVE_CAPTURE_TRIGGER"); trigger != nullptr && trigger[0] != '\0')
+	{
+		ctx->native_capture.trigger_file = std::filesystem::absolute(trigger, error);
+		if (error)
+		{
+			ctx->native_capture.trigger_file = trigger;
+		}
+	}
+
+	ctx->native_capture.first_present = NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_FIRST_PRESENT") ||
+	                                   NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_NOW");
+	ctx->native_capture.first_pending = ctx->native_capture.first_present;
+	ctx->native_capture.every_present = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_EVERY");
+	ctx->native_capture.telemetry     = NativeCaptureEnvEnabled("KYTY_NATIVE_TELEMETRY");
+
+	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE_CONFIG enabled=1 first=%d every=%u trigger=%d\n", ctx->native_capture.first_present ? 1 : 0,
+	             ctx->native_capture.every_present, ctx->native_capture.trigger_file.empty() ? 0 : 1);
+}
+
+enum class NativeCaptureMilestone
+{
+	None,
+	FirstPresent,
+	Interval,
+	Manual,
+};
+
+static NativeCaptureMilestone NativeCaptureNext(WindowContext* ctx)
+{
+	EXIT_IF(ctx == nullptr);
+	if (ctx->native_capture.directory.empty())
+	{
+		return NativeCaptureMilestone::None;
+	}
+
+	if (ctx->native_capture.first_pending)
+	{
+		return NativeCaptureMilestone::FirstPresent;
+	}
+
+	const auto next_present = ctx->native_capture.present_count + 1;
+	if (ctx->native_capture.every_present != 0 && next_present % ctx->native_capture.every_present == 0)
+	{
+		return NativeCaptureMilestone::Interval;
+	}
+
+	if (!ctx->native_capture.trigger_file.empty())
+	{
+		std::error_code error;
+		if (std::filesystem::exists(ctx->native_capture.trigger_file, error) && !error)
+		{
+			return NativeCaptureMilestone::Manual;
+		}
+	}
+
+	if (ctx->native_capture.manual_pending)
+	{
+		return NativeCaptureMilestone::Manual;
+	}
+
+	return NativeCaptureMilestone::None;
+}
+
+static const char* NativeCaptureMilestoneName(NativeCaptureMilestone milestone)
+{
+	switch (milestone)
+	{
+		case NativeCaptureMilestone::FirstPresent: return "first_present";
+		case NativeCaptureMilestone::Interval: return "interval";
+		case NativeCaptureMilestone::Manual: return "manual";
+		case NativeCaptureMilestone::None: break;
+	}
+	return "none";
+}
+
+static void NativeCapturePublishResult(WindowContext* ctx, bool ok, const char* path, const char* milestone, const char* format,
+                                       uint32_t width, uint32_t height, int frame, const char* error_code, const char* error_message)
+{
+	EXIT_IF(ctx == nullptr);
+
+	Core::LockGuard lock(ctx->native_capture.result_mutex);
+	ctx->native_capture.manual_pending     = false;
+	ctx->native_capture.completed_id       = ctx->native_capture.request_id;
+	ctx->native_capture.last_ok            = ok;
+	ctx->native_capture.last_path          = path != nullptr ? path : "";
+	ctx->native_capture.last_milestone     = milestone != nullptr ? milestone : "none";
+	ctx->native_capture.last_format        = format != nullptr ? format : "";
+	ctx->native_capture.last_width         = width;
+	ctx->native_capture.last_height        = height;
+	ctx->native_capture.last_frame         = frame;
+	ctx->native_capture.last_present       = ctx->native_capture.present_count;
+	ctx->native_capture.last_error_code    = error_code != nullptr ? error_code : "";
+	ctx->native_capture.last_error_message = error_message != nullptr ? error_message : "";
+	ctx->native_capture.result_cv.Signal();
+
+	if (ok)
+	{
+		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Capture, "capture_ok",
+		                                            path != nullptr ? path : "");
+	} else
+	{
+		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Error,
+		                                            error_code != nullptr ? error_code : "capture_failed",
+		                                            error_message != nullptr ? error_message : "");
+	}
+}
+
+static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, int frame, NativeCaptureMilestone milestone)
+{
+	EXIT_IF(ctx == nullptr);
+	EXIT_IF(image == nullptr);
+	EXIT_IF(milestone == NativeCaptureMilestone::None);
+
+	const bool agent_waiting = [&]() {
+		Core::LockGuard lock(ctx->native_capture.result_mutex);
+		return ctx->native_capture.manual_pending || ctx->native_capture.request_id > ctx->native_capture.completed_id;
+	}();
+
+	if (milestone == NativeCaptureMilestone::FirstPresent)
+	{
+		ctx->native_capture.first_pending = false;
+	}
+	if (milestone == NativeCaptureMilestone::Manual && !ctx->native_capture.trigger_file.empty())
+	{
+		std::error_code error;
+		std::filesystem::remove(ctx->native_capture.trigger_file, error);
+	}
+
+	if (image->format != VK_FORMAT_B8G8R8A8_SRGB && image->format != VK_FORMAT_R8G8B8A8_SRGB)
+	{
+		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=readback frame=%d format=%s recoverable=0\n", frame,
+		             NativeCaptureFormatName(image->format));
+		if (agent_waiting)
+		{
+			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
+			                           0, 0, frame, "unsupported_format", "native capture requires B8G8R8A8_SRGB or R8G8B8A8_SRGB");
+		}
+		return;
+	}
+
+	const uint64_t width  = image->extent.width;
+	const uint64_t height = image->extent.height;
+	if (width == 0 || height == 0 || width > UINT64_MAX / height || width * height > UINT64_MAX / 4)
+	{
+		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=validate_extent frame=%d recoverable=0\n", frame);
+		if (agent_waiting)
+		{
+			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
+			                           0, 0, frame, "invalid_extent", "native capture extent is invalid");
+		}
+		return;
+	}
+
+	const uint64_t size = width * height * 4;
+	std::vector<uint8_t> pixels(size);
+	UtilFillBuffer(&ctx->graphic_ctx, pixels.data(), size, static_cast<uint32_t>(width), image,
+	               static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+
+	Core::String title_id;
+	Core::String app_ver;
+	Loader::SystemContentGetMetadata(&title_id, &app_ver);
+	const auto title_name   = NativeCaptureSanitize(title_id.C_Str(), "unknown-title");
+	const auto version_name = NativeCaptureSanitize(app_ver.C_Str(), "unknown-version");
+	const auto revision     = NativeCaptureSanitize(BuildInfo::Revision, "unknown-revision");
+	const auto stamp        = NativeCaptureUtcStamp();
+	const auto sequence     = ctx->native_capture.sequence++;
+	const auto filename     = title_name + "-" + version_name + "-" + revision + "-frame-" + std::to_string(frame) + "-" + stamp + "-" +
+	                      std::to_string(sequence) + ".bmp";
+
+	std::error_code error;
+	std::filesystem::create_directories(ctx->native_capture.directory, error);
+	if (error)
+	{
+		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=create_directory frame=%d recoverable=0\n", frame);
+		if (agent_waiting)
+		{
+			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
+			                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame, "create_directory",
+			                           "failed to create capture directory");
+		}
+		return;
+	}
+
+	const auto image_path = ctx->native_capture.directory / filename;
+	const uint32_t r_mask = image->format == VK_FORMAT_B8G8R8A8_SRGB ? 0x00FF0000u : 0x000000FFu;
+	const uint32_t g_mask = 0x0000FF00u;
+	const uint32_t b_mask = image->format == VK_FORMAT_B8G8R8A8_SRGB ? 0x000000FFu : 0x00FF0000u;
+	const uint32_t a_mask = 0xFF000000u;
+	auto* surface = SDL_CreateRGBSurfaceFrom(pixels.data(), static_cast<int>(width), static_cast<int>(height), 32,
+	                                         static_cast<int>(width * 4), r_mask, g_mask, b_mask, a_mask);
+	if (surface == nullptr)
+	{
+		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=create_surface frame=%d recoverable=0\n", frame);
+		if (agent_waiting)
+		{
+			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
+			                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame, "create_surface",
+			                           "SDL_CreateRGBSurfaceFrom failed");
+		}
+		return;
+	}
+
+	const int save_result = SDL_SaveBMP(surface, image_path.string().c_str());
+	SDL_FreeSurface(surface);
+	if (save_result != 0)
+	{
+		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=save_image frame=%d recoverable=0 message=%s\n", frame,
+		             SDL_GetError());
+		if (agent_waiting)
+		{
+			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
+			                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame, "save_image", SDL_GetError());
+		}
+		return;
+	}
+
+	const auto metadata_path = image_path.string() + ".json";
+	if (auto* metadata = std::fopen(metadata_path.c_str(), "wb"); metadata != nullptr)
+	{
+		std::fprintf(metadata,
+		             "{\n  \"schema_version\": 1,\n  \"milestone\": \"%s\",\n  \"frame\": %d,\n  "
+		             "\"present\": %llu,\n  \"title_id\": \"%s\",\n  \"app_version\": \"%s\",\n  "
+		             "\"build_revision\": \"%s\",\n  \"build_dirty\": %s,\n  \"backend\": \"Vulkan\",\n  "
+		             "\"format\": \"%s\",\n  \"width\": %llu,\n  \"height\": %llu,\n  "
+		             "\"image\": \"%s\",\n  \"host_peak_rss_bytes\": %llu\n}\n",
+		             NativeCaptureMilestoneName(milestone), frame, static_cast<unsigned long long>(ctx->native_capture.present_count), title_name.c_str(),
+		             version_name.c_str(), revision.c_str(), BuildInfo::Dirty ? "true" : "false", NativeCaptureFormatName(image->format),
+		             static_cast<unsigned long long>(width), static_cast<unsigned long long>(height), image_path.filename().string().c_str(),
+		             static_cast<unsigned long long>(NativeCaptureHostPeakRssBytes()));
+		std::fclose(metadata);
+	} else
+	{
+		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=save_metadata frame=%d recoverable=0\n", frame);
+		if (agent_waiting)
+		{
+			NativeCapturePublishResult(ctx, false, image_path.string().c_str(), NativeCaptureMilestoneName(milestone),
+			                           NativeCaptureFormatName(image->format), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+			                           frame, "save_metadata", "failed to write capture metadata");
+		}
+		return;
+	}
+
+	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE milestone=%s frame=%d present=%llu file=%s format=%s size=%llux%llu\n",
+	             NativeCaptureMilestoneName(milestone), frame, static_cast<unsigned long long>(ctx->native_capture.present_count), image_path.string().c_str(),
+	             NativeCaptureFormatName(image->format), static_cast<unsigned long long>(width), static_cast<unsigned long long>(height));
+
+	if (agent_waiting)
+	{
+		NativeCapturePublishResult(ctx, true, image_path.string().c_str(), NativeCaptureMilestoneName(milestone),
+		                           NativeCaptureFormatName(image->format), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+		                           frame, nullptr, nullptr);
+	}
+}
 
 constexpr const char* KYTY_SDL_WINDOW_CAPTION = "Game";
 // constexpr uint32_t    KYTY_SDL_WINDOW_FLAGS       = (static_cast<uint32_t>(SDL_WINDOW_HIDDEN) |
@@ -452,6 +863,12 @@ static void ApplyKeyboardLeftStickControllerAxes(const KeyboardLeftStickUpdate& 
 
 void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 {
+	if (NativeCaptureEnvEnabled("KYTY_INPUT_LOG") && key != nullptr && (key->down || key->up))
+	{
+		std::fprintf(stderr, "KYTY_INPUT_EDGE key=%d down=%d up=%d pressed=%d released=%d\n", key->key_code, key->down ? 1 : 0,
+		             key->up ? 1 : 0, key->pressed ? 1 : 0, key->released ? 1 : 0);
+	}
+
 #ifdef KYTY_DBG_INPUT
 	printf("Key: time = %.04f, %s%s, %s%s, %s, scan = %d, key = %d, mod = %04" PRIx16 "\n", key->timestamp_seconds,
 	       (key->down ? "down" : ""), (key->up ? "up" : ""), (key->pressed ? "pressed" : ""), (key->released ? "released" : ""),
@@ -2506,6 +2923,7 @@ void WindowInit(uint32_t width, uint32_t height)
 
 	g_window_ctx->graphic_ctx.screen_width  = width;
 	g_window_ctx->graphic_ctx.screen_height = height;
+	NativeCaptureConfigure(g_window_ctx);
 }
 
 void WindowWaitForGraphicInitialized()
@@ -2694,6 +3112,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	auto* blt_src_image = image;
 	auto* blt_dst_image = g_window_ctx->swapchain;
+	const auto capture_milestone = NativeCaptureNext(g_window_ctx);
 
 	EXIT_IF(blt_src_image == nullptr);
 	EXIT_IF(blt_dst_image == nullptr);
@@ -2747,7 +3166,164 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	result = vkQueuePresentKHR(queue.vk_queue, &present);
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 
+	g_window_ctx->native_capture.present_count++;
+	g_window_ctx->native_capture.last_present_steady_ms = WindowSteadyMs();
+	if (capture_milestone != NativeCaptureMilestone::None)
+	{
+		// The capture reads the emulated source only after the present submit has
+		// completed, so the readback cannot race the source blit.
+		buffer.WaitForFence();
+		NativeCaptureFrame(g_window_ctx, image, g_window_ctx->game->m_frame_num, capture_milestone);
+	}
+
+	if (g_window_ctx->native_capture.telemetry)
+	{
+		const double t = g_window_ctx->game->m_current_time_seconds;
+		if (t - g_window_ctx->native_capture.last_log_time >= 1.0)
+		{
+			std::fprintf(stderr, "KYTY_PRESENT_TELEMETRY frame=%d present=%llu fps=%.3f peak_rss_bytes=%llu size=%ux%u format=%s\n",
+			             g_window_ctx->game->m_frame_num, static_cast<unsigned long long>(g_window_ctx->native_capture.present_count),
+			             g_window_ctx->game->m_current_fps, static_cast<unsigned long long>(NativeCaptureHostPeakRssBytes()), image->extent.width,
+			             image->extent.height, NativeCaptureFormatName(image->format));
+			g_window_ctx->native_capture.last_log_time = t;
+		}
+	}
+
 	WindowUpdateTitle();
+}
+
+bool WindowGetPresentStats(WindowPresentStats* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = WindowPresentStats {};
+	if (g_window_ctx == nullptr)
+	{
+		return true;
+	}
+
+	const uint64_t now_ms = WindowSteadyMs();
+	out->graphic_ready   = g_window_ctx->graphic_initialized;
+	out->capture_dir_set = !g_window_ctx->native_capture.directory.empty();
+	out->capture_ready   = out->capture_dir_set && out->graphic_ready;
+	out->present         = g_window_ctx->native_capture.present_count;
+	if (g_window_ctx->game != nullptr)
+	{
+		out->frame = g_window_ctx->game->m_frame_num;
+		out->fps   = g_window_ctx->game->m_current_fps;
+		if (out->frame != g_window_ctx->native_capture.last_seen_frame)
+		{
+			g_window_ctx->native_capture.last_seen_frame      = out->frame;
+			g_window_ctx->native_capture.last_frame_steady_ms = now_ms;
+		}
+	}
+	if (g_window_ctx->native_capture.last_present_steady_ms != 0)
+	{
+		out->ms_since_present = now_ms - g_window_ctx->native_capture.last_present_steady_ms;
+	}
+	if (g_window_ctx->native_capture.last_frame_steady_ms != 0)
+	{
+		out->ms_since_frame = now_ms - g_window_ctx->native_capture.last_frame_steady_ms;
+	}
+	return true;
+}
+
+bool WindowRequestNativeCapture(uint64_t* out_request_id, WindowNativeCaptureResult* error_out)
+{
+	if (error_out != nullptr)
+	{
+		*error_out = WindowNativeCaptureResult {};
+	}
+	if (g_window_ctx == nullptr)
+	{
+		if (error_out != nullptr)
+		{
+			error_out->error_code    = "not_ready";
+			error_out->error_message = "window context is not initialized";
+		}
+		return false;
+	}
+	if (g_window_ctx->native_capture.directory.empty())
+	{
+		if (error_out != nullptr)
+		{
+			error_out->error_code    = "capture_dir_unset";
+			error_out->error_message = "set KYTY_NATIVE_CAPTURE_DIR before requesting capture";
+		}
+		return false;
+	}
+
+	Core::LockGuard lock(g_window_ctx->native_capture.result_mutex);
+	if (g_window_ctx->native_capture.manual_pending)
+	{
+		if (error_out != nullptr)
+		{
+			error_out->error_code    = "busy";
+			error_out->error_message = "a native capture request is already pending";
+		}
+		return false;
+	}
+
+	++g_window_ctx->native_capture.request_id;
+	g_window_ctx->native_capture.manual_pending = true;
+	if (out_request_id != nullptr)
+	{
+		*out_request_id = g_window_ctx->native_capture.request_id;
+	}
+	return true;
+}
+
+bool WindowWaitNativeCapture(uint64_t request_id, uint32_t timeout_ms, WindowNativeCaptureResult* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = WindowNativeCaptureResult {};
+	if (g_window_ctx == nullptr)
+	{
+		out->error_code    = "not_ready";
+		out->error_message = "window context is not initialized";
+		return false;
+	}
+
+	auto& capture = g_window_ctx->native_capture;
+	const uint64_t deadline_us =
+	    static_cast<uint64_t>(timeout_ms) * 1000ull +
+	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                             std::chrono::steady_clock::now().time_since_epoch())
+	                             .count());
+
+	Core::LockGuard lock(capture.result_mutex);
+	while (capture.completed_id < request_id)
+	{
+		const uint64_t now_us = static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+		if (now_us >= deadline_us)
+		{
+			out->error_code    = "timeout";
+			out->error_message = "timed out waiting for native capture";
+			return false;
+		}
+		const uint64_t remaining_us = deadline_us - now_us;
+		const uint32_t slice_us =
+		    remaining_us > 200000ull ? 200000u : static_cast<uint32_t>(remaining_us == 0 ? 1 : remaining_us);
+		capture.result_cv.WaitFor(&capture.result_mutex, slice_us);
+	}
+
+	out->ok        = capture.last_ok;
+	out->path      = capture.last_path;
+	out->milestone = capture.last_milestone;
+	out->format    = capture.last_format;
+	out->width     = capture.last_width;
+	out->height    = capture.last_height;
+	out->present   = capture.last_present;
+	out->frame     = capture.last_frame;
+	out->error_code    = capture.last_error_code;
+	out->error_message = capture.last_error_message;
+	return capture.last_ok;
 }
 
 } // namespace Kyty::Libs::Graphics
