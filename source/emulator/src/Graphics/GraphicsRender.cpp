@@ -1499,14 +1499,15 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	attachments[0].initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	attachments[0].finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+	const auto depth_load_ops = ResolveDepthAttachmentLoadOps(depth->format, depth->depth_clear_enable, depth->stencil_clear_enable);
 	attachments[1].flags          = 0;
 	attachments[1].format         = depth->format;
 	attachments[1].samples        = VK_SAMPLE_COUNT_1_BIT;
-	attachments[1].loadOp         = (depth->depth_clear_enable ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD);
+	attachments[1].loadOp         = depth_load_ops.depth_load;
 	attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-	attachments[1].stencilLoadOp  = (depth->stencil_clear_enable ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD);
+	attachments[1].stencilLoadOp  = depth_load_ops.stencil_load;
 	attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-	attachments[1].initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	attachments[1].initialLayout  = depth_load_ops.initial_layout;
 	attachments[1].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 	VkAttachmentReference color_attachment_ref {};
@@ -2621,7 +2622,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.static_params->topology                 = topology;
 	p.static_params->with_depth               = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	p.static_params->depth_test_enable        = depth->depth_test_enable;
-	p.static_params->depth_write_enable       = (depth->depth_write_enable && !depth->depth_clear_enable);
+	// HTILE meta clear needs Vulkan load-clear but must not suppress depth writes.
+	// Register DEPTH_CLEAR_ENABLE still suppresses shader Z writes for that draw.
+	const auto depth_clear_actions            = State::ResolveDepthClearActions(depth->depth_clear_enable, false);
+	p.static_params->depth_write_enable       = (depth->depth_write_enable && !depth_clear_actions.suppress_depth_write);
 	p.static_params->depth_compare_op         = depth->depth_compare_op;
 	p.static_params->depth_bounds_test_enable = depth->depth_bounds_test_enable;
 	p.static_params->depth_min_bounds         = depth->depth_min_bounds;

@@ -26,6 +26,55 @@ struct VulkanSwapchain;
 
 VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 
+[[nodiscard]] inline bool DepthFormatHasStencil(VkFormat format)
+{
+	return format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+}
+
+[[nodiscard]] inline VkImageAspectFlags DepthFormatAspectMask(VkFormat format)
+{
+	VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+	if (DepthFormatHasStencil(format))
+	{
+		aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+	}
+	return aspect;
+}
+
+// Combined D/S images cannot LOAD any aspect from UNDEFINED. Use UNDEFINED only when
+// every used aspect CLEARs or is DONT_CARE; otherwise keep OPTIMAL and CLEAR depth only.
+struct DepthAttachmentLoadOps
+{
+	VkAttachmentLoadOp depth_load     = VK_ATTACHMENT_LOAD_OP_LOAD;
+	VkAttachmentLoadOp stencil_load   = VK_ATTACHMENT_LOAD_OP_LOAD;
+	VkImageLayout      initial_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+};
+
+// Guest HTILE/register clears map to attachment loadOp CLEAR. No invented color CLEAR0.
+// When not clearing, LOAD OPTIMAL preserves prior DS contents. Depth-only CLEAR uses
+// UNDEFINED init, so stencil cannot LOAD in that pass (DONT_CARE unless stencil clears).
+[[nodiscard]] inline DepthAttachmentLoadOps ResolveDepthAttachmentLoadOps(VkFormat format, bool depth_clear, bool stencil_clear)
+{
+	DepthAttachmentLoadOps ops {};
+	const bool             has_stencil = DepthFormatHasStencil(format);
+	ops.depth_load                     = depth_clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+	if (!has_stencil)
+	{
+		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	} else if (stencil_clear)
+	{
+		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	} else if (depth_clear)
+	{
+		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	} else
+	{
+		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_LOAD;
+	}
+	ops.initial_layout = (depth_clear || stencil_clear) ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	return ops;
+}
+
 struct BufferImageCopy
 {
 	uint32_t offset;
