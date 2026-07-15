@@ -2012,6 +2012,9 @@ static bool RtEvidenceMatches(uint32_t ps_crc)
 	return valid && static_cast<uint32_t>(value) == ps_crc;
 }
 
+// Consumer PS CRC for SAMPLE_EVIDENCE (set by BindDescriptors for pixel stage).
+static thread_local uint32_t g_sample_evidence_consumer_ps_crc = 0;
+
 static VkBlendOp get_blend_op(uint32_t op)
 {
 	switch (op)
@@ -4656,10 +4659,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			if (n < budget)
 			{
 				std::fprintf(stderr,
-				             "SAMPLE_EVIDENCE slot=%d addr=%016" PRIx64 " ufmt=%u tile=%u extent=%ux%u size=%08" PRIx32
-				             " render_texture=%d depth_texture=%d vkfmt=%d layout=%d\n",
-				             index_sampled, addr, fmt, tile, width, height, size.size, render_texture ? 1 : 0, depth_texture ? 1 : 0,
-				             static_cast<int>(tex->format), static_cast<int>(tex->layout));
+				             "SAMPLE_EVIDENCE consumer_ps=%08" PRIx32 " slot=%d addr=%016" PRIx64 " ufmt=%u tile=%u extent=%ux%u "
+				             "size=%08" PRIx32 " render_texture=%d depth_texture=%d vkfmt=%d layout=%d\n",
+				             g_sample_evidence_consumer_ps_crc, index_sampled, addr, fmt, tile, width, height, size.size,
+				             render_texture ? 1 : 0, depth_texture ? 1 : 0, static_cast<int>(tex->format),
+				             static_cast<int>(tex->layout));
 			}
 		}
 
@@ -4804,7 +4808,8 @@ static void PrepareDirectSgprs(const ShaderDirectSgprsResources& direct_sgprs, u
 }
 
 static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
-                            const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage)
+                            const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
+                            uint32_t consumer_ps_crc = 0)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -4838,6 +4843,7 @@ static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelin
 		}
 		if (bind.textures2D.textures_num > 0)
 		{
+			g_sample_evidence_consumer_ps_crc = consumer_ps_crc;
 			PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage, textures2d_sampled_view,
 			                &sgprs_ptr);
 			need_descriptor = true;
@@ -5074,15 +5080,18 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		vkCmdBindVertexBuffers(vk_buffer, i, 1, &vertices->buffer, &offset);
 	}
 
+	// ShaderGetIdPS is already used in CreatePipeline; recompute here only so
+	// SAMPLE_EVIDENCE can tag the consuming PS CRC (VulkanPipeline has no id).
+	const uint32_t consumer_ps_crc = ShaderGetIdPS(&sh_ctx->GetPs(), &ps_input_info).crc32;
+
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
-	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
+	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0);
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, consumer_ps_crc);
 
 	VulkanBuffer* indices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(
 	    submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(index_addr), index_size, IndexBufferGpuObject()));
-
 	EXIT_NOT_IMPLEMENTED(indices == nullptr);
 
 	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
@@ -5199,11 +5208,13 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		vkCmdBindVertexBuffers(vk_buffer, i, 1, &vertices->buffer, &offset);
 	}
 
+	const uint32_t consumer_ps_crc = ShaderGetIdPS(&sh_ctx->GetPs(), &ps_input_info).crc32;
+
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
-	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
+	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0);
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, consumer_ps_crc);
 
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info);
 
