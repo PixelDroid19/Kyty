@@ -1603,7 +1603,9 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 				// These extensions are optional (absent on MoltenVK); the renderer
 				// uses core-Vulkan fallbacks when they are missing.
 				if (strcmp(ext, VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME) == 0 ||
-				    strcmp(ext, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME) == 0)
+				    strcmp(ext, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME) == 0 ||
+				    strcmp(ext, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME) == 0 ||
+				    strcmp(ext, VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME) == 0)
 				{
 					continue;
 				}
@@ -1750,7 +1752,7 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 
 static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VulkanExtensions* r,
                                    const VulkanQueues& queues, const Vector<const char*>& device_extensions,
-                                   bool color_write_enable_supported)
+                                   bool color_write_enable_supported, bool depth_clip_control_supported)
 {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(r == nullptr);
@@ -1788,14 +1790,21 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features.depthClamp = VK_TRUE;
 	// device_features.shaderImageGatherExtended = VK_TRUE;
 
+	VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control_ext {};
+	depth_clip_control_ext.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT;
+	depth_clip_control_ext.pNext            = nullptr;
+	depth_clip_control_ext.depthClipControl = VK_TRUE;
+
 	VkPhysicalDeviceColorWriteEnableFeaturesEXT color_write_ext {};
 	color_write_ext.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COLOR_WRITE_ENABLE_FEATURES_EXT;
-	color_write_ext.pNext            = nullptr;
+	color_write_ext.pNext            = (depth_clip_control_supported ? &depth_clip_control_ext : nullptr);
 	color_write_ext.colorWriteEnable = VK_TRUE;
 
 	VkDeviceCreateInfo create_info {};
 	create_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-	create_info.pNext                   = (color_write_enable_supported ? &color_write_ext : nullptr);
+	create_info.pNext                   = (color_write_enable_supported
+	                                           ? static_cast<const void*>(&color_write_ext)
+	                                           : (depth_clip_control_supported ? static_cast<const void*>(&depth_clip_control_ext) : nullptr));
 	create_info.flags                   = 0;
 	create_info.pQueueCreateInfos       = queue_create_info.GetDataConst();
 	create_info.queueCreateInfoCount    = queue_create_info_num;
@@ -2366,7 +2375,8 @@ static void VulkanCreate(WindowContext* ctx)
 	}
 
 	Vector<const char*> device_extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME,
-	                                         VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME, "VK_KHR_maintenance1"};
+	                                         VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
+	                                         VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME, "VK_KHR_maintenance1"};
 
 #ifdef KYTY_ENABLE_DEBUG_PRINTF
 	if (Config::SpirvDebugPrintfEnabled())
@@ -2420,6 +2430,27 @@ static void VulkanCreate(WindowContext* ctx)
 			drop_ext(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
 			printf("VK_EXT_depth_clip_enable absent: using depthClampEnable fallback\n");
 		}
+
+		ctx->graphic_ctx.depth_clip_control_supported = has_ext(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
+		if (!ctx->graphic_ctx.depth_clip_control_supported)
+		{
+			drop_ext(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
+			printf("VK_EXT_depth_clip_control absent: OpenGL clip space needs host remapping\n");
+		} else if (!device_extensions.Contains(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
+		                                       [](auto s, auto l) { return strcmp(s, l) == 0; }))
+		{
+			device_extensions.Add(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
+		}
+
+		ctx->graphic_ctx.depth_range_unrestricted_supported = has_ext(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
+		if (!ctx->graphic_ctx.depth_range_unrestricted_supported)
+		{
+			drop_ext(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
+		} else if (!device_extensions.Contains(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME,
+		                                       [](auto s, auto l) { return strcmp(s, l) == 0; }))
+		{
+			device_extensions.Add(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
+		}
 	}
 
 	VkPhysicalDeviceProperties device_properties {};
@@ -2431,7 +2462,8 @@ static void VulkanCreate(WindowContext* ctx)
 	memcpy(ctx->processor_name, Core::GetSystemInfo().ProcessorName.C_Str(), sizeof(ctx->processor_name));
 
 	ctx->graphic_ctx.device = VulkanCreateDevice(ctx->graphic_ctx.physical_device, ctx->surface, &r, queues, device_extensions,
-	                                             ctx->graphic_ctx.color_write_enable_supported);
+	                                             ctx->graphic_ctx.color_write_enable_supported,
+	                                             ctx->graphic_ctx.depth_clip_control_supported);
 	if (ctx->graphic_ctx.device == nullptr)
 	{
 		EXIT("Could not create device");

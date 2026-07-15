@@ -196,6 +196,27 @@ TEST(EmulatorGraphicsState, RequiresAnActiveDepthStencilOperationForTargetBindin
 	EXPECT_FALSE(usage.depth_write_enable);
 }
 
+TEST(EmulatorGraphicsState, ResolvesViewportDepthForClipSpaceAndHostLimits)
+{
+	// Captured first MRT world pass: zscale=1, zoffset=0, dx_clip_space=false.
+	auto ogl = State::ResolveViewportDepth(1.0f, 0.0f, false, true);
+	EXPECT_FLOAT_EQ(ogl.min_depth, -1.0f);
+	EXPECT_FLOAT_EQ(ogl.max_depth, 1.0f);
+
+	// Intel Arc and many hosts lack VK_EXT_depth_range_unrestricted.
+	ogl = State::ResolveViewportDepth(1.0f, 0.0f, false, false);
+	EXPECT_FLOAT_EQ(ogl.min_depth, 0.0f);
+	EXPECT_FLOAT_EQ(ogl.max_depth, 1.0f);
+
+	auto dx = State::ResolveViewportDepth(0.5f, 0.5f, true, true);
+	EXPECT_FLOAT_EQ(dx.min_depth, 0.5f);
+	EXPECT_FLOAT_EQ(dx.max_depth, 1.0f);
+
+	dx = State::ResolveViewportDepth(1.0f, 0.0f, true, false);
+	EXPECT_FLOAT_EQ(dx.min_depth, 0.0f);
+	EXPECT_FLOAT_EQ(dx.max_depth, 1.0f);
+}
+
 TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 {
 	Loader::SymbolDatabase symbols;
