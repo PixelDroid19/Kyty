@@ -217,6 +217,51 @@ TEST(EmulatorGraphicsState, ResolvesViewportDepthForClipSpaceAndHostLimits)
 	EXPECT_FLOAT_EQ(dx.max_depth, 1.0f);
 }
 
+TEST(EmulatorGraphicsState, SeparatesHtileMetaClearFromRegisterDepthClear)
+{
+	// Captured world path: register DEPTH_CLEAR_ENABLE=0, HTILE meta clear=1.
+	auto htile_only = State::ResolveDepthClearActions(false, true);
+	EXPECT_TRUE(htile_only.vulkan_clear);
+	EXPECT_FALSE(htile_only.suppress_depth_write);
+
+	auto register_only = State::ResolveDepthClearActions(true, false);
+	EXPECT_TRUE(register_only.vulkan_clear);
+	EXPECT_TRUE(register_only.suppress_depth_write);
+
+	auto both = State::ResolveDepthClearActions(true, true);
+	EXPECT_TRUE(both.vulkan_clear);
+	EXPECT_TRUE(both.suppress_depth_write);
+
+	auto neither = State::ResolveDepthClearActions(false, false);
+	EXPECT_FALSE(neither.vulkan_clear);
+	EXPECT_FALSE(neither.suppress_depth_write);
+}
+
+TEST(EmulatorGraphicsState, DepthAttachmentLoadOpsClearWhenGuestDepthClear)
+{
+	using namespace Kyty::Libs::Graphics;
+	// HTILE/register clear → loadOp CLEAR + UNDEFINED.
+	auto ds = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, true, false);
+	EXPECT_EQ(ds.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(ds.stencil_load, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+	EXPECT_EQ(ds.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+
+	auto both = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, true, true);
+	EXPECT_EQ(both.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(both.stencil_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(both.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+
+	auto depth_only = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT, true, false);
+	EXPECT_EQ(depth_only.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(depth_only.stencil_load, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+	EXPECT_EQ(depth_only.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+
+	auto load = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, false, false);
+	EXPECT_EQ(load.depth_load, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(load.stencil_load, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(load.initial_layout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+}
+
 TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 {
 	Loader::SymbolDatabase symbols;

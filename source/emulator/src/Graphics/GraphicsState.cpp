@@ -99,6 +99,14 @@ ViewportDepthRange ResolveViewportDepth(float zscale, float zoffset, bool dx_cli
 	return range;
 }
 
+DepthClearActions ResolveDepthClearActions(bool register_depth_clear, bool htile_meta_clear)
+{
+	DepthClearActions actions {};
+	actions.vulkan_clear         = register_depth_clear || htile_meta_clear;
+	actions.suppress_depth_write = register_depth_clear;
+	return actions;
+}
+
 void SetGenericScissorTl(HW::Context& context, uint32_t value)
 {
 	const auto& viewport = context.GetScreenViewport();

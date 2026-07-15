@@ -29,6 +29,15 @@ struct ViewportDepthRange
 	float max_depth = 1.0f;
 };
 
+// Register DEPTH_CLEAR_ENABLE suppresses shader Z writes. HTILE clear metadata only
+// means the surface reads as cleared and needs a Vulkan load-clear; it must not
+// suppress depth writes on an otherwise normal draw.
+struct DepthClearActions
+{
+	bool vulkan_clear         = false;
+	bool suppress_depth_write = false;
+};
+
 void SetGenericScissorTl(HW::Context& context, uint32_t value);
 void SetGenericScissorBr(HW::Context& context, uint32_t value);
 void SetModeControl(HW::Context& context, uint32_t value);
@@ -42,6 +51,8 @@ void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
 // AMD VTE window Z: OpenGL clip ([-W,+W]) uses zoffset±zscale; DX clip ([0,+W]) uses [zoffset, zoffset+zscale].
 // Without VK_EXT_depth_range_unrestricted, clamp to [0,1] and pair with negativeOneToOne for OpenGL clip.
 [[nodiscard]] ViewportDepthRange ResolveViewportDepth(float zscale, float zoffset, bool dx_clip_space, bool depth_range_unrestricted);
+
+[[nodiscard]] DepthClearActions ResolveDepthClearActions(bool register_depth_clear, bool htile_meta_clear);
 
 } // namespace Kyty::Libs::Graphics::State
 
