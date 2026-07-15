@@ -58,6 +58,8 @@ public:
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
 
+class CommandProcessor;
+
 Label* LabelCreate64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelGpuObject::callback_t callback_1,
                      LabelGpuObject::callback_t callback_2, const uint64_t* args);
 Label* LabelCreate32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value, LabelGpuObject::callback_t callback_1,
@@ -65,6 +67,16 @@ Label* LabelCreate32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value
 void   LabelDelete(Label* label);
 void   LabelSet(CommandBuffer* buffer, Label* label);
 void   LabelDrainCompleted();
+// After CommandProcessor::BufferFlush waits on submitted fences, force-complete
+// Active labels for that CP. MoltenVK/host often never observes vkCmdSetEvent via
+// vkGetEventStatus; relying only on event polling skips WriteBack and leaves
+// WaitRegMem spinning or returning before GPU→CPU memory is coherent.
+void LabelCompleteSubmitted(CommandProcessor* cp);
+// StorageBuffer GPU→CPU write-back must not clobber live EOP fence words: copy
+// with holes for every Label dst still registered (preserves immediate publish,
+// completed stores, and guest resets). Blind memcpy zeroed fences (WaitRegMem64
+// val=0) or planted float bit patterns into pointer fields (AV at 0x3f800028).
+void LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size);
 
 } // namespace Kyty::Libs::Graphics
 

@@ -1132,6 +1132,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// VertexBuffers (reclaim). Captured after dmask 0xb load path:
 			// SB/RT Contains or IsContainedWithin/Crosses + VB IsContainedWithin +
 			// VB Crosses → create_all_the_same rejects mixed relations/types.
+			// Also captured: Texture Contains + IndexBuffer Crosses (link IB).
 			Vector<int> vertex_reclaim_vertex_ids;
 			bool multi_vertex_mixed = (info.type == GpuMemoryObjectType::VertexBuffer && !others.IsEmpty());
 			if (multi_vertex_mixed)
@@ -1150,7 +1151,41 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					{
 						continue;
 					}
+					if (GpuMemoryAllowsVertexLinkIndexBuffer(o.object.type, obj.relation, info.type))
+					{
+						continue;
+					}
 					multi_vertex_mixed = false;
+					break;
+				}
+			}
+
+			// Multi-parent IndexBuffer: peer IB reclaim + VB/surface link.
+			// Captured: IndexBuffer IsContainedWithin (0xe4) + VertexBuffer
+			// Contains (0x100) a new IndexBuffer 0xfc at the same base.
+			Vector<int> index_reclaim_index_ids;
+			bool multi_index_mixed = (info.type == GpuMemoryObjectType::IndexBuffer && !others.IsEmpty());
+			if (multi_index_mixed)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& h = heap.objects[obj.object_id];
+					EXIT_IF(h.free);
+					const auto& o = h.info;
+					if (GpuMemoryAllowsIndexReclaimIndex(o.object.type, obj.relation, info.type))
+					{
+						index_reclaim_index_ids.Add(obj.object_id);
+						continue;
+					}
+					if (GpuMemoryAllowsIndexContainedInSurface(o.object.type, obj.relation, info.type))
+					{
+						continue;
+					}
+					if (GpuMemoryAllowsIndexLinkVertexBuffer(o.object.type, obj.relation, info.type))
+					{
+						continue;
+					}
+					multi_index_mixed = false;
 					break;
 				}
 			}
@@ -1330,6 +1365,38 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					}
 					// Reuse texture_reclaim_vertex_ids free path after create.
 					texture_reclaim_vertex_ids = vertex_reclaim_vertex_ids;
+					others                     = keep;
+					overlap                    = true;
+				}
+			} else if (multi_index_mixed)
+			{
+				// Drop reclaimed peer IBs; keep VB/surface parents linked.
+				if (index_reclaim_index_ids.Size() == others.Size())
+				{
+					delete_all = true;
+				} else if (index_reclaim_index_ids.IsEmpty())
+				{
+					overlap = true;
+				} else
+				{
+					Vector<OverlappedBlock> keep;
+					for (const auto& obj: others)
+					{
+						bool reclaim = false;
+						for (int id: index_reclaim_index_ids)
+						{
+							if (id == obj.object_id)
+							{
+								reclaim = true;
+								break;
+							}
+						}
+						if (!reclaim)
+						{
+							keep.Add(obj);
+						}
+					}
+					texture_reclaim_vertex_ids = index_reclaim_index_ids;
 					others                     = keep;
 					overlap                    = true;
 				}

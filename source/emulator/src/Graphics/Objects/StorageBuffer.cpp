@@ -6,6 +6,7 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
+#include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
 
@@ -113,7 +114,7 @@ static void write_back(GraphicContext* ctx, const uint64_t* /*params*/, void* ob
 	KYTY_PROFILER_END_BLOCK;
 
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::memcpy");
-	memcpy(reinterpret_cast<void*>(*vaddr), data, *size);
+	LabelWriteBackCopy(reinterpret_cast<void*>(*vaddr), data, *size);
 	if (vk_obj->depth_meta_addr != 0 && DepthMetaIsClearPattern(data, *size))
 	{
 		DepthMetaMarkClear(vk_obj->depth_meta_addr);

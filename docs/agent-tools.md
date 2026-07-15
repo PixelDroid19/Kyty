@@ -43,7 +43,7 @@ Stdout is one JSON object per call. Exit `0` on success, `1` on tool failure or
 | `status` / `diagnostics` | Frame/present/FPS, `ms_since_present`/`ms_since_frame`, pad overlay, diagnostic flags |
 | `events` / `last_error` / `wait_event` | Bounded structured event ring |
 | `capture` | Native VideoOut readback on next present; scores the BMP by default (`score:false` / `--no-score` to skip) |
-| `score` | Classify last capture (or `--path ABS.bmp`) for white-world / hot corruption / entropy collapse |
+| `score` | Classify last capture (or `--path ABS.bmp`) with coarse frame heuristics |
 | `pad_down` / `pad_up` / `pad_tap` / `pad_axis` / `pad_clear` | Diagnostic pad overlay. `pad_tap` schedules release→press→release across **three** `PadReadState` samples (not host sleep). |
 | `wait_present` / `wait_frame` | Host-side waits with timeout |
 | `watch` | Sample progress for N ms; classify `present_stalled` / `frame_stalled` / `low_fps`; optional native capture + frame `score` + `last_error` |
@@ -67,15 +67,16 @@ Exit `1` with `"healthy":false` means a stall was classified. Important fields:
 - `stall_code`: `present_stalled` | `frame_stalled` | `low_fps` | `not_ready`
 - `frame_delta` / `present_delta` / end `fps` / `ms_since_*`
 - `capture`: VideoOut BMP of the stuck screen (needs `KYTY_NATIVE_CAPTURE_DIR`)
-- `score`: frame metrics when a capture succeeded (`hot_corruption`, `white_world`, …)
+- `score`: frame metrics when a capture succeeded (heuristic labels only; see below)
 - `last_error`: last structured agent/runtime error, if any
 
 `watch` answers “is it stuck and what does the screen show?”. For “which HLE/GPU
 progress lane died?”, also launch under `kyty_devtools` (passive stall bundles).
 
-### Detecting graphics corruption (yellow/red slabs, bloom blowout, white world)
+### Frame capture scores (diagnostic only)
 
-UI can still look correct while the world is wrong. Use native capture scoring:
+UI can still look correct while textures or alpha are wrong, and the reverse.
+Use native capture scoring as a coarse gate, not as a list of known title bugs:
 
 ```bash
 kyty_agent capture                 # BMP + score JSON; exit 1 if unhealthy
@@ -83,30 +84,28 @@ kyty_agent score                   # re-score last capture
 kyty_agent score --path /abs/x.bmp # score an existing native BMP
 ```
 
-Verdicts (priority order):
+Score verdicts (`hot_corruption`, `white_world`, `stripey`, `low_entropy`,
+`healthy`) are **heuristic labels**. They must not be treated as standing orders
+to “fix yellow/red slabs” or “fix white world.”
 
-| Verdict | Signal | Agent hint direction |
-|---------|--------|----------------------|
-| `hot_corruption` | yellow/red slabs or near-max luminance blowout | lighting / RT sampling / format |
-| `white_world` | large near-white world crop | RT layout / WriteBack / clear |
-| `stripey` | strong horizontal stripe pattern | tiling / pitch |
-| `low_entropy` | collapsed color diversity | textures / clears |
-| `healthy` | metrics in diagnostic gameplay band | continue |
+- Localized warm window light, god-rays, and bloom are often intentional art;
+  do not rewrite lighting because a metric flagged saturated pixels.
+- Prefer a known-good reference of the same scene. Investigate missing or
+  crushed textures, opaque black quads where alpha should reveal the scene,
+  clears, sampling, blend, and layout before chasing color wash narratives.
+- A `healthy` score does not prove correct rendering; an unhealthy score is a
+  signal to form one falsifiable hypothesis from the BMP, not a license to
+  invent guest state.
 
 Metrics exposed: `white_ratio`, `saturated_ratio`, `blowout_ratio`,
 `hot_block_ratio`, `sparkle_ratio`, `entropy`, `color_bins`, `stripey`.
 
-This is a **diagnostic gate**, not gameplay acceptance. A `healthy` score does not
-prove correct rendering; an unhealthy score is evidence to investigate the first
-bad producer (GpuMemory / shader / format), not a license to invent guest state.
+Example agent loop when presents advance but the frame looks wrong:
 
-Example agent loop for a cutscene with “(HOLD) Skip” and broken world:
-
-1. `status` — confirm presents advance (UI alive).
-2. `capture` — if `score.verdict` is `hot_corruption` / `white_world`, stop input sweeps.
-3. Record path + metrics under an untracked scratch dir; form one hypothesis
-   (e.g. RT discard after WriteBack, format-71 sample, bloom clamp).
-4. Do **not** treat Circle-hold skip as proof the frame is correct.
+1. `status` — confirm presents advance.
+2. `capture` — record path + metrics under an untracked scratch dir.
+3. Compare to a known-good reference when available; form one hypothesis.
+4. Do **not** treat automated input or a score label alone as acceptance.
 
 ## Privacy and safety
 
