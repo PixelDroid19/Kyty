@@ -206,6 +206,10 @@ TEST(DevToolsProtocol, ProgressPublicationRoundTrips)
 	pub.writer_loss.aggregate_ring.total = 4;
 
 	ASSERT_EQ(PublishProgress(mut, pub), ProtocolResult::Ok);
+	uint64_t publication_heartbeat = 0;
+	std::memcpy(&publication_heartbeat, map.data() + kProtocolPublicationHeartbeatOffset,
+	            sizeof(publication_heartbeat));
+	EXPECT_NE(publication_heartbeat, 0u);
 
 	ProgressPublication out {};
 	ProtocolReadLossState loss {};

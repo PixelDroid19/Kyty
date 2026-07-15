@@ -19,6 +19,7 @@ inline constexpr uint32_t kProtocolWordSize     = 8u;
 // Magic "KYTYDVT1" as little-endian u64 of those ASCII bytes.
 inline constexpr uint64_t kProtocolMagic = 0x315456445954594Bull; // 'K''Y''T''Y''D''V''T''1' LE
 inline constexpr uint64_t kProtocolHandshakeStateOffset = 0x100ull;
+inline constexpr uint64_t kProtocolPublicationHeartbeatOffset = 0x140ull;
 
 inline constexpr uint32_t kProgressSchemaId = 0x31475250u; // 'PRG1'
 inline constexpr uint32_t kTimelineSchemaId = 0x314e4c54u; // 'TLN1'
