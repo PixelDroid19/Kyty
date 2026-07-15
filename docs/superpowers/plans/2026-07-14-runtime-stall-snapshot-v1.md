@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Execute only after `docs/superpowers/plans/2026-07-14-curated-gen5-integration.md` reaches its history and strict/visual gates.
-- Freeze the exact accepted curated commit before execution. `/home/monasterios/Documents/PS5/Kyty-gen5-curated` is read-only evidence while this plan runs; all diagnostic implementation occurs in `/home/monasterios/Documents/PS5/Kyty-devtools`.
+- Freeze the exact accepted curated commit before execution. `$KYTY_CURATED_ROOT` is read-only evidence while this plan runs; all diagnostic implementation occurs in `$KYTY_DEVTOOLS_ROOT`.
 - Treat `docs/superpowers/specs/2026-07-14-native-runtime-diagnostics-design.md` as the accepted protocol authority; changing its ABI or behavior requires a reviewed spec amendment first.
 - Hot-path recording performs no allocation, formatting, file I/O, emulator-owned locking, scheduler pumping, recovery, signaling, or waiting.
 - Automatic artifacts are allowlist-only and contain no arbitrary argv/environment/log text, private paths, workload identifiers, guest-provided names, stable shader/pipeline hashes, binaries, textures, screenshots, or full guest memory.
@@ -27,15 +27,15 @@
 - General code changes use rebuild plus controlled restart/replay; overlay and live shader generation require separate specifications.
 - One contract per short commit; no `Co-authored-by` trailer.
 - Before every emulator-provider commit, run the complete host build, confirm the task's exact test suite appears in `--gtest_list_tests`, run that suite, run a lightweight enabled/disabled benchmark, run the same bounded strict scenario directly and through the supervisor, and run `git diff --check`. A zero-test match or earlier strict frontier blocks the commit.
-- Execute binaries from `/home/monasterios/Documents/PS5/Kyty-devtools`, route emulator artifacts to `/home/monasterios/Documents/PS5/Kyty-devtools-scratch`, and require `--output-dir` for every supervisor bundle. The primary and curated source worktrees remain byte-for-byte untouched.
+- Execute binaries from `$KYTY_DEVTOOLS_ROOT`, route emulator artifacts to `$KYTY_DEVTOOLS_SCRATCH`, and require `--output-dir` for every supervisor bundle. The primary and curated source worktrees remain byte-for-byte untouched.
 
 ---
 
 ### Task 0: Fork a dedicated DevTools worktree from the frozen curated frontier
 
 **Files:**
-- Read-only source: `/home/monasterios/Documents/PS5/Kyty-gen5-curated`
-- Create through worktree skill: `/home/monasterios/Documents/PS5/Kyty-devtools/`
+- Read-only source: `$KYTY_CURATED_ROOT`
+- Create through worktree skill: `$KYTY_DEVTOOLS_ROOT/`
 
 **Interfaces:**
 - Consumes: one clean, fully gated `codex/gen5-curated-integration` commit recorded in the required untracked frontier report.
@@ -45,10 +45,10 @@
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-primary=/home/monasterios/Documents/PS5/Kyty
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+primary=$KYTY_SOURCE_ROOT
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/baseline"
 test "$(git -C "$curated" branch --show-current)" = codex/gen5-curated-integration
 curated_status=$(git -C "$curated" status --short)
@@ -69,13 +69,13 @@ Expected: a clean accepted tip. Record `curated_tip` in the untracked execution 
 
 - [ ] **Step 2: Create the isolated worktree through the required skill**
 
-Invoke `superpowers:using-git-worktrees` with the exact recorded `curated_tip`, branch `codex/runtime-stall-snapshot-v1`, and destination `/home/monasterios/Documents/PS5/Kyty-devtools`. Do not reuse the curated worktree or its build directory.
+Invoke `superpowers:using-git-worktrees` with the exact recorded `curated_tip`, branch `codex/runtime-stall-snapshot-v1`, and destination `$KYTY_DEVTOOLS_ROOT`. Do not reuse the curated worktree or its build directory.
 
 - [ ] **Step 3: Prove the DevTools baseline**
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 test "$(git -C "$devtools" branch --show-current)" = codex/runtime-stall-snapshot-v1
 devtools_status=$(git -C "$devtools" status --short)
@@ -180,9 +180,9 @@ an incorrectly set or cleared bit.
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/red"
 red_log="$scratch/red/event-schema.log"
 set +e
@@ -275,7 +275,7 @@ static_assert(std::is_trivially_copyable_v<EventRecord>);
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$devtools/_build_linux_devtools"
@@ -291,7 +291,7 @@ Expected: PASS.
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 git -C "$devtools" add source/lib/CMakeLists.txt source/lib/DevTools source/unit_test/CMakeLists.txt source/unit_test/src/devtools/UnitTestDevToolsEventRing.cpp source/unit_test/src/UnitTest.cpp
 git -C "$devtools" commit -m 'feat(devtools): define telemetry event schema'
@@ -372,9 +372,9 @@ Add exact tests headed by `ReservesActivatesAndDrainsWriter`. Creator reserves b
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/red"
 red_log="$scratch/red/event-ring.log"
 ninja -C "$devtools/_build_linux_devtools" fc_script >"$red_log" 2>&1
@@ -397,7 +397,7 @@ Creator: `Reserve` claims only `Free`, increments generation, initializes role a
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 ninja -C "$devtools/_build_linux_devtools"
 listed_tests=$("$devtools/_build_linux_devtools/fc_script" '{kyty_run_tests()}' --gtest_list_tests)
@@ -542,9 +542,9 @@ bits, unknown states, and every noncanonical combination are rejected.
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/red"
 red_log="$scratch/red/progress.log"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release >"$red_log" 2>&1
@@ -570,7 +570,7 @@ Use the accepted capacities: guest 256, HLE 512, CP 80, renderer 32, GPU 32, Vid
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$devtools/_build_linux_devtools"
@@ -700,9 +700,9 @@ Add an exact `ClassifiesHleStallAfterVirtualThreshold` test, then cover `Healthy
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/red"
 red_log="$scratch/red/classifier.log"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release >"$red_log" 2>&1
@@ -758,7 +758,7 @@ Classification uses only explicit progress/loss/typed-wait-graph/heartbeat/proce
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 ninja -C "$devtools/_build_linux_devtools"
 listed_tests=$("$devtools/_build_linux_devtools/fc_script" '{kyty_run_tests()}' --gtest_list_tests)
@@ -935,9 +935,9 @@ vendor-binary size, and unknown states before the snapshot reaches a bundle.
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/red"
 red_log="$scratch/red/protocol.log"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release >"$red_log" 2>&1
@@ -965,7 +965,7 @@ Encode every field by offset; do not `reinterpret_cast` the mapping to a public 
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$devtools/_build_linux_devtools"
@@ -1001,9 +1001,9 @@ git -C "$devtools" commit -m 'feat(devtools): publish coherent stall snapshots'
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/red"
 red_log="$scratch/red/build-info.log"
 set +e
@@ -1043,9 +1043,9 @@ Replace `KytyGitVersion` references with `KytyBuildInfo`; make `fc_script`, `emu
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/build-info-test"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$devtools/_build_linux_devtools"
@@ -1188,9 +1188,9 @@ Add exact tests named `CreatesOwnerOnlyMapping`, `BootstrapMetadataRoundTripsExa
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/red"
 red_log="$scratch/red/supervisor-boundary.log"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release >"$red_log" 2>&1
@@ -1220,7 +1220,7 @@ Link the focused test with `target_link_libraries(unit_test kyty_devtools_superv
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$devtools/_build_linux_devtools"
@@ -1284,9 +1284,9 @@ Add exact tests named `WritesCompleteBundleAtomically`, `CompleteMarkerWireForma
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/red"
 red_log="$scratch/red/bundle.log"
 ninja -C "$devtools/_build_linux_devtools" fc_script >"$red_log" 2>&1
@@ -1314,7 +1314,7 @@ Before creating a new temporary directory, scan only the tool's own fixed naming
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 ninja -C "$devtools/_build_linux_devtools"
 listed_tests=$("$devtools/_build_linux_devtools/fc_script" '{kyty_run_tests()}' --gtest_list_tests)
@@ -1414,9 +1414,9 @@ Use a fake clock/process launcher for 250 ms samples, 5 s suspicion, and 15 s co
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/red"
 red_log="$scratch/red/lifecycle.log"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release >"$red_log" 2>&1
@@ -1446,9 +1446,9 @@ Document the exact `run`, `measure`, `validate-metrics`, `compare-metrics`, `che
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 bundle_dir="$scratch/Bundles"
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines" "$bundle_dir"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
@@ -1498,7 +1498,7 @@ Stress producer/consumer full/drop/reuse/close, registration exhaustion, invalid
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release -DKYTY_DEVTOOLS_BUILD_TSAN_STRESS=ON
 ninja -C "$devtools/_build_linux_devtools"
@@ -1595,9 +1595,9 @@ Add exact tests named `ValidTransportPublishesAndShutsDown`, `MetricsOnlyPublish
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/red"
 red_log="$scratch/red/runtime-adapter.log"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release >"$red_log" 2>&1
@@ -1648,9 +1648,9 @@ Use `target_sources(emulator PRIVATE ...)`, link `kyty_devtools_core` with the e
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 bundle_dir="$scratch/Bundles"
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines" "$bundle_dir"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
@@ -1750,7 +1750,7 @@ Add `UT_LINK(DevToolsKernelProvider)` and explicitly add `UnitTestDevToolsKernel
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$devtools/_build_linux_devtools"
@@ -1776,9 +1776,9 @@ Replace the compile-only provider behavior with the minimum lifecycle implementa
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 bundle_dir="$scratch/Bundles"
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines" "$bundle_dir"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
@@ -1890,7 +1890,7 @@ Extend `Providers.h` with the exact interfaces above, reusing the core `HleCallK
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$devtools/_build_linux_devtools"
@@ -1920,9 +1920,9 @@ Instrument `KernelWaitEventFlag`/`KernelSetEventFlag`, `KernelWaitSema`/`KernelS
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 bundle_dir="$scratch/Bundles"
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines" "$bundle_dir"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
@@ -2072,7 +2072,7 @@ the opcode; submit progress uses the command size and zero auxiliary 1.
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$devtools/_build_linux_devtools"
@@ -2096,9 +2096,9 @@ The owning `GraphicsRing` reserves tokens for its batch, draw, and constant work
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 bundle_dir="$scratch/Bundles"
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines" "$bundle_dir"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
@@ -2129,9 +2129,9 @@ The curated base carries Vulkan C header version 176, which predates `VK_EXT_dev
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 mkdir -p "$scratch/red" "$scratch/Bundles"
 main_header="$devtools/source/3rdparty/vulkan/include/vulkan/vulkan_core.h"
 sdl_header="$devtools/source/3rdparty/sdl2/sdl2/src/video/khronos/vulkan/vulkan_core.h"
@@ -2204,7 +2204,7 @@ not a test-only helper, and validates every resulting snapshot with
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 ninja -C "$devtools/_build_linux_devtools"
 listed_tests=$("$devtools/_build_linux_devtools/fc_script" '{kyty_run_tests()}' --gtest_list_tests)
@@ -2241,9 +2241,9 @@ numeric literal.
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 bundle_dir="$scratch/Bundles"
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines" "$bundle_dir"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
@@ -2324,7 +2324,7 @@ Declare the narrow VideoOut-provider API in `Providers.h` and add compile-only n
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$devtools/_build_linux_devtools"
@@ -2352,9 +2352,9 @@ Store the presentation writer/progress tokens, incrementing swapchain generation
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 bundle_dir="$scratch/Bundles"
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines" "$bundle_dir"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
@@ -2396,7 +2396,7 @@ Add a Linux job that performs a full Release build, lists/runs `DevTools*.*`, ru
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release -DKYTY_DEVTOOLS_BUILD_TSAN_STRESS=ON
 ninja -C "$devtools/_build_linux_devtools"
@@ -2427,7 +2427,7 @@ Expected: local Linux gates are green. macOS runtime and Windows runtime remain 
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 cmake -S "$devtools/source" -B "$devtools/_build_linux_devtools" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$devtools/_build_linux_devtools"
@@ -2448,9 +2448,9 @@ Verify blocked lane with live publisher, whole publication stop while process st
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 bundle_dir="$scratch/SyntheticBundles"
 mkdir -p "$bundle_dir"
 for mode in blocked-lane publication-stop parent-disconnect normal-exit crash; do
@@ -2466,9 +2466,9 @@ Launch a synthetic worker with canary values in argv, environment, fake log, pat
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 canary_dir="$scratch/CanaryBundles"
 canary='KYTY_PRIVACY_CANARY_7f1e2a90'
 mkdir -p "$canary_dir"
@@ -2488,9 +2488,9 @@ Run the fixed synthetic enabled/disabled benchmark after warmup. Then reproduce 
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 bundle_dir="$scratch/Bundles"
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines" "$bundle_dir"
 metrics_root=$(mktemp -d "$scratch/MetricsAcceptance.XXXXXX")
@@ -2535,11 +2535,11 @@ Use the supervisor bundle to identify the earliest observable producer/consumer 
 
 - [ ] **Step 7: Write and validate the sanitized acceptance report**
 
-Using `apply_patch`, create `/home/monasterios/Documents/PS5/Kyty-devtools-scratch/acceptance-report.md` outside Git from the actual outputs. Give it these exact second-level headings: `Identity`, `Build and tests`, `Synthetic lifecycle`, `Privacy`, `Overhead`, `Strict equivalence`, `Visual frontier`, `Platform gates`, and `Remaining work`. Record the frozen curated base and DevTools commit, host/GPU capability summary, nonzero test count, outcome of every synthetic mode, recursive canary result, enabled/disabled median and p95 plus run-to-run variation, process CPU, all loss/capacity counters, exact resolution, Silent logging, shader-cache state, real press/release input sequence, four strict run results with frame/flip counts, Vulkan validation outcome, visual equivalence, and earliest observable divergence. Write `not verified` for any unavailable platform/runtime gate; never infer a pass. Do not include private fixture names, product IDs, absolute private paths, raw logs, captures, binaries, shaders, textures, or screenshots.
+Using `apply_patch`, create `$KYTY_DEVTOOLS_SCRATCH/acceptance-report.md` outside Git from the actual outputs. Give it these exact second-level headings: `Identity`, `Build and tests`, `Synthetic lifecycle`, `Privacy`, `Overhead`, `Strict equivalence`, `Visual frontier`, `Platform gates`, and `Remaining work`. Record the frozen curated base and DevTools commit, host/GPU capability summary, nonzero test count, outcome of every synthetic mode, recursive canary result, enabled/disabled median and p95 plus run-to-run variation, process CPU, all loss/capacity counters, exact resolution, Silent logging, shader-cache state, real press/release input sequence, four strict run results with frame/flip counts, Vulkan validation outcome, visual equivalence, and earliest observable divergence. Write `not verified` for any unavailable platform/runtime gate; never infer a pass. Do not include private fixture names, product IDs, absolute private paths, raw logs, captures, binaries, shaders, textures, or screenshots.
 
 ```bash
 set -euo pipefail
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+scratch=$KYTY_DEVTOOLS_SCRATCH
 report="$scratch/acceptance-report.md"
 test -s "$report"
 for heading in 'Identity' 'Build and tests' 'Synthetic lifecycle' 'Privacy' 'Overhead' 'Strict equivalence' 'Visual frontier' 'Platform gates' 'Remaining work'; do
@@ -2563,7 +2563,7 @@ Re-run every documented command in `docs/devtools/runtime-stall-snapshot.md` aga
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 test -s docs/devtools/runtime-stall-snapshot.md
 set +e
@@ -2583,11 +2583,11 @@ fi
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
-primary=/home/monasterios/Documents/PS5/Kyty
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
-scratch=/home/monasterios/Documents/PS5/Kyty-devtools-scratch
+primary=$KYTY_SOURCE_ROOT
+curated=$KYTY_CURATED_ROOT
+scratch=$KYTY_DEVTOOLS_SCRATCH
 test -n "${KYTY_GUEST_ROOT:-}"
 private_fixture_name=$(basename "$KYTY_GUEST_ROOT")
 git -C "$devtools" log --format=fuller --stat main..HEAD
@@ -2642,7 +2642,7 @@ Expected: no prohibited trailer/flag dependency; only explicitly reviewed tracke
 
 ```bash
 set -euo pipefail
-devtools=/home/monasterios/Documents/PS5/Kyty-devtools
+devtools=$KYTY_DEVTOOLS_ROOT
 cd "$devtools"
 git -C "$devtools" push -u origin codex/runtime-stall-snapshot-v1
 ```

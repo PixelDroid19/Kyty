@@ -186,7 +186,7 @@ static KYTY_SYSV_ABI char*  c_strchr(const char* s, int c) { return const_cast<c
 }
 [[maybe_unused]] static KYTY_SYSV_ABI size_t c_strnlen(const char* s, size_t n) { return ::strnlen(s, n); }
 static KYTY_SYSV_ABI void c_srand(unsigned int seed) { ::srand(seed); }
-// Gen5 libc_v1 rand (Nmtr628eA3A): first Unpatched after Global Heap create on Astro.
+// Gen5 libc_v1 rand (Nmtr628eA3A): first Unpatched after Global Heap create.
 static KYTY_SYSV_ABI int c_rand() { return ::rand(); }
 // Gen5 libc_v1 strtok (oVkZ8W8-Q8A): host uses strtok_r with a per-thread save pointer.
 static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
@@ -614,8 +614,8 @@ void* KYTY_SYSV_ABI LibcMspaceMalloc(void* msp, size_t size)
 	printf("\t size = %016" PRIx64 "\n", size);
 
 	// Guest libc returns nullptr on failure (OOM / null mspace); do not EXIT —
-	// callers are expected to check the return. Strict abort here blocked Astro
-	// Bot before any presentation window after an early null msp malloc(0x28).
+	// callers are expected to check the return. Strict abort here blocked the
+	// runtime before any presentation window after an early null msp malloc(0x28).
 	if (msp == nullptr)
 	{
 		printf("\t buf  = 0000000000000000 (null mspace)\n");
