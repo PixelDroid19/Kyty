@@ -53,6 +53,13 @@ TEST(DevToolsLifecycle, NormalExitFinalizesOnce)
 	EXPECT_EQ(r.outcome, SupervisorOutcome::LaunchError);
 }
 
+TEST(DevToolsLifecycle, SelfTestNormalExitRunsOnCurrentHost)
+{
+	const std::string dir = MakeScratchDir();
+	ASSERT_FALSE(dir.empty());
+	EXPECT_EQ(RunSelfTest("normal-exit", dir.c_str(), 20, 50, 500), 0);
+}
+
 TEST(DevToolsLifecycle, SelfTestNormalExitViaDevToolsBinary)
 {
 	// Locate sibling kyty_devtools next to a known build layout if present.
