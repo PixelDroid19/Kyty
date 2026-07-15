@@ -15,6 +15,16 @@ SystemInfo GetSystemInfo();
 
 namespace VirtualMemory {
 
+struct SignalDiagnosticsConfig
+{
+	bool skip_ud2 = false;
+	bool fault_log = false;
+};
+
+// Environment diagnostics are enabled by variable presence, including an
+// empty value. Callers load the environment outside signal handlers.
+SignalDiagnosticsConfig MakeSignalDiagnosticsConfig(const char* skip_ud2, const char* fault_log) noexcept;
+
 class ExceptionHandlerPrivate;
 
 class ExceptionHandler
