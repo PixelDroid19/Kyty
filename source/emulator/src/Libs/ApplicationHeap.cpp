@@ -85,7 +85,7 @@ static bool try_invoke_create(ApiV2* table, uint64_t text_begin, uint64_t text_e
 }
 
 // Fallback when the guest never calls KernelRtldSetApplicationHeapAPI before
-// early malloc (observed on Astro Bot: GetGPI then null-mspace assert). Scan
+// early malloc (observed on a Gen5 startup path: GetGPI then null-mspace assert). Scan
 // readable PT_LOAD for a fully validated v2 table; create is guest code.
 static bool scan_segment_for_table(uint64_t segment_addr, uint64_t segment_size, uint64_t text_begin, uint64_t text_end)
 {

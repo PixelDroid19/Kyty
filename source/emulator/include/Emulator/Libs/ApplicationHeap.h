@@ -40,7 +40,7 @@ void RegisterApi(void* api);
 // Invoke create on the registered v2 table, or (fallback) locate a fully
 // validated table in main-image readable PT_LOAD and invoke its create slot.
 // Required when the guest never calls KernelRtldSetApplicationHeapAPI before
-// the first application-heap malloc (captured Astro Bot path).
+// the first application-heap malloc (captured Gen5 startup path).
 void EnsureInitialized(Loader::Program* program);
 
 [[nodiscard]] bool IsInitialized();
