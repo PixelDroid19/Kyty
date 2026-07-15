@@ -43,8 +43,13 @@ public:
 		Graphics::GpuMemoryMode gpu_mode;
 	};
 
-	PhysicalMemory() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
-	virtual ~PhysicalMemory() { KYTY_NOT_IMPLEMENTED; }
+	PhysicalMemory()
+	{
+		EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+		m_backing = VirtualMemory::CreateSharedBacking(Size());
+		EXIT_NOT_IMPLEMENTED(m_backing == nullptr);
+	}
+	virtual ~PhysicalMemory() { VirtualMemory::DestroySharedBacking(m_backing); }
 
 	KYTY_CLASS_NO_COPY(PhysicalMemory);
 
@@ -52,7 +57,8 @@ public:
 
 	bool Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out, int memory_type);
 	bool Release(uint64_t start, size_t len);
-	bool Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode);
+	uint64_t Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode,
+	             uint64_t alignment, bool fixed, bool* physical_range_valid);
 	bool Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
 	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode);
 	bool Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
@@ -63,9 +69,11 @@ public:
 private:
 	// Gen5 releases the physical reservation independently from its virtual mapping.
 	// KernelMunmap owns the mapping and host/GPU cleanup lifecycle.
-	Vector<AllocatedBlock> m_allocated;
-	Vector<MappedBlock>    m_mapped;
-	Core::Mutex            m_mutex;
+	// SharedBacking maps keep re-used physical ranges byte-coherent across aliases.
+	Vector<AllocatedBlock>        m_allocated;
+	Vector<MappedBlock>           m_mapped;
+	Core::Mutex                   m_mutex;
+	VirtualMemory::SharedBacking* m_backing = nullptr;
 };
 
 class FlexibleMemory
@@ -108,10 +116,10 @@ static callback_func_t g_free_callback   = nullptr;
 
 KYTY_SUBSYSTEM_INIT(Memory)
 {
+	VirtualMemory::Init();
+
 	g_physical_memory = new PhysicalMemory;
 	g_flexible_memory = new FlexibleMemory;
-
-	VirtualMemory::Init();
 }
 
 KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Memory) {}
@@ -211,14 +219,17 @@ bool PhysicalMemory::Release(uint64_t start, size_t len)
 	return false;
 }
 
-bool PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode,
-                         Graphics::GpuMemoryMode gpu_mode)
+uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode,
+                             Graphics::GpuMemoryMode gpu_mode, uint64_t alignment, bool fixed, bool* physical_range_valid)
 {
+	EXIT_IF(physical_range_valid == nullptr);
+	*physical_range_valid = false;
+
 	Core::LockGuard lock(m_mutex);
 
-	if (len == 0)
+	if (len == 0 || alignment == 0)
 	{
-		return false;
+		return 0;
 	}
 
 	const uint64_t map_size  = len;
@@ -230,27 +241,37 @@ bool PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int pro
 	                                       });
 	if (!allocated)
 	{
-		return false;
+		return 0;
+	}
+	*physical_range_valid = true;
+
+	uint64_t map_vaddr = 0;
+	if (fixed)
+	{
+		if ((vaddr & (alignment - 1)) == 0 && VirtualMemory::MapSharedFixed(m_backing, vaddr, phys_addr, map_size, mode))
+		{
+			map_vaddr = vaddr;
+		}
+	} else
+	{
+		map_vaddr = VirtualMemory::MapSharedAligned(m_backing, vaddr, phys_addr, map_size, mode, alignment);
 	}
 
-	for (const auto& b: m_mapped)
+	if (map_vaddr == 0)
 	{
-		if (phys_addr < b.phys_addr + b.map_size && b.phys_addr < phys_addr + map_size)
-		{
-			return false;
-		}
+		return 0;
 	}
 
 	MappedBlock b {};
 	b.phys_addr = phys_addr;
-	b.map_vaddr = vaddr;
+	b.map_vaddr = map_vaddr;
 	b.map_size  = map_size;
 	b.prot      = prot;
 	b.mode      = mode;
 	b.gpu_mode  = gpu_mode;
 	m_mapped.Add(b);
 
-	return true;
+	return map_vaddr;
 }
 
 bool PhysicalMemory::Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode)
@@ -264,6 +285,10 @@ bool PhysicalMemory::Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMod
 	{
 		if (b.map_vaddr == vaddr && b.map_size == size)
 		{
+			if (!VirtualMemory::Free(vaddr))
+			{
+				return false;
+			}
 			*gpu_mode = b.gpu_mode;
 			m_mapped.RemoveAt(index);
 			return true;
@@ -376,6 +401,10 @@ bool FlexibleMemory::Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMod
 	{
 		if (b.map_vaddr == vaddr && b.map_size == size)
 		{
+			if (!VirtualMemory::Free(vaddr))
+			{
+				return false;
+			}
 			*gpu_mode = b.gpu_mode;
 
 			m_allocated.RemoveAt(index);
@@ -531,10 +560,7 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 
 	EXIT_NOT_IMPLEMENTED(!result);
 
-	if (vaddr != 0 || len != 0)
-	{
-		VirtualMemory::Free(vaddr);
-	}
+	// Physical and flexible Unmap own VirtualMemory::Free for their views.
 
 	if (gpu_mode != Graphics::GpuMemoryMode::NoAccess)
 	{
@@ -709,6 +735,18 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 	EXIT_IF(g_physical_memory == nullptr);
 
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
+	if (len == 0 || direct_memory_start < 0)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	if (alignment == 0)
+	{
+		alignment = VirtualMemory::GetPageSize();
+	}
+	if ((alignment & (alignment - 1)) != 0)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	// The fixed-address request is bit 0x10; accept any other flag bits rather than
 	// bailing (PS5 titles pass e.g. 0x11 = fixed + no-overwrite).
@@ -736,22 +774,18 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		default: EXIT("unknown prot: %d\n", prot);
 	}
 
-	auto     in_addr  = reinterpret_cast<uint64_t>(*addr);
-	uint64_t out_addr = 0;
+	auto in_addr = reinterpret_cast<uint64_t>(*addr);
 
 	if (fixed)
 	{
 		EXIT_NOT_IMPLEMENTED(in_addr == 0);
 		EXIT_NOT_IMPLEMENTED((in_addr & (alignment - 1)) != 0);
-
-		if (VirtualMemory::AllocFixed(in_addr, len, mode))
-		{
-			out_addr = in_addr;
-		}
-	} else
-	{
-		out_addr = VirtualMemory::AllocAligned(in_addr, len, mode, alignment);
 	}
+
+	bool     physical_range_valid = false;
+	uint64_t out_addr =
+	    g_physical_memory->Map(in_addr, static_cast<uint64_t>(direct_memory_start), len, prot, mode, gpu_mode, alignment, fixed,
+	                           &physical_range_valid);
 
 	*addr = reinterpret_cast<void*>(out_addr);
 
@@ -762,21 +796,16 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 	printf("\t align    = 0x%016" PRIx64 "\n", alignment);
 	printf("\t gpu_mode = %s\n", Core::EnumName(gpu_mode).C_Str());
 
-	EXIT_NOT_IMPLEMENTED(out_addr == 0);
+	if (!physical_range_valid)
+	{
+		EXIT("direct-memory range is not allocated: phys=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
+		     static_cast<uint64_t>(direct_memory_start), len);
+	}
 
 	if (out_addr == 0)
 	{
-		return KERNEL_ERROR_ENOMEM;
-	}
-
-	if (!g_physical_memory->Map(out_addr, direct_memory_start, len, prot, mode, gpu_mode))
-	{
 		printf(FG_RED "\t [Fail]\n" FG_DEFAULT);
-		VirtualMemory::Free(out_addr);
-
-		KYTY_NOT_IMPLEMENTED;
-
-		return KERNEL_ERROR_EBUSY;
+		return fixed ? KERNEL_ERROR_EBUSY : KERNEL_ERROR_ENOMEM;
 	}
 
 	if (gpu_mode != Graphics::GpuMemoryMode::NoAccess)

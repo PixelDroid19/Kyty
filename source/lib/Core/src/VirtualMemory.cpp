@@ -358,6 +358,8 @@ static void sigsafe_fault(const char* tag, uint64_t a, uint64_t b)
 // SIGSEGV/SIGBUS handler: translates the Mach fault into Kyty's ExceptionInfo and
 // dispatches to the installed handler. If the handler returns (e.g. a GPU memory
 // watchpoint unprotected the page), the faulting instruction is retried.
+// Guest soft-debug `int $0x41` is NOP'd at load time (LoaderPatchGuestSoftDebugInterrupts);
+// do not peek guest RIP here — LOAD code can be X-only and re-fault in the handler.
 static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 {
 	auto* uc = static_cast<ucontext_t*>(ucontext);
@@ -625,6 +627,11 @@ void Init()
 	sys_virtual_init();
 }
 
+uint64_t GetPageSize()
+{
+	return sys_virtual_get_page_size();
+}
+
 uint64_t Alloc(uint64_t address, uint64_t size, Mode mode)
 {
 	return sys_virtual_alloc(address, size, mode);
@@ -647,6 +654,65 @@ bool AllocFixed(uint64_t address, uint64_t size, Mode mode)
 	return sys_virtual_alloc_fixed(address, size, mode);
 }
 
+class SharedBacking
+{
+public:
+	void*    handle = nullptr;
+	uint64_t size   = 0;
+};
+
+SharedBacking* CreateSharedBacking(uint64_t size)
+{
+	if (size == 0)
+	{
+		return nullptr;
+	}
+
+	auto* backing  = new SharedBacking;
+	backing->handle = sys_virtual_create_shared_backing(size);
+	backing->size   = size;
+	if (backing->handle == nullptr)
+	{
+		delete backing;
+		return nullptr;
+	}
+	return backing;
+}
+
+void DestroySharedBacking(SharedBacking* backing)
+{
+	if (backing != nullptr)
+	{
+		sys_virtual_destroy_shared_backing(backing->handle);
+		delete backing;
+	}
+}
+
+static bool shared_range_is_valid(const SharedBacking* backing, uint64_t backing_offset, uint64_t size)
+{
+	return backing != nullptr && backing->handle != nullptr && size != 0 && backing_offset <= backing->size &&
+	       size <= backing->size - backing_offset;
+}
+
+uint64_t MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
+                          uint64_t alignment)
+{
+	if (!shared_range_is_valid(backing, backing_offset, size) || alignment == 0 || (alignment & (alignment - 1)) != 0)
+	{
+		return 0;
+	}
+	return sys_virtual_map_shared_aligned(backing->handle, address, backing_offset, size, mode, alignment);
+}
+
+bool MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode)
+{
+	if (address == 0 || !shared_range_is_valid(backing, backing_offset, size))
+	{
+		return false;
+	}
+	return sys_virtual_map_shared_fixed(backing->handle, address, backing_offset, size, mode);
+}
+
 bool Free(uint64_t address)
 {
 	return sys_virtual_free(address);
@@ -655,6 +721,11 @@ bool Free(uint64_t address)
 bool Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode)
 {
 	return sys_virtual_protect(address, size, mode, old_mode);
+}
+
+bool ProtectWriteSignalSafe(uint64_t address, uint64_t size)
+{
+	return sys_virtual_protect_write_signal_safe(address, size);
 }
 
 bool FlushInstructionCache(uint64_t address, uint64_t size)
