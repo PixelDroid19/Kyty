@@ -11,12 +11,17 @@ target_link_libraries(kyty_devtools_supervisor
 	Threads::Threads
 )
 
+target_sources(kyty_devtools_supervisor PRIVATE
+	src/BundleWriter.cpp
+)
+
 if (WIN32)
 	target_sources(kyty_devtools_supervisor PRIVATE
 		src/SharedMappingWindows.cpp
 		src/ProcessLauncherWindows.cpp
 		src/SecureRandomWindows.cpp
 		src/ProcessIdentityWindows.cpp
+		src/DurableFileWindows.cpp
 	)
 	target_link_libraries(kyty_devtools_supervisor bcrypt)
 else()
@@ -24,8 +29,8 @@ else()
 		src/SharedMappingPosix.cpp
 		src/ProcessLauncherPosix.cpp
 		src/SecureRandomPosix.cpp
+		src/DurableFilePosix.cpp
 	)
-	# Process identity for Linux is in ProcessLauncherPosix.cpp for now.
 endif()
 
 if (NOT MSVC)
