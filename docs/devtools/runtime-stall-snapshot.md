@@ -83,6 +83,10 @@ numeric/enumerated fields.
 
 The verified supervisor path in this repository is the POSIX implementation.
 The CMake file names Windows supervisor adapters, but those source files and
-the Windows orchestration path are not yet present; Windows runtime support is
-therefore unverified and must not be inferred from the portable protocol types
-or from a successful non-Windows build.
+the Windows orchestration path are not yet present. In addition, `Supervisor.cpp`
+currently owns POSIX-only `pipe`, fixed file-descriptor, `close`, and absolute
+POSIX-path assumptions; adding only the five missing adapter files would not
+make a Windows build or runtime path complete. No Windows toolchain is
+available in the current workspace, so Windows runtime support remains
+unverified and must not be inferred from the portable protocol types or from a
+successful non-Windows build.
