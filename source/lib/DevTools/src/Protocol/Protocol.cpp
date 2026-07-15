@@ -2,14 +2,18 @@
 
 #include "Kyty/DevTools/Diagnostics/Checksum.h"
 
-#include <atomic>
 #include <cstring>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace Kyty::DevTools {
 namespace {
 
-// Descriptor generation at end of header (owner-local double buffer index).
-// Wire: offset 0x0f0 active buffer selector (0/1), 0x0f8 generation.
 constexpr uint64_t kOffMagic        = 0x000;
 constexpr uint64_t kOffMajor        = 0x008;
 constexpr uint64_t kOffMinor        = 0x00a;
@@ -17,13 +21,23 @@ constexpr uint64_t kOffHeaderSize   = 0x00c;
 constexpr uint64_t kOffTotalSize    = 0x010;
 constexpr uint64_t kOffByteOrder    = 0x018;
 constexpr uint64_t kOffWordSize     = 0x01c;
-constexpr uint64_t kOffParentPid    = 0x020;
-constexpr uint64_t kOffParentToken  = 0x028;
-constexpr uint64_t kOffNonce        = 0x030;
+constexpr uint64_t kOffNonce        = 0x020;
+constexpr uint64_t kOffParentPid    = 0x030;
+constexpr uint64_t kOffWorkerPid    = 0x038;
+constexpr uint64_t kOffWorkerToken  = 0x040;
+constexpr uint64_t kOffRevision     = 0x080;
+constexpr uint64_t kOffDirty        = 0x0a8;
+constexpr uint64_t kOffCapabilities = 0x0b0;
+constexpr uint64_t kOffLogging      = 0x0c0;
+constexpr uint64_t kOffShaderCache  = 0x0c4;
+constexpr uint64_t kOffValidation   = 0x0c8;
+constexpr uint64_t kOffWidth        = 0x0cc;
+constexpr uint64_t kOffHeight       = 0x0d0;
 constexpr uint64_t kOffReqMode      = 0x0d4;
 constexpr uint64_t kOffAcceptedMode = 0x0d8;
-constexpr uint64_t kOffActiveBuf    = 0x0f0;
-constexpr uint64_t kOffGeneration   = 0x0f8;
+constexpr uint64_t kOffHandshakeState = 0x100;
+constexpr uint64_t kOffProgressActive = 0x180;
+constexpr uint64_t kOffTimelineActive = 0x240;
 
 void WriteU16(uint8_t* base, uint64_t off, uint16_t v) noexcept
 {
@@ -54,6 +68,60 @@ uint64_t ReadU64(const uint8_t* base, uint64_t off) noexcept
 	uint64_t v = 0;
 	std::memcpy(&v, base + off, sizeof(v));
 	return v;
+}
+
+void AtomicStoreU32(uint8_t* base, uint64_t off, uint32_t value) noexcept
+{
+#if defined(_WIN32)
+	(void)::InterlockedExchange(reinterpret_cast<volatile LONG*>(base + off), static_cast<LONG>(value));
+#else
+	__atomic_store_n(reinterpret_cast<uint32_t*>(base + off), value, __ATOMIC_RELEASE);
+#endif
+}
+
+uint32_t AtomicLoadU32(const uint8_t* base, uint64_t off) noexcept
+{
+#if defined(_WIN32)
+	return static_cast<uint32_t>(::InterlockedCompareExchange(
+		reinterpret_cast<volatile LONG*>(const_cast<uint8_t*>(base + off)), 0, 0));
+#else
+	return __atomic_load_n(reinterpret_cast<const uint32_t*>(base + off), __ATOMIC_ACQUIRE);
+#endif
+}
+
+void AtomicStoreU64(uint8_t* base, uint64_t off, uint64_t value) noexcept
+{
+#if defined(_WIN32)
+	(void)::InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(base + off), static_cast<LONGLONG>(value));
+#else
+	__atomic_store_n(reinterpret_cast<uint64_t*>(base + off), value, __ATOMIC_RELEASE);
+#endif
+}
+
+uint64_t AtomicLoadU64(const uint8_t* base, uint64_t off) noexcept
+{
+#if defined(_WIN32)
+	return static_cast<uint64_t>(::InterlockedCompareExchange64(
+		reinterpret_cast<volatile LONGLONG*>(const_cast<uint8_t*>(base + off)), 0, 0));
+#else
+	return __atomic_load_n(reinterpret_cast<const uint64_t*>(base + off), __ATOMIC_ACQUIRE);
+#endif
+}
+
+[[nodiscard]] HandshakeState LoadHandshakeState(const uint8_t* data) noexcept
+{
+	return static_cast<HandshakeState>(AtomicLoadU32(data, kOffHandshakeState));
+}
+
+void WriteSectionDescriptor(uint8_t* data, uint64_t off, uint32_t schema, uint64_t first_offset, uint64_t second_offset,
+                            uint64_t size, uint32_t capacity) noexcept
+{
+	WriteU32(data, off + 0x00, schema);
+	WriteU32(data, off + 0x04, 0);
+	WriteU64(data, off + 0x08, first_offset);
+	WriteU64(data, off + 0x10, second_offset);
+	WriteU64(data, off + 0x18, size);
+	WriteU32(data, off + 0x1c, capacity);
 }
 
 [[nodiscard]] bool MappingOk(const uint8_t* data, uint64_t size) noexcept
@@ -169,12 +237,16 @@ ProtocolResult InitializeProtocolOwner(MutableMappingView mapping, const ParentP
 	WriteU64(mapping.data, kOffTotalSize, kProtocolMappingSize);
 	WriteU32(mapping.data, kOffByteOrder, kProtocolByteOrderTag);
 	WriteU32(mapping.data, kOffWordSize, kProtocolWordSize);
-	WriteU64(mapping.data, kOffParentPid, init.supervisor_pid);
-	WriteU64(mapping.data, kOffParentToken, init.supervisor_start_token);
 	std::memcpy(mapping.data + kOffNonce, init.nonce, 16);
+	WriteU64(mapping.data, kOffParentPid, init.supervisor_pid);
 	WriteU32(mapping.data, kOffReqMode, static_cast<uint32_t>(init.requested_mode));
-	WriteU32(mapping.data, kOffActiveBuf, 0);
-	WriteU64(mapping.data, kOffGeneration, 0);
+	WriteSectionDescriptor(mapping.data, 0x600, kProgressSchemaId, kProgressBufferAOffset, kProgressBufferBOffset,
+	                       kProgressBufferSize, MaxProgressSnapshotEntries);
+	WriteSectionDescriptor(mapping.data, 0x620, kTimelineSchemaId, kTimelineBufferAOffset, kTimelineBufferBOffset,
+	                       kTimelineBufferSize, kTimelineMaxEvents);
+	AtomicStoreU64(mapping.data, kOffProgressActive, 0);
+	AtomicStoreU64(mapping.data, kOffTimelineActive, 0);
+	AtomicStoreU32(mapping.data, kOffHandshakeState, static_cast<uint32_t>(HandshakeState::ParentReady));
 	return ProtocolResult::Ok;
 }
 
@@ -189,16 +261,32 @@ ProtocolResult PublishWorkerHandshake(MutableMappingView mapping, const WorkerHa
 	{
 		return hdr;
 	}
-	if (handshake.accepted_mode != RecordingMode::MetricsOnly && handshake.accepted_mode != RecordingMode::Full)
+	if (LoadHandshakeState(mapping.data) != HandshakeState::ParentReady ||
+		handshake.accepted_mode != static_cast<RecordingMode>(ReadU32(mapping.data, kOffReqMode)) ||
+		(handshake.accepted_mode != RecordingMode::MetricsOnly && handshake.accepted_mode != RecordingMode::Full) ||
+		handshake.worker_pid == 0u || handshake.worker_start_token == 0u)
 	{
 		return ProtocolResult::Rejected;
 	}
-	if (handshake.dirty > 1u || handshake.validation_enabled > 1u)
+	if (handshake.logging_mode > LoggingMode::Directory ||
+		handshake.shader_cache_state > ShaderCacheState::PersistentCacheDisabled || handshake.dirty > 1u ||
+		handshake.validation_enabled > 1u || (handshake.capabilities[0] & ~1ull) != 0u || handshake.capabilities[1] != 0u)
 	{
 		return ProtocolResult::Rejected;
 	}
-	// Store accepted mode; full handshake blob is beyond v1 minimal path.
+	WriteU64(mapping.data, kOffWorkerPid, handshake.worker_pid);
+	WriteU64(mapping.data, kOffWorkerToken, handshake.worker_start_token);
+	std::memcpy(mapping.data + kOffRevision, handshake.revision, sizeof(handshake.revision));
+	WriteU32(mapping.data, kOffDirty, handshake.dirty);
+	WriteU64(mapping.data, kOffCapabilities + 0x00, handshake.capabilities[0]);
+	WriteU64(mapping.data, kOffCapabilities + 0x08, handshake.capabilities[1]);
+	WriteU32(mapping.data, kOffLogging, static_cast<uint32_t>(handshake.logging_mode));
+	WriteU32(mapping.data, kOffShaderCache, static_cast<uint32_t>(handshake.shader_cache_state));
+	WriteU32(mapping.data, kOffValidation, handshake.validation_enabled);
+	WriteU32(mapping.data, kOffWidth, handshake.resolution_width);
+	WriteU32(mapping.data, kOffHeight, handshake.resolution_height);
 	WriteU32(mapping.data, kOffAcceptedMode, static_cast<uint32_t>(handshake.accepted_mode));
+	AtomicStoreU32(mapping.data, kOffHandshakeState, static_cast<uint32_t>(HandshakeState::WorkerReady));
 	return ProtocolResult::Ok;
 }
 
@@ -214,17 +302,29 @@ ProtocolResult AcceptWorkerHandshake(MutableMappingView mapping, const ParentPro
 	{
 		return hdr;
 	}
-	if (ReadU64(mapping.data, kOffParentToken) != init.supervisor_start_token)
+	if (LoadHandshakeState(mapping.data) != HandshakeState::WorkerReady)
 	{
 		return ProtocolResult::Rejected;
 	}
-	if (std::memcmp(mapping.data + kOffNonce, init.nonce, 16) != 0)
+	if (ReadU64(mapping.data, kOffParentPid) != init.supervisor_pid ||
+		std::memcmp(mapping.data + kOffNonce, init.nonce, 16) != 0)
 	{
 		return ProtocolResult::Rejected;
 	}
 	*out = {};
-	out->accepted_mode =
-	    static_cast<RecordingMode>(ReadU32(mapping.data, kOffAcceptedMode));
+	out->worker_pid         = ReadU64(mapping.data, kOffWorkerPid);
+	out->worker_start_token = ReadU64(mapping.data, kOffWorkerToken);
+	std::memcpy(out->nonce, mapping.data + kOffNonce, sizeof(out->nonce));
+	std::memcpy(out->revision, mapping.data + kOffRevision, sizeof(out->revision));
+	out->dirty              = ReadU32(mapping.data, kOffDirty);
+	out->capabilities[0]    = ReadU64(mapping.data, kOffCapabilities + 0x00);
+	out->capabilities[1]    = ReadU64(mapping.data, kOffCapabilities + 0x08);
+	out->logging_mode       = static_cast<LoggingMode>(ReadU32(mapping.data, kOffLogging));
+	out->shader_cache_state = static_cast<ShaderCacheState>(ReadU32(mapping.data, kOffShaderCache));
+	out->validation_enabled = ReadU32(mapping.data, kOffValidation);
+	out->resolution_width   = ReadU32(mapping.data, kOffWidth);
+	out->resolution_height  = ReadU32(mapping.data, kOffHeight);
+	out->accepted_mode      = static_cast<RecordingMode>(ReadU32(mapping.data, kOffAcceptedMode));
 	if (out->accepted_mode != init.requested_mode)
 	{
 		return ProtocolResult::Rejected;
@@ -242,6 +342,10 @@ ProtocolResult ReadWorkerBootstrap(ConstMappingView mapping, const uint8_t* nonc
 	if (hdr != ProtocolResult::Ok)
 	{
 		return hdr;
+	}
+	if (LoadHandshakeState(mapping.data) != HandshakeState::ParentReady)
+	{
+		return ProtocolResult::Rejected;
 	}
 	if (std::memcmp(mapping.data + kOffNonce, nonce, 16) != 0)
 	{
@@ -272,8 +376,9 @@ ProtocolResult PublishProgress(MutableMappingView mapping, const ProgressPublica
 		return ProtocolResult::Rejected;
 	}
 
-	const uint32_t active = ReadU32(mapping.data, kOffActiveBuf) & 1u;
-	const uint32_t inactive = active ^ 1u;
+	const uint64_t active_descriptor = AtomicLoadU64(mapping.data, kOffProgressActive);
+	const uint32_t active            = static_cast<uint32_t>(active_descriptor & 1u);
+	const uint32_t inactive          = active ^ 1u;
 	const uint64_t buf_off =
 	    (inactive == 0u) ? kProgressBufferAOffset : kProgressBufferBOffset;
 	uint8_t* buf = mapping.data + buf_off;
@@ -281,7 +386,12 @@ ProtocolResult PublishProgress(MutableMappingView mapping, const ProgressPublica
 
 	WriteU32(buf, kProgSchemaOff, kProgressSchemaId);
 	WriteU32(buf, kProgFlagsOff, 0);
-	const uint64_t gen = ReadU64(mapping.data, kOffGeneration) + 1u;
+	const uint64_t previous_generation = active_descriptor >> 1u;
+	const uint64_t gen                 = previous_generation + 1u;
+	if (gen == 0u || gen >= (1ull << 63u))
+	{
+		return ProtocolResult::Rejected;
+	}
 	WriteU64(buf, kProgGenOff, gen);
 	const uint32_t count =
 	    (publication.progress.count < MaxProgressSnapshotEntries) ? publication.progress.count : MaxProgressSnapshotEntries;
@@ -321,9 +431,8 @@ ProtocolResult PublishProgress(MutableMappingView mapping, const ProgressPublica
 	const uint64_t crc     = Crc64Ecma(buf, static_cast<size_t>(crc_len));
 	WriteU64(buf, crc_len, crc);
 
-	// Publish: generation then flip active buffer.
-	WriteU64(mapping.data, kOffGeneration, gen);
-	WriteU32(mapping.data, kOffActiveBuf, inactive);
+	// Publish the completed buffer and generation as one acquire/release cell.
+	AtomicStoreU64(mapping.data, kOffProgressActive, (gen << 1u) | inactive);
 
 	// Mirror child-owned health aggregates from writer_loss / progress_loss.
 	WriteControlCell(mapping.data, ControlCell::AggregateRing, publication.writer_loss.aggregate_ring);
@@ -344,8 +453,9 @@ ProtocolResult ReadProgressPublication(ConstMappingView mapping, ProtocolReadLos
 	{
 		return hdr;
 	}
-	const uint32_t active  = ReadU32(mapping.data, kOffActiveBuf) & 1u;
-	const uint64_t gen_hdr = ReadU64(mapping.data, kOffGeneration);
+	const uint64_t active_descriptor = AtomicLoadU64(mapping.data, kOffProgressActive);
+	const uint32_t active            = static_cast<uint32_t>(active_descriptor & 1u);
+	const uint64_t gen_hdr           = active_descriptor >> 1u;
 	if (gen_hdr == 0u)
 	{
 		if (loss_state != nullptr)
@@ -455,7 +565,8 @@ ProtocolResult PublishTimeline(MutableMappingView mapping, const TimelineSnapsho
 	{
 		return ProtocolResult::Rejected;
 	}
-	const uint32_t active   = ReadU32(mapping.data, kOffActiveBuf) & 1u;
+	const uint64_t active_descriptor = AtomicLoadU64(mapping.data, kOffTimelineActive);
+	const uint32_t active            = static_cast<uint32_t>(active_descriptor & 1u);
 	const uint32_t inactive = active ^ 1u;
 	// Timeline uses same active index convention independently; store in buffer pair.
 	const uint64_t buf_off =
@@ -477,7 +588,11 @@ ProtocolResult PublishTimeline(MutableMappingView mapping, const TimelineSnapsho
 	}
 	const uint64_t crc_len = kTlBodyOff + bytes;
 	WriteU64(buf, crc_len, Crc64Ecma(buf, static_cast<size_t>(crc_len)));
-	// Note: does not flip progress active selector; timeline generation is self-contained.
+	if (timeline.generation == 0u || timeline.generation >= (1ull << 63u))
+	{
+		return ProtocolResult::Rejected;
+	}
+	AtomicStoreU64(mapping.data, kOffTimelineActive, (timeline.generation << 1u) | inactive);
 	return ProtocolResult::Ok;
 }
 

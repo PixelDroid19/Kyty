@@ -206,6 +206,8 @@ SupervisorResult RunSupervisor(const SupervisorOptions& options) noexcept
 		result.platform_error = lr.platform_error;
 		return result;
 	}
+	ProcessIdentity launched_identity {};
+	const bool launch_identity_valid = QueryProcessIdentity(lr.process, &launched_identity) == ProcessIdentityError::None;
 
 	const uint64_t t_launch = MonoNs();
 	bool           handshook = false;
@@ -214,6 +216,23 @@ SupervisorResult RunSupervisor(const SupervisorOptions& options) noexcept
 	{
 		if (AcceptWorkerHandshake(mapping.MutableView(), init, &hs) == ProtocolResult::Ok)
 		{
+			ProcessIdentity child_identity {};
+			if (QueryProcessIdentity(lr.process, &child_identity) != ProcessIdentityError::None && launch_identity_valid)
+			{
+				child_identity = launched_identity;
+			}
+			if ((child_identity.pid == 0u || child_identity.start_token == 0u) ||
+				child_identity.pid != hs.worker_pid || child_identity.start_token != hs.worker_start_token)
+			{
+				mapping.Close();
+				::close(pipes[1]);
+				pipes[1] = -1;
+				ProcessObservation terminal {};
+				(void)ProcessLauncher::Wait(&lr.process, &terminal);
+				result.process = terminal.status;
+				result.outcome = SupervisorOutcome::WorkerHandshakeFailed;
+				return result;
+			}
 			handshook = true;
 			break;
 		}

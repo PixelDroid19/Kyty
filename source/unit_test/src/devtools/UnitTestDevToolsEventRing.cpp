@@ -368,6 +368,8 @@ TEST(DevToolsEventRing, WorkerTelemetryPublishesHandshakeAndLifecycle)
 	ASSERT_EQ(InitializeProtocolOwner({mapping.data(), mapping.size()}, init), ProtocolResult::Ok);
 
 	WorkerTelemetryOptions options {};
+	options.worker_pid                 = 123;
+	options.worker_start_token         = 456;
 	options.requested_mode             = RecordingMode::Full;
 	options.logging_mode               = LoggingMode::Silent;
 	options.diagnostic_thread_instance = 99;
@@ -406,6 +408,8 @@ TEST(DevToolsEventRing, WorkerTelemetryAllocatesThreadInstanceWhenUnset)
 	ASSERT_EQ(InitializeProtocolOwner({mapping.data(), mapping.size()}, init), ProtocolResult::Ok);
 
 	WorkerTelemetryOptions options {};
+	options.worker_pid         = 123;
+	options.worker_start_token = 456;
 	options.requested_mode = RecordingMode::Full;
 
 	WorkerTelemetry telemetry;
@@ -440,6 +444,8 @@ TEST(DevToolsEventRing, WorkerTelemetryMetricsOnlyPublishesNoTimeline)
 	ASSERT_EQ(InitializeProtocolOwner({mapping.data(), mapping.size()}, init), ProtocolResult::Ok);
 
 	WorkerTelemetryOptions options {};
+	options.worker_pid         = 123;
+	options.worker_start_token = 456;
 	options.requested_mode             = RecordingMode::MetricsOnly;
 
 	WorkerTelemetry telemetry;

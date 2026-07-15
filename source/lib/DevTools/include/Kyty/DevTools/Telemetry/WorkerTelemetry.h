@@ -10,6 +10,8 @@ namespace Kyty::DevTools {
 
 struct WorkerTelemetryOptions
 {
+	uint64_t         worker_pid                 = 0;
+	uint64_t         worker_start_token         = 0;
 	RecordingMode    requested_mode             = RecordingMode::MetricsOnly;
 	LoggingMode      logging_mode               = LoggingMode::Silent;
 	ShaderCacheState shader_cache_state         = ShaderCacheState::Unknown;
