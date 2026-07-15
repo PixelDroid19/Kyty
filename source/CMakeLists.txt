@@ -141,14 +141,16 @@ configure_file(
   )
 
 find_package(Git)
-  
-add_custom_target( KytyGitVersion
-    COMMAND ${CMAKE_COMMAND} 
-	-D INPUT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/KytyGitVersion.h.in
-    -D OUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/KytyGitVersion.h
-	-D GIT_EXECUTABLE=${GIT_EXECUTABLE}
-	-P ${CMAKE_CURRENT_SOURCE_DIR}/generate_version.cmake
-	COMMENT "Generate KytyGitVersion.h"
+
+add_custom_target(KytyBuildInfo
+	COMMAND ${CMAKE_COMMAND}
+		-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+		-DINPUT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/KytyBuildInfo.h.in
+		-DOUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/KytyBuildInfo.h
+		-DGIT_EXECUTABLE=${GIT_EXECUTABLE}
+		-P ${CMAKE_CURRENT_SOURCE_DIR}/generate_version.cmake
+	BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/KytyBuildInfo.h
+	COMMENT "Generate KytyBuildInfo.h"
 )
 
 if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0.0)
@@ -184,6 +186,7 @@ if(NOT ${KYTY_PROJECT_NAME} MATCHES "Build_Tools" AND NOT MACOS)
 	add_subdirectory(launcher)
 endif()
 add_subdirectory(lib)
+add_subdirectory(devtools)
 
 add_executable(fc_script ${KYTY_SCRIPT_SRC}) 
 
@@ -239,7 +242,7 @@ elseif(MINGW)
 	add_custom_command(TARGET fc_script POST_BUILD COMMAND ${KYTY_SCRIPT_BIN} ${PROJECT_SOURCE_DIR}/map_to_csv.lua fc_script ${KYTY_COMPILER_ID} ${KYTY_BITNESS} ${KYTY_LINKER_ID})
 endif()
 
-add_dependencies(fc_script KytyGitVersion)  
+add_dependencies(fc_script KytyBuildInfo)  
 
 install(TARGETS fc_script DESTINATION .)
 if(NOT ${KYTY_PROJECT_NAME} MATCHES "Build_Tools")
