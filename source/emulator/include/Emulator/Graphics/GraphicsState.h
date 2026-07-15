@@ -84,6 +84,21 @@ enum class Gen5SampleBacking
 
 [[nodiscard]] Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exact_render_target_found);
 
+enum class ImageSampleOperation
+{
+	Regular,
+	DepthReference,
+};
+
+struct SamplerComparison
+{
+	bool    enabled  = false;
+	uint8_t function = 0;
+};
+
+// Vulkan requires sampler comparison state to agree with the SPIR-V image instruction.
+[[nodiscard]] SamplerComparison ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation);
+
 } // namespace Kyty::Libs::Graphics::State
 
 #endif // KYTY_EMU_ENABLED
