@@ -2024,8 +2024,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	return VK_ERROR_EXTENSION_NOT_PRESENT;
 }
 
-[[maybe_unused]] static VkSwapchainKHR VulkanCreateSwapchainInternal(VkDevice device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
-                                                                     uint32_t image_count, SurfaceCapabilities* r,
+[[maybe_unused]] static VkSwapchainKHR VulkanCreateSwapchainInternal(VkDevice device, VkSurfaceKHR surface, VkSwapchainKHR old_swapchain,
+                                                                     uint32_t width, uint32_t height, uint32_t image_count,
+                                                                     SurfaceCapabilities* r,
                                                                      VkFormat* swapchain_format, VkExtent2D* swapchain_extent,
                                                                      VkImage** swapchain_images, VkImageView** swapchain_image_views,
                                                                      uint32_t* swapchain_images_count)
@@ -2132,7 +2133,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 		create_info.minImageCount = image_count;
 	}
 	create_info.clipped      = VK_TRUE;
-	create_info.oldSwapchain = nullptr;
+	create_info.oldSwapchain = old_swapchain;
 
 	*swapchain_format = create_info.imageFormat;
 	*swapchain_extent = extent;
@@ -2224,8 +2225,8 @@ static VulkanSwapchain* VulkanCreateSwapchain(GraphicContext* ctx, uint32_t imag
 
 	auto* s = new VulkanSwapchain;
 
-	s->swapchain = VulkanCreateSwapchainInternal(ctx->device, g_window_ctx->surface, ctx->screen_width, ctx->screen_height, image_count,
-	                                             g_window_ctx->surface_capabilities, &s->swapchain_format, &s->swapchain_extent,
+	s->swapchain = VulkanCreateSwapchainInternal(ctx->device, g_window_ctx->surface, nullptr, ctx->screen_width, ctx->screen_height,
+	                                             image_count, g_window_ctx->surface_capabilities, &s->swapchain_format, &s->swapchain_extent,
 	                                             &s->swapchain_images, &s->swapchain_image_views, &s->swapchain_images_count);
 	if (s->swapchain == nullptr)
 	{
@@ -2284,7 +2285,7 @@ static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uin
 
 	VulkanGetSurfaceCapabilities(ctx->physical_device, g_window_ctx->surface, g_window_ctx->surface_capabilities);
 
-	s->swapchain = VulkanCreateSwapchainInternal(ctx->device, g_window_ctx->surface, ctx->screen_width, ctx->screen_height, image_count,
+	s->swapchain = VulkanCreateSwapchainInternal(ctx->device, g_window_ctx->surface, old, ctx->screen_width, ctx->screen_height, image_count,
 	                                             g_window_ctx->surface_capabilities, &s->swapchain_format, &s->swapchain_extent,
 	                                             &s->swapchain_images, &s->swapchain_image_views, &s->swapchain_images_count);
 	if (s->swapchain == nullptr)
