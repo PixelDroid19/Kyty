@@ -4,6 +4,7 @@
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/Texture.h"
+#include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
@@ -20,6 +21,12 @@
 UT_BEGIN(EmulatorGraphicsState);
 
 using namespace Libs::Graphics;
+
+TEST(EmulatorGraphicsState, TiledVideoOutBufferUpdateDoesNotCpuUpload)
+{
+	EXPECT_FALSE(VideoOutBufferShouldCpuUploadOnUpdate(true));
+	EXPECT_TRUE(VideoOutBufferShouldCpuUploadOnUpdate(false));
+}
 
 TEST(EmulatorGraphicsState, DecodesGenericScissorHalves)
 {

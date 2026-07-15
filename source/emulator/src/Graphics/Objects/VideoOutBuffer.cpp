@@ -49,6 +49,14 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	auto width  = params[VideoOutBufferObject::PARAM_WIDTH];
 	auto height = params[VideoOutBufferObject::PARAM_HEIGHT];
 
+	// Tiled VideoOut buffers are GPU render targets. Uploading registered guest
+	// memory makes first GPU passes LOAD stale CPU contents before the renderer
+	// has produced the image. Decision is centralized for unit characterization.
+	if (!VideoOutBufferShouldCpuUploadOnUpdate(tiled))
+	{
+		return;
+	}
+
 	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	if (tiled && buffer_is_tiled(*vaddr, *size))
