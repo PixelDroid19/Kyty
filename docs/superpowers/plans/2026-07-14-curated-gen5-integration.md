@@ -10,17 +10,17 @@
 
 ## Global Constraints
 
-- Read `/home/monasterios/Documents/PS5/Kyty/AGENTS.md` completely before every execution session.
-- Source worktrees `/home/monasterios/Documents/PS5/Kyty` and `/home/monasterios/Documents/PS5/Kyty-gen5-compositor` are read-only evidence during curation.
+- Read `$KYTY_SOURCE_ROOT/AGENTS.md` completely before every execution session.
+- Source worktrees `$KYTY_SOURCE_ROOT` and `$KYTY_COMPOSITOR_ROOT` are read-only evidence during curation.
 - Preserve all existing stashes, untracked scratch, and dirty files; do not stash, reset, clean, rebase, checkout, or force-push either source worktree.
-- Create `/home/monasterios/Documents/PS5/Kyty-gen5-curated` on `codex/gen5-curated-integration` from `main` only through the `superpowers:using-git-worktrees` skill.
+- Create `$KYTY_CURATED_ROOT` on `codex/gen5-curated-integration` from `main` only through the `superpowers:using-git-worktrees` skill.
 - Never use `KYTY_STUB_MISSING`, `KYTY_GFX_PERMISSIVE`, or `KYTY_SKIP_UD2` for acceptance.
 - Never copy private fixture paths, identifiers, assets, screenshots, binaries, raw logs, or generated shader dumps into Git.
 - Every semantic commit has one contract, a short subject, no `Co-authored-by` trailer, focused tests, a successful build, and a strict/visual replay.
 - Do not preserve an intermediate commit known to be semantically wrong merely because a later commit repairs it; integrate the correct net behavior once.
 - Do not copy `TexProbe` workload-specific dimensions/CRCs, `KYTY_*_EVIDENCE` hot-path dumps, auto-input, fabricated dialog state, trap skipping, or assumed guest success into a semantic commit.
 - Use `apply_patch` for manual source edits. Git cherry-pick is allowed only for the exact commits identified below and only in the clean curated worktree.
-- Execute every emulator/test binary from the curated worktree and route shader/log/buffer/pipeline output to `/home/monasterios/Documents/PS5/Kyty-curated-scratch`; never let relative output land in the dirty source worktree.
+- Execute every emulator/test binary from the curated worktree and route shader/log/buffer/pipeline output to `$KYTY_CURATED_SCRATCH`; never let relative output land in the dirty source worktree.
 - After adding a red test, rebuild `fc_script` before running it. A result from the pre-edit binary or a GoogleTest filter that matched zero tests is invalid evidence.
 
 ---
@@ -28,9 +28,9 @@
 ### Task 1: Create and prove the isolated baseline
 
 **Files:**
-- Read: `/home/monasterios/Documents/PS5/Kyty/AGENTS.md`
-- Read: `/home/monasterios/Documents/PS5/Kyty/docs/superpowers/specs/2026-07-14-native-runtime-diagnostics-design.md`
-- Create through worktree skill: `/home/monasterios/Documents/PS5/Kyty-gen5-curated/`
+- Read: `$KYTY_SOURCE_ROOT/AGENTS.md`
+- Read: `$KYTY_SOURCE_ROOT/docs/superpowers/specs/2026-07-14-native-runtime-diagnostics-design.md`
+- Create through worktree skill: `$KYTY_CURATED_ROOT/`
 
 **Interfaces:**
 - Consumes: immutable audited code frontier `15e1552e46b27e928b33e869111ca9d521702612`, `main=0b708016142cf8ce304675fd8f9f3cd547e2362b`, and `compositor-fix=b9abd4553e8766ef60fd555a649ca2102096f3e7`.
@@ -40,9 +40,9 @@
 
 ```bash
 set -euo pipefail
-source_repo=/home/monasterios/Documents/PS5/Kyty
-compositor_repo=/home/monasterios/Documents/PS5/Kyty-gen5-compositor
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+source_repo=$KYTY_SOURCE_ROOT
+compositor_repo=$KYTY_COMPOSITOR_ROOT
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/baseline"
 test "$(git -C "$source_repo" rev-parse main)" = 0b708016142cf8ce304675fd8f9f3cd547e2362b
 test "$(git -C "$compositor_repo" rev-parse HEAD)" = b9abd4553e8766ef60fd555a649ca2102096f3e7
@@ -63,13 +63,13 @@ Expected: the hashes/merge-base match; source dirty state and all stashes are re
 
 - [ ] **Step 2: Create the new worktree through the required skill**
 
-Invoke `superpowers:using-git-worktrees` with base `main`, branch `codex/gen5-curated-integration`, and destination `/home/monasterios/Documents/PS5/Kyty-gen5-curated`.
+Invoke `superpowers:using-git-worktrees` with base `main`, branch `codex/gen5-curated-integration`, and destination `$KYTY_CURATED_ROOT`.
 
 - [ ] **Step 3: Configure and build the trusted baseline**
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 test -n "${KYTY_GUEST_ROOT:-}"
 test -z "${KYTY_STUB_MISSING:-}"
@@ -87,9 +87,9 @@ Expected: build succeeds and the focused baseline is green. Record any pre-exist
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -117,7 +117,7 @@ Expected: both runs produce the same first structural failure or the same first 
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 git -C "$curated" status --short
 git -C "$curated" log -1 --oneline --decorate
@@ -141,9 +141,9 @@ Expected: clean worktree at `main`; no commit is created in this task.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-source_repo=/home/monasterios/Documents/PS5/Kyty
+source_repo=$KYTY_SOURCE_ROOT
 spec_amendment_commit=$(git -C "$source_repo" log -1 --format='%H' -- docs/superpowers/specs/2026-07-14-native-runtime-diagnostics-design.md)
 curated_plan_commit=$(git -C "$source_repo" log -1 --format='%H' -- docs/superpowers/plans/2026-07-14-curated-gen5-integration.md)
 runtime_plan_commit=$(git -C "$source_repo" log -1 --format='%H' -- docs/superpowers/plans/2026-07-14-runtime-stall-snapshot-v1.md)
@@ -161,9 +161,9 @@ test "$curated_plan_commit" != "$runtime_plan_commit"
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-source_repo=/home/monasterios/Documents/PS5/Kyty
+source_repo=$KYTY_SOURCE_ROOT
 spec_amendment_commit=$(git -C "$source_repo" log -1 --format='%H' -- docs/superpowers/specs/2026-07-14-native-runtime-diagnostics-design.md)
 curated_plan_commit=$(git -C "$source_repo" log -1 --format='%H' -- docs/superpowers/plans/2026-07-14-curated-gen5-integration.md)
 runtime_plan_commit=$(git -C "$source_repo" log -1 --format='%H' -- docs/superpowers/plans/2026-07-14-runtime-stall-snapshot-v1.md)
@@ -177,7 +177,7 @@ Expected: five documentation commits, no source changes.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 test -n "${KYTY_GUEST_ROOT:-}"
 private_fixture_name=$(basename "$KYTY_GUEST_ROOT")
@@ -214,7 +214,7 @@ Add `Sw64kRx4bppDetileRampPreservesX`, `Sw64kRx4bppMacroPitchAdvancesBlock`, and
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated"
 test_filter='EmulatorGraphicsPackets.Sw64kRx4bppDetileRampPreservesX:EmulatorGraphicsPackets.Sw64kRx4bppMacroPitchAdvancesBlock:EmulatorGraphicsPackets.SizesGen5RotatedXGbuffer642x362Rgba8MatchesSample56'
@@ -227,7 +227,7 @@ Expected: all three tests pass without editing `Tile.h` or `Tile.cpp`. A failure
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 test "$(git -C "$curated" diff --name-only)" = source/unit_test/src/emulator/UnitTestEmulatorGraphicsPackets.cpp
 git -C "$curated" add source/unit_test/src/emulator/UnitTestEmulatorGraphicsPackets.cpp
@@ -264,7 +264,7 @@ Add only `ResolvesViewportDepthForClipSpaceAndHostLimits`, covering OpenGL/DX cl
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 cmake -S "$curated/source" -B "$curated/_build_linux_curated" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$curated/_build_linux_curated"
@@ -288,9 +288,9 @@ Use an explicit return struct. `ResolveViewportDepth` maps guest clip-space stat
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -321,7 +321,7 @@ Add only `SeparatesHtileMetaClearFromRegisterDepthClear` and `DepthAttachmentLoa
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated"
 listed_tests=$("$curated/_build_linux_curated/fc_script" --gtest_list_tests '{kyty_run_tests()}')
@@ -343,9 +343,9 @@ Expected: red at the missing decision seam or named assertions, never a zero-mat
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -377,7 +377,7 @@ Add `RecognizesObservedHtileClearPattern`, `ConsumesTrackedHtileClearOnce`, `Hti
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 cmake -S "$curated/source" -B "$curated/_build_linux_curated" -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C "$curated/_build_linux_curated"
@@ -400,9 +400,9 @@ Thread HTILE address and size through `DepthStencilBufferObject`. Extend the pri
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -430,7 +430,7 @@ git -C "$curated" diff --check
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 git -C "$curated" add source/emulator/include/Emulator/Graphics/GraphicContext.h source/emulator/include/Emulator/Graphics/Objects/DepthMeta.h source/emulator/src/Graphics/Objects/DepthMeta.cpp source/emulator/include/Emulator/Graphics/Objects/DepthStencilBuffer.h source/emulator/src/Graphics/Objects/DepthStencilBuffer.cpp source/emulator/src/Graphics/Objects/GpuMemory.cpp source/emulator/src/Graphics/Objects/StorageBuffer.cpp source/emulator/src/Graphics/Utils.cpp source/emulator/src/Graphics/GraphicsRender.cpp source/unit_test/src/emulator/UnitTestEmulatorGraphicsState.cpp
 git -C "$curated" commit -m 'fix(graphics): preserve observed Gen5 depth clears'
@@ -468,7 +468,7 @@ classified independently.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated" fc_script
 listed_tests=$("$curated/_build_linux_curated/fc_script" --gtest_list_tests '{kyty_run_tests()}')
@@ -501,9 +501,9 @@ Build render-pass attachments, image views, blend attachments, and invalidation 
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -539,7 +539,7 @@ Before implementation, the ported test must compile and fail exactly:
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated" fc_script
 listed_tests=$("$curated/_build_linux_curated/fc_script" --gtest_list_tests '{kyty_run_tests()}')
@@ -561,9 +561,9 @@ manufacture a red test by weakening current behavior.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -598,7 +598,7 @@ Prove the first success path is red while build and registration are green:
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated" fc_script
 listed_tests=$("$curated/_build_linux_curated/fc_script" --gtest_list_tests '{kyty_run_tests()}')
@@ -617,9 +617,9 @@ test "$(rg -Fxc '[  FAILED  ] EmulatorGraphicsState.ColorAttachmentLoadOpsClearO
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -654,7 +654,7 @@ the commit as already integrated; otherwise require attributed red evidence:
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated" fc_script
 listed_tests=$("$curated/_build_linux_curated/fc_script" --gtest_list_tests '{kyty_run_tests()}')
@@ -671,9 +671,9 @@ test "$(rg -Fxc '[  FAILED  ] EmulatorGraphicsPackets.CompressedMrtExportIsGuard
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -727,7 +727,7 @@ must not enter the implementation commit.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 test_filter='EmulatorGraphicsState.Gen5SampleBackingRequiresExactLiveRenderTarget'
 ninja -C "$curated/_build_linux_curated" fc_script
@@ -755,7 +755,7 @@ Use the existing live-object lookup result in `PrepareTextures` as the sole rend
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 set +e
 git -C "$curated" grep -n 'TexProbe\|RecordGen5RenderTargetSize\|HasGen5RenderTargetSize\|Gen5Tile27SamplePrefersRenderTarget\|KYTY_VERTEX_EVIDENCE\|KYTY_BLEND_CONSTANT_EVIDENCE'
@@ -770,9 +770,9 @@ Expected: no matches.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -828,7 +828,7 @@ drain:
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated" fc_script
 listed_tests=$("$curated/_build_linux_curated/fc_script" --gtest_list_tests '{kyty_run_tests()}')
@@ -851,9 +851,9 @@ Centralize the transition in one `Label` function called by both paths. The func
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -895,7 +895,7 @@ degamma assertion before implementation:
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated" fc_script
 listed_tests=$("$curated/_build_linux_curated/fc_script" --gtest_list_tests '{kyty_run_tests()}')
@@ -914,9 +914,9 @@ test "$(rg -Fxc '[  FAILED  ] EmulatorGraphicsState.Gen5SampledRgba8FormatUsesUn
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -952,7 +952,7 @@ The regular-operation expectation must then be the sole red result:
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated" fc_script
 listed_tests=$("$curated/_build_linux_curated/fc_script" --gtest_list_tests '{kyty_run_tests()}')
@@ -969,9 +969,9 @@ test "$(rg -Fxc '[  FAILED  ] EmulatorGraphicsState.RegularImageSamplingDisables
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -1029,7 +1029,7 @@ failure as red evidence.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 test_filter='EmulatorKernelMemory.ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap'
 ninja -C "$curated/_build_linux_curated" fc_script
@@ -1056,9 +1056,9 @@ Keep guest allocation/mapping policy in `Kernel/Memory.cpp`. Unmapping one view 
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -1097,7 +1097,7 @@ remain coherent without guest-specific policy in platform files.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated" fc_script
 listed_tests=$("$curated/_build_linux_curated/fc_script" --gtest_list_tests '{kyty_run_tests()}')
@@ -1117,9 +1117,9 @@ test "$(rg -Fxc '[  FAILED  ] CoreVirtualMemory.SharedBackingPreservesAliasCoher
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -1156,7 +1156,7 @@ Commit only the alias APIs, platform adapters, and alias tests:
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 git -C "$curated" add source/emulator/src/Kernel/Memory.cpp source/include/Kyty/Core/VirtualMemory.h source/include/Kyty/Sys/Linux/SysLinuxVirtual.h source/include/Kyty/Sys/Windows/SysWindowsVirtual.h source/lib/Core/src/VirtualMemory.cpp source/lib/Sys/src/SysLinuxVirtual.cpp source/lib/Sys/src/SysWindowsVirtual.cpp source/unit_test/src/emulator/UnitTestEmulatorKernelMemory.cpp
 git -C "$curated" commit -m 'fix(kernel): preserve coherent direct memory aliases'
@@ -1178,9 +1178,9 @@ This is an interruptible gate, not a deferred sweep. If any earlier task's stric
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -1229,7 +1229,7 @@ recaptured instead of patched:
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 test -n "${CAPTURED_HLE_TEST:-}"
 case "$CAPTURED_HLE_TEST" in *.*) ;; *) exit 1 ;; esac
@@ -1254,9 +1254,9 @@ test "$(rg -Fxc "[  FAILED  ] $CAPTURED_HLE_TEST" <<<"$red_output")" -eq 1
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -1322,7 +1322,7 @@ missing test, or additional selected test is not an acceptable red gate.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 test_name=EmulatorGraphicsState.TiledVideoOutBufferUpdateDoesNotCpuUpload
 classify_one_test() {
@@ -1366,9 +1366,9 @@ production call, and prove exact green plus the owner suite and strict replay.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -1418,7 +1418,7 @@ reset to `128/128`; require the exact test to fail once before implementing.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated" fc_script
 test_name=EmulatorPad.KeyboardMovementKeyPressReleaseMapsLeftStick
@@ -1446,9 +1446,9 @@ This is a testability seam, not permission for broader Window refactoring.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -1493,7 +1493,7 @@ it.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated" fc_script
 test_name=EmulatorGraphicsPackets.Encodes32BitWaitWithInactiveUpperPredicate
@@ -1520,9 +1520,9 @@ their producer. Then prove exact green, the owner filter, and strict replay.
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -1560,8 +1560,8 @@ accepted only after inspection proves it reaches the production seam.
 ### Task 11: Reconcile the dirty primary patch file by file
 
 **Files:**
-- Read-only source diff: `/home/monasterios/Documents/PS5/Kyty`
-- Candidate tracked files are the current dirty list reported by `git -C /home/monasterios/Documents/PS5/Kyty status --short`.
+- Read-only source diff: `$KYTY_SOURCE_ROOT`
+- Candidate tracked files are the current dirty list reported by `git -C $KYTY_SOURCE_ROOT status --short`.
 - Candidate untracked files: `docs/graphics-captures.md`, `scripts/kyty_capture.py`, and `scripts/test_kyty_capture.py`.
 - Always exclude: `scripts/__pycache__/`, scratch, raw captures, generated shaders, and private runner values.
 
@@ -1573,7 +1573,7 @@ accepted only after inspection proves it reaches the production seam.
 
 ```bash
 set -euo pipefail
-source_repo=/home/monasterios/Documents/PS5/Kyty
+source_repo=$KYTY_SOURCE_ROOT
 git -C "$source_repo" status --short
 git -C "$source_repo" diff --check
 git -C "$source_repo" diff --name-only
@@ -1593,7 +1593,7 @@ Run the following against the source worktree so cwd is explicit and no new byte
 
 ```bash
 set -euo pipefail
-source_repo=/home/monasterios/Documents/PS5/Kyty
+source_repo=$KYTY_SOURCE_ROOT
 (cd "$source_repo" && PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest scripts/test_kyty_capture.py)
 ```
 
@@ -1611,7 +1611,7 @@ source_repo=/home/monasterios/Documents/PS5/Kyty
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 ninja -C "$curated/_build_linux_curated"
 listed_tests=$(
@@ -1635,9 +1635,9 @@ Use identical resolution, Silent logging, shader-cache state, and real input seq
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 mkdir -p "$scratch/Shaders" "$scratch/Logs" "$scratch/Buffers" "$scratch/Pipelines"
 export KYTY_SHADER_LOG_FOLDER="$scratch/Shaders"
 export KYTY_PRINTF_OUTPUT_FOLDER="$scratch/Logs"
@@ -1663,11 +1663,11 @@ Both runs must reach the same or later frontier than the source branch; HUD-only
 
 - [ ] **Step 3: Write and validate the sanitized frontier report**
 
-Using `apply_patch`, create `/home/monasterios/Documents/PS5/Kyty-curated-scratch/frontier-report.md` outside Git after reading the actual test/run evidence. Give it these exact second-level headings: `Identity`, `Build and tests`, `Strict replay`, `Input`, `Visual result`, `Validation`, `Performance`, and `Frontier`. Record the exact commit, host/GPU capability summary, nonzero focused-test count, both run durations/results, exact resolution, `PrintfDirection=Silent`, shader-cache state, real press/release input sequence, frame/flip counts, geometry/color assessment, Vulkan validation result, performance conditions, and first bad producer or stable checkpoint. Write `not verified` for a gate that could not be run; never infer a pass. Do not include the fixture name, title/product ID, private path, raw logs, captures, or assets.
+Using `apply_patch`, create `$KYTY_CURATED_SCRATCH/frontier-report.md` outside Git after reading the actual test/run evidence. Give it these exact second-level headings: `Identity`, `Build and tests`, `Strict replay`, `Input`, `Visual result`, `Validation`, `Performance`, and `Frontier`. Record the exact commit, host/GPU capability summary, nonzero focused-test count, both run durations/results, exact resolution, `PrintfDirection=Silent`, shader-cache state, real press/release input sequence, frame/flip counts, geometry/color assessment, Vulkan validation result, performance conditions, and first bad producer or stable checkpoint. Write `not verified` for a gate that could not be run; never infer a pass. Do not include the fixture name, title/product ID, private path, raw logs, captures, or assets.
 
 ```bash
 set -euo pipefail
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+scratch=$KYTY_CURATED_SCRATCH
 report="$scratch/frontier-report.md"
 test -s "$report"
 for heading in 'Identity' 'Build and tests' 'Strict replay' 'Input' 'Visual result' 'Validation' 'Performance' 'Frontier'; do
@@ -1689,11 +1689,11 @@ test "$path_status" -eq 1
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
-source_repo=/home/monasterios/Documents/PS5/Kyty
-compositor_repo=/home/monasterios/Documents/PS5/Kyty-gen5-compositor
-scratch=/home/monasterios/Documents/PS5/Kyty-curated-scratch
+source_repo=$KYTY_SOURCE_ROOT
+compositor_repo=$KYTY_COMPOSITOR_ROOT
+scratch=$KYTY_CURATED_SCRATCH
 test -n "${KYTY_GUEST_ROOT:-}"
 private_fixture_name=$(basename "$KYTY_GUEST_ROOT")
 git -C "$curated" log --format=fuller --stat main..HEAD
@@ -1740,7 +1740,7 @@ Expected: no trailer matches, no omitted commit is an ancestor, and the range-di
 
 ```bash
 set -euo pipefail
-curated=/home/monasterios/Documents/PS5/Kyty-gen5-curated
+curated=$KYTY_CURATED_ROOT
 cd "$curated"
 git -C "$curated" push -u origin codex/gen5-curated-integration
 ```
