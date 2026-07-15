@@ -242,7 +242,7 @@ elseif(MINGW)
 	add_custom_command(TARGET fc_script POST_BUILD COMMAND ${KYTY_SCRIPT_BIN} ${PROJECT_SOURCE_DIR}/map_to_csv.lua fc_script ${KYTY_COMPILER_ID} ${KYTY_BITNESS} ${KYTY_LINKER_ID})
 endif()
 
-add_dependencies(fc_script KytyBuildInfo)  
+add_dependencies(fc_script KytyBuildInfo)
 
 install(TARGETS fc_script DESTINATION .)
 if(NOT ${KYTY_PROJECT_NAME} MATCHES "Build_Tools")
@@ -255,6 +255,5 @@ endif()
 if(MSVC)
     set(CMAKE_USE_RELATIVE_PATHS ON)
 endif()
-
 
 
