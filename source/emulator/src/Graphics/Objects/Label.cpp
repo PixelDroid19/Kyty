@@ -61,9 +61,11 @@ public:
 	                LabelGpuObject::callback_t callback_2, const uint64_t* args);
 	void   Delete(Label* label);
 	void   Set(CommandBuffer* buffer, Label* label);
+	void   DrainCompleted();
 
 private:
 	static void ThreadRun(void* data);
+	static void FireCallbacks(const Vector<LabelCallbacks>& fired_labels);
 
 	bool        Remove(Label* label);
 	static void Destroy(Label* label);
@@ -74,6 +76,40 @@ private:
 };
 
 static LabelManager* g_label_manager = nullptr;
+
+void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
+{
+	for (auto& label: fired_labels)
+	{
+		bool write = true;
+
+		if (label.callback_1 != nullptr)
+		{
+			write = label.callback_1(label.args);
+		}
+
+		if (write && label.dst_gpu_addr64 != nullptr)
+		{
+			*label.dst_gpu_addr64 = label.value64;
+
+			printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%016" PRIx64 "\n" FG_DEFAULT,
+			       reinterpret_cast<uint64_t>(label.dst_gpu_addr64), label.value64);
+		}
+
+		if (write && label.dst_gpu_addr32 != nullptr)
+		{
+			*label.dst_gpu_addr32 = label.value32;
+
+			printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%08" PRIx32 "\n" FG_DEFAULT,
+			       reinterpret_cast<uint64_t>(label.dst_gpu_addr32), label.value32);
+		}
+
+		if (label.callback_2 != nullptr)
+		{
+			label.callback_2(label.args);
+		}
+	}
+}
 
 void LabelManager::ThreadRun(void* data)
 {
@@ -126,39 +162,30 @@ void LabelManager::ThreadRun(void* data)
 			Destroy(label);
 		}
 
-		for (auto& label: fired_labels)
-		{
-			bool write = true;
-
-			if (label.callback_1 != nullptr)
-			{
-				write = label.callback_1(label.args);
-			}
-
-			if (write && label.dst_gpu_addr64 != nullptr)
-			{
-				*label.dst_gpu_addr64 = label.value64;
-
-				printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%016" PRIx64 "\n" FG_DEFAULT,
-				       reinterpret_cast<uint64_t>(label.dst_gpu_addr64), label.value64);
-			}
-
-			if (write && label.dst_gpu_addr32 != nullptr)
-			{
-				*label.dst_gpu_addr32 = label.value32;
-
-				printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%08" PRIx32 "\n" FG_DEFAULT,
-				       reinterpret_cast<uint64_t>(label.dst_gpu_addr32), label.value32);
-			}
-
-			if (label.callback_2 != nullptr)
-			{
-				label.callback_2(label.args);
-			}
-		}
+		FireCallbacks(fired_labels);
 
 		Core::Thread::SleepMicro(100);
 	}
+}
+
+void LabelManager::DrainCompleted()
+{
+	Vector<LabelCallbacks> fired_labels;
+
+	{
+		Core::LockGuard lock(m_mutex);
+
+		for (auto& label: m_labels)
+		{
+			if (label->status == LabelStatus::Active && vkGetEventStatus(label->device, label->event) == VK_EVENT_SET)
+			{
+				label->status = LabelStatus::NotActive;
+				fired_labels.Add(label->callbacks);
+			}
+		}
+	}
+
+	FireCallbacks(fired_labels);
 }
 
 Label* LabelManager::Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelGpuObject::callback_t callback_1,
@@ -357,6 +384,13 @@ void LabelSet(CommandBuffer* buffer, Label* label)
 	EXIT_IF(g_label_manager == nullptr);
 
 	g_label_manager->Set(buffer, label);
+}
+
+void LabelDrainCompleted()
+{
+	EXIT_IF(g_label_manager == nullptr);
+
+	g_label_manager->DrainCompleted();
 }
 
 static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,

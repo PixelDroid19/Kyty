@@ -64,6 +64,7 @@ Label* LabelCreate32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value
                      LabelGpuObject::callback_t callback_2, const uint64_t* args);
 void   LabelDelete(Label* label);
 void   LabelSet(CommandBuffer* buffer, Label* label);
+void   LabelDrainCompleted();
 
 } // namespace Kyty::Libs::Graphics
 
