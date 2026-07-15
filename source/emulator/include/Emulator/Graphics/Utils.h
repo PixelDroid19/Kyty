@@ -42,6 +42,88 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	return aspect;
 }
 
+// Host presentation only. Guest intermediate float RTs (COLOR_16_16_16_16 + FLOAT /
+// ufmt 71) are game-driven contracts and are unrelated to this host color-space policy.
+// Default swapchain selection must stay ordinary LDR sRGB — not HDR10 / HLG / Dolby /
+// BT.2020, which few displays use and which can produce wrong presentation.
+[[nodiscard]] inline bool VulkanColorSpaceIsHostHdr(VkColorSpaceKHR color_space)
+{
+	switch (static_cast<int>(color_space))
+	{
+		case static_cast<int>(VK_COLOR_SPACE_HDR10_ST2084_EXT):
+		case static_cast<int>(VK_COLOR_SPACE_HDR10_HLG_EXT):
+		case static_cast<int>(VK_COLOR_SPACE_DOLBYVISION_EXT):
+		case static_cast<int>(VK_COLOR_SPACE_BT2020_LINEAR_EXT): return true;
+		default: return false;
+	}
+}
+
+// Prefer B8G8R8A8 UNORM/SRGB + SRGB_NONLINEAR. Never pick a host-HDR color space when
+// any LDR SRGB_NONLINEAR candidate exists. Last resort: first non-HDR entry, else [0].
+[[nodiscard]] inline VkSurfaceFormatKHR SelectDefaultSwapchainSurfaceFormat(const VkSurfaceFormatKHR* formats, uint32_t count)
+{
+	VkSurfaceFormatKHR fallback {};
+	fallback.format     = VK_FORMAT_B8G8R8A8_UNORM;
+	fallback.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	if (formats == nullptr || count == 0u)
+	{
+		return fallback;
+	}
+
+	const VkSurfaceFormatKHR* unorm_srgb = nullptr;
+	const VkSurfaceFormatKHR* srgb_srgb  = nullptr;
+	const VkSurfaceFormatKHR* any_srgb   = nullptr;
+	const VkSurfaceFormatKHR* any_ldr    = nullptr;
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const auto& f = formats[i];
+		if (VulkanColorSpaceIsHostHdr(f.colorSpace))
+		{
+			continue;
+		}
+		if (any_ldr == nullptr)
+		{
+			any_ldr = &f;
+		}
+		if (f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+		{
+			if (any_srgb == nullptr)
+			{
+				any_srgb = &f;
+			}
+			if (f.format == VK_FORMAT_B8G8R8A8_UNORM && unorm_srgb == nullptr)
+			{
+				unorm_srgb = &f;
+			}
+			if (f.format == VK_FORMAT_B8G8R8A8_SRGB && srgb_srgb == nullptr)
+			{
+				srgb_srgb = &f;
+			}
+		}
+	}
+
+	if (unorm_srgb != nullptr)
+	{
+		return *unorm_srgb;
+	}
+	if (srgb_srgb != nullptr)
+	{
+		return *srgb_srgb;
+	}
+	if (any_srgb != nullptr)
+	{
+		return *any_srgb;
+	}
+	if (any_ldr != nullptr)
+	{
+		return *any_ldr;
+	}
+	// Only HDR (or empty-after-filter) surfaces: still avoid inventing a format the
+	// driver did not list; caller must cope. Prefer not silently "enabling HDR".
+	return formats[0];
+}
+
 // Combined D/S images cannot LOAD any aspect from UNDEFINED. Use UNDEFINED only when
 // every used aspect CLEARs or is DONT_CARE; otherwise keep OPTIMAL and CLEAR depth only.
 struct DepthAttachmentLoadOps
