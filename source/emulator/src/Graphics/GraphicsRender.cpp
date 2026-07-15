@@ -37,6 +37,7 @@
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -1995,6 +1996,22 @@ static VkBlendFactor get_blend_factor(uint32_t factor)
 	return VK_BLEND_FACTOR_ZERO;
 }
 
+// Env-gated producer probe only (KYTY_RT_EVIDENCE). Off by default; no guest
+// semantic change when unset. Optional KYTY_RT_EVIDENCE_PS filters to one CRC.
+static bool RtEvidenceMatches(uint32_t ps_crc)
+{
+	const char* filter = std::getenv("KYTY_RT_EVIDENCE_PS");
+	if (filter == nullptr || filter[0] == '\0')
+	{
+		return true;
+	}
+
+	char*      end   = nullptr;
+	const auto value = std::strtoul(filter, &end, 16);
+	const bool valid = end != filter && end != nullptr && *end == '\0' && value <= UINT32_MAX;
+	return valid && static_cast<uint32_t>(value) == ps_crc;
+}
+
 static VkBlendOp get_blend_op(uint32_t op)
 {
 	switch (op)
@@ -2661,6 +2678,53 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 
 	auto vs_id = ShaderGetIdVS(&vs_regs, vs_input_info);
 	auto ps_id = ShaderGetIdPS(&ps_regs, ps_input_info);
+
+	if (std::getenv("KYTY_RT_EVIDENCE") != nullptr && RtEvidenceMatches(ps_id.crc32))
+	{
+		static std::atomic<uint32_t> rt_logs {0};
+		const uint32_t               n = rt_logs.fetch_add(1);
+		if (n < 128u)
+		{
+			std::fprintf(stderr, "RT_EVIDENCE ps=%08" PRIx32 " mask=%08" PRIx32 " targets=%u depth=%d ztest=%d zwrite=%d\n", ps_id.crc32,
+			             ctx->GetRenderTargetMask(), color->targets_num,
+			             depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr ? 1 : 0,
+			             depth->depth_test_enable ? 1 : 0, depth->depth_write_enable ? 1 : 0);
+			for (uint32_t rt = 0; rt < color->targets_num; rt++)
+			{
+				const auto&    blend  = ctx->GetBlendControl(rt);
+				const auto&    target = ctx->GetRenderTarget(rt);
+				const uint32_t width =
+				    Config::IsNextGen() ? target.attrib2.width + 1u : static_cast<uint32_t>(target.size.width);
+				const uint32_t height =
+				    Config::IsNextGen() ? target.attrib2.height + 1u : static_cast<uint32_t>(target.size.height);
+				const uint32_t tile =
+				    Config::IsNextGen() ? target.attrib3.tile_mode : static_cast<uint32_t>(target.attrib.tile_mode);
+				std::fprintf(stderr,
+				             "RT_EVIDENCE rt=%u base=%016" PRIx64 " fmt=%u ctype=%u order=%u width=%u height=%u tile=%u mask=%x "
+				             "blend_en=%d src=%u dst=%u op=%u asrc=%u adst=%u aop=%u sep=%d\n",
+				             rt, target.base.addr, target.info.format, target.info.channel_type, target.info.channel_order, width,
+				             height, tile, (ctx->GetRenderTargetMask() >> (rt * 4u)) & 0xfu, blend.enable ? 1 : 0,
+				             blend.color_srcblend, blend.color_destblend, blend.color_comb_fcn, blend.alpha_srcblend,
+				             blend.alpha_destblend, blend.alpha_comb_fcn, blend.separate_alpha_blend ? 1 : 0);
+			}
+		}
+	}
+
+	if (std::getenv("KYTY_RT_EVIDENCE") != nullptr && ps_id.crc32 == 0x3f9d6677u)
+	{
+		static std::atomic_bool ps_input_logged {false};
+		if (!ps_input_logged.exchange(true))
+		{
+			const auto& sh = ctx->GetShaderRegisters();
+			std::fprintf(stderr, "PS_INPUT ps=3f9d6677 ena=%08" PRIx32 " addr=%08" PRIx32 " in_control=%u export_count=%d\n",
+			             sh.ps_input_ena, sh.ps_input_addr, sh.ps_in_control, vs_input_info->export_count);
+			for (uint32_t i = 0; i < ps_input_info->input_num; i++)
+			{
+				std::fprintf(stderr, "PS_INPUT attr%u interpolator=0x%03" PRIx32 "\n", i, ps_input_info->interpolator_settings[i]);
+			}
+			std::fflush(stderr);
+		}
+	}
 
 	Pipeline p {};
 	p.render_pass_id = framebuffer->render_pass_id;
@@ -4578,6 +4642,19 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		}
 
 		EXIT_NOT_IMPLEMENTED(tex == nullptr);
+
+		if (std::getenv("KYTY_RT_EVIDENCE") != nullptr && gen5 && !textures.desc[i].textures2d_without_sampler)
+		{
+			static std::atomic<uint32_t> sample_logs {0};
+			if (sample_logs.fetch_add(1) < 256u)
+			{
+				std::fprintf(stderr,
+				             "SAMPLE_EVIDENCE slot=%d addr=%016" PRIx64 " ufmt=%u tile=%u extent=%ux%u size=%08" PRIx32
+				             " render_texture=%d depth_texture=%d vkfmt=%d layout=%d\n",
+				             index_sampled, addr, fmt, tile, width, height, size.size, render_texture ? 1 : 0, depth_texture ? 1 : 0,
+				             static_cast<int>(tex->format), static_cast<int>(tex->layout));
+			}
+		}
 
 		if (textures.desc[i].textures2d_without_sampler)
 		{
