@@ -2519,13 +2519,18 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
+	// The host CP has one normalized 64-bit packet form. A guest size=0 wait
+	// still has 32-bit comparison semantics, so its upper mask/reference
+	// dwords must not participate in that normalized comparison.
+	const uint64_t effective_mask      = (size == 0 ? (mask & 0xffffffffull) : mask);
+	const uint64_t effective_reference = (size == 0 ? (reference & 0xffffffffull) : reference);
 	cmd[0] = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
 	cmd[1] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(address) & 0xffffffffu);
 	cmd[2] = static_cast<uint32_t>((reinterpret_cast<uint64_t>(address) >> 32u) & 0xffffffffu);
-	cmd[3] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(mask) & 0xffffffffu);
-	cmd[4] = static_cast<uint32_t>((reinterpret_cast<uint64_t>(mask) >> 32u) & 0xffffffffu);
-	cmd[5] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(reference) & 0xffffffffu);
-	cmd[6] = static_cast<uint32_t>((reinterpret_cast<uint64_t>(reference) >> 32u) & 0xffffffffu);
+	cmd[3] = static_cast<uint32_t>(effective_mask & 0xffffffffu);
+	cmd[4] = static_cast<uint32_t>((effective_mask >> 32u) & 0xffffffffu);
+	cmd[5] = static_cast<uint32_t>(effective_reference & 0xffffffffu);
+	cmd[6] = static_cast<uint32_t>((effective_reference >> 32u) & 0xffffffffu);
 	cmd[7] = compare_function;
 	cmd[8] = poll_cycles / 40;
 
