@@ -189,6 +189,11 @@ private:
 // Returns the number of sites rewritten. Pure buffer transform for unit tests.
 uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size);
 
+// Run DT_INIT / DT_PREINIT_ARRAY / DT_INIT_ARRAY for a loaded program. Each
+// entry is a void(void) guest function at base_vaddr + offset. Testable helper.
+// Main executables never go through StartModule; call this before run_entry.
+void LoaderRunProgramInitializers(uint64_t base_vaddr, const DynamicInfo& info);
+
 } // namespace Kyty::Loader
 
 #endif // KYTY_EMU_ENABLED

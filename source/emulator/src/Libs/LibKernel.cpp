@@ -14,6 +14,7 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Kernel/Semaphore.h"
+#include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/RuntimeLinker.h"
@@ -237,14 +238,26 @@ static void KYTY_SYSV_ABI KernelRtldSetApplicationHeapAPI(void* api[])
 {
 	PRINT_NAME();
 
+	if (api == nullptr)
+	{
+		return;
+	}
+
 	for (int i = 0; i < 10; i++)
 	{
 		printf("\tapi[%d] = 0x%016" PRIx64 "\n", i, reinterpret_cast<uint64_t>(api[i]));
 	}
 
-	[[maybe_unused]] auto* heap_malloc         = api[0];
-	[[maybe_unused]] auto* heap_free           = api[1];
-	[[maybe_unused]] auto* heap_posix_memalign = api[6];
+	// Register the guest v2 ApplicationHeap table (size=0x78, version=2). Create
+	// is invoked when EnsureInitialized has a main program with executable text
+	// bounds — typically immediately if entry is known, else before DT_INIT.
+	ApplicationHeap::RegisterApi(api);
+
+	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
+	if (const uint64_t entry = rt->GetEntry(); entry != 0)
+	{
+		ApplicationHeap::EnsureInitialized(rt->FindProgramByAddr(entry));
+	}
 }
 
 static int64_t KYTY_SYSV_ABI write(int d, const char* str, int64_t size)

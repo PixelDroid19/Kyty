@@ -487,6 +487,8 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 		case 7: mode = VirtualMemory::Mode::ExecuteReadWrite; break;
 		case 0x32:
 		case 0x33:
+		case 0xf3:
+			// 0xf3: Gen5 direct-map style GPU+CPU RW used by application-heap create.
 			mode     = VirtualMemory::Mode::ReadWrite;
 			gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
 			break;
@@ -768,6 +770,8 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		case 0x07: mode = VirtualMemory::Mode::ExecuteReadWrite; break;
 		case 0x32:
 		case 0x33:
+		case 0xf3:
+			// 0xf3: Gen5 direct-map style GPU+CPU RW used by application-heap create.
 			mode     = VirtualMemory::Mode::ReadWrite;
 			gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
 			break;

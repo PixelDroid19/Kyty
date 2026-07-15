@@ -14,6 +14,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Loader/Elf.h"
 #include "Emulator/Loader/Jit.h"
 #include "Emulator/Loader/SymbolDatabase.h"
@@ -197,6 +198,44 @@ static KYTY_SYSV_ABI void run_entry(uint64_t addr, EntryParams* params, atexit_f
 static KYTY_SYSV_ABI int run_ini_fini(uint64_t addr, size_t args, const void* argp, module_func_t func)
 {
 	return reinterpret_cast<module_ini_fini_func_t>(addr)(args, argp, func);
+}
+
+static void run_init_array(uint64_t base_vaddr, uint64_t array_vaddr, uint64_t array_size)
+{
+	if (array_vaddr == 0 || array_size < sizeof(uint64_t))
+	{
+		return;
+	}
+
+	auto*      entries = reinterpret_cast<uint64_t*>(base_vaddr + array_vaddr);
+	const auto count   = static_cast<size_t>(array_size / sizeof(uint64_t));
+
+	for (size_t i = 0; i < count; i++)
+	{
+		const uint64_t fn = entries[i];
+		if (fn != 0)
+		{
+			reinterpret_cast<void (*)()>(fn)();
+		}
+	}
+}
+
+void LoaderRunProgramInitializers(uint64_t base_vaddr, const DynamicInfo& info)
+{
+	if (info.preinit_array_vaddr != 0 && info.preinit_array_size != 0)
+	{
+		run_init_array(base_vaddr, info.preinit_array_vaddr, info.preinit_array_size);
+	}
+
+	if (info.init_vaddr != 0)
+	{
+		reinterpret_cast<void (*)()>(base_vaddr + info.init_vaddr)();
+	}
+
+	if (info.init_array_vaddr != 0 && info.init_array_size != 0)
+	{
+		run_init_array(base_vaddr, info.init_array_vaddr, info.init_array_size);
+	}
 }
 
 static uint64_t get_aligned_size(const Elf64_Phdr* p)
@@ -1010,6 +1049,27 @@ void RuntimeLinker::Execute()
 		printf("stack_addr = %" PRIx64 "\n", reinterpret_cast<uint64_t>(&p));
 
 		Core::mem_guest_thread_enter();
+
+		// Main executables never went through StartModule; run DT_INIT /
+		// init_array so static constructors (heap bootstrap, etc.) execute before
+		// _start hands off to the game.
+		{
+			Core::LockGuard lock(m_mutex);
+			for (auto* program: m_programs)
+			{
+				if (program != nullptr && program->elf != nullptr && !program->elf->IsShared() && program->dynamic_info != nullptr)
+				{
+					printf("Run main initializers: preinit=0x%016" PRIx64 " init=0x%016" PRIx64 " init_array=0x%016" PRIx64
+					       " size=0x%016" PRIx64 "\n",
+					       program->dynamic_info->preinit_array_vaddr, program->dynamic_info->init_vaddr,
+					       program->dynamic_info->init_array_vaddr, program->dynamic_info->init_array_size);
+					Kyty::Libs::LibKernel::ApplicationHeap::EnsureInitialized(program);
+					LoaderRunProgramInitializers(program->base_vaddr, *program->dynamic_info);
+					break;
+				}
+			}
+		}
+
 		run_entry(entry, &p, ProgramExitHandler);
 		Core::mem_guest_thread_leave();
 	}
