@@ -1,4 +1,5 @@
 #include "Kyty/DevTools/Telemetry/Event.h"
+#include "Kyty/DevTools/Telemetry/ThreadInstanceAllocator.h"
 #include "Kyty/DevTools/Telemetry/WriterRegistry.h"
 #include "Kyty/DevTools/Telemetry/WorkerTelemetry.h"
 #include "Kyty/DevTools/Protocol/Protocol.h"
@@ -14,6 +15,27 @@
 UT_BEGIN(DevToolsEventRing);
 
 using namespace Kyty::DevTools;
+
+TEST(DevToolsEventRing, ThreadInstanceAllocatorStartsAtOneAndNeverReuses)
+{
+	ThreadInstanceAllocator allocator;
+	uint64_t                first  = 0;
+	uint64_t                second = 0;
+	ASSERT_TRUE(allocator.Allocate(&first));
+	ASSERT_TRUE(allocator.Allocate(&second));
+	EXPECT_EQ(first, 1u);
+	EXPECT_EQ(second, 2u);
+	EXPECT_FALSE(allocator.Allocate(nullptr));
+}
+
+TEST(DevToolsEventRing, ThreadInstanceAllocatorRejectsProgressRefOverflow)
+{
+	ThreadInstanceAllocator allocator(ThreadInstanceAllocator::kMaxInstance);
+	uint64_t                last = 0;
+	ASSERT_TRUE(allocator.Allocate(&last));
+	EXPECT_EQ(last, ThreadInstanceAllocator::kMaxInstance);
+	EXPECT_FALSE(allocator.Allocate(&last));
+}
 
 TEST(DevToolsEventRing, EventRecordHasWireCompatibleFields)
 {
@@ -370,6 +392,32 @@ TEST(DevToolsEventRing, WorkerTelemetryPublishesHandshakeAndLifecycle)
 	ASSERT_EQ(timeline.count, 2u);
 	EXPECT_EQ(timeline.events[0].event, static_cast<uint16_t>(EventId::ThreadExit));
 	EXPECT_EQ(timeline.events[1].event, static_cast<uint16_t>(EventId::ThreadStart));
+}
+
+TEST(DevToolsEventRing, WorkerTelemetryAllocatesThreadInstanceWhenUnset)
+{
+	std::vector<uint8_t> mapping(static_cast<size_t>(kProtocolMappingSize), 0);
+	ParentProtocolInit init {};
+	init.requested_mode = RecordingMode::Full;
+	for (uint32_t i = 0; i < sizeof(init.nonce); ++i)
+	{
+		init.nonce[i] = static_cast<uint8_t>(0x40u + i);
+	}
+	ASSERT_EQ(InitializeProtocolOwner({mapping.data(), mapping.size()}, init), ProtocolResult::Ok);
+
+	WorkerTelemetryOptions options {};
+	options.requested_mode = RecordingMode::Full;
+
+	WorkerTelemetry telemetry;
+	ASSERT_TRUE(telemetry.Start({mapping.data(), mapping.size()}, options));
+
+	ProtocolReadLossState loss {};
+	TimelineSnapshot timeline {};
+	ASSERT_EQ(ReadTimeline({mapping.data(), mapping.size()}, &loss, &timeline), ProtocolResult::Ok);
+	ASSERT_EQ(timeline.count, 1u);
+	EXPECT_EQ(timeline.events[0].correlation, 1u);
+
+	ASSERT_TRUE(telemetry.Stop());
 }
 
 TEST(DevToolsEventRing, WorkerTelemetryRejectsInvalidMappingWithoutActivation)

@@ -8,6 +8,7 @@ target_sources(kyty_devtools_core PRIVATE
 	src/Telemetry/Event.cpp
 	src/Telemetry/EventRing.cpp
 	src/Telemetry/WriterRegistry.cpp
+	src/Telemetry/ThreadInstanceAllocator.cpp
 	src/Telemetry/WorkerTelemetry.cpp
 	src/Telemetry/Progress.cpp
 	src/Diagnostics/Checksum.cpp

@@ -1,5 +1,6 @@
 #include "Kyty/DevTools/Telemetry/WorkerTelemetry.h"
 
+#include "Kyty/DevTools/Telemetry/ThreadInstanceAllocator.h"
 #include "Kyty/DevTools/Time/MonotonicClock.h"
 
 #include <cstring>
@@ -70,6 +71,7 @@ struct WorkerTelemetry::State
 	MutableMappingView    mapping {};
 	WriterRegistry        writers {};
 	ProgressRegistry      progress {};
+	ThreadInstanceAllocator thread_instances {};
 	TelemetryWriterToken  writer_token {};
 	RecordingMode         mode = RecordingMode::MetricsOnly;
 	uint64_t              thread_instance = 0;
@@ -86,8 +88,14 @@ bool WorkerTelemetry::Start(MutableMappingView mapping, const WorkerTelemetryOpt
 	if (!state_ || state_->active || mapping.data == nullptr || mapping.size < kProtocolMappingSize ||
 	    (options.requested_mode != RecordingMode::MetricsOnly && options.requested_mode != RecordingMode::Full) ||
 	    options.logging_mode == LoggingMode::Unknown || options.logging_mode > LoggingMode::Directory ||
-	    options.dirty > 1u || options.validation_enabled > 1u ||
-	    (options.requested_mode == RecordingMode::Full && options.diagnostic_thread_instance == 0u))
+		options.dirty > 1u || options.validation_enabled > 1u ||
+	    (options.requested_mode == RecordingMode::Full && options.diagnostic_thread_instance > ThreadInstanceAllocator::kMaxInstance))
+	{
+		return false;
+	}
+
+	uint64_t thread_instance = options.diagnostic_thread_instance;
+	if (options.requested_mode == RecordingMode::Full && thread_instance == 0u && !state_->thread_instances.Allocate(&thread_instance))
 	{
 		return false;
 	}
@@ -111,7 +119,7 @@ bool WorkerTelemetry::Start(MutableMappingView mapping, const WorkerTelemetryOpt
 
 	state_->mapping         = mapping;
 	state_->mode            = options.requested_mode;
-	state_->thread_instance = options.diagnostic_thread_instance;
+	state_->thread_instance = thread_instance;
 	state_->active          = true;
 
 	if (state_->mode == RecordingMode::MetricsOnly)
@@ -126,7 +134,7 @@ bool WorkerTelemetry::Start(MutableMappingView mapping, const WorkerTelemetryOpt
 	}
 
 	TelemetryWriterToken token {};
-	if (!state_->writers.Reserve(kWorkerRole, options.diagnostic_thread_instance, &token))
+	if (!state_->writers.Reserve(kWorkerRole, thread_instance, &token))
 	{
 		state_->mapping = {};
 		state_->active  = false;
