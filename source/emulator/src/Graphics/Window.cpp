@@ -1314,18 +1314,19 @@ static void VulkanGetSurfaceCapabilities(VkPhysicalDevice physical_device, VkSur
 	r->present_modes = Vector<VkPresentModeKHR>(present_modes_count); // @suppress("Ambiguous problem")
 	vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &present_modes_count, r->present_modes.GetData());
 
-	r->format_srgb_bgra32 = false;
+	r->format_srgb_bgra32  = false;
+	r->format_unorm_bgra32 = false;
 	for (const auto& f: r->formats)
 	{
+		// Scan all surface formats; do not stop at the first match so both
+		// UNORM and SRGB LDR candidates are visible to swapchain selection.
 		if (f.format == VK_FORMAT_B8G8R8A8_SRGB && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
 		{
 			r->format_srgb_bgra32 = true;
-			break;
 		}
 		if (f.format == VK_FORMAT_B8G8R8A8_UNORM && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
 		{
 			r->format_unorm_bgra32 = true;
-			break;
 		}
 	}
 }
@@ -2075,6 +2076,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	create_info.surface       = surface;
 	create_info.minImageCount = image_count;
 
+	// Host presentation default is ordinary LDR sRGB. Never prefer HDR10/HLG/etc.
+	// even when a driver lists them first (SelectDefaultSwapchainSurfaceFormat).
 	if (r->format_unorm_bgra32)
 	{
 		create_info.imageFormat     = VK_FORMAT_B8G8R8A8_UNORM;
@@ -2085,8 +2088,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 		create_info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 	} else
 	{
-		create_info.imageFormat     = r->formats.At(0).format;
-		create_info.imageColorSpace = r->formats.At(0).colorSpace;
+		const auto chosen =
+		    SelectDefaultSwapchainSurfaceFormat(r->formats.GetData(), static_cast<uint32_t>(r->formats.Size()));
+		create_info.imageFormat     = chosen.format;
+		create_info.imageColorSpace = chosen.colorSpace;
 	}
 
 	create_info.imageExtent           = extent;

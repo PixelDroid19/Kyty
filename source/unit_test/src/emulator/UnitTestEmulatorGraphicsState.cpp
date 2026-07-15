@@ -686,6 +686,44 @@ TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesGuestClearWords)
 	EXPECT_FLOAT_EQ(ops.clear_a, 1.0f);
 }
 
+// Host presentation: default swapchain selection must stay LDR sRGB even when a
+// driver lists HDR10 (or other host-HDR color spaces) first.
+TEST(EmulatorGraphicsState, HostHdrColorSpacesAreDetected)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(VulkanColorSpaceIsHostHdr(VK_COLOR_SPACE_HDR10_ST2084_EXT));
+	EXPECT_TRUE(VulkanColorSpaceIsHostHdr(VK_COLOR_SPACE_HDR10_HLG_EXT));
+	EXPECT_TRUE(VulkanColorSpaceIsHostHdr(VK_COLOR_SPACE_DOLBYVISION_EXT));
+	EXPECT_TRUE(VulkanColorSpaceIsHostHdr(VK_COLOR_SPACE_BT2020_LINEAR_EXT));
+	EXPECT_FALSE(VulkanColorSpaceIsHostHdr(VK_COLOR_SPACE_SRGB_NONLINEAR_KHR));
+}
+
+TEST(EmulatorGraphicsState, DefaultSwapchainPrefersLdrSrgbOverHdr10First)
+{
+	using namespace Kyty::Libs::Graphics;
+	const VkSurfaceFormatKHR formats[] = {
+	    {VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_HDR10_ST2084_EXT},
+	    {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+	    {VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+	};
+	const auto chosen = SelectDefaultSwapchainSurfaceFormat(formats, 3u);
+	EXPECT_EQ(chosen.format, VK_FORMAT_B8G8R8A8_UNORM);
+	EXPECT_EQ(chosen.colorSpace, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+	EXPECT_FALSE(VulkanColorSpaceIsHostHdr(chosen.colorSpace));
+}
+
+TEST(EmulatorGraphicsState, DefaultSwapchainPrefersUnormSrgbOverSrgbFormat)
+{
+	using namespace Kyty::Libs::Graphics;
+	const VkSurfaceFormatKHR formats[] = {
+	    {VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+	    {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+	};
+	const auto chosen = SelectDefaultSwapchainSurfaceFormat(formats, 2u);
+	EXPECT_EQ(chosen.format, VK_FORMAT_B8G8R8A8_UNORM);
+	EXPECT_EQ(chosen.colorSpace, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+}
+
 TEST(EmulatorGraphicsState, ResolvesContiguousMultiRenderTargetLayout)
 {
 	auto zero = State::ResolveColorTargetLayout(0u);
