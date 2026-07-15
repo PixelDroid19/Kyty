@@ -442,14 +442,12 @@ int RunSelfTest(const char* synthetic_mode, const char* absolute_output_dir, uin
 		return 2;
 	}
 
-	// Re-exec self as synthetic worker via /proc/self/exe.
+	// Re-exec self as synthetic worker through the host executable-path adapter.
 	char self_path[512] = {};
-	const ssize_t n = ::readlink("/proc/self/exe", self_path, sizeof(self_path) - 1u);
-	if (n <= 0)
+	if (!QueryCurrentExecutablePath(self_path, sizeof(self_path)))
 	{
 		return 2;
 	}
-	self_path[n] = '\0';
 
 	const char* argv[] = {self_path, "synthetic", synthetic_mode, nullptr};
 	SupervisorOptions opt {};

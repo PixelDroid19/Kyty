@@ -7,10 +7,17 @@
 #include <cstring>
 #include <memory>
 #include <fcntl.h>
+#include <limits>
 #include <spawn.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#if defined(__APPLE__)
+#include <libproc.h>
+#include <mach-o/dyld.h>
+#include <sys/proc_info.h>
+#endif
 
 extern char** environ;
 
@@ -149,8 +156,32 @@ LaunchResult ProcessLauncher::Launch(const LaunchOptions& options) noexcept
 		result.error = ProcessOperationError::SpawnFailed;
 		return result;
 	}
+#if defined(__APPLE__)
+	if (posix_spawn_file_actions_addinherit_np(&actions, 3) != 0 ||
+	    posix_spawn_file_actions_addinherit_np(&actions, 4) != 0)
+	{
+		posix_spawn_file_actions_destroy(&actions);
+		result.error = ProcessOperationError::SpawnFailed;
+		return result;
+	}
+#endif
 
-#if defined(__linux__) && defined(POSIX_SPAWN_SETSID)
+#if defined(__APPLE__)
+	posix_spawnattr_t spawn_attr {};
+	if (posix_spawnattr_init(&spawn_attr) != 0)
+	{
+		posix_spawn_file_actions_destroy(&actions);
+		result.error = ProcessOperationError::Unsupported;
+		return result;
+	}
+	if (posix_spawnattr_setflags(&spawn_attr, POSIX_SPAWN_CLOEXEC_DEFAULT) != 0)
+	{
+		posix_spawnattr_destroy(&spawn_attr);
+		posix_spawn_file_actions_destroy(&actions);
+		result.error = ProcessOperationError::Unsupported;
+		return result;
+	}
+#elif defined(__linux__) && defined(POSIX_SPAWN_SETSID)
 	// Prefer closefrom when available (glibc 2.34+).
 #if defined(__GLIBC__)
 #if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34)
@@ -189,6 +220,9 @@ LaunchResult ProcessLauncher::Launch(const LaunchOptions& options) noexcept
 	char** envp = static_cast<char**>(std::calloc(static_cast<size_t>(env_count) + 2u, sizeof(char*)));
 	if (envp == nullptr)
 	{
+	#if defined(__APPLE__)
+		posix_spawnattr_destroy(&spawn_attr);
+	#endif
 		posix_spawn_file_actions_destroy(&actions);
 		result.error = ProcessOperationError::SpawnFailed;
 		return result;
@@ -213,6 +247,9 @@ LaunchResult ProcessLauncher::Launch(const LaunchOptions& options) noexcept
 	if (argv == nullptr)
 	{
 		std::free(envp);
+	#if defined(__APPLE__)
+		posix_spawnattr_destroy(&spawn_attr);
+	#endif
 		posix_spawn_file_actions_destroy(&actions);
 		result.error = ProcessOperationError::SpawnFailed;
 		return result;
@@ -223,11 +260,20 @@ LaunchResult ProcessLauncher::Launch(const LaunchOptions& options) noexcept
 	}
 
 	pid_t pid = -1;
-	const int rc = posix_spawn(&pid, options.executable, &actions, nullptr, argv, envp);
+	const int rc = posix_spawn(&pid, options.executable, &actions,
+#if defined(__APPLE__)
+	                          &spawn_attr,
+#else
+	                          nullptr,
+#endif
+	                          argv, envp);
+
+#if defined(__APPLE__)
+	posix_spawnattr_destroy(&spawn_attr);
+#endif
 	posix_spawn_file_actions_destroy(&actions);
 	std::free(argv);
 	std::free(envp);
-
 	if (rc != 0)
 	{
 		result.error          = ProcessOperationError::SpawnFailed;
@@ -323,13 +369,29 @@ bool ParseLinuxProcStatStartTicks(const char* stat_line, uint64_t* start_ticks) 
 	return true;
 }
 
-ProcessIdentityError QueryProcessIdentity(const ProcessHandle& handle, ProcessIdentity* out) noexcept
+ProcessIdentityError QueryProcessIdentityByPid(uint64_t pid, ProcessIdentity* out) noexcept
 {
-	if (out == nullptr || !handle.IsValid())
+	if (out == nullptr || pid == 0u)
 	{
 		return ProcessIdentityError::Unavailable;
 	}
-	const pid_t pid = handle.GetState()->pid;
+	*out = {};
+	if (pid > static_cast<uint64_t>(std::numeric_limits<pid_t>::max()))
+	{
+		return ProcessIdentityError::Overflow;
+	}
+
+#if defined(__APPLE__)
+	struct proc_bsdinfo info {};
+	const int size = ::proc_pidinfo(static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+	if (size != static_cast<int>(sizeof(info)) || (info.pbi_start_tvsec == 0u && info.pbi_start_tvusec == 0u))
+	{
+		return ProcessIdentityError::Unavailable;
+	}
+	out->pid         = pid;
+	out->start_token = info.pbi_start_tvsec * 1000000ull + info.pbi_start_tvusec;
+	return ProcessIdentityError::None;
+#elif defined(__linux__)
 	char        path[64] = {};
 	std::snprintf(path, sizeof(path), "/proc/%d/stat", static_cast<int>(pid));
 	const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
@@ -353,35 +415,75 @@ ProcessIdentityError QueryProcessIdentity(const ProcessHandle& handle, ProcessId
 	out->pid         = static_cast<uint64_t>(pid);
 	out->start_token = ticks;
 	return ProcessIdentityError::None;
+#else
+	return ProcessIdentityError::Unavailable;
+#endif
+}
+
+ProcessIdentityError QueryProcessIdentity(const ProcessHandle& handle, ProcessIdentity* out) noexcept
+{
+	if (out == nullptr || !handle.IsValid())
+	{
+		return ProcessIdentityError::Unavailable;
+	}
+	return QueryProcessIdentityByPid(static_cast<uint64_t>(handle.GetState()->pid), out);
 }
 
 ProcessIdentityProbe ProbeProcessIdentity(uint64_t pid, uint64_t expected_start_token) noexcept
 {
-	char path[64] = {};
-	std::snprintf(path, sizeof(path), "/proc/%llu/stat", static_cast<unsigned long long>(pid));
-	const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
-	if (fd < 0)
+	ProcessIdentity actual {};
+	const ProcessIdentityError result = QueryProcessIdentityByPid(pid, &actual);
+	if (result == ProcessIdentityError::None)
 	{
-		return ProcessIdentityProbe::Dead;
+		return actual.start_token == expected_start_token ? ProcessIdentityProbe::AliveMatch : ProcessIdentityProbe::AliveDifferentStart;
 	}
-	char buf[1024] = {};
-	const ssize_t n = ::read(fd, buf, sizeof(buf) - 1u);
-	::close(fd);
-	if (n <= 0)
+	if (result == ProcessIdentityError::Overflow)
+	{
+		return ProcessIdentityProbe::Overflow;
+	}
+
+	// An unavailable query is only treated as dead when the OS confirms that the
+	// pid no longer exists. Permission and other query failures retain the temp.
+	if (pid > static_cast<uint64_t>(std::numeric_limits<pid_t>::max()))
+	{
+		return ProcessIdentityProbe::Overflow;
+	}
+	errno = 0;
+	if (::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM)
 	{
 		return ProcessIdentityProbe::Unreadable;
 	}
-	buf[n] = '\0';
-	uint64_t ticks = 0;
-	if (!ParseLinuxProcStatStartTicks(buf, &ticks))
+	return errno == ESRCH ? ProcessIdentityProbe::Dead : ProcessIdentityProbe::Unreadable;
+}
+
+bool QueryCurrentExecutablePath(char* path, uint32_t capacity) noexcept
+{
+	if (path == nullptr || capacity == 0u)
 	{
-		return ProcessIdentityProbe::Malformed;
+		return false;
 	}
-	if (ticks == expected_start_token)
+	path[0] = '\0';
+#if defined(__APPLE__)
+	uint32_t size = capacity;
+	if (_NSGetExecutablePath(path, &size) != 0 || path[0] == '\0')
 	{
-		return ProcessIdentityProbe::AliveMatch;
+		path[0] = '\0';
+		return false;
 	}
-	return ProcessIdentityProbe::AliveDifferentStart;
+	path[capacity - 1u] = '\0';
+	return true;
+#elif defined(__linux__)
+	const ssize_t n = ::readlink("/proc/self/exe", path, static_cast<size_t>(capacity - 1u));
+	if (n <= 0 || static_cast<uint32_t>(n) >= capacity)
+	{
+		path[0] = '\0';
+		return false;
+	}
+	path[n] = '\0';
+	return true;
+#else
+	return false;
+#endif
 }
 
 } // namespace Kyty::DevTools
