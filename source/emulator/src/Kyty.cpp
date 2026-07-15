@@ -11,6 +11,7 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Audio.h"
+#include "Emulator/Agent/AgentSubsystem.h"
 #include "Emulator/Common.h"
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
@@ -82,6 +83,7 @@ static void Init(const Scripts::ScriptVar& cfg)
 	auto* slist = Core::SubsystemsList::Instance();
 
 	auto* audio       = Libs::Audio::AudioSubsystem::Instance();
+	auto* agent       = Emulator::Agent::AgentToolsSubsystem::Instance();
 	auto* config      = Config::ConfigSubsystem::Instance();
 	auto* controller  = Libs::Controller::ControllerSubsystem::Instance();
 	auto* core        = Core::CoreSubsystem::Instance();
@@ -102,6 +104,7 @@ static void Init(const Scripts::ScriptVar& cfg)
 	Config::Load(cfg);
 
 	slist->Add(audio, {core, log, pthread, memory});
+	slist->Add(agent, {core, controller, graphics});
 	slist->Add(controller, {core, log, config});
 	slist->Add(file_system, {core, log, pthread});
 	slist->Add(graphics, {core, log, pthread, memory, config, profiler, controller, runtime});
@@ -247,6 +250,18 @@ KYTY_SCRIPT_FUNC(kyty_load_param_sfo_func)
 	{
 		Loader::SystemContentLoadParamSfo(Scripts::ArgGetVar(0).ToString());
 	}
+
+	return 0;
+}
+
+KYTY_SCRIPT_FUNC(kyty_load_param_json_func)
+{
+	if (Scripts::ArgGetVarCount() != 1)
+	{
+		EXIT("invalid args\n");
+	}
+
+	Loader::SystemContentLoadParamJson(Scripts::ArgGetVar(0).ToString());
 
 	return 0;
 }
@@ -427,6 +442,7 @@ void kyty_reg()
 	Scripts::RegisterFunc("kyty_load_symbols", LuaFunc::kyty_load_symbols_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_load_symbols_all", LuaFunc::kyty_load_symbols_all_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_load_param_sfo", LuaFunc::kyty_load_param_sfo_func, LuaFunc::kyty_help);
+	Scripts::RegisterFunc("kyty_load_param_json", LuaFunc::kyty_load_param_json_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_dbg_dump", LuaFunc::kyty_dbg_dump_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_execute", LuaFunc::kyty_execute_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_mount", LuaFunc::kyty_mount_func, LuaFunc::kyty_help);

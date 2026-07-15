@@ -10,6 +10,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <cstring>
 #include <cstdlib>
 
 #ifdef KYTY_EMU_ENABLED
@@ -128,6 +129,357 @@ private:
 };
 
 static GameController* g_controller = nullptr;
+
+struct AgentPadOverlay
+{
+	enum class TapPhase: uint8_t
+	{
+		None,
+		ReleaseBeforePress,
+		Pressed,
+		ReleaseAfterPress,
+	};
+
+	Core::Mutex mutex;
+	uint32_t    buttons                                         = 0;
+	uint8_t     axes[static_cast<int>(Axis::AxisMax)]           = {128, 128, 128, 128, 0, 0};
+	bool        axis_set[static_cast<int>(Axis::AxisMax)]       = {};
+	TapPhase    tap_phase                                       = TapPhase::None;
+	uint32_t    tap_button                                      = 0;
+	uint64_t    read_state_samples                               = 0;
+	uint64_t    read_samples                                     = 0;
+	uint64_t    delivered_taps                                   = 0;
+};
+
+static AgentPadOverlay g_agent_pad;
+
+static void AgentPadApplyToButtonsAndAxes(bool advance_tap, uint32_t* buttons, uint8_t* left_x, uint8_t* left_y, uint8_t* right_x,
+                                          uint8_t* right_y, uint8_t* l2, uint8_t* r2)
+{
+	Core::LockGuard lock(g_agent_pad.mutex);
+	uint32_t         tap_bits = 0;
+	switch (g_agent_pad.tap_phase)
+	{
+		case AgentPadOverlay::TapPhase::ReleaseBeforePress:
+			// First guest sample stays released so edge detectors see 0 → 1.
+			tap_bits = 0;
+			if (advance_tap)
+			{
+				g_agent_pad.tap_phase = AgentPadOverlay::TapPhase::Pressed;
+			}
+			break;
+		case AgentPadOverlay::TapPhase::Pressed:
+			tap_bits = g_agent_pad.tap_button;
+			if (advance_tap)
+			{
+				g_agent_pad.tap_phase = AgentPadOverlay::TapPhase::ReleaseAfterPress;
+				++g_agent_pad.delivered_taps;
+			}
+			break;
+		case AgentPadOverlay::TapPhase::ReleaseAfterPress:
+			tap_bits = 0;
+			if (advance_tap)
+			{
+				g_agent_pad.tap_phase  = AgentPadOverlay::TapPhase::None;
+				g_agent_pad.tap_button = 0;
+			}
+			break;
+		case AgentPadOverlay::TapPhase::None: break;
+	}
+
+	const bool active = g_agent_pad.buttons != 0 || tap_bits != 0 || [&]() {
+		for (int i = 0; i < static_cast<int>(Axis::AxisMax); ++i)
+		{
+			if (g_agent_pad.axis_set[i])
+			{
+				return true;
+			}
+		}
+		return false;
+	}();
+	if (active && advance_tap)
+	{
+		++g_agent_pad.read_state_samples;
+	} else if (active)
+	{
+		++g_agent_pad.read_samples;
+	}
+	if (buttons != nullptr)
+	{
+		*buttons |= g_agent_pad.buttons | tap_bits;
+	}
+	if (g_agent_pad.axis_set[static_cast<int>(Axis::LeftX)] && left_x != nullptr)
+	{
+		*left_x = g_agent_pad.axes[static_cast<int>(Axis::LeftX)];
+	}
+	if (g_agent_pad.axis_set[static_cast<int>(Axis::LeftY)] && left_y != nullptr)
+	{
+		*left_y = g_agent_pad.axes[static_cast<int>(Axis::LeftY)];
+	}
+	if (g_agent_pad.axis_set[static_cast<int>(Axis::RightX)] && right_x != nullptr)
+	{
+		*right_x = g_agent_pad.axes[static_cast<int>(Axis::RightX)];
+	}
+	if (g_agent_pad.axis_set[static_cast<int>(Axis::RightY)] && right_y != nullptr)
+	{
+		*right_y = g_agent_pad.axes[static_cast<int>(Axis::RightY)];
+	}
+	if (g_agent_pad.axis_set[static_cast<int>(Axis::TriggerLeft)] && l2 != nullptr)
+	{
+		*l2 = g_agent_pad.axes[static_cast<int>(Axis::TriggerLeft)];
+		if (*l2 > 0 && buttons != nullptr)
+		{
+			*buttons |= PAD_BUTTON_L2;
+		}
+	}
+	if (g_agent_pad.axis_set[static_cast<int>(Axis::TriggerRight)] && r2 != nullptr)
+	{
+		*r2 = g_agent_pad.axes[static_cast<int>(Axis::TriggerRight)];
+		if (*r2 > 0 && buttons != nullptr)
+		{
+			*buttons |= PAD_BUTTON_R2;
+		}
+	}
+}
+
+bool AgentPadButtonFromName(const char* name, uint32_t* out_button)
+{
+	if (name == nullptr || out_button == nullptr)
+	{
+		return false;
+	}
+	if (std::strcmp(name, "cross") == 0)
+	{
+		*out_button = PAD_BUTTON_CROSS;
+		return true;
+	}
+	if (std::strcmp(name, "circle") == 0)
+	{
+		*out_button = PAD_BUTTON_CIRCLE;
+		return true;
+	}
+	if (std::strcmp(name, "square") == 0)
+	{
+		*out_button = PAD_BUTTON_SQUARE;
+		return true;
+	}
+	if (std::strcmp(name, "triangle") == 0)
+	{
+		*out_button = PAD_BUTTON_TRIANGLE;
+		return true;
+	}
+	if (std::strcmp(name, "up") == 0)
+	{
+		*out_button = PAD_BUTTON_UP;
+		return true;
+	}
+	if (std::strcmp(name, "down") == 0)
+	{
+		*out_button = PAD_BUTTON_DOWN;
+		return true;
+	}
+	if (std::strcmp(name, "left") == 0)
+	{
+		*out_button = PAD_BUTTON_LEFT;
+		return true;
+	}
+	if (std::strcmp(name, "right") == 0)
+	{
+		*out_button = PAD_BUTTON_RIGHT;
+		return true;
+	}
+	if (std::strcmp(name, "l1") == 0)
+	{
+		*out_button = PAD_BUTTON_L1;
+		return true;
+	}
+	if (std::strcmp(name, "r1") == 0)
+	{
+		*out_button = PAD_BUTTON_R1;
+		return true;
+	}
+	if (std::strcmp(name, "l2") == 0)
+	{
+		*out_button = PAD_BUTTON_L2;
+		return true;
+	}
+	if (std::strcmp(name, "r2") == 0)
+	{
+		*out_button = PAD_BUTTON_R2;
+		return true;
+	}
+	if (std::strcmp(name, "l3") == 0)
+	{
+		*out_button = PAD_BUTTON_L3;
+		return true;
+	}
+	if (std::strcmp(name, "r3") == 0)
+	{
+		*out_button = PAD_BUTTON_R3;
+		return true;
+	}
+	if (std::strcmp(name, "options") == 0)
+	{
+		*out_button = PAD_BUTTON_OPTIONS;
+		return true;
+	}
+	if (std::strcmp(name, "touch_pad") == 0 || std::strcmp(name, "touchpad") == 0)
+	{
+		*out_button = PAD_BUTTON_TOUCH_PAD;
+		return true;
+	}
+	return false;
+}
+
+bool AgentPadAxisFromName(const char* name, Axis* out_axis)
+{
+	if (name == nullptr || out_axis == nullptr)
+	{
+		return false;
+	}
+	if (std::strcmp(name, "left_x") == 0)
+	{
+		*out_axis = Axis::LeftX;
+		return true;
+	}
+	if (std::strcmp(name, "left_y") == 0)
+	{
+		*out_axis = Axis::LeftY;
+		return true;
+	}
+	if (std::strcmp(name, "right_x") == 0)
+	{
+		*out_axis = Axis::RightX;
+		return true;
+	}
+	if (std::strcmp(name, "right_y") == 0)
+	{
+		*out_axis = Axis::RightY;
+		return true;
+	}
+	if (std::strcmp(name, "l2") == 0 || std::strcmp(name, "trigger_left") == 0)
+	{
+		*out_axis = Axis::TriggerLeft;
+		return true;
+	}
+	if (std::strcmp(name, "r2") == 0 || std::strcmp(name, "trigger_right") == 0)
+	{
+		*out_axis = Axis::TriggerRight;
+		return true;
+	}
+	return false;
+}
+
+void AgentPadSetButton(uint32_t button, bool down)
+{
+	Core::LockGuard lock(g_agent_pad.mutex);
+	if (down)
+	{
+		g_agent_pad.buttons |= button;
+	} else
+	{
+		g_agent_pad.buttons &= ~button;
+	}
+}
+
+void AgentPadSetAxis(Axis axis, uint8_t value)
+{
+	const int axis_id = static_cast<int>(axis);
+	if (axis_id < 0 || axis_id >= static_cast<int>(Axis::AxisMax))
+	{
+		return;
+	}
+	Core::LockGuard lock(g_agent_pad.mutex);
+	g_agent_pad.axes[axis_id]     = value;
+	g_agent_pad.axis_set[axis_id] = true;
+	if (axis == Axis::TriggerLeft)
+	{
+		if (value > 0)
+		{
+			g_agent_pad.buttons |= PAD_BUTTON_L2;
+		} else
+		{
+			g_agent_pad.buttons &= ~PAD_BUTTON_L2;
+		}
+	}
+	if (axis == Axis::TriggerRight)
+	{
+		if (value > 0)
+		{
+			g_agent_pad.buttons |= PAD_BUTTON_R2;
+		} else
+		{
+			g_agent_pad.buttons &= ~PAD_BUTTON_R2;
+		}
+	}
+}
+
+bool AgentPadScheduleTap(uint32_t button)
+{
+	if (button == 0)
+	{
+		return false;
+	}
+	Core::LockGuard lock(g_agent_pad.mutex);
+	if (g_agent_pad.tap_phase != AgentPadOverlay::TapPhase::None || (g_agent_pad.buttons & button) != 0)
+	{
+		return false;
+	}
+	// The pulse is release/press/release at guest sample boundaries. A host
+	// wall-clock sleep cannot guarantee an edge reaches a title that polls more
+	// than once per frame.
+	g_agent_pad.tap_button = button;
+	g_agent_pad.tap_phase  = AgentPadOverlay::TapPhase::ReleaseBeforePress;
+	return true;
+}
+
+void AgentPadClear()
+{
+	Core::LockGuard lock(g_agent_pad.mutex);
+	g_agent_pad.buttons = 0;
+	g_agent_pad.tap_phase  = AgentPadOverlay::TapPhase::None;
+	g_agent_pad.tap_button = 0;
+	for (int i = 0; i < static_cast<int>(Axis::AxisMax); ++i)
+	{
+		g_agent_pad.axis_set[i] = false;
+		g_agent_pad.axes[i]     = (i < 4) ? 128 : 0;
+	}
+}
+
+void AgentPadGetState(uint32_t* buttons, uint8_t* axes)
+{
+	Core::LockGuard lock(g_agent_pad.mutex);
+	if (buttons != nullptr)
+	{
+		*buttons = g_agent_pad.buttons;
+	}
+	if (axes != nullptr)
+	{
+		for (int i = 0; i < static_cast<int>(Axis::AxisMax); ++i)
+		{
+			axes[i] = g_agent_pad.axes[i];
+		}
+	}
+}
+
+void AgentPadGetReadStats(AgentPadReadStats* out)
+{
+	if (out == nullptr)
+	{
+		return;
+	}
+	Core::LockGuard lock(g_agent_pad.mutex);
+	out->read_state_samples = g_agent_pad.read_state_samples;
+	out->read_samples       = g_agent_pad.read_samples;
+	out->delivered_taps     = g_agent_pad.delivered_taps;
+	out->tap_pending        = g_agent_pad.tap_phase != AgentPadOverlay::TapPhase::None;
+}
+
+void AgentPadApplyReadStateSample(uint32_t* buttons)
+{
+	uint8_t unused = 0;
+	AgentPadApplyToButtonsAndAxes(true, buttons, &unused, &unused, &unused, &unused, &unused, &unused);
+}
 
 KYTY_SUBSYSTEM_INIT(Controller)
 {
@@ -491,6 +843,34 @@ int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable)
 	return OK;
 }
 
+int KYTY_SYSV_ABI PadSetTiltCorrectionState(int handle, bool enable)
+{
+	PRINT_NAME();
+
+	if (handle != kPrimaryHandle)
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+
+	printf("\t enable = %s\n", (enable ? "true" : "false"));
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable)
+{
+	PRINT_NAME();
+
+	if (handle != kPrimaryHandle)
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+
+	printf("\t enable = %s\n", (enable ? "true" : "false"));
+
+	return OK;
+}
+
 int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformation* info)
 {
 	PRINT_NAME();
@@ -581,6 +961,8 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	data->right_stick_y          = state.axes[static_cast<int>(Axis::RightY)];
 	data->analog_buttons_l2      = state.axes[static_cast<int>(Axis::TriggerLeft)];
 	data->analog_buttons_r2      = state.axes[static_cast<int>(Axis::TriggerRight)];
+	AgentPadApplyToButtonsAndAxes(true, &data->buttons, &data->left_stick_x, &data->left_stick_y, &data->right_stick_x,
+	                              &data->right_stick_y, &data->analog_buttons_l2, &data->analog_buttons_r2);
 	data->orientation_x          = 0.0f;
 	data->orientation_y          = 0.0f;
 	data->orientation_z          = 0.0f;
@@ -637,6 +1019,10 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 		data[i].right_stick_y          = states[i].axes[static_cast<int>(Axis::RightY)];
 		data[i].analog_buttons_l2      = states[i].axes[static_cast<int>(Axis::TriggerLeft)];
 		data[i].analog_buttons_r2      = states[i].axes[static_cast<int>(Axis::TriggerRight)];
+		// Advance the tap FSM at most once per PadRead call (first sample only) so a
+		// large num cannot collapse release/press/release into one HLE invocation.
+		AgentPadApplyToButtonsAndAxes(i == 0, &data[i].buttons, &data[i].left_stick_x, &data[i].left_stick_y, &data[i].right_stick_x,
+		                              &data[i].right_stick_y, &data[i].analog_buttons_l2, &data[i].analog_buttons_r2);
 		data[i].orientation_x          = 0.0f;
 		data[i].orientation_y          = 0.0f;
 		data[i].orientation_z          = 0.0f;
