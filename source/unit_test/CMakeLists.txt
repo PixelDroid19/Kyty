@@ -5,6 +5,11 @@ file(GLOB unit_test_src
     "src/emulator/*.cpp"
 )
 
+# DevTools tests are listed explicitly (no recursive glob expansion for new modules).
+list(APPEND unit_test_src
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsEventRing.cpp"
+)
+
 if (MSVC AND CLANG)
 	set_source_files_properties(${unit_test_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack")
 endif()
@@ -13,6 +18,7 @@ add_library(unit_test STATIC ${unit_test_src})
 
 target_link_libraries(unit_test core)
 target_link_libraries(unit_test math)
+target_link_libraries(unit_test kyty_devtools_core)
 target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/emulator/include")
 
 #target_include_directories(unit_test PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
