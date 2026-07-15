@@ -478,13 +478,13 @@ ProtocolResult PublishProgress(MutableMappingView mapping, const ProgressPublica
 	WriteU64(buf, crc_len, crc);
 
 	// Publish the completed buffer and generation as one acquire/release cell.
+	TouchPublicationHeartbeat(mapping.data);
 	AtomicStoreU64(mapping.data, kOffProgressActive, (gen << 1u) | inactive);
 
 	// Mirror child-owned health aggregates from writer_loss / progress_loss.
 	WriteControlCell(mapping.data, ControlCell::AggregateRing, publication.writer_loss.aggregate_ring);
 	WriteControlCell(mapping.data, ControlCell::RegistrationCapacity, publication.writer_loss.registration_capacity);
 	WriteControlCell(mapping.data, ControlCell::InactiveTokenAttempts, publication.writer_loss.inactive_writer_attempts);
-	TouchPublicationHeartbeat(mapping.data);
 	return ProtocolResult::Ok;
 }
 
@@ -639,8 +639,28 @@ ProtocolResult PublishTimeline(MutableMappingView mapping, const TimelineSnapsho
 	{
 		return ProtocolResult::Rejected;
 	}
-	AtomicStoreU64(mapping.data, kOffTimelineActive, (timeline.generation << 1u) | inactive);
 	TouchPublicationHeartbeat(mapping.data);
+	AtomicStoreU64(mapping.data, kOffTimelineActive, (timeline.generation << 1u) | inactive);
+	return ProtocolResult::Ok;
+}
+
+ProtocolResult ReadPublicationHeartbeat(ConstMappingView mapping, uint64_t* out_ns) noexcept
+{
+	if (!MappingOk(mapping.data, mapping.size) || out_ns == nullptr)
+	{
+		return ProtocolResult::InvalidArgument;
+	}
+	const auto hdr = ValidateHeader(mapping.data);
+	if (hdr != ProtocolResult::Ok)
+	{
+		return hdr;
+	}
+	const uint64_t heartbeat = AtomicLoadU64(mapping.data, kOffPublicationHeartbeat);
+	if (heartbeat == 0u)
+	{
+		return ProtocolResult::Rejected;
+	}
+	*out_ns = heartbeat;
 	return ProtocolResult::Ok;
 }
 
