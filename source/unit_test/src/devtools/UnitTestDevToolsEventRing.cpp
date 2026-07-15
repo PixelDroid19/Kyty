@@ -390,6 +390,9 @@ TEST(DevToolsEventRing, WorkerTelemetryPublishesHandshakeAndLifecycle)
 
 	ASSERT_TRUE(telemetry.Stop());
 	EXPECT_FALSE(telemetry.Active());
+	uint32_t handshake_state = 0;
+	std::memcpy(&handshake_state, mapping.data() + kProtocolHandshakeStateOffset, sizeof(handshake_state));
+	EXPECT_EQ(handshake_state, static_cast<uint32_t>(HandshakeState::WorkerClosing));
 	ASSERT_EQ(ReadTimeline({mapping.data(), mapping.size()}, &loss, &timeline), ProtocolResult::Ok);
 	ASSERT_EQ(timeline.count, 2u);
 	EXPECT_EQ(timeline.events[0].event, static_cast<uint16_t>(EventId::ThreadExit));

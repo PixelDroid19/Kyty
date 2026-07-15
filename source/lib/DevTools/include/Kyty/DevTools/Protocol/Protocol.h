@@ -214,6 +214,7 @@ struct ProtocolReadLossState
 [[nodiscard]] ProtocolResult AcceptWorkerHandshake(MutableMappingView mapping,
                                                    const ParentProtocolInit& init,
                                                    WorkerHandshake* out) noexcept;
+[[nodiscard]] ProtocolResult CloseWorkerHandshake(MutableMappingView mapping) noexcept;
 [[nodiscard]] ProtocolResult ReadWorkerBootstrap(ConstMappingView mapping, const uint8_t* nonce,
                                                  RecordingMode* requested_mode) noexcept;
 [[nodiscard]] ProtocolResult PublishProgress(MutableMappingView mapping,

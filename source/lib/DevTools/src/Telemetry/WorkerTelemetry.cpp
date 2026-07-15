@@ -222,9 +222,10 @@ bool WorkerTelemetry::Stop() noexcept
 		state_->writers.Close(state_->writer_token, MakeThreadExit(state_->thread_instance));
 	}
 	const bool published = Publish();
+	const bool closed = CloseWorkerHandshake(state_->mapping) == ProtocolResult::Ok;
 	state_->active        = false;
 	state_->mapping       = {};
-	return published;
+	return published && closed;
 }
 
 bool WorkerTelemetry::Active() const noexcept
