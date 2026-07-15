@@ -15,7 +15,7 @@
 
 #include "Emulator/Emulator.h"
 
-#include "KytyGitVersion.h"
+#include "KytyBuildInfo.h"
 
 using namespace Kyty;
 using namespace Core;
@@ -51,8 +51,13 @@ static String get_build_string()
 
 	String compiler = Debug::GetCompiler() + U"-" + Debug::GetLinker() + U"-" + Debug::GetBitness();
 
+	String rev = String::FromUtf8(Kyty::BuildInfo::Revision);
+	if (Kyty::BuildInfo::Dirty)
+	{
+		rev = rev + U"-dirty";
+	}
 	String str = String::FromPrintf("%s, %s, ver = %s, git = %s, lua = %s, date = %s", type.C_Str(), compiler.C_Str(), KYTY_VERSION,
-	                                KYTY_GIT_VERSION, lua.C_Str(), date.ToString().C_Str());
+	                                rev.C_Str(), lua.C_Str(), date.ToString().C_Str());
 
 	return str;
 }
