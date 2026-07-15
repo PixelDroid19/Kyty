@@ -12,6 +12,7 @@ UT_LINK(DevToolsEventRing);
 UT_LINK(DevToolsProgress);
 UT_LINK(DevToolsClassifier);
 UT_LINK(DevToolsProtocol);
+UT_LINK(DevToolsSupervisor);
 UT_LINK(EmulatorGraphicsState);
 UT_LINK(EmulatorKernelMemory);
 UT_LINK(EmulatorGraphicsPackets);
