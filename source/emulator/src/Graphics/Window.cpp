@@ -15,6 +15,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Image.h"
+#include "Emulator/Graphics/KeyboardInput.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Loader/SystemContent.h"
@@ -437,6 +438,18 @@ void game_event_terminate(GameApi* game)
 	game->m_game_need_exit = true;
 }
 
+static KeyboardLeftStickState g_keyboard_left_stick;
+
+static void ApplyKeyboardLeftStickControllerAxes(const KeyboardLeftStickUpdate& update)
+{
+	if (!update.changed)
+	{
+		return;
+	}
+	Controller::ControllerAxis(Controller::CONTROLLER_KEYBOARD_ID, Controller::Axis::LeftX, update.axes.x);
+	Controller::ControllerAxis(Controller::CONTROLLER_KEYBOARD_ID, Controller::Axis::LeftY, update.axes.y);
+}
+
 void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 {
 #ifdef KYTY_DBG_INPUT
@@ -449,8 +462,9 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 	// without a physical controller. Repeat is ignored to avoid stuck buttons.
 	if (!key->repeat && (key->down || key->up))
 	{
-		const bool     down   = key->down;
-		uint32_t       button = 0;
+		const bool down = key->down;
+		ApplyKeyboardLeftStickControllerAxes(ApplyKeyboardLeftStickKey(g_keyboard_left_stick, key->key_code, down));
+		uint32_t button = 0;
 		switch (key->key_code)
 		{
 			case SDLK_RETURN:
@@ -738,7 +752,10 @@ static void process_window_event(GameApi* game, SDL_WindowEvent window)
 		case SDL_WINDOWEVENT_ENTER: printf("Mouse entered window %" PRIu32 "\n", window.windowID); break;
 		case SDL_WINDOWEVENT_LEAVE: printf("Mouse left window %" PRIu32 "\n", window.windowID); break;
 		case SDL_WINDOWEVENT_FOCUS_GAINED: printf("Window %" PRIu32 " gained keyboard focus\n", window.windowID); break;
-		case SDL_WINDOWEVENT_FOCUS_LOST: printf("Window %" PRIu32 " lost keyboard focus\n", window.windowID); break;
+		case SDL_WINDOWEVENT_FOCUS_LOST:
+			printf("Window %" PRIu32 " lost keyboard focus\n", window.windowID);
+			ApplyKeyboardLeftStickControllerAxes(ResetKeyboardLeftStick(g_keyboard_left_stick));
+			break;
 		case SDL_WINDOWEVENT_CLOSE: printf("Window %" PRIu32 " closed\n", window.windowID); break;
 		default: printf("Window %" PRIu32 " got unknown event %" PRIu8 "\n", window.windowID, window.event); break;
 	}
