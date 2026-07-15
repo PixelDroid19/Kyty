@@ -110,13 +110,19 @@ ProcessOperationError SharedMapping::CreateOwnerOnly(uint64_t size, SharedMappin
 		std::snprintf(name, sizeof(name), "/kytydt-%02x%02x%02x%02x%02x%02x%02x%02x", rnd[0], rnd[1], rnd[2], rnd[3], rnd[4], rnd[5],
 		              rnd[6], rnd[7]);
 
-		const int fd = ::shm_open(name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+		const int fd = ::shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
 		if (fd < 0)
 		{
 			if (errno == EEXIST)
 			{
 				continue;
 			}
+			return ProcessOperationError::MappingFailed;
+		}
+		const int descriptor_flags = ::fcntl(fd, F_GETFD);
+		if (descriptor_flags < 0 || ::fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) != 0)
+		{
+			::close(fd);
 			return ProcessOperationError::MappingFailed;
 		}
 		// Unlink immediately so the object is not discoverable by name.

@@ -62,7 +62,7 @@ struct TempCleanupResult
 [[nodiscard]] DurableIoResult DurableCleanupOwnTemps(const char* parent_dir, DurableClockNs clock,
                                                      TempCleanupResult* out) noexcept;
 
-// Current process identity for temp ownership (Linux /proc/self/stat).
+// Current process identity for temp ownership through the host identity adapter.
 [[nodiscard]] bool QuerySelfProcessIdentity(uint64_t* pid, uint64_t* start_token) noexcept;
 
 } // namespace Kyty::DevTools

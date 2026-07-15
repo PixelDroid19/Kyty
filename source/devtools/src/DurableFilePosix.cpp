@@ -17,6 +17,17 @@ namespace {
 // Matches BundleWriter::kBundleTempMaxAgeNs (24h). Kept local to avoid header cycles.
 inline constexpr uint64_t kTempMaxAgeNs = 24ull * 60ull * 60ull * 1000000000ull;
 
+[[nodiscard]] uint64_t StatModificationTimeNs(const struct stat& st) noexcept
+{
+#if defined(__APPLE__)
+	return static_cast<uint64_t>(st.st_mtimespec.tv_sec) * 1000000000ull +
+	       static_cast<uint64_t>(st.st_mtimespec.tv_nsec);
+#else
+	return static_cast<uint64_t>(st.st_mtim.tv_sec) * 1000000000ull +
+	       static_cast<uint64_t>(st.st_mtim.tv_nsec);
+#endif
+}
+
 [[nodiscard]] uint64_t RealtimeNs() noexcept
 {
 	struct timespec ts {};
@@ -300,34 +311,13 @@ bool QuerySelfProcessIdentity(uint64_t* pid, uint64_t* start_token) noexcept
 	{
 		return false;
 	}
-	const int fd = ::open("/proc/self/stat", O_RDONLY | O_CLOEXEC);
-	if (fd < 0)
+	ProcessIdentity identity {};
+	if (QueryProcessIdentityByPid(static_cast<uint64_t>(::getpid()), &identity) != ProcessIdentityError::None)
 	{
 		return false;
 	}
-	char buf[1024] = {};
-	const ssize_t n = ::read(fd, buf, sizeof(buf) - 1u);
-	::close(fd);
-	if (n <= 0)
-	{
-		return false;
-	}
-	buf[n] = '\0';
-	// Leading pid.
-	char* end = nullptr;
-	errno     = 0;
-	const unsigned long long p = std::strtoull(buf, &end, 10);
-	if (errno != 0 || end == buf || p == 0ull)
-	{
-		return false;
-	}
-	uint64_t ticks = 0;
-	if (!ParseLinuxProcStatStartTicks(buf, &ticks))
-	{
-		return false;
-	}
-	*pid         = static_cast<uint64_t>(p);
-	*start_token = ticks;
+	*pid         = identity.pid;
+	*start_token = identity.start_token;
 	return true;
 }
 
@@ -379,8 +369,7 @@ DurableIoResult DurableCleanupOwnTemps(const char* parent_dir, DurableClockNs cl
 			continue;
 		}
 		// Age from mtime (wall clock seconds via injected clock for tests).
-		const uint64_t mtime_ns =
-		    static_cast<uint64_t>(st.st_mtim.tv_sec) * 1000000000ull + static_cast<uint64_t>(st.st_mtim.tv_nsec);
+		const uint64_t mtime_ns = StatModificationTimeNs(st);
 		if (now == 0u || now < mtime_ns || (now - mtime_ns) < kTempMaxAgeNs)
 		{
 			++local.retained;

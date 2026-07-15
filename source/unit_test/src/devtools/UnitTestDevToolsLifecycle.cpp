@@ -1,4 +1,5 @@
 #include "Kyty/DevTools/Supervisor/Supervisor.h"
+#include "Kyty/DevTools/Supervisor/ProcessLauncher.h"
 #include "Kyty/UnitTest.h"
 
 #include <cstring>
@@ -18,6 +19,23 @@ std::string MakeScratchDir()
 	char* path  = ::mkdtemp(tmpl);
 	EXPECT_NE(path, nullptr);
 	return path != nullptr ? std::string(path) : std::string();
+}
+
+std::string FindDevToolsBinary()
+{
+	char current[512] = {};
+	if (!QueryCurrentExecutablePath(current, sizeof(current)))
+	{
+		return {};
+	}
+	const std::string executable(current);
+	const std::string suffix = "/fc_script";
+	const size_t      marker = executable.rfind(suffix);
+	if (marker == std::string::npos)
+	{
+		return {};
+	}
+	return executable.substr(0, marker) + "/devtools/kyty_devtools";
 }
 
 } // namespace
@@ -53,33 +71,14 @@ TEST(DevToolsLifecycle, NormalExitFinalizesOnce)
 	EXPECT_EQ(r.outcome, SupervisorOutcome::LaunchError);
 }
 
-TEST(DevToolsLifecycle, SelfTestNormalExitRunsOnCurrentHost)
-{
-	const std::string dir = MakeScratchDir();
-	ASSERT_FALSE(dir.empty());
-	EXPECT_EQ(RunSelfTest("normal-exit", dir.c_str(), 20, 50, 500), 0);
-}
-
 TEST(DevToolsLifecycle, SelfTestNormalExitViaDevToolsBinary)
 {
-	// Locate sibling kyty_devtools next to a known build layout if present.
-	const char* candidates[] = {
-	    "/home/monasterios/Documents/PS5/Kyty-devtools/_build_linux_devtools/devtools/kyty_devtools",
-	    nullptr,
-	};
-	const char* bin = nullptr;
-	for (int i = 0; candidates[i] != nullptr; ++i)
-	{
-		if (::access(candidates[i], X_OK) == 0)
-		{
-			bin = candidates[i];
-			break;
-		}
-	}
-	if (bin == nullptr)
+	const std::string binary = FindDevToolsBinary();
+	if (binary.empty() || ::access(binary.c_str(), X_OK) != 0)
 	{
 		GTEST_SKIP() << "kyty_devtools binary not built yet";
 	}
+	const char* bin = binary.c_str();
 	const std::string dir = MakeScratchDir();
 	ASSERT_FALSE(dir.empty());
 	// Fork/exec self-test normal-exit.
@@ -100,12 +99,12 @@ TEST(DevToolsLifecycle, SelfTestNormalExitViaDevToolsBinary)
 
 TEST(DevToolsLifecycle, SelfTestBlockedLaneCapturesBundle)
 {
-	const char* bin =
-	    "/home/monasterios/Documents/PS5/Kyty-devtools/_build_linux_devtools/devtools/kyty_devtools";
-	if (::access(bin, X_OK) != 0)
+	const std::string binary = FindDevToolsBinary();
+	if (binary.empty() || ::access(binary.c_str(), X_OK) != 0)
 	{
 		GTEST_SKIP() << "kyty_devtools binary not built yet";
 	}
+	const char* bin = binary.c_str();
 	const std::string dir = MakeScratchDir();
 	ASSERT_FALSE(dir.empty());
 	const pid_t pid = ::fork();
@@ -127,12 +126,12 @@ TEST(DevToolsLifecycle, LiveStallCapturesOnceAndContinues)
 {
 	// Covered by SelfTestBlockedLaneCapturesBundle (production path continues after bundle;
 	// self-test bounds samples then waits once).
-	const char* bin =
-	    "/home/monasterios/Documents/PS5/Kyty-devtools/_build_linux_devtools/devtools/kyty_devtools";
-	if (::access(bin, X_OK) != 0)
+	const std::string binary = FindDevToolsBinary();
+	if (binary.empty() || ::access(binary.c_str(), X_OK) != 0)
 	{
 		GTEST_SKIP() << "kyty_devtools binary not built yet";
 	}
+	const char* bin = binary.c_str();
 	const std::string dir = MakeScratchDir();
 	ASSERT_FALSE(dir.empty());
 	const pid_t pid = ::fork();

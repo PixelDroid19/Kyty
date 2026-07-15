@@ -22,24 +22,23 @@
 ### Task 1: Establish the red host-boundary test
 
 **Files:**
-- Modify: `source/unit_test/src/devtools/UnitTestDevToolsLifecycle.cpp`
+- Modify: `source/unit_test/src/devtools/UnitTestDevToolsSupervisor.cpp`
 
 **Interfaces:**
 - Consumes: `RunSelfTest` and the existing scratch-directory helper.
-- Produces: `DevToolsLifecycle.SelfTestNormalExitRunsOnCurrentHost`.
+- Produces: `DevToolsSupervisor.CurrentExecutablePathIsResolvable`.
 
 - [ ] **Step 1: Add the failing test**
 
-Add a test that calls the production self-test entrypoint directly so it uses
-the current `fc_script` executable path and does not depend on a private or
-Linux-only build path:
+Add a pure adapter test that exercises the current executable lookup without
+re-executing `fc_script` as if it were the `kyty_devtools` CLI:
 
 ```cpp
-TEST(DevToolsLifecycle, SelfTestNormalExitRunsOnCurrentHost)
+TEST(DevToolsSupervisor, CurrentExecutablePathIsResolvable)
 {
-	const std::string dir = MakeScratchDir();
-	ASSERT_FALSE(dir.empty());
-	EXPECT_EQ(RunSelfTest("normal-exit", dir.c_str(), 20, 50, 500), 0);
+	char path[512] = {};
+	ASSERT_TRUE(QueryCurrentExecutablePath(path, sizeof(path)));
+	EXPECT_NE(path[0], '\0');
 }
 ```
 
@@ -58,8 +57,8 @@ added before this failure is recorded.
 - [ ] **Step 3: Commit the red test only**
 
 ```bash
-git add source/unit_test/src/devtools/UnitTestDevToolsLifecycle.cpp
-git commit -m 'test(devtools): require current-host supervisor self-test'
+git add source/unit_test/src/devtools/UnitTestDevToolsSupervisor.cpp
+git commit -m 'test(devtools): cover current-host executable path'
 ```
 
 ---
@@ -145,11 +144,21 @@ existing `dup2` actions for descriptors 3 and 4. Add
 
 ```bash
 ninja -C _build_macos fc_script
-_build_macos/fc_script '{kyty_run_tests()}' '--gtest_filter=DevToolsBundle.*:DevToolsLifecycle.SelfTestNormalExitRunsOnCurrentHost'
+_build_macos/fc_script '{kyty_run_tests()}' '--gtest_filter=DevToolsBundle.*:DevToolsSupervisor.CurrentExecutablePathIsResolvable'
 ```
 
-Expected: the named test count is nonzero, all selected tests pass, and the
-self-test creates its normal-exit bundle through the production supervisor.
+Expected: the named test count is nonzero and all selected tests pass.
+
+Then validate the real supervisor executable rather than re-executing
+`fc_script` from a unit test:
+
+```bash
+ninja -C _build_macos kyty_devtools
+_build_macos/devtools/kyty_devtools self-test --output-dir /tmp/kyty-devtools-macos-self-test --mode=normal-exit --suspected-ms=20 --confirmed-ms=50 --cleanup-ms=500
+```
+
+Expected: exit status zero and a completed normal-exit bundle in the untracked
+temporary directory.
 
 ---
 

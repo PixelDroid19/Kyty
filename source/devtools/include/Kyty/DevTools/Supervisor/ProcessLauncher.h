@@ -71,7 +71,8 @@ public:
 	static ProcessOperationError ForwardSignal(ProcessHandle* handle, uint32_t signal) noexcept;
 };
 
-// Linux /proc start-ticks identity helpers (pure parsing + query).
+// Host process identity helpers. Linux parsing remains exposed for deterministic
+// characterization; host queries are implemented by the platform adapter.
 struct ProcessIdentity
 {
 	uint64_t pid         = 0;
@@ -97,10 +98,15 @@ enum class ProcessIdentityProbe: uint8_t
 };
 
 [[nodiscard]] ProcessIdentityError QueryProcessIdentity(const ProcessHandle& handle, ProcessIdentity* out) noexcept;
+[[nodiscard]] ProcessIdentityError QueryProcessIdentityByPid(uint64_t pid, ProcessIdentity* out) noexcept;
 [[nodiscard]] ProcessIdentityProbe ProbeProcessIdentity(uint64_t pid, uint64_t expected_start_token) noexcept;
 
 // Pure parser for Linux /proc/<pid>/stat field 22 (starttime) with parenthesized cmd.
 [[nodiscard]] bool ParseLinuxProcStatStartTicks(const char* stat_line, uint64_t* start_ticks) noexcept;
+
+// Resolve the current executable without exposing OS-specific path mechanisms to
+// the supervisor orchestration layer.
+[[nodiscard]] bool QueryCurrentExecutablePath(char* path, uint32_t capacity) noexcept;
 
 } // namespace Kyty::DevTools
 

@@ -67,15 +67,16 @@ tests directly include emulator graphics headers. This removes the need for
 
 The red/green gate is:
 
-1. Add a current-host self-test covering process identity and supervisor
-   launch; build the existing test target and observe the known portability
-   failure before implementation.
+1. Add a current-host executable-path adapter test; build the existing test
+   target and observe the known portability failure before implementation.
 2. Build without `CPATH` after the minimal implementation.
 3. Run the focused filters
-   `DevToolsBundle.*:DevToolsLifecycle.SelfTestNormalExitRunsOnCurrentHost` and
+   `DevToolsBundle.*:DevToolsSupervisor.CurrentExecutablePathIsResolvable` and
    the existing `CoreMemoryAlloc.*` host-memory regression suite.
-4. Run the complete `fc_script` build and inspect new warnings.
-5. Run the devtools self-test path on macOS with no behavior-changing
+4. Build and run the actual `kyty_devtools self-test` binary on macOS; a unit
+   test must not re-exec `fc_script` as a substitute for that executable.
+5. Run the complete `fc_script` build and inspect new warnings.
+6. Run the devtools self-test path on macOS with no behavior-changing
    `KYTY_*` flags. No guest strict replay is claimed until this build gate is
    green.
 

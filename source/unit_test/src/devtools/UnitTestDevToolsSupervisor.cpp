@@ -67,6 +67,13 @@ TEST(DevToolsSupervisor, MalformedBootstrapOpensNoHandle)
 	EXPECT_EQ(ParseBootstrapMetadata("nope", &out), BootstrapParseResult::Malformed);
 }
 
+TEST(DevToolsSupervisor, CurrentExecutablePathIsResolvable)
+{
+	char path[512] = {};
+	ASSERT_TRUE(QueryCurrentExecutablePath(path, sizeof(path)));
+	EXPECT_NE(path[0], '\0');
+}
+
 TEST(DevToolsSupervisor, LinuxProcessStatParsesParenthesizedCommand)
 {
 	// Field 22 = starttime. Tokens after ") ": state is index 0; field 22 is index 19.
@@ -115,9 +122,14 @@ TEST(DevToolsSupervisor, PosixExitDecodesExitCode)
 	BootstrapText boot {};
 	ASSERT_TRUE(EncodeBootstrapMetadata(meta, &boot));
 
-	const char* argv[] = {"/bin/true", nullptr};
+	#if defined(__APPLE__)
+	const char* true_executable = "/usr/bin/true";
+	#else
+	const char* true_executable = "/bin/true";
+	#endif
+	const char* argv[] = {true_executable, nullptr};
 	LaunchOptions opt {};
-	opt.executable  = "/bin/true";
+	opt.executable  = true_executable;
 	opt.argv        = argv;
 	opt.argc        = 1;
 	opt.bootstrap   = boot;
