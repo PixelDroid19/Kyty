@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Pm4.h"
 
 #include <algorithm>
@@ -145,6 +146,53 @@ ColorTargetLayout ResolveColorTargetLayout(uint32_t mask)
 	// Trailing zeros after a contiguous full prefix are OK (count stops at first zero).
 	layout.error = ColorTargetLayoutError::None;
 	return layout;
+}
+
+void RecordGen5RenderTargetSize(GraphicContext* ctx, uint64_t base, uint32_t width, uint32_t height, uint64_t size)
+{
+	EXIT_IF(ctx == nullptr);
+	if (base == 0 || width == 0 || height == 0 || size == 0)
+	{
+		return;
+	}
+
+	for (uint32_t i = 0; i < ctx->gen5_render_target_sizes_num; i++)
+	{
+		const auto& entry = ctx->gen5_render_target_sizes[i];
+		if (entry.base == base && entry.width == width && entry.height == height && entry.size == size)
+		{
+			return;
+		}
+	}
+
+	EXIT_NOT_IMPLEMENTED(ctx->gen5_render_target_sizes_num >= GraphicContext::GEN5_RENDER_TARGET_SIZE_MAX);
+	auto& entry  = ctx->gen5_render_target_sizes[ctx->gen5_render_target_sizes_num++];
+	entry.base   = base;
+	entry.width  = width;
+	entry.height = height;
+	entry.size   = size;
+}
+
+bool HasGen5RenderTargetSize(const GraphicContext* ctx, uint64_t base, uint32_t width, uint32_t height, uint64_t size)
+{
+	if (ctx == nullptr || base == 0 || width == 0 || height == 0 || size == 0)
+	{
+		return false;
+	}
+	for (uint32_t i = 0; i < ctx->gen5_render_target_sizes_num; i++)
+	{
+		const auto& entry = ctx->gen5_render_target_sizes[i];
+		if (entry.base == base && entry.width == width && entry.height == height && entry.size == size)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool Gen5Tile27SamplePrefersRenderTarget(uint32_t fmt, uint32_t tile, bool seen_as_color_target_size)
+{
+	return tile == 27u && (fmt == 56u || fmt == 71u) && seen_as_color_target_size;
 }
 
 Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exact_render_target_found)

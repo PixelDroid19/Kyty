@@ -70,6 +70,17 @@ struct VulkanQueueInfo
 	VkQueue      vk_queue = nullptr;
 };
 
+// Guest color-target layouts already observed this session (base-keyed). Used
+// only to decide whether a tile-27 sample should bind as a GPU-owned RT alias
+// when FindRenderTexture has not yet resolved the live object.
+struct Gen5RenderTargetSize
+{
+	uint64_t base   = 0;
+	uint32_t width  = 0;
+	uint32_t height = 0;
+	uint64_t size   = 0;
+};
+
 struct GraphicContext
 {
 	static constexpr int QUEUES_NUM          = 11;
@@ -81,6 +92,7 @@ struct GraphicContext
 	static constexpr int QUEUE_PRESENT_NUM   = 1;
 	static constexpr int QUEUE_COMPUTE_START = 0;
 	static constexpr int QUEUE_COMPUTE_NUM   = 8;
+	static constexpr int GEN5_RENDER_TARGET_SIZE_MAX = 64;
 
 	uint32_t                 screen_width    = 0;
 	uint32_t                 screen_height   = 0;
@@ -105,6 +117,9 @@ struct GraphicContext
 
 	// VK_EXT_depth_range_unrestricted allows viewport min/maxDepth outside [0,1].
 	bool depth_range_unrestricted_supported = false;
+
+	Gen5RenderTargetSize gen5_render_target_sizes[GEN5_RENDER_TARGET_SIZE_MAX] = {};
+	uint32_t             gen5_render_target_sizes_num                          = 0;
 };
 
 struct VulkanMemory
