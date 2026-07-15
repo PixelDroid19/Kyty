@@ -89,13 +89,21 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 
 	auto* vk_obj = static_cast<RenderTextureVulkanImage*>(obj);
 
-	// bool tiled = (params[RenderTextureObject::PARAM_TILED] != 0);
 	// bool neo    = (params[RenderTextureObject::PARAM_NEO] != 0);
 	// auto pitch  = params[RenderTextureObject::PARAM_PITCH];
 	auto width  = params[RenderTextureObject::PARAM_WIDTH];
 	auto height = params[RenderTextureObject::PARAM_HEIGHT];
 
-	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+	// GPU-owned tiled RT (write_back=0): never force UNDEFINED — that discards
+	// prior render-pass contents (white / false-color intermediate targets when
+	// the float lighting RT is re-entered via multi-parent Update2). GenerateMips
+	// below transitions from the tracked layout via UtilFillImage/ImageToImage.
+	const bool tiled     = (params[RenderTextureObject::PARAM_TILED] != 0);
+	const bool gpu_owned = tiled && params[RenderTextureObject::PARAM_WRITE_BACK] == 0;
+	if (!gpu_owned)
+	{
+		vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+	}
 
 	//	if (objects.Size() == 2 && objects.At(0).type == GpuMemoryObjectType::StorageBuffer &&
 	//	    objects.At(1).type == GpuMemoryObjectType::StorageTexture && scenario == GpuMemoryScenario::GenerateMips)
