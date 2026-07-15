@@ -380,4 +380,32 @@ TEST(DevToolsEventRing, WorkerTelemetryRejectsInvalidMappingWithoutActivation)
 	EXPECT_FALSE(telemetry.Active());
 }
 
+TEST(DevToolsEventRing, WorkerTelemetryMetricsOnlyPublishesNoTimeline)
+{
+	std::vector<uint8_t> mapping(static_cast<size_t>(kProtocolMappingSize), 0);
+	ParentProtocolInit init {};
+	init.requested_mode = RecordingMode::MetricsOnly;
+	for (uint32_t i = 0; i < sizeof(init.nonce); ++i)
+	{
+		init.nonce[i] = static_cast<uint8_t>(0xa0u + i);
+	}
+	ASSERT_EQ(InitializeProtocolOwner({mapping.data(), mapping.size()}, init), ProtocolResult::Ok);
+
+	WorkerTelemetryOptions options {};
+	options.requested_mode             = RecordingMode::MetricsOnly;
+
+	WorkerTelemetry telemetry;
+	ASSERT_TRUE(telemetry.Start({mapping.data(), mapping.size()}, options));
+
+	ProtocolReadLossState loss {};
+	ProgressPublication progress {};
+	ASSERT_EQ(ReadProgressPublication({mapping.data(), mapping.size()}, &loss, &progress), ProtocolResult::Ok);
+	EXPECT_EQ(progress.progress.count, 0u);
+	TimelineSnapshot timeline {};
+	EXPECT_EQ(ReadTimeline({mapping.data(), mapping.size()}, &loss, &timeline), ProtocolResult::Rejected);
+
+	ASSERT_TRUE(telemetry.Stop());
+	EXPECT_EQ(ReadTimeline({mapping.data(), mapping.size()}, &loss, &timeline), ProtocolResult::Rejected);
+}
+
 UT_END();

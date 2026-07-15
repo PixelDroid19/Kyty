@@ -71,6 +71,7 @@ struct WorkerTelemetry::State
 	WriterRegistry        writers {};
 	ProgressRegistry      progress {};
 	TelemetryWriterToken  writer_token {};
+	RecordingMode         mode = RecordingMode::MetricsOnly;
 	uint64_t              thread_instance = 0;
 	uint64_t              publication_generation = 0;
 	bool                  active = false;
@@ -85,7 +86,8 @@ bool WorkerTelemetry::Start(MutableMappingView mapping, const WorkerTelemetryOpt
 	if (!state_ || state_->active || mapping.data == nullptr || mapping.size < kProtocolMappingSize ||
 	    (options.requested_mode != RecordingMode::MetricsOnly && options.requested_mode != RecordingMode::Full) ||
 	    options.logging_mode == LoggingMode::Unknown || options.logging_mode > LoggingMode::Directory ||
-	    options.dirty > 1u || options.validation_enabled > 1u || options.diagnostic_thread_instance == 0u)
+	    options.dirty > 1u || options.validation_enabled > 1u ||
+	    (options.requested_mode == RecordingMode::Full && options.diagnostic_thread_instance == 0u))
 	{
 		return false;
 	}
@@ -107,21 +109,38 @@ bool WorkerTelemetry::Start(MutableMappingView mapping, const WorkerTelemetryOpt
 		return false;
 	}
 
+	state_->mapping         = mapping;
+	state_->mode            = options.requested_mode;
+	state_->thread_instance = options.diagnostic_thread_instance;
+	state_->active          = true;
+
+	if (state_->mode == RecordingMode::MetricsOnly)
+	{
+		if (!Publish())
+		{
+			state_->mapping = {};
+			state_->active  = false;
+			return false;
+		}
+		return true;
+	}
+
 	TelemetryWriterToken token {};
 	if (!state_->writers.Reserve(kWorkerRole, options.diagnostic_thread_instance, &token))
 	{
+		state_->mapping = {};
+		state_->active  = false;
 		return false;
 	}
 	if (!state_->writers.Activate(token))
 	{
 		state_->writers.Abandon(token);
+		state_->mapping = {};
+		state_->active  = false;
 		return false;
 	}
 
-	state_->mapping         = mapping;
-	state_->writer_token    = token;
-	state_->thread_instance = options.diagnostic_thread_instance;
-	state_->active          = true;
+	state_->writer_token = token;
 	if (!Record(MakeThreadStart(state_->thread_instance)) || !Publish())
 	{
 		state_->writers.Close(token, MakeThreadExit(state_->thread_instance));
@@ -139,6 +158,10 @@ bool WorkerTelemetry::Record(EventRecord record) noexcept
 	if (!state_ || !state_->active)
 	{
 		return false;
+	}
+	if (state_->mode == RecordingMode::MetricsOnly)
+	{
+		return true;
 	}
 	return state_->writers.TryRecord(state_->writer_token, record);
 }
@@ -166,6 +189,10 @@ bool WorkerTelemetry::Publish() noexcept
 	{
 		return false;
 	}
+	if (state_->mode == RecordingMode::MetricsOnly)
+	{
+		return true;
+	}
 
 	TimelineSnapshot timeline {};
 	timeline.count      = state_->writers.History().SnapshotNewest(timeline.events, kTimelineMaxEvents);
@@ -180,7 +207,10 @@ bool WorkerTelemetry::Stop() noexcept
 		return false;
 	}
 
-	state_->writers.Close(state_->writer_token, MakeThreadExit(state_->thread_instance));
+	if (state_->mode == RecordingMode::Full)
+	{
+		state_->writers.Close(state_->writer_token, MakeThreadExit(state_->thread_instance));
+	}
 	const bool published = Publish();
 	state_->active        = false;
 	state_->mapping       = {};
