@@ -633,6 +633,67 @@ TEST(EmulatorGraphicsPackets, Sw64kRx4bppDetileRoundTrip)
 	EXPECT_EQ(TileGetSw64kRxOffset(128, 0, k_w, k_bpp), 65536u);
 }
 
+// Functional detile: RGBA8 ramp R=x across two 64 KiB macro columns (pitch=256).
+TEST(EmulatorGraphicsPackets, Sw64kRx4bppDetileRampPreservesX)
+{
+	constexpr uint32_t k_w   = 256u;
+	constexpr uint32_t k_h   = 64u;
+	constexpr uint32_t k_bpp = 4u;
+	TileSizeAlign      size {};
+	TileGetRenderTargetSize(k_w, k_h, k_w, 0x1b, k_bpp, &size);
+	ASSERT_GT(size.size, 0u);
+
+	std::vector<uint8_t> linear(static_cast<size_t>(k_w) * k_h * k_bpp);
+	std::vector<uint8_t> tiled(size.size, 0);
+	std::vector<uint8_t> out(linear.size(), 0xAAu);
+
+	for (uint32_t y = 0; y < k_h; y++)
+	{
+		for (uint32_t x = 0; x < k_w; x++)
+		{
+			const size_t i     = (static_cast<size_t>(y) * k_w + x) * k_bpp;
+			linear[i + 0]      = static_cast<uint8_t>(x & 0xffu);
+			linear[i + 1]      = 0;
+			linear[i + 2]      = 0;
+			linear[i + 3]      = 0xff;
+			const uint64_t off = TileGetSw64kRxOffset(x, y, k_w, k_bpp);
+			ASSERT_LT(off + k_bpp, tiled.size() + 1);
+			std::memcpy(tiled.data() + off, linear.data() + i, k_bpp);
+		}
+	}
+
+	TileConvertSw64kRxToLinear(out.data(), tiled.data(), k_w, k_h, k_w, k_bpp);
+	for (uint32_t y = 0; y < k_h; y++)
+	{
+		for (uint32_t x = 0; x < k_w; x++)
+		{
+			const size_t i = (static_cast<size_t>(y) * k_w + x) * k_bpp;
+			EXPECT_EQ(out[i + 0], static_cast<uint8_t>(x & 0xffu)) << "x=" << x << " y=" << y;
+		}
+	}
+}
+
+// Macro pitch: pitch_elems=256 with width=192 still advances one 64 KiB block per
+// 128 rows of y (blocks_x = ceil(256/128) = 2).
+TEST(EmulatorGraphicsPackets, Sw64kRx4bppMacroPitchAdvancesBlock)
+{
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 128, 256, 4), 65536u * 2u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 128, 192, 4), 65536u * 2u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 128, 128, 4), 65536u);
+}
+
+// Captured world GBuffer class: 642x362 tile 27 RGBA8 (fmt 56) size must match
+// RT size so FindRenderTexture exact alias can hit.
+TEST(EmulatorGraphicsPackets, SizesGen5RotatedXGbuffer642x362Rgba8MatchesSample56)
+{
+	TileSizeAlign rt {};
+	TileGetRenderTargetSize(642, 362, 642, 0x1b, 4, &rt);
+	TileSizeAlign tex {};
+	TileGetTextureSize2(56, 642, 362, 642, 1, 27, &tex, nullptr, nullptr);
+	EXPECT_EQ(rt.size, tex.size);
+	EXPECT_EQ(rt.align, tex.align);
+	EXPECT_GT(rt.size, 0u);
+}
 
 // Post-Play DCB fragment after CB/DB meta EVENT_WRITE: a run of Type0
 // single-register writes (10 dwords) then WaitFlipDone (0xC0051018). Walking
