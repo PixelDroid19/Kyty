@@ -43,6 +43,9 @@ public:
 	// The id is unique and can't be reused by another thread.
 	static int GetThreadIdUnique();
 
+	// Get the current native host thread id. This API is not signal-handler safe.
+	[[nodiscard]] static uint64_t GetHostThreadId();
+
 	KYTY_CLASS_NO_COPY(Thread);
 
 private:
