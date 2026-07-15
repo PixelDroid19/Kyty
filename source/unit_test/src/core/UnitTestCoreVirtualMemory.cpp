@@ -53,4 +53,27 @@ TEST(CoreVirtualMemory, LargeSharedMappingUsesBoundedProtectionMetadata)
 	DestroySharedBacking(backing);
 }
 
+TEST(CoreVirtualMemory, DemandMapUsesHostPageSize)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_GT(page_size, 0u);
+
+#if defined(_WIN32)
+	GTEST_SKIP() << "demand paging signal path is POSIX-only";
+#else
+	const uint64_t address = Alloc(0, page_size, Mode::NoAccess);
+	ASSERT_NE(address, 0u);
+
+	RegisterDemandRange(address, page_size);
+	ASSERT_TRUE(TryDemandMap(address + page_size - 1u));
+
+	auto* bytes = reinterpret_cast<uint8_t*>(address);
+	bytes[0]              = 0x5a;
+	bytes[page_size - 1u] = 0xc3;
+	EXPECT_EQ(bytes[0], 0x5a);
+	EXPECT_EQ(bytes[page_size - 1u], 0xc3);
+	ASSERT_TRUE(Free(address));
+#endif
+}
+
 UT_END();
