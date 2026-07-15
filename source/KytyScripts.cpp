@@ -181,5 +181,11 @@ int main(int argc, char* argv[])
 		slist.DestroyAll(false);
 	}
 
+	if (!Emulator::DevTools::Shutdown())
+	{
+		printf("Kyty DevTools worker session failed to publish shutdown\n");
+		return 125;
+	}
+
 	return 0;
 }
