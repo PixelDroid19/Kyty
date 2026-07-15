@@ -16,7 +16,7 @@ UT_BEGIN(EmulatorKernelMemory);
 using namespace Libs;
 using namespace Libs::LibKernel::Memory;
 
-TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
+static void EnsureMemorySubsystemInitialized()
 {
 	if (!Config::IsInitialized())
 	{
@@ -29,6 +29,11 @@ TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
 		MemorySubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 		memory_inited = true;
 	}
+}
+
+TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
+{
+	EnsureMemorySubsystemInitialized();
 
 	int64_t address = 0;
 	ASSERT_EQ(KernelAllocateDirectMemory(0x10000, 0x40000, 0x10000, 0x10000, 12, &address), OK);
@@ -36,6 +41,52 @@ TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(address, 0x10000), LibKernel::KERNEL_ERROR_ENOENT);
 	EXPECT_EQ(KernelReleaseDirectMemory(address, 0x10000), LibKernel::KERNEL_ERROR_ENOENT);
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(address, 0), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+TEST(EmulatorKernelMemory, ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t kSize = 0x10000;
+	int64_t          physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(0x40000, 0x80000, kSize, kSize, 12, &physical_address), OK);
+
+	void* mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&mapping, kSize, 0x02, 0, physical_address, kSize), OK);
+	ASSERT_NE(mapping, nullptr);
+
+	void* mapping_start = nullptr;
+	void* mapping_end   = nullptr;
+	int   protection    = 0;
+	ASSERT_EQ(KernelQueryMemoryProtection(mapping, &mapping_start, &mapping_end, &protection), OK);
+	EXPECT_EQ(mapping_start, mapping);
+	EXPECT_EQ(mapping_end, static_cast<uint8_t*>(mapping) + kSize - 1);
+	EXPECT_EQ(protection, 0x02);
+
+	ASSERT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
+
+	struct DirectMemoryInfo
+	{
+		int64_t start;
+		int64_t end;
+		int     memory_type;
+	};
+	DirectMemoryInfo info {};
+	EXPECT_EQ(KernelDirectMemoryQuery(physical_address, 0, &info, sizeof(info)), LibKernel::KERNEL_ERROR_EACCES);
+
+	mapping_start = nullptr;
+	mapping_end   = nullptr;
+	protection    = 0;
+	const int query_after_release = KernelQueryMemoryProtection(mapping, &mapping_start, &mapping_end, &protection);
+	EXPECT_EQ(query_after_release, OK);
+	if (query_after_release == OK)
+	{
+		EXPECT_EQ(mapping_start, mapping);
+		EXPECT_EQ(mapping_end, static_cast<uint8_t*>(mapping) + kSize - 1);
+		EXPECT_EQ(protection, 0x02);
+		EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(mapping), kSize), OK);
+		EXPECT_EQ(KernelQueryMemoryProtection(mapping, nullptr, nullptr, nullptr), LibKernel::KERNEL_ERROR_EACCES);
+	}
 }
 
 // Red→green for Gen5 boot mprotect prot=0xC2 (was EXIT "unknown prot: 194").

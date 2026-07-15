@@ -28,14 +28,19 @@ class PhysicalMemory
 public:
 	struct AllocatedBlock
 	{
-		uint64_t                start_addr;
-		uint64_t                size;
+		uint64_t start_addr;
+		uint64_t size;
+		int      memory_type;
+	};
+
+	struct MappedBlock
+	{
+		uint64_t                phys_addr;
 		uint64_t                map_vaddr;
 		uint64_t                map_size;
 		int                     prot;
 		VirtualMemory::Mode     mode;
 		Graphics::GpuMemoryMode gpu_mode;
-		int                     memory_type;
 	};
 
 	PhysicalMemory() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
@@ -46,17 +51,20 @@ public:
 	static uint64_t Size() { return static_cast<uint64_t>(5376) * 1024 * 1024; }
 
 	bool Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out, int memory_type);
-	bool Release(uint64_t start, size_t len, uint64_t* vaddr, uint64_t* size, Graphics::GpuMemoryMode* gpu_mode);
+	bool Release(uint64_t start, size_t len);
 	bool Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode);
 	bool Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
 	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode);
 	bool Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
 
-	[[nodiscard]] Core::Mutex&                  GetMutex() { return m_mutex; }
-	[[nodiscard]] const Vector<AllocatedBlock>& GetBlocks() const { return m_allocated; }
+	[[nodiscard]] Core::Mutex&               GetMutex() { return m_mutex; }
+	[[nodiscard]] const Vector<MappedBlock>& GetMappedBlocks() const { return m_mapped; }
 
 private:
+	// Gen5 releases the physical reservation independently from its virtual mapping.
+	// KernelMunmap owns the mapping and host/GPU cleanup lifecycle.
 	Vector<AllocatedBlock> m_allocated;
+	Vector<MappedBlock>    m_mapped;
 	Core::Mutex            m_mutex;
 };
 
@@ -124,7 +132,7 @@ void RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func)
 	g_free_callback  = free_func;
 
 	g_physical_memory->GetMutex().Lock();
-	for (const auto& b: g_physical_memory->GetBlocks())
+	for (const auto& b: g_physical_memory->GetMappedBlocks())
 	{
 		g_alloc_callback(b.map_vaddr, b.map_size);
 	}
@@ -174,11 +182,6 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 		AllocatedBlock b {};
 		b.size        = len;
 		b.start_addr  = free_pos;
-		b.gpu_mode    = Graphics::GpuMemoryMode::NoAccess;
-		b.map_size    = 0;
-		b.map_vaddr   = 0;
-		b.prot        = 0;
-		b.mode        = VirtualMemory::Mode::NoAccess;
 		b.memory_type = memory_type;
 
 		m_allocated.Add(b);
@@ -190,12 +193,8 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 	return false;
 }
 
-bool PhysicalMemory::Release(uint64_t start, size_t len, uint64_t* vaddr, uint64_t* size, Graphics::GpuMemoryMode* gpu_mode)
+bool PhysicalMemory::Release(uint64_t start, size_t len)
 {
-	EXIT_IF(vaddr == nullptr);
-	EXIT_IF(size == nullptr);
-	EXIT_IF(gpu_mode == nullptr);
-
 	Core::LockGuard lock(m_mutex);
 
 	uint32_t index = 0;
@@ -203,10 +202,6 @@ bool PhysicalMemory::Release(uint64_t start, size_t len, uint64_t* vaddr, uint64
 	{
 		if (start == b.start_addr && len == b.size)
 		{
-			*vaddr    = b.map_vaddr;
-			*size     = b.map_size;
-			*gpu_mode = b.gpu_mode;
-
 			m_allocated.RemoveAt(index);
 			return true;
 		}
@@ -221,26 +216,41 @@ bool PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int pro
 {
 	Core::LockGuard lock(m_mutex);
 
-	for (auto& b: m_allocated)
+	if (len == 0)
 	{
-		if (phys_addr >= b.start_addr && phys_addr < b.start_addr + b.size)
+		return false;
+	}
+
+	const uint64_t map_size  = len;
+	const bool     allocated = std::any_of(m_allocated.begin(), m_allocated.end(),
+	                                       [phys_addr, map_size](const auto& b)
+	                                       {
+		                                       return phys_addr >= b.start_addr && map_size <= b.size &&
+		                                              phys_addr - b.start_addr <= b.size - map_size;
+	                                       });
+	if (!allocated)
+	{
+		return false;
+	}
+
+	for (const auto& b: m_mapped)
+	{
+		if (phys_addr < b.phys_addr + b.map_size && b.phys_addr < phys_addr + map_size)
 		{
-			if (b.map_vaddr != 0 || b.map_size != 0)
-			{
-				return false;
-			}
-
-			b.map_vaddr = vaddr;
-			b.map_size  = len;
-			b.prot      = prot;
-			b.mode      = mode;
-			b.gpu_mode  = gpu_mode;
-
-			return true;
+			return false;
 		}
 	}
 
-	return false;
+	MappedBlock b {};
+	b.phys_addr = phys_addr;
+	b.map_vaddr = vaddr;
+	b.map_size  = map_size;
+	b.prot      = prot;
+	b.mode      = mode;
+	b.gpu_mode  = gpu_mode;
+	m_mapped.Add(b);
+
+	return true;
 }
 
 bool PhysicalMemory::Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode)
@@ -249,20 +259,16 @@ bool PhysicalMemory::Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMod
 
 	Core::LockGuard lock(m_mutex);
 
-	for (auto& b: m_allocated)
+	uint32_t index = 0;
+	for (auto& b: m_mapped)
 	{
 		if (b.map_vaddr == vaddr && b.map_size == size)
 		{
 			*gpu_mode = b.gpu_mode;
-
-			b.gpu_mode  = Graphics::GpuMemoryMode::NoAccess;
-			b.map_size  = 0;
-			b.map_vaddr = 0;
-			b.prot      = 0;
-			b.mode      = VirtualMemory::Mode::NoAccess;
-
+			m_mapped.RemoveAt(index);
 			return true;
 		}
+		index++;
 	}
 
 	return false;
@@ -310,10 +316,10 @@ bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 {
 	Core::LockGuard lock(m_mutex);
 
-	return std::any_of(m_allocated.begin(), m_allocated.end(),
+	return std::any_of(m_mapped.begin(), m_mapped.end(),
 	                   [vaddr, base_addr, len, prot, mode, gpu_mode](auto& b)
 	                   {
-		                   if (vaddr >= b.map_vaddr && vaddr < b.map_vaddr + b.map_size)
+		                   if (vaddr >= b.map_vaddr && vaddr - b.map_vaddr < b.map_size)
 		                   {
 			                   if (base_addr != nullptr)
 			                   {
@@ -666,31 +672,11 @@ static int release_direct_memory(int64_t start, size_t len)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	uint64_t                vaddr    = 0;
-	uint64_t                size     = 0;
-	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
-
-	bool result = g_physical_memory->Release(start, len, &vaddr, &size, &gpu_mode);
+	bool result = g_physical_memory->Release(start, len);
 
 	if (!result)
 	{
 		return KERNEL_ERROR_ENOENT;
-	}
-
-	if (vaddr != 0 || size != 0)
-	{
-		VirtualMemory::Free(vaddr);
-	}
-
-	if (gpu_mode != Graphics::GpuMemoryMode::NoAccess)
-	{
-		Graphics::GraphicsRunWait();
-		Graphics::GpuMemoryFree(Graphics::WindowGetGraphicContext(), vaddr, size, true);
-	}
-
-	if (g_free_callback != nullptr)
-	{
-		g_free_callback(vaddr, len);
 	}
 
 	return OK;
