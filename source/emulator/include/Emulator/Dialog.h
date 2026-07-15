@@ -64,21 +64,6 @@ int KYTY_SYSV_ABI SaveDataDialogProgressBarSetValue(int target, uint32_t rate);
 
 } // namespace SaveDataDialog
 
-namespace MsgDialog {
-
-// sceMsgDialog* — NIDs from public PS5-3.20_Libs / sce_stubs (libSceMsgDialog.c).
-// Astro Bot post-window path: Initialize then Open after a guest heap assert.
-// Host has no SCE message UI; Open completes immediately to FINISHED.
-int KYTY_SYSV_ABI MsgDialogInitialize();
-int KYTY_SYSV_ABI MsgDialogOpen(const void* param);
-int KYTY_SYSV_ABI MsgDialogGetResult(void* result);
-int KYTY_SYSV_ABI MsgDialogGetStatus();
-int KYTY_SYSV_ABI MsgDialogUpdateStatus();
-int KYTY_SYSV_ABI MsgDialogClose();
-int KYTY_SYSV_ABI MsgDialogTerminate();
-
-} // namespace MsgDialog
-
 } // namespace Kyty::Libs::Dialog
 
 #endif // KYTY_EMU_ENABLED
