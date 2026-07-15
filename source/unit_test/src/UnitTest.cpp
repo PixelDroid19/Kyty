@@ -9,6 +9,7 @@ UT_LINK(CoreDateTime);
 UT_LINK(CoreMemoryAlloc);
 UT_LINK(CoreVirtualMemory);
 UT_LINK(DevToolsEventRing);
+UT_LINK(DevToolsProgress);
 UT_LINK(EmulatorGraphicsState);
 UT_LINK(EmulatorKernelMemory);
 UT_LINK(EmulatorGraphicsPackets);
