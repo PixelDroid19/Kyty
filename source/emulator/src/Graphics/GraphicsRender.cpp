@@ -431,10 +431,12 @@ enum class RenderColorType
 
 struct RenderColorInfo
 {
-	RenderColorType type          = RenderColorType::NoColorOutput;
-	VulkanImage*    vulkan_buffer = nullptr;
-	uint64_t        base_addr     = 0;
-	uint64_t        buffer_size   = 0;
+	static constexpr uint32_t TARGETS_MAX = 8;
+	uint32_t                  targets_num = 0;
+	RenderColorType           type[TARGETS_MAX] {};
+	VulkanImage*              vulkan_buffer[TARGETS_MAX] {};
+	uint64_t                  base_addr[TARGETS_MAX] {};
+	uint64_t                  buffer_size[TARGETS_MAX] {};
 };
 
 class CommandPool
@@ -1461,11 +1463,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	EXIT_IF(g_render_ctx == nullptr);
 
 	bool with_depth = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
-	bool with_color = (color->vulkan_buffer != nullptr);
+	bool with_color = (color->targets_num != 0 && color->vulkan_buffer[0] != nullptr);
 
 	for (auto& f: m_framebuffers)
 	{
-		if (f.framebuffer != nullptr && f.image_id == (with_color ? color->vulkan_buffer->memory.unique_id : 0) &&
+		if (f.framebuffer != nullptr && f.image_id == (with_color ? color->vulkan_buffer[0]->memory.unique_id : 0) &&
 		    f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) && f.depth_clear_enable == depth->depth_clear_enable &&
 		    f.stencil_clear_enable == depth->stencil_clear_enable)
 		{
@@ -1483,11 +1485,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 
 	EXIT_NOT_IMPLEMENTED(!with_depth && !with_color);
 	EXIT_NOT_IMPLEMENTED(with_depth && with_color &&
-	                     (color->vulkan_buffer->extent.width != depth->vulkan_buffer->extent.width ||
-	                      color->vulkan_buffer->extent.height != depth->vulkan_buffer->extent.height));
+	                     (color->vulkan_buffer[0]->extent.width != depth->vulkan_buffer->extent.width ||
+	                      color->vulkan_buffer[0]->extent.height != depth->vulkan_buffer->extent.height));
 
 	VulkanImage* vulkan_buffer =
-	    (with_color ? color->vulkan_buffer
+	    (with_color ? color->vulkan_buffer[0]
 	                : CreateDummyBuffer(VK_FORMAT_B8G8R8A8_SRGB, depth->vulkan_buffer->extent.width, depth->vulkan_buffer->extent.height));
 
 	VkAttachmentDescription attachments[2];
@@ -1569,7 +1571,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 
 	Framebuffer fnew;
 	fnew.framebuffer          = framebuffer;
-	fnew.image_id             = (with_color ? color->vulkan_buffer->memory.unique_id : 0);
+	fnew.image_id             = (with_color ? color->vulkan_buffer[0]->memory.unique_id : 0);
 	fnew.depth_id             = (with_depth ? depth->vulkan_buffer->memory.unique_id : 0);
 	fnew.depth_clear_enable   = depth->depth_clear_enable;
 	fnew.stencil_clear_enable = depth->stencil_clear_enable;
@@ -4024,16 +4026,19 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 
 	const auto& rt   = hw.GetRenderTarget(0);
 	auto        mask = hw.GetRenderTargetMask();
+	r->targets_num   = 0;
 
 	if (rt.base.addr == 0 || mask == 0)
 	{
 		// No color output
-		r->type          = RenderColorType::NoColorOutput;
-		r->base_addr     = 0;
-		r->vulkan_buffer = nullptr;
-		r->buffer_size   = 0;
 		return;
 	}
+
+	const auto layout = State::ResolveColorTargetLayout(mask);
+	EXIT_NOT_IMPLEMENTED(layout.error == State::ColorTargetLayoutError::Gapped);
+	EXIT_NOT_IMPLEMENTED(layout.error == State::ColorTargetLayoutError::PartialChannel);
+	EXIT_NOT_IMPLEMENTED(layout.count == 0 || layout.count > RenderColorInfo::TARGETS_MAX);
+	r->targets_num = layout.count;
 
 	bool ps5 = Config::IsNextGen();
 
@@ -4149,37 +4154,60 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		auto*               buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(
             Graphics::GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, rt.base.addr, size, vulkan_buffer_info));
 		EXIT_NOT_IMPLEMENTED(buffer_vulkan == nullptr);
-		r->type          = RenderColorType::RenderTexture;
-		r->base_addr     = rt.base.addr;
-		r->vulkan_buffer = buffer_vulkan;
-		r->buffer_size   = size;
+		r->type[0]          = RenderColorType::RenderTexture;
+		r->base_addr[0]     = rt.base.addr;
+		r->vulkan_buffer[0] = buffer_vulkan;
+		r->buffer_size[0]   = size;
+
+		// Additional MRTs: same dimensions/format as RT0 (captured multi-target path).
+		for (uint32_t slot = 1; slot < r->targets_num; slot++)
+		{
+			const auto& other = hw.GetRenderTarget(slot);
+			EXIT_NOT_IMPLEMENTED(other.base.addr == 0);
+			if (ps5)
+			{
+				EXIT_NOT_IMPLEMENTED(other.attrib2.width != rt.attrib2.width || other.attrib2.height != rt.attrib2.height ||
+				                     other.attrib3.tile_mode != rt.attrib3.tile_mode || other.info.format != rt.info.format ||
+				                     other.info.channel_type != rt.info.channel_type ||
+				                     other.info.channel_order != rt.info.channel_order);
+			}
+			auto* other_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(
+			    Graphics::GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, other.base.addr, size,
+			                                    vulkan_buffer_info));
+			EXIT_NOT_IMPLEMENTED(other_vulkan == nullptr);
+			r->type[slot]          = RenderColorType::RenderTexture;
+			r->base_addr[slot]     = other.base.addr;
+			r->vulkan_buffer[slot] = other_vulkan;
+			r->buffer_size[slot]   = size;
+		}
 	} else
 	{
 		EXIT_NOT_IMPLEMENTED(!(rt.info.format == 0xa && (rt.info.channel_type == 0x6 || rt.info.channel_type == 0x0) &&
 		                       (rt.info.channel_order == 0x0 || rt.info.channel_order == 0x1)));
 
-		// Display buffer
+		// Display buffer (single swapchain target only).
+		EXIT_NOT_IMPLEMENTED(r->targets_num != 1);
 		EXIT_NOT_IMPLEMENTED(video_image.buffer_size != size);
 		EXIT_NOT_IMPLEMENTED(video_image.buffer_pitch != pitch);
-		r->type          = RenderColorType::DisplayBuffer;
-		r->base_addr     = rt.base.addr;
-		r->vulkan_buffer = video_image.image;
-		r->buffer_size   = video_image.buffer_size;
+		r->type[0]          = RenderColorType::DisplayBuffer;
+		r->base_addr[0]     = rt.base.addr;
+		r->vulkan_buffer[0] = video_image.image;
+		r->buffer_size[0]   = video_image.buffer_size;
 	}
 }
 
 static void InvalidateMemoryObject(const RenderColorInfo& r)
 {
-	bool with_color = (r.vulkan_buffer != nullptr);
+	bool with_color = (r.vulkan_buffer[0] != nullptr);
 
 	if (with_color)
 	{
-		if (r.type == RenderColorType::RenderTexture)
+		if (r.type[0] == RenderColorType::RenderTexture)
 		{
-			GpuMemoryResetHash(&r.base_addr, &r.buffer_size, 1, GpuMemoryObjectType::RenderTexture);
-		} else if (r.type == RenderColorType::DisplayBuffer /*|| r.type == RenderColorType::OffscreenBuffer*/)
+			GpuMemoryResetHash(&r.base_addr[0], &r.buffer_size[0], 1, GpuMemoryObjectType::RenderTexture);
+		} else if (r.type[0] == RenderColorType::DisplayBuffer /*|| r.type == RenderColorType::OffscreenBuffer*/)
 		{
-			GpuMemoryResetHash(&r.base_addr, &r.buffer_size, 1, GpuMemoryObjectType::VideoOutBuffer);
+			GpuMemoryResetHash(&r.base_addr[0], &r.buffer_size[0], 1, GpuMemoryObjectType::VideoOutBuffer);
 		}
 	}
 }
@@ -5701,7 +5729,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	EXIT_IF(framebuffer == nullptr);
 
 	bool with_depth = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
-	bool with_color = (color->vulkan_buffer != nullptr);
+	bool with_color = (color->targets_num != 0 && color->vulkan_buffer[0] != nullptr);
 
 	EXIT_NOT_IMPLEMENTED(!with_depth && !with_color);
 
@@ -5709,7 +5737,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	clears[0].color        = {{0.0f, 0.0f, 0.0f, 1.0f}};
 	clears[1].depthStencil = {depth->depth_clear_value, depth->stencil_clear_value};
 
-	VkExtent2D extent = (with_color ? color->vulkan_buffer->extent : depth->vulkan_buffer->extent);
+	VkExtent2D extent = (with_color ? color->vulkan_buffer[0]->extent : depth->vulkan_buffer->extent);
 
 	VkRenderPassBeginInfo render_pass_info {};
 	render_pass_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -5721,18 +5749,18 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	render_pass_info.clearValueCount   = with_depth ? 2 : 1;
 	render_pass_info.pClearValues      = clears;
 
-	if (with_color && color->vulkan_buffer->layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+	if (with_color && color->vulkan_buffer[0]->layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
 	{
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		image_memory_barrier.pNext                           = nullptr;
 		image_memory_barrier.srcAccessMask                   = VK_ACCESS_MEMORY_READ_BIT;
 		image_memory_barrier.dstAccessMask                   = VK_ACCESS_MEMORY_WRITE_BIT;
-		image_memory_barrier.oldLayout                       = color->vulkan_buffer->layout;
+		image_memory_barrier.oldLayout                       = color->vulkan_buffer[0]->layout;
 		image_memory_barrier.newLayout                       = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-		image_memory_barrier.image                           = color->vulkan_buffer->image;
+		image_memory_barrier.image                           = color->vulkan_buffer[0]->image;
 		image_memory_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
 		image_memory_barrier.subresourceRange.baseMipLevel   = 0;
 		image_memory_barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
@@ -5743,7 +5771,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		                     VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
 		                     &image_memory_barrier);
 
-		color->vulkan_buffer->layout = image_memory_barrier.newLayout;
+		color->vulkan_buffer[0]->layout = image_memory_barrier.newLayout;
 	}
 
 	if (with_depth && depth->vulkan_buffer->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
