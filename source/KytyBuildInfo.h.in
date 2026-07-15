@@ -1,0 +1,6 @@
+#pragma once
+namespace Kyty::BuildInfo {
+inline constexpr char Revision[] = "@KYTY_BUILD_REVISION@";
+inline constexpr bool Dirty = @KYTY_BUILD_DIRTY@;
+inline constexpr bool RevisionKnown = @KYTY_BUILD_REVISION_KNOWN@;
+}

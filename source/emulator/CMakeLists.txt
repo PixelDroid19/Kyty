@@ -16,6 +16,7 @@ endif()
 #add_library(emulator_obj OBJECT ${emulator_src})
 #add_library(emulator STATIC $<TARGET_OBJECTS:emulator_obj>)
 add_library(emulator STATIC ${emulator_src})
+add_dependencies(emulator KytyBuildInfo)
 
 target_link_libraries(emulator core math scripts lua unit_test vulkan-1 spirv-tools-opt spirv-tools easy_profiler SDL2-static)
 
