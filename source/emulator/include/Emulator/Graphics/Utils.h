@@ -5,6 +5,7 @@
 
 #include "Emulator/Common.h"
 
+#include <cstring>
 #include <utility>
 #include <vulkan/vulkan_core.h>
 
@@ -72,6 +73,52 @@ struct DepthAttachmentLoadOps
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_LOAD;
 	}
 	ops.initial_layout = (depth_clear || stencil_clear) ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	return ops;
+}
+
+// Guest CB clear words map to attachment loadOp CLEAR on first GPU-owned use
+// (tracked layout UNDEFINED). Subsequent passes LOAD OPTIMAL preserve contents.
+struct ColorAttachmentLoadOps
+{
+	VkAttachmentLoadOp load_op        = VK_ATTACHMENT_LOAD_OP_LOAD;
+	VkImageLayout      initial_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	float              clear_r        = 0.0f;
+	float              clear_g        = 0.0f;
+	float              clear_b        = 0.0f;
+	float              clear_a        = 1.0f;
+};
+
+[[nodiscard]] inline VkClearColorValue DecodeGuestColorClearWords(uint32_t word0, uint32_t word1)
+{
+	VkClearColorValue value {};
+	std::memcpy(&value.float32[0], &word0, sizeof(uint32_t));
+	std::memcpy(&value.float32[1], &word1, sizeof(uint32_t));
+	value.float32[2] = 0.0f;
+	value.float32[3] = 1.0f;
+	return value;
+}
+
+[[nodiscard]] inline ColorAttachmentLoadOps ResolveColorAttachmentLoadOps(VkImageLayout tracked_layout, bool guest_fast_clear,
+                                                                          uint32_t clear_word0, uint32_t clear_word1)
+{
+	ColorAttachmentLoadOps ops {};
+	if (tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED)
+	{
+		ops.load_op        = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		ops.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+		if (guest_fast_clear || clear_word0 != 0u || clear_word1 != 0u)
+		{
+			const auto clear = DecodeGuestColorClearWords(clear_word0, clear_word1);
+			ops.clear_r      = clear.float32[0];
+			ops.clear_g      = clear.float32[1];
+			ops.clear_b      = clear.float32[2];
+			ops.clear_a      = clear.float32[3];
+		}
+	} else
+	{
+		ops.load_op        = VK_ATTACHMENT_LOAD_OP_LOAD;
+		ops.initial_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	}
 	return ops;
 }
 

@@ -291,9 +291,14 @@ private:
 
 struct VulkanFramebuffer
 {
-	VkRenderPass  render_pass    = nullptr;
-	uint64_t      render_pass_id = 0;
-	VkFramebuffer framebuffer    = nullptr;
+	static constexpr uint32_t TARGETS_MAX = 8;
+	VkRenderPass              render_pass    = nullptr;
+	uint64_t                  render_pass_id = 0;
+	VkFramebuffer             framebuffer    = nullptr;
+	uint32_t                  color_count    = 0;
+	VkAttachmentLoadOp        color_load_op[TARGETS_MAX]        = {};
+	VkImageLayout             color_initial_layout[TARGETS_MAX] = {};
+	float                     color_clear[TARGETS_MAX][4]       = {};
 };
 
 class FramebufferCache
@@ -318,6 +323,8 @@ private:
 		uint64_t           depth_id             = 0;
 		bool               depth_clear_enable   = false;
 		bool               stencil_clear_enable = false;
+		VkAttachmentLoadOp color_load_op[8]     = {};
+		VkImageLayout      color_initial_layout[8] = {};
 	};
 
 	Core::Mutex                  m_mutex;
@@ -439,6 +446,9 @@ struct RenderColorInfo
 	VulkanImage*              vulkan_buffer[TARGETS_MAX] {};
 	uint64_t                  base_addr[TARGETS_MAX] {};
 	uint64_t                  buffer_size[TARGETS_MAX] {};
+	bool                      cmask_fast_clear_enable[TARGETS_MAX] {};
+	uint32_t                  clear_word0[TARGETS_MAX] {};
+	uint32_t                  clear_word1[TARGETS_MAX] {};
 };
 
 class CommandPool
@@ -1472,7 +1482,12 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		bool same_colors = (f.targets_num == color->targets_num);
 		for (uint32_t slot = 0; same_colors && slot < color->targets_num; slot++)
 		{
-			same_colors = (f.image_id[slot] == color->vulkan_buffer[slot]->memory.unique_id);
+			auto*      image    = color->vulkan_buffer[slot];
+			const auto load_ops = ResolveColorAttachmentLoadOps(image->layout, color->cmask_fast_clear_enable[slot],
+			                                                    color->clear_word0[slot], color->clear_word1[slot]);
+			same_colors =
+			    (f.image_id[slot] == color->vulkan_buffer[slot]->memory.unique_id) && (f.color_load_op[slot] == load_ops.load_op) &&
+			    (f.color_initial_layout[slot] == load_ops.initial_layout);
 		}
 		if (f.framebuffer != nullptr && same_colors &&
 		    f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) && f.depth_clear_enable == depth->depth_clear_enable &&
@@ -1507,18 +1522,28 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	{
 		auto* image = (with_color ? color->vulkan_buffer[slot] : vulkan_buffer);
 		EXIT_NOT_IMPLEMENTED(image->extent.width != vulkan_buffer->extent.width || image->extent.height != vulkan_buffer->extent.height);
+		const auto load_ops = ResolveColorAttachmentLoadOps(image->layout, with_color ? color->cmask_fast_clear_enable[slot] : false,
+		                                                    with_color ? color->clear_word0[slot] : 0u,
+		                                                    with_color ? color->clear_word1[slot] : 0u);
 		attachments[slot].flags          = 0;
 		attachments[slot].format         = image->format;
 		attachments[slot].samples        = VK_SAMPLE_COUNT_1_BIT;
-		attachments[slot].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+		attachments[slot].loadOp         = load_ops.load_op;
 		attachments[slot].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
 		attachments[slot].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		attachments[slot].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachments[slot].initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		attachments[slot].initialLayout  = load_ops.initial_layout;
 		attachments[slot].finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		color_attachment_refs[slot]      = {slot, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
 		views[slot]                      = image->image_view[VulkanImage::VIEW_DEFAULT];
+		framebuffer->color_load_op[slot]        = load_ops.load_op;
+		framebuffer->color_initial_layout[slot] = load_ops.initial_layout;
+		framebuffer->color_clear[slot][0]       = load_ops.clear_r;
+		framebuffer->color_clear[slot][1]       = load_ops.clear_g;
+		framebuffer->color_clear[slot][2]       = load_ops.clear_b;
+		framebuffer->color_clear[slot][3]       = load_ops.clear_a;
 	}
+	framebuffer->color_count = color_count;
 
 	const auto depth_load_ops = ResolveDepthAttachmentLoadOps(depth->format, depth->depth_clear_enable, depth->stencil_clear_enable);
 	attachments[color_count].flags          = 0;
@@ -1594,6 +1619,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	fnew.depth_id             = (with_depth ? depth->vulkan_buffer->memory.unique_id : 0);
 	fnew.depth_clear_enable   = depth->depth_clear_enable;
 	fnew.stencil_clear_enable = depth->stencil_clear_enable;
+	for (uint32_t slot = 0; slot < color->targets_num; slot++)
+	{
+		fnew.color_load_op[slot]        = framebuffer->color_load_op[slot];
+		fnew.color_initial_layout[slot] = framebuffer->color_initial_layout[slot];
+	}
 
 	bool updated = false;
 
@@ -4235,6 +4265,14 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		r->vulkan_buffer[0] = video_image.image;
 		r->buffer_size[0]   = video_image.buffer_size;
 	}
+
+	for (uint32_t slot = 0; slot < r->targets_num; slot++)
+	{
+		const auto& rt_slot              = hw.GetRenderTarget(slot);
+		r->cmask_fast_clear_enable[slot] = rt_slot.info.cmask_fast_clear_enable;
+		r->clear_word0[slot]             = rt_slot.clear_word0.word0;
+		r->clear_word1[slot]             = rt_slot.clear_word1.word1;
+	}
 }
 
 static void InvalidateMemoryObject(const RenderColorInfo& r)
@@ -5778,7 +5816,14 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	VkClearValue   clears[RenderColorInfo::TARGETS_MAX + 1] {};
 	for (uint32_t slot = 0; slot < color_count; slot++)
 	{
-		clears[slot].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+		if (framebuffer->color_count > slot)
+		{
+			clears[slot].color = {{framebuffer->color_clear[slot][0], framebuffer->color_clear[slot][1],
+			                       framebuffer->color_clear[slot][2], framebuffer->color_clear[slot][3]}};
+		} else
+		{
+			clears[slot].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+		}
 	}
 	if (with_depth)
 	{
