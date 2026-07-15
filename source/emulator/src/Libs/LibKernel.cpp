@@ -379,7 +379,9 @@ static KYTY_SYSV_ABI uint64_t KernelInternalMemoryMap(uint64_t addr, uint64_t le
 	if (getenv("KYTY_TRACE_LIBC") != nullptr)
 	{
 		Core::VirtualMemory::SetGuestTrace(1500);
+	#if defined(__x86_64__) || defined(__i386__)
 		__asm__ __volatile__("pushfq; orq $0x100,(%rsp); popfq");
+	#endif
 	}
 	if (getenv("KYTY_PROF") != nullptr)
 	{

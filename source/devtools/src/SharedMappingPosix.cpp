@@ -134,7 +134,10 @@ ProcessOperationError SharedMapping::CreateOwnerOnly(uint64_t size, SharedMappin
 			return ProcessOperationError::MappingFailed;
 		}
 		struct stat st {};
-		if (::fstat(fd, &st) != 0 || static_cast<uint64_t>(st.st_size) != size)
+		// Darwin may round a POSIX shared-memory object to its host page size
+		// (16 KiB on Apple Silicon). The logical mapping remains `size` bytes;
+		// reject only a backing object that is smaller than requested.
+		if (::fstat(fd, &st) != 0 || st.st_size < 0 || static_cast<uint64_t>(st.st_size) < size)
 		{
 			::close(fd);
 			return ProcessOperationError::MappingFailed;
