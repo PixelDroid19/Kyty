@@ -74,6 +74,8 @@ enum class Mode : uint32_t
 	ExecuteReadWrite = Execute | Read | Write,
 };
 
+class SharedBacking;
+
 inline bool IsExecute(Mode mode)
 {
 	return (mode == Mode::Execute || mode == Mode::ExecuteRead || mode == Mode::ExecuteWrite || mode == Mode::ExecuteReadWrite);
@@ -81,13 +83,27 @@ inline bool IsExecute(Mode mode)
 
 void Init();
 
+uint64_t GetPageSize();
+
 uint64_t Alloc(uint64_t address, uint64_t size, Mode mode);
 uint64_t AllocAligned(uint64_t address, uint64_t size, Mode mode, uint64_t alignment);
 bool     AllocFixed(uint64_t address, uint64_t size, Mode mode);
-bool     Free(uint64_t address);
-bool     Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nullptr);
-bool     FlushInstructionCache(uint64_t address, uint64_t size);
-bool     PatchReplace(uint64_t vaddr, uint64_t value);
+
+// Sparse host backing whose views share bytes by backing_offset. Free() unmaps
+// individual views without destroying the backing or other aliases.
+SharedBacking* CreateSharedBacking(uint64_t size);
+void           DestroySharedBacking(SharedBacking* backing);
+uint64_t       MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
+                                uint64_t alignment);
+bool           MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode);
+bool           Free(uint64_t address);
+bool           Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nullptr);
+// Write-enable a page from an access-violation handler without taking Kyty's
+// virtual-memory bookkeeping lock. This is intentionally narrow: callers must
+// restore tracked protection with Protect() outside the handler.
+bool ProtectWriteSignalSafe(uint64_t address, uint64_t size);
+bool FlushInstructionCache(uint64_t address, uint64_t size);
+bool PatchReplace(uint64_t vaddr, uint64_t value);
 
 // Diagnostic single-step tracer (macOS/Rosetta): logs the next `steps` guest
 // instructions on the current thread via the x86 trap flag. No-op elsewhere.

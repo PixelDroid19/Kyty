@@ -89,6 +89,52 @@ TEST(EmulatorKernelMemory, ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap)
 	}
 }
 
+TEST(EmulatorKernelMemory, ReusedDirectMemoryKeepsVirtualAliasesCoherent)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t  kSize        = 0x10000;
+	constexpr int64_t kSearchStart = 0x100000;
+	constexpr int64_t kSearchEnd   = kSearchStart + kSize;
+	int64_t           first_physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kSearchStart, kSearchEnd, kSize, kSize, 12, &first_physical_address), OK);
+	ASSERT_EQ(first_physical_address, kSearchStart);
+
+	void* first_mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&first_mapping, kSize, 0x02, 0, first_physical_address, kSize), OK);
+	ASSERT_NE(first_mapping, nullptr);
+	auto* first_bytes = static_cast<uint8_t*>(first_mapping);
+	first_bytes[0]    = 0x5a;
+	first_bytes[1]    = 0xc3;
+
+	ASSERT_EQ(KernelCheckedReleaseDirectMemory(first_physical_address, kSize), OK);
+
+	int64_t second_physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kSearchStart, kSearchEnd, kSize, kSize, 12, &second_physical_address), OK);
+	ASSERT_EQ(second_physical_address, first_physical_address);
+
+	void* second_mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&second_mapping, kSize, 0x02, 0, second_physical_address, kSize), OK);
+	ASSERT_NE(second_mapping, nullptr);
+	ASSERT_NE(second_mapping, first_mapping);
+	auto* second_bytes = static_cast<uint8_t*>(second_mapping);
+
+	EXPECT_EQ(second_bytes[0], 0x5a);
+	EXPECT_EQ(second_bytes[1], 0xc3);
+	second_bytes[2] = 0x7e;
+	EXPECT_EQ(first_bytes[2], 0x7e);
+
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(second_mapping), kSize), OK);
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(first_mapping), kSize), OK);
+
+	void* remapped_at_first_address = first_mapping;
+	ASSERT_EQ(KernelMapDirectMemory(&remapped_at_first_address, kSize, 0x07, 0x10, second_physical_address, kSize), OK);
+	ASSERT_EQ(remapped_at_first_address, first_mapping);
+	EXPECT_EQ(static_cast<uint8_t*>(remapped_at_first_address)[2], 0x7e);
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(remapped_at_first_address), kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
+}
+
 // Red→green for Gen5 boot mprotect prot=0xC2 (was EXIT "unknown prot: 194").
 // Pure decoder is the shipped decision path used by KernelMprotect.
 TEST(EmulatorKernelMemory, DecodesGen5MprotectProtC2AsReadWriteGpu)

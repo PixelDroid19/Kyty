@@ -11,14 +11,20 @@
 
 #include "cpuinfo.h"
 
+#include <algorithm>
 #include <cerrno>
+#include <fcntl.h>
+#include <limits>
 #include <map>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#else
+#include <sys/syscall.h>
 #endif
 
 // IWYU pragma: no_include <asm/mman-common.h>
@@ -35,6 +41,12 @@ namespace Kyty::Core {
 static pthread_mutex_t              g_virtual_mutex {};
 static std::map<uintptr_t, size_t>* g_allocs   = nullptr;
 static std::map<uintptr_t, int>*    g_protects = nullptr;
+
+struct SharedBacking
+{
+	int      fd   = -1;
+	uint64_t size = 0;
+};
 
 void sys_get_system_info(SystemInfo* info)
 {
@@ -64,6 +76,12 @@ void sys_virtual_init()
 	g_protects = new std::map<uintptr_t, int>;
 
 	cpuinfo_initialize();
+}
+
+uint64_t sys_virtual_get_page_size()
+{
+	const long page_size = sysconf(_SC_PAGESIZE);
+	return page_size > 0 ? static_cast<uint64_t>(page_size) : 0;
 }
 
 static int get_protection_flag(VirtualMemory::Mode mode)
@@ -105,6 +123,16 @@ static uintptr_t align_up(uintptr_t addr, uint64_t alignment)
 	return (addr + alignment - 1) & ~(alignment - 1);
 }
 
+static bool try_align_up(uintptr_t addr, uint64_t alignment, uintptr_t* result)
+{
+	if (result == nullptr || alignment == 0 || (alignment & (alignment - 1)) != 0 || addr > UINTPTR_MAX - (alignment - 1))
+	{
+		return false;
+	}
+	*result = align_up(addr, alignment);
+	return true;
+}
+
 // GpuMemory page ids pack vaddr>>14 into a uint32, so guest addresses must fit
 // below 2^46. Linux free mmap commonly returns ~0x7f... which is outside that
 // window and aborts on the first GPU-backed VideoOut registration. Keep free
@@ -124,10 +152,44 @@ static bool guest_va_compatible(uint64_t addr, uint64_t size)
 	{
 		return false;
 	}
-	if (addr + size - 1ull > kGuestVaMax)
+	if (size - 1ull > kGuestVaMax - addr)
 	{
 		return false;
 	}
+	return true;
+}
+
+static bool is_power_of_two(uint64_t value)
+{
+	return value != 0 && (value & (value - 1)) == 0;
+}
+
+static bool shared_mapping_valid(const SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
+	                             uint64_t alignment, bool fixed)
+{
+	if (backing == nullptr || backing->fd < 0 || size == 0 || !is_power_of_two(alignment))
+	{
+		return false;
+	}
+
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (page_size == 0 || alignment < page_size || alignment % page_size != 0 || backing_offset % page_size != 0 ||
+	    size % page_size != 0)
+	{
+		return false;
+	}
+
+	if (backing_offset > backing->size || size > backing->size - backing_offset ||
+	    backing_offset > static_cast<uint64_t>(std::numeric_limits<off_t>::max()))
+	{
+		return false;
+	}
+
+	if (fixed && (address == 0 || address % page_size != 0 || !guest_va_compatible(address, size)))
+	{
+		return false;
+	}
+
 	return true;
 }
 
@@ -157,7 +219,10 @@ static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, 
 	{
 		start = kGuestHeapLo;
 	}
-	start = align_up(start, alignment);
+	if (!try_align_up(start, alignment, &start))
+	{
+		return MAP_FAILED;
+	}
 
 	// Large flexible/direct heaps are demand-backed; avoid immediate commit checks.
 	const int flags_base = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE;
@@ -337,6 +402,194 @@ uint64_t sys_virtual_alloc_aligned(uint64_t address, uint64_t size, VirtualMemor
 
 #endif
 
+void* sys_virtual_create_shared_backing(uint64_t size)
+{
+	if (size == 0 || size > static_cast<uint64_t>(std::numeric_limits<off_t>::max()))
+	{
+		return nullptr;
+	}
+
+	int fd = -1;
+#ifdef __APPLE__
+#ifdef SHM_ANON
+	fd = shm_open(SHM_ANON, O_RDWR, 0);
+#endif
+#else
+#ifdef SYS_memfd_create
+	static constexpr unsigned int kMemfdCloseOnExec = 0x0001u;
+	static constexpr unsigned int kMemfdExecutable  = 0x0010u;
+	fd = static_cast<int>(syscall(SYS_memfd_create, "kyty-direct-memory", kMemfdCloseOnExec | kMemfdExecutable));
+	if (fd < 0 && errno == EINVAL)
+	{
+		fd = static_cast<int>(syscall(SYS_memfd_create, "kyty-direct-memory", kMemfdCloseOnExec));
+	}
+#endif
+#endif
+	if (fd < 0)
+	{
+		return nullptr;
+	}
+
+	if (ftruncate(fd, static_cast<off_t>(size)) != 0)
+	{
+		close(fd);
+		return nullptr;
+	}
+
+	auto* backing = new SharedBacking;
+	backing->fd    = fd;
+	backing->size  = size;
+	return backing;
+}
+
+void sys_virtual_destroy_shared_backing(void* backing)
+{
+	auto* shared = static_cast<SharedBacking*>(backing);
+	if (shared == nullptr)
+	{
+		return;
+	}
+
+	if (shared->fd >= 0)
+	{
+		close(shared->fd);
+	}
+	delete shared;
+}
+
+static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t prefer, uint64_t backing_offset, uint64_t size,
+	                                     int protect, uint64_t alignment)
+{
+	if (size > kGuestHeapHi - kGuestHeapLo)
+	{
+		return MAP_FAILED;
+	}
+
+	uintptr_t start = (prefer != 0) ? prefer : kGuestHeapLo;
+	if (start < kGuestHeapLo || start > kGuestHeapHi - size)
+	{
+		start = kGuestHeapLo;
+	}
+	if (!try_align_up(start, alignment, &start))
+	{
+		return MAP_FAILED;
+	}
+
+	if (start > kGuestHeapHi - size)
+	{
+		return MAP_FAILED;
+	}
+
+	const uintptr_t last_address = std::min<uintptr_t>(kGuestHeapHi - size, kGuestVaMax - (size - 1));
+	uintptr_t       address      = start;
+	while (address <= last_address)
+	{
+		void* ptr = MAP_FAILED;
+#ifdef KYTY_FIXED_NOREPLACE
+		// NOLINTNEXTLINE
+		ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED_NOREPLACE | MAP_SHARED, backing->fd,
+		           static_cast<off_t>(backing_offset));
+#else
+		if (!is_mmaped(reinterpret_cast<void*>(address), size))
+		{
+			// NOLINTNEXTLINE
+			ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED | MAP_SHARED, backing->fd,
+			           static_cast<off_t>(backing_offset));
+		}
+#endif
+		if (ptr != MAP_FAILED)
+		{
+			if (reinterpret_cast<uintptr_t>(ptr) == address)
+			{
+				return ptr;
+			}
+			munmap(ptr, size);
+		}
+
+		if (alignment > last_address - address)
+		{
+			break;
+		}
+		address += alignment;
+	}
+
+	return MAP_FAILED;
+}
+
+uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
+	                                    VirtualMemory::Mode mode, uint64_t alignment)
+{
+	EXIT_IF(g_allocs == nullptr);
+
+	auto* shared = static_cast<SharedBacking*>(backing);
+	if (!shared_mapping_valid(shared, address, backing_offset, size, alignment, false))
+	{
+		return 0;
+	}
+
+	const uintptr_t prefer = guest_va_compatible(address, size) ? static_cast<uintptr_t>(address) : 0;
+	const int       protect = get_protection_flag(mode);
+	void*           ptr     = mmap_shared_in_guest_window(shared, prefer, backing_offset, size, protect, alignment);
+	if (ptr == MAP_FAILED)
+	{
+		return 0;
+	}
+
+	const auto ret_addr = reinterpret_cast<uintptr_t>(ptr);
+	if ((ret_addr & (alignment - 1)) != 0 || !guest_va_compatible(ret_addr, size))
+	{
+		munmap(ptr, size);
+		return 0;
+	}
+
+	track_alloc(ret_addr, size, protect);
+	return ret_addr;
+}
+
+bool sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
+	                              VirtualMemory::Mode mode)
+{
+	EXIT_IF(g_allocs == nullptr);
+
+	auto* shared          = static_cast<SharedBacking*>(backing);
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (!shared_mapping_valid(shared, address, backing_offset, size, page_size, true))
+	{
+		return false;
+	}
+
+	const auto addr    = static_cast<uintptr_t>(address);
+	const int  protect = get_protection_flag(mode);
+	void*      ptr     = MAP_FAILED;
+
+#ifdef KYTY_FIXED_NOREPLACE
+	// NOLINTNEXTLINE
+	ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED_NOREPLACE | MAP_SHARED, shared->fd,
+	           static_cast<off_t>(backing_offset));
+#else
+	if (!is_mmaped(reinterpret_cast<void*>(addr), size))
+	{
+		// NOLINTNEXTLINE
+		ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_SHARED, shared->fd,
+		           static_cast<off_t>(backing_offset));
+	}
+#endif
+
+	if (ptr == MAP_FAILED)
+	{
+		return false;
+	}
+
+	if (reinterpret_cast<uintptr_t>(ptr) != addr)
+	{
+		munmap(ptr, size);
+		return false;
+	}
+
+	track_alloc(addr, size, protect);
+	return true;
+}
+
 bool sys_virtual_alloc_fixed(uint64_t address, uint64_t size, VirtualMemory::Mode mode)
 {
 	EXIT_IF(g_allocs == nullptr);
@@ -398,7 +651,6 @@ bool sys_virtual_free(uint64_t address)
 	if (auto s = g_allocs->find(addr); s != g_allocs->end())
 	{
 		size = s->second;
-		g_allocs->erase(s);
 	}
 	pthread_mutex_unlock(&g_virtual_mutex);
 
@@ -412,6 +664,7 @@ bool sys_virtual_free(uint64_t address)
 		uintptr_t page_start = addr >> 12u;
 		uintptr_t page_end   = (addr + size - 1) >> 12u;
 		pthread_mutex_lock(&g_virtual_mutex);
+		g_allocs->erase(addr);
 		for (uintptr_t page = page_start; page <= page_end; page++)
 		{
 			if (auto s = g_protects->find(page); s != g_protects->end())
@@ -457,6 +710,15 @@ bool sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mo
 	}
 
 	return false;
+}
+
+bool sys_virtual_protect_write_signal_safe(uint64_t address, uint64_t size)
+{
+	if (size == 0)
+	{
+		return false;
+	}
+	return mprotect(reinterpret_cast<void*>(static_cast<uintptr_t>(address)), size, PROT_READ | PROT_WRITE) == 0;
 }
 
 bool sys_virtual_flush_instruction_cache(uint64_t /*address*/, uint64_t /*size*/)
