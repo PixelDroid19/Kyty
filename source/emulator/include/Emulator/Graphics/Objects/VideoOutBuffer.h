@@ -17,6 +17,13 @@ enum class VideoOutBufferFormat : uint64_t
 	B8G8R8A8Srgb,
 };
 
+// Tiled display buffers are GPU-owned; CPU upload on Update would LOAD stale
+// guest memory before the renderer has filled the image.
+[[nodiscard]] inline bool VideoOutBufferShouldCpuUploadOnUpdate(bool tiled)
+{
+	return !tiled;
+}
+
 class VideoOutBufferObject: public GpuObject
 {
 public:
