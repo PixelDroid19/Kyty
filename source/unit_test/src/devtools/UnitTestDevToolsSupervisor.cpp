@@ -1,7 +1,9 @@
 #include "Kyty/DevTools/Protocol/Protocol.h"
 #include "Kyty/DevTools/Supervisor/ProcessLauncher.h"
 #include "Kyty/DevTools/Supervisor/SharedMapping.h"
+#include "Kyty/DevTools/Telemetry/WorkerTelemetry.h"
 #include "Kyty/DevTools/Transport/Bootstrap.h"
+#include "Kyty/DevTools/Transport/WorkerSession.h"
 #include "Kyty/UnitTest.h"
 
 #include <cstring>
@@ -160,6 +162,17 @@ TEST(DevToolsSupervisor, PosixExitDecodesExitCode)
 	EXPECT_EQ(again.status.code, 0u);
 
 	::close(pipes[0]);
+}
+
+TEST(DevToolsSupervisor, WorkerSessionClassifiesBootstrapWithoutActivation)
+{
+	WorkerTelemetryOptions options {};
+	options.diagnostic_thread_instance = 1;
+	WorkerSession session;
+
+	EXPECT_EQ(session.StartFromBootstrap(nullptr, options), WorkerSessionResult::MissingBootstrap);
+	EXPECT_EQ(session.StartFromBootstrap("p:3:4:invalid", options), WorkerSessionResult::MalformedBootstrap);
+	EXPECT_FALSE(session.Active());
 }
 
 UT_END();

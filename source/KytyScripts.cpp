@@ -6,6 +6,8 @@
 #include "Kyty/Core/MemoryAlloc.h"
 #include "Kyty/Core/SDLSubsystem.h"
 #include "Kyty/Core/Threads.h"
+#include "Kyty/DevTools/Transport/Bootstrap.h"
+#include "Kyty/DevTools/Transport/WorkerSession.h"
 #include "Kyty/Math/MathAll.h"
 #include "Kyty/Scripts/BuildTools.h"
 #include "Kyty/Scripts/Scripts.h"
@@ -16,6 +18,8 @@
 #include "Emulator/Emulator.h"
 
 #include "KytyBuildInfo.h"
+
+#include <cstdlib>
 
 using namespace Kyty;
 using namespace Core;
@@ -109,6 +113,22 @@ int main(int argc, char* argv[])
 
 	mem_set_max_size(static_cast<size_t>(2048) * 1024 * 1024 - 1);
 
+	DevTools::WorkerTelemetryOptions telemetry_options {};
+	telemetry_options.logging_mode               = DevTools::LoggingMode::Silent;
+	telemetry_options.revision                   = Kyty::BuildInfo::Revision;
+	telemetry_options.dirty                      = Kyty::BuildInfo::Dirty ? 1u : 0u;
+	telemetry_options.diagnostic_thread_instance = 1u;
+	DevTools::WorkerSession worker_session;
+	const auto              worker_result = worker_session.StartFromBootstrap(
+	    std::getenv(DevTools::kBootstrapEnvName), telemetry_options);
+	if (worker_result != DevTools::WorkerSessionResult::MissingBootstrap &&
+	    worker_result != DevTools::WorkerSessionResult::Attached)
+	{
+		printf("Kyty DevTools bootstrap rejected: %u\n", static_cast<unsigned>(worker_result));
+		return 125;
+	}
+	const bool worker_diagnostics_active = worker_result == DevTools::WorkerSessionResult::Attached;
+
 	auto& slist = *SubsystemsList::Instance();
 
 	slist.SetArgs(argc, argv);
@@ -163,6 +183,12 @@ int main(int argc, char* argv[])
 		}
 
 		slist.DestroyAll(false);
+	}
+
+	if (worker_diagnostics_active && !worker_session.Stop())
+	{
+		printf("Kyty DevTools worker session failed to publish shutdown\n");
+		return 125;
 	}
 
 	return 0;

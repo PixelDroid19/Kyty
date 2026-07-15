@@ -46,6 +46,28 @@ TEST(DevToolsProtocol, HeaderMagicMajorMinorAndMappingSize)
 	EXPECT_EQ(static_cast<uint32_t>(ShaderCacheState::PersistentCacheWarm), 3u);
 }
 
+TEST(DevToolsProtocol, WorkerBootstrapValidatesNonceAndRequestedMode)
+{
+	std::vector<uint8_t> map(static_cast<size_t>(kProtocolMappingSize), 0);
+	ParentProtocolInit   init {};
+	init.supervisor_start_token = 9;
+	init.requested_mode         = RecordingMode::Full;
+	for (uint32_t i = 0; i < sizeof(init.nonce); ++i)
+	{
+		init.nonce[i] = static_cast<uint8_t>(0x80u + i);
+	}
+	MutableMappingView mut {map.data(), map.size()};
+	ASSERT_EQ(InitializeProtocolOwner(mut, init), ProtocolResult::Ok);
+
+	RecordingMode requested = RecordingMode::MetricsOnly;
+	EXPECT_EQ(ReadWorkerBootstrap({map.data(), map.size()}, init.nonce, &requested), ProtocolResult::Ok);
+	EXPECT_EQ(requested, RecordingMode::Full);
+
+	uint8_t wrong_nonce[16] = {};
+	EXPECT_EQ(ReadWorkerBootstrap({map.data(), map.size()}, wrong_nonce, &requested), ProtocolResult::Rejected);
+	EXPECT_EQ(ReadWorkerBootstrap({nullptr, 0}, init.nonce, &requested), ProtocolResult::InvalidArgument);
+}
+
 TEST(DevToolsProtocol, ProgressPublicationRoundTrips)
 {
 	std::vector<uint8_t> map(static_cast<size_t>(kProtocolMappingSize), 0);
