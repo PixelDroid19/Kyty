@@ -1352,6 +1352,72 @@ TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0)
 	EXPECT_TRUE(inst.src[0].negate);
 }
 
+// Compressed MRT export must read the uint packed-half shadow written by
+// VCvtPkrtz, not a float load+bitcast of the same VGPR (precision/path mismatch).
+TEST(EmulatorGraphicsPackets, CompressedMrtExportReadsPackedHalfFromUintShadow)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	auto vgpr = [](int reg)
+	{
+		ShaderOperand op {};
+		op.type        = ShaderOperandType::Vgpr;
+		op.register_id = reg;
+		op.size        = 1;
+		return op;
+	};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+
+	ShaderInstruction pack_rg;
+	pack_rg.pc      = 0;
+	pack_rg.type    = ShaderInstructionType::VCvtPkrtzF16F32;
+	pack_rg.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	pack_rg.dst     = vgpr(4);
+	pack_rg.src[0]  = vgpr(2);
+	pack_rg.src[1]  = vgpr(3);
+	pack_rg.src_num = 2;
+
+	ShaderInstruction pack_ba;
+	pack_ba.pc      = 4;
+	pack_ba.type    = ShaderInstructionType::VCvtPkrtzF16F32;
+	pack_ba.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	pack_ba.dst     = vgpr(5);
+	pack_ba.src[0]  = vgpr(6);
+	pack_ba.src[1]  = vgpr(7);
+	pack_ba.src_num = 2;
+
+	ShaderInstruction export_mrt;
+	export_mrt.pc      = 8;
+	export_mrt.type    = ShaderInstructionType::Exp;
+	export_mrt.format  = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone;
+	export_mrt.src[0]  = vgpr(4);
+	export_mrt.src[1]  = vgpr(5);
+	export_mrt.src_num = 2;
+
+	code.GetInstructions().Add(pack_rg);
+	code.GetInstructions().Add(pack_ba);
+	code.GetInstructions().Add(export_mrt);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("PackHalf2x16"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("UnpackHalf2x16"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%t1_2 = OpLoad %float %v4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%t6_2 = OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %uint %v4_packed_half"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %uint %v5_packed_half"), Core::STRING8_INVALID_INDEX);
+}
+
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
 // at VS PC 0x264. Same ParamN path as 0x20+N; real ShaderParse entry (not a re-impl).
 TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)

@@ -1543,6 +1543,7 @@ public:
 	void GenerateSource();
 
 	[[nodiscard]] const String8& GetSource() const { return m_source; }
+	[[nodiscard]] bool           CanLoadPackedHalfForExport(int export_index, ShaderOperand op) const;
 
 	void                                       SetVsInputInfo(const ShaderVertexInputInfo* input_info) { m_vs_input_info = input_info; }
 	[[nodiscard]] const ShaderVertexInputInfo* GetVsInputInfo() const { return m_vs_input_info; }
@@ -1645,6 +1646,45 @@ static bool operand_is_variable(ShaderOperand op)
 	return (op.type == ShaderOperandType::Vgpr || op.type == ShaderOperandType::VccLo || op.type == ShaderOperandType::VccHi ||
 	        op.type == ShaderOperandType::Sgpr || op.type == ShaderOperandType::ExecLo || op.type == ShaderOperandType::ExecHi ||
 	        op.type == ShaderOperandType::ExecZ || op.type == ShaderOperandType::Scc || op.type == ShaderOperandType::M0);
+}
+
+static bool operand_covers_vgpr(ShaderOperand op, int reg)
+{
+	if (op.type != ShaderOperandType::Vgpr || reg < 0)
+	{
+		return false;
+	}
+
+	const int size = (op.size > 0 ? op.size : 1);
+	return reg >= op.register_id && reg < op.register_id + size;
+}
+
+static bool instruction_writes_vgpr(const ShaderInstruction& inst, int reg)
+{
+	return operand_covers_vgpr(inst.dst, reg) || operand_covers_vgpr(inst.dst2, reg);
+}
+
+static bool instruction_changes_control_flow(const ShaderInstruction& inst)
+{
+	switch (inst.type)
+	{
+		case ShaderInstructionType::SBranch:
+		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchScc0:
+		case ShaderInstructionType::SCbranchScc1:
+		case ShaderInstructionType::SCbranchVccz:
+		case ShaderInstructionType::SCbranchVccnz:
+		case ShaderInstructionType::SSetpcB64:
+		case ShaderInstructionType::SSwappcB64: return true;
+		default: break;
+	}
+	return false;
+}
+
+static String8 packed_half_shadow_to_str(ShaderOperand op)
+{
+	EXIT_NOT_IMPLEMENTED(op.type != ShaderOperandType::Vgpr || op.size != 1);
+	return String8::FromPrintf("v%d_packed_half", op.register_id);
 }
 
 static SpirvValue operand_variable_to_str(ShaderOperand op)
@@ -2574,14 +2614,40 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 	// TODO() check VSKIP
 	// TODO() check EXEC
 
+	const auto index_str = String8::FromPrintf("%u", index);
+	String8    load_src0;
+	String8    load_src1;
+	if (spirv->CanLoadPackedHalfForExport(index, inst.src[0]))
+	{
+		load_src0 = String8("%t2_<index> = OpLoad %uint %<src0_packed>")
+		                .ReplaceStr("<index>", index_str)
+		                .ReplaceStr("<src0_packed>", packed_half_shadow_to_str(inst.src[0]));
+	} else
+	{
+		load_src0 = (String8("%t1_<index> = OpLoad %float %<src0>\n") + String8(' ', 9) +
+		             String8("%t2_<index> = OpBitcast %uint %t1_<index>"))
+		                .ReplaceStr("<index>", index_str)
+		                .ReplaceStr("<src0>", src0_value.value);
+	}
+	if (spirv->CanLoadPackedHalfForExport(index, inst.src[1]))
+	{
+		load_src1 = String8("%t7_<index> = OpLoad %uint %<src1_packed>")
+		                .ReplaceStr("<index>", index_str)
+		                .ReplaceStr("<src1_packed>", packed_half_shadow_to_str(inst.src[1]));
+	} else
+	{
+		load_src1 = (String8("%t6_<index> = OpLoad %float %<src1>\n") + String8(' ', 9) +
+		             String8("%t7_<index> = OpBitcast %uint %t6_<index>"))
+		                .ReplaceStr("<index>", index_str)
+		                .ReplaceStr("<src1>", src1_value.value);
+	}
+
 	static const char* text = R"(
-         %t1_<index> = OpLoad %float %<src0>
-         %t2_<index> = OpBitcast %uint %t1_<index>
+         <load_src0>
          %t3_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t2_<index>
          %t4_<index> = OpCompositeExtract %float %t3_<index> 0
          %t5_<index> = OpCompositeExtract %float %t3_<index> 1
-         %t6_<index> = OpLoad %float %<src1>
-         %t7_<index> = OpBitcast %uint %t6_<index>
+         <load_src1>
          %t8_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t7_<index>
          %t9_<index> = OpCompositeExtract %float %t8_<index> 0
          %t10_<index> = OpCompositeExtract %float %t8_<index> 1
@@ -2590,7 +2656,9 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 )";
 
 	*dst_source += String8(text)
-	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+	                   .ReplaceStr("<index>", index_str)
+	                   .ReplaceStr("<load_src0>", load_src0)
+	                   .ReplaceStr("<load_src1>", load_src1)
 	                   .ReplaceStr("<src0>", src0_value.value)
 	                   .ReplaceStr("<src1>", src1_value.value)
 	                   .ReplaceStr("<mrt>", param[0]);
@@ -5829,9 +5897,13 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPkrtzF16F32_SVdstSVsrc0SVsrc1)
         %tdst_<index> = OpLoad %float %<dst>
         %tval_<index> = OpSelect %float %exec_lo_b_<index> %t4_<index> %tdst_<index>
                OpStore %<dst> %tval_<index>
+        %tdst_packed_<index> = OpLoad %uint %<dst_packed>
+        %tpacked_val_<index> = OpSelect %uint %exec_lo_b_<index> %t3_<index> %tdst_packed_<index>
+               OpStore %<dst_packed> %tpacked_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<dst_packed>", packed_half_shadow_to_str(inst.dst))
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<index>", index_str);
@@ -7848,6 +7920,27 @@ void Spirv::WriteLocalVariables()
 {
 	FindVariables();
 
+	Vector<int> packed_half_regs;
+	for (const auto& inst: m_code.GetInstructions())
+	{
+		if (inst.type == ShaderInstructionType::VCvtPkrtzF16F32 && inst.dst.type == ShaderOperandType::Vgpr && inst.dst.size == 1)
+		{
+			bool exists = false;
+			for (auto reg: packed_half_regs)
+			{
+				if (reg == inst.dst.register_id)
+				{
+					exists = true;
+					break;
+				}
+			}
+			if (!exists)
+			{
+				packed_half_regs.Add(inst.dst.register_id);
+			}
+		}
+	}
+
 	static const char* comment = R"(
     ; Registers
 )";
@@ -7859,6 +7952,10 @@ void Spirv::WriteLocalVariables()
 		auto value = operand_variable_to_str(c.op);
 		m_source += String8::FromPrintf("%%%s = OpVariable %%_ptr_Function_%s Function\n", value.value.c_str(),
 		                                Core::EnumName(value.type).ToLower().C_Str());
+	}
+	for (auto reg: packed_half_regs)
+	{
+		m_source += String8::FromPrintf("%%v%d_packed_half = OpVariable %%_ptr_Function_uint Function\n", reg);
 	}
 
 	static const char* common_vars = R"(
@@ -7881,6 +7978,10 @@ void Spirv::WriteLocalVariables()
 )";
 
 	m_source += common_vars;
+	for (auto reg: packed_half_regs)
+	{
+		m_source += String8::FromPrintf("               OpStore %%v%d_packed_half %%uint_0\n", reg);
+	}
 
 	if (m_code.GetType() == ShaderType::Vertex)
 	{
@@ -8689,6 +8790,38 @@ void Spirv::FindVariables()
 			AddVariable(ShaderOperandType::Sgpr, storage_start, 8);
 		}
 	}
+}
+
+bool Spirv::CanLoadPackedHalfForExport(int export_index, ShaderOperand op) const
+{
+	if (op.type != ShaderOperandType::Vgpr || op.size != 1 || export_index <= 0)
+	{
+		return false;
+	}
+
+	const int reg          = op.register_id;
+	const auto& insts      = m_code.GetInstructions();
+	const int insts_count  = static_cast<int>(insts.Size());
+	const int search_start = (export_index < insts_count ? export_index - 1 : insts_count - 1);
+
+	for (int i = search_start; i >= 0; i--)
+	{
+		const auto& prev = insts.At(i);
+
+		if (instruction_changes_control_flow(prev))
+		{
+			return false;
+		}
+
+		if (!instruction_writes_vgpr(prev, reg))
+		{
+			continue;
+		}
+
+		return prev.type == ShaderInstructionType::VCvtPkrtzF16F32 && operand_covers_vgpr(prev.dst, reg);
+	}
+
+	return false;
 }
 
 String8 SpirvGenerateSource(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info, const ShaderPixelInputInfo* ps_input_info,
