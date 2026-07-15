@@ -3,20 +3,46 @@ if guest_root == nil or guest_root == '' then
 	error('usage: fc_script scripts/run_guest.lua <guest-root>')
 end
 
+local function env_or(name, fallback)
+	local value = os.getenv(name)
+	if value == nil or value == '' then
+		return fallback
+	end
+	return value
+end
+
+local function env_bool(name, fallback)
+	local value = os.getenv(name)
+	if value == nil or value == '' then
+		return fallback
+	end
+	return value == '1' or value == 'true' or value == 'TRUE'
+end
+
+local function env_number(name, fallback)
+	local value = tonumber(os.getenv(name) or '')
+	return value or fallback
+end
+
 local cfg = {
-	ScreenWidth = 1280;
-	ScreenHeight = 720;
+	ScreenWidth = env_number('KYTY_SCREEN_WIDTH', 1280);
+	ScreenHeight = env_number('KYTY_SCREEN_HEIGHT', 720);
 	Neo = true;
-	VulkanValidationEnabled = false;
-	ShaderValidationEnabled = false;
-	ShaderOptimizationType = 'Performance';
-	ShaderLogDirection = 'Silent';
-	CommandBufferDumpEnabled = false;
+	VulkanValidationEnabled = env_bool('KYTY_VULKAN_VALIDATION', false);
+	ShaderValidationEnabled = env_bool('KYTY_SHADER_VALIDATION', false);
+	ShaderOptimizationType = env_or('KYTY_SHADER_OPTIMIZATION', 'Performance');
+	ShaderLogDirection = env_or('KYTY_SHADER_LOG_DIRECTION', 'Silent');
+	ShaderLogFolder = env_or('KYTY_SHADER_LOG_FOLDER', '_Shaders');
+	CommandBufferDumpEnabled = env_bool('KYTY_COMMAND_BUFFER_DUMP', false);
+	CommandBufferDumpFolder = env_or('KYTY_COMMAND_BUFFER_DUMP_FOLDER', '_Buffers');
 	-- Silent is required for usable host FPS. Console HLE logging can drop a
 	-- Release build from ~40+ FPS to ~1 FPS on the same host/GPU. Use Console
 	-- only when debugging a specific guest call sequence.
-	PrintfDirection = 'Silent';
-	ProfilerDirection = 'None';
+	PrintfDirection = env_or('KYTY_PRINTF_DIRECTION', 'Silent');
+	PrintfOutputFolder = env_or('KYTY_PRINTF_OUTPUT_FOLDER', '_Logs');
+	ProfilerDirection = env_or('KYTY_PROFILER_DIRECTION', 'None');
+	PipelineDumpEnabled = env_bool('KYTY_PIPELINE_DUMP', false);
+	PipelineDumpFolder = env_or('KYTY_PIPELINE_DUMP_FOLDER', '_Pipelines');
 }
 
 kyty_init(cfg)
