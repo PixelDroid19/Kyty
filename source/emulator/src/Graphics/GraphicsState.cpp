@@ -147,6 +147,24 @@ ColorTargetLayout ResolveColorTargetLayout(uint32_t mask)
 	return layout;
 }
 
+Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exact_render_target_found)
+{
+	if (exact_render_target_found)
+	{
+		return Gen5SampleBacking::ExactRenderTarget;
+	}
+
+	// The guest-memory tile-27 uploader currently has an evidenced 4-Bpp
+	// detile path only (fmt 56). Other formats require an exact live RT until
+	// their byte-width-specific layout is implemented.
+	if (tile == 27u && fmt != 56u)
+	{
+		return Gen5SampleBacking::Unsupported;
+	}
+
+	return Gen5SampleBacking::GuestMemoryTexture;
+}
+
 void SetGenericScissorTl(HW::Context& context, uint32_t value)
 {
 	const auto& viewport = context.GetScreenViewport();

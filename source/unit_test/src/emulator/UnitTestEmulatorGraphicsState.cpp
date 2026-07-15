@@ -750,4 +750,14 @@ TEST(EmulatorGraphicsState, MatchesOnlyExactHtileStorageRange)
 	EXPECT_FALSE(DepthMetaMatchesStorageRange(0, 0x8000, 0, 0x8000));
 }
 
+TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
+{
+	using namespace Kyty::Libs::Graphics::State;
+	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, true), Gen5SampleBacking::ExactRenderTarget);
+	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(14, 27, false), Gen5SampleBacking::Unsupported);
+	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, false), Gen5SampleBacking::Unsupported);
+	EXPECT_EQ(ResolveGen5SampleBacking(56, 0, false), Gen5SampleBacking::GuestMemoryTexture);
+}
+
 UT_END();

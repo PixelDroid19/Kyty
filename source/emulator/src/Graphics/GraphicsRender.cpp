@@ -4515,6 +4515,16 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					view_type = VulkanImage::VIEW_BGRA;
 				}
 			}
+			if (gen5)
+			{
+				const auto backing = State::ResolveGen5SampleBacking(fmt, tile, render_texture);
+				if (backing == State::Gen5SampleBacking::Unsupported)
+				{
+					EXIT("Gen5 sampled texture has no exact render-target backing and no guest-memory upload: "
+					     "fmt=%" PRIu32 ", tile=%" PRIu32 ", addr=0x%016" PRIx64 ", size=0x%08" PRIx32 "\n",
+					     fmt, tile, addr, size.size);
+				}
+			}
 		}
 
 		if (!render_texture && !depth_texture)
