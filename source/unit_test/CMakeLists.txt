@@ -12,6 +12,7 @@ list(APPEND unit_test_src
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsClassifier.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsProtocol.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsSupervisor.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsBundle.cpp"
 )
 
 if (MSVC AND CLANG)
