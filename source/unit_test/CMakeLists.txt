@@ -8,6 +8,7 @@ file(GLOB unit_test_src
 # DevTools tests are listed explicitly (no recursive glob expansion for new modules).
 list(APPEND unit_test_src
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsEventRing.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsProgress.cpp"
 )
 
 if (MSVC AND CLANG)
