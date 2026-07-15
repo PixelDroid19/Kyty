@@ -188,6 +188,17 @@ endif()
 add_subdirectory(lib)
 add_subdirectory(devtools)
 
+# The emulator may consume the portable diagnostics core, but the process
+# supervisor is a launcher-side concern. Keep tests and emulator free of that
+# dependency so guest/runtime code cannot acquire platform process-control
+# policy transitively.
+foreach(_kyty_runtime_target emulator unit_test)
+	get_target_property(_kyty_runtime_links ${_kyty_runtime_target} LINK_LIBRARIES)
+	if(_kyty_runtime_links AND "kyty_devtools_supervisor" IN_LIST _kyty_runtime_links)
+		message(FATAL_ERROR "${_kyty_runtime_target} must not link kyty_devtools_supervisor")
+	endif()
+endforeach()
+
 add_executable(fc_script ${KYTY_SCRIPT_SRC}) 
 
 if(MINGW)
@@ -206,6 +217,7 @@ target_link_libraries(fc_script scripts)
 target_link_libraries(fc_script lua)
 target_link_libraries(fc_script SDL2-static)
 target_link_libraries(fc_script emulator)
+target_link_libraries(fc_script kyty_devtools_supervisor)
 target_link_libraries(fc_script rijndael)
 target_link_libraries(fc_script lzma)
 target_link_libraries(fc_script sqlite)
@@ -255,5 +267,4 @@ endif()
 if(MSVC)
     set(CMAKE_USE_RELATIVE_PATHS ON)
 endif()
-
 
