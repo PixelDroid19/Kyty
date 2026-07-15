@@ -30,6 +30,7 @@
 #include <ucontext.h>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #endif
 
 // IWYU pragma: no_include <basetsd.h>
@@ -51,6 +52,14 @@ SystemInfo GetSystemInfo()
 }
 
 namespace VirtualMemory {
+
+SignalDiagnosticsConfig MakeSignalDiagnosticsConfig(const char* skip_ud2, const char* fault_log) noexcept
+{
+	SignalDiagnosticsConfig config {};
+	config.skip_ud2 = skip_ud2 != nullptr;
+	config.fault_log = fault_log != nullptr;
+	return config;
+}
 
 #ifdef KYTY_HAS_EXCEPTIONS
 
@@ -171,6 +180,16 @@ public:
 
 ExceptionHandler::handler_func_t ExceptionHandlerPrivate::g_vec_func = nullptr;
 
+static volatile sig_atomic_t g_signal_skip_ud2  = 0;
+static volatile sig_atomic_t g_signal_fault_log = 0;
+
+static void LoadSignalDiagnosticsConfigFromEnvironment() noexcept
+{
+	const auto config = MakeSignalDiagnosticsConfig(getenv("KYTY_SKIP_UD2"), getenv("KYTY_FAULT_LOG"));
+	g_signal_skip_ud2  = config.skip_ud2 ? 1 : 0;
+	g_signal_fault_log = config.fault_log ? 1 : 0;
+}
+
 // Platform register accessors for POSIX ucontext. The exception contract keeps
 // the historical x86 register names because the guest ABI is x86_64; native
 // arm64 builds expose the corresponding program counter, frame/stack pointers,
@@ -257,6 +276,9 @@ static thread_local int g_trace_guest = 0; // remaining guest instructions to lo
 static thread_local int g_trace_total = 0; // hard cap on total single-steps
 #endif
 
+// Async-signal-safe fatal report used by all POSIX diagnostic handlers.
+static void sigsafe_fault(const char* tag, uint64_t a, uint64_t b);
+
 void SetGuestTrace(int steps)
 {
 #if defined(__x86_64__) || defined(__i386__)
@@ -274,13 +296,13 @@ static void kyty_sigprof_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontex
 {
 	auto*    uc  = static_cast<ucontext_t*>(ucontext);
 	uint64_t rip = uc_get_rip(uc);
-	static int n = 0;
+	static volatile sig_atomic_t n = 0;
 	if (n++ < 200)
 	{
-		const char* zone = (rip >= 0x900000000ull && rip < 0x920000000ull) ? "GUEST"
-		                   : (rip >= 0x100000000ull && rip < 0x110000000ull) ? "fc_script"
-		                                                                     : "other";
-		printf("PROF %s %016llx\n", zone, static_cast<unsigned long long>(rip));
+		const char* tag = (rip >= 0x900000000ull && rip < 0x920000000ull) ? "PROF-GUEST"
+		                  : (rip >= 0x100000000ull && rip < 0x110000000ull) ? "PROF-FC"
+		                                                                    : "PROF-OTHER";
+		sigsafe_fault(tag, rip, 0);
 	}
 }
 
@@ -310,7 +332,7 @@ static void kyty_sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontex
 	g_trace_total--;
 	if (rip >= 0x900000000ull && rip < 0x920000000ull) // any guest module
 	{
-		printf("TRACE %016llx\n", static_cast<unsigned long long>(rip));
+		sigsafe_fault("TRACE", rip, 0);
 		g_trace_guest--;
 	}
 	uc_set_rflags(uc, uc_get_rflags(uc) | 0x100ull);
@@ -382,9 +404,6 @@ bool TryDemandMap(uint64_t vaddr)
 	return try_demand_map(vaddr);
 }
 
-// forward decl (defined below, near the signal handler)
-static void sigsafe_fault(const char* tag, uint64_t a, uint64_t b);
-
 void FatalFault(uint64_t vaddr, uint64_t rip)
 {
 	// Async-signal-safe fatal exit: report and terminate without touching the
@@ -435,7 +454,7 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 		// debug-raise codes are soft: the kernel logs and RESUMES past the trap. When
 		// KYTY_SKIP_UD2 is set, emulate that: skip the ud2 in guest code and continue,
 		// to determine whether the raised condition is actually recoverable.
-		if (getenv("KYTY_SKIP_UD2") != nullptr && rip >= 0x900000000ull && rip < 0x920000000ull)
+		if (g_signal_skip_ud2 != 0 && rip >= 0x900000000ull && rip < 0x920000000ull)
 		{
 			const auto* code = reinterpret_cast<const uint8_t*>(rip);
 			if (code[0] == 0x0F && code[1] == 0x0B)
@@ -446,21 +465,15 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 			}
 		}
 	#endif
-		printf("\n=== SIGILL @ rip=0x%016llx ===\n", static_cast<unsigned long long>(rip));
-		printf("rax=0x%016llx rbx=0x%016llx rcx=0x%016llx rdx=0x%016llx\n", static_cast<unsigned long long>(uc_get_rax(uc)),
-		       static_cast<unsigned long long>(uc_get_rbx(uc)), static_cast<unsigned long long>(uc_get_rcx(uc)),
-		       static_cast<unsigned long long>(uc_get_rdx(uc)));
-		printf("rsi=0x%016llx rdi=0x%016llx rbp=0x%016llx rsp=0x%016llx\n", static_cast<unsigned long long>(uc_get_rsi(uc)),
-		       static_cast<unsigned long long>(uc_get_rdi(uc)), static_cast<unsigned long long>(uc_get_rbp(uc)),
-		       static_cast<unsigned long long>(uc_get_rsp(uc)));
-		printf("r8 =0x%016llx r9 =0x%016llx r10=0x%016llx r11=0x%016llx\n", static_cast<unsigned long long>(uc_get_r8(uc)),
-		       static_cast<unsigned long long>(uc_get_r9(uc)), static_cast<unsigned long long>(uc_get_r10(uc)),
-		       static_cast<unsigned long long>(uc_get_r11(uc)));
-		printf("r12=0x%016llx r13=0x%016llx r14=0x%016llx r15=0x%016llx\n", static_cast<unsigned long long>(uc_get_r12(uc)),
-		       static_cast<unsigned long long>(uc_get_r13(uc)), static_cast<unsigned long long>(uc_get_r14(uc)),
-		       static_cast<unsigned long long>(uc_get_r15(uc)));
-		::fflush(nullptr);
-		signal(SIGILL, SIG_DFL);
+		sigsafe_fault("SIGILL", rip, 0);
+		sigsafe_fault("ILL-RAXRBX", uc_get_rax(uc), uc_get_rbx(uc));
+		sigsafe_fault("ILL-RCXRDX", uc_get_rcx(uc), uc_get_rdx(uc));
+		sigsafe_fault("ILL-RSIRDI", uc_get_rsi(uc), uc_get_rdi(uc));
+		sigsafe_fault("ILL-RBPRSP", uc_get_rbp(uc), uc_get_rsp(uc));
+		sigsafe_fault("ILL-R8R9", uc_get_r8(uc), uc_get_r9(uc));
+		sigsafe_fault("ILL-R10R11", uc_get_r10(uc), uc_get_r11(uc));
+		sigsafe_fault("ILL-R12R13", uc_get_r12(uc), uc_get_r13(uc));
+		sigsafe_fault("ILL-R14R15", uc_get_r14(uc), uc_get_r15(uc));
 		return;
 	}
 
@@ -484,9 +497,9 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 		einfo.access_violation_type = ExceptionHandler::AccessViolationType::Read;
 	}
 
-	if (getenv("KYTY_FAULT_LOG") != nullptr)
+	if (g_signal_fault_log != 0)
 	{
-		static int n = 0;
+		static volatile sig_atomic_t n = 0;
 		if (n++ < 60)
 		{
 			sigsafe_fault(einfo.access_violation_type == ExceptionHandler::AccessViolationType::Write ? "FAULTW" : "FAULTR",
@@ -516,9 +529,11 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 		return;
 	}
 
-	// No handler installed: restore default action and re-raise
-	signal(SIGSEGV, SIG_DFL);
-	signal(SIGBUS, SIG_DFL);
+	// No handler installed: report and terminate explicitly. Calling signal() here
+	// would invoke a non-async-signal-safe libc path while the faulting thread is
+	// already inside the signal machinery.
+	sigsafe_fault("NO-HANDLER", einfo.access_violation_vaddr, einfo.exception_address);
+	::_Exit(139);
 }
 
 #else
@@ -638,6 +653,7 @@ bool ExceptionHandler::InstallVectored(handler_func_t func)
 #elif defined(KYTY_HAS_SIGNAL_EXCEPTIONS)
 	if (ExceptionHandlerPrivate::g_vec_func == nullptr)
 	{
+		LoadSignalDiagnosticsConfigFromEnvironment();
 		ExceptionHandlerPrivate::g_vec_func = func;
 
 		struct sigaction sa {};
@@ -645,7 +661,10 @@ bool ExceptionHandler::InstallVectored(handler_func_t func)
 		sa.sa_flags     = SA_SIGINFO;
 		sigemptyset(&sa.sa_mask);
 
-		if (sigaction(SIGSEGV, &sa, nullptr) != 0 || sigaction(SIGBUS, &sa, nullptr) != 0 || sigaction(SIGILL, &sa, nullptr) != 0)
+		struct sigaction sigill = sa;
+		sigill.sa_flags |= SA_RESETHAND;
+
+		if (sigaction(SIGSEGV, &sa, nullptr) != 0 || sigaction(SIGBUS, &sa, nullptr) != 0 || sigaction(SIGILL, &sigill, nullptr) != 0)
 		{
 			printf("sigaction() failed\n");
 			return false;
@@ -690,6 +709,9 @@ bool ExceptionHandler::Uninstall()
 
 void Init()
 {
+#ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
+	LoadSignalDiagnosticsConfigFromEnvironment();
+#endif
 	sys_virtual_init();
 	EnsureDemandPageSize();
 }

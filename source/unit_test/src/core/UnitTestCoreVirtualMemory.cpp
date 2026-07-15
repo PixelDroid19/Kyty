@@ -76,4 +76,19 @@ TEST(CoreVirtualMemory, DemandMapUsesHostPageSize)
 #endif
 }
 
+TEST(CoreVirtualMemory, SignalDiagnosticsConfigurationUsesPresenceSemantics)
+{
+	const auto disabled = MakeSignalDiagnosticsConfig(nullptr, nullptr);
+	EXPECT_FALSE(disabled.skip_ud2);
+	EXPECT_FALSE(disabled.fault_log);
+
+	const auto enabled = MakeSignalDiagnosticsConfig("0", "");
+	EXPECT_TRUE(enabled.skip_ud2);
+	EXPECT_TRUE(enabled.fault_log);
+
+	const auto partial = MakeSignalDiagnosticsConfig("1", nullptr);
+	EXPECT_TRUE(partial.skip_ud2);
+	EXPECT_FALSE(partial.fault_log);
+}
+
 UT_END();
