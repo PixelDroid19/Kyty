@@ -134,6 +134,9 @@ TEST(DevToolsProtocol, WorkerHandshakeUsesVersionOneWireFields)
 	EXPECT_EQ(accepted.resolution_height, hs.resolution_height);
 	EXPECT_EQ(accepted.capabilities[0], hs.capabilities[0]);
 	EXPECT_EQ(std::memcmp(accepted.revision, hs.revision, sizeof(hs.revision)), 0);
+	ASSERT_EQ(CloseWorkerHandshake(view), ProtocolResult::Ok);
+	WorkerHandshake closing_accepted {};
+	EXPECT_EQ(AcceptWorkerHandshake(view, init, &closing_accepted), ProtocolResult::Ok);
 
 	for (uint32_t i = 0x0acu; i < 0x0b0u; ++i)
 	{
@@ -143,6 +146,30 @@ TEST(DevToolsProtocol, WorkerHandshakeUsesVersionOneWireFields)
 	{
 		EXPECT_EQ(map[i], 0u);
 	}
+}
+
+TEST(DevToolsProtocol, WorkerHandshakePublishesRejectedTerminalState)
+{
+	std::vector<uint8_t> map(static_cast<size_t>(kProtocolMappingSize), 0);
+	ParentProtocolInit   init {};
+	init.requested_mode = RecordingMode::MetricsOnly;
+	MutableMappingView mut {map.data(), map.size()};
+	ASSERT_EQ(InitializeProtocolOwner(mut, init), ProtocolResult::Ok);
+
+	WorkerHandshake hs {};
+	hs.worker_pid         = 123;
+	hs.worker_start_token = 456;
+	hs.accepted_mode      = RecordingMode::MetricsOnly;
+	ASSERT_EQ(PublishWorkerHandshake(mut, hs), ProtocolResult::Ok);
+
+	ASSERT_EQ(RejectWorkerHandshake(mut), ProtocolResult::Ok);
+	uint32_t state = 0;
+	std::memcpy(&state, map.data() + kProtocolHandshakeStateOffset, sizeof(state));
+	EXPECT_EQ(state, static_cast<uint32_t>(HandshakeState::WorkerRejected));
+	EXPECT_EQ(RejectWorkerHandshake(mut), ProtocolResult::Rejected);
+	WorkerHandshake rejected_accepted {};
+	EXPECT_EQ(AcceptWorkerHandshake(mut, init, &rejected_accepted), ProtocolResult::Rejected);
+	EXPECT_EQ(CloseWorkerHandshake(mut), ProtocolResult::Rejected);
 }
 
 TEST(DevToolsProtocol, ProgressPublicationRoundTrips)
