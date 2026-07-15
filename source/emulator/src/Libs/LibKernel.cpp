@@ -2,6 +2,7 @@
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/String.h"
+#include "Kyty/Core/Threads.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Math/Rand.h"
 
@@ -21,8 +22,6 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 
 #include <cstdlib>
-#include <sys/syscall.h>
-#include <unistd.h>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -355,13 +354,7 @@ static KYTY_SYSV_ABI int KernelIsAddressSanitizerEnabled()
 static KYTY_SYSV_ABI uint64_t KernelInternalMemoryMap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags)
 {
 	PRINT_NAME();
-#if defined(__APPLE__)
-	const long long host_tid = static_cast<long long>(::syscall(SYS_thread_selfid));
-#elif defined(__linux__)
-	const long long host_tid = static_cast<long long>(::syscall(SYS_gettid));
-#else
-	const long long host_tid = static_cast<long long>(::getpid());
-#endif
+	const long long host_tid = static_cast<long long>(Core::Thread::GetHostThreadId());
 	printf("\taddr=0x%" PRIx64 " len=0x%" PRIx64 " prot=0x%" PRIx64 " flags=0x%" PRIx64 " tid=%lld\n", addr, len, prot, flags, host_tid);
 	// Register the range for demand paging: the guest allocator expects zero-filled
 	// read/write memory across the whole region, but pre-mapping it all changes what

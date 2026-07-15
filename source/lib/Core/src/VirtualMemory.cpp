@@ -195,6 +195,9 @@ static void LoadSignalDiagnosticsConfigFromEnvironment() noexcept
 // arm64 builds expose the corresponding program counter, frame/stack pointers,
 // and first ABI argument registers for host diagnostics.
 #if defined(__APPLE__)
+// Signal handlers cannot call the normal thread API: it may touch TLS or take
+// locks. Keep this direct syscall at the signal boundary for an async-signal-safe
+// native thread identifier.
 #if defined(__arm64__) || defined(__aarch64__)
 static inline uint64_t uc_get_rip(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__pc); }
 static inline uint64_t uc_get_rbp(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__fp); }
