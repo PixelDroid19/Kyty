@@ -6,7 +6,9 @@
 #include "Kyty/DevTools/Transport/WorkerSession.h"
 #include "Kyty/UnitTest.h"
 
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <unistd.h>
 #include <vector>
 
@@ -173,6 +175,24 @@ TEST(DevToolsSupervisor, WorkerSessionClassifiesBootstrapWithoutActivation)
 	EXPECT_EQ(session.StartFromBootstrap(nullptr, options), WorkerSessionResult::MissingBootstrap);
 	EXPECT_EQ(session.StartFromBootstrap("p:3:4:invalid", options), WorkerSessionResult::MalformedBootstrap);
 	EXPECT_FALSE(session.Active());
+}
+
+TEST(DevToolsSupervisor, WorkerSessionScrubsBootstrapEnvironment)
+{
+	const char* previous_value = std::getenv(kBootstrapEnvName);
+	const std::string previous = previous_value == nullptr ? std::string() : std::string(previous_value);
+	ASSERT_EQ(::setenv(kBootstrapEnvName, "malformed", 1), 0);
+
+	WorkerTelemetryOptions options {};
+	WorkerSession session;
+	EXPECT_EQ(session.StartFromBootstrap(std::getenv(kBootstrapEnvName), options), WorkerSessionResult::MalformedBootstrap);
+	EXPECT_EQ(std::getenv(kBootstrapEnvName), nullptr);
+
+	::unsetenv(kBootstrapEnvName);
+	if (previous_value != nullptr)
+	{
+		ASSERT_EQ(::setenv(kBootstrapEnvName, previous.c_str(), 1), 0);
+	}
 }
 
 UT_END();

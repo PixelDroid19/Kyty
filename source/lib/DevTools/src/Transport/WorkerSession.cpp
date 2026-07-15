@@ -3,6 +3,8 @@
 #include "Kyty/DevTools/Protocol/Protocol.h"
 #include "Kyty/DevTools/Transport/Bootstrap.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <new>
 
 #if defined(_WIN32)
@@ -19,6 +21,45 @@
 #endif
 
 namespace Kyty::DevTools {
+namespace {
+
+void ScrubBootstrapEnvironment() noexcept
+{
+#if defined(_WIN32)
+	(void)::_putenv_s(kBootstrapEnvName, "");
+#else
+	(void)::unsetenv(kBootstrapEnvName);
+#endif
+}
+
+[[nodiscard]] bool CopyBootstrapValue(const char* value, BootstrapText* out) noexcept
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+	if (value == nullptr)
+	{
+		return true;
+	}
+
+	uint32_t length = 0;
+	while (length + 1u < sizeof(out->bytes) && value[length] != '\0')
+	{
+		++length;
+	}
+	if (value[length] != '\0')
+	{
+		return false;
+	}
+	std::memcpy(out->bytes, value, length);
+	out->bytes[length] = '\0';
+	out->size         = length;
+	return true;
+}
+
+} // namespace
 
 struct WorkerSession::State
 {
@@ -82,6 +123,11 @@ WorkerSession::~WorkerSession()
 
 WorkerSessionResult WorkerSession::StartFromBootstrap(const char* value, const WorkerTelemetryOptions& options) noexcept
 {
+	BootstrapText bootstrap_copy {};
+	const bool    bootstrap_copy_valid = CopyBootstrapValue(value, &bootstrap_copy);
+	ScrubBootstrapEnvironment();
+	const char* parse_value = (value == nullptr || !bootstrap_copy_valid) ? nullptr : bootstrap_copy.bytes;
+
 	if (!state_)
 	{
 		return WorkerSessionResult::MappingFailed;
@@ -92,7 +138,7 @@ WorkerSessionResult WorkerSession::StartFromBootstrap(const char* value, const W
 	}
 
 	BootstrapMetadata metadata {};
-	const auto parsed = ParseBootstrapMetadata(value, &metadata);
+	const auto parsed = !bootstrap_copy_valid ? BootstrapParseResult::Malformed : ParseBootstrapMetadata(parse_value, &metadata);
 	if (parsed == BootstrapParseResult::Missing)
 	{
 		return WorkerSessionResult::MissingBootstrap;
