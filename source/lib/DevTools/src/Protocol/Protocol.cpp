@@ -1,6 +1,7 @@
 #include "Kyty/DevTools/Protocol/Protocol.h"
 
 #include "Kyty/DevTools/Diagnostics/Checksum.h"
+#include "Kyty/DevTools/Time/MonotonicClock.h"
 
 #include <cstring>
 
@@ -36,6 +37,7 @@ constexpr uint64_t kOffHeight       = 0x0d0;
 constexpr uint64_t kOffReqMode      = 0x0d4;
 constexpr uint64_t kOffAcceptedMode = 0x0d8;
 constexpr uint64_t kOffHandshakeState = 0x100;
+constexpr uint64_t kOffPublicationHeartbeat = 0x140;
 constexpr uint64_t kOffProgressActive = 0x180;
 constexpr uint64_t kOffTimelineActive = 0x240;
 
@@ -111,6 +113,11 @@ uint64_t AtomicLoadU64(const uint8_t* base, uint64_t off) noexcept
 [[nodiscard]] HandshakeState LoadHandshakeState(const uint8_t* data) noexcept
 {
 	return static_cast<HandshakeState>(AtomicLoadU32(data, kOffHandshakeState));
+}
+
+void TouchPublicationHeartbeat(uint8_t* data) noexcept
+{
+	AtomicStoreU64(data, kOffPublicationHeartbeat, MonotonicNowNs());
 }
 
 void WriteSectionDescriptor(uint8_t* data, uint64_t off, uint32_t schema, uint64_t first_offset, uint64_t second_offset,
@@ -477,6 +484,7 @@ ProtocolResult PublishProgress(MutableMappingView mapping, const ProgressPublica
 	WriteControlCell(mapping.data, ControlCell::AggregateRing, publication.writer_loss.aggregate_ring);
 	WriteControlCell(mapping.data, ControlCell::RegistrationCapacity, publication.writer_loss.registration_capacity);
 	WriteControlCell(mapping.data, ControlCell::InactiveTokenAttempts, publication.writer_loss.inactive_writer_attempts);
+	TouchPublicationHeartbeat(mapping.data);
 	return ProtocolResult::Ok;
 }
 
@@ -632,6 +640,7 @@ ProtocolResult PublishTimeline(MutableMappingView mapping, const TimelineSnapsho
 		return ProtocolResult::Rejected;
 	}
 	AtomicStoreU64(mapping.data, kOffTimelineActive, (timeline.generation << 1u) | inactive);
+	TouchPublicationHeartbeat(mapping.data);
 	return ProtocolResult::Ok;
 }
 
