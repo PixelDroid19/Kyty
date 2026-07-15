@@ -103,6 +103,7 @@ struct PipelineStaticParameters
 	float                      blend_color_green    = 0.0f;
 	float                      blend_color_blue     = 0.0f;
 	float                      blend_color_alpha    = 0.0f;
+	bool                       dx_clip_space        = false;
 
 	bool operator==(const PipelineStaticParameters& other) const;
 };
@@ -2117,22 +2118,34 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	input_assembly.topology               = static_params->topology;
 	input_assembly.primitiveRestartEnable = VK_FALSE;
 
+	const bool unrestricted = g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported;
+	const auto depth_range  = State::ResolveViewportDepth(static_params->viewport_scale[2], static_params->viewport_offset[2],
+	                                                      static_params->dx_clip_space, unrestricted);
+
 	VkViewport viewport {};
 	viewport.x        = static_params->viewport_offset[0] - static_params->viewport_scale[0];
 	viewport.y        = static_params->viewport_offset[1] - static_params->viewport_scale[1];
 	viewport.width    = static_params->viewport_scale[0] * 2.0f;
 	viewport.height   = static_params->viewport_scale[1] * 2.0f;
-	viewport.minDepth = static_params->viewport_offset[2];
-	viewport.maxDepth = static_params->viewport_scale[2] + static_params->viewport_offset[2];
+	viewport.minDepth = depth_range.min_depth;
+	viewport.maxDepth = depth_range.max_depth;
 
 	VkRect2D scissor {};
 	scissor.offset = {static_params->scissor_ltrb[0], static_params->scissor_ltrb[1]};
 	scissor.extent = {static_cast<uint32_t>(static_params->scissor_ltrb[2] - static_params->scissor_ltrb[0]),
 	                  static_cast<uint32_t>(static_params->scissor_ltrb[3] - static_params->scissor_ltrb[1])};
 
+	const bool depth_clip_control_supported = g_render_ctx->GetGraphicCtx()->depth_clip_control_supported;
+	EXIT_NOT_IMPLEMENTED(!static_params->dx_clip_space && !depth_clip_control_supported);
+
+	VkPipelineViewportDepthClipControlCreateInfoEXT depth_clip_control {};
+	depth_clip_control.sType            = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT;
+	depth_clip_control.pNext            = nullptr;
+	depth_clip_control.negativeOneToOne = (static_params->dx_clip_space ? VK_FALSE : VK_TRUE);
+
 	VkPipelineViewportStateCreateInfo viewport_state {};
 	viewport_state.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-	viewport_state.pNext         = nullptr;
+	viewport_state.pNext         = (depth_clip_control_supported ? &depth_clip_control : nullptr);
 	viewport_state.flags         = 0;
 	viewport_state.viewportCount = 1;
 	viewport_state.pViewports    = &viewport;
@@ -2600,6 +2613,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.static_params->viewport_offset[0]       = vp.viewports[0].xoffset;
 	p.static_params->viewport_offset[1]       = vp.viewports[0].yoffset;
 	p.static_params->viewport_offset[2]       = vp.viewports[0].zoffset;
+	p.static_params->dx_clip_space            = ctx->GetClipControl().dx_clip_space;
 	p.static_params->scissor_ltrb[0]          = scissor.left;
 	p.static_params->scissor_ltrb[1]          = scissor.top;
 	p.static_params->scissor_ltrb[2]          = scissor.right;

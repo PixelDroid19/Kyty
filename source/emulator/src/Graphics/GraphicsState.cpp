@@ -77,6 +77,28 @@ DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, 
 	return usage;
 }
 
+ViewportDepthRange ResolveViewportDepth(float zscale, float zoffset, bool dx_clip_space, bool depth_range_unrestricted)
+{
+	ViewportDepthRange range {};
+	if (dx_clip_space)
+	{
+		range.min_depth = zoffset;
+		range.max_depth = zoffset + zscale;
+	} else
+	{
+		range.min_depth = zoffset - zscale;
+		range.max_depth = zoffset + zscale;
+	}
+
+	if (!depth_range_unrestricted)
+	{
+		range.min_depth = std::max(range.min_depth, 0.0f);
+		range.max_depth = std::min(range.max_depth, 1.0f);
+	}
+
+	return range;
+}
+
 void SetGenericScissorTl(HW::Context& context, uint32_t value)
 {
 	const auto& viewport = context.GetScreenViewport();
