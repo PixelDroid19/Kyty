@@ -182,6 +182,7 @@ ExceptionHandler::handler_func_t ExceptionHandlerPrivate::g_vec_func = nullptr;
 
 static volatile sig_atomic_t g_signal_skip_ud2  = 0;
 static volatile sig_atomic_t g_signal_fault_log = 0;
+static volatile sig_atomic_t g_signal_extrq_reported = 0;
 
 static void LoadSignalDiagnosticsConfigFromEnvironment() noexcept
 {
@@ -243,6 +244,96 @@ static inline uint64_t uc_get_r15(ucontext_t* uc) { return static_cast<uint64_t>
 static inline uint64_t uc_get_err(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__es.__err); }
 static inline uint64_t uc_get_rflags(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rflags); }
 static inline void     uc_set_rflags(ucontext_t* uc, uint64_t v) { uc->uc_mcontext->__ss.__rflags = static_cast<__uint64_t>(v); }
+
+static char* uc_get_xmm_bytes(ucontext_t* uc, uint32_t index)
+{
+	switch (index)
+	{
+		case 0: return uc->uc_mcontext->__fs.__fpu_xmm0.__xmm_reg;
+		case 1: return uc->uc_mcontext->__fs.__fpu_xmm1.__xmm_reg;
+		case 2: return uc->uc_mcontext->__fs.__fpu_xmm2.__xmm_reg;
+		case 3: return uc->uc_mcontext->__fs.__fpu_xmm3.__xmm_reg;
+		case 4: return uc->uc_mcontext->__fs.__fpu_xmm4.__xmm_reg;
+		case 5: return uc->uc_mcontext->__fs.__fpu_xmm5.__xmm_reg;
+		case 6: return uc->uc_mcontext->__fs.__fpu_xmm6.__xmm_reg;
+		case 7: return uc->uc_mcontext->__fs.__fpu_xmm7.__xmm_reg;
+		default: return nullptr;
+	}
+}
+
+static uint64_t load_signal_u64(const char* bytes)
+{
+	uint64_t value = 0;
+	for (uint32_t i = 0; i < sizeof(uint64_t); i++)
+	{
+		value |= static_cast<uint64_t>(static_cast<uint8_t>(bytes[i])) << (i * 8u);
+	}
+	return value;
+}
+
+static void store_signal_u64(char* bytes, uint64_t value)
+{
+	for (uint32_t i = 0; i < sizeof(uint64_t); i++)
+	{
+		bytes[i] = static_cast<char>(value >> (i * 8u));
+	}
+	for (uint32_t i = sizeof(uint64_t); i < 16; i++)
+	{
+		bytes[i] = 0;
+	}
+}
+
+static bool try_emulate_guest_extrq(ucontext_t* uc)
+{
+	const uint64_t rip  = uc_get_rip(uc);
+	const auto*    code = reinterpret_cast<const uint8_t*>(rip);
+
+	// EXTRQ xmm, xmm, imm8, imm8: 66 0f 78 /0 ib ib. The guest reaches this
+	// SSE4a instruction under Rosetta, which does not execute it.
+	if (code[0] != 0x66u || code[1] != 0x0fu || code[2] != 0x78u)
+	{
+		return false;
+	}
+
+	const uint8_t modrm = code[3];
+	if ((modrm & 0xc0u) != 0xc0u || (modrm & 0x38u) != 0)
+	{
+		return false;
+	}
+
+	// The immediate form is 66 0f 78 /0 ib ib: ModRM.reg is the fixed /0
+	// extension and ModRM.r/m is the sole, in-place XMM operand.
+	char* operand = uc_get_xmm_bytes(uc, modrm & 0x7u);
+	if (operand == nullptr)
+	{
+		return false;
+	}
+
+	uint64_t length = code[4] & 0x3fu;
+	const auto index = static_cast<uint64_t>(code[5] & 0x3fu);
+	if (length == 0)
+	{
+		if (index != 0)
+		{
+			return false;
+		}
+		length = 64;
+	}
+	if (index + length > 64)
+	{
+		return false;
+	}
+
+	uint64_t value = load_signal_u64(operand) >> index;
+	if (length < 64)
+	{
+		value &= (UINT64_C(1) << length) - 1;
+	}
+	store_signal_u64(operand, value);
+	uc_set_rip(uc, rip + 6);
+	return true;
+}
+
 static inline long     host_tid() { return ::syscall(SYS_thread_selfid); }
 #endif
 #elif defined(__linux__)
@@ -452,6 +543,25 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 	{
 		uint64_t rip = uc_get_rip(uc);
 	#if defined(__x86_64__) || defined(__i386__)
+		if (rip >= 0x900000000ull && rip < 0x920000000ull)
+		{
+		#if defined(__APPLE__)
+			if (try_emulate_guest_extrq(uc))
+			{
+				if (g_signal_extrq_reported == 0)
+				{
+					g_signal_extrq_reported = 1;
+					sigsafe_fault("EMULATE-EXTRQ", rip, 0);
+				}
+				return;
+			}
+		#endif
+			const auto* code = reinterpret_cast<const uint8_t*>(rip);
+			sigsafe_fault("ILL-CODE", static_cast<uint64_t>(code[0]), static_cast<uint64_t>(code[1]));
+			sigsafe_fault("ILL-CODE2", static_cast<uint64_t>(code[2]), static_cast<uint64_t>(code[3]));
+			sigsafe_fault("ILL-CODE3", static_cast<uint64_t>(code[4]), static_cast<uint64_t>(code[5]));
+			sigsafe_fault("ILL-CODE4", static_cast<uint64_t>(code[6]), static_cast<uint64_t>(code[7]));
+		}
 		// A guest ud2 (0F 0B) is the trap the compiler emits after a call it believes
 		// is noreturn — here, sceKernelDebugRaiseException. On real hardware certain
 		// debug-raise codes are soft: the kernel logs and RESUMES past the trap. When
@@ -477,7 +587,9 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 		sigsafe_fault("ILL-R10R11", uc_get_r10(uc), uc_get_r11(uc));
 		sigsafe_fault("ILL-R12R13", uc_get_r12(uc), uc_get_r13(uc));
 		sigsafe_fault("ILL-R14R15", uc_get_r14(uc), uc_get_r15(uc));
-		return;
+		// Returning would retry the same unsupported guest instruction forever.
+		// Keep strict runs bounded and preserve the first-failure evidence.
+		::_Exit(132);
 	}
 
 	ExceptionHandler::ExceptionInfo einfo {};
@@ -508,6 +620,14 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 			sigsafe_fault(einfo.access_violation_type == ExceptionHandler::AccessViolationType::Write ? "FAULTW" : "FAULTR",
 			              einfo.access_violation_vaddr, uc_get_rip(uc));
 			sigsafe_fault("  rdi/rsi", uc_get_rdi(uc), uc_get_rsi(uc));
+			if (uc_get_rip(uc) >= 0x900000000ull && uc_get_rip(uc) < 0x920000000ull)
+			{
+				const auto* code = reinterpret_cast<const uint8_t*>(uc_get_rip(uc));
+				sigsafe_fault("  code01", static_cast<uint64_t>(code[0]), static_cast<uint64_t>(code[1]));
+				sigsafe_fault("  code23", static_cast<uint64_t>(code[2]), static_cast<uint64_t>(code[3]));
+				sigsafe_fault("  code45", static_cast<uint64_t>(code[4]), static_cast<uint64_t>(code[5]));
+				sigsafe_fault("  code67", static_cast<uint64_t>(code[6]), static_cast<uint64_t>(code[7]));
+			}
 			sigsafe_fault("  tid", static_cast<uint64_t>(host_tid()), 0);
 			// Scan the stack for the nearest fc_script (Kyty HLE) and guest return
 			// addresses, to identify which HLE call and which guest instruction led here.

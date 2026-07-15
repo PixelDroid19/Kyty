@@ -4,6 +4,7 @@
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/File.h"
+#include "Kyty/Core/JsonReader.h"
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/Threads.h"
 
@@ -80,6 +81,8 @@ struct SystemContent
 {
 	String                 psf_path;
 	Psf                    psf;
+	String                 title_id;
+	String                 app_version;
 	String                 playgo_path;
 	PlayGo                 playgo;
 	String                 icon_path;
@@ -388,6 +391,38 @@ void SystemContentLoadParamSfo(const String& file_name)
 	}
 }
 
+bool SystemContentLoadParamJson(const String& file_name)
+{
+	if (!Core::File::IsFileExisting(file_name))
+	{
+		return false;
+	}
+
+	const auto contents = Core::File::Read(file_name, Core::File::Encoding::Utf8);
+	const auto* json     = Core::Json::Create(contents);
+	if (json == nullptr || !json->IsObject())
+	{
+		printf("invalid content metadata: %s\n", file_name.C_Str());
+		delete json;
+		return false;
+	}
+
+	const auto title_id    = json->GetString("titleId");
+	const auto app_version = json->GetString("contentVersion");
+	delete json;
+
+	if (title_id.IsEmpty() && app_version.IsEmpty())
+	{
+		printf("content metadata has no title or version: %s\n", file_name.C_Str());
+		return false;
+	}
+
+	auto* sc          = Core::Singleton<SystemContent>::Instance();
+	sc->title_id      = title_id;
+	sc->app_version   = app_version;
+	return true;
+}
+
 bool SystemContentParamSfoGetInt(const char* name, int32_t* value)
 {
 	if (name == nullptr || value == nullptr)
@@ -422,6 +457,30 @@ bool SystemContentParamSfoGetString(const char* name, char* value, size_t value_
 	auto* sc = Core::Singleton<SystemContent>::Instance();
 
 	return sc->psf.GetParamString(name, value, value_size);
+}
+
+bool SystemContentGetMetadata(String* title_id, String* app_version)
+{
+	if (title_id == nullptr || app_version == nullptr)
+	{
+		return false;
+	}
+
+	auto* sc = Core::Singleton<SystemContent>::Instance();
+
+	*title_id    = sc->title_id;
+	*app_version = sc->app_version;
+
+	if (title_id->IsEmpty())
+	{
+		sc->psf.GetParamString("TITLE_ID", title_id);
+	}
+	if (app_version->IsEmpty())
+	{
+		sc->psf.GetParamString("APP_VER", app_version);
+	}
+
+	return !title_id->IsEmpty() || !app_version->IsEmpty();
 }
 
 Libs::Graphics::Image* SystemContentGetIcon()

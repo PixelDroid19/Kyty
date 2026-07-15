@@ -47,6 +47,7 @@ local cfg = {
 
 kyty_init(cfg)
 kyty_mount(guest_root, '/app0')
+kyty_load_param_json(guest_root .. '/sce_sys/param.json')
 kyty_load_elf('/app0/eboot.bin')
 
 kyty_load_symbols_all()
