@@ -8,12 +8,14 @@ target_sources(kyty_devtools_core PRIVATE
 	src/Telemetry/Event.cpp
 	src/Telemetry/EventRing.cpp
 	src/Telemetry/WriterRegistry.cpp
+	src/Telemetry/WorkerTelemetry.cpp
 	src/Telemetry/Progress.cpp
 	src/Diagnostics/Checksum.cpp
 	src/Diagnostics/ProcessStatus.cpp
 	src/Diagnostics/StallClassifier.cpp
 	src/Protocol/Protocol.cpp
 	src/Transport/Bootstrap.cpp
+	src/Transport/WorkerSession.cpp
 	src/Catalog/ExportCatalog.cpp
 	src/Time/MonotonicClockPosix.cpp
 )

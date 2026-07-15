@@ -38,6 +38,12 @@ std::string FindDevToolsBinary()
 	return executable.substr(0, marker) + "/devtools/kyty_devtools";
 }
 
+std::string FindWorkerBinary()
+{
+	char current[512] = {};
+	return QueryCurrentExecutablePath(current, sizeof(current)) ? std::string(current) : std::string();
+}
+
 } // namespace
 
 TEST(DevToolsLifecycle, RejectsMissingOrRelativeOutputDirectory)
@@ -69,6 +75,32 @@ TEST(DevToolsLifecycle, NormalExitFinalizesOnce)
 	bad.worker              = nullptr;
 	auto r                  = RunSupervisor(bad);
 	EXPECT_EQ(r.outcome, SupervisorOutcome::LaunchError);
+}
+
+TEST(DevToolsLifecycle, WorkerProcessCompletesDevToolsHandshake)
+{
+	const std::string worker = FindWorkerBinary();
+	if (worker.empty() || ::access(worker.c_str(), X_OK) != 0)
+	{
+		GTEST_SKIP() << "fc_script worker binary not available";
+	}
+	const std::string dir = MakeScratchDir();
+	ASSERT_FALSE(dir.empty());
+	const char* argv[] = {worker.c_str(), "{return 0}", nullptr};
+
+	SupervisorOptions options {};
+	options.absolute_output_dir  = dir.c_str();
+	options.worker               = worker.c_str();
+	options.worker_argv          = argv;
+	options.worker_argc          = 2;
+	options.mode                 = RecordingMode::Full;
+	options.handshake_timeout_ns = 1'000'000'000ull;
+	options.max_samples          = 20;
+
+	const auto result = RunSupervisor(options);
+	EXPECT_EQ(result.outcome, SupervisorOutcome::ChildExited);
+	EXPECT_EQ(result.process.termination, ProcessTermination::ExitCode);
+	EXPECT_EQ(result.process.code, 0u);
 }
 
 TEST(DevToolsLifecycle, SelfTestNormalExitViaDevToolsBinary)

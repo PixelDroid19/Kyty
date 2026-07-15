@@ -1,5 +1,7 @@
 #include "Kyty/DevTools/Telemetry/Event.h"
 #include "Kyty/DevTools/Telemetry/WriterRegistry.h"
+#include "Kyty/DevTools/Telemetry/WorkerTelemetry.h"
+#include "Kyty/DevTools/Protocol/Protocol.h"
 #include "Kyty/DevTools/Time/MonotonicClock.h"
 #include "Kyty/UnitTest.h"
 
@@ -329,6 +331,53 @@ TEST(DevToolsEventRing, SnapshotInventoryIsIndependentOfTimelineRetention)
 	EXPECT_EQ(inv.entries[token.slot].role, ThreadRole::SnapshotPublisher);
 	EXPECT_EQ(inv.entries[token.slot].diagnostic_thread_instance, 55u);
 	EXPECT_EQ(inv.entries[token.slot].writer_key, (WriterKey {token.slot, token.generation}.Pack()));
+}
+
+TEST(DevToolsEventRing, WorkerTelemetryPublishesHandshakeAndLifecycle)
+{
+	std::vector<uint8_t> mapping(static_cast<size_t>(kProtocolMappingSize), 0);
+	ParentProtocolInit init {};
+	init.supervisor_start_token = 17;
+	init.requested_mode         = RecordingMode::Full;
+	for (uint32_t i = 0; i < sizeof(init.nonce); ++i)
+	{
+		init.nonce[i] = static_cast<uint8_t>(i + 1u);
+	}
+	ASSERT_EQ(InitializeProtocolOwner({mapping.data(), mapping.size()}, init), ProtocolResult::Ok);
+
+	WorkerTelemetryOptions options {};
+	options.requested_mode             = RecordingMode::Full;
+	options.logging_mode               = LoggingMode::Silent;
+	options.diagnostic_thread_instance = 99;
+
+	WorkerTelemetry telemetry;
+	ASSERT_TRUE(telemetry.Start({mapping.data(), mapping.size()}, options));
+	EXPECT_TRUE(telemetry.Active());
+
+	WorkerHandshake handshake {};
+	ASSERT_EQ(AcceptWorkerHandshake({mapping.data(), mapping.size()}, init, &handshake), ProtocolResult::Ok);
+	EXPECT_EQ(handshake.accepted_mode, RecordingMode::Full);
+
+	ProtocolReadLossState loss {};
+	TimelineSnapshot timeline {};
+	ASSERT_EQ(ReadTimeline({mapping.data(), mapping.size()}, &loss, &timeline), ProtocolResult::Ok);
+	ASSERT_EQ(timeline.count, 1u);
+	EXPECT_EQ(timeline.events[0].event, static_cast<uint16_t>(EventId::ThreadStart));
+
+	ASSERT_TRUE(telemetry.Stop());
+	EXPECT_FALSE(telemetry.Active());
+	ASSERT_EQ(ReadTimeline({mapping.data(), mapping.size()}, &loss, &timeline), ProtocolResult::Ok);
+	ASSERT_EQ(timeline.count, 2u);
+	EXPECT_EQ(timeline.events[0].event, static_cast<uint16_t>(EventId::ThreadExit));
+	EXPECT_EQ(timeline.events[1].event, static_cast<uint16_t>(EventId::ThreadStart));
+}
+
+TEST(DevToolsEventRing, WorkerTelemetryRejectsInvalidMappingWithoutActivation)
+{
+	WorkerTelemetry telemetry;
+	WorkerTelemetryOptions options {};
+	EXPECT_FALSE(telemetry.Start({}, options));
+	EXPECT_FALSE(telemetry.Active());
 }
 
 UT_END();

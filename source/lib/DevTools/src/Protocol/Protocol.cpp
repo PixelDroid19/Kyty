@@ -232,6 +232,30 @@ ProtocolResult AcceptWorkerHandshake(MutableMappingView mapping, const ParentPro
 	return ProtocolResult::Ok;
 }
 
+ProtocolResult ReadWorkerBootstrap(ConstMappingView mapping, const uint8_t* nonce, RecordingMode* requested_mode) noexcept
+{
+	if (!MappingOk(mapping.data, mapping.size) || nonce == nullptr || requested_mode == nullptr)
+	{
+		return ProtocolResult::InvalidArgument;
+	}
+	const auto hdr = ValidateHeader(mapping.data);
+	if (hdr != ProtocolResult::Ok)
+	{
+		return hdr;
+	}
+	if (std::memcmp(mapping.data + kOffNonce, nonce, 16) != 0)
+	{
+		return ProtocolResult::Rejected;
+	}
+	const auto mode = static_cast<RecordingMode>(ReadU32(mapping.data, kOffReqMode));
+	if (mode != RecordingMode::MetricsOnly && mode != RecordingMode::Full)
+	{
+		return ProtocolResult::Rejected;
+	}
+	*requested_mode = mode;
+	return ProtocolResult::Ok;
+}
+
 ProtocolResult PublishProgress(MutableMappingView mapping, const ProgressPublication& publication) noexcept
 {
 	if (!MappingOk(mapping.data, mapping.size))
