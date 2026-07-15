@@ -411,9 +411,15 @@ void* sys_virtual_create_shared_backing(uint64_t size)
 
 	int fd = -1;
 #ifdef __APPLE__
-#ifdef SHM_ANON
-	fd = shm_open(SHM_ANON, O_RDWR, 0);
-#endif
+	// Darwin does not expose Linux's memfd_create and the SDK does not define
+	// SHM_ANON. Create a private temporary file, unlink it before returning, and
+	// keep the descriptor as the anonymous shared backing for mmap.
+	char temp_path[] = "/tmp/kyty-direct-memory-XXXXXX";
+	fd             = ::mkstemp(temp_path);
+	if (fd >= 0)
+	{
+		::unlink(temp_path);
+	}
 #else
 #ifdef SYS_memfd_create
 	static constexpr unsigned int kMemfdCloseOnExec = 0x0001u;
@@ -427,6 +433,12 @@ void* sys_virtual_create_shared_backing(uint64_t size)
 #endif
 	if (fd < 0)
 	{
+		return nullptr;
+	}
+	const int descriptor_flags = ::fcntl(fd, F_GETFD);
+	if (descriptor_flags < 0 || ::fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) != 0)
+	{
+		::close(fd);
 		return nullptr;
 	}
 
