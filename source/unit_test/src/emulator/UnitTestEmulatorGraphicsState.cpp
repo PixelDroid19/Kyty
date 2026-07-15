@@ -636,6 +636,40 @@ TEST(EmulatorGraphicsState, DepthStencilReclaimParentsAreSurfaces)
 	EXPECT_EQ(GpuMemoryOverlapType::Crosses, GpuMemoryOverlapType::Crosses);
 }
 
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearOnUndefinedFirstUse)
+{
+	using namespace Kyty::Libs::Graphics;
+	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, false, 0u, 0u);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_a, 1.0f);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsLoadOnOptimalSubsequentPass)
+{
+	using namespace Kyty::Libs::Graphics;
+	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, false, 0u, 0u);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesGuestClearWords)
+{
+	using namespace Kyty::Libs::Graphics;
+	const uint32_t word0 = 0x3f800000u; // 1.0f
+	const uint32_t word1 = 0x3f000000u; // 0.5f
+	auto           ops   = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, word0, word1);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+	EXPECT_FLOAT_EQ(ops.clear_r, 1.0f);
+	EXPECT_FLOAT_EQ(ops.clear_g, 0.5f);
+	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_a, 1.0f);
+}
+
 TEST(EmulatorGraphicsState, ResolvesContiguousMultiRenderTargetLayout)
 {
 	auto zero = State::ResolveColorTargetLayout(0u);
