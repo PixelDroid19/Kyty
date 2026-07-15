@@ -1418,6 +1418,51 @@ TEST(EmulatorGraphicsPackets, CompressedMrtExportReadsPackedHalfFromUintShadow)
 	EXPECT_NE(source.FindIndex("OpLoad %uint %v5_packed_half"), Core::STRING8_INVALID_INDEX);
 }
 
+// Compressed MRT export must branch on EXEC and OpKill when inactive so dead
+// lanes do not write color.
+TEST(EmulatorGraphicsPackets, CompressedMrtExportIsGuardedByExecMask)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	auto vgpr = [](int reg)
+	{
+		ShaderOperand op {};
+		op.type        = ShaderOperandType::Vgpr;
+		op.register_id = reg;
+		op.size        = 1;
+		return op;
+	};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+
+	ShaderInstruction export_mrt;
+	export_mrt.pc      = 0;
+	export_mrt.type    = ShaderInstructionType::Exp;
+	export_mrt.format  = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone;
+	export_mrt.src[0]  = vgpr(0);
+	export_mrt.src[1]  = vgpr(1);
+	export_mrt.src_num = 2;
+
+	code.GetInstructions().Add(export_mrt);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpBranchConditional %exp_exec_b_0 %exp_store_0 %exp_kill_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%exp_kill_0 = OpLabel"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpKill"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%exp_store_0 = OpLabel"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %outColor"), Core::STRING8_INVALID_INDEX);
+}
+
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
 // at VS PC 0x264. Same ParamN path as 0x20+N; real ShaderParse entry (not a re-impl).
 TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)

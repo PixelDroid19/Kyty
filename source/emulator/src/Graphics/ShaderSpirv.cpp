@@ -2643,6 +2643,13 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 	}
 
 	static const char* text = R"(
+         %exp_exec_u_<index> = OpLoad %uint %exec_lo
+         %exp_exec_b_<index> = OpINotEqual %bool %exp_exec_u_<index> %uint_0
+               OpSelectionMerge %exp_merge_<index> None
+               OpBranchConditional %exp_exec_b_<index> %exp_store_<index> %exp_kill_<index>
+         %exp_kill_<index> = OpLabel
+               OpKill
+         %exp_store_<index> = OpLabel
          <load_src0>
          %t3_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t2_<index>
          %t4_<index> = OpCompositeExtract %float %t3_<index> 0
@@ -2653,6 +2660,8 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
          %t10_<index> = OpCompositeExtract %float %t8_<index> 1
          %t11_<index> = OpCompositeConstruct %v4float %t4_<index> %t5_<index> %t9_<index> %t10_<index>
                OpStore %<mrt> %t11_<index>
+               OpBranch %exp_merge_<index>
+         %exp_merge_<index> = OpLabel
 )";
 
 	*dst_source += String8(text)
@@ -2702,12 +2711,21 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3)
 	// TODO() check EXEC
 
 	static const char* text = R"(
+         %exp_exec_u_<index> = OpLoad %uint %exec_lo
+         %exp_exec_b_<index> = OpINotEqual %bool %exp_exec_u_<index> %uint_0
+               OpSelectionMerge %exp_merge_<index> None
+               OpBranchConditional %exp_exec_b_<index> %exp_store_<index> %exp_kill_<index>
+         %exp_kill_<index> = OpLabel
+               OpKill
+         %exp_store_<index> = OpLabel
          %t0_<index> = OpLoad %float %<src0>
          %t1_<index> = OpLoad %float %<src1>
          %t2_<index> = OpLoad %float %<src2>
          %t3_<index> = OpLoad %float %<src3>
          %t11_<index> = OpCompositeConstruct %v4float %t0_<index> %t1_<index> %t2_<index> %t3_<index>
                OpStore %<mrt> %t11_<index>
+               OpBranch %exp_merge_<index>
+         %exp_merge_<index> = OpLabel
 )";
 
 	*dst_source += String8(text)
