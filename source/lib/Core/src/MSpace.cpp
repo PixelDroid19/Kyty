@@ -557,4 +557,26 @@ void* MSpaceRealloc(mspace_t msp, void* ptr, size_t size)
 	return MSpaceInternalRealloc_align(*ctx, ptr, static_cast<uint32_t>(size), 32);
 }
 
+void* MSpaceMemalign(mspace_t msp, size_t boundary, size_t size)
+{
+	if (msp == nullptr)
+	{
+		return nullptr;
+	}
+
+	if ((size >> 32u) != 0)
+	{
+		return nullptr;
+	}
+
+	auto* ctx = static_cast<MSpaceContext*>(msp);
+
+	return MSpaceInternalMalloc_align(*ctx, static_cast<uint32_t>(size), boundary);
+}
+
+void* MSpaceAlignedAlloc(mspace_t msp, size_t alignment, size_t size)
+{
+	return MSpaceMemalign(msp, alignment, size);
+}
+
 } // namespace Kyty::Core

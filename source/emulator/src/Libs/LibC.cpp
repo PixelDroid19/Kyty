@@ -35,7 +35,10 @@ namespace LibC {
 
 LIB_VERSION("libc", 1, "libc", 1, 1);
 
-static uint32_t g_need_flag = 1;
+// Gen5 libc/libSceLibcInternal "need" flag: 0 means already initialized so the
+// guest skips redundant CRT bootstrap. 1 re-enters init and was observed to
+// leave application globals half-built after ApplicationHeap create.
+static uint32_t g_need_flag = 0;
 
 using cxa_destructor_func_t = void (*)(void*);
 
@@ -182,7 +185,15 @@ static KYTY_SYSV_ABI char*  c_strchr(const char* s, int c) { return const_cast<c
 	return const_cast<char*>(::strrchr(s, c));
 }
 [[maybe_unused]] static KYTY_SYSV_ABI size_t c_strnlen(const char* s, size_t n) { return ::strnlen(s, n); }
-static KYTY_SYSV_ABI void   c_srand(unsigned int seed) { ::srand(seed); }
+static KYTY_SYSV_ABI void c_srand(unsigned int seed) { ::srand(seed); }
+// Gen5 libc_v1 rand (Nmtr628eA3A): first Unpatched after Global Heap create on Astro.
+static KYTY_SYSV_ABI int c_rand() { return ::rand(); }
+// Gen5 libc_v1 strtok (oVkZ8W8-Q8A): host uses strtok_r with a per-thread save pointer.
+static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
+{
+	static thread_local char* save = nullptr;
+	return ::strtok_r(str, delim, &save);
+}
 
 // C++ operator new/delete (mangled _Znwm/_ZdlPv), forwarded to the host allocator.
 static KYTY_SYSV_ABI void* cxx_new(size_t size) { return ::malloc(size != 0 ? size : 1); }
@@ -532,7 +543,8 @@ namespace LibcInternal {
 
 LIB_VERSION("LibcInternal", 1, "LibcInternal", 1, 1);
 
-static uint32_t g_need_flag = 1;
+// Same contract as LibC::g_need_flag — already-initialized, skip CRT re-entry.
+static uint32_t g_need_flag = 0;
 
 int KYTY_SYSV_ABI vprintf(const char* str, VaList* c)
 {
@@ -617,6 +629,30 @@ void* KYTY_SYSV_ABI LibcMspaceMalloc(void* msp, size_t size)
 	return buf;
 }
 
+void* KYTY_SYSV_ABI LibcMspaceMemalign(void* msp, size_t align, size_t size)
+{
+	PRINT_NAME();
+
+	if (msp == nullptr)
+	{
+		return nullptr;
+	}
+
+	return Core::MSpaceMemalign(msp, align, size);
+}
+
+void KYTY_SYSV_ABI LibcMspaceFree(void* msp, void* ptr)
+{
+	PRINT_NAME();
+
+	if (msp == nullptr || ptr == nullptr)
+	{
+		return;
+	}
+
+	Core::MSpaceFree(msp, ptr);
+}
+
 LIB_DEFINE(InitLibcInternal_1)
 {
 	LibcInternalExt::InitLibcInternalExt_1(s);
@@ -635,6 +671,8 @@ LIB_DEFINE(InitLibcInternal_1)
 
 	LIB_FUNC("-hn1tcVHq5Q", LibcInternal::LibcMspaceCreate);
 	LIB_FUNC("OJjm-QOIHlI", LibcInternal::LibcMspaceMalloc);
+	LIB_FUNC("iF1iQHzxBJU", LibcInternal::LibcMspaceMemalign);
+	LIB_FUNC("Vla-Z+eXlxo", LibcInternal::LibcMspaceFree);
 }
 
 } // namespace LibcInternal
@@ -735,6 +773,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("AEJdIVZTEmo", LibC::c_qsort);
 	LIB_FUNC("L1SBTkC+Cvw", LibC::c_abort);
 	LIB_FUNC("VPbJwTCgME0", LibC::c_srand);
+	// Gen5 libc_v1 rand / strtok — evidenced first imports after Global Heap on Astro Bot.
+	LIB_FUNC("Nmtr628eA3A", LibC::c_rand);
+	LIB_FUNC("oVkZ8W8-Q8A", LibC::c_strtok);
 
 	// time
 	LIB_FUNC("wLlFkwG9UcQ", LibC::c_time);

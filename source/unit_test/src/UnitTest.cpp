@@ -26,6 +26,7 @@ UT_LINK(EmulatorSaveData);
 UT_LINK(EmulatorAudio);
 UT_LINK(EmulatorPad);
 UT_LINK(EmulatorLoaderTls);
+UT_LINK(EmulatorApplicationHeap);
 
 KYTY_SUBSYSTEM_INIT(UnitTest)
 {
