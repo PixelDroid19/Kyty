@@ -302,7 +302,8 @@ ProtocolResult AcceptWorkerHandshake(MutableMappingView mapping, const ParentPro
 	{
 		return hdr;
 	}
-	if (LoadHandshakeState(mapping.data) != HandshakeState::WorkerReady)
+	const HandshakeState state = LoadHandshakeState(mapping.data);
+	if (state != HandshakeState::WorkerReady && state != HandshakeState::WorkerClosing)
 	{
 		return ProtocolResult::Rejected;
 	}
@@ -348,6 +349,25 @@ ProtocolResult CloseWorkerHandshake(MutableMappingView mapping) noexcept
 		return ProtocolResult::Rejected;
 	}
 	AtomicStoreU32(mapping.data, kOffHandshakeState, static_cast<uint32_t>(HandshakeState::WorkerClosing));
+	return ProtocolResult::Ok;
+}
+
+ProtocolResult RejectWorkerHandshake(MutableMappingView mapping) noexcept
+{
+	if (!MappingOk(mapping.data, mapping.size))
+	{
+		return ProtocolResult::InvalidArgument;
+	}
+	const auto hdr = ValidateHeader(mapping.data);
+	if (hdr != ProtocolResult::Ok)
+	{
+		return hdr;
+	}
+	if (LoadHandshakeState(mapping.data) != HandshakeState::WorkerReady)
+	{
+		return ProtocolResult::Rejected;
+	}
+	AtomicStoreU32(mapping.data, kOffHandshakeState, static_cast<uint32_t>(HandshakeState::WorkerRejected));
 	return ProtocolResult::Ok;
 }
 

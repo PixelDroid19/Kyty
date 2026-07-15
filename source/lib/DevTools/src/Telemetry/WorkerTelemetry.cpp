@@ -128,6 +128,7 @@ bool WorkerTelemetry::Start(MutableMappingView mapping, const WorkerTelemetryOpt
 	{
 		if (!Publish())
 		{
+			(void)RejectWorkerHandshake(state_->mapping);
 			state_->mapping = {};
 			state_->active  = false;
 			return false;
@@ -138,6 +139,7 @@ bool WorkerTelemetry::Start(MutableMappingView mapping, const WorkerTelemetryOpt
 	TelemetryWriterToken token {};
 	if (!state_->writers.Reserve(kWorkerRole, thread_instance, &token))
 	{
+		(void)RejectWorkerHandshake(state_->mapping);
 		state_->mapping = {};
 		state_->active  = false;
 		return false;
@@ -145,6 +147,7 @@ bool WorkerTelemetry::Start(MutableMappingView mapping, const WorkerTelemetryOpt
 	if (!state_->writers.Activate(token))
 	{
 		state_->writers.Abandon(token);
+		(void)RejectWorkerHandshake(state_->mapping);
 		state_->mapping = {};
 		state_->active  = false;
 		return false;
@@ -156,6 +159,7 @@ bool WorkerTelemetry::Start(MutableMappingView mapping, const WorkerTelemetryOpt
 		state_->writers.Close(token, MakeThreadExit(state_->thread_instance));
 		EventRecord discarded[kTimelineMaxEvents] {};
 		(void)state_->writers.Drain(discarded, kTimelineMaxEvents);
+		(void)RejectWorkerHandshake(state_->mapping);
 		state_->mapping  = {};
 		state_->active   = false;
 		return false;
