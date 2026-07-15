@@ -773,7 +773,21 @@ TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(14, 27, false), Gen5SampleBacking::Unsupported);
 	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, false), Gen5SampleBacking::Unsupported);
+	// Format 71 (RGBA16F) is only legal when PrepareTextures finds an exact live RT alias.
+	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, true), Gen5SampleBacking::ExactRenderTarget);
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 0, false), Gen5SampleBacking::GuestMemoryTexture);
+}
+
+// Residual visual (world false-color, HUD correct): intermediate format-71 and
+// format-56 sampled paths must keep distinct Vulkan formats — float RT aliases
+// as SFLOAT, RGBA8 samples default UNORM (sRGB only with evidenced force_degamma).
+TEST(EmulatorGraphicsState, Gen5SampledFormatsPreserveFloatAndUnormContracts)
+{
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 71, false), VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 71, true), VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 56, false), VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 56, true), VK_FORMAT_R8G8B8A8_SRGB);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 14, false), VK_FORMAT_R8G8_UNORM);
 }
 
 TEST(EmulatorGraphicsState, RegularImageSamplingDisablesSamplerComparison)
