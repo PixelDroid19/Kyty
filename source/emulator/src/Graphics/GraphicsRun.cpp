@@ -13,12 +13,15 @@
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Pm4.h"
+#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Profiler.h"
 
 #include <atomic>
+#include <cstdio>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -575,6 +578,9 @@ void CommandProcessor::BufferFlush()
 	EXIT_IF(m_buffer[m_current_buffer] == nullptr);
 
 	m_buffer[m_current_buffer]->WaitForFenceAndReset();
+	// Fence wait is authoritative on MoltenVK: vkGetEventStatus often never
+	// observes vkCmdSetEvent, so DrainCompleted alone skips WriteBack/EOP stores.
+	LabelCompleteSubmitted(this);
 	m_buffer[m_current_buffer]->Begin();
 }
 
@@ -682,9 +688,13 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	constexpr int kMaxIters = 500000; // ~5s at 10us sleep
 	for (int i = 0; i < kMaxIters; i++)
 	{
-		if (((*addr) & mask) == ref)
+		if (((*addr) & mask) == (ref & mask))
 		{
 			return;
+		}
+		if ((i % 1000) == 0)
+		{
+			LabelDrainCompleted();
 		}
 		Core::Thread::SleepMicro(10);
 	}
@@ -701,15 +711,40 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
 
 	BufferFlush();
+	LabelCompleteSubmitted(this);
+
+	// Only record waits that actually block — satisfied fences are noise and
+	// flood the agent event ring during load/gameplay.
+	if (((*addr) & mask) != (ref & mask))
+	{
+		char wait_msg[128];
+		std::snprintf(wait_msg, sizeof(wait_msg), "addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64, static_cast<const void*>(addr),
+		              *addr, ref);
+		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Warn, "wait_reg_mem64", wait_msg);
+	} else
+	{
+		return;
+	}
 
 	constexpr int kMaxIters = 500000; // ~5s at 10us sleep
 	for (int i = 0; i < kMaxIters; i++)
 	{
-		if (((*addr) & mask) == ref)
+		if (((*addr) & mask) == (ref & mask))
 		{
 			return;
 		}
+		if ((i % 1000) == 0)
+		{
+			LabelCompleteSubmitted(this);
+			LabelDrainCompleted();
+		}
 		Core::Thread::SleepMicro(10);
+	}
+	{
+		char wait_msg[128];
+		std::snprintf(wait_msg, sizeof(wait_msg), "addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64, static_cast<const void*>(addr),
+		              *addr, ref);
+		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Error, "wait_reg_mem64_timeout", wait_msg);
 	}
 	EXIT("WaitRegMem64 timeout addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64 " mask=0x%016" PRIx64 "\n", static_cast<const void*>(addr),
 	     *addr, ref, mask);
@@ -862,9 +897,13 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			cp->SetFlip(buf.flip);
 			cp->SetSumbitId(++seq);
 
-			ring->m_job1.Execute([cp, buf](void* /*unused*/) { cp->Run(buf.draw_buffer.data, buf.draw_buffer.num_dw); });
-			ring->m_job2.Execute([cp, buf](void* /*unused*/) { cp->Run(buf.const_buffer.data, buf.const_buffer.num_dw); });
+			// Run CE then DE on the same CommandProcessor. Parallel job1/job2 both
+			// called Run() against one CP (shared buffer index / EOP labels) and
+			// raced LabelSet vs WaitRegMem — observed as WaitRegMem64 timeout
+			// val=0 ref=1 after Prisoners' Quarters load (label never stored).
+			ring->m_job1.Execute([cp, buf](void* /*unused*/) { cp->Run(buf.const_buffer.data, buf.const_buffer.num_dw); });
 			ring->m_job1.Wait();
+			ring->m_job2.Execute([cp, buf](void* /*unused*/) { cp->Run(buf.draw_buffer.data, buf.draw_buffer.num_dw); });
 			ring->m_job2.Wait();
 
 			cp->BufferFlush();

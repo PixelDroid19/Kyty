@@ -5,8 +5,10 @@
 
 #include "Emulator/Common.h"
 
+#include <algorithm>
 #include <cstring>
 #include <utility>
+#include <vector>
 #include <vulkan/vulkan_core.h>
 
 #ifdef KYTY_EMU_ENABLED
@@ -170,27 +172,110 @@ struct ColorAttachmentLoadOps
 	float              clear_a        = 1.0f;
 };
 
-[[nodiscard]] inline VkClearColorValue DecodeGuestColorClearWords(uint32_t word0, uint32_t word1)
+// IEEE754 binary16 → binary32. Used only to unpack CB CLEAR_WORD bit patterns.
+[[nodiscard]] inline float Float16BitsToFloat32(uint16_t bits)
+{
+	const uint32_t sign = (static_cast<uint32_t>(bits & 0x8000u) << 16);
+	const uint32_t exp  = (bits >> 10) & 0x1fu;
+	const uint32_t mant = bits & 0x3ffu;
+	uint32_t       out  = 0;
+	if (exp == 0)
+	{
+		if (mant == 0)
+		{
+			out = sign;
+		} else
+		{
+			// Renormalize subnormal.
+			uint32_t m = mant;
+			uint32_t e = 127 - 15 + 1;
+			while ((m & 0x400u) == 0u)
+			{
+				m <<= 1u;
+				--e;
+			}
+			m &= 0x3ffu;
+			out = sign | (e << 23) | (m << 13);
+		}
+	} else if (exp == 0x1fu)
+	{
+		out = sign | 0x7f800000u | (mant << 13);
+	} else
+	{
+		out = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+	}
+	float value = 0.0f;
+	std::memcpy(&value, &out, sizeof(value));
+	return value;
+}
+
+// AMD CB_COLOR*_CLEAR_WORD0/1 hold the raw clear pixel (two dwords).
+// Mesa/RADV packing (evidenced):
+//   R16G16B16A16_SFLOAT: WORD0 = f16(R)|(f16(G)<<16), WORD1 = f16(B)|(f16(A)<<16)
+//   R8G8B8A8_*:          WORD0 = R|(G<<8)|(B<<16)|(A<<24), WORD1 = 0
+// Do not invent B=0/A=1 by bitcasting WORD0/1 as float32 R/G.
+[[nodiscard]] inline VkClearColorValue DecodeGuestColorClearWords(uint32_t word0, uint32_t word1, VkFormat format)
 {
 	VkClearColorValue value {};
-	std::memcpy(&value.float32[0], &word0, sizeof(uint32_t));
-	std::memcpy(&value.float32[1], &word1, sizeof(uint32_t));
+	if (format == VK_FORMAT_R16G16B16A16_SFLOAT)
+	{
+		value.float32[0] = Float16BitsToFloat32(static_cast<uint16_t>(word0 & 0xffffu));
+		value.float32[1] = Float16BitsToFloat32(static_cast<uint16_t>((word0 >> 16) & 0xffffu));
+		value.float32[2] = Float16BitsToFloat32(static_cast<uint16_t>(word1 & 0xffffu));
+		value.float32[3] = Float16BitsToFloat32(static_cast<uint16_t>((word1 >> 16) & 0xffffu));
+		return value;
+	}
+	if (format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB)
+	{
+		value.float32[0] = static_cast<float>((word0 >> 0) & 0xffu) / 255.0f;
+		value.float32[1] = static_cast<float>((word0 >> 8) & 0xffu) / 255.0f;
+		value.float32[2] = static_cast<float>((word0 >> 16) & 0xffu) / 255.0f;
+		value.float32[3] = static_cast<float>((word0 >> 24) & 0xffu) / 255.0f;
+		return value;
+	}
+	if (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB)
+	{
+		value.float32[0] = static_cast<float>((word0 >> 16) & 0xffu) / 255.0f;
+		value.float32[1] = static_cast<float>((word0 >> 8) & 0xffu) / 255.0f;
+		value.float32[2] = static_cast<float>((word0 >> 0) & 0xffu) / 255.0f;
+		value.float32[3] = static_cast<float>((word0 >> 24) & 0xffu) / 255.0f;
+		return value;
+	}
+	// Unsupported clear packing for this attachment format: keep structured fail
+	// path callers from inventing channels. Black+opaque matches default load ops.
+	value.float32[0] = 0.0f;
+	value.float32[1] = 0.0f;
 	value.float32[2] = 0.0f;
 	value.float32[3] = 1.0f;
 	return value;
 }
 
 [[nodiscard]] inline ColorAttachmentLoadOps ResolveColorAttachmentLoadOps(VkImageLayout tracked_layout, bool guest_fast_clear,
-                                                                          uint32_t clear_word0, uint32_t clear_word1)
+                                                                          uint32_t clear_word0, uint32_t clear_word1, VkFormat format)
 {
 	ColorAttachmentLoadOps ops {};
-	if (tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED)
+	// First bind (UNDEFINED) and rebind after sampling (SHADER_READ_ONLY) must CLEAR.
+	// Captured Dead Cells lighting: RGBA16F + SRC_ALPHA,ONE with no guest fast-clear;
+	// LOAD after sample keeps prior-frame light and accumulates into hot yellow/red slabs.
+	// Within-frame light draws stay COLOR_ATTACHMENT_OPTIMAL and still LOAD.
+	// BeginRenderPass barriers non-COLOR layouts to COLOR before vkCmdBeginRenderPass,
+	// so SHADER_READ rebinds use COLOR as the render-pass initial layout.
+	const bool clear_on_bind =
+	    tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED || tracked_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	if (clear_on_bind)
 	{
 		ops.load_op        = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		ops.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-		if (guest_fast_clear || clear_word0 != 0u || clear_word1 != 0u)
+		ops.initial_layout = (tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_IMAGE_LAYOUT_UNDEFINED
+		                                                                  : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		const bool decode_words = guest_fast_clear || clear_word0 != 0u || clear_word1 != 0u ||
+		                          format == VK_FORMAT_R16G16B16A16_SFLOAT;
+		if (decode_words)
 		{
-			const auto clear = DecodeGuestColorClearWords(clear_word0, clear_word1);
+			// Always decode for float RTs: CLEAR_WORD=0 packs to A=0 (captured lighting
+			// targets with blend SRC_ALPHA,ONE). Inventing opaque A=1 diverges from
+			// Mesa/RADV f16 packing. Other formats keep legacy opaque-black when words
+			// are zero and fast-clear is off until those paths are re-characterized.
+			const auto clear = DecodeGuestColorClearWords(clear_word0, clear_word1, format);
 			ops.clear_r      = clear.float32[0];
 			ops.clear_g      = clear.float32[1];
 			ops.clear_b      = clear.float32[2];
@@ -270,6 +355,102 @@ inline std::pair<int, int> UtilCalcMipmapOffset(uint32_t lod, uint32_t width, ui
 	}
 
 	return {mip_x, mip_y};
+}
+
+// GPU→CPU buffer write-back with absolute holes [hole_begin[i], hole_end[i]).
+// Bytes in holes keep the existing dst contents (EOP fences, guest resets).
+inline void MemcpySkipAbsoluteRanges(void* dst, const void* src, uint64_t size, const uint64_t* hole_begin, const uint64_t* hole_end,
+                                     int hole_count)
+{
+	if (dst == nullptr || src == nullptr || size == 0)
+	{
+		return;
+	}
+	if (hole_count <= 0 || hole_begin == nullptr || hole_end == nullptr)
+	{
+		std::memcpy(dst, src, static_cast<size_t>(size));
+		return;
+	}
+
+	const uint64_t base = reinterpret_cast<uint64_t>(dst);
+	const uint64_t end  = base + size;
+
+	struct Range
+	{
+		uint64_t begin = 0;
+		uint64_t end   = 0;
+	};
+
+	std::vector<Range> ranges;
+	ranges.reserve(static_cast<size_t>(hole_count));
+	for (int i = 0; i < hole_count; i++)
+	{
+		uint64_t b = hole_begin[i];
+		uint64_t e = hole_end[i];
+		if (e <= b)
+		{
+			continue;
+		}
+		if (e <= base || b >= end)
+		{
+			continue;
+		}
+		if (b < base)
+		{
+			b = base;
+		}
+		if (e > end)
+		{
+			e = end;
+		}
+		ranges.push_back({b, e});
+	}
+
+	if (ranges.empty())
+	{
+		std::memcpy(dst, src, static_cast<size_t>(size));
+		return;
+	}
+
+	std::sort(ranges.begin(), ranges.end(), [](const Range& a, const Range& b) { return a.begin < b.begin; });
+
+	std::vector<Range> merged;
+	merged.reserve(ranges.size());
+	merged.push_back(ranges[0]);
+	for (size_t i = 1; i < ranges.size(); i++)
+	{
+		Range& last = merged.back();
+		if (ranges[i].begin <= last.end)
+		{
+			if (ranges[i].end > last.end)
+			{
+				last.end = ranges[i].end;
+			}
+		} else
+		{
+			merged.push_back(ranges[i]);
+		}
+	}
+
+	uint64_t cursor = base;
+	auto*    dbytes = static_cast<uint8_t*>(dst);
+	auto*    sbytes = static_cast<const uint8_t*>(src);
+	for (const auto& hole: merged)
+	{
+		if (hole.begin > cursor)
+		{
+			const uint64_t off = cursor - base;
+			const uint64_t len = hole.begin - cursor;
+			std::memcpy(dbytes + off, sbytes + off, static_cast<size_t>(len));
+		}
+		cursor = hole.end > cursor ? hole.end : cursor;
+	}
+	if (cursor < end)
+	{
+		const uint64_t off = cursor - base;
+		const uint64_t len = end - cursor;
+		std::memcpy(dbytes + off, sbytes + off, static_cast<size_t>(len));
+	}
 }
 
 } // namespace Kyty::Libs::Graphics

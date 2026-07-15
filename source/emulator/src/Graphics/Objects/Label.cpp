@@ -7,6 +7,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -62,6 +63,8 @@ public:
 	void   Delete(Label* label);
 	void   Set(CommandBuffer* buffer, Label* label);
 	void   DrainCompleted();
+	void   CompleteSubmitted(CommandProcessor* cp);
+	void   WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size);
 
 private:
 	static void ThreadRun(void* data);
@@ -79,16 +82,30 @@ static LabelManager* g_label_manager = nullptr;
 
 void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 {
+	Vector<bool> allow_store;
+
+	// Phase 1: side effects that may write guest memory (WriteBack / GDS).
+	// Defer EOP stores so a later WriteBack cannot zero an earlier fence
+	// (WaitRegMem64 timeout val=0 ref=1).
 	for (auto& label: fired_labels)
 	{
 		bool write = true;
-
 		if (label.callback_1 != nullptr)
 		{
 			write = label.callback_1(label.args);
 		}
+		allow_store.Add(write);
+	}
 
-		if (write && label.dst_gpu_addr64 != nullptr)
+	// Phase 2: publish EOP fence values after all WriteBacks.
+	for (int i = 0; i < static_cast<int>(fired_labels.Size()); i++)
+	{
+		if (!allow_store.At(i))
+		{
+			continue;
+		}
+		auto& label = fired_labels.At(i);
+		if (label.dst_gpu_addr64 != nullptr)
 		{
 			*label.dst_gpu_addr64 = label.value64;
 
@@ -96,14 +113,18 @@ void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 			       reinterpret_cast<uint64_t>(label.dst_gpu_addr64), label.value64);
 		}
 
-		if (write && label.dst_gpu_addr32 != nullptr)
+		if (label.dst_gpu_addr32 != nullptr)
 		{
 			*label.dst_gpu_addr32 = label.value32;
 
 			printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%08" PRIx32 "\n" FG_DEFAULT,
 			       reinterpret_cast<uint64_t>(label.dst_gpu_addr32), label.value32);
 		}
+	}
 
+	// Phase 3: interrupts / flips that depend on fence memory being visible.
+	for (auto& label: fired_labels)
+	{
 		if (label.callback_2 != nullptr)
 		{
 			label.callback_2(label.args);
@@ -186,6 +207,64 @@ void LabelManager::DrainCompleted()
 	}
 
 	FireCallbacks(fired_labels);
+}
+
+void LabelManager::CompleteSubmitted(CommandProcessor* cp)
+{
+	EXIT_IF(cp == nullptr);
+
+	Vector<LabelCallbacks> fired_labels;
+
+	{
+		Core::LockGuard lock(m_mutex);
+
+		for (auto& label: m_labels)
+		{
+			// Only Active: ActiveDeleted stays on the Label thread (Destroy needs
+			// GraphicsRunCommandProcessorWait and must not run under BufferFlush's
+			// CommandProcessor mutex).
+			if (label->cp != cp || label->status != LabelStatus::Active)
+			{
+				continue;
+			}
+
+			label->status = LabelStatus::NotActive;
+			fired_labels.Add(label->callbacks);
+		}
+	}
+
+	FireCallbacks(fired_labels);
+}
+
+void LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size)
+{
+	EXIT_IF(guest_dst == nullptr);
+	EXIT_IF(gpu_src == nullptr);
+
+	Vector<uint64_t> hole_begin;
+	Vector<uint64_t> hole_end;
+
+	{
+		Core::LockGuard lock(m_mutex);
+
+		for (auto& label: m_labels)
+		{
+			if (label->callbacks.dst_gpu_addr64 != nullptr)
+			{
+				const uint64_t addr = reinterpret_cast<uint64_t>(label->callbacks.dst_gpu_addr64);
+				hole_begin.Add(addr);
+				hole_end.Add(addr + 8u);
+			}
+			if (label->callbacks.dst_gpu_addr32 != nullptr)
+			{
+				const uint64_t addr = reinterpret_cast<uint64_t>(label->callbacks.dst_gpu_addr32);
+				hole_begin.Add(addr);
+				hole_end.Add(addr + 4u);
+			}
+		}
+	}
+
+	MemcpySkipAbsoluteRanges(guest_dst, gpu_src, size, hole_begin.GetData(), hole_end.GetData(), static_cast<int>(hole_begin.Size()));
 }
 
 Label* LabelManager::Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelGpuObject::callback_t callback_1,
@@ -391,6 +470,20 @@ void LabelDrainCompleted()
 	EXIT_IF(g_label_manager == nullptr);
 
 	g_label_manager->DrainCompleted();
+}
+
+void LabelCompleteSubmitted(CommandProcessor* cp)
+{
+	EXIT_IF(g_label_manager == nullptr);
+
+	g_label_manager->CompleteSubmitted(cp);
+}
+
+void LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size)
+{
+	EXIT_IF(g_label_manager == nullptr);
+
+	g_label_manager->WriteBackCopy(guest_dst, gpu_src, size);
 }
 
 static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,

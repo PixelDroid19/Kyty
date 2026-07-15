@@ -463,11 +463,26 @@ TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
 	EXPECT_FALSE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
 	                                                    GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
-	                                              GpuMemoryObjectType::VertexBuffer));
-	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
-	                                              GpuMemoryObjectType::VertexBuffer));
-	EXPECT_FALSE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                               GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                               GpuMemoryObjectType::VertexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
+	                                                GpuMemoryObjectType::VertexBuffer));
+	// Captured: Texture Contains + IndexBuffer Crosses → link IB with new VB.
+	EXPECT_TRUE(GpuMemoryAllowsVertexLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
+	                                                 GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
+	                                                 GpuMemoryObjectType::VertexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsVertexLinkIndexBuffer(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
+	                                                  GpuMemoryObjectType::VertexBuffer));
+	// Captured: IndexBuffer IsContainedWithin + VertexBuffer Contains → reclaim
+	// peer IB, link VB with the new IndexBuffer.
+	EXPECT_TRUE(GpuMemoryAllowsIndexReclaimIndex(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                             GpuMemoryObjectType::IndexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsIndexLinkVertexBuffer(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
+	                                                 GpuMemoryObjectType::IndexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsIndexLinkVertexBuffer(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                  GpuMemoryObjectType::IndexBuffer));
 }
 
 // Captured post-Param5: RenderTexture with SB Equals + SB/RT Contains parents.
@@ -655,7 +670,9 @@ TEST(EmulatorGraphicsState, DepthStencilReclaimParentsAreSurfaces)
 TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearOnUndefinedFirstUse)
 {
 	using namespace Kyty::Libs::Graphics;
-	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, false, 0u, 0u);
+	// Non-float formats with zero CLEAR_WORDs and no fast-clear keep the legacy
+	// opaque-black default until those paths are re-characterized from capture.
+	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, false, 0u, 0u, VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
 	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
 	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
@@ -664,26 +681,124 @@ TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearOnUndefinedFirstUse)
 	EXPECT_FLOAT_EQ(ops.clear_a, 1.0f);
 }
 
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsFloatZeroWordsClearToZeroAlpha)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Captured lighting RT: fmt=12/ctype=7, CLEAR_WORD0/1=0, blend SRC_ALPHA,ONE.
+	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, false, 0u, 0u, VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
+}
+
 TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsLoadOnOptimalSubsequentPass)
 {
 	using namespace Kyty::Libs::Graphics;
-	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, false, 0u, 0u);
+	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, false, 0u, 0u, VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
 	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
-TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesGuestClearWords)
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearWhenRebindingAfterSample)
 {
 	using namespace Kyty::Libs::Graphics;
-	const uint32_t word0 = 0x3f800000u; // 1.0f
-	const uint32_t word1 = 0x3f000000u; // 0.5f
-	auto           ops   = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, word0, word1);
+	// After composite samples the lighting RT, layout is SHADER_READ_ONLY. The next
+	// frame's first additive light pass must CLEAR (zeros), not LOAD prior-frame HDR.
+	auto ops =
+	    ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false, 0u, 0u, VK_FORMAT_R16G16B16A16_SFLOAT);
 	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
-	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
+
+	// Within-frame accumulation (still COLOR_ATTACHMENT) must keep LOAD.
+	auto load_ops =
+	    ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, false, 0u, 0u, VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(load_ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesRgba8GuestClearWords)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Mesa/RADV: WORD0 = R|(G<<8)|(B<<16)|(A<<24), WORD1 = 0 for R8G8B8A8.
+	const uint32_t word0 = 0xff804020u; // R=0x20 G=0x40 B=0x80 A=0xff
+	const uint32_t word1 = 0u;
+	auto           ops   = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, word0, word1, VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_NEAR(ops.clear_r, 32.0f / 255.0f, 1e-5);
+	EXPECT_NEAR(ops.clear_g, 64.0f / 255.0f, 1e-5);
+	EXPECT_NEAR(ops.clear_b, 128.0f / 255.0f, 1e-5);
+	EXPECT_NEAR(ops.clear_a, 1.0f, 1e-5);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesRgba16FloatGuestClearWords)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Mesa/RADV: WORD0 = f16(R)|(f16(G)<<16), WORD1 = f16(B)|(f16(A)<<16).
+	// f16(1.0)=0x3c00, f16(0.5)=0x3800, f16(0.0)=0x0000, f16(1.0)=0x3c00.
+	const uint32_t word0 = 0x38003c00u;
+	const uint32_t word1 = 0x3c000000u;
+	auto           ops   = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, word0, word1, VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
 	EXPECT_FLOAT_EQ(ops.clear_r, 1.0f);
 	EXPECT_FLOAT_EQ(ops.clear_g, 0.5f);
 	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
 	EXPECT_FLOAT_EQ(ops.clear_a, 1.0f);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsRejectsInventedFloat32RgClear)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Legacy invented packing bitcast float32 R/G and forced B=0 A=1. Those
+	// bit patterns as f16 pairs must NOT decode to (1.0, 0.5, 0, 1).
+	const uint32_t word0 = 0x3f800000u; // float32 1.0
+	const uint32_t word1 = 0x3f000000u; // float32 0.5
+	auto           ops   = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, word0, word1, VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_FALSE(ops.clear_r == 1.0f && ops.clear_g == 0.5f && ops.clear_b == 0.0f && ops.clear_a == 1.0f);
+}
+
+TEST(EmulatorGraphicsState, WaitRegMemCompareMasksBothSides)
+{
+	// GraphicsDcbWaitRegMem size=0 zeroes the high half of the 64-bit mask.
+	// Comparing (*addr & mask) == ref (unmasked) never matches when ref keeps
+	// high bits; both sides must apply mask (WaitRegMem32/64 contract).
+	const uint64_t val  = 0x1u;
+	const uint64_t ref  = 0x0000000100000001ull;
+	const uint64_t mask = 0x00000000ffffffffull;
+	EXPECT_EQ((val & mask), (ref & mask));
+	EXPECT_NE((val & mask), ref);
+}
+
+TEST(EmulatorGraphicsState, MemcpySkipAbsoluteRangesPreservesFenceHoles)
+{
+	using namespace Kyty::Libs::Graphics;
+	uint8_t dst[32];
+	uint8_t src[32];
+	for (int i = 0; i < 32; i++)
+	{
+		dst[i] = static_cast<uint8_t>(0xA0 + i);
+		src[i] = static_cast<uint8_t>(0x10 + i);
+	}
+	const uint64_t base       = reinterpret_cast<uint64_t>(dst);
+	const uint64_t hole_begin = base + 8u;
+	const uint64_t hole_end   = base + 16u;
+	MemcpySkipAbsoluteRanges(dst, src, 32, &hole_begin, &hole_end, 1);
+	for (int i = 0; i < 8; i++)
+	{
+		EXPECT_EQ(dst[i], static_cast<uint8_t>(0x10 + i));
+	}
+	for (int i = 8; i < 16; i++)
+	{
+		EXPECT_EQ(dst[i], static_cast<uint8_t>(0xA0 + i));
+	}
+	for (int i = 16; i < 32; i++)
+	{
+		EXPECT_EQ(dst[i], static_cast<uint8_t>(0x10 + i));
+	}
 }
 
 // Host presentation: default swapchain selection must stay LDR sRGB even when a

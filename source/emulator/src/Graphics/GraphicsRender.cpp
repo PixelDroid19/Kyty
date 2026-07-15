@@ -324,8 +324,9 @@ private:
 		uint64_t           depth_id             = 0;
 		bool               depth_clear_enable   = false;
 		bool               stencil_clear_enable = false;
-		VkAttachmentLoadOp color_load_op[8]     = {};
+		VkAttachmentLoadOp color_load_op[8]        = {};
 		VkImageLayout      color_initial_layout[8] = {};
+		float              color_clear[8][4]       = {};
 	};
 
 	Core::Mutex                  m_mutex;
@@ -659,8 +660,8 @@ static void rt_check(const HW::RenderTarget& rt)
 		EXIT_NOT_IMPLEMENTED(rt.cmask_slice.slice_minus1 != 0x00000000);
 		EXIT_NOT_IMPLEMENTED(rt.fmask.addr != 0x0000000000000000);
 		EXIT_NOT_IMPLEMENTED(rt.fmask_slice.slice_minus1 != 0x00000000 && rt.fmask_slice.slice_minus1 != rt.slice.slice_div64_minus1);
-		EXIT_NOT_IMPLEMENTED(rt.clear_word0.word0 != 0x00000000);
-		EXIT_NOT_IMPLEMENTED(rt.clear_word1.word1 != 0x00000000);
+		// CLEAR_WORD0/1 hold the raw clear pixel; format-aware decode is in
+		// DecodeGuestColorClearWords (Mesa/RADV packing). Non-zero words are legal.
 		EXIT_NOT_IMPLEMENTED(rt.dcc_addr.addr != 0x0000000000000000);
 		if (ps5)
 		{
@@ -1485,10 +1486,12 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		{
 			auto*      image    = color->vulkan_buffer[slot];
 			const auto load_ops = ResolveColorAttachmentLoadOps(image->layout, color->cmask_fast_clear_enable[slot],
-			                                                    color->clear_word0[slot], color->clear_word1[slot]);
+			                                                    color->clear_word0[slot], color->clear_word1[slot], image->format);
 			same_colors =
 			    (f.image_id[slot] == color->vulkan_buffer[slot]->memory.unique_id) && (f.color_load_op[slot] == load_ops.load_op) &&
-			    (f.color_initial_layout[slot] == load_ops.initial_layout);
+			    (f.color_initial_layout[slot] == load_ops.initial_layout) &&
+			    (f.color_clear[slot][0] == load_ops.clear_r && f.color_clear[slot][1] == load_ops.clear_g &&
+			     f.color_clear[slot][2] == load_ops.clear_b && f.color_clear[slot][3] == load_ops.clear_a);
 		}
 		if (f.framebuffer != nullptr && same_colors &&
 		    f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) && f.depth_clear_enable == depth->depth_clear_enable &&
@@ -1525,7 +1528,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		EXIT_NOT_IMPLEMENTED(image->extent.width != vulkan_buffer->extent.width || image->extent.height != vulkan_buffer->extent.height);
 		const auto load_ops = ResolveColorAttachmentLoadOps(image->layout, with_color ? color->cmask_fast_clear_enable[slot] : false,
 		                                                    with_color ? color->clear_word0[slot] : 0u,
-		                                                    with_color ? color->clear_word1[slot] : 0u);
+		                                                    with_color ? color->clear_word1[slot] : 0u, image->format);
 		attachments[slot].flags          = 0;
 		attachments[slot].format         = image->format;
 		attachments[slot].samples        = VK_SAMPLE_COUNT_1_BIT;
@@ -1624,6 +1627,10 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	{
 		fnew.color_load_op[slot]        = framebuffer->color_load_op[slot];
 		fnew.color_initial_layout[slot] = framebuffer->color_initial_layout[slot];
+		fnew.color_clear[slot][0]       = framebuffer->color_clear[slot][0];
+		fnew.color_clear[slot][1]       = framebuffer->color_clear[slot][1];
+		fnew.color_clear[slot][2]       = framebuffer->color_clear[slot][2];
+		fnew.color_clear[slot][3]       = framebuffer->color_clear[slot][3];
 	}
 
 	bool updated = false;
@@ -2684,9 +2691,27 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 
 	if (std::getenv("KYTY_RT_EVIDENCE") != nullptr && RtEvidenceMatches(ps_id.crc32))
 	{
-		static std::atomic<uint32_t> rt_logs {0};
-		const uint32_t               n = rt_logs.fetch_add(1);
-		if (n < 128u)
+		// Prefer intermediate/float RTs (gameplay lighting) over 4K UI display
+		// targets that otherwise exhaust the log budget before Play.
+		static std::atomic<uint32_t> rt_logs_priority {0};
+		static std::atomic<uint32_t> rt_logs_other {0};
+		bool                        priority = false;
+		for (uint32_t rt = 0; rt < color->targets_num; rt++)
+		{
+			const auto&    target = ctx->GetRenderTarget(rt);
+			const uint32_t width =
+			    Config::IsNextGen() ? target.attrib2.width + 1u : static_cast<uint32_t>(target.size.width);
+			const uint32_t height =
+			    Config::IsNextGen() ? target.attrib2.height + 1u : static_cast<uint32_t>(target.size.height);
+			if (target.info.format == 0xcu || target.info.channel_type == 0x7u || width <= 1280u || height <= 720u)
+			{
+				priority = true;
+				break;
+			}
+		}
+		const uint32_t n      = priority ? rt_logs_priority.fetch_add(1) : rt_logs_other.fetch_add(1);
+		const uint32_t budget = priority ? 256u : 32u;
+		if (n < budget)
 		{
 			std::fprintf(stderr, "RT_EVIDENCE ps=%08" PRIx32 " mask=%08" PRIx32 " targets=%u depth=%d ztest=%d zwrite=%d\n", ps_id.crc32,
 			             ctx->GetRenderTargetMask(), color->targets_num,
@@ -2704,11 +2729,13 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 				    Config::IsNextGen() ? target.attrib3.tile_mode : static_cast<uint32_t>(target.attrib.tile_mode);
 				std::fprintf(stderr,
 				             "RT_EVIDENCE rt=%u base=%016" PRIx64 " fmt=%u ctype=%u order=%u width=%u height=%u tile=%u mask=%x "
-				             "blend_en=%d src=%u dst=%u op=%u asrc=%u adst=%u aop=%u sep=%d\n",
+				             "blend_en=%d src=%u dst=%u op=%u asrc=%u adst=%u aop=%u sep=%d "
+				             "clear0=%08" PRIx32 " clear1=%08" PRIx32 " fast=%d\n",
 				             rt, target.base.addr, target.info.format, target.info.channel_type, target.info.channel_order, width,
 				             height, tile, (ctx->GetRenderTargetMask() >> (rt * 4u)) & 0xfu, blend.enable ? 1 : 0,
 				             blend.color_srcblend, blend.color_destblend, blend.color_comb_fcn, blend.alpha_srcblend,
-				             blend.alpha_destblend, blend.alpha_comb_fcn, blend.separate_alpha_blend ? 1 : 0);
+				             blend.alpha_destblend, blend.alpha_comb_fcn, blend.separate_alpha_blend ? 1 : 0,
+				             target.clear_word0.word0, target.clear_word1.word1, target.info.cmask_fast_clear_enable ? 1 : 0);
 			}
 		}
 	}
@@ -5327,6 +5354,8 @@ void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer,
 	// thread's vkGetEventStatus→store left val=0 for ~5s (loading soft-lock)
 	// even after waiting on the submitted fence. Publish the immediate now so
 	// WaitRegMem can observe ref after the same flush orders GPU work.
+	// 32-bit store only — hardware data_sel=1 writes 32 bits; zero-extending
+	// to 64 corrupted adjacent guest state (intermittent post-Play present stall).
 	*dst_gpu_addr = value;
 }
 
@@ -5376,6 +5405,11 @@ void GraphicsRenderWriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer,
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
 
 	LabelSet(buffer, label);
+
+	// Same sequential-CP contract as WriteAtEndOfPipe32: WaitRegMem64 polls this
+	// address after BufferFlush. Relying only on the Label thread left val=0 for
+	// ~5s (strict EXIT at GraphicsRun WaitRegMem64) after ReleaseMem data_sel=2.
+	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr)
@@ -5436,6 +5470,11 @@ void GraphicsRenderWriteAtEndOfPipeWithWriteBack64(uint64_t submit_id, CommandBu
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
 
 	LabelSet(buffer, label);
+
+	// Immediate store is safe with BufferFlush→LabelCompleteSubmitted: WriteBack
+	// still runs before WaitRegMem observes completion. Without the store,
+	// MoltenVK missing event SET left val=0 until WaitRegMem64 EXIT.
+	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr,
@@ -5473,6 +5512,7 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t submit_id, 
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
 
 	LabelSet(buffer, label);
+	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
@@ -5496,6 +5536,8 @@ void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t submit_id, CommandBu
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
 
 	LabelSet(buffer, label);
+
+	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value)
@@ -5519,6 +5561,9 @@ void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBu
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
 
 	LabelSet(buffer, label);
+
+	// Same sequential-CP contract as WriteAtEndOfPipe32 (32-bit store only).
+	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr,
@@ -5564,6 +5609,7 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(uint64_t submit_
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
 
 	LabelSet(buffer, label);
+	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value, int handle,
@@ -5597,6 +5643,8 @@ void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer*
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
 
 	LabelSet(buffer, label);
+
+	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeOnlyFlip(uint64_t /*submit_id*/, CommandBuffer* buffer, int handle, int index, int flip_mode,

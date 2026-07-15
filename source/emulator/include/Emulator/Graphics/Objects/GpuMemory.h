@@ -166,6 +166,38 @@ inline bool GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType existing_type
 	        relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals);
 }
 
+// Incoming VertexBuffer overlapping an existing IndexBuffer. Captured after
+// WaitRegMem64 advance: Texture Contains + IndexBuffer Crosses a new VB
+// (0x480 under Texture 0x150000, IB 0xf0). Link the IB — do not reclaim it.
+inline bool GpuMemoryAllowsVertexLinkIndexBuffer(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                 GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::IndexBuffer && incoming_type == GpuMemoryObjectType::VertexBuffer &&
+	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
+	        relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals);
+}
+
+// Peer IndexBuffer overlapping an incoming IndexBuffer: reclaim the older IB.
+// Captured multi-parent: old IB IsContainedWithin (0xe4 under new 0xfc) + VB
+// Contains the new IndexBuffer.
+inline bool GpuMemoryAllowsIndexReclaimIndex(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                            GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::IndexBuffer && incoming_type == GpuMemoryObjectType::IndexBuffer &&
+	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
+	        relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals);
+}
+
+// Incoming IndexBuffer covered by an existing VertexBuffer. Link the VB —
+// same family as VertexLinkIndexBuffer (inverse create direction).
+inline bool GpuMemoryAllowsIndexLinkVertexBuffer(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::VertexBuffer && incoming_type == GpuMemoryObjectType::IndexBuffer &&
+	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
+	        relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals);
+}
+
 // Incoming Texture overlapping existing StorageBuffer/RenderTexture/Texture.
 // Used with multi-parent Texture create that also reclaims VertexBuffers.
 // Captured: SB/RT Contains + SB/RT IsContainedWithin (larger texture over a
