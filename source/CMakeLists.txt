@@ -186,6 +186,7 @@ if(NOT ${KYTY_PROJECT_NAME} MATCHES "Build_Tools" AND NOT MACOS)
 	add_subdirectory(launcher)
 endif()
 add_subdirectory(lib)
+add_subdirectory(devtools)
 
 add_executable(fc_script ${KYTY_SCRIPT_SRC}) 
 

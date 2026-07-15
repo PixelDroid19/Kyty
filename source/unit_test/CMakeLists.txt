@@ -11,6 +11,7 @@ list(APPEND unit_test_src
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsProgress.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsClassifier.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsProtocol.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsSupervisor.cpp"
 )
 
 if (MSVC AND CLANG)
@@ -22,6 +23,8 @@ add_library(unit_test STATIC ${unit_test_src})
 target_link_libraries(unit_test core)
 target_link_libraries(unit_test math)
 target_link_libraries(unit_test kyty_devtools_core)
+target_link_libraries(unit_test kyty_devtools_supervisor)
+target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/devtools/include")
 target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/emulator/include")
 
 #target_include_directories(unit_test PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

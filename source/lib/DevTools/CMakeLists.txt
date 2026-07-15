@@ -13,6 +13,7 @@ target_sources(kyty_devtools_core PRIVATE
 	src/Diagnostics/ProcessStatus.cpp
 	src/Diagnostics/StallClassifier.cpp
 	src/Protocol/Protocol.cpp
+	src/Transport/Bootstrap.cpp
 	src/Time/MonotonicClockPosix.cpp
 )
 
