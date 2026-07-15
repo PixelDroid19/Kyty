@@ -12,6 +12,7 @@
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Kernel/Semaphore.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -498,12 +499,12 @@ void KYTY_SYSV_ABI KernelSetGPO(uint32_t bits)
 
 // sceKernelGetGPI — NID 4oXYe9Xmk0Q (public PS5-3.20_Libs / sce_stubs name mapping).
 // On non-devkit retail consoles this is a no-op success (returns 0). Captured as
-// Astro Bot's first strict Unpatched import from libkernel_v1.1 before any window.
+// Astro Bot's first strict Unpatched import from libkernel_v1.1 during early Main.
 // Do not invent GPI state; no SetGPI pairing required for the observed open path.
 static int KYTY_SYSV_ABI KernelGetGPI()
 {
 	PRINT_NAME();
-	return 0;
+	return KernelRetailGetGpiResult();
 }
 
 } // namespace LibKernel
