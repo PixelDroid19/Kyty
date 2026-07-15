@@ -17,7 +17,10 @@
 
 namespace Kyty::Libs::Graphics {
 
-static VkFormat get_texture_format(uint32_t dfmt, uint32_t nfmt, uint32_t fmt)
+// Sampled texture formats only. Storage images and render-target aliases use
+// their own object format resolvers because sRGB storage/image-write semantics
+// are not interchangeable with sampled degamma.
+VkFormat TextureResolveSampledVkFormat(uint8_t dfmt, uint8_t nfmt, uint16_t fmt, bool force_degamma)
 {
 	if (fmt == 0)
 	{
@@ -63,7 +66,7 @@ static VkFormat get_texture_format(uint32_t dfmt, uint32_t nfmt, uint32_t fmt)
 		}
 		if (fmt == 56)
 		{
-			return VK_FORMAT_R8G8B8A8_UNORM;
+			return (force_degamma ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM);
 		}
 		if (fmt == 71)
 		{
@@ -463,6 +466,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto base_level = params[TextureObject::PARAM_LEVELS] >> 32u;
 	auto levels     = params[TextureObject::PARAM_LEVELS] & 0xffffffffu;
 	auto swizzle    = params[TextureObject::PARAM_SWIZZLE];
+	auto force_degamma = params[TextureObject::PARAM_FORCE_DEGAMMA] != 0;
 
 	VkImageUsageFlags vk_usage = get_usage();
 
@@ -473,7 +477,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	components.b = get_swizzle(GetDstSel(swizzle, 2));
 	components.a = get_swizzle(GetDstSel(swizzle, 3));
 
-	auto pixel_format = get_texture_format(dfmt, nfmt, fmt);
+	auto pixel_format = TextureResolveSampledVkFormat(dfmt, nfmt, fmt, force_degamma);
 
 	EXIT_NOT_IMPLEMENTED(pixel_format == VK_FORMAT_UNDEFINED);
 	EXIT_NOT_IMPLEMENTED(width == 0);
@@ -576,6 +580,7 @@ static void* create2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint
 	auto base_level = params[TextureObject::PARAM_LEVELS] >> 32u;
 	auto levels     = params[TextureObject::PARAM_LEVELS] & 0xffffffffu;
 	auto swizzle    = params[TextureObject::PARAM_SWIZZLE];
+	auto force_degamma = params[TextureObject::PARAM_FORCE_DEGAMMA] != 0;
 
 	VkImageUsageFlags vk_usage = get_usage();
 
@@ -586,7 +591,7 @@ static void* create2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint
 	components.b = get_swizzle(GetDstSel(swizzle, 2));
 	components.a = get_swizzle(GetDstSel(swizzle, 3));
 
-	auto pixel_format = get_texture_format(dfmt, nfmt, fmt);
+	auto pixel_format = TextureResolveSampledVkFormat(dfmt, nfmt, fmt, force_degamma);
 
 	EXIT_NOT_IMPLEMENTED(pixel_format == VK_FORMAT_UNDEFINED);
 	EXIT_NOT_IMPLEMENTED(width == 0);
@@ -696,7 +701,7 @@ bool TextureObject::Equal(const uint64_t* other) const
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
 	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && params[PARAM_LEVELS] == other[PARAM_LEVELS] &&
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
-	        params[PARAM_SWIZZLE] == other[PARAM_SWIZZLE]);
+	        params[PARAM_SWIZZLE] == other[PARAM_SWIZZLE] && params[PARAM_FORCE_DEGAMMA] == other[PARAM_FORCE_DEGAMMA]);
 }
 
 GpuObject::create_func_t TextureObject::GetCreateFunc() const
