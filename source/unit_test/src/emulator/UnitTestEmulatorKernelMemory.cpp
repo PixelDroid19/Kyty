@@ -127,6 +127,14 @@ TEST(EmulatorKernelMemory, ReusedDirectMemoryKeepsVirtualAliasesCoherent)
 	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(second_mapping), kSize), OK);
 	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(first_mapping), kSize), OK);
 
+#if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__))
+	// macOS arm64 rejects W+X MAP_SHARED views with EPERM and MAP_JIT cannot
+	// be combined with a shared backing. The RW alias contract above remains
+	// testable; the executable remap is an explicit host policy limitation.
+	ASSERT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
+	GTEST_SKIP() << "macOS arm64 does not permit shared ExecuteReadWrite mappings";
+#endif
+
 	void* remapped_at_first_address = first_mapping;
 	ASSERT_EQ(KernelMapDirectMemory(&remapped_at_first_address, kSize, 0x07, 0x10, second_physical_address, kSize), OK);
 	ASSERT_EQ(remapped_at_first_address, first_mapping);
@@ -135,9 +143,9 @@ TEST(EmulatorKernelMemory, ReusedDirectMemoryKeepsVirtualAliasesCoherent)
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
 }
 
-// Red→green for Gen5 boot mprotect prot=0xC2 (was EXIT "unknown prot: 194").
-// Pure decoder is the shipped decision path used by KernelMprotect.
-TEST(EmulatorKernelMemory, DecodesGen5MprotectProtC2AsReadWriteGpu)
+// Covers the explicit Gen5 protection family observed in one allocation path.
+// The pure decoder is the shipped decision path used by KernelMprotect.
+TEST(EmulatorKernelMemory, DecodesGen5MprotectProtectionFamily)
 {
 	Core::VirtualMemory::Mode     mode {};
 	Graphics::GpuMemoryMode       gpu {};
@@ -153,6 +161,14 @@ TEST(EmulatorKernelMemory, DecodesGen5MprotectProtC2AsReadWriteGpu)
 	ASSERT_TRUE(KernelDecodeMprotectProt(0xC2, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
 	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::ReadWrite);
+
+	ASSERT_TRUE(KernelDecodeMprotectProt(0x42, &mode, &gpu));
+	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
+	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::Read);
+
+	ASSERT_TRUE(KernelDecodeMprotectProt(0x82, &mode, &gpu));
+	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
+	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::Write);
 
 	EXPECT_FALSE(KernelDecodeMprotectProt(0x99, &mode, &gpu));
 }
