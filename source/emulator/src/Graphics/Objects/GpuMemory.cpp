@@ -11,6 +11,8 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/Objects/DepthMeta.h"
+#include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
@@ -1245,6 +1247,23 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
+			if (multi_depth_stencil_reclaim)
+			{
+				const uint64_t htile_addr = info.params[DepthStencilBufferObject::PARAM_HTILE_ADDR];
+				const uint64_t htile_size = info.params[DepthStencilBufferObject::PARAM_HTILE_SIZE];
+				for (const auto& obj: others)
+				{
+					auto& parent = heap.objects[obj.object_id];
+					if (parent.info.object.type == GpuMemoryObjectType::StorageBuffer && parent.block.vaddr_num == 1 &&
+					    parent.block.vaddr[0] == htile_addr && parent.block.size[0] == htile_size)
+					{
+						auto* storage = static_cast<StorageVulkanBuffer*>(parent.info.object.obj);
+						EXIT_IF(storage == nullptr || storage->guest_addr != htile_addr || storage->guest_size != htile_size);
+						storage->depth_meta_addr = htile_addr;
+					}
+				}
+			}
+
 			if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias || multi_vertex_in_surface ||
 			    multi_render_target_alias)
 			{
@@ -1451,6 +1470,27 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	} else
 	{
 		o.object.obj = info.GetCreateFunc()(ctx, o.params, vaddr, size, vaddr_num, &o.mem);
+	}
+
+	if (info.type == GpuMemoryObjectType::StorageBuffer && vaddr_num == 1)
+	{
+		auto* storage = static_cast<StorageVulkanBuffer*>(o.object.obj);
+		EXIT_IF(storage == nullptr);
+		for (const auto& obj: others)
+		{
+			const auto& parent = heap.objects[obj.object_id];
+			if (parent.info.object.type != GpuMemoryObjectType::DepthStencilBuffer)
+			{
+				continue;
+			}
+			const uint64_t htile_addr = parent.info.params[DepthStencilBufferObject::PARAM_HTILE_ADDR];
+			const uint64_t htile_size = parent.info.params[DepthStencilBufferObject::PARAM_HTILE_SIZE];
+			if (DepthMetaMatchesStorageRange(vaddr[0], size[0], htile_addr, htile_size))
+			{
+				storage->depth_meta_addr = htile_addr;
+				break;
+			}
+		}
 	}
 
 	o.write_back_func = info.GetWriteBackFunc();

@@ -14,6 +14,7 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
+#include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
@@ -399,6 +400,7 @@ struct RenderDepthInfo
 	uint64_t                    htile_buffer_vaddr       = 0;
 	uint64_t                    htile_tile_swizzle       = 0;
 	bool                        depth_clear_enable       = false;
+	bool                        suppress_depth_write     = false;
 	float                       depth_clear_value        = 0.0f;
 	bool                        depth_test_enable        = false;
 	bool                        depth_write_enable       = false;
@@ -2622,10 +2624,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.static_params->topology                 = topology;
 	p.static_params->with_depth               = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	p.static_params->depth_test_enable        = depth->depth_test_enable;
-	// HTILE meta clear needs Vulkan load-clear but must not suppress depth writes.
-	// Register DEPTH_CLEAR_ENABLE still suppresses shader Z writes for that draw.
-	const auto depth_clear_actions            = State::ResolveDepthClearActions(depth->depth_clear_enable, false);
-	p.static_params->depth_write_enable       = (depth->depth_write_enable && !depth_clear_actions.suppress_depth_write);
+	p.static_params->depth_write_enable       = (depth->depth_write_enable && !depth->suppress_depth_write);
 	p.static_params->depth_compare_op         = depth->depth_compare_op;
 	p.static_params->depth_bounds_test_enable = depth->depth_bounds_test_enable;
 	p.static_params->depth_min_bounds         = depth->depth_min_bounds;
@@ -3921,6 +3920,7 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 	r->width                = (ps5 ? z.size.x_max + 1 : z.width);
 	r->height               = (ps5 ? z.size.y_max + 1 : z.height);
 	r->depth_clear_enable   = rc.depth_clear_enable;
+	r->suppress_depth_write = rc.depth_clear_enable;
 	r->depth_clear_value    = hw.GetDepthClearValue();
 	r->depth_test_enable    = dc.z_enable;
 	r->depth_write_enable   = usage.depth_write_enable;
@@ -3965,7 +3965,8 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 	{
 		bool sampled = ((z.stencil_info.format == 0 && z.z_info.tile_mode_index != 0) || z.stencil_info.texture_compatible_stencil);
 
-		DepthStencilBufferObject vulkan_buffer_info(r->format, r->width, r->height, htile, neo, sampled);
+		DepthStencilBufferObject vulkan_buffer_info(r->format, r->width, r->height, htile, neo, sampled, r->htile_buffer_vaddr,
+		                                            r->htile_buffer_size);
 
 		EXIT_NOT_IMPLEMENTED(z.z_info.tile_mode_index != 0 && r->depth_tile_swizzle != 0);
 		EXIT_NOT_IMPLEMENTED(r->stencil_tile_swizzle != 0);
@@ -4000,6 +4001,12 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
 
 		EXIT_NOT_IMPLEMENTED(r->vulkan_buffer == nullptr);
+		if (htile && DepthMetaConsumeClear(r->htile_buffer_vaddr))
+		{
+			const auto clear_actions = State::ResolveDepthClearActions(rc.depth_clear_enable, true);
+			r->depth_clear_enable    = clear_actions.vulkan_clear;
+			r->suppress_depth_write  = clear_actions.suppress_depth_write;
+		}
 
 		if ((cc.mode == 0 && cc.op == 0xCC) || (dc.z_enable || dc.z_write_enable))
 		{

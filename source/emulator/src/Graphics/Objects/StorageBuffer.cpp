@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
 
@@ -27,6 +28,11 @@ static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* o
 	// vkMapMemory(ctx->device, vk_obj->memory.memory, vk_obj->memory.offset, *size, 0, &data);
 	VulkanMapMemory(ctx, &vk_obj->memory, &data);
 	memcpy(data, reinterpret_cast<void*>(*vaddr), *size);
+	// HTILE clears often arrive through GpuMemory Update before the world draw.
+	if (vk_obj->depth_meta_addr != 0 && DepthMetaIsClearPattern(data, *size))
+	{
+		DepthMetaMarkClear(vk_obj->depth_meta_addr);
+	}
 	// vkUnmapMemory(ctx->device, vk_obj->memory.memory);
 	VulkanUnmapMemory(ctx, &vk_obj->memory);
 }
@@ -42,6 +48,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	EXIT_IF(ctx == nullptr);
 
 	auto* vk_obj = new StorageVulkanBuffer;
+	vk_obj->guest_addr = *vaddr;
+	vk_obj->guest_size = *size;
 
 	vk_obj->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	vk_obj->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
@@ -71,6 +79,16 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
 	// All submitted commands that refer to any element of pDescriptorSets must have completed execution
 	GraphicsRunCommandProcessorWait(vk_obj->cp);
 
+	if (vk_obj->depth_meta_addr != 0)
+	{
+		void* data = nullptr;
+		VulkanMapMemory(ctx, &vk_obj->memory, &data);
+		if (DepthMetaIsClearPattern(data, vk_obj->guest_size))
+		{
+			DepthMetaMarkClear(vk_obj->depth_meta_addr);
+		}
+		VulkanUnmapMemory(ctx, &vk_obj->memory);
+	}
 	VulkanDeleteBuffer(ctx, vk_obj);
 
 	delete vk_obj;
@@ -96,6 +114,10 @@ static void write_back(GraphicContext* ctx, const uint64_t* /*params*/, void* ob
 
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::memcpy");
 	memcpy(reinterpret_cast<void*>(*vaddr), data, *size);
+	if (vk_obj->depth_meta_addr != 0 && DepthMetaIsClearPattern(data, *size))
+	{
+		DepthMetaMarkClear(vk_obj->depth_meta_addr);
+	}
 	KYTY_PROFILER_END_BLOCK;
 
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::vkUnmapMemory");
