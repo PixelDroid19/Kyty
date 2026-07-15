@@ -4,6 +4,7 @@
 
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
 
@@ -66,7 +67,9 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	image_info.format        = vk_obj->format;
 	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
 	image_info.initialLayout = vk_obj->layout;
-	image_info.usage         = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) |
+	image_info.usage = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) |
+	                   static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_TRANSFER_DST_BIT) |
+	                   static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_TRANSFER_SRC_BIT) |
 	                   (sampled ? static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_SAMPLED_BIT) : static_cast<VkImageUsageFlags>(0));
 	image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	image_info.samples     = VK_SAMPLE_COUNT_1_BIT;
@@ -102,7 +105,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	create_info.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
 	create_info.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
 	create_info.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
+	create_info.subresourceRange.aspectMask     = DepthFormatAspectMask(vk_obj->format);
 	create_info.subresourceRange.baseArrayLayer = 0;
 	create_info.subresourceRange.baseMipLevel   = 0;
 	create_info.subresourceRange.layerCount     = 1;
@@ -132,7 +135,20 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
 	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE] == nullptr);
 
-	UtilSetDepthLayoutOptimal(vk_obj);
+	// First bind of an HTILE depth target: pending Vulkan clear. Leave layout
+	// UNDEFINED so FindRenderDepthInfo → loadOp CLEAR can discard+clear. Non-HTILE
+	// still transitions to ATTACHMENT once.
+	if (htile)
+	{
+		const uint64_t htile_addr = params[DepthStencilBufferObject::PARAM_HTILE_ADDR];
+		if (htile_addr != 0)
+		{
+			DepthMetaMarkClear(htile_addr);
+		}
+	} else
+	{
+		UtilSetDepthLayoutOptimal(vk_obj);
+	}
 
 	return vk_obj;
 }
@@ -162,7 +178,8 @@ bool DepthStencilBufferObject::Equal(const uint64_t* other) const
 {
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_WIDTH] == other[PARAM_WIDTH] &&
 	        params[PARAM_HEIGHT] == other[PARAM_HEIGHT] && params[PARAM_HTILE] == other[PARAM_HTILE] &&
-	        params[PARAM_NEO] == other[PARAM_NEO] && params[PARAM_USAGE] == other[PARAM_USAGE]);
+	        params[PARAM_NEO] == other[PARAM_NEO] && params[PARAM_USAGE] == other[PARAM_USAGE] &&
+	        params[PARAM_HTILE_ADDR] == other[PARAM_HTILE_ADDR] && params[PARAM_HTILE_SIZE] == other[PARAM_HTILE_SIZE]);
 }
 
 GpuObject::create_func_t DepthStencilBufferObject::GetCreateFunc() const

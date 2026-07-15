@@ -180,7 +180,10 @@ struct VulkanBuffer
 
 struct StorageVulkanBuffer: public VulkanBuffer
 {
-	CommandProcessor* cp = nullptr;
+	CommandProcessor* cp              = nullptr;
+	uint64_t          guest_addr      = 0;
+	uint64_t          guest_size      = 0;
+	uint64_t          depth_meta_addr = 0;
 };
 
 } // namespace Kyty::Libs::Graphics

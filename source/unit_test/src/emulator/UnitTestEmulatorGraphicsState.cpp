@@ -1,6 +1,7 @@
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
+#include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -633,6 +634,44 @@ TEST(EmulatorGraphicsState, DepthStencilReclaimParentsAreSurfaces)
 		EXPECT_NE(t, GpuMemoryObjectType::DepthStencilBuffer);
 	}
 	EXPECT_EQ(GpuMemoryOverlapType::Crosses, GpuMemoryOverlapType::Crosses);
+}
+
+TEST(EmulatorGraphicsState, RecognizesObservedHtileClearPattern)
+{
+	uint32_t clear_words[8];
+	for (auto& word: clear_words)
+	{
+		word = 0xfffffff0u;
+	}
+	EXPECT_TRUE(DepthMetaIsClearPattern(clear_words, sizeof(clear_words)));
+
+	clear_words[3] = 0xffffffffu;
+	EXPECT_FALSE(DepthMetaIsClearPattern(clear_words, sizeof(clear_words)));
+	EXPECT_FALSE(DepthMetaIsClearPattern(nullptr, sizeof(clear_words)));
+	EXPECT_FALSE(DepthMetaIsClearPattern(clear_words, sizeof(clear_words) - 1));
+}
+
+TEST(EmulatorGraphicsState, ConsumesTrackedHtileClearOnce)
+{
+	constexpr uint64_t address = 0x12345000u;
+	DepthMetaMarkClear(address);
+	EXPECT_TRUE(DepthMetaConsumeClear(address));
+	EXPECT_FALSE(DepthMetaConsumeClear(address));
+}
+
+TEST(EmulatorGraphicsState, HtilePendingClearDoesNotSuppressDepthWrite)
+{
+	auto actions = State::ResolveDepthClearActions(false, true);
+	EXPECT_TRUE(actions.vulkan_clear);
+	EXPECT_FALSE(actions.suppress_depth_write);
+}
+
+TEST(EmulatorGraphicsState, MatchesOnlyExactHtileStorageRange)
+{
+	EXPECT_TRUE(DepthMetaMatchesStorageRange(0x120000, 0x8000, 0x120000, 0x8000));
+	EXPECT_FALSE(DepthMetaMatchesStorageRange(0x120000, 0x4000, 0x120000, 0x8000));
+	EXPECT_FALSE(DepthMetaMatchesStorageRange(0x124000, 0x4000, 0x120000, 0x8000));
+	EXPECT_FALSE(DepthMetaMatchesStorageRange(0, 0x8000, 0, 0x8000));
 }
 
 UT_END();
