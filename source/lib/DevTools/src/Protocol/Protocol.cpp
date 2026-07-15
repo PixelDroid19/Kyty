@@ -332,6 +332,25 @@ ProtocolResult AcceptWorkerHandshake(MutableMappingView mapping, const ParentPro
 	return ProtocolResult::Ok;
 }
 
+ProtocolResult CloseWorkerHandshake(MutableMappingView mapping) noexcept
+{
+	if (!MappingOk(mapping.data, mapping.size))
+	{
+		return ProtocolResult::InvalidArgument;
+	}
+	const auto hdr = ValidateHeader(mapping.data);
+	if (hdr != ProtocolResult::Ok)
+	{
+		return hdr;
+	}
+	if (LoadHandshakeState(mapping.data) != HandshakeState::WorkerReady)
+	{
+		return ProtocolResult::Rejected;
+	}
+	AtomicStoreU32(mapping.data, kOffHandshakeState, static_cast<uint32_t>(HandshakeState::WorkerClosing));
+	return ProtocolResult::Ok;
+}
+
 ProtocolResult ReadWorkerBootstrap(ConstMappingView mapping, const uint8_t* nonce, RecordingMode* requested_mode) noexcept
 {
 	if (!MappingOk(mapping.data, mapping.size) || nonce == nullptr || requested_mode == nullptr)
