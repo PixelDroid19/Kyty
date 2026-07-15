@@ -6,9 +6,13 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 
+#include <vulkan/vulkan_core.h>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+VkFormat TextureResolveSampledVkFormat(uint8_t dfmt, uint8_t nfmt, uint16_t fmt, bool force_degamma = false);
 
 class TextureObject: public GpuObject
 {
@@ -20,9 +24,10 @@ public:
 	static constexpr int PARAM_TILE         = 4;
 	static constexpr int PARAM_NEO          = 5;
 	static constexpr int PARAM_SWIZZLE      = 6;
+	static constexpr int PARAM_FORCE_DEGAMMA = 7;
 
 	TextureObject(uint8_t dfmt, uint8_t nfmt, uint16_t fmt, uint32_t width, uint32_t height, uint32_t pitch, uint32_t base_level,
-	              uint32_t levels, uint32_t tile, bool neo, uint32_t swizzle)
+	              uint32_t levels, uint32_t tile, bool neo, uint32_t swizzle, bool force_degamma)
 	{
 		params[PARAM_FORMAT]       = (static_cast<uint64_t>(fmt) << 16u) | (static_cast<uint64_t>(dfmt) << 8u) | nfmt;
 		params[PARAM_PITCH]        = pitch;
@@ -30,7 +35,8 @@ public:
 		params[PARAM_LEVELS]       = (static_cast<uint64_t>(base_level) << 32u) | levels;
 		params[PARAM_TILE]         = tile;
 		params[PARAM_NEO]          = neo ? 1 : 0;
-		params[PARAM_SWIZZLE]      = swizzle;
+		params[PARAM_SWIZZLE]       = swizzle;
+		params[PARAM_FORCE_DEGAMMA] = force_degamma ? 1 : 0;
 		check_hash                 = true;
 		type                       = Graphics::GpuMemoryObjectType::Texture;
 	}

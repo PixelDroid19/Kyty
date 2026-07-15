@@ -4382,8 +4382,20 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures, VulkanImage** images_sampled,
-                            VulkanImage** images_storage, int* images_sampled_view, uint32_t** sgprs)
+static bool ShouldForceGen5Degamma(const ShaderSamplerResources& samplers, int sampled_index)
+{
+	if (sampled_index < 0 || sampled_index >= samplers.samplers_num)
+	{
+		return false;
+	}
+
+	const auto& sampler = samplers.samplers[sampled_index];
+	return sampler.ForceDegamma() && !sampler.SkipDegamma();
+}
+
+static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
+                            const ShaderSamplerResources& samplers, VulkanImage** images_sampled, VulkanImage** images_storage,
+                            int* images_sampled_view, uint32_t** sgprs)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -4471,6 +4483,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		auto          nfmt       = (gen5 ? 0 : r.Nfmt());
 		auto          fmt        = (gen5 ? r.Format() : 0);
 		uint32_t      swizzle    = r.DstSelXYZW();
+		const bool    force_degamma =
+		    gen5 && !textures.desc[i].textures2d_without_sampler && ShouldForceGen5Degamma(samplers, index_sampled);
 
 		bool check_depth_texture = (!gen5 && tile == 2);
 
@@ -4553,7 +4567,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					    submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_buffer_info));
 				} else
 				{
-					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle);
+					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
+					                                  force_degamma);
 					tex = static_cast<TextureVulkanImage*>(
 					    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 				}
@@ -4737,7 +4752,7 @@ static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelin
 		}
 		if (bind.textures2D.textures_num > 0)
 		{
-			PrepareTextures(submit_id, buffer, bind.textures2D, textures2d_sampled, textures2d_storage, textures2d_sampled_view,
+			PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage, textures2d_sampled_view,
 			                &sgprs_ptr);
 			need_descriptor = true;
 		}

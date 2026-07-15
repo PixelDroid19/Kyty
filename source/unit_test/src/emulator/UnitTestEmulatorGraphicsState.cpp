@@ -3,6 +3,7 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
@@ -33,6 +34,14 @@ TEST(EmulatorGraphicsState, DecodesGenericScissorHalves)
 	EXPECT_EQ(viewport.generic_scissor_right, 16);
 	EXPECT_EQ(viewport.generic_scissor_bottom, 20);
 	EXPECT_FALSE(viewport.generic_scissor_window_offset_enable);
+}
+
+TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
+{
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 56), VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 56, true), VK_FORMAT_R8G8B8A8_SRGB);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 14), VK_FORMAT_R8G8_UNORM);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 71), VK_FORMAT_R16G16B16A16_SFLOAT);
 }
 
 TEST(EmulatorGraphicsState, DecodesModeControl)
