@@ -88,23 +88,24 @@ struct PipelineStaticParameters
 	bool                       stencil_test_enable      = false;
 	PipelineStencilStaticState stencil_front;
 	PipelineStencilStaticState stencil_back;
-	uint32_t                   color_mask           = 0;
-	bool                       cull_front           = false;
-	bool                       cull_back            = false;
-	bool                       face                 = false;
-	uint8_t                    color_srcblend       = 0;
-	uint8_t                    color_comb_fcn       = 0;
-	uint8_t                    color_destblend      = 0;
-	uint8_t                    alpha_srcblend       = 0;
-	uint8_t                    alpha_comb_fcn       = 0;
-	uint8_t                    alpha_destblend      = 0;
-	bool                       separate_alpha_blend = false;
-	bool                       blend_enable         = false;
-	float                      blend_color_red      = 0.0f;
-	float                      blend_color_green    = 0.0f;
-	float                      blend_color_blue     = 0.0f;
-	float                      blend_color_alpha    = 0.0f;
-	bool                       dx_clip_space        = false;
+	uint32_t                   color_targets_num              = 1;
+	uint32_t                   color_mask[8]                  = {};
+	bool                       cull_front                     = false;
+	bool                       cull_back                      = false;
+	bool                       face                           = false;
+	uint8_t                    color_srcblend[8]              = {};
+	uint8_t                    color_comb_fcn[8]              = {};
+	uint8_t                    color_destblend[8]             = {};
+	uint8_t                    alpha_srcblend[8]              = {};
+	uint8_t                    alpha_comb_fcn[8]              = {};
+	uint8_t                    alpha_destblend[8]             = {};
+	bool                       separate_alpha_blend[8]        = {};
+	bool                       blend_enable[8]                = {};
+	float                      blend_color_red                = 0.0f;
+	float                      blend_color_green              = 0.0f;
+	float                      blend_color_blue               = 0.0f;
+	float                      blend_color_alpha              = 0.0f;
+	bool                       dx_clip_space                  = false;
 
 	bool operator==(const PipelineStaticParameters& other) const;
 };
@@ -312,7 +313,8 @@ private:
 	struct Framebuffer
 	{
 		VulkanFramebuffer* framebuffer          = nullptr;
-		uint64_t           image_id             = 0;
+		uint32_t           targets_num          = 0;
+		uint64_t           image_id[8]          = {};
 		uint64_t           depth_id             = 0;
 		bool               depth_clear_enable   = false;
 		bool               stencil_clear_enable = false;
@@ -1467,7 +1469,12 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 
 	for (auto& f: m_framebuffers)
 	{
-		if (f.framebuffer != nullptr && f.image_id == (with_color ? color->vulkan_buffer[0]->memory.unique_id : 0) &&
+		bool same_colors = (f.targets_num == color->targets_num);
+		for (uint32_t slot = 0; same_colors && slot < color->targets_num; slot++)
+		{
+			same_colors = (f.image_id[slot] == color->vulkan_buffer[slot]->memory.unique_id);
+		}
+		if (f.framebuffer != nullptr && same_colors &&
 		    f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) && f.depth_clear_enable == depth->depth_clear_enable &&
 		    f.stencil_clear_enable == depth->stencil_clear_enable)
 		{
@@ -1491,35 +1498,41 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	VulkanImage* vulkan_buffer =
 	    (with_color ? color->vulkan_buffer[0]
 	                : CreateDummyBuffer(VK_FORMAT_B8G8R8A8_SRGB, depth->vulkan_buffer->extent.width, depth->vulkan_buffer->extent.height));
+	const uint32_t color_count = (with_color ? color->targets_num : 1);
 
-	VkAttachmentDescription attachments[2];
-	attachments[0].flags          = 0;
-	attachments[0].format         = vulkan_buffer->format;
-	attachments[0].samples        = VK_SAMPLE_COUNT_1_BIT;
-	attachments[0].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
-	attachments[0].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-	attachments[0].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	attachments[0].initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	attachments[0].finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	VkAttachmentDescription attachments[RenderColorInfo::TARGETS_MAX + 1]     = {};
+	VkAttachmentReference   color_attachment_refs[RenderColorInfo::TARGETS_MAX] = {};
+	VkImageView             views[RenderColorInfo::TARGETS_MAX + 1]             = {};
+	for (uint32_t slot = 0; slot < color_count; slot++)
+	{
+		auto* image = (with_color ? color->vulkan_buffer[slot] : vulkan_buffer);
+		EXIT_NOT_IMPLEMENTED(image->extent.width != vulkan_buffer->extent.width || image->extent.height != vulkan_buffer->extent.height);
+		attachments[slot].flags          = 0;
+		attachments[slot].format         = image->format;
+		attachments[slot].samples        = VK_SAMPLE_COUNT_1_BIT;
+		attachments[slot].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+		attachments[slot].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+		attachments[slot].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachments[slot].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachments[slot].initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		attachments[slot].finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		color_attachment_refs[slot]      = {slot, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+		views[slot]                      = image->image_view[VulkanImage::VIEW_DEFAULT];
+	}
 
 	const auto depth_load_ops = ResolveDepthAttachmentLoadOps(depth->format, depth->depth_clear_enable, depth->stencil_clear_enable);
-	attachments[1].flags          = 0;
-	attachments[1].format         = depth->format;
-	attachments[1].samples        = VK_SAMPLE_COUNT_1_BIT;
-	attachments[1].loadOp         = depth_load_ops.depth_load;
-	attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-	attachments[1].stencilLoadOp  = depth_load_ops.stencil_load;
-	attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-	attachments[1].initialLayout  = depth_load_ops.initial_layout;
-	attachments[1].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-	VkAttachmentReference color_attachment_ref {};
-	color_attachment_ref.attachment = (with_color ? 0 : VK_ATTACHMENT_UNUSED);
-	color_attachment_ref.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	attachments[color_count].flags          = 0;
+	attachments[color_count].format         = depth->format;
+	attachments[color_count].samples        = VK_SAMPLE_COUNT_1_BIT;
+	attachments[color_count].loadOp         = depth_load_ops.depth_load;
+	attachments[color_count].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[color_count].stencilLoadOp  = depth_load_ops.stencil_load;
+	attachments[color_count].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[color_count].initialLayout  = depth_load_ops.initial_layout;
+	attachments[color_count].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 	VkAttachmentReference depth_attachment_ref {};
-	depth_attachment_ref.attachment = 1;
+	depth_attachment_ref.attachment = color_count;
 	depth_attachment_ref.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 	VkSubpassDescription subpass {};
@@ -1527,8 +1540,8 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
 	subpass.inputAttachmentCount    = 0;
 	subpass.pInputAttachments       = nullptr;
-	subpass.colorAttachmentCount    = 1;
-	subpass.pColorAttachments       = &color_attachment_ref;
+	subpass.colorAttachmentCount    = color_count;
+	subpass.pColorAttachments       = color_attachment_refs;
 	subpass.pResolveAttachments     = nullptr;
 	subpass.pDepthStencilAttachment = (with_depth ? &depth_attachment_ref : nullptr);
 	subpass.preserveAttachmentCount = 0;
@@ -1538,7 +1551,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	render_pass_info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 	render_pass_info.pNext           = nullptr;
 	render_pass_info.flags           = 0;
-	render_pass_info.attachmentCount = (with_depth ? 2 : 1);
+	render_pass_info.attachmentCount = color_count + (with_depth ? 1u : 0u);
 	render_pass_info.pAttachments    = attachments;
 	render_pass_info.subpassCount    = 1;
 	render_pass_info.pSubpasses      = &subpass;
@@ -1551,15 +1564,17 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 
 	EXIT_NOT_IMPLEMENTED(framebuffer->render_pass == nullptr);
 
-	VkImageView views[] = {vulkan_buffer->image_view[VulkanImage::VIEW_DEFAULT],
-	                       (with_depth ? depth->vulkan_buffer->image_view[VulkanImage::VIEW_DEFAULT] : nullptr)};
+	if (with_depth)
+	{
+		views[color_count] = depth->vulkan_buffer->image_view[VulkanImage::VIEW_DEFAULT];
+	}
 
 	VkFramebufferCreateInfo framebuffer_info {};
 	framebuffer_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 	framebuffer_info.pNext           = nullptr;
 	framebuffer_info.flags           = 0;
 	framebuffer_info.renderPass      = framebuffer->render_pass;
-	framebuffer_info.attachmentCount = with_depth ? 2 : 1;
+	framebuffer_info.attachmentCount = color_count + (with_depth ? 1u : 0u);
 	framebuffer_info.pAttachments    = views;
 	framebuffer_info.width           = vulkan_buffer->extent.width;
 	framebuffer_info.height          = vulkan_buffer->extent.height;
@@ -1570,8 +1585,12 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	EXIT_NOT_IMPLEMENTED(framebuffer->framebuffer == nullptr);
 
 	Framebuffer fnew;
-	fnew.framebuffer          = framebuffer;
-	fnew.image_id             = (with_color ? color->vulkan_buffer[0]->memory.unique_id : 0);
+	fnew.framebuffer = framebuffer;
+	fnew.targets_num = color->targets_num;
+	for (uint32_t slot = 0; slot < color->targets_num; slot++)
+	{
+		fnew.image_id[slot] = color->vulkan_buffer[slot]->memory.unique_id;
+	}
 	fnew.depth_id             = (with_depth ? depth->vulkan_buffer->memory.unique_id : 0);
 	fnew.depth_clear_enable   = depth->depth_clear_enable;
 	fnew.stencil_clear_enable = depth->stencil_clear_enable;
@@ -1605,24 +1624,35 @@ void FramebufferCache::FreeFramebufferByColor(VulkanImage* image)
 
 	for (auto& f: m_framebuffers)
 	{
-		if (f.framebuffer != nullptr && f.image_id == image->memory.unique_id)
+		if (f.framebuffer == nullptr)
 		{
-			g_render_ctx->GetPipelineCache()->DeletePipelines(f.framebuffer);
-
-			auto* gctx = g_render_ctx->GetGraphicCtx();
-
-			EXIT_IF(gctx == nullptr);
-
-			vkDestroyFramebuffer(gctx->device, f.framebuffer->framebuffer, nullptr);
-
-			vkDestroyRenderPass(gctx->device, f.framebuffer->render_pass, nullptr);
-
-			delete f.framebuffer;
-
-			f.framebuffer = nullptr;
-
-			break;
+			continue;
 		}
+		bool contains_image = false;
+		for (uint32_t slot = 0; slot < f.targets_num; slot++)
+		{
+			contains_image = contains_image || f.image_id[slot] == image->memory.unique_id;
+		}
+		if (!contains_image)
+		{
+			continue;
+		}
+
+		g_render_ctx->GetPipelineCache()->DeletePipelines(f.framebuffer);
+
+		auto* gctx = g_render_ctx->GetGraphicCtx();
+
+		EXIT_IF(gctx == nullptr);
+
+		vkDestroyFramebuffer(gctx->device, f.framebuffer->framebuffer, nullptr);
+
+		vkDestroyRenderPass(gctx->device, f.framebuffer->render_pass, nullptr);
+
+		delete f.framebuffer;
+
+		f.framebuffer = nullptr;
+
+		break;
 	}
 }
 
@@ -2199,55 +2229,62 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	multisampling.alphaToCoverageEnable = VK_FALSE;
 	multisampling.alphaToOneEnable      = VK_FALSE;
 
-	// CB_TARGET_MASK: 4 bits per MRT (RGBA). Use RT0 nibble for the single
-	// color attachment currently bound by the pipeline.
-	const uint32_t        rt0_nibble       = static_params->color_mask & 0xFu;
-	VkColorComponentFlags color_write_mask = 0;
-	if ((rt0_nibble & 0x1u) != 0)
+	// CB_TARGET_MASK: 4 bits per MRT (RGBA). One blend attachment per active target.
+	EXIT_NOT_IMPLEMENTED(static_params->color_targets_num == 0 || static_params->color_targets_num > 8);
+	VkPipelineColorBlendAttachmentState color_blend_attachments[8] {};
+	VkBool32                            color_write_enables[8] {};
+	for (uint32_t rt = 0; rt < static_params->color_targets_num; rt++)
 	{
-		color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_R_BIT);
-	}
-	if ((rt0_nibble & 0x2u) != 0)
-	{
-		color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_G_BIT);
-	}
-	if ((rt0_nibble & 0x4u) != 0)
-	{
-		color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_B_BIT);
-	}
-	if ((rt0_nibble & 0x8u) != 0)
-	{
-		color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_A_BIT);
-	}
+		const uint32_t        nibble           = static_params->color_mask[rt] & 0xFu;
+		VkColorComponentFlags color_write_mask = 0;
+		if ((nibble & 0x1u) != 0)
+		{
+			color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_R_BIT);
+		}
+		if ((nibble & 0x2u) != 0)
+		{
+			color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_G_BIT);
+		}
+		if ((nibble & 0x4u) != 0)
+		{
+			color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_B_BIT);
+		}
+		if ((nibble & 0x8u) != 0)
+		{
+			color_write_mask |= static_cast<VkColorComponentFlags>(VK_COLOR_COMPONENT_A_BIT);
+		}
 
-	VkPipelineColorBlendAttachmentState color_blend_attachment {};
-	color_blend_attachment.colorWriteMask      = color_write_mask;
-	color_blend_attachment.blendEnable         = static_params->blend_enable ? VK_TRUE : VK_FALSE;
-	color_blend_attachment.srcColorBlendFactor = get_blend_factor(static_params->color_srcblend);
-	color_blend_attachment.dstColorBlendFactor = get_blend_factor(static_params->color_destblend);
-	color_blend_attachment.colorBlendOp        = get_blend_op(static_params->color_comb_fcn);
-	color_blend_attachment.srcAlphaBlendFactor = (static_params->separate_alpha_blend ? get_blend_factor(static_params->alpha_srcblend)
-	                                                                                  : color_blend_attachment.srcColorBlendFactor);
-	color_blend_attachment.dstAlphaBlendFactor = (static_params->separate_alpha_blend ? get_blend_factor(static_params->alpha_destblend)
-	                                                                                  : color_blend_attachment.dstColorBlendFactor);
-	color_blend_attachment.alphaBlendOp =
-	    (static_params->separate_alpha_blend ? get_blend_op(static_params->alpha_comb_fcn) : color_blend_attachment.colorBlendOp);
+		auto& att = color_blend_attachments[rt];
+		att.colorWriteMask      = color_write_mask;
+		att.blendEnable         = static_params->blend_enable[rt] ? VK_TRUE : VK_FALSE;
+		att.srcColorBlendFactor = get_blend_factor(static_params->color_srcblend[rt]);
+		att.dstColorBlendFactor = get_blend_factor(static_params->color_destblend[rt]);
+		att.colorBlendOp        = get_blend_op(static_params->color_comb_fcn[rt]);
+		att.srcAlphaBlendFactor =
+		    (static_params->separate_alpha_blend[rt] ? get_blend_factor(static_params->alpha_srcblend[rt]) : att.srcColorBlendFactor);
+		att.dstAlphaBlendFactor =
+		    (static_params->separate_alpha_blend[rt] ? get_blend_factor(static_params->alpha_destblend[rt]) : att.dstColorBlendFactor);
+		att.alphaBlendOp =
+		    (static_params->separate_alpha_blend[rt] ? get_blend_op(static_params->alpha_comb_fcn[rt]) : att.colorBlendOp);
+		color_write_enables[rt] = (pipeline->dynamic_params->color_write_enable ? VK_TRUE : VK_FALSE);
+	}
 
 	bool cwe_supported = g_render_ctx->GetGraphicCtx()->color_write_enable_supported;
-
-	VkBool32 color_write_enable = (pipeline->dynamic_params->color_write_enable ? VK_TRUE : VK_FALSE);
 
 	VkPipelineColorWriteCreateInfoEXT color_write {};
 	color_write.sType              = VK_STRUCTURE_TYPE_PIPELINE_COLOR_WRITE_CREATE_INFO_EXT;
 	color_write.pNext              = nullptr;
-	color_write.attachmentCount    = 1;
-	color_write.pColorWriteEnables = &color_write_enable;
+	color_write.attachmentCount    = static_params->color_targets_num;
+	color_write.pColorWriteEnables = color_write_enables;
 
 	// Without VK_EXT_color_write_enable (MoltenVK) fold the enable bit into the
 	// attachment's write mask instead of chaining the extension struct.
-	if (!cwe_supported && color_write_enable == VK_FALSE)
+	if (!cwe_supported && !pipeline->dynamic_params->color_write_enable)
 	{
-		color_blend_attachment.colorWriteMask = 0;
+		for (uint32_t rt = 0; rt < static_params->color_targets_num; rt++)
+		{
+			color_blend_attachments[rt].colorWriteMask = 0;
+		}
 	}
 
 	VkPipelineColorBlendStateCreateInfo color_blending {};
@@ -2256,8 +2293,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	color_blending.flags             = 0;
 	color_blending.logicOpEnable     = VK_FALSE;
 	color_blending.logicOp           = VK_LOGIC_OP_COPY;
-	color_blending.attachmentCount   = 1;
-	color_blending.pAttachments      = &color_blend_attachment;
+	color_blending.attachmentCount   = static_params->color_targets_num;
+	color_blending.pAttachments      = color_blend_attachments;
 	color_blending.blendConstants[0] = static_params->blend_color_red;
 	color_blending.blendConstants[1] = static_params->blend_color_green;
 	color_blending.blendConstants[2] = static_params->blend_color_blue;
@@ -2581,10 +2618,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	const HW::BlendColor&      bclr       = ctx->GetBlendColor();
 	const HW::ScreenViewport&  vp         = ctx->GetScreenViewport();
 	const HW::ScanModeControl& smc        = ctx->GetScanModeControl();
-	const auto&                bc         = ctx->GetBlendControl(0);
-	uint32_t                   color_mask = ctx->GetRenderTargetMask();
-	const HW::ModeControl&     mc         = ctx->GetModeControl();
-	const auto&                cc         = ctx->GetColorControl();
+	const HW::ModeControl&     mc = ctx->GetModeControl();
+	const auto&                cc = ctx->GetColorControl();
 
 	if (Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
@@ -2634,18 +2669,24 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.static_params->stencil_test_enable      = depth->stencil_test_enable;
 	p.static_params->stencil_front            = depth->stencil_static_front;
 	p.static_params->stencil_back             = depth->stencil_static_back;
-	p.static_params->color_mask               = color_mask;
+	p.static_params->color_targets_num        = color->targets_num;
+	EXIT_NOT_IMPLEMENTED(p.static_params->color_targets_num == 0 || p.static_params->color_targets_num > 8);
+	for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
+	{
+		const auto& blend = ctx->GetBlendControl(rt);
+		p.static_params->color_mask[rt]           = (ctx->GetRenderTargetMask() >> (rt * 4u)) & 0xFu;
+		p.static_params->color_srcblend[rt]       = blend.color_srcblend;
+		p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
+		p.static_params->color_destblend[rt]      = blend.color_destblend;
+		p.static_params->alpha_srcblend[rt]       = blend.alpha_srcblend;
+		p.static_params->alpha_comb_fcn[rt]       = blend.alpha_comb_fcn;
+		p.static_params->alpha_destblend[rt]      = blend.alpha_destblend;
+		p.static_params->separate_alpha_blend[rt] = blend.separate_alpha_blend;
+		p.static_params->blend_enable[rt]         = blend.enable;
+	}
 	p.static_params->cull_back                = mc.cull_back;
 	p.static_params->cull_front               = mc.cull_front;
 	p.static_params->face                     = mc.face;
-	p.static_params->color_srcblend           = bc.color_srcblend;
-	p.static_params->color_comb_fcn           = bc.color_comb_fcn;
-	p.static_params->color_destblend          = bc.color_destblend;
-	p.static_params->alpha_srcblend           = bc.alpha_srcblend;
-	p.static_params->alpha_comb_fcn           = bc.alpha_comb_fcn;
-	p.static_params->alpha_destblend          = bc.alpha_destblend;
-	p.static_params->separate_alpha_blend     = bc.separate_alpha_blend;
-	p.static_params->blend_enable             = bc.enable;
 	p.static_params->blend_color_red          = bclr.red;
 	p.static_params->blend_color_green        = bclr.green;
 	p.static_params->blend_color_blue         = bclr.blue;
@@ -5733,9 +5774,16 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 
 	EXIT_NOT_IMPLEMENTED(!with_depth && !with_color);
 
-	VkClearValue clears[2];
-	clears[0].color        = {{0.0f, 0.0f, 0.0f, 1.0f}};
-	clears[1].depthStencil = {depth->depth_clear_value, depth->stencil_clear_value};
+	const uint32_t color_count = (with_color ? color->targets_num : (with_depth ? 1u : 0u));
+	VkClearValue   clears[RenderColorInfo::TARGETS_MAX + 1] {};
+	for (uint32_t slot = 0; slot < color_count; slot++)
+	{
+		clears[slot].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+	}
+	if (with_depth)
+	{
+		clears[color_count].depthStencil = {depth->depth_clear_value, depth->stencil_clear_value};
+	}
 
 	VkExtent2D extent = (with_color ? color->vulkan_buffer[0]->extent : depth->vulkan_buffer->extent);
 
@@ -5746,21 +5794,26 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	render_pass_info.framebuffer       = framebuffer->framebuffer;
 	render_pass_info.renderArea.offset = {0, 0};
 	render_pass_info.renderArea.extent = extent;
-	render_pass_info.clearValueCount   = with_depth ? 2 : 1;
+	render_pass_info.clearValueCount   = color_count + (with_depth ? 1u : 0u);
 	render_pass_info.pClearValues      = clears;
 
-	if (with_color && color->vulkan_buffer[0]->layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+	for (uint32_t slot = 0; slot < color->targets_num; slot++)
 	{
+		if (!with_color || color->vulkan_buffer[slot] == nullptr ||
+		    color->vulkan_buffer[slot]->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+		{
+			continue;
+		}
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		image_memory_barrier.pNext                           = nullptr;
 		image_memory_barrier.srcAccessMask                   = VK_ACCESS_MEMORY_READ_BIT;
 		image_memory_barrier.dstAccessMask                   = VK_ACCESS_MEMORY_WRITE_BIT;
-		image_memory_barrier.oldLayout                       = color->vulkan_buffer[0]->layout;
+		image_memory_barrier.oldLayout                       = color->vulkan_buffer[slot]->layout;
 		image_memory_barrier.newLayout                       = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-		image_memory_barrier.image                           = color->vulkan_buffer[0]->image;
+		image_memory_barrier.image                           = color->vulkan_buffer[slot]->image;
 		image_memory_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
 		image_memory_barrier.subresourceRange.baseMipLevel   = 0;
 		image_memory_barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
@@ -5771,7 +5824,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		                     VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
 		                     &image_memory_barrier);
 
-		color->vulkan_buffer[0]->layout = image_memory_barrier.newLayout;
+		color->vulkan_buffer[slot]->layout = image_memory_barrier.newLayout;
 	}
 
 	if (with_depth && depth->vulkan_buffer->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
