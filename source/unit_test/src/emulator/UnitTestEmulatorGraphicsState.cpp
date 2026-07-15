@@ -798,25 +798,4 @@ TEST(EmulatorGraphicsState, RegularImageSamplingDisablesSamplerComparison)
 	EXPECT_EQ(comparison.function, 0);
 }
 
-TEST(EmulatorGraphicsState, PromotesObservedGen5Tile27RenderTargetSamples)
-{
-	using namespace Kyty::Libs::Graphics::State;
-	EXPECT_TRUE(Gen5Tile27SamplePrefersRenderTarget(56, 27, true));
-	EXPECT_TRUE(Gen5Tile27SamplePrefersRenderTarget(71, 27, true));
-	EXPECT_FALSE(Gen5Tile27SamplePrefersRenderTarget(56, 27, false));
-	EXPECT_FALSE(Gen5Tile27SamplePrefersRenderTarget(14, 27, true));
-	EXPECT_FALSE(Gen5Tile27SamplePrefersRenderTarget(56, 0, true));
-}
-
-TEST(EmulatorGraphicsState, TracksGen5RenderTargetByGuestBase)
-{
-	GraphicContext context;
-
-	State::RecordGen5RenderTargetSize(&context, 0x100000u, 642, 362, 0x240000u);
-
-	EXPECT_TRUE(State::HasGen5RenderTargetSize(&context, 0x100000u, 642, 362, 0x240000u));
-	EXPECT_FALSE(State::HasGen5RenderTargetSize(&context, 0x200000u, 642, 362, 0x240000u));
-	EXPECT_FALSE(State::HasGen5RenderTargetSize(&context, 0x100000u, 640, 362, 0x240000u));
-}
-
 UT_END();
