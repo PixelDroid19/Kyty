@@ -73,6 +73,17 @@ struct ColorTargetLayout
 
 [[nodiscard]] ColorTargetLayout ResolveColorTargetLayout(uint32_t mask);
 
+// A sampled surface may reuse a render target only when GpuMemory found the
+// exact live object. Matching dimensions do not establish identity or content.
+enum class Gen5SampleBacking
+{
+	ExactRenderTarget,
+	GuestMemoryTexture,
+	Unsupported,
+};
+
+[[nodiscard]] Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exact_render_target_found);
+
 } // namespace Kyty::Libs::Graphics::State
 
 #endif // KYTY_EMU_ENABLED
