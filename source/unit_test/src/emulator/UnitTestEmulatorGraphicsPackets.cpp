@@ -452,6 +452,51 @@ TEST(EmulatorGraphicsPackets, EncodesWriteDataCachePolicy2ControlWord)
 	EXPECT_EQ(cmd[5], 0x22222222u);
 }
 
+// The host CP normalizes guest waits into R_WAIT_MEM_64. A size=0 guest wait
+// must keep its 32-bit predicate when its reference/mask arguments carry
+// upper bits that the guest packet width does not consume.
+TEST(EmulatorGraphicsPackets, Encodes32BitWaitWithInactiveUpperPredicate)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd = Gen5::GraphicsDcbWaitRegMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0, 3, 0, 0,
+	                                             reinterpret_cast<const volatile void*>(0x00000001268815d0ull),
+	                                             0xfeedface00000001ull, 0xffffffffffffffffull, 400);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64));
+	EXPECT_EQ(cmd[1], 0x268815d0u);
+	EXPECT_EQ(cmd[2], 0x00000001u);
+	EXPECT_EQ(cmd[3], 0xffffffffu);
+	EXPECT_EQ(cmd[4], 0u);
+	EXPECT_EQ(cmd[5], 1u);
+	EXPECT_EQ(cmd[6], 0u);
+	EXPECT_EQ(cmd[7], 3u);
+	EXPECT_EQ(cmd[8], 10u);
+}
+
 // Post-Play: WaitMem address stays 0; preceding ReleaseMem is EopPatched.
 // Resolve Wait to the Release address when packets are contiguous.
 TEST(EmulatorGraphicsPackets, ResolvesNullWaitMemAddressFromPrecedingRelease)
