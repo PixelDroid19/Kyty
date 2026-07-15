@@ -50,7 +50,7 @@ void CopyRevision(const char* revision, char* out, uint32_t capacity) noexcept
 	}
 
 	uint32_t written = 0;
-	for (const char* p = revision; *p != '\0' && written + 1u < capacity; ++p)
+	for (const char* p = revision; *p != '\0' && written < capacity; ++p)
 	{
 		const char c = *p;
 		const bool allowed = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
@@ -101,6 +101,8 @@ bool WorkerTelemetry::Start(MutableMappingView mapping, const WorkerTelemetryOpt
 	}
 
 	WorkerHandshake handshake {};
+	handshake.worker_pid          = options.worker_pid;
+	handshake.worker_start_token  = options.worker_start_token;
 	handshake.accepted_mode      = options.requested_mode;
 	handshake.logging_mode       = options.logging_mode;
 	handshake.shader_cache_state = options.shader_cache_state;

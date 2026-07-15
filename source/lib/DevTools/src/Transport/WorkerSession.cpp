@@ -2,6 +2,7 @@
 
 #include "Kyty/DevTools/Protocol/Protocol.h"
 #include "Kyty/DevTools/Transport/Bootstrap.h"
+#include "Kyty/DevTools/Transport/ProcessIdentity.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -199,6 +200,12 @@ WorkerSessionResult WorkerSession::StartFromBootstrap(const char* value, const W
 
 	WorkerTelemetryOptions effective = options;
 	effective.requested_mode       = requested_mode;
+	if (!QueryCurrentProcessIdentity(&effective.worker_pid, &effective.worker_start_token))
+	{
+		UnmapWorkerMapping(state_.get());
+		CloseWorkerHandles(state_.get());
+		return WorkerSessionResult::ProtocolRejected;
+	}
 	state_->telemetry.reset(new (std::nothrow) WorkerTelemetry);
 	if (!state_->telemetry || !state_->telemetry->Start(state_->mapping, effective))
 	{

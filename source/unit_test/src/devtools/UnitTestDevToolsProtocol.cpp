@@ -68,6 +68,83 @@ TEST(DevToolsProtocol, WorkerBootstrapValidatesNonceAndRequestedMode)
 	EXPECT_EQ(ReadWorkerBootstrap({nullptr, 0}, init.nonce, &requested), ProtocolResult::InvalidArgument);
 }
 
+TEST(DevToolsProtocol, WorkerHandshakeUsesVersionOneWireFields)
+{
+	std::vector<uint8_t> map(static_cast<size_t>(kProtocolMappingSize), 0);
+	ParentProtocolInit   init {};
+	init.supervisor_pid         = 42;
+	init.supervisor_start_token = 77;
+	init.requested_mode         = RecordingMode::Full;
+	for (uint32_t i = 0; i < sizeof(init.nonce); ++i)
+	{
+		init.nonce[i] = static_cast<uint8_t>(0xa0u + i);
+	}
+	MutableMappingView view {map.data(), map.size()};
+	ASSERT_EQ(InitializeProtocolOwner(view, init), ProtocolResult::Ok);
+
+	for (uint32_t i = 0; i < sizeof(init.nonce); ++i)
+	{
+		EXPECT_EQ(map[0x020u + i], init.nonce[i]);
+	}
+	uint64_t parent_pid = 0;
+	std::memcpy(&parent_pid, map.data() + 0x030u, sizeof(parent_pid));
+	EXPECT_EQ(parent_pid, init.supervisor_pid);
+	uint32_t state = 0;
+	std::memcpy(&state, map.data() + kProtocolHandshakeStateOffset, sizeof(state));
+	EXPECT_EQ(state, static_cast<uint32_t>(HandshakeState::ParentReady));
+
+	WorkerHandshake hs {};
+	hs.worker_pid           = 99;
+	hs.worker_start_token   = 101;
+	hs.accepted_mode        = RecordingMode::Full;
+	hs.logging_mode         = LoggingMode::Console;
+	hs.shader_cache_state   = ShaderCacheState::PersistentCacheWarm;
+	hs.dirty                = 1;
+	hs.validation_enabled   = 1;
+	hs.resolution_width     = 1920;
+	hs.resolution_height    = 1080;
+	hs.capabilities[0]      = 1;
+	std::memcpy(hs.revision, "0123456789abcdef0123456789abcdef01234567", 40);
+	ASSERT_EQ(PublishWorkerHandshake(view, hs), ProtocolResult::Ok);
+
+	uint64_t worker_pid = 0;
+	uint64_t worker_start_token = 0;
+	std::memcpy(&worker_pid, map.data() + 0x038u, sizeof(worker_pid));
+	std::memcpy(&worker_start_token, map.data() + 0x040u, sizeof(worker_start_token));
+	EXPECT_EQ(worker_pid, hs.worker_pid);
+	EXPECT_EQ(worker_start_token, hs.worker_start_token);
+	EXPECT_EQ(map[0x080u], static_cast<uint8_t>('0'));
+	EXPECT_EQ(map[0x0a8u], static_cast<uint8_t>(1));
+	EXPECT_EQ(map[0x0c0u], static_cast<uint8_t>(LoggingMode::Console));
+	EXPECT_EQ(map[0x0c4u], static_cast<uint8_t>(ShaderCacheState::PersistentCacheWarm));
+	EXPECT_EQ(map[0x0ccu], static_cast<uint8_t>(0x80));
+	EXPECT_EQ(map[0x0d0u], static_cast<uint8_t>(0x38));
+	std::memcpy(&state, map.data() + kProtocolHandshakeStateOffset, sizeof(state));
+	EXPECT_EQ(state, static_cast<uint32_t>(HandshakeState::WorkerReady));
+
+	WorkerHandshake accepted {};
+	ASSERT_EQ(AcceptWorkerHandshake({map.data(), map.size()}, init, &accepted), ProtocolResult::Ok);
+	EXPECT_EQ(accepted.worker_pid, hs.worker_pid);
+	EXPECT_EQ(accepted.worker_start_token, hs.worker_start_token);
+	EXPECT_EQ(accepted.logging_mode, hs.logging_mode);
+	EXPECT_EQ(accepted.shader_cache_state, hs.shader_cache_state);
+	EXPECT_EQ(accepted.dirty, hs.dirty);
+	EXPECT_EQ(accepted.validation_enabled, hs.validation_enabled);
+	EXPECT_EQ(accepted.resolution_width, hs.resolution_width);
+	EXPECT_EQ(accepted.resolution_height, hs.resolution_height);
+	EXPECT_EQ(accepted.capabilities[0], hs.capabilities[0]);
+	EXPECT_EQ(std::memcmp(accepted.revision, hs.revision, sizeof(hs.revision)), 0);
+
+	for (uint32_t i = 0x0acu; i < 0x0b0u; ++i)
+	{
+		EXPECT_EQ(map[i], 0u);
+	}
+	for (uint32_t i = 0x0dcu; i < 0x100u; ++i)
+	{
+		EXPECT_EQ(map[i], 0u);
+	}
+}
+
 TEST(DevToolsProtocol, ProgressPublicationRoundTrips)
 {
 	std::vector<uint8_t> map(static_cast<size_t>(kProtocolMappingSize), 0);
@@ -79,6 +156,8 @@ TEST(DevToolsProtocol, ProgressPublicationRoundTrips)
 	ASSERT_EQ(InitializeProtocolOwner(mut, init), ProtocolResult::Ok);
 
 	WorkerHandshake hs {};
+	hs.worker_pid    = 123;
+	hs.worker_start_token = 456;
 	hs.accepted_mode = RecordingMode::MetricsOnly;
 	hs.logging_mode  = LoggingMode::Silent;
 	ASSERT_EQ(PublishWorkerHandshake(mut, hs), ProtocolResult::Ok);
