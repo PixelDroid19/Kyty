@@ -7,6 +7,10 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+namespace Kyty::Libs::Graphics {
+struct GraphicContext;
+}
+
 namespace Kyty::Libs::Graphics::State {
 
 struct ScissorRect
@@ -73,8 +77,22 @@ struct ColorTargetLayout
 
 [[nodiscard]] ColorTargetLayout ResolveColorTargetLayout(uint32_t mask);
 
+// Record guest color-target layouts already observed this session (base-keyed).
+// Matching width/height/size alone is not enough: unrelated allocations can share
+// dimensions. The sample promote path consults the same base.
+void RecordGen5RenderTargetSize(GraphicContext* ctx, uint64_t base, uint32_t width, uint32_t height, uint64_t size);
+[[nodiscard]] bool HasGen5RenderTargetSize(const GraphicContext* ctx, uint64_t base, uint32_t width, uint32_t height, uint64_t size);
+
+// Gen5 tile-27 sample that misses FindRenderTexture: prefer a GPU-owned RT when
+// this guest base was already observed as a color target. Captured: 642x362
+// samples detiled as pure CPU before their RT existed (diagonal garbage →
+// present stripes), while peers already had RTs. Pure CPU atlases never appear
+// in the color-target registry and stay on the Texture path.
+[[nodiscard]] bool Gen5Tile27SamplePrefersRenderTarget(uint32_t fmt, uint32_t tile, bool seen_as_color_target_size);
+
 // A sampled surface may reuse a render target only when GpuMemory found the
-// exact live object. Matching dimensions do not establish identity or content.
+// exact live object, or when promote registers the observed color-target base.
+// Matching dimensions alone do not establish identity or content.
 enum class Gen5SampleBacking
 {
 	ExactRenderTarget,

@@ -4231,6 +4231,10 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		r->base_addr[0]     = rt.base.addr;
 		r->vulkan_buffer[0] = buffer_vulkan;
 		r->buffer_size[0]   = size;
+		if (ps5)
+		{
+			State::RecordGen5RenderTargetSize(g_render_ctx->GetGraphicCtx(), rt.base.addr, width, height, size);
+		}
 
 		// Additional MRTs: same dimensions/format as RT0 (captured multi-target path).
 		for (uint32_t slot = 1; slot < r->targets_num; slot++)
@@ -4252,6 +4256,10 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 			r->base_addr[slot]     = other.base.addr;
 			r->vulkan_buffer[slot] = other_vulkan;
 			r->buffer_size[slot]   = size;
+			if (ps5)
+			{
+				State::RecordGen5RenderTargetSize(g_render_ctx->GetGraphicCtx(), other.base.addr, width, height, size);
+			}
 		}
 	} else
 	{
@@ -4531,15 +4539,21 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					view_type = VulkanImage::VIEW_BGRA;
 				}
 			}
-			if (gen5)
+		}
+
+		const bool promote_gen5_tile27_to_rt =
+		    gen5 && !textures.desc[i].textures2d_without_sampler &&
+		    State::Gen5Tile27SamplePrefersRenderTarget(
+		        fmt, tile, State::HasGen5RenderTargetSize(g_render_ctx->GetGraphicCtx(), addr, width, height, size.size));
+
+		if (gen5 && !textures.desc[i].textures2d_without_sampler)
+		{
+			const auto backing = State::ResolveGen5SampleBacking(fmt, tile, render_texture || promote_gen5_tile27_to_rt);
+			if (backing == State::Gen5SampleBacking::Unsupported)
 			{
-				const auto backing = State::ResolveGen5SampleBacking(fmt, tile, render_texture);
-				if (backing == State::Gen5SampleBacking::Unsupported)
-				{
-					EXIT("Gen5 sampled texture has no exact render-target backing and no guest-memory upload: "
-					     "fmt=%" PRIu32 ", tile=%" PRIu32 ", addr=0x%016" PRIx64 ", size=0x%08" PRIx32 "\n",
-					     fmt, tile, addr, size.size);
-				}
+				EXIT("Gen5 sampled texture has no exact render-target backing and no guest-memory upload: "
+				     "fmt=%" PRIu32 ", tile=%" PRIu32 ", addr=0x%016" PRIx64 ", size=0x%08" PRIx32 "\n",
+				     fmt, tile, addr, size.size);
 			}
 		}
 
@@ -4567,6 +4581,24 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					RenderTextureObject vulkan_buffer_info(rt_format, width, height, true, neo, pitch, false);
 					tex = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
 					    submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_buffer_info));
+				} else if (promote_gen5_tile27_to_rt)
+				{
+					// Observed color-target base: bind as GPU-owned RT instead of
+					// pure CPU detile (captured diagonal garbage → present stripes).
+					RenderTextureFormat rt_format = RenderTextureFormat::Unknown;
+					if (fmt == 56u)
+					{
+						rt_format = RenderTextureFormat::R8G8B8A8Unorm;
+					} else if (fmt == 71u)
+					{
+						rt_format = RenderTextureFormat::R16G16B16A16Sfloat;
+					}
+					EXIT_NOT_IMPLEMENTED(rt_format == RenderTextureFormat::Unknown);
+
+					RenderTextureObject vulkan_buffer_info(rt_format, width, height, true, neo, pitch, false);
+					tex = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
+					    submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_buffer_info));
+					render_texture = true;
 				} else
 				{
 					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
