@@ -14,6 +14,7 @@ list(APPEND unit_test_src
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsSupervisor.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsBundle.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsLifecycle.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsExportCatalog.cpp"
 )
 
 if (MSVC AND CLANG)
