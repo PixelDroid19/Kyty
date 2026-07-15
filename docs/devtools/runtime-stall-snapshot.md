@@ -16,7 +16,10 @@ and `kyty_devtools_core`. It never links the emulator.
 - Requires an **absolute** `--output-dir`. There is no cwd default.
 - Creates an exclusive shared mapping and parent-liveness pipe, launches the
   worker with fixed fds 3/4 and `KYTY_DEVTOOLS_BOOTSTRAP_V1`, handshakes, then
-  samples progress/timeline/health.
+  samples progress/timeline/health. Each accepted publication updates the
+  worker-owned monotonic heartbeat at wire offset `0x140`; the supervisor
+  consumes that value rather than treating its own sampling clock as worker
+  activity.
 - On confirmed live stall: writes one sanitized bundle and **continues** sampling.
 - On proven exit/crash/opaque termination: finalizes once, writes a terminal
   bundle when coherent evidence exists, returns the child status.
@@ -27,6 +30,18 @@ and `kyty_devtools_core`. It never links the emulator.
 
 Exit codes: child exit code; `128+signal` on POSIX crash; `125` for
 supervisor-owned failures.
+
+### Handshake lifecycle
+
+The shared header uses release/acquire state transitions:
+
+`ParentReady` → `WorkerReady` → `WorkerClosing`
+
+If worker initialization fails after publishing its identity, it transitions
+to `WorkerRejected`. A parent may accept an already validated handshake while
+it is in `WorkerClosing`, which covers workers that finish before a sampling
+poll observes `WorkerReady`; `WorkerRejected` is never accepted as a valid
+worker.
 
 ### `self-test --output-dir ABS_DIR --mode=MODE ...`
 
@@ -63,3 +78,11 @@ workload IDs, shader hashes, logs, textures, or screenshots.
 Canary values placed in synthetic argv/env/local stacks must not appear in any
 automatic artifact byte. Bundle writer serializes only compiled keys and
 numeric/enumerated fields.
+
+## Host support status
+
+The verified supervisor path in this repository is the POSIX implementation.
+The CMake file names Windows supervisor adapters, but those source files and
+the Windows orchestration path are not yet present; Windows runtime support is
+therefore unverified and must not be inferred from the portable protocol types
+or from a successful non-Windows build.
