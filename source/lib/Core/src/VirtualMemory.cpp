@@ -19,6 +19,9 @@
 #endif
 
 #ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
+#if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__)) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 1
+#endif
 #include <csignal>
 #include <sys/syscall.h>
 #include <sys/time.h>
@@ -168,8 +171,35 @@ public:
 
 ExceptionHandler::handler_func_t ExceptionHandlerPrivate::g_vec_func = nullptr;
 
-// Platform register accessors for POSIX ucontext (Darwin vs Linux glibc x86_64).
+// Platform register accessors for POSIX ucontext. The exception contract keeps
+// the historical x86 register names because the guest ABI is x86_64; native
+// arm64 builds expose the corresponding program counter, frame/stack pointers,
+// and first ABI argument registers for host diagnostics.
 #if defined(__APPLE__)
+#if defined(__arm64__) || defined(__aarch64__)
+static inline uint64_t uc_get_rip(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__pc); }
+static inline uint64_t uc_get_rbp(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__fp); }
+static inline uint64_t uc_get_rsp(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__sp); }
+static inline uint64_t uc_get_rax(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[0]); }
+static inline uint64_t uc_get_rbx(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[1]); }
+static inline uint64_t uc_get_rcx(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[2]); }
+static inline uint64_t uc_get_rdx(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[3]); }
+static inline uint64_t uc_get_rsi(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[1]); }
+static inline uint64_t uc_get_rdi(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[0]); }
+static inline uint64_t uc_get_r8(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[4]); }
+static inline uint64_t uc_get_r9(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[5]); }
+static inline uint64_t uc_get_r10(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[6]); }
+static inline uint64_t uc_get_r11(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[7]); }
+static inline uint64_t uc_get_r12(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[8]); }
+static inline uint64_t uc_get_r13(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[9]); }
+static inline uint64_t uc_get_r14(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[10]); }
+static inline uint64_t uc_get_r15(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[11]); }
+// Darwin arm64 signal contexts do not expose an x86 page-fault error code.
+// The signal info still supplies the fault address; classify it as a read when
+// no architecture-specific access bit is available.
+static inline uint64_t uc_get_err(ucontext_t* /*uc*/) { return 0; }
+static inline long     host_tid() { return ::syscall(SYS_thread_selfid); }
+#else
 static inline uint64_t uc_get_rip(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rip); }
 static inline void     uc_set_rip(ucontext_t* uc, uint64_t v) { uc->uc_mcontext->__ss.__rip = static_cast<__uint64_t>(v); }
 static inline uint64_t uc_get_rbp(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rbp); }
@@ -192,6 +222,7 @@ static inline uint64_t uc_get_err(ucontext_t* uc) { return static_cast<uint64_t>
 static inline uint64_t uc_get_rflags(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__rflags); }
 static inline void     uc_set_rflags(ucontext_t* uc, uint64_t v) { uc->uc_mcontext->__ss.__rflags = static_cast<__uint64_t>(v); }
 static inline long     host_tid() { return ::syscall(SYS_thread_selfid); }
+#endif
 #elif defined(__linux__)
 static inline uint64_t uc_get_rip(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RIP]); }
 static inline void     uc_set_rip(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_RIP] = static_cast<greg_t>(v); }
@@ -216,18 +247,24 @@ static inline uint64_t uc_get_rflags(ucontext_t* uc) { return static_cast<uint64
 static inline void     uc_set_rflags(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_EFL] = static_cast<greg_t>(v); }
 static inline long     host_tid() { return ::syscall(SYS_gettid); }
 #else
-#error "KYTY_HAS_SIGNAL_EXCEPTIONS requires Apple or Linux x86_64 ucontext accessors"
+#error "KYTY_HAS_SIGNAL_EXCEPTIONS requires Apple or Linux ucontext accessors"
 #endif
 
 // Single-step tracer: TF-based instruction trace of guest code. Armed by
 // SetGuestTrace(); logs guest-range instruction pointers until the budget runs out.
+#if defined(__x86_64__) || defined(__i386__)
 static thread_local int g_trace_guest = 0; // remaining guest instructions to log
 static thread_local int g_trace_total = 0; // hard cap on total single-steps
+#endif
 
 void SetGuestTrace(int steps)
 {
+#if defined(__x86_64__) || defined(__i386__)
 	g_trace_guest = steps;
 	g_trace_total = steps * 200; // allow stepping through HLE/return code in between
+#else
+	(void)steps;
+#endif
 }
 
 // Timer-based guest profiler: samples the instruction pointer of
@@ -260,6 +297,7 @@ void StartGuestProfiler()
 	setitimer(ITIMER_PROF, &t, nullptr);
 }
 
+#if defined(__x86_64__) || defined(__i386__)
 static void kyty_sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontext)
 {
 	auto*    uc  = static_cast<ucontext_t*>(ucontext);
@@ -277,6 +315,7 @@ static void kyty_sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontex
 	}
 	uc_set_rflags(uc, uc_get_rflags(uc) | 0x100ull);
 }
+#endif
 
 // Demand-paged ranges: flexible-memory regions the guest reserves but that
 // are backed lazily. On a write fault inside one, the touched page is mapped RW
@@ -367,6 +406,7 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 	if (sig == SIGILL)
 	{
 		uint64_t rip = uc_get_rip(uc);
+	#if defined(__x86_64__) || defined(__i386__)
 		// A guest ud2 (0F 0B) is the trap the compiler emits after a call it believes
 		// is noreturn — here, sceKernelDebugRaiseException. On real hardware certain
 		// debug-raise codes are soft: the kernel logs and RESUMES past the trap. When
@@ -382,6 +422,7 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 				return;
 			}
 		}
+	#endif
 		printf("\n=== SIGILL @ rip=0x%016llx ===\n", static_cast<unsigned long long>(rip));
 		printf("rax=0x%016llx rbx=0x%016llx rcx=0x%016llx rdx=0x%016llx\n", static_cast<unsigned long long>(uc_get_rax(uc)),
 		       static_cast<unsigned long long>(uc_get_rbx(uc)), static_cast<unsigned long long>(uc_get_rcx(uc)),
@@ -587,11 +628,13 @@ bool ExceptionHandler::InstallVectored(handler_func_t func)
 			return false;
 		}
 
+#if defined(__x86_64__) || defined(__i386__)
 		struct sigaction sat {};
 		sat.sa_sigaction = kyty_sigtrap_handler;
 		sat.sa_flags     = SA_SIGINFO;
 		sigemptyset(&sat.sa_mask);
 		sigaction(SIGTRAP, &sat, nullptr);
+#endif
 
 		return true;
 	}

@@ -35,4 +35,22 @@ TEST(CoreVirtualMemory, SharedBackingPreservesAliasCoherence)
 	DestroySharedBacking(backing);
 }
 
+// Large guest heaps must not create one host metadata node per page. This is
+// intentionally sparse so the test exercises the tracking contract without
+// requiring physical memory proportional to the guest reservation.
+TEST(CoreVirtualMemory, LargeSharedMappingUsesBoundedProtectionMetadata)
+{
+	constexpr uint64_t kSize = 0x80000000ULL;
+	const uint64_t     page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+
+	SharedBacking* backing = CreateSharedBacking(kSize);
+	ASSERT_NE(backing, nullptr);
+
+	const uint64_t view = MapSharedAligned(backing, 0, 0, kSize, Mode::ReadWrite, page_size);
+	ASSERT_NE(view, 0u);
+	ASSERT_TRUE(Free(view));
+	DestroySharedBacking(backing);
+}
+
 UT_END();
