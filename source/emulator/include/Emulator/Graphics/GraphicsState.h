@@ -54,6 +54,25 @@ void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
 
 [[nodiscard]] DepthClearActions ResolveDepthClearActions(bool register_depth_clear, bool htile_meta_clear);
 
+// CB_TARGET_MASK / CB_SHADER_MASK: four bits per MRT (RGBA). Observed Gen5
+// contract accepts only contiguous full-channel (0xf) nibbles from RT0.
+enum class ColorTargetLayoutError
+{
+	None,
+	Gapped,
+	PartialChannel,
+};
+
+struct ColorTargetLayout
+{
+	static constexpr uint32_t kMaxTargets = 8;
+	uint32_t                  count       = 0;
+	uint8_t                   nibbles[kMaxTargets] {};
+	ColorTargetLayoutError    error       = ColorTargetLayoutError::None;
+};
+
+[[nodiscard]] ColorTargetLayout ResolveColorTargetLayout(uint32_t mask);
+
 } // namespace Kyty::Libs::Graphics::State
 
 #endif // KYTY_EMU_ENABLED

@@ -107,6 +107,46 @@ DepthClearActions ResolveDepthClearActions(bool register_depth_clear, bool htile
 	return actions;
 }
 
+ColorTargetLayout ResolveColorTargetLayout(uint32_t mask)
+{
+	ColorTargetLayout layout {};
+	if (mask == 0)
+	{
+		return layout;
+	}
+
+	// Scan RT0..RT7: accept only contiguous full-channel (0xf) nibbles from RT0.
+	// A partial nibble is PartialChannel. A nonzero nibble after a zero hole is Gapped.
+	bool saw_zero = false;
+	for (uint32_t slot = 0; slot < ColorTargetLayout::kMaxTargets; slot++)
+	{
+		const uint8_t nibble = static_cast<uint8_t>((mask >> (slot * 4u)) & 0xFu);
+		if (nibble == 0)
+		{
+			saw_zero = true;
+			continue;
+		}
+		if (saw_zero)
+		{
+			layout.count = 0;
+			layout.error = ColorTargetLayoutError::Gapped;
+			return layout;
+		}
+		if (nibble != 0xFu)
+		{
+			layout.count = 0;
+			layout.error = ColorTargetLayoutError::PartialChannel;
+			return layout;
+		}
+		layout.nibbles[layout.count] = nibble;
+		layout.count++;
+	}
+
+	// Trailing zeros after a contiguous full prefix are OK (count stops at first zero).
+	layout.error = ColorTargetLayoutError::None;
+	return layout;
+}
+
 void SetGenericScissorTl(HW::Context& context, uint32_t value)
 {
 	const auto& viewport = context.GetScreenViewport();

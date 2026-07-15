@@ -636,6 +636,48 @@ TEST(EmulatorGraphicsState, DepthStencilReclaimParentsAreSurfaces)
 	EXPECT_EQ(GpuMemoryOverlapType::Crosses, GpuMemoryOverlapType::Crosses);
 }
 
+TEST(EmulatorGraphicsState, ResolvesContiguousMultiRenderTargetLayout)
+{
+	auto zero = State::ResolveColorTargetLayout(0u);
+	EXPECT_EQ(zero.count, 0u);
+	EXPECT_EQ(zero.error, State::ColorTargetLayoutError::None);
+
+	auto one = State::ResolveColorTargetLayout(0xFu);
+	EXPECT_EQ(one.count, 1u);
+	EXPECT_EQ(one.nibbles[0], 0xFu);
+	EXPECT_EQ(one.error, State::ColorTargetLayoutError::None);
+
+	auto four = State::ResolveColorTargetLayout(0x0000FFFFu);
+	EXPECT_EQ(four.count, 4u);
+	for (uint32_t i = 0; i < 4; i++)
+	{
+		EXPECT_EQ(four.nibbles[i], 0xFu) << "slot " << i;
+	}
+	EXPECT_EQ(four.error, State::ColorTargetLayoutError::None);
+
+	auto eight = State::ResolveColorTargetLayout(0xFFFFFFFFu);
+	EXPECT_EQ(eight.count, 8u);
+	for (uint32_t i = 0; i < 8; i++)
+	{
+		EXPECT_EQ(eight.nibbles[i], 0xFu) << "slot " << i;
+	}
+	EXPECT_EQ(eight.error, State::ColorTargetLayoutError::None);
+}
+
+TEST(EmulatorGraphicsState, RejectsGappedMultiRenderTargetLayout)
+{
+	// RT0 full, RT1 zero, RT2 full → hole after contiguous prefix.
+	auto gap = State::ResolveColorTargetLayout(0x00000F0Fu);
+	EXPECT_EQ(gap.error, State::ColorTargetLayoutError::Gapped);
+}
+
+TEST(EmulatorGraphicsState, RejectsPartialChannelMultiRenderTargetLayout)
+{
+	// RT0 partial channels (R+B only).
+	auto partial = State::ResolveColorTargetLayout(0x00000005u);
+	EXPECT_EQ(partial.error, State::ColorTargetLayoutError::PartialChannel);
+}
+
 TEST(EmulatorGraphicsState, RecognizesObservedHtileClearPattern)
 {
 	uint32_t clear_words[8];
