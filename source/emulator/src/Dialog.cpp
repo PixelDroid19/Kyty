@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -146,6 +147,112 @@ int KYTY_SYSV_ABI SaveDataDialogProgressBarSetValue(int target, uint32_t rate)
 }
 
 } // namespace SaveDataDialog
+
+namespace MsgDialog {
+
+LIB_NAME("MsgDialog", "MsgDialog");
+
+static std::atomic<int> g_msg_status {CommonDialog::STATUS_NONE};
+
+int KYTY_SYSV_ABI MsgDialogInitialize()
+{
+	PRINT_NAME();
+
+	if (!CommonDialog::CommonDialogIsSystemInitialized())
+	{
+		return CommonDialog::ERROR_NOT_SYSTEM_INITIALIZED;
+	}
+
+	const int status = g_msg_status.load(std::memory_order_acquire);
+	if (status != CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_ALREADY_INITIALIZED;
+	}
+
+	g_msg_status.store(CommonDialog::STATUS_INITIALIZED, std::memory_order_release);
+	return 0;
+}
+
+int KYTY_SYSV_ABI MsgDialogOpen(const void* param)
+{
+	PRINT_NAME();
+
+	if (param == nullptr)
+	{
+		return CommonDialog::ERROR_ARG_NULL;
+	}
+
+	const int status = g_msg_status.load(std::memory_order_acquire);
+	if (status != CommonDialog::STATUS_INITIALIZED && status != CommonDialog::STATUS_FINISHED)
+	{
+		return CommonDialog::ERROR_INVALID_STATE;
+	}
+
+	// No host message compositor: finish immediately so poll loops observe FINISHED.
+	printf("\t param = 0x%016" PRIx64 " (complete immediately)\n", reinterpret_cast<uint64_t>(param));
+	g_msg_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
+	return 0;
+}
+
+int KYTY_SYSV_ABI MsgDialogGetResult(void* result)
+{
+	PRINT_NAME();
+
+	if (result == nullptr)
+	{
+		return CommonDialog::ERROR_ARG_NULL;
+	}
+
+	const int status = g_msg_status.load(std::memory_order_acquire);
+	if (status != CommonDialog::STATUS_FINISHED)
+	{
+		return CommonDialog::ERROR_NOT_FINISHED;
+	}
+
+	// OrbisMsgDialogResult: mode (u32), result (u32, 0=OK), buttonId (u32), reserved[32].
+	// Zero the observed head; buttonId=0 (INVALID) is acceptable for auto-complete Open.
+	auto* bytes = static_cast<uint8_t*>(result);
+	std::memset(bytes, 0, 44);
+	return 0;
+}
+
+int KYTY_SYSV_ABI MsgDialogGetStatus()
+{
+	PRINT_NAME();
+	return g_msg_status.load(std::memory_order_acquire);
+}
+
+int KYTY_SYSV_ABI MsgDialogUpdateStatus()
+{
+	PRINT_NAME();
+	return g_msg_status.load(std::memory_order_acquire);
+}
+
+int KYTY_SYSV_ABI MsgDialogClose()
+{
+	PRINT_NAME();
+	const int status = g_msg_status.load(std::memory_order_acquire);
+	if (status == CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_NOT_INITIALIZED;
+	}
+	g_msg_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
+	return 0;
+}
+
+int KYTY_SYSV_ABI MsgDialogTerminate()
+{
+	PRINT_NAME();
+	const int status = g_msg_status.load(std::memory_order_acquire);
+	if (status == CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_NOT_INITIALIZED;
+	}
+	g_msg_status.store(CommonDialog::STATUS_NONE, std::memory_order_release);
+	return 0;
+}
+
+} // namespace MsgDialog
 
 } // namespace Kyty::Libs::Dialog
 

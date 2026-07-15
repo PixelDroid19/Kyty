@@ -496,6 +496,16 @@ void KYTY_SYSV_ABI KernelSetGPO(uint32_t bits)
 	printf("\t bits = %08" PRIx32 "\n", bits);
 }
 
+// sceKernelGetGPI — NID 4oXYe9Xmk0Q (public PS5-3.20_Libs / sce_stubs name mapping).
+// On non-devkit retail consoles this is a no-op success (returns 0). Captured as
+// Astro Bot's first strict Unpatched import from libkernel_v1.1 before any window.
+// Do not invent GPI state; no SetGPI pairing required for the observed open path.
+static int KYTY_SYSV_ABI KernelGetGPI()
+{
+	PRINT_NAME();
+	return 0;
+}
+
 } // namespace LibKernel
 
 namespace Posix {
@@ -718,6 +728,8 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("HoLVWNanBBc", Posix::getpid);
 	LIB_FUNC("bnZxYgAFeA0", LibKernel::KernelGetSanitizerNewReplaceExternal);
 	LIB_FUNC("ca7v6Cxulzs", LibKernel::KernelSetGPO);
+	// sceKernelGetGPI (PS5 stub name ↔ NID 4oXYe9Xmk0Q). Retail no-op success.
+	LIB_FUNC("4oXYe9Xmk0Q", LibKernel::KernelGetGPI);
 	LIB_FUNC("DRuBt2pvICk", LibKernel::read);
 	LIB_FUNC("f7KBOafysXo", LibKernel::KernelGetModuleInfoFromAddr);
 	LIB_FUNC("Fjc4-n1+y2g", LibKernel::elf_phdr_match_addr);

@@ -598,13 +598,21 @@ void* KYTY_SYSV_ABI LibcMspaceMalloc(void* msp, size_t size)
 {
 	PRINT_NAME();
 
+	printf("\t msp  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(msp));
 	printf("\t size = %016" PRIx64 "\n", size);
+
+	// Guest libc returns nullptr on failure (OOM / null mspace); do not EXIT —
+	// callers are expected to check the return. Strict abort here blocked Astro
+	// Bot before any presentation window after an early null msp malloc(0x28).
+	if (msp == nullptr)
+	{
+		printf("\t buf  = 0000000000000000 (null mspace)\n");
+		return nullptr;
+	}
 
 	auto* buf = Core::MSpaceMalloc(msp, size);
 
 	printf("\t buf  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
-
-	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 
 	return buf;
 }
