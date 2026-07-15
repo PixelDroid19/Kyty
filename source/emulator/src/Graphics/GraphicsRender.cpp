@@ -4645,8 +4645,15 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		if (std::getenv("KYTY_RT_EVIDENCE") != nullptr && gen5 && !textures.desc[i].textures2d_without_sampler)
 		{
-			static std::atomic<uint32_t> sample_logs {0};
-			if (sample_logs.fetch_add(1) < 256u)
+			// Prefer residual-relevant samples: RT aliases, float ufmt 71, tile-27.
+			// Keep a separate budget for early UI noise (ufmt 56 / tile 0).
+			static std::atomic<uint32_t> sample_logs_priority {0};
+			static std::atomic<uint32_t> sample_logs_other {0};
+			const bool priority = render_texture || depth_texture || fmt == 71u || tile == 27u;
+			const uint32_t n =
+			    priority ? sample_logs_priority.fetch_add(1) : sample_logs_other.fetch_add(1);
+			const uint32_t budget = priority ? 256u : 64u;
+			if (n < budget)
 			{
 				std::fprintf(stderr,
 				             "SAMPLE_EVIDENCE slot=%d addr=%016" PRIx64 " ufmt=%u tile=%u extent=%ux%u size=%08" PRIx32
