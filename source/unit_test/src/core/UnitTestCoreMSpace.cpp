@@ -33,7 +33,7 @@ static void test_fail()
 }
 
 // Null mspace is a guest-visible failure: return nullptr (no abort). Matches
-// LibcMspaceMalloc null-msp path used by Astro Bot early heap setup.
+// LibcMspaceMalloc null-msp path used by the early Gen5 heap setup.
 TEST(CoreMSpace, NullMspMallocReturnsNull)
 {
 	EXPECT_EQ(MSpaceMalloc(nullptr, 0x28), nullptr);

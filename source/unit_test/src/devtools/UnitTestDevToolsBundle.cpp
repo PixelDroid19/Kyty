@@ -195,7 +195,7 @@ TEST(DevToolsBundle, WritesCompleteBundleAtomically)
 
 	// Canaries that must never appear in any artifact.
 	const char* canary_argv  = "CANARY_ARGV_SECRET_XYZ";
-	const char* canary_path  = "/home/secret/PPSA99999/CANARY_PATH";
+	const char* canary_path  = "/private/fixture/CANARY_PATH";
 	const char* canary_guest = "CANARY_GUEST_THREAD_NAME";
 	(void)canary_argv;
 	(void)canary_path;

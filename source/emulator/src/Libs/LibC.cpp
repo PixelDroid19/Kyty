@@ -773,7 +773,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("AEJdIVZTEmo", LibC::c_qsort);
 	LIB_FUNC("L1SBTkC+Cvw", LibC::c_abort);
 	LIB_FUNC("VPbJwTCgME0", LibC::c_srand);
-	// Gen5 libc_v1 rand / strtok — evidenced first imports after Global Heap on Astro Bot.
+	// Gen5 libc_v1 rand / strtok — evidenced first imports after global heap initialization.
 	LIB_FUNC("Nmtr628eA3A", LibC::c_rand);
 	LIB_FUNC("oVkZ8W8-Q8A", LibC::c_strtok);
 

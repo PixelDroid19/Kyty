@@ -12,7 +12,7 @@ using Kyty::Libs::LibKernel::ApplicationHeap::IsValidApiV2Table;
 using Kyty::Libs::LibKernel::ApplicationHeap::kApiV2Size;
 using Kyty::Libs::LibKernel::ApplicationHeap::kApiV2Version;
 
-// Captured Astro Bot application heap table header at guest 0x9088e0148.
+// Captured Gen5 application-heap table header at a synthetic guest address.
 TEST(EmulatorApplicationHeap, RecognizesCapturedV2Header)
 {
 	EXPECT_EQ(kApiV2Size, 0x78u);
@@ -32,7 +32,7 @@ TEST(EmulatorApplicationHeap, CreateSlotMustPointIntoExecutableImage)
 	EXPECT_FALSE(IsGuestCodePointer(0x9088e0158, text_begin, text_end));
 }
 
-// Captured Astro Bot v2 table at 0x9088e0148 (create/destroy/malloc/free in text).
+// Captured Gen5 v2 table (create/destroy/malloc/free in the executable image).
 TEST(EmulatorApplicationHeap, CapturedV2TablePassesFullValidation)
 {
 	constexpr uint64_t text_begin = 0x900000000ull;

@@ -512,7 +512,7 @@ void KYTY_SYSV_ABI KernelSetGPO(uint32_t bits)
 
 // sceKernelGetGPI — NID 4oXYe9Xmk0Q (public PS5-3.20_Libs / sce_stubs name mapping).
 // On non-devkit retail consoles this is a no-op success (returns 0). Captured as
-// Astro Bot's first strict Unpatched import from libkernel_v1.1 during early Main.
+// The first strict Unpatched import from libkernel_v1.1 during early Main.
 // Do not invent GPI state; no SetGPI pairing required for the observed open path.
 static int KYTY_SYSV_ABI KernelGetGPI()
 {
