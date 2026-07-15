@@ -327,9 +327,25 @@ struct DemandRange
 };
 static DemandRange g_demand_ranges[64];
 static int         g_demand_count = 0;
+// The demand mapper runs from a signal handler, so it cannot query the host
+// page size there. Populate this before the first guest write fault.
+static uint64_t g_demand_page_size = 0;
+
+static void EnsureDemandPageSize() noexcept
+{
+	if (g_demand_page_size == 0u)
+	{
+		const uint64_t page_size = sys_virtual_get_page_size();
+		if (page_size != 0u && (page_size & (page_size - 1u)) == 0u)
+		{
+			g_demand_page_size = page_size;
+		}
+	}
+}
 
 void RegisterDemandRange(uint64_t addr, uint64_t size)
 {
+	EnsureDemandPageSize();
 	if (g_demand_count < 64)
 	{
 		g_demand_ranges[g_demand_count].addr = addr;
@@ -340,14 +356,21 @@ void RegisterDemandRange(uint64_t addr, uint64_t size)
 
 static bool try_demand_map(uint64_t vaddr)
 {
+	const uint64_t page_size = g_demand_page_size;
+	if (page_size == 0u)
+	{
+		return false;
+	}
+
 	for (int i = 0; i < g_demand_count; i++)
 	{
 		if (vaddr >= g_demand_ranges[i].addr && vaddr < g_demand_ranges[i].addr + g_demand_ranges[i].size)
 		{
 			// Raw mmap only: this runs in a signal handler, so it must avoid the
 			// allocator bookkeeping (std::map insert -> malloc) that would dead-lock.
-			uint64_t page = vaddr & ~static_cast<uint64_t>(0xFFF);
-			void*    p    = mmap(reinterpret_cast<void*>(page), 0x1000, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+			const uint64_t page = vaddr - (vaddr % page_size);
+			void*         p    = mmap(reinterpret_cast<void*>(page), static_cast<size_t>(page_size), PROT_READ | PROT_WRITE,
+			                           MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
 			return p == reinterpret_cast<void*>(page);
 		}
 	}
@@ -668,6 +691,7 @@ bool ExceptionHandler::Uninstall()
 void Init()
 {
 	sys_virtual_init();
+	EnsureDemandPageSize();
 }
 
 uint64_t GetPageSize()
