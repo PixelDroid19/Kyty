@@ -16,9 +16,15 @@ endif()
 #add_library(emulator_obj OBJECT ${emulator_src})
 #add_library(emulator STATIC $<TARGET_OBJECTS:emulator_obj>)
 add_library(emulator STATIC ${emulator_src})
+target_sources(emulator PRIVATE
+	src/DevTools/Runtime.cpp
+	src/DevTools/RuntimeSubsystem.cpp
+	include/Emulator/DevTools/Runtime.h
+	include/Emulator/DevTools/RuntimeSubsystem.h
+)
 add_dependencies(emulator KytyBuildInfo)
 
-target_link_libraries(emulator core math scripts lua unit_test vulkan-1 spirv-tools-opt spirv-tools easy_profiler SDL2-static)
+target_link_libraries(emulator core math scripts lua unit_test kyty_devtools_core vulkan-1 spirv-tools-opt spirv-tools easy_profiler SDL2-static)
 
 target_include_directories(emulator PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -53,4 +59,3 @@ clang_tidy_check(emulator "" "${check_headers}" "${inc_headers}")
 
 #include_what_you_use(emulator_obj "${inc_headers}")
 include_what_you_use(emulator "${inc_headers}")
-

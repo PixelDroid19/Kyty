@@ -14,6 +14,8 @@
 #include "Emulator/Common.h"
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
+#include "Emulator/DevTools/Runtime.h"
+#include "Emulator/DevTools/RuntimeSubsystem.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Window.h"
@@ -90,6 +92,7 @@ static void Init(const Scripts::ScriptVar& cfg)
 	auto* network     = Libs::Network::NetworkSubsystem::Instance();
 	auto* profiler    = Profiler::ProfilerSubsystem::Instance();
 	auto* pthread     = Libs::LibKernel::PthreadSubsystem::Instance();
+	auto* runtime     = DevTools::RuntimeDiagnosticsSubsystem::Instance();
 	auto* scripts     = Scripts::ScriptsSubsystem::Instance();
 	auto* timer       = Loader::Timer::TimerSubsystem::Instance();
 
@@ -101,12 +104,13 @@ static void Init(const Scripts::ScriptVar& cfg)
 	slist->Add(audio, {core, log, pthread, memory});
 	slist->Add(controller, {core, log, config});
 	slist->Add(file_system, {core, log, pthread});
-	slist->Add(graphics, {core, log, pthread, memory, config, profiler, controller});
+	slist->Add(graphics, {core, log, pthread, memory, config, profiler, controller, runtime});
 	slist->Add(log, {core, config});
 	slist->Add(memory, {core, log});
 	slist->Add(network, {core, log, pthread});
 	slist->Add(profiler, {core, config});
-	slist->Add(pthread, {core, log, timer});
+	slist->Add(pthread, {core, log, timer, runtime});
+	slist->Add(runtime, {core});
 	slist->Add(timer, {core, log});
 
 	slist->InitAll(true);
