@@ -13,6 +13,9 @@ target_link_libraries(kyty_devtools_supervisor
 
 target_sources(kyty_devtools_supervisor PRIVATE
 	src/BundleWriter.cpp
+	src/Supervisor.cpp
+	src/SyntheticWorker.cpp
+	src/Cli.cpp
 )
 
 if (WIN32)
@@ -35,4 +38,14 @@ endif()
 
 if (NOT MSVC)
 	target_compile_options(kyty_devtools_supervisor PRIVATE -fno-exceptions)
+endif()
+
+add_executable(kyty_devtools src/Main.cpp)
+target_link_libraries(kyty_devtools
+	kyty_devtools_supervisor
+	kyty_devtools_core
+	Threads::Threads
+)
+if (NOT MSVC)
+	target_compile_options(kyty_devtools PRIVATE -fno-exceptions)
 endif()
