@@ -10,7 +10,8 @@ namespace {
 struct RuntimeState
 {
 	Kyty::DevTools::WorkerSession session {};
-	bool                         prepared = false;
+	bool                         prepared        = false;
+	bool                         shutdown_result = true;
 };
 
 RuntimeState& GetState() noexcept
@@ -34,7 +35,8 @@ Kyty::DevTools::WorkerSessionResult PrepareFromBootstrap(
 	if (result == Kyty::DevTools::WorkerSessionResult::MissingBootstrap ||
 	    result == Kyty::DevTools::WorkerSessionResult::Attached)
 	{
-		state.prepared = true;
+		state.prepared        = true;
+		state.shutdown_result = true;
 	}
 	return result;
 }
@@ -49,10 +51,11 @@ bool Shutdown() noexcept
 	auto& state = GetState();
 	if (!state.prepared)
 	{
-		return true;
+		return state.shutdown_result;
 	}
 	const bool result = state.session.Stop();
-	state.prepared    = false;
+	state.prepared        = false;
+	state.shutdown_result = result;
 	return result;
 }
 
