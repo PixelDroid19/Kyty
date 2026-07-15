@@ -116,7 +116,6 @@ int main(int argc, char* argv[])
 	telemetry_options.logging_mode               = Kyty::DevTools::LoggingMode::Silent;
 	telemetry_options.revision                   = Kyty::BuildInfo::Revision;
 	telemetry_options.dirty                      = Kyty::BuildInfo::Dirty ? 1u : 0u;
-	telemetry_options.diagnostic_thread_instance = 1u;
 	const auto worker_result = Emulator::DevTools::PrepareFromBootstrap(telemetry_options);
 	if (worker_result != Kyty::DevTools::WorkerSessionResult::MissingBootstrap &&
 	    worker_result != Kyty::DevTools::WorkerSessionResult::Attached)
