@@ -82,9 +82,11 @@ selects one image.
   `sample_size` (tightest cover). If none cover, prefer the **largest** under-
   sample object.
 - If `sample_size == 0`: sizes are a comparable proxy only (for example pixel
-  area); prefer the smallest proxy. Call sites that lack a true sample size
-  should prefer passing guest **byte** sizes from GpuMemory blocks plus the
-  sample byte length whenever available.
+  area); prefer the smallest proxy. **Sample-bind call sites must pass the
+  sample’s pixel area (`width * height`) together with each RT’s
+  `extent.width * extent.height`**, not `0`. Passing `0` always selected the
+  smallest RT, including tiny `IsContainedWithin` children under a large
+  sample, which left opaque-black character/prop boxes.
 
 Do **not** abort the process on `Size() > 1`. Aborting turns a graphics alias
 bug into “the game will not start.”

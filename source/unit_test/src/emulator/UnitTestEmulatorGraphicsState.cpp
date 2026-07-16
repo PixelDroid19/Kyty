@@ -444,6 +444,18 @@ TEST(EmulatorGraphicsState, PreferGpuMemoryAliasPicksTightestCover)
 	EXPECT_EQ(PreferGpuMemoryAliasIndex(sizes, 1, 0x100ull), 0u);
 }
 
+// Sample pixel area vs RT extent areas (GraphicsRender sample-bind path).
+// A large sample covering a tiny child RT and a full-size parent must bind the
+// parent (tightest cover >= sample), not the child (sample_size==0 bug).
+TEST(EmulatorGraphicsState, PreferGpuMemoryAliasUsesSampleAreaAgainstRtExtents)
+{
+	const uint64_t rt_areas[] = {64ull * 64ull, 1920ull * 1080ull, 128ull * 128ull};
+	const uint64_t sample_area = 1920ull * 1080ull;
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(rt_areas, 3, sample_area), 1u);
+	// Smaller sample: prefer the 128x128 cover over 1920x1080.
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(rt_areas, 3, 128ull * 128ull), 2u);
+}
+
 TEST(EmulatorGraphicsState, AllowsOnlyObservedTextureStorageAliases)
 {
 	EXPECT_TRUE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Equals,
