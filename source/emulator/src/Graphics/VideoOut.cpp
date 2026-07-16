@@ -648,7 +648,9 @@ KYTY_SYSV_ABI int VideoOutOpen(int user_id, int bus_type, int index, const void*
 	EXIT_NOT_IMPLEMENTED(user_id != 255 && user_id != 0);
 	EXIT_NOT_IMPLEMENTED(bus_type != 0);
 	EXIT_NOT_IMPLEMENTED(index != 0);
-	EXIT_NOT_IMPLEMENTED(param != nullptr);
+	// Gen5 titles pass a non-null open-param block; attributes are applied later
+	// via SetBufferAttribute*. Accept and ignore for Open().
+	printf("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 
 	int handle = g_video_out_context->Open();
 
