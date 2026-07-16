@@ -253,12 +253,54 @@ static int KYTY_SYSV_ABI NpWebApi2DeleteUserContext(int user_ctx_id)
 	return OK;
 }
 
+static int KYTY_SYSV_ABI NpWebApi2PushEventCreateHandle(int lib_ctx_id)
+{
+	PRINT_NAME();
+	printf("\t lib_ctx_id = %d\n", lib_ctx_id);
+	static int handle = 1;
+	return handle++;
+}
+
+static int KYTY_SYSV_ABI NpWebApi2PushEventDeleteHandle(int handle)
+{
+	PRINT_NAME();
+	printf("\t handle = %d\n", handle);
+	return OK;
+}
+
+static int KYTY_SYSV_ABI NpWebApi2PushEventCreateFilter(int handle, const void* filter, size_t size)
+{
+	PRINT_NAME();
+	printf("\t handle = %d size = %" PRIu64 "\n", handle, static_cast<uint64_t>(size));
+	static int filter_id = 1;
+	return filter_id++;
+}
+
+static int KYTY_SYSV_ABI NpWebApi2PushEventRegisterCallback(int handle, void* cb, void* user)
+{
+	PRINT_NAME();
+	printf("\t handle = %d cb = 0x%016" PRIx64 "\n", handle, reinterpret_cast<uint64_t>(cb));
+	return OK;
+}
+
+static int KYTY_SYSV_ABI NpWebApi2CheckTimeout(int lib_ctx_id)
+{
+	PRINT_NAME();
+	printf("\t lib_ctx_id = %d\n", lib_ctx_id);
+	return OK;
+}
+
 LIB_DEFINE(InitNet_1_NpWebApi2)
 {
 	LIB_FUNC("+o9816YQhqQ", LibNpWebApi2::NpWebApi2Initialize);
 	LIB_FUNC("bEvXpcEk200", LibNpWebApi2::NpWebApi2Terminate);
 	LIB_FUNC("sk54bi6FtYM", LibNpWebApi2::NpWebApi2CreateUserContext);
 	LIB_FUNC("9X9+cneTGUU", LibNpWebApi2::NpWebApi2DeleteUserContext);
+	LIB_FUNC("WV1GwM32NgY", LibNpWebApi2::NpWebApi2PushEventCreateHandle);
+	LIB_FUNC("fIATVMo4Y1w", LibNpWebApi2::NpWebApi2PushEventDeleteHandle);
+	LIB_FUNC("MsaFhR+lPE4", LibNpWebApi2::NpWebApi2PushEventCreateFilter);
+	LIB_FUNC("fY3QqeNkF8k", LibNpWebApi2::NpWebApi2PushEventRegisterCallback);
+	LIB_FUNC("3Tt9zL3tkoc", LibNpWebApi2::NpWebApi2CheckTimeout);
 }
 
 } // namespace LibNpWebApi2
