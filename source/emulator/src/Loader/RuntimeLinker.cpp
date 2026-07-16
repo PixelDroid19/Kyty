@@ -774,21 +774,43 @@ uint64_t LoaderPrepareThreadTlsImage(uint8_t* tls, uint64_t image_size, uint64_t
 			continue;
 		}
 
-		// Absolute pointer into the main program image: if it looks like an
-		// unconstructed Context (null word0 + null buffer control), clear so
-		// the guest's null-slot factory path runs.
-		if (guest_read64 == nullptr || program_size < kContextBufferControlOffset + sizeof(uint64_t))
-		{
-			continue;
-		}
-		if (v < prog_lo || v > prog_hi - (kContextBufferControlOffset + sizeof(uint64_t)))
+		// Absolute pointer into the main program image.
+		if (guest_read64 == nullptr || v < prog_lo || v > prog_hi - sizeof(uint64_t))
 		{
 			continue;
 		}
 
-		uint64_t word0  = 1;
+		uint64_t word0 = 1;
+		if (!guest_read64(v, &word0, guest_ctx))
+		{
+			continue;
+		}
+
+		// Static type/descriptor blobs (observed at TLS +0x70/+0x78 in Gen5):
+		// word0 = small size, word1 = small refcount, word2+ = function
+		// pointers into guest code. They must not occupy "current context"
+		// TLS slots — guest SET asserts s_pTls* == nullptr first.
+		if (word0 >= 0x20 && word0 < 0x1000 && (word0 & 7u) == 0 && v + 24 <= prog_hi)
+		{
+			uint64_t word1 = 0;
+			uint64_t word2 = 0;
+			if (guest_read64(v + 8, &word1, guest_ctx) && guest_read64(v + 16, &word2, guest_ctx) && word1 < 0x100 &&
+			    word2 >= prog_lo && word2 < prog_hi)
+			{
+				*cell = 0;
+				modified++;
+				continue;
+			}
+		}
+
+		// Unconstructed Context (null word0 + null buffer control at +0x3e0).
+		if (program_size < kContextBufferControlOffset + sizeof(uint64_t) ||
+		    v > prog_hi - (kContextBufferControlOffset + sizeof(uint64_t)))
+		{
+			continue;
+		}
 		uint64_t buffer = 1;
-		if (!guest_read64(v, &word0, guest_ctx) || !guest_read64(v + kContextBufferControlOffset, &buffer, guest_ctx))
+		if (!guest_read64(v + kContextBufferControlOffset, &buffer, guest_ctx))
 		{
 			continue;
 		}
