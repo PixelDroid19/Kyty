@@ -1081,10 +1081,13 @@ int KYTY_SYSV_ABI KernelAprResolveFilepathsToIds(const char* const* paths, uint6
 
 static int AprResolveOnePath(const char* guest_path, uint32_t* out_id, uint64_t* out_size)
 {
-	EXIT_IF(g_mount_points == nullptr);
-	if (guest_path == nullptr)
+	if (guest_path == nullptr || guest_path[0] == '\0')
 	{
 		return KERNEL_ERROR_EFAULT;
+	}
+	if (g_mount_points == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
 	}
 	const String path_s         = String::FromUtf8(guest_path);
 	const auto   real_file_name = g_mount_points->GetRealFilename(path_s);
