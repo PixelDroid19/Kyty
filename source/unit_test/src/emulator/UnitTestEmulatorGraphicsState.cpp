@@ -1422,6 +1422,8 @@ TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
 	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, true), Gen5SampleBacking::ExactRenderTarget);
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 0, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(56, 9, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(133, 9, false), Gen5SampleBacking::Unsupported);
 }
 
 TEST(EmulatorGraphicsState, ResolvesObservedSamplerClampModes)

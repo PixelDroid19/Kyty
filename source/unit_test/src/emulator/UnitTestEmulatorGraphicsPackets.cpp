@@ -1353,9 +1353,9 @@ TEST(EmulatorGraphicsPackets, SizesGen5RotatedXSampledBc1Texture)
 	EXPECT_EQ(padded.height, 256u * 9u);
 }
 
-// SW_64KB_R_X within-block addressing for 4 BPE must be a bijection over a
-// 128x128 block and must keep every texel inside the 64 KiB block. Golden low
-// offsets come from Mesa MIT ADDRLIB (16-pipe, no RbPlus) pattern evaluation.
+// Gen5 kRenderTarget (tile 27) within-block addressing for 4 BPE must be a
+// bijection over a 128x128 block and keep every texel inside the 64 KiB block.
+// Golden low offsets match the guest RT bit equations (not Mesa ADDRLIB).
 TEST(EmulatorGraphicsPackets, Sw64kRx4bppWithinBlockIsBijective)
 {
 	constexpr uint32_t k_block = 128u;
@@ -1376,8 +1376,34 @@ TEST(EmulatorGraphicsPackets, Sw64kRx4bppWithinBlockIsBijective)
 	EXPECT_EQ(unique, k_block * k_block);
 	EXPECT_EQ(TileGetSw64kRxOffset(0, 0, k_block, 4), 0u);
 	EXPECT_EQ(TileGetSw64kRxOffset(1, 0, k_block, 4), 4u);
-	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x10u);
-	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0x14u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x8u);
+	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0xcu);
+}
+
+// kStandard64KB (tile 9) 32bpp uses a different within-block interleave.
+TEST(EmulatorGraphicsPackets, Standard64KB32WithinBlockIsBijective)
+{
+	constexpr uint32_t k_block = 128u;
+	bool               seen[65536] {};
+	uint32_t           unique = 0;
+	for (uint32_t y = 0; y < k_block; y++)
+	{
+		for (uint32_t x = 0; x < k_block; x++)
+		{
+			const uint64_t off = TileGetStandard64KB32Offset(x, y, k_block);
+			ASSERT_LT(off, 65536u);
+			ASSERT_EQ(off % 4u, 0u);
+			ASSERT_FALSE(seen[off]);
+			seen[off] = true;
+			unique++;
+		}
+	}
+	EXPECT_EQ(unique, k_block * k_block);
+	EXPECT_EQ(TileGetStandard64KB32Offset(0, 0, k_block), 0u);
+	EXPECT_EQ(TileGetStandard64KB32Offset(1, 0, k_block), 4u);
+	EXPECT_EQ(TileGetStandard64KB32Offset(0, 1, k_block), 0x10u);
+	// Distinct from kRenderTarget: (0,1) is 0x10 here, 0x8 for tile 27.
+	EXPECT_NE(TileGetStandard64KB32Offset(0, 1, k_block), TileGetSw64kRxOffset(0, 1, k_block, 4));
 }
 
 TEST(EmulatorGraphicsPackets, Sw64kRx8bppWithinBlockIsBijective)

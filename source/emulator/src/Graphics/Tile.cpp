@@ -833,71 +833,65 @@ void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, ui
 	}
 }
 
-// GFX10 SW_64KB_R_X within-block bit equation for 4 BPE / 16 pipes / no RbPlus.
-// Derived from Mesa 24.3 addrlib gfx10SwizzlePattern.h (MIT). Reimplemented as a
-// compact table — not a GPL paste. pipeBankXor is currently 0 (no base XOR).
-// Block geometry for 4 BPE is 128x128 elements (see TileGetRenderTargetSize).
-// Hypothesis: 16-pipe non-RbPlus matches the guest SW_64KB_R_X layout used by
-// Gen5 sample textures. Falsify via corrupt sample colors after a successful
-// upload; next trial would re-select the pipe/pattern row from the same tables.
-static constexpr uint64_t g_sw64k_r_x_4bpp_16pipe[16] = {
-    0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000001ull, 0x0000000000000002ull,
-    0x0000000000010000ull, 0x0000000000020000ull, 0x0000000000040000ull, 0x0000000000000004ull,
-    0x0000000800080008ull, 0x0000000400100010ull, 0x0000000200200040ull, 0x0000000100400020ull,
-    0x0000000000080000ull, 0x0000000000000010ull, 0x0000000000400000ull, 0x0000000000000040ull,
-};
-
-static constexpr uint64_t g_sw64k_r_x_8bpp_16pipe[16] = {
-    0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000001ull,
-    0x0000000000010000ull, 0x0000000000000002ull, 0x0000000000000004ull, 0x0000000000020000ull,
-    0x0000000800080008ull, 0x0000000400100010ull, 0x0000000200200040ull, 0x0000000100400020ull,
-    0x0000000000040000ull, 0x0000000000000008ull, 0x0000000000100000ull, 0x0000000000000040ull,
-};
-
+// Gen5 tile mode 0x1b (AGC kRenderTarget / SW_64KB_R_X) within-block byte
+// offset. Bit equations match the guest render-target layout used by titles
+// that sample intermediate color targets; the previous Mesa 16-pipe ADDRLIB
+// pattern produced horizontal banding and false-color atlas tiles on those
+// surfaces. Block geometry: 4 BPE → 128×128, 8 BPE → 128×64 elements per
+// 64 KiB block (see TileGetRenderTargetSize).
 static uint32_t Sw64kRxWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_per_element)
 {
-	// ADDRLIB ComputeOffsetFromSwizzlePattern: each bit of the offset is the
-	// parity of selected x/y bits encoded in the 16-bit channel masks.
-	const auto* pattern = (bytes_per_element == 8u ? g_sw64k_r_x_8bpp_16pipe : g_sw64k_r_x_4bpp_16pipe);
 	uint32_t offset = 0;
-	for (uint32_t i = 0; i < 16u; i++)
+	if (bytes_per_element == 4u)
 	{
-		const uint64_t setting = pattern[i];
-		const uint32_t x_mask  = static_cast<uint32_t>(setting & 0xffffu);
-		const uint32_t y_mask  = static_cast<uint32_t>((setting >> 16u) & 0xffffu);
-		const uint32_t z_mask  = static_cast<uint32_t>((setting >> 32u) & 0xffffu);
-		uint32_t       v       = 0;
+		offset ^= (y << 3u) & 0x0008u;
+		offset ^= (y << 4u) & 0x0020u;
+		offset ^= (y << 5u) & 0x0f80u;
+		offset ^= (y << 9u) & 0x1000u;
+		offset ^= (y << 8u) & 0x4000u;
 
-		uint32_t mx = x_mask;
-		uint32_t bx = x;
-		while (mx != 0u)
-		{
-			if ((mx & 1u) != 0u)
-			{
-				v ^= (bx & 1u);
-			}
-			bx >>= 1u;
-			mx >>= 1u;
-		}
-
-		uint32_t my = y_mask;
-		uint32_t by = y;
-		while (my != 0u)
-		{
-			if ((my & 1u) != 0u)
-			{
-				v ^= (by & 1u);
-			}
-			by >>= 1u;
-			my >>= 1u;
-		}
-
-		// 2D surfaces: z is always 0, so z_mask contributes nothing, but the
-		// pattern may still encode Z for the XOR form.
-		(void)z_mask;
-
-		offset |= (v << i);
+		offset ^= (x << 2u) & 0x0004u;
+		offset ^= (x << 3u) & 0x0010u;
+		offset ^= (x << 4u) & 0x0440u;
+		offset ^= (x << 5u) & 0x0300u;
+		offset ^= (x << 6u) & 0x0800u;
+		offset ^= (x << 9u) & 0xa000u;
+		return offset;
 	}
+
+	// 8 BPE (RGBA16F lighting / GBuffer companions).
+	offset ^= (y << 4u) & 0x0010u;
+	offset ^= (y << 6u) & 0x0080u;
+	offset ^= (y << 5u) & 0x0f00u;
+	offset ^= (y << 10u) & 0x5000u;
+
+	offset ^= (x << 3u) & 0x0008u;
+	offset ^= (x << 4u) & 0x0460u;
+	offset ^= (x << 5u) & 0x0300u;
+	offset ^= (x << 6u) & 0x0800u;
+	offset ^= (x << 10u) & 0x2000u;
+	offset ^= (x << 9u) & 0x8000u;
+	return offset;
+}
+
+// Gen5 tile mode 0x09 (AGC kStandard64KB) 32bpp within-block byte offset.
+// Static sample atlases use this layout; it is not the same interleave as
+// kRenderTarget (0x1b). 128×128 elements per 64 KiB block.
+static uint32_t Standard64KB32WithinBlockOffset(uint32_t x, uint32_t y)
+{
+	uint32_t offset = 0;
+	offset ^= (x << 2u) & 0x0cu;
+	offset ^= (x << 5u) & 0x80u;
+	offset ^= (x << 6u) & 0x200u;
+	offset ^= (x << 7u) & 0x800u;
+	offset ^= (x << 8u) & 0x2000u;
+	offset ^= (x << 9u) & 0x8000u;
+
+	offset ^= (y << 4u) & 0x70u;
+	offset ^= (y << 5u) & 0x100u;
+	offset ^= (y << 6u) & 0x400u;
+	offset ^= (y << 7u) & 0x1000u;
+	offset ^= (y << 8u) & 0x4000u;
 	return offset;
 }
 
@@ -938,6 +932,41 @@ void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint
 			const uint64_t tiled  = TileGetSw64kRxOffset(x, y, pitch, bytes_per_element);
 			const uint64_t linear = (static_cast<uint64_t>(y) * width + x) * bytes_per_element;
 			std::memcpy(d + linear, s + tiled, bytes_per_element);
+		}
+	}
+}
+
+uint64_t TileGetStandard64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems)
+{
+	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u);
+
+	static constexpr uint32_t k_block     = 128u;
+	static constexpr uint32_t k_block_bytes = 65536u;
+	const uint32_t            blocks_x    = (pitch_elems + k_block - 1u) / k_block;
+	const uint32_t            xb          = x / k_block;
+	const uint32_t            yb          = y / k_block;
+	const uint64_t            blk_idx     = static_cast<uint64_t>(yb) * blocks_x + xb;
+	return (blk_idx * k_block_bytes) + Standard64KB32WithinBlockOffset(x % k_block, y % k_block);
+}
+
+void TileConvertStandard64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems)
+{
+	EXIT_IF(dst == nullptr);
+	EXIT_IF(src == nullptr);
+	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u);
+
+	const uint32_t pitch = (pitch_elems != 0u ? pitch_elems : width);
+	auto*          d     = static_cast<uint8_t*>(dst);
+	const auto*    s     = static_cast<const uint8_t*>(src);
+	static constexpr uint32_t k_bpp = 4u;
+
+	for (uint32_t y = 0; y < height; y++)
+	{
+		for (uint32_t x = 0; x < width; x++)
+		{
+			const uint64_t tiled  = TileGetStandard64KB32Offset(x, y, pitch);
+			const uint64_t linear = (static_cast<uint64_t>(y) * width + x) * k_bpp;
+			std::memcpy(d + linear, s + tiled, k_bpp);
 		}
 	}
 }
@@ -1395,17 +1424,17 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 
 	{
 		// Reaching here means the precomputed table has no entry for this texture.
-		// Mode 27 (SW_64KB_R_X) shares the 64 KiB rotated-X block geometry with
-		// Gen5 render targets — never fall through to linear byte arithmetic.
-		if (tile == 0x1bu)
+		// Mode 27 (kRenderTarget) and mode 9 (kStandard64KB) use 64 KiB blocks —
+		// never fall through to linear byte arithmetic for those.
+		if (tile == 0x1bu || tile == 0x09u)
 		{
 			const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
 			EXIT_NOT_IMPLEMENTED(bpp == 0);
-			// Detile currently only implements the 4 BPE swizzle pattern; 8 BPE
-			// sample textures observed as aliases of COLOR_16_16_16_16 RTs still
-			// need a correct size for FindRenderTexture / GpuMemory linking.
+			// Mode 9 currently detiles 4 BPE (RGBA8) only; mode 27 supports 4/8 BPE
+			// size geometry even when the sample is an RT alias of float16 targets.
 
 			EXIT_NOT_IMPLEMENTED(levels != 1);
+			EXIT_NOT_IMPLEMENTED(tile == 0x09u && (format != 56u || bpp != 4u));
 
 			const bool     bc1          = (format == 133u);
 			const uint32_t elem_width   = bc1 ? std::max((width + 3u) / 4u, 1u) : width;
@@ -1413,8 +1442,11 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			const uint32_t pitch_texels = (pitch != 0 ? pitch : width);
 			const uint32_t elem_pitch   = bc1 ? std::max((pitch_texels + 3u) / 4u, 1u) : pitch_texels;
 
+			// Size geometry for both modes uses the same 64 KiB block grid as RTs
+			// (tile_mode field of TileGetRenderTargetSize only accepts 0x1b; pass
+			// that for allocation math even when the sample descriptor says 0x09).
 			TileSizeAlign rt {};
-			TileGetRenderTargetSize(elem_width, elem_height, elem_pitch, tile, bpp, &rt);
+			TileGetRenderTargetSize(elem_width, elem_height, elem_pitch, 0x1bu, bpp, &rt);
 			EXIT_NOT_IMPLEMENTED(rt.size == 0);
 
 			if (total_size != nullptr)
