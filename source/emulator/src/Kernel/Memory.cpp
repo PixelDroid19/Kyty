@@ -16,6 +16,7 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 
 #ifdef KYTY_EMU_ENABLED
@@ -1012,6 +1013,57 @@ int KYTY_SYSV_ABI KernelConfiguredFlexibleMemorySize(uint64_t* size)
 	}
 	*size = available;
 	printf("\t *size = 0x%016" PRIx64 "\n", *size);
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size)
+{
+	PRINT_NAME();
+
+	const uint64_t vaddr = reinterpret_cast<uint64_t>(addr);
+	printf("\t addr = 0x%016" PRIx64 " flags = 0x%08x info_size = 0x%016" PRIx64 "\n", vaddr, flags, info_size);
+
+	if (info == nullptr || info_size != sizeof(VirtualQueryInfo) || (flags != 0 && flags != 1))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	EXIT_IF(g_physical_memory == nullptr);
+	EXIT_IF(g_flexible_memory == nullptr);
+
+	uint64_t base = 0;
+	size_t   len  = 0;
+	int      prot = 0;
+	bool     is_direct   = false;
+	bool     is_flexible = false;
+
+	if (g_physical_memory->Find(vaddr, &base, &len, &prot, nullptr, nullptr))
+	{
+		is_direct = true;
+	}
+	else if (g_flexible_memory->Find(vaddr, &base, &len, &prot, nullptr, nullptr))
+	{
+		is_flexible = true;
+	}
+	else
+	{
+		return KERNEL_ERROR_EACCES;
+	}
+
+	std::memset(info, 0, sizeof(VirtualQueryInfo));
+	info->start        = static_cast<uintptr_t>(base);
+	info->end          = static_cast<uintptr_t>(base + len);
+	info->offset       = 0;
+	info->protection   = prot;
+	info->memory_type  = 0;
+	info->is_flexible  = is_flexible ? 1u : 0u;
+	info->is_direct    = is_direct ? 1u : 0u;
+	info->is_committed = 1u;
+
+	printf("\t start = 0x%016" PRIx64 " end = 0x%016" PRIx64 " prot = 0x%x flex=%d direct=%d\n",
+	       static_cast<uint64_t>(info->start), static_cast<uint64_t>(info->end), info->protection,
+	       static_cast<int>(info->is_flexible), static_cast<int>(info->is_direct));
+
 	return OK;
 }
 
