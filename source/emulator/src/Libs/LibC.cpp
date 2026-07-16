@@ -344,6 +344,19 @@ static KYTY_SYSV_ABI int c_sprintf(VA_ARGS)
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
 	return Format(s, C_UNBOUNDED_FORMAT, fmt, &ctx.va_list);
 }
+// Gen5 sprintf_s — NID xEszJVGpybs: buffer, size, format, ...
+static KYTY_SYSV_ABI int c_sprintf_s(VA_ARGS)
+{
+	VA_CONTEXT(ctx);
+	char*       s   = VaArg_ptr<char>(&ctx.va_list);
+	size_t      n   = VaArg_size_t(&ctx.va_list);
+	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
+	if (s == nullptr || n == 0 || fmt == nullptr)
+	{
+		return -1;
+	}
+	return Format(s, n, fmt, &ctx.va_list);
+}
 static KYTY_SYSV_ABI int c_fprintf(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
@@ -824,6 +837,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("+qitMEbkSWk", LibC::c_vsprintf_s);
 	LIB_FUNC("Q2V+iqvjgC0", LibC::c_vsnprintf); // vsnprintf (Gen5 libc_v1)
 	LIB_FUNC("tcVi5SivF7Q", LibC::c_sprintf);
+	// Gen5 sprintf_s — NID xEszJVGpybs (hard-abort after Fiber init on Astro).
+	LIB_FUNC("xEszJVGpybs", LibC::c_sprintf_s);
 	LIB_FUNC("fffwELXNVFA", LibC::c_fprintf);
 	LIB_FUNC("1Pk0qZQGeWo", LibC::c_sscanf);
 	LIB_FUNC("jbz9I9vkqkk", LibC::c_vsprintf);
@@ -839,8 +854,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("AEJdIVZTEmo", LibC::c_qsort);
 	LIB_FUNC("L1SBTkC+Cvw", LibC::c_abort);
 	LIB_FUNC("VPbJwTCgME0", LibC::c_srand);
-	// Gen5 libc_v1 rand / strtok — evidenced first imports after global heap initialization.
+	// Gen5 libc_v1 rand — Nmtr628eA3A observed early; cpCOXWMgha0 after Fiber/thread bring-up.
 	LIB_FUNC("Nmtr628eA3A", LibC::c_rand);
+	LIB_FUNC("cpCOXWMgha0", LibC::c_rand);
 	LIB_FUNC("oVkZ8W8-Q8A", LibC::c_strtok);
 
 	// time
