@@ -205,6 +205,10 @@ TEST(EmulatorKernelMemory, DecodesGen5MprotectProtectionFamily)
 	Core::VirtualMemory::Mode     mode {};
 	Graphics::GpuMemoryMode       gpu {};
 
+	ASSERT_TRUE(KernelDecodeMprotectProt(0x0, &mode, &gpu));
+	EXPECT_EQ(mode, Core::VirtualMemory::Mode::NoAccess);
+	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::NoAccess);
+
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x11, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::Read);
 	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::Read);
