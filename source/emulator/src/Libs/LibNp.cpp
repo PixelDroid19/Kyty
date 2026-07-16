@@ -257,6 +257,10 @@ namespace Kyty::Libs::NpManager {
 // country before online services. Does not contact PSN.
 LIB_VERSION("NpManager", 1, "NpManager", 1, 1);
 
+// SCE_NP_ERROR_SIGNED_OUT — offline titles must tolerate signed-out NP.
+static constexpr int kNpErrorSignedOut       = static_cast<int>(0x80550006u);
+static constexpr int kNpErrorInvalidArgument = static_cast<int>(0x80550003u);
+
 // sceNpGetAccountCountryA — NID JT+t00a3TxA. Observed SysV (user_id=1, out*).
 // Country code is a 2-letter lowercase ISO string plus NUL.
 static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
@@ -264,7 +268,7 @@ static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
 	PRINT_NAME();
 	if (country == nullptr)
 	{
-		return static_cast<int>(0x80550003u); // SCE_NP_ERROR_INVALID_ARGUMENT-style
+		return kNpErrorInvalidArgument;
 	}
 	country[0] = 'u';
 	country[1] = 's';
@@ -272,9 +276,24 @@ static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
 	return OK;
 }
 
+// sceNpGetAccountIdA — NID rbknaUjpqWo. Observed Astro after UserService privacy:
+// (user_id=1, account_id*). Report signed-out offline account id 0.
+static KYTY_SYSV_ABI int GetAccountIdA(int32_t user_id, uint64_t* account_id)
+{
+	PRINT_NAME();
+	printf("\t user_id = %d\n", user_id);
+	if (account_id == nullptr)
+	{
+		return kNpErrorInvalidArgument;
+	}
+	*account_id = 0;
+	return kNpErrorSignedOut;
+}
+
 LIB_DEFINE(InitNpManager_1)
 {
 	LIB_FUNC("JT+t00a3TxA", GetAccountCountryA);
+	LIB_FUNC("rbknaUjpqWo", GetAccountIdA);
 }
 
 } // namespace Kyty::Libs::NpManager
