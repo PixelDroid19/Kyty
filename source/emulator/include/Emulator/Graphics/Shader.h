@@ -107,6 +107,9 @@ enum class ShaderInstructionType : uint32_t
 	SMovB32,
 	SMovB64,
 	SMovkI32,
+	// SOP1: bitwise not (sets SCC if result non-zero).
+	SNotB32,
+	SNotB64,
 	SMulHiU32,
 	SMulI32,
 	SMulkI32,
@@ -133,7 +136,9 @@ enum class ShaderInstructionType : uint32_t
 	VAshrI32,
 	VAshrrevI32,
 	VBcntU32B32,
+	VBfeI32,
 	VBfeU32,
+	VBfiB32,
 	VBfmB32,
 	VBfrevB32,
 	VCeilF32,
@@ -169,12 +174,18 @@ enum class ShaderInstructionType : uint32_t
 	VCmpTruF32,
 	VCmpTU32,
 	VCmpUF32,
+	VCmpxEqI32,
 	VCmpxEqU32,
+	VCmpxGeI32,
 	VCmpxGeU32,
 	VCmpxGtF32,
+	VCmpxGtI32,
 	VCmpxGtU32,
+	VCmpxLeI32,
 	VCmpxLtF32,
+	VCmpxLtI32,
 	VCmpxNeqF32,
+	VCmpxNeI32,
 	VCmpxNeU32,
 	VCndmaskB32,
 	VCosF32,
@@ -437,10 +448,14 @@ struct ShaderOperand
 	bool              absolute    = false;
 	bool              negate      = false;
 	bool              clamp       = false;
+	// SDWA channel select (GCN/RDNA): 0-3 = BYTE_n, 4-5 = WORD_n, 6 = DWORD.
+	// Applied as zero-extend extract when loading the operand for recompile.
+	uint8_t swizzle = 6;
 
 	bool operator==(const ShaderOperand& other) const
 	{
-		return type == other.type && constant.u == other.constant.u && register_id == other.register_id && size == other.size;
+		return type == other.type && constant.u == other.constant.u && register_id == other.register_id && size == other.size &&
+		       swizzle == other.swizzle;
 	}
 };
 

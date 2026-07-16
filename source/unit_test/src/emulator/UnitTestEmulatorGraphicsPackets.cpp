@@ -2318,6 +2318,62 @@ TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0)
 	EXPECT_EQ(inst.src[0].type, ShaderOperandType::Vgpr);
 	EXPECT_EQ(inst.src[0].register_id, 2);
 	EXPECT_TRUE(inst.src[0].negate);
+	EXPECT_EQ(inst.src[0].swizzle, 6u);
+}
+
+// SOP1 s_not_b64 (op 0x08): bitwise not of a 64-bit SGPR pair.
+TEST(EmulatorGraphicsPackets, ParsesGen5SNotB64)
+{
+	// SOP1 encoding: [31:23]=0b101111101, [22:16]=sdst, [15:8]=op, [7:0]=ssrc0
+	// s_not_b64 s[0:1], s[2:3] → sdst=0, op=0x08, ssrc0=2
+	const uint32_t word0 = (0x17Du << 23u) | (0u << 16u) | (0x08u << 8u) | 2u;
+	const uint32_t shader[] = {word0, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::SNotB64);
+	EXPECT_EQ(inst.format, ShaderInstructionFormat::Sdst2Ssrc02);
+	EXPECT_EQ(inst.dst.size, 2);
+	EXPECT_EQ(inst.src[0].size, 2);
+	EXPECT_EQ(inst.dst.register_id, 0);
+	EXPECT_EQ(inst.src[0].register_id, 2);
+}
+
+// VOP1 SDWA with src0_sel=BYTE_0 (0). Observed Gen5 path after PlayGo/Resident Load.
+TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0Byte0)
+{
+	// v_mov_b32 v0, v2.b0 with SDWA: opcode 1, src0_sel=0 (BYTE_0), dst_sel=DWORD.
+	const uint32_t word0 = (0x3fu << 25u) | (0u << 17u) | (0x01u << 9u) | 249u;
+	const uint32_t word1 = 2u | (6u << 8u) | (0u << 16u); // vgpr2, dst DWORD, src0 BYTE_0
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::VMovB32);
+	EXPECT_EQ(inst.src[0].register_id, 2);
+	EXPECT_EQ(inst.src[0].swizzle, 0u);
 }
 
 // Compressed MRT export must read the uint packed-half shadow written by
