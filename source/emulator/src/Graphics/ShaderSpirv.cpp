@@ -5804,10 +5804,11 @@ KYTY_RECOMPILER_FUNC(Recompile_SNotB32_SVdstSVsrc0)
     OpStore %<dst> %t_<index>
     <scc>
 )";
+	// Insert <scc> before <dst> so SCC_NZ_1 %<dst> resolves.
 	*dst_source += String8(text)
-	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 1))
+	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);
 
 	return true;
@@ -5848,13 +5849,14 @@ KYTY_RECOMPILER_FUNC(Recompile_SNotB64_Sdst2Ssrc02)
     <execz>
     <scc>
 )";
+	// Insert <scc> before <dst0>/<dst1> so SCC_NZ_2 placeholders resolve.
 	*dst_source += String8(text)
-	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<dst1>", dst_value1.value)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<execz>", (operand_is_exec(inst.dst) ? EXECZ : ""))
 	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 2))
+	                   .ReplaceStr("<dst0>", dst_value0.value)
+	                   .ReplaceStr("<dst1>", dst_value1.value)
 	                   .ReplaceStr("<index>", index_str);
 
 	return true;
