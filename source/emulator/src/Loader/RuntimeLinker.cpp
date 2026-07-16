@@ -238,6 +238,31 @@ void LoaderRunProgramInitializers(uint64_t base_vaddr, const DynamicInfo& info)
 	}
 }
 
+bool LoaderCodeContainsDirectCallTo(const uint8_t* code, uint64_t size, uint64_t code_vaddr, uint64_t target_vaddr)
+{
+	if (code == nullptr || size < 5)
+	{
+		return false;
+	}
+
+	for (uint64_t off = 0; off + 5 <= size; off++)
+	{
+		if (code[off] != 0xe8)
+		{
+			continue;
+		}
+		int32_t rel = 0;
+		std::memcpy(&rel, code + off + 1, sizeof(rel));
+		const uint64_t next  = code_vaddr + off + 5;
+		const uint64_t dest  = static_cast<uint64_t>(static_cast<int64_t>(next) + static_cast<int64_t>(rel));
+		if (dest == target_vaddr)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 static uint64_t get_aligned_size(const Elf64_Phdr* p)
 {
 	return (p->p_align != 0 ? (p->p_memsz + (p->p_align - 1)) & ~(p->p_align - 1) : p->p_memsz);
@@ -1062,21 +1087,26 @@ void RuntimeLinker::Execute()
 
 		Core::mem_guest_thread_enter();
 
-		// Main executables never went through StartModule; run DT_INIT /
-		// init_array so static constructors (heap bootstrap, etc.) execute before
-		// _start hands off to the game.
+		// Main ET_EXEC images do not go through StartModule. Bootstrap the
+		// application-heap API before CRT so early guest malloc works.
+		//
+		// Do not run DT_INIT / init_array here. Gen5 CRT _start (entry) calls
+		// the DT_INIT (_init) body itself; invoking it from the host as well
+		// re-runs static constructors. That re-links fixed guest registration
+		// tables into self-loops and busy-spins forever (no further HLE).
 		{
 			Core::LockGuard lock(m_mutex);
 			for (auto* program: m_programs)
 			{
-				if (program != nullptr && program->elf != nullptr && !program->elf->IsShared() && program->dynamic_info != nullptr)
+				if (program != nullptr && program->elf != nullptr && !program->elf->IsShared())
 				{
-					printf("Run main initializers: preinit=0x%016" PRIx64 " init=0x%016" PRIx64 " init_array=0x%016" PRIx64
-					       " size=0x%016" PRIx64 "\n",
-					       program->dynamic_info->preinit_array_vaddr, program->dynamic_info->init_vaddr,
-					       program->dynamic_info->init_array_vaddr, program->dynamic_info->init_array_size);
+					if (program->dynamic_info != nullptr)
+					{
+						printf("Main CRT entry=0x%016" PRIx64 " DT_INIT=0x%016" PRIx64
+						       " (host skips pre-entry init; CRT runs it once)\n",
+						       entry, program->base_vaddr + program->dynamic_info->init_vaddr);
+					}
 					Kyty::Libs::LibKernel::ApplicationHeap::EnsureInitialized(program);
-					LoaderRunProgramInitializers(program->base_vaddr, *program->dynamic_info);
 					break;
 				}
 			}

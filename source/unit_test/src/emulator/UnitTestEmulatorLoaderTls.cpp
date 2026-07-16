@@ -55,6 +55,21 @@ TEST(EmulatorLoaderTls, RewritesMultipleSitesAndSkipsShortBuffers)
 	EXPECT_EQ(LoaderRewriteTlsGdCallRexPrefix(nullptr, 64), 0u);
 }
 
+// Gen5 CRT: entry (_start) at 0x70 contains `call _init` targeting DT_INIT at 0x10.
+// Host must not also run DT_INIT before entry (double static ctor → self-loop spin).
+TEST(EmulatorLoaderTls, DetectsCrtEntryDirectCallToInit)
+{
+	using Kyty::Loader::LoaderCodeContainsDirectCallTo;
+
+	// code @ 0x100: 90 e8 0b 00 00 00 c3
+	// CALL at 0x101, next=0x106, rel=+0x0b → target 0x111.
+	const uint8_t code[] = {0x90, 0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3};
+	EXPECT_TRUE(LoaderCodeContainsDirectCallTo(code, sizeof(code), 0x100, 0x111));
+	EXPECT_FALSE(LoaderCodeContainsDirectCallTo(code, sizeof(code), 0x100, 0x200));
+	EXPECT_FALSE(LoaderCodeContainsDirectCallTo(nullptr, 16, 0x100, 0x111));
+	EXPECT_FALSE(LoaderCodeContainsDirectCallTo(code, 4, 0x100, 0x111));
+}
+
 UT_END();
 
 #endif // KYTY_EMU_ENABLED
