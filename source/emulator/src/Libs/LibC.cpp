@@ -373,6 +373,9 @@ static KYTY_SYSV_ABI int c_snprintf(VA_ARGS)
 // but Astro ObjectDefinition path-building checks `r == 0` after the call (errno_t
 // style: 0 success, non-zero failure). Standard snprintf returns the written
 // length, which falsely trips that assert for any non-empty format result.
+//
+// Note: guest mesh/anim companions may open as bare `/app0/.jxm` after OD load;
+// that is handled by PreferHostOdCompanionAsset (last OD basename → gfx/anim).
 static KYTY_SYSV_ABI int c_snprintf_errno(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
@@ -388,7 +391,6 @@ static KYTY_SYSV_ABI int c_snprintf_errno(VA_ARGS)
 	{
 		return written;
 	}
-	// Truncation: would need more than n-1 payload bytes.
 	if (static_cast<size_t>(written) >= n)
 	{
 		return -1;
