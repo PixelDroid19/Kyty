@@ -2500,32 +2500,37 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 	printf("\t interrupt_ctx_id = %" PRIu32 "\n", interrupt_ctx_id);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	EXIT_NOT_IMPLEMENTED(dst != 1);
+	// dst: 0 = memory, 1 = TC_L2 (Gen5 AGC).
+	EXIT_NOT_IMPLEMENTED(dst > 1);
 	// data_sel: 0 = no destination write (barrier/flush only), 1 = 32-bit
 	// immediate, 2 = 64-bit immediate, 3 = GPU clock counter. Packet layout
-	// stores data in DW5/DW6 for write forms; data_sel 0 uses the same 7-DW
-	// custom envelope. CP custom R_RELEASE_MEM already accepts 0..3.
+	// stores data in DW5/DW6 for write forms; data_sel 0 uses the same custom
+	// envelope. CP custom R_RELEASE_MEM already accepts 0..3.
 	EXIT_NOT_IMPLEMENTED(data_sel != 0 && data_sel != 1 && data_sel != 2 && data_sel != 3);
 	EXIT_NOT_IMPLEMENTED(gds_offset != 0);
-	// Non-GDS forms do not encode GDS fields. Guests pass gds_size 0 (unused)
-	// or 1 (legacy default); both are packet-equivalent here.
-	EXIT_NOT_IMPLEMENTED(gds_size != 0 && gds_size != 1);
-	EXIT_NOT_IMPLEMENTED(interrupt != 0);
-	EXIT_NOT_IMPLEMENTED(interrupt_ctx_id != 0);
+	// Non-GDS forms do not encode GDS fields. Guests pass gds_size 0 (unused),
+	// 1 (legacy default), or 2 (observed Gen5).
+	EXIT_NOT_IMPLEMENTED(gds_size > 2);
+	// interrupt selector is a small enum (0 = none). Non-zero values are
+	// packed into the control dword; the CP may still treat clock/immediate
+	// writes as non-interrupting label publishes.
+	EXIT_NOT_IMPLEMENTED(interrupt > 3);
+	EXIT_NOT_IMPLEMENTED((interrupt_ctx_id & ~0x07ffffffu) != 0);
 
 	buf->DbgDump();
 
-	auto* cmd = buf->AllocateDW(7);
+	auto* cmd = buf->AllocateDW(8);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
-	cmd[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
 	cmd[1] = action | (static_cast<uint32_t>(cache_policy) << 8u);
-	cmd[2] = gcr_cntl | (static_cast<uint32_t>(data_sel) << 16u);
+	cmd[2] = gcr_cntl | (static_cast<uint32_t>(data_sel) << 16u) | (static_cast<uint32_t>(interrupt) << 24u);
 	cmd[3] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(address) & 0xffffffffu);
 	cmd[4] = static_cast<uint32_t>((reinterpret_cast<uint64_t>(address) >> 32u) & 0xffffffffu);
 	cmd[5] = static_cast<uint32_t>(data & 0xffffffffu);
 	cmd[6] = static_cast<uint32_t>((data >> 32u) & 0xffffffffu);
+	cmd[7] = interrupt_ctx_id & 0x07ffffffu;
 
 	return cmd;
 }
