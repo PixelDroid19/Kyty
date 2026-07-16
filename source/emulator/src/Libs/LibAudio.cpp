@@ -47,6 +47,7 @@ LIB_DEFINE(InitAudio_1_AudioOut2)
 	LIB_FUNC("JK2wamZPzwM", AudioOut2::AudioOut2PortCreate);           // PortCreate
 	LIB_FUNC("cd+Rtw+D1x8", AudioOut2::AudioOut2PortDestroy);          // PortDestroy
 	LIB_FUNC("8XTArSPyWHk", AudioOut2::AudioOut2PortSetAttributes);    // PortSetAttributes
+	LIB_FUNC("gatEUKG+Ea4", AudioOut2::AudioOut2PortGetState);         // PortGetState
 	LIB_FUNC("xywYcRB7nbQ", AudioOut2::AudioOut2UserCreate);           // UserCreate
 	LIB_FUNC("IaZXJ9M79uo", AudioOut2::AudioOut2UserDestroy);          // UserDestroy
 

@@ -357,6 +357,21 @@ void sys_virtual_destroy_shared_backing(void* backing)
 	delete shared;
 }
 
+bool sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_offset, uint64_t size)
+{
+	// SEC_RESERVE file mappings do not expose a portable punch-hole path that
+	// reclaims committed pages while other views may still exist. Release/unmap
+	// already drop host commit via UnmapViewOfFile; treat discard as success so
+	// callers share one control flow with Linux.
+	auto* shared = static_cast<SharedBacking*>(backing);
+	if (shared == nullptr || shared->mapping == nullptr || size == 0 || backing_offset > shared->size ||
+	    size > shared->size - backing_offset)
+	{
+		return false;
+	}
+	return true;
+}
+
 uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
 	                                    VirtualMemory::Mode mode, uint64_t alignment)
 {

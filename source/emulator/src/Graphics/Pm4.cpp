@@ -50,6 +50,7 @@ static void init_names()
 		g_r_names[R_WAIT_MEM_64]      = "R_WAIT_MEM_64";
 		g_r_names[R_FLIP]             = "R_FLIP";
 		g_r_names[R_RELEASE_MEM]      = "R_RELEASE_MEM";
+		g_r_names[R_DMA_DATA]         = "R_DMA_DATA";
 
 		g_names[IT_NOP]                       = "IT_NOP";
 		g_names[IT_SET_BASE]                  = "IT_SET_BASE";

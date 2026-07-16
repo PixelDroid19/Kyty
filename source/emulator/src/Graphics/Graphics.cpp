@@ -2407,6 +2407,58 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_
 	return cmd;
 }
 
+uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf)
+{
+	// GNM/AGC stallCommandBufferParser: fixed EVENT_WRITE CS partial flush (0x07).
+	// Ported from SharpEmu feature/astro-bot-baseline (sceAgcDcbStallCommandBufferParser).
+	PRINT_NAME();
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+	constexpr uint32_t kCsPartialFlush = 0x07u;
+	cmd[0]                             = KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u);
+	cmd[1]                             = kCsPartialFlush;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t destination, uint8_t destination_cache_policy, uint8_t source,
+                                           uint64_t destination_address, uint8_t source_cache_policy, uint8_t control4,
+                                           uint64_t source_address, uint32_t byte_count, uint8_t control7, uint8_t control8,
+                                           uint8_t control9)
+{
+	// sceAgcDcbDmaData / sceAgcAcbDmaData packet layout from SharpEmu Astro baseline.
+	PRINT_NAME();
+	printf("\t destination              = 0x%02" PRIx8 "\n", destination);
+	printf("\t destination_cache_policy = 0x%02" PRIx8 "\n", destination_cache_policy);
+	printf("\t source                   = 0x%02" PRIx8 "\n", source);
+	printf("\t destination_address      = 0x%016" PRIx64 "\n", destination_address);
+	printf("\t source_cache_policy      = 0x%02" PRIx8 "\n", source_cache_policy);
+	printf("\t source_address           = 0x%016" PRIx64 "\n", source_address);
+	printf("\t byte_count               = %" PRIu32 "\n", byte_count);
+
+	if (buf == nullptr || byte_count == 0 || (byte_count & 3u) != 0)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(8);
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA);
+	cmd[1] = static_cast<uint32_t>(destination) | (static_cast<uint32_t>(destination_cache_policy) << 8u) |
+	         (static_cast<uint32_t>(source) << 16u) | (static_cast<uint32_t>(source_cache_policy) << 24u);
+	cmd[2] = static_cast<uint32_t>(control4) | (static_cast<uint32_t>(control7) << 8u) | (static_cast<uint32_t>(control8) << 16u) |
+	         (static_cast<uint32_t>(control9) << 24u);
+	cmd[3] = byte_count;
+	cmd[4] = static_cast<uint32_t>(destination_address & 0xffffffffu);
+	cmd[5] = static_cast<uint32_t>((destination_address >> 32u) & 0xffffffffu);
+	cmd[6] = static_cast<uint32_t>(source_address & 0xffffffffu);
+	cmd[7] = static_cast<uint32_t>((source_address >> 32u) & 0xffffffffu);
+	return cmd;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uint32_t cb_db_op, uint32_t gcr_cntl,
                                               const volatile void* base, uint64_t size_bytes, uint32_t poll_cycles)
 {

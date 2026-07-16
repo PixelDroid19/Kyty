@@ -906,6 +906,15 @@ static bool shared_range_is_valid(const SharedBacking* backing, uint64_t backing
 	       size <= backing->size - backing_offset;
 }
 
+bool DiscardSharedBackingRange(SharedBacking* backing, uint64_t backing_offset, uint64_t size)
+{
+	if (!shared_range_is_valid(backing, backing_offset, size))
+	{
+		return false;
+	}
+	return sys_virtual_discard_shared_backing_range(backing->handle, backing_offset, size);
+}
+
 uint64_t MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                           uint64_t alignment)
 {

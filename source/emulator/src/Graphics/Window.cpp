@@ -265,6 +265,7 @@ struct WindowContext
 		uint32_t              every_present = 0;
 		bool                  telemetry     = false;
 		uint32_t              max_edge      = 0;
+		uint32_t              keep_files    = 8;
 		bool                  first_pending = false;
 		bool                  manual_pending = false;
 		uint64_t              sequence      = 0;
@@ -420,12 +421,19 @@ static void NativeCaptureConfigure(WindowContext* ctx)
 	ctx->native_capture.first_pending = ctx->native_capture.first_present;
 	ctx->native_capture.every_present = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_EVERY");
 	ctx->native_capture.telemetry     = NativeCaptureEnvEnabled("KYTY_NATIVE_TELEMETRY");
-	// Optional downscale for agent loops on memory-constrained hosts (e.g. 1280).
-	ctx->native_capture.max_edge      = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_MAX_EDGE");
+	// Default edge cap bounds disk/RAM for 4K VideoOut captures; set
+	// KYTY_NATIVE_CAPTURE_MAX_EDGE=0 for full-resolution dumps.
+	ctx->native_capture.max_edge      = NativeCaptureResolveMaxEdge(std::getenv("KYTY_NATIVE_CAPTURE_MAX_EDGE"));
+	ctx->native_capture.keep_files    = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_KEEP");
+	if (ctx->native_capture.keep_files == 0)
+	{
+		ctx->native_capture.keep_files = 8;
+	}
 
-	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE_CONFIG enabled=1 first=%d every=%u trigger=%d max_edge=%u\n",
+	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE_CONFIG enabled=1 first=%d every=%u trigger=%d max_edge=%u keep=%u\n",
 	             ctx->native_capture.first_present ? 1 : 0, ctx->native_capture.every_present,
-	             ctx->native_capture.trigger_file.empty() ? 0 : 1, ctx->native_capture.max_edge);
+	             ctx->native_capture.trigger_file.empty() ? 0 : 1, ctx->native_capture.max_edge,
+	             ctx->native_capture.keep_files);
 }
 
 enum class NativeCaptureMilestone
@@ -654,6 +662,34 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 			                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame, "save_image", SDL_GetError());
 		}
 		return;
+	}
+
+	// Bound capture-directory growth: keep only the newest N BMP(+json) pairs.
+	if (ctx->native_capture.keep_files > 0 && !ctx->native_capture.directory.empty())
+	{
+		std::error_code          list_error;
+		std::vector<std::filesystem::directory_entry> bmps;
+		for (const auto& entry: std::filesystem::directory_iterator(ctx->native_capture.directory, list_error))
+		{
+			if (!list_error && entry.is_regular_file() && entry.path().extension() == ".bmp")
+			{
+				bmps.push_back(entry);
+			}
+		}
+		std::sort(bmps.begin(), bmps.end(),
+		          [](const std::filesystem::directory_entry& a, const std::filesystem::directory_entry& b)
+		          {
+			          std::error_code ea;
+			          std::error_code eb;
+			          return a.last_write_time(ea) > b.last_write_time(eb);
+		          });
+		const size_t prune = NativeCapturePruneCount(bmps.size(), ctx->native_capture.keep_files);
+		for (size_t i = bmps.size() - prune; i < bmps.size(); ++i)
+		{
+			std::error_code remove_error;
+			std::filesystem::remove(bmps[i].path(), remove_error);
+			std::filesystem::remove(bmps[i].path().string() + ".json", remove_error);
+		}
 	}
 
 	const auto metadata_path = image_path.string() + ".json";

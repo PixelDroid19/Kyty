@@ -6,8 +6,10 @@
 #include "Emulator/Common.h"
 
 #include <algorithm>
-#include <cstring>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 #include <vulkan/vulkan_core.h>
@@ -52,6 +54,47 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 [[nodiscard]] inline bool UtilBlitImageNeedsSourceInitialization(VkImageLayout tracked_layout)
 {
 	return tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
+// Native VideoOut BMPs default to a capped edge so agent loops do not write
+// multi-dozen-MB 4K frames. Explicit env "0" means full resolution.
+[[nodiscard]] inline uint32_t NativeCaptureResolveMaxEdge(const char* env_value, uint32_t default_when_unset = 1280u)
+{
+	if (env_value == nullptr || env_value[0] == '\0')
+	{
+		return default_when_unset;
+	}
+	char*      end    = nullptr;
+	const auto parsed = std::strtoul(env_value, &end, 10);
+	if (end == env_value || *end != '\0' || parsed > static_cast<unsigned long>(std::numeric_limits<uint32_t>::max()))
+	{
+		return default_when_unset;
+	}
+	return static_cast<uint32_t>(parsed);
+}
+
+// Keep at most `keep` newest capture basenames; returns how many older names
+// should be deleted. `names_newest_first` is sorted by mtime descending.
+[[nodiscard]] inline size_t NativeCapturePruneCount(size_t file_count, size_t keep)
+{
+	if (keep == 0 || file_count <= keep)
+	{
+		return 0;
+	}
+	return file_count - keep;
+}
+
+// Round-robin pipeline slot to replace when the cache is full. Avoids EXIT on
+// long sessions that exceed MAX_PIPELINES unique variants.
+[[nodiscard]] inline uint32_t PipelineCacheNextEvictIndex(uint32_t size, uint32_t* cursor)
+{
+	if (size == 0 || cursor == nullptr)
+	{
+		return 0;
+	}
+	const uint32_t index = (*cursor) % size;
+	*cursor              = index + 1u;
+	return index;
 }
 
 [[nodiscard]] inline bool DepthFormatHasStencil(VkFormat format)
