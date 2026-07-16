@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <vulkan/vk_enum_string_helper.h>
 
 //#define XXH_INLINE_ALL

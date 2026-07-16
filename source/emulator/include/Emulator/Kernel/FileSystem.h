@@ -54,6 +54,17 @@ int KYTY_SYSV_ABI     KernelUnlink(const char* path);
 int KYTY_SYSV_ABI     KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep);
 int KYTY_SYSV_ABI     KernelGetdents(int fd, char* buf, int nbytes);
 int KYTY_SYSV_ABI     KernelMkdir(const char* path, uint16_t mode);
+// sceKernelAprResolveFilepathsToIdsAndFileSizes: paths[count] → ids[count] (u32, optional)
+// and sizes[count] (u64). File ids are stable host-side hashes of the guest path.
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* paths, uint64_t count, uint32_t* ids,
+                                                             uint64_t* sizes);
+// Host path lookup for APR file ids minted by KernelAprResolveFilepathsToIdsAndFileSizes.
+bool AprTryGetHostPath(uint32_t file_id, String* out_host_path);
+
+// sceKernelAprSubmitCommandBuffer — NID eE4Szl8sil8.
+// Observed SysV ABI: (cmd, 1, ptr, 2, ptr). Ampr builders already run
+// eagerly, so submit is currently a success acknowledgement.
+int KYTY_SYSV_ABI KernelAprSubmitCommandBuffer(void* cmd, uint64_t arg1, void* arg2, uint64_t arg3, void* arg4);
 
 } // namespace Kyty::Libs::LibKernel::FileSystem
 

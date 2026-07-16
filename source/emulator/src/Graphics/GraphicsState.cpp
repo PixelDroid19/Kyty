@@ -119,16 +119,24 @@ DepthClearActions ResolveDepthClearActions(bool register_depth_clear, bool htile
 
 ColorTargetLayout ResolveColorTargetLayout(uint32_t mask)
 {
+	return ResolveColorTargetLayout(mask, ColorTargetLayout::kMaxTargets);
+}
+
+ColorTargetLayout ResolveColorTargetLayout(uint32_t mask, uint32_t configured_target_count)
+{
 	ColorTargetLayout layout {};
+	EXIT_NOT_IMPLEMENTED(configured_target_count > ColorTargetLayout::kMaxTargets);
 	if (mask == 0)
 	{
 		return layout;
 	}
 
-	// Scan RT0..RT7: accept only contiguous full-channel (0xf) nibbles from RT0.
-	// A partial nibble is PartialChannel. A nonzero nibble after a zero hole is Gapped.
+	// Scan only physically configured RT slots. Higher CB_TARGET_MASK nibbles
+	// have no attachment semantics until their CB_COLORn_BASE is configured.
+	// The nibble is preserved so pipeline colorWriteMask can apply partial
+	// channel writes. A nonzero nibble after a zero hole is Gapped.
 	bool saw_zero = false;
-	for (uint32_t slot = 0; slot < ColorTargetLayout::kMaxTargets; slot++)
+	for (uint32_t slot = 0; slot < configured_target_count; slot++)
 	{
 		const uint8_t nibble = static_cast<uint8_t>((mask >> (slot * 4u)) & 0xFu);
 		if (nibble == 0)
@@ -140,12 +148,6 @@ ColorTargetLayout ResolveColorTargetLayout(uint32_t mask)
 		{
 			layout.count = 0;
 			layout.error = ColorTargetLayoutError::Gapped;
-			return layout;
-		}
-		if (nibble != 0xFu)
-		{
-			layout.count = 0;
-			layout.error = ColorTargetLayoutError::PartialChannel;
 			return layout;
 		}
 		layout.nibbles[layout.count] = nibble;
@@ -164,15 +166,33 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 		return Gen5SampleBacking::ExactRenderTarget;
 	}
 
-	// The guest-memory tile-27 uploader currently has an evidenced 4-Bpp
-	// detile path only (fmt 56). Other formats require an exact live RT until
-	// their byte-width-specific layout is implemented.
-	if (tile == 27u && fmt != 56u)
+	// The guest-memory tile-27 uploader currently has evidenced paths for
+	// RGBA8 texels (fmt 56) and BC1 blocks (fmt 133). Other formats require a
+	// live RT/StorageTexture alias until their byte-width-specific detile path
+	// is implemented.
+	if (tile == 27u && fmt != 56u && fmt != 133u)
 	{
 		return Gen5SampleBacking::Unsupported;
 	}
 
 	return Gen5SampleBacking::GuestMemoryTexture;
+}
+
+SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp)
+{
+	switch (sq_tex_clamp)
+	{
+		case 0: return SamplerAddressMode::Repeat;
+		case 1: return SamplerAddressMode::MirroredRepeat;
+		case 2: return SamplerAddressMode::ClampToEdge;
+		case 6: return SamplerAddressMode::ClampToBorder;
+		// AMD SQ_TEX_MIRROR_ONCE_BORDER has no exact Vulkan address mode.
+		// Prefer border behavior over enabling mirror-clamp-to-edge without a
+		// checked device feature/extension.
+		case 7: return SamplerAddressMode::ClampToBorder;
+		default: EXIT("unknown clamp: %u\n", sq_tex_clamp);
+	}
+	return SamplerAddressMode::ClampToBorder;
 }
 
 SamplerComparison ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation)
@@ -198,6 +218,77 @@ void SetGenericScissorBr(HW::Context& context, uint32_t value)
 
 	context.SetGenericScissor(viewport.generic_scissor_left, viewport.generic_scissor_top, right, bottom,
 	                          viewport.generic_scissor_window_offset_enable);
+}
+
+void SetScreenScissorTl(HW::Context& context, uint32_t value)
+{
+	const auto& viewport = context.GetScreenViewport();
+	const int   left     = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_SCREEN_SCISSOR_TL, TL_X)));
+	const int   top      = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_SCREEN_SCISSOR_TL, TL_Y)));
+
+	context.SetScreenScissor(left, top, viewport.screen_scissor_right, viewport.screen_scissor_bottom);
+}
+
+void SetScreenScissorBr(HW::Context& context, uint32_t value)
+{
+	const auto& viewport = context.GetScreenViewport();
+	const int   right    = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_SCREEN_SCISSOR_BR, BR_X)));
+	const int   bottom   = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_SCREEN_SCISSOR_BR, BR_Y)));
+
+	context.SetScreenScissor(viewport.screen_scissor_left, viewport.screen_scissor_top, right, bottom);
+}
+
+void SetRenderControl(HW::Context& context, uint32_t value)
+{
+	HW::RenderControl r;
+
+	r.depth_clear_enable       = KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_CLEAR_ENABLE) != 0;
+	r.stencil_clear_enable     = KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_CLEAR_ENABLE) != 0;
+	r.resummarize_enable       = KYTY_PM4_GET(value, DB_RENDER_CONTROL, RESUMMARIZE_ENABLE) != 0;
+	r.stencil_compress_disable = KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_COMPRESS_DISABLE) != 0;
+	r.depth_compress_disable   = KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_COMPRESS_DISABLE) != 0;
+	r.copy_centroid            = KYTY_PM4_GET(value, DB_RENDER_CONTROL, COPY_CENTROID) != 0;
+	r.copy_sample              = KYTY_PM4_GET(value, DB_RENDER_CONTROL, COPY_SAMPLE);
+
+	context.SetRenderControl(r);
+}
+
+void SetStencilControl(HW::Context& context, uint32_t value)
+{
+	HW::StencilControl r;
+
+	r.stencil_fail     = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILFAIL);
+	r.stencil_zpass    = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILZPASS);
+	r.stencil_zfail    = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILZFAIL);
+	r.stencil_fail_bf  = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILFAIL_BF);
+	r.stencil_zpass_bf = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILZPASS_BF);
+	r.stencil_zfail_bf = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILZFAIL_BF);
+
+	context.SetStencilControl(r);
+}
+
+void SetStencilRefMask(HW::Context& context, uint32_t value)
+{
+	auto r = context.GetStencilMask();
+
+	r.stencil_testval   = KYTY_PM4_GET(value, DB_STENCILREFMASK, STENCILTESTVAL);
+	r.stencil_mask      = KYTY_PM4_GET(value, DB_STENCILREFMASK, STENCILMASK);
+	r.stencil_writemask = KYTY_PM4_GET(value, DB_STENCILREFMASK, STENCILWRITEMASK);
+	r.stencil_opval     = KYTY_PM4_GET(value, DB_STENCILREFMASK, STENCILOPVAL);
+
+	context.SetStencilMask(r);
+}
+
+void SetStencilRefMaskBf(HW::Context& context, uint32_t value)
+{
+	auto r = context.GetStencilMask();
+
+	r.stencil_testval_bf   = KYTY_PM4_GET(value, DB_STENCILREFMASK_BF, STENCILTESTVAL_BF);
+	r.stencil_mask_bf      = KYTY_PM4_GET(value, DB_STENCILREFMASK_BF, STENCILMASK_BF);
+	r.stencil_writemask_bf = KYTY_PM4_GET(value, DB_STENCILREFMASK_BF, STENCILWRITEMASK_BF);
+	r.stencil_opval_bf     = KYTY_PM4_GET(value, DB_STENCILREFMASK_BF, STENCILOPVAL_BF);
+
+	context.SetStencilMask(r);
 }
 
 void SetModeControl(HW::Context& context, uint32_t value)

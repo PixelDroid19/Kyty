@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include <utility>
 #include <vector>
 #include <vulkan/vulkan_core.h>
@@ -28,6 +29,12 @@ struct DepthStencilVulkanImage;
 struct VulkanSwapchain;
 
 VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
+
+// A blit source cannot be read before its first-use contents are established.
+[[nodiscard]] inline bool UtilBlitImageNeedsSourceInitialization(VkImageLayout tracked_layout)
+{
+	return tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED;
+}
 
 [[nodiscard]] inline bool DepthFormatHasStencil(VkFormat format)
 {

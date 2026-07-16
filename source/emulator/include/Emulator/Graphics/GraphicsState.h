@@ -50,6 +50,12 @@ struct DepthClearActions
 
 void SetGenericScissorTl(HW::Context& context, uint32_t value);
 void SetGenericScissorBr(HW::Context& context, uint32_t value);
+void SetScreenScissorTl(HW::Context& context, uint32_t value);
+void SetScreenScissorBr(HW::Context& context, uint32_t value);
+void SetRenderControl(HW::Context& context, uint32_t value);
+void SetStencilControl(HW::Context& context, uint32_t value);
+void SetStencilRefMask(HW::Context& context, uint32_t value);
+void SetStencilRefMaskBf(HW::Context& context, uint32_t value);
 void SetModeControl(HW::Context& context, uint32_t value);
 void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
 
@@ -64,8 +70,9 @@ void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
 
 [[nodiscard]] DepthClearActions ResolveDepthClearActions(bool register_depth_clear, bool htile_meta_clear);
 
-// CB_TARGET_MASK / CB_SHADER_MASK: four bits per MRT (RGBA). Observed Gen5
-// contract accepts only contiguous full-channel (0xf) nibbles from RT0.
+// CB_TARGET_MASK / CB_SHADER_MASK: four bits per MRT (RGBA). The one-argument
+// form validates all eight slots; the bounded form ignores mask bits for slots
+// whose CB_COLORn_BASE is not configured by the current render pass.
 enum class ColorTargetLayoutError
 {
 	None,
@@ -82,6 +89,7 @@ struct ColorTargetLayout
 };
 
 [[nodiscard]] ColorTargetLayout ResolveColorTargetLayout(uint32_t mask);
+[[nodiscard]] ColorTargetLayout ResolveColorTargetLayout(uint32_t mask, uint32_t configured_target_count);
 
 // A sampled surface may reuse a render target or storage texture when
 // FindRenderTexture / FindStorageTexture found a live object (Equals, non-exact
@@ -104,12 +112,21 @@ enum class ImageSampleOperation
 	DepthReference,
 };
 
+enum class SamplerAddressMode
+{
+	Repeat,
+	MirroredRepeat,
+	ClampToEdge,
+	ClampToBorder,
+};
+
 struct SamplerComparison
 {
 	bool    enabled  = false;
 	uint8_t function = 0;
 };
 
+[[nodiscard]] SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp);
 // Vulkan requires sampler comparison state to agree with the SPIR-V image instruction.
 [[nodiscard]] SamplerComparison ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation);
 

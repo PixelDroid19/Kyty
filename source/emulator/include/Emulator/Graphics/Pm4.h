@@ -27,6 +27,7 @@ constexpr uint32_t IT_CLEAR_STATE               = 0x12;
 constexpr uint32_t IT_INDEX_BUFFER_SIZE         = 0x13;
 constexpr uint32_t IT_DISPATCH_DIRECT           = 0x15;
 constexpr uint32_t IT_DISPATCH_INDIRECT         = 0x16;
+constexpr uint32_t IT_INDIRECT_BUFFER_END       = 0x17;
 constexpr uint32_t IT_SET_PREDICATION           = 0x20;
 constexpr uint32_t IT_COND_EXEC                 = 0x22;
 constexpr uint32_t IT_DRAW_INDIRECT             = 0x24;
@@ -54,6 +55,7 @@ constexpr uint32_t IT_EVENT_WRITE_EOP           = 0x47;
 constexpr uint32_t IT_EVENT_WRITE_EOS           = 0x48;
 constexpr uint32_t IT_RELEASE_MEM               = 0x49;
 constexpr uint32_t IT_DMA_DATA                  = 0x50;
+constexpr uint32_t IT_ONE_REG_WRITE             = 0x57;
 constexpr uint32_t IT_ACQUIRE_MEM               = 0x58;
 constexpr uint32_t IT_REWIND                    = 0x59;
 constexpr uint32_t IT_SET_CONFIG_REG            = 0x68;
@@ -67,6 +69,7 @@ constexpr uint32_t IT_INCREMENT_CE_COUNTER      = 0x84;
 constexpr uint32_t IT_INCREMENT_DE_COUNTER      = 0x85;
 constexpr uint32_t IT_WAIT_ON_CE_COUNTER        = 0x86;
 constexpr uint32_t IT_WAIT_ON_DE_COUNTER_DIFF   = 0x88;
+constexpr uint32_t IT_GET_LOD_STATS             = 0x8E;
 constexpr uint32_t IT_DISPATCH_DRAW_PREAMBLE    = 0x8C;
 constexpr uint32_t IT_DISPATCH_DRAW             = 0x8D;
 
@@ -1001,9 +1004,14 @@ void DumpPm4PacketStream(Core::File* file, uint32_t* cmd_buffer, uint32_t start_
 
 // PM4 header type in bits [31:30]. Returns how many dwords the packet occupies
 // (header included) for non-Type3 packets, or 0 if the header is Type3 (caller
-// must decode the IT_* length). Type2 is a single-dword NOP. Type0 is treated
-// as a single-register write (header + 1 body dword) — see GraphicsRun.
-uint32_t Pm4NonType3PacketDwords(uint32_t cmd_id);
+// must decode the IT_* length). Type2 is a single-dword NOP. Type0/Type1 are
+// treated as header + 1 body dword — see GraphicsRun.
+//
+// When remaining_including_header > 0 and a Type3 header's KYTY_PM4_LEN exceeds
+// that remaining span, returns 2: Gen5 streams insert 2-dword units whose high
+// bits look like Type3 (e.g. 0xf84d2e90) but cannot be real IT_* packets.
+uint32_t Pm4NonType3PacketDwords(uint32_t cmd_id, uint32_t remaining_including_header = 0);
+uint32_t Pm4SpecialType3PacketDwords(uint32_t cmd_id);
 
 } // namespace Kyty::Libs::Graphics::Pm4
 

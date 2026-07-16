@@ -1,12 +1,16 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/RetailKernel.h"
+#include "Emulator/Kernel/EventQueue.h"
+#include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Config.h"
+#include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 #include "Kyty/UnitTest.h"
 
 UT_BEGIN(EmulatorKernelProcess);
 
 using namespace Libs;
+using namespace Libs::LibKernel::EventQueue;
 
 namespace {
 
@@ -47,6 +51,46 @@ TEST(EmulatorKernelProcess, GettimeofdayAdvancesWithinOneSecond)
 	const int64_t elapsed_us = (after.tv_sec - before.tv_sec) * 1'000'000 + (after.tv_usec - before.tv_usec);
 	EXPECT_GE(elapsed_us, 1'000);
 	EXPECT_LT(elapsed_us, 100'000);
+}
+
+// sceKernelAddAmprEvent (bBfz7kMF2Ho): register Ampr completion interest and wake via Trigger.
+TEST(EmulatorKernelProcess, AddAmprEventRegistersAndTriggers)
+{
+	EnsureKernelProcessSubsystems();
+
+	KernelEqueue eq = nullptr;
+	ASSERT_EQ(KernelCreateEqueue(&eq, "ampr-test"), OK);
+	ASSERT_NE(eq, nullptr);
+
+	int udata_probe = 0;
+	ASSERT_EQ(KernelAddAmprEvent(eq, 0, 0, /*ident=*/2, &udata_probe), OK);
+
+	KernelEvent ev {};
+	int         out  = 0;
+	LibKernel::KernelUseconds zero = 0;
+	EXPECT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
+
+	ASSERT_EQ(KernelTriggerEvent(eq, 2, KERNEL_EVFILT_AMPR, reinterpret_cast<void*>(static_cast<uintptr_t>(0x42))), OK);
+	out = 0;
+	ASSERT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), OK);
+	EXPECT_EQ(out, 1);
+	EXPECT_EQ(ev.ident, static_cast<uintptr_t>(2));
+	EXPECT_EQ(ev.filter, KERNEL_EVFILT_AMPR);
+	EXPECT_EQ(ev.udata, &udata_probe);
+	EXPECT_EQ(ev.data, static_cast<intptr_t>(0x42));
+
+	EXPECT_EQ(KernelDeleteAmprEvent(eq, 2), OK);
+	EXPECT_EQ(KernelDeleteAmprEvent(eq, 2), LibKernel::KERNEL_ERROR_ENOENT);
+	EXPECT_EQ(KernelDeleteEqueue(eq), OK);
+}
+
+TEST(EmulatorKernelProcess, AprSubmitCommandBufferRejectsNullAndAckNonNull)
+{
+	EnsureKernelProcessSubsystems();
+
+	uint64_t fake_cmd = 0x1111;
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(nullptr, 1, nullptr, 2, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(&fake_cmd, 1, &fake_cmd, 2, &fake_cmd), OK);
 }
 
 UT_END();
