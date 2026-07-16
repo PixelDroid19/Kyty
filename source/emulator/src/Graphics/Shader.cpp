@@ -1914,7 +1914,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
-					EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
 				}
 				ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, api, slot, ShaderTextureUsage::ReadOnly, user_sgpr, ebuf);
 				info->textures2D_readonly++;
@@ -1928,7 +1928,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
-					EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
 				}
 					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant, user_sgpr, ebuf))
 					{
@@ -1963,7 +1963,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
-					EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
 				}
 				ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, api, slot, ShaderTextureUsage::ReadWrite, user_sgpr, ebuf);
 				info->textures2D_readwrite++;
@@ -1977,7 +1977,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
-					EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
 				}
 					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::ReadWrite, user_sgpr, ebuf))
 					{
@@ -2006,7 +2006,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
 				api  = Gen5EudApiIndex(off, user_sgpr_num);
 				ebuf = extended_buffer;
-				EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+				EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
 			}
 			ShaderGetSampler(&bind->samplers, direct_sgprs, api, slot, user_sgpr, ebuf);
 			info->samplers++;
@@ -2032,7 +2032,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
 				api  = Gen5EudApiIndex(off, user_sgpr_num);
 				ebuf = extended_buffer;
-				EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+				EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
 			}
 			if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant, user_sgpr, ebuf))
 			{
@@ -2273,7 +2273,8 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		ShaderParseUsage(regs->cs_regs.data_addr, &usage, &info->bind, regs->cs_user_sgpr, regs->cs_regs.user_sgpr);
 	}
 
-	EXIT_NOT_IMPLEMENTED(usage.samplers > 0);
+	// Gen5 compute may bind S# samplers for image_sample / image_sample_lz
+	// (same sharp[2] path as PS). PS already allows usage.samplers > 0.
 	EXIT_NOT_IMPLEMENTED(usage.fetch || usage.vertex_buffer || usage.vertex_attrib);
 
 	ShaderCalcBindingIndices(&info->bind);

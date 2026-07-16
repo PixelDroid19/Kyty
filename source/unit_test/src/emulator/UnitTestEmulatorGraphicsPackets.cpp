@@ -2254,6 +2254,16 @@ TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
 	EXPECT_EQ(0, 0); // srt_size_dw == 0
 }
 
+// Type-5 guest EUD tables may exceed metadata eud_size_dw. Astro: api=40,
+// dwords=4, eud_size=24 → need=28 still allowed under the hard 256 cap.
+TEST(EmulatorGraphicsPackets, Gen5EudSpanAllowsModestMetadataOverrun)
+{
+	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16, 4, 24));  // fully inside metadata
+	EXPECT_TRUE(ShaderGen5EudSpanAllowed(40, 4, 24));  // need 28 > 24, still ok
+	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + 24 - 4, 4, 24)); // last in-bound
+	EXPECT_FALSE(ShaderGen5EudSpanAllowed(16, 257, 24)); // past hard cap
+}
+
 // Captured EXP target 0x03: MRT3 compressed (half2), done may be 0.
 TEST(EmulatorGraphicsPackets, ExpTarget0x03IsMrt3Compr)
 {

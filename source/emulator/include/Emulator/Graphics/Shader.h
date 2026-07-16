@@ -1022,6 +1022,20 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
                        int user_data_register_base = 0);
 
+// Gen5 EUD sharp span policy: metadata eud_size_dw is a lower bound. Type-5
+// guest pointer tables may extend past it (Astro: eud=24, sharp@40 needs 28).
+// api is the ShaderGet* start index (16 + eud_index). Hard-cap runaway offsets.
+[[nodiscard]] inline bool ShaderGen5EudSpanAllowed(int api, int dwords, uint16_t eud_size_dw)
+{
+	const int need = api - 16 + dwords;
+	if (need <= static_cast<int>(eud_size_dw))
+	{
+		return true;
+	}
+	constexpr int k_max_eud_dwords = 256;
+	return need <= k_max_eud_dwords;
+}
+
 struct ShaderRegisterRange
 {
 	uint16_t start;
