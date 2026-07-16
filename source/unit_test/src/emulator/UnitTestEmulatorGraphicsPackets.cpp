@@ -92,6 +92,33 @@ TEST(EmulatorGraphicsPackets, ParsesGen5LshlAddU32)
 	EXPECT_EQ(instruction.src[2].register_id, 2);
 }
 
+// RDNA2 VOP3 v_add3_u32 (op 0x36D): dst = src0 + src1 + src2.
+TEST(EmulatorGraphicsPackets, ParsesGen5Add3U32)
+{
+	// Same layout as ParsesGen5LshlAddU32 with opcode field set to 0x36D.
+	const uint32_t shader[] = {0xd76d0003u, 0x040a0300u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VAdd3U32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2);
+	EXPECT_EQ(instruction.dst.register_id, 3);
+	EXPECT_EQ(instruction.src[0].register_id, 0);
+	EXPECT_EQ(instruction.src[1].register_id, 1);
+	EXPECT_EQ(instruction.src[2].register_id, 2);
+}
+
 // VOP2 SDWA with SRC0_NEG (bit 20 of SDWA control). Captured post-Play path
 // hits EXIT_NOT_IMPLEMENTED(src0_neg != 0) until negate is wired like VOP3.
 TEST(EmulatorGraphicsPackets, ParsesVop2SdwaSrc0Negate)
@@ -981,6 +1008,48 @@ TEST(EmulatorGraphicsPackets, ResolvesNullWaitMemAddressFromPrecedingRelease)
 	stream[3] = 0;
 	stream[4] = 0;
 	EXPECT_EQ(Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 8), nullptr);
+}
+
+// Submit-time fence publish: ReleaseMem data_sel=1 must store the 32-bit
+// immediate so WaitRegMem can observe it even when the ring worker is blocked.
+TEST(EmulatorGraphicsPackets, PublishesReleaseMemDataSel1FenceOnScan)
+{
+	uint32_t fence = 0;
+	uint32_t stream[8] = {};
+	stream[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	stream[1] = 0x14u;                           // action
+	stream[2] = 0x00010000u;                     // gcr=0 | data_sel=1
+	stream[3] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&fence));
+	stream[4] = static_cast<uint32_t>(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&fence)) >> 32u);
+	stream[5] = 1u; // data_lo
+	stream[6] = 0u;
+	stream[7] = 0u;
+
+	EXPECT_EQ(GraphicsPm4PublishFenceProducers(stream, 8), 1u);
+	EXPECT_EQ(fence, 1u);
+
+	// data_sel=0 is barrier-only: no store.
+	stream[2] = 0u;
+	fence     = 0;
+	EXPECT_EQ(GraphicsPm4PublishFenceProducers(stream, 8), 0u);
+	EXPECT_EQ(fence, 0u);
+}
+
+// WriteData memory destinations also publish fences at submit time.
+TEST(EmulatorGraphicsPackets, PublishesWriteDataFenceOnScan)
+{
+	uint32_t words[2] = {0, 0};
+	uint32_t stream[6] = {};
+	stream[0] = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WRITE_DATA);
+	stream[1] = 0x01000004u; // dst=4, write_confirm=1
+	stream[2] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(words));
+	stream[3] = static_cast<uint32_t>(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(words)) >> 32u);
+	stream[4] = 0x11111111u;
+	stream[5] = 0x22222222u;
+
+	EXPECT_EQ(GraphicsPm4PublishFenceProducers(stream, 6), 1u);
+	EXPECT_EQ(words[0], 0x11111111u);
+	EXPECT_EQ(words[1], 0x22222222u);
 }
 
 // Encoder accepts data_sel=1 (32-bit immediate). Packet layout stores data_sel

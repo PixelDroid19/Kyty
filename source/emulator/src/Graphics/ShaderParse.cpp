@@ -2158,7 +2158,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x35A: KYTY_NI("v_interp_p2_f16"); break;
 		case 0x35E: KYTY_NI("v_mad_i16"); break;
 		case 0x35F: KYTY_NI("v_div_fixup_f16"); break;
-		case 0x36D: KYTY_NI("v_add3_u32"); break;
+		case 0x36D: inst.type = ShaderInstructionType::VAdd3U32; break;
 		case 0x36F:
 			if (next_gen)
 			{
@@ -2713,7 +2713,8 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 
 	EXIT_NOT_IMPLEMENTED(idxen == 0);
 	EXIT_NOT_IMPLEMENTED(offen == 1);
-	EXIT_NOT_IMPLEMENTED(offset != 0);
+	// Non-zero 12-bit offset is folded into soffset when that source is an
+	// immediate/inline constant (observed Gen5 buffer_load_dwordx* paths).
 	EXIT_NOT_IMPLEMENTED(glc == 1);
 	EXIT_NOT_IMPLEMENTED(slc == 1);
 	EXIT_NOT_IMPLEMENTED(lds == 1);
@@ -2733,6 +2734,24 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 	{
 		inst.src[2].constant.u = buffer[size];
 		size++;
+	}
+
+	if (offset != 0u)
+	{
+		if (inst.src[2].type == ShaderOperandType::IntegerInlineConstant)
+		{
+			inst.src[2].type       = ShaderOperandType::LiteralConstant;
+			inst.src[2].constant.u = static_cast<uint32_t>(inst.src[2].constant.i) + offset;
+			inst.src[2].size       = 0;
+		} else if (inst.src[2].type == ShaderOperandType::LiteralConstant)
+		{
+			inst.src[2].constant.u += offset;
+		} else
+		{
+			// SGPR soffset + non-zero instruction offset needs a host add;
+			// not observed yet for this title's first MUBUF paths.
+			EXIT_NOT_IMPLEMENTED(true);
+		}
 	}
 
 	switch (opcode)
@@ -2787,9 +2806,24 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
 			inst.src[1].size = 4;
 			break;
-		case 0x0D: KYTY_NI("buffer_load_dwordx2"); break;
-		case 0x0E: KYTY_NI("buffer_load_dwordx4"); break;
-		case 0x0F: KYTY_NI("buffer_load_dwordx3"); break;
+		case 0x0D:
+			inst.type        = ShaderInstructionType::BufferLoadDwordx2;
+			inst.format      = ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 2;
+			break;
+		case 0x0E:
+			inst.type        = ShaderInstructionType::BufferLoadDwordx4;
+			inst.format      = ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 4;
+			break;
+		case 0x0F:
+			inst.type        = ShaderInstructionType::BufferLoadDwordx3;
+			inst.format      = ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 3;
+			break;
 		case 0x18: KYTY_NI("buffer_store_byte"); break;
 		case 0x1A: KYTY_NI("buffer_store_short"); break;
 		case 0x1c:
