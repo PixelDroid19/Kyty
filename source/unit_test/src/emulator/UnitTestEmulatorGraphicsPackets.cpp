@@ -308,6 +308,51 @@ TEST(EmulatorGraphicsPackets, ParsesBufferStoreFormatXyzw)
 	EXPECT_EQ(instruction.src[2].constant.u, 0u);
 }
 
+// MUBUF buffer_load_dwordx4 with 12-bit offset folded into a LiteralConstant
+// soffset. SPIR-V must OpStore the offset into %temp_int_* as %int_N (not
+// %uint_N), and FindConstants must register the Int twin for that literal.
+TEST(EmulatorGraphicsPackets, MubufLiteralSoffsetUsesIntConstant)
+{
+	// op=0x0E buffer_load_dwordx4, idxen=1, offset=56, soffset=inline 0 (128),
+	// srsrc=2 → s[8:11], vdata=v30, vaddr=v43; s_nop then s_endpgm.
+	const uint32_t word0 = (0x38u << 26u) | (0x0Eu << 18u) | (1u << 13u) | 56u;
+	const uint32_t word1 = (128u << 24u) | (2u << 16u) | (30u << 8u) | 43u;
+	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_GE(code.GetInstructions().Size(), 1u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::BufferLoadDwordx4);
+	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::LiteralConstant);
+	EXPECT_EQ(instruction.src[2].constant.u, 56u);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0]                         = 1;
+	input.threads_num[1]                         = 1;
+	input.threads_num[2]                         = 1;
+	input.bind.storage_buffers.buffers_num       = 1;
+	input.bind.storage_buffers.start_register[0] = 8;
+	input.bind.storage_buffers.usages[0]         = ShaderStorageUsage::ReadOnly;
+	input.bind.push_constant_size                = 16;
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+
+	EXPECT_NE(source.FindIndex("%int_56 = OpConstant %int 56"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %temp_int_2 %int_56"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpStore %temp_int_2 %uint_56"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("unknown_int_constant"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorGraphicsPackets, ClassifiesDirectBufferStoreAsReadWrite)
 {
 	const uint32_t shader[] = {0xe01c2000u, 0x80000004u, 0xbf810000u};

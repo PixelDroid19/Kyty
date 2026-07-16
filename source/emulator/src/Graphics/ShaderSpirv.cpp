@@ -2079,6 +2079,33 @@ static String8 get_scc_check(SccCheck scc_check, int dst_num)
 	return "";
 }
 
+// MUBUF/MTBUF soffset is stored into %temp_int_* (signed int pointers).
+// GetConstant() returns %uint_N for LiteralConstant, which fails OpStore into
+// %_ptr_Function_int. Always materialize the offset as an Int constant id.
+// FindConstants must register the Int twin for every LiteralConstant.
+static String8 GetBufferOffsetIntConstant(Spirv* spirv, ShaderOperand op)
+{
+	EXIT_NOT_IMPLEMENTED(!operand_is_constant(op));
+	int value = 0;
+	if (op.type == ShaderOperandType::IntegerInlineConstant)
+	{
+		value = op.constant.i;
+	} else if (op.type == ShaderOperandType::LiteralConstant)
+	{
+		value = static_cast<int>(op.constant.u);
+	} else if (op.type == ShaderOperandType::FloatInlineConstant)
+	{
+		// Rare: treat bit pattern as unsigned immediate.
+		value = static_cast<int>(op.constant.u);
+	} else
+	{
+		EXIT_NOT_IMPLEMENTED(true);
+	}
+	String8 id = spirv->GetConstantInt(value);
+	EXIT_NOT_IMPLEMENTED(id == "unknown_int_constant");
+	return id;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword_Vdata1VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
@@ -2093,7 +2120,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword_Vdata1VaddrSvSoffsIdxen)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		// auto   src1_value3 = operand_variable_to_str(inst.src[1], 3);
-		String8 offset = spirv->GetConstant(inst.src[2]);
+		String8 offset = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -2154,7 +2181,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx2_Vdata2VaddrSvSoffsIdxen)
 		auto src0_value  = operand_variable_to_str(inst.src[0]);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value1 = operand_variable_to_str(inst.src[1], 1);
-		String8 offset   = spirv->GetConstant(inst.src[2]);
+		String8 offset   = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(dst_value1.type != SpirvType::Float);
@@ -2213,7 +2240,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx4_Vdata4VaddrSvSoffsIdxen)
 		auto src0_value  = operand_variable_to_str(inst.src[0]);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value1 = operand_variable_to_str(inst.src[1], 1);
-		String8 offset   = spirv->GetConstant(inst.src[2]);
+		String8 offset   = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -2268,7 +2295,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx3_Vdata3VaddrSvSoffsIdxen)
 		auto src0_value  = operand_variable_to_str(inst.src[0]);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value1 = operand_variable_to_str(inst.src[1], 1);
-		String8 offset   = spirv->GetConstant(inst.src[2]);
+		String8 offset   = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -2330,7 +2357,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
 		auto    src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
-		String8 offset      = spirv->GetConstant(inst.src[2]);
+		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -2395,7 +2422,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 		auto    src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
-		String8 offset      = spirv->GetConstant(inst.src[2]);
+		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -2455,7 +2482,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		// auto   src1_value3 = operand_variable_to_str(inst.src[1], 3);
-		String8 offset = spirv->GetConstant(inst.src[2]);
+		String8 offset = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -2525,7 +2552,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx2_Vdata2VaddrSvSoffsIdxen)
 		auto src0_value  = operand_variable_to_str(inst.src[0]);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value1 = operand_variable_to_str(inst.src[1], 1);
-		String8 offset   = spirv->GetConstant(inst.src[2]);
+		String8 offset   = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -2587,7 +2614,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx4_Vdata4VaddrSvSoffsIdxen)
 		auto src0_value  = operand_variable_to_str(inst.src[0]);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value1 = operand_variable_to_str(inst.src[1], 1);
-		String8 offset   = spirv->GetConstant(inst.src[2]);
+		String8 offset   = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -2650,7 +2677,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx3_Vdata3VaddrSvSoffsIdxen)
 		auto src0_value  = operand_variable_to_str(inst.src[0]);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value1 = operand_variable_to_str(inst.src[1], 1);
-		String8 offset   = spirv->GetConstant(inst.src[2]);
+		String8 offset   = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -2718,7 +2745,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatX_Vdata1VaddrSvSoffsIdxen)
 		auto    src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
-		String8 offset      = spirv->GetConstant(inst.src[2]);
+		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -2788,7 +2815,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen)
 		auto    src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
-		String8 offset      = spirv->GetConstant(inst.src[2]);
+		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -2861,7 +2888,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 		auto    src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
-		String8 offset      = spirv->GetConstant(inst.src[2]);
+		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(dst_value1.type != SpirvType::Float);
@@ -6033,7 +6060,7 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatX_Vdata1VaddrSvSoffsIdxenFloat1)
 		auto    src0_value  = operand_variable_to_str(inst.src[0]);
 		auto    src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
-		String8 offset      = spirv->GetConstant(inst.src[2]);
+		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -6089,7 +6116,7 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxenFloa
 		auto    src0_value  = operand_variable_to_str(inst.src[0]);
 		auto    src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
-		String8 offset      = spirv->GetConstant(inst.src[2]);
+		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
@@ -6149,7 +6176,7 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4Vaddr2SvSoffsOffenIdx
 		auto    src0_value1 = operand_variable_to_str(inst.src[0], 1);
 		auto    src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
-		String8 offset      = spirv->GetConstant(inst.src[2]);
+		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
 		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
 		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
@@ -9487,6 +9514,14 @@ void Spirv::FindConstants()
 			if (operand_is_constant(inst.src[i]))
 			{
 				AddConstant(inst.src[i]);
+				// MUBUF/MTBUF soffset is OpStore'd into %temp_int_* (signed).
+				// LiteralConstant only registers as Uint via AddConstant; also
+				// emit the Int twin so GetConstantInt succeeds at recompile.
+				// Offsets such as 56/80/136 appear as folded 12-bit+imm values.
+				if (inst.src[i].type == ShaderOperandType::LiteralConstant)
+				{
+					AddConstantInt(static_cast<int>(inst.src[i].constant.u));
+				}
 			}
 		}
 		// SMEM dual-offset path adds SGPR soffset + signed imm in SPIR-V.
