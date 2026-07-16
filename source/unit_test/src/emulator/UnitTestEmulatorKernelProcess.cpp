@@ -246,6 +246,27 @@ TEST(EmulatorKernelProcess, PackageFontHostPathPicksSibling)
 	Core::File::DeleteDirectories(dir);
 }
 
+// Gen5 Posix_v1 pthread_attr_init/setstacksize wrap LibKernel attr helpers.
+TEST(EmulatorKernelProcess, PosixPthreadAttrInitAndSetstacksize)
+{
+	EnsureKernelProcessSubsystems();
+
+	LibKernel::PthreadAttr attr = nullptr;
+	EXPECT_EQ(Posix::pthread_attr_init(&attr), OK);
+	ASSERT_NE(attr, nullptr);
+	EXPECT_EQ(Posix::pthread_attr_setstacksize(&attr, 0x400000), OK);
+	size_t stack_size = 0;
+	EXPECT_EQ(Posix::pthread_attr_getstacksize(&attr, &stack_size), OK);
+	EXPECT_EQ(stack_size, static_cast<size_t>(0x400000));
+	EXPECT_EQ(Posix::pthread_attr_destroy(&attr), OK);
+}
+
+// Gen5 Posix_v1 pthread_detach rejects null thread like LibKernel::PthreadDetach.
+TEST(EmulatorKernelProcess, PosixPthreadDetachRejectsNull)
+{
+	EXPECT_NE(Posix::pthread_detach(nullptr), OK);
+}
+
 // Gen5 memory helpers: null size rejects; range name is success no-op.
 TEST(EmulatorKernelProcess, ConfiguredFlexibleAndRangeNameBoundaries)
 {
