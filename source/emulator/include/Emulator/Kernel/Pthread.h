@@ -74,6 +74,7 @@ int KYTY_SYSV_ABI PthreadMutexInit(PthreadMutex* mutex, const PthreadMutexattr* 
 int KYTY_SYSV_ABI PthreadMutexDestroy(PthreadMutex* mutex);
 int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex);
 int KYTY_SYSV_ABI PthreadMutexTrylock(PthreadMutex* mutex);
+int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec);
 int KYTY_SYSV_ABI PthreadMutexUnlock(PthreadMutex* mutex);
 
 Pthread KYTY_SYSV_ABI PthreadSelf();

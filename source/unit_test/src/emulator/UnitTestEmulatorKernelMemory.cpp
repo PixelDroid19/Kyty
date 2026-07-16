@@ -431,7 +431,9 @@ TEST(EmulatorKernelMemory, ResolvesAmprResidualBootNids)
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libAmpr_1", &symbols));
 
-	const char* nids[] = {"Zi3dBUjgyXI", "4muPEJ-x5N8", "qesF88X4DRg", "8aI7R7WaOlc", "GuchCTefuZw"};
+	const char* nids[] = {"Zi3dBUjgyXI", "4muPEJ-x5N8", "qesF88X4DRg", "8aI7R7WaOlc", "GuchCTefuZw",
+	                      "0BMj1hgG+kE", "NNIZ-FMyz3M", "VGkEj4d6-Kg", "Eul7AGEpjLo", "X169CE6G3Y4",
+	                      "RPCAhx-aabE", "tNn5WBkta60", "mZSbNJVJpV8"};
 	for (const char* nid: nids)
 	{
 		Loader::SymbolResolve query {};
