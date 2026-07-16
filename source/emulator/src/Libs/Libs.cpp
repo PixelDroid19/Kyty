@@ -37,6 +37,9 @@ LIB_DEFINE(InitNpEntitlementAccess_1);
 namespace NpTrophy2 {
 LIB_DEFINE(InitNpTrophy2_1);
 } // namespace NpTrophy2
+namespace NpManager {
+LIB_DEFINE(InitNpManager_1);
+} // namespace NpManager
 LIB_DEFINE(InitSysmodule_1);
 LIB_DEFINE(InitSystemService_1);
 LIB_DEFINE(InitUserService_1);
@@ -45,6 +48,7 @@ LIB_DEFINE(InitUlt_1);
 LIB_DEFINE(InitCes_1);
 LIB_DEFINE(InitShare_1);
 LIB_DEFINE(InitAmpr_1);
+LIB_DEFINE(InitFiber_1);
 
 bool Init(const String& id, Loader::SymbolDatabase* s)
 {
@@ -65,6 +69,7 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libNpGameIntent_1", NpGameIntent::InitNpGameIntent_1);
 	LIB_CHECK(U"libNpEntitlementAccess_1", NpEntitlementAccess::InitNpEntitlementAccess_1);
 	LIB_CHECK(U"libNpTrophy2_1", NpTrophy2::InitNpTrophy2_1);
+	LIB_CHECK(U"libNpManager_1", NpManager::InitNpManager_1);
 	if (id == U"libSaveData_1")
 	{
 		InitSaveData_1(s);
@@ -79,6 +84,7 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libCes_1", InitCes_1);
 	LIB_CHECK(U"libShare_1", InitShare_1);
 	LIB_CHECK(U"libAmpr_1", InitAmpr_1);
+	LIB_CHECK(U"libFiber_1", InitFiber_1);
 
 	return false;
 }
@@ -102,6 +108,7 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(NpGameIntent::InitNpGameIntent_1);
 	LIB_LOAD(NpEntitlementAccess::InitNpEntitlementAccess_1);
 	LIB_LOAD(NpTrophy2::InitNpTrophy2_1);
+	LIB_LOAD(NpManager::InitNpManager_1);
 	LIB_LOAD(InitSaveData_1);
 	LIB_LOAD(SaveDataNative::InitSaveDataNative_1);
 	LIB_LOAD(InitSysmodule_1);
@@ -112,6 +119,7 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(InitCes_1);
 	LIB_LOAD(InitShare_1);
 	LIB_LOAD(InitAmpr_1);
+	LIB_LOAD(InitFiber_1);
 }
 
 } // namespace Kyty::Libs

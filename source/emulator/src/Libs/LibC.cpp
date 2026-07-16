@@ -152,7 +152,23 @@ static KYTY_SYSV_ABI void*  c_memset(void* d, int c, size_t n) { return ::memset
 static KYTY_SYSV_ABI int    c_memcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
 static KYTY_SYSV_ABI void*  c_memchr(const void* s, int c, size_t n) { return const_cast<void*>(::memchr(s, c, n)); }
 static KYTY_SYSV_ABI size_t c_strlen(const char* s) { return ::strlen(s); }
-static KYTY_SYSV_ABI char*  c_strcpy(char* d, const char* s) { return ::strcpy(d, s); }
+static KYTY_SYSV_ABI char* c_strcpy(char* d, const char* s) { return ::strcpy(d, s); }
+// Gen5 strcpy_s — NID 5Xa2ACNECdo: dest, destsz, src. Returns 0 on success.
+static KYTY_SYSV_ABI int c_strcpy_s(char* d, size_t destsz, const char* s)
+{
+	if (d == nullptr || s == nullptr || destsz == 0)
+	{
+		return -1;
+	}
+	const size_t n = ::strlen(s);
+	if (n + 1 > destsz)
+	{
+		d[0] = '\0';
+		return -1;
+	}
+	::memcpy(d, s, n + 1);
+	return 0;
+}
 static KYTY_SYSV_ABI char*  c_strncpy(char* d, const char* s, size_t n) { return ::strncpy(d, s, n); }
 static KYTY_SYSV_ABI int    c_strcmp(const char* a, const char* b) { return ::strcmp(a, b); }
 static KYTY_SYSV_ABI int    c_strncmp(const char* a, const char* b, size_t n) { return ::strncmp(a, b, n); }
@@ -284,6 +300,15 @@ static KYTY_SYSV_ABI FILE* c_fopen(const char* path, const char* mode)
 }
 static KYTY_SYSV_ABI int      c_fclose(FILE* f) { return (f != nullptr) ? ::fclose(f) : 0; }
 static KYTY_SYSV_ABI size_t   c_fread(void* p, size_t sz, size_t n, FILE* f) { return ::fread(p, sz, n, f); }
+// Gen5 libc_v1 fgets — NID KdP-nULpuGw.
+static KYTY_SYSV_ABI char* c_fgets(char* s, int n, FILE* f)
+{
+	if (s == nullptr || n <= 0 || f == nullptr)
+	{
+		return nullptr;
+	}
+	return ::fgets(s, n, f);
+}
 static KYTY_SYSV_ABI size_t   c_fwrite(const void* p, size_t sz, size_t n, FILE* f) { return ::fwrite(p, sz, n, f); }
 static KYTY_SYSV_ABI int      c_fseek(FILE* f, long off, int w) { return ::fseek(f, off, w); }
 static KYTY_SYSV_ABI long     c_ftell(FILE* f) { return ::ftell(f); }
@@ -319,6 +344,19 @@ static KYTY_SYSV_ABI int c_sprintf(VA_ARGS)
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
 	return Format(s, C_UNBOUNDED_FORMAT, fmt, &ctx.va_list);
 }
+// Gen5 sprintf_s — NID xEszJVGpybs: buffer, size, format, ...
+static KYTY_SYSV_ABI int c_sprintf_s(VA_ARGS)
+{
+	VA_CONTEXT(ctx);
+	char*       s   = VaArg_ptr<char>(&ctx.va_list);
+	size_t      n   = VaArg_size_t(&ctx.va_list);
+	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
+	if (s == nullptr || n == 0 || fmt == nullptr)
+	{
+		return -1;
+	}
+	return Format(s, n, fmt, &ctx.va_list);
+}
 static KYTY_SYSV_ABI int c_fprintf(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
@@ -353,6 +391,15 @@ static KYTY_SYSV_ABI int c_vsnprintf(char* s, size_t n, const char* fmt, VaList*
 {
 	return Format(s, n, fmt, ap);
 }
+// Gen5 vsprintf_s — NID +qitMEbkSWk: buffer, element count, format, va_list.
+static KYTY_SYSV_ABI int c_vsprintf_s(char* s, size_t n, const char* fmt, VaList* ap)
+{
+	if (s == nullptr || n == 0 || fmt == nullptr)
+	{
+		return -1;
+	}
+	return Format(s, n, fmt, ap);
+}
 static KYTY_SYSV_ABI int c_vsnprintf_s(char* s, size_t dn, size_t count, const char* fmt, VaList* ap)
 {
 	size_t n = (count + 1 < dn) ? count + 1 : dn;
@@ -379,6 +426,15 @@ static KYTY_SYSV_ABI int64_t    c_mktime(struct tm* tmv) { return ::mktime(tmv);
 static KYTY_SYSV_ABI struct tm* c_gmtime(const int64_t* t) { time_t v = *t; return ::gmtime(&v); }
 static KYTY_SYSV_ABI struct tm* c_localtime(const int64_t* t) { time_t v = *t; return ::localtime(&v); }
 static KYTY_SYSV_ABI size_t     c_strftime(char* s, size_t n, const char* f, const struct tm* tmv) { return ::strftime(s, n, f, tmv); }
+// Gen5 libc_v1 asctime — NID jT3xiGpA3B4. Returns static host buffer (same ABI as C).
+static KYTY_SYSV_ABI char* c_asctime(const struct tm* tmv)
+{
+	if (tmv == nullptr)
+	{
+		return nullptr;
+	}
+	return ::asctime(tmv);
+}
 
 // --- math (double) -----------------------------------------------------------
 static KYTY_SYSV_ABI double c_sin(double x) { return ::sin(x); }
@@ -455,6 +511,13 @@ static KYTY_SYSV_ABI int puts(const char* s)
 	PRINT_NAME();
 
 	return GetPrintfStdFunc()("%s\n", s);
+}
+
+// Gen5 libc_v1 putchar — NID m5wN+SwZOR4. Observed with ch=0x0a (newline)
+// on the Astro boot path after Posix semaphores.
+static KYTY_SYSV_ABI int c_putchar(int ch)
+{
+	return GetPrintfStdFunc()("%c", ch);
 }
 
 // Guest FILE* is not always a host FILE*. Log path uses the host printf
@@ -588,13 +651,15 @@ void* KYTY_SYSV_ABI LibcMspaceCreate(const char* name, void* base, size_t capaci
 {
 	PRINT_NAME();
 
-	printf("\t name     = %s\n", name);
+	// Gen5 heap paths may omit a name; treat null as empty diagnostic tag.
+	const char* mspace_name = (name != nullptr ? name : "");
+
+	printf("\t name     = %s\n", mspace_name);
 	printf("\t base     = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
 	printf("\t capacity = %016" PRIx64 "\n", capacity);
 	printf("\t flag     = %u\n", flag);
 
 	EXIT_NOT_IMPLEMENTED(flag != 0 && flag != 1);
-	EXIT_NOT_IMPLEMENTED(name == nullptr);
 	EXIT_NOT_IMPLEMENTED(base == nullptr);
 	EXIT_NOT_IMPLEMENTED(capacity == 0);
 
@@ -605,7 +670,7 @@ void* KYTY_SYSV_ABI LibcMspaceCreate(const char* name, void* base, size_t capaci
 		thread_safe = false;
 	}
 
-	auto* msp = Core::MSpaceCreate(name, base, capacity, thread_safe, nullptr);
+	auto* msp = Core::MSpaceCreate(mspace_name, base, capacity, thread_safe, nullptr);
 
 	EXIT_NOT_IMPLEMENTED(msp == nullptr);
 
@@ -647,6 +712,24 @@ void* KYTY_SYSV_ABI LibcMspaceMemalign(void* msp, size_t align, size_t size)
 	return Core::MSpaceMemalign(msp, align, size);
 }
 
+// Gen5 sceLibcMspaceMallocStatsFast — NID k04jLXu3+Ic. Fill a guest stats
+// block with zeros when the mspace exists; titles probe capacity without
+// requiring accurate host allocator counters yet.
+int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
+{
+	PRINT_NAME();
+	printf("\t msp   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(msp));
+	printf("\t stats = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(stats));
+	if (msp == nullptr || stats == nullptr)
+	{
+		return -1;
+	}
+	// Observed guest block is at least 0x30 bytes of counters; zero a full page
+	// fragment-safe 0x40 region used by the post-heap probe path.
+	std::memset(stats, 0, 0x40);
+	return 0;
+}
+
 void KYTY_SYSV_ABI LibcMspaceFree(void* msp, void* ptr)
 {
 	PRINT_NAME();
@@ -679,6 +762,7 @@ LIB_DEFINE(InitLibcInternal_1)
 	LIB_FUNC("OJjm-QOIHlI", LibcInternal::LibcMspaceMalloc);
 	LIB_FUNC("iF1iQHzxBJU", LibcInternal::LibcMspaceMemalign);
 	LIB_FUNC("Vla-Z+eXlxo", LibcInternal::LibcMspaceFree);
+	LIB_FUNC("k04jLXu3+Ic", LibcInternal::LibcMspaceMallocStatsFast);
 }
 
 } // namespace LibcInternal
@@ -702,6 +786,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("hcuQgD53UxM", LibC::libc_printf);
 	LIB_FUNC("MUjC4lbHrK4", LibcInternal::fflush);
 	LIB_FUNC("YQ0navp+YIc", LibC::puts);
+	// Gen5 putchar — NID m5wN+SwZOR4 (hard-abort after Posix sem on Astro).
+	LIB_FUNC("m5wN+SwZOR4", LibC::c_putchar);
 	// Captured Gen5 after DirNameSearch/strtol: rdi=formatted log line
 	// with trailing CR/LF, rsi=stream-like pointer — fputs ABI.
 	LIB_FUNC("QrZZdJ8XsX0", LibC::c_fputs);
@@ -743,6 +829,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("8u8lPzUEq+U", LibC::c_memchr);
 	LIB_FUNC("5TjaJwkLWxE", LibC::c_bcmp);
 	LIB_FUNC("kiZSXIWd9vg", LibC::c_strcpy);
+	// Gen5 strcpy_s — NID 5Xa2ACNECdo (next hard-abort after thread stack reprotect).
+	LIB_FUNC("5Xa2ACNECdo", LibC::c_strcpy_s);
 	LIB_FUNC("RIa6GnWp+iU", LibC::c_strerror);
 	LIB_FUNC("YNzNkJzYqEg", LibC::c_strncpy_s);
 
@@ -754,6 +842,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("xeYO4u7uyJ0", LibC::c_fopen);
 	LIB_FUNC("uodLYyUip20", LibC::c_fclose);
 	LIB_FUNC("lbB+UlZqVG0", LibC::c_fread);
+	// Gen5 fgets — NID KdP-nULpuGw (next hard-abort after asctime on Astro).
+	LIB_FUNC("KdP-nULpuGw", LibC::c_fgets);
 	LIB_FUNC("MpxhMh8QFro", LibC::c_fwrite);
 	LIB_FUNC("rQFVBXp-Cxg", LibC::c_fseek);
 	LIB_FUNC("Qazy8LmXTvw", LibC::c_ftell);
@@ -764,8 +854,12 @@ LIB_DEFINE(InitLibC_1)
 
 	// printf / scanf family
 	LIB_FUNC("eLdDw6l0-bU", LibC::c_snprintf);
+	// Gen5 vsprintf_s — NID +qitMEbkSWk (hard-abort after fgets on Astro).
+	LIB_FUNC("+qitMEbkSWk", LibC::c_vsprintf_s);
 	LIB_FUNC("Q2V+iqvjgC0", LibC::c_vsnprintf); // vsnprintf (Gen5 libc_v1)
 	LIB_FUNC("tcVi5SivF7Q", LibC::c_sprintf);
+	// Gen5 sprintf_s — NID xEszJVGpybs (hard-abort after Fiber init on Astro).
+	LIB_FUNC("xEszJVGpybs", LibC::c_sprintf_s);
 	LIB_FUNC("fffwELXNVFA", LibC::c_fprintf);
 	LIB_FUNC("1Pk0qZQGeWo", LibC::c_sscanf);
 	LIB_FUNC("jbz9I9vkqkk", LibC::c_vsprintf);
@@ -781,8 +875,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("AEJdIVZTEmo", LibC::c_qsort);
 	LIB_FUNC("L1SBTkC+Cvw", LibC::c_abort);
 	LIB_FUNC("VPbJwTCgME0", LibC::c_srand);
-	// Gen5 libc_v1 rand / strtok — evidenced first imports after global heap initialization.
+	// Gen5 libc_v1 rand — Nmtr628eA3A observed early; cpCOXWMgha0 after Fiber/thread bring-up.
 	LIB_FUNC("Nmtr628eA3A", LibC::c_rand);
+	LIB_FUNC("cpCOXWMgha0", LibC::c_rand);
 	LIB_FUNC("oVkZ8W8-Q8A", LibC::c_strtok);
 
 	// time
@@ -791,6 +886,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("1mecP7RgI2A", LibC::c_gmtime);
 	LIB_FUNC("efhK-YSUYYQ", LibC::c_localtime);
 	LIB_FUNC("Av3zjWi64Kw", LibC::c_strftime);
+	// Gen5 libc asctime (NID jT3xiGpA3B4) — hard-aborted Astro without STUB_MISSING.
+	LIB_FUNC("jT3xiGpA3B4", LibC::c_asctime);
 
 	// math (double)
 	LIB_FUNC("H8ya2H00jbI", LibC::c_sin);
