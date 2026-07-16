@@ -50,6 +50,70 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	return true;
 }
 
+// Sample→surface alias ranking for PrepareTextures.
+//
+// Evidence (Dead Cells residual): format-family match alone still left
+// cyan/banded world tiles when a full-screen parent RT was bound for a
+// smaller sprite/GBuffer sample (non-exact Contains without a crop view).
+// Prefer candidates whose Vulkan extent equals the sample descriptor; only
+// fall back to format-compatible different extents when no exact match exists
+// (parent still beats empty tile-27 upload of GPU-owned guest memory).
+// For known ufmts 56/71, zero format-compatible candidates → reject alias.
+//
+// formats[i]/extents_w[i]/extents_h[i] describe candidate i of candidate_count
+// (capped at 16). On success, out_indices[0..out_count) are candidate indices
+// in preference order; out_count==0 && !reject means "use full unfiltered list".
+[[nodiscard]] inline bool Gen5PickSampleSurfaceAliases(uint32_t sample_ufmt, uint32_t sample_width,
+                                                       uint32_t sample_height, size_t candidate_count,
+                                                       const VkFormat* formats, const uint32_t* extents_w,
+                                                       const uint32_t* extents_h, int* out_indices,
+                                                       size_t* out_count, bool* reject)
+{
+	if (formats == nullptr || extents_w == nullptr || extents_h == nullptr || out_indices == nullptr ||
+	    out_count == nullptr || reject == nullptr)
+	{
+		return false;
+	}
+	*out_count = 0;
+	*reject    = false;
+	const bool   known_ufmt   = (sample_ufmt == 56u || sample_ufmt == 71u);
+	int          format_ok[16] = {};
+	size_t       format_n      = 0;
+	int          exact_ok[16]  = {};
+	size_t       exact_n       = 0;
+	const size_t n             = candidate_count < 16 ? candidate_count : 16;
+	for (size_t i = 0; i < n; i++)
+	{
+		if (!Gen5SampleFormatMatchesVulkan(sample_ufmt, formats[i]))
+		{
+			continue;
+		}
+		format_ok[format_n++] = static_cast<int>(i);
+		if (extents_w[i] == sample_width && extents_h[i] == sample_height)
+		{
+			exact_ok[exact_n++] = static_cast<int>(i);
+		}
+	}
+	if (known_ufmt && format_n == 0)
+	{
+		*reject = true;
+		return true;
+	}
+	const int*   src = exact_n > 0 ? exact_ok : (format_n > 0 ? format_ok : nullptr);
+	const size_t sn  = exact_n > 0 ? exact_n : format_n;
+	if (src == nullptr)
+	{
+		// Unknown ufmt with empty candidate list, or no format filter applied.
+		return true;
+	}
+	for (size_t i = 0; i < sn; i++)
+	{
+		out_indices[i] = src[i];
+	}
+	*out_count = sn;
+	return true;
+}
+
 // A blit source cannot be read before its first-use contents are established.
 [[nodiscard]] inline bool UtilBlitImageNeedsSourceInitialization(VkImageLayout tracked_layout)
 {

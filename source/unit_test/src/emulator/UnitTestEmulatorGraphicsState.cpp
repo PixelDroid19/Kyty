@@ -701,6 +701,43 @@ TEST(EmulatorGraphicsState, Gen5SampleFormatMatchesVulkanRejectsFloatForRgba8)
 	EXPECT_EQ(compatible, 1u);
 }
 
+// Dead Cells residual: among format-compatible RTs, prefer exact sample extent
+// so a full-screen parent is not bound for a small GBuffer/sprite sample.
+TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesPrefersExactExtent)
+{
+	using namespace Kyty::Libs::Graphics;
+	const VkFormat formats[]   = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM,
+	                              VK_FORMAT_R8G8B8A8_UNORM};
+	const uint32_t extents_w[] = {1920u, 1920u, 128u};
+	const uint32_t extents_h[] = {1080u, 1080u, 128u};
+	int            indices[16] = {};
+	size_t         count       = 0;
+	bool           reject      = false;
+
+	// Sample 128x128 ufmt 56: skip float parent; prefer exact 128x128 over 1920x1080.
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 128u, 128u, 3, formats, extents_w, extents_h, indices,
+	                                         &count, &reject));
+	EXPECT_FALSE(reject);
+	ASSERT_EQ(count, 1u);
+	EXPECT_EQ(indices[0], 2);
+
+	// Only float candidates for ufmt 56 → reject.
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 1920u, 1080u, 1, formats, extents_w, extents_h, indices,
+	                                         &count, &reject));
+	EXPECT_TRUE(reject);
+	EXPECT_EQ(count, 0u);
+
+	// Format match without exact extent: fall back to the large RGBA8 parent.
+	const VkFormat only_large[] = {VK_FORMAT_R8G8B8A8_UNORM};
+	const uint32_t large_w[]    = {1920u};
+	const uint32_t large_h[]    = {1080u};
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 128u, 128u, 1, only_large, large_w, large_h, indices,
+	                                         &count, &reject));
+	EXPECT_FALSE(reject);
+	ASSERT_EQ(count, 1u);
+	EXPECT_EQ(indices[0], 0);
+}
+
 // Sample pixel area vs RT extent areas (GraphicsRender sample-bind path).
 // A large sample covering a tiny child RT and a full-size parent must bind the
 // parent (tightest cover >= sample), not the child (sample_size==0 bug).

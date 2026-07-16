@@ -4774,17 +4774,25 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// false-color (cyan props / hot slabs). When every overlapping
 				// RT is the wrong family for a known ufmt, reject the alias and
 				// fall through to guest-memory / storage upload instead.
+				//
+				// Extent: among format-compatible RTs, prefer exact sample
+				// width×height. Binding a full-screen parent without a crop view
+				// left horizontal bands / wrong atlas tiles on Dead Cells.
+				const size_t cand_n = static_cast<size_t>(rtex.Size() < 16 ? rtex.Size() : 16);
+				VkFormat     cand_fmt[16] = {};
+				uint32_t     cand_w[16]   = {};
+				uint32_t     cand_h[16]   = {};
+				for (size_t i = 0; i < cand_n; i++)
+				{
+					cand_fmt[i] = rtex.At(static_cast<int>(i))->format;
+					cand_w[i]   = rtex.At(static_cast<int>(i))->extent.width;
+					cand_h[i]   = rtex.At(static_cast<int>(i))->extent.height;
+				}
 				int    filtered[16] = {};
 				size_t filtered_n   = 0;
-				for (int i = 0; i < rtex.Size() && filtered_n < 16; i++)
-				{
-					if (Gen5SampleFormatMatchesVulkan(fmt, rtex.At(i)->format))
-					{
-						filtered[filtered_n++] = i;
-					}
-				}
-				const bool known_ufmt     = (fmt == 56u || fmt == 71u);
-				const bool reject_alias   = known_ufmt && filtered_n == 0;
+				bool   reject_alias = false;
+				Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered,
+				                             &filtered_n, &reject_alias);
 				if (reject_alias)
 				{
 					render_texture = false;
@@ -4845,7 +4853,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 			// Live StorageTexture (compute/UAV) can own GPU pixels without ever
 			// being a color RT. Prefer that image over tile-27 CPU upload of empty
-			// guest memory (opaque-black wall/prop quads).
+			// guest memory (opaque-black wall/prop quads). Same format+extent
+			// ranking as the RT path so float UAV parents do not paint cyan sprites.
 			bool storage_texture = false;
 			if (!render_texture && gen5)
 			{
@@ -4854,42 +4863,69 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				{
 					stex = FindStorageTexture(addr, size.size, false);
 				}
-				storage_texture = !stex.IsEmpty();
-				if (storage_texture)
+				if (!stex.IsEmpty())
 				{
-					size_t alias_index = 0;
-					if (stex.Size() > 1)
+					const size_t cand_n = static_cast<size_t>(stex.Size() < 16 ? stex.Size() : 16);
+					VkFormat     cand_fmt[16] = {};
+					uint32_t     cand_w[16]   = {};
+					uint32_t     cand_h[16]   = {};
+					for (size_t i = 0; i < cand_n; i++)
 					{
-						uint64_t sizes[16] = {};
-						const auto n       = static_cast<size_t>(stex.Size() < 16 ? stex.Size() : 16);
-						bool       use_guest_bytes = true;
-						for (size_t i = 0; i < n; i++)
-						{
-							if (stex.At(static_cast<int>(i))->guest_size == 0)
-							{
-								use_guest_bytes = false;
-								break;
-							}
-						}
-						if (use_guest_bytes)
-						{
-							for (size_t i = 0; i < n; i++)
-							{
-								sizes[i] = stex.At(static_cast<int>(i))->guest_size;
-							}
-							alias_index = PreferGpuMemoryAliasIndex(sizes, n, size.size);
-						} else
-						{
-							for (size_t i = 0; i < n; i++)
-							{
-								const auto& e = stex.At(static_cast<int>(i))->extent;
-								sizes[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
-							}
-							const uint64_t sample_area = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
-							alias_index               = PreferGpuMemoryAliasIndex(sizes, n, sample_area);
-						}
+						cand_fmt[i] = stex.At(static_cast<int>(i))->format;
+						cand_w[i]   = stex.At(static_cast<int>(i))->extent.width;
+						cand_h[i]   = stex.At(static_cast<int>(i))->extent.height;
 					}
-					tex = stex.At(static_cast<int>(alias_index));
+					int    filtered[16] = {};
+					size_t filtered_n   = 0;
+					bool   reject_st    = false;
+					Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered,
+					                             &filtered_n, &reject_st);
+					if (!reject_st)
+					{
+						storage_texture          = true;
+						const bool   use_filter  = filtered_n > 0;
+						const size_t n           = use_filter ? filtered_n : cand_n;
+						size_t       alias_index = 0;
+						if (n > 1)
+						{
+							uint64_t sizes[16]       = {};
+							bool     use_guest_bytes = true;
+							for (size_t i = 0; i < n; i++)
+							{
+								const int ri = use_filter ? filtered[i] : static_cast<int>(i);
+								if (stex.At(ri)->guest_size == 0)
+								{
+									use_guest_bytes = false;
+									break;
+								}
+							}
+							if (use_guest_bytes)
+							{
+								for (size_t i = 0; i < n; i++)
+								{
+									const int ri = use_filter ? filtered[i] : static_cast<int>(i);
+									sizes[i]     = stex.At(ri)->guest_size;
+								}
+								alias_index = PreferGpuMemoryAliasIndex(sizes, n, size.size);
+							} else
+							{
+								for (size_t i = 0; i < n; i++)
+								{
+									const int   ri = use_filter ? filtered[i] : static_cast<int>(i);
+									const auto& e  = stex.At(ri)->extent;
+									sizes[i] = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+								}
+								const uint64_t sample_area =
+								    static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+								alias_index = PreferGpuMemoryAliasIndex(sizes, n, sample_area);
+							}
+						}
+						if (use_filter)
+						{
+							alias_index = static_cast<size_t>(filtered[alias_index]);
+						}
+						tex = stex.At(static_cast<int>(alias_index));
+					}
 				}
 			}
 			if (gen5)
