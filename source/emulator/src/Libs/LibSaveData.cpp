@@ -441,6 +441,66 @@ int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResul
 	return OK;
 }
 
+// sceSaveDataTransferringMount — NID WAzWTZm1H+I / RjMlsR8EXrw (SaveData_native).
+// Observed Astro after PlayGo on thread 10: (mount*, result*). Creates host dir
+// and mounts at /savedata0 when missing so first-boot transfer continues.
+struct SaveDataTransferringMountParam
+{
+	int32_t                user_id;
+	const SaveDataTitleId* title_id;
+	const SaveDataDirName* dir_name;
+	const void*            fingerprint;
+	uint8_t                reserved[32];
+};
+
+int KYTY_SYSV_ABI SaveDataTransferringMount(const SaveDataTransferringMountParam* mount, SaveDataMountResult* mount_result)
+{
+	PRINT_NAME();
+	if (mount == nullptr || mount_result == nullptr || mount->dir_name == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	if (mount->user_id < 0)
+	{
+		return SAVE_DATA_ERROR_INVALID_LOGIN_USER;
+	}
+
+	String dir_name = String::FromUtf8(mount->dir_name->data);
+	if (dir_name.IsEmpty())
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	printf("\t user_id  = %d\n", mount->user_id);
+	printf("\t title_id = %s\n", mount->title_id != nullptr ? mount->title_id->data : "<null>");
+	printf("\t dir_name = %s\n", mount->dir_name->data);
+
+	// Layout mirrors Mount3 host path: _SaveData/<dir_name> → /savedata0.
+	String       mount_dir   = String(SAVE_DATA_DIR) + U"/" + dir_name;
+	String       mount_point = SAVE_DATA_POINT;
+	const bool   existed     = Core::File::IsDirectoryExisting(mount_dir);
+	if (!existed)
+	{
+		Core::File::CreateDirectories(mount_dir);
+		if (!Core::File::IsDirectoryExisting(mount_dir))
+		{
+			return SAVE_DATA_ERROR_INTERNAL;
+		}
+	}
+
+	LibKernel::FileSystem::Mount(mount_dir, mount_point);
+	std::memset(mount_result, 0, sizeof(*mount_result));
+	const int written =
+	    snprintf(mount_result->mount_point.data, sizeof(mount_result->mount_point.data), "%s", mount_point.C_Str());
+	if (written < 0 || written >= static_cast<int>(sizeof(mount_result->mount_point.data)))
+	{
+		return SAVE_DATA_ERROR_INTERNAL;
+	}
+	mount_result->required_blocks = 0;
+	mount_result->mount_status    = (existed ? 0u : 1u);
+	return OK;
+}
+
 int KYTY_SYSV_ABI SaveDataUmount(const SaveDataMountPoint* mount_point)
 {
 	PRINT_NAME();
@@ -704,6 +764,9 @@ LIB_DEFINE(InitSaveData_1)
 	LIB_FUNC("oQySEUfgXRA", SaveData::SaveDataSetupSaveDataMemory2);
 	LIB_FUNC("QwOO7vegnV8", SaveData::SaveDataGetSaveDataMemory2);
 	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);
+	// TransferringMount also appears on SaveData_v1 tables.
+	LIB_FUNC("WAzWTZm1H+I", SaveData::SaveDataTransferringMount);
+	LIB_FUNC("RjMlsR8EXrw", SaveData::SaveDataTransferringMount);
 }
 
 namespace SaveDataNative {
@@ -738,6 +801,9 @@ LIB_DEFINE(InitSaveDataNative_1)
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
 	LIB_FUNC("oQySEUfgXRA", SaveData::SaveDataSetupSaveDataMemory2);
 	LIB_FUNC("QwOO7vegnV8", SaveData::SaveDataGetSaveDataMemory2);
+	// sceSaveDataTransferringMount — NID WAzWTZm1H+I (Astro after PlayGo).
+	LIB_FUNC("WAzWTZm1H+I", SaveData::SaveDataTransferringMount);
+	LIB_FUNC("RjMlsR8EXrw", SaveData::SaveDataTransferringMount);
 	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);
 }
 

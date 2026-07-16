@@ -16,12 +16,20 @@ LIB_VERSION("NpUniversalDataSystem", 1, "NpUniversalDataSystem", 1, 1);
 static constexpr int error_invalid_argument = static_cast<int32_t>(0x80553102u);
 static std::atomic<int32_t> g_next_handle {1};
 
-static constexpr uint64_t event_magic           = 0x4b59545955445345ull;
+static constexpr uint64_t event_magic            = 0x4b59545955445345ull;
 static constexpr uint64_t event_properties_magic = 0x4b59545955445350ull;
+static constexpr uint64_t event_array_magic      = 0x4b59545955445341ull; // "KYTYUDSA"
 
 struct EventPropertyObject
 {
 	uint64_t magic = event_properties_magic;
+};
+
+// Opaque array node for ObjectSetArray / CreateEventPropertyArray.
+// Values are accepted and ignored offline (analytics telemetry only).
+struct EventPropertyArray
+{
+	uint64_t magic = event_array_magic;
 };
 
 struct Event
@@ -88,6 +96,75 @@ int KYTY_SYSV_ABI EventPropertyObjectSetString(EventPropertyObject* properties, 
 	            : error_invalid_argument);
 }
 
+// Observed Astro after PlayGo: (properties, key*, value=null, value_ptr*).
+// Null value allocates a new host array written through value_ptr.
+int KYTY_SYSV_ABI EventPropertyObjectSetArray(EventPropertyObject* properties, const char* key, const EventPropertyArray* value,
+                                              EventPropertyArray** value_ptr)
+{
+	if (properties == nullptr || properties->magic != event_properties_magic || key == nullptr || key[0] == '\0')
+	{
+		return error_invalid_argument;
+	}
+	if (value_ptr != nullptr)
+	{
+		if (value != nullptr)
+		{
+			*value_ptr = const_cast<EventPropertyArray*>(value);
+		}
+		else
+		{
+			*value_ptr = new EventPropertyArray;
+		}
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI CreateEventPropertyArray(EventPropertyArray** new_array)
+{
+	if (new_array == nullptr)
+	{
+		return error_invalid_argument;
+	}
+	*new_array = new EventPropertyArray;
+	return OK;
+}
+
+int KYTY_SYSV_ABI DestroyEventPropertyArray(EventPropertyArray* array)
+{
+	if (array == nullptr || array->magic != event_array_magic)
+	{
+		return error_invalid_argument;
+	}
+	array->magic = 0;
+	delete array;
+	return OK;
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetString(EventPropertyArray* array, const char* value)
+{
+	return (array != nullptr && array->magic == event_array_magic && value != nullptr ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetInt32(EventPropertyArray* array, int32_t /*value*/)
+{
+	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetUInt32(EventPropertyArray* array, uint32_t /*value*/)
+{
+	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetInt64(EventPropertyArray* array, int64_t /*value*/)
+{
+	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetUInt64(EventPropertyArray* array, uint64_t /*value*/)
+{
+	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+}
+
 int KYTY_SYSV_ABI PostEvent(int32_t /*context*/, int32_t /*handle*/, Event* event, uint32_t /*options*/)
 {
 	return (event != nullptr && event->magic == event_magic ? OK : error_invalid_argument);
@@ -117,6 +194,15 @@ LIB_DEFINE(InitNpUniversalDataSystem_1)
 	LIB_FUNC("p+GcLqwpL9M", CreateEvent);
 	LIB_FUNC("YE4dbtbz6OE", EventPropertyObjectSetInt32);
 	LIB_FUNC("MfDb+4Nln64", EventPropertyObjectSetString);
+	// Gen5 analytics arrays (Astro after PlayGo).
+	LIB_FUNC("Wxbg5x3pTXA", EventPropertyObjectSetArray);
+	LIB_FUNC("Hm7qubT3b70", CreateEventPropertyArray);
+	LIB_FUNC("W-0xwY0ZMjw", DestroyEventPropertyArray);
+	LIB_FUNC("4llLk7YJRTE", EventPropertyArraySetString);
+	LIB_FUNC("BypQuF113-k", EventPropertyArraySetInt32);
+	LIB_FUNC("yMi0xAOpmXM", EventPropertyArraySetUInt32);
+	LIB_FUNC("viVXAwmmYrY", EventPropertyArraySetInt64);
+	LIB_FUNC("Qo9qR7v5zO4", EventPropertyArraySetUInt64);
 	LIB_FUNC("CzkKf7ahIyU", PostEvent);
 	LIB_FUNC("wG+84pnNIuo", DestroyEvent);
 }
