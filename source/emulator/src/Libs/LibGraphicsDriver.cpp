@@ -124,6 +124,9 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("KT-hTp-Ch14", Gen5::GraphicsAcbAcquireMem);
 	LIB_FUNC("i1jyy49AjXU", Gen5::GraphicsDcbWriteData);
 	LIB_FUNC("eZ4+17OQz4Q", Gen5::GraphicsAcbWriteData);
+	LIB_FUNC("qj7QZpgr9Uw", Gen5::GraphicsCbType2Pad);
+	LIB_FUNC("RmaJwLtc8rY", Gen5::GraphicsDcbSetBaseIndirectArgs);
+	LIB_FUNC("CtB+A9-VxO0", Gen5::GraphicsDcbDispatchIndirect);
 	LIB_FUNC("VmW0Tdpy420", Gen5::GraphicsDcbWaitRegMem);
 	LIB_FUNC("htn36gPnBk4", Gen5::GraphicsAcbWaitRegMem);
 	LIB_FUNC("1rZSWUv1IRc", Gen5::GraphicsDcbCopyData);
@@ -204,6 +207,9 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("KT-hTp-Ch14", Gen5::GraphicsAcbAcquireMem);
 	LIB_FUNC("i1jyy49AjXU", Gen5::GraphicsDcbWriteData);
 	LIB_FUNC("eZ4+17OQz4Q", Gen5::GraphicsAcbWriteData);
+	LIB_FUNC("qj7QZpgr9Uw", Gen5::GraphicsCbType2Pad);
+	LIB_FUNC("RmaJwLtc8rY", Gen5::GraphicsDcbSetBaseIndirectArgs);
+	LIB_FUNC("CtB+A9-VxO0", Gen5::GraphicsDcbDispatchIndirect);
 	LIB_FUNC("VmW0Tdpy420", Gen5::GraphicsDcbWaitRegMem);
 	LIB_FUNC("htn36gPnBk4", Gen5::GraphicsAcbWaitRegMem);
 	LIB_FUNC("1rZSWUv1IRc", Gen5::GraphicsDcbCopyData);
