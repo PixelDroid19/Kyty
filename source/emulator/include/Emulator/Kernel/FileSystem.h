@@ -60,6 +60,22 @@ int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* 
                                                              uint64_t* sizes);
 // sceKernelAprResolveFilepathsToIds — same as above without sizes (NID WT-5NKy42fw).
 int KYTY_SYSV_ABI KernelAprResolveFilepathsToIds(const char* const* paths, uint64_t count, uint32_t* ids);
+// Prefix + path resolve (Gen5). empty/null prefix is plain resolve.
+int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIds(const char* prefix, const char* const* paths, uint64_t count,
+                                                           uint32_t* ids);
+int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(const char* prefix, const char* const* paths,
+                                                                       uint64_t count, uint32_t* ids, uint64_t* sizes);
+// ForEach variants: fill optional per-path results[]; return OK or first error when results is null.
+// When results is non-null, return success count (non-negative).
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsForEach(const char* const* paths, uint64_t count, uint32_t* ids,
+                                                        int32_t* results);
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizesForEach(const char* const* paths, uint64_t count, uint32_t* ids,
+                                                                    uint64_t* sizes, int32_t* results);
+int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsForEach(const char* prefix, const char* const* paths, uint64_t count,
+                                                                  uint32_t* ids, int32_t* results);
+int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach(const char* prefix, const char* const* paths,
+                                                                              uint64_t count, uint32_t* ids, uint64_t* sizes,
+                                                                              int32_t* results);
 // Host path lookup for APR file ids minted by resolve APIs.
 bool AprTryGetHostPath(uint32_t file_id, String* out_host_path);
 // sceKernelAprGetFileSize / GetFileStat by previously resolved file id.
