@@ -138,6 +138,41 @@ TEST(EmulatorLoaderTls, PrepareThreadTlsHandlesNullAndShort)
 	EXPECT_EQ(LoaderPrepareThreadTlsImage(tiny, sizeof(tiny), 0x1000, 0, 0, nullptr, nullptr), 0u);
 }
 
+// Gen5 TLS template can hold absolute pointers to static descriptor blobs
+// (size/refcount + function pointers) at the compute-context slots. Those
+// must clear so s_pTlsComputeContext starts null for the guest SET path.
+TEST(EmulatorLoaderTls, PreparesThreadTlsClearsStaticDescriptorContextSlots)
+{
+	using Kyty::Loader::LoaderPrepareThreadTlsImage;
+
+	GuestMem guest;
+	guest.base = 0x900000000ull;
+	guest.bytes.assign(0x1000, 0);
+	// Descriptor at +0x148: size=0x78, refcount=2, fn ptr into program.
+	const uint64_t desc_off = 0x148;
+	const uint64_t desc_va  = guest.base + desc_off;
+	*reinterpret_cast<uint64_t*>(guest.bytes.data() + desc_off)        = 0x78;
+	*reinterpret_cast<uint64_t*>(guest.bytes.data() + desc_off + 0x08) = 2;
+	*reinterpret_cast<uint64_t*>(guest.bytes.data() + desc_off + 0x10) = guest.base + 0x200; // "code"
+
+	// Live object with vtable-like word0 (high pointer) must stay.
+	const uint64_t live_off = 0x400;
+	const uint64_t live_va  = guest.base + live_off;
+	*reinterpret_cast<uint64_t*>(guest.bytes.data() + live_off) = guest.base + 0x300; // vtable
+
+	constexpr uint64_t kTmpl    = 0x9088e0000ull;
+	constexpr uint64_t kImgSize = 0xa0;
+	std::vector<uint8_t> tls(kImgSize, 0);
+	*reinterpret_cast<uint64_t*>(tls.data() + 0x70) = desc_va;
+	*reinterpret_cast<uint64_t*>(tls.data() + 0x58) = live_va;
+
+	const uint64_t n =
+	    LoaderPrepareThreadTlsImage(tls.data(), kImgSize, kTmpl, guest.base, guest.bytes.size(), TestGuestRead64, &guest);
+	EXPECT_GE(n, 1u);
+	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x70), 0u);
+	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x58), live_va);
+}
+
 UT_END();
 
 #endif // KYTY_EMU_ENABLED
