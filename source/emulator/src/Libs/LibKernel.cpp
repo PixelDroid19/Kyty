@@ -592,7 +592,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("HoLVWNanBBc", getpid);
 	// Gen5 Posix_v1 pthread_self — EotR8a3ASf4 (Astro audio path after Acm).
 	LIB_FUNC("EotR8a3ASf4", pthread_self);
-	// Gen5 Posix_v1 pthread_attr_* (Kyty Posix map; Astro after odx path fix).
+	// Gen5 Posix_v1 pthread_attr_* (Astro after package path bring-up).
 	LIB_FUNC("wtkt-teR1so", Posix::pthread_attr_init);
 	LIB_FUNC("zHchY8ft5pk", Posix::pthread_attr_destroy);
 	LIB_FUNC("vQm4fDEsWi8", Posix::pthread_attr_getstack);
@@ -612,7 +612,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 
 	LIB_FUNC("OxhIB8LB-PQ", Posix::pthread_create);
 	LIB_FUNC("h9CcP3J0oVM", Posix::pthread_join);
-	// Gen5 Posix_v1 thread control (Kyty map; Astro after attr_setstacksize).
+	// Gen5 Posix_v1 thread control (Astro after attr_setstacksize).
 	LIB_FUNC("+U1R4WtXvoc", Posix::pthread_detach);
 	LIB_FUNC("FJrT5LuUBAU", Posix::pthread_exit);
 	LIB_FUNC("B5GmVDKwpn0", Posix::pthread_yield);

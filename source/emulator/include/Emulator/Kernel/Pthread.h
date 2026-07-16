@@ -221,7 +221,7 @@ LibKernel::Pthread KYTY_SYSV_ABI pthread_self();
 int KYTY_SYSV_ABI   pthread_create(LibKernel::Pthread* thread, const LibKernel::PthreadAttr* attr, LibKernel::pthread_entry_func_t entry,
                                    void* arg);
 int KYTY_SYSV_ABI   pthread_join(LibKernel::Pthread thread, void** value);
-// Gen5 Posix_v1 — NIDs from Kyty (+U1R4WtXvoc detach after attr setup).
+// Gen5 Posix_v1 thread control (+U1R4WtXvoc detach after attr setup).
 int KYTY_SYSV_ABI   pthread_detach(LibKernel::Pthread thread);
 void KYTY_SYSV_ABI  pthread_exit(void* value);
 void KYTY_SYSV_ABI  pthread_yield();
@@ -243,7 +243,7 @@ int KYTY_SYSV_ABI   pthread_mutex_init(LibKernel::PthreadMutex* mutex, const Lib
 int KYTY_SYSV_ABI   pthread_mutexattr_init(LibKernel::PthreadMutexattr* attr);
 int KYTY_SYSV_ABI   pthread_mutexattr_settype(LibKernel::PthreadMutexattr* attr, int type);
 int KYTY_SYSV_ABI   pthread_mutexattr_destroy(LibKernel::PthreadMutexattr* attr);
-// Gen5 Posix_v1 pthread_attr_* — NIDs from Kyty Posix map (Astro after odx path).
+// Gen5 Posix_v1 pthread_attr_* (Astro after package path bring-up).
 int KYTY_SYSV_ABI pthread_attr_init(LibKernel::PthreadAttr* attr);
 int KYTY_SYSV_ABI pthread_attr_destroy(LibKernel::PthreadAttr* attr);
 int KYTY_SYSV_ABI pthread_attr_getstack(const LibKernel::PthreadAttr* attr, void** stack_addr, size_t* stack_size);

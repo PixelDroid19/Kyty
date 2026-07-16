@@ -2501,13 +2501,14 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED(dst != 1);
-	// data_sel: 1 = 32-bit immediate (observed after WaitUntilSafe path with
-	// data=1), 2/3 = 64-bit/counter forms previously exercised by the same
-	// packet encoder. Packet layout already stores data in DW5/DW6.
-	EXIT_NOT_IMPLEMENTED(data_sel != 1 && data_sel != 2 && data_sel != 3);
+	// data_sel: 0 = no destination write (barrier/flush only), 1 = 32-bit
+	// immediate, 2 = 64-bit immediate, 3 = GPU clock counter. Packet layout
+	// stores data in DW5/DW6 for write forms; data_sel 0 uses the same 7-DW
+	// custom envelope. CP custom R_RELEASE_MEM already accepts 0..3.
+	EXIT_NOT_IMPLEMENTED(data_sel != 0 && data_sel != 1 && data_sel != 2 && data_sel != 3);
 	EXIT_NOT_IMPLEMENTED(gds_offset != 0);
-	// Immediate data_sel forms do not encode GDS fields. Guests pass gds_size
-	// 0 (unused) or 1 (legacy default); both are packet-equivalent here.
+	// Non-GDS forms do not encode GDS fields. Guests pass gds_size 0 (unused)
+	// or 1 (legacy default); both are packet-equivalent here.
 	EXIT_NOT_IMPLEMENTED(gds_size != 0 && gds_size != 1);
 	EXIT_NOT_IMPLEMENTED(interrupt != 0);
 	EXIT_NOT_IMPLEMENTED(interrupt_ctx_id != 0);
@@ -2536,10 +2537,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbResetQueue(CommandBuffer* buf, uint32_t op, u
 	printf("\t op    = 0x%08" PRIx32 "\n", op);
 	printf("\t state = 0x%08" PRIx32 "\n", state);
 
-	// Gen5 sce::Agc::DrawCommandBuffer::resetQueue takes a 12-bit op mask and a
-	// small state selector. Historical Kyty only accepted op==0x3ff/state==0 and
-	// emitted a custom R_DRAW_RESET NOP; Astro and Kyty encode IT_CLEAR_STATE
-	// with the low 4 bits of state in the body dword.
+	// Gen5 sce::Agc::DrawCommandBuffer::resetQueue: 12-bit op mask and a small
+	// state selector. Emit IT_CLEAR_STATE with the low 4 bits of state.
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED((op & ~0xfffu) != 0);
 

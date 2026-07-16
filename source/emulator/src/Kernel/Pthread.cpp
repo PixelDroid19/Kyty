@@ -3314,7 +3314,7 @@ int KYTY_SYSV_ABI pthread_mutexattr_destroy(LibKernel::PthreadMutexattr* attr)
 	return POSIX_PTHREAD_CALL(LibKernel::PthreadMutexattrDestroy(attr));
 }
 
-// Gen5 Posix_v1 pthread_attr_* — NIDs from Kyty Posix map.
+// Gen5 Posix_v1 pthread_attr_* NIDs (Astro after package path bring-up).
 int KYTY_SYSV_ABI pthread_attr_init(LibKernel::PthreadAttr* attr)
 {
 	PRINT_NAME();
