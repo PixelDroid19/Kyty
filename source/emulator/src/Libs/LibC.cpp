@@ -543,6 +543,8 @@ static KYTY_SYSV_ABI int c_isnanf(float x)
 // Gen5 libc_v1 sinf — NID Q4rRL34CEeE (Astro after usleep).
 static KYTY_SYSV_ABI float c_sinf(float x) { return ::sinf(x); }
 static KYTY_SYSV_ABI float c_cosf(float x) { return ::cosf(x); }
+// Gen5 libc_v1 tanf — NID ZE6RNL+eLbk (Astro after Posix pthread_detach; float in xmm0).
+static KYTY_SYSV_ABI float c_tanf(float x) { return ::tanf(x); }
 static KYTY_SYSV_ABI float c_log10f(float x) { return ::log10f(x); }
 static KYTY_SYSV_ABI float c_logf(float x) { return ::logf(x); }
 static KYTY_SYSV_ABI float c_sqrtf(float x) { return ::sqrtf(x); }
@@ -1069,6 +1071,8 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 libc_v1 float math (Astro after usleep; NIDs from name→NID hash).
 	LIB_FUNC("Q4rRL34CEeE", LibC::c_sinf);
 	LIB_FUNC("-P6FNMzk2Kc", LibC::c_cosf);
+	// Gen5 libc_v1 tanf — ZE6RNL+eLbk after Posix detach on Astro (xmm0 float).
+	LIB_FUNC("ZE6RNL+eLbk", LibC::c_tanf);
 	LIB_FUNC("lhpd6Wk6ccs", LibC::c_log10f); // next Unpatched after sinf
 	LIB_FUNC("RQXLbdT2lc4", LibC::c_logf);
 	LIB_FUNC("Q+xU11-h0xQ", LibC::c_sqrtf);
