@@ -2712,7 +2712,9 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	EXIT_NOT_IMPLEMENTED(modifier != 0x40000000);
+	// Observed Gen5 modifiers: 0x40000000 (default) and 0x80000000 (Astro
+	// post-compute path). Other bits remain unsupported until evidenced.
+	EXIT_NOT_IMPLEMENTED(modifier != 0x40000000ull && modifier != 0x80000000ull);
 
 	// auto *m = reinterpret_cast<ShaderDrawModifier*>(&modifier);
 
@@ -2724,7 +2726,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 
 	cmd[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX_AUTO);
 	cmd[1] = index_count;
-	cmd[2] = 0;
+	cmd[2] = static_cast<uint32_t>(modifier);
 
 	return cmd;
 }

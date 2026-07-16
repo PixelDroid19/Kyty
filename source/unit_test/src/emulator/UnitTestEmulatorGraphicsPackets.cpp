@@ -636,6 +636,42 @@ TEST(EmulatorGraphicsPackets, EncodesWriteDataCachePolicy2ControlWord)
 	EXPECT_EQ(cmd[5], 0x22222222u);
 }
 
+// DrawIndexAuto accepts modifier 0x80000000 (Astro post-compute) as well as
+// the historical 0x40000000 default.
+TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoModifier80000000)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd = Gen5::GraphicsDcbDrawIndexAuto(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 0x80000000ull);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX_AUTO));
+	EXPECT_EQ(cmd[1], 1u);
+	EXPECT_EQ(cmd[2], 0x80000000u);
+}
+
 // Gen5 type-2 pad (NID qj7QZpgr9Uw): single 0x80000000 dword.
 TEST(EmulatorGraphicsPackets, EncodesCbType2Pad)
 {
