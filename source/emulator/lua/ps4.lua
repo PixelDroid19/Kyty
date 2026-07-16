@@ -1,18 +1,20 @@
 
 local cfg = {
 	ScreenWidth = 1280;
-	ScreenHeight = 720;	
+	ScreenHeight = 720;
 	Neo = true;
-	VulkanValidationEnabled = true;
-	ShaderValidationEnabled = true;		
+	VulkanValidationEnabled = false;
+	ShaderValidationEnabled = false;
 	ShaderOptimizationType = 'Performance'; -- None, Size, Performance
-	ShaderLogDirection = 'File'; -- Silent, Console, File
+	-- Diagnostics are opt-in: File/Console logging and buffer dumps can fill
+	-- host disk and stall FPS. Enable only while debugging a specific path.
+	ShaderLogDirection = 'Silent'; -- Silent, Console, File
 	ShaderLogFolder = '_Shaders';
-	CommandBufferDumpEnabled = true;
+	CommandBufferDumpEnabled = false;
 	CommandBufferDumpFolder = '_Buffers';
-	PrintfDirection = 'Console'; -- Silent, Console, File
+	PrintfDirection = 'Silent'; -- Silent, Console, File
 	PrintfOutputFile = '_kyty.txt';
-	ProfilerDirection = 'None'; -- None, File, Network,	FileAndNetwork
+	ProfilerDirection = 'None'; -- None, File, Network, FileAndNetwork
 	ProfilerOutputFile = '_profile.prof';
 }
 
@@ -40,6 +42,3 @@ kyty_load_symbols('libUserService_1');
 kyty_load_symbols('libVideoOut_1');
 
 kyty_execute();
-
-
-

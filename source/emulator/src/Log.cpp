@@ -27,11 +27,16 @@ namespace Log {
 
 static bool                     g_log_initialized    = false;
 static Core::Mutex*             g_mutex              = nullptr;
-static Direction                g_dir                = Direction::Console;
+static Direction                g_dir                = Direction::Silent;
 static Core::File*              g_file               = nullptr;
 static bool                     g_colored_printf     = false;
 static thread_local Core::File* g_thread_local_file  = nullptr;
 static Vector<Core::File*>*     g_thread_local_files = nullptr;
+// Cap File-mode logs so a long boot cannot fill the host disk. After the
+// limit, further printf/emu_printf lines are dropped (direction stays File).
+static constexpr uint64_t       g_file_log_max_bytes = 32ull * 1024ull * 1024ull;
+static uint64_t                 g_file_log_bytes     = 0;
+static bool                     g_file_log_capped    = false;
 
 static bool EnableVTMode()
 {
@@ -176,6 +181,8 @@ void SetOutputFile(const String& file_name, Core::File::Encoding enc)
 
 	g_file = new Core::File;
 	g_file->Create(file_name);
+	g_file_log_bytes  = 0;
+	g_file_log_capped = false;
 
 	if (g_file->IsInvalid())
 	{
@@ -187,6 +194,26 @@ void SetOutputFile(const String& file_name, Core::File::Encoding enc)
 		g_file->SetEncoding(enc);
 		g_file->WriteBOM();
 	}
+}
+
+// Returns false when File-mode output is past the soft cap (caller should skip Write).
+bool FileLogAllowsWrite(uint64_t add_bytes)
+{
+	if (g_file == nullptr || g_file_log_capped)
+	{
+		return false;
+	}
+	if (g_file_log_bytes + add_bytes > g_file_log_max_bytes)
+	{
+		g_file_log_capped = true;
+		const char* msg = "\n[kyty] log file soft-cap reached (32 MiB); further File logging suppressed\n";
+		g_file->Write(String::FromUtf8(msg));
+		g_file->Flush();
+		::printf("%s", msg);
+		return false;
+	}
+	g_file_log_bytes += add_bytes;
+	return true;
 }
 
 void SetOutputThreadLocalFile(const String& file_name, Core::File::Encoding enc)
@@ -246,7 +273,8 @@ void emu_printf(const char* format, ...)
 
 		::printf("%s", s.C_Str());
 
-		if (Log::g_dir == Log::Direction::File && Log::g_file != nullptr)
+		if (Log::g_dir == Log::Direction::File && Log::g_file != nullptr &&
+		    Log::FileLogAllowsWrite(static_cast<uint64_t>(s.Size())))
 		{
 			Log::g_file->Write(s);
 		}
@@ -284,7 +312,10 @@ void printf(const char* format, ...)
 	} else if (Log::g_dir == Log::Direction::File && Log::g_file != nullptr)
 	{
 		Log::g_mutex->Lock();
-		Log::g_file->Write(s);
+		if (Log::FileLogAllowsWrite(static_cast<uint64_t>(s.Size())))
+		{
+			Log::g_file->Write(s);
+		}
 		Log::g_mutex->Unlock();
 	} else if (Log::g_dir == Log::Direction::Directory)
 	{
