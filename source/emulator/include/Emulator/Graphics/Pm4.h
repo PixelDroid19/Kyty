@@ -1012,6 +1012,7 @@ void DumpPm4PacketStream(Core::File* file, uint32_t* cmd_buffer, uint32_t start_
 // bits look like Type3 (e.g. 0xf84d2e90) but cannot be real IT_* packets.
 uint32_t Pm4NonType3PacketDwords(uint32_t cmd_id, uint32_t remaining_including_header = 0);
 uint32_t Pm4SpecialType3PacketDwords(uint32_t cmd_id);
+bool     Pm4Gen5OpaquePairPrecedesWaitFlipDone(const uint32_t* stream, uint32_t remaining_including_header);
 
 } // namespace Kyty::Libs::Graphics::Pm4
 
