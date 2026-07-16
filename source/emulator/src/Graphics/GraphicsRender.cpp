@@ -5001,10 +5001,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					    submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_buffer_info));
 				} else
 				{
-					// Overlapping StorageBuffers often hold the live GPU pixels for
-					// tile-27 samples that are not color RTs. Write them back so
-					// TileConvertSw64kRxToLinear does not detile empty guest memory.
-					if (gen5 && (tile == 27u || tile == 0u))
+					// StorageBuffers are linear SSBO bindings (MUBUF dword address).
+					// Writing them back then detiling as kRenderTarget/kStandard64KB
+					// treats linear GPU bytes as tiled layout → horizontal bands and
+					// cyan atlas garbage on props. Live color surfaces must bind via
+					// FindRenderTexture / FindStorageTexture above; only linear
+					// (tile 0) samples may flush overlapping storage into guest memory
+					// before a linear upload.
+					if (gen5 && tile == 0u)
 					{
 						GpuMemoryWriteBackStorageRange(g_render_ctx->GetGraphicCtx(), addr, size.size);
 					}
