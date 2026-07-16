@@ -444,6 +444,46 @@ TEST(EmulatorGraphicsState, PreferGpuMemoryAliasPicksTightestCover)
 	EXPECT_EQ(PreferGpuMemoryAliasIndex(sizes, 1, 0x100ull), 0u);
 }
 
+// Residual world false-color: ufmt-56 samples must not alias float lighting RTs.
+// GraphicsRender rejects the RT alias entirely when every overlap is the wrong
+// family for known ufmts 56/71 (falls through to guest/storage upload).
+TEST(EmulatorGraphicsState, Gen5SampleFormatMatchesVulkanRejectsFloatForRgba8)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_B8G8R8A8_UNORM));
+	EXPECT_FALSE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(71u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_FALSE(Gen5SampleFormatMatchesVulkan(71u, VK_FORMAT_R8G8B8A8_UNORM));
+	// Unknown ufmt: do not invent a filter that drops every match.
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(14u, VK_FORMAT_R8G8_UNORM));
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(14u, VK_FORMAT_R16G16B16A16_SFLOAT));
+
+	// Simulated multi-match policy used by PrepareTextures: when every RT is
+	// float and the sample is ufmt 56, zero compatible aliases → reject path.
+	const VkFormat only_float[] = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT};
+	size_t         compatible   = 0;
+	for (VkFormat f: only_float)
+	{
+		if (Gen5SampleFormatMatchesVulkan(56u, f))
+		{
+			compatible++;
+		}
+	}
+	EXPECT_EQ(compatible, 0u);
+	const VkFormat mixed[] = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM};
+	compatible             = 0;
+	for (VkFormat f: mixed)
+	{
+		if (Gen5SampleFormatMatchesVulkan(56u, f))
+		{
+			compatible++;
+		}
+	}
+	EXPECT_EQ(compatible, 1u);
+}
+
 // Sample pixel area vs RT extent areas (GraphicsRender sample-bind path).
 // A large sample covering a tiny child RT and a full-size parent must bind the
 // parent (tightest cover >= sample), not the child (sample_size==0 bug).

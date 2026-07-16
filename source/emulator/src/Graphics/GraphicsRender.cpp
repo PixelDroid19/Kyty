@@ -4776,42 +4776,75 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// always picked the smallest RT — including tiny IsContainedWithin
 				// children under a large sample — which bound a partial image and
 				// left opaque-black prop/character boxes.
-				size_t alias_index = 0;
-				if (rtex.Size() > 1)
+				//
+				// Format family: ufmt 56 → 8bpc, ufmt 71 → float16. Binding a
+				// float lighting RT as an RGBA8 sample produces residual world
+				// false-color (cyan props / hot slabs). When every overlapping
+				// RT is the wrong family for a known ufmt, reject the alias and
+				// fall through to guest-memory / storage upload instead.
+				int    filtered[16] = {};
+				size_t filtered_n   = 0;
+				for (int i = 0; i < rtex.Size() && filtered_n < 16; i++)
 				{
-					uint64_t sizes[16] = {};
-					const auto n       = static_cast<size_t>(rtex.Size() < 16 ? rtex.Size() : 16);
-					bool       use_guest_bytes = true;
-					for (size_t i = 0; i < n; i++)
+					if (Gen5SampleFormatMatchesVulkan(fmt, rtex.At(i)->format))
 					{
-						if (rtex.At(static_cast<int>(i))->guest_size == 0)
-						{
-							use_guest_bytes = false;
-							break;
-						}
-					}
-					if (use_guest_bytes)
-					{
-						for (size_t i = 0; i < n; i++)
-						{
-							sizes[i] = rtex.At(static_cast<int>(i))->guest_size;
-						}
-						alias_index = PreferGpuMemoryAliasIndex(sizes, n, size.size);
-					} else
-					{
-						for (size_t i = 0; i < n; i++)
-						{
-							const auto& e = rtex.At(static_cast<int>(i))->extent;
-							sizes[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
-						}
-						const uint64_t sample_area = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
-						alias_index               = PreferGpuMemoryAliasIndex(sizes, n, sample_area);
+						filtered[filtered_n++] = i;
 					}
 				}
-				tex = rtex.At(static_cast<int>(alias_index));
-				if (swizzle == DstSel(6, 5, 4, 7))
+				const bool known_ufmt     = (fmt == 56u || fmt == 71u);
+				const bool reject_alias   = known_ufmt && filtered_n == 0;
+				if (reject_alias)
 				{
-					view_type = VulkanImage::VIEW_BGRA;
+					render_texture = false;
+				} else
+				{
+					const bool   use_filter = filtered_n > 0;
+					const size_t n =
+					    use_filter ? filtered_n : static_cast<size_t>(rtex.Size() < 16 ? rtex.Size() : 16);
+					size_t alias_index = 0;
+					if (n > 1)
+					{
+						uint64_t sizes[16]       = {};
+						bool     use_guest_bytes = true;
+						for (size_t i = 0; i < n; i++)
+						{
+							const int ri = use_filter ? filtered[i] : static_cast<int>(i);
+							if (rtex.At(ri)->guest_size == 0)
+							{
+								use_guest_bytes = false;
+								break;
+							}
+						}
+						if (use_guest_bytes)
+						{
+							for (size_t i = 0; i < n; i++)
+							{
+								const int ri = use_filter ? filtered[i] : static_cast<int>(i);
+								sizes[i]     = rtex.At(ri)->guest_size;
+							}
+							alias_index = PreferGpuMemoryAliasIndex(sizes, n, size.size);
+						} else
+						{
+							for (size_t i = 0; i < n; i++)
+							{
+								const int   ri = use_filter ? filtered[i] : static_cast<int>(i);
+								const auto& e  = rtex.At(ri)->extent;
+								sizes[i] = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+							}
+							const uint64_t sample_area =
+							    static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+							alias_index = PreferGpuMemoryAliasIndex(sizes, n, sample_area);
+						}
+					}
+					if (use_filter)
+					{
+						alias_index = static_cast<size_t>(filtered[alias_index]);
+					}
+					tex = rtex.At(static_cast<int>(alias_index));
+					if (swizzle == DstSel(6, 5, 4, 7))
+					{
+						view_type = VulkanImage::VIEW_BGRA;
+					}
 				}
 			}
 			// Live StorageTexture (compute/UAV) can own GPU pixels without ever
@@ -5010,8 +5043,9 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, uint64_t* sa
 		EXIT_NOT_IMPLEMENTED(r.ForceUnormCoords() != false);
 		EXIT_NOT_IMPLEMENTED(r.AnisoThreshold() != 0);
 		EXIT_NOT_IMPLEMENTED(!gen5 && r.McCoordTrunc() != false);
-		EXIT_NOT_IMPLEMENTED(r.ForceDegamma() != false);
-		EXIT_NOT_IMPLEMENTED(gen5 && r.SkipDegamma() != false);
+		// ForceDegamma / SkipDegamma are resolved in ShouldForceGen5Degamma and
+		// TextureResolveSampledVkFormat (RGBA8 → sRGB only when force && !skip).
+		// Both flags are legal guest sampler state; do not EXIT on them.
 		EXIT_NOT_IMPLEMENTED(gen5 && r.PointPreclamp() != false);
 		EXIT_NOT_IMPLEMENTED(gen5 && r.AnisoOverride() != false);
 		EXIT_NOT_IMPLEMENTED(gen5 && r.BlendZeroPrt() != false);

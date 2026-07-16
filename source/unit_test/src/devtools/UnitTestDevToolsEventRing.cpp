@@ -7,6 +7,7 @@
 #include "Kyty/UnitTest.h"
 
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <type_traits>

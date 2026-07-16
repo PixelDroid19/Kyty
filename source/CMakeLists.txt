@@ -202,9 +202,13 @@ endforeach()
 
 add_executable(fc_script ${KYTY_SCRIPT_SRC}) 
 
-if(MINGW)
+if(MINGW OR (UNIX AND NOT APPLE))
+	# unit_test references supervisor APIs only from fc_script. Pull every
+	# unit_test object before kyty_devtools_supervisor so GNU ld resolves
+	# those symbols in one pass (Linux otherwise linked unit_test too late
+	# via emulator's transitive deps).
 	SET(UNIT_TEST_LIB -Wl,--whole-archive unit_test -Wl,--no-whole-archive)
-endif()	
+endif()
 
 if(MSVC)
 	SET(UNIT_TEST_LIB unit_test)

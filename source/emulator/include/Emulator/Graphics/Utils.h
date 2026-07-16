@@ -29,6 +29,24 @@ struct VulkanSwapchain;
 
 VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 
+// Gen5 sampled ufmt → Vulkan format family for RT-alias selection.
+// ufmt 56 (RGBA8) must not bind a float lighting RT of the same size; that
+// residual false-color path left cyan/hot props while exact guest HUD textures
+// still looked correct.
+[[nodiscard]] inline bool Gen5SampleFormatMatchesVulkan(uint32_t gen5_ufmt, VkFormat vk)
+{
+	if (gen5_ufmt == 56u)
+	{
+		return vk == VK_FORMAT_R8G8B8A8_UNORM || vk == VK_FORMAT_R8G8B8A8_SRGB || vk == VK_FORMAT_B8G8R8A8_UNORM ||
+		       vk == VK_FORMAT_B8G8R8A8_SRGB;
+	}
+	if (gen5_ufmt == 71u)
+	{
+		return vk == VK_FORMAT_R16G16B16A16_SFLOAT;
+	}
+	return true;
+}
+
 [[nodiscard]] inline bool DepthFormatHasStencil(VkFormat format)
 {
 	return format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;

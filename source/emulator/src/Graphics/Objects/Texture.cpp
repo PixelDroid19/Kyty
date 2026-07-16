@@ -436,7 +436,99 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 		}
 	} else
 	{
-		KYTY_NOT_IMPLEMENTED;
+		// Mixed multi-parent graphs (RT/ST + StorageBuffer/VertexBuffer peers)
+		// reach CreateFromObjects when a Texture sample range sits under a live
+		// surface. Copy from the surface parents that match each mip extent;
+		// ignore non-image parents. Falling through here used to EXIT and abort
+		// boot, or leave empty textures that composite as solid false-color
+		// props (cyan silhouettes) after only the outline/light pass remains.
+		for (uint32_t i = 0; i < levels; i++)
+		{
+			VulkanImage* src_image = nullptr;
+			bool         storage   = false;
+
+			for (const auto& o: objects)
+			{
+				if (o.type == GpuMemoryObjectType::StorageTexture)
+				{
+					auto* src_obj = static_cast<StorageTextureVulkanImage*>(o.obj);
+					if (mip_width == src_obj->extent.width && mip_height == src_obj->extent.height)
+					{
+						src_image = src_obj;
+						storage   = true;
+						break;
+					}
+				} else if (o.type == GpuMemoryObjectType::RenderTexture)
+				{
+					auto* src_obj = static_cast<RenderTextureVulkanImage*>(o.obj);
+					if (mip_width == src_obj->extent.width && mip_height == src_obj->extent.height)
+					{
+						src_image = src_obj;
+						storage   = false;
+						break;
+					}
+				}
+			}
+
+			// No matching surface for this mip: reuse the base surface (level 0)
+			// when present so multi-level samples under a single RT still bind
+			// GPU content instead of aborting.
+			if (src_image == nullptr)
+			{
+				for (const auto& o: objects)
+				{
+					if (o.type == GpuMemoryObjectType::StorageTexture)
+					{
+						src_image = static_cast<StorageTextureVulkanImage*>(o.obj);
+						storage   = true;
+						break;
+					}
+					if (o.type == GpuMemoryObjectType::RenderTexture)
+					{
+						src_image = static_cast<RenderTextureVulkanImage*>(o.obj);
+						storage   = false;
+						break;
+					}
+				}
+			}
+
+			EXIT_NOT_IMPLEMENTED(src_image == nullptr);
+
+			if (storage)
+			{
+				auto mipmap_offset = UtilCalcMipmapOffset(i, width, height);
+
+				regions[i].src_image = src_image;
+				regions[i].src_level = 0;
+				regions[i].dst_level = i;
+				regions[i].width     = mip_width;
+				regions[i].height    = mip_height;
+				regions[i].src_x     = mipmap_offset.first;
+				regions[i].src_y     = mipmap_offset.second;
+				regions[i].dst_x     = 0;
+				regions[i].dst_y     = 0;
+			} else
+			{
+				regions[i].src_image = src_image;
+				regions[i].src_level = 0;
+				regions[i].dst_level = i;
+				regions[i].width     = mip_width;
+				regions[i].height    = mip_height;
+				regions[i].src_x     = 0;
+				regions[i].src_y     = 0;
+				regions[i].dst_x     = 0;
+				regions[i].dst_y     = 0;
+			}
+
+			if (mip_width > 1)
+			{
+				mip_width /= 2;
+			}
+			if (mip_height > 1)
+			{
+				mip_height /= 2;
+			}
+		}
 	}
 
 	if (buffer == nullptr)
