@@ -2749,7 +2749,6 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	const HW::ScreenViewport&  vp         = ctx->GetScreenViewport();
 	const HW::ScanModeControl& smc        = ctx->GetScanModeControl();
 	const HW::ModeControl&     mc = ctx->GetModeControl();
-	const auto&                cc = ctx->GetColorControl();
 
 	if (Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
@@ -2840,7 +2839,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.dynamic_params->line_width         = ctx->GetLineWidth();
 	p.dynamic_params->stencil_front      = depth->stencil_dynamic_front;
 	p.dynamic_params->stencil_back       = depth->stencil_dynamic_back;
-	p.dynamic_params->color_write_enable = (cc.mode == 1);
+	// CB_COLOR_CONTROL.mode selects special color operations. The guest's
+	// per-attachment write permission comes from CB_TARGET_MASK above; using
+	// mode here disables valid scanout and render-target draws on other modes.
+	p.dynamic_params->color_write_enable = true;
 
 	auto* found = Find(p);
 
@@ -3940,11 +3942,10 @@ void GraphicsRenderMemoryBarrier(CommandBuffer* buffer)
 	mem_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	mem_barrier.pNext         = nullptr;
 	mem_barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-	mem_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+	mem_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
 
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-	                     VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mem_barrier, 0, nullptr, 0,
-	                     nullptr);
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mem_barrier, 0,
+	                     nullptr, 0, nullptr);
 }
 
 static void GraphicsRenderRenderTextureBarrier(VkCommandBuffer vk_buffer, VulkanImage* image)
@@ -3958,8 +3959,9 @@ static void GraphicsRenderRenderTextureBarrier(VkCommandBuffer vk_buffer, Vulkan
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		image_memory_barrier.pNext                           = nullptr;
-		image_memory_barrier.srcAccessMask                   = VK_ACCESS_MEMORY_WRITE_BIT;
-		image_memory_barrier.dstAccessMask                   = VK_ACCESS_MEMORY_READ_BIT;
+		image_memory_barrier.srcAccessMask                   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
+			                                                   VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+		image_memory_barrier.dstAccessMask                   = VK_ACCESS_SHADER_READ_BIT;
 		image_memory_barrier.oldLayout                       = image->layout;
 		image_memory_barrier.newLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
@@ -3971,9 +3973,12 @@ static void GraphicsRenderRenderTextureBarrier(VkCommandBuffer vk_buffer, Vulkan
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
 		image_memory_barrier.subresourceRange.layerCount     = 1;
 
-		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		                     VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-		                     &image_memory_barrier);
+		vkCmdPipelineBarrier(vk_buffer,
+		                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+		                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+		                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		                     0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 
 		image->layout = image_memory_barrier.newLayout;
 	}
@@ -4869,6 +4874,27 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					     fmt, tile, addr, size.size);
 				}
 			}
+			if (!render_texture && !depth_texture && tex == nullptr && !textures.desc[i].textures2d_without_sampler)
+			{
+				// VideoOut surfaces are also valid sampled images. Reuse the registered
+				// image instead of creating a TextureObject over the same guest range;
+				// the latter adds an alias parent that detiles the display buffer during
+				// every GPU write-back.
+				const auto video_image = VideoOut::VideoOutGetImage(addr);
+				if (video_image.image != nullptr && video_image.buffer_size == size.size && video_image.buffer_pitch == pitch &&
+				    video_image.image->extent.width == width && video_image.image->extent.height == height &&
+				    (!gen5 || Gen5SampleFormatMatchesVulkan(fmt, video_image.image->format)))
+				{
+					tex = video_image.image;
+					if (swizzle == DstSel(6, 5, 4, 7))
+					{
+						view_type = VulkanImage::VIEW_BGRA;
+					} else if (swizzle == DstSel(7, 6, 5, 4))
+					{
+						view_type = VulkanImage::VIEW_ABGR;
+					}
+				}
+			}
 		}
 
 		if (!render_texture && !depth_texture && tex == nullptr)
@@ -5122,7 +5148,8 @@ static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelin
 				if (textures2d_sampled[i]->type == VulkanImageType::DepthStencil)
 				{
 					GraphicsRenderDepthStencilBarrier(vk_buffer, textures2d_sampled[i]);
-				} else if (textures2d_sampled[i]->type == VulkanImageType::RenderTexture)
+				} else if (textures2d_sampled[i]->type == VulkanImageType::RenderTexture ||
+				           textures2d_sampled[i]->type == VulkanImageType::VideoOut)
 				{
 					GraphicsRenderRenderTextureBarrier(vk_buffer, textures2d_sampled[i]);
 				}
@@ -6272,20 +6299,20 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	render_pass_info.clearValueCount   = color_count + (with_depth ? 1u : 0u);
 	render_pass_info.pClearValues      = clears;
 
-	for (uint32_t slot = 0; slot < color->targets_num; slot++)
+	for (uint32_t slot = 0; slot < color_count; slot++)
 	{
 		if (!with_color || color->vulkan_buffer[slot] == nullptr ||
-		    color->vulkan_buffer[slot]->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+		    color->vulkan_buffer[slot]->layout == framebuffer->color_initial_layout[slot])
 		{
 			continue;
 		}
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		image_memory_barrier.pNext                           = nullptr;
-		image_memory_barrier.srcAccessMask                   = VK_ACCESS_MEMORY_READ_BIT;
-		image_memory_barrier.dstAccessMask                   = VK_ACCESS_MEMORY_WRITE_BIT;
+		image_memory_barrier.srcAccessMask                   = 0;
+		image_memory_barrier.dstAccessMask                   = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 		image_memory_barrier.oldLayout                       = color->vulkan_buffer[slot]->layout;
-		image_memory_barrier.newLayout                       = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		image_memory_barrier.newLayout                       = framebuffer->color_initial_layout[slot];
 		image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.image                           = color->vulkan_buffer[slot]->image;
@@ -6295,9 +6322,8 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
 		image_memory_barrier.subresourceRange.layerCount     = 1;
 
-		vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		                     VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-		                     &image_memory_barrier);
+		vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
+		                     nullptr, 1, &image_memory_barrier);
 
 		color->vulkan_buffer[slot]->layout = image_memory_barrier.newLayout;
 	}
@@ -6328,6 +6354,17 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	}
 
 	vkCmdBeginRenderPass(buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+
+	// The render pass final layout is COLOR_ATTACHMENT_OPTIMAL. Keep the
+	// emulator-side tracker in sync so a later sampled use emits the required
+	// attachment-to-shader-read barrier instead of treating the image as new.
+	for (uint32_t slot = 0; slot < color_count; slot++)
+	{
+		if (with_color && color->vulkan_buffer[slot] != nullptr)
+		{
+			color->vulkan_buffer[slot]->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		}
+	}
 }
 
 void CommandBuffer::EndRenderPass() const

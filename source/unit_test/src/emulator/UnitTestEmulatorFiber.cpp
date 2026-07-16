@@ -55,7 +55,7 @@ TEST(EmulatorFiber, InitializeFillsGuestObject)
 	EXPECT_EQ(rc, OK);
 	EXPECT_TRUE(FiberObjectIsValid(&fiber));
 	EXPECT_EQ(fiber.state, FIBER_STATE_IDLE);
-	EXPECT_EQ(fiber.entry, DummyFiberEntry);
+	EXPECT_TRUE(fiber.entry == DummyFiberEntry);
 	EXPECT_EQ(fiber.arg_on_initialize, 0x11u);
 	EXPECT_EQ(fiber.addr_context, static_cast<void*>(stack));
 	EXPECT_EQ(fiber.size_context, sizeof(stack));
