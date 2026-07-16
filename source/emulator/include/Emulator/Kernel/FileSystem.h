@@ -41,6 +41,16 @@ void   Mount(const String& folder, const String& point);
 void   Umount(const String& folder_or_point);
 String GetRealFilename(const String& mounted_file_name);
 
+// Score a same-directory package font candidate against a missing request.
+// Higher is better; negative means the candidate is not a font file.
+// Used when incomplete dumps omit SIE system fonts or weight variants under app0.
+[[nodiscard]] int ScorePackageFontFallback(const String& requested_filename, const String& candidate_filename);
+
+// When requested_host_path is missing, pick the best existing OTF/TTF/TTC in the
+// same host directory by weight class (Heavy/Bold/Medium/Light). Returns the
+// original path when no substitute exists (or when the exact file is present).
+[[nodiscard]] String PreferPackageFontHostPath(const String& requested_host_path);
+
 int KYTY_SYSV_ABI     KernelOpen(const char* path, int flags, uint16_t mode);
 int KYTY_SYSV_ABI     KernelClose(int d);
 int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes);

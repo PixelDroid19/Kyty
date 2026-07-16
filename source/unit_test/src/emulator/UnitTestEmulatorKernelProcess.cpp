@@ -2,6 +2,7 @@
 #include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/FileSystem.h"
+#include "Kyty/Core/File.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Semaphore.h"
 #include "Emulator/Config.h"
@@ -134,6 +135,52 @@ TEST(EmulatorKernelProcess, AprResolveForEachReportsPerPathResults)
 	EXPECT_EQ(results[1], LibKernel::KERNEL_ERROR_EFAULT);
 	EXPECT_EQ(ids[0], 0xffffffffu);
 	EXPECT_EQ(ids[1], 0xffffffffu);
+}
+
+// Incomplete package dumps omit SIE system fonts and some Futura weights; score
+// prefers same-family and close weight (Heavy → Heavy/Bold, Medium → Bold).
+TEST(EmulatorKernelProcess, PackageFontFallbackScoresWeightAndFamily)
+{
+	using LibKernel::FileSystem::ScorePackageFontFallback;
+
+	EXPECT_GT(ScorePackageFontFallback(U"SIE-ShinGoPr6N-Heavy.otf", U"Cobe-Heavy.otf"),
+	          ScorePackageFontFallback(U"SIE-ShinGoPr6N-Heavy.otf", U"FuturaStd-Bold.otf"));
+	EXPECT_GT(ScorePackageFontFallback(U"FuturaStd-Medium.otf", U"FuturaStd-Bold.otf"),
+	          ScorePackageFontFallback(U"FuturaStd-Medium.otf", U"SeolSans-Heavy.otf"));
+	EXPECT_GT(ScorePackageFontFallback(U"FuturaStd-Medium.otf", U"FuturaStd-Bold.otf"),
+	          ScorePackageFontFallback(U"FuturaStd-Medium.otf", U"Kallisto-Medium.otf"));
+	EXPECT_LT(ScorePackageFontFallback(U"SIE-ShinGoPr6N-Heavy.otf", U"readme.txt"), 0);
+	EXPECT_EQ(ScorePackageFontFallback(U"FuturaStd-Bold.otf", U"FuturaStd-Bold.otf"), 100000);
+}
+
+// PreferPackageFontHostPath substitutes a sibling OTF when the requested file is missing.
+TEST(EmulatorKernelProcess, PackageFontHostPathPicksSibling)
+{
+	EnsureKernelProcessSubsystems();
+
+	const String dir = U"/tmp/kyty_font_fallback_test/";
+	Core::File::DeleteDirectories(dir);
+	ASSERT_TRUE(Core::File::CreateDirectories(dir));
+
+	const String present = dir + U"FuturaStd-Bold.otf";
+	const String missing = dir + U"SIE-ShinGoPr6N-Heavy.otf";
+	{
+		Core::File f;
+		ASSERT_TRUE(f.Create(present));
+		f.Write(U"otf");
+		f.Close();
+	}
+	ASSERT_TRUE(Core::File::IsFileExisting(present));
+	ASSERT_FALSE(Core::File::IsFileExisting(missing));
+
+	const String chosen = LibKernel::FileSystem::PreferPackageFontHostPath(missing);
+	EXPECT_EQ(chosen, present);
+	// Exact hit is unchanged.
+	EXPECT_EQ(LibKernel::FileSystem::PreferPackageFontHostPath(present), present);
+	// Non-font missing path is unchanged.
+	EXPECT_EQ(LibKernel::FileSystem::PreferPackageFontHostPath(dir + U"missing.bin"), dir + U"missing.bin");
+
+	Core::File::DeleteDirectories(dir);
 }
 
 // Gen5 memory helpers: null size rejects; range name is success no-op.
