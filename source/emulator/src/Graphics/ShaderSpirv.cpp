@@ -1804,6 +1804,38 @@ static bool operand_is_exec(ShaderOperand op)
 	return false;
 }
 
+// SDWA SEL (GCN/RDNA): zero-extend BYTE_n / WORD_n from a uint register value.
+// sel 6 (DWORD) is a no-op. Returns SPIR-V that writes <result_id> from <input_id>.
+static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_id, const String8& index, uint8_t sel)
+{
+	if (sel == 6u)
+	{
+		return {};
+	}
+	EXIT_NOT_IMPLEMENTED(sel > 6u);
+
+	// offset,count for OpBitFieldUExtract
+	uint32_t offset = 0;
+	uint32_t count  = 32;
+	switch (sel)
+	{
+		case 0: offset = 0; count = 8; break;  // BYTE_0
+		case 1: offset = 8; count = 8; break;  // BYTE_1
+		case 2: offset = 16; count = 8; break; // BYTE_2
+		case 3: offset = 24; count = 8; break; // BYTE_3
+		case 4: offset = 0; count = 16; break; // WORD_0
+		case 5: offset = 16; count = 16; break; // WORD_1
+		default: break;
+	}
+
+	return String8("%<result_id> = OpBitFieldUExtract %uint %<input_id> %uint_<off> %uint_<cnt>\n")
+	    .ReplaceStr("<result_id>", result_id)
+	    .ReplaceStr("<input_id>", input_id)
+	    .ReplaceStr("<off>", String8::FromPrintf("%u", offset))
+	    .ReplaceStr("<cnt>", String8::FromPrintf("%u", count))
+	    .ReplaceStr("<index>", index);
+}
+
 static bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load)
 {
 	EXIT_IF(load == nullptr);
@@ -1850,6 +1882,9 @@ static bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& res
 
 	EXIT_NOT_IMPLEMENTED(op.negate || op.absolute);
 
+	const bool need_swizzle = (op.swizzle != 6u);
+	const String8 raw_id    = need_swizzle ? ("raw" + result_id) : result_id;
+
 	if (operand_is_constant(op))
 	{
 		if (op.size == 2)
@@ -1862,18 +1897,18 @@ static bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& res
 				*load      = String8("%<result_id> = OpBitcast %uint %<id>")
 				            .ReplaceStr("<index>", index)
 				            .ReplaceStr("<id>", id)
-				            .ReplaceStr("<result_id>", result_id);
+				            .ReplaceStr("<result_id>", raw_id);
 			} else
 			{
 				if (op.type == ShaderOperandType::IntegerInlineConstant && op.constant.i < 0)
 				{
 					*load = String8("%<result_id> = OpBitcast %uint %uint_0xffffffff")
 					            .ReplaceStr("<index>", index)
-					            .ReplaceStr("<result_id>", result_id);
+					            .ReplaceStr("<result_id>", raw_id);
 				} else
 				{
 					*load =
-					    String8("%<result_id> = OpBitcast %uint %uint_0").ReplaceStr("<index>", index).ReplaceStr("<result_id>", result_id);
+					    String8("%<result_id> = OpBitcast %uint %uint_0").ReplaceStr("<index>", index).ReplaceStr("<result_id>", raw_id);
 				}
 			}
 		} else
@@ -1882,7 +1917,7 @@ static bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& res
 			*load      = String8("%<result_id> = OpBitcast %uint %<id>")
 			            .ReplaceStr("<index>", index)
 			            .ReplaceStr("<id>", id)
-			            .ReplaceStr("<result_id>", result_id);
+			            .ReplaceStr("<result_id>", raw_id);
 		}
 	} else if (operand_is_variable(op))
 	{
@@ -1894,13 +1929,13 @@ static bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& res
 			         String8("%<result_id> = OpBitcast %uint %t<result_id>\n"))
 			            .ReplaceStr("<index>", index)
 			            .ReplaceStr("<id>", value.value)
-			            .ReplaceStr("<result_id>", result_id);
+			            .ReplaceStr("<result_id>", raw_id);
 		} else if (value.type == SpirvType::Uint)
 		{
 			*load = (String8("%<result_id> = OpLoad %uint %<id>"))
 			            .ReplaceStr("<index>", index)
 			            .ReplaceStr("<id>", value.value)
-			            .ReplaceStr("<result_id>", result_id);
+			            .ReplaceStr("<result_id>", raw_id);
 		} else
 		{
 			return false;
@@ -1908,6 +1943,11 @@ static bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& res
 	} else
 	{
 		return false;
+	}
+
+	if (need_swizzle)
+	{
+		*load += String8(' ', 10) + sdwa_swizzle_uint(raw_id, result_id, index, op.swizzle);
 	}
 	return true;
 }
@@ -1917,6 +1957,47 @@ static bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& re
 	EXIT_IF(load == nullptr);
 
 	String8 l;
+	const bool need_swizzle = (op.swizzle != 6u);
+
+	// SDWA BYTE/WORD selects operate on the raw 32-bit register image, then
+	// the extracted uint is bitcast back to float for VGPR storage.
+	if (need_swizzle)
+	{
+		String8 uint_load;
+		if (!operand_load_uint(spirv, op, "su_" + result_id, index, &uint_load))
+		{
+			return false;
+		}
+		if (op.negate && op.absolute)
+		{
+			l = uint_load + String8(' ', 10) +
+			    String8("%swf_<index> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
+			    String8("%abs_<index> = OpExtInst %float %GLSL_std_450 FAbs %swf_<index>\n") + String8(' ', 10) +
+			    String8("%<result> = OpFNegate %float %abs_<index>\n");
+			*load = l.ReplaceStr("<index>", index).ReplaceStr("<result>", result_id);
+			return true;
+		}
+		if (op.absolute)
+		{
+			l = uint_load + String8(' ', 10) +
+			    String8("%swf_<index> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
+			    String8("%<result> = OpExtInst %float %GLSL_std_450 FAbs %swf_<index>\n");
+			*load = l.ReplaceStr("<index>", index).ReplaceStr("<result>", result_id);
+			return true;
+		}
+		if (op.negate)
+		{
+			l = uint_load + String8(' ', 10) +
+			    String8("%swf_<index> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
+			    String8("%<result> = OpFNegate %float %swf_<index>\n");
+			*load = l.ReplaceStr("<index>", index).ReplaceStr("<result>", result_id);
+			return true;
+		}
+		l = uint_load + String8(' ', 10) +
+		    String8("%<result> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id);
+		*load = l.ReplaceStr("<index>", index).ReplaceStr("<result>", result_id);
+		return true;
+	}
 
 	if (operand_is_constant(op))
 	{
@@ -5436,6 +5517,88 @@ KYTY_RECOMPILER_FUNC(Recompile_SMovB64_Sdst2Ssrc02)
 	return true;
 }
 
+// s_not_b32: dst = ~src0; SCC = (dst != 0).
+KYTY_RECOMPILER_FUNC(Recompile_SNotB32_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
+	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+
+	String8 load0;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+    %t_<index> = OpNot %uint %t0_<index>
+    OpStore %<dst> %t_<index>
+    <scc>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 1))
+	                   .ReplaceStr("<index>", index_str);
+
+	return true;
+}
+
+// s_not_b64: dst[63:0] = ~src0[63:0]; SCC = (dst != 0).
+KYTY_RECOMPILER_FUNC(Recompile_SNotB64_Sdst2Ssrc02)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+
+	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
+
+	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+
+	String8 load0;
+	String8 load1;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0, 0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[0], "t1_<index>", index_str, &load1, 1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+    <load1>
+    %tb_<index> = OpNot %uint %t0_<index>
+    %td_<index> = OpNot %uint %t1_<index>
+    OpStore %<dst0> %tb_<index>
+    OpStore %<dst1> %td_<index>
+    <execz>
+    <scc>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<dst0>", dst_value0.value)
+	                   .ReplaceStr("<dst1>", dst_value1.value)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<execz>", (operand_is_exec(inst.dst) ? EXECZ : ""))
+	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 2))
+	                   .ReplaceStr("<index>", index_str);
+
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_SSwappcB64_Sdst2Ssrc02)
 {
 	const auto& inst       = code.GetInstructions().At(index);
@@ -7332,6 +7495,8 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 
     {Recompile_SAndSaveexecB64_Sdst2Ssrc02,    ShaderInstructionType::SAndSaveexecB64,     ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::NonZero},
     {Recompile_SMovB64_Sdst2Ssrc02,            ShaderInstructionType::SMovB64,             ShaderInstructionFormat::Sdst2Ssrc02, {""}},
+    {Recompile_SNotB32_SVdstSVsrc0,            ShaderInstructionType::SNotB32,             ShaderInstructionFormat::SVdstSVsrc0, {""}, SccCheck::NonZero},
+    {Recompile_SNotB64_Sdst2Ssrc02,            ShaderInstructionType::SNotB64,             ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::NonZero},
     {Recompile_SSwappcB64_Sdst2Ssrc02,         ShaderInstructionType::SSwappcB64,          ShaderInstructionFormat::Sdst2Ssrc02, {""}},
     {Recompile_SWqmB64_Sdst2Ssrc02,            ShaderInstructionType::SWqmB64,             ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::NonZero},
 
@@ -7384,6 +7549,12 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VCmpx_XXX_F32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxLtF32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFOrdLessThan"}},
     {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxEqU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpIEqual"}},
     {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxNeU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpINotEqual"}},
+    {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxLtI32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpSLessThan"}},
+    {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxEqI32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpIEqual"}},
+    {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxLeI32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpSLessThanEqual"}},
+    {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxGtI32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpSGreaterThan"}},
+    {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxNeI32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpINotEqual"}},
+    {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxGeI32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpSGreaterThanEqual"}},
     {Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxGeU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpUGreaterThanEqual"}},
     {Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxGtU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpUGreaterThan"}},
 
@@ -7423,6 +7594,19 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2,  ShaderInstructionType::VBfeU32,    ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {"%to_<index> = OpBitwiseAnd %uint %t1_<index> %uint_31",
                                                                                                                                   "%ts_<index> = OpBitwiseAnd %uint %t2_<index> %uint_31",
                                                                                                                                   "%t_<index> = OpBitFieldUExtract %uint %t0_<index> %to_<index> %ts_<index>"}},
+	// v_bfe_i32: signed bitfield extract; offset/width masked to 5 bits like u32 form.
+	// RecompilerFunc param array is fixed at 4 strings — pack intermediate ops.
+	{Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2, ShaderInstructionType::VBfeI32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
+	 {"%to_<index> = OpBitwiseAnd %uint %t1_<index> %uint_31", "%ts_<index> = OpBitwiseAnd %uint %t2_<index> %uint_31",
+	  "%ti0_<index> = OpBitcast %int %t0_<index>\n          %toi_<index> = OpBitcast %int %to_<index>\n          "
+	  "%tsi_<index> = OpBitcast %int %ts_<index>\n          %tr_<index> = OpBitFieldSExtract %int %ti0_<index> %toi_<index> "
+	  "%tsi_<index>",
+	  "%t_<index> = OpBitcast %uint %tr_<index>"}},
+	// v_bfi_b32: dst = (src0 & src1) | (~src0 & src2)
+	{Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2, ShaderInstructionType::VBfiB32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
+	 {"%ta_<index> = OpBitwiseAnd %uint %t0_<index> %t1_<index>", "%tn_<index> = OpNot %uint %t0_<index>",
+	  "%tb_<index> = OpBitwiseAnd %uint %tn_<index> %t2_<index>",
+	  "%t_<index> = OpBitwiseOr %uint %ta_<index> %tb_<index>"}},
 	{Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2, ShaderInstructionType::VLshlAddU32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
 	 {"%ts_<index> = OpBitwiseAnd %uint %t1_<index> %uint_31", "%tm_<index> = OpShiftLeftLogical %uint %t0_<index> %ts_<index>",
 	  "%t_<index> = OpIAdd %uint %tm_<index> %t2_<index>"}},
