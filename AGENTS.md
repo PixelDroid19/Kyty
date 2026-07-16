@@ -59,6 +59,9 @@ specific host vendor or operating system.
 - `source/unit_test/`: GoogleTest suites and deterministic fixtures.
 - `scripts/`: runtime scripts, including the guest runner.
 - `docs/`: stable subsystem documentation and tool contracts.
+  Graphics clear/sample-alias/WaitRegMem contracts:
+  `docs/graphics-rt-clear-and-sample-alias.md`. Capture workflow:
+  `docs/graphics-captures.md`. Agent socket tools: `docs/agent-tools.md`.
 
 Read the owning module, its consumers, adjacent tests, and relevant documentation
 before editing. Do not infer architecture from filenames alone.
