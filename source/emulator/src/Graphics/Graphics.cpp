@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <limits>
 
 #ifdef KYTY_EMU_ENABLED
@@ -1588,42 +1589,217 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 
 	EXIT_NOT_IMPLEMENTED((base & 0xFFFF0000000000FFull) != 0);
 
-	if (h->type == 2 && h->num_sh_registers >= 2 && h->sh_registers[0].offset == Pm4::SPI_SHADER_PGM_LO_ES &&
-	    h->sh_registers[1].offset == Pm4::SPI_SHADER_PGM_HI_ES)
+	// Gen5 shader binary types (Prospero::ShaderBinaryType). Front halves and FS
+	// carry no program address registers; GS/HS use LO_ES/LO_LS (merged) or
+	// LO_GS/LO_HS (back halves). Search the SH list rather than assuming [0]/[1].
+	constexpr uint8_t kShaderBinaryCs      = 0;
+	constexpr uint8_t kShaderBinaryPs      = 1;
+	constexpr uint8_t kShaderBinaryGs      = 2;
+	constexpr uint8_t kShaderBinaryHs      = 3;
+	constexpr uint8_t kShaderBinaryGsFront = 4;
+	constexpr uint8_t kShaderBinaryHsFront = 5;
+	constexpr uint8_t kShaderBinaryGsBack  = 6;
+	constexpr uint8_t kShaderBinaryHsBack  = 7;
+	constexpr uint8_t kShaderBinaryFs      = 8;
+
+	uint32_t lo_offset = 0;
+	bool     needs_pgm = true;
+	switch (h->type)
 	{
-		h->sh_registers[0].offset = Pm4::SPI_SHADER_PGM_LO_ES;
-		h->sh_registers[0].value  = ((base >> 8u) & 0xffffffffu);
-		h->sh_registers[1].offset = Pm4::SPI_SHADER_PGM_HI_ES;
-		h->sh_registers[1].value  = ((base >> 40u) & 0x000000ffu);
-	} else if (h->type == 1 && h->num_sh_registers >= 2 && h->sh_registers[0].offset == Pm4::SPI_SHADER_PGM_LO_PS &&
-	           h->sh_registers[1].offset == Pm4::SPI_SHADER_PGM_HI_PS)
+		case kShaderBinaryCs: lo_offset = Pm4::COMPUTE_PGM_LO; break;
+		case kShaderBinaryPs: lo_offset = Pm4::SPI_SHADER_PGM_LO_PS; break;
+		case kShaderBinaryGs: lo_offset = Pm4::SPI_SHADER_PGM_LO_ES; break;
+		case kShaderBinaryHs: lo_offset = Pm4::SPI_SHADER_PGM_LO_LS; break;
+		case kShaderBinaryGsBack: lo_offset = Pm4::SPI_SHADER_PGM_LO_GS; break;
+		case kShaderBinaryHsBack: lo_offset = Pm4::SPI_SHADER_PGM_LO_HS; break;
+		case kShaderBinaryGsFront:
+		case kShaderBinaryHsFront:
+		case kShaderBinaryFs: needs_pgm = false; break;
+		default:
+			printf("\t SHADER DIAG: unknown type=%u num_sh_registers=%u\n", h->type, h->num_sh_registers);
+			EXIT("invalid shader\n");
+	}
+
+	if (needs_pgm)
 	{
-		h->sh_registers[0].offset = Pm4::SPI_SHADER_PGM_LO_PS;
-		h->sh_registers[0].value  = ((base >> 8u) & 0xffffffffu);
-		h->sh_registers[1].offset = Pm4::SPI_SHADER_PGM_HI_PS;
-		h->sh_registers[1].value  = ((base >> 40u) & 0x000000ffu);
-	} else if (h->type == 0 && h->num_sh_registers >= 2 && h->sh_registers[0].offset == Pm4::COMPUTE_PGM_LO &&
-	           h->sh_registers[1].offset == Pm4::COMPUTE_PGM_HI)
-	{
-		// Compute shader: patch the code base address into COMPUTE_PGM_LO/HI.
-		h->sh_registers[0].offset = Pm4::COMPUTE_PGM_LO;
-		h->sh_registers[0].value  = ((base >> 8u) & 0xffffffffu);
-		h->sh_registers[1].offset = Pm4::COMPUTE_PGM_HI;
-		h->sh_registers[1].value  = ((base >> 40u) & 0x000000ffu);
-	} else
-	{
-		printf("\t SHADER DIAG: type=%u num_sh_registers=%u\n", h->type, h->num_sh_registers);
-		for (uint32_t i = 0; i < h->num_sh_registers && i < 8; i++)
+		EXIT_NOT_IMPLEMENTED(h->sh_registers == nullptr || h->num_sh_registers == 0);
+
+		bool patched = false;
+		for (uint32_t lo_index = 0; lo_index < h->num_sh_registers; lo_index++)
 		{
-			printf("\t   sh_reg[%u] offset=0x%x value=0x%x\n", i, h->sh_registers[i].offset, h->sh_registers[i].value);
+			if (h->sh_registers[lo_index].offset != lo_offset)
+			{
+				continue;
+			}
+			const uint32_t hi_index  = lo_index + 1u;
+			const uint32_t hi_offset = lo_offset + 1u;
+			EXIT_NOT_IMPLEMENTED(hi_index >= h->num_sh_registers || h->sh_registers[hi_index].offset != hi_offset);
+
+			// Header LO/HI hold a relative code offset; absolute = base + offset.
+			const uint64_t shader_offset =
+			    (static_cast<uint64_t>(h->sh_registers[lo_index].value) << 8u) |
+			    ((static_cast<uint64_t>(h->sh_registers[hi_index].value) & 0xffu) << 40u);
+			const uint64_t addr = base + shader_offset;
+
+			h->sh_registers[lo_index].value = static_cast<uint32_t>((addr >> 8u) & 0xffffffffu);
+			h->sh_registers[hi_index].value =
+			    (h->sh_registers[hi_index].value & 0xffffff00u) | static_cast<uint32_t>((addr >> 40u) & 0xffu);
+			patched = true;
+			break;
 		}
-		EXIT("invalid shader\n");
+		if (!patched)
+		{
+			printf("\t SHADER DIAG: type=%u num_sh_registers=%u missing PGM_LO=0x%x\n", h->type, h->num_sh_registers,
+			       lo_offset);
+			for (uint32_t i = 0; i < h->num_sh_registers && i < 8; i++)
+			{
+				printf("\t   sh_reg[%u] offset=0x%x value=0x%x\n", i, h->sh_registers[i].offset, h->sh_registers[i].value);
+			}
+			EXIT("invalid shader\n");
+		}
 	}
 
 	*dst = h;
 
 	dbg_dump_shader(h);
 
+	return OK;
+}
+
+static constexpr int kGraphics5ErrorInvalidShaderHalves = static_cast<int>(0x8a6c0008u);
+
+static ShaderRegister* find_shader_register(ShaderRegister* regs, uint32_t num_regs, uint32_t offset, uint32_t occurrence = 0)
+{
+	if (regs == nullptr)
+	{
+		return nullptr;
+	}
+	for (uint32_t i = 0; i < num_regs; i++)
+	{
+		if (regs[i].offset != offset)
+		{
+			continue;
+		}
+		if (occurrence == 0)
+		{
+			return regs + i;
+		}
+		occurrence--;
+	}
+	return nullptr;
+}
+
+static void patch_shader_register_address(ShaderRegister* regs, uint32_t num_regs, uint32_t lo_offset, uint64_t address)
+{
+	auto* lo = find_shader_register(regs, num_regs, lo_offset);
+	if (lo == nullptr)
+	{
+		return;
+	}
+	auto* hi = (lo + 1 < regs + num_regs && (lo + 1)->offset == lo_offset + 1u) ? lo + 1 : nullptr;
+	if (hi == nullptr)
+	{
+		return;
+	}
+	lo->value = static_cast<uint32_t>((address >> 8u) & 0xffffffffu);
+	hi->value = (hi->value & 0xffffff00u) | static_cast<uint32_t>((address >> 40u) & 0xffu);
+}
+
+int KYTY_SYSV_ABI GraphicsUnknownGetFusedShaderSize(SizeAlign* dst, const Shader* front, const Shader* back)
+{
+	PRINT_NAME();
+
+	printf("\t dst   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst));
+	printf("\t front = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(front));
+	printf("\t back  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(back));
+
+	EXIT_NOT_IMPLEMENTED(dst == nullptr);
+	EXIT_NOT_IMPLEMENTED(front == nullptr);
+	EXIT_NOT_IMPLEMENTED(back == nullptr);
+
+	constexpr uint8_t kGsFront = 4;
+	constexpr uint8_t kHsFront = 5;
+	constexpr uint8_t kGsBack  = 6;
+	constexpr uint8_t kHsBack  = 7;
+
+	if (!((front->type == kGsFront && back->type == kGsBack) || (front->type == kHsFront && back->type == kHsBack)))
+	{
+		return kGraphics5ErrorInvalidShaderHalves;
+	}
+
+	dst->m_size  = static_cast<uint64_t>(back->num_sh_registers) * sizeof(ShaderRegister);
+	dst->m_align = 4;
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsUnknownFuseShaderHalves(Shader* fused_result, const Shader* front, const Shader* back, void* scratch_mem)
+{
+	PRINT_NAME();
+
+	printf("\t fused_result = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(fused_result));
+	printf("\t front        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(front));
+	printf("\t back         = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(back));
+	printf("\t scratch_mem  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(scratch_mem));
+
+	EXIT_NOT_IMPLEMENTED(fused_result == nullptr);
+	EXIT_NOT_IMPLEMENTED(front == nullptr);
+	EXIT_NOT_IMPLEMENTED(back == nullptr);
+
+	constexpr uint8_t kGs      = 2;
+	constexpr uint8_t kHs      = 3;
+	constexpr uint8_t kGsFront = 4;
+	constexpr uint8_t kHsFront = 5;
+	constexpr uint8_t kGsBack  = 6;
+	constexpr uint8_t kHsBack  = 7;
+
+	if (!((front->type == kGsFront && back->type == kGsBack) || (front->type == kHsFront && back->type == kHsBack)))
+	{
+		return kGraphics5ErrorInvalidShaderHalves;
+	}
+
+	*fused_result      = *back;
+	fused_result->type = static_cast<uint8_t>(front->type == kGsFront ? kGs : kHs);
+
+	if (front->specials != nullptr && back->specials != nullptr)
+	{
+		const auto front_stages = front->specials->vgt_shader_stages_en.value;
+		const auto back_stages  = back->specials->vgt_shader_stages_en.value;
+		const auto mismatch_bit = (front->type == kGsFront ? (1u << 22u) : (1u << 21u));
+		if (((front_stages ^ back_stages) & mismatch_bit) != 0)
+		{
+			return kGraphics5ErrorInvalidShaderHalves;
+		}
+	}
+
+	if (scratch_mem != nullptr && back->sh_registers != nullptr && back->num_sh_registers != 0)
+	{
+		auto* sh_registers = static_cast<ShaderRegister*>(scratch_mem);
+		std::memcpy(sh_registers, back->sh_registers, static_cast<size_t>(back->num_sh_registers) * sizeof(ShaderRegister));
+		fused_result->sh_registers = sh_registers;
+	}
+
+	auto*      fused_regs      = fused_result->sh_registers;
+	const auto fused_reg_count = static_cast<uint32_t>(fused_result->num_sh_registers);
+	const auto front_reg_count = static_cast<uint32_t>(front->num_sh_registers);
+
+	if (front->type == kGsFront)
+	{
+		for (uint32_t occurrence = 0; occurrence < 2; occurrence++)
+		{
+			auto*       dst = find_shader_register(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_CHKSUM_GS, occurrence);
+			const auto* src = find_shader_register(front->sh_registers, front_reg_count, Pm4::SPI_SHADER_PGM_CHKSUM_GS, occurrence);
+			if (dst != nullptr && src != nullptr)
+			{
+				dst->value = src->value;
+			}
+		}
+		patch_shader_register_address(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_LO_ES, reinterpret_cast<uint64_t>(front->code));
+	} else
+	{
+		patch_shader_register_address(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_LO_LS, reinterpret_cast<uint64_t>(front->code));
+	}
+
+	fused_result->user_data = nullptr;
 	return OK;
 }
 
