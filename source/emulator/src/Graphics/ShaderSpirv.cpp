@@ -2668,7 +2668,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 	const uint32_t component2 = ShaderColorExportSourceComponent(info->target_output_order[mrt], 2);
 	const uint32_t component3 = ShaderColorExportSourceComponent(info->target_output_order[mrt], 3);
 	const char*   source_names[] = {"t4", "t5", "t9", "t10"};
-	String8 export_value = String8::FromPrintf(
+	const String8 export_value = String8::FromPrintf(
 		"%%t11_<index> = OpCompositeConstruct %%v4float %%%s_<index> %%%s_<index> %%%s_<index> %%%s_<index>",
 		source_names[component0], source_names[component1], source_names[component2], source_names[component3]);
 
@@ -5997,15 +5997,83 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPkrtzF16F32_SVdstSVsrc0SVsrc1)
 	static const char* text = R"(
     <load0>
     <load1>
-    %t0u_<index> = OpBitcast %uint %t0_<index>
-    %t0uu_<index> = OpBitwiseAnd %uint %t0u_<index> %uint_0xffffe000
-    %t0f_<index> = OpBitcast %float %t0uu_<index>
-    %t1u_<index> = OpBitcast %uint %t1_<index>
-    %t1uu_<index> = OpBitwiseAnd %uint %t1u_<index> %uint_0xffffe000
-    %t1f_<index> = OpBitcast %float %t1uu_<index>
-    %t2_<index> = OpCompositeConstruct %v2float %t0f_<index> %t1f_<index>
-    %t3_<index> = OpExtInst %uint %GLSL_std_450 PackHalf2x16 %t2_<index>
-    %t4_<index> = OpBitcast %float %t3_<index>
+    ; Convert each source float to binary16 bits with round-toward-zero.
+	    ; The shader ISA writes the packed value, not a float rounded by GLSL.
+	    %tpk0_bits_<index> = OpBitcast %uint %t0_<index>
+	    %tpk0_shr_sign_<index> = OpShiftRightLogical %uint %tpk0_bits_<index> %uint_16
+	    %tpk0_sign_<index> = OpBitwiseAnd %uint %tpk0_shr_sign_<index> %uint_0x00008000
+    %tpk0_exp_shift_<index> = OpShiftRightLogical %uint %tpk0_bits_<index> %uint_23
+	    %tpk0_exp_<index> = OpBitwiseAnd %uint %tpk0_exp_shift_<index> %uint_255
+    %tpk0_mant_<index> = OpBitwiseAnd %uint %tpk0_bits_<index> %uint_0x007fffff
+    %tpk0_half_exp_<index> = OpISub %uint %tpk0_exp_<index> %uint_112
+    %tpk0_normal_exp_<index> = OpShiftLeftLogical %uint %tpk0_half_exp_<index> %uint_10
+    %tpk0_normal_mant_<index> = OpShiftRightLogical %uint %tpk0_mant_<index> %uint_13
+    %tpk0_normal_payload_<index> = OpBitwiseOr %uint %tpk0_normal_exp_<index> %tpk0_normal_mant_<index>
+    %tpk0_normal_<index> = OpBitwiseOr %uint %tpk0_sign_<index> %tpk0_normal_payload_<index>
+    %tpk0_mant_hidden_<index> = OpBitwiseOr %uint %tpk0_mant_<index> %uint_0x00800000
+    %tpk0_sub_raw_shift_<index> = OpISub %uint %uint_126 %tpk0_exp_<index>
+    %tpk0_exp_lt_103_<index> = OpULessThan %bool %tpk0_exp_<index> %uint_103
+    %tpk0_exp_gt_112_<index> = OpUGreaterThan %bool %tpk0_exp_<index> %uint_112
+    %tpk0_sub_shift_low_<index> = OpSelect %uint %tpk0_exp_lt_103_<index> %uint_31 %tpk0_sub_raw_shift_<index>
+    %tpk0_sub_shift_<index> = OpSelect %uint %tpk0_exp_gt_112_<index> %uint_14 %tpk0_sub_shift_low_<index>
+    %tpk0_sub_mant_<index> = OpShiftRightLogical %uint %tpk0_mant_hidden_<index> %tpk0_sub_shift_<index>
+    %tpk0_subnormal_<index> = OpBitwiseOr %uint %tpk0_sign_<index> %tpk0_sub_mant_<index>
+	    %tpk0_mant_shift_<index> = OpShiftRightLogical %uint %tpk0_mant_<index> %uint_13
+	    %tpk0_nan_payload_<index> = OpBitwiseOr %uint %tpk0_mant_shift_<index> %uint_0x00000200
+    %tpk0_nan_exp_<index> = OpBitwiseOr %uint %uint_0x00007c00 %tpk0_nan_payload_<index>
+    %tpk0_nan_<index> = OpBitwiseOr %uint %tpk0_sign_<index> %tpk0_nan_exp_<index>
+    %tpk0_inf_<index> = OpBitwiseOr %uint %tpk0_sign_<index> %uint_0x00007c00
+    %tpk0_max_finite_<index> = OpBitwiseOr %uint %tpk0_sign_<index> %uint_0x00007bff
+    %tpk0_mant_zero_<index> = OpIEqual %bool %tpk0_mant_<index> %uint_0
+    %tpk0_special_<index> = OpSelect %uint %tpk0_mant_zero_<index> %tpk0_inf_<index> %tpk0_nan_<index>
+    %tpk0_exp_le_112_<index> = OpULessThanEqual %bool %tpk0_exp_<index> %uint_112
+    %tpk0_exp_ge_143_<index> = OpUGreaterThanEqual %bool %tpk0_exp_<index> %uint_143
+    %tpk0_exp_eq_255_<index> = OpIEqual %bool %tpk0_exp_<index> %uint_255
+    %tpk0_finite0_<index> = OpSelect %uint %tpk0_exp_le_112_<index> %tpk0_subnormal_<index> %tpk0_normal_<index>
+    %tpk0_finite1_<index> = OpSelect %uint %tpk0_exp_lt_103_<index> %tpk0_sign_<index> %tpk0_finite0_<index>
+    %tpk0_finite2_<index> = OpSelect %uint %tpk0_exp_ge_143_<index> %tpk0_max_finite_<index> %tpk0_finite1_<index>
+	    %tpk0_exp_select_<index> = OpSelect %uint %tpk0_exp_eq_255_<index> %tpk0_special_<index> %tpk0_finite2_<index>
+	    %tpk0_result_<index> = OpBitwiseAnd %uint %tpk0_exp_select_<index> %uint_0x0000ffff
+
+	    %tpk1_bits_<index> = OpBitcast %uint %t1_<index>
+	    %tpk1_shr_sign_<index> = OpShiftRightLogical %uint %tpk1_bits_<index> %uint_16
+	    %tpk1_sign_<index> = OpBitwiseAnd %uint %tpk1_shr_sign_<index> %uint_0x00008000
+    %tpk1_exp_shift_<index> = OpShiftRightLogical %uint %tpk1_bits_<index> %uint_23
+	    %tpk1_exp_<index> = OpBitwiseAnd %uint %tpk1_exp_shift_<index> %uint_255
+    %tpk1_mant_<index> = OpBitwiseAnd %uint %tpk1_bits_<index> %uint_0x007fffff
+    %tpk1_half_exp_<index> = OpISub %uint %tpk1_exp_<index> %uint_112
+    %tpk1_normal_exp_<index> = OpShiftLeftLogical %uint %tpk1_half_exp_<index> %uint_10
+    %tpk1_normal_mant_<index> = OpShiftRightLogical %uint %tpk1_mant_<index> %uint_13
+    %tpk1_normal_payload_<index> = OpBitwiseOr %uint %tpk1_normal_exp_<index> %tpk1_normal_mant_<index>
+    %tpk1_normal_<index> = OpBitwiseOr %uint %tpk1_sign_<index> %tpk1_normal_payload_<index>
+    %tpk1_mant_hidden_<index> = OpBitwiseOr %uint %tpk1_mant_<index> %uint_0x00800000
+    %tpk1_sub_raw_shift_<index> = OpISub %uint %uint_126 %tpk1_exp_<index>
+    %tpk1_exp_lt_103_<index> = OpULessThan %bool %tpk1_exp_<index> %uint_103
+    %tpk1_exp_gt_112_<index> = OpUGreaterThan %bool %tpk1_exp_<index> %uint_112
+    %tpk1_sub_shift_low_<index> = OpSelect %uint %tpk1_exp_lt_103_<index> %uint_31 %tpk1_sub_raw_shift_<index>
+    %tpk1_sub_shift_<index> = OpSelect %uint %tpk1_exp_gt_112_<index> %uint_14 %tpk1_sub_shift_low_<index>
+    %tpk1_sub_mant_<index> = OpShiftRightLogical %uint %tpk1_mant_hidden_<index> %tpk1_sub_shift_<index>
+    %tpk1_subnormal_<index> = OpBitwiseOr %uint %tpk1_sign_<index> %tpk1_sub_mant_<index>
+	    %tpk1_mant_shift_<index> = OpShiftRightLogical %uint %tpk1_mant_<index> %uint_13
+	    %tpk1_nan_payload_<index> = OpBitwiseOr %uint %tpk1_mant_shift_<index> %uint_0x00000200
+    %tpk1_nan_exp_<index> = OpBitwiseOr %uint %uint_0x00007c00 %tpk1_nan_payload_<index>
+    %tpk1_nan_<index> = OpBitwiseOr %uint %tpk1_sign_<index> %tpk1_nan_exp_<index>
+    %tpk1_inf_<index> = OpBitwiseOr %uint %tpk1_sign_<index> %uint_0x00007c00
+    %tpk1_max_finite_<index> = OpBitwiseOr %uint %tpk1_sign_<index> %uint_0x00007bff
+    %tpk1_mant_zero_<index> = OpIEqual %bool %tpk1_mant_<index> %uint_0
+    %tpk1_special_<index> = OpSelect %uint %tpk1_mant_zero_<index> %tpk1_inf_<index> %tpk1_nan_<index>
+    %tpk1_exp_le_112_<index> = OpULessThanEqual %bool %tpk1_exp_<index> %uint_112
+    %tpk1_exp_ge_143_<index> = OpUGreaterThanEqual %bool %tpk1_exp_<index> %uint_143
+    %tpk1_exp_eq_255_<index> = OpIEqual %bool %tpk1_exp_<index> %uint_255
+    %tpk1_finite0_<index> = OpSelect %uint %tpk1_exp_le_112_<index> %tpk1_subnormal_<index> %tpk1_normal_<index>
+    %tpk1_finite1_<index> = OpSelect %uint %tpk1_exp_lt_103_<index> %tpk1_sign_<index> %tpk1_finite0_<index>
+    %tpk1_finite2_<index> = OpSelect %uint %tpk1_exp_ge_143_<index> %tpk1_max_finite_<index> %tpk1_finite1_<index>
+	    %tpk1_exp_select_<index> = OpSelect %uint %tpk1_exp_eq_255_<index> %tpk1_special_<index> %tpk1_finite2_<index>
+	    %tpk1_result_<index> = OpBitwiseAnd %uint %tpk1_exp_select_<index> %uint_0x0000ffff
+
+	    %tpk1_shifted_<index> = OpShiftLeftLogical %uint %tpk1_result_<index> %uint_16
+	    %tpk_result_<index> = OpBitwiseOr %uint %tpk0_result_<index> %tpk1_shifted_<index>
+    %t4_<index> = OpBitcast %float %tpk_result_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
@@ -6013,7 +6081,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPkrtzF16F32_SVdstSVsrc0SVsrc1)
         %tval_<index> = OpSelect %float %exec_lo_b_<index> %t4_<index> %tdst_<index>
                OpStore %<dst> %tval_<index>
         %tdst_packed_<index> = OpLoad %uint %<dst_packed>
-        %tpacked_val_<index> = OpSelect %uint %exec_lo_b_<index> %t3_<index> %tdst_packed_<index>
+        %tpacked_val_<index> = OpSelect %uint %exec_lo_b_<index> %tpk_result_<index> %tdst_packed_<index>
                OpStore %<dst_packed> %tpacked_val_<index>
 )";
 	*dst_source += String8(text)
@@ -6021,7 +6089,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPkrtzF16F32_SVdstSVsrc0SVsrc1)
 	                   .ReplaceStr("<dst_packed>", packed_half_shadow_to_str(inst.dst))
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<index>", index_str);
+	                   .ReplaceStr("<index>", index_str)
+	                   .ReplaceStr("uint_103", spirv->GetConstantUint(103))
+	                   .ReplaceStr("uint_112", spirv->GetConstantUint(112))
+	                   .ReplaceStr("uint_126", spirv->GetConstantUint(126))
+	                   .ReplaceStr("uint_143", spirv->GetConstantUint(143))
+	                   .ReplaceStr("uint_255", spirv->GetConstantUint(255));
 
 	return true;
 }
@@ -8815,9 +8888,21 @@ void Spirv::FindConstants()
 		AddConstantUint(64);
 		AddConstantUint(72);
 		AddConstantUint(127);
+		AddConstantUint(103);
+		AddConstantUint(112);
+		AddConstantUint(126);
+		AddConstantUint(143);
+		AddConstantUint(255);
+		AddConstantUint(0x00008000);
+		AddConstantUint(0x000000ff);
+		AddConstantUint(0x007fffff);
+		AddConstantUint(0x00800000);
+		AddConstantUint(0x00000200);
+		AddConstantUint(0x00007c00);
+		AddConstantUint(0x00007bff);
+		AddConstantUint(0x0000ffff);
 		AddConstantUint(0x3fff);
 		AddConstantUint(0xffffff);
-		AddConstantUint(0xffffe000);
 		AddConstantUint(0xffffffff);
 		AddConstantUint(0x0000000f);
 		AddConstantUint(0x000000f0);

@@ -1957,7 +1957,14 @@ TEST(EmulatorGraphicsPackets, CompressedMrtExportReadsPackedHalfFromUintShadow)
 
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 
-	EXPECT_NE(source.FindIndex("PackHalf2x16"), Core::STRING8_INVALID_INDEX);
+	// VCvtPkrtzF16F32 implements the ISA's binary16 round-toward-zero
+	// conversion in integer bits. GLSL PackHalf2x16 rounds to nearest-even and
+	// therefore cannot represent this instruction's contract.
+	EXPECT_EQ(source.FindIndex("PackHalf2x16"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk0_bits_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk1_bits_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk0_subnormal_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk0_max_finite_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("UnpackHalf2x16"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%t1_2 = OpLoad %float %v4"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%t6_2 = OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
