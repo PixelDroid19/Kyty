@@ -846,6 +846,12 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 		m_cp->Reset();
 	}
 
+	// Publish fence producers before enqueue so WaitRegMem in an earlier batch
+	// can observe ReleaseMem/WriteData from a later submit without requiring the
+	// blocked ring worker to dequeue that later batch first.
+	GraphicsPm4PublishFenceProducers(cmd_draw_buffer, num_draw_dw);
+	GraphicsPm4PublishFenceProducers(cmd_const_buffer, num_const_dw);
+
 	CmdBatch buf {};
 	buf.draw_buffer.data    = cmd_draw_buffer;
 	buf.draw_buffer.num_dw  = num_draw_dw;
@@ -3683,20 +3689,29 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 
 		// data_sel matches GraphicsCbReleaseMem: 0 = no destination write
 		// (flush/barrier only), 1 = 32-bit immediate, 2 = 64-bit immediate,
-		// 3 = GPU clock counter.
+		// 3 = GPU clock counter. gcr_cntl selects cache ops on real HW; the
+		// software CP only needs a host barrier when any GCR bit is set. Do not
+		// EXIT on non-zero gcr — Gen5 titles combine flush bits with label
+		// writes (observed after PlayGo: data_sel=1 with gcr!=0).
 		if (data_sel == 0)
 		{
-			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0000);
-			cp->MemoryBarrier();
-			return 6;
+			if (gcr_cntl != 0u)
+			{
+				cp->MemoryBarrier();
+			}
+			return (cmd_id == 0xc0061060) ? 7 : 6;
 		}
 		if (data_sel == 1)
 		{
-			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0000);
 			if (dst_gpu_addr == nullptr)
 			{
-				EXIT_NOT_IMPLEMENTED((buffer[0] & 0xffu) != 0x14u);
-				cp->MemoryBarrier();
+				// Null destination: flush/ordering only. Action 0x14 was the
+				// first observed form; other CACHE_* events are accepted the
+				// same way when there is no label store.
+				if (gcr_cntl != 0u || (buffer[0] & 0xffu) != 0u)
+				{
+					cp->MemoryBarrier();
+				}
 				if ((buffer[4] >> 30u) == 3u)
 				{
 					// Null-destination ReleaseMem has no data write. Some
@@ -3704,9 +3719,19 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 					// be in the full 7-dword form.
 					return 4;
 				}
-				return 6;
+				return (cmd_id == 0xc0061060) ? 7 : 6;
 			}
 
+			if (gcr_cntl != 0u)
+			{
+				cp->MemoryBarrier();
+			}
+			// Normalize to the known 32-bit immediate EOP branch when the
+			// guest action is outside the previously observed set.
+			if (eop_event_type != 0x14u && eop_event_type != 0x30u && eop_event_type != 0x2fu)
+			{
+				eop_event_type = 0x14u;
+			}
 			cache_action       = 0x00;
 			cache_policy       = 0;
 			event_index        = 0;
@@ -3715,24 +3740,31 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 			interrupt_selector = 0;
 		} else if (data_sel == 2)
 		{
-			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0200);
-			EXIT_NOT_IMPLEMENTED((buffer[0] >> 8u) != 0x3);
-
-			if (gcr_cntl == 0x200)
+			// 0x0200 was the first observed writeback form; other non-zero gcr
+			// values still publish a 64-bit immediate. Normalize event fields
+			// to the known WriteAtEndOfPipe64 branches (writeback vs plain).
+			if (gcr_cntl != 0u)
 			{
-				cache_action = 0x38;
+				cache_action   = 0x38;
+				eop_event_type = 0x14;
+				event_index    = 0;
+			} else
+			{
+				cache_action   = 0x00;
+				eop_event_type = 0x04;
+				event_index    = 0x05;
 			}
 
 			cache_policy       = 0;
-			event_index        = 0;
 			event_write_dest   = 0;
 			event_write_source = 2;
 			interrupt_selector = 0;
 		} else if (data_sel == 3)
 		{
-			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0000);
-			EXIT_NOT_IMPLEMENTED((buffer[0] >> 8u) != 0x0);
-
+			if (gcr_cntl != 0u)
+			{
+				cp->MemoryBarrier();
+			}
 			cache_action = 0x00;
 
 			cache_policy       = 0;

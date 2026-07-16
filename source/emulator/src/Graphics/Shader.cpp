@@ -1521,6 +1521,9 @@ ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start
 		switch (inst.type)
 		{
 			case ShaderInstructionType::BufferLoadDword:
+			case ShaderInstructionType::BufferLoadDwordx2:
+			case ShaderInstructionType::BufferLoadDwordx3:
+			case ShaderInstructionType::BufferLoadDwordx4:
 			case ShaderInstructionType::BufferLoadFormatX:
 			case ShaderInstructionType::BufferLoadFormatXy:
 			case ShaderInstructionType::BufferLoadFormatXyz:

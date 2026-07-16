@@ -37,6 +37,9 @@ enum class ShaderInstructionType : uint32_t
 	Unknown,
 
 	BufferLoadDword,
+	BufferLoadDwordx2,
+	BufferLoadDwordx3,
+	BufferLoadDwordx4,
 	BufferLoadFormatX,
 	BufferLoadFormatXy,
 	BufferLoadFormatXyz,
@@ -124,6 +127,8 @@ enum class ShaderInstructionType : uint32_t
 	TBufferLoadFormatXyzw,
 	VAddF32,
 	VAddI32,
+	// VOP3: dst = src0 + src1 + src2 (u32). RDNA2 op 0x36D.
+	VAdd3U32,
 	VAndB32,
 	VAshrI32,
 	VAshrrevI32,
