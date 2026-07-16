@@ -673,6 +673,37 @@ TEST(EmulatorGraphicsState, PreferGpuMemoryAliasUsesGuestByteSizes)
 	EXPECT_EQ(PreferGpuMemoryAliasIndex(guest_sizes, 3, 0x18000ull), 2u);
 }
 
+// Capture/disk bounds: unset env defaults to 1280 so 4K VideoOut dumps are not
+// multi-dozen-MB BMPs; explicit 0 keeps full resolution; prune math is pure.
+TEST(EmulatorGraphicsState, NativeCaptureDefaultsAndPruneBoundDisk)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_EQ(NativeCaptureResolveMaxEdge(nullptr), 1280u);
+	EXPECT_EQ(NativeCaptureResolveMaxEdge(""), 1280u);
+	EXPECT_EQ(NativeCaptureResolveMaxEdge("0"), 0u);
+	EXPECT_EQ(NativeCaptureResolveMaxEdge("1920"), 1920u);
+	EXPECT_EQ(NativeCaptureResolveMaxEdge("nope"), 1280u);
+
+	EXPECT_EQ(NativeCapturePruneCount(3, 8), 0u);
+	EXPECT_EQ(NativeCapturePruneCount(8, 8), 0u);
+	EXPECT_EQ(NativeCapturePruneCount(12, 8), 4u);
+	EXPECT_EQ(NativeCapturePruneCount(5, 0), 0u);
+}
+
+// Pipeline cache must recycle slots instead of EXIT when variants exceed the cap.
+TEST(EmulatorGraphicsState, PipelineCacheNextEvictIndexRotates)
+{
+	using namespace Kyty::Libs::Graphics;
+	uint32_t cursor = 0;
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, &cursor), 0u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, &cursor), 1u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, &cursor), 2u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, &cursor), 3u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, &cursor), 0u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(0, &cursor), 0u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, nullptr), 0u);
+}
+
 TEST(EmulatorGraphicsState, AllowsOnlyObservedTextureStorageAliases)
 {
 	EXPECT_TRUE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Equals,

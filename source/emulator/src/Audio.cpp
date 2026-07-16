@@ -556,8 +556,12 @@ struct ContextSlot
 
 struct PortSlot
 {
-	bool    used    = false;
-	int32_t context = 0;
+	bool     used     = false;
+	int32_t  context  = 0;
+	// PortGetState fields (external reference Astro baseline layout, 0x20-byte blob).
+	uint16_t output   = 0x01;
+	uint8_t  channels = 2;
+	int16_t  status   = -1;
 };
 
 struct UserSlot
@@ -794,6 +798,8 @@ int KYTY_SYSV_ABI AudioOut2PortDestroy(int32_t port)
 }
 
 // sceAudioOut2PortSetAttributes (NID 8XTArSPyWHk)
+// attr points at tagged entries { int32 id; int32 pad; uint64 value; } (16 B).
+// When attr is a single opaque pointer from older call sites, treat as no-op success.
 int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr)
 {
 	PRINT_NAME();
@@ -803,6 +809,56 @@ int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
+	// Successful SetAttributes clears the previous "unset" status so GetState
+	// reports a ready port (external reference Astro baseline contract).
+	g_ports[port - 1].status = 0;
+	if (attr != nullptr)
+	{
+		// Best-effort first entry: id at +0, value at +8.
+		const auto* words = static_cast<const uint32_t*>(attr);
+		const int32_t attribute_id = static_cast<int32_t>(words[0]);
+		uint64_t value = 0;
+		std::memcpy(&value, static_cast<const uint8_t*>(attr) + 8, sizeof(value));
+		auto& p = g_ports[port - 1];
+		switch (attribute_id)
+		{
+			case 0:
+			case 1: p.output = static_cast<uint16_t>(value); break;
+			case 2: p.channels = static_cast<uint8_t>(value); break;
+			case 3:
+			case 4: p.status = static_cast<int16_t>(value); break;
+			default: break;
+		}
+	}
+	return OK;
+}
+
+// sceAudioOut2PortGetState (NID gatEUKG+Ea4)
+int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out)
+{
+	PRINT_NAME();
+	printf("\t port      = %d\n", port);
+	printf("\t state_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(state_out));
+	if (port < 1 || port > kMaxPorts || !g_ports[port - 1].used || state_out == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	constexpr size_t kPortStateSize = 0x20;
+	void* start = nullptr;
+	void* end   = nullptr;
+	if (LibKernel::Memory::KernelQueryMemoryProtection(state_out, &start, &end, nullptr) != OK ||
+	    reinterpret_cast<uintptr_t>(state_out) > reinterpret_cast<uintptr_t>(end) - kPortStateSize + 1)
+	{
+		return LibKernel::KERNEL_ERROR_EFAULT;
+	}
+	const auto& p = g_ports[port - 1];
+	uint8_t blob[kPortStateSize] {};
+	blob[0] = static_cast<uint8_t>(p.output & 0xffu);
+	blob[1] = static_cast<uint8_t>((p.output >> 8) & 0xffu);
+	blob[2] = p.channels;
+	blob[4] = static_cast<uint8_t>(static_cast<uint16_t>(p.status) & 0xffu);
+	blob[5] = static_cast<uint8_t>((static_cast<uint16_t>(p.status) >> 8) & 0xffu);
+	std::memcpy(state_out, blob, kPortStateSize);
 	return OK;
 }
 

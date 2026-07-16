@@ -24,6 +24,7 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #else
+#include <linux/falloc.h>
 #include <sys/syscall.h>
 #endif
 
@@ -628,6 +629,47 @@ void sys_virtual_destroy_shared_backing(void* backing)
 		close(shared->fd);
 	}
 	delete shared;
+}
+
+bool sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_offset, uint64_t size)
+{
+	auto* shared = static_cast<SharedBacking*>(backing);
+	if (shared == nullptr || shared->fd < 0 || size == 0 || backing_offset > shared->size || size > shared->size - backing_offset)
+	{
+		return false;
+	}
+
+	// Align outward to host pages so partial ranges still reclaim whole faulted pages.
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (page_size == 0)
+	{
+		return false;
+	}
+	const uint64_t start = backing_offset & ~(page_size - 1u);
+	uint64_t       end   = (backing_offset + size + page_size - 1u) & ~(page_size - 1u);
+	if (end > shared->size)
+	{
+		end = shared->size;
+	}
+	if (end <= start)
+	{
+		return false;
+	}
+
+#if defined(__APPLE__)
+#ifdef F_PUNCHHOLE
+	fpunchhole_t hole {};
+	hole.fp_offset = static_cast<off_t>(start);
+	hole.fp_length = static_cast<off_t>(end - start);
+	return ::fcntl(shared->fd, F_PUNCHHOLE, &hole) == 0;
+#else
+	(void)start;
+	return false;
+#endif
+#else
+	return ::fallocate(shared->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, static_cast<off_t>(start),
+	                   static_cast<off_t>(end - start)) == 0;
+#endif
 }
 
 static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t prefer, uint64_t backing_offset, uint64_t size,

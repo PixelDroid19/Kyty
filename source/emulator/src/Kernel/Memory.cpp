@@ -254,6 +254,23 @@ bool PhysicalMemory::Release(uint64_t start, size_t len)
 		if (start == b.start_addr && len == b.size)
 		{
 			m_allocated.RemoveAt(index);
+
+			// Reclaim host RAM only when no live map still covers this physical
+			// range. Gen5 may release the reservation while a mapping remains;
+			// Unmap performs the discard in that case.
+			bool still_mapped = false;
+			for (const auto& mapped: m_mapped)
+			{
+				if (mapped.phys_addr < start + len && mapped.phys_addr + mapped.map_size > start)
+				{
+					still_mapped = true;
+					break;
+				}
+			}
+			if (!still_mapped)
+			{
+				(void)VirtualMemory::DiscardSharedBackingRange(m_backing, start, len);
+			}
 			return true;
 		}
 		index++;
@@ -328,12 +345,40 @@ bool PhysicalMemory::Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMod
 	{
 		if (b.map_vaddr == vaddr && b.map_size == size)
 		{
+			const uint64_t phys_addr = b.phys_addr;
+			const uint64_t map_size  = b.map_size;
 			if (!VirtualMemory::Free(vaddr))
 			{
 				return false;
 			}
 			*gpu_mode = b.gpu_mode;
 			m_mapped.RemoveAt(index);
+
+			// If the physical reservation was already released (Gen5 unmap after
+			// Release) and no alias maps remain, drop the host pages.
+			bool still_allocated = false;
+			for (const auto& allocated: m_allocated)
+			{
+				if (phys_addr >= allocated.start_addr && map_size <= allocated.size &&
+				    phys_addr - allocated.start_addr <= allocated.size - map_size)
+				{
+					still_allocated = true;
+					break;
+				}
+			}
+			bool still_mapped = false;
+			for (const auto& mapped: m_mapped)
+			{
+				if (mapped.phys_addr < phys_addr + map_size && mapped.phys_addr + mapped.map_size > phys_addr)
+				{
+					still_mapped = true;
+					break;
+				}
+			}
+			if (!still_allocated && !still_mapped)
+			{
+				(void)VirtualMemory::DiscardSharedBackingRange(m_backing, phys_addr, map_size);
+			}
 			return true;
 		}
 		index++;

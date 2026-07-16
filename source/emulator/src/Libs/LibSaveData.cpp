@@ -524,6 +524,110 @@ int KYTY_SYSV_ABI SaveDataSaveIcon(const SaveDataMountPoint* mount_point, const 
 	return OK;
 }
 
+// Host path for sceSaveData*SaveDataMemory2 slots (external reference Astro baseline).
+// Layout of setup/get/set param blobs is only partially known; we honor
+// user/slot/size fields at fixed offsets observed by external reference and keep the
+// rest of the guest structures untouched.
+static String SaveMemoryHostPath(int32_t user_id, uint32_t slot_id)
+{
+	return String::FromPrintf("%s/memory_u%d_s%u.bin", String(SAVE_DATA_DIR).C_Str(), user_id, slot_id);
+}
+
+// sceSaveDataSetupSaveDataMemory2 (NID oQySEUfgXRA)
+// rdi = setup param*, rsi = optional result*
+int KYTY_SYSV_ABI SaveDataSetupSaveDataMemory2(void* setup_param, void* result_out)
+{
+	PRINT_NAME();
+	printf("\t setup_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(setup_param));
+	printf("\t result_out  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(result_out));
+	if (setup_param == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	// Observed prefix: user_id@0 (i32), slot@4 (u32), memory_size@8 (u64).
+	const auto* words = static_cast<const uint32_t*>(setup_param);
+	const int32_t  user_id     = static_cast<int32_t>(words[0]);
+	const uint32_t slot_id     = words[1];
+	uint64_t       memory_size = 0;
+	std::memcpy(&memory_size, static_cast<const uint8_t*>(setup_param) + 8, sizeof(memory_size));
+	if (user_id < 0)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	const String path = SaveMemoryHostPath(user_id, slot_id);
+	Core::File::CreateDirectories(path.DirectoryWithoutFilename());
+	if (!Core::File::IsFileExisting(path) && memory_size > 0)
+	{
+		Core::File f;
+		if (f.Create(path))
+		{
+			f.Truncate(static_cast<uint64_t>(memory_size));
+			f.Close();
+		}
+	}
+	if (result_out != nullptr)
+	{
+		// Minimal success result: zero a 16-byte prefix when present.
+		std::memset(result_out, 0, 16);
+	}
+	return OK;
+}
+
+// sceSaveDataGetSaveDataMemory2 (NID QwOO7vegnV8)
+int KYTY_SYSV_ABI SaveDataGetSaveDataMemory2(void* get_param)
+{
+	PRINT_NAME();
+	printf("\t get_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(get_param));
+	if (get_param == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	const auto* words = static_cast<const uint32_t*>(get_param);
+	const int32_t  user_id = static_cast<int32_t>(words[0]);
+	const uint32_t slot_id = words[1];
+	if (user_id < 0)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	const String path = SaveMemoryHostPath(user_id, slot_id);
+	if (!Core::File::IsFileExisting(path))
+	{
+		return SAVE_DATA_ERROR_NOT_FOUND;
+	}
+	// Data descriptors may follow; when absent just succeed (title probes).
+	return OK;
+}
+
+// sceSaveDataSetSaveDataMemory2 (NID cduy9v4YmT4)
+int KYTY_SYSV_ABI SaveDataSetSaveDataMemory2(void* set_param)
+{
+	PRINT_NAME();
+	printf("\t set_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(set_param));
+	if (set_param == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	const auto* words = static_cast<const uint32_t*>(set_param);
+	const int32_t  user_id = static_cast<int32_t>(words[0]);
+	const uint32_t slot_id = words[1];
+	if (user_id < 0)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	const String path = SaveMemoryHostPath(user_id, slot_id);
+	if (!Core::File::IsFileExisting(path))
+	{
+		// Create empty slot so first save does not fail hard.
+		Core::File::CreateDirectories(path.DirectoryWithoutFilename());
+		Core::File f;
+		if (f.Create(path))
+		{
+			f.Close();
+		}
+	}
+	return OK;
+}
+
 } // namespace SaveData
 
 LIB_DEFINE(InitSaveData_1)
@@ -543,6 +647,10 @@ LIB_DEFINE(InitSaveData_1)
 	// sceSaveDataGetEventResult
 	LIB_FUNC("j8xKtiFj0SY", SaveData::SaveDataGetEventResult);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
+	// Memory2 APIs (Astro Bot / Gen5; external reference baseline NIDs).
+	LIB_FUNC("oQySEUfgXRA", SaveData::SaveDataSetupSaveDataMemory2);
+	LIB_FUNC("QwOO7vegnV8", SaveData::SaveDataGetSaveDataMemory2);
+	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);
 }
 
 namespace SaveDataNative {
@@ -575,6 +683,9 @@ LIB_DEFINE(InitSaveDataNative_1)
 	// NID dyIhnXq-0SM: sceSaveDataDirNameSearch (boot save enumeration).
 	LIB_FUNC("dyIhnXq-0SM", SaveData::SaveDataDirNameSearch);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
+	LIB_FUNC("oQySEUfgXRA", SaveData::SaveDataSetupSaveDataMemory2);
+	LIB_FUNC("QwOO7vegnV8", SaveData::SaveDataGetSaveDataMemory2);
+	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);
 }
 
 } // namespace SaveDataNative

@@ -1,6 +1,7 @@
 #include "Kyty/Agent/Cli.h"
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

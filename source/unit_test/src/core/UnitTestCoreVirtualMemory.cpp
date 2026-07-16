@@ -150,4 +150,55 @@ TEST(CoreVirtualMemory, SignalDiagnosticsConfigurationUsesPresenceSemantics)
 	EXPECT_FALSE(partial.fault_log);
 }
 
+// Released direct-memory ranges must reclaim host pages via punch-hole so a
+// long session that allocates/frees heaps does not keep RSS "como loco".
+TEST(CoreVirtualMemory, DiscardSharedBackingRangeReclaimsFaultedPages)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_GT(page_size, 0u);
+	constexpr uint64_t kPages = 4;
+	const uint64_t     kSize  = page_size * kPages;
+
+	SharedBacking* backing = CreateSharedBacking(kSize);
+	ASSERT_NE(backing, nullptr);
+
+	const uint64_t view = MapSharedAligned(backing, 0, 0, kSize, Mode::ReadWrite, page_size);
+	ASSERT_NE(view, 0u);
+	auto* bytes = reinterpret_cast<uint8_t*>(view);
+	for (uint64_t i = 0; i < kSize; ++i)
+	{
+		bytes[i] = static_cast<uint8_t>(0xa5);
+	}
+	ASSERT_TRUE(Free(view));
+
+	ASSERT_TRUE(DiscardSharedBackingRange(backing, 0, kSize));
+
+	const uint64_t view2 = MapSharedAligned(backing, 0, 0, kSize, Mode::ReadWrite, page_size);
+	ASSERT_NE(view2, 0u);
+	auto* bytes2 = reinterpret_cast<uint8_t*>(view2);
+	// Punch-hole zeros the range on next fault; at least the first and last
+	// bytes of each page must not retain the previous 0xa5 pattern.
+	EXPECT_EQ(bytes2[0], 0);
+	EXPECT_EQ(bytes2[page_size - 1u], 0);
+	EXPECT_EQ(bytes2[kSize - 1u], 0);
+
+	ASSERT_TRUE(Free(view2));
+	DestroySharedBacking(backing);
+}
+
+TEST(CoreVirtualMemory, DiscardSharedBackingRangeRejectsInvalidBounds)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_GT(page_size, 0u);
+	SharedBacking* backing = CreateSharedBacking(page_size);
+	ASSERT_NE(backing, nullptr);
+
+	EXPECT_FALSE(DiscardSharedBackingRange(nullptr, 0, page_size));
+	EXPECT_FALSE(DiscardSharedBackingRange(backing, 0, 0));
+	EXPECT_FALSE(DiscardSharedBackingRange(backing, page_size, page_size));
+	EXPECT_FALSE(DiscardSharedBackingRange(backing, page_size / 2u, page_size));
+
+	DestroySharedBacking(backing);
+}
+
 UT_END();

@@ -41,6 +41,8 @@ int KYTY_SYSV_ABI AudioOut2ContextGetQueueLevel(int32_t handle, uint32_t* used, 
 int KYTY_SYSV_ABI AudioOut2PortCreate(int32_t context, const void* param, int32_t* port_out);
 int KYTY_SYSV_ABI AudioOut2PortDestroy(int32_t port);
 int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr);
+// sceAudioOut2PortGetState (NID gatEUKG+Ea4): 0x20-byte guest state blob.
+int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out);
 int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* user_out);
 int KYTY_SYSV_ABI AudioOut2UserDestroy(int32_t user);
 // Residual AudioOut2 NIDs imported by Gen5 titles whose names are not yet

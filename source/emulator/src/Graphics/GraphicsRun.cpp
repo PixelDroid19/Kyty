@@ -3070,6 +3070,32 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 	return 6;
 }
 
+// Custom IT_NOP/R_DMA_DATA from sceAgcDcbDmaData / sceAgcAcbDmaData.
+// Layout (8 dwords total including header consumed by the dispatcher):
+//   buffer[0]=policies, [1]=controls, [2]=byte_count, [3..4]=dst, [5..6]=src
+// relative to post-header body (see GraphicsDcbDmaData).
+KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
+{
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(cp == nullptr);
+	EXIT_NOT_IMPLEMENTED(cmd_id != KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA));
+
+	const uint32_t byte_count = buffer[2];
+	const uint64_t dst        = buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u);
+	const uint64_t src        = buffer[5] | (static_cast<uint64_t>(buffer[6]) << 32u);
+
+	if (byte_count == 0 || byte_count > (256u * 1024u * 1024u) || dst == 0 || src == 0 || (byte_count & 3u) != 0)
+	{
+		return 7;
+	}
+
+	GpuMemoryCheckAccessViolation(src, byte_count);
+	GpuMemoryCheckAccessViolation(dst, byte_count);
+	memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), byte_count);
+	GraphicsRenderMemoryFlush(dst, byte_count);
+	return 7;
+}
+
 KYTY_CP_OP_PARSER(cp_op_draw_index)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -4801,6 +4827,7 @@ static void graphics_init_jmp_tables()
 	g_cp_op_custom_func[Pm4::R_WAIT_MEM_64]      = cp_op_wait_reg_mem_64;
 	g_cp_op_custom_func[Pm4::R_FLIP]             = cp_op_flip;
 	g_cp_op_custom_func[Pm4::R_RELEASE_MEM]      = cp_op_release_mem;
+	g_cp_op_custom_func[Pm4::R_DMA_DATA]         = cp_op_custom_dma_data;
 
 	graphics_init_jmp_tables_cx_indirect();
 	graphics_init_jmp_tables_sh_indirect();

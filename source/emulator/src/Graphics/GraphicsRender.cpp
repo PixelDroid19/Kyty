@@ -180,6 +180,7 @@ private:
 	void DumpPipeline(const char* action, uint32_t id);
 
 	Vector<Pipeline> m_pipelines;
+	uint32_t         m_evict_cursor = 0;
 	Core::Mutex      m_mutex;
 };
 
@@ -2885,11 +2886,12 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	{
 		if (m_pipelines.Size() >= PipelineCache::MAX_PIPELINES)
 		{
-			EXIT_NOT_IMPLEMENTED(m_pipelines.Size() >= PipelineCache::MAX_PIPELINES);
-			//			auto  index = Math::Rand::UintInclusiveRange(0, m_pipelines.Size() - 1);
-			//			auto& pn    = m_pipelines[index];
-			//			DeletePipelineInternal(index);
-			//			pn = p;
+			// Bound host pipeline object growth for long sessions: recycle a
+			// slot instead of EXIT_NOT_IMPLEMENTED when variants exceed the cap.
+			const uint32_t evict = PipelineCacheNextEvictIndex(m_pipelines.Size(), &m_evict_cursor);
+			DeletePipelineInternal(evict);
+			m_pipelines[static_cast<int>(evict)] = p;
+			DumpPipeline("create", static_cast<int>(evict));
 		} else
 		{
 			EXIT_IF(m_pipelines.Size() != static_cast<uint32_t>(index));
@@ -2962,11 +2964,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 	{
 		if (m_pipelines.Size() >= PipelineCache::MAX_PIPELINES)
 		{
-			EXIT_NOT_IMPLEMENTED(m_pipelines.Size() >= PipelineCache::MAX_PIPELINES);
-			//			auto  index = Math::Rand::UintInclusiveRange(0, m_pipelines.Size() - 1);
-			//			auto& pn    = m_pipelines[index];
-			//			DeletePipelineInternal(index);
-			//			pn = p;
+			const uint32_t evict = PipelineCacheNextEvictIndex(m_pipelines.Size(), &m_evict_cursor);
+			DeletePipelineInternal(evict);
+			m_pipelines[static_cast<int>(evict)] = p;
 		} else
 		{
 			m_pipelines.Add(p);

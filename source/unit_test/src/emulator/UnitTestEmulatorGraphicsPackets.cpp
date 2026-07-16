@@ -2068,4 +2068,86 @@ TEST(EmulatorGraphicsPackets, Gen5RenderTextureAbgrSampleView)
 	EXPECT_NE(VulkanImage::VIEW_ABGR, VulkanImage::VIEW_BGRA);
 }
 
+// external reference Astro baseline: sceAgcDcbStallCommandBufferParser is a fixed
+// EVENT_WRITE with CS partial flush (event type 0x07).
+TEST(EmulatorGraphicsPackets, EncodesDcbStallCommandBufferParser)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[8] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 8;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 8;
+
+	uint32_t* cmd = Gen5::GraphicsDcbStallCommandBufferParser(reinterpret_cast<Gen5::CommandBuffer*>(&cb));
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0));
+	EXPECT_EQ(cmd[1], 0x07u);
+}
+
+// external reference Astro baseline: sceAgcDcbDmaData / AcbDmaData encode IT_NOP+R_DMA_DATA.
+TEST(EmulatorGraphicsPackets, EncodesDcbDmaDataCustomPacket)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	const uint64_t dst = 0x0000000120000000ull;
+	const uint64_t src = 0x0000000130000000ull;
+	uint32_t*      cmd =
+	    Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4, 0, 0, dst, 0, 0, src, 64, 0, 0, 0);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA));
+	EXPECT_EQ(cmd[1], 0x00000004u);
+	EXPECT_EQ(cmd[2], 0u);
+	EXPECT_EQ(cmd[3], 64u);
+	EXPECT_EQ(cmd[4], 0x20000000u);
+	EXPECT_EQ(cmd[5], 0x00000001u);
+	EXPECT_EQ(cmd[6], 0x30000000u);
+	EXPECT_EQ(cmd[7], 0x00000001u);
+
+	// Invalid byte_count must not allocate.
+	EXPECT_EQ(Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4, 0, 0, dst, 0, 0, src, 3, 0, 0, 0),
+	          nullptr);
+}
+
 UT_END();

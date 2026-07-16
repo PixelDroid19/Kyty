@@ -339,6 +339,21 @@ static KYTY_SYSV_ABI uint64_t CommandBufferGetCurrentOffset(void* cmd_obj)
 	return st.write_offset;
 }
 
+// sceAmprCommandBufferGetNumCommands (NID gzndltBEzWc). Same ABI as GetSize:
+// count in RAX. Report drained/empty so poll-until-zero callers proceed.
+// Ported from external reference feature/astro-bot-baseline.
+static KYTY_SYSV_ABI uint64_t CommandBufferGetNumCommands(void* cmd_obj)
+{
+	PRINT_NAME();
+	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
+	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	if (cmd == 0)
+	{
+		return 0;
+	}
+	return 0;
+}
+
 // sceAmprAprCommandBufferReadFile(cmd, a1, a2, file_id, dest, size, file_offset)
 // Reads host file bytes into guest dest and appends a fixed-size ReadFile record
 // to the command buffer stream (measure size 0x30).
@@ -528,6 +543,7 @@ LIB_DEFINE(InitAmpr_1)
 	LIB_FUNC("ULvXMDz56po", Ampr::CommandBufferClearBuffer);
 	LIB_FUNC("tZDDEo2tE5k", Ampr::CommandBufferGetSize);
 	LIB_FUNC("GnxKOHEawhk", Ampr::CommandBufferGetCurrentOffset);
+	LIB_FUNC("gzndltBEzWc", Ampr::CommandBufferGetNumCommands);
 
 	// APR / completion builders
 	LIB_FUNC("mQ16-QdKv7k", Ampr::AprCommandBufferReadFile);
