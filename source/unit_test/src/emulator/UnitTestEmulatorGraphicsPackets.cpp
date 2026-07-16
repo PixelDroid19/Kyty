@@ -2194,6 +2194,13 @@ TEST(EmulatorGraphicsPackets, EncodesCbNopAsFullType3Packet)
 	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(cmd), 4u);
 }
 
+TEST(EmulatorGraphicsPackets, DecodesCbNopBodyWithoutSideEffects)
+{
+	EXPECT_EQ(Pm4::Pm4Type3NopBodyDwords(KYTY_PM4(10, Pm4::IT_NOP, Pm4::R_ZERO)), 9u);
+	EXPECT_EQ(Pm4::Pm4Type3NopBodyDwords(KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM)), 0u);
+	EXPECT_EQ(Pm4::Pm4Type3NopBodyDwords(0u), 0u);
+}
+
 // sceAgcDcbDmaData / sceAgcAcbDmaData: encode IT_NOP + R_DMA_DATA.
 TEST(EmulatorGraphicsPackets, EncodesDcbDmaDataCustomPacket)
 {
