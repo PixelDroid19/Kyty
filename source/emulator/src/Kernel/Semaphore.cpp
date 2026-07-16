@@ -9,6 +9,8 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <unordered_map>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::LibKernel::Semaphore {
@@ -375,5 +377,230 @@ int KYTY_SYSV_ABI KernelCancelSema(KernelSema sem, int count, int* threads)
 }
 
 } // namespace Kyty::Libs::LibKernel::Semaphore
+
+// Gen5 Posix semaphore exports (libkernel Posix_v1). Guest object is 16 bytes:
+// magic, nameid, has_waiters, count, flags. Host private state tracks waiters.
+namespace Kyty::Libs::Posix {
+
+LIB_NAME("Posix", "libkernel");
+
+namespace {
+
+constexpr uint16_t kPosixSemMagic     = 0x09fa;
+constexpr int      kPosixSemValueMax  = 0x7fffffff;
+constexpr uint32_t kPosixSemPollMicro = 10000;
+
+struct PosixSemGuest
+{
+	uint16_t          magic       = 0;
+	uint16_t          nameid      = 0;
+	volatile uint32_t has_waiters = 0;
+	volatile uint32_t count       = 0;
+	uint32_t          flags       = 0;
+};
+static_assert(sizeof(PosixSemGuest) == 16);
+
+class PosixSemPrivate
+{
+public:
+	PosixSemPrivate(PosixSemGuest* guest, unsigned int value, uint32_t flags): m_guest(guest), m_count(static_cast<int>(value))
+	{
+		SyncGuest(flags);
+	}
+
+	int Wait()
+	{
+		Core::LockGuard lock(m_mutex);
+		while (m_count <= 0)
+		{
+			m_waiters++;
+			SyncGuest();
+			m_cond_var.WaitFor(&m_mutex, kPosixSemPollMicro);
+			m_waiters--;
+		}
+		m_count--;
+		SyncGuest();
+		return OK;
+	}
+
+	int TryWait()
+	{
+		Core::LockGuard lock(m_mutex);
+		if (m_count <= 0)
+		{
+			SyncGuest();
+			return POSIX_EAGAIN;
+		}
+		m_count--;
+		SyncGuest();
+		return OK;
+	}
+
+	int Post()
+	{
+		Core::LockGuard lock(m_mutex);
+		if (m_count == kPosixSemValueMax)
+		{
+			return POSIX_EOVERFLOW;
+		}
+		m_count++;
+		SyncGuest();
+		m_cond_var.Signal();
+		return OK;
+	}
+
+	int GetValue()
+	{
+		Core::LockGuard lock(m_mutex);
+		return m_count;
+	}
+
+private:
+	void SyncGuest(uint32_t flags = 0xffffffffu)
+	{
+		if (m_guest == nullptr)
+		{
+			return;
+		}
+		m_guest->magic       = kPosixSemMagic;
+		m_guest->nameid      = 0;
+		m_guest->has_waiters = (m_waiters > 0 ? 1u : 0u);
+		m_guest->count       = static_cast<uint32_t>(m_count);
+		if (flags != 0xffffffffu)
+		{
+			m_guest->flags = flags;
+		}
+	}
+
+	Core::Mutex    m_mutex;
+	Core::CondVar  m_cond_var;
+	PosixSemGuest* m_guest   = nullptr;
+	int            m_count   = 0;
+	uint32_t       m_waiters = 0;
+};
+
+Core::Mutex                                  g_posix_sem_mutex;
+std::unordered_map<PosixSemGuest*, PosixSemPrivate*> g_posix_sems;
+
+static int SetErrnoReturn(int posix_errno)
+{
+	*Posix::GetErrorAddr() = posix_errno;
+	return -1;
+}
+
+static PosixSemPrivate* LookupSem(void* sem)
+{
+	if (sem == nullptr)
+	{
+		return nullptr;
+	}
+	Core::LockGuard lock(g_posix_sem_mutex);
+	const auto      it = g_posix_sems.find(static_cast<PosixSemGuest*>(sem));
+	return (it != g_posix_sems.end() ? it->second : nullptr);
+}
+
+} // namespace
+
+int KYTY_SYSV_ABI sem_init(void* sem, int pshared, unsigned int value)
+{
+	PRINT_NAME();
+	if (sem == nullptr || value > static_cast<unsigned int>(kPosixSemValueMax))
+	{
+		return SetErrnoReturn(POSIX_EINVAL);
+	}
+
+	auto* guest = static_cast<PosixSemGuest*>(sem);
+	auto* obj   = new PosixSemPrivate(guest, value, static_cast<uint32_t>(pshared));
+	{
+		Core::LockGuard lock(g_posix_sem_mutex);
+		if (auto it = g_posix_sems.find(guest); it != g_posix_sems.end())
+		{
+			delete it->second;
+			it->second = obj;
+		}
+		else
+		{
+			g_posix_sems.insert({guest, obj});
+		}
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI sem_destroy(void* sem)
+{
+	PRINT_NAME();
+	if (sem == nullptr)
+	{
+		return SetErrnoReturn(POSIX_EINVAL);
+	}
+	auto*            guest = static_cast<PosixSemGuest*>(sem);
+	PosixSemPrivate* obj   = nullptr;
+	{
+		Core::LockGuard lock(g_posix_sem_mutex);
+		const auto      it = g_posix_sems.find(guest);
+		if (it == g_posix_sems.end())
+		{
+			return SetErrnoReturn(POSIX_EINVAL);
+		}
+		obj = it->second;
+		g_posix_sems.erase(it);
+	}
+	delete obj;
+	guest->magic       = 0;
+	guest->has_waiters = 0;
+	guest->count       = 0;
+	guest->flags       = 0;
+	return OK;
+}
+
+int KYTY_SYSV_ABI sem_wait(void* sem)
+{
+	PRINT_NAME();
+	auto* obj = LookupSem(sem);
+	if (obj == nullptr)
+	{
+		return SetErrnoReturn(POSIX_EINVAL);
+	}
+	const int rc = obj->Wait();
+	return (rc == OK ? OK : SetErrnoReturn(rc));
+}
+
+int KYTY_SYSV_ABI sem_trywait(void* sem)
+{
+	PRINT_NAME();
+	auto* obj = LookupSem(sem);
+	if (obj == nullptr)
+	{
+		return SetErrnoReturn(POSIX_EINVAL);
+	}
+	const int rc = obj->TryWait();
+	return (rc == OK ? OK : SetErrnoReturn(rc));
+}
+
+int KYTY_SYSV_ABI sem_post(void* sem)
+{
+	PRINT_NAME();
+	auto* obj = LookupSem(sem);
+	if (obj == nullptr)
+	{
+		return SetErrnoReturn(POSIX_EINVAL);
+	}
+	const int rc = obj->Post();
+	return (rc == OK ? OK : SetErrnoReturn(rc));
+}
+
+int KYTY_SYSV_ABI sem_getvalue(void* sem, int* sval)
+{
+	PRINT_NAME();
+	auto* obj = LookupSem(sem);
+	if (obj == nullptr || sval == nullptr)
+	{
+		return SetErrnoReturn(POSIX_EINVAL);
+	}
+	*sval = obj->GetValue();
+	return OK;
+}
+
+} // namespace Kyty::Libs::Posix
 
 #endif

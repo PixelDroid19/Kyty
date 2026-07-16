@@ -590,6 +590,12 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("6BpEZuDT7YI", Posix::pthread_key_delete);
 	LIB_FUNC("WrOLvHU0yQM", Posix::pthread_setspecific);
 	LIB_FUNC("0-KXaS70xy4", Posix::pthread_getspecific);
+
+	// Gen5 Posix_v1 semaphore NIDs (Astro hard-abort pDuPEf3m4fI = sem_init).
+	LIB_FUNC("pDuPEf3m4fI", Posix::sem_init);
+	LIB_FUNC("cDW233RAwWo", Posix::sem_destroy);
+	LIB_FUNC("YCV5dGGBcCo", Posix::sem_wait);
+	LIB_FUNC("IKP8typ0QUk", Posix::sem_post);
 }
 
 } // namespace Posix
