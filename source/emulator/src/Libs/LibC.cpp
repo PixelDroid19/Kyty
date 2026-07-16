@@ -651,13 +651,15 @@ void* KYTY_SYSV_ABI LibcMspaceCreate(const char* name, void* base, size_t capaci
 {
 	PRINT_NAME();
 
-	printf("\t name     = %s\n", name);
+	// Gen5 heap paths may omit a name; treat null as empty diagnostic tag.
+	const char* mspace_name = (name != nullptr ? name : "");
+
+	printf("\t name     = %s\n", mspace_name);
 	printf("\t base     = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
 	printf("\t capacity = %016" PRIx64 "\n", capacity);
 	printf("\t flag     = %u\n", flag);
 
 	EXIT_NOT_IMPLEMENTED(flag != 0 && flag != 1);
-	EXIT_NOT_IMPLEMENTED(name == nullptr);
 	EXIT_NOT_IMPLEMENTED(base == nullptr);
 	EXIT_NOT_IMPLEMENTED(capacity == 0);
 
@@ -668,7 +670,7 @@ void* KYTY_SYSV_ABI LibcMspaceCreate(const char* name, void* base, size_t capaci
 		thread_safe = false;
 	}
 
-	auto* msp = Core::MSpaceCreate(name, base, capacity, thread_safe, nullptr);
+	auto* msp = Core::MSpaceCreate(mspace_name, base, capacity, thread_safe, nullptr);
 
 	EXIT_NOT_IMPLEMENTED(msp == nullptr);
 
@@ -710,6 +712,24 @@ void* KYTY_SYSV_ABI LibcMspaceMemalign(void* msp, size_t align, size_t size)
 	return Core::MSpaceMemalign(msp, align, size);
 }
 
+// Gen5 sceLibcMspaceMallocStatsFast — NID k04jLXu3+Ic. Fill a guest stats
+// block with zeros when the mspace exists; titles probe capacity without
+// requiring accurate host allocator counters yet.
+int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
+{
+	PRINT_NAME();
+	printf("\t msp   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(msp));
+	printf("\t stats = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(stats));
+	if (msp == nullptr || stats == nullptr)
+	{
+		return -1;
+	}
+	// Observed guest block is at least 0x30 bytes of counters; zero a full page
+	// fragment-safe 0x40 region used by the post-heap probe path.
+	std::memset(stats, 0, 0x40);
+	return 0;
+}
+
 void KYTY_SYSV_ABI LibcMspaceFree(void* msp, void* ptr)
 {
 	PRINT_NAME();
@@ -742,6 +762,7 @@ LIB_DEFINE(InitLibcInternal_1)
 	LIB_FUNC("OJjm-QOIHlI", LibcInternal::LibcMspaceMalloc);
 	LIB_FUNC("iF1iQHzxBJU", LibcInternal::LibcMspaceMemalign);
 	LIB_FUNC("Vla-Z+eXlxo", LibcInternal::LibcMspaceFree);
+	LIB_FUNC("k04jLXu3+Ic", LibcInternal::LibcMspaceMallocStatsFast);
 }
 
 } // namespace LibcInternal
