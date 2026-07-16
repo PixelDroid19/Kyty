@@ -57,8 +57,18 @@ KYTY_SYSV_ABI int  VideoOutRegisterBuffers2(int handle, int set_index, int buffe
                                             int buffer_num, const VideoOutBufferAttribute2* attribute, int category, void* option);
 KYTY_SYSV_ABI int  VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg);
 KYTY_SYSV_ABI int  VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status);
+// Returns flipPendingNum for Gen5 waiters (NID zgXifHT9ErY).
+KYTY_SYSV_ABI int  VideoOutIsFlipPending(int handle);
 KYTY_SYSV_ABI int  VideoOutGetVblankStatus(int handle, VideoOutVblankStatus* status);
 KYTY_SYSV_ABI int  VideoOutSetWindowModeMargins(int handle, int top, int bottom);
+// Gen5 color / output status (success HLE; no fabricated display modes).
+struct VideoOutOutputStatus;
+struct VideoOutColorSettings;
+KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* status);
+KYTY_SYSV_ABI int VideoOutColorSettingsSetGamma(VideoOutColorSettings* settings, float gamma);
+KYTY_SYSV_ABI int VideoOutAdjustColor(int handle, const VideoOutColorSettings* settings);
+// Accept after buffers registered; attribute change is host-side no-op.
+KYTY_SYSV_ABI int VideoOutSubmitChangeBufferAttribute2(int handle, int set_index, const VideoOutBufferAttribute2* attribute);
 
 void VideoOutBeginVblank();
 void VideoOutEndVblank();
