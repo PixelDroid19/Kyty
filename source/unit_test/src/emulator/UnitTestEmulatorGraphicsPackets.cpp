@@ -1957,7 +1957,14 @@ TEST(EmulatorGraphicsPackets, CompressedMrtExportReadsPackedHalfFromUintShadow)
 
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 
-	EXPECT_NE(source.FindIndex("PackHalf2x16"), Core::STRING8_INVALID_INDEX);
+	// VCvtPkrtzF16F32 implements the ISA's binary16 round-toward-zero
+	// conversion in integer bits. GLSL PackHalf2x16 rounds to nearest-even and
+	// therefore cannot represent this instruction's contract.
+	EXPECT_EQ(source.FindIndex("PackHalf2x16"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk0_bits_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk1_bits_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk0_subnormal_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk0_max_finite_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("UnpackHalf2x16"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%t1_2 = OpLoad %float %v4"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%t6_2 = OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
@@ -2192,6 +2199,13 @@ TEST(EmulatorGraphicsPackets, EncodesCbNopAsFullType3Packet)
 	EXPECT_EQ(cmd[3], 0u);
 	EXPECT_EQ(Gen5::GraphicsCbNop(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1), nullptr);
 	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(cmd), 4u);
+}
+
+TEST(EmulatorGraphicsPackets, DecodesCbNopBodyWithoutSideEffects)
+{
+	EXPECT_EQ(Pm4::Pm4Type3NopBodyDwords(KYTY_PM4(10, Pm4::IT_NOP, Pm4::R_ZERO)), 9u);
+	EXPECT_EQ(Pm4::Pm4Type3NopBodyDwords(KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM)), 0u);
+	EXPECT_EQ(Pm4::Pm4Type3NopBodyDwords(0u), 0u);
 }
 
 // sceAgcDcbDmaData / sceAgcAcbDmaData: encode IT_NOP + R_DMA_DATA.

@@ -485,7 +485,7 @@ VideoOutBufferImageInfo VideoOutContext::FindImage(const void* buffer)
 		{
 			for (const auto& set: ctx.buffers_sets)
 			{
-				for (int j = set.start_index; j < set.num; j++)
+				for (int j = set.start_index; j < set.start_index + set.num; j++)
 				{
 					if (ctx.buffers[j].buffer == buffer)
 					{
