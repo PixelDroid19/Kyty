@@ -1086,8 +1086,13 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 	// allocation path: 0x40/0x80/0xC0 select AMPR read, write, or read-write,
 	// while 0x02 keeps the CPU mapping writable. GpuMemoryMode is Kyty's
 	// normalized access-direction representation for the same range tracking.
+	// prot=0 is a full NoAccess demotion (observed on Astro after Posix sems).
 	switch (prot)
 	{
+		case 0x0:
+			*mode     = VirtualMemory::Mode::NoAccess;
+			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			return true;
 		case 0x11:
 			*mode     = VirtualMemory::Mode::Read;
 			*gpu_mode = Graphics::GpuMemoryMode::Read;
