@@ -96,6 +96,17 @@ static KYTY_SYSV_ABI int UserServiceGetUserName(int user_id, char* name, size_t 
 	return OK;
 }
 
+// sceUserServicePlatformPrivacyWs1* — NID D-CzAxQL0XI (UserServicePlatformPrivacyWs1_v1).
+// Observed Astro after font glyph blit; accept any args and return OK so boot continues.
+static KYTY_SYSV_ABI int UserServicePlatformPrivacyWs1Stub(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                           uint64_t a4, uint64_t a5)
+{
+	PRINT_NAME();
+	printf("\t a0=0x%016" PRIx64 " a1=0x%016" PRIx64 " a2=0x%016" PRIx64 "\n", a0, a1, a2);
+	printf("\t a3=0x%016" PRIx64 " a4=0x%016" PRIx64 " a5=0x%016" PRIx64 "\n", a3, a4, a5);
+	return OK;
+}
+
 } // namespace UserService
 
 LIB_DEFINE(InitUserService_1)
@@ -105,6 +116,8 @@ LIB_DEFINE(InitUserService_1)
 	LIB_FUNC("yH17Q6NWtVg", UserService::UserServiceGetEvent);
 	LIB_FUNC("fPhymKNvK-A", UserService::UserServiceGetLoginUserIdList);
 	LIB_FUNC("1xxcMiGu2fo", UserService::UserServiceGetUserName);
+	// Gen5 privacy Ws1 entry used on Astro after font setup.
+	LIB_FUNC("D-CzAxQL0XI", UserService::UserServicePlatformPrivacyWs1Stub);
 }
 
 } // namespace Kyty::Libs
