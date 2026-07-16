@@ -21,6 +21,8 @@ no socket).
 ```bash
 kyty_agent --sock /tmp/kyty-agent.sock doctor
 kyty_agent --sock /tmp/kyty-agent.sock status
+kyty_agent --sock /tmp/kyty-agent.sock sync-waits
+kyty_agent --sock /tmp/kyty-agent.sock threads
 kyty_agent --sock /tmp/kyty-agent.sock wait-present --min 10 --timeout-ms 60000
 kyty_agent --sock /tmp/kyty-agent.sock capture
 kyty_agent --sock /tmp/kyty-agent.sock score
@@ -42,6 +44,8 @@ Stdout is one JSON object per call. Exit `0` on success, `1` on tool failure or
 | `help` / `ping` / `doctor` | Discoverability and liveness |
 | `status` / `diagnostics` | Frame/present/FPS, `ms_since_present`/`ms_since_frame`, pad overlay, diagnostic flags |
 | `events` / `last_error` / `wait_event` | Bounded structured event ring |
+| `sync-waits` | Passive snapshot of opt-in blocked pthread condition waits (`KYTY_SLOT_TRACE=1`) |
+| `threads` | Passive snapshot of guest pthread lifecycle state |
 | `capture` | Native VideoOut readback on next present; scores the BMP by default (`score:false` / `--no-score` to skip) |
 | `score` | Classify last capture (or `--path ABS.bmp`) with coarse frame heuristics |
 | `pad_down` / `pad_up` / `pad_tap` / `pad_axis` / `pad_clear` | Diagnostic pad overlay. `pad_tap` schedules release→press→release across **three** `PadReadState` samples (not host sleep). |

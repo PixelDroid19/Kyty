@@ -43,6 +43,37 @@ TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(address, 0), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
+TEST(EmulatorKernelMemory, DirectMemorySizeTracksGuestGeneration)
+{
+	EnsureMemorySubsystemInitialized();
+
+	Config::SetNextGen(false);
+	EXPECT_EQ(KernelGetDirectMemorySize(), static_cast<size_t>(5376) * 1024 * 1024);
+
+	Config::SetNextGen(true);
+	EXPECT_EQ(KernelGetDirectMemorySize(), static_cast<size_t>(16) * 1024 * 1024 * 1024);
+
+	Config::SetNextGen(false);
+}
+
+TEST(EmulatorKernelMemory, DirectMemoryAllocationFindsAFreeEarlierRange)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t  kSize      = 0x10000;
+	constexpr int64_t kLowerBase = 0x08000000;
+	constexpr int64_t kUpperBase = 0x10000000;
+	int64_t           upper_addr = 0;
+	int64_t           lower_addr = 0;
+
+	ASSERT_EQ(KernelAllocateDirectMemory(kUpperBase, kUpperBase + kSize, kSize, kSize, 12, &upper_addr), OK);
+	ASSERT_EQ(upper_addr, kUpperBase);
+	ASSERT_EQ(KernelAllocateDirectMemory(kLowerBase, kLowerBase + kSize, kSize, kSize, 12, &lower_addr), OK);
+	EXPECT_EQ(lower_addr, kLowerBase);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(lower_addr, kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(upper_addr, kSize), OK);
+}
+
 TEST(EmulatorKernelMemory, ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap)
 {
 	EnsureMemorySubsystemInitialized();
@@ -144,6 +175,27 @@ TEST(EmulatorKernelMemory, ReusedDirectMemoryKeepsVirtualAliasesCoherent)
 	EXPECT_EQ(static_cast<uint8_t*>(remapped_at_first_address)[2], 0x7e);
 	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(remapped_at_first_address), kSize), OK);
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
+}
+
+TEST(EmulatorKernelMemory, FixedDirectMemoryRemapsFreedReadWriteView)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t  kSize        = 0x10000;
+	constexpr int64_t kSearchStart = 0x01800000;
+	int64_t           physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kSearchStart, kSearchStart + kSize, kSize, kSize, 12, &physical_address), OK);
+
+	void* first_mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&first_mapping, kSize, 0x02, 0, physical_address, kSize), OK);
+	ASSERT_NE(first_mapping, nullptr);
+	ASSERT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(first_mapping), kSize), OK);
+
+	void* remapped = first_mapping;
+	ASSERT_EQ(KernelMapDirectMemory(&remapped, kSize, 0x02, 0x10, physical_address, kSize), OK);
+	EXPECT_EQ(remapped, first_mapping);
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(remapped), kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
 }
 
 // Covers the explicit Gen5 protection family observed in one allocation path.
@@ -392,6 +444,69 @@ TEST(EmulatorKernelMemory, ResolvesAmprResidualBootNids)
 		query.type                 = Loader::SymbolType::Func;
 		EXPECT_NE(symbols.Find(query), nullptr) << nid;
 	}
+}
+
+TEST(EmulatorKernelMemory, ResolvesLibcSincosfWithFloatResults)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"pztV4AF18iI";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* record         = symbols.Find(query);
+	ASSERT_NE(record, nullptr);
+
+	using sincosf_fn_t = void (*)(float, float*, float*);
+	float sine          = 0.0f;
+	float cosine        = 0.0f;
+	reinterpret_cast<sincosf_fn_t>(static_cast<uintptr_t>(record->vaddr))(0.0f, &sine, &cosine);
+	EXPECT_FLOAT_EQ(sine, 0.0f);
+	EXPECT_FLOAT_EQ(cosine, 1.0f);
+}
+
+TEST(EmulatorKernelMemory, ResolvesLibcExpfWithFloatResult)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"8zsu04XNsZ4";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* record         = symbols.Find(query);
+	ASSERT_NE(record, nullptr);
+
+	using expf_fn_t = float (*)(float);
+	EXPECT_FLOAT_EQ(reinterpret_cast<expf_fn_t>(static_cast<uintptr_t>(record->vaddr))(0.0f), 1.0f);
+}
+
+TEST(EmulatorKernelMemory, CondWaitDiagnosticsStayInactiveWithoutOptIn)
+{
+	LibKernel::PthreadCondWaitDiagnostics diagnostics {};
+	EXPECT_FALSE(LibKernel::PthreadGetCondWaitDiagnostics(&diagnostics));
+	EXPECT_FALSE(diagnostics.enabled);
+	EXPECT_EQ(diagnostics.blocked_count, 0u);
+	EXPECT_EQ(diagnostics.blocked[0].signal_count, 0u);
+}
+
+TEST(EmulatorKernelMemory, ThreadDiagnosticsAreUnavailableWithoutPthreadContext)
+{
+	LibKernel::PthreadThreadDiagnostics diagnostics {};
+
+	EXPECT_FALSE(LibKernel::PthreadGetThreadDiagnostics(&diagnostics));
+	EXPECT_FALSE(diagnostics.available);
+	EXPECT_EQ(diagnostics.allocated_count, 0u);
+	EXPECT_EQ(diagnostics.thread_count, 0u);
 }
 
 // Live EventFlag registry: Wait/Set/Delete on garbage handles must return

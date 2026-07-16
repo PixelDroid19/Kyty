@@ -655,6 +655,7 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("6UgtwV+0zb4", LibKernel::PthreadCreate);
 	LIB_FUNC("3PtV6p3QNX4", LibKernel::PthreadEqual);
 	LIB_FUNC("onNY9Byn-W8", LibKernel::PthreadJoin);
+	LIB_FUNC("3kg7rT0NQIs", LibKernel::PthreadExit);
 	LIB_FUNC("4qGrR6eoP9Y", LibKernel::PthreadDetach);
 	LIB_FUNC("How7B8Oet6k", LibKernel::PthreadGetname);
 	LIB_FUNC("bt3CTBKmGyI", LibKernel::PthreadSetaffinity);

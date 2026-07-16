@@ -234,6 +234,21 @@ TEST(EmulatorGraphicsState, ResolvesViewportDepthForClipSpaceAndHostLimits)
 	EXPECT_FLOAT_EQ(dx.max_depth, 1.0f);
 }
 
+TEST(EmulatorGraphicsState, ResolvesViewportXyFromScaleAndOffset)
+{
+	const auto xy = State::ResolveViewportXy(640.0f, 640.0f, 360.0f, 360.0f);
+	EXPECT_FLOAT_EQ(xy.x, 0.0f);
+	EXPECT_FLOAT_EQ(xy.y, 0.0f);
+	EXPECT_FLOAT_EQ(xy.width, 1280.0f);
+	EXPECT_FLOAT_EQ(xy.height, 720.0f);
+
+	const auto xy2 = State::ResolveViewportXy(100.0f, 250.0f, 50.0f, 150.0f);
+	EXPECT_FLOAT_EQ(xy2.x, 150.0f);
+	EXPECT_FLOAT_EQ(xy2.y, 100.0f);
+	EXPECT_FLOAT_EQ(xy2.width, 200.0f);
+	EXPECT_FLOAT_EQ(xy2.height, 100.0f);
+}
+
 TEST(EmulatorGraphicsState, SeparatesHtileMetaClearFromRegisterDepthClear)
 {
 	// Captured world path: register DEPTH_CLEAR_ENABLE=0, HTILE meta clear=1.
@@ -395,6 +410,38 @@ TEST(EmulatorGraphicsState, ReversesGpuMemoryOverlapRelations)
 	EXPECT_EQ(GpuMemoryReverseOverlap(GpuMemoryOverlapType::Contains), GpuMemoryOverlapType::IsContainedWithin);
 	EXPECT_EQ(GpuMemoryReverseOverlap(GpuMemoryOverlapType::IsContainedWithin), GpuMemoryOverlapType::Contains);
 	EXPECT_EQ(GpuMemoryReverseOverlap(GpuMemoryOverlapType::None), GpuMemoryOverlapType::None);
+}
+
+// Non-exact FindRenderTexture: IsContainedWithin always; Contains only with
+// same-base (size-mismatch Equals miss). Unconditional Contains soft-locked
+// loading via multi-parent Size()>1. Offset-into-parent stays rejected until
+// cropped views exist. Crosses rejected (wrong-sized bind).
+TEST(EmulatorGraphicsState, FindObjectsNonExactAcceptsContainedSampleInRenderTarget)
+{
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Equals, true));
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Equals, false));
+	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, true));
+	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::IsContainedWithin, true));
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::IsContainedWithin, false));
+	// Same-base Contains: sample and RT share start address (size mismatch only).
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, false, true));
+	// Offset-into-parent Contains still deferred (would multi-match / need crop).
+	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, false, false));
+	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, false));
+	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Crosses, false));
+	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::None, false));
+}
+
+TEST(EmulatorGraphicsState, PreferGpuMemoryAliasPicksTightestCover)
+{
+	const uint64_t sizes[] = {0x60000ull, 0x140000ull, 0xa0000ull};
+	// Sample fits in 0xa0000 and 0x140000; prefer the smaller cover.
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(sizes, 3, 0xa0000ull), 2u);
+	// Sample larger than every object: prefer the largest under-sample RT.
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(sizes, 3, 0x200000ull), 1u);
+	// Comparable size proxy only: prefer the smallest object.
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(sizes, 3, 0ull), 0u);
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(sizes, 1, 0x100ull), 0u);
 }
 
 TEST(EmulatorGraphicsState, AllowsOnlyObservedTextureStorageAliases)
@@ -670,15 +717,15 @@ TEST(EmulatorGraphicsState, DepthStencilReclaimParentsAreSurfaces)
 TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearOnUndefinedFirstUse)
 {
 	using namespace Kyty::Libs::Graphics;
-	// Non-float formats with zero CLEAR_WORDs and no fast-clear keep the legacy
-	// opaque-black default until those paths are re-characterized from capture.
+	// Mesa/RADV R8G8B8A8: CLEAR_WORD0/1=0 packs to transparent black (A=0).
+	// Inventing opaque A=1 made sprite-layer intermediates composite as black quads.
 	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, false, 0u, 0u, VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
 	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
 	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
 	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
 	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_a, 1.0f);
+	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
 }
 
 TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsFloatZeroWordsClearToZeroAlpha)
@@ -721,6 +768,19 @@ TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearWhenRebindingAfterSample)
 	EXPECT_EQ(load_ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
 }
 
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsRgba8RebindClearsTransparent)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Captured GBuffer/sprite RTs: fmt=10, CLEAR_WORD=0, fast=0, sampled then rebound.
+	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false, 0u, 0u, VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
+}
+
 TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesRgba8GuestClearWords)
 {
 	using namespace Kyty::Libs::Graphics;
@@ -733,6 +793,22 @@ TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesRgba8GuestClearWords)
 	EXPECT_NEAR(ops.clear_g, 64.0f / 255.0f, 1e-5);
 	EXPECT_NEAR(ops.clear_b, 128.0f / 255.0f, 1e-5);
 	EXPECT_NEAR(ops.clear_a, 1.0f, 1e-5);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentClearValuesDoNotChangeRenderPassCompatibility)
+{
+	using namespace Kyty::Libs::Graphics;
+	// VkClearValue is supplied at BeginRenderPass. Two clears on the same image
+	// therefore require the same render-pass compatibility while preserving their
+	// distinct per-pass colors; keying framebuffer/pipeline caches by these values
+	// recompiles Metal pipelines every frame.
+	auto first = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, 0xff0000ffu, 0u, VK_FORMAT_R8G8B8A8_UNORM);
+	auto next  = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, 0xffff0000u, 0u, VK_FORMAT_R8G8B8A8_UNORM);
+
+	EXPECT_EQ(first.load_op, next.load_op);
+	EXPECT_EQ(first.initial_layout, next.initial_layout);
+	EXPECT_NE(first.clear_r, next.clear_r);
+	EXPECT_NE(first.clear_b, next.clear_b);
 }
 
 TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesRgba16FloatGuestClearWords)
@@ -799,6 +875,49 @@ TEST(EmulatorGraphicsState, MemcpySkipAbsoluteRangesPreservesFenceHoles)
 	{
 		EXPECT_EQ(dst[i], static_cast<uint8_t>(0x10 + i));
 	}
+}
+
+// OnlyFlip → ActiveDeleted must be force-completed with Active after BufferFlush.
+// Skipping ActiveDeleted left VideoOutSubmitFlip on vkGetEventStatus (empty Flip
+// queue; guest ThreadFlag bit 0x1 And+ClearBits soft-lock around present 2400).
+TEST(EmulatorGraphicsState, LabelForceCompleteFiresActiveDeletedOnlyFlip)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_EQ(LabelForceCompleteActionFor(true, false), LabelForceCompleteKind::FireKeep);
+	EXPECT_EQ(LabelForceCompleteActionFor(false, true), LabelForceCompleteKind::FireDestroy);
+	EXPECT_EQ(LabelForceCompleteActionFor(false, false), LabelForceCompleteKind::Skip);
+	EXPECT_EQ(LabelForceCompleteActionFor(true, true), LabelForceCompleteKind::FireKeep);
+}
+
+// Label⊂StorageBuffer must stay linked so WriteBack holes preserve EOP fences.
+// Deleting Labels let StorageBuffer WriteBack zero guest fences → EVENTFLAG_SET=0.
+TEST(EmulatorGraphicsState, GpuMemoryKeepsLabelWriteBackHoleUnderStorageBuffer)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::IsContainedWithin,
+	                                            GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::Equals,
+	                                            GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::Crosses,
+	                                            GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
+	                                            GpuMemoryObjectType::Label));
+	EXPECT_FALSE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::IsContainedWithin,
+	                                             GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                             GpuMemoryObjectType::StorageBuffer));
+}
+
+// SubmitAndFlip without an embedded R_FLIP/0x777 must still flip after BufferFlush.
+// Detect SubmitAndFlip via an explicit batch flag — not flip.handle != 0 (handle 0
+// is legal, and plain Submit also zeroes the flip fields).
+TEST(EmulatorGraphicsState, GraphicsBatchNeedsApiFlipWhenDcbOmitsFlip)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(GraphicsBatchNeedsApiFlip(true, false));
+	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(true, true));
+	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(false, false));
+	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(false, true));
 }
 
 // Host presentation: default swapchain selection must stay LDR sRGB even when a
@@ -922,11 +1041,12 @@ TEST(EmulatorGraphicsState, MatchesOnlyExactHtileStorageRange)
 TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
 {
 	using namespace Kyty::Libs::Graphics::State;
+	// Third arg is "live RT alias found" (Equals, or non-exact Contains /
+	// IsContainedWithin from FindRenderTexture).
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, true), Gen5SampleBacking::ExactRenderTarget);
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(14, 27, false), Gen5SampleBacking::Unsupported);
 	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, false), Gen5SampleBacking::Unsupported);
-	// Format 71 (RGBA16F) is only legal when PrepareTextures finds an exact live RT alias.
 	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, true), Gen5SampleBacking::ExactRenderTarget);
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 0, false), Gen5SampleBacking::GuestMemoryTexture);
 }

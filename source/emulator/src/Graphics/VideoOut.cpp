@@ -19,6 +19,11 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Profiler.h"
 
+#include <atomic>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -30,6 +35,16 @@ namespace Kyty::Libs::VideoOut {
 LIB_NAME("VideoOut", "VideoOut");
 
 namespace EventQueue = LibKernel::EventQueue;
+
+namespace {
+
+bool EopTraceEnabled()
+{
+	static const bool enabled = (std::getenv("KYTY_EOP_TRACE") != nullptr);
+	return enabled;
+}
+
+} // namespace
 
 constexpr int VIDEO_OUT_EVENT_FLIP             = 0;
 constexpr int VIDEO_OUT_EVENT_VBLANK           = 1;
@@ -529,6 +544,59 @@ bool FlipQueue::Flip(uint32_t micros)
 	m_mutex.Lock();
 	if (m_requests.Size() == 0)
 	{
+		// Soft-lock: Flip queue empty while presents already near the cliff.
+		// Dump slot table here (guest is not in Nanosleep on the setjmp wait path).
+		if (std::getenv("KYTY_SLOT_TRACE") != nullptr)
+		{
+			Graphics::WindowPresentStats stats {};
+			if (Graphics::WindowGetPresentStats(&stats) && stats.present >= 2200ull && stats.ms_since_present >= 2000ull)
+			{
+				static std::atomic<uint32_t> flip_idle_dumps {0};
+				const uint32_t               n = flip_idle_dumps.fetch_add(1);
+				if (n < 4u)
+				{
+					constexpr uint64_t kSlotTable  = 0x901c434c8ull;
+					constexpr uint64_t kSlotStride = 0x20ull;
+					std::fprintf(stderr, "SLOT_FLIP_IDLE n=%u present=%llu ms_p=%llu\n", n,
+					             static_cast<unsigned long long>(stats.present),
+					             static_cast<unsigned long long>(stats.ms_since_present));
+					for (uint32_t i = 0; i <= 15; i++)
+					{
+						const auto*    entry = reinterpret_cast<const volatile uint64_t*>(kSlotTable + i * kSlotStride);
+						const uint64_t typ   = entry[0];
+						const uint64_t obj   = entry[1];
+						uint32_t       s0    = 0;
+						uint32_t       s1    = 0;
+						uint64_t       fn    = 0;
+						uint64_t       shared = 0;
+						if (obj >= 0x900000000ull && obj < 0x940000000ull)
+						{
+							const auto* o = reinterpret_cast<const volatile uint32_t*>(obj);
+							s0            = o[0];
+							s1            = o[1];
+							fn            = *reinterpret_cast<const volatile uint64_t*>(obj + 0x10);
+							shared        = *reinterpret_cast<const volatile uint64_t*>(obj + 0x18);
+						}
+						std::fprintf(stderr,
+						             "SLOT[%u] typ=0x%" PRIx64 " obj=0x%016" PRIx64 " state=%u/%u fn=0x%016" PRIx64
+						             " shared=0x%016" PRIx64 "%s\n",
+						             i, typ, obj, s0, s1, fn, shared, (i >= 8 && i <= 11) ? " *" : "");
+					}
+					// Shared mailbox referenced by slot objs +0x18 (Dead Cells job type).
+					constexpr uint64_t kMailbox = 0x901c02768ull;
+					const auto*        mb       = reinterpret_cast<const volatile uint64_t*>(kMailbox);
+					std::fprintf(stderr, "MAILBOX 0x%016" PRIx64 ":", kMailbox);
+					for (uint32_t i = 0; i < 16; i++)
+					{
+						std::fprintf(stderr, " [%u]=0x%016" PRIx64, i, static_cast<uint64_t>(mb[i]));
+					}
+					std::fprintf(stderr, "\n");
+					LibKernel::SlotTraceDumpBlockedCondWaiters();
+					std::fflush(stderr);
+				}
+			}
+		}
+
 		m_submit_cond_var.WaitFor(&m_mutex, micros);
 
 		if (m_requests.Size() == 0)
@@ -548,6 +616,7 @@ bool FlipQueue::Flip(uint32_t micros)
 	m_mutex.Lock();
 
 	r.cfg->mutex.Lock();
+	uint32_t flip_triggered = 0;
 	for (auto& flip_eq: r.cfg->flip_eqs)
 	{
 		if (flip_eq != nullptr)
@@ -555,6 +624,16 @@ bool FlipQueue::Flip(uint32_t micros)
 			auto result = EventQueue::KernelTriggerEvent(flip_eq, VIDEO_OUT_EVENT_FLIP, EventQueue::KERNEL_EVFILT_VIDEO_OUT,
 			                                             reinterpret_cast<void*>(r.flip_arg));
 			EXIT_NOT_IMPLEMENTED(result != OK);
+			flip_triggered++;
+		}
+	}
+	if (EopTraceEnabled())
+	{
+		static std::atomic<uint32_t> flip_logs {0};
+		const uint32_t               n = flip_logs.fetch_add(1);
+		if (n < 32u)
+		{
+			std::fprintf(stderr, "FLIP_TRIGGER index=%d arg=%" PRId64 " eqs=%u\n", r.index, r.flip_arg, flip_triggered);
 		}
 	}
 	r.cfg->mutex.Unlock();
@@ -830,8 +909,14 @@ KYTY_SYSV_ABI int VideoOutAddFlipEvent(EventQueue::KernelEqueue eq, int handle, 
 	int result = EventQueue::KernelAddEvent(eq, event);
 
 	ctx->flip_eqs.Add(eq);
+	const unsigned flip_eq_count = static_cast<unsigned>(ctx->flip_eqs.Size());
 
 	ctx->mutex.Unlock();
+
+	if (EopTraceEnabled())
+	{
+		std::fprintf(stderr, "FLIP_ADD handle=%d eq=%p count=%u\n", handle, static_cast<void*>(eq), flip_eq_count);
+	}
 
 	return result;
 }

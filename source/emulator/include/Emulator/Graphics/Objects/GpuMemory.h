@@ -72,6 +72,87 @@ inline GpuMemoryOverlapType GpuMemoryReverseOverlap(GpuMemoryOverlapType relatio
 	return GpuMemoryOverlapType::None;
 }
 
+// Non-exact FindObjects relations for sample→RT aliasing.
+// GetOverlapType(existing, query):
+//   IsContainedWithin = existing RT sits inside the sample query
+//   Contains          = sample sits inside an existing live RT
+// Unconditional Contains matched multiple overlapping parent RTs and tripped
+// FindRenderTexture's Size()>1 EXIT (loading soft-lock). Accept Contains only
+// with same_base (identical start address, sample size ≤ RT size) — the
+// size-mismatch Equals miss — so one GPU image aliases without parent thrash.
+// Offset-into-parent cropped views remain a separate contract. Crosses rejected.
+inline bool GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType relation, bool exact, bool same_base = false)
+{
+	if (relation == GpuMemoryOverlapType::Equals)
+	{
+		return true;
+	}
+	if (exact)
+	{
+		return false;
+	}
+	if (relation == GpuMemoryOverlapType::IsContainedWithin)
+	{
+		return true;
+	}
+	return relation == GpuMemoryOverlapType::Contains && same_base;
+}
+
+// When non-exact FindRenderTexture returns multiple overlapping GPU images for
+// one sample bind, prefer the tightest cover: smallest object_size that still
+// covers sample_size. If every object is smaller than the sample
+// (IsContainedWithin-only set), prefer the largest object under the sample.
+// sample_size == 0 means "prefer the smallest object" (tightest alias when the
+// caller only has a comparable size proxy such as pixel area).
+// Inventing a new GPU image or falling through to guest-memory upload here
+// previously painted opaque-black props; aborting on Size()>1 killed boot.
+[[nodiscard]] inline size_t PreferGpuMemoryAliasIndex(const uint64_t* object_sizes, size_t count, uint64_t sample_size)
+{
+	if (object_sizes == nullptr || count == 0)
+	{
+		return 0;
+	}
+	if (sample_size == 0)
+	{
+		size_t best = 0;
+		for (size_t i = 1; i < count; i++)
+		{
+			if (object_sizes[i] < object_sizes[best])
+			{
+				best = i;
+			}
+		}
+		return best;
+	}
+	size_t best_cover = 0;
+	bool   have_cover = false;
+	for (size_t i = 0; i < count; i++)
+	{
+		if (object_sizes[i] < sample_size)
+		{
+			continue;
+		}
+		if (!have_cover || object_sizes[i] < object_sizes[best_cover])
+		{
+			best_cover = i;
+			have_cover = true;
+		}
+	}
+	if (have_cover)
+	{
+		return best_cover;
+	}
+	size_t best = 0;
+	for (size_t i = 1; i < count; i++)
+	{
+		if (object_sizes[i] > object_sizes[best])
+		{
+			best = i;
+		}
+	}
+	return best;
+}
+
 // A texture-backed storage view is a distinct GPU object that may share the
 // same allocation. Keep this policy explicit: only the relations observed in
 // the Gen5 resource stream are accepted, while other containment directions
@@ -280,6 +361,30 @@ inline bool GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType existing_type
 	}
 	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
 	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
+}
+
+// Keep GpuMemory Label objects linked when a StorageBuffer aliases their fence
+// words. Deleting Labels removes them from LabelWriteBackCopy's hole set, so a
+// later StorageBuffer WriteBack can zero guest EOP fences (immediate store /
+// FireCallbacks publish) and leave CPU code spinning with val=0 — guest then
+// never reaches KernelSetEventFlag(ThreadFlag). Captured Dead Cells soft-lock:
+// EVENTFLAG_SET=0 while OnlyFlip still presents.
+inline bool GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                           GpuMemoryObjectType incoming_type)
+{
+	if (existing_type == GpuMemoryObjectType::Label && incoming_type == GpuMemoryObjectType::StorageBuffer)
+	{
+		return relation == GpuMemoryOverlapType::IsContainedWithin || relation == GpuMemoryOverlapType::Equals ||
+		       relation == GpuMemoryOverlapType::Crosses;
+	}
+	// Creating a Label inside an existing StorageBuffer: link both so the Label
+	// stays registered for WriteBack holes (do not reclaim the StorageBuffer).
+	if (existing_type == GpuMemoryObjectType::StorageBuffer && incoming_type == GpuMemoryObjectType::Label)
+	{
+		return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals ||
+		       relation == GpuMemoryOverlapType::Crosses;
+	}
+	return false;
 }
 
 // WriteBack (GPU -> CPU) hash bookkeeping for aliased objects.

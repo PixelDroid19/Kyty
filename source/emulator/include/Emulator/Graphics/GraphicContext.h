@@ -88,6 +88,7 @@ struct GraphicContext
 	VkDebugUtilsMessengerEXT debug_messenger = nullptr;
 	VkPhysicalDevice         physical_device = nullptr;
 	VkDevice                 device          = nullptr;
+	VkPipelineCache          pipeline_cache   = nullptr;
 	VulkanQueueInfo          queues[QUEUES_NUM];
 
 	// VK_EXT_color_write_enable is unavailable on some drivers (notably MoltenVK

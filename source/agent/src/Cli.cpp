@@ -36,6 +36,8 @@ void PrintUsage()
 	             "  kyty_agent --sock ABS_PATH ping\n"
 	             "  kyty_agent --sock ABS_PATH status\n"
 	             "  kyty_agent --sock ABS_PATH diagnostics\n"
+	             "  kyty_agent --sock ABS_PATH sync-waits\n"
+	             "  kyty_agent --sock ABS_PATH threads\n"
 	             "  kyty_agent --sock ABS_PATH events [--last N] [--after-seq N]\n"
 	             "  kyty_agent --sock ABS_PATH last-error\n"
 	             "  kyty_agent --sock ABS_PATH capture [--timeout-ms N] [--no-score]\n"
@@ -279,6 +281,14 @@ int Main(int argc, char** argv)
 	if (std::strcmp(cmd, "diagnostics") == 0)
 	{
 		return Call(sock, "{\"id\":1,\"tool\":\"diagnostics\",\"args\":{}}");
+	}
+	if (std::strcmp(cmd, "sync-waits") == 0)
+	{
+		return Call(sock, "{\"id\":1,\"tool\":\"sync_waits\",\"args\":{}}");
+	}
+	if (std::strcmp(cmd, "threads") == 0)
+	{
+		return Call(sock, "{\"id\":1,\"tool\":\"threads\",\"args\":{}}");
 	}
 	if (std::strcmp(cmd, "last-error") == 0)
 	{

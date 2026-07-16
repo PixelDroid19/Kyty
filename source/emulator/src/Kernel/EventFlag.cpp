@@ -9,6 +9,9 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <unordered_set>
 
 #ifdef KYTY_EMU_ENABLED
@@ -91,6 +94,9 @@ public:
 		uint32_t micros = 0;
 		return Wait(bits, wait_mode, clear_mode, result, &micros);
 	}
+
+	[[nodiscard]] const String& GetName() const { return m_name; }
+	[[nodiscard]] uint64_t      GetBits() const { return m_bits; }
 
 private:
 	enum class Status
@@ -386,6 +392,18 @@ int KYTY_SYSV_ABI KernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, 
 		default: EXIT("unknown mode: %u\n", wait_mode);
 	}
 
+	if (std::getenv("KYTY_EVENTFLAG_TRACE") != nullptr)
+	{
+		static std::atomic<uint32_t> wait_logs {0};
+		const uint32_t               n = wait_logs.fetch_add(1);
+		if (n < 64u)
+		{
+			std::fprintf(stderr,
+			             "EVENTFLAG_WAIT name=%s want=0x%016" PRIx64 " have=0x%016" PRIx64 " mode=0x%x timeout=%s\n",
+			             ef->GetName().C_Str(), bit_pattern, ef->GetBits(), wait_mode, timeout == nullptr ? "inf" : "finite");
+		}
+	}
+
 	auto result = ef->Wait(bit_pattern, wait, clear, result_pat, timeout);
 
 	int ret = OK;
@@ -457,6 +475,16 @@ int KYTY_SYSV_ABI KernelSetEventFlag(KernelEventFlag ef, uint64_t bit_pattern)
 	if (!EventFlagIsLive(ef))
 	{
 		return KERNEL_ERROR_ESRCH;
+	}
+
+	if (std::getenv("KYTY_EVENTFLAG_TRACE") != nullptr)
+	{
+		static std::atomic<uint32_t> set_logs {0};
+		const uint32_t               n = set_logs.fetch_add(1);
+		if (n < 128u)
+		{
+			std::fprintf(stderr, "EVENTFLAG_SET name=%s bits=0x%016" PRIx64 "\n", ef->GetName().C_Str(), bit_pattern);
+		}
 	}
 
 	ef->Set(bit_pattern);

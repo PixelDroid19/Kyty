@@ -6,6 +6,7 @@
 #include "Emulator/Agent/StallWatch.h"
 #include "Emulator/Controller.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Pthread.h"
 
 #include "Kyty/Core/Threads.h"
 #include "KytyBuildInfo.h"
@@ -57,6 +58,7 @@ std::string HelpResult()
 	return std::string(
 	    "{\"protocol_version\":1,\"diagnostic_input\":true,\"tools\":["
 	    "{\"tool\":\"help\"},{\"tool\":\"ping\"},{\"tool\":\"status\"},{\"tool\":\"diagnostics\"},"
+	    "{\"tool\":\"sync_waits\"},{\"tool\":\"threads\"},"
 	    "{\"tool\":\"events\",\"args\":{\"last\":50,\"after_seq\":0}},"
 	    "{\"tool\":\"last_error\"},"
 	    "{\"tool\":\"capture\",\"args\":{\"timeout_ms\":10000,\"score\":true}},"
@@ -158,6 +160,68 @@ std::string LastErrorResult()
 	return std::string(buf);
 }
 
+std::string SyncWaitsResult()
+{
+	Libs::LibKernel::PthreadCondWaitDiagnostics diagnostics {};
+	const bool                                  available = Libs::LibKernel::PthreadGetCondWaitDiagnostics(&diagnostics);
+	std::string                                  out = "{\"enabled\":";
+	out += (available && diagnostics.enabled) ? "true" : "false";
+	char summary[384];
+	std::snprintf(summary, sizeof(summary),
+	              ",\"blocked_count\":%u,\"tracked_cond\":\"0x%016llx\",\"tracked_waits\":%u,\"tracked_signals\":%u,\"blocked\":[",
+	              diagnostics.blocked_count, static_cast<unsigned long long>(diagnostics.tracked_cond), diagnostics.tracked_waits,
+	              diagnostics.tracked_signals);
+	out += summary;
+	for (uint32_t i = 0; i < diagnostics.blocked_count; ++i)
+	{
+		if (i != 0)
+		{
+			out += ',';
+		}
+		const auto& waiter = diagnostics.blocked[i];
+		char        item[384];
+		std::snprintf(item, sizeof(item),
+		              "{\"cond\":\"0x%016llx\",\"mutex\":\"0x%016llx\",\"return_addr\":\"0x%016llx\","
+		              "\"cond_handle\":\"0x%016llx\",\"mutex_handle\":\"0x%016llx\",\"signal_count\":%u}",
+		              static_cast<unsigned long long>(waiter.cond), static_cast<unsigned long long>(waiter.mutex),
+		              static_cast<unsigned long long>(waiter.return_addr), static_cast<unsigned long long>(waiter.cond_handle),
+		              static_cast<unsigned long long>(waiter.mutex_handle), waiter.signal_count);
+		out += item;
+	}
+	out += "]}";
+	return out;
+}
+
+std::string ThreadsResult()
+{
+	Libs::LibKernel::PthreadThreadDiagnostics diagnostics {};
+	const bool                                available = Libs::LibKernel::PthreadGetThreadDiagnostics(&diagnostics);
+	std::string                               out = "{\"available\":";
+	out += (available && diagnostics.available) ? "true" : "false";
+	char summary[192];
+	std::snprintf(summary, sizeof(summary), ",\"allocated_count\":%u,\"active_count\":%u,\"thread_count\":%u,\"threads\":[",
+	              diagnostics.allocated_count, diagnostics.active_count, diagnostics.thread_count);
+	out += summary;
+	for (uint32_t i = 0; i < diagnostics.thread_count; ++i)
+	{
+		if (i != 0)
+		{
+			out += ',';
+		}
+		const auto& thread = diagnostics.threads[i];
+		char        item[256];
+		std::snprintf(item, sizeof(item),
+		              "{\"entry\":\"0x%016llx\",\"argument\":\"0x%016llx\",\"unique_id\":%d,\"started\":%s,"
+		              "\"detached\":%s,\"almost_done\":%s,\"free\":%s}",
+		              static_cast<unsigned long long>(thread.entry), static_cast<unsigned long long>(thread.argument), thread.unique_id,
+		              thread.started ? "true" : "false", thread.detached ? "true" : "false", thread.almost_done ? "true" : "false",
+		              thread.free ? "true" : "false");
+		out += item;
+	}
+	out += "]}";
+	return out;
+}
+
 std::string PadStateResult()
 {
 	uint32_t buttons = 0;
@@ -195,6 +259,14 @@ std::string Dispatch(const Request& req)
 	if (req.tool == "diagnostics")
 	{
 		return FormatOk(req.id, DiagnosticsResult());
+	}
+	if (req.tool == "sync_waits")
+	{
+		return FormatOk(req.id, SyncWaitsResult());
+	}
+	if (req.tool == "threads")
+	{
+		return FormatOk(req.id, ThreadsResult());
 	}
 	if (req.tool == "events")
 	{

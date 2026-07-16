@@ -75,9 +75,6 @@ struct PipelineStencilDynamicState
 
 struct PipelineStaticParameters
 {
-	float                      viewport_scale[3]        = {};
-	float                      viewport_offset[3]       = {};
-	int                        scissor_ltrb[4]          = {0};
 	VkPrimitiveTopology        topology                 = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
 	bool                       with_depth               = false;
 	bool                       depth_test_enable        = false;
@@ -102,10 +99,6 @@ struct PipelineStaticParameters
 	uint8_t                    alpha_destblend[8]             = {};
 	bool                       separate_alpha_blend[8]        = {};
 	bool                       blend_enable[8]                = {};
-	float                      blend_color_red                = 0.0f;
-	float                      blend_color_green              = 0.0f;
-	float                      blend_color_blue               = 0.0f;
-	float                      blend_color_alpha              = 0.0f;
 	bool                       dx_clip_space                  = false;
 
 	bool operator==(const PipelineStaticParameters& other) const;
@@ -118,9 +111,21 @@ struct PipelineDynamicParameters
 	bool vk_dynamic_state_stencil_write_mask     = false;
 	bool vk_dynamic_state_stencil_reference      = false;
 	bool vk_dynamic_state_color_write_enable_ext = false;
+	bool vk_dynamic_state_viewport               = false;
+	bool vk_dynamic_state_scissor                = false;
+	bool vk_dynamic_state_blend_constants        = false;
 
 	float line_width         = 1.0f;
 	bool  color_write_enable = true;
+
+	float viewport_scale[3]  = {};
+	float viewport_offset[3] = {};
+	int   scissor_ltrb[4]    = {0};
+
+	float blend_color_red   = 0.0f;
+	float blend_color_green = 0.0f;
+	float blend_color_blue  = 0.0f;
+	float blend_color_alpha = 0.0f;
 
 	PipelineStencilDynamicState stencil_front;
 	PipelineStencilDynamicState stencil_back;
@@ -154,7 +159,7 @@ public:
 	void            DeleteAllPipelines();
 
 private:
-	static constexpr uint32_t MAX_PIPELINES = 128;
+	static constexpr uint32_t MAX_PIPELINES = 512;
 
 	struct Pipeline
 	{
@@ -299,7 +304,6 @@ struct VulkanFramebuffer
 	uint32_t                  color_count    = 0;
 	VkAttachmentLoadOp        color_load_op[TARGETS_MAX]        = {};
 	VkImageLayout             color_initial_layout[TARGETS_MAX] = {};
-	float                     color_clear[TARGETS_MAX][4]       = {};
 };
 
 class FramebufferCache
@@ -326,7 +330,6 @@ private:
 		bool               stencil_clear_enable = false;
 		VkAttachmentLoadOp color_load_op[8]        = {};
 		VkImageLayout      color_initial_layout[8] = {};
-		float              color_clear[8][4]       = {};
 	};
 
 	Core::Mutex                  m_mutex;
@@ -1243,7 +1246,28 @@ void GraphicsRenderCreateContext()
 {
 	EXIT_IF(g_render_ctx == nullptr);
 
-	g_render_ctx->SetGraphicCtx(WindowGetGraphicContext());
+	auto* ctx = WindowGetGraphicContext();
+	g_render_ctx->SetGraphicCtx(ctx);
+
+	if (ctx != nullptr && ctx->device != nullptr && ctx->pipeline_cache == nullptr)
+	{
+		VkPipelineCacheCreateInfo cache_info {};
+		cache_info.sType           = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+		cache_info.pNext             = nullptr;
+		cache_info.flags             = 0;
+		cache_info.initialDataSize   = 0;
+		cache_info.pInitialData      = nullptr;
+
+		vkCreatePipelineCache(ctx->device, &cache_info, nullptr, &ctx->pipeline_cache);
+
+		EXIT_NOT_IMPLEMENTED(ctx->pipeline_cache == nullptr);
+	}
+}
+
+static bool EopTraceEnabled()
+{
+	static const bool enabled = (std::getenv("KYTY_EOP_TRACE") != nullptr);
+	return enabled;
 }
 
 void RenderContext::AddEopEq(LibKernel::EventQueue::KernelEqueue eq)
@@ -1253,6 +1277,11 @@ void RenderContext::AddEopEq(LibKernel::EventQueue::KernelEqueue eq)
 	EXIT_NOT_IMPLEMENTED(m_eop_eqs.Contains(eq));
 
 	m_eop_eqs.Add(eq);
+
+	if (EopTraceEnabled())
+	{
+		std::fprintf(stderr, "EOP_ADD eq=%p count=%u\n", static_cast<void*>(eq), static_cast<unsigned>(m_eop_eqs.Size()));
+	}
 }
 
 void RenderContext::DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq)
@@ -1262,20 +1291,37 @@ void RenderContext::DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq)
 	auto index = m_eop_eqs.Find(eq);
 	EXIT_NOT_IMPLEMENTED(!m_eop_eqs.IndexValid(index));
 	m_eop_eqs[index] = nullptr;
+
+	if (EopTraceEnabled())
+	{
+		std::fprintf(stderr, "EOP_DEL eq=%p\n", static_cast<void*>(eq));
+	}
 }
 
 void RenderContext::TriggerEopEvent()
 {
 	Core::LockGuard lock(m_eop_mutex);
 
+	uint32_t live = 0;
 	for (auto& eop_eq: m_eop_eqs)
 	{
 		if (eop_eq != nullptr)
 		{
+			live++;
 			auto result =
 			    LibKernel::EventQueue::KernelTriggerEvent(eop_eq, GRAPHICS_EVENT_EOP, LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
 			                                              reinterpret_cast<void*>(LibKernel::KernelReadTsc()));
 			EXIT_NOT_IMPLEMENTED(result != OK);
+		}
+	}
+
+	if (EopTraceEnabled())
+	{
+		static std::atomic<uint32_t> trigger_logs {0};
+		const uint32_t               n = trigger_logs.fetch_add(1);
+		if (n < 64u)
+		{
+			std::fprintf(stderr, "EOP_TRIGGER live=%u slots=%u\n", live, static_cast<unsigned>(m_eop_eqs.Size()));
 		}
 	}
 }
@@ -1489,9 +1535,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 			                                                    color->clear_word0[slot], color->clear_word1[slot], image->format);
 			same_colors =
 			    (f.image_id[slot] == color->vulkan_buffer[slot]->memory.unique_id) && (f.color_load_op[slot] == load_ops.load_op) &&
-			    (f.color_initial_layout[slot] == load_ops.initial_layout) &&
-			    (f.color_clear[slot][0] == load_ops.clear_r && f.color_clear[slot][1] == load_ops.clear_g &&
-			     f.color_clear[slot][2] == load_ops.clear_b && f.color_clear[slot][3] == load_ops.clear_a);
+			    (f.color_initial_layout[slot] == load_ops.initial_layout);
 		}
 		if (f.framebuffer != nullptr && same_colors &&
 		    f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) && f.depth_clear_enable == depth->depth_clear_enable &&
@@ -1542,10 +1586,6 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		views[slot]                      = image->image_view[VulkanImage::VIEW_DEFAULT];
 		framebuffer->color_load_op[slot]        = load_ops.load_op;
 		framebuffer->color_initial_layout[slot] = load_ops.initial_layout;
-		framebuffer->color_clear[slot][0]       = load_ops.clear_r;
-		framebuffer->color_clear[slot][1]       = load_ops.clear_g;
-		framebuffer->color_clear[slot][2]       = load_ops.clear_b;
-		framebuffer->color_clear[slot][3]       = load_ops.clear_a;
 	}
 	framebuffer->color_count = color_count;
 
@@ -1627,10 +1667,6 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	{
 		fnew.color_load_op[slot]        = framebuffer->color_load_op[slot];
 		fnew.color_initial_layout[slot] = framebuffer->color_initial_layout[slot];
-		fnew.color_clear[slot][0]       = framebuffer->color_clear[slot][0];
-		fnew.color_clear[slot][1]       = framebuffer->color_clear[slot][1];
-		fnew.color_clear[slot][2]       = framebuffer->color_clear[slot][2];
-		fnew.color_clear[slot][3]       = framebuffer->color_clear[slot][3];
 	}
 
 	bool updated = false;
@@ -2213,21 +2249,30 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	input_assembly.primitiveRestartEnable = VK_FALSE;
 
 	const bool unrestricted = g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported;
-	const auto depth_range  = State::ResolveViewportDepth(static_params->viewport_scale[2], static_params->viewport_offset[2],
-	                                                      static_params->dx_clip_space, unrestricted);
 
 	VkViewport viewport {};
-	viewport.x        = static_params->viewport_offset[0] - static_params->viewport_scale[0];
-	viewport.y        = static_params->viewport_offset[1] - static_params->viewport_scale[1];
-	viewport.width    = static_params->viewport_scale[0] * 2.0f;
-	viewport.height   = static_params->viewport_scale[1] * 2.0f;
-	viewport.minDepth = depth_range.min_depth;
-	viewport.maxDepth = depth_range.max_depth;
+	VkRect2D   scissor {};
 
-	VkRect2D scissor {};
-	scissor.offset = {static_params->scissor_ltrb[0], static_params->scissor_ltrb[1]};
-	scissor.extent = {static_cast<uint32_t>(static_params->scissor_ltrb[2] - static_params->scissor_ltrb[0]),
-	                  static_cast<uint32_t>(static_params->scissor_ltrb[3] - static_params->scissor_ltrb[1])};
+	if (!dynamic_params->vk_dynamic_state_viewport)
+	{
+		const auto depth_range = State::ResolveViewportDepth(dynamic_params->viewport_scale[2], dynamic_params->viewport_offset[2],
+		                                                      static_params->dx_clip_space, unrestricted);
+		const auto xy = State::ResolveViewportXy(dynamic_params->viewport_scale[0], dynamic_params->viewport_offset[0],
+		                                          dynamic_params->viewport_scale[1], dynamic_params->viewport_offset[1]);
+		viewport.x        = xy.x;
+		viewport.y        = xy.y;
+		viewport.width    = xy.width;
+		viewport.height   = xy.height;
+		viewport.minDepth = depth_range.min_depth;
+		viewport.maxDepth = depth_range.max_depth;
+	}
+
+	if (!dynamic_params->vk_dynamic_state_scissor)
+	{
+		scissor.offset = {dynamic_params->scissor_ltrb[0], dynamic_params->scissor_ltrb[1]};
+		scissor.extent = {static_cast<uint32_t>(dynamic_params->scissor_ltrb[2] - dynamic_params->scissor_ltrb[0]),
+		                  static_cast<uint32_t>(dynamic_params->scissor_ltrb[3] - dynamic_params->scissor_ltrb[1])};
+	}
 
 	const bool depth_clip_control_supported = g_render_ctx->GetGraphicCtx()->depth_clip_control_supported;
 	EXIT_NOT_IMPLEMENTED(!static_params->dx_clip_space && !depth_clip_control_supported);
@@ -2242,9 +2287,9 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	viewport_state.pNext         = (depth_clip_control_supported ? &depth_clip_control : nullptr);
 	viewport_state.flags         = 0;
 	viewport_state.viewportCount = 1;
-	viewport_state.pViewports    = &viewport;
+	viewport_state.pViewports    = (dynamic_params->vk_dynamic_state_viewport ? nullptr : &viewport);
 	viewport_state.scissorCount  = 1;
-	viewport_state.pScissors     = &scissor;
+	viewport_state.pScissors     = (dynamic_params->vk_dynamic_state_scissor ? nullptr : &scissor);
 
 	VkCullModeFlags cull_mode = VK_CULL_MODE_NONE;
 	cull_mode |= (static_params->cull_back ? VK_CULL_MODE_BACK_BIT : 0u);
@@ -2354,10 +2399,13 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	color_blending.logicOp           = VK_LOGIC_OP_COPY;
 	color_blending.attachmentCount   = static_params->color_targets_num;
 	color_blending.pAttachments      = color_blend_attachments;
-	color_blending.blendConstants[0] = static_params->blend_color_red;
-	color_blending.blendConstants[1] = static_params->blend_color_green;
-	color_blending.blendConstants[2] = static_params->blend_color_blue;
-	color_blending.blendConstants[3] = static_params->blend_color_alpha;
+	if (!dynamic_params->vk_dynamic_state_blend_constants)
+	{
+		color_blending.blendConstants[0] = dynamic_params->blend_color_red;
+		color_blending.blendConstants[1] = dynamic_params->blend_color_green;
+		color_blending.blendConstants[2] = dynamic_params->blend_color_blue;
+		color_blending.blendConstants[3] = dynamic_params->blend_color_alpha;
+	}
 
 	VkDescriptorSetLayout set_layouts[2]  = {};
 	uint32_t              set_layouts_num = 0;
@@ -2411,7 +2459,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	depth_stencil_info.minDepthBounds        = static_params->depth_min_bounds;
 	depth_stencil_info.maxDepthBounds        = static_params->depth_max_bounds;
 
-	VkDynamicState dynamic_states[8]    = {};
+	VkDynamicState dynamic_states[11]   = {};
 	uint32_t       dynamic_states_count = 0;
 	if (dynamic_params->vk_dynamic_state_line_width)
 	{
@@ -2432,6 +2480,18 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	if (dynamic_params->vk_dynamic_state_color_write_enable_ext && cwe_supported)
 	{
 		dynamic_states[dynamic_states_count++] = VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT;
+	}
+	if (dynamic_params->vk_dynamic_state_viewport)
+	{
+		dynamic_states[dynamic_states_count++] = VK_DYNAMIC_STATE_VIEWPORT;
+	}
+	if (dynamic_params->vk_dynamic_state_scissor)
+	{
+		dynamic_states[dynamic_states_count++] = VK_DYNAMIC_STATE_SCISSOR;
+	}
+	if (dynamic_params->vk_dynamic_state_blend_constants)
+	{
+		dynamic_states[dynamic_states_count++] = VK_DYNAMIC_STATE_BLEND_CONSTANTS;
 	}
 
 	VkPipelineDynamicStateCreateInfo dynamic_state {};
@@ -2464,7 +2524,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	EXIT_IF(pipeline->pipeline != nullptr);
 
-	vkCreateGraphicsPipelines(gctx->device, nullptr, 1, &pipeline_info, nullptr, &pipeline->pipeline);
+	vkCreateGraphicsPipelines(gctx->device, gctx->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline->pipeline);
 
 	EXIT_NOT_IMPLEMENTED(pipeline->pipeline == nullptr);
 
@@ -2548,7 +2608,7 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 
 	EXIT_IF(pipeline->pipeline != nullptr);
 
-	vkCreateComputePipelines(gctx->device, nullptr, 1, &info, nullptr, &pipeline->pipeline);
+	vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, &pipeline->pipeline);
 
 	EXIT_NOT_IMPLEMENTED(pipeline->pipeline == nullptr);
 
@@ -2569,7 +2629,10 @@ bool PipelineDynamicParameters::operator==(const PipelineDynamicParameters& othe
 	        vk_dynamic_state_stencil_compare_mask != other.vk_dynamic_state_stencil_compare_mask ||
 	        vk_dynamic_state_stencil_write_mask != other.vk_dynamic_state_stencil_write_mask ||
 	        vk_dynamic_state_stencil_reference != other.vk_dynamic_state_stencil_reference ||
-	        vk_dynamic_state_color_write_enable_ext != other.vk_dynamic_state_color_write_enable_ext);
+	        vk_dynamic_state_color_write_enable_ext != other.vk_dynamic_state_color_write_enable_ext ||
+	        vk_dynamic_state_viewport != other.vk_dynamic_state_viewport ||
+	        vk_dynamic_state_scissor != other.vk_dynamic_state_scissor ||
+	        vk_dynamic_state_blend_constants != other.vk_dynamic_state_blend_constants);
 
 	if (!vk_dynamic_state_line_width)
 	{
@@ -2602,6 +2665,31 @@ bool PipelineDynamicParameters::operator==(const PipelineDynamicParameters& othe
 	if (!vk_dynamic_state_color_write_enable_ext)
 	{
 		if (color_write_enable != other.color_write_enable)
+		{
+			return false;
+		}
+	}
+	if (!vk_dynamic_state_viewport)
+	{
+		if (viewport_scale[0] != other.viewport_scale[0] || viewport_scale[1] != other.viewport_scale[1] ||
+		    viewport_scale[2] != other.viewport_scale[2] || viewport_offset[0] != other.viewport_offset[0] ||
+		    viewport_offset[1] != other.viewport_offset[1] || viewport_offset[2] != other.viewport_offset[2])
+		{
+			return false;
+		}
+	}
+	if (!vk_dynamic_state_scissor)
+	{
+		if (scissor_ltrb[0] != other.scissor_ltrb[0] || scissor_ltrb[1] != other.scissor_ltrb[1] ||
+		    scissor_ltrb[2] != other.scissor_ltrb[2] || scissor_ltrb[3] != other.scissor_ltrb[3])
+		{
+			return false;
+		}
+	}
+	if (!vk_dynamic_state_blend_constants)
+	{
+		if (blend_color_red != other.blend_color_red || blend_color_green != other.blend_color_green ||
+		    blend_color_blue != other.blend_color_blue || blend_color_alpha != other.blend_color_alpha)
 		{
 			return false;
 		}
@@ -2767,23 +2855,26 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.dynamic_params->vk_dynamic_state_stencil_compare_mask = true;
 	p.dynamic_params->vk_dynamic_state_stencil_reference    = true;
 	p.dynamic_params->vk_dynamic_state_stencil_write_mask   = true;
+	p.dynamic_params->vk_dynamic_state_viewport             = true;
+	p.dynamic_params->vk_dynamic_state_scissor              = true;
+	p.dynamic_params->vk_dynamic_state_blend_constants      = true;
 	p.dynamic_params->color_write_enable                    = true;
 
 	EXIT_NOT_IMPLEMENTED(depth->depth_test_enable && ps_input_info->ps_execute_on_noop);
 
 	const auto scissor = State::ResolveScissor(vp, smc, 0);
 
-	p.static_params->viewport_scale[0]        = vp.viewports[0].xscale;
-	p.static_params->viewport_scale[1]        = vp.viewports[0].yscale;
-	p.static_params->viewport_scale[2]        = vp.viewports[0].zscale;
-	p.static_params->viewport_offset[0]       = vp.viewports[0].xoffset;
-	p.static_params->viewport_offset[1]       = vp.viewports[0].yoffset;
-	p.static_params->viewport_offset[2]       = vp.viewports[0].zoffset;
-	p.static_params->dx_clip_space            = ctx->GetClipControl().dx_clip_space;
-	p.static_params->scissor_ltrb[0]          = scissor.left;
-	p.static_params->scissor_ltrb[1]          = scissor.top;
-	p.static_params->scissor_ltrb[2]          = scissor.right;
-	p.static_params->scissor_ltrb[3]          = scissor.bottom;
+	p.dynamic_params->viewport_scale[0]  = vp.viewports[0].xscale;
+	p.dynamic_params->viewport_scale[1]  = vp.viewports[0].yscale;
+	p.dynamic_params->viewport_scale[2]  = vp.viewports[0].zscale;
+	p.dynamic_params->viewport_offset[0] = vp.viewports[0].xoffset;
+	p.dynamic_params->viewport_offset[1] = vp.viewports[0].yoffset;
+	p.dynamic_params->viewport_offset[2] = vp.viewports[0].zoffset;
+	p.static_params->dx_clip_space       = ctx->GetClipControl().dx_clip_space;
+	p.dynamic_params->scissor_ltrb[0]    = scissor.left;
+	p.dynamic_params->scissor_ltrb[1]    = scissor.top;
+	p.dynamic_params->scissor_ltrb[2]    = scissor.right;
+	p.dynamic_params->scissor_ltrb[3]    = scissor.bottom;
 	p.static_params->topology                 = topology;
 	p.static_params->with_depth               = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	p.static_params->depth_test_enable        = depth->depth_test_enable;
@@ -2813,10 +2904,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.static_params->cull_back                = mc.cull_back;
 	p.static_params->cull_front               = mc.cull_front;
 	p.static_params->face                     = mc.face;
-	p.static_params->blend_color_red          = bclr.red;
-	p.static_params->blend_color_green        = bclr.green;
-	p.static_params->blend_color_blue         = bclr.blue;
-	p.static_params->blend_color_alpha        = bclr.alpha;
+	p.dynamic_params->blend_color_red         = bclr.red;
+	p.dynamic_params->blend_color_green       = bclr.green;
+	p.dynamic_params->blend_color_blue        = bclr.blue;
+	p.dynamic_params->blend_color_alpha       = bclr.alpha;
 
 	p.dynamic_params->line_width         = ctx->GetLineWidth();
 	p.dynamic_params->stencil_front      = depth->stencil_dynamic_front;
@@ -4606,20 +4697,53 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			depth_texture = !dtex.IsEmpty();
 			if (depth_texture)
 			{
-				EXIT_NOT_IMPLEMENTED(dtex.Size() > 1);
 				EXIT_NOT_IMPLEMENTED(swizzle != DstSel(4, 4, 4, 4));
 				EXIT_NOT_IMPLEMENTED(dtex.At(0)->compressed);
-				tex = dtex.At(0);
+				size_t alias_index = 0;
+				if (dtex.Size() > 1)
+				{
+					uint64_t areas[16] = {};
+					const auto n       = static_cast<size_t>(dtex.Size() < 16 ? dtex.Size() : 16);
+					for (size_t i = 0; i < n; i++)
+					{
+						const auto& e = dtex.At(static_cast<int>(i))->extent;
+						areas[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+					}
+					alias_index = PreferGpuMemoryAliasIndex(areas, n, 0);
+				}
+				tex = dtex.At(static_cast<int>(alias_index));
 			}
 		} else
 		{
 			auto rtex      = FindRenderTexture(addr, size.size, true);
 			render_texture = !rtex.IsEmpty();
+			// Exact miss: sample range can sit inside a live RT (Contains) or cover a
+			// smaller RT (IsContainedWithin). Falling through to guest-memory tile-27
+			// upload then reads empty GPU-owned backing and paints opaque-black props.
+			if (!render_texture && gen5)
+			{
+				rtex           = FindRenderTexture(addr, size.size, false);
+				render_texture = !rtex.IsEmpty();
+			}
 			if (render_texture)
 			{
-				EXIT_NOT_IMPLEMENTED(rtex.Size() > 1);
 				EXIT_NOT_IMPLEMENTED(swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7));
-				tex = rtex.At(0);
+				// Multiple non-exact RT aliases are expected under Gen5 nested /
+				// same-base parents. Pick the tightest cover instead of EXIT —
+				// aborting here closed Dead Cells mid-load (rtex.Size()>1).
+				size_t alias_index = 0;
+				if (rtex.Size() > 1)
+				{
+					uint64_t areas[16] = {};
+					const auto n       = static_cast<size_t>(rtex.Size() < 16 ? rtex.Size() : 16);
+					for (size_t i = 0; i < n; i++)
+					{
+						const auto& e = rtex.At(static_cast<int>(i))->extent;
+						areas[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+					}
+					alias_index = PreferGpuMemoryAliasIndex(areas, n, 0);
+				}
+				tex = rtex.At(static_cast<int>(alias_index));
 				if (swizzle == DstSel(6, 5, 4, 7))
 				{
 					view_type = VulkanImage::VIEW_BGRA;
@@ -4976,6 +5100,44 @@ static void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline
 	{
 		VkBool32 enable = (pipeline->dynamic_params->color_write_enable ? VK_TRUE : VK_FALSE);
 		VulkanCmdSetColorWriteEnableEXT(g_render_ctx->GetGraphicCtx(), vk_buffer, 1, &enable);
+	}
+
+	if (pipeline->dynamic_params->vk_dynamic_state_viewport)
+	{
+		const bool unrestricted = g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported;
+		const auto depth_range  = State::ResolveViewportDepth(pipeline->dynamic_params->viewport_scale[2],
+		                                                      pipeline->dynamic_params->viewport_offset[2],
+		                                                      pipeline->static_params->dx_clip_space, unrestricted);
+		const auto xy = State::ResolveViewportXy(pipeline->dynamic_params->viewport_scale[0],
+		                                          pipeline->dynamic_params->viewport_offset[0],
+		                                          pipeline->dynamic_params->viewport_scale[1],
+		                                          pipeline->dynamic_params->viewport_offset[1]);
+		VkViewport viewport {};
+		viewport.x        = xy.x;
+		viewport.y        = xy.y;
+		viewport.width    = xy.width;
+		viewport.height   = xy.height;
+		viewport.minDepth = depth_range.min_depth;
+		viewport.maxDepth = depth_range.max_depth;
+		vkCmdSetViewport(vk_buffer, 0, 1, &viewport);
+	}
+
+	if (pipeline->dynamic_params->vk_dynamic_state_scissor)
+	{
+		VkRect2D scissor {};
+		scissor.offset = {pipeline->dynamic_params->scissor_ltrb[0], pipeline->dynamic_params->scissor_ltrb[1]};
+		scissor.extent = {static_cast<uint32_t>(pipeline->dynamic_params->scissor_ltrb[2] -
+		                                        pipeline->dynamic_params->scissor_ltrb[0]),
+		                  static_cast<uint32_t>(pipeline->dynamic_params->scissor_ltrb[3] -
+		                                        pipeline->dynamic_params->scissor_ltrb[1])};
+		vkCmdSetScissor(vk_buffer, 0, 1, &scissor);
+	}
+
+	if (pipeline->dynamic_params->vk_dynamic_state_blend_constants)
+	{
+		const float blend_constants[4] = {pipeline->dynamic_params->blend_color_red, pipeline->dynamic_params->blend_color_green,
+		                                  pipeline->dynamic_params->blend_color_blue, pipeline->dynamic_params->blend_color_alpha};
+		vkCmdSetBlendConstants(vk_buffer, blend_constants);
 	}
 }
 
@@ -5988,10 +6150,16 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	VkClearValue   clears[RenderColorInfo::TARGETS_MAX + 1] {};
 	for (uint32_t slot = 0; slot < color_count; slot++)
 	{
-		if (framebuffer->color_count > slot)
+		if (framebuffer->color_count > slot && color->vulkan_buffer[slot] != nullptr)
 		{
-			clears[slot].color = {{framebuffer->color_clear[slot][0], framebuffer->color_clear[slot][1],
-			                       framebuffer->color_clear[slot][2], framebuffer->color_clear[slot][3]}};
+			// Clear values belong to VkRenderPassBeginInfo, not the render-pass or
+			// framebuffer identity. Keeping them in the cache key creates a fresh
+			// render pass/pipeline for every animated clear color and stalls loading
+			// on Metal pipeline compilation.
+			const auto clear = ResolveColorAttachmentLoadOps(color->vulkan_buffer[slot]->layout,
+			                                                 color->cmask_fast_clear_enable[slot], color->clear_word0[slot],
+			                                                 color->clear_word1[slot], color->vulkan_buffer[slot]->format);
+			clears[slot].color = {{clear.clear_r, clear.clear_g, clear.clear_b, clear.clear_a}};
 		} else
 		{
 			clears[slot].color = {{0.0f, 0.0f, 0.0f, 1.0f}};

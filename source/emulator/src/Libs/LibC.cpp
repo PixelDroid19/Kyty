@@ -396,7 +396,9 @@ static KYTY_SYSV_ABI void   c_sincos(double x, double* s, double* c) { *s = ::si
 static KYTY_SYSV_ABI float  c_powf(float x, float y) { return ::powf(x, y); }
 static KYTY_SYSV_ABI float  c_log2f(float x) { return ::log2f(x); }
 static KYTY_SYSV_ABI float  c_exp2f(float x) { return ::exp2f(x); }
+static KYTY_SYSV_ABI float  c_expf(float x) { return ::expf(x); }
 static KYTY_SYSV_ABI float  c_ldexpf(float x, int e) { return ::ldexpf(x, e); }
+static KYTY_SYSV_ABI void   c_sincosf(float x, float* s, float* c) { *s = ::sinf(x); *c = ::cosf(x); }
 
 // --- C++ runtime -------------------------------------------------------------
 // One-time static-init guard. jmp_buf-free implementation over the guard byte.
@@ -804,7 +806,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("1D0H2KNjshE", LibC::c_powf);
 	LIB_FUNC("hsi9drzHR2k", LibC::c_log2f);
 	LIB_FUNC("wuAQt-j+p4o", LibC::c_exp2f);
+	LIB_FUNC("8zsu04XNsZ4", LibC::c_expf);
 	LIB_FUNC("kn0yiYeExgA", LibC::c_ldexpf);
+	LIB_FUNC("pztV4AF18iI", LibC::c_sincosf);
 
 	// C++ runtime
 	LIB_FUNC("3GPpjQdAMTw", LibC::c_cxa_guard_acquire);

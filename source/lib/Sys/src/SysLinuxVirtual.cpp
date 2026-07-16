@@ -40,6 +40,7 @@ namespace Kyty::Core {
 
 static pthread_mutex_t              g_virtual_mutex {};
 static std::map<uintptr_t, size_t>* g_allocs   = nullptr;
+static uintptr_t                    g_shared_map_cursor = 0;
 
 struct ProtectionRange
 {
@@ -84,6 +85,7 @@ void sys_virtual_init()
 
 	g_allocs   = new std::map<uintptr_t, size_t>;
 	g_protects = new std::map<uintptr_t, ProtectionRange>;
+	g_shared_map_cursor = 0;
 
 	cpuinfo_initialize();
 }
@@ -459,9 +461,23 @@ uint64_t sys_virtual_alloc_aligned(uint64_t address, uint64_t size, VirtualMemor
 
 #ifdef __APPLE__
 
-[[maybe_unused]] static bool is_mmaped(void* ptr, size_t length)
+enum class MappedRangeState
 {
-	// Returns true if any existing mapping overlaps [ptr, ptr + length)
+	Available,
+	Occupied,
+	QueryFailed
+};
+
+static MappedRangeState get_mapped_range_state(void* ptr, size_t length, uintptr_t* occupied_end)
+{
+	if (ptr == nullptr || length == 0 || occupied_end == nullptr)
+	{
+		return MappedRangeState::QueryFailed;
+	}
+
+	// mach_vm_region returns the region at or immediately after `address`. Keep
+	// the returned end so callers can skip a complete occupied interval instead
+	// of probing every guest alignment inside it.
 	auto                           address     = reinterpret_cast<mach_vm_address_t>(ptr);
 	mach_vm_size_t                 region_size = 0;
 	vm_region_basic_info_data_64_t info {};
@@ -474,13 +490,41 @@ uint64_t sys_virtual_alloc_aligned(uint64_t address, uint64_t size, VirtualMemor
 
 	if (kr != KERN_SUCCESS)
 	{
-		return false;
+		return (kr == KERN_INVALID_ADDRESS ? MappedRangeState::Available : MappedRangeState::QueryFailed);
 	}
 
 	const auto requested_start = reinterpret_cast<mach_vm_address_t>(ptr);
+	if (length > std::numeric_limits<mach_vm_address_t>::max() - requested_start ||
+	    region_size > std::numeric_limits<mach_vm_address_t>::max() - address)
+	{
+		return MappedRangeState::QueryFailed;
+	}
 	const auto requested_end   = requested_start + length;
 	const auto region_end      = address + region_size;
-	return address < requested_end && region_end > requested_start;
+	if (address < requested_end && region_end > requested_start)
+	{
+		*occupied_end = static_cast<uintptr_t>(region_end);
+		return MappedRangeState::Occupied;
+	}
+
+	return MappedRangeState::Available;
+}
+
+static bool reserve_shared_mapping(uintptr_t address, uint64_t size)
+{
+	mach_vm_address_t reservation = address;
+	return mach_vm_allocate(mach_task_self(), &reservation, size, VM_FLAGS_FIXED) == KERN_SUCCESS && reservation == address;
+}
+
+static void release_shared_mapping_reservation(uintptr_t address, uint64_t size)
+{
+	(void)mach_vm_deallocate(mach_task_self(), address, size);
+}
+
+[[maybe_unused]] static bool is_mmaped(void* ptr, size_t length)
+{
+	uintptr_t occupied_end = 0;
+	return get_mapped_range_state(ptr, length, &occupied_end) != MappedRangeState::Available;
 }
 
 #else
@@ -594,7 +638,13 @@ static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t
 		return MAP_FAILED;
 	}
 
-	uintptr_t start = (prefer != 0) ? prefer : kGuestHeapLo;
+	uintptr_t start = prefer;
+	if (start == 0)
+	{
+		pthread_mutex_lock(&g_virtual_mutex);
+		start = g_shared_map_cursor;
+		pthread_mutex_unlock(&g_virtual_mutex);
+	}
 	if (start < kGuestHeapLo || start > kGuestHeapHi - size)
 	{
 		start = kGuestHeapLo;
@@ -619,6 +669,45 @@ static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t
 		ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED_NOREPLACE | MAP_SHARED, backing->fd,
 		           static_cast<off_t>(backing_offset));
 #else
+#ifdef __APPLE__
+		if (!reserve_shared_mapping(address, size))
+		{
+		uintptr_t occupied_end = 0;
+		const auto range_state = get_mapped_range_state(reinterpret_cast<void*>(address), size, &occupied_end);
+		if (range_state == MappedRangeState::QueryFailed)
+		{
+			return MAP_FAILED;
+		}
+		if (range_state == MappedRangeState::Occupied)
+		{
+			uintptr_t next_address = 0;
+			if (!try_align_up(occupied_end, alignment, &next_address) || next_address <= address || next_address > last_address)
+			{
+				break;
+			}
+			address = next_address;
+			continue;
+		}
+			if (alignment > last_address - address)
+			{
+				break;
+			}
+			address += alignment;
+			continue;
+		}
+		// NOLINTNEXTLINE
+		ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED | MAP_SHARED, backing->fd,
+		           static_cast<off_t>(backing_offset));
+		if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != address)
+		{
+			if (ptr != MAP_FAILED)
+			{
+				munmap(ptr, size);
+			}
+			release_shared_mapping_reservation(address, size);
+			ptr = MAP_FAILED;
+		}
+#else
 		if (!is_mmaped(reinterpret_cast<void*>(address), size))
 		{
 			// NOLINTNEXTLINE
@@ -626,10 +715,17 @@ static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t
 			           static_cast<off_t>(backing_offset));
 		}
 #endif
+#endif
 		if (ptr != MAP_FAILED)
 		{
 			if (reinterpret_cast<uintptr_t>(ptr) == address)
 			{
+				if (prefer == 0)
+				{
+					pthread_mutex_lock(&g_virtual_mutex);
+					g_shared_map_cursor = address + size;
+					pthread_mutex_unlock(&g_virtual_mutex);
+				}
 				return ptr;
 			}
 			munmap(ptr, size);
@@ -698,12 +794,33 @@ bool sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t back
 	ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED_NOREPLACE | MAP_SHARED, shared->fd,
 	           static_cast<off_t>(backing_offset));
 #else
+#ifdef __APPLE__
+	// macOS has no MAP_FIXED_NOREPLACE. Reserve the exact interval first so the
+	// MAP_FIXED call replaces only a reservation created by this process, never
+	// an unrelated host mapping (including a Rosetta reservation).
+	if (reserve_shared_mapping(addr, size))
+	{
+		// NOLINTNEXTLINE
+		ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_SHARED, shared->fd,
+		           static_cast<off_t>(backing_offset));
+		if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != addr)
+		{
+			if (ptr != MAP_FAILED)
+			{
+				munmap(ptr, size);
+			}
+			release_shared_mapping_reservation(addr, size);
+			ptr = MAP_FAILED;
+		}
+	}
+#else
 	if (!is_mmaped(reinterpret_cast<void*>(addr), size))
 	{
 		// NOLINTNEXTLINE
 		ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_SHARED, shared->fd,
 		           static_cast<off_t>(backing_offset));
 	}
+#endif
 #endif
 
 	if (ptr == MAP_FAILED)

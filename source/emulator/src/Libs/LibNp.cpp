@@ -223,11 +223,30 @@ int KYTY_SYSV_ABI GetAddcontEntitlementInfo(ServiceLabel /*service_label*/, cons
 	return ERROR_NO_ENTITLEMENT;
 }
 
+int KYTY_SYSV_ABI GetAddcontEntitlementInfoList(ServiceLabel /*service_label*/, AddcontEntitlementInfo* list, uint32_t list_num,
+                                                uint32_t* hit_num)
+{
+	if (!g_entitlement_initialized.load(std::memory_order_acquire))
+	{
+		return ERROR_NOT_INITIALIZED;
+	}
+	if (hit_num == nullptr || (list == nullptr && list_num != 0))
+	{
+		return ERROR_PARAMETER;
+	}
+
+	// This runtime has no registered add-on entitlement catalog. Report an
+	// empty enumeration explicitly; do not fabricate list records.
+	*hit_num = 0;
+	return OK;
+}
+
 LIB_DEFINE(InitNpEntitlementAccess_1)
 {
 	LIB_FUNC("jO8DM8oyego", Initialize);
 	// sceNpEntitlementAccessGetAddcontEntitlementInfo
 	LIB_FUNC("xddD23+8TfQ", GetAddcontEntitlementInfo);
+	LIB_FUNC("TFyU+KFBv54", GetAddcontEntitlementInfoList);
 }
 
 } // namespace Kyty::Libs::NpEntitlementAccess

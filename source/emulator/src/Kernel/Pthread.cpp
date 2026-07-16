@@ -10,6 +10,7 @@
 #include "Kyty/Core/Timer.h"
 #include "Kyty/Core/Vector.h"
 
+#include "Emulator/Graphics/Window.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/RuntimeLinker.h"
@@ -17,6 +18,9 @@
 
 #include <atomic>
 #include <cerrno>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
 #include <ctime>
 
 #ifdef KYTY_EMU_ENABLED
@@ -181,6 +185,7 @@ public:
 	Pthread Create();
 
 	void FreeDetachedThreads();
+	void GetDiagnostics(PthreadThreadDiagnostics* out);
 
 private:
 	Vector<Pthread> m_threads;
@@ -546,6 +551,35 @@ void PthreadPool::FreeDetachedThreads()
 		{
 			PthreadJoin(p, nullptr);
 		}
+	}
+}
+
+void PthreadPool::GetDiagnostics(PthreadThreadDiagnostics* out)
+{
+	EXIT_IF(out == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+
+	for (auto* thread: m_threads)
+	{
+		out->allocated_count++;
+		if (!thread->free.load())
+		{
+			out->active_count++;
+		}
+		if (out->thread_count >= std::size(out->threads))
+		{
+			continue;
+		}
+
+		auto& snapshot = out->threads[out->thread_count++];
+		snapshot.entry = reinterpret_cast<uint64_t>(thread->entry);
+		snapshot.argument = reinterpret_cast<uint64_t>(thread->arg);
+		snapshot.unique_id = thread->unique_id;
+		snapshot.started = thread->started.load();
+		snapshot.detached = thread->detached.load();
+		snapshot.almost_done = thread->almost_done.load();
+		snapshot.free = thread->free.load();
 	}
 }
 
@@ -1785,6 +1819,330 @@ int KYTY_SYSV_ABI PthreadCondattrInit(PthreadCondattr* attr)
 	}
 }
 
+// Soft-lock diagnostic (Dead Cells): identify which guest cond/mutex the
+// CondWait at ~0x90173da75 uses, and whether Signal/Broadcast ever reaches it.
+// Opt-in via KYTY_SLOT_TRACE=1; only after present>=2200 for event spam, but
+// blocked-waiter slots are always recorded under the env so Flip-idle can dump
+// a waiter that entered CondWait before the present cliff.
+struct SlotTraceBlockedWaiter
+{
+	std::atomic<uint64_t> cond {0};
+	std::atomic<uint64_t> mutex {0};
+	std::atomic<uint64_t> ret {0};
+	std::atomic<uint64_t> cond_h {0};
+	std::atomic<uint64_t> mutex_h {0};
+	std::atomic<uint32_t> live {0};
+};
+
+static constexpr uint32_t         kSlotTraceWaiterSlots = 8;
+static SlotTraceBlockedWaiter     g_slot_trace_waiters[kSlotTraceWaiterSlots];
+static std::atomic<uint64_t>      g_slot_trace_tracked_cond {0};
+static std::atomic<uint32_t>      g_slot_trace_sig_for_tracked {0};
+static std::atomic<uint32_t>      g_slot_trace_wait_for_tracked {0};
+static std::atomic<uint32_t>      g_slot_trace_sig_after_stall {0};
+static std::atomic<uint64_t>      g_slot_trace_stall_present {0};
+
+struct SlotTraceSigCount
+{
+	std::atomic<uint64_t> cond {0};
+	std::atomic<uint32_t> count {0};
+	std::atomic<uint32_t> after_stall {0};
+};
+static constexpr uint32_t    kSlotTraceSigSlots = 16;
+static SlotTraceSigCount     g_slot_trace_sigs[kSlotTraceSigSlots];
+
+static bool slot_trace_env()
+{
+	return std::getenv("KYTY_SLOT_TRACE") != nullptr;
+}
+
+static void slot_trace_note_signal(uint64_t cond_addr)
+{
+	if (!slot_trace_env() || cond_addr == 0)
+	{
+		return;
+	}
+	const bool after_stall = g_slot_trace_stall_present.load() != 0;
+	for (uint32_t i = 0; i < kSlotTraceSigSlots; i++)
+	{
+		uint64_t cur = g_slot_trace_sigs[i].cond.load();
+		if (cur == cond_addr)
+		{
+			g_slot_trace_sigs[i].count.fetch_add(1);
+			if (after_stall)
+			{
+				g_slot_trace_sigs[i].after_stall.fetch_add(1);
+			}
+			if (cond_addr == g_slot_trace_tracked_cond.load())
+			{
+				g_slot_trace_sig_for_tracked.fetch_add(1);
+				if (after_stall)
+				{
+					g_slot_trace_sig_after_stall.fetch_add(1);
+				}
+			}
+			return;
+		}
+		if (cur == 0)
+		{
+			uint64_t expected = 0;
+			if (g_slot_trace_sigs[i].cond.compare_exchange_strong(expected, cond_addr))
+			{
+				g_slot_trace_sigs[i].count.fetch_add(1);
+				if (after_stall)
+				{
+					g_slot_trace_sigs[i].after_stall.fetch_add(1);
+				}
+				if (cond_addr == g_slot_trace_tracked_cond.load())
+				{
+					g_slot_trace_sig_for_tracked.fetch_add(1);
+					if (after_stall)
+					{
+						g_slot_trace_sig_after_stall.fetch_add(1);
+					}
+				}
+				return;
+			}
+		}
+	}
+}
+
+static bool slot_trace_cond_active(Graphics::WindowPresentStats* stats_out)
+{
+	if (!slot_trace_env())
+	{
+		return false;
+	}
+	Graphics::WindowPresentStats stats {};
+	if (!Graphics::WindowGetPresentStats(&stats) || stats.present < 2200ull)
+	{
+		return false;
+	}
+	if (stats_out != nullptr)
+	{
+		*stats_out = stats;
+	}
+	if (g_slot_trace_stall_present.load() == 0 && stats.ms_since_present >= 2000ull)
+	{
+		g_slot_trace_stall_present.store(stats.present);
+	}
+	return true;
+}
+
+static int slot_trace_register_waiter(uint64_t cond, uint64_t mutex, uint64_t ret, uint64_t cond_h, uint64_t mutex_h)
+{
+	if (!slot_trace_env())
+	{
+		return -1;
+	}
+	for (uint32_t i = 0; i < kSlotTraceWaiterSlots; i++)
+	{
+		uint32_t expected = 0;
+		if (g_slot_trace_waiters[i].live.compare_exchange_strong(expected, 1u))
+		{
+			g_slot_trace_waiters[i].cond.store(cond);
+			g_slot_trace_waiters[i].mutex.store(mutex);
+			g_slot_trace_waiters[i].ret.store(ret);
+			g_slot_trace_waiters[i].cond_h.store(cond_h);
+			g_slot_trace_waiters[i].mutex_h.store(mutex_h);
+			// Prefer the soft-lock worker return range around 0x90173da75.
+			const bool prefer = (ret >= 0x90173d000ull && ret < 0x90173e000ull);
+			if (prefer || g_slot_trace_tracked_cond.load() == 0)
+			{
+				if (cond != 0)
+				{
+					g_slot_trace_tracked_cond.store(cond);
+				}
+			}
+			if (cond != 0 && cond == g_slot_trace_tracked_cond.load())
+			{
+				g_slot_trace_wait_for_tracked.fetch_add(1);
+			}
+			return static_cast<int>(i);
+		}
+	}
+	return -1;
+}
+
+static void slot_trace_unregister_waiter(int slot)
+{
+	if (slot < 0 || static_cast<uint32_t>(slot) >= kSlotTraceWaiterSlots)
+	{
+		return;
+	}
+	g_slot_trace_waiters[static_cast<uint32_t>(slot)].live.store(0);
+}
+
+static uint32_t slot_trace_signal_count(uint64_t cond)
+{
+	for (uint32_t i = 0; i < kSlotTraceSigSlots; i++)
+	{
+		if (g_slot_trace_sigs[i].cond.load() == cond)
+		{
+			return g_slot_trace_sigs[i].count.load();
+		}
+	}
+	return 0;
+}
+
+bool PthreadGetCondWaitDiagnostics(PthreadCondWaitDiagnostics* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+	if (!slot_trace_env())
+	{
+		return false;
+	}
+
+	out->enabled         = true;
+	out->tracked_cond    = g_slot_trace_tracked_cond.load();
+	out->tracked_waits   = g_slot_trace_wait_for_tracked.load();
+	out->tracked_signals = g_slot_trace_sig_for_tracked.load();
+	for (uint32_t i = 0; i < kSlotTraceWaiterSlots; i++)
+	{
+		if (g_slot_trace_waiters[i].live.load() == 0)
+		{
+			continue;
+		}
+		if (out->blocked_count >= std::size(out->blocked))
+		{
+			break;
+		}
+		auto& waiter         = out->blocked[out->blocked_count++];
+		waiter.cond          = g_slot_trace_waiters[i].cond.load();
+		waiter.mutex         = g_slot_trace_waiters[i].mutex.load();
+		waiter.return_addr   = g_slot_trace_waiters[i].ret.load();
+		waiter.cond_handle   = g_slot_trace_waiters[i].cond_h.load();
+		waiter.mutex_handle  = g_slot_trace_waiters[i].mutex_h.load();
+		waiter.signal_count  = slot_trace_signal_count(waiter.cond);
+	}
+	return true;
+}
+
+bool PthreadGetThreadDiagnostics(PthreadThreadDiagnostics* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+
+	if (g_pthread_context == nullptr)
+	{
+		return false;
+	}
+	auto* pthread_pool = g_pthread_context->GetPthreadPool();
+	if (pthread_pool == nullptr)
+	{
+		return false;
+	}
+
+	out->available = true;
+	pthread_pool->GetDiagnostics(out);
+	return true;
+}
+
+void SlotTraceDumpBlockedCondWaiters()
+{
+	if (!slot_trace_env())
+	{
+		return;
+	}
+	std::fprintf(stderr, "COND_BLOCKED tracked=0x%016" PRIx64 " wait_reg=%u sig_total_trk=%u sig_after_stall=%u\n",
+	             g_slot_trace_tracked_cond.load(), g_slot_trace_wait_for_tracked.load(), g_slot_trace_sig_for_tracked.load(),
+	             g_slot_trace_sig_after_stall.load());
+	for (uint32_t i = 0; i < kSlotTraceWaiterSlots; i++)
+	{
+		if (g_slot_trace_waiters[i].live.load() == 0)
+		{
+			continue;
+		}
+		std::fprintf(stderr,
+		             "COND_BLOCKED[%u] cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64 " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64
+		             " ret=0x%016" PRIx64 "\n",
+		             i, g_slot_trace_waiters[i].cond.load(), g_slot_trace_waiters[i].cond_h.load(),
+		             g_slot_trace_waiters[i].mutex.load(), g_slot_trace_waiters[i].mutex_h.load(),
+		             g_slot_trace_waiters[i].ret.load());
+	}
+	for (uint32_t i = 0; i < kSlotTraceSigSlots; i++)
+	{
+		const uint64_t c = g_slot_trace_sigs[i].cond.load();
+		if (c == 0)
+		{
+			continue;
+		}
+		std::fprintf(stderr, "COND_SIGCNT cond=0x%016" PRIx64 " total=%u after_stall=%u\n", c, g_slot_trace_sigs[i].count.load(),
+		             g_slot_trace_sigs[i].after_stall.load());
+	}
+	std::fflush(stderr);
+}
+
+static void slot_trace_cond_event(const char* kind, PthreadCond* guest_cond, PthreadMutex* guest_mutex, uint64_t ret)
+{
+	Graphics::WindowPresentStats stats {};
+	if (!slot_trace_cond_active(&stats))
+	{
+		return;
+	}
+
+	const uint64_t cond_addr  = reinterpret_cast<uint64_t>(guest_cond);
+	const uint64_t mutex_addr = reinterpret_cast<uint64_t>(guest_mutex);
+	uint64_t       cond_h     = 0;
+	uint64_t       mutex_h    = 0;
+	if (guest_cond != nullptr)
+	{
+		cond_h = *reinterpret_cast<const volatile uint64_t*>(guest_cond);
+	}
+	if (guest_mutex != nullptr)
+	{
+		mutex_h = *reinterpret_cast<const volatile uint64_t*>(guest_mutex);
+	}
+
+	static std::atomic<uint32_t> wait_n {0};
+	static std::atomic<uint32_t> sig_n {0};
+	static std::atomic<uint32_t> bcast_n {0};
+
+	const uint64_t tracked = g_slot_trace_tracked_cond.load();
+	uint32_t       seq     = 0;
+	if (kind[0] == 'W')
+	{
+		seq = wait_n.fetch_add(1);
+		if (tracked == 0 && cond_addr != 0)
+		{
+			g_slot_trace_tracked_cond.store(cond_addr);
+		}
+		if (seq >= 16u && (seq % 8u) != 0u && cond_addr != tracked)
+		{
+			return;
+		}
+	} else if (kind[0] == 'S')
+	{
+		seq = sig_n.fetch_add(1);
+		if (seq >= 32u && (seq % 16u) != 0u && cond_addr != tracked)
+		{
+			return;
+		}
+	} else
+	{
+		seq = bcast_n.fetch_add(1);
+		if (seq >= 16u && (seq % 8u) != 0u && cond_addr != tracked)
+		{
+			return;
+		}
+	}
+
+	std::fprintf(stderr,
+	             "COND_TRACE %s n=%u present=%llu ms_p=%llu ret=0x%016" PRIx64 " cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64
+	             " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64 " tracked=0x%016" PRIx64 " sig_trk=%u sig_stall=%u\n",
+	             kind, seq, static_cast<unsigned long long>(stats.present), static_cast<unsigned long long>(stats.ms_since_present), ret,
+	             cond_addr, cond_h, mutex_addr, mutex_h, g_slot_trace_tracked_cond.load(), g_slot_trace_sig_for_tracked.load(),
+	             g_slot_trace_sig_after_stall.load());
+	std::fflush(stderr);
+}
+
 int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 {
 	PRINT_NAME();
@@ -1794,6 +2152,10 @@ int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
 
 	EXIT_IF(pthread_static_objects == nullptr);
+
+	const auto ret_addr = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+	slot_trace_note_signal(reinterpret_cast<uint64_t>(cond));
+	slot_trace_cond_event("BCAST", cond, nullptr, ret_addr);
 
 	cond = static_cast<PthreadCond*>(pthread_static_objects->CreateObject(cond, PthreadStaticObject::Type::Cond));
 
@@ -1887,6 +2249,10 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	const auto ret_addr = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+	slot_trace_note_signal(reinterpret_cast<uint64_t>(cond));
+	slot_trace_cond_event("SIGNAL", cond, nullptr, ret_addr);
+
 	// Lazily initialize a statically-initialized cond (sentinel), like the other paths.
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
 	EXIT_IF(pthread_static_objects == nullptr);
@@ -1975,6 +2341,10 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 
 	EXIT_IF(pthread_static_objects == nullptr);
 
+	const auto   ret_addr = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+	const uint64_t cond_addr  = reinterpret_cast<uint64_t>(cond);
+	const uint64_t mutex_addr = reinterpret_cast<uint64_t>(mutex);
+
 	cond  = static_cast<PthreadCond*>(pthread_static_objects->CreateObject(cond, PthreadStaticObject::Type::Cond));
 	mutex = static_cast<PthreadMutex*>(pthread_static_objects->CreateObject(mutex, PthreadStaticObject::Type::Mutex));
 
@@ -1986,7 +2356,22 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
 	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
 
+	// Peek handles only after CreateObject resolved static sentinels, and only
+	// under KYTY_SLOT_TRACE — early guest BSS reads crashed boot diagnostics.
+	uint64_t cond_h  = 0;
+	uint64_t mutex_h = 0;
+	int      waiter_slot = -1;
+	if (slot_trace_env())
+	{
+		cond_h  = *reinterpret_cast<const volatile uint64_t*>(cond);
+		mutex_h = *reinterpret_cast<const volatile uint64_t*>(mutex);
+		slot_trace_cond_event("WAIT", cond, mutex, ret_addr);
+		waiter_slot = slot_trace_register_waiter(cond_addr, mutex_addr, ret_addr, cond_h, mutex_h);
+	}
+
 	int result = pthread_cond_wait(&(*cond)->p, &(*mutex)->p);
+
+	slot_trace_unregister_waiter(waiter_slot);
 
 	// printf("\tcond wait: %s, %d\n", (*cond)->name.C_Str(), result);
 
@@ -2558,6 +2943,48 @@ int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rm
 	}
 
 	uint64_t nanos = rqtp->tv_sec * 1000000000 + rqtp->tv_nsec;
+
+	// Soft-lock diagnostic (Dead Cells): job pump sleep-polls via Nanosleep while
+	// waiting on guest slot table 0x901c434c8 (0x20-byte entries). Guest VAs are
+	// host-mapped only after load — never read the table before present>=2200.
+	// Opt-in via KYTY_SLOT_TRACE=1. Do not invent EventFlag wakes.
+	if (std::getenv("KYTY_SLOT_TRACE") != nullptr && nanos >= 1000000ull)
+	{
+		Graphics::WindowPresentStats stats {};
+		if (Graphics::WindowGetPresentStats(&stats) && stats.present >= 2200ull)
+		{
+			static std::atomic<uint32_t> ns_logs {0};
+			const uint32_t               n = ns_logs.fetch_add(1);
+			if (n < 64u || (n % 4u) == 0u)
+			{
+				const auto         ret        = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+				constexpr uint64_t kSlotTable  = 0x901c434c8ull;
+				constexpr uint64_t kSlotStride = 0x20ull;
+				std::fprintf(stderr, "SLOT_TRACE ns=%" PRIu64 " ret=0x%016" PRIx64 " n=%u present=%llu\n", nanos, ret, n,
+				             static_cast<unsigned long long>(stats.present));
+				for (uint32_t i = 8; i <= 11; i++)
+				{
+					const auto*    entry = reinterpret_cast<const volatile uint64_t*>(kSlotTable + i * kSlotStride);
+					const uint64_t typ   = entry[0];
+					const uint64_t obj   = entry[1];
+					uint32_t       s0    = 0;
+					uint32_t       s1    = 0;
+					uint64_t       fn    = 0;
+					if (obj >= 0x900000000ull && obj < 0x940000000ull)
+					{
+						const auto* o = reinterpret_cast<const volatile uint32_t*>(obj);
+						s0            = o[0];
+						s1            = o[1];
+						fn            = *reinterpret_cast<const volatile uint64_t*>(obj + 0x10);
+					}
+					std::fprintf(stderr,
+					             "SLOT[%u] typ=0x%" PRIx64 " obj=0x%016" PRIx64 " state=%u/%u fn=0x%016" PRIx64 "\n", i, typ, obj, s0,
+					             s1, fn);
+				}
+				std::fflush(stderr);
+			}
+		}
+	}
 
 	printf("\tnanosleep: %" PRIu64 "\n", nanos);
 

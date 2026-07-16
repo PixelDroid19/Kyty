@@ -1,6 +1,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
 
+#include <chrono>
 #include <cstdint>
 
 UT_BEGIN(CoreVirtualMemory);
@@ -51,6 +52,64 @@ TEST(CoreVirtualMemory, LargeSharedMappingUsesBoundedProtectionMetadata)
 	ASSERT_NE(view, 0u);
 	ASSERT_TRUE(Free(view));
 	DestroySharedBacking(backing);
+}
+
+// macOS lacks MAP_FIXED_NOREPLACE, so shared mappings must reject occupied
+// host ranges before MAP_FIXED is used. Skipping a single occupied interval is
+// required to keep that safety check bounded under Rosetta.
+TEST(CoreVirtualMemory, SharedMappingSkipsOccupiedHostIntervalPromptly)
+{
+#if !defined(__APPLE__)
+	GTEST_SKIP() << "Mach occupied-range probing is macOS-specific";
+#else
+	constexpr uint64_t kPageSize    = 0x4000;
+	constexpr uint64_t kBlockedSize = 0x02000000ULL;
+
+	SharedBacking* occupied_backing = CreateSharedBacking(kBlockedSize);
+	ASSERT_NE(occupied_backing, nullptr);
+	const uint64_t occupied = MapSharedAligned(occupied_backing, 0, 0, kBlockedSize, Mode::NoAccess, kPageSize);
+	ASSERT_NE(occupied, 0u);
+
+	SharedBacking* backing = CreateSharedBacking(kPageSize);
+	ASSERT_NE(backing, nullptr);
+
+	const auto started = std::chrono::steady_clock::now();
+	const uint64_t view = MapSharedAligned(backing, occupied, 0, kPageSize, Mode::ReadWrite, kPageSize);
+	const auto elapsed = std::chrono::steady_clock::now() - started;
+
+	ASSERT_NE(view, 0u);
+	EXPECT_NE(view, occupied);
+	EXPECT_LT(elapsed, std::chrono::seconds(2));
+	ASSERT_TRUE(Free(view));
+	DestroySharedBacking(backing);
+	ASSERT_TRUE(Free(occupied));
+	DestroySharedBacking(occupied_backing);
+#endif
+}
+
+// A fixed shared view must never replace an existing mapping. This is the
+// contract used by the macOS reservation path before it calls MAP_FIXED.
+TEST(CoreVirtualMemory, FixedSharedMappingRejectsOccupiedRange)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+
+	SharedBacking* occupied_backing = CreateSharedBacking(page_size);
+	ASSERT_NE(occupied_backing, nullptr);
+	const uint64_t occupied = MapSharedAligned(occupied_backing, 0, 0, page_size, Mode::ReadWrite, page_size);
+	ASSERT_NE(occupied, 0u);
+
+	auto* occupied_bytes = reinterpret_cast<uint8_t*>(occupied);
+	occupied_bytes[0]    = 0x5a;
+
+	SharedBacking* replacement_backing = CreateSharedBacking(page_size);
+	ASSERT_NE(replacement_backing, nullptr);
+	EXPECT_FALSE(MapSharedFixed(replacement_backing, occupied, 0, page_size, Mode::ReadWrite));
+	EXPECT_EQ(occupied_bytes[0], 0x5a);
+
+	DestroySharedBacking(replacement_backing);
+	ASSERT_TRUE(Free(occupied));
+	DestroySharedBacking(occupied_backing);
 }
 
 TEST(CoreVirtualMemory, DemandMapUsesHostPageSize)
