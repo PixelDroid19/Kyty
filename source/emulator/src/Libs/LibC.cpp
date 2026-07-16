@@ -414,6 +414,12 @@ static KYTY_SYSV_ABI int c_sscanf_s(VA_ARGS)
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
 	return ::vsscanf(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
 }
+
+// Gen5 clock — NID QZP6I9ZZxpE. Observed as seed input XOR rdtscp.
+static KYTY_SYSV_ABI int64_t c_clock()
+{
+	return static_cast<int64_t>(::clock());
+}
 static KYTY_SYSV_ABI int c_vsprintf(char* s, const char* fmt, VaList* ap)
 {
 	return Format(s, C_UNBOUNDED_FORMAT, fmt, ap);
@@ -965,6 +971,7 @@ LIB_DEFINE(InitLibC_1)
 
 	// time
 	LIB_FUNC("wLlFkwG9UcQ", LibC::c_time);
+	LIB_FUNC("QZP6I9ZZxpE", LibC::c_clock);
 	LIB_FUNC("n7AepwR0s34", LibC::c_mktime);
 	LIB_FUNC("1mecP7RgI2A", LibC::c_gmtime);
 	LIB_FUNC("efhK-YSUYYQ", LibC::c_localtime);
