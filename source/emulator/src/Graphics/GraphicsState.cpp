@@ -77,6 +77,16 @@ DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, 
 	return usage;
 }
 
+ViewportXy ResolveViewportXy(float xscale, float xoffset, float yscale, float yoffset)
+{
+	ViewportXy xy {};
+	xy.x      = xoffset - xscale;
+	xy.y      = yoffset - yscale;
+	xy.width  = xscale * 2.0f;
+	xy.height = yscale * 2.0f;
+	return xy;
+}
+
 ViewportDepthRange ResolveViewportDepth(float zscale, float zoffset, bool dx_clip_space, bool depth_range_unrestricted)
 {
 	ViewportDepthRange range {};

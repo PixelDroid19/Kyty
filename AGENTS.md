@@ -218,11 +218,33 @@ If the issue cannot be reproduced, continue with read-only investigation or add
 the smallest behavior-neutral observability needed. Do not manufacture a failure
 or preserve a stale hypothesis merely because an older document mentioned it.
 
+Classify boot and playability failures before editing:
+
+- **Process EXIT / Fatal Error in stdout** — an emulator invariant or
+  `EXIT_NOT_IMPLEMENTED` aborted the host process. Read the owning file:line,
+  rebuild `fc_script` from the dirty sources, and re-run; a stale binary is
+  invalid evidence.
+- **Present/FPS still advancing with wrong pixels** — graphics contract
+  (clear, sample→RT alias, blend, layout). Do not treat a surviving window as
+  proof of correct alpha or tiling.
+- **Presents stall, Flip queue empty, GPU/CP idle** — guest CPU wait. Sample
+  threads (`sample`, not long `lldb` attach on Rosetta — attaches often kill
+  translated guests). Distinguish `KernelWaitEventFlag`, `PthreadCondWait`,
+  nanosleep job pumps, and `WaitRegMem` before changing HLE.
+- **`WaitRegMem` timeout** — missing or clobbered GPU label / EOP fence store.
+  Diagnose `Label` / write-back holes; do not invent guest EventFlag Set or
+  fabricate fence values to “unblock” loading.
+
 ### 3. Form a falsifiable hypothesis
 
 State one suspected cause, the expected observable change, and what result would
 disprove it. Change one contract at a time. Remove failed experiments before
 trying another explanation.
+
+Do not invent guest wakeups. Only the guest (or an evidenced HLE store that the
+guest already programmed) may Set EventFlags, signal condvars, or publish EOP
+fence words. Host-side fabricated completion changes scheduling and hides the
+real producer.
 
 ### 4. Implement test-first
 
@@ -301,6 +323,32 @@ prior notes, or warm pixels alone.
   over color-heuristic verdicts.
 - A `healthy` score does not prove correct textures or alpha. Do not “fix”
   intentional lighting to silence a score.
+- Opaque black sprite/prop bounding boxes (character or tiles in solid black
+  rectangles while HUD and god-rays look fine) usually point at **attachment
+  clear alpha** or **sample→RenderTexture aliasing**, not at “fixing” blend
+  heuristically. Known Mesa/RADV clear packings for RGBA8 / RGBA16F decode
+  `CLEAR_WORD=0` to transparent black (`A=0`); inventing opaque `A=1` leaves
+  intermediates that composite as black quads. Prefer
+  `PreferGpuMemoryAliasIndex` (tightest cover) when non-exact
+  `FindRenderTexture` returns multiple overlapping RTs — aborting on
+  `Size() > 1` kills boot instead of binding a valid alias.
+- Tip/loading art looking correct does not prove gameplay tiles are correct;
+  re-capture after the scene that owns the remaining defect.
+
+### Replicable graphics / playability checks
+
+When validating a graphics or boot change with an authorized private fixture:
+
+1. Rebuild `_build_<host>/fc_script` after touching emulator sources.
+2. Start with `KYTY_AGENT_SOCK`, `KYTY_NATIVE_CAPTURE_DIR`, and
+   `KYTY_GUEST_ROOT` (never commit the fixture path).
+3. Confirm `kyty_agent status` shows advancing `present` past the previous
+   abort point; capture a native frame for visual judgment.
+4. Run the focused gtest filter that encodes the contract (for example clear
+   load-ops, `PreferGpuMemoryAlias*`, Label force-complete / WaitRegMem mask
+   tests) and confirm the filter selects non-zero tests.
+5. Keep opt-in traces (`KYTY_SLOT_TRACE`, `KYTY_EOP_TRACE`) diagnostic-only;
+   they must not change guest-visible completion.
 
 ## Security, privacy, and lawful use
 

@@ -86,6 +86,11 @@ int KYTY_SYSV_ABI Initialize(const void* init_parameters, void* boot_parameters)
 int KYTY_SYSV_ABI GetAddcontEntitlementInfo(ServiceLabel service_label, const UnifiedEntitlementLabel* entitlement_label,
                                             AddcontEntitlementInfo* info);
 
+// sceNpEntitlementAccessGetAddcontEntitlementInfoList (NID TFyU+KFBv54).
+// SysV: rdi=serviceLabel, rsi=list*, rdx=listNum, rcx=hitNum*.
+int KYTY_SYSV_ABI GetAddcontEntitlementInfoList(ServiceLabel service_label, AddcontEntitlementInfo* list, uint32_t list_num,
+                                                uint32_t* hit_num);
+
 } // namespace Kyty::Libs::NpEntitlementAccess
 
 namespace Kyty::Libs::NpTrophy2 {

@@ -1,5 +1,7 @@
 #include "Emulator/Kernel/Memory.h"
 
+#include "Emulator/Config.h"
+
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/MagicEnum.h"
 #include "Kyty/Core/String.h"
@@ -14,6 +16,7 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <algorithm>
+#include <limits>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -46,14 +49,23 @@ public:
 	PhysicalMemory()
 	{
 		EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
-		m_backing = VirtualMemory::CreateSharedBacking(Size());
+		// The backing is sized for the largest supported generation before the
+		// loader identifies the guest. Allocation policy still exposes only the
+		// guest generation's capacity.
+		m_backing = VirtualMemory::CreateSharedBacking(BackingSize());
 		EXIT_NOT_IMPLEMENTED(m_backing == nullptr);
 	}
 	virtual ~PhysicalMemory() { VirtualMemory::DestroySharedBacking(m_backing); }
 
 	KYTY_CLASS_NO_COPY(PhysicalMemory);
 
-	static uint64_t Size() { return static_cast<uint64_t>(5376) * 1024 * 1024; }
+	static uint64_t Size()
+	{
+		constexpr uint64_t kLegacyDirectMemory = static_cast<uint64_t>(5376) * 1024 * 1024;
+		constexpr uint64_t kNextGenSystemMemory = static_cast<uint64_t>(16) * 1024 * 1024 * 1024;
+		return Config::IsNextGen() ? kNextGenSystemMemory : kLegacyDirectMemory;
+	}
+	static constexpr uint64_t BackingSize() { return static_cast<uint64_t>(16) * 1024 * 1024 * 1024; }
 
 	bool Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out, int memory_type);
 	bool Release(uint64_t start, size_t len);
@@ -126,9 +138,30 @@ KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Memory) {}
 
 KYTY_SUBSYSTEM_DESTROY(Memory) {}
 
-static uint64_t get_aligned_pos(uint64_t pos, size_t align)
+static bool get_aligned_pos(uint64_t pos, size_t align, uint64_t* aligned_pos)
 {
-	return (align != 0 ? (pos + (align - 1)) & ~(align - 1) : pos);
+	EXIT_IF(aligned_pos == nullptr);
+
+	if (align == 0)
+	{
+		*aligned_pos = pos;
+		return true;
+	}
+
+	const uint64_t remainder = pos % align;
+	if (remainder == 0)
+	{
+		*aligned_pos = pos;
+		return true;
+	}
+
+	const uint64_t increment = align - remainder;
+	if (pos > std::numeric_limits<uint64_t>::max() - increment)
+	{
+		return false;
+	}
+	*aligned_pos = pos + increment;
+	return true;
 }
 
 void RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func)
@@ -164,41 +197,51 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 
 	Core::LockGuard lock(m_mutex);
 
-	uint64_t free_pos = 0;
-
-	for (const auto& b: m_allocated)
+	search_end = std::min(search_end, Size());
+	if (search_start >= search_end || len > search_end - search_start)
 	{
-		uint64_t n = b.start_addr + b.size;
-		if (n > free_pos)
+		return false;
+	}
+
+	uint64_t candidate = 0;
+	if (!get_aligned_pos(search_start, alignment, &candidate))
+	{
+		return false;
+	}
+
+	// Direct-memory callers repeatedly request large contiguous heaps from the
+	// same search window. Keep each window append-only so smaller allocations do
+	// not fragment the only remaining range for a later heap. Blocks outside the
+	// requested window must not advance this cursor: they are unrelated physical
+	// ranges and previously made valid lower-window requests fail.
+	for (const auto& block: m_allocated)
+	{
+		if (block.size > std::numeric_limits<uint64_t>::max() - block.start_addr)
 		{
-			free_pos = n;
+			return false;
+		}
+
+		const uint64_t block_end = block.start_addr + block.size;
+		if (block_end > search_start && block.start_addr < search_end)
+		{
+			candidate = std::max(candidate, block_end);
 		}
 	}
 
-	// Start the search at search_start, not below it: with no prior allocations
-	// free_pos is 0, which would fail the `free_pos >= search_start` check and make
-	// the first direct-memory allocation spuriously fail (seen as HashLink OOM).
-	if (free_pos < search_start)
+	if (!get_aligned_pos(candidate, alignment, &candidate) || candidate > search_end - len)
 	{
-		free_pos = search_start;
+		return false;
 	}
 
-	free_pos = get_aligned_pos(free_pos, alignment);
+	AllocatedBlock block {};
+	block.size        = len;
+	block.start_addr  = candidate;
+	block.memory_type = memory_type;
 
-	if (free_pos >= search_start && free_pos + len <= search_end)
-	{
-		AllocatedBlock b {};
-		b.size        = len;
-		b.start_addr  = free_pos;
-		b.memory_type = memory_type;
+	m_allocated.Add(block);
 
-		m_allocated.Add(b);
-
-		*phys_addr_out = free_pos;
-		return true;
-	}
-
-	return false;
+	*phys_addr_out = candidate;
+	return true;
 }
 
 bool PhysicalMemory::Release(uint64_t start, size_t len)

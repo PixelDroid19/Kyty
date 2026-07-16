@@ -29,6 +29,16 @@ struct ViewportDepthRange
 	float max_depth = 1.0f;
 };
 
+struct ViewportXy
+{
+	float x      = 0.0f;
+	float y      = 0.0f;
+	float width  = 0.0f;
+	float height = 0.0f;
+};
+
+[[nodiscard]] ViewportXy ResolveViewportXy(float xscale, float xoffset, float yscale, float yoffset);
+
 // Register DEPTH_CLEAR_ENABLE suppresses shader Z writes. HTILE clear metadata only
 // means the surface reads as cleared and needs a Vulkan load-clear; it must not
 // suppress depth writes on an otherwise normal draw.
@@ -73,8 +83,9 @@ struct ColorTargetLayout
 
 [[nodiscard]] ColorTargetLayout ResolveColorTargetLayout(uint32_t mask);
 
-// A sampled surface may reuse a render target only when GpuMemory found the
-// exact live object. Matching dimensions do not establish identity or content.
+// A sampled surface may reuse a render target when FindRenderTexture found a
+// live object (Equals, non-exact IsContainedWithin, or same-base Contains).
+// Matching dimensions alone do not establish identity or content.
 enum class Gen5SampleBacking
 {
 	ExactRenderTarget,
@@ -82,6 +93,8 @@ enum class Gen5SampleBacking
 	Unsupported,
 };
 
+// exact_render_target_found: true when a live RT alias was found (exact Equals,
+// non-exact IsContainedWithin, or same-base Contains via FindRenderTexture).
 [[nodiscard]] Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exact_render_target_found);
 
 enum class ImageSampleOperation

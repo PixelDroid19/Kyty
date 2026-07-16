@@ -15,13 +15,16 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Pm4.h"
+#include "Emulator/Graphics/Utils.h"
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Profiler.h"
 
 #include <atomic>
+#include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -129,7 +132,12 @@ public:
 	void SetQueue(int queue) { m_queue = queue; }
 
 	[[nodiscard]] const FlipInfo& GetFlip() const { return m_flip; }
-	void                          SetFlip(const FlipInfo& flip) { m_flip = flip; }
+	void                          SetFlip(const FlipInfo& flip)
+	{
+		m_flip        = flip;
+		m_flip_issued = false;
+	}
+	[[nodiscard]] bool FlipIssued() const { return m_flip_issued; }
 
 	[[nodiscard]] uint64_t GetSumbitId() const { return m_sumbit_id; }
 	void                   SetSumbitId(uint64_t sumbit_id) { m_sumbit_id = sumbit_id; }
@@ -164,6 +172,7 @@ private:
 	uint32_t m_const_ram[0x3000] = {0};
 
 	FlipInfo m_flip;
+	bool     m_flip_issued = false;
 	uint64_t m_sumbit_id = 0;
 };
 
@@ -176,7 +185,7 @@ public:
 	KYTY_CLASS_NO_COPY(GraphicsRing);
 
 	void Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle, int index,
-	            int flip_mode, int64_t flip_arg);
+	            int flip_mode, int64_t flip_arg, bool with_api_flip);
 	void Done();
 	void WaitForIdle();
 	bool IsIdle();
@@ -206,6 +215,9 @@ private:
 		CmdBuffer const_buffer;
 
 		CommandProcessor::FlipInfo flip;
+		// True only for GraphicsRunSubmitAndFlip. Do not infer from flip.handle:
+		// handle 0 is a legal VideoOut handle, and plain Submit also stores zeros.
+		bool with_api_flip = false;
 	};
 
 	static void ThreadBatchRun(void* data);
@@ -354,13 +366,13 @@ void Gpu::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_
 {
 	Core::LockGuard lock(m_mutex);
 
-	m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, 0, 0, 0, 0);
+	m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, 0, 0, 0, 0, false);
 }
 
 void Gpu::SubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle,
                         int index, int flip_mode, int64_t flip_arg)
 {
-	m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, handle, index, flip_mode, flip_arg);
+	m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, handle, index, flip_mode, flip_arg, true);
 }
 
 uint32_t Gpu::MapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint32_t* ring_addr, uint32_t ring_size_dw, uint32_t* read_ptr_addr)
@@ -698,8 +710,19 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 		}
 		Core::Thread::SleepMicro(10);
 	}
-	EXIT("WaitRegMem32 timeout addr=%p val=0x%08" PRIx32 " ref=0x%08" PRIx32 " mask=0x%08" PRIx32 "\n", static_cast<const void*>(addr),
-	     *addr, ref, mask);
+	printf("--- Error ---\nWaitRegMem32 timeout addr=%p val=0x%08" PRIx32 " ref=0x%08" PRIx32 " mask=0x%08" PRIx32
+	       " (continuing; fence producer still pending)\n",
+	       static_cast<const void*>(addr), *addr, ref, mask);
+	for (;;)
+	{
+		if (((*addr) & mask) == (ref & mask))
+		{
+			return;
+		}
+		LabelCompleteSubmitted(this);
+		LabelDrainCompleted();
+		Core::Thread::SleepMicro(1000);
+	}
 }
 
 void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll)
@@ -746,8 +769,23 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 		              *addr, ref);
 		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Error, "wait_reg_mem64_timeout", wait_msg);
 	}
-	EXIT("WaitRegMem64 timeout addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64 " mask=0x%016" PRIx64 "\n", static_cast<const void*>(addr),
-	     *addr, ref, mask);
+	// Do not EXIT the process: aborting here made boot look like "game won't
+	// start / closes immediately" while the missing producer is an EOP/Label
+	// store (val stays 0). Keep draining labels and waiting; agent already
+	// recorded wait_reg_mem64_timeout.
+	printf("--- Error ---\nWaitRegMem64 timeout addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64 " mask=0x%016" PRIx64
+	       " (continuing; fence producer still pending)\n",
+	       static_cast<const void*>(addr), *addr, ref, mask);
+	for (;;)
+	{
+		if (((*addr) & mask) == (ref & mask))
+		{
+			return;
+		}
+		LabelCompleteSubmitted(this);
+		LabelDrainCompleted();
+		Core::Thread::SleepMicro(1000);
+	}
 }
 
 void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom)
@@ -788,7 +826,7 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 }
 
 void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle,
-                          int index, int flip_mode, int64_t flip_arg)
+                          int index, int flip_mode, int64_t flip_arg, bool with_api_flip)
 {
 	EXIT_IF(m_cp == nullptr);
 
@@ -817,6 +855,7 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 	buf.flip.index          = index;
 	buf.flip.flip_mode      = flip_mode;
 	buf.flip.flip_arg       = flip_arg;
+	buf.with_api_flip       = with_api_flip;
 
 	m_cmd_batches.Add(buf);
 
@@ -859,6 +898,11 @@ GraphicsRing::CmdBatch GraphicsRing::GetCmdBatch()
 	{
 		m_idle = true;
 		m_idle_cond_var.Signal();
+
+		// Do not dump guest slot table from ring-idle: GetCmdBatch idles before
+		// guest BSS is mapped, and mincore is not a reliable guard on macOS /
+		// Rosetta (SLOT_IDLE_DUMP segfaulted during init). Soft-lock dumps live
+		// in KernelNanosleep under KYTY_SLOT_TRACE once the guest sleep-polls.
 
 		m_cond_var.Wait(&m_mutex);
 	}
@@ -907,6 +951,16 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			ring->m_job2.Wait();
 
 			cp->BufferFlush();
+
+			// SubmitAndFlip carries flip args on the batch. DCBs often embed
+			// R_FLIP / marker 0x777 (which sets m_flip_issued); when they do not,
+			// the API flip must still run or VideoOutSubmitFlip never happens
+			// (empty Flip queue → guest ThreadFlag bit 0x1 soft-lock).
+			if (GraphicsBatchNeedsApiFlip(buf.with_api_flip, cp->FlipIssued()))
+			{
+				cp->Flip();
+				cp->BufferFlush();
+			}
 		}
 		cp->RunUnlock();
 	}
@@ -1403,6 +1457,7 @@ void CommandProcessor::Flip()
 
 	GraphicsRenderWriteAtEndOfPipeOnlyFlip(m_sumbit_id, m_buffer[m_current_buffer], m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                       m_flip.flip_arg);
+	m_flip_issued = true;
 }
 
 void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value)
@@ -1417,6 +1472,7 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value)
 
 	GraphicsRenderWriteAtEndOfPipeWithFlip32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value,
 	                                         m_flip.handle, m_flip.index, m_flip.flip_mode, m_flip.flip_arg);
+	m_flip_issued = true;
 }
 
 void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr, uint32_t value)
@@ -1436,6 +1492,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 		GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(m_sumbit_id, m_buffer[m_current_buffer],
 		                                                           static_cast<uint32_t*>(dst_gpu_addr), value, m_flip.handle, m_flip.index,
 		                                                           m_flip.flip_mode, m_flip.flip_arg);
+		m_flip_issued = true;
 	} else
 	{
 		EXIT("unknown event type\n");

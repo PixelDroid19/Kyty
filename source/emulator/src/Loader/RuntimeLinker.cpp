@@ -641,11 +641,13 @@ static void relocate_all(Elf64_Rela* records, uint64_t size, Program* program, b
 	}
 }
 
-static KYTY_SYSV_ABI void RelocateHandler(RelocateHandlerStack s)
+static KYTY_SYSV_ABI void RelocateHandler(uint64_t rdi, uint64_t rsi, uint64_t rdx, uint64_t rcx, uint64_t r8, uint64_t r9,
+                                          RelocateHandlerStack s)
 {
 	auto*  stack     = s.stack;
 	auto*  program   = reinterpret_cast<Program*>(stack[-1]);
 	auto   rel_index = stack[0];
+	auto   return_address = stack[1];
 	String name      = U"<unknown function>";
 
 	if (program != nullptr && program->dynamic_info != nullptr && program->dynamic_info->jmprela_table != nullptr)
@@ -659,9 +661,19 @@ static KYTY_SYSV_ABI void RelocateHandler(RelocateHandlerStack s)
 	stack[-1] = stack[1];
 
 	Core::Singleton<Loader::RuntimeLinker>::Instance()->StackTrace(reinterpret_cast<uint64_t>(s.stack - 2));
+	// Never touch return_address memory here: an unmapped page would SIGSEGV
+	// before EXIT could report the missing NID (silent guest close).
+	static constexpr uint8_t kCallerBytesUnknown[16] = {};
 
-	EXIT("=== Unpatched function!!! ===\n[%d]\t%s\n", Core::Thread::GetThreadIdUnique(),
-	     (Log::IsColoredPrintf() ? name : Log::RemoveColors(name)).C_Str());
+	EXIT("=== Unpatched function!!! ===\n[%d]\t%s\n"
+	     "SysV arguments: rdi=%016" PRIx64 " rsi=%016" PRIx64 " rdx=%016" PRIx64 " rcx=%016" PRIx64
+	     " r8=%016" PRIx64 " r9=%016" PRIx64 " return=%016" PRIx64 "\n"
+	     "Caller bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	     Core::Thread::GetThreadIdUnique(), (Log::IsColoredPrintf() ? name : Log::RemoveColors(name)).C_Str(), rdi, rsi, rdx, rcx, r8,
+	     r9, return_address, kCallerBytesUnknown[0], kCallerBytesUnknown[1], kCallerBytesUnknown[2], kCallerBytesUnknown[3],
+	     kCallerBytesUnknown[4], kCallerBytesUnknown[5], kCallerBytesUnknown[6], kCallerBytesUnknown[7], kCallerBytesUnknown[8],
+	     kCallerBytesUnknown[9], kCallerBytesUnknown[10], kCallerBytesUnknown[11], kCallerBytesUnknown[12], kCallerBytesUnknown[13],
+	     kCallerBytesUnknown[14], kCallerBytesUnknown[15]);
 }
 
 static KYTY_MS_ABI uint8_t* TlsMainGetAddr()

@@ -136,4 +136,18 @@ TEST(EmulatorNp, GetAddcontEntitlementInfoReportsMissingEntitlement)
 	EXPECT_EQ(std::memcmp(&info, &before, sizeof(info)), 0);
 }
 
+TEST(EmulatorNp, GetAddcontEntitlementInfoListReportsNoLocalEntitlements)
+{
+	using namespace NpEntitlementAccess;
+
+	uint8_t init_parameters[0x40] = {};
+	uint8_t boot_parameters[0x20] = {};
+	ASSERT_EQ(Initialize(init_parameters, boot_parameters), 0);
+
+	uint32_t hit_count = UINT32_MAX;
+	EXPECT_EQ(GetAddcontEntitlementInfoList(0, nullptr, 0, &hit_count), 0);
+	EXPECT_EQ(hit_count, 0u);
+	EXPECT_EQ(GetAddcontEntitlementInfoList(0, nullptr, 0, nullptr), ERROR_PARAMETER);
+}
+
 UT_END();

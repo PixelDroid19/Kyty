@@ -150,6 +150,57 @@ int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread);
 int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, KernelUseconds usec);
 int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex);
 
+struct PthreadCondWaitDiagnostic
+{
+	uint64_t cond        = 0;
+	uint64_t mutex       = 0;
+	uint64_t return_addr = 0;
+	uint64_t cond_handle = 0;
+	uint64_t mutex_handle = 0;
+	uint32_t signal_count = 0;
+};
+
+struct PthreadCondWaitDiagnostics
+{
+	bool                      enabled       = false;
+	uint32_t                  blocked_count = 0;
+	uint64_t                  tracked_cond  = 0;
+	uint32_t                  tracked_waits = 0;
+	uint32_t                  tracked_signals = 0;
+	PthreadCondWaitDiagnostic blocked[8] {};
+};
+
+// Passive snapshot for opt-in condition-wait diagnostics. It never wakes a
+// guest, changes mutex ownership, or creates synchronization objects.
+bool PthreadGetCondWaitDiagnostics(PthreadCondWaitDiagnostics* out);
+
+struct PthreadThreadDiagnostic
+{
+	uint64_t entry      = 0;
+	uint64_t argument   = 0;
+	int32_t  unique_id  = -1;
+	bool     started    = false;
+	bool     detached   = false;
+	bool     almost_done = false;
+	bool     free       = false;
+};
+
+struct PthreadThreadDiagnostics
+{
+	bool                    available       = false;
+	uint32_t                allocated_count = 0;
+	uint32_t                active_count    = 0;
+	uint32_t                thread_count    = 0;
+	PthreadThreadDiagnostic threads[32] {};
+};
+
+// Passive snapshot of guest pthread lifecycle state. It does not create,
+// schedule, join, detach, or otherwise change guest threads.
+bool PthreadGetThreadDiagnostics(PthreadThreadDiagnostics* out);
+
+// Opt-in KYTY_SLOT_TRACE dump of currently blocked CondWait guests.
+void SlotTraceDumpBlockedCondWaiters();
+
 int KYTY_SYSV_ABI      KernelClockGetres(KernelClockid clock_id, KernelTimespec* tp);
 int KYTY_SYSV_ABI      KernelClockGettime(KernelClockid clock_id, KernelTimespec* tp);
 int KYTY_SYSV_ABI      KernelGettimeofday(KernelTimeval* tp);

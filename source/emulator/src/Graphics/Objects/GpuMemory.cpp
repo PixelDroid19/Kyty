@@ -222,7 +222,10 @@ public:
 	}
 
 private:
-	static constexpr uint32_t PAGE_BITS = 14u;
+	// This index only produces candidates; FindBlocks validates each range with
+	// GetOverlapType before accepting it. A 1 MiB bucket keeps that exact
+	// contract while avoiding thousands of 16 KiB probes for large descriptors.
+	static constexpr uint32_t PAGE_BITS = 20u;
 
 	static uint32_t CalcPageId(uint64_t vaddr)
 	{
@@ -974,6 +977,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// Single-parent RT/DS/Texture/SB share with an incoming StorageBuffer
 				// (captured DepthStencilBuffer Crosses StorageBuffer 0x8000).
 				overlap = true;
+			} else if (GpuMemoryKeepLabelWriteBackHole(o.object.type, obj.relation, info.type))
+			{
+				// Label↔StorageBuffer: keep Label registered for WriteBack holes.
+				overlap = true;
 			} else
 			switch (ObjectsRelation(o.object.type, obj.relation, info.type))
 			{
@@ -987,7 +994,6 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					overlap = true;
 					break;
 				}
-				case ObjectsRelation(GpuMemoryObjectType::StorageBuffer, OverlapType::Contains, GpuMemoryObjectType::Label):
 				case ObjectsRelation(GpuMemoryObjectType::Label, OverlapType::Equals, GpuMemoryObjectType::Label):
 				case ObjectsRelation(GpuMemoryObjectType::DepthStencilBuffer, OverlapType::Contains,
 				                     GpuMemoryObjectType::DepthStencilBuffer):
@@ -1101,7 +1107,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					const bool vertex_share = GpuMemoryAllowsVertexStorageShare(o.object.type, obj.relation, info.type);
 					const bool surface_share =
 					    GpuMemoryAllowsStorageSurfaceShare(o.object.type, obj.relation, info.type);
-					if (!texture_alias && !vertex_share && !surface_share)
+					const bool label_hole = GpuMemoryKeepLabelWriteBackHole(o.object.type, obj.relation, info.type);
+					if (!texture_alias && !vertex_share && !surface_share && !label_hole)
 					{
 						multi_mixed_storage_alias = false;
 						break;
@@ -1444,7 +1451,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				switch (ObjectsRelation(type, rel, info.type))
 				{
 					case ObjectsRelation(GpuMemoryObjectType::Label, OverlapType::IsContainedWithin, GpuMemoryObjectType::StorageBuffer):
-						delete_all = true;
+					case ObjectsRelation(GpuMemoryObjectType::Label, OverlapType::Equals, GpuMemoryObjectType::StorageBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::Label, OverlapType::Crosses, GpuMemoryObjectType::StorageBuffer):
+						// Keep Label for LabelWriteBackCopy holes (see GpuMemoryKeepLabelWriteBackHole).
+						overlap = true;
 						break;
 					// Same policy as the single-overlap path: Texture reclaiming
 					// memory previously tracked as VertexBuffers.
@@ -1682,8 +1692,8 @@ Vector<GpuMemoryObject> GpuMemory::FindObjects(const uint64_t* vaddr, const uint
 	{
 		const auto& h = heap.objects[obj.object_id];
 		EXIT_IF(h.free);
-		if (h.info.object.type == type &&
-		    (obj.relation == OverlapType::Equals || (!exact && obj.relation == OverlapType::IsContainedWithin)))
+		const bool same_base = (h.block.vaddr_num > 0 && h.block.vaddr[0] == vaddr[0]);
+		if (h.info.object.type == type && GpuMemoryFindObjectsAcceptsRelation(obj.relation, exact, same_base))
 		{
 			ret.Add(h.info.object);
 		}

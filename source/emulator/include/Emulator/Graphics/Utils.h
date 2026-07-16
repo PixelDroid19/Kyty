@@ -214,6 +214,12 @@ struct ColorAttachmentLoadOps
 //   R16G16B16A16_SFLOAT: WORD0 = f16(R)|(f16(G)<<16), WORD1 = f16(B)|(f16(A)<<16)
 //   R8G8B8A8_*:          WORD0 = R|(G<<8)|(B<<16)|(A<<24), WORD1 = 0
 // Do not invent B=0/A=1 by bitcasting WORD0/1 as float32 R/G.
+[[nodiscard]] inline bool ColorClearWordsHaveKnownPacking(VkFormat format)
+{
+	return format == VK_FORMAT_R16G16B16A16_SFLOAT || format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB ||
+	       format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB;
+}
+
 [[nodiscard]] inline VkClearColorValue DecodeGuestColorClearWords(uint32_t word0, uint32_t word1, VkFormat format)
 {
 	VkClearColorValue value {};
@@ -267,14 +273,12 @@ struct ColorAttachmentLoadOps
 		ops.load_op        = VK_ATTACHMENT_LOAD_OP_CLEAR;
 		ops.initial_layout = (tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_IMAGE_LAYOUT_UNDEFINED
 		                                                                  : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		const bool decode_words = guest_fast_clear || clear_word0 != 0u || clear_word1 != 0u ||
-		                          format == VK_FORMAT_R16G16B16A16_SFLOAT;
+		// Known Mesa/RADV packings decode WORD=0 to transparent black (A=0). Inventing
+		// opaque A=1 on RGBA8 left sprite/GBuffer intermediates cleared opaque-black,
+		// which then composite as black quads around alpha sprites (Prisoners' Quarters).
+		const bool decode_words = guest_fast_clear || clear_word0 != 0u || clear_word1 != 0u || ColorClearWordsHaveKnownPacking(format);
 		if (decode_words)
 		{
-			// Always decode for float RTs: CLEAR_WORD=0 packs to A=0 (captured lighting
-			// targets with blend SRC_ALPHA,ONE). Inventing opaque A=1 diverges from
-			// Mesa/RADV f16 packing. Other formats keep legacy opaque-black when words
-			// are zero and fast-clear is off until those paths are re-characterized.
 			const auto clear = DecodeGuestColorClearWords(clear_word0, clear_word1, format);
 			ops.clear_r      = clear.float32[0];
 			ops.clear_g      = clear.float32[1];
@@ -355,6 +359,41 @@ inline std::pair<int, int> UtilCalcMipmapOffset(uint32_t lod, uint32_t width, ui
 	}
 
 	return {mip_x, mip_y};
+}
+
+// Post-BufferFlush LabelCompleteSubmitted action for a registered label.
+// OnlyFlip calls LabelDelete while the label is still Active (→ ActiveDeleted)
+// before the submit fence completes. Skipping ActiveDeleted left VideoOutSubmitFlip
+// on the Label-thread vkGetEventStatus path; MoltenVK often never observes SET, so
+// the Flip queue stayed empty and the guest ThreadFlag bit 0x1 wait soft-locked.
+enum class LabelForceCompleteKind : uint8_t
+{
+	Skip        = 0,
+	FireKeep    = 1, // Active: fire callbacks, leave registered for reuse/delete
+	FireDestroy = 2, // ActiveDeleted: fire callbacks, then destroy (fence already waited)
+};
+
+[[nodiscard]] inline LabelForceCompleteKind LabelForceCompleteActionFor(bool active, bool active_deleted)
+{
+	if (active)
+	{
+		return LabelForceCompleteKind::FireKeep;
+	}
+	if (active_deleted)
+	{
+		return LabelForceCompleteKind::FireDestroy;
+	}
+	return LabelForceCompleteKind::Skip;
+}
+
+// SubmitAndFlip stores flip args on the GraphicsRing batch. If the DCB did not
+// emit R_FLIP / marker 0x777 during Run, ThreadBatchRun must still issue the API
+// flip after BufferFlush (otherwise Flip queue stays empty).
+// submit_and_flip must be an explicit batch flag: VideoOut handle 0 is legal and
+// plain Submit also zeroes flip fields, so handle!=0 is not a valid detector.
+[[nodiscard]] inline bool GraphicsBatchNeedsApiFlip(bool submit_and_flip, bool flip_issued_during_run)
+{
+	return submit_and_flip && !flip_issued_during_run;
 }
 
 // GPU→CPU buffer write-back with absolute holes [hole_begin[i], hole_end[i]).
