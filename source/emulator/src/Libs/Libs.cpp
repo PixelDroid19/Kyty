@@ -54,6 +54,10 @@ LIB_DEFINE(InitNpCppWebApi_1);
 LIB_DEFINE(InitJson2_1);
 LIB_DEFINE(InitFont_1);
 LIB_DEFINE(InitFontFt_1);
+LIB_DEFINE(InitIme_1);
+LIB_DEFINE(InitMouse_1);
+LIB_DEFINE(InitKeyboard_1);
+LIB_DEFINE(InitContentExport_1);
 
 bool Init(const String& id, Loader::SymbolDatabase* s)
 {
@@ -95,6 +99,10 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libJson2_1", InitJson2_1);
 	LIB_CHECK(U"libFont_1", InitFont_1);
 	LIB_CHECK(U"libFontFt_1", InitFontFt_1);
+	LIB_CHECK(U"libIme_1", InitIme_1);
+	LIB_CHECK(U"libMouse_1", InitMouse_1);
+	LIB_CHECK(U"libKeyboard_1", InitKeyboard_1);
+	LIB_CHECK(U"libContentExport_1", InitContentExport_1);
 
 	return false;
 }
@@ -135,6 +143,10 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(InitJson2_1);
 	LIB_LOAD(InitFont_1);
 	LIB_LOAD(InitFontFt_1);
+	LIB_LOAD(InitIme_1);
+	LIB_LOAD(InitMouse_1);
+	LIB_LOAD(InitKeyboard_1);
+	LIB_LOAD(InitContentExport_1);
 }
 
 } // namespace Kyty::Libs
