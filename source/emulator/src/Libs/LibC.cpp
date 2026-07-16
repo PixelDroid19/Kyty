@@ -215,10 +215,11 @@ static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
 	return ::strtok_r(str, delim, &save);
 }
 
-// C++ operator new/delete (mangled _Znwm/_ZdlPv), forwarded to the host allocator.
+// C++ operator new/delete (mangled _Znwm/_ZdlPv/_ZdaPv), forwarded to the host allocator.
 static KYTY_SYSV_ABI void* cxx_new(size_t size) { return ::malloc(size != 0 ? size : 1); }
 static KYTY_SYSV_ABI void  cxx_delete(void* p) { ::free(p); }
 static KYTY_SYSV_ABI void* cxx_new_array(size_t size) { return ::malloc(size != 0 ? size : 1); }
+static KYTY_SYSV_ABI void  cxx_delete_array(void* p) { ::free(p); }
 
 // --- Additional string / memory ---------------------------------------------
 static KYTY_SYSV_ABI int   c_bcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
@@ -852,9 +853,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("9yDWMxEFdJU", LibC::c_strrchr);
 	// Gen5 libc_v1 strstr.
 	LIB_FUNC("viiwFMaNamA", LibC::c_strstr);
-	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);    // operator new(size_t)
-	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete); // operator delete(void*)
-	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);    // operator new[](size_t)
+	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);         // operator new(size_t)
+	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete);      // operator delete(void*)
+	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);   // operator new[](size_t)
+	LIB_FUNC("MLWl90SFWNE", LibC::cxx_delete_array); // operator delete[](void*)
 
 	// string / memory
 	LIB_FUNC("+P6FRGH4LfA", LibC::c_memmove);
