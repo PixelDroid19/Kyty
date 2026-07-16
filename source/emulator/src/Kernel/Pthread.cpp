@@ -930,6 +930,36 @@ int KYTY_SYSV_ABI PthreadMutexTrylock(PthreadMutex* mutex)
 	}
 }
 
+int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec)
+{
+	PRINT_NAME();
+
+	if (mutex == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
+	EXIT_IF(pthread_static_objects == nullptr);
+	mutex = static_cast<PthreadMutex*>(pthread_static_objects->CreateObject(mutex, PthreadStaticObject::Type::Mutex));
+
+	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
+
+	timespec t {};
+	usec_to_timespec(&t, usec);
+
+	const int result = pthread_mutex_timedlock(&(*mutex)->p, &t);
+	switch (result)
+	{
+		case 0: return OK;
+		case ETIMEDOUT: return KERNEL_ERROR_ETIMEDOUT;
+		case EAGAIN: return KERNEL_ERROR_EAGAIN;
+		case EDEADLK: return KERNEL_ERROR_EDEADLK;
+		case EINVAL:
+		default: return KERNEL_ERROR_EINVAL;
+	}
+}
+
 int KYTY_SYSV_ABI PthreadMutexUnlock(PthreadMutex* mutex)
 {
 	// PRINT_NAME();

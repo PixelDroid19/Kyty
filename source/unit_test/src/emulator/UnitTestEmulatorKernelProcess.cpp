@@ -2,8 +2,11 @@
 #include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/FileSystem.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Config.h"
 #include "Emulator/Libs/Errno.h"
+#include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 #include "Kyty/UnitTest.h"
 
@@ -91,6 +94,85 @@ TEST(EmulatorKernelProcess, AprSubmitCommandBufferRejectsNullAndAckNonNull)
 	uint64_t fake_cmd = 0x1111;
 	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(nullptr, 1, nullptr, 2, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
 	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(&fake_cmd, 1, &fake_cmd, 2, &fake_cmd), OK);
+}
+
+TEST(EmulatorKernelProcess, AprSubmitGetIdAndWaitRoundTrip)
+{
+	EnsureKernelProcessSubsystems();
+
+	uint64_t fake_cmd = 0x2222;
+	uint32_t sub_id   = 0;
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(nullptr, 1, &sub_id), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(&fake_cmd, 1, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(&fake_cmd, 1, &sub_id), OK);
+	EXPECT_NE(sub_id, 0u);
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprWaitCommandBuffer(sub_id), OK);
+	// Second wait on completed id is soft-OK (eager builders).
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprWaitCommandBuffer(sub_id), OK);
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprWaitCommandBuffer(0), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+// Gen5 NID IafI2PxcPnQ — null mutex is EINVAL at the HLE boundary.
+TEST(EmulatorKernelProcess, PthreadMutexTimedlockRejectsNull)
+{
+	EXPECT_EQ(LibKernel::PthreadMutexTimedlock(nullptr, 1000), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+// ForEach with results[] continues after per-path errors and returns success count.
+TEST(EmulatorKernelProcess, AprResolveForEachReportsPerPathResults)
+{
+	EnsureKernelProcessSubsystems();
+
+	const char* paths[2] = {nullptr, nullptr};
+	uint32_t    ids[2]   = {0, 0};
+	int32_t     results[2] = {0, 0};
+	// Null path list entry → EFAULT per entry; with results[] returns 0 successes.
+	const int rc = LibKernel::FileSystem::KernelAprResolveFilepathsToIdsForEach(paths, 2, ids, results);
+	EXPECT_EQ(rc, 0);
+	EXPECT_EQ(results[0], LibKernel::KERNEL_ERROR_EFAULT);
+	EXPECT_EQ(results[1], LibKernel::KERNEL_ERROR_EFAULT);
+	EXPECT_EQ(ids[0], 0xffffffffu);
+	EXPECT_EQ(ids[1], 0xffffffffu);
+}
+
+// Gen5 memory helpers: null size rejects; range name is success no-op.
+TEST(EmulatorKernelProcess, ConfiguredFlexibleAndRangeNameBoundaries)
+{
+	EXPECT_EQ(LibKernel::Memory::KernelConfiguredFlexibleMemorySize(nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(LibKernel::Memory::KernelSetVirtualRangeName(nullptr, 0, "test"), OK);
+}
+
+// Gen5 VirtualQuery: reject bad info_size/flags; unmapped addr returns EACCES.
+TEST(EmulatorKernelProcess, VirtualQueryRejectsBadArgs)
+{
+	static_assert(sizeof(LibKernel::Memory::VirtualQueryInfo) == 72);
+	LibKernel::Memory::VirtualQueryInfo info {};
+	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 0, nullptr, sizeof(info)), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 0, &info, 8), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 2, &info, sizeof(info)), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+// Gen5 TLS setspecific/getspecific NIDs used after KeyCreate.
+TEST(EmulatorKernelProcess, ResolvesGen5PthreadSpecificNids)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	auto resolve = [&](const char16_t* nid) {
+		Loader::SymbolResolve query {};
+		query.name                 = nid;
+		query.library              = U"libkernel";
+		query.library_version      = 1;
+		query.module               = U"libkernel";
+		query.module_version_major = 1;
+		query.module_version_minor = 1;
+		query.type                 = Loader::SymbolType::Func;
+		return symbols.Find(query) != nullptr;
+	};
+
+	EXPECT_TRUE(resolve(u"+BzXYkqYeLE"));
+	EXPECT_TRUE(resolve(u"eoht7mQOCmo"));
+	EXPECT_TRUE(resolve(u"rVjRvHJ0X6c"));
 }
 
 UT_END();

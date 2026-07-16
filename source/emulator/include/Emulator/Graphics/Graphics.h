@@ -100,14 +100,26 @@ int KYTY_SYSV_ABI   GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, u
 uint32_t* KYTY_SYSV_ABI GraphicsCbNop(CommandBuffer* buf, uint32_t num_dw);
 // Legacy name used by older call sites; same entry as GraphicsCbNop.
 uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw);
+// Byte size of a CbNop of the given dword length (header included).
+uint32_t KYTY_SYSV_ABI GraphicsCbNopGetSize(uint32_t size_in_dwords);
+// Byte size of GraphicsCbDispatch (fixed 5-dword packet).
+uint32_t KYTY_SYSV_ABI GraphicsCbDispatchGetSize();
+// Byte size of GraphicsCbSetShRegisterRangeDirect for num_values registers.
+uint32_t KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirectGetSize(uint32_t num_values);
 // sceAgcGetPacketSize (NID Lkf86B98qPc): type-3 PM4 length in dwords from header.
 uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd);
 // sceAgcDmaDataPatchSetDstAddressOrOffset (NID IxYiarKlXxM): patch R_DMA_DATA dst.
 int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetDstAddressOrOffset(uint32_t* cmd, uint64_t destination_address);
 // sceAgcWaitRegMemPatchAddress (NID 3KDcnM3lrcU): patch wait-mem address field.
 int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t address);
+// Patch IT_WRITE_DATA destination address dwords (NID fPSCdQxgpSw).
+int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64_t address_or_offset);
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
 int KYTY_SYSV_ABI   GraphicsAgcDriverUnknownKRzWekV120();
+// PS5 Pro / Trinity GPU mode query (NID BfBDZGbti7A). Base Prospero reports 0.
+uint64_t KYTY_SYSV_ABI GraphicsGetIsTrinityMode();
+// Debug exception raise used by titles as a soft breakpoint; returns OK.
+int KYTY_SYSV_ABI GraphicsDebugRaiseException(uint32_t exception_id);
 
 uint32_t GraphicsGetShRegistersPacketSize(const ShaderRegister* regs, uint32_t num_regs);
 uint32_t GraphicsEncodeShRegisters(uint32_t* cmd, uint32_t capacity_dw, const ShaderRegister* regs, uint32_t num_regs);
@@ -153,6 +165,34 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_out_handle, int32_t display_buffer_index, uint32_t flip_mode,
                                            int64_t flip_arg);
 
+// Async CB forms: same packet encodings as the DCB builders with ABI differences
+// observed on Gen5 libSceAgc (no op argument on WaitRegMem; slim AcquireMem).
+uint32_t* KYTY_SYSV_ABI GraphicsAcbWaitRegMem(CommandBuffer* buf, uint8_t size, uint8_t compare_function, uint8_t cache_policy,
+                                              const volatile void* address, uint64_t reference, uint64_t mask, uint32_t poll_cycles);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
+                                             const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbAcquireMem(CommandBuffer* buf, uint32_t gcr_cntl, const volatile void* base, uint64_t size_bytes,
+                                              uint32_t poll_cycles);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbResetQueue(CommandBuffer* buf, uint32_t op);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dst_cache_policy, uint64_t dst_address, uint8_t src,
+                                            uint8_t src_cache_policy, uint64_t src_address_or_immediate, uint8_t item_size,
+                                            uint8_t write_confirm);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbPushMarker(CommandBuffer* buf, const char* str, uint32_t color);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbPopMarker(CommandBuffer* buf);
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dst_cache_policy, uint64_t dst_address, uint8_t src,
+                                            uint8_t src_cache_policy, uint64_t src_address_or_immediate, uint8_t item_size,
+                                            uint8_t write_confirm);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbPushMarker(CommandBuffer* buf, const char* str, uint32_t color);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbPopMarker(CommandBuffer* buf);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t index_addr);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbGetLodStats(CommandBuffer* buf, uint8_t cache_policy, const volatile void* buffer,
+                                               uint32_t buffer_size_in_bytes, uint32_t reset_count, uint8_t force_reset,
+                                               uint8_t report_and_reset, uint32_t reporting_interval_in_100k_clocks);
+
 } // namespace Gen5
 
 namespace Gen5Driver {
@@ -160,6 +200,8 @@ namespace Gen5Driver {
 struct Packet;
 
 int KYTY_SYSV_ABI GraphicsDriverSubmitDcb(const Packet* packet);
+int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet);
+int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata);
 int KYTY_SYSV_ABI GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(size_t* size, uint32_t max_resources,
                                                                                  uint32_t max_owners);
 int KYTY_SYSV_ABI GraphicsDriverInitResourceRegistration(void* memory, size_t size, uint32_t max_owners);

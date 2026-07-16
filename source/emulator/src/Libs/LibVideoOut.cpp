@@ -58,6 +58,12 @@ LIB_DEFINE(InitVideoOut_1)
 
 	LIB_FUNC("PjS5uASwcV8", VideoOut::VideoOutSetBufferAttribute2);
 	LIB_FUNC("rKBUtgRrtbk", VideoOut::VideoOutRegisterBuffers2);
+	// Gen5 NIDs observed as strict Unpatched imports on boot.
+	LIB_FUNC("zgXifHT9ErY", VideoOut::VideoOutIsFlipPending);
+	LIB_FUNC("utPrVdxio-8", VideoOut::VideoOutGetOutputStatus);
+	LIB_FUNC("DYhhWbJSeRg", VideoOut::VideoOutColorSettingsSetGamma);
+	LIB_FUNC("pv9CI5VC+R0", VideoOut::VideoOutAdjustColor);
+	LIB_FUNC("HuViW4HnrOw", VideoOut::VideoOutSubmitChangeBufferAttribute2);
 	InitVideoOutCommon(s, 1, 1);
 }
 

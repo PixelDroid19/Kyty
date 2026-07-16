@@ -515,6 +515,25 @@ static int KYTY_SYSV_ABI KernelGetGPI()
 	return KernelRetailGetGpiResult();
 }
 
+// sceKernelIsTrinityMode — NID tU5e3f9gSiU. Base PS5 mode reports 0.
+static int KYTY_SYSV_ABI KernelIsTrinityMode()
+{
+	PRINT_NAME();
+	return 0;
+}
+
+// sceKernelFsync — NID fTx66l5iWIA. Host has no guest-fd flush; accept valid fd.
+static int KYTY_SYSV_ABI KernelFsync(int fd)
+{
+	PRINT_NAME();
+	printf("\t fd = %d\n", fd);
+	if (fd < 0)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+	return OK;
+}
+
 } // namespace LibKernel
 
 namespace Posix {
@@ -596,9 +615,26 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("oib76F-12fk", FileSystem::KernelLseek);
 	LIB_FUNC("j2AIqSqJP0w", FileSystem::KernelGetdents);
 	LIB_FUNC("1-LFLmRFxxM", FileSystem::KernelMkdir);
-	// Gen5 APR batch path resolution.
+	LIB_FUNC("naInUjYt3so", FileSystem::KernelRmdir);
+	// Gen5 APR path resolution / submit / wait (libkernel APR family).
 	LIB_FUNC("gEpBkcwxUjw", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizes);
+	LIB_FUNC("WT-5NKy42fw", FileSystem::KernelAprResolveFilepathsToIds);
+	LIB_FUNC("i3HWvW35jao", FileSystem::KernelAprResolveFilepathsWithPrefixToIds);
+	LIB_FUNC("w5fcCG+t31g", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes);
+	LIB_FUNC("eYAh2vlCY-U", FileSystem::KernelAprResolveFilepathsToIdsForEach);
+	LIB_FUNC("QzB4O+bJQyA", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizesForEach);
+	LIB_FUNC("VB-BtuIW8Xc", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsForEach);
+	LIB_FUNC("C+Khtbbx2g8", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach);
+	LIB_FUNC("ApkYaHb8Sek", FileSystem::KernelAprGetFileStat);
+	LIB_FUNC("WvEu7yl3Ivg", FileSystem::KernelAprGetFileSize);
 	LIB_FUNC("eE4Szl8sil8", FileSystem::KernelAprSubmitCommandBuffer);
+	LIB_FUNC("ASoW5WE-UPo", FileSystem::KernelAprSubmitCommandBufferAndGetResult);
+	LIB_FUNC("qvMUCyyaCSI", FileSystem::KernelAprSubmitCommandBufferAndGetId);
+	LIB_FUNC("rqwFKI4PAiM", FileSystem::KernelAprWaitCommandBuffer);
+
+	// Gen5 kernel mode / fd flush.
+	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
+	LIB_FUNC("fTx66l5iWIA", LibKernel::KernelFsync);
 }
 
 LIB_DEFINE(InitLibKernel_1_Mem)
@@ -610,12 +646,16 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("rTXw65xmLIA", Memory::KernelAllocateDirectMemory);
 	LIB_FUNC("B+vc2AO2Zrc", Memory::KernelAllocateMainDirectMemory);
 	LIB_FUNC("L-Q3LEjIbgA", Memory::KernelMapDirectMemory);
+	LIB_FUNC("BQQniolj9tQ", Memory::KernelMapDirectMemory2);
 	LIB_FUNC("NcaWUxfMNIQ", Memory::KernelMapNamedDirectMemory);
 	LIB_FUNC("MBuItvba6z8", Memory::KernelReleaseDirectMemory);
 	LIB_FUNC("hwVSPCmp5tM", Memory::KernelCheckedReleaseDirectMemory);
 	LIB_FUNC("WFcfL2lzido", Memory::KernelQueryMemoryProtection);
 	LIB_FUNC("BHouLQzh0X0", Memory::KernelDirectMemoryQuery);
 	LIB_FUNC("aNz11fnnzi4", Memory::KernelAvailableFlexibleMemorySize);
+	LIB_FUNC("n1-v6FgU7MQ", Memory::KernelConfiguredFlexibleMemorySize);
+	LIB_FUNC("DGMG3JshrZU", Memory::KernelSetVirtualRangeName);
+	LIB_FUNC("rVjRvHJ0X6c", Memory::KernelVirtualQuery);
 	LIB_FUNC("vSMAm3cxYTY", Memory::KernelMprotect);
 }
 
@@ -635,6 +675,8 @@ LIB_DEFINE(InitLibKernel_1_EventFlag)
 	LIB_FUNC("BpFoboUJoZU", EventFlag::KernelCreateEventFlag);
 	LIB_FUNC("JTvBflhYazQ", EventFlag::KernelWaitEventFlag);
 	LIB_FUNC("IOnSvHzqu6A", EventFlag::KernelSetEventFlag);
+	// Gen5 NID for delete (strict Unpatched otherwise).
+	LIB_FUNC("8mql9OcQnd4", EventFlag::KernelDeleteEventFlag);
 }
 
 LIB_DEFINE(InitLibKernel_1_Semaphore)
@@ -684,6 +726,8 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("-quPa4SEJUw", LibKernel::PthreadAttrGetstack);
 	LIB_FUNC("txHtngJ+eyc", LibKernel::PthreadAttrGetguardsize);
 	LIB_FUNC("UTXzJbWhhTE", LibKernel::PthreadAttrSetstacksize);
+	// Gen5 NID (stack addr+size in one call).
+	LIB_FUNC("Bvn74vj6oLo", LibKernel::PthreadAttrSetstack);
 	LIB_FUNC("-Wreprtu0Qs", LibKernel::PthreadAttrSetdetachstate);
 	LIB_FUNC("El+cQ20DynU", LibKernel::PthreadAttrSetguardsize);
 	LIB_FUNC("eXbUSpEaTsA", LibKernel::PthreadAttrSetinheritsched);
@@ -696,15 +740,27 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("Ox9i0c7L5w0", LibKernel::PthreadRwlockRdlock);
 	LIB_FUNC("+L98PIbGttk", LibKernel::PthreadRwlockUnlock);
 	LIB_FUNC("mqdNorrB+gI", LibKernel::PthreadRwlockWrlock);
+	// Gen5 rwlock / attr NIDs observed as strict Unpatched imports.
+	LIB_FUNC("bIHoZCTomsI", LibKernel::PthreadRwlockTrywrlock);
+	LIB_FUNC("i2ifZ3fS2fo", LibKernel::PthreadRwlockattrDestroy);
+	LIB_FUNC("yOfGg-I1ZII", LibKernel::PthreadRwlockattrInit);
 
 	LIB_FUNC("2Tb92quprl0", LibKernel::PthreadCondInit);
 	LIB_FUNC("g+PZd2hiacg", LibKernel::PthreadCondDestroy);
 	LIB_FUNC("WKAXJ4XBPQ4", LibKernel::PthreadCondWait);
 	LIB_FUNC("JGgj7Uvrl+A", LibKernel::PthreadCondBroadcast);
 	LIB_FUNC("kDh-NfxgMtE", LibKernel::PthreadCondSignal);
+	LIB_FUNC("o69RpYO-Mu0", LibKernel::PthreadCondSignalto);
 	LIB_FUNC("BmMjYxmew1w", LibKernel::PthreadCondTimedwait);
 	LIB_FUNC("m5-2bsNfv7s", LibKernel::PthreadCondattrInit);
 	LIB_FUNC("waPcxYiR3WA", LibKernel::PthreadCondattrDestroy);
+
+	// Gen5 TLS key + timed mutex NIDs.
+	LIB_FUNC("geDaqgH9lTg", LibKernel::PthreadKeyCreate);
+	LIB_FUNC("PrdHuuDekhY", LibKernel::PthreadKeyDelete);
+	LIB_FUNC("+BzXYkqYeLE", LibKernel::PthreadSetspecific);
+	LIB_FUNC("eoht7mQOCmo", LibKernel::PthreadGetspecific);
+	LIB_FUNC("IafI2PxcPnQ", LibKernel::PthreadMutexTimedlock);
 
 	LIB_FUNC("QBi7HCK03hw", LibKernel::KernelClockGettime);
 	LIB_FUNC("ejekcaNQNq0", LibKernel::KernelGettimeofday);

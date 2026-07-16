@@ -15,7 +15,7 @@ LIB_DEFINE(InitPad_1)
 
 	LIB_FUNC("hv1luiJrqQM", Controller::PadInit);
 	LIB_FUNC("xk0AcarP3V4", Controller::PadOpen);
-	// scePadGetHandle — aerolib NID; returns the handle from PadOpen for the same user/type/index.
+	// scePadGetHandle — returns the handle from PadOpen for the same user/type/index.
 	LIB_FUNC("u1GRHp+oWoY", Controller::PadGetHandle);
 	LIB_FUNC("clVvL4ZDntw", Controller::PadSetMotionSensorState);
 	LIB_FUNC("vDLMoJLde8I", Controller::PadSetTiltCorrectionState);
