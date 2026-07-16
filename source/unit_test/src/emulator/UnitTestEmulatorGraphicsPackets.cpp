@@ -1782,6 +1782,29 @@ TEST(EmulatorGraphicsPackets, DecodesCbColorInfoRoundModeBit)
 	EXPECT_EQ(KYTY_PM4_GET(blend_bypass, CB_COLOR0_INFO, ROUND_MODE), 0u);
 }
 
+// image_sample_lz (MIMG op 0x27) with dmask 0xf — observed after PlayGo/Resident.
+TEST(EmulatorGraphicsPackets, ParsesImageSampleLzDmaskF)
+{
+	const uint32_t word0 = (0x3cu << 26u) | (0x27u << 18u) | (0xfu << 8u);
+	const uint32_t shader[] = {word0, 0u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::ImageSampleLz);
+	EXPECT_EQ(code.GetInstructions().At(0).format, ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF);
+	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 4);
+}
+
 // image_sample (MIMG op 0x20) with single-channel dmasks — captured post-Play
 // with dmask 0x4 then 0x2 at sequential PCs.
 TEST(EmulatorGraphicsPackets, ParsesImageSampleSingleChannelDmasks)

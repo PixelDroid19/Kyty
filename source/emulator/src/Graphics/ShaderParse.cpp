@@ -2849,9 +2849,24 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
 			inst.src[1].size = 4;
 			break;
-		case 0x1D: KYTY_NI("buffer_store_dwordx2"); break;
-		case 0x1E: KYTY_NI("buffer_store_dwordx4"); break;
-		case 0x1F: KYTY_NI("buffer_store_dwordx3"); break;
+		case 0x1D:
+			inst.type        = ShaderInstructionType::BufferStoreDwordx2;
+			inst.format      = ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 2;
+			break;
+		case 0x1E:
+			inst.type        = ShaderInstructionType::BufferStoreDwordx4;
+			inst.format      = ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 4;
+			break;
+		case 0x1F:
+			inst.type        = ShaderInstructionType::BufferStoreDwordx3;
+			inst.format      = ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 3;
+			break;
 		case 0x30: KYTY_NI("buffer_atomic_swap"); break;
 		case 0x31: KYTY_NI("buffer_atomic_cmpswap"); break;
 		case 0x32: KYTY_NI("buffer_atomic_add"); break;
@@ -3314,6 +3329,8 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x25: KYTY_NI("image_sample_b"); break;
 		case 0x26: KYTY_NI("image_sample_b_cl"); break;
 		case 0x27:
+			// image_sample_lz: sample LOD 0. Same VDATA layouts as image_sample
+			// for the observed dmasks (0x7 RGB, 0xf RGBA after PlayGo/Resident).
 			inst.type        = ShaderInstructionType::ImageSampleLz;
 			inst.src[0].size = 3;
 			inst.src[1].size = 8;
@@ -3324,6 +3341,12 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 				{
 					inst.format   = ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7;
 					inst.dst.size = 3;
+					break;
+				}
+				case 0xf:
+				{
+					inst.format   = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;
+					inst.dst.size = 4;
 					break;
 				}
 				default:;
