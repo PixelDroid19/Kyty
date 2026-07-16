@@ -596,9 +596,15 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("oib76F-12fk", FileSystem::KernelLseek);
 	LIB_FUNC("j2AIqSqJP0w", FileSystem::KernelGetdents);
 	LIB_FUNC("1-LFLmRFxxM", FileSystem::KernelMkdir);
-	// Gen5 APR batch path resolution.
+	// Gen5 APR path resolution / submit / wait (libkernel APR family).
 	LIB_FUNC("gEpBkcwxUjw", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizes);
+	LIB_FUNC("WT-5NKy42fw", FileSystem::KernelAprResolveFilepathsToIds);
+	LIB_FUNC("ApkYaHb8Sek", FileSystem::KernelAprGetFileStat);
+	LIB_FUNC("WvEu7yl3Ivg", FileSystem::KernelAprGetFileSize);
 	LIB_FUNC("eE4Szl8sil8", FileSystem::KernelAprSubmitCommandBuffer);
+	LIB_FUNC("ASoW5WE-UPo", FileSystem::KernelAprSubmitCommandBufferAndGetResult);
+	LIB_FUNC("qvMUCyyaCSI", FileSystem::KernelAprSubmitCommandBufferAndGetId);
+	LIB_FUNC("rqwFKI4PAiM", FileSystem::KernelAprWaitCommandBuffer);
 }
 
 LIB_DEFINE(InitLibKernel_1_Mem)
