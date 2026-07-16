@@ -455,6 +455,7 @@ static KYTY_SYSV_ABI int c_vsnprintf_s(char* s, size_t dn, size_t count, const c
 
 // --- stdlib ------------------------------------------------------------------
 static KYTY_SYSV_ABI double c_strtod(const char* s, char** e) { return ::strtod(s, e); }
+static KYTY_SYSV_ABI float  c_strtof(const char* s, char** e) { return ::strtof(s, e); }
 static KYTY_SYSV_ABI long   c_strtol(const char* s, char** e, int b) { return ::strtol(s, e, b); }
 // Gen5 libc_v1 strtoull — NID 5OqszGpy7Mg (Astro after TLS context factory).
 static KYTY_SYSV_ABI unsigned long long c_strtoull(const char* s, char** e, int b)
@@ -988,6 +989,8 @@ LIB_DEFINE(InitLibC_1)
 
 	// stdlib
 	LIB_FUNC("2vDqwBlpF-o", LibC::c_strtod);
+	// Gen5 libc_v1 strtof — xENtRue8dpI after APR stream wrap (levels.xml path).
+	LIB_FUNC("xENtRue8dpI", LibC::c_strtof);
 	LIB_FUNC("mXlxhmLNMPg", LibC::c_strtol);
 	// Captured Gen5 after SaveDataDirNameSearch: SysV (char* "00", endptr=null, base=10)
 	// — same ABI as strtol (second NID for same export).
