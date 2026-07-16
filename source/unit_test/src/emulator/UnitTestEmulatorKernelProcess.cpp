@@ -153,6 +153,69 @@ TEST(EmulatorKernelProcess, PackageFontFallbackScoresWeightAndFamily)
 	EXPECT_EQ(ScorePackageFontFallback(U"FuturaStd-Bold.otf", U"FuturaStd-Bold.otf"), 100000);
 }
 
+// Incomplete Astro dumps store object defs as .odxb while the guest opens .odx.
+TEST(EmulatorKernelProcess, HostExtensionAliasMapsOdxToOdxb)
+{
+	EnsureKernelProcessSubsystems();
+
+	const String dir = U"/tmp/kyty_odx_alias_test/";
+	Core::File::DeleteDirectories(dir);
+	ASSERT_TRUE(Core::File::CreateDirectories(dir));
+
+	const String odxb    = dir + U"ui_effect_temp_1.odxb";
+	const String odx     = dir + U"ui_effect_temp_1.odx";
+	{
+		Core::File f;
+		ASSERT_TRUE(f.Create(odxb));
+		f.Write(U"odxb");
+		f.Close();
+	}
+	ASSERT_TRUE(Core::File::IsFileExisting(odxb));
+	ASSERT_FALSE(Core::File::IsFileExisting(odx));
+
+	EXPECT_EQ(LibKernel::FileSystem::PreferHostExtensionAlias(odx), odxb);
+	EXPECT_EQ(LibKernel::FileSystem::PreferHostExtensionAlias(odxb), odxb);
+	EXPECT_EQ(LibKernel::FileSystem::PreferHostExtensionAlias(dir + U"missing.odx"), dir + U"missing.odx");
+
+	Core::File::DeleteDirectories(dir);
+}
+
+// Astro path builders open /app0/prein/... while package files live under /app0/data/prein/...
+TEST(EmulatorKernelProcess, HostApp0DataSegmentMapsPreinUnderData)
+{
+	EnsureKernelProcessSubsystems();
+
+	const String root = U"/tmp/kyty_app0_data_seg_test/";
+	Core::File::DeleteDirectories(root);
+	ASSERT_TRUE(Core::File::CreateDirectories(root + U"data/prein/effects/odx/"));
+
+	const String real_odxb = root + U"data/prein/effects/odx/ui_effect_temp_1.odxb";
+	{
+		Core::File f;
+		ASSERT_TRUE(f.Create(real_odxb));
+		f.Write(U"odxb");
+		f.Close();
+	}
+	ASSERT_TRUE(Core::File::IsFileExisting(real_odxb));
+
+	const String guest_wrong = U"/app0/prein/effects/odx/ui_effect_temp_1.odxb";
+	const String host_wrong  = root + U"prein/effects/odx/ui_effect_temp_1.odxb";
+	ASSERT_FALSE(Core::File::IsFileExisting(host_wrong));
+
+	EXPECT_EQ(LibKernel::FileSystem::PreferHostApp0DataSegment(guest_wrong, host_wrong), real_odxb);
+
+	// Combined with extension alias: guest .odx under wrong root → data/ + .odxb.
+	const String guest_odx = U"/app0/prein/effects/odx/ui_effect_temp_1.odx";
+	const String host_odx  = root + U"prein/effects/odx/ui_effect_temp_1.odx";
+	EXPECT_EQ(LibKernel::FileSystem::PreferHostApp0DataSegment(guest_odx, host_odx), real_odxb);
+
+	// Correct /app0/data/... guest is not rewritten.
+	EXPECT_EQ(LibKernel::FileSystem::PreferHostApp0DataSegment(U"/app0/data/prein/effects/odx/ui_effect_temp_1.odxb", real_odxb),
+	          real_odxb);
+
+	Core::File::DeleteDirectories(root);
+}
+
 // PreferPackageFontHostPath substitutes a sibling OTF when the requested file is missing.
 TEST(EmulatorKernelProcess, PackageFontHostPathPicksSibling)
 {

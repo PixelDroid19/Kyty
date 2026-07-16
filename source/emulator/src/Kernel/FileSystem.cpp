@@ -1167,12 +1167,108 @@ String PreferPackageFontHostPath(const String& requested_host_path)
 	return requested_host_path;
 }
 
-// Map guest path → existing host file, substituting a same-dir package font when needed.
+String PreferHostExtensionAlias(const String& requested_host_path)
+{
+	if (requested_host_path.IsEmpty() || Core::File::IsFileExisting(requested_host_path))
+	{
+		return requested_host_path;
+	}
+	const String lower = requested_host_path.ToLower();
+	// Astro FIXED dumps ship object defs as .odxb while guest requests .odx
+	// (ObjectDefinition.cpp: "odx not found [prein/effects/odx/....odx]").
+	if (lower.EndsWith(U".odx"))
+	{
+		const String alias = requested_host_path + U"b";
+		if (Core::File::IsFileExisting(alias))
+		{
+			printf("\t host extension alias: %s -> %s\n", requested_host_path.C_Str(), alias.C_Str());
+			return alias;
+		}
+	}
+	return requested_host_path;
+}
+
+String PreferHostApp0DataSegment(const String& guest_path, const String& requested_host_path)
+{
+	if (requested_host_path.IsEmpty() || Core::File::IsFileExisting(requested_host_path))
+	{
+		return requested_host_path;
+	}
+	// Guest open of /app0/prein/... when package layout is /app0/data/prein/...
+	// (observed: ODX resolve miss host=ROOT/prein/... while file is ROOT/data/prein/...).
+	const String guest = guest_path.FixFilenameSlash();
+	if (!guest.StartsWith(U"/app0/") || guest.StartsWith(U"/app0/data/"))
+	{
+		return requested_host_path;
+	}
+	// Do not rewrite known app0 roots that live next to data/.
+	const String rest  = guest.RemoveFirst(6); // strip "/app0/"
+	const auto   parts = rest.Split(U"/");
+	if (!parts.IndexValid(0))
+	{
+		return requested_host_path;
+	}
+	const String first = parts.At(0).ToLower();
+	// Skip known package roots and single-file app0 entries (eboot.bin, args.txt, ...).
+	if (first.IsEmpty() || first == U"data" || first == U"sce_sys" || first == U"sce_module" || first == U"fakelib" ||
+	    first.ContainsChar(U'.'))
+	{
+		return requested_host_path;
+	}
+
+	// Prefer string rewrite on the already-mapped host path so unit tests need no mount:
+	// host ROOT/prein/... → ROOT/data/prein/...
+	const String host   = requested_host_path.FixFilenameSlash();
+	const String needle = U"/" + parts.At(0) + U"/";
+	const String insert = U"/data/" + parts.At(0) + U"/";
+	String       alt_host;
+	if (host.ContainsStr(needle))
+	{
+		alt_host = host.ReplaceStr(needle, insert);
+	}
+	else if (g_mount_points != nullptr)
+	{
+		alt_host = g_mount_points->GetRealFilename(U"/app0/data/" + rest);
+	}
+	else
+	{
+		return requested_host_path;
+	}
+	if (alt_host == host)
+	{
+		return requested_host_path;
+	}
+
+	if (Core::File::IsFileExisting(alt_host))
+	{
+		printf("\t host app0 data segment: %s -> %s\n", guest.C_Str(), alt_host.C_Str());
+		return alt_host;
+	}
+	const String alt_aliased = PreferHostExtensionAlias(alt_host);
+	if (Core::File::IsFileExisting(alt_aliased))
+	{
+		printf("\t host app0 data segment+ext: %s -> %s\n", guest.C_Str(), alt_aliased.C_Str());
+		return alt_aliased;
+	}
+	return requested_host_path;
+}
+
+// Map guest path → existing host file (extension aliases, app0 data/, then package fonts).
 static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name)
 {
 	if (Core::File::IsFileExisting(real_file_name))
 	{
 		return real_file_name;
+	}
+	const String aliased = PreferHostExtensionAlias(real_file_name);
+	if (Core::File::IsFileExisting(aliased))
+	{
+		return aliased;
+	}
+	const String data_seg = PreferHostApp0DataSegment(guest_path, real_file_name);
+	if (Core::File::IsFileExisting(data_seg))
+	{
+		return data_seg;
 	}
 	const String guest_name = guest_path.FilenameWithoutDirectory().ToLower();
 	// Only substitute font assets (package external styles / SIE system fonts under app0).
