@@ -93,4 +93,20 @@ TEST(EmulatorKernelProcess, AprSubmitCommandBufferRejectsNullAndAckNonNull)
 	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(&fake_cmd, 1, &fake_cmd, 2, &fake_cmd), OK);
 }
 
+TEST(EmulatorKernelProcess, AprSubmitGetIdAndWaitRoundTrip)
+{
+	EnsureKernelProcessSubsystems();
+
+	uint64_t fake_cmd = 0x2222;
+	uint32_t sub_id   = 0;
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(nullptr, 1, &sub_id), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(&fake_cmd, 1, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(&fake_cmd, 1, &sub_id), OK);
+	EXPECT_NE(sub_id, 0u);
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprWaitCommandBuffer(sub_id), OK);
+	// Second wait on completed id is soft-OK (eager builders).
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprWaitCommandBuffer(sub_id), OK);
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprWaitCommandBuffer(0), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
 UT_END();
