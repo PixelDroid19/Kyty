@@ -505,7 +505,7 @@ void KYTY_SYSV_ABI KernelSetGPO(uint32_t bits)
 	printf("\t bits = %08" PRIx32 "\n", bits);
 }
 
-// sceKernelGetGPI — NID 4oXYe9Xmk0Q (public PS5-3.20_Libs / sce_stubs name mapping).
+// sceKernelGetGPI — NID 4oXYe9Xmk0Q.
 // On non-devkit retail consoles this is a no-op success (returns 0). Captured as
 // The first strict Unpatched import from libkernel_v1.1 during early Main.
 // Do not invent GPI state; no SetGPI pairing required for the observed open path.

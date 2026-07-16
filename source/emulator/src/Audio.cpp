@@ -558,7 +558,7 @@ struct PortSlot
 {
 	bool     used     = false;
 	int32_t  context  = 0;
-	// PortGetState fields (external reference Astro baseline layout, 0x20-byte blob).
+	// PortGetState fields (0x20-byte guest state blob).
 	uint16_t output   = 0x01;
 	uint8_t  channels = 2;
 	int16_t  status   = -1;
@@ -810,7 +810,7 @@ int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr)
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	// Successful SetAttributes clears the previous "unset" status so GetState
-	// reports a ready port (external reference Astro baseline contract).
+	// reports a ready port.
 	g_ports[port - 1].status = 0;
 	if (attr != nullptr)
 	{
