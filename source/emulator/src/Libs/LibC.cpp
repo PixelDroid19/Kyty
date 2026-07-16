@@ -850,6 +850,7 @@ LIB_DEFINE(InitLibC_1)
 	// Captured Gen5 post-~INDEX open: object+"data.js"; non-null return advances.
 	LIB_FUNC("1uJgoVq3bQU", LibC::c_1uJgoVq3bQU);
 	LIB_FUNC("Ls4tzzhimqQ", LibC::c_strcat);
+	LIB_FUNC("kHg45qPC6f0", LibC::c_strncat);
 	LIB_FUNC("ob5xAW4ln-0", LibC::c_strchr);
 	LIB_FUNC("9yDWMxEFdJU", LibC::c_strrchr);
 	// Gen5 libc_v1 strstr.
