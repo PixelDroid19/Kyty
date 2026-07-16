@@ -62,6 +62,16 @@ static int KYTY_SYSV_ABI NpCppWebApiUnknownUY(void* self, void* arg)
 	return OK;
 }
 
+// NID 52AlYvq+dmk — observed (self, 1): likely bind/create user context slot.
+static int KYTY_SYSV_ABI NpCppWebApiUnknown52Al(void* self, int user_or_flag)
+{
+	PRINT_NAME();
+	printf("\t self         = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+	printf("\t user_or_flag = %d\n", user_or_flag);
+	static int next = 1;
+	return next++;
+}
+
 } // namespace NpCppWebApi
 
 LIB_DEFINE(InitNpCppWebApi_1)
@@ -69,6 +79,7 @@ LIB_DEFINE(InitNpCppWebApi_1)
 	LIB_FUNC("Y295ygEccqk", NpCppWebApi::NpCppWebApiUnknownY295);
 	LIB_FUNC("8x++mBOUeso", NpCppWebApi::NpCppWebApiUnknown8x);
 	LIB_FUNC("UYPxv8MIzGo", NpCppWebApi::NpCppWebApiUnknownUY);
+	LIB_FUNC("52AlYvq+dmk", NpCppWebApi::NpCppWebApiUnknown52Al);
 }
 
 } // namespace Kyty::Libs

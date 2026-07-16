@@ -222,6 +222,25 @@ static KYTY_SYSV_ABI void  cxx_delete(void* p) { ::free(p); }
 static KYTY_SYSV_ABI void* cxx_new_array(size_t size) { return ::malloc(size != 0 ? size : 1); }
 static KYTY_SYSV_ABI void  cxx_delete_array(void* p) { ::free(p); }
 
+// Gen5 libc NIDs iPBqs+YUUFw / 2HnmKiLmV6s — same SysV ABI from call sites:
+//   lea 8(obj),%rdi; mov $expected,%esi; mov $desired,%edx; call; cmp $1,%eax
+// Observed pairs: (ptr,1,0) then (ptr,1,4) on a 32-bit state word. Success
+// returns 1 when *p matched expected (FreeBSD-style atomic_cmpset_int).
+static KYTY_SYSV_ABI int c_atomic_cmpset_32(volatile uint32_t* p, uint32_t expected, uint32_t desired)
+{
+	if (p == nullptr)
+	{
+		return 0;
+	}
+	uint32_t cur = *p;
+	if (cur == expected)
+	{
+		*p = desired;
+		return 1;
+	}
+	return 0;
+}
+
 // --- Additional string / memory ---------------------------------------------
 static KYTY_SYSV_ABI int   c_bcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
 static KYTY_SYSV_ABI char* c_strerror(int e) { return ::strerror(e); }
@@ -714,6 +733,20 @@ void* KYTY_SYSV_ABI LibcMspaceMemalign(void* msp, size_t align, size_t size)
 	return Core::MSpaceMemalign(msp, align, size);
 }
 
+// sceLibcMspaceCalloc — NID LYo3GhIlB38 (msp, nelem, size). Observed (msp, 1, 0x40).
+void* KYTY_SYSV_ABI LibcMspaceCalloc(void* msp, size_t nelem, size_t size)
+{
+	PRINT_NAME();
+	printf("\t msp   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(msp));
+	printf("\t nelem = 0x%016" PRIx64 "\n", static_cast<uint64_t>(nelem));
+	printf("\t size  = 0x%016" PRIx64 "\n", static_cast<uint64_t>(size));
+	if (msp == nullptr)
+	{
+		return nullptr;
+	}
+	return Core::MSpaceCalloc(msp, nelem, size);
+}
+
 // Gen5 sceLibcMspaceMallocStatsFast — NID k04jLXu3+Ic.
 // Guest structure is SceLibcMallocManagedSize (size/version 0x00010028):
 //   +0x00 u16 size=0x28, u16 version=1  (stored as u32 0x00010028)
@@ -794,6 +827,7 @@ LIB_DEFINE(InitLibcInternal_1)
 	LIB_FUNC("-hn1tcVHq5Q", LibcInternal::LibcMspaceCreate);
 	LIB_FUNC("OJjm-QOIHlI", LibcInternal::LibcMspaceMalloc);
 	LIB_FUNC("iF1iQHzxBJU", LibcInternal::LibcMspaceMemalign);
+	LIB_FUNC("LYo3GhIlB38", LibcInternal::LibcMspaceCalloc);
 	LIB_FUNC("Vla-Z+eXlxo", LibcInternal::LibcMspaceFree);
 	LIB_FUNC("k04jLXu3+Ic", LibcInternal::LibcMspaceMallocStatsFast);
 }
@@ -859,6 +893,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete);      // operator delete(void*)
 	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);   // operator new[](size_t)
 	LIB_FUNC("MLWl90SFWNE", LibC::cxx_delete_array); // operator delete[](void*)
+	LIB_FUNC("iPBqs+YUUFw", LibC::c_atomic_cmpset_32);
+	LIB_FUNC("2HnmKiLmV6s", LibC::c_atomic_cmpset_32);
 
 	// string / memory
 	LIB_FUNC("+P6FRGH4LfA", LibC::c_memmove);

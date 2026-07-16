@@ -9,6 +9,8 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 
+#include <cstring>
+
 namespace Kyty::Core {
 
 static constexpr size_t MSPACE_HEADER_SIZE = 1440;
@@ -572,6 +574,29 @@ void* MSpaceMemalign(mspace_t msp, size_t boundary, size_t size)
 	auto* ctx = static_cast<MSpaceContext*>(msp);
 
 	return MSpaceInternalMalloc_align(*ctx, static_cast<uint32_t>(size), boundary);
+}
+
+void* MSpaceCalloc(mspace_t msp, size_t nelem, size_t size)
+{
+	if (msp == nullptr)
+	{
+		return nullptr;
+	}
+	if (nelem != 0 && size > (static_cast<size_t>(-1) / nelem))
+	{
+		return nullptr;
+	}
+	const size_t total = nelem * size;
+	if ((total >> 32u) != 0)
+	{
+		return nullptr;
+	}
+	void* p = MSpaceMalloc(msp, total);
+	if (p != nullptr && total != 0)
+	{
+		std::memset(p, 0, total);
+	}
+	return p;
 }
 
 void* MSpaceAlignedAlloc(mspace_t msp, size_t alignment, size_t size)
