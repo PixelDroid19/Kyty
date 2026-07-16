@@ -152,7 +152,23 @@ static KYTY_SYSV_ABI void*  c_memset(void* d, int c, size_t n) { return ::memset
 static KYTY_SYSV_ABI int    c_memcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
 static KYTY_SYSV_ABI void*  c_memchr(const void* s, int c, size_t n) { return const_cast<void*>(::memchr(s, c, n)); }
 static KYTY_SYSV_ABI size_t c_strlen(const char* s) { return ::strlen(s); }
-static KYTY_SYSV_ABI char*  c_strcpy(char* d, const char* s) { return ::strcpy(d, s); }
+static KYTY_SYSV_ABI char* c_strcpy(char* d, const char* s) { return ::strcpy(d, s); }
+// Gen5 strcpy_s — NID 5Xa2ACNECdo: dest, destsz, src. Returns 0 on success.
+static KYTY_SYSV_ABI int c_strcpy_s(char* d, size_t destsz, const char* s)
+{
+	if (d == nullptr || s == nullptr || destsz == 0)
+	{
+		return -1;
+	}
+	const size_t n = ::strlen(s);
+	if (n + 1 > destsz)
+	{
+		d[0] = '\0';
+		return -1;
+	}
+	::memcpy(d, s, n + 1);
+	return 0;
+}
 static KYTY_SYSV_ABI char*  c_strncpy(char* d, const char* s, size_t n) { return ::strncpy(d, s, n); }
 static KYTY_SYSV_ABI int    c_strcmp(const char* a, const char* b) { return ::strcmp(a, b); }
 static KYTY_SYSV_ABI int    c_strncmp(const char* a, const char* b, size_t n) { return ::strncmp(a, b, n); }
@@ -779,6 +795,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("8u8lPzUEq+U", LibC::c_memchr);
 	LIB_FUNC("5TjaJwkLWxE", LibC::c_bcmp);
 	LIB_FUNC("kiZSXIWd9vg", LibC::c_strcpy);
+	// Gen5 strcpy_s — NID 5Xa2ACNECdo (next hard-abort after thread stack reprotect).
+	LIB_FUNC("5Xa2ACNECdo", LibC::c_strcpy_s);
 	LIB_FUNC("RIa6GnWp+iU", LibC::c_strerror);
 	LIB_FUNC("YNzNkJzYqEg", LibC::c_strncpy_s);
 
