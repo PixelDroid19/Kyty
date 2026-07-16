@@ -63,6 +63,14 @@ String GetRealFilename(const String& mounted_file_name);
 // applying PreferHostExtensionAlias). Otherwise returns the original host path.
 [[nodiscard]] String PreferHostApp0DataSegment(const String& guest_path, const String& requested_host_path);
 
+// After a successful OD open (.../odx/NAME.odxb), Astro may open bare companion
+// extensions under app0 root (`/app0/.jxm`, `/app0/.skel`, `/app0/.anim`) when
+// path composition loses the basename. Map those to package companions of the
+// last OD: gfx/NAME.jxm, anim/NAME.skel, anim/NAME_anim_play.anim (then NAME.anim).
+// last_od_host_path overrides the remembered OD path when non-empty (tests).
+[[nodiscard]] String PreferHostOdCompanionAsset(const String& guest_path, const String& requested_host_path,
+                                                const String& last_od_host_path = {});
+
 int KYTY_SYSV_ABI     KernelOpen(const char* path, int flags, uint16_t mode);
 int KYTY_SYSV_ABI     KernelClose(int d);
 int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes);

@@ -1253,22 +1253,121 @@ String PreferHostApp0DataSegment(const String& guest_path, const String& request
 	return requested_host_path;
 }
 
-// Map guest path → existing host file (extension aliases, app0 data/, then package fonts).
+// Last successfully resolved ObjectDefinition host path (.../odx/NAME.odx[b]).
+// Used to recover bare `/app0/.jxm|.skel|.anim` companion opens.
+static String g_last_od_host_path;
+
+static void RememberOdHostPath(const String& guest_path, const String& host_path)
+{
+	const String g = guest_path.ToLower();
+	if (!g.ContainsStr(U"/odx/") || (!g.EndsWith(U".odx") && !g.EndsWith(U".odxb")))
+	{
+		return;
+	}
+	if (!Core::File::IsFileExisting(host_path))
+	{
+		return;
+	}
+	g_last_od_host_path = host_path;
+}
+
+String PreferHostOdCompanionAsset(const String& guest_path, const String& requested_host_path, const String& last_od_host_path)
+{
+	if (requested_host_path.IsEmpty() || Core::File::IsFileExisting(requested_host_path))
+	{
+		return requested_host_path;
+	}
+	const String last_od = !last_od_host_path.IsEmpty() ? last_od_host_path : g_last_od_host_path;
+	if (last_od.IsEmpty())
+	{
+		return requested_host_path;
+	}
+	// Bare companion: /app0/.jxm, /app0/.skel, /app0/.anim (basename empty, only extension).
+	const String guest = guest_path.FixFilenameSlash();
+	const String name  = guest.FilenameWithoutDirectory().ToLower();
+	if (name != U".jxm" && name != U".skel" && name != U".anim" && name != U".jpx")
+	{
+		return requested_host_path;
+	}
+
+	// last OD host: .../odx/NAME.odxb → stem NAME, parent before /odx/
+	String od = last_od.FixFilenameSlash();
+	const String od_file = od.FilenameWithoutDirectory();
+	String       stem    = od_file;
+	const String od_low  = od_file.ToLower();
+	if (od_low.EndsWith(U".odxb"))
+	{
+		stem = od_file.RemoveLast(5);
+	}
+	else if (od_low.EndsWith(U".odx"))
+	{
+		stem = od_file.RemoveLast(4);
+	}
+	const String odx_dir = od.DirectoryWithoutFilename(); // .../odx/
+	// parent of odx/ → effects/ or ui/
+	String parent = odx_dir;
+	if (parent.EndsWith(U"/"))
+	{
+		parent = parent.RemoveLast(1);
+	}
+	// strip trailing "odx"
+	const String parent_name = parent.FilenameWithoutDirectory().ToLower();
+	if (parent_name != U"odx")
+	{
+		return requested_host_path;
+	}
+	const String tree_root = parent.DirectoryWithoutFilename(); // .../effects/ or .../ui/
+
+	String candidate;
+	if (name == U".jxm" || name == U".jpx")
+	{
+		candidate = tree_root + U"gfx/" + stem + name;
+	}
+	else if (name == U".skel")
+	{
+		candidate = tree_root + U"anim/" + stem + U".skel";
+	}
+	else // .anim
+	{
+		candidate = tree_root + U"anim/" + stem + U"_anim_play.anim";
+		if (!Core::File::IsFileExisting(candidate))
+		{
+			candidate = tree_root + U"anim/" + stem + U".anim";
+		}
+	}
+
+	if (Core::File::IsFileExisting(candidate))
+	{
+		printf("\t host OD companion: %s -> %s (from %s)\n", guest.C_Str(), candidate.C_Str(), last_od.C_Str());
+		return candidate;
+	}
+	return requested_host_path;
+}
+
+// Map guest path → existing host file (extension aliases, app0 data/, OD companions, fonts).
 static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name)
 {
 	if (Core::File::IsFileExisting(real_file_name))
 	{
+		RememberOdHostPath(guest_path, real_file_name);
 		return real_file_name;
 	}
 	const String aliased = PreferHostExtensionAlias(real_file_name);
 	if (Core::File::IsFileExisting(aliased))
 	{
+		RememberOdHostPath(guest_path, aliased);
 		return aliased;
 	}
 	const String data_seg = PreferHostApp0DataSegment(guest_path, real_file_name);
 	if (Core::File::IsFileExisting(data_seg))
 	{
+		RememberOdHostPath(guest_path, data_seg);
 		return data_seg;
+	}
+	const String companion = PreferHostOdCompanionAsset(guest_path, real_file_name);
+	if (Core::File::IsFileExisting(companion))
+	{
+		return companion;
 	}
 	const String guest_name = guest_path.FilenameWithoutDirectory().ToLower();
 	// Only substitute font assets (package external styles / SIE system fonts under app0).

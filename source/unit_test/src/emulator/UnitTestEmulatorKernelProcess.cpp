@@ -246,6 +246,41 @@ TEST(EmulatorKernelProcess, PackageFontHostPathPicksSibling)
 	Core::File::DeleteDirectories(dir);
 }
 
+// Bare /app0/.jxm|.skel|.anim map to companions of the last OD host path.
+TEST(EmulatorKernelProcess, HostOdCompanionMapsBareExtensionsFromLastOdxb)
+{
+	EnsureKernelProcessSubsystems();
+
+	const String root = U"/tmp/kyty_od_companion_test/";
+	Core::File::DeleteDirectories(root);
+	ASSERT_TRUE(Core::File::CreateDirectories(root + U"data/prein/effects/odx/"));
+	ASSERT_TRUE(Core::File::CreateDirectories(root + U"data/prein/effects/gfx/"));
+	ASSERT_TRUE(Core::File::CreateDirectories(root + U"data/prein/effects/anim/"));
+
+	const String odxb = root + U"data/prein/effects/odx/ui_effect_temp_1.odxb";
+	const String jxm  = root + U"data/prein/effects/gfx/ui_effect_temp_1.jxm";
+	const String skel = root + U"data/prein/effects/anim/ui_effect_temp_1.skel";
+	const String anim = root + U"data/prein/effects/anim/ui_effect_temp_1_anim_play.anim";
+	for (const String& path : {odxb, jxm, skel, anim})
+	{
+		Core::File f;
+		ASSERT_TRUE(f.Create(path));
+		f.Write(U"x");
+		f.Close();
+		ASSERT_TRUE(Core::File::IsFileExisting(path));
+	}
+
+	const String bare_jxm  = root + U".jxm";
+	const String bare_skel = root + U".skel";
+	const String bare_anim = root + U".anim";
+	EXPECT_EQ(LibKernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.jxm", bare_jxm, odxb), jxm);
+	EXPECT_EQ(LibKernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.skel", bare_skel, odxb), skel);
+	EXPECT_EQ(LibKernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.anim", bare_anim, odxb), anim);
+	EXPECT_EQ(LibKernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.jxm", bare_jxm, U""), bare_jxm);
+
+	Core::File::DeleteDirectories(root);
+}
+
 // Gen5 Posix_v1 pthread_attr_init/setstacksize wrap LibKernel attr helpers.
 TEST(EmulatorKernelProcess, PosixPthreadAttrInitAndSetstacksize)
 {
