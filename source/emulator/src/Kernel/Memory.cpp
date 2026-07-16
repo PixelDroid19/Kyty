@@ -946,6 +946,16 @@ int KYTY_SYSV_ABI KernelSetVirtualRangeName(const void* addr, uint64_t len, cons
 	return OK;
 }
 
+int KYTY_SYSV_ABI KernelClearVirtualRangeName(const void* addr, uint64_t len)
+{
+	PRINT_NAME();
+	printf("\t addr = 0x%016" PRIx64 " len = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(addr), len);
+	// Pair of SetVirtualRangeName: clearing a name is success when maps exist.
+	(void)addr;
+	(void)len;
+	return OK;
+}
+
 int KYTY_SYSV_ABI KernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot)
 {
 	PRINT_NAME();

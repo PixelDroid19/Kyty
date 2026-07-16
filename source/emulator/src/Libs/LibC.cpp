@@ -284,6 +284,15 @@ static KYTY_SYSV_ABI FILE* c_fopen(const char* path, const char* mode)
 }
 static KYTY_SYSV_ABI int      c_fclose(FILE* f) { return (f != nullptr) ? ::fclose(f) : 0; }
 static KYTY_SYSV_ABI size_t   c_fread(void* p, size_t sz, size_t n, FILE* f) { return ::fread(p, sz, n, f); }
+// Gen5 libc_v1 fgets — NID KdP-nULpuGw.
+static KYTY_SYSV_ABI char* c_fgets(char* s, int n, FILE* f)
+{
+	if (s == nullptr || n <= 0 || f == nullptr)
+	{
+		return nullptr;
+	}
+	return ::fgets(s, n, f);
+}
 static KYTY_SYSV_ABI size_t   c_fwrite(const void* p, size_t sz, size_t n, FILE* f) { return ::fwrite(p, sz, n, f); }
 static KYTY_SYSV_ABI int      c_fseek(FILE* f, long off, int w) { return ::fseek(f, off, w); }
 static KYTY_SYSV_ABI long     c_ftell(FILE* f) { return ::ftell(f); }
@@ -353,6 +362,15 @@ static KYTY_SYSV_ABI int c_vsnprintf(char* s, size_t n, const char* fmt, VaList*
 {
 	return Format(s, n, fmt, ap);
 }
+// Gen5 vsprintf_s — NID +qitMEbkSWk: buffer, element count, format, va_list.
+static KYTY_SYSV_ABI int c_vsprintf_s(char* s, size_t n, const char* fmt, VaList* ap)
+{
+	if (s == nullptr || n == 0 || fmt == nullptr)
+	{
+		return -1;
+	}
+	return Format(s, n, fmt, ap);
+}
 static KYTY_SYSV_ABI int c_vsnprintf_s(char* s, size_t dn, size_t count, const char* fmt, VaList* ap)
 {
 	size_t n = (count + 1 < dn) ? count + 1 : dn;
@@ -379,6 +397,15 @@ static KYTY_SYSV_ABI int64_t    c_mktime(struct tm* tmv) { return ::mktime(tmv);
 static KYTY_SYSV_ABI struct tm* c_gmtime(const int64_t* t) { time_t v = *t; return ::gmtime(&v); }
 static KYTY_SYSV_ABI struct tm* c_localtime(const int64_t* t) { time_t v = *t; return ::localtime(&v); }
 static KYTY_SYSV_ABI size_t     c_strftime(char* s, size_t n, const char* f, const struct tm* tmv) { return ::strftime(s, n, f, tmv); }
+// Gen5 libc_v1 asctime — NID jT3xiGpA3B4. Returns static host buffer (same ABI as C).
+static KYTY_SYSV_ABI char* c_asctime(const struct tm* tmv)
+{
+	if (tmv == nullptr)
+	{
+		return nullptr;
+	}
+	return ::asctime(tmv);
+}
 
 // --- math (double) -----------------------------------------------------------
 static KYTY_SYSV_ABI double c_sin(double x) { return ::sin(x); }
@@ -754,6 +781,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("xeYO4u7uyJ0", LibC::c_fopen);
 	LIB_FUNC("uodLYyUip20", LibC::c_fclose);
 	LIB_FUNC("lbB+UlZqVG0", LibC::c_fread);
+	// Gen5 fgets — NID KdP-nULpuGw (next hard-abort after asctime on Astro).
+	LIB_FUNC("KdP-nULpuGw", LibC::c_fgets);
 	LIB_FUNC("MpxhMh8QFro", LibC::c_fwrite);
 	LIB_FUNC("rQFVBXp-Cxg", LibC::c_fseek);
 	LIB_FUNC("Qazy8LmXTvw", LibC::c_ftell);
@@ -764,6 +793,8 @@ LIB_DEFINE(InitLibC_1)
 
 	// printf / scanf family
 	LIB_FUNC("eLdDw6l0-bU", LibC::c_snprintf);
+	// Gen5 vsprintf_s — NID +qitMEbkSWk (hard-abort after fgets on Astro).
+	LIB_FUNC("+qitMEbkSWk", LibC::c_vsprintf_s);
 	LIB_FUNC("Q2V+iqvjgC0", LibC::c_vsnprintf); // vsnprintf (Gen5 libc_v1)
 	LIB_FUNC("tcVi5SivF7Q", LibC::c_sprintf);
 	LIB_FUNC("fffwELXNVFA", LibC::c_fprintf);
@@ -791,6 +822,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("1mecP7RgI2A", LibC::c_gmtime);
 	LIB_FUNC("efhK-YSUYYQ", LibC::c_localtime);
 	LIB_FUNC("Av3zjWi64Kw", LibC::c_strftime);
+	// Gen5 libc asctime (NID jT3xiGpA3B4) — hard-aborted Astro without STUB_MISSING.
+	LIB_FUNC("jT3xiGpA3B4", LibC::c_asctime);
 
 	// math (double)
 	LIB_FUNC("H8ya2H00jbI", LibC::c_sin);

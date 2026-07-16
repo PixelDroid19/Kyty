@@ -173,6 +173,13 @@ TEST(EmulatorKernelProcess, ResolvesGen5PthreadSpecificNids)
 	EXPECT_TRUE(resolve(u"+BzXYkqYeLE"));
 	EXPECT_TRUE(resolve(u"eoht7mQOCmo"));
 	EXPECT_TRUE(resolve(u"rVjRvHJ0X6c"));
+	EXPECT_TRUE(resolve(u"XD3mDeybCnk"));
+	EXPECT_TRUE(resolve(u"mkgXxsoxWHg"));
+}
+
+TEST(EmulatorKernelProcess, ClearVirtualRangeNameSucceeds)
+{
+	EXPECT_EQ(LibKernel::Memory::KernelClearVirtualRangeName(nullptr, 0), OK);
 }
 
 UT_END();

@@ -39,6 +39,8 @@ int KYTY_SYSV_ABI    KernelMapNamedDirectMemory(void** addr, size_t len, int pro
                                                 const char* name);
 // Diagnostic name tag only; does not change mapping rights.
 int KYTY_SYSV_ABI    KernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name);
+// Gen5 sceKernelClearVirtualRangeName — NID mkgXxsoxWHg.
+int KYTY_SYSV_ABI    KernelClearVirtualRangeName(const void* addr, uint64_t len);
 int KYTY_SYSV_ABI    KernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot);
 int KYTY_SYSV_ABI    KernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size);
 int KYTY_SYSV_ABI    KernelAvailableFlexibleMemorySize(size_t* size);
