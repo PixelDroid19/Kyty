@@ -7,6 +7,7 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 
 #include <cstdio>
+#include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -107,6 +108,44 @@ static KYTY_SYSV_ABI int UserServicePlatformPrivacyWs1Stub(uint64_t a0, uint64_t
 	return OK;
 }
 
+// Guest game presets blob (40 bytes). Defaults to zeroed options.
+struct UserServiceGamePresets
+{
+	size_t   this_size;
+	uint32_t difficulty;
+	uint32_t priority;
+	uint32_t invert_vertical_view_for_1st_person_view;
+	uint32_t invert_horizontal_view_for_1st_person_view;
+	uint32_t invert_vertical_view_for_3rd_person_view;
+	uint32_t invert_horizontal_view_for_3rd_person_view;
+	uint32_t display_sub_titles;
+	uint32_t audio_language;
+};
+
+// sceUserServiceGetGamePresets — NID -sD02mFDBh4. Observed Astro after PlayGo finished.
+static KYTY_SYSV_ABI int UserServiceGetGamePresets(int user_id, UserServiceGamePresets* presets)
+{
+	PRINT_NAME();
+	printf("\t user_id = %d\n", user_id);
+	if (presets == nullptr)
+	{
+		return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+	}
+	// Kyty primary user id is 1 (see GetInitialUser / GetLoginUserIdList).
+	if (user_id != 1)
+	{
+		return USER_SERVICE_ERROR_NOT_LOGGED_IN;
+	}
+	size_t this_size = presets->this_size;
+	if (this_size == 0 || this_size > sizeof(UserServiceGamePresets))
+	{
+		this_size = sizeof(UserServiceGamePresets);
+	}
+	std::memset(presets, 0, this_size);
+	presets->this_size = sizeof(UserServiceGamePresets);
+	return OK;
+}
+
 } // namespace UserService
 
 LIB_DEFINE(InitUserService_1)
@@ -118,6 +157,7 @@ LIB_DEFINE(InitUserService_1)
 	LIB_FUNC("1xxcMiGu2fo", UserService::UserServiceGetUserName);
 	// Gen5 privacy Ws1 entry used on Astro after font setup.
 	LIB_FUNC("D-CzAxQL0XI", UserService::UserServicePlatformPrivacyWs1Stub);
+	LIB_FUNC("-sD02mFDBh4", UserService::UserServiceGetGamePresets);
 }
 
 } // namespace Kyty::Libs
