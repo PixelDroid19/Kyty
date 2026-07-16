@@ -158,7 +158,18 @@ static KYTY_SYSV_ABI int c_memmove_s(void* d, size_t dn, const void* s, size_t n
 	return 0;
 }
 static KYTY_SYSV_ABI void*  c_memmove(void* d, const void* s, size_t n) { return ::memmove(d, s, n); }
-static KYTY_SYSV_ABI void*  c_memset(void* d, int c, size_t n) { return ::memset(d, c, n); }
+static KYTY_SYSV_ABI void* c_memset(void* d, int c, size_t n) { return ::memset(d, c, n); }
+// Gen5 libc_v1 memset_s — NID h8GwqPFbu6I (Astro after DrawIndexIndirect).
+// SysV: rdi=s, rsi=smax, rdx=c, rcx=n. Returns 0 on success.
+static KYTY_SYSV_ABI int c_memset_s(void* s, size_t smax, int c, size_t n)
+{
+	if (s == nullptr)
+	{
+		return -1;
+	}
+	::memset(s, c, n < smax ? n : smax);
+	return 0;
+}
 static KYTY_SYSV_ABI int    c_memcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
 static KYTY_SYSV_ABI void*  c_memchr(const void* s, int c, size_t n) { return const_cast<void*>(::memchr(s, c, n)); }
 static KYTY_SYSV_ABI size_t c_strlen(const char* s) { return ::strlen(s); }
