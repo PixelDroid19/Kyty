@@ -124,3 +124,7 @@ Add new evidence in one of three places:
 This keeps one command, one artifact directory, and one machine-readable
 contract while allowing later PM4 snapshots, resource graphs, RenderDoc links,
 and input traces to be added without rewriting the runner.
+
+For the **clear packing**, **sample→RenderTexture alias**, and **WaitRegMem /
+Label fence** contracts that implementers must preserve when changing Gen5
+color paths, see `docs/graphics-rt-clear-and-sample-alias.md`.
