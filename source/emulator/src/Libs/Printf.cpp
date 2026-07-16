@@ -916,8 +916,20 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 
 	if (sn)
 	{
-		int s = snprintf(sn_s, sn_n, "%s", buffer.GetDataConst());
-		EXIT_NOT_IMPLEMENTED(static_cast<size_t>(s) >= sn_n);
+		// Guest snprintf: truncate into sn_s when sn_n is smaller than the
+		// full formatted result. Do not EXIT — real libc truncates and returns
+		// the would-be length (idx). Observed Astro after accessibility setup.
+		if (sn_s != nullptr && sn_n > 0)
+		{
+			const char*  src  = buffer.GetDataConst();
+			const size_t full = std::strlen(src);
+			const size_t copy = (full + 1 <= sn_n) ? full : (sn_n - 1U);
+			if (copy > 0)
+			{
+				std::memcpy(sn_s, src, copy);
+			}
+			sn_s[copy] = '\0';
+		}
 	} else
 	{
 		printf(FG_BRIGHT_MAGENTA "%s" DEFAULT, buffer.GetDataConst());

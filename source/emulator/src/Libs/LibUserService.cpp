@@ -146,6 +146,112 @@ static KYTY_SYSV_ABI int UserServiceGetGamePresets(int user_id, UserServiceGameP
 	return OK;
 }
 
+// Accessibility / age probes after save-memory setup. Primary user is 1.
+static KYTY_SYSV_ABI int UserServiceGetAccessibilityVibration(int user_id, int32_t* vibration)
+{
+	PRINT_NAME();
+	if (vibration == nullptr)
+	{
+		return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+	}
+	if (user_id != 1)
+	{
+		return USER_SERVICE_ERROR_NOT_LOGGED_IN;
+	}
+	*vibration = 1;
+	return OK;
+}
+
+static KYTY_SYSV_ABI int UserServiceGetAccessibilityTriggerEffect(int user_id, int32_t* trigger_effect)
+{
+	PRINT_NAME();
+	if (trigger_effect == nullptr)
+	{
+		return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+	}
+	if (user_id != 1)
+	{
+		return USER_SERVICE_ERROR_NOT_LOGGED_IN;
+	}
+	*trigger_effect = 1;
+	return OK;
+}
+
+static KYTY_SYSV_ABI int UserServiceGetAgeLevel(int user_id, uint32_t* age_level)
+{
+	PRINT_NAME();
+	if (age_level == nullptr)
+	{
+		return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+	}
+	if (user_id != 1)
+	{
+		return USER_SERVICE_ERROR_NOT_LOGGED_IN;
+	}
+	*age_level = 9;
+	return OK;
+}
+
+static KYTY_SYSV_ABI int UserServiceGetAccessibilityChatTranscription(int user_id, int32_t* value)
+{
+	PRINT_NAME();
+	if (value == nullptr)
+	{
+		return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+	}
+	if (user_id != 1)
+	{
+		return USER_SERVICE_ERROR_NOT_LOGGED_IN;
+	}
+	*value = 0;
+	return OK;
+}
+
+static KYTY_SYSV_ABI int UserServiceGetAccessibilityPressAndHoldDelay(int user_id, int32_t* value)
+{
+	PRINT_NAME();
+	if (value == nullptr)
+	{
+		return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+	}
+	if (user_id != 1)
+	{
+		return USER_SERVICE_ERROR_NOT_LOGGED_IN;
+	}
+	*value = 0;
+	return OK;
+}
+
+static KYTY_SYSV_ABI int UserServiceGetAccessibilityZoomEnabled(int user_id, int32_t* value)
+{
+	PRINT_NAME();
+	if (value == nullptr)
+	{
+		return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+	}
+	if (user_id != 1)
+	{
+		return USER_SERVICE_ERROR_NOT_LOGGED_IN;
+	}
+	*value = 0;
+	return OK;
+}
+
+static KYTY_SYSV_ABI int UserServiceGetAccessibilityZoomFollowFocus(int user_id, int32_t* value)
+{
+	PRINT_NAME();
+	if (value == nullptr)
+	{
+		return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+	}
+	if (user_id != 1)
+	{
+		return USER_SERVICE_ERROR_NOT_LOGGED_IN;
+	}
+	*value = 0;
+	return OK;
+}
+
 } // namespace UserService
 
 LIB_DEFINE(InitUserService_1)
@@ -158,6 +264,13 @@ LIB_DEFINE(InitUserService_1)
 	// Gen5 privacy Ws1 entry used on Astro after font setup.
 	LIB_FUNC("D-CzAxQL0XI", UserService::UserServicePlatformPrivacyWs1Stub);
 	LIB_FUNC("-sD02mFDBh4", UserService::UserServiceGetGamePresets);
+	LIB_FUNC("qWYHOFwqCxY", UserService::UserServiceGetAccessibilityVibration);
+	LIB_FUNC("-3Y5GO+-i78", UserService::UserServiceGetAccessibilityTriggerEffect);
+	LIB_FUNC("woNpu+45RLk", UserService::UserServiceGetAgeLevel);
+	LIB_FUNC("rnEhHqG-4xo", UserService::UserServiceGetAccessibilityChatTranscription);
+	LIB_FUNC("ZKJtxdgvzwg", UserService::UserServiceGetAccessibilityPressAndHoldDelay);
+	LIB_FUNC("hD-H81EN9Vg", UserService::UserServiceGetAccessibilityZoomEnabled);
+	LIB_FUNC("O6IW1-Dwm-w", UserService::UserServiceGetAccessibilityZoomFollowFocus);
 }
 
 } // namespace Kyty::Libs
