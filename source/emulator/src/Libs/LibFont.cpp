@@ -152,6 +152,42 @@ static int KYTY_SYSV_ABI FontAttachDeviceCacheBuffer(void* library, void* buffer
 	return OK;
 }
 
+struct FontSetHandle
+{
+	void*    library;
+	uint32_t font_set_type;
+	uint32_t open_flag;
+};
+
+// sceFontOpenFontSet — NID cKYtVmeSTcw
+// Observed Astro: (library, font_set_type=0x180700c7, open_flag=2, error=null, font_out).
+// Returns an opaque non-null handle so later font lookups do not null-deref.
+static int KYTY_SYSV_ABI FontOpenFontSet(void* library, uint32_t font_set_type, uint32_t open_flag, int* error,
+                                         void** font_out)
+{
+	PRINT_NAME();
+	printf("\t library       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
+	printf("\t font_set_type = 0x%" PRIx32 "\n", font_set_type);
+	printf("\t open_flag     = 0x%" PRIx32 "\n", open_flag);
+	printf("\t error         = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(error));
+	printf("\t font_out      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_out));
+
+	if (error != nullptr)
+	{
+		*error = 0;
+	}
+	if (font_out == nullptr)
+	{
+		return -1;
+	}
+	auto* handle           = new FontSetHandle {};
+	handle->library        = library;
+	handle->font_set_type  = font_set_type;
+	handle->open_flag      = open_flag;
+	*font_out              = handle;
+	return OK;
+}
+
 } // namespace Font
 
 LIB_DEFINE(InitFont_1)
@@ -164,6 +200,8 @@ LIB_DEFINE(InitFont_1)
 	LIB_FUNC("SsRbbCiWoGw", Font::FontSupportSystemFonts);
 	LIB_FUNC("mz2iTY0MK4A", Font::FontSupportExternalFonts);
 	LIB_FUNC("CUKn5pX-NVY", Font::FontAttachDeviceCacheBuffer);
+	// Gen5 Font_v1 sceFontOpenFontSet — cKYtVmeSTcw after APR/strtof on Astro.
+	LIB_FUNC("cKYtVmeSTcw", Font::FontOpenFontSet);
 }
 
 } // namespace Kyty::Libs
