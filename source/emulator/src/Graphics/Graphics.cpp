@@ -1932,8 +1932,119 @@ int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegiste
 	return OK;
 }
 
+// Pack ShaderSemantic bitfields into a 32-bit word matching the hardware layout.
+static uint32_t ShaderSemanticWord(const ShaderSemantic& semantic)
+{
+	return ((semantic.semantic & 0xffu) << 0u) | ((semantic.hardware_mapping & 0xffu) << 8u) |
+	       ((semantic.size_in_elements & 0xfu) << 16u) | ((semantic.is_f16 & 0x3u) << 20u) |
+	       ((semantic.is_flat_shaded & 0x1u) << 22u) | ((semantic.is_linear & 0x1u) << 23u) |
+	       ((semantic.is_custom & 0x1u) << 24u) | ((semantic.static_vb_index & 0x1u) << 25u) |
+	       ((semantic.static_attribute & 0x1u) << 26u) | ((semantic.reserved & 0x1u) << 27u) |
+	       ((semantic.default_value & 0x3u) << 28u) | ((semantic.default_value_hi & 0x3u) << 30u);
+}
+
+static uint32_t ApplyInterpolantDefaultValue(uint32_t value, uint32_t ps_word)
+{
+	value &= ~0x00000300u;
+	value |= ((ps_word >> 28u) & 0x3u) << 8u;
+	return value;
+}
+
+static uint32_t ApplyInterpolantDefaultValueHi(uint32_t value, uint32_t ps_word)
+{
+	value &= ~0x00600000u;
+	value |= ((ps_word >> 30u) & 0x3u) << 21u;
+	return value;
+}
+
+static uint32_t CreateInterpolantMappingValue(uint32_t value, uint32_t ps_word, uint32_t gs_word)
+{
+	const uint32_t flat_shade =
+	    ((ps_word & 0x00400000u) != 0 || (ps_word & 0x01000000u) != 0 ? 0x00000400u : 0u);
+
+	value &= ~0x0000001fu;
+	value |= (gs_word >> 8u) & 0x1fu;
+	value &= ~0x00000400u;
+	value |= flat_shade;
+
+	return ApplyInterpolantDefaultValue(value, ps_word);
+}
+
+static uint32_t CreateInterpolantDefaultValue(uint32_t value, uint32_t ps_word)
+{
+	value &= ~0x0000001fu;
+	value &= ~0x00000400u;
+	return ApplyInterpolantDefaultValue(value, ps_word);
+}
+
+static uint32_t CreateInterpolantF16Value(uint32_t ps_word, const ShaderSemantic* gs_semantic)
+{
+	uint32_t value = (ps_word << 4u) & 0x03000000u;
+
+	if (gs_semantic == nullptr)
+	{
+		value |= 0x00180020u;
+	}
+	else
+	{
+		const uint32_t common_word = ps_word & ShaderSemanticWord(*gs_semantic);
+
+		value &= 0xfff7ffdfu;
+		value |= (common_word >> 15u) & 0x20u;
+		value ^= 0x00080020u;
+		value &= ~0x00100000u;
+		value |= (~common_word >> 1u) & 0x00100000u;
+	}
+
+	return ApplyInterpolantDefaultValueHi(value, ps_word);
+}
+
+static uint32_t CreateInterpolantNonF16Value(uint32_t ps_word, const ShaderSemantic* gs_semantic)
+{
+	uint32_t value = 0;
+	// OFFSET 0x20: hardware default when custom PS input or unmatched GS export.
+	if ((ps_word & 0x01000000u) != 0 || gs_semantic == nullptr)
+	{
+		value |= 0x20u;
+	}
+	return value;
+}
+
+static const ShaderSemantic* FindInterpolantOutputSemantic(const Shader* gs, uint32_t semantic)
+{
+	if (gs == nullptr || gs->output_semantics == nullptr)
+	{
+		return nullptr;
+	}
+	for (uint16_t i = 0; i < gs->num_output_semantics; i++)
+	{
+		if (gs->output_semantics[i].semantic == semantic)
+		{
+			return &gs->output_semantics[i];
+		}
+	}
+	return nullptr;
+}
+
+static void SetInterpolantRegister(ShaderRegister* regs, uint32_t index, uint32_t value)
+{
+	regs[index].offset = Pm4::SPI_PS_INPUT_CNTL_0 + index;
+	regs[index].value  = value;
+}
+
+static void SetIdentityInterpolantRegisters(ShaderRegister* regs, uint32_t first_index)
+{
+	for (uint32_t i = first_index; i < 32u; i++)
+	{
+		SetInterpolantRegister(regs, i, i);
+	}
+}
+
+// Legacy helper used by deterministic tests: map PS inputs from a VS/GS export
+// superset (flat-shade bit, default OFFSET 0x20, or identity outputs when PS
+// has no inputs). Does not cover f16/custom packs — CreateInterpolantMapping does.
 bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic* outputs, uint32_t output_count,
-	                                     const ShaderSemantic* inputs, uint32_t input_count)
+                                     const ShaderSemantic* inputs, uint32_t input_count)
 {
 	if (regs == nullptr || output_count > 32 || input_count > 32 || (output_count != 0 && outputs == nullptr) ||
 	    (input_count != 0 && inputs == nullptr))
@@ -1951,9 +2062,7 @@ bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic*
 		for (uint32_t output_index = 0; output_index < output_count; output_index++)
 		{
 			const auto& output = outputs[output_index];
-			if (output.hardware_mapping >= 32 || output.size_in_elements != 0 || output.is_f16 != 0 || output.is_flat_shaded != 0 ||
-			    output.is_linear != 0 || output.is_custom != 0 || output.static_vb_index != 0 || output.static_attribute != 0 ||
-			    output.default_value != 0 || output.default_value_hi != 0)
+			if (output.hardware_mapping >= 32)
 			{
 				return false;
 			}
@@ -1964,17 +2073,8 @@ bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic*
 
 	for (uint32_t input_index = 0; input_index < input_count; input_index++)
 	{
-		const auto& input = inputs[input_index];
-		if (input.hardware_mapping != 0 || input.size_in_elements != 0 || input.is_f16 != 0 || input.is_linear != 0 ||
-		    input.is_custom != 0 || input.static_vb_index != 0 || input.static_attribute != 0 || input.default_value > 3 ||
-		    input.default_value_hi != 0)
-		{
-			printf("Unsupported pixel input semantic: index=%u semantic=%u mapping=%u size=%u f16=%u linear=%u custom=%u static=%u/%u default=%u/%u\n",
-			       input_index, input.semantic, input.hardware_mapping, input.size_in_elements, input.is_f16, input.is_linear,
-			       input.is_custom, input.static_vb_index, input.static_attribute, input.default_value, input.default_value_hi);
-			return false;
-		}
-
+		const auto& input  = inputs[input_index];
+		const auto  ps_word = ShaderSemanticWord(input);
 		const ShaderSemantic* output = nullptr;
 		for (uint32_t output_index = 0; output_index < output_count; output_index++)
 		{
@@ -1984,24 +2084,12 @@ bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic*
 				break;
 			}
 		}
-		if (output == nullptr)
-		{
-			// OFFSET 0x20 selects a hardware default parameter instead of a vertex export.
-			regs[input_index].value = 0x20u | (input.default_value << 8u);
-			continue;
-		}
-		if (output->hardware_mapping >= 32 || output->size_in_elements != 0 || output->is_f16 != 0 ||
-		    output->is_flat_shaded != 0 || output->is_linear != 0 || output->is_custom != 0 || output->static_vb_index != 0 ||
-		    output->static_attribute != 0 || output->default_value != 0 || output->default_value_hi != 0)
-		{
-			printf("Unsupported vertex output semantic: semantic=%u mapping=%u size=%u f16=%u flat=%u linear=%u custom=%u static=%u/%u default=%u/%u\n",
-			       output->semantic, output->hardware_mapping, output->size_in_elements, output->is_f16, output->is_flat_shaded,
-			       output->is_linear, output->is_custom, output->static_vb_index, output->static_attribute, output->default_value,
-			       output->default_value_hi);
-			return false;
-		}
 
-		regs[input_index].value = output->hardware_mapping | (input.is_flat_shaded != 0 ? 0x400u : 0u);
+		uint32_t value = ((ps_word & 0x00300000u) != 0 ? CreateInterpolantF16Value(ps_word, output)
+		                                               : CreateInterpolantNonF16Value(ps_word, output));
+		value = (output == nullptr ? CreateInterpolantDefaultValue(value, ps_word)
+		                           : CreateInterpolantMappingValue(value, ps_word, ShaderSemanticWord(*output)));
+		regs[input_index].value = value;
 	}
 	return true;
 }
@@ -2015,20 +2103,37 @@ int KYTY_SYSV_ABI GraphicsCreateInterpolantMapping(ShaderRegister* regs, const S
 	printf("\t gs   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(gs));
 	printf("\t ps   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ps));
 
-	EXIT_NOT_IMPLEMENTED(gs == nullptr);
-	EXIT_NOT_IMPLEMENTED(gs == nullptr && ps == nullptr);
 	EXIT_NOT_IMPLEMENTED(regs == nullptr);
+	EXIT_NOT_IMPLEMENTED(ps != nullptr && ps->num_input_semantics != 0 && ps->input_semantics == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(gs->type != 2);
-	EXIT_NOT_IMPLEMENTED(ps != nullptr && ps->type != 1);
+	// No PS inputs: identity SPI_PS_INPUT_CNTL slots (common clear / full-screen paths).
+	if (ps == nullptr || ps->num_input_semantics == 0)
+	{
+		SetIdentityInterpolantRegisters(regs, 0);
+		return OK;
+	}
 
+	EXIT_NOT_IMPLEMENTED(gs == nullptr);
+	EXIT_NOT_IMPLEMENTED(gs->num_output_semantics != 0 && gs->output_semantics == nullptr);
 	EXIT_NOT_IMPLEMENTED(sizeof(ShaderSemantic) != 4);
-	EXIT_NOT_IMPLEMENTED(ps != nullptr && ps->num_output_semantics != 0);
 
-	const ShaderSemantic* inputs      = (ps != nullptr ? ps->input_semantics : nullptr);
-	const uint32_t        input_count = (ps != nullptr ? ps->num_input_semantics : 0);
-	EXIT_NOT_IMPLEMENTED(!GraphicsBuildInterpolantMapping(regs, gs->output_semantics, gs->num_output_semantics, inputs, input_count));
+	for (uint32_t ps_index = 0; ps_index < ps->num_input_semantics; ps_index++)
+	{
+		const auto& ps_semantic = ps->input_semantics[ps_index];
+		const auto* gs_semantic = FindInterpolantOutputSemantic(gs, ps_semantic.semantic);
+		const auto  ps_word     = ShaderSemanticWord(ps_semantic);
 
+		auto value =
+		    ((ps_word & 0x00300000u) != 0 ? CreateInterpolantF16Value(ps_word, gs_semantic)
+		                                  : CreateInterpolantNonF16Value(ps_word, gs_semantic));
+		value = (gs_semantic == nullptr
+		             ? CreateInterpolantDefaultValue(value, ps_word)
+		             : CreateInterpolantMappingValue(value, ps_word, ShaderSemanticWord(*gs_semantic)));
+
+		SetInterpolantRegister(regs, ps_index, value);
+	}
+
+	SetIdentityInterpolantRegisters(regs, ps->num_input_semantics);
 	return OK;
 }
 

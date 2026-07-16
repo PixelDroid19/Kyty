@@ -404,6 +404,16 @@ static KYTY_SYSV_ABI int c_sscanf(VA_ARGS)
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
 	return ::vsscanf(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
 }
+// Gen5 sscanf_s — NID 24m4Z4bUaoY. Annex K requires rsize after %s/%c/%[ destinations;
+// integer formats match sscanf. Forward identically for now; refine if a title
+// supplies sized string conversions that mis-parse under host vsscanf.
+static KYTY_SYSV_ABI int c_sscanf_s(VA_ARGS)
+{
+	VA_CONTEXT(ctx);
+	const char* s   = VaArg_ptr<const char>(&ctx.va_list);
+	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
+	return ::vsscanf(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+}
 static KYTY_SYSV_ABI int c_vsprintf(char* s, const char* fmt, VaList* ap)
 {
 	return Format(s, C_UNBOUNDED_FORMAT, fmt, ap);
@@ -934,6 +944,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("xEszJVGpybs", LibC::c_sprintf_s);
 	LIB_FUNC("fffwELXNVFA", LibC::c_fprintf);
 	LIB_FUNC("1Pk0qZQGeWo", LibC::c_sscanf);
+	LIB_FUNC("24m4Z4bUaoY", LibC::c_sscanf_s);
 	LIB_FUNC("jbz9I9vkqkk", LibC::c_vsprintf);
 	LIB_FUNC("rWSuTWY2JN0", LibC::c_vsnprintf_s);
 
