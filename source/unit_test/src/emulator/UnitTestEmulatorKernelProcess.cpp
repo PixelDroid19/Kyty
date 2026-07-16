@@ -140,4 +140,14 @@ TEST(EmulatorKernelProcess, ConfiguredFlexibleAndRangeNameBoundaries)
 	EXPECT_EQ(LibKernel::Memory::KernelSetVirtualRangeName(nullptr, 0, "test"), OK);
 }
 
+// Gen5 VirtualQuery: reject bad info_size/flags; unmapped addr returns EACCES.
+TEST(EmulatorKernelProcess, VirtualQueryRejectsBadArgs)
+{
+	static_assert(sizeof(LibKernel::Memory::VirtualQueryInfo) == 72);
+	LibKernel::Memory::VirtualQueryInfo info {};
+	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 0, nullptr, sizeof(info)), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 0, &info, 8), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 2, &info, sizeof(info)), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
 UT_END();

@@ -655,6 +655,7 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("aNz11fnnzi4", Memory::KernelAvailableFlexibleMemorySize);
 	LIB_FUNC("n1-v6FgU7MQ", Memory::KernelConfiguredFlexibleMemorySize);
 	LIB_FUNC("DGMG3JshrZU", Memory::KernelSetVirtualRangeName);
+	LIB_FUNC("rVjRvHJ0X6c", Memory::KernelVirtualQuery);
 	LIB_FUNC("vSMAm3cxYTY", Memory::KernelMprotect);
 }
 
