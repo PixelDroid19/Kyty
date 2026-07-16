@@ -65,6 +65,8 @@ LIB_DEFINE(InitAudio_1_AudioOut2)
 	LIB_FUNC("Bagshr7OQ6Q", AudioOut2::AudioOut2LogAndOk);
 	LIB_FUNC("Gz1rmUZpROM", AudioOut2::AudioOut2LogAndOk);
 	LIB_FUNC("sysY2FHYff4", AudioOut2::AudioOut2LogAndOk);
+	// Astro after AcmContextCreate: DImz2Ft9E2g (name unresolved; one-arg query-like).
+	LIB_FUNC("DImz2Ft9E2g", AudioOut2::AudioOut2LogAndOk);
 }
 
 } // namespace LibAudioOut2
