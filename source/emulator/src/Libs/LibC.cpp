@@ -712,9 +712,12 @@ void* KYTY_SYSV_ABI LibcMspaceMemalign(void* msp, size_t align, size_t size)
 	return Core::MSpaceMemalign(msp, align, size);
 }
 
-// Gen5 sceLibcMspaceMallocStatsFast — NID k04jLXu3+Ic. Fill a guest stats
-// block with zeros when the mspace exists; titles probe capacity without
-// requiring accurate host allocator counters yet.
+// Gen5 sceLibcMspaceMallocStatsFast — NID k04jLXu3+Ic.
+// Observed Astro stack frame: stats block lives at rbp-0x48 with the stack
+// canary at rbp-0x20, so the guest only has 0x28 bytes before the canary.
+// Writing more than 0x28 bytes smashes the canary and trips stack_chk_fail.
+constexpr size_t kMspaceMallocStatsFastBytes = 0x28;
+
 int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
 {
 	PRINT_NAME();
@@ -724,9 +727,9 @@ int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
 	{
 		return -1;
 	}
-	// Observed guest block is at least 0x30 bytes of counters; zero a full page
-	// fragment-safe 0x40 region used by the post-heap probe path.
-	std::memset(stats, 0, 0x40);
+	std::memset(stats, 0, kMspaceMallocStatsFastBytes);
+	// Guest prologue stores size/version 0x10028 at the head of this block.
+	*reinterpret_cast<uint32_t*>(stats) = 0x10028u;
 	return 0;
 }
 
