@@ -615,6 +615,7 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("oib76F-12fk", FileSystem::KernelLseek);
 	LIB_FUNC("j2AIqSqJP0w", FileSystem::KernelGetdents);
 	LIB_FUNC("1-LFLmRFxxM", FileSystem::KernelMkdir);
+	LIB_FUNC("naInUjYt3so", FileSystem::KernelRmdir);
 	// Gen5 APR path resolution / submit / wait (libkernel APR family).
 	LIB_FUNC("gEpBkcwxUjw", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizes);
 	LIB_FUNC("WT-5NKy42fw", FileSystem::KernelAprResolveFilepathsToIds);
@@ -645,12 +646,15 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("rTXw65xmLIA", Memory::KernelAllocateDirectMemory);
 	LIB_FUNC("B+vc2AO2Zrc", Memory::KernelAllocateMainDirectMemory);
 	LIB_FUNC("L-Q3LEjIbgA", Memory::KernelMapDirectMemory);
+	LIB_FUNC("BQQniolj9tQ", Memory::KernelMapDirectMemory2);
 	LIB_FUNC("NcaWUxfMNIQ", Memory::KernelMapNamedDirectMemory);
 	LIB_FUNC("MBuItvba6z8", Memory::KernelReleaseDirectMemory);
 	LIB_FUNC("hwVSPCmp5tM", Memory::KernelCheckedReleaseDirectMemory);
 	LIB_FUNC("WFcfL2lzido", Memory::KernelQueryMemoryProtection);
 	LIB_FUNC("BHouLQzh0X0", Memory::KernelDirectMemoryQuery);
 	LIB_FUNC("aNz11fnnzi4", Memory::KernelAvailableFlexibleMemorySize);
+	LIB_FUNC("n1-v6FgU7MQ", Memory::KernelConfiguredFlexibleMemorySize);
+	LIB_FUNC("DGMG3JshrZU", Memory::KernelSetVirtualRangeName);
 	LIB_FUNC("vSMAm3cxYTY", Memory::KernelMprotect);
 }
 
