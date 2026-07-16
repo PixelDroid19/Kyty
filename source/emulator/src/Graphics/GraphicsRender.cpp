@@ -4709,7 +4709,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						const auto& e = dtex.At(static_cast<int>(i))->extent;
 						areas[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
 					}
-					alias_index = PreferGpuMemoryAliasIndex(areas, n, 0);
+					const uint64_t sample_area = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+					alias_index               = PreferGpuMemoryAliasIndex(areas, n, sample_area);
 				}
 				tex = dtex.At(static_cast<int>(alias_index));
 			}
@@ -4729,8 +4730,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			{
 				EXIT_NOT_IMPLEMENTED(swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7));
 				// Multiple non-exact RT aliases are expected under Gen5 nested /
-				// same-base parents. Pick the tightest cover instead of EXIT —
-				// aborting here closed Dead Cells mid-load (rtex.Size()>1).
+				// same-base parents. Prefer the tightest cover using the sample's
+				// pixel area as sample_size (same units as RT extent area). Using
+				// sample_size=0 always picked the smallest RT — including tiny
+				// IsContainedWithin children under a large sample — which bound a
+				// partial image and left opaque-black prop/character boxes.
 				size_t alias_index = 0;
 				if (rtex.Size() > 1)
 				{
@@ -4741,7 +4745,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						const auto& e = rtex.At(static_cast<int>(i))->extent;
 						areas[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
 					}
-					alias_index = PreferGpuMemoryAliasIndex(areas, n, 0);
+					const uint64_t sample_area = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+					alias_index               = PreferGpuMemoryAliasIndex(areas, n, sample_area);
 				}
 				tex = rtex.At(static_cast<int>(alias_index));
 				if (swizzle == DstSel(6, 5, 4, 7))
