@@ -68,8 +68,9 @@ std::string HelpResult()
 	    "{\"tool\":\"pad_tap\",\"args\":{\"button\":\"cross\"}},"
 	    "{\"tool\":\"pad_axis\",\"args\":{\"axis\":\"left_x\",\"value\":128}},"
 	    "{\"tool\":\"pad_clear\"},"
-	    "{\"tool\":\"wait_present\",\"args\":{\"min\":1,\"timeout_ms\":30000}},"
-	    "{\"tool\":\"wait_frame\",\"args\":{\"min\":1,\"timeout_ms\":30000}},"
+	    "{\"tool\":\"wait_present\",\"args\":{\"min\":1,\"delta\":20,\"timeout_ms\":15000}},"
+	    "{\"tool\":\"wait_frame\",\"args\":{\"min\":1,\"delta\":20,\"timeout_ms\":15000}},"
+	    "{\"tool\":\"wait_phase\",\"args\":{\"want\":\"interactive\",\"min_fps\":5,\"stable_ms\":400,\"timeout_ms\":45000}},"
 	    "{\"tool\":\"wait_event\",\"args\":{\"kind\":\"error\",\"timeout_ms\":5000}},"
 	    "{\"tool\":\"watch\",\"args\":{\"window_ms\":10000,\"present_stall_ms\":5000,\"frame_stall_ms\":5000,\"min_fps\":2.0,\"capture\":true}}"
 	    "]}");
@@ -86,16 +87,20 @@ std::string StatusResult()
 	Libs::Controller::AgentPadReadStats read_stats {};
 	Libs::Controller::AgentPadGetReadStats(&read_stats);
 
-	char buf[1280];
+	char buf[1536];
+	const PhaseHint phase =
+	    ClassifyPhaseHint(stats.graphic_ready, stats.present, stats.fps, stats.ms_since_present, PhaseHintArgs {});
 	std::snprintf(
 	    buf, sizeof(buf),
 	    "{\"protocol_version\":%u,\"frame\":%d,\"present\":%llu,\"fps\":%.3f,\"ms_since_present\":%llu,\"ms_since_frame\":%llu,"
+	    "\"phase\":%s,"
 	    "\"capture_ready\":%s,\"capture_dir_set\":%s,"
 	    "\"graphic_ready\":%s,\"build_revision\":%s,\"build_dirty\":%s,\"diagnostic_input\":true,"
 	    "\"pad\":{\"buttons\":%u,\"left_x\":%u,\"left_y\":%u,\"right_x\":%u,\"right_y\":%u,\"l2\":%u,\"r2\":%u,"
 	    "\"guest_read_state_samples\":%llu,\"guest_read_samples\":%llu,\"delivered_taps\":%llu,\"tap_pending\":%s}}",
 	    kAgentProtocolVersion, stats.frame, static_cast<unsigned long long>(stats.present), stats.fps,
 	    static_cast<unsigned long long>(stats.ms_since_present), static_cast<unsigned long long>(stats.ms_since_frame),
+	    JsonString(PhaseHintName(phase)).c_str(),
 	    stats.capture_ready ? "true" : "false", stats.capture_dir_set ? "true" : "false", stats.graphic_ready ? "true" : "false",
 	    JsonString(BuildInfo::Revision).c_str(), BuildInfo::Dirty ? "true" : "false", buttons,
 	    static_cast<unsigned>(axes[0]), static_cast<unsigned>(axes[1]), static_cast<unsigned>(axes[2]),
@@ -409,12 +414,22 @@ std::string Dispatch(const Request& req)
 	if (req.tool == "wait_present" || req.tool == "wait_frame")
 	{
 		uint64_t min_value  = 0;
-		uint32_t timeout_ms = 30000;
-		if (!ArgsGetU64(req.args_json, "min", &min_value))
-		{
-			return FormatErr(req.id, "invalid_args", "min is required");
-		}
+		uint64_t delta      = 0;
+		uint32_t timeout_ms = 15000;
+		const bool have_min   = ArgsGetU64(req.args_json, "min", &min_value);
+		const bool have_delta = ArgsGetU64(req.args_json, "delta", &delta) && delta > 0;
 		(void)ArgsGetU32(req.args_json, "timeout_ms", &timeout_ms);
+		if (!have_min && !have_delta)
+		{
+			return FormatErr(req.id, "invalid_args", "min or delta is required");
+		}
+		if (have_delta)
+		{
+			Libs::Graphics::WindowPresentStats now {};
+			Libs::Graphics::WindowGetPresentStats(&now);
+			const uint64_t current = req.tool == "wait_present" ? now.present : static_cast<uint64_t>(now.frame);
+			min_value              = current + delta;
+		}
 		const uint64_t deadline = SteadyMs() + timeout_ms;
 		while (!g_stop.load())
 		{
@@ -423,9 +438,13 @@ std::string Dispatch(const Request& req)
 			const uint64_t current = req.tool == "wait_present" ? stats.present : static_cast<uint64_t>(stats.frame);
 			if (current >= min_value)
 			{
-				char buf[128];
-				std::snprintf(buf, sizeof(buf), "{\"%s\":%llu}", req.tool == "wait_present" ? "present" : "frame",
-				              static_cast<unsigned long long>(current));
+				char buf[192];
+				std::snprintf(buf, sizeof(buf),
+				              "{\"%s\":%llu,\"target\":%llu,\"phase\":%s}", req.tool == "wait_present" ? "present" : "frame",
+				              static_cast<unsigned long long>(current), static_cast<unsigned long long>(min_value),
+				              JsonString(PhaseHintName(ClassifyPhaseHint(stats.graphic_ready, stats.present, stats.fps,
+				                                                        stats.ms_since_present, PhaseHintArgs {})))
+				                  .c_str());
 				return FormatOk(req.id, buf);
 			}
 			if (SteadyMs() >= deadline)
@@ -433,6 +452,84 @@ std::string Dispatch(const Request& req)
 				return FormatErr(req.id, "timeout", "wait timed out");
 			}
 			Core::Thread::Sleep(10);
+		}
+		return FormatErr(req.id, "socket_gone", "agent server stopping");
+	}
+	if (req.tool == "wait_phase")
+	{
+		std::string want_name = "interactive";
+		uint32_t    timeout_ms = 45000;
+		uint32_t    stable_ms  = 400;
+		uint32_t    min_fps_u  = 5;
+		uint32_t    stall_ms   = 2000;
+		(void)ArgsGetString(req.args_json, "want", &want_name);
+		(void)ArgsGetU32(req.args_json, "timeout_ms", &timeout_ms);
+		(void)ArgsGetU32(req.args_json, "stable_ms", &stable_ms);
+		(void)ArgsGetU32(req.args_json, "min_fps", &min_fps_u);
+		(void)ArgsGetU32(req.args_json, "stall_ms", &stall_ms);
+		PhaseHint want = PhaseHint::Interactive;
+		if (want_name == "not_ready")
+		{
+			want = PhaseHint::NotReady;
+		} else if (want_name == "booting")
+		{
+			want = PhaseHint::Booting;
+		} else if (want_name == "loading")
+		{
+			want = PhaseHint::Loading;
+		} else if (want_name == "interactive")
+		{
+			want = PhaseHint::Interactive;
+		} else if (want_name == "stalled")
+		{
+			want = PhaseHint::Stalled;
+		} else
+		{
+			return FormatErr(req.id, "invalid_args", "want must be not_ready|booting|loading|interactive|stalled");
+		}
+		PhaseHintArgs phase_args {};
+		phase_args.interactive_min_fps = static_cast<double>(min_fps_u);
+		phase_args.stall_ms            = stall_ms;
+		if (stable_ms < 50)
+		{
+			stable_ms = 50;
+		}
+		const uint64_t deadline     = SteadyMs() + timeout_ms;
+		uint64_t       match_since  = 0;
+		PhaseHint      last_phase   = PhaseHint::NotReady;
+		while (!g_stop.load())
+		{
+			Libs::Graphics::WindowPresentStats stats {};
+			Libs::Graphics::WindowGetPresentStats(&stats);
+			last_phase = ClassifyPhaseHint(stats.graphic_ready, stats.present, stats.fps, stats.ms_since_present, phase_args);
+			const uint64_t now = SteadyMs();
+			if (last_phase == want)
+			{
+				if (match_since == 0)
+				{
+					match_since = now;
+				}
+				if (now - match_since >= stable_ms)
+				{
+					char buf[256];
+					std::snprintf(buf, sizeof(buf),
+					              "{\"phase\":%s,\"present\":%llu,\"fps\":%.3f,\"ms_since_present\":%llu,\"stable_ms\":%u}",
+					              JsonString(PhaseHintName(last_phase)).c_str(), static_cast<unsigned long long>(stats.present),
+					              stats.fps, static_cast<unsigned long long>(stats.ms_since_present), stable_ms);
+					return FormatOk(req.id, buf);
+				}
+			} else
+			{
+				match_since = 0;
+			}
+			if (now >= deadline)
+			{
+				char msg[192];
+				std::snprintf(msg, sizeof(msg), "wait_phase timed out in phase=%s want=%s", PhaseHintName(last_phase),
+				              want_name.c_str());
+				return FormatErr(req.id, "timeout", msg);
+			}
+			Core::Thread::Sleep(20);
 		}
 		return FormatErr(req.id, "socket_gone", "agent server stopping");
 	}

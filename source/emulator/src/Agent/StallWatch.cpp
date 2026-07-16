@@ -17,6 +17,42 @@ const char* StallCodeName(StallCode code)
 	return "healthy";
 }
 
+const char* PhaseHintName(PhaseHint phase)
+{
+	switch (phase)
+	{
+		case PhaseHint::NotReady: return "not_ready";
+		case PhaseHint::Booting: return "booting";
+		case PhaseHint::Loading: return "loading";
+		case PhaseHint::Interactive: return "interactive";
+		case PhaseHint::Stalled: return "stalled";
+	}
+	return "not_ready";
+}
+
+PhaseHint ClassifyPhaseHint(bool graphic_ready, uint64_t present, double fps, uint64_t ms_since_present, const PhaseHintArgs& args)
+{
+	if (!graphic_ready)
+	{
+		return PhaseHint::NotReady;
+	}
+	if (ms_since_present >= args.stall_ms)
+	{
+		return PhaseHint::Stalled;
+	}
+	if (present < args.boot_present_max)
+	{
+		return PhaseHint::Booting;
+	}
+	// Presents are still completing (ms_since_present < stall) but the host
+	// frame rate is below interactive — typical loading card / heavy GPU work.
+	if (fps > 0.0 && fps < args.interactive_min_fps)
+	{
+		return PhaseHint::Loading;
+	}
+	return PhaseHint::Interactive;
+}
+
 StallWatchResult ClassifyStall(const StallSample& start, const StallSample& end, const StallWatchArgs& args)
 {
 	StallWatchResult out {};

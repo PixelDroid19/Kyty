@@ -63,13 +63,15 @@ GPU-owned guest memory (which paints opaque black).
 
 - `Equals`
 - `IsContainedWithin` (existing RT sits inside the sample query)
-- `Contains` **only** when the RT and sample share the same base address
-  (size-mismatch Equals miss)
+- `Contains` (sample sits inside an existing live RT — same-base size
+  mismatch **or** offset-into-parent). Prefer picks among multi-matches;
+  aborting on `Size() > 1` historically killed boot. Cropped
+  `VkImageView` for offset UVs is a separate follow-up; binding the parent
+  image still supplies correct GPU content instead of empty tile-27 upload.
 
-Unconditional `Contains` matched multiple overlapping parent RTs and historically
-tripped `EXIT_NOT_IMPLEMENTED(rtex.Size() > 1)`, aborting the host process mid-
-load. Offset-into-parent cropped views remain unsupported until a cropped-view
-contract exists. `Crosses` is rejected for this sample path.
+`Crosses` is rejected for this sample path (partial overlap). Offset-into-
+parent without a crop view may still show atlas/UV artifacts; opaque-black
+boxes from empty upload should clear.
 
 Depth lookups use `only_first`; color sample bind collects matches and then
 selects one image.
@@ -82,11 +84,15 @@ selects one image.
   `sample_size` (tightest cover). If none cover, prefer the **largest** under-
   sample object.
 - If `sample_size == 0`: sizes are a comparable proxy only (for example pixel
-  area); prefer the smallest proxy. **Sample-bind call sites must pass the
-  sample’s pixel area (`width * height`) together with each RT’s
-  `extent.width * extent.height`**, not `0`. Passing `0` always selected the
-  smallest RT, including tiny `IsContainedWithin` children under a large
-  sample, which left opaque-black character/prop boxes.
+  area); prefer the smallest proxy.
+
+**Sample-bind units:** when every matched image recorded `VulkanImage::guest_size`
+at create (from the guest allocation size), pass those bytes with the sample’s
+`size.size`. Otherwise fall back to the sample’s pixel area (`width * height`)
+together with each RT’s `extent.width * extent.height`. Do **not** pass
+`sample_size = 0` at the sample-bind call site: that always selected the
+smallest RT, including tiny `IsContainedWithin` children under a large sample,
+which left opaque-black character/prop boxes.
 
 Do **not** abort the process on `Size() > 1`. Aborting turns a graphics alias
 bug into “the game will not start.”
@@ -96,9 +102,11 @@ bug into “the game will not start.”
 1. Encode the relation policy in
    `EmulatorGraphicsState.FindObjectsNonExactAcceptsContainedSampleInRenderTarget`.
 2. Encode selection in
-   `EmulatorGraphicsState.PreferGpuMemoryAliasPicksTightestCover`.
+   `EmulatorGraphicsState.PreferGpuMemoryAliasPicksTightestCover`,
+   `PreferGpuMemoryAliasUsesSampleAreaAgainstRtExtents`, and
+   `PreferGpuMemoryAliasUsesGuestByteSizes`.
 3. Wire selection in the sample-bind path in `GraphicsRender.cpp` after
-   `FindRenderTexture`.
+   `FindRenderTexture` (guest bytes when available, else pixel area).
 4. Barriers that must touch **every** overlapping RT keep `only_first=false` and
    iterate all images; only the single-bind sample path picks one alias.
 

@@ -264,6 +264,7 @@ struct WindowContext
 		bool                  first_present = false;
 		uint32_t              every_present = 0;
 		bool                  telemetry     = false;
+		uint32_t              max_edge      = 0;
 		bool                  first_pending = false;
 		bool                  manual_pending = false;
 		uint64_t              sequence      = 0;
@@ -419,9 +420,12 @@ static void NativeCaptureConfigure(WindowContext* ctx)
 	ctx->native_capture.first_pending = ctx->native_capture.first_present;
 	ctx->native_capture.every_present = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_EVERY");
 	ctx->native_capture.telemetry     = NativeCaptureEnvEnabled("KYTY_NATIVE_TELEMETRY");
+	// Optional downscale for agent loops on memory-constrained hosts (e.g. 1280).
+	ctx->native_capture.max_edge      = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_MAX_EDGE");
 
-	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE_CONFIG enabled=1 first=%d every=%u trigger=%d\n", ctx->native_capture.first_present ? 1 : 0,
-	             ctx->native_capture.every_present, ctx->native_capture.trigger_file.empty() ? 0 : 1);
+	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE_CONFIG enabled=1 first=%d every=%u trigger=%d max_edge=%u\n",
+	             ctx->native_capture.first_present ? 1 : 0, ctx->native_capture.every_present,
+	             ctx->native_capture.trigger_file.empty() ? 0 : 1, ctx->native_capture.max_edge);
 }
 
 enum class NativeCaptureMilestone
@@ -607,7 +611,38 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		return;
 	}
 
-	const int save_result = SDL_SaveBMP(surface, image_path.string().c_str());
+	SDL_Surface* save_surface = surface;
+	SDL_Surface* scaled       = nullptr;
+	uint32_t     out_width    = static_cast<uint32_t>(width);
+	uint32_t     out_height   = static_cast<uint32_t>(height);
+	if (ctx->native_capture.max_edge > 0 && (out_width > ctx->native_capture.max_edge || out_height > ctx->native_capture.max_edge))
+	{
+		const double scale =
+		    static_cast<double>(ctx->native_capture.max_edge) / static_cast<double>(out_width > out_height ? out_width : out_height);
+		out_width  = std::max(1u, static_cast<uint32_t>(static_cast<double>(out_width) * scale + 0.5));
+		out_height = std::max(1u, static_cast<uint32_t>(static_cast<double>(out_height) * scale + 0.5));
+		scaled = SDL_CreateRGBSurface(0, static_cast<int>(out_width), static_cast<int>(out_height), 32, r_mask, g_mask, b_mask, a_mask);
+		if (scaled != nullptr && SDL_BlitScaled(surface, nullptr, scaled, nullptr) == 0)
+		{
+			save_surface = scaled;
+		} else
+		{
+			if (scaled != nullptr)
+			{
+				SDL_FreeSurface(scaled);
+				scaled = nullptr;
+			}
+			out_width  = static_cast<uint32_t>(width);
+			out_height = static_cast<uint32_t>(height);
+			std::fprintf(stderr, "KYTY_CAPTURE_WARN subsystem=frame_capture operation=downscale frame=%d kept_full=1\n", frame);
+		}
+	}
+
+	const int save_result = SDL_SaveBMP(save_surface, image_path.string().c_str());
+	if (scaled != nullptr)
+	{
+		SDL_FreeSurface(scaled);
+	}
 	SDL_FreeSurface(surface);
 	if (save_result != 0)
 	{
@@ -629,9 +664,11 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		             "\"present\": %llu,\n  \"title_id\": \"%s\",\n  \"app_version\": \"%s\",\n  "
 		             "\"build_revision\": \"%s\",\n  \"build_dirty\": %s,\n  \"backend\": \"Vulkan\",\n  "
 		             "\"format\": \"%s\",\n  \"width\": %llu,\n  \"height\": %llu,\n  "
+		             "\"source_width\": %llu,\n  \"source_height\": %llu,\n  "
 		             "\"image\": \"%s\",\n  \"host_peak_rss_bytes\": %llu\n}\n",
 		             NativeCaptureMilestoneName(milestone), frame, static_cast<unsigned long long>(ctx->native_capture.present_count), title_name.c_str(),
 		             version_name.c_str(), revision.c_str(), BuildInfo::Dirty ? "true" : "false", NativeCaptureFormatName(image->format),
+		             static_cast<unsigned long long>(out_width), static_cast<unsigned long long>(out_height),
 		             static_cast<unsigned long long>(width), static_cast<unsigned long long>(height), image_path.filename().string().c_str(),
 		             static_cast<unsigned long long>(NativeCaptureHostPeakRssBytes()));
 		std::fclose(metadata);
@@ -641,21 +678,21 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		if (agent_waiting)
 		{
 			NativeCapturePublishResult(ctx, false, image_path.string().c_str(), NativeCaptureMilestoneName(milestone),
-			                           NativeCaptureFormatName(image->format), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-			                           frame, "save_metadata", "failed to write capture metadata");
+			                           NativeCaptureFormatName(image->format), out_width, out_height, frame, "save_metadata",
+			                           "failed to write capture metadata");
 		}
 		return;
 	}
 
-	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE milestone=%s frame=%d present=%llu file=%s format=%s size=%llux%llu\n",
-	             NativeCaptureMilestoneName(milestone), frame, static_cast<unsigned long long>(ctx->native_capture.present_count), image_path.string().c_str(),
-	             NativeCaptureFormatName(image->format), static_cast<unsigned long long>(width), static_cast<unsigned long long>(height));
+	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE milestone=%s frame=%d present=%llu file=%s format=%s size=%ux%u source=%llux%llu\n",
+	             NativeCaptureMilestoneName(milestone), frame, static_cast<unsigned long long>(ctx->native_capture.present_count),
+	             image_path.string().c_str(), NativeCaptureFormatName(image->format), out_width, out_height,
+	             static_cast<unsigned long long>(width), static_cast<unsigned long long>(height));
 
 	if (agent_waiting)
 	{
 		NativeCapturePublishResult(ctx, true, image_path.string().c_str(), NativeCaptureMilestoneName(milestone),
-		                           NativeCaptureFormatName(image->format), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-		                           frame, nullptr, nullptr);
+		                           NativeCaptureFormatName(image->format), out_width, out_height, frame, nullptr, nullptr);
 	}
 }
 
