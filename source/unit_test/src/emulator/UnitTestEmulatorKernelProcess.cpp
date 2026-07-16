@@ -109,4 +109,10 @@ TEST(EmulatorKernelProcess, AprSubmitGetIdAndWaitRoundTrip)
 	EXPECT_EQ(LibKernel::FileSystem::KernelAprWaitCommandBuffer(0), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
+// Gen5 NID IafI2PxcPnQ — null mutex is EINVAL at the HLE boundary.
+TEST(EmulatorKernelProcess, PthreadMutexTimedlockRejectsNull)
+{
+	EXPECT_EQ(LibKernel::PthreadMutexTimedlock(nullptr, 1000), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
 UT_END();
