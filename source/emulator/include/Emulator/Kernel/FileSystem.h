@@ -51,6 +51,18 @@ String GetRealFilename(const String& mounted_file_name);
 // original path when no substitute exists (or when the exact file is present).
 [[nodiscard]] String PreferPackageFontHostPath(const String& requested_host_path);
 
+// When the exact host file is missing, try a known dump extension alias
+// (e.g. .odx → .odxb for Astro FIXED packages). Returns an existing path or
+// the original request when no alias hits.
+[[nodiscard]] String PreferHostExtensionAlias(const String& requested_host_path);
+
+// Some Astro path builders open /app0/<tree>/... when the package stores the
+// tree under /app0/data/<tree>/... (e.g. /app0/prein/... → /app0/data/prein/...).
+// When guest_path is under /app0/ and the mapped host file is missing, insert
+// a data/ segment after app0 and return that host path if it exists (also
+// applying PreferHostExtensionAlias). Otherwise returns the original host path.
+[[nodiscard]] String PreferHostApp0DataSegment(const String& guest_path, const String& requested_host_path);
+
 int KYTY_SYSV_ABI     KernelOpen(const char* path, int flags, uint16_t mode);
 int KYTY_SYSV_ABI     KernelClose(int d);
 int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes);
