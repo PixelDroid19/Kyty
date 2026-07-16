@@ -1363,25 +1363,16 @@ int KYTY_SYSV_ABI PthreadAttrSetschedparam(PthreadAttr* attr, const KernelSchedP
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	// PS5 guest priorities span a wide numeric range (observed Thread.cpp
+	// clamps to roughly 256..767). Host Linux SCHED_OTHER only accepts
+	// sched_priority 0 — mapping guest lows/highs to ±2 returns EINVAL and
+	// the game asserts (int $0x41, "ret == 0" / scePthreadAttrSetschedparam).
+	// Apply a host-valid param and always succeed for a well-formed guest call.
 	KernelSchedParam pparam {};
-	if (param->sched_priority <= 478)
-	{
-		pparam.sched_priority = +2;
-	} else if (param->sched_priority >= 733)
-	{
-		pparam.sched_priority = -2;
-	} else
-	{
-		pparam.sched_priority = 0;
-	}
+	pparam.sched_priority = 0;
+	(void)pthread_attr_setschedparam(&(*attr)->p, &pparam);
 
-	int result = pthread_attr_setschedparam(&(*attr)->p, &pparam);
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadAttrSetschedpolicy(PthreadAttr* attr, int policy)

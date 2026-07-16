@@ -567,6 +567,14 @@ int KYTY_SYSV_ABI nanosleep(const LibKernel::KernelTimespec* rqtp, LibKernel::Ke
 	return POSIX_CALL(LibKernel::KernelNanosleep(rqtp, rmtp));
 }
 
+// Gen5 Posix_v1 usleep — NID QcteRwbsnV0 (Astro after Setschedparam; rdi=µs).
+int KYTY_SYSV_ABI usleep(unsigned int microseconds)
+{
+	PRINT_NAME();
+
+	return POSIX_CALL(LibKernel::KernelUsleep(microseconds));
+}
+
 int KYTY_SYSV_ABI stat(const char* path, LibKernel::FileSystem::FileStat* sb)
 {
 	PRINT_NAME();
@@ -578,6 +586,8 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 {
 	LIB_FUNC("lLMT9vJAck0", clock_gettime);
 	LIB_FUNC("yS8U2TGCe1A", nanosleep);
+	// Gen5 Posix_v1 usleep — QcteRwbsnV0 after Setschedparam assert fix.
+	LIB_FUNC("QcteRwbsnV0", usleep);
 	LIB_FUNC("E6ao34wPw+U", stat);
 	LIB_FUNC("HoLVWNanBBc", getpid);
 	// Gen5 Posix_v1 pthread_self — EotR8a3ASf4 (Astro audio path after Acm).
