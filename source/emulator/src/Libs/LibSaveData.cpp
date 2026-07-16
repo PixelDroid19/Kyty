@@ -524,10 +524,10 @@ int KYTY_SYSV_ABI SaveDataSaveIcon(const SaveDataMountPoint* mount_point, const 
 	return OK;
 }
 
-// Host path for sceSaveData*SaveDataMemory2 slots (SharpEmu Astro baseline).
-// Layout of setup/get/set param blobs is only partially known; we honor
-// user/slot/size fields at fixed offsets observed by SharpEmu and keep the
-// rest of the guest structures untouched.
+// Host path for sceSaveData*SaveDataMemory2 slots.
+// Layout of setup/get/set param blobs is only partially known; honor
+// user/slot/size fields at fixed offsets and leave the rest of the guest
+// structures untouched.
 static String SaveMemoryHostPath(int32_t user_id, uint32_t slot_id)
 {
 	return String::FromPrintf("%s/memory_u%d_s%u.bin", String(SAVE_DATA_DIR).C_Str(), user_id, slot_id);
@@ -647,7 +647,7 @@ LIB_DEFINE(InitSaveData_1)
 	// sceSaveDataGetEventResult
 	LIB_FUNC("j8xKtiFj0SY", SaveData::SaveDataGetEventResult);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
-	// Memory2 APIs (Astro Bot / Gen5; SharpEmu baseline NIDs).
+	// Memory2 APIs (Gen5 SaveData memory slots).
 	LIB_FUNC("oQySEUfgXRA", SaveData::SaveDataSetupSaveDataMemory2);
 	LIB_FUNC("QwOO7vegnV8", SaveData::SaveDataGetSaveDataMemory2);
 	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);

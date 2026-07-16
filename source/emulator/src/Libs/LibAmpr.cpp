@@ -341,7 +341,6 @@ static KYTY_SYSV_ABI uint64_t CommandBufferGetCurrentOffset(void* cmd_obj)
 
 // sceAmprCommandBufferGetNumCommands (NID gzndltBEzWc). Same ABI as GetSize:
 // count in RAX. Report drained/empty so poll-until-zero callers proceed.
-// Ported from SharpEmu feature/astro-bot-baseline.
 static KYTY_SYSV_ABI uint64_t CommandBufferGetNumCommands(void* cmd_obj)
 {
 	PRINT_NAME();

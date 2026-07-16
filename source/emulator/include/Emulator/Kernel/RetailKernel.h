@@ -8,7 +8,7 @@
 namespace Kyty::Libs::LibKernel {
 
 // Retail (non-devkit) sceKernelGetGPI contract: return 0 (ORBIS_OK) with no GPI
-// state. Name↔NID 4oXYe9Xmk0Q from public PS5-3.20_Libs / sce_stubs. Pure helper
+// state. Name↔NID 4oXYe9Xmk0Q. Pure helper
 // for HLE and focused unit tests — does not invent SetGPI / debug GPI payloads.
 [[nodiscard]] inline int KernelRetailGetGpiResult()
 {
