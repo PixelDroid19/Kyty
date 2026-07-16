@@ -17,11 +17,14 @@ struct Config
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;
 	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::None;
+	// Host resource defaults: stay quiet and dump-free. Verbose console/file
+	// logging and buffer/pipeline dumps are opt-in — full boots can otherwise
+	// fill host disk and burn CPU/RAM on log formatting alone.
 	ShaderLogDirection     shader_log_direction        = ShaderLogDirection::Silent;
 	String                 shader_log_folder           = U"_Shaders";
 	bool                   command_buffer_dump_enabled = false;
 	String                 command_buffer_dump_folder  = U"_Buffers";
-	Log::Direction         printf_direction            = Log::Direction::Console;
+	Log::Direction         printf_direction            = Log::Direction::Silent;
 	String                 printf_output_file          = U"_kyty.txt";
 	String                 printf_output_folder        = U"_Logs";
 	ProfilerDirection      profiler_direction          = ProfilerDirection::None;
