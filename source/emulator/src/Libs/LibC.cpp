@@ -147,6 +147,16 @@ static KYTY_SYSV_ABI void c_free(void* p)
 }
 static KYTY_SYSV_ABI void*  c_memcpy(void* d, const void* s, size_t n) { return ::memcpy(d, s, n); }
 static KYTY_SYSV_ABI int    c_memcpy_s(void* d, size_t dn, const void* s, size_t n) { return (::memcpy(d, s, n < dn ? n : dn), 0); }
+// Gen5 libc_v1 memmove_s — NID B59+zQQCcbU (Astro after strtoull).
+static KYTY_SYSV_ABI int c_memmove_s(void* d, size_t dn, const void* s, size_t n)
+{
+	if (d == nullptr || s == nullptr)
+	{
+		return -1;
+	}
+	::memmove(d, s, n < dn ? n : dn);
+	return 0;
+}
 static KYTY_SYSV_ABI void*  c_memmove(void* d, const void* s, size_t n) { return ::memmove(d, s, n); }
 static KYTY_SYSV_ABI void*  c_memset(void* d, int c, size_t n) { return ::memset(d, c, n); }
 static KYTY_SYSV_ABI int    c_memcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
@@ -446,6 +456,11 @@ static KYTY_SYSV_ABI int c_vsnprintf_s(char* s, size_t dn, size_t count, const c
 // --- stdlib ------------------------------------------------------------------
 static KYTY_SYSV_ABI double c_strtod(const char* s, char** e) { return ::strtod(s, e); }
 static KYTY_SYSV_ABI long   c_strtol(const char* s, char** e, int b) { return ::strtol(s, e, b); }
+// Gen5 libc_v1 strtoull — NID 5OqszGpy7Mg (Astro after TLS context factory).
+static KYTY_SYSV_ABI unsigned long long c_strtoull(const char* s, char** e, int b)
+{
+	return ::strtoull(s, e, b);
+}
 static KYTY_SYSV_ABI double c_atof(const char* s) { return ::atof(s); }
 static KYTY_SYSV_ABI void   c_qsort(void* base, size_t n, size_t sz, int (KYTY_SYSV_ABI* cmp)(const void*, const void*))
 {
@@ -886,6 +901,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Ujf3KzMvRmI", LibC::c_memalign);
 	LIB_FUNC("Q3VBxCXhUHs", LibC::c_memcpy);
 	LIB_FUNC("NFLs+dRJGNg", LibC::c_memcpy_s);
+	// Gen5 libc_v1 memmove_s — B59+zQQCcbU after TLS factory / strtoull on Astro.
+	LIB_FUNC("B59+zQQCcbU", LibC::c_memmove_s);
 	LIB_FUNC("8zTFvBIAIN8", LibC::c_memset);
 	LIB_FUNC("DfivPArhucg", LibC::c_memcmp);
 	LIB_FUNC("j4ViWNHEgww", LibC::c_strlen);
@@ -960,6 +977,8 @@ LIB_DEFINE(InitLibC_1)
 	// Captured Gen5 after SaveDataDirNameSearch: SysV (char* "00", endptr=null, base=10)
 	// — same ABI as strtol (second NID for same export).
 	LIB_FUNC("zlfEH8FmyUA", LibC::c_strtol);
+	// Gen5 libc_v1 strtoull — 5OqszGpy7Mg after TLS context factory on Astro.
+	LIB_FUNC("5OqszGpy7Mg", LibC::c_strtoull);
 	LIB_FUNC("SRI6S9B+-a4", LibC::c_atof);
 	LIB_FUNC("AEJdIVZTEmo", LibC::c_qsort);
 	LIB_FUNC("L1SBTkC+Cvw", LibC::c_abort);

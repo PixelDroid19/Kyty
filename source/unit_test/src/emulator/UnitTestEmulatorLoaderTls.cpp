@@ -70,6 +70,74 @@ TEST(EmulatorLoaderTls, DetectsCrtEntryDirectCallToInit)
 	EXPECT_FALSE(LoaderCodeContainsDirectCallTo(code, 4, 0x100, 0x111));
 }
 
+// Synthetic guest "program" image: unconstructed Context at 0x200 (word0=0,
+// buffer@+0x3e0=0) and a constructed one at 0x800 (word0 non-zero).
+struct GuestMem
+{
+	std::vector<uint8_t> bytes;
+	uint64_t             base = 0;
+};
+
+static bool TestGuestRead64(uint64_t addr, uint64_t* out, void* ctx)
+{
+	auto* g = static_cast<GuestMem*>(ctx);
+	if (g == nullptr || out == nullptr || addr < g->base)
+	{
+		return false;
+	}
+	const uint64_t off = addr - g->base;
+	if (off + sizeof(uint64_t) > g->bytes.size())
+	{
+		return false;
+	}
+	std::memcpy(out, g->bytes.data() + off, sizeof(uint64_t));
+	return true;
+}
+
+TEST(EmulatorLoaderTls, PreparesThreadTlsRelocatesSelfAndClearsUnconstructedContext)
+{
+	using Kyty::Loader::LoaderPrepareThreadTlsImage;
+
+	GuestMem guest;
+	guest.base = 0x1000;
+	guest.bytes.assign(0x1000, 0);
+	// Unconstructed context at guest VA 0x1200 (offset 0x200): word0=0, +0x3e0=0.
+	// Constructed context at 0x1800: word0=1, +0x3e0=0xdead.
+	const uint64_t unconstructed = guest.base + 0x200;
+	const uint64_t constructed   = guest.base + 0x800;
+	*reinterpret_cast<uint64_t*>(guest.bytes.data() + 0x800)        = 1;
+	*reinterpret_cast<uint64_t*>(guest.bytes.data() + 0x800 + 0x3e0) = 0xdead;
+
+	constexpr uint64_t kTmpl     = 0x9000;
+	constexpr uint64_t kImgSize  = 0xa0;
+	std::vector<uint8_t> tls(kImgSize, 0);
+	// Self-pointer at +0x70 into template (+0x40).
+	*reinterpret_cast<uint64_t*>(tls.data() + 0x70) = kTmpl + 0x40;
+	// Stale absolute unconstructed context (Gen5 pattern).
+	*reinterpret_cast<uint64_t*>(tls.data() + 0x50) = unconstructed;
+	// Live absolute constructed context — must stay.
+	*reinterpret_cast<uint64_t*>(tls.data() + 0x58) = constructed;
+	// Unrelated non-pointer value.
+	*reinterpret_cast<uint64_t*>(tls.data() + 0x00) = 0xffffffffffffffffULL;
+
+	const uint64_t n =
+	    LoaderPrepareThreadTlsImage(tls.data(), kImgSize, kTmpl, guest.base, guest.bytes.size(), TestGuestRead64, &guest);
+	EXPECT_GE(n, 2u);
+	const uint64_t tls_base = reinterpret_cast<uint64_t>(tls.data());
+	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x70), tls_base + 0x40);
+	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x50), 0u);
+	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x58), constructed);
+	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x00), 0xffffffffffffffffULL);
+}
+
+TEST(EmulatorLoaderTls, PrepareThreadTlsHandlesNullAndShort)
+{
+	using Kyty::Loader::LoaderPrepareThreadTlsImage;
+	EXPECT_EQ(LoaderPrepareThreadTlsImage(nullptr, 64, 0x1000, 0, 0, nullptr, nullptr), 0u);
+	uint8_t tiny[4] = {};
+	EXPECT_EQ(LoaderPrepareThreadTlsImage(tiny, sizeof(tiny), 0x1000, 0, 0, nullptr, nullptr), 0u);
+}
+
 UT_END();
 
 #endif // KYTY_EMU_ENABLED
