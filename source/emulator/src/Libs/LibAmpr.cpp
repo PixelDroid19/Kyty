@@ -520,6 +520,147 @@ static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cm
 	return OK;
 }
 
+// --- Gen5 measure / marker / nop helpers (sizing + no-op builders) ------------
+// Fixed sizes match the public Ampr command-stream packing used to size DCBs
+// before append. Markers/nops do not affect host state under the eager model.
+
+constexpr uint64_t kMeasureFixed32Size = 0x20;
+constexpr uint64_t kPopMarkerSize      = 0x4;
+constexpr uint64_t kMapBeginSize       = 0x30;
+
+static uint64_t AlignUp4(uint64_t n)
+{
+	return (n + 3u) & ~uint64_t {3};
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeFixed32(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
+{
+	PRINT_NAME();
+	return kMeasureFixed32Size;
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeNop(uint32_t num_u32)
+{
+	PRINT_NAME();
+	return num_u32 == 0 ? sizeof(uint32_t) : AlignUp4(static_cast<uint64_t>(num_u32) * sizeof(uint32_t));
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeNopWithData(uint32_t num_u32, const uint32_t*)
+{
+	PRINT_NAME();
+	return AlignUp4((static_cast<uint64_t>(num_u32) + 1u) * sizeof(uint32_t));
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeMarker(const char* msg)
+{
+	PRINT_NAME();
+	const uint64_t len = (msg != nullptr) ? std::strlen(msg) + 1u : 1u;
+	return AlignUp4(0x10u + len);
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeMarkerWithColor(const char* msg, uint32_t)
+{
+	return MeasureCommandSizeMarker(msg);
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizePopMarker()
+{
+	PRINT_NAME();
+	return kPopMarkerSize;
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFileScatter(uint64_t, uint64_t)
+{
+	PRINT_NAME();
+	return kReadFileRecordSize;
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFileGatherScatter(uint64_t, uint64_t, uint64_t)
+{
+	PRINT_NAME();
+	return kReadFileRecordSize;
+}
+
+static KYTY_SYSV_ABI int64_t MeasureAprCommandSizeMapBegin(uint64_t, uint64_t, int32_t, int32_t)
+{
+	PRINT_NAME();
+	return static_cast<int64_t>(kMapBeginSize);
+}
+
+static KYTY_SYSV_ABI int CommandBufferMarkerNoOp(void* cmd_obj)
+{
+	PRINT_NAME();
+	if (reinterpret_cast<uint64_t>(cmd_obj) == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	return OK;
+}
+
+static KYTY_SYSV_ABI int CommandBufferMarkerNoOp2(void* cmd_obj, uint64_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int CommandBufferMarkerNoOp3(void* cmd_obj, uint64_t, uint64_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int CommandBufferMarkerNoOp4(void* cmd_obj, uint64_t, uint64_t, uint64_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI uint64_t CommandBufferGetBufferBaseAddress(void* cmd_obj)
+{
+	PRINT_NAME();
+	CommandBufferState st {};
+	if (!TryGetState(reinterpret_cast<uint64_t>(cmd_obj), &st))
+	{
+		return 0;
+	}
+	return st.data;
+}
+
+static KYTY_SYSV_ABI uint32_t CommandBufferGetType(void* cmd_obj)
+{
+	PRINT_NAME();
+	(void)cmd_obj;
+	return 0;
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferMapBegin(void* cmd_obj, uint64_t, uint64_t, int32_t, int32_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferMapDirectBegin(void* cmd_obj, uint64_t, uint64_t, uint64_t, int32_t, int32_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferMapEnd(void* cmd_obj)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferReadFileGather(void* cmd_obj, uint64_t, uint64_t, uint32_t, void*, uint64_t, uint64_t)
+{
+	// Gather is not yet decoded; acknowledge sizing-only callers.
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferReadFileScatter(void* cmd_obj, uint64_t, uint64_t, uint32_t, void*, uint64_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferResetGatherScatterState(void* cmd_obj)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
 // sceAmprAmmSubmitCommandBuffer / SubmitCommandBuffer2 / WaitCommandBufferCompletion.
 // Builder APIs apply work eagerly (ReadFile, address/equeue completion). Hardware
 // defers until submit; sync HLE acknowledges submit/wait with nothing left to drain.
@@ -563,6 +704,26 @@ LIB_DEFINE(InitAmpr_1)
 	LIB_FUNC("Zi3dBUjgyXI", Ampr::MeasureCommandSizeWriteKernelEventQueueOnCompletion);
 	LIB_FUNC("4muPEJ-x5N8", Ampr::MeasureCommandSizeWriteCounterOnCompletion);
 	LIB_FUNC("qesF88X4DRg", Ampr::MeasureCommandSizeReadFileGather);
+	LIB_FUNC("7nXGDGMXSqo", Ampr::MeasureCommandSizeReadFileScatter);
+	LIB_FUNC("DXmgc5op8Yw", Ampr::MeasureCommandSizeReadFileGatherScatter);
+	LIB_FUNC("0BMj1hgG+kE", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("ClnsFLLLcss", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("4fgtGfXDrFc", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("gAtc79UTt5E", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("JYd9g9L+TmE", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("2Hw8gjMdwSY", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("I-Qm+MEso5c", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("NNIZ-FMyz3M", Ampr::MeasureCommandSizeNop);
+	LIB_FUNC("Xp85BP3+BBI", Ampr::MeasureCommandSizeNopWithData);
+	LIB_FUNC("VGkEj4d6-Kg", Ampr::MeasureCommandSizeMarker);
+	LIB_FUNC("0RdLmAh7WVo", Ampr::MeasureCommandSizeMarker);
+	LIB_FUNC("tmfr97+ED5I", Ampr::MeasureCommandSizeMarkerWithColor);
+	LIB_FUNC("3OfeY4pzDV0", Ampr::MeasureCommandSizeMarkerWithColor);
+	LIB_FUNC("iwTNhyaemnw", Ampr::MeasureCommandSizePopMarker);
+	LIB_FUNC("pbnNnahE8vk", Ampr::MeasureCommandSizePopMarker);
+	LIB_FUNC("rddQYXM0CjM", Ampr::MeasureCommandSizePopMarker);
+	LIB_FUNC("kdFImtTD0hc", Ampr::MeasureAprCommandSizeMapBegin);
+	LIB_FUNC("qvbdJc7bG+s", Ampr::MeasureAprCommandSizeMapBegin);
 
 	// Command buffer lifecycle
 	LIB_FUNC("8aI7R7WaOlc", Ampr::CommandBufferConstructor);
@@ -575,9 +736,35 @@ LIB_DEFINE(InitAmpr_1)
 	LIB_FUNC("tZDDEo2tE5k", Ampr::CommandBufferGetSize);
 	LIB_FUNC("GnxKOHEawhk", Ampr::CommandBufferGetCurrentOffset);
 	LIB_FUNC("gzndltBEzWc", Ampr::CommandBufferGetNumCommands);
+	LIB_FUNC("RPCAhx-aabE", Ampr::CommandBufferGetBufferBaseAddress);
+	LIB_FUNC("VEDMaQmJZng", Ampr::CommandBufferGetType);
+	LIB_FUNC("tNn5WBkta60", Ampr::CommandBufferMarkerNoOp);
+	LIB_FUNC("GmOguNIsuKk", Ampr::CommandBufferMarkerNoOp);
+	LIB_FUNC("pFQ9UHpO52s", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("4UkZbYKVF7c", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("sWbST0oQKsc", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("4quckD2y7Pg", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("f12ObAMEi9A", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("dXPaz65HNmk", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("mv0O8Zg0woU", Ampr::CommandBufferMarkerNoOp);
+	LIB_FUNC("DLfoNxTFNVk", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("cQb8Zr8Q0Y0", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("j0+3uJMxYJY", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("jK+yuYCI7MA", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("bt3LHR9xjK4", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("enZm-6GjWqw", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("t4ExS+SwLjs", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("H896Pt-yB4I", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("BVmR1H8l+XI", Ampr::CommandBufferMarkerNoOp4);
 
 	// APR / completion builders
 	LIB_FUNC("mQ16-QdKv7k", Ampr::AprCommandBufferReadFile);
+	LIB_FUNC("mZSbNJVJpV8", Ampr::AprCommandBufferReadFileGather);
+	LIB_FUNC("Jg-AgkdJHkk", Ampr::AprCommandBufferReadFileScatter);
+	LIB_FUNC("YPxkUDhgoNI", Ampr::AprCommandBufferResetGatherScatterState);
+	LIB_FUNC("Eul7AGEpjLo", Ampr::AprCommandBufferMapBegin);
+	LIB_FUNC("bFEs0Gs6D2A", Ampr::AprCommandBufferMapDirectBegin);
+	LIB_FUNC("X169CE6G3Y4", Ampr::AprCommandBufferMapEnd);
 	LIB_FUNC("sJXyWHjP-F8", Ampr::CommandBufferWriteAddressOnCompletion);
 	LIB_FUNC("o67gODLFpls", Ampr::CommandBufferWriteKernelEventQueueOnCompletion);
 
