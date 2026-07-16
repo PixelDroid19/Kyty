@@ -41,11 +41,34 @@ static KYTY_SYSV_ABI void* NpCppWebApiUnknownY295(void* self_or_path, int arg1, 
 	return self_or_path;
 }
 
+// NID 8x++mBOUeso — observed after NpWebApi2Initialize while installing user
+// context logging: rdi = guest object/buffer, rsi = "Np-%s: Set userCtxId…".
+// Treat as constructor/setup that returns this.
+static KYTY_SYSV_ABI void* NpCppWebApiUnknown8x(void* self, const char* msg, void* arg2)
+{
+	PRINT_NAME();
+	printf("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+	printf("\t msg  = %s\n", (msg != nullptr ? msg : "(null)"));
+	printf("\t arg2 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg2));
+	return self;
+}
+
+// NID UYPxv8MIzGo — method on the object from 8x++: guest tests eax for <0.
+static int KYTY_SYSV_ABI NpCppWebApiUnknownUY(void* self, void* arg)
+{
+	PRINT_NAME();
+	printf("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+	printf("\t arg  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg));
+	return OK;
+}
+
 } // namespace NpCppWebApi
 
 LIB_DEFINE(InitNpCppWebApi_1)
 {
 	LIB_FUNC("Y295ygEccqk", NpCppWebApi::NpCppWebApiUnknownY295);
+	LIB_FUNC("8x++mBOUeso", NpCppWebApi::NpCppWebApiUnknown8x);
+	LIB_FUNC("UYPxv8MIzGo", NpCppWebApi::NpCppWebApiUnknownUY);
 }
 
 } // namespace Kyty::Libs
