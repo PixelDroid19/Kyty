@@ -171,6 +171,12 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
                                               const volatile void* base, uint64_t size_bytes, uint32_t poll_cycles);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
                                              const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm);
+// Gen5 type-2 pad dword (NID qj7QZpgr9Uw): allocates one 0x80000000 filler.
+uint32_t* KYTY_SYSV_ABI GraphicsCbType2Pad(CommandBuffer* buf);
+// sceAgcDcbSetBaseIndirectArgs (NID RmaJwLtc8rY).
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetBaseIndirectArgs(CommandBuffer* buf, uint32_t base_index, uint64_t address);
+// sceAgcDcbDispatchIndirect (NID CtB+A9-VxO0).
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t data_offset, uint32_t modifier);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, uint8_t compare_function, uint8_t op, uint8_t cache_policy,
                                               const volatile void* address, uint64_t reference, uint64_t mask, uint32_t poll_cycles);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_out_handle, int32_t display_buffer_index, uint32_t flip_mode,

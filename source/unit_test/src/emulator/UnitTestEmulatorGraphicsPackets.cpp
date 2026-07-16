@@ -636,6 +636,112 @@ TEST(EmulatorGraphicsPackets, EncodesWriteDataCachePolicy2ControlWord)
 	EXPECT_EQ(cmd[5], 0x22222222u);
 }
 
+// Gen5 type-2 pad (NID qj7QZpgr9Uw): single 0x80000000 dword.
+TEST(EmulatorGraphicsPackets, EncodesCbType2Pad)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[8] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 8;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 8;
+
+	uint32_t* cmd = Gen5::GraphicsCbType2Pad(reinterpret_cast<Gen5::CommandBuffer*>(&cb));
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], 0x80000000u);
+	EXPECT_EQ(cb.cursor_up, storage + 1);
+}
+
+// sceAgcDcbSetBaseIndirectArgs: IT_SET_BASE with 8-byte-aligned address.
+TEST(EmulatorGraphicsPackets, EncodesDcbSetBaseIndirectArgs)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd =
+	    Gen5::GraphicsDcbSetBaseIndirectArgs(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 0x00000005074063c0ull);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(4, Pm4::IT_SET_BASE, 0u) | (1u << 1u));
+	EXPECT_EQ(cmd[1], 1u);
+	EXPECT_EQ(cmd[2], 0x074063c0u);
+	EXPECT_EQ(cmd[3], 0x00000005u);
+}
+
+// sceAgcDcbDispatchIndirect: IT_DISPATCH_INDIRECT with modifier mask.
+TEST(EmulatorGraphicsPackets, EncodesDcbDispatchIndirect)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[8] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 8;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 8;
+
+	uint32_t* cmd = Gen5::GraphicsDcbDispatchIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 1u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(3, Pm4::IT_DISPATCH_INDIRECT, 0u));
+	EXPECT_EQ(cmd[1], 0u);
+	EXPECT_EQ(cmd[2], (1u & 0xa038u) | 0x41u);
+}
+
 // Placeholder address 0 is reserved then patched before submit (Astro path).
 TEST(EmulatorGraphicsPackets, EncodesWriteDataZeroAddressThenPatches)
 {

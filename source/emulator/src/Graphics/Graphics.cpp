@@ -2890,6 +2890,80 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
 	return cmd;
 }
 
+// Gen5 NID qj7QZpgr9Uw: append a single Type-2 PM4 pad dword (0x80000000).
+// Observed after compute/context setup; CP treats Type-2 as header-only filler.
+uint32_t* KYTY_SYSV_ABI GraphicsCbType2Pad(CommandBuffer* buf)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(1);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = 0x80000000u;
+	return cmd;
+}
+
+// sceAgcDcbSetBaseIndirectArgs: IT_SET_BASE for indirect argument buffers.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetBaseIndirectArgs(CommandBuffer* buf, uint32_t base_index, uint64_t address)
+{
+	PRINT_NAME();
+
+	printf("\t base_index = %" PRIu32 "\n", base_index);
+	printf("\t address    = 0x%016" PRIx64 "\n", address);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(4);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	cmd[0] = KYTY_PM4(4, Pm4::IT_SET_BASE, 0u) | ((base_index & 0x1u) << 1u);
+	cmd[1] = 1u;
+	cmd[2] = static_cast<uint32_t>(address & ~7ull);
+	cmd[3] = static_cast<uint32_t>(address >> 32u);
+	return cmd;
+}
+
+// sceAgcDcbDispatchIndirect: IT_DISPATCH_INDIRECT from SetBaseIndirect args.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t data_offset, uint32_t modifier)
+{
+	PRINT_NAME();
+
+	printf("\t data_offset = %" PRIu32 "\n", data_offset);
+	printf("\t modifier    = 0x%08" PRIx32 "\n", modifier);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(3);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	cmd[0] = KYTY_PM4(3, Pm4::IT_DISPATCH_INDIRECT, 0u);
+	cmd[1] = data_offset;
+	cmd[2] = (modifier & 0xa038u) | 0x41u;
+	return cmd;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
                                              const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm)
 {
