@@ -194,6 +194,7 @@ static KYTY_SYSV_ABI void* c_1uJgoVq3bQU(void* obj, void* /*buf*/, void* /*a2*/,
 	return obj;
 }
 static KYTY_SYSV_ABI char*  c_strcat(char* d, const char* s) { return ::strcat(d, s); }
+static KYTY_SYSV_ABI char*  c_strncat(char* d, const char* s, size_t n) { return ::strncat(d, s, n); }
 static KYTY_SYSV_ABI char*  c_strchr(const char* s, int c) { return const_cast<char*>(::strchr(s, c)); }
 static KYTY_SYSV_ABI char*  c_strstr(const char* haystack, const char* needle)
 {
