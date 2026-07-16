@@ -546,6 +546,13 @@ int KYTY_SYSV_ABI getpid()
 	return guest_process_id;
 }
 
+// Gen5 Posix_v1 pthread_self — NID EotR8a3ASf4. Same guest thread object as
+// scePthreadSelf; Astro stores the returned pthread_t into audio context state.
+LibKernel::Pthread KYTY_SYSV_ABI pthread_self()
+{
+	return LibKernel::PthreadSelf();
+}
+
 int KYTY_SYSV_ABI clock_gettime(int clock_id, LibKernel::KernelTimespec* time)
 {
 	PRINT_NAME();
@@ -573,6 +580,8 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("yS8U2TGCe1A", nanosleep);
 	LIB_FUNC("E6ao34wPw+U", stat);
 	LIB_FUNC("HoLVWNanBBc", getpid);
+	// Gen5 Posix_v1 pthread_self — EotR8a3ASf4 (Astro audio path after Acm).
+	LIB_FUNC("EotR8a3ASf4", pthread_self);
 
 	LIB_FUNC("OxhIB8LB-PQ", Posix::pthread_create);
 	LIB_FUNC("h9CcP3J0oVM", Posix::pthread_join);

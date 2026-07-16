@@ -506,6 +506,12 @@ static KYTY_SYSV_ABI double c_frexp(double x, int* e) { return ::frexp(x, e); }
 static KYTY_SYSV_ABI void   c_sincos(double x, double* s, double* c) { *s = ::sin(x); *c = ::cos(x); }
 // --- math (float) ------------------------------------------------------------
 static KYTY_SYSV_ABI float  c_powf(float x, float y) { return ::powf(x, y); }
+// Gen5 libc_v1 __isnanf — NID lA94ZgT+vMM. Float in xmm0; non-zero if NaN.
+// Observed Astro after pthread_self: call site loads float via vmovss then tests eax.
+static KYTY_SYSV_ABI int c_isnanf(float x)
+{
+	return std::isnan(x) ? 1 : 0;
+}
 static KYTY_SYSV_ABI float  c_log2f(float x) { return ::log2f(x); }
 static KYTY_SYSV_ABI float  c_exp2f(float x) { return ::exp2f(x); }
 static KYTY_SYSV_ABI float  c_expf(float x) { return ::expf(x); }
@@ -1016,6 +1022,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("jMB7EFyu30Y", LibC::c_sincos);
 	// math (float)
 	LIB_FUNC("1D0H2KNjshE", LibC::c_powf);
+	// Gen5 libc_v1 __isnanf — lA94ZgT+vMM after Posix pthread_self on Astro.
+	LIB_FUNC("lA94ZgT+vMM", LibC::c_isnanf);
 	LIB_FUNC("hsi9drzHR2k", LibC::c_log2f);
 	LIB_FUNC("wuAQt-j+p4o", LibC::c_exp2f);
 	LIB_FUNC("8zsu04XNsZ4", LibC::c_expf);
