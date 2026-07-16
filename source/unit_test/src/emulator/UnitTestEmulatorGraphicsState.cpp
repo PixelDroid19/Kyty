@@ -28,6 +28,25 @@ TEST(EmulatorGraphicsState, TiledVideoOutBufferUpdateDoesNotCpuUpload)
 	EXPECT_TRUE(VideoOutBufferShouldCpuUploadOnUpdate(false));
 }
 
+TEST(EmulatorGraphicsState, BlitInitializesUndefinedSource)
+{
+	EXPECT_TRUE(UtilBlitImageNeedsSourceInitialization(VK_IMAGE_LAYOUT_UNDEFINED));
+	EXPECT_FALSE(UtilBlitImageNeedsSourceInitialization(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+	EXPECT_FALSE(UtilBlitImageNeedsSourceInitialization(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL));
+}
+
+TEST(EmulatorGraphicsState, MapsColorExportComponents)
+{
+	EXPECT_EQ(ShaderColorExportSourceComponent(0, 0), 0u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(0, 3), 3u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(1, 0), 2u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(1, 3), 3u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(2, 0), 3u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(2, 3), 0u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(3, 0), 3u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(3, 3), 2u);
+}
+
 TEST(EmulatorGraphicsState, DecodesGenericScissorHalves)
 {
 	HW::Context context;
@@ -43,12 +62,156 @@ TEST(EmulatorGraphicsState, DecodesGenericScissorHalves)
 	EXPECT_FALSE(viewport.generic_scissor_window_offset_enable);
 }
 
+TEST(EmulatorGraphicsState, DecodesScreenScissorHalves)
+{
+	HW::Context context;
+
+	State::SetScreenScissorTl(context, 0x000A0005u);
+	State::SetScreenScissorBr(context, 0x00C800B4u);
+
+	const auto& viewport = context.GetScreenViewport();
+	EXPECT_EQ(viewport.screen_scissor_left, 5);
+	EXPECT_EQ(viewport.screen_scissor_top, 10);
+	EXPECT_EQ(viewport.screen_scissor_right, 180);
+	EXPECT_EQ(viewport.screen_scissor_bottom, 200);
+}
+
+TEST(EmulatorGraphicsState, DecodesRenderControl)
+{
+	HW::Context context;
+
+	const uint32_t value = (1u << Pm4::DB_RENDER_CONTROL_DEPTH_CLEAR_ENABLE_SHIFT) |
+	                       (1u << Pm4::DB_RENDER_CONTROL_STENCIL_CLEAR_ENABLE_SHIFT) |
+	                       (1u << Pm4::DB_RENDER_CONTROL_DEPTH_COMPRESS_DISABLE_SHIFT) |
+	                       (3u << Pm4::DB_RENDER_CONTROL_COPY_SAMPLE_SHIFT);
+
+	State::SetRenderControl(context, value);
+
+	const auto& rc = context.GetRenderControl();
+	EXPECT_TRUE(rc.depth_clear_enable);
+	EXPECT_TRUE(rc.stencil_clear_enable);
+	EXPECT_FALSE(rc.resummarize_enable);
+	EXPECT_FALSE(rc.stencil_compress_disable);
+	EXPECT_TRUE(rc.depth_compress_disable);
+	EXPECT_FALSE(rc.copy_centroid);
+	EXPECT_EQ(rc.copy_sample, 3u);
+}
+
+TEST(EmulatorGraphicsState, DecodesStencilControlAndRefMaskHalves)
+{
+	HW::Context context;
+
+	const uint32_t control = (1u << Pm4::DB_STENCIL_CONTROL_STENCILFAIL_SHIFT) |
+	                         (2u << Pm4::DB_STENCIL_CONTROL_STENCILZPASS_SHIFT) |
+	                         (3u << Pm4::DB_STENCIL_CONTROL_STENCILZFAIL_SHIFT) |
+	                         (4u << Pm4::DB_STENCIL_CONTROL_STENCILFAIL_BF_SHIFT) |
+	                         (5u << Pm4::DB_STENCIL_CONTROL_STENCILZPASS_BF_SHIFT) |
+	                         (6u << Pm4::DB_STENCIL_CONTROL_STENCILZFAIL_BF_SHIFT);
+	State::SetStencilControl(context, control);
+
+	const auto& sc = context.GetStencilControl();
+	EXPECT_EQ(sc.stencil_fail, 1u);
+	EXPECT_EQ(sc.stencil_zpass, 2u);
+	EXPECT_EQ(sc.stencil_zfail, 3u);
+	EXPECT_EQ(sc.stencil_fail_bf, 4u);
+	EXPECT_EQ(sc.stencil_zpass_bf, 5u);
+	EXPECT_EQ(sc.stencil_zfail_bf, 6u);
+
+	State::SetStencilRefMask(context, 0x04030201u);
+	State::SetStencilRefMaskBf(context, 0x08070605u);
+
+	const auto& sm = context.GetStencilMask();
+	EXPECT_EQ(sm.stencil_testval, 0x01u);
+	EXPECT_EQ(sm.stencil_mask, 0x02u);
+	EXPECT_EQ(sm.stencil_writemask, 0x03u);
+	EXPECT_EQ(sm.stencil_opval, 0x04u);
+	EXPECT_EQ(sm.stencil_testval_bf, 0x05u);
+	EXPECT_EQ(sm.stencil_mask_bf, 0x06u);
+	EXPECT_EQ(sm.stencil_writemask_bf, 0x07u);
+	EXPECT_EQ(sm.stencil_opval_bf, 0x08u);
+}
+
 TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 {
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 56), VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 56, true), VK_FORMAT_R8G8B8A8_SRGB);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 14), VK_FORMAT_R8G8_UNORM);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 71), VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 133), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+}
+
+TEST(EmulatorGraphicsState, Gen5SharpSampledTextureAcceptsTexture2DType)
+{
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 8; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Vsharp;
+	}
+	user_sgpr.value[3] = 9u << 28u;
+
+	ShaderSharp read_only_texture {};
+	read_only_texture.offset_dw = 0;
+	read_only_texture.size      = 0;
+
+	ShaderUserData user_data {};
+	user_data.sharp_resource_offset[0] = &read_only_texture;
+	user_data.sharp_resource_count[0]  = 1;
+
+	ShaderParsedUsage  usage {};
+	ShaderBindResources bind {};
+
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 8);
+
+	ASSERT_EQ(bind.textures2D.textures_num, 1);
+	EXPECT_EQ(bind.textures2D.textures2d_sampled_num, 1);
+	EXPECT_EQ(bind.textures2D.desc[0].texture.Type(), 9);
+	EXPECT_EQ(bind.textures2D.desc[0].usage, ShaderTextureUsage::ReadOnly);
+	EXPECT_EQ(usage.textures2D_readonly, 1);
+}
+
+TEST(EmulatorGraphicsState, Gen5SharpNullBufferDescriptorIsNotStorageBuffer)
+{
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 4; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+
+	ShaderSharp read_only_buffer {};
+	read_only_buffer.offset_dw = 0;
+	read_only_buffer.size      = 1;
+
+	ShaderUserData user_data {};
+	user_data.sharp_resource_offset[0] = &read_only_buffer;
+	user_data.sharp_resource_count[0]  = 1;
+
+	ShaderParsedUsage  usage {};
+	ShaderBindResources bind {};
+
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 4);
+
+	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
+	EXPECT_EQ(usage.storage_buffers_constant, 0);
+	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
+}
+
+TEST(EmulatorGraphicsState, Gen5DirectSgprsAllowFullUserWindow)
+{
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 28; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+
+	ShaderUserData user_data {};
+
+	ShaderParsedUsage  usage {};
+	ShaderBindResources bind {};
+
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 28);
+
+	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 28);
+	EXPECT_EQ(usage.direct_sgprs, 28);
 }
 
 TEST(EmulatorGraphicsState, DecodesModeControl)
@@ -609,6 +772,10 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	                                                    GpuMemoryObjectType::Texture));
 	EXPECT_TRUE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
 	                                                    GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::VideoOutBuffer, GpuMemoryOverlapType::Equals,
+	                                                    GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::VideoOutBuffer, GpuMemoryOverlapType::Contains,
+	                                                     GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                                GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
@@ -1019,11 +1186,27 @@ TEST(EmulatorGraphicsState, RejectsGappedMultiRenderTargetLayout)
 	EXPECT_EQ(gap.error, State::ColorTargetLayoutError::Gapped);
 }
 
-TEST(EmulatorGraphicsState, RejectsPartialChannelMultiRenderTargetLayout)
+TEST(EmulatorGraphicsState, IgnoresMaskBitsForUnconfiguredRenderTargets)
+{
+	// Only RT0 has a CB_COLORn_BASE; stale/nonzero higher mask nibbles do not
+	// create attachments and must not turn this single-target pass into a gap.
+	auto rt0 = State::ResolveColorTargetLayout(0xb8a601afu, 1u);
+	EXPECT_EQ(rt0.count, 1u);
+	EXPECT_EQ(rt0.nibbles[0], 0xfu);
+	EXPECT_EQ(rt0.error, State::ColorTargetLayoutError::None);
+
+	// A real RT2 with RT1 absent remains an invalid gapped layout.
+	auto gap = State::ResolveColorTargetLayout(0x00000f0fu, 3u);
+	EXPECT_EQ(gap.error, State::ColorTargetLayoutError::Gapped);
+}
+
+TEST(EmulatorGraphicsState, AcceptsPartialChannelRenderTargetLayout)
 {
 	// RT0 partial channels (R+B only).
 	auto partial = State::ResolveColorTargetLayout(0x00000005u);
-	EXPECT_EQ(partial.error, State::ColorTargetLayoutError::PartialChannel);
+	EXPECT_EQ(partial.count, 1u);
+	EXPECT_EQ(partial.nibbles[0], 0x5u);
+	EXPECT_EQ(partial.error, State::ColorTargetLayoutError::None);
 }
 
 TEST(EmulatorGraphicsState, RecognizesObservedHtileClearPattern)
@@ -1074,7 +1257,20 @@ TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
 	EXPECT_EQ(ResolveGen5SampleBacking(14, 27, false), Gen5SampleBacking::Unsupported);
 	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, false), Gen5SampleBacking::Unsupported);
 	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, true), Gen5SampleBacking::ExactRenderTarget);
+	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, true), Gen5SampleBacking::ExactRenderTarget);
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 0, false), Gen5SampleBacking::GuestMemoryTexture);
+}
+
+TEST(EmulatorGraphicsState, ResolvesObservedSamplerClampModes)
+{
+	using namespace Kyty::Libs::Graphics::State;
+
+	EXPECT_EQ(ResolveSamplerAddressMode(0), SamplerAddressMode::Repeat);
+	EXPECT_EQ(ResolveSamplerAddressMode(1), SamplerAddressMode::MirroredRepeat);
+	EXPECT_EQ(ResolveSamplerAddressMode(2), SamplerAddressMode::ClampToEdge);
+	EXPECT_EQ(ResolveSamplerAddressMode(6), SamplerAddressMode::ClampToBorder);
+	EXPECT_EQ(ResolveSamplerAddressMode(7), SamplerAddressMode::ClampToBorder);
 }
 
 // Residual visual (world false-color, HUD correct): intermediate format-71 and
@@ -1087,6 +1283,8 @@ TEST(EmulatorGraphicsState, Gen5SampledFormatsPreserveFloatAndUnormContracts)
 	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 56, false), VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 56, true), VK_FORMAT_R8G8B8A8_SRGB);
 	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 14, false), VK_FORMAT_R8G8_UNORM);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 133, false), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 133, true), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
 }
 
 TEST(EmulatorGraphicsState, RegularImageSamplingDisablesSamplerComparison)

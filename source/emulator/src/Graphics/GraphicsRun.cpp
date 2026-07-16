@@ -1156,11 +1156,16 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 		//   3 = Type3 (IT_* opcodes) — primary path
 		//   2 = Type2 NOP padding — header only
 		//   0 = Type0 register write — header + 1 body dword (single register)
+		//   1 = Type1 — classical GCN multi-reg; on Gen5 titles observed only as
+		//       fixed 2-dword units (COUNT ignored), same sizing as Type0.
 		// Observed post-Play stream: a run of Type0 single-register writes
 		// (including header 0x01fe0000) immediately before WaitFlipDone.
-		// Multi-register Type0 (COUNT field != 0 in the classical sense) is not
-		// yet required; Gen5 emits the single-register form exclusively here.
+		// Gen5 Type1 pairs (e.g. 0x7d0703e0 / 0x7d070440) interleave
+		// with Type0 before WaitFlipDone — consume 2 dwords to stay aligned.
+		// Also: headers with type bits 11 but COUNT that cannot fit the buffer
+		// (e.g. 0xf84d2e90) — same 2-dword align units, not real IT_* packets.
 		const uint32_t pkt_type = cmd_id >> 30u;
+		const uint32_t remaining_including_header = dw + 1u;
 		if (pkt_type != 3u)
 		{
 			if (pkt_type == 2u)
@@ -1168,20 +1173,41 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 				// Type2 filler: no body.
 				continue;
 			}
-			if (pkt_type == 0u)
+			if (pkt_type == 0u || pkt_type == 1u)
 			{
-				// Type0 single-register write: always one body dword.
-				// Classical GCN COUNT field is 0 for this form (body = COUNT+1).
-				// A non-zero COUNT field has been observed (0x01fe0000) with still
-				// exactly one following dword before the next Type3 — consume one
-				// body dword and ignore the COUNT field until multi-reg Type0 is
-				// evidenced with a bounded body that matches the stream.
+				if (cmd_id == 0u)
+				{
+					// Zero dwords are padding. Do not consume the following
+					// dword as a Type0 body; it can be a real Type3 header.
+					continue;
+				}
+				// Type0/Type1 single-body form: always one body dword.
+				// Classical GCN COUNT is ignored until multi-reg bodies are
+				// evidenced with a bounded size that matches the stream.
 				EXIT_NOT_IMPLEMENTED(dw < 1);
 				cmd += 1;
 				dw -= 1;
 				continue;
 			}
+			{
+				const uint32_t at = num_dw - dw - 1u;
+				std::fprintf(stderr, "unknown PM4 packet type %u (cmd_id=0x%08" PRIx32 ") at dw=0x%05" PRIx32 " num_dw=0x%05" PRIx32 "\n",
+				             pkt_type, cmd_id, at, num_dw);
+				std::fflush(stderr);
+			}
 			EXIT("unknown PM4 packet type %u (cmd_id=0x%08" PRIx32 ")\n", pkt_type, cmd_id);
+		}
+
+		const uint32_t special_packet_dwords = Pm4::Pm4SpecialType3PacketDwords(cmd_id);
+		if (special_packet_dwords != 0u)
+		{
+			EXIT_NOT_IMPLEMENTED(remaining_including_header < special_packet_dwords);
+		} else if (KYTY_PM4_LEN(cmd_id) > remaining_including_header)
+		{
+			EXIT_NOT_IMPLEMENTED(dw < 1);
+			cmd += 1;
+			dw -= 1;
+			continue;
 		}
 
 		EXIT_NOT_IMPLEMENTED(dw < 1);
@@ -1192,7 +1218,22 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 
 		if (pfunc == nullptr)
 		{
-			EXIT("unknown op\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32 "\n", num_dw - dw - 1, cmd_id);
+			const uint32_t at = num_dw - dw - 1u;
+			std::fprintf(stderr, "unknown op at dw=0x%05" PRIx32 " cmd_id=0x%08" PRIx32 " num_dw=0x%05" PRIx32 "\n", at, cmd_id,
+			             num_dw);
+			uint32_t begin = 0;
+			uint32_t end   = (num_dw < 32u) ? num_dw : 32u;
+			if (at >= 32u)
+			{
+				begin = (at > 32u) ? (at - 32u) : 0u;
+				end   = ((at + 24u) < num_dw) ? (at + 24u) : num_dw;
+			}
+			for (uint32_t i = begin; i < end; i++)
+			{
+				std::fprintf(stderr, "\t %05" PRIx32 "%s 0x%08" PRIx32 "\n", i, (i == at) ? " <<<" : "    ", data[i]);
+			}
+			std::fflush(stderr);
+			EXIT("unknown op\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32 "\n", at, cmd_id);
 		}
 
 		auto s = pfunc(this, cmd_id, cmd, dw + 1, num_dw);
@@ -1307,7 +1348,8 @@ void CommandProcessor::WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_
 		                                    value >> 16u);
 	} else
 	{
-		EXIT("unknown event type\n");
+		EXIT("unknown event type (EOP32 event=0x%" PRIx32 " cache=0x%" PRIx32 " index=0x%" PRIx32 " source=0x%" PRIx32 ")\n",
+		     eop_event_type, cache_action, event_index, event_write_source);
 	}
 }
 
@@ -1346,21 +1388,39 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 		default: EXIT("unknown interrupt_selector\n");
 	}
 
+	if (dst_gpu_addr == nullptr)
+	{
+		if (eop_event_type == 0x14 && cache_action == 0x00 && event_index == 0x00 && source32 && !with_interrupt && value == 0)
+		{
+			// CACHE_FLUSH_AND_INV_TS without a destination has no guest memory
+			// write to publish; preserve the ordering side effect only.
+			GraphicsRenderMemoryBarrier(m_buffer[m_current_buffer]);
+			return;
+		}
+		EXIT("unsupported ReleaseMem null destination: event=0x%08" PRIx32 " cache=0x%08" PRIx32 " index=0x%08" PRIx32
+		     " source=0x%08" PRIx32 " interrupt=0x%08" PRIx32 " value=0x%016" PRIx64 "\n",
+		     eop_event_type, cache_action, event_index, event_write_source, interrupt_selector, value);
+	}
+
 	if (eop_event_type == 0x04 && cache_action == 0x00 && event_index == 0x05 && source64 && !with_interrupt)
 	{
 		GraphicsRenderWriteAtEndOfPipe64(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint64_t*>(dst_gpu_addr), value);
 	} else if (eop_event_type == 0x04 && cache_action == 0x00 && event_index == 0x05 && source32 && !with_interrupt)
 	{
 		GraphicsRenderWriteAtEndOfPipe32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value);
-	} else if ((eop_event_type == 0x14 && event_index == 0x00) && cache_action == 0x00 && source32 && !with_interrupt)
+	} else if (((eop_event_type == 0x14 && event_index == 0x00) || (eop_event_type == 0x30 && event_index == 0x00) ||
+	            (eop_event_type == 0x2f && event_index == 0x00)) &&
+	           cache_action == 0x00 && source32 && !with_interrupt)
 	{
-		// Custom ReleaseMem data_sel=1: CACHE_FLUSH_AND_INV_TS-style 32-bit
-		// immediate label write (observed post-WaitUntilSafe, data=1).
+		// ReleaseMem data_sel=1: 32-bit immediate label write.
+		// Event type varies by flush/completion form; the write is driven by
+		// data_sel. Observed: 0x14 (CACHE_FLUSH_AND_INV_TS), 0x30, 0x2f@0.
 		GraphicsRenderWriteAtEndOfPipe32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr),
 		                                 static_cast<uint32_t>(value));
 	} else if (((eop_event_type == 0x04 && event_index == 0x05) || (eop_event_type == 0x28 && event_index == 0x05) ||
 	            (eop_event_type == 0x2f && event_index == 0x06) || (eop_event_type == 0x14 && event_index == 0x00) ||
-	            (eop_event_type == 0x28 && event_index == 0x00)) &&
+	            (eop_event_type == 0x28 && event_index == 0x00) || (eop_event_type == 0x30 && event_index == 0x00) ||
+	            (eop_event_type == 0x2f && event_index == 0x00)) &&
 	           cache_action == 0x38 && source64 && !with_interrupt)
 	{
 		GraphicsRenderWriteAtEndOfPipeWithWriteBack64(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint64_t*>(dst_gpu_addr), value);
@@ -1380,7 +1440,9 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 		                                                       static_cast<uint64_t*>(dst_gpu_addr), value);
 	} else
 	{
-		EXIT("unknown event type\n");
+		EXIT("unknown event type (EOP64 event=0x%" PRIx32 " cache=0x%" PRIx32 " index=0x%" PRIx32 " source=0x%" PRIx32
+		     " interrupt=0x%" PRIx32 ")\n",
+		     eop_event_type, cache_action, event_index, event_write_source, interrupt_selector);
 	}
 }
 
@@ -2053,17 +2115,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_render_control)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_RENDER_CONTROL);
 
-	HW::RenderControl r;
-
-	r.depth_clear_enable       = KYTY_PM4_GET(buffer[0], DB_RENDER_CONTROL, DEPTH_CLEAR_ENABLE) != 0;
-	r.stencil_clear_enable     = KYTY_PM4_GET(buffer[0], DB_RENDER_CONTROL, STENCIL_CLEAR_ENABLE) != 0;
-	r.resummarize_enable       = KYTY_PM4_GET(buffer[0], DB_RENDER_CONTROL, RESUMMARIZE_ENABLE) != 0;
-	r.stencil_compress_disable = KYTY_PM4_GET(buffer[0], DB_RENDER_CONTROL, STENCIL_COMPRESS_DISABLE) != 0;
-	r.depth_compress_disable   = KYTY_PM4_GET(buffer[0], DB_RENDER_CONTROL, DEPTH_COMPRESS_DISABLE) != 0;
-	r.copy_centroid            = KYTY_PM4_GET(buffer[0], DB_RENDER_CONTROL, COPY_CENTROID) != 0;
-	r.copy_sample              = KYTY_PM4_GET(buffer[0], DB_RENDER_CONTROL, COPY_SAMPLE);
-
-	cp->GetCtx()->SetRenderControl(r);
+	State::SetRenderControl(*cp->GetCtx(), buffer[0]);
 
 	return 1;
 }
@@ -2278,16 +2330,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_control)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_STENCIL_CONTROL);
 
-	HW::StencilControl r;
-
-	r.stencil_fail     = KYTY_PM4_GET(buffer[0], DB_STENCIL_CONTROL, STENCILFAIL);
-	r.stencil_zpass    = KYTY_PM4_GET(buffer[0], DB_STENCIL_CONTROL, STENCILZPASS);
-	r.stencil_zfail    = KYTY_PM4_GET(buffer[0], DB_STENCIL_CONTROL, STENCILZFAIL);
-	r.stencil_fail_bf  = KYTY_PM4_GET(buffer[0], DB_STENCIL_CONTROL, STENCILFAIL_BF);
-	r.stencil_zpass_bf = KYTY_PM4_GET(buffer[0], DB_STENCIL_CONTROL, STENCILZPASS_BF);
-	r.stencil_zfail_bf = KYTY_PM4_GET(buffer[0], DB_STENCIL_CONTROL, STENCILZFAIL_BF);
-
-	cp->GetCtx()->SetStencilControl(r);
+	State::SetStencilControl(*cp->GetCtx(), buffer[0]);
 
 	return 1;
 }
@@ -2324,18 +2367,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_mask)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0026900);
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_STENCILREFMASK);
 
-	HW::StencilMask r;
-
-	r.stencil_testval      = KYTY_PM4_GET(buffer[0], DB_STENCILREFMASK, STENCILTESTVAL);
-	r.stencil_mask         = KYTY_PM4_GET(buffer[0], DB_STENCILREFMASK, STENCILMASK);
-	r.stencil_writemask    = KYTY_PM4_GET(buffer[0], DB_STENCILREFMASK, STENCILWRITEMASK);
-	r.stencil_opval        = KYTY_PM4_GET(buffer[0], DB_STENCILREFMASK, STENCILOPVAL);
-	r.stencil_testval_bf   = KYTY_PM4_GET(buffer[1], DB_STENCILREFMASK_BF, STENCILTESTVAL_BF);
-	r.stencil_mask_bf      = KYTY_PM4_GET(buffer[1], DB_STENCILREFMASK_BF, STENCILMASK_BF);
-	r.stencil_writemask_bf = KYTY_PM4_GET(buffer[1], DB_STENCILREFMASK_BF, STENCILWRITEMASK_BF);
-	r.stencil_opval_bf     = KYTY_PM4_GET(buffer[1], DB_STENCILREFMASK_BF, STENCILOPVAL_BF);
-
-	cp->GetCtx()->SetStencilMask(r);
+	State::SetStencilRefMask(*cp->GetCtx(), buffer[0]);
+	State::SetStencilRefMaskBf(*cp->GetCtx(), buffer[1]);
 
 	return 2;
 }
@@ -3290,6 +3323,19 @@ KYTY_CP_OP_PARSER(cp_op_indirect_buffer)
 	return 3;
 }
 
+KYTY_CP_OP_PARSER(cp_op_indirect_buffer_end)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(((cmd_id >> 8u) & 0xffu) != Pm4::IT_INDIRECT_BUFFER_END);
+	EXIT_NOT_IMPLEMENTED(dw < 1);
+
+	// PAL names opcode 0x17 as IT_INDIRECT_BUFFER_END. It terminates the
+	// current IB; any following dwords belong to the parent stream or padding,
+	// not to this nested Run invocation.
+	return dw - 1u;
+}
+
 KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -3525,6 +3571,14 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 
 	bool custom = (cmd_id == 0xc0051060);
 
+	if (custom && buffer[0] == KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE))
+	{
+		// Observed Gen5 flip stream can contain a lone R_RELEASE_MEM marker
+		// before the real WaitFlipDone packet. The marker has no payload; do
+		// not consume the following Type3 header as ReleaseMem data.
+		return 0;
+	}
+
 	uint32_t cache_policy       = (buffer[0] >> 25u) & 0x3u;
 	uint32_t cache_action       = (buffer[0] >> 12u) & 0x3fu;
 	uint32_t eop_event_type     = (buffer[0]) & 0x3fu;
@@ -3540,11 +3594,31 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 		uint32_t gcr_cntl = buffer[1] & 0xffffu;
 		uint32_t data_sel = (buffer[1] >> 16u) & 0xffu;
 
-		// data_sel matches GraphicsCbReleaseMem: 1 = 32-bit immediate (observed
-		// post-WaitUntilSafe: gcr=0, data=1), 2 = 64-bit immediate, 3 = counter.
+		// data_sel matches GraphicsCbReleaseMem: 0 = no destination write
+		// (flush/barrier only), 1 = 32-bit immediate, 2 = 64-bit immediate,
+		// 3 = GPU clock counter.
+		if (data_sel == 0)
+		{
+			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0000);
+			cp->MemoryBarrier();
+			return 6;
+		}
 		if (data_sel == 1)
 		{
 			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0000);
+			if (dst_gpu_addr == nullptr)
+			{
+				EXIT_NOT_IMPLEMENTED((buffer[0] & 0xffu) != 0x14u);
+				cp->MemoryBarrier();
+				if ((buffer[4] >> 30u) == 3u)
+				{
+					// Null-destination ReleaseMem has no data write. Some
+					// streams place the following packet where data_lo would
+					// be in the full 7-dword form.
+					return 4;
+				}
+				return 6;
+			}
 
 			cache_action       = 0x00;
 			cache_policy       = 0;
@@ -3589,6 +3663,33 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 	                       value, interrupt_selector);
 
 	return 6;
+}
+
+KYTY_CP_OP_PARSER(cp_op_one_reg_write)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(((cmd_id >> 8u) & 0xffu) != Pm4::IT_ONE_REG_WRITE);
+	EXIT_NOT_IMPLEMENTED(dw < 2);
+
+	return 1;
+}
+
+KYTY_CP_OP_PARSER(cp_op_get_lod_stats)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(((cmd_id >> 8u) & 0xffu) != Pm4::IT_GET_LOD_STATS);
+	EXIT_NOT_IMPLEMENTED(dw < 2);
+
+	// This query packet has no guest-visible producer in the current renderer.
+	// Consume its payload so following PM4 packets remain aligned.
+	static std::atomic_bool warned {false};
+	if (!warned.exchange(true))
+	{
+		std::fprintf(stderr, "WARNING: ignoring unsupported IT_GET_LOD_STATS\n");
+	}
+	return 1;
 }
 
 KYTY_CP_OP_PARSER(cp_op_set_context_reg)
@@ -3813,9 +3914,39 @@ static void graphics_init_jmp_tables_cx_indirect()
 	{
 		State::SetGenericScissorBr(*cp->GetCtx(), value);
 	};
+	// Screen scissor is handled as a TL+BR pair on the direct SET_CONTEXT_REG path;
+	// Gen5 CX-indirect emits the halves separately.
+	g_hw_ctx_indirect_func[Pm4::PA_SC_SCREEN_SCISSOR_TL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		State::SetScreenScissorTl(*cp->GetCtx(), value);
+	};
+	g_hw_ctx_indirect_func[Pm4::PA_SC_SCREEN_SCISSOR_BR] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		State::SetScreenScissorBr(*cp->GetCtx(), value);
+	};
 	g_hw_ctx_indirect_func[Pm4::PA_SU_SC_MODE_CNTL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 	{
 		State::SetModeControl(*cp->GetCtx(), value);
+	};
+	// Gen5 CX-indirect emits DB_RENDER_CONTROL (offset 0) as a lone pair; direct
+	// SET_CONTEXT_REG already uses the same decoder.
+	g_hw_ctx_indirect_func[Pm4::DB_RENDER_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		State::SetRenderControl(*cp->GetCtx(), value);
+	};
+	g_hw_ctx_indirect_func[Pm4::DB_STENCIL_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		State::SetStencilControl(*cp->GetCtx(), value);
+	};
+	// Direct SET_CONTEXT_REG writes REFMASK+REFMASK_BF as a 2-dword pair; Gen5
+	// CX-indirect emits each half alone.
+	g_hw_ctx_indirect_func[Pm4::DB_STENCILREFMASK] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		State::SetStencilRefMask(*cp->GetCtx(), value);
+	};
+	g_hw_ctx_indirect_func[Pm4::DB_STENCILREFMASK_BF] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		State::SetStencilRefMaskBf(*cp->GetCtx(), value);
 	};
 	// Direct path registers CB_BLEND0..7; indirect must share the same decoder
 	// (captured: CB_BLEND1_CONTROL = 0x1e1 after post-menu load).
@@ -4437,6 +4568,48 @@ static void graphics_init_jmp_tables_sh_indirect()
 		r2.shared_vgprs           = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC2_PS, SHARED_VGPR_CNT);
 		cp->GetShCtx()->SetPsShaderResource2(r2);
 	};
+
+	// Gen5 SH-indirect emits COMPUTE_* as lone offset/value pairs. Mirror the
+	// direct SET_SH_REG decoders.
+	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_LO] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{
+		auto& r = cp->GetShCtx()->CsRegs();
+		r.data_addr &= 0xFFFFFF00000000FFull;
+		r.data_addr |= static_cast<uint64_t>(value) << 8u;
+	};
+	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_HI] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{
+		auto& r = cp->GetShCtx()->CsRegs();
+		r.data_addr &= 0xFFFF00FFFFFFFFFFull;
+		r.data_addr |= (static_cast<uint64_t>(value) & 0xffu) << 40u;
+	};
+	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC1] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{ decode_compute_pgm_rsrc1(cp->GetShCtx()->CsRegs(), value); };
+	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC2] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{ decode_compute_pgm_rsrc2(cp->GetShCtx()->CsRegs(), value); };
+	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC3] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->CsRegs().rsrc3 = value; };
+	g_hw_sh_indirect_func[Pm4::COMPUTE_SHADER_CHKSUM] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{
+		auto& r  = cp->GetShCtx()->CsRegs();
+		r.chksum = (r.chksum & 0xffffffff00000000ull) | static_cast<uint64_t>(value);
+	};
+	g_hw_sh_indirect_func[Pm4::COMPUTE_SHADER_CHKSUM_HI] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{
+		auto& r  = cp->GetShCtx()->CsRegs();
+		r.chksum = (r.chksum & 0x00000000ffffffffull) | (static_cast<uint64_t>(value) << 32u);
+	};
+	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_X] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetCsNumThreadX(value); };
+	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_Y] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetCsNumThreadY(value); };
+	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_Z] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetCsNumThreadZ(value); };
+	for (uint32_t slot = 0; slot < 16; slot++)
+	{
+		g_hw_sh_indirect_func[Pm4::COMPUTE_USER_DATA_0 + slot] = [](KYTY_HW_SH_INDIRECT_ARGS)
+		{
+			const uint32_t id = cmd_offset - Pm4::COMPUTE_USER_DATA_0;
+			cp->GetShCtx()->SetCsUserSgpr(id, value, cp->GetUserDataMarker());
+			cp->SetUserDataMarker(HW::UserSgprType::Unknown);
+		};
+	}
 }
 
 static void graphics_init_jmp_tables_uc_indirect()
@@ -4578,11 +4751,13 @@ static void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_WAIT_REG_MEM]            = cp_op_wait_reg_mem;
 	g_cp_op_func[Pm4::IT_WRITE_DATA]              = cp_op_write_data;
 	g_cp_op_func[Pm4::IT_INDIRECT_BUFFER]         = cp_op_indirect_buffer;
+	g_cp_op_func[Pm4::IT_INDIRECT_BUFFER_END]     = cp_op_indirect_buffer_end;
 	g_cp_op_func[Pm4::IT_EVENT_WRITE]             = cp_op_event_write;
 	g_cp_op_func[Pm4::IT_EVENT_WRITE_EOP]         = cp_op_event_write_eop;
 	g_cp_op_func[Pm4::IT_EVENT_WRITE_EOS]         = cp_op_event_write_eos;
 	g_cp_op_func[Pm4::IT_RELEASE_MEM]             = cp_op_release_mem;
 	g_cp_op_func[Pm4::IT_DMA_DATA]                = cp_op_dma_data;
+	g_cp_op_func[Pm4::IT_ONE_REG_WRITE]           = cp_op_one_reg_write;
 	g_cp_op_func[Pm4::IT_ACQUIRE_MEM]             = cp_op_acquire_mem;
 	g_cp_op_func[Pm4::IT_SET_CONTEXT_REG]         = cp_op_set_context_reg;
 	g_cp_op_func[Pm4::IT_SET_SH_REG]              = cp_op_set_shader_reg;
@@ -4594,6 +4769,7 @@ static void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_INCREMENT_DE_COUNTER]    = cp_op_increment_de_counter;
 	g_cp_op_func[Pm4::IT_WAIT_ON_CE_COUNTER]      = cp_op_wait_on_ce_counter;
 	g_cp_op_func[Pm4::IT_WAIT_ON_DE_COUNTER_DIFF] = cp_op_wait_on_de_counter_diff;
+	g_cp_op_func[Pm4::IT_GET_LOD_STATS]            = cp_op_get_lod_stats;
 
 	for (auto& func: g_cp_op_custom_func)
 	{

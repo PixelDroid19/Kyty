@@ -235,6 +235,7 @@ private:
 		uint64_t             storage_buffers_id[BUFFERS_MAX]             = {};
 		int                  textures2d_sampled_num                      = 0;
 		uint64_t             textures2d_sampled_id[TEXTURES_SAMPLED_MAX] = {};
+		uint8_t              textures2d_sampled_view[TEXTURES_SAMPLED_MAX] = {};
 		int                  textures2d_storage_num                      = 0;
 		uint64_t             textures2d_storage_id[TEXTURES_STORAGE_MAX] = {};
 		int                  samplers_num                                = 0;
@@ -738,7 +739,8 @@ static void z_check(const HW::DepthRenderTarget& z)
 		EXIT_NOT_IMPLEMENTED(z.z_info.num_samples != 0);
 		EXIT_NOT_IMPLEMENTED(z.z_info.tile_surface_enable != false);
 		EXIT_NOT_IMPLEMENTED(z.z_info.expclear_enabled != false);
-		EXIT_NOT_IMPLEMENTED(z.z_info.zrange_precision != 0);
+		// Gen5 may leave ZRANGE_PRECISION set while FORMAT is invalid/unbound; the bit is unused.
+		// EXIT_NOT_IMPLEMENTED(z.z_info.zrange_precision != 0);
 		EXIT_NOT_IMPLEMENTED(z.z_info.embedded_sample_locations != false);
 		EXIT_NOT_IMPLEMENTED(z.z_info.partially_resident != false);
 		EXIT_NOT_IMPLEMENTED(z.z_info.num_mip_levels != 0);
@@ -1910,13 +1912,12 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
 
 	auto get_warp = [](uint8_t clamp)
 	{
-		switch (clamp)
+		switch (State::ResolveSamplerAddressMode(clamp))
 		{
-			case 0: return VK_SAMPLER_ADDRESS_MODE_REPEAT; break;
-			case 1: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT; break;
-			case 2: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; break;
-			case 6: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; break;
-			default: EXIT("unknown clamp: %u\n", clamp);
+			case State::SamplerAddressMode::Repeat: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			case State::SamplerAddressMode::MirroredRepeat: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+			case State::SamplerAddressMode::ClampToEdge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			case State::SamplerAddressMode::ClampToBorder: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 		}
 		return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	};
@@ -2038,25 +2039,6 @@ static VkBlendFactor get_blend_factor(uint32_t factor)
 	}
 	return VK_BLEND_FACTOR_ZERO;
 }
-
-// Env-gated producer probe only (KYTY_RT_EVIDENCE). Off by default; no guest
-// semantic change when unset. Optional KYTY_RT_EVIDENCE_PS filters to one CRC.
-static bool RtEvidenceMatches(uint32_t ps_crc)
-{
-	const char* filter = std::getenv("KYTY_RT_EVIDENCE_PS");
-	if (filter == nullptr || filter[0] == '\0')
-	{
-		return true;
-	}
-
-	char*      end   = nullptr;
-	const auto value = std::strtoul(filter, &end, 16);
-	const bool valid = end != filter && end != nullptr && *end == '\0' && value <= UINT32_MAX;
-	return valid && static_cast<uint32_t>(value) == ps_crc;
-}
-
-// Consumer PS CRC for SAMPLE_EVIDENCE (set by BindDescriptors for pixel stage).
-static thread_local uint32_t g_sample_evidence_consumer_ps_crc = 0;
 
 static VkBlendOp get_blend_op(uint32_t op)
 {
@@ -2777,73 +2759,6 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	auto vs_id = ShaderGetIdVS(&vs_regs, vs_input_info);
 	auto ps_id = ShaderGetIdPS(&ps_regs, ps_input_info);
 
-	if (std::getenv("KYTY_RT_EVIDENCE") != nullptr && RtEvidenceMatches(ps_id.crc32))
-	{
-		// Prefer intermediate/float RTs (gameplay lighting) over 4K UI display
-		// targets that otherwise exhaust the log budget before Play.
-		static std::atomic<uint32_t> rt_logs_priority {0};
-		static std::atomic<uint32_t> rt_logs_other {0};
-		bool                        priority = false;
-		for (uint32_t rt = 0; rt < color->targets_num; rt++)
-		{
-			const auto&    target = ctx->GetRenderTarget(rt);
-			const uint32_t width =
-			    Config::IsNextGen() ? target.attrib2.width + 1u : static_cast<uint32_t>(target.size.width);
-			const uint32_t height =
-			    Config::IsNextGen() ? target.attrib2.height + 1u : static_cast<uint32_t>(target.size.height);
-			if (target.info.format == 0xcu || target.info.channel_type == 0x7u || width <= 1280u || height <= 720u)
-			{
-				priority = true;
-				break;
-			}
-		}
-		const uint32_t n      = priority ? rt_logs_priority.fetch_add(1) : rt_logs_other.fetch_add(1);
-		const uint32_t budget = priority ? 256u : 32u;
-		if (n < budget)
-		{
-			std::fprintf(stderr, "RT_EVIDENCE ps=%08" PRIx32 " mask=%08" PRIx32 " targets=%u depth=%d ztest=%d zwrite=%d\n", ps_id.crc32,
-			             ctx->GetRenderTargetMask(), color->targets_num,
-			             depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr ? 1 : 0,
-			             depth->depth_test_enable ? 1 : 0, depth->depth_write_enable ? 1 : 0);
-			for (uint32_t rt = 0; rt < color->targets_num; rt++)
-			{
-				const auto&    blend  = ctx->GetBlendControl(rt);
-				const auto&    target = ctx->GetRenderTarget(rt);
-				const uint32_t width =
-				    Config::IsNextGen() ? target.attrib2.width + 1u : static_cast<uint32_t>(target.size.width);
-				const uint32_t height =
-				    Config::IsNextGen() ? target.attrib2.height + 1u : static_cast<uint32_t>(target.size.height);
-				const uint32_t tile =
-				    Config::IsNextGen() ? target.attrib3.tile_mode : static_cast<uint32_t>(target.attrib.tile_mode);
-				std::fprintf(stderr,
-				             "RT_EVIDENCE rt=%u base=%016" PRIx64 " fmt=%u ctype=%u order=%u width=%u height=%u tile=%u mask=%x "
-				             "blend_en=%d src=%u dst=%u op=%u asrc=%u adst=%u aop=%u sep=%d "
-				             "clear0=%08" PRIx32 " clear1=%08" PRIx32 " fast=%d\n",
-				             rt, target.base.addr, target.info.format, target.info.channel_type, target.info.channel_order, width,
-				             height, tile, (ctx->GetRenderTargetMask() >> (rt * 4u)) & 0xfu, blend.enable ? 1 : 0,
-				             blend.color_srcblend, blend.color_destblend, blend.color_comb_fcn, blend.alpha_srcblend,
-				             blend.alpha_destblend, blend.alpha_comb_fcn, blend.separate_alpha_blend ? 1 : 0,
-				             target.clear_word0.word0, target.clear_word1.word1, target.info.cmask_fast_clear_enable ? 1 : 0);
-			}
-		}
-	}
-
-	if (std::getenv("KYTY_RT_EVIDENCE") != nullptr && ps_id.crc32 == 0x3f9d6677u)
-	{
-		static std::atomic_bool ps_input_logged {false};
-		if (!ps_input_logged.exchange(true))
-		{
-			const auto& sh = ctx->GetShaderRegisters();
-			std::fprintf(stderr, "PS_INPUT ps=3f9d6677 ena=%08" PRIx32 " addr=%08" PRIx32 " in_control=%u export_count=%d\n",
-			             sh.ps_input_ena, sh.ps_input_addr, sh.ps_in_control, vs_input_info->export_count);
-			for (uint32_t i = 0; i < ps_input_info->input_num; i++)
-			{
-				std::fprintf(stderr, "PS_INPUT attr%u interpolator=0x%03" PRIx32 "\n", i, ps_input_info->interpolator_settings[i]);
-			}
-			std::fflush(stderr);
-		}
-	}
-
 	Pipeline p {};
 	p.render_pass_id = framebuffer->render_pass_id;
 	p.ps_shader_id   = ps_id;
@@ -2887,19 +2802,31 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.static_params->stencil_front            = depth->stencil_static_front;
 	p.static_params->stencil_back             = depth->stencil_static_back;
 	p.static_params->color_targets_num        = color->targets_num;
-	EXIT_NOT_IMPLEMENTED(p.static_params->color_targets_num == 0 || p.static_params->color_targets_num > 8);
-	for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
+	if (p.static_params->color_targets_num == 0)
 	{
-		const auto& blend = ctx->GetBlendControl(rt);
-		p.static_params->color_mask[rt]           = (ctx->GetRenderTargetMask() >> (rt * 4u)) & 0xFu;
-		p.static_params->color_srcblend[rt]       = blend.color_srcblend;
-		p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
-		p.static_params->color_destblend[rt]      = blend.color_destblend;
-		p.static_params->alpha_srcblend[rt]       = blend.alpha_srcblend;
-		p.static_params->alpha_comb_fcn[rt]       = blend.alpha_comb_fcn;
-		p.static_params->alpha_destblend[rt]      = blend.alpha_destblend;
-		p.static_params->separate_alpha_blend[rt] = blend.separate_alpha_blend;
-		p.static_params->blend_enable[rt]         = blend.enable;
+		// Depth-only: FramebufferCache attaches one dummy color image so the
+		// Vulkan render pass stays valid; the pipeline must match that count
+		// with a zero write mask (no color output).
+		EXIT_NOT_IMPLEMENTED(!p.static_params->with_depth);
+		p.static_params->color_targets_num = 1;
+		p.static_params->color_mask[0]     = 0;
+		p.static_params->blend_enable[0]   = false;
+	} else
+	{
+		EXIT_NOT_IMPLEMENTED(p.static_params->color_targets_num > 8);
+		for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
+		{
+			const auto& blend = ctx->GetBlendControl(rt);
+			p.static_params->color_mask[rt]           = (ctx->GetRenderTargetMask() >> (rt * 4u)) & 0xFu;
+			p.static_params->color_srcblend[rt]       = blend.color_srcblend;
+			p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
+			p.static_params->color_destblend[rt]      = blend.color_destblend;
+			p.static_params->alpha_srcblend[rt]       = blend.alpha_srcblend;
+			p.static_params->alpha_comb_fcn[rt]       = blend.alpha_comb_fcn;
+			p.static_params->alpha_destblend[rt]      = blend.alpha_destblend;
+			p.static_params->separate_alpha_blend[rt] = blend.separate_alpha_blend;
+			p.static_params->blend_enable[rt]         = blend.enable;
+		}
 	}
 	p.static_params->cull_back                = mc.cull_back;
 	p.static_params->cull_front               = mc.cull_front;
@@ -3411,6 +3338,7 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 	for (int i = 0; i < s.textures2d_sampled_num; i++)
 	{
 		hash ^= Core::hash64(s.textures2d_sampled_id[i]);
+		hash += Core::hash8(s.textures2d_sampled_view[i]);
 	}
 	for (int i = 0; i < s.textures2d_storage_num; i++)
 	{
@@ -3454,7 +3382,8 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 				{
 					for (int i = 0; i < s.textures2d_sampled_num; i++)
 					{
-						if (s.textures2d_sampled_id[i] != set.textures2d_sampled_id[i])
+						if (s.textures2d_sampled_id[i] != set.textures2d_sampled_id[i] ||
+						    s.textures2d_sampled_view[i] != set.textures2d_sampled_view[i])
 						{
 							match = false;
 							break;
@@ -3543,6 +3472,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	for (int i = 0; i < textures2d_sampled_num; i++)
 	{
 		nset.textures2d_sampled_id[i] = textures2d_sampled[i]->memory.unique_id;
+		nset.textures2d_sampled_view[i] = static_cast<uint8_t>(textures2d_sampled_view[i]);
 	}
 	for (int i = 0; i < textures2d_storage_num; i++)
 	{
@@ -4313,9 +4243,17 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		return;
 	}
 
-	const auto layout = State::ResolveColorTargetLayout(mask);
+	uint32_t configured_target_count = 1;
+	for (; configured_target_count < RenderColorInfo::TARGETS_MAX; configured_target_count++)
+	{
+		if (hw.GetRenderTarget(configured_target_count).base.addr == 0)
+		{
+			break;
+		}
+	}
+
+	const auto layout = State::ResolveColorTargetLayout(mask, configured_target_count);
 	EXIT_NOT_IMPLEMENTED(layout.error == State::ColorTargetLayoutError::Gapped);
-	EXIT_NOT_IMPLEMENTED(layout.error == State::ColorTargetLayoutError::PartialChannel);
 	EXIT_NOT_IMPLEMENTED(layout.count == 0 || layout.count > RenderColorInfo::TARGETS_MAX);
 	r->targets_num = layout.count;
 
@@ -4419,9 +4357,12 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		} else if (rt.info.format == 0x1 && rt.info.channel_type == 0x0 && rt.info.channel_order == 0x0)
 		{
 			rt_format = RenderTextureFormat::R8Unorm;
-		} else if (rt.info.format == 0xc && rt.info.channel_type == 0x7 && rt.info.channel_order == 0x0)
+		} else if (rt.info.format == 0xc && rt.info.channel_type == 0x7 &&
+		           (rt.info.channel_order == 0x0 || rt.info.channel_order == 0x2))
 		{
 			// Captured post-Play HDR/intermediate RT: COLOR_16_16_16_16 + FLOAT.
+			// SWAP_STD_REV (2) preserves the same 4x16-bit storage; component
+			// ordering is handled at shader/sample boundaries.
 			rt_format = RenderTextureFormat::R16G16B16A16Sfloat;
 		} else
 		{
@@ -4442,7 +4383,6 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		for (uint32_t slot = 1; slot < r->targets_num; slot++)
 		{
 			const auto& other = hw.GetRenderTarget(slot);
-			EXIT_NOT_IMPLEMENTED(other.base.addr == 0);
 			if (ps5)
 			{
 				EXIT_NOT_IMPLEMENTED(other.attrib2.width != rt.attrib2.width || other.attrib2.height != rt.attrib2.height ||
@@ -4537,7 +4477,13 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 			const bool one_comp = r.Stride() == 4 &&
 			                      (r.DstSelXYZW() == DstSel(4, 0, 0, 1) || r.DstSelXYZW() == DstSel(4, 0, 0, 0)) &&
 			                      ShaderIsGen5SingleComponent32BitBufferFormat(r.Format());
-			EXIT_NOT_IMPLEMENTED(!(four_comp || one_comp));
+			if (!(four_comp || one_comp))
+			{
+				EXIT("unsupported Gen5 storage buffer format: index=%d start=%d usage=%u stride=%u dstsel=0x%03" PRIx32
+				     " format=%u records=%u base=0x%012" PRIx64 "\n",
+				     i, storage_buffers.start_register[i], static_cast<uint32_t>(storage_buffers.usages[i]), r.Stride(), r.DstSelXYZW(),
+				     r.Format(), r.NumRecords(), r.Base48());
+			}
 		} else
 		{
 			EXIT_NOT_IMPLEMENTED(!((r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 0) && r.Dfmt() == 4 && r.Nfmt() == 4) ||
@@ -4627,8 +4573,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			// - Tile 0/27, format 56 = 8_8_8_8_UNORM (RGBA8)
 			// - Tile 0, format 14 = 8_8_UNORM (RG8), 2048x4096 linear atlas
 			// - Tile 27, format 71 = 16_16_16_16_FLOAT (RGBA16F), 642x362 alias of RT
+			// - Tile 27, format 133 = BC1 RGBA UNORM, 3840x2160 title texture
 			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 27);
-			EXIT_NOT_IMPLEMENTED(r.Format() != 56 && r.Format() != 14 && r.Format() != 71);
+			if (r.Format() != 56 && r.Format() != 14 && r.Format() != 71 && r.Format() != 133)
+			{
+				EXIT("unsupported Gen5 sampled texture format: fmt=%u tile=%u width=%u height=%u base=0x%012" PRIx64 " type=%u\n",
+				     r.Format(), r.TileMode(), r.Width5() + 1u, r.Height5() + 1u, r.Base40(), r.Type());
+			}
 			EXIT_NOT_IMPLEMENTED(r.PerfMod5() != 7 && r.PerfMod5() != 0);
 			EXIT_NOT_IMPLEMENTED(r.BCSwizzle() != 0);
 			EXIT_NOT_IMPLEMENTED(r.BaseArray5() != 0);
@@ -4666,7 +4617,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		}
 		EXIT_NOT_IMPLEMENTED((gen5 ? r.Base40() : r.Base38()) == 0);
 		EXIT_NOT_IMPLEMENTED(r.MinLod() != 0);
-		EXIT_NOT_IMPLEMENTED(r.Type() != 9);
+		EXIT_NOT_IMPLEMENTED(r.Type() != 8 && r.Type() != 9);
 		EXIT_NOT_IMPLEMENTED(r.Depth() != 0);
 
 		bool read_only = (gen5 ? false : (r.MemoryType() == 0x10));
@@ -4768,7 +4719,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 			if (render_texture)
 			{
-				EXIT_NOT_IMPLEMENTED(swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7));
+				if (swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7) && swizzle != DstSel(7, 6, 5, 4))
+				{
+					EXIT("unsupported render texture sampled swizzle: swizzle=0x%03" PRIx32
+					     " dst=(%u,%u,%u,%u) fmt=%u dfmt=%u nfmt=%u tile=%u width=%u height=%u pitch=%u addr=0x%016" PRIx64
+					     " size=0x%016" PRIx64 "\n",
+					     swizzle, GetDstSel(swizzle, 0), GetDstSel(swizzle, 1), GetDstSel(swizzle, 2), GetDstSel(swizzle, 3), fmt,
+					     dfmt, nfmt, tile, width, height, pitch, static_cast<uint64_t>(addr), static_cast<uint64_t>(size.size));
+				}
 				// Multiple non-exact RT aliases are expected under Gen5 nested /
 				// same-base parents. Prefer the tightest cover using guest allocation
 				// bytes when every match recorded guest_size at create; otherwise
@@ -4812,6 +4770,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				if (swizzle == DstSel(6, 5, 4, 7))
 				{
 					view_type = VulkanImage::VIEW_BGRA;
+				}
+				if (swizzle == DstSel(7, 6, 5, 4))
+				{
+					view_type = VulkanImage::VIEW_ABGR;
 				}
 			}
 			// Live StorageTexture (compute/UAV) can own GPU pixels without ever
@@ -4919,34 +4881,6 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		EXIT_NOT_IMPLEMENTED(tex == nullptr);
 
-		if (std::getenv("KYTY_RT_EVIDENCE") != nullptr && gen5 && !textures.desc[i].textures2d_without_sampler)
-		{
-			// Prefer residual-relevant samples: RT aliases, float ufmt 71, tile-27.
-			// Keep a separate budget for early UI noise (ufmt 56 / tile 0).
-			static std::atomic<uint32_t> sample_logs_priority {0};
-			static std::atomic<uint32_t> sample_logs_other {0};
-			const bool priority = render_texture || depth_texture || fmt == 71u || tile == 27u;
-			const uint32_t n =
-			    priority ? sample_logs_priority.fetch_add(1) : sample_logs_other.fetch_add(1);
-			const uint32_t budget = priority ? 256u : 64u;
-			if (n < budget)
-			{
-				const int st_n =
-				    static_cast<int>(GpuMemoryFindObjects(addr, size.size, GpuMemoryObjectType::StorageTexture, false, false).Size());
-				const int tex_n =
-				    static_cast<int>(GpuMemoryFindObjects(addr, size.size, GpuMemoryObjectType::Texture, false, false).Size());
-				const int sb_n =
-				    static_cast<int>(GpuMemoryFindObjects(addr, size.size, GpuMemoryObjectType::StorageBuffer, false, false).Size());
-				std::fprintf(stderr,
-				             "SAMPLE_EVIDENCE consumer_ps=%08" PRIx32 " slot=%d addr=%016" PRIx64 " ufmt=%u tile=%u extent=%ux%u "
-				             "size=%08" PRIx32 " render_texture=%d depth_texture=%d vkfmt=%d layout=%d "
-				             "overlap_st=%d overlap_tex=%d overlap_sb=%d imgtype=%d\n",
-				             g_sample_evidence_consumer_ps_crc, index_sampled, addr, fmt, tile, width, height, size.size,
-				             render_texture ? 1 : 0, depth_texture ? 1 : 0, static_cast<int>(tex->format),
-				             static_cast<int>(tex->layout), st_n, tex_n, sb_n, static_cast<int>(tex->type));
-			}
-		}
-
 		if (textures.desc[i].textures2d_without_sampler)
 		{
 			images_storage[index_storage] = tex;
@@ -5027,7 +4961,8 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, uint64_t* sa
 		EXIT_NOT_IMPLEMENTED(r.LodBiasSec() != 0);
 		// EXIT_NOT_IMPLEMENTED(r.XyMagFilter() != 1);
 		// EXIT_NOT_IMPLEMENTED(r.XyMinFilter() != 1);
-		EXIT_NOT_IMPLEMENTED(r.ZFilter() != 1);
+		// Vulkan has no separate Z texture filter in VkSampler; 2D sampled images
+		// are controlled by XY min/mag and mip filtering below.
 		// EXIT_NOT_IMPLEMENTED(r.MipFilter() != 0 && r.MipFilter() != 2);
 		EXIT_NOT_IMPLEMENTED(r.BorderColorPtr() != 0);
 		EXIT_NOT_IMPLEMENTED(r.BorderColorType() != 0);
@@ -5088,8 +5023,7 @@ static void PrepareDirectSgprs(const ShaderDirectSgprsResources& direct_sgprs, u
 }
 
 static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
-                            const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
-                            uint32_t consumer_ps_crc = 0)
+                            const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -5123,7 +5057,6 @@ static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelin
 		}
 		if (bind.textures2D.textures_num > 0)
 		{
-			g_sample_evidence_consumer_ps_crc = consumer_ps_crc;
 			PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage, textures2d_sampled_view,
 			                &sgprs_ptr);
 			need_descriptor = true;
@@ -5398,15 +5331,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		vkCmdBindVertexBuffers(vk_buffer, i, 1, &vertices->buffer, &offset);
 	}
 
-	// ShaderGetIdPS is already used in CreatePipeline; recompute here only so
-	// SAMPLE_EVIDENCE can tag the consuming PS CRC (VulkanPipeline has no id).
-	const uint32_t consumer_ps_crc = ShaderGetIdPS(&sh_ctx->GetPs(), &ps_input_info).crc32;
-
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
-	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0);
+	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, consumer_ps_crc);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
 
 	VulkanBuffer* indices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(
 	    submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(index_addr), index_size, IndexBufferGpuObject()));
@@ -5526,13 +5455,11 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		vkCmdBindVertexBuffers(vk_buffer, i, 1, &vertices->buffer, &offset);
 	}
 
-	const uint32_t consumer_ps_crc = ShaderGetIdPS(&sh_ctx->GetPs(), &ps_input_info).crc32;
-
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
-	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0);
+	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, consumer_ps_crc);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
 
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info);
 

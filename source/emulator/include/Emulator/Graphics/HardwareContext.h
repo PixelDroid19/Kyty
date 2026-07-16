@@ -566,7 +566,8 @@ struct ShaderRegisters
 	uint32_t m_vgtGsOutPrimType       = 0;
 
 	uint32_t shader_z_format       = 0;
-	uint8_t  target_output_mode[8] = {};
+	uint8_t  target_output_mode[8]  = {};
+	uint8_t  target_output_order[8] = {};
 	uint32_t ps_input_ena          = 0;
 	uint32_t ps_input_addr         = 0;
 	uint32_t ps_in_control         = 0;
@@ -664,7 +665,11 @@ public:
 	void SetColorPitch(uint32_t slot, const ColorPitch& pitch) { m_render_targets[slot].pitch = pitch; }
 	void SetColorSlice(uint32_t slot, const ColorSlice& slice) { m_render_targets[slot].slice = slice; }
 	void SetColorView(uint32_t slot, const ColorView& view) { m_render_targets[slot].view = view; }
-	void SetColorInfo(uint32_t slot, const ColorInfo& info) { m_render_targets[slot].info = info; }
+	void SetColorInfo(uint32_t slot, const ColorInfo& info)
+	{
+		m_render_targets[slot].info          = info;
+		m_sh_regs.target_output_order[slot] = static_cast<uint8_t>(info.channel_order);
+	}
 	void SetColorAttrib(uint32_t slot, const ColorAttrib& attrib) { m_render_targets[slot].attrib = attrib; }
 	void SetColorAttrib2(uint32_t slot, const ColorAttrib2& attrib2) { m_render_targets[slot].attrib2 = attrib2; }
 	void SetColorAttrib3(uint32_t slot, const ColorAttrib3& attrib3) { m_render_targets[slot].attrib3 = attrib3; }

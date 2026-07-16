@@ -113,6 +113,8 @@ bug into “the game will not start.”
 ## 3. Labels, EOP fences, and WaitRegMem
 
 `WaitRegMem32/64` polls a guest address until `(value & mask) == (ref & mask)`.
+Builder `cache_policy` (0..3) is accepted and ignored by the host CP: the
+normalized `R_WAIT_MEM_64` packet has no policy field.
 The producer is normally an EOP / Label store scheduled through `LabelSet` and
 published in `LabelManager::FireCallbacks` **after** WriteBack side effects, so
 a later StorageBuffer write-back cannot zero an earlier fence.

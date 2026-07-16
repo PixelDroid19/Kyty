@@ -13,6 +13,11 @@
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -71,6 +76,10 @@ VkFormat TextureResolveSampledVkFormat(uint8_t dfmt, uint8_t nfmt, uint16_t fmt,
 		if (fmt == 71)
 		{
 			return VK_FORMAT_R16G16B16A16_SFLOAT;
+		}
+		if (fmt == 133)
+		{
+			return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
 		}
 		EXIT("unknown format: fmt = %u\n", fmt);
 	}
@@ -259,17 +268,18 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// SW_64KB_R_X sample texture: detile into tightly packed linear rows
 			// then upload. Render-target aliases still prefer FindRenderTexture
 			// before create; this path covers pure CPU-backed sample textures.
-			// CPU detile path only has the 4 BPE SW_64KB_R_X pattern. Format 71
-			// (RGBA16F) is accepted for size/FindRenderTexture aliasing; pure CPU
-			// upload of 8 BPE tiled samples remains unsupported.
-			EXIT_NOT_IMPLEMENTED(fmt != 56);
+			// BC1 (fmt 133) detiles compressed 4x4 blocks as 8-byte elements.
+			EXIT_NOT_IMPLEMENTED(fmt != 56 && fmt != 133);
 			EXIT_NOT_IMPLEMENTED(levels != 1);
-			const uint32_t bpp          = 4u;
-			const uint32_t pitch_elems  = (pitch != 0u ? static_cast<uint32_t>(pitch) : static_cast<uint32_t>(width));
-			const uint64_t linear_bytes = static_cast<uint64_t>(width) * height * bpp;
+			const bool     bc1          = (fmt == 133u);
+			const uint32_t bpp          = (bc1 ? 8u : 4u);
+			const uint32_t copy_width   = bc1 ? std::max((static_cast<uint32_t>(width) + 3u) / 4u, 1u) : static_cast<uint32_t>(width);
+			const uint32_t copy_height  = bc1 ? std::max((static_cast<uint32_t>(height) + 3u) / 4u, 1u) : static_cast<uint32_t>(height);
+			const uint32_t pitch_texels = (pitch != 0u ? static_cast<uint32_t>(pitch) : static_cast<uint32_t>(width));
+			const uint32_t pitch_elems  = bc1 ? std::max((pitch_texels + 3u) / 4u, 1u) : pitch_texels;
+			const uint64_t linear_bytes = static_cast<uint64_t>(copy_width) * copy_height * bpp;
 			auto*          temp_buf     = new uint8_t[linear_bytes];
-			TileConvertSw64kRxToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), static_cast<uint32_t>(width),
-			                           static_cast<uint32_t>(height), pitch_elems, bpp);
+			TileConvertSw64kRxToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), copy_width, copy_height, pitch_elems, bpp);
 			// Region describes the linear buffer: offset 0, pitch = width.
 			regions[0].offset = 0;
 			regions[0].pitch  = static_cast<uint32_t>(width);

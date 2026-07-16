@@ -2133,7 +2133,9 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 	// packet encoder. Packet layout already stores data in DW5/DW6.
 	EXIT_NOT_IMPLEMENTED(data_sel != 1 && data_sel != 2 && data_sel != 3);
 	EXIT_NOT_IMPLEMENTED(gds_offset != 0);
-	EXIT_NOT_IMPLEMENTED(gds_size != 1);
+	// Immediate data_sel forms do not encode GDS fields. Guests pass gds_size
+	// 0 (unused) or 1 (legacy default); both are packet-equivalent here.
+	EXIT_NOT_IMPLEMENTED(gds_size != 0 && gds_size != 1);
 	EXIT_NOT_IMPLEMENTED(interrupt != 0);
 	EXIT_NOT_IMPLEMENTED(interrupt_ctx_id != 0);
 
@@ -2511,7 +2513,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 	// op 0/1: observed memory-wait forms (op=0 size=0 cmp=3 ref=1 mask=~0 after
 	// ReleaseMem data_sel=1; op=1 was the prior path). Packet encoding is shared.
 	EXIT_NOT_IMPLEMENTED(op != 0 && op != 1);
-	EXIT_NOT_IMPLEMENTED(cache_policy != 0);
+	// cache_policy is a builder-side GPU-cache hint. The normalized R_WAIT_MEM_64
+	// packet has no policy field; host CP polls guest memory the same regardless.
+	// Observed values: 0/1/2 (WriteData-era) and 0x03 on early Gen5 WaitRegMem.
+	EXIT_NOT_IMPLEMENTED(cache_policy > 3);
 
 	buf->DbgDump();
 

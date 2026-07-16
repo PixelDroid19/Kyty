@@ -57,6 +57,7 @@ static void init_names()
 		g_names[IT_INDEX_BUFFER_SIZE]         = "IT_INDEX_BUFFER_SIZE";
 		g_names[IT_DISPATCH_DIRECT]           = "IT_DISPATCH_DIRECT";
 		g_names[IT_DISPATCH_INDIRECT]         = "IT_DISPATCH_INDIRECT";
+		g_names[IT_INDIRECT_BUFFER_END]       = "IT_INDIRECT_BUFFER_END";
 		g_names[IT_SET_PREDICATION]           = "IT_SET_PREDICATION";
 		g_names[IT_COND_EXEC]                 = "IT_COND_EXEC";
 		g_names[IT_DRAW_INDIRECT]             = "IT_DRAW_INDIRECT";
@@ -84,6 +85,7 @@ static void init_names()
 		g_names[IT_EVENT_WRITE_EOS]           = "IT_EVENT_WRITE_EOS";
 		g_names[IT_RELEASE_MEM]               = "IT_RELEASE_MEM";
 		g_names[IT_DMA_DATA]                  = "IT_DMA_DATA";
+		g_names[IT_ONE_REG_WRITE]             = "IT_ONE_REG_WRITE";
 		g_names[IT_ACQUIRE_MEM]               = "IT_ACQUIRE_MEM";
 		g_names[IT_REWIND]                    = "IT_REWIND";
 		g_names[IT_SET_CONFIG_REG]            = "IT_SET_CONFIG_REG";
@@ -97,6 +99,7 @@ static void init_names()
 		g_names[IT_INCREMENT_DE_COUNTER]      = "IT_INCREMENT_DE_COUNTER";
 		g_names[IT_WAIT_ON_CE_COUNTER]        = "IT_WAIT_ON_CE_COUNTER";
 		g_names[IT_WAIT_ON_DE_COUNTER_DIFF]   = "IT_WAIT_ON_DE_COUNTER_DIFF";
+		g_names[IT_GET_LOD_STATS]             = "IT_GET_LOD_STATS";
 		g_names[IT_DISPATCH_DRAW_PREAMBLE]    = "IT_DISPATCH_DRAW_PREAMBLE";
 		g_names[IT_DISPATCH_DRAW]             = "IT_DISPATCH_DRAW";
 
@@ -104,23 +107,51 @@ static void init_names()
 	}
 }
 
-uint32_t Pm4NonType3PacketDwords(uint32_t cmd_id)
+uint32_t Pm4NonType3PacketDwords(uint32_t cmd_id, uint32_t remaining_including_header)
 {
 	const uint32_t pkt_type = cmd_id >> 30u;
 	if (pkt_type == 3u)
 	{
+		if (remaining_including_header != 0u && KYTY_PM4_LEN(cmd_id) > remaining_including_header)
+		{
+			// Gen5: type bits 11 with an impossible COUNT — observed as fixed
+			// 2-dword units interleaved with Type0 before WaitFlipDone.
+			return 2;
+		}
 		return 0; // Type3: caller uses KYTY_PM4_LEN / opcode handlers
 	}
 	if (pkt_type == 2u)
 	{
 		return 1; // Type2 NOP padding
 	}
-	if (pkt_type == 0u)
+	if (pkt_type == 0u || pkt_type == 1u)
 	{
-		// Type0 single-register write (header + 1 body dword).
+		if (cmd_id == 0u)
+		{
+			return 1; // Zero padding
+		}
+		// Type0 and observed Gen5 Type1: header + 1 body dword (COUNT ignored).
 		return 2;
 	}
-	return 0; // Type1 reserved — not a valid skip size
+	return 0; // Reserved / unknown — not a valid skip size
+}
+
+uint32_t Pm4SpecialType3PacketDwords(uint32_t cmd_id)
+{
+	if ((cmd_id >> 30u) != 3u)
+	{
+		return 0;
+	}
+
+	const uint32_t op = (cmd_id >> 8u) & 0xffu;
+	if (op == IT_ONE_REG_WRITE)
+	{
+		// ONE_REG_WRITE stores register selection in header bits instead of
+		// using the normal PKT3 COUNT field as a payload length.
+		return 2;
+	}
+
+	return 0;
 }
 
 void DumpPm4PacketStream(Core::File* file, uint32_t* cmd_buffer, uint32_t start_dw, uint32_t num_dw)

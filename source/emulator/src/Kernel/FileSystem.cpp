@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <climits>
+#include <unordered_map>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -975,6 +976,114 @@ int KYTY_SYSV_ABI KernelMkdir(const char* path, uint16_t mode)
 		return KERNEL_ERROR_ENOENT;
 	}
 
+	return OK;
+}
+
+static uint32_t AprStableFileId(const char* guest_path)
+{
+	// FNV-1a 32-bit over the guest path bytes. Stable across runs; not a firmware
+	// hash — only needs to be unique enough for subsequent APR look-ups by id.
+	uint32_t hash = 2166136261u;
+	if (guest_path != nullptr)
+	{
+		for (const unsigned char* p = reinterpret_cast<const unsigned char*>(guest_path); *p != 0; ++p)
+		{
+			hash ^= *p;
+			hash *= 16777619u;
+		}
+	}
+	if (hash == 0)
+	{
+		hash = 1;
+	}
+	return hash;
+}
+
+static Core::Mutex                       g_apr_mutex;
+static std::unordered_map<uint32_t, String> g_apr_id_to_host;
+
+bool AprTryGetHostPath(uint32_t file_id, String* out_host_path)
+{
+	EXIT_IF(out_host_path == nullptr);
+	Core::LockGuard lock(g_apr_mutex);
+	auto            it = g_apr_id_to_host.find(file_id);
+	if (it == g_apr_id_to_host.end())
+	{
+		return false;
+	}
+	*out_host_path = it->second;
+	return true;
+}
+
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* paths, uint64_t count, uint32_t* ids, uint64_t* sizes)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_mount_points == nullptr);
+
+	printf("\t paths = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(paths));
+	printf("\t count = %" PRIu64 "\n", count);
+	printf("\t ids   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ids));
+	printf("\t sizes = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(sizes));
+
+	if (paths == nullptr || sizes == nullptr || count == 0 || count > 1024)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	for (uint64_t i = 0; i < count; ++i)
+	{
+		const char* guest_path = paths[i];
+		if (guest_path == nullptr)
+		{
+			return KERNEL_ERROR_EFAULT;
+		}
+
+		printf("\t [%llu] path = %s\n", static_cast<unsigned long long>(i), guest_path);
+
+		const String path_s         = String::FromUtf8(guest_path);
+		const auto   real_file_name = g_mount_points->GetRealFilename(path_s);
+		if (!Core::File::IsFileExisting(real_file_name))
+		{
+			printf("\t file not found: %s\n", real_file_name.C_Str());
+			return KERNEL_ERROR_ENOENT;
+		}
+
+		const uint64_t file_size = Core::File::Size(real_file_name);
+		const uint32_t file_id   = AprStableFileId(guest_path);
+		sizes[i]                 = file_size;
+		if (ids != nullptr)
+		{
+			ids[i] = file_id;
+		}
+		{
+			Core::LockGuard lock(g_apr_mutex);
+			g_apr_id_to_host[file_id] = real_file_name;
+		}
+		printf("\t [%llu] id = 0x%08" PRIx32 " size = %" PRIu64 "\n", static_cast<unsigned long long>(i), file_id, file_size);
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelAprSubmitCommandBuffer(void* cmd, uint64_t arg1, void* arg2, uint64_t arg3, void* arg4)
+{
+	PRINT_NAME();
+
+	printf("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+	printf("\t arg1 = 0x%016" PRIx64 "\n", arg1);
+	printf("\t arg2 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg2));
+	printf("\t arg3 = 0x%016" PRIx64 "\n", arg3);
+	printf("\t arg4 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg4));
+
+	if (cmd == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	// Command payloads (ReadFile / WriteAddress / equeue wake) are applied when
+	// the Ampr builder APIs append them. Hardware defers work until this submit;
+	// sync HLE has nothing left to drain.
 	return OK;
 }
 
