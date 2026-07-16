@@ -3538,6 +3538,10 @@ KYTY_CP_OP_PARSER(cp_op_nop)
 		{
 			return cp_op_marker(cp, cmd_id, buffer, dw, num_dw);
 		}
+
+		// GraphicsCbNop emits a complete Type3 NOP whose body has no side
+		// effects. Consume the encoded body so the next packet stays aligned.
+		return Pm4::Pm4Type3NopBodyDwords(cmd_id);
 	}
 
 	auto hw_ctx = g_hw_sh_custom_func[r];

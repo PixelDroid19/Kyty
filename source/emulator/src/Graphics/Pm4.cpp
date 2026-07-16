@@ -155,6 +155,16 @@ uint32_t Pm4SpecialType3PacketDwords(uint32_t cmd_id)
 	return 0;
 }
 
+uint32_t Pm4Type3NopBodyDwords(uint32_t cmd_id)
+{
+	if ((cmd_id >> 30u) != 3u || ((cmd_id >> 8u) & 0xffu) != IT_NOP || KYTY_PM4_R(cmd_id) != R_ZERO)
+	{
+		return 0;
+	}
+
+	return KYTY_PM4_LEN(cmd_id) - 1u;
+}
+
 bool Pm4Gen5OpaquePairPrecedesWaitFlipDone(const uint32_t* stream, uint32_t remaining_including_header)
 {
 	if (stream == nullptr || remaining_including_header < 3u)
