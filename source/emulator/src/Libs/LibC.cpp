@@ -545,6 +545,15 @@ static KYTY_SYSV_ABI float c_sinf(float x) { return ::sinf(x); }
 static KYTY_SYSV_ABI float c_cosf(float x) { return ::cosf(x); }
 // Gen5 libc_v1 tanf — NID ZE6RNL+eLbk (Astro after Posix pthread_detach; float in xmm0).
 static KYTY_SYSV_ABI float c_tanf(float x) { return ::tanf(x); }
+// Gen5 libc_v1 inverse/extra float math (name→NID; import tables use '-' for '/').
+static KYTY_SYSV_ABI float c_atanf(float x) { return ::atanf(x); }
+static KYTY_SYSV_ABI float c_asinf(float x) { return ::asinf(x); }
+static KYTY_SYSV_ABI float c_acosf(float x) { return ::acosf(x); }
+static KYTY_SYSV_ABI float c_atan2f(float y, float x) { return ::atan2f(y, x); }
+static KYTY_SYSV_ABI float c_fmodf(float x, float y) { return ::fmodf(x, y); }
+static KYTY_SYSV_ABI float c_hypotf(float x, float y) { return ::hypotf(x, y); }
+static KYTY_SYSV_ABI float c_truncf(float x) { return ::truncf(x); }
+static KYTY_SYSV_ABI float c_roundf(float x) { return ::roundf(x); }
 static KYTY_SYSV_ABI float c_log10f(float x) { return ::log10f(x); }
 static KYTY_SYSV_ABI float c_logf(float x) { return ::logf(x); }
 static KYTY_SYSV_ABI float c_sqrtf(float x) { return ::sqrtf(x); }
@@ -1071,8 +1080,16 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 libc_v1 float math (Astro after usleep; NIDs from name→NID hash).
 	LIB_FUNC("Q4rRL34CEeE", LibC::c_sinf);
 	LIB_FUNC("-P6FNMzk2Kc", LibC::c_cosf);
-	// Gen5 libc_v1 tanf — ZE6RNL+eLbk after Posix detach on Astro (xmm0 float).
+	// Gen5 libc_v1 float math after Posix detach (name→NID; '/' stored as '-').
 	LIB_FUNC("ZE6RNL+eLbk", LibC::c_tanf);
+	LIB_FUNC("weDug8QD-lE", LibC::c_atanf);
+	LIB_FUNC("88Vv-AzHVj8", LibC::c_fmodf);
+	LIB_FUNC("GZWjF-YIFFk", LibC::c_asinf);
+	LIB_FUNC("QI-x0SL8jhw", LibC::c_acosf);
+	LIB_FUNC("EH-x713A99c", LibC::c_atan2f);
+	LIB_FUNC("iz2shAGFIxc", LibC::c_hypotf);
+	LIB_FUNC("Vo8rvWtZw3g", LibC::c_truncf);
+	LIB_FUNC("DDHG1a6+3q0", LibC::c_roundf);
 	LIB_FUNC("lhpd6Wk6ccs", LibC::c_log10f); // next Unpatched after sinf
 	LIB_FUNC("RQXLbdT2lc4", LibC::c_logf);
 	LIB_FUNC("Q+xU11-h0xQ", LibC::c_sqrtf);
