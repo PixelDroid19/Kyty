@@ -251,4 +251,32 @@ LIB_DEFINE(InitNpEntitlementAccess_1)
 
 } // namespace Kyty::Libs::NpEntitlementAccess
 
+namespace Kyty::Libs::NpManager {
+
+// Gen5 NpManager_v1 — offline-safe account queries for titles that probe NP
+// country before online services. Does not contact PSN.
+LIB_VERSION("NpManager", 1, "NpManager", 1, 1);
+
+// sceNpGetAccountCountryA — NID JT+t00a3TxA. Observed SysV (user_id=1, out*).
+// Country code is a 2-letter lowercase ISO string plus NUL.
+static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
+{
+	PRINT_NAME();
+	if (country == nullptr)
+	{
+		return static_cast<int>(0x80550003u); // SCE_NP_ERROR_INVALID_ARGUMENT-style
+	}
+	country[0] = 'u';
+	country[1] = 's';
+	country[2] = '\0';
+	return OK;
+}
+
+LIB_DEFINE(InitNpManager_1)
+{
+	LIB_FUNC("JT+t00a3TxA", GetAccountCountryA);
+}
+
+} // namespace Kyty::Libs::NpManager
+
 #endif // KYTY_EMU_ENABLED

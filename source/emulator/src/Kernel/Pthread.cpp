@@ -9,6 +9,7 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Timer.h"
 #include "Kyty/Core/Vector.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Libs/Errno.h"
@@ -2508,6 +2509,23 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 		(*thread)->detached    = (*attr)->detached;
 		(*thread)->started     = false;
 		(*thread)->unique_id   = -1;
+
+		// Host pthread_create may memset/setup a guest-provided stack. Guests
+		// often demote a guard page with mprotect(prot=0) first; leaving that
+		// page PROT_NONE makes libc pthread_create SIGSEGV in host memset.
+		// Ensure the configured stack is host-writable for the create path.
+		// Prefer pthread_attr_getstack — getstackaddr alone can miss stacks set
+		// via setstack and is deprecated.
+		void*  stack_addr = nullptr;
+		size_t stack_size = 0;
+		if (pthread_attr_getstack(&(*attr)->p, &stack_addr, &stack_size) == 0 && stack_addr != nullptr && stack_size != 0)
+		{
+			Core::VirtualMemory::Mode old_mode {};
+			(void)Core::VirtualMemory::Protect(reinterpret_cast<uint64_t>(stack_addr), stack_size,
+			                                   Core::VirtualMemory::Mode::ReadWrite, &old_mode);
+			std::fprintf(stderr, "PthreadCreate reprotect stack=0x%016" PRIx64 " size=0x%zx\n",
+			             reinterpret_cast<uint64_t>(stack_addr), stack_size);
+		}
 
 		result = pthread_create(&(*thread)->p, &(*attr)->p, run_thread, *thread);
 	}

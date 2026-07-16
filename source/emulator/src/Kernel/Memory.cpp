@@ -16,6 +16,8 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -576,8 +578,10 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 		case 7: mode = VirtualMemory::Mode::ExecuteReadWrite; break;
 		case 0x32:
 		case 0x33:
+		case 0xf2:
 		case 0xf3:
-			// 0xf3: Gen5 direct-map style GPU+CPU RW used by application-heap create.
+			// 0xf2/0xf3: Gen5 direct-map style GPU+CPU RW (heap / large maps).
+			// 0xf2 observed after Fiber/thread bring-up on Astro (decimal 242).
 			mode     = VirtualMemory::Mode::ReadWrite;
 			gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
 			break;
@@ -859,8 +863,10 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		case 0x07: mode = VirtualMemory::Mode::ExecuteReadWrite; break;
 		case 0x32:
 		case 0x33:
+		case 0xf2:
 		case 0xf3:
-			// 0xf3: Gen5 direct-map style GPU+CPU RW used by application-heap create.
+			// 0xf2/0xf3: Gen5 direct-map style GPU+CPU RW (heap / large maps).
+			// 0xf2 observed after Fiber/thread bring-up on Astro (decimal 242).
 			mode     = VirtualMemory::Mode::ReadWrite;
 			gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
 			break;
@@ -941,6 +947,16 @@ int KYTY_SYSV_ABI KernelSetVirtualRangeName(const void* addr, uint64_t len, cons
 	printf("\t addr = 0x%016" PRIx64 " len = 0x%016" PRIx64 " name = %s\n", reinterpret_cast<uint64_t>(addr), len,
 	       name != nullptr ? name : "(null)");
 	// Name tags are diagnostic for guests; host maps are not renamed.
+	(void)addr;
+	(void)len;
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelClearVirtualRangeName(const void* addr, uint64_t len)
+{
+	PRINT_NAME();
+	printf("\t addr = 0x%016" PRIx64 " len = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(addr), len);
+	// Pair of SetVirtualRangeName: clearing a name is success when maps exist.
 	(void)addr;
 	(void)len;
 	return OK;
@@ -1076,8 +1092,13 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 	// allocation path: 0x40/0x80/0xC0 select AMPR read, write, or read-write,
 	// while 0x02 keeps the CPU mapping writable. GpuMemoryMode is Kyty's
 	// normalized access-direction representation for the same range tracking.
+	// prot=0 is a full NoAccess demotion (observed on Astro after Posix sems).
 	switch (prot)
 	{
+		case 0x0:
+			*mode     = VirtualMemory::Mode::NoAccess;
+			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			return true;
 		case 0x11:
 			*mode     = VirtualMemory::Mode::Read;
 			*gpu_mode = Graphics::GpuMemoryMode::Read;
@@ -1110,6 +1131,16 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 
 	printf("\t addr = 0x%016" PRIx64 "\n", vaddr);
 	printf("\t len  = 0x%016" PRIx64 "\n", static_cast<uint64_t>(len));
+	printf("\t prot = 0x%x\n", prot);
+
+	// Always log early mprotect calls even when PRINT_NAME is Silent — needed
+	// to correlate NoAccess demotions with later FATAL-ACCESS-VIOLATION sites.
+	static std::atomic<uint32_t> mprotect_log_count {0};
+	if (mprotect_log_count.fetch_add(1) < 32u)
+	{
+		std::fprintf(stderr, "KernelMprotect addr=0x%016" PRIx64 " len=0x%016" PRIx64 " prot=0x%x\n", vaddr,
+		             static_cast<uint64_t>(len), prot);
+	}
 
 	VirtualMemory::Mode     mode     = VirtualMemory::Mode::NoAccess;
 	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
@@ -1117,6 +1148,11 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 	if (!KernelDecodeMprotectProt(prot, &mode, &gpu_mode))
 	{
 		EXIT("unknown prot: 0x%x (%d)\n", prot, prot);
+	}
+
+	if (len == 0)
+	{
+		return OK;
 	}
 
 	VirtualMemory::Mode old_mode {};

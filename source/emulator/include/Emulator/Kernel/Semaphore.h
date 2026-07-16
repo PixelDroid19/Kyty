@@ -23,6 +23,18 @@ int KYTY_SYSV_ABI KernelCancelSema(KernelSema sem, int count, int* threads);
 
 } // namespace Kyty::Libs::LibKernel::Semaphore
 
+namespace Kyty::Libs::Posix {
+
+// Gen5 Posix_v1 semaphore exports on libkernel.
+int KYTY_SYSV_ABI sem_init(void* sem, int pshared, unsigned int value);
+int KYTY_SYSV_ABI sem_destroy(void* sem);
+int KYTY_SYSV_ABI sem_wait(void* sem);
+int KYTY_SYSV_ABI sem_trywait(void* sem);
+int KYTY_SYSV_ABI sem_post(void* sem);
+int KYTY_SYSV_ABI sem_getvalue(void* sem, int* sval);
+
+} // namespace Kyty::Libs::Posix
+
 #endif // KYTY_EMU_ENABLED
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_KERNEL_SEMAPHORE_H_ */

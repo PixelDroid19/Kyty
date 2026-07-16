@@ -3,6 +3,7 @@
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Memory.h"
+#include "Emulator/Kernel/Semaphore.h"
 #include "Emulator/Config.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -173,6 +174,34 @@ TEST(EmulatorKernelProcess, ResolvesGen5PthreadSpecificNids)
 	EXPECT_TRUE(resolve(u"+BzXYkqYeLE"));
 	EXPECT_TRUE(resolve(u"eoht7mQOCmo"));
 	EXPECT_TRUE(resolve(u"rVjRvHJ0X6c"));
+	EXPECT_TRUE(resolve(u"XD3mDeybCnk"));
+	EXPECT_TRUE(resolve(u"mkgXxsoxWHg"));
+}
+
+TEST(EmulatorKernelProcess, ClearVirtualRangeNameSucceeds)
+{
+	EXPECT_EQ(LibKernel::Memory::KernelClearVirtualRangeName(nullptr, 0), OK);
+}
+
+// Gen5 Posix_v1 semaphore: init/post/wait/destroy round-trip on guest layout.
+TEST(EmulatorKernelProcess, PosixSemInitPostWaitDestroy)
+{
+	EnsureKernelProcessSubsystems();
+	struct
+	{
+		uint16_t magic;
+		uint16_t nameid;
+		uint32_t has_waiters;
+		uint32_t count;
+		uint32_t flags;
+	} guest {};
+	static_assert(sizeof(guest) == 16);
+
+	EXPECT_EQ(Posix::sem_init(&guest, 0, 0), OK);
+	EXPECT_EQ(Posix::sem_post(&guest), OK);
+	EXPECT_EQ(Posix::sem_wait(&guest), OK);
+	EXPECT_EQ(Posix::sem_destroy(&guest), OK);
+	EXPECT_EQ(guest.magic, 0);
 }
 
 UT_END();
