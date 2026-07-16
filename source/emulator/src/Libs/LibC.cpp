@@ -975,6 +975,9 @@ LIB_DEFINE(InitLibC_1)
 
 	// printf / scanf family
 	LIB_FUNC("eLdDw6l0-bU", LibC::c_snprintf);
+	// Gen5 libc_v1 snprintf alias — NID NC4MSB+BRQg after SaveData/NpUDS on Astro
+	// (SysV buf, n=0x100, format*, first int arg … matches snprintf).
+	LIB_FUNC("NC4MSB+BRQg", LibC::c_snprintf);
 	// Gen5 vsprintf_s — NID +qitMEbkSWk (hard-abort after fgets on Astro).
 	LIB_FUNC("+qitMEbkSWk", LibC::c_vsprintf_s);
 	LIB_FUNC("Q2V+iqvjgC0", LibC::c_vsnprintf); // vsnprintf (Gen5 libc_v1)

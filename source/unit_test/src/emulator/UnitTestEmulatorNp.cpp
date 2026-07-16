@@ -55,6 +55,32 @@ TEST(EmulatorNp, OwnsLocalUniversalDataEvents)
 	EXPECT_EQ(DestroyEvent(event), 0);
 }
 
+// Astro after PlayGo: ObjectSetArray with null value allocates array via value_ptr.
+TEST(EmulatorNp, ObjectSetArrayAllocatesWhenValueNull)
+{
+	using namespace NpUniversalDataSystem;
+
+	Event*               event      = nullptr;
+	EventPropertyObject* properties = nullptr;
+	ASSERT_EQ(CreateEvent("analytics.boot", 0, &event, &properties), 0);
+
+	EventPropertyArray* array = nullptr;
+	EXPECT_LT(EventPropertyObjectSetArray(nullptr, "items", nullptr, &array), 0);
+	EXPECT_LT(EventPropertyObjectSetArray(properties, nullptr, nullptr, &array), 0);
+	EXPECT_EQ(EventPropertyObjectSetArray(properties, "items", nullptr, &array), 0);
+	ASSERT_NE(array, nullptr);
+	EXPECT_EQ(EventPropertyArraySetString(array, "entry"), 0);
+	EXPECT_EQ(EventPropertyArraySetInt32(array, 1), 0);
+	EXPECT_EQ(EventPropertyArraySetUInt64(array, 42ull), 0);
+	EXPECT_EQ(DestroyEventPropertyArray(array), 0);
+	EXPECT_EQ(DestroyEvent(event), 0);
+
+	EventPropertyArray* created = nullptr;
+	EXPECT_EQ(CreateEventPropertyArray(&created), 0);
+	ASSERT_NE(created, nullptr);
+	EXPECT_EQ(DestroyEventPropertyArray(created), 0);
+}
+
 TEST(EmulatorNp, InitializesGameIntentIdempotently)
 {
 	EXPECT_EQ(NpGameIntent::Initialize(), 0);
