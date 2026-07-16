@@ -166,11 +166,15 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 		return Gen5SampleBacking::ExactRenderTarget;
 	}
 
-	// The guest-memory tile-27 uploader currently has evidenced paths for
-	// RGBA8 texels (fmt 56) and BC1 blocks (fmt 133). Other formats require a
-	// live RT/StorageTexture alias until their byte-width-specific detile path
-	// is implemented.
+	// Guest-memory upload paths:
+	// - tile 27 (kRenderTarget): RGBA8 (56) and BC1 (133)
+	// - tile 9  (kStandard64KB): RGBA8 (56) only
+	// Other combinations need a live RT/StorageTexture alias.
 	if (tile == 27u && fmt != 56u && fmt != 133u)
+	{
+		return Gen5SampleBacking::Unsupported;
+	}
+	if (tile == 9u && fmt != 56u)
 	{
 		return Gen5SampleBacking::Unsupported;
 	}

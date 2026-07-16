@@ -4604,11 +4604,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (gen5)
 		{
 			// Observed sample textures (UfmtGFX10):
-			// - Tile 0/27, format 56 = 8_8_8_8_UNORM (RGBA8)
+			// - Tile 0/9/27, format 56 = 8_8_8_8_UNORM (RGBA8)
 			// - Tile 0, format 14 = 8_8_UNORM (RG8), 2048x4096 linear atlas
 			// - Tile 27, format 71 = 16_16_16_16_FLOAT (RGBA16F), 642x362 alias of RT
 			// - Tile 27, format 133 = BC1 RGBA UNORM, 3840x2160 title texture
-			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 27);
+			// - Tile 9 = kStandard64KB static atlases (RGBA8 detile path)
+			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 27 && r.TileMode() != 9);
 			if (r.Format() != 56 && r.Format() != 14 && r.Format() != 71 && r.Format() != 133)
 			{
 				EXIT("unsupported Gen5 sampled texture format: fmt=%u tile=%u width=%u height=%u base=0x%012" PRIx64 " type=%u\n",
@@ -4666,10 +4667,22 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		auto          tile       = r.TileMode();
 		// Gen5 linear rows are 256-byte aligned (e.g. RGBA8 pitch = align(width, 64)).
 		// Using width alone mis-unpacks non-pow2 logos into horizontal bands.
-		// Mode 27 (SW_64KB_R_X) uses block geometry; Pitch() is 0 in the observed
-		// descriptors and size is derived from width/height + 64 KiB blocks.
-		auto pitch = (!gen5 ? r.Pitch() + 1
-		                    : (tile == 27 ? width : ShaderGen5LinearTexturePitch(width, r.Format())));
+		// Mode 27 uses block geometry with Pitch() often 0 (size from blocks).
+		// Mode 9 (kStandard64KB) pitches to the 128-element block width for 4 BPE.
+		uint32_t pitch = 0;
+		if (!gen5)
+		{
+			pitch = r.Pitch() + 1;
+		} else if (tile == 27)
+		{
+			pitch = width;
+		} else if (tile == 9)
+		{
+			pitch = (width + 127u) & ~127u;
+		} else
+		{
+			pitch = ShaderGen5LinearTexturePitch(width, r.Format());
+		}
 		auto          base_level = r.BaseLevel();
 		auto          levels     = r.LastLevel() + 1;
 		auto          dfmt       = (gen5 ? 0 : r.Dfmt());

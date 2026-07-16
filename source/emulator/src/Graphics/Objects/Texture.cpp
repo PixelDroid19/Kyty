@@ -198,9 +198,9 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 
 	if (fmt != 0)
 	{
-		// Gen5: tile 0 = linear; tile 27 (0x1b) = SW_64KB_R_X. Other modes
-		// remain unsupported until their layout is evidenced and detiled.
-		EXIT_NOT_IMPLEMENTED(tile != 0 && tile != 27);
+		// Gen5: tile 0 = linear; 27 = kRenderTarget; 9 = kStandard64KB.
+		// Other modes remain unsupported until their layout is evidenced.
+		EXIT_NOT_IMPLEMENTED(tile != 0 && tile != 27 && tile != 9);
 
 		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, nullptr);
 	} else
@@ -263,15 +263,19 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		if (tile == 0)
 		{
 			UtilFillImage(ctx, vk_obj, reinterpret_cast<void*>(*vaddr), *size, regions, static_cast<uint64_t>(vk_layout));
-		} else if (tile == 27)
+		} else if (tile == 27 || tile == 9)
 		{
-			// SW_64KB_R_X sample texture: detile into tightly packed linear rows
-			// then upload. Render-target aliases still prefer FindRenderTexture
+			// Tiled sample texture: detile into tightly packed linear rows then
+			// upload. Render-target aliases still prefer FindRenderTexture
 			// before create; this path covers pure CPU-backed sample textures.
-			// BC1 (fmt 133) detiles compressed 4x4 blocks as 8-byte elements.
+			// tile 27 = kRenderTarget layout; tile 9 = kStandard64KB (RGBA8).
+			// BC1 (fmt 133) detiles compressed 4x4 blocks as 8-byte elements on
+			// tile 27 only.
+			EXIT_NOT_IMPLEMENTED(tile == 9 && fmt != 56);
 			EXIT_NOT_IMPLEMENTED(fmt != 56 && fmt != 133);
 			EXIT_NOT_IMPLEMENTED(levels != 1);
 			const bool     bc1          = (fmt == 133u);
+			EXIT_NOT_IMPLEMENTED(bc1 && tile != 27);
 			const uint32_t bpp          = (bc1 ? 8u : 4u);
 			const uint32_t copy_width   = bc1 ? std::max((static_cast<uint32_t>(width) + 3u) / 4u, 1u) : static_cast<uint32_t>(width);
 			const uint32_t copy_height  = bc1 ? std::max((static_cast<uint32_t>(height) + 3u) / 4u, 1u) : static_cast<uint32_t>(height);
@@ -279,7 +283,13 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			const uint32_t pitch_elems  = bc1 ? std::max((pitch_texels + 3u) / 4u, 1u) : pitch_texels;
 			const uint64_t linear_bytes = static_cast<uint64_t>(copy_width) * copy_height * bpp;
 			auto*          temp_buf     = new uint8_t[linear_bytes];
-			TileConvertSw64kRxToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), copy_width, copy_height, pitch_elems, bpp);
+			if (tile == 9)
+			{
+				TileConvertStandard64KB32ToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), copy_width, copy_height, pitch_elems);
+			} else
+			{
+				TileConvertSw64kRxToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), copy_width, copy_height, pitch_elems, bpp);
+			}
 			// Region describes the linear buffer: offset 0, pitch = width.
 			regions[0].offset = 0;
 			regions[0].pitch  = static_cast<uint32_t>(width);
