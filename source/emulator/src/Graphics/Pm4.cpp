@@ -154,6 +154,27 @@ uint32_t Pm4SpecialType3PacketDwords(uint32_t cmd_id)
 	return 0;
 }
 
+bool Pm4Gen5OpaquePairPrecedesWaitFlipDone(const uint32_t* stream, uint32_t remaining_including_header)
+{
+	if (stream == nullptr || remaining_including_header < 3u)
+	{
+		return false;
+	}
+
+	constexpr uint32_t MAX_OPAQUE_PAIRS = 16;
+	const uint32_t max_offset = std::min(remaining_including_header - 1u, MAX_OPAQUE_PAIRS * 2u);
+	for (uint32_t offset = 2u; offset <= max_offset; offset += 2u)
+	{
+		const uint32_t cmd_id = stream[offset];
+		if ((cmd_id >> 30u) == 3u && ((cmd_id >> 8u) & 0xffu) == IT_NOP && KYTY_PM4_R(cmd_id) == R_WAIT_FLIP_DONE &&
+		    KYTY_PM4_LEN(cmd_id) <= remaining_including_header - offset)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 void DumpPm4PacketStream(Core::File* file, uint32_t* cmd_buffer, uint32_t start_dw, uint32_t num_dw)
 {
 	init_names();

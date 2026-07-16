@@ -1187,6 +1187,19 @@ TEST(EmulatorGraphicsPackets, WalksGen5OneRegWriteBeforeWaitFlipDone)
 	EXPECT_EQ(stream[off], 0xc0051018u);
 }
 
+TEST(EmulatorGraphicsPackets, RecognizesOpaqueType3PairOnlyBeforeWaitFlipDone)
+{
+	const uint32_t stream[] = {
+	    0xc3b50072u, 0xa6b5a527u, 0x00000014u, 0x00000000u, 0xc0051018u, 0x00000000u,
+	    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+	};
+	const uint32_t no_wait[] = {0xc3b50072u, 0xa6b5a527u, 0x00000014u, 0x00000000u};
+
+	EXPECT_TRUE(Pm4::Pm4Gen5OpaquePairPrecedesWaitFlipDone(stream, static_cast<uint32_t>(std::size(stream))));
+	EXPECT_FALSE(Pm4::Pm4Gen5OpaquePairPrecedesWaitFlipDone(no_wait, static_cast<uint32_t>(std::size(no_wait))));
+	EXPECT_FALSE(Pm4::Pm4Gen5OpaquePairPrecedesWaitFlipDone(nullptr, 0u));
+}
+
 TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 {
 	// Layout matches Gen5::CommandBuffer in Graphics.cpp (non-virtual methods).

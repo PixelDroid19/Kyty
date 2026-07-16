@@ -1218,6 +1218,14 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 
 		if (pfunc == nullptr)
 		{
+			const auto* packet_start = cmd - 1;
+			if (Config::IsNextGen() && Pm4::Pm4Gen5OpaquePairPrecedesWaitFlipDone(packet_start, remaining_including_header))
+			{
+				EXIT_NOT_IMPLEMENTED(dw < 1);
+				cmd += 1;
+				dw -= 1;
+				continue;
+			}
 			const uint32_t at = num_dw - dw - 1u;
 			std::fprintf(stderr, "unknown op at dw=0x%05" PRIx32 " cmd_id=0x%08" PRIx32 " num_dw=0x%05" PRIx32 "\n", at, cmd_id,
 			             num_dw);
