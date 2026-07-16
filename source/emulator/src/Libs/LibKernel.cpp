@@ -618,6 +618,12 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	// Gen5 APR path resolution / submit / wait (libkernel APR family).
 	LIB_FUNC("gEpBkcwxUjw", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizes);
 	LIB_FUNC("WT-5NKy42fw", FileSystem::KernelAprResolveFilepathsToIds);
+	LIB_FUNC("i3HWvW35jao", FileSystem::KernelAprResolveFilepathsWithPrefixToIds);
+	LIB_FUNC("w5fcCG+t31g", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes);
+	LIB_FUNC("eYAh2vlCY-U", FileSystem::KernelAprResolveFilepathsToIdsForEach);
+	LIB_FUNC("QzB4O+bJQyA", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizesForEach);
+	LIB_FUNC("VB-BtuIW8Xc", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsForEach);
+	LIB_FUNC("C+Khtbbx2g8", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach);
 	LIB_FUNC("ApkYaHb8Sek", FileSystem::KernelAprGetFileStat);
 	LIB_FUNC("WvEu7yl3Ivg", FileSystem::KernelAprGetFileSize);
 	LIB_FUNC("eE4Szl8sil8", FileSystem::KernelAprSubmitCommandBuffer);

@@ -115,4 +115,21 @@ TEST(EmulatorKernelProcess, PthreadMutexTimedlockRejectsNull)
 	EXPECT_EQ(LibKernel::PthreadMutexTimedlock(nullptr, 1000), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
+// ForEach with results[] continues after per-path errors and returns success count.
+TEST(EmulatorKernelProcess, AprResolveForEachReportsPerPathResults)
+{
+	EnsureKernelProcessSubsystems();
+
+	const char* paths[2] = {nullptr, nullptr};
+	uint32_t    ids[2]   = {0, 0};
+	int32_t     results[2] = {0, 0};
+	// Null path list entry → EFAULT per entry; with results[] returns 0 successes.
+	const int rc = LibKernel::FileSystem::KernelAprResolveFilepathsToIdsForEach(paths, 2, ids, results);
+	EXPECT_EQ(rc, 0);
+	EXPECT_EQ(results[0], LibKernel::KERNEL_ERROR_EFAULT);
+	EXPECT_EQ(results[1], LibKernel::KERNEL_ERROR_EFAULT);
+	EXPECT_EQ(ids[0], 0xffffffffu);
+	EXPECT_EQ(ids[1], 0xffffffffu);
+}
+
 UT_END();
