@@ -50,6 +50,8 @@ LIB_DEFINE(InitShare_1);
 LIB_DEFINE(InitAmpr_1);
 LIB_DEFINE(InitFiber_1);
 LIB_DEFINE(InitRudp_1);
+LIB_DEFINE(InitNpCppWebApi_1);
+LIB_DEFINE(InitJson2_1);
 
 bool Init(const String& id, Loader::SymbolDatabase* s)
 {
@@ -87,6 +89,8 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libAmpr_1", InitAmpr_1);
 	LIB_CHECK(U"libFiber_1", InitFiber_1);
 	LIB_CHECK(U"libRudp_1", InitRudp_1);
+	LIB_CHECK(U"libNpCppWebApi_1", InitNpCppWebApi_1);
+	LIB_CHECK(U"libJson2_1", InitJson2_1);
 
 	return false;
 }
@@ -123,6 +127,8 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(InitAmpr_1);
 	LIB_LOAD(InitFiber_1);
 	LIB_LOAD(InitRudp_1);
+	LIB_LOAD(InitNpCppWebApi_1);
+	LIB_LOAD(InitJson2_1);
 }
 
 } // namespace Kyty::Libs

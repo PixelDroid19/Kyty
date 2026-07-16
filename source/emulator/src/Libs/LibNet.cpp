@@ -1,6 +1,7 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Network.h"
@@ -213,6 +214,55 @@ LIB_DEFINE(InitNet_1_NpWebApi)
 
 } // namespace LibNpWebApi
 
+namespace LibNpWebApi2 {
+
+LIB_VERSION("NpWebApi2", 1, "NpWebApi2", 1, 1);
+
+// Gen5 sceNpWebApi2Initialize (NID +o9816YQhqQ). Returns a positive library
+// context id; no real NP traffic yet.
+static int g_npwebapi2_next = 1;
+
+static int KYTY_SYSV_ABI NpWebApi2Initialize(int lib_http_ctx_id, size_t pool_size)
+{
+	PRINT_NAME();
+	printf("\t lib_http_ctx_id = %d\n", lib_http_ctx_id);
+	printf("\t pool_size       = %" PRIu64 "\n", static_cast<uint64_t>(pool_size));
+	return g_npwebapi2_next++;
+}
+
+static int KYTY_SYSV_ABI NpWebApi2Terminate(int lib_ctx_id)
+{
+	PRINT_NAME();
+	printf("\t lib_ctx_id = %d\n", lib_ctx_id);
+	return OK;
+}
+
+static int KYTY_SYSV_ABI NpWebApi2CreateUserContext(int lib_ctx_id, int user_id)
+{
+	PRINT_NAME();
+	printf("\t lib_ctx_id = %d\n", lib_ctx_id);
+	printf("\t user_id    = %d\n", user_id);
+	static int next = 1;
+	return next++;
+}
+
+static int KYTY_SYSV_ABI NpWebApi2DeleteUserContext(int user_ctx_id)
+{
+	PRINT_NAME();
+	printf("\t user_ctx_id = %d\n", user_ctx_id);
+	return OK;
+}
+
+LIB_DEFINE(InitNet_1_NpWebApi2)
+{
+	LIB_FUNC("+o9816YQhqQ", LibNpWebApi2::NpWebApi2Initialize);
+	LIB_FUNC("bEvXpcEk200", LibNpWebApi2::NpWebApi2Terminate);
+	LIB_FUNC("sk54bi6FtYM", LibNpWebApi2::NpWebApi2CreateUserContext);
+	LIB_FUNC("9X9+cneTGUU", LibNpWebApi2::NpWebApi2DeleteUserContext);
+}
+
+} // namespace LibNpWebApi2
+
 namespace LibHttp2 {
 
 LIB_VERSION("Http2", 1, "Http2", 1, 1);
@@ -248,6 +298,7 @@ LIB_DEFINE(InitNet_1)
 	LibNpManagerForToolkit::InitNet_1_NpManagerForToolkit(s);
 	LibNpTrophy::InitNet_1_NpTrophy(s);
 	LibNpWebApi::InitNet_1_NpWebApi(s);
+	LibNpWebApi2::InitNet_1_NpWebApi2(s);
 }
 
 } // namespace Kyty::Libs
