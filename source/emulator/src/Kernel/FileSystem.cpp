@@ -981,6 +981,27 @@ int KYTY_SYSV_ABI KernelMkdir(const char* path, uint16_t mode)
 	return OK;
 }
 
+int KYTY_SYSV_ABI KernelRmdir(const char* path)
+{
+	PRINT_NAME();
+	EXIT_IF(g_mount_points == nullptr);
+	if (path == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	printf("\t path = %s\n", path);
+	const String real_name = g_mount_points->GetRealDirectory(String::FromUtf8(path));
+	if (!Core::File::IsDirectoryExisting(real_name))
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	if (!Core::File::DeleteDirectory(real_name))
+	{
+		return KERNEL_ERROR_EIO;
+	}
+	return OK;
+}
+
 static uint32_t AprStableFileId(const char* guest_path)
 {
 	// FNV-1a 32-bit over the guest path bytes. Stable across runs; not a firmware

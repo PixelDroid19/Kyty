@@ -925,6 +925,26 @@ int KYTY_SYSV_ABI KernelMapNamedDirectMemory(void** addr, size_t len, int prot, 
 	return KernelMapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment);
 }
 
+int KYTY_SYSV_ABI KernelMapDirectMemory2(void** addr, size_t len, int type, int prot, int flags, int64_t direct_memory_start,
+                                         size_t alignment)
+{
+	PRINT_NAME();
+	printf("\t type = %d\n", type);
+	// Type is guest memory-class metadata; mapping rights come from prot/flags.
+	return KernelMapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment);
+}
+
+int KYTY_SYSV_ABI KernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name)
+{
+	PRINT_NAME();
+	printf("\t addr = 0x%016" PRIx64 " len = 0x%016" PRIx64 " name = %s\n", reinterpret_cast<uint64_t>(addr), len,
+	       name != nullptr ? name : "(null)");
+	// Name tags are diagnostic for guests; host maps are not renamed.
+	(void)addr;
+	(void)len;
+	return OK;
+}
+
 int KYTY_SYSV_ABI KernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot)
 {
 	PRINT_NAME();
@@ -974,6 +994,24 @@ int KYTY_SYSV_ABI KernelAvailableFlexibleMemorySize(size_t* size)
 
 	printf("\t *size = 0x%016" PRIx64 "\n", *size);
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelConfiguredFlexibleMemorySize(uint64_t* size)
+{
+	PRINT_NAME();
+	if (size == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	size_t available = 0;
+	const int rc     = KernelAvailableFlexibleMemorySize(&available);
+	if (rc != OK)
+	{
+		return rc;
+	}
+	*size = available;
+	printf("\t *size = 0x%016" PRIx64 "\n", *size);
 	return OK;
 }
 

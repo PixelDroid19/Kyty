@@ -2,6 +2,7 @@
 #include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/FileSystem.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Config.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
@@ -130,6 +131,13 @@ TEST(EmulatorKernelProcess, AprResolveForEachReportsPerPathResults)
 	EXPECT_EQ(results[1], LibKernel::KERNEL_ERROR_EFAULT);
 	EXPECT_EQ(ids[0], 0xffffffffu);
 	EXPECT_EQ(ids[1], 0xffffffffu);
+}
+
+// Gen5 memory helpers: null size rejects; range name is success no-op.
+TEST(EmulatorKernelProcess, ConfiguredFlexibleAndRangeNameBoundaries)
+{
+	EXPECT_EQ(LibKernel::Memory::KernelConfiguredFlexibleMemorySize(nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(LibKernel::Memory::KernelSetVirtualRangeName(nullptr, 0, "test"), OK);
 }
 
 UT_END();

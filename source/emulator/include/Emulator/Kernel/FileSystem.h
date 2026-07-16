@@ -54,6 +54,7 @@ int KYTY_SYSV_ABI     KernelUnlink(const char* path);
 int KYTY_SYSV_ABI     KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep);
 int KYTY_SYSV_ABI     KernelGetdents(int fd, char* buf, int nbytes);
 int KYTY_SYSV_ABI     KernelMkdir(const char* path, uint16_t mode);
+int KYTY_SYSV_ABI     KernelRmdir(const char* path);
 // sceKernelAprResolveFilepathsToIdsAndFileSizes: paths[count] → ids[count] (u32, optional)
 // and sizes[count] (u64, optional). File ids are stable host-side hashes of the guest path.
 int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* paths, uint64_t count, uint32_t* ids,
