@@ -512,6 +512,15 @@ static KYTY_SYSV_ABI int c_isnanf(float x)
 {
 	return std::isnan(x) ? 1 : 0;
 }
+// Gen5 libc_v1 sinf — NID Q4rRL34CEeE (Astro after usleep).
+static KYTY_SYSV_ABI float c_sinf(float x) { return ::sinf(x); }
+static KYTY_SYSV_ABI float c_cosf(float x) { return ::cosf(x); }
+static KYTY_SYSV_ABI float c_log10f(float x) { return ::log10f(x); }
+static KYTY_SYSV_ABI float c_logf(float x) { return ::logf(x); }
+static KYTY_SYSV_ABI float c_sqrtf(float x) { return ::sqrtf(x); }
+static KYTY_SYSV_ABI float c_fabsf(float x) { return ::fabsf(x); }
+static KYTY_SYSV_ABI float c_floorf(float x) { return ::floorf(x); }
+static KYTY_SYSV_ABI float c_ceilf(float x) { return ::ceilf(x); }
 static KYTY_SYSV_ABI float  c_log2f(float x) { return ::log2f(x); }
 static KYTY_SYSV_ABI float  c_exp2f(float x) { return ::exp2f(x); }
 static KYTY_SYSV_ABI float  c_expf(float x) { return ::expf(x); }
@@ -1024,6 +1033,15 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("1D0H2KNjshE", LibC::c_powf);
 	// Gen5 libc_v1 __isnanf — lA94ZgT+vMM after Posix pthread_self on Astro.
 	LIB_FUNC("lA94ZgT+vMM", LibC::c_isnanf);
+	// Gen5 libc_v1 float math (Astro after usleep; NIDs from name→NID hash).
+	LIB_FUNC("Q4rRL34CEeE", LibC::c_sinf);
+	LIB_FUNC("-P6FNMzk2Kc", LibC::c_cosf);
+	LIB_FUNC("lhpd6Wk6ccs", LibC::c_log10f); // next Unpatched after sinf
+	LIB_FUNC("RQXLbdT2lc4", LibC::c_logf);
+	LIB_FUNC("Q+xU11-h0xQ", LibC::c_sqrtf);
+	LIB_FUNC("fmT2cjPoWBs", LibC::c_fabsf);
+	LIB_FUNC("mKhVDmYciWA", LibC::c_floorf);
+	LIB_FUNC("GAUuLKGhsCw", LibC::c_ceilf);
 	LIB_FUNC("hsi9drzHR2k", LibC::c_log2f);
 	LIB_FUNC("wuAQt-j+p4o", LibC::c_exp2f);
 	LIB_FUNC("8zsu04XNsZ4", LibC::c_expf);
