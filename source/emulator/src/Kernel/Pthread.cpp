@@ -429,6 +429,26 @@ static int pthread_rwlock_timedwrlock(pthread_rwlock_t* lock, const timespec* t)
 {
 	return rwlock_timedlock_poll(lock, t, true);
 }
+
+static int mutex_timedlock_poll(pthread_mutex_t* mutex, const timespec* t)
+{
+	uint64_t timeout_us = static_cast<uint64_t>(t->tv_sec) * 1000000u + static_cast<uint64_t>(t->tv_nsec) / 1000u;
+	uint64_t waited_us  = 0;
+	for (;;)
+	{
+		int result = pthread_mutex_trylock(mutex);
+		if (result != EBUSY)
+		{
+			return result;
+		}
+		if (waited_us >= timeout_us)
+		{
+			return ETIMEDOUT;
+		}
+		usleep(100);
+		waited_us += 100;
+	}
+}
 #endif
 
 static void sec_to_timespec(KernelTimespec* ts, double sec)
@@ -949,7 +969,11 @@ int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec
 	timespec t {};
 	usec_to_timespec(&t, usec);
 
+#ifdef __APPLE__
+	const int result = mutex_timedlock_poll(&(*mutex)->p, &t);
+#else
 	const int result = pthread_mutex_timedlock(&(*mutex)->p, &t);
+#endif
 	switch (result)
 	{
 		case 0: return OK;
