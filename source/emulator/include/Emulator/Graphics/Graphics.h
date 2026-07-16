@@ -15,6 +15,13 @@ struct Shader;
 struct ShaderRegister;
 struct ShaderSemantic;
 
+// Gen5 sce::Agc size/alignment result for fused shader scratch.
+struct SizeAlign
+{
+	uint64_t m_size  = 0;
+	size_t   m_align = 0;
+};
+
 KYTY_SUBSYSTEM_DEFINE(Graphics);
 
 void GraphicsDbgDumpDcb(const char* type, uint32_t num_dw, uint32_t* cmd_buffer);
@@ -80,6 +87,10 @@ int KYTY_SYSV_ABI   GraphicsInit(uint32_t* state, uint32_t ver);
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2(uint32_t ver);
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2Internal(uint32_t ver);
 int KYTY_SYSV_ABI   GraphicsCreateShader(Shader** dst, void* header, const volatile void* code);
+// Fuse GS/HS front+back halves (scratch holds copied SH registers for the result).
+int KYTY_SYSV_ABI   GraphicsUnknownGetFusedShaderSize(SizeAlign* dst, const Shader* front, const Shader* back);
+int KYTY_SYSV_ABI   GraphicsUnknownFuseShaderHalves(Shader* fused_result, const Shader* front, const Shader* back,
+                                                    void* scratch_mem);
 int KYTY_SYSV_ABI   GraphicsSetCxRegIndirectPatchSetAddress(uint32_t* cmd, const volatile ShaderRegister* regs);
 int KYTY_SYSV_ABI   GraphicsSetShRegIndirectPatchSetAddress(uint32_t* cmd, const volatile ShaderRegister* regs);
 int KYTY_SYSV_ABI   GraphicsSetUcRegIndirectPatchSetAddress(uint32_t* cmd, const volatile ShaderRegister* regs);
