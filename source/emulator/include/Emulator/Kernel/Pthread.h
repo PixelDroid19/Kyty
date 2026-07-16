@@ -216,6 +216,8 @@ uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounterFrequency();
 namespace Posix {
 
 int KYTY_SYSV_ABI   getpid();
+// Gen5 Posix_v1 pthread_self — NID EotR8a3ASf4 (Astro after AudioOut2 residual).
+LibKernel::Pthread KYTY_SYSV_ABI pthread_self();
 int KYTY_SYSV_ABI   pthread_create(LibKernel::Pthread* thread, const LibKernel::PthreadAttr* attr, LibKernel::pthread_entry_func_t entry,
                                    void* arg);
 int KYTY_SYSV_ABI   pthread_join(LibKernel::Pthread thread, void** value);
