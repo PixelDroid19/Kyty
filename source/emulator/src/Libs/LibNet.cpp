@@ -5,6 +5,9 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Network.h"
 
+#include <cinttypes>
+#include <cstddef>
+
 #ifdef KYTY_EMU_ENABLED
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
@@ -210,11 +213,36 @@ LIB_DEFINE(InitNet_1_NpWebApi)
 
 } // namespace LibNpWebApi
 
+namespace LibHttp2 {
+
+LIB_VERSION("Http2", 1, "Http2", 1, 1);
+
+// Gen5 sceHttp2Init (NID 3JCe3lCbQ8A). Returns a positive context id; no real HTTP yet.
+static int g_http2_next_ctx = 1;
+
+static int KYTY_SYSV_ABI Http2Init(int libnet_mem_id, int libssl_ctx_id, size_t pool_size, int max_concurrent_request)
+{
+	PRINT_NAME();
+	printf("\t libnet_mem_id          = %d\n", libnet_mem_id);
+	printf("\t libssl_ctx_id          = %d\n", libssl_ctx_id);
+	printf("\t pool_size              = %" PRIu64 "\n", static_cast<uint64_t>(pool_size));
+	printf("\t max_concurrent_request = %d\n", max_concurrent_request);
+	return g_http2_next_ctx++;
+}
+
+LIB_DEFINE(InitNet_1_Http2)
+{
+	LIB_FUNC("3JCe3lCbQ8A", LibHttp2::Http2Init);
+}
+
+} // namespace LibHttp2
+
 LIB_DEFINE(InitNet_1)
 {
 	LibNet::InitNet_1_Net(s);
 	LibSsl::InitNet_1_Ssl(s);
 	LibHttp::InitNet_1_Http(s);
+	LibHttp2::InitNet_1_Http2(s);
 	LibNetCtl::InitNet_1_NetCtl(s);
 	LibNpManager::InitNet_1_NpManager(s);
 	LibNpManagerForToolkit::InitNet_1_NpManagerForToolkit(s);
