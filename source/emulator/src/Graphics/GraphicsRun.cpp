@@ -3204,6 +3204,20 @@ KYTY_CP_OP_PARSER(cp_op_draw_reset)
 	return 1;
 }
 
+// Gen5 IT_CLEAR_STATE from GraphicsDcbResetQueue: header + 4-bit state body.
+// Same hardware effect as the legacy custom R_DRAW_RESET path (CP context reset).
+KYTY_CP_OP_PARSER(cp_op_clear_state)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0001200);
+	EXIT_NOT_IMPLEMENTED((buffer[0] & ~0xfu) != 0);
+
+	cp->Reset();
+
+	return 1;
+}
+
 KYTY_CP_OP_PARSER(cp_op_dump_const_ram)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -4782,6 +4796,7 @@ static void graphics_init_jmp_tables()
 	}
 
 	g_cp_op_func[Pm4::IT_NOP]                     = cp_op_nop;
+	g_cp_op_func[Pm4::IT_CLEAR_STATE]             = cp_op_clear_state;
 	g_cp_op_func[Pm4::IT_DRAW_INDEX_2]            = cp_op_draw_index;
 	g_cp_op_func[Pm4::IT_INDEX_TYPE]              = cp_op_index_type;
 	g_cp_op_func[Pm4::IT_NUM_INSTANCES]           = cp_op_num_instances;

@@ -2536,9 +2536,12 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbResetQueue(CommandBuffer* buf, uint32_t op, u
 	printf("\t op    = 0x%08" PRIx32 "\n", op);
 	printf("\t state = 0x%08" PRIx32 "\n", state);
 
+	// Gen5 sce::Agc::DrawCommandBuffer::resetQueue takes a 12-bit op mask and a
+	// small state selector. Historical Kyty only accepted op==0x3ff/state==0 and
+	// emitted a custom R_DRAW_RESET NOP; Astro and Kyty encode IT_CLEAR_STATE
+	// with the low 4 bits of state in the body dword.
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	EXIT_NOT_IMPLEMENTED(op != 0x3ff);
-	EXIT_NOT_IMPLEMENTED(state != 0);
+	EXIT_NOT_IMPLEMENTED((op & ~0xfffu) != 0);
 
 	buf->DbgDump();
 
@@ -2546,8 +2549,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbResetQueue(CommandBuffer* buf, uint32_t op, u
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
-	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_DRAW_RESET);
-	cmd[1] = 0;
+	cmd[0] = KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u);
+	cmd[1] = state & 0xfu;
 
 	return cmd;
 }
