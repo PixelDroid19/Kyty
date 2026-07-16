@@ -1529,6 +1529,9 @@ ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start
 			case ShaderInstructionType::BufferLoadFormatXyz:
 			case ShaderInstructionType::BufferLoadFormatXyzw: is_load = true; break;
 			case ShaderInstructionType::BufferStoreDword:
+			case ShaderInstructionType::BufferStoreDwordx2:
+			case ShaderInstructionType::BufferStoreDwordx3:
+			case ShaderInstructionType::BufferStoreDwordx4:
 			case ShaderInstructionType::BufferStoreFormatX:
 			case ShaderInstructionType::BufferStoreFormatXy:
 			case ShaderInstructionType::BufferStoreFormatXyzw: is_store = true; break;
