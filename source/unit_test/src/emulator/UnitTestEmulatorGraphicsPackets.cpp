@@ -1246,6 +1246,53 @@ TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 	EXPECT_EQ(second[0], KYTY_PM4(4, Pm4::IT_NOP, Pm4::R_ZERO));
 }
 
+// Gen5 DCB resetQueue: 12-bit op mask, IT_CLEAR_STATE + low 4 bits of state.
+// Matches KytyPS5; rejects only op bits outside 0..0xfff (via EXIT_NOT_IMPLEMENTED).
+TEST(EmulatorGraphicsPackets, EncodesDcbResetQueueAsClearState)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	// Historical only-accepted value 0x3ff still must encode CLEAR_STATE.
+	uint32_t* cmd = Gen5::GraphicsDcbResetQueue(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x3ffu, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u));
+	EXPECT_EQ(cmd[1], 0u);
+
+	// Astro-style non-0x3ff op with non-zero state selector.
+	uint32_t* cmd2 = Gen5::GraphicsDcbResetQueue(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x001u, 0x5u);
+	ASSERT_NE(cmd2, nullptr);
+	EXPECT_EQ(cmd2[0], KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u));
+	EXPECT_EQ(cmd2[1], 0x5u);
+
+	// State is masked to 4 bits in the body dword.
+	uint32_t* cmd3 = Gen5::GraphicsDcbResetQueue(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x0ffu, 0x1fu);
+	ASSERT_NE(cmd3, nullptr);
+	EXPECT_EQ(cmd3[1], 0xfu);
+}
+
 // GraphicsDcbAcquireMem encodes size_bytes == -1 as size_lo == 0 (full range)
 // while still writing base >> 8. Observed post-Play full-target barrier:
 // cache_action 0x06007fc0, base_lo=1, size_lo=0 (guest base 0x100, size -1).
