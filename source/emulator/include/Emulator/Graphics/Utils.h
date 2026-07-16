@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include <utility>
 #include <vector>
 #include <vulkan/vulkan_core.h>
@@ -45,6 +46,12 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 		return vk == VK_FORMAT_R16G16B16A16_SFLOAT;
 	}
 	return true;
+}
+
+// A blit source cannot be read before its first-use contents are established.
+[[nodiscard]] inline bool UtilBlitImageNeedsSourceInitialization(VkImageLayout tracked_layout)
+{
+	return tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 [[nodiscard]] inline bool DepthFormatHasStencil(VkFormat format)

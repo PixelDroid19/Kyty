@@ -156,7 +156,7 @@ static KYTY_SYSV_ABI char*  c_strcpy(char* d, const char* s) { return ::strcpy(d
 static KYTY_SYSV_ABI char*  c_strncpy(char* d, const char* s, size_t n) { return ::strncpy(d, s, n); }
 static KYTY_SYSV_ABI int    c_strcmp(const char* a, const char* b) { return ::strcmp(a, b); }
 static KYTY_SYSV_ABI int    c_strncmp(const char* a, const char* b, size_t n) { return ::strncmp(a, b, n); }
-// NID AV6ipCNa4Rw (public Gen5 tables / external reference map). Null args are UB on host
+// NID AV6ipCNa4Rw. Null args are UB on host strcasecmp; guest may pass null
 // strcasecmp; guest may pass null in boot string compares — return non-zero when
 // either side is null (not equal), matching a safe strcmp-like contract.
 static KYTY_SYSV_ABI int c_strcasecmp(const char* a, const char* b)
@@ -179,6 +179,10 @@ static KYTY_SYSV_ABI void* c_1uJgoVq3bQU(void* obj, void* /*buf*/, void* /*a2*/,
 }
 static KYTY_SYSV_ABI char*  c_strcat(char* d, const char* s) { return ::strcat(d, s); }
 static KYTY_SYSV_ABI char*  c_strchr(const char* s, int c) { return const_cast<char*>(::strchr(s, c)); }
+static KYTY_SYSV_ABI char*  c_strstr(const char* haystack, const char* needle)
+{
+	return const_cast<char*>(::strstr(haystack, needle));
+}
 // Helpers kept for pending NID registration; not yet bound via LIB_FUNC.
 [[maybe_unused]] static KYTY_SYSV_ABI char*  c_strrchr(const char* s, int c)
 {
@@ -728,6 +732,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("1uJgoVq3bQU", LibC::c_1uJgoVq3bQU);
 	LIB_FUNC("Ls4tzzhimqQ", LibC::c_strcat);
 	LIB_FUNC("ob5xAW4ln-0", LibC::c_strchr);
+	// Gen5 libc_v1 strstr.
+	LIB_FUNC("viiwFMaNamA", LibC::c_strstr);
 	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);    // operator new(size_t)
 	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete); // operator delete(void*)
 	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);    // operator new[](size_t)

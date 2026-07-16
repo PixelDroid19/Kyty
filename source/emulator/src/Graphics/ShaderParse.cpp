@@ -630,12 +630,8 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 
 	EXIT_NOT_IMPLEMENTED(src0_sel != 6);
 	EXIT_NOT_IMPLEMENTED(src0_sext != 0);
-	EXIT_NOT_IMPLEMENTED(src0_neg != 0);
-	EXIT_NOT_IMPLEMENTED(src0_abs != 0);
 	EXIT_NOT_IMPLEMENTED(src1_sel != 6);
 	EXIT_NOT_IMPLEMENTED(src1_sext != 0);
-	EXIT_NOT_IMPLEMENTED(src1_neg != 0);
-	EXIT_NOT_IMPLEMENTED(src1_abs != 0);
 
 	ShaderInstruction inst;
 	inst.pc      = pc;
@@ -648,6 +644,11 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 		inst.src[0].constant.u = buffer[size];
 		size++;
 	}
+
+	inst.src[0].absolute = (src0_abs != 0);
+	inst.src[1].absolute = (src1_abs != 0);
+	inst.src[0].negate   = (src0_neg != 0);
+	inst.src[1].negate   = (src1_neg != 0);
 
 	inst.format = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
 	if (sd == 0)
@@ -955,7 +956,6 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 
 	EXIT_NOT_IMPLEMENTED(dst_sel != 6);
 	EXIT_NOT_IMPLEMENTED(sdwa && dst_sel == 6 && dst_u != 0);
-	EXIT_NOT_IMPLEMENTED(omod != 0);
 	EXIT_NOT_IMPLEMENTED(src0_sel != 6);
 	EXIT_NOT_IMPLEMENTED(src0_sext != 0);
 
@@ -966,6 +966,15 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	inst.src[0]  = operand_parse(sdwa ? (src0 + (s0 == 0 ? 256u : 0u)) : src0);
 	inst.dst     = operand_parse(vdst + 256);
 	inst.src_num = 1;
+
+	switch (omod)
+	{
+		case 0: inst.dst.multiplier = 1.0f; break;
+		case 1: inst.dst.multiplier = 2.0f; break;
+		case 2: inst.dst.multiplier = 4.0f; break;
+		case 3: inst.dst.multiplier = 0.5f; break;
+		default: break;
+	}
 
 	if (inst.src[0].type == ShaderOperandType::LiteralConstant)
 	{
@@ -1122,7 +1131,6 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 
 	EXIT_NOT_IMPLEMENTED(dst_sel != 6);
 	EXIT_NOT_IMPLEMENTED(sdwa && dst_sel == 6 && dst_u != 0);
-	EXIT_NOT_IMPLEMENTED(omod != 0);
 	EXIT_NOT_IMPLEMENTED(src0_sel != 6);
 	EXIT_NOT_IMPLEMENTED(src0_sext != 0);
 	// SDWA src0/src1 NEG bits map to operand.negate (same as VOP3).
@@ -1274,7 +1282,8 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x25:
 			if (next_gen)
 			{
-				KYTY_UNKNOWN_OP();
+				// GFX10/RDNA VOP2 0x25 is v_add_u32/v_add_nc_u32: no VCC dst.
+				inst.type = ShaderInstructionType::VAddI32;
 			} else
 			{
 				inst.type      = ShaderInstructionType::VAddI32;
@@ -2407,9 +2416,9 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 		}
 	}
 
-	// GCN/GFX: parameter exports use targets 0x20+N (N = param index). external reference
-	// treats targets in [32,64) the same way (fact only; no code copied). Captured
-	// post-Play VS: target 0x26 en=0xf done=0 compr=0 vm=0 → Param6.
+	// GCN/GFX: parameter exports use targets 0x20+N (N = param index). Targets
+	// in [32,64) are treated the same way. Captured post-Play VS: target 0x26
+	// en=0xf done=0 compr=0 vm=0 → Param6.
 	if (inst.format == ShaderInstructionFormat::Unknown && done == 0 && compr == 0 && vm == 0 && en == 0xf)
 	{
 		switch (target)
@@ -3220,6 +3229,13 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 				case 0x9:
 				{
 					inst.format   = ShaderInstructionFormat::Vdata2Vaddr3StSsDmask9;
+					inst.dst.size = 2;
+					break;
+				}
+				case 0xa:
+				{
+					// image_sample dmask 0xa = G+A (two comps).
+					inst.format   = ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskA;
 					inst.dst.size = 2;
 					break;
 				}

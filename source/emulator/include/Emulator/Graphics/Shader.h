@@ -19,6 +19,7 @@ struct VertexShaderInfo;
 struct PixelShaderInfo;
 struct ComputeShaderInfo;
 struct ShaderRegisters;
+struct UserSgprInfo;
 enum class UserSgprType;
 } // namespace HW
 
@@ -296,6 +297,7 @@ enum FormatByte : uint64_t
 	Dmask3, // dmask:0x3
 	Dmask5, // dmask:0x5
 	Dmask9, // dmask:0x9
+	DmaskA, // dmask:0xa (G+A, two components)
 	Dmask4, // dmask:0x4 (B channel only)
 	Dmask2, // dmask:0x2 (G channel only)
 	DmaskB, // dmask:0xb (R+G+A, three components)
@@ -368,6 +370,7 @@ enum Format : uint64_t
 	Vdata2Vaddr3StSsDmask3              = FormatDefine({DA2, S0A3, S1A8, S2A4, Dmask3}),
 	Vdata2Vaddr3StSsDmask5              = FormatDefine({DA2, S0A3, S1A8, S2A4, Dmask5}),
 	Vdata2Vaddr3StSsDmask9              = FormatDefine({DA2, S0A3, S1A8, S2A4, Dmask9}),
+	Vdata2Vaddr3StSsDmaskA              = FormatDefine({DA2, S0A3, S1A8, S2A4, DmaskA}),
 	Vdata2VaddrSvSoffsIdxen             = FormatDefine({DA2, S0, S1A4, S2, Idxen}),
 	Vdata3Vaddr3StSsDmask7              = FormatDefine({DA3, S0A3, S1A8, S2A4, Dmask7}),
 	Vdata3Vaddr3StSsDmaskB              = FormatDefine({DA3, S0A3, S1A8, S2A4, DmaskB}),
@@ -583,7 +586,8 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
-// Bytes per texel for Gen5 unified image formats used as sample textures (0 if unknown).
+uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component);
+// Bytes per element for Gen5 sampled formats; compressed formats use block elements (0 if unknown).
 uint32_t ShaderGen5TextureBytesPerElement(uint32_t format);
 // Linear Gen5 texture row pitch in texels: 256-byte aligned rows (GFX linear surface rule).
 uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format);
@@ -882,7 +886,7 @@ struct ShaderGdsResources
 
 struct ShaderDirectSgprsResources
 {
-	static constexpr int SGPRS_MAX = 4;
+	static constexpr int SGPRS_MAX = 32;
 
 	ShaderDirectSgprResource sgprs[SGPRS_MAX];
 	int                      start_register[SGPRS_MAX] = {0};
@@ -908,6 +912,25 @@ struct ShaderBindResources
 	ShaderGdsResources         gds_pointers;
 	ShaderDirectSgprsResources direct_sgprs;
 	ShaderExtendedResources    extended;
+};
+
+struct ShaderParsedUsage
+{
+	bool fetch                     = false;
+	int  fetch_reg                 = 0;
+	bool vertex_buffer             = false;
+	int  vertex_buffer_reg         = 0;
+	bool vertex_attrib             = false;
+	int  vertex_attrib_reg         = 0;
+	int  storage_buffers_readwrite = 0;
+	int  storage_buffers_readonly  = 0;
+	int  storage_buffers_constant  = 0;
+	int  textures2D_readonly       = 0;
+	int  textures2D_readwrite      = 0;
+	bool extended_buffer           = false;
+	int  samplers                  = 0;
+	int  gds_pointers              = 0;
+	int  direct_sgprs              = 0;
 };
 
 struct ShaderVertexInputInfo
@@ -948,6 +971,7 @@ struct ShaderPixelInputInfo
 	uint32_t            interpolator_settings[32] = {0};
 	uint32_t            input_num                 = 0;
 	uint8_t             target_output_mode[8]     = {};
+	uint8_t             target_output_order[8]    = {};
 	bool                ps_pos_xy                 = false;
 	bool                ps_pixel_kill_enable      = false;
 	bool                ps_early_z                = false;
@@ -970,6 +994,10 @@ struct ShaderUserData
 	uint16_t     direct_resource_count;
 	uint16_t     sharp_resource_count[4];
 };
+
+void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
+                       const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
+                       int user_data_register_base = 0);
 
 struct ShaderRegisterRange
 {

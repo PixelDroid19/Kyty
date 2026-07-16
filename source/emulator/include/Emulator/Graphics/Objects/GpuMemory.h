@@ -287,13 +287,18 @@ inline bool GpuMemoryAllowsIndexLinkVertexBuffer(GpuMemoryObjectType existing_ty
 // Incoming Texture overlapping existing StorageBuffer/RenderTexture/Texture.
 // Used with multi-parent Texture create that also reclaims VertexBuffers.
 // Captured: SB/RT Contains + SB/RT IsContainedWithin (larger texture over a
-// second surface pair); Texture Crosses peer Texture.
+// second surface pair); Texture Crosses peer Texture; exact VideoOutBuffer view
+// when a display allocation is also registered as StorageBuffer.
 inline bool GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                      GpuMemoryObjectType incoming_type)
 {
 	if (incoming_type != GpuMemoryObjectType::Texture)
 	{
 		return false;
+	}
+	if (existing_type == GpuMemoryObjectType::VideoOutBuffer)
+	{
+		return relation == GpuMemoryOverlapType::Equals;
 	}
 	if (existing_type != GpuMemoryObjectType::StorageBuffer && existing_type != GpuMemoryObjectType::RenderTexture &&
 	    existing_type != GpuMemoryObjectType::StorageTexture && existing_type != GpuMemoryObjectType::Texture)
