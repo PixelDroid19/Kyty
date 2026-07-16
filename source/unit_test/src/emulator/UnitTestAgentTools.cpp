@@ -279,6 +279,17 @@ TEST(AgentTools, StallWatchHealthyWhenPresentAdvances)
 	EXPECT_EQ(result.code, StallCode::Healthy);
 }
 
+TEST(AgentTools, PhaseHintClassifiesLoadingInteractiveAndStalled)
+{
+	EXPECT_EQ(ClassifyPhaseHint(false, 0, 0.0, 0), PhaseHint::NotReady);
+	EXPECT_EQ(ClassifyPhaseHint(true, 3, 30.0, 16), PhaseHint::Booting);
+	EXPECT_EQ(ClassifyPhaseHint(true, 200, 2.0, 100), PhaseHint::Loading);
+	EXPECT_EQ(ClassifyPhaseHint(true, 200, 12.0, 16), PhaseHint::Interactive);
+	EXPECT_EQ(ClassifyPhaseHint(true, 200, 12.0, 5000), PhaseHint::Stalled);
+	EXPECT_STREQ(PhaseHintName(PhaseHint::Loading), "loading");
+	EXPECT_STREQ(PhaseHintName(PhaseHint::Interactive), "interactive");
+}
+
 TEST(AgentTools, FrameScoreFlagsHotCorruption)
 {
 	const char* path = "/tmp/kyty_agent_score_hot.bmp";

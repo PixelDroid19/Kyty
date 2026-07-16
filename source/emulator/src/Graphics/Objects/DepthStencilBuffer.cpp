@@ -46,6 +46,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->format        = pixel_format;
 	vk_obj->image         = nullptr;
 	vk_obj->layout        = VK_IMAGE_LAYOUT_UNDEFINED;
+	vk_obj->guest_size    = *size;
 
 	for (auto& view: vk_obj->image_view)
 	{

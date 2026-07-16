@@ -144,6 +144,8 @@ struct VulkanImage
 	VkImageView            image_view[VIEW_MAX] = {};
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
 	Graphics::VulkanMemory memory;
+	// Guest allocation size used by PreferGpuMemoryAliasIndex when sampling.
+	uint64_t               guest_size           = 0;
 };
 
 struct VideoOutVulkanImage: public VulkanImage

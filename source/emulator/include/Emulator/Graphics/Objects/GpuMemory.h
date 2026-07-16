@@ -76,13 +76,16 @@ inline GpuMemoryOverlapType GpuMemoryReverseOverlap(GpuMemoryOverlapType relatio
 // GetOverlapType(existing, query):
 //   IsContainedWithin = existing RT sits inside the sample query
 //   Contains          = sample sits inside an existing live RT
-// Unconditional Contains matched multiple overlapping parent RTs and tripped
-// FindRenderTexture's Size()>1 EXIT (loading soft-lock). Accept Contains only
-// with same_base (identical start address, sample size ≤ RT size) — the
-// size-mismatch Equals miss — so one GPU image aliases without parent thrash.
-// Offset-into-parent cropped views remain a separate contract. Crosses rejected.
+// PreferGpuMemoryAliasIndex selects among multiple matches; do not EXIT on
+// Size()>1 (that historically soft-locked / aborted boot). Accept Contains
+// for both same-base size-mismatch and offset-into-parent samples so the
+// sampler binds the live RT instead of tile-27-uploading empty GPU-owned
+// guest memory (opaque-black props). Cropped VkImageView for offset UVs is
+// a separate follow-up; binding the parent image is still correct content.
+// Crosses rejected (partial overlap / wrong-sized bind).
 inline bool GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType relation, bool exact, bool same_base = false)
 {
+	(void)same_base;
 	if (relation == GpuMemoryOverlapType::Equals)
 	{
 		return true;
@@ -95,15 +98,17 @@ inline bool GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType relation, b
 	{
 		return true;
 	}
-	return relation == GpuMemoryOverlapType::Contains && same_base;
+	return relation == GpuMemoryOverlapType::Contains;
 }
 
 // When non-exact FindRenderTexture returns multiple overlapping GPU images for
 // one sample bind, prefer the tightest cover: smallest object_size that still
 // covers sample_size. If every object is smaller than the sample
 // (IsContainedWithin-only set), prefer the largest object under the sample.
-// sample_size == 0 means "prefer the smallest object" (tightest alias when the
-// caller only has a comparable size proxy such as pixel area).
+// Call sites should pass guest allocation bytes (VulkanImage::guest_size vs
+// sample size.size) when every match recorded them; otherwise a same-unit
+// proxy such as pixel area. sample_size == 0 means "prefer the smallest
+// object" and must not be used at the sample-bind call site.
 // Inventing a new GPU image or falling through to guest-memory upload here
 // previously painted opaque-black props; aborting on Size()>1 killed boot.
 [[nodiscard]] inline size_t PreferGpuMemoryAliasIndex(const uint64_t* object_sizes, size_t count, uint64_t sample_size)
@@ -535,6 +540,10 @@ void  GpuMemoryFlush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 void  GpuMemoryFlushAll(GraphicContext* ctx);
 void  GpuMemoryFrameDone();
 void  GpuMemoryWriteBack(GraphicContext* ctx, CommandProcessor* cp);
+// GPU→CPU for StorageBuffers overlapping [vaddr, size) before a CPU texture
+// upload. Tile-27 samples that miss RT/ST still link SB parents; without this
+// detile reads empty guest memory and paints opaque-black props.
+void  GpuMemoryWriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 bool  GpuMemoryCheckAccessViolation(uint64_t vaddr, uint64_t size);
 bool  GpuMemoryWatcherEnabled();
 

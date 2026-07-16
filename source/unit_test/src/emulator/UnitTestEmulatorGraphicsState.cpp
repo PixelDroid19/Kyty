@@ -412,10 +412,9 @@ TEST(EmulatorGraphicsState, ReversesGpuMemoryOverlapRelations)
 	EXPECT_EQ(GpuMemoryReverseOverlap(GpuMemoryOverlapType::None), GpuMemoryOverlapType::None);
 }
 
-// Non-exact FindRenderTexture: IsContainedWithin always; Contains only with
-// same-base (size-mismatch Equals miss). Unconditional Contains soft-locked
-// loading via multi-parent Size()>1. Offset-into-parent stays rejected until
-// cropped views exist. Crosses rejected (wrong-sized bind).
+// Non-exact FindRenderTexture: IsContainedWithin and Contains (same-base or
+// offset-into-parent). PreferGpuMemoryAliasIndex picks among multi-matches;
+// Size()>1 no longer EXIT. Crosses rejected (wrong-sized bind).
 TEST(EmulatorGraphicsState, FindObjectsNonExactAcceptsContainedSampleInRenderTarget)
 {
 	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Equals, true));
@@ -425,9 +424,10 @@ TEST(EmulatorGraphicsState, FindObjectsNonExactAcceptsContainedSampleInRenderTar
 	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::IsContainedWithin, false));
 	// Same-base Contains: sample and RT share start address (size mismatch only).
 	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, false, true));
-	// Offset-into-parent Contains still deferred (would multi-match / need crop).
-	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, false, false));
-	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, false));
+	// Offset-into-parent Contains: bind the live parent RT instead of empty
+	// tile-27 upload (opaque-black props). Cropped views are a follow-up.
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, false, false));
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, false));
 	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Crosses, false));
 	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::None, false));
 }
@@ -454,6 +454,20 @@ TEST(EmulatorGraphicsState, PreferGpuMemoryAliasUsesSampleAreaAgainstRtExtents)
 	EXPECT_EQ(PreferGpuMemoryAliasIndex(rt_areas, 3, sample_area), 1u);
 	// Smaller sample: prefer the 128x128 cover over 1920x1080.
 	EXPECT_EQ(PreferGpuMemoryAliasIndex(rt_areas, 3, 128ull * 128ull), 2u);
+}
+
+// Guest allocation bytes (GraphicsRender when every RT recorded guest_size).
+// Same-extent children can still differ in tiled guest size; Prefer must use
+// those bytes against size.size, not invent an area proxy.
+TEST(EmulatorGraphicsState, PreferGpuMemoryAliasUsesGuestByteSizes)
+{
+	// Child IsContainedWithin: 0x10000; parent cover: 0x800000; sibling: 0x20000.
+	const uint64_t guest_sizes[] = {0x10000ull, 0x800000ull, 0x20000ull};
+	const uint64_t sample_bytes  = 0x7f0000ull;
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(guest_sizes, 3, sample_bytes), 1u);
+	// Sample fits only under-sample objects: pick the largest child.
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(guest_sizes, 3, 0x900000ull), 1u);
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(guest_sizes, 3, 0x18000ull), 2u);
 }
 
 TEST(EmulatorGraphicsState, AllowsOnlyObservedTextureStorageAliases)

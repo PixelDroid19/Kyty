@@ -260,6 +260,8 @@ public:
 
 	// Sync: GPU -> CPU
 	void WriteBack(GraphicContext* ctx, CommandProcessor* cp);
+	// Write back StorageBuffers that overlap a sample range before CPU detile.
+	void WriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 
 	// Sync: CPU -> GPU
 	void Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
@@ -964,6 +966,17 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			} else if (GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type))
 			{
 				overlap = true;
+			} else if (GpuMemoryAllowsTextureContainedInSurface(o.object.type, obj.relation, info.type))
+			{
+				// Incoming Texture under a live RT/ST/SB/Texture surface: link and,
+				// when the parent holds a Vulkan image, copy from it instead of
+				// CPU-detiling empty GPU-owned guest memory.
+				overlap = true;
+				if (o.object.type == GpuMemoryObjectType::RenderTexture ||
+				    o.object.type == GpuMemoryObjectType::StorageTexture)
+				{
+					create_from_objects = true;
+				}
 			} else if (GpuMemoryAllowsVertexContainedInSurface(o.object.type, obj.relation, info.type))
 			{
 				overlap = true;
@@ -1340,6 +1353,19 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					}
 					others  = keep;
 					overlap = true;
+					// Surface parents hold live GPU images; copy from them instead
+					// of tile-27-uploading empty CPU guest memory (opaque-black
+					// props when the sample range was GPU-written).
+					for (const auto& obj: others)
+					{
+						const auto parent_type = heap.objects[obj.object_id].info.object.type;
+						if (parent_type == GpuMemoryObjectType::RenderTexture ||
+						    parent_type == GpuMemoryObjectType::StorageTexture)
+						{
+							create_from_objects = true;
+							break;
+						}
+					}
 				}
 			} else if (multi_vertex_mixed)
 			{
@@ -2376,6 +2402,39 @@ void GpuMemory::Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 	}
 }
 
+void GpuMemory::WriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
+{
+	EXIT_IF(ctx == nullptr);
+	if (size == 0)
+	{
+		return;
+	}
+
+	Core::LockGuard lock(m_mutex);
+
+	const int heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
+	{
+		return;
+	}
+
+	auto& heap       = m_heaps[heap_id];
+	auto  object_ids = FindBlocks(heap_id, &vaddr, &size, 1);
+
+	for (const auto& obj: object_ids)
+	{
+		auto& h = heap.objects[obj.object_id];
+		EXIT_IF(h.free);
+		auto& o = h.info;
+		if (o.object.type != GpuMemoryObjectType::StorageBuffer || o.write_back_func == nullptr || o.read_only ||
+		    o.object.obj == nullptr)
+		{
+			continue;
+		}
+		o.write_back_func(ctx, o.params, o.object.obj, h.block.vaddr, h.block.size, h.block.vaddr_num);
+	}
+}
+
 void GpuMemory::FlushAll(GraphicContext* ctx)
 {
 	Core::LockGuard lock(m_mutex);
@@ -2734,6 +2793,14 @@ void GpuMemoryWriteBack(GraphicContext* ctx, CommandProcessor* cp)
 
 	// update CPU memory after GPU-drawing
 	g_gpu_memory->WriteBack(ctx, cp);
+}
+
+void GpuMemoryWriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	EXIT_IF(ctx == nullptr);
+
+	g_gpu_memory->WriteBackStorageRange(ctx, vaddr, size);
 }
 
 bool GpuMemoryCheckAccessViolation(uint64_t /*vaddr*/, uint64_t /*size*/)

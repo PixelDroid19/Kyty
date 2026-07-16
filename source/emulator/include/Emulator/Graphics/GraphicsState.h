@@ -83,9 +83,10 @@ struct ColorTargetLayout
 
 [[nodiscard]] ColorTargetLayout ResolveColorTargetLayout(uint32_t mask);
 
-// A sampled surface may reuse a render target when FindRenderTexture found a
-// live object (Equals, non-exact IsContainedWithin, or same-base Contains).
-// Matching dimensions alone do not establish identity or content.
+// A sampled surface may reuse a render target or storage texture when
+// FindRenderTexture / FindStorageTexture found a live object (Equals, non-exact
+// IsContainedWithin, or Contains). Matching dimensions alone do not establish
+// identity.
 enum class Gen5SampleBacking
 {
 	ExactRenderTarget,
@@ -93,8 +94,8 @@ enum class Gen5SampleBacking
 	Unsupported,
 };
 
-// exact_render_target_found: true when a live RT alias was found (exact Equals,
-// non-exact IsContainedWithin, or same-base Contains via FindRenderTexture).
+// exact_render_target_found: true when a live RT or StorageTexture alias was
+// found (exact Equals, non-exact IsContainedWithin, or Contains).
 [[nodiscard]] Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exact_render_target_found);
 
 enum class ImageSampleOperation

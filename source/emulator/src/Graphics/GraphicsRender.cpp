@@ -3959,6 +3959,25 @@ static Vector<RenderTextureVulkanImage*> FindRenderTexture(uint64_t vaddr, uint6
 	return ret;
 }
 
+static Vector<StorageTextureVulkanImage*> FindStorageTexture(uint64_t vaddr, uint64_t size, bool exact)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	Vector<StorageTextureVulkanImage*> ret;
+
+	auto objects = GpuMemoryFindObjects(vaddr, size, GpuMemoryObjectType::StorageTexture, exact, false);
+
+	for (const auto& obj: objects)
+	{
+		if (obj.type == GpuMemoryObjectType::StorageTexture)
+		{
+			ret.Add(static_cast<StorageTextureVulkanImage*>(obj.obj));
+		}
+	}
+
+	return ret;
+}
+
 static Vector<DepthStencilVulkanImage*> FindDepthStencil(uint64_t vaddr, uint64_t size, bool exact)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -4002,7 +4021,9 @@ static void GraphicsRenderRenderTextureBarrier(VkCommandBuffer vk_buffer, Vulkan
 {
 	EXIT_IF(image == nullptr);
 
-	if (image->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+	// Sample bind may alias a live color RT or a storage image written by
+	// compute; both need SHADER_READ_ONLY before the draw samples them.
+	if (image->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL || image->layout == VK_IMAGE_LAYOUT_GENERAL)
 	{
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -4702,15 +4723,34 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				size_t alias_index = 0;
 				if (dtex.Size() > 1)
 				{
-					uint64_t areas[16] = {};
+					uint64_t sizes[16] = {};
 					const auto n       = static_cast<size_t>(dtex.Size() < 16 ? dtex.Size() : 16);
+					bool       use_guest_bytes = true;
 					for (size_t i = 0; i < n; i++)
 					{
-						const auto& e = dtex.At(static_cast<int>(i))->extent;
-						areas[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+						if (dtex.At(static_cast<int>(i))->guest_size == 0)
+						{
+							use_guest_bytes = false;
+							break;
+						}
 					}
-					const uint64_t sample_area = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
-					alias_index               = PreferGpuMemoryAliasIndex(areas, n, sample_area);
+					if (use_guest_bytes)
+					{
+						for (size_t i = 0; i < n; i++)
+						{
+							sizes[i] = dtex.At(static_cast<int>(i))->guest_size;
+						}
+						alias_index = PreferGpuMemoryAliasIndex(sizes, n, size.size);
+					} else
+					{
+						for (size_t i = 0; i < n; i++)
+						{
+							const auto& e = dtex.At(static_cast<int>(i))->extent;
+							sizes[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+						}
+						const uint64_t sample_area = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+						alias_index               = PreferGpuMemoryAliasIndex(sizes, n, sample_area);
+					}
 				}
 				tex = dtex.At(static_cast<int>(alias_index));
 			}
@@ -4730,23 +4770,43 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			{
 				EXIT_NOT_IMPLEMENTED(swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7));
 				// Multiple non-exact RT aliases are expected under Gen5 nested /
-				// same-base parents. Prefer the tightest cover using the sample's
-				// pixel area as sample_size (same units as RT extent area). Using
-				// sample_size=0 always picked the smallest RT — including tiny
-				// IsContainedWithin children under a large sample — which bound a
-				// partial image and left opaque-black prop/character boxes.
+				// same-base parents. Prefer the tightest cover using guest allocation
+				// bytes when every match recorded guest_size at create; otherwise
+				// fall back to sample/RT pixel area (same units). sample_size=0
+				// always picked the smallest RT — including tiny IsContainedWithin
+				// children under a large sample — which bound a partial image and
+				// left opaque-black prop/character boxes.
 				size_t alias_index = 0;
 				if (rtex.Size() > 1)
 				{
-					uint64_t areas[16] = {};
+					uint64_t sizes[16] = {};
 					const auto n       = static_cast<size_t>(rtex.Size() < 16 ? rtex.Size() : 16);
+					bool       use_guest_bytes = true;
 					for (size_t i = 0; i < n; i++)
 					{
-						const auto& e = rtex.At(static_cast<int>(i))->extent;
-						areas[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+						if (rtex.At(static_cast<int>(i))->guest_size == 0)
+						{
+							use_guest_bytes = false;
+							break;
+						}
 					}
-					const uint64_t sample_area = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
-					alias_index               = PreferGpuMemoryAliasIndex(areas, n, sample_area);
+					if (use_guest_bytes)
+					{
+						for (size_t i = 0; i < n; i++)
+						{
+							sizes[i] = rtex.At(static_cast<int>(i))->guest_size;
+						}
+						alias_index = PreferGpuMemoryAliasIndex(sizes, n, size.size);
+					} else
+					{
+						for (size_t i = 0; i < n; i++)
+						{
+							const auto& e = rtex.At(static_cast<int>(i))->extent;
+							sizes[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+						}
+						const uint64_t sample_area = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+						alias_index               = PreferGpuMemoryAliasIndex(sizes, n, sample_area);
+					}
 				}
 				tex = rtex.At(static_cast<int>(alias_index));
 				if (swizzle == DstSel(6, 5, 4, 7))
@@ -4754,9 +4814,59 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					view_type = VulkanImage::VIEW_BGRA;
 				}
 			}
+			// Live StorageTexture (compute/UAV) can own GPU pixels without ever
+			// being a color RT. Prefer that image over tile-27 CPU upload of empty
+			// guest memory (opaque-black wall/prop quads).
+			bool storage_texture = false;
+			if (!render_texture && gen5)
+			{
+				auto stex = FindStorageTexture(addr, size.size, true);
+				if (stex.IsEmpty())
+				{
+					stex = FindStorageTexture(addr, size.size, false);
+				}
+				storage_texture = !stex.IsEmpty();
+				if (storage_texture)
+				{
+					size_t alias_index = 0;
+					if (stex.Size() > 1)
+					{
+						uint64_t sizes[16] = {};
+						const auto n       = static_cast<size_t>(stex.Size() < 16 ? stex.Size() : 16);
+						bool       use_guest_bytes = true;
+						for (size_t i = 0; i < n; i++)
+						{
+							if (stex.At(static_cast<int>(i))->guest_size == 0)
+							{
+								use_guest_bytes = false;
+								break;
+							}
+						}
+						if (use_guest_bytes)
+						{
+							for (size_t i = 0; i < n; i++)
+							{
+								sizes[i] = stex.At(static_cast<int>(i))->guest_size;
+							}
+							alias_index = PreferGpuMemoryAliasIndex(sizes, n, size.size);
+						} else
+						{
+							for (size_t i = 0; i < n; i++)
+							{
+								const auto& e = stex.At(static_cast<int>(i))->extent;
+								sizes[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+							}
+							const uint64_t sample_area = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+							alias_index               = PreferGpuMemoryAliasIndex(sizes, n, sample_area);
+						}
+					}
+					tex = stex.At(static_cast<int>(alias_index));
+				}
+			}
 			if (gen5)
 			{
-				const auto backing = State::ResolveGen5SampleBacking(fmt, tile, render_texture);
+				const auto backing =
+				    State::ResolveGen5SampleBacking(fmt, tile, render_texture || storage_texture);
 				if (backing == State::Gen5SampleBacking::Unsupported)
 				{
 					EXIT("Gen5 sampled texture has no exact render-target backing and no guest-memory upload: "
@@ -4766,7 +4876,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 		}
 
-		if (!render_texture && !depth_texture)
+		if (!render_texture && !depth_texture && tex == nullptr)
 		{
 			if (textures.desc[i].textures2d_without_sampler)
 			{
@@ -4792,6 +4902,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					    submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_buffer_info));
 				} else
 				{
+					// Overlapping StorageBuffers often hold the live GPU pixels for
+					// tile-27 samples that are not color RTs. Write them back so
+					// TileConvertSw64kRxToLinear does not detile empty guest memory.
+					if (gen5 && (tile == 27u || tile == 0u))
+					{
+						GpuMemoryWriteBackStorageRange(g_render_ctx->GetGraphicCtx(), addr, size.size);
+					}
 					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
 					                                  force_degamma);
 					tex = static_cast<TextureVulkanImage*>(
@@ -4814,12 +4931,19 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			const uint32_t budget = priority ? 256u : 64u;
 			if (n < budget)
 			{
+				const int st_n =
+				    static_cast<int>(GpuMemoryFindObjects(addr, size.size, GpuMemoryObjectType::StorageTexture, false, false).Size());
+				const int tex_n =
+				    static_cast<int>(GpuMemoryFindObjects(addr, size.size, GpuMemoryObjectType::Texture, false, false).Size());
+				const int sb_n =
+				    static_cast<int>(GpuMemoryFindObjects(addr, size.size, GpuMemoryObjectType::StorageBuffer, false, false).Size());
 				std::fprintf(stderr,
 				             "SAMPLE_EVIDENCE consumer_ps=%08" PRIx32 " slot=%d addr=%016" PRIx64 " ufmt=%u tile=%u extent=%ux%u "
-				             "size=%08" PRIx32 " render_texture=%d depth_texture=%d vkfmt=%d layout=%d\n",
+				             "size=%08" PRIx32 " render_texture=%d depth_texture=%d vkfmt=%d layout=%d "
+				             "overlap_st=%d overlap_tex=%d overlap_sb=%d imgtype=%d\n",
 				             g_sample_evidence_consumer_ps_crc, index_sampled, addr, fmt, tile, width, height, size.size,
 				             render_texture ? 1 : 0, depth_texture ? 1 : 0, static_cast<int>(tex->format),
-				             static_cast<int>(tex->layout));
+				             static_cast<int>(tex->layout), st_n, tex_n, sb_n, static_cast<int>(tex->type));
 			}
 		}
 
