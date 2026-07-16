@@ -2966,6 +2966,86 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t
 	return cmd;
 }
 
+static uint32_t extract_modifier_bits(uint32_t modifier, uint32_t start, uint32_t count)
+{
+	return (modifier >> start) & ((1u << count) - 1u);
+}
+
+static uint32_t indirect_modifier_sgpr_base(uint32_t modifier)
+{
+	const auto stage = modifier >> 29u;
+	return ((stage == 3u || stage == 5u) ? 0x80u : 0u) + 0x8cu;
+}
+
+static uint64_t decode_indirect_modifier_patch_offsets(uint64_t modifier, bool indexed)
+{
+	const auto low       = static_cast<uint32_t>(modifier);
+	const auto sgpr_base = indirect_modifier_sgpr_base(low);
+
+	uint64_t base_vtx_loc = 0x280u;
+	if ((low & 0x1u) != 0)
+	{
+		base_vtx_loc = sgpr_base + extract_modifier_bits(low, 9u, 5u);
+	}
+
+	uint64_t start_inst_loc = 0x280u;
+	if ((low & 0x4u) != 0)
+	{
+		start_inst_loc = sgpr_base + extract_modifier_bits(low, 19u, 5u);
+	}
+
+	if (indexed && (low & 0x2u) != 0)
+	{
+		base_vtx_loc |= static_cast<uint64_t>(sgpr_base + extract_modifier_bits(low, 14u, 5u)) << 16u;
+		base_vtx_loc |= 1ull << 59u;
+	}
+
+	return base_vtx_loc | (start_inst_loc << 32u);
+}
+
+static uint32_t decode_indirect_draw_initiator(uint64_t modifier)
+{
+	const auto low       = static_cast<uint32_t>(modifier);
+	uint32_t   initiator = 2u;
+
+	if ((modifier & (1ull << 32u)) == 0)
+	{
+		initiator = ((low >> 3u) & 0x20u) | 2u;
+	}
+
+	return initiator;
+}
+
+// sceAgcDcbDrawIndexIndirect: IT_DRAW_INDEX_INDIRECT from SetBaseIndirect args.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier)
+{
+	PRINT_NAME();
+
+	printf("\t data_offset = 0x%" PRIx32 "\n", data_offset_in_bytes);
+	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(5);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	const auto patch_offsets = decode_indirect_modifier_patch_offsets(modifier, true);
+
+	cmd[0] = KYTY_PM4(5, Pm4::IT_DRAW_INDEX_INDIRECT, 0u);
+	cmd[1] = data_offset_in_bytes;
+	cmd[2] = static_cast<uint32_t>(patch_offsets);
+	cmd[3] = static_cast<uint32_t>(patch_offsets >> 32u);
+	cmd[4] = decode_indirect_draw_initiator(modifier);
+	return cmd;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
                                              const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm)
 {

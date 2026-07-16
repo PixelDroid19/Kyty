@@ -127,6 +127,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("qj7QZpgr9Uw", Gen5::GraphicsCbType2Pad);
 	LIB_FUNC("RmaJwLtc8rY", Gen5::GraphicsDcbSetBaseIndirectArgs);
 	LIB_FUNC("CtB+A9-VxO0", Gen5::GraphicsDcbDispatchIndirect);
+	LIB_FUNC("t1vNu082-jM", Gen5::GraphicsDcbDrawIndexIndirect);
 	LIB_FUNC("VmW0Tdpy420", Gen5::GraphicsDcbWaitRegMem);
 	LIB_FUNC("htn36gPnBk4", Gen5::GraphicsAcbWaitRegMem);
 	LIB_FUNC("1rZSWUv1IRc", Gen5::GraphicsDcbCopyData);
@@ -210,6 +211,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("qj7QZpgr9Uw", Gen5::GraphicsCbType2Pad);
 	LIB_FUNC("RmaJwLtc8rY", Gen5::GraphicsDcbSetBaseIndirectArgs);
 	LIB_FUNC("CtB+A9-VxO0", Gen5::GraphicsDcbDispatchIndirect);
+	LIB_FUNC("t1vNu082-jM", Gen5::GraphicsDcbDrawIndexIndirect);
 	LIB_FUNC("VmW0Tdpy420", Gen5::GraphicsDcbWaitRegMem);
 	LIB_FUNC("htn36gPnBk4", Gen5::GraphicsAcbWaitRegMem);
 	LIB_FUNC("1rZSWUv1IRc", Gen5::GraphicsDcbCopyData);

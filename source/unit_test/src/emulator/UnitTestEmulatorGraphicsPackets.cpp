@@ -778,6 +778,45 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDispatchIndirect)
 	EXPECT_EQ(cmd[2], (1u & 0xa038u) | 0x41u);
 }
 
+// sceAgcDcbDrawIndexIndirect with modifier 0x80000000 (Astro after DrawIndexAuto).
+TEST(EmulatorGraphicsPackets, EncodesDcbDrawIndexIndirectModifier80000000)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd =
+	    Gen5::GraphicsDcbDrawIndexIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0x80000000ull);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_DRAW_INDEX_INDIRECT, 0u));
+	EXPECT_EQ(cmd[1], 0u);
+	// Default patch offsets when modifier low bits are clear: 0x280 / 0x280.
+	EXPECT_EQ(cmd[2], 0x280u);
+	EXPECT_EQ(cmd[3], 0x280u);
+	EXPECT_EQ(cmd[4], 2u);
+}
+
 // Placeholder address 0 is reserved then patched before submit (Astro path).
 TEST(EmulatorGraphicsPackets, EncodesWriteDataZeroAddressThenPatches)
 {

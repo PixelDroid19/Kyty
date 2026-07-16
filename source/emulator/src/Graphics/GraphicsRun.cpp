@@ -3228,6 +3228,16 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_indirect)
 	return 2;
 }
 
+// Gen5 IT_DRAW_INDEX_INDIRECT: header + 4 body dwords (offset, patch lo/hi, initiator).
+KYTY_CP_OP_PARSER(cp_op_draw_index_indirect)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(dw < 4);
+
+	return 4;
+}
+
 // Gen5 IT_CLEAR_STATE from GraphicsDcbResetQueue: header + 4-bit state body.
 // Same hardware effect as the legacy custom R_DRAW_RESET path (CP context reset).
 KYTY_CP_OP_PARSER(cp_op_clear_state)
@@ -4826,6 +4836,7 @@ static void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_CLEAR_STATE]             = cp_op_clear_state;
 	g_cp_op_func[Pm4::IT_SET_BASE]                = cp_op_set_base;
 	g_cp_op_func[Pm4::IT_DISPATCH_INDIRECT]       = cp_op_dispatch_indirect;
+	g_cp_op_func[Pm4::IT_DRAW_INDEX_INDIRECT]     = cp_op_draw_index_indirect;
 	g_cp_op_func[Pm4::IT_DRAW_INDEX_2]            = cp_op_draw_index;
 	g_cp_op_func[Pm4::IT_INDEX_TYPE]              = cp_op_index_type;
 	g_cp_op_func[Pm4::IT_NUM_INSTANCES]           = cp_op_num_instances;
