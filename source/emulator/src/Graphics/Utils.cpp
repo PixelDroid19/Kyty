@@ -251,7 +251,27 @@ void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchai
 	// Use the tracked source layout; hardcoding COLOR_ATTACHMENT_OPTIMAL fails
 	// when the flip source is still GENERAL/TRANSFER_* (Linux present races).
 	// Restore color-attachment so the next render pass sees a stable layout.
-	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	const auto source_layout = src_image->layout;
+	if (UtilBlitImageNeedsSourceInitialization(source_layout))
+	{
+		set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+		                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+		VkClearColorValue clear_color {{0.0f, 0.0f, 0.0f, 1.0f}};
+		VkImageSubresourceRange clear_range {};
+		clear_range.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+		clear_range.baseMipLevel   = 0;
+		clear_range.levelCount     = 1;
+		clear_range.baseArrayLayer = 0;
+		clear_range.layerCount     = 1;
+		vkCmdClearColorImage(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &clear_range);
+
+		set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	} else
+	{
+		set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, source_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	}
 	set_image_layout(vk_buffer, &swapchain_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 

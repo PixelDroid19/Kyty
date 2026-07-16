@@ -207,6 +207,66 @@ int KYTY_SYSV_ABI KernelCreateEqueue(KernelEqueue* eq, const char* name)
 	return OK;
 }
 
+static void ampr_event_reset_func(KernelEqueueEvent* event)
+{
+	EXIT_IF(event == nullptr);
+	event->triggered    = false;
+	event->event.fflags = 0;
+	event->event.data   = 0;
+}
+
+static void ampr_event_trigger_func(KernelEqueueEvent* event, void* trigger_data)
+{
+	EXIT_IF(event == nullptr);
+	event->triggered = true;
+	event->event.fflags++;
+	if (trigger_data != nullptr)
+	{
+		event->event.data = reinterpret_cast<intptr_t>(trigger_data);
+	}
+}
+
+int KYTY_SYSV_ABI KernelAddAmprEvent(KernelEqueue eq, uint64_t reserved0, uint64_t reserved1, uintptr_t ident, void* udata)
+{
+	PRINT_NAME();
+
+	printf("\t eq        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
+	printf("\t reserved0 = 0x%016" PRIx64 "\n", reserved0);
+	printf("\t reserved1 = 0x%016" PRIx64 "\n", reserved1);
+	printf("\t ident     = 0x%016" PRIx64 "\n", static_cast<uint64_t>(ident));
+	printf("\t udata     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(udata));
+
+	if (eq == nullptr)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	KernelEqueueEvent event;
+	event.triggered                = false;
+	event.event.ident              = ident;
+	event.event.filter             = KERNEL_EVFILT_AMPR;
+	event.event.flags              = 0;
+	event.event.fflags             = 0;
+	event.event.data               = 0;
+	event.event.udata              = udata;
+	event.filter.trigger_func      = ampr_event_trigger_func;
+	event.filter.reset_func        = ampr_event_reset_func;
+	event.filter.delete_event_func = nullptr;
+	event.filter.data              = nullptr;
+
+	return KernelAddEvent(eq, event);
+}
+
+int KYTY_SYSV_ABI KernelDeleteAmprEvent(KernelEqueue eq, uintptr_t ident)
+{
+	PRINT_NAME();
+
+	printf("\t eq    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
+	printf("\t ident = 0x%016" PRIx64 "\n", static_cast<uint64_t>(ident));
+
+	return KernelDeleteEvent(eq, ident, KERNEL_EVFILT_AMPR);
+}
+
 int KYTY_SYSV_ABI KernelAddEvent(KernelEqueue eq, const KernelEqueueEvent& event)
 {
 	if (eq == nullptr)

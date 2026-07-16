@@ -847,14 +847,22 @@ static constexpr uint64_t g_sw64k_r_x_4bpp_16pipe[16] = {
     0x0000000000080000ull, 0x0000000000000010ull, 0x0000000000400000ull, 0x0000000000000040ull,
 };
 
-static uint32_t Sw64kRxWithinBlockOffset4(uint32_t x, uint32_t y)
+static constexpr uint64_t g_sw64k_r_x_8bpp_16pipe[16] = {
+    0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000001ull,
+    0x0000000000010000ull, 0x0000000000000002ull, 0x0000000000000004ull, 0x0000000000020000ull,
+    0x0000000800080008ull, 0x0000000400100010ull, 0x0000000200200040ull, 0x0000000100400020ull,
+    0x0000000000040000ull, 0x0000000000000008ull, 0x0000000000100000ull, 0x0000000000000040ull,
+};
+
+static uint32_t Sw64kRxWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_per_element)
 {
 	// ADDRLIB ComputeOffsetFromSwizzlePattern: each bit of the offset is the
 	// parity of selected x/y bits encoded in the 16-bit channel masks.
+	const auto* pattern = (bytes_per_element == 8u ? g_sw64k_r_x_8bpp_16pipe : g_sw64k_r_x_4bpp_16pipe);
 	uint32_t offset = 0;
 	for (uint32_t i = 0; i < 16u; i++)
 	{
-		const uint64_t setting = g_sw64k_r_x_4bpp_16pipe[i];
+		const uint64_t setting = pattern[i];
 		const uint32_t x_mask  = static_cast<uint32_t>(setting & 0xffffu);
 		const uint32_t y_mask  = static_cast<uint32_t>((setting >> 16u) & 0xffffu);
 		const uint32_t z_mask  = static_cast<uint32_t>((setting >> 32u) & 0xffffu);
@@ -895,20 +903,20 @@ static uint32_t Sw64kRxWithinBlockOffset4(uint32_t x, uint32_t y)
 
 uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
 {
-	EXIT_NOT_IMPLEMENTED(bytes_per_element != 4u);
+	EXIT_NOT_IMPLEMENTED(bytes_per_element != 4u && bytes_per_element != 8u);
 	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u);
 
 	static constexpr uint32_t k_block_w     = 128u;
-	static constexpr uint32_t k_block_h     = 128u;
 	static constexpr uint32_t k_block_bytes = 65536u;
+	const uint32_t            block_h       = (bytes_per_element == 8u ? 64u : 128u);
 
 	const uint32_t blocks_x = (pitch_elems + k_block_w - 1u) / k_block_w;
 	const uint32_t xb       = x / k_block_w;
-	const uint32_t yb       = y / k_block_h;
+	const uint32_t yb       = y / block_h;
 	const uint64_t blk_idx  = static_cast<uint64_t>(yb) * blocks_x + xb;
 	const uint32_t lx       = x % k_block_w;
-	const uint32_t ly       = y % k_block_h;
-	return (blk_idx * k_block_bytes) + Sw64kRxWithinBlockOffset4(lx, ly);
+	const uint32_t ly       = y % block_h;
+	return (blk_idx * k_block_bytes) + Sw64kRxWithinBlockOffset(lx, ly, bytes_per_element);
 }
 
 void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
@@ -916,7 +924,7 @@ void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
-	EXIT_NOT_IMPLEMENTED(bytes_per_element != 4u);
+	EXIT_NOT_IMPLEMENTED(bytes_per_element != 4u && bytes_per_element != 8u);
 	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u);
 
 	const uint32_t pitch = (pitch_elems != 0u ? pitch_elems : width);
@@ -1399,8 +1407,14 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 
 			EXIT_NOT_IMPLEMENTED(levels != 1);
 
+			const bool     bc1          = (format == 133u);
+			const uint32_t elem_width   = bc1 ? std::max((width + 3u) / 4u, 1u) : width;
+			const uint32_t elem_height  = bc1 ? std::max((height + 3u) / 4u, 1u) : height;
+			const uint32_t pitch_texels = (pitch != 0 ? pitch : width);
+			const uint32_t elem_pitch   = bc1 ? std::max((pitch_texels + 3u) / 4u, 1u) : pitch_texels;
+
 			TileSizeAlign rt {};
-			TileGetRenderTargetSize(width, height, pitch != 0 ? pitch : width, tile, bpp, &rt);
+			TileGetRenderTargetSize(elem_width, elem_height, elem_pitch, tile, bpp, &rt);
 			EXIT_NOT_IMPLEMENTED(rt.size == 0);
 
 			if (total_size != nullptr)
@@ -1418,8 +1432,10 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 				// 8 BPE → 128x64 elements per 64 KiB block.
 				const uint32_t block_w = 128u;
 				const uint32_t block_h = (bpp == 8u ? 64u : 128u);
-				padded_size[0].width  = ((width + block_w - 1u) / block_w) * block_w;
-				padded_size[0].height = ((height + block_h - 1u) / block_h) * block_h;
+				const uint32_t padded_w = ((elem_width + block_w - 1u) / block_w) * block_w;
+				const uint32_t padded_h = ((elem_height + block_h - 1u) / block_h) * block_h;
+				padded_size[0].width    = bc1 ? padded_w * 4u : padded_w;
+				padded_size[0].height   = bc1 ? padded_h * 4u : padded_h;
 			}
 			return;
 		}

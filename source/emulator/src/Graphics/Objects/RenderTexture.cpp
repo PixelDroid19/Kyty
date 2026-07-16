@@ -32,6 +32,49 @@ static bool buffer_is_tiled(uint64_t vaddr, uint64_t size)
 	return true;
 }
 
+static void create_render_texture_image_views(GraphicContext* ctx, RenderTextureVulkanImage* vk_obj)
+{
+	EXIT_IF(ctx == nullptr);
+	EXIT_IF(vk_obj == nullptr);
+
+	VkImageViewCreateInfo create_info {};
+	create_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	create_info.pNext                           = nullptr;
+	create_info.flags                           = 0;
+	create_info.image                           = vk_obj->image;
+	create_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+	create_info.format                          = vk_obj->format;
+	create_info.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+	create_info.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+	create_info.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+	create_info.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+	create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+	create_info.subresourceRange.baseArrayLayer = 0;
+	create_info.subresourceRange.baseMipLevel   = 0;
+	create_info.subresourceRange.layerCount     = 1;
+	create_info.subresourceRange.levelCount     = 1;
+
+	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]);
+
+	create_info.components.r = VK_COMPONENT_SWIZZLE_B;
+	create_info.components.g = VK_COMPONENT_SWIZZLE_G;
+	create_info.components.b = VK_COMPONENT_SWIZZLE_R;
+	create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+
+	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_BGRA]);
+
+	create_info.components.r = VK_COMPONENT_SWIZZLE_A;
+	create_info.components.g = VK_COMPONENT_SWIZZLE_B;
+	create_info.components.b = VK_COMPONENT_SWIZZLE_G;
+	create_info.components.a = VK_COMPONENT_SWIZZLE_R;
+
+	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ABGR]);
+
+	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
+	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_BGRA] == nullptr);
+	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_ABGR] == nullptr);
+}
+
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("RenderTextureObject::update_func");
@@ -254,46 +297,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
 
-	VkImageViewCreateInfo create_info {};
-	create_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create_info.pNext                           = nullptr;
-	create_info.flags                           = 0;
-	create_info.image                           = vk_obj->image;
-	create_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-	create_info.format                          = vk_obj->format;
-	create_info.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create_info.subresourceRange.baseArrayLayer = 0;
-	create_info.subresourceRange.baseMipLevel   = 0;
-	create_info.subresourceRange.layerCount     = 1;
-	create_info.subresourceRange.levelCount     = 1;
-
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]);
-
-	VkImageViewCreateInfo create_info2 {};
-	create_info2.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create_info2.pNext                           = nullptr;
-	create_info2.flags                           = 0;
-	create_info2.image                           = vk_obj->image;
-	create_info2.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-	create_info2.format                          = vk_obj->format;
-	create_info2.components.r                    = VK_COMPONENT_SWIZZLE_B;
-	create_info2.components.g                    = VK_COMPONENT_SWIZZLE_G;
-	create_info2.components.b                    = VK_COMPONENT_SWIZZLE_R;
-	create_info2.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info2.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create_info2.subresourceRange.baseArrayLayer = 0;
-	create_info2.subresourceRange.baseMipLevel   = 0;
-	create_info2.subresourceRange.layerCount     = 1;
-	create_info2.subresourceRange.levelCount     = 1;
-
-	vkCreateImageView(ctx->device, &create_info2, nullptr, &vk_obj->image_view[VulkanImage::VIEW_BGRA]);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_BGRA] == nullptr);
+	create_render_texture_image_views(ctx, vk_obj);
 
 	return vk_obj;
 }
@@ -386,46 +390,7 @@ static void* create2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint
 
 	update2_func(ctx, buffer, params, vk_obj, scenario, objects);
 
-	VkImageViewCreateInfo create_info {};
-	create_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create_info.pNext                           = nullptr;
-	create_info.flags                           = 0;
-	create_info.image                           = vk_obj->image;
-	create_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-	create_info.format                          = vk_obj->format;
-	create_info.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create_info.subresourceRange.baseArrayLayer = 0;
-	create_info.subresourceRange.baseMipLevel   = 0;
-	create_info.subresourceRange.layerCount     = 1;
-	create_info.subresourceRange.levelCount     = 1;
-
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]);
-
-	VkImageViewCreateInfo create_info2 {};
-	create_info2.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create_info2.pNext                           = nullptr;
-	create_info2.flags                           = 0;
-	create_info2.image                           = vk_obj->image;
-	create_info2.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-	create_info2.format                          = vk_obj->format;
-	create_info2.components.r                    = VK_COMPONENT_SWIZZLE_B;
-	create_info2.components.g                    = VK_COMPONENT_SWIZZLE_G;
-	create_info2.components.b                    = VK_COMPONENT_SWIZZLE_R;
-	create_info2.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info2.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create_info2.subresourceRange.baseArrayLayer = 0;
-	create_info2.subresourceRange.baseMipLevel   = 0;
-	create_info2.subresourceRange.layerCount     = 1;
-	create_info2.subresourceRange.levelCount     = 1;
-
-	vkCreateImageView(ctx->device, &create_info2, nullptr, &vk_obj->image_view[VulkanImage::VIEW_BGRA]);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_BGRA] == nullptr);
+	create_render_texture_image_views(ctx, vk_obj);
 
 	return vk_obj;
 }
@@ -443,7 +408,13 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 
 	DeleteFramebuffer(vk_obj);
 
-	vkDestroyImageView(ctx->device, vk_obj->image_view[VulkanImage::VIEW_DEFAULT], nullptr);
+	for (auto image_view: vk_obj->image_view)
+	{
+		if (image_view != nullptr)
+		{
+			vkDestroyImageView(ctx->device, image_view, nullptr);
+		}
+	}
 
 	vkDestroyImage(ctx->device, vk_obj->image, nullptr);
 
