@@ -176,6 +176,30 @@ static int KYTY_SYSV_ABI SystemServiceGetDisplaySafeAreaInfo(SystemServiceDispla
 	return OK;
 }
 
+// Gen5 HDR display probe (NID mPpPxv5CZt4). Values match a typical SDR-range
+// host window until a real HDR display path is wired.
+struct SystemServiceHdrToneMapLuminance
+{
+	float max_full_frame_tone_map_luminance;
+	float max_tone_map_luminance;
+	float min_tone_map_luminance;
+};
+
+static int KYTY_SYSV_ABI SystemServiceGetHdrToneMapLuminance(SystemServiceHdrToneMapLuminance* luminance)
+{
+	PRINT_NAME();
+
+	if (luminance == nullptr)
+	{
+		return SYSTEM_SERVICE_ERROR_PARAMETER;
+	}
+
+	luminance->max_full_frame_tone_map_luminance = 80.0f;
+	luminance->max_tone_map_luminance            = 1000.0f;
+	luminance->min_tone_map_luminance            = 0.0f;
+	return OK;
+}
+
 } // namespace SystemService
 
 LIB_DEFINE(InitSystemService_1)
@@ -185,6 +209,7 @@ LIB_DEFINE(InitSystemService_1)
 	LIB_FUNC("fZo48un7LK4", SystemService::SystemServiceParamGetInt);
 	LIB_FUNC("rPo6tV8D9bM", SystemService::SystemServiceGetStatus);
 	LIB_FUNC("1n37q1Bvc5Y", SystemService::SystemServiceGetDisplaySafeAreaInfo);
+	LIB_FUNC("mPpPxv5CZt4", SystemService::SystemServiceGetHdrToneMapLuminance);
 }
 
 } // namespace Kyty::Libs
