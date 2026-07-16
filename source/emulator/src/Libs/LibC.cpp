@@ -713,10 +713,25 @@ void* KYTY_SYSV_ABI LibcMspaceMemalign(void* msp, size_t align, size_t size)
 }
 
 // Gen5 sceLibcMspaceMallocStatsFast — NID k04jLXu3+Ic.
-// Observed Astro stack frame: stats block lives at rbp-0x48 with the stack
-// canary at rbp-0x20, so the guest only has 0x28 bytes before the canary.
-// Writing more than 0x28 bytes smashes the canary and trips stack_chk_fail.
-constexpr size_t kMspaceMallocStatsFastBytes = 0x28;
+// Guest structure is SceLibcMallocManagedSize (size/version 0x00010028):
+//   +0x00 u16 size=0x28, u16 version=1  (stored as u32 0x00010028)
+//   +0x04 u32 reserved
+//   +0x08 size_t maxSystemSize
+//   +0x10 size_t currentSystemSize   // Astro Onion pre-check: need <= this
+//   +0x18 size_t maxInuseSize
+//   +0x20 size_t currentInuseSize
+// Stack frame places the block at rbp-0x48 with the canary at rbp-0x20, so only
+// 0x28 bytes are writable before the canary.
+struct LibcMallocManagedSize
+{
+	uint32_t size_version;
+	uint32_t reserved;
+	uint64_t max_system_size;
+	uint64_t current_system_size;
+	uint64_t max_inuse_size;
+	uint64_t current_inuse_size;
+};
+static_assert(sizeof(LibcMallocManagedSize) == 0x28, "SceLibcMallocManagedSize");
 
 int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
 {
@@ -727,9 +742,22 @@ int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
 	{
 		return -1;
 	}
-	std::memset(stats, 0, kMspaceMallocStatsFastBytes);
-	// Guest prologue stores size/version 0x10028 at the head of this block.
-	*reinterpret_cast<uint32_t*>(stats) = 0x10028u;
+
+	Core::MSpaceSize sizes {};
+	if (!Core::MSpaceMallocStatsFast(msp, &sizes))
+	{
+		return -1;
+	}
+
+	auto* out                 = static_cast<LibcMallocManagedSize*>(stats);
+	out->size_version         = 0x00010028u;
+	out->reserved             = 0;
+	out->max_system_size      = sizes.max_system_size;
+	out->current_system_size  = sizes.current_system_size;
+	out->max_inuse_size       = sizes.max_inuse_size;
+	out->current_inuse_size   = sizes.current_inuse_size;
+	printf("\t system = 0x%016" PRIx64 " inuse = 0x%016" PRIx64 "\n", out->current_system_size,
+	       out->current_inuse_size);
 	return 0;
 }
 

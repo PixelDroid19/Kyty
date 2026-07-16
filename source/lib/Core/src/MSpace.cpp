@@ -579,4 +579,61 @@ void* MSpaceAlignedAlloc(mspace_t msp, size_t alignment, size_t size)
 	return MSpaceMemalign(msp, alignment, size);
 }
 
+static bool MSpaceInternalStats(MSpaceContext& ctx, MSpaceSize* mmsize)
+{
+	if (mmsize == nullptr)
+	{
+		return false;
+	}
+
+	// free area after the fixed control header: (capacity + 2) blocks of 8 bytes.
+	const size_t free_area_bytes =
+	    (static_cast<size_t>(ctx.capacity) + 2u) * sizeof(MSpaceBlock);
+	const size_t system_size = MSPACE_HEADER_SIZE + free_area_bytes;
+
+	// Largest free key chunk approximates remaining free space when the heap is
+	// mostly contiguous (fresh mspace). Fragmentation under-reports free space.
+	const size_t free_bytes = static_cast<size_t>(ctx.size_of_key_chunk) * sizeof(MSpaceBlock);
+	const size_t inuse_bytes = (free_bytes < free_area_bytes) ? (free_area_bytes - free_bytes) : 0;
+
+	mmsize->max_system_size     = system_size;
+	mmsize->current_system_size = system_size;
+	mmsize->max_inuse_size      = system_size;
+	mmsize->current_inuse_size  = inuse_bytes;
+	return true;
+}
+
+bool MSpaceMallocStats(mspace_t msp, MSpaceSize* mmsize)
+{
+	if (msp == nullptr)
+	{
+		return false;
+	}
+	auto* ctx = static_cast<MSpaceContext*>(msp);
+	MSpaceInternalEnter(*ctx);
+	const bool ok = MSpaceInternalStats(*ctx, mmsize);
+	MSpaceInternalLeave(*ctx);
+	return ok;
+}
+
+bool MSpaceMallocStatsFast(mspace_t msp, MSpaceSize* mmsize)
+{
+	// Same fields as the full walk for this allocator; free-list walk is not required
+	// for the managed-size pre-check titles issue before memalign.
+	return MSpaceMallocStats(msp, mmsize);
+}
+
+bool MSpaceIsHeapEmpty(mspace_t msp)
+{
+	if (msp == nullptr)
+	{
+		return true;
+	}
+	auto* ctx = static_cast<MSpaceContext*>(msp);
+	MSpaceInternalEnter(*ctx);
+	const bool empty = (ctx->size_of_key_chunk == ctx->capacity && ctx->index_of_key_chunk == 1u);
+	MSpaceInternalLeave(*ctx);
+	return empty;
+}
+
 } // namespace Kyty::Core
