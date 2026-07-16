@@ -95,13 +95,17 @@ int KYTY_SYSV_ABI   GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_
 int KYTY_SYSV_ABI   GraphicsSuspendPoint();
 // Patches the address field of a Gen5 ReleaseMem end-of-pipe packet.
 int KYTY_SYSV_ABI   GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, uint64_t address);
-// Graphics5 NID LtTouSCZjHM: allocate dwords in a CommandBuffer (cursor_up).
-// Observed SysV: rdi=CommandBuffer*, rsi=num_dw (e.g. 10). Returns dword*.
+// sceAgcCbNop (NID LtTouSCZjHM): reserve num_dw and encode a type-3 NOP (R_ZERO).
+// num_dw is the full PM4 length (header included); must be in [2, 0x4001].
+uint32_t* KYTY_SYSV_ABI GraphicsCbNop(CommandBuffer* buf, uint32_t num_dw);
+// Legacy name used by older call sites; same entry as GraphicsCbNop.
 uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw);
-// Graphics5 NIDs IxYiarKlXxM / 3KDcnM3lrcU: PM4 type-3 packet size in dwords.
-// IxYiar: rdi → WaitFlipDone (0xC0051018). 3KDcn: rdi → WaitMem64 (0xC0071058).
-// Sibling registers held stream neighbors as residuals. Returns dword count.
+// sceAgcGetPacketSize (NID Lkf86B98qPc): type-3 PM4 length in dwords from header.
 uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd);
+// sceAgcDmaDataPatchSetDstAddressOrOffset (NID IxYiarKlXxM): patch R_DMA_DATA dst.
+int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetDstAddressOrOffset(uint32_t* cmd, uint64_t destination_address);
+// sceAgcWaitRegMemPatchAddress (NID 3KDcnM3lrcU): patch wait-mem address field.
+int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t address);
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
 int KYTY_SYSV_ABI   GraphicsAgcDriverUnknownKRzWekV120();
 

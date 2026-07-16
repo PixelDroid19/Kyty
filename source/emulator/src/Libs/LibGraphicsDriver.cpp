@@ -69,8 +69,11 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("23LRUSvYu1M", Gen5::GraphicsInit);
 	LIB_FUNC("2JtWUUiYBXs", Gen5::GraphicsGetRegisterDefaults2);
 	LIB_FUNC("wRbq6ZjNop4", Gen5::GraphicsGetRegisterDefaults2Internal);
-	// 3KDcnM3lrcU: same PM4 size utility as IxYiarKlXxM (WaitMem64 packet observed).
-	LIB_FUNC("3KDcnM3lrcU", Gen5::GraphicsGetDataPacketSizeDw);
+	// Patch helpers (3.20 export names): wait-mem / DMA destination rewrite.
+	LIB_FUNC("3KDcnM3lrcU", Gen5::GraphicsAgcWaitRegMemPatchAddress);
+	LIB_FUNC("IxYiarKlXxM", Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset);
+	// Lkf86B98qPc: sceAgcGetPacketSize (type-3 dword length).
+	LIB_FUNC("Lkf86B98qPc", Gen5::GraphicsGetDataPacketSizeDw);
 	LIB_FUNC("f3dg2CSgRKY", Gen5::GraphicsCreateShader);
 	LIB_FUNC("vcmNN+AAXnY", Gen5::GraphicsSetCxRegIndirectPatchSetAddress);
 	LIB_FUNC("Qrj4c+61z4A", Gen5::GraphicsSetShRegIndirectPatchSetAddress);
@@ -78,11 +81,9 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("d-6uF9sZDIU", Gen5::GraphicsSetCxRegIndirectPatchAddRegisters);
 	LIB_FUNC("z2duB-hHQSM", Gen5::GraphicsSetShRegIndirectPatchAddRegisters);
 	LIB_FUNC("vRoArM9zaIk", Gen5::GraphicsSetUcRegIndirectPatchAddRegisters);
-	// LtTouSCZjHM: CommandBuffer dword allocation (see GraphicsCbAllocateDwords).
-	LIB_FUNC("LtTouSCZjHM", Gen5::GraphicsCbAllocateDwords);
-	// WmAc2MEj6Io: sceAgcDcbDmaData (external reference Astro baseline). Distinct from
-	// MWiElSNE8j8 WaitUntilSafeForRendering — wrong binding encodes flip waits
-	// as DMA and breaks Gen5 titles that copy through the AGC DCB helper.
+	// LtTouSCZjHM: sceAgcCbNop (encode NOP of length num_dw).
+	LIB_FUNC("LtTouSCZjHM", Gen5::GraphicsCbNop);
+	// WmAc2MEj6Io: sceAgcDcbDmaData. Distinct from MWiElSNE8j8 WaitUntilSafe.
 	LIB_FUNC("WmAc2MEj6Io", Gen5::GraphicsDcbDmaData);
 	LIB_FUNC("-RnpfpxIhec", Gen5::GraphicsDcbDmaData); // sceAgcAcbDmaData alias
 	LIB_FUNC("u2T2DiA5hRI", Gen5::GraphicsDcbStallCommandBufferParser);
@@ -96,8 +97,6 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("UZbQjYAwwXM", Gen5::GraphicsCbSetShRegistersDirect);
 	LIB_FUNC("k3GhuSNmBLU", Gen5::GraphicsCbDispatch);
 	LIB_FUNC("wr23dPKyWc0", Gen5::GraphicsCbReleaseMem);
-	// IxYiarKlXxM / 3KDcnM3lrcU: PM4 packet size in dwords.
-	LIB_FUNC("IxYiarKlXxM", Gen5::GraphicsGetDataPacketSizeDw);
 	LIB_FUNC("TRO721eVt4g", Gen5::GraphicsDcbResetQueue);
 	LIB_FUNC("MWiElSNE8j8", Gen5::GraphicsDcbWaitUntilSafeForRendering);
 	LIB_FUNC("pFLArOT53+w", Gen5::GraphicsDcbSetShRegisterDirect);
@@ -143,7 +142,7 @@ namespace LibAgc {
 
 // Guest imports libSceAgc; module name "Agc" matches the strip of Sce/lib prefixes.
 // Astro Bot (and other Gen5 titles) resolve builders from Agc, not only Graphics5.
-// Keep the builder surface in sync with LibGen5 / external reference libSceAgc exports.
+// Keep the builder surface in sync with LibGen5 for libSceAgc imports.
 LIB_VERSION("Agc", 1, "Agc", 1, 1);
 
 namespace Gen5 = Graphics::Gen5;
@@ -154,8 +153,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 
 	LIB_FUNC("-KRzWekV120", Gen5::GraphicsAgcDriverUnknownKRzWekV120);
 
-	// Command builders used by Astro / Gen5 AGC (same NIDs as Graphics5).
-	LIB_FUNC("LtTouSCZjHM", Gen5::GraphicsCbAllocateDwords);
+	// Command builders / patches used by Astro / Gen5 AGC (same NIDs as Graphics5).
+	LIB_FUNC("LtTouSCZjHM", Gen5::GraphicsCbNop);
 	LIB_FUNC("WmAc2MEj6Io", Gen5::GraphicsDcbDmaData);
 	LIB_FUNC("-RnpfpxIhec", Gen5::GraphicsDcbDmaData);
 	LIB_FUNC("u2T2DiA5hRI", Gen5::GraphicsDcbStallCommandBufferParser);
@@ -192,8 +191,9 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("V++UgBtQhn0", Gen5::GraphicsGetDataPacketPayloadAddress);
 	LIB_FUNC("h9z6+0hEydk", Gen5::GraphicsSuspendPoint);
 	LIB_FUNC("0fWWK5uG9rQ", Gen5::GraphicsAgcQueueEndOfPipeActionPatchAddress);
-	LIB_FUNC("3KDcnM3lrcU", Gen5::GraphicsGetDataPacketSizeDw);
-	LIB_FUNC("IxYiarKlXxM", Gen5::GraphicsGetDataPacketSizeDw);
+	LIB_FUNC("3KDcnM3lrcU", Gen5::GraphicsAgcWaitRegMemPatchAddress);
+	LIB_FUNC("IxYiarKlXxM", Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset);
+	LIB_FUNC("Lkf86B98qPc", Gen5::GraphicsGetDataPacketSizeDw);
 }
 
 } // namespace LibAgc

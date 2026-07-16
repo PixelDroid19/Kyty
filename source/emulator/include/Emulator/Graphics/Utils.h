@@ -97,6 +97,41 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	return index;
 }
 
+// Byte offset of the 64-bit address field inside a WaitRegMem-family packet,
+// or 0 when the header is not a recognized wait. Used by WaitRegMemPatchAddress.
+[[nodiscard]] inline uint32_t GraphicsWaitRegMemAddressByteOffset(uint32_t header)
+{
+	if ((header >> 30u) != 3u)
+	{
+		return 0;
+	}
+	const uint32_t op = (header >> 8u) & 0xffu;
+	const uint32_t r  = (header >> 2u) & 0x3fu;
+	if (op == 0x3cu) // IT_WAIT_REG_MEM
+	{
+		return 8u;
+	}
+	// Custom waits: IT_NOP + R_WAIT_MEM_32 (0x0A) / R_WAIT_MEM_64 (0x16).
+	if (op == 0x10u && (r == 0x0au || r == 0x16u))
+	{
+		return 4u;
+	}
+	return 0;
+}
+
+// True when header is custom IT_NOP/R_DMA_DATA (8 dwords, dst at +16).
+[[nodiscard]] inline bool GraphicsIsCustomDmaDataPacket(uint32_t header)
+{
+	if ((header >> 30u) != 3u)
+	{
+		return false;
+	}
+	const uint32_t op  = (header >> 8u) & 0xffu;
+	const uint32_t r   = (header >> 2u) & 0x3fu;
+	const uint32_t len = ((header >> 16u) & 0x3fffu) + 2u;
+	return op == 0x10u && r == 0x19u && len >= 8u;
+}
+
 [[nodiscard]] inline bool DepthFormatHasStencil(VkFormat format)
 {
 	return format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;

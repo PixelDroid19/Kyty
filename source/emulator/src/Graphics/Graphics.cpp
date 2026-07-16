@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Tile.h"
+#include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/Pthread.h"
@@ -1949,37 +1950,41 @@ int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, uin
 	return OK;
 }
 
-// Graphics5 NID LtTouSCZjHM. Captured strict SysV entry:
-//   rdi = CommandBuffer* (bottom/top/cursor_up/cursor_down/callback layout)
-//   rsi = 10 (num dwords)
-//   rdx+ residual (rdx matched CB top once; not treated as an argument)
-// Neighboring import NIDs are SetShRegIndirectPatch* and DcbResetQueue.
-// Matches free-function form of CommandBuffer::AllocateDW used by every
-// packet encoder: reserve space, advance cursor_up, return write pointer.
-uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw)
+// sceAgcCbNop (NID LtTouSCZjHM). SysV: rdi=CommandBuffer*, rsi=num_dw.
+// Encodes a full type-3 NOP of length num_dw (not a bare cursor bump).
+uint32_t* KYTY_SYSV_ABI GraphicsCbNop(CommandBuffer* buf, uint32_t num_dw)
 {
 	PRINT_NAME();
 
 	printf("\t buf    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
 	printf("\t num_dw = %" PRIu32 "\n", num_dw);
 
-	if (buf == nullptr || num_dw == 0)
+	if (buf == nullptr || num_dw < 2u || num_dw > 0x4001u)
 	{
 		return nullptr;
 	}
 
 	buf->DbgDump();
-	return buf->AllocateDW(num_dw);
+	auto* cmd = buf->AllocateDW(num_dw);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(num_dw, Pm4::IT_NOP, Pm4::R_ZERO);
+	for (uint32_t i = 1; i < num_dw; i++)
+	{
+		cmd[i] = 0;
+	}
+	return cmd;
 }
 
-// Graphics5 NID IxYiarKlXxM. Observed SysV on post-logo path:
-//   rdi = pointer to a complete type-3 PM4 packet (WaitFlipDone header
-//         0xC0051018, len=7, r=R_WAIT_FLIP_DONE)
-//   rsi = rdi - 0x1c (points 7 DW earlier into the same CB stream)
-//   rdx = 0
-//   rcx = rdi + 0x1c (points at the following ReleaseMem packet)
-// rsi/rcx match ±packet-size pointer arithmetic residuals, not extra inputs.
-// Same utility family as GetDataPacketPayloadAddress: decode PM4 header length.
+uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw)
+{
+	// Historical alias: guests resolve LtTouSCZjHM as sceAgcCbNop.
+	return GraphicsCbNop(buf, num_dw);
+}
+
+// sceAgcGetPacketSize (NID Lkf86B98qPc): type-3 header → dword length.
 uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 {
 	PRINT_NAME();
@@ -1994,16 +1999,52 @@ uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 	const uint32_t header = cmd[0];
 	printf("\t header = 0x%08" PRIx32 "\n", header);
 
-	// Type-3 PM4 packet (top 2 bits = 0b11). Reject non-packets rather than
-	// inventing a size for random memory.
 	if ((header >> 30u) != 3u)
 	{
-		EXIT("GraphicsGetDataPacketSizeDw: not a type-3 PM4 header: 0x%08" PRIx32 "\n", header);
+		return 0;
 	}
 
 	const uint32_t size_dw = KYTY_PM4_LEN(header);
 	printf("\t size_dw = %" PRIu32 "\n", size_dw);
 	return size_dw;
+}
+
+// sceAgcDmaDataPatchSetDstAddressOrOffset (NID IxYiarKlXxM).
+// R_DMA_DATA layout: +0 header, +16/+20 destination address lo/hi.
+int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetDstAddressOrOffset(uint32_t* cmd, uint64_t destination_address)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " dst = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), destination_address);
+
+	if (cmd == nullptr || !GraphicsIsCustomDmaDataPacket(cmd[0]))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	cmd[4] = static_cast<uint32_t>(destination_address & 0xffffffffu);
+	cmd[5] = static_cast<uint32_t>((destination_address >> 32u) & 0xffffffffu);
+	return OK;
+}
+
+// sceAgcWaitRegMemPatchAddress (NID 3KDcnM3lrcU).
+// IT_WAIT_REG_MEM: address at +8; custom R_WAIT_MEM_*: address at +4.
+int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t address)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), address);
+
+	if (cmd == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	const uint32_t byte_off = GraphicsWaitRegMemAddressByteOffset(cmd[0]);
+	if (byte_off == 0 || (byte_off % 4u) != 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	const uint32_t dw = byte_off / 4u;
+	cmd[dw]     = static_cast<uint32_t>(address & 0xffffffffu);
+	cmd[dw + 1] = static_cast<uint32_t>((address >> 32u) & 0xffffffffu);
+	return OK;
 }
 
 
@@ -2410,7 +2451,6 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_
 uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf)
 {
 	// GNM/AGC stallCommandBufferParser: fixed EVENT_WRITE CS partial flush (0x07).
-	// Ported from external reference feature/astro-bot-baseline (sceAgcDcbStallCommandBufferParser).
 	PRINT_NAME();
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	buf->DbgDump();
@@ -2427,7 +2467,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t destinati
                                            uint64_t source_address, uint32_t byte_count, uint8_t control7, uint8_t control8,
                                            uint8_t control9)
 {
-	// sceAgcDcbDmaData / sceAgcAcbDmaData packet layout from external reference Astro baseline.
+	// sceAgcDcbDmaData / sceAgcAcbDmaData custom R_DMA_DATA packet layout.
 	PRINT_NAME();
 	printf("\t destination              = 0x%02" PRIx8 "\n", destination);
 	printf("\t destination_cache_policy = 0x%02" PRIx8 "\n", destination_cache_policy);

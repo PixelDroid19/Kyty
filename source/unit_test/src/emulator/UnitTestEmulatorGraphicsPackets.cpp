@@ -9,6 +9,7 @@
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/Tile.h"
+#include "Emulator/Graphics/Utils.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
@@ -518,7 +519,13 @@ TEST(EmulatorGraphicsPackets, AcceptsFullUserSgprWriteWindow)
 
 TEST(EmulatorGraphicsPackets, ReportsType3Pm4PacketSizeInDwords)
 {
-	// WaitFlipDone header observed at IxYiarKlXxM frontier: 0xC0051018 → len 7.
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// sceAgcGetPacketSize (Lkf86B98qPc): type-3 header → dword length.
 	const uint32_t wait_flip = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE);
 	EXPECT_EQ(wait_flip, 0xC0051018u);
 	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(&wait_flip), 7u);
@@ -1203,7 +1210,7 @@ TEST(EmulatorGraphicsPackets, RecognizesOpaqueType3PairOnlyBeforeWaitFlipDone)
 TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 {
 	// Layout matches Gen5::CommandBuffer in Graphics.cpp (non-virtual methods).
-	// Observed NID LtTouSCZjHM: (CommandBuffer*, num_dw=10) → dword*.
+	// NID LtTouSCZjHM is sceAgcCbNop: (CommandBuffer*, num_dw) → dword* with type-3 NOP.
 	struct AlignasCommandBuffer
 	{
 		uint32_t* bottom      = nullptr;
@@ -1216,7 +1223,7 @@ TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 		uint32_t  pad         = 0;
 	};
 
-	uint32_t            storage[64] = {};
+	uint32_t             storage[64] = {};
 	AlignasCommandBuffer cb {};
 	cb.bottom      = storage;
 	cb.top         = storage + 64;
@@ -1230,11 +1237,13 @@ TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 	ASSERT_NE(first, nullptr);
 	EXPECT_EQ(first, storage);
 	EXPECT_EQ(cb.cursor_up, storage + 10);
+	EXPECT_EQ(first[0], KYTY_PM4(10, Pm4::IT_NOP, Pm4::R_ZERO));
 
 	uint32_t* second = Gen5::GraphicsCbAllocateDwords(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4);
 	ASSERT_NE(second, nullptr);
 	EXPECT_EQ(second, storage + 10);
 	EXPECT_EQ(cb.cursor_up, storage + 14);
+	EXPECT_EQ(second[0], KYTY_PM4(4, Pm4::IT_NOP, Pm4::R_ZERO));
 }
 
 // GraphicsDcbAcquireMem encodes size_bytes == -1 as size_lo == 0 (full range)
@@ -2068,8 +2077,7 @@ TEST(EmulatorGraphicsPackets, Gen5RenderTextureAbgrSampleView)
 	EXPECT_NE(VulkanImage::VIEW_ABGR, VulkanImage::VIEW_BGRA);
 }
 
-// external reference Astro baseline: sceAgcDcbStallCommandBufferParser is a fixed
-// EVENT_WRITE with CS partial flush (event type 0x07).
+// sceAgcDcbStallCommandBufferParser: fixed EVENT_WRITE with CS partial flush (0x07).
 TEST(EmulatorGraphicsPackets, EncodesDcbStallCommandBufferParser)
 {
 	struct AlignasCommandBuffer
@@ -2103,7 +2111,90 @@ TEST(EmulatorGraphicsPackets, EncodesDcbStallCommandBufferParser)
 	EXPECT_EQ(cmd[1], 0x07u);
 }
 
-// external reference Astro baseline: sceAgcDcbDmaData / AcbDmaData encode IT_NOP+R_DMA_DATA.
+// 3.20 catalog: WaitRegMemPatchAddress / DmaDataPatch use fixed field offsets.
+TEST(EmulatorGraphicsPackets, WaitRegMemAndDmaDataPatchFieldOffsets)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Custom R_WAIT_MEM_64: address at +4 bytes.
+	const uint32_t wait64 = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	EXPECT_EQ(GraphicsWaitRegMemAddressByteOffset(wait64), 4u);
+	const uint32_t wait32 = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WAIT_MEM_32);
+	EXPECT_EQ(GraphicsWaitRegMemAddressByteOffset(wait32), 4u);
+	// Hardware IT_WAIT_REG_MEM: address at +8 bytes.
+	const uint32_t it_wait = KYTY_PM4(7, Pm4::IT_WAIT_REG_MEM, 0);
+	EXPECT_EQ(GraphicsWaitRegMemAddressByteOffset(it_wait), 8u);
+	EXPECT_EQ(GraphicsWaitRegMemAddressByteOffset(0u), 0u);
+
+	const uint32_t dma = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA);
+	EXPECT_TRUE(GraphicsIsCustomDmaDataPacket(dma));
+	EXPECT_FALSE(GraphicsIsCustomDmaDataPacket(wait64));
+}
+
+TEST(EmulatorGraphicsPackets, PatchesDmaDataDestinationAndWaitRegMemAddress)
+{
+	using namespace Kyty::Libs::Graphics;
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t dma[8] = {};
+	dma[0]          = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA);
+	dma[3]          = 64u;
+	EXPECT_EQ(Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset(dma, 0x0000000123456789ull), 0);
+	EXPECT_EQ(dma[4], 0x23456789u);
+	EXPECT_EQ(dma[5], 0x00000001u);
+	EXPECT_EQ(Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset(nullptr, 0), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	uint32_t not_dma[2] = {KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0};
+	EXPECT_EQ(Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset(not_dma, 1), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	uint32_t wait[9] = {};
+	wait[0]          = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchAddress(wait, 0x00000001abcdef00ull), 0);
+	EXPECT_EQ(wait[1], 0xabcdef00u);
+	EXPECT_EQ(wait[2], 0x00000001u);
+	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchAddress(not_dma, 1), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+TEST(EmulatorGraphicsPackets, EncodesCbNopAsFullType3Packet)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {0xffffffffu};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd = Gen5::GraphicsCbNop(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(4, Pm4::IT_NOP, Pm4::R_ZERO));
+	EXPECT_EQ(cmd[1], 0u);
+	EXPECT_EQ(cmd[2], 0u);
+	EXPECT_EQ(cmd[3], 0u);
+	EXPECT_EQ(Gen5::GraphicsCbNop(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1), nullptr);
+	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(cmd), 4u);
+}
+
+// sceAgcDcbDmaData / sceAgcAcbDmaData: encode IT_NOP + R_DMA_DATA.
 TEST(EmulatorGraphicsPackets, EncodesDcbDmaDataCustomPacket)
 {
 	struct AlignasCommandBuffer
