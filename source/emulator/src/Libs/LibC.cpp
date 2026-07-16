@@ -484,6 +484,13 @@ static KYTY_SYSV_ABI int puts(const char* s)
 	return GetPrintfStdFunc()("%s\n", s);
 }
 
+// Gen5 libc_v1 putchar — NID m5wN+SwZOR4. Observed with ch=0x0a (newline)
+// on the Astro boot path after Posix semaphores.
+static KYTY_SYSV_ABI int c_putchar(int ch)
+{
+	return GetPrintfStdFunc()("%c", ch);
+}
+
 // Guest FILE* is not always a host FILE*. Log path uses the host printf
 // sink; the stream argument is accepted for ABI compatibility only.
 static KYTY_SYSV_ABI int c_fputs(const char* s, FILE* /*stream*/)
@@ -729,6 +736,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("hcuQgD53UxM", LibC::libc_printf);
 	LIB_FUNC("MUjC4lbHrK4", LibcInternal::fflush);
 	LIB_FUNC("YQ0navp+YIc", LibC::puts);
+	// Gen5 putchar — NID m5wN+SwZOR4 (hard-abort after Posix sem on Astro).
+	LIB_FUNC("m5wN+SwZOR4", LibC::c_putchar);
 	// Captured Gen5 after DirNameSearch/strtol: rdi=formatted log line
 	// with trailing CR/LF, rsi=stream-like pointer — fputs ABI.
 	LIB_FUNC("QrZZdJ8XsX0", LibC::c_fputs);
