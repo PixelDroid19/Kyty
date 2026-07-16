@@ -368,6 +368,33 @@ static KYTY_SYSV_ABI int c_snprintf(VA_ARGS)
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
 	return Format(s, n, fmt, &ctx.va_list);
 }
+
+// Gen5 libc_v1 NID NC4MSB+BRQg — same SysV shape as snprintf(buf, n, fmt, ...),
+// but Astro ObjectDefinition path-building checks `r == 0` after the call (errno_t
+// style: 0 success, non-zero failure). Standard snprintf returns the written
+// length, which falsely trips that assert for any non-empty format result.
+static KYTY_SYSV_ABI int c_snprintf_errno(VA_ARGS)
+{
+	VA_CONTEXT(ctx);
+	char*       s   = VaArg_ptr<char>(&ctx.va_list);
+	size_t      n   = VaArg_size_t(&ctx.va_list);
+	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
+	if (s == nullptr || n == 0 || fmt == nullptr)
+	{
+		return -1;
+	}
+	const int written = Format(s, n, fmt, &ctx.va_list);
+	if (written < 0)
+	{
+		return written;
+	}
+	// Truncation: would need more than n-1 payload bytes.
+	if (static_cast<size_t>(written) >= n)
+	{
+		return -1;
+	}
+	return 0;
+}
 static KYTY_SYSV_ABI int c_sprintf(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
@@ -975,9 +1002,9 @@ LIB_DEFINE(InitLibC_1)
 
 	// printf / scanf family
 	LIB_FUNC("eLdDw6l0-bU", LibC::c_snprintf);
-	// Gen5 libc_v1 snprintf alias — NID NC4MSB+BRQg after SaveData/NpUDS on Astro
-	// (SysV buf, n=0x100, format*, first int arg … matches snprintf).
-	LIB_FUNC("NC4MSB+BRQg", LibC::c_snprintf);
+	// Gen5 libc_v1 safe format — NID NC4MSB+BRQg. SysV matches snprintf, but
+	// return is 0 on success (ObjectDefinition path builder asserts r == 0).
+	LIB_FUNC("NC4MSB+BRQg", LibC::c_snprintf_errno);
 	// Gen5 vsprintf_s — NID +qitMEbkSWk (hard-abort after fgets on Astro).
 	LIB_FUNC("+qitMEbkSWk", LibC::c_vsprintf_s);
 	LIB_FUNC("Q2V+iqvjgC0", LibC::c_vsnprintf); // vsnprintf (Gen5 libc_v1)
