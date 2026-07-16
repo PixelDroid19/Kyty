@@ -971,6 +971,7 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 libc_v1 memmove_s — B59+zQQCcbU after TLS factory / strtoull on Astro.
 	LIB_FUNC("B59+zQQCcbU", LibC::c_memmove_s);
 	LIB_FUNC("8zTFvBIAIN8", LibC::c_memset);
+	LIB_FUNC("h8GwqPFbu6I", LibC::c_memset_s);
 	LIB_FUNC("DfivPArhucg", LibC::c_memcmp);
 	LIB_FUNC("j4ViWNHEgww", LibC::c_strlen);
 	LIB_FUNC("6sJWiWSRuqk", LibC::c_strncpy);
