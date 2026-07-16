@@ -795,13 +795,14 @@ TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1Immediate32)
 	uint32_t*   cmd =
 	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x14, 0, 1, 0, label, 1, 1, 0, 1, 0, 0);
 	ASSERT_NE(cmd, nullptr);
-	EXPECT_EQ(cmd[0], KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
 	EXPECT_EQ(cmd[1], 0x14u);
 	EXPECT_EQ(cmd[2], 0x00010000u); // gcr=0 | data_sel=1 << 16
 	EXPECT_EQ(cmd[3], 0x100u);
 	EXPECT_EQ(cmd[4], 0u);
 	EXPECT_EQ(cmd[5], 1u);
 	EXPECT_EQ(cmd[6], 0u);
+	EXPECT_EQ(cmd[7], 0u);
 }
 
 // data_sel 0: barrier/flush only (no label write). Matches CP custom path.
@@ -836,13 +837,14 @@ TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel0Barrier)
 	uint32_t*   cmd =
 	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x28, 0, 1, 0, label, 0, 0, 0, 0, 0, 0);
 	ASSERT_NE(cmd, nullptr);
-	EXPECT_EQ(cmd[0], KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
 	EXPECT_EQ(cmd[1], 0x28u);
 	EXPECT_EQ(cmd[2], 0x00000000u); // gcr=0 | data_sel=0 << 16
 	EXPECT_EQ(cmd[3], 0x100u);
 	EXPECT_EQ(cmd[4], 0u);
 	EXPECT_EQ(cmd[5], 0u);
 	EXPECT_EQ(cmd[6], 0u);
+	EXPECT_EQ(cmd[7], 0u);
 }
 
 // Immediate ReleaseMem does not encode GDS; gds_size 0 (unused) matches gds_size 1.
@@ -877,9 +879,49 @@ TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1WithUnusedGdsSize0)
 	uint32_t*   cmd =
 	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x14, 0, 1, 0, label, 1, 1, 0, 0, 0, 0);
 	ASSERT_NE(cmd, nullptr);
-	EXPECT_EQ(cmd[0], KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
 	EXPECT_EQ(cmd[2], 0x00010000u);
 	EXPECT_EQ(cmd[5], 1u);
+	EXPECT_EQ(cmd[7], 0u);
+}
+
+// Clock-counter form with non-zero interrupt selector (Gen5 after Resident Load).
+TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel3WithInterrupt)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	const auto* label = reinterpret_cast<const volatile Gen5::Label*>(static_cast<uintptr_t>(0x200));
+	uint32_t*   cmd =
+	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x28, 0, 1, 0, label, 3, 0, 0, 1, 1, 0x11u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
+	EXPECT_EQ(cmd[1], 0x28u);
+	EXPECT_EQ(cmd[2], 0x01030000u); // interrupt=1 << 24 | data_sel=3 << 16
+	EXPECT_EQ(cmd[3], 0x200u);
+	EXPECT_EQ(cmd[7], 0x11u);
 }
 
 TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1WithNullDestination)
@@ -911,13 +953,14 @@ TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1WithNullDestination)
 
 	uint32_t* cmd = Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x14, 0, 1, 0, nullptr, 1, 0, 0, 0, 0, 0);
 	ASSERT_NE(cmd, nullptr);
-	EXPECT_EQ(cmd[0], KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
 	EXPECT_EQ(cmd[1], 0x14u);
 	EXPECT_EQ(cmd[2], 0x00010000u);
 	EXPECT_EQ(cmd[3], 0u);
 	EXPECT_EQ(cmd[4], 0u);
 	EXPECT_EQ(cmd[5], 0u);
 	EXPECT_EQ(cmd[6], 0u);
+	EXPECT_EQ(cmd[7], 0u);
 }
 
 TEST(EmulatorGraphicsPackets, SizesGen5RotatedXRenderTargets)

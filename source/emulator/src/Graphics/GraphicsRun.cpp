@@ -3619,9 +3619,10 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0054902 && cmd_id != 0xc0051060);
+	// 0xC0051060 = 7-DW custom envelope; 0xC0061060 = 8-DW with interrupt_ctx_id.
+	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0054902 && cmd_id != 0xc0051060 && cmd_id != 0xc0061060);
 
-	bool custom = (cmd_id == 0xc0051060);
+	bool custom = (cmd_id == 0xc0051060 || cmd_id == 0xc0061060);
 
 	if (custom && buffer[0] == KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE))
 	{
@@ -3714,7 +3715,9 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 	cp->WriteAtEndOfPipe64(cache_policy, event_write_dest, eop_event_type, cache_action, event_index, event_write_source, dst_gpu_addr,
 	                       value, interrupt_selector);
 
-	return 6;
+	// Body dwords after the Type-3 header: 6 for the 7-DW form, 7 when the
+	// packet carries interrupt_ctx_id as an eighth dword.
+	return (cmd_id == 0xc0061060) ? 7 : 6;
 }
 
 KYTY_CP_OP_PARSER(cp_op_one_reg_write)
