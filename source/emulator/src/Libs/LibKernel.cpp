@@ -655,6 +655,7 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("aNz11fnnzi4", Memory::KernelAvailableFlexibleMemorySize);
 	LIB_FUNC("n1-v6FgU7MQ", Memory::KernelConfiguredFlexibleMemorySize);
 	LIB_FUNC("DGMG3JshrZU", Memory::KernelSetVirtualRangeName);
+	LIB_FUNC("mkgXxsoxWHg", Memory::KernelClearVirtualRangeName);
 	LIB_FUNC("rVjRvHJ0X6c", Memory::KernelVirtualQuery);
 	LIB_FUNC("vSMAm3cxYTY", Memory::KernelMprotect);
 }
@@ -742,6 +743,8 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("mqdNorrB+gI", LibKernel::PthreadRwlockWrlock);
 	// Gen5 rwlock / attr NIDs observed as strict Unpatched imports.
 	LIB_FUNC("bIHoZCTomsI", LibKernel::PthreadRwlockTrywrlock);
+	// Gen5 scePthreadRwlockTryrdlock — NID XD3mDeybCnk.
+	LIB_FUNC("XD3mDeybCnk", LibKernel::PthreadRwlockTryrdlock);
 	LIB_FUNC("i2ifZ3fS2fo", LibKernel::PthreadRwlockattrDestroy);
 	LIB_FUNC("yOfGg-I1ZII", LibKernel::PthreadRwlockattrInit);
 
