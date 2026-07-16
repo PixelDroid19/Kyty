@@ -520,6 +520,38 @@ static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cm
 	return OK;
 }
 
+// sceAmprAmmSubmitCommandBuffer / SubmitCommandBuffer2 / WaitCommandBufferCompletion.
+// Builder APIs apply work eagerly (ReadFile, address/equeue completion). Hardware
+// defers until submit; sync HLE acknowledges submit/wait with nothing left to drain.
+static KYTY_SYSV_ABI int AmmSubmitCommandBuffer(void* cmd_obj)
+{
+	PRINT_NAME();
+	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
+	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	if (cmd == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	return OK;
+}
+
+static KYTY_SYSV_ABI int AmmSubmitCommandBuffer2(void* cmd_obj, uint64_t /*arg1*/)
+{
+	return AmmSubmitCommandBuffer(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AmmWaitCommandBufferCompletion(void* cmd_obj)
+{
+	PRINT_NAME();
+	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
+	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	if (cmd == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	return OK;
+}
+
 } // namespace Ampr
 
 LIB_DEFINE(InitAmpr_1)
@@ -548,6 +580,11 @@ LIB_DEFINE(InitAmpr_1)
 	LIB_FUNC("mQ16-QdKv7k", Ampr::AprCommandBufferReadFile);
 	LIB_FUNC("sJXyWHjP-F8", Ampr::CommandBufferWriteAddressOnCompletion);
 	LIB_FUNC("o67gODLFpls", Ampr::CommandBufferWriteKernelEventQueueOnCompletion);
+
+	// AMM submit/wait (NID map: lwS-7y3jcBI / OJf3vCckPAM / HXymib4T8gc)
+	LIB_FUNC("lwS-7y3jcBI", Ampr::AmmSubmitCommandBuffer);
+	LIB_FUNC("OJf3vCckPAM", Ampr::AmmSubmitCommandBuffer2);
+	LIB_FUNC("HXymib4T8gc", Ampr::AmmWaitCommandBufferCompletion);
 }
 
 } // namespace Kyty::Libs
