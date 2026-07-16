@@ -1,3 +1,4 @@
+#include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
@@ -472,6 +473,59 @@ TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 	query.type                 = Loader::SymbolType::Func;
 
 	EXPECT_NE(symbols.Find(query), nullptr);
+}
+
+// Gen5 ACB/DCB sizing helpers and Trinity query contracts used by Astro boot.
+TEST(EmulatorGraphicsState, Gen5AgcSizeHelpersAndTrinityMode)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	using namespace Kyty::Libs::Graphics::Gen5;
+	EXPECT_EQ(GraphicsCbNopGetSize(4), 16u);
+	EXPECT_EQ(GraphicsCbNopGetSize(1), 4u);
+	EXPECT_EQ(GraphicsCbDispatchGetSize(), 20u);
+	EXPECT_EQ(GraphicsCbSetShRegisterRangeDirectGetSize(3), 20u);
+	EXPECT_EQ(GraphicsGetIsTrinityMode(), 0u);
+	EXPECT_EQ(GraphicsDebugRaiseException(0x1234u), OK);
+
+	uint32_t write_cmd[4] = {KYTY_PM4(4, Pm4::IT_WRITE_DATA, 0u), 0u, 0u, 0u};
+	EXPECT_EQ(GraphicsWriteDataPatchSetAddressOrOffset(write_cmd, 0x1122334455667788ull), OK);
+	EXPECT_EQ(write_cmd[2], 0x55667788u);
+	EXPECT_EQ(write_cmd[3], 0x11223344u);
+	uint32_t bad_cmd[2] = {KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0u};
+	EXPECT_NE(GraphicsWriteDataPatchSetAddressOrOffset(bad_cmd, 0), OK);
+}
+
+// Missing Gen5 AGC / AgcDriver exports that blocked Astro after Ampr/VideoOut.
+TEST(EmulatorGraphicsState, ResolvesGen5AgcAndDriverExports)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libGraphicsDriver_1", &symbols));
+
+	auto resolve = [&](const char16_t* nid, const char16_t* library, const char16_t* module) {
+		Loader::SymbolResolve query {};
+		query.name                 = nid;
+		query.library              = library;
+		query.library_version      = 1;
+		query.module               = module;
+		query.module_version_major = 1;
+		query.module_version_minor = 1;
+		query.type                 = Loader::SymbolType::Func;
+		return symbols.Find(query) != nullptr;
+	};
+
+	EXPECT_TRUE(resolve(u"BfBDZGbti7A", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"htn36gPnBk4", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"t7PlZ9nt5Lc", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"1rZSWUv1IRc", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"+kSrjIVxKFE", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"AhGvpITrf4M", u"Graphics5Driver", u"Graphics5Driver"));
+	EXPECT_TRUE(resolve(u"gSRnr79F8tQ", u"Graphics5Driver", u"Graphics5Driver"));
+	EXPECT_TRUE(resolve(u"w2rJhmD+dsE", u"Graphics5Driver", u"Graphics5Driver"));
 }
 
 // WaitFlipDone body observed post-Play: handle=0, index=3 while Open() left
