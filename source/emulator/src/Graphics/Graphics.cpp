@@ -2305,8 +2305,11 @@ int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
-	const auto op = (cmd[0] >> 8u) & 0xffu;
-	if (op != Pm4::IT_WRITE_DATA)
+	const auto op  = (cmd[0] >> 8u) & 0xffu;
+	const auto reg = KYTY_PM4_R(cmd[0]);
+	// Accept both hardware IT_WRITE_DATA and the Gen5 custom R_WRITE_DATA NOP
+	// envelope used by GraphicsDcbWriteData.
+	if (op != Pm4::IT_WRITE_DATA && !(op == Pm4::IT_NOP && reg == Pm4::R_WRITE_DATA))
 	{
 		return static_cast<int>(0x8a6c000cu);
 	}
@@ -2903,7 +2906,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, ui
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED((4 + num_dwords - 2u) > 0x3fffu);
 	EXIT_NOT_IMPLEMENTED(data == nullptr);
-	EXIT_NOT_IMPLEMENTED(address_or_offset == 0);
+	// address_or_offset may be 0: Gen5 reserves the packet then patches the
+	// destination with GraphicsWriteDataPatchSetAddressOrOffset before submit.
 
 	buf->DbgDump();
 
