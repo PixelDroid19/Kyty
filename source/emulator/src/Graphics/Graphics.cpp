@@ -1984,6 +1984,57 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t nu
 	return GraphicsCbNop(buf, num_dw);
 }
 
+uint32_t KYTY_SYSV_ABI GraphicsCbNopGetSize(uint32_t size_in_dwords)
+{
+	return 4u * size_in_dwords;
+}
+
+uint32_t KYTY_SYSV_ABI GraphicsCbDispatchGetSize()
+{
+	// GraphicsCbDispatch allocates a fixed 5-dword packet.
+	return 20u;
+}
+
+uint32_t KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirectGetSize(uint32_t num_values)
+{
+	// Header + offset + values: (2 + num_values) dwords.
+	return 4u * num_values + 8u;
+}
+
+uint64_t KYTY_SYSV_ABI GraphicsGetIsTrinityMode()
+{
+	// Non-Pro Prospero reports 0. Do not invent Pro/Trinity features.
+	return 0;
+}
+
+int KYTY_SYSV_ABI GraphicsDebugRaiseException(uint32_t exception_id)
+{
+	PRINT_NAME();
+	printf("\t exception_id = 0x%08" PRIx32 "\n", exception_id);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64_t address_or_offset)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), address_or_offset);
+
+	if (cmd == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	const auto op = (cmd[0] >> 8u) & 0xffu;
+	if (op != Pm4::IT_WRITE_DATA)
+	{
+		return static_cast<int>(0x8a6c000cu);
+	}
+
+	cmd[2] = static_cast<uint32_t>(address_or_offset & 0xffffffffu);
+	cmd[3] = static_cast<uint32_t>((address_or_offset >> 32u) & 0xffffffffu);
+	return OK;
+}
+
 // sceAgcGetPacketSize (NID Lkf86B98qPc): type-3 header → dword length.
 uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 {
@@ -2634,6 +2685,240 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 	return cmd;
 }
 
+uint32_t* KYTY_SYSV_ABI GraphicsAcbWaitRegMem(CommandBuffer* buf, uint8_t size, uint8_t compare_function, uint8_t cache_policy,
+                                              const volatile void* address, uint64_t reference, uint64_t mask, uint32_t poll_cycles)
+{
+	// Gen5 ACB WaitRegMem omits the DCB `op` argument; encode as op=0.
+	return GraphicsDcbWaitRegMem(buf, size, compare_function, 0, cache_policy, address, reference, mask, poll_cycles);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address)
+{
+	return GraphicsDcbEventWrite(buf, event_type, address);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
+                                             const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm)
+{
+	return GraphicsDcbWriteData(buf, dst, cache_policy, address_or_offset, data, num_dwords, increment, write_confirm);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbAcquireMem(CommandBuffer* buf, uint32_t gcr_cntl, const volatile void* base, uint64_t size_bytes,
+                                              uint32_t poll_cycles)
+{
+	// ACB form fixes engine=1 (ME) and cb_db_op=0.
+	return GraphicsDcbAcquireMem(buf, 1, 0, gcr_cntl, base, size_bytes, poll_cycles);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbResetQueue(CommandBuffer* buf, uint32_t op)
+{
+	PRINT_NAME();
+	printf("\t op = 0x%08" PRIx32 "\n", op);
+
+	if (buf == nullptr || (op & ~0x1c2u) != 0)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_DISPATCH_RESET);
+	cmd[1] = 0;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dst_cache_policy, uint64_t dst_address, uint8_t src,
+                                            uint8_t src_cache_policy, uint64_t src_address_or_immediate, uint8_t item_size,
+                                            uint8_t write_confirm)
+{
+	PRINT_NAME();
+	printf("\t dst=0x%02" PRIx8 " src=0x%02" PRIx8 " dst_addr=0x%016" PRIx64 " src=0x%016" PRIx64 " item=%u conf=%u\n", dst, src,
+	       dst_address, src_address_or_immediate, item_size, write_confirm);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(6);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	cmd[0] = KYTY_PM4(6, Pm4::IT_COPY_DATA, 0u);
+	cmd[1] = ((static_cast<uint32_t>(src) >> 1u) & 0xfu) | (((static_cast<uint32_t>(dst) >> 1u) & 0xfu) << 8u) |
+	         ((static_cast<uint32_t>(src_cache_policy) & 0x3u) << 13u) | ((static_cast<uint32_t>(item_size) & 0x1u) << 16u) |
+	         ((static_cast<uint32_t>(write_confirm) & 0x1u) << 20u) | ((static_cast<uint32_t>(dst_cache_policy) & 0x3u) << 25u) |
+	         ((static_cast<uint32_t>(src) & 0x1u) << 30u);
+	cmd[2] = static_cast<uint32_t>(src_address_or_immediate & 0xffffffffu);
+	cmd[3] = static_cast<uint32_t>((src_address_or_immediate >> 32u) & 0xffffffffu);
+	cmd[4] = static_cast<uint32_t>(dst_address & 0xffffffffu);
+	cmd[5] = static_cast<uint32_t>((dst_address >> 32u) & 0xffffffffu);
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dst_cache_policy, uint64_t dst_address, uint8_t src,
+                                            uint8_t src_cache_policy, uint64_t src_address_or_immediate, uint8_t item_size,
+                                            uint8_t write_confirm)
+{
+	// ACB memory-src encoding uses src==5 for a shifted DCB form.
+	const auto dcb_src = (src == 5 ? static_cast<uint8_t>(5u << 1u) : src);
+	return GraphicsDcbCopyData(buf, dst, dst_cache_policy, dst_address, dcb_src, src_cache_policy, src_address_or_immediate, item_size,
+	                           write_confirm);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbPushMarker(CommandBuffer* buf, const char* str, uint32_t /*color*/)
+{
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+	if (str == nullptr)
+	{
+		str = "";
+	}
+
+	const auto len            = strlen(str) + 1;
+	const auto payload_dwords = static_cast<uint32_t>((len + 3) / 4);
+	const auto size           = 1u + (payload_dwords == 0 ? 1u : payload_dwords);
+	auto*      cmd            = buf->AllocateDW(size);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_PUSH_MARKER);
+	memset(cmd + 1, 0, static_cast<size_t>(size - 1) * sizeof(uint32_t));
+	memcpy(cmd + 1, str, len);
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbPopMarker(CommandBuffer* buf)
+{
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_POP_MARKER);
+	cmd[1] = 0;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbPushMarker(CommandBuffer* buf, const char* str, uint32_t color)
+{
+	return GraphicsDcbPushMarker(buf, str, color);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbPopMarker(CommandBuffer* buf)
+{
+	return GraphicsDcbPopMarker(buf);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t index_addr)
+{
+	PRINT_NAME();
+	printf("\t index_addr = 0x%016" PRIx64 "\n", index_addr);
+
+	if (buf == nullptr || (index_addr & 1u) != 0)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(3);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(3, Pm4::IT_INDEX_BASE, 0u);
+	cmd[1] = static_cast<uint32_t>(index_addr & 0xffffffffu);
+	cmd[2] = static_cast<uint32_t>((index_addr >> 32u) & 0xffffffffu);
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count)
+{
+	PRINT_NAME();
+	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_INDEX_BUFFER_SIZE, 0u);
+	cmd[1] = index_count;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances)
+{
+	PRINT_NAME();
+	printf("\t num_instances = 0x%" PRIx32 "\n", num_instances);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_NUM_INSTANCES, 0u);
+	cmd[1] = num_instances;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbGetLodStats(CommandBuffer* buf, uint8_t cache_policy, const volatile void* buffer,
+                                               uint32_t buffer_size_in_bytes, uint32_t reset_count, uint8_t force_reset,
+                                               uint8_t report_and_reset, uint32_t reporting_interval_in_100k_clocks)
+{
+	PRINT_NAME();
+	printf("\t buffer = 0x%016" PRIx64 " size = %" PRIu32 "\n", reinterpret_cast<uint64_t>(buffer), buffer_size_in_bytes);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(5);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	const auto buffer_addr = reinterpret_cast<uint64_t>(buffer);
+	cmd[0]                 = KYTY_PM4(5, Pm4::IT_GET_LOD_STATS, 0u);
+	cmd[1]                 = buffer_size_in_bytes;
+	cmd[2]                 = static_cast<uint32_t>(buffer_addr & 0xffffffc0u);
+	cmd[3]                 = static_cast<uint32_t>((buffer_addr >> 32u) & 0xffffffffu);
+	cmd[4]                 = ((static_cast<uint32_t>(cache_policy) & 0x3u) << 28u) |
+	         ((static_cast<uint32_t>(report_and_reset) & 0x1u) << 19u) | ((static_cast<uint32_t>(force_reset) & 0x1u) << 18u) |
+	         ((reset_count & 0xffu) << 10u) | ((reporting_interval_in_100k_clocks & 0xffu) << 2u);
+	return cmd;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_out_handle, int32_t display_buffer_index, uint32_t flip_mode,
                                            int64_t flip_arg)
 {
@@ -2833,6 +3118,42 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitDcb(const Packet* packet)
 	GraphicsRunSubmit(packet->addr, packet->dw_num, nullptr, 0);
 
 	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
+{
+	PRINT_NAME();
+	printf("\t queue  = 0x%08" PRIx32 "\n", queue);
+	printf("\t packet = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet));
+
+	if (packet == nullptr)
+	{
+		return OK;
+	}
+
+	printf("\t acb    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet->addr));
+	printf("\t dw_num = 0x%08" PRIx32 "\n", packet->dw_num);
+
+	// Queue-indexed compute submit is not fully modeled yet. Execute the ACB
+	// through the existing command processor so WaitRegMem/ReleaseMem packets
+	// still complete guest labels rather than stalling on an empty GPU path.
+	(void)queue;
+	if (packet->addr != nullptr && packet->dw_num != 0)
+	{
+		GraphicsDbgDumpDcb("a", packet->dw_num, packet->addr);
+		GraphicsRunSubmit(packet->addr, packet->dw_num, nullptr, 0);
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata)
+{
+	PRINT_NAME();
+	if (eq == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EBADF;
+	}
+	return GraphicsRenderAddEqEvent(eq, id, udata);
 }
 
 } // namespace Gen5Driver

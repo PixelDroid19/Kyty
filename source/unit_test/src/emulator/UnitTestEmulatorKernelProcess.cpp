@@ -5,6 +5,8 @@
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Config.h"
 #include "Emulator/Libs/Errno.h"
+#include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 #include "Kyty/UnitTest.h"
 
@@ -148,6 +150,29 @@ TEST(EmulatorKernelProcess, VirtualQueryRejectsBadArgs)
 	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 0, nullptr, sizeof(info)), LibKernel::KERNEL_ERROR_EINVAL);
 	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 0, &info, 8), LibKernel::KERNEL_ERROR_EINVAL);
 	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 2, &info, sizeof(info)), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+// Gen5 TLS setspecific/getspecific NIDs used after KeyCreate.
+TEST(EmulatorKernelProcess, ResolvesGen5PthreadSpecificNids)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	auto resolve = [&](const char16_t* nid) {
+		Loader::SymbolResolve query {};
+		query.name                 = nid;
+		query.library              = U"libkernel";
+		query.library_version      = 1;
+		query.module               = U"libkernel";
+		query.module_version_major = 1;
+		query.module_version_minor = 1;
+		query.type                 = Loader::SymbolType::Func;
+		return symbols.Find(query) != nullptr;
+	};
+
+	EXPECT_TRUE(resolve(u"+BzXYkqYeLE"));
+	EXPECT_TRUE(resolve(u"eoht7mQOCmo"));
+	EXPECT_TRUE(resolve(u"rVjRvHJ0X6c"));
 }
 
 UT_END();

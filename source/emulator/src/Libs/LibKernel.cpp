@@ -758,6 +758,8 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	// Gen5 TLS key + timed mutex NIDs.
 	LIB_FUNC("geDaqgH9lTg", LibKernel::PthreadKeyCreate);
 	LIB_FUNC("PrdHuuDekhY", LibKernel::PthreadKeyDelete);
+	LIB_FUNC("+BzXYkqYeLE", LibKernel::PthreadSetspecific);
+	LIB_FUNC("eoht7mQOCmo", LibKernel::PthreadGetspecific);
 	LIB_FUNC("IafI2PxcPnQ", LibKernel::PthreadMutexTimedlock);
 
 	LIB_FUNC("QBi7HCK03hw", LibKernel::KernelClockGettime);
