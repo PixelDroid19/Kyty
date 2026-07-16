@@ -98,6 +98,12 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	{
 		case static_cast<uint64_t>(VideoOutBufferFormat::R8G8B8A8Srgb): vk_format = VK_FORMAT_R8G8B8A8_SRGB; break;
 		case static_cast<uint64_t>(VideoOutBufferFormat::B8G8R8A8Srgb): vk_format = VK_FORMAT_B8G8R8A8_SRGB; break;
+		case static_cast<uint64_t>(VideoOutBufferFormat::R10G10B10A2Unorm):
+			vk_format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+			break;
+		case static_cast<uint64_t>(VideoOutBufferFormat::B10G10R10A2Unorm):
+			vk_format = VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+			break;
 		default: EXIT("unknown format: %" PRIu64 "\n", pixel_format);
 	}
 
