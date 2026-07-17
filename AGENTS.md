@@ -955,14 +955,20 @@ or cite unsafe survival as compatibility. Neighbor PRX soft-preload is
 | Variable | Meaning |
 | --- | --- |
 | `KYTY_BRINGUP_MODE=unsafe` | Enable diagnostic policy (absent ⇒ strict). |
-| `KYTY_BRINGUP_FEATURES` | CSV: `not_implemented`, `missing_function_import`, `gfx_permissive`, `prx_preload`. Absent under unsafe enables all of them. |
+| `KYTY_BRINGUP_FEATURES` | CSV: `not_implemented`, `missing_function_import`, `gfx_permissive`, `prx_preload`. Absent under unsafe enables the first three only; **`prx_preload` is always explicit**. |
 | `KYTY_BRINGUP_SUBSYSTEMS` | CSV scopes: `core,loader,kernel,graphics,audio,network,hle,other`. Absent ⇒ all. |
 | `KYTY_BRINGUP_BURST_LIMIT` | Max hits per site inside the window (default 10000). |
 | `KYTY_BRINGUP_BURST_WINDOW_MS` | Window length in ms (default 1000). |
 
-Unknown, empty, zero, or contradictory values abort at process start. Circuit-
-break on a site re-enters the normal strict abort after printing a summary. The
-policy never fabricates EventFlags, fences, memory, or sync results.
+Unknown, empty, zero, or contradictory values abort at process start
+(`BringUp::InitFromEnvironment` from Core subsystem init; no silent strict
+fallback after a parse error). Circuit-break on a site re-enters the normal
+strict abort after printing a summary. Repeated `EXIT_NOT_IMPLEMENTED` continues
+log once per site (no full stack spam on every hit). The policy never
+fabricates EventFlags, fences, memory, or sync results. Only **Func** imports
+may receive missing stubs (with a minimal return-class taxonomy); Object / TLS /
+NoType stay strict `EXIT`. Neighbor PRX scan is **not** part of default unsafe
+features — set `prx_preload` explicitly.
 
 **Removed (intentional break):** `KYTY_STUB_MISSING` and `KYTY_GFX_PERMISSIVE`.
 Using them is a configuration error.

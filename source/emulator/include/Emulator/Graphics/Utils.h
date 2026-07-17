@@ -5,6 +5,7 @@
 
 #include "Emulator/Common.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 #include <vulkan/vulkan_core.h>
@@ -211,6 +212,16 @@ struct ColorAttachmentLoadOps
 			ops.clear_g      = clear.float32[1];
 			ops.clear_b      = clear.float32[2];
 			ops.clear_a      = clear.float32[3];
+		}
+		// Diagnostic only: prove whether draws write over a non-black clear.
+		// If the screen stays magenta, draws are not reaching the display buffer.
+		// If content appears over magenta, the black was empty/alpha-0 guest output.
+		if (std::getenv("KYTY_DEBUG_CLEAR_MAGENTA") != nullptr)
+		{
+			ops.clear_r = 1.0f;
+			ops.clear_g = 0.0f;
+			ops.clear_b = 1.0f;
+			ops.clear_a = 1.0f;
 		}
 	} else
 	{

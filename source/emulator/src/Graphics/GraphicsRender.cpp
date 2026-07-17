@@ -10,6 +10,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
@@ -4857,6 +4858,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		return;
 	}
 
+	DebugStatsRecordDraw();
+
 	sh_print("GraphicsRenderDrawIndex():Shader:", *sh_ctx);
 	sh_check(*sh_ctx);
 
@@ -5000,6 +5003,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		return;
 	}
 
+	DebugStatsRecordDraw();
+
 	sh_print("GraphicsRenderDrawIndexAuto():Shader:", *sh_ctx);
 	sh_check(*sh_ctx);
 
@@ -5120,6 +5125,8 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	{
 		return;
 	}
+
+	DebugStatsRecordDispatch();
 
 	// COMPUTE_DISPATCH_INITIATOR bits. COMPUTE_SHADER_EN must be set to dispatch.
 	// USE_THREAD_DIMENSIONS means the packet carries thread counts instead of

@@ -549,8 +549,9 @@ void InitFromEnvironment()
 		}
 	} else if (cfg.mode == Mode::Unsafe)
 	{
-		// Absent features in unsafe mode enables all three.
-		cfg.features = Feature::All;
+		// Absent features in unsafe mode: continue/stubs/gfx only.
+		// prx_preload remains explicit (KYTY_BRINGUP_FEATURES=...,prx_preload).
+		cfg.features = Feature::DefaultUnsafe;
 	}
 
 	const char* subsystems = std::getenv("KYTY_BRINGUP_SUBSYSTEMS");

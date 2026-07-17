@@ -12,6 +12,8 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
+#include "Emulator/Graphics/DebugOverlay.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Image.h"
@@ -487,6 +489,12 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 	{
 		SetPause(game, !game->m_game_is_paused);
 	}
+
+	// Host debug HUD toggle (does not map to guest pad).
+	if (key->down && key->key_code == SDLK_F1)
+	{
+		DebugOverlayToggle();
+	}
 #endif
 }
 
@@ -829,6 +837,8 @@ void game_process_event(GameApi* game, double time_s)
 	auto* event = static_cast<SDL_Event*>(game->data2);
 
 	EXIT_IF(!event);
+
+	DebugOverlayProcessEvent(event);
 
 	// printf("Event: 0x%04" PRIx32 "\n", event.type);
 
@@ -2270,6 +2280,8 @@ static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uin
 
 	s->current_index = static_cast<uint32_t>(-1);
 	printf("Swapchain recreated: %ux%u images=%u\n", s->swapchain_extent.width, s->swapchain_extent.height, s->swapchain_images_count);
+
+	DebugOverlayOnSwapchainRecreated(ctx, s);
 }
 
 static void VulkanCreate(WindowContext* ctx)
@@ -2442,6 +2454,7 @@ static void VulkanCreate(WindowContext* ctx)
 	VulkanCreateQueues(&ctx->graphic_ctx, queues);
 
 	ctx->swapchain = VulkanCreateSwapchain(&ctx->graphic_ctx, 2);
+	DebugOverlayInit(ctx->window, &ctx->graphic_ctx, ctx->swapchain);
 }
 
 void WindowInit(uint32_t width, uint32_t height)
@@ -2493,6 +2506,8 @@ void WindowRun()
 
 	game_main_loop(api, &g_window_ctx->graphic_ctx);
 	// game_delete_api(api);
+
+	DebugOverlayShutdown(&g_window_ctx->graphic_ctx);
 
 	Core::SubsystemsListSingleton::Instance()->ShutdownAll();
 	std::_Exit(0);
@@ -2645,6 +2660,9 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	EXIT_IF(blt_src_image == nullptr);
 	EXIT_IF(blt_dst_image == nullptr);
 
+	DebugStatsRecordPresentSource(blt_src_image->extent.width, blt_src_image->extent.height, blt_dst_image->swapchain_extent.width,
+	                              blt_dst_image->swapchain_extent.height, static_cast<uint32_t>(blt_src_image->layout));
+
 	CommandBuffer buffer(GraphicContext::QUEUE_PRESENT);
 	// buffer.SetQueue(GraphicContext::QUEUE_PRESENT);
 
@@ -2656,12 +2674,18 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	UtilBlitImage(&buffer, blt_src_image, blt_dst_image);
 
+	const double now_seconds   = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_time_seconds : 0.0;
+	const double fps_now       = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_fps : 0.0;
+	const double frame_time_ms = (fps_now > 0.0) ? (1000.0 / fps_now) : 0.0;
+	const bool   hud_drew =
+	    DebugOverlayRecord(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, vk_buffer, now_seconds, fps_now, frame_time_ms);
+
 	VkImageMemoryBarrier pre_present_barrier {};
 	pre_present_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	pre_present_barrier.pNext                           = nullptr;
-	pre_present_barrier.srcAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT;
+	pre_present_barrier.srcAccessMask                   = hud_drew ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
 	pre_present_barrier.dstAccessMask                   = VK_ACCESS_MEMORY_READ_BIT;
-	pre_present_barrier.oldLayout                       = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	pre_present_barrier.oldLayout = hud_drew ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	pre_present_barrier.newLayout                       = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 	pre_present_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 	pre_present_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
@@ -2671,8 +2695,9 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	pre_present_barrier.subresourceRange.baseArrayLayer = 0;
 	pre_present_barrier.subresourceRange.layerCount     = 1;
 	pre_present_barrier.image                           = g_window_ctx->swapchain->swapchain_images[g_window_ctx->swapchain->current_index];
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1,
-	                     &pre_present_barrier);
+	const VkPipelineStageFlags src_stage =
+	    hud_drew ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+	vkCmdPipelineBarrier(vk_buffer, src_stage, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &pre_present_barrier);
 
 	buffer.End();
 	buffer.ExecuteWithSemaphore();

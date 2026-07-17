@@ -1157,12 +1157,17 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 				out_info->name     = SymbolDatabase::GenerateName(sr);
 				out_info->dbg_name = U"";
 
-				// Only Func imports may receive bring-up stubs. Object / TLS /
-				// NoType / unknown remain unresolved (fatal at bind time).
+				// Only Func imports may receive bring-up stubs.
 				if (type == SymbolType::Func && Core::BringUp::AllowMissingFunctionImport())
 				{
 					out_info->vaddr    = MissingImport::Assign(sr);
 					out_info->dbg_name = U"kyty_missing_func_stub";
+				} else if (type != SymbolType::Func)
+				{
+					// Object / TLS / NoType / unknown must stay strict: never stub,
+					// never continue with silent zero vaddr under unsafe Func stubs.
+					EXIT("=== Unpatched non-Func import!!! ===\n[%d]\t%s type=%d\n", Core::Thread::GetThreadIdUnique(),
+					     out_info->name.C_Str(), static_cast<int>(type));
 				}
 			}
 		} else
