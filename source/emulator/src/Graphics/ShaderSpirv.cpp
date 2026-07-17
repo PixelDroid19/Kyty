@@ -4134,6 +4134,61 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata1Vaddr3StSsDmask1)
 	return false;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata2Vaddr3StSsDmask3)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+
+	if (bind_info == nullptr || !ImageSampleLzUses2dTexture(*bind_info) || bind_info->samplers.samplers_num <= 0)
+	{
+		return false;
+	}
+
+	ValidateImageSampleLz2dAddresses(inst);
+
+	const auto dst_value0  = operand_variable_to_str(inst.dst, 0);
+	const auto dst_value1  = operand_variable_to_str(inst.dst, 1);
+	const auto src0_value0 = mimg_address_to_str(inst, 0);
+	const auto src0_value1 = mimg_address_to_str(inst, 1);
+	const auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
+	const auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
+
+	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float || dst_value1.type != SpirvType::Float);
+	EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float);
+	EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint || src2_value0.type != SpirvType::Uint);
+
+	static const char* text = R"(
+         %t24_<index> = OpLoad %uint %<src1_value0>
+         %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %t24_<index>
+         %t27_<index> = OpLoad %ImageS %t26_<index>
+         %t33_<index> = OpLoad %uint %<src2_value0>
+         %t35_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %t33_<index>
+         %t36_<index> = OpLoad %Sampler %t35_<index>
+         %t38_<index> = OpSampledImage %SampledImage %t27_<index> %t36_<index>
+         %t39_<index> = OpLoad %float %<src0_value0>
+         %t40_<index> = OpLoad %float %<src0_value1>
+         %t42_<index> = OpCompositeConstruct %v2float %t39_<index> %t40_<index>
+         %t43_<index> = OpImageSampleExplicitLod %v4float %t38_<index> %t42_<index> Lod %float_0_000000
+               OpStore %temp_v4float %t43_<index>
+         %t46_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_0
+         %t47_<index> = OpLoad %float %t46_<index>
+               OpStore %<dst_value0> %t47_<index>
+         %t54_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_1
+         %t55_<index> = OpLoad %float %t54_<index>
+               OpStore %<dst_value1> %t55_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+	                   .ReplaceStr("<src0_value0>", src0_value0.value)
+	                   .ReplaceStr("<src0_value1>", src0_value1.value)
+	                   .ReplaceStr("<src1_value0>", src1_value0.value)
+	                   .ReplaceStr("<src2_value0>", src2_value0.value)
+	                   .ReplaceStr("<dst_value0>", dst_value0.value)
+	                   .ReplaceStr("<dst_value1>", dst_value1.value);
+
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata3Vaddr3StSsDmask7)
 {
 	const auto& inst      = code.GetInstructions().At(index);
@@ -8031,6 +8086,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_ImageSample_Vdata3Vaddr3StSsDmaskB,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB,         {""}},
     {Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF,         {""}},
     {Recompile_ImageSampleLz_Vdata1Vaddr3StSsDmask1,       ShaderInstructionType::ImageSampleLz,       ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1,         {""}},
+    {Recompile_ImageSampleLz_Vdata2Vaddr3StSsDmask3,       ShaderInstructionType::ImageSampleLz,       ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3,         {""}},
     {Recompile_ImageSampleLz_Vdata3Vaddr3StSsDmask7,       ShaderInstructionType::ImageSampleLz,       ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7,         {""}},
     {Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF,       ShaderInstructionType::ImageSampleLz,       ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF,         {""}},
     {Recompile_ImageSampleLzO_Vdata3Vaddr4StSsDmask7,      ShaderInstructionType::ImageSampleLzO,      ShaderInstructionFormat::Vdata3Vaddr4StSsDmask7,         {""}},
@@ -10003,6 +10059,10 @@ void Spirv::FindVariables()
 		for (int i = 0; i < inst.src_num; i++)
 		{
 			AddVariable(inst.src[i]);
+		}
+		for (int address = 0; address < inst.mimg_address_num; ++address)
+		{
+			AddVariable(inst.mimg_address[address]);
 		}
 	}
 
