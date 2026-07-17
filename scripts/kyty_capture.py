@@ -36,7 +36,17 @@ from typing import Any, Callable
 SCHEMA_VERSION = 1
 DEFAULT_WORLD_CROP = (0.18, 0.08, 0.92, 0.78)
 DEFAULT_HUD_CROP = (0.02, 0.82, 0.35, 0.96)
-FORBIDDEN_ENV = ("KYTY_STUB_MISSING", "KYTY_GFX_PERMISSIVE")
+FORBIDDEN_ENV = (
+    "KYTY_STUB_MISSING",
+    "KYTY_GFX_PERMISSIVE",
+    # Strict captures must not inherit unsafe bring-up and still claim acceptance.
+    "KYTY_BRINGUP_MODE",
+    "KYTY_BRINGUP_FEATURES",
+    "KYTY_BRINGUP_SUBSYSTEMS",
+    "KYTY_BRINGUP_BURST_LIMIT",
+    "KYTY_BRINGUP_BURST_WINDOW_MS",
+    "KYTY_BRINGUP_ALLOW_DIAGNOSTIC",
+)
 DIAGNOSTIC_ENV = (
     "KYTY_LIGHTBUF_PROBE",
     "KYTY_SKIP_UD2",
@@ -464,8 +474,8 @@ def run_capture(args: argparse.Namespace) -> int:
     if not args.allow_diagnostics:
         for name in DIAGNOSTIC_ENV:
             env.pop(name, None)
-    env.pop("KYTY_STUB_MISSING", None)
-    env.pop("KYTY_GFX_PERMISSIVE", None)
+    for name in FORBIDDEN_ENV:
+        env.pop(name, None)
     env["KYTY_AUTO_CROSS"] = "1" if args.auto_cross else "0"
     env["KYTY_NATIVE_CAPTURE_DIR"] = str(output / "native_frames")
     env["KYTY_NATIVE_CAPTURE_FIRST_PRESENT"] = "1"

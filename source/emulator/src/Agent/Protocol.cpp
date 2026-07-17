@@ -1,14 +1,163 @@
 #include "Emulator/Agent/Protocol.h"
 
+#include "Emulator/Agent/EventRing.h"
+#include "Emulator/Validation/DomainValidators.h"
+
 #include <cctype>
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Emulator::Agent {
 namespace {
+
+const char* BringUpModeName(Core::BringUp::Mode mode)
+{
+	return mode == Core::BringUp::Mode::Unsafe ? "unsafe" : "strict";
+}
+
+void AppendFeatureList(const Core::BringUp::Config& config, std::string* out)
+{
+	*out += '[';
+	bool           first           = true;
+	const uint32_t not_implemented = 1u << static_cast<uint32_t>(Core::BringUp::Feature::NotImplemented);
+	const uint32_t missing_func    = 1u << static_cast<uint32_t>(Core::BringUp::Feature::MissingFunctionImport);
+	const uint32_t gfx_perm        = 1u << static_cast<uint32_t>(Core::BringUp::Feature::GraphicsPermissive);
+	const uint32_t adj_discover    = 1u << static_cast<uint32_t>(Core::BringUp::Feature::AdjacentModuleDiscovery);
+
+	if ((config.feature_mask & not_implemented) != 0)
+	{
+		*out += first ? "\"not_implemented\"" : ",\"not_implemented\"";
+		first = false;
+	}
+	if ((config.feature_mask & missing_func) != 0)
+	{
+		*out += first ? "\"missing_function_import\"" : ",\"missing_function_import\"";
+		first = false;
+	}
+	if ((config.feature_mask & gfx_perm) != 0)
+	{
+		*out += first ? "\"gfx_permissive\"" : ",\"gfx_permissive\"";
+		first = false;
+	}
+	if ((config.feature_mask & adj_discover) != 0)
+	{
+		*out += first ? "\"adjacent_module_discovery\"" : ",\"adjacent_module_discovery\"";
+	}
+	*out += ']';
+	(void)first;
+}
+
+void AppendSubsystemList(const Core::BringUp::Config& config, std::string* out)
+{
+	*out += '[';
+	bool first = true;
+	const struct
+	{
+		uint32_t    bit;
+		const char* name;
+	} entries[] = {
+	    {1u << static_cast<uint32_t>(Core::BringUp::Subsystem::Core), "core"},
+	    {1u << static_cast<uint32_t>(Core::BringUp::Subsystem::Loader), "loader"},
+	    {1u << static_cast<uint32_t>(Core::BringUp::Subsystem::Kernel), "kernel"},
+	    {1u << static_cast<uint32_t>(Core::BringUp::Subsystem::Graphics), "graphics"},
+	    {1u << static_cast<uint32_t>(Core::BringUp::Subsystem::Audio), "audio"},
+	    {1u << static_cast<uint32_t>(Core::BringUp::Subsystem::Network), "network"},
+	    {1u << static_cast<uint32_t>(Core::BringUp::Subsystem::Hle), "hle"},
+	    {1u << static_cast<uint32_t>(Core::BringUp::Subsystem::Other), "other"},
+	};
+	for (const auto& e: entries)
+	{
+		if ((config.subsystem_mask & e.bit) == 0)
+		{
+			continue;
+		}
+		if (!first)
+		{
+			*out += ',';
+		}
+		*out += '"';
+		*out += e.name;
+		*out += '"';
+		first = false;
+	}
+	*out += ']';
+}
+
+std::string FeatureString(Core::BringUp::Feature feature)
+{
+	switch (feature)
+	{
+		case Core::BringUp::Feature::NotImplemented: return "not_implemented";
+		case Core::BringUp::Feature::MissingFunctionImport: return "missing_function_import";
+		case Core::BringUp::Feature::GraphicsPermissive: return "gfx_permissive";
+		case Core::BringUp::Feature::AdjacentModuleDiscovery: return "adjacent_module_discovery";
+		default: return "unknown";
+	}
+}
+
+std::string SubsystemString(Core::BringUp::Subsystem subsystem)
+{
+	switch (subsystem)
+	{
+		case Core::BringUp::Subsystem::Core: return "core";
+		case Core::BringUp::Subsystem::Loader: return "loader";
+		case Core::BringUp::Subsystem::Kernel: return "kernel";
+		case Core::BringUp::Subsystem::Graphics: return "graphics";
+		case Core::BringUp::Subsystem::Audio: return "audio";
+		case Core::BringUp::Subsystem::Network: return "network";
+		case Core::BringUp::Subsystem::Hle: return "hle";
+		case Core::BringUp::Subsystem::Other: return "other";
+		default: return "unknown";
+	}
+}
+
+} // namespace
+
+Tool ParseTool(const char* name) noexcept
+{
+	if (name == nullptr)
+	{
+		return Tool::Unknown;
+	}
+	struct Entry
+	{
+		const char* name;
+		Tool        tool;
+	};
+	static constexpr Entry kTools[] = {
+	    {"help", Tool::Help},
+	    {"ping", Tool::Ping},
+	    {"status", Tool::Status},
+	    {"diagnostics", Tool::Diagnostics},
+	    {"sync_waits", Tool::SyncWaits},
+	    {"threads", Tool::Threads},
+	    {"events", Tool::Events},
+	    {"last_error", Tool::LastError},
+	    {"capture", Tool::Capture},
+	    {"score", Tool::Score},
+	    {"pad_down", Tool::PadDown},
+	    {"pad_up", Tool::PadUp},
+	    {"pad_tap", Tool::PadTap},
+	    {"pad_axis", Tool::PadAxis},
+	    {"pad_clear", Tool::PadClear},
+	    {"wait_present", Tool::WaitPresent},
+	    {"wait_frame", Tool::WaitFrame},
+	    {"wait_phase", Tool::WaitPhase},
+	    {"wait_event", Tool::WaitEvent},
+	    {"watch", Tool::Watch},
+	};
+	for (const auto& entry: kTools)
+	{
+		if (std::strcmp(name, entry.name) == 0)
+		{
+			return entry.tool;
+		}
+	}
+	return Tool::Unknown;
+}
 
 const char* SkipWs(const char* p)
 {
@@ -86,8 +235,8 @@ bool ParseU64Value(const char* p, uint64_t* out, const char** end)
 	{
 		return false;
 	}
-	char*       parse_end = nullptr;
-	const auto  value     = std::strtoull(p, &parse_end, 10);
+	char*      parse_end = nullptr;
+	const auto value     = std::strtoull(p, &parse_end, 10);
 	if (parse_end == p)
 	{
 		return false;
@@ -95,6 +244,208 @@ bool ParseU64Value(const char* p, uint64_t* out, const char** end)
 	*out = value;
 	*end = parse_end;
 	return true;
+}
+
+bool SkipJsonString(const char** cursor)
+{
+	const char* p = *cursor;
+	if (p == nullptr || *p != '"')
+	{
+		return false;
+	}
+	for (++p; *p != '\0'; ++p)
+	{
+		const auto ch = static_cast<unsigned char>(*p);
+		if (ch < 0x20)
+		{
+			return false;
+		}
+		if (*p == '"')
+		{
+			*cursor = p + 1;
+			return true;
+		}
+		if (*p != '\\')
+		{
+			continue;
+		}
+		++p;
+		if (*p == '\0')
+		{
+			return false;
+		}
+		if (std::strchr("\"\\/bfnrt", *p) != nullptr)
+		{
+			continue;
+		}
+		if (*p != 'u')
+		{
+			return false;
+		}
+		for (int i = 0; i < 4; ++i)
+		{
+			if (!std::isxdigit(static_cast<unsigned char>(p[1 + i])))
+			{
+				return false;
+			}
+		}
+		p += 4;
+	}
+	return false;
+}
+
+bool SkipJsonValue(const char** cursor, uint32_t depth);
+
+bool SkipJsonComposite(const char** cursor, char open, char close, uint32_t depth)
+{
+	const char* p = SkipWs(*cursor);
+	if (p == nullptr || *p != open || depth > 32u)
+	{
+		return false;
+	}
+	p = SkipWs(p + 1);
+	if (*p == close)
+	{
+		*cursor = p + 1;
+		return true;
+	}
+	for (;;)
+	{
+		if (open == '{')
+		{
+			if (!SkipJsonString(&p))
+			{
+				return false;
+			}
+			p = SkipWs(p);
+			if (*p != ':')
+			{
+				return false;
+			}
+			++p;
+		}
+		if (!SkipJsonValue(&p, depth + 1u))
+		{
+			return false;
+		}
+		p = SkipWs(p);
+		if (*p == close)
+		{
+			*cursor = p + 1;
+			return true;
+		}
+		if (*p != ',')
+		{
+			return false;
+		}
+		p = SkipWs(p + 1);
+	}
+}
+
+bool SkipJsonNumber(const char** cursor)
+{
+	const char* p = *cursor;
+	if (*p == '-')
+	{
+		++p;
+	}
+	if (*p == '0')
+	{
+		++p;
+	} else
+	{
+		if (!std::isdigit(static_cast<unsigned char>(*p)))
+		{
+			return false;
+		}
+		while (std::isdigit(static_cast<unsigned char>(*p)))
+		{
+			++p;
+		}
+	}
+	if (*p == '.')
+	{
+		++p;
+		if (!std::isdigit(static_cast<unsigned char>(*p)))
+		{
+			return false;
+		}
+		while (std::isdigit(static_cast<unsigned char>(*p)))
+		{
+			++p;
+		}
+	}
+	if (*p == 'e' || *p == 'E')
+	{
+		++p;
+		if (*p == '+' || *p == '-')
+		{
+			++p;
+		}
+		if (!std::isdigit(static_cast<unsigned char>(*p)))
+		{
+			return false;
+		}
+		while (std::isdigit(static_cast<unsigned char>(*p)))
+		{
+			++p;
+		}
+	}
+	*cursor = p;
+	return true;
+}
+
+bool SkipJsonValue(const char** cursor, uint32_t depth)
+{
+	const char* p = SkipWs(*cursor);
+	if (p == nullptr)
+	{
+		return false;
+	}
+	if (*p == '"')
+	{
+		const bool ok = SkipJsonString(&p);
+		*cursor       = p;
+		return ok;
+	}
+	if (*p == '{' || *p == '[')
+	{
+		const char open  = *p;
+		const char close = open == '{' ? '}' : ']';
+		const bool ok    = SkipJsonComposite(&p, open, close, depth);
+		*cursor          = p;
+		return ok;
+	}
+	const struct
+	{
+		const char* text;
+		size_t      length;
+	} literals[] = {{"true", 4}, {"false", 5}, {"null", 4}};
+	for (const auto& literal: literals)
+	{
+		if (std::strncmp(p, literal.text, literal.length) == 0)
+		{
+			*cursor = p + literal.length;
+			return true;
+		}
+	}
+	if (*p == '-' || std::isdigit(static_cast<unsigned char>(*p)))
+	{
+		const bool ok = SkipJsonNumber(&p);
+		*cursor       = p;
+		return ok;
+	}
+	return false;
+}
+
+bool IsCompleteJsonObject(const char* json)
+{
+	const char* p = SkipWs(json);
+	if (p == nullptr || *p != '{' || !SkipJsonValue(&p, 0))
+	{
+		return false;
+	}
+	return *SkipWs(p) == '\0';
 }
 
 bool FindObjectField(const char* json, const char* key, const char** value_start)
@@ -118,9 +469,9 @@ bool FindObjectField(const char* json, const char* key, const char** value_start
 			return true;
 		}
 		// Skip this field roughly: advance to next comma at depth 1 or end.
-		int  depth   = 0;
-		bool in_str  = false;
-		bool escape  = false;
+		int  depth      = 0;
+		bool in_str     = false;
+		bool escape     = false;
 		bool seen_colon = false;
 		for (; *p != '\0'; ++p)
 		{
@@ -177,8 +528,6 @@ bool FindObjectField(const char* json, const char* key, const char** value_start
 	return false;
 }
 
-} // namespace
-
 std::string JsonEscape(const char* value)
 {
 	std::string out;
@@ -188,13 +537,27 @@ std::string JsonEscape(const char* value)
 	}
 	for (const char* p = value; *p != '\0'; ++p)
 	{
-		switch (*p)
+		const auto ch = static_cast<unsigned char>(*p);
+		switch (ch)
 		{
 			case '"': out += "\\\""; break;
 			case '\\': out += "\\\\"; break;
+			case '\b': out += "\\b"; break;
+			case '\f': out += "\\f"; break;
 			case '\n': out += "\\n"; break;
+			case '\r': out += "\\r"; break;
 			case '\t': out += "\\t"; break;
-			default: out.push_back(*p); break;
+			default:
+				if (ch < 0x20)
+				{
+					char escaped[7];
+					std::snprintf(escaped, sizeof(escaped), "\\u%04x", ch);
+					out += escaped;
+				} else
+				{
+					out.push_back(*p);
+				}
+				break;
 		}
 	}
 	return out;
@@ -205,54 +568,206 @@ std::string JsonString(const char* value)
 	return std::string("\"") + JsonEscape(value) + "\"";
 }
 
+std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Core::BringUp::Diagnostics& bringup,
+                                   const Loader::MissingImportDiagnostics& imports, const Loader::ModuleLoadPlanDiagnostics& load_plan)
+{
+	// Prefer diagnostics snapshot's embedded config (immutable effective view).
+	// Fall back to the explicit config argument when the snapshot is still default
+	// and the caller passed a live GetConfig() copy.
+	const Core::BringUp::Config& eff =
+	    (bringup.config.mode == Core::BringUp::Mode::Unsafe || bringup.config.feature_mask != 0 || bringup.config.explicitly_configured)
+	        ? bringup.config
+	        : config;
+
+	std::string out;
+	out.reserve(1536);
+	out += '{';
+	out += "\"protocol_version\":" + std::to_string(Kyty::Agent::kProtocolVersion);
+	out += ",\"diagnostic_input\":true";
+	out += ",\"bring_up\":{";
+	out += "\"mode\":" + JsonString(BringUpModeName(eff.mode));
+	out += ",\"feature_mask\":" + std::to_string(eff.feature_mask);
+	out += ",\"subsystem_mask\":" + std::to_string(eff.subsystem_mask);
+	out += ",\"burst_limit\":" + std::to_string(eff.burst_limit);
+	out += ",\"burst_window_ms\":" + std::to_string(eff.burst_window_ms);
+	out += ",\"explicitly_configured\":" + std::string(eff.explicitly_configured ? "true" : "false");
+	out += ",\"enabled_features\":";
+	std::string feature_json;
+	AppendFeatureList(eff, &feature_json);
+	out += feature_json;
+	out += ",\"enabled_subsystems\":";
+	std::string subsystem_json;
+	AppendSubsystemList(eff, &subsystem_json);
+	out += subsystem_json;
+	out += ",\"diagnostics\":{";
+	out += "\"unique_sites\":" + std::to_string(bringup.unique_sites);
+	out += ",\"total_continuations\":" + std::to_string(bringup.total_continuations);
+	out += ",\"total_halts\":" + std::to_string(bringup.total_halts);
+	out += ",\"breaker_trips\":" + std::to_string(bringup.breaker_trips);
+	out += ",\"table_overflows\":" + std::to_string(bringup.table_overflows);
+	out += ",\"config_rejections\":" + std::to_string(bringup.config_rejections);
+	out += ",\"last_breaker_key\":" + std::to_string(bringup.last_breaker_key);
+	out += ",\"last_breaker_feature\":" + JsonString(FeatureString(bringup.last_breaker_feature).c_str());
+	out += ",\"last_breaker_subsystem\":" + JsonString(SubsystemString(bringup.last_breaker_subsystem).c_str());
+	out += ",\"continues_by_feature\":[";
+	for (uint32_t i = 0; i < Core::BringUp::kFeatureCount; ++i)
+	{
+		if (i != 0)
+		{
+			out += ',';
+		}
+		out += std::to_string(bringup.continues_by_feature[i]);
+	}
+	out += "],\"halts_by_feature\":[";
+	for (uint32_t i = 0; i < Core::BringUp::kFeatureCount; ++i)
+	{
+		if (i != 0)
+		{
+			out += ',';
+		}
+		out += std::to_string(bringup.halts_by_feature[i]);
+	}
+	out += "],\"continues_by_subsystem\":[";
+	for (uint32_t i = 0; i < Core::BringUp::kSubsystemCount; ++i)
+	{
+		if (i != 0)
+		{
+			out += ',';
+		}
+		out += std::to_string(bringup.continues_by_subsystem[i]);
+	}
+	out += "],\"halts_by_subsystem\":[";
+	for (uint32_t i = 0; i < Core::BringUp::kSubsystemCount; ++i)
+	{
+		if (i != 0)
+		{
+			out += ',';
+		}
+		out += std::to_string(bringup.halts_by_subsystem[i]);
+	}
+	// Close diagnostics object, then bring_up object — event_ring is top-level.
+	out += "]}"; // end diagnostics
+	out += "}";  // end bring_up
+
+	// Top-level event_ring so consumers use result.event_ring.dropped (not nested
+	// under bring_up). Overflow remains visible when history was overwritten.
+	const auto ring = Emulator::Agent::EventRing::Instance().GetStats();
+	out += ",\"event_ring\":{";
+	out += "\"capacity\":" + std::to_string(ring.capacity);
+	out += ",\"size\":" + std::to_string(ring.size);
+	out += ",\"next_seq\":" + std::to_string(ring.next_seq);
+	out += ",\"total_pushed\":" + std::to_string(ring.total_pushed);
+	out += ",\"dropped\":" + std::to_string(ring.dropped);
+	out += ",\"overflowed\":" + std::string(ring.overflowed ? "true" : "false");
+	out += "}";
+
+	out += ",\"missing_imports\":{";
+	out += "\"resolution_attempts\":" + std::to_string(imports.resolution_attempts);
+	out += ",\"unique_symbols\":" + std::to_string(imports.unique_symbols);
+	out += ",\"used\":" + std::to_string(imports.used);
+	out += ",\"table_overflows\":" + std::to_string(imports.table_overflows);
+	out += ",\"table_capacity\":" + std::to_string(imports.table_capacity);
+	out += "}";
+
+	// Sanitized load plan only (relative keys / counts — never host paths or title IDs).
+	constexpr uint32_t kDisplayedEntries    = 8;
+	constexpr uint32_t kDisplayedRejections = 4;
+	constexpr uint32_t kDisplayedConflicts  = 4;
+	const bool         truncated = load_plan.entry_count > kDisplayedEntries || load_plan.rejection_count > kDisplayedRejections ||
+	                               load_plan.export_conflict_count > kDisplayedConflicts;
+	out += ",\"load_plan\":{";
+	out += "\"discovery_enabled\":" + std::string(load_plan.discovery_enabled ? "true" : "false");
+	out += ",\"discovery_attempted\":" + std::string(load_plan.discovery_attempted ? "true" : "false");
+	out += ",\"entry_count\":" + std::to_string(load_plan.entry_count);
+	out += ",\"adjacent_count\":" + std::to_string(load_plan.adjacent_count);
+	out += ",\"rejection_count\":" + std::to_string(load_plan.rejection_count);
+	out += ",\"applied_count\":" + std::to_string(load_plan.applied_count);
+	out += ",\"export_conflict_count\":" + std::to_string(load_plan.export_conflict_count);
+	out += ",\"truncated\":" + std::string(truncated ? "true" : "false");
+	out += ",\"primary_identity\":" + JsonString(load_plan.primary_identity);
+	out += ",\"entries\":[";
+	for (uint32_t i = 0; i < load_plan.entry_count && i < kDisplayedEntries; ++i)
+	{
+		if (i != 0)
+		{
+			out += ',';
+		}
+		out += JsonString(load_plan.entries[i]);
+	}
+	out += "],\"rejections\":[";
+	for (uint32_t i = 0; i < load_plan.rejection_count && i < kDisplayedRejections; ++i)
+	{
+		if (i != 0)
+		{
+			out += ',';
+		}
+		out += JsonString(load_plan.rejections[i]);
+	}
+	out += "],\"export_conflicts\":[";
+	for (uint32_t i = 0; i < load_plan.export_conflict_count && i < kDisplayedConflicts; ++i)
+	{
+		if (i != 0)
+		{
+			out += ',';
+		}
+		out += JsonString(load_plan.export_conflicts[i]);
+	}
+	out += "]}"; // end load_plan
+	out += '}';  // end root
+	return out;
+}
+
 std::string FormatOk(uint64_t id, const std::string& result_json_object)
 {
-	char prefix[64];
-	std::snprintf(prefix, sizeof(prefix), "{\"id\":%llu,\"ok\":true,\"result\":", static_cast<unsigned long long>(id));
+	// Every response envelope carries the same protocol_version (current state of wire).
+	char prefix[96];
+	std::snprintf(prefix, sizeof(prefix),
+	              "{\"id\":%llu,\"ok\":true,\"protocol_version\":%u,\"result\":", static_cast<unsigned long long>(id),
+	              Kyty::Agent::kProtocolVersion);
 	return std::string(prefix) + result_json_object + "}";
 }
 
 std::string FormatErr(uint64_t id, const char* code, const char* message)
 {
-	char buf[kAgentLineMax];
-	std::snprintf(buf, sizeof(buf),
-	              "{\"id\":%llu,\"ok\":false,\"error\":{\"code\":%s,\"message\":%s}}",
-	              static_cast<unsigned long long>(id), JsonString(code != nullptr ? code : "error").c_str(),
+	char buf[Kyty::Agent::kRequestLineMax];
+	std::snprintf(buf, sizeof(buf), "{\"id\":%llu,\"ok\":false,\"protocol_version\":%u,\"error\":{\"code\":%s,\"message\":%s}}",
+	              static_cast<unsigned long long>(id), Kyty::Agent::kProtocolVersion, JsonString(code != nullptr ? code : "error").c_str(),
 	              JsonString(message != nullptr ? message : "").c_str());
 	return std::string(buf);
 }
 
-bool ParseRequestLine(const char* line, Request* out, ErrorInfo* error)
+Core::Domain::ValidationResult ParseAndValidateRequestLine(const char* line, Request* out)
 {
-	if (line == nullptr || out == nullptr || error == nullptr)
+	using Core::Domain::Fail;
+	using Core::Domain::Ok;
+
+	if (line == nullptr || out == nullptr)
 	{
-		return false;
+		return Fail("malformed", "agent", "parse_request", "null line or out");
 	}
-	*out   = Request {};
-	*error = ErrorInfo {};
+	*out = Request {};
+	if (!IsCompleteJsonObject(line))
+	{
+		return Fail("malformed", "agent", "parse_request", "request must be one complete JSON object");
+	}
 
 	const char* id_value = nullptr;
 	if (!FindObjectField(line, "id", &id_value))
 	{
-		error->code    = "invalid_args";
-		error->message = "missing id";
-		return false;
+		return Fail("malformed", "agent", "parse_request", "missing id");
 	}
 	const char* end = nullptr;
 	if (!ParseU64Value(id_value, &out->id, &end))
 	{
-		error->code    = "invalid_args";
-		error->message = "id must be an integer";
-		return false;
+		return Fail("malformed", "agent", "parse_request", "id must be an integer");
 	}
 
 	const char* tool_value = nullptr;
 	if (!FindObjectField(line, "tool", &tool_value) || !ParseStringValue(tool_value, &out->tool, &end))
 	{
-		error->code    = "invalid_args";
-		error->message = "missing tool";
-		return false;
+		return Fail("malformed", "agent", "parse_request", "missing tool");
 	}
+	out->kind = ParseTool(out->tool.c_str());
 
 	const char* args_value = nullptr;
 	if (FindObjectField(line, "args", &args_value))
@@ -260,15 +775,13 @@ bool ParseRequestLine(const char* line, Request* out, ErrorInfo* error)
 		args_value = SkipWs(args_value);
 		if (*args_value != '{')
 		{
-			error->code    = "invalid_args";
-			error->message = "args must be an object";
-			return false;
+			return Fail("malformed", "agent", "parse_request", "args must be an object");
 		}
-		int  depth  = 0;
-		bool in_str = false;
-		bool escape = false;
-		const char* start = args_value;
-		const char* p     = args_value;
+		int         depth  = 0;
+		bool        in_str = false;
+		bool        escape = false;
+		const char* start  = args_value;
+		const char* p      = args_value;
 		for (; *p != '\0'; ++p)
 		{
 			const char c = *p;
@@ -308,16 +821,39 @@ bool ParseRequestLine(const char* line, Request* out, ErrorInfo* error)
 		}
 		if (out->args_json.empty())
 		{
-			error->code    = "invalid_args";
-			error->message = "args object truncated";
-			return false;
+			return Fail("malformed", "agent", "parse_request", "args object truncated");
 		}
 	} else
 	{
 		out->args_json = "{}";
 	}
 
-	return true;
+	// Domain policy on the parsed draft (known tools, pad button, etc.).
+	Validation::AgentRequestDraft draft {};
+	draft.id              = out->id;
+	draft.tool            = out->tool.c_str();
+	draft.known_tool      = out->kind != Tool::Unknown;
+	draft.requires_button = out->kind == Tool::PadDown || out->kind == Tool::PadUp || out->kind == Tool::PadTap;
+	std::string button;
+	draft.has_string_button = ArgsGetString(out->args_json, "button", &button);
+	return Validation::ValidateAgentRequest(draft);
+}
+
+bool ParseRequestLine(const char* line, Request* out, ErrorInfo* error)
+{
+	if (error == nullptr)
+	{
+		return false;
+	}
+	*error            = ErrorInfo {};
+	const auto result = ParseAndValidateRequestLine(line, out);
+	if (result.Ok())
+	{
+		return true;
+	}
+	error->code    = result.error.code;
+	error->message = result.error.reason;
+	return false;
 }
 
 bool ArgsGetString(const std::string& args_json, const char* key, std::string* out)

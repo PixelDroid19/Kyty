@@ -15,6 +15,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/RuntimeLinker.h"
+#include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/Timer.h"
 
 #include <atomic>
@@ -2472,7 +2473,8 @@ static void* run_thread(void* arg)
 
 	thread->started = true;
 
-	ret = thread->entry(thread->arg);
+	ret = reinterpret_cast<void*>(Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(thread->entry),
+	                                                       reinterpret_cast<uint64_t>(thread->arg), 0, 0));
 
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
 	pthread_cleanup_pop(1);

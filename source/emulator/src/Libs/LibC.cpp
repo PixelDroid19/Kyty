@@ -14,6 +14,7 @@
 #include "Emulator/Libs/Printf.h"
 #include "Emulator/Libs/VaContext.h"
 #include "Emulator/Loader/SymbolDatabase.h"
+#include "Emulator/Loader/RuntimeLinker.h"
 
 #include <cctype>
 #include <cmath>
@@ -22,7 +23,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
 #include <strings.h>
+#include <unordered_map>
 
 // setjmp/longjmp: must NOT be wrapped in a C++ function (the wrapper frame would
 // be gone by the time longjmp fires). Kyty runs guest code natively, so we bind
@@ -72,28 +75,56 @@ static KYTY_SYSV_ABI void init_env()
 // Standard C library forwarded to the host runtime. The guest's SysV x86-64 ABI
 // matches the host's, so these thin wrappers are correct. Used when the game runs
 // against Kyty's HLE "libc" instead of its own libc.prx.
-static KYTY_SYSV_ABI void*  c_malloc(size_t size) { return ::malloc(size); }
-static KYTY_SYSV_ABI void*  c_calloc(size_t n, size_t size) { return ::calloc(n, size); }
-
-struct AlignedAllocationHeader
+static KYTY_SYSV_ABI void* c_malloc(size_t size)
 {
-	uint64_t magic;
-	void*    base;
-	size_t   size;
-	size_t   alignment;
+	return ::malloc(size);
+}
+static KYTY_SYSV_ABI void* c_calloc(size_t n, size_t size)
+{
+	return ::calloc(n, size);
+}
+
+struct AlignedAllocation
+{
+	void*  base;
+	size_t size;
+	size_t alignment;
 };
 
-static constexpr uint64_t ALIGNED_ALLOCATION_MAGIC = 0x4b595459414c4e47ull;
+static std::mutex                                   g_aligned_allocations_mutex;
+static std::unordered_map<void*, AlignedAllocation> g_aligned_allocations;
 
-static AlignedAllocationHeader* aligned_header(void* ptr)
+static bool register_aligned_allocation(void* ptr, const AlignedAllocation& allocation)
 {
 	if (ptr == nullptr)
 	{
-		return nullptr;
+		return false;
 	}
 
-	auto* header = reinterpret_cast<AlignedAllocationHeader*>(reinterpret_cast<uintptr_t>(ptr) - sizeof(AlignedAllocationHeader));
-	return (header->magic == ALIGNED_ALLOCATION_MAGIC ? header : nullptr);
+	std::lock_guard lock(g_aligned_allocations_mutex);
+	return g_aligned_allocations.emplace(ptr, allocation).second;
+}
+
+// Transfers ownership out of the registry in one operation. Callers must not
+// concurrently realloc or free the same pointer; distinct allocations remain
+// independently safe. A failed realloc restores the claimed record.
+static bool claim_aligned_allocation(void* ptr, AlignedAllocation* allocation)
+{
+	if (ptr == nullptr || allocation == nullptr)
+	{
+		return false;
+	}
+
+	std::lock_guard lock(g_aligned_allocations_mutex);
+	const auto      it = g_aligned_allocations.find(ptr);
+	if (it == g_aligned_allocations.end())
+	{
+		return false;
+	}
+
+	*allocation = it->second;
+	g_aligned_allocations.erase(it);
+	return true;
 }
 
 static KYTY_SYSV_ABI void* c_memalign(size_t alignment, size_t size)
@@ -101,41 +132,49 @@ static KYTY_SYSV_ABI void* c_memalign(size_t alignment, size_t size)
 	// Prospero/FreeBSD memalign: any power-of-two alignment (including 4).
 	// Do not require alignof(void*); titles allocate uint32 index tables via
 	// memalign(4, N) and immediately fill the returned pointer.
-	if (!MemalignAlignmentOk(alignment) || size > SIZE_MAX - alignment - sizeof(AlignedAllocationHeader))
+	if (!MemalignAlignmentOk(alignment) || size > SIZE_MAX - (alignment - 1))
 	{
 		return nullptr;
 	}
 
-	const size_t total = size + alignment - 1 + sizeof(AlignedAllocationHeader);
+	const size_t total = size + alignment - 1;
 	void*        base  = ::malloc(total);
 	if (base == nullptr)
 	{
 		return nullptr;
 	}
 
-	const auto raw     = reinterpret_cast<uintptr_t>(base) + sizeof(AlignedAllocationHeader);
+	const auto raw     = reinterpret_cast<uintptr_t>(base);
 	const auto aligned = (raw + alignment - 1) & ~(static_cast<uintptr_t>(alignment) - 1);
-	auto*      header  = reinterpret_cast<AlignedAllocationHeader*>(aligned - sizeof(AlignedAllocationHeader));
-	*header            = {ALIGNED_ALLOCATION_MAGIC, base, size, alignment};
+	if (!register_aligned_allocation(reinterpret_cast<void*>(aligned), AlignedAllocation {base, size, alignment}))
+	{
+		::free(base);
+		return nullptr;
+	}
 	return reinterpret_cast<void*>(aligned);
 }
 
 static KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 {
-	if (auto* header = aligned_header(p); header != nullptr)
+	AlignedAllocation allocation {};
+	if (claim_aligned_allocation(p, &allocation))
 	{
 		if (size == 0)
 		{
-			::free(header->base);
+			::free(allocation.base);
 			return nullptr;
 		}
 
-		void* replacement = c_memalign(header->alignment, size);
-		if (replacement != nullptr)
+		void* replacement = c_memalign(allocation.alignment, size);
+		if (replacement == nullptr)
 		{
-			::memcpy(replacement, p, (header->size < size ? header->size : size));
-			::free(header->base);
+			const bool restored = register_aligned_allocation(p, allocation);
+			EXIT_IF(!restored);
+			return nullptr;
 		}
+
+		::memcpy(replacement, p, (allocation.size < size ? allocation.size : size));
+		::free(allocation.base);
 		return replacement;
 	}
 	return ::realloc(p, size);
@@ -143,15 +182,22 @@ static KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 
 static KYTY_SYSV_ABI void c_free(void* p)
 {
-	if (auto* header = aligned_header(p); header != nullptr)
+	AlignedAllocation allocation {};
+	if (claim_aligned_allocation(p, &allocation))
 	{
-		::free(header->base);
+		::free(allocation.base);
 		return;
 	}
 	::free(p);
 }
-static KYTY_SYSV_ABI void*  c_memcpy(void* d, const void* s, size_t n) { return ::memcpy(d, s, n); }
-static KYTY_SYSV_ABI int    c_memcpy_s(void* d, size_t dn, const void* s, size_t n) { return (::memcpy(d, s, n < dn ? n : dn), 0); }
+static KYTY_SYSV_ABI void* c_memcpy(void* d, const void* s, size_t n)
+{
+	return ::memcpy(d, s, n);
+}
+static KYTY_SYSV_ABI int c_memcpy_s(void* d, size_t dn, const void* s, size_t n)
+{
+	return (::memcpy(d, s, n < dn ? n : dn), 0);
+}
 // Gen5 libc_v1 memmove_s — NID B59+zQQCcbU (Astro after strtoull).
 static KYTY_SYSV_ABI int c_memmove_s(void* d, size_t dn, const void* s, size_t n)
 {
@@ -162,8 +208,14 @@ static KYTY_SYSV_ABI int c_memmove_s(void* d, size_t dn, const void* s, size_t n
 	::memmove(d, s, n < dn ? n : dn);
 	return 0;
 }
-static KYTY_SYSV_ABI void*  c_memmove(void* d, const void* s, size_t n) { return ::memmove(d, s, n); }
-static KYTY_SYSV_ABI void* c_memset(void* d, int c, size_t n) { return ::memset(d, c, n); }
+static KYTY_SYSV_ABI void* c_memmove(void* d, const void* s, size_t n)
+{
+	return ::memmove(d, s, n);
+}
+static KYTY_SYSV_ABI void* c_memset(void* d, int c, size_t n)
+{
+	return ::memset(d, c, n);
+}
 // Gen5 libc_v1 memset_s — NID h8GwqPFbu6I (Astro after DrawIndexIndirect).
 // SysV: rdi=s, rsi=smax, rdx=c, rcx=n. Returns 0 on success.
 static KYTY_SYSV_ABI int c_memset_s(void* s, size_t smax, int c, size_t n)
@@ -175,10 +227,54 @@ static KYTY_SYSV_ABI int c_memset_s(void* s, size_t smax, int c, size_t n)
 	::memset(s, c, n < smax ? n : smax);
 	return 0;
 }
-static KYTY_SYSV_ABI int    c_memcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
-static KYTY_SYSV_ABI void*  c_memchr(const void* s, int c, size_t n) { return const_cast<void*>(::memchr(s, c, n)); }
-static KYTY_SYSV_ABI size_t c_strlen(const char* s) { return ::strlen(s); }
-static KYTY_SYSV_ABI char* c_strcpy(char* d, const char* s) { return ::strcpy(d, s); }
+static KYTY_SYSV_ABI int c_memcmp(const void* a, const void* b, size_t n)
+{
+	return ::memcmp(a, b, n);
+}
+static KYTY_SYSV_ABI void* c_memchr(const void* s, int c, size_t n)
+{
+	return const_cast<void*>(::memchr(s, c, n));
+}
+static KYTY_SYSV_ABI size_t c_strlen(const char* s)
+{
+	return ::strlen(s);
+}
+static KYTY_SYSV_ABI size_t c_wcslen(const uint16_t* s)
+{
+	const uint16_t* end = s;
+	while (*end != 0)
+	{
+		end++;
+	}
+	return static_cast<size_t>(end - s);
+}
+static KYTY_SYSV_ABI uint16_t* c_wcsncpy(uint16_t* destination, const uint16_t* source, size_t count)
+{
+	size_t index = 0;
+	while (index < count && source[index] != 0)
+	{
+		destination[index] = source[index];
+		index++;
+	}
+	while (index < count)
+	{
+		destination[index] = 0;
+		index++;
+	}
+	return destination;
+}
+static KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
+{
+	// Captured wide-formatter contract: class 2 scans "08x  size: %%ld"
+	// as decimal digits. This is intentionally not a general CRT classifier.
+	EXIT_NOT_IMPLEMENTED(character_class != 2);
+	EXIT_NOT_IMPLEMENTED(character > 0x7f);
+	return character >= '0' && character <= '9' ? 1 : 0;
+}
+static KYTY_SYSV_ABI char* c_strcpy(char* d, const char* s)
+{
+	return ::strcpy(d, s);
+}
 // Gen5 strcpy_s — NID 5Xa2ACNECdo: dest, destsz, src. Returns 0 on success.
 static KYTY_SYSV_ABI int c_strcpy_s(char* d, size_t destsz, const char* s)
 {
@@ -195,9 +291,18 @@ static KYTY_SYSV_ABI int c_strcpy_s(char* d, size_t destsz, const char* s)
 	::memcpy(d, s, n + 1);
 	return 0;
 }
-static KYTY_SYSV_ABI char*  c_strncpy(char* d, const char* s, size_t n) { return ::strncpy(d, s, n); }
-static KYTY_SYSV_ABI int    c_strcmp(const char* a, const char* b) { return ::strcmp(a, b); }
-static KYTY_SYSV_ABI int    c_strncmp(const char* a, const char* b, size_t n) { return ::strncmp(a, b, n); }
+static KYTY_SYSV_ABI char* c_strncpy(char* d, const char* s, size_t n)
+{
+	return ::strncpy(d, s, n);
+}
+static KYTY_SYSV_ABI int c_strcmp(const char* a, const char* b)
+{
+	return ::strcmp(a, b);
+}
+static KYTY_SYSV_ABI int c_strncmp(const char* a, const char* b, size_t n)
+{
+	return ::strncmp(a, b, n);
+}
 // NID AV6ipCNa4Rw. Null args are UB on host strcasecmp; guest may pass null
 // strcasecmp; guest may pass null in boot string compares — return non-zero when
 // either side is null (not equal), matching a safe strcmp-like contract.
@@ -210,23 +315,40 @@ static KYTY_SYSV_ABI int c_strcasecmp(const char* a, const char* b)
 	return ::strcasecmp(a, b);
 }
 
-
-static KYTY_SYSV_ABI char*  c_strcat(char* d, const char* s) { return ::strcat(d, s); }
-static KYTY_SYSV_ABI char*  c_strncat(char* d, const char* s, size_t n) { return ::strncat(d, s, n); }
-static KYTY_SYSV_ABI char*  c_strchr(const char* s, int c) { return const_cast<char*>(::strchr(s, c)); }
-static KYTY_SYSV_ABI char*  c_strstr(const char* haystack, const char* needle)
+static KYTY_SYSV_ABI char* c_strcat(char* d, const char* s)
+{
+	return ::strcat(d, s);
+}
+static KYTY_SYSV_ABI char* c_strncat(char* d, const char* s, size_t n)
+{
+	return ::strncat(d, s, n);
+}
+static KYTY_SYSV_ABI char* c_strchr(const char* s, int c)
+{
+	return const_cast<char*>(::strchr(s, c));
+}
+static KYTY_SYSV_ABI char* c_strstr(const char* haystack, const char* needle)
 {
 	return const_cast<char*>(::strstr(haystack, needle));
 }
 // Helpers kept for pending NID registration; not yet bound via LIB_FUNC.
-[[maybe_unused]] static KYTY_SYSV_ABI char*  c_strrchr(const char* s, int c)
+[[maybe_unused]] static KYTY_SYSV_ABI char* c_strrchr(const char* s, int c)
 {
 	return const_cast<char*>(::strrchr(s, c));
 }
-[[maybe_unused]] static KYTY_SYSV_ABI size_t c_strnlen(const char* s, size_t n) { return ::strnlen(s, n); }
-static KYTY_SYSV_ABI void c_srand(unsigned int seed) { ::srand(seed); }
+[[maybe_unused]] static KYTY_SYSV_ABI size_t c_strnlen(const char* s, size_t n)
+{
+	return ::strnlen(s, n);
+}
+static KYTY_SYSV_ABI void c_srand(unsigned int seed)
+{
+	::srand(seed);
+}
 // Gen5 libc_v1 rand (Nmtr628eA3A): first Unpatched after Global Heap create.
-static KYTY_SYSV_ABI int c_rand() { return ::rand(); }
+static KYTY_SYSV_ABI int c_rand()
+{
+	return ::rand();
+}
 // Gen5 libc_v1 strtok (oVkZ8W8-Q8A): host uses strtok_r with a per-thread save pointer.
 static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
 {
@@ -235,10 +357,22 @@ static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
 }
 
 // C++ operator new/delete (mangled _Znwm/_ZdlPv/_ZdaPv), forwarded to the host allocator.
-static KYTY_SYSV_ABI void* cxx_new(size_t size) { return ::malloc(size != 0 ? size : 1); }
-static KYTY_SYSV_ABI void  cxx_delete(void* p) { ::free(p); }
-static KYTY_SYSV_ABI void* cxx_new_array(size_t size) { return ::malloc(size != 0 ? size : 1); }
-static KYTY_SYSV_ABI void  cxx_delete_array(void* p) { ::free(p); }
+static KYTY_SYSV_ABI void* cxx_new(size_t size)
+{
+	return ::malloc(size != 0 ? size : 1);
+}
+static KYTY_SYSV_ABI void cxx_delete(void* p)
+{
+	::free(p);
+}
+static KYTY_SYSV_ABI void* cxx_new_array(size_t size)
+{
+	return ::malloc(size != 0 ? size : 1);
+}
+static KYTY_SYSV_ABI void cxx_delete_array(void* p)
+{
+	::free(p);
+}
 
 // Gen5 libc NIDs iPBqs+YUUFw / 2HnmKiLmV6s — same SysV ABI from call sites:
 //   lea 8(obj),%rdi; mov $expected,%esi; mov $desired,%edx; call; cmp $1,%eax
@@ -260,8 +394,14 @@ static KYTY_SYSV_ABI int c_atomic_cmpset_32(volatile uint32_t* p, uint32_t expec
 }
 
 // --- Additional string / memory ---------------------------------------------
-static KYTY_SYSV_ABI int   c_bcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
-static KYTY_SYSV_ABI char* c_strerror(int e) { return ::strerror(e); }
+static KYTY_SYSV_ABI int c_bcmp(const void* a, const void* b, size_t n)
+{
+	return ::memcmp(a, b, n);
+}
+static KYTY_SYSV_ABI char* c_strerror(int e)
+{
+	return ::strerror(e);
+}
 // strncpy_s(dst, dstsz, src, count) -> errno_t (0 on success)
 static KYTY_SYSV_ABI int c_strncpy_s(char* d, size_t dn, const char* s, size_t n)
 {
@@ -284,7 +424,7 @@ static KYTY_SYSV_ABI int c_strncpy_s(char* d, size_t dn, const char* s, size_t n
 static KYTY_SYSV_ABI const unsigned short* c_Getpctype()
 {
 	static unsigned short table[384];
-	static bool init = false;
+	static bool           init = false;
 	if (!init)
 	{
 		for (int c = -1; c < 256; c++)
@@ -311,7 +451,7 @@ static KYTY_SYSV_ABI const unsigned short* c_Getpctype()
 static KYTY_SYSV_ABI const short* c_Getptoupper()
 {
 	static short table[384];
-	static bool init = false;
+	static bool  init = false;
 	if (!init)
 	{
 		for (int c = -1; c < 256; c++)
@@ -357,8 +497,14 @@ static KYTY_SYSV_ABI FILE* c_fopen(const char* path, const char* mode)
 	printf("\t fopen('%s' -> '%s', '%s') = %p\n", path, use.C_Str(), mode, static_cast<void*>(f));
 	return f;
 }
-static KYTY_SYSV_ABI int      c_fclose(FILE* f) { return (f != nullptr) ? ::fclose(f) : 0; }
-static KYTY_SYSV_ABI size_t   c_fread(void* p, size_t sz, size_t n, FILE* f) { return ::fread(p, sz, n, f); }
+static KYTY_SYSV_ABI int c_fclose(FILE* f)
+{
+	return (f != nullptr) ? ::fclose(f) : 0;
+}
+static KYTY_SYSV_ABI size_t c_fread(void* p, size_t sz, size_t n, FILE* f)
+{
+	return ::fread(p, sz, n, f);
+}
 // Gen5 libc_v1 fgets — NID KdP-nULpuGw.
 static KYTY_SYSV_ABI char* c_fgets(char* s, int n, FILE* f)
 {
@@ -368,13 +514,31 @@ static KYTY_SYSV_ABI char* c_fgets(char* s, int n, FILE* f)
 	}
 	return ::fgets(s, n, f);
 }
-static KYTY_SYSV_ABI size_t   c_fwrite(const void* p, size_t sz, size_t n, FILE* f) { return ::fwrite(p, sz, n, f); }
-static KYTY_SYSV_ABI int      c_fseek(FILE* f, long off, int w) { return ::fseek(f, off, w); }
-static KYTY_SYSV_ABI long     c_ftell(FILE* f) { return ::ftell(f); }
-static KYTY_SYSV_ABI int      c_feof(FILE* f) { return ::feof(f); }
-static KYTY_SYSV_ABI int      c_ferror(FILE* f) { return ::ferror(f); }
-static KYTY_SYSV_ABI int      c_fputc(int ch, FILE* f) { return ::fputc(ch, f); }
-static KYTY_SYSV_ABI int      c_remove(const char* p)
+static KYTY_SYSV_ABI size_t c_fwrite(const void* p, size_t sz, size_t n, FILE* f)
+{
+	return ::fwrite(p, sz, n, f);
+}
+static KYTY_SYSV_ABI int c_fseek(FILE* f, long off, int w)
+{
+	return ::fseek(f, off, w);
+}
+static KYTY_SYSV_ABI long c_ftell(FILE* f)
+{
+	return ::ftell(f);
+}
+static KYTY_SYSV_ABI int c_feof(FILE* f)
+{
+	return ::feof(f);
+}
+static KYTY_SYSV_ABI int c_ferror(FILE* f)
+{
+	return ::ferror(f);
+}
+static KYTY_SYSV_ABI int c_fputc(int ch, FILE* f)
+{
+	return ::fputc(ch, f);
+}
+static KYTY_SYSV_ABI int c_remove(const char* p)
 {
 	String host = LibKernel::FileSystem::GetRealFilename(String::FromUtf8(p));
 	return ::remove((host.IsEmpty() ? String::FromUtf8(p) : host).C_Str());
@@ -510,10 +674,84 @@ static KYTY_SYSV_ABI int c_vsnprintf_s(char* s, size_t dn, size_t count, const c
 	return Format(s, n, fmt, ap);
 }
 
+// Bring-up evidence currently proves only literal text, %% and %08x. Keep every
+// other conversion explicit until its guest va_list and wide-character ABI is
+// captured.
+static bool c_wide_format_supported(const char* format)
+{
+	for (const char* cursor = format; *cursor != '\0'; cursor++)
+	{
+		if (*cursor != '%')
+		{
+			continue;
+		}
+		cursor++;
+		if (*cursor == '%')
+		{
+			continue;
+		}
+		if (std::strncmp(cursor, "08x", 3) != 0)
+		{
+			return false;
+		}
+		cursor += 2;
+	}
+	return true;
+}
+
+static KYTY_SYSV_ABI int c_vswprintf(uint16_t* out, size_t out_count, const uint16_t* wide_format, VaList* ap)
+{
+	if (out == nullptr || out_count == 0 || wide_format == nullptr || ap == nullptr)
+	{
+		return -1;
+	}
+
+	char   format[1024] = {};
+	size_t format_len   = 0;
+	while (wide_format[format_len] != 0)
+	{
+		if (format_len + 1 >= sizeof(format) || wide_format[format_len] > 0x7f)
+		{
+			out[0] = 0;
+			return -1;
+		}
+		format[format_len] = static_cast<char>(wide_format[format_len]);
+		format_len++;
+	}
+	if (!c_wide_format_supported(format))
+	{
+		out[0] = 0;
+		return -1;
+	}
+
+	char      narrow[C_UNBOUNDED_FORMAT] = {};
+	const int written                    = Format(narrow, sizeof(narrow), format, ap);
+	if (written < 0 || static_cast<size_t>(written) >= out_count)
+	{
+		out[0] = 0;
+		return -1;
+	}
+	for (int index = 0; index < written; index++)
+	{
+		out[index] = static_cast<uint8_t>(narrow[index]);
+	}
+	out[written] = 0;
+	return written;
+}
+
 // --- stdlib ------------------------------------------------------------------
-static KYTY_SYSV_ABI double c_strtod(const char* s, char** e) { return ::strtod(s, e); }
-static KYTY_SYSV_ABI float  c_strtof(const char* s, char** e) { return ::strtof(s, e); }
-static KYTY_SYSV_ABI long   c_strtol(const char* s, char** e, int b) { return ::strtol(s, e, b); }
+static KYTY_SYSV_ABI double c_strtod(const char* s, char** e)
+{
+	return ::strtod(s, e);
+}
+static KYTY_SYSV_ABI float c_strtof(const char* s, char** e)
+{
+	return ::strtof(s, e);
+}
+static KYTY_SYSV_ABI long c_strtol(const char* s, char** e, int b)
+{
+	return ::strtol(s, e, b);
+}
 static KYTY_SYSV_ABI unsigned long c_strtoul(const char* s, char** e, int b)
 {
 	return ::strtoul(s, e, b);
@@ -523,23 +761,45 @@ static KYTY_SYSV_ABI unsigned long long c_strtoull(const char* s, char** e, int 
 {
 	return ::strtoull(s, e, b);
 }
-static KYTY_SYSV_ABI double c_atof(const char* s) { return ::atof(s); }
-static KYTY_SYSV_ABI void   c_qsort(void* base, size_t n, size_t sz, int (KYTY_SYSV_ABI* cmp)(const void*, const void*))
+static KYTY_SYSV_ABI double c_atof(const char* s)
+{
+	return ::atof(s);
+}
+static KYTY_SYSV_ABI void c_qsort(void* base, size_t n, size_t sz, int(KYTY_SYSV_ABI* cmp)(const void*, const void*))
 {
 	::qsort(base, n, sz, reinterpret_cast<int (*)(const void*, const void*)>(cmp));
 }
-static KYTY_SYSV_ABI void   c_abort()
+static KYTY_SYSV_ABI void c_abort()
 {
 	printf("libc::abort() called by guest\n");
 	::abort();
 }
 
 // --- time --------------------------------------------------------------------
-static KYTY_SYSV_ABI int64_t    c_time(int64_t* t) { time_t r = ::time(nullptr); if (t) *t = r; return r; }
-static KYTY_SYSV_ABI int64_t    c_mktime(struct tm* tmv) { return ::mktime(tmv); }
-static KYTY_SYSV_ABI struct tm* c_gmtime(const int64_t* t) { time_t v = *t; return ::gmtime(&v); }
-static KYTY_SYSV_ABI struct tm* c_localtime(const int64_t* t) { time_t v = *t; return ::localtime(&v); }
-static KYTY_SYSV_ABI size_t     c_strftime(char* s, size_t n, const char* f, const struct tm* tmv) { return ::strftime(s, n, f, tmv); }
+static KYTY_SYSV_ABI int64_t c_time(int64_t* t)
+{
+	time_t r = ::time(nullptr);
+	if (t) *t = r;
+	return r;
+}
+static KYTY_SYSV_ABI int64_t c_mktime(struct tm* tmv)
+{
+	return ::mktime(tmv);
+}
+static KYTY_SYSV_ABI struct tm* c_gmtime(const int64_t* t)
+{
+	time_t v = *t;
+	return ::gmtime(&v);
+}
+static KYTY_SYSV_ABI struct tm* c_localtime(const int64_t* t)
+{
+	time_t v = *t;
+	return ::localtime(&v);
+}
+static KYTY_SYSV_ABI size_t c_strftime(char* s, size_t n, const char* f, const struct tm* tmv)
+{
+	return ::strftime(s, n, f, tmv);
+}
 // Gen5 libc_v1 asctime — NID jT3xiGpA3B4. Returns static host buffer (same ABI as C).
 static KYTY_SYSV_ABI char* c_asctime(const struct tm* tmv)
 {
@@ -551,23 +811,83 @@ static KYTY_SYSV_ABI char* c_asctime(const struct tm* tmv)
 }
 
 // --- math (double) -----------------------------------------------------------
-static KYTY_SYSV_ABI double c_sin(double x) { return ::sin(x); }
-static KYTY_SYSV_ABI double c_cos(double x) { return ::cos(x); }
-static KYTY_SYSV_ABI double c_tan(double x) { return ::tan(x); }
-static KYTY_SYSV_ABI double c_asin(double x) { return ::asin(x); }
-static KYTY_SYSV_ABI double c_acos(double x) { return ::acos(x); }
-static KYTY_SYSV_ABI double c_atan(double x) { return ::atan(x); }
-static KYTY_SYSV_ABI double c_atan2(double y, double x) { return ::atan2(y, x); }
-static KYTY_SYSV_ABI double c_exp(double x) { return ::exp(x); }
-static KYTY_SYSV_ABI double c_log(double x) { return ::log(x); }
-static KYTY_SYSV_ABI double c_pow(double x, double y) { return ::pow(x, y); }
-static KYTY_SYSV_ABI double c_fmod(double x, double y) { return ::fmod(x, y); }
-static KYTY_SYSV_ABI double c_modf(double x, double* ip) { return ::modf(x, ip); }
-static KYTY_SYSV_ABI double c_ldexp(double x, int e) { return ::ldexp(x, e); }
-static KYTY_SYSV_ABI double c_frexp(double x, int* e) { return ::frexp(x, e); }
-static KYTY_SYSV_ABI void   c_sincos(double x, double* s, double* c) { *s = ::sin(x); *c = ::cos(x); }
+static KYTY_SYSV_ABI double c_sin(double x)
+{
+	return ::sin(x);
+}
+static KYTY_SYSV_ABI double c_cos(double x)
+{
+	return ::cos(x);
+}
+static KYTY_SYSV_ABI double c_tan(double x)
+{
+	return ::tan(x);
+}
+static KYTY_SYSV_ABI double c_asin(double x)
+{
+	return ::asin(x);
+}
+static KYTY_SYSV_ABI double c_acos(double x)
+{
+	return ::acos(x);
+}
+static KYTY_SYSV_ABI double c_atan(double x)
+{
+	return ::atan(x);
+}
+static KYTY_SYSV_ABI double c_atan2(double y, double x)
+{
+	return ::atan2(y, x);
+}
+static KYTY_SYSV_ABI double c_exp(double x)
+{
+	return ::exp(x);
+}
+static KYTY_SYSV_ABI double c_log(double x)
+{
+	return ::log(x);
+}
+static KYTY_SYSV_ABI double c_pow(double x, double y)
+{
+	return ::pow(x, y);
+}
+static KYTY_SYSV_ABI double c_fmod(double x, double y)
+{
+	return ::fmod(x, y);
+}
+static KYTY_SYSV_ABI double c_modf(double x, double* ip)
+{
+	return ::modf(x, ip);
+}
+static KYTY_SYSV_ABI double c_ldexp(double x, int e)
+{
+	return ::ldexp(x, e);
+}
+static KYTY_SYSV_ABI double c_frexp(double x, int* e)
+{
+	return ::frexp(x, e);
+}
+static KYTY_SYSV_ABI void c_sincos(double x, double* s, double* c)
+{
+	*s = ::sin(x);
+	*c = ::cos(x);
+}
+struct TlsInfo
+{
+	Loader::Program* program;
+	uint64_t         offset;
+};
+
+static void* KYTY_SYSV_ABI c_tls_get_addr(TlsInfo* info)
+{
+	return Loader::RuntimeLinker::TlsGetAddr(info->program) + info->offset;
+}
+
 // --- math (float) ------------------------------------------------------------
-static KYTY_SYSV_ABI float  c_powf(float x, float y) { return ::powf(x, y); }
+static KYTY_SYSV_ABI float c_powf(float x, float y)
+{
+	return ::powf(x, y);
+}
 // Gen5 libc_v1 __isnanf — NID lA94ZgT+vMM. Float in xmm0; non-zero if NaN.
 // Observed Astro after pthread_self: call site loads float via vmovss then tests eax.
 static KYTY_SYSV_ABI int c_isnanf(float x)
@@ -590,34 +910,101 @@ static KYTY_SYSV_ABI int c_isinf(double x)
 	return std::isinf(x) ? 1 : 0;
 }
 // Gen5 libc_v1 sinf — NID Q4rRL34CEeE (Astro after usleep).
-static KYTY_SYSV_ABI float c_sinf(float x) { return ::sinf(x); }
-static KYTY_SYSV_ABI float c_cosf(float x) { return ::cosf(x); }
+static KYTY_SYSV_ABI float c_sinf(float x)
+{
+	return ::sinf(x);
+}
+static KYTY_SYSV_ABI float c_cosf(float x)
+{
+	return ::cosf(x);
+}
 // Gen5 libc_v1 tanf — NID ZE6RNL+eLbk (Astro after Posix pthread_detach; float in xmm0).
-static KYTY_SYSV_ABI float c_tanf(float x) { return ::tanf(x); }
+static KYTY_SYSV_ABI float c_tanf(float x)
+{
+	return ::tanf(x);
+}
 // Gen5 libc_v1 inverse/extra float math (name→NID; import tables use '-' for '/').
-static KYTY_SYSV_ABI float c_atanf(float x) { return ::atanf(x); }
-static KYTY_SYSV_ABI float c_asinf(float x) { return ::asinf(x); }
-static KYTY_SYSV_ABI float c_acosf(float x) { return ::acosf(x); }
-static KYTY_SYSV_ABI float c_atan2f(float y, float x) { return ::atan2f(y, x); }
-static KYTY_SYSV_ABI float c_fmodf(float x, float y) { return ::fmodf(x, y); }
-static KYTY_SYSV_ABI float c_hypotf(float x, float y) { return ::hypotf(x, y); }
-static KYTY_SYSV_ABI float c_truncf(float x) { return ::truncf(x); }
-static KYTY_SYSV_ABI float c_roundf(float x) { return ::roundf(x); }
-static KYTY_SYSV_ABI float c_log10f(float x) { return ::log10f(x); }
-static KYTY_SYSV_ABI float c_logf(float x) { return ::logf(x); }
-static KYTY_SYSV_ABI float c_sqrtf(float x) { return ::sqrtf(x); }
-static KYTY_SYSV_ABI float c_fabsf(float x) { return ::fabsf(x); }
-static KYTY_SYSV_ABI float c_floorf(float x) { return ::floorf(x); }
-static KYTY_SYSV_ABI float c_ceilf(float x) { return ::ceilf(x); }
-static KYTY_SYSV_ABI float  c_log2f(float x) { return ::log2f(x); }
-static KYTY_SYSV_ABI float  c_exp2f(float x) { return ::exp2f(x); }
-static KYTY_SYSV_ABI float  c_expf(float x) { return ::expf(x); }
-static KYTY_SYSV_ABI float  c_ldexpf(float x, int e) { return ::ldexpf(x, e); }
-static KYTY_SYSV_ABI void   c_sincosf(float x, float* s, float* c) { *s = ::sinf(x); *c = ::cosf(x); }
+static KYTY_SYSV_ABI float c_atanf(float x)
+{
+	return ::atanf(x);
+}
+static KYTY_SYSV_ABI float c_asinf(float x)
+{
+	return ::asinf(x);
+}
+static KYTY_SYSV_ABI float c_acosf(float x)
+{
+	return ::acosf(x);
+}
+static KYTY_SYSV_ABI float c_atan2f(float y, float x)
+{
+	return ::atan2f(y, x);
+}
+static KYTY_SYSV_ABI float c_fmodf(float x, float y)
+{
+	return ::fmodf(x, y);
+}
+static KYTY_SYSV_ABI float c_hypotf(float x, float y)
+{
+	return ::hypotf(x, y);
+}
+static KYTY_SYSV_ABI float c_truncf(float x)
+{
+	return ::truncf(x);
+}
+static KYTY_SYSV_ABI float c_roundf(float x)
+{
+	return ::roundf(x);
+}
+static KYTY_SYSV_ABI float c_log10f(float x)
+{
+	return ::log10f(x);
+}
+static KYTY_SYSV_ABI float c_logf(float x)
+{
+	return ::logf(x);
+}
+static KYTY_SYSV_ABI float c_sqrtf(float x)
+{
+	return ::sqrtf(x);
+}
+static KYTY_SYSV_ABI float c_fabsf(float x)
+{
+	return ::fabsf(x);
+}
+static KYTY_SYSV_ABI float c_floorf(float x)
+{
+	return ::floorf(x);
+}
+static KYTY_SYSV_ABI float c_ceilf(float x)
+{
+	return ::ceilf(x);
+}
+static KYTY_SYSV_ABI float c_log2f(float x)
+{
+	return ::log2f(x);
+}
+static KYTY_SYSV_ABI float c_exp2f(float x)
+{
+	return ::exp2f(x);
+}
+static KYTY_SYSV_ABI float c_expf(float x)
+{
+	return ::expf(x);
+}
+static KYTY_SYSV_ABI float c_ldexpf(float x, int e)
+{
+	return ::ldexpf(x, e);
+}
+static KYTY_SYSV_ABI void c_sincosf(float x, float* s, float* c)
+{
+	*s = ::sinf(x);
+	*c = ::cosf(x);
+}
 
 // --- C++ runtime -------------------------------------------------------------
 // One-time static-init guard. jmp_buf-free implementation over the guard byte.
-static KYTY_SYSV_ABI int  c_cxa_guard_acquire(uint64_t* g)
+static KYTY_SYSV_ABI int c_cxa_guard_acquire(uint64_t* g)
 {
 	auto* done = reinterpret_cast<volatile uint8_t*>(g);
 	return (*done == 0) ? 1 : 0;
@@ -686,14 +1073,14 @@ static void* g_locimp_vtable[16] = {
 };
 
 static void* g_ctype_vtable[16] = {
-    reinterpret_cast<void*>(&CxxVtableNoop), // +0x00
-    reinterpret_cast<void*>(&CxxVtableNoop), // +0x08
-    reinterpret_cast<void*>(&CxxVtableNoop), // +0x10
-    reinterpret_cast<void*>(&CxxVtableNoop), // +0x18
-    reinterpret_cast<void*>(&CxxVtableNoop), // +0x20
-    reinterpret_cast<void*>(&CxxVtableNoop), // +0x28
-    reinterpret_cast<void*>(&CxxVtableNoop), // +0x30
-    reinterpret_cast<void*>(&CxxVtableNoop), // +0x38
+    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x00
+    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x08
+    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x10
+    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x18
+    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x20
+    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x28
+    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x30
+    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x38
     reinterpret_cast<void*>(&CxxCtypeFacetQuery), // +0x40
 };
 
@@ -709,14 +1096,14 @@ static CxxFacetStub g_ctype_facet {g_ctype_vtable};
 static void* g_classic_facets[kCxxLocimpFacetCount] = {nullptr, &g_ctype_facet};
 
 static CxxLocimpLayout g_classic_locimp {
-    g_locimp_vtable,          // vtable
-    nullptr,                  // reserved_08
-    g_classic_facets,         // facet_vec
-    kCxxLocimpFacetCount,     // facet_count
-    0,                        // reserved_20
-    0,                        // flag_24
-    {0, 0, 0},                // pad
-    "C",                      // name
+    g_locimp_vtable,      // vtable
+    nullptr,              // reserved_08
+    g_classic_facets,     // facet_vec
+    kCxxLocimpFacetCount, // facet_count
+    0,                    // reserved_20
+    0,                    // flag_24
+    {0, 0, 0},            // pad
+    "C",                  // name
 };
 
 // _ZSt21_sceLibcClassicLocale — std::locale object (single Locimp*).
@@ -724,22 +1111,49 @@ static CxxLocaleLayout g_sce_classic_locale {&g_classic_locimp};
 
 // std::ctype<char>::id and locale::id::_Id_cnt (pre-assigned to match facets).
 static std::uint64_t g_ctype_char_id = kCxxCtypeCharId;
-static std::int32_t  g_locale_id_cnt = static_cast<std::int32_t>(kCxxCtypeCharId);
+static std::uint64_t g_locale_id_2   = 2;
+static std::uint64_t g_locale_id_3   = 3;
+static std::uint64_t g_locale_id_4   = 4;
+static std::uint64_t g_locale_id_5   = 5;
+static std::uint64_t g_locale_id_6   = 6;
+static std::uint64_t g_locale_id_7   = 7;
+static std::int32_t  g_locale_id_cnt = 8;
+static std::uint64_t g_dummy_obj_1   = 0;
+static std::uint64_t g_dummy_obj_2   = 0;
+static std::uint64_t g_dummy_obj_3   = 0;
+static std::uint64_t g_dummy_obj_4   = 0;
+static std::uint64_t g_dummy_obj_5   = 0;
+static std::uint64_t g_dummy_obj_6   = 0;
+static std::uint64_t g_dummy_obj_7   = 0;
+static std::uint64_t g_dummy_obj_8   = 0;
+static std::uint64_t g_dummy_obj_9   = 0;
+static std::uint64_t g_dummy_obj_10  = 0;
+static std::uint64_t g_dummy_obj_11  = 0;
+static std::uint64_t g_dummy_obj_12  = 0;
+static std::uint64_t g_dummy_obj_13  = 0;
+static std::uint64_t g_dummy_obj_14  = 0;
+static std::uint64_t g_dummy_obj_15  = 0;
+static std::uint64_t g_dummy_obj_16  = 0;
+static std::uint64_t g_dummy_obj_17  = 0;
+static std::uint64_t g_dummy_obj_18  = 0;
+static std::uint64_t g_dummy_obj_19  = 0;
+static std::uint64_t g_dummy_obj_20  = 0;
+static std::uint64_t g_dummy_obj_21  = 0;
+static std::uint64_t g_dummy_obj_22  = 0;
+static std::uint64_t g_dummy_obj_23  = 0;
+static std::uint64_t g_dummy_obj_24  = 0;
+static std::uint64_t g_dummy_obj_25  = 0;
 
 // Itanium type_info vtables: guest type_info objects relocate to these. Slots
 // are no-ops so a stray virtual call does not hit INVALID_MEMORY.
-static void* g_class_type_info_vtable[8] = {
-    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
-    reinterpret_cast<void*>(&CxxVtableNoop)};
-static void* g_si_class_type_info_vtable[8] = {
-    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
-    reinterpret_cast<void*>(&CxxVtableNoop)};
-static void* g_vmi_class_type_info_vtable[8] = {
-    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
-    reinterpret_cast<void*>(&CxxVtableNoop)};
-static void* g_exception_vtable[8] = {
-    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
-    reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* g_class_type_info_vtable[8]     = {reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+                                                reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* g_si_class_type_info_vtable[8]  = {reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+                                                reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* g_vmi_class_type_info_vtable[8] = {reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+                                                reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* g_exception_vtable[8]           = {reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+                                                reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
 
 // streamoff sentinel and fpz (common libc++/MSVC objects; zero-safe).
 static std::int64_t g_bad_off = -1;
@@ -863,7 +1277,7 @@ static const char* CxaTryReadCString(const void* p)
 // Guest type_info / exception layouts (libstdc++ Itanium):
 //   type_info:  [0]=vtable, [8]=name (const char*, may be mangled with leading '*')
 //   exception with SSO string: after vptr, std::string at +8 (capacity/size/data)
-static KYTY_SYSV_ABI void cxa_throw(void* thrown_exception, void* tinfo, void (*/*dest*/)(void*))
+static KYTY_SYSV_ABI void cxa_throw(void* thrown_exception, void* tinfo, void (* /*dest*/)(void*))
 {
 	const char* type_name = nullptr;
 	const char* what_msg  = nullptr;
@@ -897,8 +1311,8 @@ static KYTY_SYSV_ABI void cxa_throw(void* thrown_exception, void* tinfo, void (*
 		}
 	}
 
-	EXIT("__cxa_throw type=%s what=%s obj=%p tinfo=%p\n", type_name != nullptr ? type_name : "?",
-	     what_msg != nullptr ? what_msg : "?", thrown_exception, tinfo);
+	EXIT("__cxa_throw type=%s what=%s obj=%p tinfo=%p\n", type_name != nullptr ? type_name : "?", what_msg != nullptr ? what_msg : "?",
+	     thrown_exception, tinfo);
 }
 
 static KYTY_SYSV_ABI int atexit(void (*func)())
@@ -987,8 +1401,6 @@ void KYTY_SYSV_ABI cxa_finalize(void* d)
 		}
 	}
 }
-
-
 
 } // namespace LibC
 
@@ -1180,15 +1592,14 @@ int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
 		return -1;
 	}
 
-	auto* out                 = static_cast<LibcMallocManagedSize*>(stats);
-	out->size_version         = 0x00010028u;
-	out->reserved             = 0;
-	out->max_system_size      = sizes.max_system_size;
-	out->current_system_size  = sizes.current_system_size;
-	out->max_inuse_size       = sizes.max_inuse_size;
-	out->current_inuse_size   = sizes.current_inuse_size;
-	printf("\t system = 0x%016" PRIx64 " inuse = 0x%016" PRIx64 "\n", out->current_system_size,
-	       out->current_inuse_size);
+	auto* out                = static_cast<LibcMallocManagedSize*>(stats);
+	out->size_version        = 0x00010028u;
+	out->reserved            = 0;
+	out->max_system_size     = sizes.max_system_size;
+	out->current_system_size = sizes.current_system_size;
+	out->max_inuse_size      = sizes.max_inuse_size;
+	out->current_inuse_size  = sizes.current_inuse_size;
+	printf("\t system = 0x%016" PRIx64 " inuse = 0x%016" PRIx64 "\n", out->current_system_size, out->current_inuse_size);
 	return 0;
 }
 
@@ -1232,7 +1643,6 @@ LIB_DEFINE(InitLibcInternal_1)
 
 LIB_USING(LibC);
 
-
 LIB_DEFINE(InitLibC_1)
 {
 	// Re-enabled for the macOS/Rosetta bring-up: HLE-ing the "libc" module lets the
@@ -1242,19 +1652,56 @@ LIB_DEFINE(InitLibC_1)
 
 	LIB_OBJECT("P330P3dFF68", &LibC::g_need_flag);
 	LIB_OBJECT("2sWzhYqFH4E", stdout);
+	LIB_OBJECT("H8AprKeZtNg", stderr);
+	LIB_OBJECT("BJCgW9-OxLA", stdin);
 
 	// C++ locale / RTTI objects — Dreaming Sarah (Qoo175Ig+-k → classic locale).
 	// dynlib: _ZSt21_sceLibcClassicLocale, ctype<char>::id, locale::id::_Id_cnt,
 	// __class_type_info / __si_class_type_info / __vmi_class_type_info vtables.
 	LIB_OBJECT("Qoo175Ig+-k", &LibC::g_sce_classic_locale);
 	LIB_OBJECT("Cv+zC4EjGMA", &LibC::g_ctype_char_id);
+	LIB_OBJECT("sBCTjFk7Gi4", &LibC::g_locale_id_2);
+	LIB_OBJECT("yLE5H3058Ao", &LibC::g_locale_id_3);
+	LIB_OBJECT("Bq8m04PN1zw", &LibC::g_locale_id_4);
+	LIB_OBJECT("bLPn1gfqSW8", &LibC::g_locale_id_5);
+	LIB_OBJECT("-L+-8F0+gBc", &LibC::g_locale_id_6);
+	LIB_OBJECT("qOD-ksTkE08", &LibC::g_locale_id_7);
 	LIB_OBJECT("H4fcpQOpc08", &LibC::g_locale_id_cnt);
 	LIB_OBJECT("byV+FWlAnB4", LibC::g_class_type_info_vtable);
+	LIB_OBJECT("5BIbzIuDxTQ", LibC::g_class_type_info_vtable);
 	LIB_OBJECT("pZ9WXcClPO8", LibC::g_si_class_type_info_vtable);
+	LIB_OBJECT("oAidKrxuUv0", LibC::g_si_class_type_info_vtable);
 	LIB_OBJECT("9ByRMdo7ywg", LibC::g_vmi_class_type_info_vtable);
 	LIB_OBJECT("dCzeFfg9WWI", LibC::g_exception_vtable);
+	LIB_OBJECT("udTM6Nxx-Ng", LibC::g_exception_vtable);
+	LIB_OBJECT("tVHE+C8vGXk", LibC::g_exception_vtable);
 	LIB_OBJECT("FQ9NFbBHb5Y", &LibC::g_bad_off);
 	LIB_OBJECT("wiR+rIcbnlc", LibC::g_fpz);
+	LIB_OBJECT("XZzWt0ygWdw", &LibC::g_dummy_obj_1);
+	LIB_OBJECT("keXoyW-rV-0", &LibC::g_dummy_obj_2);
+	LIB_OBJECT("dKjhNUf9FBc", &LibC::g_dummy_obj_3);
+	LIB_OBJECT("n+aUKkC-3sI", &LibC::g_dummy_obj_4);
+	LIB_OBJECT("MpxhMh8QFro", &LibC::g_dummy_obj_5);
+	LIB_OBJECT("NU-T4QowTNA", &LibC::g_dummy_obj_6);
+	LIB_OBJECT("E14mW8pVpoE", &LibC::g_dummy_obj_7);
+	LIB_OBJECT("1kZFcktOm+s", &LibC::g_dummy_obj_8);
+	LIB_OBJECT("DbEnA+MnVIw", &LibC::g_dummy_obj_9);
+	LIB_OBJECT("fL3O02ypZFE", &LibC::g_dummy_obj_10);
+	LIB_FUNC("QJ5xVfKkni0", LibC::c_tls_get_addr);
+	LIB_OBJECT("9rMML086SEE", &LibC::g_dummy_obj_12);
+	LIB_OBJECT("QxqK-IdpumU", &LibC::g_dummy_obj_13);
+	LIB_OBJECT("zS94yyJRSUs", &LibC::g_dummy_obj_14);
+	LIB_OBJECT("-9SIhUr4Iuo", &LibC::g_dummy_obj_15);
+	LIB_OBJECT("stv1S3BKfgw", &LibC::g_dummy_obj_16);
+	LIB_OBJECT("2wz4rthdiy8", &LibC::g_dummy_obj_17);
+	LIB_OBJECT("UWyL6KoR96U", &LibC::g_dummy_obj_18);
+	LIB_OBJECT("VmqsS6auJzo", &LibC::g_dummy_obj_19);
+	LIB_OBJECT("irGo1yaJ-vM", &LibC::g_dummy_obj_20);
+	LIB_OBJECT("HUbZmOnT-Dg", &LibC::g_dummy_obj_21);
+	LIB_OBJECT("n2kx+OmFUis", &LibC::g_dummy_obj_22);
+	LIB_OBJECT("Y6Sl4Xw7gfA", &LibC::g_dummy_obj_23);
+	LIB_OBJECT("apPZ6HKZWaQ", &LibC::g_dummy_obj_24);
+	LIB_OBJECT("BgZcGDh7o9g", &LibC::g_dummy_obj_25);
 	LIB_FUNC("kALvdgEv5ME", LibC::c_Locksyslock);
 	LIB_FUNC("9nf8joUTSaQ", LibC::c_Unlocksyslock);
 	LIB_FUNC("hEQ2Yi4PJXA", LibC::c_locale_Getgloballocale);
@@ -1296,6 +1743,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("h8GwqPFbu6I", LibC::c_memset_s);
 	LIB_FUNC("DfivPArhucg", LibC::c_memcmp);
 	LIB_FUNC("j4ViWNHEgww", LibC::c_strlen);
+	LIB_FUNC("WkkeywLJcgU", LibC::c_wcslen);
+	LIB_FUNC("0nV21JjYCH8", LibC::c_wcsncpy);
+	LIB_FUNC("CyXs2l-1kNA", LibC::c_Iswctype);
 	LIB_FUNC("6sJWiWSRuqk", LibC::c_strncpy);
 	// Captured Gen5 boot after SaveDataInitialize3: 3-arg call with dest buffer,
 	// "SAVEDATA00" src, n=0x20 — same ABI as strncpy (second NID for same export).
@@ -1310,15 +1760,15 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("9yDWMxEFdJU", LibC::c_strrchr);
 	// Gen5 libc_v1 strstr.
 	LIB_FUNC("viiwFMaNamA", LibC::c_strstr);
-	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);         // operator new(size_t)
+	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new); // operator new(size_t)
 	// Gen5 libc_v1 — second operator new(size_t) NID (Dreaming Sarah after
 	// VideoOut flip path; call is `mov $size,%edi; call`).
 	LIB_FUNC("cfAXurvfl5o", LibC::cxx_new);
-	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete);      // operator delete(void*)
+	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete); // operator delete(void*)
 	// Gen5 libc_v1 C++ EH — Dreaming Sarah throw path after flip/init.
 	// vkuuLfhnSZI: __cxa_throw (rdi=obj, rsi=typeinfo, rdx=dtor; ud2 after).
 	LIB_FUNC("vkuuLfhnSZI", LibC::cxa_throw);
-	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);   // operator new[](size_t)
+	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);    // operator new[](size_t)
 	LIB_FUNC("MLWl90SFWNE", LibC::cxx_delete_array); // operator delete[](void*)
 	LIB_FUNC("iPBqs+YUUFw", LibC::c_atomic_cmpset_32);
 	LIB_FUNC("2HnmKiLmV6s", LibC::c_atomic_cmpset_32);
@@ -1326,6 +1776,7 @@ LIB_DEFINE(InitLibC_1)
 	// string / memory
 	LIB_FUNC("+P6FRGH4LfA", LibC::c_memmove);
 	LIB_FUNC("8u8lPzUEq+U", LibC::c_memchr);
+	LIB_FUNC("fnUEjBCNRVU", LibC::c_memchr);
 	LIB_FUNC("5TjaJwkLWxE", LibC::c_bcmp);
 	LIB_FUNC("kiZSXIWd9vg", LibC::c_strcpy);
 	// Gen5 strcpy_s — NID 5Xa2ACNECdo (next hard-abort after thread stack reprotect).
@@ -1369,6 +1820,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("24m4Z4bUaoY", LibC::c_sscanf_s);
 	LIB_FUNC("jbz9I9vkqkk", LibC::c_vsprintf);
 	LIB_FUNC("rWSuTWY2JN0", LibC::c_vsnprintf_s);
+	LIB_FUNC("u0XOsuOmOzc", LibC::c_vswprintf);
 
 	// stdlib
 	LIB_FUNC("2vDqwBlpF-o", LibC::c_strtod);

@@ -412,6 +412,12 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 		case 0x33: KYTY_NI("s_mov_regrd_b32"); break;
 		case 0x34: KYTY_NI("s_abs_i32"); break;
 		case 0x35: KYTY_NI("s_mov_fed_b32"); break;
+		case 0x37:
+			inst.type        = ShaderInstructionType::SAndn1SaveexecB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
 
 		default: KYTY_UNKNOWN_OP();
 	}
@@ -702,7 +708,7 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 		case 0x19: KYTY_NI("v_cmpx_nge_f32"); break;
 		case 0x1A: KYTY_NI("v_cmpx_nlg_f32"); break;
 		case 0x1B: KYTY_NI("v_cmpx_ngt_f32"); break;
-		case 0x1C: KYTY_NI("v_cmpx_nle_f32"); break;
+		case 0x1C: inst.type = ShaderInstructionType::VCmpxNleF32; break;
 		case 0x1d: inst.type = ShaderInstructionType::VCmpxNeqF32; break;
 		case 0x1E: KYTY_NI("v_cmpx_nlt_f32"); break;
 		case 0x1F: KYTY_NI("v_cmpx_tru_f32"); break;
@@ -881,7 +887,7 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 		case 0xCE: KYTY_NI("v_cmp_ge_f16"); break;
 		case 0xCF: KYTY_NI("v_cmp_o_f16"); break;
 		case 0xD0: KYTY_NI("v_cmpx_f_u32"); break;
-		case 0xD1: KYTY_NI("v_cmpx_lt_u32"); break;
+		case 0xD1: inst.type = ShaderInstructionType::VCmpxLtU32; break;
 		case 0xd2: inst.type = ShaderInstructionType::VCmpxEqU32; break;
 		case 0xD3: KYTY_NI("v_cmpx_le_u32"); break;
 		case 0xd4: inst.type = ShaderInstructionType::VCmpxGtU32; break;
@@ -974,7 +980,7 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	EXIT_NOT_IMPLEMENTED(src0_sext != 0);
 
 	ShaderInstruction inst;
-	inst.pc      = pc;
+	inst.pc = pc;
 	// Non-SDWA: 9-bit src0 is already SGPR/VGPR encoded. SDWA: 8-bit + s0 flag
 	// (s0==0 → VGPR, same as VOP2 SDWA).
 	inst.src[0]  = operand_parse(sdwa ? (src0 + (s0 == 0 ? 256u : 0u)) : src0);
@@ -1047,7 +1053,11 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x28: KYTY_NI("v_rcp_clamp_f32"); break;
 		case 0x29: KYTY_NI("v_rcp_legacy_f32"); break;
 		case 0x2a: inst.type = ShaderInstructionType::VRcpF32; break;
-		case 0x2B: KYTY_NI("v_rcp_iflag_f32"); break;
+		case 0x2B:
+			// Gen5 v_rcp_iflag_f32 has the same value operation as v_rcp_f32.
+			// The current shader IR has no exception-state side effect to carry.
+			inst.type = ShaderInstructionType::VRcpF32;
+			break;
 		case 0x2C: KYTY_NI("v_rsq_clamp_f32"); break;
 		case 0x2D: KYTY_NI("v_rsq_legacy_f32"); break;
 		case 0x2e: inst.type = ShaderInstructionType::VRsqF32; break;
@@ -1315,12 +1325,11 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 			};
 			break;
 		case 0x26:
-			if (next_gen)
+			// Captured Gen5 E32 opcode 0x26 is v_sub_u32/v_sub_nc_u32:
+			// it writes only the VGPR result and has no VCC destination.
+			inst.type = ShaderInstructionType::VSubI32;
+			if (!next_gen)
 			{
-				KYTY_UNKNOWN_OP();
-			} else
-			{
-				inst.type      = ShaderInstructionType::VSubI32;
 				inst.format    = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
 				inst.dst2.type = ShaderOperandType::VccLo;
 				inst.dst2.size = 2;
@@ -1341,7 +1350,13 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x28:
 			if (next_gen)
 			{
-				KYTY_UNKNOWN_OP();
+				inst.type        = ShaderInstructionType::VAddCoCiU32;
+				inst.format      = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2;
+				inst.src[2].type = ShaderOperandType::VccLo;
+				inst.src[2].size = 2;
+				inst.src_num     = 3;
+				inst.dst2.type   = ShaderOperandType::VccLo;
+				inst.dst2.size   = 2;
 			} else
 			{
 				KYTY_NI("v_addc_u32")
@@ -1439,6 +1454,11 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 	return size;
 }
 
+static bool is_gen5_vop3b_carry_family(uint32_t opcode, bool next_gen)
+{
+	return next_gen && opcode >= 0x128u && opcode <= 0x12au;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity,readability-function-size,google-readability-function-size,hicpp-function-size)
 KYTY_SHADER_PARSER(shader_parse_vop3)
 {
@@ -1448,17 +1468,18 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 
 	KYTY_TYPE_STR("vop3");
 
-	uint32_t opcode = (next_gen ? (buffer[0] >> 16u) & 0x3ffu : (buffer[0] >> 17u) & 0x1ffu);
-	uint32_t clamp  = (next_gen ? (buffer[0] >> 15u) & 0x1u : (buffer[0] >> 11u) & 0x1u);
-	uint32_t op_sel = (next_gen ? (buffer[0] >> 11u) & 0xfu : 0);
-	uint32_t abs    = (buffer[0] >> 8u) & 0x7u;
-	uint32_t vdst   = (buffer[0] >> 0u) & 0xffu;
-	uint32_t sdst   = (buffer[0] >> 8u) & 0x7fu;
-	uint32_t neg    = (buffer[1] >> 29u) & 0x7u;
-	uint32_t omod   = (buffer[1] >> 27u) & 0x3u;
-	uint32_t src0   = (buffer[1] >> 0u) & 0x1ffu;
-	uint32_t src1   = (buffer[1] >> 9u) & 0x1ffu;
-	uint32_t src2   = (buffer[1] >> 18u) & 0x1ffu;
+	uint32_t   opcode         = (next_gen ? (buffer[0] >> 16u) & 0x3ffu : (buffer[0] >> 17u) & 0x1ffu);
+	uint32_t   clamp          = (next_gen ? (buffer[0] >> 15u) & 0x1u : (buffer[0] >> 11u) & 0x1u);
+	const bool is_vop3b_carry = is_gen5_vop3b_carry_family(opcode, next_gen);
+	uint32_t   op_sel         = (next_gen && !is_vop3b_carry ? (buffer[0] >> 11u) & 0xfu : 0);
+	uint32_t   abs            = (is_vop3b_carry ? 0 : (buffer[0] >> 8u) & 0x7u);
+	uint32_t   vdst           = (buffer[0] >> 0u) & 0xffu;
+	uint32_t   sdst           = (buffer[0] >> 8u) & 0x7fu;
+	uint32_t   neg            = (buffer[1] >> 29u) & 0x7u;
+	uint32_t   omod           = (buffer[1] >> 27u) & 0x3u;
+	uint32_t   src0           = (buffer[1] >> 0u) & 0x1ffu;
+	uint32_t   src1           = (buffer[1] >> 9u) & 0x1ffu;
+	uint32_t   src2           = (buffer[1] >> 18u) & 0x1ffu;
 
 	EXIT_NOT_IMPLEMENTED(op_sel != 0);
 
@@ -1568,7 +1589,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x19: KYTY_NI("v_cmpx_nge_f32"); break;
 		case 0x1A: KYTY_NI("v_cmpx_nlg_f32"); break;
 		case 0x1B: KYTY_NI("v_cmpx_ngt_f32"); break;
-		case 0x1C: KYTY_NI("v_cmpx_nle_f32"); break;
+		case 0x1C: inst.type = ShaderInstructionType::VCmpxNleF32; break;
 		case 0x1d: inst.type = ShaderInstructionType::VCmpxNeqF32; break;
 		case 0x1E: KYTY_NI("v_cmpx_nlt_f32"); break;
 		case 0x1F: KYTY_NI("v_cmpx_tru_f32"); break;
@@ -1747,7 +1768,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0xCE: KYTY_NI("v_cmp_ge_f16"); break;
 		case 0xCF: KYTY_NI("v_cmp_o_f16"); break;
 		case 0xD0: KYTY_NI("v_cmpx_f_u32"); break;
-		case 0xD1: KYTY_NI("v_cmpx_lt_u32"); break;
+		case 0xD1: inst.type = ShaderInstructionType::VCmpxLtU32; break;
 		case 0xd2: inst.type = ShaderInstructionType::VCmpxEqU32; break;
 		case 0xD3: KYTY_NI("v_cmpx_le_u32"); break;
 		case 0xd4: inst.type = ShaderInstructionType::VCmpxGtU32; break;
@@ -1895,12 +1916,11 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			};
 			break;
 		case 0x126:
-			if (next_gen)
+			// Gen5 VOP3 0x126 is the direct encoding of the same no-carry
+			// subtraction contract as VOP2 0x26. Legacy keeps its VCC result.
+			inst.type = ShaderInstructionType::VSubI32;
+			if (!next_gen)
 			{
-				KYTY_UNKNOWN_OP();
-			} else
-			{
-				inst.type      = ShaderInstructionType::VSubI32;
 				inst.format    = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
 				inst.dst2      = operand_parse(sdst);
 				inst.dst2.size = 2;
@@ -1921,7 +1941,12 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x128:
 			if (next_gen)
 			{
-				KYTY_UNKNOWN_OP();
+				inst.type        = ShaderInstructionType::VAddCoCiU32;
+				inst.format      = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2;
+				inst.src_num     = 3;
+				inst.src[2].size = 2;
+				inst.dst2        = operand_parse(sdst);
+				inst.dst2.size   = 2;
 			} else
 			{
 				KYTY_NI("v_addc_u32")
@@ -2254,7 +2279,11 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x1A8: KYTY_NI("v_rcp_clamp_f32"); break;
 		case 0x1A9: KYTY_NI("v_rcp_legacy_f32"); break;
 		case 0x1aa: inst.type = ShaderInstructionType::VRcpF32; break;
-		case 0x1AB: KYTY_NI("v_rcp_iflag_f32"); break;
+		case 0x1AB:
+			// VOP3 uses the same reciprocal value contract; modifiers remain in
+			// the normalized instruction for the shared recompiler helper.
+			inst.type = ShaderInstructionType::VRcpF32;
+			break;
 		case 0x1AC: KYTY_NI("v_rsq_clamp_f32"); break;
 		case 0x1AD: KYTY_NI("v_rsq_legacy_f32"); break;
 		case 0x1ae: inst.type = ShaderInstructionType::VRsqF32; break;
@@ -2482,8 +2511,8 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 	{
 		printf("%s", dst->DbgDump().c_str());
 		EXIT("%s\n"
-		     "unknown exp target: 0x%02" PRIx32 " done=%u compr=%u vm=%u en=0x%x at addr 0x%08" PRIx32
-		     " (hash0 = 0x%08" PRIx32 ", crc32 = 0x%08" PRIx32 ")\n",
+		     "unknown exp target: 0x%02" PRIx32 " done=%u compr=%u vm=%u en=0x%x at addr 0x%08" PRIx32 " (hash0 = 0x%08" PRIx32
+		     ", crc32 = 0x%08" PRIx32 ")\n",
 		     dst->DbgDump().c_str(), target, done, compr, vm, en, pc, dst->GetHash0(), dst->GetCrc32());
 	}
 
@@ -2543,7 +2572,7 @@ KYTY_SHADER_PARSER(shader_parse_smem)
 		{
 			int x : 21;
 		} s {};
-		s.x                 = offset;
+		s.x                  = offset;
 		inst.smem_imm_offset = s.x;
 	}
 
@@ -2738,7 +2767,7 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 	uint32_t vaddr   = (buffer[1] >> 0u) & 0xffu;
 
 	EXIT_NOT_IMPLEMENTED(idxen == 0);
-	EXIT_NOT_IMPLEMENTED(offen == 1);
+	EXIT_NOT_IMPLEMENTED(offen == 1 && (!next_gen || opcode != 0x0cu));
 	// Non-zero 12-bit offset is folded into soffset when that source is an
 	// immediate/inline constant (observed Gen5 buffer_load_dwordx* paths).
 	EXIT_NOT_IMPLEMENTED(glc == 1);
@@ -2823,13 +2852,19 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.src[1].size = 4;
 			inst.dst.size    = 4;
 			break;
-		case 0x08: KYTY_NI("buffer_load_ubyte"); break;
+		case 0x08:
+			inst.type        = ShaderInstructionType::BufferLoadUbyte;
+			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			break;
 		case 0x09: KYTY_NI("buffer_load_sbyte"); break;
 		case 0x0A: KYTY_NI("buffer_load_ushort"); break;
 		case 0x0B: KYTY_NI("buffer_load_sshort"); break;
 		case 0x0c:
-			inst.type        = ShaderInstructionType::BufferLoadDword;
-			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.type = ShaderInstructionType::BufferLoadDword;
+			inst.format =
+			    (offen == 1 ? ShaderInstructionFormat::Vdata1Vaddr2SvSoffsOffenIdxen : ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen);
+			inst.src[0].size += static_cast<int>(offen);
 			inst.src[1].size = 4;
 			break;
 		case 0x0D:
@@ -3180,12 +3215,12 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	if (nsa != 0)
 	{
 		const uint32_t encoded_address_num = 1 + nsa * 4;
-		inst.mimg_address_num = static_cast<int>(encoded_address_num);
-		inst.mimg_address[0]  = operand_parse(vaddr + 256);
+		inst.mimg_address_num              = static_cast<int>(encoded_address_num);
+		inst.mimg_address[0]               = operand_parse(vaddr + 256);
 		for (uint32_t address = 1; address < encoded_address_num; address++)
 		{
-			const uint32_t encoded = address - 1;
-			const uint32_t vgpr    = (buffer[2 + encoded / 4] >> ((encoded % 4) * 8u)) & 0xffu;
+			const uint32_t encoded     = address - 1;
+			const uint32_t vgpr        = (buffer[2 + encoded / 4] >> ((encoded % 4) * 8u)) & 0xffu;
 			inst.mimg_address[address] = operand_parse(vgpr + 256);
 		}
 	}
@@ -3338,13 +3373,19 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x26: KYTY_NI("image_sample_b_cl"); break;
 		case 0x27:
 			// image_sample_lz: sample LOD 0. Same VDATA layouts as image_sample
-			// for the observed dmasks (0x7 RGB, 0xf RGBA after PlayGo/Resident).
+			// for the supported dmasks (0x1 R, 0x7 RGB, 0xf RGBA).
 			inst.type        = ShaderInstructionType::ImageSampleLz;
 			inst.src[0].size = 3;
 			inst.src[1].size = 8;
 			inst.src[2].size = 4;
 			switch (dmask) // NOLINT
 			{
+				case 0x1:
+				{
+					inst.format   = ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1;
+					inst.dst.size = 1;
+					break;
+				}
 				case 0x7:
 				{
 					inst.format   = ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7;

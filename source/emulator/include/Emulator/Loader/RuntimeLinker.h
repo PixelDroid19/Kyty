@@ -8,6 +8,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Loader/MissingImport.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -22,6 +23,7 @@ class Elf64;
 struct Elf64_Sym;
 struct Elf64_Rela;
 class RuntimeLinker;
+class RuntimeLinkerIntegrationAccess;
 
 using module_func_t = int (*)(size_t args, const void* argp);
 
@@ -122,6 +124,18 @@ struct Program
 	uint32_t                               custom_call_plt_num         = 0;
 };
 
+// Immutable data copied while RuntimeLinker owns m_mutex. Consumers can inspect
+// this after the lock is released without retaining a Program pointer.
+struct ProgramExportSnapshot
+{
+	int32_t        unique_id = -1;
+	String         file_name;
+	Vector<String> export_names;
+};
+
+// MissingImportDiagnostics is defined in MissingImport.h (owned by
+// ImportDiagnostics / MissingImportRegistry).
+
 class RuntimeLinker
 {
 public:
@@ -150,9 +164,16 @@ public:
 	void StopAllModules();
 	void DeleteTlss(int thread_id);
 
-	void Resolve(const String& name, SymbolType type, Program* program, SymbolRecord* out_info, bool* bind_self);
+	void Resolve(const String& name, SymbolType type, Program* program, SymbolRecord* out_info, bool* bind_self = nullptr);
+	[[nodiscard]] MissingImportDiagnostics GetMissingImportDiagnostics() const;
+	[[nodiscard]] static MissingImportDiagnostics GetGlobalMissingImportDiagnostics();
 
 	SymbolDatabase* Symbols() { return m_symbols; }
+
+	// Immutable view for export-conflict scans. Do not expose Program pointers
+	// outside the lock: another lifecycle operation may unload them immediately.
+	[[nodiscard]] uint32_t LoadedProgramCount();
+	[[nodiscard]] Vector<ProgramExportSnapshot> SnapshotExportPrograms();
 
 	static uint64_t ReadFromElf(Program* program, uint64_t vaddr);
 	Program*        FindProgramByAddr(uint64_t vaddr);
@@ -164,6 +185,12 @@ public:
 	void StackTrace(uint64_t frame_ptr);
 
 private:
+	friend class RuntimeLinkerIntegrationAccess;
+
+	// Integration-only seam. Kept private so production callers cannot attach a
+	// Program that did not pass through ELF loading and validation.
+	Program* AttachSyntheticExportModule(const Core::String& file_name);
+
 	static void LoadProgramToMemory(Program* program);
 	static void ParseProgramDynamicInfo(Program* program);
 	static void CreateSymbolDatabase(Program* program);

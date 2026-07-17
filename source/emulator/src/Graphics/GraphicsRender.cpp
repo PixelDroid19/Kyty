@@ -10,6 +10,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
@@ -750,115 +751,123 @@ static void z_print(const char* func, const HW::DepthRenderTarget& z)
 	printf("\t size.y_max                            = 0x%04" PRIx16 "\n", z.size.y_max);
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static void z_check(const HW::DepthRenderTarget& z)
+static void validate_depth_plane(const HW::DepthRenderTarget& z)
 {
 	if (z.z_info.format == 0)
 	{
-		EXIT_NOT_IMPLEMENTED(z.z_info.format != 0);
 		EXIT_NOT_IMPLEMENTED(z.z_info.tile_mode_index != 0);
 		EXIT_NOT_IMPLEMENTED(z.z_info.num_samples != 0);
-		EXIT_NOT_IMPLEMENTED(z.z_info.tile_surface_enable != false);
-		EXIT_NOT_IMPLEMENTED(z.z_info.expclear_enabled != false);
-		// Gen5 may leave ZRANGE_PRECISION set while FORMAT is invalid/unbound; the bit is unused.
-		// EXIT_NOT_IMPLEMENTED(z.z_info.zrange_precision != 0);
-		EXIT_NOT_IMPLEMENTED(z.z_info.embedded_sample_locations != false);
-		EXIT_NOT_IMPLEMENTED(z.z_info.partially_resident != false);
+		EXIT_NOT_IMPLEMENTED(z.z_info.tile_surface_enable);
+		EXIT_NOT_IMPLEMENTED(z.z_info.expclear_enabled);
+		EXIT_NOT_IMPLEMENTED(z.z_info.embedded_sample_locations);
+		EXIT_NOT_IMPLEMENTED(z.z_info.partially_resident);
 		EXIT_NOT_IMPLEMENTED(z.z_info.num_mip_levels != 0);
 		EXIT_NOT_IMPLEMENTED(z.z_info.plane_compression != 0);
+		return;
+	}
+	EXIT_NOT_IMPLEMENTED(z.z_info.format != 0x00000003);
+	EXIT_NOT_IMPLEMENTED(z.z_info.num_samples != 0);
+	EXIT_NOT_IMPLEMENTED(z.z_info.expclear_enabled);
+	EXIT_NOT_IMPLEMENTED(z.z_info.zrange_precision != 1);
+	EXIT_NOT_IMPLEMENTED(z.z_info.embedded_sample_locations);
+	EXIT_NOT_IMPLEMENTED(z.z_info.partially_resident);
+	EXIT_NOT_IMPLEMENTED(z.z_info.num_mip_levels != 0);
+	EXIT_NOT_IMPLEMENTED(z.z_info.plane_compression != 0);
+	EXIT_NOT_IMPLEMENTED(z.z_read_base_addr != z.z_write_base_addr);
+	EXIT_NOT_IMPLEMENTED(z.z_write_base_addr == 0);
+}
+
+static void emit_invalid_stencil_plane(const HW::DepthRenderTarget& z, const HW::RenderControl& render_control,
+                                       const HW::DepthControl& depth_control)
+{
+	Emulator::Agent::Lifecycle::StencilFrontierContext context {};
+	context.stencil_enable     = depth_control.stencil_enable;
+	context.clear_enable       = render_control.stencil_clear_enable;
+	context.htile              = z.z_info.tile_surface_enable;
+	context.depth_decompress   = render_control.depth_compress_disable;
+	context.stencil_decompress = render_control.stencil_compress_disable;
+	context.resummarize        = render_control.resummarize_enable;
+	context.copy_centroid      = render_control.copy_centroid;
+	context.copy_sample        = render_control.copy_sample;
+	context.read_only          = z.depth_view.stencil_write_disable;
+	context.read_base_present  = z.stencil_read_base_addr != 0;
+	context.write_base_present = z.stencil_write_base_addr != 0;
+	Emulator::Agent::Lifecycle::EmitStencilFrontier(context);
+}
+
+static State::StencilPlaneValidation validate_stencil_plane(const HW::DepthRenderTarget& z,
+                                                            const HW::RenderControl& render_control,
+                                                            const HW::DepthControl& depth_control)
+{
+	const auto validation = State::ValidateStencilPlane(z, render_control, depth_control);
+	if (validation == State::StencilPlaneValidation::Inactive)
+	{
+		return validation;
+	}
+	if (validation != State::StencilPlaneValidation::Valid)
+	{
+		emit_invalid_stencil_plane(z, render_control, depth_control);
+	}
+	EXIT_NOT_IMPLEMENTED(validation == State::StencilPlaneValidation::MissingReadBase);
+	EXIT_NOT_IMPLEMENTED(validation == State::StencilPlaneValidation::MissingWriteBase);
+	EXIT_NOT_IMPLEMENTED(validation == State::StencilPlaneValidation::MismatchedBases);
+	EXIT_NOT_IMPLEMENTED(z.stencil_info.format == 0);
+	EXIT_NOT_IMPLEMENTED(z.stencil_info.tile_stencil_disable != true);
+	EXIT_NOT_IMPLEMENTED(z.stencil_info.expclear_enabled);
+	EXIT_NOT_IMPLEMENTED(z.stencil_info.partially_resident);
+	return validation;
+}
+
+static void validate_depth_target_layout(const HW::DepthRenderTarget& z, bool ps5)
+{
+	if (ps5)
+	{
+		EXIT_NOT_IMPLEMENTED(z.depth_info.addr5_swizzle_mask != 0);
+		EXIT_NOT_IMPLEMENTED(z.depth_info.array_mode != 0);
+		EXIT_NOT_IMPLEMENTED(z.depth_info.pipe_config != 0);
+		EXIT_NOT_IMPLEMENTED(z.depth_info.bank_width != 0);
+		EXIT_NOT_IMPLEMENTED(z.depth_info.bank_height != 0);
+		EXIT_NOT_IMPLEMENTED(z.depth_info.macro_tile_aspect != 0);
+		EXIT_NOT_IMPLEMENTED(z.depth_info.num_banks != 0);
+		EXIT_NOT_IMPLEMENTED(z.htile_surface.preload != 0);
 	} else
 	{
-		EXIT_NOT_IMPLEMENTED(z.z_info.format != 0x00000003);
-		// EXIT_NOT_IMPLEMENTED(z.z_info.tile_mode_index != (Config::IsNeo() ? 0x00000002 : 0));
-		EXIT_NOT_IMPLEMENTED(z.z_info.num_samples != 0x00000000);
-		// EXIT_NOT_IMPLEMENTED(z.z_info.tile_surface_enable != true);
-		EXIT_NOT_IMPLEMENTED(z.z_info.expclear_enabled != false);
-		EXIT_NOT_IMPLEMENTED(z.z_info.zrange_precision != 0x00000001);
-		EXIT_NOT_IMPLEMENTED(z.z_info.embedded_sample_locations != false);
-		EXIT_NOT_IMPLEMENTED(z.z_info.partially_resident != false);
-		EXIT_NOT_IMPLEMENTED(z.z_info.num_mip_levels != 0);
-		EXIT_NOT_IMPLEMENTED(z.z_info.plane_compression != 0);
+		EXIT_NOT_IMPLEMENTED(z.depth_info.addr5_swizzle_mask != 1);
+		EXIT_NOT_IMPLEMENTED(z.depth_info.array_mode != 4);
+		EXIT_NOT_IMPLEMENTED(z.depth_info.pipe_config != (Config::IsNeo() ? 0x12 : 0x0c));
+		EXIT_NOT_IMPLEMENTED(z.depth_info.bank_width != 0);
+		EXIT_NOT_IMPLEMENTED(z.htile_surface.preload != 1);
+	}
+	EXIT_NOT_IMPLEMENTED(z.htile_surface.linear != 0);
+	EXIT_NOT_IMPLEMENTED(z.htile_surface.full_cache != 0);
+	EXIT_NOT_IMPLEMENTED(z.htile_surface.htile_uses_preload_win != 0);
+	EXIT_NOT_IMPLEMENTED(z.htile_surface.prefetch_width != 0);
+	EXIT_NOT_IMPLEMENTED(z.htile_surface.prefetch_height != 0);
+	EXIT_NOT_IMPLEMENTED(z.htile_surface.dst_outside_zero_to_one != 0);
+}
+
+static void z_check(const HW::DepthRenderTarget& z, const HW::RenderControl& render_control,
+                    const HW::DepthControl& depth_control)
+{
+	validate_depth_plane(z);
+	const auto stencil = validate_stencil_plane(z, render_control, depth_control);
+	if (z.z_info.format == 0 && stencil == State::StencilPlaneValidation::Inactive)
+	{
+		return;
 	}
 
-	if (z.stencil_info.format == 0)
+	const bool ps5 = Config::IsNextGen();
+	validate_depth_target_layout(z, ps5);
+	EXIT_NOT_IMPLEMENTED(z.depth_view.slice_start != 0);
+	EXIT_NOT_IMPLEMENTED(z.depth_view.slice_max != 0);
+	EXIT_NOT_IMPLEMENTED(z.depth_view.current_mip_level != 0);
+	EXIT_NOT_IMPLEMENTED(z.depth_view.depth_write_disable);
+	if (ps5)
 	{
-		// EXIT_NOT_IMPLEMENTED(z.stencil_info.format != 0);
-		//  EXIT_NOT_IMPLEMENTED(z.stencil_info.tile_stencil_disable != false);
-		EXIT_NOT_IMPLEMENTED(z.stencil_info.expclear_enabled != false);
-		// EXIT_NOT_IMPLEMENTED(z.stencil_info.tile_mode_index != 0);
-		// EXIT_NOT_IMPLEMENTED(z.stencil_info.tile_split != 0);
-		// EXIT_NOT_IMPLEMENTED(z.stencil_info.texture_compatible_stencil != true);
-		EXIT_NOT_IMPLEMENTED(z.stencil_info.partially_resident != false);
-	} else
-	{
-		// EXIT_NOT_IMPLEMENTED(z.stencil_info.format != 0x00000001);
-		EXIT_NOT_IMPLEMENTED(z.stencil_info.tile_stencil_disable != true);
-		EXIT_NOT_IMPLEMENTED(z.stencil_info.expclear_enabled != false);
-		// EXIT_NOT_IMPLEMENTED(z.stencil_info.tile_mode_index != (Config::IsNeo() ? 0x00000002 : 0));
-		// EXIT_NOT_IMPLEMENTED(z.stencil_info.tile_split != (Config::IsNeo() ? 0x00000002 : 0));
-		// EXIT_NOT_IMPLEMENTED(z.stencil_info.texture_compatible_stencil != true);
-		EXIT_NOT_IMPLEMENTED(z.stencil_info.partially_resident != false);
-	}
-
-	if (z.z_info.format != 0 || z.stencil_info.format != 0)
-	{
-		bool ps5 = Config::IsNextGen();
-
-		if (ps5)
-		{
-			EXIT_NOT_IMPLEMENTED(z.depth_info.addr5_swizzle_mask != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.depth_info.array_mode != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.depth_info.pipe_config != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.depth_info.bank_width != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.depth_info.bank_height != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.depth_info.macro_tile_aspect != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.depth_info.num_banks != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.linear != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.full_cache != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.htile_uses_preload_win != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.preload != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.prefetch_width != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.prefetch_height != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.dst_outside_zero_to_one != 0x00000000);
-		} else
-		{
-			EXIT_NOT_IMPLEMENTED(z.depth_info.addr5_swizzle_mask != 0x00000001);
-			EXIT_NOT_IMPLEMENTED(z.depth_info.array_mode != 0x00000004);
-			EXIT_NOT_IMPLEMENTED(z.depth_info.pipe_config != (Config::IsNeo() ? 0x00000012 : 0x0c));
-			EXIT_NOT_IMPLEMENTED(z.depth_info.bank_width != 0x00000000);
-			// EXIT_NOT_IMPLEMENTED(z.depth_info.bank_height != (Config::IsNeo() ? 0x00000001 : 2));
-			// EXIT_NOT_IMPLEMENTED(z.depth_info.macro_tile_aspect != (Config::IsNeo() ? 0x00000000 : 2));
-			// EXIT_NOT_IMPLEMENTED(z.depth_info.num_banks != (Config::IsNeo() ? 0x00000002 : 3));
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.linear != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.full_cache != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.htile_uses_preload_win != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.preload != 0x00000001);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.prefetch_width != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.prefetch_height != 0x00000000);
-			EXIT_NOT_IMPLEMENTED(z.htile_surface.dst_outside_zero_to_one != 0x00000000);
-		}
-		EXIT_NOT_IMPLEMENTED(z.depth_view.slice_start != 0x00000000);
-		EXIT_NOT_IMPLEMENTED(z.depth_view.slice_max != 0x00000000);
-		EXIT_NOT_IMPLEMENTED(z.depth_view.current_mip_level != 0x00000000);
-		EXIT_NOT_IMPLEMENTED(z.depth_view.depth_write_disable != false);
-		EXIT_NOT_IMPLEMENTED(z.depth_view.stencil_write_disable != false);
-		EXIT_NOT_IMPLEMENTED(z.z_read_base_addr != z.z_write_base_addr);
-		EXIT_NOT_IMPLEMENTED(z.stencil_read_base_addr != z.stencil_write_base_addr);
-		EXIT_NOT_IMPLEMENTED(z.z_write_base_addr == 0);
-		EXIT_NOT_IMPLEMENTED(z.stencil_info.format != 0 && z.stencil_write_base_addr == 0);
-		// EXIT_NOT_IMPLEMENTED(z.pitch_div8_minus1 != 0x000000ff);
-		// EXIT_NOT_IMPLEMENTED(z.height_div8_minus1 != 0x0000008f);
-		// EXIT_NOT_IMPLEMENTED(z.slice_div64_minus1 != 0x00008fff);
-		// EXIT_NOT_IMPLEMENTED(z.htile_data_base_addr == 0);
-		// EXIT_NOT_IMPLEMENTED(z.width != 0x00000780);
-		// EXIT_NOT_IMPLEMENTED(z.height != 0x00000438);
-		if (ps5)
-		{
-			EXIT_NOT_IMPLEMENTED(z.width != 0);
-			EXIT_NOT_IMPLEMENTED(z.height != 0);
-			EXIT_NOT_IMPLEMENTED(z.size.x_max == 0);
-			EXIT_NOT_IMPLEMENTED(z.size.y_max == 0);
-		}
+		EXIT_NOT_IMPLEMENTED(z.width != 0);
+		EXIT_NOT_IMPLEMENTED(z.height != 0);
+		EXIT_NOT_IMPLEMENTED(z.size.x_max == 0);
+		EXIT_NOT_IMPLEMENTED(z.size.y_max == 0);
 	}
 }
 
@@ -1197,7 +1206,7 @@ static void hw_check(const HW::Context& hw)
 
 	rt_check(rt);
 	vp_check(vp, smc);
-	z_check(z);
+	z_check(z, rc, d);
 	clip_check(c);
 	rc_check(rc);
 	d_check(d, s, sm);
@@ -2009,6 +2018,14 @@ static void get_input_format(const ShaderBufferResource& res, VkFormat* format, 
 			// AGC float4 vertex format (follows RG32F=64 / RGB32F=74).
 			*format = VK_FORMAT_R32G32B32A32_SFLOAT;
 			*size   = 4;
+		} else if (fmt == 20)
+		{
+			*format = VK_FORMAT_R32_UINT;
+			*size   = 1;
+		} else if (fmt == 22)
+		{
+			*format = VK_FORMAT_R32_SFLOAT;
+			*size   = 1;
 		} else
 		{
 			EXIT("unknown format: fmt = %u\n", fmt);
@@ -4517,6 +4534,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 
 	for (int i = 0; i < storage_buffers.buffers_num; i++)
 	{
+		EXIT_IF(storage_buffers.accesses[i] == ShaderStorageAccess::UnusedMetadata);
 		auto r = storage_buffers.buffers[i];
 
 		// ADD_TID is applied in the KytyPS5 SPIR-V path (index += thread id).
@@ -4529,14 +4547,61 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 		{
 			// OutOfBounds modes (0..3) are descriptor policy; Vulkan SSBO
 			// robust access covers the common case. Do not hard-fail.
-			const bool four_comp =
-			    r.Stride() == 16 && r.DstSelXYZW() == DstSel(4, 5, 6, 7) && ShaderIsGen5FourComponent32BitBufferFormat(r.Format());
-			// Captured: stride=4, DstSel(R,0,0,1), format=20 (single 32-bit channel).
-			const bool one_comp = r.Stride() == 4 &&
-			                      (r.DstSelXYZW() == DstSel(4, 0, 0, 1) || r.DstSelXYZW() == DstSel(4, 0, 0, 0)) &&
-			                      ShaderIsGen5SingleComponent32BitBufferFormat(r.Format());
-			if (!(four_comp || one_comp))
+			if (!ShaderGen5StorageDescriptorSupported(r, storage_buffers.accesses[i]))
 			{
+				Emulator::Agent::Lifecycle::StorageFrontierContext context {};
+				switch (storage_buffers.accesses[i])
+				{
+					case ShaderStorageAccess::Unknown:
+						context.access = Emulator::Agent::Lifecycle::StorageAccessClass::Unknown;
+						break;
+					case ShaderStorageAccess::Raw:
+						context.access = Emulator::Agent::Lifecycle::StorageAccessClass::Raw;
+						break;
+					case ShaderStorageAccess::Typed:
+						context.access = Emulator::Agent::Lifecycle::StorageAccessClass::Typed;
+						break;
+					case ShaderStorageAccess::Mixed:
+						context.access = Emulator::Agent::Lifecycle::StorageAccessClass::Mixed;
+						break;
+					case ShaderStorageAccess::UnusedMetadata: EXIT("unused metadata reached Vulkan storage binding\n");
+				}
+				context.source = storage_buffers.sources[i] == ShaderStorageBindingSource::MetadataSharp
+				                     ? Emulator::Agent::Lifecycle::StorageBindingSource::Metadata
+				                     : Emulator::Agent::Lifecycle::StorageBindingSource::Direct;
+				switch (storage_buffers.unknown_reasons[i])
+				{
+					case ShaderStorageUnknownReason::None:
+						context.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::None;
+						break;
+					case ShaderStorageUnknownReason::CodeUnavailable:
+						context.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::CodeUnavailable;
+						break;
+					case ShaderStorageUnknownReason::NoMatchingInstruction:
+						context.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::NoMatchingInstruction;
+						break;
+					case ShaderStorageUnknownReason::RegisterBaseMismatch:
+						context.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::RegisterBaseMismatch;
+						break;
+					case ShaderStorageUnknownReason::MetadataOnlyBinding:
+						context.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::MetadataOnlyBinding;
+						break;
+				}
+				context.code_available = storage_buffers.code_available[i];
+				context.exact_match    = storage_buffers.exact_matches[i];
+				context.unbased_match  = storage_buffers.unbased_matches[i];
+				context.decoded_unknown = storage_buffers.decoded_unknown[i];
+				context.indirect_use   = storage_buffers.indirect_descriptor_use[i];
+				context.resource_index = i;
+				context.sgpr           = storage_buffers.start_register[i];
+				context.slot           = storage_buffers.slots[i];
+				context.usage          = static_cast<uint32_t>(storage_buffers.usages[i]);
+				context.stride         = r.Stride();
+				context.format         = r.Format();
+				context.dst_sel        = r.DstSelXYZW();
+				context.add_tid        = r.AddTid();
+				context.swizzle        = r.SwizzleEnabled();
+				Emulator::Agent::Lifecycle::EmitStorageFrontierFatal(context);
 				EXIT("unsupported Gen5 storage buffer format: index=%d start=%d usage=%u stride=%u dstsel=0x%03" PRIx32
 				     " format=%u records=%u base=0x%012" PRIx64 "\n",
 				     i, storage_buffers.start_register[i], static_cast<uint32_t>(storage_buffers.usages[i]), r.Stride(), r.DstSelXYZW(),
@@ -5479,10 +5544,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	switch (ucfg->GetPrimType())
 	{
-		case 4: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;  // kPrimitiveTypeTriList
-		case 5: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;   // kPrimitiveTypeTriFan
-		case 6: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break; // kPrimitiveTypeTriStrip
-		case 19: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;  // kPrimitiveTypeQuadList
+		case 4: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;   // kPrimitiveTypeTriList
+		case 5: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;    // kPrimitiveTypeTriFan
+		case 6: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // kPrimitiveTypeTriStrip
+		case 17: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break; // kPrimitiveTypeRectList
+		case 19: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;   // kPrimitiveTypeQuadList
 		default: EXIT("unknown primitive type: %u\n", ucfg->GetPrimType());
 	}
 
@@ -5573,7 +5639,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	{
 		case 4:
 		case 5:
-		case 6: vkCmdDrawIndexed(vk_buffer, index_count, 1, 0, 0, 0); break;
+		case 6:
+		case 17: vkCmdDrawIndexed(vk_buffer, index_count, 1, 0, 0, 0); break;
 		case 19:
 			EXIT_NOT_IMPLEMENTED((index_count & 0x3u) != 0);
 			for (uint32_t i = 0; i < index_count; i += 4)
@@ -5643,6 +5710,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	switch (ucfg->GetPrimType())
 	{
 		case 4: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;   // kPrimitiveTypeTriList
+		case 5: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;    // kPrimitiveTypeTriFan
+		case 6: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // kPrimitiveTypeTriStrip
 		case 17: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break; // kPrimitiveTypeRectList
 		case 19: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;   // kPrimitiveTypeQuadList
 		default: EXIT("unknown primitive type: %u\n", ucfg->GetPrimType());
@@ -5691,7 +5760,9 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	switch (ucfg->GetPrimType())
 	{
-		case 4: vkCmdDraw(vk_buffer, index_count, 1, 0, 0); break;
+		case 4:
+		case 5:
+		case 6: vkCmdDraw(vk_buffer, index_count, 1, 0, 0); break;
 		case 17:
 			EXIT_NOT_IMPLEMENTED(!(index_count == 3 && vs_input_info.buffers_num == 0));
 			vkCmdDraw(vk_buffer, 4, 1, 0, 0);

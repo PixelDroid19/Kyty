@@ -104,6 +104,41 @@ const SymbolRecord* SymbolDatabase::Find(const SymbolResolve& s) const
 	return nullptr;
 }
 
+const SymbolRecord* SymbolDatabase::FindByCanonicalName(const String& canonical_name) const
+{
+	if (canonical_name.IsEmpty())
+	{
+		return nullptr;
+	}
+	const auto index = m_map.Get(canonical_name, decltype(m_symbols)::INVALID_INDEX);
+	if (m_symbols.IndexValid(index))
+	{
+		return &m_symbols.At(index);
+	}
+	for (const auto& sym: m_symbols)
+	{
+		if (sym.name == canonical_name)
+		{
+			return &sym;
+		}
+	}
+	return nullptr;
+}
+
+uint32_t SymbolDatabase::SymbolCount() const
+{
+	return m_symbols.Size();
+}
+
+const SymbolRecord* SymbolDatabase::SymbolAt(uint32_t index) const
+{
+	if (!m_symbols.IndexValid(index))
+	{
+		return nullptr;
+	}
+	return &m_symbols.At(index);
+}
+
 } // namespace Kyty::Loader
 
 #endif // KYTY_EMU_ENABLED

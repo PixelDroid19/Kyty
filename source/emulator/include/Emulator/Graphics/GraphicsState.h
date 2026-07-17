@@ -23,6 +23,15 @@ struct DepthStencilUsage
 	bool depth_write_enable = false;
 };
 
+enum class StencilPlaneValidation
+{
+	Inactive,
+	Valid,
+	MissingReadBase,
+	MissingWriteBase,
+	MismatchedBases,
+};
+
 struct ViewportDepthRange
 {
 	float min_depth = 0.0f;
@@ -53,6 +62,11 @@ void SetGenericScissorBr(HW::Context& context, uint32_t value);
 void SetScreenScissorTl(HW::Context& context, uint32_t value);
 void SetScreenScissorBr(HW::Context& context, uint32_t value);
 void SetRenderControl(HW::Context& context, uint32_t value);
+void SetDepthControl(HW::Context& context, uint32_t value);
+void ApplyDepthStencilPlaneRegisters(HW::DepthRenderTarget& target, uint32_t stencil_info,
+                                     uint32_t stencil_read_base, uint32_t stencil_write_base);
+void ApplyDepthStencilPlaneRegisters(HW::Context& context, uint32_t stencil_info, uint32_t stencil_read_base,
+                                     uint32_t stencil_write_base);
 void SetStencilControl(HW::Context& context, uint32_t value);
 void SetStencilRefMask(HW::Context& context, uint32_t value);
 void SetStencilRefMaskBf(HW::Context& context, uint32_t value);
@@ -63,6 +77,9 @@ void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
 [[nodiscard]] ScissorRect ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanModeControl& mode, uint32_t viewport_id);
 [[nodiscard]] DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, const HW::RenderControl& render_control,
                                                          const HW::DepthControl& depth_control);
+[[nodiscard]] StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target,
+                                                          const HW::RenderControl& render_control,
+                                                          const HW::DepthControl& depth_control);
 
 // AMD VTE window Z: OpenGL clip ([-W,+W]) uses zoffset±zscale; DX clip ([0,+W]) uses [zoffset, zoffset+zscale].
 // Without VK_EXT_depth_range_unrestricted, clamp to [0,1] and pair with negativeOneToOne for OpenGL clip.
