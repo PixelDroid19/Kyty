@@ -421,3 +421,11 @@ _build_macos/fc_script "{kyty_run_tests()}" \
 
 Expected: all commands pass. Report the pre-existing unfiltered `Core.DateTime`
 failure separately.
+
+## Deviations
+
+## Deviations
+- Restored GraphicsCbReleaseMem to 7-dword `0xc0051060` (encoder had diverged to 8 dwords; CP/tests still 7).
+- Verification on Linux `_build_linux` (host has no `_build_macos`).
+- Strict `run_guest.lua` deferred: `KYTY_GUEST_ROOT` unset in this environment.
+- Local commit only; no push.
