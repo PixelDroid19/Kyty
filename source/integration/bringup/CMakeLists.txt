@@ -133,3 +133,11 @@ set_tests_properties(KytyBringUpIntegration.capacity PROPERTIES TIMEOUT 300)
 # Diagnostics protocol fields.
 kyty_bringup_test(diagnostics diagnostics 0
 	KYTY_BRINGUP_MODE unsafe)
+
+# Neighbor PRX discovery under sanitized fixture (unsafe + prx_preload).
+kyty_bringup_test(prx_discover prx_discover 0
+	KYTY_BRINGUP_MODE unsafe
+	KYTY_BRINGUP_FEATURES prx_preload)
+
+# Strict must not auto-preload.
+kyty_bringup_test(prx_strict_no_preload prx_strict_no_preload 0)

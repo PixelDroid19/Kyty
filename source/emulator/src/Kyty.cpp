@@ -21,6 +21,8 @@
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/Elf.h"
+#include "Emulator/Loader/NeighborModulePreload.h"
 #include "Emulator/Loader/RuntimeLinker.h"
 #include "Emulator/Loader/SystemContent.h"
 #include "Emulator/Loader/Timer.h"
@@ -156,7 +158,8 @@ KYTY_SCRIPT_FUNC(kyty_load_elf_func)
 
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
 
-	auto* program = rt->LoadProgram(Libs::LibKernel::FileSystem::GetRealFilename(elf.ToString()));
+	const auto real_path = Libs::LibKernel::FileSystem::GetRealFilename(elf.ToString());
+	auto*      program   = rt->LoadProgram(real_path);
 
 	if (Scripts::ArgGetVarCount() >= 2)
 	{
@@ -171,6 +174,15 @@ KYTY_SCRIPT_FUNC(kyty_load_elf_func)
 		auto save_name = Scripts::ArgGetVar(2).ToString();
 
 		rt->SaveProgram(program, Libs::LibKernel::FileSystem::GetRealFilename(save_name));
+	}
+
+	// Unsafe bring-up only: after loading the main (non-shared) program, soft-load
+	// neighbor PRX so real exports win over missing-import stubs. Strict mode
+	// never auto-preloads. (Elf sharedness: non-shared programs set fail flags
+	// and prog name in LoadProgram; duplicate path would only re-scan.)
+	if (program != nullptr && !program->elf->IsShared())
+	{
+		Loader::NeighborModulePreload::PreloadInto(rt, real_path);
 	}
 
 	return 0;

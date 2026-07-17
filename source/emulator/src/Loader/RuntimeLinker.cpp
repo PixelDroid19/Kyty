@@ -872,6 +872,19 @@ RuntimeLinker::~RuntimeLinker()
 	Clear();
 }
 
+bool RuntimeLinker::HasProgramFile(const String& elf_name)
+{
+	Core::LockGuard lock(m_mutex);
+	for (const auto* p : m_programs)
+	{
+		if (p != nullptr && p->file_name == elf_name)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 Program* RuntimeLinker::LoadProgram(const String& elf_name)
 {
 	KYTY_PROFILER_FUNCTION();

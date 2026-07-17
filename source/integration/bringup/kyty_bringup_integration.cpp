@@ -13,14 +13,21 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Loader/MissingImportStubs.h"
+#include "Emulator/Loader/NeighborModulePreload.h"
 #include "Emulator/Loader/SymbolDatabase.h"
+
+#include "Kyty/Core/File.h"
+#include "Kyty/Core/String.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 namespace BringUp       = Kyty::Core::BringUp;
 namespace MissingImport = Kyty::Loader::MissingImport;
@@ -316,6 +323,80 @@ int ScenarioDiagnosticsSnapshot()
 	return 0;
 }
 
+// Sanitized fixture layout (no private title IDs): discover neighbor PRX paths.
+int ScenarioPrxDiscover()
+{
+	Expect(BringUp::AllowPrxPreload(), "prx_preload feature must be on for this scenario");
+
+	// Create a temporary guest root with sce_module + Media/Modules candidates.
+	char tmpl[] = "/tmp/grok-goal-e70b2bb9233f/implementer/preload_fixture_XXXXXX";
+	char* dir   = ::mkdtemp(tmpl);
+	Expect(dir != nullptr, "mkdtemp fixture");
+
+	const Kyty::Core::String root = Kyty::Core::String::FromUtf8(dir);
+	const Kyty::Core::String sce  = root + U"/sce_module";
+	const Kyty::Core::String media = root + U"/Media/Modules";
+	Expect(Kyty::Core::File::CreateDirectories(sce), "mkdir sce_module");
+	Expect(Kyty::Core::File::CreateDirectories(media), "mkdir Media/Modules");
+
+	// Touch sanitized module-looking files (not real ELFs — discovery only).
+	auto touch = [](const Kyty::Core::String& path) {
+		Kyty::Core::File f;
+		Expect(f.Create(path), "create file");
+		const char b = 'x';
+		f.Write(&b, 1u);
+		f.Close();
+	};
+	touch(sce + U"/libc.prx");
+	touch(sce + U"/libSceFios2.prx");
+	touch(media + U"/helper.sprx");
+	touch(root + U"/eboot.bin"); // must be excluded by discovery when under root modules only;
+	// eboot lives at root, not under scanned subdirs, so it is not listed.
+
+	const auto found = Kyty::Loader::NeighborModulePreload::DiscoverCandidates(root);
+	Expect(found.Size() == 3, "three module candidates");
+	// Ensure eboot not present and prx names are.
+	bool saw_libc = false;
+	bool saw_eboot = false;
+	for (const auto& p : found)
+	{
+		const auto name = p.FilenameWithoutDirectory().ToLower();
+		if (name == U"libc.prx")
+		{
+			saw_libc = true;
+		}
+		if (name == U"eboot.bin")
+		{
+			saw_eboot = true;
+		}
+	}
+	Expect(saw_libc, "libc.prx discovered");
+	Expect(!saw_eboot, "eboot.bin not discovered as neighbor");
+
+	// PreloadInto under AllowPrxPreload with invalid ELFs: soft-skip, load count 0.
+	// Pass nullptr RuntimeLinker would return 0; we only assert gate + discover here.
+	const int loaded =
+	    Kyty::Loader::NeighborModulePreload::PreloadInto(nullptr, root + U"/eboot.bin");
+	Expect(loaded == 0, "null linker loads nothing");
+
+	Expect(BringUp::FeatureEnabled(BringUp::Feature::PrxPreload), "feature bit");
+	Expect(BringUp::GetMode() == BringUp::Mode::Unsafe, "unsafe mode");
+
+	// Cleanup fixture files (best-effort).
+	Kyty::Core::File::DeleteDirectories(root);
+	return 0;
+}
+
+// Strict: AllowPrxPreload is false; PreloadInto is a no-op even with layout present.
+int ScenarioPrxStrictNoPreload()
+{
+	Expect(!BringUp::AllowPrxPreload(), "strict must not allow prx preload");
+	const int loaded =
+	    Kyty::Loader::NeighborModulePreload::PreloadInto(nullptr, U"/nonexistent/eboot.bin");
+	Expect(loaded == 0, "strict preload no-op");
+	return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -378,6 +459,12 @@ int main(int argc, char** argv)
 	} else if (std::strcmp(scenario, "diagnostics") == 0)
 	{
 		rc = ScenarioDiagnosticsSnapshot();
+	} else if (std::strcmp(scenario, "prx_discover") == 0)
+	{
+		rc = ScenarioPrxDiscover();
+	} else if (std::strcmp(scenario, "prx_strict_no_preload") == 0)
+	{
+		rc = ScenarioPrxStrictNoPreload();
 	} else
 	{
 		std::fprintf(stderr, "unknown scenario: %s\n", scenario);

@@ -24,7 +24,9 @@ enum class Feature : uint32_t
 	NotImplemented         = 1u << 0,
 	MissingFunctionImport  = 1u << 1,
 	GfxPermissive          = 1u << 2,
-	All                    = NotImplemented | MissingFunctionImport | GfxPermissive,
+	// Discover and soft-load neighboring PRX next to the main ELF (unsafe only).
+	PrxPreload             = 1u << 3,
+	All                    = NotImplemented | MissingFunctionImport | GfxPermissive | PrxPreload,
 };
 
 inline Feature operator|(Feature a, Feature b)
@@ -116,6 +118,8 @@ struct Snapshot
 	uint64_t            missing_import_assigns = 0;
 	uint64_t            missing_import_calls   = 0;
 	uint32_t            missing_import_slots   = 0;
+	uint32_t            prx_preload_discovered = 0;
+	uint32_t            prx_preload_loaded     = 0;
 	CircuitBreakSnapshot last_circuit_break {};
 	// Fixed table of unique sites (may contain empty slots when count < capacity).
 	const SiteSnapshot* sites          = nullptr;
@@ -128,7 +132,7 @@ struct Snapshot
 //
 // Environment contract:
 //   KYTY_BRINGUP_MODE=unsafe              (absent => Strict)
-//   KYTY_BRINGUP_FEATURES=...             (absent in unsafe => all three)
+//   KYTY_BRINGUP_FEATURES=...             (absent in unsafe => all features)
 //   KYTY_BRINGUP_SUBSYSTEMS=...           (absent => all)
 //   KYTY_BRINGUP_BURST_LIMIT=10000
 //   KYTY_BRINGUP_BURST_WINDOW_MS=1000
@@ -160,10 +164,14 @@ Decision HandleNotImplemented(const char* expr, const char* file, int line);
 // Missing Func import stubs (replaces KYTY_STUB_MISSING).
 [[nodiscard]] bool AllowMissingFunctionImport();
 
+// Neighbor / system PRX discovery next to the main program (unsafe only).
+[[nodiscard]] bool AllowPrxPreload();
+
 // Linker reports assignment/call metrics (no ownership of strings).
 void NoteMissingImportAssigned();
 void NoteMissingImportCalled();
 void NoteMissingImportSlots(uint32_t used_slots);
+void NotePrxPreloadCandidates(uint32_t discovered, uint32_t loaded);
 
 // Fill a read-only snapshot (sites point into internal fixed storage).
 void GetSnapshot(Snapshot* out);
