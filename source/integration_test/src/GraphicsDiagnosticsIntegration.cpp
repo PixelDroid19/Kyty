@@ -672,6 +672,37 @@ void VerifyGen5XnorVop2()
 	       "legacy VOP2 opcode 0x1e retains bit-field-mask semantics");
 }
 
+void VerifyGen5BitCountVop3()
+{
+	// Captured Gen5 VOP3 at normalized PC 0xe04:
+	// v_bcnt_u32_b32 v98, v97, 0.
+	// AMD RDNA2 ISA, Table 83 (VOP3A opcode 868):
+	// https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture
+	const uint32_t shader[] = {0xd7640062u, 0x00010161u, 0xbf800000u, 0xbf810000u};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	Expect(code.GetInstructions().Size() == 3, "Gen5 VOP3 bit count parses with endpgm");
+	const auto& instruction = code.GetInstructions().At(0);
+	Expect(instruction.type == ShaderInstructionType::VBcntU32B32, "Gen5 VOP3 opcode 0x364 decodes as v_bcnt_u32_b32");
+	Expect(instruction.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1, "bit count normalizes to the shared two-source format");
+	Expect(instruction.src_num == 2, "bit count ignores the unused VOP3 src2 field");
+	Expect(instruction.dst.type == ShaderOperandType::Vgpr && instruction.dst.register_id == 98, "bit count destination decoded");
+	Expect(instruction.src[0].type == ShaderOperandType::Vgpr && instruction.src[0].register_id == 97, "bit count value source decoded");
+	Expect(instruction.src[1].type == ShaderOperandType::IntegerInlineConstant && instruction.src[1].constant.i == 0,
+	       "bit count accumulator source decoded");
+	Expect(instruction.dst.multiplier == 1.0f && !instruction.dst.clamp && !instruction.src[0].negate && !instruction.src[0].absolute &&
+	           !instruction.src[1].negate && !instruction.src[1].absolute,
+	       "captured bit count encoding has neutral supported modifiers");
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, nullptr);
+	Expect(source.FindIndex("OpBitCount %int %t0_0") != Kyty::Core::STRING8_INVALID_INDEX, "bit count uses the shared population-count IR");
+	Expect(source.FindIndex("OpIAdd %uint %tbu_0 %t1_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "bit count adds the explicit accumulator source");
+}
+
 ShaderCode ParseGen5ReciprocalIFlag(bool vop3)
 {
 	ShaderCode code;
@@ -913,6 +944,7 @@ int main()
 	VerifyGen5UnsignedSub();
 	VerifyGen5AddCarryIn();
 	VerifyGen5XnorVop2();
+	VerifyGen5BitCountVop3();
 	VerifyGen5ReciprocalIFlag();
 	VerifyGen5ReciprocalIFlagExceptionalInputs();
 	VerifyGen5ImageSampleLzDmask1();
