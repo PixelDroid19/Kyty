@@ -2205,6 +2205,11 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x35A: KYTY_NI("v_interp_p2_f16"); break;
 		case 0x35E: KYTY_NI("v_mad_i16"); break;
 		case 0x35F: KYTY_NI("v_div_fixup_f16"); break;
+		case 0x364:
+			inst.type    = ShaderInstructionType::VBcntU32B32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src_num = 2;
+			break;
 		case 0x36D: inst.type = ShaderInstructionType::VAdd3U32; break;
 		case 0x36F:
 			if (next_gen)
