@@ -2812,6 +2812,16 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t inde
 	return cmd;
 }
 
+static uint32_t decode_draw_index_initiator(uint64_t modifier)
+{
+	if ((modifier & (1ull << 32u)) != 0)
+	{
+		return 0;
+	}
+
+	return (static_cast<uint32_t>(modifier) >> 3u) & 0x20u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t index_count, uint64_t modifier)
 {
 	PRINT_NAME();
@@ -2824,17 +2834,18 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 	// post-compute path). Other bits remain unsupported until evidenced.
 	EXIT_NOT_IMPLEMENTED(modifier != 0x40000000ull && modifier != 0x80000000ull);
 
-	// auto *m = reinterpret_cast<ShaderDrawModifier*>(&modifier);
-
 	buf->DbgDump();
 
-	auto* cmd = buf->AllocateDW(7);
+	// IT_DRAW_INDEX_AUTO consumes the decoded draw initiator, not the AGC
+	// modifier itself. Both observed Gen5 modifiers currently decode to the
+	// standard auto-draw initiator value 2.
+	auto* cmd = buf->AllocateDW(3);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
-	cmd[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX_AUTO);
+	cmd[0] = KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u);
 	cmd[1] = index_count;
-	cmd[2] = static_cast<uint32_t>(modifier);
+	cmd[2] = decode_draw_index_initiator(modifier) | 0x2u;
 
 	return cmd;
 }
