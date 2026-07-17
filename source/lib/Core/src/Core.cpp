@@ -19,13 +19,27 @@
 #include "Kyty/Core/Vector.h"      // IWYU pragma: associated
 #include "Kyty/Core/VirtualMemory.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 namespace Kyty::Core {
+namespace {
+
+constexpr int kConfigurationErrorExitCode = 125;
+
+} // namespace
 
 KYTY_SUBSYSTEM_INIT(Core)
 {
-	// Fail-closed bring-up policy before any guest/HLE work. Invalid KYTY_BRINGUP_*
-	// aborts the process here (no silent fallback to strict after a parse error).
-	BringUp::InitFromEnvironment();
+	// Fail-closed bring-up policy before guest/HLE work. Invalid KYTY_BRINGUP_*
+	// aborts here — never convert a configuration error into silent strict.
+	BringUp::ConfigError bringup_error {};
+	if (!BringUp::InitializeFromEnvironment(&bringup_error))
+	{
+		std::fprintf(stderr, "KYTY_BRINGUP: invalid configuration: %s\n", bringup_error.message);
+		std::fflush(stderr);
+		std::_Exit(kConfigurationErrorExitCode);
+	}
 
 	core_memory_init();
 	core_file_init();

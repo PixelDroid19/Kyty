@@ -14,6 +14,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
+#include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/DebugOverlay.h"
@@ -767,6 +768,11 @@ static void CalcFrameTime(GameApi* game, double game_time_s)
 	game->m_current_time_seconds  = game_time_s;
 
 	game->m_frame_num++;
+	// Agent observation at the real frame producer (not status poll).
+	if (game->m_frame_num == 1)
+	{
+		Emulator::Agent::Lifecycle::EmitFirstFrame(1);
+	}
 
 	int fps_model = 1;
 
@@ -3047,6 +3053,10 @@ void WindowRun()
 
 		g_window_ctx->graphic_initialized = true;
 		g_window_ctx->graphic_initialized_condvar.Signal();
+		// Agent observation at graphics producer (not status poll).
+		Emulator::Agent::Lifecycle::EmitGraphicsInit();
+		// Pad overlay is available once the window thread is running.
+		Emulator::Agent::Lifecycle::EmitInputReady();
 	}
 	g_window_ctx->mutex.Unlock();
 
@@ -3268,6 +3278,11 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	g_window_ctx->native_capture.present_count++;
 	g_window_ctx->native_capture.last_present_steady_ms = WindowSteadyMs();
+	// Agent observation only — does not wake guest waits or change present path.
+	if (g_window_ctx->native_capture.present_count == 1)
+	{
+		Emulator::Agent::Lifecycle::EmitFirstPresent(g_window_ctx->native_capture.present_count);
+	}
 	if (capture_milestone != NativeCaptureMilestone::None)
 	{
 		// The capture reads the emulated source only after the present submit has

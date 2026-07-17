@@ -17,6 +17,8 @@ endif()
 #add_library(emulator STATIC $<TARGET_OBJECTS:emulator_obj>)
 add_library(emulator STATIC ${emulator_src})
 target_sources(emulator PRIVATE
+	src/Loader/GuestCall.cpp
+	include/Emulator/Loader/GuestCall.h
 	src/DevTools/Runtime.cpp
 	src/DevTools/RuntimeSubsystem.cpp
 	include/Emulator/DevTools/Runtime.h
@@ -27,12 +29,16 @@ target_sources(emulator PRIVATE
 	src/Agent/FrameScore.cpp
 	src/Agent/AgentServer.cpp
 	src/Agent/AgentSubsystem.cpp
+	src/Agent/AgentLifecycle.cpp
+	src/Validation/DomainValidators.cpp
+	include/Emulator/Validation/DomainValidators.h
 	include/Emulator/Agent/EventRing.h
 	include/Emulator/Agent/Protocol.h
 	include/Emulator/Agent/StallWatch.h
 	include/Emulator/Agent/FrameScore.h
 	include/Emulator/Agent/AgentServer.h
 	include/Emulator/Agent/AgentSubsystem.h
+	include/Emulator/Agent/AgentLifecycle.h
 )
 add_dependencies(emulator KytyBuildInfo)
 

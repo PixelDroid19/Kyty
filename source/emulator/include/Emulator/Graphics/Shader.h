@@ -44,6 +44,7 @@ enum class ShaderInstructionType : uint32_t
 	BufferLoadFormatXy,
 	BufferLoadFormatXyz,
 	BufferLoadFormatXyzw,
+	BufferLoadUbyte,
 	BufferStoreDword,
 	BufferStoreDwordx2,
 	BufferStoreDwordx3,
@@ -67,6 +68,7 @@ enum class ShaderInstructionType : uint32_t
 	SAndB64,
 	SAndn2B64,
 	SAndSaveexecB64,
+	SAndn1SaveexecB64,
 	SBfeU32,
 	SBfeU64,
 	SBfmB32,
@@ -133,6 +135,8 @@ enum class ShaderInstructionType : uint32_t
 	TBufferLoadFormatXyzw,
 	VAddF32,
 	VAddI32,
+	// VOP3 V_ADD_CO_CI_U32: vector sum with SGPR-pair carry-in and carry-out.
+	VAddCoCiU32,
 	// VOP3: dst = src0 + src1 + src2 (u32). RDNA2 op 0x36D.
 	VAdd3U32,
 	VAndB32,
@@ -187,6 +191,8 @@ enum class ShaderInstructionType : uint32_t
 	VCmpxLeI32,
 	VCmpxLtF32,
 	VCmpxLtI32,
+	VCmpxLtU32,
+	VCmpxNleF32,
 	VCmpxNeqF32,
 	VCmpxNeI32,
 	VCmpxNeU32,
@@ -337,16 +343,16 @@ constexpr uint64_t FormatDefine(std::initializer_list<uint64_t> f)
 
 enum Format : uint64_t
 {
-	Unknown                             = FormatDefine({U}),
-	Empty                               = FormatDefine({N}),
-	Imm                                 = FormatDefine({S0}),
-	Label                               = FormatDefine({L}),
-	Mrt0OffOffComprVmDone               = FormatDefine({Mrt0, Off, Off, Compr, Vm, Done}),
+	Unknown               = FormatDefine({U}),
+	Empty                 = FormatDefine({N}),
+	Imm                   = FormatDefine({S0}),
+	Label                 = FormatDefine({L}),
+	Mrt0OffOffComprVmDone = FormatDefine({Mrt0, Off, Off, Compr, Vm, Done}),
 	// Null MRT export (en=0): no channels written; often ends the export sequence.
 	// MRT0 retains the kill-linked form; MRT1-3 are no-op stores.
-	Mrt1OffOffComprVmDone               = FormatDefine({Mrt1, Off, Off, Compr, Vm, Done}),
-	Mrt2OffOffComprVmDone               = FormatDefine({Mrt2, Off, Off, Compr, Vm, Done}),
-	Mrt3OffOffComprVmDone               = FormatDefine({Mrt3, Off, Off, Compr, Vm, Done}),
+	Mrt1OffOffComprVmDone = FormatDefine({Mrt1, Off, Off, Compr, Vm, Done}),
+	Mrt2OffOffComprVmDone = FormatDefine({Mrt2, Off, Off, Compr, Vm, Done}),
+	Mrt3OffOffComprVmDone = FormatDefine({Mrt3, Off, Off, Compr, Vm, Done}),
 	// Compressed half2 MRT export (en=0xf, compr=1). Done may be 0 or 1;
 	// the "Done" token in the Mrt0 format name is historical.
 	Mrt0Vsrc0Vsrc1ComprVmDone           = FormatDefine({Mrt0, S0, S1, Compr, Vm, Done}),
@@ -386,6 +392,7 @@ enum Format : uint64_t
 	Vdata1Vaddr3StSsDmask2              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask2}),
 	Vdata1Vaddr3StSsDmask4              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask4}),
 	Vdata1Vaddr3StSsDmask8              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask8}),
+	Vdata1Vaddr2SvSoffsOffenIdxen       = FormatDefine({D, S0A2, S1A4, S2, Offen, Idxen}),
 	Vdata1VaddrSvSoffsIdxen             = FormatDefine({D, S0, S1A4, S2, Idxen}),
 	Vdata1VaddrSvSoffsIdxenFloat1       = FormatDefine({D, S0, S1A4, S2, Idxen, Float1}),
 	Vdata2Vaddr3StSsDmask3              = FormatDefine({DA2, S0A3, S1A8, S2A4, Dmask3}),
@@ -405,6 +412,7 @@ enum Format : uint64_t
 	Vdata4VaddrSvSoffsIdxenFloat4       = FormatDefine({DA4, S0, S1A4, S2, Idxen, Float4}),
 	VdstGds                             = FormatDefine({D, Gds}),
 	VdstSdst2Vsrc0Vsrc1                 = FormatDefine({D, D2A2, S0, S1}),
+	VdstSdst2Vsrc0Vsrc1Ssrc2A2          = FormatDefine({D, D2A2, S0, S1, S2A2}),
 	VdstVsrc0Vsrc1Smask2                = FormatDefine({D, S0, S1, S2A2}),
 	VdstVsrc0Vsrc1Vsrc2                 = FormatDefine({D, S0, S1, S2}),
 	VdstVsrcAttrChan                    = FormatDefine({D, S0, Attr}),
@@ -843,6 +851,46 @@ inline bool ShaderStorageUsageIsReadOnly(ShaderStorageUsage usage)
 	return usage == ShaderStorageUsage::Constant || usage == ShaderStorageUsage::ReadOnly;
 }
 
+enum class ShaderStorageAccess
+{
+	Unknown,
+	Raw,
+	Typed,
+	Mixed,
+	UnusedMetadata,
+};
+
+enum class ShaderStorageBindingSource
+{
+	DirectResource,
+	MetadataSharp,
+};
+
+enum class ShaderStorageUnknownReason
+{
+	None,
+	CodeUnavailable,
+	NoMatchingInstruction,
+	RegisterBaseMismatch,
+	MetadataOnlyBinding,
+};
+
+struct ShaderStorageAccessEvidence
+{
+	ShaderStorageAccess        access         = ShaderStorageAccess::Unknown;
+	ShaderStorageUnknownReason reason         = ShaderStorageUnknownReason::None;
+	bool                       code_available = false;
+	bool                       exact_match    = false;
+	bool                       unbased_match  = false;
+};
+
+struct ShaderStorageUseEvidence
+{
+	ShaderStorageAccess access                  = ShaderStorageAccess::Unknown;
+	bool                decoded_unknown         = false;
+	bool                indirect_descriptor_use = false;
+};
+
 enum class ShaderTextureUsage
 {
 	Unknown,
@@ -854,14 +902,30 @@ struct ShaderStorageResources
 {
 	static constexpr int BUFFERS_MAX = 16;
 
-	ShaderBufferResource buffers[BUFFERS_MAX];
-	ShaderStorageUsage   usages[BUFFERS_MAX]         = {};
-	int                  slots[BUFFERS_MAX]          = {0};
-	int                  start_register[BUFFERS_MAX] = {0};
-	bool                 extended[BUFFERS_MAX]       = {};
-	int                  buffers_num                 = 0;
-	int                  binding_index               = 0;
+	ShaderBufferResource       buffers[BUFFERS_MAX];
+	ShaderStorageUsage         usages[BUFFERS_MAX]                  = {};
+	ShaderStorageAccess        accesses[BUFFERS_MAX]                = {};
+	ShaderStorageBindingSource sources[BUFFERS_MAX]                 = {};
+	ShaderStorageUnknownReason unknown_reasons[BUFFERS_MAX]         = {};
+	bool                       code_available[BUFFERS_MAX]          = {};
+	bool                       exact_matches[BUFFERS_MAX]           = {};
+	bool                       unbased_matches[BUFFERS_MAX]         = {};
+	bool                       decoded_unknown[BUFFERS_MAX]         = {};
+	bool                       indirect_descriptor_use[BUFFERS_MAX] = {};
+	int                        slots[BUFFERS_MAX]                   = {0};
+	int                        start_register[BUFFERS_MAX]          = {0};
+	bool                       extended[BUFFERS_MAX]                = {};
+	int                        buffers_num                          = 0;
+	int                        binding_index                        = 0;
 };
+
+[[nodiscard]] bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access);
+[[nodiscard]] ShaderStorageAccessEvidence ResolveShaderStorageAccessEvidence(bool code_available, ShaderStorageBindingSource source,
+                                                                             ShaderStorageAccess exact_match,
+                                                                             ShaderStorageAccess unbased_match, bool decoded_unknown,
+                                                                             bool indirect_descriptor_use);
+[[nodiscard]] ShaderStorageUseEvidence    AnalyzeShaderStorageUse(const ShaderCode& code, int start_register);
+void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
 
 struct ShaderTextureDescriptor
 {
@@ -968,18 +1032,18 @@ struct ShaderVertexInputInfo
 	ShaderBindResources     bind;
 	// Raw guest attribute-table dwords (byte-offset/4 from fetch_attrib_reg).
 	// Snapshot for SLoad materialization; same memory ShaderParseAttrib consumes.
-	uint32_t                fetch_attrib_data[RES_MAX] = {};
-	int                     fetch_attrib_data_num      = 0;
-	int                     resources_num              = 0;
-	int                     fetch_shader_reg           = 0;
-	int                     fetch_attrib_reg           = 0;
-	int                     fetch_buffer_reg           = 0;
-	int                     buffers_num                = 0;
-	int                     export_count               = 0;
-	bool                    fetch_external             = false;
-	bool                    fetch_embedded             = false;
-	bool                    fetch_inline               = false;
-	bool                    gs_prolog                  = false;
+	uint32_t fetch_attrib_data[RES_MAX] = {};
+	int      fetch_attrib_data_num      = 0;
+	int      resources_num              = 0;
+	int      fetch_shader_reg           = 0;
+	int      fetch_attrib_reg           = 0;
+	int      fetch_buffer_reg           = 0;
+	int      buffers_num                = 0;
+	int      export_count               = 0;
+	bool     fetch_external             = false;
+	bool     fetch_embedded             = false;
+	bool     fetch_inline               = false;
+	bool     gs_prolog                  = false;
 };
 
 struct ShaderComputeInputInfo

@@ -24,6 +24,7 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 
 int KYTY_SYSV_ABI    KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags, const char* name);
 int KYTY_SYSV_ABI    KernelMapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags);
+int KYTY_SYSV_ABI    KernelReserveVirtualRange(void** addr_in_out, uint64_t len, int flags, uint64_t alignment);
 int KYTY_SYSV_ABI    KernelMunmap(uint64_t vaddr, size_t len);
 size_t KYTY_SYSV_ABI KernelGetDirectMemorySize();
 int KYTY_SYSV_ABI    KernelAllocateDirectMemory(int64_t search_start, int64_t search_end, size_t len, size_t alignment, int memory_type,

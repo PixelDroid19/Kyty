@@ -1,5 +1,7 @@
 #include "Kyty/Agent/Cli.h"
 
+#include "Kyty/Agent/WireContract.h"
+
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -27,41 +29,44 @@ int Main(int /*argc*/, char** /*argv*/)
 namespace Kyty::AgentCli {
 namespace {
 
+using Kyty::Agent::kProtocolVersion;
+using Kyty::Agent::kResponseLineMax;
+
 void PrintUsage()
 {
-	std::fprintf(stderr,
-	             "kyty_agent — realtime Kyty emulator tools (local Unix socket)\n"
-	             "\n"
-	             "Usage:\n"
-	             "  kyty_agent --sock ABS_PATH help\n"
-	             "  kyty_agent --sock ABS_PATH doctor\n"
-	             "  kyty_agent --sock ABS_PATH ping\n"
-	             "  kyty_agent --sock ABS_PATH status\n"
-	             "  kyty_agent --sock ABS_PATH diagnostics\n"
-	             "  kyty_agent --sock ABS_PATH sync-waits\n"
-	             "  kyty_agent --sock ABS_PATH threads\n"
-	             "  kyty_agent --sock ABS_PATH events [--last N] [--after-seq N]\n"
-	             "  kyty_agent --sock ABS_PATH last-error\n"
-	             "  kyty_agent --sock ABS_PATH capture [--timeout-ms N] [--no-score]\n"
-	             "  kyty_agent --sock ABS_PATH score [--path ABS.bmp]\n"
-	             "  kyty_agent --sock ABS_PATH pad down|up|tap BUTTON\n"
-	             "  kyty_agent --sock ABS_PATH pad hold BUTTON --delta N [--timeout-ms N]\n"
-	             "  kyty_agent --sock ABS_PATH pad axis AXIS VALUE\n"
-	             "  kyty_agent --sock ABS_PATH pad clear\n"
-	             "  kyty_agent --sock ABS_PATH wait-ready [--timeout-ms N]\n"
-	             "  kyty_agent --sock ABS_PATH wait-present (--min N|--delta N) [--timeout-ms N]\n"
-	             "  kyty_agent --sock ABS_PATH wait-frame (--min N|--delta N) [--timeout-ms N]\n"
-	             "  kyty_agent --sock ABS_PATH wait-phase WANT [--min-fps N] [--stable-ms N] [--timeout-ms N]\n"
-	             "  kyty_agent --sock ABS_PATH wait-event --kind KIND [--timeout-ms N]\n"
-	             "  kyty_agent --sock ABS_PATH watch [--window-ms N|--seconds N] [--present-stall-ms N] [--frame-stall-ms N] [--min-fps N] [--no-capture]\n"
-	             "\n"
-	             "Requires the emulator started with KYTY_AGENT_SOCK=ABS_PATH.\n"
-	             "Pad input is diagnostic_input, not gameplay acceptance.\n"
-	             "status.phase: not_ready|booting|loading|interactive|stalled (use wait-phase).\n"
-	             "Prefer wait-ready → wait-phase / wait-present --delta over absolute --min with long sleeps.\n"
-	             "Exit 125 = transport (guest dead / stale sock); do not retry with longer host sleeps.\n"
-	             "watch exits 1 when present/frame/fps look stalled (loading hang).\n"
-	             "capture/score exit 1 when frame metrics look corrupted (healthy:false).\n");
+	std::fprintf(stderr, "kyty_agent — realtime Kyty emulator tools (local Unix socket)\n"
+	                     "\n"
+	                     "Usage:\n"
+	                     "  kyty_agent --sock ABS_PATH help\n"
+	                     "  kyty_agent --sock ABS_PATH doctor\n"
+	                     "  kyty_agent --sock ABS_PATH ping\n"
+	                     "  kyty_agent --sock ABS_PATH status\n"
+	                     "  kyty_agent --sock ABS_PATH diagnostics\n"
+	                     "  kyty_agent --sock ABS_PATH sync-waits\n"
+	                     "  kyty_agent --sock ABS_PATH threads\n"
+	                     "  kyty_agent --sock ABS_PATH events [--last N] [--after-seq N]\n"
+	                     "  kyty_agent --sock ABS_PATH last-error\n"
+	                     "  kyty_agent --sock ABS_PATH capture [--timeout-ms N] [--no-score]\n"
+	                     "  kyty_agent --sock ABS_PATH score [--path ABS.bmp]\n"
+	                     "  kyty_agent --sock ABS_PATH pad down|up|tap BUTTON\n"
+	                     "  kyty_agent --sock ABS_PATH pad hold BUTTON --delta N [--timeout-ms N]\n"
+	                     "  kyty_agent --sock ABS_PATH pad axis AXIS VALUE\n"
+	                     "  kyty_agent --sock ABS_PATH pad clear\n"
+	                     "  kyty_agent --sock ABS_PATH wait-ready [--timeout-ms N]\n"
+	                     "  kyty_agent --sock ABS_PATH wait-present (--min N|--delta N) [--timeout-ms N]\n"
+	                     "  kyty_agent --sock ABS_PATH wait-frame (--min N|--delta N) [--timeout-ms N]\n"
+	                     "  kyty_agent --sock ABS_PATH wait-phase WANT [--min-fps N] [--stable-ms N] [--timeout-ms N]\n"
+	                     "  kyty_agent --sock ABS_PATH wait-event --kind KIND [--timeout-ms N]\n"
+	                     "  kyty_agent --sock ABS_PATH watch [--window-ms N|--seconds N] [--present-stall-ms N] [--frame-stall-ms N] "
+	                     "[--min-fps N] [--no-capture]\n"
+	                     "\n"
+	                     "Requires the emulator started with KYTY_AGENT_SOCK=ABS_PATH.\n"
+	                     "Pad input is diagnostic_input, not gameplay acceptance.\n"
+	                     "status.phase: not_ready|booting|loading|interactive|stalled (use wait-phase).\n"
+	                     "Prefer wait-ready → wait-phase / wait-present --delta over absolute --min with long sleeps.\n"
+	                     "Exit 125 = transport (guest dead / stale sock); do not retry with longer host sleeps.\n"
+	                     "watch exits 1 when present/frame/fps look stalled (loading hang).\n"
+	                     "capture/score exit 1 when frame metrics look corrupted (healthy:false).\n");
 }
 
 std::string JsonEscape(const char* value)
@@ -73,13 +78,27 @@ std::string JsonEscape(const char* value)
 	}
 	for (const char* p = value; *p != '\0'; ++p)
 	{
-		switch (*p)
+		const auto ch = static_cast<unsigned char>(*p);
+		switch (ch)
 		{
 			case '"': out += "\\\""; break;
 			case '\\': out += "\\\\"; break;
+			case '\b': out += "\\b"; break;
+			case '\f': out += "\\f"; break;
 			case '\n': out += "\\n"; break;
+			case '\r': out += "\\r"; break;
 			case '\t': out += "\\t"; break;
-			default: out.push_back(*p); break;
+			default:
+				if (ch < 0x20)
+				{
+					char escaped[7];
+					std::snprintf(escaped, sizeof(escaped), "\\u%04x", ch);
+					out += escaped;
+				} else
+				{
+					out.push_back(*p);
+				}
+				break;
 		}
 	}
 	return out;
@@ -108,7 +127,7 @@ bool ReadLine(int fd, std::string* out)
 {
 	out->clear();
 	char ch = 0;
-	while (out->size() < 8192)
+	while (out->size() < kResponseLineMax)
 	{
 		const ssize_t n = ::read(fd, &ch, 1);
 		if (n < 0)
@@ -135,6 +154,16 @@ bool ReadLine(int fd, std::string* out)
 	return false;
 }
 
+// Stable machine-readable CLI failure codes (stdout JSON when applicable).
+// Exit 125 = transport/usage; exit 1 = tool/runtime failure.
+// Codes: transport | usage | timeout | tool_error | unhealthy
+void PrintCliFailure(const char* code, const char* message)
+{
+	// Keep local transport errors on the same public wire version as the server.
+	std::printf("{\"ok\":false,\"protocol_version\":%u,\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}\n", kProtocolVersion,
+	            code != nullptr ? code : "error", message != nullptr ? message : "");
+}
+
 int Connect(const char* path, bool quiet)
 {
 	if (path == nullptr || path[0] != '/')
@@ -142,6 +171,7 @@ int Connect(const char* path, bool quiet)
 		if (!quiet)
 		{
 			std::fprintf(stderr, "kyty_agent: --sock must be an absolute path\n");
+			PrintCliFailure("usage", "sock_must_be_absolute");
 		}
 		return -1;
 	}
@@ -174,9 +204,12 @@ int Connect(const char* path, bool quiet)
 			std::fprintf(stderr, "kyty_agent: connect(%s) failed: %s\n", path, std::strerror(err));
 			if (err == ECONNREFUSED || err == ENOENT)
 			{
-				std::fprintf(stderr,
-				             "kyty_agent: guest agent socket is not live (process exited or KYTY_AGENT_SOCK not set); "
-				             "use wait-ready after relaunch — do not sleep for minutes\n");
+				std::fprintf(stderr, "kyty_agent: guest agent socket is not live (process exited or KYTY_AGENT_SOCK not set); "
+				                     "use wait-ready after relaunch — do not sleep for minutes\n");
+				PrintCliFailure("transport", "socket_not_live");
+			} else
+			{
+				PrintCliFailure("transport", "connect_failed");
 			}
 		}
 		::close(fd);
@@ -192,7 +225,7 @@ uint64_t MonotonicMs()
 	return static_cast<uint64_t>(now.tv_sec) * 1000ull + static_cast<uint64_t>(now.tv_nsec) / 1000000ull;
 }
 
-int Call(const char* sock, const std::string& request_line)
+int CallImpl(const char* sock, const std::string& request_line, bool print_response, std::string* response_out)
 {
 	const int fd = Connect(sock, false);
 	if (fd < 0)
@@ -204,6 +237,7 @@ int Call(const char* sock, const std::string& request_line)
 	if (!WriteAll(fd, payload))
 	{
 		std::fprintf(stderr, "kyty_agent: write failed\n");
+		PrintCliFailure("transport", "write_failed");
 		::close(fd);
 		return 125;
 	}
@@ -211,20 +245,33 @@ int Call(const char* sock, const std::string& request_line)
 	if (!ReadLine(fd, &response))
 	{
 		std::fprintf(stderr, "kyty_agent: read failed\n");
+		PrintCliFailure("transport", "read_failed");
 		::close(fd);
 		return 125;
 	}
 	::close(fd);
-	std::puts(response.c_str());
+	if (response_out != nullptr)
+	{
+		*response_out = response;
+	}
+	if (print_response)
+	{
+		std::puts(response.c_str());
+	}
 	if (response.find("\"ok\":false") != std::string::npos)
 	{
-		return 1;
+		return 1; // tool_error — server error object already has code
 	}
 	if (response.find("\"healthy\":false") != std::string::npos)
 	{
-		return 1;
+		return 1; // unhealthy
 	}
 	return 0;
+}
+
+int Call(const char* sock, const std::string& request_line)
+{
+	return CallImpl(sock, request_line, true, nullptr);
 }
 
 // Poll until the emulator agent accepts a connection (boot / relaunch).
@@ -239,6 +286,7 @@ int WaitReady(const char* sock, uint64_t timeout_ms)
 			std::fprintf(stderr, "kyty_agent: wait-ready timed out after %llu ms (%llu attempts)\n",
 			             static_cast<unsigned long long>(timeout_ms), static_cast<unsigned long long>(attempts));
 			std::fprintf(stderr, "kyty_agent: guest agent socket is not live; relaunch with KYTY_AGENT_SOCK set\n");
+			PrintCliFailure("timeout", "wait_ready_timeout");
 			return 1;
 		}
 		++attempts;
@@ -248,11 +296,12 @@ int WaitReady(const char* sock, uint64_t timeout_ms)
 			::close(fd);
 			char req[96];
 			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"ping\",\"args\":{}}");
-			const int rc = Call(sock, req);
+			const int rc = CallImpl(sock, req, false, nullptr);
 			if (rc == 0)
 			{
-				std::printf("{\"id\":1,\"ok\":true,\"result\":{\"ready\":true,\"attempts\":%llu,\"waited_ms\":%llu}}\n",
-				            static_cast<unsigned long long>(attempts),
+				std::printf("{\"id\":1,\"ok\":true,\"protocol_version\":%u,"
+				            "\"result\":{\"ready\":true,\"attempts\":%llu,\"waited_ms\":%llu}}\n",
+				            kProtocolVersion, static_cast<unsigned long long>(attempts),
 				            static_cast<unsigned long long>(MonotonicMs() - start_ms));
 				return 0;
 			}
@@ -280,6 +329,76 @@ const char* RequireArg(int argc, char** argv, int* index, const char* flag)
 	}
 	++(*index);
 	return argv[*index];
+}
+
+struct WatchOptions
+{
+	uint64_t window_ms        = 10000;
+	uint64_t present_stall_ms = 5000;
+	uint64_t frame_stall_ms   = 5000;
+	uint64_t min_fps          = 2;
+	bool     capture          = true;
+};
+
+enum class WatchOptionKind
+{
+	Number,
+	Seconds,
+	DisableCapture,
+};
+
+struct WatchOptionSpec
+{
+	const char*     flag;
+	WatchOptionKind kind;
+	uint64_t WatchOptions::* target;
+};
+
+const WatchOptionSpec* FindWatchOption(const char* flag)
+{
+	static constexpr WatchOptionSpec kOptions[] = {
+	    {"--window-ms", WatchOptionKind::Number, &WatchOptions::window_ms},
+	    {"--seconds", WatchOptionKind::Seconds, &WatchOptions::window_ms},
+	    {"--present-stall-ms", WatchOptionKind::Number, &WatchOptions::present_stall_ms},
+	    {"--frame-stall-ms", WatchOptionKind::Number, &WatchOptions::frame_stall_ms},
+	    {"--min-fps", WatchOptionKind::Number, &WatchOptions::min_fps},
+	    {"--no-capture", WatchOptionKind::DisableCapture, nullptr},
+	};
+	for (const auto& option: kOptions)
+	{
+		if (std::strcmp(flag, option.flag) == 0)
+		{
+			return &option;
+		}
+	}
+	return nullptr;
+}
+
+bool ParseWatchOptions(int argc, char** argv, int* index, WatchOptions* out)
+{
+	for (; *index < argc; ++(*index))
+	{
+		const char*            flag = argv[*index];
+		const WatchOptionSpec* spec = FindWatchOption(flag);
+		if (spec == nullptr)
+		{
+			std::fprintf(stderr, "kyty_agent: unknown watch flag %s\n", flag);
+			return false;
+		}
+		if (spec->kind == WatchOptionKind::DisableCapture)
+		{
+			out->capture = false;
+			continue;
+		}
+		const char* value = RequireArg(argc, argv, index, flag);
+		if (value == nullptr)
+		{
+			return false;
+		}
+		const uint64_t parsed = std::strtoull(value, nullptr, 10);
+		out->*(spec->target)  = spec->kind == WatchOptionKind::Seconds ? parsed * 1000ull : parsed;
+	}
+	return true;
 }
 
 } // namespace
@@ -485,10 +604,10 @@ int Main(int argc, char** argv)
 				std::fprintf(stderr, "kyty_agent: pad hold requires BUTTON\n");
 				return 125;
 			}
-			const char* button      = argv[i++];
-			uint64_t    delta       = 0;
-			uint64_t    timeout_ms  = 15000;
-			bool        have_delta  = false;
+			const char* button     = argv[i++];
+			uint64_t    delta      = 0;
+			uint64_t    timeout_ms = 15000;
+			bool        have_delta = false;
 			for (; i < argc; ++i)
 			{
 				if (std::strcmp(argv[i], "--delta") == 0)
@@ -521,19 +640,16 @@ int Main(int argc, char** argv)
 				return 125;
 			}
 			char req[256];
-			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_down\",\"args\":{\"button\":\"%s\"}}",
-			              JsonEscape(button).c_str());
+			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_down\",\"args\":{\"button\":\"%s\"}}", JsonEscape(button).c_str());
 			const int down_rc = Call(sock, req);
 			if (down_rc != 0)
 			{
 				return down_rc;
 			}
-			std::snprintf(req, sizeof(req),
-			              "{\"id\":1,\"tool\":\"wait_present\",\"args\":{\"delta\":%llu,\"timeout_ms\":%llu}}",
+			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"wait_present\",\"args\":{\"delta\":%llu,\"timeout_ms\":%llu}}",
 			              static_cast<unsigned long long>(delta), static_cast<unsigned long long>(timeout_ms));
 			const int wait_rc = Call(sock, req);
-			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_up\",\"args\":{\"button\":\"%s\"}}",
-			              JsonEscape(button).c_str());
+			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_up\",\"args\":{\"button\":\"%s\"}}", JsonEscape(button).c_str());
 			const int up_rc = Call(sock, req);
 			if (wait_rc != 0)
 			{
@@ -557,8 +673,7 @@ int Main(int argc, char** argv)
 			char req[256];
 			if (std::strcmp(action, "tap") == 0)
 			{
-				std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_tap\",\"args\":{\"button\":\"%s\"}}",
-				              JsonEscape(button).c_str());
+				std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_tap\",\"args\":{\"button\":\"%s\"}}", JsonEscape(button).c_str());
 			} else
 			{
 				std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_%s\",\"args\":{\"button\":\"%s\"}}", action,
@@ -641,25 +756,23 @@ int Main(int argc, char** argv)
 		char req[320];
 		if (have_delta)
 		{
-			std::snprintf(req, sizeof(req),
-			              "{\"id\":1,\"tool\":\"%s\",\"args\":{\"delta\":%llu,\"timeout_ms\":%llu}}",
-			              std::strcmp(cmd, "wait-present") == 0 ? "wait_present" : "wait_frame",
-			              static_cast<unsigned long long>(delta), static_cast<unsigned long long>(timeout_ms));
+			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"%s\",\"args\":{\"delta\":%llu,\"timeout_ms\":%llu}}",
+			              std::strcmp(cmd, "wait-present") == 0 ? "wait_present" : "wait_frame", static_cast<unsigned long long>(delta),
+			              static_cast<unsigned long long>(timeout_ms));
 		} else
 		{
-			std::snprintf(req, sizeof(req),
-			              "{\"id\":1,\"tool\":\"%s\",\"args\":{\"min\":%llu,\"timeout_ms\":%llu}}",
-			              std::strcmp(cmd, "wait-present") == 0 ? "wait_present" : "wait_frame",
-			              static_cast<unsigned long long>(min_value), static_cast<unsigned long long>(timeout_ms));
+			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"%s\",\"args\":{\"min\":%llu,\"timeout_ms\":%llu}}",
+			              std::strcmp(cmd, "wait-present") == 0 ? "wait_present" : "wait_frame", static_cast<unsigned long long>(min_value),
+			              static_cast<unsigned long long>(timeout_ms));
 		}
 		return Call(sock, req);
 	}
 	if (std::strcmp(cmd, "wait-phase") == 0)
 	{
-		const char* want        = nullptr;
-		uint64_t    timeout_ms  = 45000;
-		uint64_t    stable_ms   = 400;
-		uint64_t    min_fps     = 5;
+		const char* want       = nullptr;
+		uint64_t    timeout_ms = 45000;
+		uint64_t    stable_ms  = 400;
+		uint64_t    min_fps    = 5;
 		if (i < argc && argv[i][0] != '-')
 		{
 			want = argv[i++];
@@ -717,14 +830,14 @@ int Main(int argc, char** argv)
 		std::snprintf(req, sizeof(req),
 		              "{\"id\":1,\"tool\":\"wait_phase\",\"args\":{\"want\":\"%s\",\"timeout_ms\":%llu,"
 		              "\"stable_ms\":%llu,\"min_fps\":%llu}}",
-		              JsonEscape(want).c_str(), static_cast<unsigned long long>(timeout_ms),
-		              static_cast<unsigned long long>(stable_ms), static_cast<unsigned long long>(min_fps));
+		              JsonEscape(want).c_str(), static_cast<unsigned long long>(timeout_ms), static_cast<unsigned long long>(stable_ms),
+		              static_cast<unsigned long long>(min_fps));
 		return Call(sock, req);
 	}
 	if (std::strcmp(cmd, "wait-event") == 0)
 	{
-		const char* kind        = nullptr;
-		uint64_t    timeout_ms  = 5000;
+		const char* kind       = nullptr;
+		uint64_t    timeout_ms = 5000;
 		for (; i < argc; ++i)
 		{
 			if (std::strcmp(argv[i], "--kind") == 0)
@@ -755,66 +868,24 @@ int Main(int argc, char** argv)
 			return 125;
 		}
 		char req[256];
-		std::snprintf(req, sizeof(req),
-		              "{\"id\":1,\"tool\":\"wait_event\",\"args\":{\"kind\":\"%s\",\"timeout_ms\":%llu}}",
+		std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"wait_event\",\"args\":{\"kind\":\"%s\",\"timeout_ms\":%llu}}",
 		              JsonEscape(kind).c_str(), static_cast<unsigned long long>(timeout_ms));
 		return Call(sock, req);
 	}
 	if (std::strcmp(cmd, "watch") == 0)
 	{
-		uint64_t window_ms        = 10000;
-		uint64_t present_stall_ms = 5000;
-		uint64_t frame_stall_ms   = 5000;
-		uint64_t min_fps          = 2;
-		bool     capture          = true;
-		for (; i < argc; ++i)
+		WatchOptions options {};
+		if (!ParseWatchOptions(argc, argv, &i, &options))
 		{
-			uint64_t* target = nullptr;
-			const char* flag = argv[i];
-			if (std::strcmp(flag, "--window-ms") == 0)
-			{
-				target = &window_ms;
-			} else if (std::strcmp(flag, "--seconds") == 0)
-			{
-				const char* value = RequireArg(argc, argv, &i, flag);
-				if (value == nullptr)
-				{
-					return 125;
-				}
-				window_ms = std::strtoull(value, nullptr, 10) * 1000ull;
-				continue;
-			} else if (std::strcmp(flag, "--present-stall-ms") == 0)
-			{
-				target = &present_stall_ms;
-			} else if (std::strcmp(flag, "--frame-stall-ms") == 0)
-			{
-				target = &frame_stall_ms;
-			} else if (std::strcmp(flag, "--min-fps") == 0)
-			{
-				target = &min_fps;
-			} else if (std::strcmp(flag, "--no-capture") == 0)
-			{
-				capture = false;
-				continue;
-			} else
-			{
-				std::fprintf(stderr, "kyty_agent: unknown watch flag %s\n", flag);
-				return 125;
-			}
-			const char* value = RequireArg(argc, argv, &i, flag);
-			if (value == nullptr)
-			{
-				return 125;
-			}
-			*target = std::strtoull(value, nullptr, 10);
+			return 125;
 		}
 		char req[512];
 		std::snprintf(req, sizeof(req),
 		              "{\"id\":1,\"tool\":\"watch\",\"args\":{\"window_ms\":%llu,\"present_stall_ms\":%llu,"
 		              "\"frame_stall_ms\":%llu,\"min_fps\":%llu,\"capture\":%s}}",
-		              static_cast<unsigned long long>(window_ms), static_cast<unsigned long long>(present_stall_ms),
-		              static_cast<unsigned long long>(frame_stall_ms), static_cast<unsigned long long>(min_fps),
-		              capture ? "true" : "false");
+		              static_cast<unsigned long long>(options.window_ms), static_cast<unsigned long long>(options.present_stall_ms),
+		              static_cast<unsigned long long>(options.frame_stall_ms), static_cast<unsigned long long>(options.min_fps),
+		              options.capture ? "true" : "false");
 		return Call(sock, req);
 	}
 

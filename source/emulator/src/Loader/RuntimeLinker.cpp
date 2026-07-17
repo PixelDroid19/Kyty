@@ -1,5 +1,4 @@
 #include "Emulator/Loader/RuntimeLinker.h"
-#include <cstdio>
 
 #include "Kyty/Core/BringUp.h"
 #include "Kyty/Core/Common.h"
@@ -12,19 +11,21 @@
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Sys/SysDbg.h"
 
+#include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Config.h"
-#include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Loader/Elf.h"
+#include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/Jit.h"
-#include "Emulator/Loader/MissingImportStubs.h"
+#include "Emulator/Loader/MissingImport.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/Validation/DomainValidators.h"
 
+#include <cstdio>
 #include <cstring>
-#include <csignal>
 #include <utility>
 
 #ifdef KYTY_EMU_ENABLED
@@ -34,6 +35,10 @@ void SetProgName(const String& name);
 } // namespace Kyty::Libs::LibKernel
 
 namespace Kyty::Loader {
+
+// Missing-import registry, static StubAllocator, ImportPolicy, and diagnostics
+// live in MissingImport.{h,cpp}. RuntimeLinker::Resolve only coordinates:
+// validate → export wins → policy → AssignFuncStubOrAbort / fatal / zero.
 
 #pragma pack(1)
 
@@ -96,12 +101,12 @@ static uint8_t g_tls_spinlock = 0;
 
 static KYTY_SYSV_ABI void run_entry(uint64_t addr, EntryParams* params, atexit_func_t atexit_func)
 {
-	reinterpret_cast<entry_func_t>(addr)(params, atexit_func);
+	GuestCall::Invoke(addr, reinterpret_cast<uint64_t>(params), reinterpret_cast<uint64_t>(atexit_func), 0);
 }
 
 static KYTY_SYSV_ABI int run_ini_fini(uint64_t addr, size_t args, const void* argp, module_func_t func)
 {
-	return reinterpret_cast<module_ini_fini_func_t>(addr)(args, argp, func);
+	return static_cast<int>(GuestCall::Invoke(addr, args, reinterpret_cast<uint64_t>(argp), reinterpret_cast<uint64_t>(func)));
 }
 
 static void run_init_array(uint64_t base_vaddr, uint64_t array_vaddr, uint64_t array_size)
@@ -119,7 +124,7 @@ static void run_init_array(uint64_t base_vaddr, uint64_t array_vaddr, uint64_t a
 		const uint64_t fn = entries[i];
 		if (fn != 0)
 		{
-			reinterpret_cast<void (*)()>(fn)();
+			GuestCall::Invoke(fn, 0, 0, 0);
 		}
 	}
 }
@@ -133,7 +138,7 @@ void LoaderRunProgramInitializers(uint64_t base_vaddr, const DynamicInfo& info)
 
 	if (info.init_vaddr != 0)
 	{
-		reinterpret_cast<void (*)()>(base_vaddr + info.init_vaddr)();
+		GuestCall::Invoke(base_vaddr + info.init_vaddr, 0, 0, 0);
 	}
 
 	if (info.init_array_vaddr != 0 && info.init_array_size != 0)
@@ -157,8 +162,8 @@ bool LoaderCodeContainsDirectCallTo(const uint8_t* code, uint64_t size, uint64_t
 		}
 		int32_t rel = 0;
 		std::memcpy(&rel, code + off + 1, sizeof(rel));
-		const uint64_t next  = code_vaddr + off + 5;
-		const uint64_t dest  = static_cast<uint64_t>(static_cast<int64_t>(next) + static_cast<int64_t>(rel));
+		const uint64_t next = code_vaddr + off + 5;
+		const uint64_t dest = static_cast<uint64_t>(static_cast<int64_t>(next) + static_cast<int64_t>(rel));
 		if (dest == target_vaddr)
 		{
 			return true;
@@ -539,7 +544,11 @@ static void relocate(uint32_t index, Elf64_Rela* r, Program* program, bool jmpre
 			                                  ri.value == 0 ? FG_BRIGHT_RED : FG_BRIGHT_GREEN, ri.value, DEFAULT, ri.name.C_Str(),
 			                                  Core::EnumName(ri.type).C_Str(), Core::EnumName(ri.bind).C_Str(), ri.dbg_name.C_Str());
 
-			EXIT("Can't resolve: %s\n", (Log::IsColoredPrintf() ? dbg_str : Log::RemoveColors(dbg_str)).C_Str());
+			{
+				const String clean = Log::IsColoredPrintf() ? dbg_str : Log::RemoveColors(dbg_str);
+				Emulator::Agent::Lifecycle::EmitRelocationFailure(clean.C_Str());
+				EXIT("Can't resolve: %s\n", clean.C_Str());
+			}
 		}
 	}
 
@@ -573,11 +582,11 @@ static void relocate_all(Elf64_Rela* records, uint64_t size, Program* program, b
 static KYTY_SYSV_ABI void RelocateHandler(uint64_t rdi, uint64_t rsi, uint64_t rdx, uint64_t rcx, uint64_t r8, uint64_t r9,
                                           RelocateHandlerStack s)
 {
-	auto*  stack     = s.stack;
-	auto*  program   = reinterpret_cast<Program*>(stack[-1]);
-	auto   rel_index = stack[0];
+	auto*  stack          = s.stack;
+	auto*  program        = reinterpret_cast<Program*>(stack[-1]);
+	auto   rel_index      = stack[0];
 	auto   return_address = stack[1];
-	String name      = U"<unknown function>";
+	String name           = U"<unknown function>";
 
 	if (program != nullptr && program->dynamic_info != nullptr && program->dynamic_info->jmprela_table != nullptr)
 	{
@@ -595,11 +604,11 @@ static KYTY_SYSV_ABI void RelocateHandler(uint64_t rdi, uint64_t rsi, uint64_t r
 	static constexpr uint8_t kCallerBytesUnknown[16] = {};
 
 	EXIT("=== Unpatched function!!! ===\n[%d]\t%s\n"
-	     "SysV arguments: rdi=%016" PRIx64 " rsi=%016" PRIx64 " rdx=%016" PRIx64 " rcx=%016" PRIx64
-	     " r8=%016" PRIx64 " r9=%016" PRIx64 " return=%016" PRIx64 "\n"
+	     "SysV arguments: rdi=%016" PRIx64 " rsi=%016" PRIx64 " rdx=%016" PRIx64 " rcx=%016" PRIx64 " r8=%016" PRIx64 " r9=%016" PRIx64
+	     " return=%016" PRIx64 "\n"
 	     "Caller bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-	     Core::Thread::GetThreadIdUnique(), (Log::IsColoredPrintf() ? name : Log::RemoveColors(name)).C_Str(), rdi, rsi, rdx, rcx, r8,
-	     r9, return_address, kCallerBytesUnknown[0], kCallerBytesUnknown[1], kCallerBytesUnknown[2], kCallerBytesUnknown[3],
+	     Core::Thread::GetThreadIdUnique(), (Log::IsColoredPrintf() ? name : Log::RemoveColors(name)).C_Str(), rdi, rsi, rdx, rcx, r8, r9,
+	     return_address, kCallerBytesUnknown[0], kCallerBytesUnknown[1], kCallerBytesUnknown[2], kCallerBytesUnknown[3],
 	     kCallerBytesUnknown[4], kCallerBytesUnknown[5], kCallerBytesUnknown[6], kCallerBytesUnknown[7], kCallerBytesUnknown[8],
 	     kCallerBytesUnknown[9], kCallerBytesUnknown[10], kCallerBytesUnknown[11], kCallerBytesUnknown[12], kCallerBytesUnknown[13],
 	     kCallerBytesUnknown[14], kCallerBytesUnknown[15]);
@@ -698,8 +707,8 @@ uint64_t LoaderPrepareThreadTlsImage(uint8_t* tls, uint64_t image_size, uint64_t
 		{
 			uint64_t word1 = 0;
 			uint64_t word2 = 0;
-			if (guest_read64(v + 8, &word1, guest_ctx) && guest_read64(v + 16, &word2, guest_ctx) && word1 < 0x100 &&
-			    word2 >= prog_lo && word2 < prog_hi)
+			if (guest_read64(v + 8, &word1, guest_ctx) && guest_read64(v + 16, &word2, guest_ctx) && word1 < 0x100 && word2 >= prog_lo &&
+			    word2 < prog_hi)
 			{
 				*cell = 0;
 				modified++;
@@ -708,8 +717,7 @@ uint64_t LoaderPrepareThreadTlsImage(uint8_t* tls, uint64_t image_size, uint64_t
 		}
 
 		// Unconstructed Context (null word0 + null buffer control at +0x3e0).
-		if (program_size < kContextBufferControlOffset + sizeof(uint64_t) ||
-		    v > prog_hi - (kContextBufferControlOffset + sizeof(uint64_t)))
+		if (program_size < kContextBufferControlOffset + sizeof(uint64_t) || v > prog_hi - (kContextBufferControlOffset + sizeof(uint64_t)))
 		{
 			continue;
 		}
@@ -749,7 +757,7 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size)
 	// land on the handler slot Kyty allocates after base_size_aligned.
 	if (!program->elf->IsShared() && size >= 8)
 	{
-		auto*              start_ptr = reinterpret_cast<uint8_t*>(address);
+		auto*          start_ptr = reinterpret_cast<uint8_t*>(address);
 		const uint64_t rex_sites = LoaderRewriteTlsGdCallRexPrefix(start_ptr, size);
 		if (rex_sites != 0)
 		{
@@ -920,24 +928,36 @@ RuntimeLinker::~RuntimeLinker()
 	Clear();
 }
 
-bool RuntimeLinker::HasProgramFile(const String& elf_name)
-{
-	Core::LockGuard lock(m_mutex);
-	for (const auto* p : m_programs)
-	{
-		if (p != nullptr && p->file_name == elf_name)
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
 Program* RuntimeLinker::LoadProgram(const String& elf_name)
 {
 	KYTY_PROFILER_FUNCTION();
 
 	Core::LockGuard lock(m_mutex);
+
+	// validate path shape before any ELF mutation
+	Emulator::Validation::GuestExecutableRequest greq {};
+	greq.root_path          = elf_name.C_Str();
+	greq.require_eboot_name = false;
+	const auto path_ok      = Emulator::Validation::ValidateGuestExecutable(greq);
+	if (!path_ok.Ok())
+	{
+		EXIT("guest executable validation failed: %s (%s)\n", path_ok.error.reason, path_ok.error.code);
+	}
+
+	// Shared modules: validate basename only (no fabricated version fields).
+	const String lower = elf_name.ToLower();
+	if (lower.EndsWith(U".prx") || lower.EndsWith(U".sprx"))
+	{
+		const String                                file = elf_name.FilenameWithoutDirectory();
+		const String                                base = file.FilenameWithoutExtension();
+		Emulator::Validation::ModuleMetadataRequest mreq {};
+		mreq.name         = base.C_Str();
+		const auto mod_ok = Emulator::Validation::ValidateModuleMetadata(mreq);
+		if (!mod_ok.Ok())
+		{
+			EXIT("module metadata validation failed: %s (%s)\n", mod_ok.error.reason, mod_ok.error.code);
+		}
+	}
 
 	static int32_t id_seq = 0;
 
@@ -1054,8 +1074,8 @@ void RuntimeLinker::Execute()
 				{
 					continue;
 				}
-				const uint64_t seg_addr = phdr[i].p_vaddr + program->base_vaddr;
-				const uint64_t seg_size = get_aligned_size(phdr + i);
+				const uint64_t            seg_addr = phdr[i].p_vaddr + program->base_vaddr;
+				const uint64_t            seg_size = get_aligned_size(phdr + i);
 				Core::VirtualMemory::Mode old_mode {};
 				Core::VirtualMemory::Protect(seg_addr, seg_size, Core::VirtualMemory::Mode::ExecuteReadWrite, &old_mode);
 				total_sites += LoaderRewriteTlsGdCallRexPrefix(reinterpret_cast<uint8_t*>(seg_addr), seg_size);
@@ -1114,8 +1134,7 @@ void RuntimeLinker::Execute()
 				{
 					if (program->dynamic_info != nullptr)
 					{
-						printf("Main CRT entry=0x%016" PRIx64 " DT_INIT=0x%016" PRIx64
-						       " (host skips pre-entry init; CRT runs it once)\n",
+						printf("Main CRT entry=0x%016" PRIx64 " DT_INIT=0x%016" PRIx64 " (host skips pre-entry init; CRT runs it once)\n",
 						       entry, program->base_vaddr + program->dynamic_info->init_vaddr);
 					}
 					Kyty::Libs::LibKernel::ApplicationHeap::EnsureInitialized(program);
@@ -1126,6 +1145,8 @@ void RuntimeLinker::Execute()
 
 		run_entry(entry, &p, ProgramExitHandler);
 		Core::mem_guest_thread_leave();
+		// Guest main returned (or long-running titles never reach here). Observation only.
+		Emulator::Agent::Lifecycle::EmitGuestExit(0);
 	}
 }
 
@@ -1152,6 +1173,7 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(out_info == nullptr);
+	EXIT_IF(program == nullptr || program->dynamic_info == nullptr);
 
 	auto ids = name.Split(U'#');
 
@@ -1160,74 +1182,162 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 		*bind_self = false;
 	}
 
-	if (ids.Size() == 3)
+	if (ids.Size() != 3)
 	{
-		const LibraryId* l = FindLibrary(*program, ids.At(1));
-		const ModuleId*  m = FindModule(*program, ids.At(2));
-
-		if (l != nullptr && m != nullptr)
-		{
-			SymbolResolve sr {};
-			sr.name                 = ids.At(0);
-			sr.library              = l->name;
-			sr.library_version      = l->version;
-			sr.module               = m->name;
-			sr.module_version_major = m->version_major;
-			sr.module_version_minor = m->version_minor;
-			sr.type                 = type;
-
-			const SymbolRecord* rec = nullptr;
-
-			if (m_symbols != nullptr)
-			{
-				rec = m_symbols->Find(sr);
-			}
-
-			if (rec == nullptr)
-			{
-				if (auto* p = FindProgram(*m, *l); p != nullptr && p->export_symbols != nullptr)
-				{
-					rec = p->export_symbols->Find(sr);
-					if (bind_self != nullptr)
-					{
-						*bind_self = (p == program);
-					}
-				}
-			}
-
-			if (rec != nullptr)
-			{
-				// Real HLE / program export always wins over a missing-import stub.
-				*out_info = *rec;
-			} else
-			{
-				out_info->vaddr    = 0;
-				out_info->name     = SymbolDatabase::GenerateName(sr);
-				out_info->dbg_name = U"";
-
-				// Only Func imports may receive bring-up stubs.
-				if (type == SymbolType::Func && Core::BringUp::AllowMissingFunctionImport())
-				{
-					out_info->vaddr    = MissingImport::Assign(sr);
-					out_info->dbg_name = U"kyty_missing_func_stub";
-				} else if (type != SymbolType::Func)
-				{
-					// Object / TLS / NoType / unknown must stay strict: never stub,
-					// never continue with silent zero vaddr under unsafe Func stubs.
-					EXIT("=== Unpatched non-Func import!!! ===\n[%d]\t%s type=%d\n", Core::Thread::GetThreadIdUnique(),
-					     out_info->name.C_Str(), static_cast<int>(type));
-				}
-			}
-		} else
-		{
-			EXIT("l == nullptr || m == nullptr");
-		}
-	} else
-	{
-		out_info->vaddr    = 0;
-		out_info->name     = name;
-		out_info->dbg_name = U"";
+		EXIT("malformed import identity: %s\n", name.C_Str());
+		return;
 	}
+	if (ids.At(0).IsEmpty())
+	{
+		EXIT("malformed import symbol identity: %s\n", name.C_Str());
+		return;
+	}
+
+	const LibraryId* library = FindLibrary(*program, ids.At(1));
+	const ModuleId*  module  = FindModule(*program, ids.At(2));
+	if (library == nullptr || module == nullptr)
+	{
+		EXIT("malformed import references unknown library or module: %s\n", name.C_Str());
+		return;
+	}
+
+	SymbolResolve resolve {};
+	resolve.name                 = ids.At(0);
+	resolve.library              = library->name;
+	resolve.library_version      = library->version;
+	resolve.module               = module->name;
+	resolve.module_version_major = module->version_major;
+	resolve.module_version_minor = module->version_minor;
+	resolve.type                 = type;
+
+	const SymbolRecord* record = m_symbols != nullptr ? m_symbols->Find(resolve) : nullptr;
+	if (record == nullptr)
+	{
+		auto* exporter = FindProgram(*module, *library);
+		if (exporter != nullptr && exporter->export_symbols != nullptr)
+		{
+			record = exporter->export_symbols->Find(resolve);
+			if (bind_self != nullptr)
+			{
+				*bind_self = (exporter == program);
+			}
+		}
+	}
+
+	const String canonical_name = SymbolDatabase::GenerateName(resolve);
+	const auto   identity       = MissingImport::SymbolIdentity::From(resolve, canonical_name);
+
+	Emulator::Validation::ImportResolveRequest request {};
+	request.type       = type;
+	request.has_export = record != nullptr;
+	request.missing_function_import_enabled =
+	    Core::BringUp::IsEnabled(Core::BringUp::Feature::MissingFunctionImport, Core::BringUp::Subsystem::Loader);
+	request.identity    = identity.canonical.C_Str();
+	const auto decision = Emulator::Validation::ClassifyImportResolution(request);
+
+	switch (decision.outcome)
+	{
+		case Emulator::Validation::ImportResolutionOutcome::Resolved:
+		{
+			EXIT_IF(record == nullptr);
+			*out_info           = *record;
+			const bool from_hle = (m_symbols != nullptr && m_symbols->Find(resolve) == record);
+			Emulator::Agent::Lifecycle::EmitSymbolResolved(out_info->name.C_Str(), from_hle ? "hle" : "export");
+			return;
+		}
+		case Emulator::Validation::ImportResolutionOutcome::DiagnosticFunctionStub:
+			out_info->name     = canonical_name;
+			out_info->dbg_name = U"kyty_missing_func_stub";
+			printf(FG_BRIGHT_YELLOW "STUB (missing): %s [%s]" DEFAULT "\n", identity.name.C_Str(), identity.library.C_Str());
+			out_info->vaddr = MissingImport::AssignFuncStubOrAbort(identity);
+			EXIT_IF(out_info->vaddr == 0);
+			return;
+		case Emulator::Validation::ImportResolutionOutcome::StrictUnresolvedFunction:
+			out_info->vaddr    = 0;
+			out_info->name     = canonical_name;
+			out_info->dbg_name = U"";
+			return;
+		case Emulator::Validation::ImportResolutionOutcome::UnresolvedNonFunction:
+			// Preserve the relocation contract: weak object imports are mapped
+			// to the explicit invalid-memory sentinel, while strong imports
+			// fail in relocate() with their bind and relocation context. Resolve
+			// must not fabricate an object address or abort before bind policy is
+			// available.
+			out_info->vaddr    = 0;
+			out_info->name     = canonical_name;
+			out_info->dbg_name = U"unresolved_non_function";
+			return;
+		case Emulator::Validation::ImportResolutionOutcome::Malformed:
+			EXIT("=== Malformed import!!! ===\n[%d]\t%s type=%d reason=%s\n", Core::Thread::GetThreadIdUnique(), identity.canonical.C_Str(),
+			     static_cast<int>(type), decision.validation.error.reason);
+			return;
+	}
+	EXIT("unhandled import resolution outcome");
+}
+
+MissingImportDiagnostics RuntimeLinker::GetMissingImportDiagnostics() const
+{
+	return MissingImport::Snapshot();
+}
+
+MissingImportDiagnostics RuntimeLinker::GetGlobalMissingImportDiagnostics()
+{
+	return MissingImport::Snapshot();
+}
+
+uint32_t RuntimeLinker::LoadedProgramCount()
+{
+	Core::LockGuard lock(m_mutex);
+	return m_programs.Size();
+}
+
+Vector<ProgramExportSnapshot> RuntimeLinker::SnapshotExportPrograms()
+{
+	Core::LockGuard               lock(m_mutex);
+	Vector<ProgramExportSnapshot> snapshot;
+	for (const auto* program: m_programs)
+	{
+		if (program == nullptr)
+		{
+			continue;
+		}
+
+		ProgramExportSnapshot program_snapshot {};
+		program_snapshot.unique_id = program->unique_id;
+		program_snapshot.file_name = program->file_name;
+		if (program->export_symbols != nullptr)
+		{
+			const uint32_t export_count = program->export_symbols->SymbolCount();
+			for (uint32_t i = 0; i < export_count; ++i)
+			{
+				const SymbolRecord* export_symbol = program->export_symbols->SymbolAt(i);
+				if (export_symbol != nullptr && !export_symbol->name.IsEmpty())
+				{
+					program_snapshot.export_names.Add(export_symbol->name);
+				}
+			}
+		}
+		snapshot.Add(std::move(program_snapshot));
+	}
+	return snapshot;
+}
+
+Program* RuntimeLinker::AttachSyntheticExportModule(const String& file_name)
+{
+	Core::LockGuard lock(m_mutex);
+	static int32_t  synth_id_seq = 1'000'000;
+
+	auto* program                        = new Program;
+	program->rt                          = this;
+	program->file_name                   = file_name;
+	program->unique_id                   = ++synth_id_seq;
+	program->dynamic_info                = new DynamicInfo;
+	program->export_symbols              = new SymbolDatabase;
+	program->import_symbols              = new SymbolDatabase;
+	program->fail_if_global_not_resolved = false;
+	// No ELF / base mapping — export table only (conflict + Resolve HLE tests).
+	m_programs.Add(program);
+	return program;
 }
 
 uint64_t RuntimeLinker::ReadFromElf(Program* program, uint64_t vaddr)

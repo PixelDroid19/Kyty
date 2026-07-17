@@ -361,13 +361,9 @@ when semantics are preserved and both paths are tested. The latter is forbidden.
 
 - Public Gen5 export tables: names/signatures and PS5 subsystem vocabulary only.
   No GPL implementation code is copied into this MIT repository.
-- RPCSX: CMake/platform organization, GPU subsystem decomposition, and AMD
-  graphics research patterns. GPL implementation code is not copied.
-- Ryubing/Ryujinx: renderer abstraction, capability modeling, resource lifetime,
-  and cross-vendor testing patterns. Console-specific behavior is not assumed to
-  match PS5.
-- EmuC0re: small subsystem boundaries and native PS5-facing API observations.
-  Its on-console execution architecture is not used as a desktop renderer model.
+- Public platform and graphics architecture literature may inform subsystem
+  boundaries, capability modeling, resource lifetime, and cross-vendor tests.
+  Console-specific behavior is never assumed to match PS5.
 
 Every implementation derived from external research documents the behavioral
 fact being implemented and its provenance. Code is written against Kyty's own

@@ -1,920 +1,811 @@
 #include "Kyty/Core/BringUp.h"
 
-#include "Kyty/Core/Common.h"
-#include "Kyty/Core/DbgAssert.h"
-#include "Kyty/Core/Subsystems.h"
-
+#include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cinttypes>
-#include <cstdio>
-#include <cstring>
+#include <cstddef>
 #include <cstdlib>
-#include <ctime>
+#include <cstring>
+#include <mutex>
+#include <string_view>
 
 namespace Kyty::Core::BringUp {
+
 namespace {
 
-constexpr uint32_t kMaxSites = 512;
-
-struct SiteSlot
+struct NamedFeature
 {
-	std::atomic<uint64_t> key {0};
-	const char*           file  = nullptr;
-	int                   line  = 0;
-	const char*           expr  = nullptr;
-	Subsystem             sub   = Subsystem::Other;
-	std::atomic<uint64_t> hits {0};
-	std::atomic<uint64_t> continues {0};
-	// Burst window: start of current window (ms) and hits within it.
-	std::atomic<uint64_t> window_start_ms {0};
-	std::atomic<uint64_t> window_hits {0};
+	const char* name;
+	Feature     value;
 };
 
-struct State
-{
-	std::atomic<bool> initialized {false};
-	Config            config {};
-	SiteSlot          sites[kMaxSites];
-	std::atomic<uint64_t> unique_sites {0};
-	std::atomic<uint64_t> total_continuations {0};
-	std::atomic<uint64_t> missing_import_assigns {0};
-	std::atomic<uint64_t> missing_import_calls {0};
-	std::atomic<uint32_t> missing_import_slots {0};
-	std::atomic<uint32_t> prx_preload_discovered {0};
-	std::atomic<uint32_t> prx_preload_loaded {0};
-
-	// Last circuit-break (written under spin, read for snapshot).
-	std::atomic_flag    cb_lock = ATOMIC_FLAG_INIT;
-	CircuitBreakSnapshot last_cb {};
-
-	// Spinlock for site insertion (string pointer publish).
-	std::atomic_flag insert_lock = ATOMIC_FLAG_INIT;
+constexpr NamedFeature kFeatures[] = {
+    {"not_implemented", Feature::NotImplemented},
+    {"missing_function_import", Feature::MissingFunctionImport},
+    {"gfx_permissive", Feature::GraphicsPermissive},
+    {"adjacent_module_discovery", Feature::AdjacentModuleDiscovery},
 };
 
-State g_state {};
-
-void SpinLock(std::atomic_flag& f)
+struct NamedSubsystem
 {
-	while (f.test_and_set(std::memory_order_acquire))
+	const char* name;
+	Subsystem   value;
+};
+
+constexpr NamedSubsystem kSubsystems[] = {
+    {"core", Subsystem::Core},
+    {"loader", Subsystem::Loader},
+    {"kernel", Subsystem::Kernel},
+    {"graphics", Subsystem::Graphics},
+    {"audio", Subsystem::Audio},
+    {"network", Subsystem::Network},
+    {"hle", Subsystem::Hle},
+    {"other", Subsystem::Other},
+};
+
+constexpr uint32_t kSiteCapacity = 4096;
+
+constexpr uint32_t kFeatureBitNotImplemented          = 1u << static_cast<uint32_t>(Feature::NotImplemented);
+constexpr uint32_t kFeatureBitMissingFunctionImport   = 1u << static_cast<uint32_t>(Feature::MissingFunctionImport);
+constexpr uint32_t kFeatureBitGraphicsPermissive      = 1u << static_cast<uint32_t>(Feature::GraphicsPermissive);
+constexpr uint32_t kFeatureBitAdjacentModuleDiscovery = 1u << static_cast<uint32_t>(Feature::AdjacentModuleDiscovery);
+// Suppress unused warning for the explicit bit constant (mask built via ParseTokenList / tests).
+static_assert(kFeatureBitAdjacentModuleDiscovery != 0);
+
+constexpr uint32_t kSubsystemBitCore     = 1u << static_cast<uint32_t>(Subsystem::Core);
+constexpr uint32_t kSubsystemBitLoader   = 1u << static_cast<uint32_t>(Subsystem::Loader);
+constexpr uint32_t kSubsystemBitKernel   = 1u << static_cast<uint32_t>(Subsystem::Kernel);
+constexpr uint32_t kSubsystemBitGraphics = 1u << static_cast<uint32_t>(Subsystem::Graphics);
+constexpr uint32_t kSubsystemBitAudio    = 1u << static_cast<uint32_t>(Subsystem::Audio);
+constexpr uint32_t kSubsystemBitNetwork  = 1u << static_cast<uint32_t>(Subsystem::Network);
+constexpr uint32_t kSubsystemBitHle      = 1u << static_cast<uint32_t>(Subsystem::Hle);
+constexpr uint32_t kSubsystemBitOther    = 1u << static_cast<uint32_t>(Subsystem::Other);
+
+constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ULL;
+constexpr uint64_t kFnvPrime      = 1099511628211ULL;
+
+constexpr Config kDefaultUnsafeConfig = {
+	Mode::Unsafe,
+	kFeatureBitNotImplemented | kFeatureBitMissingFunctionImport | kFeatureBitGraphicsPermissive,
+	kSubsystemBitCore | kSubsystemBitLoader | kSubsystemBitKernel | kSubsystemBitGraphics | kSubsystemBitAudio |
+	    kSubsystemBitNetwork | kSubsystemBitHle | kSubsystemBitOther,
+	10000,
+	1000,
+	true,
+};
+
+constexpr Config kDefaultStrictConfig {
+	Mode::Strict,
+	0,
+	0,
+	10000,
+	1000,
+	false,
+};
+
+struct SiteEntry
+{
+	uint64_t key             = 0;
+	uint64_t total_hits      = 0;
+	uint64_t window_start_ms = 0;
+	uint32_t window_hits     = 0;
+	bool     first_logged    = false;
+};
+
+std::once_flag         g_init_once;
+bool                   g_init_ok = false;
+Config                 g_config {};
+ConfigError            g_init_error {};
+std::mutex             g_sites_mutex;
+
+std::atomic<uint64_t> g_unique_sites {0};
+std::atomic<uint64_t> g_total_continuations {0};
+std::atomic<uint64_t> g_total_halts {0};
+std::atomic<uint64_t> g_breaker_trips {0};
+std::atomic<uint64_t> g_table_overflows {0};
+std::atomic<uint64_t> g_config_rejections {0};
+std::atomic<uint64_t> g_last_breaker_key {0};
+std::atomic<uint32_t> g_last_breaker_feature {static_cast<uint32_t>(Feature::NotImplemented)};
+std::atomic<uint32_t> g_last_breaker_subsystem {static_cast<uint32_t>(Subsystem::Other)};
+std::atomic_bool      g_breaker_detail_logged {false};
+
+std::atomic<uint64_t> g_continues_by_feature[kFeatureCount] {};
+std::atomic<uint64_t> g_halts_by_feature[kFeatureCount] {};
+std::atomic<uint64_t> g_continues_by_subsystem[kSubsystemCount] {};
+std::atomic<uint64_t> g_halts_by_subsystem[kSubsystemCount] {};
+
+// Optional agent observer; never changes the decision.
+std::atomic<DecisionHook> g_decision_hook {nullptr};
+
+SiteEntry g_sites[kSiteCapacity];
+
+void InvokeDecisionHook(Feature feature, Subsystem subsystem, Decision decision, const char* identity,
+                        bool breaker) noexcept
+{
+	const DecisionHook hook = g_decision_hook.load(std::memory_order_acquire);
+	if (hook != nullptr)
 	{
-		// busy
+		hook(feature, subsystem, decision, identity, breaker);
 	}
 }
 
-void SpinUnlock(std::atomic_flag& f)
+uint64_t SteadyMs()
 {
-	f.clear(std::memory_order_release);
+	using clock = std::chrono::steady_clock;
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count());
 }
 
-[[noreturn]] void FailConfig(const char* msg)
+// Preserve empty strings: a set-but-empty variable is invalid config, not "unset".
+// (Coercing "" → nullptr would silently rewrite invalid config into strict defaults.)
+const char* EnvRaw(const char* name)
 {
-	std::fprintf(stderr, "KYTY_BRINGUP: invalid configuration: %s\n", msg);
-	std::fflush(stderr);
-	std::_Exit(2);
+	return std::getenv(name);
 }
 
-uint64_t NowMs()
+bool EnvIsEmpty(const char* value) noexcept
 {
-#if defined(CLOCK_MONOTONIC)
-	struct timespec ts {};
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+	return value != nullptr && value[0] == '\0';
+}
+
+void CopyText(char* out, std::size_t out_size, const char* message)
+{
+	if (out == nullptr || out_size == 0)
 	{
-		return static_cast<uint64_t>(ts.tv_sec) * 1000ull + static_cast<uint64_t>(ts.tv_nsec) / 1000000ull;
+		return;
 	}
-#endif
-	// Fallback: coarse wall clock.
-	return static_cast<uint64_t>(std::time(nullptr)) * 1000ull;
+	if (message == nullptr)
+	{
+		out[0] = '\0';
+		return;
+	}
+	std::size_t idx = 0;
+	for (; idx + 1 < out_size && message[idx] != '\0'; ++idx)
+	{
+		out[idx] = message[idx];
+	}
+	out[idx] = '\0';
 }
 
-// FNV-1a 64-bit over file pointer identity, line, and expression text.
-uint64_t HashSite(const char* expr, const char* file, int line)
+void SetInitError(const char* message)
 {
-	uint64_t h = 14695981039346656037ull;
-	auto mix = [&](uint64_t v) {
-		h ^= v;
-		h *= 1099511628211ull;
-	};
-	mix(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(file)));
-	mix(static_cast<uint64_t>(static_cast<uint32_t>(line)));
-	if (expr != nullptr)
+	CopyText(g_init_error.message, sizeof(g_init_error.message), message);
+}
+
+uint64_t HashAppend(uint64_t h, uint32_t value)
+{
+	h ^= static_cast<uint64_t>(value);
+	h *= kFnvPrime;
+	return h;
+}
+
+uint64_t HashAppend(uint64_t h, const char* value)
+{
+	if (value == nullptr)
 	{
-		for (const char* p = expr; *p != '\0'; ++p)
-		{
-			h ^= static_cast<uint64_t>(static_cast<unsigned char>(*p));
-			h *= 1099511628211ull;
-		}
+		return h;
 	}
-	if (h == 0)
+	for (const char* p = value; *p != '\0'; ++p)
 	{
-		h = 1; // zero is empty-slot sentinel
+		h ^= static_cast<uint8_t>(*p);
+		h *= kFnvPrime;
 	}
 	return h;
 }
 
-bool EqualsInsensitive(const char* a, const char* b)
+uint64_t ComputeKey(Feature feature, Subsystem subsystem, const char* identity, const char* file, int line)
 {
-	if (a == nullptr || b == nullptr)
+	uint64_t h = kFnvOffsetBasis;
+	h           = HashAppend(h, static_cast<uint32_t>(feature));
+	h           = HashAppend(h, static_cast<uint32_t>(subsystem));
+	h           = HashAppend(h, identity);
+	h           = HashAppend(h, file);
+	h           = HashAppend(h, static_cast<uint32_t>(line));
+	return h;
+}
+
+bool HasWhitespace(const char* start, const char* end)
+{
+	for (const char* p = start; p < end; ++p)
 	{
-		return a == b;
+		if (std::isspace(static_cast<unsigned char>(*p)) != 0)
+		{
+			return true;
+		}
 	}
-	while (*a != '\0' && *b != '\0')
+	return false;
+}
+
+// Pure token-list rule: no logging, no globals.
+Domain::ValidationResult ParseTokenList(const char* value, uint32_t& out_mask, bool is_feature) noexcept
+{
+	const char* op = is_feature ? "parse_features" : "parse_subsystems";
+	if (value == nullptr || value[0] == '\0')
 	{
-		const auto ca = static_cast<unsigned char>(*a);
-		const auto cb = static_cast<unsigned char>(*b);
-		if (std::tolower(ca) != std::tolower(cb))
+		return Domain::Fail("malformed", "core", op, "list is empty");
+	}
+
+	uint32_t    mask = 0;
+	const char* p    = value;
+	const char* end  = p + std::strlen(value);
+	while (p < end)
+	{
+		const char* token_start = p;
+		while (p < end && *p != ',')
+		{
+			++p;
+		}
+		if (token_start == p)
+		{
+			return Domain::Fail("malformed", "core", op, "list contains empty element");
+		}
+		if (HasWhitespace(token_start, p))
+		{
+			return Domain::Fail("malformed", "core", op, "list contains whitespace");
+		}
+
+		bool     found = false;
+		uint32_t bit   = 0;
+		if (is_feature)
+		{
+			for (const auto& f: kFeatures)
+			{
+				const auto len = std::char_traits<char>::length(f.name);
+				if (static_cast<std::size_t>(p - token_start) == len && std::strncmp(f.name, token_start, len) == 0)
+				{
+					bit   = 1u << static_cast<uint32_t>(f.value);
+					found = true;
+					break;
+				}
+			}
+		} else
+		{
+			for (const auto& s: kSubsystems)
+			{
+				const auto len = std::char_traits<char>::length(s.name);
+				if (static_cast<std::size_t>(p - token_start) == len && std::strncmp(s.name, token_start, len) == 0)
+				{
+					bit   = 1u << static_cast<uint32_t>(s.value);
+					found = true;
+					break;
+				}
+			}
+		}
+		if (!found)
+		{
+			return Domain::Fail("unsupported", "core", op, "list contains unknown token");
+		}
+		if ((mask & bit) != 0)
+		{
+			return Domain::Fail("malformed", "core", op, "list contains duplicate entry");
+		}
+		mask |= bit;
+
+		if (p < end && *p == ',')
+		{
+			++p;
+			if (p == end)
+			{
+				return Domain::Fail("malformed", "core", op, "list contains empty element");
+			}
+		}
+	}
+
+	if (mask == 0)
+	{
+		return Domain::Fail("malformed", "core", op, "list is empty");
+	}
+	out_mask = mask;
+	return Domain::Ok();
+}
+
+bool ParsePositiveDecimal(const char* value, uint32_t* out) noexcept
+{
+	if (value == nullptr || out == nullptr || *value == '\0')
+	{
+		return false;
+	}
+	uint64_t accumulator = 0;
+	for (const char* p = value; *p != '\0'; ++p)
+	{
+		if (*p < '0' || *p > '9')
 		{
 			return false;
 		}
-		++a;
-		++b;
-	}
-	return *a == *b;
-}
-
-const char* Basename(const char* path)
-{
-	if (path == nullptr)
-	{
-		return "";
-	}
-	const char* base = path;
-	for (const char* p = path; *p != '\0'; ++p)
-	{
-		if (*p == '/' || *p == '\\')
+		accumulator = accumulator * 10ull + static_cast<uint64_t>(*p - '0');
+		if (accumulator == 0 || accumulator > UINT32_MAX)
 		{
-			base = p + 1;
+			return false;
 		}
 	}
-	return base;
+	*out = static_cast<uint32_t>(accumulator);
+	return true;
 }
 
-bool PathContains(const char* path, const char* needle)
+Domain::ValidationResult RuleRejectLegacy(const EnvView& env) noexcept
 {
-	if (path == nullptr || needle == nullptr || *needle == '\0')
+	// Present at all (including empty) is a configuration error — never a live control.
+	if (env.stub_missing != nullptr || env.gfx_permissive != nullptr)
 	{
-		return false;
+		return Domain::Fail("unsupported", "core", "validate_config",
+		                    "legacy KYTY_STUB_MISSING/KYTY_GFX_PERMISSIVE removed", "use KYTY_BRINGUP_MODE");
 	}
-	// Case-sensitive substring (source tree is ASCII).
-	return std::strstr(path, needle) != nullptr;
+	return Domain::Ok();
 }
 
-bool ParseCsvToken(const char*& cursor, char* out, size_t out_cap)
+Domain::ValidationResult RuleRejectEmptyVars(const EnvView& env) noexcept
 {
-	while (*cursor == ' ' || *cursor == '\t')
+	// Set-but-empty is malformed (fail closed). Do not treat as absent.
+	struct Field
 	{
-		++cursor;
-	}
-	if (*cursor == '\0')
-	{
-		return false;
-	}
-	size_t n = 0;
-	while (*cursor != '\0' && *cursor != ',')
-	{
-		if (n + 1 < out_cap)
-		{
-			out[n++] = *cursor;
-		}
-		++cursor;
-	}
-	out[n] = '\0';
-	// trim trailing space
-	while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t'))
-	{
-		out[--n] = '\0';
-	}
-	if (*cursor == ',')
-	{
-		++cursor;
-	}
-	return n > 0;
-}
-
-Feature ParseFeatures(const char* text, bool* ok)
-{
-	*ok = true;
-	if (text == nullptr || text[0] == '\0')
-	{
-		*ok = false;
-		return Feature::None;
-	}
-	Feature f = Feature::None;
-	const char* c = text;
-	char tok[64];
-	bool any = false;
-	while (ParseCsvToken(c, tok, sizeof(tok)))
-	{
-		any = true;
-		if (EqualsInsensitive(tok, "not_implemented"))
-		{
-			f = f | Feature::NotImplemented;
-		} else if (EqualsInsensitive(tok, "missing_function_import"))
-		{
-			f = f | Feature::MissingFunctionImport;
-		} else if (EqualsInsensitive(tok, "gfx_permissive"))
-		{
-			f = f | Feature::GfxPermissive;
-		} else if (EqualsInsensitive(tok, "prx_preload"))
-		{
-			f = f | Feature::PrxPreload;
-		} else
-		{
-			*ok = false;
-			return Feature::None;
-		}
-	}
-	if (!any)
-	{
-		*ok = false;
-		return Feature::None;
-	}
-	return f;
-}
-
-Subsystem ParseSubsystems(const char* text, bool* ok)
-{
-	*ok = true;
-	if (text == nullptr || text[0] == '\0')
-	{
-		*ok = false;
-		return Subsystem::None;
-	}
-	Subsystem s = Subsystem::None;
-	const char* c = text;
-	char tok[64];
-	bool any = false;
-	while (ParseCsvToken(c, tok, sizeof(tok)))
-	{
-		any = true;
-		if (EqualsInsensitive(tok, "core"))
-		{
-			s = s | Subsystem::Core;
-		} else if (EqualsInsensitive(tok, "loader"))
-		{
-			s = s | Subsystem::Loader;
-		} else if (EqualsInsensitive(tok, "kernel"))
-		{
-			s = s | Subsystem::Kernel;
-		} else if (EqualsInsensitive(tok, "graphics"))
-		{
-			s = s | Subsystem::Graphics;
-		} else if (EqualsInsensitive(tok, "audio"))
-		{
-			s = s | Subsystem::Audio;
-		} else if (EqualsInsensitive(tok, "network"))
-		{
-			s = s | Subsystem::Network;
-		} else if (EqualsInsensitive(tok, "hle"))
-		{
-			s = s | Subsystem::Hle;
-		} else if (EqualsInsensitive(tok, "other"))
-		{
-			s = s | Subsystem::Other;
-		} else
-		{
-			*ok = false;
-			return Subsystem::None;
-		}
-	}
-	if (!any)
-	{
-		*ok = false;
-		return Subsystem::None;
-	}
-	return s;
-}
-
-uint32_t ParsePositiveU32(const char* text, bool* ok)
-{
-	*ok = false;
-	if (text == nullptr || text[0] == '\0')
-	{
-		return 0;
-	}
-	char* end = nullptr;
-	const unsigned long v = std::strtoul(text, &end, 10);
-	if (end == text || (end != nullptr && *end != '\0') || v == 0 || v > 0xfffffffful)
-	{
-		return 0;
-	}
-	*ok = true;
-	return static_cast<uint32_t>(v);
-}
-
-void EnsureInitLazy()
-{
-	if (!g_state.initialized.load(std::memory_order_acquire))
-	{
-		InitFromEnvironment();
-	}
-}
-
-SiteSlot* FindOrInsertSite(const char* expr, const char* file, int line, Subsystem sub)
-{
-	const uint64_t key = HashSite(expr, file, line);
-	const uint32_t start = static_cast<uint32_t>(key % kMaxSites);
-
-	// Fast path: find existing without lock.
-	for (uint32_t n = 0; n < kMaxSites; ++n)
-	{
-		SiteSlot& s = g_state.sites[(start + n) % kMaxSites];
-		const uint64_t k = s.key.load(std::memory_order_acquire);
-		if (k == 0)
-		{
-			break;
-		}
-		if (k == key && s.line == line && s.file == file &&
-		    (s.expr == expr || (s.expr != nullptr && expr != nullptr && std::strcmp(s.expr, expr) == 0)))
-		{
-			return &s;
-		}
-	}
-
-	// Insert path.
-	SpinLock(g_state.insert_lock);
-	SiteSlot* found = nullptr;
-	for (uint32_t n = 0; n < kMaxSites; ++n)
-	{
-		SiteSlot& s = g_state.sites[(start + n) % kMaxSites];
-		const uint64_t k = s.key.load(std::memory_order_relaxed);
-		if (k == key && s.line == line && s.file == file &&
-		    (s.expr == expr || (s.expr != nullptr && expr != nullptr && std::strcmp(s.expr, expr) == 0)))
-		{
-			found = &s;
-			break;
-		}
-		if (k == 0)
-		{
-			s.file = file;
-			s.line = line;
-			s.expr = expr;
-			s.sub  = sub;
-			s.key.store(key, std::memory_order_release);
-			g_state.unique_sites.fetch_add(1, std::memory_order_relaxed);
-			found = &s;
-			break;
-		}
-	}
-	SpinUnlock(g_state.insert_lock);
-
-	// Table full: treat as abort by returning null; caller aborts.
-	return found;
-}
-
-void RecordCircuitBreak(SiteSlot* site, uint64_t hits)
-{
-	SpinLock(g_state.cb_lock);
-	g_state.last_cb.active    = true;
-	g_state.last_cb.file      = site->file;
-	g_state.last_cb.line      = site->line;
-	g_state.last_cb.expr      = site->expr;
-	g_state.last_cb.hits      = hits;
-	g_state.last_cb.window_ms = g_state.config.burst_window_ms;
-	g_state.last_cb.limit     = g_state.config.burst_limit;
-	SpinUnlock(g_state.cb_lock);
-
-	std::fprintf(stderr,
-	             "KYTY_BRINGUP: circuit-break site=%s:%d expr=(%s) hits=%" PRIu64 " limit=%" PRIu32 " window_ms=%" PRIu32 "\n",
-	             site->file != nullptr ? site->file : "?", site->line, site->expr != nullptr ? site->expr : "?", hits,
-	             g_state.config.burst_limit, g_state.config.burst_window_ms);
-
-	// Accumulated summary of unique sites.
-	const uint64_t n = g_state.unique_sites.load(std::memory_order_relaxed);
-	std::fprintf(stderr, "KYTY_BRINGUP: summary unique_sites=%" PRIu64 " total_continuations=%" PRIu64 "\n", n,
-	             g_state.total_continuations.load(std::memory_order_relaxed));
-	std::fflush(stderr);
-}
-
-const char* ModeName(Mode m)
-{
-	return m == Mode::Unsafe ? "unsafe" : "strict";
-}
-
-void FeatureNames(Feature f, char* buf, size_t cap)
-{
-	buf[0] = '\0';
-	auto append = [&](const char* name) {
-		const size_t len = std::strlen(buf);
-		if (len + std::strlen(name) + 2 >= cap)
-		{
-			return;
-		}
-		if (len > 0)
-		{
-			std::strcat(buf, ",");
-		}
-		std::strcat(buf, name);
+		const char* value;
+		const char* name;
 	};
-	if (Any(f & Feature::NotImplemented))
+	const Field fields[] = {
+	    {env.mode, "KYTY_BRINGUP_MODE"},
+	    {env.features, "KYTY_BRINGUP_FEATURES"},
+	    {env.subsystems, "KYTY_BRINGUP_SUBSYSTEMS"},
+	    {env.burst_limit, "KYTY_BRINGUP_BURST_LIMIT"},
+	    {env.burst_window_ms, "KYTY_BRINGUP_BURST_WINDOW_MS"},
+	};
+	for (const auto& f: fields)
 	{
-		append("not_implemented");
+		if (EnvIsEmpty(f.value))
+		{
+			return Domain::Fail("malformed", "core", "validate_config", "bring-up variable must not be empty",
+			                    f.name);
+		}
 	}
-	if (Any(f & Feature::MissingFunctionImport))
+	return Domain::Ok();
+}
+
+Domain::ValidationResult RuleModeAndPolicy(const EnvView& env, Config& config) noexcept
+{
+	const char* mode = env.mode;
+	// Unset (nullptr) only — empty already rejected by RuleRejectEmptyVars.
+	if (mode == nullptr || std::strcmp(mode, "strict") == 0)
 	{
-		append("missing_function_import");
+		config = kDefaultStrictConfig;
+		if (env.features != nullptr || env.subsystems != nullptr || env.burst_limit != nullptr ||
+		    env.burst_window_ms != nullptr)
+		{
+			return Domain::Fail("policy_denied", "core", "validate_config",
+			                    "KYTY_BRINGUP_* variables are only valid in unsafe mode");
+		}
+		return Domain::Ok();
 	}
-	if (Any(f & Feature::GfxPermissive))
+	if (std::strcmp(mode, "unsafe") != 0)
 	{
-		append("gfx_permissive");
+		return Domain::Fail("malformed", "core", "validate_config", "KYTY_BRINGUP_MODE must be strict or unsafe",
+		                    mode);
 	}
-	if (Any(f & Feature::PrxPreload))
+	config                       = kDefaultUnsafeConfig;
+	config.mode                  = Mode::Unsafe;
+	config.explicitly_configured = false;
+	return Domain::Ok();
+}
+
+Domain::ValidationResult RuleLimitsAndLists(const EnvView& env, Config& config) noexcept
+{
+	if (config.mode != Mode::Unsafe)
 	{
-		append("prx_preload");
+		return Domain::Ok();
+	}
+	if (env.burst_window_ms != nullptr)
+	{
+		uint32_t value = 0;
+		if (!ParsePositiveDecimal(env.burst_window_ms, &value))
+		{
+			return Domain::Fail("malformed", "core", "validate_config",
+			                    "KYTY_BRINGUP_BURST_WINDOW_MS must be a positive decimal integer");
+		}
+		config.burst_window_ms = value;
+	}
+	if (env.burst_limit != nullptr)
+	{
+		uint32_t value = 0;
+		if (!ParsePositiveDecimal(env.burst_limit, &value))
+		{
+			return Domain::Fail("malformed", "core", "validate_config",
+			                    "KYTY_BRINGUP_BURST_LIMIT must be a positive decimal integer");
+		}
+		config.burst_limit = value;
+	}
+	if (env.features != nullptr)
+	{
+		uint32_t mask = 0;
+		const auto r  = ParseTokenList(env.features, mask, true);
+		if (!r.Ok())
+		{
+			return r;
+		}
+		config.feature_mask = mask;
+	}
+	if (env.subsystems != nullptr)
+	{
+		uint32_t mask = 0;
+		const auto r  = ParseTokenList(env.subsystems, mask, false);
+		if (!r.Ok())
+		{
+			return r;
+		}
+		config.subsystem_mask = mask;
+	}
+	config.explicitly_configured =
+	    (env.features != nullptr || env.subsystems != nullptr || env.burst_limit != nullptr ||
+	     env.burst_window_ms != nullptr);
+	return Domain::Ok();
+}
+
+void InitializeState()
+{
+	g_unique_sites.store(0, std::memory_order_relaxed);
+	g_total_continuations.store(0, std::memory_order_relaxed);
+	g_total_halts.store(0, std::memory_order_relaxed);
+	g_breaker_trips.store(0, std::memory_order_relaxed);
+	g_table_overflows.store(0, std::memory_order_relaxed);
+	// config_rejections is process-lifetime (not cleared on successful init).
+	g_last_breaker_key.store(0, std::memory_order_relaxed);
+	g_last_breaker_feature.store(static_cast<uint32_t>(Feature::NotImplemented), std::memory_order_relaxed);
+	g_last_breaker_subsystem.store(static_cast<uint32_t>(Subsystem::Other), std::memory_order_relaxed);
+	g_breaker_detail_logged.store(false, std::memory_order_relaxed);
+	for (uint32_t i = 0; i < kFeatureCount; ++i)
+	{
+		g_continues_by_feature[i].store(0, std::memory_order_relaxed);
+		g_halts_by_feature[i].store(0, std::memory_order_relaxed);
+	}
+	for (uint32_t i = 0; i < kSubsystemCount; ++i)
+	{
+		g_continues_by_subsystem[i].store(0, std::memory_order_relaxed);
+		g_halts_by_subsystem[i].store(0, std::memory_order_relaxed);
+	}
+	for (uint32_t i = 0; i < kSiteCapacity; ++i)
+	{
+		g_sites[i] = {};
 	}
 }
 
-void SubsystemNames(Subsystem s, char* buf, size_t cap)
+void NoteContinue(Feature feature, Subsystem subsystem) noexcept
 {
-	buf[0] = '\0';
-	auto append = [&](const char* name) {
-		const size_t len = std::strlen(buf);
-		if (len + std::strlen(name) + 2 >= cap)
-		{
-			return;
-		}
-		if (len > 0)
-		{
-			std::strcat(buf, ",");
-		}
-		std::strcat(buf, name);
-	};
-	if (Any(s & Subsystem::Core))
+	const auto fi = static_cast<uint32_t>(feature);
+	const auto si = static_cast<uint32_t>(subsystem);
+	g_total_continuations.fetch_add(1, std::memory_order_relaxed);
+	if (fi < kFeatureCount)
 	{
-		append("core");
+		g_continues_by_feature[fi].fetch_add(1, std::memory_order_relaxed);
 	}
-	if (Any(s & Subsystem::Loader))
+	if (si < kSubsystemCount)
 	{
-		append("loader");
+		g_continues_by_subsystem[si].fetch_add(1, std::memory_order_relaxed);
 	}
-	if (Any(s & Subsystem::Kernel))
+}
+
+void NoteHalt(Feature feature, Subsystem subsystem) noexcept
+{
+	const auto fi = static_cast<uint32_t>(feature);
+	const auto si = static_cast<uint32_t>(subsystem);
+	g_total_halts.fetch_add(1, std::memory_order_relaxed);
+	if (fi < kFeatureCount)
 	{
-		append("kernel");
+		g_halts_by_feature[fi].fetch_add(1, std::memory_order_relaxed);
 	}
-	if (Any(s & Subsystem::Graphics))
+	if (si < kSubsystemCount)
 	{
-		append("graphics");
+		g_halts_by_subsystem[si].fetch_add(1, std::memory_order_relaxed);
 	}
-	if (Any(s & Subsystem::Audio))
-	{
-		append("audio");
-	}
-	if (Any(s & Subsystem::Network))
-	{
-		append("network");
-	}
-	if (Any(s & Subsystem::Hle))
-	{
-		append("hle");
-	}
-	if (Any(s & Subsystem::Other))
-	{
-		append("other");
-	}
+}
+
+EnvView EnvViewFromProcess() noexcept
+{
+	// Raw getenv: empty string stays empty (invalid), nullptr means unset.
+	EnvView v {};
+	v.mode            = EnvRaw("KYTY_BRINGUP_MODE");
+	v.features        = EnvRaw("KYTY_BRINGUP_FEATURES");
+	v.subsystems      = EnvRaw("KYTY_BRINGUP_SUBSYSTEMS");
+	v.burst_limit     = EnvRaw("KYTY_BRINGUP_BURST_LIMIT");
+	v.burst_window_ms = EnvRaw("KYTY_BRINGUP_BURST_WINDOW_MS");
+	v.stub_missing    = EnvRaw("KYTY_STUB_MISSING");
+	v.gfx_permissive  = EnvRaw("KYTY_GFX_PERMISSIVE");
+	return v;
 }
 
 } // namespace
 
-void RejectLegacyEnvironment()
+ConfigValidation ValidateConfig(const EnvView& env) noexcept
 {
-	if (std::getenv("KYTY_STUB_MISSING") != nullptr)
-	{
-		FailConfig("KYTY_STUB_MISSING is removed; use KYTY_BRINGUP_MODE=unsafe "
-		           "and feature missing_function_import");
-	}
-	if (std::getenv("KYTY_GFX_PERMISSIVE") != nullptr)
-	{
-		FailConfig("KYTY_GFX_PERMISSIVE is removed; use KYTY_BRINGUP_MODE=unsafe "
-		           "and feature gfx_permissive");
-	}
+	ConfigValidation out {};
+	out.config = kDefaultStrictConfig;
+	// Short sequence of named pure rules — no nested trees, no side effects.
+	out.result = Domain::RunRules([&] { return RuleRejectLegacy(env); },
+	                              [&] { return RuleRejectEmptyVars(env); },
+	                              [&] { return RuleModeAndPolicy(env, out.config); },
+	                              [&] { return RuleLimitsAndLists(env, out.config); });
+	return out;
 }
 
-void InitFromEnvironment()
+namespace {
+
+bool IsFeatureEnabled(const Config& config, Feature feature)
 {
-	// Single-flight init.
-	static std::atomic_flag once = ATOMIC_FLAG_INIT;
-	if (g_state.initialized.load(std::memory_order_acquire))
-	{
-		return;
-	}
-	// Spin until we own init or someone else finished.
-	while (once.test_and_set(std::memory_order_acq_rel))
-	{
-		if (g_state.initialized.load(std::memory_order_acquire))
+	const uint32_t bit = 1u << static_cast<uint32_t>(feature);
+	return (config.feature_mask & bit) != 0;
+}
+
+bool IsSubsystemEnabled(const Config& config, Subsystem subsystem)
+{
+	const uint32_t bit = 1u << static_cast<uint32_t>(subsystem);
+	return (config.subsystem_mask & bit) != 0;
+}
+
+} // namespace
+
+bool InitializeFromEnvironment(ConfigError* error) noexcept
+{
+	// Mutation only after pure ValidateConfig succeeds.
+	std::call_once(g_init_once, [] {
+		const ConfigValidation validated = ValidateConfig(EnvViewFromProcess());
+		if (!validated.result.Ok())
 		{
+			g_init_ok = false;
+			g_config_rejections.fetch_add(1, std::memory_order_relaxed);
+			// Prefer stable reason for ConfigError message bag.
+			SetInitError(validated.result.error.reason[0] != '\0' ? validated.result.error.reason
+			                                                      : validated.result.error.code);
 			return;
 		}
-	}
-	if (g_state.initialized.load(std::memory_order_acquire))
+		g_config  = validated.config;
+		g_init_ok = true;
+		InitializeState();
+	});
+	if (error != nullptr)
 	{
-		once.clear(std::memory_order_release);
-		return;
+		CopyText(error->message, sizeof(error->message), g_init_error.message);
 	}
-
-	RejectLegacyEnvironment();
-
-	Config cfg {};
-	cfg.mode            = Mode::Strict;
-	cfg.features        = Feature::None;
-	cfg.subsystems      = Subsystem::All;
-	cfg.burst_limit     = 10000;
-	cfg.burst_window_ms = 1000;
-
-	const char* mode = std::getenv("KYTY_BRINGUP_MODE");
-	if (mode != nullptr)
-	{
-		if (EqualsInsensitive(mode, "unsafe"))
-		{
-			cfg.mode = Mode::Unsafe;
-		} else if (EqualsInsensitive(mode, "strict"))
-		{
-			cfg.mode = Mode::Strict;
-		} else if (mode[0] == '\0')
-		{
-			FailConfig("KYTY_BRINGUP_MODE is empty");
-		} else
-		{
-			FailConfig("KYTY_BRINGUP_MODE must be 'strict' or 'unsafe'");
-		}
-	}
-
-	const char* features = std::getenv("KYTY_BRINGUP_FEATURES");
-	if (features != nullptr)
-	{
-		bool ok = false;
-		cfg.features = ParseFeatures(features, &ok);
-		if (!ok)
-		{
-			FailConfig("KYTY_BRINGUP_FEATURES invalid or empty");
-		}
-	} else if (cfg.mode == Mode::Unsafe)
-	{
-		// Absent features in unsafe mode: continue/stubs/gfx only.
-		// prx_preload remains explicit (KYTY_BRINGUP_FEATURES=...,prx_preload).
-		cfg.features = Feature::DefaultUnsafe;
-	}
-
-	const char* subsystems = std::getenv("KYTY_BRINGUP_SUBSYSTEMS");
-	if (subsystems != nullptr)
-	{
-		bool ok = false;
-		cfg.subsystems = ParseSubsystems(subsystems, &ok);
-		if (!ok)
-		{
-			FailConfig("KYTY_BRINGUP_SUBSYSTEMS invalid or empty");
-		}
-	}
-
-	const char* burst = std::getenv("KYTY_BRINGUP_BURST_LIMIT");
-	if (burst != nullptr)
-	{
-		bool ok = false;
-		cfg.burst_limit = ParsePositiveU32(burst, &ok);
-		if (!ok)
-		{
-			FailConfig("KYTY_BRINGUP_BURST_LIMIT must be a positive integer");
-		}
-	}
-
-	const char* window = std::getenv("KYTY_BRINGUP_BURST_WINDOW_MS");
-	if (window != nullptr)
-	{
-		bool ok = false;
-		cfg.burst_window_ms = ParsePositiveU32(window, &ok);
-		if (!ok)
-		{
-			FailConfig("KYTY_BRINGUP_BURST_WINDOW_MS must be a positive integer");
-		}
-	}
-
-	// Contradictions: unsafe with zero features is useless and rejected.
-	if (cfg.mode == Mode::Unsafe && !Any(cfg.features))
-	{
-		FailConfig("unsafe mode requires at least one feature");
-	}
-	// Strict mode must not carry diagnostic features (contradictory).
-	if (cfg.mode == Mode::Strict && Any(cfg.features))
-	{
-		// Only if features were explicitly set; absent features stay None in strict.
-		if (features != nullptr)
-		{
-			FailConfig("strict mode cannot enable bring-up features");
-		}
-	}
-
-	g_state.config = cfg;
-	g_state.initialized.store(true, std::memory_order_release);
-	once.clear(std::memory_order_release);
+	return g_init_ok;
 }
 
-void InitForTests(const Config& config)
+Config GetConfig() noexcept
 {
-	ResetForTests();
-	if (config.mode == Mode::Unsafe && !Any(config.features))
+	ConfigError error {};
+	if (!InitializeFromEnvironment(&error))
 	{
-		FailConfig("unsafe mode requires at least one feature");
+		// Never convert a failed parse into silent strict.
+		std::fprintf(stderr, "KYTY_BRINGUP: invalid configuration: %s\n", error.message);
+		std::fflush(stderr);
+		std::_Exit(125);
 	}
-	if (config.burst_limit == 0 || config.burst_window_ms == 0)
+	return g_config;
+}
+
+Diagnostics GetDiagnostics() noexcept
+{
+	Diagnostics out {};
+	ConfigError error {};
+	if (InitializeFromEnvironment(&error))
 	{
-		FailConfig("burst_limit and burst_window_ms must be positive");
+		out.config = g_config;
 	}
-	g_state.config = config;
-	g_state.initialized.store(true, std::memory_order_release);
-}
-
-void ResetForTests()
-{
-	// Wipe registry; leave flags re-initable.
-	for (uint32_t i = 0; i < kMaxSites; ++i)
+	out.unique_sites           = g_unique_sites.load(std::memory_order_relaxed);
+	out.total_continuations    = g_total_continuations.load(std::memory_order_relaxed);
+	out.total_halts            = g_total_halts.load(std::memory_order_relaxed);
+	out.breaker_trips          = g_breaker_trips.load(std::memory_order_relaxed);
+	out.table_overflows        = g_table_overflows.load(std::memory_order_relaxed);
+	out.config_rejections      = g_config_rejections.load(std::memory_order_relaxed);
+	out.last_breaker_key       = g_last_breaker_key.load(std::memory_order_relaxed);
+	out.last_breaker_feature   = static_cast<Feature>(g_last_breaker_feature.load(std::memory_order_relaxed));
+	out.last_breaker_subsystem = static_cast<Subsystem>(g_last_breaker_subsystem.load(std::memory_order_relaxed));
+	for (uint32_t i = 0; i < kFeatureCount; ++i)
 	{
-		g_state.sites[i].key.store(0, std::memory_order_relaxed);
-		g_state.sites[i].file  = nullptr;
-		g_state.sites[i].line  = 0;
-		g_state.sites[i].expr  = nullptr;
-		g_state.sites[i].sub   = Subsystem::Other;
-		g_state.sites[i].hits.store(0, std::memory_order_relaxed);
-		g_state.sites[i].continues.store(0, std::memory_order_relaxed);
-		g_state.sites[i].window_start_ms.store(0, std::memory_order_relaxed);
-		g_state.sites[i].window_hits.store(0, std::memory_order_relaxed);
+		out.continues_by_feature[i] = g_continues_by_feature[i].load(std::memory_order_relaxed);
+		out.halts_by_feature[i]     = g_halts_by_feature[i].load(std::memory_order_relaxed);
 	}
-	g_state.unique_sites.store(0, std::memory_order_relaxed);
-	g_state.total_continuations.store(0, std::memory_order_relaxed);
-	g_state.missing_import_assigns.store(0, std::memory_order_relaxed);
-	g_state.missing_import_calls.store(0, std::memory_order_relaxed);
-	g_state.missing_import_slots.store(0, std::memory_order_relaxed);
-	g_state.prx_preload_discovered.store(0, std::memory_order_relaxed);
-	g_state.prx_preload_loaded.store(0, std::memory_order_relaxed);
-	g_state.last_cb = {};
-	g_state.config  = {};
-	g_state.initialized.store(false, std::memory_order_release);
+	for (uint32_t i = 0; i < kSubsystemCount; ++i)
+	{
+		out.continues_by_subsystem[i] = g_continues_by_subsystem[i].load(std::memory_order_relaxed);
+		out.halts_by_subsystem[i]     = g_halts_by_subsystem[i].load(std::memory_order_relaxed);
+	}
+	return out;
 }
 
-bool IsInitialized()
+Subsystem ClassifySourceFile(const char* file) noexcept
 {
-	return g_state.initialized.load(std::memory_order_acquire);
-}
-
-Mode GetMode()
-{
-	EnsureInitLazy();
-	return g_state.config.mode;
-}
-
-Config GetConfig()
-{
-	EnsureInitLazy();
-	return g_state.config;
-}
-
-bool FeatureEnabled(Feature f)
-{
-	EnsureInitLazy();
-	return g_state.config.mode == Mode::Unsafe && Any(g_state.config.features & f);
-}
-
-bool SubsystemAllowed(Subsystem s)
-{
-	EnsureInitLazy();
-	return Any(g_state.config.subsystems & s);
-}
-
-Subsystem ClassifyFile(const char* file)
-{
-	if (file == nullptr)
+	if (file == nullptr || file[0] == '\0')
 	{
 		return Subsystem::Other;
 	}
-	// Prefer path segments over basename so lib/Core and emulator Graphics both match.
-	if (PathContains(file, "/Graphics/") || PathContains(file, "\\Graphics\\") || PathContains(file, "/Graphics\\") ||
-	    PathContains(file, "Graphics/Graphics") || PathContains(file, "GraphicsRun") || PathContains(file, "GraphicsRender") ||
-	    PathContains(file, "VideoOut") || PathContains(file, "Tile.cpp") || PathContains(file, "Shader"))
+
+	char normalized[2048] {};
+	const std::size_t len = std::min<std::size_t>(sizeof(normalized) - 1, std::strlen(file));
+	for (std::size_t i = 0; i < len; ++i)
 	{
-		return Subsystem::Graphics;
+		normalized[i] = (file[i] == '\\' ? '/' : file[i]);
 	}
-	if (PathContains(file, "/Loader/") || PathContains(file, "\\Loader\\") || PathContains(file, "RuntimeLinker") ||
-	    PathContains(file, "SymbolDatabase") || PathContains(file, "/Elf"))
+	normalized[len] = '\0';
+	const std::string_view path {normalized, len};
+
+	constexpr std::string_view kLoader {"/source/emulator/src/Loader/"};
+	constexpr std::string_view kKernel {"/source/emulator/src/Kernel/"};
+	constexpr std::string_view kGraphics {"/source/emulator/src/Graphics/"};
+	constexpr std::string_view kAudio {"/source/emulator/src/Audio.cpp"};
+	constexpr std::string_view kNetwork1 {"/source/emulator/src/Network.cpp"};
+	constexpr std::string_view kNetwork2 {"/source/emulator/src/Libs/Network"};
+	constexpr std::string_view kLibs {"/source/emulator/src/Libs/"};
+	constexpr std::string_view kCore1 {"/source/lib/Core/"};
+	constexpr std::string_view kCore2 {"/source/include/Kyty/Core/"};
+
+	if (path.find(kLoader) != std::string_view::npos)
 	{
 		return Subsystem::Loader;
 	}
-	if (PathContains(file, "/Kernel/") || PathContains(file, "\\Kernel\\") || PathContains(file, "Pthread") ||
-	    PathContains(file, "Memory.cpp") || PathContains(file, "Fiber.cpp") || PathContains(file, "Semaphore"))
+	if (path.find(kKernel) != std::string_view::npos)
 	{
 		return Subsystem::Kernel;
 	}
-	if (PathContains(file, "Audio") || PathContains(file, "/Audio."))
+	if (path.find(kGraphics) != std::string_view::npos)
+	{
+		return Subsystem::Graphics;
+	}
+	if (path.find(kAudio) != std::string_view::npos)
 	{
 		return Subsystem::Audio;
 	}
-	if (PathContains(file, "Network") || PathContains(file, "Http"))
+	if (path.find(kNetwork1) != std::string_view::npos || path.find(kNetwork2) != std::string_view::npos)
 	{
 		return Subsystem::Network;
 	}
-	if (PathContains(file, "/Libs/") || PathContains(file, "\\Libs\\") || PathContains(file, "LibC.cpp") ||
-	    PathContains(file, "LibKernel") || PathContains(file, "LibGraphics") || PathContains(file, "LibAmpr") ||
-	    PathContains(file, "HLE") || PathContains(file, "Hle"))
+	if (path.find(kLibs) != std::string_view::npos)
 	{
 		return Subsystem::Hle;
 	}
-	if (PathContains(file, "/Core/") || PathContains(file, "\\Core\\") || PathContains(file, "DbgAssert") ||
-	    PathContains(file, "BringUp") || PathContains(file, "Subsystems"))
-	{
-		return Subsystem::Core;
-	}
-	// Basename fallbacks for short test paths.
-	const char* base = Basename(file);
-	if (EqualsInsensitive(base, "BringUp.cpp") || EqualsInsensitive(base, "DbgAssert.cpp"))
+	if (path.find(kCore1) != std::string_view::npos || path.find(kCore2) != std::string_view::npos)
 	{
 		return Subsystem::Core;
 	}
 	return Subsystem::Other;
 }
 
-Decision HandleNotImplemented(const char* expr, const char* file, int line)
+bool IsEnabled(Feature feature, Subsystem subsystem) noexcept
 {
-	EnsureInitLazy();
-
-	const Subsystem sub = ClassifyFile(file);
-	const bool allow =
-	    g_state.config.mode == Mode::Unsafe && FeatureEnabled(Feature::NotImplemented) && SubsystemAllowed(sub);
-
-	if (!allow)
+	const Config config = GetConfig();
+	if (config.mode != Mode::Unsafe)
 	{
-		return Decision::Abort;
+		return false;
 	}
+	return IsFeatureEnabled(config, feature) && IsSubsystemEnabled(config, subsystem);
+}
 
-	SiteSlot* site = FindOrInsertSite(expr, file, line, sub);
-	if (site == nullptr)
+struct SiteHit
+{
+	bool     found       = false;
+	bool     first_log   = false;
+	uint32_t window_hits = 0;
+	uint64_t total_hits  = 0;
+};
+
+SiteHit RecordSiteHit(uint64_t key, uint64_t now, uint32_t burst_window_ms)
+{
+	std::lock_guard<std::mutex> lock(g_sites_mutex);
+	const uint32_t              start_slot = static_cast<uint32_t>(key & (kSiteCapacity - 1));
+	SiteEntry*                  slot       = nullptr;
+
+	for (uint32_t probe = 0; probe < kSiteCapacity; ++probe)
 	{
-		// Registry full — fail closed.
-		std::fprintf(stderr, "KYTY_BRINGUP: site registry full; aborting\n");
-		std::fflush(stderr);
-		return Decision::Abort;
-	}
-
-	site->hits.fetch_add(1, std::memory_order_relaxed);
-
-	// Burst window accounting.
-	const uint64_t now = NowMs();
-	uint64_t start     = site->window_start_ms.load(std::memory_order_relaxed);
-	if (start == 0)
-	{
-		uint64_t expected = 0;
-		if (site->window_start_ms.compare_exchange_strong(expected, now, std::memory_order_relaxed))
+		SiteEntry& candidate = g_sites[(start_slot + probe) & (kSiteCapacity - 1)];
+		if (candidate.key == key)
 		{
-			start = now;
-			site->window_hits.store(0, std::memory_order_relaxed);
-		} else
-		{
-			start = expected;
+			slot = &candidate;
+			break;
 		}
-	}
-
-	if (now - start > g_state.config.burst_window_ms)
-	{
-		// Reset window (best-effort; races only affect burst precision).
-		site->window_start_ms.store(now, std::memory_order_relaxed);
-		site->window_hits.store(1, std::memory_order_relaxed);
-	} else
-	{
-		const uint64_t wh = site->window_hits.fetch_add(1, std::memory_order_relaxed) + 1;
-		if (wh > g_state.config.burst_limit)
-		{
-			RecordCircuitBreak(site, wh);
-			return Decision::CircuitBreak;
-		}
-	}
-
-	const uint64_t prev = site->continues.fetch_add(1, std::memory_order_relaxed);
-	g_state.total_continuations.fetch_add(1, std::memory_order_relaxed);
-
-	if (prev == 0)
-	{
-		// First encounter: log once.
-		std::fprintf(stderr, "KYTY_BRINGUP: continue NotImplemented (%s) in %s:%d\n", expr != nullptr ? expr : "?",
-		             file != nullptr ? file : "?", line);
-		std::fflush(stderr);
-	}
-
-	return Decision::Continue;
-}
-
-bool AllowGfxPermissive()
-{
-	EnsureInitLazy();
-	return FeatureEnabled(Feature::GfxPermissive);
-}
-
-bool AllowMissingFunctionImport()
-{
-	EnsureInitLazy();
-	return FeatureEnabled(Feature::MissingFunctionImport);
-}
-
-bool AllowPrxPreload()
-{
-	EnsureInitLazy();
-	return FeatureEnabled(Feature::PrxPreload);
-}
-
-void NoteMissingImportAssigned()
-{
-	EnsureInitLazy();
-	g_state.missing_import_assigns.fetch_add(1, std::memory_order_relaxed);
-}
-
-void NoteMissingImportCalled()
-{
-	EnsureInitLazy();
-	g_state.missing_import_calls.fetch_add(1, std::memory_order_relaxed);
-}
-
-void NoteMissingImportSlots(uint32_t used_slots)
-{
-	EnsureInitLazy();
-	g_state.missing_import_slots.store(used_slots, std::memory_order_relaxed);
-}
-
-void NotePrxPreloadCandidates(uint32_t discovered, uint32_t loaded)
-{
-	EnsureInitLazy();
-	g_state.prx_preload_discovered.store(discovered, std::memory_order_relaxed);
-	g_state.prx_preload_loaded.store(loaded, std::memory_order_relaxed);
-}
-
-void GetSnapshot(Snapshot* out)
-{
-	if (out == nullptr)
-	{
-		return;
-	}
-	EnsureInitLazy();
-	out->config                   = g_state.config;
-	out->unique_sites             = g_state.unique_sites.load(std::memory_order_relaxed);
-	out->total_continuations      = g_state.total_continuations.load(std::memory_order_relaxed);
-	out->missing_import_assigns   = g_state.missing_import_assigns.load(std::memory_order_relaxed);
-	out->missing_import_calls     = g_state.missing_import_calls.load(std::memory_order_relaxed);
-	out->missing_import_slots     = g_state.missing_import_slots.load(std::memory_order_relaxed);
-	out->prx_preload_discovered   = g_state.prx_preload_discovered.load(std::memory_order_relaxed);
-	out->prx_preload_loaded       = g_state.prx_preload_loaded.load(std::memory_order_relaxed);
-	SpinLock(g_state.cb_lock);
-	out->last_circuit_break = g_state.last_cb;
-	SpinUnlock(g_state.cb_lock);
-
-	// Sites are exposed via a static snapshot table filled on demand for diagnostics.
-	static SiteSnapshot snap_sites[kMaxSites];
-	uint32_t            filled = 0;
-	for (uint32_t i = 0; i < kMaxSites && filled < kMaxSites; ++i)
-	{
-		if (g_state.sites[i].key.load(std::memory_order_relaxed) == 0)
+		if (candidate.key != 0)
 		{
 			continue;
 		}
-		snap_sites[filled].file           = g_state.sites[i].file;
-		snap_sites[filled].line           = g_state.sites[i].line;
-		snap_sites[filled].expr           = g_state.sites[i].expr;
-		snap_sites[filled].subsystem      = g_state.sites[i].sub;
-		snap_sites[filled].hit_count      = g_state.sites[i].hits.load(std::memory_order_relaxed);
-		snap_sites[filled].continue_count = g_state.sites[i].continues.load(std::memory_order_relaxed);
-		++filled;
+		candidate     = {};
+		candidate.key = key;
+		g_unique_sites.fetch_add(1, std::memory_order_relaxed);
+		slot = &candidate;
+		break;
 	}
-	out->sites          = snap_sites;
-	out->sites_capacity = filled;
+	if (slot == nullptr)
+	{
+		return {};
+	}
+
+	const bool new_window = slot->window_start_ms == 0 || now < slot->window_start_ms ||
+	                        (now - slot->window_start_ms) > burst_window_ms;
+	if (new_window)
+	{
+		slot->window_start_ms = now;
+		slot->window_hits     = 0;
+	}
+	++slot->window_hits;
+	++slot->total_hits;
+
+	SiteHit hit {};
+	hit.found         = true;
+	hit.first_log     = !slot->first_logged;
+	hit.window_hits   = slot->window_hits;
+	hit.total_hits    = slot->total_hits;
+	slot->first_logged = true;
+	return hit;
 }
 
-int WriteDiagnosticsJson(std::FILE* out)
+Decision Report(Feature feature, Subsystem subsystem, const char* identity, const char* file, int line) noexcept
 {
-	if (out == nullptr)
+	const Config config = GetConfig();
+	if (config.mode != Mode::Unsafe || !IsFeatureEnabled(config, feature) || !IsSubsystemEnabled(config, subsystem) ||
+	    identity == nullptr || file == nullptr || line <= 0)
 	{
-		return -1;
+		NoteHalt(feature, subsystem);
+		InvokeDecisionHook(feature, subsystem, Decision::Halt, identity, false);
+		return Decision::Halt;
 	}
-	Snapshot snap {};
-	GetSnapshot(&snap);
 
-	char feat[128];
-	char subs[128];
-	FeatureNames(snap.config.features, feat, sizeof(feat));
-	SubsystemNames(snap.config.subsystems, subs, sizeof(subs));
+	const uint64_t key = ComputeKey(feature, subsystem, identity, file, line);
+	if (key == 0)
+	{
+		NoteHalt(feature, subsystem);
+		InvokeDecisionHook(feature, subsystem, Decision::Halt, identity, false);
+		return Decision::Halt;
+	}
 
-	const int n = std::fprintf(
-	    out,
-	    "{\"protocolVersion\":%d,\"bringup\":{\"mode\":\"%s\",\"features\":\"%s\",\"subsystems\":\"%s\","
-	    "\"burst_limit\":%" PRIu32 ",\"burst_window_ms\":%" PRIu32 ",\"unique_sites\":%" PRIu64
-	    ",\"continuations\":%" PRIu64 ",\"missing_imports_assigned\":%" PRIu64 ",\"missing_import_calls\":%" PRIu64
-	    ",\"missing_import_slots\":%" PRIu32 ",\"prx_preload_discovered\":%" PRIu32 ",\"prx_preload_loaded\":%" PRIu32
-	    ",\"last_circuit_break\":{\"active\":%s,\"file\":%s%s%s,\"line\":%d,"
-	    "\"expr\":%s%s%s,\"hits\":%" PRIu64 "}}}\n",
-	    kDiagnosticsProtocolVersion, ModeName(snap.config.mode), feat, subs, snap.config.burst_limit,
-	    snap.config.burst_window_ms, snap.unique_sites, snap.total_continuations, snap.missing_import_assigns,
-	    snap.missing_import_calls, snap.missing_import_slots, snap.prx_preload_discovered, snap.prx_preload_loaded,
-	    snap.last_circuit_break.active ? "true" : "false",
-	    snap.last_circuit_break.file != nullptr ? "\"" : "null",
-	    snap.last_circuit_break.file != nullptr ? snap.last_circuit_break.file : "",
-	    snap.last_circuit_break.file != nullptr ? "\"" : "", snap.last_circuit_break.line,
-	    snap.last_circuit_break.expr != nullptr ? "\"" : "null",
-	    snap.last_circuit_break.expr != nullptr ? snap.last_circuit_break.expr : "",
-	    snap.last_circuit_break.expr != nullptr ? "\"" : "", snap.last_circuit_break.hits);
-	std::fflush(out);
-	return n;
+	const SiteHit hit = RecordSiteHit(key, SteadyMs(), config.burst_window_ms);
+	if (!hit.found)
+	{
+		g_table_overflows.fetch_add(1, std::memory_order_relaxed);
+		NoteHalt(feature, subsystem);
+		InvokeDecisionHook(feature, subsystem, Decision::Halt, identity, false);
+		return Decision::Halt;
+	}
+
+	if (hit.window_hits > config.burst_limit)
+	{
+		g_breaker_trips.fetch_add(1, std::memory_order_relaxed);
+		g_last_breaker_key.store(key, std::memory_order_relaxed);
+		g_last_breaker_feature.store(static_cast<uint32_t>(feature), std::memory_order_relaxed);
+		g_last_breaker_subsystem.store(static_cast<uint32_t>(subsystem), std::memory_order_relaxed);
+		// One detailed breaker log for the process (bounded).
+		bool expected_log = false;
+		if (g_breaker_detail_logged.compare_exchange_strong(expected_log, true, std::memory_order_relaxed))
+		{
+			std::fprintf(stderr,
+			             "KYTY_BRINGUP_BREAKER feature=%u subsystem=%u identity=%s file=%s:%d hits=%u limit=%u\n",
+			             static_cast<unsigned>(feature), static_cast<unsigned>(subsystem), identity, file, line,
+			             hit.window_hits, config.burst_limit);
+		}
+		NoteHalt(feature, subsystem);
+		InvokeDecisionHook(feature, subsystem, Decision::Halt, identity, true);
+		return Decision::Halt;
+	}
+
+	// Detail once per site; later hits are counters only (no stack spam).
+	if (hit.first_log)
+	{
+		std::fprintf(stderr, "KYTY_BRINGUP_CONTINUE feature=%u subsystem=%u identity=%s file=%s:%d\n",
+		             static_cast<unsigned>(feature), static_cast<unsigned>(subsystem), identity, file, line);
+	} else
+	{
+		// Bounded summary every 1024 continues on the same site.
+		if ((hit.total_hits & 1023ull) == 0)
+		{
+			std::fprintf(stderr, "KYTY_BRINGUP_SUMMARY feature=%u subsystem=%u identity=%s hits=%" PRIu64 "\n",
+			             static_cast<unsigned>(feature), static_cast<unsigned>(subsystem), identity, hit.total_hits);
+		}
+	}
+	NoteContinue(feature, subsystem);
+	InvokeDecisionHook(feature, subsystem, Decision::Continue, identity, false);
+	return Decision::Continue;
+}
+
+Decision ReportNotImplemented(const char* expression, const char* file, int line) noexcept
+{
+	return Report(Feature::NotImplemented, ClassifySourceFile(file), expression, file, line);
+}
+
+void SetDecisionHook(DecisionHook hook) noexcept
+{
+	g_decision_hook.store(hook, std::memory_order_release);
 }
 
 } // namespace Kyty::Core::BringUp

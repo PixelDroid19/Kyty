@@ -22,3 +22,4 @@ _run/
 _SaveData/
 _gpu_memory.db
 _scratch_playable/
+_matrix_scratch/
