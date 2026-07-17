@@ -2,6 +2,7 @@
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/String.h"
+#include "Kyty/Core/Threads.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Math/Rand.h"
 
@@ -20,11 +21,7 @@
 #include "Emulator/Loader/RuntimeLinker.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
-#include <chrono>
-#include <cstdio>
 #include <cstdlib>
-#include <sys/syscall.h>
-#include <unistd.h>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -357,13 +354,7 @@ static KYTY_SYSV_ABI int KernelIsAddressSanitizerEnabled()
 static KYTY_SYSV_ABI uint64_t KernelInternalMemoryMap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags)
 {
 	PRINT_NAME();
-#if defined(__APPLE__)
-	const long long host_tid = static_cast<long long>(::syscall(SYS_thread_selfid));
-#elif defined(__linux__)
-	const long long host_tid = static_cast<long long>(::syscall(SYS_gettid));
-#else
-	const long long host_tid = static_cast<long long>(::getpid());
-#endif
+	const long long host_tid = static_cast<long long>(Core::Thread::GetHostThreadId());
 	printf("\taddr=0x%" PRIx64 " len=0x%" PRIx64 " prot=0x%" PRIx64 " flags=0x%" PRIx64 " tid=%lld\n", addr, len, prot, flags, host_tid);
 	// Register the range for demand paging: the guest allocator expects zero-filled
 	// read/write memory across the whole region, but pre-mapping it all changes what
@@ -381,7 +372,9 @@ static KYTY_SYSV_ABI uint64_t KernelInternalMemoryMap(uint64_t addr, uint64_t le
 	if (getenv("KYTY_TRACE_LIBC") != nullptr)
 	{
 		Core::VirtualMemory::SetGuestTrace(1500);
+	#if defined(__x86_64__) || defined(__i386__)
 		__asm__ __volatile__("pushfq; orq $0x100,(%rsp); popfq");
+	#endif
 	}
 	if (getenv("KYTY_PROF") != nullptr)
 	{
@@ -498,12 +491,6 @@ int KYTY_SYSV_ABI KernelIsNeoMode()
 	return (Config::IsNeo() ? 1 : 0);
 }
 
-int KYTY_SYSV_ABI KernelIsTrinityMode()
-{
-	PRINT_NAME();
-	return 0;
-}
-
 int KYTY_SYSV_ABI clock_gettime(int clock_id, LibKernel::KernelTimespec* time)
 {
 	PRINT_NAME();
@@ -519,28 +506,32 @@ void KYTY_SYSV_ABI KernelSetGPO(uint32_t bits)
 }
 
 // sceKernelGetGPI — NID 4oXYe9Xmk0Q.
-// On non-devkit retail consoles this is a no-op success (returns 0).
+// On non-devkit retail consoles this is a no-op success (returns 0). Captured as
+// The first strict Unpatched import from libkernel_v1.1 during early Main.
+// Do not invent GPI state; no SetGPI pairing required for the observed open path.
 static int KYTY_SYSV_ABI KernelGetGPI()
 {
 	PRINT_NAME();
-	const int result = KernelRetailGetGpiResult();
-	// #region agent log
+	return KernelRetailGetGpiResult();
+}
+
+// sceKernelIsTrinityMode — NID tU5e3f9gSiU. Base PS5 mode reports 0.
+static int KYTY_SYSV_ABI KernelIsTrinityMode()
+{
+	PRINT_NAME();
+	return 0;
+}
+
+// sceKernelFsync — NID fTx66l5iWIA. Host has no guest-fd flush; accept valid fd.
+static int KYTY_SYSV_ABI KernelFsync(int fd)
+{
+	PRINT_NAME();
+	printf("\t fd = %d\n", fd);
+	if (fd < 0)
 	{
-		const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-		                    std::chrono::system_clock::now().time_since_epoch())
-		                    .count();
-		if (FILE* f = std::fopen("/home/monasterios/.cursor/debug-logs/debug-0fe784.log", "a"))
-		{
-			std::fprintf(f,
-			             "{\"sessionId\":\"0fe784\",\"runId\":\"pre-fix\",\"hypothesisId\":\"A\","
-			             "\"location\":\"LibKernel.cpp:KernelGetGPI\",\"message\":\"sceKernelGetGPI "
-			             "called\",\"data\":{\"result\":%d},\"timestamp\":%lld}\n",
-			             result, static_cast<long long>(ts));
-			std::fclose(f);
-		}
+		return KERNEL_ERROR_EBADF;
 	}
-	// #endregion
-	return result;
+	return OK;
 }
 
 } // namespace LibKernel
@@ -553,6 +544,13 @@ int KYTY_SYSV_ABI getpid()
 {
 	constexpr int guest_process_id = 0xBAD1;
 	return guest_process_id;
+}
+
+// Gen5 Posix_v1 pthread_self — NID EotR8a3ASf4. Same guest thread object as
+// scePthreadSelf; Astro stores the returned pthread_t into audio context state.
+LibKernel::Pthread KYTY_SYSV_ABI pthread_self()
+{
+	return LibKernel::PthreadSelf();
 }
 
 int KYTY_SYSV_ABI clock_gettime(int clock_id, LibKernel::KernelTimespec* time)
@@ -598,9 +596,11 @@ int KYTY_SYSV_ABI nanosleep(const LibKernel::KernelTimespec* rqtp, LibKernel::Ke
 	return POSIX_CALL(LibKernel::KernelNanosleep(rqtp, rmtp));
 }
 
+// Gen5 Posix_v1 usleep — NID QcteRwbsnV0 (Astro after Setschedparam; rdi=µs).
 int KYTY_SYSV_ABI usleep(unsigned int microseconds)
 {
 	PRINT_NAME();
+
 	return POSIX_CALL(LibKernel::KernelUsleep(microseconds));
 }
 
@@ -617,11 +617,13 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	// Gen5 Posix_v1 gettimeofday — n88vx3C5nW8.
 	LIB_FUNC("n88vx3C5nW8", gettimeofday);
 	LIB_FUNC("yS8U2TGCe1A", nanosleep);
+	// Gen5 Posix_v1 usleep — QcteRwbsnV0 after Setschedparam assert fix.
 	LIB_FUNC("QcteRwbsnV0", usleep);
 	LIB_FUNC("E6ao34wPw+U", stat);
 	LIB_FUNC("HoLVWNanBBc", getpid);
+	// Gen5 Posix_v1 pthread_self — EotR8a3ASf4 (Astro audio path after Acm).
 	LIB_FUNC("EotR8a3ASf4", pthread_self);
-
+	// Gen5 Posix_v1 pthread_attr_* (Astro after package path bring-up).
 	LIB_FUNC("wtkt-teR1so", Posix::pthread_attr_init);
 	LIB_FUNC("zHchY8ft5pk", Posix::pthread_attr_destroy);
 	LIB_FUNC("vQm4fDEsWi8", Posix::pthread_attr_getstack);
@@ -641,6 +643,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 
 	LIB_FUNC("OxhIB8LB-PQ", Posix::pthread_create);
 	LIB_FUNC("h9CcP3J0oVM", Posix::pthread_join);
+	// Gen5 Posix_v1 thread control (Astro after attr_setstacksize).
 	LIB_FUNC("+U1R4WtXvoc", Posix::pthread_detach);
 	LIB_FUNC("FJrT5LuUBAU", Posix::pthread_exit);
 	LIB_FUNC("B5GmVDKwpn0", Posix::pthread_yield);
@@ -660,6 +663,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("WrOLvHU0yQM", Posix::pthread_setspecific);
 	LIB_FUNC("0-KXaS70xy4", Posix::pthread_getspecific);
 
+	// Gen5 Posix_v1 semaphore NIDs (Astro hard-abort pDuPEf3m4fI = sem_init).
 	LIB_FUNC("pDuPEf3m4fI", Posix::sem_init);
 	LIB_FUNC("cDW233RAwWo", Posix::sem_destroy);
 	LIB_FUNC("YCV5dGGBcCo", Posix::sem_wait);
@@ -689,6 +693,8 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("oib76F-12fk", FileSystem::KernelLseek);
 	LIB_FUNC("j2AIqSqJP0w", FileSystem::KernelGetdents);
 	LIB_FUNC("1-LFLmRFxxM", FileSystem::KernelMkdir);
+	LIB_FUNC("naInUjYt3so", FileSystem::KernelRmdir);
+	// Gen5 APR path resolution / submit / wait (libkernel APR family).
 	LIB_FUNC("gEpBkcwxUjw", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizes);
 	LIB_FUNC("WT-5NKy42fw", FileSystem::KernelAprResolveFilepathsToIds);
 	LIB_FUNC("i3HWvW35jao", FileSystem::KernelAprResolveFilepathsWithPrefixToIds);
@@ -703,6 +709,10 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("ASoW5WE-UPo", FileSystem::KernelAprSubmitCommandBufferAndGetResult);
 	LIB_FUNC("qvMUCyyaCSI", FileSystem::KernelAprSubmitCommandBufferAndGetId);
 	LIB_FUNC("rqwFKI4PAiM", FileSystem::KernelAprWaitCommandBuffer);
+
+	// Gen5 kernel mode / fd flush.
+	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
+	LIB_FUNC("fTx66l5iWIA", LibKernel::KernelFsync);
 }
 
 LIB_DEFINE(InitLibKernel_1_Mem)
@@ -714,6 +724,7 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("rTXw65xmLIA", Memory::KernelAllocateDirectMemory);
 	LIB_FUNC("B+vc2AO2Zrc", Memory::KernelAllocateMainDirectMemory);
 	LIB_FUNC("L-Q3LEjIbgA", Memory::KernelMapDirectMemory);
+	LIB_FUNC("BQQniolj9tQ", Memory::KernelMapDirectMemory2);
 	LIB_FUNC("NcaWUxfMNIQ", Memory::KernelMapNamedDirectMemory);
 	LIB_FUNC("MBuItvba6z8", Memory::KernelReleaseDirectMemory);
 	LIB_FUNC("hwVSPCmp5tM", Memory::KernelCheckedReleaseDirectMemory);
@@ -721,10 +732,10 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("BHouLQzh0X0", Memory::KernelDirectMemoryQuery);
 	LIB_FUNC("aNz11fnnzi4", Memory::KernelAvailableFlexibleMemorySize);
 	LIB_FUNC("n1-v6FgU7MQ", Memory::KernelConfiguredFlexibleMemorySize);
-	LIB_FUNC("vSMAm3cxYTY", Memory::KernelMprotect);
 	LIB_FUNC("DGMG3JshrZU", Memory::KernelSetVirtualRangeName);
 	LIB_FUNC("mkgXxsoxWHg", Memory::KernelClearVirtualRangeName);
 	LIB_FUNC("rVjRvHJ0X6c", Memory::KernelVirtualQuery);
+	LIB_FUNC("vSMAm3cxYTY", Memory::KernelMprotect);
 }
 
 LIB_DEFINE(InitLibKernel_1_Equeue)
@@ -733,6 +744,9 @@ LIB_DEFINE(InitLibKernel_1_Equeue)
 	LIB_FUNC("jpFjmgAC5AE", EventQueue::KernelDeleteEqueue);
 	LIB_FUNC("fzyMKs9kim0", EventQueue::KernelWaitEqueue);
 	LIB_FUNC("vz+pg2zdopI", EventQueue::KernelGetEventUserData);
+	// Gen5 Ampr completion equeue (sceKernelAdd/DeleteAmprEvent).
+	LIB_FUNC("bBfz7kMF2Ho", EventQueue::KernelAddAmprEvent);
+	LIB_FUNC("bMmid3pfyjo", EventQueue::KernelDeleteAmprEvent);
 }
 
 LIB_DEFINE(InitLibKernel_1_EventFlag)
@@ -740,6 +754,8 @@ LIB_DEFINE(InitLibKernel_1_EventFlag)
 	LIB_FUNC("BpFoboUJoZU", EventFlag::KernelCreateEventFlag);
 	LIB_FUNC("JTvBflhYazQ", EventFlag::KernelWaitEventFlag);
 	LIB_FUNC("IOnSvHzqu6A", EventFlag::KernelSetEventFlag);
+	// Gen5 NID for delete (strict Unpatched otherwise).
+	LIB_FUNC("8mql9OcQnd4", EventFlag::KernelDeleteEventFlag);
 }
 
 LIB_DEFINE(InitLibKernel_1_Semaphore)
@@ -789,6 +805,7 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("-quPa4SEJUw", LibKernel::PthreadAttrGetstack);
 	LIB_FUNC("txHtngJ+eyc", LibKernel::PthreadAttrGetguardsize);
 	LIB_FUNC("UTXzJbWhhTE", LibKernel::PthreadAttrSetstacksize);
+	// Gen5 NID (stack addr+size in one call).
 	LIB_FUNC("Bvn74vj6oLo", LibKernel::PthreadAttrSetstack);
 	LIB_FUNC("-Wreprtu0Qs", LibKernel::PthreadAttrSetdetachstate);
 	LIB_FUNC("El+cQ20DynU", LibKernel::PthreadAttrSetguardsize);
@@ -802,7 +819,9 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("Ox9i0c7L5w0", LibKernel::PthreadRwlockRdlock);
 	LIB_FUNC("+L98PIbGttk", LibKernel::PthreadRwlockUnlock);
 	LIB_FUNC("mqdNorrB+gI", LibKernel::PthreadRwlockWrlock);
+	// Gen5 rwlock / attr NIDs observed as strict Unpatched imports.
 	LIB_FUNC("bIHoZCTomsI", LibKernel::PthreadRwlockTrywrlock);
+	// Gen5 scePthreadRwlockTryrdlock — NID XD3mDeybCnk.
 	LIB_FUNC("XD3mDeybCnk", LibKernel::PthreadRwlockTryrdlock);
 	LIB_FUNC("i2ifZ3fS2fo", LibKernel::PthreadRwlockattrDestroy);
 	LIB_FUNC("yOfGg-I1ZII", LibKernel::PthreadRwlockattrInit);
@@ -817,10 +836,12 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("m5-2bsNfv7s", LibKernel::PthreadCondattrInit);
 	LIB_FUNC("waPcxYiR3WA", LibKernel::PthreadCondattrDestroy);
 
+	// Gen5 TLS key + timed mutex NIDs.
 	LIB_FUNC("geDaqgH9lTg", LibKernel::PthreadKeyCreate);
 	LIB_FUNC("PrdHuuDekhY", LibKernel::PthreadKeyDelete);
 	LIB_FUNC("+BzXYkqYeLE", LibKernel::PthreadSetspecific);
 	LIB_FUNC("eoht7mQOCmo", LibKernel::PthreadGetspecific);
+	LIB_FUNC("IafI2PxcPnQ", LibKernel::PthreadMutexTimedlock);
 
 	LIB_FUNC("QBi7HCK03hw", LibKernel::KernelClockGettime);
 	LIB_FUNC("ejekcaNQNq0", LibKernel::KernelGettimeofday);
@@ -883,7 +904,6 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("vNe1w4diLCs", LibKernel::tls_get_addr);
 	LIB_FUNC("WhCc1w3EhSI", LibKernel::KernelSetThreadAtexitReport);
 	LIB_FUNC("WslcK1FQcGI", LibKernel::KernelIsNeoMode);
-	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
 	LIB_FUNC("wzvqT4UqKX8", LibKernel::KernelLoadStartModule);
 	LIB_FUNC("Xjoosiw+XPI", LibKernel::KernelUuidCreate);
 	LIB_FUNC("zE-wXIZjLoM", LibKernel::KernelDebugRaiseExceptionOnReleaseMode);

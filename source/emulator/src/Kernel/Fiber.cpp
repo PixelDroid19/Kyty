@@ -10,7 +10,6 @@
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
-#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -359,30 +358,6 @@ int32_t KYTY_SYSV_ABI FiberInitialize(FiberObject* fiber, const char* name, Fibe
 
 	printf("\t fiber init: %s, entry = 0x%016" PRIx64 ", context = 0x%016" PRIx64 ", size = %" PRIu64 "\n", fiber->name,
 	       reinterpret_cast<uint64_t>(entry), reinterpret_cast<uint64_t>(addr_context), size_context);
-
-	// #region agent log
-	{
-		static int logged = 0;
-		if (logged++ < 3)
-		{
-			if (FILE* f = std::fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log", "a"))
-			{
-				std::fprintf(f,
-				             "{\"sessionId\":\"f08e58\",\"runId\":\"post-fix\",\"hypothesisId\":\"K\","
-				             "\"location\":\"Fiber.cpp:FiberInitialize\",\"message\":\"fiber init\","
-				             "\"data\":{\"name\":\"%s\",\"entry\":%llu,\"context\":%llu,\"size\":%llu},"
-				             "\"timestamp\":%lld}\n",
-				             fiber->name, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(entry)),
-				             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(addr_context)),
-				             static_cast<unsigned long long>(size_context),
-				             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-				                                            std::chrono::system_clock::now().time_since_epoch())
-				                                        .count()));
-				std::fclose(f);
-			}
-		}
-	}
-	// #endregion
 
 	return OK;
 }

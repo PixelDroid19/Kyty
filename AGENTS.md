@@ -337,17 +337,17 @@ console logging are not supported runtime modes.
   pthreads, synchronization, files, and time.
 - `source/emulator/src/Libs/`: HLE export registration and guest API contracts.
 - `source/emulator/src/Graphics/Graphics.cpp`: PS4/PS5 command-buffer builders
-  and Gen5 AGC-facing exports.
-- `source/emulator/src/Graphics/GraphicsRun.cpp`: PM4 packet parsing and updates
-  to normalized `HW::Context` state.
-- `source/emulator/include/Emulator/Graphics/HardwareContext.h`: normalized guest
-  GPU state used by rendering.
-- `source/emulator/src/Graphics/GraphicsRender.cpp`: resource binding, pipeline
-  construction, draw/dispatch recording, and synchronization.
+  and AGC-facing exports.
+- `source/emulator/src/Graphics/GraphicsRun.cpp`: PM4 parsing and normalized
+  graphics-state updates.
+- `source/emulator/include/Emulator/Graphics/HardwareContext.h`: normalized
+  guest GPU state.
+- `source/emulator/src/Graphics/GraphicsRender.cpp`: Vulkan resource binding,
+  pipelines, draw/dispatch recording, and synchronization.
 - `source/emulator/src/Graphics/ShaderParse.cpp` and `ShaderSpirv.cpp`: guest
   shader decoding and SPIR-V generation.
 - `source/emulator/src/Graphics/Tile.cpp`: guest surface layout and addressing.
-- `source/emulator/src/Graphics/Objects/`: Vulkan-backed guest resources and
+- `source/emulator/src/Graphics/Objects/`: Vulkan-backed resources and guest
   memory tracking.
 - `source/emulator/src/Graphics/VideoOut.cpp` and `Window.cpp`: display buffers,
   Vulkan device/swapchain setup, and presentation.
@@ -550,161 +550,11 @@ NON-NEGOTIABLE RULES
 REPRODUCTION AND VERIFICATION COMMANDS
 
 ```bash
-git status --short
-git log -5 --oneline --decorate
-cmake -S source -B _build_macos -G Ninja
-ninja -C _build_macos fc_script
-
-# Focused tests; avoid the historical date-dependent unfiltered suite.
-_build_macos/fc_script '{kyty_run_tests()}' \
-  --gtest_filter=<Suite>.<Test>
-
-# Strict integration run. The fixture root is private and untracked.
-_build_macos/fc_script scripts/run_guest.lua "$KYTY_GUEST_ROOT"
+cmake -S source -B _build_linux -G Ninja -DCMAKE_BUILD_TYPE=Release
+ninja -C _build_linux
 ```
 
-For performance characterization, make a temporary untracked copy of the Lua
-runner with `PrintfDirection = 'Silent'`, record that fact, and compare the
-same scene with the same resolution and shader-cache state. Never treat a
-diagnostic auto-input pulse as real playability. For visual evidence, keep
-captures outside the repository and record only dimensions, frame count,
-average/minimum FPS, input sequence, and whether the image is recognizable.
-
-STRICT DEBUG LOOP
-
-For each failure:
-
-1. Save the complete failure text outside Git.
-2. Locate the producer of the bad value, not just the assertion that noticed it.
-3. State one falsifiable hypothesis and the expected packet/state change.
-4. Add the smallest failing unit test or sanitized PM4/surface fixture.
-5. Implement the smallest evidenced semantic change.
-6. Run the focused test, rebuild, then rerun the strict workload.
-7. Update the frontier note with verified facts, remaining hypothesis, and
-   exact next experiment.
-
-GEN5 GRAPHICS CHECKLIST
-
-- Validate PM4 envelope, packet type, opcode/register, declared length, and
-  payload bounds before decoding fields.
-- Normalize direct/indirect state through one decoder and report unknown
-  register, packet, submit ID, and command offset.
-- For `AcquireMem`, classify cache action, target mask, extended action, GCR
-  control, base, size, and stall mode independently. Prove whether non-zero
-  range fields are legal for the observed full-target barrier; do not simply
-  mask them away.
-- For ReleaseMem/WaitRegMem/WriteData patch helpers, validate the packet's own
-  sub-op and patch only the evidenced payload dwords. Return the guest error
-  for invalid packets.
-- For every surface, derive format, bytes per element/block, dimensions, pitch,
-  mip count, tile mode, metadata, sample count, size, and alignment in one
-  layout function. Use it for allocation, overlap tracking, CPU upload,
-  detiling, and write-back.
-- Treat mode 27 (`SW_64KB_R_X`) as a real tiled layout. Do not replace it with
-  linear memory or a four-byte assumption. Add round-trip/layout tests for
-  representative non-power-of-two dimensions.
-- For GPU-memory aliases, model the exact relation and object types observed:
-  Equals, Crosses, Contains, and IsContainedWithin are not interchangeable.
-  Link or reclaim only when the producer/consumer semantics are evidenced.
-- A GPU-owned render target with no write-back must not be spuriously uploaded
-  from CPU memory. Its first use must be a validated render-pass transition.
-
-PLAYABILITY ACCEPTANCE GATE
-
-Do not move to refactoring until all rows below have evidence from a strict run:
-
-| Area | Required evidence |
-| --- | --- |
-| Boot | No missing-import stub, trap skip, or permissive register skip |
-| Menu | Recognizable, correctly proportioned image and completed flips |
-| Input | Real keyboard/controller press and release edges, not auto-pulse |
-| Play path | Play -> mode selection -> loading -> controllable scene |
-| Simulation | Character movement plus one attack/jump/interact action |
-| Rendering | Correct colors, geometry, target interpretation, and no black/corrupt frame |
-| Sync | No render-thread timeout, stuck label, or unbounded wait |
-| Vulkan | No validation errors where validation is available; no device-loss |
-| Performance | FPS/frametime measured with logging mode and resolution recorded |
-| Portability | No guest-state or tile-layout branch keyed to one OS/GPU vendor |
-| Regression | Existing focused unit tests and prior menu evidence still pass |
-
-ARCHITECTURE FREEZE AND MODULARIZATION PLAN
-
-After the acceptance gate, record a baseline commit, test output, strict
-frontier, and visual/performance measurements. **Do not start file
-decomposition while a post-Play (or earlier) strict blocker is open** — first
-reach reproducible controllable gameplay, freeze it, then modularize.
-
-Approximate line counts (recount with `wc -l` before planning; snapshot ~2026-07):
-
-| File | ~Lines |
-| `ShaderSpirv.cpp` | 8490 |
-| `GraphicsRender.cpp` | 5740 |
-| `GraphicsRun.cpp` | 4530 |
-| `ShaderParse.cpp` | 3520 |
-| `Shader.cpp` | 3350 |
-| `Pthread.cpp` | 2810 |
-| `Graphics.cpp` | 2740 |
-| `Audio.cpp` | 2720 |
-| `Window.cpp` | 2700 |
-
-Then inventory large modules by responsibility, mutable state, callers, and
-tests. Likely seams are:
-
-- `ShaderSpirv.cpp`: Op emitters; EXP/MRT; SMEM/SBuffer; **structured CFG
-  (loops/if)**; constant pool; entry/annotations. Highest risk/priority after
-  playability because it is the largest and owns the open loop CFG debt.
-- `GraphicsRun.cpp`: packet envelope/parser, opcode decoders, cache/barrier
-  semantics, and normalized-state mutation. Extract only after identifying the
-  shared state contract; direct and indirect paths must call the same decoder.
-- `Graphics.cpp`: Gen5 packet builders, ABI-facing patch helpers, and pure
-  packet encoders. Keep ABI registration out of packet math.
-- `GraphicsRender.cpp`: render planning, resource binding, pipeline creation,
-  synchronization, and presentation preparation. A planner should consume
-  normalized state and explicit host capabilities, not read global Vulkan state.
-- `ShaderParse.cpp`: per-encoding parsers and opcode tables only.
-- `Tile.cpp`: format/block geometry, surface-size calculation, address/swizzle
-  math, and conversion. Keep one descriptor/layout model and test it without
-  Vulkan.
-- `GpuMemory.cpp`: relation classification, lifetime/linking, allocation, and
-  update/write-back policy. Deepen the module behind typed relation/layout
-  contracts; do not create a generic `Utils` or `Manager` bucket.
-- `source/emulator/src/Libs/`: one cohesive HLE library per subsystem, with
-  centralized registration and contract tests for each new export.
-
-Recommended extraction order after the gameplay freeze is based on dependency
-direction, not file size:
-
-1. Extract pure packet/descriptor decoding and layout calculations that can be
-   tested without Vulkan or global runtime state.
-2. Separate normalized-state mutation from PM4 envelope walking so direct and
-   indirect packets call the same typed decoders.
-3. Separate shader instruction decoding and intermediate representation from
-   SPIR-V emission. Split `ShaderSpirv.cpp` by cohesive emission domains only
-   after tests characterize shared type, control-flow, resource, and capability
-   contracts.
-4. Separate GPU-memory relation classification and write-back policy from
-   Vulkan object lifetime, keeping exact alias relations typed and tested.
-5. Separate render planning from Vulkan execution/resource creation, passing an
-   immutable normalized draw/dispatch plan plus explicit host capabilities.
-6. Split host window/surface/input/audio/platform adapters only at existing OS
-   boundaries; guest semantics must not move into platform files.
-7. Revisit large kernel/HLE files last, one subsystem contract at a time, once
-   gameplay no longer depends on unresolved ABI behavior in that seam.
-
-For every proposed new module, write this contract before creating the file:
-
-```text
-Purpose:
-Public API:
-Inputs and outputs:
-State and ownership:
-Threading and synchronization:
-Error/unsupported behavior:
-Allowed dependencies:
-Forbidden dependencies:
-Characterization tests:
-Strict runtime checkpoint:
-```
+Configure and build on macOS:
 
 Line count is a signal, not the goal. Do not split an atomic eight-line
 function. Do split a long function that mixes parsing, state mutation,
@@ -761,79 +611,34 @@ If a required fact cannot be evidenced, stop at a structured unsupported error,
 report the blocker, and do not paper over it with a fallback or broad refactor.
 ```
 
-## Delivery order
+Windows supports the generators and toolchains defined by the CMake files and CI.
+Do not invent a Windows command from a Linux or macOS layout; inspect the active
+workflow and generator first.
 
-Compatibility work and architecture work have a strict order:
-
-1. Advance the strict runtime one evidenced failure at a time.
-2. Reach a recognizable menu without diagnostic behavior changes.
-3. Prove real controller input, stable frame progression, and representative
-   gameplay without Vulkan errors or fabricated guest results.
-4. Freeze the working frontier with focused regression and characterization
-   tests.
-5. Only then decompose oversized modules incrementally, re-running the strict
-   scenario after every extraction.
-
-Do not postpone a necessary correctness seam solely because it lives in a large
-file. Conversely, do not mix broad file decomposition into an unresolved
-compatibility change. A refactor is not evidence that the runtime improved.
-
-## Module and function boundaries
-
-- A function has one observable purpose and one reason to change. Separate
-  packet decoding, validation, state mutation, resource layout, Vulkan object
-  creation, synchronization, and diagnostic formatting.
-- A source file owns one cohesive capability. Large legacy translation units
-  are migration sources, not patterns for new centralized implementations.
-- Line count is a review signal, not a mechanical rule. Do not split an
-  eight-line function that expresses one atomic operation, and do not keep an
-  eight-thousand-line module merely because individual functions are short.
-- Before extracting code, identify the proposed module's inputs, outputs,
-  ownership, error contract, threading contract, and tests. If those cannot be
-  stated concisely, the boundary is not ready.
-- Extract behavior behind narrow typed interfaces. Do not create generic
-  `Utils`, `Common`, `Manager`, compatibility aliases, forwarding layers, or
-  duplicate old/new implementations.
-- Keep dependency direction explicit: guest descriptor decoding feeds
-  normalized state; normalized state feeds resource and render planning; host
-  capabilities select a semantically equivalent Vulkan strategy. Host details
-  never flow backward into guest semantics.
-- Add characterization tests before moving existing behavior. The extraction
-  commit must be behavior-neutral, and the focused tests plus strict scenario
-  must show the same or later frontier.
-- Delete the superseded implementation in the same extraction. There is no
-  permanent legacy path, hidden fallback, or feature flag selecting duplicate
-  semantics.
-- Document public module contracts and non-obvious hardware invariants. Avoid
-  comments that merely restate code or contain private workload information.
-
-## Required workflow
-
-### 1. Establish a clean comparison
-
-Before editing:
+Build only the main script runtime when a full build is unnecessary:
 
 ```bash
-git status --short
-git log -5 --oneline --decorate
-ninja -C _build_macos
+ninja -C <build-dir> fc_script
 ```
 
-Run focused tests with a filter. The historical unfiltered suite contains a
-date-dependent assertion and must not be used to conceal new failures:
+Run focused tests through `fc_script`:
 
 ```bash
-_build_macos/fc_script "{kyty_run_tests()}" --gtest_filter=<Suite>.*
+<build-dir>/fc_script '{kyty_run_tests()}' \
+  --gtest_filter='SuiteName.TestName'
 ```
 
-### 2. Reproduce strictly
-
-Use `scripts/run_guest.lua` with a local, untracked fixture root. Do not place
-fixture paths, title identifiers, keys, binaries, shaders, textures, screenshots,
-or logs in tracked files.
+Confirm that a new or renamed filter actually selects the intended tests:
 
 ```bash
-_build_macos/fc_script scripts/run_guest.lua "$KYTY_GUEST_ROOT"
+<build-dir>/fc_script --gtest_list_tests '{kyty_run_tests()}'
+```
+
+Run an authorized private fixture only when the task requires runtime validation
+and `KYTY_GUEST_ROOT` is already available:
+
+```bash
+<build-dir>/fc_script scripts/run_guest.lua "$KYTY_GUEST_ROOT"
 ```
 
 The strict run sets no `KYTY_BRINGUP_*` variables (and no removed legacy flags).

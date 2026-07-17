@@ -8,6 +8,30 @@
 
 #include <vulkan/vulkan_core.h> // IWYU pragma: export
 
+// Vendored vulkan_core.h may predate VK_EXT_depth_clip_control; define the ABI
+// locally when the header lacks it so capability-driven hosts can enable it.
+#ifndef VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME
+#define VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME "VK_EXT_depth_clip_control"
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT static_cast<VkStructureType>(1000355000)
+#define VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT static_cast<VkStructureType>(1000355001)
+typedef struct VkPhysicalDeviceDepthClipControlFeaturesEXT
+{
+	VkStructureType sType;
+	void*           pNext;
+	VkBool32        depthClipControl;
+} VkPhysicalDeviceDepthClipControlFeaturesEXT;
+typedef struct VkPipelineViewportDepthClipControlCreateInfoEXT
+{
+	VkStructureType sType;
+	const void*     pNext;
+	VkBool32        negativeOneToOne;
+} VkPipelineViewportDepthClipControlCreateInfoEXT;
+#endif
+
+#ifndef VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME
+#define VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME "VK_EXT_depth_range_unrestricted"
+#endif
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -64,6 +88,7 @@ struct GraphicContext
 	VkDebugUtilsMessengerEXT debug_messenger = nullptr;
 	VkPhysicalDevice         physical_device = nullptr;
 	VkDevice                 device          = nullptr;
+	VkPipelineCache          pipeline_cache   = nullptr;
 	VulkanQueueInfo          queues[QUEUES_NUM];
 
 	// VK_EXT_color_write_enable is unavailable on some drivers (notably MoltenVK
@@ -74,6 +99,13 @@ struct GraphicContext
 	// VK_EXT_depth_clip_enable is likewise absent on MoltenVK. When false, the
 	// intended "depth clip disabled" state is emulated with core depthClampEnable.
 	bool depth_clip_enable_supported = true;
+
+	// VK_EXT_depth_clip_control selects Vulkan clip Z in [-W,+W] (OpenGL) vs [0,+W]
+	// (DX). When false, OpenGL guest clip space cannot be expressed natively.
+	bool depth_clip_control_supported = false;
+
+	// VK_EXT_depth_range_unrestricted allows viewport min/maxDepth outside [0,1].
+	bool depth_range_unrestricted_supported = false;
 };
 
 struct VulkanMemory
@@ -102,6 +134,7 @@ struct VulkanImage
 	static constexpr int VIEW_DEFAULT       = 0;
 	static constexpr int VIEW_BGRA          = 1;
 	static constexpr int VIEW_DEPTH_TEXTURE = 2;
+	static constexpr int VIEW_ABGR          = 3;
 
 	explicit VulkanImage(VulkanImageType type): type(type) {}
 
@@ -112,6 +145,8 @@ struct VulkanImage
 	VkImageView            image_view[VIEW_MAX] = {};
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
 	Graphics::VulkanMemory memory;
+	// Guest allocation size used by PreferGpuMemoryAliasIndex when sampling.
+	uint64_t               guest_size           = 0;
 };
 
 struct VideoOutVulkanImage: public VulkanImage
@@ -149,7 +184,10 @@ struct VulkanBuffer
 
 struct StorageVulkanBuffer: public VulkanBuffer
 {
-	CommandProcessor* cp = nullptr;
+	CommandProcessor* cp              = nullptr;
+	uint64_t          guest_addr      = 0;
+	uint64_t          guest_size      = 0;
+	uint64_t          depth_meta_addr = 0;
 };
 
 } // namespace Kyty::Libs::Graphics

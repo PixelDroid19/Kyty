@@ -11,6 +11,7 @@
 #include "Kyty/Core/Vector.h"
 #include "Kyty/Core/VirtualMemory.h"
 
+#include "Emulator/Graphics/Window.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/RuntimeLinker.h"
@@ -18,9 +19,9 @@
 
 #include <atomic>
 #include <cerrno>
-#include <chrono>
+#include <cinttypes>
 #include <cstdio>
-#include <cstring>
+#include <cstdlib>
 #include <ctime>
 
 #ifdef KYTY_EMU_ENABLED
@@ -185,6 +186,7 @@ public:
 	Pthread Create();
 
 	void FreeDetachedThreads();
+	void GetDiagnostics(PthreadThreadDiagnostics* out);
 
 private:
 	Vector<Pthread> m_threads;
@@ -427,6 +429,26 @@ static int pthread_rwlock_timedwrlock(pthread_rwlock_t* lock, const timespec* t)
 {
 	return rwlock_timedlock_poll(lock, t, true);
 }
+
+static int mutex_timedlock_poll(pthread_mutex_t* mutex, const timespec* t)
+{
+	uint64_t timeout_us = static_cast<uint64_t>(t->tv_sec) * 1000000u + static_cast<uint64_t>(t->tv_nsec) / 1000u;
+	uint64_t waited_us  = 0;
+	for (;;)
+	{
+		int result = pthread_mutex_trylock(mutex);
+		if (result != EBUSY)
+		{
+			return result;
+		}
+		if (waited_us >= timeout_us)
+		{
+			return ETIMEDOUT;
+		}
+		usleep(100);
+		waited_us += 100;
+	}
+}
 #endif
 
 static void sec_to_timespec(KernelTimespec* ts, double sec)
@@ -550,6 +572,35 @@ void PthreadPool::FreeDetachedThreads()
 		{
 			PthreadJoin(p, nullptr);
 		}
+	}
+}
+
+void PthreadPool::GetDiagnostics(PthreadThreadDiagnostics* out)
+{
+	EXIT_IF(out == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+
+	for (auto* thread: m_threads)
+	{
+		out->allocated_count++;
+		if (!thread->free.load())
+		{
+			out->active_count++;
+		}
+		if (out->thread_count >= std::size(out->threads))
+		{
+			continue;
+		}
+
+		auto& snapshot = out->threads[out->thread_count++];
+		snapshot.entry = reinterpret_cast<uint64_t>(thread->entry);
+		snapshot.argument = reinterpret_cast<uint64_t>(thread->arg);
+		snapshot.unique_id = thread->unique_id;
+		snapshot.started = thread->started.load();
+		snapshot.detached = thread->detached.load();
+		snapshot.almost_done = thread->almost_done.load();
+		snapshot.free = thread->free.load();
 	}
 }
 
@@ -895,6 +946,40 @@ int KYTY_SYSV_ABI PthreadMutexTrylock(PthreadMutex* mutex)
 		case 0: return OK;
 		case EAGAIN: return KERNEL_ERROR_EAGAIN;
 		case EBUSY: return KERNEL_ERROR_EBUSY;
+		case EINVAL:
+		default: return KERNEL_ERROR_EINVAL;
+	}
+}
+
+int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec)
+{
+	PRINT_NAME();
+
+	if (mutex == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
+	EXIT_IF(pthread_static_objects == nullptr);
+	mutex = static_cast<PthreadMutex*>(pthread_static_objects->CreateObject(mutex, PthreadStaticObject::Type::Mutex));
+
+	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
+
+	timespec t {};
+	usec_to_timespec(&t, usec);
+
+#ifdef __APPLE__
+	const int result = mutex_timedlock_poll(&(*mutex)->p, &t);
+#else
+	const int result = pthread_mutex_timedlock(&(*mutex)->p, &t);
+#endif
+	switch (result)
+	{
+		case 0: return OK;
+		case ETIMEDOUT: return KERNEL_ERROR_ETIMEDOUT;
+		case EAGAIN: return KERNEL_ERROR_EAGAIN;
+		case EDEADLK: return KERNEL_ERROR_EDEADLK;
 		case EINVAL:
 		default: return KERNEL_ERROR_EINVAL;
 	}
@@ -1780,6 +1865,330 @@ int KYTY_SYSV_ABI PthreadCondattrInit(PthreadCondattr* attr)
 	}
 }
 
+// Soft-lock diagnostic (Dead Cells): identify which guest cond/mutex the
+// CondWait at ~0x90173da75 uses, and whether Signal/Broadcast ever reaches it.
+// Opt-in via KYTY_SLOT_TRACE=1; only after present>=2200 for event spam, but
+// blocked-waiter slots are always recorded under the env so Flip-idle can dump
+// a waiter that entered CondWait before the present cliff.
+struct SlotTraceBlockedWaiter
+{
+	std::atomic<uint64_t> cond {0};
+	std::atomic<uint64_t> mutex {0};
+	std::atomic<uint64_t> ret {0};
+	std::atomic<uint64_t> cond_h {0};
+	std::atomic<uint64_t> mutex_h {0};
+	std::atomic<uint32_t> live {0};
+};
+
+static constexpr uint32_t         kSlotTraceWaiterSlots = 8;
+static SlotTraceBlockedWaiter     g_slot_trace_waiters[kSlotTraceWaiterSlots];
+static std::atomic<uint64_t>      g_slot_trace_tracked_cond {0};
+static std::atomic<uint32_t>      g_slot_trace_sig_for_tracked {0};
+static std::atomic<uint32_t>      g_slot_trace_wait_for_tracked {0};
+static std::atomic<uint32_t>      g_slot_trace_sig_after_stall {0};
+static std::atomic<uint64_t>      g_slot_trace_stall_present {0};
+
+struct SlotTraceSigCount
+{
+	std::atomic<uint64_t> cond {0};
+	std::atomic<uint32_t> count {0};
+	std::atomic<uint32_t> after_stall {0};
+};
+static constexpr uint32_t    kSlotTraceSigSlots = 16;
+static SlotTraceSigCount     g_slot_trace_sigs[kSlotTraceSigSlots];
+
+static bool slot_trace_env()
+{
+	return std::getenv("KYTY_SLOT_TRACE") != nullptr;
+}
+
+static void slot_trace_note_signal(uint64_t cond_addr)
+{
+	if (!slot_trace_env() || cond_addr == 0)
+	{
+		return;
+	}
+	const bool after_stall = g_slot_trace_stall_present.load() != 0;
+	for (uint32_t i = 0; i < kSlotTraceSigSlots; i++)
+	{
+		uint64_t cur = g_slot_trace_sigs[i].cond.load();
+		if (cur == cond_addr)
+		{
+			g_slot_trace_sigs[i].count.fetch_add(1);
+			if (after_stall)
+			{
+				g_slot_trace_sigs[i].after_stall.fetch_add(1);
+			}
+			if (cond_addr == g_slot_trace_tracked_cond.load())
+			{
+				g_slot_trace_sig_for_tracked.fetch_add(1);
+				if (after_stall)
+				{
+					g_slot_trace_sig_after_stall.fetch_add(1);
+				}
+			}
+			return;
+		}
+		if (cur == 0)
+		{
+			uint64_t expected = 0;
+			if (g_slot_trace_sigs[i].cond.compare_exchange_strong(expected, cond_addr))
+			{
+				g_slot_trace_sigs[i].count.fetch_add(1);
+				if (after_stall)
+				{
+					g_slot_trace_sigs[i].after_stall.fetch_add(1);
+				}
+				if (cond_addr == g_slot_trace_tracked_cond.load())
+				{
+					g_slot_trace_sig_for_tracked.fetch_add(1);
+					if (after_stall)
+					{
+						g_slot_trace_sig_after_stall.fetch_add(1);
+					}
+				}
+				return;
+			}
+		}
+	}
+}
+
+static bool slot_trace_cond_active(Graphics::WindowPresentStats* stats_out)
+{
+	if (!slot_trace_env())
+	{
+		return false;
+	}
+	Graphics::WindowPresentStats stats {};
+	if (!Graphics::WindowGetPresentStats(&stats) || stats.present < 2200ull)
+	{
+		return false;
+	}
+	if (stats_out != nullptr)
+	{
+		*stats_out = stats;
+	}
+	if (g_slot_trace_stall_present.load() == 0 && stats.ms_since_present >= 2000ull)
+	{
+		g_slot_trace_stall_present.store(stats.present);
+	}
+	return true;
+}
+
+static int slot_trace_register_waiter(uint64_t cond, uint64_t mutex, uint64_t ret, uint64_t cond_h, uint64_t mutex_h)
+{
+	if (!slot_trace_env())
+	{
+		return -1;
+	}
+	for (uint32_t i = 0; i < kSlotTraceWaiterSlots; i++)
+	{
+		uint32_t expected = 0;
+		if (g_slot_trace_waiters[i].live.compare_exchange_strong(expected, 1u))
+		{
+			g_slot_trace_waiters[i].cond.store(cond);
+			g_slot_trace_waiters[i].mutex.store(mutex);
+			g_slot_trace_waiters[i].ret.store(ret);
+			g_slot_trace_waiters[i].cond_h.store(cond_h);
+			g_slot_trace_waiters[i].mutex_h.store(mutex_h);
+			// Prefer the soft-lock worker return range around 0x90173da75.
+			const bool prefer = (ret >= 0x90173d000ull && ret < 0x90173e000ull);
+			if (prefer || g_slot_trace_tracked_cond.load() == 0)
+			{
+				if (cond != 0)
+				{
+					g_slot_trace_tracked_cond.store(cond);
+				}
+			}
+			if (cond != 0 && cond == g_slot_trace_tracked_cond.load())
+			{
+				g_slot_trace_wait_for_tracked.fetch_add(1);
+			}
+			return static_cast<int>(i);
+		}
+	}
+	return -1;
+}
+
+static void slot_trace_unregister_waiter(int slot)
+{
+	if (slot < 0 || static_cast<uint32_t>(slot) >= kSlotTraceWaiterSlots)
+	{
+		return;
+	}
+	g_slot_trace_waiters[static_cast<uint32_t>(slot)].live.store(0);
+}
+
+static uint32_t slot_trace_signal_count(uint64_t cond)
+{
+	for (uint32_t i = 0; i < kSlotTraceSigSlots; i++)
+	{
+		if (g_slot_trace_sigs[i].cond.load() == cond)
+		{
+			return g_slot_trace_sigs[i].count.load();
+		}
+	}
+	return 0;
+}
+
+bool PthreadGetCondWaitDiagnostics(PthreadCondWaitDiagnostics* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+	if (!slot_trace_env())
+	{
+		return false;
+	}
+
+	out->enabled         = true;
+	out->tracked_cond    = g_slot_trace_tracked_cond.load();
+	out->tracked_waits   = g_slot_trace_wait_for_tracked.load();
+	out->tracked_signals = g_slot_trace_sig_for_tracked.load();
+	for (uint32_t i = 0; i < kSlotTraceWaiterSlots; i++)
+	{
+		if (g_slot_trace_waiters[i].live.load() == 0)
+		{
+			continue;
+		}
+		if (out->blocked_count >= std::size(out->blocked))
+		{
+			break;
+		}
+		auto& waiter         = out->blocked[out->blocked_count++];
+		waiter.cond          = g_slot_trace_waiters[i].cond.load();
+		waiter.mutex         = g_slot_trace_waiters[i].mutex.load();
+		waiter.return_addr   = g_slot_trace_waiters[i].ret.load();
+		waiter.cond_handle   = g_slot_trace_waiters[i].cond_h.load();
+		waiter.mutex_handle  = g_slot_trace_waiters[i].mutex_h.load();
+		waiter.signal_count  = slot_trace_signal_count(waiter.cond);
+	}
+	return true;
+}
+
+bool PthreadGetThreadDiagnostics(PthreadThreadDiagnostics* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+
+	if (g_pthread_context == nullptr)
+	{
+		return false;
+	}
+	auto* pthread_pool = g_pthread_context->GetPthreadPool();
+	if (pthread_pool == nullptr)
+	{
+		return false;
+	}
+
+	out->available = true;
+	pthread_pool->GetDiagnostics(out);
+	return true;
+}
+
+void SlotTraceDumpBlockedCondWaiters()
+{
+	if (!slot_trace_env())
+	{
+		return;
+	}
+	std::fprintf(stderr, "COND_BLOCKED tracked=0x%016" PRIx64 " wait_reg=%u sig_total_trk=%u sig_after_stall=%u\n",
+	             g_slot_trace_tracked_cond.load(), g_slot_trace_wait_for_tracked.load(), g_slot_trace_sig_for_tracked.load(),
+	             g_slot_trace_sig_after_stall.load());
+	for (uint32_t i = 0; i < kSlotTraceWaiterSlots; i++)
+	{
+		if (g_slot_trace_waiters[i].live.load() == 0)
+		{
+			continue;
+		}
+		std::fprintf(stderr,
+		             "COND_BLOCKED[%u] cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64 " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64
+		             " ret=0x%016" PRIx64 "\n",
+		             i, g_slot_trace_waiters[i].cond.load(), g_slot_trace_waiters[i].cond_h.load(),
+		             g_slot_trace_waiters[i].mutex.load(), g_slot_trace_waiters[i].mutex_h.load(),
+		             g_slot_trace_waiters[i].ret.load());
+	}
+	for (uint32_t i = 0; i < kSlotTraceSigSlots; i++)
+	{
+		const uint64_t c = g_slot_trace_sigs[i].cond.load();
+		if (c == 0)
+		{
+			continue;
+		}
+		std::fprintf(stderr, "COND_SIGCNT cond=0x%016" PRIx64 " total=%u after_stall=%u\n", c, g_slot_trace_sigs[i].count.load(),
+		             g_slot_trace_sigs[i].after_stall.load());
+	}
+	std::fflush(stderr);
+}
+
+static void slot_trace_cond_event(const char* kind, PthreadCond* guest_cond, PthreadMutex* guest_mutex, uint64_t ret)
+{
+	Graphics::WindowPresentStats stats {};
+	if (!slot_trace_cond_active(&stats))
+	{
+		return;
+	}
+
+	const uint64_t cond_addr  = reinterpret_cast<uint64_t>(guest_cond);
+	const uint64_t mutex_addr = reinterpret_cast<uint64_t>(guest_mutex);
+	uint64_t       cond_h     = 0;
+	uint64_t       mutex_h    = 0;
+	if (guest_cond != nullptr)
+	{
+		cond_h = *reinterpret_cast<const volatile uint64_t*>(guest_cond);
+	}
+	if (guest_mutex != nullptr)
+	{
+		mutex_h = *reinterpret_cast<const volatile uint64_t*>(guest_mutex);
+	}
+
+	static std::atomic<uint32_t> wait_n {0};
+	static std::atomic<uint32_t> sig_n {0};
+	static std::atomic<uint32_t> bcast_n {0};
+
+	const uint64_t tracked = g_slot_trace_tracked_cond.load();
+	uint32_t       seq     = 0;
+	if (kind[0] == 'W')
+	{
+		seq = wait_n.fetch_add(1);
+		if (tracked == 0 && cond_addr != 0)
+		{
+			g_slot_trace_tracked_cond.store(cond_addr);
+		}
+		if (seq >= 16u && (seq % 8u) != 0u && cond_addr != tracked)
+		{
+			return;
+		}
+	} else if (kind[0] == 'S')
+	{
+		seq = sig_n.fetch_add(1);
+		if (seq >= 32u && (seq % 16u) != 0u && cond_addr != tracked)
+		{
+			return;
+		}
+	} else
+	{
+		seq = bcast_n.fetch_add(1);
+		if (seq >= 16u && (seq % 8u) != 0u && cond_addr != tracked)
+		{
+			return;
+		}
+	}
+
+	std::fprintf(stderr,
+	             "COND_TRACE %s n=%u present=%llu ms_p=%llu ret=0x%016" PRIx64 " cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64
+	             " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64 " tracked=0x%016" PRIx64 " sig_trk=%u sig_stall=%u\n",
+	             kind, seq, static_cast<unsigned long long>(stats.present), static_cast<unsigned long long>(stats.ms_since_present), ret,
+	             cond_addr, cond_h, mutex_addr, mutex_h, g_slot_trace_tracked_cond.load(), g_slot_trace_sig_for_tracked.load(),
+	             g_slot_trace_sig_after_stall.load());
+	std::fflush(stderr);
+}
+
 int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 {
 	PRINT_NAME();
@@ -1789,6 +2198,10 @@ int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
 
 	EXIT_IF(pthread_static_objects == nullptr);
+
+	const auto ret_addr = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+	slot_trace_note_signal(reinterpret_cast<uint64_t>(cond));
+	slot_trace_cond_event("BCAST", cond, nullptr, ret_addr);
 
 	cond = static_cast<PthreadCond*>(pthread_static_objects->CreateObject(cond, PthreadStaticObject::Type::Cond));
 
@@ -1882,6 +2295,10 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	const auto ret_addr = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+	slot_trace_note_signal(reinterpret_cast<uint64_t>(cond));
+	slot_trace_cond_event("SIGNAL", cond, nullptr, ret_addr);
+
 	// Lazily initialize a statically-initialized cond (sentinel), like the other paths.
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
 	EXIT_IF(pthread_static_objects == nullptr);
@@ -1970,6 +2387,10 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 
 	EXIT_IF(pthread_static_objects == nullptr);
 
+	const auto   ret_addr = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+	const uint64_t cond_addr  = reinterpret_cast<uint64_t>(cond);
+	const uint64_t mutex_addr = reinterpret_cast<uint64_t>(mutex);
+
 	cond  = static_cast<PthreadCond*>(pthread_static_objects->CreateObject(cond, PthreadStaticObject::Type::Cond));
 	mutex = static_cast<PthreadMutex*>(pthread_static_objects->CreateObject(mutex, PthreadStaticObject::Type::Mutex));
 
@@ -1981,7 +2402,22 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
 	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
 
+	// Peek handles only after CreateObject resolved static sentinels, and only
+	// under KYTY_SLOT_TRACE — early guest BSS reads crashed boot diagnostics.
+	uint64_t cond_h  = 0;
+	uint64_t mutex_h = 0;
+	int      waiter_slot = -1;
+	if (slot_trace_env())
+	{
+		cond_h  = *reinterpret_cast<const volatile uint64_t*>(cond);
+		mutex_h = *reinterpret_cast<const volatile uint64_t*>(mutex);
+		slot_trace_cond_event("WAIT", cond, mutex, ret_addr);
+		waiter_slot = slot_trace_register_waiter(cond_addr, mutex_addr, ret_addr, cond_h, mutex_h);
+	}
+
 	int result = pthread_cond_wait(&(*cond)->p, &(*mutex)->p);
+
+	slot_trace_unregister_waiter(waiter_slot);
 
 	// printf("\tcond wait: %s, %d\n", (*cond)->name.C_Str(), result);
 
@@ -2035,53 +2471,6 @@ static void* run_thread(void* arg)
 	pthread_cleanup_push(cleanup_thread, thread);
 
 	thread->started = true;
-
-	// #region agent log
-	{
-		const auto entry_addr = reinterpret_cast<uint64_t>(thread->entry);
-		const bool log_thread = (thread->name.ContainsStr(U"tbb") || thread->name.ContainsStr(U"TBB") ||
-		                         (entry_addr >= 0x900000000ULL && entry_addr < 0x901000000ULL));
-		if (log_thread)
-		{
-			if (FILE* f = std::fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log", "a"))
-			{
-				const auto arg_addr = reinterpret_cast<uint64_t>(thread->arg);
-				uint64_t   arg_q0   = 0;
-				uint64_t   arg_q1   = 0;
-				uint64_t   deref_q0 = 0;
-				uint64_t   deref_q1 = 0;
-				if (thread->arg != nullptr)
-				{
-					// Guest heap pointers are host-mapped in the emulator process.
-					arg_q0 = *reinterpret_cast<const uint64_t*>(thread->arg);
-					arg_q1 = *(reinterpret_cast<const uint64_t*>(thread->arg) + 1);
-					if (arg_q0 >= 0x900000000ULL && arg_q0 < 0x920000000ULL)
-					{
-						deref_q0 = *reinterpret_cast<const uint64_t*>(static_cast<uintptr_t>(arg_q0));
-						deref_q1 = *(reinterpret_cast<const uint64_t*>(static_cast<uintptr_t>(arg_q0)) + 1);
-					}
-				}
-				std::fprintf(f,
-				             "{\"sessionId\":\"f08e58\",\"runId\":\"havok-debug\",\"hypothesisId\":\"S\","
-				             "\"location\":\"Pthread.cpp:run_thread\",\"message\":\"guest thread entry\","
-				             "\"data\":{\"name\":\"%s\",\"entry\":%llu,\"arg\":%llu,\"arg_q0\":%llu,\"arg_q1\":%llu,"
-				             "\"deref_q0\":%llu,\"deref_q1\":%llu,\"thread_id\":%d},\"timestamp\":%lld}\n",
-				             thread->name.C_Str(),
-				             static_cast<unsigned long long>(entry_addr),
-				             static_cast<unsigned long long>(arg_addr),
-				             static_cast<unsigned long long>(arg_q0),
-				             static_cast<unsigned long long>(arg_q1),
-				             static_cast<unsigned long long>(deref_q0),
-				             static_cast<unsigned long long>(deref_q1),
-				             thread->unique_id,
-				             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-				                                            std::chrono::system_clock::now().time_since_epoch())
-				                                        .count()));
-				std::fclose(f);
-			}
-		}
-	}
-	// #endregion
 
 	ret = thread->entry(thread->arg);
 
@@ -2139,36 +2528,18 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 		// Host pthread_create may memset/setup a guest-provided stack. Guests
 		// often demote a guard page with mprotect(prot=0) first; leaving that
 		// page PROT_NONE makes libc pthread_create SIGSEGV in host memset.
+		// Ensure the configured stack is host-writable for the create path.
+		// Prefer pthread_attr_getstack — getstackaddr alone can miss stacks set
+		// via setstack and is deprecated.
 		void*  stack_addr = nullptr;
 		size_t stack_size = 0;
 		if (pthread_attr_getstack(&(*attr)->p, &stack_addr, &stack_size) == 0 && stack_addr != nullptr && stack_size != 0)
 		{
 			Core::VirtualMemory::Mode old_mode {};
-			const bool                stack_rw = Core::VirtualMemory::Protect(reinterpret_cast<uint64_t>(stack_addr), stack_size,
-			                                                                  Core::VirtualMemory::Mode::ReadWrite, &old_mode);
-			std::fprintf(stderr, "PthreadCreate reprotect stack=0x%016" PRIx64 " size=0x%zx ok=%d\n",
-			             reinterpret_cast<uint64_t>(stack_addr), stack_size, stack_rw ? 1 : 0);
-			// #region agent log
-			if (name != nullptr && std::strstr(name, "tbb") != nullptr)
-			{
-				if (FILE* f = std::fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log", "a"))
-				{
-					std::fprintf(f,
-					             "{\"sessionId\":\"f08e58\",\"runId\":\"tbb-debug\",\"hypothesisId\":\"T\","
-					             "\"location\":\"Pthread.cpp:PthreadCreate\",\"message\":\"tbb thread create\","
-					             "\"data\":{\"name\":\"%s\",\"entry\":%llu,\"arg\":%llu,\"stack\":%llu,\"stack_size\":%zu,"
-					             "\"stack_rw\":%d},\"timestamp\":%lld}\n",
-					             name, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(entry)),
-					             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(arg)),
-					             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(stack_addr)), stack_size,
-					             stack_rw ? 1 : 0,
-					             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-					                                            std::chrono::system_clock::now().time_since_epoch())
-					                                        .count()));
-					std::fclose(f);
-				}
-			}
-			// #endregion
+			(void)Core::VirtualMemory::Protect(reinterpret_cast<uint64_t>(stack_addr), stack_size,
+			                                   Core::VirtualMemory::Mode::ReadWrite, &old_mode);
+			std::fprintf(stderr, "PthreadCreate reprotect stack=0x%016" PRIx64 " size=0x%zx\n",
+			             reinterpret_cast<uint64_t>(stack_addr), stack_size);
 		}
 
 		result = pthread_create(&(*thread)->p, &(*attr)->p, run_thread, *thread);
@@ -2183,29 +2554,6 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 	// unique_id may still be -1 in the create log until the child runs.
 
 	printf("\tthread create: %s, id = %d, %d\n", (*thread)->name.C_Str(), (*thread)->unique_id, result);
-
-	// #region agent log
-	{
-		static int logged = 0;
-		if (logged++ < 5)
-		{
-			if (FILE* f = std::fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log", "a"))
-			{
-				std::fprintf(f,
-				             "{\"sessionId\":\"f08e58\",\"runId\":\"pre-fix\",\"hypothesisId\":\"H\","
-				             "\"location\":\"Pthread.cpp:PthreadCreate\",\"message\":\"pthread_create\","
-				             "\"data\":{\"name\":\"%s\",\"result\":%d,\"thread\":%llu,\"entry\":%llu},\"timestamp\":%lld}\n",
-				             name != nullptr ? name : "", result,
-				             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(*thread)),
-				             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(entry)),
-				             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-				                                            std::chrono::system_clock::now().time_since_epoch())
-				                                        .count()));
-				std::fclose(f);
-			}
-		}
-	}
-	// #endregion
 
 	pthread_attr_dbg_print(attr);
 
@@ -2659,6 +3007,48 @@ int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rm
 
 	uint64_t nanos = rqtp->tv_sec * 1000000000 + rqtp->tv_nsec;
 
+	// Soft-lock diagnostic (Dead Cells): job pump sleep-polls via Nanosleep while
+	// waiting on guest slot table 0x901c434c8 (0x20-byte entries). Guest VAs are
+	// host-mapped only after load — never read the table before present>=2200.
+	// Opt-in via KYTY_SLOT_TRACE=1. Do not invent EventFlag wakes.
+	if (std::getenv("KYTY_SLOT_TRACE") != nullptr && nanos >= 1000000ull)
+	{
+		Graphics::WindowPresentStats stats {};
+		if (Graphics::WindowGetPresentStats(&stats) && stats.present >= 2200ull)
+		{
+			static std::atomic<uint32_t> ns_logs {0};
+			const uint32_t               n = ns_logs.fetch_add(1);
+			if (n < 64u || (n % 4u) == 0u)
+			{
+				const auto         ret        = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+				constexpr uint64_t kSlotTable  = 0x901c434c8ull;
+				constexpr uint64_t kSlotStride = 0x20ull;
+				std::fprintf(stderr, "SLOT_TRACE ns=%" PRIu64 " ret=0x%016" PRIx64 " n=%u present=%llu\n", nanos, ret, n,
+				             static_cast<unsigned long long>(stats.present));
+				for (uint32_t i = 8; i <= 11; i++)
+				{
+					const auto*    entry = reinterpret_cast<const volatile uint64_t*>(kSlotTable + i * kSlotStride);
+					const uint64_t typ   = entry[0];
+					const uint64_t obj   = entry[1];
+					uint32_t       s0    = 0;
+					uint32_t       s1    = 0;
+					uint64_t       fn    = 0;
+					if (obj >= 0x900000000ull && obj < 0x940000000ull)
+					{
+						const auto* o = reinterpret_cast<const volatile uint32_t*>(obj);
+						s0            = o[0];
+						s1            = o[1];
+						fn            = *reinterpret_cast<const volatile uint64_t*>(obj + 0x10);
+					}
+					std::fprintf(stderr,
+					             "SLOT[%u] typ=0x%" PRIx64 " obj=0x%016" PRIx64 " state=%u/%u fn=0x%016" PRIx64 "\n", i, typ, obj, s0,
+					             s1, fn);
+				}
+				std::fflush(stderr);
+			}
+		}
+	}
+
 	printf("\tnanosleep: %" PRIu64 "\n", nanos);
 
 	Core::Timer t;
@@ -2775,6 +3165,34 @@ int KYTY_SYSV_ABI pthread_join(LibKernel::Pthread thread, void** value)
 	PRINT_NAME();
 
 	return POSIX_PTHREAD_CALL(LibKernel::PthreadJoin(thread, value));
+}
+
+int KYTY_SYSV_ABI pthread_detach(LibKernel::Pthread thread)
+{
+	PRINT_NAME();
+
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadDetach(thread));
+}
+
+void KYTY_SYSV_ABI pthread_exit(void* value)
+{
+	PRINT_NAME();
+
+	LibKernel::PthreadExit(value);
+}
+
+void KYTY_SYSV_ABI pthread_yield()
+{
+	PRINT_NAME();
+
+	LibKernel::PthreadYield();
+}
+
+int KYTY_SYSV_ABI pthread_cond_signal(LibKernel::PthreadCond* cond)
+{
+	PRINT_NAME();
+
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondSignal(cond));
 }
 
 int KYTY_SYSV_ABI pthread_cond_broadcast(LibKernel::PthreadCond* cond)
@@ -2896,56 +3314,7 @@ int KYTY_SYSV_ABI pthread_mutexattr_destroy(LibKernel::PthreadMutexattr* attr)
 	return POSIX_PTHREAD_CALL(LibKernel::PthreadMutexattrDestroy(attr));
 }
 
-LibKernel::Pthread KYTY_SYSV_ABI pthread_self()
-{
-	auto* self = LibKernel::PthreadSelf();
-	// #region agent log
-	{
-		static int logged = 0;
-		if (logged++ < 3)
-		{
-			if (FILE* f = std::fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log", "a"))
-			{
-				std::fprintf(f,
-				             "{\"sessionId\":\"f08e58\",\"runId\":\"pre-fix\",\"hypothesisId\":\"G\","
-				             "\"location\":\"Pthread.cpp:Posix::pthread_self\",\"message\":\"pthread_self\","
-				             "\"data\":{\"self\":%llu,\"is_null\":%d},\"timestamp\":%lld}\n",
-				             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(self)), self == nullptr ? 1 : 0,
-				             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-				                                            std::chrono::system_clock::now().time_since_epoch())
-				                                        .count()));
-				std::fclose(f);
-			}
-		}
-	}
-	// #endregion
-	return self;
-}
-
-int KYTY_SYSV_ABI pthread_detach(LibKernel::Pthread thread)
-{
-	PRINT_NAME();
-	return POSIX_PTHREAD_CALL(LibKernel::PthreadDetach(thread));
-}
-
-void KYTY_SYSV_ABI pthread_exit(void* value)
-{
-	PRINT_NAME();
-	LibKernel::PthreadExit(value);
-}
-
-void KYTY_SYSV_ABI pthread_yield()
-{
-	PRINT_NAME();
-	LibKernel::PthreadYield();
-}
-
-int KYTY_SYSV_ABI pthread_cond_signal(LibKernel::PthreadCond* cond)
-{
-	PRINT_NAME();
-	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondSignal(cond));
-}
-
+// Gen5 Posix_v1 pthread_attr_* NIDs (Astro after package path bring-up).
 int KYTY_SYSV_ABI pthread_attr_init(LibKernel::PthreadAttr* attr)
 {
 	PRINT_NAME();

@@ -56,6 +56,10 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(armv[5-8].*|aarch64|arm64)$")
 		
 	endif()
 	
+	if(APPLE)
+		list(APPEND cpuinfo_src src/arm/mach/init.c src/mach/topology.c)
+	endif()
+
 	if(ANDROID)
 		list(APPEND cpuinfo_src src/arm/android/properties.c)
 	endif()
@@ -100,6 +104,4 @@ endif()
 
 
 target_include_directories(cpuinfo PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-
-
 

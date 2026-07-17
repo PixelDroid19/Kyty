@@ -26,7 +26,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
-#include <ctime>
 #include <limits>
 
 #ifdef KYTY_EMU_ENABLED
@@ -74,6 +73,114 @@ void GraphicsDbgDumpDcb(const char* type, uint32_t num_dw, uint32_t* cmd_buffer)
 		Pm4::DumpPm4PacketStream(&f, cmd_buffer, 0, num_dw);
 		f.Close();
 	}
+}
+
+uint32_t GraphicsPm4PublishFenceProducers(const uint32_t* data, uint32_t num_dw)
+{
+	if (data == nullptr || num_dw == 0)
+	{
+		return 0;
+	}
+
+	uint32_t published = 0;
+	uint32_t i         = 0;
+	while (i < num_dw)
+	{
+		const uint32_t header   = data[i];
+		const uint32_t pkt_type = header >> 30u;
+		if (pkt_type != 3u)
+		{
+			if (pkt_type == 2u || header == 0u)
+			{
+				i += 1;
+				continue;
+			}
+			if (pkt_type == 0u || pkt_type == 1u)
+			{
+				// Type0/Type1 single-body align unit (matches CommandProcessor::Run).
+				i += (i + 1u < num_dw) ? 2u : 1u;
+				continue;
+			}
+			break;
+		}
+
+		const uint32_t total_dw = KYTY_PM4_LEN(header);
+		if (total_dw < 2u || i + total_dw > num_dw)
+		{
+			break;
+		}
+
+		const uint32_t op = (header >> 8u) & 0xffu;
+		const uint32_t r  = KYTY_PM4_R(header);
+		const uint32_t* body = data + i + 1u;
+		const uint32_t  body_dw = total_dw - 1u;
+
+		// Custom Gen5 ReleaseMem: IT_NOP + R_RELEASE_MEM, 7 or 8 dwords total.
+		if (op == Pm4::IT_NOP && r == Pm4::R_RELEASE_MEM && body_dw >= 6u)
+		{
+			const uint32_t data_sel = (body[1] >> 16u) & 0xffu;
+			auto*          dst =
+			    reinterpret_cast<void*>(body[2] | (static_cast<uint64_t>(body[3]) << 32u));
+			const uint64_t value = body[4] | (static_cast<uint64_t>(body[5]) << 32u);
+			if (dst != nullptr)
+			{
+				if (data_sel == 1u)
+				{
+					*static_cast<uint32_t*>(dst) = static_cast<uint32_t>(value);
+					published++;
+				} else if (data_sel == 2u)
+				{
+					*static_cast<uint64_t*>(dst) = value;
+					published++;
+				}
+			}
+		}
+		// Custom Gen5 WriteData: IT_NOP + R_WRITE_DATA.
+		else if (op == Pm4::IT_NOP && r == Pm4::R_WRITE_DATA && body_dw >= 3u)
+		{
+			const uint32_t write_control = body[0];
+			const uint32_t dst_sel       = write_control & 0xffu;
+			auto*          dst =
+			    reinterpret_cast<uint32_t*>(body[1] | (static_cast<uint64_t>(body[2]) << 32u));
+			// Memory destinations observed on Gen5 builders: 1, 2, 4, 5.
+			if (dst != nullptr && (dst_sel == 1u || dst_sel == 2u || dst_sel == 4u || dst_sel == 5u))
+			{
+				const uint32_t increment = (write_control >> 16u) & 0xffu;
+				const uint32_t src_dwords = body_dw - 3u;
+				for (uint32_t n = 0; n < src_dwords; n++)
+				{
+					const uint32_t out_index = (increment == 0u) ? n : 0u;
+					dst[out_index]           = body[3u + n];
+				}
+				if (src_dwords > 0u)
+				{
+					published++;
+				}
+			}
+		}
+		// Standard IT_WRITE_DATA (non-custom).
+		else if (op == Pm4::IT_WRITE_DATA && body_dw >= 3u)
+		{
+			auto*          dst =
+			    reinterpret_cast<uint32_t*>(body[1] | (static_cast<uint64_t>(body[2]) << 32u));
+			if (dst != nullptr)
+			{
+				const uint32_t src_dwords = body_dw - 3u;
+				for (uint32_t n = 0; n < src_dwords; n++)
+				{
+					dst[n] = body[3u + n];
+				}
+				if (src_dwords > 0u)
+				{
+					published++;
+				}
+			}
+		}
+
+		i += total_dw;
+	}
+
+	return published;
 }
 
 namespace Gen4 {
@@ -1402,13 +1509,19 @@ int KYTY_SYSV_ABI GraphicsInit(uint32_t* state, uint32_t ver)
 	printf("\t state = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(state));
 	printf("\t ver   = %u\n", ver);
 
-	EXIT_NOT_IMPLEMENTED(state == nullptr);
+	// Null state is accepted (return OK) so titles that probe early do not hard
+	// abort; non-null must receive version + feature-flag words.
+	if (state == nullptr)
+	{
+		return OK;
+	}
 	// Gen5 tables were authored for AGC ver 8. Other versions currently reuse
 	// those register defaults while their version-specific tables are modeled.
 	if (ver != 8)
 	{
 		printf("\t WARNING: AGC ver %u != 8, using ver-8 register defaults\n", ver);
 	}
+	EXIT_IF(!GraphicsInitWriteGuestState(state, ver));
 
 	return OK;
 }
@@ -2232,6 +2345,70 @@ int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, uin
 	return OK;
 }
 
+// sceAgcCbNop (NID LtTouSCZjHM). SysV: rdi=CommandBuffer*, rsi=num_dw.
+// Encodes a full type-3 NOP of length num_dw (not a bare cursor bump).
+uint32_t* KYTY_SYSV_ABI GraphicsCbNop(CommandBuffer* buf, uint32_t num_dw)
+{
+	PRINT_NAME();
+
+	printf("\t buf    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
+	printf("\t num_dw = %" PRIu32 "\n", num_dw);
+
+	if (buf == nullptr || num_dw < 2u || num_dw > 0x4001u)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(num_dw);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(num_dw, Pm4::IT_NOP, Pm4::R_ZERO);
+	for (uint32_t i = 1; i < num_dw; i++)
+	{
+		cmd[i] = 0;
+	}
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw)
+{
+	// Historical alias: guests resolve LtTouSCZjHM as sceAgcCbNop.
+	return GraphicsCbNop(buf, num_dw);
+}
+
+uint32_t KYTY_SYSV_ABI GraphicsCbNopGetSize(uint32_t size_in_dwords)
+{
+	return 4u * size_in_dwords;
+}
+
+uint32_t KYTY_SYSV_ABI GraphicsCbDispatchGetSize()
+{
+	// GraphicsCbDispatch allocates a fixed 5-dword packet.
+	return 20u;
+}
+
+uint32_t KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirectGetSize(uint32_t num_values)
+{
+	// Header + offset + values: (2 + num_values) dwords.
+	return 4u * num_values + 8u;
+}
+
+uint64_t KYTY_SYSV_ABI GraphicsGetIsTrinityMode()
+{
+	// Non-Pro Prospero reports 0. Do not invent Pro/Trinity features.
+	return 0;
+}
+
+int KYTY_SYSV_ABI GraphicsDebugRaiseException(uint32_t exception_id)
+{
+	PRINT_NAME();
+	printf("\t exception_id = 0x%08" PRIx32 "\n", exception_id);
+	return OK;
+}
+
 int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64_t address_or_offset)
 {
 	PRINT_NAME();
@@ -2256,30 +2433,7 @@ int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64
 	return OK;
 }
 
-// Graphics5 NID LtTouSCZjHM. Captured strict SysV entry:
-//   rdi = CommandBuffer* (bottom/top/cursor_up/cursor_down/callback layout)
-//   rsi = 10 (num dwords)
-//   rdx+ residual (rdx matched CB top once; not treated as an argument)
-// Neighboring import NIDs are SetShRegIndirectPatch* and DcbResetQueue.
-// Matches free-function form of CommandBuffer::AllocateDW used by every
-// packet encoder: reserve space, advance cursor_up, return write pointer.
-uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw)
-{
-	PRINT_NAME();
-
-	printf("\t buf    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
-	printf("\t num_dw = %" PRIu32 "\n", num_dw);
-
-	if (buf == nullptr || num_dw == 0)
-	{
-		return nullptr;
-	}
-
-	buf->DbgDump();
-	return buf->AllocateDW(num_dw);
-}
-
-// Graphics5 NID Lkf86B98qPc: sceAgcGetPacketSize — type-3 PM4 length in dwords.
+// sceAgcGetPacketSize (NID Lkf86B98qPc): type-3 header → dword length.
 uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 {
 	PRINT_NAME();
@@ -2294,11 +2448,9 @@ uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 	const uint32_t header = cmd[0];
 	printf("\t header = 0x%08" PRIx32 "\n", header);
 
-	// Type-3 PM4 packet (top 2 bits = 0b11). Reject non-packets rather than
-	// inventing a size for random memory.
 	if ((header >> 30u) != 3u)
 	{
-		EXIT("GraphicsGetDataPacketSizeDw: not a type-3 PM4 header: 0x%08" PRIx32 "\n", header);
+		return 0;
 	}
 
 	const uint32_t size_dw = KYTY_PM4_LEN(header);
@@ -2307,6 +2459,7 @@ uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 }
 
 // sceAgcDmaDataPatchSetDstAddressOrOffset (NID IxYiarKlXxM).
+// R_DMA_DATA layout: +0 header, +16/+20 destination address lo/hi.
 int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetDstAddressOrOffset(uint32_t* cmd, uint64_t destination_address)
 {
 	PRINT_NAME();
@@ -2337,6 +2490,7 @@ int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(uint32
 }
 
 // sceAgcWaitRegMemPatchAddress (NID 3KDcnM3lrcU).
+// IT_WAIT_REG_MEM: address at +8; custom R_WAIT_MEM_*: address at +4.
 int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t address)
 {
 	PRINT_NAME();
@@ -2352,8 +2506,8 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t addr
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	const uint32_t dw = byte_off / 4u;
-	cmd[dw]           = static_cast<uint32_t>(address & 0xffffffffu);
-	cmd[dw + 1]       = static_cast<uint32_t>((address >> 32u) & 0xffffffffu);
+	cmd[dw]     = static_cast<uint32_t>(address & 0xffffffffu);
+	cmd[dw + 1] = static_cast<uint32_t>((address >> 32u) & 0xffffffffu);
 	return OK;
 }
 
@@ -2367,15 +2521,6 @@ int KYTY_SYSV_ABI GraphicsAgcDriverUnknownKRzWekV120()
 	// Real semantics unknown; return success so the draw path continues.
 	PRINT_NAME();
 	return OK;
-}
-
-uint64_t KYTY_SYSV_ABI GraphicsGetIsTrinityMode()
-{
-	// Non-Pro Prospero reports 0. Do not invent Pro/Trinity features.
-	// #region agent log
-	{FILE*f=fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log","a");if(f){fprintf(f,"{\"sessionId\":\"f08e58\",\"runId\":\"post-fix\",\"hypothesisId\":\"M\",\"location\":\"Graphics.cpp:GraphicsGetIsTrinityMode\",\"message\":\"trinity query\",\"data\":{\"result\":0},\"timestamp\":%lld}\n",(long long)time(nullptr)*1000);fclose(f);}}
-	// #endregion
-	return 0;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, uint32_t offset, const uint32_t* values, uint32_t num_values)
@@ -2502,25 +2647,22 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 	// packed into the control dword; the CP may still treat clock/immediate
 	// writes as non-interrupting label publishes.
 	EXIT_NOT_IMPLEMENTED(interrupt > 3);
-	// Custom R_RELEASE_MEM is a fixed 7-dword envelope (header + 6 body). CP
-	// accepts only 0xc0051060; WaitMem neighbor resolution and EopPatch use
-	// the same size. interrupt_ctx_id has no field in that layout — refuse
-	// non-zero until a captured wider packet is evidenced.
-	EXIT_NOT_IMPLEMENTED(interrupt_ctx_id != 0);
+	EXIT_NOT_IMPLEMENTED((interrupt_ctx_id & ~0x07ffffffu) != 0);
 
 	buf->DbgDump();
 
-	auto* cmd = buf->AllocateDW(7);
+	auto* cmd = buf->AllocateDW(8);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
-	cmd[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
 	cmd[1] = action | (static_cast<uint32_t>(cache_policy) << 8u);
 	cmd[2] = gcr_cntl | (static_cast<uint32_t>(data_sel) << 16u) | (static_cast<uint32_t>(interrupt) << 24u);
 	cmd[3] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(address) & 0xffffffffu);
 	cmd[4] = static_cast<uint32_t>((reinterpret_cast<uint64_t>(address) >> 32u) & 0xffffffffu);
 	cmd[5] = static_cast<uint32_t>(data & 0xffffffffu);
 	cmd[6] = static_cast<uint32_t>((data >> 32u) & 0xffffffffu);
+	cmd[7] = interrupt_ctx_id & 0x07ffffffu;
 
 	return cmd;
 }
@@ -2677,6 +2819,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t inde
 	printf("\t cache_policy = 0x%" PRIx8 "\n", cache_policy);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+	EXIT_NOT_IMPLEMENTED(cache_policy != 0);
 
 	buf->DbgDump();
 
@@ -2690,25 +2833,266 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t inde
 	return cmd;
 }
 
-uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t index_addr)
+static uint32_t decode_draw_index_initiator(uint64_t modifier)
+{
+	if ((modifier & (1ull << 32u)) != 0)
+	{
+		return 0;
+	}
+
+	return (static_cast<uint32_t>(modifier) >> 3u) & 0x20u;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t index_count, uint64_t modifier)
 {
 	PRINT_NAME();
-	printf("\t index_addr = 0x%016" PRIx64 "\n", index_addr);
 
-	if (buf == nullptr || (index_addr & 1u) != 0)
+	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
+	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+	// Observed Gen5 modifiers: 0x40000000 (default) and 0x80000000 (Astro
+	// post-compute path). Other bits remain unsupported until evidenced.
+	EXIT_NOT_IMPLEMENTED(modifier != 0x40000000ull && modifier != 0x80000000ull);
+
+	buf->DbgDump();
+
+	// IT_DRAW_INDEX_AUTO consumes the decoded draw initiator, not the AGC
+	// modifier itself. Both observed Gen5 modifiers currently decode to the
+	// standard auto-draw initiator value 2.
+	auto* cmd = buf->AllocateDW(3);
+
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	cmd[0] = KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u);
+	cmd[1] = index_count;
+	cmd[2] = decode_draw_index_initiator(modifier) | 0x2u;
+
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoWithBase(CommandBuffer* buf, uint32_t base_vertex, uint32_t index_count,
+                                                         uint64_t modifier)
+{
+	PRINT_NAME();
+
+	printf("\t base_vertex = 0x%" PRIx32 "\n", base_vertex);
+	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
+	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+
+	// Captured Dreaming Sarah: base_vertex is always 0. Non-zero base needs a
+	// separate PM4 encoding before it can be accepted.
+	EXIT_NOT_IMPLEMENTED(base_vertex != 0);
+
+	return GraphicsDcbDrawIndexAuto(buf, index_count, modifier);
+}
+
+// sceAgcDcbDrawIndexOffset — NID B+aG9DUnTKA.
+// Packet layout (5 DW): header, index_count, index_offset, index_count, flags&0xE0000001.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t index_offset, uint32_t index_count, uint32_t flags)
+{
+	PRINT_NAME();
+
+	printf("\t index_offset = 0x%" PRIx32 "\n", index_offset);
+	printf("\t index_count  = 0x%" PRIx32 "\n", index_count);
+	printf("\t flags        = 0x%" PRIx32 "\n", flags);
+
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+
+	buf->DbgDump();
+
+	auto* cmd = buf->AllocateDW(5);
+
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	cmd[0] = KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u);
+	cmd[1] = index_count;
+	cmd[2] = index_offset;
+	cmd[3] = index_count;
+	cmd[4] = flags & 0xE0000001u;
+
+	return cmd;
+}
+
+// AGC indexed draw: sceAgcDcbDrawIndex(dcb, index_count, index_addr, modifier).
+// Emits the same R_DRAW_INDEX custom PM4 packet (header 0xC008100C, 9 DW) that the
+// command-processor's cp_op_draw_index handler consumes.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_count, const void* index_addr, uint64_t modifier)
+{
+	PRINT_NAME();
+
+	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
+	printf("\t index_addr  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
+	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+
+	buf->DbgDump();
+
+	// Header 0xC008100C == KYTY_PM4(10, IT_NOP, R_DRAW_INDEX): 10 DW total.
+	auto* cmd = buf->AllocateDW(10);
+
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	auto addr = reinterpret_cast<uint64_t>(index_addr);
+
+	cmd[0] = KYTY_PM4(10, Pm4::IT_NOP, Pm4::R_DRAW_INDEX);
+	cmd[1] = index_count;
+	cmd[2] = static_cast<uint32_t>(addr & 0xffffffffu);
+	cmd[3] = static_cast<uint32_t>((addr >> 32u) & 0xffffffffu);
+	cmd[4] = 0; // flags
+	cmd[5] = 1; // type (indexed)
+	cmd[6] = 0;
+	cmd[7] = 0;
+	cmd[8] = 0;
+	cmd[9] = 0;
+
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address)
+{
+	PRINT_NAME();
+
+	printf("\t event_type = 0x%02" PRIx8 "\n", event_type);
+	printf("\t address    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
+
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+	EXIT_NOT_IMPLEMENTED(address != nullptr);
+	EXIT_NOT_IMPLEMENTED(event_type > 0x3fu);
+
+	buf->DbgDump();
+
+	auto* cmd = buf->AllocateDW(2);
+
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	uint32_t event_index = 0;
+
+	cmd[0] = KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u);
+	cmd[1] = (event_index << 8u) | event_type;
+
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf)
+{
+	// GNM/AGC stallCommandBufferParser: fixed EVENT_WRITE CS partial flush (0x07).
+	PRINT_NAME();
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+	constexpr uint32_t kCsPartialFlush = 0x07u;
+	cmd[0]                             = KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u);
+	cmd[1]                             = kCsPartialFlush;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t destination, uint8_t destination_cache_policy, uint8_t source,
+                                           uint64_t destination_address, uint8_t source_cache_policy, uint8_t control4,
+                                           uint64_t source_address, uint32_t byte_count, uint8_t control7, uint8_t control8,
+                                           uint8_t control9)
+{
+	// sceAgcDcbDmaData / sceAgcAcbDmaData custom R_DMA_DATA packet layout.
+	PRINT_NAME();
+	printf("\t destination              = 0x%02" PRIx8 "\n", destination);
+	printf("\t destination_cache_policy = 0x%02" PRIx8 "\n", destination_cache_policy);
+	printf("\t source                   = 0x%02" PRIx8 "\n", source);
+	printf("\t destination_address      = 0x%016" PRIx64 "\n", destination_address);
+	printf("\t source_cache_policy      = 0x%02" PRIx8 "\n", source_cache_policy);
+	printf("\t source_address           = 0x%016" PRIx64 "\n", source_address);
+	printf("\t byte_count               = %" PRIu32 "\n", byte_count);
+
+	if (buf == nullptr || byte_count == 0 || (byte_count & 3u) != 0)
 	{
 		return nullptr;
 	}
 
 	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(3);
+	auto* cmd = buf->AllocateDW(8);
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA);
+	cmd[1] = static_cast<uint32_t>(destination) | (static_cast<uint32_t>(destination_cache_policy) << 8u) |
+	         (static_cast<uint32_t>(source) << 16u) | (static_cast<uint32_t>(source_cache_policy) << 24u);
+	cmd[2] = static_cast<uint32_t>(control4) | (static_cast<uint32_t>(control7) << 8u) | (static_cast<uint32_t>(control8) << 16u) |
+	         (static_cast<uint32_t>(control9) << 24u);
+	cmd[3] = byte_count;
+	cmd[4] = static_cast<uint32_t>(destination_address & 0xffffffffu);
+	cmd[5] = static_cast<uint32_t>((destination_address >> 32u) & 0xffffffffu);
+	cmd[6] = static_cast<uint32_t>(source_address & 0xffffffffu);
+	cmd[7] = static_cast<uint32_t>((source_address >> 32u) & 0xffffffffu);
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uint32_t cb_db_op, uint32_t gcr_cntl,
+                                              const volatile void* base, uint64_t size_bytes, uint32_t poll_cycles)
+{
+	PRINT_NAME();
+
+	printf("\t engine      = 0x%02" PRIx8 "\n", engine);
+	printf("\t cb_db_op    = 0x%08" PRIx32 "\n", cb_db_op);
+	printf("\t gcr_cntl    = 0x%08" PRIx32 "\n", gcr_cntl);
+	printf("\t base        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
+	printf("\t size_bytes  = 0x%016" PRIx64 "\n", size_bytes);
+	printf("\t poll_cycles = %" PRIu32 "\n", poll_cycles);
+
+	bool no_size = (static_cast<int64_t>(size_bytes) == -1);
+	auto vaddr   = reinterpret_cast<uint64_t>(base);
+
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+	// AGC ver 10 issues ACQUIRE_MEM (GCR cache ops) with finer-than-256B granularity;
+	// the PM4 encoding is size>>8 / addr>>8, so sub-256B bits are dropped. That is
+	// acceptable for our coherency model — warn instead of aborting.
+	if (!no_size && (size_bytes & 0xffu) != 0)
+	{
+		printf("\t WARNING: ACQUIRE_MEM size 0x%" PRIx64 " not 256B-aligned\n", size_bytes);
+	}
+	EXIT_NOT_IMPLEMENTED(!no_size && (size_bytes >> 40u) != 0);
+	if ((vaddr & 0xffu) != 0)
+	{
+		printf("\t WARNING: ACQUIRE_MEM base 0x%" PRIx64 " not 256B-aligned\n", vaddr);
+	}
+	EXIT_NOT_IMPLEMENTED((vaddr >> 40u) != 0);
+	EXIT_NOT_IMPLEMENTED(engine > 1);
+
+	buf->DbgDump();
+
+	auto* cmd = buf->AllocateDW(8);
+
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_ACQUIRE_MEM);
+	cmd[1] = (static_cast<uint32_t>(engine) << 31u) | cb_db_op;
+	cmd[2] = (no_size ? 0 : size_bytes >> 8u);
+	cmd[3] = 0;
+	cmd[4] = vaddr >> 8u;
+	cmd[5] = 0;
+	cmd[6] = poll_cycles / 40;
+	cmd[7] = gcr_cntl;
+
+	return cmd;
+}
+
+// Gen5 NID qj7QZpgr9Uw: append a single Type-2 PM4 pad dword (0x80000000).
+// Observed after compute/context setup; CP treats Type-2 as header-only filler.
+uint32_t* KYTY_SYSV_ABI GraphicsCbType2Pad(CommandBuffer* buf)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(1);
 	if (cmd == nullptr)
 	{
 		return nullptr;
 	}
-	cmd[0] = KYTY_PM4(3, Pm4::IT_INDEX_BASE, 0u);
-	cmd[1] = static_cast<uint32_t>(index_addr & 0xffffffffu);
-	cmd[2] = static_cast<uint32_t>((index_addr >> 32u) & 0xffffffffu);
+	cmd[0] = 0x80000000u;
 	return cmd;
 }
 
@@ -2845,306 +3229,6 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_
 	return cmd;
 }
 
-uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count)
-{
-	PRINT_NAME();
-	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
-
-	if (buf == nullptr)
-	{
-		return nullptr;
-	}
-
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(2);
-	if (cmd == nullptr)
-	{
-		return nullptr;
-	}
-	cmd[0] = KYTY_PM4(2, Pm4::IT_INDEX_BUFFER_SIZE, 0u);
-	cmd[1] = index_count;
-	return cmd;
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances)
-{
-	PRINT_NAME();
-	printf("\t num_instances = 0x%" PRIx32 "\n", num_instances);
-
-	if (buf == nullptr)
-	{
-		return nullptr;
-	}
-
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(2);
-	if (cmd == nullptr)
-	{
-		return nullptr;
-	}
-	cmd[0] = KYTY_PM4(2, Pm4::IT_NUM_INSTANCES, 0u);
-	cmd[1] = num_instances;
-	return cmd;
-}
-
-static uint32_t decode_draw_index_initiator(uint64_t modifier)
-{
-	if ((modifier & (1ull << 32u)) != 0)
-	{
-		return 0;
-	}
-
-	return (static_cast<uint32_t>(modifier) >> 3u) & 0x20u;
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t index_count, uint64_t modifier)
-{
-	PRINT_NAME();
-
-	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
-	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
-
-	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	// Observed Gen5 modifiers: 0x40000000 (default) and 0x80000000 (Astro
-	// post-compute path). Other bits remain unsupported until evidenced.
-	EXIT_NOT_IMPLEMENTED(modifier != 0x40000000ull && modifier != 0x80000000ull);
-
-	buf->DbgDump();
-
-	// IT_DRAW_INDEX_AUTO consumes the decoded draw initiator, not the AGC
-	// modifier itself. Both observed Gen5 modifiers currently decode to the
-	// standard auto-draw initiator value 2.
-	auto* cmd = buf->AllocateDW(3);
-
-	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
-
-	cmd[0] = KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u);
-	cmd[1] = index_count;
-	cmd[2] = decode_draw_index_initiator(modifier) | 0x2u;
-
-	return cmd;
-}
-
-// sceAgcDcbDrawIndexOffset — NID B+aG9DUnTKA.
-// Packet layout (5 DW): header, index_count, index_offset, index_count, flags&0xE0000001.
-uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t index_offset, uint32_t index_count, uint32_t flags)
-{
-	PRINT_NAME();
-
-	printf("\t index_offset = 0x%" PRIx32 "\n", index_offset);
-	printf("\t index_count  = 0x%" PRIx32 "\n", index_count);
-	printf("\t flags        = 0x%" PRIx32 "\n", flags);
-
-	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-
-	buf->DbgDump();
-
-	auto* cmd = buf->AllocateDW(5);
-
-	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
-
-	cmd[0] = KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u);
-	cmd[1] = index_count;
-	cmd[2] = index_offset;
-	cmd[3] = index_count;
-	cmd[4] = flags & 0xE0000001u;
-
-	return cmd;
-}
-
-// AGC indexed draw: sceAgcDcbDrawIndex(dcb, index_count, index_addr, modifier).
-// Emits the same R_DRAW_INDEX custom PM4 packet (header 0xC008100C, 9 DW) that the
-// command-processor's cp_op_draw_index handler consumes.
-uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_count, const void* index_addr, uint64_t modifier)
-{
-	PRINT_NAME();
-
-	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
-	printf("\t index_addr  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
-	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
-
-	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-
-	buf->DbgDump();
-
-	// Header 0xC008100C == KYTY_PM4(10, IT_NOP, R_DRAW_INDEX): 10 DW total.
-	auto* cmd = buf->AllocateDW(10);
-
-	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
-
-	auto addr = reinterpret_cast<uint64_t>(index_addr);
-
-	cmd[0] = KYTY_PM4(10, Pm4::IT_NOP, Pm4::R_DRAW_INDEX);
-	cmd[1] = index_count;
-	cmd[2] = static_cast<uint32_t>(addr & 0xffffffffu);
-	cmd[3] = static_cast<uint32_t>((addr >> 32u) & 0xffffffffu);
-	cmd[4] = 0; // flags
-	cmd[5] = 1; // type (indexed)
-	cmd[6] = 0;
-	cmd[7] = 0;
-	cmd[8] = 0;
-	cmd[9] = 0;
-
-	return cmd;
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address)
-{
-	PRINT_NAME();
-
-	printf("\t event_type = 0x%02" PRIx8 "\n", event_type);
-	printf("\t address    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
-
-	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	EXIT_NOT_IMPLEMENTED(address != nullptr);
-	EXIT_NOT_IMPLEMENTED(event_type > 0x3fu);
-
-	buf->DbgDump();
-
-	auto* cmd = buf->AllocateDW(2);
-
-	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
-
-	uint32_t event_index = 0;
-
-	cmd[0] = KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u);
-	cmd[1] = (event_index << 8u) | event_type;
-
-	return cmd;
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf)
-{
-	// GNM/AGC stallCommandBufferParser: fixed EVENT_WRITE CS partial flush (0x07).
-	PRINT_NAME();
-	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(2);
-	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
-	constexpr uint32_t kCsPartialFlush = 0x07u;
-	cmd[0]                             = KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u);
-	cmd[1]                             = kCsPartialFlush;
-	return cmd;
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t destination, uint8_t destination_cache_policy, uint8_t source,
-                                           uint64_t destination_address, uint8_t source_cache_policy, uint8_t control4,
-                                           uint64_t source_address, uint32_t byte_count, uint8_t control7, uint8_t control8,
-                                           uint8_t control9)
-{
-	PRINT_NAME();
-	printf("\t destination              = 0x%02" PRIx8 "\n", destination);
-	printf("\t destination_cache_policy = 0x%02" PRIx8 "\n", destination_cache_policy);
-	printf("\t source                   = 0x%02" PRIx8 "\n", source);
-	printf("\t destination_address      = 0x%016" PRIx64 "\n", destination_address);
-	printf("\t source_cache_policy      = 0x%02" PRIx8 "\n", source_cache_policy);
-	printf("\t source_address           = 0x%016" PRIx64 "\n", source_address);
-	printf("\t byte_count               = %" PRIu32 "\n", byte_count);
-
-	if (buf == nullptr || byte_count == 0 || (byte_count & 3u) != 0)
-	{
-		return nullptr;
-	}
-
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(8);
-	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
-
-	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA);
-	cmd[1] = static_cast<uint32_t>(destination) | (static_cast<uint32_t>(destination_cache_policy) << 8u) |
-	         (static_cast<uint32_t>(source) << 16u) | (static_cast<uint32_t>(source_cache_policy) << 24u);
-	cmd[2] = static_cast<uint32_t>(control4) | (static_cast<uint32_t>(control7) << 8u) | (static_cast<uint32_t>(control8) << 16u) |
-	         (static_cast<uint32_t>(control9) << 24u);
-	cmd[3] = byte_count;
-	cmd[4] = static_cast<uint32_t>(destination_address & 0xffffffffu);
-	cmd[5] = static_cast<uint32_t>((destination_address >> 32u) & 0xffffffffu);
-	cmd[6] = static_cast<uint32_t>(source_address & 0xffffffffu);
-	cmd[7] = static_cast<uint32_t>((source_address >> 32u) & 0xffffffffu);
-	return cmd;
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsAcbAcquireMem(CommandBuffer* buf, uint32_t gcr_cntl, const volatile void* base, uint64_t size_bytes,
-                                              uint32_t poll_cycles)
-{
-	// ACB form fixes engine=1 (ME) and cb_db_op=0.
-	return GraphicsDcbAcquireMem(buf, 1, 0, gcr_cntl, base, size_bytes, poll_cycles);
-}
-
-// Gen5 NID qj7QZpgr9Uw: append a single Type-2 PM4 pad dword (0x80000000).
-// Observed after compute/context setup; CP treats Type-2 as header-only filler.
-uint32_t* KYTY_SYSV_ABI GraphicsCbType2Pad(CommandBuffer* buf)
-{
-	PRINT_NAME();
-
-	if (buf == nullptr)
-	{
-		return nullptr;
-	}
-
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(1);
-	if (cmd == nullptr)
-	{
-		return nullptr;
-	}
-	cmd[0] = 0x80000000u;
-	return cmd;
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address)
-{
-	return GraphicsDcbEventWrite(buf, event_type, address);
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uint32_t cb_db_op, uint32_t gcr_cntl,
-                                              const volatile void* base, uint64_t size_bytes, uint32_t poll_cycles)
-{
-	PRINT_NAME();
-
-	printf("\t engine      = 0x%02" PRIx8 "\n", engine);
-	printf("\t cb_db_op    = 0x%08" PRIx32 "\n", cb_db_op);
-	printf("\t gcr_cntl    = 0x%08" PRIx32 "\n", gcr_cntl);
-	printf("\t base        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
-	printf("\t size_bytes  = 0x%016" PRIx64 "\n", size_bytes);
-	printf("\t poll_cycles = %" PRIu32 "\n", poll_cycles);
-
-	bool no_size = (static_cast<int64_t>(size_bytes) == -1);
-	auto vaddr   = reinterpret_cast<uint64_t>(base);
-
-	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	// AGC ver 10 issues ACQUIRE_MEM (GCR cache ops) with finer-than-256B granularity;
-	// the PM4 encoding is size>>8 / addr>>8, so sub-256B bits are dropped. That is
-	// acceptable for our coherency model — warn instead of aborting.
-	if (!no_size && (size_bytes & 0xffu) != 0)
-	{
-		printf("\t WARNING: ACQUIRE_MEM size 0x%" PRIx64 " not 256B-aligned\n", size_bytes);
-	}
-	EXIT_NOT_IMPLEMENTED(!no_size && (size_bytes >> 40u) != 0);
-	if ((vaddr & 0xffu) != 0)
-	{
-		printf("\t WARNING: ACQUIRE_MEM base 0x%" PRIx64 " not 256B-aligned\n", vaddr);
-	}
-	EXIT_NOT_IMPLEMENTED((vaddr >> 40u) != 0);
-	EXIT_NOT_IMPLEMENTED(engine > 1);
-
-	buf->DbgDump();
-
-	auto* cmd = buf->AllocateDW(8);
-
-	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
-
-	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_ACQUIRE_MEM);
-	cmd[1] = (static_cast<uint32_t>(engine) << 31u) | cb_db_op;
-	cmd[2] = (no_size ? 0 : size_bytes >> 8u);
-	cmd[3] = 0;
-	cmd[4] = vaddr >> 8u;
-	cmd[5] = 0;
-	cmd[6] = poll_cycles / 40;
-	cmd[7] = gcr_cntl;
-
-	return cmd;
-}
-
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
                                              const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm)
 {
@@ -3239,6 +3323,203 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 	return GraphicsDcbWaitRegMem(buf, size, compare_function, 0, cache_policy, address, reference, mask, poll_cycles);
 }
 
+uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address)
+{
+	return GraphicsDcbEventWrite(buf, event_type, address);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
+                                             const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm)
+{
+	return GraphicsDcbWriteData(buf, dst, cache_policy, address_or_offset, data, num_dwords, increment, write_confirm);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbAcquireMem(CommandBuffer* buf, uint32_t gcr_cntl, const volatile void* base, uint64_t size_bytes,
+                                              uint32_t poll_cycles)
+{
+	// ACB form fixes engine=1 (ME) and cb_db_op=0.
+	return GraphicsDcbAcquireMem(buf, 1, 0, gcr_cntl, base, size_bytes, poll_cycles);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbResetQueue(CommandBuffer* buf, uint32_t op)
+{
+	PRINT_NAME();
+	printf("\t op = 0x%08" PRIx32 "\n", op);
+
+	if (buf == nullptr || (op & ~0x1c2u) != 0)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_DISPATCH_RESET);
+	cmd[1] = 0;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dst_cache_policy, uint64_t dst_address, uint8_t src,
+                                            uint8_t src_cache_policy, uint64_t src_address_or_immediate, uint8_t item_size,
+                                            uint8_t write_confirm)
+{
+	PRINT_NAME();
+	printf("\t dst=0x%02" PRIx8 " src=0x%02" PRIx8 " dst_addr=0x%016" PRIx64 " src=0x%016" PRIx64 " item=%u conf=%u\n", dst, src,
+	       dst_address, src_address_or_immediate, item_size, write_confirm);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(6);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	cmd[0] = KYTY_PM4(6, Pm4::IT_COPY_DATA, 0u);
+	cmd[1] = ((static_cast<uint32_t>(src) >> 1u) & 0xfu) | (((static_cast<uint32_t>(dst) >> 1u) & 0xfu) << 8u) |
+	         ((static_cast<uint32_t>(src_cache_policy) & 0x3u) << 13u) | ((static_cast<uint32_t>(item_size) & 0x1u) << 16u) |
+	         ((static_cast<uint32_t>(write_confirm) & 0x1u) << 20u) | ((static_cast<uint32_t>(dst_cache_policy) & 0x3u) << 25u) |
+	         ((static_cast<uint32_t>(src) & 0x1u) << 30u);
+	cmd[2] = static_cast<uint32_t>(src_address_or_immediate & 0xffffffffu);
+	cmd[3] = static_cast<uint32_t>((src_address_or_immediate >> 32u) & 0xffffffffu);
+	cmd[4] = static_cast<uint32_t>(dst_address & 0xffffffffu);
+	cmd[5] = static_cast<uint32_t>((dst_address >> 32u) & 0xffffffffu);
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dst_cache_policy, uint64_t dst_address, uint8_t src,
+                                            uint8_t src_cache_policy, uint64_t src_address_or_immediate, uint8_t item_size,
+                                            uint8_t write_confirm)
+{
+	// ACB memory-src encoding uses src==5 for a shifted DCB form.
+	const auto dcb_src = (src == 5 ? static_cast<uint8_t>(5u << 1u) : src);
+	return GraphicsDcbCopyData(buf, dst, dst_cache_policy, dst_address, dcb_src, src_cache_policy, src_address_or_immediate, item_size,
+	                           write_confirm);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbPushMarker(CommandBuffer* buf, const char* str, uint32_t /*color*/)
+{
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+	if (str == nullptr)
+	{
+		str = "";
+	}
+
+	const auto len            = strlen(str) + 1;
+	const auto payload_dwords = static_cast<uint32_t>((len + 3) / 4);
+	const auto size           = 1u + (payload_dwords == 0 ? 1u : payload_dwords);
+	auto*      cmd            = buf->AllocateDW(size);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_PUSH_MARKER);
+	memset(cmd + 1, 0, static_cast<size_t>(size - 1) * sizeof(uint32_t));
+	memcpy(cmd + 1, str, len);
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbPopMarker(CommandBuffer* buf)
+{
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_POP_MARKER);
+	cmd[1] = 0;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbPushMarker(CommandBuffer* buf, const char* str, uint32_t color)
+{
+	return GraphicsDcbPushMarker(buf, str, color);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbPopMarker(CommandBuffer* buf)
+{
+	return GraphicsDcbPopMarker(buf);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t index_addr)
+{
+	PRINT_NAME();
+	printf("\t index_addr = 0x%016" PRIx64 "\n", index_addr);
+
+	if (buf == nullptr || (index_addr & 1u) != 0)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(3);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(3, Pm4::IT_INDEX_BASE, 0u);
+	cmd[1] = static_cast<uint32_t>(index_addr & 0xffffffffu);
+	cmd[2] = static_cast<uint32_t>((index_addr >> 32u) & 0xffffffffu);
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count)
+{
+	PRINT_NAME();
+	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_INDEX_BUFFER_SIZE, 0u);
+	cmd[1] = index_count;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances)
+{
+	PRINT_NAME();
+	printf("\t num_instances = 0x%" PRIx32 "\n", num_instances);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_NUM_INSTANCES, 0u);
+	cmd[1] = num_instances;
+	return cmd;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbGetLodStats(CommandBuffer* buf, uint8_t cache_policy, const volatile void* buffer,
                                                uint32_t buffer_size_in_bytes, uint32_t reset_count, uint8_t force_reset,
                                                uint8_t report_and_reset, uint32_t reporting_interval_in_100k_clocks)
@@ -3295,80 +3576,6 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_ou
 	cmd[5] = static_cast<uint32_t>((static_cast<uint64_t>(flip_arg) >> 32u) & 0xffffffffu);
 
 	return cmd;
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsAcbResetQueue(CommandBuffer* buf, uint32_t op)
-{
-	PRINT_NAME();
-	printf("\t op = 0x%08" PRIx32 "\n", op);
-
-	if (buf == nullptr || (op & ~0x1c2u) != 0)
-	{
-		return nullptr;
-	}
-
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(2);
-	if (cmd == nullptr)
-	{
-		return nullptr;
-	}
-	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_DISPATCH_RESET);
-	cmd[1] = 0;
-	return cmd;
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsDcbPushMarker(CommandBuffer* buf, const char* str, uint32_t /*color*/)
-{
-	if (buf == nullptr)
-	{
-		return nullptr;
-	}
-	if (str == nullptr)
-	{
-		str = "";
-	}
-
-	const auto len            = strlen(str) + 1;
-	const auto payload_dwords = static_cast<uint32_t>((len + 3) / 4);
-	const auto size           = 1u + (payload_dwords == 0 ? 1u : payload_dwords);
-	auto*      cmd            = buf->AllocateDW(size);
-	if (cmd == nullptr)
-	{
-		return nullptr;
-	}
-
-	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_PUSH_MARKER);
-	memset(cmd + 1, 0, static_cast<size_t>(size - 1) * sizeof(uint32_t));
-	memcpy(cmd + 1, str, len);
-	return cmd;
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsDcbPopMarker(CommandBuffer* buf)
-{
-	if (buf == nullptr)
-	{
-		return nullptr;
-	}
-
-	auto* cmd = buf->AllocateDW(2);
-	if (cmd == nullptr)
-	{
-		return nullptr;
-	}
-	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_POP_MARKER);
-	cmd[1] = 0;
-	return cmd;
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsAcbPushMarker(CommandBuffer* buf, const char* str, uint32_t color)
-{
-	return GraphicsDcbPushMarker(buf, str, color);
-}
-
-uint32_t* KYTY_SYSV_ABI GraphicsAcbPopMarker(CommandBuffer* buf)
-{
-	return GraphicsDcbPopMarker(buf);
 }
 
 } // namespace Gen5
@@ -3573,9 +3780,6 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
 int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata)
 {
 	PRINT_NAME();
-	// #region agent log
-	{FILE*f=fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log","a");if(f){fprintf(f,"{\"sessionId\":\"f08e58\",\"runId\":\"post-fix\",\"hypothesisId\":\"N\",\"location\":\"Graphics.cpp:GraphicsDriverAddEqEvent\",\"message\":\"add eq event\",\"data\":{\"eq\":%llu,\"id\":%d},\"timestamp\":%lld}\n",(unsigned long long)reinterpret_cast<uint64_t>(eq),id,(long long)time(nullptr)*1000);fclose(f);}}
-	// #endregion
 	if (eq == nullptr)
 	{
 		return LibKernel::KERNEL_ERROR_EBADF;

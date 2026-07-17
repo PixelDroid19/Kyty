@@ -9,8 +9,6 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
-#include <chrono>
-#include <cstdio>
 #include <unordered_map>
 
 #ifdef KYTY_EMU_ENABLED
@@ -380,7 +378,8 @@ int KYTY_SYSV_ABI KernelCancelSema(KernelSema sem, int count, int* threads)
 
 } // namespace Kyty::Libs::LibKernel::Semaphore
 
-// Gen5 Posix semaphore exports (libkernel Posix_v1). Guest object is 16 bytes.
+// Gen5 Posix semaphore exports (libkernel Posix_v1). Guest object is 16 bytes:
+// magic, nameid, has_waiters, count, flags. Host private state tracks waiters.
 namespace Kyty::Libs::Posix {
 
 LIB_NAME("Posix", "libkernel");
@@ -480,7 +479,7 @@ private:
 	uint32_t       m_waiters = 0;
 };
 
-Core::Mutex                                         g_posix_sem_mutex;
+Core::Mutex                                  g_posix_sem_mutex;
 std::unordered_map<PosixSemGuest*, PosixSemPrivate*> g_posix_sems;
 
 static int SetErrnoReturn(int posix_errno)
@@ -505,23 +504,6 @@ static PosixSemPrivate* LookupSem(void* sem)
 int KYTY_SYSV_ABI sem_init(void* sem, int pshared, unsigned int value)
 {
 	PRINT_NAME();
-	// #region agent log
-	{
-		const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-		                    std::chrono::system_clock::now().time_since_epoch())
-		                    .count();
-		if (FILE* f = std::fopen("/home/monasterios/.cursor/debug-logs/debug-0fe784.log", "a"))
-		{
-			std::fprintf(f,
-			             "{\"sessionId\":\"0fe784\",\"runId\":\"post-fix\",\"hypothesisId\":\"F\","
-			             "\"location\":\"Semaphore.cpp:sem_init\",\"message\":\"posix sem_init\","
-			             "\"data\":{\"sem\":%llu,\"pshared\":%d,\"value\":%u},\"timestamp\":%lld}\n",
-			             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(sem)), pshared, value,
-			             static_cast<long long>(ts));
-			std::fclose(f);
-		}
-	}
-	// #endregion
 	if (sem == nullptr || value > static_cast<unsigned int>(kPosixSemValueMax))
 	{
 		return SetErrnoReturn(POSIX_EINVAL);

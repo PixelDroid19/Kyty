@@ -40,23 +40,30 @@ if env('KYTY_STUB_MISSING') ~= nil or env('KYTY_GFX_PERMISSIVE') ~= nil then
 end
 
 local cfg = {
-	ScreenWidth = 1280;
-	ScreenHeight = 720;
+	ScreenWidth = env_number('KYTY_SCREEN_WIDTH', 1280);
+	ScreenHeight = env_number('KYTY_SCREEN_HEIGHT', 720);
 	Neo = true;
-	VulkanValidationEnabled = false;
-	ShaderValidationEnabled = false;
-	ShaderOptimizationType = 'Performance';
-	ShaderLogDirection = 'Silent';
-	CommandBufferDumpEnabled = false;
-	-- Silent is required for usable host FPS. Console HLE logging can drop a
-	-- Release build from ~40+ FPS to ~1 FPS on the same host/GPU. Use Console
-	-- only when debugging a specific guest call sequence.
-	PrintfDirection = 'Silent';
-	ProfilerDirection = 'None';
+	VulkanValidationEnabled = env_bool('KYTY_VULKAN_VALIDATION', false);
+	ShaderValidationEnabled = env_bool('KYTY_SHADER_VALIDATION', false);
+	ShaderOptimizationType = env_or('KYTY_SHADER_OPTIMIZATION', 'Performance');
+	ShaderLogDirection = env_or('KYTY_SHADER_LOG_DIRECTION', 'Silent');
+	ShaderLogFolder = env_or('KYTY_SHADER_LOG_FOLDER', '_Shaders');
+	CommandBufferDumpEnabled = env_bool('KYTY_COMMAND_BUFFER_DUMP', false);
+	CommandBufferDumpFolder = env_or('KYTY_COMMAND_BUFFER_DUMP_FOLDER', '_Buffers');
+	-- Silent is required for usable host FPS and host resource safety.
+	-- Console/File HLE logging can drop a Release build from ~40+ FPS to ~1 FPS
+	-- and grow multi‑hundred‑MB logs on a full title boot. Dumps and verbose
+	-- logging stay opt-in so end users are not surprised by disk/RAM pressure.
+	PrintfDirection = env_or('KYTY_PRINTF_DIRECTION', 'Silent');
+	PrintfOutputFolder = env_or('KYTY_PRINTF_OUTPUT_FOLDER', '_Logs');
+	ProfilerDirection = env_or('KYTY_PROFILER_DIRECTION', 'None');
+	PipelineDumpEnabled = env_bool('KYTY_PIPELINE_DUMP', false);
+	PipelineDumpFolder = env_or('KYTY_PIPELINE_DUMP_FOLDER', '_Pipelines');
 }
 
 kyty_init(cfg)
 kyty_mount(guest_root, '/app0')
+kyty_load_param_json(guest_root .. '/sce_sys/param.json')
 kyty_load_elf('/app0/eboot.bin')
 
 kyty_load_symbols_all()

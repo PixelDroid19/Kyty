@@ -9,11 +9,18 @@
 
 #include <atomic>
 #include <map>
-#include <sys/syscall.h>
-#include <unistd.h>
 #include <chrono>             // IWYU pragma: keep
 #include <condition_variable> // IWYU pragma: keep
 #include <mutex>
+
+#if defined(__APPLE__)
+#include <pthread.h>
+#elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#include <sys/syscall.h>
+#include <unistd.h>
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#include <windows.h> // IWYU pragma: keep
+#endif
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS && KYTY_COMPILER == KYTY_COMPILER_CLANG
 #define KYTY_WIN_CS
@@ -45,7 +52,6 @@
 #endif
 
 #if !(defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)) && defined(KYTY_WIN_CS)
-#include <windows.h> // IWYU pragma: keep
 // IWYU pragma: no_include <winbase.h>
 constexpr DWORD KYTY_CS_SPIN_COUNT = 4000;
 
@@ -827,12 +833,10 @@ void CondVar::SignalAll()
 int Thread::GetThreadIdUnique()
 {
 #ifdef __APPLE__
-	// A C++ thread_local resolves through the gs segment (macOS TSD). On a guest
-	// thread executed by Rosetta 2, gs points at the guest's own storage, not the
-	// macOS TSD, so a thread_local access faults. Derive a stable per-thread id from
-	// the kernel thread id (thread_selfid syscall — segment-free) mapped to a small
-	// int, so this works from HLE code running on any thread.
-	uint64_t                       os_tid = static_cast<uint64_t>(::syscall(SYS_thread_selfid));
+	// A C++ thread_local may resolve through the guest-controlled TLS segment when
+	// HLE code runs under Rosetta. Use the native host id as the stable map key so
+	// the per-thread counter remains independent of guest TLS state.
+	uint64_t                       os_tid = Thread::GetHostThreadId();
 	static Mutex                   s_mtx;
 	static std::map<uint64_t, int> s_ids;
 	LockGuard                      lock(s_mtx);
@@ -847,6 +851,23 @@ int Thread::GetThreadIdUnique()
 #else
 	static thread_local int tid = ++g_thread_counter;
 	return tid;
+#endif
+}
+
+uint64_t Thread::GetHostThreadId()
+{
+#if defined(__APPLE__)
+	uint64_t host_tid = 0;
+	EXIT_IF(pthread_threadid_np(nullptr, &host_tid) != 0 || host_tid == 0u);
+	return host_tid;
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return static_cast<uint64_t>(::GetCurrentThreadId());
+#elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	return static_cast<uint64_t>(::syscall(SYS_gettid));
+#elif defined(KYTY_SDL_THREADS)
+	return static_cast<uint64_t>(SDL_ThreadID());
+#else
+	return static_cast<uint64_t>(std::hash<std::thread::id> {}(std::this_thread::get_id()));
 #endif
 }
 

@@ -8,7 +8,6 @@
 
 #include <cinttypes>
 #include <cstdint>
-#include <ctime>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -47,9 +46,6 @@ static int KYTY_SYSV_ABI ContentExportInit2(const ContentExportInitParam2* init_
 	printf("\t user_data   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param->user_data));
 	printf("\t buffer_size = 0x%016" PRIx64 "\n", static_cast<uint64_t>(init_param->buffer_size));
 	g_initialized = true;
-	// #region agent log
-	{FILE*f=fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log","a");if(f){fprintf(f,"{\"sessionId\":\"f08e58\",\"runId\":\"post-fix\",\"hypothesisId\":\"Q\",\"location\":\"LibContentExport.cpp:ContentExportInit2\",\"message\":\"content export init\",\"data\":{\"buffer_size\":%llu},\"timestamp\":%lld}\n",(unsigned long long)init_param->buffer_size,(long long)time(nullptr)*1000);fclose(f);}}
-	// #endregion
 	return OK;
 }
 

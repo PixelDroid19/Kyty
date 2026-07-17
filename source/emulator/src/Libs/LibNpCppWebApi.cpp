@@ -18,6 +18,11 @@ LIB_VERSION("NpCppWebApi", 1, "NpCppWebApi", 1, 1);
 
 namespace NpCppWebApi {
 
+// NID Y295ygEccqk — first NpCppWebApi import on Astro boot after Http2Init.
+// Observed SysV args: rdi = "/app0/param.sfx" (or this-pointer), rsi = 0x24,
+// rdx = 0x12. Guest continues without consuming the return value before the
+// next subobject constructor, so treat as a no-op setup and return rdi for
+// C++ constructor ABI (this-pointer passthrough).
 static KYTY_SYSV_ABI void* NpCppWebApiUnknownY295(void* self_or_path, int arg1, int arg2)
 {
 	PRINT_NAME();
@@ -27,6 +32,7 @@ static KYTY_SYSV_ABI void* NpCppWebApiUnknownY295(void* self_or_path, int arg1, 
 	if (self_or_path != nullptr)
 	{
 		const auto* as_c = static_cast<const char*>(self_or_path);
+		// Path form is printable ASCII starting with '/'; do not assume.
 		if (as_c[0] == '/')
 		{
 			printf("\t path         = %s\n", as_c);
@@ -35,6 +41,9 @@ static KYTY_SYSV_ABI void* NpCppWebApiUnknownY295(void* self_or_path, int arg1, 
 	return self_or_path;
 }
 
+// NID 8x++mBOUeso — observed after NpWebApi2Initialize while installing user
+// context logging: rdi = guest object/buffer, rsi = "Np-%s: Set userCtxId…".
+// Treat as constructor/setup that returns this.
 static KYTY_SYSV_ABI void* NpCppWebApiUnknown8x(void* self, const char* msg, void* arg2)
 {
 	PRINT_NAME();
@@ -44,6 +53,7 @@ static KYTY_SYSV_ABI void* NpCppWebApiUnknown8x(void* self, const char* msg, voi
 	return self;
 }
 
+// NID UYPxv8MIzGo — method on the object from 8x++: guest tests eax for <0.
 static int KYTY_SYSV_ABI NpCppWebApiUnknownUY(void* self, void* arg)
 {
 	PRINT_NAME();
@@ -52,6 +62,7 @@ static int KYTY_SYSV_ABI NpCppWebApiUnknownUY(void* self, void* arg)
 	return OK;
 }
 
+// NID 52AlYvq+dmk — observed (self, 1): likely bind/create user context slot.
 static int KYTY_SYSV_ABI NpCppWebApiUnknown52Al(void* self, int user_or_flag)
 {
 	PRINT_NAME();

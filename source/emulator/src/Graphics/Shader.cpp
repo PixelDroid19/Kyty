@@ -51,14 +51,32 @@ bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 	return format == 20;
 }
 
+uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component)
+{
+	EXIT_NOT_IMPLEMENTED(channel_order > 3);
+	EXIT_NOT_IMPLEMENTED(output_component > 3);
+
+	// AMD COMP_SWAP maps shader export components into color-buffer positions.
+	static constexpr uint32_t source_component[4][4] = {
+		{0, 1, 2, 3}, // SWAP_STD
+		{2, 1, 0, 3}, // SWAP_ALT
+		{3, 2, 1, 0}, // SWAP_STD_REV
+		{3, 0, 1, 2}, // SWAP_ALT_REV
+	};
+
+	return source_component[channel_order][output_component];
+}
+
 uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 {
-	// UfmtGFX10 unified image formats observed as sample textures.
+	// Gen5 sampled image element size. Block-compressed formats use bytes per
+	// compressed block after dimensions are converted to block elements.
 	switch (format)
 	{
 		case 14: return 2; // UFMT_8_8_UNORM
 		case 56: return 4; // UFMT_8_8_8_8_UNORM
 		case 71: return 8; // UFMT_16_16_16_16_FLOAT
+		case 133: return 8; // VK_FORMAT_BC1_RGBA_UNORM_BLOCK, 4x4 texels per block
 		default: return 0;
 	}
 }
@@ -112,25 +130,6 @@ struct ShaderUsageInfo
 	const ShaderUsageSlot* slots       = nullptr;
 	int                    slots_num   = 0;
 	bool                   valid       = false;
-};
-
-struct ShaderParsedUsage
-{
-	bool fetch                     = false;
-	int  fetch_reg                 = 0;
-	bool vertex_buffer             = false;
-	int  vertex_buffer_reg         = 0;
-	bool vertex_attrib             = false;
-	int  vertex_attrib_reg         = 0;
-	int  storage_buffers_readwrite = 0;
-	int  storage_buffers_readonly  = 0;
-	int  storage_buffers_constant  = 0;
-	int  textures2D_readonly       = 0;
-	int  textures2D_readwrite      = 0;
-	bool extended_buffer           = false;
-	int  samplers                  = 0;
-	int  gds_pointers              = 0;
-	int  direct_sgprs              = 0;
 };
 
 struct ShaderDebugPrintfCmds
@@ -411,6 +410,7 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::Dmask5: s = "dmask:0x5"; break;
 			case ShaderInstructionFormat::Dmask7: s = "dmask:0x7"; break;
 			case ShaderInstructionFormat::Dmask9: s = "dmask:0x9"; break;
+			case ShaderInstructionFormat::DmaskA: s = "dmask:0xa"; break;
 			case ShaderInstructionFormat::DmaskB: s = "dmask:0xb"; break;
 			case ShaderInstructionFormat::DmaskF: s = "dmask:0xf"; break;
 			case ShaderInstructionFormat::Gds: s = "gds"; break;
@@ -798,8 +798,7 @@ static void vs_check(const HW::VertexShaderInfo& vs, const HW::ShaderRegisters& 
 	EXIT_NOT_IMPLEMENTED(sh.m_spiShaderIdxFormat != 0x00000000 && sh.m_spiShaderIdxFormat != 0x00000001);
 	EXIT_NOT_IMPLEMENTED(sh.m_geNggSubgrpCntl != 0x00000000 && sh.m_geNggSubgrpCntl != 0x00000001);
 	EXIT_NOT_IMPLEMENTED(sh.m_vgtGsInstanceCnt != 0x00000000);
-	// NGG/GS subgroup sizing fields are host scheduling hints; Gen5 emits
-	// values other than 0/0x40. Bound at documented max 0x40.
+	// Subgroup counts: accept 0..wave64 (0x40), not only the exact endpoints.
 	EXIT_NOT_IMPLEMENTED(sh.GetEsVertsPerSubgrp() > 0x00000040);
 	EXIT_NOT_IMPLEMENTED(sh.GetGsPrimsPerSubgrp() > 0x00000040);
 	EXIT_NOT_IMPLEMENTED(sh.GetGsInstPrimsInSubgrp() > 0x00000040);
@@ -1237,7 +1236,7 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 	}
 }
 
-static void ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, int start_index, int slot, ShaderStorageUsage usage,
+static bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, int start_index, int slot, ShaderStorageUsage usage,
                                    const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer)
 {
 	EXIT_IF(info == nullptr);
@@ -1258,10 +1257,25 @@ static void ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sg
 		EXIT_NOT_IMPLEMENTED(start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX);
 	}
 
+	ShaderBufferResource resource;
+	resource.fields[0] = (extended ? extended_buffer[start_index - 16 + 0] : user_sgpr.value[start_index + 0]);
+	resource.fields[1] = (extended ? extended_buffer[start_index - 16 + 1] : user_sgpr.value[start_index + 1]);
+	resource.fields[2] = (extended ? extended_buffer[start_index - 16 + 2] : user_sgpr.value[start_index + 2]);
+	resource.fields[3] = (extended ? extended_buffer[start_index - 16 + 3] : user_sgpr.value[start_index + 3]);
+
+	// Fully zeroed sharp, or zero address+records with residual flag bits, is a
+	// null buffer descriptor (Gen5 titles leave unused slots that way).
+	if ((resource.fields[0] == 0 && resource.fields[1] == 0 && resource.fields[2] == 0 && resource.fields[3] == 0) ||
+	    (resource.Base48() == 0 && resource.NumRecords() == 0))
+	{
+		return false;
+	}
+
 	info->start_register[index] = start_index;
 	info->slots[index]          = slot;
 	info->usages[index]         = usage;
 	info->extended[index]       = extended;
+	info->buffers[index]        = resource;
 	// info->extended_index[index] = extended_index;
 
 	if (!extended)
@@ -1278,12 +1292,8 @@ static void ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sg
 		}
 	}
 
-	info->buffers[index].fields[0] = (extended ? extended_buffer[start_index - 16 + 0] : user_sgpr.value[start_index + 0]);
-	info->buffers[index].fields[1] = (extended ? extended_buffer[start_index - 16 + 1] : user_sgpr.value[start_index + 1]);
-	info->buffers[index].fields[2] = (extended ? extended_buffer[start_index - 16 + 2] : user_sgpr.value[start_index + 2]);
-	info->buffers[index].fields[3] = (extended ? extended_buffer[start_index - 16 + 3] : user_sgpr.value[start_index + 3]);
-
 	info->buffers_num++;
+	return true;
 }
 
 static void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, int start_index, int slot, ShaderTextureUsage usage,
@@ -1427,7 +1437,12 @@ bool ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register
 		return true;
 	}
 
-	return user_data != nullptr && start_register >= 0 && start_register < user_data->srt_size_dw && type == HW::UserSgprType::Region;
+	if (type != HW::UserSgprType::Region || user_data == nullptr || start_register < 0)
+	{
+		return false;
+	}
+
+	return user_data->srt_size_dw == 0 || start_register < user_data->srt_size_dw;
 }
 
 static void ShaderGetDirectSgpr(ShaderDirectSgprsResources* info, int start_index, const HW::UserSgprInfo& user_sgpr,
@@ -1439,12 +1454,18 @@ static void ShaderGetDirectSgpr(ShaderDirectSgprsResources* info, int start_inde
 
 	int index = info->sgprs_num;
 
-	EXIT_NOT_IMPLEMENTED(start_index >= 16);
+	EXIT_NOT_IMPLEMENTED(start_index < 0 || start_index >= HW::UserSgprInfo::SGPRS_MAX);
 
 	info->start_register[index] = start_index;
 
 	auto type = user_sgpr.type[start_index];
-	EXIT_NOT_IMPLEMENTED(!ShaderCanBindDirectSgpr(user_data, start_index, type));
+	if (!ShaderCanBindDirectSgpr(user_data, start_index, type))
+	{
+		EXIT("unsupported direct user SGPR: start=%d type=%u srt=%u eud=%u direct_count=%u value=0x%08" PRIx32 "\n",
+		     start_index, static_cast<uint32_t>(type), user_data == nullptr ? 0u : user_data->srt_size_dw,
+		     user_data == nullptr ? 0u : user_data->eud_size_dw, user_data == nullptr ? 0u : user_data->direct_resource_count,
+		     user_sgpr.value[start_index]);
+	}
 
 	info->sgprs[index].field = user_sgpr.value[start_index];
 
@@ -1504,11 +1525,17 @@ ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start
 		switch (inst.type)
 		{
 			case ShaderInstructionType::BufferLoadDword:
+			case ShaderInstructionType::BufferLoadDwordx2:
+			case ShaderInstructionType::BufferLoadDwordx3:
+			case ShaderInstructionType::BufferLoadDwordx4:
 			case ShaderInstructionType::BufferLoadFormatX:
 			case ShaderInstructionType::BufferLoadFormatXy:
 			case ShaderInstructionType::BufferLoadFormatXyz:
 			case ShaderInstructionType::BufferLoadFormatXyzw: is_load = true; break;
 			case ShaderInstructionType::BufferStoreDword:
+			case ShaderInstructionType::BufferStoreDwordx2:
+			case ShaderInstructionType::BufferStoreDwordx3:
+			case ShaderInstructionType::BufferStoreDwordx4:
 			case ShaderInstructionType::BufferStoreFormatX:
 			case ShaderInstructionType::BufferStoreFormatXy:
 			case ShaderInstructionType::BufferStoreFormatXyzw: is_store = true; break;
@@ -1573,19 +1600,20 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 		const auto& usage = usages.slots[i];
 		switch (usage.type)
 		{
-			case 0x00:
-				EXIT_NOT_IMPLEMENTED(usage.flags != 0 && usage.flags != 3);
-				if (usage.flags == 0)
-				{
-					ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, usage.start_register, usage.slot,
-					                       ShaderStorageUsage::ReadOnly, user_sgpr, extended_buffer);
-					info->storage_buffers_readonly++;
-				} else if (usage.flags == 3)
-				{
+				case 0x00:
+					EXIT_NOT_IMPLEMENTED(usage.flags != 0 && usage.flags != 3);
+					if (usage.flags == 0)
+					{
+						if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, usage.start_register, usage.slot,
+						                           ShaderStorageUsage::ReadOnly, user_sgpr, extended_buffer))
+						{
+							info->storage_buffers_readonly++;
+						}
+					} else if (usage.flags == 3)
+					{
 					ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, usage.start_register, usage.slot, ShaderTextureUsage::ReadOnly,
 					                       user_sgpr, extended_buffer);
 					info->textures2D_readonly++;
-					EXIT_NOT_IMPLEMENTED(bind->textures2D.desc[bind->textures2D.textures_num - 1].texture.Type() != 9);
 				}
 				break;
 
@@ -1595,26 +1623,29 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 				info->samplers++;
 				break;
 
-			case 0x02:
-				EXIT_NOT_IMPLEMENTED(usage.flags != 0);
-				ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, usage.start_register, usage.slot, ShaderStorageUsage::Constant,
-				                       user_sgpr, extended_buffer);
-				info->storage_buffers_constant++;
-				break;
+				case 0x02:
+					EXIT_NOT_IMPLEMENTED(usage.flags != 0);
+					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, usage.start_register, usage.slot,
+					                           ShaderStorageUsage::Constant, user_sgpr, extended_buffer))
+					{
+						info->storage_buffers_constant++;
+					}
+					break;
 
 			case 0x04:
 				EXIT_NOT_IMPLEMENTED(usage.flags != 0 && usage.flags != 3);
-				if (usage.flags == 0)
-				{
-					ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, usage.start_register, usage.slot,
-					                       ShaderStorageUsage::ReadWrite, user_sgpr, extended_buffer);
-					info->storage_buffers_readwrite++;
-				} else if (usage.flags == 3)
+					if (usage.flags == 0)
+					{
+						if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, usage.start_register, usage.slot,
+						                           ShaderStorageUsage::ReadWrite, user_sgpr, extended_buffer))
+						{
+							info->storage_buffers_readwrite++;
+						}
+					} else if (usage.flags == 3)
 				{
 					ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, usage.start_register, usage.slot, ShaderTextureUsage::ReadWrite,
 					                       user_sgpr, extended_buffer);
 					info->textures2D_readwrite++;
-					EXIT_NOT_IMPLEMENTED(bind->textures2D.desc[bind->textures2D.textures_num - 1].texture.Type() != 9);
 				}
 				break;
 
@@ -1707,10 +1738,39 @@ static int Gen5EudApiIndex(int offset_dw, int user_sgpr_num)
 	return 16 + (offset_dw - eud_base);
 }
 
+static uint32_t Gen5SharpUserSgprDword(int offset_dw, int user_sgpr_num, const HW::UserSgprInfo& user_sgpr,
+                                       const uint32_t* extended_buffer)
+{
+	if (offset_dw < user_sgpr_num)
+	{
+		return user_sgpr.value[offset_dw];
+	}
+	EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+	const int eud_base = Gen5EudOffsetBase(user_sgpr_num);
+	EXIT_NOT_IMPLEMENTED(offset_dw < eud_base);
+	return extended_buffer[offset_dw - eud_base];
+}
+
+// Gen5 texture type nibble: 8 = 1D, 9 = 2D. SizeFlag clear selects an
+// 8-dword T#; when dword3's type nibble is not 1D/2D the slot is a 4-dword V#.
+static bool Gen5SharpIsImageDescriptor(int offset_dw, int user_sgpr_num, const HW::UserSgprInfo& user_sgpr,
+                                     const uint32_t* extended_buffer)
+{
+	const uint32_t word3 = Gen5SharpUserSgprDword(offset_dw + 3, user_sgpr_num, user_sgpr, extended_buffer);
+	const uint8_t  type  = static_cast<uint8_t>((word3 >> 28u) & 0xFu);
+	return type == 8u || type == 9u;
+}
+
+static bool Gen5SharpUseTextureDescriptor(bool size_flag, int offset_dw, int user_sgpr_num,
+                                          const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer)
+{
+	return !size_flag && Gen5SharpIsImageDescriptor(offset_dw, user_sgpr_num, user_sgpr, extended_buffer);
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
-                       const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
-                       int user_data_register_base = 0)
+	                       const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code,
+	                       int user_data_register_base)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -1815,18 +1875,20 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					{
 						EXIT("unknown usage type: 0x%04" PRIx16 "\n", type);
 					}
-				}
-				// Direct storage always indexes user_sgpr (pass null extended).
-				ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, reg, bind->storage_buffers.buffers_num, usage, user_sgpr,
-				                       nullptr);
-				if (usage == ShaderStorageUsage::ReadWrite)
-				{
-					info->storage_buffers_readwrite++;
-				} else
-				{
-					info->storage_buffers_readonly++;
-				}
-				break;
+					}
+					// Direct storage always indexes user_sgpr (pass null extended).
+					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, reg, bind->storage_buffers.buffers_num, usage,
+					                           user_sgpr, nullptr))
+					{
+						if (usage == ShaderStorageUsage::ReadWrite)
+						{
+							info->storage_buffers_readwrite++;
+						} else
+						{
+							info->storage_buffers_readonly++;
+						}
+					}
+					break;
 			}
 		}
 	}
@@ -1840,25 +1902,94 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				continue;
 			}
 
-			EXIT_NOT_IMPLEMENTED(user_data->sharp_resource_offset[0][slot].size != 0);
-			const int        off    = user_data->sharp_resource_offset[0][slot].offset_dw;
-			constexpr int    dwords = 8;
-			const uint32_t*  ebuf   = nullptr;
-			int              api    = off;
-			if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
+			// sharp[0] = read-only texture slot. SizeFlag (0x8000) marks 4-dw V#;
+			// clear flag is 8-dw T# when dword3 type nibble is 1D (8) or 2D (9).
+			const auto sharp_size = user_data->sharp_resource_offset[0][slot].size;
+			const int  off        = user_data->sharp_resource_offset[0][slot].offset_dw;
+			const bool use_texture =
+			    Gen5SharpUseTextureDescriptor(sharp_size != 0, off, user_sgpr_num, user_sgpr, extended_buffer);
+			if (use_texture)
 			{
-				EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
-				api  = Gen5EudApiIndex(off, user_sgpr_num);
-				ebuf = extended_buffer;
-				EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+				constexpr int   dwords = 8;
+				const uint32_t* ebuf   = nullptr;
+				int             api    = off;
+				if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
+				{
+					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+					api  = Gen5EudApiIndex(off, user_sgpr_num);
+					ebuf = extended_buffer;
+					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
+				}
+				ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, api, slot, ShaderTextureUsage::ReadOnly, user_sgpr, ebuf);
+				info->textures2D_readonly++;
+			} else
+			{
+				constexpr int   dwords = 4;
+				const uint32_t* ebuf   = nullptr;
+				int             api    = off;
+				if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
+				{
+					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+					api  = Gen5EudApiIndex(off, user_sgpr_num);
+					ebuf = extended_buffer;
+					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
+				}
+					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant, user_sgpr, ebuf))
+					{
+						info->storage_buffers_constant++;
+					}
 			}
-			ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, api, slot, ShaderTextureUsage::ReadOnly, user_sgpr, ebuf);
-			info->textures2D_readonly++;
-			EXIT_NOT_IMPLEMENTED(bind->textures2D.desc[bind->textures2D.textures_num - 1].texture.Type() != 9);
 		}
 	}
 
-	EXIT_NOT_IMPLEMENTED(user_data->sharp_resource_count[1] != 0);
+	if (user_data->sharp_resource_count[1] != 0)
+	{
+		// sharp[1] = read-write texture slot. Same SizeFlag / type-nibble
+		// contract as sharp[0].
+		for (uint16_t slot = 0; slot < user_data->sharp_resource_count[1]; slot++)
+		{
+			if (user_data->sharp_resource_offset[1][slot].offset_dw == 0x7fff)
+			{
+				continue;
+			}
+
+			const auto sharp_size = user_data->sharp_resource_offset[1][slot].size;
+			const int  off        = user_data->sharp_resource_offset[1][slot].offset_dw;
+			const bool use_texture =
+			    Gen5SharpUseTextureDescriptor(sharp_size != 0, off, user_sgpr_num, user_sgpr, extended_buffer);
+			if (use_texture)
+			{
+				constexpr int   dwords = 8;
+				const uint32_t* ebuf   = nullptr;
+				int             api    = off;
+				if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
+				{
+					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+					api  = Gen5EudApiIndex(off, user_sgpr_num);
+					ebuf = extended_buffer;
+					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
+				}
+				ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, api, slot, ShaderTextureUsage::ReadWrite, user_sgpr, ebuf);
+				info->textures2D_readwrite++;
+			} else
+			{
+				constexpr int   dwords = 4;
+				const uint32_t* ebuf   = nullptr;
+				int             api    = off;
+				if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
+				{
+					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+					api  = Gen5EudApiIndex(off, user_sgpr_num);
+					ebuf = extended_buffer;
+					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
+				}
+					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::ReadWrite, user_sgpr, ebuf))
+					{
+						info->storage_buffers_readwrite++;
+					}
+			}
+		}
+	}
 
 	if (user_data->sharp_resource_count[2] != 0)
 	{
@@ -1879,7 +2010,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
 				api  = Gen5EudApiIndex(off, user_sgpr_num);
 				ebuf = extended_buffer;
-				EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+				EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
 			}
 			ShaderGetSampler(&bind->samplers, direct_sgprs, api, slot, user_sgpr, ebuf);
 			info->samplers++;
@@ -1905,10 +2036,12 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
 				api  = Gen5EudApiIndex(off, user_sgpr_num);
 				ebuf = extended_buffer;
-				EXIT_NOT_IMPLEMENTED(api - 16 + dwords > static_cast<int>(user_data->eud_size_dw));
+				EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
 			}
-			ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant, user_sgpr, ebuf);
-			info->storage_buffers_constant++;
+			if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant, user_sgpr, ebuf))
+			{
+				info->storage_buffers_constant++;
+			}
 		}
 	}
 
@@ -2070,6 +2203,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	for (int i = 0; i < 8; i++)
 	{
 		ps_info->target_output_mode[i] = sh->target_output_mode[i];
+		ps_info->target_output_order[i] = sh->target_output_order[i];
 	}
 
 	bool ps5 = Config::IsNextGen();
@@ -2099,7 +2233,6 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	EXIT_NOT_IMPLEMENTED(usage.fetch || usage.vertex_buffer || usage.vertex_attrib);
 	EXIT_NOT_IMPLEMENTED(usage.storage_buffers_readwrite > 0);
 	EXIT_NOT_IMPLEMENTED(usage.gds_pointers > 0);
-	EXIT_NOT_IMPLEMENTED(usage.direct_sgprs > 0);
 
 	ShaderCalcBindingIndices(&ps_info->bind);
 }
@@ -2144,7 +2277,8 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		ShaderParseUsage(regs->cs_regs.data_addr, &usage, &info->bind, regs->cs_user_sgpr, regs->cs_regs.user_sgpr);
 	}
 
-	EXIT_NOT_IMPLEMENTED(usage.samplers > 0);
+	// Gen5 compute may bind S# samplers for image_sample / image_sample_lz
+	// (same sharp[2] path as PS). PS already allows usage.samplers > 0.
 	EXIT_NOT_IMPLEMENTED(usage.fetch || usage.vertex_buffer || usage.vertex_attrib);
 
 	ShaderCalcBindingIndices(&info->bind);
@@ -3253,6 +3387,15 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pixel_kill_enable));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_early_z));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_execute_on_noop));
+
+	// The export declarations and component order are part of the generated
+	// SPIR-V interface. They must distinguish pipelines that use the same guest
+	// shader with different render-target formats or COMP_SWAP values.
+	for (int i = 0; i < 8; i++)
+	{
+		ret.ids.Add(input_info->target_output_mode[i]);
+		ret.ids.Add(input_info->target_output_order[i]);
+	}
 
 	for (uint32_t i = 0; i < input_info->input_num; i++)
 	{

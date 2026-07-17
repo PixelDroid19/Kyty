@@ -15,8 +15,11 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Emulator.h"
+#include "Emulator/DevTools/Runtime.h"
 
-#include "KytyGitVersion.h"
+#include "KytyBuildInfo.h"
+
+#include <cstdlib>
 
 using namespace Kyty;
 using namespace Core;
@@ -52,8 +55,13 @@ static String get_build_string()
 
 	String compiler = Debug::GetCompiler() + U"-" + Debug::GetLinker() + U"-" + Debug::GetBitness();
 
+	String rev = String::FromUtf8(Kyty::BuildInfo::Revision);
+	if (Kyty::BuildInfo::Dirty)
+	{
+		rev = rev + U"-dirty";
+	}
 	String str = String::FromPrintf("%s, %s, ver = %s, git = %s, lua = %s, date = %s", type.C_Str(), compiler.C_Str(), KYTY_VERSION,
-	                                KYTY_GIT_VERSION, lua.C_Str(), date.ToString().C_Str());
+	                                rev.C_Str(), lua.C_Str(), date.ToString().C_Str());
 
 	return str;
 }
@@ -110,6 +118,18 @@ int main(int argc, char* argv[])
 
 	mem_set_max_size(static_cast<size_t>(2048) * 1024 * 1024 - 1);
 
+	Kyty::DevTools::WorkerTelemetryOptions telemetry_options {};
+	telemetry_options.logging_mode               = Kyty::DevTools::LoggingMode::Silent;
+	telemetry_options.revision                   = Kyty::BuildInfo::Revision;
+	telemetry_options.dirty                      = Kyty::BuildInfo::Dirty ? 1u : 0u;
+	const auto worker_result = Emulator::DevTools::PrepareFromBootstrap(telemetry_options);
+	if (worker_result != Kyty::DevTools::WorkerSessionResult::MissingBootstrap &&
+	    worker_result != Kyty::DevTools::WorkerSessionResult::Attached)
+	{
+		printf("Kyty DevTools bootstrap rejected: %u\n", static_cast<unsigned>(worker_result));
+		return 125;
+	}
+
 	auto& slist = *SubsystemsList::Instance();
 
 	slist.SetArgs(argc, argv);
@@ -164,6 +184,12 @@ int main(int argc, char* argv[])
 		}
 
 		slist.DestroyAll(false);
+	}
+
+	if (!Emulator::DevTools::Shutdown())
+	{
+		printf("Kyty DevTools worker session failed to publish shutdown\n");
+		return 125;
 	}
 
 	return 0;

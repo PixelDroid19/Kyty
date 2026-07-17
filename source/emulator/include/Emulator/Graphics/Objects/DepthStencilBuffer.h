@@ -13,23 +13,28 @@ namespace Kyty::Libs::Graphics {
 class DepthStencilBufferObject: public GpuObject
 {
 public:
-	static constexpr int PARAM_FORMAT = 0;
-	static constexpr int PARAM_WIDTH  = 1;
-	static constexpr int PARAM_HEIGHT = 2;
-	static constexpr int PARAM_HTILE  = 3;
-	static constexpr int PARAM_NEO    = 4;
-	static constexpr int PARAM_USAGE  = 5;
+	static constexpr int PARAM_FORMAT     = 0;
+	static constexpr int PARAM_WIDTH      = 1;
+	static constexpr int PARAM_HEIGHT     = 2;
+	static constexpr int PARAM_HTILE      = 3;
+	static constexpr int PARAM_NEO        = 4;
+	static constexpr int PARAM_USAGE      = 5;
+	static constexpr int PARAM_HTILE_ADDR = 6;
+	static constexpr int PARAM_HTILE_SIZE = 7;
 
-	DepthStencilBufferObject(uint64_t vk_format, uint32_t width, uint32_t height, bool htile, bool neo, bool sampled)
+	DepthStencilBufferObject(uint64_t vk_format, uint32_t width, uint32_t height, bool htile, bool neo, bool sampled, uint64_t htile_addr,
+	                         uint64_t htile_size)
 	{
-		params[PARAM_FORMAT] = vk_format;
-		params[PARAM_WIDTH]  = width;
-		params[PARAM_HEIGHT] = height;
-		params[PARAM_HTILE]  = htile ? 1 : 0;
-		params[PARAM_NEO]    = neo ? 1 : 0;
-		params[PARAM_USAGE]  = sampled ? 1 : 0;
-		check_hash           = false;
-		type                 = Graphics::GpuMemoryObjectType::DepthStencilBuffer;
+		params[PARAM_FORMAT]     = vk_format;
+		params[PARAM_WIDTH]      = width;
+		params[PARAM_HEIGHT]     = height;
+		params[PARAM_HTILE]      = htile ? 1 : 0;
+		params[PARAM_NEO]        = neo ? 1 : 0;
+		params[PARAM_USAGE]      = sampled ? 1 : 0;
+		params[PARAM_HTILE_ADDR] = htile_addr;
+		params[PARAM_HTILE_SIZE] = htile_size;
+		check_hash               = false;
+		type                     = Graphics::GpuMemoryObjectType::DepthStencilBuffer;
 	}
 
 	bool Equal(const uint64_t* other) const override;

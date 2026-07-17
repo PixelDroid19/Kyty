@@ -121,4 +121,47 @@ TEST(EmulatorLibcPrintf, GeneralFloatFormattingFollowsCContract)
 	}
 }
 
+// Gen5 NID NC4MSB+BRQg (ObjectDefinition path builder): same format shape as
+// snprintf, but guest checks `r == 0`. Map written-length → errno_t-style 0/-1.
+static int SnprintfErrnoStyle(int written, size_t n)
+{
+	if (written < 0)
+	{
+		return written;
+	}
+	if (static_cast<size_t>(written) >= n)
+	{
+		return -1;
+	}
+	return 0;
+}
+
+TEST(EmulatorLibcPrintf, SnprintfErrnoStyleReturnsZeroWhenOutputFits)
+{
+	using namespace Kyty::Libs;
+
+	char destination[256] = {};
+	const char* format    = "%s";
+	const char* piece     = "gfx/";
+
+	alignas(16) VaContext ctx {};
+	ctx.reg_save_area.gp[0] = reinterpret_cast<uint64_t>(destination);
+	ctx.reg_save_area.gp[1] = sizeof(destination);
+	ctx.reg_save_area.gp[2] = reinterpret_cast<uint64_t>(format);
+	ctx.reg_save_area.gp[3] = reinterpret_cast<uint64_t>(piece);
+
+	uint64_t overflow_area        = 0;
+	ctx.va_list.gp_offset         = offsetof(VaRegSave, gp);
+	ctx.va_list.fp_offset         = offsetof(VaRegSave, fp);
+	ctx.va_list.reg_save_area     = &ctx.reg_save_area;
+	ctx.va_list.overflow_arg_area = &overflow_area;
+
+	const int written = GetSnrintfCtxFunc()(&ctx);
+	EXPECT_STREQ(destination, "gfx/");
+	EXPECT_EQ(written, 4);
+	// Standard snprintf length is non-zero; errno-style wrapper used by NC4MSB+BRQg is 0.
+	EXPECT_EQ(SnprintfErrnoStyle(written, sizeof(destination)), 0);
+	EXPECT_EQ(SnprintfErrnoStyle(written, 2), -1);
+}
+
 UT_END();

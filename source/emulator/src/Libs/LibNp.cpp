@@ -321,6 +321,8 @@ int KYTY_SYSV_ABI GetAddcontEntitlementInfoList(ServiceLabel /*service_label*/, 
 		return ERROR_PARAMETER;
 	}
 
+	// This runtime has no registered add-on entitlement catalog. Report an
+	// empty enumeration explicitly; do not fabricate list records.
 	*hit_num = 0;
 	return OK;
 }
@@ -337,11 +339,16 @@ LIB_DEFINE(InitNpEntitlementAccess_1)
 
 namespace Kyty::Libs::NpManager {
 
+// Gen5 NpManager_v1 — offline-safe account queries for titles that probe NP
+// country before online services. Does not contact PSN.
 LIB_VERSION("NpManager", 1, "NpManager", 1, 1);
 
-static constexpr int kNpErrorSignedOut        = static_cast<int>(0x80550006u);
+// SCE_NP_ERROR_SIGNED_OUT — offline titles must tolerate signed-out NP.
+static constexpr int kNpErrorSignedOut       = static_cast<int>(0x80550006u);
 static constexpr int kNpErrorInvalidArgument = static_cast<int>(0x80550003u);
 
+// sceNpGetAccountCountryA — NID JT+t00a3TxA. Observed SysV (user_id=1, out*).
+// Country code is a 2-letter lowercase ISO string plus NUL.
 static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
 {
 	PRINT_NAME();
@@ -355,6 +362,8 @@ static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
 	return OK;
 }
 
+// sceNpGetAccountIdA — NID rbknaUjpqWo. Observed Astro after UserService privacy:
+// (user_id=1, account_id*). Report signed-out offline account id 0.
 static KYTY_SYSV_ABI int GetAccountIdA(int32_t user_id, uint64_t* account_id)
 {
 	PRINT_NAME();

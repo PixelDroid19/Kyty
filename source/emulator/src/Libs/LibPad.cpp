@@ -15,7 +15,7 @@ LIB_DEFINE(InitPad_1)
 
 	LIB_FUNC("hv1luiJrqQM", Controller::PadInit);
 	LIB_FUNC("xk0AcarP3V4", Controller::PadOpen);
-	// scePadGetHandle — aerolib NID; returns the handle from PadOpen for the same user/type/index.
+	// scePadGetHandle — returns the handle from PadOpen for the same user/type/index.
 	LIB_FUNC("u1GRHp+oWoY", Controller::PadGetHandle);
 	LIB_FUNC("clVvL4ZDntw", Controller::PadSetMotionSensorState);
 	LIB_FUNC("vDLMoJLde8I", Controller::PadSetTiltCorrectionState);
@@ -27,6 +27,7 @@ LIB_DEFINE(InitPad_1)
 	// scePadSetVibrationMode / scePadSetTriggerEffect — no-op success (PS5 dualsense extras).
 	LIB_FUNC("W2G-yoyMF5U", Controller::PadSetVibrationMode);
 	LIB_FUNC("2JgFB2n9oUM", Controller::PadSetTriggerEffect);
+	// scePadGetTriggerEffectState — NID znaWI0gpuo8 (Astro after PlayGo).
 	LIB_FUNC("znaWI0gpuo8", Controller::PadGetTriggerEffectState);
 	LIB_FUNC("DscD1i9HX1w", Controller::PadResetLightBar);
 	LIB_FUNC("RR4novUEENY", Controller::PadSetLightBar);

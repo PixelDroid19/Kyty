@@ -144,14 +144,16 @@ configure_file(
   )
 
 find_package(Git)
-  
-add_custom_target( KytyGitVersion
-    COMMAND ${CMAKE_COMMAND} 
-	-D INPUT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/KytyGitVersion.h.in
-    -D OUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/KytyGitVersion.h
-	-D GIT_EXECUTABLE=${GIT_EXECUTABLE}
-	-P ${CMAKE_CURRENT_SOURCE_DIR}/generate_version.cmake
-	COMMENT "Generate KytyGitVersion.h"
+
+add_custom_target(KytyBuildInfo
+	COMMAND ${CMAKE_COMMAND}
+		-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+		-DINPUT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/KytyBuildInfo.h.in
+		-DOUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/KytyBuildInfo.h
+		-DGIT_EXECUTABLE=${GIT_EXECUTABLE}
+		-P ${CMAKE_CURRENT_SOURCE_DIR}/generate_version.cmake
+	BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/KytyBuildInfo.h
+	COMMENT "Generate KytyBuildInfo.h"
 )
 
 if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0.0)
@@ -188,12 +190,29 @@ if(NOT ${KYTY_PROJECT_NAME} MATCHES "Build_Tools" AND NOT MACOS)
 	add_subdirectory(launcher)
 endif()
 add_subdirectory(lib)
+add_subdirectory(devtools)
+add_subdirectory(agent)
+
+# The emulator may consume the portable diagnostics core, but the process
+# supervisor is a launcher-side concern. Keep tests and emulator free of that
+# dependency so guest/runtime code cannot acquire platform process-control
+# policy transitively.
+foreach(_kyty_runtime_target emulator unit_test)
+	get_target_property(_kyty_runtime_links ${_kyty_runtime_target} LINK_LIBRARIES)
+	if(_kyty_runtime_links AND "kyty_devtools_supervisor" IN_LIST _kyty_runtime_links)
+		message(FATAL_ERROR "${_kyty_runtime_target} must not link kyty_devtools_supervisor")
+	endif()
+endforeach()
 
 add_executable(fc_script ${KYTY_SCRIPT_SRC}) 
 
-if(MINGW)
+if(MINGW OR (UNIX AND NOT APPLE))
+	# unit_test references supervisor APIs only from fc_script. Pull every
+	# unit_test object before kyty_devtools_supervisor so GNU ld resolves
+	# those symbols in one pass (Linux otherwise linked unit_test too late
+	# via emulator's transitive deps).
 	SET(UNIT_TEST_LIB -Wl,--whole-archive unit_test -Wl,--no-whole-archive)
-endif()	
+endif()
 
 if(MSVC)
 	SET(UNIT_TEST_LIB unit_test)
@@ -207,6 +226,7 @@ target_link_libraries(fc_script scripts)
 target_link_libraries(fc_script lua)
 target_link_libraries(fc_script SDL2-static)
 target_link_libraries(fc_script emulator)
+target_link_libraries(fc_script kyty_devtools_supervisor)
 target_link_libraries(fc_script rijndael)
 target_link_libraries(fc_script lzma)
 target_link_libraries(fc_script sqlite)
@@ -243,7 +263,7 @@ elseif(MINGW)
 	add_custom_command(TARGET fc_script POST_BUILD COMMAND ${KYTY_SCRIPT_BIN} ${PROJECT_SOURCE_DIR}/map_to_csv.lua fc_script ${KYTY_COMPILER_ID} ${KYTY_BITNESS} ${KYTY_LINKER_ID})
 endif()
 
-add_dependencies(fc_script KytyGitVersion)  
+add_dependencies(fc_script KytyBuildInfo)
 
 install(TARGETS fc_script DESTINATION .)
 if(NOT ${KYTY_PROJECT_NAME} MATCHES "Build_Tools")
@@ -256,6 +276,4 @@ endif()
 if(MSVC)
     set(CMAKE_USE_RELATIVE_PATHS ON)
 endif()
-
-
 

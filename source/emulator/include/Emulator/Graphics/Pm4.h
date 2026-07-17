@@ -27,6 +27,7 @@ constexpr uint32_t IT_CLEAR_STATE               = 0x12;
 constexpr uint32_t IT_INDEX_BUFFER_SIZE         = 0x13;
 constexpr uint32_t IT_DISPATCH_DIRECT           = 0x15;
 constexpr uint32_t IT_DISPATCH_INDIRECT         = 0x16;
+constexpr uint32_t IT_INDIRECT_BUFFER_END       = 0x17;
 constexpr uint32_t IT_SET_PREDICATION           = 0x20;
 constexpr uint32_t IT_COND_EXEC                 = 0x22;
 constexpr uint32_t IT_DRAW_INDIRECT             = 0x24;
@@ -54,6 +55,7 @@ constexpr uint32_t IT_EVENT_WRITE_EOP           = 0x47;
 constexpr uint32_t IT_EVENT_WRITE_EOS           = 0x48;
 constexpr uint32_t IT_RELEASE_MEM               = 0x49;
 constexpr uint32_t IT_DMA_DATA                  = 0x50;
+constexpr uint32_t IT_ONE_REG_WRITE             = 0x57;
 constexpr uint32_t IT_ACQUIRE_MEM               = 0x58;
 constexpr uint32_t IT_REWIND                    = 0x59;
 constexpr uint32_t IT_SET_CONFIG_REG            = 0x68;
@@ -67,9 +69,9 @@ constexpr uint32_t IT_INCREMENT_CE_COUNTER      = 0x84;
 constexpr uint32_t IT_INCREMENT_DE_COUNTER      = 0x85;
 constexpr uint32_t IT_WAIT_ON_CE_COUNTER        = 0x86;
 constexpr uint32_t IT_WAIT_ON_DE_COUNTER_DIFF   = 0x88;
+constexpr uint32_t IT_GET_LOD_STATS             = 0x8E;
 constexpr uint32_t IT_DISPATCH_DRAW_PREAMBLE    = 0x8C;
 constexpr uint32_t IT_DISPATCH_DRAW             = 0x8D;
-constexpr uint32_t IT_GET_LOD_STATS             = 0x8E;
 
 /* Custom codes. Implemented via IT_NOP */
 
@@ -98,6 +100,8 @@ constexpr uint32_t R_WRITE_DATA       = 0x15;
 constexpr uint32_t R_WAIT_MEM_64      = 0x16;
 constexpr uint32_t R_FLIP             = 0x17;
 constexpr uint32_t R_RELEASE_MEM      = 0x18;
+// Custom AGC DmaData builder (sceAgcDcbDmaData / sceAgcAcbDmaData). Packet is
+// IT_NOP + this register; CP copies guest bytes when src/dst are memory.
 constexpr uint32_t R_DMA_DATA         = 0x19;
 
 constexpr uint32_t R_NUM = 0x3F + 1;
@@ -306,13 +310,14 @@ constexpr uint32_t PA_SC_LEFT_VERT_GRID      = 0xE9;
 constexpr uint32_t PA_SC_HORIZ_GRID          = 0xEA;
 constexpr uint32_t PA_SC_FOV_WINDOW_LR       = 0xEB;
 constexpr uint32_t PA_SC_FOV_WINDOW_TB       = 0xEC;
+// Legacy GCN offset (Gen5 may still emit via AGC defaults).
+constexpr uint32_t VGT_MULTI_PRIM_IB_RESET_INDX = 0x103;
 constexpr uint32_t CB_RMI_GL2_CACHE_CONTROL  = 0x104;
 constexpr uint32_t CB_BLEND_RED              = 0x105;
 constexpr uint32_t CB_BLEND_GREEN            = 0x106;
 constexpr uint32_t CB_BLEND_BLUE             = 0x107;
 constexpr uint32_t CB_BLEND_ALPHA            = 0x108;
 constexpr uint32_t CB_DCC_CONTROL            = 0x109;
-constexpr uint32_t VGT_MULTI_PRIM_IB_RESET_INDX = 0x103;
 
 constexpr uint32_t DB_STENCIL_CONTROL                       = 0x10B;
 constexpr uint32_t DB_STENCIL_CONTROL_STENCILFAIL_SHIFT     = 0;
@@ -536,15 +541,15 @@ constexpr uint32_t PA_SC_MODE_CNTL_0_LINE_STIPPLE_ENABLE_SHIFT  = 2;
 constexpr uint32_t PA_SC_MODE_CNTL_0_LINE_STIPPLE_ENABLE_MASK   = 0x1;
 
 constexpr uint32_t PA_SC_MODE_CNTL_1      = 0x293;
+// Hull/domain tess level clamps (context space, bulk AGC defaults).
+constexpr uint32_t VGT_HOS_MAX_TESS_LEVEL = 0x286;
+constexpr uint32_t VGT_HOS_MIN_TESS_LEVEL = 0x287;
 constexpr uint32_t VGT_GS_OUT_PRIM_TYPE   = 0x29B;
 constexpr uint32_t VGT_PRIMITIVEID_EN     = 0x2A1;
 constexpr uint32_t VGT_PRIMITIVEID_RESET  = 0x2A3;
 constexpr uint32_t VGT_DRAW_PAYLOAD_CNTL  = 0x2A6;
 constexpr uint32_t VGT_ESGS_RING_ITEMSIZE = 0x2AB;
 constexpr uint32_t VGT_REUSE_OFF          = 0x2AD;
-
-constexpr uint32_t VGT_HOS_MAX_TESS_LEVEL = 0x286;
-constexpr uint32_t VGT_HOS_MIN_TESS_LEVEL = 0x287;
 
 constexpr uint32_t DB_HTILE_SURFACE                               = 0x2AF;
 constexpr uint32_t DB_HTILE_SURFACE_LINEAR_SHIFT                  = 0;
@@ -1009,9 +1014,16 @@ void DumpPm4PacketStream(Core::File* file, uint32_t* cmd_buffer, uint32_t start_
 
 // PM4 header type in bits [31:30]. Returns how many dwords the packet occupies
 // (header included) for non-Type3 packets, or 0 if the header is Type3 (caller
-// must decode the IT_* length). Type2 is a single-dword NOP. Type0 is treated
-// as a single-register write (header + 1 body dword) — see GraphicsRun.
-uint32_t Pm4NonType3PacketDwords(uint32_t cmd_id);
+// must decode the IT_* length). Type2 is a single-dword NOP. Type0/Type1 are
+// treated as header + 1 body dword — see GraphicsRun.
+//
+// When remaining_including_header > 0 and a Type3 header's KYTY_PM4_LEN exceeds
+// that remaining span, returns 2: Gen5 streams insert 2-dword units whose high
+// bits look like Type3 (e.g. 0xf84d2e90) but cannot be real IT_* packets.
+uint32_t Pm4NonType3PacketDwords(uint32_t cmd_id, uint32_t remaining_including_header = 0);
+uint32_t Pm4SpecialType3PacketDwords(uint32_t cmd_id);
+uint32_t Pm4Type3NopBodyDwords(uint32_t cmd_id);
+bool     Pm4Gen5OpaquePairPrecedesWaitFlipDone(const uint32_t* stream, uint32_t remaining_including_header);
 
 } // namespace Kyty::Libs::Graphics::Pm4
 

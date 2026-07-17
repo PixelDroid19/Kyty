@@ -66,6 +66,8 @@ static KYTY_SYSV_ABI int ShareLogAndOk(uint64_t a0, uint64_t a1, uint64_t a2, ui
 	return OK;
 }
 
+// sceShareRegisterContentEventCallback — NID Sygnk9dr5WQ (callback, user_data).
+// No host share pipeline; accept registration so boot continues.
 static KYTY_SYSV_ABI int ShareRegisterContentEventCallback(void* callback, void* user_data)
 {
 	PRINT_NAME();
@@ -74,6 +76,7 @@ static KYTY_SYSV_ABI int ShareRegisterContentEventCallback(void* callback, void*
 	return OK;
 }
 
+// sceShareUnregisterContentEventCallback — NID KnsfHKmZqFA
 static KYTY_SYSV_ABI int ShareUnregisterContentEventCallback(void* callback)
 {
 	PRINT_NAME();
