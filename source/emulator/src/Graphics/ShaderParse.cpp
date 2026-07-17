@@ -1454,9 +1454,9 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 	return size;
 }
 
-static bool is_gen5_vop3b_carry_family(uint32_t opcode, bool next_gen)
+static bool is_gen5_vop3b(uint32_t opcode, bool next_gen)
 {
-	return next_gen && opcode >= 0x128u && opcode <= 0x12au;
+	return next_gen && ((opcode >= 0x128u && opcode <= 0x12au) || opcode == 0x176u || opcode == 0x177u);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity,readability-function-size,google-readability-function-size,hicpp-function-size)
@@ -1470,9 +1470,9 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 
 	uint32_t   opcode         = (next_gen ? (buffer[0] >> 16u) & 0x3ffu : (buffer[0] >> 17u) & 0x1ffu);
 	uint32_t   clamp          = (next_gen ? (buffer[0] >> 15u) & 0x1u : (buffer[0] >> 11u) & 0x1u);
-	const bool is_vop3b_carry = is_gen5_vop3b_carry_family(opcode, next_gen);
-	uint32_t   op_sel         = (next_gen && !is_vop3b_carry ? (buffer[0] >> 11u) & 0xfu : 0);
-	uint32_t   abs            = (is_vop3b_carry ? 0 : (buffer[0] >> 8u) & 0x7u);
+	const bool is_vop3b = is_gen5_vop3b(opcode, next_gen);
+	uint32_t   op_sel   = (next_gen && !is_vop3b ? (buffer[0] >> 11u) & 0xfu : 0);
+	uint32_t   abs      = (is_vop3b ? 0 : (buffer[0] >> 8u) & 0x7u);
 	uint32_t   vdst           = (buffer[0] >> 0u) & 0xffu;
 	uint32_t   sdst           = (buffer[0] >> 8u) & 0x7fu;
 	uint32_t   neg            = (buffer[1] >> 29u) & 0x7u;
@@ -1515,21 +1515,19 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 
 	uint32_t size = 2;
 
-	if (inst.src[0].type == ShaderOperandType::LiteralConstant)
+	const bool has_literal = inst.src[0].type == ShaderOperandType::LiteralConstant ||
+	                         inst.src[1].type == ShaderOperandType::LiteralConstant ||
+	                         inst.src[2].type == ShaderOperandType::LiteralConstant;
+	if (has_literal)
 	{
-		inst.src[0].constant.u = buffer[size];
-		size++;
-	}
-
-	if (inst.src[1].type == ShaderOperandType::LiteralConstant)
-	{
-		inst.src[1].constant.u = buffer[size];
-		size++;
-	}
-
-	if (inst.src[2].type == ShaderOperandType::LiteralConstant)
-	{
-		inst.src[2].constant.u = buffer[size];
+		const uint32_t literal = buffer[size];
+		for (auto& operand: inst.src)
+		{
+			if (operand.type == ShaderOperandType::LiteralConstant)
+			{
+				operand.constant.u = literal;
+			}
+		}
 		size++;
 	}
 
@@ -2109,7 +2107,14 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x171: KYTY_NI("v_msad_u8"); break;
 		case 0x174: KYTY_NI("v_trig_preop_f64"); break;
 		case 0x175: KYTY_NI("v_mqsad_u32_u8"); break;
-		case 0x176: KYTY_NI("v_mad_u64_u32"); break;
+		case 0x176:
+			inst.type        = ShaderInstructionType::VMadU64U32;
+			inst.format      = ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair;
+			inst.dst.size    = 2;
+			inst.dst2        = operand_parse(sdst);
+			inst.dst2.size   = 2;
+			inst.src[2].size = 2;
+			break;
 		case 0x177: KYTY_NI("v_mad_i64_i32"); break;
 		case 0x303:
 			if (next_gen)
