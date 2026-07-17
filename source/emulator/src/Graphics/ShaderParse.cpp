@@ -2415,9 +2415,9 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 		}
 	}
 
-	// GCN/GFX: parameter exports use targets 0x20+N (N = param index). SharpEmu
-	// treats targets in [32,64) the same way (fact only; no code copied). Captured
-	// post-Play VS: target 0x26 en=0xf done=0 compr=0 vm=0 → Param6.
+	// GCN/GFX: parameter exports use targets 0x20+N (N = param index). Targets in
+	// [32,64) follow the same mapping. Captured post-Play VS: target 0x26 en=0xf
+	// done=0 compr=0 vm=0 → Param6.
 	if (inst.format == ShaderInstructionFormat::Unknown && done == 0 && compr == 0 && vm == 0 && en == 0xf)
 	{
 		switch (target)

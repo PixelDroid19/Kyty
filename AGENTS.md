@@ -135,9 +135,9 @@ strict post-Play (or earlier) blocker is open. Delivery order below is absolute.
 6. **Compare working vs failing forms.** Same export with non-null address
    earlier in the run is ABI evidence; a post-Play null pair is a different
    contract to explain, not a free pass to invent addresses.
-7. **Consult references only for names and patterns.** SharpEmu, RPCSX wiki,
-   Vulkan/AMD docs inform vocabulary; every PS5-specific claim must reappear
-   in a local capture or test. No GPL code paste.
+7. **Consult references only for names and patterns.** Public Gen5 export
+   tables, RPCSX wiki, and Vulkan/AMD docs inform vocabulary; every
+   PS5-specific claim must reappear in a local capture or test. No GPL code paste.
 
 ### Hypothesis and trial-and-error discipline
 
@@ -718,8 +718,8 @@ REFERENCES AND HOW TO USE THEM
 Use references for behavioral facts, architecture patterns, and test ideas;
 never copy incompatible or GPL implementation code into Kyty:
 
-- SharpEmu: https://github.com/par274/sharpemu — PS4/PS5 export naming,
-  ABI evidence, Gen5 AGC packet patch contracts, and strict failure reporting.
+- Public Gen5 export / NID tables — PS4/PS5 export naming and ABI vocabulary
+  only; verify every claim with a local capture or focused test.
 - RPCSX: https://github.com/RPCSX/rpcsx and its wiki — Linux-first portability,
   runtime boundaries, logging, and compatibility transparency.
 - EmuC0re: https://github.com/egycnq/EmuC0re — small emulator seams and

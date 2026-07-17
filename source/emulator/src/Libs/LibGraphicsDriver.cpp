@@ -69,7 +69,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("23LRUSvYu1M", Gen5::GraphicsInit);
 	LIB_FUNC("2JtWUUiYBXs", Gen5::GraphicsGetRegisterDefaults2);
 	LIB_FUNC("wRbq6ZjNop4", Gen5::GraphicsGetRegisterDefaults2Internal);
-	// 3KDcnM3lrcU: sceAgcWaitRegMemPatchAddress (SharpEmu NID catalog).
+	// 3KDcnM3lrcU: sceAgcWaitRegMemPatchAddress.
 	LIB_FUNC("3KDcnM3lrcU", Gen5::GraphicsAgcWaitRegMemPatchAddress);
 	// Lkf86B98qPc: sceAgcGetPacketSize.
 	LIB_FUNC("Lkf86B98qPc", Gen5::GraphicsGetDataPacketSizeDw);

@@ -48,7 +48,7 @@ int KYTY_SYSV_ABI RegisterContext(int32_t context, int32_t handle, uint64_t opti
 
 // sceNpTrophy2RegisterUnlockCallback — NID sUXGfNMalIo
 // Gen5 capture: rdi is a guest code pointer (callback), not a context out-param.
-// Name/ABI from public Gen5 export tables (SharpEmu NID map as vocabulary only).
+// Name/ABI from public Gen5 export tables (vocabulary only; no foreign code).
 // Host has no trophy UI; accept registration without invoking the callback.
 int KYTY_SYSV_ABI RegisterUnlockCallback(void* /*callback*/, void* /*userdata*/)
 {
