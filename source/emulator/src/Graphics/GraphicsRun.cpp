@@ -3177,23 +3177,24 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_auto)
 
 		cp->DrawIndexAuto(index_count, flags);
 
-		EXIT_NOT_IMPLEMENTED(!(dw >= 4));
-
-		if (buffer[2] == 0xc0001000)
+		if (dw >= 4 && buffer[2] == 0xc0001000)
 		{
 			EXIT_NOT_IMPLEMENTED(buffer[3] != 0);
 
 			return 4;
 		}
 
-		if (buffer[2] == 0xc0021000)
+		if (dw >= 6 && buffer[2] == 0xc0021000)
 		{
 			EXIT_NOT_IMPLEMENTED(buffer[3] != 0);
 
 			return 6;
 		}
 
-		EXIT("invalid draw_index_auto\n");
+		// Standard IT_DRAW_INDEX_AUTO ends after the index count and
+		// draw-initiator payload. The optional trailer belongs to the
+		// legacy wrapped command stream handled above.
+		return 2;
 	}
 
 	return 1;
