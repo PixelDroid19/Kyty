@@ -27,6 +27,8 @@ LIB_DEFINE(InitPad_1)
 	// scePadSetVibrationMode / scePadSetTriggerEffect — no-op success (PS5 dualsense extras).
 	LIB_FUNC("W2G-yoyMF5U", Controller::PadSetVibrationMode);
 	LIB_FUNC("2JgFB2n9oUM", Controller::PadSetTriggerEffect);
+	// scePadGetTriggerEffectState — NID znaWI0gpuo8 (Astro after PlayGo).
+	LIB_FUNC("znaWI0gpuo8", Controller::PadGetTriggerEffectState);
 	LIB_FUNC("DscD1i9HX1w", Controller::PadResetLightBar);
 	LIB_FUNC("RR4novUEENY", Controller::PadSetLightBar);
 }

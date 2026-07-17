@@ -8,6 +8,7 @@
 #include "Kyty/Core/File.h"
 #include "Kyty/Core/Threads.h"
 
+#include <cinttypes>
 #include <cstring>
 #include <unordered_map>
 
@@ -97,6 +98,30 @@ static void UpdateState(uint64_t cmd, uint64_t data, uint64_t size, uint64_t wri
 	st.size         = size;
 	st.write_offset = write_offset;
 	g_buffers[cmd]  = st;
+}
+
+// Eager Ampr builders append fixed-size records into a fixed guest pool
+// (observed global buffer size 0x400). The guest may issue more builders than
+// fit without calling AprSubmit; host never drains write_offset. When the next
+// record would overflow, wrap to 0 so completed eager side-effects (file reads,
+// address stores, equeue wakes) still report success.
+static bool EnsureStreamSpace(CommandBufferState* st, uint64_t record_size)
+{
+	if (st == nullptr || record_size == 0)
+	{
+		return false;
+	}
+	if (st->size < record_size)
+	{
+		return false;
+	}
+	if (st->write_offset + record_size > st->size)
+	{
+		printf("\t command stream wrap (offset 0x%" PRIx64 " size 0x%" PRIx64 " record 0x%" PRIx64 ")\n", st->write_offset, st->size,
+		       record_size);
+		st->write_offset = 0;
+	}
+	return true;
 }
 
 static bool TryGetState(uint64_t cmd, CommandBufferState* out)
@@ -405,10 +430,12 @@ static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/
 	{
 		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
-	if (st.write_offset + kReadFileRecordSize > st.size)
+	// File transfer already completed. Stream bookkeeping must not fail the
+	// guest builder (Astro AprFile.cpp asserts ret == 0 → int $0x41).
+	if (!EnsureStreamSpace(&st, kReadFileRecordSize))
 	{
-		printf("\t command buffer overflow\n");
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		printf("\t command stream too small for records (read applied)\n");
+		return OK;
 	}
 	if (st.data != 0)
 	{
@@ -448,10 +475,10 @@ static KYTY_SYSV_ABI int CommandBufferWriteAddressOnCompletion(void* cmd_obj, ui
 	{
 		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
-	if (st.write_offset + kWriteAddressRecordSize > st.size)
+	if (!EnsureStreamSpace(&st, kWriteAddressRecordSize))
 	{
-		printf("\t command buffer overflow\n");
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		printf("\t command stream too small for records (store applied)\n");
+		return OK;
 	}
 	if (st.data != 0)
 	{
@@ -490,21 +517,23 @@ static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cm
 	{
 		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
-	if (st.write_offset + kKernelEventQueueRecordSize > st.size)
+	if (EnsureStreamSpace(&st, kKernelEventQueueRecordSize))
 	{
-		printf("\t command buffer overflow\n");
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		if (st.data != 0)
+		{
+			uint8_t record[kKernelEventQueueRecordSize] {};
+			WriteU64(record + 0x00, reinterpret_cast<uint64_t>(equeue));
+			WriteU64(record + 0x08, ident);
+			WriteU64(record + 0x10, completion_token);
+			WriteU64(record + 0x18, user_data);
+			std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(st.data + st.write_offset)), record, kKernelEventQueueRecordSize);
+		}
+		UpdateState(cmd, st.data, st.size, st.write_offset + kKernelEventQueueRecordSize);
 	}
-	if (st.data != 0)
+	else
 	{
-		uint8_t record[kKernelEventQueueRecordSize] {};
-		WriteU64(record + 0x00, reinterpret_cast<uint64_t>(equeue));
-		WriteU64(record + 0x08, ident);
-		WriteU64(record + 0x10, completion_token);
-		WriteU64(record + 0x18, user_data);
-		std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(st.data + st.write_offset)), record, kKernelEventQueueRecordSize);
+		printf("\t command stream too small for records (equeue wake still runs)\n");
 	}
-	UpdateState(cmd, st.data, st.size, st.write_offset + kKernelEventQueueRecordSize);
 
 	if (equeue != nullptr)
 	{

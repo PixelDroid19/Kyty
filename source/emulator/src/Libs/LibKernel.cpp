@@ -546,6 +546,13 @@ int KYTY_SYSV_ABI getpid()
 	return guest_process_id;
 }
 
+// Gen5 Posix_v1 pthread_self — NID EotR8a3ASf4. Same guest thread object as
+// scePthreadSelf; Astro stores the returned pthread_t into audio context state.
+LibKernel::Pthread KYTY_SYSV_ABI pthread_self()
+{
+	return LibKernel::PthreadSelf();
+}
+
 int KYTY_SYSV_ABI clock_gettime(int clock_id, LibKernel::KernelTimespec* time)
 {
 	PRINT_NAME();
@@ -560,6 +567,14 @@ int KYTY_SYSV_ABI nanosleep(const LibKernel::KernelTimespec* rqtp, LibKernel::Ke
 	return POSIX_CALL(LibKernel::KernelNanosleep(rqtp, rmtp));
 }
 
+// Gen5 Posix_v1 usleep — NID QcteRwbsnV0 (Astro after Setschedparam; rdi=µs).
+int KYTY_SYSV_ABI usleep(unsigned int microseconds)
+{
+	PRINT_NAME();
+
+	return POSIX_CALL(LibKernel::KernelUsleep(microseconds));
+}
+
 int KYTY_SYSV_ABI stat(const char* path, LibKernel::FileSystem::FileStat* sb)
 {
 	PRINT_NAME();
@@ -571,11 +586,37 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 {
 	LIB_FUNC("lLMT9vJAck0", clock_gettime);
 	LIB_FUNC("yS8U2TGCe1A", nanosleep);
+	// Gen5 Posix_v1 usleep — QcteRwbsnV0 after Setschedparam assert fix.
+	LIB_FUNC("QcteRwbsnV0", usleep);
 	LIB_FUNC("E6ao34wPw+U", stat);
 	LIB_FUNC("HoLVWNanBBc", getpid);
+	// Gen5 Posix_v1 pthread_self — EotR8a3ASf4 (Astro audio path after Acm).
+	LIB_FUNC("EotR8a3ASf4", pthread_self);
+	// Gen5 Posix_v1 pthread_attr_* (Astro after package path bring-up).
+	LIB_FUNC("wtkt-teR1so", Posix::pthread_attr_init);
+	LIB_FUNC("zHchY8ft5pk", Posix::pthread_attr_destroy);
+	LIB_FUNC("vQm4fDEsWi8", Posix::pthread_attr_getstack);
+	LIB_FUNC("2Q0z6rnBrTE", Posix::pthread_attr_setstacksize);
+	LIB_FUNC("0qOtCR-ZHck", Posix::pthread_attr_getstacksize);
+	LIB_FUNC("Ucsu-OK+els", Posix::pthread_attr_get_np);
+	LIB_FUNC("RtLRV-pBTTY", Posix::pthread_attr_getschedpolicy);
+	LIB_FUNC("JarMIy8kKEY", Posix::pthread_attr_setschedpolicy);
+	LIB_FUNC("E+tyo3lp5Lw", Posix::pthread_attr_setdetachstate);
+	LIB_FUNC("VUT1ZSrHT0I", Posix::pthread_attr_getdetachstate);
+	LIB_FUNC("euKRgm0Vn2M", Posix::pthread_attr_setschedparam);
+	LIB_FUNC("qlk9pSLsUmM", Posix::pthread_attr_getschedparam);
+	LIB_FUNC("FXPWHNk8Of0", Posix::pthread_attr_getschedparam);
+	LIB_FUNC("7ZlAakEf0Qg", Posix::pthread_attr_setinheritsched);
+	LIB_FUNC("JKyG3SWyA10", Posix::pthread_attr_setguardsize);
+	LIB_FUNC("JNkVVsVDmOk", Posix::pthread_attr_getguardsize);
 
 	LIB_FUNC("OxhIB8LB-PQ", Posix::pthread_create);
 	LIB_FUNC("h9CcP3J0oVM", Posix::pthread_join);
+	// Gen5 Posix_v1 thread control (Astro after attr_setstacksize).
+	LIB_FUNC("+U1R4WtXvoc", Posix::pthread_detach);
+	LIB_FUNC("FJrT5LuUBAU", Posix::pthread_exit);
+	LIB_FUNC("B5GmVDKwpn0", Posix::pthread_yield);
+	LIB_FUNC("2MOy+rUfuhQ", Posix::pthread_cond_signal);
 	LIB_FUNC("7H0iTOciTLo", Posix::pthread_mutex_lock);
 	LIB_FUNC("K-jXhbt2gn4", Posix::pthread_mutex_trylock);
 	LIB_FUNC("2Z+PpY6CaJg", Posix::pthread_mutex_unlock);

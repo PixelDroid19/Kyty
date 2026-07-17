@@ -83,6 +83,9 @@ private:
 static MountPoints*     g_mount_points = nullptr;
 static FileDescriptors* g_files        = nullptr;
 
+// Defined with APR helpers; used by KernelOpen/KernelStat for package font fallback.
+static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name);
+
 static void sec_to_timespec(KernelTimespec* ts, double sec)
 {
 	ts->tv_sec  = static_cast<int64_t>(sec);
@@ -336,8 +339,16 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 
 	EXIT_IF(file == nullptr || file->opened || file->directory);
 
-	file->name      = path;
-	file->real_name = (directory ? g_mount_points->GetRealDirectory(file->name) : g_mount_points->GetRealFilename(file->name));
+	file->name = path;
+	if (directory)
+	{
+		file->real_name = g_mount_points->GetRealDirectory(file->name);
+	}
+	else
+	{
+		// Package font fallback for incomplete dumps (SIE system fonts under app0).
+		file->real_name = ResolveExistingHostFile(file->name, g_mount_points->GetRealFilename(file->name));
+	}
 
 	if (trunc && rw_mode == Core::File::Mode::Read)
 	{
@@ -723,7 +734,7 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 	printf("\t KernelStat: %s\n", path);
 
 	String path_s         = String::FromUtf8(path);
-	auto   real_file_name = g_mount_points->GetRealFilename(path_s);
+	auto   real_file_name = ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s));
 	auto   real_directory = g_mount_points->GetRealDirectory(path_s);
 
 	bool is_dir  = Core::File::IsDirectoryExisting(real_file_name) || Core::File::IsDirectoryExisting(real_directory);
@@ -1027,6 +1038,346 @@ static std::unordered_map<uint32_t, String>  g_apr_id_to_host;
 static uint32_t                             g_apr_next_submission_id = 1;
 static std::unordered_map<uint32_t, uint64_t> g_apr_submissions; // id → cmd (diagnostic)
 
+// Weight classes for package-font substitution (incomplete dumps / SIE fonts under app0).
+enum class PackageFontWeight : int
+{
+	Light    = 0,
+	Regular  = 1,
+	Medium   = 2,
+	Bold     = 3,
+	Heavy    = 4,
+};
+
+static bool IsPackageFontExtension(const String& name_lower)
+{
+	return name_lower.EndsWith(U".otf") || name_lower.EndsWith(U".ttf") || name_lower.EndsWith(U".ttc");
+}
+
+static PackageFontWeight ClassifyPackageFontWeight(const String& name_lower)
+{
+	// More specific tokens first (xbold/xbd before bold).
+	if (name_lower.ContainsStr(U"heavy") || name_lower.ContainsStr(U"black") || name_lower.ContainsStr(U"xbold") ||
+	    name_lower.ContainsStr(U"xbd") || name_lower.ContainsStr(U"blk"))
+	{
+		return PackageFontWeight::Heavy;
+	}
+	if (name_lower.ContainsStr(U"bold"))
+	{
+		return PackageFontWeight::Bold;
+	}
+	if (name_lower.ContainsStr(U"medium") || name_lower.ContainsStr(U"book"))
+	{
+		return PackageFontWeight::Medium;
+	}
+	if (name_lower.ContainsStr(U"light") || name_lower.ContainsStr(U"thin"))
+	{
+		return PackageFontWeight::Light;
+	}
+	return PackageFontWeight::Regular;
+}
+
+int ScorePackageFontFallback(const String& requested_filename, const String& candidate_filename)
+{
+	const String req = requested_filename.FilenameWithoutDirectory().ToLower();
+	const String can = candidate_filename.FilenameWithoutDirectory().ToLower();
+	if (req.IsEmpty() || can.IsEmpty() || !IsPackageFontExtension(can))
+	{
+		return -1;
+	}
+	if (req == can)
+	{
+		return 100000;
+	}
+	if (!IsPackageFontExtension(req))
+	{
+		return -1;
+	}
+
+	const int req_w = static_cast<int>(ClassifyPackageFontWeight(req));
+	const int can_w = static_cast<int>(ClassifyPackageFontWeight(can));
+	int       score = 1000 - (req_w > can_w ? req_w - can_w : can_w - req_w) * 200;
+
+	// Prefer candidates that share a leading family token (before first '-' or '_').
+	const auto family_token = [](const String& n) -> String {
+		uint32_t cut = n.FindIndex(U'-');
+		const uint32_t us = n.FindIndex(U'_');
+		if (us != Core::STRING_INVALID_INDEX && (cut == Core::STRING_INVALID_INDEX || us < cut))
+		{
+			cut = us;
+		}
+		return cut == Core::STRING_INVALID_INDEX ? n : n.Left(cut);
+	};
+	const String req_fam = family_token(req);
+	const String can_fam = family_token(can);
+	if (!req_fam.IsEmpty() && req_fam == can_fam)
+	{
+		score += 300;
+	}
+	// Mild preference for larger/heavier siblings when request is Heavy/Black (SIE system fonts).
+	if (req_w >= static_cast<int>(PackageFontWeight::Heavy) && can_w >= static_cast<int>(PackageFontWeight::Bold))
+	{
+		score += 50;
+	}
+	return score;
+}
+
+String PreferPackageFontHostPath(const String& requested_host_path)
+{
+	if (requested_host_path.IsEmpty())
+	{
+		return requested_host_path;
+	}
+	if (Core::File::IsFileExisting(requested_host_path))
+	{
+		return requested_host_path;
+	}
+
+	const String requested_name = requested_host_path.FilenameWithoutDirectory();
+	const String dir            = requested_host_path.DirectoryWithoutFilename();
+	if (requested_name.IsEmpty() || dir.IsEmpty() || !IsPackageFontExtension(requested_name.ToLower()))
+	{
+		return requested_host_path;
+	}
+	if (!Core::File::IsDirectoryExisting(dir))
+	{
+		return requested_host_path;
+	}
+
+	const auto entries = Core::File::GetDirEntries(dir);
+	int        best_score = -1;
+	String     best_path;
+	for (const auto& entry: entries)
+	{
+		if (!entry.is_file)
+		{
+			continue;
+		}
+		const int score = ScorePackageFontFallback(requested_name, entry.name);
+		if (score > best_score)
+		{
+			best_score = score;
+			best_path  = dir + entry.name;
+		}
+	}
+	if (best_score >= 0 && !best_path.IsEmpty() && Core::File::IsFileExisting(best_path))
+	{
+		printf("\t package font fallback: %s -> %s (score=%d)\n", requested_host_path.C_Str(), best_path.C_Str(), best_score);
+		return best_path;
+	}
+	return requested_host_path;
+}
+
+String PreferHostExtensionAlias(const String& requested_host_path)
+{
+	if (requested_host_path.IsEmpty() || Core::File::IsFileExisting(requested_host_path))
+	{
+		return requested_host_path;
+	}
+	const String lower = requested_host_path.ToLower();
+	// Astro FIXED dumps ship object defs as .odxb while guest requests .odx
+	// (ObjectDefinition.cpp: "odx not found [prein/effects/odx/....odx]").
+	if (lower.EndsWith(U".odx"))
+	{
+		const String alias = requested_host_path + U"b";
+		if (Core::File::IsFileExisting(alias))
+		{
+			printf("\t host extension alias: %s -> %s\n", requested_host_path.C_Str(), alias.C_Str());
+			return alias;
+		}
+	}
+	return requested_host_path;
+}
+
+String PreferHostApp0DataSegment(const String& guest_path, const String& requested_host_path)
+{
+	if (requested_host_path.IsEmpty() || Core::File::IsFileExisting(requested_host_path))
+	{
+		return requested_host_path;
+	}
+	// Guest open of /app0/prein/... when package layout is /app0/data/prein/...
+	// (observed: ODX resolve miss host=ROOT/prein/... while file is ROOT/data/prein/...).
+	const String guest = guest_path.FixFilenameSlash();
+	if (!guest.StartsWith(U"/app0/") || guest.StartsWith(U"/app0/data/"))
+	{
+		return requested_host_path;
+	}
+	// Do not rewrite known app0 roots that live next to data/.
+	const String rest  = guest.RemoveFirst(6); // strip "/app0/"
+	const auto   parts = rest.Split(U"/");
+	if (!parts.IndexValid(0))
+	{
+		return requested_host_path;
+	}
+	const String first = parts.At(0).ToLower();
+	// Skip known package roots and single-file app0 entries (eboot.bin, args.txt, ...).
+	if (first.IsEmpty() || first == U"data" || first == U"sce_sys" || first == U"sce_module" || first == U"fakelib" ||
+	    first.ContainsChar(U'.'))
+	{
+		return requested_host_path;
+	}
+
+	// Prefer string rewrite on the already-mapped host path so unit tests need no mount:
+	// host ROOT/prein/... → ROOT/data/prein/...
+	const String host   = requested_host_path.FixFilenameSlash();
+	const String needle = U"/" + parts.At(0) + U"/";
+	const String insert = U"/data/" + parts.At(0) + U"/";
+	String       alt_host;
+	if (host.ContainsStr(needle))
+	{
+		alt_host = host.ReplaceStr(needle, insert);
+	}
+	else if (g_mount_points != nullptr)
+	{
+		alt_host = g_mount_points->GetRealFilename(U"/app0/data/" + rest);
+	}
+	else
+	{
+		return requested_host_path;
+	}
+	if (alt_host == host)
+	{
+		return requested_host_path;
+	}
+
+	if (Core::File::IsFileExisting(alt_host))
+	{
+		printf("\t host app0 data segment: %s -> %s\n", guest.C_Str(), alt_host.C_Str());
+		return alt_host;
+	}
+	const String alt_aliased = PreferHostExtensionAlias(alt_host);
+	if (Core::File::IsFileExisting(alt_aliased))
+	{
+		printf("\t host app0 data segment+ext: %s -> %s\n", guest.C_Str(), alt_aliased.C_Str());
+		return alt_aliased;
+	}
+	return requested_host_path;
+}
+
+// Last successfully resolved ObjectDefinition host path (.../odx/NAME.odx[b]).
+// Used to recover bare `/app0/.jxm|.skel|.anim` companion opens.
+static String g_last_od_host_path;
+
+static void RememberOdHostPath(const String& guest_path, const String& host_path)
+{
+	const String g = guest_path.ToLower();
+	if (!g.ContainsStr(U"/odx/") || (!g.EndsWith(U".odx") && !g.EndsWith(U".odxb")))
+	{
+		return;
+	}
+	if (!Core::File::IsFileExisting(host_path))
+	{
+		return;
+	}
+	g_last_od_host_path = host_path;
+}
+
+String PreferHostOdCompanionAsset(const String& guest_path, const String& requested_host_path, const String& last_od_host_path)
+{
+	if (requested_host_path.IsEmpty() || Core::File::IsFileExisting(requested_host_path))
+	{
+		return requested_host_path;
+	}
+	const String last_od = !last_od_host_path.IsEmpty() ? last_od_host_path : g_last_od_host_path;
+	if (last_od.IsEmpty())
+	{
+		return requested_host_path;
+	}
+	// Bare companion: /app0/.jxm, /app0/.skel, /app0/.anim (basename empty, only extension).
+	const String guest = guest_path.FixFilenameSlash();
+	const String name  = guest.FilenameWithoutDirectory().ToLower();
+	if (name != U".jxm" && name != U".skel" && name != U".anim" && name != U".jpx")
+	{
+		return requested_host_path;
+	}
+
+	// last OD host: .../odx/NAME.odxb → stem NAME, parent before /odx/
+	String od = last_od.FixFilenameSlash();
+	const String od_file = od.FilenameWithoutDirectory();
+	String       stem    = od_file;
+	const String od_low  = od_file.ToLower();
+	if (od_low.EndsWith(U".odxb"))
+	{
+		stem = od_file.RemoveLast(5);
+	}
+	else if (od_low.EndsWith(U".odx"))
+	{
+		stem = od_file.RemoveLast(4);
+	}
+	const String odx_dir = od.DirectoryWithoutFilename(); // .../odx/
+	// parent of odx/ → effects/ or ui/
+	String parent = odx_dir;
+	if (parent.EndsWith(U"/"))
+	{
+		parent = parent.RemoveLast(1);
+	}
+	// strip trailing "odx"
+	const String parent_name = parent.FilenameWithoutDirectory().ToLower();
+	if (parent_name != U"odx")
+	{
+		return requested_host_path;
+	}
+	const String tree_root = parent.DirectoryWithoutFilename(); // .../effects/ or .../ui/
+
+	String candidate;
+	if (name == U".jxm" || name == U".jpx")
+	{
+		candidate = tree_root + U"gfx/" + stem + name;
+	}
+	else if (name == U".skel")
+	{
+		candidate = tree_root + U"anim/" + stem + U".skel";
+	}
+	else // .anim
+	{
+		candidate = tree_root + U"anim/" + stem + U"_anim_play.anim";
+		if (!Core::File::IsFileExisting(candidate))
+		{
+			candidate = tree_root + U"anim/" + stem + U".anim";
+		}
+	}
+
+	if (Core::File::IsFileExisting(candidate))
+	{
+		printf("\t host OD companion: %s -> %s (from %s)\n", guest.C_Str(), candidate.C_Str(), last_od.C_Str());
+		return candidate;
+	}
+	return requested_host_path;
+}
+
+// Map guest path → existing host file (extension aliases, app0 data/, OD companions, fonts).
+static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name)
+{
+	if (Core::File::IsFileExisting(real_file_name))
+	{
+		RememberOdHostPath(guest_path, real_file_name);
+		return real_file_name;
+	}
+	const String aliased = PreferHostExtensionAlias(real_file_name);
+	if (Core::File::IsFileExisting(aliased))
+	{
+		RememberOdHostPath(guest_path, aliased);
+		return aliased;
+	}
+	const String data_seg = PreferHostApp0DataSegment(guest_path, real_file_name);
+	if (Core::File::IsFileExisting(data_seg))
+	{
+		RememberOdHostPath(guest_path, data_seg);
+		return data_seg;
+	}
+	const String companion = PreferHostOdCompanionAsset(guest_path, real_file_name);
+	if (Core::File::IsFileExisting(companion))
+	{
+		return companion;
+	}
+	const String guest_name = guest_path.FilenameWithoutDirectory().ToLower();
+	// Only substitute font assets (package external styles / SIE system fonts under app0).
+	if (!IsPackageFontExtension(guest_name))
+	{
+		return real_file_name;
+	}
+	return PreferPackageFontHostPath(real_file_name);
+}
+
 bool AprTryGetHostPath(uint32_t file_id, String* out_host_path)
 {
 	EXIT_IF(out_host_path == nullptr);
@@ -1068,7 +1419,7 @@ int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* 
 		printf("\t [%llu] path = %s\n", static_cast<unsigned long long>(i), guest_path);
 
 		const String path_s         = String::FromUtf8(guest_path);
-		const auto   real_file_name = g_mount_points->GetRealFilename(path_s);
+		const auto   real_file_name = ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s));
 		if (!Core::File::IsFileExisting(real_file_name))
 		{
 			printf("\t file not found: %s\n", real_file_name.C_Str());
@@ -1111,7 +1462,7 @@ static int AprResolveOnePath(const char* guest_path, uint32_t* out_id, uint64_t*
 		return KERNEL_ERROR_EINVAL;
 	}
 	const String path_s         = String::FromUtf8(guest_path);
-	const auto   real_file_name = g_mount_points->GetRealFilename(path_s);
+	const auto   real_file_name = ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s));
 	if (!Core::File::IsFileExisting(real_file_name))
 	{
 		return KERNEL_ERROR_ENOENT;

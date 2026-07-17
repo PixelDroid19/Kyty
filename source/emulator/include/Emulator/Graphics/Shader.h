@@ -37,11 +37,17 @@ enum class ShaderInstructionType : uint32_t
 	Unknown,
 
 	BufferLoadDword,
+	BufferLoadDwordx2,
+	BufferLoadDwordx3,
+	BufferLoadDwordx4,
 	BufferLoadFormatX,
 	BufferLoadFormatXy,
 	BufferLoadFormatXyz,
 	BufferLoadFormatXyzw,
 	BufferStoreDword,
+	BufferStoreDwordx2,
+	BufferStoreDwordx3,
+	BufferStoreDwordx4,
 	BufferStoreFormatX,
 	BufferStoreFormatXy,
 	BufferStoreFormatXyzw,
@@ -104,6 +110,9 @@ enum class ShaderInstructionType : uint32_t
 	SMovB32,
 	SMovB64,
 	SMovkI32,
+	// SOP1: bitwise not (sets SCC if result non-zero).
+	SNotB32,
+	SNotB64,
 	SMulHiU32,
 	SMulI32,
 	SMulkI32,
@@ -124,11 +133,15 @@ enum class ShaderInstructionType : uint32_t
 	TBufferLoadFormatXyzw,
 	VAddF32,
 	VAddI32,
+	// VOP3: dst = src0 + src1 + src2 (u32). RDNA2 op 0x36D.
+	VAdd3U32,
 	VAndB32,
 	VAshrI32,
 	VAshrrevI32,
 	VBcntU32B32,
+	VBfeI32,
 	VBfeU32,
+	VBfiB32,
 	VBfmB32,
 	VBfrevB32,
 	VCeilF32,
@@ -164,12 +177,18 @@ enum class ShaderInstructionType : uint32_t
 	VCmpTruF32,
 	VCmpTU32,
 	VCmpUF32,
+	VCmpxEqI32,
 	VCmpxEqU32,
+	VCmpxGeI32,
 	VCmpxGeU32,
 	VCmpxGtF32,
+	VCmpxGtI32,
 	VCmpxGtU32,
+	VCmpxLeI32,
 	VCmpxLtF32,
+	VCmpxLtI32,
 	VCmpxNeqF32,
+	VCmpxNeI32,
 	VCmpxNeU32,
 	VCndmaskB32,
 	VCosF32,
@@ -432,10 +451,14 @@ struct ShaderOperand
 	bool              absolute    = false;
 	bool              negate      = false;
 	bool              clamp       = false;
+	// SDWA channel select (GCN/RDNA): 0-3 = BYTE_n, 4-5 = WORD_n, 6 = DWORD.
+	// Applied as zero-extend extract when loading the operand for recompile.
+	uint8_t swizzle = 6;
 
 	bool operator==(const ShaderOperand& other) const
 	{
-		return type == other.type && constant.u == other.constant.u && register_id == other.register_id && size == other.size;
+		return type == other.type && constant.u == other.constant.u && register_id == other.register_id && size == other.size &&
+		       swizzle == other.swizzle;
 	}
 };
 
@@ -998,6 +1021,20 @@ struct ShaderUserData
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
                        int user_data_register_base = 0);
+
+// Gen5 EUD sharp span policy: metadata eud_size_dw is a lower bound. Type-5
+// guest pointer tables may extend past it (Astro: eud=24, sharp@40 needs 28).
+// api is the ShaderGet* start index (16 + eud_index). Hard-cap runaway offsets.
+[[nodiscard]] inline bool ShaderGen5EudSpanAllowed(int api, int dwords, uint16_t eud_size_dw)
+{
+	const int need = api - 16 + dwords;
+	if (need <= static_cast<int>(eud_size_dw))
+	{
+		return true;
+	}
+	constexpr int k_max_eud_dwords = 256;
+	return need <= k_max_eud_dwords;
+}
 
 struct ShaderRegisterRange
 {

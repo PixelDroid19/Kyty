@@ -35,9 +35,10 @@ local cfg = {
 	ShaderLogFolder = env_or('KYTY_SHADER_LOG_FOLDER', '_Shaders');
 	CommandBufferDumpEnabled = env_bool('KYTY_COMMAND_BUFFER_DUMP', false);
 	CommandBufferDumpFolder = env_or('KYTY_COMMAND_BUFFER_DUMP_FOLDER', '_Buffers');
-	-- Silent is required for usable host FPS. Console HLE logging can drop a
-	-- Release build from ~40+ FPS to ~1 FPS on the same host/GPU. Use Console
-	-- only when debugging a specific guest call sequence.
+	-- Silent is required for usable host FPS and host resource safety.
+	-- Console/File HLE logging can drop a Release build from ~40+ FPS to ~1 FPS
+	-- and grow multi‑hundred‑MB logs on a full title boot. Dumps and verbose
+	-- logging stay opt-in so end users are not surprised by disk/RAM pressure.
 	PrintfDirection = env_or('KYTY_PRINTF_DIRECTION', 'Silent');
 	PrintfOutputFolder = env_or('KYTY_PRINTF_OUTPUT_FOLDER', '_Logs');
 	ProfilerDirection = env_or('KYTY_PROFILER_DIRECTION', 'None');

@@ -216,9 +216,16 @@ uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounterFrequency();
 namespace Posix {
 
 int KYTY_SYSV_ABI   getpid();
+// Gen5 Posix_v1 pthread_self — NID EotR8a3ASf4 (Astro after AudioOut2 residual).
+LibKernel::Pthread KYTY_SYSV_ABI pthread_self();
 int KYTY_SYSV_ABI   pthread_create(LibKernel::Pthread* thread, const LibKernel::PthreadAttr* attr, LibKernel::pthread_entry_func_t entry,
                                    void* arg);
 int KYTY_SYSV_ABI   pthread_join(LibKernel::Pthread thread, void** value);
+// Gen5 Posix_v1 thread control (+U1R4WtXvoc detach after attr setup).
+int KYTY_SYSV_ABI   pthread_detach(LibKernel::Pthread thread);
+void KYTY_SYSV_ABI  pthread_exit(void* value);
+void KYTY_SYSV_ABI  pthread_yield();
+int KYTY_SYSV_ABI   pthread_cond_signal(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_broadcast(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex);
 int KYTY_SYSV_ABI   pthread_mutex_lock(LibKernel::PthreadMutex* mutex);
@@ -236,6 +243,22 @@ int KYTY_SYSV_ABI   pthread_mutex_init(LibKernel::PthreadMutex* mutex, const Lib
 int KYTY_SYSV_ABI   pthread_mutexattr_init(LibKernel::PthreadMutexattr* attr);
 int KYTY_SYSV_ABI   pthread_mutexattr_settype(LibKernel::PthreadMutexattr* attr, int type);
 int KYTY_SYSV_ABI   pthread_mutexattr_destroy(LibKernel::PthreadMutexattr* attr);
+// Gen5 Posix_v1 pthread_attr_* (Astro after package path bring-up).
+int KYTY_SYSV_ABI pthread_attr_init(LibKernel::PthreadAttr* attr);
+int KYTY_SYSV_ABI pthread_attr_destroy(LibKernel::PthreadAttr* attr);
+int KYTY_SYSV_ABI pthread_attr_getstack(const LibKernel::PthreadAttr* attr, void** stack_addr, size_t* stack_size);
+int KYTY_SYSV_ABI pthread_attr_setstacksize(LibKernel::PthreadAttr* attr, size_t stack_size);
+int KYTY_SYSV_ABI pthread_attr_getstacksize(const LibKernel::PthreadAttr* attr, size_t* stack_size);
+int KYTY_SYSV_ABI pthread_attr_get_np(LibKernel::Pthread thread, LibKernel::PthreadAttr* attr);
+int KYTY_SYSV_ABI pthread_attr_getschedpolicy(const LibKernel::PthreadAttr* attr, int* policy);
+int KYTY_SYSV_ABI pthread_attr_setschedpolicy(LibKernel::PthreadAttr* attr, int policy);
+int KYTY_SYSV_ABI pthread_attr_setdetachstate(LibKernel::PthreadAttr* attr, int state);
+int KYTY_SYSV_ABI pthread_attr_getdetachstate(const LibKernel::PthreadAttr* attr, int* state);
+int KYTY_SYSV_ABI pthread_attr_setschedparam(LibKernel::PthreadAttr* attr, const LibKernel::KernelSchedParam* param);
+int KYTY_SYSV_ABI pthread_attr_getschedparam(const LibKernel::PthreadAttr* attr, LibKernel::KernelSchedParam* param);
+int KYTY_SYSV_ABI pthread_attr_setinheritsched(LibKernel::PthreadAttr* attr, int inherit_sched);
+int KYTY_SYSV_ABI pthread_attr_setguardsize(LibKernel::PthreadAttr* attr, size_t guard_size);
+int KYTY_SYSV_ABI pthread_attr_getguardsize(const LibKernel::PthreadAttr* attr, size_t* guard_size);
 
 } // namespace Posix
 

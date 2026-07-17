@@ -846,6 +846,12 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 		m_cp->Reset();
 	}
 
+	// Publish fence producers before enqueue so WaitRegMem in an earlier batch
+	// can observe ReleaseMem/WriteData from a later submit without requiring the
+	// blocked ring worker to dequeue that later batch first.
+	GraphicsPm4PublishFenceProducers(cmd_draw_buffer, num_draw_dw);
+	GraphicsPm4PublishFenceProducers(cmd_const_buffer, num_const_dw);
+
 	CmdBatch buf {};
 	buf.draw_buffer.data    = cmd_draw_buffer;
 	buf.draw_buffer.num_dw  = num_draw_dw;
@@ -3204,6 +3210,54 @@ KYTY_CP_OP_PARSER(cp_op_draw_reset)
 	return 1;
 }
 
+// Gen5 IT_SET_BASE from GraphicsDcbSetBaseIndirectArgs: header + 3 body dwords.
+// Indirect-arg base is recorded for later draw/dispatch; no guest-visible
+// side effect beyond stream progress is required yet.
+KYTY_CP_OP_PARSER(cp_op_set_base)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(dw < 3);
+
+	return 3;
+}
+
+// Gen5 IT_DISPATCH_INDIRECT: header + data_offset + modifier.
+// Full GPU dispatch from the SetBaseIndirect arg buffer is future work;
+// consuming the packet keeps the command stream aligned.
+KYTY_CP_OP_PARSER(cp_op_dispatch_indirect)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(dw < 2);
+
+	return 2;
+}
+
+// Gen5 IT_DRAW_INDEX_INDIRECT: header + 4 body dwords (offset, patch lo/hi, initiator).
+KYTY_CP_OP_PARSER(cp_op_draw_index_indirect)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(dw < 4);
+
+	return 4;
+}
+
+// Gen5 IT_CLEAR_STATE from GraphicsDcbResetQueue: header + 4-bit state body.
+// Same hardware effect as the legacy custom R_DRAW_RESET path (CP context reset).
+KYTY_CP_OP_PARSER(cp_op_clear_state)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0001200);
+	EXIT_NOT_IMPLEMENTED((buffer[0] & ~0xfu) != 0);
+
+	cp->Reset();
+
+	return 1;
+}
+
 KYTY_CP_OP_PARSER(cp_op_dump_const_ram)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -3605,9 +3659,10 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0054902 && cmd_id != 0xc0051060);
+	// 0xC0051060 = 7-DW custom envelope; 0xC0061060 = 8-DW with interrupt_ctx_id.
+	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0054902 && cmd_id != 0xc0051060 && cmd_id != 0xc0061060);
 
-	bool custom = (cmd_id == 0xc0051060);
+	bool custom = (cmd_id == 0xc0051060 || cmd_id == 0xc0061060);
 
 	if (custom && buffer[0] == KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE))
 	{
@@ -3634,20 +3689,29 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 
 		// data_sel matches GraphicsCbReleaseMem: 0 = no destination write
 		// (flush/barrier only), 1 = 32-bit immediate, 2 = 64-bit immediate,
-		// 3 = GPU clock counter.
+		// 3 = GPU clock counter. gcr_cntl selects cache ops on real HW; the
+		// software CP only needs a host barrier when any GCR bit is set. Do not
+		// EXIT on non-zero gcr — Gen5 titles combine flush bits with label
+		// writes (observed after PlayGo: data_sel=1 with gcr!=0).
 		if (data_sel == 0)
 		{
-			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0000);
-			cp->MemoryBarrier();
-			return 6;
+			if (gcr_cntl != 0u)
+			{
+				cp->MemoryBarrier();
+			}
+			return (cmd_id == 0xc0061060) ? 7 : 6;
 		}
 		if (data_sel == 1)
 		{
-			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0000);
 			if (dst_gpu_addr == nullptr)
 			{
-				EXIT_NOT_IMPLEMENTED((buffer[0] & 0xffu) != 0x14u);
-				cp->MemoryBarrier();
+				// Null destination: flush/ordering only. Action 0x14 was the
+				// first observed form; other CACHE_* events are accepted the
+				// same way when there is no label store.
+				if (gcr_cntl != 0u || (buffer[0] & 0xffu) != 0u)
+				{
+					cp->MemoryBarrier();
+				}
 				if ((buffer[4] >> 30u) == 3u)
 				{
 					// Null-destination ReleaseMem has no data write. Some
@@ -3655,9 +3719,19 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 					// be in the full 7-dword form.
 					return 4;
 				}
-				return 6;
+				return (cmd_id == 0xc0061060) ? 7 : 6;
 			}
 
+			if (gcr_cntl != 0u)
+			{
+				cp->MemoryBarrier();
+			}
+			// Normalize to the known 32-bit immediate EOP branch when the
+			// guest action is outside the previously observed set.
+			if (eop_event_type != 0x14u && eop_event_type != 0x30u && eop_event_type != 0x2fu)
+			{
+				eop_event_type = 0x14u;
+			}
 			cache_action       = 0x00;
 			cache_policy       = 0;
 			event_index        = 0;
@@ -3666,24 +3740,31 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 			interrupt_selector = 0;
 		} else if (data_sel == 2)
 		{
-			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0200);
-			EXIT_NOT_IMPLEMENTED((buffer[0] >> 8u) != 0x3);
-
-			if (gcr_cntl == 0x200)
+			// 0x0200 was the first observed writeback form; other non-zero gcr
+			// values still publish a 64-bit immediate. Normalize event fields
+			// to the known WriteAtEndOfPipe64 branches (writeback vs plain).
+			if (gcr_cntl != 0u)
 			{
-				cache_action = 0x38;
+				cache_action   = 0x38;
+				eop_event_type = 0x14;
+				event_index    = 0;
+			} else
+			{
+				cache_action   = 0x00;
+				eop_event_type = 0x04;
+				event_index    = 0x05;
 			}
 
 			cache_policy       = 0;
-			event_index        = 0;
 			event_write_dest   = 0;
 			event_write_source = 2;
 			interrupt_selector = 0;
 		} else if (data_sel == 3)
 		{
-			EXIT_NOT_IMPLEMENTED(gcr_cntl != 0x0000);
-			EXIT_NOT_IMPLEMENTED((buffer[0] >> 8u) != 0x0);
-
+			if (gcr_cntl != 0u)
+			{
+				cp->MemoryBarrier();
+			}
 			cache_action = 0x00;
 
 			cache_policy       = 0;
@@ -3700,7 +3781,9 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 	cp->WriteAtEndOfPipe64(cache_policy, event_write_dest, eop_event_type, cache_action, event_index, event_write_source, dst_gpu_addr,
 	                       value, interrupt_selector);
 
-	return 6;
+	// Body dwords after the Type-3 header: 6 for the 7-DW form, 7 when the
+	// packet carries interrupt_ctx_id as an eighth dword.
+	return (cmd_id == 0xc0061060) ? 7 : 6;
 }
 
 KYTY_CP_OP_PARSER(cp_op_one_reg_write)
@@ -4782,6 +4865,10 @@ static void graphics_init_jmp_tables()
 	}
 
 	g_cp_op_func[Pm4::IT_NOP]                     = cp_op_nop;
+	g_cp_op_func[Pm4::IT_CLEAR_STATE]             = cp_op_clear_state;
+	g_cp_op_func[Pm4::IT_SET_BASE]                = cp_op_set_base;
+	g_cp_op_func[Pm4::IT_DISPATCH_INDIRECT]       = cp_op_dispatch_indirect;
+	g_cp_op_func[Pm4::IT_DRAW_INDEX_INDIRECT]     = cp_op_draw_index_indirect;
 	g_cp_op_func[Pm4::IT_DRAW_INDEX_2]            = cp_op_draw_index;
 	g_cp_op_func[Pm4::IT_INDEX_TYPE]              = cp_op_index_type;
 	g_cp_op_func[Pm4::IT_NUM_INSTANCES]           = cp_op_num_instances;

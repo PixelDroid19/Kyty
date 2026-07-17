@@ -16,12 +16,20 @@ LIB_VERSION("NpUniversalDataSystem", 1, "NpUniversalDataSystem", 1, 1);
 static constexpr int error_invalid_argument = static_cast<int32_t>(0x80553102u);
 static std::atomic<int32_t> g_next_handle {1};
 
-static constexpr uint64_t event_magic           = 0x4b59545955445345ull;
+static constexpr uint64_t event_magic            = 0x4b59545955445345ull;
 static constexpr uint64_t event_properties_magic = 0x4b59545955445350ull;
+static constexpr uint64_t event_array_magic      = 0x4b59545955445341ull; // "KYTYUDSA"
 
 struct EventPropertyObject
 {
 	uint64_t magic = event_properties_magic;
+};
+
+// Opaque array node for ObjectSetArray / CreateEventPropertyArray.
+// Values are accepted and ignored offline (analytics telemetry only).
+struct EventPropertyArray
+{
+	uint64_t magic = event_array_magic;
 };
 
 struct Event
@@ -88,6 +96,75 @@ int KYTY_SYSV_ABI EventPropertyObjectSetString(EventPropertyObject* properties, 
 	            : error_invalid_argument);
 }
 
+// Observed Astro after PlayGo: (properties, key*, value=null, value_ptr*).
+// Null value allocates a new host array written through value_ptr.
+int KYTY_SYSV_ABI EventPropertyObjectSetArray(EventPropertyObject* properties, const char* key, const EventPropertyArray* value,
+                                              EventPropertyArray** value_ptr)
+{
+	if (properties == nullptr || properties->magic != event_properties_magic || key == nullptr || key[0] == '\0')
+	{
+		return error_invalid_argument;
+	}
+	if (value_ptr != nullptr)
+	{
+		if (value != nullptr)
+		{
+			*value_ptr = const_cast<EventPropertyArray*>(value);
+		}
+		else
+		{
+			*value_ptr = new EventPropertyArray;
+		}
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI CreateEventPropertyArray(EventPropertyArray** new_array)
+{
+	if (new_array == nullptr)
+	{
+		return error_invalid_argument;
+	}
+	*new_array = new EventPropertyArray;
+	return OK;
+}
+
+int KYTY_SYSV_ABI DestroyEventPropertyArray(EventPropertyArray* array)
+{
+	if (array == nullptr || array->magic != event_array_magic)
+	{
+		return error_invalid_argument;
+	}
+	array->magic = 0;
+	delete array;
+	return OK;
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetString(EventPropertyArray* array, const char* value)
+{
+	return (array != nullptr && array->magic == event_array_magic && value != nullptr ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetInt32(EventPropertyArray* array, int32_t /*value*/)
+{
+	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetUInt32(EventPropertyArray* array, uint32_t /*value*/)
+{
+	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetInt64(EventPropertyArray* array, int64_t /*value*/)
+{
+	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetUInt64(EventPropertyArray* array, uint64_t /*value*/)
+{
+	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+}
+
 int KYTY_SYSV_ABI PostEvent(int32_t /*context*/, int32_t /*handle*/, Event* event, uint32_t /*options*/)
 {
 	return (event != nullptr && event->magic == event_magic ? OK : error_invalid_argument);
@@ -117,6 +194,15 @@ LIB_DEFINE(InitNpUniversalDataSystem_1)
 	LIB_FUNC("p+GcLqwpL9M", CreateEvent);
 	LIB_FUNC("YE4dbtbz6OE", EventPropertyObjectSetInt32);
 	LIB_FUNC("MfDb+4Nln64", EventPropertyObjectSetString);
+	// Gen5 analytics arrays (Astro after PlayGo).
+	LIB_FUNC("Wxbg5x3pTXA", EventPropertyObjectSetArray);
+	LIB_FUNC("Hm7qubT3b70", CreateEventPropertyArray);
+	LIB_FUNC("W-0xwY0ZMjw", DestroyEventPropertyArray);
+	LIB_FUNC("4llLk7YJRTE", EventPropertyArraySetString);
+	LIB_FUNC("BypQuF113-k", EventPropertyArraySetInt32);
+	LIB_FUNC("yMi0xAOpmXM", EventPropertyArraySetUInt32);
+	LIB_FUNC("viVXAwmmYrY", EventPropertyArraySetInt64);
+	LIB_FUNC("Qo9qR7v5zO4", EventPropertyArraySetUInt64);
 	LIB_FUNC("CzkKf7ahIyU", PostEvent);
 	LIB_FUNC("wG+84pnNIuo", DestroyEvent);
 }
@@ -257,6 +343,10 @@ namespace Kyty::Libs::NpManager {
 // country before online services. Does not contact PSN.
 LIB_VERSION("NpManager", 1, "NpManager", 1, 1);
 
+// SCE_NP_ERROR_SIGNED_OUT — offline titles must tolerate signed-out NP.
+static constexpr int kNpErrorSignedOut       = static_cast<int>(0x80550006u);
+static constexpr int kNpErrorInvalidArgument = static_cast<int>(0x80550003u);
+
 // sceNpGetAccountCountryA — NID JT+t00a3TxA. Observed SysV (user_id=1, out*).
 // Country code is a 2-letter lowercase ISO string plus NUL.
 static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
@@ -264,7 +354,7 @@ static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
 	PRINT_NAME();
 	if (country == nullptr)
 	{
-		return static_cast<int>(0x80550003u); // SCE_NP_ERROR_INVALID_ARGUMENT-style
+		return kNpErrorInvalidArgument;
 	}
 	country[0] = 'u';
 	country[1] = 's';
@@ -272,9 +362,24 @@ static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
 	return OK;
 }
 
+// sceNpGetAccountIdA — NID rbknaUjpqWo. Observed Astro after UserService privacy:
+// (user_id=1, account_id*). Report signed-out offline account id 0.
+static KYTY_SYSV_ABI int GetAccountIdA(int32_t user_id, uint64_t* account_id)
+{
+	PRINT_NAME();
+	printf("\t user_id = %d\n", user_id);
+	if (account_id == nullptr)
+	{
+		return kNpErrorInvalidArgument;
+	}
+	*account_id = 0;
+	return kNpErrorSignedOut;
+}
+
 LIB_DEFINE(InitNpManager_1)
 {
 	LIB_FUNC("JT+t00a3TxA", GetAccountCountryA);
+	LIB_FUNC("rbknaUjpqWo", GetAccountIdA);
 }
 
 } // namespace Kyty::Libs::NpManager
