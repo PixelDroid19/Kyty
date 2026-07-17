@@ -1826,6 +1826,17 @@ static SpirvValue operand_variable_to_str(ShaderOperand op, int shift)
 	return ret;
 }
 
+static SpirvValue buffer_index_variable_to_str(const ShaderInstruction& inst)
+{
+	if (inst.format == ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen)
+	{
+		return operand_variable_to_str(inst.src[0]);
+	}
+
+	EXIT_NOT_IMPLEMENTED(inst.format != ShaderInstructionFormat::Vdata1Vaddr2SvSoffsOffenIdxen);
+	return operand_variable_to_str(inst.src[0], 1);
+}
+
 static SpirvValue mimg_address_to_str(const ShaderInstruction& inst, int address)
 {
 	EXIT_IF(address < 0);
@@ -2277,7 +2288,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword)
 		EXIT_NOT_IMPLEMENTED(!has_vgpr_offset && inst.format != ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen);
 
 		auto dst_value   = operand_variable_to_str(inst.dst);
-		auto src0_index  = operand_variable_to_str(inst.src[0], has_vgpr_offset ? 1 : 0);
+		auto src0_index  = buffer_index_variable_to_str(inst);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		// auto   src1_value3 = operand_variable_to_str(inst.src[1], 3);
