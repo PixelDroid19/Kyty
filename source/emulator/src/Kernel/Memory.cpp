@@ -1,5 +1,7 @@
 #include "Emulator/Kernel/Memory.h"
 
+#include "Emulator/Config.h"
+
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/MagicEnum.h"
 #include "Kyty/Core/String.h"
@@ -14,6 +16,11 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <limits>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -43,7 +50,12 @@ public:
 
 	KYTY_CLASS_NO_COPY(PhysicalMemory);
 
-	static uint64_t Size() { return static_cast<uint64_t>(5376) * 1024 * 1024; }
+	static uint64_t Size()
+	{
+		constexpr uint64_t kLegacyDirectMemory  = static_cast<uint64_t>(5376) * 1024 * 1024;
+		constexpr uint64_t kNextGenSystemMemory = static_cast<uint64_t>(16) * 1024 * 1024 * 1024;
+		return Config::IsNextGen() ? kNextGenSystemMemory : kLegacyDirectMemory;
+	}
 
 	bool Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out, int memory_type);
 	bool Release(uint64_t start, size_t len, uint64_t* vaddr, uint64_t* size, Graphics::GpuMemoryMode* gpu_mode);
@@ -110,9 +122,30 @@ KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Memory) {}
 
 KYTY_SUBSYSTEM_DESTROY(Memory) {}
 
-static uint64_t get_aligned_pos(uint64_t pos, size_t align)
+static bool get_aligned_pos(uint64_t pos, size_t align, uint64_t* aligned_pos)
 {
-	return (align != 0 ? (pos + (align - 1)) & ~(align - 1) : pos);
+	EXIT_IF(aligned_pos == nullptr);
+
+	if (align == 0)
+	{
+		*aligned_pos = pos;
+		return true;
+	}
+
+	const uint64_t remainder = pos % align;
+	if (remainder == 0)
+	{
+		*aligned_pos = pos;
+		return true;
+	}
+
+	const uint64_t increment = align - remainder;
+	if (pos > std::numeric_limits<uint64_t>::max() - increment)
+	{
+		return false;
+	}
+	*aligned_pos = pos + increment;
+	return true;
 }
 
 void RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func)
@@ -148,46 +181,51 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 
 	Core::LockGuard lock(m_mutex);
 
-	uint64_t free_pos = 0;
-
-	for (const auto& b: m_allocated)
+	search_end = std::min(search_end, Size());
+	if (search_start >= search_end || len > search_end - search_start)
 	{
-		uint64_t n = b.start_addr + b.size;
-		if (n > free_pos)
+		return false;
+	}
+
+	uint64_t candidate = 0;
+	if (!get_aligned_pos(search_start, alignment, &candidate))
+	{
+		return false;
+	}
+
+	for (const auto& block: m_allocated)
+	{
+		if (block.size > std::numeric_limits<uint64_t>::max() - block.start_addr)
 		{
-			free_pos = n;
+			return false;
+		}
+
+		const uint64_t block_end = block.start_addr + block.size;
+		if (block_end > search_start && block.start_addr < search_end)
+		{
+			candidate = std::max(candidate, block_end);
 		}
 	}
 
-	// Start the search at search_start, not below it: with no prior allocations
-	// free_pos is 0, which would fail the `free_pos >= search_start` check and make
-	// the first direct-memory allocation spuriously fail (seen as HashLink OOM).
-	if (free_pos < search_start)
+	if (!get_aligned_pos(candidate, alignment, &candidate) || candidate > search_end - len)
 	{
-		free_pos = search_start;
+		return false;
 	}
 
-	free_pos = get_aligned_pos(free_pos, alignment);
+	AllocatedBlock b {};
+	b.size        = len;
+	b.start_addr  = candidate;
+	b.gpu_mode    = Graphics::GpuMemoryMode::NoAccess;
+	b.map_size    = 0;
+	b.map_vaddr   = 0;
+	b.prot        = 0;
+	b.mode        = VirtualMemory::Mode::NoAccess;
+	b.memory_type = memory_type;
 
-	if (free_pos >= search_start && free_pos + len <= search_end)
-	{
-		AllocatedBlock b {};
-		b.size        = len;
-		b.start_addr  = free_pos;
-		b.gpu_mode    = Graphics::GpuMemoryMode::NoAccess;
-		b.map_size    = 0;
-		b.map_vaddr   = 0;
-		b.prot        = 0;
-		b.mode        = VirtualMemory::Mode::NoAccess;
-		b.memory_type = memory_type;
+	m_allocated.Add(b);
 
-		m_allocated.Add(b);
-
-		*phys_addr_out = free_pos;
-		return true;
-	}
-
-	return false;
+	*phys_addr_out = candidate;
+	return true;
 }
 
 bool PhysicalMemory::Release(uint64_t start, size_t len, uint64_t* vaddr, uint64_t* size, Graphics::GpuMemoryMode* gpu_mode)
@@ -452,6 +490,9 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 		case 7: mode = VirtualMemory::Mode::ExecuteReadWrite; break;
 		case 0x32:
 		case 0x33:
+		case 0xf2:
+		case 0xf3:
+			// 0xf2/0xf3: Gen5 direct-map style GPU+CPU RW (heap / large maps).
 			mode     = VirtualMemory::Mode::ReadWrite;
 			gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
 			break;
@@ -744,6 +785,9 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		case 0x07: mode = VirtualMemory::Mode::ExecuteReadWrite; break;
 		case 0x32:
 		case 0x33:
+		case 0xf2:
+		case 0xf3:
+			// 0xf2/0xf3: Gen5 direct-map style GPU+CPU RW (heap / large maps).
 			mode     = VirtualMemory::Mode::ReadWrite;
 			gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
 			break;
@@ -776,11 +820,13 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 	printf("\t align    = 0x%016" PRIx64 "\n", alignment);
 	printf("\t gpu_mode = %s\n", Core::EnumName(gpu_mode).C_Str());
 
-	EXIT_NOT_IMPLEMENTED(out_addr == 0);
-
 	if (out_addr == 0)
 	{
-		return KERNEL_ERROR_ENOMEM;
+		// #region agent log
+		{FILE*f=fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log","a");if(f){fprintf(f,"{\"sessionId\":\"f08e58\",\"runId\":\"post-fix\",\"hypothesisId\":\"O\",\"location\":\"Memory.cpp:KernelMapDirectMemory\",\"message\":\"map alloc failed\",\"data\":{\"in_addr\":%llu,\"len\":%llu,\"align\":%llu},\"timestamp\":%lld}\n",(unsigned long long)in_addr,(unsigned long long)len,(unsigned long long)alignment,(long long)time(nullptr)*1000);fclose(f);}}
+		// #endregion
+		printf(FG_RED "\t [Fail]\n" FG_DEFAULT);
+		return fixed ? KERNEL_ERROR_EBUSY : KERNEL_ERROR_ENOMEM;
 	}
 
 	if (!g_physical_memory->Map(out_addr, direct_memory_start, len, prot, mode, gpu_mode))
@@ -870,6 +916,24 @@ int KYTY_SYSV_ABI KernelAvailableFlexibleMemorySize(size_t* size)
 	return OK;
 }
 
+int KYTY_SYSV_ABI KernelConfiguredFlexibleMemorySize(uint64_t* size)
+{
+	PRINT_NAME();
+	if (size == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	size_t available = 0;
+	const int rc     = KernelAvailableFlexibleMemorySize(&available);
+	if (rc != OK)
+	{
+		return rc;
+	}
+	*size = available;
+	printf("\t *size = 0x%016" PRIx64 "\n", *size);
+	return OK;
+}
+
 bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode)
 {
 	EXIT_IF(mode == nullptr || gpu_mode == nullptr);
@@ -878,8 +942,13 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 	// high bits. Historical forms: 0x11 = CPU_READ|GPU_READ, 0x12 =
 	// CPU_WRITE|GPU_READ. Observed Gen5 boot: 0xC2 = CPU_WRITE | high AMPR
 	// flags (0xC0); map CPU write to host ReadWrite and GPU to ReadWrite.
+	// prot=0 is a full NoAccess demotion (observed on Astro after Posix sems).
 	switch (prot)
 	{
+		case 0x0:
+			*mode     = VirtualMemory::Mode::NoAccess;
+			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			return true;
 		case 0x11:
 			*mode     = VirtualMemory::Mode::Read;
 			*gpu_mode = Graphics::GpuMemoryMode::Read;
@@ -887,6 +956,14 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 		case 0x12:
 			*mode     = VirtualMemory::Mode::ReadWrite;
 			*gpu_mode = Graphics::GpuMemoryMode::Read;
+			return true;
+		case 0x42:
+			*mode     = VirtualMemory::Mode::ReadWrite;
+			*gpu_mode = Graphics::GpuMemoryMode::Read;
+			return true;
+		case 0x82:
+			*mode     = VirtualMemory::Mode::ReadWrite;
+			*gpu_mode = Graphics::GpuMemoryMode::Write;
 			return true;
 		case 0xC2:
 			*mode     = VirtualMemory::Mode::ReadWrite;
@@ -924,6 +1001,72 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 	}
 
 	printf("\t prot: %s -> %s\n", Core::EnumName(old_mode).C_Str(), Core::EnumName(mode).C_Str());
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name)
+{
+	PRINT_NAME();
+	printf("\t addr = 0x%016" PRIx64 " len = 0x%016" PRIx64 " name = %s\n", reinterpret_cast<uint64_t>(addr), len,
+	       name != nullptr ? name : "(null)");
+	(void)addr;
+	(void)len;
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelClearVirtualRangeName(const void* addr, uint64_t len)
+{
+	PRINT_NAME();
+	printf("\t addr = 0x%016" PRIx64 " len = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(addr), len);
+	(void)addr;
+	(void)len;
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size)
+{
+	PRINT_NAME();
+
+	const uint64_t vaddr = reinterpret_cast<uint64_t>(addr);
+	printf("\t addr = 0x%016" PRIx64 " flags = 0x%08x info_size = 0x%016" PRIx64 "\n", vaddr, flags, info_size);
+
+	if (info == nullptr || info_size != sizeof(VirtualQueryInfo) || (flags != 0 && flags != 1))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	EXIT_IF(g_physical_memory == nullptr);
+	EXIT_IF(g_flexible_memory == nullptr);
+
+	uint64_t base = 0;
+	size_t   len  = 0;
+	int      prot = 0;
+	bool     is_direct   = false;
+	bool     is_flexible = false;
+
+	if (g_physical_memory->Find(vaddr, &base, &len, &prot, nullptr, nullptr))
+	{
+		is_direct = true;
+	}
+	else if (g_flexible_memory->Find(vaddr, &base, &len, &prot, nullptr, nullptr))
+	{
+		is_flexible = true;
+	}
+	else
+	{
+		return KERNEL_ERROR_EACCES;
+	}
+
+	std::memset(info, 0, sizeof(VirtualQueryInfo));
+	info->start        = static_cast<uintptr_t>(base);
+	info->end          = static_cast<uintptr_t>(base + len);
+	info->offset       = 0;
+	info->protection   = prot;
+	info->memory_type  = 0;
+	info->is_flexible  = is_flexible ? 1u : 0u;
+	info->is_direct    = is_direct ? 1u : 0u;
+	info->is_committed = 1u;
 
 	return OK;
 }

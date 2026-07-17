@@ -239,7 +239,8 @@ static void calc_buffer_size(const VideoOutBufferAttribute* attribute, const Vid
 	{
 		EXIT_NOT_IMPLEMENTED(attribute2->option != 0 && attribute2->option != 8);
 		EXIT_NOT_IMPLEMENTED(attribute2->aspect_ratio != 0);
-		EXIT_NOT_IMPLEMENTED(attribute2->pixel_format != 0x8000000000000000ULL && attribute2->pixel_format != 0x8000000022000000ULL);
+		EXIT_NOT_IMPLEMENTED(attribute2->pixel_format != 0x8000000000000000ULL && attribute2->pixel_format != 0x8000000022000000ULL &&
+		                     attribute2->pixel_format != 0x8100000000000000ULL && attribute2->pixel_format != 0x8100000022000000ULL);
 	} else
 	{
 		EXIT_NOT_IMPLEMENTED(attribute->option != 0);
@@ -622,7 +623,7 @@ KYTY_SYSV_ABI int VideoOutOpen(int user_id, int bus_type, int index, const void*
 	EXIT_NOT_IMPLEMENTED(user_id != 255 && user_id != 0);
 	EXIT_NOT_IMPLEMENTED(bus_type != 0);
 	EXIT_NOT_IMPLEMENTED(index != 0);
-	EXIT_NOT_IMPLEMENTED(param != nullptr);
+	printf("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 
 	int handle = g_video_out_context->Open();
 
@@ -920,6 +921,12 @@ static int register_buffers_internal(VideoOutConfig* ctx, int set_id, int start_
 		} else if (attribute2->pixel_format == 0x8000000022000000ULL)
 		{
 			format = Graphics::VideoOutBufferFormat::R8G8B8A8Srgb;
+		} else if (attribute2->pixel_format == 0x8100000000000000ULL)
+		{
+			format = Graphics::VideoOutBufferFormat::B10G10R10A2Unorm;
+		} else if (attribute2->pixel_format == 0x8100000022000000ULL)
+		{
+			format = Graphics::VideoOutBufferFormat::R10G10B10A2Unorm;
 		}
 	} else
 	{
@@ -1129,6 +1136,96 @@ KYTY_SYSV_ABI int VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status)
 	printf("\t flipPendingNum = %d\n", status->flipPendingNum);
 	printf("\t currentBuffer = %d\n", status->currentBuffer);
 
+	return OK;
+}
+
+KYTY_SYSV_ABI int VideoOutIsFlipPending(int handle)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_video_out_context == nullptr);
+
+	auto* ctx = g_video_out_context->Get(handle);
+	if (ctx == nullptr)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+
+	VideoOutFlipStatus status {};
+	g_video_out_context->GetFlipQueue().GetFlipStatus(ctx, &status);
+	printf("\t flipPendingNum = %d\n", status.flipPendingNum);
+	return status.flipPendingNum;
+}
+
+struct VideoOutOutputStatus
+{
+	uint32_t resolution   = 1;
+	uint32_t dynamicRange = 1;
+	uint32_t refreshRate  = 1;
+	uint32_t reserved     = 0;
+};
+
+struct VideoOutColorSettings
+{
+	float    gamma     = 1.0f;
+	uint32_t reserved0 = 0;
+	uint32_t reserved1 = 0;
+	uint32_t reserved2 = 0;
+};
+
+KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* status)
+{
+	PRINT_NAME();
+	EXIT_IF(g_video_out_context == nullptr);
+	if (status == nullptr)
+	{
+		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+	}
+	auto* ctx = g_video_out_context->Get(handle);
+	if (ctx == nullptr)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+	status->resolution   = (ctx->resolution.fullWidth >= 3840 || ctx->resolution.fullHeight >= 2160) ? 2u : 1u;
+	status->dynamicRange = 1;
+	status->refreshRate  = 1;
+	status->reserved     = 0;
+	return OK;
+}
+
+KYTY_SYSV_ABI int VideoOutColorSettingsSetGamma(VideoOutColorSettings* settings, float gamma)
+{
+	PRINT_NAME();
+	printf("\t gamma = %g\n", static_cast<double>(gamma));
+	if (settings == nullptr)
+	{
+		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+	}
+	settings->gamma = gamma;
+	return OK;
+}
+
+KYTY_SYSV_ABI int VideoOutAdjustColor(int handle, const VideoOutColorSettings* settings)
+{
+	PRINT_NAME();
+	EXIT_IF(g_video_out_context == nullptr);
+	if (g_video_out_context->Get(handle) == nullptr)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+	(void)settings;
+	return OK;
+}
+
+KYTY_SYSV_ABI int VideoOutSubmitChangeBufferAttribute2(int handle, int set_index, const VideoOutBufferAttribute2* attribute)
+{
+	PRINT_NAME();
+	EXIT_IF(g_video_out_context == nullptr);
+	printf("\t handle = %d set_index = %d attr = 0x%016" PRIx64 "\n", handle, set_index, reinterpret_cast<uint64_t>(attribute));
+	if (g_video_out_context->Get(handle) == nullptr)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
 	return OK;
 }
 

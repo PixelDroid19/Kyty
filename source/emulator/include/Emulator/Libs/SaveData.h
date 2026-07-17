@@ -73,6 +73,11 @@ int KYTY_SYSV_ABI SaveDataGetEventResult(const void* event_param, void* event);
 int KYTY_SYSV_ABI SaveDataDeleteTransactionResource(int32_t resource, const SaveDataMountPoint* mount_point);
 int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, SaveDataDirNameSearchResult* result);
 
+// sceSaveDataTransferringMount (NID WAzWTZm1H+I) — implemented in LibSaveData.cpp.
+struct SaveDataTransferringMountParam;
+struct SaveDataMountResult;
+int KYTY_SYSV_ABI SaveDataTransferringMount(const SaveDataTransferringMountParam* mount, SaveDataMountResult* mount_result);
+
 } // namespace Kyty::Libs::SaveData
 
 #endif // KYTY_EMU_ENABLED

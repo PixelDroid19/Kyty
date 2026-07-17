@@ -65,11 +65,53 @@ LIB_DEFINE(InitDialog_1_SaveDataDialogNative)
 
 } // namespace LibSaveDataDialogNative
 
+namespace LibMsgDialog {
+
+LIB_VERSION("MsgDialog", 1, "MsgDialog", 1, 1);
+
+namespace MsgDialog = Dialog::MsgDialog;
+
+static void RegisterMsgDialogFuncs(Loader::SymbolDatabase* s)
+{
+	LIB_FUNC("lDqxaY1UbEo", MsgDialog::MsgDialogInitialize);
+	LIB_FUNC("b06Hh0DPEaE", MsgDialog::MsgDialogOpen);
+	LIB_FUNC("CWVW78Qc3fI", MsgDialog::MsgDialogGetStatus);
+	LIB_FUNC("6fIC3XKt2k0", MsgDialog::MsgDialogUpdateStatus);
+	LIB_FUNC("Lr8ovHH9l6A", MsgDialog::MsgDialogGetResult);
+	LIB_FUNC("HTrcDKlFKuM", MsgDialog::MsgDialogClose);
+	LIB_FUNC("ePw-kqZmelo", MsgDialog::MsgDialogTerminate);
+	LIB_FUNC("Gc5k1qcK4fs", MsgDialog::MsgDialogProgressBarInc);
+	LIB_FUNC("6H-71OdrpXM", MsgDialog::MsgDialogProgressBarSetMsg);
+	LIB_FUNC("wTpfglkmv34", MsgDialog::MsgDialogProgressBarSetValue);
+}
+
+LIB_DEFINE(InitDialog_1_MsgDialog)
+{
+	RegisterMsgDialogFuncs(s);
+}
+
+} // namespace LibMsgDialog
+
+namespace LibMsgDialogNative {
+
+LIB_VERSION("MsgDialog.native", 1, "MsgDialog", 1, 1);
+
+namespace MsgDialog = Dialog::MsgDialog;
+
+LIB_DEFINE(InitDialog_1_MsgDialogNative)
+{
+	LibMsgDialog::RegisterMsgDialogFuncs(s);
+}
+
+} // namespace LibMsgDialogNative
+
 LIB_DEFINE(InitDialog_1)
 {
 	LibCommonDialog::InitDialog_1_CommonDialog(s);
 	LibSaveDataDialog::InitDialog_1_SaveDataDialog(s);
 	LibSaveDataDialogNative::InitDialog_1_SaveDataDialogNative(s);
+	LibMsgDialog::InitDialog_1_MsgDialog(s);
+	LibMsgDialogNative::InitDialog_1_MsgDialogNative(s);
 }
 
 } // namespace Kyty::Libs

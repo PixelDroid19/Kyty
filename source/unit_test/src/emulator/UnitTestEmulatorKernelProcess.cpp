@@ -1,4 +1,5 @@
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Config.h"
 #include "Emulator/Log.h"
 #include "Kyty/UnitTest.h"
@@ -25,6 +26,12 @@ TEST(EmulatorKernelProcess, GuestProcessIdIsStable)
 	const int first = Posix::getpid();
 	EXPECT_GT(first, 0);
 	EXPECT_EQ(Posix::getpid(), first);
+}
+
+// Retail non-devkit sceKernelGetGPI (NID 4oXYe9Xmk0Q) returns 0 without GPI state.
+TEST(EmulatorKernelProcess, RetailGetGpiReturnsZero)
+{
+	EXPECT_EQ(LibKernel::KernelRetailGetGpiResult(), 0);
 }
 
 TEST(EmulatorKernelProcess, GettimeofdayAdvancesWithinOneSecond)

@@ -3030,6 +3030,20 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_auto)
 	return 1;
 }
 
+// Gen5 IT_CLEAR_STATE from GraphicsDcbResetQueue: header + 4-bit state body.
+// Same hardware effect as the legacy custom R_DRAW_RESET path (CP context reset).
+KYTY_CP_OP_PARSER(cp_op_clear_state)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0001200);
+	EXIT_NOT_IMPLEMENTED((buffer[0] & ~0xfu) != 0);
+
+	cp->Reset();
+
+	return 1;
+}
+
 KYTY_CP_OP_PARSER(cp_op_draw_reset)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -3039,6 +3053,36 @@ KYTY_CP_OP_PARSER(cp_op_draw_reset)
 	cp->Reset();
 
 	return 1;
+}
+
+// Gen5 IT_SET_BASE from GraphicsDcbSetBaseIndirectArgs: header + 3 body dwords.
+KYTY_CP_OP_PARSER(cp_op_set_base)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(dw < 3);
+
+	return 3;
+}
+
+// Gen5 IT_DISPATCH_INDIRECT: header + data_offset + modifier.
+KYTY_CP_OP_PARSER(cp_op_dispatch_indirect)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(dw < 2);
+
+	return 2;
+}
+
+// Gen5 IT_DRAW_INDEX_INDIRECT: header + 4 body dwords (offset, patch lo/hi, initiator).
+KYTY_CP_OP_PARSER(cp_op_draw_index_indirect)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(dw < 4);
+
+	return 4;
 }
 
 KYTY_CP_OP_PARSER(cp_op_dump_const_ram)
@@ -3493,6 +3537,23 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 	                       value, interrupt_selector);
 
 	return 6;
+}
+
+KYTY_CP_OP_PARSER(cp_op_get_lod_stats)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(((cmd_id >> 8u) & 0xffu) != Pm4::IT_GET_LOD_STATS);
+	EXIT_NOT_IMPLEMENTED(dw < 2);
+
+	// This query packet has no guest-visible producer in the current renderer.
+	// Consume its payload so following PM4 packets remain aligned.
+	static std::atomic_bool warned {false};
+	if (!warned.exchange(true))
+	{
+		std::fprintf(stderr, "WARNING: ignoring unsupported IT_GET_LOD_STATS\n");
+	}
+	return 1;
 }
 
 KYTY_CP_OP_PARSER(cp_op_set_context_reg)
@@ -4491,6 +4552,10 @@ static void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_SET_CONTEXT_REG]         = cp_op_set_context_reg;
 	g_cp_op_func[Pm4::IT_SET_SH_REG]              = cp_op_set_shader_reg;
 	g_cp_op_func[Pm4::IT_DISPATCH_DIRECT]          = cp_op_dispatch_direct;
+	g_cp_op_func[Pm4::IT_SET_BASE]                = cp_op_set_base;
+	g_cp_op_func[Pm4::IT_DISPATCH_INDIRECT]       = cp_op_dispatch_indirect;
+	g_cp_op_func[Pm4::IT_DRAW_INDEX_INDIRECT]     = cp_op_draw_index_indirect;
+	g_cp_op_func[Pm4::IT_CLEAR_STATE]             = cp_op_clear_state;
 	g_cp_op_func[Pm4::IT_SET_UCONFIG_REG]         = cp_op_set_uconfig_reg;
 	g_cp_op_func[Pm4::IT_WRITE_CONST_RAM]         = cp_op_write_const_ram;
 	g_cp_op_func[Pm4::IT_DUMP_CONST_RAM]          = cp_op_dump_const_ram;
@@ -4498,6 +4563,7 @@ static void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_INCREMENT_DE_COUNTER]    = cp_op_increment_de_counter;
 	g_cp_op_func[Pm4::IT_WAIT_ON_CE_COUNTER]      = cp_op_wait_on_ce_counter;
 	g_cp_op_func[Pm4::IT_WAIT_ON_DE_COUNTER_DIFF] = cp_op_wait_on_de_counter_diff;
+	g_cp_op_func[Pm4::IT_GET_LOD_STATS]            = cp_op_get_lod_stats;
 
 	for (auto& func: g_cp_op_custom_func)
 	{

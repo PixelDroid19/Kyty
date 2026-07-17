@@ -69,6 +69,7 @@ constexpr uint32_t IT_WAIT_ON_CE_COUNTER        = 0x86;
 constexpr uint32_t IT_WAIT_ON_DE_COUNTER_DIFF   = 0x88;
 constexpr uint32_t IT_DISPATCH_DRAW_PREAMBLE    = 0x8C;
 constexpr uint32_t IT_DISPATCH_DRAW             = 0x8D;
+constexpr uint32_t IT_GET_LOD_STATS             = 0x8E;
 
 /* Custom codes. Implemented via IT_NOP */
 
@@ -97,6 +98,7 @@ constexpr uint32_t R_WRITE_DATA       = 0x15;
 constexpr uint32_t R_WAIT_MEM_64      = 0x16;
 constexpr uint32_t R_FLIP             = 0x17;
 constexpr uint32_t R_RELEASE_MEM      = 0x18;
+constexpr uint32_t R_DMA_DATA         = 0x19;
 
 constexpr uint32_t R_NUM = 0x3F + 1;
 

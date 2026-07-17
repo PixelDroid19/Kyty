@@ -15,6 +15,9 @@ enum class VideoOutBufferFormat : uint64_t
 	Unknown,
 	R8G8B8A8Srgb,
 	B8G8R8A8Srgb,
+	// Gen5 SCE_VIDEO_OUT_PIXEL_FORMAT2_* 10:10:10:2 (still 32 bpp, same pitch/size).
+	R10G10B10A2Unorm,
+	B10G10R10A2Unorm,
 };
 
 class VideoOutBufferObject: public GpuObject

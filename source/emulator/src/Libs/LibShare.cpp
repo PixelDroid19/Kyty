@@ -4,6 +4,7 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 
 #include <atomic>
+#include <cinttypes>
 #include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
@@ -65,6 +66,21 @@ static KYTY_SYSV_ABI int ShareLogAndOk(uint64_t a0, uint64_t a1, uint64_t a2, ui
 	return OK;
 }
 
+static KYTY_SYSV_ABI int ShareRegisterContentEventCallback(void* callback, void* user_data)
+{
+	PRINT_NAME();
+	printf("\t callback  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(callback));
+	printf("\t user_data = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user_data));
+	return OK;
+}
+
+static KYTY_SYSV_ABI int ShareUnregisterContentEventCallback(void* callback)
+{
+	PRINT_NAME();
+	printf("\t callback = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(callback));
+	return OK;
+}
+
 } // namespace Share
 
 LIB_DEFINE(InitShare_1)
@@ -77,6 +93,8 @@ LIB_DEFINE(InitShare_1)
 	LIB_FUNC("YBiIdcDPrxs", Share::ShareLogAndOk);
 	LIB_FUNC("5wjxESwX68I", Share::ShareLogAndOk);
 	LIB_FUNC("T64o-315wbg", Share::ShareLogAndOk);
+	LIB_FUNC("Sygnk9dr5WQ", Share::ShareRegisterContentEventCallback);
+	LIB_FUNC("KnsfHKmZqFA", Share::ShareUnregisterContentEventCallback);
 }
 
 } // namespace Kyty::Libs

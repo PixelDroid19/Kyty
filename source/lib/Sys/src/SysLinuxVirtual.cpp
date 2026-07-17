@@ -153,11 +153,16 @@ static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, 
 
 	// Always honor the requested alignment (e.g. 2 MiB GPU heaps).
 	uintptr_t start = (prefer != 0) ? prefer : kGuestHeapLo;
-	if (start < kGuestHeapLo)
+	if (start < kGuestHeapLo || start > kGuestHeapHi - size)
 	{
 		start = kGuestHeapLo;
 	}
 	start = align_up(start, alignment);
+
+	if (start > kGuestHeapHi - size)
+	{
+		return MAP_FAILED;
+	}
 
 	// Large flexible/direct heaps are demand-backed; avoid immediate commit checks.
 	const int flags_base = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE;

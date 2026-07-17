@@ -12,6 +12,7 @@
 #include "Kyty/Sys/SysDbg.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Loader/Elf.h"
@@ -20,6 +21,9 @@
 #include "Emulator/Profiler.h"
 
 #include <cstring>
+#include <csignal>
+#include <fcntl.h>
+#include <unistd.h>
 #include <utility>
 
 #ifdef KYTY_EMU_ENABLED
@@ -329,6 +333,32 @@ static void kyty_exception_handler(const Core::VirtualMemory::ExceptionHandler::
 		// Real access violation. Report async-signal-safe and terminate: this runs in
 		// a signal handler and the faulting thread may hold the allocator lock, so
 		// printf/StackTrace (which allocate) would dead-lock instead of reporting.
+		// #region agent log
+		{
+			static volatile sig_atomic_t fault_logs = 0;
+			if (fault_logs < 20)
+			{
+				++fault_logs;
+				const int fd = ::open("/home/monasterios/Kyty/.cursor/debug-f08e58.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
+				if (fd >= 0)
+				{
+					char buf[320];
+					const int n = std::snprintf(buf, sizeof(buf),
+					                            "{\"sessionId\":\"f08e58\",\"runId\":\"fault-debug\",\"hypothesisId\":\"T\","
+					                            "\"location\":\"RuntimeLinker.cpp:kyty_exception_handler\",\"message\":\"access violation\","
+					                            "\"data\":{\"vaddr\":%llu,\"rip\":%llu,\"write\":%d}}\n",
+					                            static_cast<unsigned long long>(info->access_violation_vaddr),
+					                            static_cast<unsigned long long>(info->exception_address),
+					                            info->access_violation_type == Core::VirtualMemory::ExceptionHandler::AccessViolationType::Write ? 1 : 0);
+					if (n > 0)
+					{
+						(void)!::write(fd, buf, static_cast<size_t>(n));
+					}
+					::close(fd);
+				}
+			}
+		}
+		// #endregion
 		Core::VirtualMemory::FatalFault(info->access_violation_vaddr, info->exception_address);
 	}
 
@@ -662,6 +692,101 @@ uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size)
 		}
 	}
 	return rewritten;
+}
+
+uint64_t LoaderPrepareThreadTlsImage(uint8_t* tls, uint64_t image_size, uint64_t template_vaddr, uint64_t program_base,
+                                     uint64_t program_size, bool (*guest_read64)(uint64_t addr, uint64_t* out, void* ctx), void* guest_ctx)
+{
+	if (tls == nullptr || image_size < sizeof(uint64_t))
+	{
+		return 0;
+	}
+
+	const uint64_t tmpl_lo  = template_vaddr;
+	const uint64_t tmpl_hi  = template_vaddr + image_size;
+	const uint64_t tls_base = reinterpret_cast<uint64_t>(tls);
+	const uint64_t prog_lo  = program_base;
+	const uint64_t prog_hi  = program_base + program_size;
+	// Context layout used by guest ensure: buffer control pointer at +0x3e0.
+	constexpr uint64_t kContextBufferControlOffset = 0x3e0;
+
+	uint64_t modified = 0;
+	for (uint64_t off = 0; off + sizeof(uint64_t) <= image_size; off += sizeof(uint64_t))
+	{
+		auto*          cell = reinterpret_cast<uint64_t*>(tls + off);
+		const uint64_t v    = *cell;
+		if (v == 0)
+		{
+			continue;
+		}
+
+		// Absolute self-pointer into the PT_TLS template → this thread's copy.
+		if (v >= tmpl_lo && v < tmpl_hi)
+		{
+			*cell = tls_base + (v - tmpl_lo);
+			modified++;
+			continue;
+		}
+
+		// Absolute pointer into the main program image.
+		if (guest_read64 == nullptr || v < prog_lo || v > prog_hi - sizeof(uint64_t))
+		{
+			continue;
+		}
+
+		uint64_t word0 = 1;
+		if (!guest_read64(v, &word0, guest_ctx))
+		{
+			continue;
+		}
+
+		// Static type/descriptor blobs (observed at TLS +0x70/+0x78 in Gen5):
+		// word0 = small size, word1 = small refcount, word2+ = function
+		// pointers into guest code. They must not occupy "current context"
+		// TLS slots — guest SET asserts s_pTls* == nullptr first.
+		if (word0 >= 0x20 && word0 < 0x1000 && (word0 & 7u) == 0 && v + 24 <= prog_hi)
+		{
+			uint64_t word1 = 0;
+			uint64_t word2 = 0;
+			if (guest_read64(v + 8, &word1, guest_ctx) && guest_read64(v + 16, &word2, guest_ctx) && word1 < 0x100 &&
+			    word2 >= prog_lo && word2 < prog_hi)
+			{
+				*cell = 0;
+				modified++;
+				continue;
+			}
+		}
+
+		// Unconstructed Context (null word0 + null buffer control at +0x3e0).
+		if (program_size < kContextBufferControlOffset + sizeof(uint64_t) ||
+		    v > prog_hi - (kContextBufferControlOffset + sizeof(uint64_t)))
+		{
+			continue;
+		}
+		uint64_t buffer = 1;
+		if (!guest_read64(v + kContextBufferControlOffset, &buffer, guest_ctx))
+		{
+			continue;
+		}
+		if (word0 == 0 && buffer == 0)
+		{
+			*cell = 0;
+			modified++;
+		}
+	}
+	return modified;
+}
+
+static bool TlsGuestRead64(uint64_t addr, uint64_t* out, void* /*ctx*/)
+{
+	if (out == nullptr || addr == 0)
+	{
+		return false;
+	}
+	// Main-image and demand-mapped guest pages are host-addressable at the
+	// guest VA after LoadProgramToMemory / VirtualMemory setup.
+	*out = *reinterpret_cast<const uint64_t*>(addr);
+	return true;
 }
 
 static void PatchProgram(Program* program, uint64_t address, uint64_t size)
@@ -1010,6 +1135,32 @@ void RuntimeLinker::Execute()
 		printf("stack_addr = %" PRIx64 "\n", reinterpret_cast<uint64_t>(&p));
 
 		Core::mem_guest_thread_enter();
+
+		// Main ET_EXEC images do not go through StartModule. Bootstrap the
+		// application-heap API before CRT so early guest malloc works.
+		//
+		// Do not run DT_INIT / init_array here. Gen5 CRT _start (entry) calls
+		// the DT_INIT (_init) body itself; invoking it from the host as well
+		// re-runs static constructors. That re-links fixed guest registration
+		// tables into self-loops and busy-spins forever (no further HLE).
+		{
+			Core::LockGuard lock(m_mutex);
+			for (auto* program: m_programs)
+			{
+				if (program != nullptr && program->elf != nullptr && !program->elf->IsShared())
+				{
+					if (program->dynamic_info != nullptr)
+					{
+						printf("Main CRT entry=0x%016" PRIx64 " DT_INIT=0x%016" PRIx64
+						       " (host skips pre-entry init; CRT runs it once)\n",
+						       entry, program->base_vaddr + program->dynamic_info->init_vaddr);
+					}
+					Kyty::Libs::LibKernel::ApplicationHeap::EnsureInitialized(program);
+					break;
+				}
+			}
+		}
+
 		run_entry(entry, &p, ProgramExitHandler);
 		Core::mem_guest_thread_leave();
 	}
@@ -1291,6 +1442,8 @@ uint8_t* RuntimeLinker::TlsGetAddr(Program* program)
 		constexpr uint64_t tcb_size = 0x1000;
 		tls                         = new uint8_t[program->tls.image_size + tcb_size];
 		std::memcpy(tls, reinterpret_cast<void*>(program->tls.image_vaddr), program->tls.image_size);
+		LoaderPrepareThreadTlsImage(tls, program->tls.image_size, program->tls.image_vaddr, program->base_vaddr, program->base_size,
+		                            TlsGuestRead64, nullptr);
 		auto* tcb = tls + program->tls.image_size;
 		std::memset(tcb, 0, tcb_size);
 		// TCB self-pointer (fs:[0] == fs base)

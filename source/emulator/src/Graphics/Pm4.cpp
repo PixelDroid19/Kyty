@@ -99,6 +99,7 @@ static void init_names()
 		g_names[IT_WAIT_ON_DE_COUNTER_DIFF]   = "IT_WAIT_ON_DE_COUNTER_DIFF";
 		g_names[IT_DISPATCH_DRAW_PREAMBLE]    = "IT_DISPATCH_DRAW_PREAMBLE";
 		g_names[IT_DISPATCH_DRAW]             = "IT_DISPATCH_DRAW";
+		g_names[IT_GET_LOD_STATS]             = "IT_GET_LOD_STATS";
 
 		g_names_initialized = true;
 	}

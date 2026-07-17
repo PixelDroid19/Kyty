@@ -64,6 +64,36 @@ int KYTY_SYSV_ABI SaveDataDialogProgressBarSetValue(int target, uint32_t rate);
 
 } // namespace SaveDataDialog
 
+namespace MsgDialog {
+
+struct MsgDialogResult
+{
+	uint32_t size;
+	uint32_t button_id;
+};
+
+struct MsgDialogParam
+{
+	uint64_t base_size;
+	uint8_t  base_reserved[36];
+	uint32_t base_magic;
+	uint32_t size;
+	uint32_t mode;
+};
+
+int KYTY_SYSV_ABI MsgDialogInitialize();
+int KYTY_SYSV_ABI MsgDialogOpen(const MsgDialogParam* param);
+int KYTY_SYSV_ABI MsgDialogGetStatus();
+int KYTY_SYSV_ABI MsgDialogUpdateStatus();
+int KYTY_SYSV_ABI MsgDialogGetResult(MsgDialogResult* result);
+int KYTY_SYSV_ABI MsgDialogClose();
+int KYTY_SYSV_ABI MsgDialogTerminate();
+int KYTY_SYSV_ABI MsgDialogProgressBarInc(int target, uint32_t delta);
+int KYTY_SYSV_ABI MsgDialogProgressBarSetMsg(int target, const char* msg);
+int KYTY_SYSV_ABI MsgDialogProgressBarSetValue(int target, uint32_t value);
+
+} // namespace MsgDialog
+
 } // namespace Kyty::Libs::Dialog
 
 #endif // KYTY_EMU_ENABLED

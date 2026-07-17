@@ -9,6 +9,7 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Timer.h"
 #include "Kyty/Core/Vector.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -17,6 +18,9 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
 #include <ctime>
 
 #ifdef KYTY_EMU_ENABLED
@@ -1274,25 +1278,16 @@ int KYTY_SYSV_ABI PthreadAttrSetschedparam(PthreadAttr* attr, const KernelSchedP
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	// PS5 guest priorities span a wide numeric range (observed Thread.cpp
+	// clamps to roughly 256..767). Host Linux SCHED_OTHER only accepts
+	// sched_priority 0 — mapping guest lows/highs to ±2 returns EINVAL and
+	// the game asserts (int $0x41, "ret == 0" / scePthreadAttrSetschedparam).
+	// Apply a host-valid param and always succeed for a well-formed guest call.
 	KernelSchedParam pparam {};
-	if (param->sched_priority <= 478)
-	{
-		pparam.sched_priority = +2;
-	} else if (param->sched_priority >= 733)
-	{
-		pparam.sched_priority = -2;
-	} else
-	{
-		pparam.sched_priority = 0;
-	}
+	pparam.sched_priority = 0;
+	(void)pthread_attr_setschedparam(&(*attr)->p, &pparam);
 
-	int result = pthread_attr_setschedparam(&(*attr)->p, &pparam);
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadAttrSetschedpolicy(PthreadAttr* attr, int policy)
@@ -2041,6 +2036,53 @@ static void* run_thread(void* arg)
 
 	thread->started = true;
 
+	// #region agent log
+	{
+		const auto entry_addr = reinterpret_cast<uint64_t>(thread->entry);
+		const bool log_thread = (thread->name.ContainsStr(U"tbb") || thread->name.ContainsStr(U"TBB") ||
+		                         (entry_addr >= 0x900000000ULL && entry_addr < 0x901000000ULL));
+		if (log_thread)
+		{
+			if (FILE* f = std::fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log", "a"))
+			{
+				const auto arg_addr = reinterpret_cast<uint64_t>(thread->arg);
+				uint64_t   arg_q0   = 0;
+				uint64_t   arg_q1   = 0;
+				uint64_t   deref_q0 = 0;
+				uint64_t   deref_q1 = 0;
+				if (thread->arg != nullptr)
+				{
+					// Guest heap pointers are host-mapped in the emulator process.
+					arg_q0 = *reinterpret_cast<const uint64_t*>(thread->arg);
+					arg_q1 = *(reinterpret_cast<const uint64_t*>(thread->arg) + 1);
+					if (arg_q0 >= 0x900000000ULL && arg_q0 < 0x920000000ULL)
+					{
+						deref_q0 = *reinterpret_cast<const uint64_t*>(static_cast<uintptr_t>(arg_q0));
+						deref_q1 = *(reinterpret_cast<const uint64_t*>(static_cast<uintptr_t>(arg_q0)) + 1);
+					}
+				}
+				std::fprintf(f,
+				             "{\"sessionId\":\"f08e58\",\"runId\":\"havok-debug\",\"hypothesisId\":\"S\","
+				             "\"location\":\"Pthread.cpp:run_thread\",\"message\":\"guest thread entry\","
+				             "\"data\":{\"name\":\"%s\",\"entry\":%llu,\"arg\":%llu,\"arg_q0\":%llu,\"arg_q1\":%llu,"
+				             "\"deref_q0\":%llu,\"deref_q1\":%llu,\"thread_id\":%d},\"timestamp\":%lld}\n",
+				             thread->name.C_Str(),
+				             static_cast<unsigned long long>(entry_addr),
+				             static_cast<unsigned long long>(arg_addr),
+				             static_cast<unsigned long long>(arg_q0),
+				             static_cast<unsigned long long>(arg_q1),
+				             static_cast<unsigned long long>(deref_q0),
+				             static_cast<unsigned long long>(deref_q1),
+				             thread->unique_id,
+				             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+				                                            std::chrono::system_clock::now().time_since_epoch())
+				                                        .count()));
+				std::fclose(f);
+			}
+		}
+	}
+	// #endregion
+
 	ret = thread->entry(thread->arg);
 
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
@@ -2094,6 +2136,41 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 		(*thread)->started     = false;
 		(*thread)->unique_id   = -1;
 
+		// Host pthread_create may memset/setup a guest-provided stack. Guests
+		// often demote a guard page with mprotect(prot=0) first; leaving that
+		// page PROT_NONE makes libc pthread_create SIGSEGV in host memset.
+		void*  stack_addr = nullptr;
+		size_t stack_size = 0;
+		if (pthread_attr_getstack(&(*attr)->p, &stack_addr, &stack_size) == 0 && stack_addr != nullptr && stack_size != 0)
+		{
+			Core::VirtualMemory::Mode old_mode {};
+			const bool                stack_rw = Core::VirtualMemory::Protect(reinterpret_cast<uint64_t>(stack_addr), stack_size,
+			                                                                  Core::VirtualMemory::Mode::ReadWrite, &old_mode);
+			std::fprintf(stderr, "PthreadCreate reprotect stack=0x%016" PRIx64 " size=0x%zx ok=%d\n",
+			             reinterpret_cast<uint64_t>(stack_addr), stack_size, stack_rw ? 1 : 0);
+			// #region agent log
+			if (name != nullptr && std::strstr(name, "tbb") != nullptr)
+			{
+				if (FILE* f = std::fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log", "a"))
+				{
+					std::fprintf(f,
+					             "{\"sessionId\":\"f08e58\",\"runId\":\"tbb-debug\",\"hypothesisId\":\"T\","
+					             "\"location\":\"Pthread.cpp:PthreadCreate\",\"message\":\"tbb thread create\","
+					             "\"data\":{\"name\":\"%s\",\"entry\":%llu,\"arg\":%llu,\"stack\":%llu,\"stack_size\":%zu,"
+					             "\"stack_rw\":%d},\"timestamp\":%lld}\n",
+					             name, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(entry)),
+					             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(arg)),
+					             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(stack_addr)), stack_size,
+					             stack_rw ? 1 : 0,
+					             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+					                                            std::chrono::system_clock::now().time_since_epoch())
+					                                        .count()));
+					std::fclose(f);
+				}
+			}
+			// #endregion
+		}
+
 		result = pthread_create(&(*thread)->p, &(*attr)->p, run_thread, *thread);
 	}
 
@@ -2106,6 +2183,29 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 	// unique_id may still be -1 in the create log until the child runs.
 
 	printf("\tthread create: %s, id = %d, %d\n", (*thread)->name.C_Str(), (*thread)->unique_id, result);
+
+	// #region agent log
+	{
+		static int logged = 0;
+		if (logged++ < 5)
+		{
+			if (FILE* f = std::fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log", "a"))
+			{
+				std::fprintf(f,
+				             "{\"sessionId\":\"f08e58\",\"runId\":\"pre-fix\",\"hypothesisId\":\"H\","
+				             "\"location\":\"Pthread.cpp:PthreadCreate\",\"message\":\"pthread_create\","
+				             "\"data\":{\"name\":\"%s\",\"result\":%d,\"thread\":%llu,\"entry\":%llu},\"timestamp\":%lld}\n",
+				             name != nullptr ? name : "", result,
+				             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(*thread)),
+				             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(entry)),
+				             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+				                                            std::chrono::system_clock::now().time_since_epoch())
+				                                        .count()));
+				std::fclose(f);
+			}
+		}
+	}
+	// #endregion
 
 	pthread_attr_dbg_print(attr);
 
@@ -2794,6 +2894,146 @@ int KYTY_SYSV_ABI pthread_mutexattr_destroy(LibKernel::PthreadMutexattr* attr)
 	PRINT_NAME();
 
 	return POSIX_PTHREAD_CALL(LibKernel::PthreadMutexattrDestroy(attr));
+}
+
+LibKernel::Pthread KYTY_SYSV_ABI pthread_self()
+{
+	auto* self = LibKernel::PthreadSelf();
+	// #region agent log
+	{
+		static int logged = 0;
+		if (logged++ < 3)
+		{
+			if (FILE* f = std::fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log", "a"))
+			{
+				std::fprintf(f,
+				             "{\"sessionId\":\"f08e58\",\"runId\":\"pre-fix\",\"hypothesisId\":\"G\","
+				             "\"location\":\"Pthread.cpp:Posix::pthread_self\",\"message\":\"pthread_self\","
+				             "\"data\":{\"self\":%llu,\"is_null\":%d},\"timestamp\":%lld}\n",
+				             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(self)), self == nullptr ? 1 : 0,
+				             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+				                                            std::chrono::system_clock::now().time_since_epoch())
+				                                        .count()));
+				std::fclose(f);
+			}
+		}
+	}
+	// #endregion
+	return self;
+}
+
+int KYTY_SYSV_ABI pthread_detach(LibKernel::Pthread thread)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadDetach(thread));
+}
+
+void KYTY_SYSV_ABI pthread_exit(void* value)
+{
+	PRINT_NAME();
+	LibKernel::PthreadExit(value);
+}
+
+void KYTY_SYSV_ABI pthread_yield()
+{
+	PRINT_NAME();
+	LibKernel::PthreadYield();
+}
+
+int KYTY_SYSV_ABI pthread_cond_signal(LibKernel::PthreadCond* cond)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondSignal(cond));
+}
+
+int KYTY_SYSV_ABI pthread_attr_init(LibKernel::PthreadAttr* attr)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrInit(attr));
+}
+
+int KYTY_SYSV_ABI pthread_attr_destroy(LibKernel::PthreadAttr* attr)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrDestroy(attr));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getstack(const LibKernel::PthreadAttr* attr, void** stack_addr, size_t* stack_size)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetstack(attr, stack_addr, stack_size));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setstacksize(LibKernel::PthreadAttr* attr, size_t stack_size)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetstacksize(attr, stack_size));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getstacksize(const LibKernel::PthreadAttr* attr, size_t* stack_size)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetstacksize(attr, stack_size));
+}
+
+int KYTY_SYSV_ABI pthread_attr_get_np(LibKernel::Pthread thread, LibKernel::PthreadAttr* attr)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGet(thread, attr));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getschedpolicy(const LibKernel::PthreadAttr* attr, int* policy)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetschedpolicy(attr, policy));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setschedpolicy(LibKernel::PthreadAttr* attr, int policy)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetschedpolicy(attr, policy));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setdetachstate(LibKernel::PthreadAttr* attr, int state)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetdetachstate(attr, state));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getdetachstate(const LibKernel::PthreadAttr* attr, int* state)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetdetachstate(attr, state));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setschedparam(LibKernel::PthreadAttr* attr, const LibKernel::KernelSchedParam* param)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetschedparam(attr, param));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getschedparam(const LibKernel::PthreadAttr* attr, LibKernel::KernelSchedParam* param)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetschedparam(attr, param));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setinheritsched(LibKernel::PthreadAttr* attr, int inherit_sched)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetinheritsched(attr, inherit_sched));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setguardsize(LibKernel::PthreadAttr* attr, size_t guard_size)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetguardsize(attr, guard_size));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getguardsize(const LibKernel::PthreadAttr* attr, size_t* guard_size)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetguardsize(attr, guard_size));
 }
 
 } // namespace Posix

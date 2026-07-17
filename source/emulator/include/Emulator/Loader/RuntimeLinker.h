@@ -189,6 +189,20 @@ private:
 // Returns the number of sites rewritten. Pure buffer transform for unit tests.
 uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size);
 
+// Prepare a per-thread TLS image after memcpy from the PT_TLS template:
+// 1) Relocate absolute pointers that fall inside [template_vaddr, +image_size)
+//    into this thread's copy (self-pointers baked as absolute template addrs).
+// 2) Clear absolute pointers into [program_base, +program_size) whose pointee
+//    looks like an unconstructed Context (word0==0 and buffer control at
+//    +0x3e0==0). Gen5 eboot TLS slots copy a non-null absolute pointer to such
+//    storage; the guest null→factory path is the real constructor, and leaving
+//    the stale pointer skips it (FATAL-ACCESS-VIOLATION on null buffer+8).
+// `guest_read64(addr, out)` returns true when `addr` is a safe 8-byte guest
+// read; used for step 2. Pure helper for unit tests when guest_read64 is a stub.
+// Returns the number of 8-byte cells modified.
+uint64_t LoaderPrepareThreadTlsImage(uint8_t* tls, uint64_t image_size, uint64_t template_vaddr, uint64_t program_base,
+                                     uint64_t program_size, bool (*guest_read64)(uint64_t addr, uint64_t* out, void* ctx), void* guest_ctx);
+
 } // namespace Kyty::Loader
 
 #endif // KYTY_EMU_ENABLED

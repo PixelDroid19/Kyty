@@ -12,12 +12,16 @@
 
 #include <atomic>
 #include <climits>
+#include <cstring>
+#include <unordered_map>
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::LibKernel::FileSystem {
 
 LIB_NAME("libkernel", "libkernel");
+
+static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name);
 
 constexpr int DESCRIPTOR_MIN = 3;
 
@@ -334,7 +338,8 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 	EXIT_IF(file == nullptr || file->opened || file->directory);
 
 	file->name      = path;
-	file->real_name = (directory ? g_mount_points->GetRealDirectory(file->name) : g_mount_points->GetRealFilename(file->name));
+	file->real_name = (directory ? g_mount_points->GetRealDirectory(file->name)
+	                             : ResolveExistingHostFile(file->name, g_mount_points->GetRealFilename(file->name)));
 
 	if (trunc && rw_mode == Core::File::Mode::Read)
 	{
@@ -720,7 +725,7 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 	printf("\t KernelStat: %s\n", path);
 
 	String path_s         = String::FromUtf8(path);
-	auto   real_file_name = g_mount_points->GetRealFilename(path_s);
+	auto   real_file_name = ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s));
 	auto   real_directory = g_mount_points->GetRealDirectory(path_s);
 
 	bool is_dir  = Core::File::IsDirectoryExisting(real_file_name) || Core::File::IsDirectoryExisting(real_directory);
@@ -975,6 +980,694 @@ int KYTY_SYSV_ABI KernelMkdir(const char* path, uint16_t mode)
 		return KERNEL_ERROR_ENOENT;
 	}
 
+	return OK;
+}
+
+static uint32_t AprStableFileId(const char* guest_path)
+{
+	uint32_t hash = 2166136261u;
+	if (guest_path != nullptr)
+	{
+		for (const unsigned char* p = reinterpret_cast<const unsigned char*>(guest_path); *p != 0; ++p)
+		{
+			hash ^= *p;
+			hash *= 16777619u;
+		}
+	}
+	if (hash == 0)
+	{
+		hash = 1;
+	}
+	return hash;
+}
+
+static Core::Mutex                          g_apr_mutex;
+static std::unordered_map<uint32_t, String>  g_apr_id_to_host;
+static uint32_t                             g_apr_next_submission_id = 1;
+static std::unordered_map<uint32_t, uint64_t> g_apr_submissions;
+
+// Weight classes for package-font substitution (incomplete dumps / SIE fonts under app0).
+enum class PackageFontWeight : int
+{
+	Light    = 0,
+	Regular  = 1,
+	Medium   = 2,
+	Bold     = 3,
+	Heavy    = 4,
+};
+
+static bool IsPackageFontExtension(const String& name_lower)
+{
+	return name_lower.EndsWith(U".otf") || name_lower.EndsWith(U".ttf") || name_lower.EndsWith(U".ttc");
+}
+
+static PackageFontWeight ClassifyPackageFontWeight(const String& name_lower)
+{
+	if (name_lower.ContainsStr(U"heavy") || name_lower.ContainsStr(U"black") || name_lower.ContainsStr(U"xbold") ||
+	    name_lower.ContainsStr(U"xbd") || name_lower.ContainsStr(U"blk"))
+	{
+		return PackageFontWeight::Heavy;
+	}
+	if (name_lower.ContainsStr(U"bold"))
+	{
+		return PackageFontWeight::Bold;
+	}
+	if (name_lower.ContainsStr(U"medium") || name_lower.ContainsStr(U"book"))
+	{
+		return PackageFontWeight::Medium;
+	}
+	if (name_lower.ContainsStr(U"light") || name_lower.ContainsStr(U"thin"))
+	{
+		return PackageFontWeight::Light;
+	}
+	return PackageFontWeight::Regular;
+}
+
+static int ScorePackageFontFallback(const String& requested_filename, const String& candidate_filename)
+{
+	const String req = requested_filename.FilenameWithoutDirectory().ToLower();
+	const String can = candidate_filename.FilenameWithoutDirectory().ToLower();
+	if (req.IsEmpty() || can.IsEmpty() || !IsPackageFontExtension(can))
+	{
+		return -1;
+	}
+	if (req == can)
+	{
+		return 100000;
+	}
+	if (!IsPackageFontExtension(req))
+	{
+		return -1;
+	}
+
+	const int req_w = static_cast<int>(ClassifyPackageFontWeight(req));
+	const int can_w = static_cast<int>(ClassifyPackageFontWeight(can));
+	int       score = 1000 - (req_w > can_w ? req_w - can_w : can_w - req_w) * 200;
+
+	const auto family_token = [](const String& n) -> String {
+		uint32_t cut = n.FindIndex(U'-');
+		const uint32_t us = n.FindIndex(U'_');
+		if (us != Core::STRING_INVALID_INDEX && (cut == Core::STRING_INVALID_INDEX || us < cut))
+		{
+			cut = us;
+		}
+		return cut == Core::STRING_INVALID_INDEX ? n : n.Left(cut);
+	};
+	const String req_fam = family_token(req);
+	const String can_fam = family_token(can);
+	if (!req_fam.IsEmpty() && req_fam == can_fam)
+	{
+		score += 300;
+	}
+	if (req_w >= static_cast<int>(PackageFontWeight::Heavy) && can_w >= static_cast<int>(PackageFontWeight::Bold))
+	{
+		score += 50;
+	}
+	return score;
+}
+
+static String PreferPackageFontHostPath(const String& requested_host_path)
+{
+	if (requested_host_path.IsEmpty())
+	{
+		return requested_host_path;
+	}
+	if (Core::File::IsFileExisting(requested_host_path))
+	{
+		return requested_host_path;
+	}
+
+	const String requested_name = requested_host_path.FilenameWithoutDirectory();
+	const String dir            = requested_host_path.DirectoryWithoutFilename();
+	if (requested_name.IsEmpty() || dir.IsEmpty() || !IsPackageFontExtension(requested_name.ToLower()))
+	{
+		return requested_host_path;
+	}
+	if (!Core::File::IsDirectoryExisting(dir))
+	{
+		return requested_host_path;
+	}
+
+	const auto entries = Core::File::GetDirEntries(dir);
+	int        best_score = -1;
+	String     best_path;
+	for (const auto& entry: entries)
+	{
+		if (!entry.is_file)
+		{
+			continue;
+		}
+		const int score = ScorePackageFontFallback(requested_name, entry.name);
+		if (score > best_score)
+		{
+			best_score = score;
+			best_path  = dir + entry.name;
+		}
+	}
+	if (best_score >= 0 && !best_path.IsEmpty() && Core::File::IsFileExisting(best_path))
+	{
+		printf("\t package font fallback: %s -> %s (score=%d)\n", requested_host_path.C_Str(), best_path.C_Str(), best_score);
+		return best_path;
+	}
+	return requested_host_path;
+}
+
+static String PreferHostExtensionAlias(const String& requested_host_path)
+{
+	if (requested_host_path.IsEmpty() || Core::File::IsFileExisting(requested_host_path))
+	{
+		return requested_host_path;
+	}
+	const String lower = requested_host_path.ToLower();
+	if (lower.EndsWith(U".odx"))
+	{
+		const String alias = requested_host_path + U"b";
+		if (Core::File::IsFileExisting(alias))
+		{
+			printf("\t host extension alias: %s -> %s\n", requested_host_path.C_Str(), alias.C_Str());
+			return alias;
+		}
+	}
+	return requested_host_path;
+}
+
+static String PreferHostApp0DataSegment(const String& guest_path, const String& requested_host_path)
+{
+	if (requested_host_path.IsEmpty() || Core::File::IsFileExisting(requested_host_path))
+	{
+		return requested_host_path;
+	}
+	const String guest = guest_path.FixFilenameSlash();
+	if (!guest.StartsWith(U"/app0/") || guest.StartsWith(U"/app0/data/"))
+	{
+		return requested_host_path;
+	}
+	const String rest  = guest.RemoveFirst(6);
+	const auto   parts = rest.Split(U"/");
+	if (!parts.IndexValid(0))
+	{
+		return requested_host_path;
+	}
+	const String first = parts.At(0).ToLower();
+	if (first.IsEmpty() || first == U"data" || first == U"sce_sys" || first == U"sce_module" || first == U"fakelib" ||
+	    first.ContainsChar(U'.'))
+	{
+		return requested_host_path;
+	}
+	const String host   = requested_host_path.FixFilenameSlash();
+	const String needle = U"/" + parts.At(0) + U"/";
+	const String insert = U"/data/" + parts.At(0) + U"/";
+	String       alt_host;
+	if (host.ContainsStr(needle))
+	{
+		alt_host = host.ReplaceStr(needle, insert);
+	}
+	else if (g_mount_points != nullptr)
+	{
+		alt_host = g_mount_points->GetRealFilename(U"/app0/data/" + rest);
+	}
+	else
+	{
+		return requested_host_path;
+	}
+	if (alt_host == host)
+	{
+		return requested_host_path;
+	}
+	if (Core::File::IsFileExisting(alt_host))
+	{
+		printf("\t host app0 data segment: %s -> %s\n", guest.C_Str(), alt_host.C_Str());
+		return alt_host;
+	}
+	const String alt_aliased = PreferHostExtensionAlias(alt_host);
+	if (Core::File::IsFileExisting(alt_aliased))
+	{
+		printf("\t host app0 data segment+ext: %s -> %s\n", guest.C_Str(), alt_aliased.C_Str());
+		return alt_aliased;
+	}
+	return requested_host_path;
+}
+
+static String g_last_od_host_path;
+
+static void RememberOdHostPath(const String& guest_path, const String& host_path)
+{
+	const String g = guest_path.ToLower();
+	if (!g.ContainsStr(U"/odx/") || (!g.EndsWith(U".odx") && !g.EndsWith(U".odxb")))
+	{
+		return;
+	}
+	if (!Core::File::IsFileExisting(host_path))
+	{
+		return;
+	}
+	g_last_od_host_path = host_path;
+}
+
+static String PreferHostOdCompanionAsset(const String& guest_path, const String& requested_host_path, const String& last_od_host_path)
+{
+	if (requested_host_path.IsEmpty() || Core::File::IsFileExisting(requested_host_path))
+	{
+		return requested_host_path;
+	}
+	const String last_od = !last_od_host_path.IsEmpty() ? last_od_host_path : g_last_od_host_path;
+	if (last_od.IsEmpty())
+	{
+		return requested_host_path;
+	}
+	const String guest = guest_path.FixFilenameSlash();
+	const String name  = guest.FilenameWithoutDirectory().ToLower();
+	if (name != U".jxm" && name != U".skel" && name != U".anim" && name != U".jpx")
+	{
+		return requested_host_path;
+	}
+	String od            = last_od.FixFilenameSlash();
+	const String od_file = od.FilenameWithoutDirectory();
+	String       stem    = od_file;
+	const String od_low  = od_file.ToLower();
+	if (od_low.EndsWith(U".odxb"))
+	{
+		stem = od_file.RemoveLast(5);
+	}
+	else if (od_low.EndsWith(U".odx"))
+	{
+		stem = od_file.RemoveLast(4);
+	}
+	const String odx_dir = od.DirectoryWithoutFilename();
+	String       parent  = odx_dir;
+	if (parent.EndsWith(U"/"))
+	{
+		parent = parent.RemoveLast(1);
+	}
+	const String parent_name = parent.FilenameWithoutDirectory().ToLower();
+	if (parent_name != U"odx")
+	{
+		return requested_host_path;
+	}
+	const String tree_root = parent.DirectoryWithoutFilename();
+	String       candidate;
+	if (name == U".jxm" || name == U".jpx")
+	{
+		candidate = tree_root + U"gfx/" + stem + name;
+	}
+	else if (name == U".skel")
+	{
+		candidate = tree_root + U"anim/" + stem + U".skel";
+	}
+	else
+	{
+		candidate = tree_root + U"anim/" + stem + U"_anim_play.anim";
+		if (!Core::File::IsFileExisting(candidate))
+		{
+			candidate = tree_root + U"anim/" + stem + U".anim";
+		}
+	}
+	if (Core::File::IsFileExisting(candidate))
+	{
+		printf("\t host OD companion: %s -> %s (from %s)\n", guest.C_Str(), candidate.C_Str(), last_od.C_Str());
+		return candidate;
+	}
+	return requested_host_path;
+}
+
+static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name)
+{
+	if (Core::File::IsFileExisting(real_file_name))
+	{
+		RememberOdHostPath(guest_path, real_file_name);
+		return real_file_name;
+	}
+	const String aliased = PreferHostExtensionAlias(real_file_name);
+	if (Core::File::IsFileExisting(aliased))
+	{
+		RememberOdHostPath(guest_path, aliased);
+		return aliased;
+	}
+	const String data_seg = PreferHostApp0DataSegment(guest_path, real_file_name);
+	if (Core::File::IsFileExisting(data_seg))
+	{
+		RememberOdHostPath(guest_path, data_seg);
+		return data_seg;
+	}
+	const String companion = PreferHostOdCompanionAsset(guest_path, real_file_name, {});
+	if (Core::File::IsFileExisting(companion))
+	{
+		return companion;
+	}
+	const String guest_name = guest_path.FilenameWithoutDirectory().ToLower();
+	if (!IsPackageFontExtension(guest_name))
+	{
+		return real_file_name;
+	}
+	return PreferPackageFontHostPath(real_file_name);
+}
+
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* paths, uint64_t count, uint32_t* ids, uint64_t* sizes)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_mount_points == nullptr);
+
+	printf("\t paths = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(paths));
+	printf("\t count = %" PRIu64 "\n", count);
+	printf("\t ids   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ids));
+	printf("\t sizes = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(sizes));
+
+	if (paths == nullptr || count == 0 || count > 1024)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	for (uint64_t i = 0; i < count; ++i)
+	{
+		const char* guest_path = paths[i];
+		if (guest_path == nullptr)
+		{
+			return KERNEL_ERROR_EFAULT;
+		}
+
+		printf("\t [%llu] path = %s\n", static_cast<unsigned long long>(i), guest_path);
+
+		const String path_s         = String::FromUtf8(guest_path);
+		const auto   real_file_name = ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s));
+		if (!Core::File::IsFileExisting(real_file_name))
+		{
+			printf("\t file not found: %s\n", real_file_name.C_Str());
+			return KERNEL_ERROR_ENOENT;
+		}
+
+		const uint64_t file_size = Core::File::Size(real_file_name);
+		const uint32_t file_id   = AprStableFileId(guest_path);
+		if (sizes != nullptr)
+		{
+			sizes[i] = file_size;
+		}
+		if (ids != nullptr)
+		{
+			ids[i] = file_id;
+		}
+		{
+			Core::LockGuard lock(g_apr_mutex);
+			g_apr_id_to_host[file_id] = real_file_name;
+		}
+		printf("\t [%llu] id = 0x%08" PRIx32 " size = %" PRIu64 "\n", static_cast<unsigned long long>(i), file_id, file_size);
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIds(const char* const* paths, uint64_t count, uint32_t* ids)
+{
+	return KernelAprResolveFilepathsToIdsAndFileSizes(paths, count, ids, nullptr);
+}
+
+static int AprResolveOnePath(const char* guest_path, uint32_t* out_id, uint64_t* out_size)
+{
+	if (guest_path == nullptr || guest_path[0] == '\0')
+	{
+		return KERNEL_ERROR_EFAULT;
+	}
+	if (g_mount_points == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	const String path_s         = String::FromUtf8(guest_path);
+	const auto   real_file_name = ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s));
+	if (!Core::File::IsFileExisting(real_file_name))
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	const uint32_t file_id   = AprStableFileId(guest_path);
+	const uint64_t file_size = Core::File::Size(real_file_name);
+	if (out_id != nullptr)
+	{
+		*out_id = file_id;
+	}
+	if (out_size != nullptr)
+	{
+		*out_size = file_size;
+	}
+	Core::LockGuard lock(g_apr_mutex);
+	g_apr_id_to_host[file_id] = real_file_name;
+	return OK;
+}
+
+static void AprJoinPrefix(const char* prefix, const char* path, char* out, size_t out_cap)
+{
+	if (out == nullptr || out_cap == 0)
+	{
+		return;
+	}
+	out[0] = '\0';
+	if (path == nullptr)
+	{
+		return;
+	}
+	if (prefix == nullptr || prefix[0] == '\0')
+	{
+		std::snprintf(out, out_cap, "%s", path);
+		return;
+	}
+	const size_t plen       = std::strlen(prefix);
+	const bool   need_slash = plen > 0 && prefix[plen - 1] != '/' && path[0] != '/';
+	if (need_slash)
+	{
+		std::snprintf(out, out_cap, "%s/%s", prefix, path);
+	}
+	else
+	{
+		std::snprintf(out, out_cap, "%s%s", prefix, path);
+	}
+}
+
+static int AprResolveBatch(const char* prefix, const char* const* paths, uint64_t count, uint32_t* ids, uint64_t* sizes,
+                           int32_t* results)
+{
+	if (paths == nullptr || count == 0 || count > 1024)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	int      first_error   = OK;
+	uint32_t success_count = 0;
+	for (uint64_t i = 0; i < count; ++i)
+	{
+		char full[2048] {};
+		AprJoinPrefix(prefix, paths[i], full, sizeof(full));
+		const int rc = AprResolveOnePath(full, ids != nullptr ? &ids[i] : nullptr, sizes != nullptr ? &sizes[i] : nullptr);
+		if (results != nullptr)
+		{
+			results[i] = rc;
+		}
+		if (rc == OK)
+		{
+			++success_count;
+		}
+		else
+		{
+			if (ids != nullptr)
+			{
+				ids[i] = 0xffffffffu;
+			}
+			if (sizes != nullptr)
+			{
+				sizes[i] = 0;
+			}
+			if (first_error == OK)
+			{
+				first_error = rc;
+			}
+			if (results == nullptr)
+			{
+				return rc;
+			}
+		}
+	}
+	return results != nullptr ? static_cast<int>(success_count) : first_error;
+}
+
+int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIds(const char* prefix, const char* const* paths, uint64_t count, uint32_t* ids)
+{
+	PRINT_NAME();
+	return AprResolveBatch(prefix, paths, count, ids, nullptr, nullptr);
+}
+
+int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(const char* prefix, const char* const* paths, uint64_t count,
+                                                                       uint32_t* ids, uint64_t* sizes)
+{
+	PRINT_NAME();
+	return AprResolveBatch(prefix, paths, count, ids, sizes, nullptr);
+}
+
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsForEach(const char* const* paths, uint64_t count, uint32_t* ids, int32_t* results)
+{
+	PRINT_NAME();
+	return AprResolveBatch(nullptr, paths, count, ids, nullptr, results);
+}
+
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizesForEach(const char* const* paths, uint64_t count, uint32_t* ids,
+                                                                    uint64_t* sizes, int32_t* results)
+{
+	PRINT_NAME();
+	return AprResolveBatch(nullptr, paths, count, ids, sizes, results);
+}
+
+int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsForEach(const char* prefix, const char* const* paths, uint64_t count,
+                                                                  uint32_t* ids, int32_t* results)
+{
+	PRINT_NAME();
+	return AprResolveBatch(prefix, paths, count, ids, nullptr, results);
+}
+
+int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach(const char* prefix, const char* const* paths,
+                                                                              uint64_t count, uint32_t* ids, uint64_t* sizes,
+                                                                              int32_t* results)
+{
+	PRINT_NAME();
+	return AprResolveBatch(prefix, paths, count, ids, sizes, results);
+}
+
+bool AprTryGetHostPath(uint32_t file_id, String* out_host_path)
+{
+	EXIT_IF(out_host_path == nullptr);
+	Core::LockGuard lock(g_apr_mutex);
+	auto            it = g_apr_id_to_host.find(file_id);
+	if (it == g_apr_id_to_host.end())
+	{
+		return false;
+	}
+	*out_host_path = it->second;
+	return true;
+}
+
+int KYTY_SYSV_ABI KernelAprGetFileSize(uint32_t file_id, uint64_t* size)
+{
+	PRINT_NAME();
+	printf("\t file_id = 0x%08" PRIx32 "\n", file_id);
+	printf("\t size    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(size));
+	if (size == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	String host_path;
+	if (!AprTryGetHostPath(file_id, &host_path))
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	if (!Core::File::IsFileExisting(host_path))
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	*size = Core::File::Size(host_path);
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelAprGetFileStat(uint32_t file_id, FileStat* st)
+{
+	PRINT_NAME();
+	printf("\t file_id = 0x%08" PRIx32 "\n", file_id);
+	printf("\t st      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(st));
+	if (st == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	String host_path;
+	if (!AprTryGetHostPath(file_id, &host_path))
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	if (!Core::File::IsFileExisting(host_path))
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	memset(st, 0, sizeof(FileStat));
+	st->st_mode    = 0000777u | 0100000u;
+	st->st_size    = static_cast<int64_t>(Core::File::Size(host_path));
+	st->st_blksize = 512;
+	st->st_blocks  = (st->st_size + 511) / 512;
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelAprSubmitCommandBuffer(void* cmd, uint64_t arg1, void* arg2, uint64_t arg3, void* arg4)
+{
+	PRINT_NAME();
+	printf("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+	printf("\t arg1 = 0x%016" PRIx64 "\n", arg1);
+	printf("\t arg2 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg2));
+	printf("\t arg3 = 0x%016" PRIx64 "\n", arg3);
+	printf("\t arg4 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg4));
+	if (cmd == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	return OK;
+}
+
+static uint32_t AprAllocateSubmissionId(uint64_t cmd)
+{
+	Core::LockGuard lock(g_apr_mutex);
+	uint32_t        id = g_apr_next_submission_id++;
+	if (id == 0)
+	{
+		id = g_apr_next_submission_id++;
+	}
+	g_apr_submissions[id] = cmd;
+	return id;
+}
+
+int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetId(void* cmd, uint64_t arg1, uint32_t* out_submission_id)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " out_id = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd),
+	       reinterpret_cast<uint64_t>(out_submission_id));
+	if (cmd == nullptr || out_submission_id == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	const int submit_rc = KernelAprSubmitCommandBuffer(cmd, arg1, nullptr, 0, nullptr);
+	if (submit_rc != OK)
+	{
+		return submit_rc;
+	}
+	*out_submission_id = AprAllocateSubmissionId(reinterpret_cast<uint64_t>(cmd));
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetResult(void* cmd, uint64_t arg1, void* result, uint32_t* out_submission_id)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " result = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), reinterpret_cast<uint64_t>(result));
+	if (cmd == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	const int submit_rc = KernelAprSubmitCommandBuffer(cmd, arg1, result, 0, nullptr);
+	if (submit_rc != OK)
+	{
+		return submit_rc;
+	}
+	if (out_submission_id != nullptr)
+	{
+		*out_submission_id = AprAllocateSubmissionId(reinterpret_cast<uint64_t>(cmd));
+	}
+	if (result != nullptr)
+	{
+		uint32_t words[2] = {0, 0};
+		std::memcpy(result, words, sizeof(words));
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelAprWaitCommandBuffer(uint32_t submission_id)
+{
+	PRINT_NAME();
+	printf("\t submission_id = 0x%08" PRIx32 "\n", submission_id);
+	Core::LockGuard lock(g_apr_mutex);
+	auto            it = g_apr_submissions.find(submission_id);
+	if (it == g_apr_submissions.end())
+	{
+		return submission_id == 0 ? KERNEL_ERROR_EINVAL : OK;
+	}
+	g_apr_submissions.erase(it);
 	return OK;
 }
 

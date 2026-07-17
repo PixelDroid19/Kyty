@@ -24,6 +24,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
+#include <ctime>
 #include <limits>
 
 #ifdef KYTY_EMU_ENABLED
@@ -1587,42 +1589,217 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 
 	EXIT_NOT_IMPLEMENTED((base & 0xFFFF0000000000FFull) != 0);
 
-	if (h->type == 2 && h->num_sh_registers >= 2 && h->sh_registers[0].offset == Pm4::SPI_SHADER_PGM_LO_ES &&
-	    h->sh_registers[1].offset == Pm4::SPI_SHADER_PGM_HI_ES)
+	// Gen5 shader binary types (Prospero::ShaderBinaryType). Front halves and FS
+	// carry no program address registers; GS/HS use LO_ES/LO_LS (merged) or
+	// LO_GS/LO_HS (back halves). Search the SH list rather than assuming [0]/[1].
+	constexpr uint8_t kShaderBinaryCs      = 0;
+	constexpr uint8_t kShaderBinaryPs      = 1;
+	constexpr uint8_t kShaderBinaryGs      = 2;
+	constexpr uint8_t kShaderBinaryHs      = 3;
+	constexpr uint8_t kShaderBinaryGsFront = 4;
+	constexpr uint8_t kShaderBinaryHsFront = 5;
+	constexpr uint8_t kShaderBinaryGsBack  = 6;
+	constexpr uint8_t kShaderBinaryHsBack  = 7;
+	constexpr uint8_t kShaderBinaryFs      = 8;
+
+	uint32_t lo_offset = 0;
+	bool     needs_pgm = true;
+	switch (h->type)
 	{
-		h->sh_registers[0].offset = Pm4::SPI_SHADER_PGM_LO_ES;
-		h->sh_registers[0].value  = ((base >> 8u) & 0xffffffffu);
-		h->sh_registers[1].offset = Pm4::SPI_SHADER_PGM_HI_ES;
-		h->sh_registers[1].value  = ((base >> 40u) & 0x000000ffu);
-	} else if (h->type == 1 && h->num_sh_registers >= 2 && h->sh_registers[0].offset == Pm4::SPI_SHADER_PGM_LO_PS &&
-	           h->sh_registers[1].offset == Pm4::SPI_SHADER_PGM_HI_PS)
+		case kShaderBinaryCs: lo_offset = Pm4::COMPUTE_PGM_LO; break;
+		case kShaderBinaryPs: lo_offset = Pm4::SPI_SHADER_PGM_LO_PS; break;
+		case kShaderBinaryGs: lo_offset = Pm4::SPI_SHADER_PGM_LO_ES; break;
+		case kShaderBinaryHs: lo_offset = Pm4::SPI_SHADER_PGM_LO_LS; break;
+		case kShaderBinaryGsBack: lo_offset = Pm4::SPI_SHADER_PGM_LO_GS; break;
+		case kShaderBinaryHsBack: lo_offset = Pm4::SPI_SHADER_PGM_LO_HS; break;
+		case kShaderBinaryGsFront:
+		case kShaderBinaryHsFront:
+		case kShaderBinaryFs: needs_pgm = false; break;
+		default:
+			printf("\t SHADER DIAG: unknown type=%u num_sh_registers=%u\n", h->type, h->num_sh_registers);
+			EXIT("invalid shader\n");
+	}
+
+	if (needs_pgm)
 	{
-		h->sh_registers[0].offset = Pm4::SPI_SHADER_PGM_LO_PS;
-		h->sh_registers[0].value  = ((base >> 8u) & 0xffffffffu);
-		h->sh_registers[1].offset = Pm4::SPI_SHADER_PGM_HI_PS;
-		h->sh_registers[1].value  = ((base >> 40u) & 0x000000ffu);
-	} else if (h->type == 0 && h->num_sh_registers >= 2 && h->sh_registers[0].offset == Pm4::COMPUTE_PGM_LO &&
-	           h->sh_registers[1].offset == Pm4::COMPUTE_PGM_HI)
-	{
-		// Compute shader: patch the code base address into COMPUTE_PGM_LO/HI.
-		h->sh_registers[0].offset = Pm4::COMPUTE_PGM_LO;
-		h->sh_registers[0].value  = ((base >> 8u) & 0xffffffffu);
-		h->sh_registers[1].offset = Pm4::COMPUTE_PGM_HI;
-		h->sh_registers[1].value  = ((base >> 40u) & 0x000000ffu);
-	} else
-	{
-		printf("\t SHADER DIAG: type=%u num_sh_registers=%u\n", h->type, h->num_sh_registers);
-		for (uint32_t i = 0; i < h->num_sh_registers && i < 8; i++)
+		EXIT_NOT_IMPLEMENTED(h->sh_registers == nullptr || h->num_sh_registers == 0);
+
+		bool patched = false;
+		for (uint32_t lo_index = 0; lo_index < h->num_sh_registers; lo_index++)
 		{
-			printf("\t   sh_reg[%u] offset=0x%x value=0x%x\n", i, h->sh_registers[i].offset, h->sh_registers[i].value);
+			if (h->sh_registers[lo_index].offset != lo_offset)
+			{
+				continue;
+			}
+			const uint32_t hi_index  = lo_index + 1u;
+			const uint32_t hi_offset = lo_offset + 1u;
+			EXIT_NOT_IMPLEMENTED(hi_index >= h->num_sh_registers || h->sh_registers[hi_index].offset != hi_offset);
+
+			// Header LO/HI hold a relative code offset; absolute = base + offset.
+			const uint64_t shader_offset =
+			    (static_cast<uint64_t>(h->sh_registers[lo_index].value) << 8u) |
+			    ((static_cast<uint64_t>(h->sh_registers[hi_index].value) & 0xffu) << 40u);
+			const uint64_t addr = base + shader_offset;
+
+			h->sh_registers[lo_index].value = static_cast<uint32_t>((addr >> 8u) & 0xffffffffu);
+			h->sh_registers[hi_index].value =
+			    (h->sh_registers[hi_index].value & 0xffffff00u) | static_cast<uint32_t>((addr >> 40u) & 0xffu);
+			patched = true;
+			break;
 		}
-		EXIT("invalid shader\n");
+		if (!patched)
+		{
+			printf("\t SHADER DIAG: type=%u num_sh_registers=%u missing PGM_LO=0x%x\n", h->type, h->num_sh_registers,
+			       lo_offset);
+			for (uint32_t i = 0; i < h->num_sh_registers && i < 8; i++)
+			{
+				printf("\t   sh_reg[%u] offset=0x%x value=0x%x\n", i, h->sh_registers[i].offset, h->sh_registers[i].value);
+			}
+			EXIT("invalid shader\n");
+		}
 	}
 
 	*dst = h;
 
 	dbg_dump_shader(h);
 
+	return OK;
+}
+
+static constexpr int kGraphics5ErrorInvalidShaderHalves = static_cast<int>(0x8a6c0008u);
+
+static ShaderRegister* find_shader_register(ShaderRegister* regs, uint32_t num_regs, uint32_t offset, uint32_t occurrence = 0)
+{
+	if (regs == nullptr)
+	{
+		return nullptr;
+	}
+	for (uint32_t i = 0; i < num_regs; i++)
+	{
+		if (regs[i].offset != offset)
+		{
+			continue;
+		}
+		if (occurrence == 0)
+		{
+			return regs + i;
+		}
+		occurrence--;
+	}
+	return nullptr;
+}
+
+static void patch_shader_register_address(ShaderRegister* regs, uint32_t num_regs, uint32_t lo_offset, uint64_t address)
+{
+	auto* lo = find_shader_register(regs, num_regs, lo_offset);
+	if (lo == nullptr)
+	{
+		return;
+	}
+	auto* hi = (lo + 1 < regs + num_regs && (lo + 1)->offset == lo_offset + 1u) ? lo + 1 : nullptr;
+	if (hi == nullptr)
+	{
+		return;
+	}
+	lo->value = static_cast<uint32_t>((address >> 8u) & 0xffffffffu);
+	hi->value = (hi->value & 0xffffff00u) | static_cast<uint32_t>((address >> 40u) & 0xffu);
+}
+
+int KYTY_SYSV_ABI GraphicsUnknownGetFusedShaderSize(SizeAlign* dst, const Shader* front, const Shader* back)
+{
+	PRINT_NAME();
+
+	printf("\t dst   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst));
+	printf("\t front = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(front));
+	printf("\t back  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(back));
+
+	EXIT_NOT_IMPLEMENTED(dst == nullptr);
+	EXIT_NOT_IMPLEMENTED(front == nullptr);
+	EXIT_NOT_IMPLEMENTED(back == nullptr);
+
+	constexpr uint8_t kGsFront = 4;
+	constexpr uint8_t kHsFront = 5;
+	constexpr uint8_t kGsBack  = 6;
+	constexpr uint8_t kHsBack  = 7;
+
+	if (!((front->type == kGsFront && back->type == kGsBack) || (front->type == kHsFront && back->type == kHsBack)))
+	{
+		return kGraphics5ErrorInvalidShaderHalves;
+	}
+
+	dst->m_size  = static_cast<uint64_t>(back->num_sh_registers) * sizeof(ShaderRegister);
+	dst->m_align = 4;
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsUnknownFuseShaderHalves(Shader* fused_result, const Shader* front, const Shader* back, void* scratch_mem)
+{
+	PRINT_NAME();
+
+	printf("\t fused_result = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(fused_result));
+	printf("\t front        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(front));
+	printf("\t back         = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(back));
+	printf("\t scratch_mem  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(scratch_mem));
+
+	EXIT_NOT_IMPLEMENTED(fused_result == nullptr);
+	EXIT_NOT_IMPLEMENTED(front == nullptr);
+	EXIT_NOT_IMPLEMENTED(back == nullptr);
+
+	constexpr uint8_t kGs      = 2;
+	constexpr uint8_t kHs      = 3;
+	constexpr uint8_t kGsFront = 4;
+	constexpr uint8_t kHsFront = 5;
+	constexpr uint8_t kGsBack  = 6;
+	constexpr uint8_t kHsBack  = 7;
+
+	if (!((front->type == kGsFront && back->type == kGsBack) || (front->type == kHsFront && back->type == kHsBack)))
+	{
+		return kGraphics5ErrorInvalidShaderHalves;
+	}
+
+	*fused_result      = *back;
+	fused_result->type = static_cast<uint8_t>(front->type == kGsFront ? kGs : kHs);
+
+	if (front->specials != nullptr && back->specials != nullptr)
+	{
+		const auto front_stages = front->specials->vgt_shader_stages_en.value;
+		const auto back_stages  = back->specials->vgt_shader_stages_en.value;
+		const auto mismatch_bit = (front->type == kGsFront ? (1u << 22u) : (1u << 21u));
+		if (((front_stages ^ back_stages) & mismatch_bit) != 0)
+		{
+			return kGraphics5ErrorInvalidShaderHalves;
+		}
+	}
+
+	if (scratch_mem != nullptr && back->sh_registers != nullptr && back->num_sh_registers != 0)
+	{
+		auto* sh_registers = static_cast<ShaderRegister*>(scratch_mem);
+		std::memcpy(sh_registers, back->sh_registers, static_cast<size_t>(back->num_sh_registers) * sizeof(ShaderRegister));
+		fused_result->sh_registers = sh_registers;
+	}
+
+	auto*      fused_regs      = fused_result->sh_registers;
+	const auto fused_reg_count = static_cast<uint32_t>(fused_result->num_sh_registers);
+	const auto front_reg_count = static_cast<uint32_t>(front->num_sh_registers);
+
+	if (front->type == kGsFront)
+	{
+		for (uint32_t occurrence = 0; occurrence < 2; occurrence++)
+		{
+			auto*       dst = find_shader_register(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_CHKSUM_GS, occurrence);
+			const auto* src = find_shader_register(front->sh_registers, front_reg_count, Pm4::SPI_SHADER_PGM_CHKSUM_GS, occurrence);
+			if (dst != nullptr && src != nullptr)
+			{
+				dst->value = src->value;
+			}
+		}
+		patch_shader_register_address(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_LO_ES, reinterpret_cast<uint64_t>(front->code));
+	} else
+	{
+		patch_shader_register_address(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_LO_LS, reinterpret_cast<uint64_t>(front->code));
+	}
+
+	fused_result->user_data = nullptr;
 	return OK;
 }
 
@@ -1755,8 +1932,119 @@ int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegiste
 	return OK;
 }
 
+// Pack ShaderSemantic bitfields into a 32-bit word matching the hardware layout.
+static uint32_t ShaderSemanticWord(const ShaderSemantic& semantic)
+{
+	return ((semantic.semantic & 0xffu) << 0u) | ((semantic.hardware_mapping & 0xffu) << 8u) |
+	       ((semantic.size_in_elements & 0xfu) << 16u) | ((semantic.is_f16 & 0x3u) << 20u) |
+	       ((semantic.is_flat_shaded & 0x1u) << 22u) | ((semantic.is_linear & 0x1u) << 23u) |
+	       ((semantic.is_custom & 0x1u) << 24u) | ((semantic.static_vb_index & 0x1u) << 25u) |
+	       ((semantic.static_attribute & 0x1u) << 26u) | ((semantic.reserved & 0x1u) << 27u) |
+	       ((semantic.default_value & 0x3u) << 28u) | ((semantic.default_value_hi & 0x3u) << 30u);
+}
+
+static uint32_t ApplyInterpolantDefaultValue(uint32_t value, uint32_t ps_word)
+{
+	value &= ~0x00000300u;
+	value |= ((ps_word >> 28u) & 0x3u) << 8u;
+	return value;
+}
+
+static uint32_t ApplyInterpolantDefaultValueHi(uint32_t value, uint32_t ps_word)
+{
+	value &= ~0x00600000u;
+	value |= ((ps_word >> 30u) & 0x3u) << 21u;
+	return value;
+}
+
+static uint32_t CreateInterpolantMappingValue(uint32_t value, uint32_t ps_word, uint32_t gs_word)
+{
+	const uint32_t flat_shade =
+	    ((ps_word & 0x00400000u) != 0 || (ps_word & 0x01000000u) != 0 ? 0x00000400u : 0u);
+
+	value &= ~0x0000001fu;
+	value |= (gs_word >> 8u) & 0x1fu;
+	value &= ~0x00000400u;
+	value |= flat_shade;
+
+	return ApplyInterpolantDefaultValue(value, ps_word);
+}
+
+static uint32_t CreateInterpolantDefaultValue(uint32_t value, uint32_t ps_word)
+{
+	value &= ~0x0000001fu;
+	value &= ~0x00000400u;
+	return ApplyInterpolantDefaultValue(value, ps_word);
+}
+
+static uint32_t CreateInterpolantF16Value(uint32_t ps_word, const ShaderSemantic* gs_semantic)
+{
+	uint32_t value = (ps_word << 4u) & 0x03000000u;
+
+	if (gs_semantic == nullptr)
+	{
+		value |= 0x00180020u;
+	}
+	else
+	{
+		const uint32_t common_word = ps_word & ShaderSemanticWord(*gs_semantic);
+
+		value &= 0xfff7ffdfu;
+		value |= (common_word >> 15u) & 0x20u;
+		value ^= 0x00080020u;
+		value &= ~0x00100000u;
+		value |= (~common_word >> 1u) & 0x00100000u;
+	}
+
+	return ApplyInterpolantDefaultValueHi(value, ps_word);
+}
+
+static uint32_t CreateInterpolantNonF16Value(uint32_t ps_word, const ShaderSemantic* gs_semantic)
+{
+	uint32_t value = 0;
+	// OFFSET 0x20: hardware default when custom PS input or unmatched GS export.
+	if ((ps_word & 0x01000000u) != 0 || gs_semantic == nullptr)
+	{
+		value |= 0x20u;
+	}
+	return value;
+}
+
+static const ShaderSemantic* FindInterpolantOutputSemantic(const Shader* gs, uint32_t semantic)
+{
+	if (gs == nullptr || gs->output_semantics == nullptr)
+	{
+		return nullptr;
+	}
+	for (uint16_t i = 0; i < gs->num_output_semantics; i++)
+	{
+		if (gs->output_semantics[i].semantic == semantic)
+		{
+			return &gs->output_semantics[i];
+		}
+	}
+	return nullptr;
+}
+
+static void SetInterpolantRegister(ShaderRegister* regs, uint32_t index, uint32_t value)
+{
+	regs[index].offset = Pm4::SPI_PS_INPUT_CNTL_0 + index;
+	regs[index].value  = value;
+}
+
+static void SetIdentityInterpolantRegisters(ShaderRegister* regs, uint32_t first_index)
+{
+	for (uint32_t i = first_index; i < 32u; i++)
+	{
+		SetInterpolantRegister(regs, i, i);
+	}
+}
+
+// Legacy helper used by deterministic tests: map PS inputs from a VS/GS export
+// superset (flat-shade bit, default OFFSET 0x20, or identity outputs when PS
+// has no inputs). Does not cover f16/custom packs — CreateInterpolantMapping does.
 bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic* outputs, uint32_t output_count,
-	                                     const ShaderSemantic* inputs, uint32_t input_count)
+                                     const ShaderSemantic* inputs, uint32_t input_count)
 {
 	if (regs == nullptr || output_count > 32 || input_count > 32 || (output_count != 0 && outputs == nullptr) ||
 	    (input_count != 0 && inputs == nullptr))
@@ -1774,9 +2062,7 @@ bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic*
 		for (uint32_t output_index = 0; output_index < output_count; output_index++)
 		{
 			const auto& output = outputs[output_index];
-			if (output.hardware_mapping >= 32 || output.size_in_elements != 0 || output.is_f16 != 0 || output.is_flat_shaded != 0 ||
-			    output.is_linear != 0 || output.is_custom != 0 || output.static_vb_index != 0 || output.static_attribute != 0 ||
-			    output.default_value != 0 || output.default_value_hi != 0)
+			if (output.hardware_mapping >= 32)
 			{
 				return false;
 			}
@@ -1787,17 +2073,8 @@ bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic*
 
 	for (uint32_t input_index = 0; input_index < input_count; input_index++)
 	{
-		const auto& input = inputs[input_index];
-		if (input.hardware_mapping != 0 || input.size_in_elements != 0 || input.is_f16 != 0 || input.is_linear != 0 ||
-		    input.is_custom != 0 || input.static_vb_index != 0 || input.static_attribute != 0 || input.default_value > 3 ||
-		    input.default_value_hi != 0)
-		{
-			printf("Unsupported pixel input semantic: index=%u semantic=%u mapping=%u size=%u f16=%u linear=%u custom=%u static=%u/%u default=%u/%u\n",
-			       input_index, input.semantic, input.hardware_mapping, input.size_in_elements, input.is_f16, input.is_linear,
-			       input.is_custom, input.static_vb_index, input.static_attribute, input.default_value, input.default_value_hi);
-			return false;
-		}
-
+		const auto& input  = inputs[input_index];
+		const auto  ps_word = ShaderSemanticWord(input);
 		const ShaderSemantic* output = nullptr;
 		for (uint32_t output_index = 0; output_index < output_count; output_index++)
 		{
@@ -1807,24 +2084,12 @@ bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic*
 				break;
 			}
 		}
-		if (output == nullptr)
-		{
-			// OFFSET 0x20 selects a hardware default parameter instead of a vertex export.
-			regs[input_index].value = 0x20u | (input.default_value << 8u);
-			continue;
-		}
-		if (output->hardware_mapping >= 32 || output->size_in_elements != 0 || output->is_f16 != 0 ||
-		    output->is_flat_shaded != 0 || output->is_linear != 0 || output->is_custom != 0 || output->static_vb_index != 0 ||
-		    output->static_attribute != 0 || output->default_value != 0 || output->default_value_hi != 0)
-		{
-			printf("Unsupported vertex output semantic: semantic=%u mapping=%u size=%u f16=%u flat=%u linear=%u custom=%u static=%u/%u default=%u/%u\n",
-			       output->semantic, output->hardware_mapping, output->size_in_elements, output->is_f16, output->is_flat_shaded,
-			       output->is_linear, output->is_custom, output->static_vb_index, output->static_attribute, output->default_value,
-			       output->default_value_hi);
-			return false;
-		}
 
-		regs[input_index].value = output->hardware_mapping | (input.is_flat_shaded != 0 ? 0x400u : 0u);
+		uint32_t value = ((ps_word & 0x00300000u) != 0 ? CreateInterpolantF16Value(ps_word, output)
+		                                               : CreateInterpolantNonF16Value(ps_word, output));
+		value = (output == nullptr ? CreateInterpolantDefaultValue(value, ps_word)
+		                           : CreateInterpolantMappingValue(value, ps_word, ShaderSemanticWord(*output)));
+		regs[input_index].value = value;
 	}
 	return true;
 }
@@ -1838,20 +2103,37 @@ int KYTY_SYSV_ABI GraphicsCreateInterpolantMapping(ShaderRegister* regs, const S
 	printf("\t gs   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(gs));
 	printf("\t ps   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ps));
 
-	EXIT_NOT_IMPLEMENTED(gs == nullptr);
-	EXIT_NOT_IMPLEMENTED(gs == nullptr && ps == nullptr);
 	EXIT_NOT_IMPLEMENTED(regs == nullptr);
+	EXIT_NOT_IMPLEMENTED(ps != nullptr && ps->num_input_semantics != 0 && ps->input_semantics == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(gs->type != 2);
-	EXIT_NOT_IMPLEMENTED(ps != nullptr && ps->type != 1);
+	// No PS inputs: identity SPI_PS_INPUT_CNTL slots (common clear / full-screen paths).
+	if (ps == nullptr || ps->num_input_semantics == 0)
+	{
+		SetIdentityInterpolantRegisters(regs, 0);
+		return OK;
+	}
 
+	EXIT_NOT_IMPLEMENTED(gs == nullptr);
+	EXIT_NOT_IMPLEMENTED(gs->num_output_semantics != 0 && gs->output_semantics == nullptr);
 	EXIT_NOT_IMPLEMENTED(sizeof(ShaderSemantic) != 4);
-	EXIT_NOT_IMPLEMENTED(ps != nullptr && ps->num_output_semantics != 0);
 
-	const ShaderSemantic* inputs      = (ps != nullptr ? ps->input_semantics : nullptr);
-	const uint32_t        input_count = (ps != nullptr ? ps->num_input_semantics : 0);
-	EXIT_NOT_IMPLEMENTED(!GraphicsBuildInterpolantMapping(regs, gs->output_semantics, gs->num_output_semantics, inputs, input_count));
+	for (uint32_t ps_index = 0; ps_index < ps->num_input_semantics; ps_index++)
+	{
+		const auto& ps_semantic = ps->input_semantics[ps_index];
+		const auto* gs_semantic = FindInterpolantOutputSemantic(gs, ps_semantic.semantic);
+		const auto  ps_word     = ShaderSemanticWord(ps_semantic);
 
+		auto value =
+		    ((ps_word & 0x00300000u) != 0 ? CreateInterpolantF16Value(ps_word, gs_semantic)
+		                                  : CreateInterpolantNonF16Value(ps_word, gs_semantic));
+		value = (gs_semantic == nullptr
+		             ? CreateInterpolantDefaultValue(value, ps_word)
+		             : CreateInterpolantMappingValue(value, ps_word, ShaderSemanticWord(*gs_semantic)));
+
+		SetInterpolantRegister(regs, ps_index, value);
+	}
+
+	SetIdentityInterpolantRegisters(regs, ps->num_input_semantics);
 	return OK;
 }
 
@@ -1949,6 +2231,30 @@ int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, uin
 	return OK;
 }
 
+int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64_t address_or_offset)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), address_or_offset);
+
+	if (cmd == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	const auto op  = (cmd[0] >> 8u) & 0xffu;
+	const auto reg = KYTY_PM4_R(cmd[0]);
+	// Accept both hardware IT_WRITE_DATA and the Gen5 custom R_WRITE_DATA NOP
+	// envelope used by GraphicsDcbWriteData.
+	if (op != Pm4::IT_WRITE_DATA && !(op == Pm4::IT_NOP && reg == Pm4::R_WRITE_DATA))
+	{
+		return static_cast<int>(0x8a6c000cu);
+	}
+
+	cmd[2] = static_cast<uint32_t>(address_or_offset & 0xffffffffu);
+	cmd[3] = static_cast<uint32_t>((address_or_offset >> 32u) & 0xffffffffu);
+	return OK;
+}
+
 // Graphics5 NID LtTouSCZjHM. Captured strict SysV entry:
 //   rdi = CommandBuffer* (bottom/top/cursor_up/cursor_down/callback layout)
 //   rsi = 10 (num dwords)
@@ -2016,6 +2322,15 @@ int KYTY_SYSV_ABI GraphicsAgcDriverUnknownKRzWekV120()
 	// Real semantics unknown; return success so the draw path continues.
 	PRINT_NAME();
 	return OK;
+}
+
+uint64_t KYTY_SYSV_ABI GraphicsGetIsTrinityMode()
+{
+	// Non-Pro Prospero reports 0. Do not invent Pro/Trinity features.
+	// #region agent log
+	{FILE*f=fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log","a");if(f){fprintf(f,"{\"sessionId\":\"f08e58\",\"runId\":\"post-fix\",\"hypothesisId\":\"M\",\"location\":\"Graphics.cpp:GraphicsGetIsTrinityMode\",\"message\":\"trinity query\",\"data\":{\"result\":0},\"timestamp\":%lld}\n",(long long)time(nullptr)*1000);fclose(f);}}
+	// #endregion
+	return 0;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, uint32_t offset, const uint32_t* values, uint32_t num_values)
@@ -2127,29 +2442,37 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 	printf("\t interrupt_ctx_id = %" PRIu32 "\n", interrupt_ctx_id);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	EXIT_NOT_IMPLEMENTED(dst != 1);
-	// data_sel: 1 = 32-bit immediate (observed after WaitUntilSafe path with
-	// data=1), 2/3 = 64-bit/counter forms previously exercised by the same
-	// packet encoder. Packet layout already stores data in DW5/DW6.
-	EXIT_NOT_IMPLEMENTED(data_sel != 1 && data_sel != 2 && data_sel != 3);
+	// dst: 0 = memory, 1 = TC_L2 (Gen5 AGC).
+	EXIT_NOT_IMPLEMENTED(dst > 1);
+	// data_sel: 0 = no destination write (barrier/flush only), 1 = 32-bit
+	// immediate, 2 = 64-bit immediate, 3 = GPU clock counter. Packet layout
+	// stores data in DW5/DW6 for write forms; data_sel 0 uses the same custom
+	// envelope. CP custom R_RELEASE_MEM already accepts 0..3.
+	EXIT_NOT_IMPLEMENTED(data_sel != 0 && data_sel != 1 && data_sel != 2 && data_sel != 3);
 	EXIT_NOT_IMPLEMENTED(gds_offset != 0);
-	EXIT_NOT_IMPLEMENTED(gds_size != 1);
-	EXIT_NOT_IMPLEMENTED(interrupt != 0);
-	EXIT_NOT_IMPLEMENTED(interrupt_ctx_id != 0);
+	// Non-GDS forms do not encode GDS fields. Guests pass gds_size 0 (unused),
+	// 1 (legacy default), or 2 (observed Gen5).
+	EXIT_NOT_IMPLEMENTED(gds_size > 2);
+	// interrupt selector is a small enum (0 = none). Non-zero values are
+	// packed into the control dword; the CP may still treat clock/immediate
+	// writes as non-interrupting label publishes.
+	EXIT_NOT_IMPLEMENTED(interrupt > 3);
+	EXIT_NOT_IMPLEMENTED((interrupt_ctx_id & ~0x07ffffffu) != 0);
 
 	buf->DbgDump();
 
-	auto* cmd = buf->AllocateDW(7);
+	auto* cmd = buf->AllocateDW(8);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
-	cmd[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
 	cmd[1] = action | (static_cast<uint32_t>(cache_policy) << 8u);
-	cmd[2] = gcr_cntl | (static_cast<uint32_t>(data_sel) << 16u);
+	cmd[2] = gcr_cntl | (static_cast<uint32_t>(data_sel) << 16u) | (static_cast<uint32_t>(interrupt) << 24u);
 	cmd[3] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(address) & 0xffffffffu);
 	cmd[4] = static_cast<uint32_t>((reinterpret_cast<uint64_t>(address) >> 32u) & 0xffffffffu);
 	cmd[5] = static_cast<uint32_t>(data & 0xffffffffu);
 	cmd[6] = static_cast<uint32_t>((data >> 32u) & 0xffffffffu);
+	cmd[7] = interrupt_ctx_id & 0x07ffffffu;
 
 	return cmd;
 }
@@ -2161,9 +2484,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbResetQueue(CommandBuffer* buf, uint32_t op, u
 	printf("\t op    = 0x%08" PRIx32 "\n", op);
 	printf("\t state = 0x%08" PRIx32 "\n", state);
 
+	// Gen5 sce::Agc::DrawCommandBuffer::resetQueue: 12-bit op mask and a small
+	// state selector. Emit IT_CLEAR_STATE with the low 4 bits of state.
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	EXIT_NOT_IMPLEMENTED(op != 0x3ff);
-	EXIT_NOT_IMPLEMENTED(state != 0);
+	EXIT_NOT_IMPLEMENTED((op & ~0xfffu) != 0);
 
 	buf->DbgDump();
 
@@ -2171,8 +2495,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbResetQueue(CommandBuffer* buf, uint32_t op, u
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
-	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_DRAW_RESET);
-	cmd[1] = 0;
+	cmd[0] = KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u);
+	cmd[1] = state & 0xfu;
 
 	return cmd;
 }
@@ -2305,7 +2629,6 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t inde
 	printf("\t cache_policy = 0x%" PRIx8 "\n", cache_policy);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	EXIT_NOT_IMPLEMENTED(cache_policy != 0);
 
 	buf->DbgDump();
 
@@ -2319,6 +2642,213 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t inde
 	return cmd;
 }
 
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t index_addr)
+{
+	PRINT_NAME();
+	printf("\t index_addr = 0x%016" PRIx64 "\n", index_addr);
+
+	if (buf == nullptr || (index_addr & 1u) != 0)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(3);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(3, Pm4::IT_INDEX_BASE, 0u);
+	cmd[1] = static_cast<uint32_t>(index_addr & 0xffffffffu);
+	cmd[2] = static_cast<uint32_t>((index_addr >> 32u) & 0xffffffffu);
+	return cmd;
+}
+
+// sceAgcDcbSetBaseIndirectArgs: IT_SET_BASE for indirect argument buffers.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetBaseIndirectArgs(CommandBuffer* buf, uint32_t base_index, uint64_t address)
+{
+	PRINT_NAME();
+
+	printf("\t base_index = %" PRIu32 "\n", base_index);
+	printf("\t address    = 0x%016" PRIx64 "\n", address);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(4);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	cmd[0] = KYTY_PM4(4, Pm4::IT_SET_BASE, 0u) | ((base_index & 0x1u) << 1u);
+	cmd[1] = 1u;
+	cmd[2] = static_cast<uint32_t>(address & ~7ull);
+	cmd[3] = static_cast<uint32_t>(address >> 32u);
+	return cmd;
+}
+
+// sceAgcDcbDispatchIndirect: IT_DISPATCH_INDIRECT from SetBaseIndirect args.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t data_offset, uint32_t modifier)
+{
+	PRINT_NAME();
+
+	printf("\t data_offset = %" PRIu32 "\n", data_offset);
+	printf("\t modifier    = 0x%08" PRIx32 "\n", modifier);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(3);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	cmd[0] = KYTY_PM4(3, Pm4::IT_DISPATCH_INDIRECT, 0u);
+	cmd[1] = data_offset;
+	cmd[2] = (modifier & 0xa038u) | 0x41u;
+	return cmd;
+}
+
+static uint32_t extract_modifier_bits(uint32_t modifier, uint32_t start, uint32_t count)
+{
+	return (modifier >> start) & ((1u << count) - 1u);
+}
+
+static uint32_t indirect_modifier_sgpr_base(uint32_t modifier)
+{
+	const auto stage = modifier >> 29u;
+	return ((stage == 3u || stage == 5u) ? 0x80u : 0u) + 0x8cu;
+}
+
+static uint64_t decode_indirect_modifier_patch_offsets(uint64_t modifier, bool indexed)
+{
+	const auto low       = static_cast<uint32_t>(modifier);
+	const auto sgpr_base = indirect_modifier_sgpr_base(low);
+
+	uint64_t base_vtx_loc = 0x280u;
+	if ((low & 0x1u) != 0)
+	{
+		base_vtx_loc = sgpr_base + extract_modifier_bits(low, 9u, 5u);
+	}
+
+	uint64_t start_inst_loc = 0x280u;
+	if ((low & 0x4u) != 0)
+	{
+		start_inst_loc = sgpr_base + extract_modifier_bits(low, 19u, 5u);
+	}
+
+	if (indexed && (low & 0x2u) != 0)
+	{
+		base_vtx_loc |= static_cast<uint64_t>(sgpr_base + extract_modifier_bits(low, 14u, 5u)) << 16u;
+		base_vtx_loc |= 1ull << 59u;
+	}
+
+	return base_vtx_loc | (start_inst_loc << 32u);
+}
+
+static uint32_t decode_indirect_draw_initiator(uint64_t modifier)
+{
+	const auto low       = static_cast<uint32_t>(modifier);
+	uint32_t   initiator = 2u;
+
+	if ((modifier & (1ull << 32u)) == 0)
+	{
+		initiator = ((low >> 3u) & 0x20u) | 2u;
+	}
+
+	return initiator;
+}
+
+// sceAgcDcbDrawIndexIndirect: IT_DRAW_INDEX_INDIRECT from SetBaseIndirect args.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier)
+{
+	PRINT_NAME();
+
+	printf("\t data_offset = 0x%" PRIx32 "\n", data_offset_in_bytes);
+	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(5);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	const auto patch_offsets = decode_indirect_modifier_patch_offsets(modifier, true);
+
+	cmd[0] = KYTY_PM4(5, Pm4::IT_DRAW_INDEX_INDIRECT, 0u);
+	cmd[1] = data_offset_in_bytes;
+	cmd[2] = static_cast<uint32_t>(patch_offsets);
+	cmd[3] = static_cast<uint32_t>(patch_offsets >> 32u);
+	cmd[4] = decode_indirect_draw_initiator(modifier);
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count)
+{
+	PRINT_NAME();
+	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_INDEX_BUFFER_SIZE, 0u);
+	cmd[1] = index_count;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances)
+{
+	PRINT_NAME();
+	printf("\t num_instances = 0x%" PRIx32 "\n", num_instances);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_NUM_INSTANCES, 0u);
+	cmd[1] = num_instances;
+	return cmd;
+}
+
+static uint32_t decode_draw_index_initiator(uint64_t modifier)
+{
+	if ((modifier & (1ull << 32u)) != 0)
+	{
+		return 0;
+	}
+
+	return (static_cast<uint32_t>(modifier) >> 3u) & 0x20u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t index_count, uint64_t modifier)
 {
 	PRINT_NAME();
@@ -2327,19 +2857,22 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	EXIT_NOT_IMPLEMENTED(modifier != 0x40000000);
-
-	// auto *m = reinterpret_cast<ShaderDrawModifier*>(&modifier);
+	// Observed Gen5 modifiers: 0x40000000 (default) and 0x80000000 (Astro
+	// post-compute path). Other bits remain unsupported until evidenced.
+	EXIT_NOT_IMPLEMENTED(modifier != 0x40000000ull && modifier != 0x80000000ull);
 
 	buf->DbgDump();
 
-	auto* cmd = buf->AllocateDW(7);
+	// IT_DRAW_INDEX_AUTO consumes the decoded draw initiator, not the AGC
+	// modifier itself. Both observed Gen5 modifiers currently decode to the
+	// standard auto-draw initiator value 2.
+	auto* cmd = buf->AllocateDW(3);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
-	cmd[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX_AUTO);
+	cmd[0] = KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u);
 	cmd[1] = index_count;
-	cmd[2] = 0;
+	cmd[2] = decode_draw_index_initiator(modifier) | 0x2u;
 
 	return cmd;
 }
@@ -2403,6 +2936,89 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_
 	cmd[1] = (event_index << 8u) | event_type;
 
 	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf)
+{
+	// GNM/AGC stallCommandBufferParser: fixed EVENT_WRITE CS partial flush (0x07).
+	PRINT_NAME();
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+	constexpr uint32_t kCsPartialFlush = 0x07u;
+	cmd[0]                             = KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u);
+	cmd[1]                             = kCsPartialFlush;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t destination, uint8_t destination_cache_policy, uint8_t source,
+                                           uint64_t destination_address, uint8_t source_cache_policy, uint8_t control4,
+                                           uint64_t source_address, uint32_t byte_count, uint8_t control7, uint8_t control8,
+                                           uint8_t control9)
+{
+	PRINT_NAME();
+	printf("\t destination              = 0x%02" PRIx8 "\n", destination);
+	printf("\t destination_cache_policy = 0x%02" PRIx8 "\n", destination_cache_policy);
+	printf("\t source                   = 0x%02" PRIx8 "\n", source);
+	printf("\t destination_address      = 0x%016" PRIx64 "\n", destination_address);
+	printf("\t source_cache_policy      = 0x%02" PRIx8 "\n", source_cache_policy);
+	printf("\t source_address           = 0x%016" PRIx64 "\n", source_address);
+	printf("\t byte_count               = %" PRIu32 "\n", byte_count);
+
+	if (buf == nullptr || byte_count == 0 || (byte_count & 3u) != 0)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(8);
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA);
+	cmd[1] = static_cast<uint32_t>(destination) | (static_cast<uint32_t>(destination_cache_policy) << 8u) |
+	         (static_cast<uint32_t>(source) << 16u) | (static_cast<uint32_t>(source_cache_policy) << 24u);
+	cmd[2] = static_cast<uint32_t>(control4) | (static_cast<uint32_t>(control7) << 8u) | (static_cast<uint32_t>(control8) << 16u) |
+	         (static_cast<uint32_t>(control9) << 24u);
+	cmd[3] = byte_count;
+	cmd[4] = static_cast<uint32_t>(destination_address & 0xffffffffu);
+	cmd[5] = static_cast<uint32_t>((destination_address >> 32u) & 0xffffffffu);
+	cmd[6] = static_cast<uint32_t>(source_address & 0xffffffffu);
+	cmd[7] = static_cast<uint32_t>((source_address >> 32u) & 0xffffffffu);
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbAcquireMem(CommandBuffer* buf, uint32_t gcr_cntl, const volatile void* base, uint64_t size_bytes,
+                                              uint32_t poll_cycles)
+{
+	// ACB form fixes engine=1 (ME) and cb_db_op=0.
+	return GraphicsDcbAcquireMem(buf, 1, 0, gcr_cntl, base, size_bytes, poll_cycles);
+}
+
+// Gen5 NID qj7QZpgr9Uw: append a single Type-2 PM4 pad dword (0x80000000).
+// Observed after compute/context setup; CP treats Type-2 as header-only filler.
+uint32_t* KYTY_SYSV_ABI GraphicsCbType2Pad(CommandBuffer* buf)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(1);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = 0x80000000u;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address)
+{
+	return GraphicsDcbEventWrite(buf, event_type, address);
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uint32_t cb_db_op, uint32_t gcr_cntl,
@@ -2470,7 +3086,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, ui
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED((4 + num_dwords - 2u) > 0x3fffu);
 	EXIT_NOT_IMPLEMENTED(data == nullptr);
-	EXIT_NOT_IMPLEMENTED(address_or_offset == 0);
+	// address_or_offset may be 0: Gen5 reserves the packet then patches the
+	// destination with GraphicsWriteDataPatchSetAddressOrOffset before submit.
 
 	buf->DbgDump();
 
@@ -2511,7 +3128,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 	// op 0/1: observed memory-wait forms (op=0 size=0 cmp=3 ref=1 mask=~0 after
 	// ReleaseMem data_sel=1; op=1 was the prior path). Packet encoding is shared.
 	EXIT_NOT_IMPLEMENTED(op != 0 && op != 1);
-	EXIT_NOT_IMPLEMENTED(cache_policy != 0);
+	// cache_policy is a builder-side GPU-cache hint. The normalized R_WAIT_MEM_64
+	// packet has no policy field; host CP polls guest memory the same regardless.
+	// Observed values: 0/1/2 (WriteData-era) and 0x03 on early Gen5 WaitRegMem.
+	EXIT_NOT_IMPLEMENTED(cache_policy > 3);
 
 	buf->DbgDump();
 
@@ -2519,16 +3139,58 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
+	// The host CP has one normalized 64-bit packet form. A guest size=0 wait
+	// still has 32-bit comparison semantics, so its upper mask/reference
+	// dwords must not participate in that normalized comparison.
+	const uint64_t effective_mask      = (size == 0 ? (mask & 0xffffffffull) : mask);
+	const uint64_t effective_reference = (size == 0 ? (reference & 0xffffffffull) : reference);
 	cmd[0] = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
 	cmd[1] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(address) & 0xffffffffu);
 	cmd[2] = static_cast<uint32_t>((reinterpret_cast<uint64_t>(address) >> 32u) & 0xffffffffu);
-	cmd[3] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(mask) & 0xffffffffu);
-	cmd[4] = static_cast<uint32_t>((reinterpret_cast<uint64_t>(mask) >> 32u) & 0xffffffffu);
-	cmd[5] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(reference) & 0xffffffffu);
-	cmd[6] = static_cast<uint32_t>((reinterpret_cast<uint64_t>(reference) >> 32u) & 0xffffffffu);
+	cmd[3] = static_cast<uint32_t>(effective_mask & 0xffffffffu);
+	cmd[4] = static_cast<uint32_t>((effective_mask >> 32u) & 0xffffffffu);
+	cmd[5] = static_cast<uint32_t>(effective_reference & 0xffffffffu);
+	cmd[6] = static_cast<uint32_t>((effective_reference >> 32u) & 0xffffffffu);
 	cmd[7] = compare_function;
 	cmd[8] = poll_cycles / 40;
 
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbWaitRegMem(CommandBuffer* buf, uint8_t size, uint8_t compare_function, uint8_t cache_policy,
+                                              const volatile void* address, uint64_t reference, uint64_t mask, uint32_t poll_cycles)
+{
+	// Gen5 ACB WaitRegMem omits the DCB `op` argument; encode as op=0.
+	return GraphicsDcbWaitRegMem(buf, size, compare_function, 0, cache_policy, address, reference, mask, poll_cycles);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbGetLodStats(CommandBuffer* buf, uint8_t cache_policy, const volatile void* buffer,
+                                               uint32_t buffer_size_in_bytes, uint32_t reset_count, uint8_t force_reset,
+                                               uint8_t report_and_reset, uint32_t reporting_interval_in_100k_clocks)
+{
+	PRINT_NAME();
+	printf("\t buffer = 0x%016" PRIx64 " size = %" PRIu32 "\n", reinterpret_cast<uint64_t>(buffer), buffer_size_in_bytes);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(5);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	const auto buffer_addr = reinterpret_cast<uint64_t>(buffer);
+	cmd[0]                 = KYTY_PM4(5, Pm4::IT_GET_LOD_STATS, 0u);
+	cmd[1]                 = buffer_size_in_bytes;
+	cmd[2]                 = static_cast<uint32_t>(buffer_addr & 0xffffffc0u);
+	cmd[3]                 = static_cast<uint32_t>((buffer_addr >> 32u) & 0xffffffffu);
+	cmd[4]                 = ((static_cast<uint32_t>(cache_policy) & 0x3u) << 28u) |
+	         ((static_cast<uint32_t>(report_and_reset) & 0x1u) << 19u) | ((static_cast<uint32_t>(force_reset) & 0x1u) << 18u) |
+	         ((reset_count & 0xffu) << 10u) | ((reporting_interval_in_100k_clocks & 0xffu) << 2u);
 	return cmd;
 }
 
@@ -2558,6 +3220,80 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_ou
 	cmd[5] = static_cast<uint32_t>((static_cast<uint64_t>(flip_arg) >> 32u) & 0xffffffffu);
 
 	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbResetQueue(CommandBuffer* buf, uint32_t op)
+{
+	PRINT_NAME();
+	printf("\t op = 0x%08" PRIx32 "\n", op);
+
+	if (buf == nullptr || (op & ~0x1c2u) != 0)
+	{
+		return nullptr;
+	}
+
+	buf->DbgDump();
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_DISPATCH_RESET);
+	cmd[1] = 0;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbPushMarker(CommandBuffer* buf, const char* str, uint32_t /*color*/)
+{
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+	if (str == nullptr)
+	{
+		str = "";
+	}
+
+	const auto len            = strlen(str) + 1;
+	const auto payload_dwords = static_cast<uint32_t>((len + 3) / 4);
+	const auto size           = 1u + (payload_dwords == 0 ? 1u : payload_dwords);
+	auto*      cmd            = buf->AllocateDW(size);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_PUSH_MARKER);
+	memset(cmd + 1, 0, static_cast<size_t>(size - 1) * sizeof(uint32_t));
+	memcpy(cmd + 1, str, len);
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbPopMarker(CommandBuffer* buf)
+{
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_POP_MARKER);
+	cmd[1] = 0;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbPushMarker(CommandBuffer* buf, const char* str, uint32_t color)
+{
+	return GraphicsDcbPushMarker(buf, str, color);
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbPopMarker(CommandBuffer* buf)
+{
+	return GraphicsDcbPopMarker(buf);
 }
 
 } // namespace Gen5
@@ -2731,6 +3467,45 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitDcb(const Packet* packet)
 	GraphicsRunSubmit(packet->addr, packet->dw_num, nullptr, 0);
 
 	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
+{
+	PRINT_NAME();
+	printf("\t queue  = 0x%08" PRIx32 "\n", queue);
+	printf("\t packet = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet));
+
+	if (packet == nullptr)
+	{
+		return OK;
+	}
+
+	printf("\t acb    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet->addr));
+	printf("\t dw_num = 0x%08" PRIx32 "\n", packet->dw_num);
+
+	// Queue-indexed compute submit is not fully modeled yet. Execute the ACB
+	// through the existing command processor so WaitRegMem/ReleaseMem packets
+	// still complete guest labels rather than stalling on an empty GPU path.
+	(void)queue;
+	if (packet->addr != nullptr && packet->dw_num != 0)
+	{
+		GraphicsDbgDumpDcb("a", packet->dw_num, packet->addr);
+		GraphicsRunSubmit(packet->addr, packet->dw_num, nullptr, 0);
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata)
+{
+	PRINT_NAME();
+	// #region agent log
+	{FILE*f=fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log","a");if(f){fprintf(f,"{\"sessionId\":\"f08e58\",\"runId\":\"post-fix\",\"hypothesisId\":\"N\",\"location\":\"Graphics.cpp:GraphicsDriverAddEqEvent\",\"message\":\"add eq event\",\"data\":{\"eq\":%llu,\"id\":%d},\"timestamp\":%lld}\n",(unsigned long long)reinterpret_cast<uint64_t>(eq),id,(long long)time(nullptr)*1000);fclose(f);}}
+	// #endregion
+	if (eq == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EBADF;
+	}
+	return GraphicsRenderAddEqEvent(eq, id, udata);
 }
 
 } // namespace Gen5Driver
