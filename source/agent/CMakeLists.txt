@@ -7,6 +7,7 @@ add_executable(kyty_agent
 
 target_include_directories(kyty_agent PRIVATE
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
 )
 
 target_link_libraries(kyty_agent

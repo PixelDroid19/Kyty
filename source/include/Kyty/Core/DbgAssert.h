@@ -28,6 +28,11 @@ void dbg_exit(int status);
 
 bool dbg_is_debugger_present();
 
+// Optional observer for host-side fatal paths (assert / EXIT / EXIT_IF / halt).
+// Not for async-signal-only handlers. Agent installs this for host_crash events.
+using HostFaultHook = void (*)(const char* code, const char* message) noexcept;
+void SetHostFaultHook(HostFaultHook hook) noexcept;
+
 } // namespace Kyty::Core
 
 // Prefer trap/exit over writing address 1: GCC -O3 -Werror=array-bounds treats

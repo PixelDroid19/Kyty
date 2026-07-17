@@ -114,7 +114,12 @@ int main(int argc, char* argv[])
 	// Bring-up policy is immutable for the process; load before any subsystem
 	// work so EXIT_NOT_IMPLEMENTED and import stubs see a consistent mode.
 	// Unknown/legacy env values abort here (fail closed).
-	Kyty::Core::BringUp::InitFromEnvironment();
+	Kyty::Core::BringUp::ConfigError bringup_error {};
+	if (!Kyty::Core::BringUp::InitializeFromEnvironment(&bringup_error))
+	{
+		std::fprintf(stderr, "KYTY_BRINGUP: invalid configuration: %s\n", bringup_error.message);
+		return 125;
+	}
 
 	mem_set_max_size(static_cast<size_t>(2048) * 1024 * 1024 - 1);
 

@@ -136,7 +136,7 @@ strict post-Play (or earlier) blocker is open. Delivery order below is absolute.
    earlier in the run is ABI evidence; a post-Play null pair is a different
    contract to explain, not a free pass to invent addresses.
 7. **Consult references only for names and patterns.** Public Gen5 export
-   tables, RPCSX wiki, and Vulkan/AMD docs inform vocabulary; every
+   tables and Vulkan/AMD documentation inform vocabulary; every
    PS5-specific claim must reappear in a local capture or test. No GPL code paste.
 
 ### Hypothesis and trial-and-error discipline
@@ -570,13 +570,6 @@ never copy incompatible or GPL implementation code into Kyty:
 
 - Public Gen5 export / NID tables — PS4/PS5 export naming and ABI vocabulary
   only; verify every claim with a local capture or focused test.
-- RPCSX: https://github.com/RPCSX/rpcsx and its wiki — Linux-first portability,
-  runtime boundaries, logging, and compatibility transparency.
-- EmuC0re: https://github.com/egycnq/EmuC0re — small emulator seams and
-  bring-up discipline; do not infer PS5 GPU behavior from its unrelated target.
-- Ryubing/Ryujinx: https://git.ryujinx.app/projects/Ryubing/ryujinx — mature
-  separation of guest services, translator/cache boundaries, capability-aware
-  host rendering, and regression-oriented compatibility work.
 - Vulkan specification and refpages: https://registry.khronos.org/vulkan/ —
   authoritative synchronization, image layout, format, feature, and limit
   semantics.

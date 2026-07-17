@@ -41,15 +41,10 @@ unbounded console output.
   screenshots are private and must not enter automatic bundles.
 - Kyty is MIT-licensed. GPL projects may inform concepts and tests, but their
   implementation code must not be copied or translated line by line.
-- Primary-source review on 2026-07-14 found external reference PR 164 still open as one
-  broad compatibility commit spanning scheduler, memory, GPU, and HLE. Its own
-  report says a TLS scheduler pump helps one class of workload but can stall
-  another, so it is evidence against coupling a watchdog to recovery behavior,
-  not a patch unit for Kyty. The same pull-request index separates MRT and
-  packed-f16 work into PRs 149 and 145; the curated plan likewise treats those
-  as independent red/green contracts. See
-  <https://github.com/par274/external reference/pull/164> and
-  <https://github.com/par274/external reference/pulls>.
+- External architecture research showed that scheduler, memory, GPU, and HLE
+  compatibility changes have different failure domains. The diagnostics design
+  therefore keeps watchdog observation separate from recovery behavior and
+  treats MRT and packed-f16 support as independent red/green contracts.
 
 ## Non-goals for version 1
 

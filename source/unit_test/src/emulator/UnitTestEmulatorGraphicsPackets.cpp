@@ -2652,6 +2652,7 @@ TEST(EmulatorGraphicsPackets, Gen5EudOverflowSharpOffsetMapping)
 TEST(EmulatorGraphicsPackets, Gen5SingleComponent32BitBufferFormat)
 {
 	EXPECT_TRUE(ShaderIsGen5SingleComponent32BitBufferFormat(20));
+	EXPECT_TRUE(ShaderIsGen5SingleComponent32BitBufferFormat(22));
 	EXPECT_FALSE(ShaderIsGen5SingleComponent32BitBufferFormat(75));
 	EXPECT_TRUE(ShaderIsGen5FourComponent32BitBufferFormat(75));
 	EXPECT_EQ(DstSel(4, 0, 0, 1), 0x204u);

@@ -1,6 +1,7 @@
 #include "Emulator/Libs/ApplicationHeap.h"
 
 #include "Emulator/Loader/Elf.h"
+#include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/RuntimeLinker.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -79,7 +80,7 @@ static bool try_invoke_create(ApiV2* table, uint64_t text_begin, uint64_t text_e
 		return false;
 	}
 
-	table->create();
+	Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(table->create), 0, 0, 0);
 	g_initialized = true;
 	return true;
 }

@@ -105,6 +105,12 @@ void EventRing::Push(EventKind kind, const char* code, const char* message)
 		m_start_ms = NowMs();
 	}
 
+	// When full, overwriting the oldest slot counts as one drop (overflow visible).
+	if (m_count >= kAgentEventRingCapacity)
+	{
+		++m_dropped;
+	}
+
 	const uint64_t index = m_count % kAgentEventRingCapacity;
 	auto&          rec   = m_records[index];
 	rec.seq              = ++m_seq;
@@ -113,6 +119,7 @@ void EventRing::Push(EventKind kind, const char* code, const char* message)
 	CopyBounded(rec.code, sizeof(rec.code), code != nullptr ? code : "");
 	CopyBounded(rec.message, sizeof(rec.message), message != nullptr ? message : "");
 	++m_count;
+	++m_total_pushed;
 }
 
 uint64_t EventRing::Size() const
@@ -125,6 +132,19 @@ uint64_t EventRing::NextSeq() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	return m_seq;
+}
+
+EventRingStats EventRing::GetStats() const
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	EventRingStats              s {};
+	s.capacity     = kAgentEventRingCapacity;
+	s.size         = m_count < kAgentEventRingCapacity ? m_count : kAgentEventRingCapacity;
+	s.next_seq     = m_seq;
+	s.total_pushed = m_total_pushed;
+	s.dropped      = m_dropped;
+	s.overflowed   = m_dropped > 0;
+	return s;
 }
 
 uint32_t EventRing::CopySince(uint64_t after_seq, EventRecord* out, uint32_t max_out) const
@@ -197,6 +217,20 @@ bool EventRing::LastError(EventRecord* out) const
 		}
 	}
 	return false;
+}
+
+void EventRing::ResetForTests()
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_seq          = 0;
+	m_count        = 0;
+	m_start_ms     = 0;
+	m_total_pushed = 0;
+	m_dropped      = 0;
+	for (auto& rec: m_records)
+	{
+		rec = EventRecord {};
+	}
 }
 
 } // namespace Kyty::Emulator::Agent

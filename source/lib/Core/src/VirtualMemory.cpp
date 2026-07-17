@@ -620,29 +620,21 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 			sigsafe_fault(einfo.access_violation_type == ExceptionHandler::AccessViolationType::Write ? "FAULTW" : "FAULTR",
 			              einfo.access_violation_vaddr, uc_get_rip(uc));
 			sigsafe_fault("  rdi/rsi", uc_get_rdi(uc), uc_get_rsi(uc));
-			if (uc_get_rip(uc) >= 0x900000000ull && uc_get_rip(uc) < 0x920000000ull)
-			{
-				const auto* code = reinterpret_cast<const uint8_t*>(uc_get_rip(uc));
-				sigsafe_fault("  code01", static_cast<uint64_t>(code[0]), static_cast<uint64_t>(code[1]));
-				sigsafe_fault("  code23", static_cast<uint64_t>(code[2]), static_cast<uint64_t>(code[3]));
-				sigsafe_fault("  code45", static_cast<uint64_t>(code[4]), static_cast<uint64_t>(code[5]));
-				sigsafe_fault("  code67", static_cast<uint64_t>(code[6]), static_cast<uint64_t>(code[7]));
-			}
+			// Null-page faults (addr < 0x1000) are almost always base-register + small
+			// displacement. Dump rax/rbx so producers like *(null+8) are identifiable
+			// without a debugger. Diagnostic only (KYTY_FAULT_LOG=1).
+			sigsafe_fault("  rax/rbx", uc_get_rax(uc), uc_get_rbx(uc));
+			sigsafe_fault("  rcx/rdx", uc_get_rcx(uc), uc_get_rdx(uc));
+			sigsafe_fault("  rbp/rsp", uc_get_rbp(uc), uc_get_rsp(uc));
 			sigsafe_fault("  tid", static_cast<uint64_t>(host_tid()), 0);
-			// Scan the stack for the nearest fc_script (Kyty HLE) and guest return
-			// addresses, to identify which HLE call and which guest instruction led here.
-			auto* sp    = reinterpret_cast<uint64_t*>(uc_get_rsp(uc));
-			int   n_hle = 0;
-			for (int i = 0; i < 512 && n_hle < 5; i++)
-			{
-				uint64_t v = sp[i];
-				if (v >= 0x100000000ull && v < 0x110000000ull)
-				{
-					sigsafe_fault("  hle-frame", v, static_cast<uint64_t>(i));
-					n_hle++;
-				}
-			}
 			sigsafe_fault("  anchor", reinterpret_cast<uint64_t>(&kyty_posix_signal_handler), 0);
+			// Captured Gen5 RBP walkers do mov (%rdx),%rdx; mov 0x8(%rdx),… and
+			// FAULTR at 0x8 when the parent frame pointer is already null. Tag only;
+			// does not change handling.
+			if (einfo.access_violation_vaddr < 0x1000ull && uc_get_rdx(uc) == 0)
+			{
+				sigsafe_fault("  class", 0x8, uc_get_rbp(uc));
+			}
 		}
 	}
 

@@ -46,9 +46,89 @@ bool ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format)
 bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 {
 	// Captured STORAGE_FMT_FAIL: stride=4, DstSel(R,0,0,1), format=20.
-	// Treat format 20 as a 32-bit single-component buffer view until more
+	// Treat format 20 and 22 as 32-bit single-component buffer views until more
 	// Gen5 format IDs are captured.
-	return format == 20;
+	return format == 20 || format == 22;
+}
+
+bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access)
+{
+	if (access == ShaderStorageAccess::Raw)
+	{
+		// Raw BUFFER_*_DWORD instructions do not consume the descriptor's typed format.
+		// The existing SPIR-V address path operates in DWORDs, so record strides must preserve DWORD alignment.
+		return resource.Stride() != 0 && (resource.Stride() & 0x3u) == 0;
+	}
+
+	const bool four_component = resource.Stride() == 16 && resource.DstSelXYZW() == DstSel(4, 5, 6, 7) &&
+	                            ShaderIsGen5FourComponent32BitBufferFormat(resource.Format());
+	const bool one_component = resource.Stride() == 4 &&
+	                           (resource.DstSelXYZW() == DstSel(4, 0, 0, 1) ||
+	                            resource.DstSelXYZW() == DstSel(4, 0, 0, 0)) &&
+	                           ShaderIsGen5SingleComponent32BitBufferFormat(resource.Format());
+	return four_component || one_component;
+}
+
+ShaderStorageAccessEvidence ResolveShaderStorageAccessEvidence(bool code_available,
+                                                               ShaderStorageBindingSource source,
+                                                               ShaderStorageAccess exact_match,
+                                                               ShaderStorageAccess unbased_match,
+                                                               bool decoded_unknown,
+                                                               bool indirect_descriptor_use)
+{
+	if (!code_available)
+	{
+		return {ShaderStorageAccess::Unknown, ShaderStorageUnknownReason::CodeUnavailable, false, false, false};
+	}
+	if (exact_match != ShaderStorageAccess::Unknown)
+	{
+		return {exact_match, ShaderStorageUnknownReason::None, true, true, false};
+	}
+	if (unbased_match != ShaderStorageAccess::Unknown)
+	{
+		return {ShaderStorageAccess::Unknown, ShaderStorageUnknownReason::RegisterBaseMismatch, true, false, true};
+	}
+	if (source == ShaderStorageBindingSource::MetadataSharp && !decoded_unknown && !indirect_descriptor_use)
+	{
+		return {ShaderStorageAccess::UnusedMetadata, ShaderStorageUnknownReason::None, true, false, false};
+	}
+	if (source == ShaderStorageBindingSource::MetadataSharp)
+	{
+		return {ShaderStorageAccess::Unknown, ShaderStorageUnknownReason::MetadataOnlyBinding, true, false, false};
+	}
+	return {ShaderStorageAccess::Unknown, ShaderStorageUnknownReason::NoMatchingInstruction, true, false, false};
+}
+
+void ExcludeUnusedMetadataStorage(ShaderStorageResources* resources)
+{
+	EXIT_IF(resources == nullptr);
+
+	int active_count = 0;
+	for (int source = 0; source < resources->buffers_num; ++source)
+	{
+		if (resources->accesses[source] == ShaderStorageAccess::UnusedMetadata)
+		{
+			continue;
+		}
+		if (active_count != source)
+		{
+			resources->buffers[active_count]                 = resources->buffers[source];
+			resources->usages[active_count]                  = resources->usages[source];
+			resources->accesses[active_count]                = resources->accesses[source];
+			resources->sources[active_count]                 = resources->sources[source];
+			resources->unknown_reasons[active_count]         = resources->unknown_reasons[source];
+			resources->code_available[active_count]          = resources->code_available[source];
+			resources->exact_matches[active_count]           = resources->exact_matches[source];
+			resources->unbased_matches[active_count]         = resources->unbased_matches[source];
+			resources->decoded_unknown[active_count]         = resources->decoded_unknown[source];
+			resources->indirect_descriptor_use[active_count] = resources->indirect_descriptor_use[source];
+			resources->slots[active_count]                   = resources->slots[source];
+			resources->start_register[active_count]          = resources->start_register[source];
+			resources->extended[active_count]                = resources->extended[source];
+		}
+		++active_count;
+	}
+	resources->buffers_num = active_count;
 }
 
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component)
@@ -329,6 +409,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2: return "VdstVsrc0Vsrc1Vsrc2"; break;
 		case ShaderInstructionFormat::VdstVsrcAttrChan: return "VdstVsrcAttrChan"; break;
 		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1: return "VdstSdst2Vsrc0Vsrc1"; break;
+		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2: return "VdstSdst2Vsrc0Vsrc1Ssrc2A2"; break;
 		case ShaderInstructionFormat::VdstGds: return "VdstGds"; break;
 		case ShaderInstructionFormat::Label: return "Label"; break;
 		default: return "????"; break;
@@ -1236,8 +1317,10 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 	}
 }
 
-static bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, int start_index, int slot, ShaderStorageUsage usage,
-                                   const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer)
+static bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, int start_index, int slot,
+                                   ShaderStorageUsage usage, const HW::UserSgprInfo& user_sgpr,
+                                   const uint32_t* extended_buffer,
+                                   ShaderStorageBindingSource source = ShaderStorageBindingSource::DirectResource)
 {
 	EXIT_IF(info == nullptr);
 
@@ -1274,6 +1357,7 @@ static bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sg
 	info->start_register[index] = start_index;
 	info->slots[index]          = slot;
 	info->usages[index]         = usage;
+	info->sources[index]        = source;
 	info->extended[index]       = extended;
 	info->buffers[index]        = resource;
 	// info->extended_index[index] = extended_index;
@@ -1524,6 +1608,7 @@ ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start
 		bool is_store = false;
 		switch (inst.type)
 		{
+			case ShaderInstructionType::BufferLoadUbyte:
 			case ShaderInstructionType::BufferLoadDword:
 			case ShaderInstructionType::BufferLoadDwordx2:
 			case ShaderInstructionType::BufferLoadDwordx3:
@@ -1556,6 +1641,108 @@ ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start
 	}
 
 	return usage;
+}
+
+static bool ShaderOperandOverlapsSgprRange(const ShaderOperand& operand, int start_register, int registers_num)
+{
+	if (operand.type != ShaderOperandType::Sgpr || operand.size <= 0)
+	{
+		return false;
+	}
+	const int operand_end = operand.register_id + operand.size;
+	const int range_end   = start_register + registers_num;
+	return operand.register_id < range_end && start_register < operand_end;
+}
+
+ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int start_register)
+{
+	bool raw   = false;
+	bool typed = false;
+	bool decoded_unknown         = false;
+	bool indirect_descriptor_use = false;
+
+	for (const auto& inst: code.GetInstructions())
+	{
+		decoded_unknown = decoded_unknown || inst.type == ShaderInstructionType::Unknown;
+
+		bool candidate_raw   = false;
+		bool candidate_typed = false;
+		switch (inst.type)
+		{
+			case ShaderInstructionType::BufferLoadUbyte:
+			case ShaderInstructionType::BufferLoadDword:
+			case ShaderInstructionType::BufferLoadDwordx2:
+			case ShaderInstructionType::BufferLoadDwordx3:
+			case ShaderInstructionType::BufferLoadDwordx4:
+			case ShaderInstructionType::BufferStoreDword:
+			case ShaderInstructionType::BufferStoreDwordx2:
+			case ShaderInstructionType::BufferStoreDwordx3:
+			case ShaderInstructionType::BufferStoreDwordx4:
+			case ShaderInstructionType::SBufferLoadDword:
+			case ShaderInstructionType::SBufferLoadDwordx2:
+			case ShaderInstructionType::SBufferLoadDwordx4:
+			case ShaderInstructionType::SBufferLoadDwordx8:
+			case ShaderInstructionType::SBufferLoadDwordx16: candidate_raw = true; break;
+			case ShaderInstructionType::BufferLoadFormatX:
+			case ShaderInstructionType::BufferLoadFormatXy:
+			case ShaderInstructionType::BufferLoadFormatXyz:
+			case ShaderInstructionType::BufferLoadFormatXyzw:
+			case ShaderInstructionType::BufferStoreFormatX:
+			case ShaderInstructionType::BufferStoreFormatXy:
+			case ShaderInstructionType::BufferStoreFormatXyzw:
+			case ShaderInstructionType::TBufferLoadFormatX:
+			case ShaderInstructionType::TBufferLoadFormatXyzw: candidate_typed = true; break;
+			default: break;
+		}
+		if (!candidate_raw && !candidate_typed)
+		{
+			for (int operand = 0; operand < inst.src_num; ++operand)
+			{
+				indirect_descriptor_use =
+				    indirect_descriptor_use || ShaderOperandOverlapsSgprRange(inst.src[operand], start_register, 4);
+			}
+			for (int operand = 0; operand < inst.mimg_address_num; ++operand)
+			{
+				indirect_descriptor_use =
+				    indirect_descriptor_use || ShaderOperandOverlapsSgprRange(inst.mimg_address[operand], start_register, 4);
+			}
+			continue;
+		}
+		bool matches = false;
+		for (int operand = 0; operand < inst.src_num; ++operand)
+		{
+			const auto& src = inst.src[operand];
+			if (src.type == ShaderOperandType::Sgpr && src.register_id == start_register && src.size == 4)
+			{
+				matches = true;
+			} else
+			{
+				indirect_descriptor_use =
+				    indirect_descriptor_use || ShaderOperandOverlapsSgprRange(src, start_register, 4);
+			}
+		}
+		if (!matches)
+		{
+			continue;
+		}
+		raw   = raw || candidate_raw;
+		typed = typed || candidate_typed;
+	}
+
+	if (raw && typed)
+	{
+		return {ShaderStorageAccess::Mixed, decoded_unknown, indirect_descriptor_use};
+	}
+	if (typed)
+	{
+		return {ShaderStorageAccess::Typed, decoded_unknown, indirect_descriptor_use};
+	}
+	return {raw ? ShaderStorageAccess::Raw : ShaderStorageAccess::Unknown, decoded_unknown, indirect_descriptor_use};
+}
+
+static ShaderStorageAccess ShaderGetDirectStorageAccess(const ShaderCode& code, int start_register)
+{
+	return AnalyzeShaderStorageUse(code, start_register).access;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1934,7 +2121,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					ebuf = extended_buffer;
 					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
 				}
-					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant, user_sgpr, ebuf))
+					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant,
+					                           user_sgpr, ebuf, ShaderStorageBindingSource::MetadataSharp))
 					{
 						info->storage_buffers_constant++;
 					}
@@ -1983,7 +2171,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					ebuf = extended_buffer;
 					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
 				}
-					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::ReadWrite, user_sgpr, ebuf))
+					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::ReadWrite,
+					                           user_sgpr, ebuf, ShaderStorageBindingSource::MetadataSharp))
 					{
 						info->storage_buffers_readwrite++;
 					}
@@ -2038,7 +2227,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				ebuf = extended_buffer;
 				EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
 			}
-			if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant, user_sgpr, ebuf))
+			if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant,
+			                           user_sgpr, ebuf, ShaderStorageBindingSource::MetadataSharp))
 			{
 				info->storage_buffers_constant++;
 			}
@@ -2053,6 +2243,30 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			info->direct_sgprs++;
 		}
 	}
+
+	for (int i = 0; i < bind->storage_buffers.buffers_num; ++i)
+	{
+		const int register_with_base = bind->storage_buffers.start_register[i] + user_data_register_base;
+		const auto exact_evidence =
+		    code != nullptr ? AnalyzeShaderStorageUse(*code, register_with_base) : ShaderStorageUseEvidence {};
+		const auto exact = exact_evidence.access;
+		ShaderStorageAccess unbased = ShaderStorageAccess::Unknown;
+		if (code != nullptr && user_data_register_base != 0)
+		{
+			unbased = ShaderGetDirectStorageAccess(*code, bind->storage_buffers.start_register[i]);
+		}
+		const auto evidence = ResolveShaderStorageAccessEvidence(code != nullptr, bind->storage_buffers.sources[i],
+		                                                        exact, unbased, exact_evidence.decoded_unknown,
+		                                                        exact_evidence.indirect_descriptor_use);
+		bind->storage_buffers.accesses[i]        = evidence.access;
+		bind->storage_buffers.unknown_reasons[i] = evidence.reason;
+		bind->storage_buffers.code_available[i]  = evidence.code_available;
+		bind->storage_buffers.exact_matches[i]   = evidence.exact_match;
+		bind->storage_buffers.unbased_matches[i] = evidence.unbased_match;
+		bind->storage_buffers.decoded_unknown[i] = exact_evidence.decoded_unknown;
+		bind->storage_buffers.indirect_descriptor_use[i] = exact_evidence.indirect_descriptor_use;
+	}
+	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)

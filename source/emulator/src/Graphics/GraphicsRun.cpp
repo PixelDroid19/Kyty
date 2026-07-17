@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Utils.h"
+#include "Kyty/Core/BringUp.h"
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
@@ -1912,20 +1913,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_depth_control)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_DEPTH_CONTROL);
 
-	HW::DepthControl r;
-
-	r.stencil_enable                     = KYTY_PM4_GET(buffer[0], DB_DEPTH_CONTROL, STENCIL_ENABLE) != 0;
-	r.z_enable                           = KYTY_PM4_GET(buffer[0], DB_DEPTH_CONTROL, Z_ENABLE) != 0;
-	r.z_write_enable                     = KYTY_PM4_GET(buffer[0], DB_DEPTH_CONTROL, Z_WRITE_ENABLE) != 0;
-	r.depth_bounds_enable                = KYTY_PM4_GET(buffer[0], DB_DEPTH_CONTROL, DEPTH_BOUNDS_ENABLE) != 0;
-	r.zfunc                              = KYTY_PM4_GET(buffer[0], DB_DEPTH_CONTROL, ZFUNC);
-	r.backface_enable                    = KYTY_PM4_GET(buffer[0], DB_DEPTH_CONTROL, BACKFACE_ENABLE) != 0;
-	r.stencilfunc                        = KYTY_PM4_GET(buffer[0], DB_DEPTH_CONTROL, STENCILFUNC);
-	r.stencilfunc_bf                     = KYTY_PM4_GET(buffer[0], DB_DEPTH_CONTROL, STENCILFUNC_BF);
-	r.color_writes_on_depth_fail_enable  = KYTY_PM4_GET(buffer[0], DB_DEPTH_CONTROL, ENABLE_COLOR_WRITES_ON_DEPTH_FAIL) != 0;
-	r.color_writes_on_depth_pass_disable = KYTY_PM4_GET(buffer[0], DB_DEPTH_CONTROL, DISABLE_COLOR_WRITES_ON_DEPTH_PASS) != 0;
-
-	cp->GetCtx()->SetDepthControl(r);
+	State::SetDepthControl(*cp->GetCtx(), buffer[0]);
 
 	return 1;
 }
@@ -1993,18 +1981,9 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_depth_render_target)
 			//			z.stencil_info.format               = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, FORMAT);
 			//			z.stencil_info.tile_mode_index      = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, TILE_MODE_INDEX);
 			//			z.stencil_info.tile_stencil_disable = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, TILE_STENCIL_DISABLE);
-			z.stencil_info.format                     = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, FORMAT);
-			z.stencil_info.texture_compatible_stencil = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, ITERATE_FLUSH) != 0;
-			z.stencil_info.partially_resident         = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, PARTIALLY_RESIDENT) != 0;
-			z.stencil_info.tile_split                 = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, RESERVED_FIELD_1);
-			z.stencil_info.tile_mode_index            = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, TILE_MODE_INDEX);
-			z.stencil_info.expclear_enabled           = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, ALLOW_EXPCLEAR) != 0;
-			z.stencil_info.tile_stencil_disable       = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, TILE_STENCIL_DISABLE) != 0;
-
 			z.z_read_base_addr        = static_cast<uint64_t>(buffer[2]) << 8u;
-			z.stencil_read_base_addr  = static_cast<uint64_t>(buffer[3]) << 8u;
 			z.z_write_base_addr       = static_cast<uint64_t>(buffer[4]) << 8u;
-			z.stencil_write_base_addr = static_cast<uint64_t>(buffer[5]) << 8u;
+			State::ApplyDepthStencilPlaneRegisters(z, buffer[1], buffer[3], buffer[5]);
 
 			// DB_DEPTH_SIZE
 			z.pitch_div8_minus1  = (buffer[6] >> Pm4::DB_DEPTH_SIZE_PITCH_TILE_MAX_SHIFT) & Pm4::DB_DEPTH_SIZE_PITCH_TILE_MAX_MASK;
@@ -3554,8 +3533,12 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 
 		if (pfunc == nullptr)
 		{
-			static const bool permissive = (getenv("KYTY_GFX_PERMISSIVE") != nullptr);
-			if (permissive)
+			char identity[64] {};
+			std::snprintf(identity, sizeof(identity), "unknown-cx-reg:0x%05" PRIx32, cmd_offset);
+			const auto decision =
+			    Core::BringUp::Report(Core::BringUp::Feature::GraphicsPermissive, Core::BringUp::Subsystem::Graphics,
+			                         identity, __FILE__, __LINE__);
+			if (decision == Core::BringUp::Decision::Continue)
 			{
 				printf("WARNING: skipping unknown cx reg 0x%" PRIx32 "\n", cmd_offset);
 				continue;
@@ -3592,8 +3575,12 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 
 		if (pfunc == nullptr)
 		{
-			static const bool permissive = (getenv("KYTY_GFX_PERMISSIVE") != nullptr);
-			if (permissive)
+			char identity[64] {};
+			std::snprintf(identity, sizeof(identity), "unknown-sh-reg:0x%05" PRIx32, cmd_offset);
+			const auto decision =
+			    Core::BringUp::Report(Core::BringUp::Feature::GraphicsPermissive, Core::BringUp::Subsystem::Graphics,
+			                         identity, __FILE__, __LINE__);
+			if (decision == Core::BringUp::Decision::Continue)
 			{
 				printf("WARNING: skipping unknown sh reg 0x%" PRIx32 "\n", cmd_offset);
 				continue;
@@ -3630,8 +3617,12 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 
 		if (pfunc == nullptr)
 		{
-			static const bool permissive = (getenv("KYTY_GFX_PERMISSIVE") != nullptr);
-			if (permissive)
+			char identity[64] {};
+			std::snprintf(identity, sizeof(identity), "unknown-uc-reg:0x%05" PRIx32, cmd_offset);
+			const auto decision =
+			    Core::BringUp::Report(Core::BringUp::Feature::GraphicsPermissive, Core::BringUp::Subsystem::Graphics,
+			                         identity, __FILE__, __LINE__);
+			if (decision == Core::BringUp::Decision::Continue)
 			{
 				printf("WARNING: skipping unknown uc reg 0x%" PRIx32 "\n", cmd_offset);
 				continue;
@@ -4859,20 +4850,7 @@ static void graphics_init_jmp_tables_cx_indirect()
 	};
 
 	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		HW::DepthControl r;
-		r.stencil_enable                     = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, STENCIL_ENABLE) != 0;
-		r.z_enable                           = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, Z_ENABLE) != 0;
-		r.z_write_enable                     = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, Z_WRITE_ENABLE) != 0;
-		r.depth_bounds_enable                = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, DEPTH_BOUNDS_ENABLE) != 0;
-		r.zfunc                              = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, ZFUNC);
-		r.backface_enable                    = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, BACKFACE_ENABLE) != 0;
-		r.stencilfunc                        = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, STENCILFUNC);
-		r.stencilfunc_bf                     = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, STENCILFUNC_BF);
-		r.color_writes_on_depth_fail_enable  = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, ENABLE_COLOR_WRITES_ON_DEPTH_FAIL) != 0;
-		r.color_writes_on_depth_pass_disable = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, DISABLE_COLOR_WRITES_ON_DEPTH_PASS) != 0;
-		cp->GetCtx()->SetDepthControl(r);
-	};
+	{ State::SetDepthControl(*cp->GetCtx(), value); };
 }
 
 static void graphics_init_jmp_tables_sh_indirect()
