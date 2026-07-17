@@ -1,6 +1,7 @@
 #include "Emulator/Loader/RuntimeLinker.h"
 #include <cstdio>
 
+#include "Kyty/Core/BringUp.h"
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/File.h"
@@ -17,6 +18,7 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Loader/Elf.h"
 #include "Emulator/Loader/Jit.h"
+#include "Emulator/Loader/MissingImportStubs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Profiler.h"
 
@@ -33,106 +35,6 @@ void SetProgName(const String& name);
 } // namespace Kyty::Libs::LibKernel
 
 namespace Kyty::Loader {
-
-// Permissive bring-up mode: when enabled (env var KYTY_STUB_MISSING=1), imported
-// functions that have no HLE implementation resolve to a stub that returns 0
-// instead of aborting when first called. Lets a title boot past unimplemented
-// syscalls so we can observe the next real blocker. Each missing NID is logged once.
-static bool g_stub_missing_funcs = [] {
-	const char* e = getenv("KYTY_STUB_MISSING");
-	return e != nullptr && e[0] == '1';
-}();
-
-// A real, statically-compiled no-op callable. When a missing-function stub is
-// used as a *function pointer* (callback / vtable entry / function-table getter
-// result) and then called, control lands here and returns 0. This must be a
-// genuine compiled function — under Rosetta 2 a runtime-generated code page is
-// not translatable and executing it faults as SIGILL.
-static KYTY_SYSV_ABI int64_t kyty_missing_callable()
-{
-	return 0;
-}
-
-// Zeroed data page returned by missing-function stubs for the case where the
-// caller treats the result as an output/struct pointer and writes through it.
-static uint64_t kyty_stub_scratch_addr()
-{
-	static uint64_t addr = Core::VirtualMemory::Alloc(0, 0x10000, Core::VirtualMemory::Mode::ReadWrite);
-	return addr;
-}
-
-// The value a missing-function returns. Callers use it in two incompatible ways:
-// as a data pointer (needs writable memory) or as a function pointer (needs real
-// executable code). We prime the first qword of the scratch page with the address
-// of kyty_missing_callable, so a caller that reads a function pointer out of the
-// returned struct and calls it also lands on real code.
-static KYTY_SYSV_ABI int64_t kyty_missing_func_stub()
-{
-	uint64_t scratch = kyty_stub_scratch_addr();
-	if (scratch != 0)
-	{
-		reinterpret_cast<uint64_t*>(scratch)[0] = reinterpret_cast<uint64_t>(kyty_missing_callable);
-	}
-	return static_cast<int64_t>(reinterpret_cast<uint64_t>(kyty_missing_callable));
-}
-
-// --- Per-symbol missing-function stubs ---------------------------------------
-// A pool of statically-compiled stubs, one address per index, so that when the
-// guest actually *calls* a missing function we can log which NID it was (the
-// single shared stub above can't know its own identity). Each stub logs once on
-// first call then behaves like kyty_missing_func_stub. Static compilation is
-// required — a runtime-generated code page is not translatable under Rosetta 2.
-constexpr int KYTY_MISSING_STUB_MAX = 2048;
-static const char* g_missing_stub_names[KYTY_MISSING_STUB_MAX] = {};
-static const char* g_missing_stub_libs[KYTY_MISSING_STUB_MAX]  = {};
-static bool        g_missing_stub_hit[KYTY_MISSING_STUB_MAX]   = {};
-
-template <int I>
-static KYTY_SYSV_ABI int64_t kyty_missing_stub_impl()
-{
-	if (!g_missing_stub_hit[I])
-	{
-		g_missing_stub_hit[I] = true;
-		printf(FG_BRIGHT_RED "CALLED missing stub: %s [%s]" DEFAULT "\n",
-		       g_missing_stub_names[I] != nullptr ? g_missing_stub_names[I] : "?",
-		       g_missing_stub_libs[I] != nullptr ? g_missing_stub_libs[I] : "?");
-	}
-	return kyty_missing_func_stub();
-}
-
-using kyty_stub_fn_t = KYTY_SYSV_ABI int64_t (*)();
-
-template <int... Is>
-static constexpr void fill_stub_table(kyty_stub_fn_t* t, std::integer_sequence<int, Is...> /*seq*/)
-{
-	((t[Is] = &kyty_missing_stub_impl<Is>), ...);
-}
-
-static kyty_stub_fn_t* get_missing_stub_table()
-{
-	static kyty_stub_fn_t table[KYTY_MISSING_STUB_MAX];
-	static bool           init = false;
-	if (!init)
-	{
-		fill_stub_table(table, std::make_integer_sequence<int, KYTY_MISSING_STUB_MAX>{});
-		init = true;
-	}
-	return table;
-}
-
-// Assign the next stub slot to a named missing symbol; returns its callable addr.
-static uint64_t assign_missing_stub(const char* name, const char* lib)
-{
-	static int next = 0;
-	if (next >= KYTY_MISSING_STUB_MAX)
-	{
-		return reinterpret_cast<uint64_t>(kyty_missing_func_stub);
-	}
-	int i                     = next++;
-	g_missing_stub_names[i]   = name;
-	g_missing_stub_libs[i]    = lib;
-	return reinterpret_cast<uint64_t>(get_missing_stub_table()[i]);
-}
 
 #pragma pack(1)
 
@@ -1234,7 +1136,7 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 
 			if (rec != nullptr)
 			{
-				//*out_vaddr = rec->vaddr;
+				// Real HLE / program export always wins over a missing-import stub.
 				*out_info = *rec;
 			} else
 			{
@@ -1242,15 +1144,11 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 				out_info->name     = SymbolDatabase::GenerateName(sr);
 				out_info->dbg_name = U"";
 
-				if (g_stub_missing_funcs && type == SymbolType::Func)
+				// Only Func imports may receive bring-up stubs. Object / TLS /
+				// NoType / unknown remain unresolved (fatal at bind time).
+				if (type == SymbolType::Func && Core::BringUp::AllowMissingFunctionImport())
 				{
-					static Core::Mutex s_log_mutex;
-					Core::LockGuard    log_lock(s_log_mutex);
-					printf(FG_BRIGHT_YELLOW "STUB (missing): %s [%s]" DEFAULT "\n", sr.name.C_Str(), sr.library.C_Str());
-					// Persist the name/lib strings for the lifetime of the process so the
-					// per-symbol call-time stub can print them. String::C_Str() returns a
-					// transient buffer, so copy it immediately with ::strdup.
-					out_info->vaddr    = assign_missing_stub(::strdup(sr.name.C_Str()), ::strdup(sr.library.C_Str()));
+					out_info->vaddr    = MissingImport::Assign(sr);
 					out_info->dbg_name = U"kyty_missing_func_stub";
 				}
 			}

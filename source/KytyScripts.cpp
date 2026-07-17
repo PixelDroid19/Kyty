@@ -1,3 +1,4 @@
+#include "Kyty/Core/BringUp.h"
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/Core.h"
 #include "Kyty/Core/Debug.h"
@@ -101,6 +102,11 @@ int main(int argc, char* argv[])
 	// bypass the normal flush path under Rosetta 2.
 	setvbuf(stdout, nullptr, _IONBF, 0);
 #endif
+
+	// Bring-up policy is immutable for the process; load before any subsystem
+	// work so EXIT_NOT_IMPLEMENTED and import stubs see a consistent mode.
+	// Unknown/legacy env values abort here (fail closed).
+	Kyty::Core::BringUp::InitFromEnvironment();
 
 	mem_set_max_size(static_cast<size_t>(2048) * 1024 * 1024 - 1);
 

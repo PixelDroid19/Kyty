@@ -1,5 +1,6 @@
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Kyty/Core/BringUp.h"
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/Debug.h"
 #include "Kyty/Core/Subsystems.h"
@@ -78,9 +79,23 @@ int dbg_exit_if_handler(char const* expr, char const* file, int line)
 
 int dbg_not_implemented_handler(char const* expr, char const* file, int line)
 {
+	const BringUp::Decision decision = BringUp::HandleNotImplemented(expr, file, line);
+	if (decision == BringUp::Decision::Continue)
+	{
+		// Unsafe bring-up: first hit is logged by BringUp; do not shut down.
+		return 0;
+	}
+
+	// Strict abort or circuit-break: preserve historical stack + ShutdownAll + halt.
 	dbg_print_stack();
 	KYTY_LOGE("--- Fatal Error ---\n");
-	KYTY_LOGE("Not implemented (%s) in %s:%d\n", expr, file, line);
+	if (decision == BringUp::Decision::CircuitBreak)
+	{
+		KYTY_LOGE("Bring-up circuit-break (%s) in %s:%d\n", expr, file, line);
+	} else
+	{
+		KYTY_LOGE("Not implemented (%s) in %s:%d\n", expr, file, line);
+	}
 	SubsystemsListSingleton::Instance()->ShutdownAll();
 	return 1;
 }

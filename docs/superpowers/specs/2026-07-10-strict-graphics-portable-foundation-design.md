@@ -27,7 +27,7 @@ local, untracked compatibility fixture:
 3. With the correct path and no diagnostic relaxations, the guest initializes a
    Vulkan window and stops at missing NID `hwVSPCmp5tM`. Public Gen5 export
    tables identify the NID as `sceKernelCheckedReleaseDirectMemory`.
-4. With only `KYTY_STUB_MISSING=1`, the guest reaches shader creation, produces
+4. With only diagnostic `KYTY_BRINGUP_MODE=unsafe` (legacy stub flag removed), the guest reaches shader creation, produces
    its first graphics DCB and requests a flip. Strict graphics parsing then
    stops at indirect context register `0x90`.
 5. Register `0x90` is `PA_SC_GENERIC_SCISSOR_TL`. Other registers skipped during
@@ -229,8 +229,8 @@ default return values, skip packets, or replace guest resources.
 
 ### 6.1 Strict mode is authoritative
 
-A successful acceptance run uses neither `KYTY_STUB_MISSING` nor
-`KYTY_GFX_PERMISSIVE`. Progress measured only under those flags is diagnostic,
+A successful acceptance run sets no `KYTY_BRINGUP_*` variables. Progress
+measured only under unsafe bring-up is diagnostic,
 not compatibility.
 
 ### 6.2 Diagnostic mode is explicit and non-shipping

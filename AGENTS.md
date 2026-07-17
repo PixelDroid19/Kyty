@@ -113,7 +113,7 @@ strict post-Play (or earlier) blocker is open. Delivery order below is absolute.
    git log -5 --oneline --decorate
    ninja -C _build_macos fc_script
    ```
-2. **Strict reproduce** (no `KYTY_STUB_MISSING`, no `KYTY_GFX_PERMISSIVE`):
+2. **Strict reproduce** (no `KYTY_BRINGUP_*`, no legacy stub/permissive flags):
    ```bash
    _build_macos/fc_script scripts/run_guest.lua "$KYTY_GUEST_ROOT"
    # Optional silent runner for speed; record that logging was Silent.
@@ -250,8 +250,8 @@ The local reference workload reaches Vulkan device creation, guest engine
 startup, Gen5 shader creation, indexed draws, VideoOut submission, repeated
 swapchain presentation, logos, a recognizable menu, Play / mode selection
 (discovery auto-input is not acceptance), loading-card presentation, and a deep
-post-Play GPU/HLE chain under **strict** flags (no `KYTY_STUB_MISSING`, no
-`KYTY_GFX_PERMISSIVE`). Linux Release+Silent dual-strict has sustained
+post-Play GPU/HLE chain under **strict** flags (no `KYTY_BRINGUP_*`). Linux
+Release+Silent dual-strict has sustained
 **gameplay-era frames** for 90–180 s (~11–13 FPS Silent, AUTO_CROSS discovery
 only) without a process-killing structural EXIT on recent captures.
 
@@ -525,9 +525,9 @@ NON-NEGOTIABLE RULES
 - Never invent a NID, ABI, structure layout, register meaning, tile mode,
   pitch, alignment, return code, or synchronization result. Triangulate from
   guest evidence, local call sites, upstream references, and a test.
-- Never use `KYTY_STUB_MISSING`, `KYTY_GFX_PERMISSIVE`, trap skipping, default
-  success, assumed RGBA8/linear layout, fabricated resources, or placeholder
-  shaders in acceptance runs. They are discovery-only diagnostics.
+- Never use `KYTY_BRINGUP_MODE=unsafe`, trap skipping, default success, assumed
+  RGBA8/linear layout, fabricated resources, or placeholder shaders in
+  acceptance runs. Unsafe bring-up is discovery-only diagnostics.
 - One behavior has one implementation. Direct and indirect PM4 paths share a
   decoder; all resource consumers share one descriptor-to-layout calculation.
 - An unsupported behavior must fail structurally and informatively. Do not
@@ -836,7 +836,7 @@ or logs in tracked files.
 _build_macos/fc_script scripts/run_guest.lua "$KYTY_GUEST_ROOT"
 ```
 
-The strict run uses neither `KYTY_STUB_MISSING` nor `KYTY_GFX_PERMISSIVE`.
+The strict run sets no `KYTY_BRINGUP_*` variables (and no removed legacy flags).
 Capture the first error completely, including packet/register values and the
 guest/host call path when available.
 
@@ -940,16 +940,52 @@ test coverage. Select one cohesive extraction at a time. For each extraction:
 
 ## Diagnostic flags
 
-- `KYTY_STUB_MISSING=1`: resolves unknown imports to logging stubs. This changes
-  guest behavior and is for frontier discovery only.
-- `KYTY_GFX_PERMISSIVE=1`: skips unknown indirect GPU state. This invalidates
-  rendering and is for evidence collection only.
-- `KYTY_FAULT_LOG=1`: enables signal-safe fault diagnostics.
-- `KYTY_TRACE_LIBC=1`: enables targeted single-step tracing.
-- `KYTY_SKIP_UD2=1`: skips a guest trap for diagnostics and invalidates normal
-  execution.
+Default runtime mode is **strict**: `EXIT_NOT_IMPLEMENTED` aborts with stack and
+subsystem shutdown; missing imports do not receive stubs; unknown indirect GPU
+registers are fatal. Strict acceptance runs must not set any `KYTY_BRINGUP_*`
+variable (`scripts/run_guest.lua` rejects them unless
+`KYTY_BRINGUP_ALLOW_DIAGNOSTIC=1` is set for an authorized smoke only).
+
+### Centralized unsafe bring-up (`Kyty::Core::BringUp`)
+
+Diagnostic continuation is centralized. Do **not** invent per-game exceptions,
+preload PRX automatically, or cite unsafe survival as compatibility.
+
+| Variable | Meaning |
+| --- | --- |
+| `KYTY_BRINGUP_MODE=unsafe` | Enable diagnostic policy (absent ⇒ strict). |
+| `KYTY_BRINGUP_FEATURES` | CSV: `not_implemented`, `missing_function_import`, `gfx_permissive`. Absent under unsafe enables all three. |
+| `KYTY_BRINGUP_SUBSYSTEMS` | CSV scopes: `core,loader,kernel,graphics,audio,network,hle,other`. Absent ⇒ all. |
+| `KYTY_BRINGUP_BURST_LIMIT` | Max hits per site inside the window (default 10000). |
+| `KYTY_BRINGUP_BURST_WINDOW_MS` | Window length in ms (default 1000). |
+
+Unknown, empty, zero, or contradictory values abort at process start. Circuit-
+break on a site re-enters the normal strict abort after printing a summary. The
+policy never fabricates EventFlags, fences, memory, or sync results.
+
+**Removed (intentional break):** `KYTY_STUB_MISSING` and `KYTY_GFX_PERMISSIVE`.
+Using them is a configuration error.
+
+Other diagnostics (unchanged, still not acceptance modes):
+
+- `KYTY_FAULT_LOG=1`: signal-safe fault diagnostics.
+- `KYTY_TRACE_LIBC=1`: targeted single-step tracing.
+- `KYTY_SKIP_UD2=1`: skips a guest trap for diagnostics; invalidates normal
+  execution. **Not** part of the bring-up policy.
+
+Agent diagnostics JSON protocol version is **2** and includes `bringup.mode`,
+features, subsystems, limits, unique sites, continuations, missing-import
+metrics, and last circuit-break (`BringUp::WriteDiagnosticsJson`).
 
 No diagnostic flag is enabled by default or cited as proof of compatibility.
+
+Integration matrix (process-isolated):
+
+```bash
+cmake -S source -B _build_linux -G Ninja -DCMAKE_BUILD_TYPE=Release
+ninja -C _build_linux fc_script kyty_bringup_integration
+ctest --test-dir _build_linux --output-on-failure -R KytyBringUpIntegration
+```
 
 ## External references and licensing
 
