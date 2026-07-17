@@ -569,4 +569,47 @@ TEST(EmulatorGraphicsState, DepthStencilReclaimParentsAreSurfaces)
 	EXPECT_EQ(GpuMemoryOverlapType::Crosses, GpuMemoryOverlapType::Crosses);
 }
 
+// Gen5: FORMAT=1 + TILE_STENCIL_DISABLE + null stencil bases → no separate plane.
+TEST(EmulatorGraphicsState, ResolvesEffectiveStencilFormatWithoutSeparatePlane)
+{
+	HW::DepthRenderTarget z {};
+	z.stencil_info.format               = 1;
+	z.stencil_info.tile_stencil_disable = true;
+	z.stencil_read_base_addr            = 0;
+	z.stencil_write_base_addr           = 0;
+	EXPECT_EQ(State::ResolveEffectiveStencilFormat(z), 0u);
+
+	z.stencil_write_base_addr = 0x1000;
+	EXPECT_EQ(State::ResolveEffectiveStencilFormat(z), 1u);
+
+	z.stencil_write_base_addr           = 0;
+	z.stencil_info.tile_stencil_disable = false;
+	EXPECT_EQ(State::ResolveEffectiveStencilFormat(z), 1u);
+
+	z.stencil_info.format = 0;
+	EXPECT_EQ(State::ResolveEffectiveStencilFormat(z), 0u);
+}
+
+// Guest malloc/new → host heap; small I#/V# bases land here (index draw offset).
+TEST(EmulatorGraphicsState, ClassifiesHostGuestMallocRangesForLazyGpuHeaps)
+{
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0, 0x40));
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x1190000, 0x40));           // direct GPU map
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x900000000ull, 0x40));      // main image
+	EXPECT_TRUE(GpuMemoryIsHostGuestMallocRange(0x7f005c0b3d20ull, 0x40));    // captured VB
+	EXPECT_TRUE(GpuMemoryIsHostGuestMallocRange(0x7fffcc068720ull, 0x18));    // host index-ish
+	EXPECT_TRUE(GpuMemoryIsHostGuestMallocRange(0x7febfc31a6b0ull, 0xe4));   // captured IB
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x7f005c0b3d20ull, 0));
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x7fffffffffffffull, 0x20));
+
+	uint64_t start = 0;
+	uint64_t size  = 0;
+	GpuMemoryHostGuestMallocPageCover(0x7f005c0b3d20ull, 0x40, &start, &size);
+	EXPECT_EQ(start, 0x7f005c0b3000ull);
+	EXPECT_EQ(size, 0x1000ull);
+	GpuMemoryHostGuestMallocPageCover(0x7f005c0b3ff0ull, 0x20, &start, &size);
+	EXPECT_EQ(start, 0x7f005c0b3000ull);
+	EXPECT_EQ(size, 0x2000ull);
+}
+
 UT_END();

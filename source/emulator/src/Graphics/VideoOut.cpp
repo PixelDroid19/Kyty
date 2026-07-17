@@ -809,12 +809,14 @@ KYTY_SYSV_ABI int VideoOutAddFlipEvent(EventQueue::KernelEqueue eq, int handle, 
 
 	ctx->mutex.Lock();
 
-	EXIT_NOT_IMPLEMENTED(ctx->flip_eqs.Contains(eq));
-
 	if (eq == nullptr)
 	{
+		ctx->mutex.Unlock();
 		return VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE;
 	}
+
+	// Titles may re-register the same equeue; only track it once.
+	const bool add_eq = !ctx->flip_eqs.Contains(eq);
 
 	EventQueue::KernelEqueueEvent event;
 	event.triggered                = false;
@@ -830,7 +832,10 @@ KYTY_SYSV_ABI int VideoOutAddFlipEvent(EventQueue::KernelEqueue eq, int handle, 
 
 	int result = EventQueue::KernelAddEvent(eq, event);
 
-	ctx->flip_eqs.Add(eq);
+	if (add_eq)
+	{
+		ctx->flip_eqs.Add(eq);
+	}
 
 	ctx->mutex.Unlock();
 

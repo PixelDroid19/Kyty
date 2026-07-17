@@ -312,6 +312,7 @@ constexpr uint32_t CB_BLEND_GREEN            = 0x106;
 constexpr uint32_t CB_BLEND_BLUE             = 0x107;
 constexpr uint32_t CB_BLEND_ALPHA            = 0x108;
 constexpr uint32_t CB_DCC_CONTROL            = 0x109;
+constexpr uint32_t VGT_MULTI_PRIM_IB_RESET_INDX = 0x103;
 
 constexpr uint32_t DB_STENCIL_CONTROL                       = 0x10B;
 constexpr uint32_t DB_STENCIL_CONTROL_STENCILFAIL_SHIFT     = 0;
@@ -541,6 +542,9 @@ constexpr uint32_t VGT_PRIMITIVEID_RESET  = 0x2A3;
 constexpr uint32_t VGT_DRAW_PAYLOAD_CNTL  = 0x2A6;
 constexpr uint32_t VGT_ESGS_RING_ITEMSIZE = 0x2AB;
 constexpr uint32_t VGT_REUSE_OFF          = 0x2AD;
+
+constexpr uint32_t VGT_HOS_MAX_TESS_LEVEL = 0x286;
+constexpr uint32_t VGT_HOS_MIN_TESS_LEVEL = 0x287;
 
 constexpr uint32_t DB_HTILE_SURFACE                               = 0x2AF;
 constexpr uint32_t DB_HTILE_SURFACE_LINEAR_SHIFT                  = 0;
@@ -949,12 +953,14 @@ constexpr uint32_t SH_NUM = 0x2FF + 1;
 constexpr uint32_t VGT_PRIMITIVE_TYPE                 = 0x242;
 constexpr uint32_t VGT_PRIMITIVE_TYPE_PRIM_TYPE_SHIFT = 0;
 constexpr uint32_t VGT_PRIMITIVE_TYPE_PRIM_TYPE_MASK  = 0x3F;
+constexpr uint32_t VGT_INDEX_TYPE                     = 0x243;
 
 constexpr uint32_t VGT_OBJECT_ID             = 0x248;
 constexpr uint32_t GE_INDX_OFFSET            = 0x24A;
 constexpr uint32_t GE_MULTI_PRIM_IB_RESET_EN = 0x24B;
 constexpr uint32_t VGT_HS_OFFCHIP_PARAM      = 0x24F;
 constexpr uint32_t VGT_TF_MEMORY_BASE        = 0x250;
+constexpr uint32_t IA_MULTI_VGT_PARAM        = 0x258;
 
 constexpr uint32_t GE_CNTL                     = 0x25B;
 constexpr uint32_t GE_CNTL_PRIM_GRP_SIZE_SHIFT = 0;

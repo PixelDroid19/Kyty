@@ -23,8 +23,36 @@ struct DepthStencilUsage
 	bool depth_write_enable = false;
 };
 
+// Gen5 DB_STENCIL_INFO FORMAT is a 1-bit "stencil present" flag. When
+// TILE_STENCIL_DISABLE is set and both stencil bases are null, there is no
+// separate stencil plane — depth-only Vulkan target (D32), matching host paths
+// that bind D32 without S8 for this ABI.
+[[nodiscard]] inline uint32_t ResolveEffectiveStencilFormat(const HW::DepthRenderTarget& target)
+{
+	if (target.stencil_info.format == 0)
+	{
+		return 0;
+	}
+	if (target.stencil_read_base_addr != 0 || target.stencil_write_base_addr != 0)
+	{
+		return target.stencil_info.format;
+	}
+	if (target.stencil_info.tile_stencil_disable)
+	{
+		return 0;
+	}
+	return target.stencil_info.format;
+}
+
 void SetGenericScissorTl(HW::Context& context, uint32_t value);
 void SetGenericScissorBr(HW::Context& context, uint32_t value);
+// Gen5 CX-indirect emits screen scissor TL/BR as separate pairs.
+void SetScreenScissorTl(HW::Context& context, uint32_t value);
+void SetScreenScissorBr(HW::Context& context, uint32_t value);
+void SetRenderControl(HW::Context& context, uint32_t value);
+void SetStencilControl(HW::Context& context, uint32_t value);
+void SetStencilRefMask(HW::Context& context, uint32_t value);
+void SetStencilRefMaskBf(HW::Context& context, uint32_t value);
 void SetModeControl(HW::Context& context, uint32_t value);
 void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
 

@@ -220,7 +220,7 @@ public:
 	}
 
 private:
-	static constexpr uint32_t PAGE_BITS = 14u;
+	static constexpr uint32_t PAGE_BITS = 20u;
 
 	static uint32_t CalcPageId(uint64_t vaddr)
 	{
@@ -885,6 +885,26 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	Core::LockGuard lock(m_mutex);
 
 	int heap_id = GetHeapId(vaddr[0], size[0]);
+
+	// Guest libc heap (host malloc) is never MapDirectMemory'd. Titles embed
+	// small index/vertex tables there; register a page cover so staging can
+	// memcpy. Already holding m_mutex — do not call SetAllocatedRange.
+	if (heap_id < 0 && GpuMemoryIsHostGuestMallocRange(vaddr[0], size[0]))
+	{
+		uint64_t cover_start = 0;
+		uint64_t cover_size  = 0;
+		GpuMemoryHostGuestMallocPageCover(vaddr[0], size[0], &cover_start, &cover_size);
+		if (GetHeapId(cover_start, cover_size) < 0)
+		{
+			Heap h;
+			h.range.vaddr  = cover_start;
+			h.range.size   = cover_size;
+			h.objects_map1 = new GpuMap1;
+			h.objects_map2 = new GpuMap2;
+			m_heaps.Add(h);
+		}
+		heap_id = GetHeapId(vaddr[0], size[0]);
+	}
 
 	EXIT_NOT_IMPLEMENTED(heap_id < 0);
 

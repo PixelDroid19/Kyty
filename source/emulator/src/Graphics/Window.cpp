@@ -454,6 +454,7 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 		switch (key->key_code)
 		{
 			case SDLK_RETURN:
+			case SDLK_SPACE:
 			case SDLK_z: button = Controller::PAD_BUTTON_CROSS; break;
 			case SDLK_ESCAPE:
 			case SDLK_x: button = Controller::PAD_BUTTON_CIRCLE; break;
@@ -481,7 +482,8 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 		game->m_game_need_exit = true;
 	}
 
-	if (key->down && key->key_code == SDLK_SPACE)
+	// Host pause uses F9 so Space reaches the guest (Construct "Press any key" / Spacebar).
+	if (key->down && key->key_code == SDLK_F9)
 	{
 		SetPause(game, !game->m_game_is_paused);
 	}

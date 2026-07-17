@@ -6103,6 +6103,11 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_B32_SVdstSVsrc0)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_VNop)
+{
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VMovB32_SVdstSVsrc0)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -6889,6 +6894,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VCvtF32_XXX_SVdstSVsrc0,        ShaderInstructionType::VCvtF32Ubyte2,       ShaderInstructionFormat::SVdstSVsrc0, {"%tb_<index> = OpBitFieldUExtract %uint %t0_<index> %uint_16 %uint_8", "%t_<index> = OpConvertUToF %float %tb_<index>"}},
     {Recompile_VCvtF32_XXX_SVdstSVsrc0,        ShaderInstructionType::VCvtF32Ubyte3,       ShaderInstructionFormat::SVdstSVsrc0, {"%tb_<index> = OpBitFieldUExtract %uint %t0_<index> %uint_24 %uint_8", "%t_<index> = OpConvertUToF %float %tb_<index>"}},
     {Recompile_VMovB32_SVdstSVsrc0,            ShaderInstructionType::VMovB32,             ShaderInstructionFormat::SVdstSVsrc0, {""}},
+    {Recompile_VNop,                           ShaderInstructionType::VNop,                ShaderInstructionFormat::Empty,       {""}},
 
     {Recompile_SAndSaveexecB64_Sdst2Ssrc02,    ShaderInstructionType::SAndSaveexecB64,     ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::NonZero},
     {Recompile_SMovB64_Sdst2Ssrc02,            ShaderInstructionType::SMovB64,             ShaderInstructionFormat::Sdst2Ssrc02, {""}},

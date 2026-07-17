@@ -110,10 +110,14 @@ int KYTY_SYSV_ABI   GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, u
 uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw);
 // Gen5 type-2 pad dword (NID qj7QZpgr9Uw): allocates one 0x80000000 filler.
 uint32_t* KYTY_SYSV_ABI GraphicsCbType2Pad(CommandBuffer* buf);
-// Graphics5 NIDs IxYiarKlXxM / 3KDcnM3lrcU: PM4 type-3 packet size in dwords.
-// IxYiar: rdi → WaitFlipDone (0xC0051018). 3KDcn: rdi → WaitMem64 (0xC0071058).
-// Sibling registers held stream neighbors as residuals. Returns dword count.
+// sceAgcGetPacketSize (NID Lkf86B98qPc): type-3 PM4 length in dwords from header.
 uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd);
+// sceAgcDmaDataPatchSetDstAddressOrOffset (NID IxYiarKlXxM): patch R_DMA_DATA dst.
+int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetDstAddressOrOffset(uint32_t* cmd, uint64_t destination_address);
+// sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate (NID cdDRpqcFGbU).
+int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(uint32_t* cmd, uint64_t source_value);
+// sceAgcWaitRegMemPatchAddress (NID 3KDcnM3lrcU): patch wait-mem address field.
+int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t address);
 // Patch IT_WRITE_DATA destination address dwords (NID fPSCdQxgpSw).
 int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64_t address_or_offset);
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
@@ -156,6 +160,9 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t index_count, uint64_t modifier);
+// sceAgcDcbDrawIndexOffset (NID B+aG9DUnTKA): IT_DRAW_INDEX_OFFSET_2 from prior
+// IT_INDEX_BASE + index_offset * index_size.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t index_offset, uint32_t index_count, uint32_t flags);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_count, const void* index_addr, uint64_t modifier);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address);
 // GNM/AGC stallCommandBufferParser: fixed EVENT_WRITE CS partial flush (NID u2T2DiA5hRI).
