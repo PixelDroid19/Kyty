@@ -6636,6 +6636,32 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U32_SmaskVsrc0Vsrc1)
 	return true;
 }
 
+static void append_cmpx_result(String8* dst_source, const String8& load0, const String8& load1, const String8& predicate,
+                               const String8& dst0, const String8& dst1, const String8& index_str)
+{
+	static const char* text = R"(
+          <load0>
+          <load1>
+          %t2_<index> = <predicate> %bool %t0_<index> %t1_<index>
+          %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
+          %texec_<index> = OpLoad %uint %exec_lo
+          %tmasked_<index> = OpBitwiseAnd %uint %t3_<index> %texec_<index>
+          OpStore %<dst0> %tmasked_<index>
+          OpStore %<dst1> %uint_0
+          OpStore %exec_lo %tmasked_<index>
+          OpStore %exec_hi %uint_0
+          <execz>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<dst0>", dst0)
+	                   .ReplaceStr("<dst1>", dst1)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<predicate>", predicate)
+	                   .ReplaceStr("<execz>", EXECZ)
+	                   .ReplaceStr("<index>", index_str);
+}
+
 /* XXX: Eq, Ne */
 KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1)
 {
@@ -6665,27 +6691,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1)
 	}
 
 	// TODO() check VSKIP
-	// TODO() check EXEC
-
-	static const char* text = R"(
-          <load0>
-          <load1>
-          %t2_<index> = <param> %bool %t0_<index> %t1_<index>
-          %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
-          OpStore %<dst0> %t3_<index>
-          OpStore %<dst1> %uint_0
-          OpStore %exec_lo %t3_<index>
-          OpStore %exec_hi %uint_0
-          <execz>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<dst1>", dst_value1.value)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<param>", param[0])
-	                   .ReplaceStr("<execz>", EXECZ)
-	                   .ReplaceStr("<index>", index_str);
+	append_cmpx_result(dst_source, load0, load1, param[0], dst_value0.value, dst_value1.value, index_str);
 
 	return true;
 }
@@ -6719,27 +6725,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1)
 	}
 
 	// TODO() check VSKIP
-	// TODO() check EXEC
-
-	static const char* text = R"(
-          <load0>
-          <load1>
-          %t2_<index> = <param> %bool %t0_<index> %t1_<index>
-          %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
-          OpStore %<dst0> %t3_<index>
-          OpStore %<dst1> %uint_0
-          OpStore %exec_lo %t3_<index>
-          OpStore %exec_hi %uint_0
-          <execz>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<dst1>", dst_value1.value)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<param>", param[0])
-	                   .ReplaceStr("<execz>", EXECZ)
-	                   .ReplaceStr("<index>", index_str);
+	append_cmpx_result(dst_source, load0, load1, param[0], dst_value0.value, dst_value1.value, index_str);
 
 	return true;
 }
@@ -6773,27 +6759,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_F32_SmaskVsrc0Vsrc1)
 	}
 
 	// TODO() check VSKIP
-	// TODO() check EXEC
-
-	static const char* text = R"(
-          <load0>
-          <load1>
-          %t2_<index> = <param> %bool %t0_<index> %t1_<index>
-          %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
-          OpStore %<dst0> %t3_<index>
-          OpStore %<dst1> %uint_0
-          OpStore %exec_lo %t3_<index>
-          OpStore %exec_hi %uint_0
-          <execz>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<dst1>", dst_value1.value)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<param>", param[0])
-	                   .ReplaceStr("<execz>", EXECZ)
-	                   .ReplaceStr("<index>", index_str);
+	append_cmpx_result(dst_source, load0, load1, param[0], dst_value0.value, dst_value1.value, index_str);
 
 	return true;
 }
@@ -8182,6 +8148,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VCmpx_XXX_F32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxGtF32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFOrdGreaterThan"}},
     {Recompile_VCmpx_XXX_F32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxLtF32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFOrdLessThan"}},
     {Recompile_VCmpx_XXX_F32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxNleF32,  ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFUnordGreaterThan"}},
+    {Recompile_VCmpx_XXX_F32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxNltF32,  ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFUnordGreaterThanEqual"}},
     {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxEqU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpIEqual"}},
     {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxNeU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpINotEqual"}},
     {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxLtI32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpSLessThan"}},

@@ -193,6 +193,7 @@ enum class ShaderInstructionType : uint32_t
 	VCmpxLtI32,
 	VCmpxLtU32,
 	VCmpxNleF32,
+	VCmpxNltF32,
 	VCmpxNeqF32,
 	VCmpxNeI32,
 	VCmpxNeU32,
