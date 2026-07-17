@@ -3,6 +3,34 @@ if guest_root == nil or guest_root == '' then
 	error('usage: fc_script scripts/run_guest.lua <guest-root>')
 end
 
+-- Strict acceptance runs must not set any KYTY_BRINGUP_* variable. Unsafe
+-- discovery is opt-in and never compatibility evidence.
+-- Authorized smoke: KYTY_BRINGUP_ALLOW_DIAGNOSTIC=1 plus explicit mode=unsafe.
+local function env(name)
+	return os.getenv(name)
+end
+
+local bringup_keys = {
+	'KYTY_BRINGUP_MODE',
+	'KYTY_BRINGUP_FEATURES',
+	'KYTY_BRINGUP_SUBSYSTEMS',
+	'KYTY_BRINGUP_BURST_LIMIT',
+	'KYTY_BRINGUP_BURST_WINDOW_MS',
+}
+for _, key in ipairs(bringup_keys) do
+	if env(key) ~= nil then
+		if env('KYTY_BRINGUP_ALLOW_DIAGNOSTIC') ~= '1' then
+			error(
+				'strict capture rejects KYTY_BRINGUP_* (set KYTY_BRINGUP_ALLOW_DIAGNOSTIC=1 only for authorized diagnostic smoke; never as acceptance)')
+		end
+		print('WARNING: KYTY_BRINGUP_* is active — diagnostic only, not compatibility evidence')
+		break
+	end
+end
+if env('KYTY_STUB_MISSING') ~= nil or env('KYTY_GFX_PERMISSIVE') ~= nil then
+	error('KYTY_STUB_MISSING and KYTY_GFX_PERMISSIVE are removed; use KYTY_BRINGUP_MODE=unsafe with features')
+end
+
 local function env_or(name, fallback)
 	local value = os.getenv(name)
 	if value == nil or value == '' then
@@ -51,6 +79,8 @@ kyty_mount(guest_root, '/app0')
 kyty_load_param_json(guest_root .. '/sce_sys/param.json')
 kyty_load_elf('/app0/eboot.bin')
 
+-- Registers the complete HLE symbol database, then applies any adjacent-module
+-- plan staged while loading the primary executable.
 kyty_load_symbols_all()
 
 kyty_execute()

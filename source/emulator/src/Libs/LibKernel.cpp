@@ -395,18 +395,14 @@ static KYTY_SYSV_ABI MallocReplace* KernelGetSanitizerMallocReplaceExternal()
 {
 	PRINT_NAME();
 
-	static MallocReplace ret;
-
-	return &ret;
+	return nullptr;
 }
 
 static KYTY_SYSV_ABI NewReplace* KernelGetSanitizerNewReplaceExternal()
 {
 	PRINT_NAME();
 
-	static NewReplace ret;
-
-	return &ret;
+	return nullptr;
 }
 
 static KYTY_SYSV_ABI int elf_phdr_match_addr(ModuleInfo* m, uint64_t dtor_vaddr)
@@ -735,6 +731,7 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("DGMG3JshrZU", Memory::KernelSetVirtualRangeName);
 	LIB_FUNC("mkgXxsoxWHg", Memory::KernelClearVirtualRangeName);
 	LIB_FUNC("rVjRvHJ0X6c", Memory::KernelVirtualQuery);
+	LIB_FUNC("7oxv3PPCumo", Memory::KernelReserveVirtualRange);
 	LIB_FUNC("vSMAm3cxYTY", Memory::KernelMprotect);
 }
 

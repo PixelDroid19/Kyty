@@ -77,6 +77,36 @@ DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, 
 	return usage;
 }
 
+StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target,
+                                            const HW::RenderControl& render_control,
+                                            const HW::DepthControl& depth_control)
+{
+	const bool decompress = target.z_info.tile_surface_enable && render_control.stencil_compress_disable;
+	const bool needs_read = depth_control.stencil_enable || decompress || render_control.resummarize_enable ||
+	                        render_control.copy_centroid || render_control.copy_sample != 0;
+	const bool needs_write = render_control.stencil_clear_enable ||
+	                         (depth_control.stencil_enable && !target.depth_view.stencil_write_disable) ||
+	                         decompress || render_control.resummarize_enable;
+
+	if (!needs_read && !needs_write)
+	{
+		return StencilPlaneValidation::Inactive;
+	}
+	if (needs_read && target.stencil_read_base_addr == 0)
+	{
+		return StencilPlaneValidation::MissingReadBase;
+	}
+	if (needs_write && target.stencil_write_base_addr == 0)
+	{
+		return StencilPlaneValidation::MissingWriteBase;
+	}
+	if (needs_read && needs_write && target.stencil_read_base_addr != target.stencil_write_base_addr)
+	{
+		return StencilPlaneValidation::MismatchedBases;
+	}
+	return StencilPlaneValidation::Valid;
+}
+
 ViewportXy ResolveViewportXy(float xscale, float xoffset, float yscale, float yoffset)
 {
 	ViewportXy xy {};
@@ -255,6 +285,46 @@ void SetRenderControl(HW::Context& context, uint32_t value)
 	r.copy_sample              = KYTY_PM4_GET(value, DB_RENDER_CONTROL, COPY_SAMPLE);
 
 	context.SetRenderControl(r);
+}
+
+void SetDepthControl(HW::Context& context, uint32_t value)
+{
+	HW::DepthControl r;
+	r.stencil_enable                     = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, STENCIL_ENABLE) != 0;
+	r.z_enable                           = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, Z_ENABLE) != 0;
+	r.z_write_enable                     = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, Z_WRITE_ENABLE) != 0;
+	r.depth_bounds_enable                = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, DEPTH_BOUNDS_ENABLE) != 0;
+	r.zfunc                              = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, ZFUNC);
+	r.backface_enable                    = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, BACKFACE_ENABLE) != 0;
+	r.stencilfunc                        = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, STENCILFUNC);
+	r.stencilfunc_bf                     = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, STENCILFUNC_BF);
+	r.color_writes_on_depth_fail_enable  = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, ENABLE_COLOR_WRITES_ON_DEPTH_FAIL) != 0;
+	r.color_writes_on_depth_pass_disable = KYTY_PM4_GET(value, DB_DEPTH_CONTROL, DISABLE_COLOR_WRITES_ON_DEPTH_PASS) != 0;
+	context.SetDepthControl(r);
+}
+
+void ApplyDepthStencilPlaneRegisters(HW::DepthRenderTarget& target, uint32_t stencil_info,
+                                     uint32_t stencil_read_base, uint32_t stencil_write_base)
+{
+	HW::DepthStencilInfo info;
+	info.format                     = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, FORMAT);
+	info.texture_compatible_stencil = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, ITERATE_FLUSH) != 0;
+	info.partially_resident         = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, PARTIALLY_RESIDENT) != 0;
+	info.tile_split                 = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, RESERVED_FIELD_1);
+	info.tile_mode_index            = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, TILE_MODE_INDEX);
+	info.expclear_enabled           = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, ALLOW_EXPCLEAR) != 0;
+	info.tile_stencil_disable       = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, TILE_STENCIL_DISABLE) != 0;
+	target.stencil_info            = info;
+	target.stencil_read_base_addr  = static_cast<uint64_t>(stencil_read_base) << 8u;
+	target.stencil_write_base_addr = static_cast<uint64_t>(stencil_write_base) << 8u;
+}
+
+void ApplyDepthStencilPlaneRegisters(HW::Context& context, uint32_t stencil_info, uint32_t stencil_read_base,
+                                     uint32_t stencil_write_base)
+{
+	auto target = context.GetDepthRenderTarget();
+	ApplyDepthStencilPlaneRegisters(target, stencil_info, stencil_read_base, stencil_write_base);
+	context.SetDepthRenderTarget(target);
 }
 
 void SetStencilControl(HW::Context& context, uint32_t value)

@@ -49,6 +49,10 @@ public:
 	void Add(const SymbolResolve& s, uint64_t vaddr, const String& dbg_name);
 
 	[[nodiscard]] const SymbolRecord* Find(const SymbolResolve& s) const;
+	// Lookup by full GenerateName key (used for export-conflict scans).
+	[[nodiscard]] const SymbolRecord* FindByCanonicalName(const String& canonical_name) const;
+	[[nodiscard]] uint32_t            SymbolCount() const;
+	[[nodiscard]] const SymbolRecord* SymbolAt(uint32_t index) const;
 
 	void DbgDump(const String& folder, const String& file_name);
 

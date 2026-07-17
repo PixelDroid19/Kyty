@@ -10,8 +10,8 @@
 #include "Kyty/Scripts/Scripts.h"
 #include "Kyty/UnitTest.h"
 
-#include "Emulator/Audio.h"
 #include "Emulator/Agent/AgentSubsystem.h"
+#include "Emulator/Audio.h"
 #include "Emulator/Common.h"
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
@@ -24,13 +24,17 @@
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/Elf.h"
+#include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/RuntimeLinker.h"
 #include "Emulator/Loader/SystemContent.h"
 #include "Emulator/Loader/Timer.h"
 #include "Emulator/Network.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/Validation/DomainValidators.h"
 
 #include <cstdlib>
+#include <cstring>
 
 namespace Kyty::Emulator {
 
@@ -163,7 +167,17 @@ KYTY_SCRIPT_FUNC(kyty_load_elf_func)
 
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
 
-	auto* program = rt->LoadProgram(Libs::LibKernel::FileSystem::GetRealFilename(elf.ToString()));
+	const auto real_path = Libs::LibKernel::FileSystem::GetRealFilename(elf.ToString());
+	auto*      program   = Loader::ProgramLoader::Load(rt, real_path);
+
+	// Thin orchestration: after the primary executable is loaded, the lifecycle
+	// coordinator may build a deterministic adjacent-module plan (feature-gated).
+	// run_guest.lua stays a thin mount/param/load/symbols/execute entry point.
+	if (program != nullptr && program->elf != nullptr && !program->elf->IsShared() &&
+	    Loader::GuestExecutableLocator::IsPrimaryExecutableName(real_path))
+	{
+		Loader::ModuleLifecycleCoordinator::AfterPrimaryLoaded(rt, real_path);
+	}
 
 	if (Scripts::ArgGetVarCount() >= 2)
 	{
@@ -231,6 +245,7 @@ KYTY_SCRIPT_FUNC(kyty_load_symbols_all_func)
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
 
 	load_symbols_all(rt);
+	Loader::ModuleLifecycleCoordinator::AfterHleSymbolsRegistered(rt);
 
 	return 0;
 }
@@ -324,7 +339,27 @@ KYTY_SCRIPT_FUNC(kyty_mount_func)
 	Scripts::ScriptVar folder = Scripts::ArgGetVar(0);
 	Scripts::ScriptVar point  = Scripts::ArgGetVar(1);
 
-	Libs::LibKernel::FileSystem::Mount(folder.ToString(), point.ToString());
+	// validate → policy for game-run guest root (before filesystem mutation)
+	const String folder_s   = folder.ToString();
+	const bool   bringup    = (std::getenv("KYTY_BRINGUP_MODE") != nullptr || std::getenv("KYTY_BRINGUP_FEATURES") != nullptr ||
+	                           std::getenv("KYTY_BRINGUP_SUBSYSTEMS") != nullptr || std::getenv("KYTY_BRINGUP_BURST_LIMIT") != nullptr ||
+	                           std::getenv("KYTY_BRINGUP_BURST_WINDOW_MS") != nullptr);
+	const char*  allow_env  = std::getenv("KYTY_BRINGUP_ALLOW_DIAGNOSTIC");
+	const bool   allow_diag = (allow_env != nullptr && std::strcmp(allow_env, "1") == 0);
+	const bool   removed_permissive_env = (std::getenv("KYTY_STUB_MISSING") != nullptr || std::getenv("KYTY_GFX_PERMISSIVE") != nullptr);
+
+	Emulator::Validation::GameRunRequest greq {};
+	greq.guest_root                     = folder_s.C_Str();
+	greq.bringup_env_present            = bringup;
+	greq.allow_diagnostic_override      = allow_diag;
+	greq.removed_permissive_env_present = removed_permissive_env;
+	const auto validated                = Emulator::Validation::ValidateGameRunRequest(greq);
+	if (!validated.Ok())
+	{
+		EXIT("game-run validation failed: %s (%s)\n", validated.error.reason, validated.error.code);
+	}
+
+	Libs::LibKernel::FileSystem::Mount(folder_s, point.ToString());
 
 	return 0;
 }

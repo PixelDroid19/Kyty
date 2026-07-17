@@ -121,6 +121,7 @@ endif()
 project(Kyty${KYTY_PROJECT_NAME}${CMAKE_BUILD_TYPE}${KYTY_COMPILER} VERSION 0.2.2)
 
 include(src_script.cmake)
+include(CTest)
 
 include_directories(	
 	3rdparty/gtest/include
@@ -188,6 +189,11 @@ endif()
 add_subdirectory(lib)
 add_subdirectory(devtools)
 add_subdirectory(agent)
+# Process-isolated BringUp policy harness — only when tests are enabled so
+# production-only configures do not force-link the integration executable.
+if(BUILD_TESTING)
+	add_subdirectory(integration_test)
+endif()
 
 # The emulator may consume the portable diagnostics core, but the process
 # supervisor is a launcher-side concern. Keep tests and emulator free of that
@@ -272,4 +278,3 @@ endif()
 if(MSVC)
     set(CMAKE_USE_RELATIVE_PATHS ON)
 endif()
-

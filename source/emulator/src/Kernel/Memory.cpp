@@ -124,8 +124,69 @@ private:
 	Core::Mutex            m_mutex;
 };
 
+class ReservedMemory
+{
+public:
+	struct Block
+	{
+		uint64_t addr;
+		uint64_t size;
+	};
+
+	~ReservedMemory()
+	{
+		Core::LockGuard lock(m_mutex);
+		for (const auto& block: m_blocks)
+		{
+			VirtualMemory::Free(block.addr);
+		}
+	}
+
+	KYTY_CLASS_NO_COPY(ReservedMemory);
+
+	ReservedMemory() = default;
+
+	bool Add(uint64_t addr, uint64_t size)
+	{
+		Core::LockGuard lock(m_mutex);
+		for (const auto& block: m_blocks)
+		{
+			if (addr < block.addr + block.size && block.addr < addr + size)
+			{
+				return false;
+			}
+		}
+		m_blocks.Add(Block {addr, size});
+		return true;
+	}
+
+	bool Unmap(uint64_t addr, uint64_t size)
+	{
+		Core::LockGuard lock(m_mutex);
+		for (uint32_t index = 0; index < m_blocks.Size(); index++)
+		{
+			const auto& block = m_blocks[index];
+			if (block.addr == addr && block.size == size)
+			{
+				if (!VirtualMemory::Free(addr))
+				{
+					return false;
+				}
+				m_blocks.RemoveAt(index);
+				return true;
+			}
+		}
+		return false;
+	}
+
+private:
+	Vector<Block> m_blocks;
+	Core::Mutex   m_mutex;
+};
+
 static PhysicalMemory* g_physical_memory = nullptr;
 static FlexibleMemory* g_flexible_memory = nullptr;
+static ReservedMemory* g_reserved_memory = nullptr;
 static callback_func_t g_alloc_callback  = nullptr;
 static callback_func_t g_free_callback   = nullptr;
 
@@ -135,6 +196,7 @@ KYTY_SUBSYSTEM_INIT(Memory)
 
 	g_physical_memory = new PhysicalMemory;
 	g_flexible_memory = new FlexibleMemory;
+	g_reserved_memory = new ReservedMemory;
 }
 
 KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Memory) {}
@@ -629,6 +691,73 @@ int KYTY_SYSV_ABI KernelMapFlexibleMemory(void** addr_in_out, size_t len, int pr
 	return KernelMapNamedFlexibleMemory(addr_in_out, len, prot, flags, "");
 }
 
+int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr_in_out, uint64_t len, int flags, uint64_t alignment)
+{
+	PRINT_NAME();
+
+	constexpr uint64_t kGuestPage      = 0x4000;
+	constexpr int      kFixed          = 0x10;
+	constexpr int      kNoOverwrite    = 0x80;
+	constexpr int      kSupportedFlags = kFixed | kNoOverwrite;
+
+	if (addr_in_out == nullptr || len == 0 || (len & (kGuestPage - 1)) != 0 || (flags & ~kSupportedFlags) != 0)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	if (alignment == 0)
+	{
+		alignment = kGuestPage;
+	}
+	if (alignment < kGuestPage || (alignment & (alignment - 1)) != 0)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	EXIT_IF(g_reserved_memory == nullptr);
+
+	const uint64_t requested_addr = reinterpret_cast<uint64_t>(*addr_in_out);
+	const bool     fixed          = (flags & kFixed) != 0;
+	if (fixed &&
+	    (requested_addr == 0 || (requested_addr & (alignment - 1)) != 0 || requested_addr > std::numeric_limits<uint64_t>::max() - len))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	uint64_t reserved_addr = 0;
+	if (fixed)
+	{
+		reserved_addr = VirtualMemory::AllocFixed(requested_addr, len, VirtualMemory::Mode::NoAccess) ? requested_addr : 0;
+	} else
+	{
+		reserved_addr = VirtualMemory::AllocAligned(requested_addr, len, VirtualMemory::Mode::NoAccess, alignment);
+		if (reserved_addr == 0 && requested_addr == 0)
+		{
+			// ReserveVirtualRange can request an address-space hole larger than
+			// Kyty's normal low allocation arena. Keep using the portable host
+			// abstraction, but give it a valid high guest-VA hint.
+			constexpr uint64_t kLargeReservationHint = UINT64_C(1) << 40;
+			reserved_addr = VirtualMemory::AllocAligned(kLargeReservationHint, len, VirtualMemory::Mode::NoAccess, alignment);
+		}
+	}
+	if (reserved_addr == 0)
+	{
+		return fixed ? KERNEL_ERROR_EBUSY : KERNEL_ERROR_ENOMEM;
+	}
+	if (!g_reserved_memory->Add(reserved_addr, len))
+	{
+		VirtualMemory::Free(reserved_addr);
+		return KERNEL_ERROR_EBUSY;
+	}
+
+	*addr_in_out = reinterpret_cast<void*>(reserved_addr);
+	printf("\t in_addr  = 0x%016" PRIx64 "\n", requested_addr);
+	printf("\t out_addr = 0x%016" PRIx64 "\n", reserved_addr);
+	printf("\t len      = 0x%016" PRIx64 "\n", len);
+	printf("\t flags    = 0x%08x\n", flags);
+	printf("\t align    = 0x%016" PRIx64 "\n", alignment);
+	return OK;
+}
+
 int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 {
 	PRINT_NAME();
@@ -651,6 +780,10 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 	if (!result)
 	{
 		result = g_flexible_memory->Unmap(vaddr, len, &gpu_mode);
+	}
+	if (!result && g_reserved_memory != nullptr)
+	{
+		result = g_reserved_memory->Unmap(vaddr, len);
 	}
 
 	EXIT_NOT_IMPLEMENTED(!result);
