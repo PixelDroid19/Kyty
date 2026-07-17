@@ -2212,15 +2212,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			break;
 		case 0x36D: inst.type = ShaderInstructionType::VAdd3U32; break;
 		case 0x36F: inst.type = ShaderInstructionType::VLshlOrB32; break;
-		case 0x371:
-			if (next_gen)
-			{
-				KYTY_UNKNOWN_OP();
-			} else
-			{
-				KYTY_NI("v_and_or_u32")
-			};
-			break;
+		case 0x371: inst.type = ShaderInstructionType::VAndOrB32; break;
 		case 0x372:
 			if (next_gen)
 			{

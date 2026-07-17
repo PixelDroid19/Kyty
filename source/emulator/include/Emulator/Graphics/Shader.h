@@ -140,6 +140,7 @@ enum class ShaderInstructionType : uint32_t
 	// VOP3: dst = src0 + src1 + src2 (u32). RDNA2 op 0x36D.
 	VAdd3U32,
 	VAndB32,
+	VAndOrB32,
 	VAshrI32,
 	VAshrrevI32,
 	VBcntU32B32,
