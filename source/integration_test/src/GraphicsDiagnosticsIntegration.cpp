@@ -635,6 +635,43 @@ void VerifyGen5AddCarryIn()
 	       "direct carry-in reuses the shared SPIR-V helper");
 }
 
+void VerifyGen5XnorVop2()
+{
+	// Captured Gen5 VOP2 at normalized PC 0xdf4:
+	// v_xnor_b32 v96, v141, v96.
+	// AMD RDNA2 ISA, Table 77 (VOP2 opcode 30):
+	// https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture
+	const uint32_t shader[] = {0x3cc0c18du, 0xbf800000u, 0xbf810000u};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	Expect(code.GetInstructions().Size() == 3, "Gen5 VOP2 XNOR parses with endpgm");
+	const auto& instruction = code.GetInstructions().At(0);
+	Expect(instruction.type == ShaderInstructionType::VXnorB32, "Gen5 VOP2 opcode 0x1e decodes as v_xnor_b32");
+	Expect(instruction.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1, "XNOR keeps the two-source vector format");
+	Expect(instruction.dst.type == ShaderOperandType::Vgpr && instruction.dst.register_id == 96, "XNOR destination decoded");
+	Expect(instruction.src[0].type == ShaderOperandType::Vgpr && instruction.src[0].register_id == 141, "XNOR first source decoded");
+	Expect(instruction.src[1].type == ShaderOperandType::Vgpr && instruction.src[1].register_id == 96, "XNOR second source decoded");
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, nullptr);
+	Expect(source.FindIndex("OpBitwiseXor %uint %t0_0 %t1_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "XNOR computes the bitwise XOR of both operands");
+	Expect(source.FindIndex("%t_0 = OpNot %uint %tx_0") != Kyty::Core::STRING8_INVALID_INDEX, "XNOR complements the XOR result");
+
+	Kyty::Config::SetNextGen(false);
+	ShaderCode legacy_code;
+	legacy_code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &legacy_code);
+	Kyty::Config::SetNextGen(true);
+
+	Expect(legacy_code.GetInstructions().At(0).type == ShaderInstructionType::VBfmB32, "legacy VOP2 opcode 0x1e remains v_bfm_b32");
+	const auto legacy_source = SpirvGenerateSource(legacy_code, nullptr, nullptr, nullptr);
+	Expect(legacy_source.FindIndex("OpBitFieldInsert %uint") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "legacy VOP2 opcode 0x1e retains bit-field-mask semantics");
+}
+
 ShaderCode ParseGen5ReciprocalIFlag(bool vop3)
 {
 	ShaderCode code;
@@ -875,6 +912,7 @@ int main()
 	VerifyGen5BufferLoadDwordOffenIdxen();
 	VerifyGen5UnsignedSub();
 	VerifyGen5AddCarryIn();
+	VerifyGen5XnorVop2();
 	VerifyGen5ReciprocalIFlag();
 	VerifyGen5ReciprocalIFlagExceptionalInputs();
 	VerifyGen5ImageSampleLzDmask1();

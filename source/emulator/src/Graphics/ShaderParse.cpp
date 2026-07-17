@@ -1282,7 +1282,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x1E:
 			if (next_gen)
 			{
-				KYTY_UNKNOWN_OP();
+				inst.type = ShaderInstructionType::VXnorB32;
 			} else
 			{
 				inst.type = ShaderInstructionType::VBfmB32;
