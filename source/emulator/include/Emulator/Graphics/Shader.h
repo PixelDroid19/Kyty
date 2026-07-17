@@ -218,6 +218,7 @@ enum class ShaderInstructionType : uint32_t
 	VLogF32,
 	VLshlAddU32,
 	VLshlB32,
+	VLshlOrB32,
 	VLshlrevB32,
 	VLshrB32,
 	VLshrrevB32,

@@ -703,6 +703,41 @@ void VerifyGen5BitCountVop3()
 	       "bit count adds the explicit accumulator source");
 }
 
+void VerifyGen5ShiftLeftOrVop3()
+{
+	// Captured Gen5 VOP3 at normalized PC 0xe1c:
+	// v_lshl_or_b32 v96, v98, 19, v96.
+	// AMD RDNA2 ISA, Table 83 (VOP3A opcode 879):
+	// https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture
+	const uint32_t shader[] = {0xd76f0060u, 0x05812762u, 0xbf800000u, 0xbf810000u};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	Expect(code.GetInstructions().Size() == 3, "Gen5 VOP3 shift-or parses with endpgm");
+	const auto& instruction = code.GetInstructions().At(0);
+	Expect(instruction.type == ShaderInstructionType::VLshlOrB32, "Gen5 VOP3 opcode 0x36f decodes as v_lshl_or_b32");
+	Expect(instruction.format == ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, "shift-or keeps the three-source vector format");
+	Expect(instruction.src_num == 3, "shift-or consumes all three VOP3 sources");
+	Expect(instruction.dst.type == ShaderOperandType::Vgpr && instruction.dst.register_id == 96, "shift-or destination decoded");
+	Expect(instruction.src[0].type == ShaderOperandType::Vgpr && instruction.src[0].register_id == 98, "shift-or value source decoded");
+	Expect(instruction.src[1].type == ShaderOperandType::IntegerInlineConstant && instruction.src[1].constant.i == 19,
+	       "shift-or count source decoded");
+	Expect(instruction.src[2].type == ShaderOperandType::Vgpr && instruction.src[2].register_id == 96, "shift-or OR source decoded");
+	Expect(instruction.dst.multiplier == 1.0f && !instruction.dst.clamp && !instruction.src[0].negate && !instruction.src[0].absolute &&
+	           !instruction.src[1].negate && !instruction.src[1].absolute && !instruction.src[2].negate && !instruction.src[2].absolute,
+	       "captured shift-or encoding has neutral supported modifiers");
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, nullptr);
+	Expect(source.FindIndex("OpBitwiseAnd %uint %t1_0 %uint_31") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "shift-or masks the shift count to five bits");
+	Expect(source.FindIndex("OpShiftLeftLogical %uint %t0_0 %ts_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "shift-or shifts the first source by the masked count");
+	Expect(source.FindIndex("OpBitwiseOr %uint %tm_0 %t2_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "shift-or combines the shifted value with the third source");
+}
+
 ShaderCode ParseGen5ReciprocalIFlag(bool vop3)
 {
 	ShaderCode code;
@@ -945,6 +980,7 @@ int main()
 	VerifyGen5AddCarryIn();
 	VerifyGen5XnorVop2();
 	VerifyGen5BitCountVop3();
+	VerifyGen5ShiftLeftOrVop3();
 	VerifyGen5ReciprocalIFlag();
 	VerifyGen5ReciprocalIFlagExceptionalInputs();
 	VerifyGen5ImageSampleLzDmask1();

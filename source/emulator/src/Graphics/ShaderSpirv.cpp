@@ -8246,6 +8246,9 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 	{Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2, ShaderInstructionType::VLshlAddU32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
 	 {"%ts_<index> = OpBitwiseAnd %uint %t1_<index> %uint_31", "%tm_<index> = OpShiftLeftLogical %uint %t0_<index> %ts_<index>",
 	  "%t_<index> = OpIAdd %uint %tm_<index> %t2_<index>"}},
+	{Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2, ShaderInstructionType::VLshlOrB32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
+	 {"%ts_<index> = OpBitwiseAnd %uint %t1_<index> %uint_31", "%tm_<index> = OpShiftLeftLogical %uint %t0_<index> %ts_<index>",
+	  "%t_<index> = OpBitwiseOr %uint %tm_<index> %t2_<index>"}},
 	// v_add3_u32: dst = src0 + src1 + src2 (wraps as uint).
 	{Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2, ShaderInstructionType::VAdd3U32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
 	 {"%ts_<index> = OpIAdd %uint %t0_<index> %t1_<index>", "%t_<index> = OpIAdd %uint %ts_<index> %t2_<index>"}},
