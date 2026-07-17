@@ -10,6 +10,27 @@ local function env(name)
 	return os.getenv(name)
 end
 
+local function env_or(name, fallback)
+	local value = env(name)
+	if value == nil or value == '' then
+		return fallback
+	end
+	return value
+end
+
+local function env_bool(name, fallback)
+	local value = env(name)
+	if value == nil or value == '' then
+		return fallback
+	end
+	return value == '1' or value == 'true' or value == 'TRUE'
+end
+
+local function env_number(name, fallback)
+	local value = tonumber(env(name) or '')
+	return value or fallback
+end
+
 local bringup_keys = {
 	'KYTY_BRINGUP_MODE',
 	'KYTY_BRINGUP_FEATURES',
