@@ -118,6 +118,7 @@ static int KYTY_SYSV_ABI PlayGoSetInstallSpeed(int handle, int32_t speed)
 }
 
 // scePlayGoGetChunkId — NID 73fF1MFU8hA
+// (handle, out_chunk_id_list, number_of_entries, out_entries)
 static int KYTY_SYSV_ABI PlayGoGetChunkId(int handle, uint16_t* out_chunk_id_list,
                                           uint32_t number_of_entries, uint32_t* out_entries)
 {

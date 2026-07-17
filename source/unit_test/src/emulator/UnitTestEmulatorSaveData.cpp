@@ -102,6 +102,20 @@ TEST(EmulatorSaveData, DeleteTransactionResourceTracksCreateHandles)
 	EXPECT_EQ(SaveDataDeleteTransactionResource(resource, &mount), Libs::SaveData::SAVE_DATA_ERROR_NOT_FOUND);
 }
 
+// sceSaveDataTransferringMount rejects null mount/result at the HLE boundary.
+TEST(EmulatorSaveData, TransferringMountRejectsNull)
+{
+	using namespace Libs::SaveData;
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	EXPECT_EQ(SaveDataTransferringMount(nullptr, nullptr), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+}
+
 TEST(EmulatorSaveData, DirNameSearchValidatesAndReportsHits)
 {
 	using namespace Libs::SaveData;

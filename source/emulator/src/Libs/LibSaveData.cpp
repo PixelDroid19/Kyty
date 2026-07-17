@@ -585,6 +585,8 @@ int KYTY_SYSV_ABI SaveDataSaveIcon(const SaveDataMountPoint* mount_point, const 
 	return OK;
 }
 
+// sceSaveData*SaveDataMemory2 guest param layouts (Gen5). First-boot Get must
+// not return NOT_FOUND — Astro SaveMemory.cpp asserts on 0x809F0008.
 struct SaveDataMemoryData
 {
 	void*   buf;
@@ -634,40 +636,52 @@ struct SaveDataMemorySet2
 	uint8_t                   reserved[24];
 };
 
+// In-process save-memory slot (zero-filled until Set writes).
 static std::mutex           g_save_memory_mutex;
 static std::vector<uint8_t> g_save_data_memory(0x10000);
 
+// sceSaveDataSetupSaveDataMemory2 (NID oQySEUfgXRA)
 int KYTY_SYSV_ABI SaveDataSetupSaveDataMemory2(void* setup_param, void* result_out)
 {
 	PRINT_NAME();
+	printf("\t setup_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(setup_param));
+	printf("\t result_out  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(result_out));
 	if (setup_param == nullptr)
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 	const auto* setup = static_cast<const SaveDataMemorySetup2*>(setup_param);
+	printf("\t option=%#x user_id=%d memory_size=%" PRIu64 " slot=%u\n", setup->option, setup->user_id,
+	       static_cast<uint64_t>(setup->memory_size), setup->slot_id);
 
-	std::lock_guard lock(g_save_memory_mutex);
-	if (setup->memory_size > g_save_data_memory.size())
 	{
-		g_save_data_memory.resize(setup->memory_size, 0);
-	}
-	if (result_out != nullptr)
-	{
-		auto* result                = static_cast<SaveDataMemorySetupResult*>(result_out);
-		result->existed_memory_size = g_save_data_memory.size();
-		std::memset(result->reserved, 0, sizeof(result->reserved));
+		std::lock_guard lock(g_save_memory_mutex);
+		if (setup->memory_size > g_save_data_memory.size())
+		{
+			g_save_data_memory.resize(setup->memory_size, 0);
+		}
+		if (result_out != nullptr)
+		{
+			auto* result                  = static_cast<SaveDataMemorySetupResult*>(result_out);
+			result->existed_memory_size   = g_save_data_memory.size();
+			std::memset(result->reserved, 0, sizeof(result->reserved));
+		}
 	}
 	return OK;
 }
 
+// sceSaveDataGetSaveDataMemory2 (NID QwOO7vegnV8)
+// First boot: return OK with zeros (NOT_FOUND aborts Astro SaveMemory.cpp:118).
 int KYTY_SYSV_ABI SaveDataGetSaveDataMemory2(void* get_param)
 {
 	PRINT_NAME();
+	printf("\t get_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(get_param));
 	if (get_param == nullptr)
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 	auto* get = static_cast<SaveDataMemoryGet2*>(get_param);
+	printf("\t user_id=%d data=%p slot=%u\n", get->user_id, static_cast<void*>(get->data), get->slot_id);
 
 	std::lock_guard lock(g_save_memory_mutex);
 	if (get->data != nullptr)
@@ -686,19 +700,24 @@ int KYTY_SYSV_ABI SaveDataGetSaveDataMemory2(void* get_param)
 	}
 	if (get->param != nullptr)
 	{
+		// Param blob size is title-defined; clear a conservative 0x80 prefix.
 		std::memset(get->param, 0, 0x80);
 	}
 	return OK;
 }
 
+// sceSaveDataSetSaveDataMemory2 (NID cduy9v4YmT4)
 int KYTY_SYSV_ABI SaveDataSetSaveDataMemory2(void* set_param)
 {
 	PRINT_NAME();
+	printf("\t set_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(set_param));
 	if (set_param == nullptr)
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 	const auto* set = static_cast<const SaveDataMemorySet2*>(set_param);
+	printf("\t user_id=%d data=%p data_num=%u slot=%u\n", set->user_id, static_cast<const void*>(set->data),
+	       set->data_num, set->slot_id);
 
 	std::lock_guard lock(g_save_memory_mutex);
 	const uint32_t  data_num = (set->data_num == 0 ? 1u : set->data_num);
@@ -741,6 +760,7 @@ LIB_DEFINE(InitSaveData_1)
 	// sceSaveDataGetEventResult
 	LIB_FUNC("j8xKtiFj0SY", SaveData::SaveDataGetEventResult);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
+	// Memory2 APIs (Gen5 SaveData memory slots).
 	LIB_FUNC("oQySEUfgXRA", SaveData::SaveDataSetupSaveDataMemory2);
 	LIB_FUNC("QwOO7vegnV8", SaveData::SaveDataGetSaveDataMemory2);
 	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);
@@ -781,10 +801,10 @@ LIB_DEFINE(InitSaveDataNative_1)
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
 	LIB_FUNC("oQySEUfgXRA", SaveData::SaveDataSetupSaveDataMemory2);
 	LIB_FUNC("QwOO7vegnV8", SaveData::SaveDataGetSaveDataMemory2);
-	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);
 	// sceSaveDataTransferringMount — NID WAzWTZm1H+I (Astro after PlayGo).
 	LIB_FUNC("WAzWTZm1H+I", SaveData::SaveDataTransferringMount);
 	LIB_FUNC("RjMlsR8EXrw", SaveData::SaveDataTransferringMount);
+	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);
 }
 
 } // namespace SaveDataNative

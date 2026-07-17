@@ -205,6 +205,17 @@ uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size);
 uint64_t LoaderPrepareThreadTlsImage(uint8_t* tls, uint64_t image_size, uint64_t template_vaddr, uint64_t program_base,
                                      uint64_t program_size, bool (*guest_read64)(uint64_t addr, uint64_t* out, void* ctx), void* guest_ctx);
 
+// Run DT_INIT / DT_PREINIT_ARRAY / DT_INIT_ARRAY for a loaded program. Each
+// entry is a void(void) guest function at base_vaddr + offset. Testable helper
+// for shared-module StartModule paths. Do not call this for main ET_EXEC images
+// whose CRT entry already invokes DT_INIT — double init re-links static tables.
+void LoaderRunProgramInitializers(uint64_t base_vaddr, const DynamicInfo& info);
+
+// True if `code` (image-resident at code_vaddr) contains a direct x86-64 near
+// CALL (E8 rel32) whose absolute target equals target_vaddr. Used to recognize
+// CRT _start that invokes DT_INIT (_init) itself.
+bool LoaderCodeContainsDirectCallTo(const uint8_t* code, uint64_t size, uint64_t code_vaddr, uint64_t target_vaddr);
+
 } // namespace Kyty::Loader
 
 #endif // KYTY_EMU_ENABLED

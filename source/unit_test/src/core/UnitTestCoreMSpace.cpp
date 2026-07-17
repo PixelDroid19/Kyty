@@ -32,6 +32,14 @@ static void test_fail()
 	delete[] buf;
 }
 
+// Null mspace is a guest-visible failure: return nullptr (no abort). Matches
+// LibcMspaceMalloc null-msp path used by the early Gen5 heap setup.
+TEST(CoreMSpace, NullMspMallocReturnsNull)
+{
+	EXPECT_EQ(MSpaceMalloc(nullptr, 0x28), nullptr);
+	EXPECT_EQ(MSpaceMalloc(nullptr, 56), nullptr);
+}
+
 static size_t   g_size = 0;
 static uint8_t* g_ptr  = nullptr;
 
@@ -228,6 +236,33 @@ TEST(Core, MSpace)
 	}
 
 	UT_MEM_CHECK();
+}
+
+// Gen5 Onion path: guest rejects allocs when current_system_size is zero.
+TEST(CoreMSpace, MallocStatsFastReportsCapacity)
+{
+	constexpr size_t kCap = 0x10000;
+	auto*            buf  = new uint8_t[kCap];
+	auto*            m    = MSpaceCreate("stats", buf, kCap, true, nullptr);
+	EXPECT_NE(m, nullptr);
+
+	Core::MSpaceSize sizes {};
+	EXPECT_TRUE(Core::MSpaceMallocStatsFast(m, &sizes));
+	EXPECT_GE(sizes.current_system_size, kCap - 0x1000u);
+	EXPECT_GE(sizes.max_system_size, sizes.current_system_size);
+	// Fresh heap: in-use should be well below capacity so a 2 MiB-class check passes.
+	EXPECT_LT(sizes.current_inuse_size, sizes.current_system_size);
+	EXPECT_GE(sizes.current_system_size, 0x200000u > kCap ? 0u : 0x1000u);
+
+	void* p = MSpaceMalloc(m, 256);
+	EXPECT_NE(p, nullptr);
+	Core::MSpaceSize after {};
+	EXPECT_TRUE(Core::MSpaceMallocStatsFast(m, &after));
+	EXPECT_GE(after.current_inuse_size, sizes.current_inuse_size);
+
+	EXPECT_TRUE(MSpaceFree(m, p));
+	EXPECT_TRUE(MSpaceDestroy(m));
+	delete[] buf;
 }
 
 UT_END();

@@ -284,6 +284,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->format        = image_info.format;
 	vk_obj->image         = nullptr;
 	vk_obj->layout        = image_info.initialLayout;
+	vk_obj->guest_size    = *size;
 
 	for (auto& view: vk_obj->image_view)
 	{

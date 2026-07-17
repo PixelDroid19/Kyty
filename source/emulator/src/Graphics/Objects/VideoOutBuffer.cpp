@@ -49,6 +49,14 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	auto width  = params[VideoOutBufferObject::PARAM_WIDTH];
 	auto height = params[VideoOutBufferObject::PARAM_HEIGHT];
 
+	// Tiled VideoOut buffers are GPU render targets. Uploading registered guest
+	// memory makes first GPU passes LOAD stale CPU contents before the renderer
+	// has produced the image. Decision is centralized for unit characterization.
+	if (!VideoOutBufferShouldCpuUploadOnUpdate(tiled))
+	{
+		return;
+	}
+
 	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	if (tiled && buffer_is_tiled(*vaddr, *size))
@@ -123,8 +131,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	image_info.format        = vk_obj->format;
 	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
 	image_info.initialLayout = vk_obj->layout;
-	image_info.usage         = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT) |
-	                   VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	image_info.usage         = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+	                                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 	image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	image_info.samples     = VK_SAMPLE_COUNT_1_BIT;
 
@@ -173,7 +181,21 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]);
 
+	create_info.components.r = VK_COMPONENT_SWIZZLE_B;
+	create_info.components.g = VK_COMPONENT_SWIZZLE_G;
+	create_info.components.b = VK_COMPONENT_SWIZZLE_R;
+	create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_BGRA]);
+
+	create_info.components.r = VK_COMPONENT_SWIZZLE_A;
+	create_info.components.g = VK_COMPONENT_SWIZZLE_B;
+	create_info.components.b = VK_COMPONENT_SWIZZLE_G;
+	create_info.components.a = VK_COMPONENT_SWIZZLE_R;
+	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ABGR]);
+
 	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
+	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_BGRA] == nullptr);
+	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_ABGR] == nullptr);
 
 	return vk_obj;
 }
@@ -192,7 +214,13 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 		DeleteFramebuffer(vk_obj);
 	}
 
-	vkDestroyImageView(ctx->device, vk_obj->image_view[VulkanImage::VIEW_DEFAULT], nullptr);
+	for (auto view: vk_obj->image_view)
+	{
+		if (view != nullptr)
+		{
+			vkDestroyImageView(ctx->device, view, nullptr);
+		}
+	}
 
 	vkDestroyImage(ctx->device, vk_obj->image, nullptr);
 

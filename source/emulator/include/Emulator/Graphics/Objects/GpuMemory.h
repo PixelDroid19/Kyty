@@ -72,6 +72,92 @@ inline GpuMemoryOverlapType GpuMemoryReverseOverlap(GpuMemoryOverlapType relatio
 	return GpuMemoryOverlapType::None;
 }
 
+// Non-exact FindObjects relations for sample→RT aliasing.
+// GetOverlapType(existing, query):
+//   IsContainedWithin = existing RT sits inside the sample query
+//   Contains          = sample sits inside an existing live RT
+// PreferGpuMemoryAliasIndex selects among multiple matches; do not EXIT on
+// Size()>1 (that historically soft-locked / aborted boot). Accept Contains
+// for both same-base size-mismatch and offset-into-parent samples so the
+// sampler binds the live RT instead of tile-27-uploading empty GPU-owned
+// guest memory (opaque-black props). Cropped VkImageView for offset UVs is
+// a separate follow-up; binding the parent image is still correct content.
+// Crosses rejected (partial overlap / wrong-sized bind).
+inline bool GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType relation, bool exact, bool same_base = false)
+{
+	(void)same_base;
+	if (relation == GpuMemoryOverlapType::Equals)
+	{
+		return true;
+	}
+	if (exact)
+	{
+		return false;
+	}
+	if (relation == GpuMemoryOverlapType::IsContainedWithin)
+	{
+		return true;
+	}
+	return relation == GpuMemoryOverlapType::Contains;
+}
+
+// When non-exact FindRenderTexture returns multiple overlapping GPU images for
+// one sample bind, prefer the tightest cover: smallest object_size that still
+// covers sample_size. If every object is smaller than the sample
+// (IsContainedWithin-only set), prefer the largest object under the sample.
+// Call sites should pass guest allocation bytes (VulkanImage::guest_size vs
+// sample size.size) when every match recorded them; otherwise a same-unit
+// proxy such as pixel area. sample_size == 0 means "prefer the smallest
+// object" and must not be used at the sample-bind call site.
+// Inventing a new GPU image or falling through to guest-memory upload here
+// previously painted opaque-black props; aborting on Size()>1 killed boot.
+[[nodiscard]] inline size_t PreferGpuMemoryAliasIndex(const uint64_t* object_sizes, size_t count, uint64_t sample_size)
+{
+	if (object_sizes == nullptr || count == 0)
+	{
+		return 0;
+	}
+	if (sample_size == 0)
+	{
+		size_t best = 0;
+		for (size_t i = 1; i < count; i++)
+		{
+			if (object_sizes[i] < object_sizes[best])
+			{
+				best = i;
+			}
+		}
+		return best;
+	}
+	size_t best_cover = 0;
+	bool   have_cover = false;
+	for (size_t i = 0; i < count; i++)
+	{
+		if (object_sizes[i] < sample_size)
+		{
+			continue;
+		}
+		if (!have_cover || object_sizes[i] < object_sizes[best_cover])
+		{
+			best_cover = i;
+			have_cover = true;
+		}
+	}
+	if (have_cover)
+	{
+		return best_cover;
+	}
+	size_t best = 0;
+	for (size_t i = 1; i < count; i++)
+	{
+		if (object_sizes[i] > object_sizes[best])
+		{
+			best = i;
+		}
+	}
+	return best;
+}
+
 // A texture-backed storage view is a distinct GPU object that may share the
 // same allocation. Keep this policy explicit: only the relations observed in
 // the Gen5 resource stream are accepted, while other containment directions
@@ -166,16 +252,53 @@ inline bool GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType existing_type
 	        relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals);
 }
 
+// Incoming VertexBuffer overlapping an existing IndexBuffer. Captured after
+// WaitRegMem64 advance: Texture Contains + IndexBuffer Crosses a new VB
+// (0x480 under Texture 0x150000, IB 0xf0). Link the IB — do not reclaim it.
+inline bool GpuMemoryAllowsVertexLinkIndexBuffer(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                 GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::IndexBuffer && incoming_type == GpuMemoryObjectType::VertexBuffer &&
+	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
+	        relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals);
+}
+
+// Peer IndexBuffer overlapping an incoming IndexBuffer: reclaim the older IB.
+// Captured multi-parent: old IB IsContainedWithin (0xe4 under new 0xfc) + VB
+// Contains the new IndexBuffer.
+inline bool GpuMemoryAllowsIndexReclaimIndex(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                            GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::IndexBuffer && incoming_type == GpuMemoryObjectType::IndexBuffer &&
+	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
+	        relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals);
+}
+
+// Incoming IndexBuffer covered by an existing VertexBuffer. Link the VB —
+// same family as VertexLinkIndexBuffer (inverse create direction).
+inline bool GpuMemoryAllowsIndexLinkVertexBuffer(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::VertexBuffer && incoming_type == GpuMemoryObjectType::IndexBuffer &&
+	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
+	        relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals);
+}
+
 // Incoming Texture overlapping existing StorageBuffer/RenderTexture/Texture.
 // Used with multi-parent Texture create that also reclaims VertexBuffers.
 // Captured: SB/RT Contains + SB/RT IsContainedWithin (larger texture over a
-// second surface pair); Texture Crosses peer Texture.
+// second surface pair); Texture Crosses peer Texture; exact VideoOutBuffer view
+// when a display allocation is also registered as StorageBuffer.
 inline bool GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                      GpuMemoryObjectType incoming_type)
 {
 	if (incoming_type != GpuMemoryObjectType::Texture)
 	{
 		return false;
+	}
+	if (existing_type == GpuMemoryObjectType::VideoOutBuffer)
+	{
+		return relation == GpuMemoryOverlapType::Equals;
 	}
 	if (existing_type != GpuMemoryObjectType::StorageBuffer && existing_type != GpuMemoryObjectType::RenderTexture &&
 	    existing_type != GpuMemoryObjectType::StorageTexture && existing_type != GpuMemoryObjectType::Texture)
@@ -248,6 +371,30 @@ inline bool GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType existing_type
 	}
 	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
 	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
+}
+
+// Keep GpuMemory Label objects linked when a StorageBuffer aliases their fence
+// words. Deleting Labels removes them from LabelWriteBackCopy's hole set, so a
+// later StorageBuffer WriteBack can zero guest EOP fences (immediate store /
+// FireCallbacks publish) and leave CPU code spinning with val=0 — guest then
+// never reaches KernelSetEventFlag(ThreadFlag). Captured Dead Cells soft-lock:
+// EVENTFLAG_SET=0 while OnlyFlip still presents.
+inline bool GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                           GpuMemoryObjectType incoming_type)
+{
+	if (existing_type == GpuMemoryObjectType::Label && incoming_type == GpuMemoryObjectType::StorageBuffer)
+	{
+		return relation == GpuMemoryOverlapType::IsContainedWithin || relation == GpuMemoryOverlapType::Equals ||
+		       relation == GpuMemoryOverlapType::Crosses;
+	}
+	// Creating a Label inside an existing StorageBuffer: link both so the Label
+	// stays registered for WriteBack holes (do not reclaim the StorageBuffer).
+	if (existing_type == GpuMemoryObjectType::StorageBuffer && incoming_type == GpuMemoryObjectType::Label)
+	{
+		return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals ||
+		       relation == GpuMemoryOverlapType::Crosses;
+	}
+	return false;
 }
 
 // WriteBack (GPU -> CPU) hash bookkeeping for aliased objects.
@@ -362,7 +509,7 @@ public:
 	using update_func_t     = void (*)(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size,
                                    int vaddr_num);
 
-	static constexpr int PARAMS_MAX = 8;
+	static constexpr int PARAMS_MAX = 10;
 
 	GpuObject()          = default;
 	virtual ~GpuObject() = default;
@@ -389,7 +536,7 @@ void GpuMemoryInit();
 // Guest malloc/operator new are forwarded to the host allocator, so titles may
 // put small V#/I# bases in the host userspace heap (Linux ~0x7f00…–0x8000…).
 // Those ranges never go through MapDirectMemory and are not GPU heaps until
-// CreateObject lazily covers them.
+// CreateObject lazily covers them. Pure predicate for tests and call sites.
 [[nodiscard]] inline bool GpuMemoryIsHostGuestMallocRange(uint64_t vaddr, uint64_t size)
 {
 	if (size == 0 || vaddr == 0)
@@ -401,11 +548,13 @@ void GpuMemoryInit();
 	{
 		return false; // overflow
 	}
+	// Match LibC CxaGuestPtrLooksMapped host-heap band used for guest new.
 	constexpr uint64_t kHostHeapLo = 0x7f0000000000ull;
 	constexpr uint64_t kHostHeapHi = 0x800000000000ull;
 	return vaddr >= kHostHeapLo && end <= kHostHeapHi;
 }
 
+// Page-aligned cover used when lazily registering a host-malloc range as a heap.
 inline void GpuMemoryHostGuestMallocPageCover(uint64_t vaddr, uint64_t size, uint64_t* out_start, uint64_t* out_size)
 {
 	constexpr uint64_t kPage = 0x1000ull;
@@ -433,6 +582,10 @@ void  GpuMemoryFlush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 void  GpuMemoryFlushAll(GraphicContext* ctx);
 void  GpuMemoryFrameDone();
 void  GpuMemoryWriteBack(GraphicContext* ctx, CommandProcessor* cp);
+// GPU→CPU for StorageBuffers overlapping [vaddr, size) before a CPU texture
+// upload. Tile-27 samples that miss RT/ST still link SB parents; without this
+// detile reads empty guest memory and paints opaque-black props.
+void  GpuMemoryWriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 bool  GpuMemoryCheckAccessViolation(uint64_t vaddr, uint64_t size);
 bool  GpuMemoryWatcherEnabled();
 

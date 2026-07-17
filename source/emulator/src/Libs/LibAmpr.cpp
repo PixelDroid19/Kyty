@@ -9,7 +9,6 @@
 #include "Kyty/Core/Threads.h"
 
 #include <cinttypes>
-#include <climits>
 #include <cstring>
 #include <ctime>
 #include <unordered_map>
@@ -37,6 +36,7 @@ constexpr uint64_t kOffAux1        = 0x20;
 constexpr uint64_t kReadFileRecordSize         = 0x30;
 constexpr uint64_t kKernelEventQueueRecordSize = 0x30;
 constexpr uint64_t kWriteAddressRecordSize     = 0x20;
+constexpr uint64_t kWriteCounterRecordSize     = 0x20;
 constexpr uint32_t kWriteAddressRecordType     = 3;
 
 struct CommandBufferState
@@ -101,6 +101,11 @@ static void UpdateState(uint64_t cmd, uint64_t data, uint64_t size, uint64_t wri
 	g_buffers[cmd]  = st;
 }
 
+// Eager Ampr builders append fixed-size records into a fixed guest pool
+// (observed global buffer size 0x400). The guest may issue more builders than
+// fit without calling AprSubmit; host never drains write_offset. When the next
+// record would overflow, wrap to 0 so completed eager side-effects (file reads,
+// address stores, equeue wakes) still report success.
 static bool EnsureStreamSpace(CommandBufferState* st, uint64_t record_size)
 {
 	if (st == nullptr || record_size == 0)
@@ -162,6 +167,25 @@ static KYTY_SYSV_ABI uint64_t MeasureCommandSizeWriteAddressOnCompletion()
 {
 	PRINT_NAME();
 	return kWriteAddressRecordSize;
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeWriteKernelEventQueueOnCompletion()
+{
+	PRINT_NAME();
+	return kKernelEventQueueRecordSize;
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeWriteCounterOnCompletion()
+{
+	PRINT_NAME();
+	return kWriteCounterRecordSize;
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFileGather()
+{
+	PRINT_NAME();
+	// Same payload footprint as a single ReadFile record until gather layout is evidenced.
+	return kReadFileRecordSize;
 }
 
 // --- command buffer lifecycle ------------------------------------------------
@@ -341,6 +365,23 @@ static KYTY_SYSV_ABI uint64_t CommandBufferGetCurrentOffset(void* cmd_obj)
 	return st.write_offset;
 }
 
+// sceAmprCommandBufferGetNumCommands (NID gzndltBEzWc). Same ABI as GetSize:
+// count in RAX. Report drained/empty so poll-until-zero callers proceed.
+static KYTY_SYSV_ABI uint64_t CommandBufferGetNumCommands(void* cmd_obj)
+{
+	PRINT_NAME();
+	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
+	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	if (cmd == 0)
+	{
+		return 0;
+	}
+	return 0;
+}
+
+// sceAmprAprCommandBufferReadFile(cmd, a1, a2, file_id, dest, size, file_offset)
+// Reads host file bytes into guest dest and appends a fixed-size ReadFile record
+// to the command buffer stream (measure size 0x30).
 static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/, uint64_t /*a2*/, uint32_t file_id, void* dest,
                                                   uint64_t size, uint64_t file_offset)
 {
@@ -361,9 +402,6 @@ static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/
 	if (!LibKernel::FileSystem::AprTryGetHostPath(file_id, &host_path))
 	{
 		printf("\t unknown APR file id\n");
-		// #region agent log
-		{FILE*f=fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log","a");if(f){fprintf(f,"{\"sessionId\":\"f08e58\",\"runId\":\"post-fix\",\"hypothesisId\":\"P\",\"location\":\"LibAmpr.cpp:AprCommandBufferReadFile\",\"message\":\"unknown file id\",\"data\":{\"file_id\":%u},\"timestamp\":%lld}\n",file_id,(long long)time(nullptr)*1000);fclose(f);}}
-		// #endregion
 		return LibKernel::KERNEL_ERROR_ENOENT;
 	}
 
@@ -408,13 +446,16 @@ static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/
 		WriteU64(record + 0x10, reinterpret_cast<uint64_t>(dest));
 		WriteU64(record + 0x18, size);
 		WriteU64(record + 0x20, file_offset);
-		WriteU64(record + 0x28, size);
+		WriteU64(record + 0x28, size); // bytes_read
 		std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(st.data + st.write_offset)), record, kReadFileRecordSize);
 	}
 	UpdateState(cmd, st.data, st.size, st.write_offset + kReadFileRecordSize);
 	return OK;
 }
 
+// sceAmprCommandBufferWriteAddressOnCompletion(cmd, address, value)
+// Eagerly stores value at address (same eager model as ReadFile) and appends a
+// 0x20 completion record. NID/name from PS5 libSceAmpr stubs (sJXyWHjP-F8).
 static KYTY_SYSV_ABI int CommandBufferWriteAddressOnCompletion(void* cmd_obj, uint64_t* address, uint64_t value)
 {
 	PRINT_NAME();
@@ -452,6 +493,10 @@ static KYTY_SYSV_ABI int CommandBufferWriteAddressOnCompletion(void* cmd_obj, ui
 	return OK;
 }
 
+// sceAmprCommandBufferWriteKernelEventQueueOnCompletion (o67gODLFpls)
+// Eager model (same as ReadFile / WriteAddressOnCompletion): append the record
+// and wake the Ampr equeue registration immediately. Real hardware defers this
+// until AprSubmit; sync HLE is enough while submit remains unimplemented.
 static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cmd_obj, void* equeue, uint64_t ident,
                                                                         uint64_t completion_token, uint64_t user_data)
 {
@@ -485,7 +530,8 @@ static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cm
 			std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(st.data + st.write_offset)), record, kKernelEventQueueRecordSize);
 		}
 		UpdateState(cmd, st.data, st.size, st.write_offset + kKernelEventQueueRecordSize);
-	} else
+	}
+	else
 	{
 		printf("\t command stream too small for records (equeue wake still runs)\n");
 	}
@@ -504,16 +550,71 @@ static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cm
 	return OK;
 }
 
-static KYTY_SYSV_ABI uint64_t CommandBufferGetNumCommands(void* cmd_obj)
+// --- Gen5 measure / marker / nop helpers (sizing + no-op builders) ------------
+// Fixed sizes match the public Ampr command-stream packing used to size DCBs
+// before append. Markers/nops do not affect host state under the eager model.
+
+constexpr uint64_t kMeasureFixed32Size = 0x20;
+constexpr uint64_t kPopMarkerSize      = 0x4;
+constexpr uint64_t kMapBeginSize       = 0x30;
+
+static uint64_t AlignUp4(uint64_t n)
+{
+	return (n + 3u) & ~uint64_t {3};
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeFixed32(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
 {
 	PRINT_NAME();
-	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
-	if (cmd == 0)
-	{
-		return 0;
-	}
-	return 0;
+	return kMeasureFixed32Size;
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeNop(uint32_t num_u32)
+{
+	PRINT_NAME();
+	return num_u32 == 0 ? sizeof(uint32_t) : AlignUp4(static_cast<uint64_t>(num_u32) * sizeof(uint32_t));
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeNopWithData(uint32_t num_u32, const uint32_t*)
+{
+	PRINT_NAME();
+	return AlignUp4((static_cast<uint64_t>(num_u32) + 1u) * sizeof(uint32_t));
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeMarker(const char* msg)
+{
+	PRINT_NAME();
+	const uint64_t len = (msg != nullptr) ? std::strlen(msg) + 1u : 1u;
+	return AlignUp4(0x10u + len);
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeMarkerWithColor(const char* msg, uint32_t)
+{
+	return MeasureCommandSizeMarker(msg);
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizePopMarker()
+{
+	PRINT_NAME();
+	return kPopMarkerSize;
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFileScatter(uint64_t, uint64_t)
+{
+	PRINT_NAME();
+	return kReadFileRecordSize;
+}
+
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFileGatherScatter(uint64_t, uint64_t, uint64_t)
+{
+	PRINT_NAME();
+	return kReadFileRecordSize;
+}
+
+static KYTY_SYSV_ABI int64_t MeasureAprCommandSizeMapBegin(uint64_t, uint64_t, int32_t, int32_t)
+{
+	PRINT_NAME();
+	return static_cast<int64_t>(kMapBeginSize);
 }
 
 static KYTY_SYSV_ABI int CommandBufferMarkerNoOp(void* cmd_obj)
@@ -576,6 +677,7 @@ static KYTY_SYSV_ABI int AprCommandBufferMapEnd(void* cmd_obj)
 
 static KYTY_SYSV_ABI int AprCommandBufferReadFileGather(void* cmd_obj, uint64_t, uint64_t, uint32_t, void*, uint64_t, uint64_t)
 {
+	// Gather is not yet decoded; acknowledge sizing-only callers.
 	return CommandBufferMarkerNoOp(cmd_obj);
 }
 
@@ -589,6 +691,9 @@ static KYTY_SYSV_ABI int AprCommandBufferResetGatherScatterState(void* cmd_obj)
 	return CommandBufferMarkerNoOp(cmd_obj);
 }
 
+// sceAmprAmmSubmitCommandBuffer / SubmitCommandBuffer2 / WaitCommandBufferCompletion.
+// Builder APIs apply work eagerly (ReadFile, address/equeue completion). Hardware
+// defers until submit; sync HLE acknowledges submit/wait with nothing left to drain.
 static KYTY_SYSV_ABI int AmmSubmitCommandBuffer(void* cmd_obj)
 {
 	PRINT_NAME();
@@ -618,39 +723,39 @@ static KYTY_SYSV_ABI int AmmWaitCommandBufferCompletion(void* cmd_obj)
 	return OK;
 }
 
-// Residual Ampr NIDs observed after measure APIs on the second private title.
-// Names not yet triangulated; log args and return success so boot can proceed
-// to the next evidenced fail. Replace with named contracts when known.
-static KYTY_SYSV_ABI int AmprLogAndOk(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
-{
-	PRINT_NAME();
-	printf("\t a0 = 0x%016" PRIx64 "\n", a0);
-	printf("\t a1 = 0x%016" PRIx64 "\n", a1);
-	printf("\t a2 = 0x%016" PRIx64 "\n", a2);
-	printf("\t a3 = 0x%016" PRIx64 "\n", a3);
-	return OK;
-}
-
-static KYTY_SYSV_ABI uint64_t AmprLogAndReturn0(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
-{
-	PRINT_NAME();
-	printf("\t a0 = 0x%016" PRIx64 "\n", a0);
-	printf("\t a1 = 0x%016" PRIx64 "\n", a1);
-	printf("\t a2 = 0x%016" PRIx64 "\n", a2);
-	printf("\t a3 = 0x%016" PRIx64 "\n", a3);
-	return 0;
-}
-
 } // namespace Ampr
 
 LIB_DEFINE(InitAmpr_1)
 {
-	// Measure (fixed record sizes)
+	// Measure APIs — NIDs from libSceAmpr stubs.
 	LIB_FUNC("vWU-odnS+fU", Ampr::MeasureCommandSizeReadFile);
 	LIB_FUNC("sSAUCCU1dv4", Ampr::MeasureCommandSizeWriteKernelEventQueue0400);
 	LIB_FUNC("C+IEj+BsAFM", Ampr::MeasureCommandSizeWriteAddressOnCompletion);
+	LIB_FUNC("Zi3dBUjgyXI", Ampr::MeasureCommandSizeWriteKernelEventQueueOnCompletion);
+	LIB_FUNC("4muPEJ-x5N8", Ampr::MeasureCommandSizeWriteCounterOnCompletion);
+	LIB_FUNC("qesF88X4DRg", Ampr::MeasureCommandSizeReadFileGather);
+	LIB_FUNC("7nXGDGMXSqo", Ampr::MeasureCommandSizeReadFileScatter);
+	LIB_FUNC("DXmgc5op8Yw", Ampr::MeasureCommandSizeReadFileGatherScatter);
+	LIB_FUNC("0BMj1hgG+kE", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("ClnsFLLLcss", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("4fgtGfXDrFc", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("gAtc79UTt5E", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("JYd9g9L+TmE", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("2Hw8gjMdwSY", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("I-Qm+MEso5c", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("NNIZ-FMyz3M", Ampr::MeasureCommandSizeNop);
+	LIB_FUNC("Xp85BP3+BBI", Ampr::MeasureCommandSizeNopWithData);
+	LIB_FUNC("VGkEj4d6-Kg", Ampr::MeasureCommandSizeMarker);
+	LIB_FUNC("0RdLmAh7WVo", Ampr::MeasureCommandSizeMarker);
+	LIB_FUNC("tmfr97+ED5I", Ampr::MeasureCommandSizeMarkerWithColor);
+	LIB_FUNC("3OfeY4pzDV0", Ampr::MeasureCommandSizeMarkerWithColor);
+	LIB_FUNC("iwTNhyaemnw", Ampr::MeasureCommandSizePopMarker);
+	LIB_FUNC("pbnNnahE8vk", Ampr::MeasureCommandSizePopMarker);
+	LIB_FUNC("rddQYXM0CjM", Ampr::MeasureCommandSizePopMarker);
+	LIB_FUNC("kdFImtTD0hc", Ampr::MeasureAprCommandSizeMapBegin);
+	LIB_FUNC("qvbdJc7bG+s", Ampr::MeasureAprCommandSizeMapBegin);
 
-	// Command buffer lifecycle (public export names / ABI from Gen5 usage)
+	// Command buffer lifecycle
 	LIB_FUNC("8aI7R7WaOlc", Ampr::CommandBufferConstructor);
 	LIB_FUNC("a8uLzYY--tM", Ampr::AprCommandBufferConstructor);
 	LIB_FUNC("GuchCTefuZw", Ampr::CommandBufferDestructor);
@@ -682,6 +787,7 @@ LIB_DEFINE(InitAmpr_1)
 	LIB_FUNC("H896Pt-yB4I", Ampr::CommandBufferMarkerNoOp3);
 	LIB_FUNC("BVmR1H8l+XI", Ampr::CommandBufferMarkerNoOp4);
 
+	// APR / completion builders
 	LIB_FUNC("mQ16-QdKv7k", Ampr::AprCommandBufferReadFile);
 	LIB_FUNC("mZSbNJVJpV8", Ampr::AprCommandBufferReadFileGather);
 	LIB_FUNC("Jg-AgkdJHkk", Ampr::AprCommandBufferReadFileScatter);
@@ -691,14 +797,11 @@ LIB_DEFINE(InitAmpr_1)
 	LIB_FUNC("X169CE6G3Y4", Ampr::AprCommandBufferMapEnd);
 	LIB_FUNC("sJXyWHjP-F8", Ampr::CommandBufferWriteAddressOnCompletion);
 	LIB_FUNC("o67gODLFpls", Ampr::CommandBufferWriteKernelEventQueueOnCompletion);
+
+	// AMM submit/wait (NID map: lwS-7y3jcBI / OJf3vCckPAM / HXymib4T8gc)
 	LIB_FUNC("lwS-7y3jcBI", Ampr::AmmSubmitCommandBuffer);
 	LIB_FUNC("OJf3vCckPAM", Ampr::AmmSubmitCommandBuffer2);
 	LIB_FUNC("HXymib4T8gc", Ampr::AmmWaitCommandBufferCompletion);
-
-	// Residual NIDs from second-title import stream (after measure APIs)
-	LIB_FUNC("Zi3dBUjgyXI", Ampr::AmprLogAndOk);
-	LIB_FUNC("4muPEJ-x5N8", Ampr::AmprLogAndOk);
-	LIB_FUNC("qesF88X4DRg", Ampr::AmprLogAndReturn0);
 }
 
 } // namespace Kyty::Libs

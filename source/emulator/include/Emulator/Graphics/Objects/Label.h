@@ -58,12 +58,27 @@ public:
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
 
+class CommandProcessor;
+
 Label* LabelCreate64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelGpuObject::callback_t callback_1,
                      LabelGpuObject::callback_t callback_2, const uint64_t* args);
 Label* LabelCreate32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value, LabelGpuObject::callback_t callback_1,
                      LabelGpuObject::callback_t callback_2, const uint64_t* args);
 void   LabelDelete(Label* label);
 void   LabelSet(CommandBuffer* buffer, Label* label);
+void   LabelDrainCompleted();
+// After CommandProcessor::BufferFlush waits on submitted fences, force-complete
+// Active and ActiveDeleted labels for that CP (see LabelForceCompleteActionFor).
+// MoltenVK/host often never observes vkCmdSetEvent via vkGetEventStatus; relying
+// only on event polling skips WriteBack/OnlyFlip SubmitFlip and leaves WaitRegMem
+// spinning or Flip queues empty (guest ThreadFlag soft-lock).
+void LabelCompleteSubmitted(CommandProcessor* cp);
+// StorageBuffer GPU→CPU write-back must not clobber EOP fence words: copy with
+// holes for every Label dst still registered or pending deferred Destroy
+// (preserves immediate publish, completed stores, and guest resets). Blind
+// memcpy zeroed fences after GpuMemory deleted Label⊂StorageBuffer aliases
+// (guest never reached KernelSetEventFlag(ThreadFlag); EVENTFLAG_SET=0).
+void LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size);
 
 } // namespace Kyty::Libs::Graphics
 

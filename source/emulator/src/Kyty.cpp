@@ -11,9 +11,12 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Audio.h"
+#include "Emulator/Agent/AgentSubsystem.h"
 #include "Emulator/Common.h"
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
+#include "Emulator/DevTools/Runtime.h"
+#include "Emulator/DevTools/RuntimeSubsystem.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Window.h"
@@ -82,6 +85,7 @@ static void Init(const Scripts::ScriptVar& cfg)
 	auto* slist = Core::SubsystemsList::Instance();
 
 	auto* audio       = Libs::Audio::AudioSubsystem::Instance();
+	auto* agent       = Emulator::Agent::AgentToolsSubsystem::Instance();
 	auto* config      = Config::ConfigSubsystem::Instance();
 	auto* controller  = Libs::Controller::ControllerSubsystem::Instance();
 	auto* core        = Core::CoreSubsystem::Instance();
@@ -92,6 +96,7 @@ static void Init(const Scripts::ScriptVar& cfg)
 	auto* network     = Libs::Network::NetworkSubsystem::Instance();
 	auto* profiler    = Profiler::ProfilerSubsystem::Instance();
 	auto* pthread     = Libs::LibKernel::PthreadSubsystem::Instance();
+	auto* runtime     = DevTools::RuntimeDiagnosticsSubsystem::Instance();
 	auto* scripts     = Scripts::ScriptsSubsystem::Instance();
 	auto* timer       = Loader::Timer::TimerSubsystem::Instance();
 
@@ -101,14 +106,16 @@ static void Init(const Scripts::ScriptVar& cfg)
 	Config::Load(cfg);
 
 	slist->Add(audio, {core, log, pthread, memory});
+	slist->Add(agent, {core, controller, graphics});
 	slist->Add(controller, {core, log, config});
 	slist->Add(file_system, {core, log, pthread});
-	slist->Add(graphics, {core, log, pthread, memory, config, profiler, controller});
+	slist->Add(graphics, {core, log, pthread, memory, config, profiler, controller, runtime});
 	slist->Add(log, {core, config});
 	slist->Add(memory, {core, log});
 	slist->Add(network, {core, log, pthread});
 	slist->Add(profiler, {core, config});
-	slist->Add(pthread, {core, log, timer});
+	slist->Add(pthread, {core, log, timer, runtime});
+	slist->Add(runtime, {core});
 	slist->Add(timer, {core, log});
 
 	slist->InitAll(true);
@@ -255,6 +262,18 @@ KYTY_SCRIPT_FUNC(kyty_load_param_sfo_func)
 	{
 		Loader::SystemContentLoadParamSfo(Scripts::ArgGetVar(0).ToString());
 	}
+
+	return 0;
+}
+
+KYTY_SCRIPT_FUNC(kyty_load_param_json_func)
+{
+	if (Scripts::ArgGetVarCount() != 1)
+	{
+		EXIT("invalid args\n");
+	}
+
+	Loader::SystemContentLoadParamJson(Scripts::ArgGetVar(0).ToString());
 
 	return 0;
 }
@@ -435,6 +454,7 @@ void kyty_reg()
 	Scripts::RegisterFunc("kyty_load_symbols", LuaFunc::kyty_load_symbols_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_load_symbols_all", LuaFunc::kyty_load_symbols_all_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_load_param_sfo", LuaFunc::kyty_load_param_sfo_func, LuaFunc::kyty_help);
+	Scripts::RegisterFunc("kyty_load_param_json", LuaFunc::kyty_load_param_json_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_dbg_dump", LuaFunc::kyty_dbg_dump_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_execute", LuaFunc::kyty_execute_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_mount", LuaFunc::kyty_mount_func, LuaFunc::kyty_help);

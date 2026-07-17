@@ -7,7 +7,14 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
+
+#include <atomic>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -61,9 +68,13 @@ public:
 	                LabelGpuObject::callback_t callback_2, const uint64_t* args);
 	void   Delete(Label* label);
 	void   Set(CommandBuffer* buffer, Label* label);
+	void   DrainCompleted();
+	void   CompleteSubmitted(CommandProcessor* cp);
+	void   WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size);
 
 private:
 	static void ThreadRun(void* data);
+	static void FireCallbacks(const Vector<LabelCallbacks>& fired_labels);
 
 	bool        Remove(Label* label);
 	static void Destroy(Label* label);
@@ -71,9 +82,140 @@ private:
 	Core::Mutex    m_mutex;
 	Core::CondVar  m_cond_var;
 	Vector<Label*> m_labels;
+	// OnlyFlip ActiveDeleted labels force-completed under BufferFlush: destroy
+	// here (Label thread) so GraphicsRunCommandProcessorWait is not nested under
+	// the CommandProcessor mutex.
+	Vector<Label*> m_deferred_destroy;
+	// Durable WriteBack holes for fence addresses that have ever been a Label
+	// dst. Survives GpuMemory Label reclaim / delete so StorageBuffer WriteBack
+	// cannot zero guest EOP words after the Label object is gone.
+	Vector<uint64_t> m_fence_hole_begin;
+	Vector<uint64_t> m_fence_hole_end;
+
+	void RegisterFenceHole(uint64_t addr, uint64_t bytes);
 };
 
 static LabelManager* g_label_manager = nullptr;
+
+void LabelManager::RegisterFenceHole(uint64_t addr, uint64_t bytes)
+{
+	EXIT_IF(bytes == 0);
+	for (int i = 0; i < static_cast<int>(m_fence_hole_begin.Size()); i++)
+	{
+		if (m_fence_hole_begin.At(i) == addr && (m_fence_hole_end.At(i) - m_fence_hole_begin.At(i)) == bytes)
+		{
+			return;
+		}
+	}
+	m_fence_hole_begin.Add(addr);
+	m_fence_hole_end.Add(addr + bytes);
+}
+
+void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
+{
+	static const bool eop_trace = (std::getenv("KYTY_EOP_TRACE") != nullptr);
+	Vector<bool>      allow_store;
+
+	// Phase 1: side effects that may write guest memory (WriteBack / GDS).
+	// Defer EOP stores so a later WriteBack cannot zero an earlier fence
+	// (WaitRegMem64 timeout val=0 ref=1).
+	for (auto& label: fired_labels)
+	{
+		bool write = true;
+		if (label.callback_1 != nullptr)
+		{
+			write = label.callback_1(label.args);
+		}
+		allow_store.Add(write);
+	}
+
+	// Phase 2: publish EOP fence values after all WriteBacks.
+	for (int i = 0; i < static_cast<int>(fired_labels.Size()); i++)
+	{
+		if (!allow_store.At(i))
+		{
+			continue;
+		}
+		auto& label = fired_labels.At(i);
+		if (label.dst_gpu_addr64 != nullptr)
+		{
+			*label.dst_gpu_addr64 = label.value64;
+
+			printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%016" PRIx64 "\n" FG_DEFAULT,
+			       reinterpret_cast<uint64_t>(label.dst_gpu_addr64), label.value64);
+		}
+
+		if (label.dst_gpu_addr32 != nullptr)
+		{
+			*label.dst_gpu_addr32 = label.value32;
+
+			printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%08" PRIx32 "\n" FG_DEFAULT,
+			       reinterpret_cast<uint64_t>(label.dst_gpu_addr32), label.value32);
+		}
+	}
+
+	// Phase 3: interrupts / flips that depend on fence memory being visible.
+	uint32_t interrupt_cbs = 0;
+	for (auto& label: fired_labels)
+	{
+		if (label.callback_2 != nullptr)
+		{
+			interrupt_cbs++;
+			label.callback_2(label.args);
+		}
+	}
+
+	if (eop_trace && !fired_labels.IsEmpty())
+	{
+		static std::atomic<uint32_t> fire_logs {0};
+		const uint32_t               n = fire_logs.fetch_add(1);
+		if (n < 128u)
+		{
+			uint32_t fence32 = 0;
+			uint32_t fence64 = 0;
+			uint32_t flip_only = 0;
+			for (int i = 0; i < static_cast<int>(fired_labels.Size()); i++)
+			{
+				const auto& label = fired_labels.At(i);
+				if (label.dst_gpu_addr64 != nullptr)
+				{
+					fence64++;
+				} else if (label.dst_gpu_addr32 != nullptr)
+				{
+					fence32++;
+				} else if (label.callback_1 != nullptr)
+				{
+					flip_only++;
+				}
+			}
+			std::fprintf(stderr,
+			             "EOP_FIRE labels=%u interrupt_cbs=%u fence32=%u fence64=%u flip_only=%u\n",
+			             static_cast<unsigned>(fired_labels.Size()), interrupt_cbs, fence32, fence64, flip_only);
+			// Last few fires before a present cliff: dump published fence words.
+			if (n >= 96u)
+			{
+				for (int i = 0; i < static_cast<int>(fired_labels.Size()); i++)
+				{
+					if (!allow_store.At(i))
+					{
+						continue;
+					}
+					const auto& label = fired_labels.At(i);
+					if (label.dst_gpu_addr64 != nullptr)
+					{
+						std::fprintf(stderr, "EOP_FENCE64 addr=0x%016" PRIx64 " val=0x%016" PRIx64 "\n",
+						             reinterpret_cast<uint64_t>(label.dst_gpu_addr64), *label.dst_gpu_addr64);
+					}
+					if (label.dst_gpu_addr32 != nullptr)
+					{
+						std::fprintf(stderr, "EOP_FENCE32 addr=0x%016" PRIx64 " val=0x%08" PRIx32 "\n",
+						             reinterpret_cast<uint64_t>(label.dst_gpu_addr32), *label.dst_gpu_addr32);
+					}
+				}
+			}
+		}
+	}
+}
 
 void LabelManager::ThreadRun(void* data)
 {
@@ -86,6 +228,7 @@ void LabelManager::ThreadRun(void* data)
 		int active_count = 0;
 
 		Vector<Label*>         deleted_labels;
+		Vector<Label*>         deferred_destroy;
 		Vector<LabelCallbacks> fired_labels;
 
 		for (auto& label: manager->m_labels)
@@ -108,7 +251,13 @@ void LabelManager::ThreadRun(void* data)
 			}
 		}
 
-		if (active_count == 0)
+		for (auto& label: manager->m_deferred_destroy)
+		{
+			deferred_destroy.Add(label);
+		}
+		manager->m_deferred_destroy.Clear();
+
+		if (active_count == 0 && deferred_destroy.IsEmpty())
 		{
 			manager->m_cond_var.Wait(&manager->m_mutex);
 		}
@@ -125,40 +274,159 @@ void LabelManager::ThreadRun(void* data)
 		{
 			Destroy(label);
 		}
-
-		for (auto& label: fired_labels)
+		for (auto& label: deferred_destroy)
 		{
-			bool write = true;
-
-			if (label.callback_1 != nullptr)
-			{
-				write = label.callback_1(label.args);
-			}
-
-			if (write && label.dst_gpu_addr64 != nullptr)
-			{
-				*label.dst_gpu_addr64 = label.value64;
-
-				printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%016" PRIx64 "\n" FG_DEFAULT,
-				       reinterpret_cast<uint64_t>(label.dst_gpu_addr64), label.value64);
-			}
-
-			if (write && label.dst_gpu_addr32 != nullptr)
-			{
-				*label.dst_gpu_addr32 = label.value32;
-
-				printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%08" PRIx32 "\n" FG_DEFAULT,
-				       reinterpret_cast<uint64_t>(label.dst_gpu_addr32), label.value32);
-			}
-
-			if (label.callback_2 != nullptr)
-			{
-				label.callback_2(label.args);
-			}
+			Destroy(label);
 		}
+
+		FireCallbacks(fired_labels);
 
 		Core::Thread::SleepMicro(100);
 	}
+}
+
+void LabelManager::DrainCompleted()
+{
+	Vector<LabelCallbacks> fired_labels;
+
+	{
+		Core::LockGuard lock(m_mutex);
+
+		for (auto& label: m_labels)
+		{
+			if (label->status == LabelStatus::Active && vkGetEventStatus(label->device, label->event) == VK_EVENT_SET)
+			{
+				label->status = LabelStatus::NotActive;
+				fired_labels.Add(label->callbacks);
+			}
+		}
+	}
+
+	FireCallbacks(fired_labels);
+}
+
+void LabelManager::CompleteSubmitted(CommandProcessor* cp)
+{
+	EXIT_IF(cp == nullptr);
+
+	Vector<LabelCallbacks> fired_labels;
+	Vector<Label*>         destroy_labels;
+
+	{
+		Core::LockGuard lock(m_mutex);
+
+		for (auto& label: m_labels)
+		{
+			if (label->cp != cp)
+			{
+				continue;
+			}
+
+			const auto action = LabelForceCompleteActionFor(label->status == LabelStatus::Active,
+			                                                label->status == LabelStatus::ActiveDeleted);
+			if (action == LabelForceCompleteKind::Skip)
+			{
+				continue;
+			}
+
+			label->status = LabelStatus::NotActive;
+			fired_labels.Add(label->callbacks);
+			if (action == LabelForceCompleteKind::FireDestroy)
+			{
+				destroy_labels.Add(label);
+			}
+		}
+
+		for (auto& label: destroy_labels)
+		{
+			auto index = m_labels.Find(label);
+			EXIT_NOT_IMPLEMENTED(!m_labels.IndexValid(index));
+			m_labels.RemoveAt(index);
+			m_deferred_destroy.Add(label);
+		}
+
+		if (!destroy_labels.IsEmpty())
+		{
+			m_cond_var.Signal();
+		}
+	}
+
+	FireCallbacks(fired_labels);
+}
+
+void LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size)
+{
+	EXIT_IF(guest_dst == nullptr);
+	EXIT_IF(gpu_src == nullptr);
+
+	Vector<uint64_t> hole_begin;
+	Vector<uint64_t> hole_end;
+
+	{
+		Core::LockGuard lock(m_mutex);
+
+		for (int i = 0; i < static_cast<int>(m_fence_hole_begin.Size()); i++)
+		{
+			hole_begin.Add(m_fence_hole_begin.At(i));
+			hole_end.Add(m_fence_hole_end.At(i));
+		}
+
+		auto add_holes = [&](Label* label) {
+			if (label->callbacks.dst_gpu_addr64 != nullptr)
+			{
+				const uint64_t addr = reinterpret_cast<uint64_t>(label->callbacks.dst_gpu_addr64);
+				hole_begin.Add(addr);
+				hole_end.Add(addr + 8u);
+			}
+			if (label->callbacks.dst_gpu_addr32 != nullptr)
+			{
+				const uint64_t addr = reinterpret_cast<uint64_t>(label->callbacks.dst_gpu_addr32);
+				hole_begin.Add(addr);
+				hole_end.Add(addr + 4u);
+			}
+		};
+
+		for (auto& label: m_labels)
+		{
+			add_holes(label);
+		}
+		for (auto& label: m_deferred_destroy)
+		{
+			add_holes(label);
+		}
+	}
+
+	static const bool eop_trace = (std::getenv("KYTY_EOP_TRACE") != nullptr);
+	if (eop_trace)
+	{
+		const auto* dst_bytes = static_cast<const uint8_t*>(guest_dst);
+		const auto* src_bytes = static_cast<const uint8_t*>(gpu_src);
+		const uint64_t base   = reinterpret_cast<uint64_t>(guest_dst);
+		for (int i = 0; i < static_cast<int>(hole_begin.Size()); i++)
+		{
+			const uint64_t a = hole_begin.At(i);
+			const uint64_t b = hole_end.At(i);
+			if (a < base || b > base + size || b <= a || (b - a) > 8u)
+			{
+				continue;
+			}
+			uint64_t before = 0;
+			uint64_t after  = 0;
+			const uint64_t n = b - a;
+			std::memcpy(&before, dst_bytes + (a - base), static_cast<size_t>(n));
+			std::memcpy(&after, src_bytes + (a - base), static_cast<size_t>(n));
+			if (before != 0 && after == 0)
+			{
+				static std::atomic<uint32_t> clobber_logs {0};
+				if (clobber_logs.fetch_add(1) < 32u)
+				{
+					std::fprintf(stderr, "EOP_HOLE_PROTECT addr=0x%016" PRIx64 " keep=0x%016" PRIx64 " would_clobber=0\n", a, before);
+				}
+			}
+		}
+	}
+
+	MemcpySkipAbsoluteRanges(guest_dst, gpu_src, size, hole_begin.GetData(), hole_end.GetData(), static_cast<int>(hole_begin.Size()));
 }
 
 Label* LabelManager::Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelGpuObject::callback_t callback_1,
@@ -185,6 +453,11 @@ Label* LabelManager::Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint6
 	for (int i = 0; i < LABEL_ARGS_MAX; i++)
 	{
 		label->callbacks.args[i] = args[i];
+	}
+
+	if (dst_gpu_addr != nullptr)
+	{
+		RegisterFenceHole(reinterpret_cast<uint64_t>(dst_gpu_addr), 8u);
 	}
 
 	VkEventCreateInfo create_info {};
@@ -225,6 +498,11 @@ Label* LabelManager::Create32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint3
 	for (int i = 0; i < LABEL_ARGS_MAX; i++)
 	{
 		label->callbacks.args[i] = args[i];
+	}
+
+	if (dst_gpu_addr != nullptr)
+	{
+		RegisterFenceHole(reinterpret_cast<uint64_t>(dst_gpu_addr), 4u);
 	}
 
 	VkEventCreateInfo create_info {};
@@ -357,6 +635,27 @@ void LabelSet(CommandBuffer* buffer, Label* label)
 	EXIT_IF(g_label_manager == nullptr);
 
 	g_label_manager->Set(buffer, label);
+}
+
+void LabelDrainCompleted()
+{
+	EXIT_IF(g_label_manager == nullptr);
+
+	g_label_manager->DrainCompleted();
+}
+
+void LabelCompleteSubmitted(CommandProcessor* cp)
+{
+	EXIT_IF(g_label_manager == nullptr);
+
+	g_label_manager->CompleteSubmitted(cp);
+}
+
+void LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size)
+{
+	EXIT_IF(g_label_manager == nullptr);
+
+	g_label_manager->WriteBackCopy(guest_dst, gpu_src, size);
 }
 
 static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,

@@ -176,6 +176,8 @@ static int KYTY_SYSV_ABI SystemServiceGetDisplaySafeAreaInfo(SystemServiceDispla
 	return OK;
 }
 
+// Gen5 HDR display probe (NID mPpPxv5CZt4). Values match a typical SDR-range
+// host window until a real HDR display path is wired.
 struct SystemServiceHdrToneMapLuminance
 {
 	float max_full_frame_tone_map_luminance;
@@ -198,6 +200,8 @@ static int KYTY_SYSV_ABI SystemServiceGetHdrToneMapLuminance(SystemServiceHdrTon
 	return OK;
 }
 
+// sceSystemServiceGetNoticeScreenSkipFlag — NID 3RQ5aQfnstU.
+// Report that the notice screen was not skipped (false).
 static int KYTY_SYSV_ABI SystemServiceGetNoticeScreenSkipFlag(bool* value)
 {
 	PRINT_NAME();
@@ -209,12 +213,14 @@ static int KYTY_SYSV_ABI SystemServiceGetNoticeScreenSkipFlag(bool* value)
 	return OK;
 }
 
+// sceSystemServiceDisableNoticeScreenSkipFlagAutoSet — NID 8Lo6Zv94aho
 static int KYTY_SYSV_ABI SystemServiceDisableNoticeScreenSkipFlagAutoSet()
 {
 	PRINT_NAME();
 	return OK;
 }
 
+// sceSystemServiceSetNoticeScreenSkipFlag — NID Q3utJvma4Mo
 static int KYTY_SYSV_ABI SystemServiceSetNoticeScreenSkipFlag()
 {
 	PRINT_NAME();

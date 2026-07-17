@@ -2,12 +2,23 @@
 #define EMULATOR_INCLUDE_EMULATOR_LIBS_VACONTEXT_H_
 
 #include <cstddef>
+
+#if defined(__x86_64__) || defined(__i386__)
 #include <xmmintrin.h>
+using KytyVaFloat128 = __m128;
+#else
+// This structure models the guest SysV x86-64 register-save area.  The
+// native host only needs its 16-byte floating-point slot to be layout
+// compatible when compiling host-side tests; it must not require x86 SIMD
+// intrinsics on arm64.
+using KytyVaFloat128 = float __attribute__((__vector_size__(16), __aligned__(16)));
+#endif
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define VA_ARGS                                                                                                                            \
-	uint64_t rdi, uint64_t rsi, uint64_t rdx, uint64_t rcx, uint64_t r8, uint64_t r9, uint64_t overflow_arg_area, __m128 xmm0,             \
-	    __m128 xmm1, __m128 xmm2, __m128 xmm3, __m128 xmm4, __m128 xmm5, __m128 xmm6, __m128 xmm7, ...
+	uint64_t rdi, uint64_t rsi, uint64_t rdx, uint64_t rcx, uint64_t r8, uint64_t r9, uint64_t overflow_arg_area, KytyVaFloat128 xmm0,     \
+	    KytyVaFloat128 xmm1, KytyVaFloat128 xmm2, KytyVaFloat128 xmm3, KytyVaFloat128 xmm4, KytyVaFloat128 xmm5, KytyVaFloat128 xmm6,     \
+	    KytyVaFloat128 xmm7, ...
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define VA_CONTEXT(ctx)                                                                                                                    \
@@ -48,7 +59,7 @@ struct VaList
 struct VaRegSave
 {
 	uint64_t gp[6];
-	__m128   fp[8];
+	KytyVaFloat128 fp[8];
 };
 
 struct VaContext

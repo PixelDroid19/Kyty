@@ -45,7 +45,7 @@ if(MINGW)
 	set_target_properties(launcher PROPERTIES LINK_FLAGS "${KYTY_LD_OPTIONS}")
 endif()
 
-add_dependencies(launcher KytyGitVersion)  
+add_dependencies(launcher KytyBuildInfo)
 
 if(NOT LINUX)
     find_program(QT_WINDEPLOYQT NAMES windeployqt PATHS "${Qt5_DIR}/../../../bin")

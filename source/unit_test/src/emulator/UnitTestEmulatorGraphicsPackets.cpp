@@ -1,6 +1,7 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
@@ -8,6 +9,7 @@
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/Tile.h"
+#include "Emulator/Graphics/Utils.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
@@ -58,6 +60,12 @@ TEST(EmulatorGraphicsPackets, EncodesDispatch)
 	EXPECT_EQ(command[4], 0x41u);
 }
 
+TEST(EmulatorGraphicsPackets, TreatsZeroPm4DwordAsSinglePadding)
+{
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0u), 1u);
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0x01fe0000u), 2u);
+}
+
 TEST(EmulatorGraphicsPackets, ParsesGen5LshlAddU32)
 {
 	const uint32_t shader[] = {0xd7460003u, 0x040a0300u, 0xbf810000u};
@@ -84,6 +92,33 @@ TEST(EmulatorGraphicsPackets, ParsesGen5LshlAddU32)
 	EXPECT_EQ(instruction.src[2].register_id, 2);
 }
 
+// RDNA2 VOP3 v_add3_u32 (op 0x36D): dst = src0 + src1 + src2.
+TEST(EmulatorGraphicsPackets, ParsesGen5Add3U32)
+{
+	// Same layout as ParsesGen5LshlAddU32 with opcode field set to 0x36D.
+	const uint32_t shader[] = {0xd76d0003u, 0x040a0300u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VAdd3U32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2);
+	EXPECT_EQ(instruction.dst.register_id, 3);
+	EXPECT_EQ(instruction.src[0].register_id, 0);
+	EXPECT_EQ(instruction.src[1].register_id, 1);
+	EXPECT_EQ(instruction.src[2].register_id, 2);
+}
+
 // VOP2 SDWA with SRC0_NEG (bit 20 of SDWA control). Captured post-Play path
 // hits EXIT_NOT_IMPLEMENTED(src0_neg != 0) until negate is wired like VOP3.
 TEST(EmulatorGraphicsPackets, ParsesVop2SdwaSrc0Negate)
@@ -91,7 +126,7 @@ TEST(EmulatorGraphicsPackets, ParsesVop2SdwaSrc0Negate)
 	// v_add_f32 v0, |−v2|, v1 with SDWA: src0=SDWA(249), opcode=3.
 	const uint32_t word0 = (0x03u << 25u) | (0u << 17u) | (1u << 9u) | 249u;
 	const uint32_t word1 = 2u | (6u << 8u) | (6u << 16u) | (1u << 20u) | (0u << 23u) | (6u << 24u);
-	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
 	{
@@ -104,7 +139,7 @@ TEST(EmulatorGraphicsPackets, ParsesVop2SdwaSrc0Negate)
 	code.SetType(ShaderType::Pixel);
 	ShaderParse(shader, &code);
 
-	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
 	const auto& instruction = code.GetInstructions().At(0);
 	EXPECT_EQ(instruction.type, ShaderInstructionType::VAddF32);
 	EXPECT_EQ(instruction.src[0].type, ShaderOperandType::Vgpr);
@@ -114,6 +149,68 @@ TEST(EmulatorGraphicsPackets, ParsesVop2SdwaSrc0Negate)
 	EXPECT_EQ(instruction.src[1].type, ShaderOperandType::Vgpr);
 	EXPECT_EQ(instruction.src[1].register_id, 1);
 	EXPECT_FALSE(instruction.src[1].negate);
+}
+
+// VOP2 SDWA OMOD uses the same output modifier contract as VOP3: 1=x2,
+// 2=x4, 3=x0.5. Keep it in the parsed dst so each backend instruction can
+// either apply it or reject it explicitly.
+TEST(EmulatorGraphicsPackets, ParsesVop2SdwaOmod)
+{
+	// v_mul_f32 v0, v2, v1 with SDWA OMOD=2 (x4).
+	const uint32_t word0 = (0x08u << 25u) | (0u << 17u) | (1u << 9u) | 249u;
+	const uint32_t word1 = 2u | (6u << 8u) | (2u << 14u) | (6u << 16u) | (0u << 23u) | (6u << 24u);
+	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VMulF32);
+	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Vgpr);
+	EXPECT_FLOAT_EQ(instruction.dst.multiplier, 4.0f);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	EXPECT_NE(source.FindIndex("%m200_0 = OpFMul %float %m197_0 %float_4_000000"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesVopcSdwaAbsolute)
+{
+	// v_cmp_gt_f32 |v2|, v1 with SDWA: VOP2 opcode 0x3e dispatches VOPC.
+	const uint32_t word0 = (0x3eu << 25u) | (0x04u << 17u) | (1u << 9u) | 249u;
+	const uint32_t word1 = 2u | (6u << 16u) | (1u << 21u) | (0u << 23u) | (6u << 24u);
+	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VCmpGtF32);
+	EXPECT_TRUE(instruction.src[0].absolute);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	EXPECT_NE(source.FindIndex("OpExtInst %float %GLSL_std_450 FAbs"), Core::STRING8_INVALID_INDEX);
 }
 
 // Captured post-Play Gen5 VOP2 word 0x00000009 at pc=0x64:
@@ -147,6 +244,39 @@ TEST(EmulatorGraphicsPackets, ParsesGen5Vop2Op0AsCndmask)
 	EXPECT_EQ(instruction.src_num, 3);
 }
 
+// GFX10/RDNA VOP2 opcode 0x25 is v_add_u32/v_add_nc_u32: no carry/VCC dst.
+TEST(EmulatorGraphicsPackets, ParsesGen5Vop2Opcode25AsAddNoCarry)
+{
+	const uint32_t word0 = (0x25u << 25u) | (0u << 17u) | (1u << 9u) | (2u + 256u);
+	const uint32_t shader[] = {word0, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VAddI32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::SVdstSVsrc0SVsrc1);
+	EXPECT_EQ(instruction.dst2.type, ShaderOperandType::Unknown);
+	EXPECT_EQ(instruction.src[0].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.src[0].register_id, 2);
+	EXPECT_EQ(instruction.src[1].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.src[1].register_id, 1);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	EXPECT_NE(source.FindIndex("OpIAdd %uint"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorGraphicsPackets, ParsesBufferStoreFormatXyzw)
 {
 	const uint32_t shader[] = {0xe01c2000u, 0x80010004u, 0xbf810000u};
@@ -176,6 +306,51 @@ TEST(EmulatorGraphicsPackets, ParsesBufferStoreFormatXyzw)
 	EXPECT_EQ(instruction.src[1].size, 4);
 	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::IntegerInlineConstant);
 	EXPECT_EQ(instruction.src[2].constant.u, 0u);
+}
+
+// MUBUF buffer_load_dwordx4 with 12-bit offset folded into a LiteralConstant
+// soffset. SPIR-V must OpStore the offset into %temp_int_* as %int_N (not
+// %uint_N), and FindConstants must register the Int twin for that literal.
+TEST(EmulatorGraphicsPackets, MubufLiteralSoffsetUsesIntConstant)
+{
+	// op=0x0E buffer_load_dwordx4, idxen=1, offset=56, soffset=inline 0 (128),
+	// srsrc=2 → s[8:11], vdata=v30, vaddr=v43; s_nop then s_endpgm.
+	const uint32_t word0 = (0x38u << 26u) | (0x0Eu << 18u) | (1u << 13u) | 56u;
+	const uint32_t word1 = (128u << 24u) | (2u << 16u) | (30u << 8u) | 43u;
+	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_GE(code.GetInstructions().Size(), 1u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::BufferLoadDwordx4);
+	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::LiteralConstant);
+	EXPECT_EQ(instruction.src[2].constant.u, 56u);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0]                         = 1;
+	input.threads_num[1]                         = 1;
+	input.threads_num[2]                         = 1;
+	input.bind.storage_buffers.buffers_num       = 1;
+	input.bind.storage_buffers.start_register[0] = 8;
+	input.bind.storage_buffers.usages[0]         = ShaderStorageUsage::ReadOnly;
+	input.bind.push_constant_size                = 16;
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+
+	EXPECT_NE(source.FindIndex("%int_56 = OpConstant %int 56"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %temp_int_2 %int_56"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpStore %temp_int_2 %uint_56"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("unknown_int_constant"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, ClassifiesDirectBufferStoreAsReadWrite)
@@ -300,6 +475,77 @@ TEST(EmulatorGraphicsPackets, StructuresBackwardSBranchAsLoopHeader)
 	EXPECT_NE(source.FindIndex("OpUnreachable", merge_label_idx), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, UsesForwardSBranchBeforeTargetAsSelectionMerge)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+
+	auto make_nop = [](uint32_t pc)
+	{
+		ShaderInstruction inst;
+		inst.pc                = pc;
+		inst.type              = ShaderInstructionType::SInstPrefetch;
+		inst.format            = ShaderInstructionFormat::Imm;
+		inst.src_num           = 1;
+		inst.src[0].type       = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.u = 0;
+		return inst;
+	};
+
+	auto make_branch = [](uint32_t pc, ShaderInstructionType type, int32_t imm)
+	{
+		ShaderInstruction inst;
+		inst.pc                = pc;
+		inst.type              = type;
+		inst.format            = ShaderInstructionFormat::Label;
+		inst.src_num           = 1;
+		inst.src[0].type       = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.i = imm;
+		return inst;
+	};
+
+	auto outer      = make_branch(0x00, ShaderInstructionType::SCbranchVccz, 0x1c);   // -> 0x20
+	auto inner      = make_branch(0x08, ShaderInstructionType::SCbranchExecz, 0x0c); // -> 0x18
+	auto then_exit  = make_branch(0x10, ShaderInstructionType::SBranch, 0x1c);       // -> 0x30
+	auto else_exit  = make_branch(0x1c, ShaderInstructionType::SBranch, 0x10);       // -> 0x30
+	ShaderInstruction end;
+	end.pc     = 0x30;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	code.GetInstructions().Add(outer);
+	code.GetInstructions().Add(make_nop(0x04));
+	code.GetInstructions().Add(inner);
+	code.GetInstructions().Add(make_nop(0x0c));
+	code.GetInstructions().Add(then_exit);
+	code.GetInstructions().Add(make_nop(0x18));
+	code.GetInstructions().Add(else_exit);
+	code.GetInstructions().Add(make_nop(0x20));
+	code.GetInstructions().Add(make_nop(0x24));
+	code.GetInstructions().Add(end);
+	code.GetLabels().Add(ShaderLabel(outer));
+	code.GetLabels().Add(ShaderLabel(inner));
+	code.GetLabels().Add(ShaderLabel(then_exit));
+	code.GetLabels().Add(ShaderLabel(else_exit));
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 1;
+	input.threads_num[1] = 1;
+	input.threads_num[2] = 1;
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+
+	EXPECT_NE(source.FindIndex("OpSelectionMerge %label_0030_001c None"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpSelectionMerge %label_0020_0000 None"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorGraphicsPackets, ClassifiesGen5FourComponent32BitBufferFormats)
 {
 	EXPECT_FALSE(ShaderIsGen5FourComponent32BitBufferFormat(74));
@@ -311,6 +557,10 @@ TEST(EmulatorGraphicsPackets, ClassifiesGen5FourComponent32BitBufferFormats)
 
 TEST(EmulatorGraphicsPackets, AllowsRegionScalarsOnlyInsideSrtRange)
 {
+	ShaderUserData no_srt {};
+
+	EXPECT_TRUE(ShaderCanBindDirectSgpr(&no_srt, 4, HW::UserSgprType::Region));
+
 	ShaderUserData user_data {};
 	user_data.srt_size_dw = 8;
 
@@ -341,7 +591,13 @@ TEST(EmulatorGraphicsPackets, AcceptsFullUserSgprWriteWindow)
 
 TEST(EmulatorGraphicsPackets, ReportsType3Pm4PacketSizeInDwords)
 {
-	// WaitFlipDone header observed at IxYiarKlXxM frontier: 0xC0051018 → len 7.
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// sceAgcGetPacketSize (Lkf86B98qPc): type-3 header → dword length.
 	const uint32_t wait_flip = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE);
 	EXPECT_EQ(wait_flip, 0xC0051018u);
 	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(&wait_flip), 7u);
@@ -452,6 +708,318 @@ TEST(EmulatorGraphicsPackets, EncodesWriteDataCachePolicy2ControlWord)
 	EXPECT_EQ(cmd[5], 0x22222222u);
 }
 
+// DrawIndexAuto accepts modifier 0x80000000 (Astro post-compute) as well as
+// the historical 0x40000000 default.
+TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoModifier80000000)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd = Gen5::GraphicsDcbDrawIndexAuto(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 0x80000000ull);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u));
+	EXPECT_EQ(cmd[1], 1u);
+	EXPECT_EQ(cmd[2], 0x2u);
+}
+
+// Gen5 type-2 pad (NID qj7QZpgr9Uw): single 0x80000000 dword.
+TEST(EmulatorGraphicsPackets, EncodesCbType2Pad)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[8] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 8;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 8;
+
+	uint32_t* cmd = Gen5::GraphicsCbType2Pad(reinterpret_cast<Gen5::CommandBuffer*>(&cb));
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], 0x80000000u);
+	EXPECT_EQ(cb.cursor_up, storage + 1);
+}
+
+// sceAgcDcbSetBaseIndirectArgs: IT_SET_BASE with 8-byte-aligned address.
+TEST(EmulatorGraphicsPackets, EncodesDcbSetBaseIndirectArgs)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd =
+	    Gen5::GraphicsDcbSetBaseIndirectArgs(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 0x00000005074063c0ull);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(4, Pm4::IT_SET_BASE, 0u) | (1u << 1u));
+	EXPECT_EQ(cmd[1], 1u);
+	EXPECT_EQ(cmd[2], 0x074063c0u);
+	EXPECT_EQ(cmd[3], 0x00000005u);
+}
+
+// sceAgcDcbDispatchIndirect: IT_DISPATCH_INDIRECT with modifier mask.
+TEST(EmulatorGraphicsPackets, EncodesDcbDispatchIndirect)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[8] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 8;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 8;
+
+	uint32_t* cmd = Gen5::GraphicsDcbDispatchIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 1u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(3, Pm4::IT_DISPATCH_INDIRECT, 0u));
+	EXPECT_EQ(cmd[1], 0u);
+	EXPECT_EQ(cmd[2], (1u & 0xa038u) | 0x41u);
+}
+
+// sceAgcDcbDrawIndexIndirect with modifier 0x80000000 (Astro after DrawIndexAuto).
+TEST(EmulatorGraphicsPackets, EncodesDcbDrawIndexIndirectModifier80000000)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd =
+	    Gen5::GraphicsDcbDrawIndexIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0x80000000ull);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_DRAW_INDEX_INDIRECT, 0u));
+	EXPECT_EQ(cmd[1], 0u);
+	// Default patch offsets when modifier low bits are clear: 0x280 / 0x280.
+	EXPECT_EQ(cmd[2], 0x280u);
+	EXPECT_EQ(cmd[3], 0x280u);
+	EXPECT_EQ(cmd[4], 2u);
+}
+
+// Placeholder address 0 is reserved then patched before submit (Astro path).
+TEST(EmulatorGraphicsPackets, EncodesWriteDataZeroAddressThenPatches)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	uint32_t             data[1]     = {0xdeadbeefu};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd = Gen5::GraphicsDcbWriteData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1, 0, 0, data, 1, 0, 0);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_NOP, Pm4::R_WRITE_DATA));
+	EXPECT_EQ(cmd[2], 0u);
+	EXPECT_EQ(cmd[3], 0u);
+	EXPECT_EQ(cmd[4], 0xdeadbeefu);
+
+	EXPECT_EQ(Gen5::GraphicsWriteDataPatchSetAddressOrOffset(cmd, 0x0000000123456780ull), 0);
+	EXPECT_EQ(cmd[2], 0x23456780u);
+	EXPECT_EQ(cmd[3], 0x00000001u);
+}
+
+// The host CP normalizes guest waits into R_WAIT_MEM_64. A size=0 guest wait
+// must keep its 32-bit predicate when its reference/mask arguments carry
+// upper bits that the guest packet width does not consume.
+TEST(EmulatorGraphicsPackets, Encodes32BitWaitWithInactiveUpperPredicate)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd = Gen5::GraphicsDcbWaitRegMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0, 3, 0, 0,
+	                                             reinterpret_cast<const volatile void*>(0x00000001268815d0ull),
+	                                             0xfeedface00000001ull, 0xffffffffffffffffull, 400);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64));
+	EXPECT_EQ(cmd[1], 0x268815d0u);
+	EXPECT_EQ(cmd[2], 0x00000001u);
+	EXPECT_EQ(cmd[3], 0xffffffffu);
+	EXPECT_EQ(cmd[4], 0u);
+	EXPECT_EQ(cmd[5], 1u);
+	EXPECT_EQ(cmd[6], 0u);
+	EXPECT_EQ(cmd[7], 3u);
+	EXPECT_EQ(cmd[8], 10u);
+}
+
+// WaitRegMem cache_policy is not packed into R_WAIT_MEM_64; stream (1),
+// bypass-style (2), and observed policy 3 must still encode the same poll packet.
+TEST(EmulatorGraphicsPackets, EncodesWaitRegMemCachePolicy1And2SamePacket)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	auto encode = [](uint8_t policy) {
+		uint32_t             storage[16] = {};
+		AlignasCommandBuffer cb {};
+		cb.bottom      = storage;
+		cb.top         = storage + 16;
+		cb.cursor_up   = storage;
+		cb.cursor_down = storage + 16;
+		uint32_t* cmd  = Gen5::GraphicsDcbWaitRegMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0, 3, 0, policy,
+		                                             reinterpret_cast<const volatile void*>(0x00000001268815d0ull),
+		                                             0x0000000000000001ull, 0x00000000ffffffffull, 400);
+		EXPECT_NE(cmd, nullptr);
+		EXPECT_EQ(cmd[0], KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64));
+		EXPECT_EQ(cmd[1], 0x268815d0u);
+		EXPECT_EQ(cmd[5], 1u);
+		EXPECT_EQ(cmd[7], 3u);
+		return cmd[8];
+	};
+
+	EXPECT_EQ(encode(1), 10u);
+	EXPECT_EQ(encode(2), 10u);
+	EXPECT_EQ(encode(3), 10u);
+}
+
 // Post-Play: WaitMem address stays 0; preceding ReleaseMem is EopPatched.
 // Resolve Wait to the Release address when packets are contiguous.
 TEST(EmulatorGraphicsPackets, ResolvesNullWaitMemAddressFromPrecedingRelease)
@@ -485,6 +1053,48 @@ TEST(EmulatorGraphicsPackets, ResolvesNullWaitMemAddressFromPrecedingRelease)
 	stream[3] = 0;
 	stream[4] = 0;
 	EXPECT_EQ(Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 8), nullptr);
+}
+
+// Submit-time fence publish: ReleaseMem data_sel=1 must store the 32-bit
+// immediate so WaitRegMem can observe it even when the ring worker is blocked.
+TEST(EmulatorGraphicsPackets, PublishesReleaseMemDataSel1FenceOnScan)
+{
+	uint32_t fence = 0;
+	uint32_t stream[8] = {};
+	stream[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	stream[1] = 0x14u;                           // action
+	stream[2] = 0x00010000u;                     // gcr=0 | data_sel=1
+	stream[3] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&fence));
+	stream[4] = static_cast<uint32_t>(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&fence)) >> 32u);
+	stream[5] = 1u; // data_lo
+	stream[6] = 0u;
+	stream[7] = 0u;
+
+	EXPECT_EQ(GraphicsPm4PublishFenceProducers(stream, 8), 1u);
+	EXPECT_EQ(fence, 1u);
+
+	// data_sel=0 is barrier-only: no store.
+	stream[2] = 0u;
+	fence     = 0;
+	EXPECT_EQ(GraphicsPm4PublishFenceProducers(stream, 8), 0u);
+	EXPECT_EQ(fence, 0u);
+}
+
+// WriteData memory destinations also publish fences at submit time.
+TEST(EmulatorGraphicsPackets, PublishesWriteDataFenceOnScan)
+{
+	uint32_t words[2] = {0, 0};
+	uint32_t stream[6] = {};
+	stream[0] = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WRITE_DATA);
+	stream[1] = 0x01000004u; // dst=4, write_confirm=1
+	stream[2] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(words));
+	stream[3] = static_cast<uint32_t>(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(words)) >> 32u);
+	stream[4] = 0x11111111u;
+	stream[5] = 0x22222222u;
+
+	EXPECT_EQ(GraphicsPm4PublishFenceProducers(stream, 6), 1u);
+	EXPECT_EQ(words[0], 0x11111111u);
+	EXPECT_EQ(words[1], 0x22222222u);
 }
 
 // Encoder accepts data_sel=1 (32-bit immediate). Packet layout stores data_sel
@@ -521,13 +1131,172 @@ TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1Immediate32)
 	uint32_t*   cmd =
 	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x14, 0, 1, 0, label, 1, 1, 0, 1, 0, 0);
 	ASSERT_NE(cmd, nullptr);
-	EXPECT_EQ(cmd[0], KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
 	EXPECT_EQ(cmd[1], 0x14u);
 	EXPECT_EQ(cmd[2], 0x00010000u); // gcr=0 | data_sel=1 << 16
 	EXPECT_EQ(cmd[3], 0x100u);
 	EXPECT_EQ(cmd[4], 0u);
 	EXPECT_EQ(cmd[5], 1u);
 	EXPECT_EQ(cmd[6], 0u);
+	EXPECT_EQ(cmd[7], 0u);
+}
+
+// data_sel 0: barrier/flush only (no label write). Matches CP custom path.
+TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel0Barrier)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	const auto* label = reinterpret_cast<const volatile Gen5::Label*>(static_cast<uintptr_t>(0x100));
+	uint32_t*   cmd =
+	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x28, 0, 1, 0, label, 0, 0, 0, 0, 0, 0);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
+	EXPECT_EQ(cmd[1], 0x28u);
+	EXPECT_EQ(cmd[2], 0x00000000u); // gcr=0 | data_sel=0 << 16
+	EXPECT_EQ(cmd[3], 0x100u);
+	EXPECT_EQ(cmd[4], 0u);
+	EXPECT_EQ(cmd[5], 0u);
+	EXPECT_EQ(cmd[6], 0u);
+	EXPECT_EQ(cmd[7], 0u);
+}
+
+// Immediate ReleaseMem does not encode GDS; gds_size 0 (unused) matches gds_size 1.
+TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1WithUnusedGdsSize0)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	const auto* label = reinterpret_cast<const volatile Gen5::Label*>(static_cast<uintptr_t>(0x100));
+	uint32_t*   cmd =
+	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x14, 0, 1, 0, label, 1, 1, 0, 0, 0, 0);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
+	EXPECT_EQ(cmd[2], 0x00010000u);
+	EXPECT_EQ(cmd[5], 1u);
+	EXPECT_EQ(cmd[7], 0u);
+}
+
+// Clock-counter form with non-zero interrupt selector (Gen5 after Resident Load).
+TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel3WithInterrupt)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	const auto* label = reinterpret_cast<const volatile Gen5::Label*>(static_cast<uintptr_t>(0x200));
+	uint32_t*   cmd =
+	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x28, 0, 1, 0, label, 3, 0, 0, 1, 1, 0x11u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
+	EXPECT_EQ(cmd[1], 0x28u);
+	EXPECT_EQ(cmd[2], 0x01030000u); // interrupt=1 << 24 | data_sel=3 << 16
+	EXPECT_EQ(cmd[3], 0x200u);
+	EXPECT_EQ(cmd[7], 0x11u);
+}
+
+TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1WithNullDestination)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd = Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x14, 0, 1, 0, nullptr, 1, 0, 0, 0, 0, 0);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
+	EXPECT_EQ(cmd[1], 0x14u);
+	EXPECT_EQ(cmd[2], 0x00010000u);
+	EXPECT_EQ(cmd[3], 0u);
+	EXPECT_EQ(cmd[4], 0u);
+	EXPECT_EQ(cmd[5], 0u);
+	EXPECT_EQ(cmd[6], 0u);
+	EXPECT_EQ(cmd[7], 0u);
 }
 
 TEST(EmulatorGraphicsPackets, SizesGen5RotatedXRenderTargets)
@@ -568,9 +1337,25 @@ TEST(EmulatorGraphicsPackets, SizesGen5RotatedXTexture800x320)
 	EXPECT_EQ(size.align, 65536u);
 }
 
-// SW_64KB_R_X within-block addressing for 4 BPE must be a bijection over a
-// 128x128 block and must keep every texel inside the 64 KiB block. Golden low
-// offsets come from Mesa MIT ADDRLIB (16-pipe, no RbPlus) pattern evaluation.
+// Gen5 sampled format 133 maps to BC1: 4x4 texel blocks, 8 bytes per block.
+// The tile-27 allocation is computed in block elements, not source texels.
+TEST(EmulatorGraphicsPackets, SizesGen5RotatedXSampledBc1Texture)
+{
+	TileSizeAlign size {};
+	TilePaddedSize padded {};
+	TileGetTextureSize2(133, 3840, 2160, 3840, 1, 27, &size, nullptr, &padded);
+
+	// block_width=960, block_height=540, 8-BPE tile blocks are 128x64:
+	// ceil(960/128)=8, ceil(540/64)=9, size=72*64 KiB.
+	EXPECT_EQ(size.size, 72u * 65536u);
+	EXPECT_EQ(size.align, 65536u);
+	EXPECT_EQ(padded.width, 512u * 8u);
+	EXPECT_EQ(padded.height, 256u * 9u);
+}
+
+// Gen5 kRenderTarget (tile 27) within-block addressing for 4 BPE must be a
+// bijection over a 128x128 block and keep every texel inside the 64 KiB block.
+// Golden low offsets match the guest RT bit equations (not Mesa ADDRLIB).
 TEST(EmulatorGraphicsPackets, Sw64kRx4bppWithinBlockIsBijective)
 {
 	constexpr uint32_t k_block = 128u;
@@ -591,8 +1376,60 @@ TEST(EmulatorGraphicsPackets, Sw64kRx4bppWithinBlockIsBijective)
 	EXPECT_EQ(unique, k_block * k_block);
 	EXPECT_EQ(TileGetSw64kRxOffset(0, 0, k_block, 4), 0u);
 	EXPECT_EQ(TileGetSw64kRxOffset(1, 0, k_block, 4), 4u);
-	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x10u);
-	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0x14u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x8u);
+	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0xcu);
+}
+
+// kStandard64KB (tile 9) 32bpp uses a different within-block interleave.
+TEST(EmulatorGraphicsPackets, Standard64KB32WithinBlockIsBijective)
+{
+	constexpr uint32_t k_block = 128u;
+	bool               seen[65536] {};
+	uint32_t           unique = 0;
+	for (uint32_t y = 0; y < k_block; y++)
+	{
+		for (uint32_t x = 0; x < k_block; x++)
+		{
+			const uint64_t off = TileGetStandard64KB32Offset(x, y, k_block);
+			ASSERT_LT(off, 65536u);
+			ASSERT_EQ(off % 4u, 0u);
+			ASSERT_FALSE(seen[off]);
+			seen[off] = true;
+			unique++;
+		}
+	}
+	EXPECT_EQ(unique, k_block * k_block);
+	EXPECT_EQ(TileGetStandard64KB32Offset(0, 0, k_block), 0u);
+	EXPECT_EQ(TileGetStandard64KB32Offset(1, 0, k_block), 4u);
+	EXPECT_EQ(TileGetStandard64KB32Offset(0, 1, k_block), 0x10u);
+	// Distinct from kRenderTarget: (0,1) is 0x10 here, 0x8 for tile 27.
+	EXPECT_NE(TileGetStandard64KB32Offset(0, 1, k_block), TileGetSw64kRxOffset(0, 1, k_block, 4));
+}
+
+TEST(EmulatorGraphicsPackets, Sw64kRx8bppWithinBlockIsBijective)
+{
+	constexpr uint32_t k_block_w = 128u;
+	constexpr uint32_t k_block_h = 64u;
+	bool               seen[65536] {};
+	uint32_t           unique = 0;
+	for (uint32_t y = 0; y < k_block_h; y++)
+	{
+		for (uint32_t x = 0; x < k_block_w; x++)
+		{
+			const uint64_t off = TileGetSw64kRxOffset(x, y, k_block_w, 8);
+			ASSERT_LT(off, 65536u);
+			ASSERT_EQ(off % 8u, 0u);
+			ASSERT_FALSE(seen[off]);
+			seen[off] = true;
+			unique++;
+		}
+	}
+	EXPECT_EQ(unique, k_block_w * k_block_h);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 0, k_block_w, 8), 0u);
+	EXPECT_EQ(TileGetSw64kRxOffset(1, 0, k_block_w, 8), 8u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block_w, 8), 0x10u);
+	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block_w, 8), 0x18u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 64, k_block_w, 8), 65536u);
 }
 
 // Detile round-trip: tile a gradient with the inverse of the offset function
@@ -633,6 +1470,67 @@ TEST(EmulatorGraphicsPackets, Sw64kRx4bppDetileRoundTrip)
 	EXPECT_EQ(TileGetSw64kRxOffset(128, 0, k_w, k_bpp), 65536u);
 }
 
+// Functional detile: RGBA8 ramp R=x across two 64 KiB macro columns (pitch=256).
+TEST(EmulatorGraphicsPackets, Sw64kRx4bppDetileRampPreservesX)
+{
+	constexpr uint32_t k_w   = 256u;
+	constexpr uint32_t k_h   = 64u;
+	constexpr uint32_t k_bpp = 4u;
+	TileSizeAlign      size {};
+	TileGetRenderTargetSize(k_w, k_h, k_w, 0x1b, k_bpp, &size);
+	ASSERT_GT(size.size, 0u);
+
+	std::vector<uint8_t> linear(static_cast<size_t>(k_w) * k_h * k_bpp);
+	std::vector<uint8_t> tiled(size.size, 0);
+	std::vector<uint8_t> out(linear.size(), 0xAAu);
+
+	for (uint32_t y = 0; y < k_h; y++)
+	{
+		for (uint32_t x = 0; x < k_w; x++)
+		{
+			const size_t i     = (static_cast<size_t>(y) * k_w + x) * k_bpp;
+			linear[i + 0]      = static_cast<uint8_t>(x & 0xffu);
+			linear[i + 1]      = 0;
+			linear[i + 2]      = 0;
+			linear[i + 3]      = 0xff;
+			const uint64_t off = TileGetSw64kRxOffset(x, y, k_w, k_bpp);
+			ASSERT_LT(off + k_bpp, tiled.size() + 1);
+			std::memcpy(tiled.data() + off, linear.data() + i, k_bpp);
+		}
+	}
+
+	TileConvertSw64kRxToLinear(out.data(), tiled.data(), k_w, k_h, k_w, k_bpp);
+	for (uint32_t y = 0; y < k_h; y++)
+	{
+		for (uint32_t x = 0; x < k_w; x++)
+		{
+			const size_t i = (static_cast<size_t>(y) * k_w + x) * k_bpp;
+			EXPECT_EQ(out[i + 0], static_cast<uint8_t>(x & 0xffu)) << "x=" << x << " y=" << y;
+		}
+	}
+}
+
+// Macro pitch: pitch_elems=256 with width=192 still advances one 64 KiB block per
+// 128 rows of y (blocks_x = ceil(256/128) = 2).
+TEST(EmulatorGraphicsPackets, Sw64kRx4bppMacroPitchAdvancesBlock)
+{
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 128, 256, 4), 65536u * 2u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 128, 192, 4), 65536u * 2u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 128, 128, 4), 65536u);
+}
+
+// Captured world GBuffer class: 642x362 tile 27 RGBA8 (fmt 56) size must match
+// RT size so FindRenderTexture exact alias can hit.
+TEST(EmulatorGraphicsPackets, SizesGen5RotatedXGbuffer642x362Rgba8MatchesSample56)
+{
+	TileSizeAlign rt {};
+	TileGetRenderTargetSize(642, 362, 642, 0x1b, 4, &rt);
+	TileSizeAlign tex {};
+	TileGetTextureSize2(56, 642, 362, 642, 1, 27, &tex, nullptr, nullptr);
+	EXPECT_EQ(rt.size, tex.size);
+	EXPECT_EQ(rt.align, tex.align);
+	EXPECT_GT(rt.size, 0u);
+}
 
 // Post-Play DCB fragment after CB/DB meta EVENT_WRITE: a run of Type0
 // single-register writes (10 dwords) then WaitFlipDone (0xC0051018). Walking
@@ -663,10 +1561,102 @@ TEST(EmulatorGraphicsPackets, WalksGen5Type0RunBeforeWaitFlipDone)
 	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(stream[off]), 0u);
 }
 
+// Gen5 streams can interleave Type1 2-dword units after EVENT_WRITE
+// with Type0 before WaitFlipDone. COUNT in the Type1 header is not the body size.
+TEST(EmulatorGraphicsPackets, WalksGen5Type1PairsBeforeWaitFlipDone)
+{
+	const uint32_t stream[] = {
+	    0xc0004600u, 0x0000002cu, 0x7d0703e0u, 0x00007fccu, 0x00000003u, 0x00000000u, 0x7d070440u, 0x00007fccu,
+	    0x00000003u, 0x00000000u, 0x7d070440u, 0x00007fccu, 0xc0051018u, 0x00000000u, 0x00000000u, 0x00000000u,
+	    0x00000000u, 0x00000000u, 0x00000000u,
+	};
+
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0x7d0703e0u), 2u);
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0x7d070440u), 2u);
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0x00000003u), 2u);
+
+	// Skip leading EVENT_WRITE (Type3): header + 1 body.
+	uint32_t off = 2;
+	while (off < 12u)
+	{
+		const uint32_t step = Pm4::Pm4NonType3PacketDwords(stream[off]);
+		ASSERT_EQ(step, 2u);
+		off += step;
+	}
+	EXPECT_EQ(off, 12u);
+	EXPECT_EQ(stream[off], 0xc0051018u);
+}
+
+// Some Gen5 2-dword units have type bits 11 but
+// an impossible COUNT (e.g. 0xf84d2e90). Walking must treat them like Type0/1
+// pairs so the stream lands on WaitFlipDone.
+TEST(EmulatorGraphicsPackets, WalksGen5OversizedType3PairsBeforeWaitFlipDone)
+{
+	const uint32_t stream[] = {
+	    0xc0004600u, 0x0000002eu, 0xc0004600u, 0x0000002cu, 0xf84d2e90u, 0x00007f9bu, 0x0bbb68c0u, 0x00000003u,
+	    0xf84d3300u, 0x00007f9bu, 0x15dd6a84u, 0x00007ff8u, 0xf84d3360u, 0x00007f9bu, 0xc0051018u, 0x00000000u,
+	    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+	};
+
+	const uint32_t total = static_cast<uint32_t>(sizeof(stream) / sizeof(stream[0]));
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0xf84d2e90u, total - 4u), 2u);
+	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0xc0051018u, 7u), 0u);
+
+	// Skip two EVENT_WRITE packets (header + body each).
+	uint32_t off = 4;
+	while (off < 14u)
+	{
+		const uint32_t step = Pm4::Pm4NonType3PacketDwords(stream[off], total - off);
+		ASSERT_EQ(step, 2u);
+		off += step;
+	}
+	EXPECT_EQ(off, 14u);
+	EXPECT_EQ(stream[off], 0xc0051018u);
+}
+
+// PKT3_ONE_REG_WRITE (0x57) encodes register selection in the
+// header, so the normal PKT3 COUNT field is not a payload length. Treat it as
+// header + one value dword so the following WaitFlipDone packet stays aligned.
+TEST(EmulatorGraphicsPackets, WalksGen5OneRegWriteBeforeWaitFlipDone)
+{
+	const uint32_t stream[] = {
+	    0xc0004600u, 0x0000002cu, 0x00000000u, 0x00000000u, 0xc15857a0u, 0x00000001u, 0x00000000u, 0x00000000u,
+	    0x0000001eu, 0x00000000u, 0x00000001u, 0x00000000u, 0xc0051018u, 0x00000000u, 0x00000000u, 0x00000000u,
+	    0x00000000u, 0x00000000u, 0x00000000u,
+	};
+
+	EXPECT_EQ(Pm4::Pm4SpecialType3PacketDwords(0xc15857a0u), 2u);
+	EXPECT_EQ(Pm4::Pm4SpecialType3PacketDwords(0xc0051018u), 0u);
+
+	uint32_t off = 2; // after EVENT_WRITE
+	while (off < 12u)
+	{
+		const uint32_t special = Pm4::Pm4SpecialType3PacketDwords(stream[off]);
+		const uint32_t step    = (special != 0u) ? special : Pm4::Pm4NonType3PacketDwords(stream[off]);
+		ASSERT_NE(step, 0u);
+		off += step;
+	}
+	EXPECT_EQ(off, 12u);
+	EXPECT_EQ(stream[off], 0xc0051018u);
+}
+
+TEST(EmulatorGraphicsPackets, RecognizesOpaqueType3PairOnlyBeforeWaitFlipDone)
+{
+	const uint32_t stream[] = {
+	    0xc3b50072u, 0xa6b5a527u, 0x00000014u, 0x00000000u, 0xc0051018u, 0x00000000u,
+	    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+	};
+	const uint32_t no_wait[] = {0xc3b50072u, 0xa6b5a527u, 0x00000014u, 0x00000000u};
+
+	EXPECT_TRUE(Pm4::Pm4Gen5OpaquePairPrecedesWaitFlipDone(stream, static_cast<uint32_t>(std::size(stream))));
+	EXPECT_FALSE(Pm4::Pm4Gen5OpaquePairPrecedesWaitFlipDone(no_wait, static_cast<uint32_t>(std::size(no_wait))));
+	EXPECT_FALSE(Pm4::Pm4Gen5OpaquePairPrecedesWaitFlipDone(nullptr, 0u));
+}
+
 TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 {
 	// Layout matches Gen5::CommandBuffer in Graphics.cpp (non-virtual methods).
-	// Observed NID LtTouSCZjHM: (CommandBuffer*, num_dw=10) → dword*.
+	// NID LtTouSCZjHM is sceAgcCbNop: (CommandBuffer*, num_dw) → dword* with type-3 NOP.
 	struct AlignasCommandBuffer
 	{
 		uint32_t* bottom      = nullptr;
@@ -679,7 +1669,7 @@ TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 		uint32_t  pad         = 0;
 	};
 
-	uint32_t            storage[64] = {};
+	uint32_t             storage[64] = {};
 	AlignasCommandBuffer cb {};
 	cb.bottom      = storage;
 	cb.top         = storage + 64;
@@ -693,11 +1683,59 @@ TEST(EmulatorGraphicsPackets, AllocatesCommandBufferDwords)
 	ASSERT_NE(first, nullptr);
 	EXPECT_EQ(first, storage);
 	EXPECT_EQ(cb.cursor_up, storage + 10);
+	EXPECT_EQ(first[0], KYTY_PM4(10, Pm4::IT_NOP, Pm4::R_ZERO));
 
 	uint32_t* second = Gen5::GraphicsCbAllocateDwords(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4);
 	ASSERT_NE(second, nullptr);
 	EXPECT_EQ(second, storage + 10);
 	EXPECT_EQ(cb.cursor_up, storage + 14);
+	EXPECT_EQ(second[0], KYTY_PM4(4, Pm4::IT_NOP, Pm4::R_ZERO));
+}
+
+// Gen5 DCB resetQueue: 12-bit op mask, IT_CLEAR_STATE + low 4 bits of state.
+TEST(EmulatorGraphicsPackets, EncodesDcbResetQueueAsClearState)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	// Historical only-accepted value 0x3ff still must encode CLEAR_STATE.
+	uint32_t* cmd = Gen5::GraphicsDcbResetQueue(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x3ffu, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u));
+	EXPECT_EQ(cmd[1], 0u);
+
+	// Astro-style non-0x3ff op with non-zero state selector.
+	uint32_t* cmd2 = Gen5::GraphicsDcbResetQueue(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x001u, 0x5u);
+	ASSERT_NE(cmd2, nullptr);
+	EXPECT_EQ(cmd2[0], KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u));
+	EXPECT_EQ(cmd2[1], 0x5u);
+
+	// State is masked to 4 bits in the body dword.
+	uint32_t* cmd3 = Gen5::GraphicsDcbResetQueue(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x0ffu, 0x1fu);
+	ASSERT_NE(cmd3, nullptr);
+	EXPECT_EQ(cmd3[1], 0xfu);
 }
 
 // GraphicsDcbAcquireMem encodes size_bytes == -1 as size_lo == 0 (full range)
@@ -815,6 +1853,29 @@ TEST(EmulatorGraphicsPackets, DecodesCbColorInfoRoundModeBit)
 	EXPECT_EQ(KYTY_PM4_GET(blend_bypass, CB_COLOR0_INFO, ROUND_MODE), 0u);
 }
 
+// image_sample_lz (MIMG op 0x27) with dmask 0xf — observed after PlayGo/Resident.
+TEST(EmulatorGraphicsPackets, ParsesImageSampleLzDmaskF)
+{
+	const uint32_t word0 = (0x3cu << 26u) | (0x27u << 18u) | (0xfu << 8u);
+	const uint32_t shader[] = {word0, 0u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::ImageSampleLz);
+	EXPECT_EQ(code.GetInstructions().At(0).format, ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF);
+	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 4);
+}
+
 // image_sample (MIMG op 0x20) with single-channel dmasks — captured post-Play
 // with dmask 0x4 then 0x2 at sequential PCs.
 TEST(EmulatorGraphicsPackets, ParsesImageSampleSingleChannelDmasks)
@@ -867,6 +1928,41 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleDmaskB)
 	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::ImageSample);
 	EXPECT_EQ(code.GetInstructions().At(0).format, ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB);
 	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 3);
+}
+
+// image_sample dmask 0xa materializes the G and A channels.
+TEST(EmulatorGraphicsPackets, ParsesAndMaterializesImageSampleDmaskA)
+{
+	const uint32_t word0 = (0x3cu << 26u) | (0x20u << 18u) | (0xau << 8u);
+	const uint32_t shader[] = {word0, 0u, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::ImageSample);
+	EXPECT_EQ(code.GetInstructions().At(0).format, ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskA);
+	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 2);
+
+	ShaderPixelInputInfo input {};
+	input.bind.push_constant_size                = 48;
+	input.bind.textures2D.textures_num           = 1;
+	input.bind.textures2D.textures2d_sampled_num = 1;
+	input.bind.textures2D.desc[0].start_register = 8;
+	input.bind.samplers.samplers_num             = 1;
+	input.bind.samplers.start_register[0]        = 20;
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_Function_float %temp_v4float %uint_1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_Function_float %temp_v4float %uint_3"), Core::STRING8_INVALID_INDEX);
 }
 
 // Captured Gen5 MIMG-NSA image_sample instructions. The third dword supplies
@@ -941,6 +2037,33 @@ TEST(EmulatorGraphicsPackets, MaterializesImageSampleNonSequentialCoordinates)
 	EXPECT_NE(source.FindIndex("OpLoad %float %v2"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("OpLoad %float %v3"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, MaterializesPixelDirectSgprPushConstant)
+{
+	const uint32_t shader[] = {0xbf800000u, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ShaderPixelInputInfo input {};
+	input.bind.direct_sgprs.sgprs_num         = 1;
+	input.bind.direct_sgprs.start_register[0] = 4;
+	input.bind.push_constant_size             = 16;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("%s4 = OpVariable %_ptr_Function_uint Function"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %s4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_PushConstant_uint %vsharp"), Core::STRING8_INVALID_INDEX);
 }
 
 // Gen5 SMEM opcode 0x3: s_load_dwordx8 s[4:11], s[0:1], 0 — captured at PC 0x18.
@@ -1202,6 +2325,16 @@ TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
 	EXPECT_EQ(0, 0); // srt_size_dw == 0
 }
 
+// Type-5 guest EUD tables may exceed metadata eud_size_dw. Astro: api=40,
+// dwords=4, eud_size=24 → need=28 still allowed under the hard 256 cap.
+TEST(EmulatorGraphicsPackets, Gen5EudSpanAllowsModestMetadataOverrun)
+{
+	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16, 4, 24));  // fully inside metadata
+	EXPECT_TRUE(ShaderGen5EudSpanAllowed(40, 4, 24));  // need 28 > 24, still ok
+	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + 24 - 4, 4, 24)); // last in-bound
+	EXPECT_FALSE(ShaderGen5EudSpanAllowed(16, 257, 24)); // past hard cap
+}
+
 // Captured EXP target 0x03: MRT3 compressed (half2), done may be 0.
 TEST(EmulatorGraphicsPackets, ExpTarget0x03IsMrt3Compr)
 {
@@ -1289,6 +2422,180 @@ TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0)
 	EXPECT_EQ(inst.src[0].type, ShaderOperandType::Vgpr);
 	EXPECT_EQ(inst.src[0].register_id, 2);
 	EXPECT_TRUE(inst.src[0].negate);
+	EXPECT_EQ(inst.src[0].swizzle, 6u);
+}
+
+// SOP1 s_not_b64 (op 0x08): bitwise not of a 64-bit SGPR pair.
+TEST(EmulatorGraphicsPackets, ParsesGen5SNotB64)
+{
+	// SOP1 encoding: [31:23]=0b101111101, [22:16]=sdst, [15:8]=op, [7:0]=ssrc0
+	// s_not_b64 s[0:1], s[2:3] → sdst=0, op=0x08, ssrc0=2
+	const uint32_t word0 = (0x17Du << 23u) | (0u << 16u) | (0x08u << 8u) | 2u;
+	const uint32_t shader[] = {word0, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::SNotB64);
+	EXPECT_EQ(inst.format, ShaderInstructionFormat::Sdst2Ssrc02);
+	EXPECT_EQ(inst.dst.size, 2);
+	EXPECT_EQ(inst.src[0].size, 2);
+	EXPECT_EQ(inst.dst.register_id, 0);
+	EXPECT_EQ(inst.src[0].register_id, 2);
+}
+
+// VOP1 SDWA with src0_sel=BYTE_0 (0). Observed Gen5 path after PlayGo/Resident Load.
+TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0Byte0)
+{
+	// v_mov_b32 v0, v2.b0 with SDWA: opcode 1, src0_sel=0 (BYTE_0), dst_sel=DWORD.
+	const uint32_t word0 = (0x3fu << 25u) | (0u << 17u) | (0x01u << 9u) | 249u;
+	const uint32_t word1 = 2u | (6u << 8u) | (0u << 16u); // vgpr2, dst DWORD, src0 BYTE_0
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::VMovB32);
+	EXPECT_EQ(inst.src[0].register_id, 2);
+	EXPECT_EQ(inst.src[0].swizzle, 0u);
+}
+
+// Compressed MRT export must read the uint packed-half shadow written by
+// VCvtPkrtz, not a float load+bitcast of the same VGPR (precision/path mismatch).
+TEST(EmulatorGraphicsPackets, CompressedMrtExportReadsPackedHalfFromUintShadow)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	auto vgpr = [](int reg)
+	{
+		ShaderOperand op {};
+		op.type        = ShaderOperandType::Vgpr;
+		op.register_id = reg;
+		op.size        = 1;
+		return op;
+	};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+
+	ShaderInstruction pack_rg;
+	pack_rg.pc      = 0;
+	pack_rg.type    = ShaderInstructionType::VCvtPkrtzF16F32;
+	pack_rg.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	pack_rg.dst     = vgpr(4);
+	pack_rg.src[0]  = vgpr(2);
+	pack_rg.src[1]  = vgpr(3);
+	pack_rg.src_num = 2;
+
+	ShaderInstruction pack_ba;
+	pack_ba.pc      = 4;
+	pack_ba.type    = ShaderInstructionType::VCvtPkrtzF16F32;
+	pack_ba.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	pack_ba.dst     = vgpr(5);
+	pack_ba.src[0]  = vgpr(6);
+	pack_ba.src[1]  = vgpr(7);
+	pack_ba.src_num = 2;
+
+	ShaderInstruction export_mrt;
+	export_mrt.pc      = 8;
+	export_mrt.type    = ShaderInstructionType::Exp;
+	export_mrt.format  = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone;
+	export_mrt.src[0]  = vgpr(4);
+	export_mrt.src[1]  = vgpr(5);
+	export_mrt.src_num = 2;
+
+	code.GetInstructions().Add(pack_rg);
+	code.GetInstructions().Add(pack_ba);
+	code.GetInstructions().Add(export_mrt);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	// VCvtPkrtzF16F32 implements the ISA's binary16 round-toward-zero
+	// conversion in integer bits. GLSL PackHalf2x16 rounds to nearest-even and
+	// therefore cannot represent this instruction's contract.
+	EXPECT_EQ(source.FindIndex("PackHalf2x16"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk0_bits_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk1_bits_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk0_subnormal_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("tpk0_max_finite_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("UnpackHalf2x16"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%t1_2 = OpLoad %float %v4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%t6_2 = OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %uint %v4_packed_half"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %uint %v5_packed_half"), Core::STRING8_INVALID_INDEX);
+}
+
+// Compressed MRT export must branch on EXEC and OpKill when inactive so dead
+// lanes do not write color.
+TEST(EmulatorGraphicsPackets, CompressedMrtExportIsGuardedByExecMask)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	auto vgpr = [](int reg)
+	{
+		ShaderOperand op {};
+		op.type        = ShaderOperandType::Vgpr;
+		op.register_id = reg;
+		op.size        = 1;
+		return op;
+	};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+
+	ShaderInstruction export_mrt;
+	export_mrt.pc      = 0;
+	export_mrt.type    = ShaderInstructionType::Exp;
+	export_mrt.format  = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone;
+	export_mrt.src[0]  = vgpr(0);
+	export_mrt.src[1]  = vgpr(1);
+	export_mrt.src_num = 2;
+
+	code.GetInstructions().Add(export_mrt);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpBranchConditional %exp_exec_b_0 %exp_store_0 %exp_kill_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%exp_kill_0 = OpLabel"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpKill"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%exp_store_0 = OpLabel"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %outColor"), Core::STRING8_INVALID_INDEX);
 }
 
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
@@ -1350,7 +2657,231 @@ TEST(EmulatorGraphicsPackets, Gen5SingleComponent32BitBufferFormat)
 	EXPECT_EQ(DstSel(4, 0, 0, 1), 0x204u);
 }
 
-// sceAgcDcbDrawIndexOffset (B+aG9DUnTKA): IT_DRAW_INDEX_OFFSET_2, 5 DW.
+TEST(EmulatorGraphicsPackets, Gen5RenderTextureAbgrSampleView)
+{
+	EXPECT_EQ(DstSel(7, 6, 5, 4), 0x977u);
+	EXPECT_LT(VulkanImage::VIEW_ABGR, VulkanImage::VIEW_MAX);
+	EXPECT_NE(VulkanImage::VIEW_ABGR, VulkanImage::VIEW_DEFAULT);
+	EXPECT_NE(VulkanImage::VIEW_ABGR, VulkanImage::VIEW_BGRA);
+}
+
+// sceAgcDcbStallCommandBufferParser: fixed EVENT_WRITE with CS partial flush (0x07).
+TEST(EmulatorGraphicsPackets, EncodesDcbStallCommandBufferParser)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[8] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 8;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 8;
+
+	uint32_t* cmd = Gen5::GraphicsDcbStallCommandBufferParser(reinterpret_cast<Gen5::CommandBuffer*>(&cb));
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0));
+	EXPECT_EQ(cmd[1], 0x07u);
+}
+
+// 3.20 catalog: WaitRegMemPatchAddress / DmaDataPatch use fixed field offsets.
+TEST(EmulatorGraphicsPackets, WaitRegMemAndDmaDataPatchFieldOffsets)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Custom R_WAIT_MEM_64: address at +4 bytes.
+	const uint32_t wait64 = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	EXPECT_EQ(GraphicsWaitRegMemAddressByteOffset(wait64), 4u);
+	const uint32_t wait32 = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WAIT_MEM_32);
+	EXPECT_EQ(GraphicsWaitRegMemAddressByteOffset(wait32), 4u);
+	// Hardware IT_WAIT_REG_MEM: address at +8 bytes.
+	const uint32_t it_wait = KYTY_PM4(7, Pm4::IT_WAIT_REG_MEM, 0);
+	EXPECT_EQ(GraphicsWaitRegMemAddressByteOffset(it_wait), 8u);
+	EXPECT_EQ(GraphicsWaitRegMemAddressByteOffset(0u), 0u);
+
+	const uint32_t dma = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA);
+	EXPECT_TRUE(GraphicsIsCustomDmaDataPacket(dma));
+	EXPECT_FALSE(GraphicsIsCustomDmaDataPacket(wait64));
+}
+
+TEST(EmulatorGraphicsPackets, PatchesDmaDataDestinationAndWaitRegMemAddress)
+{
+	using namespace Kyty::Libs::Graphics;
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t dma[8] = {};
+	dma[0]          = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA);
+	dma[3]          = 64u;
+	EXPECT_EQ(Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset(dma, 0x0000000123456789ull), 0);
+	EXPECT_EQ(dma[4], 0x23456789u);
+	EXPECT_EQ(dma[5], 0x00000001u);
+	EXPECT_EQ(Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset(nullptr, 0), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	uint32_t not_dma[2] = {KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0};
+	EXPECT_EQ(Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset(not_dma, 1), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	uint32_t wait[9] = {};
+	wait[0]          = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchAddress(wait, 0x00000001abcdef00ull), 0);
+	EXPECT_EQ(wait[1], 0xabcdef00u);
+	EXPECT_EQ(wait[2], 0x00000001u);
+	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchAddress(not_dma, 1), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+TEST(EmulatorGraphicsPackets, EncodesCbNopAsFullType3Packet)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {0xffffffffu};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t* cmd = Gen5::GraphicsCbNop(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(4, Pm4::IT_NOP, Pm4::R_ZERO));
+	EXPECT_EQ(cmd[1], 0u);
+	EXPECT_EQ(cmd[2], 0u);
+	EXPECT_EQ(cmd[3], 0u);
+	EXPECT_EQ(Gen5::GraphicsCbNop(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1), nullptr);
+	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(cmd), 4u);
+}
+
+TEST(EmulatorGraphicsPackets, DecodesCbNopBodyWithoutSideEffects)
+{
+	EXPECT_EQ(Pm4::Pm4Type3NopBodyDwords(KYTY_PM4(10, Pm4::IT_NOP, Pm4::R_ZERO)), 9u);
+	EXPECT_EQ(Pm4::Pm4Type3NopBodyDwords(KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM)), 0u);
+	EXPECT_EQ(Pm4::Pm4Type3NopBodyDwords(0u), 0u);
+}
+
+// sceAgcDcbDmaData / sceAgcAcbDmaData: encode IT_NOP + R_DMA_DATA.
+TEST(EmulatorGraphicsPackets, EncodesDcbDmaDataCustomPacket)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	const uint64_t dst = 0x0000000120000000ull;
+	const uint64_t src = 0x0000000130000000ull;
+	uint32_t*      cmd =
+	    Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4, 0, 0, dst, 0, 0, src, 64, 0, 0, 0);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA));
+	EXPECT_EQ(cmd[1], 0x00000004u);
+	EXPECT_EQ(cmd[2], 0u);
+	EXPECT_EQ(cmd[3], 64u);
+	EXPECT_EQ(cmd[4], 0x20000000u);
+	EXPECT_EQ(cmd[5], 0x00000001u);
+	EXPECT_EQ(cmd[6], 0x30000000u);
+	EXPECT_EQ(cmd[7], 0x00000001u);
+
+	// Invalid byte_count must not allocate.
+	EXPECT_EQ(Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4, 0, 0, dst, 0, 0, src, 3, 0, 0, 0),
+	          nullptr);
+}
+
+// IT_INDEX_BASE (0x26) / IT_INDEX_BUFFER_SIZE (0x13): DCB encoders must emit the
+// packet forms the CP parsers accept (cmd_id 0xc0012600 / 0xc0001300).
+TEST(EmulatorGraphicsPackets, EncodesDcbIndexBaseAndBufferSize)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	const uint64_t index_addr = 0x00007f5a6805eb90ull;
+	uint32_t*      base_cmd =
+	    Gen5::GraphicsDcbSetIndexBuffer(reinterpret_cast<Gen5::CommandBuffer*>(&cb), index_addr);
+	ASSERT_NE(base_cmd, nullptr);
+	EXPECT_EQ(base_cmd[0], KYTY_PM4(3, Pm4::IT_INDEX_BASE, 0u));
+	EXPECT_EQ(base_cmd[0], 0xc0012600u);
+	EXPECT_EQ(base_cmd[1], 0x6805eb90u);
+	EXPECT_EQ(base_cmd[2], 0x00007f5au);
+
+	uint32_t* size_cmd =
+	    Gen5::GraphicsDcbSetIndexCount(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x1234u);
+	ASSERT_NE(size_cmd, nullptr);
+	EXPECT_EQ(size_cmd[0], KYTY_PM4(2, Pm4::IT_INDEX_BUFFER_SIZE, 0u));
+	EXPECT_EQ(size_cmd[0], 0xc0001300u);
+	EXPECT_EQ(size_cmd[1], 0x1234u);
+}
+
 TEST(EmulatorGraphicsPackets, EncodesDrawIndexOffset)
 {
 	struct AlignasCommandBuffer
@@ -1378,7 +2909,6 @@ TEST(EmulatorGraphicsPackets, EncodesDrawIndexOffset)
 	cb.cursor_up   = storage;
 	cb.cursor_down = storage + 8;
 
-	// Guest may pass AGC-style high bits; packet keeps mask 0xE0000001 (incl. bit30).
 	uint32_t* cmd = Gen5::GraphicsDcbDrawIndexOffset(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x10u, 0x30u, 0x40000000u);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0));

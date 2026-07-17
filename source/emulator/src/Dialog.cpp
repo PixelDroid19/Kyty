@@ -6,8 +6,6 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <atomic>
-#include <chrono>
-#include <cstdio>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -157,24 +155,6 @@ static std::atomic<int> g_status {CommonDialog::STATUS_NONE};
 int KYTY_SYSV_ABI MsgDialogInitialize()
 {
 	PRINT_NAME();
-
-	// #region agent log
-	{
-		const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-		                    std::chrono::system_clock::now().time_since_epoch())
-		                    .count();
-		if (FILE* f = std::fopen("/home/monasterios/.cursor/debug-logs/debug-0fe784.log", "a"))
-		{
-			std::fprintf(f,
-			             "{\"sessionId\":\"0fe784\",\"runId\":\"pre-fix\",\"hypothesisId\":\"C\","
-			             "\"location\":\"Dialog.cpp:MsgDialogInitialize\",\"message\":\"msg dialog "
-			             "init\",\"data\":{\"systemInit\":%d},\"timestamp\":%lld}\n",
-			             CommonDialog::CommonDialogIsSystemInitialized() ? 1 : 0,
-			             static_cast<long long>(ts));
-			std::fclose(f);
-		}
-	}
-	// #endregion
 
 	if (!CommonDialog::CommonDialogIsSystemInitialized())
 	{

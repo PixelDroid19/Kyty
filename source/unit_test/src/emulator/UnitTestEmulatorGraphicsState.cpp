@@ -1,7 +1,11 @@
+#include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
+#include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/Texture.h"
+#include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
@@ -19,6 +23,31 @@ UT_BEGIN(EmulatorGraphicsState);
 
 using namespace Libs::Graphics;
 
+TEST(EmulatorGraphicsState, TiledVideoOutBufferUpdateDoesNotCpuUpload)
+{
+	EXPECT_FALSE(VideoOutBufferShouldCpuUploadOnUpdate(true));
+	EXPECT_TRUE(VideoOutBufferShouldCpuUploadOnUpdate(false));
+}
+
+TEST(EmulatorGraphicsState, BlitInitializesUndefinedSource)
+{
+	EXPECT_TRUE(UtilBlitImageNeedsSourceInitialization(VK_IMAGE_LAYOUT_UNDEFINED));
+	EXPECT_FALSE(UtilBlitImageNeedsSourceInitialization(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+	EXPECT_FALSE(UtilBlitImageNeedsSourceInitialization(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL));
+}
+
+TEST(EmulatorGraphicsState, MapsColorExportComponents)
+{
+	EXPECT_EQ(ShaderColorExportSourceComponent(0, 0), 0u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(0, 3), 3u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(1, 0), 2u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(1, 3), 3u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(2, 0), 3u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(2, 3), 0u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(3, 0), 3u);
+	EXPECT_EQ(ShaderColorExportSourceComponent(3, 3), 2u);
+}
+
 TEST(EmulatorGraphicsState, DecodesGenericScissorHalves)
 {
 	HW::Context context;
@@ -32,6 +61,158 @@ TEST(EmulatorGraphicsState, DecodesGenericScissorHalves)
 	EXPECT_EQ(viewport.generic_scissor_right, 16);
 	EXPECT_EQ(viewport.generic_scissor_bottom, 20);
 	EXPECT_FALSE(viewport.generic_scissor_window_offset_enable);
+}
+
+TEST(EmulatorGraphicsState, DecodesScreenScissorHalves)
+{
+	HW::Context context;
+
+	State::SetScreenScissorTl(context, 0x000A0005u);
+	State::SetScreenScissorBr(context, 0x00C800B4u);
+
+	const auto& viewport = context.GetScreenViewport();
+	EXPECT_EQ(viewport.screen_scissor_left, 5);
+	EXPECT_EQ(viewport.screen_scissor_top, 10);
+	EXPECT_EQ(viewport.screen_scissor_right, 180);
+	EXPECT_EQ(viewport.screen_scissor_bottom, 200);
+}
+
+TEST(EmulatorGraphicsState, DecodesRenderControl)
+{
+	HW::Context context;
+
+	const uint32_t value = (1u << Pm4::DB_RENDER_CONTROL_DEPTH_CLEAR_ENABLE_SHIFT) |
+	                       (1u << Pm4::DB_RENDER_CONTROL_STENCIL_CLEAR_ENABLE_SHIFT) |
+	                       (1u << Pm4::DB_RENDER_CONTROL_DEPTH_COMPRESS_DISABLE_SHIFT) |
+	                       (3u << Pm4::DB_RENDER_CONTROL_COPY_SAMPLE_SHIFT);
+
+	State::SetRenderControl(context, value);
+
+	const auto& rc = context.GetRenderControl();
+	EXPECT_TRUE(rc.depth_clear_enable);
+	EXPECT_TRUE(rc.stencil_clear_enable);
+	EXPECT_FALSE(rc.resummarize_enable);
+	EXPECT_FALSE(rc.stencil_compress_disable);
+	EXPECT_TRUE(rc.depth_compress_disable);
+	EXPECT_FALSE(rc.copy_centroid);
+	EXPECT_EQ(rc.copy_sample, 3u);
+}
+
+TEST(EmulatorGraphicsState, DecodesStencilControlAndRefMaskHalves)
+{
+	HW::Context context;
+
+	const uint32_t control = (1u << Pm4::DB_STENCIL_CONTROL_STENCILFAIL_SHIFT) |
+	                         (2u << Pm4::DB_STENCIL_CONTROL_STENCILZPASS_SHIFT) |
+	                         (3u << Pm4::DB_STENCIL_CONTROL_STENCILZFAIL_SHIFT) |
+	                         (4u << Pm4::DB_STENCIL_CONTROL_STENCILFAIL_BF_SHIFT) |
+	                         (5u << Pm4::DB_STENCIL_CONTROL_STENCILZPASS_BF_SHIFT) |
+	                         (6u << Pm4::DB_STENCIL_CONTROL_STENCILZFAIL_BF_SHIFT);
+	State::SetStencilControl(context, control);
+
+	const auto& sc = context.GetStencilControl();
+	EXPECT_EQ(sc.stencil_fail, 1u);
+	EXPECT_EQ(sc.stencil_zpass, 2u);
+	EXPECT_EQ(sc.stencil_zfail, 3u);
+	EXPECT_EQ(sc.stencil_fail_bf, 4u);
+	EXPECT_EQ(sc.stencil_zpass_bf, 5u);
+	EXPECT_EQ(sc.stencil_zfail_bf, 6u);
+
+	State::SetStencilRefMask(context, 0x04030201u);
+	State::SetStencilRefMaskBf(context, 0x08070605u);
+
+	const auto& sm = context.GetStencilMask();
+	EXPECT_EQ(sm.stencil_testval, 0x01u);
+	EXPECT_EQ(sm.stencil_mask, 0x02u);
+	EXPECT_EQ(sm.stencil_writemask, 0x03u);
+	EXPECT_EQ(sm.stencil_opval, 0x04u);
+	EXPECT_EQ(sm.stencil_testval_bf, 0x05u);
+	EXPECT_EQ(sm.stencil_mask_bf, 0x06u);
+	EXPECT_EQ(sm.stencil_writemask_bf, 0x07u);
+	EXPECT_EQ(sm.stencil_opval_bf, 0x08u);
+}
+
+TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
+{
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 56), VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 56, true), VK_FORMAT_R8G8B8A8_SRGB);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 14), VK_FORMAT_R8G8_UNORM);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 71), VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 133), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+}
+
+TEST(EmulatorGraphicsState, Gen5SharpSampledTextureAcceptsTexture2DType)
+{
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 8; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Vsharp;
+	}
+	user_sgpr.value[3] = 9u << 28u;
+
+	ShaderSharp read_only_texture {};
+	read_only_texture.offset_dw = 0;
+	read_only_texture.size      = 0;
+
+	ShaderUserData user_data {};
+	user_data.sharp_resource_offset[0] = &read_only_texture;
+	user_data.sharp_resource_count[0]  = 1;
+
+	ShaderParsedUsage  usage {};
+	ShaderBindResources bind {};
+
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 8);
+
+	ASSERT_EQ(bind.textures2D.textures_num, 1);
+	EXPECT_EQ(bind.textures2D.textures2d_sampled_num, 1);
+	EXPECT_EQ(bind.textures2D.desc[0].texture.Type(), 9);
+	EXPECT_EQ(bind.textures2D.desc[0].usage, ShaderTextureUsage::ReadOnly);
+	EXPECT_EQ(usage.textures2D_readonly, 1);
+}
+
+TEST(EmulatorGraphicsState, Gen5SharpNullBufferDescriptorIsNotStorageBuffer)
+{
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 4; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+
+	ShaderSharp read_only_buffer {};
+	read_only_buffer.offset_dw = 0;
+	read_only_buffer.size      = 1;
+
+	ShaderUserData user_data {};
+	user_data.sharp_resource_offset[0] = &read_only_buffer;
+	user_data.sharp_resource_count[0]  = 1;
+
+	ShaderParsedUsage  usage {};
+	ShaderBindResources bind {};
+
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 4);
+
+	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
+	EXPECT_EQ(usage.storage_buffers_constant, 0);
+	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
+}
+
+TEST(EmulatorGraphicsState, Gen5DirectSgprsAllowFullUserWindow)
+{
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 28; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+
+	ShaderUserData user_data {};
+
+	ShaderParsedUsage  usage {};
+	ShaderBindResources bind {};
+
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 28);
+
+	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 28);
+	EXPECT_EQ(usage.direct_sgprs, 28);
 }
 
 TEST(EmulatorGraphicsState, DecodesModeControl)
@@ -196,6 +377,87 @@ TEST(EmulatorGraphicsState, RequiresAnActiveDepthStencilOperationForTargetBindin
 	EXPECT_FALSE(usage.depth_write_enable);
 }
 
+TEST(EmulatorGraphicsState, ResolvesViewportDepthForClipSpaceAndHostLimits)
+{
+	// Captured first MRT world pass: zscale=1, zoffset=0, dx_clip_space=false.
+	auto ogl = State::ResolveViewportDepth(1.0f, 0.0f, false, true);
+	EXPECT_FLOAT_EQ(ogl.min_depth, -1.0f);
+	EXPECT_FLOAT_EQ(ogl.max_depth, 1.0f);
+
+	// Intel Arc and many hosts lack VK_EXT_depth_range_unrestricted.
+	ogl = State::ResolveViewportDepth(1.0f, 0.0f, false, false);
+	EXPECT_FLOAT_EQ(ogl.min_depth, 0.0f);
+	EXPECT_FLOAT_EQ(ogl.max_depth, 1.0f);
+
+	auto dx = State::ResolveViewportDepth(0.5f, 0.5f, true, true);
+	EXPECT_FLOAT_EQ(dx.min_depth, 0.5f);
+	EXPECT_FLOAT_EQ(dx.max_depth, 1.0f);
+
+	dx = State::ResolveViewportDepth(1.0f, 0.0f, true, false);
+	EXPECT_FLOAT_EQ(dx.min_depth, 0.0f);
+	EXPECT_FLOAT_EQ(dx.max_depth, 1.0f);
+}
+
+TEST(EmulatorGraphicsState, ResolvesViewportXyFromScaleAndOffset)
+{
+	const auto xy = State::ResolveViewportXy(640.0f, 640.0f, 360.0f, 360.0f);
+	EXPECT_FLOAT_EQ(xy.x, 0.0f);
+	EXPECT_FLOAT_EQ(xy.y, 0.0f);
+	EXPECT_FLOAT_EQ(xy.width, 1280.0f);
+	EXPECT_FLOAT_EQ(xy.height, 720.0f);
+
+	const auto xy2 = State::ResolveViewportXy(100.0f, 250.0f, 50.0f, 150.0f);
+	EXPECT_FLOAT_EQ(xy2.x, 150.0f);
+	EXPECT_FLOAT_EQ(xy2.y, 100.0f);
+	EXPECT_FLOAT_EQ(xy2.width, 200.0f);
+	EXPECT_FLOAT_EQ(xy2.height, 100.0f);
+}
+
+TEST(EmulatorGraphicsState, SeparatesHtileMetaClearFromRegisterDepthClear)
+{
+	// Captured world path: register DEPTH_CLEAR_ENABLE=0, HTILE meta clear=1.
+	auto htile_only = State::ResolveDepthClearActions(false, true);
+	EXPECT_TRUE(htile_only.vulkan_clear);
+	EXPECT_FALSE(htile_only.suppress_depth_write);
+
+	auto register_only = State::ResolveDepthClearActions(true, false);
+	EXPECT_TRUE(register_only.vulkan_clear);
+	EXPECT_TRUE(register_only.suppress_depth_write);
+
+	auto both = State::ResolveDepthClearActions(true, true);
+	EXPECT_TRUE(both.vulkan_clear);
+	EXPECT_TRUE(both.suppress_depth_write);
+
+	auto neither = State::ResolveDepthClearActions(false, false);
+	EXPECT_FALSE(neither.vulkan_clear);
+	EXPECT_FALSE(neither.suppress_depth_write);
+}
+
+TEST(EmulatorGraphicsState, DepthAttachmentLoadOpsClearWhenGuestDepthClear)
+{
+	using namespace Kyty::Libs::Graphics;
+	// HTILE/register clear → loadOp CLEAR + UNDEFINED.
+	auto ds = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, true, false);
+	EXPECT_EQ(ds.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(ds.stencil_load, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+	EXPECT_EQ(ds.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+
+	auto both = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, true, true);
+	EXPECT_EQ(both.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(both.stencil_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(both.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+
+	auto depth_only = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT, true, false);
+	EXPECT_EQ(depth_only.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(depth_only.stencil_load, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+	EXPECT_EQ(depth_only.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+
+	auto load = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, false, false);
+	EXPECT_EQ(load.depth_load, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(load.stencil_load, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(load.initial_layout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+}
+
 TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 {
 	Loader::SymbolDatabase symbols;
@@ -211,6 +473,59 @@ TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 	query.type                 = Loader::SymbolType::Func;
 
 	EXPECT_NE(symbols.Find(query), nullptr);
+}
+
+// Gen5 ACB/DCB sizing helpers and Trinity query contracts used by Astro boot.
+TEST(EmulatorGraphicsState, Gen5AgcSizeHelpersAndTrinityMode)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	using namespace Kyty::Libs::Graphics::Gen5;
+	EXPECT_EQ(GraphicsCbNopGetSize(4), 16u);
+	EXPECT_EQ(GraphicsCbNopGetSize(1), 4u);
+	EXPECT_EQ(GraphicsCbDispatchGetSize(), 20u);
+	EXPECT_EQ(GraphicsCbSetShRegisterRangeDirectGetSize(3), 20u);
+	EXPECT_EQ(GraphicsGetIsTrinityMode(), 0u);
+	EXPECT_EQ(GraphicsDebugRaiseException(0x1234u), OK);
+
+	uint32_t write_cmd[4] = {KYTY_PM4(4, Pm4::IT_WRITE_DATA, 0u), 0u, 0u, 0u};
+	EXPECT_EQ(GraphicsWriteDataPatchSetAddressOrOffset(write_cmd, 0x1122334455667788ull), OK);
+	EXPECT_EQ(write_cmd[2], 0x55667788u);
+	EXPECT_EQ(write_cmd[3], 0x11223344u);
+	uint32_t bad_cmd[2] = {KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0u};
+	EXPECT_NE(GraphicsWriteDataPatchSetAddressOrOffset(bad_cmd, 0), OK);
+}
+
+// Missing Gen5 AGC / AgcDriver exports that blocked Astro after Ampr/VideoOut.
+TEST(EmulatorGraphicsState, ResolvesGen5AgcAndDriverExports)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libGraphicsDriver_1", &symbols));
+
+	auto resolve = [&](const char16_t* nid, const char16_t* library, const char16_t* module) {
+		Loader::SymbolResolve query {};
+		query.name                 = nid;
+		query.library              = library;
+		query.library_version      = 1;
+		query.module               = module;
+		query.module_version_major = 1;
+		query.module_version_minor = 1;
+		query.type                 = Loader::SymbolType::Func;
+		return symbols.Find(query) != nullptr;
+	};
+
+	EXPECT_TRUE(resolve(u"BfBDZGbti7A", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"htn36gPnBk4", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"t7PlZ9nt5Lc", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"1rZSWUv1IRc", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"+kSrjIVxKFE", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"AhGvpITrf4M", u"Graphics5Driver", u"Graphics5Driver"));
+	EXPECT_TRUE(resolve(u"gSRnr79F8tQ", u"Graphics5Driver", u"Graphics5Driver"));
+	EXPECT_TRUE(resolve(u"w2rJhmD+dsE", u"Graphics5Driver", u"Graphics5Driver"));
 }
 
 // WaitFlipDone body observed post-Play: handle=0, index=3 while Open() left
@@ -280,6 +595,29 @@ TEST(EmulatorGraphicsState, ClassifiesConstantStorageResourcesAsReadOnly)
 	EXPECT_FALSE(ShaderStorageUsageIsReadOnly(ShaderStorageUsage::Unknown));
 }
 
+// Guest malloc/new → host heap; small V# bases land here (Dreaming Sarah).
+TEST(EmulatorGraphicsState, ClassifiesHostGuestMallocRangesForLazyGpuHeaps)
+{
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0, 0x40));
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x1190000, 0x40));           // direct GPU map
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x900000000ull, 0x40));      // main image
+	EXPECT_TRUE(GpuMemoryIsHostGuestMallocRange(0x7f005c0b3d20ull, 0x40));    // captured VB
+	EXPECT_TRUE(GpuMemoryIsHostGuestMallocRange(0x7fffcc068720ull, 0x18));    // host index-ish
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x7f005c0b3d20ull, 0));
+	// Overflow / past host band
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x7fffffffffffffull, 0x20));
+
+	uint64_t start = 0;
+	uint64_t size  = 0;
+	GpuMemoryHostGuestMallocPageCover(0x7f005c0b3d20ull, 0x40, &start, &size);
+	EXPECT_EQ(start, 0x7f005c0b3000ull);
+	EXPECT_EQ(size, 0x1000ull);
+	// Spans a page boundary
+	GpuMemoryHostGuestMallocPageCover(0x7f005c0b3ff0ull, 0x20, &start, &size);
+	EXPECT_EQ(start, 0x7f005c0b3000ull);
+	EXPECT_EQ(size, 0x2000ull);
+}
+
 TEST(EmulatorGraphicsState, SharesOverlappingReadOnlyStorageViews)
 {
 	EXPECT_TRUE(GpuMemoryCanShareReadOnlyStorageViews(0x1000, 0x80, true, 0x1010, 0x70, true));
@@ -312,6 +650,215 @@ TEST(EmulatorGraphicsState, ReversesGpuMemoryOverlapRelations)
 	EXPECT_EQ(GpuMemoryReverseOverlap(GpuMemoryOverlapType::Contains), GpuMemoryOverlapType::IsContainedWithin);
 	EXPECT_EQ(GpuMemoryReverseOverlap(GpuMemoryOverlapType::IsContainedWithin), GpuMemoryOverlapType::Contains);
 	EXPECT_EQ(GpuMemoryReverseOverlap(GpuMemoryOverlapType::None), GpuMemoryOverlapType::None);
+}
+
+// Non-exact FindRenderTexture: IsContainedWithin and Contains (same-base or
+// offset-into-parent). PreferGpuMemoryAliasIndex picks among multi-matches;
+// Size()>1 no longer EXIT. Crosses rejected (wrong-sized bind).
+TEST(EmulatorGraphicsState, FindObjectsNonExactAcceptsContainedSampleInRenderTarget)
+{
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Equals, true));
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Equals, false));
+	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, true));
+	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::IsContainedWithin, true));
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::IsContainedWithin, false));
+	// Same-base Contains: sample and RT share start address (size mismatch only).
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, false, true));
+	// Offset-into-parent Contains: bind the live parent RT instead of empty
+	// tile-27 upload (opaque-black props). Cropped views are a follow-up.
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, false, false));
+	EXPECT_TRUE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Contains, false));
+	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::Crosses, false));
+	EXPECT_FALSE(GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType::None, false));
+}
+
+TEST(EmulatorGraphicsState, PreferGpuMemoryAliasPicksTightestCover)
+{
+	const uint64_t sizes[] = {0x60000ull, 0x140000ull, 0xa0000ull};
+	// Sample fits in 0xa0000 and 0x140000; prefer the smaller cover.
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(sizes, 3, 0xa0000ull), 2u);
+	// Sample larger than every object: prefer the largest under-sample RT.
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(sizes, 3, 0x200000ull), 1u);
+	// Comparable size proxy only: prefer the smallest object.
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(sizes, 3, 0ull), 0u);
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(sizes, 1, 0x100ull), 0u);
+}
+
+// Residual world false-color: ufmt-56 samples must not alias float lighting RTs.
+// GraphicsRender rejects the RT alias entirely when every overlap is the wrong
+// family for known ufmts 56/71 (falls through to guest/storage upload).
+TEST(EmulatorGraphicsState, Gen5SampleFormatMatchesVulkanRejectsFloatForRgba8)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_B8G8R8A8_UNORM));
+	EXPECT_FALSE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(71u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_FALSE(Gen5SampleFormatMatchesVulkan(71u, VK_FORMAT_R8G8B8A8_UNORM));
+	// Unknown ufmt: do not invent a filter that drops every match.
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(14u, VK_FORMAT_R8G8_UNORM));
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(14u, VK_FORMAT_R16G16B16A16_SFLOAT));
+
+	// Simulated multi-match policy used by PrepareTextures: when every RT is
+	// float and the sample is ufmt 56, zero compatible aliases → reject path.
+	const VkFormat only_float[] = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT};
+	size_t         compatible   = 0;
+	for (VkFormat f: only_float)
+	{
+		if (Gen5SampleFormatMatchesVulkan(56u, f))
+		{
+			compatible++;
+		}
+	}
+	EXPECT_EQ(compatible, 0u);
+	const VkFormat mixed[] = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM};
+	compatible             = 0;
+	for (VkFormat f: mixed)
+	{
+		if (Gen5SampleFormatMatchesVulkan(56u, f))
+		{
+			compatible++;
+		}
+	}
+	EXPECT_EQ(compatible, 1u);
+}
+
+// Sample guest upload must never flush StorageBuffers first (linear SSBO ≠ texture).
+TEST(EmulatorGraphicsState, Gen5SampleGuestUploadNeverWriteBackStorage)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_FALSE(Gen5SampleMayWriteBackStorageBeforeGuestUpload());
+}
+
+// Tiled guest upload under a live color surface is forbidden (GPU-owned guest).
+TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledRejectsCoveredTile27)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, true));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, true));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, false));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, false));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(0u, true));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(0u, false));
+}
+
+// Hash refresh stays enabled so late package loads still upload; SSBO clobber
+// is handled by skipping guest re-detile when a live RT/ST parent is linked.
+TEST(EmulatorGraphicsState, Gen5SampleTextureHashRefreshStaysEnabled)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(Gen5SampleTextureUsesHashRefresh(56u));
+	EXPECT_TRUE(Gen5SampleTextureUsesHashRefresh(71u));
+	EXPECT_TRUE(Gen5SampleTextureUsesHashRefresh(0u));
+}
+
+// CreateFromObjects may copy a live surface parent only when ufmt families match.
+// Float lighting under an RGBA8 sample must not be blitted into the Texture.
+TEST(EmulatorGraphicsState, Gen5SampleMayCopyFromSurfaceParentMatchesFormatFamily)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(56u, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(56u, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(56u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(71u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(71u, VK_FORMAT_R8G8B8A8_UNORM));
+	// Unknown sample ufmt: do not block all parents.
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(14u, VK_FORMAT_R8G8_UNORM));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(14u, VK_FORMAT_R16G16B16A16_SFLOAT));
+}
+
+// Dead Cells residual: bind only exact sample extent. A larger parent without a
+// crop view left banded/false-color world tiles (never fall back to non-exact).
+TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesPrefersExactExtent)
+{
+	using namespace Kyty::Libs::Graphics;
+	const VkFormat formats[]   = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM,
+	                              VK_FORMAT_R8G8B8A8_UNORM};
+	const uint32_t extents_w[] = {1920u, 1920u, 128u};
+	const uint32_t extents_h[] = {1080u, 1080u, 128u};
+	int            indices[16] = {};
+	size_t         count       = 0;
+	bool           reject      = false;
+
+	// Sample 128x128 ufmt 56: skip float parent; only exact 128x128.
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 128u, 128u, 3, formats, extents_w, extents_h, indices,
+	                                         &count, &reject));
+	EXPECT_FALSE(reject);
+	ASSERT_EQ(count, 1u);
+	EXPECT_EQ(indices[0], 2);
+
+	// Only float candidates for ufmt 56 → reject.
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 1920u, 1080u, 1, formats, extents_w, extents_h, indices,
+	                                         &count, &reject));
+	EXPECT_TRUE(reject);
+	EXPECT_EQ(count, 0u);
+
+	// Format match without exact extent → reject (no full-screen parent bind).
+	const VkFormat only_large[] = {VK_FORMAT_R8G8B8A8_UNORM};
+	const uint32_t large_w[]    = {1920u};
+	const uint32_t large_h[]    = {1080u};
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 128u, 128u, 1, only_large, large_w, large_h, indices,
+	                                         &count, &reject));
+	EXPECT_TRUE(reject);
+	EXPECT_EQ(count, 0u);
+}
+
+// Sample pixel area vs RT extent areas (GraphicsRender sample-bind path).
+// A large sample covering a tiny child RT and a full-size parent must bind the
+// parent (tightest cover >= sample), not the child (sample_size==0 bug).
+TEST(EmulatorGraphicsState, PreferGpuMemoryAliasUsesSampleAreaAgainstRtExtents)
+{
+	const uint64_t rt_areas[] = {64ull * 64ull, 1920ull * 1080ull, 128ull * 128ull};
+	const uint64_t sample_area = 1920ull * 1080ull;
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(rt_areas, 3, sample_area), 1u);
+	// Smaller sample: prefer the 128x128 cover over 1920x1080.
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(rt_areas, 3, 128ull * 128ull), 2u);
+}
+
+// Guest allocation bytes (GraphicsRender when every RT recorded guest_size).
+// Same-extent children can still differ in tiled guest size; Prefer must use
+// those bytes against size.size, not invent an area proxy.
+TEST(EmulatorGraphicsState, PreferGpuMemoryAliasUsesGuestByteSizes)
+{
+	// Child IsContainedWithin: 0x10000; parent cover: 0x800000; sibling: 0x20000.
+	const uint64_t guest_sizes[] = {0x10000ull, 0x800000ull, 0x20000ull};
+	const uint64_t sample_bytes  = 0x7f0000ull;
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(guest_sizes, 3, sample_bytes), 1u);
+	// Sample fits only under-sample objects: pick the largest child.
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(guest_sizes, 3, 0x900000ull), 1u);
+	EXPECT_EQ(PreferGpuMemoryAliasIndex(guest_sizes, 3, 0x18000ull), 2u);
+}
+
+// Capture/disk bounds: unset env defaults to 1280 so 4K VideoOut dumps are not
+// multi-dozen-MB BMPs; explicit 0 keeps full resolution; prune math is pure.
+TEST(EmulatorGraphicsState, NativeCaptureDefaultsAndPruneBoundDisk)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_EQ(NativeCaptureResolveMaxEdge(nullptr), 1280u);
+	EXPECT_EQ(NativeCaptureResolveMaxEdge(""), 1280u);
+	EXPECT_EQ(NativeCaptureResolveMaxEdge("0"), 0u);
+	EXPECT_EQ(NativeCaptureResolveMaxEdge("1920"), 1920u);
+	EXPECT_EQ(NativeCaptureResolveMaxEdge("nope"), 1280u);
+
+	EXPECT_EQ(NativeCapturePruneCount(3, 8), 0u);
+	EXPECT_EQ(NativeCapturePruneCount(8, 8), 0u);
+	EXPECT_EQ(NativeCapturePruneCount(12, 8), 4u);
+	EXPECT_EQ(NativeCapturePruneCount(5, 0), 0u);
+}
+
+// Pipeline cache must recycle slots instead of EXIT when variants exceed the cap.
+TEST(EmulatorGraphicsState, PipelineCacheNextEvictIndexRotates)
+{
+	using namespace Kyty::Libs::Graphics;
+	uint32_t cursor = 0;
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, &cursor), 0u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, &cursor), 1u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, &cursor), 2u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, &cursor), 3u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, &cursor), 0u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(0, &cursor), 0u);
+	EXPECT_EQ(PipelineCacheNextEvictIndex(4, nullptr), 0u);
 }
 
 TEST(EmulatorGraphicsState, AllowsOnlyObservedTextureStorageAliases)
@@ -380,11 +927,26 @@ TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
 	EXPECT_FALSE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
 	                                                    GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
-	                                              GpuMemoryObjectType::VertexBuffer));
-	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
-	                                              GpuMemoryObjectType::VertexBuffer));
-	EXPECT_FALSE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                               GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                               GpuMemoryObjectType::VertexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
+	                                                GpuMemoryObjectType::VertexBuffer));
+	// Captured: Texture Contains + IndexBuffer Crosses → link IB with new VB.
+	EXPECT_TRUE(GpuMemoryAllowsVertexLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
+	                                                 GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
+	                                                 GpuMemoryObjectType::VertexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsVertexLinkIndexBuffer(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
+	                                                  GpuMemoryObjectType::VertexBuffer));
+	// Captured: IndexBuffer IsContainedWithin + VertexBuffer Contains → reclaim
+	// peer IB, link VB with the new IndexBuffer.
+	EXPECT_TRUE(GpuMemoryAllowsIndexReclaimIndex(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                             GpuMemoryObjectType::IndexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsIndexLinkVertexBuffer(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
+	                                                 GpuMemoryObjectType::IndexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsIndexLinkVertexBuffer(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                  GpuMemoryObjectType::IndexBuffer));
 }
 
 // Captured post-Param5: RenderTexture with SB Equals + SB/RT Contains parents.
@@ -438,6 +1000,10 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	                                                    GpuMemoryObjectType::Texture));
 	EXPECT_TRUE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
 	                                                    GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::VideoOutBuffer, GpuMemoryOverlapType::Equals,
+	                                                    GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::VideoOutBuffer, GpuMemoryOverlapType::Contains,
+	                                                     GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                                GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
@@ -569,7 +1135,416 @@ TEST(EmulatorGraphicsState, DepthStencilReclaimParentsAreSurfaces)
 	EXPECT_EQ(GpuMemoryOverlapType::Crosses, GpuMemoryOverlapType::Crosses);
 }
 
-// Gen5: FORMAT=1 + TILE_STENCIL_DISABLE + null stencil bases → no separate plane.
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearOnUndefinedFirstUse)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Mesa/RADV R8G8B8A8: CLEAR_WORD0/1=0 packs to transparent black (A=0).
+	// Inventing opaque A=1 made sprite-layer intermediates composite as black quads.
+	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, false, 0u, 0u, VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsFloatZeroWordsClearToZeroAlpha)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Captured lighting RT: fmt=12/ctype=7, CLEAR_WORD0/1=0, blend SRC_ALPHA,ONE.
+	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, false, 0u, 0u, VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsLoadOnOptimalSubsequentPass)
+{
+	using namespace Kyty::Libs::Graphics;
+	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, false, 0u, 0u, VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearWhenRebindingAfterSample)
+{
+	using namespace Kyty::Libs::Graphics;
+	// After composite samples the lighting RT, layout is SHADER_READ_ONLY. The next
+	// frame's first additive light pass must CLEAR (zeros), not LOAD prior-frame HDR.
+	auto ops =
+	    ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false, 0u, 0u, VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
+
+	// Within-frame accumulation (still COLOR_ATTACHMENT) must keep LOAD.
+	auto load_ops =
+	    ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, false, 0u, 0u, VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(load_ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsRgba8RebindClearsTransparent)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Captured GBuffer/sprite RTs: fmt=10, CLEAR_WORD=0, fast=0, sampled then rebound.
+	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false, 0u, 0u, VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesRgba8GuestClearWords)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Mesa/RADV: WORD0 = R|(G<<8)|(B<<16)|(A<<24), WORD1 = 0 for R8G8B8A8.
+	const uint32_t word0 = 0xff804020u; // R=0x20 G=0x40 B=0x80 A=0xff
+	const uint32_t word1 = 0u;
+	auto           ops   = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, word0, word1, VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_NEAR(ops.clear_r, 32.0f / 255.0f, 1e-5);
+	EXPECT_NEAR(ops.clear_g, 64.0f / 255.0f, 1e-5);
+	EXPECT_NEAR(ops.clear_b, 128.0f / 255.0f, 1e-5);
+	EXPECT_NEAR(ops.clear_a, 1.0f, 1e-5);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentClearValuesDoNotChangeRenderPassCompatibility)
+{
+	using namespace Kyty::Libs::Graphics;
+	// VkClearValue is supplied at BeginRenderPass. Two clears on the same image
+	// therefore require the same render-pass compatibility while preserving their
+	// distinct per-pass colors; keying framebuffer/pipeline caches by these values
+	// recompiles Metal pipelines every frame.
+	auto first = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, 0xff0000ffu, 0u, VK_FORMAT_R8G8B8A8_UNORM);
+	auto next  = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, 0xffff0000u, 0u, VK_FORMAT_R8G8B8A8_UNORM);
+
+	EXPECT_EQ(first.load_op, next.load_op);
+	EXPECT_EQ(first.initial_layout, next.initial_layout);
+	EXPECT_NE(first.clear_r, next.clear_r);
+	EXPECT_NE(first.clear_b, next.clear_b);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesRgba16FloatGuestClearWords)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Mesa/RADV: WORD0 = f16(R)|(f16(G)<<16), WORD1 = f16(B)|(f16(A)<<16).
+	// f16(1.0)=0x3c00, f16(0.5)=0x3800, f16(0.0)=0x0000, f16(1.0)=0x3c00.
+	const uint32_t word0 = 0x38003c00u;
+	const uint32_t word1 = 0x3c000000u;
+	auto           ops   = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, word0, word1, VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_FLOAT_EQ(ops.clear_r, 1.0f);
+	EXPECT_FLOAT_EQ(ops.clear_g, 0.5f);
+	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
+	EXPECT_FLOAT_EQ(ops.clear_a, 1.0f);
+}
+
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsRejectsInventedFloat32RgClear)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Legacy invented packing bitcast float32 R/G and forced B=0 A=1. Those
+	// bit patterns as f16 pairs must NOT decode to (1.0, 0.5, 0, 1).
+	const uint32_t word0 = 0x3f800000u; // float32 1.0
+	const uint32_t word1 = 0x3f000000u; // float32 0.5
+	auto           ops   = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, word0, word1, VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_FALSE(ops.clear_r == 1.0f && ops.clear_g == 0.5f && ops.clear_b == 0.0f && ops.clear_a == 1.0f);
+}
+
+TEST(EmulatorGraphicsState, WaitRegMemCompareMasksBothSides)
+{
+	// GraphicsDcbWaitRegMem size=0 zeroes the high half of the 64-bit mask.
+	// Comparing (*addr & mask) == ref (unmasked) never matches when ref keeps
+	// high bits; both sides must apply mask (WaitRegMem32/64 contract).
+	const uint64_t val  = 0x1u;
+	const uint64_t ref  = 0x0000000100000001ull;
+	const uint64_t mask = 0x00000000ffffffffull;
+	EXPECT_EQ((val & mask), (ref & mask));
+	EXPECT_NE((val & mask), ref);
+}
+
+TEST(EmulatorGraphicsState, MemcpySkipAbsoluteRangesPreservesFenceHoles)
+{
+	using namespace Kyty::Libs::Graphics;
+	uint8_t dst[32];
+	uint8_t src[32];
+	for (int i = 0; i < 32; i++)
+	{
+		dst[i] = static_cast<uint8_t>(0xA0 + i);
+		src[i] = static_cast<uint8_t>(0x10 + i);
+	}
+	const uint64_t base       = reinterpret_cast<uint64_t>(dst);
+	const uint64_t hole_begin = base + 8u;
+	const uint64_t hole_end   = base + 16u;
+	MemcpySkipAbsoluteRanges(dst, src, 32, &hole_begin, &hole_end, 1);
+	for (int i = 0; i < 8; i++)
+	{
+		EXPECT_EQ(dst[i], static_cast<uint8_t>(0x10 + i));
+	}
+	for (int i = 8; i < 16; i++)
+	{
+		EXPECT_EQ(dst[i], static_cast<uint8_t>(0xA0 + i));
+	}
+	for (int i = 16; i < 32; i++)
+	{
+		EXPECT_EQ(dst[i], static_cast<uint8_t>(0x10 + i));
+	}
+}
+
+// OnlyFlip → ActiveDeleted must be force-completed with Active after BufferFlush.
+// Skipping ActiveDeleted left VideoOutSubmitFlip on vkGetEventStatus (empty Flip
+// queue; guest ThreadFlag bit 0x1 And+ClearBits soft-lock around present 2400).
+TEST(EmulatorGraphicsState, LabelForceCompleteFiresActiveDeletedOnlyFlip)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_EQ(LabelForceCompleteActionFor(true, false), LabelForceCompleteKind::FireKeep);
+	EXPECT_EQ(LabelForceCompleteActionFor(false, true), LabelForceCompleteKind::FireDestroy);
+	EXPECT_EQ(LabelForceCompleteActionFor(false, false), LabelForceCompleteKind::Skip);
+	EXPECT_EQ(LabelForceCompleteActionFor(true, true), LabelForceCompleteKind::FireKeep);
+}
+
+// Label⊂StorageBuffer must stay linked so WriteBack holes preserve EOP fences.
+// Deleting Labels let StorageBuffer WriteBack zero guest fences → EVENTFLAG_SET=0.
+TEST(EmulatorGraphicsState, GpuMemoryKeepsLabelWriteBackHoleUnderStorageBuffer)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::IsContainedWithin,
+	                                            GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::Equals,
+	                                            GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::Crosses,
+	                                            GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
+	                                            GpuMemoryObjectType::Label));
+	EXPECT_FALSE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::IsContainedWithin,
+	                                             GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                             GpuMemoryObjectType::StorageBuffer));
+}
+
+// SubmitAndFlip without an embedded R_FLIP/0x777 must still flip after BufferFlush.
+// Detect SubmitAndFlip via an explicit batch flag — not flip.handle != 0 (handle 0
+// is legal, and plain Submit also zeroes the flip fields).
+TEST(EmulatorGraphicsState, GraphicsBatchNeedsApiFlipWhenDcbOmitsFlip)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(GraphicsBatchNeedsApiFlip(true, false));
+	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(true, true));
+	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(false, false));
+	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(false, true));
+}
+
+// Host presentation: default swapchain selection must stay LDR sRGB even when a
+// driver lists HDR10 (or other host-HDR color spaces) first.
+TEST(EmulatorGraphicsState, HostHdrColorSpacesAreDetected)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(VulkanColorSpaceIsHostHdr(VK_COLOR_SPACE_HDR10_ST2084_EXT));
+	EXPECT_TRUE(VulkanColorSpaceIsHostHdr(VK_COLOR_SPACE_HDR10_HLG_EXT));
+	EXPECT_TRUE(VulkanColorSpaceIsHostHdr(VK_COLOR_SPACE_DOLBYVISION_EXT));
+	EXPECT_TRUE(VulkanColorSpaceIsHostHdr(VK_COLOR_SPACE_BT2020_LINEAR_EXT));
+	EXPECT_FALSE(VulkanColorSpaceIsHostHdr(VK_COLOR_SPACE_SRGB_NONLINEAR_KHR));
+}
+
+TEST(EmulatorGraphicsState, DefaultSwapchainPrefersLdrSrgbOverHdr10First)
+{
+	using namespace Kyty::Libs::Graphics;
+	const VkSurfaceFormatKHR formats[] = {
+	    {VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_HDR10_ST2084_EXT},
+	    {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+	    {VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+	};
+	const auto chosen = SelectDefaultSwapchainSurfaceFormat(formats, 3u);
+	EXPECT_EQ(chosen.format, VK_FORMAT_B8G8R8A8_UNORM);
+	EXPECT_EQ(chosen.colorSpace, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+	EXPECT_FALSE(VulkanColorSpaceIsHostHdr(chosen.colorSpace));
+}
+
+TEST(EmulatorGraphicsState, DefaultSwapchainPrefersUnormSrgbOverSrgbFormat)
+{
+	using namespace Kyty::Libs::Graphics;
+	const VkSurfaceFormatKHR formats[] = {
+	    {VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+	    {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+	};
+	const auto chosen = SelectDefaultSwapchainSurfaceFormat(formats, 2u);
+	EXPECT_EQ(chosen.format, VK_FORMAT_B8G8R8A8_UNORM);
+	EXPECT_EQ(chosen.colorSpace, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+}
+
+TEST(EmulatorGraphicsState, ResolvesContiguousMultiRenderTargetLayout)
+{
+	auto zero = State::ResolveColorTargetLayout(0u);
+	EXPECT_EQ(zero.count, 0u);
+	EXPECT_EQ(zero.error, State::ColorTargetLayoutError::None);
+
+	auto one = State::ResolveColorTargetLayout(0xFu);
+	EXPECT_EQ(one.count, 1u);
+	EXPECT_EQ(one.nibbles[0], 0xFu);
+	EXPECT_EQ(one.error, State::ColorTargetLayoutError::None);
+
+	auto four = State::ResolveColorTargetLayout(0x0000FFFFu);
+	EXPECT_EQ(four.count, 4u);
+	for (uint32_t i = 0; i < 4; i++)
+	{
+		EXPECT_EQ(four.nibbles[i], 0xFu) << "slot " << i;
+	}
+	EXPECT_EQ(four.error, State::ColorTargetLayoutError::None);
+
+	auto eight = State::ResolveColorTargetLayout(0xFFFFFFFFu);
+	EXPECT_EQ(eight.count, 8u);
+	for (uint32_t i = 0; i < 8; i++)
+	{
+		EXPECT_EQ(eight.nibbles[i], 0xFu) << "slot " << i;
+	}
+	EXPECT_EQ(eight.error, State::ColorTargetLayoutError::None);
+}
+
+TEST(EmulatorGraphicsState, RejectsGappedMultiRenderTargetLayout)
+{
+	// RT0 full, RT1 zero, RT2 full → hole after contiguous prefix.
+	auto gap = State::ResolveColorTargetLayout(0x00000F0Fu);
+	EXPECT_EQ(gap.error, State::ColorTargetLayoutError::Gapped);
+}
+
+TEST(EmulatorGraphicsState, IgnoresMaskBitsForUnconfiguredRenderTargets)
+{
+	// Only RT0 has a CB_COLORn_BASE; stale/nonzero higher mask nibbles do not
+	// create attachments and must not turn this single-target pass into a gap.
+	auto rt0 = State::ResolveColorTargetLayout(0xb8a601afu, 1u);
+	EXPECT_EQ(rt0.count, 1u);
+	EXPECT_EQ(rt0.nibbles[0], 0xfu);
+	EXPECT_EQ(rt0.error, State::ColorTargetLayoutError::None);
+
+	// A real RT2 with RT1 absent remains an invalid gapped layout.
+	auto gap = State::ResolveColorTargetLayout(0x00000f0fu, 3u);
+	EXPECT_EQ(gap.error, State::ColorTargetLayoutError::Gapped);
+}
+
+TEST(EmulatorGraphicsState, AcceptsPartialChannelRenderTargetLayout)
+{
+	// RT0 partial channels (R+B only).
+	auto partial = State::ResolveColorTargetLayout(0x00000005u);
+	EXPECT_EQ(partial.count, 1u);
+	EXPECT_EQ(partial.nibbles[0], 0x5u);
+	EXPECT_EQ(partial.error, State::ColorTargetLayoutError::None);
+}
+
+TEST(EmulatorGraphicsState, RecognizesObservedHtileClearPattern)
+{
+	uint32_t clear_words[8];
+	for (auto& word: clear_words)
+	{
+		word = 0xfffffff0u;
+	}
+	EXPECT_TRUE(DepthMetaIsClearPattern(clear_words, sizeof(clear_words)));
+
+	clear_words[3] = 0xffffffffu;
+	EXPECT_FALSE(DepthMetaIsClearPattern(clear_words, sizeof(clear_words)));
+	EXPECT_FALSE(DepthMetaIsClearPattern(nullptr, sizeof(clear_words)));
+	EXPECT_FALSE(DepthMetaIsClearPattern(clear_words, sizeof(clear_words) - 1));
+}
+
+TEST(EmulatorGraphicsState, ConsumesTrackedHtileClearOnce)
+{
+	constexpr uint64_t address = 0x12345000u;
+	DepthMetaMarkClear(address);
+	EXPECT_TRUE(DepthMetaConsumeClear(address));
+	EXPECT_FALSE(DepthMetaConsumeClear(address));
+}
+
+TEST(EmulatorGraphicsState, HtilePendingClearDoesNotSuppressDepthWrite)
+{
+	auto actions = State::ResolveDepthClearActions(false, true);
+	EXPECT_TRUE(actions.vulkan_clear);
+	EXPECT_FALSE(actions.suppress_depth_write);
+}
+
+TEST(EmulatorGraphicsState, MatchesOnlyExactHtileStorageRange)
+{
+	EXPECT_TRUE(DepthMetaMatchesStorageRange(0x120000, 0x8000, 0x120000, 0x8000));
+	EXPECT_FALSE(DepthMetaMatchesStorageRange(0x120000, 0x4000, 0x120000, 0x8000));
+	EXPECT_FALSE(DepthMetaMatchesStorageRange(0x124000, 0x4000, 0x120000, 0x8000));
+	EXPECT_FALSE(DepthMetaMatchesStorageRange(0, 0x8000, 0, 0x8000));
+}
+
+TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
+{
+	using namespace Kyty::Libs::Graphics::State;
+	// Third arg is "live RT alias found" (Equals, or non-exact Contains /
+	// IsContainedWithin from FindRenderTexture).
+	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, true), Gen5SampleBacking::ExactRenderTarget);
+	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(14, 27, false), Gen5SampleBacking::Unsupported);
+	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, false), Gen5SampleBacking::Unsupported);
+	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, true), Gen5SampleBacking::ExactRenderTarget);
+	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, true), Gen5SampleBacking::ExactRenderTarget);
+	EXPECT_EQ(ResolveGen5SampleBacking(56, 0, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(56, 9, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(133, 9, false), Gen5SampleBacking::Unsupported);
+}
+
+TEST(EmulatorGraphicsState, ResolvesObservedSamplerClampModes)
+{
+	using namespace Kyty::Libs::Graphics::State;
+
+	EXPECT_EQ(ResolveSamplerAddressMode(0), SamplerAddressMode::Repeat);
+	EXPECT_EQ(ResolveSamplerAddressMode(1), SamplerAddressMode::MirroredRepeat);
+	EXPECT_EQ(ResolveSamplerAddressMode(2), SamplerAddressMode::ClampToEdge);
+	EXPECT_EQ(ResolveSamplerAddressMode(6), SamplerAddressMode::ClampToBorder);
+	EXPECT_EQ(ResolveSamplerAddressMode(7), SamplerAddressMode::ClampToBorder);
+}
+
+// Residual visual (world false-color, HUD correct): intermediate format-71 and
+// format-56 sampled paths must keep distinct Vulkan formats — float RT aliases
+// as SFLOAT, RGBA8 samples default UNORM (sRGB only with evidenced force_degamma).
+TEST(EmulatorGraphicsState, Gen5SampledFormatsPreserveFloatAndUnormContracts)
+{
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 71, false), VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 71, true), VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 56, false), VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 56, true), VK_FORMAT_R8G8B8A8_SRGB);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 14, false), VK_FORMAT_R8G8_UNORM);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 133, false), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 133, true), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+}
+
+TEST(EmulatorGraphicsState, RegularImageSamplingDisablesSamplerComparison)
+{
+	using namespace Kyty::Libs::Graphics::State;
+	const auto comparison = ResolveSamplerComparison(0, ImageSampleOperation::Regular);
+	EXPECT_FALSE(comparison.enabled);
+	EXPECT_EQ(comparison.function, 0);
+}
+
+// GraphicsInit must publish API version and feature-flag words into the guest
+// AGC state buffer; leaving them unset lets titles take a null-deref after
+// CreateShader / register-default use (see GraphicsInitWriteGuestState).
+TEST(EmulatorGraphicsState, GraphicsInitWriteGuestStatePublishesVersionAndFeatureWords)
+{
+	EXPECT_FALSE(Gen5::GraphicsInitWriteGuestState(nullptr, 8u));
+
+	uint32_t state[4] = {0xdeadbeefu, 0xcafebabeu, 0x11111111u, 0x22222222u};
+	EXPECT_TRUE(Gen5::GraphicsInitWriteGuestState(state, 8u));
+	EXPECT_EQ(state[0], 8u);
+	EXPECT_EQ(state[1], 0u);
+	// Only the documented two words are written.
+	EXPECT_EQ(state[2], 0x11111111u);
+	EXPECT_EQ(state[3], 0x22222222u);
+
+	EXPECT_TRUE(Gen5::GraphicsInitWriteGuestState(state, 7u));
+	EXPECT_EQ(state[0], 7u);
+	EXPECT_EQ(state[1], 0u);
+}
+
 TEST(EmulatorGraphicsState, ResolvesEffectiveStencilFormatWithoutSeparatePlane)
 {
 	HW::DepthRenderTarget z {};
@@ -588,28 +1563,6 @@ TEST(EmulatorGraphicsState, ResolvesEffectiveStencilFormatWithoutSeparatePlane)
 
 	z.stencil_info.format = 0;
 	EXPECT_EQ(State::ResolveEffectiveStencilFormat(z), 0u);
-}
-
-// Guest malloc/new → host heap; small I#/V# bases land here (index draw offset).
-TEST(EmulatorGraphicsState, ClassifiesHostGuestMallocRangesForLazyGpuHeaps)
-{
-	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0, 0x40));
-	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x1190000, 0x40));           // direct GPU map
-	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x900000000ull, 0x40));      // main image
-	EXPECT_TRUE(GpuMemoryIsHostGuestMallocRange(0x7f005c0b3d20ull, 0x40));    // captured VB
-	EXPECT_TRUE(GpuMemoryIsHostGuestMallocRange(0x7fffcc068720ull, 0x18));    // host index-ish
-	EXPECT_TRUE(GpuMemoryIsHostGuestMallocRange(0x7febfc31a6b0ull, 0xe4));   // captured IB
-	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x7f005c0b3d20ull, 0));
-	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x7fffffffffffffull, 0x20));
-
-	uint64_t start = 0;
-	uint64_t size  = 0;
-	GpuMemoryHostGuestMallocPageCover(0x7f005c0b3d20ull, 0x40, &start, &size);
-	EXPECT_EQ(start, 0x7f005c0b3000ull);
-	EXPECT_EQ(size, 0x1000ull);
-	GpuMemoryHostGuestMallocPageCover(0x7f005c0b3ff0ull, 0x20, &start, &size);
-	EXPECT_EQ(start, 0x7f005c0b3000ull);
-	EXPECT_EQ(size, 0x2000ull);
 }
 
 UT_END();

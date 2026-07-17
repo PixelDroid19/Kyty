@@ -16,6 +16,7 @@
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Loader/Elf.h"
 #include "Emulator/Loader/Jit.h"
 #include "Emulator/Loader/MissingImportStubs.h"
@@ -24,8 +25,6 @@
 
 #include <cstring>
 #include <csignal>
-#include <fcntl.h>
-#include <unistd.h>
 #include <utility>
 
 #ifdef KYTY_EMU_ENABLED
@@ -103,6 +102,69 @@ static KYTY_SYSV_ABI void run_entry(uint64_t addr, EntryParams* params, atexit_f
 static KYTY_SYSV_ABI int run_ini_fini(uint64_t addr, size_t args, const void* argp, module_func_t func)
 {
 	return reinterpret_cast<module_ini_fini_func_t>(addr)(args, argp, func);
+}
+
+static void run_init_array(uint64_t base_vaddr, uint64_t array_vaddr, uint64_t array_size)
+{
+	if (array_vaddr == 0 || array_size < sizeof(uint64_t))
+	{
+		return;
+	}
+
+	auto*      entries = reinterpret_cast<uint64_t*>(base_vaddr + array_vaddr);
+	const auto count   = static_cast<size_t>(array_size / sizeof(uint64_t));
+
+	for (size_t i = 0; i < count; i++)
+	{
+		const uint64_t fn = entries[i];
+		if (fn != 0)
+		{
+			reinterpret_cast<void (*)()>(fn)();
+		}
+	}
+}
+
+void LoaderRunProgramInitializers(uint64_t base_vaddr, const DynamicInfo& info)
+{
+	if (info.preinit_array_vaddr != 0 && info.preinit_array_size != 0)
+	{
+		run_init_array(base_vaddr, info.preinit_array_vaddr, info.preinit_array_size);
+	}
+
+	if (info.init_vaddr != 0)
+	{
+		reinterpret_cast<void (*)()>(base_vaddr + info.init_vaddr)();
+	}
+
+	if (info.init_array_vaddr != 0 && info.init_array_size != 0)
+	{
+		run_init_array(base_vaddr, info.init_array_vaddr, info.init_array_size);
+	}
+}
+
+bool LoaderCodeContainsDirectCallTo(const uint8_t* code, uint64_t size, uint64_t code_vaddr, uint64_t target_vaddr)
+{
+	if (code == nullptr || size < 5)
+	{
+		return false;
+	}
+
+	for (uint64_t off = 0; off + 5 <= size; off++)
+	{
+		if (code[off] != 0xe8)
+		{
+			continue;
+		}
+		int32_t rel = 0;
+		std::memcpy(&rel, code + off + 1, sizeof(rel));
+		const uint64_t next  = code_vaddr + off + 5;
+		const uint64_t dest  = static_cast<uint64_t>(static_cast<int64_t>(next) + static_cast<int64_t>(rel));
+		if (dest == target_vaddr)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 static uint64_t get_aligned_size(const Elf64_Phdr* p)
@@ -235,32 +297,6 @@ static void kyty_exception_handler(const Core::VirtualMemory::ExceptionHandler::
 		// Real access violation. Report async-signal-safe and terminate: this runs in
 		// a signal handler and the faulting thread may hold the allocator lock, so
 		// printf/StackTrace (which allocate) would dead-lock instead of reporting.
-		// #region agent log
-		{
-			static volatile sig_atomic_t fault_logs = 0;
-			if (fault_logs < 20)
-			{
-				++fault_logs;
-				const int fd = ::open("/home/monasterios/Kyty/.cursor/debug-f08e58.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
-				if (fd >= 0)
-				{
-					char buf[320];
-					const int n = std::snprintf(buf, sizeof(buf),
-					                            "{\"sessionId\":\"f08e58\",\"runId\":\"fault-debug\",\"hypothesisId\":\"T\","
-					                            "\"location\":\"RuntimeLinker.cpp:kyty_exception_handler\",\"message\":\"access violation\","
-					                            "\"data\":{\"vaddr\":%llu,\"rip\":%llu,\"write\":%d}}\n",
-					                            static_cast<unsigned long long>(info->access_violation_vaddr),
-					                            static_cast<unsigned long long>(info->exception_address),
-					                            info->access_violation_type == Core::VirtualMemory::ExceptionHandler::AccessViolationType::Write ? 1 : 0);
-					if (n > 0)
-					{
-						(void)!::write(fd, buf, static_cast<size_t>(n));
-					}
-					::close(fd);
-				}
-			}
-		}
-		// #endregion
 		Core::VirtualMemory::FatalFault(info->access_violation_vaddr, info->exception_address);
 	}
 
@@ -534,11 +570,13 @@ static void relocate_all(Elf64_Rela* records, uint64_t size, Program* program, b
 	}
 }
 
-static KYTY_SYSV_ABI void RelocateHandler(RelocateHandlerStack s)
+static KYTY_SYSV_ABI void RelocateHandler(uint64_t rdi, uint64_t rsi, uint64_t rdx, uint64_t rcx, uint64_t r8, uint64_t r9,
+                                          RelocateHandlerStack s)
 {
 	auto*  stack     = s.stack;
 	auto*  program   = reinterpret_cast<Program*>(stack[-1]);
 	auto   rel_index = stack[0];
+	auto   return_address = stack[1];
 	String name      = U"<unknown function>";
 
 	if (program != nullptr && program->dynamic_info != nullptr && program->dynamic_info->jmprela_table != nullptr)
@@ -552,9 +590,19 @@ static KYTY_SYSV_ABI void RelocateHandler(RelocateHandlerStack s)
 	stack[-1] = stack[1];
 
 	Core::Singleton<Loader::RuntimeLinker>::Instance()->StackTrace(reinterpret_cast<uint64_t>(s.stack - 2));
+	// Never touch return_address memory here: an unmapped page would SIGSEGV
+	// before EXIT could report the missing NID (silent guest close).
+	static constexpr uint8_t kCallerBytesUnknown[16] = {};
 
-	EXIT("=== Unpatched function!!! ===\n[%d]\t%s\n", Core::Thread::GetThreadIdUnique(),
-	     (Log::IsColoredPrintf() ? name : Log::RemoveColors(name)).C_Str());
+	EXIT("=== Unpatched function!!! ===\n[%d]\t%s\n"
+	     "SysV arguments: rdi=%016" PRIx64 " rsi=%016" PRIx64 " rdx=%016" PRIx64 " rcx=%016" PRIx64
+	     " r8=%016" PRIx64 " r9=%016" PRIx64 " return=%016" PRIx64 "\n"
+	     "Caller bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	     Core::Thread::GetThreadIdUnique(), (Log::IsColoredPrintf() ? name : Log::RemoveColors(name)).C_Str(), rdi, rsi, rdx, rcx, r8,
+	     r9, return_address, kCallerBytesUnknown[0], kCallerBytesUnknown[1], kCallerBytesUnknown[2], kCallerBytesUnknown[3],
+	     kCallerBytesUnknown[4], kCallerBytesUnknown[5], kCallerBytesUnknown[6], kCallerBytesUnknown[7], kCallerBytesUnknown[8],
+	     kCallerBytesUnknown[9], kCallerBytesUnknown[10], kCallerBytesUnknown[11], kCallerBytesUnknown[12], kCallerBytesUnknown[13],
+	     kCallerBytesUnknown[14], kCallerBytesUnknown[15]);
 }
 
 static KYTY_MS_ABI uint8_t* TlsMainGetAddr()

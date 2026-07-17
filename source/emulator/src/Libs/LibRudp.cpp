@@ -24,6 +24,7 @@ static RudpEventHandler g_event_handler = nullptr;
 static void*            g_event_arg     = nullptr;
 static bool             g_initialized   = false;
 
+// Gen5 sceRudpInit (NID amuBfI-AQc4). Accept guest memory pool; no real socket IO yet.
 static int KYTY_SYSV_ABI RudpInit(void* mem_pool, int mem_pool_size)
 {
 	PRINT_NAME();

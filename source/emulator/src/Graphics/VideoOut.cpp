@@ -19,6 +19,11 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Profiler.h"
 
+#include <atomic>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -30,6 +35,16 @@ namespace Kyty::Libs::VideoOut {
 LIB_NAME("VideoOut", "VideoOut");
 
 namespace EventQueue = LibKernel::EventQueue;
+
+namespace {
+
+bool EopTraceEnabled()
+{
+	static const bool enabled = (std::getenv("KYTY_EOP_TRACE") != nullptr);
+	return enabled;
+}
+
+} // namespace
 
 constexpr int VIDEO_OUT_EVENT_FLIP             = 0;
 constexpr int VIDEO_OUT_EVENT_VBLANK           = 1;
@@ -239,6 +254,7 @@ static void calc_buffer_size(const VideoOutBufferAttribute* attribute, const Vid
 	{
 		EXIT_NOT_IMPLEMENTED(attribute2->option != 0 && attribute2->option != 8);
 		EXIT_NOT_IMPLEMENTED(attribute2->aspect_ratio != 0);
+		// Gen5 PIXEL_FORMAT2: 8:8:8:8 sRGB and 10:10:10:2 (B/R channel order variants).
 		EXIT_NOT_IMPLEMENTED(attribute2->pixel_format != 0x8000000000000000ULL && attribute2->pixel_format != 0x8000000022000000ULL &&
 		                     attribute2->pixel_format != 0x8100000000000000ULL && attribute2->pixel_format != 0x8100000022000000ULL);
 	} else
@@ -469,7 +485,7 @@ VideoOutBufferImageInfo VideoOutContext::FindImage(const void* buffer)
 		{
 			for (const auto& set: ctx.buffers_sets)
 			{
-				for (int j = set.start_index; j < set.num; j++)
+				for (int j = set.start_index; j < set.start_index + set.num; j++)
 				{
 					if (ctx.buffers[j].buffer == buffer)
 					{
@@ -549,6 +565,7 @@ bool FlipQueue::Flip(uint32_t micros)
 	m_mutex.Lock();
 
 	r.cfg->mutex.Lock();
+	uint32_t flip_triggered = 0;
 	for (auto& flip_eq: r.cfg->flip_eqs)
 	{
 		if (flip_eq != nullptr)
@@ -556,6 +573,16 @@ bool FlipQueue::Flip(uint32_t micros)
 			auto result = EventQueue::KernelTriggerEvent(flip_eq, VIDEO_OUT_EVENT_FLIP, EventQueue::KERNEL_EVFILT_VIDEO_OUT,
 			                                             reinterpret_cast<void*>(r.flip_arg));
 			EXIT_NOT_IMPLEMENTED(result != OK);
+			flip_triggered++;
+		}
+	}
+	if (EopTraceEnabled())
+	{
+		static std::atomic<uint32_t> flip_logs {0};
+		const uint32_t               n = flip_logs.fetch_add(1);
+		if (n < 32u)
+		{
+			std::fprintf(stderr, "FLIP_TRIGGER index=%d arg=%" PRId64 " eqs=%u\n", r.index, r.flip_arg, flip_triggered);
 		}
 	}
 	r.cfg->mutex.Unlock();
@@ -623,6 +650,8 @@ KYTY_SYSV_ABI int VideoOutOpen(int user_id, int bus_type, int index, const void*
 	EXIT_NOT_IMPLEMENTED(user_id != 255 && user_id != 0);
 	EXIT_NOT_IMPLEMENTED(bus_type != 0);
 	EXIT_NOT_IMPLEMENTED(index != 0);
+	// Gen5 titles pass a non-null open-param block; attributes are applied later
+	// via SetBufferAttribute*. Accept and ignore for Open().
 	printf("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 
 	int handle = g_video_out_context->Open();
@@ -815,7 +844,7 @@ KYTY_SYSV_ABI int VideoOutAddFlipEvent(EventQueue::KernelEqueue eq, int handle, 
 		return VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE;
 	}
 
-	// Titles may re-register the same equeue; only track it once.
+	// Titles may re-register the same equeue; only track it once (KytyPS5).
 	const bool add_eq = !ctx->flip_eqs.Contains(eq);
 
 	EventQueue::KernelEqueueEvent event;
@@ -836,8 +865,14 @@ KYTY_SYSV_ABI int VideoOutAddFlipEvent(EventQueue::KernelEqueue eq, int handle, 
 	{
 		ctx->flip_eqs.Add(eq);
 	}
+	const unsigned flip_eq_count = static_cast<unsigned>(ctx->flip_eqs.Size());
 
 	ctx->mutex.Unlock();
+
+	if (EopTraceEnabled())
+	{
+		std::fprintf(stderr, "FLIP_ADD handle=%d eq=%p count=%u\n", handle, static_cast<void*>(eq), flip_eq_count);
+	}
 
 	return result;
 }
@@ -928,9 +963,11 @@ static int register_buffers_internal(VideoOutConfig* ctx, int set_id, int start_
 			format = Graphics::VideoOutBufferFormat::R8G8B8A8Srgb;
 		} else if (attribute2->pixel_format == 0x8100000000000000ULL)
 		{
+			// SCE_VIDEO_OUT_PIXEL_FORMAT2_B10_G10_R10_A2
 			format = Graphics::VideoOutBufferFormat::B10G10R10A2Unorm;
 		} else if (attribute2->pixel_format == 0x8100000022000000ULL)
 		{
+			// SCE_VIDEO_OUT_PIXEL_FORMAT2_R10_G10_B10_A2
 			format = Graphics::VideoOutBufferFormat::R10G10B10A2Unorm;
 		}
 	} else

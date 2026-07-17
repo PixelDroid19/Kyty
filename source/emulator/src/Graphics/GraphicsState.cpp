@@ -77,6 +77,133 @@ DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, 
 	return usage;
 }
 
+ViewportXy ResolveViewportXy(float xscale, float xoffset, float yscale, float yoffset)
+{
+	ViewportXy xy {};
+	xy.x      = xoffset - xscale;
+	xy.y      = yoffset - yscale;
+	xy.width  = xscale * 2.0f;
+	xy.height = yscale * 2.0f;
+	return xy;
+}
+
+ViewportDepthRange ResolveViewportDepth(float zscale, float zoffset, bool dx_clip_space, bool depth_range_unrestricted)
+{
+	ViewportDepthRange range {};
+	if (dx_clip_space)
+	{
+		range.min_depth = zoffset;
+		range.max_depth = zoffset + zscale;
+	} else
+	{
+		range.min_depth = zoffset - zscale;
+		range.max_depth = zoffset + zscale;
+	}
+
+	if (!depth_range_unrestricted)
+	{
+		range.min_depth = std::max(range.min_depth, 0.0f);
+		range.max_depth = std::min(range.max_depth, 1.0f);
+	}
+
+	return range;
+}
+
+DepthClearActions ResolveDepthClearActions(bool register_depth_clear, bool htile_meta_clear)
+{
+	DepthClearActions actions {};
+	actions.vulkan_clear         = register_depth_clear || htile_meta_clear;
+	actions.suppress_depth_write = register_depth_clear;
+	return actions;
+}
+
+ColorTargetLayout ResolveColorTargetLayout(uint32_t mask)
+{
+	return ResolveColorTargetLayout(mask, ColorTargetLayout::kMaxTargets);
+}
+
+ColorTargetLayout ResolveColorTargetLayout(uint32_t mask, uint32_t configured_target_count)
+{
+	ColorTargetLayout layout {};
+	EXIT_NOT_IMPLEMENTED(configured_target_count > ColorTargetLayout::kMaxTargets);
+	if (mask == 0)
+	{
+		return layout;
+	}
+
+	// Scan only physically configured RT slots. Higher CB_TARGET_MASK nibbles
+	// have no attachment semantics until their CB_COLORn_BASE is configured.
+	// The nibble is preserved so pipeline colorWriteMask can apply partial
+	// channel writes. A nonzero nibble after a zero hole is Gapped.
+	bool saw_zero = false;
+	for (uint32_t slot = 0; slot < configured_target_count; slot++)
+	{
+		const uint8_t nibble = static_cast<uint8_t>((mask >> (slot * 4u)) & 0xFu);
+		if (nibble == 0)
+		{
+			saw_zero = true;
+			continue;
+		}
+		if (saw_zero)
+		{
+			layout.count = 0;
+			layout.error = ColorTargetLayoutError::Gapped;
+			return layout;
+		}
+		layout.nibbles[layout.count] = nibble;
+		layout.count++;
+	}
+
+	// Trailing zeros after a contiguous full prefix are OK (count stops at first zero).
+	layout.error = ColorTargetLayoutError::None;
+	return layout;
+}
+
+Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exact_render_target_found)
+{
+	if (exact_render_target_found)
+	{
+		return Gen5SampleBacking::ExactRenderTarget;
+	}
+
+	// Guest-memory upload paths:
+	// - tile 27 (kRenderTarget): RGBA8 (56) and BC1 (133)
+	// - tile 9  (kStandard64KB): RGBA8 (56) only
+	// Other combinations need a live RT/StorageTexture alias.
+	if (tile == 27u && fmt != 56u && fmt != 133u)
+	{
+		return Gen5SampleBacking::Unsupported;
+	}
+	if (tile == 9u && fmt != 56u)
+	{
+		return Gen5SampleBacking::Unsupported;
+	}
+
+	return Gen5SampleBacking::GuestMemoryTexture;
+}
+
+SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp)
+{
+	switch (sq_tex_clamp)
+	{
+		case 0: return SamplerAddressMode::Repeat;
+		case 1: return SamplerAddressMode::MirroredRepeat;
+		case 2: return SamplerAddressMode::ClampToEdge;
+		case 6: return SamplerAddressMode::ClampToBorder;
+		// AMD SQ_TEX_MIRROR_ONCE_BORDER has no exact Vulkan address mode.
+		// Prefer border behavior over enabling mirror-clamp-to-edge without a
+		// checked device feature/extension.
+		case 7: return SamplerAddressMode::ClampToBorder;
+		default: EXIT("unknown clamp: %u\n", sq_tex_clamp);
+	}
+	return SamplerAddressMode::ClampToBorder;
+}
+
+SamplerComparison ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation)
+{
+	return {operation == ImageSampleOperation::DepthReference, depth_compare_function};
+}
+
 void SetGenericScissorTl(HW::Context& context, uint32_t value)
 {
 	const auto& viewport = context.GetScreenViewport();

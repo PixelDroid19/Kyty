@@ -74,6 +74,7 @@ int KYTY_SYSV_ABI PthreadMutexInit(PthreadMutex* mutex, const PthreadMutexattr* 
 int KYTY_SYSV_ABI PthreadMutexDestroy(PthreadMutex* mutex);
 int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex);
 int KYTY_SYSV_ABI PthreadMutexTrylock(PthreadMutex* mutex);
+int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec);
 int KYTY_SYSV_ABI PthreadMutexUnlock(PthreadMutex* mutex);
 
 Pthread KYTY_SYSV_ABI PthreadSelf();
@@ -150,6 +151,57 @@ int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread);
 int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, KernelUseconds usec);
 int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex);
 
+struct PthreadCondWaitDiagnostic
+{
+	uint64_t cond        = 0;
+	uint64_t mutex       = 0;
+	uint64_t return_addr = 0;
+	uint64_t cond_handle = 0;
+	uint64_t mutex_handle = 0;
+	uint32_t signal_count = 0;
+};
+
+struct PthreadCondWaitDiagnostics
+{
+	bool                      enabled       = false;
+	uint32_t                  blocked_count = 0;
+	uint64_t                  tracked_cond  = 0;
+	uint32_t                  tracked_waits = 0;
+	uint32_t                  tracked_signals = 0;
+	PthreadCondWaitDiagnostic blocked[8] {};
+};
+
+// Passive snapshot for opt-in condition-wait diagnostics. It never wakes a
+// guest, changes mutex ownership, or creates synchronization objects.
+bool PthreadGetCondWaitDiagnostics(PthreadCondWaitDiagnostics* out);
+
+struct PthreadThreadDiagnostic
+{
+	uint64_t entry      = 0;
+	uint64_t argument   = 0;
+	int32_t  unique_id  = -1;
+	bool     started    = false;
+	bool     detached   = false;
+	bool     almost_done = false;
+	bool     free       = false;
+};
+
+struct PthreadThreadDiagnostics
+{
+	bool                    available       = false;
+	uint32_t                allocated_count = 0;
+	uint32_t                active_count    = 0;
+	uint32_t                thread_count    = 0;
+	PthreadThreadDiagnostic threads[32] {};
+};
+
+// Passive snapshot of guest pthread lifecycle state. It does not create,
+// schedule, join, detach, or otherwise change guest threads.
+bool PthreadGetThreadDiagnostics(PthreadThreadDiagnostics* out);
+
+// Opt-in KYTY_SLOT_TRACE dump of currently blocked CondWait guests.
+void SlotTraceDumpBlockedCondWaiters();
+
 int KYTY_SYSV_ABI      KernelClockGetres(KernelClockid clock_id, KernelTimespec* tp);
 int KYTY_SYSV_ABI      KernelClockGettime(KernelClockid clock_id, KernelTimespec* tp);
 int KYTY_SYSV_ABI      KernelGettimeofday(KernelTimeval* tp);
@@ -164,9 +216,16 @@ uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounterFrequency();
 namespace Posix {
 
 int KYTY_SYSV_ABI   getpid();
+// Gen5 Posix_v1 pthread_self — NID EotR8a3ASf4 (Astro after AudioOut2 residual).
+LibKernel::Pthread KYTY_SYSV_ABI pthread_self();
 int KYTY_SYSV_ABI   pthread_create(LibKernel::Pthread* thread, const LibKernel::PthreadAttr* attr, LibKernel::pthread_entry_func_t entry,
                                    void* arg);
 int KYTY_SYSV_ABI   pthread_join(LibKernel::Pthread thread, void** value);
+// Gen5 Posix_v1 thread control (+U1R4WtXvoc detach after attr setup).
+int KYTY_SYSV_ABI   pthread_detach(LibKernel::Pthread thread);
+void KYTY_SYSV_ABI  pthread_exit(void* value);
+void KYTY_SYSV_ABI  pthread_yield();
+int KYTY_SYSV_ABI   pthread_cond_signal(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_broadcast(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex);
 int KYTY_SYSV_ABI   pthread_mutex_lock(LibKernel::PthreadMutex* mutex);
@@ -184,6 +243,22 @@ int KYTY_SYSV_ABI   pthread_mutex_init(LibKernel::PthreadMutex* mutex, const Lib
 int KYTY_SYSV_ABI   pthread_mutexattr_init(LibKernel::PthreadMutexattr* attr);
 int KYTY_SYSV_ABI   pthread_mutexattr_settype(LibKernel::PthreadMutexattr* attr, int type);
 int KYTY_SYSV_ABI   pthread_mutexattr_destroy(LibKernel::PthreadMutexattr* attr);
+// Gen5 Posix_v1 pthread_attr_* (Astro after package path bring-up).
+int KYTY_SYSV_ABI pthread_attr_init(LibKernel::PthreadAttr* attr);
+int KYTY_SYSV_ABI pthread_attr_destroy(LibKernel::PthreadAttr* attr);
+int KYTY_SYSV_ABI pthread_attr_getstack(const LibKernel::PthreadAttr* attr, void** stack_addr, size_t* stack_size);
+int KYTY_SYSV_ABI pthread_attr_setstacksize(LibKernel::PthreadAttr* attr, size_t stack_size);
+int KYTY_SYSV_ABI pthread_attr_getstacksize(const LibKernel::PthreadAttr* attr, size_t* stack_size);
+int KYTY_SYSV_ABI pthread_attr_get_np(LibKernel::Pthread thread, LibKernel::PthreadAttr* attr);
+int KYTY_SYSV_ABI pthread_attr_getschedpolicy(const LibKernel::PthreadAttr* attr, int* policy);
+int KYTY_SYSV_ABI pthread_attr_setschedpolicy(LibKernel::PthreadAttr* attr, int policy);
+int KYTY_SYSV_ABI pthread_attr_setdetachstate(LibKernel::PthreadAttr* attr, int state);
+int KYTY_SYSV_ABI pthread_attr_getdetachstate(const LibKernel::PthreadAttr* attr, int* state);
+int KYTY_SYSV_ABI pthread_attr_setschedparam(LibKernel::PthreadAttr* attr, const LibKernel::KernelSchedParam* param);
+int KYTY_SYSV_ABI pthread_attr_getschedparam(const LibKernel::PthreadAttr* attr, LibKernel::KernelSchedParam* param);
+int KYTY_SYSV_ABI pthread_attr_setinheritsched(LibKernel::PthreadAttr* attr, int inherit_sched);
+int KYTY_SYSV_ABI pthread_attr_setguardsize(LibKernel::PthreadAttr* attr, size_t guard_size);
+int KYTY_SYSV_ABI pthread_attr_getguardsize(const LibKernel::PthreadAttr* attr, size_t* guard_size);
 
 LibKernel::Pthread KYTY_SYSV_ABI pthread_self();
 int KYTY_SYSV_ABI                  pthread_detach(LibKernel::Pthread thread);

@@ -16,7 +16,7 @@ UT_BEGIN(EmulatorKernelMemory);
 using namespace Libs;
 using namespace Libs::LibKernel::Memory;
 
-TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
+static void EnsureMemorySubsystemInitialized()
 {
 	if (!Config::IsInitialized())
 	{
@@ -29,6 +29,11 @@ TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
 		MemorySubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 		memory_inited = true;
 	}
+}
+
+TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
+{
+	EnsureMemorySubsystemInitialized();
 
 	int64_t address = 0;
 	ASSERT_EQ(KernelAllocateDirectMemory(0x10000, 0x40000, 0x10000, 0x10000, 12, &address), OK);
@@ -38,12 +43,171 @@ TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(address, 0), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
-// Red→green for Gen5 boot mprotect prot=0xC2 (was EXIT "unknown prot: 194").
-// Pure decoder is the shipped decision path used by KernelMprotect.
-TEST(EmulatorKernelMemory, DecodesGen5MprotectProtC2AsReadWriteGpu)
+TEST(EmulatorKernelMemory, DirectMemorySizeTracksGuestGeneration)
+{
+	EnsureMemorySubsystemInitialized();
+
+	Config::SetNextGen(false);
+	EXPECT_EQ(KernelGetDirectMemorySize(), static_cast<size_t>(5376) * 1024 * 1024);
+
+	Config::SetNextGen(true);
+	EXPECT_EQ(KernelGetDirectMemorySize(), static_cast<size_t>(16) * 1024 * 1024 * 1024);
+
+	Config::SetNextGen(false);
+}
+
+TEST(EmulatorKernelMemory, DirectMemoryAllocationFindsAFreeEarlierRange)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t  kSize      = 0x10000;
+	constexpr int64_t kLowerBase = 0x08000000;
+	constexpr int64_t kUpperBase = 0x10000000;
+	int64_t           upper_addr = 0;
+	int64_t           lower_addr = 0;
+
+	ASSERT_EQ(KernelAllocateDirectMemory(kUpperBase, kUpperBase + kSize, kSize, kSize, 12, &upper_addr), OK);
+	ASSERT_EQ(upper_addr, kUpperBase);
+	ASSERT_EQ(KernelAllocateDirectMemory(kLowerBase, kLowerBase + kSize, kSize, kSize, 12, &lower_addr), OK);
+	EXPECT_EQ(lower_addr, kLowerBase);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(lower_addr, kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(upper_addr, kSize), OK);
+}
+
+TEST(EmulatorKernelMemory, ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t kSize = 0x10000;
+	int64_t          physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(0x40000, 0x80000, kSize, kSize, 12, &physical_address), OK);
+
+	void* mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&mapping, kSize, 0x02, 0, physical_address, kSize), OK);
+	ASSERT_NE(mapping, nullptr);
+
+	void* mapping_start = nullptr;
+	void* mapping_end   = nullptr;
+	int   protection    = 0;
+	ASSERT_EQ(KernelQueryMemoryProtection(mapping, &mapping_start, &mapping_end, &protection), OK);
+	EXPECT_EQ(mapping_start, mapping);
+	EXPECT_EQ(mapping_end, static_cast<uint8_t*>(mapping) + kSize - 1);
+	EXPECT_EQ(protection, 0x02);
+
+	ASSERT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
+
+	struct DirectMemoryInfo
+	{
+		int64_t start;
+		int64_t end;
+		int     memory_type;
+	};
+	DirectMemoryInfo info {};
+	EXPECT_EQ(KernelDirectMemoryQuery(physical_address, 0, &info, sizeof(info)), LibKernel::KERNEL_ERROR_EACCES);
+
+	mapping_start = nullptr;
+	mapping_end   = nullptr;
+	protection    = 0;
+	const int query_after_release = KernelQueryMemoryProtection(mapping, &mapping_start, &mapping_end, &protection);
+	EXPECT_EQ(query_after_release, OK);
+	if (query_after_release == OK)
+	{
+		EXPECT_EQ(mapping_start, mapping);
+		EXPECT_EQ(mapping_end, static_cast<uint8_t*>(mapping) + kSize - 1);
+		EXPECT_EQ(protection, 0x02);
+		EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(mapping), kSize), OK);
+		EXPECT_EQ(KernelQueryMemoryProtection(mapping, nullptr, nullptr, nullptr), LibKernel::KERNEL_ERROR_EACCES);
+	}
+}
+
+TEST(EmulatorKernelMemory, ReusedDirectMemoryKeepsVirtualAliasesCoherent)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t  kSize        = 0x10000;
+	constexpr int64_t kSearchStart = 0x100000;
+	constexpr int64_t kSearchEnd   = kSearchStart + kSize;
+	int64_t           first_physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kSearchStart, kSearchEnd, kSize, kSize, 12, &first_physical_address), OK);
+	ASSERT_EQ(first_physical_address, kSearchStart);
+
+	void* first_mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&first_mapping, kSize, 0x02, 0, first_physical_address, kSize), OK);
+	ASSERT_NE(first_mapping, nullptr);
+	auto* first_bytes = static_cast<uint8_t*>(first_mapping);
+	first_bytes[0]    = 0x5a;
+	first_bytes[1]    = 0xc3;
+
+	ASSERT_EQ(KernelCheckedReleaseDirectMemory(first_physical_address, kSize), OK);
+
+	int64_t second_physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kSearchStart, kSearchEnd, kSize, kSize, 12, &second_physical_address), OK);
+	ASSERT_EQ(second_physical_address, first_physical_address);
+
+	void* second_mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&second_mapping, kSize, 0x02, 0, second_physical_address, kSize), OK);
+	ASSERT_NE(second_mapping, nullptr);
+	ASSERT_NE(second_mapping, first_mapping);
+	auto* second_bytes = static_cast<uint8_t*>(second_mapping);
+
+	EXPECT_EQ(second_bytes[0], 0x5a);
+	EXPECT_EQ(second_bytes[1], 0xc3);
+	second_bytes[2] = 0x7e;
+	EXPECT_EQ(first_bytes[2], 0x7e);
+
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(second_mapping), kSize), OK);
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(first_mapping), kSize), OK);
+
+	void* remapped_at_first_address = first_mapping;
+	const int remap_result = KernelMapDirectMemory(&remapped_at_first_address, kSize, 0x07, 0x10, second_physical_address, kSize);
+	#if defined(__APPLE__)
+	// macOS can reject an executable writable MAP_SHARED view even when the
+	// requested address is free. Keep alias coherence covered above and make
+	// the host policy explicit instead of replacing a mapping unsafely.
+	if (remap_result == LibKernel::KERNEL_ERROR_EBUSY)
+	{
+		ASSERT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
+		GTEST_SKIP() << "macOS rejected the shared ExecuteReadWrite remap";
+	}
+	#endif
+	ASSERT_EQ(remap_result, OK);
+	ASSERT_EQ(remapped_at_first_address, first_mapping);
+	EXPECT_EQ(static_cast<uint8_t*>(remapped_at_first_address)[2], 0x7e);
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(remapped_at_first_address), kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
+}
+
+TEST(EmulatorKernelMemory, FixedDirectMemoryRemapsFreedReadWriteView)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t  kSize        = 0x10000;
+	constexpr int64_t kSearchStart = 0x01800000;
+	int64_t           physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kSearchStart, kSearchStart + kSize, kSize, kSize, 12, &physical_address), OK);
+
+	void* first_mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&first_mapping, kSize, 0x02, 0, physical_address, kSize), OK);
+	ASSERT_NE(first_mapping, nullptr);
+	ASSERT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(first_mapping), kSize), OK);
+
+	void* remapped = first_mapping;
+	ASSERT_EQ(KernelMapDirectMemory(&remapped, kSize, 0x02, 0x10, physical_address, kSize), OK);
+	EXPECT_EQ(remapped, first_mapping);
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(remapped), kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
+}
+
+// Covers the explicit Gen5 protection family observed in one allocation path.
+// The pure decoder is the shipped decision path used by KernelMprotect.
+TEST(EmulatorKernelMemory, DecodesGen5MprotectProtectionFamily)
 {
 	Core::VirtualMemory::Mode     mode {};
 	Graphics::GpuMemoryMode       gpu {};
+
+	ASSERT_TRUE(KernelDecodeMprotectProt(0x0, &mode, &gpu));
+	EXPECT_EQ(mode, Core::VirtualMemory::Mode::NoAccess);
+	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::NoAccess);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x11, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::Read);
@@ -56,6 +220,14 @@ TEST(EmulatorKernelMemory, DecodesGen5MprotectProtC2AsReadWriteGpu)
 	ASSERT_TRUE(KernelDecodeMprotectProt(0xC2, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
 	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::ReadWrite);
+
+	ASSERT_TRUE(KernelDecodeMprotectProt(0x42, &mode, &gpu));
+	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
+	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::Read);
+
+	ASSERT_TRUE(KernelDecodeMprotectProt(0x82, &mode, &gpu));
+	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
+	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::Write);
 
 	EXPECT_FALSE(KernelDecodeMprotectProt(0x99, &mode, &gpu));
 }
@@ -263,7 +435,9 @@ TEST(EmulatorKernelMemory, ResolvesAmprResidualBootNids)
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libAmpr_1", &symbols));
 
-	const char* nids[] = {"Zi3dBUjgyXI", "4muPEJ-x5N8", "qesF88X4DRg", "8aI7R7WaOlc", "GuchCTefuZw"};
+	const char* nids[] = {"Zi3dBUjgyXI", "4muPEJ-x5N8", "qesF88X4DRg", "8aI7R7WaOlc", "GuchCTefuZw",
+	                      "0BMj1hgG+kE", "NNIZ-FMyz3M", "VGkEj4d6-Kg", "Eul7AGEpjLo", "X169CE6G3Y4",
+	                      "RPCAhx-aabE", "tNn5WBkta60", "mZSbNJVJpV8"};
 	for (const char* nid: nids)
 	{
 		Loader::SymbolResolve query {};
@@ -276,6 +450,69 @@ TEST(EmulatorKernelMemory, ResolvesAmprResidualBootNids)
 		query.type                 = Loader::SymbolType::Func;
 		EXPECT_NE(symbols.Find(query), nullptr) << nid;
 	}
+}
+
+TEST(EmulatorKernelMemory, ResolvesLibcSincosfWithFloatResults)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"pztV4AF18iI";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* record         = symbols.Find(query);
+	ASSERT_NE(record, nullptr);
+
+	using sincosf_fn_t = void (*)(float, float*, float*);
+	float sine          = 0.0f;
+	float cosine        = 0.0f;
+	reinterpret_cast<sincosf_fn_t>(static_cast<uintptr_t>(record->vaddr))(0.0f, &sine, &cosine);
+	EXPECT_FLOAT_EQ(sine, 0.0f);
+	EXPECT_FLOAT_EQ(cosine, 1.0f);
+}
+
+TEST(EmulatorKernelMemory, ResolvesLibcExpfWithFloatResult)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"8zsu04XNsZ4";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* record         = symbols.Find(query);
+	ASSERT_NE(record, nullptr);
+
+	using expf_fn_t = float (*)(float);
+	EXPECT_FLOAT_EQ(reinterpret_cast<expf_fn_t>(static_cast<uintptr_t>(record->vaddr))(0.0f), 1.0f);
+}
+
+TEST(EmulatorKernelMemory, CondWaitDiagnosticsStayInactiveWithoutOptIn)
+{
+	LibKernel::PthreadCondWaitDiagnostics diagnostics {};
+	EXPECT_FALSE(LibKernel::PthreadGetCondWaitDiagnostics(&diagnostics));
+	EXPECT_FALSE(diagnostics.enabled);
+	EXPECT_EQ(diagnostics.blocked_count, 0u);
+	EXPECT_EQ(diagnostics.blocked[0].signal_count, 0u);
+}
+
+TEST(EmulatorKernelMemory, ThreadDiagnosticsAreUnavailableWithoutPthreadContext)
+{
+	LibKernel::PthreadThreadDiagnostics diagnostics {};
+
+	EXPECT_FALSE(LibKernel::PthreadGetThreadDiagnostics(&diagnostics));
+	EXPECT_FALSE(diagnostics.available);
+	EXPECT_EQ(diagnostics.allocated_count, 0u);
+	EXPECT_EQ(diagnostics.thread_count, 0u);
 }
 
 // Live EventFlag registry: Wait/Set/Delete on garbage handles must return

@@ -7,10 +7,10 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Kernel/FileSystem.h"
-#include "Emulator/Libs/Libs.h"
-#include "Emulator/Libs/Memalign.h"
 #include "Emulator/Libs/CxaDynamicCast.h"
 #include "Emulator/Libs/CxxLocale.h"
+#include "Emulator/Libs/Libs.h"
+#include "Emulator/Libs/Memalign.h"
 #include "Emulator/Libs/Printf.h"
 #include "Emulator/Libs/VaContext.h"
 #include "Emulator/Loader/SymbolDatabase.h"
@@ -220,6 +220,7 @@ static KYTY_SYSV_ABI int c_strcasecmp(const char* a, const char* b)
 	return ::strcasecmp(a, b);
 }
 
+
 static KYTY_SYSV_ABI char*  c_strcat(char* d, const char* s) { return ::strcat(d, s); }
 static KYTY_SYSV_ABI char*  c_strncat(char* d, const char* s, size_t n) { return ::strncat(d, s, n); }
 static KYTY_SYSV_ABI char*  c_strchr(const char* s, int c) { return const_cast<char*>(::strchr(s, c)); }
@@ -248,103 +249,6 @@ static KYTY_SYSV_ABI void* cxx_new(size_t size) { return ::malloc(size != 0 ? si
 static KYTY_SYSV_ABI void  cxx_delete(void* p) { ::free(p); }
 static KYTY_SYSV_ABI void* cxx_new_array(size_t size) { return ::malloc(size != 0 ? size : 1); }
 static KYTY_SYSV_ABI void  cxx_delete_array(void* p) { ::free(p); }
-
-// Only touch pointers that are known host-mapped. Reject the NoAccess
-// unresolved-object sentinel at ~0x840000000 and other sparse holes.
-[[nodiscard]] static bool CxaGuestPtrLooksMapped(const void* p, size_t bytes)
-{
-	const auto a = reinterpret_cast<uintptr_t>(p);
-	if (a < 0x1000u || bytes == 0 || a > UINTPTR_MAX - bytes)
-	{
-		return false;
-	}
-	const auto end = a + bytes;
-	if (a >= 0x840000000ull && a < 0x850000000ull)
-	{
-		return false;
-	}
-	if (a >= 0x900000000ull && end <= 0x920000000ull)
-	{
-		return true;
-	}
-	if (a >= 0x10000ull && end <= 0x080000000ull)
-	{
-		return true;
-	}
-	if (a >= 0x100000000ull && end <= 0x200000000ull)
-	{
-		return true;
-	}
-	if (a >= 0x7f0000000000ull && end < 0x800000000000ull)
-	{
-		return true;
-	}
-	return false;
-}
-
-static const char* CxaTryReadCString(const void* p)
-{
-	if (!CxaGuestPtrLooksMapped(p, 1))
-	{
-		return nullptr;
-	}
-	const auto* s = static_cast<const char*>(p);
-	for (int i = 0; i < 256; i++)
-	{
-		if (!CxaGuestPtrLooksMapped(s + i, 1))
-		{
-			return nullptr;
-		}
-		const unsigned char c = static_cast<unsigned char>(s[i]);
-		if (c == 0)
-		{
-			return i > 0 ? s : nullptr;
-		}
-		if (c < 0x09 || (c > 0x0d && c < 0x20))
-		{
-			return nullptr;
-		}
-	}
-	return nullptr;
-}
-
-// Gen5 libc_v1 __cxa_throw (vkuuLfhnSZI). Full unwind is not implemented;
-// host-fatal with typeinfo name when readable so the throw producer is diagnosable.
-static KYTY_SYSV_ABI void cxa_throw(void* thrown_exception, void* tinfo, void (*/*dest*/)(void*))
-{
-	const char* type_name = nullptr;
-	const char* what_msg  = nullptr;
-
-	if (CxaGuestPtrLooksMapped(tinfo, 16))
-	{
-		const auto* words = static_cast<const uint64_t*>(tinfo);
-		type_name         = CxaTryReadCString(reinterpret_cast<const void*>(words[1]));
-		if (type_name != nullptr && type_name[0] == '*')
-		{
-			type_name++;
-		}
-	}
-
-	if (CxaGuestPtrLooksMapped(thrown_exception, 32))
-	{
-		const auto* words = static_cast<const uint64_t*>(thrown_exception);
-		const auto  cap   = words[3];
-		if (cap <= 15u)
-		{
-			what_msg = CxaTryReadCString(static_cast<const char*>(thrown_exception) + 16);
-		} else
-		{
-			what_msg = CxaTryReadCString(reinterpret_cast<const void*>(words[1]));
-		}
-		if (what_msg == nullptr)
-		{
-			what_msg = CxaTryReadCString(reinterpret_cast<const void*>(words[2]));
-		}
-	}
-
-	EXIT("__cxa_throw type=%s what=%s obj=%p tinfo=%p\n", type_name != nullptr ? type_name : "?",
-	     what_msg != nullptr ? what_msg : "?", thrown_exception, tinfo);
-}
 
 // Gen5 libc NIDs iPBqs+YUUFw / 2HnmKiLmV6s — same SysV ABI from call sites:
 //   lea 8(obj),%rdi; mov $expected,%esi; mov $desired,%edx; call; cmp $1,%eax
@@ -430,11 +334,10 @@ static KYTY_SYSV_ABI const short* c_Getptoupper()
 }
 
 // Gen5 libc_v1 _Getptolower — NID 1uJgoVq3bQU. Same table contract as
-// _Getptoupper: short[384] centered so index 0 is EOF (-1). Guest VFS path
-// lowercasing after fopen(~INDEX) uses:
+// _Getptoupper: short[384] centered so index 0 is EOF (-1). Dreaming Sarah's
+// Construct VFS lowercases asset names with:
 //   table = _Getptolower();  dest[i] = (uint8_t)table[(unsigned char)src[i]];
-// Returning a non-table pointer previously corrupted "data.js" and the project
-// parse hit EOF ("parse error - unexpected end of input").
+// Returning a non-table pointer corrupted "data.js" and the project parse hit EOF.
 static KYTY_SYSV_ABI const short* c_Getptolower()
 {
 	static short table[384];
@@ -681,8 +584,9 @@ static KYTY_SYSV_ABI int c_isnanf(float x)
 {
 	return std::isnan(x) ? 1 : 0;
 }
-// Gen5 libc_v1 isfinite(double) — NID dhK16CKwhQg. After strtod in project
-// parse: xmm0 = value; non-zero eax keeps the value.
+// Gen5 libc_v1 isfinite(double) — NID dhK16CKwhQg. Dreaming Sarah Construct
+// number parser after strtod: store double, call, test %eax; non-zero keeps value.
+// xmm0 = value; return non-zero when finite.
 static KYTY_SYSV_ABI int c_isfinite(double x)
 {
 	return std::isfinite(x) ? 1 : 0;
@@ -690,6 +594,10 @@ static KYTY_SYSV_ABI int c_isfinite(double x)
 static KYTY_SYSV_ABI int c_isnan(double x)
 {
 	return std::isnan(x) ? 1 : 0;
+}
+static KYTY_SYSV_ABI int c_isinf(double x)
+{
+	return std::isinf(x) ? 1 : 0;
 }
 // Gen5 libc_v1 sinf — NID Q4rRL34CEeE (Astro after usleep).
 static KYTY_SYSV_ABI float c_sinf(float x) { return ::sinf(x); }
@@ -741,19 +649,24 @@ static KYTY_SYSV_ABI void c_Xlength_error(const char* msg)
 	EXIT("std::length_error: %s\n", msg != nullptr ? msg : "");
 }
 
-// Itanium __cxa_dynamic_cast (NID hMAe+TWS9mQ). Captured after Construct JSON
-// load: rdi=src, rsi/rdx=type_info, rcx=src2dst (0 = unique base at offset 0).
-// type_info vtables often point at the unresolved-object sentinel, so only
-// src2dst arithmetic runs.
+// Itanium __cxa_dynamic_cast (NID hMAe+TWS9mQ). Captured Dreaming Sarah after
+// Construct JSON load: rdi=src, rsi/rdx=type_info ("17ConditionOrAction" /
+// "6Action"), rcx=src2dst (0 = unique base at offset 0). type_info vtables often
+// point at the unresolved-object sentinel, so only src2dst arithmetic runs.
 static KYTY_SYSV_ABI void* cxa_dynamic_cast(void* src, const void* /*src_type*/, const void* /*dst_type*/, int64_t src2dst)
 {
 	return CxaDynamicCastApply(src, src2dst);
 }
 
-// --- C++ locale / RTTI objects ------------------------------------------------
-// Quiet AV: mov (%r12),%rdi with r12 = INVALID_MEMORY because weak Object
-// Qoo175Ig+-k (_ZSt21_sceLibcClassicLocale) was never registered.
+// --- C++ locale / RTTI objects (Dreaming Sarah Construct string path) --------
+// Quiet boot AV: mov (%r12),%rdi with r12 = INVALID_MEMORY because weak Object
+// Qoo175Ig+-k (_ZSt21_sceLibcClassicLocale) was never registered. The guest
+// loads Locimp* from the locale, then looks up ctype<char> by id.
+//
+// NIDs from aerosoul94/dynlib (public Orbis NID table). Layout from the guest
+// use_facet-like body at 0x900134a80 (facet_vec@+0x10, count@+0x18, id compare).
 
+// SysV virtual stubs — slots match MSVC-style vptr offsets used by the title.
 static KYTY_SYSV_ABI void* CxxVtableNoop(void* self)
 {
 	return self;
@@ -764,41 +677,67 @@ static KYTY_SYSV_ABI void* CxxVtableNull(void* /*self*/)
 	return nullptr;
 }
 
+// ctype facet method at vtable+0x40 with esi=0x20; return non-zero in al.
 static KYTY_SYSV_ABI int CxxCtypeFacetQuery(void* /*self*/, int /*mask*/)
 {
 	return 1;
 }
 
 static void* g_locimp_vtable[16] = {
-    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
-    reinterpret_cast<void*>(&CxxVtableNull), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
-    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x00
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x08
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x10  (called on Locimp entry)
+    reinterpret_cast<void*>(&CxxVtableNull), // +0x18  (release; null skips delete)
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x20
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x28
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x30
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x38
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x40
 };
 
 static void* g_ctype_vtable[16] = {
-    reinterpret_cast<void*>(&CxxVtableNoop),     reinterpret_cast<void*>(&CxxVtableNoop),
-    reinterpret_cast<void*>(&CxxVtableNoop),     reinterpret_cast<void*>(&CxxVtableNoop),
-    reinterpret_cast<void*>(&CxxVtableNoop),     reinterpret_cast<void*>(&CxxVtableNoop),
-    reinterpret_cast<void*>(&CxxVtableNoop),     reinterpret_cast<void*>(&CxxVtableNoop),
-    reinterpret_cast<void*>(&CxxCtypeFacetQuery),
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x00
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x08
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x10
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x18
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x20
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x28
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x30
+    reinterpret_cast<void*>(&CxxVtableNoop), // +0x38
+    reinterpret_cast<void*>(&CxxCtypeFacetQuery), // +0x40
 };
 
+// Minimal facet object: vptr only (methods do not touch further fields).
 struct CxxFacetStub
 {
 	void** vtable;
 };
 
 static CxxFacetStub g_ctype_facet {g_ctype_vtable};
-static void*        g_classic_facets[kCxxLocimpFacetCount] = {nullptr, &g_ctype_facet};
+
+// Facet vector: index 0 unused; ctype at kCxxCtypeCharId (1).
+static void* g_classic_facets[kCxxLocimpFacetCount] = {nullptr, &g_ctype_facet};
 
 static CxxLocimpLayout g_classic_locimp {
-    g_locimp_vtable, nullptr, g_classic_facets, kCxxLocimpFacetCount, 0, 0, {0, 0, 0}, "C",
+    g_locimp_vtable,          // vtable
+    nullptr,                  // reserved_08
+    g_classic_facets,         // facet_vec
+    kCxxLocimpFacetCount,     // facet_count
+    0,                        // reserved_20
+    0,                        // flag_24
+    {0, 0, 0},                // pad
+    "C",                      // name
 };
 
+// _ZSt21_sceLibcClassicLocale — std::locale object (single Locimp*).
 static CxxLocaleLayout g_sce_classic_locale {&g_classic_locimp};
-static std::uint64_t   g_ctype_char_id = kCxxCtypeCharId;
-static std::int32_t    g_locale_id_cnt = static_cast<std::int32_t>(kCxxCtypeCharId);
 
+// std::ctype<char>::id and locale::id::_Id_cnt (pre-assigned to match facets).
+static std::uint64_t g_ctype_char_id = kCxxCtypeCharId;
+static std::int32_t  g_locale_id_cnt = static_cast<std::int32_t>(kCxxCtypeCharId);
+
+// Itanium type_info vtables: guest type_info objects relocate to these. Slots
+// are no-ops so a stray virtual call does not hit INVALID_MEMORY.
 static void* g_class_type_info_vtable[8] = {
     reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
     reinterpret_cast<void*>(&CxxVtableNoop)};
@@ -812,12 +751,16 @@ static void* g_exception_vtable[8] = {
     reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
     reinterpret_cast<void*>(&CxxVtableNoop)};
 
+// streamoff sentinel and fpz (common libc++/MSVC objects; zero-safe).
 static std::int64_t g_bad_off = -1;
 static std::uint8_t g_fpz[16] {};
 
+// _Locksyslock / _Unlocksyslock — CRT global lock; no-op is correct while HLE
+// is single-threaded for these paths. Arg is lock index (guest passes 0).
 static KYTY_SYSV_ABI void c_Locksyslock(int /*index*/) {}
 static KYTY_SYSV_ABI void c_Unlocksyslock(int /*index*/) {}
 
+// std::locale::_Getgloballocale — return classic Locimp.
 static KYTY_SYSV_ABI void* c_locale_Getgloballocale()
 {
 	return &g_classic_locimp;
@@ -828,12 +771,145 @@ static KYTY_SYSV_ABI void c_cxa_pure_virtual()
 	EXIT("__cxa_pure_virtual\n");
 }
 
+// std::uncaught_exception() — returns non-zero while an exception is active.
+// Full EH is not implemented; report "no active exception" so destructors that
+// probe this during Construct string/locale work continue (Dreaming Sarah).
 static KYTY_SYSV_ABI int c_uncaught_exception()
 {
 	return 0;
 }
 
+// std::ios_base::~ios_base() — guest tears down temporary stream objects after
+// locale/ctype probes. No host side-effects required for the stub ios_base.
 static KYTY_SYSV_ABI void c_ios_base_dtor(void* /*self*/) {}
+
+// Itanium C++ ABI exception entry points (Gen5 libc_v1). Full unwind is not
+// implemented; throws are host-fatal with a decoded type/message so the
+// producer of the exception remains diagnosable (same spirit as Xlength_error).
+static KYTY_SYSV_ABI void* cxa_allocate_exception(size_t thrown_size)
+{
+	// Header is opaque to the guest object body; keep a small leading region
+	// for freestanding dtor bookkeeping if free_exception is later wired.
+	constexpr size_t kHeader = 128;
+	void*            block   = ::malloc(kHeader + (thrown_size != 0 ? thrown_size : 1));
+	EXIT_IF(block == nullptr);
+	return static_cast<uint8_t*>(block) + kHeader;
+}
+
+static KYTY_SYSV_ABI void cxa_free_exception(void* thrown_exception)
+{
+	if (thrown_exception == nullptr)
+	{
+		return;
+	}
+	constexpr size_t kHeader = 128;
+	::free(static_cast<uint8_t*>(thrown_exception) - kHeader);
+}
+
+// Only touch pointers that are known host-mapped. Reject the NoAccess
+// unresolved-object sentinel at ~0x840000000 and other sparse holes.
+[[nodiscard]] static bool CxaGuestPtrLooksMapped(const void* p, size_t bytes)
+{
+	const auto a = reinterpret_cast<uintptr_t>(p);
+	if (a < 0x1000u || bytes == 0 || a > UINTPTR_MAX - bytes)
+	{
+		return false;
+	}
+	const auto end = a + bytes;
+	// Unresolved weak Object sentinel (VirtualMemory NoAccess page).
+	if (a >= 0x840000000ull && a < 0x850000000ull)
+	{
+		return false;
+	}
+	// Main image and TLS/data around 0x900000000.
+	if (a >= 0x900000000ull && end <= 0x920000000ull)
+	{
+		return true;
+	}
+	// Flexible/direct guest heaps used by titles (low 32-bit and mid ranges).
+	if (a >= 0x10000ull && end <= 0x080000000ull)
+	{
+		return true;
+	}
+	if (a >= 0x100000000ull && end <= 0x200000000ull)
+	{
+		return true;
+	}
+	// Host heap used when guest operator new is forwarded to malloc (exception
+	// objects land here). High userspace mappings on Linux.
+	if (a >= 0x7f0000000000ull && end < 0x800000000000ull)
+	{
+		return true;
+	}
+	return false;
+}
+
+static const char* CxaTryReadCString(const void* p)
+{
+	if (!CxaGuestPtrLooksMapped(p, 1))
+	{
+		return nullptr;
+	}
+	const auto* s = static_cast<const char*>(p);
+	for (int i = 0; i < 256; i++)
+	{
+		if (!CxaGuestPtrLooksMapped(s + i, 1))
+		{
+			return nullptr;
+		}
+		const unsigned char c = static_cast<unsigned char>(s[i]);
+		if (c == 0)
+		{
+			return i > 0 ? s : nullptr;
+		}
+		if (c < 0x09 || (c > 0x0d && c < 0x20))
+		{
+			return nullptr;
+		}
+	}
+	return nullptr;
+}
+
+// Guest type_info / exception layouts (libstdc++ Itanium):
+//   type_info:  [0]=vtable, [8]=name (const char*, may be mangled with leading '*')
+//   exception with SSO string: after vptr, std::string at +8 (capacity/size/data)
+static KYTY_SYSV_ABI void cxa_throw(void* thrown_exception, void* tinfo, void (*/*dest*/)(void*))
+{
+	const char* type_name = nullptr;
+	const char* what_msg  = nullptr;
+
+	if (CxaGuestPtrLooksMapped(tinfo, 16))
+	{
+		const auto* words = static_cast<const uint64_t*>(tinfo);
+		type_name         = CxaTryReadCString(reinterpret_cast<const void*>(words[1]));
+		if (type_name != nullptr && type_name[0] == '*')
+		{
+			type_name++; // libstdc++ marks non-mangled names with a leading '*'
+		}
+	}
+
+	if (CxaGuestPtrLooksMapped(thrown_exception, 32))
+	{
+		// Heuristic: many libstdc++ exception objects store a std::string at +8.
+		// SSO layout (GCC): local buffer at +16 when capacity field at +24 is small.
+		const auto* words = static_cast<const uint64_t*>(thrown_exception);
+		const auto  cap   = words[3]; // often capacity for SSO string
+		if (cap <= 15u)
+		{
+			what_msg = CxaTryReadCString(static_cast<const char*>(thrown_exception) + 16);
+		} else
+		{
+			what_msg = CxaTryReadCString(reinterpret_cast<const void*>(words[1]));
+		}
+		if (what_msg == nullptr)
+		{
+			what_msg = CxaTryReadCString(reinterpret_cast<const void*>(words[2]));
+		}
+	}
+
+	EXIT("__cxa_throw type=%s what=%s obj=%p tinfo=%p\n", type_name != nullptr ? type_name : "?",
+	     what_msg != nullptr ? what_msg : "?", thrown_exception, tinfo);
+}
 
 static KYTY_SYSV_ABI int atexit(void (*func)())
 {
@@ -1035,32 +1111,12 @@ void* KYTY_SYSV_ABI LibcMspaceMalloc(void* msp, size_t size)
 	printf("\t msp  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(msp));
 	printf("\t size = %016" PRIx64 "\n", size);
 
-	// Guest libc returns nullptr on failure (OOM / null mspace); do not EXIT.
-	// Early Gen5 boot may call with null mspace before ApplicationHeap create;
-	// EnsureInitialized runs before CRT entry so guest heap is ready first.
+	// Guest libc returns nullptr on failure (OOM / null mspace); do not EXIT —
+	// callers are expected to check the return. Strict abort here blocked the
+	// runtime before any presentation window after an early null msp malloc(0x28).
 	if (msp == nullptr)
 	{
 		printf("\t buf  = 0000000000000000 (null mspace)\n");
-		// #region agent log
-		{
-			static int null_logged = 0;
-			if (null_logged++ < 3)
-			{
-				const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-				                    std::chrono::system_clock::now().time_since_epoch())
-				                    .count();
-				if (FILE* f = std::fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log", "a"))
-				{
-					std::fprintf(f,
-					             "{\"sessionId\":\"f08e58\",\"runId\":\"post-fix\",\"hypothesisId\":\"J\","
-					             "\"location\":\"LibC.cpp:LibcMspaceMalloc\",\"message\":\"null msp returns "
-					             "nullptr\",\"data\":{\"size\":%llu},\"timestamp\":%lld}\n",
-					             static_cast<unsigned long long>(size), static_cast<long long>(ts));
-					std::fclose(f);
-				}
-			}
-		}
-		// #endregion
 		return nullptr;
 	}
 
@@ -1197,8 +1253,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("P330P3dFF68", &LibC::g_need_flag);
 	LIB_OBJECT("2sWzhYqFH4E", stdout);
 
-	// C++ locale / RTTI objects — Qoo175Ig+-k → classic locale (avoids AV on
-	// unresolved weak Object sentinel 0x840000000).
+	// C++ locale / RTTI objects — Dreaming Sarah (Qoo175Ig+-k → classic locale).
+	// dynlib: _ZSt21_sceLibcClassicLocale, ctype<char>::id, locale::id::_Id_cnt,
+	// __class_type_info / __si_class_type_info / __vmi_class_type_info vtables.
 	LIB_OBJECT("Qoo175Ig+-k", &LibC::g_sce_classic_locale);
 	LIB_OBJECT("Cv+zC4EjGMA", &LibC::g_ctype_char_id);
 	LIB_OBJECT("H4fcpQOpc08", &LibC::g_locale_id_cnt);
@@ -1212,7 +1269,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("9nf8joUTSaQ", LibC::c_Unlocksyslock);
 	LIB_FUNC("hEQ2Yi4PJXA", LibC::c_locale_Getgloballocale);
 	LIB_FUNC("zr094EQ39Ww", LibC::c_cxa_pure_virtual);
+	// std::uncaught_exception — Q1BL70XVV0o after classic-locale probe.
 	LIB_FUNC("Q1BL70XVV0o", LibC::c_uncaught_exception);
+	// std::ios_base::~ios_base — P8F2oavZXtY after interactive presents start.
 	LIB_FUNC("P8F2oavZXtY", LibC::c_ios_base_dtor);
 
 	LIB_FUNC("uMei1W9uyNo", LibC::exit);
@@ -1237,8 +1296,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("tIhsqj0qsFE", LibC::c_free);
 	LIB_FUNC("Ujf3KzMvRmI", LibC::c_memalign);
 	LIB_FUNC("Q3VBxCXhUHs", LibC::c_memcpy);
-	// Gen5 wmemmove — NID Noj9PsJrsa8 (was mislabeled as second memcpy).
-	LIB_FUNC("Noj9PsJrsa8", LibC::c_wmemmove);
+	// Gen5 second memcpy NID — Dreaming Sarah std::string SSO short-assign path
+	// after __cxa_dynamic_cast (Construct Action setup): (dst, src, n=1..).
+	LIB_FUNC("Noj9PsJrsa8", LibC::c_memcpy);
 	LIB_FUNC("NFLs+dRJGNg", LibC::c_memcpy_s);
 	// Gen5 libc_v1 memmove_s — B59+zQQCcbU after TLS factory / strtoull on Astro.
 	LIB_FUNC("B59+zQQCcbU", LibC::c_memmove_s);
@@ -1261,10 +1321,12 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 libc_v1 strstr.
 	LIB_FUNC("viiwFMaNamA", LibC::c_strstr);
 	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);         // operator new(size_t)
-	// Gen5 libc_v1 — second operator new(size_t) NID.
+	// Gen5 libc_v1 — second operator new(size_t) NID (Dreaming Sarah after
+	// VideoOut flip path; call is `mov $size,%edi; call`).
 	LIB_FUNC("cfAXurvfl5o", LibC::cxx_new);
 	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete);      // operator delete(void*)
-	// Gen5 libc_v1 __cxa_throw — vkuuLfhnSZI.
+	// Gen5 libc_v1 C++ EH — Dreaming Sarah throw path after flip/init.
+	// vkuuLfhnSZI: __cxa_throw (rdi=obj, rsi=typeinfo, rdx=dtor; ud2 after).
 	LIB_FUNC("vkuuLfhnSZI", LibC::cxa_throw);
 	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);   // operator new[](size_t)
 	LIB_FUNC("MLWl90SFWNE", LibC::cxx_delete_array); // operator delete[](void*)
@@ -1287,7 +1349,7 @@ LIB_DEFINE(InitLibC_1)
 	// ctype
 	LIB_FUNC("sUP1hBaouOw", LibC::c_Getpctype);
 	LIB_FUNC("rcQCUr0EaRU", LibC::c_Getptoupper);
-	// Gen5 _Getptolower — VFS path lowercasing after ~INDEX (was mis-bound).
+	// Gen5 _Getptolower — Dreaming Sarah VFS path lowercasing after ~INDEX.
 	LIB_FUNC("1uJgoVq3bQU", LibC::c_Getptolower);
 
 	// stdio
@@ -1326,8 +1388,8 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 libc_v1 strtof — xENtRue8dpI after APR stream wrap (levels.xml path).
 	LIB_FUNC("xENtRue8dpI", LibC::c_strtof);
 	LIB_FUNC("mXlxhmLNMPg", LibC::c_strtol);
-	// Gen5 strtoul: KytyPS5 maps QxmSHBCuKTk / zlfEH8FmyUA; Construct parser
-	// also hits VOBg+iNwB-4 (rdi=nptr, rsi=endptr, rdx=10).
+	// Gen5 strtoul: KytyPS5 maps QxmSHBCuKTk / zlfEH8FmyUA; Dreaming Sarah
+	// Construct parser also hits VOBg+iNwB-4 (rdi=nptr, rsi=endptr, rdx=10).
 	LIB_FUNC("QxmSHBCuKTk", LibC::c_strtoul);
 	LIB_FUNC("zlfEH8FmyUA", LibC::c_strtoul);
 	LIB_FUNC("VOBg+iNwB-4", LibC::c_strtoul);
@@ -1349,7 +1411,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("1mecP7RgI2A", LibC::c_gmtime);
 	LIB_FUNC("efhK-YSUYYQ", LibC::c_localtime);
 	LIB_FUNC("Av3zjWi64Kw", LibC::c_strftime);
-	// Gen5 libc asctime (NID jT3xiGpA3B4) — hard-aborted without missing-import stubs.
+	// Gen5 libc asctime (NID jT3xiGpA3B4) — hard-aborted Astro without STUB_MISSING.
 	LIB_FUNC("jT3xiGpA3B4", LibC::c_asctime);
 
 	// math (double)
@@ -1372,9 +1434,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("1D0H2KNjshE", LibC::c_powf);
 	// Gen5 libc_v1 __isnanf — lA94ZgT+vMM after Posix pthread_self on Astro.
 	LIB_FUNC("lA94ZgT+vMM", LibC::c_isnanf);
-	// Gen5 isfinite(double) — after strtod in project parse.
+	// Gen5 isfinite(double) — Dreaming Sarah after strtod in project parse.
 	LIB_FUNC("dhK16CKwhQg", LibC::c_isfinite);
-	// Gen5 isnan(double) — layout coord checks after vcvttsd2si.
+	// Gen5 isnan(double) — Dreaming Sarah layout coord checks after
+	// vcvttsd2si; return 0 continues (non-zero rejects).
 	LIB_FUNC("GfxAp9Xyiqs", LibC::c_isnan);
 	// Gen5 libc_v1 float math (Astro after usleep; NIDs from name→NID hash).
 	LIB_FUNC("Q4rRL34CEeE", LibC::c_sinf);
@@ -1405,7 +1468,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("3GPpjQdAMTw", LibC::c_cxa_guard_acquire);
 	LIB_FUNC("9rAeANT2tyE", LibC::c_cxa_guard_release);
 	LIB_FUNC("2emaaluWzUw", LibC::c_cxa_guard_abort);
-	// Gen5 __cxa_dynamic_cast — Construct ConditionOrAction→Action.
+	// Gen5 __cxa_dynamic_cast — Dreaming Sarah Construct ConditionOrAction→Action.
 	LIB_FUNC("hMAe+TWS9mQ", LibC::cxa_dynamic_cast);
 	LIB_FUNC("ozMAr28BwSY", LibC::c_Xout_of_range);
 	LIB_FUNC("tQIo+GIPklo", LibC::c_Xlength_error);

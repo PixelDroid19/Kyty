@@ -32,16 +32,23 @@ int KYTY_SYSV_ABI    KernelAllocateMainDirectMemory(size_t len, size_t alignment
 int KYTY_SYSV_ABI    KernelReleaseDirectMemory(int64_t start, size_t len);
 int KYTY_SYSV_ABI    KernelCheckedReleaseDirectMemory(int64_t start, size_t len);
 int KYTY_SYSV_ABI    KernelMapDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment);
+// Gen5: type arg recorded by titles; mapping uses the same path as MapDirectMemory.
+int KYTY_SYSV_ABI    KernelMapDirectMemory2(void** addr, size_t len, int type, int prot, int flags, int64_t direct_memory_start,
+                                            size_t alignment);
 int KYTY_SYSV_ABI    KernelMapNamedDirectMemory(void** addr, size_t len, int prot, int flags, off_t direct_memory_start, size_t alignment,
                                                 const char* name);
+// Diagnostic name tag only; does not change mapping rights.
+int KYTY_SYSV_ABI    KernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name);
+// Gen5 sceKernelClearVirtualRangeName — NID mkgXxsoxWHg.
+int KYTY_SYSV_ABI    KernelClearVirtualRangeName(const void* addr, uint64_t len);
 int KYTY_SYSV_ABI    KernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot);
 int KYTY_SYSV_ABI    KernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size);
 int KYTY_SYSV_ABI    KernelAvailableFlexibleMemorySize(size_t* size);
+// Configured flexible size for Gen5 queries (same budget as available for now).
 int KYTY_SYSV_ABI    KernelConfiguredFlexibleMemorySize(uint64_t* size);
 int KYTY_SYSV_ABI    KernelMprotect(const void* addr, size_t len, int prot);
-int KYTY_SYSV_ABI    KernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name);
-int KYTY_SYSV_ABI    KernelClearVirtualRangeName(const void* addr, uint64_t len);
 
+// Gen5 sceKernelVirtualQuery — NID rVjRvHJ0X6c. info_size must be sizeof(VirtualQueryInfo).
 constexpr uint32_t kKernelVirtualQueryNameLength = 32;
 struct VirtualQueryInfo
 {

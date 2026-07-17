@@ -3,9 +3,6 @@
 #include "Emulator/Loader/Elf.h"
 #include "Emulator/Loader/RuntimeLinker.h"
 
-#include <chrono>
-#include <cstdio>
-
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::LibKernel::ApplicationHeap {
@@ -174,62 +171,45 @@ void EnsureInitialized(Loader::Program* program)
 	uint64_t text_end   = 0;
 	get_text_bounds(program, &text_begin, &text_end);
 
-	bool via_registered = false;
-	bool via_scan       = false;
-
 	if (g_registered_api != nullptr && try_invoke_create(g_registered_api, text_begin, text_end))
 	{
-		via_registered = true;
+		return;
 	}
-	else if (program != nullptr && program->elf != nullptr)
+
+	if (program == nullptr || program->elf == nullptr)
 	{
-		const auto* ehdr = program->elf->GetEhdr();
-		const auto* phdr = program->elf->GetPhdr();
-		if (ehdr != nullptr && phdr != nullptr)
+		return;
+	}
+
+	const auto* ehdr = program->elf->GetEhdr();
+	const auto* phdr = program->elf->GetPhdr();
+	if (ehdr == nullptr || phdr == nullptr)
+	{
+		return;
+	}
+
+	// Prefer registered API; if absent, scan main-image readable LOAD segments
+	// with IsValidApiV2Table only (create/destroy/malloc/free all in text).
+	for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
+	{
+		if (phdr[i].p_memsz == 0 || phdr[i].p_type != PT_LOAD)
 		{
-			for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
-			{
-				if (phdr[i].p_memsz == 0 || phdr[i].p_type != PT_LOAD)
-				{
-					continue;
-				}
+			continue;
+		}
 
-				if ((phdr[i].p_flags & PF_R) == 0)
-				{
-					continue;
-				}
+		if ((phdr[i].p_flags & PF_R) == 0)
+		{
+			continue;
+		}
 
-				const uint64_t segment_addr = phdr[i].p_vaddr + program->base_vaddr;
-				const uint64_t segment_size = get_aligned_size(phdr + i);
+		const uint64_t segment_addr = phdr[i].p_vaddr + program->base_vaddr;
+		const uint64_t segment_size = get_aligned_size(phdr + i);
 
-				if (scan_segment_for_table(segment_addr, segment_size, text_begin, text_end))
-				{
-					via_scan = true;
-					break;
-				}
-			}
+		if (scan_segment_for_table(segment_addr, segment_size, text_begin, text_end))
+		{
+			return;
 		}
 	}
-
-	// #region agent log
-	{
-		const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-		                    std::chrono::system_clock::now().time_since_epoch())
-		                    .count();
-		if (FILE* f = std::fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log", "a"))
-		{
-			std::fprintf(f,
-			             "{\"sessionId\":\"f08e58\",\"runId\":\"post-fix\",\"hypothesisId\":\"I\","
-			             "\"location\":\"ApplicationHeap.cpp:EnsureInitialized\",\"message\":\"heap init\","
-			             "\"data\":{\"initialized\":%d,\"via_registered\":%d,\"via_scan\":%d,\"text_begin\":%llu,"
-			             "\"text_end\":%llu},\"timestamp\":%lld}\n",
-			             g_initialized ? 1 : 0, via_registered ? 1 : 0, via_scan ? 1 : 0,
-			             static_cast<unsigned long long>(text_begin), static_cast<unsigned long long>(text_end),
-			             static_cast<long long>(ts));
-			std::fclose(f);
-		}
-	}
-	// #endregion
 }
 
 bool IsInitialized()

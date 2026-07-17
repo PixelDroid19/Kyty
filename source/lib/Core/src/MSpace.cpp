@@ -9,6 +9,8 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 
+#include <cstring>
+
 namespace Kyty::Core {
 
 static constexpr size_t MSPACE_HEADER_SIZE = 1440;
@@ -592,7 +594,7 @@ void* MSpaceCalloc(mspace_t msp, size_t nelem, size_t size)
 	void* p = MSpaceMalloc(msp, total);
 	if (p != nullptr && total != 0)
 	{
-		memset(p, 0, total);
+		std::memset(p, 0, total);
 	}
 	return p;
 }
@@ -609,11 +611,14 @@ static bool MSpaceInternalStats(MSpaceContext& ctx, MSpaceSize* mmsize)
 		return false;
 	}
 
+	// free area after the fixed control header: (capacity + 2) blocks of 8 bytes.
 	const size_t free_area_bytes =
 	    (static_cast<size_t>(ctx.capacity) + 2u) * sizeof(MSpaceBlock);
 	const size_t system_size = MSPACE_HEADER_SIZE + free_area_bytes;
 
-	const size_t free_bytes  = static_cast<size_t>(ctx.size_of_key_chunk) * sizeof(MSpaceBlock);
+	// Largest free key chunk approximates remaining free space when the heap is
+	// mostly contiguous (fresh mspace). Fragmentation under-reports free space.
+	const size_t free_bytes = static_cast<size_t>(ctx.size_of_key_chunk) * sizeof(MSpaceBlock);
 	const size_t inuse_bytes = (free_bytes < free_area_bytes) ? (free_area_bytes - free_bytes) : 0;
 
 	mmsize->max_system_size     = system_size;
@@ -638,6 +643,8 @@ bool MSpaceMallocStats(mspace_t msp, MSpaceSize* mmsize)
 
 bool MSpaceMallocStatsFast(mspace_t msp, MSpaceSize* mmsize)
 {
+	// Same fields as the full walk for this allocator; free-list walk is not required
+	// for the managed-size pre-check titles issue before memalign.
 	return MSpaceMallocStats(msp, mmsize);
 }
 
