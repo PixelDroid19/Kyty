@@ -1220,6 +1220,7 @@ LIB_DEFINE(InitLibcInternal_1)
 
 	LIB_OBJECT("ZT4ODD2Ts9o", &LibcInternal::g_need_flag);
 	LIB_OBJECT("2sWzhYqFH4E", stdout);
+	LIB_OBJECT("H8AprKeZtNg", stderr);
 
 	LIB_FUNC("GMpvxPFW924", LibcInternal::vprintf);
 	LIB_FUNC("MUjC4lbHrK4", LibcInternal::fflush);
@@ -1252,6 +1253,7 @@ LIB_DEFINE(InitLibC_1)
 
 	LIB_OBJECT("P330P3dFF68", &LibC::g_need_flag);
 	LIB_OBJECT("2sWzhYqFH4E", stdout);
+	LIB_OBJECT("H8AprKeZtNg", stderr);
 
 	// C++ locale / RTTI objects — Dreaming Sarah (Qoo175Ig+-k → classic locale).
 	// dynlib: _ZSt21_sceLibcClassicLocale, ctype<char>::id, locale::id::_Id_cnt,
