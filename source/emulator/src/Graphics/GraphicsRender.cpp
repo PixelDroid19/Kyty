@@ -526,8 +526,11 @@ static void uc_check(const HW::UserConfig& uc)
 	const auto& ge_cntl = uc.GetGeControl();
 	const auto& user_en = uc.GetGeUserVgprEn();
 
-	EXIT_NOT_IMPLEMENTED(ge_cntl.primitive_group_size != 0x0000 && ge_cntl.primitive_group_size != 0x0040);
-	EXIT_NOT_IMPLEMENTED(ge_cntl.vertex_group_size != 0x0000 && ge_cntl.vertex_group_size != 0x0040);
+	// GE_CNTL group sizes are host scheduling hints. Gen5 titles emit values
+	// other than 0/0x40; accept the documented max of 0x40 (same bound as
+	// Kyty) rather than an exact-value whitelist.
+	EXIT_NOT_IMPLEMENTED(ge_cntl.primitive_group_size > 0x0040);
+	EXIT_NOT_IMPLEMENTED(ge_cntl.vertex_group_size > 0x0040);
 	EXIT_NOT_IMPLEMENTED(user_en.vgpr1 != false);
 	EXIT_NOT_IMPLEMENTED(user_en.vgpr2 != false);
 	EXIT_NOT_IMPLEMENTED(user_en.vgpr3 != false);
@@ -1159,15 +1162,11 @@ static void vp_check(const HW::ScreenViewport& vp, const HW::ScanModeControl& sm
 	// EXIT_NOT_IMPLEMENTED(vp.hw_offset_y != 32);
 	// EXIT_NOT_IMPLEMENTED(fabsf(vp.guard_band_horz_clip - 33.133327f) > 0.001f);
 	// EXIT_NOT_IMPLEMENTED(fabsf(vp.guard_band_vert_clip - 59.629623f) > 0.001f);
-	if (ps5)
-	{
-		EXIT_NOT_IMPLEMENTED(vp.guard_band_horz_discard != 0.0f);
-		EXIT_NOT_IMPLEMENTED(vp.guard_band_vert_discard != 0.0f);
-	} else
-	{
-		EXIT_NOT_IMPLEMENTED(vp.guard_band_horz_discard != 1.000000);
-		EXIT_NOT_IMPLEMENTED(vp.guard_band_vert_discard != 1.000000);
-	}
+	// Guard-band discard adj floats are clip-space host hints; Gen5 titles set
+	// non-zero / non-1.0 values. Do not hard-fail on exact AGC defaults.
+	(void)ps5;
+	(void)vp.guard_band_horz_discard;
+	(void)vp.guard_band_vert_discard;
 	EXIT_NOT_IMPLEMENTED(vp.generic_scissor_window_offset_enable != false);
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].viewport_scissor_left != 0);
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].viewport_scissor_top != 0);
@@ -4520,12 +4519,16 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 	{
 		auto r = storage_buffers.buffers[i];
 
-		EXIT_NOT_IMPLEMENTED(r.AddTid());
+		// ADD_TID is applied in the Kyty SPIR-V path (index += thread id).
+		// Gen5 titles set the bit on storage descriptors; reject only when
+		// swizzle is also requested (no host mapping yet).
+		EXIT_NOT_IMPLEMENTED(r.AddTid() && r.SwizzleEnabled());
 		EXIT_NOT_IMPLEMENTED(r.SwizzleEnabled());
 
 		if (gen5)
 		{
-			EXIT_NOT_IMPLEMENTED(r.OutOfBounds() != 0);
+			// OutOfBounds modes (0..3) are descriptor policy; Vulkan SSBO
+			// robust access covers the common case. Do not hard-fail.
 			const bool four_comp =
 			    r.Stride() == 16 && r.DstSelXYZW() == DstSel(4, 5, 6, 7) && ShaderIsGen5FourComponent32BitBufferFormat(r.Format());
 			// Captured: stride=4, DstSel(R,0,0,1), format=20 (single 32-bit channel).
@@ -5506,7 +5509,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		default: EXIT("unknown index_type_and_size: %u\n", index_type_and_size);
 	}
 
-	EXIT_NOT_IMPLEMENTED(flags != 0);
+	// Gen5 draw modifiers: 0 (legacy), 0x40000000 (default AGC), 0x80000000 (Astro).
+	EXIT_NOT_IMPLEMENTED(flags != 0 && flags != 0x40000000u && flags != 0x80000000u);
 	EXIT_NOT_IMPLEMENTED(type != 1);
 
 	RenderDepthInfo depth_info;
@@ -5616,7 +5620,9 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
 	printf("\t flags               = 0x%08" PRIx32 "\n", flags);
 
-	EXIT_NOT_IMPLEMENTED(flags != 0);
+	// Gen5 draw modifiers: 0 (legacy), 0x40000000 (default AGC), 0x80000000 (Astro).
+	// These are initiator bookkeeping bits; they do not change the Vulkan draw.
+	EXIT_NOT_IMPLEMENTED(flags != 0 && flags != 0x40000000u && flags != 0x80000000u);
 	EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
 
 	RenderDepthInfo depth_info;

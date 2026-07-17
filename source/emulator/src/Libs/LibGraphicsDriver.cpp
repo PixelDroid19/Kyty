@@ -117,6 +117,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("8N2tmT3jmC8", Gen5::GraphicsDcbSetIndexCount);
 	LIB_FUNC("tSBxhAPyytQ", Gen5::GraphicsDcbSetNumInstances);
 	LIB_FUNC("Yw0jKSqop+E", Gen5::GraphicsDcbDrawIndexAuto);
+	// Dreaming Sarah: 4-arg drawIndexAuto (dcb, base=0, count, modifier).
+	LIB_FUNC("B+aG9DUnTKA", Gen5::GraphicsDcbDrawIndexAutoWithBase);
 	LIB_FUNC("q88lQ+GP5Yk", Gen5::GraphicsDcbDrawIndex);
 	LIB_FUNC("aJf+j5yntiU", Gen5::GraphicsDcbEventWrite);
 	LIB_FUNC("cFazmnXpJOE", Gen5::GraphicsAcbEventWrite);
@@ -201,6 +203,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("8N2tmT3jmC8", Gen5::GraphicsDcbSetIndexCount);
 	LIB_FUNC("tSBxhAPyytQ", Gen5::GraphicsDcbSetNumInstances);
 	LIB_FUNC("Yw0jKSqop+E", Gen5::GraphicsDcbDrawIndexAuto);
+	// Dreaming Sarah: 4-arg drawIndexAuto (dcb, base=0, count, modifier).
+	LIB_FUNC("B+aG9DUnTKA", Gen5::GraphicsDcbDrawIndexAutoWithBase);
 	LIB_FUNC("q88lQ+GP5Yk", Gen5::GraphicsDcbDrawIndex);
 	LIB_FUNC("aJf+j5yntiU", Gen5::GraphicsDcbEventWrite);
 	LIB_FUNC("cFazmnXpJOE", Gen5::GraphicsAcbEventWrite);

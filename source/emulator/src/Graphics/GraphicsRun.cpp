@@ -84,6 +84,8 @@ public:
 	HW::Shader*     GetShCtx() { return &m_sh_ctx; }
 
 	void SetIndexType(uint32_t index_type_and_size);
+	void SetIndexBaseAddress(uint64_t index_base_addr);
+	void SetIndexBufferSize(uint32_t index_buffer_size);
 	void SetNumInstances(uint32_t num_instances);
 	void DrawIndex(uint32_t index_count, const void* index_addr, uint32_t flags, uint32_t type);
 	void DrawIndexAuto(uint32_t index_count, uint32_t flags);
@@ -157,6 +159,8 @@ private:
 	HW::Shader       m_sh_ctx;
 	HW::UserSgprType m_user_data_marker    = HW::UserSgprType::Unknown;
 	uint32_t         m_index_type_and_size = 0;
+	uint32_t         m_index_buffer_size   = 0;
+	uint64_t         m_index_base_addr     = 0;
 	uint32_t         m_num_instances       = 1;
 
 	Core::Mutex m_mutex;
@@ -544,6 +548,8 @@ void CommandProcessor::Reset()
 	m_ucfg.Reset();
 	m_ctx.Reset();
 	m_index_type_and_size = 0;
+	m_index_buffer_size   = 0;
+	m_index_base_addr     = 0;
 	m_user_data_marker    = HW::UserSgprType::Unknown;
 
 	std::memset(m_const_ram, 0, sizeof(m_const_ram));
@@ -1264,6 +1270,20 @@ void CommandProcessor::SetIndexType(uint32_t index_type_and_size)
 	Core::LockGuard lock(m_mutex);
 
 	m_index_type_and_size = index_type_and_size;
+}
+
+void CommandProcessor::SetIndexBaseAddress(uint64_t index_base_addr)
+{
+	Core::LockGuard lock(m_mutex);
+
+	m_index_base_addr = index_base_addr;
+}
+
+void CommandProcessor::SetIndexBufferSize(uint32_t index_buffer_size)
+{
+	Core::LockGuard lock(m_mutex);
+
+	m_index_buffer_size = index_buffer_size;
 }
 
 void CommandProcessor::SetNumInstances(uint32_t num_instances)
@@ -2894,10 +2914,14 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			EXIT_IF(target_mask != 0x00003FC0);
 			EXIT_IF(extended_action != 0x02000000);
 			EXIT_IF(action != 0x00);
-			EXIT_NOT_IMPLEMENTED(size_lo == 0);
-			EXIT_NOT_IMPLEMENTED(base_lo == 0);
-
-			cp->RenderTextureBarrier(base_lo << 8u, size_lo << 8u);
+			if (size_lo == 0)
+			{
+				cp->MemoryBarrier();
+			} else
+			{
+				EXIT_NOT_IMPLEMENTED(base_lo == 0);
+				cp->RenderTextureBarrier(base_lo << 8u, size_lo << 8u);
+			}
 		}
 		break;
 		case 0x00C40000:
@@ -2983,6 +3007,27 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			EXIT_IF(action != 0x00);
 
 			cp->MemoryBarrier();
+		}
+		break;
+
+		case 0x02007fc0:
+		{
+			// target_mask:     0x00007fc0 (all rt and depth)
+			// extended_action: 0x02000000 (FlushAndInvalidateCbCache)
+			// action:          0x00 (none)
+			// Sibling of 0x02003fc0 (all rt only) already handled above.
+			EXIT_IF(target_mask != 0x00007fc0);
+			EXIT_IF(extended_action != 0x02000000);
+			EXIT_IF(action != 0x00);
+
+			if (size_lo == 0)
+			{
+				cp->MemoryBarrier();
+			} else
+			{
+				EXIT_NOT_IMPLEMENTED(base_lo == 0);
+				cp->RenderTextureBarrier(base_lo << 8u, size_lo << 8u);
+			}
 		}
 		break;
 
@@ -3387,6 +3432,33 @@ KYTY_CP_OP_PARSER(cp_op_index_type)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0002A00);
 
 	cp->SetIndexType(buffer[0]);
+
+	return 1;
+}
+
+// IT_INDEX_BASE (0x26): two dwords absolute GPU VA of the index buffer.
+// Emitted by sceAgcDcbSetIndexBuffer / GraphicsDcbSetIndexBuffer; required
+// before DRAW_INDEX_OFFSET / DRAW_INDEX_INDIRECT that resolve against base.
+KYTY_CP_OP_PARSER(cp_op_index_base)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0012600);
+
+	const auto index_base_addr = buffer[0] | (static_cast<uint64_t>(buffer[1]) << 32u);
+	cp->SetIndexBaseAddress(index_base_addr);
+
+	return 2;
+}
+
+// IT_INDEX_BUFFER_SIZE (0x13): index count cap for indirect/offset draws.
+KYTY_CP_OP_PARSER(cp_op_index_buffer_size)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0001300);
+
+	cp->SetIndexBufferSize(buffer[0]);
 
 	return 1;
 }
@@ -4348,6 +4420,187 @@ static void graphics_init_jmp_tables_cx_indirect()
 		{ cp->GetCtx()->SetViewportZOffset((cmd_offset - Pm4::PA_CL_VPORT_ZOFFSET) / 6, *reinterpret_cast<const float*>(&value)); };
 	}
 
+	// Guard-band adj floats written one-at-a-time via IT_SET_CONTEXT_REG
+	// indirect (Gen5 AGC). Bulk four-dword form is handled by hw_ctx_set_guard_bands.
+	g_hw_ctx_indirect_func[Pm4::PA_CL_GB_VERT_CLIP_ADJ] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		const auto vp = cp->GetCtx()->GetScreenViewport();
+		cp->GetCtx()->SetGuardBands(vp.guard_band_horz_clip, *reinterpret_cast<const float*>(&value), vp.guard_band_horz_discard,
+		                            vp.guard_band_vert_discard);
+	};
+	g_hw_ctx_indirect_func[Pm4::PA_CL_GB_VERT_DISC_ADJ] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		const auto vp = cp->GetCtx()->GetScreenViewport();
+		cp->GetCtx()->SetGuardBands(vp.guard_band_horz_clip, vp.guard_band_vert_clip, vp.guard_band_horz_discard,
+		                            *reinterpret_cast<const float*>(&value));
+	};
+	g_hw_ctx_indirect_func[Pm4::PA_CL_GB_HORZ_CLIP_ADJ] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		const auto vp = cp->GetCtx()->GetScreenViewport();
+		cp->GetCtx()->SetGuardBands(*reinterpret_cast<const float*>(&value), vp.guard_band_vert_clip, vp.guard_band_horz_discard,
+		                            vp.guard_band_vert_discard);
+	};
+	g_hw_ctx_indirect_func[Pm4::PA_CL_GB_HORZ_DISC_ADJ] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		const auto vp = cp->GetCtx()->GetScreenViewport();
+		cp->GetCtx()->SetGuardBands(vp.guard_band_horz_clip, vp.guard_band_vert_clip, *reinterpret_cast<const float*>(&value),
+		                            vp.guard_band_vert_discard);
+	};
+
+	// Single-dword forms of bulk CX parsers (Gen5 indirect set path).
+	g_hw_ctx_indirect_func[Pm4::PA_SU_HARDWARE_SCREEN_OFFSET] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		const uint32_t x = KYTY_PM4_GET(value, PA_SU_HARDWARE_SCREEN_OFFSET, HW_SCREEN_OFFSET_X);
+		const uint32_t y = KYTY_PM4_GET(value, PA_SU_HARDWARE_SCREEN_OFFSET, HW_SCREEN_OFFSET_Y);
+		cp->GetCtx()->SetHardwareScreenOffset(x, y);
+	};
+	g_hw_ctx_indirect_func[Pm4::PA_CL_CLIP_CNTL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		HW::ClipControl r;
+		r.user_clip_planes                    = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, UCP_ENA);
+		r.user_clip_plane_mode                = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, PS_UCP_MODE);
+		r.dx_clip_space                       = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, DX_CLIP_SPACE_DEF) != 0;
+		r.vertex_kill_any                     = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, VTX_KILL_OR) != 0;
+		r.min_z_clip_disable                  = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, ZCLIP_NEAR_DISABLE) != 0;
+		r.max_z_clip_disable                  = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, ZCLIP_FAR_DISABLE) != 0;
+		r.user_clip_plane_negate_y            = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, PS_UCP_Y_SCALE_NEG) != 0;
+		r.clip_disable                        = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, CLIP_DISABLE) != 0;
+		r.user_clip_plane_cull_only           = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, UCP_CULL_ONLY_ENA) != 0;
+		r.cull_on_clipping_error_disable      = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, DIS_CLIP_ERR_DETECT) != 0;
+		r.linear_attribute_clip_enable        = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, DX_LINEAR_ATTR_CLIP_ENA) != 0;
+		r.force_viewport_index_from_vs_enable = KYTY_PM4_GET(value, PA_CL_CLIP_CNTL, VTE_VPORT_PROVOKE_DISABLE) != 0;
+		cp->GetCtx()->SetClipControl(r);
+	};
+	g_hw_ctx_indirect_func[Pm4::CB_COLOR_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		HW::ColorControl r;
+		r.mode = KYTY_PM4_GET(value, CB_COLOR_CONTROL, MODE);
+		r.op   = KYTY_PM4_GET(value, CB_COLOR_CONTROL, ROP3);
+		cp->GetCtx()->SetColorControl(r);
+	};
+	g_hw_ctx_indirect_func[Pm4::PA_SU_LINE_CNTL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		const auto line_width = KYTY_PM4_GET(value, PA_SU_LINE_CNTL, WIDTH);
+		cp->GetCtx()->SetLineWidth(line_width == 8 ? 1.0f : static_cast<float>(line_width) / 8.0f);
+	};
+	g_hw_ctx_indirect_func[Pm4::PA_SC_AA_CONFIG] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		HW::AaConfig r;
+		r.msaa_num_samples      = KYTY_PM4_GET(value, PA_SC_AA_CONFIG, MSAA_NUM_SAMPLES);
+		r.aa_mask_centroid_dtmn = KYTY_PM4_GET(value, PA_SC_AA_CONFIG, AA_MASK_CENTROID_DTMN) != 0;
+		r.max_sample_dist       = KYTY_PM4_GET(value, PA_SC_AA_CONFIG, MAX_SAMPLE_DIST);
+		r.msaa_exposed_samples  = KYTY_PM4_GET(value, PA_SC_AA_CONFIG, MSAA_EXPOSED_SAMPLES);
+		cp->GetCtx()->SetAaConfig(r);
+	};
+	g_hw_ctx_indirect_func[Pm4::DB_EQAA] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		HW::EqaaControl r;
+		r.max_anchor_samples         = KYTY_PM4_GET(value, DB_EQAA, MAX_ANCHOR_SAMPLES);
+		r.ps_iter_samples            = KYTY_PM4_GET(value, DB_EQAA, PS_ITER_SAMPLES);
+		r.mask_export_num_samples    = KYTY_PM4_GET(value, DB_EQAA, MASK_EXPORT_NUM_SAMPLES);
+		r.alpha_to_mask_num_samples  = KYTY_PM4_GET(value, DB_EQAA, ALPHA_TO_MASK_NUM_SAMPLES);
+		r.high_quality_intersections = KYTY_PM4_GET(value, DB_EQAA, HIGH_QUALITY_INTERSECTIONS) != 0;
+		r.incoherent_eqaa_reads      = KYTY_PM4_GET(value, DB_EQAA, INCOHERENT_EQAA_READS) != 0;
+		r.interpolate_comp_z         = KYTY_PM4_GET(value, DB_EQAA, INTERPOLATE_COMP_Z) != 0;
+		r.static_anchor_associations = KYTY_PM4_GET(value, DB_EQAA, STATIC_ANCHOR_ASSOCIATIONS) != 0;
+		cp->GetCtx()->SetEqaaControl(r);
+	};
+	g_hw_ctx_indirect_func[Pm4::CB_BLEND_RED] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		auto color = cp->GetCtx()->GetBlendColor();
+		color.red  = *reinterpret_cast<const float*>(&value);
+		cp->GetCtx()->SetBlendColor(color);
+	};
+	g_hw_ctx_indirect_func[Pm4::CB_BLEND_GREEN] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		auto color  = cp->GetCtx()->GetBlendColor();
+		color.green = *reinterpret_cast<const float*>(&value);
+		cp->GetCtx()->SetBlendColor(color);
+	};
+	g_hw_ctx_indirect_func[Pm4::CB_BLEND_BLUE] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		auto color = cp->GetCtx()->GetBlendColor();
+		color.blue = *reinterpret_cast<const float*>(&value);
+		cp->GetCtx()->SetBlendColor(color);
+	};
+	g_hw_ctx_indirect_func[Pm4::CB_BLEND_ALPHA] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		auto color  = cp->GetCtx()->GetBlendColor();
+		color.alpha = *reinterpret_cast<const float*>(&value);
+		cp->GetCtx()->SetBlendColor(color);
+	};
+
+	// Host-irrelevant GPU metadata / modes that Kyty accepts without state
+	// (no guest-visible Vulkan mapping yet). Accept to keep PM4 streams moving.
+	const auto ignore_cx = [](KYTY_HW_CTX_INDIRECT_ARGS) { (void)cp; (void)cmd_offset; (void)value; };
+	g_hw_ctx_indirect_func[Pm4::CB_DCC_CONTROL]                        = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_COUNT_CONTROL]                      = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_RENDER_OVERRIDE]                    = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_RENDER_OVERRIDE2]                   = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_DFSM_CONTROL]                       = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_RMI_L2_CACHE_CONTROL]               = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::CB_RMI_GL2_CACHE_CONTROL]              = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::TA_BC_BASE_ADDR]                       = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::TA_BC_BASE_ADDR_HI]                    = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SU_POINT_SIZE]                      = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SU_POINT_MINMAX]                    = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::SPI_TMPRING_SIZE]                      = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_MULTI_PRIM_IB_RESET_INDX]          = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_DRAW_PAYLOAD_CNTL]                 = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_PRIMITIVEID_RESET]                 = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_CL_OBJPRIM_ID_CNTL]                 = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL]         = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_CLAMP]               = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_FRONT_SCALE]         = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_FRONT_OFFSET]        = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_BACK_SCALE]          = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET]         = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_FOV_WINDOW_LR]                   = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_FOV_WINDOW_TB]                   = ignore_cx;
+	// PA_SC_FSR_ENABLE / FSR_RECURSIONS* use host-only fake offsets
+	// (0x800003FC..) outside the CX table; bulk path only.
+	g_hw_ctx_indirect_func[Pm4::PA_SC_MODE_CNTL_1]                     = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_AA_MASK_X0Y0_X1Y0]               = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_AA_MASK_X0Y1_X1Y1]               = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SU_VTX_CNTL]                        = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PS_SHADER_SAMPLE_EXCLUSION_MASK]       = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_BINNER_CNTL_0]                   = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_BINNER_CNTL_1]                   = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_CONSERVATIVE_RASTERIZATION_CNTL] = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_NGG_MODE_CNTL]                   = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_ALPHA_TO_MASK]                      = ignore_cx;
+	// Window scissor/offset and tessellation stage regs need full Context
+	// fields (Kyty). Accept values for now so Gen5 bootstreams proceed;
+	// geometry that depends on them will need the proper setters later.
+	g_hw_ctx_indirect_func[Pm4::PA_SC_WINDOW_OFFSET]     = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_WINDOW_SCISSOR_TL] = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_WINDOW_SCISSOR_BR] = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_HOS_MAX_TESS_LEVEL]  = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_HOS_MIN_TESS_LEVEL]  = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_PRIMITIVEID_EN]      = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_REUSE_OFF]           = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_TESS_DISTRIBUTION]   = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_LS_HS_CONFIG]         = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_TF_PARAM]            = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_BOUNDS_MIN]     = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_BOUNDS_MAX]     = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_HTILE_SURFACE]        = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_INFO]           = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_SIZE]           = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_SLICE]          = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_CENTROID_PRIORITY_0] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		auto r               = cp->GetCtx()->GetAaSampleControl();
+		r.centroid_priority  = (r.centroid_priority & 0xffffffff00000000ull) | value;
+		cp->GetCtx()->SetAaSampleControl(r);
+	};
+	g_hw_ctx_indirect_func[Pm4::PA_SC_CENTROID_PRIORITY_1] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		auto r              = cp->GetCtx()->GetAaSampleControl();
+		r.centroid_priority = (r.centroid_priority & 0x00000000ffffffffull) | (static_cast<uint64_t>(value) << 32u);
+		cp->GetCtx()->SetAaSampleControl(r);
+	};
+
 	for (auto cmd_offset = Pm4::PA_SC_VPORT_SCISSOR_0_TL; cmd_offset <= Pm4::PA_SC_VPORT_SCISSOR_15_TL; cmd_offset += 2)
 	{
 		g_hw_ctx_indirect_func[cmd_offset] = [](KYTY_HW_CTX_INDIRECT_ARGS)
@@ -4763,6 +5016,24 @@ static void graphics_init_jmp_tables_uc_indirect()
 		uint32_t prim_type = KYTY_PM4_GET(value, VGT_PRIMITIVE_TYPE, PRIM_TYPE);
 		cp->GetUcfg()->SetPrimitiveType(prim_type);
 	};
+
+	// Index type via UCONFIG (same 2-bit size field as IT_INDEX_TYPE).
+	g_hw_uc_indirect_func[Pm4::VGT_INDEX_TYPE] = [](KYTY_HW_UC_INDIRECT_ARGS) { cp->SetIndexType(value & 0x3u); };
+
+	// Remaining UCONFIG regs accepted without host state until HardwareContext
+	// gains matching setters (matches Kyty ignore/set-index-offset path).
+	const auto ignore_uc = [](KYTY_HW_UC_INDIRECT_ARGS) { (void)cp; (void)cmd_offset; (void)value; };
+	g_hw_uc_indirect_func[Pm4::GE_INDX_OFFSET]            = ignore_uc;
+	g_hw_uc_indirect_func[Pm4::GE_MULTI_PRIM_IB_RESET_EN] = ignore_uc;
+	g_hw_uc_indirect_func[Pm4::VGT_OBJECT_ID]             = ignore_uc;
+	g_hw_uc_indirect_func[Pm4::TEXTURE_GRADIENT_FACTORS]  = ignore_uc;
+	g_hw_uc_indirect_func[Pm4::IA_MULTI_VGT_PARAM]        = ignore_uc;
+	g_hw_uc_indirect_func[Pm4::TA_CS_BC_BASE_ADDR]        = ignore_uc;
+	g_hw_uc_indirect_func[Pm4::TA_CS_BC_BASE_ADDR_HI]     = ignore_uc;
+	g_hw_uc_indirect_func[Pm4::GDS_OA_CNTL]               = ignore_uc;
+	g_hw_uc_indirect_func[Pm4::GDS_OA_COUNTER]            = ignore_uc;
+	g_hw_uc_indirect_func[Pm4::GDS_OA_ADDRESS]            = ignore_uc;
+	g_hw_uc_indirect_func[Pm4::GE_STEREO_CNTL]            = ignore_uc;
 }
 
 static void graphics_init_jmp_tables()
@@ -4871,6 +5142,8 @@ static void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_DISPATCH_INDIRECT]       = cp_op_dispatch_indirect;
 	g_cp_op_func[Pm4::IT_DRAW_INDEX_INDIRECT]     = cp_op_draw_index_indirect;
 	g_cp_op_func[Pm4::IT_DRAW_INDEX_2]            = cp_op_draw_index;
+	g_cp_op_func[Pm4::IT_INDEX_BASE]              = cp_op_index_base;
+	g_cp_op_func[Pm4::IT_INDEX_BUFFER_SIZE]       = cp_op_index_buffer_size;
 	g_cp_op_func[Pm4::IT_INDEX_TYPE]              = cp_op_index_type;
 	g_cp_op_func[Pm4::IT_NUM_INSTANCES]           = cp_op_num_instances;
 	g_cp_op_func[Pm4::IT_DRAW_INDEX_AUTO]         = cp_op_draw_index_auto;

@@ -2836,4 +2836,50 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDmaDataCustomPacket)
 	          nullptr);
 }
 
+// IT_INDEX_BASE (0x26) / IT_INDEX_BUFFER_SIZE (0x13): DCB encoders must emit the
+// packet forms the CP parsers accept (cmd_id 0xc0012600 / 0xc0001300).
+TEST(EmulatorGraphicsPackets, EncodesDcbIndexBaseAndBufferSize)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	const uint64_t index_addr = 0x00007f5a6805eb90ull;
+	uint32_t*      base_cmd =
+	    Gen5::GraphicsDcbSetIndexBuffer(reinterpret_cast<Gen5::CommandBuffer*>(&cb), index_addr);
+	ASSERT_NE(base_cmd, nullptr);
+	EXPECT_EQ(base_cmd[0], KYTY_PM4(3, Pm4::IT_INDEX_BASE, 0u));
+	EXPECT_EQ(base_cmd[0], 0xc0012600u);
+	EXPECT_EQ(base_cmd[1], 0x6805eb90u);
+	EXPECT_EQ(base_cmd[2], 0x00007f5au);
+
+	uint32_t* size_cmd =
+	    Gen5::GraphicsDcbSetIndexCount(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x1234u);
+	ASSERT_NE(size_cmd, nullptr);
+	EXPECT_EQ(size_cmd[0], KYTY_PM4(2, Pm4::IT_INDEX_BUFFER_SIZE, 0u));
+	EXPECT_EQ(size_cmd[0], 0xc0001300u);
+	EXPECT_EQ(size_cmd[1], 0x1234u);
+}
+
 UT_END();

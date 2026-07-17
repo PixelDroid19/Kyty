@@ -595,6 +595,29 @@ TEST(EmulatorGraphicsState, ClassifiesConstantStorageResourcesAsReadOnly)
 	EXPECT_FALSE(ShaderStorageUsageIsReadOnly(ShaderStorageUsage::Unknown));
 }
 
+// Guest malloc/new → host heap; small V# bases land here (Dreaming Sarah).
+TEST(EmulatorGraphicsState, ClassifiesHostGuestMallocRangesForLazyGpuHeaps)
+{
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0, 0x40));
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x1190000, 0x40));           // direct GPU map
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x900000000ull, 0x40));      // main image
+	EXPECT_TRUE(GpuMemoryIsHostGuestMallocRange(0x7f005c0b3d20ull, 0x40));    // captured VB
+	EXPECT_TRUE(GpuMemoryIsHostGuestMallocRange(0x7fffcc068720ull, 0x18));    // host index-ish
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x7f005c0b3d20ull, 0));
+	// Overflow / past host band
+	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0x7fffffffffffffull, 0x20));
+
+	uint64_t start = 0;
+	uint64_t size  = 0;
+	GpuMemoryHostGuestMallocPageCover(0x7f005c0b3d20ull, 0x40, &start, &size);
+	EXPECT_EQ(start, 0x7f005c0b3000ull);
+	EXPECT_EQ(size, 0x1000ull);
+	// Spans a page boundary
+	GpuMemoryHostGuestMallocPageCover(0x7f005c0b3ff0ull, 0x20, &start, &size);
+	EXPECT_EQ(start, 0x7f005c0b3000ull);
+	EXPECT_EQ(size, 0x2000ull);
+}
+
 TEST(EmulatorGraphicsState, SharesOverlappingReadOnlyStorageViews)
 {
 	EXPECT_TRUE(GpuMemoryCanShareReadOnlyStorageViews(0x1000, 0x80, true, 0x1010, 0x70, true));
@@ -1500,6 +1523,26 @@ TEST(EmulatorGraphicsState, RegularImageSamplingDisablesSamplerComparison)
 	const auto comparison = ResolveSamplerComparison(0, ImageSampleOperation::Regular);
 	EXPECT_FALSE(comparison.enabled);
 	EXPECT_EQ(comparison.function, 0);
+}
+
+// GraphicsInit must publish API version and feature-flag words into the guest
+// AGC state buffer; leaving them unset lets titles take a null-deref after
+// CreateShader / register-default use (see GraphicsInitWriteGuestState).
+TEST(EmulatorGraphicsState, GraphicsInitWriteGuestStatePublishesVersionAndFeatureWords)
+{
+	EXPECT_FALSE(Gen5::GraphicsInitWriteGuestState(nullptr, 8u));
+
+	uint32_t state[4] = {0xdeadbeefu, 0xcafebabeu, 0x11111111u, 0x22222222u};
+	EXPECT_TRUE(Gen5::GraphicsInitWriteGuestState(state, 8u));
+	EXPECT_EQ(state[0], 8u);
+	EXPECT_EQ(state[1], 0u);
+	// Only the documented two words are written.
+	EXPECT_EQ(state[2], 0x11111111u);
+	EXPECT_EQ(state[3], 0x22222222u);
+
+	EXPECT_TRUE(Gen5::GraphicsInitWriteGuestState(state, 7u));
+	EXPECT_EQ(state[0], 7u);
+	EXPECT_EQ(state[1], 0u);
 }
 
 UT_END();
