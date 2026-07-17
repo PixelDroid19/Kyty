@@ -185,6 +185,27 @@ int KYTY_SYSV_ABI   pthread_mutexattr_init(LibKernel::PthreadMutexattr* attr);
 int KYTY_SYSV_ABI   pthread_mutexattr_settype(LibKernel::PthreadMutexattr* attr, int type);
 int KYTY_SYSV_ABI   pthread_mutexattr_destroy(LibKernel::PthreadMutexattr* attr);
 
+LibKernel::Pthread KYTY_SYSV_ABI pthread_self();
+int KYTY_SYSV_ABI                  pthread_detach(LibKernel::Pthread thread);
+void KYTY_SYSV_ABI                 pthread_exit(void* value);
+void KYTY_SYSV_ABI                 pthread_yield();
+int KYTY_SYSV_ABI                  pthread_cond_signal(LibKernel::PthreadCond* cond);
+int KYTY_SYSV_ABI                  pthread_attr_init(LibKernel::PthreadAttr* attr);
+int KYTY_SYSV_ABI                  pthread_attr_destroy(LibKernel::PthreadAttr* attr);
+int KYTY_SYSV_ABI                  pthread_attr_getstack(const LibKernel::PthreadAttr* attr, void** stack_addr, size_t* stack_size);
+int KYTY_SYSV_ABI                  pthread_attr_setstacksize(LibKernel::PthreadAttr* attr, size_t stack_size);
+int KYTY_SYSV_ABI                  pthread_attr_getstacksize(const LibKernel::PthreadAttr* attr, size_t* stack_size);
+int KYTY_SYSV_ABI                  pthread_attr_get_np(LibKernel::Pthread thread, LibKernel::PthreadAttr* attr);
+int KYTY_SYSV_ABI                  pthread_attr_getschedpolicy(const LibKernel::PthreadAttr* attr, int* policy);
+int KYTY_SYSV_ABI                  pthread_attr_setschedpolicy(LibKernel::PthreadAttr* attr, int policy);
+int KYTY_SYSV_ABI                  pthread_attr_setdetachstate(LibKernel::PthreadAttr* attr, int state);
+int KYTY_SYSV_ABI                  pthread_attr_getdetachstate(const LibKernel::PthreadAttr* attr, int* state);
+int KYTY_SYSV_ABI                  pthread_attr_setschedparam(LibKernel::PthreadAttr* attr, const LibKernel::KernelSchedParam* param);
+int KYTY_SYSV_ABI                  pthread_attr_getschedparam(const LibKernel::PthreadAttr* attr, LibKernel::KernelSchedParam* param);
+int KYTY_SYSV_ABI                  pthread_attr_setinheritsched(LibKernel::PthreadAttr* attr, int inherit_sched);
+int KYTY_SYSV_ABI                  pthread_attr_setguardsize(LibKernel::PthreadAttr* attr, size_t guard_size);
+int KYTY_SYSV_ABI                  pthread_attr_getguardsize(const LibKernel::PthreadAttr* attr, size_t* guard_size);
+
 } // namespace Posix
 
 } // namespace Kyty::Libs

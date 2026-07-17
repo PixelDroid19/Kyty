@@ -6,6 +6,7 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 
 #ifdef KYTY_EMU_ENABLED
@@ -146,6 +147,162 @@ int KYTY_SYSV_ABI SaveDataDialogProgressBarSetValue(int target, uint32_t rate)
 }
 
 } // namespace SaveDataDialog
+
+namespace MsgDialog {
+
+LIB_NAME("MsgDialog", "MsgDialog");
+
+static std::atomic<int> g_status {CommonDialog::STATUS_NONE};
+
+int KYTY_SYSV_ABI MsgDialogInitialize()
+{
+	PRINT_NAME();
+
+	// #region agent log
+	{
+		const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+		                    std::chrono::system_clock::now().time_since_epoch())
+		                    .count();
+		if (FILE* f = std::fopen("/home/monasterios/.cursor/debug-logs/debug-0fe784.log", "a"))
+		{
+			std::fprintf(f,
+			             "{\"sessionId\":\"0fe784\",\"runId\":\"pre-fix\",\"hypothesisId\":\"C\","
+			             "\"location\":\"Dialog.cpp:MsgDialogInitialize\",\"message\":\"msg dialog "
+			             "init\",\"data\":{\"systemInit\":%d},\"timestamp\":%lld}\n",
+			             CommonDialog::CommonDialogIsSystemInitialized() ? 1 : 0,
+			             static_cast<long long>(ts));
+			std::fclose(f);
+		}
+	}
+	// #endregion
+
+	if (!CommonDialog::CommonDialogIsSystemInitialized())
+	{
+		return CommonDialog::ERROR_NOT_SYSTEM_INITIALIZED;
+	}
+
+	const int status = g_status.load(std::memory_order_acquire);
+	if (status != CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_ALREADY_INITIALIZED;
+	}
+
+	g_status.store(CommonDialog::STATUS_INITIALIZED, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI MsgDialogOpen(const MsgDialogParam* param)
+{
+	PRINT_NAME();
+
+	if (param == nullptr)
+	{
+		return CommonDialog::ERROR_ARG_NULL;
+	}
+
+	const int status = g_status.load(std::memory_order_acquire);
+	if (status != CommonDialog::STATUS_INITIALIZED && status != CommonDialog::STATUS_FINISHED)
+	{
+		return CommonDialog::ERROR_INVALID_STATE;
+	}
+
+	if (param->base_size != 0x30)
+	{
+		printf("\t base_size = 0x%016" PRIx64 " (rejected)\n", param->base_size);
+		return CommonDialog::ERROR_PARAM_INVALID;
+	}
+
+	printf("\t base_size = 0x%016" PRIx64 "\n", param->base_size);
+	printf("\t size      = %u\n", param->size);
+	printf("\t mode      = %u\n", param->mode);
+
+	g_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI MsgDialogGetStatus()
+{
+	PRINT_NAME();
+	return g_status.load(std::memory_order_acquire);
+}
+
+int KYTY_SYSV_ABI MsgDialogUpdateStatus()
+{
+	PRINT_NAME();
+	return g_status.load(std::memory_order_acquire);
+}
+
+int KYTY_SYSV_ABI MsgDialogGetResult(MsgDialogResult* result)
+{
+	PRINT_NAME();
+
+	if (g_status.load(std::memory_order_acquire) != CommonDialog::STATUS_FINISHED)
+	{
+		return CommonDialog::ERROR_NOT_FINISHED;
+	}
+	if (result == nullptr)
+	{
+		return CommonDialog::ERROR_ARG_NULL;
+	}
+
+	result->size      = sizeof(MsgDialogResult);
+	result->button_id = 0;
+	return OK;
+}
+
+int KYTY_SYSV_ABI MsgDialogClose()
+{
+	PRINT_NAME();
+
+	const int status = g_status.load(std::memory_order_acquire);
+	if (status != CommonDialog::STATUS_RUNNING && status != CommonDialog::STATUS_FINISHED)
+	{
+		return CommonDialog::ERROR_NOT_RUNNING;
+	}
+
+	g_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI MsgDialogTerminate()
+{
+	PRINT_NAME();
+
+	const int status = g_status.load(std::memory_order_acquire);
+	if (status == CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_NOT_INITIALIZED;
+	}
+
+	g_status.store(CommonDialog::STATUS_NONE, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI MsgDialogProgressBarInc(int target, uint32_t delta)
+{
+	PRINT_NAME();
+	printf("\t target = %d\n", target);
+	printf("\t delta  = %u\n", delta);
+	return OK;
+}
+
+int KYTY_SYSV_ABI MsgDialogProgressBarSetMsg(int target, const char* msg)
+{
+	PRINT_NAME();
+	printf("\t target = %d\n", target);
+	printf("\t msg    = %s\n", msg != nullptr ? msg : "(null)");
+	return OK;
+}
+
+int KYTY_SYSV_ABI MsgDialogProgressBarSetValue(int target, uint32_t value)
+{
+	PRINT_NAME();
+	printf("\t target = %d\n", target);
+	printf("\t value  = %u\n", value);
+	return OK;
+}
+
+} // namespace MsgDialog
 
 } // namespace Kyty::Libs::Dialog
 

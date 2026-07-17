@@ -12,12 +12,16 @@
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Kernel/Semaphore.h"
+#include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/RuntimeLinker.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -236,14 +240,26 @@ static void KYTY_SYSV_ABI KernelRtldSetApplicationHeapAPI(void* api[])
 {
 	PRINT_NAME();
 
+	if (api == nullptr)
+	{
+		return;
+	}
+
 	for (int i = 0; i < 10; i++)
 	{
 		printf("\tapi[%d] = 0x%016" PRIx64 "\n", i, reinterpret_cast<uint64_t>(api[i]));
 	}
 
-	[[maybe_unused]] auto* heap_malloc         = api[0];
-	[[maybe_unused]] auto* heap_free           = api[1];
-	[[maybe_unused]] auto* heap_posix_memalign = api[6];
+	// Register the guest v2 ApplicationHeap table (size=0x78, version=2). Create
+	// is invoked when EnsureInitialized has a main program with executable text
+	// bounds — typically immediately if entry is known, else before DT_INIT.
+	ApplicationHeap::RegisterApi(api);
+
+	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
+	if (const uint64_t entry = rt->GetEntry(); entry != 0)
+	{
+		ApplicationHeap::EnsureInitialized(rt->FindProgramByAddr(entry));
+	}
 }
 
 static int64_t KYTY_SYSV_ABI write(int d, const char* str, int64_t size)
@@ -482,6 +498,12 @@ int KYTY_SYSV_ABI KernelIsNeoMode()
 	return (Config::IsNeo() ? 1 : 0);
 }
 
+int KYTY_SYSV_ABI KernelIsTrinityMode()
+{
+	PRINT_NAME();
+	return 0;
+}
+
 int KYTY_SYSV_ABI clock_gettime(int clock_id, LibKernel::KernelTimespec* time)
 {
 	PRINT_NAME();
@@ -494,6 +516,31 @@ void KYTY_SYSV_ABI KernelSetGPO(uint32_t bits)
 	PRINT_NAME();
 
 	printf("\t bits = %08" PRIx32 "\n", bits);
+}
+
+// sceKernelGetGPI — NID 4oXYe9Xmk0Q.
+// On non-devkit retail consoles this is a no-op success (returns 0).
+static int KYTY_SYSV_ABI KernelGetGPI()
+{
+	PRINT_NAME();
+	const int result = KernelRetailGetGpiResult();
+	// #region agent log
+	{
+		const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+		                    std::chrono::system_clock::now().time_since_epoch())
+		                    .count();
+		if (FILE* f = std::fopen("/home/monasterios/.cursor/debug-logs/debug-0fe784.log", "a"))
+		{
+			std::fprintf(f,
+			             "{\"sessionId\":\"0fe784\",\"runId\":\"pre-fix\",\"hypothesisId\":\"A\","
+			             "\"location\":\"LibKernel.cpp:KernelGetGPI\",\"message\":\"sceKernelGetGPI "
+			             "called\",\"data\":{\"result\":%d},\"timestamp\":%lld}\n",
+			             result, static_cast<long long>(ts));
+			std::fclose(f);
+		}
+	}
+	// #endregion
+	return result;
 }
 
 } // namespace LibKernel
@@ -522,6 +569,12 @@ int KYTY_SYSV_ABI nanosleep(const LibKernel::KernelTimespec* rqtp, LibKernel::Ke
 	return POSIX_CALL(LibKernel::KernelNanosleep(rqtp, rmtp));
 }
 
+int KYTY_SYSV_ABI usleep(unsigned int microseconds)
+{
+	PRINT_NAME();
+	return POSIX_CALL(LibKernel::KernelUsleep(microseconds));
+}
+
 int KYTY_SYSV_ABI stat(const char* path, LibKernel::FileSystem::FileStat* sb)
 {
 	PRINT_NAME();
@@ -533,11 +586,34 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 {
 	LIB_FUNC("lLMT9vJAck0", clock_gettime);
 	LIB_FUNC("yS8U2TGCe1A", nanosleep);
+	LIB_FUNC("QcteRwbsnV0", usleep);
 	LIB_FUNC("E6ao34wPw+U", stat);
 	LIB_FUNC("HoLVWNanBBc", getpid);
+	LIB_FUNC("EotR8a3ASf4", pthread_self);
+
+	LIB_FUNC("wtkt-teR1so", Posix::pthread_attr_init);
+	LIB_FUNC("zHchY8ft5pk", Posix::pthread_attr_destroy);
+	LIB_FUNC("vQm4fDEsWi8", Posix::pthread_attr_getstack);
+	LIB_FUNC("2Q0z6rnBrTE", Posix::pthread_attr_setstacksize);
+	LIB_FUNC("0qOtCR-ZHck", Posix::pthread_attr_getstacksize);
+	LIB_FUNC("Ucsu-OK+els", Posix::pthread_attr_get_np);
+	LIB_FUNC("RtLRV-pBTTY", Posix::pthread_attr_getschedpolicy);
+	LIB_FUNC("JarMIy8kKEY", Posix::pthread_attr_setschedpolicy);
+	LIB_FUNC("E+tyo3lp5Lw", Posix::pthread_attr_setdetachstate);
+	LIB_FUNC("VUT1ZSrHT0I", Posix::pthread_attr_getdetachstate);
+	LIB_FUNC("euKRgm0Vn2M", Posix::pthread_attr_setschedparam);
+	LIB_FUNC("qlk9pSLsUmM", Posix::pthread_attr_getschedparam);
+	LIB_FUNC("FXPWHNk8Of0", Posix::pthread_attr_getschedparam);
+	LIB_FUNC("7ZlAakEf0Qg", Posix::pthread_attr_setinheritsched);
+	LIB_FUNC("JKyG3SWyA10", Posix::pthread_attr_setguardsize);
+	LIB_FUNC("JNkVVsVDmOk", Posix::pthread_attr_getguardsize);
 
 	LIB_FUNC("OxhIB8LB-PQ", Posix::pthread_create);
 	LIB_FUNC("h9CcP3J0oVM", Posix::pthread_join);
+	LIB_FUNC("+U1R4WtXvoc", Posix::pthread_detach);
+	LIB_FUNC("FJrT5LuUBAU", Posix::pthread_exit);
+	LIB_FUNC("B5GmVDKwpn0", Posix::pthread_yield);
+	LIB_FUNC("2MOy+rUfuhQ", Posix::pthread_cond_signal);
 	LIB_FUNC("7H0iTOciTLo", Posix::pthread_mutex_lock);
 	LIB_FUNC("K-jXhbt2gn4", Posix::pthread_mutex_trylock);
 	LIB_FUNC("2Z+PpY6CaJg", Posix::pthread_mutex_unlock);
@@ -552,6 +628,11 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("6BpEZuDT7YI", Posix::pthread_key_delete);
 	LIB_FUNC("WrOLvHU0yQM", Posix::pthread_setspecific);
 	LIB_FUNC("0-KXaS70xy4", Posix::pthread_getspecific);
+
+	LIB_FUNC("pDuPEf3m4fI", Posix::sem_init);
+	LIB_FUNC("cDW233RAwWo", Posix::sem_destroy);
+	LIB_FUNC("YCV5dGGBcCo", Posix::sem_wait);
+	LIB_FUNC("IKP8typ0QUk", Posix::sem_post);
 }
 
 } // namespace Posix
@@ -577,6 +658,20 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("oib76F-12fk", FileSystem::KernelLseek);
 	LIB_FUNC("j2AIqSqJP0w", FileSystem::KernelGetdents);
 	LIB_FUNC("1-LFLmRFxxM", FileSystem::KernelMkdir);
+	LIB_FUNC("gEpBkcwxUjw", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizes);
+	LIB_FUNC("WT-5NKy42fw", FileSystem::KernelAprResolveFilepathsToIds);
+	LIB_FUNC("i3HWvW35jao", FileSystem::KernelAprResolveFilepathsWithPrefixToIds);
+	LIB_FUNC("w5fcCG+t31g", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes);
+	LIB_FUNC("eYAh2vlCY-U", FileSystem::KernelAprResolveFilepathsToIdsForEach);
+	LIB_FUNC("QzB4O+bJQyA", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizesForEach);
+	LIB_FUNC("VB-BtuIW8Xc", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsForEach);
+	LIB_FUNC("C+Khtbbx2g8", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach);
+	LIB_FUNC("ApkYaHb8Sek", FileSystem::KernelAprGetFileStat);
+	LIB_FUNC("WvEu7yl3Ivg", FileSystem::KernelAprGetFileSize);
+	LIB_FUNC("eE4Szl8sil8", FileSystem::KernelAprSubmitCommandBuffer);
+	LIB_FUNC("ASoW5WE-UPo", FileSystem::KernelAprSubmitCommandBufferAndGetResult);
+	LIB_FUNC("qvMUCyyaCSI", FileSystem::KernelAprSubmitCommandBufferAndGetId);
+	LIB_FUNC("rqwFKI4PAiM", FileSystem::KernelAprWaitCommandBuffer);
 }
 
 LIB_DEFINE(InitLibKernel_1_Mem)
@@ -594,7 +689,11 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("WFcfL2lzido", Memory::KernelQueryMemoryProtection);
 	LIB_FUNC("BHouLQzh0X0", Memory::KernelDirectMemoryQuery);
 	LIB_FUNC("aNz11fnnzi4", Memory::KernelAvailableFlexibleMemorySize);
+	LIB_FUNC("n1-v6FgU7MQ", Memory::KernelConfiguredFlexibleMemorySize);
 	LIB_FUNC("vSMAm3cxYTY", Memory::KernelMprotect);
+	LIB_FUNC("DGMG3JshrZU", Memory::KernelSetVirtualRangeName);
+	LIB_FUNC("mkgXxsoxWHg", Memory::KernelClearVirtualRangeName);
+	LIB_FUNC("rVjRvHJ0X6c", Memory::KernelVirtualQuery);
 }
 
 LIB_DEFINE(InitLibKernel_1_Equeue)
@@ -636,6 +735,7 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("6UgtwV+0zb4", LibKernel::PthreadCreate);
 	LIB_FUNC("3PtV6p3QNX4", LibKernel::PthreadEqual);
 	LIB_FUNC("onNY9Byn-W8", LibKernel::PthreadJoin);
+	LIB_FUNC("3kg7rT0NQIs", LibKernel::PthreadExit);
 	LIB_FUNC("4qGrR6eoP9Y", LibKernel::PthreadDetach);
 	LIB_FUNC("How7B8Oet6k", LibKernel::PthreadGetname);
 	LIB_FUNC("bt3CTBKmGyI", LibKernel::PthreadSetaffinity);
@@ -649,6 +749,7 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("8+s5BzZjxSg", LibKernel::PthreadAttrGetaffinity);
 	LIB_FUNC("nsYoNRywwNg", LibKernel::PthreadAttrInit);
 	LIB_FUNC("JaRMy+QcpeU", LibKernel::PthreadAttrGetdetachstate);
+	LIB_FUNC("FXPWHNk8Of0", LibKernel::PthreadAttrGetschedparam);
 	LIB_FUNC("Ru36fiTtJzA", LibKernel::PthreadAttrGetstackaddr);
 	LIB_FUNC("-fA+7ZlGDQs", LibKernel::PthreadAttrGetstacksize);
 	// Captured post-TLS REX fix on Gen5 eboot: worker thread after Attr set/get
@@ -657,6 +758,7 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("-quPa4SEJUw", LibKernel::PthreadAttrGetstack);
 	LIB_FUNC("txHtngJ+eyc", LibKernel::PthreadAttrGetguardsize);
 	LIB_FUNC("UTXzJbWhhTE", LibKernel::PthreadAttrSetstacksize);
+	LIB_FUNC("Bvn74vj6oLo", LibKernel::PthreadAttrSetstack);
 	LIB_FUNC("-Wreprtu0Qs", LibKernel::PthreadAttrSetdetachstate);
 	LIB_FUNC("El+cQ20DynU", LibKernel::PthreadAttrSetguardsize);
 	LIB_FUNC("eXbUSpEaTsA", LibKernel::PthreadAttrSetinheritsched);
@@ -669,15 +771,25 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("Ox9i0c7L5w0", LibKernel::PthreadRwlockRdlock);
 	LIB_FUNC("+L98PIbGttk", LibKernel::PthreadRwlockUnlock);
 	LIB_FUNC("mqdNorrB+gI", LibKernel::PthreadRwlockWrlock);
+	LIB_FUNC("bIHoZCTomsI", LibKernel::PthreadRwlockTrywrlock);
+	LIB_FUNC("XD3mDeybCnk", LibKernel::PthreadRwlockTryrdlock);
+	LIB_FUNC("i2ifZ3fS2fo", LibKernel::PthreadRwlockattrDestroy);
+	LIB_FUNC("yOfGg-I1ZII", LibKernel::PthreadRwlockattrInit);
 
 	LIB_FUNC("2Tb92quprl0", LibKernel::PthreadCondInit);
 	LIB_FUNC("g+PZd2hiacg", LibKernel::PthreadCondDestroy);
 	LIB_FUNC("WKAXJ4XBPQ4", LibKernel::PthreadCondWait);
 	LIB_FUNC("JGgj7Uvrl+A", LibKernel::PthreadCondBroadcast);
 	LIB_FUNC("kDh-NfxgMtE", LibKernel::PthreadCondSignal);
+	LIB_FUNC("o69RpYO-Mu0", LibKernel::PthreadCondSignalto);
 	LIB_FUNC("BmMjYxmew1w", LibKernel::PthreadCondTimedwait);
 	LIB_FUNC("m5-2bsNfv7s", LibKernel::PthreadCondattrInit);
 	LIB_FUNC("waPcxYiR3WA", LibKernel::PthreadCondattrDestroy);
+
+	LIB_FUNC("geDaqgH9lTg", LibKernel::PthreadKeyCreate);
+	LIB_FUNC("PrdHuuDekhY", LibKernel::PthreadKeyDelete);
+	LIB_FUNC("+BzXYkqYeLE", LibKernel::PthreadSetspecific);
+	LIB_FUNC("eoht7mQOCmo", LibKernel::PthreadGetspecific);
 
 	LIB_FUNC("QBi7HCK03hw", LibKernel::KernelClockGettime);
 	LIB_FUNC("ejekcaNQNq0", LibKernel::KernelGettimeofday);
@@ -718,6 +830,8 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("HoLVWNanBBc", Posix::getpid);
 	LIB_FUNC("bnZxYgAFeA0", LibKernel::KernelGetSanitizerNewReplaceExternal);
 	LIB_FUNC("ca7v6Cxulzs", LibKernel::KernelSetGPO);
+	// sceKernelGetGPI (PS5 stub name ↔ NID 4oXYe9Xmk0Q). Retail no-op success.
+	LIB_FUNC("4oXYe9Xmk0Q", LibKernel::KernelGetGPI);
 	LIB_FUNC("DRuBt2pvICk", LibKernel::read);
 	LIB_FUNC("f7KBOafysXo", LibKernel::KernelGetModuleInfoFromAddr);
 	LIB_FUNC("Fjc4-n1+y2g", LibKernel::elf_phdr_match_addr);
@@ -738,6 +852,7 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("vNe1w4diLCs", LibKernel::tls_get_addr);
 	LIB_FUNC("WhCc1w3EhSI", LibKernel::KernelSetThreadAtexitReport);
 	LIB_FUNC("WslcK1FQcGI", LibKernel::KernelIsNeoMode);
+	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
 	LIB_FUNC("wzvqT4UqKX8", LibKernel::KernelLoadStartModule);
 	LIB_FUNC("Xjoosiw+XPI", LibKernel::KernelUuidCreate);
 	LIB_FUNC("zE-wXIZjLoM", LibKernel::KernelDebugRaiseExceptionOnReleaseMode);

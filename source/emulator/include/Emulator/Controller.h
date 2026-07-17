@@ -63,12 +63,20 @@ int KYTY_SYSV_ABI PadInit();
 int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param);
 int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index);
 int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable);
+int KYTY_SYSV_ABI PadSetTiltCorrectionState(int handle, bool enable);
+int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable);
 int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformation* info);
 int KYTY_SYSV_ABI PadReadState(int handle, PadData* data);
 int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num);
 int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param);
 int KYTY_SYSV_ABI PadSetVibrationMode(int handle, int mode);
 int KYTY_SYSV_ABI PadSetTriggerEffect(int handle, const void* param);
+// scePadGetTriggerEffectState — report both adaptive triggers idle.
+struct PadTriggerEffectStateInformation
+{
+	int32_t state[2];
+};
+int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInformation* info);
 int KYTY_SYSV_ABI PadResetLightBar(int handle);
 int KYTY_SYSV_ABI PadSetLightBar(int handle, const PadLightBarParam* param);
 

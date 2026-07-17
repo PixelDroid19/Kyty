@@ -100,6 +100,54 @@ int KYTY_SYSV_ABI PlayGoGetLocus(int handle, const uint16_t* chunk_ids, uint32_t
 	return OK;
 }
 
+// scePlayGoSetInstallSpeed — NID 4AAcTU9R3XM. speed: 0..2.
+static int KYTY_SYSV_ABI PlayGoSetInstallSpeed(int handle, int32_t speed)
+{
+	PRINT_NAME();
+	printf("\t handle = %d\n", handle);
+	printf("\t speed  = %" PRId32 "\n", speed);
+	if (handle != 1)
+	{
+		return PLAYGO_ERROR_BAD_HANDLE;
+	}
+	if (speed < 0 || speed > 2)
+	{
+		return PLAYGO_ERROR_BAD_SPEED;
+	}
+	return OK;
+}
+
+// scePlayGoGetChunkId — NID 73fF1MFU8hA
+static int KYTY_SYSV_ABI PlayGoGetChunkId(int handle, uint16_t* out_chunk_id_list,
+                                          uint32_t number_of_entries, uint32_t* out_entries)
+{
+	PRINT_NAME();
+	printf("\t handle            = %d\n", handle);
+	printf("\t out_chunk_id_list = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(out_chunk_id_list));
+	printf("\t number_of_entries = %" PRIu32 "\n", number_of_entries);
+	printf("\t out_entries       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(out_entries));
+	if (handle != 1)
+	{
+		return PLAYGO_ERROR_BAD_HANDLE;
+	}
+	if (out_entries == nullptr)
+	{
+		return PLAYGO_ERROR_BAD_POINTER;
+	}
+	if (number_of_entries != 0 && out_chunk_id_list == nullptr)
+	{
+		return PLAYGO_ERROR_BAD_POINTER;
+	}
+	const uint32_t total   = (g_chunks_num != 0 ? g_chunks_num : 1u);
+	const uint32_t entries = (number_of_entries < total ? number_of_entries : total);
+	for (uint32_t i = 0; i < entries; i++)
+	{
+		out_chunk_id_list[i] = static_cast<uint16_t>(i);
+	}
+	*out_entries = entries;
+	return OK;
+}
+
 } // namespace PlayGo
 
 LIB_DEFINE(InitPlayGo_1)
@@ -109,6 +157,8 @@ LIB_DEFINE(InitPlayGo_1)
 	LIB_FUNC("M1Gma1ocrGE", PlayGo::PlayGoOpen);
 	LIB_FUNC("Uco1I0dlDi8", PlayGo::PlayGoClose);
 	LIB_FUNC("uWIYLFkkwqk", PlayGo::PlayGoGetLocus);
+	LIB_FUNC("4AAcTU9R3XM", PlayGo::PlayGoSetInstallSpeed);
+	LIB_FUNC("73fF1MFU8hA", PlayGo::PlayGoGetChunkId);
 }
 
 } // namespace Kyty::Libs

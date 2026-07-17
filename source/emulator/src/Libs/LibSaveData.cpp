@@ -15,6 +15,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_set>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -440,6 +441,66 @@ int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResul
 	return OK;
 }
 
+// sceSaveDataTransferringMount — NID WAzWTZm1H+I / RjMlsR8EXrw (SaveData_native).
+// Observed Astro after PlayGo on thread 10: (mount*, result*). Creates host dir
+// and mounts at /savedata0 when missing so first-boot transfer continues.
+struct SaveDataTransferringMountParam
+{
+	int32_t                user_id;
+	const SaveDataTitleId* title_id;
+	const SaveDataDirName* dir_name;
+	const void*            fingerprint;
+	uint8_t                reserved[32];
+};
+
+int KYTY_SYSV_ABI SaveDataTransferringMount(const SaveDataTransferringMountParam* mount, SaveDataMountResult* mount_result)
+{
+	PRINT_NAME();
+	if (mount == nullptr || mount_result == nullptr || mount->dir_name == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	if (mount->user_id < 0)
+	{
+		return SAVE_DATA_ERROR_INVALID_LOGIN_USER;
+	}
+
+	String dir_name = String::FromUtf8(mount->dir_name->data);
+	if (dir_name.IsEmpty())
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	printf("\t user_id  = %d\n", mount->user_id);
+	printf("\t title_id = %s\n", mount->title_id != nullptr ? mount->title_id->data : "<null>");
+	printf("\t dir_name = %s\n", mount->dir_name->data);
+
+	// Layout mirrors Mount3 host path: _SaveData/<dir_name> → /savedata0.
+	String       mount_dir   = String(SAVE_DATA_DIR) + U"/" + dir_name;
+	String       mount_point = SAVE_DATA_POINT;
+	const bool   existed     = Core::File::IsDirectoryExisting(mount_dir);
+	if (!existed)
+	{
+		Core::File::CreateDirectories(mount_dir);
+		if (!Core::File::IsDirectoryExisting(mount_dir))
+		{
+			return SAVE_DATA_ERROR_INTERNAL;
+		}
+	}
+
+	LibKernel::FileSystem::Mount(mount_dir, mount_point);
+	std::memset(mount_result, 0, sizeof(*mount_result));
+	const int written =
+	    snprintf(mount_result->mount_point.data, sizeof(mount_result->mount_point.data), "%s", mount_point.C_Str());
+	if (written < 0 || written >= static_cast<int>(sizeof(mount_result->mount_point.data)))
+	{
+		return SAVE_DATA_ERROR_INTERNAL;
+	}
+	mount_result->required_blocks = 0;
+	mount_result->mount_status    = (existed ? 0u : 1u);
+	return OK;
+}
+
 int KYTY_SYSV_ABI SaveDataUmount(const SaveDataMountPoint* mount_point)
 {
 	PRINT_NAME();
@@ -524,6 +585,143 @@ int KYTY_SYSV_ABI SaveDataSaveIcon(const SaveDataMountPoint* mount_point, const 
 	return OK;
 }
 
+struct SaveDataMemoryData
+{
+	void*   buf;
+	size_t  buf_size;
+	int64_t offset;
+	uint8_t reserved[40];
+};
+
+struct SaveDataMemoryGet2
+{
+	int32_t             user_id;
+	uint8_t             padding[4];
+	SaveDataMemoryData* data;
+	void*               param;
+	void*               icon;
+	uint32_t            slot_id;
+	uint8_t             reserved[28];
+};
+
+struct SaveDataMemorySetup2
+{
+	uint32_t    option;
+	int32_t     user_id;
+	size_t      memory_size;
+	size_t      icon_memory_size;
+	const void* init_param;
+	const void* init_icon;
+	uint32_t    slot_id;
+	uint8_t     reserved[20];
+};
+
+struct SaveDataMemorySetupResult
+{
+	size_t  existed_memory_size;
+	uint8_t reserved[16];
+};
+
+struct SaveDataMemorySet2
+{
+	int32_t                   user_id;
+	uint8_t                   padding[4];
+	const SaveDataMemoryData* data;
+	const void*               param;
+	const void*               icon;
+	uint32_t                  data_num;
+	uint32_t                  slot_id;
+	uint8_t                   reserved[24];
+};
+
+static std::mutex           g_save_memory_mutex;
+static std::vector<uint8_t> g_save_data_memory(0x10000);
+
+int KYTY_SYSV_ABI SaveDataSetupSaveDataMemory2(void* setup_param, void* result_out)
+{
+	PRINT_NAME();
+	if (setup_param == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	const auto* setup = static_cast<const SaveDataMemorySetup2*>(setup_param);
+
+	std::lock_guard lock(g_save_memory_mutex);
+	if (setup->memory_size > g_save_data_memory.size())
+	{
+		g_save_data_memory.resize(setup->memory_size, 0);
+	}
+	if (result_out != nullptr)
+	{
+		auto* result                = static_cast<SaveDataMemorySetupResult*>(result_out);
+		result->existed_memory_size = g_save_data_memory.size();
+		std::memset(result->reserved, 0, sizeof(result->reserved));
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI SaveDataGetSaveDataMemory2(void* get_param)
+{
+	PRINT_NAME();
+	if (get_param == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	auto* get = static_cast<SaveDataMemoryGet2*>(get_param);
+
+	std::lock_guard lock(g_save_memory_mutex);
+	if (get->data != nullptr)
+	{
+		auto* data = get->data;
+		if (data->buf == nullptr || data->offset < 0)
+		{
+			return SAVE_DATA_ERROR_PARAMETER;
+		}
+		const auto offset = static_cast<size_t>(data->offset);
+		if (offset + data->buf_size > g_save_data_memory.size())
+		{
+			g_save_data_memory.resize(offset + data->buf_size, 0);
+		}
+		std::memcpy(data->buf, g_save_data_memory.data() + offset, data->buf_size);
+	}
+	if (get->param != nullptr)
+	{
+		std::memset(get->param, 0, 0x80);
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI SaveDataSetSaveDataMemory2(void* set_param)
+{
+	PRINT_NAME();
+	if (set_param == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	const auto* set = static_cast<const SaveDataMemorySet2*>(set_param);
+
+	std::lock_guard lock(g_save_memory_mutex);
+	const uint32_t  data_num = (set->data_num == 0 ? 1u : set->data_num);
+	if (set->data != nullptr)
+	{
+		for (uint32_t i = 0; i < data_num; ++i)
+		{
+			const auto& data = set->data[i];
+			if (data.buf == nullptr || data.offset < 0)
+			{
+				return SAVE_DATA_ERROR_PARAMETER;
+			}
+			const auto offset = static_cast<size_t>(data.offset);
+			if (offset + data.buf_size > g_save_data_memory.size())
+			{
+				g_save_data_memory.resize(offset + data.buf_size, 0);
+			}
+			std::memcpy(g_save_data_memory.data() + offset, data.buf, data.buf_size);
+		}
+	}
+	return OK;
+}
+
 } // namespace SaveData
 
 LIB_DEFINE(InitSaveData_1)
@@ -543,6 +741,12 @@ LIB_DEFINE(InitSaveData_1)
 	// sceSaveDataGetEventResult
 	LIB_FUNC("j8xKtiFj0SY", SaveData::SaveDataGetEventResult);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
+	LIB_FUNC("oQySEUfgXRA", SaveData::SaveDataSetupSaveDataMemory2);
+	LIB_FUNC("QwOO7vegnV8", SaveData::SaveDataGetSaveDataMemory2);
+	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);
+	// TransferringMount also appears on SaveData_v1 tables.
+	LIB_FUNC("WAzWTZm1H+I", SaveData::SaveDataTransferringMount);
+	LIB_FUNC("RjMlsR8EXrw", SaveData::SaveDataTransferringMount);
 }
 
 namespace SaveDataNative {
@@ -575,6 +779,12 @@ LIB_DEFINE(InitSaveDataNative_1)
 	// NID dyIhnXq-0SM: sceSaveDataDirNameSearch (boot save enumeration).
 	LIB_FUNC("dyIhnXq-0SM", SaveData::SaveDataDirNameSearch);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
+	LIB_FUNC("oQySEUfgXRA", SaveData::SaveDataSetupSaveDataMemory2);
+	LIB_FUNC("QwOO7vegnV8", SaveData::SaveDataGetSaveDataMemory2);
+	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);
+	// sceSaveDataTransferringMount — NID WAzWTZm1H+I (Astro after PlayGo).
+	LIB_FUNC("WAzWTZm1H+I", SaveData::SaveDataTransferringMount);
+	LIB_FUNC("RjMlsR8EXrw", SaveData::SaveDataTransferringMount);
 }
 
 } // namespace SaveDataNative

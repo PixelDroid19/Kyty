@@ -43,7 +43,13 @@
 
 namespace Kyty::Libs::Graphics {
 
-constexpr int GRAPHICS_EVENT_EOP = 0x40;
+constexpr int GRAPHICS_EVENT_QUEUED_GRAPHICS_INTERRUPT = 0x00;
+constexpr int GRAPHICS_EVENT_EOP                       = 0x40;
+
+static bool IsGraphicsEopEventId(int id)
+{
+	return id == GRAPHICS_EVENT_QUEUED_GRAPHICS_INTERRUPT || id == GRAPHICS_EVENT_EOP;
+}
 
 struct Label;
 struct RenderDepthInfo;
@@ -364,11 +370,17 @@ public:
 	SamplerCache*     GetSamplerCache() { return m_sampler_cache; }
 	GdsBuffer*        GetGdsBuffer() { return m_gds_buffer; }
 
-	void AddEopEq(LibKernel::EventQueue::KernelEqueue eq);
-	void DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq);
+	void AddEopEq(LibKernel::EventQueue::KernelEqueue eq, int id);
+	void DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq, int id);
 	void TriggerEopEvent();
 
 private:
+	struct EopEqRegistration
+	{
+		LibKernel::EventQueue::KernelEqueue eq = nullptr;
+		int                                 id = GRAPHICS_EVENT_EOP;
+	};
+
 	Core::Mutex       m_mutex;
 	PipelineCache*    m_pipeline_cache    = nullptr;
 	DescriptorCache*  m_descriptor_cache  = nullptr;
@@ -377,8 +389,8 @@ private:
 	GraphicContext*   m_graphic_ctx       = nullptr;
 	GdsBuffer*        m_gds_buffer        = nullptr;
 
-	Core::Mutex                                 m_eop_mutex;
-	Vector<LibKernel::EventQueue::KernelEqueue> m_eop_eqs;
+	Core::Mutex               m_eop_mutex;
+	Vector<EopEqRegistration> m_eop_eqs;
 };
 
 struct RenderDepthInfo
@@ -1227,35 +1239,49 @@ void GraphicsRenderCreateContext()
 	g_render_ctx->SetGraphicCtx(WindowGetGraphicContext());
 }
 
-void RenderContext::AddEopEq(LibKernel::EventQueue::KernelEqueue eq)
+void RenderContext::AddEopEq(LibKernel::EventQueue::KernelEqueue eq, int id)
 {
 	Core::LockGuard lock(m_eop_mutex);
 
-	EXIT_NOT_IMPLEMENTED(m_eop_eqs.Contains(eq));
+	for (const auto& entry: m_eop_eqs)
+	{
+		EXIT_NOT_IMPLEMENTED(entry.eq == eq && entry.id == id);
+	}
 
-	m_eop_eqs.Add(eq);
+	EopEqRegistration reg {};
+	reg.eq = eq;
+	reg.id = id;
+	m_eop_eqs.Add(reg);
 }
 
-void RenderContext::DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq)
+void RenderContext::DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq, int id)
 {
 	Core::LockGuard lock(m_eop_mutex);
 
-	auto index = m_eop_eqs.Find(eq);
-	EXIT_NOT_IMPLEMENTED(!m_eop_eqs.IndexValid(index));
-	m_eop_eqs[index] = nullptr;
+	bool found = false;
+	for (uint32_t i = 0; i < m_eop_eqs.Size(); i++)
+	{
+		if (m_eop_eqs[i].eq == eq && m_eop_eqs[i].id == id)
+		{
+			m_eop_eqs[i].eq = nullptr;
+			found           = true;
+			break;
+		}
+	}
+	EXIT_NOT_IMPLEMENTED(!found);
 }
 
 void RenderContext::TriggerEopEvent()
 {
 	Core::LockGuard lock(m_eop_mutex);
 
-	for (auto& eop_eq: m_eop_eqs)
+	for (auto& entry: m_eop_eqs)
 	{
-		if (eop_eq != nullptr)
+		if (entry.eq != nullptr)
 		{
-			auto result =
-			    LibKernel::EventQueue::KernelTriggerEvent(eop_eq, GRAPHICS_EVENT_EOP, LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
-			                                              reinterpret_cast<void*>(LibKernel::KernelReadTsc()));
+			auto result = LibKernel::EventQueue::KernelTriggerEvent(
+			    entry.eq, static_cast<uintptr_t>(entry.id), LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
+			    reinterpret_cast<void*>(LibKernel::KernelReadTsc()));
 			EXIT_NOT_IMPLEMENTED(result != OK);
 		}
 	}
@@ -5397,9 +5423,11 @@ static void eop_event_delete_func(LibKernel::EventQueue::KernelEqueue eq, LibKer
 {
 	EXIT_IF(event == nullptr);
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_NOT_IMPLEMENTED(event->event.ident != GRAPHICS_EVENT_EOP);
 	EXIT_NOT_IMPLEMENTED(event->event.filter != LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
-	g_render_ctx->DeleteEopEq(eq);
+	if (IsGraphicsEopEventId(static_cast<int>(event->event.ident)))
+	{
+		g_render_ctx->DeleteEopEq(eq, static_cast<int>(event->event.ident));
+	}
 }
 
 static void eop_event_trigger_func(LibKernel::EventQueue::KernelEqueueEvent* event, void* trigger_data)
@@ -5414,15 +5442,16 @@ int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, voi
 {
 	EXIT_IF(g_render_ctx == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(id != GRAPHICS_EVENT_EOP);
-
+	// Gen5 registers multiple graphics event idents (0 = queued interrupt,
+	// 0x40 = EOP, 0x48 and others observed at device init). Accept any id on the
+	// graphics filter; only EOP-class ids are added to the end-of-pipe list.
 	LibKernel::EventQueue::KernelEqueueEvent event;
 	event.triggered                = false;
-	event.event.ident              = GRAPHICS_EVENT_EOP;
+	event.event.ident              = static_cast<uintptr_t>(id);
 	event.event.filter             = LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS;
 	event.event.udata              = udata;
 	event.event.fflags             = 0;
-	event.event.data               = 0;
+	event.event.data               = id;
 	event.filter.delete_event_func = eop_event_delete_func;
 	event.filter.reset_func        = eop_event_reset_func;
 	event.filter.trigger_func      = eop_event_trigger_func;
@@ -5430,7 +5459,10 @@ int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, voi
 
 	int result = LibKernel::EventQueue::KernelAddEvent(eq, event);
 
-	g_render_ctx->AddEopEq(eq);
+	if (IsGraphicsEopEventId(id))
+	{
+		g_render_ctx->AddEopEq(eq, id);
+	}
 
 	return result;
 }
@@ -5439,11 +5471,13 @@ int GraphicsRenderDeleteEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id)
 {
 	EXIT_IF(g_render_ctx == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(id != GRAPHICS_EVENT_EOP);
+	int result = LibKernel::EventQueue::KernelDeleteEvent(eq, static_cast<uintptr_t>(id),
+	                                                     LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
 
-	int result = LibKernel::EventQueue::KernelDeleteEvent(eq, GRAPHICS_EVENT_EOP, LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
-
-	g_render_ctx->DeleteEopEq(eq);
+	if (IsGraphicsEopEventId(id))
+	{
+		g_render_ctx->DeleteEopEq(eq, id);
+	}
 
 	return result;
 }

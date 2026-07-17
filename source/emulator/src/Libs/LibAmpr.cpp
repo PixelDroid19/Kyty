@@ -1,11 +1,17 @@
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/EventQueue.h"
+#include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
+#include "Kyty/Core/File.h"
 #include "Kyty/Core/Threads.h"
 
+#include <cinttypes>
+#include <climits>
 #include <cstring>
+#include <ctime>
 #include <unordered_map>
 
 #ifdef KYTY_EMU_ENABLED
@@ -31,6 +37,7 @@ constexpr uint64_t kOffAux1        = 0x20;
 constexpr uint64_t kReadFileRecordSize         = 0x30;
 constexpr uint64_t kKernelEventQueueRecordSize = 0x30;
 constexpr uint64_t kWriteAddressRecordSize     = 0x20;
+constexpr uint32_t kWriteAddressRecordType     = 3;
 
 struct CommandBufferState
 {
@@ -92,6 +99,25 @@ static void UpdateState(uint64_t cmd, uint64_t data, uint64_t size, uint64_t wri
 	st.size         = size;
 	st.write_offset = write_offset;
 	g_buffers[cmd]  = st;
+}
+
+static bool EnsureStreamSpace(CommandBufferState* st, uint64_t record_size)
+{
+	if (st == nullptr || record_size == 0)
+	{
+		return false;
+	}
+	if (st->size < record_size)
+	{
+		return false;
+	}
+	if (st->write_offset + record_size > st->size)
+	{
+		printf("\t command stream wrap (offset 0x%" PRIx64 " size 0x%" PRIx64 " record 0x%" PRIx64 ")\n", st->write_offset, st->size,
+		       record_size);
+		st->write_offset = 0;
+	}
+	return true;
 }
 
 static bool TryGetState(uint64_t cmd, CommandBufferState* out)
@@ -315,6 +341,283 @@ static KYTY_SYSV_ABI uint64_t CommandBufferGetCurrentOffset(void* cmd_obj)
 	return st.write_offset;
 }
 
+static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/, uint64_t /*a2*/, uint32_t file_id, void* dest,
+                                                  uint64_t size, uint64_t file_offset)
+{
+	PRINT_NAME();
+	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
+	printf("\t cmd         = 0x%016" PRIx64 "\n", cmd);
+	printf("\t file_id     = 0x%08" PRIx32 "\n", file_id);
+	printf("\t dest        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dest));
+	printf("\t size        = 0x%016" PRIx64 "\n", size);
+	printf("\t file_offset = 0x%016" PRIx64 "\n", file_offset);
+
+	if (cmd == 0 || (dest == nullptr && size != 0))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	Core::String host_path;
+	if (!LibKernel::FileSystem::AprTryGetHostPath(file_id, &host_path))
+	{
+		printf("\t unknown APR file id\n");
+		// #region agent log
+		{FILE*f=fopen("/home/monasterios/Kyty/.cursor/debug-f08e58.log","a");if(f){fprintf(f,"{\"sessionId\":\"f08e58\",\"runId\":\"post-fix\",\"hypothesisId\":\"P\",\"location\":\"LibAmpr.cpp:AprCommandBufferReadFile\",\"message\":\"unknown file id\",\"data\":{\"file_id\":%u},\"timestamp\":%lld}\n",file_id,(long long)time(nullptr)*1000);fclose(f);}}
+		// #endregion
+		return LibKernel::KERNEL_ERROR_ENOENT;
+	}
+
+	if (size != 0)
+	{
+		Core::File f;
+		if (!f.Open(host_path, Core::File::Mode::Read))
+		{
+			printf("\t open failed: %s\n", host_path.C_Str());
+			return LibKernel::KERNEL_ERROR_ENOENT;
+		}
+		if (!f.Seek(file_offset))
+		{
+			return LibKernel::KERNEL_ERROR_EINVAL;
+		}
+		uint32_t read_n = 0;
+		f.Read(dest, static_cast<uint32_t>(size > UINT32_MAX ? UINT32_MAX : size), &read_n);
+		if (static_cast<uint64_t>(read_n) != size)
+		{
+			printf("\t short read: got %" PRIu32 " want %" PRIu64 "\n", read_n, size);
+			return LibKernel::KERNEL_ERROR_EIO;
+		}
+	}
+
+	CommandBufferState st {};
+	if (!TryGetState(cmd, &st))
+	{
+		return LibKernel::KERNEL_ERROR_EFAULT;
+	}
+	// File transfer already completed. Stream bookkeeping must not fail the
+	// guest builder (Astro AprFile.cpp asserts ret == 0 → int $0x41).
+	if (!EnsureStreamSpace(&st, kReadFileRecordSize))
+	{
+		printf("\t command stream too small for records (read applied)\n");
+		return OK;
+	}
+	if (st.data != 0)
+	{
+		uint8_t record[kReadFileRecordSize] {};
+		WriteU64(record + 0x00, cmd);
+		WriteU64(record + 0x08, static_cast<uint64_t>(file_id));
+		WriteU64(record + 0x10, reinterpret_cast<uint64_t>(dest));
+		WriteU64(record + 0x18, size);
+		WriteU64(record + 0x20, file_offset);
+		WriteU64(record + 0x28, size);
+		std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(st.data + st.write_offset)), record, kReadFileRecordSize);
+	}
+	UpdateState(cmd, st.data, st.size, st.write_offset + kReadFileRecordSize);
+	return OK;
+}
+
+static KYTY_SYSV_ABI int CommandBufferWriteAddressOnCompletion(void* cmd_obj, uint64_t* address, uint64_t value)
+{
+	PRINT_NAME();
+	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
+	printf("\t cmd     = 0x%016" PRIx64 "\n", cmd);
+	printf("\t address = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
+	printf("\t value   = 0x%016" PRIx64 "\n", value);
+
+	if (cmd == 0 || address == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	*address = value;
+
+	CommandBufferState st {};
+	if (!TryGetState(cmd, &st))
+	{
+		return LibKernel::KERNEL_ERROR_EFAULT;
+	}
+	if (!EnsureStreamSpace(&st, kWriteAddressRecordSize))
+	{
+		printf("\t command stream too small for records (store applied)\n");
+		return OK;
+	}
+	if (st.data != 0)
+	{
+		uint8_t record[kWriteAddressRecordSize] {};
+		WriteU64(record + 0x00, static_cast<uint64_t>(kWriteAddressRecordType));
+		WriteU64(record + 0x08, reinterpret_cast<uint64_t>(address));
+		WriteU64(record + 0x10, value);
+		std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(st.data + st.write_offset)), record, kWriteAddressRecordSize);
+	}
+	UpdateState(cmd, st.data, st.size, st.write_offset + kWriteAddressRecordSize);
+	return OK;
+}
+
+static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cmd_obj, void* equeue, uint64_t ident,
+                                                                        uint64_t completion_token, uint64_t user_data)
+{
+	PRINT_NAME();
+	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
+	printf("\t cmd              = 0x%016" PRIx64 "\n", cmd);
+	printf("\t equeue           = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(equeue));
+	printf("\t ident            = 0x%016" PRIx64 "\n", ident);
+	printf("\t completion_token = 0x%016" PRIx64 "\n", completion_token);
+	printf("\t user_data        = 0x%016" PRIx64 "\n", user_data);
+
+	if (cmd == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	CommandBufferState st {};
+	if (!TryGetState(cmd, &st))
+	{
+		return LibKernel::KERNEL_ERROR_EFAULT;
+	}
+	if (EnsureStreamSpace(&st, kKernelEventQueueRecordSize))
+	{
+		if (st.data != 0)
+		{
+			uint8_t record[kKernelEventQueueRecordSize] {};
+			WriteU64(record + 0x00, reinterpret_cast<uint64_t>(equeue));
+			WriteU64(record + 0x08, ident);
+			WriteU64(record + 0x10, completion_token);
+			WriteU64(record + 0x18, user_data);
+			std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(st.data + st.write_offset)), record, kKernelEventQueueRecordSize);
+		}
+		UpdateState(cmd, st.data, st.size, st.write_offset + kKernelEventQueueRecordSize);
+	} else
+	{
+		printf("\t command stream too small for records (equeue wake still runs)\n");
+	}
+
+	if (equeue != nullptr)
+	{
+		auto* eq = static_cast<LibKernel::EventQueue::KernelEqueue>(equeue);
+		const int trigger_rc =
+		    LibKernel::EventQueue::KernelTriggerEvent(eq, static_cast<uintptr_t>(ident), LibKernel::EventQueue::KERNEL_EVFILT_AMPR,
+		                                              reinterpret_cast<void*>(static_cast<uintptr_t>(completion_token)));
+		if (trigger_rc != OK && trigger_rc != LibKernel::KERNEL_ERROR_ENOENT)
+		{
+			return trigger_rc;
+		}
+	}
+	return OK;
+}
+
+static KYTY_SYSV_ABI uint64_t CommandBufferGetNumCommands(void* cmd_obj)
+{
+	PRINT_NAME();
+	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
+	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	if (cmd == 0)
+	{
+		return 0;
+	}
+	return 0;
+}
+
+static KYTY_SYSV_ABI int CommandBufferMarkerNoOp(void* cmd_obj)
+{
+	PRINT_NAME();
+	if (reinterpret_cast<uint64_t>(cmd_obj) == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	return OK;
+}
+
+static KYTY_SYSV_ABI int CommandBufferMarkerNoOp2(void* cmd_obj, uint64_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int CommandBufferMarkerNoOp3(void* cmd_obj, uint64_t, uint64_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int CommandBufferMarkerNoOp4(void* cmd_obj, uint64_t, uint64_t, uint64_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI uint64_t CommandBufferGetBufferBaseAddress(void* cmd_obj)
+{
+	PRINT_NAME();
+	CommandBufferState st {};
+	if (!TryGetState(reinterpret_cast<uint64_t>(cmd_obj), &st))
+	{
+		return 0;
+	}
+	return st.data;
+}
+
+static KYTY_SYSV_ABI uint32_t CommandBufferGetType(void* cmd_obj)
+{
+	PRINT_NAME();
+	(void)cmd_obj;
+	return 0;
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferMapBegin(void* cmd_obj, uint64_t, uint64_t, int32_t, int32_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferMapDirectBegin(void* cmd_obj, uint64_t, uint64_t, uint64_t, int32_t, int32_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferMapEnd(void* cmd_obj)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferReadFileGather(void* cmd_obj, uint64_t, uint64_t, uint32_t, void*, uint64_t, uint64_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferReadFileScatter(void* cmd_obj, uint64_t, uint64_t, uint32_t, void*, uint64_t)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AprCommandBufferResetGatherScatterState(void* cmd_obj)
+{
+	return CommandBufferMarkerNoOp(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AmmSubmitCommandBuffer(void* cmd_obj)
+{
+	PRINT_NAME();
+	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
+	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	if (cmd == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	return OK;
+}
+
+static KYTY_SYSV_ABI int AmmSubmitCommandBuffer2(void* cmd_obj, uint64_t /*arg1*/)
+{
+	return AmmSubmitCommandBuffer(cmd_obj);
+}
+
+static KYTY_SYSV_ABI int AmmWaitCommandBufferCompletion(void* cmd_obj)
+{
+	PRINT_NAME();
+	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
+	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	if (cmd == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	return OK;
+}
+
 // Residual Ampr NIDs observed after measure APIs on the second private title.
 // Names not yet triangulated; log args and return success so boot can proceed
 // to the next evidenced fail. Replace with named contracts when known.
@@ -357,6 +660,40 @@ LIB_DEFINE(InitAmpr_1)
 	LIB_FUNC("ULvXMDz56po", Ampr::CommandBufferClearBuffer);
 	LIB_FUNC("tZDDEo2tE5k", Ampr::CommandBufferGetSize);
 	LIB_FUNC("GnxKOHEawhk", Ampr::CommandBufferGetCurrentOffset);
+	LIB_FUNC("gzndltBEzWc", Ampr::CommandBufferGetNumCommands);
+	LIB_FUNC("RPCAhx-aabE", Ampr::CommandBufferGetBufferBaseAddress);
+	LIB_FUNC("VEDMaQmJZng", Ampr::CommandBufferGetType);
+	LIB_FUNC("tNn5WBkta60", Ampr::CommandBufferMarkerNoOp);
+	LIB_FUNC("GmOguNIsuKk", Ampr::CommandBufferMarkerNoOp);
+	LIB_FUNC("pFQ9UHpO52s", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("4UkZbYKVF7c", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("sWbST0oQKsc", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("4quckD2y7Pg", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("f12ObAMEi9A", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("dXPaz65HNmk", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("mv0O8Zg0woU", Ampr::CommandBufferMarkerNoOp);
+	LIB_FUNC("DLfoNxTFNVk", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("cQb8Zr8Q0Y0", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("j0+3uJMxYJY", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("jK+yuYCI7MA", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("bt3LHR9xjK4", Ampr::CommandBufferMarkerNoOp2);
+	LIB_FUNC("enZm-6GjWqw", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("t4ExS+SwLjs", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("H896Pt-yB4I", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("BVmR1H8l+XI", Ampr::CommandBufferMarkerNoOp4);
+
+	LIB_FUNC("mQ16-QdKv7k", Ampr::AprCommandBufferReadFile);
+	LIB_FUNC("mZSbNJVJpV8", Ampr::AprCommandBufferReadFileGather);
+	LIB_FUNC("Jg-AgkdJHkk", Ampr::AprCommandBufferReadFileScatter);
+	LIB_FUNC("YPxkUDhgoNI", Ampr::AprCommandBufferResetGatherScatterState);
+	LIB_FUNC("Eul7AGEpjLo", Ampr::AprCommandBufferMapBegin);
+	LIB_FUNC("bFEs0Gs6D2A", Ampr::AprCommandBufferMapDirectBegin);
+	LIB_FUNC("X169CE6G3Y4", Ampr::AprCommandBufferMapEnd);
+	LIB_FUNC("sJXyWHjP-F8", Ampr::CommandBufferWriteAddressOnCompletion);
+	LIB_FUNC("o67gODLFpls", Ampr::CommandBufferWriteKernelEventQueueOnCompletion);
+	LIB_FUNC("lwS-7y3jcBI", Ampr::AmmSubmitCommandBuffer);
+	LIB_FUNC("OJf3vCckPAM", Ampr::AmmSubmitCommandBuffer2);
+	LIB_FUNC("HXymib4T8gc", Ampr::AmmWaitCommandBufferCompletion);
 
 	// Residual NIDs from second-title import stream (after measure APIs)
 	LIB_FUNC("Zi3dBUjgyXI", Ampr::AmprLogAndOk);

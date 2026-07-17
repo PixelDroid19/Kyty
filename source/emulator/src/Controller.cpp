@@ -393,6 +393,7 @@ void ControllerAxis(int id, Axis axis, int value)
 }
 
 // SCE_PAD_ERROR_* (public Sony codes; used for ordinary guest failures, not EXIT).
+constexpr int PAD_ERROR_INVALID_ARG        = static_cast<int>(0x80920001u);
 constexpr int PAD_ERROR_INVALID_HANDLE     = static_cast<int>(0x80920003u);
 constexpr int PAD_ERROR_NOT_INITIALIZED    = static_cast<int>(0x80920005u);
 constexpr int PAD_ERROR_DEVICE_NO_HANDLE   = static_cast<int>(0x80920008u);
@@ -485,6 +486,34 @@ int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable)
 	PRINT_NAME();
 
 	EXIT_NOT_IMPLEMENTED(handle != 1);
+
+	printf("\t enable = %s\n", (enable ? "true" : "false"));
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadSetTiltCorrectionState(int handle, bool enable)
+{
+	PRINT_NAME();
+
+	if (handle != kPrimaryHandle)
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+
+	printf("\t enable = %s\n", (enable ? "true" : "false"));
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable)
+{
+	PRINT_NAME();
+
+	if (handle != kPrimaryHandle)
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
 
 	printf("\t enable = %s\n", (enable ? "true" : "false"));
 
@@ -689,6 +718,20 @@ int KYTY_SYSV_ABI PadSetTriggerEffect(int handle, const void* param)
 	// DualSense adaptive-trigger program: accepted and ignored (no host hardware).
 	(void)param;
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInformation* info)
+{
+	PRINT_NAME();
+	printf("\t handle = %d\n", handle);
+	if (info == nullptr)
+	{
+		return PAD_ERROR_INVALID_ARG;
+	}
+	// Idle state for both adaptive triggers (L2/R2).
+	info->state[0] = 0;
+	info->state[1] = 0;
 	return OK;
 }
 
