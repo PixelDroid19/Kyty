@@ -1005,7 +1005,11 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 
 	switch (opcode)
 	{
-		case 0x00: KYTY_NI("v_nop"); break;
+		case 0x00:
+			inst.type    = ShaderInstructionType::VNop;
+			inst.format  = ShaderInstructionFormat::Empty;
+			inst.src_num = 0;
+			break;
 		case 0x01: inst.type = ShaderInstructionType::VMovB32; break;
 		case 0x02: KYTY_NI("v_readfirstlane_b32"); break;
 		case 0x03: KYTY_NI("v_cvt_i32_f64"); break;
@@ -2208,7 +2212,11 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x375: KYTY_NI("v_mad_i32_i16"); break;
 
 		/* VOP1 using VOP3 encoding */
-		case 0x180: KYTY_NI("v_nop"); break;
+		case 0x180:
+			inst.type    = ShaderInstructionType::VNop;
+			inst.format  = ShaderInstructionFormat::Empty;
+			inst.src_num = 0;
+			break;
 		case 0x181: KYTY_NI("v_mov_b32"); break;
 		case 0x182: KYTY_NI("v_readfirstlane_b32"); break;
 		case 0x183: KYTY_NI("v_cvt_i32_f64"); break;

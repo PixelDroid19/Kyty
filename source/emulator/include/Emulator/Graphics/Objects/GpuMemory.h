@@ -533,6 +533,43 @@ public:
 
 void GpuMemoryInit();
 
+// Guest malloc/operator new are forwarded to the host allocator, so titles may
+// put small V#/I# bases in the host userspace heap (Linux ~0x7f00…–0x8000…).
+// Those ranges never go through MapDirectMemory and are not GPU heaps until
+// CreateObject lazily covers them. Pure predicate for tests and call sites.
+[[nodiscard]] inline bool GpuMemoryIsHostGuestMallocRange(uint64_t vaddr, uint64_t size)
+{
+	if (size == 0 || vaddr == 0)
+	{
+		return false;
+	}
+	const uint64_t end = vaddr + size;
+	if (end < vaddr)
+	{
+		return false; // overflow
+	}
+	// Match LibC CxaGuestPtrLooksMapped host-heap band used for guest new.
+	constexpr uint64_t kHostHeapLo = 0x7f0000000000ull;
+	constexpr uint64_t kHostHeapHi = 0x800000000000ull;
+	return vaddr >= kHostHeapLo && end <= kHostHeapHi;
+}
+
+// Page-aligned cover used when lazily registering a host-malloc range as a heap.
+inline void GpuMemoryHostGuestMallocPageCover(uint64_t vaddr, uint64_t size, uint64_t* out_start, uint64_t* out_size)
+{
+	constexpr uint64_t kPage = 0x1000ull;
+	const uint64_t     start = vaddr & ~(kPage - 1ull);
+	const uint64_t     end   = (vaddr + size + kPage - 1ull) & ~(kPage - 1ull);
+	if (out_start != nullptr)
+	{
+		*out_start = start;
+	}
+	if (out_size != nullptr)
+	{
+		*out_size = (end > start) ? (end - start) : kPage;
+	}
+}
+
 void  GpuMemorySetAllocatedRange(uint64_t vaddr, uint64_t size);
 void  GpuMemoryFree(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool unmap);
 void* GpuMemoryCreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size,

@@ -798,10 +798,11 @@ static void vs_check(const HW::VertexShaderInfo& vs, const HW::ShaderRegisters& 
 	EXIT_NOT_IMPLEMENTED(sh.m_spiShaderIdxFormat != 0x00000000 && sh.m_spiShaderIdxFormat != 0x00000001);
 	EXIT_NOT_IMPLEMENTED(sh.m_geNggSubgrpCntl != 0x00000000 && sh.m_geNggSubgrpCntl != 0x00000001);
 	EXIT_NOT_IMPLEMENTED(sh.m_vgtGsInstanceCnt != 0x00000000);
-	EXIT_NOT_IMPLEMENTED(sh.GetEsVertsPerSubgrp() != 0x00000000 && sh.GetEsVertsPerSubgrp() != 0x00000040);
-	EXIT_NOT_IMPLEMENTED(sh.GetGsPrimsPerSubgrp() != 0x00000000 && sh.GetGsPrimsPerSubgrp() != 0x00000040);
-	EXIT_NOT_IMPLEMENTED(sh.GetGsInstPrimsInSubgrp() != 0x00000000 && sh.GetGsInstPrimsInSubgrp() != 0x00000040);
-	EXIT_NOT_IMPLEMENTED(sh.m_geMaxOutputPerSubgroup != 0x00000000 && sh.m_geMaxOutputPerSubgroup != 0x00000040);
+	// Subgroup counts: accept 0..wave64 (0x40), not only the exact endpoints.
+	EXIT_NOT_IMPLEMENTED(sh.GetEsVertsPerSubgrp() > 0x00000040);
+	EXIT_NOT_IMPLEMENTED(sh.GetGsPrimsPerSubgrp() > 0x00000040);
+	EXIT_NOT_IMPLEMENTED(sh.GetGsInstPrimsInSubgrp() > 0x00000040);
+	EXIT_NOT_IMPLEMENTED(sh.m_geMaxOutputPerSubgroup > 0x00000040);
 	EXIT_NOT_IMPLEMENTED(sh.m_vgtEsgsRingItemsize != 0x00000000 && sh.m_vgtEsgsRingItemsize != 0x00000004);
 	EXIT_NOT_IMPLEMENTED(sh.m_vgtGsMaxVertOut != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(sh.m_vgtGsOutPrimType != 0x00000000);
@@ -1262,7 +1263,10 @@ static bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sg
 	resource.fields[2] = (extended ? extended_buffer[start_index - 16 + 2] : user_sgpr.value[start_index + 2]);
 	resource.fields[3] = (extended ? extended_buffer[start_index - 16 + 3] : user_sgpr.value[start_index + 3]);
 
-	if (resource.fields[0] == 0 && resource.fields[1] == 0 && resource.fields[2] == 0 && resource.fields[3] == 0)
+	// Fully zeroed sharp, or zero address+records with residual flag bits, is a
+	// null buffer descriptor (Gen5 titles leave unused slots that way).
+	if ((resource.fields[0] == 0 && resource.fields[1] == 0 && resource.fields[2] == 0 && resource.fields[3] == 0) ||
+	    (resource.Base48() == 0 && resource.NumRecords() == 0))
 	{
 		return false;
 	}
