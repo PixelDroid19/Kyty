@@ -710,7 +710,7 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 		case 0x1B: KYTY_NI("v_cmpx_ngt_f32"); break;
 		case 0x1C: inst.type = ShaderInstructionType::VCmpxNleF32; break;
 		case 0x1d: inst.type = ShaderInstructionType::VCmpxNeqF32; break;
-		case 0x1E: KYTY_NI("v_cmpx_nlt_f32"); break;
+		case 0x1E: inst.type = ShaderInstructionType::VCmpxNltF32; break;
 		case 0x1F: KYTY_NI("v_cmpx_tru_f32"); break;
 		case 0x20: KYTY_NI("v_cmp_f_f64"); break;
 		case 0x21: KYTY_NI("v_cmp_lt_f64"); break;
@@ -1591,7 +1591,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x1B: KYTY_NI("v_cmpx_ngt_f32"); break;
 		case 0x1C: inst.type = ShaderInstructionType::VCmpxNleF32; break;
 		case 0x1d: inst.type = ShaderInstructionType::VCmpxNeqF32; break;
-		case 0x1E: KYTY_NI("v_cmpx_nlt_f32"); break;
+		case 0x1E: inst.type = ShaderInstructionType::VCmpxNltF32; break;
 		case 0x1F: KYTY_NI("v_cmpx_tru_f32"); break;
 		case 0x20: KYTY_NI("v_cmp_f_f64"); break;
 		case 0x21: KYTY_NI("v_cmp_lt_f64"); break;

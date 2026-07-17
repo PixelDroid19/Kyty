@@ -359,6 +359,60 @@ void VerifyFloatExecNotLessEqualComparison()
 	Expect(std::strstr(source.c_str(), "OpStore %exec_hi %uint_0") != nullptr, "float exec comparison clears exec high mask");
 }
 
+void VerifyGen5FloatExecNotLessThanSdwa()
+{
+	// Captured Gen5 SDWA VOPC at normalized PC 0x1194:
+	// v_cmpx_nlt_f32 v100, 0 with DWORD selectors and neutral modifiers.
+	// AMD RDNA2 ISA, Table 23:
+	// https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture
+	const uint32_t shader[] = {0x7c3d00f9u, 0x86060064u, 0x7c3d00f9u, 0x86060064u, 0xbf810000u};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	Expect(code.GetInstructions().Size() == 3, "captured Gen5 SDWA comparison parses with endpgm");
+	const auto& compare = code.GetInstructions().At(0);
+	Expect(compare.type == ShaderInstructionType::VCmpxNltF32, "Gen5 VOPC opcode 0x1e decodes as v_cmpx_nlt_f32");
+	Expect(compare.format == ShaderInstructionFormat::SmaskVsrc0Vsrc1, "Gen5 SDWA comparison uses the shared mask format");
+	Expect(compare.dst.type == ShaderOperandType::VccLo && compare.dst.size == 2, "Gen5 SDWA comparison targets the VCC/EXEC mask");
+	Expect(compare.src_num == 2, "Gen5 SDWA comparison consumes two sources");
+	Expect(compare.src[0].type == ShaderOperandType::Vgpr && compare.src[0].register_id == 100,
+	       "Gen5 SDWA comparison decodes the vector source");
+	Expect(compare.src[1].type == ShaderOperandType::IntegerInlineConstant && compare.src[1].constant.i == 0,
+	       "Gen5 SDWA comparison decodes the inline zero source");
+	Expect(compare.src[0].swizzle == 6 && compare.src[1].swizzle == 6, "captured comparison uses DWORD selectors");
+	Expect(!compare.src[0].negate && !compare.src[0].absolute && !compare.src[1].negate && !compare.src[1].absolute,
+	       "captured comparison has neutral source modifiers");
+
+	const uint32_t vop3_shader[] = {
+	    (0x35u << 26u) | (0x1eu << 16u) | 106u,
+	    256u | (257u << 9u),
+	    (0x35u << 26u) | (0x1eu << 16u) | 106u,
+	    256u | (257u << 9u),
+	    0xbf810000u,
+	};
+	ShaderCode vop3_code;
+	vop3_code.SetType(ShaderType::Compute);
+	ShaderParse(vop3_shader, &vop3_code);
+	Expect(vop3_code.GetInstructions().At(0).type == ShaderInstructionType::VCmpxNltF32,
+	       "VOP3 opcode 0x1e shares the v_cmpx_nlt_f32 semantic decoder");
+	Expect(vop3_code.GetInstructions().At(0).format == ShaderInstructionFormat::SmaskVsrc0Vsrc1,
+	       "VOP3 v_cmpx_nlt_f32 uses the shared mask format");
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, nullptr);
+	Expect(source.FindIndex("OpFUnordGreaterThanEqual") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "not-less-than preserves unordered-or-greater-equal NaN semantics");
+	Expect(source.FindIndex("%texec_0 = OpLoad %uint %exec_lo") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "CMPX reads the prior execution mask");
+	Expect(source.FindIndex("%tmasked_0 = OpBitwiseAnd %uint %t3_0 %texec_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "CMPX cannot reactivate an inactive lane");
+	Expect(source.FindIndex("OpStore %exec_lo") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "Gen5 CMPX updates the low execution mask");
+	Expect(source.FindIndex("OpStore %exec_hi %uint_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "Gen5 CMPX clears the unused high execution mask");
+}
+
 ShaderCode ParseUnsignedByteBufferLoad()
 {
 	const uint32_t word0    = (0x38u << 26u) | (0x08u << 18u) | (1u << 13u) | 3u;
@@ -973,6 +1027,7 @@ int main()
 	VerifyRawGen5StorageDescriptorContract();
 	VerifyUnsignedExecLessThanComparison();
 	VerifyFloatExecNotLessEqualComparison();
+	VerifyGen5FloatExecNotLessThanSdwa();
 	VerifyUnsignedByteBufferLoad();
 	VerifyGen5BufferLoadDwordIdxen();
 	VerifyGen5BufferLoadDwordOffenIdxen();
