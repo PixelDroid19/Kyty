@@ -2502,22 +2502,25 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 	// packed into the control dword; the CP may still treat clock/immediate
 	// writes as non-interrupting label publishes.
 	EXIT_NOT_IMPLEMENTED(interrupt > 3);
-	EXIT_NOT_IMPLEMENTED((interrupt_ctx_id & ~0x07ffffffu) != 0);
+	// Custom R_RELEASE_MEM is a fixed 7-dword envelope (header + 6 body). CP
+	// accepts only 0xc0051060; WaitMem neighbor resolution and EopPatch use
+	// the same size. interrupt_ctx_id has no field in that layout — refuse
+	// non-zero until a captured wider packet is evidenced.
+	EXIT_NOT_IMPLEMENTED(interrupt_ctx_id != 0);
 
 	buf->DbgDump();
 
-	auto* cmd = buf->AllocateDW(8);
+	auto* cmd = buf->AllocateDW(7);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
-	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	cmd[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
 	cmd[1] = action | (static_cast<uint32_t>(cache_policy) << 8u);
 	cmd[2] = gcr_cntl | (static_cast<uint32_t>(data_sel) << 16u) | (static_cast<uint32_t>(interrupt) << 24u);
 	cmd[3] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(address) & 0xffffffffu);
 	cmd[4] = static_cast<uint32_t>((reinterpret_cast<uint64_t>(address) >> 32u) & 0xffffffffu);
 	cmd[5] = static_cast<uint32_t>(data & 0xffffffffu);
 	cmd[6] = static_cast<uint32_t>((data >> 32u) & 0xffffffffu);
-	cmd[7] = interrupt_ctx_id & 0x07ffffffu;
 
 	return cmd;
 }
