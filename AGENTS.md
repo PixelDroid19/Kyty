@@ -948,13 +948,14 @@ variable (`scripts/run_guest.lua` rejects them unless
 
 ### Centralized unsafe bring-up (`Kyty::Core::BringUp`)
 
-Diagnostic continuation is centralized. Do **not** invent per-game exceptions,
-preload PRX automatically, or cite unsafe survival as compatibility.
+Diagnostic continuation is centralized. Do **not** invent per-game exceptions
+or cite unsafe survival as compatibility. Neighbor PRX soft-preload is
+**unsafe-only** (`prx_preload` feature); strict acceptance never auto-preloads.
 
 | Variable | Meaning |
 | --- | --- |
 | `KYTY_BRINGUP_MODE=unsafe` | Enable diagnostic policy (absent ⇒ strict). |
-| `KYTY_BRINGUP_FEATURES` | CSV: `not_implemented`, `missing_function_import`, `gfx_permissive`. Absent under unsafe enables all three. |
+| `KYTY_BRINGUP_FEATURES` | CSV: `not_implemented`, `missing_function_import`, `gfx_permissive`, `prx_preload`. Absent under unsafe enables all of them. |
 | `KYTY_BRINGUP_SUBSYSTEMS` | CSV scopes: `core,loader,kernel,graphics,audio,network,hle,other`. Absent ⇒ all. |
 | `KYTY_BRINGUP_BURST_LIMIT` | Max hits per site inside the window (default 10000). |
 | `KYTY_BRINGUP_BURST_WINDOW_MS` | Window length in ms (default 1000). |

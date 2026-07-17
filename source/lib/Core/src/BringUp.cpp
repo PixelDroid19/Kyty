@@ -41,6 +41,8 @@ struct State
 	std::atomic<uint64_t> missing_import_assigns {0};
 	std::atomic<uint64_t> missing_import_calls {0};
 	std::atomic<uint32_t> missing_import_slots {0};
+	std::atomic<uint32_t> prx_preload_discovered {0};
+	std::atomic<uint32_t> prx_preload_loaded {0};
 
 	// Last circuit-break (written under spin, read for snapshot).
 	std::atomic_flag    cb_lock = ATOMIC_FLAG_INIT;
@@ -213,6 +215,9 @@ Feature ParseFeatures(const char* text, bool* ok)
 		} else if (EqualsInsensitive(tok, "gfx_permissive"))
 		{
 			f = f | Feature::GfxPermissive;
+		} else if (EqualsInsensitive(tok, "prx_preload"))
+		{
+			f = f | Feature::PrxPreload;
 		} else
 		{
 			*ok = false;
@@ -412,6 +417,10 @@ void FeatureNames(Feature f, char* buf, size_t cap)
 	if (Any(f & Feature::GfxPermissive))
 	{
 		append("gfx_permissive");
+	}
+	if (Any(f & Feature::PrxPreload))
+	{
+		append("prx_preload");
 	}
 }
 
@@ -632,6 +641,8 @@ void ResetForTests()
 	g_state.missing_import_assigns.store(0, std::memory_order_relaxed);
 	g_state.missing_import_calls.store(0, std::memory_order_relaxed);
 	g_state.missing_import_slots.store(0, std::memory_order_relaxed);
+	g_state.prx_preload_discovered.store(0, std::memory_order_relaxed);
+	g_state.prx_preload_loaded.store(0, std::memory_order_relaxed);
 	g_state.last_cb = {};
 	g_state.config  = {};
 	g_state.initialized.store(false, std::memory_order_release);
@@ -798,6 +809,12 @@ bool AllowMissingFunctionImport()
 	return FeatureEnabled(Feature::MissingFunctionImport);
 }
 
+bool AllowPrxPreload()
+{
+	EnsureInitLazy();
+	return FeatureEnabled(Feature::PrxPreload);
+}
+
 void NoteMissingImportAssigned()
 {
 	EnsureInitLazy();
@@ -816,6 +833,13 @@ void NoteMissingImportSlots(uint32_t used_slots)
 	g_state.missing_import_slots.store(used_slots, std::memory_order_relaxed);
 }
 
+void NotePrxPreloadCandidates(uint32_t discovered, uint32_t loaded)
+{
+	EnsureInitLazy();
+	g_state.prx_preload_discovered.store(discovered, std::memory_order_relaxed);
+	g_state.prx_preload_loaded.store(loaded, std::memory_order_relaxed);
+}
+
 void GetSnapshot(Snapshot* out)
 {
 	if (out == nullptr)
@@ -829,6 +853,8 @@ void GetSnapshot(Snapshot* out)
 	out->missing_import_assigns   = g_state.missing_import_assigns.load(std::memory_order_relaxed);
 	out->missing_import_calls     = g_state.missing_import_calls.load(std::memory_order_relaxed);
 	out->missing_import_slots     = g_state.missing_import_slots.load(std::memory_order_relaxed);
+	out->prx_preload_discovered   = g_state.prx_preload_discovered.load(std::memory_order_relaxed);
+	out->prx_preload_loaded       = g_state.prx_preload_loaded.load(std::memory_order_relaxed);
 	SpinLock(g_state.cb_lock);
 	out->last_circuit_break = g_state.last_cb;
 	SpinUnlock(g_state.cb_lock);
@@ -873,11 +899,13 @@ int WriteDiagnosticsJson(std::FILE* out)
 	    "{\"protocolVersion\":%d,\"bringup\":{\"mode\":\"%s\",\"features\":\"%s\",\"subsystems\":\"%s\","
 	    "\"burst_limit\":%" PRIu32 ",\"burst_window_ms\":%" PRIu32 ",\"unique_sites\":%" PRIu64
 	    ",\"continuations\":%" PRIu64 ",\"missing_imports_assigned\":%" PRIu64 ",\"missing_import_calls\":%" PRIu64
-	    ",\"missing_import_slots\":%" PRIu32 ",\"last_circuit_break\":{\"active\":%s,\"file\":%s%s%s,\"line\":%d,"
+	    ",\"missing_import_slots\":%" PRIu32 ",\"prx_preload_discovered\":%" PRIu32 ",\"prx_preload_loaded\":%" PRIu32
+	    ",\"last_circuit_break\":{\"active\":%s,\"file\":%s%s%s,\"line\":%d,"
 	    "\"expr\":%s%s%s,\"hits\":%" PRIu64 "}}}\n",
 	    kDiagnosticsProtocolVersion, ModeName(snap.config.mode), feat, subs, snap.config.burst_limit,
 	    snap.config.burst_window_ms, snap.unique_sites, snap.total_continuations, snap.missing_import_assigns,
-	    snap.missing_import_calls, snap.missing_import_slots, snap.last_circuit_break.active ? "true" : "false",
+	    snap.missing_import_calls, snap.missing_import_slots, snap.prx_preload_discovered, snap.prx_preload_loaded,
+	    snap.last_circuit_break.active ? "true" : "false",
 	    snap.last_circuit_break.file != nullptr ? "\"" : "null",
 	    snap.last_circuit_break.file != nullptr ? snap.last_circuit_break.file : "",
 	    snap.last_circuit_break.file != nullptr ? "\"" : "", snap.last_circuit_break.line,

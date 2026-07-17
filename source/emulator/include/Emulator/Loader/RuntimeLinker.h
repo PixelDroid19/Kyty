@@ -134,6 +134,8 @@ public:
 	void DbgDump(const String& folder);
 
 	Program* LoadProgram(const String& elf_name);
+	// True if a program with this exact host path is already in the load list.
+	[[nodiscard]] bool HasProgramFile(const String& elf_name);
 	void     SaveMainProgram(const String& elf_name);
 	void     SaveProgram(Program* program, const String& elf_name);
 	void     UnloadProgram(Program* program);
