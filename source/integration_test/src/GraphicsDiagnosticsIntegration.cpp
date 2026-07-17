@@ -14,6 +14,7 @@
 
 #include "spirv-tools/libspirv.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -39,7 +40,7 @@ void Expect(bool condition, const char* message)
 	}
 }
 
-void ExpectValidSpirv(const Kyty::Core::String8& source, const char* message)
+std::vector<uint32_t> AssembleValidSpirv(const Kyty::Core::String8& source, const char* message)
 {
 	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
 	std::vector<uint32_t> binary;
@@ -49,6 +50,12 @@ void ExpectValidSpirv(const Kyty::Core::String8& source, const char* message)
 	});
 	Expect(tools.Assemble(source.GetDataConst(), source.Size(), &binary), message);
 	Expect(tools.Validate(binary), message);
+	return binary;
+}
+
+void ExpectValidSpirv(const Kyty::Core::String8& source, const char* message)
+{
+	AssembleValidSpirv(source, message);
 }
 
 struct UnsignedMad64Result
@@ -484,10 +491,11 @@ void VerifyUnsignedByteBufferLoad()
 	Expect(source.FindIndex("OpShiftRightLogical %uint") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "byte load extracts the selected byte from the loaded dword");
 	Expect(source.FindIndex("OpBitwiseAnd %uint") != Kyty::Core::STRING8_INVALID_INDEX, "byte load masks to an unsigned byte");
-	Expect(source.FindIndex("%uint_0x000000ff") != Kyty::Core::STRING8_INVALID_INDEX, "byte load zero-extension mask is 0xff");
+	Expect(source.FindIndex("%uint_255") != Kyty::Core::STRING8_INVALID_INDEX, "byte load zero-extension mask is 0xff");
 	Expect(source.FindIndex("OpBitcast %float") != Kyty::Core::STRING8_INVALID_INDEX, "unsigned byte result is stored as VGPR bits");
 	Expect(source.FindIndex("%buffer_load_float1") == Kyty::Core::STRING8_INVALID_INDEX,
 	       "unsigned byte load does not coerce to dword float loading");
+	ExpectValidSpirv(source, "unsigned byte load emits valid SPIR-V");
 }
 
 ShaderCode ParseGen5BufferLoadDwordOffenIdxen()
@@ -925,6 +933,45 @@ void VerifyGen5UnsignedMinEncodings()
 	ExpectValidSpirv(vop3_source, "Gen5 VOP3 unsigned min emits valid SPIR-V");
 }
 
+void VerifyGen5InverseTwoPiInlineConstant()
+{
+	// Captured Gen5 VOP2 at normalized PC 0x4118:
+	// v_mul_f32 v123, 1/(2*pi), v124.
+	// AMD defines operand code 248 as exact single-precision bits 0x3e22f983.
+	const uint32_t shader[] = {0xbf800000u, 0x10f6f8f8u, 0xbf810000u};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	Expect(code.GetInstructions().Size() == 3, "inverse-two-pi VOP2 parses without consuming a literal DWORD");
+	const auto& multiply = code.GetInstructions().At(1);
+	Expect(multiply.type == ShaderInstructionType::VMulF32 && multiply.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1,
+	       "captured inverse-two-pi operand belongs to v_mul_f32");
+	Expect(multiply.dst.type == ShaderOperandType::Vgpr && multiply.dst.register_id == 123,
+	       "inverse-two-pi multiply decodes its destination");
+	Expect(multiply.src[0].type == ShaderOperandType::FloatInlineConstant && multiply.src[0].constant.u == 0x3e22f983u &&
+	           multiply.src[0].size == 0,
+	       "operand 248 preserves the architected single-precision bit pattern");
+	Expect(multiply.src[1].type == ShaderOperandType::Vgpr && multiply.src[1].register_id == 124,
+	       "inverse-two-pi multiply decodes its vector source");
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 1;
+	input.threads_num[1] = 1;
+	input.threads_num[2] = 1;
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	Expect(source.FindIndex("%float_0_159155 = OpConstant %float 0.159154937") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "inverse-two-pi is serialized with round-trip precision");
+	Expect(source.FindIndex("%t0_1 = OpCopyObject %float %float_0_159155") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "floating inline constants are copied without an invalid same-type bitcast");
+	Expect(source.FindIndex("OpFMul %float %t0_1 %t1_1") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "captured v_mul_f32 consumes the inverse-two-pi constant");
+	const auto binary = AssembleValidSpirv(source, "inverse-two-pi inline constant emits valid SPIR-V");
+	Expect(std::find(binary.begin(), binary.end(), 0x3e22f983u) != binary.end(),
+	       "assembled inverse-two-pi constant preserves its architected bits");
+}
+
 void VerifyGen5UnsignedMad64Vop3b()
 {
 	// Captured Gen5 VOP3B at normalized PC 0x1ec4:
@@ -1312,6 +1359,7 @@ int main()
 	VerifyGen5ShiftLeftOrVop3();
 	VerifyGen5AndOrVop3();
 	VerifyGen5UnsignedMinEncodings();
+	VerifyGen5InverseTwoPiInlineConstant();
 	VerifyGen5UnsignedMad64Vop3b();
 	VerifyGen5ReciprocalIFlag();
 	VerifyGen5ReciprocalIFlagExceptionalInputs();

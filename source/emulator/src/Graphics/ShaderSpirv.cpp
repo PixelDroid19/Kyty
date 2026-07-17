@@ -598,7 +598,7 @@ constexpr char BUFFER_LOAD_UBYTE[] = R"(
          %buf_l_ub_63 = OpLoad %float %buf_l_ub_62
          %buf_l_ub_64 = OpBitcast %uint %buf_l_ub_63
          %buf_l_ub_65 = OpShiftRightLogical %uint %buf_l_ub_64 %buf_l_ub_52
-         %buf_l_ub_66 = OpBitwiseAnd %uint %buf_l_ub_65 %uint_0x000000ff
+         %buf_l_ub_66 = OpBitwiseAnd %uint %buf_l_ub_65 %uint_255
                OpStore %buf_l_ub_11 %buf_l_ub_66
                OpReturn
                OpFunctionEnd
@@ -1630,6 +1630,7 @@ private:
 		ShaderConstant constant = {0};
 		String8        type_str;
 		String8        value_str;
+		String8        literal_str;
 		String8        id;
 	};
 
@@ -2119,7 +2120,8 @@ static bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& re
 	{
 		String8 id = spirv->GetConstant(op);
 
-		l = String8("%<result_id> = OpBitcast %float %<id>").ReplaceStr("<id>", id);
+		const char* operation = (op.type == ShaderOperandType::FloatInlineConstant ? "OpCopyObject" : "OpBitcast");
+		l = String8("%<result_id> = <operation> %float %<id>").ReplaceStr("<operation>", operation).ReplaceStr("<id>", id);
 	} else if (operand_is_variable(op))
 	{
 		auto value = operand_variable_to_str(op);
@@ -8443,14 +8445,17 @@ void Spirv::AddConstant(SpirvType type, ShaderConstant constant)
 	if (type == SpirvType::Uint)
 	{
 		c.value_str = constant.u < 256 ? String8::FromPrintf("%u", constant.u) : String8::FromPrintf("0x%08" PRIx32, constant.u);
+		c.literal_str = c.value_str;
 	}
 	if (type == SpirvType::Int)
 	{
 		c.value_str = String8::FromPrintf("%d", constant.i);
+		c.literal_str = c.value_str;
 	}
 	if (type == SpirvType::Float)
 	{
 		c.value_str = String8::FromPrintf("%f", constant.f);
+		c.literal_str = String8::FromPrintf("%.9g", static_cast<double>(constant.f));
 	}
 
 	c.id = String8::FromPrintf("%s_%s", c.type_str.c_str(), c.value_str.ReplaceChar('.', '_').ReplaceChar('-', 'm').c_str());
@@ -9080,7 +9085,7 @@ void Spirv::WriteConstants()
 
 	for (const auto& c: m_constants)
 	{
-		m_source += String8::FromPrintf("%%%s = OpConstant %%%s %s\n", c.id.c_str(), c.type_str.c_str(), c.value_str.c_str());
+		m_source += String8::FromPrintf("%%%s = OpConstant %%%s %s\n", c.id.c_str(), c.type_str.c_str(), c.literal_str.c_str());
 	}
 }
 

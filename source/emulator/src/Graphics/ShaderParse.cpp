@@ -49,12 +49,15 @@ static ShaderOperand operand_parse(uint32_t code)
 		ret.type       = ShaderOperandType::IntegerInlineConstant;
 		ret.constant.i = 192 - static_cast<int>(code);
 		ret.size       = 0;
-	} else if (code >= 240 && code <= 247)
+	} else if (code >= 240 && code <= 248)
 	{
-		static const float fv[] = {0.5f, -0.5f, 1.0f, -1.0f, 2.0f, -2.0f, 4.0f, -4.0f};
-		ret.type                = ShaderOperandType::FloatInlineConstant;
-		ret.constant.f          = fv[static_cast<int>(code) - 240];
-		ret.size                = 0;
+		static constexpr uint32_t bits[] = {
+		    0x3f000000u, 0xbf000000u, 0x3f800000u, 0xbf800000u, 0x40000000u,
+		    0xc0000000u, 0x40800000u, 0xc0800000u, 0x3e22f983u,
+		};
+		ret.type       = ShaderOperandType::FloatInlineConstant;
+		ret.constant.u = bits[static_cast<int>(code) - 240];
+		ret.size       = 0;
 	} else if (code >= 256)
 	{
 		ret.type        = ShaderOperandType::Vgpr;
