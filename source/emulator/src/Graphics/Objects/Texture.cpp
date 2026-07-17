@@ -17,6 +17,8 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -189,10 +191,31 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	auto levels = params[TextureObject::PARAM_LEVELS] & 0xffffffffu;
 	auto pitch  = params[TextureObject::PARAM_PITCH];
 	bool neo    = Config::IsNeo();
+	const bool skip_guest = params[TextureObject::PARAM_SKIP_GUEST_UPLOAD] != 0;
 
 	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	EXIT_NOT_IMPLEMENTED(levels >= 16);
+
+	// GPU-owned range under a live color surface that could not be bound as an
+	// alias: never detile guest (period-16 bands). Transparent black clear.
+	if (skip_guest)
+	{
+		const uint32_t bpp   = (fmt == 71u ? 8u : (fmt == 14u ? 2u : (fmt == 133u ? 8u : 4u)));
+		const uint64_t bytes = static_cast<uint64_t>(width) * height * bpp;
+		EXIT_NOT_IMPLEMENTED(bytes == 0u);
+		std::vector<uint8_t> zeros(static_cast<size_t>(bytes), 0);
+		Vector<BufferImageCopy> clear_regions(1);
+		clear_regions[0].offset    = 0;
+		clear_regions[0].pitch     = static_cast<uint32_t>(width);
+		clear_regions[0].width     = static_cast<uint32_t>(width);
+		clear_regions[0].height    = static_cast<uint32_t>(height);
+		clear_regions[0].dst_level = 0;
+		clear_regions[0].dst_x     = 0;
+		clear_regions[0].dst_y     = 0;
+		UtilFillImage(ctx, vk_obj, zeros.data(), bytes, clear_regions, static_cast<uint64_t>(vk_layout));
+		return;
+	}
 
 	TileSizeOffset level_sizes[16];
 
@@ -281,18 +304,29 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			const uint32_t copy_height  = bc1 ? std::max((static_cast<uint32_t>(height) + 3u) / 4u, 1u) : static_cast<uint32_t>(height);
 			const uint32_t pitch_texels = (pitch != 0u ? static_cast<uint32_t>(pitch) : static_cast<uint32_t>(width));
 			const uint32_t pitch_elems  = bc1 ? std::max((pitch_texels + 3u) / 4u, 1u) : pitch_texels;
-			const uint64_t linear_bytes = static_cast<uint64_t>(copy_width) * copy_height * bpp;
+			// Pitch-strided linear rows (host tiler contract). Tight y*width packing
+			// is only equivalent when pitch_elems == width.
+			const uint64_t linear_bytes = static_cast<uint64_t>(pitch_elems) * copy_height * bpp;
 			auto*          temp_buf     = new uint8_t[linear_bytes];
-			if (tile == 9)
+			std::memset(temp_buf, 0, static_cast<size_t>(linear_bytes));
 			{
-				TileConvertStandard64KB32ToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), copy_width, copy_height, pitch_elems);
-			} else
-			{
-				TileConvertSw64kRxToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), copy_width, copy_height, pitch_elems, bpp);
+				auto*       d = temp_buf;
+				const auto* s = reinterpret_cast<const uint8_t*>(*vaddr);
+				for (uint32_t y = 0; y < copy_height; y++)
+				{
+					for (uint32_t x = 0; x < copy_width; x++)
+					{
+						const uint64_t tiled =
+						    (tile == 9) ? TileGetStandard64KB32Offset(x, y, pitch_elems)
+						                : TileGetSw64kRxOffset(x, y, pitch_elems, bpp);
+						const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * bpp;
+						std::memcpy(d + linear, s + tiled, bpp);
+					}
+				}
 			}
-			// Region describes the linear buffer: offset 0, pitch = width.
 			regions[0].offset = 0;
-			regions[0].pitch  = static_cast<uint32_t>(width);
+			// bufferRowLength is in texels (BC block width accounted by the caller).
+			regions[0].pitch  = pitch_texels;
 			regions[0].width  = static_cast<uint32_t>(width);
 			regions[0].height = static_cast<uint32_t>(height);
 			UtilFillImage(ctx, vk_obj, temp_buf, linear_bytes, regions, static_cast<uint64_t>(vk_layout));
@@ -327,9 +361,50 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 
 	Vector<ImageImageCopy> regions(levels);
 
+	auto fmt = (params[TextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
+
+	// Select a surface parent only when sample ufmt and VkFormat families match
+	// and the parent extent equals this mip. Copying float lighting into RGBA8
+	// reinterprets bits as cyan/hot garbage; copying a larger parent without a
+	// crop view leaves horizontal bands on world tiles.
+	const auto surface_parent_ok = [fmt](VulkanImage* img, uint32_t need_w, uint32_t need_h) -> bool {
+		if (img == nullptr)
+		{
+			return false;
+		}
+		if (img->extent.width != need_w || img->extent.height != need_h)
+		{
+			return false;
+		}
+		if (fmt == 0u)
+		{
+			return true;
+		}
+		return Gen5SampleMayCopyFromSurfaceParent(static_cast<uint32_t>(fmt), img->format);
+	};
+
+	// Leave layout UNDEFINED when no valid surface parent. GpuMemory then
+	// guest-uploads (package tiles) instead of leaving transparent-black
+	// AABBs that only show god-ray bands through alpha.
+	const auto skip_surface_copy = [&]() {
+		(void)ctx;
+		(void)vk_obj;
+		(void)vk_layout;
+	};
+
 	if (objects.Size() == 1 && objects.At(0).type == GpuMemoryObjectType::StorageTexture && scenario == GpuMemoryScenario::Common)
 	{
 		auto* src_obj = static_cast<StorageTextureVulkanImage*>(objects.At(0).obj);
+		// Single ST parent: exact sample extent, or a larger atlas that can host
+		// mip offsets (legacy GenerateMips-style). Wrong-format parents rejected.
+		const bool st_ok =
+		    src_obj != nullptr && src_obj->extent.width >= width && src_obj->extent.height >= height &&
+		    (fmt == 0u || Gen5SampleMayCopyFromSurfaceParent(static_cast<uint32_t>(fmt), src_obj->format));
+		if (!st_ok)
+		{
+			skip_surface_copy();
+			return;
+		}
 
 		for (uint32_t i = 0; i < levels; i++)
 		{
@@ -356,13 +431,42 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 		}
 	} else if (levels == objects.Size() && scenario == GpuMemoryScenario::Common)
 	{
+		bool parents_ok = true;
+		uint32_t check_w = static_cast<uint32_t>(width);
+		uint32_t check_h = static_cast<uint32_t>(height);
 		for (uint32_t i = 0; i < levels; i++)
 		{
 			const auto& object = objects.At(i);
-
-			EXIT_NOT_IMPLEMENTED(object.type != GpuMemoryObjectType::RenderTexture);
-
+			if (object.type != GpuMemoryObjectType::RenderTexture)
+			{
+				parents_ok = false;
+				break;
+			}
 			auto* src_obj = static_cast<RenderTextureVulkanImage*>(object.obj);
+			if (!surface_parent_ok(src_obj, check_w, check_h))
+			{
+				parents_ok = false;
+				break;
+			}
+			if (check_w > 1)
+			{
+				check_w /= 2;
+			}
+			if (check_h > 1)
+			{
+				check_h /= 2;
+			}
+		}
+		if (!parents_ok)
+		{
+			skip_surface_copy();
+			return;
+		}
+
+		for (uint32_t i = 0; i < levels; i++)
+		{
+			const auto& object  = objects.At(i);
+			auto*       src_obj = static_cast<RenderTextureVulkanImage*>(object.obj);
 
 			regions[i].src_image = src_obj;
 			regions[i].src_level = 0;
@@ -458,10 +562,8 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	{
 		// Mixed multi-parent graphs (RT/ST + StorageBuffer/VertexBuffer peers)
 		// reach CreateFromObjects when a Texture sample range sits under a live
-		// surface. Copy from the surface parents that match each mip extent;
-		// ignore non-image parents. Falling through here used to EXIT and abort
-		// boot, or leave empty textures that composite as solid false-color
-		// props (cyan silhouettes) after only the outline/light pass remains.
+		// surface. Copy only exact-extent, format-compatible parents; ignore
+		// peers, wrong-family RTs, and larger parents without crop views.
 		for (uint32_t i = 0; i < levels; i++)
 		{
 			VulkanImage* src_image = nullptr;
@@ -472,7 +574,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 				if (o.type == GpuMemoryObjectType::StorageTexture)
 				{
 					auto* src_obj = static_cast<StorageTextureVulkanImage*>(o.obj);
-					if (mip_width == src_obj->extent.width && mip_height == src_obj->extent.height)
+					if (surface_parent_ok(src_obj, mip_width, mip_height))
 					{
 						src_image = src_obj;
 						storage   = true;
@@ -481,7 +583,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 				} else if (o.type == GpuMemoryObjectType::RenderTexture)
 				{
 					auto* src_obj = static_cast<RenderTextureVulkanImage*>(o.obj);
-					if (mip_width == src_obj->extent.width && mip_height == src_obj->extent.height)
+					if (surface_parent_ok(src_obj, mip_width, mip_height))
 					{
 						src_image = src_obj;
 						storage   = false;
@@ -490,29 +592,13 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 				}
 			}
 
-			// No matching surface for this mip: reuse the base surface (level 0)
-			// when present so multi-level samples under a single RT still bind
-			// GPU content instead of aborting.
 			if (src_image == nullptr)
 			{
-				for (const auto& o: objects)
-				{
-					if (o.type == GpuMemoryObjectType::StorageTexture)
-					{
-						src_image = static_cast<StorageTextureVulkanImage*>(o.obj);
-						storage   = true;
-						break;
-					}
-					if (o.type == GpuMemoryObjectType::RenderTexture)
-					{
-						src_image = static_cast<RenderTextureVulkanImage*>(o.obj);
-						storage   = false;
-						break;
-					}
-				}
+				// No exact-extent surface parent. Leave UNDEFINED so GpuMemory
+				// can guest-upload package tiles (not a full-screen RT blit).
+				skip_surface_copy();
+				return;
 			}
-
-			EXIT_NOT_IMPLEMENTED(src_image == nullptr);
 
 			if (storage)
 			{
@@ -813,7 +899,8 @@ bool TextureObject::Equal(const uint64_t* other) const
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
 	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && params[PARAM_LEVELS] == other[PARAM_LEVELS] &&
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
-	        params[PARAM_SWIZZLE] == other[PARAM_SWIZZLE] && params[PARAM_FORCE_DEGAMMA] == other[PARAM_FORCE_DEGAMMA]);
+	        params[PARAM_SWIZZLE] == other[PARAM_SWIZZLE] && params[PARAM_FORCE_DEGAMMA] == other[PARAM_FORCE_DEGAMMA] &&
+	        params[PARAM_SKIP_GUEST_UPLOAD] == other[PARAM_SKIP_GUEST_UPLOAD]);
 }
 
 GpuObject::create_func_t TextureObject::GetCreateFunc() const

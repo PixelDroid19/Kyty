@@ -38,6 +38,9 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
+#include <set>
+#include <string>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -4313,7 +4316,6 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 
 		width  = rt.attrib2.width + 1;
 		height = rt.attrib2.height + 1;
-		pitch  = width;
 
 		// CB_COLOR FORMAT field: 0x1 = COLOR_8 (1 Bpp), 0xa = COLOR_8_8_8_8 (4),
 		// 0xc = COLOR_16_16_16_16 (8). TileGetRenderTargetSize needs exact Bpp.
@@ -4327,6 +4329,25 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		} else if (rt.info.format != 0xau)
 		{
 			EXIT("unsupported Gen5 CB format for size: 0x%" PRIx32 "\n", rt.info.format);
+		}
+
+		// Element pitch: hardware PITCH when programmed, otherwise align width
+		// to the 64 KiB block width for this BPE (same rule as sample tile 27).
+		if (rt.pitch.pitch_div8_minus1 != 0)
+		{
+			pitch = (rt.pitch.pitch_div8_minus1 + 1u) << 3u;
+		} else
+		{
+			static constexpr uint32_t k_block_w[] = {256u, 256u, 128u, 128u, 64u};
+			uint32_t                 log2        = 0;
+			uint32_t                 esz         = rt_bpp;
+			while (esz > 1u)
+			{
+				esz >>= 1u;
+				log2++;
+			}
+			const uint32_t bw = k_block_w[log2];
+			pitch             = (width + bw - 1u) & ~(bw - 1u);
 		}
 
 		Graphics::TileSizeAlign size32 {};
@@ -4667,7 +4688,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		auto          tile       = r.TileMode();
 		// Gen5 linear rows are 256-byte aligned (e.g. RGBA8 pitch = align(width, 64)).
 		// Using width alone mis-unpacks non-pow2 logos into horizontal bands.
-		// Mode 27 uses block geometry with Pitch() often 0 (size from blocks).
+		// Mode 27 (kRenderTarget): element pitch aligns to the 64 KiB block width
+		// for the sample BPE so size/alias matches the CB path.
 		// Mode 9 (kStandard64KB) pitches to the 128-element block width for 4 BPE.
 		uint32_t pitch = 0;
 		if (!gen5)
@@ -4675,7 +4697,17 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			pitch = r.Pitch() + 1;
 		} else if (tile == 27)
 		{
-			pitch = width;
+			const uint32_t bpp = ShaderGen5TextureBytesPerElement(r.Format());
+			static constexpr uint32_t k_block_w[] = {256u, 256u, 128u, 128u, 64u};
+			uint32_t                 log2        = 0;
+			uint32_t                 esz         = (bpp != 0u ? bpp : 4u);
+			while (esz > 1u)
+			{
+				esz >>= 1u;
+				log2++;
+			}
+			const uint32_t bw = k_block_w[log2 < 5u ? log2 : 2u];
+			pitch             = (width + bw - 1u) & ~(bw - 1u);
 		} else if (tile == 9)
 		{
 			pitch = (width + 127u) & ~127u;
@@ -4704,6 +4736,31 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		EXIT_NOT_IMPLEMENTED(size.size == 0);
 		EXIT_NOT_IMPLEMENTED((addr & (static_cast<uint64_t>(size.align) - 1u)) != 0);
+
+		// Opt-in catalog (KYTY_SAMPLE_BIND_CATALOG=/abs/path): unique sample binds
+		// for residual investigation. No guest-visible side effects when unset.
+		const auto catalog_sample = [gen5, fmt, tile, width, height, addr](const char* path) {
+			static const char* catalog_path = std::getenv("KYTY_SAMPLE_BIND_CATALOG");
+			if (catalog_path == nullptr || catalog_path[0] == '\0' || !gen5)
+			{
+				return;
+			}
+			static std::mutex              catalog_mu;
+			static std::set<std::string> catalog_seen;
+			char                           line[192];
+			std::snprintf(line, sizeof(line), "fmt=%u tile=%u %ux%u path=%s addr=0x%012" PRIx64 "\n", fmt, tile, width,
+			              height, path, static_cast<uint64_t>(addr));
+			std::lock_guard<std::mutex> lock(catalog_mu);
+			if (!catalog_seen.insert(line).second)
+			{
+				return;
+			}
+			if (FILE* f = std::fopen(catalog_path, "a"))
+			{
+				std::fputs(line, f);
+				std::fclose(f);
+			}
+		};
 
 		VulkanImage* tex            = nullptr;
 		bool         render_texture = false;
@@ -5001,19 +5058,22 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					    submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_buffer_info));
 				} else
 				{
-					// StorageBuffers are linear SSBO bindings (MUBUF dword address).
-					// Writing them back then detiling as kRenderTarget/kStandard64KB
-					// treats linear GPU bytes as tiled layout → horizontal bands and
-					// cyan atlas garbage on props. Live color surfaces must bind via
-					// FindRenderTexture / FindStorageTexture above; only linear
-					// (tile 0) samples may flush overlapping storage into guest memory
-					// before a linear upload.
-					if (gen5 && tile == 0u)
+					// Never flush StorageBuffers before sample guest upload (Kyty
+					// contract): SSBOs are linear MUBUF data, not texture content.
+					// Write-back then linear/tile upload corrupts package atlases.
+					EXIT_IF(Gen5SampleMayWriteBackStorageBeforeGuestUpload());
+					// Tiled samples under a live RT/ST that was not bound as alias
+					// must not detile GPU-owned guest (catalog: 642x362 tile27 guest).
+					bool live_cover = false;
+					if (gen5 && (tile == 27u || tile == 9u))
 					{
-						GpuMemoryWriteBackStorageRange(g_render_ctx->GetGraphicCtx(), addr, size.size);
+						const auto r_cover = FindRenderTexture(addr, size.size, false);
+						const auto s_cover = FindStorageTexture(addr, size.size, false);
+						live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
 					}
+					const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, live_cover);
 					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
-					                                  force_degamma);
+					                                  force_degamma, skip_guest);
 					tex = static_cast<TextureVulkanImage*>(
 					    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 				}
@@ -5021,6 +5081,23 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		}
 
 		EXIT_NOT_IMPLEMENTED(tex == nullptr);
+
+		if (render_texture)
+		{
+			catalog_sample("rt");
+		} else if (depth_texture)
+		{
+			catalog_sample("depth");
+		} else if (tex != nullptr && tex->type == VulkanImageType::StorageTexture)
+		{
+			catalog_sample("st");
+		} else if (tex != nullptr && tex->type == VulkanImageType::VideoOut)
+		{
+			catalog_sample("video");
+		} else
+		{
+			catalog_sample("guest");
+		}
 
 		if (textures.desc[i].textures2d_without_sampler)
 		{
