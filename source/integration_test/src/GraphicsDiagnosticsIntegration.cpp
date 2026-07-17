@@ -12,9 +12,13 @@
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
 
+#include "spirv-tools/libspirv.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <vector>
 
 using namespace Kyty::Emulator::Agent;
 using namespace Kyty::Libs::Graphics;
@@ -33,6 +37,31 @@ void Expect(bool condition, const char* message)
 	{
 		Die(message);
 	}
+}
+
+void ExpectValidSpirv(const Kyty::Core::String8& source, const char* message)
+{
+	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+	std::vector<uint32_t> binary;
+	tools.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t& position, const char* detail)
+	{
+		std::fprintf(stderr, "SPIR-V validation at %zu:%zu: %s\n", position.line, position.column, detail);
+	});
+	Expect(tools.Assemble(source.GetDataConst(), source.Size(), &binary), message);
+	Expect(tools.Validate(binary), message);
+}
+
+struct UnsignedMad64Result
+{
+	uint64_t value;
+	uint32_t carry;
+};
+
+UnsignedMad64Result ReferenceUnsignedMad64(uint32_t multiplier_a, uint32_t multiplier_b, uint64_t addend)
+{
+	const uint64_t product = static_cast<uint64_t>(multiplier_a) * multiplier_b;
+	const uint64_t value   = product + addend;
+	return {value, value < product ? 1u : 0u};
 }
 
 EventRecord LastEvent()
@@ -835,6 +864,91 @@ void VerifyGen5AndOrVop3()
 	       "and-or combines the intermediate result with the third source");
 }
 
+void VerifyGen5UnsignedMad64Vop3b()
+{
+	// Captured Gen5 VOP3B at normalized PC 0x1ec4:
+	// v_mad_u64_u32 v[5:6], vcc, 0x92492492, v92, 0x92492492.
+	// AMD RDNA2 ISA, VOP3B opcode 374; one literal may feed multiple operands:
+	// https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture
+	const uint32_t shader[] = {
+	    0xd5766a05u, 0x03feb8ffu, 0x92492492u,
+	    0xd5766a05u, 0x03feb8ffu, 0x92492492u,
+	    0xbf810000u,
+	};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	Expect(code.GetInstructions().Size() == 3, "Gen5 VOP3B unsigned MAD64 consumes one shared literal per instruction");
+	const auto& instruction = code.GetInstructions().At(0);
+	const auto& repeated    = code.GetInstructions().At(1);
+	Expect(instruction.type == ShaderInstructionType::VMadU64U32, "Gen5 VOP3B opcode 0x176 decodes as v_mad_u64_u32");
+	Expect(instruction.format == ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair,
+	       "unsigned MAD64 exposes vector result, scalar carry, and 64-bit addend");
+	Expect(instruction.dst.type == ShaderOperandType::Vgpr && instruction.dst.register_id == 5 && instruction.dst.size == 2,
+	       "unsigned MAD64 decodes its 64-bit vector destination");
+	Expect(instruction.dst2.type == ShaderOperandType::VccLo && instruction.dst2.size == 2,
+	       "unsigned MAD64 decodes its scalar carry destination");
+	Expect(instruction.src_num == 3, "unsigned MAD64 consumes three sources");
+	Expect(instruction.src[0].type == ShaderOperandType::LiteralConstant && instruction.src[0].constant.u == 0x92492492u,
+	       "unsigned MAD64 decodes the shared literal multiplier");
+	Expect(instruction.src[1].type == ShaderOperandType::Vgpr && instruction.src[1].register_id == 92,
+	       "unsigned MAD64 decodes the vector multiplier");
+	Expect(instruction.src[2].type == ShaderOperandType::LiteralConstant && instruction.src[2].constant.u == 0x92492492u &&
+	           instruction.src[2].size == 2,
+	       "unsigned MAD64 reuses the literal as a zero-extended 64-bit addend");
+	Expect(repeated.type == ShaderInstructionType::VMadU64U32 && repeated.src[0].constant.u == 0x92492492u &&
+	           repeated.src[2].constant.u == 0x92492492u,
+	       "repeated unsigned MAD64 starts immediately after the single literal");
+	Expect(!instruction.dst.clamp && instruction.dst.multiplier == 1.0f && !instruction.src[0].negate &&
+	           !instruction.src[0].absolute && !instruction.src[1].negate && !instruction.src[1].absolute &&
+	           !instruction.src[2].negate && !instruction.src[2].absolute,
+	       "captured unsigned MAD64 has no VOP3A modifiers");
+
+	ShaderComputeInputInfo compute_input {};
+	compute_input.threads_num[0] = 1;
+	compute_input.threads_num[1] = 1;
+	compute_input.threads_num[2] = 1;
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &compute_input);
+	Expect(source.FindIndex("OpUMulExtended %ResTypeU") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "unsigned MAD64 preserves the full 64-bit multiplication product");
+	const auto low_add = source.FindIndex("%tsum_lo_pair_0 = OpIAddCarry %ResTypeU %tmul_lo_0 %tadd_lo_0");
+	const auto high_add = source.FindIndex("%tsum_hi_base_pair_0 = OpIAddCarry %ResTypeU %tmul_hi_0 %tadd_hi_0");
+	const auto propagated_add = source.FindIndex("%tsum_hi_pair_0 = OpIAddCarry %ResTypeU %tsum_hi_base_0 %tcarry_lo_0");
+	const auto final_carry = source.FindIndex("%tcarry_out_0 = OpBitwiseOr %uint %tcarry_hi_base_0 %tcarry_hi_extra_0");
+	Expect(low_add != Kyty::Core::STRING8_INVALID_INDEX && high_add != Kyty::Core::STRING8_INVALID_INDEX &&
+	           propagated_add != Kyty::Core::STRING8_INVALID_INDEX && final_carry != Kyty::Core::STRING8_INVALID_INDEX &&
+	           low_add < high_add && high_add < propagated_add && propagated_add < final_carry,
+	       "unsigned MAD64 propagates low and high carries in order");
+	Expect(source.FindIndex("OpStore %v5") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           source.FindIndex("OpStore %v6") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "unsigned MAD64 writes both vector result dwords");
+	Expect(source.FindIndex("OpStore %vcc_lo") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "unsigned MAD64 writes its carry-out destination");
+	Expect(source.FindIndex("OpSelect %float %tactive_mad_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "unsigned MAD64 preserves inactive vector lanes");
+	ExpectValidSpirv(source, "unsigned MAD64 emits valid SPIR-V");
+
+	const auto no_carry = ReferenceUnsignedMad64(3u, 7u, 11u);
+	Expect(no_carry.value == 32u && no_carry.carry == 0u, "unsigned MAD64 computes a basic multiply-add");
+
+	const auto low_carry = ReferenceUnsignedMad64(1u, 1u, 0x00000000ffffffffull);
+	Expect(low_carry.value == 0x0000000100000000ull && low_carry.carry == 0u,
+	       "unsigned MAD64 propagates low-word carry into the high word");
+
+	const auto high_overflow = ReferenceUnsignedMad64(std::numeric_limits<uint32_t>::max(),
+	                                                  std::numeric_limits<uint32_t>::max(), 0x00000001ffffffffull);
+	Expect(high_overflow.value == 0u && high_overflow.carry == 1u,
+	       "unsigned MAD64 reports high-word overflow after carry propagation");
+
+	const auto full_overflow = ReferenceUnsignedMad64(std::numeric_limits<uint32_t>::max(),
+	                                                  std::numeric_limits<uint32_t>::max(),
+	                                                  std::numeric_limits<uint64_t>::max());
+	Expect(full_overflow.value == 0xfffffffe00000000ull && full_overflow.carry == 1u,
+	       "unsigned MAD64 handles the maximum product and addend");
+}
+
 ShaderCode ParseGen5ReciprocalIFlag(bool vop3)
 {
 	ShaderCode code;
@@ -1080,6 +1194,7 @@ int main()
 	VerifyGen5BitCountVop3();
 	VerifyGen5ShiftLeftOrVop3();
 	VerifyGen5AndOrVop3();
+	VerifyGen5UnsignedMad64Vop3b();
 	VerifyGen5ReciprocalIFlag();
 	VerifyGen5ReciprocalIFlagExceptionalInputs();
 	VerifyGen5ImageSampleLzDmask1();

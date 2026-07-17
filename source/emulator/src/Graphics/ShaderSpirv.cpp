@@ -7775,6 +7775,82 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_VMadU64U32_Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst) || !operand_is_variable(inst.dst2));
+	EXIT_NOT_IMPLEMENTED(inst.dst.size != 2 || inst.dst2.size != 2 || inst.src[2].size != 2);
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp || inst.dst.multiplier != 1.0f);
+	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst2));
+
+	const String8 index_str = String8::FromPrintf("%u", index);
+	const auto    dst_lo    = operand_variable_to_str(inst.dst, 0);
+	const auto    dst_hi    = operand_variable_to_str(inst.dst, 1);
+	const auto    carry_lo  = operand_variable_to_str(inst.dst2, 0);
+	const auto    carry_hi  = operand_variable_to_str(inst.dst2, 1);
+
+	EXIT_NOT_IMPLEMENTED(dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float);
+	EXIT_NOT_IMPLEMENTED(carry_lo.type != SpirvType::Uint || carry_hi.type != SpirvType::Uint);
+
+	String8 load0;
+	String8 load1;
+	String8 load2_lo;
+	String8 load2_hi;
+	if (!operand_load_uint(spirv, inst.src[0], "tmad0_<index>", index_str, &load0) ||
+	    !operand_load_uint(spirv, inst.src[1], "tmad1_<index>", index_str, &load1) ||
+	    !operand_load_uint(spirv, inst.src[2], "tadd_lo_<index>", index_str, &load2_lo, 0) ||
+	    !operand_load_uint(spirv, inst.src[2], "tadd_hi_<index>", index_str, &load2_hi, 1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+          <load0>
+          <load1>
+          <load2_lo>
+          <load2_hi>
+          %tmul_<index> = OpUMulExtended %ResTypeU %tmad0_<index> %tmad1_<index>
+          %tmul_lo_<index> = OpCompositeExtract %uint %tmul_<index> 0
+          %tmul_hi_<index> = OpCompositeExtract %uint %tmul_<index> 1
+          %tsum_lo_pair_<index> = OpIAddCarry %ResTypeU %tmul_lo_<index> %tadd_lo_<index>
+          %tsum_lo_<index> = OpCompositeExtract %uint %tsum_lo_pair_<index> 0
+          %tcarry_lo_<index> = OpCompositeExtract %uint %tsum_lo_pair_<index> 1
+          %tsum_hi_base_pair_<index> = OpIAddCarry %ResTypeU %tmul_hi_<index> %tadd_hi_<index>
+          %tsum_hi_base_<index> = OpCompositeExtract %uint %tsum_hi_base_pair_<index> 0
+          %tcarry_hi_base_<index> = OpCompositeExtract %uint %tsum_hi_base_pair_<index> 1
+          %tsum_hi_pair_<index> = OpIAddCarry %ResTypeU %tsum_hi_base_<index> %tcarry_lo_<index>
+          %tsum_hi_<index> = OpCompositeExtract %uint %tsum_hi_pair_<index> 0
+          %tcarry_hi_extra_<index> = OpCompositeExtract %uint %tsum_hi_pair_<index> 1
+          %tcarry_out_<index> = OpBitwiseOr %uint %tcarry_hi_base_<index> %tcarry_hi_extra_<index>
+          %tresult_lo_<index> = OpBitcast %float %tsum_lo_<index>
+          %tresult_hi_<index> = OpBitcast %float %tsum_hi_<index>
+          %texec_mad_<index> = OpLoad %uint %exec_lo
+          %tactive_mad_<index> = OpINotEqual %bool %texec_mad_<index> %uint_0
+          %tdst_old_lo_<index> = OpLoad %float %<dst_lo>
+          %tdst_old_hi_<index> = OpLoad %float %<dst_hi>
+          %tdst_active_lo_<index> = OpSelect %float %tactive_mad_<index> %tresult_lo_<index> %tdst_old_lo_<index>
+          %tdst_active_hi_<index> = OpSelect %float %tactive_mad_<index> %tresult_hi_<index> %tdst_old_hi_<index>
+          OpStore %<dst_lo> %tdst_active_lo_<index>
+          OpStore %<dst_hi> %tdst_active_hi_<index>
+          %tcarry_active_<index> = OpSelect %uint %tactive_mad_<index> %tcarry_out_<index> %uint_0
+          OpStore %<carry_lo> %tcarry_active_<index>
+          OpStore %<carry_hi> %uint_0
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<load2_lo>", load2_lo)
+	                   .ReplaceStr("<load2_hi>", load2_hi)
+	                   .ReplaceStr("<dst_lo>", dst_lo.value)
+	                   .ReplaceStr("<dst_hi>", dst_hi.value)
+	                   .ReplaceStr("<carry_lo>", carry_lo.value)
+	                   .ReplaceStr("<carry_hi>", carry_hi.value)
+	                   .ReplaceStr("<index>", index_str);
+
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_Fetch)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -8111,6 +8187,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1,  ShaderInstructionType::VSubI32,    ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1,  {"%t_<index> = OpISubBorrow %ResTypeU %t0_<index> %t1_<index>"}},
     {Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1,  ShaderInstructionType::VSubrevI32, ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1,  {"%t_<index> = OpISubBorrow %ResTypeU %t1_<index> %t0_<index>"}},
     {Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2, ShaderInstructionType::VAddCoCiU32, ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2, {""}},
+    {Recompile_VMadU64U32_Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair, ShaderInstructionType::VMadU64U32, ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair, {""}},
 
     {Recompile_VCmp_XXX_F32_SmaskVsrc0Vsrc1,  ShaderInstructionType::VCmpEqF32,    ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFOrdEqual"}},
     {Recompile_VCmp_XXX_F32_SmaskVsrc0Vsrc1,  ShaderInstructionType::VCmpFF32,     ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpIEqual %bool %uint_0 %uint_1 ; "}},
