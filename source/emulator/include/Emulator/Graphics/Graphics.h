@@ -15,9 +15,24 @@ struct Shader;
 struct ShaderRegister;
 struct ShaderSemantic;
 
+// Gen5 sce::Agc size/alignment result for fused shader scratch.
+struct SizeAlign
+{
+	uint64_t m_size  = 0;
+	size_t   m_align = 0;
+};
+
 KYTY_SUBSYSTEM_DEFINE(Graphics);
 
 void GraphicsDbgDumpDcb(const char* type, uint32_t num_dw, uint32_t* cmd_buffer);
+
+// Publish guest fence memory from submitted PM4 streams (ReleaseMem data_sel
+// 1/2 and WriteData memory destinations) before the sequential CP runs.
+// The software ring processes one batch at a time and WaitRegMem blocks that
+// worker; without submit-time fence publish, a later batch that owns the
+// ReleaseMem/WriteData producer never runs and WaitRegMem sees val=0 forever.
+// Returns how many guest stores were performed (for tests).
+uint32_t GraphicsPm4PublishFenceProducers(const uint32_t* data, uint32_t num_dw);
 
 namespace Gen4 {
 
@@ -80,6 +95,10 @@ int KYTY_SYSV_ABI   GraphicsInit(uint32_t* state, uint32_t ver);
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2(uint32_t ver);
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2Internal(uint32_t ver);
 int KYTY_SYSV_ABI   GraphicsCreateShader(Shader** dst, void* header, const volatile void* code);
+// Fuse GS/HS front+back halves (scratch holds copied SH registers for the result).
+int KYTY_SYSV_ABI   GraphicsUnknownGetFusedShaderSize(SizeAlign* dst, const Shader* front, const Shader* back);
+int KYTY_SYSV_ABI   GraphicsUnknownFuseShaderHalves(Shader* fused_result, const Shader* front, const Shader* back,
+                                                    void* scratch_mem);
 int KYTY_SYSV_ABI   GraphicsSetCxRegIndirectPatchSetAddress(uint32_t* cmd, const volatile ShaderRegister* regs);
 int KYTY_SYSV_ABI   GraphicsSetShRegIndirectPatchSetAddress(uint32_t* cmd, const volatile ShaderRegister* regs);
 int KYTY_SYSV_ABI   GraphicsSetUcRegIndirectPatchSetAddress(uint32_t* cmd, const volatile ShaderRegister* regs);
@@ -160,6 +179,14 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
                                               const volatile void* base, uint64_t size_bytes, uint32_t poll_cycles);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
                                              const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm);
+// Gen5 type-2 pad dword (NID qj7QZpgr9Uw): allocates one 0x80000000 filler.
+uint32_t* KYTY_SYSV_ABI GraphicsCbType2Pad(CommandBuffer* buf);
+// sceAgcDcbSetBaseIndirectArgs (NID RmaJwLtc8rY).
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetBaseIndirectArgs(CommandBuffer* buf, uint32_t base_index, uint64_t address);
+// sceAgcDcbDispatchIndirect (NID CtB+A9-VxO0).
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t data_offset, uint32_t modifier);
+// sceAgcDcbDrawIndexIndirect (NID t1vNu082-jM).
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, uint8_t compare_function, uint8_t op, uint8_t cache_policy,
                                               const volatile void* address, uint64_t reference, uint64_t mask, uint32_t poll_cycles);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_out_handle, int32_t display_buffer_index, uint32_t flip_mode,

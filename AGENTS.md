@@ -311,6 +311,12 @@ Diagnostic output belongs in an untracked scratch directory. Do not copy a
 session's verdict, suspected error, frame metrics, socket path, or compatibility
 status into this file.
 
+Default runtime configuration must stay quiet and dump-free. Command-buffer,
+pipeline, shader, ELF, and console/file logging are opt-in diagnostics. Do not
+enable them as acceptance defaults: full boots can fill host disk and spend
+host RAM/CPU on log formatting. Prefer demand-backed guest heaps over eager
+host commit when large flexible ranges are mapped.
+
 ### Visual evaluation
 
 Automated capture scores are heuristics, not a defect catalog. Do **not** invent

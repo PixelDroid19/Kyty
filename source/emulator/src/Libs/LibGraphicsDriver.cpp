@@ -75,6 +75,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	// Lkf86B98qPc: sceAgcGetPacketSize (type-3 dword length).
 	LIB_FUNC("Lkf86B98qPc", Gen5::GraphicsGetDataPacketSizeDw);
 	LIB_FUNC("f3dg2CSgRKY", Gen5::GraphicsCreateShader);
+	LIB_FUNC("dolOmWH+huQ", Gen5::GraphicsUnknownGetFusedShaderSize);
+	LIB_FUNC("fd5Bp5tGTgo", Gen5::GraphicsUnknownFuseShaderHalves);
 	LIB_FUNC("vcmNN+AAXnY", Gen5::GraphicsSetCxRegIndirectPatchSetAddress);
 	LIB_FUNC("Qrj4c+61z4A", Gen5::GraphicsSetShRegIndirectPatchSetAddress);
 	LIB_FUNC("6lNcCp+fxi4", Gen5::GraphicsSetUcRegIndirectPatchSetAddress);
@@ -122,6 +124,10 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("KT-hTp-Ch14", Gen5::GraphicsAcbAcquireMem);
 	LIB_FUNC("i1jyy49AjXU", Gen5::GraphicsDcbWriteData);
 	LIB_FUNC("eZ4+17OQz4Q", Gen5::GraphicsAcbWriteData);
+	LIB_FUNC("qj7QZpgr9Uw", Gen5::GraphicsCbType2Pad);
+	LIB_FUNC("RmaJwLtc8rY", Gen5::GraphicsDcbSetBaseIndirectArgs);
+	LIB_FUNC("CtB+A9-VxO0", Gen5::GraphicsDcbDispatchIndirect);
+	LIB_FUNC("t1vNu082-jM", Gen5::GraphicsDcbDrawIndexIndirect);
 	LIB_FUNC("VmW0Tdpy420", Gen5::GraphicsDcbWaitRegMem);
 	LIB_FUNC("htn36gPnBk4", Gen5::GraphicsAcbWaitRegMem);
 	LIB_FUNC("1rZSWUv1IRc", Gen5::GraphicsDcbCopyData);
@@ -202,6 +208,10 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("KT-hTp-Ch14", Gen5::GraphicsAcbAcquireMem);
 	LIB_FUNC("i1jyy49AjXU", Gen5::GraphicsDcbWriteData);
 	LIB_FUNC("eZ4+17OQz4Q", Gen5::GraphicsAcbWriteData);
+	LIB_FUNC("qj7QZpgr9Uw", Gen5::GraphicsCbType2Pad);
+	LIB_FUNC("RmaJwLtc8rY", Gen5::GraphicsDcbSetBaseIndirectArgs);
+	LIB_FUNC("CtB+A9-VxO0", Gen5::GraphicsDcbDispatchIndirect);
+	LIB_FUNC("t1vNu082-jM", Gen5::GraphicsDcbDrawIndexIndirect);
 	LIB_FUNC("VmW0Tdpy420", Gen5::GraphicsDcbWaitRegMem);
 	LIB_FUNC("htn36gPnBk4", Gen5::GraphicsAcbWaitRegMem);
 	LIB_FUNC("1rZSWUv1IRc", Gen5::GraphicsDcbCopyData);
@@ -222,6 +232,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("2JtWUUiYBXs", Gen5::GraphicsGetRegisterDefaults2);
 	LIB_FUNC("wRbq6ZjNop4", Gen5::GraphicsGetRegisterDefaults2Internal);
 	LIB_FUNC("f3dg2CSgRKY", Gen5::GraphicsCreateShader);
+	LIB_FUNC("dolOmWH+huQ", Gen5::GraphicsUnknownGetFusedShaderSize);
+	LIB_FUNC("fd5Bp5tGTgo", Gen5::GraphicsUnknownFuseShaderHalves);
 	LIB_FUNC("vcmNN+AAXnY", Gen5::GraphicsSetCxRegIndirectPatchSetAddress);
 	LIB_FUNC("Qrj4c+61z4A", Gen5::GraphicsSetShRegIndirectPatchSetAddress);
 	LIB_FUNC("6lNcCp+fxi4", Gen5::GraphicsSetUcRegIndirectPatchSetAddress);

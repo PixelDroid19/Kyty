@@ -50,6 +50,101 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	return true;
 }
 
+// Sample→surface alias ranking for PrepareTextures.
+//
+// Live color surfaces may be bound only when:
+//   1) sample ufmt and surface VkFormat are the same family, and
+//   2) Vulkan extent equals the sample descriptor (exact width×height).
+// Binding a larger parent without a crop view samples the wrong tiles and
+// leaves horizontal bands / false-color props (Dead Cells residual). For known
+// ufmts 56/71, zero exact+format matches → reject alias (fall through); never
+// fall back to a format-compatible different extent.
+//
+// formats[i]/extents_w[i]/extents_h[i] describe candidate i of candidate_count
+// (capped at 16). On success, out_indices[0..out_count) are candidate indices
+// in preference order; out_count==0 && !reject means "use full unfiltered list".
+[[nodiscard]] inline bool Gen5PickSampleSurfaceAliases(uint32_t sample_ufmt, uint32_t sample_width,
+                                                       uint32_t sample_height, size_t candidate_count,
+                                                       const VkFormat* formats, const uint32_t* extents_w,
+                                                       const uint32_t* extents_h, int* out_indices,
+                                                       size_t* out_count, bool* reject)
+{
+	if (formats == nullptr || extents_w == nullptr || extents_h == nullptr || out_indices == nullptr ||
+	    out_count == nullptr || reject == nullptr)
+	{
+		return false;
+	}
+	*out_count = 0;
+	*reject    = false;
+	int          exact_ok[16] = {};
+	size_t       exact_n      = 0;
+	const size_t n            = candidate_count < 16 ? candidate_count : 16;
+	for (size_t i = 0; i < n; i++)
+	{
+		if (!Gen5SampleFormatMatchesVulkan(sample_ufmt, formats[i]))
+		{
+			continue;
+		}
+		if (extents_w[i] == sample_width && extents_h[i] == sample_height)
+		{
+			exact_ok[exact_n++] = static_cast<int>(i);
+		}
+	}
+	if (exact_n == 0)
+	{
+		// No format+extent match. Reject rather than bind a larger parent
+		// without a crop view (horizontal bands / false-color props).
+		*reject = true;
+		return true;
+	}
+	for (size_t i = 0; i < exact_n; i++)
+	{
+		out_indices[i] = exact_ok[i];
+	}
+	*out_count = exact_n;
+	return true;
+}
+
+// Sample guest upload must not flush StorageBuffers first: SSBOs are linear
+// MUBUF data, not texture tiles. Write-back then detile/linear-upload corrupts
+// package atlases and intermediates (Dead Cells cyan/banded props).
+[[nodiscard]] inline bool Gen5SampleMayWriteBackStorageBeforeGuestUpload()
+{
+	return false;
+}
+
+// Tiled guest upload (tile 27/9) is only valid for CPU-backed package data.
+// When a live color surface covers the sample range but is not bindable (wrong
+// format/extent/size), guest memory is still GPU-owned: detiling it yields
+// period-16 horizontal bands (Dead Cells 642x362 tile27 path=guest under RT).
+[[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, bool live_color_surface_covers)
+{
+	if (tile != 27u && tile != 9u)
+	{
+		return true; // linear tile 0 always may upload guest
+	}
+	return !live_color_surface_covers;
+}
+
+// Hash-driven Texture refresh is allowed for PS4 and Gen5. Gen5 must still
+// refresh when package bytes arrive after first create. Protection against
+// SSBO clobber is in GpuMemory::Update (skip guest re-detile when a live
+// RT/ST parent is linked), not by disabling check_hash.
+[[nodiscard]] inline bool Gen5SampleTextureUsesHashRefresh(uint32_t gen5_ufmt)
+{
+	(void)gen5_ufmt;
+	return true;
+}
+
+// Texture CreateFromObjects may copy a live RT/StorageTexture parent only when
+// the sample ufmt and the surface VkFormat are the same family. Copying a float
+// lighting RT into an RGBA8 Texture (after PrepareTextures rejects the alias)
+// reinterprets float bits as 8-bit channels → residual cyan/hot prop boxes.
+[[nodiscard]] inline bool Gen5SampleMayCopyFromSurfaceParent(uint32_t sample_ufmt, VkFormat surface_vk)
+{
+	return Gen5SampleFormatMatchesVulkan(sample_ufmt, surface_vk);
+}
+
 // A blit source cannot be read before its first-use contents are established.
 [[nodiscard]] inline bool UtilBlitImageNeedsSourceInitialization(VkImageLayout tracked_layout)
 {

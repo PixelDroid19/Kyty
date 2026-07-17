@@ -38,6 +38,9 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
+#include <set>
+#include <string>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -45,7 +48,15 @@
 
 namespace Kyty::Libs::Graphics {
 
-constexpr int GRAPHICS_EVENT_EOP = 0x40;
+// Gen5 AGC registers "queued graphics interrupt" as id 0; classic Gnm EOP is 0x40.
+// Both ride the same end-of-pipe eq list and must trigger with the registered ident.
+constexpr int GRAPHICS_EVENT_QUEUED_GRAPHICS_INTERRUPT = 0x00;
+constexpr int GRAPHICS_EVENT_EOP                       = 0x40;
+
+static bool IsGraphicsEopEventId(int id)
+{
+	return id == GRAPHICS_EVENT_QUEUED_GRAPHICS_INTERRUPT || id == GRAPHICS_EVENT_EOP;
+}
 
 struct Label;
 struct RenderDepthInfo;
@@ -382,11 +393,17 @@ public:
 	SamplerCache*     GetSamplerCache() { return m_sampler_cache; }
 	GdsBuffer*        GetGdsBuffer() { return m_gds_buffer; }
 
-	void AddEopEq(LibKernel::EventQueue::KernelEqueue eq);
-	void DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq);
+	void AddEopEq(LibKernel::EventQueue::KernelEqueue eq, int id);
+	void DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq, int id);
 	void TriggerEopEvent();
 
 private:
+	struct EopEqRegistration
+	{
+		LibKernel::EventQueue::KernelEqueue eq = nullptr;
+		int                                 id = GRAPHICS_EVENT_EOP;
+	};
+
 	Core::Mutex       m_mutex;
 	PipelineCache*    m_pipeline_cache    = nullptr;
 	DescriptorCache*  m_descriptor_cache  = nullptr;
@@ -395,8 +412,8 @@ private:
 	GraphicContext*   m_graphic_ctx       = nullptr;
 	GdsBuffer*        m_gds_buffer        = nullptr;
 
-	Core::Mutex                                 m_eop_mutex;
-	Vector<LibKernel::EventQueue::KernelEqueue> m_eop_eqs;
+	Core::Mutex                m_eop_mutex;
+	Vector<EopEqRegistration>  m_eop_eqs;
 };
 
 struct RenderDepthInfo
@@ -1273,31 +1290,46 @@ static bool EopTraceEnabled()
 	return enabled;
 }
 
-void RenderContext::AddEopEq(LibKernel::EventQueue::KernelEqueue eq)
+void RenderContext::AddEopEq(LibKernel::EventQueue::KernelEqueue eq, int id)
 {
 	Core::LockGuard lock(m_eop_mutex);
 
-	EXIT_NOT_IMPLEMENTED(m_eop_eqs.Contains(eq));
+	for (const auto& entry: m_eop_eqs)
+	{
+		EXIT_NOT_IMPLEMENTED(entry.eq == eq && entry.id == id);
+	}
 
-	m_eop_eqs.Add(eq);
+	EopEqRegistration reg {};
+	reg.eq = eq;
+	reg.id = id;
+	m_eop_eqs.Add(reg);
 
 	if (EopTraceEnabled())
 	{
-		std::fprintf(stderr, "EOP_ADD eq=%p count=%u\n", static_cast<void*>(eq), static_cast<unsigned>(m_eop_eqs.Size()));
+		std::fprintf(stderr, "EOP_ADD eq=%p id=0x%x count=%u\n", static_cast<void*>(eq), id,
+		             static_cast<unsigned>(m_eop_eqs.Size()));
 	}
 }
 
-void RenderContext::DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq)
+void RenderContext::DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq, int id)
 {
 	Core::LockGuard lock(m_eop_mutex);
 
-	auto index = m_eop_eqs.Find(eq);
-	EXIT_NOT_IMPLEMENTED(!m_eop_eqs.IndexValid(index));
-	m_eop_eqs[index] = nullptr;
+	bool found = false;
+	for (uint32_t i = 0; i < m_eop_eqs.Size(); i++)
+	{
+		if (m_eop_eqs[i].eq == eq && m_eop_eqs[i].id == id)
+		{
+			m_eop_eqs[i].eq = nullptr;
+			found           = true;
+			break;
+		}
+	}
+	EXIT_NOT_IMPLEMENTED(!found);
 
 	if (EopTraceEnabled())
 	{
-		std::fprintf(stderr, "EOP_DEL eq=%p\n", static_cast<void*>(eq));
+		std::fprintf(stderr, "EOP_DEL eq=%p id=0x%x\n", static_cast<void*>(eq), id);
 	}
 }
 
@@ -1306,14 +1338,14 @@ void RenderContext::TriggerEopEvent()
 	Core::LockGuard lock(m_eop_mutex);
 
 	uint32_t live = 0;
-	for (auto& eop_eq: m_eop_eqs)
+	for (auto& entry: m_eop_eqs)
 	{
-		if (eop_eq != nullptr)
+		if (entry.eq != nullptr)
 		{
 			live++;
-			auto result =
-			    LibKernel::EventQueue::KernelTriggerEvent(eop_eq, GRAPHICS_EVENT_EOP, LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
-			                                              reinterpret_cast<void*>(LibKernel::KernelReadTsc()));
+			auto result = LibKernel::EventQueue::KernelTriggerEvent(
+			    entry.eq, static_cast<uintptr_t>(entry.id), LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
+			    reinterpret_cast<void*>(LibKernel::KernelReadTsc()));
 			EXIT_NOT_IMPLEMENTED(result != OK);
 		}
 	}
@@ -4284,7 +4316,6 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 
 		width  = rt.attrib2.width + 1;
 		height = rt.attrib2.height + 1;
-		pitch  = width;
 
 		// CB_COLOR FORMAT field: 0x1 = COLOR_8 (1 Bpp), 0xa = COLOR_8_8_8_8 (4),
 		// 0xc = COLOR_16_16_16_16 (8). TileGetRenderTargetSize needs exact Bpp.
@@ -4298,6 +4329,25 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		} else if (rt.info.format != 0xau)
 		{
 			EXIT("unsupported Gen5 CB format for size: 0x%" PRIx32 "\n", rt.info.format);
+		}
+
+		// Element pitch: hardware PITCH when programmed, otherwise align width
+		// to the 64 KiB block width for this BPE (same rule as sample tile 27).
+		if (rt.pitch.pitch_div8_minus1 != 0)
+		{
+			pitch = (rt.pitch.pitch_div8_minus1 + 1u) << 3u;
+		} else
+		{
+			static constexpr uint32_t k_block_w[] = {256u, 256u, 128u, 128u, 64u};
+			uint32_t                 log2        = 0;
+			uint32_t                 esz         = rt_bpp;
+			while (esz > 1u)
+			{
+				esz >>= 1u;
+				log2++;
+			}
+			const uint32_t bw = k_block_w[log2];
+			pitch             = (width + bw - 1u) & ~(bw - 1u);
 		}
 
 		Graphics::TileSizeAlign size32 {};
@@ -4575,11 +4625,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (gen5)
 		{
 			// Observed sample textures (UfmtGFX10):
-			// - Tile 0/27, format 56 = 8_8_8_8_UNORM (RGBA8)
+			// - Tile 0/9/27, format 56 = 8_8_8_8_UNORM (RGBA8)
 			// - Tile 0, format 14 = 8_8_UNORM (RG8), 2048x4096 linear atlas
 			// - Tile 27, format 71 = 16_16_16_16_FLOAT (RGBA16F), 642x362 alias of RT
 			// - Tile 27, format 133 = BC1 RGBA UNORM, 3840x2160 title texture
-			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 27);
+			// - Tile 9 = kStandard64KB static atlases (RGBA8 detile path)
+			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 27 && r.TileMode() != 9);
 			if (r.Format() != 56 && r.Format() != 14 && r.Format() != 71 && r.Format() != 133)
 			{
 				EXIT("unsupported Gen5 sampled texture format: fmt=%u tile=%u width=%u height=%u base=0x%012" PRIx64 " type=%u\n",
@@ -4637,10 +4688,33 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		auto          tile       = r.TileMode();
 		// Gen5 linear rows are 256-byte aligned (e.g. RGBA8 pitch = align(width, 64)).
 		// Using width alone mis-unpacks non-pow2 logos into horizontal bands.
-		// Mode 27 (SW_64KB_R_X) uses block geometry; Pitch() is 0 in the observed
-		// descriptors and size is derived from width/height + 64 KiB blocks.
-		auto pitch = (!gen5 ? r.Pitch() + 1
-		                    : (tile == 27 ? width : ShaderGen5LinearTexturePitch(width, r.Format())));
+		// Mode 27 (kRenderTarget): element pitch aligns to the 64 KiB block width
+		// for the sample BPE so size/alias matches the CB path.
+		// Mode 9 (kStandard64KB) pitches to the 128-element block width for 4 BPE.
+		uint32_t pitch = 0;
+		if (!gen5)
+		{
+			pitch = r.Pitch() + 1;
+		} else if (tile == 27)
+		{
+			const uint32_t bpp = ShaderGen5TextureBytesPerElement(r.Format());
+			static constexpr uint32_t k_block_w[] = {256u, 256u, 128u, 128u, 64u};
+			uint32_t                 log2        = 0;
+			uint32_t                 esz         = (bpp != 0u ? bpp : 4u);
+			while (esz > 1u)
+			{
+				esz >>= 1u;
+				log2++;
+			}
+			const uint32_t bw = k_block_w[log2 < 5u ? log2 : 2u];
+			pitch             = (width + bw - 1u) & ~(bw - 1u);
+		} else if (tile == 9)
+		{
+			pitch = (width + 127u) & ~127u;
+		} else
+		{
+			pitch = ShaderGen5LinearTexturePitch(width, r.Format());
+		}
 		auto          base_level = r.BaseLevel();
 		auto          levels     = r.LastLevel() + 1;
 		auto          dfmt       = (gen5 ? 0 : r.Dfmt());
@@ -4662,6 +4736,31 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		EXIT_NOT_IMPLEMENTED(size.size == 0);
 		EXIT_NOT_IMPLEMENTED((addr & (static_cast<uint64_t>(size.align) - 1u)) != 0);
+
+		// Opt-in catalog (KYTY_SAMPLE_BIND_CATALOG=/abs/path): unique sample binds
+		// for residual investigation. No guest-visible side effects when unset.
+		const auto catalog_sample = [gen5, fmt, tile, width, height, addr](const char* path) {
+			static const char* catalog_path = std::getenv("KYTY_SAMPLE_BIND_CATALOG");
+			if (catalog_path == nullptr || catalog_path[0] == '\0' || !gen5)
+			{
+				return;
+			}
+			static std::mutex              catalog_mu;
+			static std::set<std::string> catalog_seen;
+			char                           line[192];
+			std::snprintf(line, sizeof(line), "fmt=%u tile=%u %ux%u path=%s addr=0x%012" PRIx64 "\n", fmt, tile, width,
+			              height, path, static_cast<uint64_t>(addr));
+			std::lock_guard<std::mutex> lock(catalog_mu);
+			if (!catalog_seen.insert(line).second)
+			{
+				return;
+			}
+			if (FILE* f = std::fopen(catalog_path, "a"))
+			{
+				std::fputs(line, f);
+				std::fclose(f);
+			}
+		};
 
 		VulkanImage* tex            = nullptr;
 		bool         render_texture = false;
@@ -4745,17 +4844,25 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// false-color (cyan props / hot slabs). When every overlapping
 				// RT is the wrong family for a known ufmt, reject the alias and
 				// fall through to guest-memory / storage upload instead.
+				//
+				// Extent: among format-compatible RTs, prefer exact sample
+				// width×height. Binding a full-screen parent without a crop view
+				// left horizontal bands / wrong atlas tiles on Dead Cells.
+				const size_t cand_n = static_cast<size_t>(rtex.Size() < 16 ? rtex.Size() : 16);
+				VkFormat     cand_fmt[16] = {};
+				uint32_t     cand_w[16]   = {};
+				uint32_t     cand_h[16]   = {};
+				for (size_t i = 0; i < cand_n; i++)
+				{
+					cand_fmt[i] = rtex.At(static_cast<int>(i))->format;
+					cand_w[i]   = rtex.At(static_cast<int>(i))->extent.width;
+					cand_h[i]   = rtex.At(static_cast<int>(i))->extent.height;
+				}
 				int    filtered[16] = {};
 				size_t filtered_n   = 0;
-				for (int i = 0; i < rtex.Size() && filtered_n < 16; i++)
-				{
-					if (Gen5SampleFormatMatchesVulkan(fmt, rtex.At(i)->format))
-					{
-						filtered[filtered_n++] = i;
-					}
-				}
-				const bool known_ufmt     = (fmt == 56u || fmt == 71u);
-				const bool reject_alias   = known_ufmt && filtered_n == 0;
+				bool   reject_alias = false;
+				Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered,
+				                             &filtered_n, &reject_alias);
 				if (reject_alias)
 				{
 					render_texture = false;
@@ -4816,7 +4923,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 			// Live StorageTexture (compute/UAV) can own GPU pixels without ever
 			// being a color RT. Prefer that image over tile-27 CPU upload of empty
-			// guest memory (opaque-black wall/prop quads).
+			// guest memory (opaque-black wall/prop quads). Same format+extent
+			// ranking as the RT path so float UAV parents do not paint cyan sprites.
 			bool storage_texture = false;
 			if (!render_texture && gen5)
 			{
@@ -4825,42 +4933,69 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				{
 					stex = FindStorageTexture(addr, size.size, false);
 				}
-				storage_texture = !stex.IsEmpty();
-				if (storage_texture)
+				if (!stex.IsEmpty())
 				{
-					size_t alias_index = 0;
-					if (stex.Size() > 1)
+					const size_t cand_n = static_cast<size_t>(stex.Size() < 16 ? stex.Size() : 16);
+					VkFormat     cand_fmt[16] = {};
+					uint32_t     cand_w[16]   = {};
+					uint32_t     cand_h[16]   = {};
+					for (size_t i = 0; i < cand_n; i++)
 					{
-						uint64_t sizes[16] = {};
-						const auto n       = static_cast<size_t>(stex.Size() < 16 ? stex.Size() : 16);
-						bool       use_guest_bytes = true;
-						for (size_t i = 0; i < n; i++)
-						{
-							if (stex.At(static_cast<int>(i))->guest_size == 0)
-							{
-								use_guest_bytes = false;
-								break;
-							}
-						}
-						if (use_guest_bytes)
-						{
-							for (size_t i = 0; i < n; i++)
-							{
-								sizes[i] = stex.At(static_cast<int>(i))->guest_size;
-							}
-							alias_index = PreferGpuMemoryAliasIndex(sizes, n, size.size);
-						} else
-						{
-							for (size_t i = 0; i < n; i++)
-							{
-								const auto& e = stex.At(static_cast<int>(i))->extent;
-								sizes[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
-							}
-							const uint64_t sample_area = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
-							alias_index               = PreferGpuMemoryAliasIndex(sizes, n, sample_area);
-						}
+						cand_fmt[i] = stex.At(static_cast<int>(i))->format;
+						cand_w[i]   = stex.At(static_cast<int>(i))->extent.width;
+						cand_h[i]   = stex.At(static_cast<int>(i))->extent.height;
 					}
-					tex = stex.At(static_cast<int>(alias_index));
+					int    filtered[16] = {};
+					size_t filtered_n   = 0;
+					bool   reject_st    = false;
+					Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered,
+					                             &filtered_n, &reject_st);
+					if (!reject_st)
+					{
+						storage_texture          = true;
+						const bool   use_filter  = filtered_n > 0;
+						const size_t n           = use_filter ? filtered_n : cand_n;
+						size_t       alias_index = 0;
+						if (n > 1)
+						{
+							uint64_t sizes[16]       = {};
+							bool     use_guest_bytes = true;
+							for (size_t i = 0; i < n; i++)
+							{
+								const int ri = use_filter ? filtered[i] : static_cast<int>(i);
+								if (stex.At(ri)->guest_size == 0)
+								{
+									use_guest_bytes = false;
+									break;
+								}
+							}
+							if (use_guest_bytes)
+							{
+								for (size_t i = 0; i < n; i++)
+								{
+									const int ri = use_filter ? filtered[i] : static_cast<int>(i);
+									sizes[i]     = stex.At(ri)->guest_size;
+								}
+								alias_index = PreferGpuMemoryAliasIndex(sizes, n, size.size);
+							} else
+							{
+								for (size_t i = 0; i < n; i++)
+								{
+									const int   ri = use_filter ? filtered[i] : static_cast<int>(i);
+									const auto& e  = stex.At(ri)->extent;
+									sizes[i] = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+								}
+								const uint64_t sample_area =
+								    static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+								alias_index = PreferGpuMemoryAliasIndex(sizes, n, sample_area);
+							}
+						}
+						if (use_filter)
+						{
+							alias_index = static_cast<size_t>(filtered[alias_index]);
+						}
+						tex = stex.At(static_cast<int>(alias_index));
+					}
 				}
 			}
 			if (gen5)
@@ -4923,15 +5058,22 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					    submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_buffer_info));
 				} else
 				{
-					// Overlapping StorageBuffers often hold the live GPU pixels for
-					// tile-27 samples that are not color RTs. Write them back so
-					// TileConvertSw64kRxToLinear does not detile empty guest memory.
-					if (gen5 && (tile == 27u || tile == 0u))
+					// Never flush StorageBuffers before sample guest upload (KytyPS5
+					// contract): SSBOs are linear MUBUF data, not texture content.
+					// Write-back then linear/tile upload corrupts package atlases.
+					EXIT_IF(Gen5SampleMayWriteBackStorageBeforeGuestUpload());
+					// Tiled samples under a live RT/ST that was not bound as alias
+					// must not detile GPU-owned guest (catalog: 642x362 tile27 guest).
+					bool live_cover = false;
+					if (gen5 && (tile == 27u || tile == 9u))
 					{
-						GpuMemoryWriteBackStorageRange(g_render_ctx->GetGraphicCtx(), addr, size.size);
+						const auto r_cover = FindRenderTexture(addr, size.size, false);
+						const auto s_cover = FindStorageTexture(addr, size.size, false);
+						live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
 					}
+					const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, live_cover);
 					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
-					                                  force_degamma);
+					                                  force_degamma, skip_guest);
 					tex = static_cast<TextureVulkanImage*>(
 					    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 				}
@@ -4939,6 +5081,23 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		}
 
 		EXIT_NOT_IMPLEMENTED(tex == nullptr);
+
+		if (render_texture)
+		{
+			catalog_sample("rt");
+		} else if (depth_texture)
+		{
+			catalog_sample("depth");
+		} else if (tex != nullptr && tex->type == VulkanImageType::StorageTexture)
+		{
+			catalog_sample("st");
+		} else if (tex != nullptr && tex->type == VulkanImageType::VideoOut)
+		{
+			catalog_sample("video");
+		} else
+		{
+			catalog_sample("guest");
+		}
 
 		if (textures.desc[i].textures2d_without_sampler)
 		{
@@ -5978,9 +6137,13 @@ static void eop_event_delete_func(LibKernel::EventQueue::KernelEqueue eq, LibKer
 {
 	EXIT_IF(event == nullptr);
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_NOT_IMPLEMENTED(event->event.ident != GRAPHICS_EVENT_EOP);
 	EXIT_NOT_IMPLEMENTED(event->event.filter != LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
-	g_render_ctx->DeleteEopEq(eq);
+	// Only EOP-class ids are tracked for TriggerEopEvent; other graphics ids
+	// are passive registrations until a producer is wired.
+	if (IsGraphicsEopEventId(static_cast<int>(event->event.ident)))
+	{
+		g_render_ctx->DeleteEopEq(eq, static_cast<int>(event->event.ident));
+	}
 }
 
 static void eop_event_trigger_func(LibKernel::EventQueue::KernelEqueueEvent* event, void* trigger_data)
@@ -5995,15 +6158,16 @@ int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, voi
 {
 	EXIT_IF(g_render_ctx == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(id != GRAPHICS_EVENT_EOP);
-
+	// Gen5 registers multiple graphics event idents (0 = queued interrupt,
+	// 0x40 = EOP, 0x48 and others observed at device init). Accept any id on the
+	// graphics filter; only EOP-class ids are added to the end-of-pipe list.
 	LibKernel::EventQueue::KernelEqueueEvent event;
 	event.triggered                = false;
-	event.event.ident              = GRAPHICS_EVENT_EOP;
+	event.event.ident              = static_cast<uintptr_t>(id);
 	event.event.filter             = LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS;
 	event.event.udata              = udata;
 	event.event.fflags             = 0;
-	event.event.data               = 0;
+	event.event.data               = id;
 	event.filter.delete_event_func = eop_event_delete_func;
 	event.filter.reset_func        = eop_event_reset_func;
 	event.filter.trigger_func      = eop_event_trigger_func;
@@ -6011,7 +6175,10 @@ int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, voi
 
 	int result = LibKernel::EventQueue::KernelAddEvent(eq, event);
 
-	g_render_ctx->AddEopEq(eq);
+	if (IsGraphicsEopEventId(id))
+	{
+		g_render_ctx->AddEopEq(eq, id);
+	}
 
 	return result;
 }
@@ -6020,11 +6187,13 @@ int GraphicsRenderDeleteEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id)
 {
 	EXIT_IF(g_render_ctx == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(id != GRAPHICS_EVENT_EOP);
+	int result = LibKernel::EventQueue::KernelDeleteEvent(eq, static_cast<uintptr_t>(id),
+	                                                     LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
 
-	int result = LibKernel::EventQueue::KernelDeleteEvent(eq, GRAPHICS_EVENT_EOP, LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
-
-	g_render_ctx->DeleteEopEq(eq);
+	if (IsGraphicsEopEventId(id))
+	{
+		g_render_ctx->DeleteEopEq(eq, id);
+	}
 
 	return result;
 }

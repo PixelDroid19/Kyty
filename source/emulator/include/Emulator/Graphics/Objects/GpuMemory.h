@@ -509,7 +509,7 @@ public:
 	using update_func_t     = void (*)(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size,
                                    int vaddr_num);
 
-	static constexpr int PARAMS_MAX = 8;
+	static constexpr int PARAMS_MAX = 10;
 
 	GpuObject()          = default;
 	virtual ~GpuObject() = default;

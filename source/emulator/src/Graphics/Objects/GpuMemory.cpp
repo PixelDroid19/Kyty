@@ -661,7 +661,37 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 	if (need_update)
 	{
 		EXIT_IF(o.update_func == nullptr);
-		o.update_func(ctx, o.params, o.object.obj, h.block.vaddr, h.block.size, h.block.vaddr_num);
+		// Textures linked under a live RT/StorageTexture must not re-detile from
+		// guest after StorageBuffer writebacks clobber the same pages: the guest
+		// then holds linear SSBO bytes, and tile-27/9 detile produces horizontal
+		// bands. Keep the last GPU-resident image; sample bind prefers the live
+		// surface when still present.
+		bool surface_parent = false;
+		if (o.object.type == GpuMemoryObjectType::Texture)
+		{
+			for (const auto& link: h.others)
+			{
+				if (link.object_id < 0 || static_cast<uint32_t>(link.object_id) >= heap.objects.Size())
+				{
+					continue;
+				}
+				const auto& parent = heap.objects[link.object_id];
+				if (parent.free)
+				{
+					continue;
+				}
+				const auto pt = parent.info.object.type;
+				if (pt == GpuMemoryObjectType::RenderTexture || pt == GpuMemoryObjectType::StorageTexture)
+				{
+					surface_parent = true;
+					break;
+				}
+			}
+		}
+		if (!surface_parent)
+		{
+			o.update_func(ctx, o.params, o.object.obj, h.block.vaddr, h.block.size, h.block.vaddr_num);
+		}
 		o.gpu_update_time = get_current_time();
 	}
 }
@@ -1571,6 +1601,19 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		auto create_func = info.GetCreateFromObjectsFunc();
 		EXIT_IF(create_func == nullptr);
 		o.object.obj = create_func(ctx, buffer, o.params, scenario, objects, &o.mem);
+		// Texture CreateFromObjects may leave layout UNDEFINED when no
+		// format+extent surface parent is usable. Fall back to guest upload so
+		// package tiles are not replaced by transparent AABBs over god-rays.
+		if (info.type == GpuMemoryObjectType::Texture && o.object.obj != nullptr)
+		{
+			auto* tex = static_cast<TextureVulkanImage*>(o.object.obj);
+			if (tex->layout == VK_IMAGE_LAYOUT_UNDEFINED)
+			{
+				auto update = info.GetUpdateFunc();
+				EXIT_IF(update == nullptr);
+				update(ctx, o.params, o.object.obj, vaddr, size, vaddr_num);
+			}
+		}
 	} else
 	{
 		o.object.obj = info.GetCreateFunc()(ctx, o.params, vaddr, size, vaddr_num, &o.mem);

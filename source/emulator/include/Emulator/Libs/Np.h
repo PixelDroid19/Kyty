@@ -11,6 +11,7 @@ namespace Kyty::Libs::NpUniversalDataSystem {
 
 struct Event;
 struct EventPropertyObject;
+struct EventPropertyArray;
 
 int KYTY_SYSV_ABI Initialize(const void* parameters);
 int KYTY_SYSV_ABI CreateContext(int32_t* context);
@@ -19,6 +20,17 @@ int KYTY_SYSV_ABI RegisterContext();
 int KYTY_SYSV_ABI CreateEvent(const char* name, uint64_t options, Event** event, EventPropertyObject** properties);
 int KYTY_SYSV_ABI EventPropertyObjectSetInt32(EventPropertyObject* properties, const char* name, int32_t value);
 int KYTY_SYSV_ABI EventPropertyObjectSetString(EventPropertyObject* properties, const char* name, const char* value);
+// sceNpUniversalDataSystemEventPropertyObjectSetArray — NID Wxbg5x3pTXA.
+// When value is null, allocates a host-owned array and returns it via value_ptr.
+int KYTY_SYSV_ABI EventPropertyObjectSetArray(EventPropertyObject* properties, const char* key,
+                                              const EventPropertyArray* value, EventPropertyArray** value_ptr);
+int KYTY_SYSV_ABI CreateEventPropertyArray(EventPropertyArray** new_array);
+int KYTY_SYSV_ABI DestroyEventPropertyArray(EventPropertyArray* array);
+int KYTY_SYSV_ABI EventPropertyArraySetString(EventPropertyArray* array, const char* value);
+int KYTY_SYSV_ABI EventPropertyArraySetInt32(EventPropertyArray* array, int32_t value);
+int KYTY_SYSV_ABI EventPropertyArraySetUInt32(EventPropertyArray* array, uint32_t value);
+int KYTY_SYSV_ABI EventPropertyArraySetInt64(EventPropertyArray* array, int64_t value);
+int KYTY_SYSV_ABI EventPropertyArraySetUInt64(EventPropertyArray* array, uint64_t value);
 int KYTY_SYSV_ABI PostEvent(int32_t context, int32_t handle, Event* event, uint32_t options);
 int KYTY_SYSV_ABI DestroyEvent(Event* event);
 

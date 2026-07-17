@@ -1363,25 +1363,16 @@ int KYTY_SYSV_ABI PthreadAttrSetschedparam(PthreadAttr* attr, const KernelSchedP
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	// PS5 guest priorities span a wide numeric range (observed Thread.cpp
+	// clamps to roughly 256..767). Host Linux SCHED_OTHER only accepts
+	// sched_priority 0 — mapping guest lows/highs to ±2 returns EINVAL and
+	// the game asserts (int $0x41, "ret == 0" / scePthreadAttrSetschedparam).
+	// Apply a host-valid param and always succeed for a well-formed guest call.
 	KernelSchedParam pparam {};
-	if (param->sched_priority <= 478)
-	{
-		pparam.sched_priority = +2;
-	} else if (param->sched_priority >= 733)
-	{
-		pparam.sched_priority = -2;
-	} else
-	{
-		pparam.sched_priority = 0;
-	}
+	pparam.sched_priority = 0;
+	(void)pthread_attr_setschedparam(&(*attr)->p, &pparam);
 
-	int result = pthread_attr_setschedparam(&(*attr)->p, &pparam);
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadAttrSetschedpolicy(PthreadAttr* attr, int policy)
@@ -3176,6 +3167,34 @@ int KYTY_SYSV_ABI pthread_join(LibKernel::Pthread thread, void** value)
 	return POSIX_PTHREAD_CALL(LibKernel::PthreadJoin(thread, value));
 }
 
+int KYTY_SYSV_ABI pthread_detach(LibKernel::Pthread thread)
+{
+	PRINT_NAME();
+
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadDetach(thread));
+}
+
+void KYTY_SYSV_ABI pthread_exit(void* value)
+{
+	PRINT_NAME();
+
+	LibKernel::PthreadExit(value);
+}
+
+void KYTY_SYSV_ABI pthread_yield()
+{
+	PRINT_NAME();
+
+	LibKernel::PthreadYield();
+}
+
+int KYTY_SYSV_ABI pthread_cond_signal(LibKernel::PthreadCond* cond)
+{
+	PRINT_NAME();
+
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondSignal(cond));
+}
+
 int KYTY_SYSV_ABI pthread_cond_broadcast(LibKernel::PthreadCond* cond)
 {
 	PRINT_NAME();
@@ -3293,6 +3312,97 @@ int KYTY_SYSV_ABI pthread_mutexattr_destroy(LibKernel::PthreadMutexattr* attr)
 	PRINT_NAME();
 
 	return POSIX_PTHREAD_CALL(LibKernel::PthreadMutexattrDestroy(attr));
+}
+
+// Gen5 Posix_v1 pthread_attr_* NIDs (Astro after package path bring-up).
+int KYTY_SYSV_ABI pthread_attr_init(LibKernel::PthreadAttr* attr)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrInit(attr));
+}
+
+int KYTY_SYSV_ABI pthread_attr_destroy(LibKernel::PthreadAttr* attr)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrDestroy(attr));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getstack(const LibKernel::PthreadAttr* attr, void** stack_addr, size_t* stack_size)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetstack(attr, stack_addr, stack_size));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setstacksize(LibKernel::PthreadAttr* attr, size_t stack_size)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetstacksize(attr, stack_size));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getstacksize(const LibKernel::PthreadAttr* attr, size_t* stack_size)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetstacksize(attr, stack_size));
+}
+
+int KYTY_SYSV_ABI pthread_attr_get_np(LibKernel::Pthread thread, LibKernel::PthreadAttr* attr)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGet(thread, attr));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getschedpolicy(const LibKernel::PthreadAttr* attr, int* policy)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetschedpolicy(attr, policy));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setschedpolicy(LibKernel::PthreadAttr* attr, int policy)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetschedpolicy(attr, policy));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setdetachstate(LibKernel::PthreadAttr* attr, int state)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetdetachstate(attr, state));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getdetachstate(const LibKernel::PthreadAttr* attr, int* state)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetdetachstate(attr, state));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setschedparam(LibKernel::PthreadAttr* attr, const LibKernel::KernelSchedParam* param)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetschedparam(attr, param));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getschedparam(const LibKernel::PthreadAttr* attr, LibKernel::KernelSchedParam* param)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetschedparam(attr, param));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setinheritsched(LibKernel::PthreadAttr* attr, int inherit_sched)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetinheritsched(attr, inherit_sched));
+}
+
+int KYTY_SYSV_ABI pthread_attr_setguardsize(LibKernel::PthreadAttr* attr, size_t guard_size)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrSetguardsize(attr, guard_size));
+}
+
+int KYTY_SYSV_ABI pthread_attr_getguardsize(const LibKernel::PthreadAttr* attr, size_t* guard_size)
+{
+	PRINT_NAME();
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadAttrGetguardsize(attr, guard_size));
 }
 
 } // namespace Posix

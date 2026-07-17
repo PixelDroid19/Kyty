@@ -701,6 +701,86 @@ TEST(EmulatorGraphicsState, Gen5SampleFormatMatchesVulkanRejectsFloatForRgba8)
 	EXPECT_EQ(compatible, 1u);
 }
 
+// Sample guest upload must never flush StorageBuffers first (linear SSBO ≠ texture).
+TEST(EmulatorGraphicsState, Gen5SampleGuestUploadNeverWriteBackStorage)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_FALSE(Gen5SampleMayWriteBackStorageBeforeGuestUpload());
+}
+
+// Tiled guest upload under a live color surface is forbidden (GPU-owned guest).
+TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledRejectsCoveredTile27)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, true));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, true));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, false));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, false));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(0u, true));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(0u, false));
+}
+
+// Hash refresh stays enabled so late package loads still upload; SSBO clobber
+// is handled by skipping guest re-detile when a live RT/ST parent is linked.
+TEST(EmulatorGraphicsState, Gen5SampleTextureHashRefreshStaysEnabled)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(Gen5SampleTextureUsesHashRefresh(56u));
+	EXPECT_TRUE(Gen5SampleTextureUsesHashRefresh(71u));
+	EXPECT_TRUE(Gen5SampleTextureUsesHashRefresh(0u));
+}
+
+// CreateFromObjects may copy a live surface parent only when ufmt families match.
+// Float lighting under an RGBA8 sample must not be blitted into the Texture.
+TEST(EmulatorGraphicsState, Gen5SampleMayCopyFromSurfaceParentMatchesFormatFamily)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(56u, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(56u, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(56u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(71u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(71u, VK_FORMAT_R8G8B8A8_UNORM));
+	// Unknown sample ufmt: do not block all parents.
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(14u, VK_FORMAT_R8G8_UNORM));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(14u, VK_FORMAT_R16G16B16A16_SFLOAT));
+}
+
+// Dead Cells residual: bind only exact sample extent. A larger parent without a
+// crop view left banded/false-color world tiles (never fall back to non-exact).
+TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesPrefersExactExtent)
+{
+	using namespace Kyty::Libs::Graphics;
+	const VkFormat formats[]   = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM,
+	                              VK_FORMAT_R8G8B8A8_UNORM};
+	const uint32_t extents_w[] = {1920u, 1920u, 128u};
+	const uint32_t extents_h[] = {1080u, 1080u, 128u};
+	int            indices[16] = {};
+	size_t         count       = 0;
+	bool           reject      = false;
+
+	// Sample 128x128 ufmt 56: skip float parent; only exact 128x128.
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 128u, 128u, 3, formats, extents_w, extents_h, indices,
+	                                         &count, &reject));
+	EXPECT_FALSE(reject);
+	ASSERT_EQ(count, 1u);
+	EXPECT_EQ(indices[0], 2);
+
+	// Only float candidates for ufmt 56 → reject.
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 1920u, 1080u, 1, formats, extents_w, extents_h, indices,
+	                                         &count, &reject));
+	EXPECT_TRUE(reject);
+	EXPECT_EQ(count, 0u);
+
+	// Format match without exact extent → reject (no full-screen parent bind).
+	const VkFormat only_large[] = {VK_FORMAT_R8G8B8A8_UNORM};
+	const uint32_t large_w[]    = {1920u};
+	const uint32_t large_h[]    = {1080u};
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 128u, 128u, 1, only_large, large_w, large_h, indices,
+	                                         &count, &reject));
+	EXPECT_TRUE(reject);
+	EXPECT_EQ(count, 0u);
+}
+
 // Sample pixel area vs RT extent areas (GraphicsRender sample-bind path).
 // A large sample covering a tiny child RT and a full-size parent must bind the
 // parent (tightest cover >= sample), not the child (sample_size==0 bug).
@@ -1385,6 +1465,8 @@ TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
 	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, true), Gen5SampleBacking::ExactRenderTarget);
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 0, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(56, 9, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(133, 9, false), Gen5SampleBacking::Unsupported);
 }
 
 TEST(EmulatorGraphicsState, ResolvesObservedSamplerClampModes)

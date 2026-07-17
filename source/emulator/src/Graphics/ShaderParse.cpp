@@ -339,8 +339,16 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			break;
 		case 0x05: KYTY_NI("s_cmov_b32"); break;
 		case 0x06: KYTY_NI("s_cmov_b64"); break;
-		case 0x07: KYTY_NI("s_not_b32"); break;
-		case 0x08: KYTY_NI("s_not_b64"); break;
+		case 0x07:
+			inst.type   = ShaderInstructionType::SNotB32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
+			break;
+		case 0x08:
+			inst.type        = ShaderInstructionType::SNotB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
 		case 0x09: KYTY_NI("s_wqm_b32"); break;
 		case 0x0a:
 			inst.type        = ShaderInstructionType::SWqmB64;
@@ -628,9 +636,11 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 	uint32_t src1_abs  = (sdwa ? (buffer[1] >> 29u) & 0x1u : 0);
 	uint32_t s1        = (sdwa ? (buffer[1] >> 31u) & 0x1u : 0);
 
-	EXIT_NOT_IMPLEMENTED(src0_sel != 6);
+	// SDWA SEL 0-6: BYTE_0..3, WORD_0..1, DWORD. Zero-extend only for now
+	// (src*_sext is a separate path).
+	EXIT_NOT_IMPLEMENTED(src0_sel > 6);
 	EXIT_NOT_IMPLEMENTED(src0_sext != 0);
-	EXIT_NOT_IMPLEMENTED(src1_sel != 6);
+	EXIT_NOT_IMPLEMENTED(src1_sel > 6);
 	EXIT_NOT_IMPLEMENTED(src1_sext != 0);
 
 	ShaderInstruction inst;
@@ -645,6 +655,8 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 		size++;
 	}
 
+	inst.src[0].swizzle  = static_cast<uint8_t>(src0_sel);
+	inst.src[1].swizzle  = static_cast<uint8_t>(src1_sel);
 	inst.src[0].absolute = (src0_abs != 0);
 	inst.src[1].absolute = (src1_abs != 0);
 	inst.src[0].negate   = (src0_neg != 0);
@@ -807,12 +819,12 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 		case 0x8E: KYTY_NI("v_cmp_ge_i16"); break;
 		case 0x8F: KYTY_NI("v_cmp_class_f16"); break;
 		case 0x90: KYTY_NI("v_cmpx_f_i32"); break;
-		case 0x91: KYTY_NI("v_cmpx_lt_i32"); break;
-		case 0x92: KYTY_NI("v_cmpx_eq_i32"); break;
-		case 0x93: KYTY_NI("v_cmpx_le_i32"); break;
-		case 0x94: KYTY_NI("v_cmpx_gt_i32"); break;
-		case 0x95: KYTY_NI("v_cmpx_ne_i32"); break;
-		case 0x96: KYTY_NI("v_cmpx_ge_i32"); break;
+		case 0x91: inst.type = ShaderInstructionType::VCmpxLtI32; break;
+		case 0x92: inst.type = ShaderInstructionType::VCmpxEqI32; break;
+		case 0x93: inst.type = ShaderInstructionType::VCmpxLeI32; break;
+		case 0x94: inst.type = ShaderInstructionType::VCmpxGtI32; break;
+		case 0x95: inst.type = ShaderInstructionType::VCmpxNeI32; break;
+		case 0x96: inst.type = ShaderInstructionType::VCmpxGeI32; break;
 		case 0x97: KYTY_NI("v_cmpx_t_i32"); break;
 		case 0x98: KYTY_NI("v_cmpx_class_f32"); break;
 		case 0x99: KYTY_NI("v_cmpx_lt_i16"); break;
@@ -954,9 +966,11 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	uint32_t src0_abs  = (sdwa ? (buffer[1] >> 21u) & 0x1u : 0u);
 	uint32_t s0        = (sdwa ? (buffer[1] >> 23u) & 0x1u : 1u);
 
+	// Destination partial writes (dst_sel != DWORD) need a read-modify-write
+	// of the target VGPR; not wired yet. Source SEL 0-6 is supported.
 	EXIT_NOT_IMPLEMENTED(dst_sel != 6);
 	EXIT_NOT_IMPLEMENTED(sdwa && dst_sel == 6 && dst_u != 0);
-	EXIT_NOT_IMPLEMENTED(src0_sel != 6);
+	EXIT_NOT_IMPLEMENTED(src0_sel > 6);
 	EXIT_NOT_IMPLEMENTED(src0_sext != 0);
 
 	ShaderInstruction inst;
@@ -982,6 +996,7 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		size++;
 	}
 
+	inst.src[0].swizzle  = static_cast<uint8_t>(src0_sel);
 	inst.src[0].absolute = (src0_abs != 0);
 	inst.src[0].negate   = (src0_neg != 0);
 	inst.dst.clamp       = (clmp != 0);
@@ -1131,11 +1146,12 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 
 	EXIT_NOT_IMPLEMENTED(dst_sel != 6);
 	EXIT_NOT_IMPLEMENTED(sdwa && dst_sel == 6 && dst_u != 0);
-	EXIT_NOT_IMPLEMENTED(src0_sel != 6);
+	EXIT_NOT_IMPLEMENTED(src0_sel > 6);
 	EXIT_NOT_IMPLEMENTED(src0_sext != 0);
 	// SDWA src0/src1 NEG bits map to operand.negate (same as VOP3).
 	// Captured post-Play Gen5 VOP2 SDWA sets src0_neg; SPIR-V already emits OpFNegate.
-	EXIT_NOT_IMPLEMENTED(src1_sel != 6);
+	// Source SEL 0-6: BYTE_n / WORD_n / DWORD (zero-extend on load).
+	EXIT_NOT_IMPLEMENTED(src1_sel > 6);
 	EXIT_NOT_IMPLEMENTED(src1_sext != 0);
 
 	ShaderInstruction inst;
@@ -1160,6 +1176,8 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		size++;
 	}
 
+	inst.src[0].swizzle  = static_cast<uint8_t>(src0_sel);
+	inst.src[1].swizzle  = static_cast<uint8_t>(src1_sel);
 	inst.src[0].absolute = (src0_abs != 0);
 	inst.src[1].absolute = (src1_abs != 0);
 	inst.src[0].negate   = (src0_neg != 0);
@@ -1663,12 +1681,12 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x8E: KYTY_NI("v_cmp_ge_i16"); break;
 		case 0x8F: KYTY_NI("v_cmp_class_f16"); break;
 		case 0x90: KYTY_NI("v_cmpx_f_i32"); break;
-		case 0x91: KYTY_NI("v_cmpx_lt_i32"); break;
-		case 0x92: KYTY_NI("v_cmpx_eq_i32"); break;
-		case 0x93: KYTY_NI("v_cmpx_le_i32"); break;
-		case 0x94: KYTY_NI("v_cmpx_gt_i32"); break;
-		case 0x95: KYTY_NI("v_cmpx_ne_i32"); break;
-		case 0x96: KYTY_NI("v_cmpx_ge_i32"); break;
+		case 0x91: inst.type = ShaderInstructionType::VCmpxLtI32; break;
+		case 0x92: inst.type = ShaderInstructionType::VCmpxEqI32; break;
+		case 0x93: inst.type = ShaderInstructionType::VCmpxLeI32; break;
+		case 0x94: inst.type = ShaderInstructionType::VCmpxGtI32; break;
+		case 0x95: inst.type = ShaderInstructionType::VCmpxNeI32; break;
+		case 0x96: inst.type = ShaderInstructionType::VCmpxGeI32; break;
 		case 0x97: KYTY_NI("v_cmpx_t_i32"); break;
 		case 0x98: KYTY_NI("v_cmpx_class_f32"); break;
 		case 0x99: KYTY_NI("v_cmpx_lt_i16"); break;
@@ -2007,8 +2025,8 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x146: KYTY_NI("v_cubetc_f32"); break;
 		case 0x147: KYTY_NI("v_cubema_f32"); break;
 		case 0x148: inst.type = ShaderInstructionType::VBfeU32; break;
-		case 0x149: KYTY_NI("v_bfe_i32"); break;
-		case 0x14A: KYTY_NI("v_bfi_b32"); break;
+		case 0x149: inst.type = ShaderInstructionType::VBfeI32; break;
+		case 0x14A: inst.type = ShaderInstructionType::VBfiB32; break;
 		case 0x14b: inst.type = ShaderInstructionType::VFmaF32; break;
 		case 0x14C: KYTY_NI("v_fma_f64"); break;
 		case 0x14D: KYTY_NI("v_lerp_u8"); break;
@@ -2158,7 +2176,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x35A: KYTY_NI("v_interp_p2_f16"); break;
 		case 0x35E: KYTY_NI("v_mad_i16"); break;
 		case 0x35F: KYTY_NI("v_div_fixup_f16"); break;
-		case 0x36D: KYTY_NI("v_add3_u32"); break;
+		case 0x36D: inst.type = ShaderInstructionType::VAdd3U32; break;
 		case 0x36F:
 			if (next_gen)
 			{
@@ -2713,7 +2731,8 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 
 	EXIT_NOT_IMPLEMENTED(idxen == 0);
 	EXIT_NOT_IMPLEMENTED(offen == 1);
-	EXIT_NOT_IMPLEMENTED(offset != 0);
+	// Non-zero 12-bit offset is folded into soffset when that source is an
+	// immediate/inline constant (observed Gen5 buffer_load_dwordx* paths).
 	EXIT_NOT_IMPLEMENTED(glc == 1);
 	EXIT_NOT_IMPLEMENTED(slc == 1);
 	EXIT_NOT_IMPLEMENTED(lds == 1);
@@ -2733,6 +2752,24 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 	{
 		inst.src[2].constant.u = buffer[size];
 		size++;
+	}
+
+	if (offset != 0u)
+	{
+		if (inst.src[2].type == ShaderOperandType::IntegerInlineConstant)
+		{
+			inst.src[2].type       = ShaderOperandType::LiteralConstant;
+			inst.src[2].constant.u = static_cast<uint32_t>(inst.src[2].constant.i) + offset;
+			inst.src[2].size       = 0;
+		} else if (inst.src[2].type == ShaderOperandType::LiteralConstant)
+		{
+			inst.src[2].constant.u += offset;
+		} else
+		{
+			// SGPR soffset + non-zero instruction offset needs a host add;
+			// not observed yet for this title's first MUBUF paths.
+			EXIT_NOT_IMPLEMENTED(true);
+		}
 	}
 
 	switch (opcode)
@@ -2787,9 +2824,24 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
 			inst.src[1].size = 4;
 			break;
-		case 0x0D: KYTY_NI("buffer_load_dwordx2"); break;
-		case 0x0E: KYTY_NI("buffer_load_dwordx4"); break;
-		case 0x0F: KYTY_NI("buffer_load_dwordx3"); break;
+		case 0x0D:
+			inst.type        = ShaderInstructionType::BufferLoadDwordx2;
+			inst.format      = ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 2;
+			break;
+		case 0x0E:
+			inst.type        = ShaderInstructionType::BufferLoadDwordx4;
+			inst.format      = ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 4;
+			break;
+		case 0x0F:
+			inst.type        = ShaderInstructionType::BufferLoadDwordx3;
+			inst.format      = ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 3;
+			break;
 		case 0x18: KYTY_NI("buffer_store_byte"); break;
 		case 0x1A: KYTY_NI("buffer_store_short"); break;
 		case 0x1c:
@@ -2797,9 +2849,24 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
 			inst.src[1].size = 4;
 			break;
-		case 0x1D: KYTY_NI("buffer_store_dwordx2"); break;
-		case 0x1E: KYTY_NI("buffer_store_dwordx4"); break;
-		case 0x1F: KYTY_NI("buffer_store_dwordx3"); break;
+		case 0x1D:
+			inst.type        = ShaderInstructionType::BufferStoreDwordx2;
+			inst.format      = ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 2;
+			break;
+		case 0x1E:
+			inst.type        = ShaderInstructionType::BufferStoreDwordx4;
+			inst.format      = ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 4;
+			break;
+		case 0x1F:
+			inst.type        = ShaderInstructionType::BufferStoreDwordx3;
+			inst.format      = ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			inst.dst.size    = 3;
+			break;
 		case 0x30: KYTY_NI("buffer_atomic_swap"); break;
 		case 0x31: KYTY_NI("buffer_atomic_cmpswap"); break;
 		case 0x32: KYTY_NI("buffer_atomic_add"); break;
@@ -3262,6 +3329,8 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x25: KYTY_NI("image_sample_b"); break;
 		case 0x26: KYTY_NI("image_sample_b_cl"); break;
 		case 0x27:
+			// image_sample_lz: sample LOD 0. Same VDATA layouts as image_sample
+			// for the observed dmasks (0x7 RGB, 0xf RGBA after PlayGo/Resident).
 			inst.type        = ShaderInstructionType::ImageSampleLz;
 			inst.src[0].size = 3;
 			inst.src[1].size = 8;
@@ -3272,6 +3341,12 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 				{
 					inst.format   = ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7;
 					inst.dst.size = 3;
+					break;
+				}
+				case 0xf:
+				{
+					inst.format   = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;
+					inst.dst.size = 4;
 					break;
 				}
 				default:;

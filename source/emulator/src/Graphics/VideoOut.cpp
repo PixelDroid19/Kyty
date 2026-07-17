@@ -254,7 +254,9 @@ static void calc_buffer_size(const VideoOutBufferAttribute* attribute, const Vid
 	{
 		EXIT_NOT_IMPLEMENTED(attribute2->option != 0 && attribute2->option != 8);
 		EXIT_NOT_IMPLEMENTED(attribute2->aspect_ratio != 0);
-		EXIT_NOT_IMPLEMENTED(attribute2->pixel_format != 0x8000000000000000ULL && attribute2->pixel_format != 0x8000000022000000ULL);
+		// Gen5 PIXEL_FORMAT2: 8:8:8:8 sRGB and 10:10:10:2 (B/R channel order variants).
+		EXIT_NOT_IMPLEMENTED(attribute2->pixel_format != 0x8000000000000000ULL && attribute2->pixel_format != 0x8000000022000000ULL &&
+		                     attribute2->pixel_format != 0x8100000000000000ULL && attribute2->pixel_format != 0x8100000022000000ULL);
 	} else
 	{
 		EXIT_NOT_IMPLEMENTED(attribute->option != 0);
@@ -954,6 +956,14 @@ static int register_buffers_internal(VideoOutConfig* ctx, int set_id, int start_
 		} else if (attribute2->pixel_format == 0x8000000022000000ULL)
 		{
 			format = Graphics::VideoOutBufferFormat::R8G8B8A8Srgb;
+		} else if (attribute2->pixel_format == 0x8100000000000000ULL)
+		{
+			// SCE_VIDEO_OUT_PIXEL_FORMAT2_B10_G10_R10_A2
+			format = Graphics::VideoOutBufferFormat::B10G10R10A2Unorm;
+		} else if (attribute2->pixel_format == 0x8100000022000000ULL)
+		{
+			// SCE_VIDEO_OUT_PIXEL_FORMAT2_R10_G10_B10_A2
+			format = Graphics::VideoOutBufferFormat::R10G10B10A2Unorm;
 		}
 	} else
 	{
