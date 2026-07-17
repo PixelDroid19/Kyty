@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Tile.h"
+#include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/Pthread.h"
@@ -2278,14 +2279,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t nu
 	return buf->AllocateDW(num_dw);
 }
 
-// Graphics5 NID IxYiarKlXxM. Observed SysV on post-logo path:
-//   rdi = pointer to a complete type-3 PM4 packet (WaitFlipDone header
-//         0xC0051018, len=7, r=R_WAIT_FLIP_DONE)
-//   rsi = rdi - 0x1c (points 7 DW earlier into the same CB stream)
-//   rdx = 0
-//   rcx = rdi + 0x1c (points at the following ReleaseMem packet)
-// rsi/rcx match ±packet-size pointer arithmetic residuals, not extra inputs.
-// Same utility family as GetDataPacketPayloadAddress: decode PM4 header length.
+// Graphics5 NID Lkf86B98qPc: sceAgcGetPacketSize — type-3 PM4 length in dwords.
 uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 {
 	PRINT_NAME();
@@ -2310,6 +2304,57 @@ uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 	const uint32_t size_dw = KYTY_PM4_LEN(header);
 	printf("\t size_dw = %" PRIu32 "\n", size_dw);
 	return size_dw;
+}
+
+// sceAgcDmaDataPatchSetDstAddressOrOffset (NID IxYiarKlXxM).
+int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetDstAddressOrOffset(uint32_t* cmd, uint64_t destination_address)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " dst = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), destination_address);
+
+	if (cmd == nullptr || !GraphicsIsCustomDmaDataPacket(cmd[0]))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	cmd[4] = static_cast<uint32_t>(destination_address & 0xffffffffu);
+	cmd[5] = static_cast<uint32_t>((destination_address >> 32u) & 0xffffffffu);
+	return OK;
+}
+
+// sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate (NID cdDRpqcFGbU).
+int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(uint32_t* cmd, uint64_t source_value)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " src = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), source_value);
+
+	if (cmd == nullptr || !GraphicsIsCustomDmaDataPacket(cmd[0]))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	cmd[6] = static_cast<uint32_t>(source_value & 0xffffffffu);
+	cmd[7] = static_cast<uint32_t>((source_value >> 32u) & 0xffffffffu);
+	return OK;
+}
+
+// sceAgcWaitRegMemPatchAddress (NID 3KDcnM3lrcU).
+int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t address)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), address);
+
+	if (cmd == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	const uint32_t byte_off = GraphicsWaitRegMemAddressByteOffset(cmd[0]);
+	if (byte_off == 0 || (byte_off % 4u) != 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	const uint32_t dw = byte_off / 4u;
+	cmd[dw]           = static_cast<uint32_t>(address & 0xffffffffu);
+	cmd[dw + 1]       = static_cast<uint32_t>((address >> 32u) & 0xffffffffu);
+	return OK;
 }
 
 
@@ -2873,6 +2918,33 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 	cmd[0] = KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u);
 	cmd[1] = index_count;
 	cmd[2] = decode_draw_index_initiator(modifier) | 0x2u;
+
+	return cmd;
+}
+
+// sceAgcDcbDrawIndexOffset — NID B+aG9DUnTKA.
+// Packet layout (5 DW): header, index_count, index_offset, index_count, flags&0xE0000001.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t index_offset, uint32_t index_count, uint32_t flags)
+{
+	PRINT_NAME();
+
+	printf("\t index_offset = 0x%" PRIx32 "\n", index_offset);
+	printf("\t index_count  = 0x%" PRIx32 "\n", index_count);
+	printf("\t flags        = 0x%" PRIx32 "\n", flags);
+
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+
+	buf->DbgDump();
+
+	auto* cmd = buf->AllocateDW(5);
+
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	cmd[0] = KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u);
+	cmd[1] = index_count;
+	cmd[2] = index_offset;
+	cmd[3] = index_count;
+	cmd[4] = flags & 0xE0000001u;
 
 	return cmd;
 }

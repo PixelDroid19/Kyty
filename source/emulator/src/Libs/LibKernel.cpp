@@ -562,6 +562,35 @@ int KYTY_SYSV_ABI clock_gettime(int clock_id, LibKernel::KernelTimespec* time)
 	return POSIX_CALL(LibKernel::KernelClockGettime(clock_id, time));
 }
 
+// Gen5 Posix_v1 gettimeofday — NID n88vx3C5nW8. Optional timezone zero-filled.
+struct KernelTimezone
+{
+	int32_t tz_minuteswest;
+	int32_t tz_dsttime;
+};
+
+int KYTY_SYSV_ABI gettimeofday(LibKernel::KernelTimeval* time, KernelTimezone* timezone)
+{
+	PRINT_NAME();
+
+	if (time != nullptr)
+	{
+		const int status = POSIX_CALL(LibKernel::KernelGettimeofday(time));
+		if (status != 0)
+		{
+			return status;
+		}
+	}
+
+	if (timezone != nullptr)
+	{
+		timezone->tz_minuteswest = 0;
+		timezone->tz_dsttime     = 0;
+	}
+
+	return 0;
+}
+
 int KYTY_SYSV_ABI nanosleep(const LibKernel::KernelTimespec* rqtp, LibKernel::KernelTimespec* rmtp)
 {
 	PRINT_NAME();
@@ -585,6 +614,8 @@ int KYTY_SYSV_ABI stat(const char* path, LibKernel::FileSystem::FileStat* sb)
 LIB_DEFINE(InitLibKernel_1_Posix)
 {
 	LIB_FUNC("lLMT9vJAck0", clock_gettime);
+	// Gen5 Posix_v1 gettimeofday — n88vx3C5nW8.
+	LIB_FUNC("n88vx3C5nW8", gettimeofday);
 	LIB_FUNC("yS8U2TGCe1A", nanosleep);
 	LIB_FUNC("QcteRwbsnV0", usleep);
 	LIB_FUNC("E6ao34wPw+U", stat);

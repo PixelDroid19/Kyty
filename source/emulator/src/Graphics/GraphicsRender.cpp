@@ -294,9 +294,15 @@ private:
 
 struct VulkanFramebuffer
 {
-	VkRenderPass  render_pass    = nullptr;
-	uint64_t      render_pass_id = 0;
-	VkFramebuffer framebuffer    = nullptr;
+	VkRenderPass       render_pass           = nullptr;
+	uint64_t           render_pass_id        = 0;
+	VkFramebuffer      framebuffer           = nullptr;
+	VkAttachmentLoadOp color_load_op         = VK_ATTACHMENT_LOAD_OP_LOAD;
+	VkImageLayout      color_initial_layout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	float              clear_r               = 0.0f;
+	float              clear_g               = 0.0f;
+	float              clear_b               = 0.0f;
+	float              clear_a               = 0.0f;
 };
 
 class FramebufferCache
@@ -320,6 +326,8 @@ private:
 		uint64_t           depth_id             = 0;
 		bool               depth_clear_enable   = false;
 		bool               stencil_clear_enable = false;
+		VkAttachmentLoadOp color_load_op        = VK_ATTACHMENT_LOAD_OP_LOAD;
+		VkImageLayout      color_initial_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	};
 
 	Core::Mutex                  m_mutex;
@@ -440,10 +448,13 @@ enum class RenderColorType
 
 struct RenderColorInfo
 {
-	RenderColorType type          = RenderColorType::NoColorOutput;
-	VulkanImage*    vulkan_buffer = nullptr;
-	uint64_t        base_addr     = 0;
-	uint64_t        buffer_size   = 0;
+	RenderColorType type                    = RenderColorType::NoColorOutput;
+	VulkanImage*    vulkan_buffer           = nullptr;
+	uint64_t        base_addr               = 0;
+	uint64_t        buffer_size             = 0;
+	bool            cmask_fast_clear_enable = false;
+	uint32_t        clear_word0             = 0;
+	uint32_t        clear_word1             = 0;
 };
 
 class CommandPool
@@ -497,8 +508,11 @@ static void uc_check(const HW::UserConfig& uc)
 	const auto& ge_cntl = uc.GetGeControl();
 	const auto& user_en = uc.GetGeUserVgprEn();
 
-	EXIT_NOT_IMPLEMENTED(ge_cntl.primitive_group_size != 0x0000 && ge_cntl.primitive_group_size != 0x0040);
-	EXIT_NOT_IMPLEMENTED(ge_cntl.vertex_group_size != 0x0000 && ge_cntl.vertex_group_size != 0x0040);
+	// GE_CNTL group sizes are host scheduling hints. Gen5 titles emit values
+	// other than 0/0x40; accept the documented max of 0x40 rather than an
+	// exact-value whitelist.
+	EXIT_NOT_IMPLEMENTED(ge_cntl.primitive_group_size > 0x0040);
+	EXIT_NOT_IMPLEMENTED(ge_cntl.vertex_group_size > 0x0040);
 	EXIT_NOT_IMPLEMENTED(user_en.vgpr1 != false);
 	EXIT_NOT_IMPLEMENTED(user_en.vgpr2 != false);
 	EXIT_NOT_IMPLEMENTED(user_en.vgpr3 != false);
@@ -653,8 +667,8 @@ static void rt_check(const HW::RenderTarget& rt)
 		EXIT_NOT_IMPLEMENTED(rt.cmask_slice.slice_minus1 != 0x00000000);
 		EXIT_NOT_IMPLEMENTED(rt.fmask.addr != 0x0000000000000000);
 		EXIT_NOT_IMPLEMENTED(rt.fmask_slice.slice_minus1 != 0x00000000 && rt.fmask_slice.slice_minus1 != rt.slice.slice_div64_minus1);
-		EXIT_NOT_IMPLEMENTED(rt.clear_word0.word0 != 0x00000000);
-		EXIT_NOT_IMPLEMENTED(rt.clear_word1.word1 != 0x00000000);
+		// CLEAR_WORD0/1 hold the raw clear pixel; format-aware decode is in
+		// DecodeGuestColorClearWords. Non-zero words are legal.
 		EXIT_NOT_IMPLEMENTED(rt.dcc_addr.addr != 0x0000000000000000);
 		if (ps5)
 		{
@@ -728,7 +742,8 @@ static void z_check(const HW::DepthRenderTarget& z)
 		EXIT_NOT_IMPLEMENTED(z.z_info.num_samples != 0);
 		EXIT_NOT_IMPLEMENTED(z.z_info.tile_surface_enable != false);
 		EXIT_NOT_IMPLEMENTED(z.z_info.expclear_enabled != false);
-		EXIT_NOT_IMPLEMENTED(z.z_info.zrange_precision != 0);
+		// Gen5 may leave ZRANGE_PRECISION set while FORMAT is invalid/unbound; the bit is unused.
+		// EXIT_NOT_IMPLEMENTED(z.z_info.zrange_precision != 0);
 		EXIT_NOT_IMPLEMENTED(z.z_info.embedded_sample_locations != false);
 		EXIT_NOT_IMPLEMENTED(z.z_info.partially_resident != false);
 		EXIT_NOT_IMPLEMENTED(z.z_info.num_mip_levels != 0);
@@ -812,7 +827,10 @@ static void z_check(const HW::DepthRenderTarget& z)
 		EXIT_NOT_IMPLEMENTED(z.z_read_base_addr != z.z_write_base_addr);
 		EXIT_NOT_IMPLEMENTED(z.stencil_read_base_addr != z.stencil_write_base_addr);
 		EXIT_NOT_IMPLEMENTED(z.z_write_base_addr == 0);
-		EXIT_NOT_IMPLEMENTED(z.stencil_info.format != 0 && z.stencil_write_base_addr == 0);
+		// Separate stencil plane requires a non-null write base. Gen5 may set
+		// FORMAT=1 with TILE_STENCIL_DISABLE and null bases (no separate plane).
+		EXIT_NOT_IMPLEMENTED(z.stencil_info.format != 0 && z.stencil_write_base_addr == 0 &&
+		                     !(z.stencil_info.tile_stencil_disable && z.stencil_read_base_addr == 0));
 		// EXIT_NOT_IMPLEMENTED(z.pitch_div8_minus1 != 0x000000ff);
 		// EXIT_NOT_IMPLEMENTED(z.height_div8_minus1 != 0x0000008f);
 		// EXIT_NOT_IMPLEMENTED(z.slice_div64_minus1 != 0x00008fff);
@@ -1129,15 +1147,11 @@ static void vp_check(const HW::ScreenViewport& vp, const HW::ScanModeControl& sm
 	// EXIT_NOT_IMPLEMENTED(vp.hw_offset_y != 32);
 	// EXIT_NOT_IMPLEMENTED(fabsf(vp.guard_band_horz_clip - 33.133327f) > 0.001f);
 	// EXIT_NOT_IMPLEMENTED(fabsf(vp.guard_band_vert_clip - 59.629623f) > 0.001f);
-	if (ps5)
-	{
-		EXIT_NOT_IMPLEMENTED(vp.guard_band_horz_discard != 0.0f);
-		EXIT_NOT_IMPLEMENTED(vp.guard_band_vert_discard != 0.0f);
-	} else
-	{
-		EXIT_NOT_IMPLEMENTED(vp.guard_band_horz_discard != 1.000000);
-		EXIT_NOT_IMPLEMENTED(vp.guard_band_vert_discard != 1.000000);
-	}
+	// Guard-band discard adj floats are clip-space host hints; Gen5 titles set
+	// non-zero / non-1.0 values. Do not hard-fail on exact AGC defaults.
+	(void)ps5;
+	(void)vp.guard_band_horz_discard;
+	(void)vp.guard_band_vert_discard;
 	EXIT_NOT_IMPLEMENTED(vp.generic_scissor_window_offset_enable != false);
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].viewport_scissor_left != 0);
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].viewport_scissor_top != 0);
@@ -1486,11 +1500,19 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	bool with_depth = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	bool with_color = (color->vulkan_buffer != nullptr);
 
+	ColorAttachmentLoadOps color_load_ops {};
+	if (with_color)
+	{
+		color_load_ops = ResolveColorAttachmentLoadOps(color->vulkan_buffer->layout, color->cmask_fast_clear_enable, color->clear_word0,
+		                                               color->clear_word1, color->vulkan_buffer->format);
+	}
+
 	for (auto& f: m_framebuffers)
 	{
 		if (f.framebuffer != nullptr && f.image_id == (with_color ? color->vulkan_buffer->memory.unique_id : 0) &&
 		    f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) && f.depth_clear_enable == depth->depth_clear_enable &&
-		    f.stencil_clear_enable == depth->stencil_clear_enable)
+		    f.stencil_clear_enable == depth->stencil_clear_enable && f.color_load_op == color_load_ops.load_op &&
+		    f.color_initial_layout == color_load_ops.initial_layout)
 		{
 			return f.framebuffer;
 		}
@@ -1499,6 +1521,15 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	auto* framebuffer        = new VulkanFramebuffer;
 	framebuffer->render_pass = nullptr;
 	framebuffer->framebuffer = nullptr;
+	if (with_color)
+	{
+		framebuffer->color_load_op        = color_load_ops.load_op;
+		framebuffer->color_initial_layout = color_load_ops.initial_layout;
+		framebuffer->clear_r              = color_load_ops.clear_r;
+		framebuffer->clear_g              = color_load_ops.clear_g;
+		framebuffer->clear_b              = color_load_ops.clear_b;
+		framebuffer->clear_a              = color_load_ops.clear_a;
+	}
 
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 
@@ -1517,11 +1548,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	attachments[0].flags          = 0;
 	attachments[0].format         = vulkan_buffer->format;
 	attachments[0].samples        = VK_SAMPLE_COUNT_1_BIT;
-	attachments[0].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+	attachments[0].loadOp         = (with_color ? color_load_ops.load_op : VK_ATTACHMENT_LOAD_OP_LOAD);
 	attachments[0].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
 	attachments[0].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	attachments[0].initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	attachments[0].initialLayout  = (with_color ? color_load_ops.initial_layout : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	attachments[0].finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
 	attachments[1].flags          = 0;
@@ -1595,6 +1626,8 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	fnew.depth_id             = (with_depth ? depth->vulkan_buffer->memory.unique_id : 0);
 	fnew.depth_clear_enable   = depth->depth_clear_enable;
 	fnew.stencil_clear_enable = depth->stencil_clear_enable;
+	fnew.color_load_op        = color_load_ops.load_op;
+	fnew.color_initial_layout = color_load_ops.initial_layout;
 
 	bool updated = false;
 
@@ -1877,7 +1910,12 @@ static void get_input_format(const ShaderBufferResource& res, VkFormat* format, 
 	if (ps5)
 	{
 		auto fmt = res.Format();
-		if (fmt == 74)
+		if (fmt == 22)
+		{
+			// UFMT_32_FLOAT (LLVM UfmtGFX10).
+			*format = VK_FORMAT_R32_SFLOAT;
+			*size   = 1;
+		} else if (fmt == 74)
 		{
 			*format = VK_FORMAT_R32G32B32_SFLOAT;
 			*size   = 3;
@@ -3864,10 +3902,11 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 	bool       htile      = z.z_info.tile_surface_enable;
 	bool       decompress = htile && (rc.depth_compress_disable || rc.stencil_compress_disable);
 	const auto usage      = State::ResolveDepthStencilUsage(z, rc, dc);
+	const uint32_t stencil_fmt = State::ResolveEffectiveStencilFormat(z);
 
 	if (usage.target_active)
 	{
-		switch (z.z_info.format * 2 + z.stencil_info.format)
+		switch (z.z_info.format * 2 + stencil_fmt)
 		{
 			case 0: r->format = VK_FORMAT_UNDEFINED; break;
 			case 1: /*r->format = VK_FORMAT_S8_UINT*/ EXIT("Unsupported format: VK_FORMAT_S8_UINT\n"); break;
@@ -3875,7 +3914,7 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 			case 3: r->format = VK_FORMAT_D24_UNORM_S8_UINT; break;
 			case 6: r->format = VK_FORMAT_D32_SFLOAT; break;
 			case 7: r->format = VK_FORMAT_D32_SFLOAT_S8_UINT; break;
-			default: EXIT("unknown z and stencil format: %u, %u\n", z.z_info.format, z.stencil_info.format);
+			default: EXIT("unknown z and stencil format: %u, %u\n", z.z_info.format, stencil_fmt);
 		}
 	}
 
@@ -3883,7 +3922,7 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 	{
 		if (ps5)
 		{
-			bool size_found = TileGetDepthSize(z.size.x_max + 1, z.size.y_max + 1, 0, z.z_info.format, z.stencil_info.format, htile, true,
+			bool size_found = TileGetDepthSize(z.size.x_max + 1, z.size.y_max + 1, 0, z.z_info.format, stencil_fmt, htile, true,
 			                                   true, &stencil_size, &htile_size, &depth_size);
 			EXIT_NOT_IMPLEMENTED(!size_found);
 		} else
@@ -3899,7 +3938,7 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 				size = (z.slice_div64_minus1 + 1) * 64 * 2;
 			}
 
-			if (!TileGetDepthSize(z.width, z.height, pitch, z.z_info.format, z.stencil_info.format, htile, neo, false, &stencil_size,
+			if (!TileGetDepthSize(z.width, z.height, pitch, z.z_info.format, stencil_fmt, htile, neo, false, &stencil_size,
 			                      &htile_size, &depth_size))
 			{
 				depth_size.size  = size;
@@ -4150,10 +4189,13 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		auto*               buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(
             Graphics::GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, rt.base.addr, size, vulkan_buffer_info));
 		EXIT_NOT_IMPLEMENTED(buffer_vulkan == nullptr);
-		r->type          = RenderColorType::RenderTexture;
-		r->base_addr     = rt.base.addr;
-		r->vulkan_buffer = buffer_vulkan;
-		r->buffer_size   = size;
+		r->type                    = RenderColorType::RenderTexture;
+		r->base_addr               = rt.base.addr;
+		r->vulkan_buffer           = buffer_vulkan;
+		r->buffer_size             = size;
+		r->cmask_fast_clear_enable = rt.info.cmask_fast_clear_enable;
+		r->clear_word0             = rt.clear_word0.word0;
+		r->clear_word1             = rt.clear_word1.word1;
 	} else
 	{
 		EXIT_NOT_IMPLEMENTED(!(rt.info.format == 0xa && (rt.info.channel_type == 0x6 || rt.info.channel_type == 0x0) &&
@@ -4162,10 +4204,13 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		// Display buffer
 		EXIT_NOT_IMPLEMENTED(video_image.buffer_size != size);
 		EXIT_NOT_IMPLEMENTED(video_image.buffer_pitch != pitch);
-		r->type          = RenderColorType::DisplayBuffer;
-		r->base_addr     = rt.base.addr;
-		r->vulkan_buffer = video_image.image;
-		r->buffer_size   = video_image.buffer_size;
+		r->type                    = RenderColorType::DisplayBuffer;
+		r->base_addr               = rt.base.addr;
+		r->vulkan_buffer           = video_image.image;
+		r->buffer_size             = video_image.buffer_size;
+		r->cmask_fast_clear_enable = rt.info.cmask_fast_clear_enable;
+		r->clear_word0             = rt.clear_word0.word0;
+		r->clear_word1             = rt.clear_word1.word1;
 	}
 }
 
@@ -4211,19 +4256,64 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 	{
 		auto r = storage_buffers.buffers[i];
 
-		EXIT_NOT_IMPLEMENTED(r.AddTid());
+		// SharpEmu accepts all-zero V# as a null buffer. Captured Gen5 also emits
+		// base/stride/records all zero with junk in word3 (e.g. 0x3f800000 / 1.0f);
+		// that cannot address guest memory, so bind a host-only dummy SSBO.
+		const bool null_descriptor = r.Base48() == 0 && r.Stride() == 0 && r.NumRecords() == 0;
+		if (null_descriptor)
+		{
+			static StorageVulkanBuffer* s_null_storage = nullptr;
+			if (s_null_storage == nullptr)
+			{
+				s_null_storage = new StorageVulkanBuffer;
+				s_null_storage->usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+				s_null_storage->memory.property =
+				    static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+				    VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+				s_null_storage->buffer = nullptr;
+				VulkanCreateBuffer(g_render_ctx->GetGraphicCtx(), 16, s_null_storage);
+				EXIT_NOT_IMPLEMENTED(s_null_storage->buffer == nullptr);
+			}
+			StorageBufferSet(buffer, s_null_storage);
+			buffers[i] = s_null_storage;
+			if (gen5)
+			{
+				r.UpdateAddress48(static_cast<uint64_t>(i));
+			} else
+			{
+				r.UpdateAddress44(static_cast<uint64_t>(i));
+			}
+			(*sgprs)[0] = r.fields[0];
+			(*sgprs)[1] = r.fields[1];
+			(*sgprs)[2] = r.fields[2];
+			(*sgprs)[3] = r.fields[3];
+			(*sgprs) += 4;
+			continue;
+		}
+
+		// ADD_TID is applied in the SPIR-V path (index += thread id). Gen5 titles
+		// set the bit on storage descriptors; reject only swizzle (no host mapping).
+		EXIT_NOT_IMPLEMENTED(r.AddTid() && r.SwizzleEnabled());
 		EXIT_NOT_IMPLEMENTED(r.SwizzleEnabled());
 
 		if (gen5)
 		{
-			EXIT_NOT_IMPLEMENTED(r.OutOfBounds() != 0);
+			// OutOfBounds modes (0..3) are descriptor policy; Vulkan SSBO
+			// robust access covers the common case. Do not hard-fail.
 			const bool four_comp =
 			    r.Stride() == 16 && r.DstSelXYZW() == DstSel(4, 5, 6, 7) && ShaderIsGen5FourComponent32BitBufferFormat(r.Format());
 			// Captured: stride=4, DstSel(R,0,0,1), format=20 (single 32-bit channel).
 			const bool one_comp = r.Stride() == 4 &&
 			                      (r.DstSelXYZW() == DstSel(4, 0, 0, 1) || r.DstSelXYZW() == DstSel(4, 0, 0, 0)) &&
 			                      ShaderIsGen5SingleComponent32BitBufferFormat(r.Format());
-			EXIT_NOT_IMPLEMENTED(!(four_comp || one_comp));
+			if (!(four_comp || one_comp))
+			{
+				EXIT("unsupported Gen5 storage buffer format: index=%d start=%d usage=%u stride=%u dstsel=0x%03" PRIx32
+				     " format=%u records=%u base=0x%012" PRIx64 " fields=%08x %08x %08x %08x add_tid=%u oob=%u\n",
+				     i, storage_buffers.start_register[i], static_cast<uint32_t>(storage_buffers.usages[i]), r.Stride(), r.DstSelXYZW(),
+				     r.Format(), r.NumRecords(), r.Base48(), r.fields[0], r.fields[1], r.fields[2], r.fields[3],
+				     static_cast<unsigned>(r.AddTid()), static_cast<unsigned>(r.OutOfBounds()));
+			}
 		} else
 		{
 			EXIT_NOT_IMPLEMENTED(!((r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 0) && r.Dfmt() == 4 && r.Nfmt() == 4) ||
@@ -5715,7 +5805,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	EXIT_NOT_IMPLEMENTED(!with_depth && !with_color);
 
 	VkClearValue clears[2];
-	clears[0].color        = {{0.0f, 0.0f, 0.0f, 1.0f}};
+	clears[0].color        = {{framebuffer->clear_r, framebuffer->clear_g, framebuffer->clear_b, framebuffer->clear_a}};
 	clears[1].depthStencil = {depth->depth_clear_value, depth->stencil_clear_value};
 
 	VkExtent2D extent = (with_color ? color->vulkan_buffer->extent : depth->vulkan_buffer->extent);
@@ -5730,7 +5820,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	render_pass_info.clearValueCount   = with_depth ? 2 : 1;
 	render_pass_info.pClearValues      = clears;
 
-	if (with_color && color->vulkan_buffer->layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+	if (with_color && color->vulkan_buffer->layout != framebuffer->color_initial_layout)
 	{
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -5738,7 +5828,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		image_memory_barrier.srcAccessMask                   = VK_ACCESS_MEMORY_READ_BIT;
 		image_memory_barrier.dstAccessMask                   = VK_ACCESS_MEMORY_WRITE_BIT;
 		image_memory_barrier.oldLayout                       = color->vulkan_buffer->layout;
-		image_memory_barrier.newLayout                       = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		image_memory_barrier.newLayout                       = framebuffer->color_initial_layout;
 		image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.image                           = color->vulkan_buffer->image;

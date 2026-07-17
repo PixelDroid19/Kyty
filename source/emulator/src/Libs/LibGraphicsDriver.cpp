@@ -69,8 +69,13 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("23LRUSvYu1M", Gen5::GraphicsInit);
 	LIB_FUNC("2JtWUUiYBXs", Gen5::GraphicsGetRegisterDefaults2);
 	LIB_FUNC("wRbq6ZjNop4", Gen5::GraphicsGetRegisterDefaults2Internal);
-	// 3KDcnM3lrcU: same PM4 size utility as IxYiarKlXxM (WaitMem64 packet observed).
-	LIB_FUNC("3KDcnM3lrcU", Gen5::GraphicsGetDataPacketSizeDw);
+	// 3KDcnM3lrcU: sceAgcWaitRegMemPatchAddress (SharpEmu NID catalog).
+	LIB_FUNC("3KDcnM3lrcU", Gen5::GraphicsAgcWaitRegMemPatchAddress);
+	// Lkf86B98qPc: sceAgcGetPacketSize.
+	LIB_FUNC("Lkf86B98qPc", Gen5::GraphicsGetDataPacketSizeDw);
+	// IxYiarKlXxM: sceAgcDmaDataPatchSetDstAddressOrOffset.
+	LIB_FUNC("IxYiarKlXxM", Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset);
+	LIB_FUNC("cdDRpqcFGbU", Gen5::GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate);
 	LIB_FUNC("f3dg2CSgRKY", Gen5::GraphicsCreateShader);
 	LIB_FUNC("dolOmWH+huQ", Gen5::GraphicsUnknownGetFusedShaderSize);
 	LIB_FUNC("fd5Bp5tGTgo", Gen5::GraphicsUnknownFuseShaderHalves);
@@ -97,8 +102,6 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("UZbQjYAwwXM", Gen5::GraphicsCbSetShRegistersDirect);
 	LIB_FUNC("k3GhuSNmBLU", Gen5::GraphicsCbDispatch);
 	LIB_FUNC("wr23dPKyWc0", Gen5::GraphicsCbReleaseMem);
-	// IxYiarKlXxM / 3KDcnM3lrcU: PM4 packet size in dwords.
-	LIB_FUNC("IxYiarKlXxM", Gen5::GraphicsGetDataPacketSizeDw);
 	LIB_FUNC("TRO721eVt4g", Gen5::GraphicsDcbResetQueue);
 	LIB_FUNC("WmAc2MEj6Io", Gen5::GraphicsDcbDmaData);
 	LIB_FUNC("-RnpfpxIhec", Gen5::GraphicsDcbDmaData);
@@ -116,6 +119,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("8N2tmT3jmC8", Gen5::GraphicsDcbSetIndexCount);
 	LIB_FUNC("tSBxhAPyytQ", Gen5::GraphicsDcbSetNumInstances);
 	LIB_FUNC("Yw0jKSqop+E", Gen5::GraphicsDcbDrawIndexAuto);
+	// sceAgcDcbDrawIndexOffset — Graphics5 / Agc NID B+aG9DUnTKA.
+	LIB_FUNC("B+aG9DUnTKA", Gen5::GraphicsDcbDrawIndexOffset);
 	LIB_FUNC("q88lQ+GP5Yk", Gen5::GraphicsDcbDrawIndex);
 	LIB_FUNC("aJf+j5yntiU", Gen5::GraphicsDcbEventWrite);
 	LIB_FUNC("cFazmnXpJOE", Gen5::GraphicsAcbEventWrite);
@@ -183,6 +188,10 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("JrtiDtKeS38", Gen5::GraphicsAcbResetQueue);
 	LIB_FUNC("fPSCdQxgpSw", Gen5::GraphicsWriteDataPatchSetAddressOrOffset);
 	LIB_FUNC("u2T2DiA5hRI", Gen5::GraphicsDcbStallCommandBufferParser);
+	LIB_FUNC("IxYiarKlXxM", Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset);
+	LIB_FUNC("cdDRpqcFGbU", Gen5::GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate);
+	LIB_FUNC("3KDcnM3lrcU", Gen5::GraphicsAgcWaitRegMemPatchAddress);
+	LIB_FUNC("Lkf86B98qPc", Gen5::GraphicsGetDataPacketSizeDw);
 	LIB_FUNC("qj7QZpgr9Uw", Gen5::GraphicsCbType2Pad);
 	LIB_FUNC("cFazmnXpJOE", Gen5::GraphicsAcbEventWrite);
 	LIB_FUNC("KT-hTp-Ch14", Gen5::GraphicsAcbAcquireMem);
@@ -192,6 +201,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("t1vNu082-jM", Gen5::GraphicsDcbDrawIndexIndirect);
 	LIB_FUNC("8N2tmT3jmC8", Gen5::GraphicsDcbSetIndexCount);
 	LIB_FUNC("tSBxhAPyytQ", Gen5::GraphicsDcbSetNumInstances);
+	LIB_FUNC("B+aG9DUnTKA", Gen5::GraphicsDcbDrawIndexOffset);
 	LIB_FUNC("htn36gPnBk4", Gen5::GraphicsAcbWaitRegMem);
 	LIB_FUNC("+kSrjIVxKFE", Gen5::GraphicsDcbPushMarker);
 	LIB_FUNC("H7uZqCoNuWk", Gen5::GraphicsDcbPopMarker);

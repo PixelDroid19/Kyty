@@ -8,6 +8,9 @@
 #include "Emulator/Common.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Libs/Memalign.h"
+#include "Emulator/Libs/CxaDynamicCast.h"
+#include "Emulator/Libs/CxxLocale.h"
 #include "Emulator/Libs/Printf.h"
 #include "Emulator/Libs/VaContext.h"
 #include "Emulator/Loader/SymbolDatabase.h"
@@ -21,6 +24,7 @@
 #include <cstring>
 #include <ctime>
 #include <strings.h>
+#include <wchar.h>
 
 // setjmp/longjmp: must NOT be wrapped in a C++ function (the wrapper frame would
 // be gone by the time longjmp fires). Kyty runs guest code natively, so we bind
@@ -96,21 +100,23 @@ static AlignedAllocationHeader* aligned_header(void* ptr)
 
 static KYTY_SYSV_ABI void* c_memalign(size_t alignment, size_t size)
 {
-	if (alignment < alignof(void*) || (alignment & (alignment - 1)) != 0 ||
-	    size > SIZE_MAX - alignment - sizeof(AlignedAllocationHeader))
+	// Prospero/FreeBSD memalign: any power-of-two alignment (including 4).
+	// Do not require alignof(void*); titles allocate uint32 index tables via
+	// memalign(4, N) and immediately fill the returned pointer.
+	if (!MemalignAlignmentOk(alignment) || size > SIZE_MAX - alignment - sizeof(AlignedAllocationHeader))
 	{
 		return nullptr;
 	}
 
 	const size_t total = size + alignment - 1 + sizeof(AlignedAllocationHeader);
-	void*       base  = ::malloc(total);
+	void*        base  = ::malloc(total);
 	if (base == nullptr)
 	{
 		return nullptr;
 	}
 
 	const auto raw     = reinterpret_cast<uintptr_t>(base) + sizeof(AlignedAllocationHeader);
-	const auto aligned = (raw + alignment - 1) & ~(alignment - 1);
+	const auto aligned = (raw + alignment - 1) & ~(static_cast<uintptr_t>(alignment) - 1);
 	auto*      header  = reinterpret_cast<AlignedAllocationHeader*>(aligned - sizeof(AlignedAllocationHeader));
 	*header            = {ALIGNED_ALLOCATION_MAGIC, base, size, alignment};
 	return reinterpret_cast<void*>(aligned);
@@ -173,6 +179,14 @@ static KYTY_SYSV_ABI int c_memset_s(void* s, size_t smax, int c, size_t n)
 }
 static KYTY_SYSV_ABI int    c_memcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
 static KYTY_SYSV_ABI void*  c_memchr(const void* s, int c, size_t n) { return const_cast<void*>(::memchr(s, c, n)); }
+// Gen5 libc_v1 wide mem* — NIDs from SharpEmu Ps5Nid (SHA1+suffix, byte-reversed).
+static KYTY_SYSV_ABI wchar_t* c_wmemchr(const wchar_t* s, wchar_t c, size_t n)
+{
+	return const_cast<wchar_t*>(::wmemchr(s, c, n));
+}
+static KYTY_SYSV_ABI wchar_t* c_wmemcpy(wchar_t* d, const wchar_t* s, size_t n) { return ::wmemcpy(d, s, n); }
+static KYTY_SYSV_ABI wchar_t* c_wmemmove(wchar_t* d, const wchar_t* s, size_t n) { return ::wmemmove(d, s, n); }
+static KYTY_SYSV_ABI wchar_t* c_wmemset(wchar_t* s, wchar_t c, size_t n) { return ::wmemset(s, c, n); }
 static KYTY_SYSV_ABI size_t c_strlen(const char* s) { return ::strlen(s); }
 static KYTY_SYSV_ABI char* c_strcpy(char* d, const char* s) { return ::strcpy(d, s); }
 // Gen5 strcpy_s — NID 5Xa2ACNECdo: dest, destsz, src. Returns 0 on success.
@@ -206,15 +220,6 @@ static KYTY_SYSV_ABI int c_strcasecmp(const char* a, const char* b)
 	return ::strcasecmp(a, b);
 }
 
-// NID 1uJgoVq3bQU — name not yet in public tables. Captured SysV after fopen(~INDEX):
-// rdi=object with embedded name at +8 ("data.js"), rsi=guest side-buffer, rcx=0x64.
-// Guest treats the return as a non-null object pointer. Writing into rsi as a raw
-// n-byte buffer regressed to an earlier null crash (rsi is not a plain peek buf).
-// Return rdi only — same continue path as the non-null missing-func stub return.
-static KYTY_SYSV_ABI void* c_1uJgoVq3bQU(void* obj, void* /*buf*/, void* /*a2*/, uint64_t /*n*/, void* /*a4*/, uint64_t /*a5*/)
-{
-	return obj;
-}
 static KYTY_SYSV_ABI char*  c_strcat(char* d, const char* s) { return ::strcat(d, s); }
 static KYTY_SYSV_ABI char*  c_strncat(char* d, const char* s, size_t n) { return ::strncat(d, s, n); }
 static KYTY_SYSV_ABI char*  c_strchr(const char* s, int c) { return const_cast<char*>(::strchr(s, c)); }
@@ -243,6 +248,103 @@ static KYTY_SYSV_ABI void* cxx_new(size_t size) { return ::malloc(size != 0 ? si
 static KYTY_SYSV_ABI void  cxx_delete(void* p) { ::free(p); }
 static KYTY_SYSV_ABI void* cxx_new_array(size_t size) { return ::malloc(size != 0 ? size : 1); }
 static KYTY_SYSV_ABI void  cxx_delete_array(void* p) { ::free(p); }
+
+// Only touch pointers that are known host-mapped. Reject the NoAccess
+// unresolved-object sentinel at ~0x840000000 and other sparse holes.
+[[nodiscard]] static bool CxaGuestPtrLooksMapped(const void* p, size_t bytes)
+{
+	const auto a = reinterpret_cast<uintptr_t>(p);
+	if (a < 0x1000u || bytes == 0 || a > UINTPTR_MAX - bytes)
+	{
+		return false;
+	}
+	const auto end = a + bytes;
+	if (a >= 0x840000000ull && a < 0x850000000ull)
+	{
+		return false;
+	}
+	if (a >= 0x900000000ull && end <= 0x920000000ull)
+	{
+		return true;
+	}
+	if (a >= 0x10000ull && end <= 0x080000000ull)
+	{
+		return true;
+	}
+	if (a >= 0x100000000ull && end <= 0x200000000ull)
+	{
+		return true;
+	}
+	if (a >= 0x7f0000000000ull && end < 0x800000000000ull)
+	{
+		return true;
+	}
+	return false;
+}
+
+static const char* CxaTryReadCString(const void* p)
+{
+	if (!CxaGuestPtrLooksMapped(p, 1))
+	{
+		return nullptr;
+	}
+	const auto* s = static_cast<const char*>(p);
+	for (int i = 0; i < 256; i++)
+	{
+		if (!CxaGuestPtrLooksMapped(s + i, 1))
+		{
+			return nullptr;
+		}
+		const unsigned char c = static_cast<unsigned char>(s[i]);
+		if (c == 0)
+		{
+			return i > 0 ? s : nullptr;
+		}
+		if (c < 0x09 || (c > 0x0d && c < 0x20))
+		{
+			return nullptr;
+		}
+	}
+	return nullptr;
+}
+
+// Gen5 libc_v1 __cxa_throw (vkuuLfhnSZI). Full unwind is not implemented;
+// host-fatal with typeinfo name when readable so the throw producer is diagnosable.
+static KYTY_SYSV_ABI void cxa_throw(void* thrown_exception, void* tinfo, void (*/*dest*/)(void*))
+{
+	const char* type_name = nullptr;
+	const char* what_msg  = nullptr;
+
+	if (CxaGuestPtrLooksMapped(tinfo, 16))
+	{
+		const auto* words = static_cast<const uint64_t*>(tinfo);
+		type_name         = CxaTryReadCString(reinterpret_cast<const void*>(words[1]));
+		if (type_name != nullptr && type_name[0] == '*')
+		{
+			type_name++;
+		}
+	}
+
+	if (CxaGuestPtrLooksMapped(thrown_exception, 32))
+	{
+		const auto* words = static_cast<const uint64_t*>(thrown_exception);
+		const auto  cap   = words[3];
+		if (cap <= 15u)
+		{
+			what_msg = CxaTryReadCString(static_cast<const char*>(thrown_exception) + 16);
+		} else
+		{
+			what_msg = CxaTryReadCString(reinterpret_cast<const void*>(words[1]));
+		}
+		if (what_msg == nullptr)
+		{
+			what_msg = CxaTryReadCString(reinterpret_cast<const void*>(words[2]));
+		}
+	}
+
+	EXIT("__cxa_throw type=%s what=%s obj=%p tinfo=%p\n", type_name != nullptr ? type_name : "?",
+	     what_msg != nullptr ? what_msg : "?", thrown_exception, tinfo);
+}
 
 // Gen5 libc NIDs iPBqs+YUUFw / 2HnmKiLmV6s — same SysV ABI from call sites:
 //   lea 8(obj),%rdi; mov $expected,%esi; mov $desired,%edx; call; cmp $1,%eax
@@ -321,6 +423,27 @@ static KYTY_SYSV_ABI const short* c_Getptoupper()
 		for (int c = -1; c < 256; c++)
 		{
 			table[c + 1] = (c >= 0) ? static_cast<short>(::toupper(c)) : 0;
+		}
+		init = true;
+	}
+	return table + 1;
+}
+
+// Gen5 libc_v1 _Getptolower — NID 1uJgoVq3bQU. Same table contract as
+// _Getptoupper: short[384] centered so index 0 is EOF (-1). Guest VFS path
+// lowercasing after fopen(~INDEX) uses:
+//   table = _Getptolower();  dest[i] = (uint8_t)table[(unsigned char)src[i]];
+// Returning a non-table pointer previously corrupted "data.js" and the project
+// parse hit EOF ("parse error - unexpected end of input").
+static KYTY_SYSV_ABI const short* c_Getptolower()
+{
+	static short table[384];
+	static bool  init = false;
+	if (!init)
+	{
+		for (int c = -1; c < 256; c++)
+		{
+			table[c + 1] = (c >= 0) ? static_cast<short>(::tolower(c)) : 0;
 		}
 		init = true;
 	}
@@ -498,6 +621,10 @@ static KYTY_SYSV_ABI int c_vsnprintf_s(char* s, size_t dn, size_t count, const c
 static KYTY_SYSV_ABI double c_strtod(const char* s, char** e) { return ::strtod(s, e); }
 static KYTY_SYSV_ABI float  c_strtof(const char* s, char** e) { return ::strtof(s, e); }
 static KYTY_SYSV_ABI long   c_strtol(const char* s, char** e, int b) { return ::strtol(s, e, b); }
+static KYTY_SYSV_ABI unsigned long c_strtoul(const char* s, char** e, int b)
+{
+	return ::strtoul(s, e, b);
+}
 // Gen5 libc_v1 strtoull — NID 5OqszGpy7Mg (Astro after TLS context factory).
 static KYTY_SYSV_ABI unsigned long long c_strtoull(const char* s, char** e, int b)
 {
@@ -554,6 +681,16 @@ static KYTY_SYSV_ABI int c_isnanf(float x)
 {
 	return std::isnan(x) ? 1 : 0;
 }
+// Gen5 libc_v1 isfinite(double) — NID dhK16CKwhQg. After strtod in project
+// parse: xmm0 = value; non-zero eax keeps the value.
+static KYTY_SYSV_ABI int c_isfinite(double x)
+{
+	return std::isfinite(x) ? 1 : 0;
+}
+static KYTY_SYSV_ABI int c_isnan(double x)
+{
+	return std::isnan(x) ? 1 : 0;
+}
 // Gen5 libc_v1 sinf — NID Q4rRL34CEeE (Astro after usleep).
 static KYTY_SYSV_ABI float c_sinf(float x) { return ::sinf(x); }
 static KYTY_SYSV_ABI float c_cosf(float x) { return ::cosf(x); }
@@ -603,6 +740,100 @@ static KYTY_SYSV_ABI void c_Xlength_error(const char* msg)
 {
 	EXIT("std::length_error: %s\n", msg != nullptr ? msg : "");
 }
+
+// Itanium __cxa_dynamic_cast (NID hMAe+TWS9mQ). Captured after Construct JSON
+// load: rdi=src, rsi/rdx=type_info, rcx=src2dst (0 = unique base at offset 0).
+// type_info vtables often point at the unresolved-object sentinel, so only
+// src2dst arithmetic runs.
+static KYTY_SYSV_ABI void* cxa_dynamic_cast(void* src, const void* /*src_type*/, const void* /*dst_type*/, int64_t src2dst)
+{
+	return CxaDynamicCastApply(src, src2dst);
+}
+
+// --- C++ locale / RTTI objects ------------------------------------------------
+// Quiet AV: mov (%r12),%rdi with r12 = INVALID_MEMORY because weak Object
+// Qoo175Ig+-k (_ZSt21_sceLibcClassicLocale) was never registered.
+
+static KYTY_SYSV_ABI void* CxxVtableNoop(void* self)
+{
+	return self;
+}
+
+static KYTY_SYSV_ABI void* CxxVtableNull(void* /*self*/)
+{
+	return nullptr;
+}
+
+static KYTY_SYSV_ABI int CxxCtypeFacetQuery(void* /*self*/, int /*mask*/)
+{
+	return 1;
+}
+
+static void* g_locimp_vtable[16] = {
+    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+    reinterpret_cast<void*>(&CxxVtableNull), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+};
+
+static void* g_ctype_vtable[16] = {
+    reinterpret_cast<void*>(&CxxVtableNoop),     reinterpret_cast<void*>(&CxxVtableNoop),
+    reinterpret_cast<void*>(&CxxVtableNoop),     reinterpret_cast<void*>(&CxxVtableNoop),
+    reinterpret_cast<void*>(&CxxVtableNoop),     reinterpret_cast<void*>(&CxxVtableNoop),
+    reinterpret_cast<void*>(&CxxVtableNoop),     reinterpret_cast<void*>(&CxxVtableNoop),
+    reinterpret_cast<void*>(&CxxCtypeFacetQuery),
+};
+
+struct CxxFacetStub
+{
+	void** vtable;
+};
+
+static CxxFacetStub g_ctype_facet {g_ctype_vtable};
+static void*        g_classic_facets[kCxxLocimpFacetCount] = {nullptr, &g_ctype_facet};
+
+static CxxLocimpLayout g_classic_locimp {
+    g_locimp_vtable, nullptr, g_classic_facets, kCxxLocimpFacetCount, 0, 0, {0, 0, 0}, "C",
+};
+
+static CxxLocaleLayout g_sce_classic_locale {&g_classic_locimp};
+static std::uint64_t   g_ctype_char_id = kCxxCtypeCharId;
+static std::int32_t    g_locale_id_cnt = static_cast<std::int32_t>(kCxxCtypeCharId);
+
+static void* g_class_type_info_vtable[8] = {
+    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+    reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* g_si_class_type_info_vtable[8] = {
+    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+    reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* g_vmi_class_type_info_vtable[8] = {
+    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+    reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* g_exception_vtable[8] = {
+    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+    reinterpret_cast<void*>(&CxxVtableNoop)};
+
+static std::int64_t g_bad_off = -1;
+static std::uint8_t g_fpz[16] {};
+
+static KYTY_SYSV_ABI void c_Locksyslock(int /*index*/) {}
+static KYTY_SYSV_ABI void c_Unlocksyslock(int /*index*/) {}
+
+static KYTY_SYSV_ABI void* c_locale_Getgloballocale()
+{
+	return &g_classic_locimp;
+}
+
+static KYTY_SYSV_ABI void c_cxa_pure_virtual()
+{
+	EXIT("__cxa_pure_virtual\n");
+}
+
+static KYTY_SYSV_ABI int c_uncaught_exception()
+{
+	return 0;
+}
+
+static KYTY_SYSV_ABI void c_ios_base_dtor(void* /*self*/) {}
 
 static KYTY_SYSV_ABI int atexit(void (*func)())
 {
@@ -966,6 +1197,24 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("P330P3dFF68", &LibC::g_need_flag);
 	LIB_OBJECT("2sWzhYqFH4E", stdout);
 
+	// C++ locale / RTTI objects — Qoo175Ig+-k → classic locale (avoids AV on
+	// unresolved weak Object sentinel 0x840000000).
+	LIB_OBJECT("Qoo175Ig+-k", &LibC::g_sce_classic_locale);
+	LIB_OBJECT("Cv+zC4EjGMA", &LibC::g_ctype_char_id);
+	LIB_OBJECT("H4fcpQOpc08", &LibC::g_locale_id_cnt);
+	LIB_OBJECT("byV+FWlAnB4", LibC::g_class_type_info_vtable);
+	LIB_OBJECT("pZ9WXcClPO8", LibC::g_si_class_type_info_vtable);
+	LIB_OBJECT("9ByRMdo7ywg", LibC::g_vmi_class_type_info_vtable);
+	LIB_OBJECT("dCzeFfg9WWI", LibC::g_exception_vtable);
+	LIB_OBJECT("FQ9NFbBHb5Y", &LibC::g_bad_off);
+	LIB_OBJECT("wiR+rIcbnlc", LibC::g_fpz);
+	LIB_FUNC("kALvdgEv5ME", LibC::c_Locksyslock);
+	LIB_FUNC("9nf8joUTSaQ", LibC::c_Unlocksyslock);
+	LIB_FUNC("hEQ2Yi4PJXA", LibC::c_locale_Getgloballocale);
+	LIB_FUNC("zr094EQ39Ww", LibC::c_cxa_pure_virtual);
+	LIB_FUNC("Q1BL70XVV0o", LibC::c_uncaught_exception);
+	LIB_FUNC("P8F2oavZXtY", LibC::c_ios_base_dtor);
+
 	LIB_FUNC("uMei1W9uyNo", LibC::exit);
 	LIB_FUNC("bzQExy189ZI", LibC::init_env);
 	LIB_FUNC("8G2LB+A3rzg", LibC::atexit);
@@ -988,6 +1237,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("tIhsqj0qsFE", LibC::c_free);
 	LIB_FUNC("Ujf3KzMvRmI", LibC::c_memalign);
 	LIB_FUNC("Q3VBxCXhUHs", LibC::c_memcpy);
+	// Gen5 wmemmove — NID Noj9PsJrsa8 (was mislabeled as second memcpy).
+	LIB_FUNC("Noj9PsJrsa8", LibC::c_wmemmove);
 	LIB_FUNC("NFLs+dRJGNg", LibC::c_memcpy_s);
 	// Gen5 libc_v1 memmove_s — B59+zQQCcbU after TLS factory / strtoull on Astro.
 	LIB_FUNC("B59+zQQCcbU", LibC::c_memmove_s);
@@ -1003,8 +1254,6 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("aesyjrHVWy4", LibC::c_strncmp);
 	// sceLibc strcasecmp — NID AV6ipCNa4Rw
 	LIB_FUNC("AV6ipCNa4Rw", LibC::c_strcasecmp);
-	// Captured Gen5 post-~INDEX open: object+"data.js"; non-null return advances.
-	LIB_FUNC("1uJgoVq3bQU", LibC::c_1uJgoVq3bQU);
 	LIB_FUNC("Ls4tzzhimqQ", LibC::c_strcat);
 	LIB_FUNC("kHg45qPC6f0", LibC::c_strncat);
 	LIB_FUNC("ob5xAW4ln-0", LibC::c_strchr);
@@ -1012,7 +1261,11 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 libc_v1 strstr.
 	LIB_FUNC("viiwFMaNamA", LibC::c_strstr);
 	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);         // operator new(size_t)
+	// Gen5 libc_v1 — second operator new(size_t) NID.
+	LIB_FUNC("cfAXurvfl5o", LibC::cxx_new);
 	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete);      // operator delete(void*)
+	// Gen5 libc_v1 __cxa_throw — vkuuLfhnSZI.
+	LIB_FUNC("vkuuLfhnSZI", LibC::cxa_throw);
 	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);   // operator new[](size_t)
 	LIB_FUNC("MLWl90SFWNE", LibC::cxx_delete_array); // operator delete[](void*)
 	LIB_FUNC("iPBqs+YUUFw", LibC::c_atomic_cmpset_32);
@@ -1021,6 +1274,9 @@ LIB_DEFINE(InitLibC_1)
 	// string / memory
 	LIB_FUNC("+P6FRGH4LfA", LibC::c_memmove);
 	LIB_FUNC("8u8lPzUEq+U", LibC::c_memchr);
+	LIB_FUNC("fnUEjBCNRVU", LibC::c_wmemchr);
+	LIB_FUNC("fL3O02ypZFE", LibC::c_wmemcpy);
+	LIB_FUNC("Al8MZJh-4hM", LibC::c_wmemset);
 	LIB_FUNC("5TjaJwkLWxE", LibC::c_bcmp);
 	LIB_FUNC("kiZSXIWd9vg", LibC::c_strcpy);
 	// Gen5 strcpy_s — NID 5Xa2ACNECdo (next hard-abort after thread stack reprotect).
@@ -1031,6 +1287,8 @@ LIB_DEFINE(InitLibC_1)
 	// ctype
 	LIB_FUNC("sUP1hBaouOw", LibC::c_Getpctype);
 	LIB_FUNC("rcQCUr0EaRU", LibC::c_Getptoupper);
+	// Gen5 _Getptolower — VFS path lowercasing after ~INDEX (was mis-bound).
+	LIB_FUNC("1uJgoVq3bQU", LibC::c_Getptolower);
 
 	// stdio
 	LIB_FUNC("xeYO4u7uyJ0", LibC::c_fopen);
@@ -1068,9 +1326,11 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 libc_v1 strtof — xENtRue8dpI after APR stream wrap (levels.xml path).
 	LIB_FUNC("xENtRue8dpI", LibC::c_strtof);
 	LIB_FUNC("mXlxhmLNMPg", LibC::c_strtol);
-	// Captured Gen5 after SaveDataDirNameSearch: SysV (char* "00", endptr=null, base=10)
-	// — same ABI as strtol (second NID for same export).
-	LIB_FUNC("zlfEH8FmyUA", LibC::c_strtol);
+	// Gen5 strtoul: KytyPS5 maps QxmSHBCuKTk / zlfEH8FmyUA; Construct parser
+	// also hits VOBg+iNwB-4 (rdi=nptr, rsi=endptr, rdx=10).
+	LIB_FUNC("QxmSHBCuKTk", LibC::c_strtoul);
+	LIB_FUNC("zlfEH8FmyUA", LibC::c_strtoul);
+	LIB_FUNC("VOBg+iNwB-4", LibC::c_strtoul);
 	// Gen5 libc_v1 strtoull — 5OqszGpy7Mg after TLS context factory on Astro.
 	LIB_FUNC("5OqszGpy7Mg", LibC::c_strtoull);
 	LIB_FUNC("SRI6S9B+-a4", LibC::c_atof);
@@ -1112,6 +1372,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("1D0H2KNjshE", LibC::c_powf);
 	// Gen5 libc_v1 __isnanf — lA94ZgT+vMM after Posix pthread_self on Astro.
 	LIB_FUNC("lA94ZgT+vMM", LibC::c_isnanf);
+	// Gen5 isfinite(double) — after strtod in project parse.
+	LIB_FUNC("dhK16CKwhQg", LibC::c_isfinite);
+	// Gen5 isnan(double) — layout coord checks after vcvttsd2si.
+	LIB_FUNC("GfxAp9Xyiqs", LibC::c_isnan);
 	// Gen5 libc_v1 float math (Astro after usleep; NIDs from name→NID hash).
 	LIB_FUNC("Q4rRL34CEeE", LibC::c_sinf);
 	LIB_FUNC("-P6FNMzk2Kc", LibC::c_cosf);
@@ -1141,6 +1405,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("3GPpjQdAMTw", LibC::c_cxa_guard_acquire);
 	LIB_FUNC("9rAeANT2tyE", LibC::c_cxa_guard_release);
 	LIB_FUNC("2emaaluWzUw", LibC::c_cxa_guard_abort);
+	// Gen5 __cxa_dynamic_cast — Construct ConditionOrAction→Action.
+	LIB_FUNC("hMAe+TWS9mQ", LibC::cxa_dynamic_cast);
 	LIB_FUNC("ozMAr28BwSY", LibC::c_Xout_of_range);
 	LIB_FUNC("tQIo+GIPklo", LibC::c_Xlength_error);
 

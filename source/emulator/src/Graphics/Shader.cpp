@@ -798,10 +798,12 @@ static void vs_check(const HW::VertexShaderInfo& vs, const HW::ShaderRegisters& 
 	EXIT_NOT_IMPLEMENTED(sh.m_spiShaderIdxFormat != 0x00000000 && sh.m_spiShaderIdxFormat != 0x00000001);
 	EXIT_NOT_IMPLEMENTED(sh.m_geNggSubgrpCntl != 0x00000000 && sh.m_geNggSubgrpCntl != 0x00000001);
 	EXIT_NOT_IMPLEMENTED(sh.m_vgtGsInstanceCnt != 0x00000000);
-	EXIT_NOT_IMPLEMENTED(sh.GetEsVertsPerSubgrp() != 0x00000000 && sh.GetEsVertsPerSubgrp() != 0x00000040);
-	EXIT_NOT_IMPLEMENTED(sh.GetGsPrimsPerSubgrp() != 0x00000000 && sh.GetGsPrimsPerSubgrp() != 0x00000040);
-	EXIT_NOT_IMPLEMENTED(sh.GetGsInstPrimsInSubgrp() != 0x00000000 && sh.GetGsInstPrimsInSubgrp() != 0x00000040);
-	EXIT_NOT_IMPLEMENTED(sh.m_geMaxOutputPerSubgroup != 0x00000000 && sh.m_geMaxOutputPerSubgroup != 0x00000040);
+	// NGG/GS subgroup sizing fields are host scheduling hints; Gen5 emits
+	// values other than 0/0x40. Bound at documented max 0x40.
+	EXIT_NOT_IMPLEMENTED(sh.GetEsVertsPerSubgrp() > 0x00000040);
+	EXIT_NOT_IMPLEMENTED(sh.GetGsPrimsPerSubgrp() > 0x00000040);
+	EXIT_NOT_IMPLEMENTED(sh.GetGsInstPrimsInSubgrp() > 0x00000040);
+	EXIT_NOT_IMPLEMENTED(sh.m_geMaxOutputPerSubgroup > 0x00000040);
 	EXIT_NOT_IMPLEMENTED(sh.m_vgtEsgsRingItemsize != 0x00000000 && sh.m_vgtEsgsRingItemsize != 0x00000004);
 	EXIT_NOT_IMPLEMENTED(sh.m_vgtGsMaxVertOut != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(sh.m_vgtGsOutPrimType != 0x00000000);

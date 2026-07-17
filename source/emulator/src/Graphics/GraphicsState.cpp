@@ -97,6 +97,77 @@ void SetGenericScissorBr(HW::Context& context, uint32_t value)
 	                          viewport.generic_scissor_window_offset_enable);
 }
 
+void SetScreenScissorTl(HW::Context& context, uint32_t value)
+{
+	const auto& viewport = context.GetScreenViewport();
+	const int   left     = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_SCREEN_SCISSOR_TL, TL_X)));
+	const int   top      = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_SCREEN_SCISSOR_TL, TL_Y)));
+
+	context.SetScreenScissor(left, top, viewport.screen_scissor_right, viewport.screen_scissor_bottom);
+}
+
+void SetScreenScissorBr(HW::Context& context, uint32_t value)
+{
+	const auto& viewport = context.GetScreenViewport();
+	const int   right    = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_SCREEN_SCISSOR_BR, BR_X)));
+	const int   bottom   = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_SCREEN_SCISSOR_BR, BR_Y)));
+
+	context.SetScreenScissor(viewport.screen_scissor_left, viewport.screen_scissor_top, right, bottom);
+}
+
+void SetRenderControl(HW::Context& context, uint32_t value)
+{
+	HW::RenderControl r;
+
+	r.depth_clear_enable       = KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_CLEAR_ENABLE) != 0;
+	r.stencil_clear_enable     = KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_CLEAR_ENABLE) != 0;
+	r.resummarize_enable       = KYTY_PM4_GET(value, DB_RENDER_CONTROL, RESUMMARIZE_ENABLE) != 0;
+	r.stencil_compress_disable = KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_COMPRESS_DISABLE) != 0;
+	r.depth_compress_disable   = KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_COMPRESS_DISABLE) != 0;
+	r.copy_centroid            = KYTY_PM4_GET(value, DB_RENDER_CONTROL, COPY_CENTROID) != 0;
+	r.copy_sample              = KYTY_PM4_GET(value, DB_RENDER_CONTROL, COPY_SAMPLE);
+
+	context.SetRenderControl(r);
+}
+
+void SetStencilControl(HW::Context& context, uint32_t value)
+{
+	HW::StencilControl r;
+
+	r.stencil_fail     = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILFAIL);
+	r.stencil_zpass    = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILZPASS);
+	r.stencil_zfail    = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILZFAIL);
+	r.stencil_fail_bf  = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILFAIL_BF);
+	r.stencil_zpass_bf = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILZPASS_BF);
+	r.stencil_zfail_bf = KYTY_PM4_GET(value, DB_STENCIL_CONTROL, STENCILZFAIL_BF);
+
+	context.SetStencilControl(r);
+}
+
+void SetStencilRefMask(HW::Context& context, uint32_t value)
+{
+	auto r = context.GetStencilMask();
+
+	r.stencil_testval   = KYTY_PM4_GET(value, DB_STENCILREFMASK, STENCILTESTVAL);
+	r.stencil_mask      = KYTY_PM4_GET(value, DB_STENCILREFMASK, STENCILMASK);
+	r.stencil_writemask = KYTY_PM4_GET(value, DB_STENCILREFMASK, STENCILWRITEMASK);
+	r.stencil_opval     = KYTY_PM4_GET(value, DB_STENCILREFMASK, STENCILOPVAL);
+
+	context.SetStencilMask(r);
+}
+
+void SetStencilRefMaskBf(HW::Context& context, uint32_t value)
+{
+	auto r = context.GetStencilMask();
+
+	r.stencil_testval_bf   = KYTY_PM4_GET(value, DB_STENCILREFMASK_BF, STENCILTESTVAL_BF);
+	r.stencil_mask_bf      = KYTY_PM4_GET(value, DB_STENCILREFMASK_BF, STENCILMASK_BF);
+	r.stencil_writemask_bf = KYTY_PM4_GET(value, DB_STENCILREFMASK_BF, STENCILWRITEMASK_BF);
+	r.stencil_opval_bf     = KYTY_PM4_GET(value, DB_STENCILREFMASK_BF, STENCILOPVAL_BF);
+
+	context.SetStencilMask(r);
+}
+
 void SetModeControl(HW::Context& context, uint32_t value)
 {
 	HW::ModeControl mode;
