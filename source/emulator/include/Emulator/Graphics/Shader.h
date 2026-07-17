@@ -243,6 +243,7 @@ enum class ShaderInstructionType : uint32_t
 	VMulU32U24,
 	VNotB32,
 	VOrB32,
+	VXnorB32,
 	VRcpF32,
 	VRndneF32,
 	VRsqF32,
