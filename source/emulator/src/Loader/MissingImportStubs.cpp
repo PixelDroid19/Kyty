@@ -4,7 +4,6 @@
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Threads.h"
-#include "Kyty/Core/VirtualMemory.h"
 
 #include <atomic>
 #include <cstdio>
@@ -21,14 +20,15 @@ using stub_fn_t = KYTY_SYSV_ABI int64_t (*)(uint64_t, uint64_t, uint64_t, uint64
 
 struct Slot
 {
-	char        name[96]     = {};
-	char        library[64]  = {};
-	char        module[64]   = {};
-	int         library_version      = 0;
-	int         module_version_major = 0;
-	int         module_version_minor = 0;
-	SymbolType  type                 = SymbolType::Func;
-	bool        used                 = false;
+	char                  name[96]               = {};
+	char                  library[64]            = {};
+	char                  module[64]             = {};
+	int                   library_version        = 0;
+	int                   module_version_major   = 0;
+	int                   module_version_minor   = 0;
+	SymbolType            type                   = SymbolType::Func;
+	ReturnClass           ret_class              = ReturnClass::IntegerZero;
+	bool                  used                   = false;
 	std::atomic<uint64_t> call_count {0};
 	std::atomic<uint64_t> arg0 {0};
 	std::atomic<uint64_t> arg1 {0};
@@ -36,36 +36,31 @@ struct Slot
 	std::atomic<uint64_t> arg3 {0};
 	std::atomic<uint64_t> arg4 {0};
 	std::atomic<uint64_t> arg5 {0};
-	bool        logged_first_call = false;
+	// First-call log: atomic so concurrent first hits do not race the flag.
+	std::atomic_bool logged_first_call {false};
 };
 
-Slot                    g_slots[kMaxSlots];
-std::atomic<int>        g_next {0};
-Core::Mutex             g_mutex;
-std::atomic<uint64_t>   g_total_calls {0};
+Slot                  g_slots[kMaxSlots];
+std::atomic<int>      g_next {0};
+Core::Mutex           g_mutex;
+std::atomic<uint64_t> g_total_calls {0};
 
-// Scratch page + callable for permissive return (preserve prior ABI: return a
-// real function pointer address usable as data or code).
+// Real, static no-op for Callback/Callable consumers only.
 static KYTY_SYSV_ABI int64_t kyty_missing_callable()
 {
 	return 0;
 }
 
-static uint64_t stub_scratch_addr()
+static int64_t ValueForClass(ReturnClass c)
 {
-	static uint64_t addr = Core::VirtualMemory::Alloc(0, 0x10000, Core::VirtualMemory::Mode::ReadWrite);
-	return addr;
-}
-
-static KYTY_SYSV_ABI int64_t stub_return_value()
-{
-	const uint64_t scratch = stub_scratch_addr();
-	if (scratch != 0)
+	switch (c)
 	{
-		reinterpret_cast<uint64_t*>(scratch)[0] = reinterpret_cast<uint64_t>(kyty_missing_callable);
+		case ReturnClass::IntegerError: return static_cast<int64_t>(-1);
+		case ReturnClass::NullPointer: return 0;
+		case ReturnClass::IntegerZero: return 0;
+		case ReturnClass::Callable: return static_cast<int64_t>(reinterpret_cast<uint64_t>(kyty_missing_callable));
+		default: return 0;
 	}
-	// Preserve prior permissive return: a callable address (not zero).
-	return static_cast<int64_t>(reinterpret_cast<uint64_t>(kyty_missing_callable));
 }
 
 template <int I>
@@ -82,14 +77,14 @@ static KYTY_SYSV_ABI int64_t stub_impl(uint64_t a0, uint64_t a1, uint64_t a2, ui
 	g_total_calls.fetch_add(1, std::memory_order_relaxed);
 	Core::BringUp::NoteMissingImportCalled();
 
-	if (!s.logged_first_call)
+	bool expected = false;
+	if (s.logged_first_call.compare_exchange_strong(expected, true, std::memory_order_relaxed))
 	{
-		// Best-effort once; races may double-print, never corrupt.
-		s.logged_first_call = true;
-		std::printf("CALLED missing stub: %s [%s] module=%s\n", s.name, s.library, s.module);
+		std::printf("CALLED missing stub: %s [%s] module=%s ret=%u\n", s.name, s.library, s.module,
+		            static_cast<unsigned>(s.ret_class));
 		std::fflush(stdout);
 	}
-	return stub_return_value();
+	return ValueForClass(s.ret_class);
 }
 
 template <int... Is>
@@ -130,7 +125,40 @@ static void CopyField(char* dst, size_t cap, const String& src)
 	std::snprintf(dst, cap, "%s", p);
 }
 
+static bool NameContains(const char* name, const char* needle)
+{
+	return name != nullptr && needle != nullptr && std::strstr(name, needle) != nullptr;
+}
+
 } // namespace
+
+ReturnClass ClassifyReturn(const SymbolResolve& sr)
+{
+	// Conservative heuristics only — no per-NID invention. Prefer zero/null so
+	// discovery continues; use Callable only when the library/name strongly
+	// suggests a function-pointer slot (rare in HLE resolve).
+	const char* lib  = sr.library.C_Str();
+	const char* name = sr.name.C_Str();
+
+	if (NameContains(name, "Callback") || NameContains(name, "Handler") || NameContains(name, "Func") ||
+	    NameContains(lib, "Callback"))
+	{
+		return ReturnClass::Callable;
+	}
+	// Create/open/alloc style NIDs often return handles/pointers; null is safer
+	// than fabricating an object (guest may check nullptr).
+	if (NameContains(name, "Create") || NameContains(name, "Open") || NameContains(name, "Alloc") ||
+	    NameContains(name, "New") || NameContains(name, "Get"))
+	{
+		return ReturnClass::NullPointer;
+	}
+	// Generic error for remaining libkernel/posix-ish calls.
+	if (NameContains(lib, "libkernel") || NameContains(lib, "Posix") || NameContains(lib, "libc"))
+	{
+		return ReturnClass::IntegerError;
+	}
+	return ReturnClass::IntegerZero;
+}
 
 uint64_t Assign(const SymbolResolve& sr)
 {
@@ -138,7 +166,7 @@ uint64_t Assign(const SymbolResolve& sr)
 
 	Core::LockGuard lock(g_mutex);
 
-	// Deduplicate: same identity → same address.
+	// Deduplicate first: same identity → same address (do not bump slot count).
 	const int used = g_next.load(std::memory_order_relaxed);
 	for (int i = 0; i < used; ++i)
 	{
@@ -165,15 +193,17 @@ uint64_t Assign(const SymbolResolve& sr)
 	s.module_version_major = sr.module_version_major;
 	s.module_version_minor = sr.module_version_minor;
 	s.type                 = sr.type;
+	s.ret_class            = ClassifyReturn(sr);
 	s.used                 = true;
 	s.call_count.store(0, std::memory_order_relaxed);
-	s.logged_first_call = false;
+	s.logged_first_call.store(false, std::memory_order_relaxed);
 
 	g_next.store(used + 1, std::memory_order_relaxed);
 	Core::BringUp::NoteMissingImportAssigned();
 	Core::BringUp::NoteMissingImportSlots(static_cast<uint32_t>(used + 1));
 
-	std::printf("STUB (missing): %s [%s] module=%s\n", s.name, s.library, s.module);
+	std::printf("STUB (missing): %s [%s] module=%s ret=%u\n", s.name, s.library, s.module,
+	            static_cast<unsigned>(s.ret_class));
 	std::fflush(stdout);
 
 	return reinterpret_cast<uint64_t>(table()[used]);
@@ -196,22 +226,23 @@ bool FindByIdentity(const SymbolResolve& sr, SlotInfo* out)
 	{
 		if (IdentityEqual(g_slots[i], sr))
 		{
-			const Slot& s         = g_slots[i];
-			out->name             = s.name;
-			out->library          = s.library;
-			out->library_version  = s.library_version;
-			out->module           = s.module;
+			const Slot& s             = g_slots[i];
+			out->name                 = s.name;
+			out->library              = s.library;
+			out->library_version      = s.library_version;
+			out->module               = s.module;
 			out->module_version_major = s.module_version_major;
 			out->module_version_minor = s.module_version_minor;
-			out->type             = s.type;
-			out->call_count       = s.call_count.load(std::memory_order_relaxed);
-			out->last_args[0]     = s.arg0.load(std::memory_order_relaxed);
-			out->last_args[1]     = s.arg1.load(std::memory_order_relaxed);
-			out->last_args[2]     = s.arg2.load(std::memory_order_relaxed);
-			out->last_args[3]     = s.arg3.load(std::memory_order_relaxed);
-			out->last_args[4]     = s.arg4.load(std::memory_order_relaxed);
-			out->last_args[5]     = s.arg5.load(std::memory_order_relaxed);
-			out->vaddr            = reinterpret_cast<uint64_t>(table()[i]);
+			out->type                 = s.type;
+			out->ret_class            = s.ret_class;
+			out->call_count           = s.call_count.load(std::memory_order_relaxed);
+			out->last_args[0]         = s.arg0.load(std::memory_order_relaxed);
+			out->last_args[1]         = s.arg1.load(std::memory_order_relaxed);
+			out->last_args[2]         = s.arg2.load(std::memory_order_relaxed);
+			out->last_args[3]         = s.arg3.load(std::memory_order_relaxed);
+			out->last_args[4]         = s.arg4.load(std::memory_order_relaxed);
+			out->last_args[5]         = s.arg5.load(std::memory_order_relaxed);
+			out->vaddr                = reinterpret_cast<uint64_t>(table()[i]);
 			return true;
 		}
 	}
@@ -230,13 +261,14 @@ void ResetForTests()
 	for (int i = 0; i < used; ++i)
 	{
 		Slot& s = g_slots[i];
-		s.name[0]     = '\0';
-		s.library[0]  = '\0';
-		s.module[0]   = '\0';
+		s.name[0]              = '\0';
+		s.library[0]           = '\0';
+		s.module[0]            = '\0';
 		s.library_version      = 0;
 		s.module_version_major = 0;
 		s.module_version_minor = 0;
 		s.type                 = SymbolType::Func;
+		s.ret_class            = ReturnClass::IntegerZero;
 		s.used                 = false;
 		s.call_count.store(0, std::memory_order_relaxed);
 		s.arg0.store(0, std::memory_order_relaxed);
@@ -245,7 +277,7 @@ void ResetForTests()
 		s.arg3.store(0, std::memory_order_relaxed);
 		s.arg4.store(0, std::memory_order_relaxed);
 		s.arg5.store(0, std::memory_order_relaxed);
-		s.logged_first_call = false;
+		s.logged_first_call.store(false, std::memory_order_relaxed);
 	}
 	g_next.store(0, std::memory_order_relaxed);
 	g_total_calls.store(0, std::memory_order_relaxed);

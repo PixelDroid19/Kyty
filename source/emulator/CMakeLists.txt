@@ -17,7 +17,7 @@ endif()
 #add_library(emulator STATIC $<TARGET_OBJECTS:emulator_obj>)
 add_library(emulator STATIC ${emulator_src})
 
-target_link_libraries(emulator core math scripts lua unit_test vulkan-1 spirv-tools-opt spirv-tools easy_profiler SDL2-static)
+target_link_libraries(emulator core math scripts lua unit_test vulkan-1 spirv-tools-opt spirv-tools easy_profiler imgui SDL2-static)
 
 target_include_directories(emulator PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -27,6 +27,8 @@ list(APPEND inc_headers
 	${CMAKE_SOURCE_DIR}/3rdparty/sdl2/sdl2/include
 	${CMAKE_SOURCE_DIR}/3rdparty/vulkan/include
 	${CMAKE_SOURCE_DIR}/3rdparty/easy_profiler/include
+	${CMAKE_SOURCE_DIR}/3rdparty/imgui
+	${CMAKE_SOURCE_DIR}/3rdparty/imgui/backends
 	${CMAKE_SOURCE_DIR}/3rdparty/xxhash/include
 	${CMAKE_SOURCE_DIR}/3rdparty/cpuinfo/include
 	${CMAKE_SOURCE_DIR}/3rdparty/stb

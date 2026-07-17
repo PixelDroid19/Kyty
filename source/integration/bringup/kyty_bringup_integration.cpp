@@ -169,6 +169,12 @@ int ScenarioMissingImportDedupeAndCalls()
 	Expect(info.call_count == 2, "call count");
 	Expect(info.last_args[0] == 0x11 && info.last_args[5] == 0x66, "gpr args recorded");
 	Expect(MissingImport::TotalCalls() == 2, "total calls");
+	// Taxonomy: Create* → NullPointer class (return 0), not a free callable.
+	Expect(info.ret_class == MissingImport::ReturnClass::NullPointer ||
+	           info.ret_class == MissingImport::ReturnClass::IntegerError ||
+	           info.ret_class == MissingImport::ReturnClass::IntegerZero ||
+	           info.ret_class == MissingImport::ReturnClass::Callable,
+	       "return class assigned");
 	return 0;
 }
 
@@ -193,19 +199,66 @@ int ScenarioRealExportWinsConcept()
 
 int ScenarioNoStubForNonFunc()
 {
-	// RuntimeLinker only stubs Func. Non-Func must not call Assign.
-	// Guard: Assign asserts type == Func; we only verify policy surface.
+	// Under unsafe + missing_function_import, non-Func must stay fatal:
+	// MissingImport::Assign refuses non-Func with EXIT_IF (process halt).
+	// RuntimeLinker similarly EXIT("Unpatched non-Func import") instead of
+	// silent vaddr==0. This scenario drives the Assign guard so CTest sees abort.
 	Expect(BringUp::AllowMissingFunctionImport(), "feature on");
-	// Types that must never be stubbed by the linker path.
-	const SymbolType banned[] = {SymbolType::Object, SymbolType::TlsModule, SymbolType::NoType, SymbolType::Unknown};
-	for (auto t : banned)
-	{
-		Expect(t != SymbolType::Func, "non-func");
-	}
-	// Linker gate in RuntimeLinker: type == Func && Allow...
-	// Structural check: UsedSlots stays 0 when we do not call Assign for them.
 	MissingImport::ResetForTests();
-	Expect(MissingImport::UsedSlots() == 0, "no slots without Assign");
+
+	SymbolResolve obj {};
+	obj.name                 = "DataObject";
+	obj.library              = "libkernel";
+	obj.library_version      = 1;
+	obj.module               = "libkernel";
+	obj.module_version_major = 1;
+	obj.module_version_minor = 1;
+	obj.type                 = SymbolType::Object;
+
+	// Must not return — EXIT_IF(type != Func) → dbg_exit(321) → Unix status 65.
+	(void)MissingImport::Assign(obj);
+	Die("non-Func Assign must abort (strict data/TLS/NoType contract)");
+	return 1;
+}
+
+int ScenarioAbiReturnTaxonomy()
+{
+	Expect(BringUp::AllowMissingFunctionImport(), "feature on");
+	MissingImport::ResetForTests();
+
+	const auto create = MakeFunc("sceFooCreate", "libSceFoo", "Foo");
+	const auto err    = MakeFunc("plainNid", "libkernel", "libkernel");
+	const auto cb     = MakeFunc("InstallCallback", "libSceBar", "Bar");
+
+	Expect(MissingImport::ClassifyReturn(create) == MissingImport::ReturnClass::NullPointer, "Create → NullPointer");
+	Expect(MissingImport::ClassifyReturn(err) == MissingImport::ReturnClass::IntegerError, "libkernel → IntegerError");
+	Expect(MissingImport::ClassifyReturn(cb) == MissingImport::ReturnClass::Callable, "Callback → Callable");
+
+	const uint64_t a_create = MissingImport::Assign(create);
+	const uint64_t a_err    = MissingImport::Assign(err);
+	const uint64_t a_cb     = MissingImport::Assign(cb);
+	Expect(a_create != 0 && a_err != 0 && a_cb != 0, "stubs assigned");
+
+	using stub_t = KYTY_SYSV_ABI int64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+	const int64_t r_create = reinterpret_cast<stub_t>(a_create)(0, 0, 0, 0, 0, 0);
+	const int64_t r_err    = reinterpret_cast<stub_t>(a_err)(0, 0, 0, 0, 0, 0);
+	const int64_t r_cb     = reinterpret_cast<stub_t>(a_cb)(0, 0, 0, 0, 0, 0);
+	Expect(r_create == 0, "NullPointer returns 0");
+	Expect(r_err == static_cast<int64_t>(-1), "IntegerError returns -1");
+	Expect(r_cb != 0, "Callable returns real function pointer");
+	// Callable must not be the same as IntegerZero address confusion: it is executable.
+	Expect(r_cb != r_err, "Callable differs from error code");
+	return 0;
+}
+
+int ScenarioPrxNotDefaultUnderBareUnsafe()
+{
+	// Bare KYTY_BRINGUP_MODE=unsafe must NOT enable prx_preload.
+	Expect(BringUp::GetMode() == BringUp::Mode::Unsafe, "unsafe");
+	Expect(BringUp::AllowMissingFunctionImport() || BringUp::FeatureEnabled(BringUp::Feature::NotImplemented) ||
+	           BringUp::AllowGfxPermissive(),
+	       "default unsafe features present");
+	Expect(!BringUp::AllowPrxPreload(), "prx_preload not implied by bare unsafe");
 	return 0;
 }
 
@@ -317,6 +370,9 @@ int ScenarioDiagnosticsSnapshot()
 	Expect(std::strstr(buf, "\"protocolVersion\":2") != nullptr, "protocol version 2");
 	Expect(std::strstr(buf, "\"bringup\"") != nullptr, "bringup object");
 	Expect(std::strstr(buf, "\"mode\"") != nullptr, "mode field");
+	// Enabled feature/subsystem names must be present (not only aggregates).
+	Expect(std::strstr(buf, "\"features\"") != nullptr, "features field");
+	Expect(std::strstr(buf, "\"subsystems\"") != nullptr, "subsystems field");
 	// Legacy keys must not appear.
 	Expect(std::strstr(buf, "STUB_MISSING") == nullptr, "no STUB_MISSING");
 	Expect(std::strstr(buf, "GFX_PERMISSIVE") == nullptr, "no GFX_PERMISSIVE");
@@ -329,7 +385,8 @@ int ScenarioPrxDiscover()
 	Expect(BringUp::AllowPrxPreload(), "prx_preload feature must be on for this scenario");
 
 	// Create a temporary guest root with sce_module + Media/Modules candidates.
-	char tmpl[] = "/tmp/grok-goal-e70b2bb9233f/implementer/preload_fixture_XXXXXX";
+	// Parent must exist; use P_tmpdir so this works under any goal scratch.
+	char tmpl[] = "/tmp/kyty_preload_fixture_XXXXXX";
 	char* dir   = ::mkdtemp(tmpl);
 	Expect(dir != nullptr, "mkdtemp fixture");
 
@@ -465,6 +522,12 @@ int main(int argc, char** argv)
 	} else if (std::strcmp(scenario, "prx_strict_no_preload") == 0)
 	{
 		rc = ScenarioPrxStrictNoPreload();
+	} else if (std::strcmp(scenario, "abi_taxonomy") == 0)
+	{
+		rc = ScenarioAbiReturnTaxonomy();
+	} else if (std::strcmp(scenario, "prx_not_default") == 0)
+	{
+		rc = ScenarioPrxNotDefaultUnderBareUnsafe();
 	} else
 	{
 		std::fprintf(stderr, "unknown scenario: %s\n", scenario);

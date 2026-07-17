@@ -24,9 +24,12 @@ enum class Feature : uint32_t
 	NotImplemented         = 1u << 0,
 	MissingFunctionImport  = 1u << 1,
 	GfxPermissive          = 1u << 2,
-	// Discover and soft-load neighboring PRX next to the main ELF (unsafe only).
+	// Discover and soft-load neighboring PRX next to the main ELF.
+	// Opt-in only: never implied by bare KYTY_BRINGUP_MODE=unsafe alone.
 	PrxPreload             = 1u << 3,
-	All                    = NotImplemented | MissingFunctionImport | GfxPermissive | PrxPreload,
+	// Default unsafe feature set (explicit prx_preload still required for PRX).
+	DefaultUnsafe          = NotImplemented | MissingFunctionImport | GfxPermissive,
+	All                    = DefaultUnsafe | PrxPreload,
 };
 
 inline Feature operator|(Feature a, Feature b)
@@ -132,7 +135,7 @@ struct Snapshot
 //
 // Environment contract:
 //   KYTY_BRINGUP_MODE=unsafe              (absent => Strict)
-//   KYTY_BRINGUP_FEATURES=...             (absent in unsafe => all features)
+//   KYTY_BRINGUP_FEATURES=...             (absent in unsafe => DefaultUnsafe)
 //   KYTY_BRINGUP_SUBSYSTEMS=...           (absent => all)
 //   KYTY_BRINGUP_BURST_LIMIT=10000
 //   KYTY_BRINGUP_BURST_WINDOW_MS=1000

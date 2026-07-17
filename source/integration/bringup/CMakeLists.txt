@@ -111,8 +111,8 @@ kyty_bringup_test(export_wins export_wins 0
 	KYTY_BRINGUP_MODE unsafe
 	KYTY_BRINGUP_FEATURES missing_function_import)
 
-# Non-Func types are never stubbed by policy surface.
-kyty_bringup_test(no_stub_nonfunc no_stub_nonfunc 0
+# Non-Func types remain fatal (Assign EXIT / RuntimeLinker unpatched EXIT).
+kyty_bringup_test(no_stub_nonfunc no_stub_nonfunc ${KYTY_ABORT_RC}
 	KYTY_BRINGUP_MODE unsafe
 	KYTY_BRINGUP_FEATURES missing_function_import)
 
@@ -141,3 +141,12 @@ kyty_bringup_test(prx_discover prx_discover 0
 
 # Strict must not auto-preload.
 kyty_bringup_test(prx_strict_no_preload prx_strict_no_preload 0)
+
+# Bare unsafe does not enable prx_preload.
+kyty_bringup_test(prx_not_default prx_not_default 0
+	KYTY_BRINGUP_MODE unsafe)
+
+# Minimal ABI return taxonomy for missing Func stubs.
+kyty_bringup_test(abi_taxonomy abi_taxonomy 0
+	KYTY_BRINGUP_MODE unsafe
+	KYTY_BRINGUP_FEATURES missing_function_import)

@@ -9,6 +9,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Profiler.h"
@@ -1557,6 +1558,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	}
 	m_mutex.Lock();
 
+	uint64_t created_bytes = 0;
+	for (int vi = 0; vi < vaddr_num; vi++)
+	{
+		created_bytes += size[vi];
+	}
+	DebugStatsRecordAlloc(created_bytes);
+
 	return o.object.obj;
 }
 
@@ -1746,6 +1754,13 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 	EXIT_IF(o.delete_func == nullptr);
 
 	Destructor ret {};
+
+	uint64_t freed_bytes = 0;
+	for (int vi = 0; vi < block.vaddr_num; vi++)
+	{
+		freed_bytes += block.size[vi];
+	}
+	DebugStatsRecordFree(freed_bytes);
 
 	if (o.delete_func != nullptr)
 	{

@@ -1,6 +1,7 @@
 #include "Kyty/Core/Core.h"
 
 #include "Kyty/Core/ArrayWrapper.h" // IWYU pragma: associated
+#include "Kyty/Core/BringUp.h"
 #include "Kyty/Core/ByteBuffer.h"   // IWYU pragma: associated
 #include "Kyty/Core/Common.h"       // IWYU pragma: associated
 #include "Kyty/Core/Database.h"
@@ -22,6 +23,10 @@ namespace Kyty::Core {
 
 KYTY_SUBSYSTEM_INIT(Core)
 {
+	// Fail-closed bring-up policy before any guest/HLE work. Invalid KYTY_BRINGUP_*
+	// aborts the process here (no silent fallback to strict after a parse error).
+	BringUp::InitFromEnvironment();
+
 	core_memory_init();
 	core_file_init();
 	core_debug_init(parent->GetArgv()[0]);
