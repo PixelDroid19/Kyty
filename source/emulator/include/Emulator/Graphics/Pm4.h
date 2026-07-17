@@ -310,6 +310,8 @@ constexpr uint32_t PA_SC_LEFT_VERT_GRID      = 0xE9;
 constexpr uint32_t PA_SC_HORIZ_GRID          = 0xEA;
 constexpr uint32_t PA_SC_FOV_WINDOW_LR       = 0xEB;
 constexpr uint32_t PA_SC_FOV_WINDOW_TB       = 0xEC;
+// Legacy GCN offset (Gen5 may still emit via AGC defaults).
+constexpr uint32_t VGT_MULTI_PRIM_IB_RESET_INDX = 0x103;
 constexpr uint32_t CB_RMI_GL2_CACHE_CONTROL  = 0x104;
 constexpr uint32_t CB_BLEND_RED              = 0x105;
 constexpr uint32_t CB_BLEND_GREEN            = 0x106;
@@ -539,6 +541,9 @@ constexpr uint32_t PA_SC_MODE_CNTL_0_LINE_STIPPLE_ENABLE_SHIFT  = 2;
 constexpr uint32_t PA_SC_MODE_CNTL_0_LINE_STIPPLE_ENABLE_MASK   = 0x1;
 
 constexpr uint32_t PA_SC_MODE_CNTL_1      = 0x293;
+// Hull/domain tess level clamps (context space, bulk AGC defaults).
+constexpr uint32_t VGT_HOS_MAX_TESS_LEVEL = 0x286;
+constexpr uint32_t VGT_HOS_MIN_TESS_LEVEL = 0x287;
 constexpr uint32_t VGT_GS_OUT_PRIM_TYPE   = 0x29B;
 constexpr uint32_t VGT_PRIMITIVEID_EN     = 0x2A1;
 constexpr uint32_t VGT_PRIMITIVEID_RESET  = 0x2A3;
@@ -953,12 +958,14 @@ constexpr uint32_t SH_NUM = 0x2FF + 1;
 constexpr uint32_t VGT_PRIMITIVE_TYPE                 = 0x242;
 constexpr uint32_t VGT_PRIMITIVE_TYPE_PRIM_TYPE_SHIFT = 0;
 constexpr uint32_t VGT_PRIMITIVE_TYPE_PRIM_TYPE_MASK  = 0x3F;
+constexpr uint32_t VGT_INDEX_TYPE                     = 0x243;
 
 constexpr uint32_t VGT_OBJECT_ID             = 0x248;
 constexpr uint32_t GE_INDX_OFFSET            = 0x24A;
 constexpr uint32_t GE_MULTI_PRIM_IB_RESET_EN = 0x24B;
 constexpr uint32_t VGT_HS_OFFCHIP_PARAM      = 0x24F;
 constexpr uint32_t VGT_TF_MEMORY_BASE        = 0x250;
+constexpr uint32_t IA_MULTI_VGT_PARAM        = 0x258;
 
 constexpr uint32_t GE_CNTL                     = 0x25B;
 constexpr uint32_t GE_CNTL_PRIM_GRP_SIZE_SHIFT = 0;

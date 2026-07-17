@@ -1509,13 +1509,19 @@ int KYTY_SYSV_ABI GraphicsInit(uint32_t* state, uint32_t ver)
 	printf("\t state = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(state));
 	printf("\t ver   = %u\n", ver);
 
-	EXIT_NOT_IMPLEMENTED(state == nullptr);
+	// Null state is accepted (return OK) so titles that probe early do not hard
+	// abort; non-null must receive version + feature-flag words.
+	if (state == nullptr)
+	{
+		return OK;
+	}
 	// Gen5 tables were authored for AGC ver 8. Other versions currently reuse
 	// those register defaults while their version-specific tables are modeled.
 	if (ver != 8)
 	{
 		printf("\t WARNING: AGC ver %u != 8, using ver-8 register defaults\n", ver);
 	}
+	EXIT_IF(!GraphicsInitWriteGuestState(state, ver));
 
 	return OK;
 }
@@ -2848,6 +2854,22 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 	cmd[2] = decode_draw_index_initiator(modifier) | 0x2u;
 
 	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoWithBase(CommandBuffer* buf, uint32_t base_vertex, uint32_t index_count,
+                                                         uint64_t modifier)
+{
+	PRINT_NAME();
+
+	printf("\t base_vertex = 0x%" PRIx32 "\n", base_vertex);
+	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
+	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+
+	// Captured Dreaming Sarah: base_vertex is always 0. Non-zero base needs a
+	// separate PM4 encoding before it can be accepted.
+	EXIT_NOT_IMPLEMENTED(base_vertex != 0);
+
+	return GraphicsDcbDrawIndexAuto(buf, index_count, modifier);
 }
 
 // AGC indexed draw: sceAgcDcbDrawIndex(dcb, index_count, index_addr, modifier).

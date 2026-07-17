@@ -91,6 +91,20 @@ namespace Gen5 {
 struct CommandBuffer;
 struct Label;
 
+// Guest AGC state published by GraphicsInit: [0]=requested API version,
+// [1]=feature flags (0 = no optional feature bits). Leaving both unset lets
+// titles take a null-deref path after CreateShader / register-default use.
+[[nodiscard]] inline bool GraphicsInitWriteGuestState(uint32_t* state, uint32_t ver)
+{
+	if (state == nullptr)
+	{
+		return false;
+	}
+	state[0] = ver;
+	state[1] = 0u;
+	return true;
+}
+
 int KYTY_SYSV_ABI   GraphicsInit(uint32_t* state, uint32_t ver);
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2(uint32_t ver);
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2Internal(uint32_t ver);
@@ -166,6 +180,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirect(CommandBuffer* buf, co
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t index_size, uint8_t cache_policy);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t index_count, uint64_t modifier);
+// Dreaming Sarah (Graphics5 NID B+aG9DUnTKA): 4-arg drawIndexAuto after modifier load.
+// Observed SysV: (dcb, base_vertex=0, index_count, modifier=0x40000000).
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoWithBase(CommandBuffer* buf, uint32_t base_vertex, uint32_t index_count,
+                                                         uint64_t modifier);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_count, const void* index_addr, uint64_t modifier);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address);
 // sceAgcDcbStallCommandBufferParser: fixed EVENT_WRITE with CS partial flush (0x07).
