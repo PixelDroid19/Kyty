@@ -419,6 +419,49 @@ ShaderCode ParseGen5BufferLoadDwordOffenIdxen()
 	return code;
 }
 
+ShaderCode ParseGen5BufferLoadDwordIdxen()
+{
+	// Captured MUBUF at normalized PC 0x58:
+	// buffer_load_dword v2, v43, s[8:11], 0 idxen offset:0x38.
+	const uint32_t shader[] = {0xe0302038u, 0x8002022bu, 0xbf800000u, 0xbf810000u};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+	return code;
+}
+
+void VerifyGen5BufferLoadDwordIdxen()
+{
+	auto code = ParseGen5BufferLoadDwordIdxen();
+	Expect(code.GetInstructions().Size() == 3, "idxen buffer load encoding parsed with endpgm");
+
+	const auto& load = code.GetInstructions().At(0);
+	Expect(load.type == ShaderInstructionType::BufferLoadDword, "idxen MUBUF opcode 0xc decodes as buffer_load_dword");
+	Expect(load.format == ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen, "idxen buffer load preserves the scalar VGPR address format");
+	Expect(load.dst.type == ShaderOperandType::Vgpr && load.dst.register_id == 2 && load.dst.size == 1,
+	       "idxen buffer load destination decoded");
+	Expect(load.src[0].type == ShaderOperandType::Vgpr && load.src[0].register_id == 43 && load.src[0].size == 1,
+	       "idxen buffer load preserves its single index VGPR");
+	Expect(load.src[1].type == ShaderOperandType::Sgpr && load.src[1].register_id == 8 && load.src[1].size == 4,
+	       "idxen buffer load descriptor decoded");
+	Expect(load.src[2].type == ShaderOperandType::LiteralConstant && load.src[2].constant.u == 0x38u,
+	       "idxen buffer load preserves the instruction byte offset");
+
+	ShaderComputeInputInfo input {};
+	input.bind.storage_buffers.buffers_num       = 1;
+	input.bind.storage_buffers.start_register[0] = 8;
+	input.bind.storage_buffers.usages[0]         = ShaderStorageUsage::ReadOnly;
+	input.bind.push_constant_size                = 16;
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	Expect(source.FindIndex("OpLoad %float %v43") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "idxen consumes its scalar address VGPR as the structured index");
+	Expect(source.FindIndex("OpLoad %float %v44") == Kyty::Core::STRING8_INVALID_INDEX, "idxen does not consume a nonexistent offset VGPR");
+	Expect(source.FindIndex("OpFunctionCall %void %buffer_load_float1") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "idxen buffer_load_dword uses the existing raw dword load contract");
+}
+
 void VerifyGen5BufferLoadDwordOffenIdxen()
 {
 	auto code = ParseGen5BufferLoadDwordOffenIdxen();
@@ -828,6 +871,7 @@ int main()
 	VerifyUnsignedExecLessThanComparison();
 	VerifyFloatExecNotLessEqualComparison();
 	VerifyUnsignedByteBufferLoad();
+	VerifyGen5BufferLoadDwordIdxen();
 	VerifyGen5BufferLoadDwordOffenIdxen();
 	VerifyGen5UnsignedSub();
 	VerifyGen5AddCarryIn();
