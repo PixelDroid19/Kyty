@@ -1059,6 +1059,62 @@ ShaderCode ParseGen5ImageSampleLzDmask1()
 	return code;
 }
 
+ShaderCode ParseGen5ImageSampleLzDmask3()
+{
+	// Captured Gen5 MIMG at normalized PC 0x3a18. NSA contributes the third
+	// DWORD, and dmask 0x3 requests the R and G result components.
+	const uint32_t shader[] = {0xbf800000u, 0xf09c030au, 0x00403740u, 0x00000006u, 0xbf810000u};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+	return code;
+}
+
+void VerifyGen5ImageSampleLzDmask3()
+{
+	auto code = ParseGen5ImageSampleLzDmask3();
+	Expect(code.GetInstructions().Size() == 3, "image_sample_lz dmask 3 consumes its NSA word");
+
+	const auto& sample = code.GetInstructions().At(1);
+	Expect(sample.type == ShaderInstructionType::ImageSampleLz, "image_sample_lz dmask 3 decodes the captured opcode");
+	Expect(sample.format == ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3,
+	       "image_sample_lz dmask 3 uses the two-component MIMG format");
+	Expect(sample.dst.type == ShaderOperandType::Vgpr && sample.dst.register_id == 55 && sample.dst.size == 2,
+	       "image_sample_lz dmask 3 writes two consecutive VGPRs");
+	Expect(sample.mimg_address_num == 5 && sample.mimg_address[0].register_id == 64 && sample.mimg_address[1].register_id == 6,
+	       "image_sample_lz dmask 3 preserves captured NSA addressing");
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0]                              = 1;
+	input.threads_num[1]                              = 1;
+	input.threads_num[2]                              = 1;
+	input.bind.push_constant_size                     = 48;
+	input.bind.textures2D.textures_num                = 1;
+	input.bind.textures2D.textures2d_sampled_num      = 1;
+	input.bind.textures2D.desc[0].start_register      = 0;
+	input.bind.textures2D.desc[0].usage               = ShaderTextureUsage::ReadOnly;
+	input.bind.textures2D.desc[0].texture.fields[0]   = 0x0555f590u;
+	input.bind.textures2D.desc[0].texture.fields[1]   = 0xc4700000u;
+	input.bind.textures2D.desc[0].texture.fields[2]   = 0x00ffc0ffu;
+	input.bind.textures2D.desc[0].texture.fields[3]   = 0x90000facu;
+	input.bind.textures2D.desc[0].texture.fields[4]   = 0x00000000u;
+	input.bind.textures2D.desc[0].texture.fields[5]   = 0x00700000u;
+	input.bind.samplers.samplers_num                  = 1;
+	input.bind.samplers.start_register[0]             = 8;
+	const auto source                                 = SpirvGenerateSource(code, nullptr, nullptr, &input);
+
+	Expect(source.FindIndex("OpImageSampleExplicitLod %v4float %t38_1 %t42_1 Lod %float_0_000000") !=
+	           Kyty::Core::STRING8_INVALID_INDEX,
+	       "image_sample_lz dmask 3 samples at explicit LOD");
+	Expect(source.FindIndex("OpStore %v55") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           source.FindIndex("OpStore %v56") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "image_sample_lz dmask 3 stores R and G");
+	Expect(source.FindIndex("OpAccessChain %_ptr_Function_float %temp_v4float %uint_2") == Kyty::Core::STRING8_INVALID_INDEX,
+	       "image_sample_lz dmask 3 does not materialize B");
+	ExpectValidSpirv(source, "image_sample_lz dmask 3 emits valid SPIR-V");
+}
+
 void VerifyGen5ImageSampleLzDmask1()
 {
 	auto code = ParseGen5ImageSampleLzDmask1();
@@ -1197,6 +1253,7 @@ int main()
 	VerifyGen5UnsignedMad64Vop3b();
 	VerifyGen5ReciprocalIFlag();
 	VerifyGen5ReciprocalIFlagExceptionalInputs();
+	VerifyGen5ImageSampleLzDmask3();
 	VerifyGen5ImageSampleLzDmask1();
 	VerifyGen5SAndn1SaveexecB64();
 	return 0;

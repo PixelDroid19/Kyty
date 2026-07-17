@@ -3367,7 +3367,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x26: KYTY_NI("image_sample_b_cl"); break;
 		case 0x27:
 			// image_sample_lz: sample LOD 0. Same VDATA layouts as image_sample
-			// for the supported dmasks (0x1 R, 0x7 RGB, 0xf RGBA).
+			// for the supported dmasks (0x1 R, 0x3 RG, 0x7 RGB, 0xf RGBA).
 			inst.type        = ShaderInstructionType::ImageSampleLz;
 			inst.src[0].size = 3;
 			inst.src[1].size = 8;
@@ -3378,6 +3378,12 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 				{
 					inst.format   = ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1;
 					inst.dst.size = 1;
+					break;
+				}
+				case 0x3:
+				{
+					inst.format   = ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3;
+					inst.dst.size = 2;
 					break;
 				}
 				case 0x7:
