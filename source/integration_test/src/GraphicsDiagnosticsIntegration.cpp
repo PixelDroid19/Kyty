@@ -792,6 +792,49 @@ void VerifyGen5ShiftLeftOrVop3()
 	       "shift-or combines the shifted value with the third source");
 }
 
+void VerifyGen5AndOrVop3()
+{
+	// Captured Gen5 VOP3 at normalized PC 0x1abc:
+	// v_and_or_b32 v95, 0x07000000, v175, v151.
+	// AMD RDNA2 ISA, Table 83 (VOP3A opcode 881):
+	// https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture
+	const uint32_t shader[] = {
+	    0xd771005fu, 0x065f5effu, 0x07000000u,
+	    0xd771005fu, 0x065f5effu, 0x07000000u,
+	    0xbf810000u,
+	};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	Expect(code.GetInstructions().Size() == 3, "Gen5 VOP3 and-or parses with endpgm");
+	const auto& instruction = code.GetInstructions().At(0);
+	const auto& repeated    = code.GetInstructions().At(1);
+	Expect(instruction.type == ShaderInstructionType::VAndOrB32, "Gen5 VOP3 opcode 0x371 decodes as v_and_or_b32");
+	Expect(repeated.type == ShaderInstructionType::VAndOrB32 &&
+	           repeated.src[0].type == ShaderOperandType::LiteralConstant && repeated.src[0].constant.u == 0x07000000u,
+	       "repeated and-or consumes its own trailing literal before endpgm");
+	Expect(instruction.format == ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, "and-or keeps the three-source vector format");
+	Expect(instruction.src_num == 3, "and-or consumes all three VOP3 sources");
+	Expect(instruction.dst.type == ShaderOperandType::Vgpr && instruction.dst.register_id == 95, "and-or destination decoded");
+	Expect(instruction.src[0].type == ShaderOperandType::LiteralConstant && instruction.src[0].constant.u == 0x07000000u,
+	       "and-or literal mask decoded");
+	Expect(instruction.src[1].type == ShaderOperandType::Vgpr && instruction.src[1].register_id == 175,
+	       "and-or second source decoded");
+	Expect(instruction.src[2].type == ShaderOperandType::Vgpr && instruction.src[2].register_id == 151,
+	       "and-or third source decoded");
+	Expect(instruction.dst.multiplier == 1.0f && !instruction.dst.clamp && !instruction.src[0].negate && !instruction.src[0].absolute &&
+	           !instruction.src[1].negate && !instruction.src[1].absolute && !instruction.src[2].negate && !instruction.src[2].absolute,
+	       "captured and-or encoding has neutral supported modifiers");
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, nullptr);
+	Expect(source.FindIndex("OpBitwiseAnd %uint %t0_0 %t1_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "and-or combines the first two sources with bitwise AND");
+	Expect(source.FindIndex("OpBitwiseOr %uint %tm_0 %t2_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "and-or combines the intermediate result with the third source");
+}
+
 ShaderCode ParseGen5ReciprocalIFlag(bool vop3)
 {
 	ShaderCode code;
@@ -1036,6 +1079,7 @@ int main()
 	VerifyGen5XnorVop2();
 	VerifyGen5BitCountVop3();
 	VerifyGen5ShiftLeftOrVop3();
+	VerifyGen5AndOrVop3();
 	VerifyGen5ReciprocalIFlag();
 	VerifyGen5ReciprocalIFlagExceptionalInputs();
 	VerifyGen5ImageSampleLzDmask1();
