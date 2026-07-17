@@ -1268,7 +1268,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x10: inst.type = ShaderInstructionType::VMaxF32; break;
 		case 0x11: KYTY_NI("v_min_i32"); break;
 		case 0x12: KYTY_NI("v_max_i32"); break;
-		case 0x13: KYTY_NI("v_min_u32"); break;
+		case 0x13: inst.type = ShaderInstructionType::VMinU32; break;
 		case 0x14: KYTY_NI("v_max_u32"); break;
 		case 0x15: inst.type = ShaderInstructionType::VLshrB32; break;
 		case 0x16: inst.type = ShaderInstructionType::VLshrrevB32; break;
@@ -1875,7 +1875,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x110: inst.type = ShaderInstructionType::VMaxF32; break;
 		case 0x111: KYTY_NI("v_min_i32"); break;
 		case 0x112: KYTY_NI("v_max_i32"); break;
-		case 0x113: KYTY_NI("v_min_u32"); break;
+		case 0x113: inst.type = ShaderInstructionType::VMinU32; break;
 		case 0x114: KYTY_NI("v_max_u32"); break;
 		case 0x115: inst.type = ShaderInstructionType::VLshrB32; break;
 		case 0x116: inst.type = ShaderInstructionType::VLshrrevB32; break;

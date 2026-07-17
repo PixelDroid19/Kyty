@@ -237,6 +237,7 @@ enum class ShaderInstructionType : uint32_t
 	VMed3F32,
 	VMin3F32,
 	VMinF32,
+	VMinU32,
 	VMovB32,
 	// VOP1/VOP3 v_nop: padding; SPIR-V emits nothing.
 	VNop,

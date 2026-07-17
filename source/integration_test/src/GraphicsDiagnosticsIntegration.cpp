@@ -864,6 +864,67 @@ void VerifyGen5AndOrVop3()
 	       "and-or combines the intermediate result with the third source");
 }
 
+void VerifyGen5UnsignedMinEncodings()
+{
+	// Captured Gen5 VOP2 at normalized PC 0x3ba4:
+	// v_min_u32 v76, v2, v59.
+	const uint32_t shader[] = {0xbf800000u, 0x26987702u, 0xbf810000u};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	Expect(code.GetInstructions().Size() == 3, "Gen5 VOP2 unsigned min parses with endpgm");
+	const auto& instruction = code.GetInstructions().At(1);
+	Expect(instruction.type == ShaderInstructionType::VMinU32, "Gen5 VOP2 opcode 0x13 decodes as v_min_u32");
+	Expect(instruction.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1, "unsigned min uses the binary vector format");
+	Expect(instruction.dst.type == ShaderOperandType::Vgpr && instruction.dst.register_id == 76,
+	       "unsigned min decodes its destination");
+	Expect(instruction.src[0].type == ShaderOperandType::Vgpr && instruction.src[0].register_id == 2,
+	       "unsigned min decodes its first operand");
+	Expect(instruction.src[1].type == ShaderOperandType::Vgpr && instruction.src[1].register_id == 59,
+	       "unsigned min decodes its second operand");
+	Expect(instruction.src[0].swizzle == 6 && instruction.src[1].swizzle == 6 && !instruction.src[0].absolute &&
+	           !instruction.src[1].absolute && !instruction.src[0].negate && !instruction.src[1].negate &&
+	           !instruction.dst.clamp && instruction.dst.multiplier == 1.0f,
+	       "captured unsigned min uses neutral DWORD modifiers");
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 1;
+	input.threads_num[1] = 1;
+	input.threads_num[2] = 1;
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	Expect(source.FindIndex("OpExtInst %uint %GLSL_std_450 UMin %t0_1 %t1_1") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "unsigned min compares operands without signed reinterpretation");
+	Expect(source.FindIndex("OpSelect %float %exec_lo_b_1 %tf_1 %tdst_1") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "unsigned min preserves its destination when EXEC is inactive");
+	ExpectValidSpirv(source, "unsigned min emits valid SPIR-V");
+
+	const uint32_t vop3_shader[] = {0xbf800000u, 0xd513004cu, 0x00027702u, 0xbf810000u};
+	ShaderCode     vop3_code;
+	vop3_code.SetType(ShaderType::Compute);
+	ShaderParse(vop3_shader, &vop3_code);
+
+	Expect(vop3_code.GetInstructions().Size() == 3, "Gen5 VOP3 unsigned min parses with endpgm");
+	const auto& vop3 = vop3_code.GetInstructions().At(1);
+	Expect(vop3.type == ShaderInstructionType::VMinU32 && vop3.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1,
+	       "Gen5 VOP3 opcode 0x113 shares unsigned min semantics");
+	Expect(vop3.dst.type == ShaderOperandType::Vgpr && vop3.dst.register_id == 76 &&
+	           vop3.src[0].type == ShaderOperandType::Vgpr && vop3.src[0].register_id == 2 &&
+	           vop3.src[1].type == ShaderOperandType::Vgpr && vop3.src[1].register_id == 59,
+	       "Gen5 VOP3 unsigned min preserves destination and operands");
+	Expect(!vop3.src[0].absolute && !vop3.src[1].absolute && !vop3.src[0].negate && !vop3.src[1].negate &&
+	           !vop3.dst.clamp && vop3.dst.multiplier == 1.0f,
+	       "Gen5 VOP3 unsigned min uses neutral modifiers");
+
+	const auto vop3_source = SpirvGenerateSource(vop3_code, nullptr, nullptr, &input);
+	Expect(vop3_source.FindIndex("OpExtInst %uint %GLSL_std_450 UMin %t0_1 %t1_1") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "Gen5 VOP3 unsigned min uses the shared unsigned backend");
+	Expect(vop3_source.FindIndex("OpSelect %float %exec_lo_b_1 %tf_1 %tdst_1") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "Gen5 VOP3 unsigned min preserves inactive destinations");
+	ExpectValidSpirv(vop3_source, "Gen5 VOP3 unsigned min emits valid SPIR-V");
+}
+
 void VerifyGen5UnsignedMad64Vop3b()
 {
 	// Captured Gen5 VOP3B at normalized PC 0x1ec4:
@@ -1250,6 +1311,7 @@ int main()
 	VerifyGen5BitCountVop3();
 	VerifyGen5ShiftLeftOrVop3();
 	VerifyGen5AndOrVop3();
+	VerifyGen5UnsignedMinEncodings();
 	VerifyGen5UnsignedMad64Vop3b();
 	VerifyGen5ReciprocalIFlag();
 	VerifyGen5ReciprocalIFlagExceptionalInputs();
