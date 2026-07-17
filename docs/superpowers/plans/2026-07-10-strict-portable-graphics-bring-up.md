@@ -11,7 +11,9 @@
 ## Global Constraints
 
 - Tracked files must contain no proprietary title name, title identifier, personal path, or compatibility-fixture content.
-- `KYTY_STUB_MISSING` and `KYTY_GFX_PERMISSIVE` are diagnostic only and cannot prove completion.
+- `KYTY_BRINGUP_MODE=unsafe` (and related `KYTY_BRINGUP_*` features) is diagnostic
+  only and cannot prove completion. Legacy `KYTY_STUB_MISSING` /
+  `KYTY_GFX_PERMISSIVE` were removed.
 - No behavior may depend solely on a Vulkan vendor ID.
 - Direct and indirect encodings of the same guest state must use one decoder.
 - Unknown guest behavior fails with evidence; it is never silently skipped or guessed.

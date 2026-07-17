@@ -1,5 +1,6 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 
+#include "Kyty/Core/BringUp.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/LinkList.h"
 #include "Kyty/Core/String.h"
@@ -3393,8 +3394,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 
 		if (pfunc == nullptr)
 		{
-			static const bool permissive = (getenv("KYTY_GFX_PERMISSIVE") != nullptr);
-			if (permissive)
+			if (Core::BringUp::AllowGfxPermissive())
 			{
 				printf("WARNING: skipping unknown cx reg 0x%" PRIx32 "\n", cmd_offset);
 				continue;
@@ -3431,8 +3431,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 
 		if (pfunc == nullptr)
 		{
-			static const bool permissive = (getenv("KYTY_GFX_PERMISSIVE") != nullptr);
-			if (permissive)
+			if (Core::BringUp::AllowGfxPermissive())
 			{
 				printf("WARNING: skipping unknown sh reg 0x%" PRIx32 "\n", cmd_offset);
 				continue;
@@ -3469,8 +3468,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 
 		if (pfunc == nullptr)
 		{
-			static const bool permissive = (getenv("KYTY_GFX_PERMISSIVE") != nullptr);
-			if (permissive)
+			if (Core::BringUp::AllowGfxPermissive())
 			{
 				printf("WARNING: skipping unknown uc reg 0x%" PRIx32 "\n", cmd_offset);
 				continue;

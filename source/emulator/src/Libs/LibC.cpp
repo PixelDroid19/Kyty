@@ -1349,7 +1349,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("1mecP7RgI2A", LibC::c_gmtime);
 	LIB_FUNC("efhK-YSUYYQ", LibC::c_localtime);
 	LIB_FUNC("Av3zjWi64Kw", LibC::c_strftime);
-	// Gen5 libc asctime (NID jT3xiGpA3B4) — hard-aborted Astro without STUB_MISSING.
+	// Gen5 libc asctime (NID jT3xiGpA3B4) — hard-aborted without missing-import stubs.
 	LIB_FUNC("jT3xiGpA3B4", LibC::c_asctime);
 
 	// math (double)

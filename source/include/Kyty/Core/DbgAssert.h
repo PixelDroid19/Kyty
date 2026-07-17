@@ -15,7 +15,8 @@ namespace Kyty::Core {
 int  dbg_exit_handler(char const* file, int line, const char* f, ...) KYTY_FORMAT_PRINTF(3, 4) __attribute__((analyzer_noreturn));
 int  dbg_assert_handler(char const* expr, char const* file, int line) __attribute__((analyzer_noreturn));
 int  dbg_exit_if_handler(char const* expr, char const* file, int line) __attribute__((analyzer_noreturn));
-int  dbg_not_implemented_handler(char const* expr, char const* file, int line) __attribute__((analyzer_noreturn));
+// May return 0 under KYTY_BRINGUP_MODE=unsafe (continue); not noreturn.
+int  dbg_not_implemented_handler(char const* expr, char const* file, int line);
 void dbg_exit(int status) __attribute__((analyzer_noreturn));
 #else
 int  dbg_exit_handler(char const* file, int line, const char* f, ...) KYTY_FORMAT_PRINTF(3, 4);

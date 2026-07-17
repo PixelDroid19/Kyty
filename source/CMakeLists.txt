@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.12)
 
 project(Kyty)
 
+# Required so subdirectory add_test targets are visible to top-level ctest.
+enable_testing()
+
 # Single-config generators (Ninja/Make) with an empty build type produce an
 # unoptimized binary (-g only). Default to Release so Linux/macOS hosts match
 # the intended performance profile; override with -DCMAKE_BUILD_TYPE=Debug.
@@ -179,6 +182,7 @@ config_compiler_and_linker()
 add_subdirectory(3rdparty)
 add_subdirectory(emulator)
 add_subdirectory(unit_test)
+add_subdirectory(integration/bringup)
 if(NOT ${KYTY_PROJECT_NAME} MATCHES "Build_Tools" AND NOT MACOS)
 	# The Qt launcher is not ported to macOS yet; use the fc_script CLI instead.
 	add_subdirectory(launcher)
