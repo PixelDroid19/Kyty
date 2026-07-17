@@ -4256,9 +4256,9 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 	{
 		auto r = storage_buffers.buffers[i];
 
-		// external reference accepts all-zero V# as a null buffer. Captured Gen5 also emits
-		// base/stride/records all zero with junk in word3 (e.g. 0x3f800000 / 1.0f);
-		// that cannot address guest memory, so bind a host-only dummy SSBO.
+		// All-zero V# is a null buffer. Captured Gen5 also emits base/stride/records
+		// all zero with junk in word3 (e.g. 0x3f800000 / 1.0f); that cannot address
+		// guest memory, so bind a host-only dummy SSBO.
 		const bool null_descriptor = r.Base48() == 0 && r.Stride() == 0 && r.NumRecords() == 0;
 		if (null_descriptor)
 		{

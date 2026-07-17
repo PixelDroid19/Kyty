@@ -179,7 +179,7 @@ static KYTY_SYSV_ABI int c_memset_s(void* s, size_t smax, int c, size_t n)
 }
 static KYTY_SYSV_ABI int    c_memcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
 static KYTY_SYSV_ABI void*  c_memchr(const void* s, int c, size_t n) { return const_cast<void*>(::memchr(s, c, n)); }
-// Gen5 libc_v1 wide mem* — NIDs from external reference Ps5Nid (SHA1+suffix, byte-reversed).
+// Gen5 libc_v1 wide mem* — NIDs from the public Gen5 export hash (SHA1+suffix, byte-reversed).
 static KYTY_SYSV_ABI wchar_t* c_wmemchr(const wchar_t* s, wchar_t c, size_t n)
 {
 	return const_cast<wchar_t*>(::wmemchr(s, c, n));

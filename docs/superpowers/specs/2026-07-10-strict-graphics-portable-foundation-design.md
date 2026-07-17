@@ -25,8 +25,8 @@ local, untracked compatibility fixture:
 2. Both checked-in compatibility scripts point to a removed local directory, so
    the default invocation fails while opening the guest executable.
 3. With the correct path and no diagnostic relaxations, the guest initializes a
-   Vulkan window and stops at missing NID `hwVSPCmp5tM`. external reference identifies the
-   NID as `sceKernelCheckedReleaseDirectMemory`.
+   Vulkan window and stops at missing NID `hwVSPCmp5tM`. Public Gen5 export
+   tables identify the NID as `sceKernelCheckedReleaseDirectMemory`.
 4. With only `KYTY_STUB_MISSING=1`, the guest reaches shader creation, produces
    its first graphics DCB and requests a flip. Strict graphics parsing then
    stops at indirect context register `0x90`.
@@ -359,8 +359,8 @@ when semantics are preserved and both paths are tested. The latter is forbidden.
 
 ## 10. Reference Use and Licensing
 
-- external reference: names/signatures, PS5 subsystem boundaries, AGC research patterns.
-  Its GPL code is not copied into this MIT repository.
+- Public Gen5 export tables: names/signatures and PS5 subsystem vocabulary only.
+  No GPL implementation code is copied into this MIT repository.
 - RPCSX: CMake/platform organization, GPU subsystem decomposition, and AMD
   graphics research patterns. GPL implementation code is not copied.
 - Ryubing/Ryujinx: renderer abstraction, capability modeling, resource lifetime,
