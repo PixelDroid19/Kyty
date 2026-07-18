@@ -4623,6 +4623,48 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_Vdata4Vaddr3StDmaskF)
 	return false;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_Vdata1Vaddr3StDmask1)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+
+	if (bind_info == nullptr || bind_info->textures2D.textures2d_sampled_num == 0)
+	{
+		return false;
+	}
+
+	auto dst_value0  = operand_variable_to_str(inst.dst);
+	auto src0_value0 = mimg_address_to_str(inst, 0);
+	auto src0_value1 = mimg_address_to_str(inst, 1);
+	auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
+
+	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
+	EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
+	EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
+
+	static const char* text = R"(
+         %t24_<index> = OpLoad %uint %<src1_value0>
+         %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %t24_<index>
+         %t27_<index> = OpLoad %ImageS %t26_<index>
+         %t67_<index> = OpLoad %float %<src0_value0>
+         %t69_<index> = OpBitcast %uint %t67_<index>
+         %t70_<index> = OpLoad %float %<src0_value1>
+         %t71_<index> = OpBitcast %uint %t70_<index>
+         %t73_<index> = OpCompositeConstruct %v2uint %t69_<index> %t71_<index>
+         %t74_<index> = OpImageFetch %v4float %t27_<index> %t73_<index>
+         %t46_<index> = OpCompositeExtract %float %t74_<index> 0
+               OpStore %<dst_value0> %t46_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+	                   .ReplaceStr("<src0_value0>", src0_value0.value)
+	                   .ReplaceStr("<src0_value1>", src0_value1.value)
+	                   .ReplaceStr("<src1_value0>", src1_value0.value)
+	                   .ReplaceStr("<dst_value0>", dst_value0.value);
+
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageStore_Vdata4Vaddr3StDmaskF)
 {
 	const auto& inst      = code.GetInstructions().At(index);
@@ -8185,6 +8227,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_Exp_Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done,           ShaderInstructionType::Exp,                 ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done,   {""}},
     {Recompile_Exp_PrimVsrc0OffOffOffDone,                 ShaderInstructionType::Exp,                 ShaderInstructionFormat::PrimVsrc0OffOffOffDone,         {""}},
 
+    {Recompile_ImageLoad_Vdata1Vaddr3StDmask1,             ShaderInstructionType::ImageLoad,           ShaderInstructionFormat::Vdata1Vaddr3StDmask1,           {""}},
     {Recompile_ImageLoad_Vdata4Vaddr3StDmaskF,             ShaderInstructionType::ImageLoad,           ShaderInstructionFormat::Vdata4Vaddr3StDmaskF,           {""}},
     {Recompile_ImageSample_Vdata1Vaddr3StSsDmask1,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1,         {""}},
     {Recompile_ImageSample_Vdata1Vaddr3StSsDmask2,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2,         {""}},

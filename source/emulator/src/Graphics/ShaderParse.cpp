@@ -3229,7 +3229,11 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			inst.src[0].size = 3;
 			inst.src[1].size = 8;
 			inst.src_num     = 2;
-			if (dmask == 0xf)
+			if (dmask == 0x1)
+			{
+				inst.format   = ShaderInstructionFormat::Vdata1Vaddr3StDmask1;
+				inst.dst.size = 1;
+			} else if (dmask == 0xf)
 			{
 				inst.format   = ShaderInstructionFormat::Vdata4Vaddr3StDmaskF;
 				inst.dst.size = 4;

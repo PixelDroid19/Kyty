@@ -1957,6 +1957,55 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleLzDmaskF)
 	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 4);
 }
 
+TEST(EmulatorGraphicsPackets, ParsesAndMaterializesImageLoadDmask1)
+{
+	const uint32_t shader[] = {0xf0000108u, 0x00000402u, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	const auto& load = code.GetInstructions().At(0);
+	EXPECT_EQ(load.type, ShaderInstructionType::ImageLoad);
+	EXPECT_EQ(load.format, ShaderInstructionFormat::Vdata1Vaddr3StDmask1);
+	EXPECT_EQ(load.src_num, 2);
+	EXPECT_EQ(load.dst.register_id, 4);
+	EXPECT_EQ(load.dst.size, 1);
+	EXPECT_EQ(load.dst.type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(load.src[0].register_id, 2);
+	EXPECT_EQ(load.src[0].size, 3);
+	EXPECT_EQ(load.src[0].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(load.src[1].register_id, 0);
+	EXPECT_EQ(load.src[1].size, 8);
+	EXPECT_EQ(load.src[1].type, ShaderOperandType::Sgpr);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0]                         = 1;
+	input.threads_num[1]                         = 1;
+	input.threads_num[2]                         = 1;
+	input.bind.push_constant_size                = 32;
+	input.bind.textures2D.textures_num           = 1;
+	input.bind.textures2D.textures2d_sampled_num = 1;
+	input.bind.textures2D.desc[0].start_register = 0;
+	const auto source                            = SpirvGenerateSource(code, nullptr, nullptr, &input);
+
+	EXPECT_NE(source.FindIndex("%t24_0 = OpLoad %uint %s0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%t67_0 = OpLoad %float %v2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%t70_0 = OpLoad %float %v3"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%t73_0 = OpCompositeConstruct %v2uint %t69_0 %t71_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%t74_0 = OpImageFetch %v4float %t27_0 %t73_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%t46_0 = OpCompositeExtract %float %t74_0 0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v4 %t46_0"), Core::STRING8_INVALID_INDEX);
+}
+
 // image_sample (MIMG op 0x20) with single-channel dmasks — captured post-Play
 // with dmask 0x4 then 0x2 at sequential PCs.
 TEST(EmulatorGraphicsPackets, ParsesImageSampleSingleChannelDmasks)

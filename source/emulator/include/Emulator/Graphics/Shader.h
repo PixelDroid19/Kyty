@@ -394,6 +394,7 @@ enum Format : uint64_t
 	Ssrc0Ssrc1                          = FormatDefine({S0, S1}),
 	SVdstSVsrc0                         = FormatDefine({D, S0}),
 	SVdstSVsrc0SVsrc1                   = FormatDefine({D, S0, S1}),
+	Vdata1Vaddr3StDmask1                = FormatDefine({D, S0A3, S1A8, Dmask1}),
 	Vdata1Vaddr3StSsDmask1              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask1}),
 	Vdata1Vaddr3StSsDmask2              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask2}),
 	Vdata1Vaddr3StSsDmask4              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask4}),
