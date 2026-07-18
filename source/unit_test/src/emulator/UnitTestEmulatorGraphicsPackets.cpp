@@ -2781,7 +2781,7 @@ TEST(EmulatorGraphicsPackets, Gen5EudOverflowSharpOffsetMapping)
 TEST(EmulatorGraphicsPackets, Gen5DsWriteB32UsesConfiguredWorkgroupLds)
 {
 	// Captured compute instruction: ds_write_b32 v5, v4 offset:0.
-	const uint32_t shader[] = {0xd8340000u, 0x00000405u, 0xbf800000u, 0xbf810000u};
+	const uint32_t shader[] = {0xd8340000u, 0x00000405u, 0xbf8a0000u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
 	{
@@ -2802,6 +2802,10 @@ TEST(EmulatorGraphicsPackets, Gen5DsWriteB32UsesConfiguredWorkgroupLds)
 	EXPECT_EQ(instruction.src[0].register_id, 5);
 	EXPECT_EQ(instruction.src[1].register_id, 4);
 	EXPECT_EQ(instruction.ds_offset, 0);
+	const auto& barrier = code.GetInstructions().At(1);
+	EXPECT_EQ(barrier.type, ShaderInstructionType::SBarrier);
+	EXPECT_EQ(barrier.format, ShaderInstructionFormat::Empty);
+	EXPECT_EQ(barrier.src_num, 0);
 
 	ShaderComputeInputInfo input;
 	input.threads_num[0] = 16;
@@ -2816,6 +2820,8 @@ TEST(EmulatorGraphicsPackets, Gen5DsWriteB32UsesConfiguredWorkgroupLds)
 	EXPECT_NE(source.FindIndex("OpLoad %float %v4"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpShiftRightLogical %uint %lds_byte_addr_0 %uint_2"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpStore %lds_ptr_0 %lds_data_u_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpControlBarrier %uint_2 %uint_2 %uint_0x00000108"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("unknown_uint_constant"), Core::STRING8_INVALID_INDEX);
 
 	const auto binary = ShaderRecompileCS(code, &input);
 	EXPECT_FALSE(binary.IsEmpty());

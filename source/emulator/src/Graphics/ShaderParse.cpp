@@ -265,7 +265,12 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 			inst.src_num           = 1;
 			break;
 		case 0x9: KYTY_NI("s_cbranch_execnz"); break;
-		case 0xA: KYTY_NI("s_barrier"); break;
+		case 0xA:
+			EXIT_NOT_IMPLEMENTED(simm != 0);
+			inst.type    = ShaderInstructionType::SBarrier;
+			inst.format  = ShaderInstructionFormat::Empty;
+			inst.src_num = 0;
+			break;
 		case 0xB: KYTY_NI("s_setkill"); break;
 		case 0xD: KYTY_NI("s_sethalt"); break;
 		case 0xE: KYTY_NI("s_sleep"); break;
