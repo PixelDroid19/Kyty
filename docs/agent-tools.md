@@ -3,6 +3,10 @@
 Opt-in local Unix socket that lets an agent (or human) control and observe a
 running emulator **in realtime** without Python, xdotool, or window screenshots.
 
+Install and verify the broader agent toolkit: `INSTALL-AGENTS.md`,
+`python3 scripts/kyty_agent_doctor.py --task start`,
+`python3 scripts/verify_agent_toolkit.py`.
+
 ## Enable
 
 Start the guest with an absolute socket path and a capture directory:
@@ -162,3 +166,28 @@ Example agent loop when presents advance but the frame looks wrong:
    frontier signal. Delete large BMPs after making a PNG preview on 8GB hosts.
 6. Exit `125` means the guest/socket is gone — relaunch; do not extend sleeps.
 7. `events` / `last-error` when something looks wrong.
+
+## Matrix and regression harnesses
+
+Game-agnostic strict runners (no hard-coded titles; anonymous `case_*` ids):
+
+```bash
+# Discover package roots under a games directory:
+python3 scripts/kyty_games_matrix.py --discover-only --games-root "$KYTY_GAMES_ROOT"
+
+# Full matrix (requires fc_script + kyty_agent built):
+KYTY_GAMES_ROOT=... KYTY_MATRIX_SCRATCH=/tmp/matrix \\
+  python3 scripts/kyty_games_matrix.py \\
+    --fc-script _build_linux/fc_script \\
+    --kyty-agent _build_linux/agent/kyty_agent
+
+# Single-title playable profile (strict env; optional baseline PNG):
+python3 scripts/kyty_playable_regression.py \\
+  --fc-script _build_linux/fc_script \\
+  --kyty-agent _build_linux/agent/kyty_agent \\
+  --guest-root "$KYTY_GUEST_ROOT"
+```
+
+Record outcomes in a frontier manifest for multi-session work — see
+`skills/kyty-frontier-swarm/references/manifest-schema.md`. Never commit scratch
+logs or private paths.

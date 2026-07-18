@@ -1,0 +1,26 @@
+{
+  "schema": "kyty_playable_regression_profile_v1",
+  "description": "Strict bounded playable gate: agent-ready, video, presents, pad delivery, capture, visual compare. Thresholds only — does not alter emulator behavior.",
+  "mode": "strict",
+  "deadlines_s": {
+    "agent_ready": 60,
+    "first_present": 120,
+    "present_stability": 25,
+    "input_window": 30,
+    "total": 180
+  },
+  "milestones": {
+    "min_present_after_ready": 1,
+    "present_delta_stable": 15,
+    "min_pad_taps": 1,
+    "min_guest_read_state_samples": 1
+  },
+  "pad_sequence": [
+    {"tool": "pad_tap", "button": "cross"},
+    {"tool": "pad_tap", "button": "cross"}
+  ],
+  "visual": {
+    "require_baseline": true,
+    "require_capture": true
+  }
+}
