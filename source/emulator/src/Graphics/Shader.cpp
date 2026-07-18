@@ -48,7 +48,22 @@ bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 	// Captured STORAGE_FMT_FAIL: stride=4, DstSel(R,0,0,1), format=20.
 	// Treat format 20 as a 32-bit single-component buffer view until more
 	// Gen5 format IDs are captured.
-	return format == 20;
+	// Format 22 = 32_FLOAT (Gfx10UnifiedFormat → dfmt=4,nfmt=7; TileTextureInfo_2_4_7).
+	return format == 20 || format == 22;
+}
+
+// Gen5 VS input attribute component counts for formats wired in get_input_format.
+// 0 = unsupported. Provenance: Gfx10 unified table + existing Kyty floatN cases.
+uint32_t ShaderGen5VertexInputComponentCount(uint8_t format)
+{
+	switch (format)
+	{
+		case 22: return 1; // 32_FLOAT
+		case 64: return 2; // 32_32_FLOAT
+		case 74: return 3; // 32_32_32_FLOAT
+		case 77: return 4; // 32_32_32_32_FLOAT
+		default: return 0;
+	}
 }
 
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component)
@@ -93,6 +108,22 @@ uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format)
 		return align_px;
 	}
 	return ((width + align_px - 1u) / align_px) * align_px;
+}
+
+uint32_t ShaderGen5ResolveLinearPitch(uint32_t width, uint32_t format, uint8_t type, uint32_t word4)
+{
+	// Provenance: RDNA2 SQ_IMG_RSRC 256-bit 1D/2D/2D-MSAA word4[13:0] = pitch-1.
+	// Zero word4 denotes a 128-bit resource with implicit pitch = width.
+	uint32_t pitch = width;
+	if ((type == 8u || type == 9u || type == 14u) && word4 != 0u)
+	{
+		pitch = (word4 & 0x3FFFu) + 1u;
+	}
+	if (pitch < width)
+	{
+		pitch = width;
+	}
+	return ShaderGen5LinearTexturePitch(pitch, format);
 }
 
 struct ShaderBinaryInfo

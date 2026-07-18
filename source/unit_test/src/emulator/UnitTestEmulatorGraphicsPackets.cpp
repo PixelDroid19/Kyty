@@ -555,6 +555,17 @@ TEST(EmulatorGraphicsPackets, ClassifiesGen5FourComponent32BitBufferFormats)
 	EXPECT_FALSE(ShaderIsGen5FourComponent32BitBufferFormat(78));
 }
 
+TEST(EmulatorGraphicsPackets, Gen5VertexInputComponentCounts)
+{
+	// Gfx10 unified 22 → (dfmt=4,nfmt=7) = 32_FLOAT; 64/74/77 are existing floatN.
+	EXPECT_EQ(ShaderGen5VertexInputComponentCount(22), 1u);
+	EXPECT_EQ(ShaderGen5VertexInputComponentCount(64), 2u);
+	EXPECT_EQ(ShaderGen5VertexInputComponentCount(74), 3u);
+	EXPECT_EQ(ShaderGen5VertexInputComponentCount(77), 4u);
+	EXPECT_EQ(ShaderGen5VertexInputComponentCount(0), 0u);
+	EXPECT_TRUE(ShaderIsGen5SingleComponent32BitBufferFormat(22));
+}
+
 TEST(EmulatorGraphicsPackets, AllowsRegionScalarsOnlyInsideSrtRange)
 {
 	ShaderUserData no_srt {};
@@ -1802,6 +1813,35 @@ TEST(EmulatorGraphicsPackets, AlignsGen5LinearTexturePitchTo256ByteRows)
 	EXPECT_EQ(ShaderGen5LinearTexturePitch(2048, 14), 2048u);
 }
 
+// RDNA2 SQ_IMG_RSRC: 256-bit 2D word4[13:0] = pitch-1; zero word4 => pitch = width.
+TEST(EmulatorGraphicsPackets, ResolvesGen5LinearPitchFromDescriptorWord4)
+{
+	constexpr uint8_t k_type_2d = 9u;
+	// 128-bit resource (word4=0): 980-wide RGBA8 aligns to 1024.
+	EXPECT_EQ(ShaderGen5ResolveLinearPitch(980u, 56u, k_type_2d, 0u), 1024u);
+	// Explicit pitch 1280 (word4 = 1279) wins over width 980, already 256-byte aligned.
+	EXPECT_EQ(ShaderGen5ResolveLinearPitch(980u, 56u, k_type_2d, 1279u), 1280u);
+	// Pitch below width is clamped up to width, then aligned.
+	EXPECT_EQ(ShaderGen5ResolveLinearPitch(980u, 56u, k_type_2d, 63u), 1024u);
+	// Pitch5 accessor matches Resolve for a filled resource.
+	ShaderTextureResource r {};
+	r.fields[3] = (k_type_2d << 28u);
+	r.fields[4] = 1279u;
+	EXPECT_EQ(r.Pitch5(980u), 1280u);
+	EXPECT_EQ(ShaderGen5ResolveLinearPitch(980u, 56u, k_type_2d, r.fields[4]), 1280u);
+}
+
+TEST(EmulatorGraphicsPackets, DecodesGen5WidthHeightFullIsaFields)
+{
+	ShaderTextureResource r {};
+	// width-1 uses word2[13:0]; old 12-bit mask dropped bit 12 → wrong widths >= 16385.
+	r.fields[1] = (0x3u << 30u);
+	r.fields[2] = 0x1000u;
+	EXPECT_EQ(r.Width5() + 1u, 16388u);
+	r.fields[2] |= (2159u << 14u);
+	EXPECT_EQ(r.Height5() + 1u, 2160u);
+}
+
 // Captured post-Play sample texture: format 14 (RG8), 2048x4096, linear tile 0.
 // Size must be pitch*height*2 with 256-byte row alignment (pitch == width here).
 TEST(EmulatorGraphicsPackets, SizesGen5LinearRg8Texture2048x4096)
@@ -2916,6 +2956,47 @@ TEST(EmulatorGraphicsPackets, EncodesDrawIndexOffset)
 	EXPECT_EQ(cmd[2], 0x10u);
 	EXPECT_EQ(cmd[3], 0x30u);
 	EXPECT_EQ(cmd[4], 0x40000000u & 0xE0000001u);
+}
+
+// Captured UI batch (Dreaming Sarah title logo): IndexBase holds 0,1,2,1,2,3 for a
+// 4-vert quad. NID B+aG9DUnTKA must emit Offset (not Auto) so those indices apply.
+TEST(EmulatorGraphicsPackets, DrawIndexOffsetEncodesUiQuadIndexCount)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[8] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 8;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 8;
+
+	uint32_t* cmd = Gen5::GraphicsDcbDrawIndexOffset(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 6u, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0));
+	EXPECT_EQ(cmd[1], 6u);
+	EXPECT_EQ(cmd[2], 0u);
+	EXPECT_EQ(cmd[3], 6u);
+	EXPECT_EQ(cmd[4], 0u);
+
+	// Auto uses a different opcode; B+aG9DUnTKA must not emit this.
+	EXPECT_NE(KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0), KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u));
 }
 
 UT_END();
