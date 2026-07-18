@@ -49,6 +49,16 @@ void SymbolDatabase::Add(const SymbolResolve& s, uint64_t vaddr, const String& d
 	m_symbols.Add(r);
 }
 
+void SymbolDatabase::AddAliases(SymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr, const String& dbg_name)
+{
+	for (const auto* name: names)
+	{
+		EXIT_IF(name == nullptr);
+		s.name = name;
+		Add(s, vaddr, dbg_name);
+	}
+}
+
 void SymbolDatabase::DbgDump(const String& folder, const String& file_name)
 {
 	auto folder_str = folder.FixDirectorySlash();
@@ -87,14 +97,16 @@ const SymbolRecord* SymbolDatabase::Find(const SymbolResolve& s) const
 		}
 	}
 
-	// Last resort: match on NID-only prefix (before first '[').
+	// Last resort: match on NID prefix only when the requested symbol type also
+	// matches. A Func lookup must not bind an Object placeholder with the same NID.
 	const uint32_t bracket = key.FindIndex(U'[');
 	if (bracket != Core::STRING_INVALID_INDEX && bracket > 0)
 	{
-		const String nid = key.Left(bracket);
+		const String nid  = key.Left(bracket);
+		const String type = String::FromPrintf("[%s]", Core::EnumName(s.type).C_Str());
 		for (const auto& sym: m_symbols)
 		{
-			if (sym.name.StartsWith(nid + U"["))
+			if (sym.name.StartsWith(nid + U"[") && sym.name.EndsWith(type))
 			{
 				return &sym;
 			}

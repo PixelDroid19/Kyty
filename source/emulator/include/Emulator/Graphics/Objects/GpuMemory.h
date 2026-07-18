@@ -533,9 +533,9 @@ public:
 
 void GpuMemoryInit();
 
-// Guest malloc/operator new are forwarded to the host allocator, so titles may
-// put small V#/I# bases in the host userspace heap (Linux ~0x7f00…–0x8000…).
-// Those ranges never go through MapDirectMemory and are not GPU heaps until
+// Bootstrap HLE-owned allocations may live in the host userspace heap (Linux
+// ~0x7f00...-0x8000...) before the guest application heap is available. Those
+// ranges never go through MapDirectMemory and are not GPU heaps until
 // CreateObject lazily covers them. Pure predicate for tests and call sites.
 [[nodiscard]] inline bool GpuMemoryIsHostGuestMallocRange(uint64_t vaddr, uint64_t size)
 {

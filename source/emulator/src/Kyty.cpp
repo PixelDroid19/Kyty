@@ -297,6 +297,22 @@ KYTY_SCRIPT_FUNC(kyty_dbg_dump_func)
 	return 0;
 }
 
+KYTY_SCRIPT_FUNC(kyty_dbg_dump_symbols_func)
+{
+	if (Scripts::ArgGetVarCount() != 1)
+	{
+		EXIT("invalid args\n");
+	}
+
+	Scripts::ScriptVar dbg_dir = Scripts::ArgGetVar(0);
+
+	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
+
+	rt->DbgDumpSymbols(dbg_dir.ToString());
+
+	return 0;
+}
+
 KYTY_SCRIPT_FUNC(kyty_execute_func)
 {
 	if (Scripts::ArgGetVarCount() != 0)
@@ -479,6 +495,7 @@ void kyty_reg()
 	Scripts::RegisterFunc("kyty_load_param_sfo", LuaFunc::kyty_load_param_sfo_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_load_param_json", LuaFunc::kyty_load_param_json_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_dbg_dump", LuaFunc::kyty_dbg_dump_func, LuaFunc::kyty_help);
+	Scripts::RegisterFunc("kyty_dbg_dump_symbols", LuaFunc::kyty_dbg_dump_symbols_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_execute", LuaFunc::kyty_execute_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_mount", LuaFunc::kyty_mount_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_shader_disable", LuaFunc::kyty_shader_disable, LuaFunc::kyty_help);

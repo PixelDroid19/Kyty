@@ -946,7 +946,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		heap_id = GetHeapId(vaddr[0], size[0]);
 	}
 
-	EXIT_NOT_IMPLEMENTED(heap_id < 0);
+	if (heap_id < 0)
+	{
+		Vector<OverlappedBlock> no_parents;
+		EXIT("%s\n", create_dbg_exit(U"unallocated gpu object range", vaddr, size, vaddr_num, no_parents, info.type).C_Str());
+	}
 
 	auto& heap = m_heaps[heap_id];
 

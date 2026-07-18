@@ -54,6 +54,8 @@ struct ThreadLocalStorage
 	uint64_t image_vaddr   = 0;
 	uint64_t image_size    = 0;
 	uint64_t handler_vaddr = 0;
+	uint64_t module_id     = 0;
+	uint64_t static_offset = 0;
 
 	Core::Hashmap<int, uint8_t*> tlss;
 	Core::Mutex                  mutex;
@@ -146,6 +148,7 @@ public:
 	KYTY_CLASS_NO_COPY(RuntimeLinker);
 
 	void DbgDump(const String& folder);
+	void DbgDumpSymbols(const String& folder);
 
 	Program* LoadProgram(const String& elf_name);
 	// True if a program with this exact host path is already in the load list.
@@ -182,6 +185,7 @@ public:
 	Program*        FindProgramById(int32_t id);
 
 	static uint8_t* TlsGetAddr(Program* program);
+	static uint8_t* TlsGetAddr(uint64_t module_id, uint64_t offset);
 	static void     DeleteTls(Program* program, int thread_id);
 
 	void StackTrace(uint64_t frame_ptr);
@@ -217,6 +221,19 @@ private:
 // prefixes execute as a 16-bit CALL on the host (IP 0x3ffe, misaligned stack).
 // Returns the number of sites rewritten. Pure buffer transform for unit tests.
 uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size);
+
+// Patch direct guest TLS-base loads in executable code:
+//   [66 ...] mov rax, qword ptr fs:[0]
+// into a call to Kyty's per-thread guest TLS handler. Returns the number of
+// load sites rewritten. Pure buffer transform for unit tests; callers own page
+// permissions and instruction-cache flushing.
+uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handler_vaddr);
+
+// Calculate x86-64 TLS relocation payloads in guest terms. DTPMOD64 writes the
+// stable guest TLS module id; DTPOFF64 writes the module-local TLS offset; and
+// TPOFF64 writes the negative static offset from the thread pointer.
+uint64_t LoaderTlsRelocationValue(uint32_t relocation_type, uint64_t module_id, uint64_t symbol_offset, int64_t addend,
+                                  uint64_t static_tls_size);
 
 // Prepare a per-thread TLS image after memcpy from the PT_TLS template:
 // 1) Relocate absolute pointers that fall inside [template_vaddr, +image_size)

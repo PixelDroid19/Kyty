@@ -7,6 +7,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Kernel/FileSystem.h"
+#include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/CxaDynamicCast.h"
 #include "Emulator/Libs/CxxLocale.h"
 #include "Emulator/Libs/Libs.h"
@@ -73,16 +74,123 @@ static KYTY_SYSV_ABI void init_env()
 	PRINT_NAME();
 }
 
-// Standard C library forwarded to the host runtime. The guest's SysV x86-64 ABI
-// matches the host's, so these thin wrappers are correct. Used when the game runs
-// against Kyty's HLE "libc" instead of its own libc.prx.
+enum class AllocationOwner
+{
+	Host,
+	ApplicationHeap,
+};
+
+struct AllocationRecord
+{
+	AllocationOwner owner;
+	size_t          size;
+};
+
+static std::mutex                                  g_allocations_mutex;
+static std::unordered_map<void*, AllocationRecord> g_allocations;
+
+static bool register_allocation(void* ptr, AllocationRecord record)
+{
+	if (ptr == nullptr)
+	{
+		return false;
+	}
+
+	std::lock_guard lock(g_allocations_mutex);
+	return g_allocations.emplace(ptr, record).second;
+}
+
+static bool claim_allocation(void* ptr, AllocationRecord* record)
+{
+	if (ptr == nullptr || record == nullptr)
+	{
+		return false;
+	}
+
+	std::lock_guard lock(g_allocations_mutex);
+	const auto      it = g_allocations.find(ptr);
+	if (it == g_allocations.end())
+	{
+		return false;
+	}
+
+	*record = it->second;
+	g_allocations.erase(it);
+	return true;
+}
+
+static void* allocate_with_owner(size_t size)
+{
+	if (void* ptr = LibKernel::ApplicationHeap::Malloc(size); ptr != nullptr)
+	{
+		const bool registered = register_allocation(ptr, {AllocationOwner::ApplicationHeap, size});
+		EXIT_IF(!registered);
+		return ptr;
+	}
+
+	if (LibKernel::ApplicationHeap::IsInitialized())
+	{
+		return nullptr;
+	}
+
+	void* ptr = ::malloc(size);
+	if (ptr != nullptr)
+	{
+		const bool registered = register_allocation(ptr, {AllocationOwner::Host, size});
+		EXIT_IF(!registered);
+	}
+	return ptr;
+}
+
+static bool free_by_owner(void* ptr)
+{
+	if (ptr == nullptr)
+	{
+		return true;
+	}
+
+	AllocationRecord record {};
+	if (claim_allocation(ptr, &record))
+	{
+		if (record.owner == AllocationOwner::ApplicationHeap)
+		{
+			return LibKernel::ApplicationHeap::Free(ptr);
+		}
+		::free(ptr);
+		return true;
+	}
+
+	if (LibKernel::ApplicationHeap::HasAllocator())
+	{
+		return LibKernel::ApplicationHeap::Free(ptr);
+	}
+
+	::free(ptr);
+	return true;
+}
+
+// Standard C allocation routes through the guest application heap after the
+// title registers and creates it. Before that point, host allocation remains
+// the bootstrap fallback for HLE-owned libc objects.
 static KYTY_SYSV_ABI void* c_malloc(size_t size)
 {
-	return ::malloc(size);
+	return allocate_with_owner(size);
 }
+
 static KYTY_SYSV_ABI void* c_calloc(size_t n, size_t size)
 {
-	return ::calloc(n, size);
+	if (size != 0 && n > SIZE_MAX / size)
+	{
+		return nullptr;
+	}
+
+	const size_t total = n * size;
+	void*        ptr   = allocate_with_owner(total);
+	if (ptr != nullptr)
+	{
+		::memset(ptr, 0, total);
+	}
+	return ptr;
 }
 
 struct AlignedAllocation
@@ -138,6 +246,27 @@ static KYTY_SYSV_ABI void* c_memalign(size_t alignment, size_t size)
 		return nullptr;
 	}
 
+	if (LibKernel::ApplicationHeap::IsInitialized())
+	{
+		constexpr size_t kGuestMallocAlignment = 16;
+		if (alignment > kGuestMallocAlignment)
+		{
+			EXIT_NOT_IMPLEMENTED(true);
+		}
+
+		void* ptr = allocate_with_owner(size);
+		if (ptr == nullptr)
+		{
+			return nullptr;
+		}
+		if ((reinterpret_cast<uintptr_t>(ptr) & (alignment - 1)) != 0)
+		{
+			(void)free_by_owner(ptr);
+			return nullptr;
+		}
+		return ptr;
+	}
+
 	const size_t total = size + alignment - 1;
 	void*        base  = ::malloc(total);
 	if (base == nullptr)
@@ -155,17 +284,23 @@ static KYTY_SYSV_ABI void* c_memalign(size_t alignment, size_t size)
 	return reinterpret_cast<void*>(aligned);
 }
 
+static KYTY_SYSV_ABI void c_free(void* p);
+
 static KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 {
+	if (p == nullptr)
+	{
+		return c_malloc(size);
+	}
+	if (size == 0)
+	{
+		c_free(p);
+		return nullptr;
+	}
+
 	AlignedAllocation allocation {};
 	if (claim_aligned_allocation(p, &allocation))
 	{
-		if (size == 0)
-		{
-			::free(allocation.base);
-			return nullptr;
-		}
-
 		void* replacement = c_memalign(allocation.alignment, size);
 		if (replacement == nullptr)
 		{
@@ -178,7 +313,43 @@ static KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 		::free(allocation.base);
 		return replacement;
 	}
-	return ::realloc(p, size);
+
+	AllocationRecord record {};
+	if (!claim_allocation(p, &record))
+	{
+		EXIT_NOT_IMPLEMENTED(LibKernel::ApplicationHeap::HasAllocator());
+		return ::realloc(p, size);
+	}
+
+	if (record.owner == AllocationOwner::ApplicationHeap)
+	{
+		void* replacement = allocate_with_owner(size);
+		if (replacement == nullptr)
+		{
+			const bool restored = register_allocation(p, record);
+			EXIT_IF(!restored);
+			return nullptr;
+		}
+
+		::memcpy(replacement, p, (record.size < size ? record.size : size));
+		if (!LibKernel::ApplicationHeap::Free(p))
+		{
+			EXIT("ApplicationHeap free failed during realloc\n");
+		}
+		return replacement;
+	}
+
+	void* replacement = ::realloc(p, size);
+	if (replacement == nullptr)
+	{
+		const bool restored = register_allocation(p, record);
+		EXIT_IF(!restored);
+		return nullptr;
+	}
+
+	const bool registered = register_allocation(replacement, {AllocationOwner::Host, size});
+	EXIT_IF(!registered);
+	return replacement;
 }
 
 static KYTY_SYSV_ABI void c_free(void* p)
@@ -189,7 +360,10 @@ static KYTY_SYSV_ABI void c_free(void* p)
 		::free(allocation.base);
 		return;
 	}
-	::free(p);
+	if (!free_by_owner(p))
+	{
+		EXIT("ApplicationHeap free failed\n");
+	}
 }
 static KYTY_SYSV_ABI void* c_memcpy(void* d, const void* s, size_t n)
 {
@@ -272,6 +446,34 @@ static KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
 	EXIT_NOT_IMPLEMENTED(character > 0x7f);
 	return character >= '0' && character <= '9' ? 1 : 0;
 }
+static KYTY_SYSV_ABI int c_Wctombx(char* dst, uint32_t character, std::mbstate_t* /*state*/, const void* /*cvtvec*/)
+{
+	if (dst == nullptr)
+	{
+		return 0;
+	}
+	EXIT_NOT_IMPLEMENTED(character > 0x7f);
+	dst[0] = static_cast<char>(character);
+	return 1;
+}
+static KYTY_SYSV_ABI int c_Mbtowcx(uint16_t* dst, const char* src, size_t count, std::mbstate_t* /*state*/, const void* /*cvtvec*/)
+{
+	if (src == nullptr)
+	{
+		return 0;
+	}
+	if (count == 0)
+	{
+		return -2;
+	}
+	const auto ch = static_cast<uint8_t>(src[0]);
+	EXIT_NOT_IMPLEMENTED(ch > 0x7f);
+	if (dst != nullptr)
+	{
+		*dst = ch;
+	}
+	return ch == 0 ? 0 : 1;
+}
 static KYTY_SYSV_ABI char* c_strcpy(char* d, const char* s)
 {
 	return ::strcpy(d, s);
@@ -284,6 +486,35 @@ static KYTY_SYSV_ABI wchar_t* c_wmemchr(const wchar_t* s, wchar_t c, size_t n)
 static KYTY_SYSV_ABI int      c_wmemcmp(const wchar_t* a, const wchar_t* b, size_t n)
 {
 	return std::wmemcmp(a, b, n);
+}
+static KYTY_SYSV_ABI int c_wmemcmp16(const char16_t* a, const char16_t* b, size_t n)
+{
+	if (n == 0)
+	{
+		return 0;
+	}
+	EXIT_IF(a == nullptr || b == nullptr);
+	for (size_t i = 0; i < n; i++)
+	{
+		if (a[i] != b[i])
+		{
+			return (a[i] < b[i] ? -1 : 1);
+		}
+	}
+	return 0;
+}
+static KYTY_SYSV_ABI char16_t* c_wmemcpy16(char16_t* d, const char16_t* s, size_t n)
+{
+	if (n == 0)
+	{
+		return d;
+	}
+	EXIT_IF(d == nullptr || s == nullptr);
+	for (size_t i = 0; i < n; i++)
+	{
+		d[i] = s[i];
+	}
+	return d;
 }
 static KYTY_SYSV_ABI wchar_t* c_wmemcpy(wchar_t* d, const wchar_t* s, size_t n)
 {
@@ -378,22 +609,28 @@ static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
 	return ::strtok_r(str, delim, &save);
 }
 
-// C++ operator new/delete (mangled _Znwm/_ZdlPv/_ZdaPv), forwarded to the host allocator.
+// C++ operator new/delete (mangled _Znwm/_ZdlPv/_ZdaPv), same ownership as libc malloc.
 static KYTY_SYSV_ABI void* cxx_new(size_t size)
 {
-	return ::malloc(size != 0 ? size : 1);
+	return allocate_with_owner(size != 0 ? size : 1);
 }
 static KYTY_SYSV_ABI void cxx_delete(void* p)
 {
-	::free(p);
+	if (!free_by_owner(p))
+	{
+		EXIT("ApplicationHeap delete failed\n");
+	}
 }
 static KYTY_SYSV_ABI void* cxx_new_array(size_t size)
 {
-	return ::malloc(size != 0 ? size : 1);
+	return allocate_with_owner(size != 0 ? size : 1);
 }
 static KYTY_SYSV_ABI void cxx_delete_array(void* p)
 {
-	::free(p);
+	if (!free_by_owner(p))
+	{
+		EXIT("ApplicationHeap delete[] failed\n");
+	}
 }
 
 // Gen5 libc NIDs iPBqs+YUUFw / 2HnmKiLmV6s — same SysV ABI from call sites:
@@ -503,6 +740,18 @@ static KYTY_SYSV_ABI const short* c_Getptolower()
 		init = true;
 	}
 	return table + 1;
+}
+
+static KYTY_SYSV_ABI std::mbstate_t* c_Getpmbstate()
+{
+	static std::mbstate_t state {};
+	return &state;
+}
+
+static KYTY_SYSV_ABI std::mbstate_t* c_Getpwcstate()
+{
+	static std::mbstate_t state {};
+	return &state;
 }
 
 // --- stdio (host FILE* passed back opaquely to the guest) --------------------
@@ -894,17 +1143,6 @@ static KYTY_SYSV_ABI void c_sincos(double x, double* s, double* c)
 	*s = ::sin(x);
 	*c = ::cos(x);
 }
-struct TlsInfo
-{
-	Loader::Program* program;
-	uint64_t         offset;
-};
-
-static void* KYTY_SYSV_ABI c_tls_get_addr(TlsInfo* info)
-{
-	return Loader::RuntimeLinker::TlsGetAddr(info->program) + info->offset;
-}
-
 // --- math (float) ------------------------------------------------------------
 static KYTY_SYSV_ABI float c_powf(float x, float y)
 {
@@ -1047,6 +1285,10 @@ static KYTY_SYSV_ABI void c_Xlength_error(const char* msg)
 {
 	EXIT("std::length_error: %s\n", msg != nullptr ? msg : "");
 }
+static KYTY_SYSV_ABI void c_Xregex_error(int error_type)
+{
+	EXIT("std::regex_error: error_type=%d\n", error_type);
+}
 
 // Itanium __cxa_dynamic_cast (NID hMAe+TWS9mQ). Captured Dreaming Sarah after
 // Construct JSON load: rdi=src, rsi/rdx=type_info ("17ConditionOrAction" /
@@ -1182,7 +1424,7 @@ static void* g_exception_vtable[8]           = {reinterpret_cast<void*>(&CxxVtab
                                                 reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
 
 // Exception / iostream RTTI Objects imported by case_dreaming_sarah eboot
-// (libc_v1). NIDs from eboot import table; names via external reference ps5_names + Ps5Nid.
+// (libc_v1). NIDs from eboot import table; names from public symbol catalogs.
 // Vtable slots are no-ops; type_info uses Itanium __si layout (base null for now).
 #define KYTY_CXX_NOOP_VTBL                                                                                                                 \
 	{                                                                                                                                      \
@@ -1232,6 +1474,21 @@ static KYTY_SYSV_ABI void* c_locale_Getgloballocale()
 {
 	return &g_classic_locimp;
 }
+
+static KYTY_SYSV_ABI void* c_locale_CreateClassicLocimp()
+{
+	return &g_classic_locimp;
+}
+
+static KYTY_SYSV_ABI void c_locale_InitTemporaryInfo(void* /*self*/, const char* /*name*/, std::uint64_t /*category*/)
+{
+	// Captured caller only needs the temporary to be accepted before passing it
+	// back to libc cleanup HLE; no guest-visible fields are read at this site.
+}
+
+static KYTY_SYSV_ABI void c_locale_DestroyTemporaryInfo(void* /*self*/) {}
+
+static KYTY_SYSV_ABI void c_locale_RegisterFacet(void* /*self*/) {}
 
 static KYTY_SYSV_ABI void c_cxa_pure_virtual()
 {
@@ -1302,8 +1559,8 @@ static KYTY_SYSV_ABI void cxa_free_exception(void* thrown_exception)
 	{
 		return true;
 	}
-	// Host heap used when guest operator new is forwarded to malloc (exception
-	// objects land here). High userspace mappings on Linux.
+	// Host/HLE-owned exception objects may still land here. High userspace
+	// mappings on Linux.
 	if (a >= 0x7f0000000000ull && end < 0x800000000000ull)
 	{
 		return true;
@@ -1762,16 +2019,18 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("MpxhMh8QFro", &LibC::g_dummy_obj_5);
 	LIB_OBJECT("NU-T4QowTNA", &LibC::g_dummy_obj_6);
 	LIB_OBJECT("DbEnA+MnVIw", &LibC::g_dummy_obj_9);
-	LIB_OBJECT("fL3O02ypZFE", &LibC::g_dummy_obj_10);
-	// HEAD: Gen5 TLS resolver (do not remap this NID to wmemcmp).
-	LIB_FUNC("QJ5xVfKkni0", LibC::c_tls_get_addr);
-	LIB_OBJECT("9rMML086SEE", &LibC::g_dummy_obj_12);
-	LIB_OBJECT("QxqK-IdpumU", &LibC::g_dummy_obj_13);
-	LIB_OBJECT("zS94yyJRSUs", &LibC::g_dummy_obj_14);
-	LIB_OBJECT("-9SIhUr4Iuo", &LibC::g_dummy_obj_15);
-	LIB_OBJECT("stv1S3BKfgw", &LibC::g_dummy_obj_16);
+	// Captured Gen5 UTF-16 string assignment: dst, src, code-unit count.
+	LIB_FUNC("fL3O02ypZFE", LibC::c_wmemcpy16);
+	// Captured Gen5 UTF-16 compare: lhs, rhs, code-unit count.
+	LIB_FUNC("QJ5xVfKkni0", LibC::c_wmemcmp16);
+	// Captured Gen5 locale setup: no args, returns a Locimp-like object.
+	LIB_FUNC("9rMML086SEE", LibC::c_locale_CreateClassicLocimp);
+	LIB_FUNC("QxqK-IdpumU", LibC::c_Getpmbstate);
+	LIB_FUNC("zS94yyJRSUs", LibC::c_Getpwcstate);
+	LIB_FUNC("-9SIhUr4Iuo", LibC::c_Mbtowcx);
+	LIB_FUNC("stv1S3BKfgw", LibC::c_Wctombx);
 	LIB_OBJECT("2wz4rthdiy8", &LibC::g_dummy_obj_17);
-	LIB_OBJECT("UWyL6KoR96U", &LibC::g_dummy_obj_18);
+	LIB_FUNC("UWyL6KoR96U", LibC::c_Xregex_error);
 	LIB_OBJECT("HUbZmOnT-Dg", &LibC::g_dummy_obj_21);
 	LIB_OBJECT("Y6Sl4Xw7gfA", &LibC::g_dummy_obj_23);
 	LIB_OBJECT("apPZ6HKZWaQ", &LibC::g_dummy_obj_24);
@@ -1779,6 +2038,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("kALvdgEv5ME", LibC::c_Locksyslock);
 	LIB_FUNC("9nf8joUTSaQ", LibC::c_Unlocksyslock);
 	LIB_FUNC("hEQ2Yi4PJXA", LibC::c_locale_Getgloballocale);
+	LIB_FUNC("hqi8yMOCmG0", LibC::c_locale_InitTemporaryInfo);
+	LIB_FUNC("p6LrHjIQMdk", LibC::c_locale_DestroyTemporaryInfo);
+	LIB_FUNC("QW2jL1J5rwY", LibC::c_locale_RegisterFacet);
 	LIB_FUNC("zr094EQ39Ww", LibC::c_cxa_pure_virtual);
 	// std::uncaught_exception — Q1BL70XVV0o after classic-locale probe.
 	LIB_FUNC("Q1BL70XVV0o", LibC::c_uncaught_exception);
@@ -1800,7 +2062,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("tsvEmnenz48", LibC::cxa_atexit);
 	LIB_FUNC("H2e8t5ScQGc", LibC::cxa_finalize);
 
-	// Standard C library, forwarded to the host runtime.
+	// Standard C allocation uses the guest application heap after it is ready.
 	LIB_FUNC("gQX+4GDQjpM", LibC::c_malloc);
 	LIB_FUNC("2X5agFjKxMc", LibC::c_calloc);
 	LIB_FUNC("Y7aJ1uydPMo", LibC::c_realloc);
@@ -1905,9 +2167,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("mXlxhmLNMPg", LibC::c_strtol);
 	// Gen5 strtoul: Kyty maps QxmSHBCuKTk / zlfEH8FmyUA; Dreaming Sarah
 	// Construct parser also hits VOBg+iNwB-4 (rdi=nptr, rsi=endptr, rdx=10).
-	LIB_FUNC("QxmSHBCuKTk", LibC::c_strtoul);
-	LIB_FUNC("zlfEH8FmyUA", LibC::c_strtoul);
-	LIB_FUNC("VOBg+iNwB-4", LibC::c_strtoul);
+	LIB_FUNC_ALIASES(LibC::c_strtoul, "QxmSHBCuKTk", "zlfEH8FmyUA", "VOBg+iNwB-4");
 	// Gen5 libc_v1 strtoull — 5OqszGpy7Mg after TLS context factory on Astro.
 	LIB_FUNC("5OqszGpy7Mg", LibC::c_strtoull);
 	LIB_FUNC("SRI6S9B+-a4", LibC::c_atof);
@@ -1915,8 +2175,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("L1SBTkC+Cvw", LibC::c_abort);
 	LIB_FUNC("VPbJwTCgME0", LibC::c_srand);
 	// Gen5 libc_v1 rand — Nmtr628eA3A observed early; cpCOXWMgha0 after Fiber/thread bring-up.
-	LIB_FUNC("Nmtr628eA3A", LibC::c_rand);
-	LIB_FUNC("cpCOXWMgha0", LibC::c_rand);
+	LIB_FUNC_ALIASES(LibC::c_rand, "Nmtr628eA3A", "cpCOXWMgha0");
 	LIB_FUNC("oVkZ8W8-Q8A", LibC::c_strtok);
 
 	// time

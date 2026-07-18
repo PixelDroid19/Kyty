@@ -19,6 +19,8 @@ using Kyty::Loader::PT_LOAD;
 static ApiV2* g_registered_api = nullptr;
 static bool   g_initialized    = false;
 
+static thread_local bool g_in_guest_allocator = false;
+
 static uint64_t get_aligned_size(const Elf64_Phdr* p)
 {
 	return (p->p_align != 0 ? (p->p_memsz + (p->p_align - 1)) & ~(p->p_align - 1) : p->p_memsz);
@@ -216,6 +218,55 @@ void EnsureInitialized(Loader::Program* program)
 bool IsInitialized()
 {
 	return g_initialized;
+}
+
+bool HasAllocator()
+{
+	return g_initialized && g_registered_api != nullptr && g_registered_api->malloc != nullptr && g_registered_api->free != nullptr &&
+	       !g_in_guest_allocator;
+}
+
+void* Malloc(size_t size)
+{
+	if (!HasAllocator())
+	{
+		return nullptr;
+	}
+
+	auto* table = g_registered_api;
+
+	g_in_guest_allocator = true;
+	const uint64_t ptr   = Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(table->malloc), size, 0, 0);
+	g_in_guest_allocator = false;
+
+	return reinterpret_cast<void*>(ptr);
+}
+
+bool Free(void* ptr)
+{
+	if (ptr == nullptr)
+	{
+		return true;
+	}
+
+	if (!HasAllocator())
+	{
+		return false;
+	}
+
+	auto* table = g_registered_api;
+
+	g_in_guest_allocator = true;
+	Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(table->free), reinterpret_cast<uint64_t>(ptr), 0, 0);
+	g_in_guest_allocator = false;
+	return true;
+}
+
+void Reset()
+{
+	g_registered_api      = nullptr;
+	g_initialized         = false;
+	g_in_guest_allocator  = false;
 }
 
 } // namespace Kyty::Libs::LibKernel::ApplicationHeap

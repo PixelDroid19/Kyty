@@ -59,9 +59,27 @@
 		s->Add(sr, func, dbg_name);                                                                                                        \
 	}
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LIB_ADD_ALIASES(f, t, ...)                                                                                                         \
+	{                                                                                                                                      \
+		Loader::SymbolResolve sr {};                                                                                                       \
+		sr.library              = g_library;                                                                                               \
+		sr.library_version      = g_library_version;                                                                                       \
+		sr.module               = g_module;                                                                                                \
+		sr.module_version_major = g_module_version_major;                                                                                  \
+		sr.module_version_minor = g_module_version_minor;                                                                                  \
+		sr.type                 = t;                                                                                                       \
+		auto            func    = reinterpret_cast<uint64_t>(f);                                                                           \
+		const char32_t* dbg_name = U"" #f;                                                                                                 \
+		s->AddAliases(sr, {__VA_ARGS__}, func, dbg_name);                                                                                  \
+	}
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_OBJECT(n, f) LIB_ADD(n, f, Loader::SymbolType::Object)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_FUNC(n, f) LIB_ADD(n, f, Loader::SymbolType::Func)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LIB_OBJECT_ALIASES(f, ...) LIB_ADD_ALIASES(f, Loader::SymbolType::Object, __VA_ARGS__)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LIB_FUNC_ALIASES(f, ...) LIB_ADD_ALIASES(f, Loader::SymbolType::Func, __VA_ARGS__)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME()                                                                                                                       \
