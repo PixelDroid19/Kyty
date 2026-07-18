@@ -284,6 +284,14 @@ Recent strict bring-up (evidence-backed, focused tests where noted) includes:
   MRT0–3 (including `done=0` / `vm=0` variants observed on load).
 - SPIR-V structured loops for backward `S_BRANCH` (`OpLoopMerge` + body +
   continue / unreachable as required); do not regress CFG.
+- Compute LDS is represented as a correctly sized SPIR-V `Workgroup` array.
+  `COMPUTE_PGM_RSRC2.LDS_SIZE` is a 9-bit value in 128-dword units and is part
+  of compute shader identity. Captured `ds_write_b32 v5, v4 offset:0` uses a
+  byte address and preserves the written 32-bit payload (`516934ca`).
+- Captured compute `s_barrier` lowers to `OpControlBarrier` with Workgroup
+  execution/memory scope and `AcquireRelease | WorkgroupMemory`; its SPIR-V
+  semantics constant must be registered explicitly, and the lowering remains
+  compute-only (`b4480131`).
 - `v_cvt_i32_f32` (VOP1 `0x8` / VOP3 `0x188`); VOP1/VOP2 SDWA (encoding 249).
 - SMEM dual offset (SGPR soffset + 21-bit imm) and variable-offset
   `s_buffer_load_dword` / `x2` / `x4` with imm constants registered for SPIR-V.
@@ -293,16 +301,22 @@ Recent strict bring-up (evidence-backed, focused tests where noted) includes:
 - PS user SGPR window up to 32; CB blend1–7, BufferLoadFormatXyzw, and related
   register/shader contracts from earlier cycles.
 
-**First strict fail on recent Linux Release+Silent+AUTO_CROSS discovery runs
-(always re-capture on HEAD):** none observed within 90–180 s dual-strict after
-`dd64b41` (IndexBuffer-in-Texture). Prior first fail was
+**First strict fail on current HEAD (always re-capture):**
 
-`unknown relation: Texture - Contains - IndexBuffer`
+`unknown ds instruction ds_read2_b32, opcode = 0x37 at addr 0x000000a0`
 
-at ~frame 1540 (single-parent GpuMemory CreateObject). That policy is in tree.
-Re-capture may still surface a **later** GpuMemory multi-parent topology, an
-unsupported shader/format, or a host fault; treat the first EXIT or structured
-error on the current HEAD as the unit of work.
+Captured words are `d8dc0100 04000002`: compute shader, LDS (`gds=0`),
+`vaddr=v2`, `vdst=v4:v5`, `offset0=0`, and `offset1=1`. For `ds_read2_b32`,
+the two encoded offsets are dword-scaled while `vaddr` remains a byte address;
+prove the shared address calculation in a focused parser/SPIR-V test before
+implementation. The previous strict failures, `ds_write_b32` at PC `0x4c` and
+`s_barrier` at PC `0x58`, are implemented in `516934ca` and `b4480131`.
+
+The five-title strict matrix after `b4480131` preserved the interactive title
+(2,029 presents in the bounded run). Two titles still stop at `unknown prot:
+194`; another still has a later host access violation after presenting frames.
+Treat those as separate first-failure cycles; do not mix them into the open
+`ds_read2_b32` cycle.
 
 **Visual residual (not a process EXIT):** gameplay **HUD/UI can be correct while
 the world is white**. First hypothesis addressed by preserving GPU-owned RT
@@ -388,10 +402,13 @@ CURRENT FRONTIER
   classify); GPU-owned RT layout preserve on Update; tile-27 size+4bpp detile;
   Gen5 EUD type-5; formats 14/56/71; multi-RT CB_SHADER_MASK; EXP Param5/6 +
   multi-MRT; structured SPIR-V loops; `v_cvt_i32_f32`; SDWA; SMEM dual-offset +
-  variable SBuffer; image_sample dmasks 0x2/0x4/0xb; NGS2 extended max_voices.
-- **First strict fail (re-capture on HEAD):** none fixed in the last 90–180 s
-  dual-strict after IndexBuffer-in-Texture. Always re-capture; next EXIT or
-  structured unsupported is the unit of work.
+  variable SBuffer; image load dmask `0x1`; image_sample dmasks 0x2/0x4/0xb;
+  correctly sized compute LDS, `ds_write_b32`, Workgroup `s_barrier`; NGS2
+  extended max_voices.
+- **First strict fail (re-capture on HEAD):** `ds_read2_b32` at compute PC
+  `0xa0`, words `d8dc0100 04000002`, `vaddr=v2`, `vdst=v4:v5`,
+  `offset0=0`, `offset1=1`, `gds=0`. Implement its two dword-scaled LDS reads
+  through the same byte-addressed Workgroup storage used by `ds_write_b32`.
 - **Visual residual:** HUD/UI may work while world is white. Prefer layout /
   texture / RT alias evidence over inventing clears or ThreadFlag. RT UNDEFINED
   discard after SB WriteBack parent invalidation is already fixed — re-verify.
