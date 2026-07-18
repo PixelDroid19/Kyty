@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <cwchar>
 #include <mutex>
 #include <strings.h>
 #include <unordered_map>
@@ -278,23 +279,23 @@ static KYTY_SYSV_ABI char* c_strcpy(char* d, const char* s)
 // Gen5 libc_v1 wide mem* — NIDs from the public Gen5 export hash (SHA1+suffix, byte-reversed).
 static KYTY_SYSV_ABI wchar_t* c_wmemchr(const wchar_t* s, wchar_t c, size_t n)
 {
-	return const_cast<wchar_t*>(::wmemchr(s, c, n));
+	return const_cast<wchar_t*>(std::wmemchr(s, c, n));
 }
 static KYTY_SYSV_ABI int      c_wmemcmp(const wchar_t* a, const wchar_t* b, size_t n)
 {
-	return ::wmemcmp(a, b, n);
+	return std::wmemcmp(a, b, n);
 }
 static KYTY_SYSV_ABI wchar_t* c_wmemcpy(wchar_t* d, const wchar_t* s, size_t n)
 {
-	return ::wmemcpy(d, s, n);
+	return std::wmemcpy(d, s, n);
 }
 static KYTY_SYSV_ABI wchar_t* c_wmemmove(wchar_t* d, const wchar_t* s, size_t n)
 {
-	return ::wmemmove(d, s, n);
+	return std::wmemmove(d, s, n);
 }
 static KYTY_SYSV_ABI wchar_t* c_wmemset(wchar_t* s, wchar_t c, size_t n)
 {
-	return ::wmemset(s, c, n);
+	return std::wmemset(s, c, n);
 }
 // Gen5 strcpy_s — NID 5Xa2ACNECdo: dest, destsz, src. Returns 0 on success.
 static KYTY_SYSV_ABI int c_strcpy_s(char* d, size_t destsz, const char* s)
