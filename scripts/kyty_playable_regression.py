@@ -70,6 +70,14 @@ DEFAULT_PROFILE: dict[str, Any] = {
     "visual": {"require_baseline": True, "require_capture": True},
 }
 
+MATERIAL_VISUAL_CHECKS = (
+    "white_ratio_not_worse",
+    "entropy_not_collapsed",
+    "colors_not_collapsed",
+    "not_stripey",
+    "absolute_world_gate",
+)
+
 
 def load_capture_module(repo_root: Path) -> Any:
     path = repo_root / "scripts" / "kyty_capture.py"
@@ -446,7 +454,13 @@ def evaluate_gates(
         )
     )
     if baseline_missing and create_baseline:
-        gates.append(GateResult("visual_compare", True, "baseline_created"))
+        gates.append(
+            GateResult(
+                "visual_compare",
+                bool(compare.get("pass")),
+                "baseline_created" if compare.get("pass") else json.dumps(compare.get("checks") or compare, sort_keys=True)[:200],
+            )
+        )
     elif baseline_missing and visual_require_baseline:
         gates.append(GateResult("visual_compare", False, "baseline_missing"))
     else:
@@ -465,6 +479,31 @@ def evaluate_gates(
     else:
         gates.append(GateResult("no_early_loader_failure", True, first_error or "none"))
     return gates
+
+
+def material_visual_checks(raw_compare: dict[str, Any]) -> dict[str, bool]:
+    checks = raw_compare.get("checks") if isinstance(raw_compare.get("checks"), dict) else {}
+    return {key: bool(checks.get(key, False)) for key in MATERIAL_VISUAL_CHECKS}
+
+
+def visual_floor_from_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    world = metrics.get("world") if isinstance(metrics.get("world"), dict) else {}
+    white_ratio = float(world.get("white_ratio") or 0.0)
+    entropy = float(world.get("entropy") or 0.0)
+    unique_colors = int(world.get("unique_quantized_colors") or 0)
+    checks = {
+        "absolute_world_gate": white_ratio < 0.35 and entropy >= 2.5 and unique_colors >= 80,
+        "not_stripey": not bool(world.get("stripey")),
+    }
+    return {
+        "pass": all(checks.values()),
+        "checks": checks,
+        "world": {
+            "white_ratio": white_ratio,
+            "entropy": entropy,
+            "unique_quantized_colors": unique_colors,
+        },
+    }
 
 
 def run_session(
@@ -689,23 +728,28 @@ def run_session(
                                     )
                                     if create_baseline or baseline_missing:
                                         if create_baseline:
-                                            baseline_path.parent.mkdir(parents=True, exist_ok=True)
-                                            # Store metrics only (no private paths)
-                                            baseline_payload = {
-                                                "schema": "kyty_playable_visual_baseline_v1",
-                                                "world": metrics["world"],
-                                                "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                                            }
-                                            baseline_path.write_text(
-                                                json.dumps(baseline_payload, indent=2) + "\n", encoding="utf-8"
-                                            )
-                                            notes.append("baseline_created")
-                                            baseline_missing = False
+                                            floor = visual_floor_from_metrics(metrics)
                                             compare = {
-                                                "pass": True,
-                                                "checks": {"baseline_created": True},
+                                                "pass": bool(floor.get("pass")),
+                                                "checks": floor.get("checks") or {},
                                                 "delta": {},
                                             }
+                                            if floor.get("pass"):
+                                                baseline_path.parent.mkdir(parents=True, exist_ok=True)
+                                                # Store metrics only (no private paths)
+                                                baseline_payload = {
+                                                    "schema": "kyty_playable_visual_baseline_v1",
+                                                    "world": metrics["world"],
+                                                    "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                                }
+                                                baseline_path.write_text(
+                                                    json.dumps(baseline_payload, indent=2) + "\n", encoding="utf-8"
+                                                )
+                                                notes.append("baseline_created")
+                                                baseline_missing = False
+                                                compare["checks"] = {**compare["checks"], "baseline_created": True}
+                                            else:
+                                                notes.append("baseline_rejected_visual_floor")
                                     if baseline_path.is_file() and not create_baseline:
                                         bas = json.loads(baseline_path.read_text(encoding="utf-8"))
                                         # Support both raw score_image and wrapped baseline
@@ -714,13 +758,7 @@ def run_session(
                                         compare = capture_mod.compare_metrics(current, baseline_metrics)
                                         # Playable regression: do not require scene_is_gameplay OCR
                                         # (title-specific OCR is diagnostic). Material regress gates only.
-                                        checks = dict(compare.get("checks") or {})
-                                        material = {
-                                            "white_ratio_not_worse": checks.get("white_ratio_not_worse", False),
-                                            "entropy_not_collapsed": checks.get("entropy_not_collapsed", False),
-                                            "colors_not_collapsed": checks.get("colors_not_collapsed", False),
-                                            "not_stripey": checks.get("not_stripey", False),
-                                        }
+                                        material = material_visual_checks(compare)
                                         compare = {
                                             "pass": all(material.values()),
                                             "checks": material,
