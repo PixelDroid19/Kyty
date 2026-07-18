@@ -701,12 +701,11 @@ static void delete_func(GraphicContext* /*ctx*/, void* obj, VulkanMemory* /*mem*
 	LabelDelete(label_obj);
 }
 
-bool LabelGpuObject::Equal(const uint64_t* other) const
+bool LabelGpuObject::Equal(const uint64_t* /*other*/) const
 {
-	return (params[PARAM_VALUE] == other[PARAM_VALUE] && params[PARAM_CALLBACK_1] == other[PARAM_CALLBACK_1] &&
-	        params[PARAM_CALLBACK_2] == other[PARAM_CALLBACK_2] && params[PARAM_ARG_1] == other[PARAM_ARG_1] &&
-	        params[PARAM_ARG_2] == other[PARAM_ARG_2] && params[PARAM_ARG_3] == other[PARAM_ARG_3] &&
-	        params[PARAM_ARG_4] == other[PARAM_ARG_4]);
+	// Each EOP submission owns a distinct event. The guest may reuse the same
+	// fence address and value before the previous command has completed.
+	return false;
 }
 
 GpuObject::create_func_t LabelGpuObject::GetCreateFunc() const

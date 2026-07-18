@@ -5809,6 +5809,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	RenderColorInfo color_info;
 	FindRenderColorInfo(submit_id, buffer, *ctx, &color_info);
+	if (color_info.targets_num == 0 && depth_info.format == VK_FORMAT_UNDEFINED)
+	{
+		// A zero target mask with depth disabled is a valid no-output draw.
+		return;
+	}
 
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
 
@@ -5926,6 +5931,11 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	RenderColorInfo color_info;
 	FindRenderColorInfo(submit_id, buffer, *ctx, &color_info);
+	if (color_info.targets_num == 0 && depth_info.format == VK_FORMAT_UNDEFINED)
+	{
+		// A zero target mask with depth disabled is a valid no-output draw.
+		return;
+	}
 
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
 
