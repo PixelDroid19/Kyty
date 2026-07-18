@@ -1,43 +1,43 @@
-# Kyty Engineering Guide (agent-facing)
+# Kyty Bring-Up Manual (extended)
 
-Kyty is an experimental PS4/PS5 emulator (MIT). This fork advances the PS5
-path to correct, interactive rendering on Linux/macOS/Windows and AMD/Intel/
-NVIDIA/Apple GPUs. Accuracy beats superficial progress.
+This is the extended strict-frontier manual: investigation loop, phase gates,
+frontier history, and the auxiliary-agent handoff template. Consult it when
+advancing the strict PS5 compatibility frontier. Day-to-day rules and
+invariants live in the repository root `AGENTS.md`, which takes precedence for
+process weight (do not apply this full loop to ordinary code tasks).
 
-The full bring-up manual (phases, frontier history, handoff template) lives in
-`docs/BRINGUP.md`. Read it **only** when doing strict-frontier compatibility
-work, not for ordinary code tasks.
+Note: frontier facts below are a snapshot — always re-capture the first strict
+fail on the current HEAD before acting on them.
 
-Agent orchestration (contract gates, manifest, matrix harness, install):
-`skills/kyty-frontier-swarm/SKILL.md` and `INSTALL-AGENTS.md`. Verify with
-`python3 scripts/verify_agent_toolkit.py`.
+## Mission
 
-## Agent session start (use the toolkit)
+Kyty is an experimental PlayStation 4 and PlayStation 5 emulator. This fork is
+bringing the PS5 path from early execution to correct, interactive rendering
+while preserving a design that can run on macOS, Linux, and Windows and on AMD,
+Intel, NVIDIA, and Apple GPUs.
 
-```bash
-python3 scripts/kyty_agent_doctor.py --task start
-export KYTY_FRONTIER_MANIFEST=/tmp/kyty-frontier.json
-```
+Accuracy comes before superficial progress. A frame that is merely non-black,
+a process that survives because unsupported behavior was ignored, or a build
+that succeeds without exercising the runtime is not compatibility.
 
-Read `skills/kyty-frontier-swarm/references/quick-recipes.md` for copy-paste
-loops (`kyty_agent`, matrix, strict replay, manifest import). Cursor loads
-`.cursor/rules/kyty-agent-toolkit.mdc` automatically in this repo.
+## Non-negotiable invariants
 
-## Invariants (never weaken)
-
-1. **Evidence before code.** Reproduce and trace bad state to its producer
-   before editing.
-2. **Never invent guest behavior.** No guessed NIDs, ABI signatures, packet
+1. **Evidence before code.** Reproduce the problem, identify the first strict
+   failure, and trace the bad state to its producer before editing.
+2. **Never invent guest behavior.** Do not guess NIDs, ABI signatures, packet
    layouts, register meanings, formats, tiling, alignments, or return codes.
-3. **One behavior, one implementation.** Direct/indirect PM4 share a decoder;
-   all surface consumers share one descriptor-to-layout calculation.
-4. **No behavioral fallbacks.** Unsupported behavior fails structurally and
-   informatively (no assumed RGBA8, linear tiling, default success, placeholder
-   shaders, fabricated resources).
-5. **Capability-driven rendering.** Vulkan strategy from features/limits/
-   formats/queues. Vendor IDs are diagnostics, never policy.
-6. **Platform code at the boundary.** Guest HLE and GPU semantics stay
-   platform-neutral; `__APPLE__`/`_WIN32`/Linux branches only in platform files.
+3. **One behavior, one implementation.** Direct and indirect encodings of the
+   same GPU state share a decoder. Resource sizes, offsets, and pitches come
+   from one layout model consumed by every caller.
+4. **No behavioral fallbacks.** Never continue with assumed RGBA8, linear
+   tiling, default success, skipped state, placeholder shaders, or fabricated
+   resources. Unsupported behavior fails with enough evidence to implement it.
+5. **Capability-driven rendering.** Select Vulkan strategies from features,
+   limits, formats, queues, and extensions. Vendor IDs are diagnostic data, not
+   policy switches.
+6. **Keep platform code at the boundary.** OS-specific memory, exceptions,
+   threads, windows, surfaces, controllers, and dynamic loading stay in focused
+   platform modules. Guest HLE and GPU semantics are platform-neutral.
 7. **Do not regress the working frontier.** Preserve existing execution,
    rendering, input, and build behavior unless a test proves that behavior is
    itself incorrect.
@@ -140,7 +140,7 @@ strict post-Play (or earlier) blocker is open. Delivery order below is absolute.
    earlier in the run is ABI evidence; a post-Play null pair is a different
    contract to explain, not a free pass to invent addresses.
 7. **Consult references only for names and patterns.** Public Gen5 export
-   tables and Vulkan/AMD documentation inform vocabulary; every
+   tables, RPCSX wiki, and Vulkan/AMD docs inform vocabulary; every
    PS5-specific claim must reappear in a local capture or test. No GPL code paste.
 
 ### Hypothesis and trial-and-error discipline
@@ -288,14 +288,6 @@ Recent strict bring-up (evidence-backed, focused tests where noted) includes:
   MRT0–3 (including `done=0` / `vm=0` variants observed on load).
 - SPIR-V structured loops for backward `S_BRANCH` (`OpLoopMerge` + body +
   continue / unreachable as required); do not regress CFG.
-- Compute LDS is represented as a correctly sized SPIR-V `Workgroup` array.
-  `COMPUTE_PGM_RSRC2.LDS_SIZE` is a 9-bit value in 128-dword units and is part
-  of compute shader identity. Captured `ds_write_b32 v5, v4 offset:0` uses a
-  byte address and preserves the written 32-bit payload (`516934ca`).
-- Captured compute `s_barrier` lowers to `OpControlBarrier` with Workgroup
-  execution/memory scope and `AcquireRelease | WorkgroupMemory`; its SPIR-V
-  semantics constant must be registered explicitly, and the lowering remains
-  compute-only (`b4480131`).
 - `v_cvt_i32_f32` (VOP1 `0x8` / VOP3 `0x188`); VOP1/VOP2 SDWA (encoding 249).
 - SMEM dual offset (SGPR soffset + 21-bit imm) and variable-offset
   `s_buffer_load_dword` / `x2` / `x4` with imm constants registered for SPIR-V.
@@ -305,22 +297,16 @@ Recent strict bring-up (evidence-backed, focused tests where noted) includes:
 - PS user SGPR window up to 32; CB blend1–7, BufferLoadFormatXyzw, and related
   register/shader contracts from earlier cycles.
 
-**First strict fail on current HEAD (always re-capture):**
+**First strict fail on recent Linux Release+Silent+AUTO_CROSS discovery runs
+(always re-capture on HEAD):** none observed within 90–180 s dual-strict after
+`dd64b41` (IndexBuffer-in-Texture). Prior first fail was
 
-`unknown ds instruction ds_read2_b32, opcode = 0x37 at addr 0x000000a0`
+`unknown relation: Texture - Contains - IndexBuffer`
 
-Captured words are `d8dc0100 04000002`: compute shader, LDS (`gds=0`),
-`vaddr=v2`, `vdst=v4:v5`, `offset0=0`, and `offset1=1`. For `ds_read2_b32`,
-the two encoded offsets are dword-scaled while `vaddr` remains a byte address;
-prove the shared address calculation in a focused parser/SPIR-V test before
-implementation. The previous strict failures, `ds_write_b32` at PC `0x4c` and
-`s_barrier` at PC `0x58`, are implemented in `516934ca` and `b4480131`.
-
-The five-title strict matrix after `b4480131` preserved the interactive title
-(2,029 presents in the bounded run). Two titles still stop at `unknown prot:
-194`; another still has a later host access violation after presenting frames.
-Treat those as separate first-failure cycles; do not mix them into the open
-`ds_read2_b32` cycle.
+at ~frame 1540 (single-parent GpuMemory CreateObject). That policy is in tree.
+Re-capture may still surface a **later** GpuMemory multi-parent topology, an
+unsupported shader/format, or a host fault; treat the first EXIT or structured
+error on the current HEAD as the unit of work.
 
 **Visual residual (not a process EXIT):** gameplay **HUD/UI can be correct while
 the world is white**. First hypothesis addressed by preserving GPU-owned RT
@@ -406,13 +392,10 @@ CURRENT FRONTIER
   classify); GPU-owned RT layout preserve on Update; tile-27 size+4bpp detile;
   Gen5 EUD type-5; formats 14/56/71; multi-RT CB_SHADER_MASK; EXP Param5/6 +
   multi-MRT; structured SPIR-V loops; `v_cvt_i32_f32`; SDWA; SMEM dual-offset +
-  variable SBuffer; image load dmask `0x1`; image_sample dmasks 0x2/0x4/0xb;
-  correctly sized compute LDS, `ds_write_b32`, Workgroup `s_barrier`; NGS2
-  extended max_voices.
-- **First strict fail (re-capture on HEAD):** `ds_read2_b32` at compute PC
-  `0xa0`, words `d8dc0100 04000002`, `vaddr=v2`, `vdst=v4:v5`,
-  `offset0=0`, `offset1=1`, `gds=0`. Implement its two dword-scaled LDS reads
-  through the same byte-addressed Workgroup storage used by `ds_write_b32`.
+  variable SBuffer; image_sample dmasks 0x2/0x4/0xb; NGS2 extended max_voices.
+- **First strict fail (re-capture on HEAD):** none fixed in the last 90–180 s
+  dual-strict after IndexBuffer-in-Texture. Always re-capture; next EXIT or
+  structured unsupported is the unit of work.
 - **Visual residual:** HUD/UI may work while world is white. Prefer layout /
   texture / RT alias evidence over inventing clears or ThreadFlag. RT UNDEFINED
   discard after SB WriteBack parent invalidation is already fixed — re-verify.
@@ -572,14 +555,10 @@ REPRODUCTION AND VERIFICATION COMMANDS
 
 ```bash
 cmake -S source -B _build_linux -G Ninja -DCMAKE_BUILD_TYPE=Release
-ninja -C _build_linux fc_script        # runtime only, when a full build is unnecessary
-_build_linux/fc_script '{kyty_run_tests()}' --gtest_filter='Suite.Test'
-ctest --test-dir _build_linux --output-on-failure -R <IntegrationRegex>
+ninja -C _build_linux
 ```
 
-macOS uses `_build_macos`; do not put macOS build steps in Linux checklists or
-vice versa. Windows follows CI's generators — inspect the workflow, don't
-invent commands.
+Configure and build on macOS:
 
 Line count is a signal, not the goal. Do not split an atomic eight-line
 function. Do split a long function that mixes parsing, state mutation,
@@ -595,6 +574,13 @@ never copy incompatible or GPL implementation code into Kyty:
 
 - Public Gen5 export / NID tables — PS4/PS5 export naming and ABI vocabulary
   only; verify every claim with a local capture or focused test.
+- RPCSX: https://github.com/RPCSX/rpcsx and its wiki — Linux-first portability,
+  runtime boundaries, logging, and compatibility transparency.
+- EmuC0re: https://github.com/egycnq/EmuC0re — small emulator seams and
+  bring-up discipline; do not infer PS5 GPU behavior from its unrelated target.
+- Ryubing/Ryujinx: https://git.ryujinx.app/projects/Ryubing/ryujinx — mature
+  separation of guest services, translator/cache boundaries, capability-aware
+  host rendering, and regression-oriented compatibility work.
 - Vulkan specification and refpages: https://registry.khronos.org/vulkan/ —
   authoritative synchronization, image layout, format, feature, and limit
   semantics.
@@ -636,39 +622,226 @@ workflow and generator first.
 Build only the main script runtime when a full build is unnecessary:
 
 ```bash
-_build_linux/fc_script scripts/run_guest.lua "$KYTY_GUEST_ROOT"
+ninja -C <build-dir> fc_script
 ```
 
-Strict runs set no `KYTY_BRINGUP_*` variables. Diagnostics (`KYTY_FAULT_LOG`,
-`KYTY_TLS_DIAG`, `KYTY_BRINGUP_MODE=unsafe`, `KYTY_AUTO_CROSS`) are discovery
-tools and never count as acceptance or compatibility evidence.
+Run focused tests through `fc_script`:
 
-## Privacy and hygiene
+```bash
+<build-dir>/fc_script '{kyty_run_tests()}' \
+  --gtest_filter='SuiteName.TestName'
+```
 
-- Never commit guest paths, title IDs, keys, binaries, saves, screenshots,
-  crash dumps, raw multi-megabyte logs, or `_Shaders/` dumps. Reference
-  fixtures only as `$KYTY_GUEST_ROOT` (or case IDs).
-- Commit messages describe emulator behavior only
-  (`fix(graphics): validate Gen5 barrier range`) — never a title.
-- Session evidence goes under untracked scratch (`/tmp/...`,
-  `_scratch_playable/`).
-- Remove temporary probes before commit.
-- No GPL code paste. Record borrowed facts with URL/provenance and confirm
-  them with a local test before implementing against Kyty types.
+Confirm that a new or renamed filter actually selects the intended tests:
 
-## Done checklist (behavior changes)
+```bash
+<build-dir>/fc_script --gtest_list_tests '{kyty_run_tests()}'
+```
 
-1. Focused test failed before, passes after.
-2. Build succeeds on the host you are on (`ninja -C _build_linux`).
-3. `git diff --check` clean; no new warnings.
-4. For guest-contract changes: strict scenario advances or renders more
-   correctly, with no stub/permissive flag required for the claim.
-5. No tracked file contains fixture identity or generated evidence.
-6. Existing working behavior rechecked (touched suites green).
+Run an authorized private fixture only when the task requires runtime validation
+and `KYTY_GUEST_ROOT` is already available:
 
-## Reporting
+```bash
+<build-dir>/fc_script scripts/run_guest.lua "$KYTY_GUEST_ROOT"
+```
 
-Keep reports proportional: for small tasks, outcome + what was verified in a
-few sentences. The full handoff template (evidence table, phase gates,
-frontier note) applies only to strict-frontier sessions and lives in
-`docs/BRINGUP.md`.
+The strict run sets no `KYTY_BRINGUP_*` variables (and no removed legacy flags).
+Capture the first error completely, including packet/register values and the
+guest/host call path when available.
+
+### 3. Form one hypothesis
+
+State the suspected root cause and the evidence supporting it. Change one
+variable at a time. If a hypothesis fails, remove the experiment before testing
+the next one.
+
+### 4. Work test-first
+
+For every behavior change:
+
+1. Add the smallest deterministic failing test.
+2. Run it and confirm the expected failure.
+3. Implement only the behavior required by the test.
+4. Run the focused test until it passes.
+5. Build and re-run the strict integration scenario.
+
+Sanitized PM4 packets and surface descriptors are acceptable fixtures. Guest
+code and assets are not.
+
+### 5. Verify the real outcome
+
+For graphics changes, a successful build and non-black pixels are insufficient.
+Verify geometry, colors, resource interpretation, completed flips, absence of
+Vulkan errors, and a recognizable correctly proportioned frame. Preserve local
+visual evidence outside Git.
+
+### 6. Refactor only behind a frozen frontier
+
+After strict menu and gameplay acceptance exists, inventory oversized modules
+with line counts, responsibilities, dependency direction, mutable globals, and
+test coverage. Select one cohesive extraction at a time. For each extraction:
+
+1. Record the pre-refactor strict frontier and focused test results.
+2. Add missing characterization tests without changing behavior.
+3. Move one responsibility behind a narrow interface.
+4. Remove the original implementation rather than leaving an alias.
+5. Build, run focused tests, and reproduce the strict frontier.
+6. Revert the extraction if the frontier, frame, input, or validation state
+   regresses.
+
+## HLE and ABI rules
+
+- Every export needs an evidenced name, NID, signature, calling convention,
+  argument validation, return code, and side effect.
+- Prefer guest error returns for expected invalid input. Assertions and process
+  exits are for violated emulator invariants, not ordinary guest errors.
+- Do not map a new NID to a convenient existing function until their contracts
+  have been compared, including failure behavior.
+- Keep registration centralized in the owning `Lib*.cpp` module.
+- A generic missing-symbol stub may be used to discover which import is called;
+  it must never be required by acceptance runs or releases.
+
+## Graphics rules
+
+### PM4 and normalized state
+
+- Packet envelope validation belongs to packet parsing.
+- Register bit decoding belongs to one state-decoder function.
+- Direct and indirect packet handlers call the same decoder.
+- Unknown registers report packet type, register, value, submit ID, and command
+  offset, then stop in strict mode.
+- Never label an unknown register harmless without proving its semantics and
+  showing that the workload does not depend on it.
+
+### Surface layout
+
+- Format, block geometry, pitch, mip levels, depth/array layers, sample count,
+  tile mode, metadata, size, and alignment form one descriptor-to-layout
+  calculation.
+- Compressed formats use block dimensions; bytes-per-pixel arithmetic is not a
+  substitute.
+- CPU upload/detiling, overlap tracking, Vulkan allocation, and writeback consume
+  the same layout.
+- An unknown descriptor returns a structured unsupported error. It does not
+  assume four-byte texels or linear memory.
+
+### Vulkan and GPU portability
+
+- Collect device capabilities once and pass them explicitly to consumers.
+- Classify each capability as required, optional with a semantically equivalent
+  tested strategy, or diagnostic-only.
+- A correct alternative for an absent extension is not a behavioral fallback:
+  it must preserve guest-visible semantics and have tests for both strategies.
+- Do not add AMD-, Intel-, NVIDIA-, Apple-, MoltenVK-, or driver-specific paths
+  to guest state decoding or surface layout.
+- Keep Vulkan validation clean when the platform supports the required layers.
+
+## Platform portability rules
+
+- macOS is a distinct supported host, not a Linux build label.
+- Use portable C++ and existing Core/Sys abstractions in shared code.
+- Confine `__APPLE__`, `_WIN32`, and Linux-specific branches to platform-facing
+  implementation files.
+- Do not use Apple frameworks, Win32 APIs, or Linux syscalls in HLE, PM4,
+  shaders, surface layout, or renderer policy.
+- Treat host CPU architecture separately from host OS. Preserve the current
+  native x86-64 path while keeping future execution backends possible.
+
+## Diagnostic flags
+
+Default runtime mode is **strict**: `EXIT_NOT_IMPLEMENTED` aborts with stack and
+subsystem shutdown; missing imports do not receive stubs; unknown indirect GPU
+registers are fatal. Strict acceptance runs must not set any `KYTY_BRINGUP_*`
+variable (`scripts/run_guest.lua` rejects them unless
+`KYTY_BRINGUP_ALLOW_DIAGNOSTIC=1` is set for an authorized smoke only).
+
+### Centralized unsafe bring-up (`Kyty::Core::BringUp`)
+
+Diagnostic continuation is centralized. Do **not** invent per-game exceptions
+or cite unsafe survival as compatibility. Neighbor PRX soft-preload is
+**unsafe-only** (`prx_preload` feature); strict acceptance never auto-preloads.
+
+| Variable | Meaning |
+| --- | --- |
+| `KYTY_BRINGUP_MODE=unsafe` | Enable diagnostic policy (absent ⇒ strict). |
+| `KYTY_BRINGUP_FEATURES` | CSV: `not_implemented`, `missing_function_import`, `gfx_permissive`, `prx_preload`. Absent under unsafe enables the first three only; **`prx_preload` is always explicit**. |
+| `KYTY_BRINGUP_SUBSYSTEMS` | CSV scopes: `core,loader,kernel,graphics,audio,network,hle,other`. Absent ⇒ all. |
+| `KYTY_BRINGUP_BURST_LIMIT` | Max hits per site inside the window (default 10000). |
+| `KYTY_BRINGUP_BURST_WINDOW_MS` | Window length in ms (default 1000). |
+
+Unknown, empty, zero, or contradictory values abort at process start
+(`BringUp::InitFromEnvironment` from Core subsystem init; no silent strict
+fallback after a parse error). Circuit-break on a site re-enters the normal
+strict abort after printing a summary. Repeated `EXIT_NOT_IMPLEMENTED` continues
+log once per site (no full stack spam on every hit). The policy never
+fabricates EventFlags, fences, memory, or sync results. Only **Func** imports
+may receive missing stubs (with a minimal return-class taxonomy); Object / TLS /
+NoType stay strict `EXIT`. Neighbor PRX scan is **not** part of default unsafe
+features — set `prx_preload` explicitly.
+
+**Removed (intentional break):** `KYTY_STUB_MISSING` and `KYTY_GFX_PERMISSIVE`.
+Using them is a configuration error.
+
+Other diagnostics (unchanged, still not acceptance modes):
+
+- `KYTY_FAULT_LOG=1`: signal-safe fault diagnostics.
+- `KYTY_TRACE_LIBC=1`: targeted single-step tracing.
+- `KYTY_SKIP_UD2=1`: skips a guest trap for diagnostics; invalidates normal
+  execution. **Not** part of the bring-up policy.
+
+Agent diagnostics JSON protocol version is **2** and includes `bringup.mode`,
+features, subsystems, limits, unique sites, continuations, missing-import
+metrics, and last circuit-break (`BringUp::WriteDiagnosticsJson`).
+
+No diagnostic flag is enabled by default or cited as proof of compatibility.
+
+Integration matrix (process-isolated):
+
+```bash
+cmake -S source -B _build_linux -G Ninja -DCMAKE_BUILD_TYPE=Release
+ninja -C _build_linux fc_script kyty_bringup_integration
+ctest --test-dir _build_linux --output-on-failure -R KytyBringUpIntegration
+```
+
+## External references and licensing
+
+Reference implementations may establish names, concepts, architecture patterns,
+and test ideas. Kyty is MIT-licensed; do not copy GPL implementation code into
+this repository. Record the behavioral fact and provenance, then implement it
+against Kyty's own types after verifying it locally.
+
+Use PS5-focused references for guest ABI and AGC evidence, mature emulators for
+renderer/capability architecture, and official Vulkan documentation for host API
+semantics. Do not assume another console's GPU behavior applies to PS5.
+
+## Code quality
+
+- Follow `source/.clang-format` and the existing C++17 style.
+- Prefer focused functions and explicit types over duplicated bit manipulation.
+- Keep headers minimal and ownership clear.
+- Avoid broad renames, compatibility aliases, dead code, commented-out paths,
+  magic constants without provenance, and unrelated cleanup.
+- Comments explain evidence, invariants, and non-obvious hardware semantics; they
+  do not narrate obvious code or advertise another project.
+- Treat warnings, `git diff --check`, and new validation messages as failures to
+  investigate.
+
+## Completion checklist
+
+Before committing a behavior change:
+
+1. The focused test failed before implementation and passes afterward.
+2. `ninja -C _build_macos` succeeds.
+3. `git diff --check` succeeds.
+4. The strict local scenario advances or renders more correctly.
+5. No missing-symbol stub or permissive register skip is needed for the claimed
+   behavior.
+6. No tracked file contains fixture information or generated evidence.
+7. No OS or GPU vendor was made a hidden correctness requirement.
+8. Existing working behavior was rechecked.
+9. The commit message describes emulator behavior without identifying a private
+   compatibility fixture.
+10. Any refactor preserves the frozen strict frontier and leaves one active
+    implementation of each behavior.
+11. New or extracted modules have a documented responsibility, ownership model,
+    dependency direction, and focused tests.

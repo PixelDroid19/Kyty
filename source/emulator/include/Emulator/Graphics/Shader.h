@@ -632,11 +632,14 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
+uint32_t ShaderGen5VertexInputComponentCount(uint8_t format);
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component);
 // Bytes per element for Gen5 sampled formats; compressed formats use block elements (0 if unknown).
 uint32_t ShaderGen5TextureBytesPerElement(uint32_t format);
 // Linear Gen5 texture row pitch in texels: 256-byte aligned rows (GFX linear surface rule).
 uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format);
+// Resolve sample row pitch for Gen5 linear (tile 0): max(width, descriptor pitch), then 256-byte align.
+uint32_t ShaderGen5ResolveLinearPitch(uint32_t width, uint32_t format, uint8_t type, uint32_t word4);
 
 inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 {
@@ -724,8 +727,21 @@ struct ShaderTextureResource
 
 	[[nodiscard]] uint64_t Base40() const { return ((fields[0] | (static_cast<uint64_t>(fields[1]) << 32u)) & 0xFFFFFFFFFFu) << 8u; }
 	[[nodiscard]] uint16_t Format() const { return (fields[1] >> 20u) & 0x1FFu; }
-	[[nodiscard]] uint16_t Width5() const { return ((fields[1] >> 30u) & 0x3u) | (((fields[2] >> 0u) & 0xFFFu) << 2u); }
-	[[nodiscard]] uint16_t Height5() const { return (fields[2] >> 14u) & 0x3FFFu; }
+	// RDNA2 SQ_IMG_RSRC: WIDTH is 16 bits split across word1[31:30] and word2[13:0].
+	[[nodiscard]] uint16_t Width5() const { return ((fields[1] >> 30u) & 0x3u) | (((fields[2] >> 0u) & 0x3FFFu) << 2u); }
+	// HEIGHT is word2[29:14] (16 bits).
+	[[nodiscard]] uint16_t Height5() const { return (fields[2] >> 14u) & 0xFFFFu; }
+	// 256-bit 1D/2D/2D-MSAA: word4[13:0] = pitch-1. Zero word4 => 128-bit resource, pitch = width.
+	[[nodiscard]] uint32_t Pitch5(uint32_t width) const
+	{
+		const uint8_t  type  = Type();
+		const uint32_t word4 = fields[4];
+		if ((type == 8u || type == 9u || type == 14u) && word4 != 0u)
+		{
+			return (word4 & 0x3FFFu) + 1u;
+		}
+		return width;
+	}
 	[[nodiscard]] uint8_t  BCSwizzle() const { return (fields[3] >> 25u) & 0x7u; }
 	[[nodiscard]] uint16_t BaseArray5() const { return (fields[4] >> 16u) & 0x1FFFu; }
 	[[nodiscard]] uint8_t  ArrayPitch() const { return (fields[5] >> 0u) & 0xFu; }

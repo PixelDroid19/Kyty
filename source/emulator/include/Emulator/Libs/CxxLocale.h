@@ -30,6 +30,21 @@ struct alignas(8) CxxLocaleLayout
 	CxxLocimpLayout* ptr;
 };
 
+// Itanium type_info (libstdc++): [0]=vtable, [8]=name (mangled; leading '*' = plain).
+// __si_class_type_info adds [16]=base type_info*.
+struct alignas(8) CxxTypeInfoLayout
+{
+	void**      vtable;
+	const char* name;
+};
+
+struct alignas(8) CxxSiTypeInfoLayout
+{
+	void**                   vtable;
+	const char*              name;
+	const CxxTypeInfoLayout* base;
+};
+
 // Pre-assign ctype<char>::id = 1 and install a facet at index 1 with count 2 so
 // the first classic-locale probe does not need runtime id allocation.
 inline constexpr std::uint64_t kCxxCtypeCharId = 1;

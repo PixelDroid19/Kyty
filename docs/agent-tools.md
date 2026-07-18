@@ -6,6 +6,10 @@ running emulator **in realtime** without Python, xdotool, or window screenshots.
 This is the **only** supported realtime debugging interface for developers and
 automated agents. Do not introduce a second protocol or debug framework.
 
+Install and verify the broader agent toolkit: `INSTALL-AGENTS.md`,
+`python3 scripts/kyty_agent_doctor.py --task start`,
+`python3 scripts/verify_agent_toolkit.py`.
+
 ## Protocol version
 
 Live wire version: **`protocol_version`: 3** (`kAgentProtocolVersion`).

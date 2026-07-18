@@ -2880,14 +2880,14 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoWithBase(CommandBuffer* buf, uin
 	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
 	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
 
-	// Captured Dreaming Sarah: base_vertex is always 0. Non-zero base needs a
-	// separate PM4 encoding before it can be accepted.
+	// Not registered under B+aG9DUnTKA (that NID is sceAgcDcbDrawIndexOffset).
+	// Keep helper for a future evidenced Auto-with-base NID; base_vertex==0 only.
 	EXIT_NOT_IMPLEMENTED(base_vertex != 0);
 
 	return GraphicsDcbDrawIndexAuto(buf, index_count, modifier);
 }
 
-// sceAgcDcbDrawIndexOffset — NID B+aG9DUnTKA.
+// sceAgcDcbDrawIndexOffset — NID B+aG9DUnTKA (external reference MIT / aerolib name).
 // Packet layout (5 DW): header, index_count, index_offset, index_count, flags&0xE0000001.
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t index_offset, uint32_t index_count, uint32_t flags)
 {
