@@ -154,14 +154,60 @@ class CompareWiringTests(unittest.TestCase):
             }
         }
         raw = capture.compare_metrics(current, baseline)
-        # Profile material gates: ignore OCR scene_ok
-        material = {
-            "white_ratio_not_worse": raw["checks"]["white_ratio_not_worse"],
-            "entropy_not_collapsed": raw["checks"]["entropy_not_collapsed"],
-            "colors_not_collapsed": raw["checks"]["colors_not_collapsed"],
-            "not_stripey": raw["checks"]["not_stripey"],
-        }
+        # Profile material gates: ignore OCR scene_ok, but still require a
+        # non-collapsed frame through absolute_world_gate.
+        material = reg.material_visual_checks(raw)
         self.assertTrue(all(material.values()))
+
+    def test_material_gates_reject_absolute_black_even_if_relative_checks_pass(self) -> None:
+        current = {
+            "world": {
+                "white_ratio": 0.0,
+                "entropy": 0.0,
+                "unique_quantized_colors": 200,
+                "stripey": False,
+                "scene_ok": False,
+            }
+        }
+        baseline = {
+            "world": {
+                "white_ratio": 0.0,
+                "entropy": 0.0,
+                "unique_quantized_colors": 200,
+                "stripey": False,
+                "scene_ok": False,
+            }
+        }
+        material = reg.material_visual_checks(capture.compare_metrics(current, baseline))
+        self.assertFalse(material["absolute_world_gate"])
+        self.assertFalse(all(material.values()))
+
+    def test_visual_floor_rejects_solid_baseline_candidate(self) -> None:
+        result = reg.visual_floor_from_metrics(
+            {
+                "world": {
+                    "white_ratio": 0.0,
+                    "entropy": 0.0,
+                    "unique_quantized_colors": 1,
+                    "stripey": False,
+                }
+            }
+        )
+        self.assertFalse(result["pass"])
+        self.assertFalse(result["checks"]["absolute_world_gate"])
+
+    def test_visual_floor_accepts_material_baseline_candidate(self) -> None:
+        result = reg.visual_floor_from_metrics(
+            {
+                "world": {
+                    "white_ratio": 0.04,
+                    "entropy": 6.8,
+                    "unique_quantized_colors": 1000,
+                    "stripey": False,
+                }
+            }
+        )
+        self.assertTrue(result["pass"])
 
 
 class SanitizeTests(unittest.TestCase):
