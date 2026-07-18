@@ -2778,6 +2778,58 @@ TEST(EmulatorGraphicsPackets, Gen5EudOverflowSharpOffsetMapping)
 	EXPECT_LE((0x24 - eud_base) + 4, 12);
 }
 
+TEST(EmulatorGraphicsPackets, Gen5DsWriteB32UsesConfiguredWorkgroupLds)
+{
+	// Captured compute instruction: ds_write_b32 v5, v4 offset:0.
+	const uint32_t shader[] = {0xd8340000u, 0x00000405u, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::DsWriteB32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VaddrVdataOffset);
+	ASSERT_EQ(instruction.src_num, 2);
+	EXPECT_EQ(instruction.src[0].register_id, 5);
+	EXPECT_EQ(instruction.src[1].register_id, 4);
+	EXPECT_EQ(instruction.ds_offset, 0);
+
+	ShaderComputeInputInfo input;
+	input.threads_num[0] = 16;
+	input.threads_num[1] = 16;
+	input.threads_num[2] = 1;
+	input.lds_dwords     = ShaderComputeLdsDwords(2);
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("%lds_length = OpConstant %uint 256"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%lds = OpVariable %_ptr_Workgroup_lds_array_uint Workgroup"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpShiftRightLogical %uint %lds_byte_addr_0 %uint_2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %lds_ptr_0 %lds_data_u_0"), Core::STRING8_INVALID_INDEX);
+
+	const auto binary = ShaderRecompileCS(code, &input);
+	EXPECT_FALSE(binary.IsEmpty());
+
+	EXPECT_EQ(ShaderComputeLdsDwords(0x100), 32768u);
+
+	HW::ComputeShaderInfo regs;
+	regs.cs_regs.data_addr = reinterpret_cast<uint64_t>(shader);
+
+	auto larger_input       = input;
+	larger_input.lds_dwords = ShaderComputeLdsDwords(3);
+	EXPECT_NE(ShaderGetIdCS(&regs, &input), ShaderGetIdCS(&regs, &larger_input));
+}
+
 
 TEST(EmulatorGraphicsPackets, Gen5SingleComponent32BitBufferFormat)
 {

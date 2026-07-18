@@ -54,6 +54,7 @@ enum class ShaderInstructionType : uint32_t
 	BufferStoreFormatXyzw,
 	DsAppend,
 	DsConsume,
+	DsWriteB32,
 	Exp,
 	ImageLoad,
 	ImageSample,
@@ -418,6 +419,7 @@ enum Format : uint64_t
 	Vdata4VaddrSvSoffsIdxen             = FormatDefine({DA4, S0, S1A4, S2, Idxen}),
 	Vdata4VaddrSvSoffsIdxenFloat4       = FormatDefine({DA4, S0, S1A4, S2, Idxen, Float4}),
 	VdstGds                             = FormatDefine({D, Gds}),
+	VaddrVdataOffset                    = FormatDefine({S0, S1}),
 	VdstSdst2Vsrc0Vsrc1                 = FormatDefine({D, D2A2, S0, S1}),
 	VdstSdst2Vsrc0Vsrc1Ssrc2A2          = FormatDefine({D, D2A2, S0, S1, S2A2}),
 	Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair       = FormatDefine({DA2, D2A2, S0, S1, S2A2}),
@@ -497,6 +499,8 @@ struct ShaderInstruction
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;
+	// DS single-address instructions add this byte offset to the byte address in src[0].
+	uint16_t ds_offset = 0;
 };
 
 class ShaderLabel
@@ -1057,11 +1061,17 @@ struct ShaderVertexInputInfo
 struct ShaderComputeInputInfo
 {
 	uint32_t            threads_num[3]     = {0, 0, 0};
+	uint32_t            lds_dwords         = 0;
 	bool                group_id[3]        = {false, false, false};
 	int                 thread_ids_num     = 0;
 	int                 workgroup_register = 0;
 	ShaderBindResources bind;
 };
+
+[[nodiscard]] constexpr uint32_t ShaderComputeLdsDwords(uint16_t granulated_lds_size)
+{
+	return static_cast<uint32_t>(granulated_lds_size) * 128u;
+}
 
 struct ShaderPixelInputInfo
 {

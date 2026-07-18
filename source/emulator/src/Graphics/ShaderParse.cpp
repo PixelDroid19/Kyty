@@ -2994,19 +2994,10 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 	uint32_t data0 = (buffer[1] >> 8u) & 0xffu;
 	uint32_t addr  = (buffer[1] >> 0u) & 0xffu;
 
-	EXIT_NOT_IMPLEMENTED(addr != 0);
-	EXIT_NOT_IMPLEMENTED(data0 != 0);
-	EXIT_NOT_IMPLEMENTED(data1 != 0);
-	EXIT_NOT_IMPLEMENTED(offset0 != 0);
-	EXIT_NOT_IMPLEMENTED(offset1 != 0);
-	EXIT_NOT_IMPLEMENTED(gds == 0);
-
 	uint32_t size = 2;
 
 	ShaderInstruction inst;
-	inst.pc      = pc;
-	inst.dst     = operand_parse(vdst + 256);
-	inst.src_num = 0;
+	inst.pc = pc;
 
 	switch (opcode) // NOLINT
 	{
@@ -3023,7 +3014,16 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 		case 0x0A: KYTY_NI("ds_or_b32"); break;
 		case 0x0B: KYTY_NI("ds_xor_b32"); break;
 		case 0x0C: KYTY_NI("ds_mskor_b32"); break;
-		case 0x0D: KYTY_NI("ds_write_b32"); break;
+		case 0x0D:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data1 != 0 || offset1 != 0 || vdst != 0);
+			inst.type      = ShaderInstructionType::DsWriteB32;
+			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src_num   = 2;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
 		case 0x0E: KYTY_NI("ds_write2_b32"); break;
 		case 0x0F: KYTY_NI("ds_write2st64_b32"); break;
 		case 0x10: KYTY_NI("ds_cmpst_b32"); break;
@@ -3069,12 +3069,18 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 		case 0x3B: KYTY_NI("ds_read_i16"); break;
 		case 0x3C: KYTY_NI("ds_read_u16"); break;
 		case 0x3d:
+			EXIT_NOT_IMPLEMENTED(addr != 0 || data0 != 0 || data1 != 0);
+			EXIT_NOT_IMPLEMENTED(offset0 != 0 || offset1 != 0 || gds == 0);
 			inst.type   = ShaderInstructionType::DsConsume;
 			inst.format = ShaderInstructionFormat::VdstGds;
+			inst.dst    = operand_parse(vdst + 256);
 			break;
 		case 0x3e:
+			EXIT_NOT_IMPLEMENTED(addr != 0 || data0 != 0 || data1 != 0);
+			EXIT_NOT_IMPLEMENTED(offset0 != 0 || offset1 != 0 || gds == 0);
 			inst.type   = ShaderInstructionType::DsAppend;
 			inst.format = ShaderInstructionFormat::VdstGds;
+			inst.dst    = operand_parse(vdst + 256);
 			break;
 		case 0x3F: KYTY_NI("ds_ordered_count"); break;
 		case 0x40: KYTY_NI("ds_add_u64"); break;

@@ -3290,6 +3290,43 @@ KYTY_RECOMPILER_FUNC(Recompile_DsConsume_VdstGds)
 	return false;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffset)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	const auto* input_info = spirv->GetCsInputInfo();
+
+	if (input_info == nullptr || input_info->lds_dwords == 0)
+	{
+		return false;
+	}
+
+	auto address = operand_variable_to_str(inst.src[0]);
+	auto data    = operand_variable_to_str(inst.src[1]);
+
+	EXIT_NOT_IMPLEMENTED(address.type != SpirvType::Float);
+	EXIT_NOT_IMPLEMENTED(data.type != SpirvType::Float);
+
+	const auto index_str  = String8::FromPrintf("%u", index);
+	const auto offset_str = spirv->GetConstantUint(inst.ds_offset);
+
+	static const char* text = R"(
+        %lds_addr_f_<index> = OpLoad %float %<address>
+        %lds_addr_u_<index> = OpBitcast %uint %lds_addr_f_<index>
+        %lds_byte_addr_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset>
+        %lds_index_<index> = OpShiftRightLogical %uint %lds_byte_addr_<index> %uint_2
+        %lds_ptr_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index_<index>
+        %lds_data_f_<index> = OpLoad %float %<data>
+        %lds_data_u_<index> = OpBitcast %uint %lds_data_f_<index>
+               OpStore %lds_ptr_<index> %lds_data_u_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<index>", index_str)
+	                   .ReplaceStr("<address>", address.value)
+	                   .ReplaceStr("<data>", data.value)
+	                   .ReplaceStr("<offset>", offset_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt0OffOffComprVmDone)
 {
 	EXIT_NOT_IMPLEMENTED(index == 0 || index + 1 >= code.GetInstructions().Size());
@@ -8204,6 +8241,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 
     {Recompile_DsAppend_VdstGds,                           ShaderInstructionType::DsAppend,            ShaderInstructionFormat::VdstGds,                        {""}},
     {Recompile_DsConsume_VdstGds,                          ShaderInstructionType::DsConsume,           ShaderInstructionFormat::VdstGds,                        {""}},
+    {Recompile_DsWriteB32_VaddrVdataOffset,                ShaderInstructionType::DsWriteB32,          ShaderInstructionFormat::VaddrVdataOffset,                {""}},
 
     {Recompile_Exp_Mrt0OffOffComprVmDone,                  ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0OffOffComprVmDone,          {""}},
     {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt1OffOffComprVmDone,          {""}},
@@ -9129,7 +9167,7 @@ void Spirv::WriteTypes()
 %_ptr_Output_gl_PerVertex = OpTypePointer Output %gl_PerVertex
 )";
 
-	static const char* compute_types = R"(
+static const char* compute_types = R"(
 )";
 
 	m_source += types;
@@ -9140,6 +9178,17 @@ void Spirv::WriteTypes()
 		case ShaderType::Pixel: m_source += pixel_types; break;
 		case ShaderType::Compute: m_source += compute_types; break;
 		default: EXIT("unknown type: %s\n", Core::EnumName8(m_code.GetType()).c_str()); break;
+	}
+
+	if (m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
+	{
+		m_source += String8(R"(
+                  %lds_length = OpConstant %uint <lds_dwords>
+              %lds_array_uint = OpTypeArray %uint %lds_length
+          %_ptr_Workgroup_uint = OpTypePointer Workgroup %uint
+%_ptr_Workgroup_lds_array_uint = OpTypePointer Workgroup %lds_array_uint
+)")
+		                .ReplaceStr("<lds_dwords>", String8::FromPrintf("%u", m_cs_input_info->lds_dwords));
 	}
 
 	static const char* storage_buffers_types = R"(
@@ -9221,6 +9270,7 @@ void Spirv::WriteTypes()
 			m_source += String8(vsharp_types).ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->push_constant_size / 16));
 		}
 	}
+
 }
 
 void Spirv::WriteConstants()
@@ -9307,6 +9357,11 @@ void Spirv::WriteGlobalVariables()
 		{
 			vars.Add("%vsharp = OpVariable %_ptr_PushConstant_BufferResource PushConstant");
 		}
+	}
+
+	if (m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
+	{
+		vars.Add("%lds = OpVariable %_ptr_Workgroup_lds_array_uint Workgroup");
 	}
 
 	switch (m_code.GetType())
