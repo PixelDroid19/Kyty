@@ -9,6 +9,7 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/UnitTest.h"
 
+#include <array>
 #include <cstring>
 
 UT_BEGIN(EmulatorKernelMemory);
@@ -196,6 +197,46 @@ TEST(EmulatorKernelMemory, FixedDirectMemoryRemapsFreedReadWriteView)
 	EXPECT_EQ(remapped, first_mapping);
 	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(remapped), kSize), OK);
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
+}
+
+TEST(EmulatorKernelMemory, InternalNamedFlexibleMemoryNidUsesOutPointerAbi)
+{
+	EnsureMemorySubsystemInitialized();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"4h6F1LLbTiw";
+	query.library              = U"libkernel";
+	query.library_version      = 1;
+	query.module               = U"libkernel";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* rec            = symbols.Find(query);
+	ASSERT_NE(rec, nullptr);
+
+	static std::array<uint8_t, 0x4000> out_storage {};
+	auto**                             out_addr = reinterpret_cast<void**>(out_storage.data());
+	*out_addr                                  = nullptr;
+
+	using map_named_flexible_internal_fn_t = int (*)(void**, size_t, int, int, const char*);
+	auto* map_named_flexible_internal = reinterpret_cast<map_named_flexible_internal_fn_t>(static_cast<uintptr_t>(rec->vaddr));
+	ASSERT_NE(map_named_flexible_internal, nullptr);
+
+	constexpr size_t kSize = 0x4000;
+	ASSERT_EQ(map_named_flexible_internal(out_addr, kSize, 0x03, 0x8000, "internal-test"), OK);
+	ASSERT_NE(*out_addr, nullptr);
+
+	void* start      = nullptr;
+	void* end        = nullptr;
+	int   protection = 0;
+	EXPECT_EQ(KernelQueryMemoryProtection(*out_addr, &start, &end, &protection), OK);
+	EXPECT_EQ(start, *out_addr);
+	EXPECT_EQ(end, static_cast<uint8_t*>(*out_addr) + kSize - 1);
+	EXPECT_EQ(protection, 0x03);
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(*out_addr), kSize), OK);
 }
 
 // Covers the explicit Gen5 protection family observed in one allocation path.

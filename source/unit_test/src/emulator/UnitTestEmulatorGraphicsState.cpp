@@ -23,10 +23,91 @@ UT_BEGIN(EmulatorGraphicsState);
 
 using namespace Libs::Graphics;
 
+namespace {
+
+int g_test_gpu_object_deletes = 0;
+
+struct TestGpuObject: public GpuObject
+{
+	TestGpuObject()
+	{
+		type       = GpuMemoryObjectType::StorageBuffer;
+		params[0] = 0x53544f5241474555ull;
+	}
+
+	bool Equal(const uint64_t* other) const override { return other != nullptr && other[0] == params[0]; }
+
+	create_func_t GetCreateFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, const uint64_t* /*vaddr*/, const uint64_t* /*size*/,
+		          int /*vaddr_num*/, VulkanMemory* /*mem*/) -> void* { return reinterpret_cast<void*>(0x51515151ull); };
+	}
+
+	create_from_objects_func_t GetCreateFromObjectsFunc() const override { return nullptr; }
+	write_back_func_t          GetWriteBackFunc() const override { return nullptr; }
+
+	delete_func_t GetDeleteFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, void* obj, VulkanMemory* /*mem*/)
+		{
+			if (obj == reinterpret_cast<void*>(0x51515151ull))
+			{
+				g_test_gpu_object_deletes++;
+			}
+		};
+	}
+
+	update_func_t GetUpdateFunc() const override { return nullptr; }
+};
+
+void EnsureGpuMemoryForTests()
+{
+	static bool initialized = false;
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!initialized)
+	{
+		GpuMemoryInit();
+		initialized = true;
+	}
+}
+
+} // namespace
+
 TEST(EmulatorGraphicsState, TiledVideoOutBufferUpdateDoesNotCpuUpload)
 {
 	EXPECT_FALSE(VideoOutBufferShouldCpuUploadOnUpdate(true));
 	EXPECT_TRUE(VideoOutBufferShouldCpuUploadOnUpdate(false));
+}
+
+TEST(EmulatorGraphicsState, DisabledShaderFilterIgnoresNullAddress)
+{
+	EXPECT_FALSE(ShaderIsDisabled(0));
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	const uint64_t heap_base = 0x0000005100000000ull;
+	const uint64_t heap_size = 0x20000ull;
+	const uint64_t obj_addr  = heap_base + 0x4000ull;
+	const uint64_t obj_size  = 0x1000ull;
+
+	GpuMemorySetAllocatedRange(heap_base, heap_size);
+	g_test_gpu_object_deletes = 0;
+
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, obj_addr, obj_size, TestGpuObject()), nullptr);
+	EXPECT_EQ(GpuMemoryFindObjects(obj_addr, obj_size, GpuMemoryObjectType::StorageBuffer, true, false).Size(), 1u);
+
+	GpuMemoryFree(&ctx, obj_addr, obj_size, false);
+
+	EXPECT_EQ(g_test_gpu_object_deletes, 1);
+	EXPECT_TRUE(GpuMemoryFindObjects(obj_addr, obj_size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
 }
 
 TEST(EmulatorGraphicsState, BlitInitializesUndefinedSource)
@@ -136,6 +217,8 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 {
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 56), VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 56, true), VK_FORMAT_R8G8B8A8_SRGB);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 13), VK_FORMAT_R16_SFLOAT);
+	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(13), 2u);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 14), VK_FORMAT_R8G8_UNORM);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 71), VK_FORMAT_R16G16B16A16_SFLOAT);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 133), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
@@ -193,6 +276,39 @@ TEST(EmulatorGraphicsState, Gen5SharpNullBufferDescriptorIsNotStorageBuffer)
 
 	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
 	EXPECT_EQ(usage.storage_buffers_constant, 0);
+	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
+}
+
+TEST(EmulatorGraphicsState, Gen5CodeUnavailableSkipsInvalidDirectStorageDescriptor)
+{
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 4; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+
+	ShaderBufferResource invalid {};
+	invalid.fields[0] = 0x3f068687u;
+	invalid.fields[1] = (0x3f16u << 16u) | 0x9697u; // non-dword-aligned stride 16150
+	invalid.fields[2] = 1058115986u;
+	invalid.fields[3] = 0u; // no typed format/swizzle evidence
+	for (int i = 0; i < 4; i++)
+	{
+		user_sgpr.value[i] = invalid.fields[i];
+	}
+
+	uint16_t direct_offsets[1] = {0};
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 1;
+
+	ShaderParsedUsage  usage {};
+	ShaderBindResources bind {};
+
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 4, nullptr);
+
+	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
+	EXPECT_EQ(usage.storage_buffers_readonly, 0);
 	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
 }
 
@@ -1559,6 +1675,7 @@ TEST(EmulatorGraphicsState, Gen5SampledFormatsPreserveFloatAndUnormContracts)
 	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 71, true), VK_FORMAT_R16G16B16A16_SFLOAT);
 	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 56, false), VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 56, true), VK_FORMAT_R8G8B8A8_SRGB);
+	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 13, false), VK_FORMAT_R16_SFLOAT);
 	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 14, false), VK_FORMAT_R8G8_UNORM);
 	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 133, false), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
 	EXPECT_EQ(TextureResolveSampledVkFormat(0, 0, 133, true), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);

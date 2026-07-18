@@ -121,7 +121,7 @@ void Resolve(RuntimeLinker* rt, const Core::String& name, SymbolType type, Progr
 // that Resolve would use for a missing-or-module export of `sr`.
 [[nodiscard]] bool HleOwns(RuntimeLinker* rt, const SymbolResolve& sr);
 
-// After Resolve, true iff out vaddr matches the HLE record (HLE wins over module).
+// After Resolve, true iff out vaddr matches the HLE record.
 [[nodiscard]] bool ResolvedMatchesHle(RuntimeLinker* rt, const SymbolResolve& sr, uint64_t resolved_vaddr);
 } // namespace ImportResolver
 
@@ -139,7 +139,7 @@ uint32_t DetectExportConflicts(RuntimeLinker* rt, ModuleLoadPlanDiagnostics* dia
 // Batch helper used by deferred application: scan the last entry in `batch` for export
 // conflicts against HLE and other loaded programs. On inter-module conflict, unload
 // the entire batch (reverse order) and return 0. On success return batch_count.
-// HLE-only conflicts are recorded but do not unload. Does not invent symbols.
+// HLE conflicts are recorded but do not unload. Does not invent symbols.
 // `batch` must contain only programs loaded for this adjacent apply (not primary).
 int CommitAdjacentBatchOrRollback(RuntimeLinker* rt, Program** batch, uint32_t batch_count, ModuleLoadPlanDiagnostics* diag);
 

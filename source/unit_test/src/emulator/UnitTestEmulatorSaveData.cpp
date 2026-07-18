@@ -3,12 +3,40 @@
 #include "Emulator/Config.h"
 #include "Emulator/Dialog.h"
 #include "Emulator/Libs/Errno.h"
+#include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/SaveData.h"
+#include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 
 #include <cstring>
 
 UT_BEGIN(EmulatorSaveData);
+
+namespace {
+
+Kyty::Loader::SymbolResolve SaveDataNativeFunc(const char16_t* nid)
+{
+	Kyty::Loader::SymbolResolve sr {};
+	sr.name                 = nid;
+	sr.library              = U"SaveData_native";
+	sr.library_version      = 1;
+	sr.module               = U"SaveData_native";
+	sr.module_version_major = 1;
+	sr.module_version_minor = 1;
+	sr.type                 = Kyty::Loader::SymbolType::Func;
+	return sr;
+}
+
+void EnsureLogSubsystem()
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+}
+
+} // namespace
 
 TEST(EmulatorSaveData, CreatesTransactionResourceThroughReturnValue)
 {
@@ -80,6 +108,24 @@ TEST(EmulatorSaveData, GetEventResultReportsEmptyQueue)
 	uint8_t event[128] = {};
 	EXPECT_EQ(SaveDataGetEventResult(nullptr, nullptr), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
 	EXPECT_EQ(SaveDataGetEventResult(nullptr, event), Libs::SaveData::SAVE_DATA_ERROR_NOT_FOUND);
+}
+
+TEST(EmulatorSaveData, CommitNativeNidValidatesPointerAndSucceeds)
+{
+	using CommitFn = int(KYTY_SYSV_ABI*)(const void*);
+
+	EnsureLogSubsystem();
+
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libSaveData_1", &symbols));
+	const Kyty::Loader::SymbolRecord* commit = symbols.Find(SaveDataNativeFunc(u"ie7qhZ4X0Cc"));
+	ASSERT_NE(commit, nullptr);
+	auto* commit_fn = reinterpret_cast<CommitFn>(commit->vaddr);
+	ASSERT_NE(commit_fn, nullptr);
+
+	uint8_t commit_param[32] = {};
+	EXPECT_EQ(commit_fn(nullptr), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+	EXPECT_EQ(commit_fn(commit_param), 0);
 }
 
 TEST(EmulatorSaveData, DeleteTransactionResourceTracksCreateHandles)

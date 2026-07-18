@@ -229,9 +229,9 @@ static Core::VirtualMemory::Mode get_mode(Elf64_Word flags)
 		case PF_R: return Core::VirtualMemory::Mode::Read;
 		case PF_W: return Core::VirtualMemory::Mode::Write;
 		case PF_R | PF_W: return Core::VirtualMemory::Mode::ReadWrite;
-		case PF_X: return Core::VirtualMemory::Mode::Execute;
+		case PF_X: return Core::VirtualMemory::Mode::ExecuteRead;
 		case PF_X | PF_R: return Core::VirtualMemory::Mode::ExecuteRead;
-		case PF_X | PF_W: return Core::VirtualMemory::Mode::ExecuteWrite;
+		case PF_X | PF_W: return Core::VirtualMemory::Mode::ExecuteReadWrite;
 		case PF_X | PF_W | PF_R: return Core::VirtualMemory::Mode::ExecuteReadWrite;
 
 		default: return Core::VirtualMemory::Mode::NoAccess;
@@ -1297,19 +1297,18 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 	resolve.module_version_minor = module->version_minor;
 	resolve.type                 = type;
 
-	const SymbolRecord* record = m_symbols != nullptr ? m_symbols->Find(resolve) : nullptr;
-	if (record == nullptr)
+	const SymbolRecord* hle_record    = m_symbols != nullptr ? m_symbols->Find(resolve) : nullptr;
+	const SymbolRecord* export_record = nullptr;
+	auto*               exporter      = FindProgram(*module, *library);
+	if (exporter != nullptr && exporter->export_symbols != nullptr)
 	{
-		auto* exporter = FindProgram(*module, *library);
-		if (exporter != nullptr && exporter->export_symbols != nullptr)
+		export_record = exporter->export_symbols->Find(resolve);
+		if (export_record != nullptr && bind_self != nullptr)
 		{
-			record = exporter->export_symbols->Find(resolve);
-			if (bind_self != nullptr)
-			{
-				*bind_self = (exporter == program);
-			}
+			*bind_self = (exporter == program);
 		}
 	}
+	const SymbolRecord* record = export_record != nullptr ? export_record : hle_record;
 
 	const String canonical_name = SymbolDatabase::GenerateName(resolve);
 	const auto   identity       = MissingImport::SymbolIdentity::From(resolve, canonical_name);
@@ -1328,7 +1327,7 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 		{
 			EXIT_IF(record == nullptr);
 			*out_info           = *record;
-			const bool from_hle = (m_symbols != nullptr && m_symbols->Find(resolve) == record);
+			const bool from_hle = (hle_record == record);
 			Emulator::Agent::Lifecycle::EmitSymbolResolved(out_info->name.C_Str(), from_hle ? "hle" : "export");
 			return;
 		}

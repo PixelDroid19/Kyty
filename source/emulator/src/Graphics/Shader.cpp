@@ -168,6 +168,7 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 	// compressed block after dimensions are converted to block elements.
 	switch (format)
 	{
+		case 13: return 2; // UFMT_16_FLOAT
 		case 14: return 2; // UFMT_8_8_UNORM
 		case 56: return 4; // UFMT_8_8_8_8_UNORM
 		case 71: return 8; // UFMT_16_16_16_16_FLOAT
@@ -1984,6 +1985,28 @@ static bool Gen5SharpUseTextureDescriptor(bool size_flag, int offset_dw, int use
 	return !size_flag && Gen5SharpIsImageDescriptor(offset_dw, user_sgpr_num, user_sgpr, extended_buffer);
 }
 
+static bool Gen5CodeUnavailableDirectResourceLooksStorage(const HW::UserSgprInfo& user_sgpr, int reg)
+{
+	if (reg < 0 || reg + 3 >= HW::UserSgprInfo::SGPRS_MAX)
+	{
+		return false;
+	}
+
+	ShaderBufferResource resource;
+	resource.fields[0] = user_sgpr.value[reg + 0];
+	resource.fields[1] = user_sgpr.value[reg + 1];
+	resource.fields[2] = user_sgpr.value[reg + 2];
+	resource.fields[3] = user_sgpr.value[reg + 3];
+
+	if (resource.Base48() == 0 && resource.NumRecords() == 0)
+	{
+		return false;
+	}
+
+	return ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw) ||
+	       ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Typed);
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
 	                       const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code,
@@ -2084,6 +2107,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				// When the instruction stream is unavailable (VS/PS Gen5 path),
 				// default to ReadOnly rather than failing. CS passes &code and
 				// reclassifies stores as ReadWrite via ShaderGetDirectStorageUsage.
+				if (code == nullptr && !Gen5CodeUnavailableDirectResourceLooksStorage(user_sgpr, reg))
+				{
+					break;
+				}
 				auto usage = ShaderStorageUsage::ReadOnly;
 				if (code != nullptr)
 				{
@@ -3695,6 +3722,11 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 
 bool ShaderIsDisabled(uint64_t addr)
 {
+	if (addr == 0)
+	{
+		return false;
+	}
+
 	const auto* src = reinterpret_cast<const uint32_t*>(addr);
 	EXIT_NOT_IMPLEMENTED(src == nullptr);
 

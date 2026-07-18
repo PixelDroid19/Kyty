@@ -4912,12 +4912,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		{
 			// Observed sample textures (UfmtGFX10):
 			// - Tile 0/9/27, format 56 = 8_8_8_8_UNORM (RGBA8)
+			// - Tile 0, format 13 = 16_FLOAT (R16F), 64x1 linear lookup
 			// - Tile 0, format 14 = 8_8_UNORM (RG8), 2048x4096 linear atlas
 			// - Tile 27, format 71 = 16_16_16_16_FLOAT (RGBA16F), 642x362 alias of RT
 			// - Tile 27, format 133 = BC1 RGBA UNORM, 3840x2160 title texture
 			// - Tile 9 = kStandard64KB static atlases (RGBA8 detile path)
 			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 27 && r.TileMode() != 9);
-			if (r.Format() != 56 && r.Format() != 14 && r.Format() != 71 && r.Format() != 133)
+			if (r.Format() != 56 && r.Format() != 13 && r.Format() != 14 && r.Format() != 71 && r.Format() != 133)
 			{
 				EXIT("unsupported Gen5 sampled texture format: fmt=%u tile=%u width=%u height=%u base=0x%012" PRIx64 " type=%u\n",
 				     r.Format(), r.TileMode(), r.Width5() + 1u, r.Height5() + 1u, r.Base40(), r.Type());

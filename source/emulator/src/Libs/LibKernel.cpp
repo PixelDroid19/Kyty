@@ -15,6 +15,7 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Kernel/Semaphore.h"
+#include "Emulator/Kernel/Time.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -290,9 +291,19 @@ static int KYTY_SYSV_ABI close(int d)
 	return POSIX_CALL(FileSystem::KernelClose(d));
 }
 
+static int64_t KYTY_SYSV_ABI lseek(int d, int64_t offset, int whence)
+{
+	return POSIX_N_CALL(FileSystem::KernelLseek(d, offset, whence));
+}
+
 static int64_t KYTY_SYSV_ABI read(int d, void* buf, uint64_t nbytes)
 {
 	// PRINT_NAME();
+
+	if (d > 2)
+	{
+		return POSIX_N_CALL(FileSystem::KernelRead(d, buf, nbytes));
+	}
 
 	EXIT_NOT_IMPLEMENTED(d != 0);
 
@@ -344,45 +355,6 @@ static KYTY_SYSV_ABI int KernelIsAddressSanitizerEnabled()
 {
 	PRINT_NAME();
 	return 0;
-}
-
-// PS5 libkernel v1.1 NID 4h6F1LLbTiw (name undocumented). Determined by
-// observation: the libc heap allocator calls it as f(addr, len, prot, flags)
-// where `addr` is an address the allocator pre-computed inside a range it has
-// already reserved, and uses the returned pointer directly as the base of that
-// region (linking free-list nodes at base+0x10/+0x18). The mapping already
-// exists, so the contract is to return the requested address unchanged.
-static KYTY_SYSV_ABI uint64_t KernelInternalMemoryMap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags)
-{
-	PRINT_NAME();
-	const long long host_tid = static_cast<long long>(Core::Thread::GetHostThreadId());
-	printf("\taddr=0x%" PRIx64 " len=0x%" PRIx64 " prot=0x%" PRIx64 " flags=0x%" PRIx64 " tid=%lld\n", addr, len, prot, flags, host_tid);
-	// Register the range for demand paging: the guest allocator expects zero-filled
-	// read/write memory across the whole region, but pre-mapping it all changes what
-	// the allocator's header check reads (triggering an abort) and a blind CPU memset
-	// faults on the reserved-but-unbacked pages. Instead we zero just the leading
-	// header the allocator inspects now, and map the rest lazily when the guest first
-	// writes to it (see the fault handler's demand-map path).
-	if (addr != 0 && len != 0)
-	{
-		Core::VirtualMemory::RegisterDemandRange(addr, len);
-		uint64_t clear = len < 0x10000 ? len : 0x10000;
-		memset(reinterpret_cast<void*>(addr), 0, clear);
-	}
-#ifdef __APPLE__
-	if (getenv("KYTY_TRACE_LIBC") != nullptr)
-	{
-		Core::VirtualMemory::SetGuestTrace(1500);
-	#if defined(__x86_64__) || defined(__i386__)
-		__asm__ __volatile__("pushfq; orq $0x100,(%rsp); popfq");
-	#endif
-	}
-	if (getenv("KYTY_PROF") != nullptr)
-	{
-		Core::VirtualMemory::StartGuestProfiler();
-	}
-#endif
-	return addr;
 }
 
 static void KYTY_SYSV_ABI exit(int code)
@@ -688,6 +660,7 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("AUXVxWeJU-A", FileSystem::KernelUnlink);
 	LIB_FUNC("taRWhTJFTgE", FileSystem::KernelGetdirentries);
 	LIB_FUNC("oib76F-12fk", FileSystem::KernelLseek);
+	LIB_FUNC("Oy6IpwgtYOk", LibKernel::lseek);
 	LIB_FUNC("j2AIqSqJP0w", FileSystem::KernelGetdents);
 	LIB_FUNC("1-LFLmRFxxM", FileSystem::KernelMkdir);
 	LIB_FUNC("naInUjYt3so", FileSystem::KernelRmdir);
@@ -891,7 +864,10 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("NNtFaKJbPt0", LibKernel::close);
 	LIB_FUNC("OMDRKKAZ8I4", LibKernel::KernelDebugRaiseException);
 	LIB_FUNC("jh+8XiK4LeE", LibKernel::KernelIsAddressSanitizerEnabled);
-	LIB_FUNC("4h6F1LLbTiw", LibKernel::KernelInternalMemoryMap);
+	LIB_FUNC("-o5uEDpN+oY", LibKernel::KernelConvertUtcToLocaltime);
+	// sceKernelMapNamedFlexibleMemoryInternal uses the same out-pointer ABI as
+	// the public named-flexible mapper.
+	LIB_FUNC("4h6F1LLbTiw", Memory::KernelMapNamedFlexibleMemory);
 	LIB_FUNC("Ou3iL1abvng", LibKernel::stack_chk_fail);
 	LIB_FUNC("p5EcQeEeJAE", LibKernel::KernelRtldSetApplicationHeapAPI);
 	LIB_FUNC("pB-yGZ2nQ9o", LibKernel::KernelSetThreadAtexitCount);

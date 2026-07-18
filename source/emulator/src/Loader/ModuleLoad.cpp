@@ -13,7 +13,6 @@
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <algorithm>
-#include <array>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -117,24 +116,9 @@ bool ProbeSharedElf(const String& package_root, const String& host_path)
 		return false;
 	}
 
-	std::array<unsigned char, 64> header {};
-	File                          file;
-	if (!file.Open(host_path, File::Mode::Read) || file.Size() < header.size())
-	{
-		return false;
-	}
-	uint32_t bytes_read = 0;
-	file.Read(header.data(), static_cast<uint32_t>(header.size()), &bytes_read);
-	file.Close();
-	if (bytes_read != header.size())
-	{
-		return false;
-	}
-
-	const bool elf64_le = header[0] == 0x7f && header[1] == 'E' && header[2] == 'L' && header[3] == 'F' && header[4] == 2 && header[5] == 1;
-	const uint16_t type = static_cast<uint16_t>(header[16]) | (static_cast<uint16_t>(header[17]) << 8u);
-	const uint16_t machine = static_cast<uint16_t>(header[18]) | (static_cast<uint16_t>(header[19]) << 8u);
-	return elf64_le && type == 0xfe18 && machine == 62;
+	Elf64 elf;
+	elf.Open(host_path);
+	return elf.IsValid() && elf.IsShared();
 }
 
 String NormalizeRoot(const String& root_in)
@@ -564,7 +548,7 @@ String ConflictNote(const String& canonical_name, const String& first, const Str
 }
 
 // True if newly loaded program's exports collide with another module (not HLE).
-// HLE collisions are reported separately and do not force unload (HLE wins).
+// HLE collisions are reported separately and do not force unload.
 bool ScanNewProgramConflicts(RuntimeLinker* rt, int32_t newly_loaded_id, ModuleLoadPlanDiagnostics* diag, bool* out_inter_module_conflict)
 {
 	EXIT_IF(rt == nullptr);
@@ -590,7 +574,8 @@ bool ScanNewProgramConflicts(RuntimeLinker* rt, int32_t newly_loaded_id, ModuleL
 
 	for (const auto& canonical_name: newly_loaded->export_names)
 	{
-		// HLE conflict: report, keep module (Resolve prefers HLE).
+		// HLE conflict: report, keep module. Loaded-module exports remain valid
+		// resolution candidates for imports that name this module/library.
 		if (hle != nullptr)
 		{
 			const SymbolRecord* h = hle->FindByCanonicalName(canonical_name);
@@ -813,20 +798,17 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const String& primary_host_path)
 		g_pending = {};
 	}
 
-	const bool enabled = Core::BringUp::IsEnabled(Core::BringUp::Feature::AdjacentModuleDiscovery, Core::BringUp::Subsystem::Loader);
+	const bool diagnostic =
+	    Core::BringUp::IsEnabled(Core::BringUp::Feature::AdjacentModuleDiscovery, Core::BringUp::Subsystem::Loader);
 
-	// Always publish a plan snapshot (primary-only when discovery is off).
-	const ModuleLoadPlan plan = ModuleLoadPlanning::BuildPlan(primary_host_path, enabled);
+	// Always publish a strict plan snapshot. Adjacent package modules are guest
+	// load inputs, not a diagnostic-only behavior.
+	const ModuleLoadPlan plan = ModuleLoadPlanning::BuildPlan(primary_host_path, true);
 	PublishDiagnostics(plan.diag);
 
 	// Agent observation only (sanitized basenames / relative keys).
 	Emulator::Agent::Lifecycle::EmitExecutableDiscovered(plan.diag.primary_identity);
 	Emulator::Agent::Lifecycle::EmitModuleDiscovery(plan.diag.entry_count, plan.diag.adjacent_count, plan.diag.rejection_count);
-
-	if (!enabled)
-	{
-		return;
-	}
 
 	if (!plan.valid)
 	{
@@ -835,27 +817,34 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const String& primary_host_path)
 		return;
 	}
 
-	// Report for diagnostics/burst (feature already IsEnabled).
-	const auto decision = Core::BringUp::Report(Core::BringUp::Feature::AdjacentModuleDiscovery, Core::BringUp::Subsystem::Loader,
-	                                            "adjacent_module_discovery", __FILE__, __LINE__);
-	if (decision != Core::BringUp::Decision::Continue)
+	if (plan.diag.adjacent_count == 0)
 	{
-		std::fprintf(stderr, "KYTY_LOADER: adjacent discovery policy Halt; plan not applied\n");
-		std::fflush(stderr);
 		return;
 	}
 
-	std::printf("KYTY_LOADER: plan entries=%u adjacent=%u rejections=%u\n", plan.diag.entry_count, plan.diag.adjacent_count,
-	            plan.diag.rejection_count);
-	for (uint32_t i = 0; i < plan.diag.entry_count; ++i)
+	if (diagnostic)
 	{
-		std::printf("KYTY_LOADER: plan[%u]=%s\n", i, plan.diag.entries[i]);
+		const auto decision = Core::BringUp::Report(Core::BringUp::Feature::AdjacentModuleDiscovery, Core::BringUp::Subsystem::Loader,
+		                                            "adjacent_module_discovery", __FILE__, __LINE__);
+		if (decision != Core::BringUp::Decision::Continue)
+		{
+			std::fprintf(stderr, "KYTY_LOADER: adjacent discovery policy Halt; plan not applied\n");
+			std::fflush(stderr);
+			return;
+		}
+
+		std::printf("KYTY_LOADER: plan entries=%u adjacent=%u rejections=%u\n", plan.diag.entry_count, plan.diag.adjacent_count,
+		            plan.diag.rejection_count);
+		for (uint32_t i = 0; i < plan.diag.entry_count; ++i)
+		{
+			std::printf("KYTY_LOADER: plan[%u]=%s\n", i, plan.diag.entries[i]);
+		}
+		for (uint32_t i = 0; i < plan.diag.rejection_count; ++i)
+		{
+			std::printf("KYTY_LOADER: reject[%u]=%s\n", i, plan.diag.rejections[i]);
+		}
+		std::fflush(stdout);
 	}
-	for (uint32_t i = 0; i < plan.diag.rejection_count; ++i)
-	{
-		std::printf("KYTY_LOADER: reject[%u]=%s\n", i, plan.diag.rejections[i]);
-	}
-	std::fflush(stdout);
 
 	Core::LockGuard lock(g_diag_mutex);
 	g_pending.owner = rt;

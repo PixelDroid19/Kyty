@@ -573,6 +573,22 @@ int KYTY_SYSV_ABI SaveDataGetEventResult(const void* /*event_param*/, void* even
 	return SAVE_DATA_ERROR_NOT_FOUND;
 }
 
+// sceSaveDataCommit — completes a save transaction descriptor supplied by the guest.
+// The observed caller only requires synchronous success after a non-null descriptor.
+int KYTY_SYSV_ABI SaveDataCommit(const void* commit_param)
+{
+	PRINT_NAME();
+
+	printf("\t commit_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(commit_param));
+
+	if (commit_param == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	return OK;
+}
+
 int KYTY_SYSV_ABI SaveDataSaveIcon(const SaveDataMountPoint* mount_point, const SaveDataIcon* icon)
 {
 	EXIT_NOT_IMPLEMENTED(mount_point == nullptr);
@@ -759,6 +775,7 @@ LIB_DEFINE(InitSaveData_1)
 	LIB_FUNC("dyIhnXq-0SM", SaveData::SaveDataDirNameSearch);
 	// sceSaveDataGetEventResult
 	LIB_FUNC("j8xKtiFj0SY", SaveData::SaveDataGetEventResult);
+	LIB_FUNC("ie7qhZ4X0Cc", SaveData::SaveDataCommit);
 	LIB_FUNC("c88Yy54Mx0w", SaveData::SaveDataSaveIcon);
 	// Memory2 APIs (Gen5 SaveData memory slots).
 	LIB_FUNC("oQySEUfgXRA", SaveData::SaveDataSetupSaveDataMemory2);
@@ -787,6 +804,7 @@ LIB_DEFINE(InitSaveDataNative_1)
 	LIB_FUNC("65VH0Qaaz6s", SaveData::SaveDataGetMountInfo);
 	// sceSaveDataGetEventResult
 	LIB_FUNC("j8xKtiFj0SY", SaveData::SaveDataGetEventResult);
+	LIB_FUNC("ie7qhZ4X0Cc", SaveData::SaveDataCommit);
 	// Observed Gen5 import (SaveData_native): SysV (MountPoint*, info*).
 	// Public PS4 tables list GetMountInfo as 65VH0Qaaz6s; this title does not
 	// import that NID. Call-site capture shows rdi="/savedata0" and rsi as a
