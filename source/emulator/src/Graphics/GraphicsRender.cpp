@@ -35,6 +35,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Profiler.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
@@ -475,6 +476,216 @@ struct RenderColorInfo
 	uint32_t                  clear_word0[TARGETS_MAX] {};
 	uint32_t                  clear_word1[TARGETS_MAX] {};
 };
+
+// Latest 1280x720 color targets (for KYTY_DUMP_RT paired with VideoOut frame dumps).
+static constexpr uint32_t k_dump_rt_slots = 4;
+static VulkanImage*       g_dump_rt_images[k_dump_rt_slots] {};
+static uint32_t           g_dump_rt_count = 0;
+
+static void RememberDumpRt(VulkanImage* img)
+{
+	if (img == nullptr)
+	{
+		return;
+	}
+	for (uint32_t i = 0; i < g_dump_rt_count; i++)
+	{
+		if (g_dump_rt_images[i] == img)
+		{
+			return;
+		}
+	}
+	if (g_dump_rt_count < k_dump_rt_slots)
+	{
+		g_dump_rt_images[g_dump_rt_count++] = img;
+	} else
+	{
+		// Ring: keep most recent.
+		for (uint32_t i = 1; i < k_dump_rt_slots; i++)
+		{
+			g_dump_rt_images[i - 1] = g_dump_rt_images[i];
+		}
+		g_dump_rt_images[k_dump_rt_slots - 1] = img;
+	}
+}
+
+void GraphicsDumpRememberedRts(GraphicContext* ctx, const char* prefix)
+{
+	if (ctx == nullptr || prefix == nullptr)
+	{
+		return;
+	}
+	for (uint32_t i = 0; i < g_dump_rt_count; i++)
+	{
+		char tag[32];
+		std::snprintf(tag, sizeof(tag), "rt%u", i);
+		UtilDumpVulkanImageRgba8Bmp(ctx, g_dump_rt_images[i], prefix, tag);
+	}
+}
+
+// Opt-in: KYTY_DUMP_DRAW=1 logs unique draws into 1280x720 color targets that
+// sample a 980x347 texture (title logo). Captures VS fmt/stride, prim, viewport.
+static void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& vs_input,
+                            const ShaderPixelInputInfo& ps_input, const HW::Context& hw, const HW::UserConfig& ucfg,
+                            uint32_t index_count, uint32_t index_type_and_size, bool indexed, uint32_t flags = 0)
+{
+	static const char* enabled = std::getenv("KYTY_DUMP_DRAW");
+	if (enabled == nullptr || enabled[0] == '\0')
+	{
+		return;
+	}
+	bool rt720 = false;
+	uint32_t rt_w = 0;
+	uint32_t rt_h = 0;
+	for (uint32_t slot = 0; slot < color.targets_num; slot++)
+	{
+		VulkanImage* img = color.vulkan_buffer[slot];
+		if (img != nullptr && img->extent.width == 1280u && img->extent.height == 720u)
+		{
+			rt720 = true;
+			rt_w  = img->extent.width;
+			rt_h  = img->extent.height;
+			break;
+		}
+	}
+	if (!rt720)
+	{
+		return;
+	}
+
+	bool        logo = false;
+	char        tex_buf[256] {};
+	size_t      tex_len = 0;
+	const auto& textures = ps_input.bind.textures2D;
+	for (int ti = 0; ti < textures.textures_num; ti++)
+	{
+		const auto& r = textures.desc[ti].texture;
+		const uint32_t tw = static_cast<uint32_t>(r.Width5()) + 1u;
+		const uint32_t th = static_cast<uint32_t>(r.Height5()) + 1u;
+		const uint32_t tf = r.Format();
+		const uint32_t tt = r.TileMode();
+		if (tw == 980u && th == 347u)
+		{
+			logo = true;
+		}
+		tex_len += static_cast<size_t>(
+		    std::snprintf(tex_buf + tex_len, sizeof(tex_buf) - tex_len, "%s%ux%u:fmt%u:tile%u", (tex_len ? "," : ""), tw, th, tf, tt));
+		if (tex_len + 8 >= sizeof(tex_buf))
+		{
+			break;
+		}
+	}
+	// Also log non-logo 720p draws once (wipe/bg); logo draws always preferred.
+	if (!logo && textures.textures_num == 0)
+	{
+		// Still interesting for wipe geometry — allow a few.
+	}
+
+	char vs_buf[384] {};
+	size_t vs_len = 0;
+	for (int bi = 0; bi < vs_input.buffers_num; bi++)
+	{
+		const auto& b = vs_input.buffers[bi];
+		vs_len += static_cast<size_t>(std::snprintf(vs_buf + vs_len, sizeof(vs_buf) - vs_len, "%sstride=%u:recs=%u:attrs=%d",
+		                                            (vs_len ? "|" : ""), b.stride, b.num_records, b.attr_num));
+		for (int ai = 0; ai < b.attr_num && ai < 8; ai++)
+		{
+			const int idx = b.attr_indices[ai];
+			const uint8_t fmt = vs_input.resources[idx].Format();
+			vs_len += static_cast<size_t>(
+			    std::snprintf(vs_buf + vs_len, sizeof(vs_buf) - vs_len, ":a%d@%u:fmt%u", idx, b.attr_offsets[ai], fmt));
+		}
+		if (vs_len + 16 >= sizeof(vs_buf))
+		{
+			break;
+		}
+	}
+
+	const auto& vp = hw.GetScreenViewport().viewports[0];
+	const auto  xy = State::ResolveViewportXy(vp.xscale, vp.xoffset, vp.yscale, vp.yoffset);
+	const auto  sc = State::ResolveScissor(hw.GetScreenViewport(), hw.GetScanModeControl(), 0);
+
+	char line[768];
+	std::snprintf(line, sizeof(line),
+	              "rt=%ux%u logo=%d prim=%u idx=%u itype=%u indexed=%d flags=0x%x vs_bufs=%d [%s] tex=[%s] "
+	              "vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d\n",
+	              rt_w, rt_h, logo ? 1 : 0, ucfg.GetPrimType(), index_count, index_type_and_size, indexed ? 1 : 0, flags,
+	              vs_input.buffers_num, vs_buf, tex_buf, xy.x, xy.y, xy.width, xy.height, sc.left, sc.top, sc.right, sc.bottom);
+
+	static std::set<std::string> seen;
+	static uint32_t              non_logo_left = 8;
+	if (!logo)
+	{
+		if (non_logo_left == 0)
+		{
+			return;
+		}
+		--non_logo_left;
+	}
+	if (!seen.insert(line).second)
+	{
+		return;
+	}
+
+	std::fprintf(stderr, "KYTY_DUMP_DRAW %s", line);
+
+	// First vertex records as floats (cheap evidence for stride/fmt / shear).
+	if (logo && vs_input.buffers_num > 0)
+	{
+		const auto& b = vs_input.buffers[0];
+		if (b.addr != 0 && b.stride >= 4 && b.stride <= 256)
+		{
+			const uint32_t floats_per = b.stride / 4u;
+			const uint32_t vert_n     = std::min(index_count == 0 ? 6u : index_count, 8u);
+			std::fprintf(stderr, "KYTY_DUMP_DRAW_VERT stride=%u floats=%u verts=%u", b.stride, floats_per, vert_n);
+			for (int ai = 0; ai < b.attr_num && ai < 8; ai++)
+			{
+				const int     idx = b.attr_indices[ai];
+				const uint8_t fmt = vs_input.resources[idx].Format();
+				std::fprintf(stderr, " dst%d={reg=%d,n=%d,fmt=%u,off=%u}", ai, vs_input.resources_dst[idx].register_start,
+				             vs_input.resources_dst[idx].registers_num, fmt, b.attr_offsets[ai]);
+			}
+			std::fprintf(stderr, "\n");
+			const auto* base = reinterpret_cast<const float*>(static_cast<uintptr_t>(b.addr));
+			for (uint32_t v = 0; v < vert_n; v++)
+			{
+				const float* f = base + static_cast<size_t>(v) * floats_per;
+				std::fprintf(stderr, "KYTY_DUMP_DRAW_VERT[%u]", v);
+				for (uint32_t i = 0; i < floats_per && i < 16u; i++)
+				{
+					std::fprintf(stderr, " %g", static_cast<double>(f[i]));
+				}
+				std::fprintf(stderr, "\n");
+			}
+		}
+	}
+}
+
+// Opt-in: KYTY_DUMP_RT=WxH remembers matching color targets; paired VideoOut
+// frame dumps call GraphicsDumpRememberedRts (avoid per-draw readback stalls).
+static void MaybeDumpColorTargets(GraphicContext* ctx, const RenderColorInfo& color)
+{
+	static const char* spec = std::getenv("KYTY_DUMP_RT");
+	if (spec == nullptr || spec[0] == '\0' || ctx == nullptr)
+	{
+		return;
+	}
+	uint32_t want_w = 0;
+	uint32_t want_h = 0;
+	if (std::sscanf(spec, "%ux%u", &want_w, &want_h) != 2 || want_w == 0 || want_h == 0)
+	{
+		return;
+	}
+	for (uint32_t slot = 0; slot < color.targets_num; slot++)
+	{
+		VulkanImage* img = color.vulkan_buffer[slot];
+		if (img == nullptr || img->extent.width != want_w || img->extent.height != want_h)
+		{
+			continue;
+		}
+		RememberDumpRt(img);
+	}
+}
 
 class CommandPool
 {
@@ -2005,7 +2216,12 @@ static void get_input_format(const ShaderBufferResource& res, VkFormat* format, 
 	if (ps5)
 	{
 		auto fmt = res.Format();
-		if (fmt == 74)
+		if (fmt == 22)
+		{
+			// Gfx10 unified 22 → (dfmt=4,nfmt=7) = 32_FLOAT (TileTextureInfo_2_4_7 / R32F).
+			*format = VK_FORMAT_R32_SFLOAT;
+			*size   = 1;
+		} else if (fmt == 74)
 		{
 			*format = VK_FORMAT_R32G32B32_SFLOAT;
 			*size   = 3;
@@ -2032,6 +2248,7 @@ static void get_input_format(const ShaderBufferResource& res, VkFormat* format, 
 			*format = VK_FORMAT_UNDEFINED;
 			*size   = 4;
 		}
+		EXIT_IF(ShaderGen5VertexInputComponentCount(fmt) != *size);
 	} else
 	{
 		auto nfmt = res.Nfmt();
@@ -4114,15 +4331,16 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 	TileSizeAlign htile_size {};
 	TileSizeAlign depth_size {};
 
-	bool       neo        = Config::IsNeo();
-	bool       ps5        = Config::IsNextGen();
-	bool       htile      = z.z_info.tile_surface_enable;
-	bool       decompress = htile && (rc.depth_compress_disable || rc.stencil_compress_disable);
-	const auto usage      = State::ResolveDepthStencilUsage(z, rc, dc);
+	bool       neo               = Config::IsNeo();
+	bool       ps5               = Config::IsNextGen();
+	bool       htile             = z.z_info.tile_surface_enable;
+	bool       decompress        = htile && (rc.depth_compress_disable || rc.stencil_compress_disable);
+	const auto usage             = State::ResolveDepthStencilUsage(z, rc, dc);
+	const uint32_t effective_stencil = State::ResolveEffectiveStencilFormat(z);
 
 	if (usage.target_active)
 	{
-		switch (z.z_info.format * 2 + z.stencil_info.format)
+		switch (z.z_info.format * 2 + effective_stencil)
 		{
 			case 0: r->format = VK_FORMAT_UNDEFINED; break;
 			case 1: /*r->format = VK_FORMAT_S8_UINT*/ EXIT("Unsupported format: VK_FORMAT_S8_UINT\n"); break;
@@ -4130,7 +4348,7 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 			case 3: r->format = VK_FORMAT_D24_UNORM_S8_UINT; break;
 			case 6: r->format = VK_FORMAT_D32_SFLOAT; break;
 			case 7: r->format = VK_FORMAT_D32_SFLOAT_S8_UINT; break;
-			default: EXIT("unknown z and stencil format: %u, %u\n", z.z_info.format, z.stencil_info.format);
+			default: EXIT("unknown z and stencil format: %u, %u\n", z.z_info.format, effective_stencil);
 		}
 	}
 
@@ -4138,7 +4356,7 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 	{
 		if (ps5)
 		{
-			bool size_found = TileGetDepthSize(z.size.x_max + 1, z.size.y_max + 1, 0, z.z_info.format, z.stencil_info.format, htile, true,
+			bool size_found = TileGetDepthSize(z.size.x_max + 1, z.size.y_max + 1, 0, z.z_info.format, effective_stencil, htile, true,
 			                                   true, &stencil_size, &htile_size, &depth_size);
 			EXIT_NOT_IMPLEMENTED(!size_found);
 		} else
@@ -4154,7 +4372,7 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 				size = (z.slice_div64_minus1 + 1) * 64 * 2;
 			}
 
-			if (!TileGetDepthSize(z.width, z.height, pitch, z.z_info.format, z.stencil_info.format, htile, neo, false, &stencil_size,
+			if (!TileGetDepthSize(z.width, z.height, pitch, z.z_info.format, effective_stencil, htile, neo, false, &stencil_size,
 			                      &htile_size, &depth_size))
 			{
 				depth_size.size  = size;
@@ -4227,7 +4445,7 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 
 	if (r->format != VK_FORMAT_UNDEFINED)
 	{
-		bool sampled = ((z.stencil_info.format == 0 && z.z_info.tile_mode_index != 0) || z.stencil_info.texture_compatible_stencil);
+		bool sampled = ((effective_stencil == 0 && z.z_info.tile_mode_index != 0) || z.stencil_info.texture_compatible_stencil);
 
 		DepthStencilBufferObject vulkan_buffer_info(r->format, r->width, r->height, htile, neo, sampled, r->htile_buffer_vaddr,
 		                                            r->htile_buffer_size);
@@ -4742,7 +4960,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		EXIT_NOT_IMPLEMENTED((gen5 ? r.Base40() : r.Base38()) == 0);
 		EXIT_NOT_IMPLEMENTED(r.MinLod() != 0);
 		EXIT_NOT_IMPLEMENTED(r.Type() != 8 && r.Type() != 9);
-		EXIT_NOT_IMPLEMENTED(r.Depth() != 0);
+		// Gen5 2D resources encode pitch in word4[13:0]; Depth() overlaps those bits.
+		if (!gen5)
+		{
+			EXIT_NOT_IMPLEMENTED(r.Depth() != 0);
+		}
 
 		bool read_only = (gen5 ? false : (r.MemoryType() == 0x10));
 
@@ -4781,7 +5003,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			pitch = (width + 127u) & ~127u;
 		} else
 		{
-			pitch = ShaderGen5LinearTexturePitch(width, r.Format());
+			// Prefer descriptor pitch (256-bit RSRC word4) over width alone.
+			pitch = ShaderGen5ResolveLinearPitch(width, r.Format(), r.Type(), r.fields[4]);
 		}
 		auto          base_level = r.BaseLevel();
 		auto          levels     = r.LastLevel() + 1;
@@ -4807,7 +5030,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		// Opt-in catalog (KYTY_SAMPLE_BIND_CATALOG=/abs/path): unique sample binds
 		// for residual investigation. No guest-visible side effects when unset.
-		const auto catalog_sample = [gen5, fmt, tile, width, height, addr](const char* path) {
+		const auto catalog_sample = [gen5, fmt, tile, width, height, pitch, addr, &r](const char* path) {
 			static const char* catalog_path = std::getenv("KYTY_SAMPLE_BIND_CATALOG");
 			if (catalog_path == nullptr || catalog_path[0] == '\0' || !gen5)
 			{
@@ -4815,9 +5038,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 			static std::mutex              catalog_mu;
 			static std::set<std::string> catalog_seen;
-			char                           line[192];
-			std::snprintf(line, sizeof(line), "fmt=%u tile=%u %ux%u path=%s addr=0x%012" PRIx64 "\n", fmt, tile, width,
-			              height, path, static_cast<uint64_t>(addr));
+			char                           line[256];
+			std::snprintf(line, sizeof(line),
+			              "fmt=%u tile=%u %ux%u pitch=%u word4=0x%08x path=%s addr=0x%012" PRIx64 "\n", fmt, tile, width, height, pitch,
+			              r.fields[4], path, static_cast<uint64_t>(addr));
 			std::lock_guard<std::mutex> lock(catalog_mu);
 			if (!catalog_seen.insert(line).second)
 			{
@@ -5139,7 +5363,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						const auto s_cover = FindStorageTexture(addr, size.size, false);
 						live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
 					}
-					const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, live_cover);
+					const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
 					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
 					                                  force_degamma, skip_guest);
 					tex = static_cast<TextureVulkanImage*>(
@@ -5598,6 +5822,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
 
+	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, index_type_and_size, true, flags);
+
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, topology);
 
@@ -5652,6 +5878,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	}
 
 	buffer->EndRenderPass();
+
+	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
 
 	InvalidateMemoryObject(color_info);
 	InvalidateMemoryObject(depth_info);
@@ -5727,6 +5955,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info);
 
+	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, 0xffffffffu, false, flags);
+
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, topology);
 
@@ -5778,6 +6008,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	}
 
 	buffer->EndRenderPass();
+
+	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
 
 	InvalidateMemoryObject(color_info);
 	InvalidateMemoryObject(depth_info);

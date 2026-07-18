@@ -732,15 +732,34 @@ TEST(EmulatorGraphicsState, Gen5SampleGuestUploadNeverWriteBackStorage)
 }
 
 // Tiled guest upload under a live color surface is forbidden (GPU-owned guest).
+// Tile 27 + RGBA8 (ufmt 56) is kRenderTarget layout: never detile from guest
+// (period-16 bands). BC1 (133) package data may detile when uncovered.
 TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledRejectsCoveredTile27)
 {
 	using namespace Kyty::Libs::Graphics;
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, true));
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, true));
-	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, false));
+	// Overload defaults ufmt=56: tile 27 RGBA8 must not detile even when uncovered.
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, false));
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, false));
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(0u, true));
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(0u, false));
+}
+
+TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledTile27ByFormat)
+{
+	using namespace Kyty::Libs::Graphics;
+	// RT-class samples: never guest-detile kRenderTarget layout.
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 56u, false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 71u, false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 56u, true));
+	// BC1 package textures may detile when no live surface covers the range.
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, 133u, false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 133u, true));
+	// Tile 9 package RGBA8 when uncovered only.
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, 56u, false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 56u, true));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 133u, false));
 }
 
 // Hash refresh stays enabled so late package loads still upload; SSBO clobber
@@ -1481,6 +1500,8 @@ TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
 	// Third arg is "live RT alias found" (Equals, or non-exact Contains /
 	// IsContainedWithin from FindRenderTexture).
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, true), Gen5SampleBacking::ExactRenderTarget);
+	// 56+27 without RT: still GuestMemoryTexture object, but upload is skip_guest
+	// (see Gen5SampleBackingAndUploadPolicyAreConsistent).
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(14, 27, false), Gen5SampleBacking::Unsupported);
 	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, false), Gen5SampleBacking::Unsupported);
@@ -1490,6 +1511,32 @@ TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 0, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 9, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(133, 9, false), Gen5SampleBacking::Unsupported);
+}
+
+// ResolveGen5SampleBacking and Gen5SampleMayGuestUploadTiled share one contract:
+// tile27+56 may create a Texture object without ever CPU-detiling guest pages.
+TEST(EmulatorGraphicsState, Gen5SampleBackingAndUploadPolicyAreConsistent)
+{
+	using namespace Kyty::Libs::Graphics;
+	using namespace Kyty::Libs::Graphics::State;
+
+	// RGBA8 kRenderTarget sample without live alias: Texture object + skip_guest.
+	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 56u, false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 56u, true));
+
+	// RGBA16F kRenderTarget without live alias: no Texture object (must find RT).
+	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, false), Gen5SampleBacking::Unsupported);
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 71u, false));
+
+	// BC1 package may detile when uncovered; never under a live surface.
+	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, 133u, false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 133u, true));
+
+	// With live RT alias, Resolve prefers ExactRenderTarget; upload never detiles.
+	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, true), Gen5SampleBacking::ExactRenderTarget);
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 56u, true));
 }
 
 TEST(EmulatorGraphicsState, ResolvesObservedSamplerClampModes)

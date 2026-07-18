@@ -1349,6 +1349,38 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint32_t flags)
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
+	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+	{
+		static uint32_t auto_logs = 0;
+		if (auto_logs < 48u)
+		{
+			++auto_logs;
+			std::fprintf(stderr,
+			             "KYTY_DUMP_DRAW_AUTO count=%u flags=0x%x index_base=0x%012" PRIx64 " index_buf_size=%u index_type=%u",
+			             index_count, flags, m_index_base_addr, m_index_buffer_size, m_index_type_and_size);
+			if (m_index_base_addr != 0 && index_count > 0 && index_count <= 64)
+			{
+				std::fprintf(stderr, " idx=");
+				if (m_index_type_and_size == 0)
+				{
+					const auto* idx = reinterpret_cast<const uint16_t*>(static_cast<uintptr_t>(m_index_base_addr));
+					for (uint32_t i = 0; i < index_count; i++)
+					{
+						std::fprintf(stderr, "%s%u", (i ? "," : ""), static_cast<unsigned>(idx[i]));
+					}
+				} else if (m_index_type_and_size == 1)
+				{
+					const auto* idx = reinterpret_cast<const uint32_t*>(static_cast<uintptr_t>(m_index_base_addr));
+					for (uint32_t i = 0; i < index_count; i++)
+					{
+						std::fprintf(stderr, "%s%u", (i ? "," : ""), idx[i]);
+					}
+				}
+			}
+			std::fprintf(stderr, "\n");
+		}
+	}
+
 	GraphicsRenderDrawIndexAuto(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, flags);
 }
 

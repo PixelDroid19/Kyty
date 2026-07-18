@@ -116,14 +116,40 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 // Tiled guest upload (tile 27/9) is only valid for CPU-backed package data.
 // When a live color surface covers the sample range but is not bindable (wrong
 // format/extent/size), guest memory is still GPU-owned: detiling it yields
-// period-16 horizontal bands (Dead Cells 642x362 tile27 path=guest under RT).
+// period-16 horizontal bands (GBuffer-class 642x362 / 800x300 tile27 samples).
+//
+// Tile 27 is kRenderTarget layout. Catalog evidence: fmt 56/71 samples on tile 27
+// are GPU intermediates (also appear as path=rt); CPU detile of those pages is
+// always wrong even when FindRenderTexture misses on the first bind. BC1 (ufmt
+// 133) package textures may still detile from guest when uncovered.
+// Tile 9 (kStandard64KB) remains package-RGBA8 when uncovered.
+[[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, uint32_t ufmt,
+                                                        bool live_color_surface_covers)
+{
+	if (tile == 0u)
+	{
+		return true; // linear always may upload guest
+	}
+	if (live_color_surface_covers)
+	{
+		return false;
+	}
+	if (tile == 27u)
+	{
+		// Only BC1 package data may detile kRenderTarget layout from guest.
+		return ufmt == 133u;
+	}
+	if (tile == 9u)
+	{
+		return ufmt == 56u;
+	}
+	return true;
+}
+
+// Back-compat overload used by older call sites/tests: treat as RGBA8 (ufmt 56).
 [[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, bool live_color_surface_covers)
 {
-	if (tile != 27u && tile != 9u)
-	{
-		return true; // linear tile 0 always may upload guest
-	}
-	return !live_color_surface_covers;
+	return Gen5SampleMayGuestUploadTiled(tile, 56u, live_color_surface_covers);
 }
 
 // Hash-driven Texture refresh is allowed for PS4 and Gen5. Gen5 must still
@@ -527,6 +553,9 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_
                    uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image, uint64_t src_layout);
+// Opt-in RGBA8 BMP dump for RT vs VideoOut localization (scratch paths only).
+// Returns false if skipped (wrong format/size, already dumped, or env unset).
+bool UtilDumpVulkanImageRgba8Bmp(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag);
 void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t size);
 void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image);
 void UtilSetImageLayoutOptimal(VulkanImage* image);

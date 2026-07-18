@@ -46,9 +46,12 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <ctime>
+#include <set>
 #include <string>
+#include <vector>
 #include <system_error>
 #include <vector>
 
@@ -3217,6 +3220,65 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	EXIT_IF(blt_src_image == nullptr);
 	EXIT_IF(blt_dst_image == nullptr);
 
+	// Opt-in VideoOut dump: KYTY_DUMP_VIDEOOUT=1 writes present sources at key frames.
+	// Dedup by frame (same Vulkan image is reused across presents).
+	if (NativeCaptureEnvEnabled("KYTY_DUMP_VIDEOOUT") && g_window_ctx->game != nullptr)
+	{
+		const int frame = g_window_ctx->game->m_frame_num;
+		if (frame == 32 || frame == 200 || frame == 400 || frame == 480 || frame == 507 || frame == 540 || frame == 560)
+		{
+			char prefix[128];
+			std::snprintf(prefix, sizeof(prefix), "/tmp/kyty-dump-videoout-f%d", frame);
+			// Bypass unique-id dedup by using frame-specific prefix paths via direct readback.
+			const uint32_t w = blt_src_image->extent.width;
+			const uint32_t h = blt_src_image->extent.height;
+			if (w > 0 && h > 0 && w <= 8192 && h <= 8192 &&
+			    (blt_src_image->format == VK_FORMAT_R8G8B8A8_SRGB || blt_src_image->format == VK_FORMAT_R8G8B8A8_UNORM ||
+			     blt_src_image->format == VK_FORMAT_B8G8R8A8_SRGB || blt_src_image->format == VK_FORMAT_B8G8R8A8_UNORM))
+			{
+				static std::set<int> dumped_frames;
+				if (dumped_frames.insert(frame).second)
+				{
+					const uint64_t       bytes = static_cast<uint64_t>(w) * h * 4u;
+					std::vector<uint8_t> pixels(static_cast<size_t>(bytes));
+					UtilFillBuffer(&g_window_ctx->graphic_ctx, pixels.data(), bytes, w, blt_src_image,
+					               static_cast<uint64_t>(blt_src_image->layout));
+					char path[192];
+					std::snprintf(path, sizeof(path), "%s-present-%ux%u.bmp", prefix, w, h);
+					FILE* f = std::fopen(path, "wb");
+					if (f != nullptr)
+					{
+						const uint32_t row_bytes = w * 4u;
+						const uint32_t dib       = 40u;
+						const uint32_t off       = 14u + dib;
+						const uint32_t file_size = off + row_bytes * h;
+						uint8_t        hdr[54] {};
+						hdr[0] = 'B';
+						hdr[1] = 'M';
+						std::memcpy(hdr + 2, &file_size, 4);
+						std::memcpy(hdr + 10, &off, 4);
+						std::memcpy(hdr + 14, &dib, 4);
+						int32_t  wi = static_cast<int32_t>(w);
+						int32_t  hi = -static_cast<int32_t>(h);
+						uint16_t planes = 1;
+						uint16_t bpp    = 32;
+						std::memcpy(hdr + 18, &wi, 4);
+						std::memcpy(hdr + 22, &hi, 4);
+						std::memcpy(hdr + 26, &planes, 2);
+						std::memcpy(hdr + 28, &bpp, 2);
+						std::fwrite(hdr, 1, 54, f);
+						std::fwrite(pixels.data(), 1, static_cast<size_t>(bytes), f);
+						std::fclose(f);
+						std::fprintf(stderr, "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
+						char rt_prefix[128];
+						std::snprintf(rt_prefix, sizeof(rt_prefix), "/tmp/kyty-dump-rt-at-f%d", frame);
+						GraphicsDumpRememberedRts(&g_window_ctx->graphic_ctx, rt_prefix);
+					}
+				}
+			}
+		}
+	}
+
 	DebugStatsRecordPresentSource(blt_src_image->extent.width, blt_src_image->extent.height, blt_dst_image->swapchain_extent.width,
 	                              blt_dst_image->swapchain_extent.height, static_cast<uint32_t>(blt_src_image->layout));
 
@@ -3418,6 +3480,18 @@ bool WindowWaitNativeCapture(uint64_t request_id, uint32_t timeout_ms, WindowNat
 		    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 		if (now_us >= deadline_us)
 		{
+			// Cancel the pending request so the present path does not keep
+			// retrying a Manual capture after the agent has given up (that
+			// stalls VideoOut when readback is slow or already wedged).
+			if (capture.manual_pending && capture.request_id == request_id)
+			{
+				capture.manual_pending = false;
+				capture.completed_id   = request_id;
+				capture.last_ok        = false;
+				capture.last_error_code = "timeout";
+				capture.last_error_message = "timed out waiting for native capture";
+				capture.result_cv.Signal();
+			}
 			out->error_code    = "timeout";
 			out->error_message = "timed out waiting for native capture";
 			return false;

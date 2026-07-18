@@ -196,19 +196,35 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 		return Gen5SampleBacking::ExactRenderTarget;
 	}
 
-	// Guest-memory upload paths:
-	// - tile 27 (kRenderTarget): RGBA8 (56) and BC1 (133)
-	// - tile 9  (kStandard64KB): RGBA8 (56) only
-	// Other combinations need a live RT/StorageTexture alias.
-	if (tile == 27u && fmt != 56u && fmt != 133u)
+	// Texture-object path (not necessarily CPU detile). Whether guest pages are
+	// detiled is decided only by Gen5SampleMayGuestUploadTiled — one behavior:
+	//
+	// tile 27 (kRenderTarget):
+	//   - ufmt 133 (BC1): GuestMemoryTexture; MayGuestUpload may detile package data
+	//   - ufmt 56 (RGBA8): GuestMemoryTexture; MayGuestUpload always false (skip_guest
+	//     transparent clear — never detile GPU intermediates)
+	//   - ufmt 71 (RGBA16F): requires live RT (Unsupported without alias)
+	// tile 9 (kStandard64KB): ufmt 56 only; MayGuestUpload when uncovered
+	//
+	// Unsupported = no Texture object and no live alias → structured EXIT.
+	if (tile == 27u)
 	{
+		if (fmt == 56u || fmt == 133u)
+		{
+			return Gen5SampleBacking::GuestMemoryTexture;
+		}
 		return Gen5SampleBacking::Unsupported;
 	}
-	if (tile == 9u && fmt != 56u)
+	if (tile == 9u)
 	{
+		if (fmt == 56u)
+		{
+			return Gen5SampleBacking::GuestMemoryTexture;
+		}
 		return Gen5SampleBacking::Unsupported;
 	}
 
+	// Linear tile 0 and other package modes: guest Texture object.
 	return Gen5SampleBacking::GuestMemoryTexture;
 }
 

@@ -27,6 +27,7 @@ struct VulkanBuffer;
 struct VulkanFramebuffer;
 struct RenderDepthInfo;
 struct RenderColorInfo;
+struct GraphicContext;
 
 class CommandBuffer
 {
@@ -96,6 +97,9 @@ void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, ui
 void GraphicsRenderMemoryFree(uint64_t vaddr, uint64_t size);
 void GraphicsRenderDeleteIndexBuffers();
 void GraphicsRenderMemoryFlush(uint64_t vaddr, uint64_t size);
+
+// Scratch: dump remembered KYTY_DUMP_RT color targets (paired with VideoOut frame dumps).
+void GraphicsDumpRememberedRts(GraphicContext* ctx, const char* path_prefix);
 
 void DeleteFramebuffer(VideoOutVulkanImage* image);
 void DeleteFramebuffer(DepthStencilVulkanImage* image);

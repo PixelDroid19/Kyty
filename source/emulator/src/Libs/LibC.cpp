@@ -275,6 +275,27 @@ static KYTY_SYSV_ABI char* c_strcpy(char* d, const char* s)
 {
 	return ::strcpy(d, s);
 }
+// Gen5 libc_v1 wide mem* — NIDs from the public Gen5 export hash (SHA1+suffix, byte-reversed).
+static KYTY_SYSV_ABI wchar_t* c_wmemchr(const wchar_t* s, wchar_t c, size_t n)
+{
+	return const_cast<wchar_t*>(::wmemchr(s, c, n));
+}
+static KYTY_SYSV_ABI int      c_wmemcmp(const wchar_t* a, const wchar_t* b, size_t n)
+{
+	return ::wmemcmp(a, b, n);
+}
+static KYTY_SYSV_ABI wchar_t* c_wmemcpy(wchar_t* d, const wchar_t* s, size_t n)
+{
+	return ::wmemcpy(d, s, n);
+}
+static KYTY_SYSV_ABI wchar_t* c_wmemmove(wchar_t* d, const wchar_t* s, size_t n)
+{
+	return ::wmemmove(d, s, n);
+}
+static KYTY_SYSV_ABI wchar_t* c_wmemset(wchar_t* s, wchar_t c, size_t n)
+{
+	return ::wmemset(s, c, n);
+}
 // Gen5 strcpy_s — NID 5Xa2ACNECdo: dest, destsz, src. Returns 0 on success.
 static KYTY_SYSV_ABI int c_strcpy_s(char* d, size_t destsz, const char* s)
 {
@@ -1143,6 +1164,10 @@ static std::uint64_t g_dummy_obj_22  = 0;
 static std::uint64_t g_dummy_obj_23  = 0;
 static std::uint64_t g_dummy_obj_24  = 0;
 static std::uint64_t g_dummy_obj_25  = 0;
+// Additional facet ids imported as Objects by eboot (linker needs stable addresses).
+static std::uint64_t g_ctype_wchar_id   = 2;
+static std::uint64_t g_collate_wchar_id = 3;
+static std::uint64_t g_num_put_char_id  = 4;
 
 // Itanium type_info vtables: guest type_info objects relocate to these. Slots
 // are no-ops so a stray virtual call does not hit INVALID_MEMORY.
@@ -1154,6 +1179,43 @@ static void* g_vmi_class_type_info_vtable[8] = {reinterpret_cast<void*>(&CxxVtab
                                                 reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
 static void* g_exception_vtable[8]           = {reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
                                                 reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
+
+// Exception / iostream RTTI Objects imported by case_dreaming_sarah eboot
+// (libc_v1). NIDs from eboot import table; names via sharpemu ps5_names + Ps5Nid.
+// Vtable slots are no-ops; type_info uses Itanium __si layout (base null for now).
+#define KYTY_CXX_NOOP_VTBL                                                                                                                 \
+	{                                                                                                                                      \
+		reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),           \
+		    reinterpret_cast<void*>(&CxxVtableNoop)                                                                                        \
+	}
+static void* g_domain_error_vtable[8]       = KYTY_CXX_NOOP_VTBL;
+static void* g_logic_error_vtable[8]        = KYTY_CXX_NOOP_VTBL;
+static void* g_out_of_range_vtable[8]       = KYTY_CXX_NOOP_VTBL;
+static void* g_runtime_error_vtable[8]      = KYTY_CXX_NOOP_VTBL;
+static void* g_invalid_argument_vtable[8]   = KYTY_CXX_NOOP_VTBL;
+static void* g_system_error_vtable[8]       = KYTY_CXX_NOOP_VTBL;
+static void* g_bad_cast_vtable[8]           = KYTY_CXX_NOOP_VTBL;
+static void* g_ios_failure_vtable[8]        = KYTY_CXX_NOOP_VTBL;
+static void* g_num_put_char_vtable[8]       = KYTY_CXX_NOOP_VTBL;
+#undef KYTY_CXX_NOOP_VTBL
+
+static const char g_ti_name_exception[]         = "St9exception";
+static const char g_ti_name_domain_error[]      = "St12domain_error";
+static const char g_ti_name_out_of_range[]      = "St12out_of_range";
+static const char g_ti_name_runtime_error[]     = "St13runtime_error";
+static const char g_ti_name_invalid_argument[]  = "St16invalid_argument";
+static const char g_ti_name_bad_cast[]          = "St8bad_cast";
+static const char g_ti_name_ios_base[]          = "St8ios_base";
+static const char g_ti_name_ios_failure[]       = "NSt8ios_base7failureE";
+
+static CxxSiTypeInfoLayout g_typeinfo_exception {g_si_class_type_info_vtable, g_ti_name_exception, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_domain_error {g_si_class_type_info_vtable, g_ti_name_domain_error, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_out_of_range {g_si_class_type_info_vtable, g_ti_name_out_of_range, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_runtime_error {g_si_class_type_info_vtable, g_ti_name_runtime_error, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_invalid_argument {g_si_class_type_info_vtable, g_ti_name_invalid_argument, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_bad_cast {g_si_class_type_info_vtable, g_ti_name_bad_cast, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_ios_base {g_si_class_type_info_vtable, g_ti_name_ios_base, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_ios_failure {g_si_class_type_info_vtable, g_ti_name_ios_failure, nullptr};
 
 // streamoff sentinel and fpz (common libc++/MSVC objects; zero-safe).
 static std::int64_t g_bad_off = -1;
@@ -1620,6 +1682,9 @@ LIB_DEFINE(InitLibcInternal_1)
 	LibcInternalExt::InitLibcInternalExt_1(s);
 
 	LIB_OBJECT("ZT4ODD2Ts9o", &LibcInternal::g_need_flag);
+	// stdin Object triad: guest import tables list 1TDo-ImqkJc immediately before
+	// the registered stdout NID 2sWzhYqFH4E and stderr H8AprKeZtNg (libc_v1).
+	LIB_OBJECT("1TDo-ImqkJc", stdin);
 	LIB_OBJECT("2sWzhYqFH4E", stdout);
 
 	LIB_FUNC("GMpvxPFW924", LibcInternal::vprintf);
@@ -1651,42 +1716,53 @@ LIB_DEFINE(InitLibC_1)
 	LibcInternal::InitLibcInternal_1(s);
 
 	LIB_OBJECT("P330P3dFF68", &LibC::g_need_flag);
+	// stdin Object triad: same NIDs as InitLibcInternal_1 (see comment there).
+	LIB_OBJECT("1TDo-ImqkJc", stdin);
 	LIB_OBJECT("2sWzhYqFH4E", stdout);
 	LIB_OBJECT("H8AprKeZtNg", stderr);
-	LIB_OBJECT("BJCgW9-OxLA", stdin);
 
 	// C++ locale / RTTI objects — Dreaming Sarah (Qoo175Ig+-k → classic locale).
 	// dynlib: _ZSt21_sceLibcClassicLocale, ctype<char>::id, locale::id::_Id_cnt,
 	// __class_type_info / __si_class_type_info / __vmi_class_type_info vtables.
 	LIB_OBJECT("Qoo175Ig+-k", &LibC::g_sce_classic_locale);
 	LIB_OBJECT("Cv+zC4EjGMA", &LibC::g_ctype_char_id);
-	LIB_OBJECT("sBCTjFk7Gi4", &LibC::g_locale_id_2);
-	LIB_OBJECT("yLE5H3058Ao", &LibC::g_locale_id_3);
-	LIB_OBJECT("Bq8m04PN1zw", &LibC::g_locale_id_4);
-	LIB_OBJECT("bLPn1gfqSW8", &LibC::g_locale_id_5);
-	LIB_OBJECT("-L+-8F0+gBc", &LibC::g_locale_id_6);
-	LIB_OBJECT("qOD-ksTkE08", &LibC::g_locale_id_7);
 	LIB_OBJECT("H4fcpQOpc08", &LibC::g_locale_id_cnt);
+	// Facet ::id Objects — eboot imports (Ps5Nid / ps5_names).
+	LIB_OBJECT("VmqsS6auJzo", &LibC::g_ctype_wchar_id);
+	LIB_OBJECT("irGo1yaJ-vM", &LibC::g_collate_wchar_id);
+	LIB_OBJECT("E14mW8pVpoE", &LibC::g_num_put_char_id);
 	LIB_OBJECT("byV+FWlAnB4", LibC::g_class_type_info_vtable);
-	LIB_OBJECT("5BIbzIuDxTQ", LibC::g_class_type_info_vtable);
 	LIB_OBJECT("pZ9WXcClPO8", LibC::g_si_class_type_info_vtable);
-	LIB_OBJECT("oAidKrxuUv0", LibC::g_si_class_type_info_vtable);
 	LIB_OBJECT("9ByRMdo7ywg", LibC::g_vmi_class_type_info_vtable);
 	LIB_OBJECT("dCzeFfg9WWI", LibC::g_exception_vtable);
-	LIB_OBJECT("udTM6Nxx-Ng", LibC::g_exception_vtable);
-	LIB_OBJECT("tVHE+C8vGXk", LibC::g_exception_vtable);
+	// Exception / iostream RTTI Objects — eboot libc_v1 imports.
+	// Prefer typed type_info/vtable Objects over generic locale-id/dummy placeholders
+	// for the same NIDs (unit-tested domain_error layout).
+	LIB_OBJECT("5BIbzIuDxTQ", &LibC::g_typeinfo_domain_error);
+	LIB_OBJECT("n2kx+OmFUis", &LibC::g_typeinfo_exception);
+	LIB_OBJECT("dKjhNUf9FBc", &LibC::g_typeinfo_out_of_range);
+	LIB_OBJECT("bLPn1gfqSW8", &LibC::g_typeinfo_runtime_error);
+	LIB_OBJECT("XZzWt0ygWdw", &LibC::g_typeinfo_invalid_argument);
+	LIB_OBJECT("qOD-ksTkE08", &LibC::g_typeinfo_bad_cast);
+	LIB_OBJECT("BJCgW9-OxLA", &LibC::g_typeinfo_ios_base);
+	LIB_OBJECT("sBCTjFk7Gi4", &LibC::g_typeinfo_ios_failure);
+	LIB_OBJECT("oAidKrxuUv0", LibC::g_domain_error_vtable);
+	LIB_OBJECT("udTM6Nxx-Ng", LibC::g_logic_error_vtable);
+	LIB_OBJECT("n+aUKkC-3sI", LibC::g_out_of_range_vtable);
+	LIB_OBJECT("-L+-8F0+gBc", LibC::g_runtime_error_vtable);
+	LIB_OBJECT("keXoyW-rV-0", LibC::g_invalid_argument_vtable);
+	LIB_OBJECT("Bq8m04PN1zw", LibC::g_system_error_vtable);
+	LIB_OBJECT("tVHE+C8vGXk", LibC::g_bad_cast_vtable);
+	LIB_OBJECT("yLE5H3058Ao", LibC::g_ios_failure_vtable);
+	LIB_OBJECT("1kZFcktOm+s", LibC::g_num_put_char_vtable);
 	LIB_OBJECT("FQ9NFbBHb5Y", &LibC::g_bad_off);
 	LIB_OBJECT("wiR+rIcbnlc", LibC::g_fpz);
-	LIB_OBJECT("XZzWt0ygWdw", &LibC::g_dummy_obj_1);
-	LIB_OBJECT("keXoyW-rV-0", &LibC::g_dummy_obj_2);
-	LIB_OBJECT("dKjhNUf9FBc", &LibC::g_dummy_obj_3);
-	LIB_OBJECT("n+aUKkC-3sI", &LibC::g_dummy_obj_4);
+	// HEAD-only unresolved Object placeholders (NIDs that do not collide with RTTI above).
 	LIB_OBJECT("MpxhMh8QFro", &LibC::g_dummy_obj_5);
 	LIB_OBJECT("NU-T4QowTNA", &LibC::g_dummy_obj_6);
-	LIB_OBJECT("E14mW8pVpoE", &LibC::g_dummy_obj_7);
-	LIB_OBJECT("1kZFcktOm+s", &LibC::g_dummy_obj_8);
 	LIB_OBJECT("DbEnA+MnVIw", &LibC::g_dummy_obj_9);
 	LIB_OBJECT("fL3O02ypZFE", &LibC::g_dummy_obj_10);
+	// HEAD: Gen5 TLS resolver (do not remap this NID to wmemcmp).
 	LIB_FUNC("QJ5xVfKkni0", LibC::c_tls_get_addr);
 	LIB_OBJECT("9rMML086SEE", &LibC::g_dummy_obj_12);
 	LIB_OBJECT("QxqK-IdpumU", &LibC::g_dummy_obj_13);
@@ -1695,10 +1771,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("stv1S3BKfgw", &LibC::g_dummy_obj_16);
 	LIB_OBJECT("2wz4rthdiy8", &LibC::g_dummy_obj_17);
 	LIB_OBJECT("UWyL6KoR96U", &LibC::g_dummy_obj_18);
-	LIB_OBJECT("VmqsS6auJzo", &LibC::g_dummy_obj_19);
-	LIB_OBJECT("irGo1yaJ-vM", &LibC::g_dummy_obj_20);
 	LIB_OBJECT("HUbZmOnT-Dg", &LibC::g_dummy_obj_21);
-	LIB_OBJECT("n2kx+OmFUis", &LibC::g_dummy_obj_22);
 	LIB_OBJECT("Y6Sl4Xw7gfA", &LibC::g_dummy_obj_23);
 	LIB_OBJECT("apPZ6HKZWaQ", &LibC::g_dummy_obj_24);
 	LIB_OBJECT("BgZcGDh7o9g", &LibC::g_dummy_obj_25);
@@ -1777,6 +1850,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("+P6FRGH4LfA", LibC::c_memmove);
 	LIB_FUNC("8u8lPzUEq+U", LibC::c_memchr);
 	LIB_FUNC("fnUEjBCNRVU", LibC::c_memchr);
+	// Unique wide-mem HLE from bringup (NID does not collide with HEAD Objects).
+	LIB_FUNC("Al8MZJh-4hM", LibC::c_wmemset);
 	LIB_FUNC("5TjaJwkLWxE", LibC::c_bcmp);
 	LIB_FUNC("kiZSXIWd9vg", LibC::c_strcpy);
 	// Gen5 strcpy_s — NID 5Xa2ACNECdo (next hard-abort after thread stack reprotect).

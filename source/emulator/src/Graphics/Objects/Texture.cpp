@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -285,6 +286,77 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	{
 		if (tile == 0)
 		{
+			// Opt-in dump for linear Gen5 sample investigation (scratch only).
+			// KYTY_DUMP_LINEAR_SAMPLE=WxH writes one RGBA8 BMP under /tmp.
+			if (fmt == 56u && levels == 1u)
+			{
+				static const char* dump_spec = std::getenv("KYTY_DUMP_LINEAR_SAMPLE");
+				if (dump_spec != nullptr && dump_spec[0] != '\0')
+				{
+					uint32_t dw = 0;
+					uint32_t dh = 0;
+					if (std::sscanf(dump_spec, "%ux%u", &dw, &dh) == 2 && dw == width && dh == height)
+					{
+						static std::set<uint64_t> dumped_sizes;
+						const uint64_t            key = (static_cast<uint64_t>(width) << 32u) | height;
+						if (dumped_sizes.insert(key).second)
+						{
+							char out_path[128];
+							std::snprintf(out_path, sizeof(out_path), "/tmp/kyty-dump-linear-%ux%u.bmp",
+							              static_cast<unsigned>(width), static_cast<unsigned>(height));
+							char out_path_w[128];
+							std::snprintf(out_path_w, sizeof(out_path_w), "/tmp/kyty-dump-linear-%ux%u-widthpitch.bmp",
+							              static_cast<unsigned>(width), static_cast<unsigned>(height));
+							auto write_bmp = [](const char* path, const uint8_t* src, uint32_t w, uint32_t h, uint32_t src_pitch) {
+								FILE* f = std::fopen(path, "wb");
+								if (f == nullptr)
+								{
+									return;
+								}
+								const uint32_t row_bytes = w * 4u;
+								const uint32_t pad       = (4u - (row_bytes % 4u)) % 4u;
+								const uint32_t dib       = 40u;
+								const uint32_t off       = 14u + dib;
+								const uint32_t size_img  = (row_bytes + pad) * h;
+								const uint32_t file_size = off + size_img;
+								uint8_t        hdr[54] {};
+								hdr[0] = 'B';
+								hdr[1] = 'M';
+								std::memcpy(hdr + 2, &file_size, 4);
+								std::memcpy(hdr + 10, &off, 4);
+								std::memcpy(hdr + 14, &dib, 4);
+								int32_t wi = static_cast<int32_t>(w);
+								int32_t hi = -static_cast<int32_t>(h);
+								std::memcpy(hdr + 18, &wi, 4);
+								std::memcpy(hdr + 22, &hi, 4);
+								uint16_t planes = 1;
+								uint16_t bpp    = 32;
+								std::memcpy(hdr + 26, &planes, 2);
+								std::memcpy(hdr + 28, &bpp, 2);
+								std::fwrite(hdr, 1, 54, f);
+								std::vector<uint8_t> zero(pad, 0);
+								for (uint32_t y = 0; y < h; y++)
+								{
+									const uint8_t* row = src + static_cast<uint64_t>(y) * src_pitch * 4u;
+									std::fwrite(row, 1, row_bytes, f);
+									if (pad != 0)
+									{
+										std::fwrite(zero.data(), 1, pad, f);
+									}
+								}
+								std::fclose(f);
+							};
+							const auto* base = reinterpret_cast<const uint8_t*>(*vaddr);
+							write_bmp(out_path, base, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+							          static_cast<uint32_t>(pitch));
+							write_bmp(out_path_w, base, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+							          static_cast<uint32_t>(width));
+							printf("KYTY_DUMP_LINEAR_SAMPLE wrote %ux%u pitch=%u -> %s\n", static_cast<unsigned>(width),
+							       static_cast<unsigned>(height), static_cast<unsigned>(pitch), out_path);
+						}
+					}
+				}
+			}
 			UtilFillImage(ctx, vk_obj, reinterpret_cast<void*>(*vaddr), *size, regions, static_cast<uint64_t>(vk_layout));
 		} else if (tile == 27 || tile == 9)
 		{
