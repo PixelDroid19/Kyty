@@ -30,6 +30,7 @@ target_sources(emulator PRIVATE
 	src/Agent/AgentServer.cpp
 	src/Agent/AgentSubsystem.cpp
 	src/Agent/AgentLifecycle.cpp
+	src/Kernel/Time.cpp
 	src/Validation/DomainValidators.cpp
 	include/Emulator/Validation/DomainValidators.h
 	include/Emulator/Agent/EventRing.h
@@ -39,6 +40,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Agent/AgentServer.h
 	include/Emulator/Agent/AgentSubsystem.h
 	include/Emulator/Agent/AgentLifecycle.h
+	include/Emulator/Kernel/Time.h
 )
 add_dependencies(emulator KytyBuildInfo)
 

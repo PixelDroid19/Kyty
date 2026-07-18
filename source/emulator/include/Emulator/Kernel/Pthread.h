@@ -5,6 +5,7 @@
 #include "Kyty/Core/Subsystems.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/Time.h"
 
 // IWYU pragma: no_include <pthread.h>
 
@@ -33,18 +34,6 @@ struct PthreadRwlockattrPrivate;
 struct PthreadCondattrPrivate;
 struct PthreadCondPrivate;
 
-struct KernelTimespec
-{
-	int64_t tv_sec;
-	int64_t tv_nsec;
-};
-
-struct KernelTimeval
-{
-	int64_t tv_sec;
-	int64_t tv_usec;
-};
-
 using PthreadAttr       = PthreadAttrPrivate*;
 using Pthread           = PthreadPrivate*;
 using KernelCpumask     = uint64_t;
@@ -56,7 +45,6 @@ using PthreadRwlockattr = PthreadRwlockattrPrivate*;
 using KernelUseconds    = unsigned int;
 using PthreadCondattr   = PthreadCondattrPrivate*;
 using PthreadCond       = PthreadCondPrivate*;
-using KernelClockid     = int32_t;
 using PthreadKey        = int;
 
 using pthread_entry_func_t          = KYTY_SYSV_ABI void* (*)(void*);
@@ -201,15 +189,6 @@ bool PthreadGetThreadDiagnostics(PthreadThreadDiagnostics* out);
 
 // Opt-in KYTY_SLOT_TRACE dump of currently blocked CondWait guests.
 void SlotTraceDumpBlockedCondWaiters();
-
-int KYTY_SYSV_ABI      KernelClockGetres(KernelClockid clock_id, KernelTimespec* tp);
-int KYTY_SYSV_ABI      KernelClockGettime(KernelClockid clock_id, KernelTimespec* tp);
-int KYTY_SYSV_ABI      KernelGettimeofday(KernelTimeval* tp);
-uint64_t KYTY_SYSV_ABI KernelGetTscFrequency();
-uint64_t KYTY_SYSV_ABI KernelReadTsc();
-uint64_t KYTY_SYSV_ABI KernelGetProcessTime();
-uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounter();
-uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounterFrequency();
 
 } // namespace LibKernel
 

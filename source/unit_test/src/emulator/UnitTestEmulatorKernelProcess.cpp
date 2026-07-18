@@ -12,12 +12,58 @@
 #include "Emulator/Log.h"
 #include "Kyty/UnitTest.h"
 
+#include <cstdlib>
+#include <ctime>
+#include <string>
+
 UT_BEGIN(EmulatorKernelProcess);
 
 using namespace Libs;
 using namespace Libs::LibKernel::EventQueue;
 
 namespace {
+
+class ScopedUtcTimezone
+{
+public:
+	ScopedUtcTimezone()
+	{
+		const char* current = std::getenv("TZ");
+		if (current != nullptr)
+		{
+			m_had_value = true;
+			m_value     = current;
+		}
+	#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		_putenv_s("TZ", "UTC");
+		_tzset();
+	#else
+		::setenv("TZ", "UTC", 1);
+		::tzset();
+	#endif
+	}
+
+	~ScopedUtcTimezone()
+	{
+	#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		_putenv_s("TZ", m_had_value ? m_value.c_str() : "");
+		_tzset();
+	#else
+		if (m_had_value)
+		{
+			::setenv("TZ", m_value.c_str(), 1);
+		} else
+		{
+			::unsetenv("TZ");
+		}
+		::tzset();
+	#endif
+	}
+
+private:
+	bool        m_had_value = false;
+	std::string m_value;
+};
 
 void EnsureKernelProcessSubsystems()
 {
@@ -56,6 +102,43 @@ TEST(EmulatorKernelProcess, GettimeofdayAdvancesWithinOneSecond)
 	const int64_t elapsed_us = (after.tv_sec - before.tv_sec) * 1'000'000 + (after.tv_usec - before.tv_usec);
 	EXPECT_GE(elapsed_us, 1'000);
 	EXPECT_LT(elapsed_us, 100'000);
+}
+
+TEST(EmulatorKernelProcess, ConvertUtcToLocaltimeWritesUtcTimezoneOutputs)
+{
+	EnsureKernelProcessSubsystems();
+	ScopedUtcTimezone utc_timezone;
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"-o5uEDpN+oY";
+	query.library              = U"libkernel";
+	query.library_version      = 1;
+	query.module               = U"libkernel";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* rec            = symbols.Find(query);
+	ASSERT_NE(rec, nullptr);
+
+	using convert_utc_to_localtime_fn_t = int (*)(int64_t, int64_t*, LibKernel::KernelTimesec*, uint64_t*);
+	auto* convert_utc_to_localtime = reinterpret_cast<convert_utc_to_localtime_fn_t>(static_cast<uintptr_t>(rec->vaddr));
+	ASSERT_NE(convert_utc_to_localtime, nullptr);
+
+	constexpr int64_t kUtcSeconds = 1234567890;
+	int64_t           local_time  = -1;
+	LibKernel::KernelTimesec timesec {-1, 0xffffffffu, 0xffffffffu};
+	uint64_t          dst_seconds = UINT64_MAX;
+
+	EXPECT_EQ(convert_utc_to_localtime(kUtcSeconds, nullptr, &timesec, &dst_seconds), LibKernel::KERNEL_ERROR_EINVAL);
+	ASSERT_EQ(convert_utc_to_localtime(kUtcSeconds, &local_time, &timesec, &dst_seconds), OK);
+	EXPECT_EQ(local_time, kUtcSeconds);
+	EXPECT_EQ(timesec.time, kUtcSeconds);
+	EXPECT_EQ(timesec.offset_seconds, 0u);
+	EXPECT_EQ(timesec.dst_seconds, 0u);
+	EXPECT_EQ(dst_seconds, 0u);
 }
 
 // sceKernelAddAmprEvent (bBfz7kMF2Ho): register Ampr completion interest and wake via Trigger.

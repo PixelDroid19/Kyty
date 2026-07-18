@@ -16,7 +16,6 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/RuntimeLinker.h"
 #include "Emulator/Loader/GuestCall.h"
-#include "Emulator/Loader/Timer.h"
 
 #include <atomic>
 #include <cerrno>
@@ -2851,115 +2850,6 @@ int KYTY_SYSV_ABI PthreadGetthreadid()
 	PRINT_NAME();
 
 	return Core::Thread::GetThreadIdUnique();
-}
-
-int KYTY_SYSV_ABI KernelClockGetres(KernelClockid clock_id, KernelTimespec* tp)
-{
-	PRINT_NAME();
-
-	if (tp == nullptr)
-	{
-		return KERNEL_ERROR_EFAULT;
-	}
-
-	clockid_t pclock_id = CLOCK_REALTIME;
-	switch (clock_id)
-	{
-		case 0: pclock_id = CLOCK_REALTIME; break;
-		case 4: pclock_id = CLOCK_MONOTONIC; break;
-		default: EXIT("unknown clock_id: %d", clock_id);
-	}
-
-	timespec t {};
-
-	int result = clock_getres(pclock_id, &t);
-
-	tp->tv_sec  = t.tv_sec;
-	tp->tv_nsec = t.tv_nsec;
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
-}
-
-int KYTY_SYSV_ABI KernelClockGettime(KernelClockid clock_id, KernelTimespec* tp)
-{
-	PRINT_NAME();
-
-	if (tp == nullptr)
-	{
-		return KERNEL_ERROR_EFAULT;
-	}
-
-	clockid_t pclock_id = CLOCK_REALTIME;
-	switch (clock_id)
-	{
-		case 0: pclock_id = CLOCK_REALTIME; break;
-		case 13:
-		case 4: pclock_id = CLOCK_MONOTONIC; break;
-		default: EXIT("unknown clock_id: %d", clock_id);
-	}
-
-	timespec t {};
-
-	int result = clock_gettime(pclock_id, &t);
-
-	tp->tv_sec  = t.tv_sec;
-	tp->tv_nsec = t.tv_nsec;
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
-}
-
-int KYTY_SYSV_ABI KernelGettimeofday(KernelTimeval* tp)
-{
-	PRINT_NAME();
-
-	if (tp == nullptr)
-	{
-		return KERNEL_ERROR_EFAULT;
-	}
-
-	timespec t {};
-	int      result = clock_gettime(CLOCK_REALTIME, &t);
-	tp->tv_sec       = t.tv_sec;
-	tp->tv_usec      = t.tv_nsec / 1000;
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
-}
-
-uint64_t KYTY_SYSV_ABI KernelGetTscFrequency()
-{
-	return Core::Timer::QueryPerformanceFrequency();
-}
-
-uint64_t KYTY_SYSV_ABI KernelReadTsc()
-{
-	return Core::Timer::QueryPerformanceCounter();
-}
-
-uint64_t KYTY_SYSV_ABI KernelGetProcessTime()
-{
-	return static_cast<uint64_t>(Loader::Timer::GetTimeMs() * 1000.0);
-}
-
-uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounter()
-{
-	return Loader::Timer::GetCounter();
-}
-
-uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounterFrequency()
-{
-	return Loader::Timer::GetFrequency();
 }
 
 void KYTY_SYSV_ABI KernelSetThreadDtors(thread_dtors_func_t dtors)

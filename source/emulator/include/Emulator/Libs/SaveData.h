@@ -70,6 +70,7 @@ struct SaveDataDirNameSearchResult
 int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id);
 int KYTY_SYSV_ABI SaveDataGetMountInfo(const SaveDataMountPoint* mount_point, SaveDataMountInfo* info);
 int KYTY_SYSV_ABI SaveDataGetEventResult(const void* event_param, void* event);
+int KYTY_SYSV_ABI SaveDataCommit(const void* commit_param);
 int KYTY_SYSV_ABI SaveDataDeleteTransactionResource(int32_t resource, const SaveDataMountPoint* mount_point);
 int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, SaveDataDirNameSearchResult* result);
 

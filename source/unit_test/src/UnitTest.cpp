@@ -29,6 +29,7 @@ UT_LINK(EmulatorSaveData);
 UT_LINK(EmulatorAudio);
 UT_LINK(EmulatorPad);
 UT_LINK(EmulatorLoaderTls);
+UT_LINK(EmulatorModuleLoad);
 UT_LINK(EmulatorApplicationHeap);
 UT_LINK(AgentTools);
 

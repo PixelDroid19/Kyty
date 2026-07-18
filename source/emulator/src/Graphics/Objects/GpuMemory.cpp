@@ -1890,6 +1890,7 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool un
 	{
 		switch (obj.relation)
 		{
+			case OverlapType::Equals:
 			case OverlapType::IsContainedWithin:
 			case OverlapType::Crosses: destructors.Add(Free(heap_id, obj.object_id)); break;
 			default: GpuMemoryDbgDump(); EXIT("unknown obj.relation: %s\n", Core::EnumName(obj.relation).C_Str());

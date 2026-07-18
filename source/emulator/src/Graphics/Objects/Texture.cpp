@@ -68,6 +68,10 @@ VkFormat TextureResolveSampledVkFormat(uint8_t dfmt, uint8_t nfmt, uint16_t fmt,
 	} else
 	{
 		// Gen5 unified image formats (UfmtGFX10).
+		if (fmt == 13)
+		{
+			return VK_FORMAT_R16_SFLOAT;
+		}
 		if (fmt == 14)
 		{
 			return VK_FORMAT_R8G8_UNORM;
@@ -202,7 +206,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	// alias: never detile guest (period-16 bands). Transparent black clear.
 	if (skip_guest)
 	{
-		const uint32_t bpp   = (fmt == 71u ? 8u : (fmt == 14u ? 2u : (fmt == 133u ? 8u : 4u)));
+		const uint32_t bpp   = (fmt != 0u ? ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt)) : 4u);
 		const uint64_t bytes = static_cast<uint64_t>(width) * height * bpp;
 		EXIT_NOT_IMPLEMENTED(bytes == 0u);
 		std::vector<uint8_t> zeros(static_cast<size_t>(bytes), 0);
