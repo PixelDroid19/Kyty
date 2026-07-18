@@ -26,14 +26,6 @@ KYTY_SUBSYSTEM_DEFINE(Graphics);
 
 void GraphicsDbgDumpDcb(const char* type, uint32_t num_dw, uint32_t* cmd_buffer);
 
-// Publish guest fence memory from submitted PM4 streams (ReleaseMem data_sel
-// 1/2 and WriteData memory destinations) before the sequential CP runs.
-// The software ring processes one batch at a time and WaitRegMem blocks that
-// worker; without submit-time fence publish, a later batch that owns the
-// ReleaseMem/WriteData producer never runs and WaitRegMem sees val=0 forever.
-// Returns how many guest stores were performed (for tests).
-uint32_t GraphicsPm4PublishFenceProducers(const uint32_t* data, uint32_t num_dw);
-
 namespace Gen4 {
 
 int KYTY_SYSV_ABI      GraphicsSetVsShader(uint32_t* cmd, uint64_t size, const uint32_t* vs_regs, uint32_t shader_modifier);
