@@ -8,6 +8,12 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Profiler.h"
 
+#include <cstdio>
+#include <cstring>
+#include <set>
+#include <string>
+#include <vector>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -448,6 +454,95 @@ void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t
 	VulkanUnmapMemory(ctx, &staging_buffer.memory);
 
 	VulkanDeleteBuffer(ctx, &staging_buffer);
+}
+
+bool UtilDumpVulkanImageRgba8Bmp(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag)
+{
+	if (ctx == nullptr || image == nullptr || image->image == nullptr || path_prefix == nullptr || path_prefix[0] == '\0')
+	{
+		return false;
+	}
+	if (image->format != VK_FORMAT_R8G8B8A8_SRGB && image->format != VK_FORMAT_R8G8B8A8_UNORM &&
+	    image->format != VK_FORMAT_B8G8R8A8_SRGB && image->format != VK_FORMAT_B8G8R8A8_UNORM)
+	{
+		return false;
+	}
+	const uint32_t w = image->extent.width;
+	const uint32_t h = image->extent.height;
+	if (w == 0 || h == 0 || w > 8192 || h > 8192)
+	{
+		return false;
+	}
+	static std::set<std::string> dumped;
+	char                         key_buf[320];
+	std::snprintf(key_buf, sizeof(key_buf), "%s|%llu|%ux%u", path_prefix,
+	              static_cast<unsigned long long>(image->memory.unique_id), w, h);
+	if (!dumped.insert(key_buf).second || dumped.size() > 64u)
+	{
+		return false;
+	}
+
+	const uint64_t       bytes = static_cast<uint64_t>(w) * h * 4u;
+	std::vector<uint8_t> pixels(static_cast<size_t>(bytes));
+	UtilFillBuffer(ctx, pixels.data(), bytes, w, image, static_cast<uint64_t>(image->layout));
+
+	char path[256];
+	std::snprintf(path, sizeof(path), "%s-%s-%ux%u-id%llu.bmp", path_prefix, (tag != nullptr ? tag : "img"), w, h,
+	              static_cast<unsigned long long>(image->memory.unique_id));
+
+	FILE* f = std::fopen(path, "wb");
+	if (f == nullptr)
+	{
+		return false;
+	}
+	const uint32_t row_bytes = w * 4u;
+	const uint32_t pad       = (4u - (row_bytes % 4u)) % 4u;
+	const uint32_t dib       = 40u;
+	const uint32_t off       = 14u + dib;
+	const uint32_t size_img  = (row_bytes + pad) * h;
+	const uint32_t file_size = off + size_img;
+	uint8_t        hdr[54] {};
+	hdr[0] = 'B';
+	hdr[1] = 'M';
+	std::memcpy(hdr + 2, &file_size, 4);
+	std::memcpy(hdr + 10, &off, 4);
+	std::memcpy(hdr + 14, &dib, 4);
+	int32_t  wi     = static_cast<int32_t>(w);
+	int32_t  hi     = -static_cast<int32_t>(h);
+	uint16_t planes = 1;
+	uint16_t bpp    = 32;
+	std::memcpy(hdr + 18, &wi, 4);
+	std::memcpy(hdr + 22, &hi, 4);
+	std::memcpy(hdr + 26, &planes, 2);
+	std::memcpy(hdr + 28, &bpp, 2);
+	std::fwrite(hdr, 1, 54, f);
+	std::vector<uint8_t> zero(pad, 0);
+	const bool           swap_rb =
+	    (image->format == VK_FORMAT_B8G8R8A8_SRGB || image->format == VK_FORMAT_B8G8R8A8_UNORM);
+	for (uint32_t y = 0; y < h; y++)
+	{
+		const uint8_t* row = pixels.data() + static_cast<uint64_t>(y) * row_bytes;
+		if (!swap_rb)
+		{
+			std::fwrite(row, 1, row_bytes, f);
+		} else
+		{
+			for (uint32_t x = 0; x < w; x++)
+			{
+				const uint8_t* px     = row + x * 4u;
+				const uint8_t  out[4] = {px[2], px[1], px[0], px[3]};
+				std::fwrite(out, 1, 4, f);
+			}
+		}
+		if (pad != 0)
+		{
+			std::fwrite(zero.data(), 1, pad, f);
+		}
+	}
+	std::fclose(f);
+	std::fprintf(stderr, "KYTY_DUMP_VK_IMAGE wrote %s layout=%u fmt=%d\n", path, static_cast<unsigned>(image->layout),
+	             static_cast<int>(image->format));
+	return true;
 }
 
 void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image)

@@ -184,6 +184,7 @@ static KYTY_SYSV_ABI wchar_t* c_wmemchr(const wchar_t* s, wchar_t c, size_t n)
 {
 	return const_cast<wchar_t*>(::wmemchr(s, c, n));
 }
+static KYTY_SYSV_ABI int      c_wmemcmp(const wchar_t* a, const wchar_t* b, size_t n) { return ::wmemcmp(a, b, n); }
 static KYTY_SYSV_ABI wchar_t* c_wmemcpy(wchar_t* d, const wchar_t* s, size_t n) { return ::wmemcpy(d, s, n); }
 static KYTY_SYSV_ABI wchar_t* c_wmemmove(wchar_t* d, const wchar_t* s, size_t n) { return ::wmemmove(d, s, n); }
 static KYTY_SYSV_ABI wchar_t* c_wmemset(wchar_t* s, wchar_t c, size_t n) { return ::wmemset(s, c, n); }
@@ -735,6 +736,12 @@ static CxxLocaleLayout g_sce_classic_locale {&g_classic_locimp};
 // std::ctype<char>::id and locale::id::_Id_cnt (pre-assigned to match facets).
 static std::uint64_t g_ctype_char_id = kCxxCtypeCharId;
 static std::int32_t  g_locale_id_cnt = static_cast<std::int32_t>(kCxxCtypeCharId);
+// Additional facet ids imported as Objects by case_dreaming_sarah eboot.
+// Values are distinct from ctype<char>::id; facet tables for these are not
+// installed yet (linker only needs stable Object addresses).
+static std::uint64_t g_ctype_wchar_id = 2;
+static std::uint64_t g_collate_wchar_id = 3;
+static std::uint64_t g_num_put_char_id = 4;
 
 // Itanium type_info vtables: guest type_info objects relocate to these. Slots
 // are no-ops so a stray virtual call does not hit INVALID_MEMORY.
@@ -750,6 +757,43 @@ static void* g_vmi_class_type_info_vtable[8] = {
 static void* g_exception_vtable[8] = {
     reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
     reinterpret_cast<void*>(&CxxVtableNoop)};
+
+// Exception / iostream RTTI Objects imported by case_dreaming_sarah eboot
+// (libc_v1). NIDs from eboot import table; names via sharpemu ps5_names + Ps5Nid.
+// Vtable slots are no-ops; type_info uses Itanium __si layout (base null for now).
+#define KYTY_CXX_NOOP_VTBL                                                                                                                 \
+	{                                                                                                                                      \
+		reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),           \
+		    reinterpret_cast<void*>(&CxxVtableNoop)                                                                                        \
+	}
+static void* g_domain_error_vtable[8]       = KYTY_CXX_NOOP_VTBL;
+static void* g_logic_error_vtable[8]        = KYTY_CXX_NOOP_VTBL;
+static void* g_out_of_range_vtable[8]       = KYTY_CXX_NOOP_VTBL;
+static void* g_runtime_error_vtable[8]      = KYTY_CXX_NOOP_VTBL;
+static void* g_invalid_argument_vtable[8]   = KYTY_CXX_NOOP_VTBL;
+static void* g_system_error_vtable[8]       = KYTY_CXX_NOOP_VTBL;
+static void* g_bad_cast_vtable[8]           = KYTY_CXX_NOOP_VTBL;
+static void* g_ios_failure_vtable[8]        = KYTY_CXX_NOOP_VTBL;
+static void* g_num_put_char_vtable[8]       = KYTY_CXX_NOOP_VTBL;
+#undef KYTY_CXX_NOOP_VTBL
+
+static const char g_ti_name_exception[]         = "St9exception";
+static const char g_ti_name_domain_error[]      = "St12domain_error";
+static const char g_ti_name_out_of_range[]      = "St12out_of_range";
+static const char g_ti_name_runtime_error[]     = "St13runtime_error";
+static const char g_ti_name_invalid_argument[]  = "St16invalid_argument";
+static const char g_ti_name_bad_cast[]          = "St8bad_cast";
+static const char g_ti_name_ios_base[]          = "St8ios_base";
+static const char g_ti_name_ios_failure[]       = "NSt8ios_base7failureE";
+
+static CxxSiTypeInfoLayout g_typeinfo_exception {g_si_class_type_info_vtable, g_ti_name_exception, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_domain_error {g_si_class_type_info_vtable, g_ti_name_domain_error, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_out_of_range {g_si_class_type_info_vtable, g_ti_name_out_of_range, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_runtime_error {g_si_class_type_info_vtable, g_ti_name_runtime_error, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_invalid_argument {g_si_class_type_info_vtable, g_ti_name_invalid_argument, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_bad_cast {g_si_class_type_info_vtable, g_ti_name_bad_cast, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_ios_base {g_si_class_type_info_vtable, g_ti_name_ios_base, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_ios_failure {g_si_class_type_info_vtable, g_ti_name_ios_failure, nullptr};
 
 // streamoff sentinel and fpz (common libc++/MSVC objects; zero-safe).
 static std::int64_t g_bad_off = -1;
@@ -1219,6 +1263,9 @@ LIB_DEFINE(InitLibcInternal_1)
 	LibcInternalExt::InitLibcInternalExt_1(s);
 
 	LIB_OBJECT("ZT4ODD2Ts9o", &LibcInternal::g_need_flag);
+	// stdin Object triad: guest import tables list 1TDo-ImqkJc immediately before
+	// the registered stdout NID 2sWzhYqFH4E and stderr H8AprKeZtNg (libc_v1).
+	LIB_OBJECT("1TDo-ImqkJc", stdin);
 	LIB_OBJECT("2sWzhYqFH4E", stdout);
 	LIB_OBJECT("H8AprKeZtNg", stderr);
 
@@ -1252,6 +1299,8 @@ LIB_DEFINE(InitLibC_1)
 	LibcInternal::InitLibcInternal_1(s);
 
 	LIB_OBJECT("P330P3dFF68", &LibC::g_need_flag);
+	// stdin Object triad: same NIDs as InitLibcInternal_1 (see comment there).
+	LIB_OBJECT("1TDo-ImqkJc", stdin);
 	LIB_OBJECT("2sWzhYqFH4E", stdout);
 	LIB_OBJECT("H8AprKeZtNg", stderr);
 
@@ -1261,10 +1310,36 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("Qoo175Ig+-k", &LibC::g_sce_classic_locale);
 	LIB_OBJECT("Cv+zC4EjGMA", &LibC::g_ctype_char_id);
 	LIB_OBJECT("H4fcpQOpc08", &LibC::g_locale_id_cnt);
+	// Facet ::id Objects — eboot imports (Ps5Nid / ps5_names).
+	LIB_OBJECT("VmqsS6auJzo", &LibC::g_ctype_wchar_id);
+	LIB_OBJECT("irGo1yaJ-vM", &LibC::g_collate_wchar_id);
+	LIB_OBJECT("E14mW8pVpoE", &LibC::g_num_put_char_id);
 	LIB_OBJECT("byV+FWlAnB4", LibC::g_class_type_info_vtable);
 	LIB_OBJECT("pZ9WXcClPO8", LibC::g_si_class_type_info_vtable);
 	LIB_OBJECT("9ByRMdo7ywg", LibC::g_vmi_class_type_info_vtable);
 	LIB_OBJECT("dCzeFfg9WWI", LibC::g_exception_vtable);
+	// Exception / iostream RTTI Objects — eboot libc_v1 imports (case_dreaming_sarah).
+	// type_info: 5BIbzIuDxTQ,n2kx+OmFUis,dKjhNUf9FBc,bLPn1gfqSW8,XZzWt0ygWdw,qOD-ksTkE08,
+	//            BJCgW9-OxLA,sBCTjFk7Gi4
+	// vtables:   oAidKrxuUv0,udTM6Nxx-Ng,n+aUKkC-3sI,-L+-8F0+gBc,keXoyW-rV-0,Bq8m04PN1zw,
+	//            tVHE+C8vGXk,yLE5H3058Ao,1kZFcktOm+s
+	LIB_OBJECT("5BIbzIuDxTQ", &LibC::g_typeinfo_domain_error);
+	LIB_OBJECT("n2kx+OmFUis", &LibC::g_typeinfo_exception);
+	LIB_OBJECT("dKjhNUf9FBc", &LibC::g_typeinfo_out_of_range);
+	LIB_OBJECT("bLPn1gfqSW8", &LibC::g_typeinfo_runtime_error);
+	LIB_OBJECT("XZzWt0ygWdw", &LibC::g_typeinfo_invalid_argument);
+	LIB_OBJECT("qOD-ksTkE08", &LibC::g_typeinfo_bad_cast);
+	LIB_OBJECT("BJCgW9-OxLA", &LibC::g_typeinfo_ios_base);
+	LIB_OBJECT("sBCTjFk7Gi4", &LibC::g_typeinfo_ios_failure);
+	LIB_OBJECT("oAidKrxuUv0", LibC::g_domain_error_vtable);
+	LIB_OBJECT("udTM6Nxx-Ng", LibC::g_logic_error_vtable);
+	LIB_OBJECT("n+aUKkC-3sI", LibC::g_out_of_range_vtable);
+	LIB_OBJECT("-L+-8F0+gBc", LibC::g_runtime_error_vtable);
+	LIB_OBJECT("keXoyW-rV-0", LibC::g_invalid_argument_vtable);
+	LIB_OBJECT("Bq8m04PN1zw", LibC::g_system_error_vtable);
+	LIB_OBJECT("tVHE+C8vGXk", LibC::g_bad_cast_vtable);
+	LIB_OBJECT("yLE5H3058Ao", LibC::g_ios_failure_vtable);
+	LIB_OBJECT("1kZFcktOm+s", LibC::g_num_put_char_vtable);
 	LIB_OBJECT("FQ9NFbBHb5Y", &LibC::g_bad_off);
 	LIB_OBJECT("wiR+rIcbnlc", LibC::g_fpz);
 	LIB_FUNC("kALvdgEv5ME", LibC::c_Locksyslock);
@@ -1339,6 +1414,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("+P6FRGH4LfA", LibC::c_memmove);
 	LIB_FUNC("8u8lPzUEq+U", LibC::c_memchr);
 	LIB_FUNC("fnUEjBCNRVU", LibC::c_wmemchr);
+	// wmemcmp — QJ5xVfKkni0; strict SysV: rdi/rsi wchar*, rdx=n (captured n=2).
+	LIB_FUNC("QJ5xVfKkni0", LibC::c_wmemcmp);
 	LIB_FUNC("fL3O02ypZFE", LibC::c_wmemcpy);
 	LIB_FUNC("Al8MZJh-4hM", LibC::c_wmemset);
 	LIB_FUNC("5TjaJwkLWxE", LibC::c_bcmp);

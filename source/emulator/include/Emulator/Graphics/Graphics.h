@@ -182,10 +182,9 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirect(CommandBuffer* buf, co
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t index_size, uint8_t cache_policy);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t index_count, uint64_t modifier);
-// sceAgcDcbDrawIndexOffset (NID B+aG9DUnTKA): IT_DRAW_INDEX_OFFSET_2.
+// sceAgcDcbDrawIndexOffset (NID B+aG9DUnTKA, sharpemu/aerolib): IT_DRAW_INDEX_OFFSET_2.
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t index_offset, uint32_t index_count, uint32_t flags);
-// Dreaming Sarah (Graphics5 NID B+aG9DUnTKA): 4-arg drawIndexAuto after modifier load.
-// Observed SysV: (dcb, base_vertex=0, index_count, modifier=0x40000000).
+// Optional base-vertex auto-draw helper. Not bound to B+aG9DUnTKA (that NID is Offset).
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoWithBase(CommandBuffer* buf, uint32_t base_vertex, uint32_t index_count,
                                                          uint64_t modifier);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_count, const void* index_addr, uint64_t modifier);
