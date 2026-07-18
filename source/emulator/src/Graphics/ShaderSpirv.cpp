@@ -3327,6 +3327,27 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffset)
 	return true;
 }
 
+static constexpr uint32_t SPIRV_SCOPE_WORKGROUP          = 2;
+static constexpr uint32_t SPIRV_ACQUIRE_RELEASE          = 0x8;
+static constexpr uint32_t SPIRV_WORKGROUP_MEMORY         = 0x100;
+static constexpr uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL = SPIRV_ACQUIRE_RELEASE | SPIRV_WORKGROUP_MEMORY;
+
+KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty)
+{
+	if (spirv->GetCsInputInfo() == nullptr)
+	{
+		return false;
+	}
+
+	const auto execution_scope = spirv->GetConstantUint(SPIRV_SCOPE_WORKGROUP);
+	const auto memory_scope    = spirv->GetConstantUint(SPIRV_SCOPE_WORKGROUP);
+	const auto semantics       = spirv->GetConstantUint(SPIRV_WORKGROUP_MEMORY_ACQ_REL);
+
+	*dst_source += String8::FromPrintf("               OpControlBarrier %%%s %%%s %%%s\n", execution_scope.c_str(),
+	                                  memory_scope.c_str(), semantics.c_str());
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt0OffOffComprVmDone)
 {
 	EXIT_NOT_IMPLEMENTED(index == 0 || index + 1 >= code.GetInstructions().Size());
@@ -8242,6 +8263,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_DsAppend_VdstGds,                           ShaderInstructionType::DsAppend,            ShaderInstructionFormat::VdstGds,                        {""}},
     {Recompile_DsConsume_VdstGds,                          ShaderInstructionType::DsConsume,           ShaderInstructionFormat::VdstGds,                        {""}},
     {Recompile_DsWriteB32_VaddrVdataOffset,                ShaderInstructionType::DsWriteB32,          ShaderInstructionFormat::VaddrVdataOffset,                {""}},
+    {Recompile_SBarrier_Empty,                             ShaderInstructionType::SBarrier,             ShaderInstructionFormat::Empty,                            {""}},
 
     {Recompile_Exp_Mrt0OffOffComprVmDone,                  ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0OffOffComprVmDone,          {""}},
     {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt1OffOffComprVmDone,          {""}},
@@ -10180,6 +10202,10 @@ void Spirv::FindConstants()
 	}
 	for (const auto& inst: m_code.GetInstructions())
 	{
+		if (inst.type == ShaderInstructionType::SBarrier)
+		{
+			AddConstantUint(SPIRV_WORKGROUP_MEMORY_ACQ_REL);
+		}
 		for (int i = 0; i < inst.src_num; i++)
 		{
 			if (operand_is_constant(inst.src[i]))
