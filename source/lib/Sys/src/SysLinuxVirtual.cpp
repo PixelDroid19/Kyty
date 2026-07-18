@@ -41,6 +41,7 @@ namespace Kyty::Core {
 
 static pthread_mutex_t              g_virtual_mutex {};
 static std::map<uintptr_t, size_t>* g_allocs   = nullptr;
+static uintptr_t                    g_guest_map_cursor = 0;
 static uintptr_t                    g_shared_map_cursor = 0;
 
 struct ProtectionRange
@@ -86,6 +87,7 @@ void sys_virtual_init()
 
 	g_allocs   = new std::map<uintptr_t, size_t>;
 	g_protects = new std::map<uintptr_t, ProtectionRange>;
+	g_guest_map_cursor  = 0;
 	g_shared_map_cursor = 0;
 
 	cpuinfo_initialize();
@@ -332,6 +334,17 @@ static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, 
 
 	// Always honor the requested alignment (e.g. 2 MiB GPU heaps).
 	uintptr_t start = (prefer != 0) ? prefer : kGuestHeapLo;
+	if (prefer == 0)
+	{
+		// Shared/direct mappings publish the end of their occupied span. Reusing
+		// it avoids probing that span once per guest page during heap growth.
+		pthread_mutex_lock(&g_virtual_mutex);
+		if (g_guest_map_cursor >= kGuestHeapLo)
+		{
+			start = g_guest_map_cursor;
+		}
+		pthread_mutex_unlock(&g_virtual_mutex);
+	}
 	if (start < kGuestHeapLo || start > kGuestHeapHi - size)
 	{
 		start = kGuestHeapLo;
@@ -365,6 +378,12 @@ static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, 
 #endif
 		if (ptr != MAP_FAILED)
 		{
+			if (prefer == 0)
+			{
+				pthread_mutex_lock(&g_virtual_mutex);
+				g_guest_map_cursor = a + size;
+				pthread_mutex_unlock(&g_virtual_mutex);
+			}
 			return ptr;
 		}
 	}
@@ -771,6 +790,7 @@ static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t
 				{
 					pthread_mutex_lock(&g_virtual_mutex);
 					g_shared_map_cursor = address + size;
+					g_guest_map_cursor  = address + size;
 					pthread_mutex_unlock(&g_virtual_mutex);
 				}
 				return ptr;
@@ -959,6 +979,10 @@ bool sys_virtual_free(uint64_t address)
 		pthread_mutex_lock(&g_virtual_mutex);
 		g_allocs->erase(addr);
 		erase_protection_range(page_start, page_end);
+		if (g_guest_map_cursor > addr)
+		{
+			g_guest_map_cursor = addr;
+		}
 		pthread_mutex_unlock(&g_virtual_mutex);
 		return true;
 	}

@@ -986,7 +986,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	auto others = FindBlocks(heap_id, vaddr, size, vaddr_num);
 
-	if (!others.IsEmpty())
+	// EOP labels are command-scoped events, not reusable surface views. They may
+	// share guest fence words with active labels or storage buffers, but their
+	// Vulkan event ownership must remain independent. LabelManager keeps durable
+	// fence holes separately for write-back protection.
+	if (!others.IsEmpty() && info.type != GpuMemoryObjectType::Label)
 	{
 		int existing_id = -1;
 		if (create_existing(others, info, heap_id, &existing_id))
