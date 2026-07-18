@@ -125,6 +125,8 @@ constexpr Elf64_Word R_X86_64_GLOB_DAT  = 6;
 constexpr Elf64_Word R_X86_64_JUMP_SLOT = 7;
 constexpr Elf64_Word R_X86_64_RELATIVE  = 8;
 constexpr Elf64_Word R_X86_64_DTPMOD64  = 16;
+constexpr Elf64_Word R_X86_64_DTPOFF64  = 17;
+constexpr Elf64_Word R_X86_64_TPOFF64   = 18;
 
 constexpr uint8_t STB_LOCAL  = 0;
 constexpr uint8_t STB_GLOBAL = 1;

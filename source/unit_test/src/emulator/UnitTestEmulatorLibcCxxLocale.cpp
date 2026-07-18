@@ -7,6 +7,7 @@
 #include "Emulator/Log.h"
 
 #include <cstring>
+#include <cwchar>
 
 UT_BEGIN(EmulatorLibcCxxLocale);
 
@@ -113,6 +114,315 @@ TEST(EmulatorLibcCxxLocale, ResolvesDomainErrorTypeInfoObject)
 		ASSERT_NE(rec, nullptr) << "missing Object NID";
 		ASSERT_NE(rec->vaddr, 0u);
 	}
+}
+
+TEST(EmulatorLibcCxxLocale, Qj5xWideCompareMatchesGuestSixteenBitCodeUnits)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"QJ5xVfKkni0";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Wmemcmp16 = KYTY_SYSV_ABI int (*)(const char16_t* a, const char16_t* b, size_t count);
+	auto* fn        = reinterpret_cast<Wmemcmp16>(rec->vaddr);
+
+	const char16_t text[]   = u"||This path";
+	const char16_t match[]  = u"||This";
+	const char16_t higher[] = u"||Thjt";
+
+	EXPECT_EQ(fn(text, match, 6), 0);
+	EXPECT_LT(fn(text, higher, 5), 0);
+	EXPECT_GT(fn(higher, text, 5), 0);
+}
+
+TEST(EmulatorLibcCxxLocale, Fl3WideCopyMatchesGuestSixteenBitCodeUnits)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"fL3O02ypZFE";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Wmemcpy16 = KYTY_SYSV_ABI char16_t* (*)(char16_t* dst, const char16_t* src, size_t count);
+	auto* fn        = reinterpret_cast<Wmemcpy16>(rec->vaddr);
+
+	char16_t dst[]       = u"______";
+	const char16_t src[] = u"planet";
+
+	EXPECT_EQ(fn(dst, src, 6), dst);
+	EXPECT_EQ(std::memcmp(dst, src, sizeof(src) - sizeof(src[0])), 0);
+}
+
+TEST(EmulatorLibcCxxLocale, NineRMmReturnsClassicLocimp)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"9rMML086SEE";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using GetLocimp = KYTY_SYSV_ABI CxxLocimpLayout* (*)();
+	auto* fn        = reinterpret_cast<GetLocimp>(rec->vaddr);
+
+	CxxLocimpLayout* locimp = fn();
+	ASSERT_NE(locimp, nullptr);
+	ASSERT_NE(locimp->vtable, nullptr);
+	EXPECT_TRUE(CxxLocimpFacetLookupOk(*locimp, kCxxCtypeCharId));
+}
+
+TEST(EmulatorLibcCxxLocale, HqiInitializesTemporaryLocaleInfo)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"hqi8yMOCmG0";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using InitLocaleInfo = KYTY_SYSV_ABI void (*)(void* self, const char* name, std::uint64_t category);
+	auto* fn             = reinterpret_cast<InitLocaleInfo>(rec->vaddr);
+
+	alignas(8) std::uint8_t temp[0x40] {};
+	fn(temp, "C", 0x17);
+}
+
+TEST(EmulatorLibcCxxLocale, P6DestroysTemporaryLocaleInfo)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"p6LrHjIQMdk";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using DestroyLocaleInfo = KYTY_SYSV_ABI void (*)(void* self);
+	auto* fn                = reinterpret_cast<DestroyLocaleInfo>(rec->vaddr);
+
+	alignas(8) std::uint8_t temp[0x40] {};
+	fn(temp);
+}
+
+TEST(EmulatorLibcCxxLocale, QwRegistersLocaleFacet)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"QW2jL1J5rwY";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using RegisterFacet = KYTY_SYSV_ABI void (*)(void* self);
+	auto* fn            = reinterpret_cast<RegisterFacet>(rec->vaddr);
+
+	alignas(8) std::uint8_t facet[0x40] {};
+	fn(facet);
+}
+
+TEST(EmulatorLibcCxxLocale, QxqReturnsMultibyteConversionState)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"QxqK-IdpumU";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using GetState = KYTY_SYSV_ABI std::mbstate_t* (*)();
+	auto* fn       = reinterpret_cast<GetState>(rec->vaddr);
+
+	EXPECT_NE(fn(), nullptr);
+	EXPECT_EQ(fn(), fn());
+}
+
+TEST(EmulatorLibcCxxLocale, Zs94ReturnsWideConversionState)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"zS94yyJRSUs";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using GetState = KYTY_SYSV_ABI std::mbstate_t* (*)();
+	auto* fn       = reinterpret_cast<GetState>(rec->vaddr);
+
+	EXPECT_NE(fn(), nullptr);
+	EXPECT_EQ(fn(), fn());
+}
+
+TEST(EmulatorLibcCxxLocale, StvConvertsAsciiWideCharToMultibyte)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"stv1S3BKfgw";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Wctombx = KYTY_SYSV_ABI int (*)(char* dst, std::uint32_t ch, std::mbstate_t* state, const void* cvtvec);
+	auto* fn      = reinterpret_cast<Wctombx>(rec->vaddr);
+
+	char           out[4] {};
+	std::mbstate_t state {};
+	EXPECT_EQ(fn(out, ']', &state, nullptr), 1);
+	EXPECT_EQ(out[0], ']');
+}
+
+TEST(EmulatorLibcCxxLocale, Minus9ConvertsSingleByteToAsciiWideChar)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"-9SIhUr4Iuo";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Mbtowcx = KYTY_SYSV_ABI int (*)(std::uint16_t* dst, const char* src, size_t count, std::mbstate_t* state, const void* cvtvec);
+	auto* fn      = reinterpret_cast<Mbtowcx>(rec->vaddr);
+
+	const char     src[] = "]";
+	std::uint16_t  out   = 0;
+	std::mbstate_t state {};
+	EXPECT_EQ(fn(&out, src, 1, &state, nullptr), 1);
+	EXPECT_EQ(out, static_cast<std::uint16_t>(']'));
+}
+
+TEST(EmulatorLibcCxxLocale, ResolvesRegexErrorHelperAsFunctionOnly)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"UWyL6KoR96U";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	query.type = Loader::SymbolType::Object;
+	EXPECT_EQ(symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query)), nullptr);
 }
 
 UT_END();

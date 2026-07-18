@@ -8,6 +8,8 @@
 
 #include "Emulator/Common.h"
 
+#include <initializer_list>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Loader {
@@ -47,6 +49,7 @@ public:
 
 	void Add(const SymbolResolve& s, uint64_t vaddr);
 	void Add(const SymbolResolve& s, uint64_t vaddr, const String& dbg_name);
+	void AddAliases(SymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr, const String& dbg_name);
 
 	[[nodiscard]] const SymbolRecord* Find(const SymbolResolve& s) const;
 	// Lookup by full GenerateName key (used for export-conflict scans).

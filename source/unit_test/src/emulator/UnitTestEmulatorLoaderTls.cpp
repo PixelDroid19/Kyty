@@ -11,6 +11,7 @@
 UT_BEGIN(EmulatorLoaderTls);
 
 using Kyty::Loader::LoaderRewriteTlsGdCallRexPrefix;
+using Kyty::Loader::LoaderPatchTlsFsBaseLoads;
 
 // Captured guest encoding: three 0x66 prefixes + E8 rel32 (should be REX.W).
 // Real image had 730 sites, all targeting the TLS handler after rewrite to 64-bit.
@@ -53,6 +54,68 @@ TEST(EmulatorLoaderTls, RewritesMultipleSitesAndSkipsShortBuffers)
 	uint8_t tiny[4] = {0x66, 0x66, 0x66, 0xe8};
 	EXPECT_EQ(LoaderRewriteTlsGdCallRexPrefix(tiny, sizeof(tiny)), 0u);
 	EXPECT_EQ(LoaderRewriteTlsGdCallRexPrefix(nullptr, 64), 0u);
+}
+
+TEST(EmulatorLoaderTls, PatchesUnprefixedFsBaseLoad)
+{
+	std::vector<uint8_t> code = {
+	    0x90,
+	    0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
+	    0xcc,
+	};
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(code.data(), code.size(), 0x100000), 1u);
+	EXPECT_EQ(code[0], 0x90u);
+	EXPECT_EQ(code[1], 0xe8u);
+	EXPECT_EQ(code[6], 0x48u);
+	EXPECT_EQ(code[7], 0x89u);
+	EXPECT_EQ(code[8], 0xc0u);
+	EXPECT_EQ(code[9], 0x90u);
+	EXPECT_EQ(code[10], 0xccu);
+}
+
+TEST(EmulatorLoaderTls, PatchesPrefixedFsBaseLoadFromInstructionStart)
+{
+	std::vector<uint8_t> code = {
+	    0x90,
+	    0x66, 0x66, 0x66,
+	    0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
+	    0xcc,
+	};
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(code.data(), code.size(), 0x100000), 1u);
+	EXPECT_EQ(code[0], 0x90u);
+	EXPECT_EQ(code[1], 0xe8u);
+	EXPECT_EQ(code[6], 0x48u);
+	EXPECT_EQ(code[7], 0x89u);
+	EXPECT_EQ(code[8], 0xc0u);
+	EXPECT_EQ(code[9], 0x90u);
+	EXPECT_EQ(code[10], 0x90u);
+	EXPECT_EQ(code[11], 0x90u);
+	EXPECT_EQ(code[12], 0x90u);
+	EXPECT_EQ(code[13], 0xccu);
+}
+
+TEST(EmulatorLoaderTls, DoesNotPatchInvalidFsBaseLoadWindows)
+{
+	uint8_t short_code[8] = {0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00};
+	uint8_t valid_code[9] = {0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00};
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(short_code, sizeof(short_code), 0x100000), 0u);
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(valid_code, sizeof(valid_code), 0), 0u);
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(nullptr, 16, 0x100000), 0u);
+}
+
+TEST(EmulatorLoaderTls, CalculatesGuestTlsRelocationValues)
+{
+	using Kyty::Loader::LoaderTlsRelocationValue;
+
+	constexpr uint64_t module_id       = 7;
+	constexpr uint64_t static_tls_size = 0x1868;
+	constexpr uint64_t symbol_offset   = 0x40;
+	constexpr int64_t  addend          = 3;
+
+	EXPECT_EQ(LoaderTlsRelocationValue(16, module_id, symbol_offset, addend, static_tls_size), module_id);
+	EXPECT_EQ(LoaderTlsRelocationValue(17, module_id, symbol_offset, addend, static_tls_size), symbol_offset + addend);
+	EXPECT_EQ(LoaderTlsRelocationValue(18, module_id, symbol_offset, addend, static_tls_size),
+	          symbol_offset + addend - static_tls_size);
 }
 
 // Gen5 CRT: entry (_start) at 0x70 contains `call _init` targeting DT_INIT at 0x10.

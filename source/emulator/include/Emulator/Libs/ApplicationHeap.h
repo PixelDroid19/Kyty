@@ -45,6 +45,12 @@ void EnsureInitialized(Loader::Program* program);
 
 [[nodiscard]] bool IsInitialized();
 
+[[nodiscard]] bool HasAllocator();
+[[nodiscard]] void* Malloc(size_t size);
+bool                Free(void* ptr);
+
+void Reset();
+
 } // namespace Kyty::Libs::LibKernel::ApplicationHeap
 
 #endif // KYTY_EMU_ENABLED

@@ -49,8 +49,8 @@ struct KernelUnloadModuleOpt
 
 struct TlsInfo
 {
-	Loader::Program* program;
-	uint64_t         offset;
+	uint64_t module_id;
+	uint64_t offset;
 };
 
 struct MallocReplace
@@ -221,7 +221,8 @@ static void* KYTY_SYSV_ABI tls_get_addr(TlsInfo* info)
 
 	// EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
 
-	return Loader::RuntimeLinker::TlsGetAddr(info->program) + info->offset;
+	EXIT_IF(info == nullptr);
+	return Loader::RuntimeLinker::TlsGetAddr(info->module_id, info->offset);
 }
 
 static void* KYTY_SYSV_ABI KernelGetProcParam()

@@ -94,6 +94,7 @@ constexpr uint64_t XSAVE_CHK_GUARD   = 0xDeadBeef5533CCAAu;
 
 static uint64_t g_desired_base_addr = SYSTEM_RESERVED + CODE_BASE_OFFSET;
 static uint64_t g_invalid_memory    = 0;
+static uint64_t g_next_tls_module_id = 1;
 
 static Program* g_tls_main_program = nullptr;
 alignas(64) static uint8_t g_tls_reg_save_area[XSAVE_BUFFER_SIZE + sizeof(XSAVE_CHK_GUARD)];
@@ -414,6 +415,21 @@ static void get_dyn_libs(Elf64* elf, T* out, const char* names, Elf64_Sxword tag
 	}
 }
 
+uint64_t LoaderTlsRelocationValue(uint32_t relocation_type, uint64_t module_id, uint64_t symbol_offset, int64_t addend,
+                                  uint64_t static_tls_size)
+{
+	const uint64_t offset = symbol_offset + static_cast<uint64_t>(addend);
+
+	switch (relocation_type)
+	{
+		case R_X86_64_DTPMOD64: return module_id;
+		case R_X86_64_DTPOFF64: return offset;
+		case R_X86_64_TPOFF64: return offset - static_tls_size;
+		default: EXIT("unknown TLS relocation type: %u\n", relocation_type);
+	}
+	return 0;
+}
+
 static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -486,12 +502,22 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program)
 			ret.resolved = true;
 			break;
 		case R_X86_64_DTPMOD64:
-			ret.value    = reinterpret_cast<uint64_t>(program);
+		case R_X86_64_DTPOFF64:
+		case R_X86_64_TPOFF64:
+		{
+			uint64_t symbol_offset = 0;
+			if (symbol != 0)
+			{
+				symbol_offset = symbols[symbol].st_value;
+			}
+			EXIT_IF(program->tls.module_id == 0);
+			ret.value = LoaderTlsRelocationValue(type, program->tls.module_id, symbol_offset, addend, program->tls.static_offset);
 			ret.resolved = true;
 			ret.type     = SymbolType::TlsModule;
 			ret.bind     = BindType::Local;
 			ret.dbg_name = program->file_name;
 			break;
+		}
 		default: EXIT("unknown type: %d\n", (int)type);
 	}
 
@@ -653,6 +679,56 @@ uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size)
 	return rewritten;
 }
 
+uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handler_vaddr)
+{
+	if (code == nullptr || size < Jit::Call9::GetSize() || handler_vaddr == 0)
+	{
+		return 0;
+	}
+
+	// Replace:
+	//   [66 ...] mov rax, qword ptr fs:[0x00]
+	// with:
+	//   call <handler>
+	//   mov rax,rax
+	//   nop
+	const uint8_t tls_pattern[9] = {0x64, 0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00};
+	constexpr uint64_t max_data16_prefixes = 3;
+
+	EXIT_IF(Jit::Call9::GetSize() != sizeof(tls_pattern));
+
+	uint64_t patched = 0;
+	for (uint64_t i = 0; i + Jit::Call9::GetSize() <= size; i++)
+	{
+		uint64_t prefix_count = 0;
+		while (i + prefix_count < size && code[i + prefix_count] == 0x66)
+		{
+			prefix_count++;
+		}
+		if (prefix_count > max_data16_prefixes)
+		{
+			i += prefix_count - 1;
+			continue;
+		}
+
+		const uint64_t instruction_size = prefix_count + sizeof(tls_pattern);
+		if (i + instruction_size > size || std::memcmp(code + i + prefix_count, tls_pattern, sizeof(tls_pattern)) != 0)
+		{
+			continue;
+		}
+
+		auto* call = new (code + i) Jit::Call9;
+		call->SetFunc(handler_vaddr);
+		for (uint64_t n = Jit::Call9::GetSize(); n < instruction_size; n++)
+		{
+			code[i + n] = 0x90;
+		}
+		patched++;
+		i += instruction_size - 1;
+	}
+	return patched;
+}
+
 uint64_t LoaderPrepareThreadTlsImage(uint8_t* tls, uint64_t image_size, uint64_t template_vaddr, uint64_t program_base,
                                      uint64_t program_size, bool (*guest_read64)(uint64_t addr, uint64_t* out, void* ctx), void* guest_ctx)
 {
@@ -768,30 +844,10 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size)
 
 	if (!program->elf->IsShared() && program->tls.handler_vaddr != 0)
 	{
-		auto* start_ptr = reinterpret_cast<uint8_t*>(address);
-
-		// Replace:
-		//   mov rax, qword ptr fs:[0x00]
-		// with:
-		//   call <handler>
-		//   mov rax,rax
-		//   nop
-		// TODO() sometimes prefix 666666 is present before the FS load
-		const uint8_t tls_pattern[9] = {0x64, 0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00};
-
-		EXIT_IF(Jit::Call9::GetSize() != sizeof(tls_pattern));
-
-		auto* end_ptr = start_ptr + size - sizeof(tls_pattern);
-
-		for (auto* ptr = start_ptr; ptr < end_ptr; ptr++)
+		const uint64_t tls_sites = LoaderPatchTlsFsBaseLoads(reinterpret_cast<uint8_t*>(address), size, program->tls.handler_vaddr);
+		if (tls_sites != 0)
 		{
-			if (memcmp(ptr, tls_pattern, sizeof(tls_pattern)) == 0)
-			{
-				printf("Patch tls at addr: [%016" PRIx64 "]\n", reinterpret_cast<uint64_t>(ptr));
-
-				auto* code = new (ptr) Jit::Call9;
-				code->SetFunc(program->tls.handler_vaddr);
-			}
+			printf("Patch tls at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, tls_sites);
 		}
 	}
 }
@@ -871,6 +927,35 @@ void RuntimeLinker::DbgDump(const String& folder)
 				              "rela_table.txt");
 			}
 		}
+
+		if (p->export_symbols != nullptr)
+		{
+			p->export_symbols->DbgDump(folder_str, U"export_symbols.txt");
+		}
+		if (p->import_symbols != nullptr)
+		{
+			p->import_symbols->DbgDump(folder_str, U"import_symbols.txt");
+		}
+	}
+}
+
+void RuntimeLinker::DbgDumpSymbols(const String& folder)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+
+	Core::LockGuard lock(m_mutex);
+
+	if (m_symbols != nullptr)
+	{
+		m_symbols->DbgDump(folder.FixDirectorySlash(), U"hle_symbols.txt");
+	}
+
+	for (const auto* p: m_programs)
+	{
+		auto folder_str = folder.FixDirectorySlash();
+		folder_str += p->file_name.FilenameWithoutDirectory();
 
 		if (p->export_symbols != nullptr)
 		{
@@ -1162,8 +1247,10 @@ void RuntimeLinker::Clear()
 	}
 	m_programs.Clear();
 	delete m_symbols;
-	m_symbols   = nullptr;
-	m_relocated = false;
+	m_symbols             = nullptr;
+	m_relocated           = false;
+	g_next_tls_module_id  = 1;
+	Kyty::Libs::LibKernel::ApplicationHeap::Reset();
 }
 
 void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* program, SymbolRecord* out_info, bool* bind_self)
@@ -1531,6 +1618,32 @@ uint8_t* RuntimeLinker::TlsGetAddr(Program* program)
 	return ret;
 }
 
+uint8_t* RuntimeLinker::TlsGetAddr(uint64_t module_id, uint64_t offset)
+{
+	EXIT_IF(module_id == 0);
+
+	auto* rt = Core::Singleton<RuntimeLinker>::Instance(); // NOLINT
+	EXIT_IF(rt == nullptr);
+
+	Program* program = nullptr;
+	{
+		Core::LockGuard lock(rt->m_mutex);
+		for (auto* p: rt->m_programs)
+		{
+			if (p != nullptr && p->tls.module_id == module_id)
+			{
+				program = p;
+				break;
+			}
+		}
+	}
+
+	EXIT_IF(program == nullptr);
+	EXIT_IF(offset > program->tls.image_size);
+
+	return TlsGetAddr(program) + offset;
+}
+
 void RuntimeLinker::DeleteTls(Program* program, int thread_id)
 {
 	EXIT_IF(program == nullptr);
@@ -1668,13 +1781,17 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 
 		if (phdr[i].p_type == PT_TLS)
 		{
+			EXIT_IF(program->tls.image_vaddr != 0 || program->tls.image_size != 0 || program->tls.module_id != 0);
 			EXIT_IF(phdr[i].p_vaddr >= program->base_size);
 
 			program->tls.image_vaddr = phdr[i].p_vaddr + program->base_vaddr;
 			program->tls.image_size  = get_aligned_size(phdr + i);
+			program->tls.static_offset = program->tls.image_size;
+			program->tls.module_id     = g_next_tls_module_id++;
 
 			printf("tls addr = 0x%016" PRIx64 "\n", program->tls.image_vaddr);
 			printf("tls size   = %" PRIu64 "\n", program->tls.image_size);
+			printf("tls module = %" PRIu64 "\n", program->tls.module_id);
 		}
 
 		if (phdr[i].p_type == PT_OS_PROCPARAM)
