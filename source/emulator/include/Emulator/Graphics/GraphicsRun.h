@@ -10,8 +10,13 @@
 namespace Kyty::Libs::Graphics {
 
 class CommandProcessor;
+namespace HW {
+struct CsStageRegisters;
+}
 
 void GraphicsRunInit();
+bool GraphicsDecodeComputeResourceLimits(HW::CsStageRegisters* regs, uint32_t cmd_offset, const uint32_t* values,
+                                         uint32_t value_count);
 
 void     GraphicsRunSubmit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw);
 void     GraphicsRunSubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,

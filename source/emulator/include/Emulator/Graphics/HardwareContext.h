@@ -499,6 +499,9 @@ struct CsStageRegisters
 	uint8_t  tg_size_en     = 0;
 	uint8_t  tidig_comp_cnt = 0;
 	uint8_t  lds_size       = 0;
+	// Dispatch occupancy/scheduling state. It does not change shader semantics
+	// in the host SPIR-V backend, but must survive both PM4 register paths.
+	uint32_t resource_limits = 0;
 	// Wave-packing hints (shared VGPR count, instruction prefetch). Recorded for
 	// completeness; the GCN->SPIR-V path re-derives register allocation, so these
 	// do not affect the computed result.
@@ -506,6 +509,8 @@ struct CsStageRegisters
 	// Shader identity checksum. The shader is located by its code address, so this
 	// is recorded for identification only.
 	uint64_t chksum         = 0;
+
+	void SetResourceLimits(uint32_t value) { resource_limits = value; }
 };
 
 struct EsStageRegisters
