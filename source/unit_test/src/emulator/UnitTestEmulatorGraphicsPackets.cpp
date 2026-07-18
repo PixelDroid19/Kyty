@@ -475,6 +475,71 @@ TEST(EmulatorGraphicsPackets, StructuresBackwardSBranchAsLoopHeader)
 	EXPECT_NE(source.FindIndex("OpUnreachable", merge_label_idx), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, UsesForwardConditionalExitAsBackwardLoopMerge)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+
+	auto make_nop = [](uint32_t pc)
+	{
+		ShaderInstruction inst;
+		inst.pc                = pc;
+		inst.type              = ShaderInstructionType::SInstPrefetch;
+		inst.format            = ShaderInstructionFormat::Imm;
+		inst.src_num           = 1;
+		inst.src[0].type       = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.u = 0;
+		return inst;
+	};
+
+	auto make_branch = [](uint32_t pc, ShaderInstructionType type, int32_t imm)
+	{
+		ShaderInstruction inst;
+		inst.pc                = pc;
+		inst.type              = type;
+		inst.format            = ShaderInstructionFormat::Label;
+		inst.src_num           = 1;
+		inst.src[0].type       = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.i = imm;
+		return inst;
+	};
+
+	auto exit     = make_branch(0x08, ShaderInstructionType::SCbranchExecz, 0x08); // -> 0x14
+	auto backedge = make_branch(0x10, ShaderInstructionType::SBranch, -0x10);      // -> 0x04
+
+	ShaderInstruction end;
+	end.pc     = 0x14;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	code.GetInstructions().Add(make_nop(0x00));
+	code.GetInstructions().Add(make_nop(0x04));
+	code.GetInstructions().Add(exit);
+	code.GetInstructions().Add(make_nop(0x0c));
+	code.GetInstructions().Add(backedge);
+	code.GetInstructions().Add(end);
+	code.GetLabels().Add(ShaderLabel(exit));
+	code.GetLabels().Add(ShaderLabel(backedge));
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 1;
+	input.threads_num[1] = 1;
+	input.threads_num[2] = 1;
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+
+	EXPECT_NE(source.FindIndex("OpLoopMerge %label_0014_0008 %loop_continue_0010 None"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%loop_merge_0010 = OpLabel"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpBranchConditional %cc_b_2 %label_0014_0008 %t230_2"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorGraphicsPackets, UsesForwardSBranchBeforeTargetAsSelectionMerge)
 {
 	if (!Config::IsInitialized())
