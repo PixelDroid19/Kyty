@@ -3,6 +3,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
+#include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
@@ -538,6 +539,21 @@ TEST(EmulatorGraphicsPackets, UsesForwardConditionalExitAsBackwardLoopMerge)
 	EXPECT_NE(source.FindIndex("OpLoopMerge %label_0014_0008 %loop_continue_0010 None"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%loop_merge_0010 = OpLabel"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpBranchConditional %cc_b_2 %label_0014_0008 %t230_2"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, PreservesComputeResourceLimitsSchedulingState)
+{
+	HW::CsStageRegisters regs {};
+	const uint32_t       observed_value[] = {0x00008000};
+
+	ASSERT_TRUE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, observed_value, 1));
+
+	EXPECT_EQ(regs.resource_limits, 0x00008000u);
+	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(nullptr, Pm4::COMPUTE_RESOURCE_LIMITS, observed_value, 1));
+	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_PGM_RSRC2, observed_value, 1));
+	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, nullptr, 1));
+	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, observed_value, 0));
+	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, observed_value, 2));
 }
 
 TEST(EmulatorGraphicsPackets, UsesForwardSBranchBeforeTargetAsSelectionMerge)

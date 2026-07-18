@@ -2468,6 +2468,17 @@ static void decode_compute_pgm_rsrc2(HW::CsStageRegisters& r, uint32_t value)
 	r.lds_size       = (value >> Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_MASK;
 }
 
+bool GraphicsDecodeComputeResourceLimits(HW::CsStageRegisters* regs, uint32_t cmd_offset, const uint32_t* values, uint32_t value_count)
+{
+	if (regs == nullptr || values == nullptr || cmd_offset != Pm4::COMPUTE_RESOURCE_LIMITS || value_count != 1)
+	{
+		return false;
+	}
+
+	regs->SetResourceLimits(values[0]);
+	return true;
+}
+
 KYTY_HW_SH_PARSER(hw_sh_set_cs_shader)
 {
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC017101C);
@@ -2545,6 +2556,14 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_num_thread)
 			default: EXIT("unexpected compute thread register 0x%08" PRIx32 "\n", offset);
 		}
 	}
+
+	return reg_num;
+}
+
+KYTY_HW_SH_PARSER(hw_sh_set_cs_resource_limits)
+{
+	const auto reg_num = (cmd_id >> 16u) & 0x3fffu;
+	EXIT_NOT_IMPLEMENTED(!GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, buffer, reg_num));
 
 	return reg_num;
 }
@@ -4974,6 +4993,10 @@ static void graphics_init_jmp_tables_sh_indirect()
 	{ decode_compute_pgm_rsrc1(cp->GetShCtx()->CsRegs(), value); };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC2] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{ decode_compute_pgm_rsrc2(cp->GetShCtx()->CsRegs(), value); };
+	g_hw_sh_indirect_func[Pm4::COMPUTE_RESOURCE_LIMITS] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{
+		EXIT_NOT_IMPLEMENTED(!GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1));
+	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC3] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->CsRegs().rsrc3 = value; };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_SHADER_CHKSUM] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
@@ -5119,6 +5142,7 @@ static void graphics_init_jmp_tables()
 	g_hw_sh_func[Pm4::COMPUTE_PGM_HI]       = hw_sh_set_cs_pgm;
 	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC1]    = hw_sh_set_cs_rsrc;
 	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC2]    = hw_sh_set_cs_rsrc;
+	g_hw_sh_func[Pm4::COMPUTE_RESOURCE_LIMITS] = hw_sh_set_cs_resource_limits;
 	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC3]    = hw_sh_set_cs_rsrc;
 	g_hw_sh_func[Pm4::COMPUTE_SHADER_CHKSUM]    = hw_sh_set_cs_rsrc;
 	g_hw_sh_func[Pm4::COMPUTE_SHADER_CHKSUM_HI] = hw_sh_set_cs_rsrc;
