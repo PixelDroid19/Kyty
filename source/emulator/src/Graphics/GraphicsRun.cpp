@@ -854,12 +854,9 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 		m_cp->Reset();
 	}
 
-	// Publish fence producers before enqueue so WaitRegMem in an earlier batch
-	// can observe ReleaseMem/WriteData from a later submit without requiring the
-	// blocked ring worker to dequeue that later batch first.
-	GraphicsPm4PublishFenceProducers(cmd_draw_buffer, num_draw_dw);
-	GraphicsPm4PublishFenceProducers(cmd_const_buffer, num_const_dw);
-
+	// Submission transfers ownership to the ring but does not execute PM4.
+	// Guest-visible stores become observable only when the command processor
+	// reaches their packet, preserving semaphore reuse across queued batches.
 	CmdBatch buf {};
 	buf.draw_buffer.data    = cmd_draw_buffer;
 	buf.draw_buffer.num_dw  = num_draw_dw;
