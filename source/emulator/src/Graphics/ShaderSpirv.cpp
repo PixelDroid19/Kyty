@@ -1727,6 +1727,87 @@ static bool instruction_changes_control_flow(const ShaderInstruction& inst)
 	return false;
 }
 
+static bool instruction_is_conditional_branch(const ShaderInstruction& inst)
+{
+	switch (inst.type)
+	{
+		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchScc0:
+		case ShaderInstructionType::SCbranchScc1:
+		case ShaderInstructionType::SCbranchVccz:
+		case ShaderInstructionType::SCbranchVccnz: return true;
+		default: return false;
+	}
+}
+
+static bool loop_exit_is_in_header_block(const ShaderCode& code, const ShaderLabel& backedge, const ShaderInstruction& exit)
+{
+	for (const auto& label: code.GetLabels())
+	{
+		if (!label.IsDisabled() && label.GetDst() > backedge.GetDst() && label.GetDst() <= exit.pc)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static String8 find_backward_loop_merge(const ShaderCode& code, const ShaderLabel& backedge)
+{
+	String8 merge;
+
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.pc < backedge.GetDst() || inst.pc >= backedge.GetSrc() || !instruction_is_conditional_branch(inst))
+		{
+			continue;
+		}
+
+		const auto exit = ShaderLabel(inst);
+		if (exit.GetDst() <= backedge.GetSrc())
+		{
+			continue;
+		}
+
+		EXIT_NOT_IMPLEMENTED(!loop_exit_is_in_header_block(code, backedge, inst));
+
+		if (merge.Size() == 0)
+		{
+			merge = exit.ToString();
+			continue;
+		}
+
+		EXIT_NOT_IMPLEMENTED(merge != exit.ToString());
+	}
+
+	return merge;
+}
+
+static uint32_t find_backward_loop_for_exit(const ShaderCode& code, const ShaderLabel& exit)
+{
+	uint32_t owner = 0;
+
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.type != ShaderInstructionType::SBranch)
+		{
+			continue;
+		}
+
+		const auto backedge = ShaderLabel(inst);
+		if (backedge.GetDst() >= backedge.GetSrc() || find_backward_loop_merge(code, backedge) != exit.ToString())
+		{
+			continue;
+		}
+
+		EXIT_NOT_IMPLEMENTED(owner != 0);
+		owner = backedge.GetSrc();
+	}
+
+	return owner;
+}
+
 static String8 packed_half_shadow_to_str(ShaderOperand op)
 {
 	EXIT_NOT_IMPLEMENTED(op.type != ShaderOperandType::Vgpr || op.size != 1);
@@ -5562,23 +5643,28 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 
 	if (branch.GetDst() < inst.pc)
 	{
-		// Unconditional backward S_BRANCH is an infinite structured loop: the
-		// merge block is unreachable from the back-edge path. Terminate it so
-		// the next guest basic block can open with its own OpLabel without
-		// leaving the merge unterminated (SPIR-V "block must end with a branch").
 		String8 continue_label = String8::FromPrintf("loop_continue_%04" PRIx32, inst.pc);
-		String8 merge_label    = String8::FromPrintf("loop_merge_%04" PRIx32, inst.pc);
+		String8 merge_label    = find_backward_loop_merge(code, branch);
+		const bool has_exit    = merge_label.Size() != 0;
+		if (!has_exit)
+		{
+			merge_label = String8::FromPrintf("loop_merge_%04" PRIx32, inst.pc);
+		}
 
 		static const char* loop_text = R"(
                 OpBranch %<continue>
        %<continue> = OpLabel
                 OpBranch %<label>
-       %<merge> = OpLabel
-                OpUnreachable
+        <unreachable_merge>
 )";
 
 		*dst_source +=
-		    String8(loop_text).ReplaceStr("<continue>", continue_label).ReplaceStr("<label>", label).ReplaceStr("<merge>", merge_label);
+		    String8(loop_text)
+		        .ReplaceStr("<continue>", continue_label)
+		        .ReplaceStr("<label>", label)
+		        .ReplaceStr("<unreachable_merge>",
+		                    has_exit ? ""
+		                             : String8::FromPrintf("%%%s = OpLabel\n                OpUnreachable", merge_label.c_str()));
 		return true;
 	}
 
@@ -5618,6 +5704,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	String8 label_str = label.ToString();
 	String8 label_merge =
 	    if_else ? (dst_block.last.type == ShaderInstructionType::SBranch ? label_dst_block.ToString() : label_next_block.ToString()) : "";
+	const uint32_t loop_backedge = find_backward_loop_for_exit(code, label);
 
 	if (!if_else && label.GetDst() > inst.pc)
 	{
@@ -5690,10 +5777,33 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
         %t230_<index> = OpLabel
 )";
 
-	*dst_source += String8(if_else ? text_variant_c : (discard ? text_variant_b : text_variant_a))
+	static const char* text_loop_exit = R"(
+        <param0>
+        <param1>
+               OpLoopMerge %<label> %loop_continue_<backedge> None
+               OpBranchConditional %cc_b_<index> %<label> %t230_<index>
+        %t230_<index> = OpLabel
+)";
+
+	const char* text = text_variant_a;
+	if (discard)
+	{
+		text = text_variant_b;
+	}
+	if (if_else)
+	{
+		text = text_variant_c;
+	}
+	if (loop_backedge != 0)
+	{
+		text = text_loop_exit;
+	}
+
+	*dst_source += String8(text)
 	                   .ReplaceStr("<param0>", param[0])
 	                   .ReplaceStr("<param1>", param[1])
 	                   .ReplaceStr("<merge>", label_merge)
+	                   .ReplaceStr("<backedge>", String8::FromPrintf("%04" PRIx32, loop_backedge))
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                   .ReplaceStr("<label>", label_str);
 
@@ -9571,6 +9681,11 @@ void Spirv::WriteLabel(int index)
 
 				if (backward_sbranch && label.GetSrc() > label.GetDst())
 				{
+					if (find_backward_loop_merge(m_code, label).Size() != 0)
+					{
+						continue;
+					}
+
 					// SPIR-V requires OpLoopMerge to be immediately followed by
 					// OpBranch or OpBranchConditional. The guest body becomes a
 					// dedicated successor so the header is a valid structured
