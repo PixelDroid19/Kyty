@@ -811,7 +811,7 @@ static void cs_print(const char* func, const HW::CsStageRegisters& cs, const HW:
 	printf("\t tgid_z_en      = 0x%02" PRIx8 "\n", cs.tgid_z_en);
 	printf("\t tg_size_en     = 0x%02" PRIx8 "\n", cs.tg_size_en);
 	printf("\t tidig_comp_cnt = 0x%02" PRIx8 "\n", cs.tidig_comp_cnt);
-	printf("\t lds_size       = 0x%02" PRIx8 "\n", cs.lds_size);
+	printf("\t lds_size       = 0x%03" PRIx16 "\n", cs.lds_size);
 }
 
 static void bi_print(const char* func, const ShaderBinaryInfo& bi)
@@ -958,8 +958,6 @@ static void cs_check(const HW::CsStageRegisters& cs, const HW::ShaderRegisters& 
 	// EXIT_NOT_IMPLEMENTED(cs.tgid_z_en != 0x00);
 	EXIT_NOT_IMPLEMENTED(cs.tg_size_en != 0x00);
 	EXIT_NOT_IMPLEMENTED(cs.tidig_comp_cnt > 2);
-	EXIT_NOT_IMPLEMENTED(cs.lds_size != 0x00);
-
 	//	EXIT_NOT_IMPLEMENTED(cs.m_computePgmRsrc1 != 0x002c0040);
 	//	EXIT_NOT_IMPLEMENTED(cs.m_computePgmRsrc2 != 0x00000098);
 	//	EXIT_NOT_IMPLEMENTED(cs.m_computeNumThreadX != 0x00000040);
@@ -2460,6 +2458,8 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 	info->threads_num[0] = regs->cs_regs.num_thread_x;
 	info->threads_num[1] = regs->cs_regs.num_thread_y;
 	info->threads_num[2] = regs->cs_regs.num_thread_z;
+	// COMPUTE_PGM_RSRC2.LDS_SIZE is expressed in 128-dword allocation units.
+	info->lds_dwords = ShaderComputeLdsDwords(regs->cs_regs.lds_size);
 	info->group_id[0]    = regs->cs_regs.tgid_x_en != 0;
 	info->group_id[1]    = regs->cs_regs.tgid_y_en != 0;
 	info->group_id[2]    = regs->cs_regs.tgid_z_en != 0;
@@ -3649,6 +3649,7 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 
 	ret.ids.Add(input_info->workgroup_register);
 	ret.ids.Add(input_info->thread_ids_num);
+	ret.ids.Add(input_info->lds_dwords);
 
 	for (int i = 0; i < 3; i++)
 	{

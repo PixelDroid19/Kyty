@@ -498,7 +498,7 @@ struct CsStageRegisters
 	uint8_t  tgid_z_en      = 0;
 	uint8_t  tg_size_en     = 0;
 	uint8_t  tidig_comp_cnt = 0;
-	uint8_t  lds_size       = 0;
+	uint16_t lds_size       = 0;
 	// Dispatch occupancy/scheduling state. It does not change shader semantics
 	// in the host SPIR-V backend, but must survive both PM4 register paths.
 	uint32_t resource_limits = 0;
