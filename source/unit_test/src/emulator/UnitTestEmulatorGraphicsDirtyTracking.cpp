@@ -112,4 +112,19 @@ TEST(EmulatorGraphicsDirtyTracking, InvalidRangeFallsBack)
 	EXPECT_EQ(tracker.Mode(0, 1), GpuDirtyTrackingMode::HashFallback);
 }
 
+TEST(EmulatorGraphicsDirtyTracking, DisabledTrackerFallsBackWithoutMetadata)
+{
+	GpuDirtyPageTracker tracker(false);
+	EXPECT_FALSE(tracker.Enabled());
+	EXPECT_FALSE(tracker.RegisterRange(1, 1));
+	EXPECT_FALSE(tracker.UnregisterRange(1, 1));
+	EXPECT_FALSE(tracker.PrepareForRead(1, 1));
+	EXPECT_FALSE(tracker.Rearm(1, 1));
+	EXPECT_FALSE(tracker.HandleWriteFault(1));
+	EXPECT_FALSE(tracker.NotifyWrite(1, 1));
+	EXPECT_EQ(tracker.SnapshotGeneration(1, 1), 0u);
+	EXPECT_TRUE(tracker.ChangedSince(1, 1, 0));
+	EXPECT_EQ(tracker.Mode(1, 1), GpuDirtyTrackingMode::HashFallback);
+}
+
 UT_END();

@@ -315,9 +315,14 @@ Object teardown unregisters ranges before object IDs are recycled. The tracker
 uses tombstones for page-table removal and range reference counts to preserve
 collision and overlap correctness.
 
-Focused validation currently passes 5/5 dirty-tracker tests and 214/214
+Focused validation currently passes 6/6 dirty-tracker tests and 220/220
 GraphicsPackets/GraphicsState/CoreVirtualMemory tests (one macOS-only test is
-skipped on Linux). The tracker is deliberately opt-in with
+skipped on Linux). During the first disabled-mode hardening pass, lazy tracker
+metadata exposed a rollback path that called `UnregisterRange` without a
+registration attempt; that dereferenced a null mutex and terminated the game
+before its first present. Disabled tracker APIs now return through the hash
+fallback contract, rollback runs only after an attempted registration, and a
+regression test covers the no-metadata path. The tracker is deliberately opt-in with
 `KYTY_ENABLE_GPU_DIRTY_TRACKING=1`: a short A/B capture showed that the first
 page-fault implementation was slower than the hash baseline and once exited
 before the second present. The normal runtime therefore keeps XXH64 active
