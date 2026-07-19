@@ -2829,6 +2829,73 @@ TEST(EmulatorGraphicsPackets, AlphaKillDoesNotCommitDepthWithEarlyFragmentTests)
 	EXPECT_NE(opaque_source.FindIndex("OpExecutionMode %main EarlyFragmentTests"), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, PixelShaderIdentityIncludesHostToGuestCoordinateScale)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+
+	HW::PixelShaderInfo regs {};
+	regs.ps_regs.chksum = 0x0123456789abcdefu;
+
+	ShaderPixelInputInfo native_input {};
+
+	ShaderPixelInputInfo scaled_x_input {};
+	scaled_x_input.host_to_guest_scale.x_guest_numerator  = 3;
+	scaled_x_input.host_to_guest_scale.x_host_denominator = 1;
+
+	ShaderPixelInputInfo scaled_y_input                   = scaled_x_input;
+	scaled_y_input.host_to_guest_scale.y_guest_numerator  = 2;
+	scaled_y_input.host_to_guest_scale.y_host_denominator = 1;
+
+	const auto native_id   = ShaderGetIdPS(&regs, &native_input);
+	const auto scaled_x_id = ShaderGetIdPS(&regs, &scaled_x_input);
+	const auto scaled_y_id = ShaderGetIdPS(&regs, &scaled_y_input);
+
+	EXPECT_NE(native_id, scaled_x_id);
+	EXPECT_NE(scaled_x_id, scaled_y_id);
+}
+
+TEST(EmulatorGraphicsPackets, PixelFragCoordKeepsNativeCoordinatesAtOneToOneScale)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+
+	ShaderPixelInputInfo input {};
+	input.ps_pos_xy = true;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpStore %v2 %FragCoord_x"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v3 %FragCoord_y"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%FragCoord_guest_x"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%FragCoord_guest_y"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+
+	ShaderPixelInputInfo input {};
+	input.ps_pos_xy                              = true;
+	input.host_to_guest_scale.x_guest_numerator  = 3;
+	input.host_to_guest_scale.x_host_denominator = 1;
+	input.host_to_guest_scale.y_guest_numerator  = 2;
+	input.host_to_guest_scale.y_host_denominator = 1;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("%FragCoord_scale_x = OpFDiv %float %float_3_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%FragCoord_guest_x = OpFMul %float %FragCoord_x %FragCoord_scale_x"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %FragCoord_guest_x"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%FragCoord_scale_y = OpFDiv %float %float_2_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%FragCoord_guest_y = OpFMul %float %FragCoord_y %FragCoord_scale_y"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v3 %FragCoord_guest_y"), Core::STRING8_INVALID_INDEX);
+}
+
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
 // at VS PC 0x264. Same ParamN path as 0x20+N; real ShaderParse entry (not a re-impl).
 TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)

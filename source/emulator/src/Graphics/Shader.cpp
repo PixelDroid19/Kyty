@@ -3724,6 +3724,10 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 
 	ret.ids.Add(input_info->input_num);
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pos_xy));
+	ret.ids.Add(input_info->host_to_guest_scale.x_guest_numerator);
+	ret.ids.Add(input_info->host_to_guest_scale.x_host_denominator);
+	ret.ids.Add(input_info->host_to_guest_scale.y_guest_numerator);
+	ret.ids.Add(input_info->host_to_guest_scale.y_host_denominator);
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pixel_kill_enable));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_early_z));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_execute_on_noop));
