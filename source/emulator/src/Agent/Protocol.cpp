@@ -1,6 +1,7 @@
 #include "Emulator/Agent/Protocol.h"
 
 #include "Emulator/Agent/EventRing.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <cctype>
@@ -132,6 +133,7 @@ Tool ParseTool(const char* name) noexcept
 	    {"ping", Tool::Ping},
 	    {"status", Tool::Status},
 	    {"diagnostics", Tool::Diagnostics},
+	    {"perf_snapshot", Tool::PerfSnapshot},
 	    {"sync_waits", Tool::SyncWaits},
 	    {"threads", Tool::Threads},
 	    {"events", Tool::Events},
@@ -660,6 +662,19 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	out += ",\"dropped\":" + std::to_string(ring.dropped);
 	out += ",\"overflowed\":" + std::string(ring.overflowed ? "true" : "false");
 	out += "}";
+
+	const auto performance = Libs::Graphics::DebugStatsGetPerformanceSnapshot(false);
+	char       performance_json[512];
+	std::snprintf(performance_json, sizeof(performance_json),
+	              ",\"performance\":{\"interval_ms\":%llu,\"draws\":%llu,\"dispatches\":%llu,"
+	              "\"alloc_bytes\":%llu,\"free_bytes\":%llu,\"creates\":%llu,\"frees\":%llu,\"flips\":%llu,"
+	              "\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f}",
+	              static_cast<unsigned long long>(performance.interval_ms), static_cast<unsigned long long>(performance.draws),
+	              static_cast<unsigned long long>(performance.dispatches), static_cast<unsigned long long>(performance.alloc_bytes),
+	              static_cast<unsigned long long>(performance.free_bytes), static_cast<unsigned long long>(performance.creates),
+	              static_cast<unsigned long long>(performance.frees), static_cast<unsigned long long>(performance.flips),
+	              static_cast<unsigned long long>(performance.live_objects), performance.fps, performance.frame_time_ms);
+	out += performance_json;
 
 	out += ",\"missing_imports\":{";
 	out += "\"resolution_attempts\":" + std::to_string(imports.resolution_attempts);

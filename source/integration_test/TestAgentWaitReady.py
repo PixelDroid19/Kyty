@@ -27,8 +27,8 @@ def serve_once(sock_path: str, ready: threading.Event) -> None:
             response = {
                 "id": parsed["id"],
                 "ok": True,
-                "protocol_version": 3,
-                "result": {"alive": True, "protocol_version": 3},
+                "protocol_version": 4,
+                "result": {"alive": True, "protocol_version": 4},
             }
             client.sendall(json.dumps(response, separators=(",", ":")).encode() + b"\n")
 
@@ -65,7 +65,7 @@ def main() -> int:
         print(f"expected one JSON object, got {len(lines)}", file=sys.stderr)
         return 1
     result = json.loads(lines[0])
-    if result.get("protocol_version") != 3 or not result.get("ok"):
+    if result.get("protocol_version") != 4 or not result.get("ok"):
         print(f"unexpected wait-ready response: {result}", file=sys.stderr)
         return 1
     if not result.get("result", {}).get("ready"):

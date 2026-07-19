@@ -3,6 +3,7 @@
 #include "Emulator/Agent/Protocol.h"
 #include "Emulator/Agent/StallWatch.h"
 #include "Emulator/Controller.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/Window.h"
 #include "Kyty/UnitTest.h"
 
@@ -114,6 +115,38 @@ TEST(AgentTools, ProtocolParsesRequestAndFormatsResponse)
 	const std::string err = FormatErr(7, "timeout", "wait timed out");
 	EXPECT_NE(err.find("\"ok\":false"), std::string::npos);
 	EXPECT_NE(err.find("timeout"), std::string::npos);
+}
+
+TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsRecordDraw();
+	DebugStatsRecordDispatch();
+	DebugStatsRecordAlloc(4096);
+	DebugStatsRecordFlip(60.0, 16.667);
+
+	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
+	EXPECT_EQ(first.draws, 1u);
+	EXPECT_EQ(first.dispatches, 1u);
+	EXPECT_EQ(first.alloc_bytes, 4096u);
+	EXPECT_EQ(first.creates, 1u);
+	EXPECT_EQ(first.flips, 1u);
+	EXPECT_EQ(first.live_objects, 1u);
+
+	DebugStatsRecordDraw();
+	DebugStatsRecordFree(4096);
+	const DebugStatsPerformanceSnapshot second = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(second.draws, 1u);
+	EXPECT_EQ(second.dispatches, 0u);
+	EXPECT_EQ(second.alloc_bytes, 0u);
+	EXPECT_EQ(second.free_bytes, 4096u);
+	EXPECT_EQ(second.creates, 0u);
+	EXPECT_EQ(second.frees, 1u);
+	EXPECT_EQ(second.flips, 0u);
+	EXPECT_EQ(second.live_objects, 0u);
+	DebugStatsShutdown();
 }
 
 TEST(AgentTools, ProtocolRejectsUnknownShape)

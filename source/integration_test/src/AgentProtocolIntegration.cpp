@@ -72,11 +72,13 @@ int ScenarioProtocolVersionConsistent()
 	                                                     Loader::RuntimeLinker::GetGlobalMissingImportDiagnostics(),
 	                                                     Loader::ModuleLifecycleCoordinator::GetDiagnostics());
 	Expect(diag_body.find("\"event_ring\"") != std::string::npos, "diagnostics has event_ring");
+	Expect(diag_body.find("\"performance\"") != std::string::npos, "diagnostics has bounded performance snapshot");
 	// ensure bring_up closes before event_ring appears as sibling: look for pattern
 	const auto bring_pos = diag_body.find("\"bring_up\"");
 	const auto ring_pos  = diag_body.find("\"event_ring\"");
 	Expect(bring_pos != std::string::npos && ring_pos != std::string::npos && ring_pos > bring_pos, "event_ring after bring_up");
-	Expect(Kyty::Agent::kProtocolVersion == 3u, "live constant is 3");
+	Expect(Kyty::Agent::kProtocolVersion == 4u, "live constant is 4");
+	Expect(ParseTool("perf_snapshot") == Tool::PerfSnapshot, "perf_snapshot is part of protocol v4");
 	std::printf("PROTOCOL_VERSION=%u\n", Kyty::Agent::kProtocolVersion);
 	return 0;
 }
