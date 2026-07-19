@@ -976,6 +976,42 @@ bool sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t back
 	return true;
 }
 
+uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
+                                                   VirtualMemory::Mode mode, uint64_t alignment)
+{
+	if (sys_virtual_map_shared_fixed(backing, address, backing_offset, size, mode))
+	{
+		return address;
+	}
+
+#ifdef __APPLE__
+	// Rosetta reserves parts of the low address space used by PS5 applications.
+	// Relocate only an external-host collision; a Kyty-owned overlap remains a
+	// real fixed-map conflict and must fail.
+	bool overlaps_tracked = false;
+	pthread_mutex_lock(&g_virtual_mutex);
+	for (const auto& [base, tracked_size]: *g_allocs)
+	{
+		const uint64_t requested_end = address <= UINT64_MAX - size ? address + size : UINT64_MAX;
+		const uint64_t tracked_end   = base <= UINT64_MAX - tracked_size ? base + tracked_size : UINT64_MAX;
+		if (base < requested_end && address < tracked_end)
+		{
+			overlaps_tracked = true;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_virtual_mutex);
+
+	if (!overlaps_tracked)
+	{
+		return sys_virtual_map_shared_aligned(backing, 0, backing_offset, size, mode, alignment);
+	}
+#else
+	(void)alignment;
+#endif
+	return 0;
+}
+
 bool sys_virtual_alloc_fixed(uint64_t address, uint64_t size, VirtualMemory::Mode mode)
 {
 	EXIT_IF(g_allocs == nullptr);
