@@ -26,6 +26,8 @@ public:
 	GpuSubmissionResult BeginRecording(uint32_t slot, SubmissionId* id, SubmissionDependency* blocking_dependency);
 	GpuSubmissionResult MarkSubmitted(uint32_t slot);
 	GpuSubmissionResult MarkCompletedWithoutActionsAndRetire(uint32_t slot);
+	GpuSubmissionResult CompleteAndRetireThenBeginRecording(uint32_t completed_slot, uint32_t recording_slot, SubmissionId* id,
+	                                                        SubmissionDependency* blocking_dependency);
 
 private:
 	struct Slot

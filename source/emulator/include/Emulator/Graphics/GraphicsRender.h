@@ -51,7 +51,9 @@ public:
 	void BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth) const;
 	void EndRenderPass() const;
 	void WaitForFence();
+	void WaitForFenceWithoutLabelCallbacks();
 	void WaitForFenceAndReset();
+	void WaitForFenceAndResetWithoutLabelCallbacks();
 
 	[[nodiscard]] uint32_t GetIndex() const { return m_index; }
 	VulkanCommandPool*     GetPool() { return m_pool; }
@@ -63,6 +65,8 @@ private:
 	int                m_queue   = -1;
 	bool               m_execute = false;
 	CommandProcessor*  m_parent  = nullptr;
+
+	void WaitForFence(bool drain_label_callbacks, bool reset_command_buffer);
 };
 
 void GraphicsRenderInit();

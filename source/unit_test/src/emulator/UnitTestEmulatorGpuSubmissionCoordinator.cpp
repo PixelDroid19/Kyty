@@ -202,4 +202,23 @@ TEST(EmulatorGpuSubmissionCoordinator, RejectsCommandProcessorSlotLifecycleWitho
 	EXPECT_EQ(slots.BeginRecording(CommandProcessorSubmissionSlots::SlotCount, nullptr, nullptr), GpuSubmissionResult::InvalidArgument);
 }
 
+TEST(EmulatorGpuSubmissionCoordinator, RotatesToRecordingSlotBeforeCompletionCallbackFlush)
+{
+	GpuSubmissionCoordinator        coordinator;
+	CommandProcessorSubmissionSlots slots(&coordinator, GpuQueueId(8));
+	SubmissionId                    submitted;
+	SubmissionId                    callback_recording;
+
+	ASSERT_EQ(slots.BeginRecording(0, &submitted, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.MarkSubmitted(0), GpuSubmissionResult::Success);
+	// A synchronous completion callback flushing before rotation would submit
+	// the same slot twice, which is the strict runtime failure this guards.
+	EXPECT_EQ(slots.MarkSubmitted(0), GpuSubmissionResult::InvalidTransition);
+	ASSERT_EQ(slots.CompleteAndRetireThenBeginRecording(0, 1, &callback_recording, nullptr), GpuSubmissionResult::Success);
+
+	EXPECT_EQ(callback_recording.queue, GpuQueueId(8));
+	EXPECT_EQ(callback_recording.sequence, 2u);
+	EXPECT_EQ(slots.MarkSubmitted(1), GpuSubmissionResult::Success);
+}
+
 UT_END();

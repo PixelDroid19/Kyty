@@ -64,4 +64,20 @@ GpuSubmissionResult CommandProcessorSubmissionSlots::MarkCompletedWithoutActions
 	return retired;
 }
 
+GpuSubmissionResult CommandProcessorSubmissionSlots::CompleteAndRetireThenBeginRecording(
+    uint32_t completed_slot, uint32_t recording_slot, SubmissionId* id, SubmissionDependency* blocking_dependency)
+{
+	if (id == nullptr || completed_slot >= SlotCount || recording_slot >= SlotCount)
+	{
+		return GpuSubmissionResult::InvalidArgument;
+	}
+
+	const auto completed = MarkCompletedWithoutActionsAndRetire(completed_slot);
+	if (completed != GpuSubmissionResult::Success)
+	{
+		return completed;
+	}
+	return BeginRecording(recording_slot, id, blocking_dependency);
+}
+
 } // namespace Kyty::Libs::Graphics
