@@ -35,7 +35,8 @@ ResolutionCohortDecision EvaluateResolutionCohort(const InternalResolutionPolicy
 		return NativeDecision(ResolutionCohortReason::Incomplete, input.attachment_count, ResolutionNativeReason::None,
 		                      input.attachments[0].guest_extent);
 	}
-	if (input.shader_usage.fragment_coordinates || input.shader_usage.integer_image_coordinates || input.shader_usage.image_size_query)
+	if ((input.shader_usage.fragment_coordinates && !input.shader_usage.fragment_coordinates_supported) ||
+	    input.shader_usage.integer_image_coordinates || input.shader_usage.image_size_query)
 	{
 		return NativeDecision(ResolutionCohortReason::ShaderCoordinateAccess, input.attachment_count, ResolutionNativeReason::None,
 		                      input.attachments[0].guest_extent);

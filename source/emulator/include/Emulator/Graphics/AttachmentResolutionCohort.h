@@ -15,9 +15,10 @@ struct ResolutionAttachmentCandidate
 
 struct ResolutionShaderCoordinateUsage
 {
-	bool fragment_coordinates      = false;
-	bool integer_image_coordinates = false;
-	bool image_size_query          = false;
+	bool fragment_coordinates           = false;
+	bool fragment_coordinates_supported = false;
+	bool integer_image_coordinates      = false;
+	bool image_size_query               = false;
 };
 
 enum class ResolutionCohortReason : uint8_t

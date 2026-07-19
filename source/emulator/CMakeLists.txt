@@ -45,6 +45,7 @@ target_sources(emulator PRIVATE
 	src/Graphics/ResolutionImageCapability.cpp
 	src/Graphics/ResolutionCoordinateTransform.cpp
 	src/Graphics/VulkanResolutionCapability.cpp
+	src/Graphics/ShaderCoordinateScale.cpp
 	include/Emulator/Graphics/PipelineCacheStore.h
 	include/Emulator/Graphics/GpuDirtyPageTracker.h
 	include/Emulator/Graphics/CommandProcessorSubmissionSlots.h
@@ -59,6 +60,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/ResolutionImageCapability.h
 	include/Emulator/Graphics/ResolutionCoordinateTransform.h
 	include/Emulator/Graphics/VulkanResolutionCapability.h
+	include/Emulator/Graphics/ShaderCoordinateScale.h
 	src/Validation/DomainValidators.cpp
 	include/Emulator/Validation/DomainValidators.h
 	include/Emulator/Agent/EventRing.h
