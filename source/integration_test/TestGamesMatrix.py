@@ -294,6 +294,31 @@ class FrontierExtractionTests(unittest.TestCase):
         self.assertEqual(oc, "controlled_timeout")
         self.assertEqual(fr, "presenting")
 
+    def test_parent_sigterm_after_deadline_is_controlled_timeout(self) -> None:
+        oc, fr = matrix.map_outcome(
+            process_exit=-15,
+            agent_ready=True,
+            status={"phase": "booting", "frontier": "startup", "present": 0, "graphic_ready": False},
+            last_error_code="",
+            timed_out=True,
+            notes=["total_deadline", "killed_sigterm"],
+        )
+        self.assertEqual(oc, "controlled_timeout")
+        self.assertEqual(fr, "runtime_started")
+
+    def test_parent_sigkill_after_deadline_is_controlled_timeout(self) -> None:
+        for exit_code in (-9, 137):
+            oc, fr = matrix.map_outcome(
+                process_exit=exit_code,
+                agent_ready=True,
+                status={"phase": "booting", "frontier": "none", "present": 0, "graphic_ready": False},
+                last_error_code="",
+                timed_out=True,
+                notes=["total_deadline", "killed_sigkill"],
+            )
+            self.assertEqual(oc, "controlled_timeout", msg=f"exit={exit_code}")
+            self.assertEqual(fr, "runtime_started")
+
     def test_launch_failed_before_agent(self) -> None:
         oc, fr = matrix.map_outcome(
             process_exit=1,

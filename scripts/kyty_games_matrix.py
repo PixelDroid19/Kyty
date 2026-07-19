@@ -482,7 +482,11 @@ def map_outcome(
     if process_exit in (139, 132, 134, 136, 321) or err in ("host_crash", "host_fault"):
         return "host_crash", usable_label(err, frontier, "host_crash")
 
-    if process_exit is not None and process_exit != 0:
+    # A deadline is enforced by terminating the child process group, so poll()
+    # reports SIGTERM/SIGKILL as a non-zero exit. Once the agent was ready,
+    # preserve the observed runtime frontier and classify that parent-owned
+    # termination as controlled_timeout below.
+    if process_exit is not None and process_exit != 0 and not (timed_out and agent_ready):
         if not agent_ready:
             return "launch_failed", "launch"
         return "loader_failed", usable_label(frontier, err, "post_agent_exit")
