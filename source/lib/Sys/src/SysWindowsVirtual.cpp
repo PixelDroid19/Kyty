@@ -413,6 +413,12 @@ bool sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t back
 	return map_shared_at(shared, address, backing_offset, size, mode) == address;
 }
 
+uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
+                                                   VirtualMemory::Mode mode, uint64_t /*alignment*/)
+{
+	return sys_virtual_map_shared_fixed(backing, address, backing_offset, size, mode) ? address : 0;
+}
+
 bool sys_virtual_free(uint64_t address)
 {
 	{

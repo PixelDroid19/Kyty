@@ -29,6 +29,8 @@ uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_
                                         VirtualMemory::Mode mode, uint64_t alignment);
 bool     sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                       VirtualMemory::Mode mode);
+uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
+                                                   VirtualMemory::Mode mode, uint64_t alignment);
 bool     sys_virtual_free(uint64_t address);
 bool     sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode = nullptr);
 bool     sys_virtual_protect_write_signal_safe(uint64_t address, uint64_t size);
