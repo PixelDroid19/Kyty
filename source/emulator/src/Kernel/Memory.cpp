@@ -375,9 +375,9 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 	uint64_t map_vaddr = 0;
 	if (fixed)
 	{
-		if ((vaddr & (alignment - 1)) == 0 && VirtualMemory::MapSharedFixed(m_backing, vaddr, phys_addr, map_size, mode))
+		if ((vaddr & (alignment - 1)) == 0)
 		{
-			map_vaddr = vaddr;
+			map_vaddr = VirtualMemory::MapSharedFixedOrRelocated(m_backing, vaddr, phys_addr, map_size, mode, alignment);
 		}
 	} else
 	{

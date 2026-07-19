@@ -626,6 +626,25 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 			sigsafe_fault("  rax/rbx", uc_get_rax(uc), uc_get_rbx(uc));
 			sigsafe_fault("  rcx/rdx", uc_get_rcx(uc), uc_get_rdx(uc));
 			sigsafe_fault("  rbp/rsp", uc_get_rbp(uc), uc_get_rsp(uc));
+			sigsafe_fault("  r8/r9", uc_get_r8(uc), uc_get_r9(uc));
+			sigsafe_fault("  r10/r11", uc_get_r10(uc), uc_get_r11(uc));
+			sigsafe_fault("  r12/r13", uc_get_r12(uc), uc_get_r13(uc));
+			sigsafe_fault("  r14/r15", uc_get_r14(uc), uc_get_r15(uc));
+			const uint64_t rbp = uc_get_rbp(uc);
+			if (rbp >= 0x1000ull)
+			{
+				const auto* frame = reinterpret_cast<const uint64_t*>(rbp);
+				for (int depth = 0; depth < 4; depth++)
+				{
+					const uint64_t next = frame[0];
+					sigsafe_fault("  frame", next, frame[1]);
+					if (next <= reinterpret_cast<uint64_t>(frame) || next - reinterpret_cast<uint64_t>(frame) > 0x10000ull)
+					{
+						break;
+					}
+					frame = reinterpret_cast<const uint64_t*>(next);
+				}
+			}
 			sigsafe_fault("  tid", static_cast<uint64_t>(host_tid()), 0);
 			sigsafe_fault("  anchor", reinterpret_cast<uint64_t>(&kyty_posix_signal_handler), 0);
 			// Captured Gen5 RBP walkers do mov (%rdx),%rdx; mov 0x8(%rdx),… and
@@ -924,6 +943,17 @@ bool MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_o
 		return false;
 	}
 	return sys_virtual_map_shared_fixed(backing->handle, address, backing_offset, size, mode);
+}
+
+uint64_t MapSharedFixedOrRelocated(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
+                                   uint64_t alignment)
+{
+	if (address == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0 ||
+	    !shared_range_is_valid(backing, backing_offset, size))
+	{
+		return 0;
+	}
+	return sys_virtual_map_shared_fixed_or_relocated(backing->handle, address, backing_offset, size, mode, alignment);
 }
 
 bool Free(uint64_t address)
