@@ -2726,6 +2726,109 @@ TEST(EmulatorGraphicsPackets, CompressedMrtExportIsGuardedByExecMask)
 	EXPECT_NE(source.FindIndex("OpStore %outColor"), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, NullMrt3ExportAfterExecZeroKillsFragment)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderOperand exec {};
+	exec.type = ShaderOperandType::ExecLo;
+	exec.size = 2;
+
+	ShaderOperand zero {};
+	zero.type       = ShaderOperandType::IntegerInlineConstant;
+	zero.constant.i = 0;
+	zero.size       = 2;
+
+	ShaderInstruction clear_exec;
+	clear_exec.pc      = 0;
+	clear_exec.type    = ShaderInstructionType::SMovB64;
+	clear_exec.format  = ShaderInstructionFormat::Sdst2Ssrc02;
+	clear_exec.dst     = exec;
+	clear_exec.src[0]  = zero;
+	clear_exec.src_num = 1;
+
+	ShaderInstruction null_mrt3;
+	null_mrt3.pc      = 4;
+	null_mrt3.type    = ShaderInstructionType::Exp;
+	null_mrt3.format  = ShaderInstructionFormat::Mrt3OffOffComprVmDone;
+	null_mrt3.src_num = 0;
+
+	ShaderInstruction end;
+	end.pc     = 12;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(clear_exec);
+	code.GetInstructions().Add(null_mrt3);
+	code.GetInstructions().Add(end);
+
+	ShaderPixelInputInfo input {};
+	input.ps_pixel_kill_enable  = true;
+	input.target_output_mode[3] = 4;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_TRUE(code.ReadBlock(0).is_discard);
+	EXPECT_NE(source.FindIndex("OpKill"), Core::STRING8_INVALID_INDEX);
+}
+
+// Guest Z_ORDER=EarlyZThenLateZ may reject occluded fragments early, but a
+// fragment that survives must still run alpha kill before depth is committed.
+// Vulkan EarlyFragmentTests alone commits depth too early for that contract.
+TEST(EmulatorGraphicsPackets, AlphaKillDoesNotCommitDepthWithEarlyFragmentTests)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	auto vgpr = [](int reg)
+	{
+		ShaderOperand op {};
+		op.type        = ShaderOperandType::Vgpr;
+		op.register_id = reg;
+		op.size        = 1;
+		return op;
+	};
+
+	ShaderInstruction export_mrt;
+	export_mrt.pc      = 0;
+	export_mrt.type    = ShaderInstructionType::Exp;
+	export_mrt.format  = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone;
+	export_mrt.src[0]  = vgpr(0);
+	export_mrt.src[1]  = vgpr(1);
+	export_mrt.src_num = 2;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(export_mrt);
+
+	ShaderPixelInputInfo kill_input {};
+	kill_input.ps_early_z           = true;
+	kill_input.ps_pixel_kill_enable = true;
+	kill_input.target_output_mode[0] = 4;
+
+	const auto kill_source = SpirvGenerateSource(code, nullptr, &kill_input, nullptr);
+	EXPECT_EQ(kill_source.FindIndex("OpExecutionMode %main EarlyFragmentTests"), Core::STRING8_INVALID_INDEX);
+
+	ShaderPixelInputInfo opaque_input {};
+	opaque_input.ps_early_z            = true;
+	opaque_input.ps_pixel_kill_enable  = false;
+	opaque_input.target_output_mode[0] = 4;
+
+	const auto opaque_source = SpirvGenerateSource(code, nullptr, &opaque_input, nullptr);
+	EXPECT_NE(opaque_source.FindIndex("OpExecutionMode %main EarlyFragmentTests"), Core::STRING8_INVALID_INDEX);
+}
+
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
 // at VS PC 0x264. Same ParamN path as 0x20+N; real ShaderParse entry (not a re-impl).
 TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)
@@ -2834,6 +2937,59 @@ TEST(EmulatorGraphicsPackets, Gen5DsWriteB32UsesConfiguredWorkgroupLds)
 	EXPECT_NE(ShaderGetIdCS(&regs, &input), ShaderGetIdCS(&regs, &larger_input));
 }
 
+TEST(EmulatorGraphicsPackets, Gen5DsRead2B32UsesDwordScaledWorkgroupOffsets)
+{
+	// Captured compute instruction: ds_read2_b32 v[4:5], v2 offset0:0 offset1:1
+	// words d8dc0100 04000002 — offsets are dword-scaled; vaddr stays byte-addressed.
+	const uint32_t shader[] = {0xd8dc0100u, 0x04000002u, 0xbf8a0000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::DsRead2B32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::Vdst2VaddrOffset01);
+	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.dst.register_id, 4);
+	EXPECT_EQ(instruction.dst.size, 2);
+	ASSERT_EQ(instruction.src_num, 1);
+	EXPECT_EQ(instruction.src[0].register_id, 2);
+	EXPECT_EQ(instruction.ds_offset, 0x0100u);
+	EXPECT_EQ(instruction.ds_offset & 0xffu, 0u);
+	EXPECT_EQ((instruction.ds_offset >> 8u) & 0xffu, 1u);
+	const auto& barrier = code.GetInstructions().At(1);
+	EXPECT_EQ(barrier.type, ShaderInstructionType::SBarrier);
+	EXPECT_EQ(barrier.format, ShaderInstructionFormat::Empty);
+
+	ShaderComputeInputInfo input;
+	input.threads_num[0] = 16;
+	input.threads_num[1] = 16;
+	input.threads_num[2] = 1;
+	input.lds_dwords     = ShaderComputeLdsDwords(2);
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("%lds = OpVariable %_ptr_Workgroup_lds_array_uint Workgroup"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpIAdd %uint %lds_addr_u_0 %uint_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpIAdd %uint %lds_addr_u_0 %uint_4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpShiftRightLogical %uint %lds_byte_addr0_0 %uint_2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpShiftRightLogical %uint %lds_byte_addr1_0 %uint_2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v4 %lds_data0_f_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v5 %lds_data1_f_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("unknown_uint_constant"), Core::STRING8_INVALID_INDEX);
+
+	const auto binary = ShaderRecompileCS(code, &input);
+	EXPECT_FALSE(binary.IsEmpty());
+}
 
 TEST(EmulatorGraphicsPackets, Gen5SingleComponent32BitBufferFormat)
 {

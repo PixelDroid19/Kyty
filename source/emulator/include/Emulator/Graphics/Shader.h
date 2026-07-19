@@ -54,6 +54,7 @@ enum class ShaderInstructionType : uint32_t
 	BufferStoreFormatXyzw,
 	DsAppend,
 	DsConsume,
+	DsRead2B32,
 	DsWriteB32,
 	Exp,
 	ImageLoad,
@@ -357,7 +358,8 @@ enum Format : uint64_t
 	Label                 = FormatDefine({L}),
 	Mrt0OffOffComprVmDone = FormatDefine({Mrt0, Off, Off, Compr, Vm, Done}),
 	// Null MRT export (en=0): no channels written; often ends the export sequence.
-	// MRT0 retains the kill-linked form; MRT1-3 are no-op stores.
+	// Any MRT target is a discard when bracketed by exec=0 and endpgm; otherwise
+	// MRT1-3 remain no-op sequence terminators.
 	Mrt1OffOffComprVmDone = FormatDefine({Mrt1, Off, Off, Compr, Vm, Done}),
 	Mrt2OffOffComprVmDone = FormatDefine({Mrt2, Off, Off, Compr, Vm, Done}),
 	Mrt3OffOffComprVmDone = FormatDefine({Mrt3, Off, Off, Compr, Vm, Done}),
@@ -421,6 +423,8 @@ enum Format : uint64_t
 	Vdata4VaddrSvSoffsIdxenFloat4       = FormatDefine({DA4, S0, S1A4, S2, Idxen, Float4}),
 	VdstGds                             = FormatDefine({D, Gds}),
 	VaddrVdataOffset                    = FormatDefine({S0, S1}),
+	// ds_read2_b32: vdst is a VGPR pair; offsets live in ds_offset (see field comment).
+	Vdst2VaddrOffset01                  = FormatDefine({DA2, S0}),
 	VdstSdst2Vsrc0Vsrc1                 = FormatDefine({D, D2A2, S0, S1}),
 	VdstSdst2Vsrc0Vsrc1Ssrc2A2          = FormatDefine({D, D2A2, S0, S1, S2A2}),
 	Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair       = FormatDefine({DA2, D2A2, S0, S1, S2A2}),
@@ -500,7 +504,10 @@ struct ShaderInstruction
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;
-	// DS single-address instructions add this byte offset to the byte address in src[0].
+	// DS addressing:
+	// - DsWriteB32: byte offset added to the byte address in src[0].
+	// - DsRead2B32: packed as (offset1 << 8) | offset0; each offset is dword-scaled
+	//   while src[0] remains a byte address (addr_i = vaddr + offset_i * 4).
 	uint16_t ds_offset = 0;
 };
 
@@ -633,6 +640,7 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
 uint32_t ShaderGen5VertexInputComponentCount(uint8_t format);
+bool     ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format);
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component);
 // Bytes per element for Gen5 sampled formats; compressed formats use block elements (0 if unknown).
 uint32_t ShaderGen5TextureBytesPerElement(uint32_t format);

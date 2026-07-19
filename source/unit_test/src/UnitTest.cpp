@@ -17,6 +17,7 @@ UT_LINK(DevToolsBundle);
 UT_LINK(DevToolsLifecycle);
 UT_LINK(DevToolsExportCatalog);
 UT_LINK(EmulatorGraphicsState);
+UT_LINK(EmulatorGraphicsDirtyTracking);
 UT_LINK(EmulatorKernelMemory);
 UT_LINK(EmulatorGraphicsPackets);
 UT_LINK(EmulatorKernelProcess);

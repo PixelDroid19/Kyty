@@ -4,8 +4,10 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
@@ -83,9 +85,78 @@ TEST(EmulatorGraphicsState, TiledVideoOutBufferUpdateDoesNotCpuUpload)
 	EXPECT_TRUE(VideoOutBufferShouldCpuUploadOnUpdate(false));
 }
 
+TEST(EmulatorGraphicsState, GpuOwnedTiledRenderTextureSkipsCpuHash)
+{
+	const RenderTextureObject gpu_owned(RenderTextureFormat::R8G8B8A8Unorm, 1280, 720, true, false, 1280, false);
+	const RenderTextureObject write_back(RenderTextureFormat::R8G8B8A8Unorm, 1280, 720, true, false, 1280, true);
+	const RenderTextureObject linear(RenderTextureFormat::R8G8B8A8Unorm, 1280, 720, false, false, 1280, false);
+
+	EXPECT_FALSE(gpu_owned.check_hash);
+	EXPECT_TRUE(write_back.check_hash);
+	EXPECT_TRUE(linear.check_hash);
+}
+
+TEST(EmulatorGraphicsState, TiledVideoOutBufferSkipsCpuHash)
+{
+	const VideoOutBufferObject tiled(VideoOutBufferFormat::R8G8B8A8Srgb, 1280, 720, true, false, 1280);
+	const VideoOutBufferObject linear(VideoOutBufferFormat::R8G8B8A8Srgb, 1280, 720, false, false, 1280);
+
+	EXPECT_FALSE(tiled.check_hash);
+	EXPECT_TRUE(linear.check_hash);
+}
+
 TEST(EmulatorGraphicsState, DisabledShaderFilterIgnoresNullAddress)
 {
 	EXPECT_FALSE(ShaderIsDisabled(0));
+}
+
+TEST(EmulatorGraphicsState, PipelineCacheAcceptsMatchingVulkanHeader)
+{
+	VkPhysicalDeviceProperties properties {};
+	properties.vendorID = 0x1234;
+	properties.deviceID = 0x5678;
+	for (uint32_t i = 0; i < VK_UUID_SIZE; i++)
+	{
+		properties.pipelineCacheUUID[i] = static_cast<uint8_t>(i + 1);
+	}
+
+	PipelineCacheHeaderV1 header {};
+	header.header_size    = sizeof(header);
+	header.header_version = VK_PIPELINE_CACHE_HEADER_VERSION_ONE;
+	header.vendor_id      = properties.vendorID;
+	header.device_id      = properties.deviceID;
+	memcpy(header.uuid, properties.pipelineCacheUUID, VK_UUID_SIZE);
+
+	EXPECT_TRUE(PipelineCacheDataMatchesDevice(&header, sizeof(header), properties));
+}
+
+TEST(EmulatorGraphicsState, PipelineCacheRejectsMalformedOrForeignData)
+{
+	VkPhysicalDeviceProperties properties {};
+	properties.vendorID = 0x1234;
+	properties.deviceID = 0x5678;
+
+	PipelineCacheHeaderV1 header {};
+	header.header_size    = sizeof(header);
+	header.header_version = VK_PIPELINE_CACHE_HEADER_VERSION_ONE;
+	header.vendor_id      = properties.vendorID;
+	header.device_id      = properties.deviceID;
+	memcpy(header.uuid, properties.pipelineCacheUUID, VK_UUID_SIZE);
+
+	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, sizeof(header) - 1, properties));
+
+	header.header_size = sizeof(header) + 1;
+	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, sizeof(header), properties));
+	header.header_size = sizeof(header);
+
+	header.header_version = VK_PIPELINE_CACHE_HEADER_VERSION_ONE + 1;
+	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, sizeof(header), properties));
+	header.header_version = VK_PIPELINE_CACHE_HEADER_VERSION_ONE;
+
+	header.device_id++;
+	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, sizeof(header), properties));
+
+	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, PipelineCacheStoreMaxBytes() + 1, properties));
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
@@ -1163,6 +1234,20 @@ TEST(EmulatorGraphicsState, SkipWriteBackInvalidateForGpuOwnedRenderTexture)
 
 	EXPECT_FALSE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::Texture, gpu_owned));
 	EXPECT_FALSE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::VertexBuffer, gpu_owned));
+}
+
+TEST(EmulatorGraphicsState, TiledGpuOwnedRenderTextureUpdatePreservesTrackedLayout)
+{
+	GraphicContext                ctx {};
+	RenderTextureVulkanImage      image;
+	const RenderTextureObject     render_texture(RenderTextureFormat::R8G8B8A8Unorm, 642, 362, true, false, 642, false);
+	const uint64_t                vaddr = 0x0000005100000000ull;
+	const uint64_t                size  = 642u * 362u * 4u;
+
+	image.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	render_texture.GetUpdateFunc()(&ctx, render_texture.params, &image, &vaddr, &size, 1);
+
+	EXPECT_EQ(image.layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 TEST(EmulatorGraphicsState, UsesTrackedLayoutWhenUploadingOverExistingImage)
