@@ -15,6 +15,10 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+namespace Kyty::Libs::Graphics {
+struct DebugStatsPerformanceSnapshot;
+} // namespace Kyty::Libs::Graphics
+
 namespace Kyty::Emulator::Agent {
 
 enum class Tool
@@ -73,6 +77,8 @@ bool ArgsGetString(const std::string& args_json, const char* key, std::string* o
 bool ArgsGetU64(const std::string& args_json, const char* key, uint64_t* out);
 bool ArgsGetU32(const std::string& args_json, const char* key, uint32_t* out);
 bool ArgsGetBool(const std::string& args_json, const char* key, bool* out);
+
+void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceSnapshot& performance, std::string* out);
 
 std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Core::BringUp::Diagnostics& diagnostics,
                                    const Loader::MissingImportDiagnostics& imports, const Loader::ModuleLoadPlanDiagnostics& load_plan);

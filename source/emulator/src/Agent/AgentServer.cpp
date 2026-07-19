@@ -139,7 +139,7 @@ std::string DiagnosticsResult()
 std::string PerformanceResult(bool reset)
 {
 	const auto stats = Libs::Graphics::DebugStatsGetPerformanceSnapshot(reset);
-	char       buf[6144];
+	char       buf[8192];
 	std::snprintf(buf, sizeof(buf),
 	              "{\"protocol_version\":%u,\"schema\":\"performance_snapshot\",\"reset\":%s,"
 	              "\"interval_ms\":%llu,\"draws\":%llu,\"dispatches\":%llu,\"alloc_bytes\":%llu,\"free_bytes\":%llu,"
@@ -176,7 +176,7 @@ std::string PerformanceResult(bool reset)
 	              "\"vk_compute_pipeline_create_max_ns\":%llu,"
 	              "\"shader_translation_cache_hits\":%llu,\"shader_translation_cache_misses\":%llu,"
 	              "\"shader_translation_cache_evictions\":%llu,"
-	              "\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f}",
+	              "\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f,",
 	              Kyty::Agent::kProtocolVersion, reset ? "true" : "false", static_cast<unsigned long long>(stats.interval_ms),
 	              static_cast<unsigned long long>(stats.draws), static_cast<unsigned long long>(stats.dispatches),
 	              static_cast<unsigned long long>(stats.alloc_bytes), static_cast<unsigned long long>(stats.free_bytes),
@@ -238,7 +238,10 @@ std::string PerformanceResult(bool reset)
 	              static_cast<unsigned long long>(stats.shader_translation_cache_misses),
 	              static_cast<unsigned long long>(stats.shader_translation_cache_evictions),
 	              static_cast<unsigned long long>(stats.live_objects), stats.fps, stats.frame_time_ms);
-	return std::string(buf);
+	std::string out(buf);
+	AppendGpuMemoryPerformanceJson(stats, &out);
+	out += '}';
+	return out;
 }
 
 std::string EventsResult(uint32_t last, uint64_t after_seq)
