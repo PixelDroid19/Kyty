@@ -41,8 +41,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	auto* vk_obj = new DepthStencilVulkanImage;
 
-	vk_obj->extent.width  = width;
-	vk_obj->extent.height = height;
+	vk_obj->SetNativeExtent(width, height);
 	vk_obj->format        = pixel_format;
 	vk_obj->image         = nullptr;
 	vk_obj->layout        = VK_IMAGE_LAYOUT_UNDEFINED;

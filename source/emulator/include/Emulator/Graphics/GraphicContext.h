@@ -138,8 +138,26 @@ struct VulkanImage
 
 	explicit VulkanImage(VulkanImageType type): type(type) {}
 
+	void SetNativeExtent(uint32_t width, uint32_t height)
+	{
+		guest_extent = {width, height};
+		extent       = guest_extent;
+	}
+
+	void SetHostExtent(uint32_t width, uint32_t height) { extent = {width, height}; }
+
+	[[nodiscard]] VkExtent2D GetHostExtent() const { return extent; }
+
+	[[nodiscard]] bool IsResolutionScaled() const
+	{
+		return guest_extent.width != extent.width || guest_extent.height != extent.height;
+	}
+
 	VulkanImageType        type                 = VulkanImageType::Unknown;
 	VkFormat               format               = VK_FORMAT_UNDEFINED;
+	// Guest descriptor/layout calculations always use guest_extent. extent is
+	// the independently selectable Vulkan storage extent.
+	VkExtent2D             guest_extent         = {};
 	VkExtent2D             extent               = {};
 	VkImage                image                = nullptr;
 	VkImageView            image_view[VIEW_MAX] = {};
