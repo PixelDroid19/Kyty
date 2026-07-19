@@ -159,8 +159,9 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	{
 		auto* src_obj = static_cast<StorageTextureVulkanImage*>(objects.At(2).obj);
 
-		uint32_t mip_width  = src_obj->extent.width;
-		uint32_t mip_height = src_obj->extent.height;
+		const auto src_guest_extent = src_obj->GetGuestExtent();
+		uint32_t   mip_width        = src_guest_extent.width;
+		uint32_t   mip_height       = src_guest_extent.height;
 
 		Vector<ImageImageCopy> regions(1);
 

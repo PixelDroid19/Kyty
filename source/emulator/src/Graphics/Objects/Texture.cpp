@@ -449,7 +449,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 		{
 			return false;
 		}
-		if (img->extent.width != need_w || img->extent.height != need_h)
+		if (!img->MatchesGuestExtent(need_w, need_h))
 		{
 			return false;
 		}
@@ -474,8 +474,9 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 		auto* src_obj = static_cast<StorageTextureVulkanImage*>(objects.At(0).obj);
 		// Single ST parent: exact sample extent, or a larger atlas that can host
 		// mip offsets (legacy GenerateMips-style). Wrong-format parents rejected.
+		const auto src_guest_extent = (src_obj != nullptr ? src_obj->GetGuestExtent() : VkExtent2D {});
 		const bool st_ok =
-		    src_obj != nullptr && src_obj->extent.width >= width && src_obj->extent.height >= height &&
+		    src_obj != nullptr && src_guest_extent.width >= width && src_guest_extent.height >= height &&
 		    (fmt == 0u || Gen5SampleMayCopyFromSurfaceParent(static_cast<uint32_t>(fmt), src_obj->format));
 		if (!st_ok)
 		{
@@ -580,7 +581,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 				if (o.type == GpuMemoryObjectType::StorageTexture)
 				{
 					auto* src_obj = static_cast<StorageTextureVulkanImage*>(o.obj);
-					if (mip_width == src_obj->extent.width && mip_height == src_obj->extent.height)
+					if (src_obj->MatchesGuestExtent(mip_width, mip_height))
 					{
 						src_image = src_obj;
 						storage   = true;
@@ -589,7 +590,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 				} else if (o.type == GpuMemoryObjectType::RenderTexture)
 				{
 					auto* src_obj = static_cast<RenderTextureVulkanImage*>(o.obj);
-					if (mip_width == src_obj->extent.width && mip_height == src_obj->extent.height)
+					if (src_obj->MatchesGuestExtent(mip_width, mip_height))
 					{
 						src_image = src_obj;
 						storage   = false;
