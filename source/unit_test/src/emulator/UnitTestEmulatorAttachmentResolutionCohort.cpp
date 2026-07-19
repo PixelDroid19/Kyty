@@ -82,20 +82,41 @@ TEST(EmulatorAttachmentResolutionCohort, RejectsAnyUnsafeAttachment)
 	EXPECT_EQ(decision.scale, (ResolutionScale {1, 1}));
 }
 
-TEST(EmulatorAttachmentResolutionCohort, RejectsShaderCoordinatesUntilTranslationSupportsScaling)
+TEST(EmulatorAttachmentResolutionCohort, AllowsFragmentCoordinatesOnlyWhenTranslationSupportsScaling)
 {
 	InternalResolutionPolicy policy;
 	ASSERT_EQ(policy.RegisterGuestDisplayExtent({3840, 2160}), ResolutionPolicyStatus::Success);
 
 	const auto color = Color({3840, 2160});
 
-	for (const auto usage: {ResolutionShaderCoordinateUsage {true, false, false}, ResolutionShaderCoordinateUsage {false, true, false},
-	                        ResolutionShaderCoordinateUsage {false, false, true}})
-	{
-		const auto decision = EvaluateResolutionCohort(policy, {&color, 1, 1, usage});
-		EXPECT_EQ(decision.classification, ResolutionClassification::Native);
-		EXPECT_EQ(decision.reason, ResolutionCohortReason::ShaderCoordinateAccess);
-	}
+	ResolutionShaderCoordinateUsage fragment_unsupported;
+	fragment_unsupported.fragment_coordinates = true;
+	EXPECT_EQ(EvaluateResolutionCohort(policy, {&color, 1, 1, fragment_unsupported}).reason,
+	          ResolutionCohortReason::ShaderCoordinateAccess);
+
+	auto fragment_supported                           = fragment_unsupported;
+	fragment_supported.fragment_coordinates_supported = true;
+	const auto supported_decision                     = EvaluateResolutionCohort(policy, {&color, 1, 1, fragment_supported});
+	EXPECT_EQ(supported_decision.classification, ResolutionClassification::Scaled);
+	EXPECT_EQ(supported_decision.reason, ResolutionCohortReason::None);
+}
+
+TEST(EmulatorAttachmentResolutionCohort, KeepsIntegerCoordinatesAndImageSizeBlockedWithFragmentSupport)
+{
+	InternalResolutionPolicy policy;
+	ASSERT_EQ(policy.RegisterGuestDisplayExtent({3840, 2160}), ResolutionPolicyStatus::Success);
+
+	const auto color = Color({3840, 2160});
+
+	ResolutionShaderCoordinateUsage integer_coordinates;
+	integer_coordinates.fragment_coordinates_supported = true;
+	integer_coordinates.integer_image_coordinates      = true;
+	EXPECT_EQ(EvaluateResolutionCohort(policy, {&color, 1, 1, integer_coordinates}).reason, ResolutionCohortReason::ShaderCoordinateAccess);
+
+	ResolutionShaderCoordinateUsage image_size;
+	image_size.fragment_coordinates_supported = true;
+	image_size.image_size_query               = true;
+	EXPECT_EQ(EvaluateResolutionCohort(policy, {&color, 1, 1, image_size}).reason, ResolutionCohortReason::ShaderCoordinateAccess);
 }
 
 TEST(EmulatorAttachmentResolutionCohort, RejectsEmptyAndInvalidInputsStructurally)
@@ -144,9 +165,8 @@ TEST(EmulatorAttachmentResolutionCohort, ResolutionIdentityIncludesTheHostExtent
 	ASSERT_EQ(hd.RegisterGuestDisplayExtent({3840, 2160}), ResolutionPolicyStatus::Success);
 	ASSERT_EQ(full_hd.RegisterGuestDisplayExtent({3840, 2160}), ResolutionPolicyStatus::Success);
 
-	const auto hd_decision = hd.Evaluate({3840, 2160}, {ResolutionResourceKind::ColorAttachment, false});
-	const auto full_hd_decision =
-	    full_hd.Evaluate({3840, 2160}, {ResolutionResourceKind::ColorAttachment, false});
+	const auto hd_decision      = hd.Evaluate({3840, 2160}, {ResolutionResourceKind::ColorAttachment, false});
+	const auto full_hd_decision = full_hd.Evaluate({3840, 2160}, {ResolutionResourceKind::ColorAttachment, false});
 
 	EXPECT_EQ(hd_decision.identity.guest_resource_extent, full_hd_decision.identity.guest_resource_extent);
 	EXPECT_NE(hd_decision.identity.host_resource_extent, full_hd_decision.identity.host_resource_extent);

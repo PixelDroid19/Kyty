@@ -8,6 +8,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderCoordinateScale.h"
 
 #include <algorithm>
 #ifdef KYTY_EMU_ENABLED
@@ -1097,26 +1098,6 @@ struct ShaderComputeInputInfo
 {
 	return static_cast<uint32_t>(granulated_lds_size) * 128u;
 }
-
-// Converts host attachment coordinates back to guest coordinates. Callers
-// provide reduced guest/host ratios so equivalent scales share cache identity.
-struct ShaderHostToGuestScale
-{
-	uint32_t x_guest_numerator  = 1;
-	uint32_t x_host_denominator = 1;
-	uint32_t y_guest_numerator  = 1;
-	uint32_t y_host_denominator = 1;
-
-	[[nodiscard]] constexpr bool IsValid() const
-	{
-		return x_guest_numerator != 0 && x_host_denominator != 0 && y_guest_numerator != 0 && y_host_denominator != 0;
-	}
-
-	[[nodiscard]] constexpr bool IsIdentity() const
-	{
-		return x_guest_numerator == x_host_denominator && y_guest_numerator == y_host_denominator;
-	}
-};
 
 struct ShaderPixelInputInfo
 {
