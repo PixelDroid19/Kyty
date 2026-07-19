@@ -300,6 +300,7 @@ public:
 
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first);
+	bool QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 
 	// Sync: GPU -> CPU
 	void WriteBack(GraphicContext* ctx, CommandProcessor* cp);
@@ -1929,6 +1930,96 @@ Vector<GpuMemoryObject> GpuMemory::FindObjects(const uint64_t* vaddr, const uint
 	return ret;
 }
 
+bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+
+	if (vaddr == nullptr || size == nullptr || vaddr_num <= 0 || vaddr_num > VADDR_BLOCKS_MAX)
+	{
+		return false;
+	}
+	for (int i = 0; i < vaddr_num; i++)
+	{
+		if (size[i] == 0 || vaddr[i] > UINT64_MAX - (size[i] - 1))
+		{
+			return false;
+		}
+	}
+
+	Core::LockGuard lock(m_mutex);
+
+	const auto ranges_overlap = [](uint64_t a, uint64_t a_size, uint64_t b, uint64_t b_size)
+	{
+		return a <= b ? b - a < a_size : a - b < b_size;
+	};
+	bool intersects_allocated_range = false;
+	for (const auto& heap: m_heaps)
+	{
+		for (int i = 0; i < vaddr_num; i++)
+		{
+			if (ranges_overlap(vaddr[i], size[i], heap.range.vaddr, heap.range.size))
+			{
+				intersects_allocated_range = true;
+				break;
+			}
+		}
+		if (intersects_allocated_range)
+		{
+			break;
+		}
+	}
+	if (!intersects_allocated_range)
+	{
+		return true;
+	}
+
+	for (uint32_t heap_id = 0; heap_id < m_heaps.Size(); heap_id++)
+	{
+		const auto& heap    = m_heaps[heap_id];
+		const auto  objects = FindBlocks(static_cast<int>(heap_id), vaddr, size, vaddr_num);
+		for (const auto& object: objects)
+		{
+			const auto& stored = heap.objects[object.object_id];
+			EXIT_IF(stored.free);
+
+			out->total_count++;
+			if (object.relation == GpuMemoryOverlapType::Equals)
+			{
+				out->exact_count++;
+			}
+
+			GpuMemoryOverlapEntry* entry = nullptr;
+			for (uint32_t i = 0; i < out->entry_count; i++)
+			{
+				if (out->entries[i].type == stored.info.object.type && out->entries[i].relation == object.relation)
+				{
+					entry = &out->entries[i];
+					break;
+				}
+			}
+			if (entry == nullptr)
+			{
+				if (out->entry_count == GpuMemoryOverlapSnapshot::ENTRIES_MAX)
+				{
+					out->truncated = true;
+					continue;
+				}
+				entry           = &out->entries[out->entry_count++];
+				entry->type     = stored.info.object.type;
+				entry->relation = object.relation;
+				entry->exact    = object.relation == GpuMemoryOverlapType::Equals;
+			}
+			entry->count++;
+		}
+	}
+
+	return true;
+}
+
 void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type)
 {
 	EXIT_IF(type == GpuMemoryObjectType::Invalid);
@@ -2206,8 +2297,8 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks_slow(int heap_id, const
 		{
 			if (!b.free)
 			{
-				bool equal = true;
-				for (int i = 0; i < vaddr_num; i++)
+				bool equal = b.block.vaddr_num == vaddr_num;
+				for (int i = 0; equal && i < vaddr_num; i++)
 				{
 					if (GetOverlapType(b.block.vaddr[i], b.block.size[i], vaddr[i], size[i]) != OverlapType::Equals)
 					{
@@ -2315,8 +2406,8 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 			const auto& b = heap.objects[index];
 			if (!b.free)
 			{
-				bool equal = true;
-				for (int i = 0; i < vaddr_num; i++)
+				bool equal = b.block.vaddr_num == vaddr_num;
+				for (int i = 0; equal && i < vaddr_num; i++)
 				{
 					if (GetOverlapType(b.block.vaddr[i], b.block.size[i], vaddr[i], size[i]) != OverlapType::Equals)
 					{
@@ -2965,6 +3056,17 @@ Vector<GpuMemoryObject> GpuMemoryFindObjects(uint64_t vaddr, uint64_t size, GpuM
 	EXIT_IF(g_gpu_memory == nullptr);
 
 	return g_gpu_memory->FindObjects(&vaddr, &size, 1, type, exact, only_first);
+}
+
+bool GpuMemoryQueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+
+	return g_gpu_memory != nullptr && g_gpu_memory->QueryOverlaps(vaddr, size, vaddr_num, out);
 }
 
 void GpuMemoryResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type)

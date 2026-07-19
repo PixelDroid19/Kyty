@@ -1,4 +1,5 @@
 #include "Emulator/Graphics/Graphics.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
@@ -31,10 +32,10 @@ int g_test_gpu_object_deletes = 0;
 
 struct TestGpuObject: public GpuObject
 {
-	TestGpuObject()
+	explicit TestGpuObject(GpuMemoryObjectType object_type = GpuMemoryObjectType::StorageBuffer)
 	{
-		type       = GpuMemoryObjectType::StorageBuffer;
-		params[0] = 0x53544f5241474555ull;
+		type       = object_type;
+		params[0] = 0x53544f5241474555ull ^ static_cast<uint64_t>(object_type);
 	}
 
 	bool Equal(const uint64_t* other) const override { return other != nullptr && other[0] == params[0]; }
@@ -188,6 +189,97 @@ TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
 
 	EXPECT_EQ(g_test_gpu_object_deletes, 1);
 	EXPECT_TRUE(GpuMemoryFindObjects(obj_addr, obj_size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryOverlapQueryIsBoundedAndReadOnly)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	const uint64_t heap_base        = 0x0000005200000000ull;
+	const uint64_t second_heap_base = heap_base + 0x40000ull;
+	const uint64_t heap_size        = 0x20000ull;
+	const uint64_t first            = heap_base + 0x4000ull;
+	const uint64_t second           = second_heap_base + 0x6000ull;
+	const uint64_t obj_size         = 0x1000ull;
+	GpuMemorySetAllocatedRange(heap_base, heap_size);
+	GpuMemorySetAllocatedRange(second_heap_base, heap_size);
+
+	g_test_gpu_object_deletes = 0;
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, first, obj_size, TestGpuObject(GpuMemoryObjectType::StorageBuffer)), nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, second, obj_size, TestGpuObject(GpuMemoryObjectType::VertexBuffer)), nullptr);
+
+	GpuMemoryOverlapSnapshot snapshot;
+	const uint64_t           none_addr = heap_base + 0x9000ull;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&none_addr, &obj_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 0u);
+	EXPECT_EQ(snapshot.entry_count, 0u);
+	EXPECT_FALSE(snapshot.truncated);
+
+	const auto stats_before = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&first, &obj_size, 1, &snapshot));
+	ASSERT_EQ(snapshot.total_count, 1u);
+	ASSERT_EQ(snapshot.entry_count, 1u);
+	EXPECT_EQ(snapshot.exact_count, 1u);
+	EXPECT_EQ(snapshot.entries[0].type, GpuMemoryObjectType::StorageBuffer);
+	EXPECT_EQ(snapshot.entries[0].relation, GpuMemoryOverlapType::Equals);
+	EXPECT_TRUE(snapshot.entries[0].exact);
+	EXPECT_EQ(snapshot.entries[0].count, 1u);
+
+	const uint64_t partial_addr = first + 0x800ull;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&partial_addr, &obj_size, 1, &snapshot));
+	ASSERT_EQ(snapshot.total_count, 1u);
+	EXPECT_EQ(snapshot.entries[0].relation, GpuMemoryOverlapType::Crosses);
+	EXPECT_FALSE(snapshot.entries[0].exact);
+
+	const uint64_t covering_size = (second + obj_size) - first;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&first, &covering_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 2u);
+	EXPECT_EQ(snapshot.entry_count, 2u);
+	EXPECT_EQ(snapshot.exact_count, 0u);
+	EXPECT_FALSE(snapshot.truncated);
+
+	const uint64_t outer_addr = heap_base - 0x1000ull;
+	const uint64_t outer_size = (second_heap_base + heap_size + 0x1000ull) - outer_addr;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&outer_addr, &outer_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 2u);
+
+	const uint64_t range_addrs[] = {first, second};
+	const uint64_t range_sizes[] = {obj_size, obj_size};
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(range_addrs, range_sizes, 2, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 2u);
+	EXPECT_EQ(snapshot.exact_count, 0u);
+
+	const uint64_t last_addr = UINT64_MAX;
+	const uint64_t last_size = 1;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&last_addr, &last_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 0u);
+
+	const auto stats_after = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(stats_after.hash_calls, stats_before.hash_calls);
+	EXPECT_EQ(stats_after.hash_bytes, stats_before.hash_bytes);
+	EXPECT_EQ(stats_after.hash_ns, stats_before.hash_ns);
+	EXPECT_EQ(stats_after.gpu_memory_create_calls, stats_before.gpu_memory_create_calls);
+	EXPECT_EQ(stats_after.gpu_memory_create_ns, stats_before.gpu_memory_create_ns);
+	EXPECT_EQ(stats_after.live_objects, stats_before.live_objects);
+	for (uint32_t type = 0; type < kDebugStatsGpuMemoryTypeCount; type++)
+	{
+		EXPECT_EQ(stats_after.gpu_memory_types[type].fast_reuse, stats_before.gpu_memory_types[type].fast_reuse);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].exact_reuse, stats_before.gpu_memory_types[type].exact_reuse);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].new_standalone, stats_before.gpu_memory_types[type].new_standalone);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].new_linked, stats_before.gpu_memory_types[type].new_linked);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].new_from_objects, stats_before.gpu_memory_types[type].new_from_objects);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].reclaim_new, stats_before.gpu_memory_types[type].reclaim_new);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].logical_free, stats_before.gpu_memory_types[type].logical_free);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].live, stats_before.gpu_memory_types[type].live);
+	}
+	EXPECT_EQ(g_test_gpu_object_deletes, 0);
+	EXPECT_EQ(GpuMemoryFindObjects(first, obj_size, GpuMemoryObjectType::StorageBuffer, true, false).Size(), 1u);
+	EXPECT_EQ(GpuMemoryFindObjects(second, obj_size, GpuMemoryObjectType::VertexBuffer, true, false).Size(), 1u);
+
+	GpuMemoryFree(&ctx, first, obj_size, false);
+	GpuMemoryFree(&ctx, second, obj_size, false);
+	EXPECT_EQ(g_test_gpu_object_deletes, 2);
 }
 
 TEST(EmulatorGraphicsState, BlitInitializesUndefinedSource)
