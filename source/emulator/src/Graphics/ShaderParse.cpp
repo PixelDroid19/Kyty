@@ -2407,8 +2407,9 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 	{
 		if (done != 0 && compr != 0 && en == 0x0u)
 		{
-			// Null export (no channels). MRT0 may be linked to discard→OpKill;
-			// MRT1-3 are no-ops that close the export sequence (captured MRT3).
+			// Null export (no channels). Any MRT target may terminate a discard
+			// block when preceded by exec=0; outside that pattern MRT1-3 are
+			// no-ops that close the export sequence.
 			static const ShaderInstructionFormat::Format k_null[] = {
 			    ShaderInstructionFormat::Mrt0OffOffComprVmDone,
 			    ShaderInstructionFormat::Mrt1OffOffComprVmDone,

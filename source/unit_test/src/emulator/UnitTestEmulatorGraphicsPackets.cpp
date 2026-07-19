@@ -2726,6 +2726,59 @@ TEST(EmulatorGraphicsPackets, CompressedMrtExportIsGuardedByExecMask)
 	EXPECT_NE(source.FindIndex("OpStore %outColor"), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, NullMrt3ExportAfterExecZeroKillsFragment)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderOperand exec {};
+	exec.type = ShaderOperandType::ExecLo;
+	exec.size = 2;
+
+	ShaderOperand zero {};
+	zero.type       = ShaderOperandType::IntegerInlineConstant;
+	zero.constant.i = 0;
+	zero.size       = 2;
+
+	ShaderInstruction clear_exec;
+	clear_exec.pc      = 0;
+	clear_exec.type    = ShaderInstructionType::SMovB64;
+	clear_exec.format  = ShaderInstructionFormat::Sdst2Ssrc02;
+	clear_exec.dst     = exec;
+	clear_exec.src[0]  = zero;
+	clear_exec.src_num = 1;
+
+	ShaderInstruction null_mrt3;
+	null_mrt3.pc      = 4;
+	null_mrt3.type    = ShaderInstructionType::Exp;
+	null_mrt3.format  = ShaderInstructionFormat::Mrt3OffOffComprVmDone;
+	null_mrt3.src_num = 0;
+
+	ShaderInstruction end;
+	end.pc     = 12;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(clear_exec);
+	code.GetInstructions().Add(null_mrt3);
+	code.GetInstructions().Add(end);
+
+	ShaderPixelInputInfo input {};
+	input.ps_pixel_kill_enable  = true;
+	input.target_output_mode[3] = 4;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_TRUE(code.ReadBlock(0).is_discard);
+	EXPECT_NE(source.FindIndex("OpKill"), Core::STRING8_INVALID_INDEX);
+}
+
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
 // at VS PC 0x264. Same ParamN path as 0x20+N; real ShaderParse entry (not a re-impl).
 TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)

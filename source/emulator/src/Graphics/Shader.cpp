@@ -146,6 +146,18 @@ uint32_t ShaderGen5VertexInputComponentCount(uint8_t format)
 	}
 }
 
+bool ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format)
+{
+	switch (format)
+	{
+		case ShaderInstructionFormat::Mrt0OffOffComprVmDone:
+		case ShaderInstructionFormat::Mrt1OffOffComprVmDone:
+		case ShaderInstructionFormat::Mrt2OffOffComprVmDone:
+		case ShaderInstructionFormat::Mrt3OffOffComprVmDone: return true;
+		default: return false;
+	}
+}
+
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component)
 {
 	EXIT_NOT_IMPLEMENTED(channel_order > 3);
@@ -613,7 +625,7 @@ static bool IsDiscardInstruction(const Vector<ShaderInstruction>& code, uint32_t
 		const auto& inst      = code.At(index);
 		const auto& next_inst = code.At(index + 1);
 
-		return (inst.type == ShaderInstructionType::Exp && inst.format == ShaderInstructionFormat::Mrt0OffOffComprVmDone &&
+		return (inst.type == ShaderInstructionType::Exp && ShaderIsNullMrtDoneFormat(inst.format) &&
 		        prev_inst.type == ShaderInstructionType::SMovB64 && prev_inst.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
 		        prev_inst.dst.type == ShaderOperandType::ExecLo && prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
 		        prev_inst.src[0].constant.i == 0 && next_inst.type == ShaderInstructionType::SEndpgm);
