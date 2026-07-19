@@ -8,6 +8,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Libs/Errno.h"
+#include "Emulator/Libs/LibAmpr.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 
@@ -1665,10 +1666,7 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBuffer(void* cmd, uint64_t arg1, void* a
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	// Command payloads (ReadFile / WriteAddress / equeue wake) are applied when
-	// the Ampr builder APIs append them. Hardware defers work until this submit;
-	// sync HLE has nothing left to drain.
-	return OK;
+	return Ampr::SubmitCommandBuffer(cmd, static_cast<uintptr_t>(arg3));
 }
 
 static uint32_t AprAllocateSubmissionId(uint64_t cmd)

@@ -114,8 +114,7 @@ int KYTY_SYSV_ABI KernelAprGetFileSize(uint32_t file_id, uint64_t* size);
 int KYTY_SYSV_ABI KernelAprGetFileStat(uint32_t file_id, FileStat* st);
 
 // sceKernelAprSubmitCommandBuffer — NID eE4Szl8sil8.
-// Observed SysV ABI: (cmd, 1, ptr, 2, ptr). Ampr builders already run
-// eagerly, so submit is currently a success acknowledgement.
+// Observed SysV ABI: (cmd, 1, ptr, completion_ident, ptr).
 int KYTY_SYSV_ABI KernelAprSubmitCommandBuffer(void* cmd, uint64_t arg1, void* arg2, uint64_t arg3, void* arg4);
 // Submit variants with submission id / result blob (Gen5 APR waiters).
 int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetId(void* cmd, uint64_t arg1, uint32_t* out_submission_id);
