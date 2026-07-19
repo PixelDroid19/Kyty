@@ -456,6 +456,9 @@ struct RenderDepthInfo
 	bool                        stencil_clear_enable     = false;
 	uint8_t                     stencil_clear_value      = 0;
 	bool                        stencil_test_enable      = false;
+	bool                        sampled                  = false;
+	bool                        update_compression_state = false;
+	bool                        compressed_after_draw    = false;
 	PipelineStencilStaticState  stencil_static_front;
 	PipelineStencilStaticState  stencil_static_back;
 	PipelineStencilDynamicState stencil_dynamic_front;
@@ -485,6 +488,15 @@ struct RenderColorInfo
 	bool                      cmask_fast_clear_enable[TARGETS_MAX] {};
 	uint32_t                  clear_word0[TARGETS_MAX] {};
 	uint32_t                  clear_word1[TARGETS_MAX] {};
+	RenderTextureFormat       render_texture_format = RenderTextureFormat::Unknown;
+	VideoOutVulkanImage*      existing_video_image  = nullptr;
+	uint32_t                  width                 = 0;
+	uint32_t                  height                = 0;
+	uint32_t                  pitch                 = 0;
+	uint32_t                  size                  = 0;
+	bool                      tile                  = false;
+	bool                      neo                   = false;
+	bool                      write_back            = false;
 };
 
 // Latest 1280x720 color targets (for KYTY_DUMP_RT paired with VideoOut frame dumps).
@@ -4427,7 +4439,7 @@ void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, ui
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, const HW::Context& hw, RenderDepthInfo* r)
+static void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -4554,14 +4566,9 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 	// EXIT_NOT_IMPLEMENTED(r->stencil_test_enable);
 	EXIT_NOT_IMPLEMENTED(dc.backface_enable);
 
-	r->vulkan_buffer = nullptr;
-
 	if (r->format != VK_FORMAT_UNDEFINED)
 	{
-		bool sampled = ((effective_stencil == 0 && z.z_info.tile_mode_index != 0) || z.stencil_info.texture_compatible_stencil);
-
-		DepthStencilBufferObject vulkan_buffer_info(r->format, r->width, r->height, htile, neo, sampled, r->htile_buffer_vaddr,
-		                                            r->htile_buffer_size);
+		r->sampled = ((effective_stencil == 0 && z.z_info.tile_mode_index != 0) || z.stencil_info.texture_compatible_stencil);
 
 		EXIT_NOT_IMPLEMENTED(z.z_info.tile_mode_index != 0 && r->depth_tile_swizzle != 0);
 		EXIT_NOT_IMPLEMENTED(r->stencil_tile_swizzle != 0);
@@ -4591,27 +4598,41 @@ static void FindRenderDepthInfo(uint64_t submit_id, CommandBuffer* /*buffer*/, c
 		}
 
 		EXIT_NOT_IMPLEMENTED(r->vaddr_num == 0);
+		r->update_compression_state = ((cc.mode == 0 && cc.op == 0xCC) || (dc.z_enable || dc.z_write_enable));
+		r->compressed_after_draw    = htile && !decompress;
+	}
+}
 
-		r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
-		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
+static void MaterializeRenderDepthInfo(uint64_t submit_id, RenderDepthInfo* r)
+{
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(r == nullptr);
 
-		EXIT_NOT_IMPLEMENTED(r->vulkan_buffer == nullptr);
-		if (htile && DepthMetaConsumeClear(r->htile_buffer_vaddr))
-		{
-			const auto clear_actions = State::ResolveDepthClearActions(rc.depth_clear_enable, true);
-			r->depth_clear_enable    = clear_actions.vulkan_clear;
-			r->suppress_depth_write  = clear_actions.suppress_depth_write;
-		}
+	if (r->format == VK_FORMAT_UNDEFINED)
+	{
+		return;
+	}
 
-		if ((cc.mode == 0 && cc.op == 0xCC) || (dc.z_enable || dc.z_write_enable))
-		{
-			r->vulkan_buffer->compressed = htile && !decompress;
-		}
+	DepthStencilBufferObject vulkan_buffer_info(r->format, r->width, r->height, r->htile, r->neo, r->sampled,
+	                                            r->htile_buffer_vaddr, r->htile_buffer_size);
+	r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
+	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
+	EXIT_NOT_IMPLEMENTED(r->vulkan_buffer == nullptr);
+
+	if (r->htile && DepthMetaConsumeClear(r->htile_buffer_vaddr))
+	{
+		const auto clear_actions = State::ResolveDepthClearActions(r->depth_clear_enable, true);
+		r->depth_clear_enable    = clear_actions.vulkan_clear;
+		r->suppress_depth_write  = clear_actions.suppress_depth_write;
+	}
+	if (r->update_compression_state)
+	{
+		r->vulkan_buffer->compressed = r->compressed_after_draw;
 	}
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw, RenderColorInfo* r)
+static void DescribeRenderColorInfo(const HW::Context& hw, RenderColorInfo* r)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -4643,26 +4664,19 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 
 	bool ps5 = Config::IsNextGen();
 
-	uint32_t width      = 0;
-	uint32_t height     = 0;
-	uint32_t pitch      = 0;
-	uint32_t size       = 0;
-	bool     tile       = false;
-	bool     write_back = false;
-
 	if (ps5)
 	{
 		switch (rt.attrib3.tile_mode)
 		{
 			case 0x1b:
-				tile       = true;
-				write_back = false;
+				r->tile       = true;
+				r->write_back = false;
 				break;
 			default: EXIT("unknown tile mode: %u\n", rt.attrib3.tile_mode);
 		}
 
-		width  = rt.attrib2.width + 1;
-		height = rt.attrib2.height + 1;
+		r->width  = rt.attrib2.width + 1;
+		r->height = rt.attrib2.height + 1;
 
 		// CB_COLOR FORMAT field: 0x1 = COLOR_8 (1 Bpp), 0xa = COLOR_8_8_8_8 (4),
 		// 0xc = COLOR_16_16_16_16 (8). TileGetRenderTargetSize needs exact Bpp.
@@ -4682,7 +4696,7 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		// to the 64 KiB block width for this BPE (same rule as sample tile 27).
 		if (rt.pitch.pitch_div8_minus1 != 0)
 		{
-			pitch = (rt.pitch.pitch_div8_minus1 + 1u) << 3u;
+			r->pitch = (rt.pitch.pitch_div8_minus1 + 1u) << 3u;
 		} else
 		{
 			static constexpr uint32_t k_block_w[] = {256u, 256u, 128u, 128u, 64u};
@@ -4694,92 +4708,85 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 				log2++;
 			}
 			const uint32_t bw = k_block_w[log2];
-			pitch             = (width + bw - 1u) & ~(bw - 1u);
+			r->pitch          = (r->width + bw - 1u) & ~(bw - 1u);
 		}
 
 		Graphics::TileSizeAlign size32 {};
-		Graphics::TileGetRenderTargetSize(width, height, pitch, rt.attrib3.tile_mode, rt_bpp, &size32);
+		Graphics::TileGetRenderTargetSize(r->width, r->height, r->pitch, rt.attrib3.tile_mode, rt_bpp, &size32);
 
-		size = size32.size;
+		r->size = size32.size;
 
-		if (size == 0)
+		if (r->size == 0)
 		{
 			EXIT("unsupported Gen5 render-target layout: width=%" PRIu32 ", height=%" PRIu32 ", pitch=%" PRIu32 ", tile=%s, neo=%s\n",
-			     width, height, pitch, tile ? "true" : "false", rt.info.neo_mode ? "true" : "false");
+			     r->width, r->height, r->pitch, r->tile ? "true" : "false", rt.info.neo_mode ? "true" : "false");
 		}
 	} else
 	{
 		switch (rt.attrib.tile_mode)
 		{
 			case 0x8:
-				tile       = false;
-				write_back = false;
+				r->tile       = false;
+				r->write_back = false;
 				break;
 
 			case 0x1f:
-				tile       = false;
-				write_back = true;
+				r->tile       = false;
+				r->write_back = true;
 				break;
 
 			case 0xa:
 			case 0xd:
 			case 0xe:
-				tile       = true;
-				write_back = false;
+				r->tile       = true;
+				r->write_back = false;
 				break;
 
 			default: EXIT("unknown tile mode: %u\n", rt.attrib.tile_mode);
 		}
 
-		width  = rt.size.width;
-		height = rt.size.height;
-		pitch  = (rt.pitch.pitch_div8_minus1 + 1) * 8;
-		size   = (rt.slice.slice_div64_minus1 + 1) * 64 * 4;
+		r->width  = rt.size.width;
+		r->height = rt.size.height;
+		r->pitch  = (rt.pitch.pitch_div8_minus1 + 1) * 8;
+		r->size   = (rt.slice.slice_div64_minus1 + 1) * 64 * 4;
 	}
+	r->neo = rt.info.neo_mode;
 
 	auto video_image       = VideoOut::VideoOutGetImage(rt.base.addr);
 	bool render_to_texture = (video_image.image == nullptr);
 
 	if (render_to_texture)
 	{
-		RenderTextureFormat rt_format = RenderTextureFormat::Unknown;
-
 		if (rt.info.format == 0xa && rt.info.channel_type == 0x0 && rt.info.channel_order == 0x0)
 		{
-			rt_format = RenderTextureFormat::R8G8B8A8Unorm;
+			r->render_texture_format = RenderTextureFormat::R8G8B8A8Unorm;
 		} else if (rt.info.format == 0xa && rt.info.channel_type == 0x6 && rt.info.channel_order == 0x0)
 		{
-			rt_format = RenderTextureFormat::R8G8B8A8Srgb;
+			r->render_texture_format = RenderTextureFormat::R8G8B8A8Srgb;
 		} else if (rt.info.format == 0xa && rt.info.channel_type == 0x0 && rt.info.channel_order == 0x1)
 		{
-			rt_format = RenderTextureFormat::B8G8R8A8Unorm;
+			r->render_texture_format = RenderTextureFormat::B8G8R8A8Unorm;
 		} else if (rt.info.format == 0xa && rt.info.channel_type == 0x6 && rt.info.channel_order == 0x1)
 		{
-			rt_format = RenderTextureFormat::B8G8R8A8Srgb;
+			r->render_texture_format = RenderTextureFormat::B8G8R8A8Srgb;
 		} else if (rt.info.format == 0x1 && rt.info.channel_type == 0x0 && rt.info.channel_order == 0x0)
 		{
-			rt_format = RenderTextureFormat::R8Unorm;
+			r->render_texture_format = RenderTextureFormat::R8Unorm;
 		} else if (rt.info.format == 0xc && rt.info.channel_type == 0x7 &&
 		           (rt.info.channel_order == 0x0 || rt.info.channel_order == 0x2))
 		{
 			// Captured post-Play HDR/intermediate RT: COLOR_16_16_16_16 + FLOAT.
 			// SWAP_STD_REV (2) preserves the same 4x16-bit storage; component
 			// ordering is handled at shader/sample boundaries.
-			rt_format = RenderTextureFormat::R16G16B16A16Sfloat;
+			r->render_texture_format = RenderTextureFormat::R16G16B16A16Sfloat;
 		} else
 		{
 			EXIT("%s\n unknown format\n", rt_print("RenderTarget", rt).Concat(U"").C_Str());
 		}
 
-		// Render to texture
-		RenderTextureObject vulkan_buffer_info(rt_format, width, height, tile, rt.info.neo_mode, pitch, write_back);
-		auto*               buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(
-            Graphics::GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, rt.base.addr, size, vulkan_buffer_info));
-		EXIT_NOT_IMPLEMENTED(buffer_vulkan == nullptr);
-		r->type[0]          = RenderColorType::RenderTexture;
-		r->base_addr[0]     = rt.base.addr;
-		r->vulkan_buffer[0] = buffer_vulkan;
-		r->buffer_size[0]   = size;
+		r->type[0]        = RenderColorType::RenderTexture;
+		r->base_addr[0]   = rt.base.addr;
+		r->buffer_size[0] = r->size;
 
 		// Additional MRTs: same dimensions/format as RT0 (captured multi-target path).
 		for (uint32_t slot = 1; slot < r->targets_num; slot++)
@@ -4792,14 +4799,9 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 				                     other.info.channel_type != rt.info.channel_type ||
 				                     other.info.channel_order != rt.info.channel_order);
 			}
-			auto* other_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(
-			    Graphics::GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, other.base.addr, size,
-			                                    vulkan_buffer_info));
-			EXIT_NOT_IMPLEMENTED(other_vulkan == nullptr);
-			r->type[slot]          = RenderColorType::RenderTexture;
-			r->base_addr[slot]     = other.base.addr;
-			r->vulkan_buffer[slot] = other_vulkan;
-			r->buffer_size[slot]   = size;
+			r->type[slot]        = RenderColorType::RenderTexture;
+			r->base_addr[slot]   = other.base.addr;
+			r->buffer_size[slot] = r->size;
 		}
 	} else
 	{
@@ -4808,12 +4810,12 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 
 		// Display buffer (single swapchain target only).
 		EXIT_NOT_IMPLEMENTED(r->targets_num != 1);
-		EXIT_NOT_IMPLEMENTED(video_image.buffer_size != size);
-		EXIT_NOT_IMPLEMENTED(video_image.buffer_pitch != pitch);
-		r->type[0]          = RenderColorType::DisplayBuffer;
-		r->base_addr[0]     = rt.base.addr;
-		r->vulkan_buffer[0] = video_image.image;
-		r->buffer_size[0]   = video_image.buffer_size;
+		EXIT_NOT_IMPLEMENTED(video_image.buffer_size != r->size);
+		EXIT_NOT_IMPLEMENTED(video_image.buffer_pitch != r->pitch);
+		r->type[0]               = RenderColorType::DisplayBuffer;
+		r->base_addr[0]          = rt.base.addr;
+		r->buffer_size[0]        = video_image.buffer_size;
+		r->existing_video_image = video_image.image;
 	}
 
 	for (uint32_t slot = 0; slot < r->targets_num; slot++)
@@ -4822,6 +4824,33 @@ static void FindRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, const
 		r->cmask_fast_clear_enable[slot] = rt_slot.info.cmask_fast_clear_enable;
 		r->clear_word0[slot]             = rt_slot.clear_word0.word0;
 		r->clear_word1[slot]             = rt_slot.clear_word1.word1;
+	}
+}
+
+static void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, RenderColorInfo* r)
+{
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(r == nullptr);
+
+	if (r->targets_num == 0)
+	{
+		return;
+	}
+	if (r->type[0] == RenderColorType::DisplayBuffer)
+	{
+		r->vulkan_buffer[0] = r->existing_video_image;
+		EXIT_NOT_IMPLEMENTED(r->vulkan_buffer[0] == nullptr);
+		return;
+	}
+
+	RenderTextureObject vulkan_buffer_info(r->render_texture_format, r->width, r->height, r->tile, r->neo, r->pitch, r->write_back);
+	for (uint32_t slot = 0; slot < r->targets_num; slot++)
+	{
+		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(
+		    Graphics::GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->base_addr[slot], r->size,
+		                                    vulkan_buffer_info));
+		EXIT_NOT_IMPLEMENTED(buffer_vulkan == nullptr);
+		r->vulkan_buffer[slot] = buffer_vulkan;
 	}
 }
 
@@ -5918,15 +5947,16 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	EXIT_NOT_IMPLEMENTED(type != 1);
 
 	RenderDepthInfo depth_info;
-	FindRenderDepthInfo(submit_id, buffer, *ctx, &depth_info);
-
 	RenderColorInfo color_info;
-	FindRenderColorInfo(submit_id, buffer, *ctx, &color_info);
+	DescribeRenderDepthInfo(*ctx, &depth_info);
+	DescribeRenderColorInfo(*ctx, &color_info);
 	if (color_info.targets_num == 0 && depth_info.format == VK_FORMAT_UNDEFINED)
 	{
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
+	MaterializeRenderDepthInfo(submit_id, &depth_info);
+	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
 
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
 
@@ -6044,15 +6074,16 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
 
 	RenderDepthInfo depth_info;
-	FindRenderDepthInfo(submit_id, buffer, *ctx, &depth_info);
-
 	RenderColorInfo color_info;
-	FindRenderColorInfo(submit_id, buffer, *ctx, &color_info);
+	DescribeRenderDepthInfo(*ctx, &depth_info);
+	DescribeRenderColorInfo(*ctx, &color_info);
 	if (color_info.targets_num == 0 && depth_info.format == VK_FORMAT_UNDEFINED)
 	{
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
+	MaterializeRenderDepthInfo(submit_id, &depth_info);
+	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
 
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
 
