@@ -33,9 +33,13 @@ target_sources(emulator PRIVATE
 	src/Kernel/Time.cpp
 	src/Graphics/PipelineCacheStore.cpp
 	src/Graphics/GpuDirtyPageTracker.cpp
+	src/Graphics/GpuSubmissionTracker.cpp
+	src/Graphics/GpuSubmissionCoordinator.cpp
 	src/Graphics/ShaderTranslationCache.cpp
 	include/Emulator/Graphics/PipelineCacheStore.h
 	include/Emulator/Graphics/GpuDirtyPageTracker.h
+	include/Emulator/Graphics/GpuSubmissionTracker.h
+	include/Emulator/Graphics/GpuSubmissionCoordinator.h
 	include/Emulator/Graphics/ShaderTranslationCache.h
 	src/Validation/DomainValidators.cpp
 	include/Emulator/Validation/DomainValidators.h
