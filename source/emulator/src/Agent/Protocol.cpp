@@ -570,6 +570,39 @@ std::string JsonString(const char* value)
 	return std::string("\"") + JsonEscape(value) + "\"";
 }
 
+void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceSnapshot& performance, std::string* out)
+{
+	EXIT_IF(out == nullptr);
+
+	*out += "\"gpu_memory\":{\"create_calls\":" + std::to_string(performance.gpu_memory_create_calls);
+	*out += ",\"create_ns\":" + std::to_string(performance.gpu_memory_create_ns);
+	*out += ",\"create_max_ns\":" + std::to_string(performance.gpu_memory_create_max_ns);
+	*out += ",\"types\":[";
+	constexpr const char* type_names[Libs::Graphics::kDebugStatsGpuMemoryTypeCount] = {
+	    "video_out_buffer", "depth_stencil_buffer", "label",         "index_buffer",  "vertex_buffer",
+	    "storage_buffer",   "texture",              "render_texture", "storage_texture"};
+	for (uint32_t i = 0; i < Libs::Graphics::kDebugStatsGpuMemoryTypeCount; ++i)
+	{
+		if (i != 0)
+		{
+			*out += ',';
+		}
+		const auto& type = performance.gpu_memory_types[i];
+		*out += "{\"type\":\"";
+		*out += type_names[i];
+		*out += "\",\"fast_reuse\":" + std::to_string(type.fast_reuse);
+		*out += ",\"exact_reuse\":" + std::to_string(type.exact_reuse);
+		*out += ",\"new_standalone\":" + std::to_string(type.new_standalone);
+		*out += ",\"new_linked\":" + std::to_string(type.new_linked);
+		*out += ",\"new_from_objects\":" + std::to_string(type.new_from_objects);
+		*out += ",\"reclaim_new\":" + std::to_string(type.reclaim_new);
+		*out += ",\"logical_free\":" + std::to_string(type.logical_free);
+		*out += ",\"live\":" + std::to_string(type.live);
+		*out += '}';
+	}
+	*out += "]}";
+}
+
 std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Core::BringUp::Diagnostics& bringup,
                                    const Loader::MissingImportDiagnostics& imports, const Loader::ModuleLoadPlanDiagnostics& load_plan)
 {
@@ -767,33 +800,9 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	    static_cast<unsigned long long>(performance.shader_translation_cache_evictions),
 	    static_cast<unsigned long long>(performance.live_objects), performance.fps, performance.frame_time_ms);
 	out += performance_json;
-	out += ",\"gpu_memory\":{\"create_calls\":" + std::to_string(performance.gpu_memory_create_calls);
-	out += ",\"create_ns\":" + std::to_string(performance.gpu_memory_create_ns);
-	out += ",\"create_max_ns\":" + std::to_string(performance.gpu_memory_create_max_ns);
-	out += ",\"types\":[";
-	constexpr const char* gpu_memory_type_names[Libs::Graphics::kDebugStatsGpuMemoryTypeCount] = {
-	    "video_out_buffer", "depth_stencil_buffer", "label",   "index_buffer",  "vertex_buffer",
-	    "storage_buffer",   "texture",              "render_texture", "storage_texture"};
-	for (uint32_t i = 0; i < Libs::Graphics::kDebugStatsGpuMemoryTypeCount; ++i)
-	{
-		if (i != 0)
-		{
-			out += ',';
-		}
-		const auto& type = performance.gpu_memory_types[i];
-		out += "{\"type\":\"";
-		out += gpu_memory_type_names[i];
-		out += "\",\"fast_reuse\":" + std::to_string(type.fast_reuse);
-		out += ",\"exact_reuse\":" + std::to_string(type.exact_reuse);
-		out += ",\"new_standalone\":" + std::to_string(type.new_standalone);
-		out += ",\"new_linked\":" + std::to_string(type.new_linked);
-		out += ",\"new_from_objects\":" + std::to_string(type.new_from_objects);
-		out += ",\"reclaim_new\":" + std::to_string(type.reclaim_new);
-		out += ",\"logical_free\":" + std::to_string(type.logical_free);
-		out += ",\"live\":" + std::to_string(type.live);
-		out += '}';
-	}
-	out += "]}}";
+	out += ',';
+	AppendGpuMemoryPerformanceJson(performance, &out);
+	out += '}';
 
 	out += ",\"missing_imports\":{";
 	out += "\"resolution_attempts\":" + std::to_string(imports.resolution_attempts);

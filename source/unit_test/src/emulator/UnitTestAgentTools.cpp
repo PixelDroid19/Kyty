@@ -442,6 +442,27 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	DebugStatsShutdown();
 }
 
+TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
+{
+	Libs::Graphics::DebugStatsPerformanceSnapshot snapshot {};
+	snapshot.gpu_memory_create_calls                = 2;
+	snapshot.gpu_memory_create_ns                   = 300;
+	snapshot.gpu_memory_create_max_ns               = 200;
+	snapshot.gpu_memory_types[3].reclaim_new        = 1;
+	snapshot.gpu_memory_types[3].logical_free       = 1;
+	snapshot.gpu_memory_types[3].live               = 7;
+	snapshot.gpu_memory_types[4].fast_reuse         = 9;
+
+	std::string json;
+	AppendGpuMemoryPerformanceJson(snapshot, &json);
+
+	EXPECT_NE(json.find(R"("gpu_memory":{"create_calls":2,"create_ns":300,"create_max_ns":200)"), std::string::npos);
+	EXPECT_NE(json.find(R"("type":"index_buffer")"), std::string::npos);
+	EXPECT_NE(json.find(R"("reclaim_new":1,"logical_free":1,"live":7)"), std::string::npos);
+	EXPECT_NE(json.find(R"("type":"vertex_buffer","fast_reuse":9)"), std::string::npos);
+	EXPECT_EQ(json.find("PPSA"), std::string::npos);
+}
+
 TEST(AgentTools, ProtocolRejectsUnknownShape)
 {
 	Request   req {};
