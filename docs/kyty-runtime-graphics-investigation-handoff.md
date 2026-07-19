@@ -295,3 +295,34 @@ against the same correct gameplay capture.
 Process survival, a clean HUD, or a single recognizable frame is not
 playability acceptance. Do not fabricate clears, alpha tests, resources,
 signals, formats, or fallbacks to make the workload continue.
+
+## Dirty-page tracking performance phase
+
+The first optimization phase is now implemented on `codex/graphics-runtime-fixes`.
+`GpuMemory::Update` registers only CPU-upload resources (`check_hash=true`) in
+a fixed-capacity page tracker. Pages are armed read-only with the actual host
+page size; the write-fault path increments an atomic generation and enables the
+faulting page using the signal-safe VM primitive. Each GPU object stores its own
+generation snapshot, so an overlapping object cannot consume another object's
+dirty evidence. Registration, protection, capacity, and upload uncertainty
+remain on the XXH64 fallback path.
+
+The handler boundary is intentionally narrow: it does not take `GpuMemory` or
+virtual-memory bookkeeping locks, allocate, log, hash, or call Vulkan. Host
+destinations in CP WriteData/constant-RAM dumps, libc copy/set/read helpers,
+and file reads call the same notification seam. DMA sources are not marked.
+Object teardown unregisters ranges before object IDs are recycled. The tracker
+uses tombstones for page-table removal and range reference counts to preserve
+collision and overlap correctness.
+
+Focused validation currently passes 5/5 dirty-tracker tests and 214/214
+GraphicsPackets/GraphicsState/CoreVirtualMemory tests (one macOS-only test is
+skipped on Linux). The tracker is deliberately opt-in with
+`KYTY_ENABLE_GPU_DIRTY_TRACKING=1`: a short A/B capture showed that the first
+page-fault implementation was slower than the hash baseline and once exited
+before the second present. The normal runtime therefore keeps XXH64 active
+until a longer, controlled run proves a gain. When profiling the prototype,
+compare hash bytes/time, skipped scans, upload time, median FPS, p99 frame time,
+and visual correctness against the prior Release+Silent baseline. If any
+false-clean upload or visual change appears, leave the affected ranges on
+XXH64 fallback and use the counters/tests to isolate the producer.

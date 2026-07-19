@@ -6,6 +6,7 @@
 #include "Kyty/Core/String.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/CxaDynamicCast.h"
@@ -40,6 +41,8 @@ extern "C" void _longjmp(void*, int);
 namespace Kyty::Libs {
 
 namespace LibC {
+
+using Kyty::Libs::Graphics::GpuMemoryCheckAccessViolation;
 
 LIB_VERSION("libc", 1, "libc", 1, 1);
 
@@ -367,10 +370,12 @@ static KYTY_SYSV_ABI void c_free(void* p)
 }
 static KYTY_SYSV_ABI void* c_memcpy(void* d, const void* s, size_t n)
 {
+	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(d), n);
 	return ::memcpy(d, s, n);
 }
 static KYTY_SYSV_ABI int c_memcpy_s(void* d, size_t dn, const void* s, size_t n)
 {
+	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(d), n < dn ? n : dn);
 	return (::memcpy(d, s, n < dn ? n : dn), 0);
 }
 // Gen5 libc_v1 memmove_s — NID B59+zQQCcbU (Astro after strtoull).
@@ -380,15 +385,18 @@ static KYTY_SYSV_ABI int c_memmove_s(void* d, size_t dn, const void* s, size_t n
 	{
 		return -1;
 	}
+	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(d), n < dn ? n : dn);
 	::memmove(d, s, n < dn ? n : dn);
 	return 0;
 }
 static KYTY_SYSV_ABI void* c_memmove(void* d, const void* s, size_t n)
 {
+	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(d), n);
 	return ::memmove(d, s, n);
 }
 static KYTY_SYSV_ABI void* c_memset(void* d, int c, size_t n)
 {
+	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(d), n);
 	return ::memset(d, c, n);
 }
 // Gen5 libc_v1 memset_s — NID h8GwqPFbu6I (Astro after DrawIndexIndirect).
@@ -399,6 +407,7 @@ static KYTY_SYSV_ABI int c_memset_s(void* s, size_t smax, int c, size_t n)
 	{
 		return -1;
 	}
+	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(s), n < smax ? n : smax);
 	::memset(s, c, n < smax ? n : smax);
 	return 0;
 }
@@ -774,7 +783,9 @@ static KYTY_SYSV_ABI int c_fclose(FILE* f)
 }
 static KYTY_SYSV_ABI size_t c_fread(void* p, size_t sz, size_t n, FILE* f)
 {
-	return ::fread(p, sz, n, f);
+	const size_t result = ::fread(p, sz, n, f);
+	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(p), result * sz);
+	return result;
 }
 // Gen5 libc_v1 fgets — NID KdP-nULpuGw.
 static KYTY_SYSV_ABI char* c_fgets(char* s, int n, FILE* f)
@@ -783,7 +794,12 @@ static KYTY_SYSV_ABI char* c_fgets(char* s, int n, FILE* f)
 	{
 		return nullptr;
 	}
-	return ::fgets(s, n, f);
+	char* result = ::fgets(s, n, f);
+	if (result != nullptr)
+	{
+		GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(s), std::strlen(s) + 1);
+	}
+	return result;
 }
 static KYTY_SYSV_ABI size_t c_fwrite(const void* p, size_t sz, size_t n, FILE* f)
 {
