@@ -43,6 +43,7 @@ target_sources(emulator PRIVATE
 	src/Graphics/InternalResolutionRuntime.cpp
 	src/Graphics/AttachmentResolutionCohort.cpp
 	src/Graphics/ResolutionImageCapability.cpp
+	src/Graphics/ResolutionCoordinateTransform.cpp
 	include/Emulator/Graphics/PipelineCacheStore.h
 	include/Emulator/Graphics/GpuDirtyPageTracker.h
 	include/Emulator/Graphics/CommandProcessorSubmissionSlots.h
@@ -55,6 +56,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/InternalResolutionRuntime.h
 	include/Emulator/Graphics/AttachmentResolutionCohort.h
 	include/Emulator/Graphics/ResolutionImageCapability.h
+	include/Emulator/Graphics/ResolutionCoordinateTransform.h
 	src/Validation/DomainValidators.cpp
 	include/Emulator/Validation/DomainValidators.h
 	include/Emulator/Agent/EventRing.h
