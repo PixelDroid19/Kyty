@@ -2,6 +2,7 @@
 
 #include "Emulator/Graphics/AttachmentResolutionCohort.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 
 UT_BEGIN(EmulatorAttachmentResolutionCohort);
 
@@ -150,6 +151,31 @@ TEST(EmulatorAttachmentResolutionCohort, ResolutionIdentityIncludesTheHostExtent
 	EXPECT_EQ(hd_decision.identity.guest_resource_extent, full_hd_decision.identity.guest_resource_extent);
 	EXPECT_NE(hd_decision.identity.host_resource_extent, full_hd_decision.identity.host_resource_extent);
 	EXPECT_NE(hd_decision.identity, full_hd_decision.identity);
+}
+
+TEST(EmulatorAttachmentResolutionCohort, NativeDepthStencilIdentityUsesGuestExtentForHostExtent)
+{
+	const DepthStencilBufferObject native(VK_FORMAT_D32_SFLOAT, 3840, 2160, true, false, true, 0x1000, 0x2000);
+
+	EXPECT_EQ(native.params[DepthStencilBufferObject::PARAM_GUEST_WIDTH], 3840u);
+	EXPECT_EQ(native.params[DepthStencilBufferObject::PARAM_GUEST_HEIGHT], 2160u);
+	EXPECT_EQ(native.params[DepthStencilBufferObject::PARAM_HOST_WIDTH], 3840u);
+	EXPECT_EQ(native.params[DepthStencilBufferObject::PARAM_HOST_HEIGHT], 2160u);
+}
+
+TEST(EmulatorAttachmentResolutionCohort, ScaledDepthStencilIdentityDistinguishesHostExtent)
+{
+	const DepthStencilBufferObject native(VK_FORMAT_D32_SFLOAT, 3840, 2160, true, false, true, 0x1000, 0x2000);
+	const DepthStencilBufferObject scaled_720p(VK_FORMAT_D32_SFLOAT, 3840, 2160, 1280, 720, true, false, true, 0x1000,
+	                                           0x2000);
+	const DepthStencilBufferObject same_scaled_720p(VK_FORMAT_D32_SFLOAT, 3840, 2160, 1280, 720, true, false, true, 0x1000,
+	                                                0x2000);
+	const DepthStencilBufferObject scaled_1080p(VK_FORMAT_D32_SFLOAT, 3840, 2160, 1920, 1080, true, false, true, 0x1000,
+	                                            0x2000);
+
+	EXPECT_FALSE(native.Equal(scaled_720p.params));
+	EXPECT_TRUE(scaled_720p.Equal(same_scaled_720p.params));
+	EXPECT_FALSE(scaled_720p.Equal(scaled_1080p.params));
 }
 
 UT_END();
