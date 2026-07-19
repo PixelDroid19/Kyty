@@ -4,6 +4,7 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/Tile.h"
@@ -1163,6 +1164,20 @@ TEST(EmulatorGraphicsState, SkipWriteBackInvalidateForGpuOwnedRenderTexture)
 
 	EXPECT_FALSE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::Texture, gpu_owned));
 	EXPECT_FALSE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::VertexBuffer, gpu_owned));
+}
+
+TEST(EmulatorGraphicsState, TiledGpuOwnedRenderTextureUpdatePreservesTrackedLayout)
+{
+	GraphicContext                ctx {};
+	RenderTextureVulkanImage      image;
+	const RenderTextureObject     render_texture(RenderTextureFormat::R8G8B8A8Unorm, 642, 362, true, false, 642, false);
+	const uint64_t                vaddr = 0x0000005100000000ull;
+	const uint64_t                size  = 642u * 362u * 4u;
+
+	image.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	render_texture.GetUpdateFunc()(&ctx, render_texture.params, &image, &vaddr, &size, 1);
+
+	EXPECT_EQ(image.layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 TEST(EmulatorGraphicsState, UsesTrackedLayoutWhenUploadingOverExistingImage)
