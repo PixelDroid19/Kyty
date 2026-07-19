@@ -7,6 +7,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/Objects/LabelSubmissionTracker.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
 
@@ -69,7 +70,7 @@ public:
 	void   Delete(Label* label);
 	void   Set(CommandBuffer* buffer, Label* label);
 	void   DrainCompleted();
-	void   CompleteSubmitted(CommandProcessor* cp);
+	void   CompleteSubmission(SubmissionId submission);
 	void   WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size);
 
 private:
@@ -82,6 +83,9 @@ private:
 	Core::Mutex    m_mutex;
 	Core::CondVar  m_cond_var;
 	Vector<Label*> m_labels;
+	// Exact logical submission containing each active Label's vkCmdSetEvent.
+	// Protected by m_mutex together with m_labels and Label::status.
+	LabelSubmissionTracker m_submission_labels;
 	// OnlyFlip ActiveDeleted labels force-completed under BufferFlush: destroy
 	// here (Label thread) so GraphicsRunCommandProcessorWait is not nested under
 	// the CommandProcessor mutex.
@@ -235,6 +239,13 @@ void LabelManager::ThreadRun(void* data)
 		{
 			if (label->status == LabelStatus::Active || label->status == LabelStatus::ActiveDeleted)
 			{
+				// Bound labels become visible only after their exact submission
+				// fence completes. Event polling is retained solely for any
+				// legacy unbound label and is never authoritative for a bound EOP.
+				if (manager->m_submission_labels.IsBound(reinterpret_cast<uint64_t>(label)))
+				{
+					continue;
+				}
 				active_count++;
 
 				if (vkGetEventStatus(label->device, label->event) == VK_EVENT_SET)
@@ -294,7 +305,9 @@ void LabelManager::DrainCompleted()
 
 		for (auto& label: m_labels)
 		{
-			if (label->status == LabelStatus::Active && vkGetEventStatus(label->device, label->event) == VK_EVENT_SET)
+			if (label->status == LabelStatus::Active &&
+			    !m_submission_labels.IsBound(reinterpret_cast<uint64_t>(label)) &&
+			    vkGetEventStatus(label->device, label->event) == VK_EVENT_SET)
 			{
 				label->status = LabelStatus::NotActive;
 				fired_labels.Add(label->callbacks);
@@ -305,29 +318,33 @@ void LabelManager::DrainCompleted()
 	FireCallbacks(fired_labels);
 }
 
-void LabelManager::CompleteSubmitted(CommandProcessor* cp)
+void LabelManager::CompleteSubmission(SubmissionId submission)
 {
-	EXIT_IF(cp == nullptr);
+	EXIT_IF(submission.sequence == 0);
 
 	Vector<LabelCallbacks> fired_labels;
 	Vector<Label*>         destroy_labels;
+	Vector<LabelSubmissionCompletion> completions;
 
 	{
 		Core::LockGuard lock(m_mutex);
 
-		for (auto& label: m_labels)
+		const auto result = m_submission_labels.TakeCompleted(submission, &completions);
+		EXIT_NOT_IMPLEMENTED(result != LabelSubmissionResult::Success);
+
+		for (const auto& completion: completions)
 		{
-			if (label->cp != cp)
-			{
-				continue;
-			}
+			auto* label = reinterpret_cast<Label*>(completion.token);
+			auto  index = m_labels.Find(label);
+			EXIT_NOT_IMPLEMENTED(!m_labels.IndexValid(index));
 
 			const auto action = LabelForceCompleteActionFor(label->status == LabelStatus::Active,
 			                                                label->status == LabelStatus::ActiveDeleted);
-			if (action == LabelForceCompleteKind::Skip)
-			{
-				continue;
-			}
+			EXIT_NOT_IMPLEMENTED(action == LabelForceCompleteKind::Skip);
+			const auto tracked_action = (completion.kind == LabelSubmissionCompletionKind::Destroy
+			                                 ? LabelForceCompleteKind::FireDestroy
+			                                 : LabelForceCompleteKind::FireKeep);
+			EXIT_NOT_IMPLEMENTED(action != tracked_action);
 
 			label->status = LabelStatus::NotActive;
 			fired_labels.Add(label->callbacks);
@@ -535,6 +552,8 @@ bool LabelManager::Remove(Label* label)
 
 	if (label->status == LabelStatus::Active)
 	{
+		const auto result = m_submission_labels.MarkDeleted(reinterpret_cast<uint64_t>(label));
+		EXIT_NOT_IMPLEMENTED(result != LabelSubmissionResult::Success);
 		label->status = LabelStatus::ActiveDeleted;
 
 		return false;
@@ -583,6 +602,11 @@ void LabelManager::Set(CommandBuffer* buffer, Label* label)
 	EXIT_NOT_IMPLEMENTED(!m_labels.IndexValid(index));
 
 	EXIT_NOT_IMPLEMENTED(label->status != LabelStatus::New && label->status != LabelStatus::NotActive);
+
+	SubmissionId submission;
+	EXIT_NOT_IMPLEMENTED(!buffer->GetSubmissionId(&submission));
+	const auto bind_result = m_submission_labels.Bind(reinterpret_cast<uint64_t>(label), submission);
+	EXIT_NOT_IMPLEMENTED(bind_result != LabelSubmissionResult::Success);
 
 	label->status = LabelStatus::Active;
 
@@ -644,11 +668,11 @@ void LabelDrainCompleted()
 	g_label_manager->DrainCompleted();
 }
 
-void LabelCompleteSubmitted(CommandProcessor* cp)
+void LabelCompleteSubmission(SubmissionId submission)
 {
 	EXIT_IF(g_label_manager == nullptr);
 
-	g_label_manager->CompleteSubmitted(cp);
+	g_label_manager->CompleteSubmission(submission);
 }
 
 void LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size)

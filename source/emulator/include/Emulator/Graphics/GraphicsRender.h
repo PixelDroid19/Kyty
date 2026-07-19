@@ -4,6 +4,7 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/GpuSubmissionTracker.h"
 #include "Emulator/Kernel/EventQueue.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -58,6 +59,20 @@ public:
 	[[nodiscard]] uint32_t GetIndex() const { return m_index; }
 	VulkanCommandPool*     GetPool() { return m_pool; }
 	[[nodiscard]] bool     IsExecute() const { return m_execute; }
+	void                   SetSubmissionId(SubmissionId submission)
+	{
+		m_submission     = submission;
+		m_has_submission = true;
+	}
+	[[nodiscard]] bool GetSubmissionId(SubmissionId* submission) const
+	{
+		if (!m_has_submission || submission == nullptr)
+		{
+			return false;
+		}
+		*submission = m_submission;
+		return true;
+	}
 
 private:
 	VulkanCommandPool* m_pool    = nullptr;
@@ -65,6 +80,8 @@ private:
 	int                m_queue   = -1;
 	bool               m_execute = false;
 	CommandProcessor*  m_parent  = nullptr;
+	SubmissionId       m_submission;
+	bool               m_has_submission = false;
 
 	void WaitForFence(bool drain_label_callbacks, bool reset_command_buffer);
 };

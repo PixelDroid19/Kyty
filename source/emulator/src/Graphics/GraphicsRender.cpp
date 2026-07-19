@@ -6230,15 +6230,6 @@ void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer,
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
 
 	LabelSet(buffer, label);
-
-	// Sequential software CP: ReleaseMem data_sel=1 waits (post-Play loading
-	// fence) poll this address after BufferFlush. Relying only on the Label
-	// thread's vkGetEventStatus→store left val=0 for ~5s (loading soft-lock)
-	// even after waiting on the submitted fence. Publish the immediate now so
-	// WaitRegMem can observe ref after the same flush orders GPU work.
-	// 32-bit store only — hardware data_sel=1 writes 32 bits; zero-extending
-	// to 64 corrupted adjacent guest state (intermittent post-Play present stall).
-	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t dw_offset,
@@ -6287,11 +6278,6 @@ void GraphicsRenderWriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer,
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
 
 	LabelSet(buffer, label);
-
-	// Same sequential-CP contract as WriteAtEndOfPipe32: WaitRegMem64 polls this
-	// address after BufferFlush. Relying only on the Label thread left val=0 for
-	// ~5s (strict EXIT at GraphicsRun WaitRegMem64) after ReleaseMem data_sel=2.
-	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr)
@@ -6352,11 +6338,6 @@ void GraphicsRenderWriteAtEndOfPipeWithWriteBack64(uint64_t submit_id, CommandBu
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
 
 	LabelSet(buffer, label);
-
-	// Immediate store is safe with BufferFlush→LabelCompleteSubmitted: WriteBack
-	// still runs before WaitRegMem observes completion. Without the store,
-	// MoltenVK missing event SET left val=0 until WaitRegMem64 EXIT.
-	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr,
@@ -6394,7 +6375,6 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t submit_id, 
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
 
 	LabelSet(buffer, label);
-	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
@@ -6418,8 +6398,6 @@ void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t submit_id, CommandBu
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
 
 	LabelSet(buffer, label);
-
-	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value)
@@ -6443,9 +6421,6 @@ void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBu
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
 
 	LabelSet(buffer, label);
-
-	// Same sequential-CP contract as WriteAtEndOfPipe32 (32-bit store only).
-	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr,
@@ -6491,7 +6466,6 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(uint64_t submit_
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
 
 	LabelSet(buffer, label);
-	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value, int handle,
@@ -6525,8 +6499,6 @@ void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer*
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
 
 	LabelSet(buffer, label);
-
-	*dst_gpu_addr = value;
 }
 
 void GraphicsRenderWriteAtEndOfPipeOnlyFlip(uint64_t /*submit_id*/, CommandBuffer* buffer, int handle, int index, int flip_mode,

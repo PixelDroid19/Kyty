@@ -588,7 +588,7 @@ inline std::pair<int, int> UtilCalcMipmapOffset(uint32_t lod, uint32_t width, ui
 	return {mip_x, mip_y};
 }
 
-// Post-BufferFlush LabelCompleteSubmitted action for a registered label.
+// Post-fence exact-submission action for a registered label.
 // OnlyFlip calls LabelDelete while the label is still Active (→ ActiveDeleted)
 // before the submit fence completes. Skipping ActiveDeleted left VideoOutSubmitFlip
 // on the Label-thread vkGetEventStatus path; MoltenVK often never observes SET, so

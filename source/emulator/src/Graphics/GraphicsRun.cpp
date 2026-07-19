@@ -633,6 +633,7 @@ void CommandProcessor::BufferInit()
 		SubmissionId submission;
 		require_submission_success(m_submission_slots.BeginRecording(static_cast<uint32_t>(m_current_buffer), &submission, nullptr),
 		                           "BeginRecording", m_queue, static_cast<uint32_t>(m_current_buffer));
+		m_buffer[m_current_buffer]->SetSubmissionId(submission);
 		m_buffer[m_current_buffer]->Begin();
 	}
 }
@@ -650,6 +651,8 @@ void CommandProcessor::BufferFlush()
 	// host memory writes) incomplete when WaitRegMem polled immediately after
 	// flush — observed as post-Play loading soft-lock: val stays 0 for ref=1.
 	const int submitted = m_current_buffer;
+	SubmissionId completed_submission;
+	EXIT_NOT_IMPLEMENTED(!m_buffer[submitted]->GetSubmissionId(&completed_submission));
 	m_buffer[submitted]->End();
 	m_buffer[submitted]->Execute();
 	require_submission_success(m_submission_slots.MarkSubmitted(static_cast<uint32_t>(submitted)), "MarkSubmitted", m_queue,
@@ -666,6 +669,7 @@ void CommandProcessor::BufferFlush()
 	    m_submission_slots.CompleteAndRetireThenBeginRecording(static_cast<uint32_t>(submitted),
 	                                                           static_cast<uint32_t>(m_current_buffer), &submission, nullptr),
 	    "CompleteAndRetireThenBeginRecording", m_queue, static_cast<uint32_t>(submitted));
+	m_buffer[m_current_buffer]->SetSubmissionId(submission);
 	m_buffer[m_current_buffer]->Begin();
 
 	// Fence wait is authoritative on MoltenVK: vkGetEventStatus often never
@@ -673,27 +677,45 @@ void CommandProcessor::BufferFlush()
 	// Publish only after the completed slot is retired and the next slot is
 	// recording: write-back callbacks may synchronously flush this CP.
 	LabelDrainCompleted();
-	LabelCompleteSubmitted(this);
+	LabelCompleteSubmission(completed_submission);
 }
 
 void CommandProcessor::BufferWait()
 {
 	BufferInit();
 
-	Core::LockGuard lock(m_mutex);
+	SubmissionId completed_submissions[VK_BUFFERS_NUM];
+	uint32_t     completed_count = 0;
 
-	for (uint32_t slot = 0; slot < VK_BUFFERS_NUM; slot++)
 	{
-		auto* buf = m_buffer[slot];
-		EXIT_IF(buf == nullptr);
+		Core::LockGuard lock(m_mutex);
 
-		const bool submitted = buf->IsExecute();
-		buf->WaitForFenceAndReset();
-		if (submitted)
+		for (uint32_t slot = 0; slot < VK_BUFFERS_NUM; slot++)
 		{
-			require_submission_success(m_submission_slots.MarkCompletedWithoutActionsAndRetire(slot),
-			                           "MarkCompletedWithoutActionsAndRetire", m_queue, slot);
+			auto* buf = m_buffer[slot];
+			EXIT_IF(buf == nullptr);
+
+			const bool submitted = buf->IsExecute();
+			if (submitted)
+			{
+				EXIT_NOT_IMPLEMENTED(!buf->GetSubmissionId(&completed_submissions[completed_count]));
+			}
+			buf->WaitForFenceAndResetWithoutLabelCallbacks();
+			if (submitted)
+			{
+				require_submission_success(m_submission_slots.MarkCompletedWithoutActionsAndRetire(slot),
+				                           "MarkCompletedWithoutActionsAndRetire", m_queue, slot);
+				completed_count++;
+			}
 		}
+	}
+
+	// Completion callbacks can synchronously flush this CP. Run them only after
+	// every waited submission is retired and the CP mutex is released.
+	LabelDrainCompleted();
+	for (uint32_t index = 0; index < completed_count; index++)
+	{
+		LabelCompleteSubmission(completed_submissions[index]);
 	}
 }
 
@@ -807,7 +829,6 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 		{
 			return;
 		}
-		LabelCompleteSubmitted(this);
 		LabelDrainCompleted();
 		Core::Thread::SleepMicro(1000);
 	}
@@ -823,7 +844,6 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 
 	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitRegMem);
 	BufferFlush();
-	LabelCompleteSubmitted(this);
 
 	// Only record waits that actually block — satisfied fences are noise and
 	// flood the agent event ring during load/gameplay.
@@ -847,7 +867,6 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 		}
 		if ((i % 1000) == 0)
 		{
-			LabelCompleteSubmitted(this);
 			LabelDrainCompleted();
 		}
 		Core::Thread::SleepMicro(10);
@@ -871,7 +890,6 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 		{
 			return;
 		}
-		LabelCompleteSubmitted(this);
 		LabelDrainCompleted();
 		Core::Thread::SleepMicro(1000);
 	}
