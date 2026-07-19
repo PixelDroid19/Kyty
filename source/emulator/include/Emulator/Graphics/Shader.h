@@ -1107,6 +1107,8 @@ struct ShaderPixelInputInfo
 	uint8_t             target_output_order[8]    = {};
 	ShaderHostToGuestScale host_to_guest_scale;
 	bool                ps_pos_xy                 = false;
+	bool                integer_image_coordinates = false;
+	bool                image_size_query          = false;
 	bool                ps_pixel_kill_enable      = false;
 	bool                ps_early_z                = false;
 	bool                ps_execute_on_noop        = false;

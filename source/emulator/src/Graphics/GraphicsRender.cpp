@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
+#include "Emulator/Graphics/InternalResolutionRuntime.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -26,12 +27,16 @@
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VertexBuffer.h"
+#include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/PipelineCacheStore.h"
+#include "Emulator/Graphics/ResolutionCoordinateTransform.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderCoordinateScale.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
+#include "Emulator/Graphics/VulkanResolutionCapability.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/Pthread.h"
@@ -2097,6 +2102,7 @@ VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(VkFormat format, uint32
 	vkCreateImage(ctx->device, &image_info, nullptr, &vk_obj->image);
 
 	EXIT_NOT_IMPLEMENTED(vk_obj->image == nullptr);
+	vk_obj->host_extent_selected = true;
 
 	VulkanMemory mem;
 
@@ -3134,6 +3140,32 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.dynamic_params->scissor_ltrb[1]    = scissor.top;
 	p.dynamic_params->scissor_ltrb[2]    = scissor.right;
 	p.dynamic_params->scissor_ltrb[3]    = scissor.bottom;
+	if (color->targets_num == 1 && color->type[0] == RenderColorType::DisplayBuffer && color->vulkan_buffer[0] != nullptr &&
+	    color->vulkan_buffer[0]->IsResolutionScaled())
+	{
+		ResolutionCoordinateTransform transform;
+		const ResolutionExtent guest {color->width, color->height};
+		const ResolutionExtent host {color->vulkan_buffer[0]->extent.width, color->vulkan_buffer[0]->extent.height};
+		EXIT_NOT_IMPLEMENTED(CreateResolutionCoordinateTransform(guest, host, &transform) != ResolutionCoordinateStatus::Success);
+
+		const auto xy = State::ResolveViewportXy(p.dynamic_params->viewport_scale[0], p.dynamic_params->viewport_offset[0],
+		                                         p.dynamic_params->viewport_scale[1], p.dynamic_params->viewport_offset[1]);
+		ResolutionViewport guest_viewport {xy.x, xy.y, xy.width, xy.height, 0.0, 1.0};
+		ResolutionViewport host_viewport;
+		EXIT_NOT_IMPLEMENTED(MapResolutionViewport(transform, guest_viewport, &host_viewport) != ResolutionCoordinateStatus::Success);
+		p.dynamic_params->viewport_scale[0]  = static_cast<float>(host_viewport.width * 0.5);
+		p.dynamic_params->viewport_scale[1]  = static_cast<float>(host_viewport.height * 0.5);
+		p.dynamic_params->viewport_offset[0] = static_cast<float>(host_viewport.x + host_viewport.width * 0.5);
+		p.dynamic_params->viewport_offset[1] = static_cast<float>(host_viewport.y + host_viewport.height * 0.5);
+
+		ResolutionScissorRect host_scissor;
+		const ResolutionScissorRect guest_scissor {scissor.left, scissor.top, scissor.right, scissor.bottom};
+		EXIT_NOT_IMPLEMENTED(MapResolutionScissor(transform, guest_scissor, &host_scissor) != ResolutionCoordinateStatus::Success);
+		p.dynamic_params->scissor_ltrb[0] = static_cast<int>(host_scissor.left);
+		p.dynamic_params->scissor_ltrb[1] = static_cast<int>(host_scissor.top);
+		p.dynamic_params->scissor_ltrb[2] = static_cast<int>(host_scissor.right);
+		p.dynamic_params->scissor_ltrb[3] = static_cast<int>(host_scissor.bottom);
+	}
 	p.static_params->topology                 = topology;
 	p.static_params->with_depth               = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	p.static_params->depth_test_enable        = depth->depth_test_enable;
@@ -4603,7 +4635,7 @@ static void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	}
 }
 
-static void MaterializeRenderDepthInfo(uint64_t submit_id, RenderDepthInfo* r)
+static void MaterializeRenderDepthInfo(uint64_t submit_id, RenderDepthInfo* r, uint32_t host_width = 0, uint32_t host_height = 0)
 {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(r == nullptr);
@@ -4613,7 +4645,9 @@ static void MaterializeRenderDepthInfo(uint64_t submit_id, RenderDepthInfo* r)
 		return;
 	}
 
-	DepthStencilBufferObject vulkan_buffer_info(r->format, r->width, r->height, r->htile, r->neo, r->sampled,
+	host_width  = host_width == 0 ? r->width : host_width;
+	host_height = host_height == 0 ? r->height : host_height;
+	DepthStencilBufferObject vulkan_buffer_info(r->format, r->width, r->height, host_width, host_height, r->htile, r->neo, r->sampled,
 	                                            r->htile_buffer_vaddr, r->htile_buffer_size);
 	r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
@@ -4854,6 +4888,202 @@ static void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer
 		EXIT_NOT_IMPLEMENTED(buffer_vulkan == nullptr);
 		r->vulkan_buffer[slot] = buffer_vulkan;
 	}
+}
+
+static bool HasOnlyExactOverlap(const uint64_t* vaddr, const uint64_t* size, int count, GpuMemoryObjectType type, bool allow_empty)
+{
+	GpuMemoryOverlapSnapshot overlaps;
+	if (!GpuMemoryQueryOverlaps(vaddr, size, count, &overlaps) || overlaps.truncated)
+	{
+		return false;
+	}
+	if (allow_empty && overlaps.total_count == 0)
+	{
+		return true;
+	}
+	return overlaps.total_count == 1 && overlaps.exact_count == 1 && overlaps.entry_count == 1 && overlaps.entries[0].type == type &&
+	       overlaps.entries[0].relation == GpuMemoryOverlapType::Equals && overlaps.entries[0].count == 1;
+}
+
+static void FreezeDepthOnlyDisplayAtNative(const RenderColorInfo& color, const RenderDepthInfo& depth)
+{
+	if (color.targets_num != 0 || depth.format == VK_FORMAT_UNDEFINED)
+	{
+		return;
+	}
+	const auto snapshot = InternalResolutionRuntimeGetSnapshot();
+	const ResolutionExtent depth_extent {depth.width, depth.height};
+	if (!snapshot.guest_registered || depth_extent != snapshot.guest_display_extent)
+	{
+		return;
+	}
+	ResolutionExtent selected;
+	const auto status = InternalResolutionRuntimeSelectDisplayHostExtent(depth_extent, depth_extent, nullptr, &selected);
+	if (status == InternalResolutionDisplaySelectionStatus::StickyMismatch)
+	{
+		EXIT("Depth-only display prepass conflicts with selected host extent: guest=%ux%u selected=%ux%u\n", depth_extent.width,
+		     depth_extent.height, selected.width, selected.height);
+	}
+	EXIT_IF(status != InternalResolutionDisplaySelectionStatus::Selected &&
+	        status != InternalResolutionDisplaySelectionStatus::StickyMatch);
+}
+
+static ResolutionCohortDecision PrepareDisplayResolutionCohort(RenderColorInfo* color, const RenderDepthInfo& depth,
+                                                               ShaderPixelInputInfo* ps)
+{
+	ResolutionCohortDecision native;
+	native.classification = ResolutionClassification::Native;
+	native.guest_extent   = {color != nullptr ? color->width : 0, color != nullptr ? color->height : 0};
+	native.host_extent    = native.guest_extent;
+	if (color == nullptr || ps == nullptr || color->targets_num != 1 || color->type[0] != RenderColorType::DisplayBuffer ||
+	    color->existing_video_image == nullptr)
+	{
+		return native;
+	}
+
+	const ResolutionExtent guest {color->width, color->height};
+	const bool             has_depth = depth.format != VK_FORMAT_UNDEFINED;
+
+	const bool color_alias_safe =
+	    HasOnlyExactOverlap(&color->base_addr[0], &color->buffer_size[0], 1, GpuMemoryObjectType::VideoOutBuffer, false);
+	const bool depth_alias_safe =
+	    !has_depth || HasOnlyExactOverlap(depth.vaddr, depth.size, depth.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer, true);
+
+	ResolutionAttachmentCandidate attachments[2];
+	attachments[0].guest_extent             = guest;
+	attachments[0].resource.kind            = ResolutionResourceKind::ColorAttachment;
+	attachments[0].resource.cpu_transfer    = !color->tile;
+	attachments[0].resource.ambiguous_alias = !color_alias_safe;
+	uint32_t attachment_count               = 1;
+	if (has_depth)
+	{
+		attachments[1].guest_extent             = {depth.width, depth.height};
+		attachments[1].resource.kind            = ResolutionResourceKind::DepthStencilAttachment;
+		attachments[1].resource.compressed      = depth.htile;
+		attachments[1].resource.ambiguous_alias = !depth_alias_safe;
+		attachment_count                        = 2;
+	}
+
+	ResolutionCohortInput input;
+	input.attachments                       = attachments;
+	input.attachment_count                  = attachment_count;
+	input.expected_count                    = attachment_count;
+	input.shader_usage.fragment_coordinates = ps->ps_pos_xy;
+	input.shader_usage.integer_image_coordinates = ps->integer_image_coordinates;
+	input.shader_usage.image_size_query          = ps->image_size_query;
+
+	const auto snapshot = InternalResolutionRuntimeGetSnapshot();
+	ShaderHostToGuestScale scale;
+	input.shader_usage.fragment_coordinates_supported =
+	    BuildShaderHostToGuestScale({guest.width, guest.height}, {snapshot.target_extent.width, snapshot.target_extent.height}, &scale) ==
+	    ShaderCoordinateScaleStatus::Success;
+	auto decision = InternalResolutionRuntimeEvaluateCohort(input);
+
+	if (decision.classification == ResolutionClassification::Scaled)
+	{
+		VulkanResolutionAttachmentRequest color_request;
+		color_request.extent = decision.host_extent;
+		color_request.format = color->existing_video_image->format;
+		color_request.usage  = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+		                      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		const auto color_capability = EvaluateVulkanResolutionAttachment(g_render_ctx->GetGraphicCtx(), color_request);
+		bool       supported = color_capability.status == VulkanResolutionCapabilityStatus::Success &&
+		                 color_capability.decision.status == ResolutionImageCapabilityStatus::Supported;
+		if (has_depth)
+		{
+			VulkanResolutionAttachmentRequest depth_request;
+			depth_request.extent = decision.host_extent;
+			depth_request.format = depth.format;
+			depth_request.usage  = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+			                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (depth.sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
+			const auto depth_capability = EvaluateVulkanResolutionAttachment(g_render_ctx->GetGraphicCtx(), depth_request);
+			supported = supported && depth_capability.status == VulkanResolutionCapabilityStatus::Success &&
+			            depth_capability.decision.status == ResolutionImageCapabilityStatus::Supported;
+		}
+		if (!supported)
+		{
+			decision = native;
+		}
+	}
+
+	ResolutionExtent requested =
+	    decision.classification == ResolutionClassification::Scaled ? decision.host_extent : guest;
+	VideoOutHostExtentState prior_image_state;
+	if (!VideoOutBufferGetHostExtentState(color->existing_video_image, &prior_image_state))
+	{
+		return native;
+	}
+	if (prior_image_state.materialized)
+	{
+		requested = {prior_image_state.width, prior_image_state.height};
+		if (requested != guest && decision.classification != ResolutionClassification::Scaled)
+		{
+			decision.classification = ResolutionClassification::Unsupported;
+			decision.host_extent    = requested;
+			return decision;
+		}
+		if (requested == guest)
+		{
+			decision = native;
+		}
+	}
+	ResolutionExtent selected;
+	const auto* authorization = requested != guest ? &decision : nullptr;
+	const auto selection = InternalResolutionRuntimeSelectDisplayHostExtent(guest, requested, authorization, &selected);
+	if (selection == InternalResolutionDisplaySelectionStatus::InvalidExtent ||
+	    selection == InternalResolutionDisplaySelectionStatus::UnregisteredDisplay ||
+	    selection == InternalResolutionDisplaySelectionStatus::UnauthorizedExtent)
+	{
+		return native;
+	}
+	if (selected != requested)
+	{
+		decision.classification = ResolutionClassification::Unsupported;
+		decision.reason         = ResolutionCohortReason::MismatchedHostExtent;
+		decision.guest_extent   = guest;
+		decision.host_extent    = selected;
+		return decision;
+	}
+	if (has_depth)
+	{
+		const auto existing_depth =
+		    GpuMemoryFindObjects(depth.vaddr, depth.size, depth.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer, true, false);
+		if (existing_depth.Size() > 1)
+		{
+			decision.classification = ResolutionClassification::Unsupported;
+			decision.reason         = ResolutionCohortReason::MismatchedHostExtent;
+			decision.host_extent    = selected;
+			return decision;
+		}
+		if (!existing_depth.IsEmpty())
+		{
+			const auto* image = static_cast<const DepthStencilVulkanImage*>(existing_depth[0].obj);
+			if (image == nullptr || image->extent.width != selected.width || image->extent.height != selected.height)
+			{
+				decision.classification = ResolutionClassification::Unsupported;
+				decision.reason         = ResolutionCohortReason::MismatchedHostExtent;
+				decision.host_extent    = selected;
+				return decision;
+			}
+		}
+	}
+
+	VideoOutHostExtentState image_state;
+	const auto image_selection =
+	    VideoOutBufferSelectHostExtent(color->existing_video_image, selected.width, selected.height, &image_state);
+	if (image_selection == VideoOutHostExtentStatus::InvalidArgument || image_selection == VideoOutHostExtentStatus::StickyMismatch)
+	{
+		return native;
+	}
+	if (decision.classification == ResolutionClassification::Scaled)
+	{
+		if (BuildShaderHostToGuestScale({guest.width, guest.height}, {selected.width, selected.height}, &ps->host_to_guest_scale) !=
+		    ShaderCoordinateScaleStatus::Success)
+		{
+			return native;
+		}
+	}
+	return decision;
 }
 
 static void InvalidateMemoryObject(const RenderColorInfo& r)
@@ -5959,8 +6189,41 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
-	MaterializeRenderDepthInfo(submit_id, &depth_info);
+	FreezeDepthOnlyDisplayAtNative(color_info, depth_info);
+
+	ShaderVertexInputInfo vs_input_info;
+	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info);
+
+	ShaderPixelInputInfo ps_input_info;
+	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
+	const auto resolution = PrepareDisplayResolutionCohort(&color_info, depth_info, &ps_input_info);
+	if (resolution.classification == ResolutionClassification::Unsupported)
+	{
+		EXIT("Internal resolution cohort conflict: guest=%ux%u selected=%ux%u reason=%u\n", resolution.guest_extent.width,
+		     resolution.guest_extent.height, resolution.host_extent.width, resolution.host_extent.height,
+		     static_cast<unsigned>(resolution.reason));
+	}
+	MaterializeRenderDepthInfo(submit_id, &depth_info,
+	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.width : 0,
+	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.height : 0);
 	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
+	if (resolution.classification == ResolutionClassification::Scaled)
+	{
+		if (color_info.vulkan_buffer[0] == nullptr || color_info.vulkan_buffer[0]->extent.width != resolution.host_extent.width ||
+		    color_info.vulkan_buffer[0]->extent.height != resolution.host_extent.height ||
+		    (depth_info.vulkan_buffer != nullptr &&
+		     (depth_info.vulkan_buffer->extent.width != resolution.host_extent.width ||
+		      depth_info.vulkan_buffer->extent.height != resolution.host_extent.height)))
+		{
+			EXIT("Scaled attachment materialization mismatch: expected=%ux%u color=%ux%u depth=%ux%u\n",
+			     resolution.host_extent.width, resolution.host_extent.height,
+			     color_info.vulkan_buffer[0] != nullptr ? color_info.vulkan_buffer[0]->extent.width : 0,
+			     color_info.vulkan_buffer[0] != nullptr ? color_info.vulkan_buffer[0]->extent.height : 0,
+			     depth_info.vulkan_buffer != nullptr ? depth_info.vulkan_buffer->extent.width : 0,
+			     depth_info.vulkan_buffer != nullptr ? depth_info.vulkan_buffer->extent.height : 0);
+		}
+		(void)InternalResolutionRuntimeMarkScalingApplied(resolution);
+	}
 
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
 
@@ -5968,12 +6231,6 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	EXIT_NOT_IMPLEMENTED(framebuffer->render_pass == nullptr);
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
-
-	ShaderVertexInputInfo vs_input_info;
-	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info);
-
-	ShaderPixelInputInfo ps_input_info;
-	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
 
 	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, index_type_and_size, true, flags);
 
@@ -6086,15 +6343,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
-	MaterializeRenderDepthInfo(submit_id, &depth_info);
-	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
-
-	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
-
-	EXIT_NOT_IMPLEMENTED(framebuffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(framebuffer->render_pass == nullptr);
-
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	FreezeDepthOnlyDisplayAtNative(color_info, depth_info);
 
 	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
 
@@ -6117,6 +6366,41 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info);
+	const auto resolution = PrepareDisplayResolutionCohort(&color_info, depth_info, &ps_input_info);
+	if (resolution.classification == ResolutionClassification::Unsupported)
+	{
+		EXIT("Internal resolution cohort conflict: guest=%ux%u selected=%ux%u reason=%u\n", resolution.guest_extent.width,
+		     resolution.guest_extent.height, resolution.host_extent.width, resolution.host_extent.height,
+		     static_cast<unsigned>(resolution.reason));
+	}
+	MaterializeRenderDepthInfo(submit_id, &depth_info,
+	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.width : 0,
+	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.height : 0);
+	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
+	if (resolution.classification == ResolutionClassification::Scaled)
+	{
+		if (color_info.vulkan_buffer[0] == nullptr || color_info.vulkan_buffer[0]->extent.width != resolution.host_extent.width ||
+		    color_info.vulkan_buffer[0]->extent.height != resolution.host_extent.height ||
+		    (depth_info.vulkan_buffer != nullptr &&
+		     (depth_info.vulkan_buffer->extent.width != resolution.host_extent.width ||
+		      depth_info.vulkan_buffer->extent.height != resolution.host_extent.height)))
+		{
+			EXIT("Scaled attachment materialization mismatch: expected=%ux%u color=%ux%u depth=%ux%u\n",
+			     resolution.host_extent.width, resolution.host_extent.height,
+			     color_info.vulkan_buffer[0] != nullptr ? color_info.vulkan_buffer[0]->extent.width : 0,
+			     color_info.vulkan_buffer[0] != nullptr ? color_info.vulkan_buffer[0]->extent.height : 0,
+			     depth_info.vulkan_buffer != nullptr ? depth_info.vulkan_buffer->extent.width : 0,
+			     depth_info.vulkan_buffer != nullptr ? depth_info.vulkan_buffer->extent.height : 0);
+		}
+		(void)InternalResolutionRuntimeMarkScalingApplied(resolution);
+	}
+
+	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
+
+	EXIT_NOT_IMPLEMENTED(framebuffer == nullptr);
+	EXIT_NOT_IMPLEMENTED(framebuffer->render_pass == nullptr);
+
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
 	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, 0xffffffffu, false, flags);
 

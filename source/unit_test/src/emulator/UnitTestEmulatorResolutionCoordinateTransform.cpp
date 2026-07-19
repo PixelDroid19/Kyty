@@ -54,7 +54,7 @@ TEST(EmulatorResolutionCoordinateTransform, RejectsATransformWhoseCachedScaleDoe
 	EXPECT_EQ(viewport, sentinel);
 }
 
-TEST(EmulatorResolutionCoordinateTransform, MapsViewportOriginsDownAndEndsUp)
+TEST(EmulatorResolutionCoordinateTransform, MapsViewportWithExactFloatingPointRatios)
 {
 	const auto               transform = MakeTransform({1919, 1079}, {1280, 720});
 	const ResolutionViewport guest {1.0, 1.0, 1.0, 1.0, 0.2, 0.8};
@@ -62,10 +62,10 @@ TEST(EmulatorResolutionCoordinateTransform, MapsViewportOriginsDownAndEndsUp)
 
 	ASSERT_EQ(MapResolutionViewport(transform, guest, &host), ResolutionCoordinateStatus::Success);
 
-	EXPECT_DOUBLE_EQ(host.x, 0.0);
-	EXPECT_DOUBLE_EQ(host.y, 0.0);
-	EXPECT_DOUBLE_EQ(host.width, 2.0);
-	EXPECT_DOUBLE_EQ(host.height, 2.0);
+	EXPECT_DOUBLE_EQ(host.x, 1280.0 / 1919.0);
+	EXPECT_DOUBLE_EQ(host.y, 720.0 / 1079.0);
+	EXPECT_DOUBLE_EQ(host.width, 1280.0 / 1919.0);
+	EXPECT_DOUBLE_EQ(host.height, 720.0 / 1079.0);
 	EXPECT_DOUBLE_EQ(host.min_depth, guest.min_depth);
 	EXPECT_DOUBLE_EQ(host.max_depth, guest.max_depth);
 }
@@ -84,8 +84,8 @@ TEST(EmulatorResolutionCoordinateTransform, PreservesInvertedViewportOrientation
 	ASSERT_EQ(MapResolutionViewport(transform, {3.0, 1079.0, 3.0, -1.0, 0.0, 1.0}, &host), ResolutionCoordinateStatus::Success);
 	EXPECT_DOUBLE_EQ(host.x, 2.0);
 	EXPECT_DOUBLE_EQ(host.width, 2.0);
-	EXPECT_DOUBLE_EQ(host.y, 720.0);
-	EXPECT_DOUBLE_EQ(host.height, -2.0);
+	EXPECT_DOUBLE_EQ(host.y, 1079.0 * (2.0 / 3.0));
+	EXPECT_NEAR(host.height, -2.0 / 3.0, 1e-12);
 }
 
 TEST(EmulatorResolutionCoordinateTransform, SupportsUpscalingAndKeepsViewportBoundsSemantic)

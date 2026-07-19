@@ -181,6 +181,7 @@ struct VideoOutVulkanImage: public VulkanImage
 	// Registration owns the guest resource identity immediately, while Vulkan
 	// storage may be materialized by the first renderer/present consumer.
 	Core::Mutex materialize_mutex;
+	bool        host_extent_selected = false;
 	uint64_t    guest_vaddr = 0;
 	uint64_t    guest_pitch = 0;
 	bool        tiled       = false;

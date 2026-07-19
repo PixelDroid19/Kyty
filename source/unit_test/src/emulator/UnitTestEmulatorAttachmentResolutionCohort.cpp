@@ -3,6 +3,8 @@
 #include "Emulator/Graphics/AttachmentResolutionCohort.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
+#include "Emulator/Graphics/Objects/VideoOutBuffer.h"
+#include "Emulator/Graphics/Shader.h"
 
 UT_BEGIN(EmulatorAttachmentResolutionCohort);
 
@@ -117,6 +119,67 @@ TEST(EmulatorAttachmentResolutionCohort, KeepsIntegerCoordinatesAndImageSizeBloc
 	image_size.fragment_coordinates_supported = true;
 	image_size.image_size_query               = true;
 	EXPECT_EQ(EvaluateResolutionCohort(policy, {&color, 1, 1, image_size}).reason, ResolutionCohortReason::ShaderCoordinateAccess);
+}
+
+TEST(EmulatorAttachmentResolutionCohort, ShaderAnalysisAllowsSamplingAndRejectsIntegerImageAccess)
+{
+	ShaderCode sampled;
+	sampled.GetInstructions().Add({.type = ShaderInstructionType::ImageSample});
+	const auto sampled_usage = AnalyzeResolutionShaderUsage(sampled);
+	EXPECT_FALSE(sampled_usage.fragment_coordinates);
+	EXPECT_FALSE(sampled_usage.fragment_coordinates_supported);
+	EXPECT_FALSE(sampled_usage.integer_image_coordinates);
+	EXPECT_FALSE(sampled_usage.image_size_query);
+
+	ShaderCode loaded;
+	loaded.GetInstructions().Add({.type = ShaderInstructionType::ImageLoad});
+	EXPECT_TRUE(AnalyzeResolutionShaderUsage(loaded).integer_image_coordinates);
+
+	ShaderCode stored;
+	stored.GetInstructions().Add({.type = ShaderInstructionType::ImageStore});
+	EXPECT_TRUE(AnalyzeResolutionShaderUsage(stored).integer_image_coordinates);
+}
+
+TEST(EmulatorAttachmentResolutionCohort, VideoOutHostExtentSelectionIsStickyBeforeMaterialization)
+{
+	VideoOutVulkanImage image;
+	image.SetNativeExtent(3840, 2160);
+
+	VideoOutHostExtentState state;
+	EXPECT_EQ(VideoOutBufferSelectHostExtent(&image, 1280, 720, &state), VideoOutHostExtentStatus::Selected);
+	EXPECT_EQ(state.width, 1280u);
+	EXPECT_EQ(state.height, 720u);
+	EXPECT_TRUE(state.selected);
+	EXPECT_FALSE(state.materialized);
+
+	EXPECT_EQ(VideoOutBufferSelectHostExtent(&image, 1920, 1080, &state), VideoOutHostExtentStatus::StickyMismatch);
+	EXPECT_EQ(state.width, 1280u);
+	EXPECT_EQ(state.height, 720u);
+	EXPECT_EQ(image.GetGuestExtent().width, 3840u);
+	EXPECT_EQ(image.GetGuestExtent().height, 2160u);
+	EXPECT_EQ(image.GetHostExtent().width, 1280u);
+	EXPECT_EQ(image.GetHostExtent().height, 720u);
+
+	EXPECT_TRUE(VideoOutBufferGetHostExtentState(&image, &state));
+	EXPECT_EQ(state.width, 1280u);
+	EXPECT_EQ(state.height, 720u);
+}
+
+TEST(EmulatorAttachmentResolutionCohort, VideoOutMaterializedExtentCannotBeChangedWhenSelectionFlagIsInconsistent)
+{
+	VideoOutVulkanImage image;
+	image.SetNativeExtent(3840, 2160);
+	image.host_extent_selected = false;
+	image.image                = reinterpret_cast<VkImage>(uintptr_t {1});
+
+	VideoOutHostExtentState state {};
+	EXPECT_EQ(VideoOutBufferSelectHostExtent(&image, 1280, 720, &state), VideoOutHostExtentStatus::StickyMismatch);
+	EXPECT_TRUE(state.selected);
+	EXPECT_TRUE(state.materialized);
+	EXPECT_EQ(state.width, 3840u);
+	EXPECT_EQ(state.height, 2160u);
+	EXPECT_EQ(image.extent.width, 3840u);
+	EXPECT_EQ(image.extent.height, 2160u);
 }
 
 TEST(EmulatorAttachmentResolutionCohort, RejectsEmptyAndInvalidInputsStructurally)

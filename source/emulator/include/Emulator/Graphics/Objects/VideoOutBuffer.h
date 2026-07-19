@@ -33,6 +33,26 @@ enum class VideoOutBufferFormat : uint64_t
 [[nodiscard]] bool VideoOutBufferNeedsMaterialization(const VideoOutVulkanImage* image);
 void               VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* image);
 
+enum class VideoOutHostExtentStatus
+{
+	Selected,
+	StickyMatch,
+	StickyMismatch,
+	InvalidArgument,
+};
+
+struct VideoOutHostExtentState
+{
+	uint32_t width        = 0;
+	uint32_t height       = 0;
+	bool     selected     = false;
+	bool     materialized = false;
+};
+
+[[nodiscard]] VideoOutHostExtentStatus VideoOutBufferSelectHostExtent(VideoOutVulkanImage* image, uint32_t width, uint32_t height,
+                                                                      VideoOutHostExtentState* state);
+[[nodiscard]] bool VideoOutBufferGetHostExtentState(VideoOutVulkanImage* image, VideoOutHostExtentState* state);
+
 class VideoOutBufferObject: public GpuObject
 {
 public:

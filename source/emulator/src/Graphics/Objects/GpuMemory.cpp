@@ -3058,6 +3058,14 @@ Vector<GpuMemoryObject> GpuMemoryFindObjects(uint64_t vaddr, uint64_t size, GpuM
 	return g_gpu_memory->FindObjects(&vaddr, &size, 1, type, exact, only_first);
 }
 
+Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type,
+                                             bool exact, bool only_first)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+
+	return g_gpu_memory->FindObjects(vaddr, size, vaddr_num, type, exact, only_first);
+}
+
 bool GpuMemoryQueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out)
 {
 	if (out == nullptr)
