@@ -172,6 +172,32 @@ TEST(EmulatorKernelProcess, AddAmprEventRegistersAndTriggers)
 	EXPECT_EQ(KernelDeleteEqueue(eq), OK);
 }
 
+TEST(EmulatorKernelProcess, ResolvesKernelGetEventId)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"mJ7aghmgvfc";
+	query.library              = U"libkernel";
+	query.library_version      = 1;
+	query.module               = U"libkernel";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* rec            = symbols.Find(query);
+	ASSERT_NE(rec, nullptr);
+
+	using get_event_id_fn_t = uintptr_t (*)(const KernelEvent*);
+	auto* get_event_id      = reinterpret_cast<get_event_id_fn_t>(static_cast<uintptr_t>(rec->vaddr));
+	ASSERT_NE(get_event_id, nullptr);
+
+	KernelEvent ev {};
+	ev.ident = 0x120a8;
+	EXPECT_EQ(get_event_id(&ev), static_cast<uintptr_t>(0x120a8));
+	EXPECT_EQ(get_event_id(nullptr), static_cast<uintptr_t>(0));
+}
+
 TEST(EmulatorKernelProcess, AprSubmitCommandBufferRejectsNullAndAckNonNull)
 {
 	EnsureKernelProcessSubsystems();
