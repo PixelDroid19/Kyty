@@ -29,6 +29,7 @@
 #include "Emulator/Graphics/Objects/VertexBuffer.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/PipelineCacheStore.h"
+#include "Emulator/Graphics/ResolutionAliasPolicy.h"
 #include "Emulator/Graphics/ResolutionCoordinateTransform.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderCoordinateScale.h"
@@ -4890,21 +4891,6 @@ static void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer
 	}
 }
 
-static bool HasOnlyExactOverlap(const uint64_t* vaddr, const uint64_t* size, int count, GpuMemoryObjectType type, bool allow_empty)
-{
-	GpuMemoryOverlapSnapshot overlaps;
-	if (!GpuMemoryQueryOverlaps(vaddr, size, count, &overlaps) || overlaps.truncated)
-	{
-		return false;
-	}
-	if (allow_empty && overlaps.total_count == 0)
-	{
-		return true;
-	}
-	return overlaps.total_count == 1 && overlaps.exact_count == 1 && overlaps.entry_count == 1 && overlaps.entries[0].type == type &&
-	       overlaps.entries[0].relation == GpuMemoryOverlapType::Equals && overlaps.entries[0].count == 1;
-}
-
 static void FreezeDepthOnlyDisplayAtNative(const RenderColorInfo& color, const RenderDepthInfo& depth)
 {
 	if (color.targets_num != 0 || depth.format == VK_FORMAT_UNDEFINED)
@@ -4917,6 +4903,25 @@ static void FreezeDepthOnlyDisplayAtNative(const RenderColorInfo& color, const R
 	{
 		return;
 	}
+	uint32_t registered_width  = 0;
+	uint32_t registered_height = 0;
+	const auto registered_status =
+	    VideoOut::VideoOutGetRegisteredHostExtent(depth_extent.width, depth_extent.height, &registered_width, &registered_height);
+	if (registered_status != VideoOut::VideoOutRegisteredHostExtentStatus::Uniform)
+	{
+		EXIT("Depth-only display prepass cannot inspect registered host extent: guest=%ux%u status=%s(%u)\n", depth_extent.width,
+		     depth_extent.height, VideoOut::VideoOutRegisteredHostExtentStatusName(registered_status),
+		     static_cast<unsigned>(registered_status));
+	}
+	const ResolutionExtent registered_extent {registered_width, registered_height};
+	const auto compatibility = EvaluateNativeDisplayExtentCompatibility(depth_extent, registered_extent);
+	if (compatibility.classification == ResolutionClassification::Unsupported)
+	{
+		EXIT("Depth-only display prepass conflicts with registered host extent: guest=%ux%u registered=%ux%u reason=%s(%u)\n",
+		     depth_extent.width, depth_extent.height, registered_extent.width, registered_extent.height,
+		     ResolutionCohortReasonName(compatibility.reason), static_cast<unsigned>(compatibility.reason));
+	}
+
 	ResolutionExtent selected;
 	const auto status = InternalResolutionRuntimeSelectDisplayHostExtent(depth_extent, depth_extent, nullptr, &selected);
 	if (status == InternalResolutionDisplaySelectionStatus::StickyMismatch)
@@ -4945,9 +4950,10 @@ static ResolutionCohortDecision PrepareDisplayResolutionCohort(RenderColorInfo* 
 	const bool             has_depth = depth.format != VK_FORMAT_UNDEFINED;
 
 	const bool color_alias_safe =
-	    HasOnlyExactOverlap(&color->base_addr[0], &color->buffer_size[0], 1, GpuMemoryObjectType::VideoOutBuffer, false);
+	    ResolutionAliasPolicyAllowsRanges(&color->base_addr[0], &color->buffer_size[0], 1, GpuMemoryObjectType::VideoOutBuffer, false);
 	const bool depth_alias_safe =
-	    !has_depth || HasOnlyExactOverlap(depth.vaddr, depth.size, depth.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer, true);
+	    !has_depth ||
+	    ResolutionAliasPolicyAllowsRanges(depth.vaddr, depth.size, depth.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer, true);
 
 	ResolutionAttachmentCandidate attachments[2];
 	attachments[0].guest_extent             = guest;
@@ -4984,65 +4990,73 @@ static ResolutionCohortDecision PrepareDisplayResolutionCohort(RenderColorInfo* 
 		VulkanResolutionAttachmentRequest color_request;
 		color_request.extent = decision.host_extent;
 		color_request.format = color->existing_video_image->format;
-		color_request.usage  = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-		                      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		color_request.usage  = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+		                       VK_IMAGE_USAGE_SAMPLED_BIT;
 		const auto color_capability = EvaluateVulkanResolutionAttachment(g_render_ctx->GetGraphicCtx(), color_request);
-		bool       supported = color_capability.status == VulkanResolutionCapabilityStatus::Success &&
-		                 color_capability.decision.status == ResolutionImageCapabilityStatus::Supported;
+		const bool color_supported  = color_capability.status == VulkanResolutionCapabilityStatus::Success &&
+		                              color_capability.decision.status == ResolutionImageCapabilityStatus::Supported;
+		bool       supported        = color_supported;
+		bool       depth_supported  = true;
 		if (has_depth)
 		{
 			VulkanResolutionAttachmentRequest depth_request;
-			depth_request.extent = decision.host_extent;
-			depth_request.format = depth.format;
-			depth_request.usage  = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-			                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (depth.sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
+			depth_request.extent        = decision.host_extent;
+			depth_request.format        = depth.format;
+			depth_request.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+			                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (depth.sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
 			const auto depth_capability = EvaluateVulkanResolutionAttachment(g_render_ctx->GetGraphicCtx(), depth_request);
-			supported = supported && depth_capability.status == VulkanResolutionCapabilityStatus::Success &&
-			            depth_capability.decision.status == ResolutionImageCapabilityStatus::Supported;
+			depth_supported             = depth_capability.status == VulkanResolutionCapabilityStatus::Success &&
+			                              depth_capability.decision.status == ResolutionImageCapabilityStatus::Supported;
+			supported                   = supported && depth_supported;
 		}
 		if (!supported)
 		{
 			decision = native;
+			decision.reason =
+			    color_supported ? ResolutionCohortReason::DepthCapabilityUnsupported : ResolutionCohortReason::ColorCapabilityUnsupported;
+			decision.attachment_count          = attachment_count;
+			decision.blocking_attachment_index = color_supported ? 1u : 0u;
 		}
 	}
 
-	ResolutionExtent requested =
-	    decision.classification == ResolutionClassification::Scaled ? decision.host_extent : guest;
-	VideoOutHostExtentState prior_image_state;
-	if (!VideoOutBufferGetHostExtentState(color->existing_video_image, &prior_image_state))
+	const ResolutionExtent requested   = decision.classification == ResolutionClassification::Scaled ? decision.host_extent : guest;
+	auto                   unsupported = [&decision, guest](ResolutionExtent selected)
 	{
-		return native;
-	}
-	if (prior_image_state.materialized)
-	{
-		requested = {prior_image_state.width, prior_image_state.height};
-		if (requested != guest && decision.classification != ResolutionClassification::Scaled)
+		decision.classification = ResolutionClassification::Unsupported;
+		if (decision.reason == ResolutionCohortReason::None)
 		{
-			decision.classification = ResolutionClassification::Unsupported;
-			decision.host_extent    = requested;
-			return decision;
+			decision.reason = ResolutionCohortReason::MismatchedHostExtent;
 		}
-		if (requested == guest)
-		{
-			decision = native;
-		}
-	}
-	ResolutionExtent selected;
-	const auto* authorization = requested != guest ? &decision : nullptr;
-	const auto selection = InternalResolutionRuntimeSelectDisplayHostExtent(guest, requested, authorization, &selected);
-	if (selection == InternalResolutionDisplaySelectionStatus::InvalidExtent ||
-	    selection == InternalResolutionDisplaySelectionStatus::UnregisteredDisplay ||
-	    selection == InternalResolutionDisplaySelectionStatus::UnauthorizedExtent)
+		decision.guest_extent = guest;
+		decision.host_extent  = selected;
+		return decision;
+	};
+
+	uint32_t   registered_width  = 0;
+	uint32_t   registered_height = 0;
+	const auto registered_status =
+	    VideoOut::VideoOutGetRegisteredHostExtent(guest.width, guest.height, &registered_width, &registered_height);
+	const ResolutionExtent registered {registered_width, registered_height};
+	if (registered_status != VideoOut::VideoOutRegisteredHostExtentStatus::Uniform)
 	{
-		return native;
+		return unsupported(registered);
+	}
+	if (registered != requested)
+	{
+		return unsupported(registered);
+	}
+
+	ResolutionExtent selected = registered;
+	const auto*      authorization = requested != guest ? &decision : nullptr;
+	const auto       selection     = InternalResolutionRuntimeSelectDisplayHostExtent(guest, requested, authorization, &selected);
+	if (selection != InternalResolutionDisplaySelectionStatus::Selected &&
+	    selection != InternalResolutionDisplaySelectionStatus::StickyMatch)
+	{
+		return unsupported(selected);
 	}
 	if (selected != requested)
 	{
-		decision.classification = ResolutionClassification::Unsupported;
-		decision.reason         = ResolutionCohortReason::MismatchedHostExtent;
-		decision.guest_extent   = guest;
-		decision.host_extent    = selected;
-		return decision;
+		return unsupported(selected);
 	}
 	if (has_depth)
 	{
@@ -5050,37 +5064,31 @@ static ResolutionCohortDecision PrepareDisplayResolutionCohort(RenderColorInfo* 
 		    GpuMemoryFindObjects(depth.vaddr, depth.size, depth.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer, true, false);
 		if (existing_depth.Size() > 1)
 		{
-			decision.classification = ResolutionClassification::Unsupported;
-			decision.reason         = ResolutionCohortReason::MismatchedHostExtent;
-			decision.host_extent    = selected;
-			return decision;
+			return unsupported(selected);
 		}
 		if (!existing_depth.IsEmpty())
 		{
 			const auto* image = static_cast<const DepthStencilVulkanImage*>(existing_depth[0].obj);
 			if (image == nullptr || image->extent.width != selected.width || image->extent.height != selected.height)
 			{
-				decision.classification = ResolutionClassification::Unsupported;
-				decision.reason         = ResolutionCohortReason::MismatchedHostExtent;
-				decision.host_extent    = selected;
-				return decision;
+				return unsupported(selected);
 			}
 		}
 	}
 
-	VideoOutHostExtentState image_state;
-	const auto image_selection =
-	    VideoOutBufferSelectHostExtent(color->existing_video_image, selected.width, selected.height, &image_state);
-	if (image_selection == VideoOutHostExtentStatus::InvalidArgument || image_selection == VideoOutHostExtentStatus::StickyMismatch)
+	VideoOutHostExtentState image_state {};
+	if (!VideoOutBufferGetHostExtentState(color->existing_video_image, &image_state) || !image_state.selected ||
+	    image_state.width != selected.width || image_state.height != selected.height)
 	{
-		return native;
+		return unsupported({image_state.width, image_state.height});
 	}
 	if (decision.classification == ResolutionClassification::Scaled)
 	{
 		if (BuildShaderHostToGuestScale({guest.width, guest.height}, {selected.width, selected.height}, &ps->host_to_guest_scale) !=
 		    ShaderCoordinateScaleStatus::Success)
 		{
-			return native;
+			decision.reason = ResolutionCohortReason::ShaderCoordinateAccess;
+			return unsupported(selected);
 		}
 	}
 	return decision;
@@ -6199,9 +6207,12 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	const auto resolution = PrepareDisplayResolutionCohort(&color_info, depth_info, &ps_input_info);
 	if (resolution.classification == ResolutionClassification::Unsupported)
 	{
-		EXIT("Internal resolution cohort conflict: guest=%ux%u selected=%ux%u reason=%u\n", resolution.guest_extent.width,
-		     resolution.guest_extent.height, resolution.host_extent.width, resolution.host_extent.height,
-		     static_cast<unsigned>(resolution.reason));
+		EXIT("Internal resolution cohort conflict: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
+		     "attachment_index=%u\n",
+		     resolution.guest_extent.width, resolution.guest_extent.height, resolution.host_extent.width, resolution.host_extent.height,
+		     ResolutionCohortReasonName(resolution.reason), static_cast<unsigned>(resolution.reason),
+		     ResolutionNativeReasonName(resolution.attachment_native_reason),
+		     static_cast<unsigned>(resolution.attachment_native_reason), resolution.blocking_attachment_index);
 	}
 	MaterializeRenderDepthInfo(submit_id, &depth_info,
 	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.width : 0,
@@ -6369,9 +6380,12 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	const auto resolution = PrepareDisplayResolutionCohort(&color_info, depth_info, &ps_input_info);
 	if (resolution.classification == ResolutionClassification::Unsupported)
 	{
-		EXIT("Internal resolution cohort conflict: guest=%ux%u selected=%ux%u reason=%u\n", resolution.guest_extent.width,
-		     resolution.guest_extent.height, resolution.host_extent.width, resolution.host_extent.height,
-		     static_cast<unsigned>(resolution.reason));
+		EXIT("Internal resolution cohort conflict: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
+		     "attachment_index=%u\n",
+		     resolution.guest_extent.width, resolution.guest_extent.height, resolution.host_extent.width, resolution.host_extent.height,
+		     ResolutionCohortReasonName(resolution.reason), static_cast<unsigned>(resolution.reason),
+		     ResolutionNativeReasonName(resolution.attachment_native_reason),
+		     static_cast<unsigned>(resolution.attachment_native_reason), resolution.blocking_attachment_index);
 	}
 	MaterializeRenderDepthInfo(submit_id, &depth_info,
 	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.width : 0,

@@ -49,9 +49,43 @@ struct VideoOutHostExtentState
 	bool     materialized = false;
 };
 
+enum class VideoOutHostExtentSetSelectionStatus
+{
+	Selected,
+	StickyMatch,
+	StickyMismatch,
+	InvalidArgument,
+	Empty,
+};
+
+[[nodiscard]] const char* VideoOutHostExtentSetSelectionStatusName(VideoOutHostExtentSetSelectionStatus status);
+
+enum class VideoOutHostExtentSetInspectionStatus
+{
+	Uniform,
+	Unselected,
+	NonUniform,
+	InvalidArgument,
+	Empty,
+};
+
+struct VideoOutHostExtentSetState
+{
+	uint32_t width       = 0;
+	uint32_t height      = 0;
+	uint32_t image_count = 0;
+};
+
 [[nodiscard]] VideoOutHostExtentStatus VideoOutBufferSelectHostExtent(VideoOutVulkanImage* image, uint32_t width, uint32_t height,
                                                                       VideoOutHostExtentState* state);
-[[nodiscard]] bool VideoOutBufferGetHostExtentState(VideoOutVulkanImage* image, VideoOutHostExtentState* state);
+[[nodiscard]] bool                     VideoOutBufferGetHostExtentState(VideoOutVulkanImage* image, VideoOutHostExtentState* state);
+// Locks every unique image in a stable order and preflights the complete set before selecting any image, so concurrent set selection cannot
+// publish a partial or non-uniform extent. Duplicate images are invalid input.
+[[nodiscard]] VideoOutHostExtentSetSelectionStatus VideoOutBufferSelectHostExtentSet(VideoOutVulkanImage* const* images,
+                                                                                     uint32_t image_count, uint32_t width, uint32_t height,
+                                                                                     VideoOutHostExtentSetState* state);
+[[nodiscard]] VideoOutHostExtentSetInspectionStatus
+VideoOutBufferInspectHostExtentSet(VideoOutVulkanImage* const* images, uint32_t image_count, VideoOutHostExtentSetState* state);
 
 class VideoOutBufferObject: public GpuObject
 {

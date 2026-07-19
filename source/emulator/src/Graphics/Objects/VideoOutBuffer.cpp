@@ -8,11 +8,110 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
 
+#include <algorithm>
+#include <functional>
+#include <vector>
+
 // IWYU pragma: no_forward_declare VkImageView_T
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+const char* VideoOutHostExtentSetSelectionStatusName(VideoOutHostExtentSetSelectionStatus status)
+{
+	switch (status)
+	{
+		case VideoOutHostExtentSetSelectionStatus::Selected: return "selected";
+		case VideoOutHostExtentSetSelectionStatus::StickyMatch: return "sticky_match";
+		case VideoOutHostExtentSetSelectionStatus::StickyMismatch: return "sticky_mismatch";
+		case VideoOutHostExtentSetSelectionStatus::InvalidArgument: return "invalid_argument";
+		case VideoOutHostExtentSetSelectionStatus::Empty: return "empty";
+	}
+	return "unknown";
+}
+
+namespace {
+
+class VideoOutImageLockSet
+{
+public:
+	VideoOutImageLockSet(VideoOutVulkanImage* const* images, uint32_t image_count)
+	{
+		if (images == nullptr || image_count == 0)
+		{
+			return;
+		}
+
+		m_images.assign(images, images + image_count);
+		if (std::any_of(m_images.cbegin(), m_images.cend(), [](const auto* image) { return image == nullptr; }))
+		{
+			m_images.clear();
+			return;
+		}
+
+		std::sort(m_images.begin(), m_images.end(), std::less<VideoOutVulkanImage*> {});
+		if (std::adjacent_find(m_images.cbegin(), m_images.cend()) != m_images.cend())
+		{
+			m_images.clear();
+			return;
+		}
+
+		for (auto* image: m_images)
+		{
+			image->materialize_mutex.Lock();
+		}
+		m_locked = true;
+	}
+
+	~VideoOutImageLockSet()
+	{
+		if (m_locked)
+		{
+			for (auto image = m_images.rbegin(); image != m_images.rend(); ++image)
+			{
+				(*image)->materialize_mutex.Unlock();
+			}
+		}
+	}
+
+	KYTY_CLASS_NO_COPY(VideoOutImageLockSet);
+
+	[[nodiscard]] bool IsLocked() const { return m_locked; }
+
+private:
+	std::vector<VideoOutVulkanImage*> m_images;
+	bool                              m_locked = false;
+};
+
+VideoOutHostExtentState GetHostExtentStateLocked(const VideoOutVulkanImage* image)
+{
+	return {image->extent.width, image->extent.height, image->host_extent_selected, image->image != nullptr};
+}
+
+VideoOutHostExtentStatus SelectHostExtentLocked(VideoOutVulkanImage* image, uint32_t width, uint32_t height, VideoOutHostExtentState* state)
+{
+	if (image->image != nullptr)
+	{
+		image->host_extent_selected = true;
+		*state                      = GetHostExtentStateLocked(image);
+		return image->extent.width == width && image->extent.height == height ? VideoOutHostExtentStatus::StickyMatch
+		                                                                      : VideoOutHostExtentStatus::StickyMismatch;
+	}
+	if (!image->host_extent_selected)
+	{
+		image->SetHostExtent(width, height);
+		image->host_extent_selected = true;
+		*state                      = GetHostExtentStateLocked(image);
+		return VideoOutHostExtentStatus::Selected;
+	}
+
+	*state = GetHostExtentStateLocked(image);
+	return image->extent.width == width && image->extent.height == height ? VideoOutHostExtentStatus::StickyMatch
+	                                                                      : VideoOutHostExtentStatus::StickyMismatch;
+}
+
+} // namespace
 
 static bool buffer_is_tiled(uint64_t vaddr, uint64_t size)
 {
@@ -50,7 +149,7 @@ static void upload_guest_contents(GraphicContext* ctx, VideoOutVulkanImage* vk_o
 		EXIT_NOT_IMPLEMENTED(vk_obj->guest_extent.width != vk_obj->guest_pitch);
 		auto* temp_buf = new uint8_t[vk_obj->guest_size];
 		TileConvertTiledToLinear(temp_buf, reinterpret_cast<void*>(vk_obj->guest_vaddr), TileMode::VideoOutTiled,
-		                        vk_obj->guest_extent.width, vk_obj->guest_extent.height, vk_obj->neo);
+		                         vk_obj->guest_extent.width, vk_obj->guest_extent.height, vk_obj->neo);
 		UtilFillImage(ctx, vk_obj, temp_buf, vk_obj->guest_size, vk_obj->guest_pitch,
 		              static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
 		delete[] temp_buf;
@@ -73,7 +172,7 @@ bool VideoOutBufferGetHostExtentState(VideoOutVulkanImage* image, VideoOutHostEx
 		return false;
 	}
 	Core::LockGuard lock(image->materialize_mutex);
-	*state = {image->extent.width, image->extent.height, image->host_extent_selected, image->image != nullptr};
+	*state = GetHostExtentStateLocked(image);
 	return true;
 }
 
@@ -86,24 +185,94 @@ VideoOutHostExtentStatus VideoOutBufferSelectHostExtent(VideoOutVulkanImage* ima
 	}
 
 	Core::LockGuard lock(image->materialize_mutex);
-	if (image->image != nullptr)
+	return SelectHostExtentLocked(image, width, height, state);
+}
+
+VideoOutHostExtentSetSelectionStatus VideoOutBufferSelectHostExtentSet(VideoOutVulkanImage* const* images, uint32_t image_count,
+                                                                       uint32_t width, uint32_t height, VideoOutHostExtentSetState* state)
+{
+	if (images == nullptr || state == nullptr || width == 0 || height == 0)
 	{
-		image->host_extent_selected = true;
-		*state = {image->extent.width, image->extent.height, true, true};
-		return image->extent.width == width && image->extent.height == height ? VideoOutHostExtentStatus::StickyMatch
-		                                                                     : VideoOutHostExtentStatus::StickyMismatch;
+		return VideoOutHostExtentSetSelectionStatus::InvalidArgument;
 	}
-	if (!image->host_extent_selected)
+	if (image_count == 0)
 	{
-		image->SetHostExtent(width, height);
-		image->host_extent_selected = true;
-		*state = {width, height, true, image->image != nullptr};
-		return VideoOutHostExtentStatus::Selected;
+		return VideoOutHostExtentSetSelectionStatus::Empty;
 	}
 
-	*state = {image->extent.width, image->extent.height, true, image->image != nullptr};
-	return image->extent.width == width && image->extent.height == height ? VideoOutHostExtentStatus::StickyMatch
-	                                                                     : VideoOutHostExtentStatus::StickyMismatch;
+	VideoOutImageLockSet lock(images, image_count);
+	if (!lock.IsLocked())
+	{
+		return VideoOutHostExtentSetSelectionStatus::InvalidArgument;
+	}
+
+	bool needs_selection = false;
+	for (uint32_t index = 0; index < image_count; index++)
+	{
+		const auto image_state = GetHostExtentStateLocked(images[index]);
+		if ((image_state.selected || image_state.materialized) && (image_state.width != width || image_state.height != height))
+		{
+			*state = {image_state.width, image_state.height, image_count};
+			return VideoOutHostExtentSetSelectionStatus::StickyMismatch;
+		}
+		needs_selection = needs_selection || !image_state.selected;
+	}
+
+	for (uint32_t index = 0; index < image_count; index++)
+	{
+		VideoOutHostExtentState image_state;
+		const auto              status = SelectHostExtentLocked(images[index], width, height, &image_state);
+		if (status == VideoOutHostExtentStatus::StickyMismatch)
+		{
+			*state = {image_state.width, image_state.height, image_count};
+			return VideoOutHostExtentSetSelectionStatus::StickyMismatch;
+		}
+	}
+
+	*state = {width, height, image_count};
+	return needs_selection ? VideoOutHostExtentSetSelectionStatus::Selected : VideoOutHostExtentSetSelectionStatus::StickyMatch;
+}
+
+VideoOutHostExtentSetInspectionStatus VideoOutBufferInspectHostExtentSet(VideoOutVulkanImage* const* images, uint32_t image_count,
+                                                                         VideoOutHostExtentSetState* state)
+{
+	if (images == nullptr || state == nullptr)
+	{
+		return VideoOutHostExtentSetInspectionStatus::InvalidArgument;
+	}
+	if (image_count == 0)
+	{
+		return VideoOutHostExtentSetInspectionStatus::Empty;
+	}
+
+	VideoOutImageLockSet lock(images, image_count);
+	if (!lock.IsLocked())
+	{
+		return VideoOutHostExtentSetInspectionStatus::InvalidArgument;
+	}
+
+	const auto first = GetHostExtentStateLocked(images[0]);
+	if (!first.selected)
+	{
+		return VideoOutHostExtentSetInspectionStatus::Unselected;
+	}
+
+	for (uint32_t index = 1; index < image_count; index++)
+	{
+		const auto current = GetHostExtentStateLocked(images[index]);
+		if (!current.selected)
+		{
+			return VideoOutHostExtentSetInspectionStatus::Unselected;
+		}
+		if (current.width != first.width || current.height != first.height)
+		{
+			*state = {first.width, first.height, image_count};
+			return VideoOutHostExtentSetInspectionStatus::NonUniform;
+		}
+	}
+
+	*state = {first.width, first.height, image_count};
+	return VideoOutHostExtentSetInspectionStatus::Uniform;
 }
 
 void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* vk_obj)
@@ -133,9 +302,9 @@ void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* 
 	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
 	image_info.initialLayout = vk_obj->layout;
 	image_info.usage         = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-	                                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-	image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	image_info.samples     = VK_SAMPLE_COUNT_1_BIT;
+	                                                          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+	image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+	image_info.samples       = VK_SAMPLE_COUNT_1_BIT;
 
 	vkCreateImage(ctx->device, &image_info, nullptr, &vk_obj->image);
 	EXIT_NOT_IMPLEMENTED(vk_obj->image == nullptr);
@@ -198,7 +367,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	EXIT_IF(params == nullptr);
 	EXIT_IF(vaddr == nullptr || size == nullptr || vaddr_num != 1);
 
-	auto* vk_obj = static_cast<VideoOutVulkanImage*>(obj);
+	auto*           vk_obj = static_cast<VideoOutVulkanImage*>(obj);
 	Core::LockGuard lock(vk_obj->materialize_mutex);
 	vk_obj->guest_vaddr = *vaddr;
 	vk_obj->guest_size  = *size;
@@ -233,12 +402,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	{
 		case static_cast<uint64_t>(VideoOutBufferFormat::R8G8B8A8Srgb): vk_format = VK_FORMAT_R8G8B8A8_SRGB; break;
 		case static_cast<uint64_t>(VideoOutBufferFormat::B8G8R8A8Srgb): vk_format = VK_FORMAT_B8G8R8A8_SRGB; break;
-		case static_cast<uint64_t>(VideoOutBufferFormat::R10G10B10A2Unorm):
-			vk_format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-			break;
-		case static_cast<uint64_t>(VideoOutBufferFormat::B10G10R10A2Unorm):
-			vk_format = VK_FORMAT_A2R10G10B10_UNORM_PACK32;
-			break;
+		case static_cast<uint64_t>(VideoOutBufferFormat::R10G10B10A2Unorm): vk_format = VK_FORMAT_A2B10G10R10_UNORM_PACK32; break;
+		case static_cast<uint64_t>(VideoOutBufferFormat::B10G10R10A2Unorm): vk_format = VK_FORMAT_A2R10G10B10_UNORM_PACK32; break;
 		default: EXIT("unknown format: %" PRIu64 "\n", pixel_format);
 	}
 

@@ -9,11 +9,14 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/InternalResolutionRuntime.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/Tile.h"
+#include "Emulator/Graphics/VideoOutFlipLifecycleGate.h"
+#include "Emulator/Graphics/VideoOutMaterializationGate.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
@@ -35,6 +38,19 @@ namespace Kyty::Libs::VideoOut {
 
 LIB_NAME("VideoOut", "VideoOut");
 
+const char* VideoOutRegisteredHostExtentStatusName(VideoOutRegisteredHostExtentStatus status)
+{
+	switch (status)
+	{
+		case VideoOutRegisteredHostExtentStatus::Uniform: return "uniform";
+		case VideoOutRegisteredHostExtentStatus::Unselected: return "unselected";
+		case VideoOutRegisteredHostExtentStatus::NonUniform: return "non_uniform";
+		case VideoOutRegisteredHostExtentStatus::InvalidArgument: return "invalid_argument";
+		case VideoOutRegisteredHostExtentStatus::NoBuffers: return "no_buffers";
+	}
+	return "unknown";
+}
+
 namespace EventQueue = LibKernel::EventQueue;
 
 namespace {
@@ -43,6 +59,15 @@ bool EopTraceEnabled()
 {
 	static const bool enabled = (std::getenv("KYTY_EOP_TRACE") != nullptr);
 	return enabled;
+}
+
+bool VideoOutRangesOverlap(uint64_t lhs_address, uint64_t lhs_size, uint64_t rhs_address, uint64_t rhs_size)
+{
+	if (lhs_size == 0 || rhs_size == 0)
+	{
+		return false;
+	}
+	return lhs_address <= rhs_address ? rhs_address - lhs_address < lhs_size : lhs_address - rhs_address < rhs_size;
 }
 
 } // namespace
@@ -154,6 +179,7 @@ struct VideoOutConfig
 	Core::Mutex                      mutex;
 	VideoOutResolutionStatus         resolution;
 	bool                             opened    = false;
+	bool                             closing   = false;
 	int                              flip_rate = 0;
 	Vector<EventQueue::KernelEqueue> flip_eqs;
 	Vector<EventQueue::KernelEqueue> pre_vblank_eqs;
@@ -162,6 +188,7 @@ struct VideoOutConfig
 	VideoOutVblankStatus             pre_vblank_status;
 	VideoOutVblankStatus             vblank_status;
 	VideoOutBufferInfo               buffers[16];
+	bool                             buffer_registration_reserved[16] {};
 	Vector<VideoOutBufferSet>        buffers_sets;
 	int                              buffers_sets_seq = 0;
 };
@@ -177,6 +204,7 @@ public:
 	bool Flip(uint32_t micros);
 	void GetFlipStatus(VideoOutConfig* cfg, VideoOutFlipStatus* out);
 	void Wait(VideoOutConfig* cfg, int index);
+	void WaitForConfig(VideoOutConfig* cfg);
 
 private:
 	struct Request
@@ -191,6 +219,15 @@ private:
 	Core::CondVar       m_submit_cond_var;
 	Core::CondVar       m_done_cond_var;
 	Core::List<Request> m_requests;
+	Graphics::VideoOutFlipLifecycleGate m_lifecycle_gate;
+};
+
+enum class SubmitFlipStatus
+{
+	Submitted,
+	InvalidHandle,
+	InvalidIndex,
+	QueueFull,
 };
 
 class VideoOutContext
@@ -208,7 +245,14 @@ public:
 	VideoOutConfig* Get(int handle);
 	int             ResolveHandle(int handle) const;
 
-	VideoOutBufferImageInfo FindImage(const void* buffer);
+	VideoOutBufferImageInfo            FindImage(const void* buffer);
+	VideoOutBufferImageInfo            FindAndMaterializeImage(const void* buffer);
+	Graphics::VideoOutVulkanImage*     MaterializeRegisteredImage(VideoOutConfig* cfg, int index);
+	VideoOutRegisteredHostExtentStatus GetRegisteredHostExtent(uint32_t guest_width, uint32_t guest_height, uint32_t* host_width,
+	                                                           uint32_t* host_height);
+	int RegisterBuffers(int handle, int set_id, bool generate_set_id, int start_index, const void* const* addresses, int buffer_num,
+	                    const VideoOutBufferAttribute* attribute, const VideoOutBufferAttribute2* attribute2);
+	SubmitFlipStatus SubmitFlip(int handle, int index, int64_t flip_arg);
 
 	void Init(uint32_t width, uint32_t height);
 
@@ -230,10 +274,19 @@ public:
 	void VblankEnd();
 
 private:
-	Core::Mutex               m_mutex;
-	VideoOutConfig            m_video_out_ctx[VIDEO_OUT_NUM_MAX];
-	Graphics::GraphicContext* m_graphic_ctx = nullptr;
-	FlipQueue                 m_flip_queue;
+	[[nodiscard]] VideoOutBufferImageInfo FindImageLocked(const void* buffer);
+	[[nodiscard]] VideoOutBufferImageInfo
+	PinImageForMaterialization(const void* buffer, Graphics::VideoOutMaterializationGate::Pin* pin);
+	[[nodiscard]] Graphics::VideoOutVulkanImage*
+	PinRegisteredImageForMaterialization(VideoOutConfig* cfg, int index, Graphics::VideoOutMaterializationGate::Pin* pin);
+
+	Core::Mutex                           m_mutex;
+	Core::Mutex                           m_registration_mutex;
+	Graphics::VideoOutMaterializationGate m_registration_gate;
+	Graphics::VideoOutMaterializationGate m_materialization_gate;
+	VideoOutConfig                        m_video_out_ctx[VIDEO_OUT_NUM_MAX];
+	Graphics::GraphicContext*             m_graphic_ctx = nullptr;
+	FlipQueue                             m_flip_queue;
 };
 
 static VideoOutContext* g_video_out_context = nullptr;
@@ -301,13 +354,18 @@ int VideoOutContext::Open()
 
 	for (int i = 1; i < VIDEO_OUT_NUM_MAX; i++)
 	{
-		if (!m_video_out_ctx[i].opened)
+		if (!m_video_out_ctx[i].opened && !m_video_out_ctx[i].closing)
 		{
 			handle = i;
 			break;
 		}
 	}
 
+	if (handle < 0)
+	{
+		return -1;
+	}
+	EXIT_IF(m_video_out_ctx[handle].closing);
 	EXIT_IF(!m_video_out_ctx[handle].flip_eqs.IsEmpty());
 	EXIT_IF(!m_video_out_ctx[handle].pre_vblank_eqs.IsEmpty());
 	EXIT_IF(!m_video_out_ctx[handle].vblank_eqs.IsEmpty());
@@ -326,15 +384,29 @@ int VideoOutContext::Open()
 
 void VideoOutContext::Close(int handle)
 {
-	Core::LockGuard lock(m_mutex);
+	m_mutex.Lock();
 
-	EXIT_NOT_IMPLEMENTED(handle >= VIDEO_OUT_NUM_MAX);
-	EXIT_NOT_IMPLEMENTED(!m_video_out_ctx[handle].opened);
+	EXIT_NOT_IMPLEMENTED(handle < 0 || handle >= VIDEO_OUT_NUM_MAX);
+	auto* ctx = m_video_out_ctx + handle;
+	EXIT_NOT_IMPLEMENTED(!ctx->opened || ctx->closing);
 
-	m_video_out_ctx[handle].opened = false;
+	ctx->closing = true;
+	m_mutex.Unlock();
 
-	m_video_out_ctx[handle].mutex.Lock();
-	for (auto& flip_eq: m_video_out_ctx[handle].flip_eqs)
+	m_flip_queue.WaitForConfig(ctx);
+	m_registration_gate.WaitUntilIdle();
+
+	m_mutex.Lock();
+	EXIT_IF(!ctx->opened || !ctx->closing);
+	ctx->opened = false;
+	m_mutex.Unlock();
+
+	m_materialization_gate.WaitUntilIdle();
+
+	m_mutex.Lock();
+	EXIT_IF(ctx->opened || !ctx->closing);
+	ctx->mutex.Lock();
+	for (auto& flip_eq: ctx->flip_eqs)
 	{
 		if (flip_eq != nullptr)
 		{
@@ -342,8 +414,8 @@ void VideoOutContext::Close(int handle)
 			EXIT_NOT_IMPLEMENTED(result != OK);
 		}
 	}
-	m_video_out_ctx[handle].flip_eqs.Clear();
-	for (auto& vblank_eq: m_video_out_ctx[handle].pre_vblank_eqs)
+	ctx->flip_eqs.Clear();
+	for (auto& vblank_eq: ctx->pre_vblank_eqs)
 	{
 		if (vblank_eq != nullptr)
 		{
@@ -351,8 +423,8 @@ void VideoOutContext::Close(int handle)
 			EXIT_NOT_IMPLEMENTED(result != OK);
 		}
 	}
-	m_video_out_ctx[handle].pre_vblank_eqs.Clear();
-	for (auto& vblank_eq: m_video_out_ctx[handle].vblank_eqs)
+	ctx->pre_vblank_eqs.Clear();
+	for (auto& vblank_eq: ctx->vblank_eqs)
 	{
 		if (vblank_eq != nullptr)
 		{
@@ -360,22 +432,28 @@ void VideoOutContext::Close(int handle)
 			EXIT_NOT_IMPLEMENTED(result != OK);
 		}
 	}
-	m_video_out_ctx[handle].vblank_eqs.Clear();
-	m_video_out_ctx[handle].mutex.Unlock();
+	ctx->vblank_eqs.Clear();
+	ctx->mutex.Unlock();
 
-	m_video_out_ctx[handle].flip_rate = 0;
+	ctx->flip_rate = 0;
 
-	for (auto& buffer: m_video_out_ctx[handle].buffers)
+	for (auto& buffer: ctx->buffers)
 	{
 		buffer.buffer        = nullptr;
 		buffer.buffer_vulkan = nullptr;
 		buffer.buffer_size   = 0;
 		buffer.set_id        = 0;
 	}
+	for (bool reserved: ctx->buffer_registration_reserved)
+	{
+		EXIT_IF(reserved);
+	}
 
-	m_video_out_ctx[handle].buffers_sets.Clear();
+	ctx->buffers_sets.Clear();
 
-	m_video_out_ctx[handle].buffers_sets_seq = 0;
+	ctx->buffers_sets_seq = 0;
+	ctx->closing          = false;
+	m_mutex.Unlock();
 }
 
 VideoOutConfig* VideoOutContext::Get(int handle)
@@ -385,6 +463,27 @@ VideoOutConfig* VideoOutContext::Get(int handle)
 	EXIT_NOT_IMPLEMENTED(!m_video_out_ctx[handle].opened);
 
 	return m_video_out_ctx + handle;
+}
+
+SubmitFlipStatus VideoOutContext::SubmitFlip(int handle, int index, int64_t flip_arg)
+{
+	Core::LockGuard lock(m_mutex);
+	handle = ResolveHandle(handle);
+	if (handle < 0 || handle >= VIDEO_OUT_NUM_MAX)
+	{
+		return SubmitFlipStatus::InvalidHandle;
+	}
+
+	auto* ctx = m_video_out_ctx + handle;
+	if (!ctx->opened || ctx->closing)
+	{
+		return SubmitFlipStatus::InvalidHandle;
+	}
+	if (index < 0 || index >= 16 || ctx->buffer_registration_reserved[index] || ctx->buffers[index].buffer_vulkan == nullptr)
+	{
+		return SubmitFlipStatus::InvalidIndex;
+	}
+	return m_flip_queue.Submit(ctx, index, flip_arg) ? SubmitFlipStatus::Submitted : SubmitFlipStatus::QueueFull;
 }
 
 int VideoOutContext::ResolveHandle(int handle) const
@@ -476,10 +575,13 @@ void VideoOutContext::VblankEnd()
 
 VideoOutBufferImageInfo VideoOutContext::FindImage(const void* buffer)
 {
-	VideoOutBufferImageInfo ret;
-
 	Core::LockGuard lock(m_mutex);
+	return FindImageLocked(buffer);
+}
 
+VideoOutBufferImageInfo VideoOutContext::FindImageLocked(const void* buffer)
+{
+	VideoOutBufferImageInfo ret;
 	for (auto& ctx: m_video_out_ctx)
 	{
 		if (ctx.opened)
@@ -504,6 +606,112 @@ END:
 	return ret;
 }
 
+VideoOutBufferImageInfo VideoOutContext::FindAndMaterializeImage(const void* buffer)
+{
+	auto* graphic_ctx = GetGraphicCtx();
+
+	Graphics::VideoOutMaterializationGate::Pin pin;
+	auto                                       ret = PinImageForMaterialization(buffer, &pin);
+	if (ret.image != nullptr)
+	{
+		Graphics::VideoOutBufferEnsureMaterialized(graphic_ctx, ret.image);
+	}
+	return ret;
+}
+
+Graphics::VideoOutVulkanImage* VideoOutContext::MaterializeRegisteredImage(VideoOutConfig* cfg, int index)
+{
+	EXIT_IF(cfg == nullptr);
+	EXIT_IF(index < 0 || index >= 16);
+	auto* graphic_ctx = GetGraphicCtx();
+
+	Graphics::VideoOutMaterializationGate::Pin pin;
+	auto*                                      image = PinRegisteredImageForMaterialization(cfg, index, &pin);
+	Graphics::VideoOutBufferEnsureMaterialized(graphic_ctx, image);
+	return image;
+}
+
+VideoOutBufferImageInfo VideoOutContext::PinImageForMaterialization(const void* buffer,
+                                                                    Graphics::VideoOutMaterializationGate::Pin* pin)
+{
+	EXIT_IF(pin == nullptr);
+	Core::LockGuard lock(m_mutex);
+	auto            ret = FindImageLocked(buffer);
+	if (ret.image != nullptr)
+	{
+		*pin = m_materialization_gate.Acquire();
+	}
+	return ret;
+}
+
+Graphics::VideoOutVulkanImage*
+VideoOutContext::PinRegisteredImageForMaterialization(VideoOutConfig* cfg, int index, Graphics::VideoOutMaterializationGate::Pin* pin)
+{
+	EXIT_IF(pin == nullptr);
+	Core::LockGuard lock(m_mutex);
+	bool            registered_config = false;
+	for (auto& context: m_video_out_ctx)
+	{
+		registered_config = registered_config || (&context == cfg && context.opened);
+	}
+	EXIT_IF(!registered_config);
+	auto* image = cfg->buffers[index].buffer_vulkan;
+	EXIT_IF(image == nullptr);
+	*pin = m_materialization_gate.Acquire();
+	return image;
+}
+
+VideoOutRegisteredHostExtentStatus VideoOutContext::GetRegisteredHostExtent(uint32_t guest_width, uint32_t guest_height,
+                                                                            uint32_t* host_width, uint32_t* host_height)
+{
+	if (guest_width == 0 || guest_height == 0 || host_width == nullptr || host_height == nullptr)
+	{
+		return VideoOutRegisteredHostExtentStatus::InvalidArgument;
+	}
+
+	Core::LockGuard                lock(m_mutex);
+	Graphics::VideoOutVulkanImage* images[VIDEO_OUT_NUM_MAX * 16] {};
+	uint32_t                       image_count = 0;
+	for (auto& ctx: m_video_out_ctx)
+	{
+		if (!ctx.opened)
+		{
+			continue;
+		}
+		for (auto& buffer: ctx.buffers)
+		{
+			auto* image = buffer.buffer_vulkan;
+			if (image == nullptr || image->guest_extent.width != guest_width || image->guest_extent.height != guest_height)
+			{
+				continue;
+			}
+			images[image_count++] = image;
+		}
+	}
+
+	if (image_count == 0)
+	{
+		return VideoOutRegisteredHostExtentStatus::NoBuffers;
+	}
+
+	Graphics::VideoOutHostExtentSetState state;
+	switch (Graphics::VideoOutBufferInspectHostExtentSet(images, image_count, &state))
+	{
+		case Graphics::VideoOutHostExtentSetInspectionStatus::Uniform:
+			*host_width  = state.width;
+			*host_height = state.height;
+			return VideoOutRegisteredHostExtentStatus::Uniform;
+		case Graphics::VideoOutHostExtentSetInspectionStatus::Unselected: return VideoOutRegisteredHostExtentStatus::Unselected;
+		case Graphics::VideoOutHostExtentSetInspectionStatus::NonUniform:
+			*host_width  = state.width;
+			*host_height = state.height;
+			return VideoOutRegisteredHostExtentStatus::NonUniform;
+		case Graphics::VideoOutHostExtentSetInspectionStatus::InvalidArgument: return VideoOutRegisteredHostExtentStatus::InvalidArgument;
+		case Graphics::VideoOutHostExtentSetInspectionStatus::Empty: return VideoOutRegisteredHostExtentStatus::NoBuffers;
+	}
+	return VideoOutRegisteredHostExtentStatus::InvalidArgument;
+}
+
 bool FlipQueue::Submit(VideoOutConfig* cfg, int index, int64_t flip_arg)
 {
 	Core::LockGuard lock(m_mutex);
@@ -520,6 +728,7 @@ bool FlipQueue::Submit(VideoOutConfig* cfg, int index, int64_t flip_arg)
 	r.submit_tsc = LibKernel::KernelReadTsc();
 
 	m_requests.Add(r);
+	m_lifecycle_gate.Accept(cfg);
 
 	cfg->flip_status.flipPendingNum = static_cast<int>(m_requests.Size());
 	cfg->flip_status.gcQueueNum     = 0;
@@ -538,6 +747,12 @@ void FlipQueue::Wait(VideoOutConfig* cfg, int index)
 	{
 		m_done_cond_var.Wait(&m_mutex);
 	}
+}
+
+void FlipQueue::WaitForConfig(VideoOutConfig* cfg)
+{
+	EXIT_IF(cfg == nullptr);
+	m_lifecycle_gate.WaitUntilIdle(cfg);
 }
 
 bool FlipQueue::Flip(uint32_t micros)
@@ -559,8 +774,7 @@ bool FlipQueue::Flip(uint32_t micros)
 	auto r     = m_requests.At(first);
 	m_mutex.Unlock();
 
-	auto* buffer = r.cfg->buffers[r.index].buffer_vulkan;
-	Graphics::VideoOutBufferEnsureMaterialized(g_video_out_context->GetGraphicCtx(), buffer);
+	auto* buffer = g_video_out_context->MaterializeRegisteredImage(r.cfg, r.index);
 
 	Graphics::WindowDrawBuffer(buffer);
 
@@ -593,16 +807,17 @@ bool FlipQueue::Flip(uint32_t micros)
 
 	// m_mutex.Lock();
 
-	m_requests.Remove(first);
-	m_done_cond_var.Signal();
-
 	r.cfg->flip_status.count++;
 	r.cfg->flip_status.processTime    = LibKernel::KernelGetProcessTime();
 	r.cfg->flip_status.tsc            = LibKernel::KernelReadTsc();
 	r.cfg->flip_status.submitTsc      = r.submit_tsc;
 	r.cfg->flip_status.flipArg        = r.flip_arg;
 	r.cfg->flip_status.currentBuffer  = r.index;
-	r.cfg->flip_status.flipPendingNum = static_cast<int>(m_requests.Size());
+	r.cfg->flip_status.flipPendingNum = static_cast<int>(m_requests.Size() - 1);
+
+	m_requests.Remove(first);
+	m_done_cond_var.SignalAll();
+	m_lifecycle_gate.Complete(r.cfg);
 
 	m_mutex.Unlock();
 
@@ -917,11 +1132,13 @@ KYTY_SYSV_ABI int VideoOutAddVblankEvent(LibKernel::EventQueue::KernelEqueue eq,
 	return result;
 }
 
-static int register_buffers_internal(VideoOutConfig* ctx, int set_id, int start_index, const void* const* addresses, int buffer_num,
-                                     const VideoOutBufferAttribute* attribute, const VideoOutBufferAttribute2* attribute2)
+int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_id, int start_index, const void* const* addresses,
+                                     int buffer_num, const VideoOutBufferAttribute* attribute, const VideoOutBufferAttribute2* attribute2)
 {
-	Graphics::WindowWaitForGraphicInitialized();
-	Graphics::GraphicsRenderCreateContext();
+	// Registration is a transaction, but its expensive GpuMemory/Vulkan work
+	// must not block vblank, flip status, image lookup, or Close on m_mutex.
+	// Reserve before any host wait so Close either observes this exact
+	// transaction or wins the session linearization point.
 
 	uint64_t buffer_size  = 0;
 	uint64_t buffer_align = 0;
@@ -930,23 +1147,6 @@ static int register_buffers_internal(VideoOutConfig* ctx, int set_id, int start_
 
 	EXIT_NOT_IMPLEMENTED(buffer_size == 0);
 	EXIT_NOT_IMPLEMENTED(buffer_pitch == 0);
-
-	VideoOutBufferSet new_set {};
-
-	new_set.start_index = start_index;
-	new_set.num         = buffer_num;
-	new_set.set_id      = set_id;
-	if (attribute2 != nullptr)
-	{
-		new_set.attr.gen5 = *attribute2;
-		new_set.gen5      = true;
-	} else
-	{
-		new_set.attr.gen4 = *attribute;
-		new_set.gen5      = false;
-	}
-
-	ctx->buffers_sets.Add(new_set);
 
 	bool     tile   = (attribute2 != nullptr ? (attribute2->tiling_mode == 0) : (attribute->tiling_mode == 0));
 	bool     neo    = (attribute2 != nullptr ? true : Config::IsNeo());
@@ -987,31 +1187,178 @@ static int register_buffers_internal(VideoOutConfig* ctx, int set_id, int start_
 
 	for (int i = 0; i < buffer_num; i++)
 	{
-		if (ctx->buffers[i + start_index].buffer != nullptr)
+		EXIT_NOT_IMPLEMENTED((reinterpret_cast<uint64_t>(addresses[i]) & (buffer_align - 1u)) != 0);
+		for (int j = i + 1; j < buffer_num; j++)
+		{
+			if (VideoOutRangesOverlap(reinterpret_cast<uint64_t>(addresses[i]), buffer_size,
+			                         reinterpret_cast<uint64_t>(addresses[j]), buffer_size))
+			{
+				return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+			}
+		}
+	}
+
+	auto overlaps_registered_video_out = [&]() {
+		for (int i = 0; i < buffer_num; i++)
+		{
+			const auto requested_address = reinterpret_cast<uint64_t>(addresses[i]);
+			for (const auto& registered_ctx: m_video_out_ctx)
+			{
+				for (const auto& registered: registered_ctx.buffers)
+				{
+					if (registered.buffer != nullptr &&
+					    VideoOutRangesOverlap(requested_address, buffer_size, reinterpret_cast<uint64_t>(registered.buffer),
+					                          registered.buffer_size))
+					{
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	};
+
+	Graphics::VideoOutMaterializationGate::Pin registration_pin;
+	VideoOutConfig*                          ctx = nullptr;
+	{
+		Core::LockGuard lock(m_mutex);
+		handle = ResolveHandle(handle);
+		if (handle < 0 || handle >= VIDEO_OUT_NUM_MAX)
+		{
+			return VIDEO_OUT_ERROR_INVALID_HANDLE;
+		}
+		ctx = m_video_out_ctx + handle;
+		if (!ctx->opened || ctx->closing)
+		{
+			return VIDEO_OUT_ERROR_INVALID_HANDLE;
+		}
+		if (overlaps_registered_video_out())
 		{
 			return VIDEO_OUT_ERROR_SLOT_OCCUPIED;
 		}
 
-		EXIT_NOT_IMPLEMENTED((reinterpret_cast<uint64_t>(addresses[i]) & (buffer_align - 1u)) != 0);
-
-		ctx->buffers[i + start_index].set_id        = set_id;
-		ctx->buffers[i + start_index].buffer        = addresses[i];
-		ctx->buffers[i + start_index].buffer_size   = buffer_size;
-		ctx->buffers[i + start_index].buffer_pitch  = buffer_pitch;
-		ctx->buffers[i + start_index].buffer_vulkan = static_cast<Graphics::VideoOutVulkanImage*>(Graphics::GpuMemoryCreateObject(
-		    0, g_video_out_context->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(addresses[i]), buffer_size, vulkan_buffer_info));
-
-		EXIT_NOT_IMPLEMENTED(ctx->buffers[i + start_index].buffer_vulkan == nullptr);
-
-		printf("\tbuffers[%d] = %016" PRIx64 "\n", i + start_index, reinterpret_cast<uint64_t>(addresses[i]));
+		for (int i = 0; i < buffer_num; i++)
+		{
+			const int slot = i + start_index;
+			if (ctx->buffers[slot].buffer != nullptr || ctx->buffer_registration_reserved[slot])
+			{
+				return VIDEO_OUT_ERROR_SLOT_OCCUPIED;
+			}
+		}
+		for (int i = 0; i < buffer_num; i++)
+		{
+			ctx->buffer_registration_reserved[i + start_index] = true;
+		}
+		registration_pin = m_registration_gate.Acquire();
 	}
 
-	const auto resolution_status = Graphics::InternalResolutionRuntimeRegisterGuestDisplayExtent({width, height});
-	EXIT_IF(resolution_status != Graphics::ResolutionPolicyStatus::Success);
+	// Staging may run concurrently with vblank, flips, image queries and Close,
+	// but registrations themselves remain ordered so resolution epochs and
+	// generated set IDs cannot overtake one another.
+	Core::LockGuard registration_lock(m_registration_mutex);
 
-	// Graphics::GpuMemoryDbgDump();
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(ctx == nullptr || !ctx->opened);
+		if (overlaps_registered_video_out())
+		{
+			for (int i = 0; i < buffer_num; i++)
+			{
+				const int slot = i + start_index;
+				EXIT_IF(!ctx->buffer_registration_reserved[slot]);
+				ctx->buffer_registration_reserved[slot] = false;
+			}
+			return VIDEO_OUT_ERROR_SLOT_OCCUPIED;
+		}
+	}
 
-	return OK;
+	Graphics::WindowWaitForGraphicInitialized();
+	Graphics::GraphicsRenderCreateContext();
+	auto* graphic_ctx = GetGraphicCtx();
+
+	VideoOutBufferInfo             staged_buffers[16] {};
+	Graphics::VideoOutVulkanImage* staged_images[16] {};
+	for (int i = 0; i < buffer_num; i++)
+	{
+		auto& staged         = staged_buffers[i];
+		staged.buffer        = addresses[i];
+		staged.buffer_size   = buffer_size;
+		staged.buffer_pitch  = buffer_pitch;
+		staged.buffer_vulkan = static_cast<Graphics::VideoOutVulkanImage*>(Graphics::GpuMemoryCreateObject(
+		    0, graphic_ctx, nullptr, reinterpret_cast<uint64_t>(addresses[i]), buffer_size, vulkan_buffer_info));
+		EXIT_NOT_IMPLEMENTED(staged.buffer_vulkan == nullptr);
+		staged_images[i] = staged.buffer_vulkan;
+	}
+
+	{
+		Core::LockGuard lock(m_mutex);
+
+		// Close marks the context as closing, then waits for this transaction
+		// outside m_mutex. A registration that already reserved its slots
+		// therefore linearizes completely before Close clears the session.
+		EXIT_IF(ctx == nullptr || !ctx->opened);
+		for (int i = 0; i < buffer_num; i++)
+		{
+			const int slot = i + start_index;
+			EXIT_IF(!ctx->buffer_registration_reserved[slot] || ctx->buffers[slot].buffer != nullptr);
+		}
+
+		// Commit the runtime extent, every staged image selection and the
+		// published set under one VideoOut observation boundary. Draw/image
+		// lookup can therefore see either the previous set or this complete
+		// cohort, never a registered candidate without its buffers.
+		const auto resolution_status = Graphics::InternalResolutionRuntimeRegisterGuestDisplayExtent({width, height});
+		EXIT_IF(resolution_status != Graphics::ResolutionPolicyStatus::Success);
+		const auto resolution  = Graphics::InternalResolutionRuntimeGetSnapshot();
+		const auto host_extent = resolution.candidate_decision.classification == Graphics::ResolutionClassification::Scaled
+		                             ? resolution.candidate_decision.host_extent
+		                             : Graphics::ResolutionExtent {width, height};
+
+		Graphics::VideoOutHostExtentSetState selection_state {};
+		const auto selection =
+		    Graphics::VideoOutBufferSelectHostExtentSet(staged_images, static_cast<uint32_t>(buffer_num), host_extent.width,
+		                                                host_extent.height, &selection_state);
+		if (selection != Graphics::VideoOutHostExtentSetSelectionStatus::Selected &&
+		    selection != Graphics::VideoOutHostExtentSetSelectionStatus::StickyMatch)
+		{
+			EXIT("VideoOut buffer-set host extent conflict: guest=%ux%u requested=%ux%u selected=%ux%u status=%s(%u)\n", width,
+			     height, host_extent.width, host_extent.height, selection_state.width, selection_state.height,
+			     Graphics::VideoOutHostExtentSetSelectionStatusName(selection), static_cast<unsigned>(selection));
+		}
+
+		// Generated set IDs are committed with publication. Validation failures
+		// such as SLOT_OCCUPIED leave the sequence unchanged.
+		const int         effective_set_id = generate_set_id ? ctx->buffers_sets_seq : set_id;
+		VideoOutBufferSet new_set {};
+		new_set.start_index = start_index;
+		new_set.num         = buffer_num;
+		new_set.set_id      = effective_set_id;
+		if (attribute2 != nullptr)
+		{
+			new_set.attr.gen5 = *attribute2;
+			new_set.gen5      = true;
+		} else
+		{
+			new_set.attr.gen4 = *attribute;
+			new_set.gen5      = false;
+		}
+
+		for (int i = 0; i < buffer_num; i++)
+		{
+			const int slot                              = i + start_index;
+			staged_buffers[i].set_id                    = effective_set_id;
+			ctx->buffers[slot]                          = staged_buffers[i];
+			ctx->buffer_registration_reserved[slot]     = false;
+			printf("\tbuffers[%d] = %016" PRIx64 "\n", slot, reinterpret_cast<uint64_t>(addresses[i]));
+		}
+		ctx->buffers_sets.Add(new_set);
+		if (generate_set_id)
+		{
+			ctx->buffers_sets_seq++;
+		}
+
+		return generate_set_id ? effective_set_id : OK;
+	}
 }
 
 KYTY_SYSV_ABI int VideoOutRegisterBuffers(int handle, int start_index, void* const* addresses, int buffer_num,
@@ -1020,8 +1367,6 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers(int handle, int start_index, void* con
 	PRINT_NAME();
 
 	EXIT_IF(g_video_out_context == nullptr);
-
-	auto* ctx = g_video_out_context->Get(handle);
 
 	if (addresses == nullptr)
 	{
@@ -1037,8 +1382,6 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers(int handle, int start_index, void* con
 	{
 		return VIDEO_OUT_ERROR_INVALID_VALUE;
 	}
-
-	int set_id = ctx->buffers_sets_seq++;
 
 	printf("\t start_index    = %d\n", start_index);
 	printf("\t buffer_num     = %d\n", buffer_num);
@@ -1056,9 +1399,7 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers(int handle, int start_index, void* con
 	EXIT_NOT_IMPLEMENTED(attribute->pitch_in_pixel != attribute->width);
 	EXIT_NOT_IMPLEMENTED(attribute->option != 0);
 
-	int result = register_buffers_internal(ctx, set_id, start_index, addresses, buffer_num, attribute, nullptr);
-
-	return (result == OK ? set_id : result);
+	return g_video_out_context->RegisterBuffers(handle, 0, true, start_index, addresses, buffer_num, attribute, nullptr);
 }
 
 KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer_index_start, const VideoOutBuffers* buffers,
@@ -1067,8 +1408,6 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 	PRINT_NAME();
 
 	EXIT_IF(g_video_out_context == nullptr);
-
-	auto* ctx = g_video_out_context->Get(handle);
 
 	if (buffers == nullptr)
 	{
@@ -1115,7 +1454,8 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 		addresses[i] = buffers[i].data;
 	}
 
-	return register_buffers_internal(ctx, set_index, buffer_index_start, addresses.GetDataConst(), buffer_num, nullptr, attribute);
+	return g_video_out_context->RegisterBuffers(handle, set_index, false, buffer_index_start, addresses.GetDataConst(), buffer_num,
+	                                            nullptr, attribute);
 }
 
 VideoOutBufferImageInfo VideoOutGetImageMetadata(uint64_t addr)
@@ -1127,12 +1467,15 @@ VideoOutBufferImageInfo VideoOutGetImageMetadata(uint64_t addr)
 
 VideoOutBufferImageInfo VideoOutGetImage(uint64_t addr)
 {
-	auto ret = VideoOutGetImageMetadata(addr);
-	if (ret.image != nullptr)
-	{
-		Graphics::VideoOutBufferEnsureMaterialized(g_video_out_context->GetGraphicCtx(), ret.image);
-	}
-	return ret;
+	EXIT_IF(g_video_out_context == nullptr);
+	return g_video_out_context->FindAndMaterializeImage(reinterpret_cast<void*>(addr));
+}
+
+VideoOutRegisteredHostExtentStatus VideoOutGetRegisteredHostExtent(uint32_t guest_width, uint32_t guest_height, uint32_t* host_width,
+                                                                   uint32_t* host_height)
+{
+	EXIT_IF(g_video_out_context == nullptr);
+	return g_video_out_context->GetRegisteredHostExtent(guest_width, guest_height, host_width, host_height);
 }
 
 KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg)
@@ -1141,8 +1484,6 @@ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64
 
 	EXIT_IF(g_video_out_context == nullptr);
 
-	auto* ctx = g_video_out_context->Get(handle);
-
 	EXIT_NOT_IMPLEMENTED(flip_mode != 1);
 
 	if (index < 0 || index > 15)
@@ -1150,12 +1491,14 @@ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64
 		return VIDEO_OUT_ERROR_INVALID_INDEX;
 	}
 
-	if (!g_video_out_context->GetFlipQueue().Submit(ctx, index, flip_arg))
+	switch (g_video_out_context->SubmitFlip(handle, index, flip_arg))
 	{
-		return VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
+		case SubmitFlipStatus::Submitted: return OK;
+		case SubmitFlipStatus::InvalidHandle: return VIDEO_OUT_ERROR_INVALID_HANDLE;
+		case SubmitFlipStatus::InvalidIndex: return VIDEO_OUT_ERROR_INVALID_INDEX;
+		case SubmitFlipStatus::QueueFull: return VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
 	}
-
-	return OK;
+	return VIDEO_OUT_ERROR_INVALID_HANDLE;
 }
 
 void VideoOutWaitFlipDone(int handle, int index)

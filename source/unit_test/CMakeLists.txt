@@ -18,6 +18,7 @@ list(APPEND unit_test_src
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorGraphicsDirtyTracking.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorExactStagingPool.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorShaderResolutionUsageCache.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorVideoOutResolution.cpp"
 )
 
 if (MSVC AND CLANG)

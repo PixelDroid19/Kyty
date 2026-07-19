@@ -64,6 +64,7 @@ TEST(EmulatorAttachmentResolutionCohort, RejectsMismatchedAttachmentExtents)
 
 	EXPECT_EQ(decision.classification, ResolutionClassification::Native);
 	EXPECT_EQ(decision.reason, ResolutionCohortReason::MismatchedGuestExtent);
+	EXPECT_EQ(decision.blocking_attachment_index, 1u);
 }
 
 TEST(EmulatorAttachmentResolutionCohort, RejectsAnyUnsafeAttachment)
@@ -82,6 +83,17 @@ TEST(EmulatorAttachmentResolutionCohort, RejectsAnyUnsafeAttachment)
 	EXPECT_EQ(decision.guest_extent, (ResolutionExtent {3840, 2160}));
 	EXPECT_EQ(decision.host_extent, decision.guest_extent);
 	EXPECT_EQ(decision.scale, (ResolutionScale {1, 1}));
+}
+
+TEST(EmulatorAttachmentResolutionCohort, RejectsNativeDepthOnlyDisplayWhenVideoOutIsAlreadyScaled)
+{
+	const auto decision = EvaluateNativeDisplayExtentCompatibility({3840, 2160}, {1280, 720});
+
+	EXPECT_EQ(decision.classification, ResolutionClassification::Unsupported);
+	EXPECT_EQ(decision.reason, ResolutionCohortReason::MismatchedHostExtent);
+	EXPECT_EQ(decision.guest_extent, (ResolutionExtent {3840, 2160}));
+	EXPECT_EQ(decision.host_extent, (ResolutionExtent {1280, 720}));
+	EXPECT_EQ(decision.blocking_attachment_index, 0u);
 }
 
 TEST(EmulatorAttachmentResolutionCohort, AllowsFragmentCoordinatesOnlyWhenTranslationSupportsScaling)
@@ -191,6 +203,21 @@ TEST(EmulatorAttachmentResolutionCohort, RejectsEmptyAndInvalidInputsStructurall
 	EXPECT_EQ(EvaluateResolutionCohort(policy, {nullptr, 1, 1, {}}).reason, ResolutionCohortReason::InvalidInput);
 }
 
+TEST(EmulatorAttachmentResolutionCohort, ExposesStableCohortReasonNames)
+{
+	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::None), "none");
+	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::Empty), "empty");
+	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::InvalidInput), "invalid_input");
+	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::Incomplete), "incomplete");
+	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::AttachmentNotScalable), "attachment_not_scalable");
+	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::MismatchedGuestExtent), "mismatched_guest_extent");
+	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::MismatchedHostExtent), "mismatched_host_extent");
+	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::MismatchedScale), "mismatched_scale");
+	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::ShaderCoordinateAccess), "shader_coordinate_access");
+	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::ColorCapabilityUnsupported), "color_capability_unsupported");
+	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::DepthCapabilityUnsupported), "depth_capability_unsupported");
+}
+
 TEST(EmulatorAttachmentResolutionCohort, VulkanImagesKeepGuestAndHostExtentsSeparate)
 {
 	RenderTextureVulkanImage image;
@@ -249,12 +276,9 @@ TEST(EmulatorAttachmentResolutionCohort, NativeDepthStencilIdentityUsesGuestExte
 TEST(EmulatorAttachmentResolutionCohort, ScaledDepthStencilIdentityDistinguishesHostExtent)
 {
 	const DepthStencilBufferObject native(VK_FORMAT_D32_SFLOAT, 3840, 2160, true, false, true, 0x1000, 0x2000);
-	const DepthStencilBufferObject scaled_720p(VK_FORMAT_D32_SFLOAT, 3840, 2160, 1280, 720, true, false, true, 0x1000,
-	                                           0x2000);
-	const DepthStencilBufferObject same_scaled_720p(VK_FORMAT_D32_SFLOAT, 3840, 2160, 1280, 720, true, false, true, 0x1000,
-	                                                0x2000);
-	const DepthStencilBufferObject scaled_1080p(VK_FORMAT_D32_SFLOAT, 3840, 2160, 1920, 1080, true, false, true, 0x1000,
-	                                            0x2000);
+	const DepthStencilBufferObject scaled_720p(VK_FORMAT_D32_SFLOAT, 3840, 2160, 1280, 720, true, false, true, 0x1000, 0x2000);
+	const DepthStencilBufferObject same_scaled_720p(VK_FORMAT_D32_SFLOAT, 3840, 2160, 1280, 720, true, false, true, 0x1000, 0x2000);
+	const DepthStencilBufferObject scaled_1080p(VK_FORMAT_D32_SFLOAT, 3840, 2160, 1920, 1080, true, false, true, 0x1000, 0x2000);
 
 	EXPECT_FALSE(native.Equal(scaled_720p.params));
 	EXPECT_TRUE(scaled_720p.Equal(same_scaled_720p.params));

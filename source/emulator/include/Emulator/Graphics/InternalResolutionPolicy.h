@@ -126,6 +126,8 @@ enum class ResolutionNativeReason : uint8_t
 	ArithmeticOverflow,
 };
 
+[[nodiscard]] const char* ResolutionNativeReasonName(ResolutionNativeReason reason);
+
 enum class ResolutionPolicyStatus : uint8_t
 {
 	Success,
