@@ -6835,26 +6835,25 @@ void CommandBuffer::ExecuteWithSemaphore()
 
 void CommandBuffer::WaitForFence()
 {
-	EXIT_IF(IsInvalid());
+	WaitForFence(true, false);
+}
 
-	if (m_execute)
-	{
-		auto* device = g_render_ctx->GetGraphicCtx()->device;
-
-		const auto wait_start = std::chrono::steady_clock::now();
-		vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, UINT64_MAX);
-		const auto wait_ns =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
-		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
-		DebugStatsRecordSubmissionComplete();
-		LabelDrainCompleted();
-		vkResetFences(device, 1, &m_pool->fences[m_index]);
-
-		m_execute = false;
-	}
+void CommandBuffer::WaitForFenceWithoutLabelCallbacks()
+{
+	WaitForFence(false, false);
 }
 
 void CommandBuffer::WaitForFenceAndReset()
+{
+	WaitForFence(true, true);
+}
+
+void CommandBuffer::WaitForFenceAndResetWithoutLabelCallbacks()
+{
+	WaitForFence(false, true);
+}
+
+void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_buffer)
 {
 	EXIT_IF(IsInvalid());
 
@@ -6868,9 +6867,15 @@ void CommandBuffer::WaitForFenceAndReset()
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
 		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
 		DebugStatsRecordSubmissionComplete();
-		LabelDrainCompleted();
+		if (drain_label_callbacks)
+		{
+			LabelDrainCompleted();
+		}
 		vkResetFences(device, 1, &m_pool->fences[m_index]);
-		vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+		if (reset_command_buffer)
+		{
+			vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+		}
 
 		m_execute = false;
 	}

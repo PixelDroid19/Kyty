@@ -78,6 +78,32 @@ private:
 	std::chrono::steady_clock::time_point m_start;
 };
 
+[[nodiscard]] const char* gpu_submission_result_name(GpuSubmissionResult result)
+{
+	switch (result)
+	{
+		case GpuSubmissionResult::Success: return "Success";
+		case GpuSubmissionResult::InvalidArgument: return "InvalidArgument";
+		case GpuSubmissionResult::UnknownSubmission: return "UnknownSubmission";
+		case GpuSubmissionResult::InvalidTransition: return "InvalidTransition";
+		case GpuSubmissionResult::SubmissionFrozen: return "SubmissionFrozen";
+		case GpuSubmissionResult::SlotBusy: return "SlotBusy";
+		case GpuSubmissionResult::ProducerNotFound: return "ProducerNotFound";
+		case GpuSubmissionResult::AlreadyCompleted: return "AlreadyCompleted";
+		case GpuSubmissionResult::CompletionActionsPending: return "CompletionActionsPending";
+	}
+	return "UnknownResult";
+}
+
+void require_submission_success(GpuSubmissionResult result, const char* operation, int queue, uint32_t slot)
+{
+	if (result != GpuSubmissionResult::Success)
+	{
+		EXIT("GPU submission lifecycle failed: operation=%s queue=%d slot=%" PRIu32 " result=%s\n", operation, queue, slot,
+		     gpu_submission_result_name(result));
+	}
+}
+
 } // namespace
 
 class CommandProcessor
@@ -605,8 +631,8 @@ void CommandProcessor::BufferInit()
 
 		m_current_buffer = 0;
 		SubmissionId submission;
-		EXIT_IF(m_submission_slots.BeginRecording(static_cast<uint32_t>(m_current_buffer), &submission, nullptr) !=
-		        GpuSubmissionResult::Success);
+		require_submission_success(m_submission_slots.BeginRecording(static_cast<uint32_t>(m_current_buffer), &submission, nullptr),
+		                           "BeginRecording", m_queue, static_cast<uint32_t>(m_current_buffer));
 		m_buffer[m_current_buffer]->Begin();
 	}
 }
@@ -626,23 +652,28 @@ void CommandProcessor::BufferFlush()
 	const int submitted = m_current_buffer;
 	m_buffer[submitted]->End();
 	m_buffer[submitted]->Execute();
-	EXIT_IF(m_submission_slots.MarkSubmitted(static_cast<uint32_t>(submitted)) != GpuSubmissionResult::Success);
-	m_buffer[submitted]->WaitForFence();
-	EXIT_IF(m_submission_slots.MarkCompletedWithoutActionsAndRetire(static_cast<uint32_t>(submitted)) !=
-	        GpuSubmissionResult::Success);
+	require_submission_success(m_submission_slots.MarkSubmitted(static_cast<uint32_t>(submitted)), "MarkSubmitted", m_queue,
+	                           static_cast<uint32_t>(submitted));
+	m_buffer[submitted]->WaitForFenceWithoutLabelCallbacks();
 
 	m_current_buffer = (submitted + 1) % VK_BUFFERS_NUM;
 
 	EXIT_IF(m_buffer[m_current_buffer] == nullptr);
 
-	m_buffer[m_current_buffer]->WaitForFenceAndReset();
+	m_buffer[m_current_buffer]->WaitForFenceAndResetWithoutLabelCallbacks();
+	SubmissionId submission;
+	require_submission_success(
+	    m_submission_slots.CompleteAndRetireThenBeginRecording(static_cast<uint32_t>(submitted),
+	                                                           static_cast<uint32_t>(m_current_buffer), &submission, nullptr),
+	    "CompleteAndRetireThenBeginRecording", m_queue, static_cast<uint32_t>(submitted));
+	m_buffer[m_current_buffer]->Begin();
+
 	// Fence wait is authoritative on MoltenVK: vkGetEventStatus often never
 	// observes vkCmdSetEvent, so DrainCompleted alone skips WriteBack/EOP stores.
+	// Publish only after the completed slot is retired and the next slot is
+	// recording: write-back callbacks may synchronously flush this CP.
+	LabelDrainCompleted();
 	LabelCompleteSubmitted(this);
-	SubmissionId submission;
-	EXIT_IF(m_submission_slots.BeginRecording(static_cast<uint32_t>(m_current_buffer), &submission, nullptr) !=
-	        GpuSubmissionResult::Success);
-	m_buffer[m_current_buffer]->Begin();
 }
 
 void CommandProcessor::BufferWait()
@@ -660,7 +691,8 @@ void CommandProcessor::BufferWait()
 		buf->WaitForFenceAndReset();
 		if (submitted)
 		{
-			EXIT_IF(m_submission_slots.MarkCompletedWithoutActionsAndRetire(slot) != GpuSubmissionResult::Success);
+			require_submission_success(m_submission_slots.MarkCompletedWithoutActionsAndRetire(slot),
+			                           "MarkCompletedWithoutActionsAndRetire", m_queue, slot);
 		}
 	}
 }
