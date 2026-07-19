@@ -6729,6 +6729,7 @@ void CommandBuffer::Execute()
 	}
 
 	auto result = vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence);
+	DebugStatsRecordSubmit();
 
 	if (queue.mutex != nullptr)
 	{
@@ -6768,6 +6769,7 @@ void CommandBuffer::ExecuteWithSemaphore()
 	}
 
 	auto result = vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence);
+	DebugStatsRecordSubmit();
 
 	if (queue.mutex != nullptr)
 	{
@@ -6787,7 +6789,11 @@ void CommandBuffer::WaitForFence()
 	{
 		auto* device = g_render_ctx->GetGraphicCtx()->device;
 
+		const auto wait_start = std::chrono::steady_clock::now();
 		vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, UINT64_MAX);
+		const auto wait_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
+		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
 		LabelDrainCompleted();
 		vkResetFences(device, 1, &m_pool->fences[m_index]);
 
@@ -6803,7 +6809,11 @@ void CommandBuffer::WaitForFenceAndReset()
 	{
 		auto* device = g_render_ctx->GetGraphicCtx()->device;
 
+		const auto wait_start = std::chrono::steady_clock::now();
 		vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, UINT64_MAX);
+		const auto wait_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
+		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
 		LabelDrainCompleted();
 		vkResetFences(device, 1, &m_pool->fences[m_index]);
 		vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);

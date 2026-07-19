@@ -20,6 +20,11 @@ std::atomic<uint64_t> g_create_count {0};
 std::atomic<uint64_t> g_free_count {0};
 std::atomic<uint64_t> g_live_objects {0};
 std::atomic<uint64_t> g_flips {0};
+std::atomic<uint64_t> g_buffer_flushes {0};
+std::atomic<uint64_t> g_submits {0};
+std::atomic<uint64_t> g_fence_waits {0};
+std::atomic<uint64_t> g_fence_wait_ns {0};
+std::atomic<uint64_t> g_fence_wait_max_ns {0};
 std::atomic<uint32_t> g_present_src_w {0};
 std::atomic<uint32_t> g_present_src_h {0};
 std::atomic<uint32_t> g_present_dst_w {0};
@@ -49,6 +54,10 @@ struct PerformanceBaseline
 	uint64_t creates     = 0;
 	uint64_t frees       = 0;
 	uint64_t flips       = 0;
+	uint64_t buffer_flushes = 0;
+	uint64_t submits        = 0;
+	uint64_t fence_waits    = 0;
+	uint64_t fence_wait_ns  = 0;
 };
 
 std::mutex          g_performance_mutex;
@@ -72,6 +81,11 @@ void DebugStatsInit()
 	g_free_count.store(0, std::memory_order_relaxed);
 	g_live_objects.store(0, std::memory_order_relaxed);
 	g_flips.store(0, std::memory_order_relaxed);
+	g_buffer_flushes.store(0, std::memory_order_relaxed);
+	g_submits.store(0, std::memory_order_relaxed);
+	g_fence_waits.store(0, std::memory_order_relaxed);
+	g_fence_wait_ns.store(0, std::memory_order_relaxed);
+	g_fence_wait_max_ns.store(0, std::memory_order_relaxed);
 	g_last_fps.store(0.0, std::memory_order_relaxed);
 	g_last_frame_ms.store(0.0, std::memory_order_relaxed);
 	g_window_start_seconds = -1.0;
@@ -125,6 +139,27 @@ void DebugStatsRecordFlip(double fps, double frame_time_ms)
 	g_flips.fetch_add(1, std::memory_order_relaxed);
 	g_last_fps.store(fps, std::memory_order_relaxed);
 	g_last_frame_ms.store(frame_time_ms, std::memory_order_relaxed);
+}
+
+void DebugStatsRecordBufferFlush()
+{
+	g_buffer_flushes.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DebugStatsRecordSubmit()
+{
+	g_submits.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DebugStatsRecordFenceWait(uint64_t elapsed_ns)
+{
+	g_fence_waits.fetch_add(1, std::memory_order_relaxed);
+	g_fence_wait_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+	uint64_t previous = g_fence_wait_max_ns.load(std::memory_order_relaxed);
+	while (previous < elapsed_ns &&
+	       !g_fence_wait_max_ns.compare_exchange_weak(previous, elapsed_ns, std::memory_order_relaxed, std::memory_order_relaxed))
+	{
+	}
 }
 
 void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout)
@@ -212,6 +247,10 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	const uint64_t creates      = g_create_count.load(std::memory_order_relaxed);
 	const uint64_t frees        = g_free_count.load(std::memory_order_relaxed);
 	const uint64_t flips        = g_flips.load(std::memory_order_relaxed);
+	const uint64_t buffer_flushes = g_buffer_flushes.load(std::memory_order_relaxed);
+	const uint64_t submits        = g_submits.load(std::memory_order_relaxed);
+	const uint64_t fence_waits    = g_fence_waits.load(std::memory_order_relaxed);
+	const uint64_t fence_wait_ns  = g_fence_wait_ns.load(std::memory_order_relaxed);
 
 	std::lock_guard<std::mutex> lock(g_performance_mutex);
 	if (g_performance_baseline.time_ms == 0)
@@ -228,13 +267,20 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	snapshot.creates      = creates - g_performance_baseline.creates;
 	snapshot.frees        = frees - g_performance_baseline.frees;
 	snapshot.flips        = flips - g_performance_baseline.flips;
+	snapshot.buffer_flushes = buffer_flushes - g_performance_baseline.buffer_flushes;
+	snapshot.submits        = submits - g_performance_baseline.submits;
+	snapshot.fence_waits    = fence_waits - g_performance_baseline.fence_waits;
+	snapshot.fence_wait_ns  = fence_wait_ns - g_performance_baseline.fence_wait_ns;
+	snapshot.fence_wait_max_ns =
+	    reset ? g_fence_wait_max_ns.exchange(0, std::memory_order_relaxed) : g_fence_wait_max_ns.load(std::memory_order_relaxed);
 	snapshot.live_objects = g_live_objects.load(std::memory_order_relaxed);
 	snapshot.fps          = g_last_fps.load(std::memory_order_relaxed);
 	snapshot.frame_time_ms = g_last_frame_ms.load(std::memory_order_relaxed);
 
 	if (reset)
 	{
-		g_performance_baseline = {now_ms, draws, dispatches, alloc_bytes, free_bytes, creates, frees, flips};
+		g_performance_baseline =
+		    {now_ms, draws, dispatches, alloc_bytes, free_bytes, creates, frees, flips, buffer_flushes, submits, fence_waits, fence_wait_ns};
 	}
 	return snapshot;
 }

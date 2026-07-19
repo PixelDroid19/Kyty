@@ -126,6 +126,10 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	DebugStatsRecordDispatch();
 	DebugStatsRecordAlloc(4096);
 	DebugStatsRecordFlip(60.0, 16.667);
+	DebugStatsRecordBufferFlush();
+	DebugStatsRecordSubmit();
+	DebugStatsRecordFenceWait(250000);
+	DebugStatsRecordFenceWait(750000);
 
 	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
 	EXPECT_EQ(first.draws, 1u);
@@ -133,6 +137,11 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	EXPECT_EQ(first.alloc_bytes, 4096u);
 	EXPECT_EQ(first.creates, 1u);
 	EXPECT_EQ(first.flips, 1u);
+	EXPECT_EQ(first.buffer_flushes, 1u);
+	EXPECT_EQ(first.submits, 1u);
+	EXPECT_EQ(first.fence_waits, 2u);
+	EXPECT_EQ(first.fence_wait_ns, 1000000u);
+	EXPECT_EQ(first.fence_wait_max_ns, 750000u);
 	EXPECT_EQ(first.live_objects, 1u);
 
 	DebugStatsRecordDraw();
@@ -145,6 +154,11 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	EXPECT_EQ(second.creates, 0u);
 	EXPECT_EQ(second.frees, 1u);
 	EXPECT_EQ(second.flips, 0u);
+	EXPECT_EQ(second.buffer_flushes, 0u);
+	EXPECT_EQ(second.submits, 0u);
+	EXPECT_EQ(second.fence_waits, 0u);
+	EXPECT_EQ(second.fence_wait_ns, 0u);
+	EXPECT_EQ(second.fence_wait_max_ns, 0u);
 	EXPECT_EQ(second.live_objects, 0u);
 	DebugStatsShutdown();
 }
