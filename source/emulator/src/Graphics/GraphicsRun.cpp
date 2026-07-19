@@ -7,6 +7,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/AsyncJob.h"
+#include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
@@ -90,7 +91,12 @@ public:
 		int64_t flip_arg  = 0;
 	};
 
-	CommandProcessor() = default;
+	CommandProcessor(GpuSubmissionCoordinator* submission_coordinator, int queue):
+	    m_submission_slots(submission_coordinator, GpuQueueId(static_cast<uint32_t>(queue))), m_queue(queue)
+	{
+		EXIT_IF(submission_coordinator == nullptr);
+		EXIT_IF(queue < 0 || queue >= GraphicContext::QUEUES_NUM);
+	}
 	virtual ~CommandProcessor() { KYTY_NOT_IMPLEMENTED; }
 
 	KYTY_CLASS_NO_COPY(CommandProcessor);
@@ -159,8 +165,6 @@ public:
 
 	void Run(uint32_t* data, uint32_t num_dw);
 
-	void SetQueue(int queue) { m_queue = queue; }
-
 	[[nodiscard]] const FlipInfo& GetFlip() const { return m_flip; }
 	void                          SetFlip(const FlipInfo& flip)
 	{
@@ -173,7 +177,7 @@ public:
 	void                   SetSumbitId(uint64_t sumbit_id) { m_sumbit_id = sumbit_id; }
 
 private:
-	static constexpr int VK_BUFFERS_NUM = 4;
+	static constexpr int VK_BUFFERS_NUM = static_cast<int>(CommandProcessorSubmissionSlots::SlotCount);
 
 	struct Counter
 	{
@@ -196,6 +200,7 @@ private:
 
 	CommandBuffer* m_buffer[VK_BUFFERS_NUM] = {};
 	int            m_current_buffer         = -1;
+	CommandProcessorSubmissionSlots m_submission_slots;
 	int            m_queue                  = -1;
 
 	Counter m_de_counter;
@@ -351,6 +356,7 @@ private:
 	ComputeRing* GetRing(uint32_t ring_id);
 
 	Core::Mutex m_mutex;
+	GpuSubmissionCoordinator m_submission_coordinator;
 
 	CommandProcessor* m_gfx_cp   = nullptr;
 	GraphicsRing*     m_gfx_ring = nullptr;
@@ -533,9 +539,8 @@ void Gpu::Init()
 	EXIT_IF(m_gfx_cp != nullptr);
 	EXIT_IF(m_gfx_ring != nullptr);
 
-	m_gfx_cp   = new CommandProcessor;
+	m_gfx_cp   = new CommandProcessor(&m_submission_coordinator, GraphicContext::QUEUE_GFX);
 	m_gfx_ring = new GraphicsRing;
-	m_gfx_cp->SetQueue(GraphicContext::QUEUE_GFX);
 	m_gfx_ring->SetCp(m_gfx_cp);
 
 	EXIT_IF(GraphicContext::QUEUE_COMPUTE_NUM < 8);
@@ -549,8 +554,8 @@ ComputeRing* Gpu::GetRing(uint32_t ring_id)
 
 	if (m_compute_cp[pipe_id] == nullptr)
 	{
-		m_compute_cp[pipe_id] = new CommandProcessor;
-		m_compute_cp[pipe_id]->SetQueue(GraphicContext::QUEUE_COMPUTE_START + pipe_id);
+		m_compute_cp[pipe_id] =
+		    new CommandProcessor(&m_submission_coordinator, GraphicContext::QUEUE_COMPUTE_START + pipe_id);
 	}
 
 	if (m_compute_ring[v] == nullptr)
@@ -599,6 +604,9 @@ void CommandProcessor::BufferInit()
 		}
 
 		m_current_buffer = 0;
+		SubmissionId submission;
+		EXIT_IF(m_submission_slots.BeginRecording(static_cast<uint32_t>(m_current_buffer), &submission, nullptr) !=
+		        GpuSubmissionResult::Success);
 		m_buffer[m_current_buffer]->Begin();
 	}
 }
@@ -618,7 +626,10 @@ void CommandProcessor::BufferFlush()
 	const int submitted = m_current_buffer;
 	m_buffer[submitted]->End();
 	m_buffer[submitted]->Execute();
+	EXIT_IF(m_submission_slots.MarkSubmitted(static_cast<uint32_t>(submitted)) != GpuSubmissionResult::Success);
 	m_buffer[submitted]->WaitForFence();
+	EXIT_IF(m_submission_slots.MarkCompletedWithoutActionsAndRetire(static_cast<uint32_t>(submitted)) !=
+	        GpuSubmissionResult::Success);
 
 	m_current_buffer = (submitted + 1) % VK_BUFFERS_NUM;
 
@@ -628,6 +639,9 @@ void CommandProcessor::BufferFlush()
 	// Fence wait is authoritative on MoltenVK: vkGetEventStatus often never
 	// observes vkCmdSetEvent, so DrainCompleted alone skips WriteBack/EOP stores.
 	LabelCompleteSubmitted(this);
+	SubmissionId submission;
+	EXIT_IF(m_submission_slots.BeginRecording(static_cast<uint32_t>(m_current_buffer), &submission, nullptr) !=
+	        GpuSubmissionResult::Success);
 	m_buffer[m_current_buffer]->Begin();
 }
 
@@ -637,11 +651,17 @@ void CommandProcessor::BufferWait()
 
 	Core::LockGuard lock(m_mutex);
 
-	for (auto& buf: m_buffer)
+	for (uint32_t slot = 0; slot < VK_BUFFERS_NUM; slot++)
 	{
+		auto* buf = m_buffer[slot];
 		EXIT_IF(buf == nullptr);
 
+		const bool submitted = buf->IsExecute();
 		buf->WaitForFenceAndReset();
+		if (submitted)
+		{
+			EXIT_IF(m_submission_slots.MarkCompletedWithoutActionsAndRetire(slot) != GpuSubmissionResult::Success);
+		}
 	}
 }
 
