@@ -2,6 +2,8 @@
 
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/GpuSubmissionCoordinator.h"
+#include "Emulator/Graphics/Objects/LabelSubmissionTracker.h"
+#include "Emulator/Graphics/Utils.h"
 
 #include <condition_variable>
 #include <cstdint>
@@ -219,6 +221,81 @@ TEST(EmulatorGpuSubmissionCoordinator, RotatesToRecordingSlotBeforeCompletionCal
 	EXPECT_EQ(callback_recording.queue, GpuQueueId(8));
 	EXPECT_EQ(callback_recording.sequence, 2u);
 	EXPECT_EQ(slots.MarkSubmitted(1), GpuSubmissionResult::Success);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, LabelCompletionSelectsOnlyTheExactSubmission)
+{
+	LabelSubmissionTracker tracker;
+	const SubmissionId     first {GpuQueueId(2), 11};
+	const SubmissionId     second {GpuQueueId(2), 12};
+	Vector<LabelSubmissionCompletion> completed;
+
+	ASSERT_EQ(tracker.Bind(101, first), LabelSubmissionResult::Success);
+	ASSERT_EQ(tracker.Bind(102, second), LabelSubmissionResult::Success);
+
+	ASSERT_EQ(tracker.TakeCompleted(first, &completed), LabelSubmissionResult::Success);
+	ASSERT_EQ(completed.Size(), 1u);
+	EXPECT_EQ(completed.At(0).token, 101u);
+	EXPECT_EQ(completed.At(0).kind, LabelSubmissionCompletionKind::Keep);
+	EXPECT_TRUE(tracker.IsBound(102));
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, LabelCompletionDestroysOnlyAnActiveDeletedLabel)
+{
+	LabelSubmissionTracker tracker;
+	const SubmissionId     first {GpuQueueId(4), 21};
+	const SubmissionId     second {GpuQueueId(4), 22};
+	Vector<LabelSubmissionCompletion> completed;
+
+	ASSERT_EQ(tracker.Bind(201, first), LabelSubmissionResult::Success);
+	ASSERT_EQ(tracker.Bind(202, second), LabelSubmissionResult::Success);
+	ASSERT_EQ(tracker.MarkDeleted(201), LabelSubmissionResult::Success);
+
+	ASSERT_EQ(tracker.TakeCompleted(first, &completed), LabelSubmissionResult::Success);
+	ASSERT_EQ(completed.Size(), 1u);
+	EXPECT_EQ(completed.At(0).token, 201u);
+	EXPECT_EQ(completed.At(0).kind, LabelSubmissionCompletionKind::Destroy);
+	EXPECT_TRUE(tracker.IsBound(202));
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, LabelCompletionAllowsExactReuseAfterPriorCompletion)
+{
+	LabelSubmissionTracker tracker;
+	const SubmissionId     first {GpuQueueId(6), 31};
+	const SubmissionId     second {GpuQueueId(6), 32};
+	Vector<LabelSubmissionCompletion> completed;
+
+	ASSERT_EQ(tracker.Bind(301, first), LabelSubmissionResult::Success);
+	ASSERT_EQ(tracker.TakeCompleted(first, &completed), LabelSubmissionResult::Success);
+	ASSERT_EQ(completed.Size(), 1u);
+
+	completed.Clear();
+	ASSERT_EQ(tracker.Bind(301, second), LabelSubmissionResult::Success);
+	ASSERT_EQ(tracker.TakeCompleted(first, &completed), LabelSubmissionResult::Success);
+	EXPECT_TRUE(completed.IsEmpty());
+	EXPECT_TRUE(tracker.IsBound(301));
+
+	ASSERT_EQ(tracker.TakeCompleted(second, &completed), LabelSubmissionResult::Success);
+	ASSERT_EQ(completed.Size(), 1u);
+	EXPECT_EQ(completed.At(0).token, 301u);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, LabelCompletionKeepsDistinctLabelsAtAReusedGuestAddressIndependent)
+{
+	LabelSubmissionTracker tracker;
+	const SubmissionId     old_write {GpuQueueId(1), 41};
+	const SubmissionId     new_write {GpuQueueId(1), 42};
+	Vector<LabelSubmissionCompletion> completed;
+
+	// Tokens identify Label objects, not guest addresses. Two Label objects may
+	// legitimately target the same guest fence word in consecutive submissions.
+	ASSERT_EQ(tracker.Bind(401, old_write), LabelSubmissionResult::Success);
+	ASSERT_EQ(tracker.Bind(402, new_write), LabelSubmissionResult::Success);
+
+	ASSERT_EQ(tracker.TakeCompleted(old_write, &completed), LabelSubmissionResult::Success);
+	ASSERT_EQ(completed.Size(), 1u);
+	EXPECT_EQ(completed.At(0).token, 401u);
+	EXPECT_TRUE(tracker.IsBound(402));
 }
 
 UT_END();

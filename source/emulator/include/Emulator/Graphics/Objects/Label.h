@@ -4,6 +4,7 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/GpuSubmissionTracker.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -67,15 +68,15 @@ Label* LabelCreate32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value
 void   LabelDelete(Label* label);
 void   LabelSet(CommandBuffer* buffer, Label* label);
 void   LabelDrainCompleted();
-// After CommandProcessor::BufferFlush waits on submitted fences, force-complete
-// Active and ActiveDeleted labels for that CP (see LabelForceCompleteActionFor).
+// After the fence for an exact logical submission completes, force-complete
+// only the Active and ActiveDeleted labels recorded into that submission.
 // MoltenVK/host often never observes vkCmdSetEvent via vkGetEventStatus; relying
 // only on event polling skips WriteBack/OnlyFlip SubmitFlip and leaves WaitRegMem
 // spinning or Flip queues empty (guest ThreadFlag soft-lock).
-void LabelCompleteSubmitted(CommandProcessor* cp);
+void LabelCompleteSubmission(SubmissionId submission);
 // StorageBuffer GPU→CPU write-back must not clobber EOP fence words: copy with
 // holes for every Label dst still registered or pending deferred Destroy
-// (preserves immediate publish, completed stores, and guest resets). Blind
+// (preserves completion stores and guest resets). Blind
 // memcpy zeroed fences after GpuMemory deleted Label⊂StorageBuffer aliases
 // (guest never reached KernelSetEventFlag(ThreadFlag); EVENTFLAG_SET=0).
 void LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size);
