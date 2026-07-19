@@ -3,6 +3,7 @@
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Vector.h"
 
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -400,7 +401,8 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_
 	EXIT_IF(dst_image == nullptr);
 	EXIT_IF(src_data == nullptr);
 
-	VulkanBuffer staging_buffer {};
+	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
+	VulkanBuffer               staging_buffer {};
 	staging_buffer.usage           = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 	staging_buffer.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 	VulkanCreateBuffer(ctx, size, &staging_buffer);
@@ -596,7 +598,8 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* image, const void* src_data
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(image == nullptr);
 
-	VulkanBuffer staging_buffer {};
+	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
+	VulkanBuffer               staging_buffer {};
 	staging_buffer.usage           = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 	staging_buffer.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 	VulkanCreateBuffer(ctx, size, &staging_buffer);
@@ -644,7 +647,8 @@ void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t
 	EXIT_IF(dst_buffer == nullptr);
 	EXIT_IF(dst_buffer->buffer == nullptr);
 
-	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
+	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
+	CommandBuffer              buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
 	EXIT_NOT_IMPLEMENTED(buffer.IsInvalid());

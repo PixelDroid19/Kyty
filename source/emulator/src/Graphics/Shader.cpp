@@ -9,6 +9,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/ShaderParse.h"
@@ -35,6 +36,16 @@
 KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>(Kyty::Libs::Graphics::ShaderInstructionType::ZMax));
 
 namespace Kyty::Libs::Graphics {
+
+static void RecordShaderInputAnalysis(uint64_t elapsed_ns)
+{
+	DebugStatsRecordShaderIrParse(DebugStatsShaderParseKind::InputAnalysis, elapsed_ns);
+}
+
+static void RecordShaderPipelineMissParse(uint64_t elapsed_ns)
+{
+	DebugStatsRecordShaderIrParse(DebugStatsShaderParseKind::PipelineMiss, elapsed_ns);
+}
 
 bool ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format)
 {
@@ -1219,7 +1230,10 @@ static void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch,
 	ShaderCode code;
 	code.SetType(ShaderType::Fetch);
 	// shader_parse(0, fetch, nullptr, &code);
-	ShaderParse(fetch, &code);
+	{
+		DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
+		ShaderParse(fetch, &code);
+	}
 
 	KYTY_PROFILER_END_BLOCK;
 
@@ -2556,7 +2570,10 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		EXIT_NOT_IMPLEMENTED(data.user_data == nullptr);
 		ShaderCode code;
 		code.SetType(ShaderType::Compute);
-		ShaderParse(reinterpret_cast<const uint32_t*>(regs->cs_regs.data_addr), &code);
+		{
+			DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
+			ShaderParse(reinterpret_cast<const uint32_t*>(regs->cs_regs.data_addr), &code);
+		}
 		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(regs->cs_regs.user_sgpr), &code);
 	} else
 	{
@@ -3075,7 +3092,10 @@ ShaderCode ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegis
 		code.SetCrc32(crc32);
 		code.SetHash0(hash0);
 		// shader_parse(0, src, nullptr, &code);
-		ShaderParse(src, &code);
+		{
+			DebugStatsScopedTimer timer(RecordShaderPipelineMissParse);
+			ShaderParse(src, &code);
+		}
 
 		if (g_debug_printfs != nullptr)
 		{
@@ -3111,12 +3131,21 @@ Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInp
 
 		log.DumpOriginalShader(code);
 
-		source = SpirvGenerateSource(code, input_info, nullptr, nullptr);
+		{
+			DebugStatsScopedTimer timer(DebugStatsRecordSpirvSource);
+			source = SpirvGenerateSource(code, input_info, nullptr, nullptr);
+		}
 	}
 
 	log.DumpRecompiledShader(source);
 
-	if (String8 err_msg; !SpirvRun(source, &ret, &err_msg))
+	String8 err_msg;
+	bool    spirv_ok = false;
+	{
+		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
+		spirv_ok = SpirvRun(source, &ret, &err_msg);
+	}
+	if (!spirv_ok)
 	{
 		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());
 	}
@@ -3173,7 +3202,10 @@ ShaderCode ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegist
 		code.SetCrc32(crc32);
 		code.SetHash0(hash0);
 		// shader_parse(0, src, nullptr, &code);
-		ShaderParse(src, &code);
+		{
+			DebugStatsScopedTimer timer(RecordShaderPipelineMissParse);
+			ShaderParse(src, &code);
+		}
 
 		if (g_debug_printfs != nullptr)
 		{
@@ -3214,12 +3246,21 @@ Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInpu
 
 		log.DumpOriginalShader(code);
 
-		source = SpirvGenerateSource(code, nullptr, input_info, nullptr);
+		{
+			DebugStatsScopedTimer timer(DebugStatsRecordSpirvSource);
+			source = SpirvGenerateSource(code, nullptr, input_info, nullptr);
+		}
 	}
 
 	log.DumpRecompiledShader(source);
 
-	if (String8 err_msg; !SpirvRun(source, &ret, &err_msg))
+	String8 err_msg;
+	bool    spirv_ok = false;
+	{
+		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
+		spirv_ok = SpirvRun(source, &ret, &err_msg);
+	}
+	if (!spirv_ok)
 	{
 		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());
 	}
@@ -3272,7 +3313,10 @@ ShaderCode ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegi
 	code.SetCrc32(crc32);
 	code.SetHash0(hash0);
 	// shader_parse(0, src, nullptr, &code);
-	ShaderParse(src, &code);
+	{
+		DebugStatsScopedTimer timer(RecordShaderPipelineMissParse);
+		ShaderParse(src, &code);
+	}
 
 	if (g_debug_printfs != nullptr)
 	{
@@ -3302,11 +3346,21 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 
 	log.DumpOriginalShader(code);
 
-	auto source = SpirvGenerateSource(code, nullptr, nullptr, input_info);
+	String8 source;
+	{
+		DebugStatsScopedTimer timer(DebugStatsRecordSpirvSource);
+		source = SpirvGenerateSource(code, nullptr, nullptr, input_info);
+	}
 
 	log.DumpRecompiledShader(source);
 
-	if (String8 err_msg; !SpirvRun(source, &ret, &err_msg))
+	String8 err_msg;
+	bool    spirv_ok = false;
+	{
+		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
+		spirv_ok = SpirvRun(source, &ret, &err_msg);
+	}
+	if (!spirv_ok)
 	{
 		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());
 	}

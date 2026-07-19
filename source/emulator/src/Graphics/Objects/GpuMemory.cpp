@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <vulkan/vk_enum_string_helper.h>
@@ -33,6 +34,45 @@ namespace Kyty::Libs::Graphics {
 constexpr int VADDR_BLOCKS_MAX = 3;
 
 using OverlapType = GpuMemoryOverlapType;
+
+constexpr uint32_t GpuMemoryStatsTypeIndex(GpuMemoryObjectType type)
+{
+	return static_cast<uint32_t>(type) - static_cast<uint32_t>(GpuMemoryObjectType::VideoOutBuffer);
+}
+
+class GpuMemoryCreateStatsScope final
+{
+public:
+	explicit GpuMemoryCreateStatsScope(GpuMemoryObjectType type)
+	    : m_type_index(GpuMemoryStatsTypeIndex(type)), m_start(std::chrono::steady_clock::now())
+	{
+	}
+
+	~GpuMemoryCreateStatsScope()
+	{
+		if (m_completed)
+		{
+			const auto elapsed =
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
+			DebugStatsRecordGpuMemoryCreate(m_type_index, m_outcome, static_cast<uint64_t>(elapsed));
+		}
+	}
+
+	KYTY_CLASS_NO_COPY(GpuMemoryCreateStatsScope);
+
+	void Complete(DebugStatsGpuMemoryCreateOutcome outcome)
+	{
+		EXIT_IF(m_completed);
+		m_outcome   = outcome;
+		m_completed = true;
+	}
+
+private:
+	uint32_t                              m_type_index = 0;
+	std::chrono::steady_clock::time_point m_start;
+	DebugStatsGpuMemoryCreateOutcome      m_outcome = DebugStatsGpuMemoryCreateOutcome::FastReuse;
+	bool                                  m_completed = false;
+};
 
 constexpr uint64_t ObjectsRelation(GpuMemoryObjectType b, OverlapType relation, GpuMemoryObjectType a)
 {
@@ -587,7 +627,12 @@ static uint64_t calc_hash(const uint8_t* buf, uint64_t size)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	return (size > 0 && buf != nullptr ? XXH64(buf, size, 0) : 0);
+	if (size == 0 || buf == nullptr)
+	{
+		return 0;
+	}
+	const DebugStatsScopedWork hash_work(DebugStatsRecordHash, size);
+	return XXH64(buf, size, 0);
 }
 
 static uint64_t get_current_time()
@@ -948,6 +993,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	EXIT_IF(info.type == GpuMemoryObjectType::Invalid);
 	EXIT_IF(vaddr == nullptr || size == nullptr || vaddr_num > VADDR_BLOCKS_MAX || vaddr_num <= 0);
 
+	GpuMemoryCreateStatsScope create_stats(info.type);
 	Core::LockGuard lock(m_mutex);
 
 	int heap_id = GetHeapId(vaddr[0], size[0]);
@@ -1007,6 +1053,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			o.read_only      = info.read_only;
 			o.check_hash     = info.check_hash;
 
+			create_stats.Complete(DebugStatsGpuMemoryCreateOutcome::FastReuse);
 			return o.object.obj;
 		}
 	}
@@ -1034,6 +1081,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			o.read_only      = info.read_only;
 			o.check_hash     = info.check_hash;
 
+			create_stats.Complete(DebugStatsGpuMemoryCreateOutcome::ExactReuse);
 			return o.object.obj;
 		}
 
@@ -1593,6 +1641,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	EXIT_IF(delete_all && overlap);
 
+	const bool reclaimed_existing = delete_all || !texture_reclaim_vertex_ids.IsEmpty();
 	Vector<Destructor> destructors;
 
 	if (delete_all)
@@ -1819,6 +1868,19 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	}
 	DebugStatsRecordAlloc(created_bytes);
 
+	if (reclaimed_existing)
+	{
+		create_stats.Complete(DebugStatsGpuMemoryCreateOutcome::ReclaimNew);
+	} else if (create_from_objects)
+	{
+		create_stats.Complete(DebugStatsGpuMemoryCreateOutcome::NewFromObjects);
+	} else if (overlap)
+	{
+		create_stats.Complete(DebugStatsGpuMemoryCreateOutcome::NewLinked);
+	} else
+	{
+		create_stats.Complete(DebugStatsGpuMemoryCreateOutcome::NewStandalone);
+	}
 	return o.object.obj;
 }
 
@@ -2025,6 +2087,7 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 		freed_bytes += block.size[vi];
 	}
 	DebugStatsRecordFree(freed_bytes);
+	DebugStatsRecordGpuMemoryFree(GpuMemoryStatsTypeIndex(o.object.type));
 
 	if (o.delete_func != nullptr)
 	{
@@ -2459,7 +2522,15 @@ void GpuMemory::WriteBack(GraphicContext* ctx, CommandProcessor* cp)
 				EXIT("WriteBack unsupported parent relation\n");
 			}
 
-			o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
+			uint64_t writeback_bytes = 0;
+			for (int vi = 0; vi < block.vaddr_num; ++vi)
+			{
+				writeback_bytes += block.size[vi];
+			}
+			{
+				const DebugStatsScopedWork writeback_work(DebugStatsRecordWriteBack, writeback_bytes);
+				o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
+			}
 			o.cpu_update_time = get_current_time();
 
 			// Invalidate / propagate each parent according to its relation.
@@ -2582,11 +2653,16 @@ void GpuMemory::WriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint6
 		auto& h = heap.objects[obj.object_id];
 		EXIT_IF(h.free);
 		auto& o = h.info;
-		if (o.object.type != GpuMemoryObjectType::StorageBuffer || o.write_back_func == nullptr || o.read_only ||
-		    o.object.obj == nullptr)
+		if (o.object.type != GpuMemoryObjectType::StorageBuffer || o.write_back_func == nullptr || o.read_only || o.object.obj == nullptr)
 		{
 			continue;
 		}
+		uint64_t writeback_bytes = 0;
+		for (int vi = 0; vi < h.block.vaddr_num; ++vi)
+		{
+			writeback_bytes += h.block.size[vi];
+		}
+		const DebugStatsScopedWork writeback_work(DebugStatsRecordWriteBack, writeback_bytes);
 		o.write_back_func(ctx, o.params, o.object.obj, h.block.vaddr, h.block.size, h.block.vaddr_num);
 	}
 }

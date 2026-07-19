@@ -80,7 +80,7 @@ Do not “fix” a `125` by sleeping longer. Machine-readable example:
 | `help` / `ping` / `doctor` | Discoverability and liveness |
 | `wait-ready` | Poll until the socket accepts `ping` (boot/relaunch; default 30s) |
 | `status` / `diagnostics` | Frame/present/FPS, `phase`, `ms_since_*`, pad overlay |
-| `perf_snapshot` | Bounded draw, dispatch, flip, submit, fence-wait, and GPU-object allocation counters; `--reset` advances only its measurement baseline |
+| `perf_snapshot` | Bounded draw, dispatch, flip, command-buffer, submit/in-flight, acquire, present, guest-wait, fence-wait, and GPU-object allocation counters; `--reset` advances its measurement window without clearing current in-flight/live state |
 | `events` / `last_error` / `wait_event` | Bounded structured event ring |
 | `sync-waits` | Live snapshot of opt-in blocked pthread condition waits (`KYTY_SLOT_TRACE=1`) |
 | `threads` | Live snapshot of guest pthread lifecycle state |
@@ -91,6 +91,40 @@ Do not “fix” a `125` by sleeping longer. Machine-readable example:
 | `wait_present` / `wait_frame` | Wait until absolute `--min` **or** relative `--delta` from now |
 | `wait_phase` | Wait until `status.phase` matches for `--stable-ms` |
 | `watch` | Sample progress for N ms; classify stalls; optional capture + score |
+
+`perf_snapshot` keeps frame-time samples in a fixed 1 ms histogram through
+500 ms plus one overflow bucket. The wire response contains only sample count,
+p50/p95/p99/max in integer microseconds, and counts above 50/100/250 ms; it
+never serializes histogram buckets. Samples without a positive finite frame
+time are excluded. `--reset` returns the completed window and opens an empty
+one; a snapshot without reset is read-only.
+
+Resource-work fields use the same resettable window and report
+`calls`/`bytes`/`ns`/`max_ns` for effective hash, detile, CPU-to-GPU upload,
+and GPU-to-CPU writeback operations. Skipped work is not counted. Upload time
+includes the existing staging submission and fence where that is the operation
+boundary; writeback time covers the registered callback only.
+
+Pipeline/shader fields report graphics and compute lookup hits/misses plus
+lookup time, evictions, shader IR parse time split between input analysis and
+the pipeline-miss path, SPIR-V source/compile time, and exact Vulkan graphics
+and compute pipeline creation calls. `*_pipeline_miss_ns` is intentionally an
+inclusive end-to-end value containing its parse, SPIR-V, and Vulkan creation
+subphases; those subphase times must not be added to it. The renderer also
+reports exact in-memory shader-translation cache hits,
+misses, and host-side evictions; a hit reuses final SPIR-V only when the full
+shader identity, stage, optimization mode, generation mode, and translator
+version match.
+
+`performance.gpu_memory` is a fixed nine-row array ordered and named as
+`video_out_buffer`, `depth_stencil_buffer`, `label`, `index_buffer`,
+`vertex_buffer`, `storage_buffer`, `texture`, `render_texture`, and
+`storage_texture`. Every completed `GpuMemory::CreateObject` call contributes
+to exactly one of `fast_reuse`, `exact_reuse`, `new_standalone`, `new_linked`,
+`new_from_objects`, or `reclaim_new`. `logical_free` counts registry removal;
+`live` is the current absolute count and is therefore not reset with the
+measurement window. The existing top-level `creates` remains the number of
+new logical objects, not total `CreateObject` calls.
 
 ### `status.phase`
 

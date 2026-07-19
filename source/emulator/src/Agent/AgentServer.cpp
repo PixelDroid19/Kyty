@@ -139,20 +139,104 @@ std::string DiagnosticsResult()
 std::string PerformanceResult(bool reset)
 {
 	const auto stats = Libs::Graphics::DebugStatsGetPerformanceSnapshot(reset);
-	char       buf[512];
+	char       buf[6144];
 	std::snprintf(buf, sizeof(buf),
 	              "{\"protocol_version\":%u,\"schema\":\"performance_snapshot\",\"reset\":%s,"
 	              "\"interval_ms\":%llu,\"draws\":%llu,\"dispatches\":%llu,\"alloc_bytes\":%llu,\"free_bytes\":%llu,"
-	              "\"creates\":%llu,\"frees\":%llu,\"flips\":%llu,\"buffer_flushes\":%llu,\"submits\":%llu,"
+	              "\"creates\":%llu,\"frees\":%llu,\"flips\":%llu,\"buffer_flushes\":%llu,\"command_buffers\":%llu,\"submits\":%llu,"
 	              "\"fence_waits\":%llu,\"fence_wait_ns\":%llu,\"fence_wait_max_ns\":%llu,"
+	              "\"acquires\":%llu,\"acquire_ns\":%llu,\"acquire_max_ns\":%llu,"
+	              "\"presents\":%llu,\"present_ns\":%llu,\"present_max_ns\":%llu,"
+	              "\"wait_reg_mem\":%llu,\"wait_reg_mem_ns\":%llu,\"wait_reg_mem_max_ns\":%llu,"
+	              "\"wait_flip_done\":%llu,\"wait_flip_done_ns\":%llu,\"wait_flip_done_max_ns\":%llu,"
+	              "\"in_flight_current\":%llu,\"in_flight_max\":%llu,"
+	              "\"frame_samples\":%llu,\"frame_time_p50_us\":%llu,\"frame_time_p95_us\":%llu,"
+	              "\"frame_time_p99_us\":%llu,\"frame_time_max_us\":%llu,"
+	              "\"frames_over_50ms\":%llu,\"frames_over_100ms\":%llu,\"frames_over_250ms\":%llu,"
+	              "\"hash_calls\":%llu,\"hash_bytes\":%llu,\"hash_ns\":%llu,\"hash_max_ns\":%llu,"
+	              "\"detile_calls\":%llu,\"detile_bytes\":%llu,\"detile_ns\":%llu,\"detile_max_ns\":%llu,"
+	              "\"upload_calls\":%llu,\"upload_bytes\":%llu,\"upload_ns\":%llu,\"upload_max_ns\":%llu,"
+	              "\"writeback_calls\":%llu,\"writeback_bytes\":%llu,\"writeback_ns\":%llu,\"writeback_max_ns\":%llu,"
+	              "\"gfx_pipeline_lookup_hits\":%llu,\"gfx_pipeline_lookup_misses\":%llu,"
+	              "\"gfx_pipeline_lookup_ns\":%llu,\"gfx_pipeline_lookup_max_ns\":%llu,"
+	              "\"compute_pipeline_lookup_hits\":%llu,\"compute_pipeline_lookup_misses\":%llu,"
+	              "\"compute_pipeline_lookup_ns\":%llu,\"compute_pipeline_lookup_max_ns\":%llu,"
+	              "\"pipeline_evictions\":%llu,"
+	              "\"gfx_pipeline_miss_count\":%llu,\"gfx_pipeline_miss_ns\":%llu,\"gfx_pipeline_miss_max_ns\":%llu,"
+	              "\"compute_pipeline_miss_count\":%llu,\"compute_pipeline_miss_ns\":%llu,\"compute_pipeline_miss_max_ns\":%llu,"
+	              "\"shader_ir_input_analysis_count\":%llu,\"shader_ir_input_analysis_ns\":%llu,"
+	              "\"shader_ir_input_analysis_max_ns\":%llu,"
+	              "\"shader_ir_pipeline_miss_count\":%llu,\"shader_ir_pipeline_miss_ns\":%llu,"
+	              "\"shader_ir_pipeline_miss_max_ns\":%llu,"
+	              "\"spirv_source_count\":%llu,\"spirv_source_ns\":%llu,\"spirv_source_max_ns\":%llu,"
+	              "\"spirv_compile_count\":%llu,\"spirv_compile_ns\":%llu,\"spirv_compile_max_ns\":%llu,"
+	              "\"vk_graphics_pipeline_create_count\":%llu,\"vk_graphics_pipeline_create_ns\":%llu,"
+	              "\"vk_graphics_pipeline_create_max_ns\":%llu,"
+	              "\"vk_compute_pipeline_create_count\":%llu,\"vk_compute_pipeline_create_ns\":%llu,"
+	              "\"vk_compute_pipeline_create_max_ns\":%llu,"
+	              "\"shader_translation_cache_hits\":%llu,\"shader_translation_cache_misses\":%llu,"
+	              "\"shader_translation_cache_evictions\":%llu,"
 	              "\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f}",
 	              Kyty::Agent::kProtocolVersion, reset ? "true" : "false", static_cast<unsigned long long>(stats.interval_ms),
 	              static_cast<unsigned long long>(stats.draws), static_cast<unsigned long long>(stats.dispatches),
 	              static_cast<unsigned long long>(stats.alloc_bytes), static_cast<unsigned long long>(stats.free_bytes),
 	              static_cast<unsigned long long>(stats.creates), static_cast<unsigned long long>(stats.frees),
 	              static_cast<unsigned long long>(stats.flips), static_cast<unsigned long long>(stats.buffer_flushes),
-	              static_cast<unsigned long long>(stats.submits), static_cast<unsigned long long>(stats.fence_waits),
-	              static_cast<unsigned long long>(stats.fence_wait_ns), static_cast<unsigned long long>(stats.fence_wait_max_ns),
+	              static_cast<unsigned long long>(stats.command_buffers), static_cast<unsigned long long>(stats.submits),
+	              static_cast<unsigned long long>(stats.fence_waits), static_cast<unsigned long long>(stats.fence_wait_ns),
+	              static_cast<unsigned long long>(stats.fence_wait_max_ns), static_cast<unsigned long long>(stats.acquires),
+	              static_cast<unsigned long long>(stats.acquire_ns), static_cast<unsigned long long>(stats.acquire_max_ns),
+	              static_cast<unsigned long long>(stats.presents), static_cast<unsigned long long>(stats.present_ns),
+	              static_cast<unsigned long long>(stats.present_max_ns), static_cast<unsigned long long>(stats.wait_reg_mem),
+	              static_cast<unsigned long long>(stats.wait_reg_mem_ns), static_cast<unsigned long long>(stats.wait_reg_mem_max_ns),
+	              static_cast<unsigned long long>(stats.wait_flip_done), static_cast<unsigned long long>(stats.wait_flip_done_ns),
+	              static_cast<unsigned long long>(stats.wait_flip_done_max_ns), static_cast<unsigned long long>(stats.in_flight_current),
+	              static_cast<unsigned long long>(stats.in_flight_max), static_cast<unsigned long long>(stats.frame_samples),
+	              static_cast<unsigned long long>(stats.frame_time_p50_us), static_cast<unsigned long long>(stats.frame_time_p95_us),
+	              static_cast<unsigned long long>(stats.frame_time_p99_us), static_cast<unsigned long long>(stats.frame_time_max_us),
+	              static_cast<unsigned long long>(stats.frames_over_50ms), static_cast<unsigned long long>(stats.frames_over_100ms),
+	              static_cast<unsigned long long>(stats.frames_over_250ms), static_cast<unsigned long long>(stats.hash_calls),
+	              static_cast<unsigned long long>(stats.hash_bytes), static_cast<unsigned long long>(stats.hash_ns),
+	              static_cast<unsigned long long>(stats.hash_max_ns), static_cast<unsigned long long>(stats.detile_calls),
+	              static_cast<unsigned long long>(stats.detile_bytes), static_cast<unsigned long long>(stats.detile_ns),
+	              static_cast<unsigned long long>(stats.detile_max_ns), static_cast<unsigned long long>(stats.upload_calls),
+	              static_cast<unsigned long long>(stats.upload_bytes), static_cast<unsigned long long>(stats.upload_ns),
+	              static_cast<unsigned long long>(stats.upload_max_ns), static_cast<unsigned long long>(stats.writeback_calls),
+	              static_cast<unsigned long long>(stats.writeback_bytes), static_cast<unsigned long long>(stats.writeback_ns),
+	              static_cast<unsigned long long>(stats.writeback_max_ns),
+	              static_cast<unsigned long long>(stats.gfx_pipeline_lookup_hits),
+	              static_cast<unsigned long long>(stats.gfx_pipeline_lookup_misses),
+	              static_cast<unsigned long long>(stats.gfx_pipeline_lookup_ns),
+	              static_cast<unsigned long long>(stats.gfx_pipeline_lookup_max_ns),
+	              static_cast<unsigned long long>(stats.compute_pipeline_lookup_hits),
+	              static_cast<unsigned long long>(stats.compute_pipeline_lookup_misses),
+	              static_cast<unsigned long long>(stats.compute_pipeline_lookup_ns),
+	              static_cast<unsigned long long>(stats.compute_pipeline_lookup_max_ns),
+	              static_cast<unsigned long long>(stats.pipeline_evictions),
+	              static_cast<unsigned long long>(stats.gfx_pipeline_miss_count),
+	              static_cast<unsigned long long>(stats.gfx_pipeline_miss_ns),
+	              static_cast<unsigned long long>(stats.gfx_pipeline_miss_max_ns),
+	              static_cast<unsigned long long>(stats.compute_pipeline_miss_count),
+	              static_cast<unsigned long long>(stats.compute_pipeline_miss_ns),
+	              static_cast<unsigned long long>(stats.compute_pipeline_miss_max_ns),
+	              static_cast<unsigned long long>(stats.shader_ir_input_analysis_count),
+	              static_cast<unsigned long long>(stats.shader_ir_input_analysis_ns),
+	              static_cast<unsigned long long>(stats.shader_ir_input_analysis_max_ns),
+	              static_cast<unsigned long long>(stats.shader_ir_pipeline_miss_count),
+	              static_cast<unsigned long long>(stats.shader_ir_pipeline_miss_ns),
+	              static_cast<unsigned long long>(stats.shader_ir_pipeline_miss_max_ns),
+	              static_cast<unsigned long long>(stats.spirv_source_count), static_cast<unsigned long long>(stats.spirv_source_ns),
+	              static_cast<unsigned long long>(stats.spirv_source_max_ns), static_cast<unsigned long long>(stats.spirv_compile_count),
+	              static_cast<unsigned long long>(stats.spirv_compile_ns), static_cast<unsigned long long>(stats.spirv_compile_max_ns),
+	              static_cast<unsigned long long>(stats.vk_graphics_pipeline_create_count),
+	              static_cast<unsigned long long>(stats.vk_graphics_pipeline_create_ns),
+	              static_cast<unsigned long long>(stats.vk_graphics_pipeline_create_max_ns),
+	              static_cast<unsigned long long>(stats.vk_compute_pipeline_create_count),
+	              static_cast<unsigned long long>(stats.vk_compute_pipeline_create_ns),
+	              static_cast<unsigned long long>(stats.vk_compute_pipeline_create_max_ns),
+	              static_cast<unsigned long long>(stats.shader_translation_cache_hits),
+	              static_cast<unsigned long long>(stats.shader_translation_cache_misses),
+	              static_cast<unsigned long long>(stats.shader_translation_cache_evictions),
 	              static_cast<unsigned long long>(stats.live_objects), stats.fps, stats.frame_time_ms);
 	return std::string(buf);
 }

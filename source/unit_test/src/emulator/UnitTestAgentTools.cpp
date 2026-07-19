@@ -127,9 +127,17 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	DebugStatsRecordAlloc(4096);
 	DebugStatsRecordFlip(60.0, 16.667);
 	DebugStatsRecordBufferFlush();
+	DebugStatsRecordCommandBuffer();
+	DebugStatsRecordSubmit();
 	DebugStatsRecordSubmit();
 	DebugStatsRecordFenceWait(250000);
 	DebugStatsRecordFenceWait(750000);
+	DebugStatsRecordAcquire(100000);
+	DebugStatsRecordAcquire(300000);
+	DebugStatsRecordPresent(200000);
+	DebugStatsRecordWaitRegMem(400000);
+	DebugStatsRecordWaitFlipDone(500000);
+	DebugStatsRecordSubmissionComplete();
 
 	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
 	EXPECT_EQ(first.draws, 1u);
@@ -138,10 +146,25 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	EXPECT_EQ(first.creates, 1u);
 	EXPECT_EQ(first.flips, 1u);
 	EXPECT_EQ(first.buffer_flushes, 1u);
-	EXPECT_EQ(first.submits, 1u);
+	EXPECT_EQ(first.command_buffers, 1u);
+	EXPECT_EQ(first.submits, 2u);
 	EXPECT_EQ(first.fence_waits, 2u);
 	EXPECT_EQ(first.fence_wait_ns, 1000000u);
 	EXPECT_EQ(first.fence_wait_max_ns, 750000u);
+	EXPECT_EQ(first.acquires, 2u);
+	EXPECT_EQ(first.acquire_ns, 400000u);
+	EXPECT_EQ(first.acquire_max_ns, 300000u);
+	EXPECT_EQ(first.presents, 1u);
+	EXPECT_EQ(first.present_ns, 200000u);
+	EXPECT_EQ(first.present_max_ns, 200000u);
+	EXPECT_EQ(first.wait_reg_mem, 1u);
+	EXPECT_EQ(first.wait_reg_mem_ns, 400000u);
+	EXPECT_EQ(first.wait_reg_mem_max_ns, 400000u);
+	EXPECT_EQ(first.wait_flip_done, 1u);
+	EXPECT_EQ(first.wait_flip_done_ns, 500000u);
+	EXPECT_EQ(first.wait_flip_done_max_ns, 500000u);
+	EXPECT_EQ(first.in_flight_current, 1u);
+	EXPECT_EQ(first.in_flight_max, 2u);
 	EXPECT_EQ(first.live_objects, 1u);
 
 	DebugStatsRecordDraw();
@@ -155,11 +178,267 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	EXPECT_EQ(second.frees, 1u);
 	EXPECT_EQ(second.flips, 0u);
 	EXPECT_EQ(second.buffer_flushes, 0u);
+	EXPECT_EQ(second.command_buffers, 0u);
 	EXPECT_EQ(second.submits, 0u);
 	EXPECT_EQ(second.fence_waits, 0u);
 	EXPECT_EQ(second.fence_wait_ns, 0u);
 	EXPECT_EQ(second.fence_wait_max_ns, 0u);
+	EXPECT_EQ(second.acquires, 0u);
+	EXPECT_EQ(second.acquire_ns, 0u);
+	EXPECT_EQ(second.acquire_max_ns, 0u);
+	EXPECT_EQ(second.presents, 0u);
+	EXPECT_EQ(second.present_ns, 0u);
+	EXPECT_EQ(second.present_max_ns, 0u);
+	EXPECT_EQ(second.wait_reg_mem, 0u);
+	EXPECT_EQ(second.wait_reg_mem_ns, 0u);
+	EXPECT_EQ(second.wait_reg_mem_max_ns, 0u);
+	EXPECT_EQ(second.wait_flip_done, 0u);
+	EXPECT_EQ(second.wait_flip_done_ns, 0u);
+	EXPECT_EQ(second.wait_flip_done_max_ns, 0u);
+	EXPECT_EQ(second.in_flight_current, 1u);
+	EXPECT_EQ(second.in_flight_max, 1u);
 	EXPECT_EQ(second.live_objects, 0u);
+
+	DebugStatsRecordSubmissionComplete();
+	const DebugStatsPerformanceSnapshot third = DebugStatsGetPerformanceSnapshot(true);
+	EXPECT_EQ(third.in_flight_current, 0u);
+	EXPECT_EQ(third.in_flight_max, 1u);
+
+	const DebugStatsPerformanceSnapshot fourth = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(fourth.in_flight_current, 0u);
+	EXPECT_EQ(fourth.in_flight_max, 0u);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, FrameTimeHistogramIsBoundedAndResettable)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	for (int i = 0; i < 50; ++i)
+	{
+		DebugStatsRecordFlip(100.0, 10.0);
+	}
+	for (int i = 0; i < 45; ++i)
+	{
+		DebugStatsRecordFlip(50.0, 20.0);
+	}
+	for (int i = 0; i < 4; ++i)
+	{
+		DebugStatsRecordFlip(16.0, 60.0);
+	}
+	DebugStatsRecordFlip(1.0, 600.0);
+
+	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(first.frame_samples, 100u);
+	EXPECT_EQ(first.frame_time_p50_us, 11000u);
+	EXPECT_EQ(first.frame_time_p95_us, 21000u);
+	EXPECT_EQ(first.frame_time_p99_us, 61000u);
+	EXPECT_EQ(first.frame_time_max_us, 600000u);
+	EXPECT_EQ(first.frames_over_50ms, 5u);
+	EXPECT_EQ(first.frames_over_100ms, 1u);
+	EXPECT_EQ(first.frames_over_250ms, 1u);
+
+	const DebugStatsPerformanceSnapshot reset = DebugStatsGetPerformanceSnapshot(true);
+	EXPECT_EQ(reset.frame_samples, 100u);
+	EXPECT_EQ(reset.frame_time_max_us, 600000u);
+
+	const DebugStatsPerformanceSnapshot empty = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(empty.frame_samples, 0u);
+	EXPECT_EQ(empty.frame_time_p50_us, 0u);
+	EXPECT_EQ(empty.frame_time_p95_us, 0u);
+	EXPECT_EQ(empty.frame_time_p99_us, 0u);
+	EXPECT_EQ(empty.frame_time_max_us, 0u);
+	EXPECT_EQ(empty.frames_over_50ms, 0u);
+	EXPECT_EQ(empty.frames_over_100ms, 0u);
+	EXPECT_EQ(empty.frames_over_250ms, 0u);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, ResourceWorkTelemetryTracksOnlyRecordedOperations)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsRecordHash(64, 100);
+	DebugStatsRecordHash(128, 300);
+	DebugStatsRecordDetile(256, 400);
+	DebugStatsRecordUpload(512, 500);
+	DebugStatsRecordWriteBack(1024, 600);
+
+	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
+	EXPECT_EQ(first.hash_calls, 2u);
+	EXPECT_EQ(first.hash_bytes, 192u);
+	EXPECT_EQ(first.hash_ns, 400u);
+	EXPECT_EQ(first.hash_max_ns, 300u);
+	EXPECT_EQ(first.detile_calls, 1u);
+	EXPECT_EQ(first.detile_bytes, 256u);
+	EXPECT_EQ(first.detile_ns, 400u);
+	EXPECT_EQ(first.detile_max_ns, 400u);
+	EXPECT_EQ(first.upload_calls, 1u);
+	EXPECT_EQ(first.upload_bytes, 512u);
+	EXPECT_EQ(first.upload_ns, 500u);
+	EXPECT_EQ(first.upload_max_ns, 500u);
+	EXPECT_EQ(first.writeback_calls, 1u);
+	EXPECT_EQ(first.writeback_bytes, 1024u);
+	EXPECT_EQ(first.writeback_ns, 600u);
+	EXPECT_EQ(first.writeback_max_ns, 600u);
+
+	const DebugStatsPerformanceSnapshot empty = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(empty.hash_calls, 0u);
+	EXPECT_EQ(empty.hash_bytes, 0u);
+	EXPECT_EQ(empty.hash_ns, 0u);
+	EXPECT_EQ(empty.hash_max_ns, 0u);
+	EXPECT_EQ(empty.detile_calls, 0u);
+	EXPECT_EQ(empty.detile_bytes, 0u);
+	EXPECT_EQ(empty.detile_ns, 0u);
+	EXPECT_EQ(empty.detile_max_ns, 0u);
+	EXPECT_EQ(empty.upload_calls, 0u);
+	EXPECT_EQ(empty.upload_bytes, 0u);
+	EXPECT_EQ(empty.upload_ns, 0u);
+	EXPECT_EQ(empty.upload_max_ns, 0u);
+	EXPECT_EQ(empty.writeback_calls, 0u);
+	EXPECT_EQ(empty.writeback_bytes, 0u);
+	EXPECT_EQ(empty.writeback_ns, 0u);
+	EXPECT_EQ(empty.writeback_max_ns, 0u);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, PipelineShaderTelemetrySeparatesExactOperationBoundaries)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Graphics, true, 100);
+	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Graphics, false, 300);
+	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Compute, true, 200);
+	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Compute, false, 400);
+	DebugStatsRecordPipelineEviction();
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, 500);
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, 600);
+	DebugStatsRecordShaderIrParse(DebugStatsShaderParseKind::InputAnalysis, 700);
+	DebugStatsRecordShaderIrParse(DebugStatsShaderParseKind::PipelineMiss, 800);
+	DebugStatsRecordSpirvSource(900);
+	DebugStatsRecordSpirvCompile(1000);
+	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Graphics, 1100);
+	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Compute, 1200);
+	DebugStatsRecordShaderTranslationCache(true, false);
+	DebugStatsRecordShaderTranslationCache(false, true);
+
+	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
+	EXPECT_EQ(first.gfx_pipeline_lookup_hits, 1u);
+	EXPECT_EQ(first.gfx_pipeline_lookup_misses, 1u);
+	EXPECT_EQ(first.gfx_pipeline_lookup_ns, 400u);
+	EXPECT_EQ(first.gfx_pipeline_lookup_max_ns, 300u);
+	EXPECT_EQ(first.compute_pipeline_lookup_hits, 1u);
+	EXPECT_EQ(first.compute_pipeline_lookup_misses, 1u);
+	EXPECT_EQ(first.compute_pipeline_lookup_ns, 600u);
+	EXPECT_EQ(first.compute_pipeline_lookup_max_ns, 400u);
+	EXPECT_EQ(first.pipeline_evictions, 1u);
+	EXPECT_EQ(first.gfx_pipeline_miss_count, 1u);
+	EXPECT_EQ(first.gfx_pipeline_miss_ns, 500u);
+	EXPECT_EQ(first.gfx_pipeline_miss_max_ns, 500u);
+	EXPECT_EQ(first.compute_pipeline_miss_count, 1u);
+	EXPECT_EQ(first.compute_pipeline_miss_ns, 600u);
+	EXPECT_EQ(first.compute_pipeline_miss_max_ns, 600u);
+	EXPECT_EQ(first.shader_ir_input_analysis_count, 1u);
+	EXPECT_EQ(first.shader_ir_input_analysis_ns, 700u);
+	EXPECT_EQ(first.shader_ir_input_analysis_max_ns, 700u);
+	EXPECT_EQ(first.shader_ir_pipeline_miss_count, 1u);
+	EXPECT_EQ(first.shader_ir_pipeline_miss_ns, 800u);
+	EXPECT_EQ(first.shader_ir_pipeline_miss_max_ns, 800u);
+	EXPECT_EQ(first.spirv_source_count, 1u);
+	EXPECT_EQ(first.spirv_source_ns, 900u);
+	EXPECT_EQ(first.spirv_source_max_ns, 900u);
+	EXPECT_EQ(first.spirv_compile_count, 1u);
+	EXPECT_EQ(first.spirv_compile_ns, 1000u);
+	EXPECT_EQ(first.spirv_compile_max_ns, 1000u);
+	EXPECT_EQ(first.vk_graphics_pipeline_create_count, 1u);
+	EXPECT_EQ(first.vk_graphics_pipeline_create_ns, 1100u);
+	EXPECT_EQ(first.vk_graphics_pipeline_create_max_ns, 1100u);
+	EXPECT_EQ(first.vk_compute_pipeline_create_count, 1u);
+	EXPECT_EQ(first.vk_compute_pipeline_create_ns, 1200u);
+	EXPECT_EQ(first.vk_compute_pipeline_create_max_ns, 1200u);
+	EXPECT_EQ(first.shader_translation_cache_hits, 1u);
+	EXPECT_EQ(first.shader_translation_cache_misses, 1u);
+	EXPECT_EQ(first.shader_translation_cache_evictions, 1u);
+
+	const DebugStatsPerformanceSnapshot empty = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(empty.gfx_pipeline_lookup_hits, 0u);
+	EXPECT_EQ(empty.gfx_pipeline_lookup_misses, 0u);
+	EXPECT_EQ(empty.gfx_pipeline_lookup_ns, 0u);
+	EXPECT_EQ(empty.gfx_pipeline_lookup_max_ns, 0u);
+	EXPECT_EQ(empty.compute_pipeline_lookup_hits, 0u);
+	EXPECT_EQ(empty.compute_pipeline_lookup_misses, 0u);
+	EXPECT_EQ(empty.compute_pipeline_lookup_ns, 0u);
+	EXPECT_EQ(empty.compute_pipeline_lookup_max_ns, 0u);
+	EXPECT_EQ(empty.pipeline_evictions, 0u);
+	EXPECT_EQ(empty.gfx_pipeline_miss_count, 0u);
+	EXPECT_EQ(empty.compute_pipeline_miss_count, 0u);
+	EXPECT_EQ(empty.shader_ir_input_analysis_count, 0u);
+	EXPECT_EQ(empty.shader_ir_pipeline_miss_count, 0u);
+	EXPECT_EQ(empty.spirv_source_count, 0u);
+	EXPECT_EQ(empty.spirv_compile_count, 0u);
+	EXPECT_EQ(empty.vk_graphics_pipeline_create_count, 0u);
+	EXPECT_EQ(empty.vk_compute_pipeline_create_count, 0u);
+	EXPECT_EQ(empty.shader_translation_cache_hits, 0u);
+	EXPECT_EQ(empty.shader_translation_cache_misses, 0u);
+	EXPECT_EQ(empty.shader_translation_cache_evictions, 0u);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsRecordGpuMemoryCreate(0, DebugStatsGpuMemoryCreateOutcome::FastReuse, 100);
+	DebugStatsRecordGpuMemoryCreate(1, DebugStatsGpuMemoryCreateOutcome::ExactReuse, 200);
+	DebugStatsRecordGpuMemoryCreate(2, DebugStatsGpuMemoryCreateOutcome::NewStandalone, 300);
+	DebugStatsRecordGpuMemoryCreate(3, DebugStatsGpuMemoryCreateOutcome::NewLinked, 400);
+	DebugStatsRecordGpuMemoryCreate(4, DebugStatsGpuMemoryCreateOutcome::NewFromObjects, 500);
+	DebugStatsRecordGpuMemoryCreate(5, DebugStatsGpuMemoryCreateOutcome::ReclaimNew, 600);
+	DebugStatsRecordGpuMemoryFree(5);
+
+	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
+	EXPECT_EQ(first.gpu_memory_create_calls, 6u);
+	EXPECT_EQ(first.gpu_memory_create_ns, 2100u);
+	EXPECT_EQ(first.gpu_memory_create_max_ns, 600u);
+	EXPECT_EQ(first.gpu_memory_types[0].fast_reuse, 1u);
+	EXPECT_EQ(first.gpu_memory_types[1].exact_reuse, 1u);
+	EXPECT_EQ(first.gpu_memory_types[2].new_standalone, 1u);
+	EXPECT_EQ(first.gpu_memory_types[3].new_linked, 1u);
+	EXPECT_EQ(first.gpu_memory_types[4].new_from_objects, 1u);
+	EXPECT_EQ(first.gpu_memory_types[5].reclaim_new, 1u);
+	EXPECT_EQ(first.gpu_memory_types[5].logical_free, 1u);
+	EXPECT_EQ(first.gpu_memory_types[5].live, 0u);
+	for (uint32_t i = 6; i < kDebugStatsGpuMemoryTypeCount; ++i)
+	{
+		EXPECT_EQ(first.gpu_memory_types[i].fast_reuse, 0u);
+		EXPECT_EQ(first.gpu_memory_types[i].exact_reuse, 0u);
+		EXPECT_EQ(first.gpu_memory_types[i].new_standalone, 0u);
+		EXPECT_EQ(first.gpu_memory_types[i].new_linked, 0u);
+		EXPECT_EQ(first.gpu_memory_types[i].new_from_objects, 0u);
+		EXPECT_EQ(first.gpu_memory_types[i].reclaim_new, 0u);
+		EXPECT_EQ(first.gpu_memory_types[i].logical_free, 0u);
+		EXPECT_EQ(first.gpu_memory_types[i].live, 0u);
+	}
+
+	const DebugStatsPerformanceSnapshot empty = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(empty.gpu_memory_create_calls, 0u);
+	EXPECT_EQ(empty.gpu_memory_create_ns, 0u);
+	EXPECT_EQ(empty.gpu_memory_create_max_ns, 0u);
+	for (uint32_t i = 0; i < kDebugStatsGpuMemoryTypeCount; ++i)
+	{
+		EXPECT_EQ(empty.gpu_memory_types[i].fast_reuse, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].exact_reuse, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].new_standalone, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].new_linked, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].new_from_objects, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].reclaim_new, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].logical_free, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].live, first.gpu_memory_types[i].live);
+	}
 	DebugStatsShutdown();
 }
 

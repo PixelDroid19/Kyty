@@ -73,6 +73,53 @@ int ScenarioProtocolVersionConsistent()
 	                                                     Loader::ModuleLifecycleCoordinator::GetDiagnostics());
 	Expect(diag_body.find("\"event_ring\"") != std::string::npos, "diagnostics has event_ring");
 	Expect(diag_body.find("\"performance\"") != std::string::npos, "diagnostics has bounded performance snapshot");
+	Expect(diag_body.find("\"command_buffers\"") != std::string::npos, "performance has command buffer count");
+	Expect(diag_body.find("\"acquire_max_ns\"") != std::string::npos, "performance has bounded acquire timing");
+	Expect(diag_body.find("\"present_max_ns\"") != std::string::npos, "performance has bounded present timing");
+	Expect(diag_body.find("\"wait_reg_mem_max_ns\"") != std::string::npos, "performance has bounded WaitRegMem timing");
+	Expect(diag_body.find("\"wait_flip_done_max_ns\"") != std::string::npos, "performance has bounded WaitFlipDone timing");
+	Expect(diag_body.find("\"in_flight_current\"") != std::string::npos, "performance has current submissions in flight");
+	Expect(diag_body.find("\"in_flight_max\"") != std::string::npos, "performance has bounded peak submissions in flight");
+	Expect(diag_body.find("\"frame_samples\"") != std::string::npos, "performance has bounded frame sample count");
+	Expect(diag_body.find("\"frame_time_p99_us\"") != std::string::npos, "performance has bounded p99 frame time");
+	Expect(diag_body.find("\"frame_time_max_us\"") != std::string::npos, "performance has bounded maximum frame time");
+	Expect(diag_body.find("\"frames_over_250ms\"") != std::string::npos, "performance has cold-frame threshold count");
+	Expect(diag_body.find("\"hash_max_ns\"") != std::string::npos, "performance has bounded hash timing");
+	Expect(diag_body.find("\"detile_max_ns\"") != std::string::npos, "performance has bounded detile timing");
+	Expect(diag_body.find("\"upload_max_ns\"") != std::string::npos, "performance has bounded upload timing");
+	Expect(diag_body.find("\"writeback_max_ns\"") != std::string::npos, "performance has bounded writeback timing");
+	Expect(diag_body.find("\"gfx_pipeline_lookup_max_ns\"") != std::string::npos, "performance has bounded graphics lookup timing");
+	Expect(diag_body.find("\"compute_pipeline_lookup_max_ns\"") != std::string::npos, "performance has bounded compute lookup timing");
+	Expect(diag_body.find("\"pipeline_evictions\"") != std::string::npos, "performance has pipeline eviction count");
+	Expect(diag_body.find("\"gfx_pipeline_miss_max_ns\"") != std::string::npos, "performance has bounded graphics miss timing");
+	Expect(diag_body.find("\"compute_pipeline_miss_max_ns\"") != std::string::npos, "performance has bounded compute miss timing");
+	Expect(diag_body.find("\"shader_ir_input_analysis_max_ns\"") != std::string::npos,
+	       "performance has bounded shader input-analysis timing");
+	Expect(diag_body.find("\"shader_ir_pipeline_miss_max_ns\"") != std::string::npos,
+	       "performance has bounded shader miss-parse timing");
+	Expect(diag_body.find("\"spirv_source_max_ns\"") != std::string::npos, "performance has bounded SPIR-V source timing");
+	Expect(diag_body.find("\"spirv_compile_max_ns\"") != std::string::npos, "performance has bounded SPIR-V compile timing");
+	Expect(diag_body.find("\"vk_graphics_pipeline_create_max_ns\"") != std::string::npos,
+	       "performance has bounded Vulkan graphics pipeline timing");
+	Expect(diag_body.find("\"vk_compute_pipeline_create_max_ns\"") != std::string::npos,
+	       "performance has bounded Vulkan compute pipeline timing");
+	Expect(diag_body.find("\"shader_translation_cache_hits\"") != std::string::npos, "performance has shader translation cache hits");
+	Expect(diag_body.find("\"shader_translation_cache_misses\"") != std::string::npos, "performance has shader translation cache misses");
+	Expect(diag_body.find("\"shader_translation_cache_evictions\"") != std::string::npos,
+	       "performance has bounded shader translation cache evictions");
+	Expect(diag_body.find("\"gpu_memory\"") != std::string::npos, "performance has bounded GPU memory outcomes");
+	Expect(diag_body.find("\"create_max_ns\"") != std::string::npos,
+	       "performance has bounded GPU memory create timing");
+	const char* gpu_memory_types[] = {"video_out_buffer", "depth_stencil_buffer", "label",         "index_buffer", "vertex_buffer",
+	                                  "storage_buffer",   "texture",              "render_texture", "storage_texture"};
+	for (const char* type: gpu_memory_types)
+	{
+		const std::string needle = std::string("\"type\":\"") + type + "\"";
+		Expect(diag_body.find(needle) != std::string::npos, "performance has every stable GPU memory type row");
+	}
+	Expect(diag_body.find("\"reclaim_new\"") != std::string::npos, "GPU memory rows contain the final create outcome");
+	Expect(diag_body.find("\"logical_free\"") != std::string::npos, "GPU memory rows contain logical frees");
+	Expect(diag_body.find("\"live\"") != std::string::npos, "GPU memory rows contain live objects");
 	// ensure bring_up closes before event_ring appears as sibling: look for pattern
 	const auto bring_pos = diag_body.find("\"bring_up\"");
 	const auto ring_pos  = diag_body.find("\"event_ring\"");
