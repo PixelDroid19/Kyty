@@ -19,6 +19,8 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <cstdlib>
+#include <chrono>
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -43,6 +45,12 @@ static pthread_mutex_t              g_virtual_mutex {};
 static std::map<uintptr_t, size_t>* g_allocs   = nullptr;
 static uintptr_t                    g_guest_map_cursor = 0;
 static uintptr_t                    g_shared_map_cursor = 0;
+
+static bool IsDebugVirtualAlloc()
+{
+	static const bool enabled = (std::getenv("KYTY_DEBUG_FLEX_ALLOC") != nullptr);
+	return enabled;
+}
 
 struct ProtectionRange
 {
@@ -331,6 +339,8 @@ static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, 
 	{
 		alignment = 0x1000;
 	}
+	const uint64_t page_size = sys_virtual_get_page_size();
+	alignment                  = align_up(alignment, page_size);
 
 	// Always honor the requested alignment (e.g. 2 MiB GPU heaps).
 	uintptr_t start = (prefer != 0) ? prefer : kGuestHeapLo;
@@ -359,11 +369,23 @@ static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, 
 		return MAP_FAILED;
 	}
 
-	// Large flexible/direct heaps are demand-backed; avoid immediate commit checks.
+	// Large flexible/direct heaps are demand-backed; avoid immediate commit checks
+	// where supported. On macOS this is not an available flag, so map only with
+	// portable protection flags.
+#ifdef __APPLE__
+	const int flags_base = MAP_PRIVATE | MAP_ANON;
+#else
 	const int flags_base = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE;
+#endif
+	if (IsDebugVirtualAlloc())
+	{
+		printf("[mmap_window] prefer=0x%016" PRIxPTR " size=%" PRIu64 " align=0x%" PRIx64 "\n", start, size, alignment);
+	}
 
+	uint64_t attempts = 0;
 	for (uintptr_t a = start; a + size <= kGuestHeapHi && a + size - 1 <= kGuestVaMax; a += alignment)
 	{
+		attempts++;
 #ifdef KYTY_FIXED_NOREPLACE
 		// NOLINTNEXTLINE
 		void* ptr = mmap(reinterpret_cast<void*>(a), size, protect, MAP_FIXED_NOREPLACE | flags_base, -1, 0);
@@ -384,8 +406,21 @@ static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, 
 				g_guest_map_cursor = a + size;
 				pthread_mutex_unlock(&g_virtual_mutex);
 			}
+			if (IsDebugVirtualAlloc())
+			{
+					printf("[mmap_window] success attempt=%" PRIu64 " addr=0x%016" PRIxPTR "\n", attempts, reinterpret_cast<uintptr_t>(ptr));
+			}
 			return ptr;
 		}
+
+		if (IsDebugVirtualAlloc() && (attempts % 1024u) == 0)
+		{
+			printf("[mmap_window] fail attempt=%" PRIu64 " at=0x%016" PRIxPTR "\n", attempts, a);
+		}
+	}
+	if (IsDebugVirtualAlloc())
+	{
+		printf("[mmap_window] exhausted attempts=%" PRIu64 "\n", attempts);
 	}
 	return MAP_FAILED;
 }
@@ -395,13 +430,39 @@ uint64_t sys_virtual_alloc(uint64_t address, uint64_t size, VirtualMemory::Mode 
 	EXIT_IF(g_allocs == nullptr);
 
 	auto addr = static_cast<uintptr_t>(address);
+	const auto start_us = IsDebugVirtualAlloc() ? std::chrono::duration_cast<std::chrono::microseconds>(
+	                                   std::chrono::steady_clock::now().time_since_epoch()).count() : 0;
+	if (IsDebugVirtualAlloc())
+	{
+		printf("[sys_alloc] req address=0x%016" PRIx64 " size=%" PRIu64 "\n", address, size);
+	}
 
 	int protect = get_protection_flag(mode);
 
 	void* ptr = nullptr;
 	if (addr == 0)
 	{
+	#ifdef __APPLE__
+		// Prefer an unrestricted anonymous mapping first on Apple: it often lands
+		// directly in the guest-compatible range and avoids expensive linear fixed
+		// probing when large windows are heavily fragmented.
+		ptr = mmap(nullptr, size, protect, MAP_PRIVATE | MAP_ANON, -1, 0);
+		if (ptr != MAP_FAILED)
+		{
+			const uintptr_t mapped_addr = reinterpret_cast<uintptr_t>(ptr);
+			if (!guest_va_compatible(mapped_addr, size) || mapped_addr < kGuestHeapLo)
+			{
+				munmap(ptr, size);
+				ptr = MAP_FAILED;
+			}
+		}
+		if (ptr == MAP_FAILED)
+		{
+			ptr = mmap_in_guest_window(0, size, protect, 0x1000);
+		}
+	#else
 		ptr = mmap_in_guest_window(0, size, protect, 0x1000);
+	#endif
 	} else
 	{
 		// NOLINTNEXTLINE
@@ -418,8 +479,18 @@ uint64_t sys_virtual_alloc(uint64_t address, uint64_t size, VirtualMemory::Mode 
 
 	if (ptr != MAP_FAILED)
 	{
+		if (IsDebugVirtualAlloc())
+		{
+			const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+			    std::chrono::steady_clock::now().time_since_epoch()).count();
+			printf("[sys_alloc] ok out=0x%016" PRIx64 " elapsed_us=%" PRIu64 "\n", static_cast<uint64_t>(ret_addr), now_us - start_us);
+		}
 		track_alloc(ret_addr, size, protect);
 		return ret_addr;
+	}
+	if (IsDebugVirtualAlloc())
+	{
+		printf("[sys_alloc] fail\n");
 	}
 
 	return 0;

@@ -288,8 +288,11 @@ static void kyty_exception_handler(const Core::VirtualMemory::ExceptionHandler::
 	// (which terminate the process anyway) use printf.
 	if (info->type == Core::VirtualMemory::ExceptionHandler::ExceptionType::AccessViolation)
 	{
-		if (info->access_violation_type == Core::VirtualMemory::ExceptionHandler::AccessViolationType::Write &&
-		    Libs::Graphics::GpuMemoryCheckAccessViolation(info->access_violation_vaddr, sizeof(uint64_t)))
+		// On macOS ARM/Rosetta, access-type bits are not always reliable.
+		// Attempt GPU watch handling for any access violation before treating it
+		// as fatal; this preserves write handling when the signal classification
+		// can only be inferred from the faulting context.
+		if (Libs::Graphics::GpuMemoryCheckAccessViolation(info->access_violation_vaddr, sizeof(uint64_t)))
 		{
 			return;
 		}
@@ -1020,8 +1023,9 @@ Program* RuntimeLinker::LoadProgram(const String& elf_name)
 	Core::LockGuard lock(m_mutex);
 
 	// validate path shape before any ELF mutation
+	const auto elf_name_utf8    = elf_name.utf8_str();
 	Emulator::Validation::GuestExecutableRequest greq {};
-	greq.root_path          = elf_name.C_Str();
+	greq.root_path          = elf_name_utf8.GetData();
 	greq.require_eboot_name = false;
 	const auto path_ok      = Emulator::Validation::ValidateGuestExecutable(greq);
 	if (!path_ok.Ok())
@@ -1036,7 +1040,8 @@ Program* RuntimeLinker::LoadProgram(const String& elf_name)
 		const String                                file = elf_name.FilenameWithoutDirectory();
 		const String                                base = file.FilenameWithoutExtension();
 		Emulator::Validation::ModuleMetadataRequest mreq {};
-		mreq.name         = base.C_Str();
+		const auto                                  base_utf8 = base.utf8_str();
+		mreq.name         = base_utf8.GetData();
 		const auto mod_ok = Emulator::Validation::ValidateModuleMetadata(mreq);
 		if (!mod_ok.Ok())
 		{
@@ -1046,7 +1051,7 @@ Program* RuntimeLinker::LoadProgram(const String& elf_name)
 
 	static int32_t id_seq = 0;
 
-	printf("Loading: %s\n", elf_name.C_Str());
+	printf("Loading: %s\n", elf_name_utf8.GetData());
 
 	auto* program = new Program;
 
@@ -1064,7 +1069,7 @@ Program* RuntimeLinker::LoadProgram(const String& elf_name)
 		CreateSymbolDatabase(program);
 	} else
 	{
-		EXIT("elf is not valid: %s\n", elf_name.C_Str());
+		EXIT("elf is not valid: %s\n", elf_name_utf8.GetData());
 	}
 
 	m_programs.Add(program);
@@ -1318,7 +1323,8 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 	request.has_export = record != nullptr;
 	request.missing_function_import_enabled =
 	    Core::BringUp::IsEnabled(Core::BringUp::Feature::MissingFunctionImport, Core::BringUp::Subsystem::Loader);
-	request.identity    = identity.canonical.C_Str();
+	const auto identity_utf8 = identity.canonical.utf8_str();
+	request.identity    = identity_utf8.GetData();
 	const auto decision = Emulator::Validation::ClassifyImportResolution(request);
 
 	switch (decision.outcome)
