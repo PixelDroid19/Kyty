@@ -10,6 +10,9 @@
 
 namespace Kyty::Libs::Graphics {
 
+struct GraphicContext;
+struct VideoOutVulkanImage;
+
 enum class VideoOutBufferFormat : uint64_t
 {
 	Unknown,
@@ -26,6 +29,9 @@ enum class VideoOutBufferFormat : uint64_t
 {
 	return !tiled;
 }
+
+[[nodiscard]] bool VideoOutBufferNeedsMaterialization(const VideoOutVulkanImage* image);
+void               VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* image);
 
 class VideoOutBufferObject: public GpuObject
 {

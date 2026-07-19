@@ -560,6 +560,7 @@ bool FlipQueue::Flip(uint32_t micros)
 	m_mutex.Unlock();
 
 	auto* buffer = r.cfg->buffers[r.index].buffer_vulkan;
+	Graphics::VideoOutBufferEnsureMaterialized(g_video_out_context->GetGraphicCtx(), buffer);
 
 	Graphics::WindowDrawBuffer(buffer);
 
@@ -1117,11 +1118,21 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 	return register_buffers_internal(ctx, set_index, buffer_index_start, addresses.GetDataConst(), buffer_num, nullptr, attribute);
 }
 
-VideoOutBufferImageInfo VideoOutGetImage(uint64_t addr)
+VideoOutBufferImageInfo VideoOutGetImageMetadata(uint64_t addr)
 {
 	EXIT_IF(g_video_out_context == nullptr);
 
 	return g_video_out_context->FindImage(reinterpret_cast<void*>(addr));
+}
+
+VideoOutBufferImageInfo VideoOutGetImage(uint64_t addr)
+{
+	auto ret = VideoOutGetImageMetadata(addr);
+	if (ret.image != nullptr)
+	{
+		Graphics::VideoOutBufferEnsureMaterialized(g_video_out_context->GetGraphicCtx(), ret.image);
+	}
+	return ret;
 }
 
 KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg)

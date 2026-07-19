@@ -85,6 +85,15 @@ TEST(EmulatorGraphicsState, TiledVideoOutBufferUpdateDoesNotCpuUpload)
 	EXPECT_TRUE(VideoOutBufferShouldCpuUploadOnUpdate(false));
 }
 
+TEST(EmulatorGraphicsState, VideoOutBufferMaterializationStateTracksTheHostImage)
+{
+	VideoOutVulkanImage image;
+	EXPECT_TRUE(VideoOutBufferNeedsMaterialization(&image));
+	image.image = reinterpret_cast<VkImage>(0x1);
+	EXPECT_FALSE(VideoOutBufferNeedsMaterialization(&image));
+	EXPECT_FALSE(VideoOutBufferNeedsMaterialization(nullptr));
+}
+
 TEST(EmulatorGraphicsState, GpuOwnedTiledRenderTextureSkipsCpuHash)
 {
 	const RenderTextureObject gpu_owned(RenderTextureFormat::R8G8B8A8Unorm, 1280, 720, true, false, 1280, false);
