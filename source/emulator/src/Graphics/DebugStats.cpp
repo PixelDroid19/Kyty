@@ -691,6 +691,11 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	snapshot.present_ns = present_ns - g_performance_baseline.present_ns;
 	snapshot.present_max_ns =
 	    reset ? g_present_max_ns.exchange(0, std::memory_order_relaxed) : g_present_max_ns.load(std::memory_order_relaxed);
+	snapshot.present_src_w      = g_present_src_w.load(std::memory_order_relaxed);
+	snapshot.present_src_h      = g_present_src_h.load(std::memory_order_relaxed);
+	snapshot.present_dst_w      = g_present_dst_w.load(std::memory_order_relaxed);
+	snapshot.present_dst_h      = g_present_dst_h.load(std::memory_order_relaxed);
+	snapshot.present_src_layout = g_present_src_layout.load(std::memory_order_relaxed);
 	snapshot.wait_reg_mem    = wait_reg_mem - g_performance_baseline.wait_reg_mem;
 	snapshot.wait_reg_mem_ns = wait_reg_mem_ns - g_performance_baseline.wait_reg_mem_ns;
 	snapshot.wait_reg_mem_max_ns =

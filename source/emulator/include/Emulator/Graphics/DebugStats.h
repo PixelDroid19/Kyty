@@ -83,6 +83,11 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t presents              = 0;
 	uint64_t present_ns            = 0;
 	uint64_t present_max_ns        = 0;
+	uint32_t present_src_w         = 0;
+	uint32_t present_src_h         = 0;
+	uint32_t present_dst_w         = 0;
+	uint32_t present_dst_h         = 0;
+	uint32_t present_src_layout    = 0;
 	uint64_t wait_reg_mem          = 0;
 	uint64_t wait_reg_mem_ns       = 0;
 	uint64_t wait_reg_mem_max_ns   = 0;
