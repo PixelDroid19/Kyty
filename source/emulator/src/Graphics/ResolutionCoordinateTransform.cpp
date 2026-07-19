@@ -46,15 +46,8 @@ namespace {
 		return false;
 	}
 
-	if (length > 0.0)
-	{
-		*mapped_origin = std::floor(scaled_origin);
-		*mapped_length = std::ceil(scaled_end) - *mapped_origin;
-	} else
-	{
-		*mapped_origin = std::ceil(scaled_origin);
-		*mapped_length = std::floor(scaled_end) - *mapped_origin;
-	}
+	*mapped_origin = scaled_origin;
+	*mapped_length = scaled_end - scaled_origin;
 	return std::isfinite(*mapped_origin) && std::isfinite(*mapped_length);
 }
 

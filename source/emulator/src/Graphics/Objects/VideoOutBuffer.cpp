@@ -66,6 +66,46 @@ bool VideoOutBufferNeedsMaterialization(const VideoOutVulkanImage* image)
 	return image != nullptr && image->image == nullptr;
 }
 
+bool VideoOutBufferGetHostExtentState(VideoOutVulkanImage* image, VideoOutHostExtentState* state)
+{
+	if (image == nullptr || state == nullptr)
+	{
+		return false;
+	}
+	Core::LockGuard lock(image->materialize_mutex);
+	*state = {image->extent.width, image->extent.height, image->host_extent_selected, image->image != nullptr};
+	return true;
+}
+
+VideoOutHostExtentStatus VideoOutBufferSelectHostExtent(VideoOutVulkanImage* image, uint32_t width, uint32_t height,
+                                                        VideoOutHostExtentState* state)
+{
+	if (image == nullptr || state == nullptr || width == 0 || height == 0)
+	{
+		return VideoOutHostExtentStatus::InvalidArgument;
+	}
+
+	Core::LockGuard lock(image->materialize_mutex);
+	if (image->image != nullptr)
+	{
+		image->host_extent_selected = true;
+		*state = {image->extent.width, image->extent.height, true, true};
+		return image->extent.width == width && image->extent.height == height ? VideoOutHostExtentStatus::StickyMatch
+		                                                                     : VideoOutHostExtentStatus::StickyMismatch;
+	}
+	if (!image->host_extent_selected)
+	{
+		image->SetHostExtent(width, height);
+		image->host_extent_selected = true;
+		*state = {width, height, true, image->image != nullptr};
+		return VideoOutHostExtentStatus::Selected;
+	}
+
+	*state = {image->extent.width, image->extent.height, true, image->image != nullptr};
+	return image->extent.width == width && image->extent.height == height ? VideoOutHostExtentStatus::StickyMatch
+	                                                                     : VideoOutHostExtentStatus::StickyMismatch;
+}
+
 void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* vk_obj)
 {
 	KYTY_PROFILER_BLOCK("VideoOutBufferObject::Materialize");
@@ -77,6 +117,7 @@ void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* 
 	{
 		return;
 	}
+	vk_obj->host_extent_selected = true;
 
 	VkImageCreateInfo image_info {};
 	image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;

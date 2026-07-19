@@ -7,6 +7,8 @@
 
 namespace Kyty::Libs::Graphics {
 
+class ShaderCode;
+
 struct ResolutionAttachmentCandidate
 {
 	ResolutionExtent       guest_extent;
@@ -58,6 +60,10 @@ struct ResolutionCohortDecision
 // independent from Vulkan object creation so incomplete cohorts cannot resize
 // a single attachment.
 [[nodiscard]] ResolutionCohortDecision EvaluateResolutionCohort(const InternalResolutionPolicy& policy, const ResolutionCohortInput& input);
+// Only instruction-derived hazards are reported here. Fragment-coordinate use
+// comes from normalized pixel input state, and its support is set only after a
+// valid host-to-guest scale has been built.
+[[nodiscard]] ResolutionShaderCoordinateUsage AnalyzeResolutionShaderUsage(const ShaderCode& code);
 
 } // namespace Kyty::Libs::Graphics
 

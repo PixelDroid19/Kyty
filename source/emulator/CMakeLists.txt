@@ -39,6 +39,7 @@ target_sources(emulator PRIVATE
 	src/Graphics/GpuSubmissionTracker.cpp
 	src/Graphics/GpuSubmissionCoordinator.cpp
 	src/Graphics/ShaderTranslationCache.cpp
+	src/Graphics/ShaderResolutionUsageCache.cpp
 	src/Graphics/InternalResolutionPolicy.cpp
 	src/Graphics/InternalResolutionRuntime.cpp
 	src/Graphics/AttachmentResolutionCohort.cpp
@@ -54,6 +55,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/GpuSubmissionTracker.h
 	include/Emulator/Graphics/GpuSubmissionCoordinator.h
 	include/Emulator/Graphics/ShaderTranslationCache.h
+	include/Emulator/Graphics/ShaderResolutionUsageCache.h
 	include/Emulator/Graphics/InternalResolutionPolicy.h
 	include/Emulator/Graphics/InternalResolutionRuntime.h
 	include/Emulator/Graphics/AttachmentResolutionCohort.h

@@ -13,7 +13,9 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Graphics/ShaderResolutionUsageCache.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Profiler.h"
 
 
@@ -36,6 +38,8 @@
 KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>(Kyty::Libs::Graphics::ShaderInstructionType::ZMax));
 
 namespace Kyty::Libs::Graphics {
+
+static ShaderResolutionUsageCache g_shader_resolution_usage_cache(512);
 
 static void RecordShaderInputAnalysis(uint64_t elapsed_ns)
 {
@@ -2522,7 +2526,21 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	{
 		EXIT_NOT_IMPLEMENTED(data.user_data == nullptr);
 
-		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr);
+		const auto analysis = g_shader_resolution_usage_cache.GetOrAnalyze(
+		    {regs->ps_regs.data_addr, regs->ps_regs.chksum, kShaderTranslatorVersion},
+		    [regs]()
+		    {
+			    auto code = std::make_shared<ShaderCode>();
+			    code->SetType(ShaderType::Pixel);
+			    {
+				    DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
+				    ShaderParse(reinterpret_cast<const uint32_t*>(regs->ps_regs.data_addr), code.get());
+			    }
+			    return ShaderResolutionAnalysis {AnalyzeResolutionShaderUsage(*code), code};
+		    });
+		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
+		ps_info->image_size_query          = analysis.usage.image_size_query;
+		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr, analysis.code.get());
 	} else
 	{
 		ShaderParseUsage(regs->ps_regs.data_addr, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr);

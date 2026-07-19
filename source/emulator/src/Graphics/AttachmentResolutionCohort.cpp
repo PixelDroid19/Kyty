@@ -1,5 +1,7 @@
 #include "Emulator/Graphics/AttachmentResolutionCohort.h"
 
+#include "Emulator/Graphics/Shader.h"
+
 namespace Kyty::Libs::Graphics {
 
 namespace {
@@ -87,6 +89,17 @@ ResolutionCohortDecision EvaluateResolutionCohort(const InternalResolutionPolicy
 	decision.scale            = first.scale;
 	decision.attachment_count = input.attachment_count;
 	return decision;
+}
+
+ResolutionShaderCoordinateUsage AnalyzeResolutionShaderUsage(const ShaderCode& code)
+{
+	ResolutionShaderCoordinateUsage usage;
+	usage.integer_image_coordinates =
+	    code.HasAnyOf({ShaderInstructionType::ImageLoad, ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip});
+	// image_get_resinfo is still a structured unsupported parser opcode and has
+	// no ShaderInstructionType. A supported decoder must set this bit when that
+	// opcode is introduced; it cannot currently reach this analysis silently.
+	return usage;
 }
 
 } // namespace Kyty::Libs::Graphics
