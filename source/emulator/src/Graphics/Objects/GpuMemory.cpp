@@ -1776,10 +1776,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	if (info.check_hash)
 	{
-		auto& created = heap.objects[index];
-		bool  tracked = GpuDirtyPageTracker::Instance().Enabled();
+		auto& created  = heap.objects[index];
+		bool  tracked  = GpuDirtyPageTracker::Instance().Enabled();
+		bool  attempted = false;
 		for (int vi = 0; tracked && vi < created.block.vaddr_num; vi++)
 		{
+			attempted = true;
 			tracked = GpuDirtyPageTracker::Instance().RegisterRange(created.block.vaddr[vi], created.block.size[vi]);
 		}
 		for (int vi = 0; tracked && vi < created.block.vaddr_num; vi++)
@@ -1794,7 +1796,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				created.info.dirty_generation[vi] =
 				    GpuDirtyPageTracker::Instance().SnapshotGeneration(created.block.vaddr[vi], created.block.size[vi]);
 			}
-		} else
+		} else if (attempted)
 		{
 			for (int vi = 0; vi < created.block.vaddr_num; vi++)
 			{

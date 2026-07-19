@@ -66,9 +66,10 @@ void AtomicMax(std::atomic<uint64_t>* target, uint64_t value) noexcept
 } // namespace
 
 GpuDirtyPageTracker::GpuDirtyPageTracker(bool enabled): m_page_size(Core::VirtualMemory::GetPageSize()),
-                                           m_pages(new PageEntry[kPageTableSize]),
-                                           m_ranges(new RangeEntry[kMaxRanges]),
-                                           m_registration_mutex(new std::mutex), m_epoch(new std::atomic<uint64_t>(0)), m_enabled(enabled)
+                                           m_pages(enabled ? new PageEntry[kPageTableSize] : nullptr),
+                                           m_ranges(enabled ? new RangeEntry[kMaxRanges] : nullptr),
+                                           m_registration_mutex(enabled ? new std::mutex : nullptr),
+                                           m_epoch(enabled ? new std::atomic<uint64_t>(0) : nullptr), m_enabled(enabled)
 {
 }
 
@@ -246,6 +247,10 @@ bool GpuDirtyPageTracker::RegisterRange(uintptr_t address, size_t size) noexcept
 
 bool GpuDirtyPageTracker::UnregisterRange(uintptr_t address, size_t size) noexcept
 {
+	if (!m_enabled || m_registration_mutex == nullptr)
+	{
+		return false;
+	}
 	std::lock_guard<std::mutex> lock(*m_registration_mutex);
 	RangeEntry* range = FindRange(address, size);
 	if (range == nullptr)
@@ -484,6 +489,10 @@ bool GpuDirtyPageTracker::NotifyWrite(uintptr_t address, size_t size) noexcept
 
 uint64_t GpuDirtyPageTracker::SnapshotGeneration(uintptr_t address, size_t size) const noexcept
 {
+	if (!m_enabled || m_ranges == nullptr)
+	{
+		return 0;
+	}
 	const uintptr_t end = RangeEnd(address, size);
 	if (end == 0)
 	{
@@ -507,6 +516,10 @@ uint64_t GpuDirtyPageTracker::SnapshotGeneration(uintptr_t address, size_t size)
 
 bool GpuDirtyPageTracker::ChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept
 {
+	if (!m_enabled || m_ranges == nullptr)
+	{
+		return true;
+	}
 	const uintptr_t end = RangeEnd(address, size);
 	if (end == 0)
 	{
@@ -537,6 +550,10 @@ bool GpuDirtyPageTracker::Enabled() const noexcept
 
 GpuDirtyTrackingMode GpuDirtyPageTracker::Mode(uintptr_t address, size_t size) const noexcept
 {
+	if (!m_enabled || m_ranges == nullptr)
+	{
+		return GpuDirtyTrackingMode::HashFallback;
+	}
 	const uintptr_t end = RangeEnd(address, size);
 	if (end == 0)
 	{
