@@ -7,6 +7,7 @@
 #include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
@@ -87,6 +88,55 @@ TEST(EmulatorGraphicsState, TiledVideoOutBufferUpdateDoesNotCpuUpload)
 TEST(EmulatorGraphicsState, DisabledShaderFilterIgnoresNullAddress)
 {
 	EXPECT_FALSE(ShaderIsDisabled(0));
+}
+
+TEST(EmulatorGraphicsState, PipelineCacheAcceptsMatchingVulkanHeader)
+{
+	VkPhysicalDeviceProperties properties {};
+	properties.vendorID = 0x1234;
+	properties.deviceID = 0x5678;
+	for (uint32_t i = 0; i < VK_UUID_SIZE; i++)
+	{
+		properties.pipelineCacheUUID[i] = static_cast<uint8_t>(i + 1);
+	}
+
+	PipelineCacheHeaderV1 header {};
+	header.header_size    = sizeof(header);
+	header.header_version = VK_PIPELINE_CACHE_HEADER_VERSION_ONE;
+	header.vendor_id      = properties.vendorID;
+	header.device_id      = properties.deviceID;
+	memcpy(header.uuid, properties.pipelineCacheUUID, VK_UUID_SIZE);
+
+	EXPECT_TRUE(PipelineCacheDataMatchesDevice(&header, sizeof(header), properties));
+}
+
+TEST(EmulatorGraphicsState, PipelineCacheRejectsMalformedOrForeignData)
+{
+	VkPhysicalDeviceProperties properties {};
+	properties.vendorID = 0x1234;
+	properties.deviceID = 0x5678;
+
+	PipelineCacheHeaderV1 header {};
+	header.header_size    = sizeof(header);
+	header.header_version = VK_PIPELINE_CACHE_HEADER_VERSION_ONE;
+	header.vendor_id      = properties.vendorID;
+	header.device_id      = properties.deviceID;
+	memcpy(header.uuid, properties.pipelineCacheUUID, VK_UUID_SIZE);
+
+	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, sizeof(header) - 1, properties));
+
+	header.header_size = sizeof(header) + 1;
+	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, sizeof(header), properties));
+	header.header_size = sizeof(header);
+
+	header.header_version = VK_PIPELINE_CACHE_HEADER_VERSION_ONE + 1;
+	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, sizeof(header), properties));
+	header.header_version = VK_PIPELINE_CACHE_HEADER_VERSION_ONE;
+
+	header.device_id++;
+	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, sizeof(header), properties));
+
+	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, PipelineCacheStoreMaxBytes() + 1, properties));
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)

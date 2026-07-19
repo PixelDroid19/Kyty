@@ -31,6 +31,8 @@ target_sources(emulator PRIVATE
 	src/Agent/AgentSubsystem.cpp
 	src/Agent/AgentLifecycle.cpp
 	src/Kernel/Time.cpp
+	src/Graphics/PipelineCacheStore.cpp
+	include/Emulator/Graphics/PipelineCacheStore.h
 	src/Validation/DomainValidators.cpp
 	include/Emulator/Validation/DomainValidators.h
 	include/Emulator/Agent/EventRing.h
