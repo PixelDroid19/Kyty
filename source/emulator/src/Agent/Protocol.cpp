@@ -2,6 +2,7 @@
 
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/InternalResolutionRuntime.h"
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <cctype>
@@ -603,6 +604,61 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 	*out += "]}";
 }
 
+void AppendInternalResolutionPerformanceJson(const Libs::Graphics::InternalResolutionRuntimeSnapshot& resolution, std::string* out)
+{
+	EXIT_IF(out == nullptr);
+
+	const auto classification_name = [](Libs::Graphics::ResolutionClassification classification)
+	{
+		switch (classification)
+		{
+			case Libs::Graphics::ResolutionClassification::Scaled: return "scaled";
+			case Libs::Graphics::ResolutionClassification::Native: return "native";
+			case Libs::Graphics::ResolutionClassification::Unsupported: return "unsupported";
+		}
+		return "unknown";
+	};
+	const auto reason_name = [](Libs::Graphics::ResolutionNativeReason reason)
+	{
+		switch (reason)
+		{
+			case Libs::Graphics::ResolutionNativeReason::None: return "none";
+			case Libs::Graphics::ResolutionNativeReason::PolicyDisabled: return "policy_disabled";
+			case Libs::Graphics::ResolutionNativeReason::ResourceKind: return "resource_kind";
+			case Libs::Graphics::ResolutionNativeReason::Compressed: return "compressed";
+			case Libs::Graphics::ResolutionNativeReason::UnsupportedDimension: return "unsupported_dimension";
+			case Libs::Graphics::ResolutionNativeReason::Mipmapped: return "mipmapped";
+			case Libs::Graphics::ResolutionNativeReason::Multisampled: return "multisampled";
+			case Libs::Graphics::ResolutionNativeReason::ShaderWritable: return "shader_writable";
+			case Libs::Graphics::ResolutionNativeReason::CpuTransfer: return "cpu_transfer";
+			case Libs::Graphics::ResolutionNativeReason::AmbiguousAlias: return "ambiguous_alias";
+			case Libs::Graphics::ResolutionNativeReason::IdentityScale: return "identity_scale";
+			case Libs::Graphics::ResolutionNativeReason::InvalidExtent: return "invalid_extent";
+			case Libs::Graphics::ResolutionNativeReason::ArithmeticOverflow: return "arithmetic_overflow";
+		}
+		return "unknown";
+	};
+
+	const auto& decision = resolution.candidate_decision;
+	*out += "\"internal_resolution\":{\"target\":{\"width\":" + std::to_string(resolution.target_extent.width);
+	*out += ",\"height\":" + std::to_string(resolution.target_extent.height);
+	*out += "},\"guest_display\":{\"registered\":";
+	*out += resolution.guest_registered ? "true" : "false";
+	*out += ",\"width\":" + std::to_string(resolution.guest_display_extent.width);
+	*out += ",\"height\":" + std::to_string(resolution.guest_display_extent.height);
+	*out += "},\"candidate_host\":{\"width\":" + std::to_string(decision.host_extent.width);
+	*out += ",\"height\":" + std::to_string(decision.host_extent.height);
+	*out += "},\"scale\":{\"numerator\":" + std::to_string(decision.scale.numerator);
+	*out += ",\"denominator\":" + std::to_string(decision.scale.denominator);
+	*out += "},\"classification\":\"";
+	*out += classification_name(decision.classification);
+	*out += "\",\"native_reason\":\"";
+	*out += reason_name(decision.native_reason);
+	*out += "\",\"scaling_applied\":";
+	*out += resolution.scaling_applied ? "true" : "false";
+	*out += '}';
+}
+
 std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Core::BringUp::Diagnostics& bringup,
                                    const Loader::MissingImportDiagnostics& imports, const Loader::ModuleLoadPlanDiagnostics& load_plan)
 {
@@ -800,6 +856,8 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	    static_cast<unsigned long long>(performance.shader_translation_cache_evictions),
 	    static_cast<unsigned long long>(performance.live_objects), performance.fps, performance.frame_time_ms);
 	out += performance_json;
+	out += ',';
+	AppendInternalResolutionPerformanceJson(Libs::Graphics::InternalResolutionRuntimeGetSnapshot(), &out);
 	out += ',';
 	AppendGpuMemoryPerformanceJson(performance, &out);
 	out += '}';

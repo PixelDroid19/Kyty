@@ -10,6 +10,7 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
+#include "Emulator/Graphics/InternalResolutionRuntime.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -36,6 +37,9 @@ KYTY_SUBSYSTEM_INIT(Graphics)
 {
 	auto width  = Config::GetScreenWidth();
 	auto height = Config::GetScreenHeight();
+	const auto resolution_status = InternalResolutionRuntimeInitialize(
+	    {Config::GetInternalResolutionWidth(), Config::GetInternalResolutionHeight()});
+	EXIT_IF(resolution_status != ResolutionPolicyStatus::Success);
 
 	WindowInit(width, height);
 	VideoOut::VideoOutInit(width, height);

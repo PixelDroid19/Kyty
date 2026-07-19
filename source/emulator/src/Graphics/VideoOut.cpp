@@ -10,6 +10,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/InternalResolutionRuntime.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/Tile.h"
@@ -1003,6 +1004,9 @@ static int register_buffers_internal(VideoOutConfig* ctx, int set_id, int start_
 
 		printf("\tbuffers[%d] = %016" PRIx64 "\n", i + start_index, reinterpret_cast<uint64_t>(addresses[i]));
 	}
+
+	const auto resolution_status = Graphics::InternalResolutionRuntimeRegisterGuestDisplayExtent({width, height});
+	EXIT_IF(resolution_status != Graphics::ResolutionPolicyStatus::Success);
 
 	// Graphics::GpuMemoryDbgDump();
 

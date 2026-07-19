@@ -40,6 +40,7 @@ target_sources(emulator PRIVATE
 	src/Graphics/GpuSubmissionCoordinator.cpp
 	src/Graphics/ShaderTranslationCache.cpp
 	src/Graphics/InternalResolutionPolicy.cpp
+	src/Graphics/InternalResolutionRuntime.cpp
 	include/Emulator/Graphics/PipelineCacheStore.h
 	include/Emulator/Graphics/GpuDirtyPageTracker.h
 	include/Emulator/Graphics/CommandProcessorSubmissionSlots.h
@@ -49,6 +50,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/GpuSubmissionCoordinator.h
 	include/Emulator/Graphics/ShaderTranslationCache.h
 	include/Emulator/Graphics/InternalResolutionPolicy.h
+	include/Emulator/Graphics/InternalResolutionRuntime.h
 	src/Validation/DomainValidators.cpp
 	include/Emulator/Validation/DomainValidators.h
 	include/Emulator/Agent/EventRing.h

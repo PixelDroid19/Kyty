@@ -3,10 +3,12 @@
 ## Decision
 
 The resolution core is a capability-neutral policy, separate from Vulkan and
-from guest descriptors. `ScreenWidth` and `ScreenHeight` are the future host
-target inputs and retain their existing 1280x720 defaults. A guest display
-extent is registered independently, and guest dimensions, pitch, tiling,
-addresses, descriptors, and ABI remain unchanged.
+from guest descriptors. `InternalResolutionWidth` and
+`InternalResolutionHeight` are the future host render-target inputs and retain
+1280x720 defaults. `ScreenWidth` and `ScreenHeight` remain independent
+window/swapchain inputs. A guest display extent is registered independently,
+and guest dimensions, pitch, tiling, addresses, descriptors, and ABI remain
+unchanged.
 
 Three designs were considered:
 
@@ -31,9 +33,16 @@ buffers, shader-writable images, CPU upload/readback resources, compressed
 images, and ambiguous aliases remain native. A native-reason enum keeps this
 boundary observable and extensible.
 
-The policy does not change runtime behavior yet. Vulkan integration must:
+The strict launcher maps `KYTY_INTERNAL_RESOLUTION_WIDTH` and
+`KYTY_INTERNAL_RESOLUTION_HEIGHT` to those new configuration values. VideoOut
+records the extent only after buffer registration succeeds. Bounded agent
+telemetry reports target, guest display, candidate host extent, scale,
+classification, native reason, and `scaling_applied=false`.
 
-- construct the policy from `Config::GetScreenWidth/Height`;
+The policy does not change Vulkan behavior yet. Vulkan integration must:
+
+- consume the policy already constructed from
+  `Config::GetInternalResolutionWidth/Height`;
 - register the actual guest display extent from VideoOut evidence;
 - add host extent and scale to resource/pipeline identities without replacing
   guest extent;
