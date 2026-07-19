@@ -296,6 +296,9 @@ Recent strict bring-up (evidence-backed, focused tests where noted) includes:
   execution/memory scope and `AcquireRelease | WorkgroupMemory`; its SPIR-V
   semantics constant must be registered explicitly, and the lowering remains
   compute-only (`b4480131`).
+- Captured `ds_read2_b32` decodes its two 8-bit dword-scaled offsets while
+  keeping `vaddr` byte-addressed, and loads both values through the same
+  Workgroup storage used by `ds_write_b32` (`990b9a40`).
 - `v_cvt_i32_f32` (VOP1 `0x8` / VOP3 `0x188`); VOP1/VOP2 SDWA (encoding 249).
 - SMEM dual offset (SGPR soffset + 21-bit imm) and variable-offset
   `s_buffer_load_dword` / `x2` / `x4` with imm constants registered for SPIR-V.
@@ -305,28 +308,21 @@ Recent strict bring-up (evidence-backed, focused tests where noted) includes:
 - PS user SGPR window up to 32; CB blend1–7, BufferLoadFormatXyzw, and related
   register/shader contracts from earlier cycles.
 
-**First strict fail on current HEAD (always re-capture):**
+**First strict fail on current HEAD (always re-capture):** none observed in the
+latest Linux Release+Silent strict run through more than 2,300 presents.
+`ds_read2_b32` is implemented and covered by focused parser/SPIR-V tests.
+The next structured EXIT, host fault, or earlier regression on a fresh capture
+becomes the process frontier.
 
-`unknown ds instruction ds_read2_b32, opcode = 0x37 at addr 0x000000a0`
-
-Captured words are `d8dc0100 04000002`: compute shader, LDS (`gds=0`),
-`vaddr=v2`, `vdst=v4:v5`, `offset0=0`, and `offset1=1`. For `ds_read2_b32`,
-the two encoded offsets are dword-scaled while `vaddr` remains a byte address;
-prove the shared address calculation in a focused parser/SPIR-V test before
-implementation. The previous strict failures, `ds_write_b32` at PC `0x4c` and
-`s_barrier` at PC `0x58`, are implemented in `516934ca` and `b4480131`.
-
-The five-title strict matrix after `b4480131` preserved the interactive title
-(2,029 presents in the bounded run). Two titles still stop at `unknown prot:
-194`; another still has a later host access violation after presenting frames.
-Treat those as separate first-failure cycles; do not mix them into the open
-`ds_read2_b32` cycle.
-
-**Visual residual (not a process EXIT):** gameplay **HUD/UI can be correct while
-the world is white**. First hypothesis addressed by preserving GPU-owned RT
-layout across Update (`b86c730`). If white remains after that commit, next
-evidence targets are texture CPU reload after WriteBack invalidation, intermediate
-format-71 sampling, and clear/composite — not ThreadFlag fabrication.
+**Visual residual (current frontier, not a process EXIT):** the horizontal
+stripe corruption is absent after the GPU-owned RenderTexture layout and null
+MRT discard-tail fixes, but opaque black rectangles remain around sprite and
+prop bounds while HUD/UI and scene geometry continue drawing. The rectangles
+move with scene content, so investigate the sprite/G-buffer writer and its
+lighting consumer before VideoOut. The next discriminating evidence is a
+same-draw comparison of sampled atlas alpha, MRT3 alpha immediately after the
+writer, and the consumer threshold/output. End-of-frame RT dumps alone do not
+identify the producer. Do not invent clears, alpha tests, or ThreadFlag signals.
 
 `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms waits, no observed Set in earlier
 captures) remains a **later** suspected synchronization symptom: do not fake
@@ -407,15 +403,15 @@ CURRENT FRONTIER
   Gen5 EUD type-5; formats 14/56/71; multi-RT CB_SHADER_MASK; EXP Param5/6 +
   multi-MRT; structured SPIR-V loops; `v_cvt_i32_f32`; SDWA; SMEM dual-offset +
   variable SBuffer; image load dmask `0x1`; image_sample dmasks 0x2/0x4/0xb;
-  correctly sized compute LDS, `ds_write_b32`, Workgroup `s_barrier`; NGS2
-  extended max_voices.
-- **First strict fail (re-capture on HEAD):** `ds_read2_b32` at compute PC
-  `0xa0`, words `d8dc0100 04000002`, `vaddr=v2`, `vdst=v4:v5`,
-  `offset0=0`, `offset1=1`, `gds=0`. Implement its two dword-scaled LDS reads
-  through the same byte-addressed Workgroup storage used by `ds_write_b32`.
-- **Visual residual:** HUD/UI may work while world is white. Prefer layout /
-  texture / RT alias evidence over inventing clears or ThreadFlag. RT UNDEFINED
-  discard after SB WriteBack parent invalidation is already fixed — re-verify.
+  correctly sized compute LDS, `ds_write_b32`, `ds_read2_b32`, Workgroup
+  `s_barrier`; null MRT discard tails; NGS2 extended max_voices.
+- **First strict fail (re-capture on HEAD):** none observed through more than
+  2,300 presents in the latest Linux Release+Silent strict run. The next
+  structured EXIT or host fault is the process unit of work.
+- **Visual residual:** horizontal stripes are absent, but opaque black
+  rectangles remain around sprite/prop bounds. Capture sampled atlas alpha,
+  MRT3 alpha immediately after its writer, and consumer threshold/output for
+  the same draw before changing shader, blend, clear, or composite behavior.
 - **Later symptom only:** `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms) with no
   observed Set. Never fabricate the signal. EventFlag live-handle registry
   (garbage → ESRCH) is not Set. Trace the producer after earlier GPU/shader
@@ -428,10 +424,10 @@ gameplay scene without diagnostics or fabricated success. Process survival and
 HUD-only correctness are not playability.
 
 If dual-strict shows a process EXIT, that is first priority (GpuMemory, shader,
-format, HLE). If the process survives but the world is wrong (e.g. white world
-with working HUD), treat that as the rendering frontier: identify the first
-bad producer (RT layout, texture update after WriteBack, sample format, clear,
-composite) with capture evidence — do not paper over with permissive flags.
+format, HLE). If the process survives but the world is wrong, treat that as the
+rendering frontier: identify the first bad producer at the bound sample,
+writer MRT, or consumer/composite boundary with capture evidence — do not
+paper over it with permissive flags.
 
 `ThreadFlag` remains deferred while earlier GPU/render issues dominate:
 
