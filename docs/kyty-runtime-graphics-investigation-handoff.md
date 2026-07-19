@@ -4,8 +4,10 @@ Updated: 2026-07-18
 
 Status: the runtime advances into sustained gameplay-era presentation without
 a process-killing error. The opaque black sprite/prop rectangles are absent
-after correcting pixel-kill depth ordering. Full playability acceptance still
-requires a repeatable real-input run without diagnostic automation.
+after correcting pixel-kill depth ordering. A persistent, device-qualified
+Vulkan pipeline cache now removes most repeated driver pipeline compilation
+cost across runs. Full playability acceptance and sustained-FPS optimization
+remain open.
 
 This document intentionally excludes private workload names, identifiers,
 paths, binaries, screenshots, shader hashes, and raw logs. Keep those only in
@@ -22,7 +24,7 @@ The current graphics branch contains four isolated, tested changes:
 | `9cc21524` | Preserve discard semantics for null MRT0–3 export tails | Focused shader/SPIR-V test plus strict runtime |
 | `9b026e53` | Keep pixel-kill shaders on late Vulkan depth commit while retaining early fragment tests for opaque shaders | Red/green SPIR-V test plus gameplay-era native capture |
 
-On the exact tracked branch state, Linux Release passed 203 focused
+On the exact tracked branch state, Linux Release passed 205 focused
 GraphicsPackets/GraphicsState tests. The earlier strict Release+Silent baseline
 without `KYTY_BRINGUP_*`, automatic input, or permissive fallbacks exceeded
 2,300 presents. New gameplay-era visual captures used automatic Cross only to
@@ -55,7 +57,7 @@ _build_linux/fc_script '{kyty_run_tests()}' \
   --gtest_filter='EmulatorGraphicsPackets.*:EmulatorGraphicsState.*'
 ```
 
-The expected result at this handoff is 203 passing tests. A runtime change is
+The expected result at this handoff is 205 passing tests. A runtime change is
 accepted only when the focused tests pass and a strict re-run either preserves
 the gameplay-era checkpoint or advances the first failure.
 
@@ -67,7 +69,50 @@ the gameplay-era checkpoint or advances the first failure.
 | White or horizontally corrupted world after a valid earlier frame | RenderTexture update re-entry reset a GPU-owned tiled image to `VK_IMAGE_LAYOUT_UNDEFINED` | Preserve the current image layout on Update; use `UNDEFINED` only for initial creation or an evidenced invalidation/discard | Focused GPU memory/render-target state test |
 | Striped or missing output around multi-render-target shaders | Null MRT export tails lost their discard/no-write semantics during SPIR-V generation | Preserve null MRT0–3 tails as no-write exports instead of fabricating color output or truncating the export contract | Focused shader/SPIR-V export test |
 | Opaque black rectangles in transparent sprite or prop bounds | Kill-enabled `EarlyZThenLateZ` pixel shaders were emitted with Vulkan `EarlyFragmentTests`, allowing depth commit before `OpKill` | Omit `EarlyFragmentTests` for pixel-kill shaders so discarded fragments cannot write depth; retain it for opaque early-Z shaders | Red/green SPIR-V test and native gameplay-era capture |
+| Large first-run stalls recur after restarting Kyty | `VkPipelineCache` was always created empty and never persisted | Validate the standard cache header against vendor/device/UUID, load compatible bounded data, and save dirty cache data atomically at a rate limit | Header tests plus isolated cold/warm driver measurements |
 | Scene reached only with automatic Cross input | Input automation bypasses the real press/release acceptance contract | Do not change graphics or synthesize completion. Re-run with real keyboard/controller edges and treat inability to reach gameplay as a separate input/synchronization frontier | Pending real-input acceptance |
+
+### Pipeline compilation hitches across restarts
+
+Kyty previously passed an empty `VkPipelineCache` to every graphics and compute
+pipeline creation. A process restart therefore discarded the opaque driver
+cache even when guest shader and render state were unchanged.
+
+The cache store now:
+
+- uses `KYTY_VULKAN_PIPELINE_CACHE` when an explicit test location is needed,
+  otherwise a per-user cache directory;
+- includes the Vulkan vendor ID, device ID, and pipeline-cache UUID in the
+  default filename;
+- accepts at most 64 MiB and validates the standard version-one header before
+  passing bytes to Vulkan;
+- retries with an empty cache if a driver rejects otherwise compatible data;
+- writes a sibling temporary file and replaces the destination;
+- saves after the first new pipeline and consolidates later dirty data at most
+  once every five seconds.
+
+With Mesa's independent shader cache disabled to isolate this path, a bounded
+cold run spent 268 ms in 87 `vkCreate*Pipelines` calls (maximum 25 ms). The
+equivalent warm run spent 6 ms in 84 calls (maximum 6 ms), a 97.8% reduction
+in the measured driver-pipeline stage. Cache snapshots were approximately
+0.6 MiB and took about 1–2 ms each.
+
+This does **not** prove that every pipeline miss is cheap: guest shader parsing,
+SPIR-V generation/optimization, and application pipeline lookup occur outside
+`vkCreate*Pipelines`. It also does not improve the established steady-state
+gameplay rate by itself.
+
+If the cache is suspected after a driver update:
+
+1. Point `KYTY_VULKAN_PIPELINE_CACHE` at a new empty path for one run.
+2. Confirm the new file has a nonzero size and a second run still reaches the
+   same strict frontier.
+3. Compare Release+Silent runs with the same resolution and shader-cache state.
+4. If a file is stale, remove only that cache file. Do not disable validation,
+   invent a pipeline, or substitute a placeholder shader.
+
+Malformed, foreign-device, oversized, and unreadable files are ignored; cache
+I/O failure is a performance miss, not a guest-visible semantic fallback.
 
 ### Unknown `ds_read2_b32`
 
@@ -166,6 +211,16 @@ as opaque rectangular footprints.
 The fix omits `EarlyFragmentTests` when `shader_kill_enable` is active, allowing
 Vulkan depth commit after fragment discard. Opaque shaders keep the existing
 early-fragment path.
+
+The current performance frontier is separate from graphics correctness. A
+Release+Silent gameplay sample showed roughly 6 FPS after warm-up even though
+the menu exceeded 100 FPS. Read-only probes attributed approximately
+105–122 ms/s to full-range memory hashing and 140–180 ms/s to immediate
+submit/fence waits; neither alone explains the remaining frame time. Pipeline
+miss bursts explain severe transient freezes, while persistent low FPS still
+requires producer-level work in shader reuse, GPU memory tracking, command
+submission, and resource upload. Change one contract at a time and compare
+against the same correct gameplay capture.
 
 ## Evidence and exclusions
 

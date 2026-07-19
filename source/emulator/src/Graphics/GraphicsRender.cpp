@@ -25,6 +25,7 @@
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VertexBuffer.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
@@ -37,6 +38,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -188,6 +190,7 @@ private:
 	[[nodiscard]] VulkanPipeline* Find(const Pipeline& p) const;
 
 	void DeletePipelineInternal(uint32_t id);
+	void SaveDriverCacheIfDue();
 
 	void DumpToFile(Core::File* f, const Pipeline& p);
 	void DumpPipeline(const char* action, uint32_t id);
@@ -195,6 +198,9 @@ private:
 	Vector<Pipeline> m_pipelines;
 	uint32_t         m_evict_cursor = 0;
 	Core::Mutex      m_mutex;
+	std::chrono::steady_clock::time_point m_last_driver_cache_save {};
+	bool                                  m_driver_cache_saved_once = false;
+	bool                                  m_driver_cache_dirty      = false;
 };
 
 struct VulkanDescriptorSet
@@ -1490,16 +1496,31 @@ void GraphicsRenderCreateContext()
 
 	if (ctx != nullptr && ctx->device != nullptr && ctx->pipeline_cache == nullptr)
 	{
+		VkPhysicalDeviceProperties properties {};
+		vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
+		auto initial_data = PipelineCacheStoreLoad(properties);
+
 		VkPipelineCacheCreateInfo cache_info {};
 		cache_info.sType           = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
 		cache_info.pNext             = nullptr;
 		cache_info.flags             = 0;
-		cache_info.initialDataSize   = 0;
-		cache_info.pInitialData      = nullptr;
+		cache_info.initialDataSize   = initial_data.size();
+		cache_info.pInitialData      = initial_data.empty() ? nullptr : initial_data.data();
 
-		vkCreatePipelineCache(ctx->device, &cache_info, nullptr, &ctx->pipeline_cache);
+		auto result = vkCreatePipelineCache(ctx->device, &cache_info, nullptr, &ctx->pipeline_cache);
+		if (result != VK_SUCCESS && !initial_data.empty())
+		{
+			cache_info.initialDataSize = 0;
+			cache_info.pInitialData    = nullptr;
+			result                     = vkCreatePipelineCache(ctx->device, &cache_info, nullptr, &ctx->pipeline_cache);
+		}
 
-		EXIT_NOT_IMPLEMENTED(ctx->pipeline_cache == nullptr);
+		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS || ctx->pipeline_cache == nullptr);
+
+		if (!initial_data.empty() && Config::GetPrintfDirection() != Log::Direction::Silent)
+		{
+			printf("Loaded Vulkan pipeline cache: %zu bytes\n", initial_data.size());
+		}
 	}
 }
 
@@ -2995,6 +3016,41 @@ VulkanPipeline* PipelineCache::Find(const Pipeline& p) const
 	return nullptr;
 }
 
+void PipelineCache::SaveDriverCacheIfDue()
+{
+	if (!m_driver_cache_dirty)
+	{
+		return;
+	}
+
+	auto* ctx = g_render_ctx->GetGraphicCtx();
+	if (ctx == nullptr || ctx->physical_device == nullptr || ctx->device == nullptr || ctx->pipeline_cache == nullptr)
+	{
+		return;
+	}
+
+	const auto now = std::chrono::steady_clock::now();
+	if (m_driver_cache_saved_once && now - m_last_driver_cache_save < std::chrono::seconds(5))
+	{
+		return;
+	}
+
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
+
+	size_t saved_size = 0;
+	if (PipelineCacheStoreSave(ctx->device, ctx->pipeline_cache, properties, &saved_size))
+	{
+		m_driver_cache_saved_once = true;
+		m_driver_cache_dirty      = false;
+		m_last_driver_cache_save  = now;
+		if (Config::GetPrintfDirection() != Log::Direction::Silent)
+		{
+			printf("Saved Vulkan pipeline cache: %zu bytes\n", saved_size);
+		}
+	}
+}
+
 VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
                                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology)
@@ -3116,6 +3172,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		*found->dynamic_params = *p.dynamic_params;
 		delete p.static_params;
 		delete p.dynamic_params;
+		SaveDriverCacheIfDue();
 		return found;
 	}
 
@@ -3169,6 +3226,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		}
 	}
 
+	m_driver_cache_dirty = true;
+	SaveDriverCacheIfDue();
 	return p.pipeline;
 }
 
@@ -3204,6 +3263,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 		*found->dynamic_params = *p.dynamic_params;
 		delete p.static_params;
 		delete p.dynamic_params;
+		SaveDriverCacheIfDue();
 		return found;
 	}
 
@@ -3240,6 +3300,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 		}
 	}
 
+	m_driver_cache_dirty = true;
+	SaveDriverCacheIfDue();
 	return p.pipeline;
 }
 
