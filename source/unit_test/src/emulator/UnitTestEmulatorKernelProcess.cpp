@@ -181,6 +181,72 @@ TEST(EmulatorKernelProcess, AprSubmitCommandBufferRejectsNullAndAckNonNull)
 	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(&fake_cmd, 1, &fake_cmd, 2, &fake_cmd), OK);
 }
 
+TEST(EmulatorKernelProcess, AprSubmitUsesSubmitIdentForDeferredCompletion)
+{
+	EnsureKernelProcessSubsystems();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libAmpr_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"8aI7R7WaOlc";
+	query.library              = U"Ampr";
+	query.library_version      = 1;
+	query.module               = U"Ampr";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* ctor_rec       = symbols.Find(query);
+	ASSERT_NE(ctor_rec, nullptr);
+
+	query.name            = U"o67gODLFpls";
+	const auto* event_rec = symbols.Find(query);
+	ASSERT_NE(event_rec, nullptr);
+
+	query.name            = U"baQO9ez2gL4";
+	const auto* reset_rec = symbols.Find(query);
+	ASSERT_NE(reset_rec, nullptr);
+
+	using ctor_fn_t   = uint64_t (*)(void*, void*, uint64_t);
+	using event_fn_t  = int (*)(void*, void*, uint64_t, uint64_t, uint64_t);
+	using reset_fn_t  = int (*)(void*);
+	auto* ctor        = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(ctor_rec->vaddr));
+	auto* add_event   = reinterpret_cast<event_fn_t>(static_cast<uintptr_t>(event_rec->vaddr));
+	auto* reset       = reinterpret_cast<reset_fn_t>(static_cast<uintptr_t>(reset_rec->vaddr));
+
+	alignas(8) uint8_t cmd[0x28] {};
+	alignas(8) uint8_t stream[0x80] {};
+	ASSERT_EQ(ctor(cmd, stream, sizeof(stream)), reinterpret_cast<uint64_t>(cmd));
+
+	KernelEqueue eq = nullptr;
+	ASSERT_EQ(KernelCreateEqueue(&eq, "ampr-submit-test"), OK);
+	int udata_probe = 0;
+	ASSERT_EQ(KernelAddAmprEvent(eq, 0, 0, /*ident=*/2, &udata_probe), OK);
+
+	ASSERT_EQ(add_event(cmd, eq, /*builder_ident=*/0, /*completion_token=*/0x42, /*user_data=*/0), OK);
+
+	KernelEvent ev {};
+	int         out  = 0;
+	LibKernel::KernelUseconds zero = 0;
+	EXPECT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
+
+	ASSERT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr), OK);
+	ASSERT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), OK);
+	EXPECT_EQ(out, 1);
+	EXPECT_EQ(ev.ident, static_cast<uintptr_t>(2));
+	EXPECT_EQ(ev.filter, KERNEL_EVFILT_AMPR);
+	EXPECT_EQ(ev.udata, &udata_probe);
+	EXPECT_EQ(ev.data, static_cast<intptr_t>(0x42));
+
+	ASSERT_EQ(add_event(cmd, eq, /*builder_ident=*/0, /*completion_token=*/0x43, /*user_data=*/0), OK);
+	ASSERT_EQ(reset(cmd), OK);
+	ASSERT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr), OK);
+	out = 0;
+	EXPECT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
+
+	EXPECT_EQ(KernelDeleteEqueue(eq), OK);
+}
+
 TEST(EmulatorKernelProcess, AprSubmitGetIdAndWaitRoundTrip)
 {
 	EnsureKernelProcessSubsystems();

@@ -2,6 +2,7 @@
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Errno.h"
+#include "Emulator/Libs/LibAmpr.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <ctime>
 #include <unordered_map>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -46,8 +48,22 @@ struct CommandBufferState
 	uint64_t write_offset = 0;
 };
 
+struct PendingEqueueCompletion
+{
+	LibKernel::EventQueue::KernelEqueue equeue           = nullptr;
+	uintptr_t                           ident            = 0;
+	uintptr_t                           completion_token = 0;
+};
+
 static Core::Mutex                                      g_ampr_mutex;
 static std::unordered_map<uint64_t, CommandBufferState> g_buffers;
+static std::unordered_map<uint64_t, std::vector<PendingEqueueCompletion>> g_pending_equeue_completions;
+
+static void ClearPendingEqueueCompletions(uint64_t cmd)
+{
+	Core::LockGuard lock(g_ampr_mutex);
+	g_pending_equeue_completions.erase(cmd);
+}
 
 static void WriteU64(void* p, uint64_t v)
 {
@@ -208,6 +224,7 @@ static KYTY_SYSV_ABI uint64_t CommandBufferConstructor(void* cmd_obj, void* buff
 		return 0;
 	}
 	UpdateState(cmd, buf, size, 0);
+	ClearPendingEqueueCompletions(cmd);
 	return cmd;
 }
 
@@ -243,6 +260,7 @@ static KYTY_SYSV_ABI uint64_t AprCommandBufferConstructor(void* cmd_obj, uint64_
 		return 0;
 	}
 	UpdateState(cmd, data, size, 0);
+	ClearPendingEqueueCompletions(cmd);
 	return cmd;
 }
 
@@ -258,6 +276,7 @@ static KYTY_SYSV_ABI int CommandBufferDestructor(void* cmd_obj)
 	WriteVisiblePointers(cmd, 0, 0);
 	Core::LockGuard lock(g_ampr_mutex);
 	g_buffers.erase(cmd);
+	g_pending_equeue_completions.erase(cmd);
 	return OK;
 }
 
@@ -293,6 +312,7 @@ static KYTY_SYSV_ABI int CommandBufferSetBuffer(void* cmd_obj, void* buffer, uin
 		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
 	UpdateState(cmd, buf, size, 0);
+	ClearPendingEqueueCompletions(cmd);
 	return OK;
 }
 
@@ -315,6 +335,7 @@ static KYTY_SYSV_ABI int CommandBufferReset(void* cmd_obj)
 		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
 	UpdateState(cmd, st.data, st.size, 0);
+	ClearPendingEqueueCompletions(cmd);
 	return OK;
 }
 
@@ -336,6 +357,7 @@ static KYTY_SYSV_ABI uint64_t CommandBufferClearBuffer(void* cmd_obj)
 	WriteVisiblePointers(cmd, 0, 0);
 	Core::LockGuard lock(g_ampr_mutex);
 	g_buffers.erase(cmd);
+	g_pending_equeue_completions.erase(cmd);
 	return old;
 }
 
@@ -494,9 +516,6 @@ static KYTY_SYSV_ABI int CommandBufferWriteAddressOnCompletion(void* cmd_obj, ui
 }
 
 // sceAmprCommandBufferWriteKernelEventQueueOnCompletion (o67gODLFpls)
-// Eager model (same as ReadFile / WriteAddressOnCompletion): append the record
-// and wake the Ampr equeue registration immediately. Real hardware defers this
-// until AprSubmit; sync HLE is enough while submit remains unimplemented.
 static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cmd_obj, void* equeue, uint64_t ident,
                                                                         uint64_t completion_token, uint64_t user_data)
 {
@@ -533,18 +552,60 @@ static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cm
 	}
 	else
 	{
-		printf("\t command stream too small for records (equeue wake still runs)\n");
+		printf("\t command stream too small for equeue completion record\n");
+		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
 	if (equeue != nullptr)
 	{
-		auto* eq = static_cast<LibKernel::EventQueue::KernelEqueue>(equeue);
-		const int trigger_rc =
-		    LibKernel::EventQueue::KernelTriggerEvent(eq, static_cast<uintptr_t>(ident), LibKernel::EventQueue::KERNEL_EVFILT_AMPR,
-		                                              reinterpret_cast<void*>(static_cast<uintptr_t>(completion_token)));
-		if (trigger_rc != OK && trigger_rc != LibKernel::KERNEL_ERROR_ENOENT)
+		Core::LockGuard lock(g_ampr_mutex);
+		g_pending_equeue_completions[cmd].push_back(
+		    {static_cast<LibKernel::EventQueue::KernelEqueue>(equeue), static_cast<uintptr_t>(ident),
+		     static_cast<uintptr_t>(completion_token)});
+	}
+	return OK;
+}
+
+int SubmitCommandBuffer(void* cmd_obj, uintptr_t submit_ident)
+{
+	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
+	if (cmd == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	std::vector<PendingEqueueCompletion> pending;
+	{
+		Core::LockGuard lock(g_ampr_mutex);
+		auto            it = g_pending_equeue_completions.find(cmd);
+		if (it == g_pending_equeue_completions.end())
 		{
-			return trigger_rc;
+			return OK;
+		}
+		pending = std::move(it->second);
+		g_pending_equeue_completions.erase(it);
+	}
+
+	for (size_t i = 0; i < pending.size(); i++)
+	{
+		const auto&     completion = pending[i];
+		const uintptr_t ident = completion.ident != 0 ? completion.ident : submit_ident;
+		if (ident == 0)
+		{
+			Core::LockGuard lock(g_ampr_mutex);
+			auto&           queued = g_pending_equeue_completions[cmd];
+			queued.insert(queued.begin(), pending.begin() + static_cast<ptrdiff_t>(i), pending.end());
+			return LibKernel::KERNEL_ERROR_EINVAL;
+		}
+		const int rc = LibKernel::EventQueue::KernelTriggerEvent(
+		    completion.equeue, ident, LibKernel::EventQueue::KERNEL_EVFILT_AMPR,
+		    reinterpret_cast<void*>(completion.completion_token));
+		if (rc != OK)
+		{
+			Core::LockGuard lock(g_ampr_mutex);
+			auto&           queued = g_pending_equeue_completions[cmd];
+			queued.insert(queued.begin(), pending.begin() + static_cast<ptrdiff_t>(i), pending.end());
+			return rc;
 		}
 	}
 	return OK;
