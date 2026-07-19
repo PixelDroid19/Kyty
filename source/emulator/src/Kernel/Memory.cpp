@@ -20,6 +20,8 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <cstdlib>
+#include <chrono>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -619,6 +621,7 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	PRINT_NAME();
 
 	EXIT_IF(g_flexible_memory == nullptr);
+	const bool trace_flex = std::getenv("KYTY_DEBUG_FLEX_ALLOC") != nullptr;
 
 	EXIT_NOT_IMPLEMENTED(addr_in_out == nullptr);
 	// PS5 titles pass flags such as 0x8000 (fixed-address request); accept the
@@ -650,15 +653,34 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 		default: EXIT("unknown prot: %d\n", prot);
 	}
 
-	auto in_addr  = reinterpret_cast<uint64_t>(*addr_in_out);
+	auto in_addr = reinterpret_cast<uint64_t>(*addr_in_out);
+	const auto start_us = trace_flex ? std::chrono::duration_cast<std::chrono::microseconds>(
+	                                      std::chrono::steady_clock::now().time_since_epoch()).count() : 0;
+	if (trace_flex)
+	{
+		printf("[FlexMap] request in_addr=0x%016" PRIx64 " len=%" PRIu64 " prot=0x%x flags=0x%x name=%s\n", in_addr,
+		       static_cast<uint64_t>(len), prot, flags, name);
+	}
 	auto out_addr = VirtualMemory::Alloc(in_addr, len, mode);
 	*addr_in_out  = reinterpret_cast<void*>(out_addr);
+	if (trace_flex)
+	{
+		const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+		    std::chrono::steady_clock::now().time_since_epoch()).count();
+		printf("[FlexMap] after_alloc out_addr=0x%016" PRIx64 " elapsed_us=%" PRIu64 "\n", out_addr, now_us - start_us);
+	}
 
 	if (!g_flexible_memory->Map(out_addr, len, prot, mode, gpu_mode))
 	{
 		printf(FG_RED "\t [Fail]\n" FG_DEFAULT);
 		VirtualMemory::Free(out_addr);
 		return KERNEL_ERROR_ENOMEM;
+	}
+	if (trace_flex)
+	{
+		const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+		    std::chrono::steady_clock::now().time_since_epoch()).count();
+		printf("[FlexMap] after_flex_map elapsed_us=%" PRIu64 "\n", now_us - start_us);
 	}
 
 	printf("\t in_addr  = 0x%016" PRIx64 "\n", in_addr);
@@ -675,12 +697,32 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 
 	if (gpu_mode != Graphics::GpuMemoryMode::NoAccess)
 	{
+		if (trace_flex)
+		{
+			printf("[FlexMap] calling GpuMemorySetAllocatedRange addr=0x%016" PRIx64 " size=%" PRIu64 "\n", out_addr, static_cast<uint64_t>(len));
+		}
 		Graphics::GpuMemorySetAllocatedRange(out_addr, len);
 	}
 
 	if (g_alloc_callback != nullptr)
 	{
+		if (trace_flex)
+		{
+			printf("[FlexMap] callback begin\n");
+		}
 		g_alloc_callback(out_addr, len);
+		if (trace_flex)
+		{
+			const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+			    std::chrono::steady_clock::now().time_since_epoch()).count();
+			printf("[FlexMap] callback_done elapsed_us=%" PRIu64 "\n", now_us - start_us);
+		}
+	}
+	if (trace_flex)
+	{
+		const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+		    std::chrono::steady_clock::now().time_since_epoch()).count();
+		printf("[FlexMap] done total_us=%" PRIu64 "\n", now_us - start_us);
 	}
 
 	return OK;

@@ -121,7 +121,7 @@ TEST(AgentTools, ProtocolRejectsUnknownShape)
 	Request   req {};
 	ErrorInfo error {};
 	EXPECT_FALSE(ParseRequestLine("{\"tool\":\"status\"}", &req, &error));
-	EXPECT_EQ(error.code, "invalid_args");
+	EXPECT_EQ(error.code, "malformed");
 }
 
 TEST(AgentTools, EventRingKeepsNewestAndLastError)

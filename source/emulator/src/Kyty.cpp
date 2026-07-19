@@ -357,6 +357,8 @@ KYTY_SCRIPT_FUNC(kyty_mount_func)
 
 	// validate → policy for game-run guest root (before filesystem mutation)
 	const String folder_s   = folder.ToString();
+	const auto   folder_str = folder_s.utf8_str();
+	const String point_s    = point.ToString();
 	const bool   bringup    = (std::getenv("KYTY_BRINGUP_MODE") != nullptr || std::getenv("KYTY_BRINGUP_FEATURES") != nullptr ||
 	                           std::getenv("KYTY_BRINGUP_SUBSYSTEMS") != nullptr || std::getenv("KYTY_BRINGUP_BURST_LIMIT") != nullptr ||
 	                           std::getenv("KYTY_BRINGUP_BURST_WINDOW_MS") != nullptr);
@@ -365,7 +367,7 @@ KYTY_SCRIPT_FUNC(kyty_mount_func)
 	const bool   removed_permissive_env = (std::getenv("KYTY_STUB_MISSING") != nullptr || std::getenv("KYTY_GFX_PERMISSIVE") != nullptr);
 
 	Emulator::Validation::GameRunRequest greq {};
-	greq.guest_root                     = folder_s.C_Str();
+	greq.guest_root                     = folder_str.GetData();
 	greq.bringup_env_present            = bringup;
 	greq.allow_diagnostic_override      = allow_diag;
 	greq.removed_permissive_env_present = removed_permissive_env;
@@ -375,7 +377,7 @@ KYTY_SCRIPT_FUNC(kyty_mount_func)
 		EXIT("game-run validation failed: %s (%s)\n", validated.error.reason, validated.error.code);
 	}
 
-	Libs::LibKernel::FileSystem::Mount(folder_s, point.ToString());
+	Libs::LibKernel::FileSystem::Mount(folder_s, point_s);
 
 	return 0;
 }

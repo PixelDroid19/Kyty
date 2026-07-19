@@ -185,7 +185,8 @@ bool ValidatePrimaryPath(const String& primary_host_path)
 		return false;
 	}
 	Emulator::Validation::GuestExecutableRequest greq {};
-	greq.root_path          = primary_host_path.C_Str();
+	const auto primary_path_utf8 = primary_host_path.utf8_str();
+	greq.root_path          = primary_path_utf8.GetData();
 	greq.require_eboot_name = false;
 	if (!Emulator::Validation::ValidateGuestExecutable(greq).Ok())
 	{
@@ -364,7 +365,8 @@ ModuleLoadPlan BuildPlan(const String& primary_host_path, bool discovery_enabled
 
 		// Identity validation (basename only).
 		Emulator::Validation::ModuleMetadataRequest mreq {};
-		mreq.name         = base.C_Str();
+		const auto base_utf8 = base.utf8_str();
+		mreq.name         = base_utf8.GetData();
 		const auto mod_ok = Emulator::Validation::ValidateModuleMetadata(mreq);
 		if (!mod_ok.Ok())
 		{
