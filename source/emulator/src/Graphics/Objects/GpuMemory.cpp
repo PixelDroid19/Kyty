@@ -256,6 +256,7 @@ public:
 	void* CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
 	                   int vaddr_num, const GpuObject& info);
 	void  ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type);
+	void  DeleteLabel(Label* label);
 	void  FrameDone();
 
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
@@ -2073,6 +2074,35 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 	return ret;
 }
 
+void GpuMemory::DeleteLabel(Label* label)
+{
+	EXIT_IF(label == nullptr);
+
+	Destructor destructor {};
+	bool       found = false;
+	{
+		Core::LockGuard lock(m_mutex);
+		for (int heap_id = 0; heap_id < static_cast<int>(m_heaps.Size()) && !found; heap_id++)
+		{
+			auto& heap = m_heaps[heap_id];
+			for (int object_id = 0; object_id < static_cast<int>(heap.objects.Size()); object_id++)
+			{
+				auto& object = heap.objects[object_id];
+				if (!object.free && object.info.object.type == GpuMemoryObjectType::Label && object.info.object.obj == label)
+				{
+					destructor = Free(heap_id, object_id);
+					found      = true;
+					break;
+				}
+			}
+		}
+	}
+
+	EXIT_NOT_IMPLEMENTED(!found);
+	EXIT_IF(destructor.delete_func == nullptr);
+	destructor.delete_func(nullptr, destructor.obj, &destructor.mem);
+}
+
 bool GpuMemory::FindFast(int heap_id, const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool only_first,
                          int* id)
 {
@@ -2896,6 +2926,12 @@ void GpuMemoryResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_n
 	EXIT_IF(g_gpu_memory == nullptr);
 
 	g_gpu_memory->ResetHash(vaddr, size, vaddr_num, type);
+}
+
+void GpuMemoryDeleteLabel(Label* label)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	g_gpu_memory->DeleteLabel(label);
 }
 
 void GpuMemoryDbgDump()

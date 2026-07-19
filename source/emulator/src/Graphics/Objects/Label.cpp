@@ -86,6 +86,9 @@ private:
 	// here (Label thread) so GraphicsRunCommandProcessorWait is not nested under
 	// the CommandProcessor mutex.
 	Vector<Label*> m_deferred_destroy;
+	// Tracked labels are reclaimed from GpuMemory on this thread after their
+	// callbacks finish, outside CommandProcessor and GpuMemory lock nesting.
+	Vector<Label*> m_completed_tracked;
 	// Durable WriteBack holes for fence addresses that have ever been a Label
 	// dst. Survives GpuMemory Label reclaim / delete so StorageBuffer WriteBack
 	// cannot zero guest EOP words after the Label object is gone.
@@ -229,6 +232,7 @@ void LabelManager::ThreadRun(void* data)
 
 		Vector<Label*>         deleted_labels;
 		Vector<Label*>         deferred_destroy;
+		Vector<Label*>         completed_tracked;
 		Vector<LabelCallbacks> fired_labels;
 
 		for (auto& label: manager->m_labels)
@@ -242,6 +246,9 @@ void LabelManager::ThreadRun(void* data)
 					if (label->status == LabelStatus::ActiveDeleted)
 					{
 						deleted_labels.Add(label);
+					} else
+					{
+						completed_tracked.Add(label);
 					}
 
 					label->status = LabelStatus::NotActive;
@@ -256,8 +263,13 @@ void LabelManager::ThreadRun(void* data)
 			deferred_destroy.Add(label);
 		}
 		manager->m_deferred_destroy.Clear();
+		for (auto& label: manager->m_completed_tracked)
+		{
+			completed_tracked.Add(label);
+		}
+		manager->m_completed_tracked.Clear();
 
-		if (active_count == 0 && deferred_destroy.IsEmpty())
+		if (active_count == 0 && deferred_destroy.IsEmpty() && completed_tracked.IsEmpty())
 		{
 			manager->m_cond_var.Wait(&manager->m_mutex);
 		}
@@ -280,6 +292,10 @@ void LabelManager::ThreadRun(void* data)
 		}
 
 		FireCallbacks(fired_labels);
+		for (auto& label: completed_tracked)
+		{
+			GpuMemoryDeleteLabel(label);
+		}
 
 		Core::Thread::SleepMicro(100);
 	}
@@ -288,6 +304,7 @@ void LabelManager::ThreadRun(void* data)
 void LabelManager::DrainCompleted()
 {
 	Vector<LabelCallbacks> fired_labels;
+	Vector<Label*>         completed_labels;
 
 	{
 		Core::LockGuard lock(m_mutex);
@@ -298,11 +315,21 @@ void LabelManager::DrainCompleted()
 			{
 				label->status = LabelStatus::NotActive;
 				fired_labels.Add(label->callbacks);
+				completed_labels.Add(label);
 			}
 		}
 	}
 
 	FireCallbacks(fired_labels);
+	if (!completed_labels.IsEmpty())
+	{
+		Core::LockGuard lock(m_mutex);
+		for (auto& label: completed_labels)
+		{
+			m_completed_tracked.Add(label);
+		}
+		m_cond_var.Signal();
+	}
 }
 
 void LabelManager::CompleteSubmitted(CommandProcessor* cp)
@@ -311,6 +338,7 @@ void LabelManager::CompleteSubmitted(CommandProcessor* cp)
 
 	Vector<LabelCallbacks> fired_labels;
 	Vector<Label*>         destroy_labels;
+	Vector<Label*>         completed_labels;
 
 	{
 		Core::LockGuard lock(m_mutex);
@@ -334,6 +362,9 @@ void LabelManager::CompleteSubmitted(CommandProcessor* cp)
 			if (action == LabelForceCompleteKind::FireDestroy)
 			{
 				destroy_labels.Add(label);
+			} else
+			{
+				completed_labels.Add(label);
 			}
 		}
 
@@ -352,6 +383,15 @@ void LabelManager::CompleteSubmitted(CommandProcessor* cp)
 	}
 
 	FireCallbacks(fired_labels);
+	if (!completed_labels.IsEmpty())
+	{
+		Core::LockGuard lock(m_mutex);
+		for (auto& label: completed_labels)
+		{
+			m_completed_tracked.Add(label);
+		}
+		m_cond_var.Signal();
+	}
 }
 
 void LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size)

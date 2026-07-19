@@ -13,6 +13,7 @@ namespace Kyty::Libs::Graphics {
 class CommandBuffer;
 class CommandProcessor;
 struct GraphicContext;
+struct Label;
 struct VulkanMemory;
 struct VulkanBuffer;
 struct VulkanImage;
@@ -577,6 +578,7 @@ void* GpuMemoryCreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuff
 void* GpuMemoryCreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
                             int vaddr_num, const GpuObject& info);
 void  GpuMemoryResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type);
+void  GpuMemoryDeleteLabel(Label* label);
 void  GpuMemoryDbgDump();
 void  GpuMemoryFlush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 void  GpuMemoryFlushAll(GraphicContext* ctx);
