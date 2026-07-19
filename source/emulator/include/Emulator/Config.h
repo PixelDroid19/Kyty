@@ -46,6 +46,8 @@ void SetNextGen(bool mode);
 bool     IsInitialized();
 uint32_t GetScreenWidth();
 uint32_t GetScreenHeight();
+uint32_t GetInternalResolutionWidth();
+uint32_t GetInternalResolutionHeight();
 bool     IsNeo();
 bool     IsNextGen();
 bool     VulkanValidationEnabled();

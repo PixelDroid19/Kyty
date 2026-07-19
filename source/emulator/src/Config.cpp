@@ -12,6 +12,8 @@ struct Config
 {
 	uint32_t               screen_width                = 1280;
 	uint32_t               screen_height               = 720;
+	uint32_t               internal_resolution_width   = 1280;
+	uint32_t               internal_resolution_height  = 720;
 	bool                   neo                         = true;
 	bool                   next_gen                    = false;
 	bool                   vulkan_validation_enabled   = false;
@@ -89,6 +91,8 @@ void Load(const Scripts::ScriptVar& cfg)
 {
 	LoadInt(g_config->screen_width, cfg, U"ScreenWidth");
 	LoadInt(g_config->screen_height, cfg, U"ScreenHeight");
+	LoadInt(g_config->internal_resolution_width, cfg, U"InternalResolutionWidth");
+	LoadInt(g_config->internal_resolution_height, cfg, U"InternalResolutionHeight");
 	LoadBool(g_config->neo, cfg, U"Neo");
 	LoadBool(g_config->vulkan_validation_enabled, cfg, U"VulkanValidationEnabled");
 	LoadBool(g_config->shader_validation_enabled, cfg, U"ShaderValidationEnabled");
@@ -115,6 +119,16 @@ uint32_t GetScreenWidth()
 uint32_t GetScreenHeight()
 {
 	return g_config->screen_height;
+}
+
+uint32_t GetInternalResolutionWidth()
+{
+	return g_config->internal_resolution_width;
+}
+
+uint32_t GetInternalResolutionHeight()
+{
+	return g_config->internal_resolution_height;
 }
 
 bool IsNeo()
