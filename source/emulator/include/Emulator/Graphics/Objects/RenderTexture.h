@@ -22,6 +22,13 @@ enum class RenderTextureFormat : uint64_t
 	R16G16B16A16Sfloat,
 };
 
+// GPU-owned tiled render targets without write-back never upload guest memory
+// during Update. Other variants may consume CPU data and must retain hashing.
+[[nodiscard]] inline bool RenderTextureMayCpuUploadOnUpdate(bool tiled, bool write_back)
+{
+	return !tiled || write_back;
+}
+
 class RenderTextureObject: public GpuObject
 {
 public:
@@ -43,7 +50,7 @@ public:
 		params[PARAM_NEO]        = neo ? 1 : 0;
 		params[PARAM_PITCH]      = pitch;
 		params[PARAM_WRITE_BACK] = write_back ? 1 : 0;
-		check_hash               = true;
+		check_hash               = RenderTextureMayCpuUploadOnUpdate(tiled, write_back);
 		type                     = Graphics::GpuMemoryObjectType::RenderTexture;
 	}
 

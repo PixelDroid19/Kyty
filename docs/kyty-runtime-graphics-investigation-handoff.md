@@ -114,6 +114,46 @@ If the cache is suspected after a driver update:
 Malformed, foreign-device, oversized, and unreadable files are ignored; cache
 I/O failure is a performance miss, not a guest-visible semantic fallback.
 
+### Redundant hashes on GPU-owned surfaces
+
+`GpuMemory::Update` previously hashed every `RenderTexture` and
+`VideoOutBuffer` once per submit even when the object could not upload CPU
+guest memory. Two existing contracts make those scans redundant:
+
+- a tiled `VideoOutBuffer` is GPU-owned and its update callback returns without
+  a CPU upload;
+- a tiled `RenderTexture` without write-back is GPU-owned and its update
+  callback preserves the current Vulkan layout without reading guest memory.
+
+The constructors now derive `check_hash` from the same CPU-upload eligibility
+used by their update callbacks. Linear display buffers and render targets with
+write-back retain hashing. Texture, storage, vertex, and index resources also
+retain their previous policy, so this change does not hide native guest writes
+to CPU-backed data.
+
+A 75-second Release+Silent discovery run used temporary counters around
+`calc_hash`, grouped by resource type. Across thirteen five-second reporting
+windows, `RenderTexture` and `VideoOutBuffer` produced zero hash calls after
+the change. `Texture` remained dominant: 53.831 GiB and 4043 ms total across
+those windows (the interval included loading and gameplay-era work). Individual
+active windows still approached roughly 1.0–1.6 GiB/s and 100–140 ms/s.
+
+This is a correctness-preserving removal of impossible work, not a claim that
+steady-state FPS is solved. It narrows the next memory optimization to
+CPU-backed textures. Replacing XXH64 with a faster hash can reduce cost per
+byte but still performs full scans under the global memory mutex. The
+higher-ceiling design is page-level dirty tracking with:
+
+1. fixed, async-signal-safe page metadata;
+2. all overlapping resource owners marked dirty on the first write;
+3. explicit invalidation for HLE/managed writes;
+4. preservation and restoration of the original guest protection;
+5. hash fallback whenever page watching cannot be armed.
+
+Do not restore the historical watcher directly: it locked a mutex, allocated
+containers, and invoked callbacks from the write-fault handler. Those
+operations are not signal-safe and can deadlock the emulator.
+
 ### Unknown `ds_read2_b32`
 
 Capture the instruction words and decoded fields before editing. The observed
