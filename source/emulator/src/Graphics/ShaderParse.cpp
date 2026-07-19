@@ -2407,8 +2407,9 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 	{
 		if (done != 0 && compr != 0 && en == 0x0u)
 		{
-			// Null export (no channels). MRT0 may be linked to discard→OpKill;
-			// MRT1-3 are no-ops that close the export sequence (captured MRT3).
+			// Null export (no channels). Any MRT target may terminate a discard
+			// block when preceded by exec=0; outside that pattern MRT1-3 are
+			// no-ops that close the export sequence.
 			static const ShaderInstructionFormat::Format k_null[] = {
 			    ShaderInstructionFormat::Mrt0OffOffComprVmDone,
 			    ShaderInstructionFormat::Mrt1OffOffComprVmDone,
@@ -3067,7 +3068,17 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 		case 0x34: KYTY_NI("ds_wrap_rtn_b32"); break;
 		case 0x35: KYTY_NI("ds_swizzle_b32"); break;
 		case 0x36: KYTY_NI("ds_read_b32"); break;
-		case 0x37: KYTY_NI("ds_read2_b32"); break;
+		case 0x37:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data0 != 0 || data1 != 0);
+			inst.type      = ShaderInstructionType::DsRead2B32;
+			inst.format    = ShaderInstructionFormat::Vdst2VaddrOffset01;
+			inst.dst       = operand_parse(vdst + 256);
+			inst.dst.size  = 2;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src_num   = 1;
+			inst.ds_offset = static_cast<uint16_t>((offset1 << 8u) | offset0);
+			break;
 		case 0x38: KYTY_NI("ds_read2st64_b32"); break;
 		case 0x39: KYTY_NI("ds_read_i8"); break;
 		case 0x3A: KYTY_NI("ds_read_u8"); break;

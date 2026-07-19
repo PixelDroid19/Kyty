@@ -3327,6 +3327,58 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffset)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_DsRead2B32_Vdst2VaddrOffset01)
+{
+	const auto& inst       = code.GetInstructions().At(index);
+	const auto* input_info = spirv->GetCsInputInfo();
+
+	if (input_info == nullptr || input_info->lds_dwords == 0)
+	{
+		return false;
+	}
+
+	auto address = operand_variable_to_str(inst.src[0]);
+	auto dst0    = operand_variable_to_str(inst.dst, 0);
+	auto dst1    = operand_variable_to_str(inst.dst, 1);
+
+	EXIT_NOT_IMPLEMENTED(address.type != SpirvType::Float);
+	EXIT_NOT_IMPLEMENTED(dst0.type != SpirvType::Float);
+	EXIT_NOT_IMPLEMENTED(dst1.type != SpirvType::Float);
+
+	const uint32_t offset0       = inst.ds_offset & 0xffu;
+	const uint32_t offset1       = (inst.ds_offset >> 8u) & 0xffu;
+	const auto     index_str     = String8::FromPrintf("%u", index);
+	const auto     offset0_bytes = spirv->GetConstantUint(offset0 * 4u);
+	const auto     offset1_bytes = spirv->GetConstantUint(offset1 * 4u);
+
+	// Same Workgroup byte-addressed storage as ds_write_b32; read2 offsets are
+	// dword-scaled, so convert to byte offsets before the shared >>2 index path.
+	static const char* text = R"(
+        %lds_addr_f_<index> = OpLoad %float %<address>
+        %lds_addr_u_<index> = OpBitcast %uint %lds_addr_f_<index>
+        %lds_byte_addr0_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset0>
+        %lds_index0_<index> = OpShiftRightLogical %uint %lds_byte_addr0_<index> %uint_2
+        %lds_ptr0_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index0_<index>
+        %lds_data0_u_<index> = OpLoad %uint %lds_ptr0_<index>
+        %lds_data0_f_<index> = OpBitcast %float %lds_data0_u_<index>
+               OpStore %<dst0> %lds_data0_f_<index>
+        %lds_byte_addr1_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset1>
+        %lds_index1_<index> = OpShiftRightLogical %uint %lds_byte_addr1_<index> %uint_2
+        %lds_ptr1_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index1_<index>
+        %lds_data1_u_<index> = OpLoad %uint %lds_ptr1_<index>
+        %lds_data1_f_<index> = OpBitcast %float %lds_data1_u_<index>
+               OpStore %<dst1> %lds_data1_f_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<index>", index_str)
+	                   .ReplaceStr("<address>", address.value)
+	                   .ReplaceStr("<dst0>", dst0.value)
+	                   .ReplaceStr("<dst1>", dst1.value)
+	                   .ReplaceStr("<offset0>", offset0_bytes)
+	                   .ReplaceStr("<offset1>", offset1_bytes);
+	return true;
+}
+
 static constexpr uint32_t SPIRV_SCOPE_WORKGROUP          = 2;
 static constexpr uint32_t SPIRV_ACQUIRE_RELEASE          = 0x8;
 static constexpr uint32_t SPIRV_WORKGROUP_MEMORY         = 0x100;
@@ -3348,44 +3400,48 @@ KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty)
 	return true;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt0OffOffComprVmDone)
+static uint32_t null_mrt_target(ShaderInstructionFormat::Format format)
 {
-	EXIT_NOT_IMPLEMENTED(index == 0 || index + 1 >= code.GetInstructions().Size());
-
-	const auto& prev_inst = code.GetInstructions().At(index - 1);
-	const auto& inst      = code.GetInstructions().At(index);
-	auto        block     = code.ReadBlock(prev_inst.pc);
-
-	if (!block.is_discard)
+	switch (format)
 	{
-		return false;
+		case ShaderInstructionFormat::Mrt0OffOffComprVmDone: return 0;
+		case ShaderInstructionFormat::Mrt1OffOffComprVmDone: return 1;
+		case ShaderInstructionFormat::Mrt2OffOffComprVmDone: return 2;
+		case ShaderInstructionFormat::Mrt3OffOffComprVmDone: return 3;
+		default: EXIT("not a null MRT done format");
 	}
-
-	const auto* info = spirv->GetPsInputInfo();
-
-	EXIT_NOT_IMPLEMENTED(info == nullptr || !info->ps_pixel_kill_enable);
-	EXIT_NOT_IMPLEMENTED(info->target_output_mode[0] != 4);
-
-	EXIT_NOT_IMPLEMENTED(inst.src_num > 0);
-
-	// TODO() check VSKIP
-	// TODO() check EXEC
-
-	static const char* text = R"(
-        OpKill
-)";
-
-	*dst_source += String8(text);
-
-	return true;
+	return 0;
 }
 
-// Null MRT1-3 export (en=0, done=1): no channels written. Recognized as a
-// successful no-op so the export sequence can complete.
+// Null MRT done exports are no-ops unless they form the captured discard tail:
+// exec=0; EXP MRTn null/done; endpgm. The target number does not change the
+// discard semantics.
 KYTY_RECOMPILER_FUNC(Recompile_Exp_MrtNullDone)
 {
 	const auto& inst = code.GetInstructions().At(index);
+	EXIT_NOT_IMPLEMENTED(!ShaderIsNullMrtDoneFormat(inst.format));
 	EXIT_NOT_IMPLEMENTED(inst.src_num > 0);
+
+	if (index > 0 && index + 1 < code.GetInstructions().Size())
+	{
+		const auto& prev_inst = code.GetInstructions().At(index - 1);
+		if (code.ReadBlock(prev_inst.pc).is_discard)
+		{
+			const auto* info   = spirv->GetPsInputInfo();
+			const auto  target = null_mrt_target(inst.format);
+			EXIT_NOT_IMPLEMENTED(info == nullptr || !info->ps_pixel_kill_enable);
+			EXIT_NOT_IMPLEMENTED(info->target_output_mode[target] != 4);
+			*dst_source += "        OpKill\n";
+			return true;
+		}
+	}
+
+	// MRT0 null/done has only been evidenced as a discard tail. Keep unsupported
+	// standalone MRT0 behavior strict; MRT1-3 remain captured no-op terminators.
+	if (inst.format == ShaderInstructionFormat::Mrt0OffOffComprVmDone)
+	{
+		return false;
+	}
 	return true;
 }
 
@@ -6034,7 +6090,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SEndpgm_Empty)
 	    (prev_prev_inst.type == ShaderInstructionType::SMovB64 && prev_prev_inst.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
 	     prev_prev_inst.dst.type == ShaderOperandType::ExecLo && prev_prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
 	     prev_prev_inst.src[0].constant.i == 0 && prev_inst.type == ShaderInstructionType::Exp &&
-	     prev_inst.format == ShaderInstructionFormat::Mrt0OffOffComprVmDone);
+	     ShaderIsNullMrtDoneFormat(prev_inst.format));
 
 	if (!after_kill)
 	{
@@ -8263,9 +8319,10 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_DsAppend_VdstGds,                           ShaderInstructionType::DsAppend,            ShaderInstructionFormat::VdstGds,                        {""}},
     {Recompile_DsConsume_VdstGds,                          ShaderInstructionType::DsConsume,           ShaderInstructionFormat::VdstGds,                        {""}},
     {Recompile_DsWriteB32_VaddrVdataOffset,                ShaderInstructionType::DsWriteB32,          ShaderInstructionFormat::VaddrVdataOffset,                {""}},
+    {Recompile_DsRead2B32_Vdst2VaddrOffset01,              ShaderInstructionType::DsRead2B32,          ShaderInstructionFormat::Vdst2VaddrOffset01,              {""}},
     {Recompile_SBarrier_Empty,                             ShaderInstructionType::SBarrier,             ShaderInstructionFormat::Empty,                            {""}},
 
-    {Recompile_Exp_Mrt0OffOffComprVmDone,                  ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0OffOffComprVmDone,          {""}},
+    {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0OffOffComprVmDone,          {""}},
     {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt1OffOffComprVmDone,          {""}},
     {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt2OffOffComprVmDone,          {""}},
     {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt3OffOffComprVmDone,          {""}},
@@ -8897,7 +8954,11 @@ void Spirv::WriteHeader()
 				{
 					vars.Add("%gl_FragCoord");
 				}
-				if (m_ps_input_info->ps_early_z)
+				// Guest EarlyZThenLateZ may reject occluded fragments early, but
+				// depth is committed after shader kill. Vulkan EarlyFragmentTests
+				// alone commits depth before OpKill, so use late tests for shaders
+				// that can discard.
+				if (m_ps_input_info->ps_early_z && !m_ps_input_info->ps_pixel_kill_enable)
 				{
 					execution_modes.Add("OpExecutionMode %main EarlyFragmentTests\n");
 				}
