@@ -3327,6 +3327,58 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffset)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_DsRead2B32_Vdst2VaddrOffset01)
+{
+	const auto& inst       = code.GetInstructions().At(index);
+	const auto* input_info = spirv->GetCsInputInfo();
+
+	if (input_info == nullptr || input_info->lds_dwords == 0)
+	{
+		return false;
+	}
+
+	auto address = operand_variable_to_str(inst.src[0]);
+	auto dst0    = operand_variable_to_str(inst.dst, 0);
+	auto dst1    = operand_variable_to_str(inst.dst, 1);
+
+	EXIT_NOT_IMPLEMENTED(address.type != SpirvType::Float);
+	EXIT_NOT_IMPLEMENTED(dst0.type != SpirvType::Float);
+	EXIT_NOT_IMPLEMENTED(dst1.type != SpirvType::Float);
+
+	const uint32_t offset0       = inst.ds_offset & 0xffu;
+	const uint32_t offset1       = (inst.ds_offset >> 8u) & 0xffu;
+	const auto     index_str     = String8::FromPrintf("%u", index);
+	const auto     offset0_bytes = spirv->GetConstantUint(offset0 * 4u);
+	const auto     offset1_bytes = spirv->GetConstantUint(offset1 * 4u);
+
+	// Same Workgroup byte-addressed storage as ds_write_b32; read2 offsets are
+	// dword-scaled, so convert to byte offsets before the shared >>2 index path.
+	static const char* text = R"(
+        %lds_addr_f_<index> = OpLoad %float %<address>
+        %lds_addr_u_<index> = OpBitcast %uint %lds_addr_f_<index>
+        %lds_byte_addr0_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset0>
+        %lds_index0_<index> = OpShiftRightLogical %uint %lds_byte_addr0_<index> %uint_2
+        %lds_ptr0_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index0_<index>
+        %lds_data0_u_<index> = OpLoad %uint %lds_ptr0_<index>
+        %lds_data0_f_<index> = OpBitcast %float %lds_data0_u_<index>
+               OpStore %<dst0> %lds_data0_f_<index>
+        %lds_byte_addr1_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset1>
+        %lds_index1_<index> = OpShiftRightLogical %uint %lds_byte_addr1_<index> %uint_2
+        %lds_ptr1_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index1_<index>
+        %lds_data1_u_<index> = OpLoad %uint %lds_ptr1_<index>
+        %lds_data1_f_<index> = OpBitcast %float %lds_data1_u_<index>
+               OpStore %<dst1> %lds_data1_f_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<index>", index_str)
+	                   .ReplaceStr("<address>", address.value)
+	                   .ReplaceStr("<dst0>", dst0.value)
+	                   .ReplaceStr("<dst1>", dst1.value)
+	                   .ReplaceStr("<offset0>", offset0_bytes)
+	                   .ReplaceStr("<offset1>", offset1_bytes);
+	return true;
+}
+
 static constexpr uint32_t SPIRV_SCOPE_WORKGROUP          = 2;
 static constexpr uint32_t SPIRV_ACQUIRE_RELEASE          = 0x8;
 static constexpr uint32_t SPIRV_WORKGROUP_MEMORY         = 0x100;
@@ -8263,6 +8315,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_DsAppend_VdstGds,                           ShaderInstructionType::DsAppend,            ShaderInstructionFormat::VdstGds,                        {""}},
     {Recompile_DsConsume_VdstGds,                          ShaderInstructionType::DsConsume,           ShaderInstructionFormat::VdstGds,                        {""}},
     {Recompile_DsWriteB32_VaddrVdataOffset,                ShaderInstructionType::DsWriteB32,          ShaderInstructionFormat::VaddrVdataOffset,                {""}},
+    {Recompile_DsRead2B32_Vdst2VaddrOffset01,              ShaderInstructionType::DsRead2B32,          ShaderInstructionFormat::Vdst2VaddrOffset01,              {""}},
     {Recompile_SBarrier_Empty,                             ShaderInstructionType::SBarrier,             ShaderInstructionFormat::Empty,                            {""}},
 
     {Recompile_Exp_Mrt0OffOffComprVmDone,                  ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0OffOffComprVmDone,          {""}},

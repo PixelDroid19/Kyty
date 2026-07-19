@@ -54,6 +54,7 @@ enum class ShaderInstructionType : uint32_t
 	BufferStoreFormatXyzw,
 	DsAppend,
 	DsConsume,
+	DsRead2B32,
 	DsWriteB32,
 	Exp,
 	ImageLoad,
@@ -421,6 +422,8 @@ enum Format : uint64_t
 	Vdata4VaddrSvSoffsIdxenFloat4       = FormatDefine({DA4, S0, S1A4, S2, Idxen, Float4}),
 	VdstGds                             = FormatDefine({D, Gds}),
 	VaddrVdataOffset                    = FormatDefine({S0, S1}),
+	// ds_read2_b32: vdst is a VGPR pair; offsets live in ds_offset (see field comment).
+	Vdst2VaddrOffset01                  = FormatDefine({DA2, S0}),
 	VdstSdst2Vsrc0Vsrc1                 = FormatDefine({D, D2A2, S0, S1}),
 	VdstSdst2Vsrc0Vsrc1Ssrc2A2          = FormatDefine({D, D2A2, S0, S1, S2A2}),
 	Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair       = FormatDefine({DA2, D2A2, S0, S1, S2A2}),
@@ -500,7 +503,10 @@ struct ShaderInstruction
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;
-	// DS single-address instructions add this byte offset to the byte address in src[0].
+	// DS addressing:
+	// - DsWriteB32: byte offset added to the byte address in src[0].
+	// - DsRead2B32: packed as (offset1 << 8) | offset0; each offset is dword-scaled
+	//   while src[0] remains a byte address (addr_i = vaddr + offset_i * 4).
 	uint16_t ds_offset = 0;
 };
 

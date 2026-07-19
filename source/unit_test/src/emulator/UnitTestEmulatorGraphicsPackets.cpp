@@ -2834,6 +2834,59 @@ TEST(EmulatorGraphicsPackets, Gen5DsWriteB32UsesConfiguredWorkgroupLds)
 	EXPECT_NE(ShaderGetIdCS(&regs, &input), ShaderGetIdCS(&regs, &larger_input));
 }
 
+TEST(EmulatorGraphicsPackets, Gen5DsRead2B32UsesDwordScaledWorkgroupOffsets)
+{
+	// Captured compute instruction: ds_read2_b32 v[4:5], v2 offset0:0 offset1:1
+	// words d8dc0100 04000002 — offsets are dword-scaled; vaddr stays byte-addressed.
+	const uint32_t shader[] = {0xd8dc0100u, 0x04000002u, 0xbf8a0000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::DsRead2B32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::Vdst2VaddrOffset01);
+	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.dst.register_id, 4);
+	EXPECT_EQ(instruction.dst.size, 2);
+	ASSERT_EQ(instruction.src_num, 1);
+	EXPECT_EQ(instruction.src[0].register_id, 2);
+	EXPECT_EQ(instruction.ds_offset, 0x0100u);
+	EXPECT_EQ(instruction.ds_offset & 0xffu, 0u);
+	EXPECT_EQ((instruction.ds_offset >> 8u) & 0xffu, 1u);
+	const auto& barrier = code.GetInstructions().At(1);
+	EXPECT_EQ(barrier.type, ShaderInstructionType::SBarrier);
+	EXPECT_EQ(barrier.format, ShaderInstructionFormat::Empty);
+
+	ShaderComputeInputInfo input;
+	input.threads_num[0] = 16;
+	input.threads_num[1] = 16;
+	input.threads_num[2] = 1;
+	input.lds_dwords     = ShaderComputeLdsDwords(2);
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("%lds = OpVariable %_ptr_Workgroup_lds_array_uint Workgroup"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpIAdd %uint %lds_addr_u_0 %uint_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpIAdd %uint %lds_addr_u_0 %uint_4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpShiftRightLogical %uint %lds_byte_addr0_0 %uint_2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpShiftRightLogical %uint %lds_byte_addr1_0 %uint_2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v4 %lds_data0_f_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v5 %lds_data1_f_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("unknown_uint_constant"), Core::STRING8_INVALID_INDEX);
+
+	const auto binary = ShaderRecompileCS(code, &input);
+	EXPECT_FALSE(binary.IsEmpty());
+}
 
 TEST(EmulatorGraphicsPackets, Gen5SingleComponent32BitBufferFormat)
 {
