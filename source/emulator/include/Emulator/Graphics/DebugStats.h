@@ -45,6 +45,11 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t creates      = 0;
 	uint64_t frees        = 0;
 	uint64_t flips        = 0;
+	uint64_t buffer_flushes = 0;
+	uint64_t submits        = 0;
+	uint64_t fence_waits    = 0;
+	uint64_t fence_wait_ns  = 0;
+	uint64_t fence_wait_max_ns = 0;
 	uint64_t live_objects = 0;
 	double   fps          = 0.0;
 	double   frame_time_ms = 0.0;
@@ -58,6 +63,9 @@ void DebugStatsRecordDispatch();
 void DebugStatsRecordAlloc(uint64_t bytes);
 void DebugStatsRecordFree(uint64_t bytes);
 void DebugStatsRecordFlip(double fps, double frame_time_ms);
+void DebugStatsRecordBufferFlush();
+void DebugStatsRecordSubmit();
+void DebugStatsRecordFenceWait(uint64_t elapsed_ns);
 // Call from WindowDrawBuffer with the guest display image and swapchain extent.
 void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout);
 

@@ -80,7 +80,7 @@ Do not “fix” a `125` by sleeping longer. Machine-readable example:
 | `help` / `ping` / `doctor` | Discoverability and liveness |
 | `wait-ready` | Poll until the socket accepts `ping` (boot/relaunch; default 30s) |
 | `status` / `diagnostics` | Frame/present/FPS, `phase`, `ms_since_*`, pad overlay |
-| `perf_snapshot` | Bounded draw, dispatch, flip, and GPU-object allocation counters; `--reset` advances only its measurement baseline |
+| `perf_snapshot` | Bounded draw, dispatch, flip, submit, fence-wait, and GPU-object allocation counters; `--reset` advances only its measurement baseline |
 | `events` / `last_error` / `wait_event` | Bounded structured event ring |
 | `sync-waits` | Live snapshot of opt-in blocked pthread condition waits (`KYTY_SLOT_TRACE=1`) |
 | `threads` | Live snapshot of guest pthread lifecycle state |

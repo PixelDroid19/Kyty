@@ -668,11 +668,15 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	std::snprintf(performance_json, sizeof(performance_json),
 	              ",\"performance\":{\"interval_ms\":%llu,\"draws\":%llu,\"dispatches\":%llu,"
 	              "\"alloc_bytes\":%llu,\"free_bytes\":%llu,\"creates\":%llu,\"frees\":%llu,\"flips\":%llu,"
-	              "\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f}",
+	              "\"buffer_flushes\":%llu,\"submits\":%llu,\"fence_waits\":%llu,\"fence_wait_ns\":%llu,"
+	              "\"fence_wait_max_ns\":%llu,\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f}",
 	              static_cast<unsigned long long>(performance.interval_ms), static_cast<unsigned long long>(performance.draws),
 	              static_cast<unsigned long long>(performance.dispatches), static_cast<unsigned long long>(performance.alloc_bytes),
 	              static_cast<unsigned long long>(performance.free_bytes), static_cast<unsigned long long>(performance.creates),
 	              static_cast<unsigned long long>(performance.frees), static_cast<unsigned long long>(performance.flips),
+	              static_cast<unsigned long long>(performance.buffer_flushes), static_cast<unsigned long long>(performance.submits),
+	              static_cast<unsigned long long>(performance.fence_waits), static_cast<unsigned long long>(performance.fence_wait_ns),
+	              static_cast<unsigned long long>(performance.fence_wait_max_ns),
 	              static_cast<unsigned long long>(performance.live_objects), performance.fps, performance.frame_time_ms);
 	out += performance_json;
 

@@ -143,13 +143,17 @@ std::string PerformanceResult(bool reset)
 	std::snprintf(buf, sizeof(buf),
 	              "{\"protocol_version\":%u,\"schema\":\"performance_snapshot\",\"reset\":%s,"
 	              "\"interval_ms\":%llu,\"draws\":%llu,\"dispatches\":%llu,\"alloc_bytes\":%llu,\"free_bytes\":%llu,"
-	              "\"creates\":%llu,\"frees\":%llu,\"flips\":%llu,\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f}",
+	              "\"creates\":%llu,\"frees\":%llu,\"flips\":%llu,\"buffer_flushes\":%llu,\"submits\":%llu,"
+	              "\"fence_waits\":%llu,\"fence_wait_ns\":%llu,\"fence_wait_max_ns\":%llu,"
+	              "\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f}",
 	              Kyty::Agent::kProtocolVersion, reset ? "true" : "false", static_cast<unsigned long long>(stats.interval_ms),
 	              static_cast<unsigned long long>(stats.draws), static_cast<unsigned long long>(stats.dispatches),
 	              static_cast<unsigned long long>(stats.alloc_bytes), static_cast<unsigned long long>(stats.free_bytes),
 	              static_cast<unsigned long long>(stats.creates), static_cast<unsigned long long>(stats.frees),
-	              static_cast<unsigned long long>(stats.flips), static_cast<unsigned long long>(stats.live_objects), stats.fps,
-	              stats.frame_time_ms);
+	              static_cast<unsigned long long>(stats.flips), static_cast<unsigned long long>(stats.buffer_flushes),
+	              static_cast<unsigned long long>(stats.submits), static_cast<unsigned long long>(stats.fence_waits),
+	              static_cast<unsigned long long>(stats.fence_wait_ns), static_cast<unsigned long long>(stats.fence_wait_max_ns),
+	              static_cast<unsigned long long>(stats.live_objects), stats.fps, stats.frame_time_ms);
 	return std::string(buf);
 }
 

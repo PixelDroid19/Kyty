@@ -7,6 +7,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/AsyncJob.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRender.h"
@@ -580,6 +581,7 @@ void CommandProcessor::BufferInit()
 void CommandProcessor::BufferFlush()
 {
 	Core::LockGuard lock(m_mutex);
+	DebugStatsRecordBufferFlush();
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 	EXIT_IF(m_buffer[m_current_buffer] == nullptr);
