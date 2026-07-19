@@ -58,6 +58,25 @@ enum class GpuMemoryOverlapType : uint64_t
 	Max
 };
 
+struct GpuMemoryOverlapEntry
+{
+	GpuMemoryObjectType  type     = GpuMemoryObjectType::Invalid;
+	GpuMemoryOverlapType relation = GpuMemoryOverlapType::None;
+	uint32_t             count    = 0;
+	bool                 exact    = false;
+};
+
+struct GpuMemoryOverlapSnapshot
+{
+	static constexpr uint32_t ENTRIES_MAX = 16;
+
+	GpuMemoryOverlapEntry entries[ENTRIES_MAX] {};
+	uint32_t              entry_count = 0;
+	uint32_t              total_count = 0;
+	uint32_t              exact_count = 0;
+	bool                  truncated   = false;
+};
+
 inline GpuMemoryOverlapType GpuMemoryReverseOverlap(GpuMemoryOverlapType relation)
 {
 	switch (relation)
@@ -590,6 +609,7 @@ bool  GpuMemoryCheckAccessViolation(uint64_t vaddr, uint64_t size);
 bool  GpuMemoryWatcherEnabled();
 
 Vector<GpuMemoryObject> GpuMemoryFindObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, bool exact, bool only_first);
+bool GpuMemoryQueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 
 inline bool GpuMemoryCanShareReadOnlyStorageViews(uint64_t existing_addr, uint64_t existing_size, bool existing_read_only,
                                                    uint64_t incoming_addr, uint64_t incoming_size, bool incoming_read_only)
