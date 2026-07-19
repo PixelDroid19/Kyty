@@ -35,6 +35,21 @@ struct DebugStatsSnapshot
 	uint32_t present_src_layout = 0; // VkImageLayout as uint
 };
 
+struct DebugStatsPerformanceSnapshot
+{
+	uint64_t interval_ms  = 0;
+	uint64_t draws        = 0;
+	uint64_t dispatches   = 0;
+	uint64_t alloc_bytes  = 0;
+	uint64_t free_bytes   = 0;
+	uint64_t creates      = 0;
+	uint64_t frees        = 0;
+	uint64_t flips        = 0;
+	uint64_t live_objects = 0;
+	double   fps          = 0.0;
+	double   frame_time_ms = 0.0;
+};
+
 void DebugStatsInit();
 void DebugStatsShutdown();
 
@@ -48,6 +63,10 @@ void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_
 
 // Refresh one-second rates and host CPU/RSS. Call from the window/present thread.
 DebugStatsSnapshot DebugStatsTick(double now_seconds);
+
+// Returns counters relative to an agent-owned baseline. Reset advances that
+// baseline after taking the snapshot and never mutates the overlay window.
+DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset);
 
 } // namespace Kyty::Libs::Graphics
 

@@ -8,6 +8,7 @@
 #include "Emulator/Agent/Protocol.h"
 #include "Emulator/Agent/StallWatch.h"
 #include "Emulator/Controller.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Loader/ModuleLoad.h"
@@ -57,6 +58,7 @@ std::string HelpResult()
 	              "{\"protocol_version\":%u,\"diagnostic_input\":true,\"schema\":\"agent_tools\","
 	              "\"tools\":["
 	              "{\"tool\":\"help\"},{\"tool\":\"ping\"},{\"tool\":\"status\"},{\"tool\":\"diagnostics\"},"
+	              "{\"tool\":\"perf_snapshot\",\"args\":{\"reset\":false}},"
 	              "{\"tool\":\"sync_waits\"},{\"tool\":\"threads\"},"
 	              "{\"tool\":\"events\",\"args\":{\"last\":50,\"after_seq\":0}},"
 	              "{\"tool\":\"last_error\"},"
@@ -132,6 +134,23 @@ std::string DiagnosticsResult()
 	const auto import_stats = Loader::RuntimeLinker::GetGlobalMissingImportDiagnostics();
 	const auto load_plan    = Loader::ModuleLifecycleCoordinator::GetDiagnostics();
 	return BuildDiagnosticsResult(bringup, diagnostics, import_stats, load_plan);
+}
+
+std::string PerformanceResult(bool reset)
+{
+	const auto stats = Libs::Graphics::DebugStatsGetPerformanceSnapshot(reset);
+	char       buf[512];
+	std::snprintf(buf, sizeof(buf),
+	              "{\"protocol_version\":%u,\"schema\":\"performance_snapshot\",\"reset\":%s,"
+	              "\"interval_ms\":%llu,\"draws\":%llu,\"dispatches\":%llu,\"alloc_bytes\":%llu,\"free_bytes\":%llu,"
+	              "\"creates\":%llu,\"frees\":%llu,\"flips\":%llu,\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f}",
+	              Kyty::Agent::kProtocolVersion, reset ? "true" : "false", static_cast<unsigned long long>(stats.interval_ms),
+	              static_cast<unsigned long long>(stats.draws), static_cast<unsigned long long>(stats.dispatches),
+	              static_cast<unsigned long long>(stats.alloc_bytes), static_cast<unsigned long long>(stats.free_bytes),
+	              static_cast<unsigned long long>(stats.creates), static_cast<unsigned long long>(stats.frees),
+	              static_cast<unsigned long long>(stats.flips), static_cast<unsigned long long>(stats.live_objects), stats.fps,
+	              stats.frame_time_ms);
+	return std::string(buf);
 }
 
 std::string EventsResult(uint32_t last, uint64_t after_seq)
@@ -292,6 +311,13 @@ std::string HandleStatus(const Request& req)
 std::string HandleDiagnostics(const Request& req)
 {
 	return FormatOk(req.id, DiagnosticsResult());
+}
+
+std::string HandlePerfSnapshot(const Request& req)
+{
+	bool reset = false;
+	(void)ArgsGetBool(req.args_json, "reset", &reset);
+	return FormatOk(req.id, PerformanceResult(reset));
 }
 
 std::string HandleSyncWaits(const Request& req)
@@ -795,6 +821,7 @@ std::string HandleUnknown(const Request& req)
 static constexpr HandlerEntry kHandlers[] = {
     {Tool::Help, HandleHelp},           {Tool::Ping, HandlePing},
     {Tool::Status, HandleStatus},       {Tool::Diagnostics, HandleDiagnostics},
+    {Tool::PerfSnapshot, HandlePerfSnapshot},
     {Tool::SyncWaits, HandleSyncWaits}, {Tool::Threads, HandleThreads},
     {Tool::Events, HandleEvents},       {Tool::LastError, HandleLastError},
     {Tool::Capture, HandleCapture},     {Tool::Score, HandleScore},

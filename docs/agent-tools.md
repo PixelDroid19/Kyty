@@ -12,13 +12,13 @@ Install and verify the broader agent toolkit: `INSTALL-AGENTS.md`,
 
 ## Protocol version
 
-Live wire version: **`protocol_version`: 3** (`kAgentProtocolVersion`).
+Live wire version: **`protocol_version`: 4** (`kProtocolVersion`).
 
 Every response envelope (success or error) includes the same field:
 
 ```json
-{"id":1,"ok":true,"protocol_version":3,"result":{...}}
-{"id":1,"ok":false,"protocol_version":3,"error":{"code":"malformed","message":"..."}}
+{"id":1,"ok":true,"protocol_version":4,"result":{...}}
+{"id":1,"ok":false,"protocol_version":4,"error":{"code":"malformed","message":"..."}}
 ```
 
 `help`, `ping`, `status`, `diagnostics`, and `events` result bodies also embed
@@ -49,6 +49,7 @@ runs so later diagnostics remain useful.
 kyty_agent --sock /tmp/kyty-agent.sock doctor
 kyty_agent --sock /tmp/kyty-agent.sock wait-ready --timeout-ms 30000
 kyty_agent --sock /tmp/kyty-agent.sock status
+kyty_agent --sock /tmp/kyty-agent.sock perf-snapshot --reset
 kyty_agent --sock /tmp/kyty-agent.sock wait-present --delta 20 --timeout-ms 15000
 kyty_agent --sock /tmp/kyty-agent.sock wait-phase interactive --timeout-ms 45000
 kyty_agent --sock /tmp/kyty-agent.sock capture
@@ -69,7 +70,7 @@ Stdout is one JSON object per call. Exit codes (stable):
 Do not “fix” a `125` by sleeping longer. Machine-readable example:
 
 ```json
-{"ok":false,"protocol_version":3,"error":{"code":"transport","message":"socket_not_live"}}
+{"ok":false,"protocol_version":4,"error":{"code":"transport","message":"socket_not_live"}}
 ```
 
 ## Tools
@@ -79,6 +80,7 @@ Do not “fix” a `125` by sleeping longer. Machine-readable example:
 | `help` / `ping` / `doctor` | Discoverability and liveness |
 | `wait-ready` | Poll until the socket accepts `ping` (boot/relaunch; default 30s) |
 | `status` / `diagnostics` | Frame/present/FPS, `phase`, `ms_since_*`, pad overlay |
+| `perf_snapshot` | Bounded draw, dispatch, flip, and GPU-object allocation counters; `--reset` advances only its measurement baseline |
 | `events` / `last_error` / `wait_event` | Bounded structured event ring |
 | `sync-waits` | Live snapshot of opt-in blocked pthread condition waits (`KYTY_SLOT_TRACE=1`) |
 | `threads` | Live snapshot of guest pthread lifecycle state |
@@ -110,7 +112,7 @@ kyty_agent wait-phase interactive --timeout-ms 45000
 kyty_agent capture --no-score
 ```
 
-Protocol: JSON lines, **`protocol_version` 3**. Pad tools are **diagnostic_input**
+Protocol: JSON lines, **`protocol_version` 4**. Pad tools are **diagnostic_input**
 only — not gameplay acceptance (same rule as `KYTY_AUTO_CROSS`).
 
 ### `status.frontier` (current state)
@@ -165,7 +167,7 @@ Example:
 
 ```bash
 kyty_agent events --last 50
-# {"id":…,"ok":true,"protocol_version":3,"result":{"protocol_version":3,"schema":"event_history",
+# {"id":…,"ok":true,"protocol_version":4,"result":{"protocol_version":4,"schema":"event_history",
 #  "ring":{"capacity":512,"size":…,"next_seq":…,"dropped":0,"overflowed":false},
 #  "events":[{"seq":1,"t_ms":12,"kind":"info","code":"startup_config","message":"mode=strict explicit=false"},…]}}
 ```
@@ -253,7 +255,7 @@ Example agent loop when presents advance but the frame looks wrong:
 1. Launch emulator with `KYTY_AGENT_SOCK` + `KYTY_NATIVE_CAPTURE_DIR` (no
    `KYTY_AUTO_CROSS` during gameplay verification).
 2. `kyty_agent wait-ready` (then `doctor` if needed) until ping succeeds —
-   confirm `"protocol_version":3` on every response.
+   confirm `"protocol_version":4` on every response.
 3. `status` → read `phase` **and** `frontier`. Map:
    - `frontier=launch` → boot/window path
    - `frontier=unsupported` → `events` / `last-error` / `diagnostics` BringUp

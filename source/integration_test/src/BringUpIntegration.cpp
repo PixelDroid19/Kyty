@@ -468,7 +468,7 @@ int ScenarioAgentDiagnostics()
 	const auto imports     = Loader::RuntimeLinker::GetGlobalMissingImportDiagnostics();
 	const auto load_plan   = Loader::ModuleLifecycleCoordinator::GetDiagnostics();
 	const std::string result = Kyty::Emulator::Agent::BuildDiagnosticsResult(config, diagnostics, imports, load_plan);
-	Expect(result.find("\"protocol_version\":3") != std::string::npos, "protocol version 3");
+	Expect(result.find("\"protocol_version\":4") != std::string::npos, "protocol version 4");
 	Expect(result.find("\"mode\":\"unsafe\"") != std::string::npos, "mode unsafe");
 	Expect(result.find("\"not_implemented\"") != std::string::npos, "enabled features list");
 	Expect(result.find("\"enabled_subsystems\"") != std::string::npos, "enabled subsystems field");

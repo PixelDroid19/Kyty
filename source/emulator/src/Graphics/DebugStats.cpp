@@ -5,6 +5,8 @@
 #include "Kyty/Sys/SysProcess.h"
 
 #include <atomic>
+#include <chrono>
+#include <mutex>
 
 namespace Kyty::Libs::Graphics {
 
@@ -37,6 +39,27 @@ uint64_t g_window_flips         = 0;
 
 DebugStatsSnapshot g_last_snapshot {};
 
+struct PerformanceBaseline
+{
+	uint64_t time_ms     = 0;
+	uint64_t draws       = 0;
+	uint64_t dispatches  = 0;
+	uint64_t alloc_bytes = 0;
+	uint64_t free_bytes  = 0;
+	uint64_t creates     = 0;
+	uint64_t frees       = 0;
+	uint64_t flips       = 0;
+};
+
+std::mutex          g_performance_mutex;
+PerformanceBaseline g_performance_baseline {};
+
+uint64_t SteadyMs()
+{
+	using clock = std::chrono::steady_clock;
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count());
+}
+
 } // namespace
 
 void DebugStatsInit()
@@ -59,6 +82,11 @@ void DebugStatsInit()
 	g_window_frees         = 0;
 	g_window_flips         = 0;
 	g_last_snapshot        = {};
+	{
+		std::lock_guard<std::mutex> lock(g_performance_mutex);
+		g_performance_baseline      = {};
+		g_performance_baseline.time_ms = SteadyMs();
+	}
 	SysProcessSampleReset();
 }
 
@@ -172,6 +200,43 @@ DebugStatsSnapshot DebugStatsTick(double now_seconds)
 	g_window_flips           = flips_now;
 
 	return g_last_snapshot;
+}
+
+DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
+{
+	const uint64_t now_ms       = SteadyMs();
+	const uint64_t draws        = g_draws.load(std::memory_order_relaxed);
+	const uint64_t dispatches   = g_dispatches.load(std::memory_order_relaxed);
+	const uint64_t alloc_bytes  = g_alloc_bytes.load(std::memory_order_relaxed);
+	const uint64_t free_bytes   = g_free_bytes.load(std::memory_order_relaxed);
+	const uint64_t creates      = g_create_count.load(std::memory_order_relaxed);
+	const uint64_t frees        = g_free_count.load(std::memory_order_relaxed);
+	const uint64_t flips        = g_flips.load(std::memory_order_relaxed);
+
+	std::lock_guard<std::mutex> lock(g_performance_mutex);
+	if (g_performance_baseline.time_ms == 0)
+	{
+		g_performance_baseline.time_ms = now_ms;
+	}
+
+	DebugStatsPerformanceSnapshot snapshot {};
+	snapshot.interval_ms  = now_ms - g_performance_baseline.time_ms;
+	snapshot.draws        = draws - g_performance_baseline.draws;
+	snapshot.dispatches   = dispatches - g_performance_baseline.dispatches;
+	snapshot.alloc_bytes  = alloc_bytes - g_performance_baseline.alloc_bytes;
+	snapshot.free_bytes   = free_bytes - g_performance_baseline.free_bytes;
+	snapshot.creates      = creates - g_performance_baseline.creates;
+	snapshot.frees        = frees - g_performance_baseline.frees;
+	snapshot.flips        = flips - g_performance_baseline.flips;
+	snapshot.live_objects = g_live_objects.load(std::memory_order_relaxed);
+	snapshot.fps          = g_last_fps.load(std::memory_order_relaxed);
+	snapshot.frame_time_ms = g_last_frame_ms.load(std::memory_order_relaxed);
+
+	if (reset)
+	{
+		g_performance_baseline = {now_ms, draws, dispatches, alloc_bytes, free_bytes, creates, frees, flips};
+	}
+	return snapshot;
 }
 
 } // namespace Kyty::Libs::Graphics

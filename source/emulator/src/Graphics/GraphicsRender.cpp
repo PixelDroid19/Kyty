@@ -12,6 +12,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
@@ -5934,12 +5935,16 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		case 4:
 		case 5:
 		case 6:
-		case 17: vkCmdDrawIndexed(vk_buffer, index_count, 1, 0, 0, 0); break;
+		case 17:
+			vkCmdDrawIndexed(vk_buffer, index_count, 1, 0, 0, 0);
+			DebugStatsRecordDraw();
+			break;
 		case 19:
 			EXIT_NOT_IMPLEMENTED((index_count & 0x3u) != 0);
 			for (uint32_t i = 0; i < index_count; i += 4)
 			{
 				vkCmdDrawIndexed(vk_buffer, 4, 1, i, 0, 0);
+				DebugStatsRecordDraw();
 			}
 			break;
 		default: EXIT("unknown primitive type: %u\n", ucfg->GetPrimType());
@@ -6065,16 +6070,21 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	{
 		case 4:
 		case 5:
-		case 6: vkCmdDraw(vk_buffer, index_count, 1, 0, 0); break;
+		case 6:
+			vkCmdDraw(vk_buffer, index_count, 1, 0, 0);
+			DebugStatsRecordDraw();
+			break;
 		case 17:
 			EXIT_NOT_IMPLEMENTED(!(index_count == 3 && vs_input_info.buffers_num == 0));
 			vkCmdDraw(vk_buffer, 4, 1, 0, 0);
+			DebugStatsRecordDraw();
 			break;
 		case 19:
 			EXIT_NOT_IMPLEMENTED((index_count & 0x3u) != 0);
 			for (uint32_t i = 0; i < index_count; i += 4)
 			{
 				vkCmdDraw(vk_buffer, 4, 1, i, 0);
+				DebugStatsRecordDraw();
 			}
 			break;
 		default: EXIT("unknown primitive type: %u\n", ucfg->GetPrimType());
@@ -6151,6 +6161,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute);
 
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
+	DebugStatsRecordDispatch();
 }
 
 void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value)
