@@ -85,6 +85,26 @@ TEST(EmulatorGraphicsState, TiledVideoOutBufferUpdateDoesNotCpuUpload)
 	EXPECT_TRUE(VideoOutBufferShouldCpuUploadOnUpdate(false));
 }
 
+TEST(EmulatorGraphicsState, GpuOwnedTiledRenderTextureSkipsCpuHash)
+{
+	const RenderTextureObject gpu_owned(RenderTextureFormat::R8G8B8A8Unorm, 1280, 720, true, false, 1280, false);
+	const RenderTextureObject write_back(RenderTextureFormat::R8G8B8A8Unorm, 1280, 720, true, false, 1280, true);
+	const RenderTextureObject linear(RenderTextureFormat::R8G8B8A8Unorm, 1280, 720, false, false, 1280, false);
+
+	EXPECT_FALSE(gpu_owned.check_hash);
+	EXPECT_TRUE(write_back.check_hash);
+	EXPECT_TRUE(linear.check_hash);
+}
+
+TEST(EmulatorGraphicsState, TiledVideoOutBufferSkipsCpuHash)
+{
+	const VideoOutBufferObject tiled(VideoOutBufferFormat::R8G8B8A8Srgb, 1280, 720, true, false, 1280);
+	const VideoOutBufferObject linear(VideoOutBufferFormat::R8G8B8A8Srgb, 1280, 720, false, false, 1280);
+
+	EXPECT_FALSE(tiled.check_hash);
+	EXPECT_TRUE(linear.check_hash);
+}
+
 TEST(EmulatorGraphicsState, DisabledShaderFilterIgnoresNullAddress)
 {
 	EXPECT_FALSE(ShaderIsDisabled(0));

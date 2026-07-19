@@ -45,7 +45,7 @@ public:
 		params[PARAM_TILED]  = tiled ? 1 : 0;
 		params[PARAM_NEO]    = neo ? 1 : 0;
 		params[PARAM_PITCH]  = pitch;
-		check_hash           = true;
+		check_hash           = VideoOutBufferShouldCpuUploadOnUpdate(tiled);
 		type                 = Graphics::GpuMemoryObjectType::VideoOutBuffer;
 	}
 
