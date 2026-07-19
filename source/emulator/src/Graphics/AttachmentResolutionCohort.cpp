@@ -4,11 +4,30 @@
 
 namespace Kyty::Libs::Graphics {
 
+const char* ResolutionCohortReasonName(ResolutionCohortReason reason)
+{
+	switch (reason)
+	{
+		case ResolutionCohortReason::None: return "none";
+		case ResolutionCohortReason::Empty: return "empty";
+		case ResolutionCohortReason::InvalidInput: return "invalid_input";
+		case ResolutionCohortReason::Incomplete: return "incomplete";
+		case ResolutionCohortReason::AttachmentNotScalable: return "attachment_not_scalable";
+		case ResolutionCohortReason::MismatchedGuestExtent: return "mismatched_guest_extent";
+		case ResolutionCohortReason::MismatchedHostExtent: return "mismatched_host_extent";
+		case ResolutionCohortReason::MismatchedScale: return "mismatched_scale";
+		case ResolutionCohortReason::ShaderCoordinateAccess: return "shader_coordinate_access";
+		case ResolutionCohortReason::ColorCapabilityUnsupported: return "color_capability_unsupported";
+		case ResolutionCohortReason::DepthCapabilityUnsupported: return "depth_capability_unsupported";
+	}
+	return "unknown";
+}
+
 namespace {
 
 ResolutionCohortDecision NativeDecision(ResolutionCohortReason reason, uint32_t attachment_count,
                                         ResolutionNativeReason attachment_reason = ResolutionNativeReason::None,
-                                        ResolutionExtent       guest_extent      = {})
+                                        ResolutionExtent       guest_extent      = {}, uint32_t blocking_attachment_index = UINT32_MAX)
 {
 	ResolutionCohortDecision decision;
 	decision.classification           = ResolutionClassification::Native;
@@ -17,6 +36,7 @@ ResolutionCohortDecision NativeDecision(ResolutionCohortReason reason, uint32_t 
 	decision.guest_extent             = guest_extent;
 	decision.host_extent              = guest_extent;
 	decision.attachment_count         = attachment_count;
+	decision.blocking_attachment_index = blocking_attachment_index;
 	return decision;
 }
 
@@ -50,7 +70,7 @@ ResolutionCohortDecision EvaluateResolutionCohort(const InternalResolutionPolicy
 		if (input.attachments[index].guest_extent != first_guest_extent)
 		{
 			return NativeDecision(ResolutionCohortReason::MismatchedGuestExtent, input.attachment_count, ResolutionNativeReason::None,
-			                      first_guest_extent);
+			                      first_guest_extent, index);
 		}
 	}
 
@@ -58,7 +78,7 @@ ResolutionCohortDecision EvaluateResolutionCohort(const InternalResolutionPolicy
 	if (first.classification != ResolutionClassification::Scaled)
 	{
 		return NativeDecision(ResolutionCohortReason::AttachmentNotScalable, input.attachment_count, first.native_reason,
-		                      first_guest_extent);
+		                      first_guest_extent, 0);
 	}
 
 	for (uint32_t index = 1; index < input.attachment_count; index++)
@@ -67,17 +87,17 @@ ResolutionCohortDecision EvaluateResolutionCohort(const InternalResolutionPolicy
 		if (current.classification != ResolutionClassification::Scaled)
 		{
 			return NativeDecision(ResolutionCohortReason::AttachmentNotScalable, input.attachment_count, current.native_reason,
-			                      first_guest_extent);
+			                      first_guest_extent, index);
 		}
 		if (current.host_extent != first.host_extent)
 		{
 			return NativeDecision(ResolutionCohortReason::MismatchedHostExtent, input.attachment_count, ResolutionNativeReason::None,
-			                      first_guest_extent);
+			                      first_guest_extent, index);
 		}
 		if (current.scale != first.scale)
 		{
 			return NativeDecision(ResolutionCohortReason::MismatchedScale, input.attachment_count, ResolutionNativeReason::None,
-			                      first_guest_extent);
+			                      first_guest_extent, index);
 		}
 	}
 
@@ -88,6 +108,34 @@ ResolutionCohortDecision EvaluateResolutionCohort(const InternalResolutionPolicy
 	decision.host_extent      = first.host_extent;
 	decision.scale            = first.scale;
 	decision.attachment_count = input.attachment_count;
+	return decision;
+}
+
+ResolutionCohortDecision EvaluateNativeDisplayExtentCompatibility(ResolutionExtent guest_extent,
+                                                                  ResolutionExtent registered_host_extent)
+{
+	ResolutionCohortDecision decision;
+	decision.guest_extent     = guest_extent;
+	decision.host_extent      = registered_host_extent;
+	decision.scale            = {1, 1};
+	decision.attachment_count = 1;
+	if (guest_extent.width == 0 || guest_extent.height == 0 || registered_host_extent.width == 0 ||
+	    registered_host_extent.height == 0)
+	{
+		decision.classification = ResolutionClassification::Unsupported;
+		decision.reason         = ResolutionCohortReason::InvalidInput;
+		return decision;
+	}
+	if (registered_host_extent != guest_extent)
+	{
+		decision.classification            = ResolutionClassification::Unsupported;
+		decision.reason                    = ResolutionCohortReason::MismatchedHostExtent;
+		decision.blocking_attachment_index = 0;
+		return decision;
+	}
+
+	decision.classification = ResolutionClassification::Native;
+	decision.reason         = ResolutionCohortReason::None;
 	return decision;
 }
 

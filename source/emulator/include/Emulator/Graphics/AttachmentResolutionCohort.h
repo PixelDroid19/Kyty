@@ -34,7 +34,11 @@ enum class ResolutionCohortReason : uint8_t
 	MismatchedHostExtent,
 	MismatchedScale,
 	ShaderCoordinateAccess,
+	ColorCapabilityUnsupported,
+	DepthCapabilityUnsupported,
 };
+
+[[nodiscard]] const char* ResolutionCohortReasonName(ResolutionCohortReason reason);
 
 struct ResolutionCohortInput
 {
@@ -53,6 +57,7 @@ struct ResolutionCohortDecision
 	ResolutionExtent         host_extent;
 	ResolutionScale          scale;
 	uint32_t                 attachment_count = 0;
+	uint32_t                 blocking_attachment_index = UINT32_MAX;
 };
 
 // A render target is scaled only when every active color/depth attachment is
@@ -60,6 +65,8 @@ struct ResolutionCohortDecision
 // independent from Vulkan object creation so incomplete cohorts cannot resize
 // a single attachment.
 [[nodiscard]] ResolutionCohortDecision EvaluateResolutionCohort(const InternalResolutionPolicy& policy, const ResolutionCohortInput& input);
+[[nodiscard]] ResolutionCohortDecision EvaluateNativeDisplayExtentCompatibility(ResolutionExtent guest_extent,
+                                                                                 ResolutionExtent registered_host_extent);
 // Only instruction-derived hazards are reported here. Fragment-coordinate use
 // comes from normalized pixel input state, and its support is set only after a
 // valid host-to-guest scale has been built.

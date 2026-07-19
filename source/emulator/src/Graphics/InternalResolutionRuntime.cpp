@@ -50,6 +50,13 @@ ResolutionPolicyStatus InternalResolutionRuntime::RegisterGuestDisplayExtent(Res
 		return status;
 	}
 
+	const bool guest_extent_changed = m_snapshot.guest_registered && guest_extent != m_snapshot.guest_display_extent;
+	if (guest_extent_changed)
+	{
+		m_selected_host_extent  = {};
+		m_display_selection_set = false;
+	}
+
 	m_snapshot.target_extent        = m_policy.GetTargetExtent();
 	m_snapshot.guest_display_extent = guest_extent;
 	m_snapshot.candidate_decision   = m_policy.Evaluate(guest_extent, DisplayCandidateInfo());

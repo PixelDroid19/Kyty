@@ -23,6 +23,17 @@ struct VideoOutFlipStatus;
 struct VideoOutVblankStatus;
 struct VideoOutBuffers;
 
+enum class VideoOutRegisteredHostExtentStatus
+{
+	Uniform,
+	Unselected,
+	NonUniform,
+	InvalidArgument,
+	NoBuffers,
+};
+
+[[nodiscard]] const char* VideoOutRegisteredHostExtentStatusName(VideoOutRegisteredHostExtentStatus status);
+
 struct VideoOutBufferImageInfo
 {
 	Graphics::VideoOutVulkanImage* image        = nullptr;
@@ -31,10 +42,12 @@ struct VideoOutBufferImageInfo
 	uint64_t                       buffer_pitch = 0;
 };
 
-void                    VideoOutInit(uint32_t width, uint32_t height);
-VideoOutBufferImageInfo VideoOutGetImageMetadata(uint64_t addr);
-VideoOutBufferImageInfo VideoOutGetImage(uint64_t addr);
-void                    VideoOutWaitFlipDone(int handle, int index);
+void                               VideoOutInit(uint32_t width, uint32_t height);
+VideoOutBufferImageInfo            VideoOutGetImageMetadata(uint64_t addr);
+VideoOutBufferImageInfo            VideoOutGetImage(uint64_t addr);
+VideoOutRegisteredHostExtentStatus VideoOutGetRegisteredHostExtent(uint32_t guest_width, uint32_t guest_height, uint32_t* host_width,
+                                                                   uint32_t* host_height);
+void                               VideoOutWaitFlipDone(int handle, int index);
 
 // Pure helper: map handle 0 to the sole opened slot when exactly one port is
 // open (Gen5 WaitUntilSafe encodes handle 0 while Open returns 1). Non-zero
@@ -59,9 +72,9 @@ KYTY_SYSV_ABI int  VideoOutRegisterBuffers2(int handle, int set_index, int buffe
 KYTY_SYSV_ABI int  VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg);
 KYTY_SYSV_ABI int  VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status);
 // Returns flipPendingNum for Gen5 waiters (NID zgXifHT9ErY).
-KYTY_SYSV_ABI int  VideoOutIsFlipPending(int handle);
-KYTY_SYSV_ABI int  VideoOutGetVblankStatus(int handle, VideoOutVblankStatus* status);
-KYTY_SYSV_ABI int  VideoOutSetWindowModeMargins(int handle, int top, int bottom);
+KYTY_SYSV_ABI int VideoOutIsFlipPending(int handle);
+KYTY_SYSV_ABI int VideoOutGetVblankStatus(int handle, VideoOutVblankStatus* status);
+KYTY_SYSV_ABI int VideoOutSetWindowModeMargins(int handle, int top, int bottom);
 // Gen5 color / output status (success HLE; no fabricated display modes).
 struct VideoOutOutputStatus;
 struct VideoOutColorSettings;

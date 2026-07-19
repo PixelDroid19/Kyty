@@ -43,6 +43,9 @@ target_sources(emulator PRIVATE
 	src/Graphics/InternalResolutionPolicy.cpp
 	src/Graphics/InternalResolutionRuntime.cpp
 	src/Graphics/AttachmentResolutionCohort.cpp
+	src/Graphics/ResolutionAliasPolicy.cpp
+	src/Graphics/VideoOutFlipLifecycleGate.cpp
+	src/Graphics/VideoOutMaterializationGate.cpp
 	src/Graphics/ResolutionImageCapability.cpp
 	src/Graphics/ResolutionCoordinateTransform.cpp
 	src/Graphics/VulkanResolutionCapability.cpp
@@ -59,6 +62,9 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/InternalResolutionPolicy.h
 	include/Emulator/Graphics/InternalResolutionRuntime.h
 	include/Emulator/Graphics/AttachmentResolutionCohort.h
+	include/Emulator/Graphics/ResolutionAliasPolicy.h
+	include/Emulator/Graphics/VideoOutFlipLifecycleGate.h
+	include/Emulator/Graphics/VideoOutMaterializationGate.h
 	include/Emulator/Graphics/ResolutionImageCapability.h
 	include/Emulator/Graphics/ResolutionCoordinateTransform.h
 	include/Emulator/Graphics/VulkanResolutionCapability.h

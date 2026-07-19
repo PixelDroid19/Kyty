@@ -85,7 +85,7 @@ TEST(EmulatorInternalResolutionRuntime, FirstDisplayDecisionIsStickyAcrossTheBuf
 	InternalResolutionRuntime runtime({1280, 720});
 	ASSERT_EQ(runtime.RegisterGuestDisplayExtent({3840, 2160}), ResolutionPolicyStatus::Success);
 
-	ResolutionExtent selected;
+	ResolutionExtent         selected;
 	ResolutionCohortDecision authorized;
 	authorized.classification = ResolutionClassification::Scaled;
 	authorized.guest_extent   = {3840, 2160};
@@ -140,6 +140,20 @@ TEST(EmulatorInternalResolutionRuntime, AdditionalBufferSetsKeepTheExistingStick
 	EXPECT_EQ(runtime.SelectDisplayHostExtent({3840, 2160}, {1280, 720}, &authorized, &selected),
 	          InternalResolutionDisplaySelectionStatus::StickyMismatch);
 	EXPECT_EQ(selected, (ResolutionExtent {3840, 2160}));
+}
+
+TEST(EmulatorInternalResolutionRuntime, ChangedGuestDisplayStartsANewStickySelectionEpoch)
+{
+	InternalResolutionRuntime runtime({1280, 720});
+	ASSERT_EQ(runtime.RegisterGuestDisplayExtent({3840, 2160}), ResolutionPolicyStatus::Success);
+	ResolutionExtent selected;
+	ASSERT_EQ(runtime.SelectDisplayHostExtent({3840, 2160}, {3840, 2160}, nullptr, &selected),
+	          InternalResolutionDisplaySelectionStatus::Selected);
+
+	ASSERT_EQ(runtime.RegisterGuestDisplayExtent({1920, 1080}), ResolutionPolicyStatus::Success);
+	EXPECT_EQ(runtime.SelectDisplayHostExtent({1920, 1080}, {1920, 1080}, nullptr, &selected),
+	          InternalResolutionDisplaySelectionStatus::Selected);
+	EXPECT_EQ(selected, (ResolutionExtent {1920, 1080}));
 }
 
 TEST(EmulatorInternalResolutionRuntime, DepthOnlyPrepassCanFreezeDisplayAtNativeBeforeColor)

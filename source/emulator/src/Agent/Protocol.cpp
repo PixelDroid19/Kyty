@@ -618,27 +618,6 @@ void AppendInternalResolutionPerformanceJson(const Libs::Graphics::InternalResol
 		}
 		return "unknown";
 	};
-	const auto reason_name = [](Libs::Graphics::ResolutionNativeReason reason)
-	{
-		switch (reason)
-		{
-			case Libs::Graphics::ResolutionNativeReason::None: return "none";
-			case Libs::Graphics::ResolutionNativeReason::PolicyDisabled: return "policy_disabled";
-			case Libs::Graphics::ResolutionNativeReason::ResourceKind: return "resource_kind";
-			case Libs::Graphics::ResolutionNativeReason::Compressed: return "compressed";
-			case Libs::Graphics::ResolutionNativeReason::UnsupportedDimension: return "unsupported_dimension";
-			case Libs::Graphics::ResolutionNativeReason::Mipmapped: return "mipmapped";
-			case Libs::Graphics::ResolutionNativeReason::Multisampled: return "multisampled";
-			case Libs::Graphics::ResolutionNativeReason::ShaderWritable: return "shader_writable";
-			case Libs::Graphics::ResolutionNativeReason::CpuTransfer: return "cpu_transfer";
-			case Libs::Graphics::ResolutionNativeReason::AmbiguousAlias: return "ambiguous_alias";
-			case Libs::Graphics::ResolutionNativeReason::IdentityScale: return "identity_scale";
-			case Libs::Graphics::ResolutionNativeReason::InvalidExtent: return "invalid_extent";
-			case Libs::Graphics::ResolutionNativeReason::ArithmeticOverflow: return "arithmetic_overflow";
-		}
-		return "unknown";
-	};
-
 	const auto& decision = resolution.candidate_decision;
 	*out += "\"internal_resolution\":{\"target\":{\"width\":" + std::to_string(resolution.target_extent.width);
 	*out += ",\"height\":" + std::to_string(resolution.target_extent.height);
@@ -653,7 +632,7 @@ void AppendInternalResolutionPerformanceJson(const Libs::Graphics::InternalResol
 	*out += "},\"classification\":\"";
 	*out += classification_name(decision.classification);
 	*out += "\",\"native_reason\":\"";
-	*out += reason_name(decision.native_reason);
+	*out += Libs::Graphics::ResolutionNativeReasonName(decision.native_reason);
 	*out += "\",\"scaling_applied\":";
 	*out += resolution.scaling_applied ? "true" : "false";
 	*out += '}';
