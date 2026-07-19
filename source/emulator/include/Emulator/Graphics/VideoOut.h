@@ -32,6 +32,7 @@ struct VideoOutBufferImageInfo
 };
 
 void                    VideoOutInit(uint32_t width, uint32_t height);
+VideoOutBufferImageInfo VideoOutGetImageMetadata(uint64_t addr);
 VideoOutBufferImageInfo VideoOutGetImage(uint64_t addr);
 void                    VideoOutWaitFlipDone(int handle, int index);
 

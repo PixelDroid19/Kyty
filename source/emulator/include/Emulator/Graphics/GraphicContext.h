@@ -170,6 +170,14 @@ struct VulkanImage
 struct VideoOutVulkanImage: public VulkanImage
 {
 	VideoOutVulkanImage(): VulkanImage(VulkanImageType::VideoOut) {}
+
+	// Registration owns the guest resource identity immediately, while Vulkan
+	// storage may be materialized by the first renderer/present consumer.
+	Core::Mutex materialize_mutex;
+	uint64_t    guest_vaddr = 0;
+	uint64_t    guest_pitch = 0;
+	bool        tiled       = false;
+	bool        neo         = false;
 };
 
 struct DepthStencilVulkanImage: public VulkanImage

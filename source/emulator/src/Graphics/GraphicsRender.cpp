@@ -4752,7 +4752,7 @@ static void DescribeRenderColorInfo(const HW::Context& hw, RenderColorInfo* r)
 	}
 	r->neo = rt.info.neo_mode;
 
-	auto video_image       = VideoOut::VideoOutGetImage(rt.base.addr);
+	auto video_image       = VideoOut::VideoOutGetImageMetadata(rt.base.addr);
 	bool render_to_texture = (video_image.image == nullptr);
 
 	if (render_to_texture)
@@ -4838,7 +4838,9 @@ static void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer
 	}
 	if (r->type[0] == RenderColorType::DisplayBuffer)
 	{
-		r->vulkan_buffer[0] = r->existing_video_image;
+		const auto video_image = VideoOut::VideoOutGetImage(r->base_addr[0]);
+		EXIT_NOT_IMPLEMENTED(video_image.image != r->existing_video_image);
+		r->vulkan_buffer[0] = video_image.image;
 		EXIT_NOT_IMPLEMENTED(r->vulkan_buffer[0] == nullptr);
 		return;
 	}

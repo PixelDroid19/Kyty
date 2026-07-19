@@ -32,6 +32,122 @@ static bool buffer_is_tiled(uint64_t vaddr, uint64_t size)
 	return true;
 }
 
+static void upload_guest_contents(GraphicContext* ctx, VideoOutVulkanImage* vk_obj)
+{
+	EXIT_IF(ctx == nullptr);
+	EXIT_IF(vk_obj == nullptr);
+	EXIT_IF(vk_obj->image == nullptr);
+
+	if (!VideoOutBufferShouldCpuUploadOnUpdate(vk_obj->tiled))
+	{
+		return;
+	}
+
+	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	if (vk_obj->tiled && buffer_is_tiled(vk_obj->guest_vaddr, vk_obj->guest_size))
+	{
+		EXIT_NOT_IMPLEMENTED(vk_obj->guest_extent.width != vk_obj->guest_pitch);
+		auto* temp_buf = new uint8_t[vk_obj->guest_size];
+		TileConvertTiledToLinear(temp_buf, reinterpret_cast<void*>(vk_obj->guest_vaddr), TileMode::VideoOutTiled,
+		                        vk_obj->guest_extent.width, vk_obj->guest_extent.height, vk_obj->neo);
+		UtilFillImage(ctx, vk_obj, temp_buf, vk_obj->guest_size, vk_obj->guest_pitch,
+		              static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+		delete[] temp_buf;
+	} else
+	{
+		UtilFillImage(ctx, vk_obj, reinterpret_cast<void*>(vk_obj->guest_vaddr), vk_obj->guest_size, vk_obj->guest_pitch,
+		              static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+	}
+}
+
+bool VideoOutBufferNeedsMaterialization(const VideoOutVulkanImage* image)
+{
+	return image != nullptr && image->image == nullptr;
+}
+
+void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* vk_obj)
+{
+	KYTY_PROFILER_BLOCK("VideoOutBufferObject::Materialize");
+	EXIT_IF(ctx == nullptr);
+	EXIT_IF(vk_obj == nullptr);
+
+	Core::LockGuard lock(vk_obj->materialize_mutex);
+	if (vk_obj->image != nullptr)
+	{
+		return;
+	}
+
+	VkImageCreateInfo image_info {};
+	image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	image_info.pNext         = nullptr;
+	image_info.flags         = 0;
+	image_info.imageType     = VK_IMAGE_TYPE_2D;
+	image_info.extent.width  = vk_obj->extent.width;
+	image_info.extent.height = vk_obj->extent.height;
+	image_info.extent.depth  = 1;
+	image_info.mipLevels     = 1;
+	image_info.arrayLayers   = 1;
+	image_info.format        = vk_obj->format;
+	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+	image_info.initialLayout = vk_obj->layout;
+	image_info.usage         = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+	                                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+	image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	image_info.samples     = VK_SAMPLE_COUNT_1_BIT;
+
+	vkCreateImage(ctx->device, &image_info, nullptr, &vk_obj->image);
+	EXIT_NOT_IMPLEMENTED(vk_obj->image == nullptr);
+
+	vkGetImageMemoryRequirements(ctx->device, vk_obj->image, &vk_obj->memory.requirements);
+	vk_obj->memory.property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+	EXIT_NOT_IMPLEMENTED(!VulkanAllocate(ctx, &vk_obj->memory));
+	VulkanBindImageMemory(ctx, vk_obj, &vk_obj->memory);
+
+	printf("VideoOutBufferObject::Materialize()\n");
+	printf("\t memory size = %" PRIu64 "\n", vk_obj->memory.requirements.size);
+	printf("\t width       = %" PRIu32 "\n", vk_obj->extent.width);
+	printf("\t height      = %" PRIu32 "\n", vk_obj->extent.height);
+	printf("\t guest size  = %" PRIu64 "\n", vk_obj->guest_size);
+
+	upload_guest_contents(ctx, vk_obj);
+
+	VkImageViewCreateInfo create_info {};
+	create_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	create_info.pNext                           = nullptr;
+	create_info.flags                           = 0;
+	create_info.image                           = vk_obj->image;
+	create_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+	create_info.format                          = vk_obj->format;
+	create_info.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+	create_info.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+	create_info.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+	create_info.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+	create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+	create_info.subresourceRange.baseArrayLayer = 0;
+	create_info.subresourceRange.baseMipLevel   = 0;
+	create_info.subresourceRange.layerCount     = 1;
+	create_info.subresourceRange.levelCount     = 1;
+
+	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]);
+
+	create_info.components.r = VK_COMPONENT_SWIZZLE_B;
+	create_info.components.g = VK_COMPONENT_SWIZZLE_G;
+	create_info.components.b = VK_COMPONENT_SWIZZLE_R;
+	create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_BGRA]);
+
+	create_info.components.r = VK_COMPONENT_SWIZZLE_A;
+	create_info.components.g = VK_COMPONENT_SWIZZLE_B;
+	create_info.components.b = VK_COMPONENT_SWIZZLE_G;
+	create_info.components.a = VK_COMPONENT_SWIZZLE_R;
+	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ABGR]);
+
+	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
+	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_BGRA] == nullptr);
+	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_ABGR] == nullptr);
+}
+
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("VideoOutBufferObject::update_func");
@@ -42,34 +158,12 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	EXIT_IF(vaddr == nullptr || size == nullptr || vaddr_num != 1);
 
 	auto* vk_obj = static_cast<VideoOutVulkanImage*>(obj);
-
-	bool tiled  = (params[VideoOutBufferObject::PARAM_TILED] != 0);
-	bool neo    = (params[VideoOutBufferObject::PARAM_NEO] != 0);
-	auto pitch  = params[VideoOutBufferObject::PARAM_PITCH];
-	auto width  = params[VideoOutBufferObject::PARAM_WIDTH];
-	auto height = params[VideoOutBufferObject::PARAM_HEIGHT];
-
-	// Tiled VideoOut buffers are GPU render targets. Uploading registered guest
-	// memory makes first GPU passes LOAD stale CPU contents before the renderer
-	// has produced the image. Decision is centralized for unit characterization.
-	if (!VideoOutBufferShouldCpuUploadOnUpdate(tiled))
+	Core::LockGuard lock(vk_obj->materialize_mutex);
+	vk_obj->guest_vaddr = *vaddr;
+	vk_obj->guest_size  = *size;
+	if (vk_obj->image != nullptr)
 	{
-		return;
-	}
-
-	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-	if (tiled && buffer_is_tiled(*vaddr, *size))
-	{
-		EXIT_NOT_IMPLEMENTED(width != pitch);
-		auto* temp_buf = new uint8_t[*size];
-		TileConvertTiledToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), TileMode::VideoOutTiled, width, height, neo);
-		UtilFillImage(ctx, vk_obj, temp_buf, *size, pitch, static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
-		delete[] temp_buf;
-	} else
-	{
-		UtilFillImage(ctx, vk_obj, reinterpret_cast<void*>(*vaddr), *size, pitch,
-		              static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+		upload_guest_contents(ctx, vk_obj);
 	}
 }
 
@@ -108,98 +202,18 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	}
 
 	vk_obj->SetNativeExtent(width, height);
-	vk_obj->format        = vk_format;
-	vk_obj->image         = nullptr;
-	vk_obj->layout        = VK_IMAGE_LAYOUT_UNDEFINED;
-
-	for (auto& view: vk_obj->image_view)
-	{
-		view = nullptr;
-	}
-
-	VkImageCreateInfo image_info {};
-	image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	image_info.pNext         = nullptr;
-	image_info.flags         = 0;
-	image_info.imageType     = VK_IMAGE_TYPE_2D;
-	image_info.extent.width  = vk_obj->extent.width;
-	image_info.extent.height = vk_obj->extent.height;
-	image_info.extent.depth  = 1;
-	image_info.mipLevels     = 1;
-	image_info.arrayLayers   = 1;
-	image_info.format        = vk_obj->format;
-	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-	image_info.initialLayout = vk_obj->layout;
-	image_info.usage         = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-	                                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-	image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	image_info.samples     = VK_SAMPLE_COUNT_1_BIT;
-
-	vkCreateImage(ctx->device, &image_info, nullptr, &vk_obj->image);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image == nullptr);
-
-	vkGetImageMemoryRequirements(ctx->device, vk_obj->image, &mem->requirements);
-
-	mem->property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-
-	bool allocated = VulkanAllocate(ctx, mem);
-
-	EXIT_NOT_IMPLEMENTED(!allocated);
-
-	VulkanBindImageMemory(ctx, vk_obj, mem);
-
-	vk_obj->memory = *mem;
-
-	printf("VideoOutBufferObject::Create()\n");
-	printf("\t mem->requirements.size = %" PRIu64 "\n", mem->requirements.size);
-	printf("\t width                  = %" PRIu64 "\n", width);
-	printf("\t height                 = %" PRIu64 "\n", height);
-	printf("\t size                   = %" PRIu64 "\n", *size);
-
-	// EXIT_NOT_IMPLEMENTED(mem->requirements.size > *size);
-
-	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
-
-	VkImageViewCreateInfo create_info {};
-	create_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create_info.pNext                           = nullptr;
-	create_info.flags                           = 0;
-	create_info.image                           = vk_obj->image;
-	create_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-	create_info.format                          = vk_obj->format;
-	create_info.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create_info.subresourceRange.baseArrayLayer = 0;
-	create_info.subresourceRange.baseMipLevel   = 0;
-	create_info.subresourceRange.layerCount     = 1;
-	create_info.subresourceRange.levelCount     = 1;
-
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]);
-
-	create_info.components.r = VK_COMPONENT_SWIZZLE_B;
-	create_info.components.g = VK_COMPONENT_SWIZZLE_G;
-	create_info.components.b = VK_COMPONENT_SWIZZLE_R;
-	create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_BGRA]);
-
-	create_info.components.r = VK_COMPONENT_SWIZZLE_A;
-	create_info.components.g = VK_COMPONENT_SWIZZLE_B;
-	create_info.components.b = VK_COMPONENT_SWIZZLE_G;
-	create_info.components.a = VK_COMPONENT_SWIZZLE_R;
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ABGR]);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_BGRA] == nullptr);
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_ABGR] == nullptr);
+	vk_obj->format      = vk_format;
+	vk_obj->layout      = VK_IMAGE_LAYOUT_UNDEFINED;
+	vk_obj->guest_vaddr = *vaddr;
+	vk_obj->guest_size  = *size;
+	vk_obj->guest_pitch = params[VideoOutBufferObject::PARAM_PITCH];
+	vk_obj->tiled       = params[VideoOutBufferObject::PARAM_TILED] != 0;
+	vk_obj->neo         = params[VideoOutBufferObject::PARAM_NEO] != 0;
 
 	return vk_obj;
 }
 
-static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
+static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
 {
 	KYTY_PROFILER_BLOCK("VideoOutBufferObject::delete_func");
 
@@ -207,23 +221,24 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 
 	EXIT_IF(vk_obj == nullptr);
 	EXIT_IF(ctx == nullptr);
-
-	// if (vk_obj->framebuffer != nullptr)
 	{
-		DeleteFramebuffer(vk_obj);
-	}
-
-	for (auto view: vk_obj->image_view)
-	{
-		if (view != nullptr)
+		Core::LockGuard lock(vk_obj->materialize_mutex);
+		if (vk_obj->image != nullptr)
 		{
-			vkDestroyImageView(ctx->device, view, nullptr);
+			DeleteFramebuffer(vk_obj);
+
+			for (auto view: vk_obj->image_view)
+			{
+				if (view != nullptr)
+				{
+					vkDestroyImageView(ctx->device, view, nullptr);
+				}
+			}
+
+			vkDestroyImage(ctx->device, vk_obj->image, nullptr);
+			VulkanFree(ctx, &vk_obj->memory);
 		}
 	}
-
-	vkDestroyImage(ctx->device, vk_obj->image, nullptr);
-
-	VulkanFree(ctx, mem);
 
 	delete vk_obj;
 }
