@@ -30,18 +30,23 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	EXIT_IF(ctx == nullptr);
 
 	auto pixel_format = static_cast<VkFormat>(params[DepthStencilBufferObject::PARAM_FORMAT]);
-	auto width        = params[DepthStencilBufferObject::PARAM_WIDTH];
-	auto height       = params[DepthStencilBufferObject::PARAM_HEIGHT];
+	auto guest_width  = params[DepthStencilBufferObject::PARAM_GUEST_WIDTH];
+	auto guest_height = params[DepthStencilBufferObject::PARAM_GUEST_HEIGHT];
+	auto host_width   = params[DepthStencilBufferObject::PARAM_HOST_WIDTH];
+	auto host_height  = params[DepthStencilBufferObject::PARAM_HOST_HEIGHT];
 	bool htile        = params[DepthStencilBufferObject::PARAM_HTILE] != 0;
 	bool sampled      = params[DepthStencilBufferObject::PARAM_USAGE] == 1;
 
 	EXIT_NOT_IMPLEMENTED(pixel_format == VK_FORMAT_UNDEFINED);
-	EXIT_NOT_IMPLEMENTED(width == 0);
-	EXIT_NOT_IMPLEMENTED(height == 0);
+	EXIT_NOT_IMPLEMENTED(guest_width == 0);
+	EXIT_NOT_IMPLEMENTED(guest_height == 0);
+	EXIT_NOT_IMPLEMENTED(host_width == 0);
+	EXIT_NOT_IMPLEMENTED(host_height == 0);
 
 	auto* vk_obj = new DepthStencilVulkanImage;
 
-	vk_obj->SetNativeExtent(width, height);
+	vk_obj->SetNativeExtent(guest_width, guest_height);
+	vk_obj->SetHostExtent(host_width, host_height);
 	vk_obj->format        = pixel_format;
 	vk_obj->image         = nullptr;
 	vk_obj->layout        = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -176,10 +181,11 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 
 bool DepthStencilBufferObject::Equal(const uint64_t* other) const
 {
-	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_WIDTH] == other[PARAM_WIDTH] &&
-	        params[PARAM_HEIGHT] == other[PARAM_HEIGHT] && params[PARAM_HTILE] == other[PARAM_HTILE] &&
+	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_GUEST_WIDTH] == other[PARAM_GUEST_WIDTH] &&
+	        params[PARAM_GUEST_HEIGHT] == other[PARAM_GUEST_HEIGHT] && params[PARAM_HTILE] == other[PARAM_HTILE] &&
 	        params[PARAM_NEO] == other[PARAM_NEO] && params[PARAM_USAGE] == other[PARAM_USAGE] &&
-	        params[PARAM_HTILE_ADDR] == other[PARAM_HTILE_ADDR] && params[PARAM_HTILE_SIZE] == other[PARAM_HTILE_SIZE]);
+	        params[PARAM_HTILE_ADDR] == other[PARAM_HTILE_ADDR] && params[PARAM_HTILE_SIZE] == other[PARAM_HTILE_SIZE] &&
+	        params[PARAM_HOST_WIDTH] == other[PARAM_HOST_WIDTH] && params[PARAM_HOST_HEIGHT] == other[PARAM_HOST_HEIGHT]);
 }
 
 GpuObject::create_func_t DepthStencilBufferObject::GetCreateFunc() const
