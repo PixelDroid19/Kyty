@@ -4,6 +4,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Shader.h"
@@ -373,7 +374,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			EXIT_NOT_IMPLEMENTED(tile == 9 && fmt != 56);
 			EXIT_NOT_IMPLEMENTED(fmt != 56 && fmt != 133);
 			EXIT_NOT_IMPLEMENTED(levels != 1);
-			const bool     bc1          = (fmt == 133u);
+			const bool bc1 = (fmt == 133u);
 			EXIT_NOT_IMPLEMENTED(bc1 && tile != 27);
 			const uint32_t bpp          = (bc1 ? 8u : 4u);
 			const uint32_t copy_width   = bc1 ? std::max((static_cast<uint32_t>(width) + 3u) / 4u, 1u) : static_cast<uint32_t>(width);
@@ -386,15 +387,15 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			auto*          temp_buf     = new uint8_t[linear_bytes];
 			std::memset(temp_buf, 0, static_cast<size_t>(linear_bytes));
 			{
-				auto*       d = temp_buf;
-				const auto* s = reinterpret_cast<const uint8_t*>(*vaddr);
+				const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(copy_width) * copy_height * bpp);
+				auto*                      d = temp_buf;
+				const auto*                s = reinterpret_cast<const uint8_t*>(*vaddr);
 				for (uint32_t y = 0; y < copy_height; y++)
 				{
 					for (uint32_t x = 0; x < copy_width; x++)
 					{
 						const uint64_t tiled =
-						    (tile == 9) ? TileGetStandard64KB32Offset(x, y, pitch_elems)
-						                : TileGetSw64kRxOffset(x, y, pitch_elems, bpp);
+						    (tile == 9) ? TileGetStandard64KB32Offset(x, y, pitch_elems) : TileGetSw64kRxOffset(x, y, pitch_elems, bpp);
 						const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * bpp;
 						std::memcpy(d + linear, s + tiled, bpp);
 					}

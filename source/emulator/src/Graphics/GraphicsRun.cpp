@@ -24,6 +24,7 @@
 #include "Emulator/Profiler.h"
 
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -53,6 +54,30 @@
 #define KYTY_CP_OP_PARSER(f) static uint32_t f(KYTY_CP_OP_PARSER_ARGS)
 
 namespace Kyty::Libs::Graphics {
+
+namespace {
+
+class ScopedDebugStatsTimer
+{
+public:
+	using RecordFunc = void (*)(uint64_t);
+
+	explicit ScopedDebugStatsTimer(RecordFunc record): m_record(record), m_start(std::chrono::steady_clock::now()) {}
+	~ScopedDebugStatsTimer()
+	{
+		const auto elapsed_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
+		m_record(static_cast<uint64_t>(elapsed_ns));
+	}
+
+	KYTY_CLASS_NO_COPY(ScopedDebugStatsTimer);
+
+private:
+	RecordFunc                              m_record;
+	std::chrono::steady_clock::time_point m_start;
+};
+
+} // namespace
 
 class CommandProcessor
 {
@@ -703,6 +728,7 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	EXIT_NOT_IMPLEMENTED(poll != 10);
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
 
+	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitRegMem);
 	BufferFlush();
 
 	// Unbounded polls freeze loading screens while the window still flips.
@@ -743,6 +769,7 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	// (ReleaseMem data_sel=1 + WaitRegMem size=0) or patched by the guest.
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
 
+	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitRegMem);
 	BufferFlush();
 	LabelCompleteSubmitted(this);
 
@@ -1399,6 +1426,7 @@ void CommandProcessor::ReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_si
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index)
 {
+	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitFlipDone);
 	BufferFlush();
 
 	VideoOut::VideoOutWaitFlipDone(static_cast<int>(video_out_handle), static_cast<int>(display_buffer_index));

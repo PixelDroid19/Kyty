@@ -3179,6 +3179,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	g_window_ctx->swapchain->current_index = static_cast<uint32_t>(-1);
 
+	const auto acquire_start = std::chrono::steady_clock::now();
 	auto result = vkAcquireNextImageKHR(g_window_ctx->graphic_ctx.device, g_window_ctx->swapchain->swapchain, UINT64_MAX,
 	                                    /*g_window_ctx->swapchain->present_complete_semaphore*/ nullptr,
 	                                    g_window_ctx->swapchain->present_complete_fence, &g_window_ctx->swapchain->current_index);
@@ -3212,6 +3213,9 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 
 	vkResetFences(g_window_ctx->graphic_ctx.device, 1, &g_window_ctx->swapchain->present_complete_fence);
+	const auto acquire_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - acquire_start).count();
+	DebugStatsRecordAcquire(static_cast<uint64_t>(acquire_ns));
 
 	auto* blt_src_image = image;
 	auto* blt_dst_image = g_window_ctx->swapchain;
@@ -3335,8 +3339,12 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	EXIT_IF(queue.mutex != nullptr);
 
-	result = vkQueuePresentKHR(queue.vk_queue, &present);
+	const auto present_start = std::chrono::steady_clock::now();
+	result                   = vkQueuePresentKHR(queue.vk_queue, &present);
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+	const auto present_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - present_start).count();
+	DebugStatsRecordPresent(static_cast<uint64_t>(present_ns));
 
 	g_window_ctx->native_capture.present_count++;
 	g_window_ctx->native_capture.last_present_steady_ms = WindowSteadyMs();

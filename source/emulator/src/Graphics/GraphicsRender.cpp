@@ -28,6 +28,7 @@
 #include "Emulator/Graphics/Objects/VertexBuffer.h"
 #include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
@@ -385,7 +386,7 @@ class RenderContext
 public:
 	RenderContext()
 	    : m_pipeline_cache(new PipelineCache), m_descriptor_cache(new DescriptorCache), m_framebuffer_cache(new FramebufferCache),
-	      m_sampler_cache(new SamplerCache), m_gds_buffer(new GdsBuffer)
+	      m_sampler_cache(new SamplerCache), m_shader_translation_cache(new ShaderTranslationCache(2048)), m_gds_buffer(new GdsBuffer)
 	{
 		EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
 	}
@@ -395,12 +396,13 @@ public:
 	void            SetGraphicCtx(GraphicContext* ctx) { m_graphic_ctx = ctx; }
 	GraphicContext* GetGraphicCtx() { return m_graphic_ctx; }
 
-	Core::Mutex&      GetMutex() { return m_mutex; }
-	PipelineCache*    GetPipelineCache() { return m_pipeline_cache; }
-	DescriptorCache*  GetDescriptorCache() { return m_descriptor_cache; }
-	FramebufferCache* GetFramebufferCache() { return m_framebuffer_cache; }
-	SamplerCache*     GetSamplerCache() { return m_sampler_cache; }
-	GdsBuffer*        GetGdsBuffer() { return m_gds_buffer; }
+	Core::Mutex&            GetMutex() { return m_mutex; }
+	PipelineCache*          GetPipelineCache() { return m_pipeline_cache; }
+	DescriptorCache*        GetDescriptorCache() { return m_descriptor_cache; }
+	FramebufferCache*       GetFramebufferCache() { return m_framebuffer_cache; }
+	SamplerCache*           GetSamplerCache() { return m_sampler_cache; }
+	ShaderTranslationCache* GetShaderTranslationCache() { return m_shader_translation_cache; }
+	GdsBuffer*              GetGdsBuffer() { return m_gds_buffer; }
 
 	void AddEopEq(LibKernel::EventQueue::KernelEqueue eq, int id);
 	void DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq, int id);
@@ -413,13 +415,14 @@ private:
 		int                                 id = GRAPHICS_EVENT_EOP;
 	};
 
-	Core::Mutex       m_mutex;
-	PipelineCache*    m_pipeline_cache    = nullptr;
-	DescriptorCache*  m_descriptor_cache  = nullptr;
-	FramebufferCache* m_framebuffer_cache = nullptr;
-	SamplerCache*     m_sampler_cache     = nullptr;
-	GraphicContext*   m_graphic_ctx       = nullptr;
-	GdsBuffer*        m_gds_buffer        = nullptr;
+	Core::Mutex             m_mutex;
+	PipelineCache*          m_pipeline_cache           = nullptr;
+	DescriptorCache*        m_descriptor_cache         = nullptr;
+	FramebufferCache*       m_framebuffer_cache        = nullptr;
+	SamplerCache*           m_sampler_cache            = nullptr;
+	ShaderTranslationCache* m_shader_translation_cache = nullptr;
+	GraphicContext*         m_graphic_ctx              = nullptr;
+	GdsBuffer*              m_gds_buffer               = nullptr;
 
 	Core::Mutex                m_eop_mutex;
 	Vector<EopEqRegistration>  m_eop_eqs;
@@ -2794,7 +2797,11 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	EXIT_IF(pipeline->pipeline != nullptr);
 
+	const auto vk_create_start = std::chrono::steady_clock::now();
 	vkCreateGraphicsPipelines(gctx->device, gctx->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline->pipeline);
+	const auto vk_create_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - vk_create_start).count();
+	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(vk_create_ns));
 
 	EXIT_NOT_IMPLEMENTED(pipeline->pipeline == nullptr);
 
@@ -2878,7 +2885,11 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 
 	EXIT_IF(pipeline->pipeline != nullptr);
 
+	const auto vk_create_start = std::chrono::steady_clock::now();
 	vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, &pipeline->pipeline);
+	const auto vk_create_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - vk_create_start).count();
+	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(vk_create_ns));
 
 	EXIT_NOT_IMPLEMENTED(pipeline->pipeline == nullptr);
 
@@ -3166,7 +3177,11 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	// mode here disables valid scanout and render-target draws on other modes.
 	p.dynamic_params->color_write_enable = true;
 
-	auto* found = Find(p);
+	const auto lookup_start = std::chrono::steady_clock::now();
+	auto*      found        = Find(p);
+	const auto lookup_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - lookup_start).count();
+	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Graphics, found != nullptr, static_cast<uint64_t>(lookup_ns));
 
 	if (found != nullptr)
 	{
@@ -3177,17 +3192,34 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		return found;
 	}
 
-	auto vs_code = ShaderParseVS(&vs_regs, &sh_regs);
-	auto ps_code = ShaderParsePS(&ps_regs, &sh_regs);
+	const auto miss_start = std::chrono::steady_clock::now();
 
-	auto vs_shader = ShaderRecompileVS(vs_code, vs_input_info);
-	auto ps_shader = ShaderRecompilePS(ps_code, ps_input_info);
+	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
+	EXIT_IF(translation_cache == nullptr);
+	const auto optimization = Config::GetShaderOptimizationType();
+	const bool next_gen     = Config::IsNextGen();
+	const auto vs_translation = translation_cache->GetOrCompile(
+	    ShaderModuleKey::Create(vs_id, ShaderModuleStage::Vertex, optimization, next_gen),
+	    [&]
+	    {
+		    auto vs_code = ShaderParseVS(&vs_regs, &sh_regs);
+		    return ShaderRecompileVS(vs_code, vs_input_info);
+	    });
+	DebugStatsRecordShaderTranslationCache(vs_translation.hit, vs_translation.evicted);
+	const auto ps_translation = translation_cache->GetOrCompile(
+	    ShaderModuleKey::Create(ps_id, ShaderModuleStage::Pixel, optimization, next_gen),
+	    [&]
+	    {
+		    auto ps_code = ShaderParsePS(&ps_regs, &sh_regs);
+		    return ShaderRecompilePS(ps_code, ps_input_info);
+	    });
+	DebugStatsRecordShaderTranslationCache(ps_translation.hit, ps_translation.evicted);
 
-	EXIT_IF(vs_shader.IsEmpty());
-	EXIT_IF(ps_shader.IsEmpty());
+	EXIT_IF(vs_translation.binary.IsEmpty());
+	EXIT_IF(ps_translation.binary.IsEmpty());
 
-	p.pipeline = CreatePipelineInternal(framebuffer->render_pass, vs_input_info, vs_shader, ps_input_info, ps_shader, p.static_params,
-	                                    p.dynamic_params);
+	p.pipeline = CreatePipelineInternal(framebuffer->render_pass, vs_input_info, vs_translation.binary, ps_input_info, ps_translation.binary,
+	                                    p.static_params, p.dynamic_params);
 
 	EXIT_NOT_IMPLEMENTED(p.pipeline == nullptr);
 
@@ -3214,6 +3246,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 			// Bound host pipeline object growth for long sessions: recycle a
 			// slot instead of EXIT_NOT_IMPLEMENTED when variants exceed the cap.
 			const uint32_t evict = PipelineCacheNextEvictIndex(m_pipelines.Size(), &m_evict_cursor);
+			DebugStatsRecordPipelineEviction();
 			DeletePipelineInternal(evict);
 			m_pipelines[static_cast<int>(evict)] = p;
 			DumpPipeline("create", static_cast<int>(evict));
@@ -3229,6 +3262,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 
 	m_driver_cache_dirty = true;
 	SaveDriverCacheIfDue();
+	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - miss_start).count();
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(miss_ns));
 	return p.pipeline;
 }
 
@@ -3257,7 +3292,11 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 	p.dynamic_params->vk_dynamic_state_stencil_write_mask   = true;
 	p.dynamic_params->color_write_enable                    = true;
 
-	auto* found = Find(p);
+	const auto lookup_start = std::chrono::steady_clock::now();
+	auto*      found        = Find(p);
+	const auto lookup_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - lookup_start).count();
+	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Compute, found != nullptr, static_cast<uint64_t>(lookup_ns));
 
 	if (found != nullptr)
 	{
@@ -3268,12 +3307,21 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 		return found;
 	}
 
-	auto cs_code = ShaderParseCS(cs_regs, sh_regs);
+	const auto miss_start = std::chrono::steady_clock::now();
 
-	auto cs_shader = ShaderRecompileCS(cs_code, input_info);
-	EXIT_IF(cs_shader.IsEmpty());
+	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
+	EXIT_IF(translation_cache == nullptr);
+	const auto cs_translation = translation_cache->GetOrCompile(
+	    ShaderModuleKey::Create(cs_id, ShaderModuleStage::Compute, Config::GetShaderOptimizationType(), Config::IsNextGen()),
+	    [&]
+	    {
+		    auto cs_code = ShaderParseCS(cs_regs, sh_regs);
+		    return ShaderRecompileCS(cs_code, input_info);
+	    });
+	DebugStatsRecordShaderTranslationCache(cs_translation.hit, cs_translation.evicted);
+	EXIT_IF(cs_translation.binary.IsEmpty());
 
-	p.pipeline = CreatePipelineInternal(input_info, cs_shader, p.static_params, p.dynamic_params /*, params2*/);
+	p.pipeline = CreatePipelineInternal(input_info, cs_translation.binary, p.static_params, p.dynamic_params /*, params2*/);
 
 	EXIT_NOT_IMPLEMENTED(p.pipeline == nullptr);
 
@@ -3293,6 +3341,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 		if (m_pipelines.Size() >= PipelineCache::MAX_PIPELINES)
 		{
 			const uint32_t evict = PipelineCacheNextEvictIndex(m_pipelines.Size(), &m_evict_cursor);
+			DebugStatsRecordPipelineEviction();
 			DeletePipelineInternal(evict);
 			m_pipelines[static_cast<int>(evict)] = p;
 		} else
@@ -3303,6 +3352,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 
 	m_driver_cache_dirty = true;
 	SaveDriverCacheIfDue();
+	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - miss_start).count();
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));
 	return p.pipeline;
 }
 
@@ -6699,6 +6750,7 @@ void CommandBuffer::End() const
 	auto result = vkEndCommandBuffer(buffer);
 
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+	DebugStatsRecordCommandBuffer();
 }
 
 void CommandBuffer::Execute()
@@ -6794,6 +6846,7 @@ void CommandBuffer::WaitForFence()
 		const auto wait_ns =
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
 		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
+		DebugStatsRecordSubmissionComplete();
 		LabelDrainCompleted();
 		vkResetFences(device, 1, &m_pool->fences[m_index]);
 
@@ -6814,6 +6867,7 @@ void CommandBuffer::WaitForFenceAndReset()
 		const auto wait_ns =
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
 		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
+		DebugStatsRecordSubmissionComplete();
 		LabelDrainCompleted();
 		vkResetFences(device, 1, &m_pool->fences[m_index]);
 		vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);

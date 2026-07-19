@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
@@ -25,7 +26,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* o
 
 	auto* vk_obj = reinterpret_cast<StorageVulkanBuffer*>(obj);
 
-	void* data = nullptr;
+	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, *size);
+	void*                      data = nullptr;
 	// vkMapMemory(ctx->device, vk_obj->memory.memory, vk_obj->memory.offset, *size, 0, &data);
 	VulkanMapMemory(ctx, &vk_obj->memory, &data);
 	memcpy(data, reinterpret_cast<void*>(*vaddr), *size);

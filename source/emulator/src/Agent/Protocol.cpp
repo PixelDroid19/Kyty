@@ -664,21 +664,136 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	out += "}";
 
 	const auto performance = Libs::Graphics::DebugStatsGetPerformanceSnapshot(false);
-	char       performance_json[512];
-	std::snprintf(performance_json, sizeof(performance_json),
-	              ",\"performance\":{\"interval_ms\":%llu,\"draws\":%llu,\"dispatches\":%llu,"
-	              "\"alloc_bytes\":%llu,\"free_bytes\":%llu,\"creates\":%llu,\"frees\":%llu,\"flips\":%llu,"
-	              "\"buffer_flushes\":%llu,\"submits\":%llu,\"fence_waits\":%llu,\"fence_wait_ns\":%llu,"
-	              "\"fence_wait_max_ns\":%llu,\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f}",
-	              static_cast<unsigned long long>(performance.interval_ms), static_cast<unsigned long long>(performance.draws),
-	              static_cast<unsigned long long>(performance.dispatches), static_cast<unsigned long long>(performance.alloc_bytes),
-	              static_cast<unsigned long long>(performance.free_bytes), static_cast<unsigned long long>(performance.creates),
-	              static_cast<unsigned long long>(performance.frees), static_cast<unsigned long long>(performance.flips),
-	              static_cast<unsigned long long>(performance.buffer_flushes), static_cast<unsigned long long>(performance.submits),
-	              static_cast<unsigned long long>(performance.fence_waits), static_cast<unsigned long long>(performance.fence_wait_ns),
-	              static_cast<unsigned long long>(performance.fence_wait_max_ns),
-	              static_cast<unsigned long long>(performance.live_objects), performance.fps, performance.frame_time_ms);
+	char       performance_json[8192];
+	std::snprintf(
+	    performance_json, sizeof(performance_json),
+	    ",\"performance\":{\"interval_ms\":%llu,\"draws\":%llu,\"dispatches\":%llu,"
+	    "\"alloc_bytes\":%llu,\"free_bytes\":%llu,\"creates\":%llu,\"frees\":%llu,\"flips\":%llu,"
+	    "\"buffer_flushes\":%llu,\"command_buffers\":%llu,\"submits\":%llu,"
+	    "\"fence_waits\":%llu,\"fence_wait_ns\":%llu,\"fence_wait_max_ns\":%llu,"
+	    "\"acquires\":%llu,\"acquire_ns\":%llu,\"acquire_max_ns\":%llu,"
+	    "\"presents\":%llu,\"present_ns\":%llu,\"present_max_ns\":%llu,"
+	    "\"wait_reg_mem\":%llu,\"wait_reg_mem_ns\":%llu,\"wait_reg_mem_max_ns\":%llu,"
+	    "\"wait_flip_done\":%llu,\"wait_flip_done_ns\":%llu,\"wait_flip_done_max_ns\":%llu,"
+	    "\"in_flight_current\":%llu,\"in_flight_max\":%llu,"
+	    "\"frame_samples\":%llu,\"frame_time_p50_us\":%llu,\"frame_time_p95_us\":%llu,"
+	    "\"frame_time_p99_us\":%llu,\"frame_time_max_us\":%llu,"
+	    "\"frames_over_50ms\":%llu,\"frames_over_100ms\":%llu,\"frames_over_250ms\":%llu,"
+	    "\"hash_calls\":%llu,\"hash_bytes\":%llu,\"hash_ns\":%llu,\"hash_max_ns\":%llu,"
+	    "\"detile_calls\":%llu,\"detile_bytes\":%llu,\"detile_ns\":%llu,\"detile_max_ns\":%llu,"
+	    "\"upload_calls\":%llu,\"upload_bytes\":%llu,\"upload_ns\":%llu,\"upload_max_ns\":%llu,"
+	    "\"writeback_calls\":%llu,\"writeback_bytes\":%llu,\"writeback_ns\":%llu,\"writeback_max_ns\":%llu,"
+	    "\"gfx_pipeline_lookup_hits\":%llu,\"gfx_pipeline_lookup_misses\":%llu,"
+	    "\"gfx_pipeline_lookup_ns\":%llu,\"gfx_pipeline_lookup_max_ns\":%llu,"
+	    "\"compute_pipeline_lookup_hits\":%llu,\"compute_pipeline_lookup_misses\":%llu,"
+	    "\"compute_pipeline_lookup_ns\":%llu,\"compute_pipeline_lookup_max_ns\":%llu,"
+	    "\"pipeline_evictions\":%llu,"
+	    "\"gfx_pipeline_miss_count\":%llu,\"gfx_pipeline_miss_ns\":%llu,\"gfx_pipeline_miss_max_ns\":%llu,"
+	    "\"compute_pipeline_miss_count\":%llu,\"compute_pipeline_miss_ns\":%llu,\"compute_pipeline_miss_max_ns\":%llu,"
+	    "\"shader_ir_input_analysis_count\":%llu,\"shader_ir_input_analysis_ns\":%llu,"
+	    "\"shader_ir_input_analysis_max_ns\":%llu,"
+	    "\"shader_ir_pipeline_miss_count\":%llu,\"shader_ir_pipeline_miss_ns\":%llu,"
+	    "\"shader_ir_pipeline_miss_max_ns\":%llu,"
+	    "\"spirv_source_count\":%llu,\"spirv_source_ns\":%llu,\"spirv_source_max_ns\":%llu,"
+	    "\"spirv_compile_count\":%llu,\"spirv_compile_ns\":%llu,\"spirv_compile_max_ns\":%llu,"
+	    "\"vk_graphics_pipeline_create_count\":%llu,\"vk_graphics_pipeline_create_ns\":%llu,"
+	    "\"vk_graphics_pipeline_create_max_ns\":%llu,"
+	    "\"vk_compute_pipeline_create_count\":%llu,\"vk_compute_pipeline_create_ns\":%llu,"
+	    "\"vk_compute_pipeline_create_max_ns\":%llu,"
+	    "\"shader_translation_cache_hits\":%llu,\"shader_translation_cache_misses\":%llu,"
+	    "\"shader_translation_cache_evictions\":%llu,"
+	    "\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f",
+	    static_cast<unsigned long long>(performance.interval_ms), static_cast<unsigned long long>(performance.draws),
+	    static_cast<unsigned long long>(performance.dispatches), static_cast<unsigned long long>(performance.alloc_bytes),
+	    static_cast<unsigned long long>(performance.free_bytes), static_cast<unsigned long long>(performance.creates),
+	    static_cast<unsigned long long>(performance.frees), static_cast<unsigned long long>(performance.flips),
+	    static_cast<unsigned long long>(performance.buffer_flushes), static_cast<unsigned long long>(performance.command_buffers),
+	    static_cast<unsigned long long>(performance.submits), static_cast<unsigned long long>(performance.fence_waits),
+	    static_cast<unsigned long long>(performance.fence_wait_ns), static_cast<unsigned long long>(performance.fence_wait_max_ns),
+	    static_cast<unsigned long long>(performance.acquires), static_cast<unsigned long long>(performance.acquire_ns),
+	    static_cast<unsigned long long>(performance.acquire_max_ns), static_cast<unsigned long long>(performance.presents),
+	    static_cast<unsigned long long>(performance.present_ns), static_cast<unsigned long long>(performance.present_max_ns),
+	    static_cast<unsigned long long>(performance.wait_reg_mem), static_cast<unsigned long long>(performance.wait_reg_mem_ns),
+	    static_cast<unsigned long long>(performance.wait_reg_mem_max_ns), static_cast<unsigned long long>(performance.wait_flip_done),
+	    static_cast<unsigned long long>(performance.wait_flip_done_ns), static_cast<unsigned long long>(performance.wait_flip_done_max_ns),
+	    static_cast<unsigned long long>(performance.in_flight_current), static_cast<unsigned long long>(performance.in_flight_max),
+	    static_cast<unsigned long long>(performance.frame_samples), static_cast<unsigned long long>(performance.frame_time_p50_us),
+	    static_cast<unsigned long long>(performance.frame_time_p95_us), static_cast<unsigned long long>(performance.frame_time_p99_us),
+	    static_cast<unsigned long long>(performance.frame_time_max_us), static_cast<unsigned long long>(performance.frames_over_50ms),
+	    static_cast<unsigned long long>(performance.frames_over_100ms), static_cast<unsigned long long>(performance.frames_over_250ms),
+	    static_cast<unsigned long long>(performance.hash_calls), static_cast<unsigned long long>(performance.hash_bytes),
+	    static_cast<unsigned long long>(performance.hash_ns), static_cast<unsigned long long>(performance.hash_max_ns),
+	    static_cast<unsigned long long>(performance.detile_calls), static_cast<unsigned long long>(performance.detile_bytes),
+	    static_cast<unsigned long long>(performance.detile_ns), static_cast<unsigned long long>(performance.detile_max_ns),
+	    static_cast<unsigned long long>(performance.upload_calls), static_cast<unsigned long long>(performance.upload_bytes),
+	    static_cast<unsigned long long>(performance.upload_ns), static_cast<unsigned long long>(performance.upload_max_ns),
+	    static_cast<unsigned long long>(performance.writeback_calls), static_cast<unsigned long long>(performance.writeback_bytes),
+	    static_cast<unsigned long long>(performance.writeback_ns), static_cast<unsigned long long>(performance.writeback_max_ns),
+	    static_cast<unsigned long long>(performance.gfx_pipeline_lookup_hits),
+	    static_cast<unsigned long long>(performance.gfx_pipeline_lookup_misses),
+	    static_cast<unsigned long long>(performance.gfx_pipeline_lookup_ns),
+	    static_cast<unsigned long long>(performance.gfx_pipeline_lookup_max_ns),
+	    static_cast<unsigned long long>(performance.compute_pipeline_lookup_hits),
+	    static_cast<unsigned long long>(performance.compute_pipeline_lookup_misses),
+	    static_cast<unsigned long long>(performance.compute_pipeline_lookup_ns),
+	    static_cast<unsigned long long>(performance.compute_pipeline_lookup_max_ns),
+	    static_cast<unsigned long long>(performance.pipeline_evictions),
+	    static_cast<unsigned long long>(performance.gfx_pipeline_miss_count),
+	    static_cast<unsigned long long>(performance.gfx_pipeline_miss_ns),
+	    static_cast<unsigned long long>(performance.gfx_pipeline_miss_max_ns),
+	    static_cast<unsigned long long>(performance.compute_pipeline_miss_count),
+	    static_cast<unsigned long long>(performance.compute_pipeline_miss_ns),
+	    static_cast<unsigned long long>(performance.compute_pipeline_miss_max_ns),
+	    static_cast<unsigned long long>(performance.shader_ir_input_analysis_count),
+	    static_cast<unsigned long long>(performance.shader_ir_input_analysis_ns),
+	    static_cast<unsigned long long>(performance.shader_ir_input_analysis_max_ns),
+	    static_cast<unsigned long long>(performance.shader_ir_pipeline_miss_count),
+	    static_cast<unsigned long long>(performance.shader_ir_pipeline_miss_ns),
+	    static_cast<unsigned long long>(performance.shader_ir_pipeline_miss_max_ns),
+	    static_cast<unsigned long long>(performance.spirv_source_count),
+	    static_cast<unsigned long long>(performance.spirv_source_ns),
+	    static_cast<unsigned long long>(performance.spirv_source_max_ns),
+	    static_cast<unsigned long long>(performance.spirv_compile_count),
+	    static_cast<unsigned long long>(performance.spirv_compile_ns),
+	    static_cast<unsigned long long>(performance.spirv_compile_max_ns),
+	    static_cast<unsigned long long>(performance.vk_graphics_pipeline_create_count),
+	    static_cast<unsigned long long>(performance.vk_graphics_pipeline_create_ns),
+	    static_cast<unsigned long long>(performance.vk_graphics_pipeline_create_max_ns),
+	    static_cast<unsigned long long>(performance.vk_compute_pipeline_create_count),
+	    static_cast<unsigned long long>(performance.vk_compute_pipeline_create_ns),
+	    static_cast<unsigned long long>(performance.vk_compute_pipeline_create_max_ns),
+	    static_cast<unsigned long long>(performance.shader_translation_cache_hits),
+	    static_cast<unsigned long long>(performance.shader_translation_cache_misses),
+	    static_cast<unsigned long long>(performance.shader_translation_cache_evictions),
+	    static_cast<unsigned long long>(performance.live_objects), performance.fps, performance.frame_time_ms);
 	out += performance_json;
+	out += ",\"gpu_memory\":{\"create_calls\":" + std::to_string(performance.gpu_memory_create_calls);
+	out += ",\"create_ns\":" + std::to_string(performance.gpu_memory_create_ns);
+	out += ",\"create_max_ns\":" + std::to_string(performance.gpu_memory_create_max_ns);
+	out += ",\"types\":[";
+	constexpr const char* gpu_memory_type_names[Libs::Graphics::kDebugStatsGpuMemoryTypeCount] = {
+	    "video_out_buffer", "depth_stencil_buffer", "label",   "index_buffer",  "vertex_buffer",
+	    "storage_buffer",   "texture",              "render_texture", "storage_texture"};
+	for (uint32_t i = 0; i < Libs::Graphics::kDebugStatsGpuMemoryTypeCount; ++i)
+	{
+		if (i != 0)
+		{
+			out += ',';
+		}
+		const auto& type = performance.gpu_memory_types[i];
+		out += "{\"type\":\"";
+		out += gpu_memory_type_names[i];
+		out += "\",\"fast_reuse\":" + std::to_string(type.fast_reuse);
+		out += ",\"exact_reuse\":" + std::to_string(type.exact_reuse);
+		out += ",\"new_standalone\":" + std::to_string(type.new_standalone);
+		out += ",\"new_linked\":" + std::to_string(type.new_linked);
+		out += ",\"new_from_objects\":" + std::to_string(type.new_from_objects);
+		out += ",\"reclaim_new\":" + std::to_string(type.reclaim_new);
+		out += ",\"logical_free\":" + std::to_string(type.logical_free);
+		out += ",\"live\":" + std::to_string(type.live);
+		out += '}';
+	}
+	out += "]}}";
 
 	out += ",\"missing_imports\":{";
 	out += "\"resolution_attempts\":" + std::to_string(imports.resolution_attempts);

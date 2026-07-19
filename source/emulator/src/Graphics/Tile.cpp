@@ -5,6 +5,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Graphics/AsyncJob.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Profiler.h"
 
@@ -460,6 +461,7 @@ void TileConvertTiledToLinear(void* dst, const void* src, TileMode mode, uint32_
 	Tiler32 t;
 	t.Init(width, height, neo);
 
+	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * 4u);
 	Detile32(&t, width, height, width, static_cast<uint8_t*>(dst), static_cast<const uint8_t*>(src), neo);
 }
 
@@ -477,8 +479,14 @@ void TileConvertTiledToLinear(void* dst, const void* src, TileMode mode, uint32_
 	uint32_t mip_height = height;
 	uint32_t mip_pitch  = pitch;
 
-	auto*       dstptr = static_cast<uint8_t*>(dst);
-	const auto* srcptr = static_cast<const uint8_t*>(src);
+	auto*       dstptr       = static_cast<uint8_t*>(dst);
+	const auto* srcptr       = static_cast<const uint8_t*>(src);
+	uint64_t    detile_bytes = 0;
+	for (uint32_t l = 0; l < levels; ++l)
+	{
+		detile_bytes += level_sizes[l].size;
+	}
+	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, detile_bytes);
 
 	for (uint32_t l = 0; l < levels; l++)
 	{
@@ -921,9 +929,10 @@ void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint
 	EXIT_NOT_IMPLEMENTED(bytes_per_element != 4u && bytes_per_element != 8u);
 	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u);
 
-	const uint32_t pitch = (pitch_elems != 0u ? pitch_elems : width);
-	auto*          d     = static_cast<uint8_t*>(dst);
-	const auto*    s     = static_cast<const uint8_t*>(src);
+	const uint32_t             pitch = (pitch_elems != 0u ? pitch_elems : width);
+	auto*                      d     = static_cast<uint8_t*>(dst);
+	const auto*                s     = static_cast<const uint8_t*>(src);
+	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * bytes_per_element);
 
 	for (uint32_t y = 0; y < height; y++)
 	{
@@ -940,12 +949,12 @@ uint64_t TileGetStandard64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elem
 {
 	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u);
 
-	static constexpr uint32_t k_block     = 128u;
+	static constexpr uint32_t k_block       = 128u;
 	static constexpr uint32_t k_block_bytes = 65536u;
-	const uint32_t            blocks_x    = (pitch_elems + k_block - 1u) / k_block;
-	const uint32_t            xb          = x / k_block;
-	const uint32_t            yb          = y / k_block;
-	const uint64_t            blk_idx     = static_cast<uint64_t>(yb) * blocks_x + xb;
+	const uint32_t            blocks_x      = (pitch_elems + k_block - 1u) / k_block;
+	const uint32_t            xb            = x / k_block;
+	const uint32_t            yb            = y / k_block;
+	const uint64_t            blk_idx       = static_cast<uint64_t>(yb) * blocks_x + xb;
 	return (blk_idx * k_block_bytes) + Standard64KB32WithinBlockOffset(x % k_block, y % k_block);
 }
 
@@ -955,10 +964,11 @@ void TileConvertStandard64KB32ToLinear(void* dst, const void* src, uint32_t widt
 	EXIT_IF(src == nullptr);
 	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u);
 
-	const uint32_t pitch = (pitch_elems != 0u ? pitch_elems : width);
-	auto*          d     = static_cast<uint8_t*>(dst);
-	const auto*    s     = static_cast<const uint8_t*>(src);
-	static constexpr uint32_t k_bpp = 4u;
+	const uint32_t             pitch = (pitch_elems != 0u ? pitch_elems : width);
+	auto*                      d     = static_cast<uint8_t*>(dst);
+	const auto*                s     = static_cast<const uint8_t*>(src);
+	static constexpr uint32_t  k_bpp = 4u;
+	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * k_bpp);
 
 	for (uint32_t y = 0; y < height; y++)
 	{
