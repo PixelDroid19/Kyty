@@ -292,27 +292,30 @@ Recent strict bring-up (evidence-backed, focused tests where noted) includes:
 - SMEM dual offset (SGPR soffset + 21-bit imm) and variable-offset
   `s_buffer_load_dword` / `x2` / `x4` with imm constants registered for SPIR-V.
 - `image_sample` dmasks including single-channel `0x2`/`0x4` and `0xb` (R+G+A).
+- Captured `ds_read2_b32` decodes its two dword-scaled offsets while preserving
+  the byte-addressed `vaddr`, and reads through the same Workgroup storage as
+  `ds_write_b32` (`990b9a40`).
 - Gen5 extended NGS2 rack `max_voices` at option offset `+0x50` when option size
   ≥ `0xb0` (focused Audio tests).
 - PS user SGPR window up to 32; CB blend1–7, BufferLoadFormatXyzw, and related
   register/shader contracts from earlier cycles.
 
-**First strict fail on recent Linux Release+Silent+AUTO_CROSS discovery runs
-(always re-capture on HEAD):** none observed within 90–180 s dual-strict after
-`dd64b41` (IndexBuffer-in-Texture). Prior first fail was
+**First strict fail on current HEAD (always re-capture):** none observed in the
+latest Linux Release+Silent strict run through more than 2,300 presents.
+`ds_read2_b32` is implemented and covered by focused parser/SPIR-V tests.
+Treat the next structured EXIT, host fault, or earlier regression on a fresh
+capture as the process unit of work.
 
-`unknown relation: Texture - Contains - IndexBuffer`
-
-at ~frame 1540 (single-parent GpuMemory CreateObject). That policy is in tree.
-Re-capture may still surface a **later** GpuMemory multi-parent topology, an
-unsupported shader/format, or a host fault; treat the first EXIT or structured
-error on the current HEAD as the unit of work.
-
-**Visual residual (not a process EXIT):** gameplay **HUD/UI can be correct while
-the world is white**. First hypothesis addressed by preserving GPU-owned RT
-layout across Update (`b86c730`). If white remains after that commit, next
-evidence targets are texture CPU reload after WriteBack invalidation, intermediate
-format-71 sampling, and clear/composite — not ThreadFlag fabrication.
+**Visual residual (current frontier, not a process EXIT):** horizontal stripes
+are absent after the GPU-owned RenderTexture layout and null MRT discard-tail
+fixes. Opaque black rectangles remain around sprite and prop bounds while the
+HUD/UI and scene geometry continue drawing; native VideoOut captures prove the
+rectangles exist before PNG conversion. Evidence from captured pixel shaders
+also shows alpha-kill lowering was present in a run where the rectangles
+remained, so do not add another heuristic discard. Capture the actual bound
+sample alpha, MRT3 immediately after the writer, and the lighting consumer
+output for the same draw. This distinguishes alias/backing/descriptor errors
+from MRT blend/load or composite errors.
 
 `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms waits, no observed Set in earlier
 captures) remains a **later** suspected synchronization symptom: do not fake
@@ -392,13 +395,15 @@ CURRENT FRONTIER
   classify); GPU-owned RT layout preserve on Update; tile-27 size+4bpp detile;
   Gen5 EUD type-5; formats 14/56/71; multi-RT CB_SHADER_MASK; EXP Param5/6 +
   multi-MRT; structured SPIR-V loops; `v_cvt_i32_f32`; SDWA; SMEM dual-offset +
-  variable SBuffer; image_sample dmasks 0x2/0x4/0xb; NGS2 extended max_voices.
-- **First strict fail (re-capture on HEAD):** none fixed in the last 90–180 s
-  dual-strict after IndexBuffer-in-Texture. Always re-capture; next EXIT or
-  structured unsupported is the unit of work.
-- **Visual residual:** HUD/UI may work while world is white. Prefer layout /
-  texture / RT alias evidence over inventing clears or ThreadFlag. RT UNDEFINED
-  discard after SB WriteBack parent invalidation is already fixed — re-verify.
+  variable SBuffer; image_sample dmasks 0x2/0x4/0xb; `ds_read2_b32`; null MRT
+  discard tails; NGS2 extended max_voices.
+- **First strict fail (re-capture on HEAD):** none observed through more than
+  2,300 presents in the latest Linux Release+Silent strict run. The next
+  structured EXIT or host fault is the process unit of work.
+- **Visual residual:** horizontal stripes are absent, but opaque black
+  rectangles remain around sprite/prop bounds. Capture the actual bound sample
+  alpha, MRT3 immediately after its writer, and consumer threshold/output for
+  the same draw before changing shader, blend, clear, or composite behavior.
 - **Later symptom only:** `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms) with no
   observed Set. Never fabricate the signal. EventFlag live-handle registry
   (garbage → ESRCH) is not Set. Trace the producer after earlier GPU/shader
@@ -411,10 +416,10 @@ gameplay scene without diagnostics or fabricated success. Process survival and
 HUD-only correctness are not playability.
 
 If dual-strict shows a process EXIT, that is first priority (GpuMemory, shader,
-format, HLE). If the process survives but the world is wrong (e.g. white world
-with working HUD), treat that as the rendering frontier: identify the first
-bad producer (RT layout, texture update after WriteBack, sample format, clear,
-composite) with capture evidence — do not paper over with permissive flags.
+format, HLE). If the process survives but the world is wrong, treat that as the
+rendering frontier: identify the first bad producer at the bound sample,
+writer MRT, or consumer/composite boundary with capture evidence — do not
+paper over it with permissive flags.
 
 `ThreadFlag` remains deferred while earlier GPU/render issues dominate:
 
