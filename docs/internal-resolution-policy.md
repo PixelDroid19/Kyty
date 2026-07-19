@@ -51,3 +51,28 @@ The policy does not change Vulkan behavior yet. Vulkan integration must:
   floor-origin/ceil-end transform;
 - keep presentation filtering as a separate, capability-driven decision;
 - reject mixed or unsafe cohorts instead of partially scaling them.
+
+## Shader-coordinate boundary
+
+Pixel shaders that consume `FragCoord` (`ps_pos_xy`) need the active
+attachment's host-to-guest ratio. The pixel interface carries this as explicit
+reduced integer X/Y fractions with a 1:1 default. It is part of shader-module
+identity.
+At non-native scale, generated SPIR-V multiplies the host `FragCoord` X/Y by
+guest/host before exposing the values to guest VGPRs. The 1:1 path retains the
+existing direct loads.
+
+This does not make sampled aliases safe to scale. The current shader binding
+model has no per-texture guest/host extent:
+
+- `OpImageFetch` receives guest integer texel coordinates but would address
+  host texels directly.
+- `OpImageQuerySizeLod` currently observes the host image extent; guest shader
+  semantics require the guest extent. It is also used internally while
+  materializing offset sampling.
+
+Therefore resources used by either path must remain native. A later phase must
+add exact per-binding scale/extent identity, transform integer fetch
+coordinates, and provide guest-visible query sizes with deterministic tests
+before expanding eligibility. Storage-image writes remain a separate blocked
+case and are not implied by `FragCoord` support.

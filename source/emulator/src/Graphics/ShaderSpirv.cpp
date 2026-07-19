@@ -9607,7 +9607,7 @@ void Spirv::WriteLocalVariables()
 	{
 		if (m_ps_input_info != nullptr && m_ps_input_info->ps_pos_xy)
 		{
-			static const char* text = R"(
+			static const char* native_text = R"(
          %FragCoord_px = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0
          %FragCoord_x = OpLoad %float %FragCoord_px
                OpStore %v2 %FragCoord_x
@@ -9615,7 +9615,30 @@ void Spirv::WriteLocalVariables()
          %FragCoord_y = OpLoad %float %FragCoord_py
                OpStore %v3 %FragCoord_y
 )";
-			m_source += text;
+			static const char* scaled_text = R"(
+         %FragCoord_px = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0
+         %FragCoord_x = OpLoad %float %FragCoord_px
+         %FragCoord_scale_x = OpFDiv %float %<x_numerator> %<x_denominator>
+         %FragCoord_guest_x = OpFMul %float %FragCoord_x %FragCoord_scale_x
+               OpStore %v2 %FragCoord_guest_x
+         %FragCoord_py = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_1
+         %FragCoord_y = OpLoad %float %FragCoord_py
+         %FragCoord_scale_y = OpFDiv %float %<y_numerator> %<y_denominator>
+         %FragCoord_guest_y = OpFMul %float %FragCoord_y %FragCoord_scale_y
+               OpStore %v3 %FragCoord_guest_y
+)";
+			const auto&        scale       = m_ps_input_info->host_to_guest_scale;
+			if (scale.IsIdentity())
+			{
+				m_source += native_text;
+			} else
+			{
+				m_source += String8(scaled_text)
+				                .ReplaceStr("<x_numerator>", GetConstantFloat(static_cast<float>(scale.x_guest_numerator)))
+				                .ReplaceStr("<x_denominator>", GetConstantFloat(static_cast<float>(scale.x_host_denominator)))
+				                .ReplaceStr("<y_numerator>", GetConstantFloat(static_cast<float>(scale.y_guest_numerator)))
+				                .ReplaceStr("<y_denominator>", GetConstantFloat(static_cast<float>(scale.y_host_denominator)));
+			}
 		}
 	}
 
@@ -10341,6 +10364,14 @@ void Spirv::FindConstants()
 		AddConstantUint(0x0f000000);
 		AddConstantUint(0xf0000000);
 	}
+	if (m_ps_input_info != nullptr && m_ps_input_info->ps_pos_xy && !m_ps_input_info->host_to_guest_scale.IsIdentity())
+	{
+		const auto& scale = m_ps_input_info->host_to_guest_scale;
+		AddConstantFloat(static_cast<float>(scale.x_guest_numerator));
+		AddConstantFloat(static_cast<float>(scale.x_host_denominator));
+		AddConstantFloat(static_cast<float>(scale.y_guest_numerator));
+		AddConstantFloat(static_cast<float>(scale.y_host_denominator));
+	}
 	if (m_cs_input_info != nullptr)
 	{
 		AddConstantUint(m_cs_input_info->threads_num[0]);
@@ -10393,6 +10424,7 @@ void Spirv::FindVariables()
 	{
 		if (m_ps_input_info->ps_pos_xy)
 		{
+			EXIT_NOT_IMPLEMENTED(!m_ps_input_info->host_to_guest_scale.IsValid());
 			AddVariable(ShaderOperandType::Vgpr, 2, 1);
 			AddVariable(ShaderOperandType::Vgpr, 3, 1);
 		}

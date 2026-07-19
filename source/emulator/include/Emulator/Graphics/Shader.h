@@ -1098,12 +1098,33 @@ struct ShaderComputeInputInfo
 	return static_cast<uint32_t>(granulated_lds_size) * 128u;
 }
 
+// Converts host attachment coordinates back to guest coordinates. Callers
+// provide reduced guest/host ratios so equivalent scales share cache identity.
+struct ShaderHostToGuestScale
+{
+	uint32_t x_guest_numerator  = 1;
+	uint32_t x_host_denominator = 1;
+	uint32_t y_guest_numerator  = 1;
+	uint32_t y_host_denominator = 1;
+
+	[[nodiscard]] constexpr bool IsValid() const
+	{
+		return x_guest_numerator != 0 && x_host_denominator != 0 && y_guest_numerator != 0 && y_host_denominator != 0;
+	}
+
+	[[nodiscard]] constexpr bool IsIdentity() const
+	{
+		return x_guest_numerator == x_host_denominator && y_guest_numerator == y_host_denominator;
+	}
+};
+
 struct ShaderPixelInputInfo
 {
 	uint32_t            interpolator_settings[32] = {0};
 	uint32_t            input_num                 = 0;
 	uint8_t             target_output_mode[8]     = {};
 	uint8_t             target_output_order[8]    = {};
+	ShaderHostToGuestScale host_to_guest_scale;
 	bool                ps_pos_xy                 = false;
 	bool                ps_pixel_kill_enable      = false;
 	bool                ps_early_z                = false;
