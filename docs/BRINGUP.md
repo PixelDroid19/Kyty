@@ -286,6 +286,10 @@ Recent strict bring-up (evidence-backed, focused tests where noted) includes:
 - Multi-RT `CB_SHADER_MASK` full-channel nibbles (`0` or `0xf` per RT).
 - EXP Param5 (`0x25`) / Param6 (`0x26`) and multi-MRT compressed / null EXP for
   MRT0–3 (including `done=0` / `vm=0` variants observed on load).
+- Guest `EarlyZThenLateZ` with pixel kill must not lower to Vulkan
+  `EarlyFragmentTests` alone: kill-enabled shaders use late depth commit so
+  transparent quad pixels cannot write depth before `OpKill`; opaque early-Z
+  shaders retain `EarlyFragmentTests` (`9b026e53`).
 - SPIR-V structured loops for backward `S_BRANCH` (`OpLoopMerge` + body +
   continue / unreachable as required); do not regress CFG.
 - `v_cvt_i32_f32` (VOP1 `0x8` / VOP3 `0x188`); VOP1/VOP2 SDWA (encoding 249).
@@ -306,16 +310,15 @@ latest Linux Release+Silent strict run through more than 2,300 presents.
 Treat the next structured EXIT, host fault, or earlier regression on a fresh
 capture as the process unit of work.
 
-**Visual residual (current frontier, not a process EXIT):** horizontal stripes
-are absent after the GPU-owned RenderTexture layout and null MRT discard-tail
-fixes. Opaque black rectangles remain around sprite and prop bounds while the
-HUD/UI and scene geometry continue drawing; native VideoOut captures prove the
-rectangles exist before PNG conversion. Evidence from captured pixel shaders
-also shows alpha-kill lowering was present in a run where the rectangles
-remained, so do not add another heuristic discard. Capture the actual bound
-sample alpha, MRT3 immediately after the writer, and the lighting consumer
-output for the same draw. This distinguishes alias/backing/descriptor errors
-from MRT blend/load or composite errors.
+**Visual frontier (not yet playability acceptance):** horizontal stripes and
+opaque black sprite/prop rectangles are absent after the RenderTexture layout,
+null MRT discard-tail, and pixel-kill late-depth fixes. The rectangle producer
+was Vulkan `EarlyFragmentTests` committing depth before an existing `OpKill`
+in a guest `EarlyZThenLateZ` shader. A gameplay-era native discovery capture
+shows coherent background, props, character, lighting, and transparency.
+Because that capture used `KYTY_AUTO_CROSS` only to reach the scene, acceptance
+still requires a repeatable real-input run, movement/action, stable
+presentation, and validation-clean output.
 
 `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms waits, no observed Set in earlier
 captures) remains a **later** suspected synchronization symptom: do not fake
@@ -396,14 +399,15 @@ CURRENT FRONTIER
   Gen5 EUD type-5; formats 14/56/71; multi-RT CB_SHADER_MASK; EXP Param5/6 +
   multi-MRT; structured SPIR-V loops; `v_cvt_i32_f32`; SDWA; SMEM dual-offset +
   variable SBuffer; image_sample dmasks 0x2/0x4/0xb; `ds_read2_b32`; null MRT
-  discard tails; NGS2 extended max_voices.
+  discard tails; kill-enabled `EarlyZThenLateZ` late depth commit; NGS2
+  extended max_voices.
 - **First strict fail (re-capture on HEAD):** none observed through more than
   2,300 presents in the latest Linux Release+Silent strict run. The next
   structured EXIT or host fault is the process unit of work.
-- **Visual residual:** horizontal stripes are absent, but opaque black
-  rectangles remain around sprite/prop bounds. Capture the actual bound sample
-  alpha, MRT3 immediately after its writer, and consumer threshold/output for
-  the same draw before changing shader, blend, clear, or composite behavior.
+- **Visual frontier:** horizontal stripes and opaque sprite/prop rectangles are
+  absent in a gameplay-era native discovery capture after `9b026e53`.
+  `KYTY_AUTO_CROSS` was used only to reach that scene, so re-prove it with real
+  press/release edges before claiming correctly rendered playability.
 - **Later symptom only:** `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms) with no
   observed Set. Never fabricate the signal. EventFlag live-handle registry
   (garbage → ESRCH) is not Set. Trace the producer after earlier GPU/shader
