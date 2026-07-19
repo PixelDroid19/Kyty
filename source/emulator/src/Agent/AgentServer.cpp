@@ -239,6 +239,17 @@ std::string PerformanceResult(bool reset)
 	              static_cast<unsigned long long>(stats.shader_translation_cache_evictions),
 	              static_cast<unsigned long long>(stats.live_objects), stats.fps, stats.frame_time_ms);
 	std::string out(buf);
+	out += "\"present_source\":{\"width\":";
+	out += std::to_string(stats.present_src_w);
+	out += ",\"height\":";
+	out += std::to_string(stats.present_src_h);
+	out += ",\"layout\":";
+	out += std::to_string(stats.present_src_layout);
+	out += "},\"present_destination\":{\"width\":";
+	out += std::to_string(stats.present_dst_w);
+	out += ",\"height\":";
+	out += std::to_string(stats.present_dst_h);
+	out += "},";
 	AppendGpuMemoryPerformanceJson(stats, &out);
 	out += '}';
 	return out;

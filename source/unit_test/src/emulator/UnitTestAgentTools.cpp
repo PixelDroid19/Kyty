@@ -463,6 +463,23 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	EXPECT_EQ(json.find("PPSA"), std::string::npos);
 }
 
+TEST(AgentTools, PerformanceSnapshotReportsPresentSourceAndDestination)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsRecordPresentSource(3840, 2160, 1280, 720, 7);
+
+	const DebugStatsPerformanceSnapshot snapshot = DebugStatsGetPerformanceSnapshot(false);
+
+	EXPECT_EQ(snapshot.present_src_w, 3840u);
+	EXPECT_EQ(snapshot.present_src_h, 2160u);
+	EXPECT_EQ(snapshot.present_dst_w, 1280u);
+	EXPECT_EQ(snapshot.present_dst_h, 720u);
+	EXPECT_EQ(snapshot.present_src_layout, 7u);
+	DebugStatsShutdown();
+}
+
 TEST(AgentTools, ProtocolRejectsUnknownShape)
 {
 	Request   req {};
