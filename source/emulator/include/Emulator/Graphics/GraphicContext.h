@@ -146,7 +146,14 @@ struct VulkanImage
 
 	void SetHostExtent(uint32_t width, uint32_t height) { extent = {width, height}; }
 
+	[[nodiscard]] VkExtent2D GetGuestExtent() const { return guest_extent; }
+
 	[[nodiscard]] VkExtent2D GetHostExtent() const { return extent; }
+
+	[[nodiscard]] bool MatchesGuestExtent(uint32_t width, uint32_t height) const
+	{
+		return guest_extent.width == width && guest_extent.height == height;
+	}
 
 	[[nodiscard]] bool IsResolutionScaled() const
 	{

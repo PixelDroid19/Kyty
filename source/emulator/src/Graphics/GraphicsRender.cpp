@@ -5237,7 +5237,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					{
 						for (size_t i = 0; i < n; i++)
 						{
-							const auto& e = dtex.At(static_cast<int>(i))->extent;
+							const auto e = dtex.At(static_cast<int>(i))->GetGuestExtent();
 							sizes[i]      = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
 						}
 						const uint64_t sample_area = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
@@ -5292,8 +5292,9 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				for (size_t i = 0; i < cand_n; i++)
 				{
 					cand_fmt[i] = rtex.At(static_cast<int>(i))->format;
-					cand_w[i]   = rtex.At(static_cast<int>(i))->extent.width;
-					cand_h[i]   = rtex.At(static_cast<int>(i))->extent.height;
+					const auto guest_extent = rtex.At(static_cast<int>(i))->GetGuestExtent();
+					cand_w[i]                 = guest_extent.width;
+					cand_h[i]                 = guest_extent.height;
 				}
 				int    filtered[16] = {};
 				size_t filtered_n   = 0;
@@ -5335,8 +5336,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 							for (size_t i = 0; i < n; i++)
 							{
 								const int   ri = use_filter ? filtered[i] : static_cast<int>(i);
-								const auto& e  = rtex.At(ri)->extent;
-								sizes[i] = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+								const auto e = rtex.At(ri)->GetGuestExtent();
+								sizes[i]     = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
 							}
 							const uint64_t sample_area =
 							    static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
@@ -5379,8 +5380,9 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					for (size_t i = 0; i < cand_n; i++)
 					{
 						cand_fmt[i] = stex.At(static_cast<int>(i))->format;
-						cand_w[i]   = stex.At(static_cast<int>(i))->extent.width;
-						cand_h[i]   = stex.At(static_cast<int>(i))->extent.height;
+						const auto guest_extent = stex.At(static_cast<int>(i))->GetGuestExtent();
+						cand_w[i]                 = guest_extent.width;
+						cand_h[i]                 = guest_extent.height;
 					}
 					int    filtered[16] = {};
 					size_t filtered_n   = 0;
@@ -5419,8 +5421,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 								for (size_t i = 0; i < n; i++)
 								{
 									const int   ri = use_filter ? filtered[i] : static_cast<int>(i);
-									const auto& e  = stex.At(ri)->extent;
-									sizes[i] = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
+									const auto e = stex.At(ri)->GetGuestExtent();
+									sizes[i]     = static_cast<uint64_t>(e.width) * static_cast<uint64_t>(e.height);
 								}
 								const uint64_t sample_area =
 								    static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
@@ -5454,7 +5456,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// every GPU write-back.
 				const auto video_image = VideoOut::VideoOutGetImage(addr);
 				if (video_image.image != nullptr && video_image.buffer_size == size.size && video_image.buffer_pitch == pitch &&
-				    video_image.image->extent.width == width && video_image.image->extent.height == height &&
+				    video_image.image->MatchesGuestExtent(width, height) &&
 				    (!gen5 || Gen5SampleFormatMatchesVulkan(fmt, video_image.image->format)))
 				{
 					tex = video_image.image;

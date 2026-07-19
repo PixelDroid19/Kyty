@@ -126,4 +126,30 @@ TEST(EmulatorAttachmentResolutionCohort, VulkanImagesKeepGuestAndHostExtentsSepa
 	EXPECT_TRUE(image.IsResolutionScaled());
 }
 
+TEST(EmulatorAttachmentResolutionCohort, ScaledVulkanImageMatchesItsGuestDescriptorExtent)
+{
+	RenderTextureVulkanImage image;
+	image.SetNativeExtent(3840, 2160);
+	image.SetHostExtent(1280, 720);
+
+	EXPECT_TRUE(image.MatchesGuestExtent(3840, 2160));
+	EXPECT_FALSE(image.MatchesGuestExtent(1280, 720));
+}
+
+TEST(EmulatorAttachmentResolutionCohort, ResolutionIdentityIncludesTheHostExtent)
+{
+	InternalResolutionPolicy hd({1280, 720});
+	InternalResolutionPolicy full_hd({1920, 1080});
+	ASSERT_EQ(hd.RegisterGuestDisplayExtent({3840, 2160}), ResolutionPolicyStatus::Success);
+	ASSERT_EQ(full_hd.RegisterGuestDisplayExtent({3840, 2160}), ResolutionPolicyStatus::Success);
+
+	const auto hd_decision = hd.Evaluate({3840, 2160}, {ResolutionResourceKind::ColorAttachment, false});
+	const auto full_hd_decision =
+	    full_hd.Evaluate({3840, 2160}, {ResolutionResourceKind::ColorAttachment, false});
+
+	EXPECT_EQ(hd_decision.identity.guest_resource_extent, full_hd_decision.identity.guest_resource_extent);
+	EXPECT_NE(hd_decision.identity.host_resource_extent, full_hd_decision.identity.host_resource_extent);
+	EXPECT_NE(hd_decision.identity, full_hd_decision.identity);
+}
+
 UT_END();
