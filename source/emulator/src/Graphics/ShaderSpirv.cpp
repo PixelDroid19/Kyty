@@ -8954,7 +8954,11 @@ void Spirv::WriteHeader()
 				{
 					vars.Add("%gl_FragCoord");
 				}
-				if (m_ps_input_info->ps_early_z)
+				// Guest EarlyZThenLateZ may reject occluded fragments early, but
+				// depth is committed after shader kill. Vulkan EarlyFragmentTests
+				// alone commits depth before OpKill, so use late tests for shaders
+				// that can discard.
+				if (m_ps_input_info->ps_early_z && !m_ps_input_info->ps_pixel_kill_enable)
 				{
 					execution_modes.Add("OpExecutionMode %main EarlyFragmentTests\n");
 				}
