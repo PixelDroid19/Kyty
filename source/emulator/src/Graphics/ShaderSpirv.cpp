@@ -3400,44 +3400,48 @@ KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty)
 	return true;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt0OffOffComprVmDone)
+static uint32_t null_mrt_target(ShaderInstructionFormat::Format format)
 {
-	EXIT_NOT_IMPLEMENTED(index == 0 || index + 1 >= code.GetInstructions().Size());
-
-	const auto& prev_inst = code.GetInstructions().At(index - 1);
-	const auto& inst      = code.GetInstructions().At(index);
-	auto        block     = code.ReadBlock(prev_inst.pc);
-
-	if (!block.is_discard)
+	switch (format)
 	{
-		return false;
+		case ShaderInstructionFormat::Mrt0OffOffComprVmDone: return 0;
+		case ShaderInstructionFormat::Mrt1OffOffComprVmDone: return 1;
+		case ShaderInstructionFormat::Mrt2OffOffComprVmDone: return 2;
+		case ShaderInstructionFormat::Mrt3OffOffComprVmDone: return 3;
+		default: EXIT("not a null MRT done format");
 	}
-
-	const auto* info = spirv->GetPsInputInfo();
-
-	EXIT_NOT_IMPLEMENTED(info == nullptr || !info->ps_pixel_kill_enable);
-	EXIT_NOT_IMPLEMENTED(info->target_output_mode[0] != 4);
-
-	EXIT_NOT_IMPLEMENTED(inst.src_num > 0);
-
-	// TODO() check VSKIP
-	// TODO() check EXEC
-
-	static const char* text = R"(
-        OpKill
-)";
-
-	*dst_source += String8(text);
-
-	return true;
+	return 0;
 }
 
-// Null MRT1-3 export (en=0, done=1): no channels written. Recognized as a
-// successful no-op so the export sequence can complete.
+// Null MRT done exports are no-ops unless they form the captured discard tail:
+// exec=0; EXP MRTn null/done; endpgm. The target number does not change the
+// discard semantics.
 KYTY_RECOMPILER_FUNC(Recompile_Exp_MrtNullDone)
 {
 	const auto& inst = code.GetInstructions().At(index);
+	EXIT_NOT_IMPLEMENTED(!ShaderIsNullMrtDoneFormat(inst.format));
 	EXIT_NOT_IMPLEMENTED(inst.src_num > 0);
+
+	if (index > 0 && index + 1 < code.GetInstructions().Size())
+	{
+		const auto& prev_inst = code.GetInstructions().At(index - 1);
+		if (code.ReadBlock(prev_inst.pc).is_discard)
+		{
+			const auto* info   = spirv->GetPsInputInfo();
+			const auto  target = null_mrt_target(inst.format);
+			EXIT_NOT_IMPLEMENTED(info == nullptr || !info->ps_pixel_kill_enable);
+			EXIT_NOT_IMPLEMENTED(info->target_output_mode[target] != 4);
+			*dst_source += "        OpKill\n";
+			return true;
+		}
+	}
+
+	// MRT0 null/done has only been evidenced as a discard tail. Keep unsupported
+	// standalone MRT0 behavior strict; MRT1-3 remain captured no-op terminators.
+	if (inst.format == ShaderInstructionFormat::Mrt0OffOffComprVmDone)
+	{
+		return false;
+	}
 	return true;
 }
 
@@ -6086,7 +6090,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SEndpgm_Empty)
 	    (prev_prev_inst.type == ShaderInstructionType::SMovB64 && prev_prev_inst.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
 	     prev_prev_inst.dst.type == ShaderOperandType::ExecLo && prev_prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
 	     prev_prev_inst.src[0].constant.i == 0 && prev_inst.type == ShaderInstructionType::Exp &&
-	     prev_inst.format == ShaderInstructionFormat::Mrt0OffOffComprVmDone);
+	     ShaderIsNullMrtDoneFormat(prev_inst.format));
 
 	if (!after_kill)
 	{
@@ -8318,7 +8322,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_DsRead2B32_Vdst2VaddrOffset01,              ShaderInstructionType::DsRead2B32,          ShaderInstructionFormat::Vdst2VaddrOffset01,              {""}},
     {Recompile_SBarrier_Empty,                             ShaderInstructionType::SBarrier,             ShaderInstructionFormat::Empty,                            {""}},
 
-    {Recompile_Exp_Mrt0OffOffComprVmDone,                  ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0OffOffComprVmDone,          {""}},
+    {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt0OffOffComprVmDone,          {""}},
     {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt1OffOffComprVmDone,          {""}},
     {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt2OffOffComprVmDone,          {""}},
     {Recompile_Exp_MrtNullDone,                            ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt3OffOffComprVmDone,          {""}},
