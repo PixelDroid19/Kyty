@@ -1,5 +1,6 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/GpuSubmissionCoordinator.h"
 
 #include <condition_variable>
@@ -147,6 +148,58 @@ TEST(EmulatorGpuSubmissionCoordinator, RejectsUnexpectedActionsBeforeCompletion)
 	GpuSubmissionState state = GpuSubmissionState::Recording;
 	ASSERT_EQ(coordinator.GetState(id, &state), GpuSubmissionResult::Success);
 	EXPECT_EQ(state, GpuSubmissionState::Submitted);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, RotatesCommandProcessorSlotsWithExactMonotonicIdentity)
+{
+	GpuSubmissionCoordinator        coordinator;
+	CommandProcessorSubmissionSlots slots(&coordinator, GpuQueueId(3));
+
+	for (uint32_t slot = 0; slot < CommandProcessorSubmissionSlots::SlotCount; slot++)
+	{
+		SubmissionId id;
+		ASSERT_EQ(slots.BeginRecording(slot, &id, nullptr), GpuSubmissionResult::Success);
+		EXPECT_EQ(id.queue, GpuQueueId(3));
+		EXPECT_EQ(id.sequence, static_cast<uint64_t>(slot) + 1);
+		ASSERT_EQ(slots.MarkSubmitted(slot), GpuSubmissionResult::Success);
+		ASSERT_EQ(slots.MarkCompletedWithoutActionsAndRetire(slot), GpuSubmissionResult::Success);
+	}
+
+	SubmissionId reused;
+	ASSERT_EQ(slots.BeginRecording(0, &reused, nullptr), GpuSubmissionResult::Success);
+	EXPECT_EQ(reused.queue, GpuQueueId(3));
+	EXPECT_EQ(reused.sequence, 5u);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, CompletesOnlyTheSubmissionOwnedByTheFenceSlot)
+{
+	GpuSubmissionCoordinator        coordinator;
+	CommandProcessorSubmissionSlots slots(&coordinator, GpuQueueId(7));
+	SubmissionId                    first;
+	SubmissionId                    second;
+
+	ASSERT_EQ(slots.BeginRecording(0, &first, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.BeginRecording(1, &second, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.MarkSubmitted(0), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.MarkSubmitted(1), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.MarkCompletedWithoutActionsAndRetire(1), GpuSubmissionResult::Success);
+
+	GpuSubmissionState first_state = GpuSubmissionState::Recording;
+	ASSERT_EQ(coordinator.GetState(first, &first_state), GpuSubmissionResult::Success);
+	EXPECT_EQ(first_state, GpuSubmissionState::Submitted);
+
+	GpuSubmissionState second_state = GpuSubmissionState::Recording;
+	EXPECT_EQ(coordinator.GetState(second, &second_state), GpuSubmissionResult::UnknownSubmission);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, RejectsCommandProcessorSlotLifecycleWithoutAnActiveIdentity)
+{
+	GpuSubmissionCoordinator        coordinator;
+	CommandProcessorSubmissionSlots slots(&coordinator, GpuQueueId(0));
+
+	EXPECT_EQ(slots.MarkSubmitted(0), GpuSubmissionResult::UnknownSubmission);
+	EXPECT_EQ(slots.MarkCompletedWithoutActionsAndRetire(0), GpuSubmissionResult::UnknownSubmission);
+	EXPECT_EQ(slots.BeginRecording(CommandProcessorSubmissionSlots::SlotCount, nullptr, nullptr), GpuSubmissionResult::InvalidArgument);
 }
 
 UT_END();
