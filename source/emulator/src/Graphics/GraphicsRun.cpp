@@ -3189,7 +3189,6 @@ KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
 		return 7;
 	}
 
-	GpuMemoryCheckAccessViolation(src, byte_count);
 	GpuMemoryCheckAccessViolation(dst, byte_count);
 	memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), byte_count);
 	GraphicsRenderMemoryFlush(dst, byte_count);

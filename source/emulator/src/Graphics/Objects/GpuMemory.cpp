@@ -14,6 +14,7 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
@@ -298,6 +299,8 @@ private:
 		bool                         in_use                        = false;
 		bool                         read_only                     = false;
 		bool                         check_hash                    = false;
+		bool                         dirty_registered              = false;
+		uint64_t                     dirty_generation[VADDR_BLOCKS_MAX] = {};
 		VulkanMemory                 mem;
 	};
 
@@ -628,12 +631,21 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 	if ((mem_watch && o.cpu_update_time > o.gpu_update_time) || (!mem_watch && submit_id > o.submit_id))
 	{
 		uint64_t hash[VADDR_BLOCKS_MAX] = {};
+		bool     tracker_ready          = o.check_hash && o.dirty_registered;
 
 		for (int vi = 0; vi < h.block.vaddr_num; vi++)
 		{
 			EXIT_IF(h.block.size[vi] == 0);
 
-			if (o.check_hash)
+			bool clean = false;
+			if (tracker_ready && GpuDirtyPageTracker::Instance().PrepareForRead(h.block.vaddr[vi], h.block.size[vi]))
+			{
+				clean = !GpuDirtyPageTracker::Instance().ChangedSince(h.block.vaddr[vi], h.block.size[vi], o.dirty_generation[vi]);
+			}
+			if (clean)
+			{
+				hash[vi] = o.hash[vi];
+			} else if (o.check_hash)
 			{
 				hash[vi] = calc_hash(reinterpret_cast<const uint8_t*>(h.block.vaddr[vi]), h.block.size[vi]);
 			} else
@@ -656,6 +668,14 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 		if (submit_id != UINT64_MAX)
 		{
 			o.submit_id = submit_id;
+		}
+
+		if (o.dirty_registered && !need_update)
+		{
+			for (int vi = 0; vi < h.block.vaddr_num; vi++)
+			{
+				o.dirty_generation[vi] = GpuDirtyPageTracker::Instance().SnapshotGeneration(h.block.vaddr[vi], h.block.size[vi]);
+			}
 		}
 	}
 
@@ -694,6 +714,13 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			o.update_func(ctx, o.params, o.object.obj, h.block.vaddr, h.block.size, h.block.vaddr_num);
 		}
 		o.gpu_update_time = get_current_time();
+		if (o.dirty_registered)
+		{
+			for (int vi = 0; vi < h.block.vaddr_num; vi++)
+			{
+				o.dirty_generation[vi] = GpuDirtyPageTracker::Instance().SnapshotGeneration(h.block.vaddr[vi], h.block.size[vi]);
+			}
+		}
 	}
 }
 
@@ -1747,6 +1774,35 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		}
 	}
 
+	if (info.check_hash)
+	{
+		auto& created = heap.objects[index];
+		bool  tracked = GpuDirtyPageTracker::Instance().Enabled();
+		for (int vi = 0; tracked && vi < created.block.vaddr_num; vi++)
+		{
+			tracked = GpuDirtyPageTracker::Instance().RegisterRange(created.block.vaddr[vi], created.block.size[vi]);
+		}
+		for (int vi = 0; tracked && vi < created.block.vaddr_num; vi++)
+		{
+			tracked = GpuDirtyPageTracker::Instance().PrepareForRead(created.block.vaddr[vi], created.block.size[vi]);
+		}
+		if (tracked)
+		{
+			created.info.dirty_registered = true;
+			for (int vi = 0; vi < created.block.vaddr_num; vi++)
+			{
+				created.info.dirty_generation[vi] =
+				    GpuDirtyPageTracker::Instance().SnapshotGeneration(created.block.vaddr[vi], created.block.size[vi]);
+			}
+		} else
+		{
+			for (int vi = 0; vi < created.block.vaddr_num; vi++)
+			{
+				(void)GpuDirtyPageTracker::Instance().UnregisterRange(created.block.vaddr[vi], created.block.size[vi]);
+			}
+		}
+	}
+
 	m_mutex.Unlock();
 	for (auto& d: destructors)
 	{
@@ -1947,6 +2003,15 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 	EXIT_IF(h.free);
 	auto&       o     = h.info;
 	const auto& block = h.block;
+
+	if (o.dirty_registered)
+	{
+		for (int vi = 0; vi < block.vaddr_num; vi++)
+		{
+			(void)GpuDirtyPageTracker::Instance().UnregisterRange(block.vaddr[vi], block.size[vi]);
+		}
+		o.dirty_registered = false;
+	}
 
 	EXIT_IF(o.delete_func == nullptr);
 
@@ -2892,14 +2957,14 @@ void GpuMemoryWriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_
 	g_gpu_memory->WriteBackStorageRange(ctx, vaddr, size);
 }
 
-bool GpuMemoryCheckAccessViolation(uint64_t /*vaddr*/, uint64_t /*size*/)
+bool GpuMemoryCheckAccessViolation(uint64_t vaddr, uint64_t size)
 {
-	return false;
+	return GpuDirtyPageTracker::Instance().NotifyWrite(vaddr, size);
 }
 
 bool GpuMemoryWatcherEnabled()
 {
-	return false;
+	return GpuDirtyPageTracker::Instance().Enabled();
 }
 
 bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)

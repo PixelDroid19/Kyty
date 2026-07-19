@@ -32,7 +32,9 @@ target_sources(emulator PRIVATE
 	src/Agent/AgentLifecycle.cpp
 	src/Kernel/Time.cpp
 	src/Graphics/PipelineCacheStore.cpp
+	src/Graphics/GpuDirtyPageTracker.cpp
 	include/Emulator/Graphics/PipelineCacheStore.h
+	include/Emulator/Graphics/GpuDirtyPageTracker.h
 	src/Validation/DomainValidators.cpp
 	include/Emulator/Validation/DomainValidators.h
 	include/Emulator/Agent/EventRing.h
