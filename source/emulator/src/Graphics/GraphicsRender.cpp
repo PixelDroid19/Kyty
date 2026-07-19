@@ -2055,8 +2055,7 @@ VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(VkFormat format, uint32
 
 	auto* vk_obj = new VideoOutVulkanImage;
 
-	vk_obj->extent.width  = width;
-	vk_obj->extent.height = height;
+	vk_obj->SetNativeExtent(width, height);
 	vk_obj->format        = format;
 	vk_obj->image         = nullptr;
 	vk_obj->layout        = VK_IMAGE_LAYOUT_UNDEFINED;
