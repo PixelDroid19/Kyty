@@ -2779,6 +2779,56 @@ TEST(EmulatorGraphicsPackets, NullMrt3ExportAfterExecZeroKillsFragment)
 	EXPECT_NE(source.FindIndex("OpKill"), Core::STRING8_INVALID_INDEX);
 }
 
+// Guest Z_ORDER=EarlyZThenLateZ may reject occluded fragments early, but a
+// fragment that survives must still run alpha kill before depth is committed.
+// Vulkan EarlyFragmentTests alone commits depth too early for that contract.
+TEST(EmulatorGraphicsPackets, AlphaKillDoesNotCommitDepthWithEarlyFragmentTests)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	auto vgpr = [](int reg)
+	{
+		ShaderOperand op {};
+		op.type        = ShaderOperandType::Vgpr;
+		op.register_id = reg;
+		op.size        = 1;
+		return op;
+	};
+
+	ShaderInstruction export_mrt;
+	export_mrt.pc      = 0;
+	export_mrt.type    = ShaderInstructionType::Exp;
+	export_mrt.format  = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone;
+	export_mrt.src[0]  = vgpr(0);
+	export_mrt.src[1]  = vgpr(1);
+	export_mrt.src_num = 2;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(export_mrt);
+
+	ShaderPixelInputInfo kill_input {};
+	kill_input.ps_early_z           = true;
+	kill_input.ps_pixel_kill_enable = true;
+	kill_input.target_output_mode[0] = 4;
+
+	const auto kill_source = SpirvGenerateSource(code, nullptr, &kill_input, nullptr);
+	EXPECT_EQ(kill_source.FindIndex("OpExecutionMode %main EarlyFragmentTests"), Core::STRING8_INVALID_INDEX);
+
+	ShaderPixelInputInfo opaque_input {};
+	opaque_input.ps_early_z            = true;
+	opaque_input.ps_pixel_kill_enable  = false;
+	opaque_input.target_output_mode[0] = 4;
+
+	const auto opaque_source = SpirvGenerateSource(code, nullptr, &opaque_input, nullptr);
+	EXPECT_NE(opaque_source.FindIndex("OpExecutionMode %main EarlyFragmentTests"), Core::STRING8_INVALID_INDEX);
+}
+
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
 // at VS PC 0x264. Same ParamN path as 0x20+N; real ShaderParse entry (not a re-impl).
 TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)
