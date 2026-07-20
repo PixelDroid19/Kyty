@@ -13,6 +13,7 @@
 
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/ApplicationHeap.h"
@@ -1745,6 +1746,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 		// if (Libs::Graphics::GpuMemoryWatcherEnabled())
 		{
 			Core::VirtualMemory::ExceptionHandler::InstallVectored(kyty_exception_handler);
+			Libs::Graphics::GpuDirtyPageTrackerNotifyFaultHandlerInstalled();
 		}
 	}
 
