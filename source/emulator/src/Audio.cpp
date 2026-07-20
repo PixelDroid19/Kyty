@@ -2195,6 +2195,20 @@ static Ngs2Internal*     g_ngs_list   = nullptr;
 static Ngs2RackInternal* g_racks_list = nullptr;
 static std::unordered_map<Ngs2VoiceInternal*, Ngs2PcmStream> g_pcm_streams;
 
+static uint32_t Ngs2GetVoiceStateFlags(const Ngs2VoiceInternal* voice)
+{
+	EXIT_IF(voice == nullptr);
+	switch (voice->state)
+	{
+		case Ngs2VoicePlayState::Empty: return 0;
+		case Ngs2VoicePlayState::Playing: return 0x3;
+		case Ngs2VoicePlayState::Paused: return 0x5;
+		case Ngs2VoicePlayState::Stopped: return 0xb;
+	}
+	EXIT("unknown voice state\n");
+	return 0;
+}
+
 static bool Ngs2MixPcmStream(Ngs2PcmStream* stream, float* output, uint32_t output_frames, uint32_t output_channels,
 	                         uint32_t output_rate)
 {
@@ -2568,6 +2582,58 @@ int KYTY_SYSV_ABI Ngs2RackCreateWithAllocator(uintptr_t system_handle, uint32_t 
 	}
 
 	return result;
+}
+
+int KYTY_SYSV_ABI Ngs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* buffer_info)
+{
+	PRINT_NAME();
+
+	if (rack_handle == 0)
+	{
+		return static_cast<int32_t>(0x804a0261u);
+	}
+
+	auto* rack = reinterpret_cast<Ngs2RackInternal*>(rack_handle);
+	auto* ngs  = rack->ngs;
+	EXIT_IF(ngs == nullptr);
+
+	Ngs2ContextBufferInfo released {};
+	released.host_buffer      = rack;
+	released.host_buffer_size = sizeof(Ngs2RackInternal) + sizeof(Ngs2VoiceInternal) * rack->option.common.max_voices;
+	released.user_data        = rack->allocator.user_data;
+	const auto allocator      = rack->allocator;
+
+	{
+		Core::LockGuard lock(ngs->mutex);
+
+		auto** link = &g_racks_list;
+		while (*link != nullptr && *link != rack)
+		{
+			link = &(*link)->next;
+		}
+		if (*link == nullptr)
+		{
+			return static_cast<int32_t>(0x804a0261u);
+		}
+		*link = rack->next;
+
+		auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack + 1);
+		for (uint32_t i = 0; i < rack->option.common.max_voices; i++)
+		{
+			g_pcm_streams.erase(voices + i);
+		}
+		rack->~Ngs2RackInternal();
+	}
+
+	if (allocator.free_handler != nullptr)
+	{
+		return allocator.free_handler(&released);
+	}
+	if (buffer_info != nullptr)
+	{
+		*buffer_info = released;
+	}
+	return OK;
 }
 
 int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBufferInfo* buffer_info, uint32_t num_buffer_info)
@@ -3070,13 +3136,7 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 		{
 			EXIT_NOT_IMPLEMENTED(state_size != sizeof(Ngs2SamplerVoiceState));
 			auto* sampler = reinterpret_cast<Ngs2SamplerVoiceState*>(state);
-			switch (voice->state)
-			{
-				case Ngs2VoicePlayState::Empty: sampler->voice_state.state_flags = 0; break;
-				case Ngs2VoicePlayState::Playing: sampler->voice_state.state_flags = 0x3; break;
-				case Ngs2VoicePlayState::Paused: sampler->voice_state.state_flags = 0x5; break;
-				case Ngs2VoicePlayState::Stopped: sampler->voice_state.state_flags = 0xb; break;
-			}
+			sampler->voice_state.state_flags = Ngs2GetVoiceStateFlags(voice);
 			sampler->envelope_height     = 1.0f;
 			sampler->peak_height         = 0.0f;
 			sampler->reserved            = 0;
@@ -3089,6 +3149,23 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 		}
 		default: EXIT("unknown type: %s\n", Core::EnumName(voice->rack->type).C_Str());
 	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2VoiceGetStateFlags(uintptr_t voice_handle, uint32_t* state_flags)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(state_flags == nullptr);
+	EXIT_NOT_IMPLEMENTED(voice_handle == 0);
+
+	auto* voice = reinterpret_cast<Ngs2VoiceInternal*>(voice_handle);
+
+	Core::LockGuard lock(voice->rack->ngs->mutex);
+
+	*state_flags = Ngs2GetVoiceStateFlags(voice);
+	printf("\t state_flags = %u\n", *state_flags);
 
 	return OK;
 }

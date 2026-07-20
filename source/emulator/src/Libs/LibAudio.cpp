@@ -164,10 +164,12 @@ LIB_DEFINE(InitAudio_1_Ngs2)
 	LIB_FUNC("U546k6orxQo", Ngs2::Ngs2RackCreateWithAllocator);
 	LIB_FUNC("cLV4aiT9JpA", Ngs2::Ngs2RackCreate);
 	LIB_FUNC("0eFLVCfWVds", Ngs2::Ngs2RackQueryBufferSize);
+	LIB_FUNC("lCqD7oycmIM", Ngs2::Ngs2RackDestroy);
 	LIB_FUNC("MwmHz8pAdAo", Ngs2::Ngs2RackGetVoiceHandle);
 	LIB_FUNC("uu94irFOGpA", Ngs2::Ngs2VoiceControl);
 	LIB_FUNC("AbYvTOZ8Pts", Ngs2::Ngs2VoiceRunCommands);
 	LIB_FUNC("-TOuuAQ-buE", Ngs2::Ngs2VoiceGetState);
+	LIB_FUNC("rEh728kXk3w", Ngs2::Ngs2VoiceGetStateFlags);
 	LIB_FUNC("i0VnXM-C9fc", Ngs2::Ngs2SystemRender);
 	// Positional audio geometry (Ngs2 geom exports used on Gen5 boot).
 	LIB_FUNC("0lbbayqDNoE", Ngs2::Ngs2GeomResetSourceParam);

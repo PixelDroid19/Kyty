@@ -398,6 +398,25 @@ behavior. A strict Release+Silent rerun sustained 300 seconds and passed the
 previous reproduction point, reaching more than 8,100 presents with no
 structured error; process disk writes remained about 10 MB.
 
+## NGS2 state and lifetime exports
+
+The captured import set includes `sceNgs2VoiceGetStateFlags` and
+`sceNgs2RackDestroy`, but neither export was previously registered. A missing
+import fallback could therefore return success without writing voice state or
+retiring rack-owned streams. The state-flags export now shares the exact state
+mapping used by `sceNgs2VoiceGetState`. Rack destruction unlinks the rack,
+removes every associated PCM stream, returns caller-provided storage, and uses
+the registered free callback for allocator-owned storage.
+
+A strict runtime audio-boundary capture showed the workload creating Custom
+Sampler, Mastering, and Reverb racks, submitting stereo PCM blocks, and issuing
+the observed play command. Initial blocks were intentionally silent. A later
+89,800-frame source block had a signed-PCM peak of 12,987; `Ngs2SystemRender`
+produced a floating-point peak of 0.071069, and `AudioOut` delivered the same
+peak to the host device queue. This locates the earlier silence before the host
+backend and confirms that the final NGS2-to-device path can carry non-zero
+audio. Temporary amplitude probes were removed after capture.
+
 ## Descriptor-layout cache startup phase
 
 The descriptor cache previously created the complete Cartesian product of
