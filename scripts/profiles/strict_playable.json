@@ -20,8 +20,14 @@
     {"tool": "pad_tap", "button": "cross"},
     {"tool": "pad_tap", "button": "cross"}
   ],
+  "input": {
+    "menu_settle_s": 5,
+    "inter_tap_settle_s": 3
+  },
   "post_input": {
-    "require_loading_transition": true
+    "require_loading_transition": true,
+    "min_present_delta": 240,
+    "min_settle_s": 15
   },
   "visual": {
     "require_baseline": true,

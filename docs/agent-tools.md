@@ -141,8 +141,12 @@ Prefer `wait-present --delta` and `wait-phase interactive` over absolute
 
 Use `scripts/kyty_playable_regression.py` for automated startup input. Its
 bounded sequence waits for `tap_pending=false` after each of exactly three
-Cross taps, performs an explicit clear, then observes loading → interactive
-without further input. Do not script consecutive raw `pad tap` commands: the
+Cross taps, gives the initial menu five seconds to settle, gives each
+subsequent UI transition three seconds, performs an
+explicit clear, then observes a bounded post-input settle without further
+input. The shipped strict profile requires a loading transition, then observes
+at least 15 seconds and 240 further presents before capturing. Do not script
+consecutive raw `pad tap` commands: the
 server acknowledges scheduling before the release edge is necessarily
 delivered, so the next tap can be rejected or the final clear can cancel it.
 Continuous or repeated input can trigger jumps and reopen menus, invalidating
