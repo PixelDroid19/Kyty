@@ -2014,6 +2014,12 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	                                                    GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::VideoOutBuffer, GpuMemoryOverlapType::Contains,
 	                                                     GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureLinkDepthMetadata(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
+	                                                   GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureLinkDepthMetadata(GpuMemoryObjectType::DepthStencilBuffer,
+	                                                    GpuMemoryOverlapType::Contains, GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureLinkDepthMetadata(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Crosses,
+	                                                    GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                                GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,

@@ -70,6 +70,8 @@ the gameplay-era checkpoint or advances the first failure.
 | Striped or missing output around multi-render-target shaders | Null MRT export tails lost their discard/no-write semantics during SPIR-V generation | Preserve null MRT0–3 tails as no-write exports instead of fabricating color output or truncating the export contract | Focused shader/SPIR-V export test |
 | Opaque black rectangles in transparent sprite or prop bounds | Kill-enabled `EarlyZThenLateZ` pixel shaders were emitted with Vulkan `EarlyFragmentTests`, allowing depth commit before `OpKill` | Omit `EarlyFragmentTests` for pixel-kill shaders so discarded fragments cannot write depth; retain it for opaque early-Z shaders | Red/green SPIR-V test and native gameplay-era capture |
 | Large first-run stalls recur after restarting Kyty | `VkPipelineCache` was always created empty and never persisted | Validate the standard cache header against vendor/device/UUID, load compatible bounded data, and save dirty cache data atomically at a rate limit | Header tests plus isolated cold/warm driver measurements |
+| Pipeline-cache writes can exceed the session budget after an I/O failure | A failed temporary-file write, flush, or replace did not consume budget and was retried on every pipeline lookup | Charge every disk attempt conservatively, rate-limit retries, and stop attempting after 64 MiB per process | Budget saturation test plus strict runtime disk counters |
+| Reload exits while a sampled texture overlaps live color/depth aliases | The texture crosses the color RT/storage pair and the depth metadata plane, but the mixed-parent policy did not recognize the exact DepthStencil relation | Link only the captured `DepthStencilBuffer Crosses Texture` metadata alias; materialize the image from the existing color surface | Exact policy test plus input-driven strict runtime beyond the former exit |
 | Scene reached only with automatic Cross input | Input automation bypasses the real press/release acceptance contract | Do not change graphics or synthesize completion. Re-run with real keyboard/controller edges and treat inability to reach gameplay as a separate input/synchronization frontier | Pending real-input acceptance |
 
 ### Pipeline compilation hitches across restarts
@@ -90,8 +92,11 @@ The cache store now:
 - writes a sibling temporary file and replaces the destination;
 - saves after the first new pipeline and consolidates later dirty data at most
   once every 30 seconds;
-- enforces a 64 MiB physical-write budget per process, so a long session cannot
-  repeatedly replace the bounded blob into gigabytes of cumulative writes.
+- charges attempted bytes before opening the temporary file, including failed
+  write, flush, and replace operations;
+- enforces a 64 MiB attempted-write budget per process, so I/O failures and a
+  long session cannot repeatedly replace the bounded blob into gigabytes of
+  cumulative writes.
 
 With Mesa's independent shader cache disabled to isolate this path, a bounded
 cold run spent 268 ms in 87 `vkCreate*Pipelines` calls (maximum 25 ms). The

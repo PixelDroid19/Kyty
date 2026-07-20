@@ -1783,6 +1783,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					{
 						continue;
 					}
+					if (GpuMemoryAllowsTextureLinkDepthMetadata(o.object.type, obj.relation, info.type))
+					{
+						continue;
+					}
 					multi_texture_mixed = false;
 					break;
 				}
