@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
@@ -396,6 +397,33 @@ TEST(EmulatorGraphicsState, SpirvBinaryCacheRequiresExactSourceAndCompileOptions
 	EXPECT_EQ(cache.Load(source_a, 0, true, &loaded), SpirvBinaryCacheLoadResult::Miss);
 }
 
+TEST(EmulatorGraphicsState, SpirvModuleCacheRequiresExactTranslationIdentity)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheStore     cache(directory.path);
+	ShaderId                  shader_id;
+	shader_id.hash0 = 0x11223344u;
+	shader_id.crc32 = 0x55667788u;
+	shader_id.ids.Add(0x99aabbccu);
+	const auto base =
+	    ShaderModuleKey::Create(shader_id, ShaderModuleStage::Vertex, Config::ShaderOptimizationType::Performance, true);
+	Vector<uint32_t> expected {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+	Vector<uint32_t> loaded;
+
+	EXPECT_EQ(cache.StoreModule(base, false, expected), SpirvBinaryCacheStoreResult::Written);
+	EXPECT_EQ(cache.LoadModule(base, false, &loaded), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(loaded, expected);
+	EXPECT_EQ(cache.LoadModule(ShaderModuleKey::Create(shader_id, ShaderModuleStage::Pixel,
+	                                                  Config::ShaderOptimizationType::Performance, true),
+	                           false, &loaded),
+	          SpirvBinaryCacheLoadResult::Miss);
+	EXPECT_EQ(cache.LoadModule(base, true, &loaded), SpirvBinaryCacheLoadResult::Miss);
+
+	auto newer = base;
+	newer.translator_version++;
+	EXPECT_EQ(cache.LoadModule(newer, false, &loaded), SpirvBinaryCacheLoadResult::Miss);
+}
+
 TEST(EmulatorGraphicsState, SpirvBinaryCacheRejectsCorruptEntry)
 {
 	ScopedSpirvCacheDirectory directory;
@@ -436,6 +464,32 @@ TEST(EmulatorGraphicsState, SpirvBinaryCacheEnforcesDiskAndSessionBudgets)
 		EXPECT_LE(cache.DiskUsageBytes(), limits.max_total_bytes);
 	}
 	EXPECT_LE(cache.SessionBytesAttempted(), limits.session_write_budget);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheReplacementDoesNotEvictUnrelatedEntry)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheLimits    limits;
+	limits.max_total_bytes      = 300;
+	limits.max_entry_bytes      = 256;
+	limits.session_write_budget = 1024;
+	SpirvBinaryCacheStore cache(directory.path, limits);
+	const String8         source_a("OpCapability Shader\n; entry a\n");
+	const String8         source_b("OpCapability Shader\n; entry b\n");
+	Vector<uint32_t>      binary_a {0x07230203u, 0x00010500u, 1u, 4u, 0u};
+	Vector<uint32_t>      binary_b {0x07230203u, 0x00010500u, 2u, 4u, 0u};
+	Vector<uint32_t>      replacement {0x07230203u, 0x00010500u, 3u, 4u, 0u};
+	Vector<uint32_t>      loaded;
+
+	ASSERT_EQ(cache.Store(source_a, 0, false, binary_a), SpirvBinaryCacheStoreResult::Written);
+	ASSERT_EQ(cache.Store(source_b, 0, false, binary_b), SpirvBinaryCacheStoreResult::Written);
+	ASSERT_EQ(cache.Store(source_a, 0, false, replacement), SpirvBinaryCacheStoreResult::Written);
+
+	EXPECT_EQ(cache.Load(source_a, 0, false, &loaded), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(loaded, replacement);
+	EXPECT_EQ(cache.Load(source_b, 0, false, &loaded), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(loaded, binary_b);
+	EXPECT_LE(cache.DiskUsageBytes(), limits.max_total_bytes);
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
