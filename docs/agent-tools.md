@@ -139,13 +139,14 @@ new logical objects, not total `CreateObject` calls.
 Prefer `wait-present --delta` and `wait-phase interactive` over absolute
 `wait-present --min` with multi-minute timeouts.
 
-```bash
-kyty_agent pad tap cross
-kyty_agent wait-phase loading --timeout-ms 10000      # optional
-kyty_agent wait-phase interactive --timeout-ms 45000
-kyty_agent capture --no-score
-```
-
+Use `scripts/kyty_playable_regression.py` for automated startup input. Its
+bounded sequence waits for `tap_pending=false` after each of exactly three
+Cross taps, performs an explicit clear, then observes loading → interactive
+without further input. Do not script consecutive raw `pad tap` commands: the
+server acknowledges scheduling before the release edge is necessarily
+delivered, so the next tap can be rejected or the final clear can cancel it.
+Continuous or repeated input can trigger jumps and reopen menus, invalidating
+cache and frame-time measurements.
 Protocol: JSON lines, **`protocol_version` 4**. Pad tools are **diagnostic_input**
 only — not gameplay acceptance (same rule as `KYTY_AUTO_CROSS`).
 

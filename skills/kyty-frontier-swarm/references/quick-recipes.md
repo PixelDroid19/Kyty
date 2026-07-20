@@ -55,6 +55,11 @@ $A watch --seconds 10 --min-fps 2    # stall detector
 ```
 
 Exit `125` = guest dead — relaunch, do not sleep-loop.
+For automated startup input, launch with
+`python3 scripts/kyty_playable_regression.py --guest-root "$KYTY_GUEST_ROOT"`
+instead of Terminal A. It confirms each of exactly three Cross taps, clears the
+overlay, then waits through loading without sending more input. Do not set
+`KYTY_AUTO_CROSS`.
 
 ## 3. Matrix discover + run
 

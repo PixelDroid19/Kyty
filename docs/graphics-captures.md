@@ -42,9 +42,12 @@ The command writes an ignored directory such as
   configuration, artifact names, and deterministic image metrics.
 
 The private guest root is used to start the process but is never written to the
-manifest. `--auto-cross` is enabled by default for discovery and is explicitly
-marked `diagnostic_input` in the manifest; it is not gameplay acceptance.
-Disable it with `--no-auto-cross` when a real input sequence is available.
+manifest. Continuous `--auto-cross` is disabled by default because it can keep
+activating gameplay or menus after startup. Explicitly enabling it marks the
+manifest as `diagnostic_input`; it is discovery-only, never gameplay
+acceptance. Prefer the bounded `kyty_playable_regression.py` sequence, which
+delivers exactly three Cross taps, clears the pad overlay, and then waits for
+the loading-to-interactive transition without sending more input.
 
 The guest log and screenshots are raw local evidence, not sanitized data. Keep
 the output directory ignored and do not commit it; the manifest is the portable
