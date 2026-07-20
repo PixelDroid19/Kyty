@@ -107,11 +107,11 @@ std::vector<uint8_t> PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& pr
 }
 
 PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineCache cache, const VkPhysicalDeviceProperties& properties,
-                                                    size_t remaining_write_budget, size_t* saved_size)
+                                                    size_t remaining_write_budget, size_t* attempted_size)
 {
-	if (saved_size != nullptr)
+	if (attempted_size != nullptr)
 	{
-		*saved_size = 0;
+		*attempted_size = 0;
 	}
 	if (device == VK_NULL_HANDLE || cache == VK_NULL_HANDLE)
 	{
@@ -155,6 +155,13 @@ PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineC
 
 	auto temporary = path;
 	temporary += ".tmp";
+	if (attempted_size != nullptr)
+	{
+		// Charge the complete blob before opening the temporary file. This is a
+		// conservative upper bound for partial writes and failed flush/replace
+		// operations, which must not bypass the per-session disk budget.
+		*attempted_size = data.size();
+	}
 	{
 		std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
 		if (!file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size())) || !file.flush())
@@ -170,10 +177,6 @@ PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineC
 		return PipelineCacheStoreSaveResult::Failed;
 	}
 
-	if (saved_size != nullptr)
-	{
-		*saved_size = data.size();
-	}
 	return PipelineCacheStoreSaveResult::Written;
 }
 

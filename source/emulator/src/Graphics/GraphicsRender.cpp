@@ -208,10 +208,10 @@ private:
 	Vector<Pipeline> m_pipelines;
 	uint32_t         m_evict_cursor = 0;
 	Core::Mutex      m_mutex;
-	std::chrono::steady_clock::time_point m_last_driver_cache_save {};
-	bool                                  m_driver_cache_saved_once = false;
+	std::chrono::steady_clock::time_point m_last_driver_cache_attempt {};
+	bool                                  m_driver_cache_attempted_once = false;
 	bool                                  m_driver_cache_dirty      = false;
-	size_t                                m_driver_cache_bytes_written = 0;
+	size_t                                m_driver_cache_bytes_attempted = 0;
 	bool                                  m_driver_cache_write_budget_exhausted = false;
 };
 
@@ -3117,10 +3117,10 @@ void PipelineCache::SaveDriverCacheIfDue()
 
 	const auto now = std::chrono::steady_clock::now();
 	const auto elapsed_seconds =
-	    m_driver_cache_saved_once
-	        ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now - m_last_driver_cache_save).count())
+	    m_driver_cache_attempted_once
+	        ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now - m_last_driver_cache_attempt).count())
 	        : 0u;
-	if (!PipelineCacheStoreCheckpointDue(m_driver_cache_dirty, m_driver_cache_saved_once, elapsed_seconds))
+	if (!PipelineCacheStoreCheckpointDue(m_driver_cache_dirty, m_driver_cache_attempted_once, elapsed_seconds))
 	{
 		return;
 	}
@@ -3130,19 +3130,21 @@ void PipelineCache::SaveDriverCacheIfDue()
 
 	const size_t budget = PipelineCacheStoreSessionWriteBudgetBytes();
 	const size_t remaining_budget =
-	    m_driver_cache_bytes_written < budget ? budget - m_driver_cache_bytes_written : 0u;
-	size_t saved_size = 0;
+	    m_driver_cache_bytes_attempted < budget ? budget - m_driver_cache_bytes_attempted : 0u;
+	size_t attempted_size = 0;
 	const auto save_result =
-	    PipelineCacheStoreSave(ctx->device, ctx->pipeline_cache, properties, remaining_budget, &saved_size);
+	    PipelineCacheStoreSave(ctx->device, ctx->pipeline_cache, properties, remaining_budget, &attempted_size);
+	m_driver_cache_attempted_once = true;
+	m_last_driver_cache_attempt   = now;
+	m_driver_cache_bytes_attempted =
+	    PipelineCacheStoreAccountWriteAttempt(m_driver_cache_bytes_attempted, attempted_size);
+	m_driver_cache_write_budget_exhausted = m_driver_cache_bytes_attempted >= budget;
 	if (save_result == PipelineCacheStoreSaveResult::Written)
 	{
-		m_driver_cache_saved_once = true;
-		m_driver_cache_dirty      = false;
-		m_last_driver_cache_save  = now;
-		m_driver_cache_bytes_written += saved_size;
+		m_driver_cache_dirty = false;
 		if (Config::GetPrintfDirection() != Log::Direction::Silent)
 		{
-			printf("Saved Vulkan pipeline cache: %zu bytes\n", saved_size);
+			printf("Saved Vulkan pipeline cache: %zu bytes\n", attempted_size);
 		}
 	} else if (save_result == PipelineCacheStoreSaveResult::BudgetExceeded)
 	{
