@@ -6,6 +6,7 @@
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
+#include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
@@ -136,7 +137,10 @@ struct VersionedTestGpuObject: public GpuObject
 			return nullptr;
 		}
 		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, void* /*obj*/, const uint64_t* /*vaddr*/,
-		          const uint64_t* /*size*/, int /*vaddr_num*/) {};
+		          const uint64_t* size, int /*vaddr_num*/)
+		{
+			return GpuWritebackResult {.changed_pages = 1u, .copied_bytes = *size, .content_changed = true};
+		};
 	}
 
 	delete_func_t GetDeleteFunc() const override
@@ -2305,6 +2309,60 @@ TEST(EmulatorGraphicsState, MemcpySkipAbsoluteRangesPreservesFenceHoles)
 	{
 		EXPECT_EQ(dst[i], static_cast<uint8_t>(0x10 + i));
 	}
+}
+
+TEST(EmulatorGraphicsState, GpuWritebackPageCacheCopiesOnlyChangedPagesAndPreservesFenceHoles)
+{
+	using namespace Kyty::Libs::Graphics;
+	constexpr uint64_t PageSize = 16u;
+	uint8_t            guest[PageSize * 3u] {};
+	uint8_t            gpu[PageSize * 3u] {};
+	for (uint64_t i = 0; i < sizeof(gpu); ++i)
+	{
+		guest[i] = static_cast<uint8_t>(i);
+		gpu[i]   = static_cast<uint8_t>(i);
+	}
+
+	GpuWritebackPageCache cache(PageSize);
+	cache.Reset(gpu, sizeof(gpu));
+
+	gpu[PageSize + 2u] = 0xe1u;
+	gpu[PageSize + 8u] = 0xe2u;
+	const uint64_t hole_begin = reinterpret_cast<uint64_t>(guest) + PageSize + 8u;
+	const uint64_t hole_end   = hole_begin + 1u;
+
+	struct Notifications
+	{
+		uint64_t calls   = 0;
+		uint64_t address = 0;
+		uint64_t size    = 0;
+	} notifications;
+	const auto notify = [](void* opaque, uint64_t address, uint64_t size)
+	{
+		auto* state = static_cast<Notifications*>(opaque);
+		state->calls++;
+		state->address = address;
+		state->size = size;
+	};
+
+	const auto first =
+	    cache.CopyChangedPages(guest, gpu, sizeof(gpu), &hole_begin, &hole_end, 1, notify, &notifications);
+	EXPECT_TRUE(first.content_changed);
+	EXPECT_EQ(first.changed_pages, 1u);
+	EXPECT_EQ(first.copied_bytes, PageSize);
+	EXPECT_EQ(notifications.calls, 1u);
+	EXPECT_EQ(notifications.address, reinterpret_cast<uint64_t>(guest) + PageSize);
+	EXPECT_EQ(notifications.size, PageSize);
+	EXPECT_EQ(guest[PageSize + 2u], 0xe1u);
+	EXPECT_NE(guest[PageSize + 8u], 0xe2u);
+
+	notifications = {};
+	const auto second =
+	    cache.CopyChangedPages(guest, gpu, sizeof(gpu), &hole_begin, &hole_end, 1, notify, &notifications);
+	EXPECT_FALSE(second.content_changed);
+	EXPECT_EQ(second.changed_pages, 0u);
+	EXPECT_EQ(second.copied_bytes, 0u);
+	EXPECT_EQ(notifications.calls, 0u);
 }
 
 // OnlyFlip → ActiveDeleted must be force-completed with Active after BufferFlush.

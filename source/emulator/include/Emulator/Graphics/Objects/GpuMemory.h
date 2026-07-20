@@ -6,6 +6,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
+#include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -553,8 +554,8 @@ public:
 	                                VulkanMemory* mem);
 	using create_from_objects_func_t = void* (*)(GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* params,
 	                                             GpuMemoryScenario scenario, const Vector<GpuMemoryObject>& objects, VulkanMemory* mem);
-	using write_back_func_t = void (*)(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size,
-	                                   int vaddr_num);
+	using write_back_func_t = GpuWritebackResult (*)(GraphicContext* ctx, const uint64_t* params, void* obj,
+	                                                 const uint64_t* vaddr, const uint64_t* size, int vaddr_num);
 	using delete_func_t     = void (*)(GraphicContext* ctx, void* obj, VulkanMemory* mem);
 	using update_func_t     = void (*)(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size,
                                    int vaddr_num);

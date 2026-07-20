@@ -35,6 +35,7 @@ target_sources(emulator PRIVATE
 	src/Graphics/GpuDirtyPageTracker.cpp
 	src/Graphics/CommandProcessorSubmissionSlots.cpp
 	src/Graphics/Objects/ExactStagingPool.cpp
+	src/Graphics/Objects/GpuWritebackPageCache.cpp
 	src/Graphics/Objects/LabelSubmissionTracker.cpp
 	src/Graphics/GpuSubmissionTracker.cpp
 	src/Graphics/GpuSubmissionCoordinator.cpp
@@ -59,6 +60,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/GpuDirtyPageTracker.h
 	include/Emulator/Graphics/CommandProcessorSubmissionSlots.h
 	include/Emulator/Graphics/Objects/ExactStagingPool.h
+	include/Emulator/Graphics/Objects/GpuWritebackPageCache.h
 	include/Emulator/Graphics/Objects/LabelSubmissionTracker.h
 	include/Emulator/Graphics/GpuSubmissionTracker.h
 	include/Emulator/Graphics/GpuSubmissionCoordinator.h

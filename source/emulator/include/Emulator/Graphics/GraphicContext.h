@@ -5,6 +5,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 
 #include <vulkan/vulkan_core.h> // IWYU pragma: export
 
@@ -218,9 +219,10 @@ struct VulkanBuffer
 
 struct StorageVulkanBuffer: public VulkanBuffer
 {
-	uint64_t          guest_addr      = 0;
-	uint64_t          guest_size      = 0;
-	uint64_t          depth_meta_addr = 0;
+	uint64_t              guest_addr      = 0;
+	uint64_t              guest_size      = 0;
+	uint64_t              depth_meta_addr = 0;
+	GpuWritebackPageCache writeback_cache;
 };
 
 } // namespace Kyty::Libs::Graphics

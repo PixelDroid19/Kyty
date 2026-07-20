@@ -3013,18 +3013,19 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 		EXIT("WriteBack unsupported parent relation\n");
 	}
 
-	uint64_t writeback_bytes = 0;
-	for (int vi = 0; vi < block.vaddr_num; ++vi)
-	{
-		writeback_bytes += block.size[vi];
-	}
+	GpuWritebackResult writeback_result;
 	{
 		const auto writeback_start = std::chrono::steady_clock::now();
-		o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
+		writeback_result = o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
 		const auto writeback_elapsed =
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - writeback_start).count();
-		DebugStatsRecordGpuMemoryWriteBack(GpuMemoryStatsTypeIndex(o.object.type), writeback_bytes,
+		DebugStatsRecordGpuMemoryWriteBack(GpuMemoryStatsTypeIndex(o.object.type), writeback_result.copied_bytes,
 		                                   static_cast<uint64_t>(writeback_elapsed));
+	}
+	if (!writeback_result.content_changed)
+	{
+		o.in_use = false;
+		return;
 	}
 	o.cpu_update_time = get_current_time();
 
