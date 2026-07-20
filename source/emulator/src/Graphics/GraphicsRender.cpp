@@ -211,6 +211,8 @@ private:
 	std::chrono::steady_clock::time_point m_last_driver_cache_save {};
 	bool                                  m_driver_cache_saved_once = false;
 	bool                                  m_driver_cache_dirty      = false;
+	size_t                                m_driver_cache_bytes_written = 0;
+	bool                                  m_driver_cache_write_budget_exhausted = false;
 };
 
 struct VulkanDescriptorSet
@@ -3108,6 +3110,10 @@ void PipelineCache::SaveDriverCacheIfDue()
 	{
 		return;
 	}
+	if (m_driver_cache_write_budget_exhausted)
+	{
+		return;
+	}
 
 	const auto now = std::chrono::steady_clock::now();
 	const auto elapsed_seconds =
@@ -3122,16 +3128,25 @@ void PipelineCache::SaveDriverCacheIfDue()
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
 
+	const size_t budget = PipelineCacheStoreSessionWriteBudgetBytes();
+	const size_t remaining_budget =
+	    m_driver_cache_bytes_written < budget ? budget - m_driver_cache_bytes_written : 0u;
 	size_t saved_size = 0;
-	if (PipelineCacheStoreSave(ctx->device, ctx->pipeline_cache, properties, &saved_size))
+	const auto save_result =
+	    PipelineCacheStoreSave(ctx->device, ctx->pipeline_cache, properties, remaining_budget, &saved_size);
+	if (save_result == PipelineCacheStoreSaveResult::Written)
 	{
 		m_driver_cache_saved_once = true;
 		m_driver_cache_dirty      = false;
 		m_last_driver_cache_save  = now;
+		m_driver_cache_bytes_written += saved_size;
 		if (Config::GetPrintfDirection() != Log::Direction::Silent)
 		{
 			printf("Saved Vulkan pipeline cache: %zu bytes\n", saved_size);
 		}
+	} else if (save_result == PipelineCacheStoreSaveResult::BudgetExceeded)
+	{
+		m_driver_cache_write_budget_exhausted = true;
 	}
 }
 

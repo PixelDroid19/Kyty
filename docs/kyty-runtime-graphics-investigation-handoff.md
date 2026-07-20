@@ -1,6 +1,6 @@
 # Kyty Gen5 runtime graphics investigation handoff
 
-Updated: 2026-07-18
+Updated: 2026-07-20
 
 Status: the runtime advances into sustained gameplay-era presentation without
 a process-killing error. The opaque black sprite/prop rectangles are absent
@@ -89,13 +89,21 @@ The cache store now:
 - retries with an empty cache if a driver rejects otherwise compatible data;
 - writes a sibling temporary file and replaces the destination;
 - saves after the first new pipeline and consolidates later dirty data at most
-  once every five seconds.
+  once every 30 seconds;
+- enforces a 64 MiB physical-write budget per process, so a long session cannot
+  repeatedly replace the bounded blob into gigabytes of cumulative writes.
 
 With Mesa's independent shader cache disabled to isolate this path, a bounded
 cold run spent 268 ms in 87 `vkCreate*Pipelines` calls (maximum 25 ms). The
 equivalent warm run spent 6 ms in 84 calls (maximum 6 ms), a 97.8% reduction
 in the measured driver-pipeline stage. Cache snapshots were approximately
 0.6 MiB and took about 1–2 ms each.
+
+The Vulkan driver blob is not stable enough for whole-file content
+deduplication on the current Linux driver: two equivalent warm runs produced
+the same 1.1 MiB size but differed in about 855,000 bytes. The hard per-process
+write budget is therefore the disk-wear guarantee; texture/resource caches stay
+in RAM/VRAM and are never serialized per frame.
 
 This does **not** prove that every pipeline miss is cheap: guest shader parsing,
 SPIR-V generation/optimization, and application pipeline lookup occur outside
