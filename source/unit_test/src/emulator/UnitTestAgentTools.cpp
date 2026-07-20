@@ -401,6 +401,7 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	DebugStatsRecordGpuMemoryCreate(6, DebugStatsGpuMemoryCreateOutcome::NewFromObjects, 600);
 	DebugStatsRecordGpuMemoryCreate(7, DebugStatsGpuMemoryCreateOutcome::ReclaimNew, 700);
 	DebugStatsRecordGpuMemoryFree(7);
+	DebugStatsRecordGpuMemoryWriteBack(5, 4096, 250);
 
 	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
 	EXPECT_EQ(first.gpu_memory_create_calls, 8u);
@@ -416,6 +417,10 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	EXPECT_EQ(first.gpu_memory_types[7].reclaim_new, 1u);
 	EXPECT_EQ(first.gpu_memory_types[7].logical_free, 1u);
 	EXPECT_EQ(first.gpu_memory_types[7].live, 0u);
+	EXPECT_EQ(first.gpu_memory_types[5].writeback_calls, 1u);
+	EXPECT_EQ(first.gpu_memory_types[5].writeback_bytes, 4096u);
+	EXPECT_EQ(first.gpu_memory_types[5].writeback_ns, 250u);
+	EXPECT_EQ(first.gpu_memory_types[5].writeback_max_ns, 250u);
 	for (uint32_t i = 8; i < kDebugStatsGpuMemoryTypeCount; ++i)
 	{
 		EXPECT_EQ(first.gpu_memory_types[i].cached_reuse, 0u);
@@ -461,6 +466,8 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	snapshot.gpu_memory_types[3].live               = 7;
 	snapshot.gpu_memory_types[4].fast_reuse         = 9;
 	snapshot.gpu_memory_types[4].cached_reuse       = 11;
+	snapshot.gpu_memory_types[4].writeback_calls    = 3;
+	snapshot.gpu_memory_types[4].writeback_bytes    = 8192;
 
 	std::string json;
 	AppendGpuMemoryPerformanceJson(snapshot, &json);
@@ -469,6 +476,7 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	EXPECT_NE(json.find(R"("type":"index_buffer")"), std::string::npos);
 	EXPECT_NE(json.find(R"("reclaim_new":1,"logical_free":1,"live":7)"), std::string::npos);
 	EXPECT_NE(json.find(R"("type":"vertex_buffer","cached_reuse":11,"fast_reuse":9)"), std::string::npos);
+	EXPECT_NE(json.find(R"("writeback_calls":3,"writeback_bytes":8192)"), std::string::npos);
 	EXPECT_EQ(json.find("PPSA"), std::string::npos);
 }
 

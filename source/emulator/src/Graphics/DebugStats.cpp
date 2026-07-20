@@ -111,6 +111,10 @@ struct GpuMemoryTypeMetric
 	std::atomic<uint64_t> reclaim_new {0};
 	std::atomic<uint64_t> logical_free {0};
 	std::atomic<uint64_t> live {0};
+	std::atomic<uint64_t> writeback_calls {0};
+	std::atomic<uint64_t> writeback_bytes {0};
+	std::atomic<uint64_t> writeback_ns {0};
+	std::atomic<uint64_t> writeback_max_ns {0};
 };
 
 std::array<GpuMemoryTypeMetric, kDebugStatsGpuMemoryTypeCount> g_gpu_memory_types {};
@@ -325,6 +329,10 @@ void DebugStatsInit()
 		type.reclaim_new.store(0, std::memory_order_relaxed);
 		type.logical_free.store(0, std::memory_order_relaxed);
 		type.live.store(0, std::memory_order_relaxed);
+		type.writeback_calls.store(0, std::memory_order_relaxed);
+		type.writeback_bytes.store(0, std::memory_order_relaxed);
+		type.writeback_ns.store(0, std::memory_order_relaxed);
+		type.writeback_max_ns.store(0, std::memory_order_relaxed);
 	}
 	g_last_fps.store(0.0, std::memory_order_relaxed);
 	g_last_frame_ms.store(0.0, std::memory_order_relaxed);
@@ -568,6 +576,17 @@ void DebugStatsRecordGpuMemoryFree(uint32_t type_index)
 	}
 }
 
+void DebugStatsRecordGpuMemoryWriteBack(uint32_t type_index, uint64_t bytes, uint64_t elapsed_ns)
+{
+	DebugStatsRecordWriteBack(bytes, elapsed_ns);
+	if (type_index >= kDebugStatsGpuMemoryTypeCount)
+	{
+		return;
+	}
+	auto& type = g_gpu_memory_types[type_index];
+	RecordWork(&type.writeback_calls, &type.writeback_bytes, &type.writeback_ns, &type.writeback_max_ns, bytes, elapsed_ns);
+}
+
 void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout)
 {
 	g_present_src_w.store(src_w, std::memory_order_relaxed);
@@ -803,6 +822,10 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 		dst.reclaim_new      = take_window(src.reclaim_new);
 		dst.logical_free     = take_window(src.logical_free);
 		dst.live             = src.live.load(std::memory_order_relaxed);
+		dst.writeback_calls  = take_window(src.writeback_calls);
+		dst.writeback_bytes  = take_window(src.writeback_bytes);
+		dst.writeback_ns     = take_window(src.writeback_ns);
+		dst.writeback_max_ns = src.writeback_max_ns.exchange(0, std::memory_order_relaxed);
 	}
 
 	snapshot.live_objects  = g_live_objects.load(std::memory_order_relaxed);
