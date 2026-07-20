@@ -3726,6 +3726,9 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_external));
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_embedded));
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_inline));
+	ret.ids.Add(static_cast<uint32_t>(input_info->gs_prolog));
+	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_reg));
+	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_buffer_reg));
 	ret.ids.Add(input_info->resources_num);
 	ret.ids.Add(input_info->export_count);
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_data_num));
