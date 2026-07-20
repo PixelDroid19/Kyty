@@ -189,6 +189,9 @@ TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 	*reinterpret_cast<uint16_t*>(param_blob + 0) = 40;
 	*reinterpret_cast<int16_t*>(param_blob + 2)  = 0;
 	*reinterpret_cast<uint32_t*>(param_blob + 4) = 0x40010000u;
+	*reinterpret_cast<uint32_t*>(param_blob + 8)  = 0x12u;
+	*reinterpret_cast<uint32_t*>(param_blob + 12) = 2;
+	*reinterpret_cast<uint32_t*>(param_blob + 16) = 44100;
 
 	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(param_blob)), 0);
 
@@ -213,6 +216,13 @@ TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 	*reinterpret_cast<uint32_t*>(custom_module_blob + 4) = 0x40001300u;
 	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(custom_module_blob)), 0);
 
+	// Additional custom-sampler module controls remain opaque until their
+	// guest-visible effect is captured; accepting the class must not abort.
+	alignas(uint64_t) uint8_t opaque_sampler_blob[8] = {};
+	*reinterpret_cast<uint16_t*>(opaque_sampler_blob + 0) = sizeof(opaque_sampler_blob);
+	*reinterpret_cast<uint32_t*>(opaque_sampler_blob + 4) = 0x40010005u;
+	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(opaque_sampler_blob)), 0);
+
 	// Observed GetState size 48 for CustomSampler (same block as Sampler, not 80).
 	alignas(uint64_t) uint8_t state_blob[48] = {};
 	for (auto& b: state_blob)
@@ -224,6 +234,72 @@ TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 	EXPECT_EQ(*reinterpret_cast<uint32_t*>(state_blob), 0u);
 
 	// Keep buffers alive for the process-global NGS lists used by HLE.
+	sys_storage.release();
+	rack_storage.release();
+}
+
+TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	alignas(uint64_t) uint64_t raw_sys_info[8] = {};
+	auto*                      sys_info        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_sys_info);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, sys_info), 0);
+	std::unique_ptr<uint8_t[]> sys_storage(new uint8_t[raw_sys_info[1]]);
+	raw_sys_info[0]  = reinterpret_cast<uintptr_t>(sys_storage.get());
+	uintptr_t system = 0;
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, sys_info, &system), 0);
+
+	alignas(uint64_t) uint8_t raw_option[0x518]     = {};
+	*reinterpret_cast<size_t*>(raw_option)          = sizeof(raw_option);
+	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = 1;
+	alignas(uint64_t) uint64_t raw_rack_info[8]     = {};
+	auto*                      rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info), 0);
+	std::unique_ptr<uint8_t[]> rack_storage(new uint8_t[raw_rack_info[1]]);
+	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.get());
+	uintptr_t rack   = 0;
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info, &rack), 0);
+	uintptr_t voice = 0;
+	ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, &voice), 0);
+
+	alignas(uint64_t) uint8_t format_param[40] = {};
+	*reinterpret_cast<uint16_t*>(format_param + 0)  = sizeof(format_param);
+	*reinterpret_cast<uint32_t*>(format_param + 4)  = 0x40010000u;
+	*reinterpret_cast<uint32_t*>(format_param + 8)  = 0x12u;
+	*reinterpret_cast<uint32_t*>(format_param + 12) = 1;
+	*reinterpret_cast<uint32_t*>(format_param + 16) = 44100;
+	ASSERT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(format_param)), 0);
+
+	constexpr uint64_t kSourceFrames = 512;
+	alignas(uint64_t) int16_t source[kSourceFrames];
+	for (auto& sample: source)
+	{
+		sample = 16384;
+	}
+	alignas(uint64_t) uint64_t waveform_context[5] = {0, sizeof(source), 0, kSourceFrames, 0};
+	alignas(uint64_t) uint8_t  waveform_param[32]   = {};
+	*reinterpret_cast<uint16_t*>(waveform_param + 0)  = sizeof(waveform_param);
+	*reinterpret_cast<uint32_t*>(waveform_param + 4)  = 0x40010001u;
+	*reinterpret_cast<uintptr_t*>(waveform_param + 8) = reinterpret_cast<uintptr_t>(source);
+	*reinterpret_cast<uint32_t*>(waveform_param + 16) = 0x11u;
+	*reinterpret_cast<uint32_t*>(waveform_param + 20) = 1u;
+	*reinterpret_cast<uintptr_t*>(waveform_param + 24) = reinterpret_cast<uintptr_t>(waveform_context);
+	ASSERT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(waveform_param)), 0);
+
+	const uint32_t play_command[3] = {2, 0x400, 1};
+	ASSERT_EQ(Ngs2::Ngs2VoiceRunCommands(voice, play_command, 1), 0);
+
+	alignas(uint64_t) float output[256 * 2] = {};
+	alignas(uint64_t) uint64_t render_info[3] = {reinterpret_cast<uintptr_t>(output), sizeof(output), (uint64_t {2} << 32u) | 24u};
+	ASSERT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1), 0);
+	EXPECT_NE(output[0], 0.0f);
+	EXPECT_FLOAT_EQ(output[0], output[1]);
+
 	sys_storage.release();
 	rack_storage.release();
 }
