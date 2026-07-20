@@ -24,10 +24,13 @@ public:
 	GpuSubmissionResult BeginRecording(GpuQueueId queue, uint32_t slot, SubmissionId* id,
 	                                   SubmissionDependency* blocking_dependency);
 	GpuSubmissionResult AddCompletionAction(SubmissionId id, GpuCompletionPhase phase, uint64_t token);
+	GpuSubmissionResult RegisterProducer(SubmissionId id, uint64_t address, uint32_t size_bytes, uint64_t value);
 	GpuSubmissionResult MarkSubmitted(SubmissionId id);
 	GpuSubmissionResult MarkCompletedWithoutActions(SubmissionId id);
 	GpuSubmissionResult RetireCompleted(SubmissionId id);
 	GpuSubmissionResult GetState(SubmissionId id, GpuSubmissionState* state);
+	GpuSubmissionResult FindPendingProducer(uint64_t address, uint32_t size_bytes, uint64_t reference, uint64_t mask,
+	                                        SubmissionDependency* dependency);
 
 private:
 	Core::Mutex          m_mutex;

@@ -5,7 +5,6 @@
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
-#include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Utils.h"
@@ -77,11 +76,6 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
 	EXIT_IF(vk_obj->buffer == nullptr);
 	EXIT_IF(ctx == nullptr);
 
-	EXIT_IF(vk_obj->cp == nullptr);
-
-	// All submitted commands that refer to any element of pDescriptorSets must have completed execution
-	GraphicsRunCommandProcessorWait(vk_obj->cp);
-
 	if (vk_obj->depth_meta_addr != 0)
 	{
 		void* data = nullptr;
@@ -152,11 +146,6 @@ GpuObject::delete_func_t StorageBufferGpuObject::GetDeleteFunc() const
 GpuObject::update_func_t StorageBufferGpuObject::GetUpdateFunc() const
 {
 	return update_func;
-}
-
-void StorageBufferSet(CommandBuffer* cmd_buffer, StorageVulkanBuffer* buffer)
-{
-	buffer->cp = cmd_buffer->GetParent();
 }
 
 } // namespace Kyty::Libs::Graphics

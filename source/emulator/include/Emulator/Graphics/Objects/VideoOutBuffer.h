@@ -79,6 +79,21 @@ struct VideoOutHostExtentSetState
 [[nodiscard]] VideoOutHostExtentStatus VideoOutBufferSelectHostExtent(VideoOutVulkanImage* image, uint32_t width, uint32_t height,
                                                                       VideoOutHostExtentState* state);
 [[nodiscard]] bool                     VideoOutBufferGetHostExtentState(VideoOutVulkanImage* image, VideoOutHostExtentState* state);
+
+enum class VideoOutPublishedImageRefreshStatus
+{
+	Published,
+	ExtentConflict,
+	InvalidArgument,
+};
+
+// Applies the VideoOut-owned host extent before publishing a newly resolved
+// GpuMemory backing. The cache is observational only and remains unchanged if
+// the current backing cannot honor the registered extent.
+[[nodiscard]] VideoOutPublishedImageRefreshStatus
+VideoOutBufferRefreshPublishedImage(VideoOutVulkanImage* current, uint32_t host_width, uint32_t host_height,
+                                    VideoOutVulkanImage** published_cache);
+
 // Locks every unique image in a stable order and preflights the complete set before selecting any image, so concurrent set selection cannot
 // publish a partial or non-uniform extent. Duplicate images are invalid input.
 [[nodiscard]] VideoOutHostExtentSetSelectionStatus VideoOutBufferSelectHostExtentSet(VideoOutVulkanImage* const* images,

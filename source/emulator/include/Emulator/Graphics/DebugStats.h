@@ -19,6 +19,7 @@ enum class DebugStatsGpuMemoryCreateOutcome
 {
 	FastReuse,
 	ExactReuse,
+	CoveredReuse,
 	NewStandalone,
 	NewLinked,
 	NewFromObjects,
@@ -29,6 +30,7 @@ struct DebugStatsGpuMemoryTypeSnapshot
 {
 	uint64_t fast_reuse       = 0;
 	uint64_t exact_reuse      = 0;
+	uint64_t covered_reuse    = 0;
 	uint64_t new_standalone   = 0;
 	uint64_t new_linked       = 0;
 	uint64_t new_from_objects = 0;

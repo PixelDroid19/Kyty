@@ -9,7 +9,6 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/Objects/LabelSubmissionTracker.h"
 #include "Emulator/Graphics/Utils.h"
-#include "Emulator/Profiler.h"
 
 #include <atomic>
 #include <cinttypes>
@@ -33,12 +32,13 @@ enum LabelStatus
 
 struct LabelCallbacks
 {
+	SubmissionId              submission;
 	uint64_t*                  dst_gpu_addr64       = nullptr;
 	uint64_t                   value64              = 0;
 	uint32_t*                  dst_gpu_addr32       = nullptr;
 	uint32_t                   value32              = 0;
-	LabelGpuObject::callback_t callback_1           = nullptr;
-	LabelGpuObject::callback_t callback_2           = nullptr;
+	LabelCallback callback_1 = nullptr;
+	LabelCallback callback_2 = nullptr;
 	uint64_t                   args[LABEL_ARGS_MAX] = {};
 };
 
@@ -49,6 +49,7 @@ struct Label
 	LabelStatus       status = LabelStatus::New;
 	LabelCallbacks    callbacks;
 	CommandProcessor* cp = nullptr;
+	bool              exact_submission_completed = false;
 };
 
 class LabelManager
@@ -63,15 +64,16 @@ public:
 	virtual ~LabelManager() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(LabelManager);
 
-	Label* Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelGpuObject::callback_t callback_1,
-	                LabelGpuObject::callback_t callback_2, const uint64_t* args);
-	Label* Create32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value, LabelGpuObject::callback_t callback_1,
-	                LabelGpuObject::callback_t callback_2, const uint64_t* args);
+	Label* Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelCallback callback_1,
+	                LabelCallback callback_2, const uint64_t* args);
+	Label* Create32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value, uint32_t dst_word_count,
+	                LabelCallback callback_1, LabelCallback callback_2, const uint64_t* args);
 	void   Delete(Label* label);
 	void   Set(CommandBuffer* buffer, Label* label);
 	void   DrainCompleted();
 	void   CompleteSubmission(SubmissionId submission);
 	void   WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size);
+	void   ReleaseMappedRange(uint64_t addr, uint64_t bytes);
 
 private:
 	static void ThreadRun(void* data);
@@ -86,33 +88,95 @@ private:
 	// Exact logical submission containing each active Label's vkCmdSetEvent.
 	// Protected by m_mutex together with m_labels and Label::status.
 	LabelSubmissionTracker m_submission_labels;
-	// OnlyFlip ActiveDeleted labels force-completed under BufferFlush: destroy
-	// here (Label thread) so GraphicsRunCommandProcessorWait is not nested under
-	// the CommandProcessor mutex.
+	// Legacy labels that are not bound to an exact submission may still need
+	// destruction on the Label thread.
 	Vector<Label*> m_deferred_destroy;
-	// Durable WriteBack holes for fence addresses that have ever been a Label
-	// dst. Survives GpuMemory Label reclaim / delete so StorageBuffer WriteBack
-	// cannot zero guest EOP words after the Label object is gone.
-	Vector<uint64_t> m_fence_hole_begin;
-	Vector<uint64_t> m_fence_hole_end;
+	LabelFenceRegistry m_fence_holes;
 
 	void RegisterFenceHole(uint64_t addr, uint64_t bytes);
 };
 
 static LabelManager* g_label_manager = nullptr;
 
-void LabelManager::RegisterFenceHole(uint64_t addr, uint64_t bytes)
+LabelFenceRegistrationStatus LabelFenceRegistry::Register(uint64_t addr, uint64_t bytes)
 {
-	EXIT_IF(bytes == 0);
-	for (int i = 0; i < static_cast<int>(m_fence_hole_begin.Size()); i++)
+	if (bytes == 0 || bytes > UINT64_MAX - addr)
 	{
-		if (m_fence_hole_begin.At(i) == addr && (m_fence_hole_end.At(i) - m_fence_hole_begin.At(i)) == bytes)
+		return LabelFenceRegistrationStatus::InvalidArgument;
+	}
+
+	const uint64_t end = addr + bytes;
+	for (int i = 0; i < static_cast<int>(m_begin.Size()); i++)
+	{
+		if (m_begin.At(i) == addr && m_end.At(i) == end)
 		{
-			return;
+			return LabelFenceRegistrationStatus::AlreadyRegistered;
 		}
 	}
-	m_fence_hole_begin.Add(addr);
-	m_fence_hole_end.Add(addr + bytes);
+
+	m_begin.Add(addr);
+	m_end.Add(end);
+	return LabelFenceRegistrationStatus::Inserted;
+}
+
+LabelFenceReleaseStatus LabelFenceRegistry::ReleaseAllocation(uint64_t addr, uint64_t bytes)
+{
+	if (bytes == 0 || bytes > UINT64_MAX - addr)
+	{
+		return LabelFenceReleaseStatus::InvalidArgument;
+	}
+
+	const uint64_t end      = addr + bytes;
+	bool           released = false;
+	for (int i = 0; i < static_cast<int>(m_begin.Size()); i++)
+	{
+		const uint64_t hole_begin = m_begin.At(i);
+		const uint64_t hole_end   = m_end.At(i);
+		if (hole_begin >= end || addr >= hole_end)
+		{
+			continue;
+		}
+		if (hole_begin < addr || hole_end > end)
+		{
+			return LabelFenceReleaseStatus::PartialOverlap;
+		}
+		released = true;
+	}
+
+	if (!released)
+	{
+		return LabelFenceReleaseStatus::NotFound;
+	}
+
+	for (int i = static_cast<int>(m_begin.Size()) - 1; i >= 0; i--)
+	{
+		if (m_begin.At(i) >= addr && m_end.At(i) <= end)
+		{
+			m_begin.RemoveAt(i);
+			m_end.RemoveAt(i);
+		}
+	}
+	return LabelFenceReleaseStatus::Released;
+}
+
+void LabelFenceRegistry::Snapshot(Vector<uint64_t>* begin, Vector<uint64_t>* end) const
+{
+	EXIT_IF(begin == nullptr);
+	EXIT_IF(end == nullptr);
+
+	begin->Clear();
+	end->Clear();
+	for (int i = 0; i < static_cast<int>(m_begin.Size()); i++)
+	{
+		begin->Add(m_begin.At(i));
+		end->Add(m_end.At(i));
+	}
+}
+
+void LabelManager::RegisterFenceHole(uint64_t addr, uint64_t bytes)
+{
+	const auto result = m_fence_holes.Register(addr, bytes);
+	EXIT_NOT_IMPLEMENTED(result == LabelFenceRegistrationStatus::InvalidArgument);
 }
 
 void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
@@ -128,7 +192,7 @@ void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 		bool write = true;
 		if (label.callback_1 != nullptr)
 		{
-			write = label.callback_1(label.args);
+			write = label.callback_1(label.submission, label.args);
 		}
 		allow_store.Add(write);
 	}
@@ -165,7 +229,7 @@ void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 		if (label.callback_2 != nullptr)
 		{
 			interrupt_cbs++;
-			label.callback_2(label.args);
+			label.callback_2(label.submission, label.args);
 		}
 	}
 
@@ -346,7 +410,8 @@ void LabelManager::CompleteSubmission(SubmissionId submission)
 			                                 : LabelForceCompleteKind::FireKeep);
 			EXIT_NOT_IMPLEMENTED(action != tracked_action);
 
-			label->status = LabelStatus::NotActive;
+			label->status                     = LabelStatus::NotActive;
+			label->exact_submission_completed = true;
 			fired_labels.Add(label->callbacks);
 			if (action == LabelForceCompleteKind::FireDestroy)
 			{
@@ -359,16 +424,15 @@ void LabelManager::CompleteSubmission(SubmissionId submission)
 			auto index = m_labels.Find(label);
 			EXIT_NOT_IMPLEMENTED(!m_labels.IndexValid(index));
 			m_labels.RemoveAt(index);
-			m_deferred_destroy.Add(label);
-		}
-
-		if (!destroy_labels.IsEmpty())
-		{
-			m_cond_var.Signal();
 		}
 	}
 
 	FireCallbacks(fired_labels);
+
+	for (auto& label: destroy_labels)
+	{
+		Destroy(label);
+	}
 }
 
 void LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size)
@@ -381,36 +445,7 @@ void LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t 
 
 	{
 		Core::LockGuard lock(m_mutex);
-
-		for (int i = 0; i < static_cast<int>(m_fence_hole_begin.Size()); i++)
-		{
-			hole_begin.Add(m_fence_hole_begin.At(i));
-			hole_end.Add(m_fence_hole_end.At(i));
-		}
-
-		auto add_holes = [&](Label* label) {
-			if (label->callbacks.dst_gpu_addr64 != nullptr)
-			{
-				const uint64_t addr = reinterpret_cast<uint64_t>(label->callbacks.dst_gpu_addr64);
-				hole_begin.Add(addr);
-				hole_end.Add(addr + 8u);
-			}
-			if (label->callbacks.dst_gpu_addr32 != nullptr)
-			{
-				const uint64_t addr = reinterpret_cast<uint64_t>(label->callbacks.dst_gpu_addr32);
-				hole_begin.Add(addr);
-				hole_end.Add(addr + 4u);
-			}
-		};
-
-		for (auto& label: m_labels)
-		{
-			add_holes(label);
-		}
-		for (auto& label: m_deferred_destroy)
-		{
-			add_holes(label);
-		}
+		m_fence_holes.Snapshot(&hole_begin, &hole_end);
 	}
 
 	static const bool eop_trace = (std::getenv("KYTY_EOP_TRACE") != nullptr);
@@ -446,8 +481,19 @@ void LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t 
 	MemcpySkipAbsoluteRanges(guest_dst, gpu_src, size, hole_begin.GetData(), hole_end.GetData(), static_cast<int>(hole_begin.Size()));
 }
 
-Label* LabelManager::Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelGpuObject::callback_t callback_1,
-                              LabelGpuObject::callback_t callback_2, const uint64_t* args)
+void LabelManager::ReleaseMappedRange(uint64_t addr, uint64_t bytes)
+{
+	Core::LockGuard lock(m_mutex);
+	const auto      result = m_fence_holes.ReleaseAllocation(addr, bytes);
+	if (result == LabelFenceReleaseStatus::InvalidArgument || result == LabelFenceReleaseStatus::PartialOverlap)
+	{
+		EXIT("Label fence allocation release failed: address=0x%016" PRIx64 ", size=0x%016" PRIx64 ", status=%u\n", addr, bytes,
+		     static_cast<uint32_t>(result));
+	}
+}
+
+Label* LabelManager::Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelCallback callback_1,
+                              LabelCallback callback_2, const uint64_t* args)
 {
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(args == nullptr);
@@ -491,8 +537,8 @@ Label* LabelManager::Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint6
 	return label;
 }
 
-Label* LabelManager::Create32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value, LabelGpuObject::callback_t callback_1,
-                              LabelGpuObject::callback_t callback_2, const uint64_t* args)
+Label* LabelManager::Create32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value, uint32_t dst_word_count,
+                              LabelCallback callback_1, LabelCallback callback_2, const uint64_t* args)
 {
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(args == nullptr);
@@ -517,9 +563,9 @@ Label* LabelManager::Create32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint3
 		label->callbacks.args[i] = args[i];
 	}
 
-	if (dst_gpu_addr != nullptr)
+	if (dst_gpu_addr != nullptr && dst_word_count != 0)
 	{
-		RegisterFenceHole(reinterpret_cast<uint64_t>(dst_gpu_addr), 4u);
+		RegisterFenceHole(reinterpret_cast<uint64_t>(dst_gpu_addr), LabelDwordStoreSizeBytes(dst_word_count));
 	}
 
 	VkEventCreateInfo create_info {};
@@ -571,8 +617,13 @@ void LabelManager::Destroy(Label* label)
 	EXIT_IF(label->device == nullptr);
 	EXIT_IF(label->cp == nullptr);
 
-	// All submitted commands that refer to event must have completed execution
-	GraphicsRunCommandProcessorWait(label->cp);
+	if (!label->exact_submission_completed)
+	{
+		// Legacy/unbound event polling proves only that vkCmdSetEvent executed;
+		// it does not prove that every later command referencing the event has
+		// completed. Exact-bound labels arrive here only after their fence.
+		GraphicsRunCommandProcessorWait(label->cp);
+	}
 
 	vkDestroyEvent(label->device, label->event, nullptr);
 
@@ -608,7 +659,9 @@ void LabelManager::Set(CommandBuffer* buffer, Label* label)
 	const auto bind_result = m_submission_labels.Bind(reinterpret_cast<uint64_t>(label), submission);
 	EXIT_NOT_IMPLEMENTED(bind_result != LabelSubmissionResult::Success);
 
-	label->status = LabelStatus::Active;
+	label->callbacks.submission          = submission;
+	label->status                        = LabelStatus::Active;
+	label->exact_submission_completed = false;
 
 	EXIT_IF(label->event == nullptr);
 
@@ -631,20 +684,20 @@ void LabelInit()
 	g_label_manager = new LabelManager;
 }
 
-Label* LabelCreate64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelGpuObject::callback_t callback_1,
-                     LabelGpuObject::callback_t callback_2, const uint64_t* args)
+Label* LabelCreate64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelCallback callback_1,
+                     LabelCallback callback_2, const uint64_t* args)
 {
 	EXIT_IF(g_label_manager == nullptr);
 
 	return g_label_manager->Create64(ctx, dst_gpu_addr, value, callback_1, callback_2, args);
 }
 
-Label* LabelCreate32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value, LabelGpuObject::callback_t callback_1,
-                     LabelGpuObject::callback_t callback_2, const uint64_t* args)
+Label* LabelCreate32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value, uint32_t dst_word_count,
+                     LabelCallback callback_1, LabelCallback callback_2, const uint64_t* args)
 {
 	EXIT_IF(g_label_manager == nullptr);
 
-	return g_label_manager->Create32(ctx, dst_gpu_addr, value, callback_1, callback_2, args);
+	return g_label_manager->Create32(ctx, dst_gpu_addr, value, dst_word_count, callback_1, callback_2, args);
 }
 
 void LabelDelete(Label* label)
@@ -682,69 +735,11 @@ void LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size)
 	g_label_manager->WriteBackCopy(guest_dst, gpu_src, size);
 }
 
-static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
-                         VulkanMemory* /*mem*/)
+void LabelReleaseMappedRange(uint64_t addr, uint64_t bytes)
 {
-	KYTY_PROFILER_BLOCK("LabelGpuObject::Create");
+	EXIT_IF(g_label_manager == nullptr);
 
-	EXIT_IF(vaddr_num != 1 || size == nullptr || vaddr == nullptr || *vaddr == 0);
-
-	EXIT_NOT_IMPLEMENTED(*size != 8 && *size != 4);
-
-	auto value      = params[LabelGpuObject::PARAM_VALUE];
-	auto callback_1 = reinterpret_cast<LabelGpuObject::callback_t>(params[LabelGpuObject::PARAM_CALLBACK_1]);
-	auto callback_2 = reinterpret_cast<LabelGpuObject::callback_t>(params[LabelGpuObject::PARAM_CALLBACK_2]);
-
-	auto* label_obj = (*size == 8 ? LabelCreate64(ctx, reinterpret_cast<uint64_t*>(*vaddr), value, callback_1, callback_2,
-	                                              params + LabelGpuObject::PARAM_ARG_1)
-	                              : (*size == 4 ? LabelCreate32(ctx, reinterpret_cast<uint32_t*>(*vaddr), static_cast<uint32_t>(value),
-	                                                            callback_1, callback_2, params + LabelGpuObject::PARAM_ARG_1)
-	                                            : nullptr));
-
-	EXIT_NOT_IMPLEMENTED(label_obj == nullptr);
-
-	return label_obj;
-}
-
-static void update_func(GraphicContext* /*ctx*/, const uint64_t* /*params*/, void* /*obj*/, const uint64_t* /*vaddr*/,
-                        const uint64_t* /*size*/, int /*vaddr_num*/)
-{
-	KYTY_PROFILER_BLOCK("LabelGpuObject::update_func");
-
-	KYTY_NOT_IMPLEMENTED;
-}
-
-static void delete_func(GraphicContext* /*ctx*/, void* obj, VulkanMemory* /*mem*/)
-{
-	KYTY_PROFILER_BLOCK("LabelGpuObject::delete_func");
-
-	auto* label_obj = reinterpret_cast<Label*>(obj);
-
-	EXIT_IF(label_obj == nullptr);
-
-	LabelDelete(label_obj);
-}
-
-bool LabelGpuObject::Equal(const uint64_t* /*other*/) const
-{
-	// Each EOP submission owns a distinct event. The guest may reuse the same
-	// fence address and value before the previous command has completed.
-	return false;
-}
-
-GpuObject::create_func_t LabelGpuObject::GetCreateFunc() const
-{
-	return create_func;
-}
-
-GpuObject::delete_func_t LabelGpuObject::GetDeleteFunc() const
-{
-	return delete_func;
-}
-
-GpuObject::update_func_t LabelGpuObject::GetUpdateFunc() const
-{
-	return update_func;
+	g_label_manager->ReleaseMappedRange(addr, bytes);
 }
 
 } // namespace Kyty::Libs::Graphics

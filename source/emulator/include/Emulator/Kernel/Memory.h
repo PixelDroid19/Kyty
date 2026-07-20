@@ -22,6 +22,42 @@ void RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func);
 // and GpuMemoryMode. Returns false for unsupported prot values.
 bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode);
 
+enum class KernelGpuMappingPromotionStatus : uint8_t
+{
+	Promoted,
+	Retained,
+	NotContained,
+	InvalidArgument,
+	UnmapPending,
+};
+
+enum class KernelGpuMappingRegistrationAction : uint8_t
+{
+	RegisterOwnerMapping,
+	RegisterProtectedRange,
+	Retain,
+	Reject,
+};
+
+constexpr KernelGpuMappingRegistrationAction KernelGpuMappingRegistrationActionFor(KernelGpuMappingPromotionStatus status)
+{
+	switch (status)
+	{
+		case KernelGpuMappingPromotionStatus::Promoted: return KernelGpuMappingRegistrationAction::RegisterOwnerMapping;
+		case KernelGpuMappingPromotionStatus::Retained: return KernelGpuMappingRegistrationAction::Retain;
+		case KernelGpuMappingPromotionStatus::NotContained: return KernelGpuMappingRegistrationAction::RegisterProtectedRange;
+		case KernelGpuMappingPromotionStatus::InvalidArgument:
+		case KernelGpuMappingPromotionStatus::UnmapPending: return KernelGpuMappingRegistrationAction::Reject;
+	}
+	return KernelGpuMappingRegistrationAction::Reject;
+}
+
+// A mapping that has ever become GPU-visible owns GPU cleanup until unmap.
+// NoAccess protection changes never demote this lifetime obligation.
+[[nodiscard]] KernelGpuMappingPromotionStatus KernelPromoteGpuMappingRange(
+    uint64_t mapping_addr, uint64_t mapping_size, uint64_t protected_addr, uint64_t protected_size,
+    Graphics::GpuMemoryMode requested_mode, Graphics::GpuMemoryMode* cleanup_mode);
+
 int KYTY_SYSV_ABI    KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags, const char* name);
 int KYTY_SYSV_ABI    KernelMapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags);
 int KYTY_SYSV_ABI    KernelReserveVirtualRange(void** addr_in_out, uint64_t len, int flags, uint64_t alignment);

@@ -64,6 +64,7 @@ enum class GpuSubmissionResult : uint8_t
 	SubmissionFrozen,
 	SlotBusy,
 	ProducerNotFound,
+	ProducerValueMismatch,
 	AlreadyCompleted,
 	CompletionActionsPending,
 };

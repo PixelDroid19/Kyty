@@ -5,6 +5,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/GpuSubmissionTracker.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -46,6 +47,13 @@ enum class GpuMemoryScenario
 	Common,
 	GenerateMips,
 	TextureTriplet
+};
+
+enum class GpuMemoryRangeValidationStatus : uint8_t
+{
+	Valid,
+	InvalidArgument,
+	Unallocated,
 };
 
 enum class GpuMemoryOverlapType : uint64_t
@@ -260,6 +268,20 @@ inline bool GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType existing_
 	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
+// A draw often requests a shorter prefix of the same guest index allocation.
+// Reuse only an already-created buffer that starts at the exact same guest
+// address and fully covers the requested bytes. Offset views require an
+// explicit Vulkan bind offset and therefore remain a separate contract.
+inline bool GpuMemoryCanReuseIndexBacking(uint64_t existing_addr, uint64_t existing_size, uint64_t incoming_addr,
+                                          uint64_t incoming_size)
+{
+	if (existing_size == 0 || incoming_size == 0 || existing_addr != incoming_addr)
+	{
+		return false;
+	}
+	return existing_size >= incoming_size;
+}
+
 // Peer VertexBuffer overlapping an incoming VertexBuffer: reclaim (delete) the
 // older VB. Captured multi-parent set mixes surface links with VB
 // IsContainedWithin + Crosses parents of the same new VertexBuffer.
@@ -392,30 +414,6 @@ inline bool GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType existing_type
 	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
-// Keep GpuMemory Label objects linked when a StorageBuffer aliases their fence
-// words. Deleting Labels removes them from LabelWriteBackCopy's hole set, so a
-// later StorageBuffer WriteBack can zero guest EOP fences (immediate store /
-// FireCallbacks publish) and leave CPU code spinning with val=0 — guest then
-// never reaches KernelSetEventFlag(ThreadFlag). Captured Dead Cells soft-lock:
-// EVENTFLAG_SET=0 while OnlyFlip still presents.
-inline bool GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
-                                           GpuMemoryObjectType incoming_type)
-{
-	if (existing_type == GpuMemoryObjectType::Label && incoming_type == GpuMemoryObjectType::StorageBuffer)
-	{
-		return relation == GpuMemoryOverlapType::IsContainedWithin || relation == GpuMemoryOverlapType::Equals ||
-		       relation == GpuMemoryOverlapType::Crosses;
-	}
-	// Creating a Label inside an existing StorageBuffer: link both so the Label
-	// stays registered for WriteBack holes (do not reclaim the StorageBuffer).
-	if (existing_type == GpuMemoryObjectType::StorageBuffer && incoming_type == GpuMemoryObjectType::Label)
-	{
-		return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals ||
-		       relation == GpuMemoryOverlapType::Crosses;
-	}
-	return false;
-}
-
 // WriteBack (GPU -> CPU) hash bookkeeping for aliased objects.
 //
 // Observed Gen5 topology (private title after post-menu load): a RW
@@ -515,6 +513,29 @@ struct GpuMemoryObject
 	void*               obj  = nullptr;
 };
 
+enum class GpuMemoryMutationAction : uint8_t
+{
+	None,
+	UpdateInPlace,
+	VersionBacking,
+	RejectWriteBackConflict,
+};
+
+[[nodiscard]] constexpr GpuMemoryMutationAction GpuMemoryChooseMutationAction(bool content_changed, bool update_suppressed,
+                                                                               bool backing_has_pending_uses,
+                                                                               bool write_back_capable)
+{
+	if (!content_changed || update_suppressed)
+	{
+		return GpuMemoryMutationAction::None;
+	}
+	if (!backing_has_pending_uses)
+	{
+		return GpuMemoryMutationAction::UpdateInPlace;
+	}
+	return write_back_capable ? GpuMemoryMutationAction::RejectWriteBackConflict : GpuMemoryMutationAction::VersionBacking;
+}
+
 class GpuObject
 {
 public:
@@ -590,7 +611,12 @@ inline void GpuMemoryHostGuestMallocPageCover(uint64_t vaddr, uint64_t size, uin
 }
 
 void  GpuMemorySetAllocatedRange(uint64_t vaddr, uint64_t size);
-void  GpuMemoryFree(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool unmap);
+[[nodiscard]] GpuMemoryRangeValidationStatus GpuMemoryValidateAllocatedRange(uint64_t vaddr, uint64_t size);
+void  GpuMemoryFree(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
+// Requires GraphicsRunWithQuiescedSubmissions to own the admission gate. The
+// guest VA must remain mapped until this call has written back and detached
+// every resource in the range.
+void  GpuMemoryFreeMappedRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 void* GpuMemoryCreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size,
                             const GpuObject& info);
 void* GpuMemoryCreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
@@ -600,7 +626,8 @@ void  GpuMemoryDbgDump();
 void  GpuMemoryFlush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 void  GpuMemoryFlushAll(GraphicContext* ctx);
 void  GpuMemoryFrameDone();
-void  GpuMemoryWriteBack(GraphicContext* ctx, CommandProcessor* cp);
+void  GpuMemoryWriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
+void  GpuMemoryCompleteSubmission(SubmissionId submission);
 // GPU→CPU for StorageBuffers overlapping [vaddr, size) before a CPU texture
 // upload. Tile-27 samples that miss RT/ST still link SB parents; without this
 // detile reads empty guest memory and paints opaque-black props.
@@ -611,6 +638,16 @@ bool  GpuMemoryWatcherEnabled();
 Vector<GpuMemoryObject> GpuMemoryFindObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, bool exact, bool only_first);
 Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type,
                                              bool exact, bool only_first);
+// Atomically finds matching objects and records the exact submission high-water
+// before exposing their raw Vulkan handles to the caller.
+Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size,
+                                                          GpuMemoryObjectType type, bool exact, bool only_first);
+Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, const uint64_t* vaddr, const uint64_t* size,
+                                                          int vaddr_num, GpuMemoryObjectType type, bool exact, bool only_first);
+Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size,
+                                                          GpuMemoryObjectType type, bool exact, bool only_first);
+Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
+                                                          int vaddr_num, GpuMemoryObjectType type, bool exact, bool only_first);
 bool GpuMemoryQueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 
 inline bool GpuMemoryCanShareReadOnlyStorageViews(uint64_t existing_addr, uint64_t existing_size, bool existing_read_only,

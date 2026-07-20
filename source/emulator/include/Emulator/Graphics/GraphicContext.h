@@ -36,8 +36,6 @@ typedef struct VkPipelineViewportDepthClipControlCreateInfoEXT
 
 namespace Kyty::Libs::Graphics {
 
-class CommandProcessor;
-
 struct VulkanSwapchain
 {
 	VkSwapchainKHR swapchain                  = nullptr;
@@ -90,6 +88,8 @@ struct GraphicContext
 	VkDevice                 device          = nullptr;
 	VkPipelineCache          pipeline_cache   = nullptr;
 	VulkanQueueInfo          queues[QUEUES_NUM];
+	Core::Mutex              queue_mutexes[QUEUES_NUM];
+	uint32_t                 queue_mutex_count = 0;
 
 	// VK_EXT_color_write_enable is unavailable on some drivers (notably MoltenVK
 	// on Apple Silicon). When false, color write masking falls back to being
@@ -218,7 +218,6 @@ struct VulkanBuffer
 
 struct StorageVulkanBuffer: public VulkanBuffer
 {
-	CommandProcessor* cp              = nullptr;
 	uint64_t          guest_addr      = 0;
 	uint64_t          guest_size      = 0;
 	uint64_t          depth_meta_addr = 0;

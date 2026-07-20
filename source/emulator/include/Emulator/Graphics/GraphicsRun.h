@@ -4,6 +4,10 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/GpuSubmissionTracker.h"
+
+#include <mutex>
+#include <utility>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -13,6 +17,38 @@ class CommandProcessor;
 namespace HW {
 struct CsStageRegisters;
 }
+
+// Serializes command admission with teardown transactions. A quiesced action
+// keeps admission closed across both the GPU drain and the caller-owned host
+// lifetime change (for example, unmapping guest virtual memory).
+class GpuSubmissionAdmissionGate
+{
+public:
+	GpuSubmissionAdmissionGate()  = default;
+	~GpuSubmissionAdmissionGate() = default;
+
+	KYTY_CLASS_NO_COPY(GpuSubmissionAdmissionGate);
+
+	template <typename Action>
+	decltype(auto) RunAdmitted(Action&& action)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		return std::forward<Action>(action)();
+	}
+
+	template <typename Drain, typename Action>
+	decltype(auto) RunQuiesced(Drain&& drain, Action&& action)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		std::forward<Drain>(drain)();
+		return std::forward<Action>(action)();
+	}
+
+private:
+	std::mutex m_mutex;
+};
+
+using GraphicsRunQuiescedAction = bool (*)(void*);
 
 void GraphicsRunInit();
 bool GraphicsDecodeComputeResourceLimits(HW::CsStageRegisters* regs, uint32_t cmd_offset, const uint32_t* values,
@@ -29,9 +65,8 @@ void     GraphicsRunDone();
 void     GraphicsRunDingDong(uint32_t ring_id, uint32_t offset_dw);
 int      GraphicsRunGetFrameNum();
 bool     GraphicsRunAreSubmitsAllowed();
+bool     GraphicsRunWithQuiescedSubmissions(GraphicsRunQuiescedAction action, void* data);
 
-void GraphicsRunCommandProcessorLock(CommandProcessor* cp);
-void GraphicsRunCommandProcessorUnlock(CommandProcessor* cp);
 void GraphicsRunCommandProcessorFlush(CommandProcessor* cp);
 void GraphicsRunCommandProcessorWait(CommandProcessor* cp);
 
