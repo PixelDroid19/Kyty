@@ -227,18 +227,25 @@ inline bool GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType existing_type,
 	       relation == GpuMemoryOverlapType::Contains;
 }
 
-// Incoming VertexBuffer fully or partially covered by an existing storage or
-// render-target allocation (captured: VB Contained in StorageBuffer +
-// RenderTexture that share the same guest range).
+// Incoming VertexBuffer fully or partially covered by an existing storage,
+// color-target, or depth-target allocation (captured: VB Contained in
+// StorageBuffer + RenderTexture that share the same guest range).
 // Also captured multi-parent create: new VB 0x12500 with parents
 // SB/RT IsContainedWithin (surface sits inside the new VB range) and
 // SB/RT Crosses — link all surface directions rather than EXIT.
+// A later scene-load capture has a large VB crossing active depth and stencil
+// planes plus a co-located SB/RT pair. Link only the observed DS Crosses form;
+// reclaiming the active depth target would discard guest GPU state.
 inline bool GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                     GpuMemoryObjectType incoming_type)
 {
 	if (incoming_type != GpuMemoryObjectType::VertexBuffer)
 	{
 		return false;
+	}
+	if (existing_type == GpuMemoryObjectType::DepthStencilBuffer)
+	{
+		return relation == GpuMemoryOverlapType::Crosses;
 	}
 	if (existing_type != GpuMemoryObjectType::StorageBuffer && existing_type != GpuMemoryObjectType::RenderTexture &&
 	    existing_type != GpuMemoryObjectType::Texture && existing_type != GpuMemoryObjectType::StorageTexture)
@@ -387,12 +394,19 @@ inline bool GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType existing_type, 
 //   - StorageBuffer Equals + StorageBuffer Contains + RenderTexture Contains
 //   - RenderTexture Contains + StorageBuffer Contains + StorageBuffer Equals
 //   - VertexBuffer Contains + StorageBuffer/RenderTexture surface parents
+//   - DepthStencilBuffer Crosses + exact StorageBuffer/Texture peers
+// The depth surface remains live in the last form; link only the captured
+// partial overlap rather than reclaiming it or accepting broader DS relations.
 inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                     GpuMemoryObjectType incoming_type)
 {
 	if (incoming_type != GpuMemoryObjectType::RenderTexture)
 	{
 		return false;
+	}
+	if (existing_type == GpuMemoryObjectType::DepthStencilBuffer)
+	{
+		return relation == GpuMemoryOverlapType::Crosses;
 	}
 	if (existing_type == GpuMemoryObjectType::StorageBuffer || existing_type == GpuMemoryObjectType::RenderTexture ||
 	    existing_type == GpuMemoryObjectType::Texture || existing_type == GpuMemoryObjectType::StorageTexture)
