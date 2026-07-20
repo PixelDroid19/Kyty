@@ -14,6 +14,7 @@
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderResolutionUsageCache.h"
+#include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Profiler.h"
@@ -1063,7 +1064,7 @@ static bool SpirvToGlsl(const uint32_t* /*src_binary*/, size_t /*src_binary_size
 	return true;
 }
 
-static bool SpirvRun(const String8& src, Vector<uint32_t>* dst, String8* err_msg)
+static bool SpirvCompile(const String8& src, Vector<uint32_t>* dst, String8* err_msg)
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(err_msg == nullptr);
@@ -1125,6 +1126,32 @@ static bool SpirvRun(const String8& src, Vector<uint32_t>* dst, String8* err_msg
 	dst->Add(spirv.data(), spirv.size());
 
 	return true;
+}
+
+static bool SpirvRun(const String8& src, Vector<uint32_t>* dst, String8* err_msg)
+{
+	EXIT_IF(dst == nullptr);
+	EXIT_IF(err_msg == nullptr);
+
+	const auto optimization = static_cast<uint32_t>(Config::GetShaderOptimizationType());
+	const bool validation   = Config::ShaderValidationEnabled();
+	auto&      cache        = SpirvBinaryCacheDefaultStore();
+	const auto lookup       = cache.Load(src, optimization, validation, dst);
+	if (lookup == SpirvBinaryCacheLoadResult::Hit)
+	{
+		return true;
+	}
+
+	bool compiled = false;
+	{
+		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
+		compiled = SpirvCompile(src, dst, err_msg);
+	}
+	if (compiled)
+	{
+		(void)cache.Store(src, optimization, validation, *dst);
+	}
+	return compiled;
 }
 
 static const ShaderBinaryInfo* GetBinaryInfo(const uint32_t* code)
@@ -3231,10 +3258,7 @@ Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInp
 
 	String8 err_msg;
 	bool    spirv_ok = false;
-	{
-		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
-		spirv_ok = SpirvRun(source, &ret, &err_msg);
-	}
+	spirv_ok = SpirvRun(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
 		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());
@@ -3346,10 +3370,7 @@ Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInpu
 
 	String8 err_msg;
 	bool    spirv_ok = false;
-	{
-		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
-		spirv_ok = SpirvRun(source, &ret, &err_msg);
-	}
+	spirv_ok = SpirvRun(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
 		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());
@@ -3446,10 +3467,7 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 
 	String8 err_msg;
 	bool    spirv_ok = false;
-	{
-		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
-		spirv_ok = SpirvRun(source, &ret, &err_msg);
-	}
+	spirv_ok = SpirvRun(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
 		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());

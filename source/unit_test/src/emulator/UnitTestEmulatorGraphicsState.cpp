@@ -15,6 +15,7 @@
 #include "Emulator/Graphics/Objects/VertexBuffer.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/PipelineCacheStore.h"
+#include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
@@ -33,6 +34,8 @@
 #include <chrono>
 #include <cstring>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <thread>
 
@@ -41,6 +44,23 @@ UT_BEGIN(EmulatorGraphicsState);
 using namespace Libs::Graphics;
 
 namespace {
+
+class ScopedSpirvCacheDirectory final
+{
+public:
+	ScopedSpirvCacheDirectory()
+	{
+		const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+		path             = std::filesystem::temp_directory_path() / ("kyty-spirv-cache-test-" + std::to_string(nonce));
+	}
+	~ScopedSpirvCacheDirectory()
+	{
+		std::error_code error;
+		std::filesystem::remove_all(path, error);
+	}
+
+	std::filesystem::path path;
+};
 
 int                   g_test_gpu_object_deletes = 0;
 int                   g_versioned_gpu_object_creates = 0;
@@ -357,6 +377,65 @@ TEST(EmulatorGraphicsState, PipelineCacheCheckpointsAreDirtyAndRateLimited)
 	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget / 2, budget / 2), budget);
 	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget - 1, 2), budget);
 	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget, 1), budget);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheRequiresExactSourceAndCompileOptions)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheStore     cache(directory.path);
+	const String8             source_a("OpCapability Shader\nOpMemoryModel Logical GLSL450\n");
+	const String8             source_b("OpCapability Shader\nOpMemoryModel Logical Vulkan\n");
+	Vector<uint32_t>          expected {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+	Vector<uint32_t>          loaded;
+
+	EXPECT_EQ(cache.Store(source_a, 0, false, expected), SpirvBinaryCacheStoreResult::Written);
+	EXPECT_EQ(cache.Load(source_a, 0, false, &loaded), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(loaded, expected);
+	EXPECT_EQ(cache.Load(source_b, 0, false, &loaded), SpirvBinaryCacheLoadResult::Miss);
+	EXPECT_EQ(cache.Load(source_a, 1, false, &loaded), SpirvBinaryCacheLoadResult::Miss);
+	EXPECT_EQ(cache.Load(source_a, 0, true, &loaded), SpirvBinaryCacheLoadResult::Miss);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheRejectsCorruptEntry)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheStore     cache(directory.path);
+	const String8             source("OpCapability Shader\n");
+	Vector<uint32_t>          expected {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+	Vector<uint32_t>          loaded;
+
+	ASSERT_EQ(cache.Store(source, 0, false, expected), SpirvBinaryCacheStoreResult::Written);
+	for (const auto& entry: std::filesystem::directory_iterator(directory.path))
+	{
+		if (entry.is_regular_file() && entry.path().extension() == ".spvbin")
+		{
+			std::ofstream file(entry.path(), std::ios::binary | std::ios::trunc);
+			file.write("broken", 6);
+		}
+	}
+
+	EXPECT_EQ(cache.Load(source, 0, false, &loaded), SpirvBinaryCacheLoadResult::Corrupt);
+	EXPECT_TRUE(loaded.IsEmpty());
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheEnforcesDiskAndSessionBudgets)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheLimits    limits;
+	limits.max_total_bytes      = 512;
+	limits.max_entry_bytes      = 256;
+	limits.session_write_budget = 512;
+	SpirvBinaryCacheStore cache(directory.path, limits);
+	Vector<uint32_t>      binary {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+
+	for (uint32_t i = 0; i < 8; ++i)
+	{
+		const auto source = String8::FromPrintf("OpCapability Shader\n; entry %u\n", i);
+		const auto result = cache.Store(source, 0, false, binary);
+		EXPECT_TRUE(result == SpirvBinaryCacheStoreResult::Written || result == SpirvBinaryCacheStoreResult::BudgetExceeded);
+		EXPECT_LE(cache.DiskUsageBytes(), limits.max_total_bytes);
+	}
+	EXPECT_LE(cache.SessionBytesAttempted(), limits.session_write_budget);
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
