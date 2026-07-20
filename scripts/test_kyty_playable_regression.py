@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("kyty_playable_regression.py")
@@ -109,6 +111,38 @@ class ProfileLoadTests(unittest.TestCase):
 
 
 class GateClassificationTests(unittest.TestCase):
+    def test_sigabrt_is_a_host_crash(self) -> None:
+        self.assertEqual(reg.classify_exit(-6, False), "host_crash")
+
+    def test_fatal_marker_reports_following_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "child.log"
+            log.write_text(
+                "--- Fatal Error ---\nNot implemented (shader format != 4)\n in /tmp/source.cpp:1\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                reg.first_actionable_from_log(log),
+                "Not implemented (shader format != 4)",
+            )
+
+    def test_kill_timeout_is_reported_without_raising(self) -> None:
+        class Process:
+            pid = 123
+
+            @staticmethod
+            def poll():
+                return None
+
+            @staticmethod
+            def wait(timeout: int):
+                raise subprocess.TimeoutExpired("guest", timeout)
+
+        notes: list[str] = []
+        with mock.patch.object(reg.os, "killpg"):
+            reg.kill_process_group(Process(), notes)
+        self.assertIn("kill_timeout", notes)
+
     def test_all_gates_pass_happy_path(self) -> None:
         gates = reg.evaluate_gates(
             agent_ready=True,
