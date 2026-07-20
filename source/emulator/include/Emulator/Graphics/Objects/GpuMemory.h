@@ -352,6 +352,18 @@ inline bool GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType existin
 	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
+// Incoming Texture crossing the metadata plane of an existing depth surface.
+// Captured mixed-parent set: the texture also crosses the matching color
+// RT/StorageBuffer pair and contains the 0x8000 depth-metadata StorageBuffer.
+// Keep the depth object linked; image materialization still comes from the
+// color surface selected by the mixed-parent path.
+inline bool GpuMemoryAllowsTextureLinkDepthMetadata(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                    GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::DepthStencilBuffer && relation == GpuMemoryOverlapType::Crosses &&
+	       incoming_type == GpuMemoryObjectType::Texture;
+}
+
 // VertexBuffer parent of an incoming Texture that should be reclaimed (delete).
 inline bool GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                 GpuMemoryObjectType incoming_type)
