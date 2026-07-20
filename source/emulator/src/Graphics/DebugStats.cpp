@@ -115,6 +115,10 @@ struct GpuMemoryTypeMetric
 	std::atomic<uint64_t> writeback_bytes {0};
 	std::atomic<uint64_t> writeback_ns {0};
 	std::atomic<uint64_t> writeback_max_ns {0};
+	std::atomic<uint64_t> hash_calls {0};
+	std::atomic<uint64_t> hash_bytes {0};
+	std::atomic<uint64_t> hash_ns {0};
+	std::atomic<uint64_t> hash_max_ns {0};
 };
 
 std::array<GpuMemoryTypeMetric, kDebugStatsGpuMemoryTypeCount> g_gpu_memory_types {};
@@ -333,6 +337,10 @@ void DebugStatsInit()
 		type.writeback_bytes.store(0, std::memory_order_relaxed);
 		type.writeback_ns.store(0, std::memory_order_relaxed);
 		type.writeback_max_ns.store(0, std::memory_order_relaxed);
+		type.hash_calls.store(0, std::memory_order_relaxed);
+		type.hash_bytes.store(0, std::memory_order_relaxed);
+		type.hash_ns.store(0, std::memory_order_relaxed);
+		type.hash_max_ns.store(0, std::memory_order_relaxed);
 	}
 	g_last_fps.store(0.0, std::memory_order_relaxed);
 	g_last_frame_ms.store(0.0, std::memory_order_relaxed);
@@ -587,6 +595,17 @@ void DebugStatsRecordGpuMemoryWriteBack(uint32_t type_index, uint64_t bytes, uin
 	RecordWork(&type.writeback_calls, &type.writeback_bytes, &type.writeback_ns, &type.writeback_max_ns, bytes, elapsed_ns);
 }
 
+void DebugStatsRecordGpuMemoryHash(uint32_t type_index, uint64_t bytes, uint64_t elapsed_ns)
+{
+	DebugStatsRecordHash(bytes, elapsed_ns);
+	if (type_index >= kDebugStatsGpuMemoryTypeCount)
+	{
+		return;
+	}
+	auto& type = g_gpu_memory_types[type_index];
+	RecordWork(&type.hash_calls, &type.hash_bytes, &type.hash_ns, &type.hash_max_ns, bytes, elapsed_ns);
+}
+
 void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout)
 {
 	g_present_src_w.store(src_w, std::memory_order_relaxed);
@@ -826,6 +845,10 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 		dst.writeback_bytes  = take_window(src.writeback_bytes);
 		dst.writeback_ns     = take_window(src.writeback_ns);
 		dst.writeback_max_ns = src.writeback_max_ns.exchange(0, std::memory_order_relaxed);
+		dst.hash_calls       = take_window(src.hash_calls);
+		dst.hash_bytes       = take_window(src.hash_bytes);
+		dst.hash_ns          = take_window(src.hash_ns);
+		dst.hash_max_ns      = src.hash_max_ns.exchange(0, std::memory_order_relaxed);
 	}
 
 	snapshot.live_objects  = g_live_objects.load(std::memory_order_relaxed);

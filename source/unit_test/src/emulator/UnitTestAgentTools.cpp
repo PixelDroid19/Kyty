@@ -402,6 +402,7 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	DebugStatsRecordGpuMemoryCreate(7, DebugStatsGpuMemoryCreateOutcome::ReclaimNew, 700);
 	DebugStatsRecordGpuMemoryFree(7);
 	DebugStatsRecordGpuMemoryWriteBack(5, 4096, 250);
+	DebugStatsRecordGpuMemoryHash(6, 8192, 300);
 
 	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
 	EXPECT_EQ(first.gpu_memory_create_calls, 8u);
@@ -421,6 +422,10 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	EXPECT_EQ(first.gpu_memory_types[5].writeback_bytes, 4096u);
 	EXPECT_EQ(first.gpu_memory_types[5].writeback_ns, 250u);
 	EXPECT_EQ(first.gpu_memory_types[5].writeback_max_ns, 250u);
+	EXPECT_EQ(first.gpu_memory_types[6].hash_calls, 1u);
+	EXPECT_EQ(first.gpu_memory_types[6].hash_bytes, 8192u);
+	EXPECT_EQ(first.gpu_memory_types[6].hash_ns, 300u);
+	EXPECT_EQ(first.gpu_memory_types[6].hash_max_ns, 300u);
 	for (uint32_t i = 8; i < kDebugStatsGpuMemoryTypeCount; ++i)
 	{
 		EXPECT_EQ(first.gpu_memory_types[i].cached_reuse, 0u);
@@ -468,6 +473,8 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	snapshot.gpu_memory_types[4].cached_reuse       = 11;
 	snapshot.gpu_memory_types[4].writeback_calls    = 3;
 	snapshot.gpu_memory_types[4].writeback_bytes    = 8192;
+	snapshot.gpu_memory_types[4].hash_calls         = 5;
+	snapshot.gpu_memory_types[4].hash_bytes         = 16384;
 
 	std::string json;
 	AppendGpuMemoryPerformanceJson(snapshot, &json);
@@ -477,6 +484,7 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	EXPECT_NE(json.find(R"("reclaim_new":1,"logical_free":1,"live":7)"), std::string::npos);
 	EXPECT_NE(json.find(R"("type":"vertex_buffer","cached_reuse":11,"fast_reuse":9)"), std::string::npos);
 	EXPECT_NE(json.find(R"("writeback_calls":3,"writeback_bytes":8192)"), std::string::npos);
+	EXPECT_NE(json.find(R"("hash_calls":5,"hash_bytes":16384)"), std::string::npos);
 	EXPECT_EQ(json.find("PPSA"), std::string::npos);
 }
 

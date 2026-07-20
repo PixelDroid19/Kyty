@@ -605,6 +605,10 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 		*out += ",\"writeback_bytes\":" + std::to_string(type.writeback_bytes);
 		*out += ",\"writeback_ns\":" + std::to_string(type.writeback_ns);
 		*out += ",\"writeback_max_ns\":" + std::to_string(type.writeback_max_ns);
+		*out += ",\"hash_calls\":" + std::to_string(type.hash_calls);
+		*out += ",\"hash_bytes\":" + std::to_string(type.hash_bytes);
+		*out += ",\"hash_ns\":" + std::to_string(type.hash_ns);
+		*out += ",\"hash_max_ns\":" + std::to_string(type.hash_max_ns);
 		*out += '}';
 	}
 	*out += "]}";

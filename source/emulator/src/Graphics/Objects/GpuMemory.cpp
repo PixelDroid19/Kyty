@@ -701,7 +701,7 @@ int GpuMemory::GetHeapId(uint64_t vaddr, uint64_t size)
 	return -1;
 }
 
-static uint64_t calc_hash(const uint8_t* buf, uint64_t size)
+static uint64_t calc_hash(GpuMemoryObjectType type, const uint8_t* buf, uint64_t size)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -709,8 +709,12 @@ static uint64_t calc_hash(const uint8_t* buf, uint64_t size)
 	{
 		return 0;
 	}
-	const DebugStatsScopedWork hash_work(DebugStatsRecordHash, size);
-	return XXH3_64bits(buf, size);
+	const auto start  = std::chrono::steady_clock::now();
+	const auto result = XXH3_64bits(buf, size);
+	const auto elapsed =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+	DebugStatsRecordGpuMemoryHash(GpuMemoryStatsTypeIndex(type), size, static_cast<uint64_t>(elapsed));
+	return result;
 }
 
 static uint64_t get_current_time()
@@ -858,7 +862,7 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 				hash[vi] = o.hash[vi];
 			} else if (o.check_hash)
 			{
-				hash[vi] = calc_hash(reinterpret_cast<const uint8_t*>(h.block.vaddr[vi]), h.block.size[vi]);
+				hash[vi] = calc_hash(o.object.type, reinterpret_cast<const uint8_t*>(h.block.vaddr[vi]), h.block.size[vi]);
 			} else
 			{
 				hash[vi] = 0;
@@ -2016,7 +2020,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 		if (info.check_hash)
 		{
-			hash[vi] = calc_hash(reinterpret_cast<const uint8_t*>(vaddr[vi]), size[vi]);
+			hash[vi] = calc_hash(info.type, reinterpret_cast<const uint8_t*>(vaddr[vi]), size[vi]);
 		} else
 		{
 			hash[vi] = 0;
@@ -3060,7 +3064,7 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 			uint64_t new_hash = 0;
 			if (o.check_hash)
 			{
-				new_hash = calc_hash(reinterpret_cast<const uint8_t*>(block.vaddr[vi]), block.size[vi]);
+				new_hash = calc_hash(o.object.type, reinterpret_cast<const uint8_t*>(block.vaddr[vi]), block.size[vi]);
 			}
 			printf("WriteBack (GPU -> CPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64
 			       ", old_hash = 0x%016" PRIx64 ", new_hash = 0x%016" PRIx64 ", equals=%u invalidate=%u\n",
