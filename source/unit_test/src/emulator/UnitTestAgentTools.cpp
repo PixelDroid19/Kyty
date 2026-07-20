@@ -403,6 +403,14 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	DebugStatsRecordGpuMemoryFree(7);
 	DebugStatsRecordGpuMemoryWriteBack(5, 4096, 250);
 	DebugStatsRecordGpuMemoryHash(6, 8192, 300);
+	DebugStatsRecordGpuMemoryHashComparison(6, true, true);
+	DebugStatsRecordGpuMemoryHashComparison(6, true, false);
+	DebugStatsRecordGpuMemoryHashComparison(6, false, true);
+	DebugStatsRecordGpuMemoryHashComparison(6, false, false);
+
+	const DebugStatsPerformanceSnapshot peek = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(peek.gpu_memory_types[5].writeback_max_ns, 250u);
+	EXPECT_EQ(peek.gpu_memory_types[6].hash_max_ns, 300u);
 
 	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
 	EXPECT_EQ(first.gpu_memory_create_calls, 8u);
@@ -426,6 +434,10 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	EXPECT_EQ(first.gpu_memory_types[6].hash_bytes, 8192u);
 	EXPECT_EQ(first.gpu_memory_types[6].hash_ns, 300u);
 	EXPECT_EQ(first.gpu_memory_types[6].hash_max_ns, 300u);
+	EXPECT_EQ(first.gpu_memory_types[6].hash_tracked_changed, 1u);
+	EXPECT_EQ(first.gpu_memory_types[6].hash_tracked_unchanged, 1u);
+	EXPECT_EQ(first.gpu_memory_types[6].hash_fallback_changed, 1u);
+	EXPECT_EQ(first.gpu_memory_types[6].hash_fallback_unchanged, 1u);
 	for (uint32_t i = 8; i < kDebugStatsGpuMemoryTypeCount; ++i)
 	{
 		EXPECT_EQ(first.gpu_memory_types[i].cached_reuse, 0u);
@@ -456,6 +468,10 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 		EXPECT_EQ(empty.gpu_memory_types[i].reclaim_new, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].logical_free, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].live, first.gpu_memory_types[i].live);
+		EXPECT_EQ(empty.gpu_memory_types[i].hash_tracked_changed, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].hash_tracked_unchanged, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].hash_fallback_changed, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].hash_fallback_unchanged, 0u);
 	}
 	DebugStatsShutdown();
 }
@@ -475,6 +491,8 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	snapshot.gpu_memory_types[4].writeback_bytes    = 8192;
 	snapshot.gpu_memory_types[4].hash_calls         = 5;
 	snapshot.gpu_memory_types[4].hash_bytes         = 16384;
+	snapshot.gpu_memory_types[4].hash_tracked_changed   = 2;
+	snapshot.gpu_memory_types[4].hash_fallback_unchanged = 3;
 
 	std::string json;
 	AppendGpuMemoryPerformanceJson(snapshot, &json);
@@ -485,6 +503,8 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	EXPECT_NE(json.find(R"("type":"vertex_buffer","cached_reuse":11,"fast_reuse":9)"), std::string::npos);
 	EXPECT_NE(json.find(R"("writeback_calls":3,"writeback_bytes":8192)"), std::string::npos);
 	EXPECT_NE(json.find(R"("hash_calls":5,"hash_bytes":16384)"), std::string::npos);
+	EXPECT_NE(json.find(R"("hash_tracked_changed":2)"), std::string::npos);
+	EXPECT_NE(json.find(R"("hash_fallback_unchanged":3)"), std::string::npos);
 	EXPECT_EQ(json.find("PPSA"), std::string::npos);
 }
 

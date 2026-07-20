@@ -355,3 +355,18 @@ more than 14,000 presents past the previous failure, with a healthy capture and
 a stable 2,008-frame window at about 31 FPS (p50 33 ms, p99 36 ms, no frame
 over 50 ms). Keep the tracker opt-in until this survives repeated titles and
 longer default-path validation.
+
+The next controlled gameplay comparison identified tracker capacity—not an
+unbounded disk cache—as the remaining texture-hash fallback. The original
+fixed page table had 65,536 metadata slots and a 32,768-page limit per
+registered range. Once that cover filled, a stable large texture range fell
+back to 3,715 full hashes (106.7 GB read, 4.72 s CPU) in 30 seconds; every
+comparison was unchanged. Expanding the bounded table to 262,144 slots with a
+131,072-page per-range limit eliminated all steady-state texture hashes in the
+equivalent scene. The 30-second window improved from 24.39 FPS / p50 42 ms /
+p99 44 ms to 28.51 FPS / p50 34 ms / p99 37 ms, with no frame over 50 ms.
+A subsequent 218-second gameplay window sustained 6,915 presents, p50 32 ms,
+p99 37 ms, eight frames over 50 ms, no frame over 100 ms, healthy native
+captures, delivered movement/action input, and no structured error. The larger
+fixed table adds bounded RAM metadata only; it does not serialize textures or
+increase persistent cache writes.

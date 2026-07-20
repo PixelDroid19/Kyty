@@ -43,10 +43,14 @@ struct DebugStatsGpuMemoryTypeSnapshot
 	uint64_t writeback_bytes  = 0;
 	uint64_t writeback_ns     = 0;
 	uint64_t writeback_max_ns = 0;
-	uint64_t hash_calls       = 0;
-	uint64_t hash_bytes       = 0;
-	uint64_t hash_ns          = 0;
-	uint64_t hash_max_ns      = 0;
+	uint64_t hash_calls              = 0;
+	uint64_t hash_bytes              = 0;
+	uint64_t hash_ns                 = 0;
+	uint64_t hash_max_ns             = 0;
+	uint64_t hash_tracked_changed    = 0;
+	uint64_t hash_tracked_unchanged  = 0;
+	uint64_t hash_fallback_changed   = 0;
+	uint64_t hash_fallback_unchanged = 0;
 };
 
 // Host-only diagnostic counters. Never gate guest correctness on these values.
@@ -223,6 +227,7 @@ void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCre
 void DebugStatsRecordGpuMemoryFree(uint32_t type_index);
 void DebugStatsRecordGpuMemoryWriteBack(uint32_t type_index, uint64_t bytes, uint64_t elapsed_ns);
 void DebugStatsRecordGpuMemoryHash(uint32_t type_index, uint64_t bytes, uint64_t elapsed_ns);
+void DebugStatsRecordGpuMemoryHashComparison(uint32_t type_index, bool tracked, bool changed);
 
 // Host-only wall-time scope. Construct only after an operation's validation
 // gates pass so rejected/skipped work is never counted.
