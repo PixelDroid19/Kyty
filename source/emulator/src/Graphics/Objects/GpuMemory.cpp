@@ -3019,8 +3019,12 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 		writeback_bytes += block.size[vi];
 	}
 	{
-		const DebugStatsScopedWork writeback_work(DebugStatsRecordWriteBack, writeback_bytes);
+		const auto writeback_start = std::chrono::steady_clock::now();
 		o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
+		const auto writeback_elapsed =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - writeback_start).count();
+		DebugStatsRecordGpuMemoryWriteBack(GpuMemoryStatsTypeIndex(o.object.type), writeback_bytes,
+		                                   static_cast<uint64_t>(writeback_elapsed));
 	}
 	o.cpu_update_time = get_current_time();
 
