@@ -233,6 +233,10 @@ TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 	// state_flags at offset 0 should be written (Empty → 0).
 	EXPECT_EQ(*reinterpret_cast<uint32_t*>(state_blob), 0u);
 
+	uint32_t state_flags = UINT32_MAX;
+	EXPECT_EQ(Ngs2::Ngs2VoiceGetStateFlags(voice, &state_flags), 0);
+	EXPECT_EQ(state_flags, 0u);
+
 	// Keep buffers alive for the process-global NGS lists used by HLE.
 	sys_storage.release();
 	rack_storage.release();
@@ -299,6 +303,16 @@ TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
 	ASSERT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1), 0);
 	EXPECT_NE(output[0], 0.0f);
 	EXPECT_FLOAT_EQ(output[0], output[1]);
+
+	alignas(uint64_t) uint64_t destroyed_rack_info[8] = {};
+	ASSERT_EQ(Ngs2::Ngs2RackDestroy(rack, reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(destroyed_rack_info)), 0);
+	EXPECT_EQ(destroyed_rack_info[0], rack);
+	EXPECT_EQ(destroyed_rack_info[1], raw_rack_info[1]);
+
+	std::fill(std::begin(output), std::end(output), 1.0f);
+	ASSERT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1), 0);
+	EXPECT_FLOAT_EQ(output[0], 0.0f);
+	EXPECT_FLOAT_EQ(output[1], 0.0f);
 
 	sys_storage.release();
 	rack_storage.release();
