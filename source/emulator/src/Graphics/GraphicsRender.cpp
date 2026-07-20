@@ -284,7 +284,8 @@ private:
 		bool             free           = true;
 	};
 
-	void Init();
+	VkDescriptorSetLayout GetOrCreateLayout(Stage stage, int storage_buffers_num, int textures2d_sampled_num,
+	                                      int textures2d_storage_num, int samplers_num, int gds_buffers_num);
 	void CreatePool();
 
 	static uint32_t CalcHash(const Set& s);
@@ -305,7 +306,6 @@ private:
 	                                                   [SAMPLERS_MAX + 1][GDS_BUFFER_MAX + 1] = {};
 	VkDescriptorSetLayout m_descriptor_set_layout_compute[BUFFERS_MAX + 1][TEXTURES_SAMPLED_MAX + 1][TEXTURES_STORAGE_MAX + 1]
 	                                                     [SAMPLERS_MAX + 1][GDS_BUFFER_MAX + 1] = {};
-	bool m_initialized                                                                          = false;
 };
 
 class SamplerCache
@@ -3638,46 +3638,40 @@ static void create_layout(GraphicContext* gctx, int storage_buffers_num, int tex
 	}
 };
 
-void DescriptorCache::Init()
+VkDescriptorSetLayout DescriptorCache::GetOrCreateLayout(Stage stage, int storage_buffers_num, int textures2d_sampled_num,
+                                                         int textures2d_storage_num, int samplers_num, int gds_buffers_num)
 {
-	if (m_initialized)
-	{
-		return;
-	}
-
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	EXIT_IF(gctx == nullptr);
 
-	EXIT_IF(m_descriptor_set_layout_vertex[0][0][0][0][0] != nullptr);
-	EXIT_IF(m_descriptor_set_layout_pixel[0][0][0][0][0] != nullptr);
-	EXIT_IF(m_descriptor_set_layout_compute[0][0][0][0][0] != nullptr);
-
-	for (int buffers_num_i = 0; buffers_num_i <= BUFFERS_MAX; buffers_num_i++)
+	VkDescriptorSetLayout* layout = nullptr;
+	VkShaderStageFlags     vk_stage {};
+	switch (stage)
 	{
-		for (int buffers_num_j = 0; buffers_num_j <= TEXTURES_SAMPLED_MAX; buffers_num_j++)
-		{
-			for (int buffers_num_j2 = 0; buffers_num_j2 <= TEXTURES_STORAGE_MAX; buffers_num_j2++)
-			{
-				for (int buffers_num_k = 0; buffers_num_k <= SAMPLERS_MAX; buffers_num_k++)
-				{
-					for (int buffers_num_l = 0; buffers_num_l <= GDS_BUFFER_MAX; buffers_num_l++)
-					{
-						create_layout(
-						    gctx, buffers_num_i, buffers_num_j, buffers_num_j2, buffers_num_k, buffers_num_l, VK_SHADER_STAGE_FRAGMENT_BIT,
-						    &m_descriptor_set_layout_pixel[buffers_num_i][buffers_num_j][buffers_num_j2][buffers_num_k][buffers_num_l]);
-						create_layout(
-						    gctx, buffers_num_i, buffers_num_j, buffers_num_j2, buffers_num_k, buffers_num_l, VK_SHADER_STAGE_VERTEX_BIT,
-						    &m_descriptor_set_layout_vertex[buffers_num_i][buffers_num_j][buffers_num_j2][buffers_num_k][buffers_num_l]);
-						create_layout(
-						    gctx, buffers_num_i, buffers_num_j, buffers_num_j2, buffers_num_k, buffers_num_l, VK_SHADER_STAGE_COMPUTE_BIT,
-						    &m_descriptor_set_layout_compute[buffers_num_i][buffers_num_j][buffers_num_j2][buffers_num_k][buffers_num_l]);
-					}
-				}
-			}
-		}
+		case Stage::Vertex:
+			layout = &m_descriptor_set_layout_vertex[storage_buffers_num][textures2d_sampled_num][textures2d_storage_num][samplers_num]
+			                                         [gds_buffers_num];
+			vk_stage = VK_SHADER_STAGE_VERTEX_BIT;
+			break;
+		case Stage::Pixel:
+			layout = &m_descriptor_set_layout_pixel[storage_buffers_num][textures2d_sampled_num][textures2d_storage_num][samplers_num]
+			                                        [gds_buffers_num];
+			vk_stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+			break;
+		case Stage::Compute:
+			layout = &m_descriptor_set_layout_compute[storage_buffers_num][textures2d_sampled_num][textures2d_storage_num][samplers_num]
+			                                          [gds_buffers_num];
+			vk_stage = VK_SHADER_STAGE_COMPUTE_BIT;
+			break;
+		default: EXIT("unknown stage\n");
 	}
 
-	m_initialized = true;
+	if (*layout == nullptr)
+	{
+		create_layout(gctx, storage_buffers_num, textures2d_sampled_num, textures2d_storage_num, samplers_num, gds_buffers_num,
+		              vk_stage, layout);
+	}
+	return *layout;
 }
 
 void DescriptorCache::CreatePool()
@@ -3736,7 +3730,8 @@ VulkanDescriptorSet* DescriptorCache::Allocate(Stage stage, int storage_buffers_
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	EXIT_IF(gctx == nullptr);
 
-	Init();
+	const VkDescriptorSetLayout layout = GetOrCreateLayout(stage, storage_buffers_num, textures2d_sampled_num,
+	                                                       textures2d_storage_num, samplers_num, gds_buffers_num);
 
 	auto* ret = new VulkanDescriptorSet;
 
@@ -3754,26 +3749,10 @@ VulkanDescriptorSet* DescriptorCache::Allocate(Stage stage, int storage_buffers_
 			alloc_info.pNext              = nullptr;
 			alloc_info.descriptorPool     = pool.pool;
 			alloc_info.descriptorSetCount = 1;
-
-			switch (stage)
-			{
-				case Stage::Vertex:
-					alloc_info.pSetLayouts = &m_descriptor_set_layout_vertex[storage_buffers_num][textures2d_sampled_num]
-					                                                        [textures2d_storage_num][samplers_num][gds_buffers_num];
-					break;
-				case Stage::Pixel:
-					alloc_info.pSetLayouts = &m_descriptor_set_layout_pixel[storage_buffers_num][textures2d_sampled_num]
-					                                                       [textures2d_storage_num][samplers_num][gds_buffers_num];
-					break;
-				case Stage::Compute:
-					alloc_info.pSetLayouts = &m_descriptor_set_layout_compute[storage_buffers_num][textures2d_sampled_num]
-					                                                         [textures2d_storage_num][samplers_num][gds_buffers_num];
-					break;
-				default: EXIT("unknown stage\n");
-			}
+			alloc_info.pSetLayouts        = &layout;
 
 			ret->pool_id = pool_id;
-			ret->layout  = *alloc_info.pSetLayouts;
+			ret->layout  = layout;
 
 			EXIT_IF(!pool.free);
 
@@ -4245,21 +4224,7 @@ VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const
 	                     (textures2d_sampled_num > 0 || textures2d_storage_num > 0 || samplers_num > 0));
 
 	Core::LockGuard lock(m_mutex);
-	Init();
-	switch (stage)
-	{
-		case Stage::Vertex:
-			return m_descriptor_set_layout_vertex[storage_buffers_num][textures2d_sampled_num][textures2d_storage_num][samplers_num]
-			                                     [gds_buffers_num];
-		case Stage::Pixel:
-			return m_descriptor_set_layout_pixel[storage_buffers_num][textures2d_sampled_num][textures2d_storage_num][samplers_num]
-			                                    [gds_buffers_num];
-		case Stage::Compute:
-			return m_descriptor_set_layout_compute[storage_buffers_num][textures2d_sampled_num][textures2d_storage_num][samplers_num]
-			                                      [gds_buffers_num];
-		default: EXIT("unknown stage\n");
-	}
-	return nullptr;
+	return GetOrCreateLayout(stage, storage_buffers_num, textures2d_sampled_num, textures2d_storage_num, samplers_num, gds_buffers_num);
 }
 
 void DeleteFramebuffer(VideoOutVulkanImage* image)
