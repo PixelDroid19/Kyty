@@ -323,14 +323,13 @@ Object teardown unregisters ranges before object IDs are recycled. The tracker
 uses tombstones for page-table removal and range reference counts to preserve
 collision and overlap correctness.
 
-Focused validation currently passes 6/6 dirty-tracker tests and 220/220
-GraphicsPackets/GraphicsState/CoreVirtualMemory tests (one macOS-only test is
-skipped on Linux). During the first disabled-mode hardening pass, lazy tracker
+During the first disabled-mode hardening pass, lazy tracker
 metadata exposed a rollback path that called `UnregisterRange` without a
 registration attempt; that dereferenced a null mutex and terminated the game
 before its first present. Disabled tracker APIs now return through the hash
 fallback contract, rollback runs only after an attempted registration, and a
-regression test covers the no-metadata path. The tracker is deliberately opt-in with
+regression test covers the no-metadata path.
+
 Exact registered-range queries now bypass the per-page scan across every range.
 Two controlled Release+Silent gameplay runs then sustained 500 and 1,000
 presents with healthy captures, movement/action input, no frame over 50 ms,
@@ -338,10 +337,8 @@ and higher FPS than the hash-only baseline. A debugger capture then traced the
 remaining intermittent fatal fault to a protected page whose tracking entry had
 already been discarded. Retired page metadata now remains in the fixed table so
 late faults can restore the known writable host mode. Tracking remains opt-in
-with `KYTY_ENABLE_GPU_DIRTY_TRACKING=1` while automatic activation still has
-an intermittent early-load fault under investigation. The normal runtime and
-test processes keep the conservative XXH3 path. Untracked, capacity-limited,
-or uncertain ranges also continue to use XXH3 automatically.
+at this historical checkpoint. Untracked, capacity-limited, or uncertain ranges
+continue to use XXH3 automatically.
 
 A later opt-in repetition reproduced that intermittent fault after more than
 10,500 healthy presents. GDB found the fatal page still read-only with zero
@@ -353,8 +350,8 @@ publishing zero references; and an arming transaction rolls back read-only
 protection if it observes `Retired`. A subsequent Release+Silent run sustained
 more than 14,000 presents past the previous failure, with a healthy capture and
 a stable 2,008-frame window at about 31 FPS (p50 33 ms, p99 36 ms, no frame
-over 50 ms). Keep the tracker opt-in until this survives repeated titles and
-longer default-path validation.
+over 50 ms). At that checkpoint the tracker remained opt-in pending longer
+default-path validation.
 
 The next controlled gameplay comparison identified tracker capacity—not an
 unbounded disk cache—as the remaining texture-hash fallback. The original
@@ -370,3 +367,28 @@ p99 37 ms, eight frames over 50 ms, no frame over 100 ms, healthy native
 captures, delivered movement/action input, and no structured error. The larger
 fixed table adds bounded RAM metadata only; it does not serialize textures or
 increase persistent cache writes.
+
+Generation tracking is now enabled on the normal runtime path. Set
+`KYTY_DISABLE_GPU_DIRTY_TRACKING=1` only to diagnose tracker-specific problems;
+the process-wide tracker does not arm until the runtime fault handler is
+installed, and disabled or uncovered ranges use the conservative hash path. A strict
+Release+Silent default-path run, with neither enable nor disable variables set,
+reached a coherent interactive scene and exceeded 11,000 presents. Its
+45-second movement/action window advanced 1,499 frames and presents, ended at
+33.40 FPS, measured p50 31 ms / p99 36 ms, had no frame over 100 ms, and
+reported no structured error. During that window the process wrote about
+1.07 MB to disk and the bounded persistent Vulkan cache remained 1.1 MB; the
+tracker itself writes no texture data to disk.
+
+A later long interactive run exposed a separate presentation freeze after more
+than 80,000 frames. A debugger capture stopped at the first bounded
+`WaitRegMem64` timeout and preserved the command stream. The wait expected
+64-bit value `1`; the immediately preceding confirmed custom `WriteData`
+contained that same address and value, but its early host `memcpy` had been
+overwritten by a later GPU-to-CPU materialization. Confirmed 64-bit
+`WriteData -> WaitMem64` pairs now publish through the exact GPU submission,
+register that submission as the wait producer, and use the existing durable
+label-hole protection. Other `WriteData` packets retain their established
+behavior. A strict Release+Silent rerun sustained 300 seconds and passed the
+previous reproduction point, reaching more than 8,100 presents with no
+structured error; process disk writes remained about 10 MB.

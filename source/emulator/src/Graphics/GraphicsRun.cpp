@@ -216,7 +216,8 @@ public:
 
 	void WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll);
 	void WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll);
-	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom);
+	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom,
+	               bool matching_wait_mem64);
 
 	void Run(uint32_t* data, uint32_t num_dw);
 
@@ -1158,7 +1159,28 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	}
 }
 
-void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom)
+bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords,
+                                                const uint32_t* next_packet, uint32_t next_packet_dwords)
+{
+	if (write_body == nullptr || next_packet == nullptr || write_body_dwords != 5u || next_packet_dwords < 9u ||
+	    next_packet[0] != 0xc0071058u)
+	{
+		return false;
+	}
+
+	const uint32_t write_confirm = (write_body[0] >> 24u) & 0xffu;
+	const uint64_t write_address = write_body[1] | (static_cast<uint64_t>(write_body[2]) << 32u);
+	const uint64_t write_value   = write_body[3] | (static_cast<uint64_t>(write_body[4]) << 32u);
+	const uint64_t wait_address  = next_packet[1] | (static_cast<uint64_t>(next_packet[2]) << 32u);
+	const uint64_t wait_mask     = next_packet[3] | (static_cast<uint64_t>(next_packet[4]) << 32u);
+	const uint64_t wait_ref      = next_packet[5] | (static_cast<uint64_t>(next_packet[6]) << 32u);
+
+	return write_confirm == 1u && write_address != 0u && write_address == wait_address &&
+	       (write_value & wait_mask) == (wait_ref & wait_mask);
+}
+
+void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom,
+                                 bool matching_wait_mem64)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -1186,6 +1208,19 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 			EXIT("WriteData custom write_control=0x%08" PRIx32 " dw_num=%u dst=%p\n", write_control, dw_num,
 			     static_cast<void*>(dst));
 		}
+	}
+
+	if (matching_wait_mem64)
+	{
+		EXIT_IF(!custom || dw_num != 2u);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		const uint64_t value = src[0] | (static_cast<uint64_t>(src[1]) << 32u);
+		GraphicsRenderWriteAtEndOfPipe64(m_sumbit_id, m_buffer[m_current_buffer], reinterpret_cast<uint64_t*>(dst), value);
+		require_submission_success(
+		    m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer), reinterpret_cast<uint64_t>(dst),
+		                                        sizeof(uint64_t), value),
+		    "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
+		return;
 	}
 
 	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
@@ -4554,7 +4589,14 @@ KYTY_CP_OP_PARSER(cp_op_write_data)
 	auto  write_control = buffer[0];
 	auto* dst           = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 
-	cp->WriteData(dst, buffer + 3, dw_num - 2, write_control, custom);
+	const uint32_t write_body_dwords = 1u + dw_num;
+	const uint32_t next_packet_dwords =
+	    (dw > 1u + write_body_dwords) ? (dw - 1u - write_body_dwords) : 0u;
+	const uint32_t* next_packet = buffer + write_body_dwords;
+	const bool matching_wait_mem64 =
+	    custom && GraphicsWriteDataPrecedesMatchingWaitMem64(buffer, write_body_dwords, next_packet, next_packet_dwords);
+
+	cp->WriteData(dst, buffer + 3, dw_num - 2, write_control, custom, matching_wait_mem64);
 
 	return 1 + dw_num;
 }
