@@ -42,6 +42,7 @@ target_sources(emulator PRIVATE
 	src/Graphics/GpuSubmissionPublicationGate.cpp
 	src/Graphics/GpuDeferredDeletionQueue.cpp
 	src/Graphics/ShaderTranslationCache.cpp
+	src/Graphics/SpirvBinaryCacheStore.cpp
 	src/Graphics/ShaderResolutionUsageCache.cpp
 	src/Graphics/InternalResolutionPolicy.cpp
 	src/Graphics/InternalResolutionRuntime.cpp
@@ -67,6 +68,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/GpuSubmissionPublicationGate.h
 	include/Emulator/Graphics/GpuDeferredDeletionQueue.h
 	include/Emulator/Graphics/ShaderTranslationCache.h
+	include/Emulator/Graphics/SpirvBinaryCacheStore.h
 	include/Emulator/Graphics/ShaderResolutionUsageCache.h
 	include/Emulator/Graphics/InternalResolutionPolicy.h
 	include/Emulator/Graphics/InternalResolutionRuntime.h
