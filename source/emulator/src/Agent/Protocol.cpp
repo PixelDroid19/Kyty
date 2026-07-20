@@ -609,6 +609,10 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 		*out += ",\"hash_bytes\":" + std::to_string(type.hash_bytes);
 		*out += ",\"hash_ns\":" + std::to_string(type.hash_ns);
 		*out += ",\"hash_max_ns\":" + std::to_string(type.hash_max_ns);
+		*out += ",\"hash_tracked_changed\":" + std::to_string(type.hash_tracked_changed);
+		*out += ",\"hash_tracked_unchanged\":" + std::to_string(type.hash_tracked_unchanged);
+		*out += ",\"hash_fallback_changed\":" + std::to_string(type.hash_fallback_changed);
+		*out += ",\"hash_fallback_unchanged\":" + std::to_string(type.hash_fallback_unchanged);
 		*out += '}';
 	}
 	*out += "]}";

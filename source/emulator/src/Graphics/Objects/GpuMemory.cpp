@@ -841,6 +841,8 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 	{
 		uint64_t                hash[VADDR_BLOCKS_MAX] = {};
 		GpuDirtyReadObservation dirty_read[VADDR_BLOCKS_MAX] {};
+		bool                    hash_compared[VADDR_BLOCKS_MAX] = {};
+		bool                    hash_tracked[VADDR_BLOCKS_MAX] = {};
 		bool                    tracker_ready = o.check_hash && o.dirty_registered;
 
 		for (int vi = 0; vi < h.block.vaddr_num; vi++)
@@ -863,6 +865,8 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			} else if (o.check_hash)
 			{
 				hash[vi] = calc_hash(o.object.type, reinterpret_cast<const uint8_t*>(h.block.vaddr[vi]), h.block.size[vi]);
+				hash_compared[vi] = true;
+				hash_tracked[vi]  = dirty_read[vi].tracked;
 			} else
 			{
 				hash[vi] = 0;
@@ -871,7 +875,12 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 
 		for (int vi = 0; vi < h.block.vaddr_num; vi++)
 		{
-			if (o.hash[vi] != hash[vi])
+			const bool changed = o.hash[vi] != hash[vi];
+			if (hash_compared[vi])
+			{
+				DebugStatsRecordGpuMemoryHashComparison(GpuMemoryStatsTypeIndex(o.object.type), hash_tracked[vi], changed);
+			}
+			if (changed)
 			{
 				printf("Update (CPU -> GPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 "\n",
 				       Core::EnumName(o.object.type).C_Str(), h.block.vaddr[vi], h.block.size[vi]);

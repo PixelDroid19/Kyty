@@ -82,7 +82,10 @@ private:
 	struct PageEntry;
 	struct RangeEntry;
 
-	static constexpr size_t kPageTableSize = 1u << 16u;
+	// Fixed, bounded metadata with 262,144 slots and a 131,072-page limit per
+	// registered range (512 MiB on a 4 KiB host). Large texture atlases
+	// otherwise exhaust the old cover and force stable full-range hashes.
+	static constexpr size_t kPageTableSize = 1u << 18u;
 	static constexpr size_t kMaxPages      = kPageTableSize / 2u;
 	static constexpr size_t kMaxRanges     = 512u;
 

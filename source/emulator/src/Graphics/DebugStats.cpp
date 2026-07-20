@@ -119,6 +119,10 @@ struct GpuMemoryTypeMetric
 	std::atomic<uint64_t> hash_bytes {0};
 	std::atomic<uint64_t> hash_ns {0};
 	std::atomic<uint64_t> hash_max_ns {0};
+	std::atomic<uint64_t> hash_tracked_changed {0};
+	std::atomic<uint64_t> hash_tracked_unchanged {0};
+	std::atomic<uint64_t> hash_fallback_changed {0};
+	std::atomic<uint64_t> hash_fallback_unchanged {0};
 };
 
 std::array<GpuMemoryTypeMetric, kDebugStatsGpuMemoryTypeCount> g_gpu_memory_types {};
@@ -341,6 +345,10 @@ void DebugStatsInit()
 		type.hash_bytes.store(0, std::memory_order_relaxed);
 		type.hash_ns.store(0, std::memory_order_relaxed);
 		type.hash_max_ns.store(0, std::memory_order_relaxed);
+		type.hash_tracked_changed.store(0, std::memory_order_relaxed);
+		type.hash_tracked_unchanged.store(0, std::memory_order_relaxed);
+		type.hash_fallback_changed.store(0, std::memory_order_relaxed);
+		type.hash_fallback_unchanged.store(0, std::memory_order_relaxed);
 	}
 	g_last_fps.store(0.0, std::memory_order_relaxed);
 	g_last_frame_ms.store(0.0, std::memory_order_relaxed);
@@ -606,6 +614,18 @@ void DebugStatsRecordGpuMemoryHash(uint32_t type_index, uint64_t bytes, uint64_t
 	RecordWork(&type.hash_calls, &type.hash_bytes, &type.hash_ns, &type.hash_max_ns, bytes, elapsed_ns);
 }
 
+void DebugStatsRecordGpuMemoryHashComparison(uint32_t type_index, bool tracked, bool changed)
+{
+	if (type_index >= kDebugStatsGpuMemoryTypeCount)
+	{
+		return;
+	}
+	auto& type = g_gpu_memory_types[type_index];
+	auto& counter = tracked ? (changed ? type.hash_tracked_changed : type.hash_tracked_unchanged)
+	                        : (changed ? type.hash_fallback_changed : type.hash_fallback_unchanged);
+	counter.fetch_add(1, std::memory_order_relaxed);
+}
+
 void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout)
 {
 	g_present_src_w.store(src_w, std::memory_order_relaxed);
@@ -844,11 +864,15 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 		dst.writeback_calls  = take_window(src.writeback_calls);
 		dst.writeback_bytes  = take_window(src.writeback_bytes);
 		dst.writeback_ns     = take_window(src.writeback_ns);
-		dst.writeback_max_ns = src.writeback_max_ns.exchange(0, std::memory_order_relaxed);
-		dst.hash_calls       = take_window(src.hash_calls);
-		dst.hash_bytes       = take_window(src.hash_bytes);
-		dst.hash_ns          = take_window(src.hash_ns);
-		dst.hash_max_ns      = src.hash_max_ns.exchange(0, std::memory_order_relaxed);
+		dst.writeback_max_ns = take_window(src.writeback_max_ns);
+		dst.hash_calls              = take_window(src.hash_calls);
+		dst.hash_bytes              = take_window(src.hash_bytes);
+		dst.hash_ns                 = take_window(src.hash_ns);
+		dst.hash_max_ns             = take_window(src.hash_max_ns);
+		dst.hash_tracked_changed    = take_window(src.hash_tracked_changed);
+		dst.hash_tracked_unchanged  = take_window(src.hash_tracked_unchanged);
+		dst.hash_fallback_changed   = take_window(src.hash_fallback_changed);
+		dst.hash_fallback_unchanged = take_window(src.hash_fallback_unchanged);
 	}
 
 	snapshot.live_objects  = g_live_objects.load(std::memory_order_relaxed);
