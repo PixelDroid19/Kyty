@@ -32,6 +32,7 @@ struct GpuDirtyPageTracker::RangeEntry
 namespace {
 
 constexpr uintptr_t kTombstoneKey = 1u;
+std::atomic<bool>    g_fault_handler_ready {false};
 
 [[nodiscard]] uintptr_t HashPage(uintptr_t page) noexcept
 {
@@ -724,8 +725,14 @@ GpuDirtyTrackingMode GpuDirtyPageTracker::Mode(uintptr_t address, size_t size) c
 
 GpuDirtyPageTracker& GetGpuDirtyPageTracker() noexcept
 {
-	static GpuDirtyPageTracker tracker(std::getenv("KYTY_ENABLE_GPU_DIRTY_TRACKING") != nullptr);
+	static GpuDirtyPageTracker tracker(GpuDirtyTrackingEnabledForProcess(
+	    std::getenv("KYTY_DISABLE_GPU_DIRTY_TRACKING"), g_fault_handler_ready.load(std::memory_order_acquire)));
 	return tracker;
+}
+
+void GpuDirtyPageTrackerNotifyFaultHandlerInstalled() noexcept
+{
+	g_fault_handler_ready.store(true, std::memory_order_release);
 }
 
 GpuDirtyPageTracker& GpuDirtyPageTracker::Instance() noexcept

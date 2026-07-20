@@ -37,6 +37,12 @@ enum class GpuDirtyProtectionState : uint32_t
 	return observed == GpuDirtyProtectionState::Writable || observed == GpuDirtyProtectionState::Retired;
 }
 
+[[nodiscard]] constexpr bool GpuDirtyTrackingEnabledForProcess(const char* disable_value, bool fault_handler_ready)
+{
+	return fault_handler_ready &&
+	       (disable_value == nullptr || disable_value[0] == '\0' || (disable_value[0] == '0' && disable_value[1] == '\0'));
+}
+
 struct GpuDirtyReadObservation
 {
 	uint64_t generation = 0;
@@ -109,7 +115,10 @@ private:
 };
 
 // Process-wide tracker used by the exception/HLE seams. Its fixed metadata is
-// allocated once outside signal context.
+// allocated once outside signal context. Tracking is enabled by default and
+// can be disabled for diagnosis with KYTY_DISABLE_GPU_DIRTY_TRACKING=1.
+// The runtime must publish its fault handler before first use.
+void GpuDirtyPageTrackerNotifyFaultHandlerInstalled() noexcept;
 GpuDirtyPageTracker& GetGpuDirtyPageTracker() noexcept;
 
 } // namespace Kyty::Libs::Graphics

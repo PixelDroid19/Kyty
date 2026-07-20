@@ -17,6 +17,7 @@ using Kyty::Libs::Graphics::GpuDirtyPageTracker;
 using Kyty::Libs::Graphics::GpuDirtyProtectionState;
 using Kyty::Libs::Graphics::GpuDirtyProtectionStateHandlesFault;
 using Kyty::Libs::Graphics::GpuDirtyProtectionStateNeedsArmingRollback;
+using Kyty::Libs::Graphics::GpuDirtyTrackingEnabledForProcess;
 using Kyty::Libs::Graphics::GpuDirtyTrackingMode;
 using Kyty::Libs::Graphics::GpuMemoryCheckAccessViolation;
 using Kyty::Libs::Graphics::GpuMemoryNotifyHostWrite;
@@ -183,6 +184,16 @@ TEST(EmulatorGraphicsDirtyTracking, DisabledTrackerFallsBackWithoutMetadata)
 	EXPECT_EQ(tracker.SnapshotGeneration(1, 1), 0u);
 	EXPECT_TRUE(tracker.ChangedSince(1, 1, 0));
 	EXPECT_EQ(tracker.Mode(1, 1), GpuDirtyTrackingMode::HashFallback);
+}
+
+TEST(EmulatorGraphicsDirtyTracking, DefaultPolicyRequiresAnExplicitDisableValue)
+{
+	EXPECT_FALSE(GpuDirtyTrackingEnabledForProcess(nullptr, false));
+	EXPECT_TRUE(GpuDirtyTrackingEnabledForProcess(nullptr, true));
+	EXPECT_TRUE(GpuDirtyTrackingEnabledForProcess("", true));
+	EXPECT_TRUE(GpuDirtyTrackingEnabledForProcess("0", true));
+	EXPECT_FALSE(GpuDirtyTrackingEnabledForProcess("1", true));
+	EXPECT_FALSE(GpuDirtyTrackingEnabledForProcess("true", true));
 }
 
 TEST(EmulatorGraphicsDirtyTracking, PublicWriteRoutesRejectInvalidRanges)
