@@ -213,8 +213,11 @@ def kill_process_group(proc: subprocess.Popen[Any], notes: list[str]) -> None:
             os.killpg(proc.pid, signal.SIGKILL)
         else:
             proc.kill()
-        proc.wait(timeout=5)
-        notes.append("killed_sigkill")
+        try:
+            proc.wait(timeout=5)
+            notes.append("killed_sigkill")
+        except subprocess.TimeoutExpired:
+            notes.append("kill_timeout")
     except ProcessLookupError:
         notes.append("process_already_gone")
     except OSError as exc:
@@ -281,8 +284,15 @@ def first_actionable_from_log(log_path: Path) -> str:
         text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
         s = line.strip()
+        if s in ("--- Error ---", "--- Fatal Error ---"):
+            for diagnostic in lines[index + 1 :]:
+                diagnostic = diagnostic.strip()
+                if not diagnostic or diagnostic.startswith("---") or diagnostic.startswith(" in /"):
+                    continue
+                return diagnostic[:160]
         if not s or s.startswith("---") or s.startswith("["):
             continue
         if "/home/" in s or "Documents/" in s or s.startswith(" in /"):
@@ -507,7 +517,7 @@ def classify_exit(exit_code: Optional[int], timed_out: bool) -> str:
         return "unknown"
     if exit_code == 0:
         return "guest_exit_ok"
-    if exit_code in (139, 132, 134, 136, 65, 321):
+    if exit_code in (-6, 139, 132, 134, 136, 65, 321):
         return "host_crash"
     if exit_code in (-15, -9, 143, 137):
         return "controlled_kill"
