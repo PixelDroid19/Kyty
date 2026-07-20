@@ -6,6 +6,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
+#include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -73,7 +74,8 @@ void LabelCompleteSubmission(SubmissionId submission);
 // StorageBuffer GPU→CPU write-back must not clobber EOP fence words. Fence
 // ranges are durable for the lifetime of their guest allocation, independently
 // of the transient Label that published them.
-void LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size);
+[[nodiscard]] GpuWritebackResult LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
+                                                   GpuWritebackPageCache* page_cache);
 // Called only after GPU submissions and host presentation have quiesced, while
 // the guest VA is still mapped and before it can be reused.
 void LabelReleaseMappedRange(uint64_t addr, uint64_t bytes);

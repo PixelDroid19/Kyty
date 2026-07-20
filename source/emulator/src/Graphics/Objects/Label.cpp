@@ -73,7 +73,8 @@ public:
 	void   Set(CommandBuffer* buffer, Label* label);
 	void   DrainCompleted();
 	void   CompleteSubmission(SubmissionId submission);
-	void   WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size);
+	[[nodiscard]] GpuWritebackResult WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
+	                                              GpuWritebackPageCache* page_cache);
 	void   ReleaseMappedRange(uint64_t addr, uint64_t bytes);
 
 private:
@@ -436,10 +437,12 @@ void LabelManager::CompleteSubmission(SubmissionId submission)
 	}
 }
 
-void LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size)
+GpuWritebackResult LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
+                                              GpuWritebackPageCache* page_cache)
 {
 	EXIT_IF(guest_dst == nullptr);
 	EXIT_IF(gpu_src == nullptr);
+	EXIT_IF(page_cache == nullptr);
 
 	Vector<uint64_t> hole_begin;
 	Vector<uint64_t> hole_end;
@@ -479,8 +482,12 @@ void LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t 
 		}
 	}
 
-	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(guest_dst), size);
-	MemcpySkipAbsoluteRanges(guest_dst, gpu_src, size, hole_begin.GetData(), hole_end.GetData(), static_cast<int>(hole_begin.Size()));
+	const auto notify_write = [](void* /*opaque*/, uint64_t address, uint64_t bytes)
+	{
+		(void)GpuMemoryNotifyHostWrite(address, bytes);
+	};
+	return page_cache->CopyChangedPages(guest_dst, gpu_src, size, hole_begin.GetData(), hole_end.GetData(),
+	                                    static_cast<int>(hole_begin.Size()), notify_write, nullptr);
 }
 
 void LabelManager::ReleaseMappedRange(uint64_t addr, uint64_t bytes)
@@ -730,11 +737,12 @@ void LabelCompleteSubmission(SubmissionId submission)
 	g_label_manager->CompleteSubmission(submission);
 }
 
-void LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size)
+GpuWritebackResult LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
+                                     GpuWritebackPageCache* page_cache)
 {
 	EXIT_IF(g_label_manager == nullptr);
 
-	g_label_manager->WriteBackCopy(guest_dst, gpu_src, size);
+	return g_label_manager->WriteBackCopy(guest_dst, gpu_src, size, page_cache);
 }
 
 void LabelReleaseMappedRange(uint64_t addr, uint64_t bytes)
