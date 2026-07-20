@@ -333,7 +333,15 @@ bool DebugOverlayRecord(GraphicContext* ctx, VulkanSwapchain* swapchain, VkComma
 		return false;
 	}
 
-	ImGui_ImplVulkan_NewFrame();
+	// The backend lazily uploads its font atlas from NewFrame and performs its
+	// own queue submit/wait. Serialize that host access with every other role
+	// that resolves to the same physical Vulkan queue.
+	auto& queue = ctx->queues[GraphicContext::QUEUE_PRESENT];
+	EXIT_IF(queue.mutex == nullptr);
+	{
+		Core::LockGuard queue_lock(*queue.mutex);
+		ImGui_ImplVulkan_NewFrame();
+	}
 	ImGui_ImplSDL2_NewFrame();
 	ImGui::NewFrame();
 	DrawHud(snap);

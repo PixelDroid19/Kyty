@@ -5,6 +5,8 @@
 #include "Emulator/Graphics/ResolutionAliasPolicy.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VideoOutFlipLifecycleGate.h"
+#include "Emulator/Graphics/VideoOutFlipQueueAdmissionGate.h"
+#include "Emulator/Graphics/VideoOutHostAccessGate.h"
 #include "Emulator/Graphics/VideoOutMaterializationGate.h"
 
 #include <atomic>
@@ -241,6 +243,87 @@ TEST(EmulatorVideoOutResolution, FlipLifecycleDrainWaitsForEveryAcceptedRequestO
 	EXPECT_EQ(completed.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
 	gate.Complete(&first_owner);
 	EXPECT_EQ(completed.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	waiter.join();
+}
+
+TEST(EmulatorVideoOutResolution, InternalFlipAdmissionWaitsForFlipRemovalAndAdmitsExactlyOnce)
+{
+	VideoOutFlipQueueAdmissionGate admission(2);
+	ASSERT_TRUE(admission.TryAcquire());
+	ASSERT_TRUE(admission.TryAcquire());
+	EXPECT_FALSE(admission.TryAcquire());
+
+	std::atomic_uint32_t admitted {0};
+	std::promise<void>  waiter_entered;
+	std::promise<void>  waiter_completed;
+	auto                entered   = waiter_entered.get_future();
+	auto                completed = waiter_completed.get_future();
+	std::thread         waiter(
+	    [&]
+	    {
+		    waiter_entered.set_value();
+		    admission.AcquireBlocking();
+		    admitted.fetch_add(1, std::memory_order_relaxed);
+		    waiter_completed.set_value();
+	    });
+
+	EXPECT_EQ(entered.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(completed.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+	EXPECT_EQ(admitted.load(std::memory_order_relaxed), 0u);
+
+	// Models FlipQueue::Flip removing one accepted request.
+	admission.Release();
+	EXPECT_EQ(completed.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(admitted.load(std::memory_order_relaxed), 1u);
+	EXPECT_FALSE(admission.TryAcquire());
+
+	admission.Release();
+	admission.Release();
+	EXPECT_TRUE(admission.TryAcquire());
+	admission.Release();
+	waiter.join();
+}
+
+TEST(EmulatorVideoOutResolution, HostAccessQuiesceWaitsForAcceptedWorkAndBlocksNewAdmissions)
+{
+	VideoOutHostAccessGate gate;
+	auto                   accepted = gate.Acquire();
+
+	std::promise<void> quiesce_entered;
+	std::promise<void> quiesce_acquired;
+	std::promise<void> release_quiesce;
+	auto               entered           = quiesce_entered.get_future();
+	auto               acquired          = quiesce_acquired.get_future();
+	auto               release_exclusive = release_quiesce.get_future();
+	std::thread         quiescer(
+        [&]
+        {
+	        quiesce_entered.set_value();
+	        auto exclusive = gate.Quiesce();
+	        quiesce_acquired.set_value();
+	        release_exclusive.wait();
+        });
+
+	EXPECT_EQ(entered.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(acquired.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+
+	std::promise<void> new_access_acquired;
+	auto               new_access = new_access_acquired.get_future();
+	std::thread         waiter(
+        [&]
+        {
+	        auto pin = gate.Acquire();
+	        new_access_acquired.set_value();
+        });
+
+	EXPECT_EQ(new_access.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+	accepted.Reset();
+	EXPECT_EQ(acquired.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(new_access.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+
+	release_quiesce.set_value();
+	EXPECT_EQ(new_access.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	quiescer.join();
 	waiter.join();
 }
 

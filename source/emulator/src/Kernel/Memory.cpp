@@ -11,6 +11,7 @@
 
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -31,6 +32,33 @@ namespace VirtualMemory = Core::VirtualMemory;
 
 LIB_NAME("libkernel", "libkernel");
 
+static bool is_representable_range(uint64_t addr, uint64_t size)
+{
+	return size != 0 && size <= UINT64_MAX - addr;
+}
+
+KernelGpuMappingPromotionStatus KernelPromoteGpuMappingRange(uint64_t mapping_addr, uint64_t mapping_size, uint64_t protected_addr,
+                                                             uint64_t protected_size, Graphics::GpuMemoryMode requested_mode,
+                                                             Graphics::GpuMemoryMode* cleanup_mode)
+{
+	if (cleanup_mode == nullptr || !is_representable_range(mapping_addr, mapping_size) ||
+	    !is_representable_range(protected_addr, protected_size))
+	{
+		return KernelGpuMappingPromotionStatus::InvalidArgument;
+	}
+	if (protected_addr < mapping_addr || protected_size > mapping_size ||
+	    protected_addr - mapping_addr > mapping_size - protected_size)
+	{
+		return KernelGpuMappingPromotionStatus::NotContained;
+	}
+	if (requested_mode != Graphics::GpuMemoryMode::NoAccess && *cleanup_mode == Graphics::GpuMemoryMode::NoAccess)
+	{
+		*cleanup_mode = requested_mode;
+		return KernelGpuMappingPromotionStatus::Promoted;
+	}
+	return KernelGpuMappingPromotionStatus::Retained;
+}
+
 class PhysicalMemory
 {
 public:
@@ -48,7 +76,10 @@ public:
 		uint64_t                map_size;
 		int                     prot;
 		VirtualMemory::Mode     mode;
-		Graphics::GpuMemoryMode gpu_mode;
+		// Monotonic lifetime marker consumed by ClaimUnmap. It records that
+		// cleanup is required, not the mapping's latest protection.
+		Graphics::GpuMemoryMode gpu_cleanup_mode;
+		bool                    unmap_pending = false;
 	};
 
 	PhysicalMemory()
@@ -76,7 +107,10 @@ public:
 	bool Release(uint64_t start, size_t len);
 	uint64_t Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode,
 	             uint64_t alignment, bool fixed, bool* physical_range_valid);
-	bool Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
+	bool ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
+	bool CompleteUnmap(uint64_t vaddr, uint64_t size);
+	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode,
+	                                               uint64_t* mapping_addr, uint64_t* mapping_size);
 	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode);
 	bool Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
 
@@ -102,7 +136,8 @@ public:
 		uint64_t                map_size;
 		int                     prot;
 		VirtualMemory::Mode     mode;
-		Graphics::GpuMemoryMode gpu_mode;
+		Graphics::GpuMemoryMode gpu_cleanup_mode;
+		bool                    unmap_pending = false;
 	};
 
 	FlexibleMemory() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
@@ -114,7 +149,10 @@ public:
 	uint64_t        Available();
 
 	bool Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode);
-	bool Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
+	bool ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
+	bool CompleteUnmap(uint64_t vaddr, uint64_t size);
+	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode,
+	                                               uint64_t* mapping_addr, uint64_t* mapping_size);
 	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode);
 
 	[[nodiscard]] Core::Mutex&                  GetMutex() { return m_mutex; }
@@ -395,30 +433,81 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 	b.map_size  = map_size;
 	b.prot      = prot;
 	b.mode      = mode;
-	b.gpu_mode  = gpu_mode;
+	b.gpu_cleanup_mode = gpu_mode;
 	m_mapped.Add(b);
 
 	return map_vaddr;
 }
 
-bool PhysicalMemory::Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode)
+bool PhysicalMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode)
 {
 	EXIT_IF(gpu_mode == nullptr);
 
 	Core::LockGuard lock(m_mutex);
 
+	for (auto& b: m_mapped)
+	{
+		if (b.map_vaddr == vaddr && b.map_size == size && !b.unmap_pending)
+		{
+			*gpu_mode = b.gpu_cleanup_mode;
+			b.unmap_pending = true;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+KernelGpuMappingPromotionStatus PhysicalMemory::PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode,
+                                                               uint64_t* mapping_addr, uint64_t* mapping_size)
+{
+	if (mapping_addr == nullptr || mapping_size == nullptr || !is_representable_range(vaddr, size))
+	{
+		return KernelGpuMappingPromotionStatus::InvalidArgument;
+	}
+
+	Core::LockGuard lock(m_mutex);
+	for (auto& block: m_mapped)
+	{
+		auto cleanup_mode = block.gpu_cleanup_mode;
+		const auto result =
+		    KernelPromoteGpuMappingRange(block.map_vaddr, block.map_size, vaddr, size, gpu_mode, &cleanup_mode);
+		if (result == KernelGpuMappingPromotionStatus::NotContained)
+		{
+			continue;
+		}
+		if (result == KernelGpuMappingPromotionStatus::InvalidArgument)
+		{
+			return result;
+		}
+		if (block.unmap_pending)
+		{
+			return KernelGpuMappingPromotionStatus::UnmapPending;
+		}
+		block.gpu_cleanup_mode = cleanup_mode;
+		*mapping_addr  = block.map_vaddr;
+		*mapping_size  = block.map_size;
+		return result;
+	}
+	return KernelGpuMappingPromotionStatus::NotContained;
+}
+
+bool PhysicalMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
+{
+	Core::LockGuard lock(m_mutex);
+
 	uint32_t index = 0;
 	for (auto& b: m_mapped)
 	{
-		if (b.map_vaddr == vaddr && b.map_size == size)
+		if (b.map_vaddr == vaddr && b.map_size == size && b.unmap_pending)
 		{
 			const uint64_t phys_addr = b.phys_addr;
 			const uint64_t map_size  = b.map_size;
 			if (!VirtualMemory::Free(vaddr))
 			{
+				b.unmap_pending = false;
 				return false;
 			}
-			*gpu_mode = b.gpu_mode;
 			m_mapped.RemoveAt(index);
 
 			// If the physical reservation was already released (Gen5 unmap after
@@ -519,7 +608,7 @@ bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 			                   }
 			                   if (gpu_mode != nullptr)
 			                   {
-				                   *gpu_mode = b.gpu_mode;
+				                   *gpu_mode = b.gpu_cleanup_mode;
 			                   }
 
 			                   return true;
@@ -537,7 +626,7 @@ bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mo
 	b.map_size  = len;
 	b.prot      = prot;
 	b.mode      = mode;
-	b.gpu_mode  = gpu_mode;
+	b.gpu_cleanup_mode = gpu_mode;
 
 	m_allocated.Add(b);
 	m_allocated_total += len;
@@ -545,22 +634,73 @@ bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mo
 	return true;
 }
 
-bool FlexibleMemory::Unmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode)
+bool FlexibleMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode)
 {
 	EXIT_IF(gpu_mode == nullptr);
 
 	Core::LockGuard lock(m_mutex);
 
+	for (auto& b: m_allocated)
+	{
+		if (b.map_vaddr == vaddr && b.map_size == size && !b.unmap_pending)
+		{
+			*gpu_mode = b.gpu_cleanup_mode;
+			b.unmap_pending = true;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+KernelGpuMappingPromotionStatus FlexibleMemory::PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode,
+                                                               uint64_t* mapping_addr, uint64_t* mapping_size)
+{
+	if (mapping_addr == nullptr || mapping_size == nullptr || !is_representable_range(vaddr, size))
+	{
+		return KernelGpuMappingPromotionStatus::InvalidArgument;
+	}
+
+	Core::LockGuard lock(m_mutex);
+	for (auto& block: m_allocated)
+	{
+		auto cleanup_mode = block.gpu_cleanup_mode;
+		const auto result =
+		    KernelPromoteGpuMappingRange(block.map_vaddr, block.map_size, vaddr, size, gpu_mode, &cleanup_mode);
+		if (result == KernelGpuMappingPromotionStatus::NotContained)
+		{
+			continue;
+		}
+		if (result == KernelGpuMappingPromotionStatus::InvalidArgument)
+		{
+			return result;
+		}
+		if (block.unmap_pending)
+		{
+			return KernelGpuMappingPromotionStatus::UnmapPending;
+		}
+		block.gpu_cleanup_mode = cleanup_mode;
+		*mapping_addr  = block.map_vaddr;
+		*mapping_size  = block.map_size;
+		return result;
+	}
+	return KernelGpuMappingPromotionStatus::NotContained;
+}
+
+bool FlexibleMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
+{
+	Core::LockGuard lock(m_mutex);
+
 	uint32_t index = 0;
 	for (auto& b: m_allocated)
 	{
-		if (b.map_vaddr == vaddr && b.map_size == size)
+		if (b.map_vaddr == vaddr && b.map_size == size && b.unmap_pending)
 		{
 			if (!VirtualMemory::Free(vaddr))
 			{
+				b.unmap_pending = false;
 				return false;
 			}
-			*gpu_mode = b.gpu_mode;
 
 			m_allocated.RemoveAt(index);
 			m_allocated_total -= size;
@@ -600,7 +740,7 @@ bool FlexibleMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 			                   }
 			                   if (gpu_mode != nullptr)
 			                   {
-				                   *gpu_mode = b.gpu_mode;
+				                   *gpu_mode = b.gpu_cleanup_mode;
 			                   }
 
 			                   return true;
@@ -800,6 +940,50 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr_in_out, uint64_t len, in
 	return OK;
 }
 
+enum class PendingUnmapOwner : uint8_t
+{
+	Physical,
+	Flexible,
+};
+
+struct PendingUnmap
+{
+	PendingUnmapOwner       owner    = PendingUnmapOwner::Physical;
+	uint64_t                vaddr    = 0;
+	uint64_t                size     = 0;
+	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+};
+
+static bool complete_mapping_unmap(const PendingUnmap& pending)
+{
+	switch (pending.owner)
+	{
+		case PendingUnmapOwner::Physical: return g_physical_memory->CompleteUnmap(pending.vaddr, pending.size);
+		case PendingUnmapOwner::Flexible: return g_flexible_memory->CompleteUnmap(pending.vaddr, pending.size);
+	}
+	EXIT("Unknown pending unmap owner\n");
+	return false;
+}
+
+static bool complete_gpu_mapping_unmap(void* data)
+{
+	EXIT_IF(data == nullptr);
+
+	// GraphicsRun owns the GPU admission gate and has already drained every
+	// guest queue. VideoOut closes host-buffer admission and drains accepted
+	// presentation work before the mapping is detached and released.
+	return VideoOut::VideoOutRunBufferUnmapTransaction(
+	    static_cast<const PendingUnmap*>(data)->vaddr, static_cast<const PendingUnmap*>(data)->size,
+	    [](void* action_data)
+	    {
+		    EXIT_IF(action_data == nullptr);
+		    const auto& pending = *static_cast<const PendingUnmap*>(action_data);
+		    Graphics::GpuMemoryFreeMappedRangeQuiesced(Graphics::WindowGetGraphicContext(), pending.vaddr, pending.size);
+		    return complete_mapping_unmap(pending);
+	    },
+	    data);
+}
+
 int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 {
 	PRINT_NAME();
@@ -815,28 +999,33 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+	PendingUnmap pending {};
+	pending.vaddr = vaddr;
+	pending.size  = len;
 
-	bool result = g_physical_memory->Unmap(vaddr, len, &gpu_mode);
-
-	if (!result)
+	bool mapping_claimed = g_physical_memory->ClaimUnmap(vaddr, len, &pending.gpu_mode);
+	if (!mapping_claimed)
 	{
-		result = g_flexible_memory->Unmap(vaddr, len, &gpu_mode);
+		mapping_claimed = g_flexible_memory->ClaimUnmap(vaddr, len, &pending.gpu_mode);
+		if (mapping_claimed)
+		{
+			pending.owner = PendingUnmapOwner::Flexible;
+		}
 	}
-	if (!result && g_reserved_memory != nullptr)
+
+	bool result = false;
+	if (mapping_claimed)
 	{
+		result = pending.gpu_mode == Graphics::GpuMemoryMode::NoAccess
+		             ? complete_mapping_unmap(pending)
+		             : Graphics::GraphicsRunWithQuiescedSubmissions(complete_gpu_mapping_unmap, &pending);
+	} else if (g_reserved_memory != nullptr)
+	{
+		// Reserved NoAccess ranges never enter the GPU lifetime graph.
 		result = g_reserved_memory->Unmap(vaddr, len);
 	}
 
 	EXIT_NOT_IMPLEMENTED(!result);
-
-	// Physical and flexible Unmap own VirtualMemory::Free for their views.
-
-	if (gpu_mode != Graphics::GpuMemoryMode::NoAccess)
-	{
-		Graphics::GraphicsRunWait();
-		Graphics::GpuMemoryFree(Graphics::WindowGetGraphicContext(), vaddr, len, true);
-	}
 
 	if (g_free_callback != nullptr)
 	{
@@ -1298,6 +1487,19 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 	}
 }
 
+static const char* gpu_mapping_promotion_status_name(KernelGpuMappingPromotionStatus status)
+{
+	switch (status)
+	{
+		case KernelGpuMappingPromotionStatus::Promoted: return "Promoted";
+		case KernelGpuMappingPromotionStatus::Retained: return "Retained";
+		case KernelGpuMappingPromotionStatus::NotContained: return "NotContained";
+		case KernelGpuMappingPromotionStatus::InvalidArgument: return "InvalidArgument";
+		case KernelGpuMappingPromotionStatus::UnmapPending: return "UnmapPending";
+	}
+	return "Unknown";
+}
+
 int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 {
 	PRINT_NAME();
@@ -1337,7 +1539,30 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 
 	if (gpu_mode != Graphics::GpuMemoryMode::NoAccess)
 	{
-		Graphics::GpuMemorySetAllocatedRange(vaddr, len);
+		uint64_t mapping_addr = 0;
+		uint64_t mapping_size = 0;
+		auto     promotion = g_physical_memory->PromoteGpuRange(vaddr, len, gpu_mode, &mapping_addr, &mapping_size);
+		if (promotion == KernelGpuMappingPromotionStatus::NotContained)
+		{
+			promotion = g_flexible_memory->PromoteGpuRange(vaddr, len, gpu_mode, &mapping_addr, &mapping_size);
+		}
+		const auto registration_action = KernelGpuMappingRegistrationActionFor(promotion);
+		if (registration_action == KernelGpuMappingRegistrationAction::Reject)
+		{
+			EXIT("GPU-visible mprotect range registration failed: address=0x%016" PRIx64 ", size=0x%016" PRIx64
+			     ", mode=%s, status=%s(%u)\n",
+			     vaddr, static_cast<uint64_t>(len), Core::EnumName(gpu_mode).C_Str(),
+			     gpu_mapping_promotion_status_name(promotion), static_cast<uint32_t>(promotion));
+		}
+		if (registration_action == KernelGpuMappingRegistrationAction::RegisterOwnerMapping)
+		{
+			Graphics::GpuMemorySetAllocatedRange(mapping_addr, mapping_size);
+		} else if (registration_action == KernelGpuMappingRegistrationAction::RegisterProtectedRange)
+		{
+			// Preserve the pre-lifecycle behavior for valid external regions
+			// that are not owned by PhysicalMemory or FlexibleMemory.
+			Graphics::GpuMemorySetAllocatedRange(vaddr, len);
+		}
 	}
 
 	printf("\t prot: %s -> %s\n", Core::EnumName(old_mode).C_Str(), Core::EnumName(mode).C_Str());

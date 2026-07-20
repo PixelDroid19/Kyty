@@ -53,6 +53,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -410,15 +411,20 @@ public:
 	ShaderTranslationCache* GetShaderTranslationCache() { return m_shader_translation_cache; }
 	GdsBuffer*              GetGdsBuffer() { return m_gds_buffer; }
 
-	void AddEopEq(LibKernel::EventQueue::KernelEqueue eq, int id);
-	void DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq, int id);
+	void* BeginEopEqRegistration(LibKernel::EventQueue::KernelEqueueIdentity identity, int id);
+	void  PublishEopEqRegistration(void* registration);
+	void  CancelEopEqRegistration(void* registration);
+	void  DeleteEopEqRegistration(void* registration, LibKernel::EventQueue::KernelEqueue eq, int id);
 	void TriggerEopEvent();
+	Core::Mutex& GetEopRegistrationMutex() { return m_eop_registration_mutex; }
 
 private:
 	struct EopEqRegistration
 	{
-		LibKernel::EventQueue::KernelEqueue eq = nullptr;
-		int                                 id = GRAPHICS_EVENT_EOP;
+		LibKernel::EventQueue::KernelEqueueIdentity identity {};
+		int                                         id        = GRAPHICS_EVENT_EOP;
+		bool                                        published = false;
+		bool                                        deleted   = false;
 	};
 
 	Core::Mutex             m_mutex;
@@ -430,8 +436,9 @@ private:
 	GraphicContext*         m_graphic_ctx              = nullptr;
 	GdsBuffer*              m_gds_buffer               = nullptr;
 
-	Core::Mutex                m_eop_mutex;
-	Vector<EopEqRegistration>  m_eop_eqs;
+	Core::Mutex                 m_eop_registration_mutex;
+	Core::Mutex                 m_eop_mutex;
+	Vector<EopEqRegistration*>  m_eop_eqs;
 };
 
 struct RenderDepthInfo
@@ -1552,64 +1559,111 @@ static bool EopTraceEnabled()
 	return enabled;
 }
 
-void RenderContext::AddEopEq(LibKernel::EventQueue::KernelEqueue eq, int id)
+void* RenderContext::BeginEopEqRegistration(LibKernel::EventQueue::KernelEqueueIdentity identity, int id)
 {
 	Core::LockGuard lock(m_eop_mutex);
 
-	for (const auto& entry: m_eop_eqs)
-	{
-		EXIT_NOT_IMPLEMENTED(entry.eq == eq && entry.id == id);
-	}
-
-	EopEqRegistration reg {};
-	reg.eq = eq;
-	reg.id = id;
-	m_eop_eqs.Add(reg);
+	auto* registration     = new EopEqRegistration;
+	registration->identity = identity;
+	registration->id       = id;
+	m_eop_eqs.Add(registration);
 
 	if (EopTraceEnabled())
 	{
-		std::fprintf(stderr, "EOP_ADD eq=%p id=0x%x count=%u\n", static_cast<void*>(eq), id,
+		std::fprintf(stderr, "EOP_BEGIN eq=%p id=0x%x count=%u\n", static_cast<void*>(identity.eq), id,
 		             static_cast<unsigned>(m_eop_eqs.Size()));
 	}
+	return registration;
 }
 
-void RenderContext::DeleteEopEq(LibKernel::EventQueue::KernelEqueue eq, int id)
+void RenderContext::PublishEopEqRegistration(void* registration_ptr)
 {
+	auto*           registration = static_cast<EopEqRegistration*>(registration_ptr);
+	EopEqRegistration* release    = nullptr;
 	Core::LockGuard lock(m_eop_mutex);
-
-	bool found = false;
-	for (uint32_t i = 0; i < m_eop_eqs.Size(); i++)
+	const auto index = m_eop_eqs.Find(registration);
+	EXIT_IF(!m_eop_eqs.IndexValid(index) || registration->published);
+	if (registration->deleted)
 	{
-		if (m_eop_eqs[i].eq == eq && m_eop_eqs[i].id == id)
+		m_eop_eqs.RemoveAt(index);
+		release = registration;
+	} else
+	{
+		registration->published = true;
+	}
+
+	if (EopTraceEnabled())
+	{
+		std::fprintf(stderr, "EOP_PUBLISH eq=%p id=0x%x deleted=%d\n", static_cast<void*>(registration->identity.eq),
+		             registration->id, registration->deleted ? 1 : 0);
+	}
+	delete release;
+}
+
+void RenderContext::CancelEopEqRegistration(void* registration_ptr)
+{
+	auto* registration = static_cast<EopEqRegistration*>(registration_ptr);
+	Core::LockGuard lock(m_eop_mutex);
+	const auto      index = m_eop_eqs.Find(registration);
+	EXIT_IF(!m_eop_eqs.IndexValid(index) || registration->published);
+	m_eop_eqs.RemoveAt(index);
+	delete registration;
+}
+
+void RenderContext::DeleteEopEqRegistration(void* registration_ptr, LibKernel::EventQueue::KernelEqueue eq, int id)
+{
+	auto*              registration = static_cast<EopEqRegistration*>(registration_ptr);
+	EopEqRegistration* release      = nullptr;
+	{
+		Core::LockGuard lock(m_eop_mutex);
+		const auto      index = m_eop_eqs.Find(registration);
+		EXIT_IF(!m_eop_eqs.IndexValid(index));
+		EXIT_IF(registration->identity.eq != eq || registration->id != id || registration->deleted);
+		registration->deleted = true;
+		if (registration->published)
 		{
-			m_eop_eqs[i].eq = nullptr;
-			found           = true;
-			break;
+			m_eop_eqs.RemoveAt(index);
+			release = registration;
 		}
 	}
-	EXIT_NOT_IMPLEMENTED(!found);
 
 	if (EopTraceEnabled())
 	{
 		std::fprintf(stderr, "EOP_DEL eq=%p id=0x%x\n", static_cast<void*>(eq), id);
 	}
+	delete release;
 }
 
 void RenderContext::TriggerEopEvent()
 {
-	Core::LockGuard lock(m_eop_mutex);
-
-	uint32_t live = 0;
-	for (auto& entry: m_eop_eqs)
+	struct PendingTrigger
 	{
-		if (entry.eq != nullptr)
+		LibKernel::EventQueue::KernelEqueuePin pin;
+		int                                    id = GRAPHICS_EVENT_EOP;
+	};
+	std::vector<PendingTrigger> triggers;
+	{
+		Core::LockGuard lock(m_eop_mutex);
+		triggers.reserve(m_eop_eqs.Size());
+		for (auto* entry: m_eop_eqs)
 		{
-			live++;
-			auto result = LibKernel::EventQueue::KernelTriggerEvent(
-			    entry.eq, static_cast<uintptr_t>(entry.id), LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
-			    reinterpret_cast<void*>(LibKernel::KernelReadTsc()));
-			EXIT_NOT_IMPLEMENTED(result != OK);
+			if (entry->published && !entry->deleted)
+			{
+				auto pin = LibKernel::EventQueue::KernelAcquireEqueue(entry->identity);
+				if (pin)
+				{
+					triggers.push_back(PendingTrigger {std::move(pin), entry->id});
+				}
+			}
 		}
+	}
+
+	for (auto& trigger: triggers)
+	{
+		const auto result = LibKernel::EventQueue::KernelTriggerEvent(
+		    trigger.pin, static_cast<uintptr_t>(trigger.id), LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
+		    reinterpret_cast<void*>(LibKernel::KernelReadTsc()));
+		EXIT_NOT_IMPLEMENTED(result != OK && result != LibKernel::KERNEL_ERROR_ENOENT);
 	}
 
 	if (EopTraceEnabled())
@@ -1618,7 +1672,7 @@ void RenderContext::TriggerEopEvent()
 		const uint32_t               n = trigger_logs.fetch_add(1);
 		if (n < 64u)
 		{
-			std::fprintf(stderr, "EOP_TRIGGER live=%u slots=%u\n", live, static_cast<unsigned>(m_eop_eqs.Size()));
+			std::fprintf(stderr, "EOP_TRIGGER live=%u\n", static_cast<unsigned>(triggers.size()));
 		}
 	}
 }
@@ -4295,13 +4349,14 @@ static void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDyna
 	}
 }
 
-static Vector<RenderTextureVulkanImage*> FindRenderTexture(uint64_t vaddr, uint64_t size, bool exact)
+static Vector<RenderTextureVulkanImage*> FindRenderTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact)
 {
 	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(buffer == nullptr);
 
 	Vector<RenderTextureVulkanImage*> ret;
 
-	auto objects = GpuMemoryFindObjects(vaddr, size, GpuMemoryObjectType::RenderTexture, exact, false);
+	auto objects = GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::RenderTexture, exact, false);
 
 	for (const auto& obj: objects)
 	{
@@ -4314,13 +4369,14 @@ static Vector<RenderTextureVulkanImage*> FindRenderTexture(uint64_t vaddr, uint6
 	return ret;
 }
 
-static Vector<StorageTextureVulkanImage*> FindStorageTexture(uint64_t vaddr, uint64_t size, bool exact)
+static Vector<StorageTextureVulkanImage*> FindStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact)
 {
 	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(buffer == nullptr);
 
 	Vector<StorageTextureVulkanImage*> ret;
 
-	auto objects = GpuMemoryFindObjects(vaddr, size, GpuMemoryObjectType::StorageTexture, exact, false);
+	auto objects = GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::StorageTexture, exact, false);
 
 	for (const auto& obj: objects)
 	{
@@ -4333,13 +4389,14 @@ static Vector<StorageTextureVulkanImage*> FindStorageTexture(uint64_t vaddr, uin
 	return ret;
 }
 
-static Vector<DepthStencilVulkanImage*> FindDepthStencil(uint64_t vaddr, uint64_t size, bool exact)
+static Vector<DepthStencilVulkanImage*> FindDepthStencil(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact)
 {
 	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(buffer == nullptr);
 
 	Vector<DepthStencilVulkanImage*> ret;
 
-	auto objects = GpuMemoryFindObjects(vaddr, size, GpuMemoryObjectType::DepthStencilBuffer, exact, true);
+	auto objects = GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::DepthStencilBuffer, exact, true);
 
 	for (const auto& obj: objects)
 	{
@@ -4446,7 +4503,7 @@ void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, uint64_t vaddr, u
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
-	auto images = FindRenderTexture(vaddr, size, false);
+	auto images = FindRenderTexture(buffer, vaddr, size, false);
 
 	for (auto* image: images)
 	{
@@ -4463,7 +4520,7 @@ void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, ui
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
-	auto images = FindDepthStencil(vaddr, size, false);
+	auto images = FindDepthStencil(buffer, vaddr, size, false);
 
 	for (auto* image: images)
 	{
@@ -4636,7 +4693,8 @@ static void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	}
 }
 
-static void MaterializeRenderDepthInfo(uint64_t submit_id, RenderDepthInfo* r, uint32_t host_width = 0, uint32_t host_height = 0)
+static void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, RenderDepthInfo* r, uint32_t host_width = 0,
+                                       uint32_t host_height = 0)
 {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(r == nullptr);
@@ -4651,7 +4709,7 @@ static void MaterializeRenderDepthInfo(uint64_t submit_id, RenderDepthInfo* r, u
 	DepthStencilBufferObject vulkan_buffer_info(r->format, r->width, r->height, host_width, host_height, r->htile, r->neo, r->sampled,
 	                                            r->htile_buffer_vaddr, r->htile_buffer_size);
 	r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
-	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
+	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
 	EXIT_NOT_IMPLEMENTED(r->vulkan_buffer == nullptr);
 
 	if (r->htile && DepthMetaConsumeClear(r->htile_buffer_vaddr))
@@ -4667,11 +4725,11 @@ static void MaterializeRenderDepthInfo(uint64_t submit_id, RenderDepthInfo* r, u
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static void DescribeRenderColorInfo(const HW::Context& hw, RenderColorInfo* r)
+static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw, RenderColorInfo* r)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_IF(r == nullptr);
+	EXIT_IF(buffer == nullptr || r == nullptr);
 
 	const auto& rt   = hw.GetRenderTarget(0);
 	auto        mask = hw.GetRenderTargetMask();
@@ -4787,7 +4845,7 @@ static void DescribeRenderColorInfo(const HW::Context& hw, RenderColorInfo* r)
 	}
 	r->neo = rt.info.neo_mode;
 
-	auto video_image       = VideoOut::VideoOutGetImageMetadata(rt.base.addr);
+	auto video_image       = VideoOut::VideoOutGetImageMetadataForSubmission(rt.base.addr, buffer);
 	bool render_to_texture = (video_image.image == nullptr);
 
 	if (render_to_texture)
@@ -4873,7 +4931,7 @@ static void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer
 	}
 	if (r->type[0] == RenderColorType::DisplayBuffer)
 	{
-		const auto video_image = VideoOut::VideoOutGetImage(r->base_addr[0]);
+		const auto video_image = VideoOut::VideoOutGetImageForSubmission(r->base_addr[0], buffer);
 		EXIT_NOT_IMPLEMENTED(video_image.image != r->existing_video_image);
 		r->vulkan_buffer[0] = video_image.image;
 		EXIT_NOT_IMPLEMENTED(r->vulkan_buffer[0] == nullptr);
@@ -4891,8 +4949,9 @@ static void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer
 	}
 }
 
-static void FreezeDepthOnlyDisplayAtNative(const RenderColorInfo& color, const RenderDepthInfo& depth)
+static void FreezeDepthOnlyDisplayAtNative(CommandBuffer* buffer, const RenderColorInfo& color, const RenderDepthInfo& depth)
 {
+	EXIT_IF(buffer == nullptr);
 	if (color.targets_num != 0 || depth.format == VK_FORMAT_UNDEFINED)
 	{
 		return;
@@ -4906,7 +4965,7 @@ static void FreezeDepthOnlyDisplayAtNative(const RenderColorInfo& color, const R
 	uint32_t registered_width  = 0;
 	uint32_t registered_height = 0;
 	const auto registered_status =
-	    VideoOut::VideoOutGetRegisteredHostExtent(depth_extent.width, depth_extent.height, &registered_width, &registered_height);
+	    VideoOut::VideoOutGetRegisteredHostExtent(buffer, depth_extent.width, depth_extent.height, &registered_width, &registered_height);
 	if (registered_status != VideoOut::VideoOutRegisteredHostExtentStatus::Uniform)
 	{
 		EXIT("Depth-only display prepass cannot inspect registered host extent: guest=%ux%u status=%s(%u)\n", depth_extent.width,
@@ -4933,9 +4992,10 @@ static void FreezeDepthOnlyDisplayAtNative(const RenderColorInfo& color, const R
 	        status != InternalResolutionDisplaySelectionStatus::StickyMatch);
 }
 
-static ResolutionCohortDecision PrepareDisplayResolutionCohort(RenderColorInfo* color, const RenderDepthInfo& depth,
-                                                               ShaderPixelInputInfo* ps)
+static ResolutionCohortDecision PrepareDisplayResolutionCohort(CommandBuffer* buffer, RenderColorInfo* color,
+                                                               const RenderDepthInfo& depth, ShaderPixelInputInfo* ps)
 {
+	EXIT_IF(buffer == nullptr);
 	ResolutionCohortDecision native;
 	native.classification = ResolutionClassification::Native;
 	native.guest_extent   = {color != nullptr ? color->width : 0, color != nullptr ? color->height : 0};
@@ -5035,7 +5095,7 @@ static ResolutionCohortDecision PrepareDisplayResolutionCohort(RenderColorInfo* 
 	uint32_t   registered_width  = 0;
 	uint32_t   registered_height = 0;
 	const auto registered_status =
-	    VideoOut::VideoOutGetRegisteredHostExtent(guest.width, guest.height, &registered_width, &registered_height);
+	    VideoOut::VideoOutGetRegisteredHostExtent(buffer, guest.width, guest.height, &registered_width, &registered_height);
 	const ResolutionExtent registered {registered_width, registered_height};
 	if (registered_status != VideoOut::VideoOutRegisteredHostExtentStatus::Uniform)
 	{
@@ -5060,8 +5120,8 @@ static ResolutionCohortDecision PrepareDisplayResolutionCohort(RenderColorInfo* 
 	}
 	if (has_depth)
 	{
-		const auto existing_depth =
-		    GpuMemoryFindObjects(depth.vaddr, depth.size, depth.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer, true, false);
+		const auto existing_depth = GpuMemoryFindObjectsForSubmission(
+		    buffer, depth.vaddr, depth.size, depth.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer, true, false);
 		if (existing_depth.Size() > 1)
 		{
 			return unsupported(selected);
@@ -5231,11 +5291,9 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 		StorageBufferGpuObject buf_info(stride, num_records, read_only);
 
 		auto* buf = static_cast<StorageVulkanBuffer*>(
-		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, addr, size, buf_info));
+		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size, buf_info));
 
 		EXIT_NOT_IMPLEMENTED(buf == nullptr);
-
-		StorageBufferSet(buffer, buf);
 
 		buffers[i] = buf;
 
@@ -5444,7 +5502,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		if (check_depth_texture)
 		{
-			auto dtex     = FindDepthStencil(addr, size.size, true);
+			auto dtex     = FindDepthStencil(buffer, addr, size.size, true);
 			depth_texture = !dtex.IsEmpty();
 			if (depth_texture)
 			{
@@ -5486,14 +5544,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 		} else
 		{
-			auto rtex      = FindRenderTexture(addr, size.size, true);
+			auto rtex      = FindRenderTexture(buffer, addr, size.size, true);
 			render_texture = !rtex.IsEmpty();
 			// Exact miss: sample range can sit inside a live RT (Contains) or cover a
 			// smaller RT (IsContainedWithin). Falling through to guest-memory tile-27
 			// upload then reads empty GPU-owned backing and paints opaque-black props.
 			if (!render_texture && gen5)
 			{
-				rtex           = FindRenderTexture(addr, size.size, false);
+				rtex           = FindRenderTexture(buffer, addr, size.size, false);
 				render_texture = !rtex.IsEmpty();
 			}
 			if (render_texture)
@@ -5604,10 +5662,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			bool storage_texture = false;
 			if (!render_texture && gen5)
 			{
-				auto stex = FindStorageTexture(addr, size.size, true);
+				auto stex = FindStorageTexture(buffer, addr, size.size, true);
 				if (stex.IsEmpty())
 				{
-					stex = FindStorageTexture(addr, size.size, false);
+					stex = FindStorageTexture(buffer, addr, size.size, false);
 				}
 				if (!stex.IsEmpty())
 				{
@@ -5692,7 +5750,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// image instead of creating a TextureObject over the same guest range;
 				// the latter adds an alias parent that detiles the display buffer during
 				// every GPU write-back.
-				const auto video_image = VideoOut::VideoOutGetImage(addr);
+				const auto video_image = VideoOut::VideoOutGetImageForSubmission(addr, buffer);
 				if (video_image.image != nullptr && video_image.buffer_size == size.size && video_image.buffer_pitch == pitch &&
 				    video_image.image->MatchesGuestExtent(width, height) &&
 				    (!gen5 || Gen5SampleFormatMatchesVulkan(fmt, video_image.image->format)))
@@ -5744,8 +5802,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					bool live_cover = false;
 					if (gen5 && (tile == 27u || tile == 9u))
 					{
-						const auto r_cover = FindRenderTexture(addr, size.size, false);
-						const auto s_cover = FindStorageTexture(addr, size.size, false);
+						const auto r_cover = FindRenderTexture(buffer, addr, size.size, false);
+						const auto s_cover = FindStorageTexture(buffer, addr, size.size, false);
 						live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
 					}
 					const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
@@ -6191,20 +6249,20 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	RenderDepthInfo depth_info;
 	RenderColorInfo color_info;
 	DescribeRenderDepthInfo(*ctx, &depth_info);
-	DescribeRenderColorInfo(*ctx, &color_info);
+	DescribeRenderColorInfo(buffer, *ctx, &color_info);
 	if (color_info.targets_num == 0 && depth_info.format == VK_FORMAT_UNDEFINED)
 	{
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
-	FreezeDepthOnlyDisplayAtNative(color_info, depth_info);
+	FreezeDepthOnlyDisplayAtNative(buffer, color_info, depth_info);
 
 	ShaderVertexInputInfo vs_input_info;
 	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info);
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
-	const auto resolution = PrepareDisplayResolutionCohort(&color_info, depth_info, &ps_input_info);
+	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	if (resolution.classification == ResolutionClassification::Unsupported)
 	{
 		EXIT("Internal resolution cohort conflict: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
@@ -6214,7 +6272,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		     ResolutionNativeReasonName(resolution.attachment_native_reason),
 		     static_cast<unsigned>(resolution.attachment_native_reason), resolution.blocking_attachment_index);
 	}
-	MaterializeRenderDepthInfo(submit_id, &depth_info,
+	MaterializeRenderDepthInfo(submit_id, buffer, &depth_info,
 	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.width : 0,
 	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.height : 0);
 	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
@@ -6261,7 +6319,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		uint64_t    size = static_cast<uint64_t>(b.stride) * b.num_records;
 
 		auto* vertices = static_cast<VulkanBuffer*>(
-		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, addr, size, VertexBufferGpuObject()));
+		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size, VertexBufferGpuObject()));
 
 		VkDeviceSize offset = 0;
 
@@ -6275,7 +6333,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
 
 	VulkanBuffer* indices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(
-	    submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(index_addr), index_size, IndexBufferGpuObject()));
+	    submit_id, g_render_ctx->GetGraphicCtx(), buffer, reinterpret_cast<uint64_t>(index_addr), index_size, IndexBufferGpuObject()));
 	EXIT_NOT_IMPLEMENTED(indices == nullptr);
 
 	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
@@ -6348,13 +6406,13 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	RenderDepthInfo depth_info;
 	RenderColorInfo color_info;
 	DescribeRenderDepthInfo(*ctx, &depth_info);
-	DescribeRenderColorInfo(*ctx, &color_info);
+	DescribeRenderColorInfo(buffer, *ctx, &color_info);
 	if (color_info.targets_num == 0 && depth_info.format == VK_FORMAT_UNDEFINED)
 	{
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
-	FreezeDepthOnlyDisplayAtNative(color_info, depth_info);
+	FreezeDepthOnlyDisplayAtNative(buffer, color_info, depth_info);
 
 	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
 
@@ -6377,7 +6435,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info);
-	const auto resolution = PrepareDisplayResolutionCohort(&color_info, depth_info, &ps_input_info);
+	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	if (resolution.classification == ResolutionClassification::Unsupported)
 	{
 		EXIT("Internal resolution cohort conflict: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
@@ -6387,7 +6445,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		     ResolutionNativeReasonName(resolution.attachment_native_reason),
 		     static_cast<unsigned>(resolution.attachment_native_reason), resolution.blocking_attachment_index);
 	}
-	MaterializeRenderDepthInfo(submit_id, &depth_info,
+	MaterializeRenderDepthInfo(submit_id, buffer, &depth_info,
 	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.width : 0,
 	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.height : 0);
 	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
@@ -6434,7 +6492,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		uint64_t    size = static_cast<uint64_t>(b.stride) * b.num_records;
 
 		auto* vertices = static_cast<VulkanBuffer*>(
-		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, addr, size, VertexBufferGpuObject()));
+		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size, VertexBufferGpuObject()));
 
 		VkDeviceSize offset = 0;
 
@@ -6547,39 +6605,80 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	DebugStatsRecordDispatch();
 }
 
-void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value)
+static const char* GpuMemoryRangeValidationStatusName(GpuMemoryRangeValidationStatus status)
 {
-	EXIT_IF(g_render_ctx == nullptr);
+	switch (status)
+	{
+		case GpuMemoryRangeValidationStatus::Valid: return "Valid";
+		case GpuMemoryRangeValidationStatus::InvalidArgument: return "InvalidArgument";
+		case GpuMemoryRangeValidationStatus::Unallocated: return "Unallocated";
+	}
+	return "Unknown";
+}
+
+static void ValidateTransientLabelDestination(const void* dst_gpu_addr, uint64_t size)
+{
 	EXIT_IF(dst_gpu_addr == nullptr);
+	const auto status = GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(dst_gpu_addr), size);
+	if (status != GpuMemoryRangeValidationStatus::Valid)
+	{
+		EXIT("EOP destination range is invalid: address=0x%016" PRIx64 ", size=%" PRIu64 ", status=%s(%u)",
+		     reinterpret_cast<uint64_t>(dst_gpu_addr), size, GpuMemoryRangeValidationStatusName(status), static_cast<uint32_t>(status));
+	}
+}
+
+static void RecordTransientLabel32(CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value, uint32_t dst_word_count,
+                                   LabelCallback callback_1, LabelCallback callback_2, const uint64_t* args)
+{
 	EXIT_IF(buffer == nullptr);
 	EXIT_IF(buffer->IsInvalid());
 
-	Core::LockGuard lock(g_render_ctx->GetMutex());
-
-	Graphics::LabelGpuObject label_info(value, nullptr, nullptr);
-
-	auto* label = static_cast<Label*>(
-	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
+	uint64_t empty_args[LABEL_ARGS_MAX] = {};
+	auto*    label = LabelCreate32(g_render_ctx->GetGraphicCtx(), dst_gpu_addr, value, dst_word_count, callback_1, callback_2,
+	                               args != nullptr ? args : empty_args);
 
 	LabelSet(buffer, label);
+	LabelDelete(label);
 }
 
-void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t dw_offset,
+static void RecordTransientLabel64(CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value, LabelCallback callback_1,
+                                   LabelCallback callback_2, const uint64_t* args)
+{
+	EXIT_IF(buffer == nullptr);
+	EXIT_IF(buffer->IsInvalid());
+
+	uint64_t empty_args[LABEL_ARGS_MAX] = {};
+	auto*    label = LabelCreate64(g_render_ctx->GetGraphicCtx(), dst_gpu_addr, value, callback_1, callback_2,
+	                               args != nullptr ? args : empty_args);
+
+	LabelSet(buffer, label);
+	LabelDelete(label);
+}
+
+void GraphicsRenderWriteAtEndOfPipe32(uint64_t /*submit_id*/, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value)
+{
+	EXIT_IF(g_render_ctx == nullptr);
+	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
+
+	Core::LockGuard lock(g_render_ctx->GetMutex());
+	RecordTransientLabel32(buffer, dst_gpu_addr, value, 1u, nullptr, nullptr, nullptr);
+}
+
+void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t /*submit_id*/, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t dw_offset,
                                          uint32_t dw_num)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(dst_gpu_addr == nullptr);
-	EXIT_IF(buffer == nullptr);
-	EXIT_IF(buffer->IsInvalid());
+	const uint64_t write_size = std::max<uint64_t>(sizeof(*dst_gpu_addr), static_cast<uint64_t>(dw_num) * sizeof(*dst_gpu_addr));
+	ValidateTransientLabelDestination(dst_gpu_addr, write_size);
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
 	uint64_t args[LABEL_ARGS_MAX] = {static_cast<uint64_t>(dw_offset), static_cast<uint64_t>(dw_num),
 	                                 reinterpret_cast<uint64_t>(dst_gpu_addr), 0};
 
-	Graphics::LabelGpuObject label_info(
-	    0,
-	    [](const uint64_t* args)
+	RecordTransientLabel32(
+	    buffer, dst_gpu_addr, 0, dw_num,
+	    [](SubmissionId /*submission*/, const uint64_t* args)
 	    {
 		    auto  dw_offset    = static_cast<uint32_t>(args[0]);
 		    auto  dw_num       = static_cast<uint32_t>(args[1]);
@@ -6588,44 +6687,29 @@ void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buff
 		    return false;
 	    },
 	    nullptr, args);
-
-	auto* label = static_cast<Label*>(
-	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
-
-	LabelSet(buffer, label);
 }
 
-void GraphicsRenderWriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
+void GraphicsRenderWriteAtEndOfPipe64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(dst_gpu_addr == nullptr);
-	EXIT_IF(buffer == nullptr);
-	EXIT_IF(buffer->IsInvalid());
+	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
-
-	Graphics::LabelGpuObject label_info(value, nullptr, nullptr);
-
-	auto* label = static_cast<Label*>(
-	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
-
-	LabelSet(buffer, label);
+	RecordTransientLabel64(buffer, dst_gpu_addr, value, nullptr, nullptr, nullptr);
 }
 
-void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr)
+void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(dst_gpu_addr == nullptr);
-	EXIT_IF(buffer == nullptr);
-	EXIT_IF(buffer->IsInvalid());
+	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
 	uint64_t args[LABEL_ARGS_MAX] = {reinterpret_cast<uint64_t>(dst_gpu_addr), 0, 0, 0};
 
-	Graphics::LabelGpuObject label_info(
-	    0,
-	    [](const uint64_t* args)
+	RecordTransientLabel64(
+	    buffer, dst_gpu_addr, 0,
+	    [](SubmissionId /*submission*/, const uint64_t* args)
 	    {
 		    auto* dst_gpu_addr = reinterpret_cast<uint64_t*>(args[0]);
 		    EXIT_IF(dst_gpu_addr == nullptr);
@@ -6635,202 +6719,148 @@ void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffe
 		    return false;
 	    },
 	    nullptr, args);
-
-	auto* label = static_cast<Label*>(
-	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
-
-	LabelSet(buffer, label);
 }
 
-void GraphicsRenderWriteAtEndOfPipeWithWriteBack64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
+void GraphicsRenderWriteAtEndOfPipeWithWriteBack64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(dst_gpu_addr == nullptr);
-	EXIT_IF(buffer == nullptr);
-	EXIT_IF(buffer->IsInvalid());
+	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	uint64_t args[LABEL_ARGS_MAX] = {reinterpret_cast<uint64_t>(buffer->GetParent())};
-
-	Graphics::LabelGpuObject label_info(
-	    value,
-	    [](const uint64_t* args)
+	RecordTransientLabel64(
+	    buffer, dst_gpu_addr, value,
+	    [](SubmissionId submission, const uint64_t* /*args*/)
 	    {
 		    EXIT_IF(g_render_ctx == nullptr);
 
-		    auto* cp = reinterpret_cast<CommandProcessor*>(args[0]);
-
-		    GpuMemoryWriteBack(g_render_ctx->GetGraphicCtx(), cp);
+		    GpuMemoryWriteBackCompletedSubmission(g_render_ctx->GetGraphicCtx(), submission);
 		    return true;
 	    },
-	    nullptr, args);
-
-	auto* label = static_cast<Label*>(
-	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
-
-	LabelSet(buffer, label);
+	    nullptr, nullptr);
 }
 
-void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr,
+void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr,
                                                             uint64_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(dst_gpu_addr == nullptr);
-	EXIT_IF(buffer == nullptr);
-	EXIT_IF(buffer->IsInvalid());
+	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	uint64_t args[LABEL_ARGS_MAX] = {reinterpret_cast<uint64_t>(buffer->GetParent())};
-
-	Graphics::LabelGpuObject label_info(
-	    value,
-	    [](const uint64_t* args)
+	RecordTransientLabel64(
+	    buffer, dst_gpu_addr, value,
+	    [](SubmissionId submission, const uint64_t* /*args*/)
 	    {
 		    EXIT_IF(g_render_ctx == nullptr);
 
-		    auto* cp = reinterpret_cast<CommandProcessor*>(args[0]);
-
-		    GpuMemoryWriteBack(g_render_ctx->GetGraphicCtx(), cp);
+		    GpuMemoryWriteBackCompletedSubmission(g_render_ctx->GetGraphicCtx(), submission);
 		    return true;
 	    },
-	    [](const uint64_t* /*args*/)
+	    [](SubmissionId /*submission*/, const uint64_t* /*args*/)
 	    {
 		    EXIT_IF(g_render_ctx == nullptr);
 		    g_render_ctx->TriggerEopEvent();
 		    return true;
 	    },
-	    args);
-
-	auto* label = static_cast<Label*>(
-	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
-
-	LabelSet(buffer, label);
+	    nullptr);
 }
 
-void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
+void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(dst_gpu_addr == nullptr);
-	EXIT_IF(buffer == nullptr);
-	EXIT_IF(buffer->IsInvalid());
+	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	Graphics::LabelGpuObject label_info(value, nullptr,
-	                                    [](const uint64_t* /*args*/)
-	                                    {
-		                                    EXIT_IF(g_render_ctx == nullptr);
-		                                    g_render_ctx->TriggerEopEvent();
-		                                    return true;
-	                                    });
-
-	auto* label = static_cast<Label*>(
-	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 8, label_info));
-
-	LabelSet(buffer, label);
+	RecordTransientLabel64(buffer, dst_gpu_addr, value, nullptr,
+	                       [](SubmissionId /*submission*/, const uint64_t* /*args*/)
+	                       {
+		                       EXIT_IF(g_render_ctx == nullptr);
+		                       g_render_ctx->TriggerEopEvent();
+		                       return true;
+	                       },
+	                       nullptr);
 }
 
-void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value)
+void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t /*submit_id*/, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(dst_gpu_addr == nullptr);
-	EXIT_IF(buffer == nullptr);
-	EXIT_IF(buffer->IsInvalid());
+	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	Graphics::LabelGpuObject label_info(value, nullptr,
-	                                    [](const uint64_t* /*args*/)
-	                                    {
-		                                    EXIT_IF(g_render_ctx == nullptr);
-		                                    g_render_ctx->TriggerEopEvent();
-		                                    return true;
-	                                    });
-
-	auto* label = static_cast<Label*>(
-	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
-
-	LabelSet(buffer, label);
+	RecordTransientLabel32(buffer, dst_gpu_addr, value, 1u, nullptr,
+	                       [](SubmissionId /*submission*/, const uint64_t* /*args*/)
+	                       {
+		                       EXIT_IF(g_render_ctx == nullptr);
+		                       g_render_ctx->TriggerEopEvent();
+		                       return true;
+	                       },
+	                       nullptr);
 }
 
-void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr,
+void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(uint64_t /*submit_id*/, CommandBuffer* buffer, uint32_t* dst_gpu_addr,
                                                                 uint32_t value, int handle, int index, int flip_mode, int64_t flip_arg)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(dst_gpu_addr == nullptr);
-	EXIT_IF(buffer == nullptr);
-	EXIT_IF(buffer->IsInvalid());
+	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
 	uint64_t args[LABEL_ARGS_MAX] = {static_cast<uint64_t>(handle), static_cast<uint64_t>(index), static_cast<uint64_t>(flip_mode),
-	                                 static_cast<uint64_t>(flip_arg), reinterpret_cast<uint64_t>(buffer->GetParent())};
+	                                 static_cast<uint64_t>(flip_arg), 0};
 
-	Graphics::LabelGpuObject label_info(
-	    value,
-	    [](const uint64_t* args)
+	RecordTransientLabel32(
+	    buffer, dst_gpu_addr, value, 1u,
+	    [](SubmissionId submission, const uint64_t* /*args*/)
 	    {
 		    EXIT_IF(g_render_ctx == nullptr);
 
-		    auto* cp = reinterpret_cast<CommandProcessor*>(args[4]);
-
-		    GpuMemoryWriteBack(g_render_ctx->GetGraphicCtx(), cp);
+		    GpuMemoryWriteBackCompletedSubmission(g_render_ctx->GetGraphicCtx(), submission);
+		    return true;
+	    },
+	    [](SubmissionId /*submission*/, const uint64_t* args)
+	    {
+		    EXIT_IF(g_render_ctx == nullptr);
 
 		    int     handle    = static_cast<int>(args[0]);
 		    int     index     = static_cast<int>(args[1]);
 		    int     flip_mode = static_cast<int>(args[2]);
 		    int64_t flip_arg  = static_cast<int>(args[3]);
 
-		    VideoOut::VideoOutSubmitFlip(handle, index, flip_mode, flip_arg);
-		    return true;
-	    },
-	    [](const uint64_t* /*args*/)
-	    {
-		    EXIT_IF(g_render_ctx == nullptr);
+		    VideoOut::VideoOutSubmitFlipInternal(handle, index, flip_mode, flip_arg);
 		    g_render_ctx->TriggerEopEvent();
 		    return true;
 	    },
 	    args);
-
-	auto* label = static_cast<Label*>(
-	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
-
-	LabelSet(buffer, label);
 }
 
-void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value, int handle,
+void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t /*submit_id*/, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value, int handle,
                                               int index, int flip_mode, int64_t flip_arg)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(dst_gpu_addr == nullptr);
-	EXIT_IF(buffer == nullptr);
-	EXIT_IF(buffer->IsInvalid());
+	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
 	uint64_t args[LABEL_ARGS_MAX] = {static_cast<uint64_t>(handle), static_cast<uint64_t>(index), static_cast<uint64_t>(flip_mode),
 	                                 static_cast<uint64_t>(flip_arg)};
 
-	Graphics::LabelGpuObject label_info(
-	    value,
-	    [](const uint64_t* args)
+	RecordTransientLabel32(
+	    buffer, dst_gpu_addr, value, 1u,
+	    nullptr,
+	    [](SubmissionId /*submission*/, const uint64_t* args)
 	    {
 		    int     handle    = static_cast<int>(args[0]);
 		    int     index     = static_cast<int>(args[1]);
 		    int     flip_mode = static_cast<int>(args[2]);
 		    int64_t flip_arg  = static_cast<int>(args[3]);
 
-		    VideoOut::VideoOutSubmitFlip(handle, index, flip_mode, flip_arg);
+		    VideoOut::VideoOutSubmitFlipInternal(handle, index, flip_mode, flip_arg);
 		    return true;
 	    },
-	    nullptr, args);
-
-	auto* label = static_cast<Label*>(
-	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), nullptr, reinterpret_cast<uint64_t>(dst_gpu_addr), 4, label_info));
-
-	LabelSet(buffer, label);
+	    args);
 }
 
 void GraphicsRenderWriteAtEndOfPipeOnlyFlip(uint64_t /*submit_id*/, CommandBuffer* buffer, int handle, int index, int flip_mode,
@@ -6845,32 +6875,38 @@ void GraphicsRenderWriteAtEndOfPipeOnlyFlip(uint64_t /*submit_id*/, CommandBuffe
 	uint64_t args[LABEL_ARGS_MAX] = {static_cast<uint64_t>(handle), static_cast<uint64_t>(index), static_cast<uint64_t>(flip_mode),
 	                                 static_cast<uint64_t>(flip_arg)};
 
-	auto* label = LabelCreate32(
-	    g_render_ctx->GetGraphicCtx(), nullptr, 0,
-	    [](const uint64_t* args)
+	RecordTransientLabel32(
+	    buffer, nullptr, 0, 0u, nullptr,
+	    [](SubmissionId /*submission*/, const uint64_t* args)
 	    {
 		    int     handle    = static_cast<int>(args[0]);
 		    int     index     = static_cast<int>(args[1]);
 		    int     flip_mode = static_cast<int>(args[2]);
 		    int64_t flip_arg  = static_cast<int>(args[3]);
 
-		    VideoOut::VideoOutSubmitFlip(handle, index, flip_mode, flip_arg);
+		    VideoOut::VideoOutSubmitFlipInternal(handle, index, flip_mode, flip_arg);
 		    return true;
 	    },
-	    nullptr, args);
-
-	LabelSet(buffer, label);
-
-	LabelDelete(label);
+	    args);
 }
 
-void GraphicsRenderWriteBack(CommandProcessor* cp)
+void GraphicsRenderPrepareWriteBack(CommandBuffer* buffer)
 {
+	EXIT_IF(g_render_ctx == nullptr);
+	EXIT_IF(buffer == nullptr);
+	EXIT_IF(buffer->IsInvalid());
+
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	EXIT_IF(g_render_ctx == nullptr);
-
-	GpuMemoryWriteBack(g_render_ctx->GetGraphicCtx(), cp);
+	RecordTransientLabel32(
+	    buffer, nullptr, 0, 0u,
+	    [](SubmissionId submission, const uint64_t* /*args*/)
+	    {
+		    EXIT_IF(g_render_ctx == nullptr);
+		    GpuMemoryWriteBackCompletedSubmission(g_render_ctx->GetGraphicCtx(), submission);
+		    return true;
+	    },
+	    nullptr, nullptr);
 }
 
 static void eop_event_reset_func(LibKernel::EventQueue::KernelEqueueEvent* event)
@@ -6890,7 +6926,8 @@ static void eop_event_delete_func(LibKernel::EventQueue::KernelEqueue eq, LibKer
 	// are passive registrations until a producer is wired.
 	if (IsGraphicsEopEventId(static_cast<int>(event->event.ident)))
 	{
-		g_render_ctx->DeleteEopEq(eq, static_cast<int>(event->event.ident));
+		EXIT_IF(event->filter.data == nullptr);
+		g_render_ctx->DeleteEopEqRegistration(event->filter.data, eq, static_cast<int>(event->event.ident));
 	}
 }
 
@@ -6905,6 +6942,12 @@ static void eop_event_trigger_func(LibKernel::EventQueue::KernelEqueueEvent* eve
 int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata)
 {
 	EXIT_IF(g_render_ctx == nullptr);
+	auto eq_pin = LibKernel::EventQueue::KernelAcquireEqueue(eq);
+	if (!eq_pin)
+	{
+		return LibKernel::KERNEL_ERROR_EBADF;
+	}
+	Core::LockGuard registration_lock(g_render_ctx->GetEopRegistrationMutex());
 
 	// Gen5 registers multiple graphics event idents (0 = queued interrupt,
 	// 0x40 = EOP, 0x48 and others observed at device init). Accept any id on the
@@ -6919,15 +6962,24 @@ int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, voi
 	event.filter.delete_event_func = eop_event_delete_func;
 	event.filter.reset_func        = eop_event_reset_func;
 	event.filter.trigger_func      = eop_event_trigger_func;
-	event.filter.data              = nullptr;
-
-	int result = LibKernel::EventQueue::KernelAddEvent(eq, event);
-
+	void* registration = nullptr;
 	if (IsGraphicsEopEventId(id))
 	{
-		g_render_ctx->AddEopEq(eq, id);
+		registration      = g_render_ctx->BeginEopEqRegistration(eq_pin.GetIdentity(), id);
+		event.filter.data = registration;
 	}
 
+	const int result = LibKernel::EventQueue::KernelAddEvent(eq_pin, event);
+	if (registration != nullptr)
+	{
+		if (result == OK)
+		{
+			g_render_ctx->PublishEopEqRegistration(registration);
+		} else
+		{
+			g_render_ctx->CancelEopEqRegistration(registration);
+		}
+	}
 	return result;
 }
 
@@ -6935,15 +6987,8 @@ int GraphicsRenderDeleteEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id)
 {
 	EXIT_IF(g_render_ctx == nullptr);
 
-	int result = LibKernel::EventQueue::KernelDeleteEvent(eq, static_cast<uintptr_t>(id),
-	                                                     LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
-
-	if (IsGraphicsEopEventId(id))
-	{
-		g_render_ctx->DeleteEopEq(eq, id);
-	}
-
-	return result;
+	return LibKernel::EventQueue::KernelDeleteEvent(eq, static_cast<uintptr_t>(id),
+	                                                LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
 }
 
 void GraphicsRenderClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value)
@@ -6964,7 +7009,7 @@ void GraphicsRenderReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size)
 
 void GraphicsRenderMemoryFree(uint64_t vaddr, uint64_t size)
 {
-	GpuMemoryFree(g_render_ctx->GetGraphicCtx(), vaddr, size, false);
+	GpuMemoryFree(g_render_ctx->GetGraphicCtx(), vaddr, size);
 }
 
 void GraphicsRenderDeleteIndexBuffers()
@@ -7079,22 +7124,15 @@ void CommandBuffer::Execute()
 
 	const auto& queue = g_render_ctx->GetGraphicCtx()->queues[m_queue];
 
-	if (queue.mutex != nullptr)
 	{
-		queue.mutex->Lock();
+		EXIT_IF(queue.mutex == nullptr);
+		Core::LockGuard queue_lock(*queue.mutex);
+		auto result = vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence);
+		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 	}
-
-	auto result = vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence);
 	DebugStatsRecordSubmit();
 
-	if (queue.mutex != nullptr)
-	{
-		queue.mutex->Unlock();
-	}
-
 	m_execute = true;
-
-	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 }
 
 void CommandBuffer::ExecuteWithSemaphore()
@@ -7119,22 +7157,15 @@ void CommandBuffer::ExecuteWithSemaphore()
 
 	const auto& queue = g_render_ctx->GetGraphicCtx()->queues[m_queue];
 
-	if (queue.mutex != nullptr)
 	{
-		queue.mutex->Lock();
+		EXIT_IF(queue.mutex == nullptr);
+		Core::LockGuard queue_lock(*queue.mutex);
+		auto result = vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence);
+		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 	}
-
-	auto result = vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence);
 	DebugStatsRecordSubmit();
 
-	if (queue.mutex != nullptr)
-	{
-		queue.mutex->Unlock();
-	}
-
 	m_execute = true;
-
-	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 }
 
 void CommandBuffer::WaitForFence()
@@ -7157,6 +7188,32 @@ void CommandBuffer::WaitForFenceAndResetWithoutLabelCallbacks()
 	WaitForFence(false, true);
 }
 
+bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
+{
+	EXIT_IF(IsInvalid());
+	if (!m_execute)
+	{
+		return true;
+	}
+
+	auto* device = g_render_ctx->GetGraphicCtx()->device;
+	const auto status = vkGetFenceStatus(device, m_pool->fences[m_index]);
+	if (status == VK_NOT_READY)
+	{
+		return false;
+	}
+	EXIT_NOT_IMPLEMENTED(status != VK_SUCCESS);
+
+	DebugStatsRecordSubmissionComplete();
+	const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
+	EXIT_NOT_IMPLEMENTED(fence_reset_result != VK_SUCCESS);
+	const auto command_reset_result =
+	    vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+	EXIT_NOT_IMPLEMENTED(command_reset_result != VK_SUCCESS);
+	m_execute = false;
+	return true;
+}
+
 void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_buffer)
 {
 	EXIT_IF(IsInvalid());
@@ -7166,19 +7223,23 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 		auto* device = g_render_ctx->GetGraphicCtx()->device;
 
 		const auto wait_start = std::chrono::steady_clock::now();
-		vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, UINT64_MAX);
+		const auto wait_result = vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, UINT64_MAX);
 		const auto wait_ns =
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
+		EXIT_NOT_IMPLEMENTED(wait_result != VK_SUCCESS);
 		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
 		DebugStatsRecordSubmissionComplete();
 		if (drain_label_callbacks)
 		{
 			LabelDrainCompleted();
 		}
-		vkResetFences(device, 1, &m_pool->fences[m_index]);
+		const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
+		EXIT_NOT_IMPLEMENTED(fence_reset_result != VK_SUCCESS);
 		if (reset_command_buffer)
 		{
-			vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+			const auto command_reset_result =
+			    vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+			EXIT_NOT_IMPLEMENTED(command_reset_result != VK_SUCCESS);
 		}
 
 		m_execute = false;

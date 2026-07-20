@@ -55,6 +55,7 @@ public:
 	void WaitForFenceWithoutLabelCallbacks();
 	void WaitForFenceAndReset();
 	void WaitForFenceAndResetWithoutLabelCallbacks();
+	[[nodiscard]] bool TryCompleteFenceAndResetWithoutLabelCallbacks();
 
 	[[nodiscard]] uint32_t GetIndex() const { return m_index; }
 	VulkanCommandPool*     GetPool() { return m_pool; }
@@ -73,7 +74,6 @@ public:
 		*submission = m_submission;
 		return true;
 	}
-
 private:
 	VulkanCommandPool* m_pool    = nullptr;
 	uint32_t           m_index   = static_cast<uint32_t>(-1);
@@ -109,7 +109,10 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t submit_id, 
                                                             uint64_t value);
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value);
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value);
-void GraphicsRenderWriteBack(CommandProcessor* cp);
+// Records a completion-only write-back action in the current command buffer.
+// The caller submits after releasing its CommandProcessor mutex so publication
+// cannot precede GPU -> CPU materialization.
+void GraphicsRenderPrepareWriteBack(CommandBuffer* buffer);
 void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
                                   uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
 void GraphicsRenderMemoryBarrier(CommandBuffer* buffer);

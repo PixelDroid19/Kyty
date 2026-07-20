@@ -12,9 +12,13 @@
 #include "Emulator/Log.h"
 #include "Kyty/UnitTest.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <future>
 #include <string>
+#include <thread>
 
 UT_BEGIN(EmulatorKernelProcess);
 
@@ -22,6 +26,14 @@ using namespace Libs;
 using namespace Libs::LibKernel::EventQueue;
 
 namespace {
+
+void CountDeletedEvent(KernelEqueue /*eq*/, KernelEqueueEvent* event)
+{
+	ASSERT_NE(event, nullptr);
+	auto* count = static_cast<std::atomic<uint32_t>*>(event->filter.data);
+	ASSERT_NE(count, nullptr);
+	count->fetch_add(1, std::memory_order_relaxed);
+}
 
 class ScopedUtcTimezone
 {
@@ -170,6 +182,108 @@ TEST(EmulatorKernelProcess, AddAmprEventRegistersAndTriggers)
 	EXPECT_EQ(KernelDeleteAmprEvent(eq, 2), OK);
 	EXPECT_EQ(KernelDeleteAmprEvent(eq, 2), LibKernel::KERNEL_ERROR_ENOENT);
 	EXPECT_EQ(KernelDeleteEqueue(eq), OK);
+}
+
+TEST(EmulatorKernelProcess, DeleteEqueueWaitsForOutstandingLifetimePins)
+{
+	EnsureKernelProcessSubsystems();
+
+	KernelEqueue eq = nullptr;
+	ASSERT_EQ(KernelCreateEqueue(&eq, "lifetime-pin-test"), OK);
+	auto pin = KernelAcquireEqueue(eq);
+	ASSERT_TRUE(pin);
+	const auto identity = pin.GetIdentity();
+
+	std::promise<void> delete_started;
+	std::promise<int>  delete_result;
+	auto               started = delete_started.get_future();
+	auto               result  = delete_result.get_future();
+	std::thread         deleter(
+        [&]
+        {
+	        delete_started.set_value();
+	        delete_result.set_value(KernelDeleteEqueue(eq));
+        });
+
+	ASSERT_EQ(started.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(result.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+	bool       closing  = false;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+		auto probe = KernelAcquireEqueue(identity);
+		if (!probe)
+		{
+			closing = true;
+			break;
+		}
+		probe.Reset();
+		std::this_thread::yield();
+	}
+	ASSERT_TRUE(closing);
+
+	pin.Reset();
+	ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(result.get(), OK);
+	EXPECT_FALSE(KernelAcquireEqueue(eq));
+	EXPECT_FALSE(KernelAcquireEqueue(identity));
+	KernelWaitEqueueClosed(identity);
+	deleter.join();
+}
+
+TEST(EmulatorKernelProcess, DeleteEqueueWakesInfiniteWaiter)
+{
+	EnsureKernelProcessSubsystems();
+
+	KernelEqueue eq = nullptr;
+	ASSERT_EQ(KernelCreateEqueue(&eq, "wait-close-test"), OK);
+
+	std::promise<void> waiter_started;
+	std::promise<int>  waiter_result;
+	auto               started = waiter_started.get_future();
+	auto               result  = waiter_result.get_future();
+	std::thread         waiter(
+        [&]
+        {
+	        KernelEvent event {};
+	        int         out = -1;
+	        waiter_started.set_value();
+	        waiter_result.set_value(KernelWaitEqueue(eq, &event, 1, &out, nullptr));
+        });
+
+	ASSERT_EQ(started.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(result.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+	ASSERT_EQ(KernelDeleteEqueue(eq), OK);
+	ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(result.get(), LibKernel::KERNEL_ERROR_EBADF);
+	waiter.join();
+}
+
+TEST(EmulatorKernelProcess, ReplacingEventRunsEachDeleteCallbackExactlyOnce)
+{
+	EnsureKernelProcessSubsystems();
+
+	KernelEqueue eq = nullptr;
+	ASSERT_EQ(KernelCreateEqueue(&eq, "replace-callback-test"), OK);
+
+	std::atomic<uint32_t> first_deleted {0};
+	std::atomic<uint32_t> second_deleted {0};
+	KernelEqueueEvent     first {};
+	first.event.ident              = 7;
+	first.event.filter             = KERNEL_EVFILT_AMPR;
+	first.filter.delete_event_func = CountDeletedEvent;
+	first.filter.data              = &first_deleted;
+	KernelEqueueEvent second        = first;
+	second.filter.data              = &second_deleted;
+
+	ASSERT_EQ(KernelAddEvent(eq, first), OK);
+	ASSERT_EQ(KernelAddEvent(eq, second), OK);
+	EXPECT_EQ(first_deleted.load(std::memory_order_relaxed), 1u);
+	EXPECT_EQ(second_deleted.load(std::memory_order_relaxed), 0u);
+
+	ASSERT_EQ(KernelDeleteEqueue(eq), OK);
+	EXPECT_EQ(first_deleted.load(std::memory_order_relaxed), 1u);
+	EXPECT_EQ(second_deleted.load(std::memory_order_relaxed), 1u);
 }
 
 TEST(EmulatorKernelProcess, AprSubmitCommandBufferRejectsNullAndAckNonNull)

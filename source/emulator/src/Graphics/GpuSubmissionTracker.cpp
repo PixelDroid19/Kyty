@@ -298,10 +298,6 @@ GpuSubmissionResult GpuSubmissionTracker::FindPendingProducer(uint64_t address, 
 	uint64_t          newest_order = 0;
 	for (const auto& submission: m_submissions)
 	{
-		if (submission.state == GpuSubmissionState::Completed)
-		{
-			continue;
-		}
 		for (const auto& producer: submission.producers)
 		{
 			if (producer.registration_order > newest_order && ProducerTouchesMaskedBits(producer, address, size_bytes, mask))
@@ -326,7 +322,8 @@ GpuSubmissionResult GpuSubmissionTracker::FindPendingProducer(uint64_t address, 
 		}
 	}
 
-	return GpuSubmissionResult::ProducerNotFound;
+	dependency->producer = newest->id;
+	return GpuSubmissionResult::ProducerValueMismatch;
 }
 
 } // namespace Kyty::Libs::Graphics

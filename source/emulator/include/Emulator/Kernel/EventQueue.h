@@ -28,6 +28,38 @@ struct KernelEqueueEvent;
 
 using KernelEqueue = KernelEqueuePrivate*;
 
+struct KernelEqueueIdentity
+{
+	KernelEqueue eq         = nullptr;
+	uint64_t     generation = 0;
+
+	[[nodiscard]] explicit operator bool() const { return eq != nullptr && generation != 0; }
+};
+
+class KernelEqueuePin final
+{
+public:
+	KernelEqueuePin() = default;
+	KernelEqueuePin(KernelEqueuePin&& other) noexcept;
+	KernelEqueuePin& operator=(KernelEqueuePin&& other) noexcept;
+	~KernelEqueuePin();
+
+	KernelEqueuePin(const KernelEqueuePin&)            = delete;
+	KernelEqueuePin& operator=(const KernelEqueuePin&) = delete;
+
+	[[nodiscard]] KernelEqueue Get() const { return m_identity.eq; }
+	[[nodiscard]] KernelEqueueIdentity GetIdentity() const { return m_identity; }
+	[[nodiscard]] explicit operator bool() const { return static_cast<bool>(m_identity); }
+	void                         Reset();
+
+private:
+	friend KernelEqueuePin KernelAcquireEqueue(KernelEqueue eq);
+	friend KernelEqueuePin KernelAcquireEqueue(KernelEqueueIdentity identity);
+	explicit KernelEqueuePin(KernelEqueueIdentity identity): m_identity(identity) {}
+
+	KernelEqueueIdentity m_identity {};
+};
+
 using trigger_func_t = void (*)(KernelEqueueEvent* event, void* trigger_data);
 using reset_func_t   = void (*)(KernelEqueueEvent* event);
 using delete_func_t  = void (*)(KernelEqueue eq, KernelEqueueEvent* event);
@@ -60,6 +92,13 @@ struct KernelEqueueEvent
 int KYTY_SYSV_ABI KernelAddEvent(KernelEqueue eq, const KernelEqueueEvent& event);
 int KYTY_SYSV_ABI KernelTriggerEvent(KernelEqueue eq, uintptr_t ident, int16_t filter, void* trigger_data);
 int KYTY_SYSV_ABI KernelDeleteEvent(KernelEqueue eq, uintptr_t ident, int16_t filter);
+int               KernelAddEvent(const KernelEqueuePin& eq, const KernelEqueueEvent& event);
+int               KernelTriggerEvent(const KernelEqueuePin& eq, uintptr_t ident, int16_t filter, void* trigger_data);
+int               KernelDeleteEvent(const KernelEqueuePin& eq, uintptr_t ident, int16_t filter);
+
+[[nodiscard]] KernelEqueuePin KernelAcquireEqueue(KernelEqueue eq);
+[[nodiscard]] KernelEqueuePin KernelAcquireEqueue(KernelEqueueIdentity identity);
+void                          KernelWaitEqueueClosed(KernelEqueueIdentity identity);
 
 int KYTY_SYSV_ABI KernelCreateEqueue(KernelEqueue* eq, const char* name);
 int KYTY_SYSV_ABI KernelDeleteEqueue(KernelEqueue eq);

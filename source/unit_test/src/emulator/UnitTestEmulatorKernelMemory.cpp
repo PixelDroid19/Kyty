@@ -1,4 +1,5 @@
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Kernel/EventFlag.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
@@ -10,7 +11,11 @@
 #include "Kyty/UnitTest.h"
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
+#include <thread>
 
 UT_BEGIN(EmulatorKernelMemory);
 
@@ -30,6 +35,57 @@ static void EnsureMemorySubsystemInitialized()
 		MemorySubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 		memory_inited = true;
 	}
+}
+
+TEST(EmulatorKernelMemory, GpuUnmapGateKeepsAdmissionsClosedThroughHostUnmap)
+{
+	Graphics::GpuSubmissionAdmissionGate gate;
+
+	std::mutex              state_mutex;
+	std::condition_variable state_condition;
+	bool                    admission_started = false;
+	std::atomic_bool        admission_entered  = false;
+	bool                    drained            = false;
+	bool                    detached           = false;
+	bool                    host_mapping_live  = true;
+
+	std::thread submitter;
+	gate.RunQuiesced(
+	    [&]
+	    {
+		    drained = true;
+		    submitter = std::thread(
+		        [&]
+		        {
+			        {
+				        std::lock_guard<std::mutex> lock(state_mutex);
+				        admission_started = true;
+			        }
+			        state_condition.notify_one();
+			        gate.RunAdmitted([&] { admission_entered = true; });
+		        });
+
+		    std::unique_lock<std::mutex> lock(state_mutex);
+		    state_condition.wait(lock, [&] { return admission_started; });
+	    },
+	    [&]
+	    {
+		    EXPECT_TRUE(drained);
+		    EXPECT_FALSE(admission_entered.load());
+		    EXPECT_TRUE(host_mapping_live);
+
+		    detached = true;
+		    EXPECT_FALSE(admission_entered.load());
+		    EXPECT_TRUE(host_mapping_live);
+
+		    host_mapping_live = false;
+		    EXPECT_TRUE(detached);
+		    EXPECT_FALSE(admission_entered.load());
+	    });
+
+	submitter.join();
+	EXPECT_TRUE(admission_entered.load());
+	EXPECT_FALSE(host_mapping_live);
 }
 
 TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
@@ -271,6 +327,58 @@ TEST(EmulatorKernelMemory, DecodesGen5MprotectProtectionFamily)
 	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::Write);
 
 	EXPECT_FALSE(KernelDecodeMprotectProt(0x99, &mode, &gpu));
+}
+
+TEST(EmulatorKernelMemory, GpuVisibleMprotectMarksContainingMappingUntilUnmap)
+{
+	constexpr uint64_t       mapping_base = 0x100000u;
+	constexpr uint64_t       mapping_size = 0x10000u;
+	Graphics::GpuMemoryMode cleanup_mode = Graphics::GpuMemoryMode::NoAccess;
+
+	for (const auto requested:
+	     {Graphics::GpuMemoryMode::Read, Graphics::GpuMemoryMode::Write, Graphics::GpuMemoryMode::ReadWrite})
+	{
+		auto fresh_mode = Graphics::GpuMemoryMode::NoAccess;
+		EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base + 0x1000u, 0x1000u, requested,
+		                                      &fresh_mode),
+		          KernelGpuMappingPromotionStatus::Promoted);
+		EXPECT_EQ(fresh_mode, requested);
+	}
+
+	EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base + 0x2000u, 0x3000u,
+	                                      Graphics::GpuMemoryMode::Read, &cleanup_mode),
+	          KernelGpuMappingPromotionStatus::Promoted);
+	EXPECT_EQ(cleanup_mode, Graphics::GpuMemoryMode::Read);
+
+	EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base + 0x2000u, 0x3000u,
+	                                      Graphics::GpuMemoryMode::NoAccess, &cleanup_mode),
+	          KernelGpuMappingPromotionStatus::Retained);
+	EXPECT_EQ(cleanup_mode, Graphics::GpuMemoryMode::Read);
+
+	EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base + 0xf000u, 0x2000u,
+	                                      Graphics::GpuMemoryMode::Write, &cleanup_mode),
+	          KernelGpuMappingPromotionStatus::NotContained);
+	EXPECT_EQ(cleanup_mode, Graphics::GpuMemoryMode::Read);
+	EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base - 1u, 1u,
+	                                      Graphics::GpuMemoryMode::Write, &cleanup_mode),
+	          KernelGpuMappingPromotionStatus::NotContained);
+	EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base, 0u, Graphics::GpuMemoryMode::Write,
+	                                      &cleanup_mode),
+	          KernelGpuMappingPromotionStatus::InvalidArgument);
+	EXPECT_EQ(KernelPromoteGpuMappingRange(UINT64_MAX - 3u, 8u, mapping_base, 4u, Graphics::GpuMemoryMode::Write,
+	                                      &cleanup_mode),
+	          KernelGpuMappingPromotionStatus::InvalidArgument);
+
+	EXPECT_EQ(KernelGpuMappingRegistrationActionFor(KernelGpuMappingPromotionStatus::Promoted),
+	          KernelGpuMappingRegistrationAction::RegisterOwnerMapping);
+	EXPECT_EQ(KernelGpuMappingRegistrationActionFor(KernelGpuMappingPromotionStatus::Retained),
+	          KernelGpuMappingRegistrationAction::Retain);
+	EXPECT_EQ(KernelGpuMappingRegistrationActionFor(KernelGpuMappingPromotionStatus::NotContained),
+	          KernelGpuMappingRegistrationAction::RegisterProtectedRange);
+	EXPECT_EQ(KernelGpuMappingRegistrationActionFor(KernelGpuMappingPromotionStatus::InvalidArgument),
+	          KernelGpuMappingRegistrationAction::Reject);
+	EXPECT_EQ(KernelGpuMappingRegistrationActionFor(KernelGpuMappingPromotionStatus::UnmapPending),
+	          KernelGpuMappingRegistrationAction::Reject);
 }
 
 // Share_v1 NIDs from second-title first strict fail must resolve after InitShare_1.

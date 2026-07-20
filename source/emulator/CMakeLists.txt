@@ -38,6 +38,8 @@ target_sources(emulator PRIVATE
 	src/Graphics/Objects/LabelSubmissionTracker.cpp
 	src/Graphics/GpuSubmissionTracker.cpp
 	src/Graphics/GpuSubmissionCoordinator.cpp
+	src/Graphics/GpuSubmissionPublicationGate.cpp
+	src/Graphics/GpuDeferredDeletionQueue.cpp
 	src/Graphics/ShaderTranslationCache.cpp
 	src/Graphics/ShaderResolutionUsageCache.cpp
 	src/Graphics/InternalResolutionPolicy.cpp
@@ -45,10 +47,13 @@ target_sources(emulator PRIVATE
 	src/Graphics/AttachmentResolutionCohort.cpp
 	src/Graphics/ResolutionAliasPolicy.cpp
 	src/Graphics/VideoOutFlipLifecycleGate.cpp
+	src/Graphics/VideoOutFlipQueueAdmissionGate.cpp
+	src/Graphics/VideoOutHostAccessGate.cpp
 	src/Graphics/VideoOutMaterializationGate.cpp
 	src/Graphics/ResolutionImageCapability.cpp
 	src/Graphics/ResolutionCoordinateTransform.cpp
 	src/Graphics/VulkanResolutionCapability.cpp
+	src/Graphics/VulkanQueueIdentity.cpp
 	src/Graphics/ShaderCoordinateScale.cpp
 	include/Emulator/Graphics/PipelineCacheStore.h
 	include/Emulator/Graphics/GpuDirtyPageTracker.h
@@ -57,6 +62,8 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/Objects/LabelSubmissionTracker.h
 	include/Emulator/Graphics/GpuSubmissionTracker.h
 	include/Emulator/Graphics/GpuSubmissionCoordinator.h
+	include/Emulator/Graphics/GpuSubmissionPublicationGate.h
+	include/Emulator/Graphics/GpuDeferredDeletionQueue.h
 	include/Emulator/Graphics/ShaderTranslationCache.h
 	include/Emulator/Graphics/ShaderResolutionUsageCache.h
 	include/Emulator/Graphics/InternalResolutionPolicy.h
@@ -64,10 +71,13 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/AttachmentResolutionCohort.h
 	include/Emulator/Graphics/ResolutionAliasPolicy.h
 	include/Emulator/Graphics/VideoOutFlipLifecycleGate.h
+	include/Emulator/Graphics/VideoOutFlipQueueAdmissionGate.h
+	include/Emulator/Graphics/VideoOutHostAccessGate.h
 	include/Emulator/Graphics/VideoOutMaterializationGate.h
 	include/Emulator/Graphics/ResolutionImageCapability.h
 	include/Emulator/Graphics/ResolutionCoordinateTransform.h
 	include/Emulator/Graphics/VulkanResolutionCapability.h
+	include/Emulator/Graphics/VulkanQueueIdentity.h
 	include/Emulator/Graphics/ShaderCoordinateScale.h
 	src/Validation/DomainValidators.cpp
 	include/Emulator/Validation/DomainValidators.h

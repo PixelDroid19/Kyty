@@ -394,28 +394,31 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	DebugStatsInit();
 	DebugStatsRecordGpuMemoryCreate(0, DebugStatsGpuMemoryCreateOutcome::FastReuse, 100);
 	DebugStatsRecordGpuMemoryCreate(1, DebugStatsGpuMemoryCreateOutcome::ExactReuse, 200);
-	DebugStatsRecordGpuMemoryCreate(2, DebugStatsGpuMemoryCreateOutcome::NewStandalone, 300);
-	DebugStatsRecordGpuMemoryCreate(3, DebugStatsGpuMemoryCreateOutcome::NewLinked, 400);
-	DebugStatsRecordGpuMemoryCreate(4, DebugStatsGpuMemoryCreateOutcome::NewFromObjects, 500);
-	DebugStatsRecordGpuMemoryCreate(5, DebugStatsGpuMemoryCreateOutcome::ReclaimNew, 600);
-	DebugStatsRecordGpuMemoryFree(5);
+	DebugStatsRecordGpuMemoryCreate(2, DebugStatsGpuMemoryCreateOutcome::CoveredReuse, 300);
+	DebugStatsRecordGpuMemoryCreate(3, DebugStatsGpuMemoryCreateOutcome::NewStandalone, 400);
+	DebugStatsRecordGpuMemoryCreate(4, DebugStatsGpuMemoryCreateOutcome::NewLinked, 500);
+	DebugStatsRecordGpuMemoryCreate(5, DebugStatsGpuMemoryCreateOutcome::NewFromObjects, 600);
+	DebugStatsRecordGpuMemoryCreate(6, DebugStatsGpuMemoryCreateOutcome::ReclaimNew, 700);
+	DebugStatsRecordGpuMemoryFree(6);
 
 	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
-	EXPECT_EQ(first.gpu_memory_create_calls, 6u);
-	EXPECT_EQ(first.gpu_memory_create_ns, 2100u);
-	EXPECT_EQ(first.gpu_memory_create_max_ns, 600u);
+	EXPECT_EQ(first.gpu_memory_create_calls, 7u);
+	EXPECT_EQ(first.gpu_memory_create_ns, 2800u);
+	EXPECT_EQ(first.gpu_memory_create_max_ns, 700u);
 	EXPECT_EQ(first.gpu_memory_types[0].fast_reuse, 1u);
 	EXPECT_EQ(first.gpu_memory_types[1].exact_reuse, 1u);
-	EXPECT_EQ(first.gpu_memory_types[2].new_standalone, 1u);
-	EXPECT_EQ(first.gpu_memory_types[3].new_linked, 1u);
-	EXPECT_EQ(first.gpu_memory_types[4].new_from_objects, 1u);
-	EXPECT_EQ(first.gpu_memory_types[5].reclaim_new, 1u);
-	EXPECT_EQ(first.gpu_memory_types[5].logical_free, 1u);
-	EXPECT_EQ(first.gpu_memory_types[5].live, 0u);
-	for (uint32_t i = 6; i < kDebugStatsGpuMemoryTypeCount; ++i)
+	EXPECT_EQ(first.gpu_memory_types[2].covered_reuse, 1u);
+	EXPECT_EQ(first.gpu_memory_types[3].new_standalone, 1u);
+	EXPECT_EQ(first.gpu_memory_types[4].new_linked, 1u);
+	EXPECT_EQ(first.gpu_memory_types[5].new_from_objects, 1u);
+	EXPECT_EQ(first.gpu_memory_types[6].reclaim_new, 1u);
+	EXPECT_EQ(first.gpu_memory_types[6].logical_free, 1u);
+	EXPECT_EQ(first.gpu_memory_types[6].live, 0u);
+	for (uint32_t i = 7; i < kDebugStatsGpuMemoryTypeCount; ++i)
 	{
 		EXPECT_EQ(first.gpu_memory_types[i].fast_reuse, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].exact_reuse, 0u);
+		EXPECT_EQ(first.gpu_memory_types[i].covered_reuse, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].new_standalone, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].new_linked, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].new_from_objects, 0u);
@@ -432,6 +435,7 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	{
 		EXPECT_EQ(empty.gpu_memory_types[i].fast_reuse, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].exact_reuse, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].covered_reuse, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].new_standalone, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].new_linked, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].new_from_objects, 0u);

@@ -188,6 +188,28 @@ VideoOutHostExtentStatus VideoOutBufferSelectHostExtent(VideoOutVulkanImage* ima
 	return SelectHostExtentLocked(image, width, height, state);
 }
 
+VideoOutPublishedImageRefreshStatus VideoOutBufferRefreshPublishedImage(VideoOutVulkanImage* current, uint32_t host_width,
+                                                                        uint32_t host_height,
+                                                                        VideoOutVulkanImage** published_cache)
+{
+	if (current == nullptr || host_width == 0 || host_height == 0 || published_cache == nullptr)
+	{
+		return VideoOutPublishedImageRefreshStatus::InvalidArgument;
+	}
+
+	VideoOutHostExtentState state;
+	const auto              selection = VideoOutBufferSelectHostExtent(current, host_width, host_height, &state);
+	if (selection != VideoOutHostExtentStatus::Selected && selection != VideoOutHostExtentStatus::StickyMatch)
+	{
+		return selection == VideoOutHostExtentStatus::StickyMismatch
+		           ? VideoOutPublishedImageRefreshStatus::ExtentConflict
+		           : VideoOutPublishedImageRefreshStatus::InvalidArgument;
+	}
+
+	*published_cache = current;
+	return VideoOutPublishedImageRefreshStatus::Published;
+}
+
 VideoOutHostExtentSetSelectionStatus VideoOutBufferSelectHostExtentSet(VideoOutVulkanImage* const* images, uint32_t image_count,
                                                                        uint32_t width, uint32_t height, VideoOutHostExtentSetState* state)
 {

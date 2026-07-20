@@ -2,10 +2,10 @@
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_OBJECTS_LABEL_H_
 
 #include "Kyty/Core/Common.h"
+#include "Kyty/Core/Vector.h"
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
-#include "Emulator/Graphics/Objects/GpuMemory.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -19,52 +19,48 @@ void LabelInit();
 
 constexpr int LABEL_ARGS_MAX = 5;
 
-class LabelGpuObject: public GpuObject
+enum class LabelFenceRegistrationStatus : uint8_t
+{
+	Inserted,
+	AlreadyRegistered,
+	InvalidArgument,
+};
+
+enum class LabelFenceReleaseStatus : uint8_t
+{
+	Released,
+	NotFound,
+	InvalidArgument,
+	PartialOverlap,
+};
+
+constexpr uint64_t LabelDwordStoreSizeBytes(uint32_t dword_count)
+{
+	return static_cast<uint64_t>(dword_count) * sizeof(uint32_t);
+}
+
+class LabelFenceRegistry
 {
 public:
-	using callback_t = bool (*)(const uint64_t* args);
+	[[nodiscard]] LabelFenceRegistrationStatus Register(uint64_t addr, uint64_t bytes);
+	[[nodiscard]] LabelFenceReleaseStatus      ReleaseAllocation(uint64_t addr, uint64_t bytes);
+	void Snapshot(Vector<uint64_t>* begin, Vector<uint64_t>* end) const;
 
-	static constexpr int PARAM_VALUE      = 0;
-	static constexpr int PARAM_CALLBACK_1 = 1;
-	static constexpr int PARAM_CALLBACK_2 = 2;
-	static constexpr int PARAM_ARG_1      = 3;
-	static constexpr int PARAM_ARG_2      = 4;
-	static constexpr int PARAM_ARG_3      = 5;
-	static constexpr int PARAM_ARG_4      = 6;
-	static constexpr int PARAM_ARG_5      = 7;
+	[[nodiscard]] uint32_t Size() const { return m_begin.Size(); }
 
-	explicit LabelGpuObject(uint64_t value, callback_t callback_1, callback_t callback_2, const uint64_t* args = nullptr)
-	{
-		params[PARAM_VALUE]      = value;
-		params[PARAM_CALLBACK_1] = reinterpret_cast<uint64_t>(callback_1);
-		params[PARAM_CALLBACK_2] = reinterpret_cast<uint64_t>(callback_2);
-		if (args != nullptr)
-		{
-			params[PARAM_ARG_1] = args[0];
-			params[PARAM_ARG_2] = args[1];
-			params[PARAM_ARG_3] = args[2];
-			params[PARAM_ARG_4] = args[3];
-			params[PARAM_ARG_5] = args[4];
-		}
-		check_hash = false;
-		type       = Graphics::GpuMemoryObjectType::Label;
-	}
-
-	bool Equal(const uint64_t* other) const override;
-
-	[[nodiscard]] create_func_t              GetCreateFunc() const override;
-	[[nodiscard]] create_from_objects_func_t GetCreateFromObjectsFunc() const override { return nullptr; };
-	[[nodiscard]] write_back_func_t          GetWriteBackFunc() const override { return nullptr; };
-	[[nodiscard]] delete_func_t              GetDeleteFunc() const override;
-	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
+private:
+	Vector<uint64_t> m_begin;
+	Vector<uint64_t> m_end;
 };
+
+using LabelCallback = bool (*)(SubmissionId submission, const uint64_t* args);
 
 class CommandProcessor;
 
-Label* LabelCreate64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelGpuObject::callback_t callback_1,
-                     LabelGpuObject::callback_t callback_2, const uint64_t* args);
-Label* LabelCreate32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value, LabelGpuObject::callback_t callback_1,
-                     LabelGpuObject::callback_t callback_2, const uint64_t* args);
+Label* LabelCreate64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint64_t value, LabelCallback callback_1,
+                     LabelCallback callback_2, const uint64_t* args);
+Label* LabelCreate32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint32_t value, uint32_t dst_word_count,
+                     LabelCallback callback_1, LabelCallback callback_2, const uint64_t* args);
 void   LabelDelete(Label* label);
 void   LabelSet(CommandBuffer* buffer, Label* label);
 void   LabelDrainCompleted();
@@ -74,12 +70,13 @@ void   LabelDrainCompleted();
 // only on event polling skips WriteBack/OnlyFlip SubmitFlip and leaves WaitRegMem
 // spinning or Flip queues empty (guest ThreadFlag soft-lock).
 void LabelCompleteSubmission(SubmissionId submission);
-// StorageBuffer GPU→CPU write-back must not clobber EOP fence words: copy with
-// holes for every Label dst still registered or pending deferred Destroy
-// (preserves completion stores and guest resets). Blind
-// memcpy zeroed fences after GpuMemory deleted Label⊂StorageBuffer aliases
-// (guest never reached KernelSetEventFlag(ThreadFlag); EVENTFLAG_SET=0).
+// StorageBuffer GPU→CPU write-back must not clobber EOP fence words. Fence
+// ranges are durable for the lifetime of their guest allocation, independently
+// of the transient Label that published them.
 void LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size);
+// Called only after GPU submissions and host presentation have quiesced, while
+// the guest VA is still mapped and before it can be reused.
+void LabelReleaseMappedRange(uint64_t addr, uint64_t bytes);
 
 } // namespace Kyty::Libs::Graphics
 
