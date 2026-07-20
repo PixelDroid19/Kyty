@@ -3080,6 +3080,20 @@ void KYTY_SYSV_ABI pthread_yield()
 	LibKernel::PthreadYield();
 }
 
+int KYTY_SYSV_ABI pthread_cond_init(LibKernel::PthreadCond* cond, const LibKernel::PthreadCondattr* attr)
+{
+	PRINT_NAME();
+
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondInit(cond, attr, nullptr));
+}
+
+int KYTY_SYSV_ABI pthread_cond_destroy(LibKernel::PthreadCond* cond)
+{
+	PRINT_NAME();
+
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondDestroy(cond));
+}
+
 int KYTY_SYSV_ABI pthread_cond_signal(LibKernel::PthreadCond* cond)
 {
 	PRINT_NAME();

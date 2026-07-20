@@ -43,10 +43,14 @@ void AppendPod(std::vector<uint8_t>* out, const T& value)
 	out->insert(out->end(), bytes, bytes + sizeof(T));
 }
 
-std::vector<uint8_t> MakeSelfWrappedElf(Elf64_Half type)
+std::vector<uint8_t> MakeSelfWrappedElf(Elf64_Half type, bool alternate_signature = false, bool unstored_sections = false)
 {
 	SelfHeader self {};
-	const uint8_t ident[] = {0x4f, 0x15, 0x3d, 0x1d, 0x00, 0x01, 0x01, 0x12, 0x01, 0x01, 0x00, 0x00};
+	const uint8_t ident[] = {alternate_signature ? uint8_t {0x54} : uint8_t {0x4f},
+	                         alternate_signature ? uint8_t {0x14} : uint8_t {0x15},
+	                         alternate_signature ? uint8_t {0xf5} : uint8_t {0x3d},
+	                         alternate_signature ? uint8_t {0xee} : uint8_t {0x1d},
+	                         0x00, 0x01, 0x01, 0x12, 0x01, 0x01, 0x00, 0x00};
 	std::memcpy(self.ident, ident, sizeof(ident));
 	self.file_size    = sizeof(SelfHeader);
 	self.segments_num = 0;
@@ -67,6 +71,13 @@ std::vector<uint8_t> MakeSelfWrappedElf(Elf64_Half type)
 	ehdr.e_version              = EV_CURRENT;
 	ehdr.e_ehsize               = sizeof(Elf64_Ehdr);
 	ehdr.e_phentsize            = sizeof(Elf64_Phdr);
+	if (unstored_sections)
+	{
+		ehdr.e_shoff     = 0x10000;
+		ehdr.e_shentsize = sizeof(Elf64_Shdr);
+		ehdr.e_shnum     = 2;
+		ehdr.e_shstrndx  = 1;
+	}
 
 	std::vector<uint8_t> out;
 	AppendPod(&out, self);
@@ -171,6 +182,20 @@ TEST(EmulatorModuleLoad, BuildPlanAcceptsSelfWrappedAdjacentSharedPrx)
 	EXPECT_STREQ(plan.entries[1].relative_key, "sce_module/libc.prx");
 	EXPECT_EQ(plan.entries[1].role, ModulePlanRole::AdjacentShared);
 	EXPECT_EQ(plan.diag.rejection_count, 0u);
+}
+
+TEST(EmulatorModuleLoad, RecognizesAlternateGen5SelfSignature)
+{
+	EnsureFileSystemSubsystem();
+	const TempPackageRoot temp(U"/tmp/kyty_module_load_alternate_self_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+	const String path = temp.root + U"eboot.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeSelfWrappedElf(ET_DYNEXEC, true, true)));
+
+	Elf64 elf;
+	elf.Open(path);
+	EXPECT_TRUE(elf.IsSelf());
+	EXPECT_TRUE(elf.IsValid());
 }
 
 TEST(EmulatorModuleLoad, BuildPlanRejectsExtensionOnlyAdjacentJunk)

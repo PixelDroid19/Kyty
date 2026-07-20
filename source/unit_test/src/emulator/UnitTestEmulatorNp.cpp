@@ -1,4 +1,6 @@
 #include "Emulator/Libs/Np.h"
+#include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/SymbolDatabase.h"
 #include "Kyty/UnitTest.h"
 
 #include <cstring>
@@ -6,6 +8,38 @@
 UT_BEGIN(EmulatorNp);
 
 using namespace Libs;
+
+TEST(EmulatorNp, ResolvesSessionSignalingInitialize)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNet_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"ysmw6J-P8Ak";
+	query.library              = U"NpSessionSignaling";
+	query.library_version      = 1;
+	query.module               = U"NpSessionSignaling";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	EXPECT_NE(symbols.Find(query), nullptr);
+}
+
+TEST(EmulatorNp, ResolvesAlternateStateCallbackExport)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNet_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"qQJfO8HAiaY";
+	query.library              = U"NpManager";
+	query.library_version      = 1;
+	query.module               = U"NpManager";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	EXPECT_NE(symbols.Find(query), nullptr);
+}
 
 TEST(EmulatorNp, ValidatesAndCreatesStableHandles)
 {

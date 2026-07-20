@@ -156,6 +156,7 @@ LIB_DEFINE(InitNet_1_NpManager)
 	LIB_FUNC("Ec63y59l9tw", NpManager::NpSetNpTitleId);
 	LIB_FUNC("A2CQ3kgSopQ", NpManager::NpSetContentRestriction);
 	LIB_FUNC("VfRSmPmj8Q8", NpManager::NpRegisterStateCallback);
+	LIB_FUNC("qQJfO8HAiaY", NpManager::NpRegisterStateCallback);
 	LIB_FUNC("uFJpaKNBAj4", NpManager::NpRegisterGamePresenceCallback);
 	LIB_FUNC("GImICnh+boA", NpManager::NpRegisterPlusEventCallback);
 	LIB_FUNC("hw5KNqAAels", NpManager::NpRegisterNpReachabilityStateCallback);
@@ -183,6 +184,27 @@ LIB_DEFINE(InitNet_1_NpManagerForToolkit)
 }
 
 } // namespace LibNpManagerForToolkit
+
+namespace LibNpSessionSignaling {
+
+LIB_VERSION("NpSessionSignaling", 1, "NpSessionSignaling", 1, 1);
+
+static int KYTY_SYSV_ABI NpSessionSignalingInitialize(void* parameters)
+{
+	PRINT_NAME();
+	printf("\t parameters = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(parameters));
+
+	// The offline contract only establishes the library. Network signaling is
+	// deliberately not fabricated until a caller requests a concrete operation.
+	return OK;
+}
+
+LIB_DEFINE(InitNet_1_NpSessionSignaling)
+{
+	LIB_FUNC("ysmw6J-P8Ak", NpSessionSignalingInitialize);
+}
+
+} // namespace LibNpSessionSignaling
 
 namespace LibNpTrophy {
 
@@ -338,6 +360,7 @@ LIB_DEFINE(InitNet_1)
 	LibNetCtl::InitNet_1_NetCtl(s);
 	LibNpManager::InitNet_1_NpManager(s);
 	LibNpManagerForToolkit::InitNet_1_NpManagerForToolkit(s);
+	LibNpSessionSignaling::InitNet_1_NpSessionSignaling(s);
 	LibNpTrophy::InitNet_1_NpTrophy(s);
 	LibNpWebApi::InitNet_1_NpWebApi(s);
 	LibNpWebApi2::InitNet_1_NpWebApi2(s);
