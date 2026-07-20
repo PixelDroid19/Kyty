@@ -109,6 +109,10 @@ bool           DiscardSharedBackingRange(SharedBacking* backing, uint64_t backin
 uint64_t       MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                                 uint64_t alignment);
 bool           MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode);
+// Preserve the requested view when possible. A host may relocate only when
+// its own runtime occupies the range and Kyty does not own the collision.
+uint64_t MapSharedFixedOrRelocated(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
+                                   uint64_t alignment);
 bool           Free(uint64_t address);
 bool           Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nullptr);
 // Write-enable a page from an access-violation handler without taking Kyty's

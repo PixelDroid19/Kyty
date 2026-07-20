@@ -105,6 +105,7 @@ TEST(CoreVirtualMemory, FixedSharedMappingRejectsOccupiedRange)
 	SharedBacking* replacement_backing = CreateSharedBacking(page_size);
 	ASSERT_NE(replacement_backing, nullptr);
 	EXPECT_FALSE(MapSharedFixed(replacement_backing, occupied, 0, page_size, Mode::ReadWrite));
+	EXPECT_EQ(MapSharedFixedOrRelocated(replacement_backing, occupied, 0, page_size, Mode::ReadWrite, page_size), 0u);
 	EXPECT_EQ(occupied_bytes[0], 0x5a);
 
 	DestroySharedBacking(replacement_backing);

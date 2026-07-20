@@ -715,6 +715,7 @@ LIB_DEFINE(InitLibKernel_1_Equeue)
 	LIB_FUNC("jpFjmgAC5AE", EventQueue::KernelDeleteEqueue);
 	LIB_FUNC("fzyMKs9kim0", EventQueue::KernelWaitEqueue);
 	LIB_FUNC("vz+pg2zdopI", EventQueue::KernelGetEventUserData);
+	LIB_FUNC("mJ7aghmgvfc", EventQueue::KernelGetEventId);
 	// Gen5 Ampr completion equeue (sceKernelAdd/DeleteAmprEvent).
 	LIB_FUNC("bBfz7kMF2Ho", EventQueue::KernelAddAmprEvent);
 	LIB_FUNC("bMmid3pfyjo", EventQueue::KernelDeleteAmprEvent);
