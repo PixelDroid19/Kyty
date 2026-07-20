@@ -1112,6 +1112,21 @@ TEST(EmulatorGraphicsPackets, EncodesWaitRegMemCachePolicy1And2SamePacket)
 	EXPECT_EQ(encode(3), 10u);
 }
 
+TEST(EmulatorGraphicsPackets, PublishesConfirmedCompactWriteDataWithItsSubmission)
+{
+	uint32_t write_body[5] = {0x01000004u, 0x19fbf0b0u, 0u, 1u, 0u};
+	uint32_t wait_packet[9] = {KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64), 0x19fbf0b0u, 0u,
+	                           0xffffffffu, 0xffffffffu, 1u, 0u, 3u, 10u};
+
+	EXPECT_TRUE(GraphicsWriteDataPrecedesMatchingWaitMem64(write_body, 5u, wait_packet, 9u));
+
+	wait_packet[1] += 8u;
+	EXPECT_FALSE(GraphicsWriteDataPrecedesMatchingWaitMem64(write_body, 5u, wait_packet, 9u));
+	wait_packet[1] -= 8u;
+	wait_packet[5] = 2u;
+	EXPECT_FALSE(GraphicsWriteDataPrecedesMatchingWaitMem64(write_body, 5u, wait_packet, 9u));
+}
+
 // Post-Play: WaitMem address stays 0; preceding ReleaseMem is EopPatched.
 // Resolve Wait to the Release address when packets are contiguous.
 TEST(EmulatorGraphicsPackets, ResolvesNullWaitMemAddressFromPrecedingRelease)
