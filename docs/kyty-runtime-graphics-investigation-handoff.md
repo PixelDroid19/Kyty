@@ -397,3 +397,28 @@ label-hole protection. Other `WriteData` packets retain their established
 behavior. A strict Release+Silent rerun sustained 300 seconds and passed the
 previous reproduction point, reaching more than 8,100 presents with no
 structured error; process disk writes remained about 10 MB.
+
+## Descriptor-layout cache startup phase
+
+The descriptor cache previously created the complete Cartesian product of
+layout counts on first use. With limits of 16 storage buffers, 16 sampled
+images, 16 storage images, 16 samplers, one GDS buffer, and three shader
+stages, that path issued 501,123 Vulkan layout creations while holding the
+cache mutex. Most combinations were never requested by the workload.
+
+Layouts are now created on demand in their existing per-stage/count slot. The
+descriptor key, binding order, stage flags, pool allocation, and lifetime are
+unchanged; repeated requests still reuse the same Vulkan layout. This removes
+the eager combinatorial work without adding persistent data or disk writes.
+
+A Release+Silent strict run reached a coherent interactive scene after the
+change using exactly three initial input taps and no repeated automation. A
+native 1280x720 capture was classified as gameplay-like, scene-correct, and
+free of stripe artifacts. The first cumulative window reduced frames above
+250 ms from 187 in the prior baseline to 143. After scene discovery completed,
+an 89.684-second stable window advanced 2,613 presents (29.136 presents/s),
+with frame p50/p95/p99 of 35/38/39 ms, a 40.239 ms maximum, and no frame above
+50 ms. The comparable prior stable window advanced at 28.364 presents/s with
+36/40/46 ms p50/p95/p99 and eight frames above 50 ms. These measurements
+validate removal of the startup pause and preservation of rendering; they do
+not establish a universal FPS result across titles or hosts.
