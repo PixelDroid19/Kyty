@@ -616,6 +616,8 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("+U1R4WtXvoc", Posix::pthread_detach);
 	LIB_FUNC("FJrT5LuUBAU", Posix::pthread_exit);
 	LIB_FUNC("B5GmVDKwpn0", Posix::pthread_yield);
+	LIB_FUNC("0TyVk4MSLt0", Posix::pthread_cond_init);
+	LIB_FUNC("RXXqi4CtF8w", Posix::pthread_cond_destroy);
 	LIB_FUNC("2MOy+rUfuhQ", Posix::pthread_cond_signal);
 	LIB_FUNC("7H0iTOciTLo", Posix::pthread_mutex_lock);
 	LIB_FUNC("K-jXhbt2gn4", Posix::pthread_mutex_trylock);

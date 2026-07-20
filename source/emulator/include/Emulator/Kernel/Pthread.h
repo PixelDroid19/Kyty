@@ -204,6 +204,8 @@ int KYTY_SYSV_ABI   pthread_join(LibKernel::Pthread thread, void** value);
 int KYTY_SYSV_ABI   pthread_detach(LibKernel::Pthread thread);
 void KYTY_SYSV_ABI  pthread_exit(void* value);
 void KYTY_SYSV_ABI  pthread_yield();
+int KYTY_SYSV_ABI   pthread_cond_init(LibKernel::PthreadCond* cond, const LibKernel::PthreadCondattr* attr);
+int KYTY_SYSV_ABI   pthread_cond_destroy(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_signal(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_broadcast(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex);

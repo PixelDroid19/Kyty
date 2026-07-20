@@ -595,6 +595,18 @@ TEST(EmulatorKernelProcess, PosixPthreadDetachRejectsNull)
 	EXPECT_NE(Posix::pthread_detach(nullptr), OK);
 }
 
+TEST(EmulatorKernelProcess, PosixPthreadCondInitUsesGuestConditionLayout)
+{
+	EnsureKernelProcessSubsystems();
+	LibKernel::PthreadCondattr attr = nullptr;
+	ASSERT_EQ(LibKernel::PthreadCondattrInit(&attr), OK);
+	LibKernel::PthreadCond cond = nullptr;
+	EXPECT_EQ(Posix::pthread_cond_init(&cond, &attr), OK);
+	ASSERT_NE(cond, nullptr);
+	EXPECT_EQ(Posix::pthread_cond_destroy(&cond), OK);
+	EXPECT_EQ(LibKernel::PthreadCondattrDestroy(&attr), OK);
+}
+
 // Gen5 memory helpers: null size rejects; range name is success no-op.
 TEST(EmulatorKernelProcess, ConfiguredFlexibleAndRangeNameBoundaries)
 {
@@ -635,6 +647,8 @@ TEST(EmulatorKernelProcess, ResolvesGen5PthreadSpecificNids)
 	EXPECT_TRUE(resolve(u"rVjRvHJ0X6c"));
 	EXPECT_TRUE(resolve(u"XD3mDeybCnk"));
 	EXPECT_TRUE(resolve(u"mkgXxsoxWHg"));
+	EXPECT_TRUE(resolve(u"0TyVk4MSLt0"));
+	EXPECT_TRUE(resolve(u"RXXqi4CtF8w"));
 }
 
 TEST(EmulatorKernelProcess, ClearVirtualRangeNameSucceeds)
