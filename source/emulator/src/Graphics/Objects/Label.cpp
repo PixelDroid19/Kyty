@@ -7,6 +7,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/LabelSubmissionTracker.h"
 #include "Emulator/Graphics/Utils.h"
 
@@ -478,6 +479,7 @@ void LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t 
 		}
 	}
 
+	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(guest_dst), size);
 	MemcpySkipAbsoluteRanges(guest_dst, gpu_src, size, hole_begin.GetData(), hole_end.GetData(), static_cast<int>(hole_begin.Size()));
 }
 

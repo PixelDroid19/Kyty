@@ -15,6 +15,32 @@ enum class GpuDirtyTrackingMode : uint32_t
 	HashFallback
 };
 
+enum class GpuDirtyProtectionState : uint32_t
+{
+	Writable,
+	Arming,
+	Armed,
+	Disarming
+};
+
+[[nodiscard]] constexpr bool GpuDirtyProtectionStateHandlesFault(GpuDirtyProtectionState state)
+{
+	return state != GpuDirtyProtectionState::Writable;
+}
+
+[[nodiscard]] constexpr bool GpuDirtyProtectionStateNeedsArmingRollback(GpuDirtyProtectionState observed)
+{
+	// If a writer completed while Rearm was entering mprotect, the page may
+	// have become read-only after that writer published Writable.
+	return observed == GpuDirtyProtectionState::Writable;
+}
+
+struct GpuDirtyReadObservation
+{
+	uint64_t generation = 0;
+	bool     tracked    = false;
+};
+
 // Fixed-capacity, signal-safe dirty-page metadata. Registration and protection
 // changes happen on normal threads; HandleWriteFault and NotifyWrite only use
 // atomics, bounded table scans, and the raw write-enable VM primitive.
@@ -31,8 +57,10 @@ public:
 	[[nodiscard]] bool RegisterRange(uintptr_t address, size_t size) noexcept;
 	[[nodiscard]] bool UnregisterRange(uintptr_t address, size_t size) noexcept;
 
-	// Protect the covered pages read-only before a CPU->GPU read. The returned
-	// generation can be passed to ChangedSince after the upload.
+	// Protect the covered pages read-only before a CPU->GPU read. BeginRead
+	// captures the generation owned by that read transaction; callers must not
+	// replace it with a later snapshot after hashing or uploading.
+	[[nodiscard]] GpuDirtyReadObservation BeginRead(uintptr_t address, size_t size) noexcept;
 	[[nodiscard]] bool PrepareForRead(uintptr_t address, size_t size) noexcept;
 	[[nodiscard]] bool Rearm(uintptr_t address, size_t size) noexcept;
 

@@ -30,6 +30,16 @@ struct PipelineCacheHeaderV1
 	return 64u * 1024u * 1024u;
 }
 
+[[nodiscard]] constexpr uint64_t PipelineCacheStoreCheckpointSeconds()
+{
+	return 30u;
+}
+
+[[nodiscard]] constexpr bool PipelineCacheStoreCheckpointDue(bool dirty, bool saved_once, uint64_t elapsed_seconds)
+{
+	return dirty && (!saved_once || elapsed_seconds >= PipelineCacheStoreCheckpointSeconds());
+}
+
 [[nodiscard]] inline bool PipelineCacheDataMatchesDevice(const void* data, size_t size, const VkPhysicalDeviceProperties& properties)
 {
 	if (data == nullptr || size < sizeof(PipelineCacheHeaderV1) || size > PipelineCacheStoreMaxBytes())

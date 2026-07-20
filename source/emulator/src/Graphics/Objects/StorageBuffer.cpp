@@ -125,7 +125,10 @@ static void write_back(GraphicContext* ctx, const uint64_t* /*params*/, void* ob
 
 bool StorageBufferGpuObject::Equal(const uint64_t* other) const
 {
-	return params[0] == other[0] && params[1] == other[1];
+	// GpuMemory calls Equal only after type and guest byte ranges match.
+	// Stride and record count describe the shader view; they do not affect the
+	// VkBuffer backing created above.
+	return other != nullptr;
 }
 
 GpuObject::create_func_t StorageBufferGpuObject::GetCreateFunc() const

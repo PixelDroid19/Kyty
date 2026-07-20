@@ -623,6 +623,15 @@ enum class LabelForceCompleteKind : uint8_t
 	return submit_and_flip && !flip_issued_during_run;
 }
 
+// Flip callbacks are post-fence completion actions. A batch that issued a flip
+// must retire the exact containing submission even when the guest does not
+// submit another batch; otherwise a guest waiting for its first flip event can
+// starve the only code path that publishes that event.
+[[nodiscard]] inline bool GraphicsBatchNeedsSubmissionCompletion(bool flip_issued_during_run)
+{
+	return flip_issued_during_run;
+}
+
 // GPU→CPU buffer write-back with absolute holes [hole_begin[i], hole_end[i]).
 // Bytes in holes keep the existing dst contents (EOP fences, guest resets).
 inline void MemcpySkipAbsoluteRanges(void* dst, const void* src, uint64_t size, const uint64_t* hole_begin, const uint64_t* hole_end,

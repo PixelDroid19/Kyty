@@ -20,6 +20,7 @@
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
@@ -3102,11 +3103,6 @@ VulkanPipeline* PipelineCache::Find(const Pipeline& p) const
 
 void PipelineCache::SaveDriverCacheIfDue()
 {
-	if (!m_driver_cache_dirty)
-	{
-		return;
-	}
-
 	auto* ctx = g_render_ctx->GetGraphicCtx();
 	if (ctx == nullptr || ctx->physical_device == nullptr || ctx->device == nullptr || ctx->pipeline_cache == nullptr)
 	{
@@ -3114,7 +3110,11 @@ void PipelineCache::SaveDriverCacheIfDue()
 	}
 
 	const auto now = std::chrono::steady_clock::now();
-	if (m_driver_cache_saved_once && now - m_last_driver_cache_save < std::chrono::seconds(5))
+	const auto elapsed_seconds =
+	    m_driver_cache_saved_once
+	        ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now - m_last_driver_cache_save).count())
+	        : 0u;
+	if (!PipelineCacheStoreCheckpointDue(m_driver_cache_dirty, m_driver_cache_saved_once, elapsed_seconds))
 	{
 		return;
 	}
@@ -5181,6 +5181,26 @@ static void InvalidateMemoryObject(const RenderDepthInfo& r)
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+static VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
+                                                      VkBufferUsageFlags usage)
+{
+	if (buffer == nullptr || !read_only || size == 0u || size > 0x1000u)
+	{
+		return nullptr;
+	}
+
+	const bool allocated = GpuMemoryValidateAllocatedRange(addr, size) == GpuMemoryRangeValidationStatus::Valid;
+	GpuMemoryOverlapSnapshot overlaps {};
+	const bool overlap_query_ok = allocated && GpuMemoryQueryOverlaps(&addr, &size, 1, &overlaps);
+	const bool overlap_snapshot_safe =
+	    overlap_query_ok && GpuMemoryOverlapsAllowTransientReadOnlyBuffer(overlaps);
+	if (!GpuMemoryCanUseTransientReadOnlyBuffer(read_only, size, allocated, overlap_snapshot_safe))
+	{
+		return nullptr;
+	}
+	return buffer->UploadTransientBuffer(reinterpret_cast<const void*>(addr), size, usage);
+}
+
 static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, const ShaderStorageResources& storage_buffers,
                                   VulkanBuffer** buffers, uint32_t** sgprs)
 {
@@ -5189,6 +5209,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 	EXIT_IF(buffers == nullptr);
 	EXIT_IF(sgprs == nullptr);
 	EXIT_IF(*sgprs == nullptr);
+	EXIT_IF(buffer == nullptr);
 
 	bool gen5 = Config::IsNextGen();
 
@@ -5279,7 +5300,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 		auto addr        = (gen5 ? r.Base48() : r.Base44());
 		auto stride      = r.Stride();
 		auto num_records = r.NumRecords();
-		auto size        = stride * num_records;
+		const uint64_t size = static_cast<uint64_t>(stride) * static_cast<uint64_t>(num_records);
 		EXIT_NOT_IMPLEMENTED(size == 0);
 		EXIT_NOT_IMPLEMENTED((size & 0x3u) != 0);
 
@@ -5290,8 +5311,13 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 
 		StorageBufferGpuObject buf_info(stride, num_records, read_only);
 
-		auto* buf = static_cast<StorageVulkanBuffer*>(
-		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size, buf_info));
+		VulkanBuffer* buf =
+		    TryUploadTransientReadOnlyBuffer(buffer, addr, size, read_only, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+		if (buf == nullptr)
+		{
+			buf = static_cast<StorageVulkanBuffer*>(
+			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size, buf_info));
+		}
 
 		EXIT_NOT_IMPLEMENTED(buf == nullptr);
 
@@ -6318,8 +6344,14 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		uint64_t    addr = b.addr;
 		uint64_t    size = static_cast<uint64_t>(b.stride) * b.num_records;
 
-		auto* vertices = static_cast<VulkanBuffer*>(
-		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size, VertexBufferGpuObject()));
+		auto* vertices =
+		    TryUploadTransientReadOnlyBuffer(buffer, addr, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+		if (vertices == nullptr)
+		{
+			vertices = static_cast<VulkanBuffer*>(
+			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size, VertexBufferGpuObject()));
+		}
+		EXIT_NOT_IMPLEMENTED(vertices == nullptr);
 
 		VkDeviceSize offset = 0;
 
@@ -6332,8 +6364,14 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
 
-	VulkanBuffer* indices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(
-	    submit_id, g_render_ctx->GetGraphicCtx(), buffer, reinterpret_cast<uint64_t>(index_addr), index_size, IndexBufferGpuObject()));
+	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
+	VulkanBuffer* indices =
+	    TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+	if (indices == nullptr)
+	{
+		indices = static_cast<VulkanBuffer*>(
+		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
+	}
 	EXIT_NOT_IMPLEMENTED(indices == nullptr);
 
 	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
@@ -6491,8 +6529,14 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		uint64_t    addr = b.addr;
 		uint64_t    size = static_cast<uint64_t>(b.stride) * b.num_records;
 
-		auto* vertices = static_cast<VulkanBuffer*>(
-		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size, VertexBufferGpuObject()));
+		auto* vertices =
+		    TryUploadTransientReadOnlyBuffer(buffer, addr, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+		if (vertices == nullptr)
+		{
+			vertices = static_cast<VulkanBuffer*>(
+			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size, VertexBufferGpuObject()));
+		}
+		EXIT_NOT_IMPLEMENTED(vertices == nullptr);
 
 		VkDeviceSize offset = 0;
 
@@ -7022,6 +7066,92 @@ void GraphicsRenderMemoryFlush(uint64_t vaddr, uint64_t size)
 	GpuMemoryFlush(g_render_ctx->GetGraphicCtx(), vaddr, size);
 }
 
+class TransientBufferPool
+{
+	struct Entry
+	{
+		VulkanBuffer buffer;
+		void*        mapped = nullptr;
+		uint64_t     size   = 0;
+		uint32_t     usage  = 0;
+		bool         used   = false;
+	};
+
+public:
+	VulkanBuffer* Upload(GraphicContext* ctx, const void* data, uint64_t size, uint32_t usage)
+	{
+		EXIT_IF(ctx == nullptr || data == nullptr || size == 0u || usage == 0u);
+
+		Entry*  entry         = nullptr;
+		uint32_t usage_entries = 0;
+		for (auto* candidate: m_entries)
+		{
+			if (candidate->usage == usage)
+			{
+				usage_entries++;
+			}
+			if (!candidate->used && candidate->size == size && candidate->usage == usage)
+			{
+				entry = candidate;
+				break;
+			}
+		}
+
+		if (entry == nullptr)
+		{
+			if (!GpuMemoryTransientBufferPoolCanAllocate(usage_entries, static_cast<uint32_t>(m_entries.size()), m_total_bytes, size))
+			{
+				return nullptr;
+			}
+
+			entry                  = new Entry;
+			entry->size            = size;
+			entry->usage           = usage;
+			entry->buffer.usage    = usage;
+			entry->buffer.memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) |
+			                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+			                                VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+			VulkanCreateBuffer(ctx, size, &entry->buffer);
+			VulkanMapMemory(ctx, &entry->buffer.memory, &entry->mapped);
+			EXIT_IF(entry->mapped == nullptr);
+			m_entries.push_back(entry);
+			m_total_bytes += size;
+		}
+
+		const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
+		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
+		entry->used = true;
+		return &entry->buffer;
+	}
+
+	void Reset()
+	{
+		for (auto* entry: m_entries)
+		{
+			entry->used = false;
+		}
+	}
+
+	void Destroy(GraphicContext* ctx)
+	{
+		EXIT_IF(ctx == nullptr);
+		for (auto* entry: m_entries)
+		{
+			EXIT_IF(entry == nullptr || entry->mapped == nullptr);
+			VulkanUnmapMemory(ctx, &entry->buffer.memory);
+			entry->mapped = nullptr;
+			VulkanDeleteBuffer(ctx, &entry->buffer);
+			delete entry;
+		}
+		m_entries.clear();
+		m_total_bytes = 0;
+	}
+
+private:
+	std::vector<Entry*> m_entries;
+	uint64_t            m_total_bytes = 0;
+};
+
 bool CommandBuffer::IsInvalid() const
 {
 	EXIT_IF(g_render_ctx == nullptr);
@@ -7065,6 +7195,12 @@ void CommandBuffer::Free()
 	Core::LockGuard lock(m_pool->mutex);
 
 	WaitForFence();
+	if (m_transient_buffers != nullptr)
+	{
+		m_transient_buffers->Destroy(g_render_ctx->GetGraphicCtx());
+		delete m_transient_buffers;
+		m_transient_buffers = nullptr;
+	}
 
 	m_pool->busy[m_index] = false;
 	vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
@@ -7076,6 +7212,10 @@ void CommandBuffer::Free()
 void CommandBuffer::Begin() const
 {
 	EXIT_IF(IsInvalid());
+	if (m_transient_buffers != nullptr)
+	{
+		m_transient_buffers->Reset();
+	}
 
 	auto* buffer = m_pool->buffers[m_index];
 
@@ -7088,6 +7228,16 @@ void CommandBuffer::Begin() const
 	auto result = vkBeginCommandBuffer(buffer, &begin_info);
 
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+}
+
+VulkanBuffer* CommandBuffer::UploadTransientBuffer(const void* data, uint64_t size, uint32_t usage)
+{
+	EXIT_IF(IsInvalid());
+	if (m_transient_buffers == nullptr)
+	{
+		m_transient_buffers = new TransientBufferPool;
+	}
+	return m_transient_buffers->Upload(g_render_ctx->GetGraphicCtx(), data, size, usage);
 }
 
 void CommandBuffer::End() const

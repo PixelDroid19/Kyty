@@ -22,7 +22,7 @@
 
 namespace Kyty::Libs::LibKernel::FileSystem {
 
-using Kyty::Libs::Graphics::GpuMemoryCheckAccessViolation;
+using Kyty::Libs::Graphics::GpuMemoryNotifyHostWrite;
 
 LIB_NAME("libkernel", "libkernel");
 
@@ -491,7 +491,7 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
 
 	file->mutex.Unlock();
-	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(buf), bytes_read);
+	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
 
 	if (is_invalid)
 	{

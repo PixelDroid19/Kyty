@@ -591,7 +591,8 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 		const auto& type = performance.gpu_memory_types[i];
 		*out += "{\"type\":\"";
 		*out += type_names[i];
-		*out += "\",\"fast_reuse\":" + std::to_string(type.fast_reuse);
+		*out += "\",\"cached_reuse\":" + std::to_string(type.cached_reuse);
+		*out += ",\"fast_reuse\":" + std::to_string(type.fast_reuse);
 		*out += ",\"exact_reuse\":" + std::to_string(type.exact_reuse);
 		*out += ",\"covered_reuse\":" + std::to_string(type.covered_reuse);
 		*out += ",\"new_standalone\":" + std::to_string(type.new_standalone);

@@ -392,30 +392,33 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	using namespace Kyty::Libs::Graphics;
 
 	DebugStatsInit();
-	DebugStatsRecordGpuMemoryCreate(0, DebugStatsGpuMemoryCreateOutcome::FastReuse, 100);
-	DebugStatsRecordGpuMemoryCreate(1, DebugStatsGpuMemoryCreateOutcome::ExactReuse, 200);
-	DebugStatsRecordGpuMemoryCreate(2, DebugStatsGpuMemoryCreateOutcome::CoveredReuse, 300);
-	DebugStatsRecordGpuMemoryCreate(3, DebugStatsGpuMemoryCreateOutcome::NewStandalone, 400);
-	DebugStatsRecordGpuMemoryCreate(4, DebugStatsGpuMemoryCreateOutcome::NewLinked, 500);
-	DebugStatsRecordGpuMemoryCreate(5, DebugStatsGpuMemoryCreateOutcome::NewFromObjects, 600);
-	DebugStatsRecordGpuMemoryCreate(6, DebugStatsGpuMemoryCreateOutcome::ReclaimNew, 700);
-	DebugStatsRecordGpuMemoryFree(6);
+	DebugStatsRecordGpuMemoryCreate(0, DebugStatsGpuMemoryCreateOutcome::CachedReuse, 50);
+	DebugStatsRecordGpuMemoryCreate(1, DebugStatsGpuMemoryCreateOutcome::FastReuse, 100);
+	DebugStatsRecordGpuMemoryCreate(2, DebugStatsGpuMemoryCreateOutcome::ExactReuse, 200);
+	DebugStatsRecordGpuMemoryCreate(3, DebugStatsGpuMemoryCreateOutcome::CoveredReuse, 300);
+	DebugStatsRecordGpuMemoryCreate(4, DebugStatsGpuMemoryCreateOutcome::NewStandalone, 400);
+	DebugStatsRecordGpuMemoryCreate(5, DebugStatsGpuMemoryCreateOutcome::NewLinked, 500);
+	DebugStatsRecordGpuMemoryCreate(6, DebugStatsGpuMemoryCreateOutcome::NewFromObjects, 600);
+	DebugStatsRecordGpuMemoryCreate(7, DebugStatsGpuMemoryCreateOutcome::ReclaimNew, 700);
+	DebugStatsRecordGpuMemoryFree(7);
 
 	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
-	EXPECT_EQ(first.gpu_memory_create_calls, 7u);
-	EXPECT_EQ(first.gpu_memory_create_ns, 2800u);
+	EXPECT_EQ(first.gpu_memory_create_calls, 8u);
+	EXPECT_EQ(first.gpu_memory_create_ns, 2850u);
 	EXPECT_EQ(first.gpu_memory_create_max_ns, 700u);
-	EXPECT_EQ(first.gpu_memory_types[0].fast_reuse, 1u);
-	EXPECT_EQ(first.gpu_memory_types[1].exact_reuse, 1u);
-	EXPECT_EQ(first.gpu_memory_types[2].covered_reuse, 1u);
-	EXPECT_EQ(first.gpu_memory_types[3].new_standalone, 1u);
-	EXPECT_EQ(first.gpu_memory_types[4].new_linked, 1u);
-	EXPECT_EQ(first.gpu_memory_types[5].new_from_objects, 1u);
-	EXPECT_EQ(first.gpu_memory_types[6].reclaim_new, 1u);
-	EXPECT_EQ(first.gpu_memory_types[6].logical_free, 1u);
-	EXPECT_EQ(first.gpu_memory_types[6].live, 0u);
-	for (uint32_t i = 7; i < kDebugStatsGpuMemoryTypeCount; ++i)
+	EXPECT_EQ(first.gpu_memory_types[0].cached_reuse, 1u);
+	EXPECT_EQ(first.gpu_memory_types[1].fast_reuse, 1u);
+	EXPECT_EQ(first.gpu_memory_types[2].exact_reuse, 1u);
+	EXPECT_EQ(first.gpu_memory_types[3].covered_reuse, 1u);
+	EXPECT_EQ(first.gpu_memory_types[4].new_standalone, 1u);
+	EXPECT_EQ(first.gpu_memory_types[5].new_linked, 1u);
+	EXPECT_EQ(first.gpu_memory_types[6].new_from_objects, 1u);
+	EXPECT_EQ(first.gpu_memory_types[7].reclaim_new, 1u);
+	EXPECT_EQ(first.gpu_memory_types[7].logical_free, 1u);
+	EXPECT_EQ(first.gpu_memory_types[7].live, 0u);
+	for (uint32_t i = 8; i < kDebugStatsGpuMemoryTypeCount; ++i)
 	{
+		EXPECT_EQ(first.gpu_memory_types[i].cached_reuse, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].fast_reuse, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].exact_reuse, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].covered_reuse, 0u);
@@ -433,6 +436,7 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	EXPECT_EQ(empty.gpu_memory_create_max_ns, 0u);
 	for (uint32_t i = 0; i < kDebugStatsGpuMemoryTypeCount; ++i)
 	{
+		EXPECT_EQ(empty.gpu_memory_types[i].cached_reuse, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].fast_reuse, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].exact_reuse, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].covered_reuse, 0u);
@@ -456,6 +460,7 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	snapshot.gpu_memory_types[3].logical_free       = 1;
 	snapshot.gpu_memory_types[3].live               = 7;
 	snapshot.gpu_memory_types[4].fast_reuse         = 9;
+	snapshot.gpu_memory_types[4].cached_reuse       = 11;
 
 	std::string json;
 	AppendGpuMemoryPerformanceJson(snapshot, &json);
@@ -463,7 +468,7 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	EXPECT_NE(json.find(R"("gpu_memory":{"create_calls":2,"create_ns":300,"create_max_ns":200)"), std::string::npos);
 	EXPECT_NE(json.find(R"("type":"index_buffer")"), std::string::npos);
 	EXPECT_NE(json.find(R"("reclaim_new":1,"logical_free":1,"live":7)"), std::string::npos);
-	EXPECT_NE(json.find(R"("type":"vertex_buffer","fast_reuse":9)"), std::string::npos);
+	EXPECT_NE(json.find(R"("type":"vertex_buffer","cached_reuse":11,"fast_reuse":9)"), std::string::npos);
 	EXPECT_EQ(json.find("PPSA"), std::string::npos);
 }
 

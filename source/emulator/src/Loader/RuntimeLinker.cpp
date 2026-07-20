@@ -292,7 +292,7 @@ static void kyty_exception_handler(const Core::VirtualMemory::ExceptionHandler::
 		// Attempt GPU watch handling for any access violation before treating it
 		// as fatal; this preserves write handling when the signal classification
 		// can only be inferred from the faulting context.
-		if (Libs::Graphics::GpuMemoryCheckAccessViolation(info->access_violation_vaddr, sizeof(uint64_t)))
+		if (Libs::Graphics::GpuMemoryCheckAccessViolation(info->access_violation_vaddr))
 		{
 			return;
 		}
