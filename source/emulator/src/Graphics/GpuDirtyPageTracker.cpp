@@ -364,6 +364,14 @@ bool GpuDirtyPageTracker::PrepareForRead(uintptr_t address, size_t size) noexcep
 	{
 		return false;
 	}
+	if (auto* range = FindRange(address, size); range != nullptr)
+	{
+		if (range->mode.load(std::memory_order_acquire) == static_cast<uint32_t>(GpuDirtyTrackingMode::HashFallback))
+		{
+			return false;
+		}
+		return Rearm(address, size);
+	}
 	const uintptr_t end = RangeEnd(address, size);
 	const uintptr_t first = PageStart(address);
 	const uintptr_t last  = end == 0 ? 0 : PageStart(end - 1u);
@@ -578,6 +586,10 @@ uint64_t GpuDirtyPageTracker::SnapshotGeneration(uintptr_t address, size_t size)
 	{
 		return 0;
 	}
+	if (const auto* range = FindRange(address, size); range != nullptr)
+	{
+		return range->generation.load(std::memory_order_acquire);
+	}
 	const uintptr_t end = RangeEnd(address, size);
 	if (end == 0)
 	{
@@ -604,6 +616,11 @@ bool GpuDirtyPageTracker::ChangedSince(uintptr_t address, size_t size, uint64_t 
 	if (!m_enabled || m_ranges == nullptr)
 	{
 		return true;
+	}
+	if (const auto* range = FindRange(address, size); range != nullptr)
+	{
+		return range->mode.load(std::memory_order_acquire) == static_cast<uint32_t>(GpuDirtyTrackingMode::HashFallback) ||
+		       range->generation.load(std::memory_order_acquire) > snapshot;
 	}
 	const uintptr_t end = RangeEnd(address, size);
 	if (end == 0)
@@ -638,6 +655,10 @@ GpuDirtyTrackingMode GpuDirtyPageTracker::Mode(uintptr_t address, size_t size) c
 	if (!m_enabled || m_ranges == nullptr)
 	{
 		return GpuDirtyTrackingMode::HashFallback;
+	}
+	if (const auto* range = FindRange(address, size); range != nullptr)
+	{
+		return static_cast<GpuDirtyTrackingMode>(range->mode.load(std::memory_order_acquire));
 	}
 	const uintptr_t end = RangeEnd(address, size);
 	if (end == 0)
