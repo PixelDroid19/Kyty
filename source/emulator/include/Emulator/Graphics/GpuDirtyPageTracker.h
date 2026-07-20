@@ -32,8 +32,9 @@ enum class GpuDirtyProtectionState : uint32_t
 [[nodiscard]] constexpr bool GpuDirtyProtectionStateNeedsArmingRollback(GpuDirtyProtectionState observed)
 {
 	// If a writer completed while Rearm was entering mprotect, the page may
-	// have become read-only after that writer published Writable.
-	return observed == GpuDirtyProtectionState::Writable;
+	// have become read-only after that writer published Writable. A concurrent
+	// final unregister can likewise publish Retired after restoring the page.
+	return observed == GpuDirtyProtectionState::Writable || observed == GpuDirtyProtectionState::Retired;
 }
 
 struct GpuDirtyReadObservation

@@ -334,3 +334,16 @@ with `KYTY_ENABLE_GPU_DIRTY_TRACKING=1` while automatic activation still has
 an intermittent early-load fault under investigation. The normal runtime and
 test processes keep the conservative XXH3 path. Untracked, capacity-limited,
 or uncertain ranges also continue to use XXH3 automatically.
+
+A later opt-in repetition reproduced that intermittent fault after more than
+10,500 healthy presents. GDB found the fatal page still read-only with zero
+references, writable original mode, and retained `Retired` metadata. This
+identified a `Rearm`/final-`UnregisterRange` protection race rather than disk
+cache growth or missing metadata. Rearm and range registration transitions now
+share the registration mutex; final unregister claims `Disarming` before
+publishing zero references; and an arming transaction rolls back read-only
+protection if it observes `Retired`. A subsequent Release+Silent run sustained
+more than 14,000 presents past the previous failure, with a healthy capture and
+a stable 2,008-frame window at about 31 FPS (p50 33 ms, p99 36 ms, no frame
+over 50 ms). Keep the tracker opt-in until this survives repeated titles and
+longer default-path validation.
