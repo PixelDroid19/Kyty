@@ -476,7 +476,10 @@ def run_capture(args: argparse.Namespace) -> int:
             env.pop(name, None)
     for name in FORBIDDEN_ENV:
         env.pop(name, None)
-    env["KYTY_AUTO_CROSS"] = "1" if args.auto_cross else "0"
+    if args.auto_cross:
+        env["KYTY_AUTO_CROSS"] = "1"
+    else:
+        env.pop("KYTY_AUTO_CROSS", None)
     env["KYTY_NATIVE_CAPTURE_DIR"] = str(output / "native_frames")
     env["KYTY_NATIVE_CAPTURE_FIRST_PRESENT"] = "1"
     env["KYTY_NATIVE_CAPTURE_TRIGGER"] = str(output / "capture-now.trigger")
@@ -729,7 +732,7 @@ def parser() -> argparse.ArgumentParser:
     capture.add_argument("--baseline", help="optional prior manifest; fail on a visual metric regression")
     capture.add_argument("--width", type=positive_int, default=1280)
     capture.add_argument("--height", type=positive_int, default=720)
-    capture.add_argument("--auto-cross", action=argparse.BooleanOptionalAction, default=True)
+    capture.add_argument("--auto-cross", action=argparse.BooleanOptionalAction, default=False)
     capture.add_argument("--rt-evidence", action="store_true")
     capture.add_argument(
         "--rt-evidence-ps",

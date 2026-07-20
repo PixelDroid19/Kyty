@@ -26,6 +26,10 @@ def metrics(*, white: float, entropy: float, colors: int, stripey: bool = False)
 
 
 class CaptureContractTests(unittest.TestCase):
+    def test_capture_disables_continuous_auto_cross_by_default(self):
+        args = capture.parser().parse_args(["capture", "--guest-root", "/tmp"])
+        self.assertFalse(args.auto_cross)
+
     def test_compare_accepts_small_measurement_drift(self):
         result = capture.compare_metrics(
             metrics(white=0.04, entropy=6.8, colors=1200),

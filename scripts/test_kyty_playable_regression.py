@@ -59,6 +59,19 @@ class ProfileLoadTests(unittest.TestCase):
         self.assertNotIn("title", p)
         self.assertNotIn("guest_root", p)
 
+    def test_default_profile_uses_exactly_three_cross_taps(self) -> None:
+        p = reg.load_profile(None)
+        self.assertEqual(
+            p["pad_sequence"],
+            [
+                {"tool": "pad_tap", "button": "cross"},
+                {"tool": "pad_tap", "button": "cross"},
+                {"tool": "pad_tap", "button": "cross"},
+            ],
+        )
+        self.assertTrue(p["post_input"]["require_loading_transition"])
+        self.assertEqual(p["milestones"]["min_pad_taps"], 3)
+
     def test_load_shipped_profile_json(self) -> None:
         path = Path(__file__).resolve().parents[0] / "profiles" / "strict_playable.json"
         if not path.is_file():
@@ -85,7 +98,7 @@ class GateClassificationTests(unittest.TestCase):
             create_baseline=False,
             shutdown="controlled_timeout",
             first_error="",
-            milestones={"min_present_after_ready": 1, "present_delta_stable": 15, "min_pad_taps": 1},
+            milestones={"min_present_after_ready": 1, "present_delta_stable": 15, "min_pad_taps": 2},
             visual_require_baseline=True,
         )
         self.assertTrue(all(g.passed for g in gates))
@@ -131,6 +144,154 @@ class GateClassificationTests(unittest.TestCase):
         )
         by = {g.name: g for g in gates}
         self.assertFalse(by["visual_compare"].passed)
+
+    def test_input_gate_rejects_partial_startup_sequence(self) -> None:
+        gates = reg.evaluate_gates(
+            agent_ready=True,
+            video_initialized=True,
+            first_present=5,
+            present_delta=20,
+            input_before={"delivered_taps": 0, "guest_read_state_samples": 0},
+            input_after={"delivered_taps": 2, "guest_read_state_samples": 100},
+            capture_path="frame.bmp",
+            compare={"pass": True, "checks": {}},
+            baseline_missing=False,
+            create_baseline=False,
+            shutdown="controlled_kill",
+            first_error="",
+            milestones={
+                "min_present_after_ready": 1,
+                "present_delta_stable": 15,
+                "min_pad_taps": 3,
+                "min_guest_read_state_samples": 1,
+            },
+            visual_require_baseline=True,
+        )
+
+        by = {gate.name: gate for gate in gates}
+        self.assertFalse(by["input_delivered"].passed)
+
+    def test_input_gate_rejects_failed_clear_after_three_taps(self) -> None:
+        gates = reg.evaluate_gates(
+            agent_ready=True,
+            video_initialized=True,
+            first_present=5,
+            present_delta=20,
+            input_before={"delivered_taps": 0, "guest_read_state_samples": 0},
+            input_after={"delivered_taps": 3, "guest_read_state_samples": 100},
+            capture_path="frame.bmp",
+            compare={"pass": True, "checks": {}},
+            baseline_missing=False,
+            create_baseline=False,
+            shutdown="controlled_kill",
+            first_error="",
+            milestones={
+                "min_present_after_ready": 1,
+                "present_delta_stable": 15,
+                "min_pad_taps": 3,
+                "min_guest_read_state_samples": 1,
+            },
+            visual_require_baseline=True,
+            input_sequence_ok=False,
+        )
+
+        by = {gate.name: gate for gate in gates}
+        self.assertFalse(by["input_sequence_complete"].passed)
+        self.assertFalse(by["input_delivered"].passed)
+
+
+class PadSequenceTests(unittest.TestCase):
+    def test_sequence_delivers_three_taps_then_always_clears(self) -> None:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        def call(_sock: Path, tool: str, args: dict[str, object], timeout: float):
+            del timeout
+            calls.append((tool, args))
+            if tool == "status":
+                return 0, {"ok": True, "result": {"pad": {"tap_pending": False}}}
+            return 0, {"ok": True}
+
+        ok, events = reg.deliver_pad_sequence(
+            Path("/tmp/test.sock"),
+            [
+                {"tool": "pad_tap", "button": "cross"},
+                {"tool": "pad_tap", "button": "cross"},
+                {"tool": "pad_tap", "button": "cross"},
+            ],
+            call=call,
+            pause=lambda _seconds: None,
+        )
+
+        self.assertTrue(ok)
+        mutating = [tool for tool, _args in calls if tool.startswith("pad_")]
+        self.assertEqual(mutating, ["pad_tap", "pad_tap", "pad_tap", "pad_clear"])
+        self.assertEqual(events[-1]["event"], "pad_clear")
+
+    def test_sequence_clears_even_when_a_tap_fails(self) -> None:
+        calls: list[str] = []
+
+        def call(_sock: Path, tool: str, _args: dict[str, object], timeout: float):
+            del timeout
+            calls.append(tool)
+            return (1 if tool == "pad_tap" else 0), {"ok": tool != "pad_tap"}
+
+        ok, _events = reg.deliver_pad_sequence(
+            Path("/tmp/test.sock"),
+            [{"tool": "pad_tap", "button": "cross"}],
+            call=call,
+            pause=lambda _seconds: None,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(calls, ["pad_tap", "pad_clear"])
+
+    def test_sequence_stops_polling_at_its_deadline_and_clears(self) -> None:
+        now = [0.0]
+        calls: list[tuple[str, float]] = []
+
+        def call(_sock: Path, tool: str, _args: dict[str, object], timeout: float):
+            calls.append((tool, timeout))
+            if tool == "status":
+                now[0] += timeout
+                return 0, {"ok": True, "result": {"pad": {"tap_pending": True}}}
+            return 0, {"ok": True}
+
+        ok, _events = reg.deliver_pad_sequence(
+            Path("/tmp/test.sock"),
+            [{"tool": "pad_tap", "button": "cross"}],
+            call=call,
+            pause=lambda _seconds: None,
+            deadline=1.0,
+            clock=lambda: now[0],
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual([tool for tool, _timeout in calls], ["pad_tap", "status", "pad_clear"])
+        self.assertLessEqual(calls[1][1], 1.0)
+        self.assertGreaterEqual(calls[-1][1], 0.1)
+
+    def test_deadline_timeout_never_exceeds_remaining_budget(self) -> None:
+        self.assertEqual(reg.deadline_timeout(10.0, 2.0, clock=lambda: 9.5), 0.5)
+        self.assertEqual(reg.deadline_timeout(10.0, 2.0, clock=lambda: 10.0), 0.0)
+        self.assertEqual(reg.deadline_timeout(10.0, 2.0, clock=lambda: 11.0), 0.0)
+
+    def test_startup_input_waits_for_interactive_phase(self) -> None:
+        self.assertFalse(reg.can_start_pad_sequence(True, 1, "loading", True, 5.0, 10.0))
+        self.assertFalse(reg.can_start_pad_sequence(True, 1, "booting", True, 5.0, 10.0))
+        self.assertTrue(reg.can_start_pad_sequence(True, 1, "interactive", True, 5.0, 10.0))
+
+    def test_post_input_wait_requires_loading_then_interactive(self) -> None:
+        seen, ready = reg.advance_post_input_wait(True, False, "interactive")
+        self.assertFalse(seen)
+        self.assertFalse(ready)
+
+        seen, ready = reg.advance_post_input_wait(True, seen, "loading")
+        self.assertTrue(seen)
+        self.assertFalse(ready)
+
+        seen, ready = reg.advance_post_input_wait(True, seen, "interactive")
+        self.assertTrue(seen)
+        self.assertTrue(ready)
 
 
 class CompareWiringTests(unittest.TestCase):
