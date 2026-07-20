@@ -15,7 +15,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-inline constexpr uint32_t kShaderTranslatorVersion = 1;
+inline constexpr uint32_t kShaderTranslatorVersion = 2;
 
 enum class ShaderModuleStage : uint8_t
 {

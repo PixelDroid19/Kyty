@@ -2873,6 +2873,34 @@ TEST(EmulatorGraphicsPackets, PixelShaderIdentityIncludesHostToGuestCoordinateSc
 	EXPECT_NE(scaled_x_id, scaled_y_id);
 }
 
+TEST(EmulatorGraphicsPackets, VertexShaderIdentityIncludesGen5FetchRegistersAndProlog)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+
+	HW::VertexShaderInfo regs {};
+	regs.es_regs.data_addr = 0x1000;
+	regs.gs_regs.chksum    = 0x0123456789abcdefu;
+
+	ShaderVertexInputInfo base {};
+
+	auto prolog      = base;
+	prolog.gs_prolog = true;
+
+	auto attrib             = prolog;
+	attrib.fetch_attrib_reg = 4;
+
+	auto buffer             = attrib;
+	buffer.fetch_buffer_reg = 8;
+
+	EXPECT_NE(ShaderGetIdVS(&regs, &base), ShaderGetIdVS(&regs, &prolog));
+	EXPECT_NE(ShaderGetIdVS(&regs, &prolog), ShaderGetIdVS(&regs, &attrib));
+	EXPECT_NE(ShaderGetIdVS(&regs, &attrib), ShaderGetIdVS(&regs, &buffer));
+}
+
 TEST(EmulatorGraphicsPackets, PixelFragCoordKeepsNativeCoordinatesAtOneToOneScale)
 {
 	ShaderCode code;
