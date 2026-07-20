@@ -323,11 +323,14 @@ registration attempt; that dereferenced a null mutex and terminated the game
 before its first present. Disabled tracker APIs now return through the hash
 fallback contract, rollback runs only after an attempted registration, and a
 regression test covers the no-metadata path. The tracker is deliberately opt-in with
-`KYTY_ENABLE_GPU_DIRTY_TRACKING=1`: a short A/B capture showed that the first
-page-fault implementation was slower than the hash baseline and once exited
-before the second present. The normal runtime therefore keeps XXH64 active
-until a longer, controlled run proves a gain. When profiling the prototype,
-compare hash bytes/time, skipped scans, upload time, median FPS, p99 frame time,
-and visual correctness against the prior Release+Silent baseline. If any
-false-clean upload or visual change appears, leave the affected ranges on
-XXH64 fallback and use the counters/tests to isolate the producer.
+Exact registered-range queries now bypass the per-page scan across every range.
+Two controlled Release+Silent gameplay runs then sustained 500 and 1,000
+presents with healthy captures, movement/action input, no frame over 50 ms,
+and higher FPS than the hash-only baseline. A debugger capture then traced the
+remaining intermittent fatal fault to a protected page whose tracking entry had
+already been discarded. Retired page metadata now remains in the fixed table so
+late faults can restore the known writable host mode. Tracking remains opt-in
+with `KYTY_ENABLE_GPU_DIRTY_TRACKING=1` while automatic activation still has
+an intermittent early-load fault under investigation. The normal runtime and
+test processes keep the conservative XXH3 path. Untracked, capacity-limited,
+or uncertain ranges also continue to use XXH3 automatically.

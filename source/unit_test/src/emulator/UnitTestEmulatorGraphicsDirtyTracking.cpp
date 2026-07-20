@@ -147,14 +147,15 @@ TEST(EmulatorGraphicsDirtyTracking, ReadObservationDoesNotAcknowledgeConcurrentW
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 
-TEST(EmulatorGraphicsDirtyTracking, UnregisterMakesStaleFaultUntracked)
+TEST(EmulatorGraphicsDirtyTracking, UnregisterRetainsLateWritableFaultEvidence)
 {
 	Mapping mapping;
 	ASSERT_NE(mapping.address, 0u);
 	GpuDirtyPageTracker tracker;
 	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.PrepareForRead(mapping.address, mapping.size));
 	ASSERT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
-	EXPECT_FALSE(tracker.HandleWriteFault(mapping.address));
+	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address));
 	EXPECT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
 	EXPECT_TRUE(tracker.PrepareForRead(mapping.address, mapping.size));
 	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address));

@@ -20,7 +20,8 @@ enum class GpuDirtyProtectionState : uint32_t
 	Writable,
 	Arming,
 	Armed,
-	Disarming
+	Disarming,
+	Retired
 };
 
 [[nodiscard]] constexpr bool GpuDirtyProtectionStateHandlesFault(GpuDirtyProtectionState state)
