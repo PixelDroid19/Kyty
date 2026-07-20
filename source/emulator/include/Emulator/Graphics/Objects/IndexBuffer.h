@@ -21,6 +21,7 @@ public:
 	IndexBufferGpuObject()
 	{
 		check_hash = true;
+		read_only  = true;
 		type       = Graphics::GpuMemoryObjectType::IndexBuffer;
 	}
 

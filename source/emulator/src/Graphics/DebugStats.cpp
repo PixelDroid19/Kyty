@@ -101,6 +101,7 @@ TimedMetric           g_gpu_memory_create;
 
 struct GpuMemoryTypeMetric
 {
+	std::atomic<uint64_t> cached_reuse {0};
 	std::atomic<uint64_t> fast_reuse {0};
 	std::atomic<uint64_t> exact_reuse {0};
 	std::atomic<uint64_t> covered_reuse {0};
@@ -314,6 +315,7 @@ void DebugStatsInit()
 	ResetTimed(&g_gpu_memory_create);
 	for (auto& type: g_gpu_memory_types)
 	{
+		type.cached_reuse.store(0, std::memory_order_relaxed);
 		type.fast_reuse.store(0, std::memory_order_relaxed);
 		type.exact_reuse.store(0, std::memory_order_relaxed);
 		type.covered_reuse.store(0, std::memory_order_relaxed);
@@ -528,6 +530,7 @@ void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCre
 	auto& type = g_gpu_memory_types[type_index];
 	switch (outcome)
 	{
+		case DebugStatsGpuMemoryCreateOutcome::CachedReuse: type.cached_reuse.fetch_add(1, std::memory_order_relaxed); break;
 		case DebugStatsGpuMemoryCreateOutcome::FastReuse: type.fast_reuse.fetch_add(1, std::memory_order_relaxed); break;
 		case DebugStatsGpuMemoryCreateOutcome::ExactReuse: type.exact_reuse.fetch_add(1, std::memory_order_relaxed); break;
 		case DebugStatsGpuMemoryCreateOutcome::CoveredReuse: type.covered_reuse.fetch_add(1, std::memory_order_relaxed); break;
@@ -790,6 +793,7 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	{
 		auto& src = g_gpu_memory_types[i];
 		auto& dst = snapshot.gpu_memory_types[i];
+		dst.cached_reuse     = take_window(src.cached_reuse);
 		dst.fast_reuse       = take_window(src.fast_reuse);
 		dst.exact_reuse      = take_window(src.exact_reuse);
 		dst.covered_reuse    = take_window(src.covered_reuse);

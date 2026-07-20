@@ -68,10 +68,11 @@ enum class GpuMemoryOverlapType : uint64_t
 
 struct GpuMemoryOverlapEntry
 {
-	GpuMemoryObjectType  type     = GpuMemoryObjectType::Invalid;
-	GpuMemoryOverlapType relation = GpuMemoryOverlapType::None;
-	uint32_t             count    = 0;
-	bool                 exact    = false;
+	GpuMemoryObjectType  type          = GpuMemoryObjectType::Invalid;
+	GpuMemoryOverlapType relation      = GpuMemoryOverlapType::None;
+	uint32_t             count         = 0;
+	bool                 exact         = false;
+	bool                 all_read_only = false;
 };
 
 struct GpuMemoryOverlapSnapshot
@@ -372,6 +373,7 @@ inline bool GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType existing_type, 
 // VertexBuffers. Captured multi-parent sets after Param5:
 //   - StorageBuffer Equals + StorageBuffer Contains + RenderTexture Contains
 //   - RenderTexture Contains + StorageBuffer Contains + StorageBuffer Equals
+//   - VertexBuffer Contains + StorageBuffer/RenderTexture surface parents
 inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                     GpuMemoryObjectType incoming_type)
 {
@@ -387,7 +389,8 @@ inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing
 	}
 	if (existing_type == GpuMemoryObjectType::VertexBuffer)
 	{
-		return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin;
+		return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
+		       relation == GpuMemoryOverlapType::Contains;
 	}
 	return false;
 }
@@ -536,6 +539,13 @@ enum class GpuMemoryMutationAction : uint8_t
 	return write_back_capable ? GpuMemoryMutationAction::RejectWriteBackConflict : GpuMemoryMutationAction::VersionBacking;
 }
 
+// Preserve any write intent until the backing is published. Once the previous
+// use period has ended, the incoming access mode starts a new period.
+[[nodiscard]] constexpr bool GpuMemoryMergeReadOnlyUse(bool currently_in_use, bool current_read_only, bool incoming_read_only)
+{
+	return currently_in_use ? (current_read_only && incoming_read_only) : incoming_read_only;
+}
+
 class GpuObject
 {
 public:
@@ -632,7 +642,10 @@ void  GpuMemoryCompleteSubmission(SubmissionId submission);
 // upload. Tile-27 samples that miss RT/ST still link SB parents; without this
 // detile reads empty guest memory and paints opaque-black props.
 void  GpuMemoryWriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
-bool  GpuMemoryCheckAccessViolation(uint64_t vaddr, uint64_t size);
+// Exception handling accepts only a page fault caused by an armed tracker
+// protection. Known host/HLE writers use the explicit range notification.
+bool  GpuMemoryCheckAccessViolation(uint64_t vaddr);
+bool  GpuMemoryNotifyHostWrite(uint64_t vaddr, uint64_t size);
 bool  GpuMemoryWatcherEnabled();
 
 Vector<GpuMemoryObject> GpuMemoryFindObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, bool exact, bool only_first);

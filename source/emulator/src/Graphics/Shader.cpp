@@ -1807,6 +1807,52 @@ static ShaderStorageAccess ShaderGetDirectStorageAccess(const ShaderCode& code, 
 	return AnalyzeShaderStorageUse(code, start_register).access;
 }
 
+struct ShaderDirectImageUse
+{
+	ShaderTextureUsage texture = ShaderTextureUsage::Unknown;
+	int                sampler_register = -1;
+};
+
+static ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register)
+{
+	ShaderDirectImageUse result;
+
+	for (const auto& inst: code.GetInstructions())
+	{
+		const bool read =
+		    inst.type == ShaderInstructionType::ImageLoad || inst.type == ShaderInstructionType::ImageSample ||
+		    inst.type == ShaderInstructionType::ImageSampleLz || inst.type == ShaderInstructionType::ImageSampleLzO;
+		const bool write = inst.type == ShaderInstructionType::ImageStore || inst.type == ShaderInstructionType::ImageStoreMip;
+		if ((!read && !write) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
+		    inst.src[1].register_id != start_register || inst.src[1].size != 8)
+		{
+			continue;
+		}
+
+		if (write)
+		{
+			result.texture = ShaderTextureUsage::ReadWrite;
+		} else if (result.texture == ShaderTextureUsage::Unknown)
+		{
+			result.texture = ShaderTextureUsage::ReadOnly;
+		}
+
+		const bool sampled = inst.type == ShaderInstructionType::ImageSample || inst.type == ShaderInstructionType::ImageSampleLz ||
+		                     inst.type == ShaderInstructionType::ImageSampleLzO;
+		if (sampled && inst.src_num >= 3 && inst.src[2].type == ShaderOperandType::Sgpr && inst.src[2].size == 4)
+		{
+			if (result.sampler_register >= 0 && result.sampler_register != inst.src[2].register_id)
+			{
+				EXIT("direct image resource uses multiple sampler ranges: texture_sgpr=%d first_sampler=%d next_sampler=%d\n",
+				     start_register, result.sampler_register, inst.src[2].register_id);
+			}
+			result.sampler_register = inst.src[2].register_id;
+		}
+	}
+
+	return result;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                       int user_sgpr_num)
@@ -2135,6 +2181,32 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				// fallthrough
 			default:
 			{
+				if (code != nullptr)
+				{
+					const auto image = AnalyzeShaderDirectImageUse(*code, reg + user_data_register_base);
+					if (image.texture != ShaderTextureUsage::Unknown)
+					{
+						ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, reg, bind->textures2D.textures_num, image.texture,
+						                       user_sgpr, nullptr);
+						if (image.texture == ShaderTextureUsage::ReadWrite)
+						{
+							info->textures2D_readwrite++;
+						} else
+						{
+							info->textures2D_readonly++;
+						}
+						if (image.sampler_register >= 0)
+						{
+							const int sampler_register = image.sampler_register - user_data_register_base;
+							EXIT_NOT_IMPLEMENTED(sampler_register < 0);
+							ShaderGetSampler(&bind->samplers, direct_sgprs, sampler_register, bind->samplers.samplers_num,
+							                 user_sgpr, nullptr);
+							info->samplers++;
+						}
+						break;
+					}
+				}
+
 				// When the instruction stream is unavailable (VS/PS Gen5 path),
 				// default to ReadOnly rather than failing. CS passes &code and
 				// reclassifies stores as ReadWrite via ShaderGetDirectStorageUsage.

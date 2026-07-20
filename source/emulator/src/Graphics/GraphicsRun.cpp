@@ -155,7 +155,7 @@ public:
 	void Reset();
 
 	void BufferInit();
-	void BufferFlush();
+	SubmissionId BufferFlush();
 	void BufferWait();
 	void SubmitAndWait();
 	void WaitSubmission(SubmissionId submission);
@@ -235,7 +235,7 @@ private:
 	static constexpr int VK_BUFFERS_NUM = static_cast<int>(CommandProcessorSubmissionSlots::SlotCount);
 	void CompleteSubmittedThroughLocked(SubmissionId target, SubmissionId* latest_completed);
 	void TryCompleteSubmittedLocked(SubmissionId* latest_completed);
-	void SubmitCurrentLocked(SubmissionId* latest_completed);
+	SubmissionId SubmitCurrentLocked(SubmissionId* latest_completed);
 	void PublishCompletedSubmissions();
 	void WaitUntilPublishedUnlessReentrant(SubmissionId submission);
 
@@ -731,20 +731,22 @@ void CommandProcessor::BufferInit()
 	}
 }
 
-void CommandProcessor::BufferFlush()
+SubmissionId CommandProcessor::BufferFlush()
 {
 	SubmissionId latest_completed;
+	SubmissionId submitted;
 
 	{
 		Core::LockGuard lock(m_mutex);
-		SubmitCurrentLocked(&latest_completed);
+		submitted = SubmitCurrentLocked(&latest_completed);
 	}
 
 	PublishCompletedSubmissions();
 	WaitUntilPublishedUnlessReentrant(latest_completed);
+	return submitted;
 }
 
-void CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_completed)
+SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_completed)
 {
 	EXIT_IF(latest_completed == nullptr);
 	DebugStatsRecordBufferFlush();
@@ -778,6 +780,7 @@ void CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_completed)
 	m_current_buffer = static_cast<int>(recording_slot);
 	m_buffer[recording_slot]->SetSubmissionId(recording_id);
 	m_buffer[recording_slot]->Begin();
+	return submitted_id;
 }
 
 void CommandProcessor::TryCompleteSubmittedLocked(SubmissionId* latest_completed)
@@ -879,7 +882,7 @@ void CommandProcessor::WaitSubmission(SubmissionId submission)
 		if (find == GpuSubmissionResult::Success && state == GpuSubmissionState::Recording)
 		{
 			EXIT_IF(slot != static_cast<uint32_t>(m_current_buffer));
-			SubmitCurrentLocked(&latest_completed);
+			(void)SubmitCurrentLocked(&latest_completed);
 			find = m_submission_slots.FindSlot(submission, &slot);
 			if (find == GpuSubmissionResult::Success)
 			{
@@ -1013,7 +1016,7 @@ void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_
 {
 	Core::LockGuard lock(m_mutex);
 
-	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
+	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
 
 	memcpy(dst, m_const_ram + offset / 4, static_cast<size_t>(dw_num) * 4);
 
@@ -1185,7 +1188,7 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 		}
 	}
 
-	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
+	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
 
 	memcpy(dst, src, static_cast<size_t>(dw_num) * 4);
 
@@ -1320,7 +1323,7 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			ring->m_job2.Execute([cp, buf](void* /*unused*/) { cp->Run(buf.draw_buffer.data, buf.draw_buffer.num_dw); });
 			ring->m_job2.Wait();
 
-			cp->BufferFlush();
+			SubmissionId flip_submission = cp->BufferFlush();
 
 			// SubmitAndFlip carries flip args on the batch. DCBs often embed
 			// R_FLIP / marker 0x777 (which sets m_flip_issued); when they do not,
@@ -1329,7 +1332,11 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			if (GraphicsBatchNeedsApiFlip(buf.with_api_flip, cp->FlipIssued()))
 			{
 				cp->Flip();
-				cp->BufferFlush();
+				flip_submission = cp->BufferFlush();
+			}
+			if (GraphicsBatchNeedsSubmissionCompletion(cp->FlipIssued()))
+			{
+				cp->WaitSubmission(flip_submission);
 			}
 		}
 		cp->RunUnlock();
@@ -3576,7 +3583,7 @@ KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
 		return 7;
 	}
 
-	GpuMemoryCheckAccessViolation(dst, byte_count);
+	GpuMemoryNotifyHostWrite(dst, byte_count);
 	memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), byte_count);
 	GraphicsRenderMemoryFlush(dst, byte_count);
 	return 7;

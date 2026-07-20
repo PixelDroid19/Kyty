@@ -18,6 +18,7 @@ class Shader;
 } // namespace HW
 
 class CommandProcessor;
+class TransientBufferPool;
 struct VideoOutVulkanImage;
 struct DepthStencilVulkanImage;
 struct TextureVulkanImage;
@@ -74,6 +75,8 @@ public:
 		*submission = m_submission;
 		return true;
 	}
+	VulkanBuffer* UploadTransientBuffer(const void* data, uint64_t size, uint32_t usage);
+
 private:
 	VulkanCommandPool* m_pool    = nullptr;
 	uint32_t           m_index   = static_cast<uint32_t>(-1);
@@ -82,6 +85,7 @@ private:
 	CommandProcessor*  m_parent  = nullptr;
 	SubmissionId       m_submission;
 	bool               m_has_submission = false;
+	TransientBufferPool* m_transient_buffers = nullptr;
 
 	void WaitForFence(bool drain_label_callbacks, bool reset_command_buffer);
 };

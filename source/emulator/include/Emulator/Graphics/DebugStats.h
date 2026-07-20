@@ -17,6 +17,7 @@ constexpr uint32_t kDebugStatsGpuMemoryTypeCount = 9;
 
 enum class DebugStatsGpuMemoryCreateOutcome
 {
+	CachedReuse,
 	FastReuse,
 	ExactReuse,
 	CoveredReuse,
@@ -28,6 +29,7 @@ enum class DebugStatsGpuMemoryCreateOutcome
 
 struct DebugStatsGpuMemoryTypeSnapshot
 {
+	uint64_t cached_reuse     = 0;
 	uint64_t fast_reuse       = 0;
 	uint64_t exact_reuse      = 0;
 	uint64_t covered_reuse    = 0;

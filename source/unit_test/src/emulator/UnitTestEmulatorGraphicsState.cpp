@@ -5,14 +5,19 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
+#include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
+#include "Emulator/Graphics/Objects/StorageBuffer.h"
 #include "Emulator/Graphics/Objects/Texture.h"
+#include "Emulator/Graphics/Objects/VertexBuffer.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Libs/Libs.h"
@@ -54,10 +59,11 @@ bool                    g_versioned_gpu_object_release_second = false;
 
 struct TestGpuObject: public GpuObject
 {
-	explicit TestGpuObject(GpuMemoryObjectType object_type = GpuMemoryObjectType::StorageBuffer)
+	explicit TestGpuObject(GpuMemoryObjectType object_type = GpuMemoryObjectType::StorageBuffer, bool is_read_only = false)
 	{
 		type       = object_type;
 		params[0] = 0x53544f5241474555ull ^ static_cast<uint64_t>(object_type);
+		read_only  = is_read_only;
 	}
 
 	bool Equal(const uint64_t* other) const override { return other != nullptr && other[0] == params[0]; }
@@ -328,6 +334,14 @@ TEST(EmulatorGraphicsState, PipelineCacheRejectsMalformedOrForeignData)
 	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, sizeof(header), properties));
 
 	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, PipelineCacheStoreMaxBytes() + 1, properties));
+}
+
+TEST(EmulatorGraphicsState, PipelineCacheCheckpointsAreDirtyAndRateLimited)
+{
+	EXPECT_FALSE(PipelineCacheStoreCheckpointDue(false, false, 0));
+	EXPECT_TRUE(PipelineCacheStoreCheckpointDue(true, false, 0));
+	EXPECT_FALSE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds() - 1));
+	EXPECT_TRUE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds()));
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
@@ -739,7 +753,9 @@ TEST(EmulatorGraphicsState, GpuMemoryOverlapQueryIsBoundedAndReadOnly)
 	GpuMemorySetAllocatedRange(second_heap_base, heap_size);
 
 	g_test_gpu_object_deletes = 0;
-	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, first, obj_size, TestGpuObject(GpuMemoryObjectType::StorageBuffer)), nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, first, obj_size,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
 	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, second, obj_size, TestGpuObject(GpuMemoryObjectType::VertexBuffer)), nullptr);
 
 	GpuMemoryOverlapSnapshot snapshot;
@@ -758,6 +774,7 @@ TEST(EmulatorGraphicsState, GpuMemoryOverlapQueryIsBoundedAndReadOnly)
 	EXPECT_EQ(snapshot.entries[0].relation, GpuMemoryOverlapType::Equals);
 	EXPECT_TRUE(snapshot.entries[0].exact);
 	EXPECT_EQ(snapshot.entries[0].count, 1u);
+	EXPECT_TRUE(snapshot.entries[0].all_read_only);
 
 	const uint64_t partial_addr = first + 0x800ull;
 	ASSERT_TRUE(GpuMemoryQueryOverlaps(&partial_addr, &obj_size, 1, &snapshot));
@@ -814,6 +831,86 @@ TEST(EmulatorGraphicsState, GpuMemoryOverlapQueryIsBoundedAndReadOnly)
 	GpuMemoryFree(&ctx, first, obj_size);
 	GpuMemoryFree(&ctx, second, obj_size);
 	EXPECT_EQ(g_test_gpu_object_deletes, 2);
+}
+
+TEST(EmulatorGraphicsState, StorageBufferBackingIdentityIgnoresViewShape)
+{
+	const StorageBufferGpuObject dword_view(4, 16, true);
+	const StorageBufferGpuObject vec4_view(16, 4, true);
+
+	EXPECT_TRUE(dword_view.Equal(vec4_view.params));
+	EXPECT_TRUE(vec4_view.Equal(dword_view.params));
+	EXPECT_FALSE(dword_view.Equal(nullptr));
+}
+
+TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
+{
+	GpuMemoryOverlapSnapshot empty;
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(empty));
+
+	GpuMemoryOverlapSnapshot read_only_storage;
+	read_only_storage.total_count              = 2;
+	read_only_storage.entry_count              = 1;
+	read_only_storage.entries[0].type          = GpuMemoryObjectType::StorageBuffer;
+	read_only_storage.entries[0].relation      = GpuMemoryOverlapType::Crosses;
+	read_only_storage.entries[0].count         = 2;
+	read_only_storage.entries[0].all_read_only = true;
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_storage));
+
+	auto read_only_vertex            = read_only_storage;
+	read_only_vertex.entries[0].type = GpuMemoryObjectType::VertexBuffer;
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_vertex));
+
+	auto read_only_index            = read_only_storage;
+	read_only_index.entries[0].type = GpuMemoryObjectType::IndexBuffer;
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_index));
+
+	auto writable_storage                     = read_only_storage;
+	writable_storage.entries[0].all_read_only = false;
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage));
+
+	auto surface            = read_only_storage;
+	surface.entries[0].type = GpuMemoryObjectType::RenderTexture;
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface));
+
+	auto truncated      = read_only_storage;
+	truncated.truncated = true;
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(truncated));
+}
+
+TEST(EmulatorGraphicsState, UsesTransientBuffersOnlyForSmallSafeReadOnlyViews)
+{
+	EXPECT_TRUE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x80u, true, true));
+	EXPECT_TRUE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x1000u, true, true));
+	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(false, 0x80u, true, false));
+	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x1001u, true, false));
+	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x80u, false, false));
+	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x80u, true, false));
+}
+
+TEST(EmulatorGraphicsState, VertexAndIndexBuffersDeclareReadOnlyGpuUse)
+{
+	EXPECT_TRUE(VertexBufferGpuObject().read_only);
+	EXPECT_TRUE(IndexBufferGpuObject().read_only);
+}
+
+TEST(EmulatorGraphicsState, TransientBufferPoolReservesCapacityPerUsage)
+{
+	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 512u, 0u, 0x80u));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(512u, 512u, 0u, 0x80u));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 1536u, 0u, 0x80u));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 16u * 1024u * 1024u, 0x80u));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 0u, 0u));
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryAccumulatesWriteIntentUntilWriteBack)
+{
+	EXPECT_FALSE(GpuMemoryMergeReadOnlyUse(true, false, true));
+	EXPECT_FALSE(GpuMemoryMergeReadOnlyUse(true, true, false));
+	EXPECT_TRUE(GpuMemoryMergeReadOnlyUse(true, true, true));
+
+	EXPECT_TRUE(GpuMemoryMergeReadOnlyUse(false, false, true));
+	EXPECT_FALSE(GpuMemoryMergeReadOnlyUse(false, true, false));
 }
 
 TEST(EmulatorGraphicsState, BlitInitializesUndefinedSource)
@@ -1016,6 +1113,48 @@ TEST(EmulatorGraphicsState, Gen5CodeUnavailableSkipsInvalidDirectStorageDescript
 	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
 	EXPECT_EQ(usage.storage_buffers_readonly, 0);
 	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
+}
+
+TEST(EmulatorGraphicsState, Gen5DirectImageSampleBindsTextureAndSampler)
+{
+	const uint32_t word0 = (0x3cu << 26u) | (0x20u << 18u) | (0xfu << 8u);
+	const uint32_t word1 = 2u << 21u; // T#0 = s[0:7], S#2 = s[8:11].
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 12; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	user_sgpr.value[3] = 9u << 28u;
+
+	uint16_t direct_offsets[2] = {0xffffu, 0u};
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 2;
+	user_data.srt_size_dw            = 4;
+
+	ShaderParsedUsage  usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 12, &code);
+
+	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
+	ASSERT_EQ(bind.textures2D.textures_num, 1);
+	EXPECT_EQ(bind.textures2D.desc[0].start_register, 0);
+	EXPECT_EQ(bind.textures2D.desc[0].usage, ShaderTextureUsage::ReadOnly);
+	ASSERT_EQ(bind.samplers.samplers_num, 1);
+	EXPECT_EQ(bind.samplers.start_register[0], 8);
 }
 
 TEST(EmulatorGraphicsState, Gen5DirectSgprsAllowFullUserWindow)
@@ -1816,6 +1955,8 @@ TEST(EmulatorGraphicsState, AllowsRenderTargetMultiSurfaceParents)
 	                                                    GpuMemoryObjectType::RenderTexture));
 	EXPECT_TRUE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
 	                                                    GpuMemoryObjectType::RenderTexture));
+	EXPECT_TRUE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::RenderTexture));
 	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Equals,
 	                                                     GpuMemoryObjectType::Texture));
 }
@@ -2301,6 +2442,16 @@ TEST(EmulatorGraphicsState, GraphicsBatchNeedsApiFlipWhenDcbOmitsFlip)
 	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(true, true));
 	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(false, false));
 	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(false, true));
+}
+
+// A flip becomes guest-visible only when the exact submission containing its
+// post-fence callback is published. Leaving that retirement to a later batch
+// deadlocks titles that wait for the first flip event before submitting again.
+TEST(EmulatorGraphicsState, GraphicsBatchWaitsForSubmissionContainingFlip)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(GraphicsBatchNeedsSubmissionCompletion(true));
+	EXPECT_FALSE(GraphicsBatchNeedsSubmissionCompletion(false));
 }
 
 // Host presentation: default swapchain selection must stay LDR sRGB even when a
