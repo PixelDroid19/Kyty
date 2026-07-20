@@ -346,6 +346,12 @@ TEST(EmulatorGraphicsState, PipelineCacheCheckpointsAreDirtyAndRateLimited)
 	EXPECT_TRUE(PipelineCacheStoreCheckpointDue(true, false, 0));
 	EXPECT_FALSE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds() - 1));
 	EXPECT_TRUE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds()));
+
+	const size_t budget = PipelineCacheStoreSessionWriteBudgetBytes();
+	EXPECT_TRUE(PipelineCacheStoreWriteBudgetAllows(0, budget));
+	EXPECT_TRUE(PipelineCacheStoreWriteBudgetAllows(budget - 1, 1));
+	EXPECT_FALSE(PipelineCacheStoreWriteBudgetAllows(1, budget));
+	EXPECT_FALSE(PipelineCacheStoreWriteBudgetAllows(budget, 1));
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
