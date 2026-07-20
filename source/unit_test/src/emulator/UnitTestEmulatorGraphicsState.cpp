@@ -352,6 +352,11 @@ TEST(EmulatorGraphicsState, PipelineCacheCheckpointsAreDirtyAndRateLimited)
 	EXPECT_TRUE(PipelineCacheStoreWriteBudgetAllows(budget - 1, 1));
 	EXPECT_FALSE(PipelineCacheStoreWriteBudgetAllows(1, budget));
 	EXPECT_FALSE(PipelineCacheStoreWriteBudgetAllows(budget, 1));
+
+	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(0, budget / 2), budget / 2);
+	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget / 2, budget / 2), budget);
+	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget - 1, 2), budget);
+	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget, 1), budget);
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)

@@ -41,6 +41,12 @@ struct PipelineCacheHeaderV1
 	       next_write <= PipelineCacheStoreSessionWriteBudgetBytes() - bytes_written;
 }
 
+[[nodiscard]] constexpr size_t PipelineCacheStoreAccountWriteAttempt(size_t bytes_attempted, size_t next_attempt)
+{
+	const size_t budget = PipelineCacheStoreSessionWriteBudgetBytes();
+	return bytes_attempted >= budget || next_attempt >= budget - bytes_attempted ? budget : bytes_attempted + next_attempt;
+}
+
 [[nodiscard]] constexpr uint64_t PipelineCacheStoreCheckpointSeconds()
 {
 	return 30u;
@@ -76,7 +82,7 @@ enum class PipelineCacheStoreSaveResult
 [[nodiscard]] std::vector<uint8_t>         PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& properties);
 [[nodiscard]] PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineCache cache,
                                                                   const VkPhysicalDeviceProperties& properties,
-                                                                  size_t remaining_write_budget, size_t* saved_size);
+                                                                  size_t remaining_write_budget, size_t* attempted_size);
 
 } // namespace Kyty::Libs::Graphics
 
