@@ -93,6 +93,10 @@ private:
 void GraphicsRenderInit();
 void GraphicsRenderCreateContext();
 
+// Resolves the Gen5 rect-list auto-draw expansion without depending on Vulkan
+// objects, so the guest primitive contract can be tested deterministically.
+bool GraphicsResolveRectListAutoDraw(uint32_t primitive_type, uint32_t index_count, int vertex_buffers_num, uint32_t* vertex_count);
+
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint32_t flags, uint32_t type);
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,

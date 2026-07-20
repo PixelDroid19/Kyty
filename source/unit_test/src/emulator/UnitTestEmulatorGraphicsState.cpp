@@ -1,6 +1,7 @@
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicsState.h"
+#include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
@@ -271,6 +272,18 @@ void EnsureGpuMemoryForTests()
 }
 
 } // namespace
+
+TEST(EmulatorGraphicsState, ResolvesGen5RectListAutoDrawExpansion)
+{
+	uint32_t vertex_count = 0;
+	EXPECT_TRUE(GraphicsResolveRectListAutoDraw(7, 3, 0, &vertex_count));
+	EXPECT_EQ(vertex_count, 4u);
+
+	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(7, 4, 0, &vertex_count));
+	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(7, 3, 1, &vertex_count));
+	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(17, 3, 0, &vertex_count));
+	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(7, 3, 0, nullptr));
+}
 
 TEST(EmulatorGraphicsState, TiledVideoOutBufferUpdateDoesNotCpuUpload)
 {

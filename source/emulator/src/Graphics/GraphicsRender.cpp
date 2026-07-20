@@ -6227,6 +6227,17 @@ static bool shader_is_disabled(HW::Shader* sh_ctx)
 	return false;
 }
 
+bool GraphicsResolveRectListAutoDraw(uint32_t primitive_type, uint32_t index_count, int vertex_buffers_num, uint32_t* vertex_count)
+{
+	if (primitive_type != 7 || index_count != 3 || vertex_buffers_num != 0 || vertex_count == nullptr)
+	{
+		return false;
+	}
+
+	*vertex_count = 4;
+	return true;
+}
+
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint32_t flags, uint32_t type)
 {
@@ -6482,6 +6493,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		case 4: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;   // kPrimitiveTypeTriList
 		case 5: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;    // kPrimitiveTypeTriFan
 		case 6: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // kPrimitiveTypeTriStrip
+		case 7: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // Gen5 rect list
 		case 17: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break; // kPrimitiveTypeRectList
 		case 19: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;   // kPrimitiveTypeQuadList
 		default: EXIT("unknown primitive type: %u\n", ucfg->GetPrimType());
@@ -6582,6 +6594,14 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 			vkCmdDraw(vk_buffer, index_count, 1, 0, 0);
 			DebugStatsRecordDraw();
 			break;
+		case 7:
+		{
+			uint32_t vertex_count = 0;
+			EXIT_NOT_IMPLEMENTED(!GraphicsResolveRectListAutoDraw(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, &vertex_count));
+			vkCmdDraw(vk_buffer, vertex_count, 1, 0, 0);
+			DebugStatsRecordDraw();
+			break;
+		}
 		case 17:
 			EXIT_NOT_IMPLEMENTED(!(index_count == 3 && vs_input_info.buffers_num == 0));
 			vkCmdDraw(vk_buffer, 4, 1, 0, 0);
