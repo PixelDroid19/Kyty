@@ -17,6 +17,8 @@ namespace Kyty::Libs::Graphics {
 
 inline constexpr uint32_t kSpirvBinaryCacheSchemaVersion = 1;
 
+struct ShaderModuleKey;
+
 struct SpirvBinaryCacheLimits
 {
 	size_t max_total_bytes      = 64u * 1024u * 1024u;
@@ -50,10 +52,21 @@ public:
 	                                              Vector<uint32_t>* binary);
 	[[nodiscard]] SpirvBinaryCacheStoreResult Store(const String8& source, uint32_t optimization, bool validation_enabled,
 	                                                const Vector<uint32_t>& binary);
+	[[nodiscard]] SpirvBinaryCacheLoadResult  LoadModule(const ShaderModuleKey& key, bool validation_enabled,
+	                                                     Vector<uint32_t>* binary);
+	[[nodiscard]] SpirvBinaryCacheStoreResult StoreModule(const ShaderModuleKey& key, bool validation_enabled,
+	                                                      const Vector<uint32_t>& binary);
 	[[nodiscard]] size_t                     DiskUsageBytes() const;
 	[[nodiscard]] size_t                     SessionBytesAttempted() const;
 
 private:
+	[[nodiscard]] SpirvBinaryCacheLoadResult LoadEntry(const uint8_t* identity, size_t identity_size, uint32_t optimization,
+	                                                   bool validation_enabled, uint64_t key_low, uint64_t key_high,
+	                                                   const char* extension, Vector<uint32_t>* binary);
+	[[nodiscard]] SpirvBinaryCacheStoreResult StoreEntry(const uint8_t* identity, size_t identity_size, uint32_t optimization,
+	                                                     bool validation_enabled, uint64_t key_low, uint64_t key_high,
+	                                                     const char* extension, const Vector<uint32_t>& binary);
+
 	struct State;
 	State* m_state = nullptr;
 };

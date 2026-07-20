@@ -34,6 +34,7 @@
 #include "Emulator/Graphics/ResolutionCoordinateTransform.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderCoordinateScale.h"
+#include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
@@ -396,7 +397,10 @@ class RenderContext
 public:
 	RenderContext()
 	    : m_pipeline_cache(new PipelineCache), m_descriptor_cache(new DescriptorCache), m_framebuffer_cache(new FramebufferCache),
-	      m_sampler_cache(new SamplerCache), m_shader_translation_cache(new ShaderTranslationCache(2048)), m_gds_buffer(new GdsBuffer)
+	      m_sampler_cache(new SamplerCache),
+	      m_shader_translation_cache(
+	          new ShaderTranslationCache(2048, &SpirvBinaryCacheDefaultStore(), Config::ShaderValidationEnabled())),
+	      m_gds_buffer(new GdsBuffer)
 	{
 		EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
 	}
@@ -3313,8 +3317,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	EXIT_IF(translation_cache == nullptr);
 	const auto optimization = Config::GetShaderOptimizationType();
 	const bool next_gen     = Config::IsNextGen();
+	const bool debug_printf = Config::SpirvDebugPrintfEnabled();
 	const auto vs_translation = translation_cache->GetOrCompile(
-	    ShaderModuleKey::Create(vs_id, ShaderModuleStage::Vertex, optimization, next_gen),
+	    ShaderModuleKey::Create(vs_id, ShaderModuleStage::Vertex, optimization, next_gen, debug_printf),
 	    [&]
 	    {
 		    auto vs_code = ShaderParseVS(&vs_regs, &sh_regs);
@@ -3322,7 +3327,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	    });
 	DebugStatsRecordShaderTranslationCache(vs_translation.hit, vs_translation.evicted);
 	const auto ps_translation = translation_cache->GetOrCompile(
-	    ShaderModuleKey::Create(ps_id, ShaderModuleStage::Pixel, optimization, next_gen),
+	    ShaderModuleKey::Create(ps_id, ShaderModuleStage::Pixel, optimization, next_gen, debug_printf),
 	    [&]
 	    {
 		    auto ps_code = ShaderParsePS(&ps_regs, &sh_regs);
@@ -3427,7 +3432,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
 	const auto cs_translation = translation_cache->GetOrCompile(
-	    ShaderModuleKey::Create(cs_id, ShaderModuleStage::Compute, Config::GetShaderOptimizationType(), Config::IsNextGen()),
+	    ShaderModuleKey::Create(cs_id, ShaderModuleStage::Compute, Config::GetShaderOptimizationType(), Config::IsNextGen(),
+	                            Config::SpirvDebugPrintfEnabled()),
 	    [&]
 	    {
 		    auto cs_code = ShaderParseCS(cs_regs, sh_regs);

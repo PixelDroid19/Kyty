@@ -2,6 +2,8 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Graphics/ShaderTranslationCache.h"
+
 #define XXH_INLINE_ALL
 #include <xxhash/xxhash.h>
 
@@ -36,6 +38,9 @@ constexpr uint32_t k_format_version = 1;
 constexpr uint32_t k_target_vulkan_12 = 1;
 constexpr uint32_t k_spirv_magic      = 0x07230203u;
 constexpr char     k_key_domain[]      = "KytySpirvAssemblyCacheKey";
+constexpr char     k_module_key_domain[] = "KytySpirvModuleCacheKey";
+constexpr char     k_source_extension[]  = ".spvbin";
+constexpr char     k_module_extension[]  = ".spvmod";
 
 void AppendU32(std::vector<uint8_t>* bytes, uint32_t value)
 {
@@ -87,11 +92,40 @@ XXH128_hash_t SourceKey(const String8& source, uint32_t optimization, bool valid
 	return XXH3_128bits(canonical.data(), canonical.size());
 }
 
-std::string KeyName(XXH128_hash_t key)
+std::vector<uint8_t> ModuleIdentity(const ShaderModuleKey& key, bool validation_enabled)
+{
+	std::vector<uint8_t> canonical;
+	canonical.reserve(sizeof(k_module_key_domain) + 40u + static_cast<size_t>(key.shader_id.ids.Size()) * sizeof(uint32_t));
+	canonical.insert(canonical.end(), std::begin(k_module_key_domain), std::end(k_module_key_domain));
+	AppendU32(&canonical, kSpirvBinaryCacheSchemaVersion);
+	AppendU32(&canonical, k_target_vulkan_12);
+	AppendU32(&canonical, key.shader_id.hash0);
+	AppendU32(&canonical, key.shader_id.crc32);
+	AppendU32(&canonical, static_cast<uint32_t>(key.shader_id.ids.Size()));
+	for (uint32_t id: key.shader_id.ids)
+	{
+		AppendU32(&canonical, id);
+	}
+	AppendU32(&canonical, static_cast<uint32_t>(key.stage));
+	AppendU32(&canonical, static_cast<uint32_t>(key.optimization));
+	AppendU32(&canonical, key.next_gen ? 1u : 0u);
+	AppendU32(&canonical, key.debug_printf_enabled ? 1u : 0u);
+	AppendU32(&canonical, key.translator_version);
+	AppendU32(&canonical, validation_enabled ? 1u : 0u);
+	return canonical;
+}
+
+std::string KeyName(XXH128_hash_t key, const char* extension)
 {
 	std::ostringstream name;
-	name << std::hex << std::setfill('0') << std::setw(16) << key.high64 << std::setw(16) << key.low64 << ".spvbin";
+	name << std::hex << std::setfill('0') << std::setw(16) << key.high64 << std::setw(16) << key.low64 << extension;
 	return name.str();
+}
+
+bool IsCacheEntry(const std::filesystem::path& path)
+{
+	const auto extension = path.extension();
+	return extension == k_source_extension || extension == k_module_extension;
 }
 
 size_t CacheUsage(const std::filesystem::path& root)
@@ -100,7 +134,7 @@ size_t CacheUsage(const std::filesystem::path& root)
 	size_t          total = 0;
 	for (std::filesystem::directory_iterator it(root, error), end; !error && it != end; it.increment(error))
 	{
-		if (!it->is_regular_file(error) || error || it->path().extension() != ".spvbin")
+		if (!it->is_regular_file(error) || error || !IsCacheEntry(it->path()))
 		{
 			error.clear();
 			continue;
@@ -159,12 +193,32 @@ SpirvBinaryCacheStore::~SpirvBinaryCacheStore()
 SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::Load(const String8& source, uint32_t optimization, bool validation_enabled,
                                                        Vector<uint32_t>* binary)
 {
+	const auto key = SourceKey(source, optimization, validation_enabled);
+	return LoadEntry(reinterpret_cast<const uint8_t*>(source.GetDataConst()), source.Size(), optimization, validation_enabled, key.low64,
+	                 key.high64, k_source_extension, binary);
+}
+
+SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::LoadModule(const ShaderModuleKey& key, bool validation_enabled,
+                                                             Vector<uint32_t>* binary)
+{
+	const auto identity = ModuleIdentity(key, validation_enabled);
+	const auto hash     = XXH3_128bits(identity.data(), identity.size());
+	return LoadEntry(identity.data(), identity.size(), static_cast<uint32_t>(key.optimization), validation_enabled, hash.low64,
+	                 hash.high64, k_module_extension, binary);
+}
+
+SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::LoadEntry(const uint8_t* identity, size_t identity_size, uint32_t optimization,
+                                                            bool validation_enabled, uint64_t key_low, uint64_t key_high,
+                                                            const char* extension, Vector<uint32_t>* binary)
+{
 	EXIT_IF(m_state == nullptr);
+	EXIT_IF(identity == nullptr && identity_size != 0);
+	EXIT_IF(extension == nullptr);
 	EXIT_IF(binary == nullptr);
 	binary->Clear();
 
-	const auto key  = SourceKey(source, optimization, validation_enabled);
-	const auto path = m_state->root / KeyName(key);
+	const XXH128_hash_t key {key_low, key_high};
+	const auto          path = m_state->root / KeyName(key, extension);
 	std::lock_guard<std::mutex> lock(m_state->mutex);
 
 	std::error_code error;
@@ -194,20 +248,22 @@ SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::Load(const String8& source, ui
 		return SpirvBinaryCacheLoadResult::Corrupt;
 	}
 
-	const uint64_t source_size = ReadU64(header + 32);
-	const uint64_t word_count  = ReadU64(header + 40);
+	const uint64_t stored_identity_size = ReadU64(header + 32);
+	const uint64_t word_count           = ReadU64(header + 40);
 	const uint64_t payload_size = ReadU64(header + 72);
-	if (source_size != source.Size() || word_count == 0 || word_count > (m_state->limits.max_entry_bytes / sizeof(uint32_t)) ||
-	    source_size > m_state->limits.max_entry_bytes || word_count > (UINT64_MAX - source_size) / sizeof(uint32_t) ||
-	    payload_size != source_size + word_count * sizeof(uint32_t) || payload_size > UINT64_MAX - k_header_size ||
+	if (stored_identity_size != identity_size || word_count == 0 ||
+	    word_count > (m_state->limits.max_entry_bytes / sizeof(uint32_t)) ||
+	    stored_identity_size > m_state->limits.max_entry_bytes ||
+	    word_count > (UINT64_MAX - stored_identity_size) / sizeof(uint32_t) ||
+	    payload_size != stored_identity_size + word_count * sizeof(uint32_t) || payload_size > UINT64_MAX - k_header_size ||
 	    file_size != k_header_size + payload_size || ReadU64(header + 48) != key.low64 || ReadU64(header + 56) != key.high64)
 	{
 		return SpirvBinaryCacheLoadResult::Corrupt;
 	}
 
-	const uint8_t* stored_source = data.data() + k_header_size;
-	const uint8_t* stored_binary = stored_source + source_size;
-	if (memcmp(stored_source, source.GetDataConst(), source.Size()) != 0 ||
+	const uint8_t* stored_identity = data.data() + k_header_size;
+	const uint8_t* stored_binary   = stored_identity + stored_identity_size;
+	if ((identity_size != 0 && memcmp(stored_identity, identity, identity_size) != 0) ||
 	    ReadU64(header + 64) != XXH3_64bits(stored_binary, static_cast<size_t>(word_count * sizeof(uint32_t))) ||
 	    ReadU32(stored_binary) != k_spirv_magic)
 	{
@@ -224,21 +280,41 @@ SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::Load(const String8& source, ui
 SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::Store(const String8& source, uint32_t optimization, bool validation_enabled,
                                                          const Vector<uint32_t>& binary)
 {
+	const auto key = SourceKey(source, optimization, validation_enabled);
+	return StoreEntry(reinterpret_cast<const uint8_t*>(source.GetDataConst()), source.Size(), optimization, validation_enabled, key.low64,
+	                  key.high64, k_source_extension, binary);
+}
+
+SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreModule(const ShaderModuleKey& key, bool validation_enabled,
+                                                               const Vector<uint32_t>& binary)
+{
+	const auto identity = ModuleIdentity(key, validation_enabled);
+	const auto hash     = XXH3_128bits(identity.data(), identity.size());
+	return StoreEntry(identity.data(), identity.size(), static_cast<uint32_t>(key.optimization), validation_enabled, hash.low64,
+	                  hash.high64, k_module_extension, binary);
+}
+
+SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreEntry(const uint8_t* identity, size_t identity_size, uint32_t optimization,
+                                                              bool validation_enabled, uint64_t key_low, uint64_t key_high,
+                                                              const char* extension, const Vector<uint32_t>& binary)
+{
 	EXIT_IF(m_state == nullptr);
+	EXIT_IF(identity == nullptr && identity_size != 0);
+	EXIT_IF(extension == nullptr);
 	if (binary.IsEmpty() || binary[0] != k_spirv_magic)
 	{
 		return SpirvBinaryCacheStoreResult::Failed;
 	}
 
-	const size_t payload_size = static_cast<size_t>(source.Size()) + static_cast<size_t>(binary.Size()) * sizeof(uint32_t);
+	const size_t payload_size = identity_size + static_cast<size_t>(binary.Size()) * sizeof(uint32_t);
 	const size_t entry_size   = k_header_size + payload_size;
 	if (entry_size > m_state->limits.max_entry_bytes || entry_size > m_state->limits.max_total_bytes)
 	{
 		return SpirvBinaryCacheStoreResult::TooLarge;
 	}
 
-	const auto key  = SourceKey(source, optimization, validation_enabled);
-	const auto path = m_state->root / KeyName(key);
+	const XXH128_hash_t key {key_low, key_high};
+	const auto          path = m_state->root / KeyName(key, extension);
 	std::lock_guard<std::mutex> lock(m_state->mutex);
 	if (m_state->session_bytes_attempted > m_state->limits.session_write_budget ||
 	    entry_size > m_state->limits.session_write_budget - m_state->session_bytes_attempted)
@@ -254,6 +330,12 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::Store(const String8& source, 
 	}
 
 	size_t usage = CacheUsage(m_state->root);
+	const auto existing_size = std::filesystem::file_size(path, error);
+	if (!error && existing_size <= usage)
+	{
+		usage -= static_cast<size_t>(existing_size);
+	}
+	error.clear();
 
 	struct Candidate
 	{
@@ -264,7 +346,7 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::Store(const String8& source, 
 	std::vector<Candidate> candidates;
 	for (std::filesystem::directory_iterator it(m_state->root, error), end; !error && it != end; it.increment(error))
 	{
-		if (!it->is_regular_file(error) || error || it->path().extension() != ".spvbin" || it->path() == path)
+		if (!it->is_regular_file(error) || error || !IsCacheEntry(it->path()) || it->path() == path)
 		{
 			error.clear();
 			continue;
@@ -308,13 +390,16 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::Store(const String8& source, 
 	AppendU32(&data, k_target_vulkan_12);
 	AppendU32(&data, optimization);
 	AppendU32(&data, validation_enabled ? 1u : 0u);
-	AppendU64(&data, source.Size());
+	AppendU64(&data, identity_size);
 	AppendU64(&data, binary.Size());
 	AppendU64(&data, key.low64);
 	AppendU64(&data, key.high64);
 	AppendU64(&data, XXH3_64bits(binary.GetDataConst(), static_cast<size_t>(binary.Size()) * sizeof(uint32_t)));
 	AppendU64(&data, payload_size);
-	data.insert(data.end(), source.GetDataConst(), source.GetDataConst() + source.Size());
+	if (identity_size != 0)
+	{
+		data.insert(data.end(), identity, identity + identity_size);
+	}
 	for (uint32_t word: binary)
 	{
 		AppendU32(&data, word);

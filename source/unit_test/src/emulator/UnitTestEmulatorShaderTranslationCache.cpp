@@ -1,13 +1,36 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 
 #include <atomic>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <thread>
 
 UT_BEGIN(EmulatorShaderTranslationCache);
 
 using namespace Libs::Graphics;
+
+namespace {
+
+class ScopedShaderModuleCacheDirectory final
+{
+public:
+	ScopedShaderModuleCacheDirectory()
+	{
+		const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+		path             = std::filesystem::temp_directory_path() / ("kyty-shader-module-cache-test-" + std::to_string(nonce));
+	}
+	~ScopedShaderModuleCacheDirectory()
+	{
+		std::error_code error;
+		std::filesystem::remove_all(path, error);
+	}
+
+	std::filesystem::path path;
+};
 
 static ShaderId TestShaderId(uint32_t hash, uint32_t crc, uint32_t interface_id)
 {
@@ -17,6 +40,8 @@ static ShaderId TestShaderId(uint32_t hash, uint32_t crc, uint32_t interface_id)
 	id.ids.Add(interface_id);
 	return id;
 }
+
+} // namespace
 
 TEST(EmulatorShaderTranslationCache, KeyTracksOnlyExactTranslationInputs)
 {
@@ -35,6 +60,10 @@ TEST(EmulatorShaderTranslationCache, KeyTracksOnlyExactTranslationInputs)
 	auto newer = base;
 	newer.translator_version++;
 	EXPECT_NE(base, newer);
+
+	auto debug = base;
+	debug.debug_printf_enabled = !base.debug_printf_enabled;
+	EXPECT_NE(base, debug);
 }
 
 TEST(EmulatorShaderTranslationCache, ExactMissCompilesOnceAndHitDoesNotInvokeCompiler)
@@ -59,6 +88,94 @@ TEST(EmulatorShaderTranslationCache, ExactMissCompilesOnceAndHitDoesNotInvokeCom
 	EXPECT_EQ(compiles.load(), 1u);
 	ASSERT_EQ(miss.binary.Size(), 1u);
 	EXPECT_EQ(hit.binary, miss.binary);
+}
+
+TEST(EmulatorShaderTranslationCache, PersistentModuleHitSkipsCompilerAcrossCacheInstances)
+{
+	ScopedShaderModuleCacheDirectory directory;
+	SpirvBinaryCacheStore            store(directory.path);
+	const auto key =
+	    ShaderModuleKey::Create(TestShaderId(11, 22, 33), ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true);
+	std::atomic<uint32_t> compiles {0};
+	auto compiler = [&]
+	{
+		compiles.fetch_add(1);
+		return Vector<uint32_t> {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+	};
+
+	{
+		ShaderTranslationCache cold_cache(16, &store, false);
+		EXPECT_FALSE(cold_cache.GetOrCompile(key, compiler).hit);
+	}
+	{
+		ShaderTranslationCache warm_cache(16, &store, false);
+		const auto             warm = warm_cache.GetOrCompile(key, compiler);
+		EXPECT_TRUE(warm.hit);
+		EXPECT_EQ(warm.binary, (Vector<uint32_t> {0x07230203u, 0x00010500u, 0u, 4u, 0u}));
+	}
+	EXPECT_EQ(compiles.load(), 1u);
+}
+
+TEST(EmulatorShaderTranslationCache, DebugPrintfModulesRemainSessionLocal)
+{
+	ScopedShaderModuleCacheDirectory directory;
+	SpirvBinaryCacheStore            store(directory.path);
+	const auto key = ShaderModuleKey::Create(TestShaderId(77, 88, 99), ShaderModuleStage::Pixel,
+	                                         Config::ShaderOptimizationType::Performance, true, true);
+	uint32_t   compiles = 0;
+	auto compiler = [&]
+	{
+		++compiles;
+		return Vector<uint32_t> {0x07230203u, 0x00010500u, compiles, 4u, 0u};
+	};
+
+	{
+		ShaderTranslationCache first(16, &store, false);
+		EXPECT_FALSE(first.GetOrCompile(key, compiler).hit);
+		EXPECT_TRUE(first.GetOrCompile(key, compiler).hit);
+	}
+	{
+		ShaderTranslationCache second(16, &store, false);
+		EXPECT_FALSE(second.GetOrCompile(key, compiler).hit);
+	}
+	EXPECT_EQ(compiles, 2u);
+	EXPECT_FALSE(std::filesystem::exists(directory.path));
+}
+
+TEST(EmulatorShaderTranslationCache, CorruptPersistentModuleFallsBackAndIsReplaced)
+{
+	ScopedShaderModuleCacheDirectory directory;
+	SpirvBinaryCacheStore            store(directory.path);
+	const auto key =
+	    ShaderModuleKey::Create(TestShaderId(44, 55, 66), ShaderModuleStage::Compute, Config::ShaderOptimizationType::None, true);
+	uint32_t compiles = 0;
+	auto compiler = [&]
+	{
+		++compiles;
+		return Vector<uint32_t> {0x07230203u, 0x00010500u, compiles, 4u, 0u};
+	};
+
+	{
+		ShaderTranslationCache seed(16, &store, false);
+		EXPECT_FALSE(seed.GetOrCompile(key, compiler).hit);
+	}
+	for (const auto& entry: std::filesystem::directory_iterator(directory.path))
+	{
+		if (entry.is_regular_file() && entry.path().extension() == ".spvmod")
+		{
+			std::ofstream file(entry.path(), std::ios::binary | std::ios::trunc);
+			file.write("broken", 6);
+		}
+	}
+	{
+		ShaderTranslationCache repair(16, &store, false);
+		EXPECT_FALSE(repair.GetOrCompile(key, compiler).hit);
+	}
+	{
+		ShaderTranslationCache warm(16, &store, false);
+		EXPECT_TRUE(warm.GetOrCompile(key, compiler).hit);
+	}
+	EXPECT_EQ(compiles, 2u);
 }
 
 TEST(EmulatorShaderTranslationCache, ConcurrentSameKeyDoesNotDuplicateCompilation)
