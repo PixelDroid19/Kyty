@@ -118,6 +118,8 @@ private:
 	[[nodiscard]] PageEntry*        FindOrCreatePage(uintptr_t page) noexcept;
 	[[nodiscard]] RangeEntry*       FindRange(uintptr_t address, size_t size) noexcept;
 	[[nodiscard]] const RangeEntry* FindRange(uintptr_t address, size_t size) const noexcept;
+	void                            ClaimPageForRetirement(PageEntry* entry) noexcept;
+	[[nodiscard]] bool              RestoreRetirementRun(uintptr_t first, uintptr_t last, uint32_t token) noexcept;
 	[[nodiscard]] bool              HasCover(uintptr_t page, uintptr_t end, bool* fallback) const noexcept;
 	void                            MarkFallback(uintptr_t page, uintptr_t end) noexcept;
 	void                            MarkPageWrite(PageEntry* page) noexcept;
