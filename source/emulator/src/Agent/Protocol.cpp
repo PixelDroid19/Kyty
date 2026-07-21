@@ -615,7 +615,60 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 		*out += ",\"hash_fallback_unchanged\":" + std::to_string(type.hash_fallback_unchanged);
 		*out += '}';
 	}
-	*out += "]}";
+	const auto& slow = performance.gpu_memory_slow_creates;
+	const uint32_t slow_size = std::min<uint32_t>(slow.size, static_cast<uint32_t>(slow.records.size()));
+	constexpr const char* outcome_names[] = {"cached_reuse", "fast_reuse", "exact_reuse", "covered_reuse", "new_standalone",
+	                                         "new_linked", "new_from_objects", "reclaim_new"};
+	*out += "],\"slow_creates\":{\"capacity\":" + std::to_string(slow.records.size());
+	*out += ",\"size\":" + std::to_string(slow_size);
+	*out += ",\"dropped\":" + std::to_string(slow.dropped);
+	*out += ",\"correlation\":\"temporal_not_causal\",\"records\":[";
+	for (uint32_t i = 0; i < slow_size; ++i)
+	{
+		if (i != 0)
+		{
+			*out += ',';
+		}
+		const auto& record = slow.records[i];
+		const uint32_t outcome_index = static_cast<uint32_t>(record.outcome);
+		const char* type_name = record.type_index < Libs::Graphics::kDebugStatsGpuMemoryTypeCount ? type_names[record.type_index]
+		                                                                                          : "unknown";
+		const char* outcome_name = outcome_index < std::size(outcome_names) ? outcome_names[outcome_index] : "unknown";
+		*out += "{\"seq\":" + std::to_string(record.seq);
+		*out += ",\"duration_us\":" + std::to_string(record.duration_us);
+		*out += ",\"type\":\"";
+		*out += type_name;
+		*out += "\",\"outcome\":\"";
+		*out += outcome_name;
+		*out += "\",\"requested_bytes\":" + std::to_string(record.requested_bytes);
+		*out += ",\"range_count\":" + std::to_string(record.range_count);
+		*out += ",\"backing_lock_wait_ns\":" + std::to_string(record.backing_lock_wait_ns);
+		*out += ",\"registry_lock_wait_ns\":" + std::to_string(record.registry_lock_wait_ns);
+		*out += ",\"classification_ns\":" + std::to_string(record.classification_ns);
+		*out += ",\"overlap_candidates\":" + std::to_string(record.overlap_candidates);
+		*out += ",\"overlap_relation_mask\":" + std::to_string(record.overlap_relation_mask);
+		*out += ",\"reclaimed_objects\":" + std::to_string(record.reclaimed_objects);
+		*out += ",\"create_from_objects\":" + std::string(record.create_from_objects ? "true" : "false");
+		*out += ",\"hash_calls\":" + std::to_string(record.hash_calls);
+		*out += ",\"hash_bytes\":" + std::to_string(record.hash_bytes);
+		*out += ",\"hash_ns\":" + std::to_string(record.hash_ns);
+		*out += ",\"vulkan_allocate_calls\":" + std::to_string(record.vulkan_allocate_calls);
+		*out += ",\"vulkan_allocate_ns\":" + std::to_string(record.vulkan_allocate_ns);
+		*out += ",\"vulkan_bind_calls\":" + std::to_string(record.vulkan_bind_calls);
+		*out += ",\"vulkan_bind_ns\":" + std::to_string(record.vulkan_bind_ns);
+		*out += ",\"create_func_calls\":" + std::to_string(record.create_func_calls);
+		*out += ",\"create_func_ns\":" + std::to_string(record.create_func_ns);
+		*out += ",\"update_func_calls\":" + std::to_string(record.update_func_calls);
+		*out += ",\"update_func_ns\":" + std::to_string(record.update_func_ns);
+		*out += ",\"dirty_register_ns\":" + std::to_string(record.dirty_register_ns);
+		*out += ",\"dirty_prepare_ns\":" + std::to_string(record.dirty_prepare_ns);
+		*out += ",\"dirty_track_ns\":" + std::to_string(record.dirty_track_ns);
+		*out += ",\"upload_calls\":" + std::to_string(record.upload_calls);
+		*out += ",\"upload_bytes\":" + std::to_string(record.upload_bytes);
+		*out += ",\"upload_ns\":" + std::to_string(record.upload_ns);
+		*out += '}';
+	}
+	*out += "]}}";
 }
 
 void AppendSlowFramePerformanceJson(const Libs::Graphics::DebugStatsPerformanceSnapshot& performance, std::string* out)

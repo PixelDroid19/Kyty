@@ -15,6 +15,8 @@ namespace Kyty::Libs::Graphics {
 
 constexpr uint32_t kDebugStatsGpuMemoryTypeCount = 9;
 constexpr uint32_t kDebugStatsSlowFrameCapacity  = 64;
+constexpr uint32_t kDebugStatsGpuMemorySlowCreateCapacity = 64;
+constexpr uint64_t kDebugStatsGpuMemorySlowCreateThresholdNs = 5'000'000;
 
 enum class DebugStatsGpuMemoryCreateOutcome
 {
@@ -26,6 +28,89 @@ enum class DebugStatsGpuMemoryCreateOutcome
 	NewLinked,
 	NewFromObjects,
 	ReclaimNew
+};
+
+// Bounded host-only diagnostics for one CreateObject operation. No guest
+// addresses or object identifiers are retained.
+struct DebugStatsGpuMemorySlowCreateRecord
+{
+	uint64_t seq                      = 0;
+	uint64_t duration_us              = 0;
+	uint32_t type_index               = 0;
+	DebugStatsGpuMemoryCreateOutcome outcome = DebugStatsGpuMemoryCreateOutcome::FastReuse;
+	uint64_t requested_bytes          = 0;
+	uint32_t range_count              = 0;
+	uint64_t backing_lock_wait_ns     = 0;
+	uint64_t registry_lock_wait_ns    = 0;
+	uint64_t classification_ns        = 0;
+	uint32_t overlap_candidates       = 0;
+	uint32_t overlap_relation_mask    = 0;
+	uint32_t reclaimed_objects        = 0;
+	bool     create_from_objects      = false;
+	uint64_t hash_calls               = 0;
+	uint64_t hash_bytes               = 0;
+	uint64_t hash_ns                  = 0;
+	uint64_t vulkan_allocate_calls    = 0;
+	uint64_t vulkan_allocate_ns       = 0;
+	uint64_t vulkan_bind_calls        = 0;
+	uint64_t vulkan_bind_ns           = 0;
+	uint64_t create_func_calls        = 0;
+	uint64_t create_func_ns           = 0;
+	uint64_t update_func_calls        = 0;
+	uint64_t update_func_ns           = 0;
+	uint64_t dirty_register_ns        = 0;
+	uint64_t dirty_prepare_ns         = 0;
+	uint64_t dirty_track_ns           = 0;
+	uint64_t upload_calls             = 0;
+	uint64_t upload_bytes             = 0;
+	uint64_t upload_ns                = 0;
+};
+
+struct DebugStatsGpuMemorySlowCreateSnapshot
+{
+	uint32_t capacity = kDebugStatsGpuMemorySlowCreateCapacity;
+	uint32_t size     = 0;
+	uint64_t dropped  = 0;
+	std::array<DebugStatsGpuMemorySlowCreateRecord, kDebugStatsGpuMemorySlowCreateCapacity> records {};
+};
+
+enum class DebugStatsGpuMemoryCreatePhase
+{
+	BackingLockWait,
+	RegistryLockWait,
+	Classification,
+	Hash,
+	VulkanAllocate,
+	VulkanBind,
+	CreateFunc,
+	UpdateFunc,
+	DirtyRegister,
+	DirtyPrepare,
+	DirtyTrack,
+	Upload
+};
+
+class DebugStatsGpuMemoryCreateTrace final
+{
+public:
+	DebugStatsGpuMemoryCreateTrace(uint32_t type_index, uint64_t requested_bytes, uint32_t range_count);
+	~DebugStatsGpuMemoryCreateTrace();
+
+	KYTY_CLASS_NO_COPY(DebugStatsGpuMemoryCreateTrace);
+
+	void AddPhase(DebugStatsGpuMemoryCreatePhase phase, uint64_t elapsed_ns, uint64_t bytes = 0);
+	void SetClassification(uint32_t candidates, uint32_t relation_mask, uint32_t reclaimed, bool create_from_objects);
+	void Complete(DebugStatsGpuMemoryCreateOutcome outcome);
+
+	static void AddCurrentPhase(DebugStatsGpuMemoryCreatePhase phase, uint64_t elapsed_ns, uint64_t bytes = 0);
+
+private:
+	DebugStatsGpuMemorySlowCreateRecord* m_previous = nullptr;
+	DebugStatsGpuMemorySlowCreateRecord  m_record {};
+	std::chrono::steady_clock::time_point m_start;
+	uint32_t                             m_type_index = 0;
+	DebugStatsGpuMemoryCreateOutcome     m_outcome    = DebugStatsGpuMemoryCreateOutcome::FastReuse;
+	bool                                 m_completed  = false;
 };
 
 struct DebugStatsGpuMemoryTypeSnapshot
@@ -217,6 +302,7 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t gpu_memory_create_ns               = 0;
 	uint64_t gpu_memory_create_max_ns           = 0;
 	std::array<DebugStatsGpuMemoryTypeSnapshot, kDebugStatsGpuMemoryTypeCount> gpu_memory_types {};
+	DebugStatsGpuMemorySlowCreateSnapshot gpu_memory_slow_creates {};
 	uint64_t live_objects          = 0;
 	double   fps                   = 0.0;
 	double   frame_time_ms         = 0.0;
@@ -274,7 +360,8 @@ void DebugStatsRecordSpirvSource(uint64_t elapsed_ns);
 void DebugStatsRecordSpirvCompile(uint64_t elapsed_ns);
 void DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind kind, uint64_t elapsed_ns);
 void DebugStatsRecordShaderTranslationCache(bool hit, bool evicted);
-void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCreateOutcome outcome, uint64_t elapsed_ns);
+void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCreateOutcome outcome, uint64_t elapsed_ns,
+	                                 const DebugStatsGpuMemorySlowCreateRecord* detail = nullptr);
 void DebugStatsRecordGpuMemoryFree(uint32_t type_index);
 void DebugStatsRecordGpuMemoryWriteBack(uint32_t type_index, uint64_t bytes, uint64_t elapsed_ns);
 void DebugStatsRecordGpuMemoryHash(uint32_t type_index, uint64_t bytes, uint64_t elapsed_ns);

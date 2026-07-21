@@ -2,6 +2,7 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+#include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Sys/SysProcess.h"
 
 #include <algorithm>
@@ -184,6 +185,19 @@ struct GpuMemoryTypeMetric
 };
 
 std::array<GpuMemoryTypeMetric, kDebugStatsGpuMemoryTypeCount> g_gpu_memory_types {};
+
+struct GpuMemorySlowCreateRing
+{
+	std::array<DebugStatsGpuMemorySlowCreateRecord, kDebugStatsGpuMemorySlowCreateCapacity> records {};
+	uint32_t head     = 0;
+	uint32_t size     = 0;
+	uint64_t dropped  = 0;
+	uint64_t next_seq = 1;
+};
+
+GpuMemorySlowCreateRing g_gpu_memory_slow_creates;
+std::mutex              g_gpu_memory_slow_create_mutex;
+thread_local DebugStatsGpuMemorySlowCreateRecord* g_current_gpu_memory_create = nullptr;
 
 std::atomic<uint32_t>                                  g_present_src_w {0};
 std::atomic<uint32_t>                                  g_present_src_h {0};
@@ -460,7 +474,97 @@ uint64_t PercentileUs(const FrameHistogram& histogram, uint64_t samples, uint64_
 	return maximum_us;
 }
 
+void AddGpuMemoryCreatePhase(DebugStatsGpuMemorySlowCreateRecord* record, DebugStatsGpuMemoryCreatePhase phase,
+	                         uint64_t elapsed_ns, uint64_t bytes)
+{
+	if (record == nullptr)
+	{
+		return;
+	}
+	switch (phase)
+	{
+		case DebugStatsGpuMemoryCreatePhase::BackingLockWait: record->backing_lock_wait_ns += elapsed_ns; break;
+		case DebugStatsGpuMemoryCreatePhase::RegistryLockWait: record->registry_lock_wait_ns += elapsed_ns; break;
+		case DebugStatsGpuMemoryCreatePhase::Classification: record->classification_ns += elapsed_ns; break;
+		case DebugStatsGpuMemoryCreatePhase::Hash:
+			record->hash_calls++;
+			record->hash_bytes += bytes;
+			record->hash_ns += elapsed_ns;
+			break;
+		case DebugStatsGpuMemoryCreatePhase::VulkanAllocate:
+			record->vulkan_allocate_calls++;
+			record->vulkan_allocate_ns += elapsed_ns;
+			break;
+		case DebugStatsGpuMemoryCreatePhase::VulkanBind:
+			record->vulkan_bind_calls++;
+			record->vulkan_bind_ns += elapsed_ns;
+			break;
+		case DebugStatsGpuMemoryCreatePhase::CreateFunc:
+			record->create_func_calls++;
+			record->create_func_ns += elapsed_ns;
+			break;
+		case DebugStatsGpuMemoryCreatePhase::UpdateFunc:
+			record->update_func_calls++;
+			record->update_func_ns += elapsed_ns;
+			break;
+		case DebugStatsGpuMemoryCreatePhase::DirtyRegister: record->dirty_register_ns += elapsed_ns; break;
+		case DebugStatsGpuMemoryCreatePhase::DirtyPrepare: record->dirty_prepare_ns += elapsed_ns; break;
+		case DebugStatsGpuMemoryCreatePhase::DirtyTrack: record->dirty_track_ns += elapsed_ns; break;
+		case DebugStatsGpuMemoryCreatePhase::Upload:
+			record->upload_calls++;
+			record->upload_bytes += bytes;
+			record->upload_ns += elapsed_ns;
+			break;
+	}
+}
+
 } // namespace
+
+DebugStatsGpuMemoryCreateTrace::DebugStatsGpuMemoryCreateTrace(uint32_t type_index, uint64_t requested_bytes,
+	                                                           uint32_t range_count)
+	: m_previous(g_current_gpu_memory_create), m_start(std::chrono::steady_clock::now()), m_type_index(type_index)
+{
+	m_record.requested_bytes = requested_bytes;
+	m_record.range_count     = range_count;
+	g_current_gpu_memory_create = &m_record;
+}
+
+DebugStatsGpuMemoryCreateTrace::~DebugStatsGpuMemoryCreateTrace()
+{
+	g_current_gpu_memory_create = m_previous;
+	if (m_completed)
+	{
+		const auto elapsed =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
+		DebugStatsRecordGpuMemoryCreate(m_type_index, m_outcome, static_cast<uint64_t>(elapsed), &m_record);
+	}
+}
+
+void DebugStatsGpuMemoryCreateTrace::AddPhase(DebugStatsGpuMemoryCreatePhase phase, uint64_t elapsed_ns, uint64_t bytes)
+{
+	AddGpuMemoryCreatePhase(&m_record, phase, elapsed_ns, bytes);
+}
+
+void DebugStatsGpuMemoryCreateTrace::SetClassification(uint32_t candidates, uint32_t relation_mask, uint32_t reclaimed,
+	                                                   bool create_from_objects)
+{
+	m_record.overlap_candidates    = candidates;
+	m_record.overlap_relation_mask = relation_mask;
+	m_record.reclaimed_objects     = reclaimed;
+	m_record.create_from_objects   = create_from_objects;
+}
+
+void DebugStatsGpuMemoryCreateTrace::Complete(DebugStatsGpuMemoryCreateOutcome outcome)
+{
+	EXIT_IF(m_completed);
+	m_outcome   = outcome;
+	m_completed = true;
+}
+
+void DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase phase, uint64_t elapsed_ns, uint64_t bytes)
+{
+	AddGpuMemoryCreatePhase(g_current_gpu_memory_create, phase, elapsed_ns, bytes);
+}
 
 void DebugStatsInit()
 {
@@ -592,6 +696,10 @@ void DebugStatsInit()
 		type.hash_tracked_unchanged.store(0, std::memory_order_relaxed);
 		type.hash_fallback_changed.store(0, std::memory_order_relaxed);
 		type.hash_fallback_unchanged.store(0, std::memory_order_relaxed);
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_gpu_memory_slow_create_mutex);
+		g_gpu_memory_slow_creates = {};
 	}
 	g_last_fps.store(0.0, std::memory_order_relaxed);
 	g_last_frame_ms.store(0.0, std::memory_order_relaxed);
@@ -744,6 +852,7 @@ void DebugStatsRecordDetile(uint64_t bytes, uint64_t elapsed_ns)
 void DebugStatsRecordUpload(uint64_t bytes, uint64_t elapsed_ns)
 {
 	RecordWork(&g_upload_calls, &g_upload_bytes, &g_upload_ns, &g_upload_max_ns, bytes, elapsed_ns);
+	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::Upload, elapsed_ns, bytes);
 	SlowTotalsWriteGuard totals_write;
 	g_slow_frame_totals.upload_calls.fetch_add(1, std::memory_order_relaxed);
 	g_slow_frame_totals.upload_bytes.fetch_add(bytes, std::memory_order_relaxed);
@@ -838,7 +947,8 @@ void DebugStatsRecordShaderTranslationCache(bool hit, bool evicted)
 	}
 }
 
-void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCreateOutcome outcome, uint64_t elapsed_ns)
+void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCreateOutcome outcome, uint64_t elapsed_ns,
+	                                 const DebugStatsGpuMemorySlowCreateRecord* detail)
 {
 	if (type_index >= kDebugStatsGpuMemoryTypeCount)
 	{
@@ -874,6 +984,29 @@ void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCre
 			type.reclaim_new.fetch_add(1, std::memory_order_relaxed);
 			type.live.fetch_add(1, std::memory_order_relaxed);
 			break;
+	}
+
+	if (detail != nullptr && elapsed_ns > kDebugStatsGpuMemorySlowCreateThresholdNs)
+	{
+		std::lock_guard<std::mutex> lock(g_gpu_memory_slow_create_mutex);
+		auto record       = *detail;
+		record.seq        = g_gpu_memory_slow_creates.next_seq++;
+		record.duration_us = elapsed_ns / 1000u + (elapsed_ns % 1000u != 0u ? 1u : 0u);
+		record.type_index = type_index;
+		record.outcome    = outcome;
+		const uint32_t index =
+		    (g_gpu_memory_slow_creates.head + g_gpu_memory_slow_creates.size) % kDebugStatsGpuMemorySlowCreateCapacity;
+		if (g_gpu_memory_slow_creates.size == kDebugStatsGpuMemorySlowCreateCapacity)
+		{
+			g_gpu_memory_slow_creates.records[g_gpu_memory_slow_creates.head] = record;
+			g_gpu_memory_slow_creates.head =
+			    (g_gpu_memory_slow_creates.head + 1u) % kDebugStatsGpuMemorySlowCreateCapacity;
+			g_gpu_memory_slow_creates.dropped++;
+		} else
+		{
+			g_gpu_memory_slow_creates.records[index] = record;
+			g_gpu_memory_slow_creates.size++;
+		}
 	}
 }
 
@@ -1198,6 +1331,24 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 		dst.hash_tracked_unchanged  = take_window(src.hash_tracked_unchanged);
 		dst.hash_fallback_changed   = take_window(src.hash_fallback_changed);
 		dst.hash_fallback_unchanged = take_window(src.hash_fallback_unchanged);
+	}
+	{
+		std::lock_guard<std::mutex> slow_create_lock(g_gpu_memory_slow_create_mutex);
+		auto& out     = snapshot.gpu_memory_slow_creates;
+		out.capacity  = kDebugStatsGpuMemorySlowCreateCapacity;
+		out.size      = g_gpu_memory_slow_creates.size;
+		out.dropped   = g_gpu_memory_slow_creates.dropped;
+		for (uint32_t i = 0; i < out.size; ++i)
+		{
+			out.records[i] = g_gpu_memory_slow_creates.records[
+			    (g_gpu_memory_slow_creates.head + i) % kDebugStatsGpuMemorySlowCreateCapacity];
+		}
+		if (reset)
+		{
+			g_gpu_memory_slow_creates.head    = 0;
+			g_gpu_memory_slow_creates.size    = 0;
+			g_gpu_memory_slow_creates.dropped = 0;
+		}
 	}
 
 	snapshot.live_objects  = g_live_objects.load(std::memory_order_relaxed);

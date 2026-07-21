@@ -146,6 +146,16 @@ to exactly one of `fast_reuse`, `exact_reuse`, `new_standalone`, `new_linked`,
 measurement window. The existing top-level `creates` remains the number of
 new logical objects, not total `CreateObject` calls.
 
+`performance.gpu_memory.slow_creates` retains at most 64 `CreateObject`
+operations strictly slower than 5 ms. Records classify type, outcome, requested
+bytes, range count, alias work, lock waits, hashing, dirty tracking, Vulkan
+allocation/binding, object callbacks, and uploads without retaining guest
+addresses or object identifiers. `create_func_ns` and `update_func_ns` are
+**inclusive**: their Vulkan and upload subphases are reported separately for
+attribution but must not be added to the parent callback time. Likewise,
+`dirty_track_ns` includes `dirty_register_ns` and `dirty_prepare_ns`. These
+records are diagnostic correlation only and never control guest behavior.
+
 ### `status.phase`
 
 | Phase | Meaning |
