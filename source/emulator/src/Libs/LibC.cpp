@@ -86,6 +86,15 @@ static KYTY_SYSV_ABI void init_env()
 	PRINT_NAME();
 }
 
+// The C++ runtime uses _Cnd_t as a pointer to the kernel condition object.
+// _Cnd_init receives the address of that handle and owns its allocation; use
+// the same condition implementation as the public pthread ABI so both paths
+// share lifetime and error handling.
+static KYTY_SYSV_ABI int c_cnd_init(LibKernel::PthreadCond* cond)
+{
+	return LibKernel::PthreadCondInit(cond, nullptr, nullptr);
+}
+
 enum class AllocationOwner
 {
 	Host,
@@ -2223,6 +2232,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("2Btkg8k24Zg", LibC::c_aligned_alloc);
 	LIB_FUNC("cVSk9y8URbc", LibC::c_posix_memalign);
 	LIB_FUNC("KuOuD58hqn4", LibcInternal::LibcMallocStatsFast);
+	LIB_FUNC("SreZybSRWpU", LibC::c_cnd_init);
 	LIB_FUNC("7Xl257M4VNI", LibC::c_pthread_equal);
 	LIB_FUNC("mqQMh1zPPT8", LibC::c_fstat);
 	LIB_FUNC("Q3VBxCXhUHs", LibC::c_memcpy);
