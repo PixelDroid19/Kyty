@@ -53,6 +53,7 @@ using pthread_key_destructor_func_t = KYTY_SYSV_ABI void (*)(void*);
 
 void PthreadInitSelfForMainThread();
 void PthreadDeleteStaticObjects(Loader::Program* program);
+bool PthreadQueryStack(const void* addr, void** start, void** end);
 
 int KYTY_SYSV_ABI PthreadMutexattrInit(PthreadMutexattr* attr);
 int KYTY_SYSV_ABI PthreadMutexattrDestroy(PthreadMutexattr* attr);
@@ -216,6 +217,7 @@ int KYTY_SYSV_ABI   pthread_join(LibKernel::Pthread thread, void** value);
 int KYTY_SYSV_ABI   pthread_detach(LibKernel::Pthread thread);
 void KYTY_SYSV_ABI  pthread_exit(void* value);
 void KYTY_SYSV_ABI  pthread_yield();
+int KYTY_SYSV_ABI   sched_yield();
 int KYTY_SYSV_ABI   pthread_cond_init(LibKernel::PthreadCond* cond, const LibKernel::PthreadCondattr* attr);
 int KYTY_SYSV_ABI   pthread_cond_destroy(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_signal(LibKernel::PthreadCond* cond);

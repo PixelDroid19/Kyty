@@ -1625,6 +1625,12 @@ TEST(EmulatorGraphicsState, Gen5AgcSizeHelpersAndTrinityMode)
 // Missing Gen5 AGC / AgcDriver exports that blocked Astro after Ampr/VideoOut.
 TEST(EmulatorGraphicsState, ResolvesGen5AgcAndDriverExports)
 {
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libGraphicsDriver_1", &symbols));
 
@@ -1648,6 +1654,10 @@ TEST(EmulatorGraphicsState, ResolvesGen5AgcAndDriverExports)
 	EXPECT_TRUE(resolve(u"AhGvpITrf4M", u"Graphics5Driver", u"Graphics5Driver"));
 	EXPECT_TRUE(resolve(u"gSRnr79F8tQ", u"Graphics5Driver", u"Graphics5Driver"));
 	EXPECT_TRUE(resolve(u"w2rJhmD+dsE", u"Graphics5Driver", u"Graphics5Driver"));
+	EXPECT_TRUE(resolve(u"XlNp7jzGiPo", u"Graphics5Driver", u"Graphics5Driver"));
+	EXPECT_TRUE(resolve(u"MM4IZSEYytQ", u"Graphics5Driver", u"Graphics5Driver"));
+	EXPECT_EQ(Gen5Driver::GraphicsDriverSetTFRing(reinterpret_cast<const volatile void*>(0x10000), 0x3fff8), OK);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverSetHsOffchipParam(0, 0x1ff, 0), OK);
 }
 
 // WaitFlipDone body observed post-Play: handle=0, index=3 while Open() left

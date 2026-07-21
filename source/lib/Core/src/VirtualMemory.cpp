@@ -957,6 +957,21 @@ bool MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_o
 	return sys_virtual_map_shared_fixed(backing->handle, address, backing_offset, size, mode);
 }
 
+bool MapSharedFixedReplacingOwnedReservation(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
+                                             Mode mode)
+{
+	if (address == 0 || !shared_range_is_valid(backing, backing_offset, size))
+	{
+		return false;
+	}
+	return sys_virtual_map_shared_fixed_replacing_owned_reservation(backing->handle, address, backing_offset, size, mode);
+}
+
+bool SupportsSharedFixedOwnedReservationReplacement()
+{
+	return sys_virtual_supports_shared_fixed_owned_reservation_replacement();
+}
+
 uint64_t MapSharedFixedOrRelocated(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                                    uint64_t alignment)
 {

@@ -85,6 +85,9 @@ struct PthreadPrivate
 	std::atomic_bool     detached;
 	std::atomic_bool     almost_done;
 	std::atomic_bool     free;
+	std::atomic_int      guest_priority {700};
+	uint64_t             guest_stack_base = 0;
+	uint64_t             guest_stack_size = 0;
 };
 
 struct PthreadRwlockPrivate
@@ -188,6 +191,7 @@ public:
 
 	void FreeDetachedThreads();
 	void GetDiagnostics(PthreadThreadDiagnostics* out);
+	bool QueryStack(uint64_t addr, uint64_t* start, uint64_t* end);
 
 private:
 	Vector<Pthread> m_threads;
@@ -603,6 +607,49 @@ void PthreadPool::GetDiagnostics(PthreadThreadDiagnostics* out)
 		snapshot.almost_done = thread->almost_done.load();
 		snapshot.free = thread->free.load();
 	}
+}
+
+bool PthreadPool::QueryStack(uint64_t addr, uint64_t* start, uint64_t* end)
+{
+	EXIT_IF(start == nullptr || end == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+	for (auto* thread: m_threads)
+	{
+		const uint64_t base = thread->guest_stack_base;
+		const uint64_t size = thread->guest_stack_size;
+		if (!thread->free.load(std::memory_order_acquire) && size != 0 && addr >= base && addr - base < size)
+		{
+			*start = base;
+			*end   = base + size;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool PthreadQueryStack(const void* addr, void** start, void** end)
+{
+	if (g_pthread_context == nullptr || addr == nullptr)
+	{
+		return false;
+	}
+
+	uint64_t stack_start = 0;
+	uint64_t stack_end   = 0;
+	if (!g_pthread_context->GetPthreadPool()->QueryStack(reinterpret_cast<uint64_t>(addr), &stack_start, &stack_end))
+	{
+		return false;
+	}
+	if (start != nullptr)
+	{
+		*start = reinterpret_cast<void*>(stack_start);
+	}
+	if (end != nullptr)
+	{
+		*end = reinterpret_cast<void*>(stack_end);
+	}
+	return true;
 }
 
 bool PthreadKeys::Create(int* key, pthread_key_destructor_func_t destructor)
@@ -2613,6 +2660,9 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 		(*thread)->detached    = (*attr)->detached;
 		(*thread)->started     = false;
 		(*thread)->unique_id   = -1;
+		(*thread)->guest_priority.store(700, std::memory_order_relaxed);
+		(*thread)->guest_stack_base = 0;
+		(*thread)->guest_stack_size = 0;
 
 		// Host pthread_create may memset/setup a guest-provided stack. Guests
 		// often demote a guard page with mprotect(prot=0) first; leaving that
@@ -2624,6 +2674,8 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 		size_t stack_size = 0;
 		if (pthread_attr_getstack(&(*attr)->p, &stack_addr, &stack_size) == 0 && stack_addr != nullptr && stack_size != 0)
 		{
+			(*thread)->guest_stack_base = reinterpret_cast<uint64_t>(stack_addr);
+			(*thread)->guest_stack_size = stack_size;
 			Core::VirtualMemory::Mode old_mode {};
 			(void)Core::VirtualMemory::Protect(reinterpret_cast<uint64_t>(stack_addr), stack_size,
 			                                   Core::VirtualMemory::Mode::ReadWrite, &old_mode);
@@ -2819,30 +2871,11 @@ int KYTY_SYSV_ABI PthreadGetprio(Pthread thread, int* prio)
 
 	EXIT_NOT_IMPLEMENTED(prio == nullptr);
 
-	sched_param param {};
-	int         pol = 0;
+	*prio = thread->guest_priority.load(std::memory_order_relaxed);
 
-	int result = pthread_getschedparam(thread->p, &pol, &param);
+	printf("\t PthreadGetprio: %d, %d\n", thread->unique_id, *prio);
 
-	if (result == 0)
-	{
-		if (param.sched_priority <= -2)
-		{
-			*prio = 767;
-		} else if (param.sched_priority >= +2)
-		{
-			*prio = 256;
-		} else
-		{
-			*prio = 700;
-		}
-
-		printf("\t PthreadGetprio: %d, %d\n", thread->unique_id, *prio);
-
-		return OK;
-	}
-
-	return KERNEL_ERROR_EINVAL;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadSetprio(Pthread thread, int prio)
@@ -2854,35 +2887,11 @@ int KYTY_SYSV_ABI PthreadSetprio(Pthread thread, int prio)
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	sched_param param {};
-	int         pol = 0;
+	thread->guest_priority.store(prio, std::memory_order_relaxed);
 
-	int result = pthread_getschedparam(thread->p, &pol, &param);
+	printf("\t PthreadSetprio: %d, %d\n", thread->unique_id, prio);
 
-	if (result == 0)
-	{
-		if (prio <= 478)
-		{
-			param.sched_priority = +2;
-		} else if (prio >= 733)
-		{
-			param.sched_priority = -2;
-		} else
-		{
-			param.sched_priority = 0;
-		}
-
-		result = pthread_setschedparam(thread->p, pol, &param);
-
-		if (result == 0)
-		{
-			printf("\t PthreadSetprio: %d, %d\n", thread->unique_id, prio);
-
-			return OK;
-		}
-	}
-
-	return KERNEL_ERROR_EINVAL;
+	return OK;
 }
 
 void KYTY_SYSV_ABI PthreadTestcancel()
@@ -3260,6 +3269,13 @@ void KYTY_SYSV_ABI pthread_yield()
 	PRINT_NAME();
 
 	LibKernel::PthreadYield();
+}
+
+int KYTY_SYSV_ABI sched_yield()
+{
+	PRINT_NAME();
+	LibKernel::PthreadYield();
+	return 0;
 }
 
 int KYTY_SYSV_ABI pthread_cond_init(LibKernel::PthreadCond* cond, const LibKernel::PthreadCondattr* attr)

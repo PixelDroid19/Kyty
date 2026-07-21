@@ -67,7 +67,9 @@ int KYTY_SYSV_ABI VoiceQoSInit(void* mem_block, uint32_t mem_size, int32_t app_t
 namespace Ajm {
 
 int KYTY_SYSV_ABI AjmInitialize(int64_t reserved, uint32_t* context);
+int KYTY_SYSV_ABI AjmFinalize(uint32_t context);
 int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t reserved);
+int KYTY_SYSV_ABI AjmModuleUnregister(uint32_t context, uint32_t codec);
 
 } // namespace Ajm
 

@@ -253,29 +253,8 @@ static KYTY_SYSV_ABI void* c_memalign(size_t alignment, size_t size)
 		return nullptr;
 	}
 
-	if (LibKernel::ApplicationHeap::IsInitialized())
-	{
-		constexpr size_t kGuestMallocAlignment = 16;
-		if (alignment > kGuestMallocAlignment)
-		{
-			EXIT_NOT_IMPLEMENTED(true);
-		}
-
-		void* ptr = allocate_with_owner(size);
-		if (ptr == nullptr)
-		{
-			return nullptr;
-		}
-		if ((reinterpret_cast<uintptr_t>(ptr) & (alignment - 1)) != 0)
-		{
-			(void)free_by_owner(ptr);
-			return nullptr;
-		}
-		return ptr;
-	}
-
 	const size_t total = size + alignment - 1;
-	void*        base  = ::malloc(total);
+	void*        base  = allocate_with_owner(total);
 	if (base == nullptr)
 	{
 		return nullptr;
@@ -285,7 +264,7 @@ static KYTY_SYSV_ABI void* c_memalign(size_t alignment, size_t size)
 	const auto aligned = (raw + alignment - 1) & ~(static_cast<uintptr_t>(alignment) - 1);
 	if (!register_aligned_allocation(reinterpret_cast<void*>(aligned), AlignedAllocation {base, size, alignment}))
 	{
-		::free(base);
+		(void)free_by_owner(base);
 		return nullptr;
 	}
 	return reinterpret_cast<void*>(aligned);
@@ -317,7 +296,10 @@ static KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 		}
 
 		::memcpy(replacement, p, (allocation.size < size ? allocation.size : size));
-		::free(allocation.base);
+		if (!free_by_owner(allocation.base))
+		{
+			EXIT("ApplicationHeap free failed during aligned realloc\n");
+		}
 		return replacement;
 	}
 
@@ -364,7 +346,10 @@ static KYTY_SYSV_ABI void c_free(void* p)
 	AlignedAllocation allocation {};
 	if (claim_aligned_allocation(p, &allocation))
 	{
-		::free(allocation.base);
+		if (!free_by_owner(allocation.base))
+		{
+			EXIT("ApplicationHeap aligned free failed\n");
+		}
 		return;
 	}
 	if (!free_by_owner(p))

@@ -84,6 +84,22 @@ void EnsureKernelProcessSubsystems()
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 		Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
+	static bool pthread_initialized = false;
+	if (!pthread_initialized)
+	{
+		LibKernel::PthreadSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		pthread_initialized = true;
+	}
+}
+
+void* KYTY_SYSV_ABI HoldPthreadUntilReleased(void* arg)
+{
+	auto* release = static_cast<std::atomic_bool*>(arg);
+	while (!release->load(std::memory_order_acquire))
+	{
+		std::this_thread::yield();
+	}
+	return nullptr;
 }
 
 } // namespace
@@ -93,6 +109,48 @@ TEST(EmulatorKernelProcess, GuestProcessIdIsStable)
 	const int first = Posix::getpid();
 	EXPECT_GT(first, 0);
 	EXPECT_EQ(Posix::getpid(), first);
+}
+
+TEST(EmulatorKernelProcess, DeleteSemaphoreWakesBlockedWaiter)
+{
+	EnsureKernelProcessSubsystems();
+
+	LibKernel::Semaphore::KernelSema sem = nullptr;
+	ASSERT_EQ(LibKernel::Semaphore::KernelCreateSema(&sem, "delete-wait-test", 1, 0, 1, nullptr), OK);
+	ASSERT_NE(sem, nullptr);
+
+	auto waiter1 = std::async(std::launch::async, [sem] { return LibKernel::Semaphore::KernelWaitSema(sem, 1, nullptr); });
+	auto waiter2 = std::async(std::launch::async, [sem] { return LibKernel::Semaphore::KernelWaitSema(sem, 1, nullptr); });
+	ASSERT_EQ(waiter1.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+	ASSERT_EQ(waiter2.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+	ASSERT_EQ(LibKernel::Semaphore::KernelDeleteSema(sem), OK);
+	ASSERT_EQ(waiter1.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	ASSERT_EQ(waiter2.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(waiter1.get(), LibKernel::KERNEL_ERROR_EACCES);
+	EXPECT_EQ(waiter2.get(), LibKernel::KERNEL_ERROR_EACCES);
+	EXPECT_EQ(LibKernel::Semaphore::KernelWaitSema(sem, 1, nullptr), LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(LibKernel::Semaphore::KernelSignalSema(sem, 1), LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(LibKernel::Semaphore::KernelDeleteSema(sem), LibKernel::KERNEL_ERROR_ESRCH);
+}
+
+TEST(EmulatorKernelProcess, PthreadPriorityRoundTripsGuestValue)
+{
+	EnsureKernelProcessSubsystems();
+
+	std::atomic_bool             release = false;
+	LibKernel::Pthread           thread  = nullptr;
+	ASSERT_EQ(LibKernel::PthreadCreate(&thread, nullptr, HoldPthreadUntilReleased, &release, "priority-test"), OK);
+	ASSERT_NE(thread, nullptr);
+
+	const int set_result = LibKernel::PthreadSetprio(thread, 260);
+	int       priority   = -1;
+	const int get_result = LibKernel::PthreadGetprio(thread, &priority);
+
+	release.store(true, std::memory_order_release);
+	ASSERT_EQ(LibKernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_EQ(set_result, OK);
+	EXPECT_EQ(get_result, OK);
+	EXPECT_EQ(priority, 260);
 }
 
 // Retail non-devkit sceKernelGetGPI (NID 4oXYe9Xmk0Q) returns 0 without GPI state.
@@ -473,6 +531,25 @@ TEST(EmulatorKernelProcess, HostExtensionAliasMapsOdxToOdxb)
 	Core::File::DeleteDirectories(dir);
 }
 
+TEST(EmulatorKernelProcess, OpenLinuxFileReportsTimestampsByDescriptor)
+{
+	const String path = U"/tmp/kyty_open_file_timestamp_test.bin";
+	Core::File::DeleteFile(path);
+
+	Core::File file;
+	ASSERT_TRUE(file.Create(path));
+	file.Write(U"timestamp");
+
+	Core::DateTime access;
+	Core::DateTime write;
+	file.GetLastAccessAndWriteTimeUTC(&access, &write);
+
+	EXPECT_FALSE(access.IsInvalid());
+	EXPECT_FALSE(write.IsInvalid());
+	file.Close();
+	Core::File::DeleteFile(path);
+}
+
 // Astro path builders open /app0/prein/... while package files live under /app0/data/prein/...
 TEST(EmulatorKernelProcess, HostApp0DataSegmentMapsPreinUnderData)
 {
@@ -645,6 +722,7 @@ TEST(EmulatorKernelProcess, ResolvesGen5PthreadSpecificNids)
 	EXPECT_TRUE(resolve(u"+BzXYkqYeLE"));
 	EXPECT_TRUE(resolve(u"eoht7mQOCmo"));
 	EXPECT_TRUE(resolve(u"rVjRvHJ0X6c"));
+	EXPECT_TRUE(resolve(u"yDBwVAolDgg"));
 	EXPECT_TRUE(resolve(u"XD3mDeybCnk"));
 	EXPECT_TRUE(resolve(u"mkgXxsoxWHg"));
 	EXPECT_TRUE(resolve(u"0TyVk4MSLt0"));

@@ -1123,6 +1123,13 @@ int KYTY_SYSV_ABI AjmInitialize(int64_t reserved, uint32_t* context)
 	return OK;
 }
 
+int KYTY_SYSV_ABI AjmFinalize(uint32_t context)
+{
+	PRINT_NAME();
+	printf("\t context = %u\n", context);
+	return OK;
+}
+
 int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t reserved)
 {
 	PRINT_NAME();
@@ -1144,6 +1151,14 @@ int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t re
 		default: EXIT("unknown codec\n");
 	}
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmModuleUnregister(uint32_t context, uint32_t codec)
+{
+	PRINT_NAME();
+	printf("\t context = %u\n", context);
+	printf("\t codec   = %u\n", codec);
 	return OK;
 }
 

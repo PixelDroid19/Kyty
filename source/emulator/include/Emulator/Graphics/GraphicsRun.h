@@ -56,6 +56,16 @@ bool GraphicsDecodeComputeResourceLimits(HW::CsStageRegisters* regs, uint32_t cm
 bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords,
                                                 const uint32_t* next_packet, uint32_t next_packet_dwords);
 
+struct GraphicsAgcReleaseMemControl
+{
+	uint16_t gcr_cntl  = 0;
+	uint8_t  data_sel  = 0;
+	uint8_t  interrupt = 0;
+};
+
+GraphicsAgcReleaseMemControl GraphicsDecodeAgcReleaseMemControl(uint32_t control_dw);
+uint32_t GraphicsAgcReleaseMemCacheAction(uint16_t gcr_cntl);
+
 void     GraphicsRunSubmit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw);
 void     GraphicsRunSubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
                                   int handle, int index, int flip_mode, int64_t flip_arg);

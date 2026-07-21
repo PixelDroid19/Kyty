@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <utility>
 
 #ifdef KYTY_EMU_ENABLED
@@ -95,6 +96,53 @@ Vector<uint32_t> LoaderBuildModuleStartOrder(const Vector<ModuleStartDescriptor>
 		visit(i);
 	}
 	return order;
+}
+
+bool LoaderDecodeEhFrameHeader(const uint8_t* header, size_t header_size, uint64_t header_addr, uint64_t readable_end,
+                               EhFrameInfo* out_info)
+{
+	if (header == nullptr || header_size < 8 || out_info == nullptr || header[0] != 1 || header[1] != 0x1b)
+	{
+		return false;
+	}
+
+	int32_t relative = 0;
+	std::memcpy(&relative, header + 4, sizeof(relative));
+
+	if (header_addr > std::numeric_limits<uint64_t>::max() - 4)
+	{
+		return false;
+	}
+
+	const uint64_t relative_base = header_addr + 4;
+	uint64_t       frame_addr    = 0;
+	if (relative >= 0)
+	{
+		const auto offset = static_cast<uint64_t>(relative);
+		if (relative_base > std::numeric_limits<uint64_t>::max() - offset)
+		{
+			return false;
+		}
+		frame_addr = relative_base + offset;
+	} else
+	{
+		const auto offset = static_cast<uint64_t>(-static_cast<int64_t>(relative));
+		if (relative_base < offset)
+		{
+			return false;
+		}
+		frame_addr = relative_base - offset;
+	}
+
+	if (frame_addr >= readable_end)
+	{
+		return false;
+	}
+
+	out_info->header_addr = header_addr;
+	out_info->frame_addr  = frame_addr;
+	out_info->frame_size  = readable_end - frame_addr;
+	return true;
 }
 
 // Missing-import registry, static StubAllocator, ImportPolicy, and diagnostics
@@ -875,6 +923,24 @@ uint64_t LoaderPrepareThreadTlsImage(uint8_t* tls, uint64_t image_size, uint64_t
 	return modified;
 }
 
+void LoaderInitializeThreadTlsImage(uint8_t* tls, uint64_t image_size, const uint8_t* template_data, uint64_t init_size)
+{
+	EXIT_IF(tls == nullptr && image_size != 0);
+	EXIT_IF(template_data == nullptr && init_size != 0);
+	EXIT_IF(init_size > image_size);
+
+	if (image_size == 0)
+	{
+		return;
+	}
+
+	std::memset(tls, 0, image_size);
+	if (init_size != 0)
+	{
+		std::memcpy(tls, template_data, init_size);
+	}
+}
+
 static bool TlsGuestRead64(uint64_t addr, uint64_t* out, void* /*ctx*/)
 {
 	if (out == nullptr || addr == 0)
@@ -1044,6 +1110,16 @@ void RuntimeLinker::RelocateAll()
 	}
 
 	m_relocated = true;
+}
+
+void RuntimeLinker::RelocateProgram(Program* program)
+{
+	Core::LockGuard lock(m_mutex);
+
+	EXIT_IF(program == nullptr);
+	EXIT_IF(!m_programs.Contains(program));
+
+	Relocate(program);
 }
 
 void RuntimeLinker::UnloadProgram(Program* program)
@@ -1270,30 +1346,6 @@ void RuntimeLinker::Execute()
 
 		Core::mem_guest_thread_enter();
 
-		// Main ET_EXEC images do not go through StartModule. Bootstrap the
-		// application-heap API before CRT so early guest malloc works.
-		//
-		// Do not run DT_INIT / init_array here. Gen5 CRT _start (entry) calls
-		// the DT_INIT (_init) body itself; invoking it from the host as well
-		// re-runs static constructors. That re-links fixed guest registration
-		// tables into self-loops and busy-spins forever (no further HLE).
-		{
-			Core::LockGuard lock(m_mutex);
-			for (auto* program: m_programs)
-			{
-				if (program != nullptr && program->elf != nullptr && !program->elf->IsShared())
-				{
-					if (program->dynamic_info != nullptr)
-					{
-						printf("Main CRT entry=0x%016" PRIx64 " DT_INIT=0x%016" PRIx64 " (host skips pre-entry init; CRT runs it once)\n",
-						       entry, program->base_vaddr + program->dynamic_info->init_vaddr);
-					}
-					Kyty::Libs::LibKernel::ApplicationHeap::EnsureInitialized(program);
-					break;
-				}
-			}
-		}
-
 		run_entry(entry, &p, ProgramExitHandler);
 		Core::mem_guest_thread_leave();
 		// Guest main returned (or long-running titles never reach here). Observation only.
@@ -1374,15 +1426,17 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 			*bind_self = (exporter == program);
 		}
 	}
-	// Guest libc.prx exports malloc/operator new, but its internal mspace can
-	// remain BSS-zero after CRT start when ApplicationHeap registration uses
-	// the legacy pointer-table form (not ApiV2). Prefer the HLE allocator for
+	// Guest libc.prx exports the allocation family, but constructors can reach
+	// those imports before its allocator initialization is complete. Its internal
+	// mspace can also remain BSS-zero when the legacy ApplicationHeap table is used.
+	// Prefer the HLE allocator for these NIDs so constructors do not throw
 	// those NIDs so constructors do not throw bad_alloc → terminate
 	// (DebugRaiseException 0xa0020008). Other exports still win over HLE.
 	const bool prefer_hle_allocator =
 	    hle_record != nullptr &&
 	    (resolve.name == U"gQX+4GDQjpM" || resolve.name == U"2X5agFjKxMc" || resolve.name == U"Y7aJ1uydPMo" ||
-	     resolve.name == U"tIhsqj0qsFE" || resolve.name == U"fJnpuVVBbKk" || resolve.name == U"hdm0YfMa7TQ" ||
+	     resolve.name == U"tIhsqj0qsFE" || resolve.name == U"Ujf3KzMvRmI" || resolve.name == U"2Btkg8k24Zg" ||
+	     resolve.name == U"cVSk9y8URbc" || resolve.name == U"fJnpuVVBbKk" || resolve.name == U"hdm0YfMa7TQ" ||
 	     resolve.name == U"z+P+xCnWLBk" || resolve.name == U"MLWl90SFWNE");
 	const SymbolRecord* record =
 	    prefer_hle_allocator ? hle_record : (export_record != nullptr ? export_record : hle_record);
@@ -1506,6 +1560,120 @@ Vector<LoadedModuleSnapshot> RuntimeLinker::SnapshotLoadedModules()
 		snapshot.Add(std::move(module_snapshot));
 	}
 	return snapshot;
+}
+
+bool RuntimeLinker::TryGetProgramUnwindInfoByAddr(uint64_t vaddr, ProgramUnwindInfo* out_info)
+{
+	if (out_info == nullptr)
+	{
+		return false;
+	}
+
+	Core::LockGuard lock(m_mutex);
+	for (const auto* program: m_programs)
+	{
+		if (program == nullptr || program->elf == nullptr)
+		{
+			continue;
+		}
+
+		const auto* ehdr = program->elf->GetEhdr();
+		const auto* phdr = program->elf->GetPhdr();
+		if (ehdr == nullptr || phdr == nullptr)
+		{
+			continue;
+		}
+
+		bool contains_address = false;
+		for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
+		{
+			if (phdr[i].p_memsz == 0 || (phdr[i].p_type != PT_LOAD && phdr[i].p_type != PT_OS_RELRO) ||
+			    phdr[i].p_vaddr > std::numeric_limits<uint64_t>::max() - program->base_vaddr)
+			{
+				continue;
+			}
+			const uint64_t begin = program->base_vaddr + phdr[i].p_vaddr;
+			if (phdr[i].p_memsz <= std::numeric_limits<uint64_t>::max() - begin && vaddr >= begin && vaddr < begin + phdr[i].p_memsz)
+			{
+				contains_address = true;
+				break;
+			}
+		}
+		if (!contains_address)
+		{
+			continue;
+		}
+
+		for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
+		{
+			if (phdr[i].p_type != PT_GNU_EH_FRAME || phdr[i].p_memsz < 8 ||
+			    phdr[i].p_vaddr > std::numeric_limits<uint64_t>::max() - program->base_vaddr)
+			{
+				continue;
+			}
+
+			const uint64_t header_addr = program->base_vaddr + phdr[i].p_vaddr;
+			bool header_is_mapped = false;
+			for (Elf64_Half j = 0; j < ehdr->e_phnum; j++)
+			{
+				if (phdr[j].p_type != PT_LOAD || (phdr[j].p_flags & PF_R) == 0 || phdr[j].p_memsz < 8 ||
+				    phdr[j].p_vaddr > std::numeric_limits<uint64_t>::max() - program->base_vaddr)
+				{
+					continue;
+				}
+				const uint64_t begin = program->base_vaddr + phdr[j].p_vaddr;
+				if (phdr[j].p_memsz <= std::numeric_limits<uint64_t>::max() - begin && header_addr >= begin &&
+				    header_addr <= begin + phdr[j].p_memsz - 8)
+				{
+					header_is_mapped = true;
+					break;
+				}
+			}
+			if (!header_is_mapped || program->base_size > std::numeric_limits<uint64_t>::max() - program->base_vaddr)
+			{
+				continue;
+			}
+
+			EhFrameInfo decoded {};
+			if (!LoaderDecodeEhFrameHeader(reinterpret_cast<const uint8_t*>(header_addr), 8, header_addr,
+			                               program->base_vaddr + program->base_size, &decoded))
+			{
+				continue;
+			}
+
+			bool frame_is_mapped = false;
+			for (Elf64_Half j = 0; j < ehdr->e_phnum; j++)
+			{
+				if (phdr[j].p_type != PT_LOAD || (phdr[j].p_flags & PF_R) == 0 || phdr[j].p_memsz == 0 ||
+				    phdr[j].p_vaddr > std::numeric_limits<uint64_t>::max() - program->base_vaddr)
+				{
+					continue;
+				}
+				const uint64_t begin = program->base_vaddr + phdr[j].p_vaddr;
+				if (phdr[j].p_memsz <= std::numeric_limits<uint64_t>::max() - begin && decoded.frame_addr >= begin &&
+				    decoded.frame_addr < begin + phdr[j].p_memsz)
+				{
+					decoded.frame_size = begin + phdr[j].p_memsz - decoded.frame_addr;
+					frame_is_mapped    = true;
+					break;
+				}
+			}
+			if (!frame_is_mapped)
+			{
+				continue;
+			}
+
+			out_info->file_name            = program->file_name.FilenameWithoutDirectory();
+			out_info->eh_frame_header_addr = decoded.header_addr;
+			out_info->eh_frame_addr        = decoded.frame_addr;
+			out_info->eh_frame_size        = decoded.frame_size;
+			out_info->image_addr           = program->base_vaddr;
+			out_info->image_size           = program->base_size;
+			return true;
+		}
+	}
+
+	return false;
 }
 
 Program* RuntimeLinker::AttachSyntheticExportModule(const String& file_name)
@@ -1723,7 +1891,8 @@ uint8_t* RuntimeLinker::TlsGetAddr(Program* program)
 		// otherwise those reads land in unallocated memory (observed as 0xAAAA garbage).
 		constexpr uint64_t tcb_size = 0x1000;
 		tls                         = new uint8_t[program->tls.image_size + tcb_size];
-		std::memcpy(tls, reinterpret_cast<void*>(program->tls.image_vaddr), program->tls.image_size);
+		LoaderInitializeThreadTlsImage(tls, program->tls.image_size, reinterpret_cast<const uint8_t*>(program->tls.image_vaddr),
+		                               program->tls.init_size);
 		LoaderPrepareThreadTlsImage(tls, program->tls.image_size, program->tls.image_vaddr, program->base_vaddr, program->base_size,
 		                            TlsGuestRead64, nullptr);
 		auto* tcb = tls + program->tls.image_size;
@@ -1908,10 +2077,12 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 
 			program->tls.image_vaddr = phdr[i].p_vaddr + program->base_vaddr;
 			program->tls.image_size  = get_aligned_size(phdr + i);
+			program->tls.init_size   = std::min(phdr[i].p_filesz, program->tls.image_size);
 			program->tls.static_offset = program->tls.image_size;
 			program->tls.module_id     = g_next_tls_module_id++;
 
 			printf("tls addr = 0x%016" PRIx64 "\n", program->tls.image_vaddr);
+			printf("tls init   = %" PRIu64 "\n", program->tls.init_size);
 			printf("tls size   = %" PRIu64 "\n", program->tls.image_size);
 			printf("tls module = %" PRIu64 "\n", program->tls.module_id);
 		}

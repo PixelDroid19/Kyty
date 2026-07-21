@@ -670,7 +670,6 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 		// printf("\ttimedout\n");
 		return KERNEL_ERROR_ETIMEDOUT;
 	}
-
 	// printf("\treceived %u events\n", *out);
 
 	return OK;

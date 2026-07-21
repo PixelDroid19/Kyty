@@ -113,6 +113,97 @@ TEST(EmulatorKernelMemory, DirectMemorySizeTracksGuestGeneration)
 	Config::SetNextGen(false);
 }
 
+TEST(EmulatorKernelMemory, VirtualQueryReportsReservedRangeAsUncommitted)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t kSize = 0x10000;
+	void*            address = nullptr;
+	ASSERT_EQ(KernelReserveVirtualRange(&address, kSize, 0, kSize), OK);
+	ASSERT_NE(address, nullptr);
+
+	VirtualQueryInfo info {};
+	ASSERT_EQ(KernelVirtualQuery(static_cast<uint8_t*>(address) + 0x4000, 0, &info, sizeof(info)), OK);
+	EXPECT_EQ(info.start, reinterpret_cast<uintptr_t>(address));
+	EXPECT_EQ(info.end, reinterpret_cast<uintptr_t>(address) + kSize);
+	EXPECT_EQ(info.protection, 0);
+	EXPECT_EQ(info.is_direct, 0u);
+	EXPECT_EQ(info.is_flexible, 0u);
+	EXPECT_EQ(info.is_committed, 0u);
+
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(address), kSize), OK);
+}
+
+TEST(EmulatorKernelMemory, FixedDirectMapCommitsOwnedReservation)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr size_t kSize = 0x10000;
+	void*            address = nullptr;
+	ASSERT_EQ(KernelReserveVirtualRange(&address, kSize, 0, kSize), OK);
+
+	int64_t physical_address = 0;
+	ASSERT_EQ(KernelAllocateMainDirectMemory(kSize, kSize, 12, &physical_address), OK);
+	ASSERT_EQ(KernelMapDirectMemory(&address, kSize, 0x02, 0x10, physical_address, kSize), OK);
+
+	VirtualQueryInfo info {};
+	ASSERT_EQ(KernelVirtualQuery(address, 0, &info, sizeof(info)), OK);
+	EXPECT_EQ(info.start, reinterpret_cast<uintptr_t>(address));
+	EXPECT_EQ(info.end, reinterpret_cast<uintptr_t>(address) + kSize);
+	EXPECT_EQ(info.is_direct, 1u);
+	EXPECT_EQ(info.is_committed, 1u);
+
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(address), kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
+	Config::SetNextGen(false);
+}
+
+TEST(EmulatorKernelMemory, FixedDirectMapConsumesPrefixOfLargerReservation)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr size_t kReservationSize = 0x40000;
+	constexpr size_t kMappingSize     = 0x4000;
+	void*            reservation      = nullptr;
+	ASSERT_EQ(KernelReserveVirtualRange(&reservation, kReservationSize, 0, kReservationSize), OK);
+	const auto reservation_base = reinterpret_cast<uint64_t>(reservation);
+
+	int64_t physical_address = 0;
+	ASSERT_EQ(KernelAllocateMainDirectMemory(kMappingSize, 0, 12, &physical_address), OK);
+
+	void*     mapping    = reservation;
+	const int map_result = KernelMapDirectMemory(&mapping, kMappingSize, 0x02, 0x10, physical_address, 0x1000);
+	EXPECT_EQ(map_result, OK);
+	if (map_result == OK)
+	{
+		ASSERT_EQ(mapping, reservation);
+		static_cast<uint8_t*>(mapping)[0] = 0x5a;
+
+		VirtualQueryInfo mapped_info {};
+		ASSERT_EQ(KernelVirtualQuery(mapping, 0, &mapped_info, sizeof(mapped_info)), OK);
+		EXPECT_EQ(mapped_info.is_direct, 1u);
+		EXPECT_EQ(mapped_info.is_committed, 1u);
+
+		VirtualQueryInfo suffix_info {};
+		ASSERT_EQ(KernelVirtualQuery(reinterpret_cast<void*>(reservation_base + kMappingSize), 0, &suffix_info,
+		                             sizeof(suffix_info)),
+		          OK);
+		EXPECT_EQ(suffix_info.start, reservation_base + kMappingSize);
+		EXPECT_EQ(suffix_info.end, reservation_base + kReservationSize);
+		EXPECT_EQ(suffix_info.is_committed, 0u);
+
+		EXPECT_EQ(KernelMunmap(reservation_base, kMappingSize), OK);
+		EXPECT_EQ(KernelMunmap(reservation_base + kMappingSize, kReservationSize - kMappingSize), OK);
+	} else
+	{
+		EXPECT_EQ(KernelMunmap(reservation_base, kReservationSize), OK);
+	}
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kMappingSize), OK);
+	Config::SetNextGen(false);
+}
+
 TEST(EmulatorKernelMemory, DirectMemoryAllocationFindsAFreeEarlierRange)
 {
 	EnsureMemorySubsystemInitialized();

@@ -15,6 +15,7 @@
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Kernel/Pthread.h"
 
 #include <algorithm>
 #include <atomic>
@@ -106,7 +107,7 @@ public:
 	bool Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out, int memory_type);
 	bool Release(uint64_t start, size_t len);
 	uint64_t Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode,
-	             uint64_t alignment, bool fixed, bool* physical_range_valid);
+	             uint64_t alignment, bool fixed, bool replace_owned_reservation, bool* physical_range_valid);
 	bool ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
 	bool CompleteUnmap(uint64_t vaddr, uint64_t size);
 	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode,
@@ -203,6 +204,26 @@ public:
 		return true;
 	}
 
+	bool Find(uint64_t addr, uint64_t* base, uint64_t* size)
+	{
+		if (base == nullptr || size == nullptr)
+		{
+			return false;
+		}
+
+		Core::LockGuard lock(m_mutex);
+		for (const auto& block: m_blocks)
+		{
+			if (addr >= block.addr && addr - block.addr < block.size)
+			{
+				*base = block.addr;
+				*size = block.size;
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool Unmap(uint64_t addr, uint64_t size)
 	{
 		Core::LockGuard lock(m_mutex);
@@ -222,7 +243,116 @@ public:
 		return false;
 	}
 
+	bool Contains(uint64_t addr, uint64_t size)
+	{
+		if (size == 0 || addr > std::numeric_limits<uint64_t>::max() - size)
+		{
+			return false;
+		}
+		Core::LockGuard lock(m_mutex);
+		return std::any_of(m_blocks.begin(), m_blocks.end(),
+		                   [addr, size](const Block& block)
+		                   { return addr >= block.addr && size <= block.size && addr - block.addr <= block.size - size; });
+	}
+
+	template <typename Mapper>
+	bool ReplaceAndConsume(uint64_t addr, uint64_t size, Mapper&& mapper)
+	{
+		if (size == 0 || addr > std::numeric_limits<uint64_t>::max() - size)
+		{
+			return false;
+		}
+
+		Core::LockGuard lock(m_mutex);
+		for (uint32_t index = 0; index < m_blocks.Size(); index++)
+		{
+			const Block block = m_blocks[index];
+			if (addr < block.addr || size > block.size || addr - block.addr > block.size - size)
+			{
+				continue;
+			}
+			if (!mapper())
+			{
+				return false;
+			}
+			SplitConsumedBlock(index, block, addr, size);
+			return true;
+		}
+		return false;
+	}
+
+	bool Consume(uint64_t addr, uint64_t size)
+	{
+		if (size == 0 || addr > std::numeric_limits<uint64_t>::max() - size)
+		{
+			return false;
+		}
+
+		Core::LockGuard lock(m_mutex);
+		for (uint32_t index = 0; index < m_blocks.Size(); index++)
+		{
+			const Block block = m_blocks[index];
+			if (addr < block.addr || size > block.size || addr - block.addr > block.size - size)
+			{
+				continue;
+			}
+
+			const uint64_t prefix_size = addr - block.addr;
+			const uint64_t suffix_addr = addr + size;
+			const uint64_t suffix_size = block.size - prefix_size - size;
+			if (!VirtualMemory::Free(block.addr))
+			{
+				return false;
+			}
+			m_blocks.RemoveAt(index);
+
+			const bool prefix_ok = prefix_size == 0 || VirtualMemory::AllocFixed(block.addr, prefix_size, VirtualMemory::Mode::NoAccess);
+			const bool suffix_ok = suffix_size == 0 || VirtualMemory::AllocFixed(suffix_addr, suffix_size, VirtualMemory::Mode::NoAccess);
+			if (!prefix_ok || !suffix_ok)
+			{
+				if (prefix_ok && prefix_size != 0)
+				{
+					EXIT_IF(!VirtualMemory::Free(block.addr));
+				}
+				if (suffix_ok && suffix_size != 0)
+				{
+					EXIT_IF(!VirtualMemory::Free(suffix_addr));
+				}
+				EXIT_IF(!VirtualMemory::AllocFixed(block.addr, block.size, VirtualMemory::Mode::NoAccess));
+				m_blocks.Add(block);
+				return false;
+			}
+
+			if (prefix_size != 0)
+			{
+				m_blocks.Add(Block {block.addr, prefix_size});
+			}
+			if (suffix_size != 0)
+			{
+				m_blocks.Add(Block {suffix_addr, suffix_size});
+			}
+			return true;
+		}
+		return false;
+	}
+
 private:
+	void SplitConsumedBlock(uint32_t index, const Block& block, uint64_t addr, uint64_t size)
+	{
+		const uint64_t prefix_size = addr - block.addr;
+		const uint64_t suffix_addr = addr + size;
+		const uint64_t suffix_size = block.size - prefix_size - size;
+		m_blocks.RemoveAt(index);
+		if (prefix_size != 0)
+		{
+			m_blocks.Add(Block {block.addr, prefix_size});
+		}
+		if (suffix_size != 0)
+		{
+			m_blocks.Add(Block {suffix_addr, suffix_size});
+		}
+	}
+
 	Vector<Block> m_blocks;
 	Core::Mutex   m_mutex;
 };
@@ -473,7 +603,8 @@ bool PhysicalMemory::FindLargestAvailableSpan(uint64_t search_start, uint64_t se
 }
 
 uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode,
-                             Graphics::GpuMemoryMode gpu_mode, uint64_t alignment, bool fixed, bool* physical_range_valid)
+                             Graphics::GpuMemoryMode gpu_mode, uint64_t alignment, bool fixed, bool replace_owned_reservation,
+                             bool* physical_range_valid)
 {
 	EXIT_IF(physical_range_valid == nullptr);
 	*physical_range_valid = false;
@@ -503,7 +634,13 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 	{
 		if ((vaddr & (alignment - 1)) == 0)
 		{
-			map_vaddr = VirtualMemory::MapSharedFixedOrRelocated(m_backing, vaddr, phys_addr, map_size, mode, alignment);
+			if (replace_owned_reservation)
+			{
+				map_vaddr = VirtualMemory::MapSharedFixedReplacingOwnedReservation(m_backing, vaddr, phys_addr, map_size, mode) ? vaddr : 0;
+			} else
+			{
+				map_vaddr = VirtualMemory::MapSharedFixedOrRelocated(m_backing, vaddr, phys_addr, map_size, mode, alignment);
+			}
 		}
 	} else
 	{
@@ -1309,26 +1446,28 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 	VirtualMemory::Mode     mode     = VirtualMemory::Mode::NoAccess;
 	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
 
-	switch (prot)
+	if (!KernelDecodeMprotectProt(prot, &mode, &gpu_mode))
 	{
-		case 0x00: mode = VirtualMemory::Mode::NoAccess; break;
-		case 0x01: mode = VirtualMemory::Mode::Read; break;
-		case 0x02:
-		case 0x03: mode = VirtualMemory::Mode::ReadWrite; break;
-		case 0x04: mode = VirtualMemory::Mode::Execute; break;
-		case 0x05: mode = VirtualMemory::Mode::ExecuteRead; break;
-		case 0x06:
-		case 0x07: mode = VirtualMemory::Mode::ExecuteReadWrite; break;
-		case 0x32:
-		case 0x33:
-		case 0xf2:
-		case 0xf3:
-			// 0xf2/0xf3: Gen5 direct-map style GPU+CPU RW (heap / large maps).
-			// 0xf2 observed after Fiber/thread bring-up on Astro (decimal 242).
-			mode     = VirtualMemory::Mode::ReadWrite;
-			gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
-			break;
-		default: EXIT("unknown prot: %d\n", prot);
+		switch (prot)
+		{
+			case 0x01: mode = VirtualMemory::Mode::Read; break;
+			case 0x02:
+			case 0x03: mode = VirtualMemory::Mode::ReadWrite; break;
+			case 0x04: mode = VirtualMemory::Mode::Execute; break;
+			case 0x05: mode = VirtualMemory::Mode::ExecuteRead; break;
+			case 0x06:
+			case 0x07: mode = VirtualMemory::Mode::ExecuteReadWrite; break;
+			case 0x32:
+			case 0x33:
+			case 0xf2:
+			case 0xf3:
+				// 0xf2/0xf3: Gen5 direct-map style GPU+CPU RW (heap / large maps).
+				// 0xf2 observed after Fiber/thread bring-up on Astro (decimal 242).
+				mode     = VirtualMemory::Mode::ReadWrite;
+				gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
+				break;
+			default: EXIT("unknown prot: %d\n", prot);
+		}
 	}
 
 	auto in_addr = reinterpret_cast<uint64_t>(*addr);
@@ -1339,10 +1478,34 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		EXIT_NOT_IMPLEMENTED((in_addr & (alignment - 1)) != 0);
 	}
 
-	bool     physical_range_valid = false;
-	uint64_t out_addr =
-	    g_physical_memory->Map(in_addr, static_cast<uint64_t>(direct_memory_start), len, prot, mode, gpu_mode, alignment, fixed,
-	                           &physical_range_valid);
+	bool     physical_range_valid  = false;
+	bool     consumed_reservation  = false;
+	uint64_t out_addr              = 0;
+	const bool replace_reservation = fixed && g_reserved_memory != nullptr &&
+	                                 VirtualMemory::SupportsSharedFixedOwnedReservationReplacement() &&
+	                                 g_reserved_memory->Contains(in_addr, len);
+	if (replace_reservation)
+	{
+		consumed_reservation = g_reserved_memory->ReplaceAndConsume(
+		    in_addr, len,
+		    [&]
+		    {
+			    out_addr = g_physical_memory->Map(in_addr, static_cast<uint64_t>(direct_memory_start), len, prot, mode, gpu_mode,
+			                                      alignment, true, true, &physical_range_valid);
+			    return out_addr != 0;
+		    });
+	} else
+	{
+		consumed_reservation = fixed && g_reserved_memory != nullptr && g_reserved_memory->Consume(in_addr, len);
+		out_addr = g_physical_memory->Map(in_addr, static_cast<uint64_t>(direct_memory_start), len, prot, mode, gpu_mode, alignment,
+		                                  fixed, false, &physical_range_valid);
+	}
+	if (out_addr == 0 && consumed_reservation)
+	{
+		const bool restored = VirtualMemory::AllocFixed(in_addr, len, VirtualMemory::Mode::NoAccess) &&
+		                      g_reserved_memory->Add(in_addr, len);
+		EXIT_IF(!restored);
+	}
 
 	*addr = reinterpret_cast<void*>(out_addr);
 
@@ -1657,6 +1820,7 @@ int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryIn
 	int      prot = 0;
 	bool     is_direct   = false;
 	bool     is_flexible = false;
+	bool     is_reserved = false;
 
 	if (g_physical_memory->Find(vaddr, &base, &len, &prot, nullptr, nullptr))
 	{
@@ -1668,7 +1832,16 @@ int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryIn
 	}
 	else
 	{
-		return KERNEL_ERROR_EACCES;
+		uint64_t reserved_size = 0;
+		if (g_reserved_memory != nullptr && g_reserved_memory->Find(vaddr, &base, &reserved_size))
+		{
+			len         = reserved_size;
+			prot        = 0;
+			is_reserved = true;
+		} else
+		{
+			return KERNEL_ERROR_EACCES;
+		}
 	}
 
 	std::memset(info, 0, sizeof(VirtualQueryInfo));
@@ -1679,12 +1852,38 @@ int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryIn
 	info->memory_type  = 0;
 	info->is_flexible  = is_flexible ? 1u : 0u;
 	info->is_direct    = is_direct ? 1u : 0u;
-	info->is_committed = 1u;
+	info->is_committed = is_reserved ? 0u : 1u;
+	info->is_stack     = LibKernel::PthreadQueryStack(addr, nullptr, nullptr) ? 1u : 0u;
 
 	printf("\t start = 0x%016" PRIx64 " end = 0x%016" PRIx64 " prot = 0x%x flex=%d direct=%d\n",
 	       static_cast<uint64_t>(info->start), static_cast<uint64_t>(info->end), info->protection,
 	       static_cast<int>(info->is_flexible), static_cast<int>(info->is_direct));
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelIsStack(const void* addr, void** start, void** end)
+{
+	PRINT_NAME();
+
+	VirtualQueryInfo info {};
+	const int query_result = KernelVirtualQuery(addr, 0, &info, sizeof(info));
+	if (query_result != OK)
+	{
+		return query_result;
+	}
+
+	void* stack_start = nullptr;
+	void* stack_end   = nullptr;
+	(void)LibKernel::PthreadQueryStack(addr, &stack_start, &stack_end);
+	if (start != nullptr)
+	{
+		*start = stack_start;
+	}
+	if (end != nullptr)
+	{
+		*end = stack_end;
+	}
 	return OK;
 }
 

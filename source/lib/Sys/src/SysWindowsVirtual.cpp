@@ -413,6 +413,18 @@ bool sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t back
 	return map_shared_at(shared, address, backing_offset, size, mode) == address;
 }
 
+bool sys_virtual_map_shared_fixed_replacing_owned_reservation(void* /*backing*/, uint64_t /*address*/,
+                                                              uint64_t /*backing_offset*/, uint64_t /*size*/,
+                                                              VirtualMemory::Mode /*mode*/)
+{
+	return false;
+}
+
+bool sys_virtual_supports_shared_fixed_owned_reservation_replacement()
+{
+	return false;
+}
+
 uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                                    VirtualMemory::Mode mode, uint64_t /*alignment*/)
 {

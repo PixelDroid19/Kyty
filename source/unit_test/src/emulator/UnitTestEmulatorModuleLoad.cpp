@@ -251,12 +251,225 @@ TEST(EmulatorModuleLoad, ResolvePrefersLoadedModuleExportOverHleForSameIdentity)
 	EXPECT_FALSE(bind_self);
 }
 
+TEST(EmulatorModuleLoad, ResolvePrefersHleMemalignOverUninitializedGuestLibcHeap)
+{
+	RuntimeLinker rt;
+	const auto    sr = LibcFunc(u"Ujf3KzMvRmI");
+	rt.Symbols()->Add(sr, 0x11110000, U"hle_memalign");
+
+	Program* importer = RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&rt, U"/tmp/eboot.bin");
+	AddLibcImportIds(importer);
+
+	Program* libc = RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&rt, U"/tmp/sce_module/libc.prx");
+	AddLibcExportIds(libc);
+	libc->export_symbols->Add(sr, 0x22220000, U"guest_memalign");
+
+	SymbolRecord out {};
+	bool         bind_self = true;
+	rt.Resolve(U"Ujf3KzMvRmI#libc-lib-id#libc-mod-id", SymbolType::Func, importer, &out, &bind_self);
+
+	EXPECT_EQ(out.vaddr, 0x11110000u);
+	EXPECT_FALSE(bind_self);
+}
+
 TEST(EmulatorModuleLoad, LibkernelRegistersPosixLseekAlias)
 {
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
 	ASSERT_NE(symbols.Find(LibkernelFunc(u"oib76F-12fk")), nullptr);
 	EXPECT_NE(symbols.Find(LibkernelFunc(u"Oy6IpwgtYOk")), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibkernelRegistersModuleInfoForUnwind)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
+	EXPECT_NE(symbols.Find(LibkernelFunc(u"RpQJJVKTiFM")), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibkernelRegistersKernelSleep)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"-ZR+hG7aDHw";
+	query.library              = U"libkernel";
+	query.library_version      = 1;
+	query.module               = U"libkernel";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	EXPECT_NE(symbols.Find(query), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibkernelUnityRegistersExceptionHandler)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"WkwEd3N7w0Y";
+	query.library              = U"libkernel_unity";
+	query.library_version      = 1;
+	query.module               = U"libkernel";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	EXPECT_NE(symbols.Find(query), nullptr);
+	query.name = U"il03nluKfMk";
+	EXPECT_NE(symbols.Find(query), nullptr);
+}
+
+TEST(EmulatorModuleLoad, PosixRegistersConditionTimedWait)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"27bAgiJmOh0";
+	query.library              = U"Posix";
+	query.library_version      = 1;
+	query.module               = U"libkernel";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	EXPECT_NE(symbols.Find(query), nullptr);
+	query.name = U"AqBioC2vF3I";
+	EXPECT_NE(symbols.Find(query), nullptr);
+	query.name = U"mqQMh1zPPT8";
+	EXPECT_NE(symbols.Find(query), nullptr);
+	query.name = U"VAzswvTOCzI";
+	EXPECT_NE(symbols.Find(query), nullptr);
+	for (const auto* nid:
+	     {U"wuCroIGjt2g", U"bY-PO6JhzhQ", U"FN4gaPmuFV8", U"ezv-RSBNKqI", U"C2kJ-byS5rM", U"4n51s0zEf0c", U"XVL8So3QJUk",
+	      U"6O8EwYOgH9Y", U"RenI1lL1WFk", U"3e+4Iv7IJ8U", U"lUk6wrGXyMw", U"aNeavPDNKzA", U"hI7oVeOluPM",
+	      U"1471ajPzxh0", U"sIlRvQqsN2Y", U"KuOmgKoqCdY", U"pxnCmagrtao", U"6XG4B33N09g", U"7Xl257M4VNI"})
+	{
+		query.name = nid;
+		EXPECT_NE(symbols.Find(query), nullptr);
+	}
+}
+
+TEST(EmulatorModuleLoad, EncodesAndFindsDynamicSymbolsByNid)
+{
+	EXPECT_EQ(EncodeNameAsNid("sceKernelDlsym"), U"LwG8g3niqwA");
+	EXPECT_EQ(EncodeNameAsNid("sceKernelGetModuleInfoForUnwind"), U"RpQJJVKTiFM");
+
+	SymbolDatabase symbols;
+	SymbolResolve  exported {};
+	exported.name                 = U"LwG8g3niqwA";
+	exported.library              = U"libkernel";
+	exported.library_version      = 1;
+	exported.module               = U"libkernel";
+	exported.module_version_major = 1;
+	exported.module_version_minor = 1;
+	exported.type                 = SymbolType::Func;
+	symbols.Add(exported, 0x12345678u);
+
+	const auto* record = symbols.FindByNid(U"LwG8g3niqwA", SymbolType::Func);
+	ASSERT_NE(record, nullptr);
+	EXPECT_EQ(record->vaddr, 0x12345678u);
+	EXPECT_EQ(symbols.FindByNid(U"LwG8g3niqwA", SymbolType::Object), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibkernelRegistersDlsym)
+{
+	EnsureFileSystemSubsystem();
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"LwG8g3niqwA";
+	query.library              = U"libkernel";
+	query.library_version      = 1;
+	query.module               = U"libkernel";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* record = symbols.Find(query);
+	ASSERT_NE(record, nullptr);
+
+	using DlsymFn = int (*)(int32_t, const char*, void**);
+	auto* const preserved = reinterpret_cast<void*>(0x12345678u);
+	void*      address    = preserved;
+	const int  result     = reinterpret_cast<DlsymFn>(record->vaddr)(-1, "missing_symbol", &address);
+
+	EXPECT_EQ(result, Kyty::Libs::LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(address, preserved);
+}
+
+TEST(EmulatorModuleLoad, NetRegistersEpollCreate)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNet_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"SF47kB2MNTo";
+	query.library              = U"Net";
+	query.library_version      = 1;
+	query.module               = U"Net";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	for (const auto* nid: {U"SF47kB2MNTo", U"Inp1lfL+Jdw", U"ZVw46bsasAk", U"drjIbDbA7UQ", U"C4UgDHHPvdw",
+	                       U"Nd91WaWmG2w", U"kJlYH5uMAWI", U"K7RlrTkI-mw", U"Apb4YDxKsRI", U"hLuXdjHnhiI",
+	                       U"2mKX2Spso7I", U"xphrZusl78E"})
+	{
+		query.name = nid;
+		EXPECT_NE(symbols.Find(query), nullptr);
+	}
+}
+
+TEST(EmulatorModuleLoad, RtcRegistersCurrentTick)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libSceRtc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"18B2NS1y9UU";
+	query.library              = U"Rtc";
+	query.library_version      = 1;
+	query.module               = U"Rtc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	EXPECT_NE(symbols.Find(query), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibkernelRegistersPosixRwlockReadLock)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
+	EXPECT_NE(symbols.Find(LibkernelFunc(u"iGjsr1WAtI0")), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibkernelRegistersPosixRwlockUnlock)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
+	EXPECT_NE(symbols.Find(LibkernelFunc(u"EgmLo6EWgso")), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibkernelRegistersPosixRwlockInit)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
+	EXPECT_NE(symbols.Find(LibkernelFunc(u"ytQULN-nhL4")), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibkernelRegistersPthreadRename)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
+	EXPECT_NE(symbols.Find(LibkernelFunc(u"GBUY7ywdULE")), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibkernelRegistersEventFlagClear)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
+	EXPECT_NE(symbols.Find(LibkernelFunc(u"7uhBFWRAS60")), nullptr);
 }
 
 TEST(EmulatorModuleLoad, LibkernelReadAliasReadsRegularFileDescriptor)

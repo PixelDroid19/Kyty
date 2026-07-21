@@ -25,10 +25,12 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Loader/Elf.h"
 
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <cstdio>
+#include <mutex>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #include <arpa/inet.h>
@@ -169,7 +171,7 @@ static KYTY_SYSV_ABI KernelModule KernelLoadStartModule(const char* module_file_
 
 	program->dbg_print_reloc = true;
 
-	rt->RelocateAll();
+	rt->RelocateProgram(program);
 
 	int result = rt->StartModule(program, args, argp, nullptr);
 
@@ -246,6 +248,37 @@ static void* KYTY_SYSV_ABI KernelGetProcParam()
 	return reinterpret_cast<void*>(rt->GetProcParam());
 }
 
+static int KYTY_SYSV_ABI KernelDlsym(KernelModule handle, const char* symbol, void** address)
+{
+	PRINT_NAME();
+	printf("\t handle = %d\n", handle);
+	printf("\t symbol = %s\n", symbol != nullptr ? symbol : "(null)");
+
+	if (address == nullptr || symbol == nullptr)
+	{
+		return KERNEL_ERROR_EFAULT;
+	}
+
+	auto* runtime = Core::Singleton<Loader::RuntimeLinker>::Instance();
+	auto* program = runtime->FindProgramById(handle);
+	if (program == nullptr || program->export_symbols == nullptr)
+	{
+		return KERNEL_ERROR_ESRCH;
+	}
+
+	const String nid = Loader::EncodeNameAsNid(symbol);
+	for (const auto type: {Loader::SymbolType::Func, Loader::SymbolType::Object, Loader::SymbolType::NoType})
+	{
+		if (const auto* record = program->export_symbols->FindByNid(nid, type); record != nullptr)
+		{
+			*address = reinterpret_cast<void*>(record->vaddr);
+			return OK;
+		}
+	}
+
+	return KERNEL_ERROR_ESRCH;
+}
+
 static void KYTY_SYSV_ABI KernelRtldSetApplicationHeapAPI(void* api[])
 {
 	PRINT_NAME();
@@ -260,16 +293,7 @@ static void KYTY_SYSV_ABI KernelRtldSetApplicationHeapAPI(void* api[])
 		printf("\tapi[%d] = 0x%016" PRIx64 "\n", i, reinterpret_cast<uint64_t>(api[i]));
 	}
 
-	// Register the guest v2 ApplicationHeap table (size=0x78, version=2). Create
-	// is invoked when EnsureInitialized has a main program with executable text
-	// bounds — typically immediately if entry is known, else before DT_INIT.
 	ApplicationHeap::RegisterApi(api);
-
-	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
-	if (const uint64_t entry = rt->GetEntry(); entry != 0)
-	{
-		ApplicationHeap::EnsureInitialized(rt->FindProgramByAddr(entry));
-	}
 }
 
 static int64_t KYTY_SYSV_ABI write(int d, const char* str, int64_t size)
@@ -756,6 +780,111 @@ static void KYTY_SYSV_ABI KernelDebugRaiseException(uint64_t c1, uint64_t c2)
 	EXIT("KernelDebugRaiseException: error=0x%016" PRIx64 " arg=0x%016" PRIx64 "\n", c1, c2);
 }
 
+static bool is_allowed_exception_signal(int signum)
+{
+	return signum == 1 || signum == 4 || signum == 8 || signum == 10 || signum == 11 || signum == 30;
+}
+
+static std::array<void*, 128> g_exception_handlers {};
+static std::mutex             g_exception_handlers_mutex;
+
+struct SignalMcontext
+{
+	uint64_t mc_onstack;
+	uint64_t mc_rdi;
+	uint64_t mc_rsi;
+	uint64_t mc_rdx;
+	uint64_t mc_rcx;
+	uint64_t mc_r8;
+	uint64_t mc_r9;
+	uint64_t mc_rax;
+	uint64_t mc_rbx;
+	uint64_t mc_rbp;
+	uint64_t mc_r10;
+	uint64_t mc_r11;
+	uint64_t mc_r12;
+	uint64_t mc_r13;
+	uint64_t mc_r14;
+	uint64_t mc_r15;
+	int      mc_trapno;
+	uint16_t mc_fs;
+	uint16_t mc_gs;
+	uint64_t mc_addr;
+	int      mc_flags;
+	uint16_t mc_es;
+	uint16_t mc_ds;
+	uint64_t mc_err;
+	uint64_t mc_rip;
+	uint64_t mc_cs;
+	uint64_t mc_rflags;
+	uint64_t mc_reserved[8];
+	uint64_t mc_rsp;
+	uint64_t mc_ss;
+	uint64_t mc_len;
+	uint64_t mc_fpformat;
+	uint64_t mc_ownedfp;
+	uint64_t mc_lbrfrom;
+	uint64_t mc_lbrto;
+	uint64_t mc_aux1;
+	uint64_t mc_aux2;
+	uint64_t mc_fpstate[104];
+	uint64_t mc_fsbase;
+	uint64_t mc_gsbase;
+	uint64_t mc_spare[6];
+};
+
+struct SignalUcontext
+{
+	SignalMcontext uc_mcontext;
+};
+
+static_assert(offsetof(SignalMcontext, mc_rip) == 0xa0);
+static_assert(offsetof(SignalMcontext, mc_rsp) == 0xf8);
+
+static int KYTY_SYSV_ABI KernelInstallExceptionHandler(int signum, void* handler)
+{
+	PRINT_NAME();
+	if (!is_allowed_exception_signal(signum) || handler == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	std::lock_guard lock(g_exception_handlers_mutex);
+	if (g_exception_handlers[static_cast<size_t>(signum)] != nullptr)
+	{
+		return KERNEL_ERROR_EAGAIN;
+	}
+	g_exception_handlers[static_cast<size_t>(signum)] = handler;
+	return OK;
+}
+
+static int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum)
+{
+	if (thread == nullptr || signum != 30)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	void* handler = nullptr;
+	{
+		std::lock_guard lock(g_exception_handlers_mutex);
+		handler = g_exception_handlers[static_cast<size_t>(signum)];
+	}
+	if (handler == nullptr)
+	{
+		return OK;
+	}
+
+	SignalUcontext context {};
+	context.uc_mcontext.mc_len = sizeof(SignalMcontext);
+	context.uc_mcontext.mc_rsp = reinterpret_cast<uint64_t>(__builtin_frame_address(0));
+	context.uc_mcontext.mc_rbp = reinterpret_cast<uint64_t>(__builtin_frame_address(0));
+	context.uc_mcontext.mc_rip = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+	using handler_func_t       = KYTY_SYSV_ABI void (*)(int, SignalUcontext*);
+	reinterpret_cast<handler_func_t>(handler)(signum, &context);
+	return OK;
+}
+
 static KYTY_SYSV_ABI int KernelIsAddressSanitizerEnabled()
 {
 	PRINT_NAME();
@@ -918,6 +1047,16 @@ static int KYTY_SYSV_ABI PosixFdatasync(int fd)
 	return POSIX_CALL(KernelFsync(fd));
 }
 
+static int64_t KYTY_SYSV_ABI PosixFstat(int fd, FileSystem::FileStat* stat)
+{
+	return POSIX_N_CALL(FileSystem::KernelFstat(fd, stat));
+}
+
+static int KYTY_SYSV_ABI PosixUnlink(const char* path)
+{
+	return POSIX_N_CALL(FileSystem::KernelUnlink(path));
+}
+
 static int KYTY_SYSV_ABI PosixRename(const char* from, const char* to)
 {
 	PRINT_NAME();
@@ -1021,6 +1160,40 @@ static int KYTY_SYSV_ABI PosixGetsockname(int id, void* addr, int* len)
 static int KYTY_SYSV_ABI PosixGetsockopt(int id, int level, int option, void* value, int* value_len)
 {
 	return POSIX_NET_CALL(Network::Net::NetGetsockopt(id, level, option, value, value_len));
+}
+
+static int64_t KYTY_SYSV_ABI PosixRecvfrom(int socket, void* buffer, uint64_t length, int flags, void* address,
+                                           uint32_t* address_len)
+{
+	PRINT_NAME();
+	printf("\t socket      = %d\n", socket);
+	printf("\t buffer      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
+	printf("\t length      = %" PRIu64 "\n", length);
+	printf("\t flags       = %d\n", flags);
+	printf("\t address     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
+	printf("\t address_len = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address_len));
+	EXIT("POSIX recvfrom is not implemented\n");
+	return -1;
+}
+
+static int KYTY_SYSV_ABI PosixSendmsg(int socket, const void* message, int flags)
+{
+	PRINT_NAME();
+	printf("\t socket  = %d\n", socket);
+	printf("\t message = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(message));
+	printf("\t flags   = %d\n", flags);
+	EXIT("POSIX sendmsg is not implemented\n");
+	return -1;
+}
+
+static int64_t KYTY_SYSV_ABI PosixRecvmsg(int socket, void* message, int flags)
+{
+	PRINT_NAME();
+	printf("\t socket  = %d\n", socket);
+	printf("\t message = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(message));
+	printf("\t flags   = %d\n", flags);
+	EXIT("POSIX recvmsg is not implemented\n");
+	return -1;
 }
 
 static int KYTY_SYSV_ABI PosixSelect(int nfds, void* readfds, void* writefds, void* exceptfds, void* timeout)
@@ -1198,6 +1371,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("+U1R4WtXvoc", Posix::pthread_detach);
 	LIB_FUNC("FJrT5LuUBAU", Posix::pthread_exit);
 	LIB_FUNC("B5GmVDKwpn0", Posix::pthread_yield);
+	LIB_FUNC("6XG4B33N09g", Posix::sched_yield);
 	LIB_FUNC("7Xl257M4VNI", Posix::pthread_equal);
 	LIB_FUNC("lZzFeSxPl08", Posix::pthread_setcancelstate);
 	LIB_FUNC("a2P9wYGeZvc", Posix::pthread_setprio);
@@ -1252,6 +1426,8 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("wuCroIGjt2g", LibKernel::open);
 	LIB_FUNC("bY-PO6JhzhQ", LibKernel::close);
 	LIB_FUNC("AqBioC2vF3I", LibKernel::read);
+	LIB_FUNC("mqQMh1zPPT8", LibKernel::PosixFstat);
+	LIB_FUNC("VAzswvTOCzI", LibKernel::PosixUnlink);
 	LIB_FUNC("FN4gaPmuFV8", LibKernel::write);
 	LIB_FUNC("ezv-RSBNKqI", LibKernel::pread);
 	LIB_FUNC("C2kJ-byS5rM", LibKernel::pwrite);
@@ -1272,6 +1448,9 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("3e+4Iv7IJ8U", LibKernel::PosixAccept);
 	LIB_FUNC("RenI1lL1WFk", LibKernel::PosixGetsockname);
 	LIB_FUNC("6O8EwYOgH9Y", LibKernel::PosixGetsockopt);
+	LIB_FUNC("lUk6wrGXyMw", LibKernel::PosixRecvfrom);
+	LIB_FUNC("aNeavPDNKzA", LibKernel::PosixSendmsg);
+	LIB_FUNC("hI7oVeOluPM", LibKernel::PosixRecvmsg);
 	LIB_FUNC("fFxGkxF2bVo", LibKernel::PosixSetsockopt);
 	LIB_FUNC("fZOeZIOEmLw", LibKernel::PosixSend);
 	LIB_FUNC("Ez8xjo9UF4E", LibKernel::PosixRecv);
@@ -1358,6 +1537,7 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("DGMG3JshrZU", Memory::KernelSetVirtualRangeName);
 	LIB_FUNC("mkgXxsoxWHg", Memory::KernelClearVirtualRangeName);
 	LIB_FUNC("rVjRvHJ0X6c", Memory::KernelVirtualQuery);
+	LIB_FUNC("yDBwVAolDgg", Memory::KernelIsStack);
 	LIB_FUNC("7oxv3PPCumo", Memory::KernelReserveVirtualRange);
 	LIB_FUNC("vSMAm3cxYTY", Memory::KernelMprotect);
 	// Posix dual NIDs for the same Orbis memory helpers.
@@ -1530,6 +1710,7 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_OBJECT("djxxOmW6-aw", &LibKernel::g_progname);
 
 	LIB_FUNC("1jfXLRVzisc", LibKernel::KernelUsleep);
+	LIB_FUNC("-ZR+hG7aDHw", LibKernel::KernelSleep);
 	// sceKernelNanosleep (NID verified against the public PS5 stub name).
 	LIB_FUNC("QvsZxomvUHs", LibKernel::KernelNanosleep);
 	LIB_FUNC("6c3rCVE-fTU", LibKernel::open);
@@ -1537,6 +1718,7 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("6Z83sYWFlA8", LibKernel::exit);
 	LIB_FUNC("8OnWXlgQlvo", LibKernel::KernelRtldThreadAtexitDecrement);
 	LIB_FUNC("959qrazPIrg", LibKernel::KernelGetProcParam);
+	LIB_FUNC("LwG8g3niqwA", LibKernel::KernelDlsym);
 	LIB_FUNC("9BcDykPmo1I", LibKernel::get_error_addr);
 	LIB_FUNC("HoLVWNanBBc", Posix::getpid);
 	LIB_FUNC("bnZxYgAFeA0", LibKernel::KernelGetSanitizerNewReplaceExternal);
@@ -1556,6 +1738,8 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("lLMT9vJAck0", LibKernel::clock_gettime);
 	LIB_FUNC("NNtFaKJbPt0", LibKernel::close);
 	LIB_FUNC("OMDRKKAZ8I4", LibKernel::KernelDebugRaiseException);
+	LIB_FUNC("il03nluKfMk", LibKernel::KernelRaiseException);
+	LIB_FUNC("WkwEd3N7w0Y", LibKernel::KernelInstallExceptionHandler);
 	LIB_FUNC("jh+8XiK4LeE", LibKernel::KernelIsAddressSanitizerEnabled);
 	LIB_FUNC("-o5uEDpN+oY", LibKernel::KernelConvertUtcToLocaltime);
 	// sceKernelMapNamedFlexibleMemoryInternal uses the same out-pointer ABI as

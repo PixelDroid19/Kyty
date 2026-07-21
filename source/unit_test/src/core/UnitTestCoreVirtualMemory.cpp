@@ -113,6 +113,35 @@ TEST(CoreVirtualMemory, FixedSharedMappingRejectsOccupiedRange)
 	DestroySharedBacking(occupied_backing);
 }
 
+TEST(CoreVirtualMemory, FixedSharedMappingReplacesOnlyOwnedReservationSubrange)
+{
+#if defined(_WIN32)
+	GTEST_SKIP() << "owned reservation replacement is not available on this host";
+#else
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+
+	const uint64_t reservation = Alloc(0, page_size * 4u, Mode::NoAccess);
+	ASSERT_NE(reservation, 0u);
+	SharedBacking* backing = CreateSharedBacking(page_size * 2u);
+	ASSERT_NE(backing, nullptr);
+
+	ASSERT_TRUE(MapSharedFixedReplacingOwnedReservation(backing, reservation + page_size, 0, page_size * 2u,
+	                                                   Mode::ReadWrite));
+	auto* bytes = reinterpret_cast<uint8_t*>(reservation + page_size);
+	bytes[0] = 0x5a;
+	bytes[page_size * 2u - 1u] = 0xc3;
+	EXPECT_EQ(bytes[0], 0x5a);
+	EXPECT_EQ(bytes[page_size * 2u - 1u], 0xc3);
+
+	EXPECT_FALSE(MapSharedFixedReplacingOwnedReservation(backing, reservation + page_size, 0, page_size, Mode::ReadWrite));
+	ASSERT_TRUE(Free(reservation));
+	ASSERT_TRUE(Free(reservation + page_size));
+	ASSERT_TRUE(Free(reservation + page_size * 3u));
+	DestroySharedBacking(backing);
+#endif
+}
+
 TEST(CoreVirtualMemory, DemandMapUsesHostPageSize)
 {
 	const uint64_t page_size = GetPageSize();

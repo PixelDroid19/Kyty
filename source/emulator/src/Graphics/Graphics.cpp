@@ -3679,6 +3679,11 @@ LIB_NAME("Graphics5Driver", "Graphics5Driver");
 
 static Core::Mutex     g_resource_registration_mutex;
 static Vector<uint32_t> g_registered_resources;
+static std::atomic<uint64_t> g_tf_ring_base {0};
+static std::atomic<uint32_t> g_tf_ring_size {0};
+static std::atomic<uint64_t> g_hs_offchip_value0 {0};
+static std::atomic<uint64_t> g_hs_offchip_value1 {0};
+static std::atomic<uint64_t> g_hs_offchip_value2 {0};
 
 struct Packet
 {
@@ -3824,6 +3829,28 @@ int KYTY_SYSV_ABI GraphicsDriverUnregisterResource(uint32_t resource)
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	g_registered_resources.RemoveAt(index);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverSetTFRing(const volatile void* base, uint32_t size)
+{
+	PRINT_NAME();
+	g_tf_ring_base.store(reinterpret_cast<uint64_t>(base), std::memory_order_release);
+	g_tf_ring_size.store(size, std::memory_order_release);
+	printf("\t base = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
+	printf("\t size = 0x%08" PRIx32 "\n", size);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverSetHsOffchipParam(uint64_t value0, uint64_t value1, uint64_t value2)
+{
+	PRINT_NAME();
+	g_hs_offchip_value0.store(value0, std::memory_order_release);
+	g_hs_offchip_value1.store(value1, std::memory_order_release);
+	g_hs_offchip_value2.store(value2, std::memory_order_release);
+	printf("\t value0 = 0x%016" PRIx64 "\n", value0);
+	printf("\t value1 = 0x%016" PRIx64 "\n", value1);
+	printf("\t value2 = 0x%016" PRIx64 "\n", value2);
 	return OK;
 }
 

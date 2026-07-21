@@ -272,6 +272,8 @@ int KYTY_SYSV_ABI GraphicsDriverRegisterOwner(uint32_t* owner, const char* name)
 int KYTY_SYSV_ABI GraphicsDriverRegisterResource(uint32_t* resource, uint32_t owner, const void* base, uint64_t size, const char* name,
                                                  uint32_t type, uint64_t user_data);
 int KYTY_SYSV_ABI GraphicsDriverUnregisterResource(uint32_t resource);
+int KYTY_SYSV_ABI GraphicsDriverSetTFRing(const volatile void* base, uint32_t size);
+int KYTY_SYSV_ABI GraphicsDriverSetHsOffchipParam(uint64_t value0, uint64_t value1, uint64_t value2);
 
 } // namespace Gen5Driver
 
