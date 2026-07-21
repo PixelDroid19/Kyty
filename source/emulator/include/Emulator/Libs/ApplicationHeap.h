@@ -13,6 +13,9 @@ constexpr size_t kApiSlotCount         = 10;
 constexpr size_t kMallocSlot           = 0;
 constexpr size_t kFreeSlot             = 1;
 constexpr size_t kPosixMemalignSlot    = 6;
+// The replacement table follows the Gen5 order used by libkernel's
+// MallocReplace record: malloc_stats is slot 7 and malloc_stats_fast is slot 8.
+constexpr size_t kMallocStatsFastSlot = 8;
 
 struct Api
 {
@@ -27,7 +30,9 @@ void RegisterApi(void* const api[kApiSlotCount]);
 
 [[nodiscard]] bool IsInitialized();
 [[nodiscard]] bool HasAllocator();
+[[nodiscard]] bool HasMallocStatsFast();
 [[nodiscard]] void* Malloc(size_t size);
+int                 MallocStatsFast(void* stats);
 bool                Free(void* ptr);
 
 void Reset();
