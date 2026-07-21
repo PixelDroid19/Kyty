@@ -7,9 +7,11 @@
 #include "Emulator/Graphics/Window.h"
 #include "Kyty/UnitTest.h"
 
+#include <atomic>
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 UT_BEGIN(AgentTools);
@@ -255,6 +257,16 @@ TEST(AgentTools, FrameTimeHistogramIsBoundedAndResettable)
 	DebugStatsShutdown();
 }
 
+TEST(AgentTools, FrameIntervalUsesConsecutiveMonotonicTimestamps)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	EXPECT_NEAR(DebugStatsFrameIntervalMs(10.016, 10.0), 16.0, 0.000001);
+	EXPECT_DOUBLE_EQ(DebugStatsFrameIntervalMs(3.0, 0.0), 0.0);
+	EXPECT_DOUBLE_EQ(DebugStatsFrameIntervalMs(10.0, 10.0), 0.0);
+	EXPECT_DOUBLE_EQ(DebugStatsFrameIntervalMs(9.0, 10.0), 0.0);
+}
+
 TEST(AgentTools, ResourceWorkTelemetryTracksOnlyRecordedOperations)
 {
 	using namespace Kyty::Libs::Graphics;
@@ -314,6 +326,9 @@ TEST(AgentTools, PipelineShaderTelemetrySeparatesExactOperationBoundaries)
 	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Compute, true, 200);
 	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Compute, false, 400);
 	DebugStatsRecordPipelineEviction();
+	DebugStatsRecordPipelineCacheCheckpoint(DebugStatsPipelineCacheCheckpointOutcome::Written, 1024, 1300);
+	DebugStatsRecordPipelineCacheCheckpoint(DebugStatsPipelineCacheCheckpointOutcome::Failed, 2048, 1400);
+	DebugStatsRecordPipelineCacheCheckpoint(DebugStatsPipelineCacheCheckpointOutcome::BudgetExceeded, 0, 1500);
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, 500);
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, 600);
 	DebugStatsRecordShaderIrParse(DebugStatsShaderParseKind::InputAnalysis, 700);
@@ -335,6 +350,13 @@ TEST(AgentTools, PipelineShaderTelemetrySeparatesExactOperationBoundaries)
 	EXPECT_EQ(first.compute_pipeline_lookup_ns, 600u);
 	EXPECT_EQ(first.compute_pipeline_lookup_max_ns, 400u);
 	EXPECT_EQ(first.pipeline_evictions, 1u);
+	EXPECT_EQ(first.pipeline_cache_checkpoint_count, 3u);
+	EXPECT_EQ(first.pipeline_cache_checkpoint_bytes, 3072u);
+	EXPECT_EQ(first.pipeline_cache_checkpoint_ns, 4200u);
+	EXPECT_EQ(first.pipeline_cache_checkpoint_max_ns, 1500u);
+	EXPECT_EQ(first.pipeline_cache_checkpoint_written, 1u);
+	EXPECT_EQ(first.pipeline_cache_checkpoint_failed, 1u);
+	EXPECT_EQ(first.pipeline_cache_checkpoint_budget_exceeded, 1u);
 	EXPECT_EQ(first.gfx_pipeline_miss_count, 1u);
 	EXPECT_EQ(first.gfx_pipeline_miss_ns, 500u);
 	EXPECT_EQ(first.gfx_pipeline_miss_max_ns, 500u);
@@ -373,6 +395,13 @@ TEST(AgentTools, PipelineShaderTelemetrySeparatesExactOperationBoundaries)
 	EXPECT_EQ(empty.compute_pipeline_lookup_ns, 0u);
 	EXPECT_EQ(empty.compute_pipeline_lookup_max_ns, 0u);
 	EXPECT_EQ(empty.pipeline_evictions, 0u);
+	EXPECT_EQ(empty.pipeline_cache_checkpoint_count, 0u);
+	EXPECT_EQ(empty.pipeline_cache_checkpoint_bytes, 0u);
+	EXPECT_EQ(empty.pipeline_cache_checkpoint_ns, 0u);
+	EXPECT_EQ(empty.pipeline_cache_checkpoint_max_ns, 0u);
+	EXPECT_EQ(empty.pipeline_cache_checkpoint_written, 0u);
+	EXPECT_EQ(empty.pipeline_cache_checkpoint_failed, 0u);
+	EXPECT_EQ(empty.pipeline_cache_checkpoint_budget_exceeded, 0u);
 	EXPECT_EQ(empty.gfx_pipeline_miss_count, 0u);
 	EXPECT_EQ(empty.compute_pipeline_miss_count, 0u);
 	EXPECT_EQ(empty.shader_ir_input_analysis_count, 0u);
@@ -384,6 +413,47 @@ TEST(AgentTools, PipelineShaderTelemetrySeparatesExactOperationBoundaries)
 	EXPECT_EQ(empty.shader_translation_cache_hits, 0u);
 	EXPECT_EQ(empty.shader_translation_cache_misses, 0u);
 	EXPECT_EQ(empty.shader_translation_cache_evictions, 0u);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, PipelineCheckpointResetKeepsEachEventInOneWindow)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	constexpr uint64_t events = 20000;
+	DebugStatsInit();
+	std::atomic<bool> done {false};
+	std::atomic<bool> inconsistent {false};
+	auto validate = [&inconsistent](const DebugStatsPerformanceSnapshot& snapshot)
+	{
+		if (snapshot.pipeline_cache_checkpoint_bytes != snapshot.pipeline_cache_checkpoint_count * 7u ||
+		    snapshot.pipeline_cache_checkpoint_ns != snapshot.pipeline_cache_checkpoint_count * 11u ||
+		    snapshot.pipeline_cache_checkpoint_written != snapshot.pipeline_cache_checkpoint_count ||
+		    snapshot.pipeline_cache_checkpoint_failed != 0u || snapshot.pipeline_cache_checkpoint_budget_exceeded != 0u ||
+		    (snapshot.pipeline_cache_checkpoint_count != 0u && snapshot.pipeline_cache_checkpoint_max_ns != 11u))
+		{
+			inconsistent.store(true, std::memory_order_relaxed);
+		}
+	};
+
+	std::thread recorder(
+	    [&]
+	    {
+		    for (uint64_t i = 0; i < events; ++i)
+		    {
+			    DebugStatsRecordPipelineCacheCheckpoint(DebugStatsPipelineCacheCheckpointOutcome::Written, 7, 11);
+		    }
+		    done.store(true, std::memory_order_release);
+	    });
+	while (!done.load(std::memory_order_acquire))
+	{
+		validate(DebugStatsGetPerformanceSnapshot(true));
+		std::this_thread::yield();
+	}
+	recorder.join();
+	validate(DebugStatsGetPerformanceSnapshot(true));
+
+	EXPECT_FALSE(inconsistent.load(std::memory_order_relaxed));
 	DebugStatsShutdown();
 }
 

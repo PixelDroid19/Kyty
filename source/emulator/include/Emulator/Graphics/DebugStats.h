@@ -145,6 +145,13 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t compute_pipeline_lookup_ns         = 0;
 	uint64_t compute_pipeline_lookup_max_ns     = 0;
 	uint64_t pipeline_evictions                 = 0;
+	uint64_t pipeline_cache_checkpoint_count           = 0;
+	uint64_t pipeline_cache_checkpoint_bytes           = 0;
+	uint64_t pipeline_cache_checkpoint_ns              = 0;
+	uint64_t pipeline_cache_checkpoint_max_ns          = 0;
+	uint64_t pipeline_cache_checkpoint_written         = 0;
+	uint64_t pipeline_cache_checkpoint_failed          = 0;
+	uint64_t pipeline_cache_checkpoint_budget_exceeded = 0;
 	// Inclusive miss latency: parse + SPIR-V + Vulkan pipeline creation.
 	uint64_t gfx_pipeline_miss_count            = 0;
 	uint64_t gfx_pipeline_miss_ns               = 0;
@@ -194,8 +201,17 @@ enum class DebugStatsShaderParseKind
 	PipelineMiss
 };
 
+enum class DebugStatsPipelineCacheCheckpointOutcome
+{
+	Written,
+	Failed,
+	BudgetExceeded
+};
+
 void DebugStatsInit();
 void DebugStatsShutdown();
+
+[[nodiscard]] double DebugStatsFrameIntervalMs(double current_seconds, double previous_seconds);
 
 void DebugStatsRecordDraw();
 void DebugStatsRecordDispatch();
@@ -217,6 +233,8 @@ void DebugStatsRecordUpload(uint64_t bytes, uint64_t elapsed_ns);
 void DebugStatsRecordWriteBack(uint64_t bytes, uint64_t elapsed_ns);
 void DebugStatsRecordPipelineLookup(DebugStatsPipelineKind kind, bool hit, uint64_t elapsed_ns);
 void DebugStatsRecordPipelineEviction();
+void DebugStatsRecordPipelineCacheCheckpoint(DebugStatsPipelineCacheCheckpointOutcome outcome, uint64_t attempted_bytes,
+                                             uint64_t elapsed_ns);
 void DebugStatsRecordPipelineMiss(DebugStatsPipelineKind kind, uint64_t elapsed_ns);
 void DebugStatsRecordShaderIrParse(DebugStatsShaderParseKind kind, uint64_t elapsed_ns);
 void DebugStatsRecordSpirvSource(uint64_t elapsed_ns);

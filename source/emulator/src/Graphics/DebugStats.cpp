@@ -4,6 +4,7 @@
 
 #include "Kyty/Sys/SysProcess.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -83,9 +84,22 @@ struct LookupMetric
 	std::atomic<uint64_t> max_ns {0};
 };
 
+struct PipelineCacheCheckpointMetric
+{
+	std::mutex mutex;
+	uint64_t   count           = 0;
+	uint64_t   bytes           = 0;
+	uint64_t   total_ns        = 0;
+	uint64_t   max_ns          = 0;
+	uint64_t   written         = 0;
+	uint64_t   failed          = 0;
+	uint64_t   budget_exceeded = 0;
+};
+
 LookupMetric          g_gfx_pipeline_lookup;
 LookupMetric          g_compute_pipeline_lookup;
 std::atomic<uint64_t> g_pipeline_evictions {0};
+PipelineCacheCheckpointMetric g_pipeline_cache_checkpoint;
 TimedMetric           g_gfx_pipeline_miss;
 TimedMetric           g_compute_pipeline_miss;
 TimedMetric           g_shader_ir_input_analysis;
@@ -313,6 +327,16 @@ void DebugStatsInit()
 	ResetLookup(&g_gfx_pipeline_lookup);
 	ResetLookup(&g_compute_pipeline_lookup);
 	g_pipeline_evictions.store(0, std::memory_order_relaxed);
+	{
+		std::lock_guard<std::mutex> lock(g_pipeline_cache_checkpoint.mutex);
+		g_pipeline_cache_checkpoint.count           = 0;
+		g_pipeline_cache_checkpoint.bytes           = 0;
+		g_pipeline_cache_checkpoint.total_ns        = 0;
+		g_pipeline_cache_checkpoint.max_ns          = 0;
+		g_pipeline_cache_checkpoint.written         = 0;
+		g_pipeline_cache_checkpoint.failed          = 0;
+		g_pipeline_cache_checkpoint.budget_exceeded = 0;
+	}
 	ResetTimed(&g_gfx_pipeline_miss);
 	ResetTimed(&g_compute_pipeline_miss);
 	ResetTimed(&g_shader_ir_input_analysis);
@@ -369,6 +393,16 @@ void DebugStatsInit()
 }
 
 void DebugStatsShutdown() {}
+
+double DebugStatsFrameIntervalMs(double current_seconds, double previous_seconds)
+{
+	if (!std::isfinite(current_seconds) || !std::isfinite(previous_seconds) || previous_seconds <= 0.0 ||
+	    current_seconds <= previous_seconds)
+	{
+		return 0.0;
+	}
+	return (current_seconds - previous_seconds) * 1000.0;
+}
 
 void DebugStatsRecordDraw()
 {
@@ -507,6 +541,28 @@ void DebugStatsRecordPipelineLookup(DebugStatsPipelineKind kind, bool hit, uint6
 void DebugStatsRecordPipelineEviction()
 {
 	g_pipeline_evictions.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DebugStatsRecordPipelineCacheCheckpoint(DebugStatsPipelineCacheCheckpointOutcome outcome, uint64_t attempted_bytes,
+                                             uint64_t elapsed_ns)
+{
+	std::lock_guard<std::mutex> lock(g_pipeline_cache_checkpoint.mutex);
+	g_pipeline_cache_checkpoint.count++;
+	g_pipeline_cache_checkpoint.bytes += attempted_bytes;
+	g_pipeline_cache_checkpoint.total_ns += elapsed_ns;
+	g_pipeline_cache_checkpoint.max_ns = std::max(g_pipeline_cache_checkpoint.max_ns, elapsed_ns);
+	switch (outcome)
+	{
+		case DebugStatsPipelineCacheCheckpointOutcome::Written:
+			g_pipeline_cache_checkpoint.written++;
+			break;
+		case DebugStatsPipelineCacheCheckpointOutcome::Failed:
+			g_pipeline_cache_checkpoint.failed++;
+			break;
+		case DebugStatsPipelineCacheCheckpointOutcome::BudgetExceeded:
+			g_pipeline_cache_checkpoint.budget_exceeded++;
+			break;
+	}
 }
 
 void DebugStatsRecordPipelineMiss(DebugStatsPipelineKind kind, uint64_t elapsed_ns)
@@ -828,6 +884,26 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	take_lookup(g_compute_pipeline_lookup, &snapshot.compute_pipeline_lookup_hits, &snapshot.compute_pipeline_lookup_misses,
 	            &snapshot.compute_pipeline_lookup_ns, &snapshot.compute_pipeline_lookup_max_ns);
 	snapshot.pipeline_evictions = take_window(g_pipeline_evictions);
+	{
+		std::lock_guard<std::mutex> checkpoint_lock(g_pipeline_cache_checkpoint.mutex);
+		snapshot.pipeline_cache_checkpoint_count           = g_pipeline_cache_checkpoint.count;
+		snapshot.pipeline_cache_checkpoint_bytes           = g_pipeline_cache_checkpoint.bytes;
+		snapshot.pipeline_cache_checkpoint_ns              = g_pipeline_cache_checkpoint.total_ns;
+		snapshot.pipeline_cache_checkpoint_max_ns          = g_pipeline_cache_checkpoint.max_ns;
+		snapshot.pipeline_cache_checkpoint_written         = g_pipeline_cache_checkpoint.written;
+		snapshot.pipeline_cache_checkpoint_failed          = g_pipeline_cache_checkpoint.failed;
+		snapshot.pipeline_cache_checkpoint_budget_exceeded = g_pipeline_cache_checkpoint.budget_exceeded;
+		if (reset)
+		{
+			g_pipeline_cache_checkpoint.count           = 0;
+			g_pipeline_cache_checkpoint.bytes           = 0;
+			g_pipeline_cache_checkpoint.total_ns        = 0;
+			g_pipeline_cache_checkpoint.max_ns          = 0;
+			g_pipeline_cache_checkpoint.written         = 0;
+			g_pipeline_cache_checkpoint.failed          = 0;
+			g_pipeline_cache_checkpoint.budget_exceeded = 0;
+		}
+	}
 	take_timed(g_gfx_pipeline_miss, &snapshot.gfx_pipeline_miss_count, &snapshot.gfx_pipeline_miss_ns,
 	           &snapshot.gfx_pipeline_miss_max_ns);
 	take_timed(g_compute_pipeline_miss, &snapshot.compute_pipeline_miss_count, &snapshot.compute_pipeline_miss_ns,

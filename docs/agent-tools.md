@@ -96,7 +96,9 @@ Do not “fix” a `125` by sleeping longer. Machine-readable example:
 500 ms plus one overflow bucket. The wire response contains only sample count,
 p50/p95/p99/max in integer microseconds, and counts above 50/100/250 ms; it
 never serializes histogram buckets. Samples without a positive finite frame
-time are excluded. `--reset` returns the completed window and opens an empty
+time are excluded. Each sample is the monotonic interval between consecutive
+host frame-loop timestamps; it is not reconstructed from the periodically
+averaged FPS value. `--reset` returns the completed window and opens an empty
 one; a snapshot without reset is read-only.
 
 Resource-work fields use the same resettable window and report
@@ -114,7 +116,9 @@ subphases; those subphase times must not be added to it. The renderer also
 reports exact in-memory shader-translation cache hits,
 misses, and host-side evictions; a hit reuses final SPIR-V only when the full
 shader identity, stage, optimization mode, generation mode, and translator
-version match.
+version match. `pipeline_cache_checkpoint_*` reports the exact synchronous
+driver-cache snapshot boundary: attempts, attempted bytes, total/maximum time,
+and written/failed/budget-exceeded outcomes.
 
 `performance.gpu_memory` is a fixed nine-row array ordered and named as
 `video_out_buffer`, `depth_stencil_buffer`, `label`, `index_buffer`,
