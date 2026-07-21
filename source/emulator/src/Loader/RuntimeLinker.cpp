@@ -147,7 +147,7 @@ bool LoaderDecodeEhFrameHeader(const uint8_t* header, size_t header_size, uint64
 
 // Missing-import registry, static StubAllocator, ImportPolicy, and diagnostics
 // live in MissingImport.{h,cpp}. RuntimeLinker::Resolve only coordinates:
-// validate → export wins → policy → AssignFuncStubOrAbort / fatal / zero.
+// validate → allocator policy or export → missing-import policy.
 
 #pragma pack(1)
 
@@ -1430,7 +1430,6 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 	// those imports before its allocator initialization is complete. Its internal
 	// mspace can also remain BSS-zero when the legacy ApplicationHeap table is used.
 	// Prefer the HLE allocator for these NIDs so constructors do not throw
-	// those NIDs so constructors do not throw bad_alloc → terminate
 	// (DebugRaiseException 0xa0020008). Other exports still win over HLE.
 	const bool prefer_hle_allocator =
 	    hle_record != nullptr &&
