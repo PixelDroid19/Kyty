@@ -49,8 +49,8 @@ LIB_VERSION("libc", 1, "libc", 1, 1);
 
 // Gen5 libc/libSceLibcInternal "need" flag: non-zero asks the guest CRT to run
 // heap/TSD bootstrap. Zero claims "already initialized" and skips that path.
-// GRIS (and any title that uses libc's internal mspace before ApplicationHeap
-// create) leaves the mspace at BSS zero when this stays 0, so operator new
+// A title that uses libc's internal mspace before ApplicationHeap create can
+// leave the mspace at BSS zero when this stays 0, so operator new
 // returns null → bad_alloc → terminate (DebugRaiseException 0xa0020008).
 // Keep both LibC and LibcInternal objects in sync.
 static uint32_t g_need_flag = 1;
