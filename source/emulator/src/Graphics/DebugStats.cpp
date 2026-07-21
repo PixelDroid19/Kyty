@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <limits>
 #include <mutex>
 
@@ -112,6 +113,49 @@ std::atomic<uint64_t> g_shader_translation_cache_hits {0};
 std::atomic<uint64_t> g_shader_translation_cache_misses {0};
 std::atomic<uint64_t> g_shader_translation_cache_evictions {0};
 TimedMetric           g_gpu_memory_create;
+
+struct SlowFrameCounters
+{
+	std::atomic<uint64_t> gfx_pipeline_miss_count {0};
+	std::atomic<uint64_t> gfx_pipeline_miss_ns {0};
+	std::atomic<uint64_t> compute_pipeline_miss_count {0};
+	std::atomic<uint64_t> compute_pipeline_miss_ns {0};
+	std::atomic<uint64_t> spirv_compile_count {0};
+	std::atomic<uint64_t> spirv_compile_ns {0};
+	std::atomic<uint64_t> gpu_memory_create_calls {0};
+	std::atomic<uint64_t> gpu_memory_create_ns {0};
+	std::atomic<uint64_t> upload_calls {0};
+	std::atomic<uint64_t> upload_bytes {0};
+	std::atomic<uint64_t> upload_ns {0};
+	std::atomic<uint64_t> writeback_calls {0};
+	std::atomic<uint64_t> writeback_bytes {0};
+	std::atomic<uint64_t> writeback_ns {0};
+};
+
+SlowFrameCounters g_slow_frame_totals;
+SlowFrameCounters g_slow_frame_baseline;
+std::atomic<bool>  g_slow_frame_baseline_valid {false};
+
+struct SlowFrameRing
+{
+	std::array<DebugStatsSlowFrameRecord, kDebugStatsSlowFrameCapacity> records {};
+	uint32_t head    = 0;
+	uint32_t size    = 0;
+	uint64_t dropped = 0;
+};
+
+SlowFrameRing g_slow_frames;
+std::mutex    g_slow_frame_mutex;
+
+struct SlowTotalsGate
+{
+	std::mutex              mutex;
+	std::condition_variable cv;
+	uint32_t                active_writers  = 0;
+	bool                    capture_pending = false;
+};
+
+SlowTotalsGate g_slow_totals_gate;
 
 struct GpuMemoryTypeMetric
 {
@@ -249,6 +293,154 @@ uint64_t FrameTimeUs(double frame_time_ms)
 	return us >= max_us ? std::numeric_limits<uint64_t>::max() : static_cast<uint64_t>(us + 0.5);
 }
 
+class SlowTotalsWriteGuard final
+{
+public:
+	SlowTotalsWriteGuard()
+	{
+		std::unique_lock<std::mutex> lock(g_slow_totals_gate.mutex);
+		g_slow_totals_gate.cv.wait(lock, [] { return !g_slow_totals_gate.capture_pending; });
+		g_slow_totals_gate.active_writers++;
+	}
+	~SlowTotalsWriteGuard()
+	{
+		std::lock_guard<std::mutex> lock(g_slow_totals_gate.mutex);
+		g_slow_totals_gate.active_writers--;
+		if (g_slow_totals_gate.active_writers == 0)
+		{
+			g_slow_totals_gate.cv.notify_all();
+		}
+	}
+
+	KYTY_CLASS_NO_COPY(SlowTotalsWriteGuard);
+};
+
+DebugStatsSlowFrameRecord LoadSlowFrameTotals()
+{
+	DebugStatsSlowFrameRecord totals {};
+	totals.gfx_pipeline_miss_count     = g_slow_frame_totals.gfx_pipeline_miss_count.load(std::memory_order_relaxed);
+	totals.gfx_pipeline_miss_ns        = g_slow_frame_totals.gfx_pipeline_miss_ns.load(std::memory_order_relaxed);
+	totals.compute_pipeline_miss_count = g_slow_frame_totals.compute_pipeline_miss_count.load(std::memory_order_relaxed);
+	totals.compute_pipeline_miss_ns    = g_slow_frame_totals.compute_pipeline_miss_ns.load(std::memory_order_relaxed);
+	totals.spirv_compile_count         = g_slow_frame_totals.spirv_compile_count.load(std::memory_order_relaxed);
+	totals.spirv_compile_ns            = g_slow_frame_totals.spirv_compile_ns.load(std::memory_order_relaxed);
+	totals.gpu_memory_create_calls     = g_slow_frame_totals.gpu_memory_create_calls.load(std::memory_order_relaxed);
+	totals.gpu_memory_create_ns        = g_slow_frame_totals.gpu_memory_create_ns.load(std::memory_order_relaxed);
+	totals.upload_calls                = g_slow_frame_totals.upload_calls.load(std::memory_order_relaxed);
+	totals.upload_bytes                = g_slow_frame_totals.upload_bytes.load(std::memory_order_relaxed);
+	totals.upload_ns                   = g_slow_frame_totals.upload_ns.load(std::memory_order_relaxed);
+	totals.writeback_calls             = g_slow_frame_totals.writeback_calls.load(std::memory_order_relaxed);
+	totals.writeback_bytes             = g_slow_frame_totals.writeback_bytes.load(std::memory_order_relaxed);
+	totals.writeback_ns                = g_slow_frame_totals.writeback_ns.load(std::memory_order_relaxed);
+	return totals;
+}
+
+DebugStatsSlowFrameRecord CaptureSlowFrameTotals()
+{
+	std::unique_lock<std::mutex> lock(g_slow_totals_gate.mutex);
+	g_slow_totals_gate.capture_pending = true;
+	g_slow_totals_gate.cv.wait(lock, [] { return g_slow_totals_gate.active_writers == 0; });
+	auto totals = LoadSlowFrameTotals();
+	g_slow_totals_gate.capture_pending = false;
+	lock.unlock();
+	g_slow_totals_gate.cv.notify_all();
+	return totals;
+}
+
+void StoreSlowFrameBaseline(const DebugStatsSlowFrameRecord& totals)
+{
+	g_slow_frame_baseline.gfx_pipeline_miss_count.store(totals.gfx_pipeline_miss_count, std::memory_order_relaxed);
+	g_slow_frame_baseline.gfx_pipeline_miss_ns.store(totals.gfx_pipeline_miss_ns, std::memory_order_relaxed);
+	g_slow_frame_baseline.compute_pipeline_miss_count.store(totals.compute_pipeline_miss_count, std::memory_order_relaxed);
+	g_slow_frame_baseline.compute_pipeline_miss_ns.store(totals.compute_pipeline_miss_ns, std::memory_order_relaxed);
+	g_slow_frame_baseline.spirv_compile_count.store(totals.spirv_compile_count, std::memory_order_relaxed);
+	g_slow_frame_baseline.spirv_compile_ns.store(totals.spirv_compile_ns, std::memory_order_relaxed);
+	g_slow_frame_baseline.gpu_memory_create_calls.store(totals.gpu_memory_create_calls, std::memory_order_relaxed);
+	g_slow_frame_baseline.gpu_memory_create_ns.store(totals.gpu_memory_create_ns, std::memory_order_relaxed);
+	g_slow_frame_baseline.upload_calls.store(totals.upload_calls, std::memory_order_relaxed);
+	g_slow_frame_baseline.upload_bytes.store(totals.upload_bytes, std::memory_order_relaxed);
+	g_slow_frame_baseline.upload_ns.store(totals.upload_ns, std::memory_order_relaxed);
+	g_slow_frame_baseline.writeback_calls.store(totals.writeback_calls, std::memory_order_relaxed);
+	g_slow_frame_baseline.writeback_bytes.store(totals.writeback_bytes, std::memory_order_relaxed);
+	g_slow_frame_baseline.writeback_ns.store(totals.writeback_ns, std::memory_order_relaxed);
+}
+
+DebugStatsSlowFrameRecord AdvanceSlowFrameBaseline(const DebugStatsSlowFrameRecord& totals, bool* had_baseline)
+{
+	DebugStatsSlowFrameRecord delta {};
+	*had_baseline = g_slow_frame_baseline_valid.load(std::memory_order_relaxed);
+	g_slow_frame_baseline_valid.store(true, std::memory_order_relaxed);
+#define KYTY_SLOW_FRAME_DELTA(field)                                                                                                \
+	delta.field = totals.field - g_slow_frame_baseline.field.load(std::memory_order_relaxed);                                          \
+	g_slow_frame_baseline.field.store(totals.field, std::memory_order_relaxed)
+	KYTY_SLOW_FRAME_DELTA(gfx_pipeline_miss_count);
+	KYTY_SLOW_FRAME_DELTA(gfx_pipeline_miss_ns);
+	KYTY_SLOW_FRAME_DELTA(compute_pipeline_miss_count);
+	KYTY_SLOW_FRAME_DELTA(compute_pipeline_miss_ns);
+	KYTY_SLOW_FRAME_DELTA(spirv_compile_count);
+	KYTY_SLOW_FRAME_DELTA(spirv_compile_ns);
+	KYTY_SLOW_FRAME_DELTA(gpu_memory_create_calls);
+	KYTY_SLOW_FRAME_DELTA(gpu_memory_create_ns);
+	KYTY_SLOW_FRAME_DELTA(upload_calls);
+	KYTY_SLOW_FRAME_DELTA(upload_bytes);
+	KYTY_SLOW_FRAME_DELTA(upload_ns);
+	KYTY_SLOW_FRAME_DELTA(writeback_calls);
+	KYTY_SLOW_FRAME_DELTA(writeback_bytes);
+	KYTY_SLOW_FRAME_DELTA(writeback_ns);
+#undef KYTY_SLOW_FRAME_DELTA
+	return delta;
+}
+
+void RecordFlipCorrelation(uint64_t duration_us, uint64_t flip_seq)
+{
+	const bool slow = duration_us > 50000;
+	if (!slow)
+	{
+		bool ignored = false;
+		AdvanceSlowFrameBaseline(CaptureSlowFrameTotals(), &ignored);
+		return;
+	}
+
+	bool had_baseline = false;
+	auto record       = AdvanceSlowFrameBaseline(CaptureSlowFrameTotals(), &had_baseline);
+	if (!had_baseline)
+	{
+		return;
+	}
+	record.duration_us = duration_us;
+	record.flip_seq    = flip_seq;
+	const uint32_t index = (g_slow_frames.head + g_slow_frames.size) % kDebugStatsSlowFrameCapacity;
+	if (g_slow_frames.size == kDebugStatsSlowFrameCapacity)
+	{
+		g_slow_frames.records[g_slow_frames.head] = record;
+		g_slow_frames.head = (g_slow_frames.head + 1) % kDebugStatsSlowFrameCapacity;
+		g_slow_frames.dropped++;
+	} else
+	{
+		g_slow_frames.records[index] = record;
+		g_slow_frames.size++;
+	}
+}
+
+void CopySlowFrames(bool reset, DebugStatsSlowFrameSnapshot* out)
+{
+	out->capacity = kDebugStatsSlowFrameCapacity;
+	out->size     = g_slow_frames.size;
+	out->dropped  = g_slow_frames.dropped;
+	for (uint32_t i = 0; i < g_slow_frames.size; ++i)
+	{
+		out->records[i] = g_slow_frames.records[(g_slow_frames.head + i) % kDebugStatsSlowFrameCapacity];
+	}
+	if (reset)
+	{
+		g_slow_frames.head    = 0;
+		g_slow_frames.size    = 0;
+		g_slow_frames.dropped = 0;
+		StoreSlowFrameBaseline(CaptureSlowFrameTotals());
+		g_slow_frame_baseline_valid.store(true, std::memory_order_relaxed);
+	}
+}
+
 uint64_t PercentileUs(const FrameHistogram& histogram, uint64_t samples, uint64_t percentile, uint64_t maximum_us)
 {
 	if (samples == 0)
@@ -349,6 +541,33 @@ void DebugStatsInit()
 	g_shader_translation_cache_misses.store(0, std::memory_order_relaxed);
 	g_shader_translation_cache_evictions.store(0, std::memory_order_relaxed);
 	ResetTimed(&g_gpu_memory_create);
+	DebugStatsSlowFrameRecord zero_slow_totals {};
+	StoreSlowFrameBaseline(zero_slow_totals);
+#define KYTY_RESET_SLOW_FRAME_TOTAL(field) g_slow_frame_totals.field.store(0, std::memory_order_relaxed)
+	KYTY_RESET_SLOW_FRAME_TOTAL(gfx_pipeline_miss_count);
+	KYTY_RESET_SLOW_FRAME_TOTAL(gfx_pipeline_miss_ns);
+	KYTY_RESET_SLOW_FRAME_TOTAL(compute_pipeline_miss_count);
+	KYTY_RESET_SLOW_FRAME_TOTAL(compute_pipeline_miss_ns);
+	KYTY_RESET_SLOW_FRAME_TOTAL(spirv_compile_count);
+	KYTY_RESET_SLOW_FRAME_TOTAL(spirv_compile_ns);
+	KYTY_RESET_SLOW_FRAME_TOTAL(gpu_memory_create_calls);
+	KYTY_RESET_SLOW_FRAME_TOTAL(gpu_memory_create_ns);
+	KYTY_RESET_SLOW_FRAME_TOTAL(upload_calls);
+	KYTY_RESET_SLOW_FRAME_TOTAL(upload_bytes);
+	KYTY_RESET_SLOW_FRAME_TOTAL(upload_ns);
+	KYTY_RESET_SLOW_FRAME_TOTAL(writeback_calls);
+	KYTY_RESET_SLOW_FRAME_TOTAL(writeback_bytes);
+	KYTY_RESET_SLOW_FRAME_TOTAL(writeback_ns);
+#undef KYTY_RESET_SLOW_FRAME_TOTAL
+	g_slow_frame_baseline_valid.store(false, std::memory_order_relaxed);
+	{
+		std::lock_guard<std::mutex> lock(g_slow_totals_gate.mutex);
+		g_slow_totals_gate.active_writers  = 0;
+		g_slow_totals_gate.capture_pending = false;
+	}
+	g_slow_frames.head    = 0;
+	g_slow_frames.size    = 0;
+	g_slow_frames.dropped = 0;
 	for (auto& type: g_gpu_memory_types)
 	{
 		type.cached_reuse.store(0, std::memory_order_relaxed);
@@ -434,10 +653,12 @@ void DebugStatsRecordFree(uint64_t bytes)
 
 void DebugStatsRecordFlip(double fps, double frame_time_ms)
 {
-	g_flips.fetch_add(1, std::memory_order_relaxed);
+	std::lock_guard<std::mutex> frame_lock(g_slow_frame_mutex);
+	const uint64_t flip_seq = g_flips.fetch_add(1, std::memory_order_relaxed) + 1;
 	g_last_fps.store(fps, std::memory_order_relaxed);
 	g_last_frame_ms.store(frame_time_ms, std::memory_order_relaxed);
 	const uint64_t frame_time_us = FrameTimeUs(frame_time_ms);
+	RecordFlipCorrelation(frame_time_us, flip_seq);
 	if (frame_time_us == 0)
 	{
 		return;
@@ -523,11 +744,19 @@ void DebugStatsRecordDetile(uint64_t bytes, uint64_t elapsed_ns)
 void DebugStatsRecordUpload(uint64_t bytes, uint64_t elapsed_ns)
 {
 	RecordWork(&g_upload_calls, &g_upload_bytes, &g_upload_ns, &g_upload_max_ns, bytes, elapsed_ns);
+	SlowTotalsWriteGuard totals_write;
+	g_slow_frame_totals.upload_calls.fetch_add(1, std::memory_order_relaxed);
+	g_slow_frame_totals.upload_bytes.fetch_add(bytes, std::memory_order_relaxed);
+	g_slow_frame_totals.upload_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
 }
 
 void DebugStatsRecordWriteBack(uint64_t bytes, uint64_t elapsed_ns)
 {
 	RecordWork(&g_writeback_calls, &g_writeback_bytes, &g_writeback_ns, &g_writeback_max_ns, bytes, elapsed_ns);
+	SlowTotalsWriteGuard totals_write;
+	g_slow_frame_totals.writeback_calls.fetch_add(1, std::memory_order_relaxed);
+	g_slow_frame_totals.writeback_bytes.fetch_add(bytes, std::memory_order_relaxed);
+	g_slow_frame_totals.writeback_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
 }
 
 void DebugStatsRecordPipelineLookup(DebugStatsPipelineKind kind, bool hit, uint64_t elapsed_ns)
@@ -568,6 +797,13 @@ void DebugStatsRecordPipelineCacheCheckpoint(DebugStatsPipelineCacheCheckpointOu
 void DebugStatsRecordPipelineMiss(DebugStatsPipelineKind kind, uint64_t elapsed_ns)
 {
 	RecordTimed(kind == DebugStatsPipelineKind::Graphics ? &g_gfx_pipeline_miss : &g_compute_pipeline_miss, elapsed_ns);
+	SlowTotalsWriteGuard totals_write;
+	auto& count = kind == DebugStatsPipelineKind::Graphics ? g_slow_frame_totals.gfx_pipeline_miss_count
+	                                                      : g_slow_frame_totals.compute_pipeline_miss_count;
+	auto& total = kind == DebugStatsPipelineKind::Graphics ? g_slow_frame_totals.gfx_pipeline_miss_ns
+	                                                      : g_slow_frame_totals.compute_pipeline_miss_ns;
+	count.fetch_add(1, std::memory_order_relaxed);
+	total.fetch_add(elapsed_ns, std::memory_order_relaxed);
 }
 
 void DebugStatsRecordShaderIrParse(DebugStatsShaderParseKind kind, uint64_t elapsed_ns)
@@ -583,6 +819,9 @@ void DebugStatsRecordSpirvSource(uint64_t elapsed_ns)
 void DebugStatsRecordSpirvCompile(uint64_t elapsed_ns)
 {
 	RecordTimed(&g_spirv_compile, elapsed_ns);
+	SlowTotalsWriteGuard totals_write;
+	g_slow_frame_totals.spirv_compile_count.fetch_add(1, std::memory_order_relaxed);
+	g_slow_frame_totals.spirv_compile_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
 }
 
 void DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind kind, uint64_t elapsed_ns)
@@ -607,6 +846,11 @@ void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCre
 	}
 
 	RecordTimed(&g_gpu_memory_create, elapsed_ns);
+	{
+		SlowTotalsWriteGuard totals_write;
+		g_slow_frame_totals.gpu_memory_create_calls.fetch_add(1, std::memory_order_relaxed);
+		g_slow_frame_totals.gpu_memory_create_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+	}
 	auto& type = g_gpu_memory_types[type_index];
 	switch (outcome)
 	{
@@ -766,7 +1010,7 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	const uint64_t free_bytes        = g_free_bytes.load(std::memory_order_relaxed);
 	const uint64_t creates           = g_create_count.load(std::memory_order_relaxed);
 	const uint64_t frees             = g_free_count.load(std::memory_order_relaxed);
-	const uint64_t flips             = g_flips.load(std::memory_order_relaxed);
+	uint64_t       flips             = 0;
 	const uint64_t buffer_flushes    = g_buffer_flushes.load(std::memory_order_relaxed);
 	const uint64_t command_buffers   = g_command_buffers.load(std::memory_order_relaxed);
 	const uint64_t submits           = g_submits.load(std::memory_order_relaxed);
@@ -795,7 +1039,6 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	snapshot.free_bytes      = free_bytes - g_performance_baseline.free_bytes;
 	snapshot.creates         = creates - g_performance_baseline.creates;
 	snapshot.frees           = frees - g_performance_baseline.frees;
-	snapshot.flips           = flips - g_performance_baseline.flips;
 	snapshot.buffer_flushes  = buffer_flushes - g_performance_baseline.buffer_flushes;
 	snapshot.command_buffers = command_buffers - g_performance_baseline.command_buffers;
 	snapshot.submits         = submits - g_performance_baseline.submits;
@@ -829,23 +1072,29 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	                                   : g_in_flight_max.load(std::memory_order_relaxed);
 
 	FrameHistogram frame_histogram {};
-	for (size_t i = 0; i < frame_histogram.size(); ++i)
 	{
-		frame_histogram[i] =
-		    reset ? g_frame_histogram[i].exchange(0, std::memory_order_relaxed) : g_frame_histogram[i].load(std::memory_order_relaxed);
-		snapshot.frame_samples += frame_histogram[i];
+		std::lock_guard<std::mutex> frame_lock(g_slow_frame_mutex);
+		flips          = g_flips.load(std::memory_order_relaxed);
+		snapshot.flips = flips - g_performance_baseline.flips;
+		for (size_t i = 0; i < frame_histogram.size(); ++i)
+		{
+			frame_histogram[i] = reset ? g_frame_histogram[i].exchange(0, std::memory_order_relaxed)
+			                           : g_frame_histogram[i].load(std::memory_order_relaxed);
+			snapshot.frame_samples += frame_histogram[i];
+		}
+		snapshot.frame_time_max_us =
+		    reset ? g_frame_time_max_us.exchange(0, std::memory_order_relaxed) : g_frame_time_max_us.load(std::memory_order_relaxed);
+		snapshot.frames_over_50ms =
+		    reset ? g_frames_over_50ms.exchange(0, std::memory_order_relaxed) : g_frames_over_50ms.load(std::memory_order_relaxed);
+		snapshot.frames_over_100ms =
+		    reset ? g_frames_over_100ms.exchange(0, std::memory_order_relaxed) : g_frames_over_100ms.load(std::memory_order_relaxed);
+		snapshot.frames_over_250ms =
+		    reset ? g_frames_over_250ms.exchange(0, std::memory_order_relaxed) : g_frames_over_250ms.load(std::memory_order_relaxed);
+		CopySlowFrames(reset, &snapshot.slow_frames);
 	}
-	snapshot.frame_time_max_us =
-	    reset ? g_frame_time_max_us.exchange(0, std::memory_order_relaxed) : g_frame_time_max_us.load(std::memory_order_relaxed);
 	snapshot.frame_time_p50_us = PercentileUs(frame_histogram, snapshot.frame_samples, 50, snapshot.frame_time_max_us);
 	snapshot.frame_time_p95_us = PercentileUs(frame_histogram, snapshot.frame_samples, 95, snapshot.frame_time_max_us);
 	snapshot.frame_time_p99_us = PercentileUs(frame_histogram, snapshot.frame_samples, 99, snapshot.frame_time_max_us);
-	snapshot.frames_over_50ms =
-	    reset ? g_frames_over_50ms.exchange(0, std::memory_order_relaxed) : g_frames_over_50ms.load(std::memory_order_relaxed);
-	snapshot.frames_over_100ms =
-	    reset ? g_frames_over_100ms.exchange(0, std::memory_order_relaxed) : g_frames_over_100ms.load(std::memory_order_relaxed);
-	snapshot.frames_over_250ms =
-	    reset ? g_frames_over_250ms.exchange(0, std::memory_order_relaxed) : g_frames_over_250ms.load(std::memory_order_relaxed);
 
 	auto take_window = [reset](std::atomic<uint64_t>& value)
 	{ return reset ? value.exchange(0, std::memory_order_relaxed) : value.load(std::memory_order_relaxed); };

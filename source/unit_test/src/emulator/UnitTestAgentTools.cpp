@@ -595,6 +595,280 @@ TEST(AgentTools, PerformanceSnapshotReportsPresentSourceAndDestination)
 	DebugStatsShutdown();
 }
 
+TEST(AgentTools, SlowFrameTelemetryUsesPreviousFlipAsItsBaseline)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, 100);
+	DebugStatsRecordSpirvCompile(200);
+	DebugStatsRecordFlip(10.0, 60.0); // First flip establishes the baseline only.
+
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, 300);
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, 400);
+	DebugStatsRecordSpirvCompile(500);
+	DebugStatsRecordGpuMemoryCreate(0, DebugStatsGpuMemoryCreateOutcome::CachedReuse, 600);
+	DebugStatsRecordUpload(700, 800);
+	DebugStatsRecordWriteBack(900, 1000);
+	DebugStatsRecordFlip(60.0, 50.0); // Threshold is strictly greater than 50 ms.
+
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, 1100);
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, 1200);
+	DebugStatsRecordSpirvCompile(1300);
+	DebugStatsRecordGpuMemoryCreate(0, DebugStatsGpuMemoryCreateOutcome::FastReuse, 1400);
+	DebugStatsRecordUpload(1500, 1600);
+	DebugStatsRecordWriteBack(1700, 1800);
+	DebugStatsRecordFlip(10.0, 50.001);
+
+	const DebugStatsPerformanceSnapshot snapshot = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_EQ(snapshot.slow_frames.size, 1u);
+	EXPECT_EQ(snapshot.slow_frames.capacity, kDebugStatsSlowFrameCapacity);
+	EXPECT_EQ(snapshot.slow_frames.dropped, 0u);
+	const auto& frame = snapshot.slow_frames.records[0];
+	EXPECT_EQ(frame.duration_us, 50001u);
+	EXPECT_EQ(frame.flip_seq, 3u);
+	EXPECT_EQ(frame.gfx_pipeline_miss_count, 1u);
+	EXPECT_EQ(frame.gfx_pipeline_miss_ns, 1100u);
+	EXPECT_EQ(frame.compute_pipeline_miss_count, 1u);
+	EXPECT_EQ(frame.compute_pipeline_miss_ns, 1200u);
+	EXPECT_EQ(frame.spirv_compile_count, 1u);
+	EXPECT_EQ(frame.spirv_compile_ns, 1300u);
+	EXPECT_EQ(frame.gpu_memory_create_calls, 1u);
+	EXPECT_EQ(frame.gpu_memory_create_ns, 1400u);
+	EXPECT_EQ(frame.upload_calls, 1u);
+	EXPECT_EQ(frame.upload_bytes, 1500u);
+	EXPECT_EQ(frame.upload_ns, 1600u);
+	EXPECT_EQ(frame.writeback_calls, 1u);
+	EXPECT_EQ(frame.writeback_bytes, 1700u);
+	EXPECT_EQ(frame.writeback_ns, 1800u);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, SlowFrameTelemetryEstablishesBaselineOnAnUntimedFirstFlip)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsRecordSpirvCompile(100);
+	DebugStatsRecordFlip(0.0, 0.0);
+	DebugStatsRecordSpirvCompile(200);
+	DebugStatsRecordFlip(10.0, 60.0);
+
+	const DebugStatsPerformanceSnapshot snapshot = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_EQ(snapshot.slow_frames.size, 1u);
+	EXPECT_EQ(snapshot.slow_frames.records[0].flip_seq, 2u);
+	EXPECT_EQ(snapshot.slow_frames.records[0].spirv_compile_count, 1u);
+	EXPECT_EQ(snapshot.slow_frames.records[0].spirv_compile_ns, 200u);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, SlowFrameTelemetryKeepsNewestRecordsInChronologicalOrder)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsRecordFlip(60.0, 16.0);
+	for (uint64_t i = 0; i < kDebugStatsSlowFrameCapacity + 3u; ++i)
+	{
+		DebugStatsRecordFlip(10.0, 51.0 + static_cast<double>(i) / 1000.0);
+	}
+
+	const DebugStatsPerformanceSnapshot snapshot = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_EQ(snapshot.slow_frames.size, kDebugStatsSlowFrameCapacity);
+	EXPECT_EQ(snapshot.slow_frames.dropped, 3u);
+	EXPECT_EQ(snapshot.slow_frames.records.front().flip_seq, 5u);
+	EXPECT_EQ(snapshot.slow_frames.records.front().duration_us, 51003u);
+	EXPECT_EQ(snapshot.slow_frames.records.back().flip_seq, kDebugStatsSlowFrameCapacity + 4u);
+	EXPECT_EQ(snapshot.slow_frames.records.back().duration_us, 51000u + kDebugStatsSlowFrameCapacity + 2u);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, SlowFrameResetClearsHistoryAndUsesCurrentCountersAsBaseline)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsRecordFlip(60.0, 16.0);
+	DebugStatsRecordSpirvCompile(100);
+	DebugStatsRecordFlip(10.0, 60.0);
+	ASSERT_EQ(DebugStatsGetPerformanceSnapshot(true).slow_frames.size, 1u);
+
+	DebugStatsRecordSpirvCompile(200);
+	DebugStatsRecordFlip(10.0, 70.0);
+	const DebugStatsPerformanceSnapshot snapshot = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_EQ(snapshot.slow_frames.size, 1u);
+	EXPECT_EQ(snapshot.slow_frames.dropped, 0u);
+	EXPECT_EQ(snapshot.slow_frames.records[0].spirv_compile_count, 1u);
+	EXPECT_EQ(snapshot.slow_frames.records[0].spirv_compile_ns, 200u);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, SlowFramePerformanceJsonUsesTheSharedStableSchema)
+{
+	Libs::Graphics::DebugStatsPerformanceSnapshot snapshot {};
+	snapshot.slow_frames.size                             = 1;
+	snapshot.slow_frames.dropped                          = 2;
+	snapshot.slow_frames.records[0].duration_us           = 75000;
+	snapshot.slow_frames.records[0].flip_seq              = 9;
+	snapshot.slow_frames.records[0].gfx_pipeline_miss_count = 3;
+	snapshot.slow_frames.records[0].gfx_pipeline_miss_ns  = 400;
+	snapshot.slow_frames.records[0].upload_calls          = 5;
+	snapshot.slow_frames.records[0].upload_bytes          = 600;
+	snapshot.slow_frames.records[0].upload_ns             = 700;
+
+	std::string json;
+	AppendSlowFramePerformanceJson(snapshot, &json);
+
+	EXPECT_NE(json.find(R"("slow_frames":{"capacity":64,"size":1,"dropped":2,"correlation":"temporal_not_causal")"),
+	          std::string::npos);
+	EXPECT_NE(json.find(R"("duration_us":75000,"flip_seq":9,"gfx_pipeline_miss_count":3,"gfx_pipeline_miss_ns":400)"),
+	          std::string::npos);
+	EXPECT_NE(json.find(R"("upload_calls":5,"upload_bytes":600,"upload_ns":700)"), std::string::npos);
+}
+
+TEST(AgentTools, SlowFrameResetIsConcurrentWithOneCompleteFlipPublication)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsRecordFlip(60.0, 16.0);
+	DebugStatsGetPerformanceSnapshot(true);
+	constexpr uint32_t writer_count      = 4;
+	constexpr uint32_t events_per_writer = 5000;
+	std::atomic<uint32_t> writers_left {writer_count};
+	std::atomic<uint32_t> inconsistent {0};
+	auto validate = [&inconsistent](const DebugStatsPerformanceSnapshot& snapshot)
+	{
+		if (snapshot.frames_over_50ms != static_cast<uint64_t>(snapshot.slow_frames.size) + snapshot.slow_frames.dropped ||
+		    snapshot.frame_samples != snapshot.frames_over_50ms || snapshot.slow_frames.size > kDebugStatsSlowFrameCapacity)
+		{
+			inconsistent.fetch_or(1u, std::memory_order_relaxed);
+		}
+		uint64_t previous_seq = 0;
+		for (uint32_t i = 0; i < snapshot.slow_frames.size; ++i)
+		{
+			const auto& frame = snapshot.slow_frames.records[i];
+			if ((i != 0 && frame.flip_seq <= previous_seq) || frame.duration_us != 60000u)
+			{
+				inconsistent.fetch_or(2u, std::memory_order_relaxed);
+			}
+			if (frame.upload_bytes != frame.upload_calls * 7u || frame.upload_ns != frame.upload_calls * 11u)
+				inconsistent.fetch_or(4u, std::memory_order_relaxed);
+			if (frame.writeback_bytes != frame.writeback_calls * 13u || frame.writeback_ns != frame.writeback_calls * 17u)
+				inconsistent.fetch_or(8u, std::memory_order_relaxed);
+			if (frame.gfx_pipeline_miss_ns != frame.gfx_pipeline_miss_count * 19u)
+				inconsistent.fetch_or(16u, std::memory_order_relaxed);
+			if (frame.spirv_compile_ns != frame.spirv_compile_count * 23u)
+				inconsistent.fetch_or(32u, std::memory_order_relaxed);
+			if (frame.gpu_memory_create_ns != frame.gpu_memory_create_calls * 29u)
+				inconsistent.fetch_or(64u, std::memory_order_relaxed);
+			previous_seq = frame.flip_seq;
+		}
+	};
+
+	std::vector<std::thread> recorders;
+	for (uint32_t writer = 0; writer < writer_count; ++writer)
+	{
+		recorders.emplace_back(
+		    [&]
+		    {
+			    for (uint32_t i = 0; i < events_per_writer; ++i)
+			    {
+				    DebugStatsRecordUpload(7, 11);
+				    DebugStatsRecordWriteBack(13, 17);
+				    DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, 19);
+				    DebugStatsRecordSpirvCompile(23);
+				    DebugStatsRecordGpuMemoryCreate(0, DebugStatsGpuMemoryCreateOutcome::CachedReuse, 29);
+				    DebugStatsRecordFlip(10.0, 60.0);
+			    }
+			    writers_left.fetch_sub(1, std::memory_order_release);
+		    });
+	}
+	while (writers_left.load(std::memory_order_acquire) != 0)
+	{
+		validate(DebugStatsGetPerformanceSnapshot(true));
+		std::this_thread::yield();
+	}
+	for (auto& recorder: recorders)
+	{
+		recorder.join();
+	}
+	validate(DebugStatsGetPerformanceSnapshot(true));
+
+	EXPECT_EQ(inconsistent.load(std::memory_order_relaxed), 0u);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, SlowFramePerformanceJsonClampsInvalidSnapshotSize)
+{
+	Libs::Graphics::DebugStatsPerformanceSnapshot snapshot {};
+	snapshot.slow_frames.capacity = 999;
+	snapshot.slow_frames.size = Libs::Graphics::kDebugStatsSlowFrameCapacity + 10u;
+	for (uint32_t i = 0; i < Libs::Graphics::kDebugStatsSlowFrameCapacity; ++i)
+	{
+		snapshot.slow_frames.records[i].flip_seq = i + 1;
+	}
+
+	std::string json;
+	AppendSlowFramePerformanceJson(snapshot, &json);
+	EXPECT_NE(json.find(R"("capacity":64,"size":64)"), std::string::npos);
+	EXPECT_EQ(json.find(R"("flip_seq":65)"), std::string::npos);
+}
+
+TEST(AgentTools, SlowFrameCaptureProgressesUnderSustainedIndependentPublishers)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsRecordFlip(60.0, 16.0);
+	DebugStatsGetPerformanceSnapshot(true);
+	std::atomic<bool> stop {false};
+	std::array<std::atomic<uint64_t>, 4> progress {};
+	std::vector<std::thread> publishers;
+	for (uint32_t publisher = 0; publisher < progress.size(); ++publisher)
+	{
+		publishers.emplace_back(
+		    [&, publisher]
+		    {
+			    while (!stop.load(std::memory_order_acquire))
+			    {
+				    switch (publisher)
+				    {
+					    case 0: DebugStatsRecordUpload(7, 11); break;
+					    case 1: DebugStatsRecordWriteBack(13, 17); break;
+					    case 2: DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, 19); break;
+					    default: DebugStatsRecordSpirvCompile(23); break;
+				    }
+				    progress[publisher].fetch_add(1, std::memory_order_relaxed);
+			    }
+		    });
+	}
+
+	const auto start = std::chrono::steady_clock::now();
+	auto       maximum_capture = std::chrono::steady_clock::duration::zero();
+	for (uint32_t i = 0; i < 4000; ++i)
+	{
+		const auto capture_start = std::chrono::steady_clock::now();
+		DebugStatsRecordFlip(10.0, 60.0);
+		DebugStatsGetPerformanceSnapshot((i % 31u) == 0u);
+		maximum_capture = std::max(maximum_capture, std::chrono::steady_clock::now() - capture_start);
+	}
+	stop.store(true, std::memory_order_release);
+	for (auto& publisher: publishers)
+	{
+		publisher.join();
+	}
+	const auto elapsed = std::chrono::steady_clock::now() - start;
+
+	for (const auto& count: progress)
+	{
+		EXPECT_GT(count.load(std::memory_order_relaxed), 0u);
+	}
+	EXPECT_LT(elapsed, std::chrono::seconds(5));
+	EXPECT_LT(maximum_capture, std::chrono::seconds(1));
+	DebugStatsShutdown();
+}
+
 TEST(AgentTools, ProtocolRejectsUnknownShape)
 {
 	Request   req {};

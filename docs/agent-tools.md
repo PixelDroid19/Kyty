@@ -120,6 +120,22 @@ version match. `pipeline_cache_checkpoint_*` reports the exact synchronous
 driver-cache snapshot boundary: attempts, attempted bytes, total/maximum time,
 and written/failed/budget-exceeded outcomes.
 
+`performance.slow_frames` is a fixed 64-record ring containing only flips
+strictly slower than 50 ms. Records remain in chronological order and expose
+`capacity`, current `size`, and overwritten-record `dropped` count. Each record
+contains the frame duration and flip sequence together with the changes since
+the preceding flip in graphics/compute pipeline misses, SPIR-V compilation,
+GPU-memory creation, upload, and writeback work. The first flip establishes the
+baseline and is never attributed earlier work. `--reset` returns and clears the
+ring, then establishes a new baseline from the current cumulative counters.
+These fields provide **temporal correlation, not causality**: overlapping work
+can identify a seam to investigate, but cannot by itself prove the producer of
+a stall. Flip publication and snapshot/reset share one short mutex boundary so
+a frame cannot be split across histogram, threshold, and ring windows. Work
+producers remain concurrent after a short admission step. A pending flip
+temporarily closes admission, waits only for already-active publishers, copies
+the fixed cumulative counters, and immediately reopens publication.
+
 `performance.gpu_memory` is a fixed nine-row array ordered and named as
 `video_out_buffer`, `depth_stencil_buffer`, `label`, `index_buffer`,
 `vertex_buffer`, `storage_buffer`, `texture`, `render_texture`, and
