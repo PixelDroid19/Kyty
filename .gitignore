@@ -6,6 +6,7 @@
 
 # Build output
 _build*/
+_bin*/
 build/
 out/
 cmake-build-*/
@@ -17,6 +18,7 @@ cmake-build-*/
 # Local run configs and generated logs (contain machine-specific game paths)
 _run/
 *.log
+*.cer
 
 # Private emulator runtime state and compatibility evidence
 _SaveData/

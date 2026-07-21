@@ -29,6 +29,7 @@
 #include <ctime>
 #include <cwchar>
 #include <mutex>
+#include <setjmp.h>
 #include <strings.h>
 #include <unordered_map>
 
@@ -36,11 +37,56 @@
 #include <malloc.h>
 #endif
 
-// setjmp/longjmp: must NOT be wrapped in a C++ function (the wrapper frame would
-// be gone by the time longjmp fires). Kyty runs guest code natively, so we bind
-// the guest NIDs straight to the host implementations.
-extern "C" int  _setjmp(void*);
-extern "C" void _longjmp(void*, int);
+// Orbis uses the FreeBSD amd64 _setjmp layout (72 bytes). UCRT's jmp_buf is
+// 256 bytes and has a different layout, so forwarding to host setjmp corrupts
+// adjacent guest memory. Save and restore the guest SysV context directly.
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+extern "C" KYTY_SYSV_ABI __attribute__((naked)) int kyty_setjmp(void* /*env*/)
+{
+	__asm__ volatile("movq (%rsp), %rdx\n\t"
+	                 "movq %rdx, 0(%rdi)\n\t"
+	                 "movq %rbx, 8(%rdi)\n\t"
+	                 "movq %rsp, 16(%rdi)\n\t"
+	                 "movq %rbp, 24(%rdi)\n\t"
+	                 "movq %r12, 32(%rdi)\n\t"
+	                 "movq %r13, 40(%rdi)\n\t"
+	                 "movq %r14, 48(%rdi)\n\t"
+	                 "movq %r15, 56(%rdi)\n\t"
+	                 "fnstcw 64(%rdi)\n\t"
+	                 "stmxcsr 68(%rdi)\n\t"
+	                 "xorl %eax, %eax\n\t"
+	                 "ret\n\t");
+}
+
+extern "C" KYTY_SYSV_ABI __attribute__((naked)) void kyty_longjmp(void* /*env*/, int /*value*/)
+{
+	__asm__ volatile("movq %rdi, %rdx\n\t"
+	                 "stmxcsr -4(%rsp)\n\t"
+	                 "movl 68(%rdx), %eax\n\t"
+	                 "andl $0xffffffc0, %eax\n\t"
+	                 "movl -4(%rsp), %edi\n\t"
+	                 "andl $0x3f, %edi\n\t"
+	                 "xorl %eax, %edi\n\t"
+	                 "movl %edi, -4(%rsp)\n\t"
+	                 "ldmxcsr -4(%rsp)\n\t"
+	                 "movl %esi, %eax\n\t"
+	                 "movq 0(%rdx), %rcx\n\t"
+	                 "movq 8(%rdx), %rbx\n\t"
+	                 "movq 16(%rdx), %rsp\n\t"
+	                 "movq 24(%rdx), %rbp\n\t"
+	                 "movq 32(%rdx), %r12\n\t"
+	                 "movq 40(%rdx), %r13\n\t"
+	                 "movq 48(%rdx), %r14\n\t"
+	                 "movq 56(%rdx), %r15\n\t"
+	                 "fldcw 64(%rdx)\n\t"
+	                 "testl %eax, %eax\n\t"
+	                 "jnz 1f\n\t"
+	                 "incl %eax\n\t"
+	                 "1:\n\t"
+	                 "movq %rcx, (%rsp)\n\t"
+	                 "ret\n\t");
+}
+#endif
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -1164,9 +1210,28 @@ static KYTY_SYSV_ABI double c_atof(const char* s)
 {
 	return ::atof(s);
 }
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+using GuestQsortCompare = int(KYTY_SYSV_ABI*)(const void*, const void*);
+static thread_local GuestQsortCompare g_guest_qsort_compare = nullptr;
+
+static int qsort_compare_bridge(const void* lhs, const void* rhs)
+{
+	EXIT_IF(g_guest_qsort_compare == nullptr);
+	return g_guest_qsort_compare(lhs, rhs);
+}
+#endif
+
 static KYTY_SYSV_ABI void c_qsort(void* base, size_t n, size_t sz, int(KYTY_SYSV_ABI* cmp)(const void*, const void*))
 {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	auto previous         = g_guest_qsort_compare;
+	g_guest_qsort_compare = cmp;
+	::qsort(base, n, sz, qsort_compare_bridge);
+	g_guest_qsort_compare = previous;
+#else
 	::qsort(base, n, sz, reinterpret_cast<int (*)(const void*, const void*)>(cmp));
+#endif
 }
 static KYTY_SYSV_ABI void c_abort()
 {
@@ -2422,8 +2487,13 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("tQIo+GIPklo", LibC::c_Xlength_error);
 
 	// setjmp / longjmp (bound directly to host — no C++ wrapper)
+	#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	LIB_FUNC("gNQ1V2vfXDE", kyty_setjmp);
+	LIB_FUNC("lKEN2IebgJ0", kyty_longjmp);
+	#else
 	LIB_FUNC("gNQ1V2vfXDE", _setjmp);
 	LIB_FUNC("lKEN2IebgJ0", _longjmp);
+	#endif
 }
 
 } // namespace Kyty::Libs

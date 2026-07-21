@@ -18,6 +18,8 @@
 #include <windows.h> // IWYU pragma: keep
 #endif
 
+#include <cstdlib>
+
 #ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
 #if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__)) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 1
@@ -688,6 +690,20 @@ class ExceptionHandlerPrivate
 };
 #endif
 
+#if !defined(KYTY_HAS_SIGNAL_EXCEPTIONS)
+void RegisterDemandRange(uint64_t, uint64_t) {}
+
+bool TryDemandMap(uint64_t)
+{
+	return false;
+}
+
+void FatalFault(uint64_t, uint64_t)
+{
+	std::abort();
+}
+#endif
+
 ExceptionHandler::ExceptionHandler(): m_p(new ExceptionHandlerPrivate) {}
 
 ExceptionHandler::~ExceptionHandler()
@@ -859,7 +875,9 @@ void Init()
 	LoadSignalDiagnosticsConfigFromEnvironment();
 #endif
 	sys_virtual_init();
+#ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
 	EnsureDemandPageSize();
+#endif
 }
 
 uint64_t GetPageSize()
