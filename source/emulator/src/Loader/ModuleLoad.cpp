@@ -803,9 +803,9 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const String& primary_host_path)
 	const bool diagnostic =
 	    Core::BringUp::IsEnabled(Core::BringUp::Feature::AdjacentModuleDiscovery, Core::BringUp::Subsystem::Loader);
 
-	// Always publish a strict plan snapshot. Adjacent package modules are guest
-	// load inputs, not a diagnostic-only behavior.
-	const ModuleLoadPlan plan = ModuleLoadPlanning::BuildPlan(primary_host_path, true);
+	// Apply the loader feature policy at planning time so diagnostics and the
+	// pending load set cannot claim adjacent discovery when it is disabled.
+	const ModuleLoadPlan plan = ModuleLoadPlanning::BuildPlan(primary_host_path, diagnostic);
 	PublishDiagnostics(plan.diag);
 
 	// Agent observation only (sanitized basenames / relative keys).
