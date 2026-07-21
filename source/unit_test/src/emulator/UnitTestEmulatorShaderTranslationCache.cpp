@@ -142,6 +142,33 @@ TEST(EmulatorShaderTranslationCache, DebugPrintfModulesRemainSessionLocal)
 	EXPECT_FALSE(std::filesystem::exists(directory.path));
 }
 
+TEST(EmulatorShaderTranslationCache, SaturatedPersistenceDoesNotInvalidateTheMemoryEntry)
+{
+	ScopedShaderModuleCacheDirectory directory;
+	SpirvBinaryCacheLimits           limits;
+	limits.max_pending_entries = 0;
+	limits.max_pending_bytes   = 0;
+	SpirvBinaryCacheStore store(directory.path, limits);
+	ShaderTranslationCache cache(16, &store, false);
+	const auto key =
+	    ShaderModuleKey::Create(TestShaderId(71, 72, 73), ShaderModuleStage::Compute, Config::ShaderOptimizationType::None, true);
+	std::atomic<uint32_t> compiles {0};
+	auto compiler = [&]
+	{
+		compiles.fetch_add(1);
+		return Vector<uint32_t> {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+	};
+
+	const auto miss = cache.GetOrCompile(key, compiler);
+	const auto hit  = cache.GetOrCompile(key, compiler);
+
+	EXPECT_FALSE(miss.hit);
+	EXPECT_TRUE(hit.hit);
+	EXPECT_EQ(hit.binary, miss.binary);
+	EXPECT_EQ(compiles.load(), 1u);
+	EXPECT_EQ(store.AsyncStats().dropped, 1u);
+}
+
 TEST(EmulatorShaderTranslationCache, CorruptPersistentModuleFallsBackAndIsReplaced)
 {
 	ScopedShaderModuleCacheDirectory directory;
@@ -159,6 +186,7 @@ TEST(EmulatorShaderTranslationCache, CorruptPersistentModuleFallsBackAndIsReplac
 		ShaderTranslationCache seed(16, &store, false);
 		EXPECT_FALSE(seed.GetOrCompile(key, compiler).hit);
 	}
+	store.Drain();
 	for (const auto& entry: std::filesystem::directory_iterator(directory.path))
 	{
 		if (entry.is_regular_file() && entry.path().extension() == ".spvmod")
@@ -171,6 +199,7 @@ TEST(EmulatorShaderTranslationCache, CorruptPersistentModuleFallsBackAndIsReplac
 		ShaderTranslationCache repair(16, &store, false);
 		EXPECT_FALSE(repair.GetOrCompile(key, compiler).hit);
 	}
+	store.Drain();
 	{
 		ShaderTranslationCache warm(16, &store, false);
 		EXPECT_TRUE(warm.GetOrCompile(key, compiler).hit);
