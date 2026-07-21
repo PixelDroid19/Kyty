@@ -10,9 +10,11 @@ namespace {
 
 using MallocFunc = void*(KYTY_SYSV_ABI*)(size_t);
 using FreeFunc   = void(KYTY_SYSV_ABI*)(void*);
+using StatsFunc  = int(KYTY_SYSV_ABI*)(void*);
 
-static MallocFunc g_malloc = nullptr;
-static FreeFunc   g_free   = nullptr;
+static MallocFunc g_malloc     = nullptr;
+static FreeFunc   g_free       = nullptr;
+static StatsFunc  g_stats_fast = nullptr;
 
 static thread_local bool g_in_guest_allocator = false;
 
@@ -28,13 +30,15 @@ void RegisterApi(void* const api[kApiSlotCount])
 	const auto* table = reinterpret_cast<const Api*>(api);
 	if (!IsValidApi(table))
 	{
-		g_malloc = nullptr;
-		g_free   = nullptr;
+		g_malloc     = nullptr;
+		g_free       = nullptr;
+		g_stats_fast = nullptr;
 		return;
 	}
 
-	g_malloc = reinterpret_cast<MallocFunc>(table->slots[kMallocSlot]);
-	g_free   = reinterpret_cast<FreeFunc>(table->slots[kFreeSlot]);
+	g_malloc     = reinterpret_cast<MallocFunc>(table->slots[kMallocSlot]);
+	g_free       = reinterpret_cast<FreeFunc>(table->slots[kFreeSlot]);
+	g_stats_fast = reinterpret_cast<StatsFunc>(table->slots[kMallocStatsFastSlot]);
 }
 
 bool IsInitialized()
@@ -45,6 +49,11 @@ bool IsInitialized()
 bool HasAllocator()
 {
 	return IsInitialized() && !g_in_guest_allocator;
+}
+
+bool HasMallocStatsFast()
+{
+	return HasAllocator() && g_stats_fast != nullptr;
 }
 
 void* Malloc(size_t size)
@@ -58,6 +67,20 @@ void* Malloc(size_t size)
 	const uint64_t ptr   = Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_malloc), size, 0, 0);
 	g_in_guest_allocator = false;
 	return reinterpret_cast<void*>(ptr);
+}
+
+int MallocStatsFast(void* stats)
+{
+	if (!HasMallocStatsFast() || stats == nullptr)
+	{
+		return -1;
+	}
+
+	g_in_guest_allocator = true;
+	const int result = static_cast<int>(Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_stats_fast),
+	                                                              reinterpret_cast<uint64_t>(stats), 0, 0));
+	g_in_guest_allocator = false;
+	return result;
 }
 
 bool Free(void* ptr)
@@ -80,9 +103,10 @@ bool Free(void* ptr)
 
 void Reset()
 {
-	g_malloc              = nullptr;
-	g_free                = nullptr;
-	g_in_guest_allocator  = false;
+	g_malloc             = nullptr;
+	g_free               = nullptr;
+	g_stats_fast         = nullptr;
+	g_in_guest_allocator = false;
 }
 
 } // namespace Kyty::Libs::LibKernel::ApplicationHeap

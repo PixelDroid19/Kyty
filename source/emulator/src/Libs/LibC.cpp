@@ -20,6 +20,7 @@
 #include "Emulator/Loader/RuntimeLinker.h"
 
 #include <cctype>
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -30,6 +31,10 @@
 #include <mutex>
 #include <strings.h>
 #include <unordered_map>
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 // setjmp/longjmp: must NOT be wrapped in a C++ function (the wrapper frame would
 // be gone by the time longjmp fires). Kyty runs guest code natively, so we bind
@@ -174,6 +179,48 @@ static bool free_by_owner(void* ptr)
 
 	::free(ptr);
 	return true;
+}
+
+// Capture the host allocator's live accounting for the libc bootstrap path.
+// The startup path calls malloc_stats_fast before the application heap table
+// is published, so forwarding to a guest slot at that point would recurse into
+// an uninitialized allocator. mallinfo2 is used where glibc exposes it; the
+// ledger remains the portable lower-bound fallback on other hosts.
+static void collect_host_malloc_stats(Core::MSpaceSize* out)
+{
+	if (out == nullptr)
+	{
+		return;
+	}
+
+	size_t current_inuse = 0;
+	{
+		std::lock_guard lock(g_allocations_mutex);
+		for (const auto& [ptr, record]: g_allocations)
+		{
+			(void)ptr;
+			if (record.size <= SIZE_MAX - current_inuse)
+			{
+				current_inuse += record.size;
+			}
+		}
+	}
+
+	size_t current_system = current_inuse;
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+	const auto host_info = ::mallinfo2();
+	if (host_info.arena <= static_cast<size_t>(SIZE_MAX - host_info.hblkhd))
+	{
+		current_system = std::max(current_system, static_cast<size_t>(host_info.arena + host_info.hblkhd));
+	}
+	current_inuse = std::max(current_inuse, static_cast<size_t>(host_info.uordblks));
+#endif
+
+	current_system              = std::max(current_system, current_inuse);
+	out->max_system_size     = current_system;
+	out->current_system_size = current_system;
+	out->max_inuse_size      = current_inuse;
+	out->current_inuse_size  = current_inuse;
 }
 
 // Standard C allocation routes through the guest application heap after the
@@ -1995,6 +2042,39 @@ int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
 	return 0;
 }
 
+// libc malloc_stats_fast — NID KuOuD58hqn4.  The public replacement-table
+// ABI is int(void*), unlike the internal mspace form above.  During bootstrap
+// there is no application-heap handle; report the host allocator snapshot.
+int KYTY_SYSV_ABI LibcMallocStatsFast(void* stats)
+{
+	PRINT_NAME();
+	if (stats == nullptr)
+	{
+		return -1;
+	}
+
+	if (LibKernel::ApplicationHeap::HasMallocStatsFast())
+	{
+		return LibKernel::ApplicationHeap::MallocStatsFast(stats);
+	}
+	if (LibKernel::ApplicationHeap::IsInitialized())
+	{
+		return -1;
+	}
+
+	Core::MSpaceSize sizes {};
+	LibC::collect_host_malloc_stats(&sizes);
+
+	auto* out                = static_cast<LibcMallocManagedSize*>(stats);
+	out->size_version        = 0x00010028u;
+	out->reserved            = 0;
+	out->max_system_size     = sizes.max_system_size;
+	out->current_system_size = sizes.current_system_size;
+	out->max_inuse_size      = sizes.max_inuse_size;
+	out->current_inuse_size  = sizes.current_inuse_size;
+	return 0;
+}
+
 void KYTY_SYSV_ABI LibcMspaceFree(void* msp, void* ptr)
 {
 	PRINT_NAME();
@@ -2142,6 +2222,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Ujf3KzMvRmI", LibC::c_memalign);
 	LIB_FUNC("2Btkg8k24Zg", LibC::c_aligned_alloc);
 	LIB_FUNC("cVSk9y8URbc", LibC::c_posix_memalign);
+	LIB_FUNC("KuOuD58hqn4", LibcInternal::LibcMallocStatsFast);
 	LIB_FUNC("7Xl257M4VNI", LibC::c_pthread_equal);
 	LIB_FUNC("mqQMh1zPPT8", LibC::c_fstat);
 	LIB_FUNC("Q3VBxCXhUHs", LibC::c_memcpy);
