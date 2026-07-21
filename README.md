@@ -1,4 +1,4 @@
-[![Build status](https://ci.appveyor.com/api/projects/status/0du32fg9flol63to?svg=true)](https://ci.appveyor.com/project/InoriRus/kyty) [![CI](https://github.com/InoriRus/Kyty/actions/workflows/ci.yml/badge.svg)](https://github.com/InoriRus/Kyty/actions/workflows/ci.yml)
+[![Build and Release](https://github.com/PixelDroid19/Kyty/actions/workflows/build-release.yml/badge.svg)](https://github.com/PixelDroid19/Kyty/actions/workflows/build-release.yml)
 
 # Kyty
 
