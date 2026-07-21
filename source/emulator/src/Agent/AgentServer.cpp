@@ -163,6 +163,10 @@ std::string PerformanceResult(bool reset)
 	              "\"compute_pipeline_lookup_hits\":%llu,\"compute_pipeline_lookup_misses\":%llu,"
 	              "\"compute_pipeline_lookup_ns\":%llu,\"compute_pipeline_lookup_max_ns\":%llu,"
 	              "\"pipeline_evictions\":%llu,"
+	              "\"pipeline_cache_checkpoint_count\":%llu,\"pipeline_cache_checkpoint_bytes\":%llu,"
+	              "\"pipeline_cache_checkpoint_ns\":%llu,\"pipeline_cache_checkpoint_max_ns\":%llu,"
+	              "\"pipeline_cache_checkpoint_written\":%llu,\"pipeline_cache_checkpoint_failed\":%llu,"
+	              "\"pipeline_cache_checkpoint_budget_exceeded\":%llu,"
 	              "\"gfx_pipeline_miss_count\":%llu,\"gfx_pipeline_miss_ns\":%llu,\"gfx_pipeline_miss_max_ns\":%llu,"
 	              "\"compute_pipeline_miss_count\":%llu,\"compute_pipeline_miss_ns\":%llu,\"compute_pipeline_miss_max_ns\":%llu,"
 	              "\"shader_ir_input_analysis_count\":%llu,\"shader_ir_input_analysis_ns\":%llu,"
@@ -214,6 +218,13 @@ std::string PerformanceResult(bool reset)
 	              static_cast<unsigned long long>(stats.compute_pipeline_lookup_ns),
 	              static_cast<unsigned long long>(stats.compute_pipeline_lookup_max_ns),
 	              static_cast<unsigned long long>(stats.pipeline_evictions),
+	              static_cast<unsigned long long>(stats.pipeline_cache_checkpoint_count),
+	              static_cast<unsigned long long>(stats.pipeline_cache_checkpoint_bytes),
+	              static_cast<unsigned long long>(stats.pipeline_cache_checkpoint_ns),
+	              static_cast<unsigned long long>(stats.pipeline_cache_checkpoint_max_ns),
+	              static_cast<unsigned long long>(stats.pipeline_cache_checkpoint_written),
+	              static_cast<unsigned long long>(stats.pipeline_cache_checkpoint_failed),
+	              static_cast<unsigned long long>(stats.pipeline_cache_checkpoint_budget_exceeded),
 	              static_cast<unsigned long long>(stats.gfx_pipeline_miss_count),
 	              static_cast<unsigned long long>(stats.gfx_pipeline_miss_ns),
 	              static_cast<unsigned long long>(stats.gfx_pipeline_miss_max_ns),

@@ -72,6 +72,7 @@ the gameplay-era checkpoint or advances the first failure.
 | Large first-run stalls recur after restarting Kyty | `VkPipelineCache` was always created empty and never persisted | Validate the standard cache header against vendor/device/UUID, load compatible bounded data, and save dirty cache data atomically at a rate limit | Header tests plus isolated cold/warm driver measurements |
 | Pipeline-cache writes can exceed the session budget after an I/O failure | A failed temporary-file write, flush, or replace did not consume budget and was retried on every pipeline lookup | Charge every disk attempt conservatively, rate-limit retries, and stop attempting after 64 MiB per process | Budget saturation test plus strict runtime disk counters |
 | First-use shader persistence pauses the render path | Every new SPIR-V entry scanned the cache directory and performed write, flush, and rename synchronously on the compiling thread | Queue immutable entries to one bounded writer, coalesce duplicate identities, and keep persistence best-effort without invalidating the in-memory shader | Queue saturation/drain tests, cold/warm restart, and strict visual regression |
+| Frame histogram reports hundreds of multi-second frames while presents advance | Every sample used `1000 / averaged_fps`; one slow FPS window was therefore copied into many fast frames | Record the monotonic delta between consecutive frame-loop timestamps and retain FPS only as a rate metric | Red/green interval test plus strict cold/warm runtime pair |
 | Reload exits while a sampled texture overlaps live color/depth aliases | The texture crosses the color RT/storage pair and the depth metadata plane, but the mixed-parent policy did not recognize the exact DepthStencil relation | Link only the captured `DepthStencilBuffer Crosses Texture` metadata alias; materialize the image from the existing color surface | Exact policy test plus input-driven strict runtime beyond the former exit |
 | Scene reached only with automatic Cross input | Input automation bypasses the real press/release acceptance contract | Do not change graphics or synthesize completion. Re-run with real keyboard/controller edges and treat inability to reach gameplay as a separate input/synchronization frontier | Pending real-input acceptance |
 
@@ -162,6 +163,16 @@ zero misses, and zero SPIR-V compilations. The strict three-edge visual gate
 also passed against the prior baseline. These measurements verify persistence
 and absence of a steady-state regression; they do not claim that shader or
 pipeline compilation itself is asynchronous.
+
+A later isolated cold/warm pair disabled the host driver's shader cache and
+used the same Kyty cache population. The warm restart changed 4 SPIR-V
+compilations into 23 exact translation-cache hits and reduced inclusive
+pipeline-miss time from about 425 ms to 0.49 ms. With real frame intervals,
+startup samples above 50/100 ms fell from 14/9 to 11/7; the single multi-second
+loading interval remained in both runs and is therefore not attributed to the
+cache. The synchronous Vulkan-cache checkpoint was also measured directly:
+0.081 ms cold and 0.341 ms warm in this pair, too small to justify another
+writer solely for frame-time improvement.
 
 ### Redundant hashes on GPU-owned surfaces
 
