@@ -10,9 +10,9 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <limits>
 #include <mutex>
+#include <thread>
 
 namespace Kyty::Libs::Graphics {
 
@@ -150,10 +150,8 @@ std::mutex    g_slow_frame_mutex;
 
 struct SlowTotalsGate
 {
-	std::mutex              mutex;
-	std::condition_variable cv;
-	uint32_t                active_writers  = 0;
-	bool                    capture_pending = false;
+	std::atomic<uint32_t> active_writers {0};
+	std::atomic<bool>     capture_pending {false};
 };
 
 SlowTotalsGate g_slow_totals_gate;
@@ -312,21 +310,37 @@ class SlowTotalsWriteGuard final
 public:
 	SlowTotalsWriteGuard()
 	{
-		std::unique_lock<std::mutex> lock(g_slow_totals_gate.mutex);
-		g_slow_totals_gate.cv.wait(lock, [] { return !g_slow_totals_gate.capture_pending; });
-		g_slow_totals_gate.active_writers++;
+		for (;;)
+		{
+			while (g_slow_totals_gate.capture_pending.load(std::memory_order_acquire))
+			{
+				std::this_thread::yield();
+			}
+
+			g_slow_totals_gate.active_writers.fetch_add(1, std::memory_order_acq_rel);
+			if (!g_slow_totals_gate.capture_pending.load(std::memory_order_acquire))
+			{
+				m_active = true;
+				return;
+			}
+
+			// A capture started between the first check and the increment. Drop
+			// the registration and retry so the snapshot sees a stable writer set.
+			g_slow_totals_gate.active_writers.fetch_sub(1, std::memory_order_release);
+		}
 	}
 	~SlowTotalsWriteGuard()
 	{
-		std::lock_guard<std::mutex> lock(g_slow_totals_gate.mutex);
-		g_slow_totals_gate.active_writers--;
-		if (g_slow_totals_gate.active_writers == 0)
+		if (m_active)
 		{
-			g_slow_totals_gate.cv.notify_all();
+			g_slow_totals_gate.active_writers.fetch_sub(1, std::memory_order_release);
 		}
 	}
 
 	KYTY_CLASS_NO_COPY(SlowTotalsWriteGuard);
+
+private:
+	bool m_active = false;
 };
 
 DebugStatsSlowFrameRecord LoadSlowFrameTotals()
@@ -351,13 +365,16 @@ DebugStatsSlowFrameRecord LoadSlowFrameTotals()
 
 DebugStatsSlowFrameRecord CaptureSlowFrameTotals()
 {
-	std::unique_lock<std::mutex> lock(g_slow_totals_gate.mutex);
-	g_slow_totals_gate.capture_pending = true;
-	g_slow_totals_gate.cv.wait(lock, [] { return g_slow_totals_gate.active_writers == 0; });
+	// All slow-frame fields are atomic, but the gate keeps a snapshot from
+	// observing a writer halfway through a correlated update. Writers that
+	// race this transition retry before touching the totals.
+	g_slow_totals_gate.capture_pending.store(true, std::memory_order_seq_cst);
+	while (g_slow_totals_gate.active_writers.load(std::memory_order_acquire) != 0)
+	{
+		std::this_thread::yield();
+	}
 	auto totals = LoadSlowFrameTotals();
-	g_slow_totals_gate.capture_pending = false;
-	lock.unlock();
-	g_slow_totals_gate.cv.notify_all();
+	g_slow_totals_gate.capture_pending.store(false, std::memory_order_release);
 	return totals;
 }
 
@@ -664,11 +681,8 @@ void DebugStatsInit()
 	KYTY_RESET_SLOW_FRAME_TOTAL(writeback_ns);
 #undef KYTY_RESET_SLOW_FRAME_TOTAL
 	g_slow_frame_baseline_valid.store(false, std::memory_order_relaxed);
-	{
-		std::lock_guard<std::mutex> lock(g_slow_totals_gate.mutex);
-		g_slow_totals_gate.active_writers  = 0;
-		g_slow_totals_gate.capture_pending = false;
-	}
+	g_slow_totals_gate.active_writers.store(0, std::memory_order_relaxed);
+	g_slow_totals_gate.capture_pending.store(false, std::memory_order_relaxed);
 	g_slow_frames.head    = 0;
 	g_slow_frames.size    = 0;
 	g_slow_frames.dropped = 0;
