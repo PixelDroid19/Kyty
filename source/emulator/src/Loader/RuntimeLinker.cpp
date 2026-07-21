@@ -27,6 +27,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <utility>
 
 #ifdef KYTY_EMU_ENABLED
@@ -36,6 +37,65 @@ void SetProgName(const String& name);
 } // namespace Kyty::Libs::LibKernel
 
 namespace Kyty::Loader {
+
+Vector<uint32_t> LoaderBuildModuleStartOrder(const Vector<ModuleStartDescriptor>& modules)
+{
+	Vector<uint32_t> order;
+	Vector<uint8_t>  state(modules.Size());
+
+	auto find_dependency = [&modules](const String& name) -> uint32_t {
+		for (uint32_t i = 0; i < modules.Size(); i++)
+		{
+			if ((!modules[i].so_name.IsEmpty() && modules[i].so_name == name) || modules[i].file_name == name)
+			{
+				return i;
+			}
+		}
+		return Vector<uint32_t>::INVALID_INDEX;
+	};
+
+	std::function<void(uint32_t)> visit = [&](uint32_t index) {
+		if (state[index] == 2)
+		{
+			return;
+		}
+		if (state[index] == 1)
+		{
+			// Keep cyclic dependency groups stable; each member is still started once.
+			return;
+		}
+
+		state[index] = 1;
+		for (const auto& dependency: modules[index].needed)
+		{
+			const uint32_t dependency_index = find_dependency(dependency);
+			if (dependency_index != Vector<uint32_t>::INVALID_INDEX)
+			{
+				visit(dependency_index);
+			}
+		}
+		state[index] = 2;
+		order.Add(index);
+	};
+
+	// Seed CRT providers before the generic walk. Some game PRXes import libc
+	// symbols without listing libc.prx in DT_NEEDED; starting them first still
+	// leaves the BSS mspace uninitialized for their constructors.
+	for (uint32_t i = 0; i < modules.Size(); i++)
+	{
+		if (modules[i].file_name == U"libc.prx" || modules[i].so_name == U"libc.prx" ||
+		    modules[i].file_name == U"libSceLibcInternal.sprx" || modules[i].so_name == U"libSceLibcInternal.sprx")
+		{
+			visit(i);
+		}
+	}
+
+	for (uint32_t i = 0; i < modules.Size(); i++)
+	{
+		visit(i);
+	}
+	return order;
+}
 
 // Missing-import registry, static StubAllocator, ImportPolicy, and diagnostics
 // live in MissingImport.{h,cpp}. RuntimeLinker::Resolve only coordinates:
@@ -1314,7 +1374,18 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 			*bind_self = (exporter == program);
 		}
 	}
-	const SymbolRecord* record = export_record != nullptr ? export_record : hle_record;
+	// Guest libc.prx exports malloc/operator new, but its internal mspace can
+	// remain BSS-zero after CRT start when ApplicationHeap registration uses
+	// the legacy pointer-table form (not ApiV2). Prefer the HLE allocator for
+	// those NIDs so constructors do not throw bad_alloc → terminate
+	// (DebugRaiseException 0xa0020008). Other exports still win over HLE.
+	const bool prefer_hle_allocator =
+	    hle_record != nullptr &&
+	    (resolve.name == U"gQX+4GDQjpM" || resolve.name == U"2X5agFjKxMc" || resolve.name == U"Y7aJ1uydPMo" ||
+	     resolve.name == U"tIhsqj0qsFE" || resolve.name == U"fJnpuVVBbKk" || resolve.name == U"hdm0YfMa7TQ" ||
+	     resolve.name == U"z+P+xCnWLBk" || resolve.name == U"MLWl90SFWNE");
+	const SymbolRecord* record =
+	    prefer_hle_allocator ? hle_record : (export_record != nullptr ? export_record : hle_record);
 
 	const String canonical_name = SymbolDatabase::GenerateName(resolve);
 	const auto   identity       = MissingImport::SymbolIdentity::From(resolve, canonical_name);
@@ -1411,6 +1482,28 @@ Vector<ProgramExportSnapshot> RuntimeLinker::SnapshotExportPrograms()
 			}
 		}
 		snapshot.Add(std::move(program_snapshot));
+	}
+	return snapshot;
+}
+
+Vector<LoadedModuleSnapshot> RuntimeLinker::SnapshotLoadedModules()
+{
+	Core::LockGuard              lock(m_mutex);
+	Vector<LoadedModuleSnapshot> snapshot;
+	for (const auto* program: m_programs)
+	{
+		if (program == nullptr || program->elf == nullptr || program->base_vaddr == 0)
+		{
+			continue;
+		}
+
+		LoadedModuleSnapshot module_snapshot {};
+		module_snapshot.unique_id   = program->unique_id;
+		module_snapshot.file_name   = program->file_name;
+		module_snapshot.base_vaddr  = program->base_vaddr;
+		module_snapshot.base_size   = program->base_size;
+		module_snapshot.entry_point = program->elf->GetEntry() + program->base_vaddr;
+		snapshot.Add(std::move(module_snapshot));
 	}
 	return snapshot;
 }
@@ -1531,12 +1624,34 @@ void RuntimeLinker::StartAllModules()
 
 	Core::LockGuard lock(m_mutex);
 
+	Vector<Program*>              shared_programs;
+	Vector<ModuleStartDescriptor> descriptors;
 	for (auto* p: m_programs)
 	{
 		if (p->elf->IsShared())
 		{
-			StartModule(p, 0, nullptr, nullptr);
+			EXIT_IF(p->dynamic_info == nullptr);
+			ModuleStartDescriptor descriptor {};
+			descriptor.file_name = p->file_name.FilenameWithoutDirectory();
+			if (p->dynamic_info->so_name != nullptr)
+			{
+				descriptor.so_name = String::FromUtf8(p->dynamic_info->so_name);
+			}
+			for (const auto* dependency: p->dynamic_info->needed)
+			{
+				if (dependency != nullptr)
+				{
+					descriptor.needed.Add(String::FromUtf8(dependency));
+				}
+			}
+			shared_programs.Add(p);
+			descriptors.Add(std::move(descriptor));
 		}
+	}
+
+	for (const uint32_t index: LoaderBuildModuleStartOrder(descriptors))
+	{
+		StartModule(shared_programs[index], 0, nullptr, nullptr);
 	}
 }
 

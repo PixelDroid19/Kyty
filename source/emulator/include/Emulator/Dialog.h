@@ -33,8 +33,20 @@ constexpr int ERROR_ARG_NULL                   = static_cast<int32_t>(0x80B8000D
 
 int KYTY_SYSV_ABI CommonDialogInitialize();
 bool              CommonDialogIsSystemInitialized();
+int KYTY_SYSV_ABI CommonDialogIsUsed();
 
 } // namespace CommonDialog
+
+namespace ErrorDialog {
+
+int KYTY_SYSV_ABI ErrorDialogInitialize();
+int KYTY_SYSV_ABI ErrorDialogOpen(const void* param);
+int KYTY_SYSV_ABI ErrorDialogGetStatus();
+int KYTY_SYSV_ABI ErrorDialogUpdateStatus();
+int KYTY_SYSV_ABI ErrorDialogClose();
+int KYTY_SYSV_ABI ErrorDialogTerminate();
+
+} // namespace ErrorDialog
 
 namespace SaveDataDialog {
 
@@ -60,6 +72,10 @@ int KYTY_SYSV_ABI SaveDataDialogOpen(const SaveDataDialogParam* param);
 int KYTY_SYSV_ABI SaveDataDialogGetStatus();
 int KYTY_SYSV_ABI SaveDataDialogUpdateStatus();
 int KYTY_SYSV_ABI SaveDataDialogTerminate();
+int KYTY_SYSV_ABI SaveDataDialogClose();
+int KYTY_SYSV_ABI SaveDataDialogGetResult(void* result);
+int KYTY_SYSV_ABI SaveDataDialogIsReadyToDisplay(int* ready);
+int KYTY_SYSV_ABI SaveDataDialogProgressBarInc(int target, uint32_t delta);
 int KYTY_SYSV_ABI SaveDataDialogProgressBarSetValue(int target, uint32_t rate);
 
 } // namespace SaveDataDialog

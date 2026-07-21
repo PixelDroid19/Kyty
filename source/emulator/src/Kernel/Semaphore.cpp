@@ -8,7 +8,10 @@
 
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Kernel/Time.h"
 
+#include <algorithm>
+#include <chrono>
 #include <unordered_map>
 
 #ifdef KYTY_EMU_ENABLED
@@ -436,6 +439,39 @@ public:
 		return OK;
 	}
 
+	// timeout_usec == UINT32_MAX means wait forever (same as Wait).
+	int TimedWait(uint32_t timeout_usec)
+	{
+		if (timeout_usec == UINT32_MAX)
+		{
+			return Wait();
+		}
+
+		Core::LockGuard lock(m_mutex);
+		const auto      deadline =
+		    std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_usec);
+		while (m_count <= 0)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			if (now >= deadline)
+			{
+				SyncGuest();
+				return POSIX_ETIMEDOUT;
+			}
+			const auto remain_us =
+			    std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
+			const auto slice =
+			    static_cast<uint32_t>(std::min<int64_t>(remain_us, kPosixSemPollMicro));
+			m_waiters++;
+			SyncGuest();
+			m_cond_var.WaitFor(&m_mutex, slice);
+			m_waiters--;
+		}
+		m_count--;
+		SyncGuest();
+		return OK;
+	}
+
 	int Post()
 	{
 		Core::LockGuard lock(m_mutex);
@@ -574,6 +610,77 @@ int KYTY_SYSV_ABI sem_trywait(void* sem)
 		return SetErrnoReturn(POSIX_EINVAL);
 	}
 	const int rc = obj->TryWait();
+	return (rc == OK ? OK : SetErrnoReturn(rc));
+}
+
+static uint32_t TimespecToUsec(const LibKernel::KernelTimespec* ts)
+{
+	if (ts == nullptr || ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000)
+	{
+		return 0;
+	}
+	const int64_t usec = ts->tv_sec * 1000000 + ts->tv_nsec / 1000;
+	if (usec <= 0)
+	{
+		return 0;
+	}
+	if (usec > static_cast<int64_t>(UINT32_MAX))
+	{
+		return UINT32_MAX;
+	}
+	return static_cast<uint32_t>(usec);
+}
+
+static uint32_t AbstimeRemainingUsec(const LibKernel::KernelTimespec* abstime)
+{
+	LibKernel::KernelTimespec now {};
+	if (abstime == nullptr || LibKernel::KernelClockGettime(0, &now) != OK)
+	{
+		return 0;
+	}
+	const int64_t now_us = now.tv_sec * 1000000 + now.tv_nsec / 1000;
+	const int64_t abs_us = abstime->tv_sec * 1000000 + abstime->tv_nsec / 1000;
+	if (abs_us <= now_us)
+	{
+		return 0;
+	}
+	const int64_t delta = abs_us - now_us;
+	if (delta > static_cast<int64_t>(UINT32_MAX))
+	{
+		return UINT32_MAX;
+	}
+	return static_cast<uint32_t>(delta);
+}
+
+int KYTY_SYSV_ABI sem_timedwait(void* sem, const LibKernel::KernelTimespec* abstime)
+{
+	PRINT_NAME();
+	if (abstime == nullptr)
+	{
+		return SetErrnoReturn(POSIX_EINVAL);
+	}
+	auto* obj = LookupSem(sem);
+	if (obj == nullptr)
+	{
+		return SetErrnoReturn(POSIX_EINVAL);
+	}
+	const int rc = obj->TimedWait(AbstimeRemainingUsec(abstime));
+	return (rc == OK ? OK : SetErrnoReturn(rc));
+}
+
+int KYTY_SYSV_ABI sem_reltimedwait_np(void* sem, const LibKernel::KernelTimespec* reltime)
+{
+	PRINT_NAME();
+	if (reltime == nullptr)
+	{
+		return SetErrnoReturn(POSIX_EINVAL);
+	}
+	auto* obj = LookupSem(sem);
+	if (obj == nullptr)
+	{
+		return SetErrnoReturn(POSIX_EINVAL);
+	}
+	const int rc = obj->TimedWait(TimespecToUsec(reltime));
 	return (rc == OK ? OK : SetErrnoReturn(rc));
 }
 

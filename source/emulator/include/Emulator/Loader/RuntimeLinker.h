@@ -135,6 +135,28 @@ struct ProgramExportSnapshot
 	Vector<String> export_names;
 };
 
+struct LoadedModuleSnapshot
+{
+	int32_t  unique_id   = -1;
+	String   file_name;
+	uint64_t base_vaddr  = 0;
+	uint64_t base_size   = 0;
+	uint64_t entry_point = 0;
+};
+
+struct ModuleStartDescriptor
+{
+	String         file_name;
+	String         so_name;
+	Vector<String> needed;
+};
+
+// Return stable dependency-first indices. Dependencies not present in the
+// loaded set are supplied by HLE or loaded later through the module API.
+// libc.prx is visited first when present so CRT heap/TSD bootstrap runs before
+// C++ module constructors that call operator new (captured GRIS start path).
+Vector<uint32_t> LoaderBuildModuleStartOrder(const Vector<ModuleStartDescriptor>& modules);
+
 // MissingImportDiagnostics is defined in MissingImport.h (owned by
 // ImportDiagnostics / MissingImportRegistry).
 
@@ -179,6 +201,7 @@ public:
 	// outside the lock: another lifecycle operation may unload them immediately.
 	[[nodiscard]] uint32_t LoadedProgramCount();
 	[[nodiscard]] Vector<ProgramExportSnapshot> SnapshotExportPrograms();
+	[[nodiscard]] Vector<LoadedModuleSnapshot>  SnapshotLoadedModules();
 
 	static uint64_t ReadFromElf(Program* program, uint64_t vaddr);
 	Program*        FindProgramByAddr(uint64_t vaddr);
