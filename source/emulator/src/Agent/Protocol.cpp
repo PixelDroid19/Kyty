@@ -618,6 +618,44 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 	*out += "]}";
 }
 
+void AppendSlowFramePerformanceJson(const Libs::Graphics::DebugStatsPerformanceSnapshot& performance, std::string* out)
+{
+	EXIT_IF(out == nullptr);
+
+	const auto& slow = performance.slow_frames;
+	const uint32_t size = std::min<uint32_t>(slow.size, static_cast<uint32_t>(slow.records.size()));
+	*out += "\"slow_frames\":{\"capacity\":" + std::to_string(slow.records.size());
+	*out += ",\"size\":" + std::to_string(size);
+	*out += ",\"dropped\":" + std::to_string(slow.dropped);
+	*out += ",\"correlation\":\"temporal_not_causal\",\"records\":[";
+	for (uint32_t i = 0; i < size; ++i)
+	{
+		if (i != 0)
+		{
+			*out += ',';
+		}
+		const auto& frame = slow.records[i];
+		*out += "{\"duration_us\":" + std::to_string(frame.duration_us);
+		*out += ",\"flip_seq\":" + std::to_string(frame.flip_seq);
+		*out += ",\"gfx_pipeline_miss_count\":" + std::to_string(frame.gfx_pipeline_miss_count);
+		*out += ",\"gfx_pipeline_miss_ns\":" + std::to_string(frame.gfx_pipeline_miss_ns);
+		*out += ",\"compute_pipeline_miss_count\":" + std::to_string(frame.compute_pipeline_miss_count);
+		*out += ",\"compute_pipeline_miss_ns\":" + std::to_string(frame.compute_pipeline_miss_ns);
+		*out += ",\"spirv_compile_count\":" + std::to_string(frame.spirv_compile_count);
+		*out += ",\"spirv_compile_ns\":" + std::to_string(frame.spirv_compile_ns);
+		*out += ",\"gpu_memory_create_calls\":" + std::to_string(frame.gpu_memory_create_calls);
+		*out += ",\"gpu_memory_create_ns\":" + std::to_string(frame.gpu_memory_create_ns);
+		*out += ",\"upload_calls\":" + std::to_string(frame.upload_calls);
+		*out += ",\"upload_bytes\":" + std::to_string(frame.upload_bytes);
+		*out += ",\"upload_ns\":" + std::to_string(frame.upload_ns);
+		*out += ",\"writeback_calls\":" + std::to_string(frame.writeback_calls);
+		*out += ",\"writeback_bytes\":" + std::to_string(frame.writeback_bytes);
+		*out += ",\"writeback_ns\":" + std::to_string(frame.writeback_ns);
+		*out += '}';
+	}
+	*out += "]}";
+}
+
 void AppendInternalResolutionPerformanceJson(const Libs::Graphics::InternalResolutionRuntimeSnapshot& resolution, std::string* out)
 {
 	EXIT_IF(out == nullptr);
@@ -864,6 +902,8 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	AppendInternalResolutionPerformanceJson(Libs::Graphics::InternalResolutionRuntimeGetSnapshot(), &out);
 	out += ',';
 	AppendGpuMemoryPerformanceJson(performance, &out);
+	out += ',';
+	AppendSlowFramePerformanceJson(performance, &out);
 	out += '}';
 
 	out += ",\"missing_imports\":{";

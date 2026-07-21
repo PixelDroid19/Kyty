@@ -14,6 +14,7 @@
 namespace Kyty::Libs::Graphics {
 
 constexpr uint32_t kDebugStatsGpuMemoryTypeCount = 9;
+constexpr uint32_t kDebugStatsSlowFrameCapacity  = 64;
 
 enum class DebugStatsGpuMemoryCreateOutcome
 {
@@ -77,6 +78,37 @@ struct DebugStatsSnapshot
 	uint32_t present_src_layout = 0; // VkImageLayout as uint
 };
 
+// Bounded temporal correlation captured at a slow VideoOut flip. These deltas
+// identify work observed between adjacent flips; they do not establish that
+// any recorded operation caused the slow frame.
+struct DebugStatsSlowFrameRecord
+{
+	uint64_t duration_us                 = 0;
+	uint64_t flip_seq                    = 0;
+	uint64_t gfx_pipeline_miss_count     = 0;
+	uint64_t gfx_pipeline_miss_ns        = 0;
+	uint64_t compute_pipeline_miss_count = 0;
+	uint64_t compute_pipeline_miss_ns    = 0;
+	uint64_t spirv_compile_count         = 0;
+	uint64_t spirv_compile_ns            = 0;
+	uint64_t gpu_memory_create_calls     = 0;
+	uint64_t gpu_memory_create_ns        = 0;
+	uint64_t upload_calls                = 0;
+	uint64_t upload_bytes                = 0;
+	uint64_t upload_ns                   = 0;
+	uint64_t writeback_calls             = 0;
+	uint64_t writeback_bytes             = 0;
+	uint64_t writeback_ns                = 0;
+};
+
+struct DebugStatsSlowFrameSnapshot
+{
+	uint32_t capacity = kDebugStatsSlowFrameCapacity;
+	uint32_t size     = 0;
+	uint64_t dropped  = 0;
+	std::array<DebugStatsSlowFrameRecord, kDebugStatsSlowFrameCapacity> records {};
+};
+
 struct DebugStatsPerformanceSnapshot
 {
 	uint64_t interval_ms           = 0;
@@ -120,6 +152,7 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t frames_over_50ms      = 0;
 	uint64_t frames_over_100ms     = 0;
 	uint64_t frames_over_250ms     = 0;
+	DebugStatsSlowFrameSnapshot slow_frames {};
 	uint64_t hash_calls            = 0;
 	uint64_t hash_bytes            = 0;
 	uint64_t hash_ns               = 0;

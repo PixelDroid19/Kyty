@@ -265,6 +265,8 @@ std::string PerformanceResult(bool reset)
 	AppendInternalResolutionPerformanceJson(Libs::Graphics::InternalResolutionRuntimeGetSnapshot(), &out);
 	out += ',';
 	AppendGpuMemoryPerformanceJson(stats, &out);
+	out += ',';
+	AppendSlowFramePerformanceJson(stats, &out);
 	out += '}';
 	return out;
 }
