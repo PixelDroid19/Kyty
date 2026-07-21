@@ -421,9 +421,9 @@ int ScenarioLocatorPrimaryNames()
 	return 0;
 }
 
-// Real RuntimeLinker::Resolve path: HLE SymbolDatabase wins over a module export
-// with the same GenerateName identity (adjacent load must not override HLE).
-int ScenarioHleWinsOverModuleExport()
+// Real RuntimeLinker::Resolve path: non-allocator module exports retain
+// precedence over HLE records with the same identity.
+int ScenarioModuleExportWinsOverHle()
 {
 	Loader::RuntimeLinker linker;
 	// Synthetic export module (no full PRX image — LoadProgram requires dynsym).
@@ -457,10 +457,10 @@ int ScenarioHleWinsOverModuleExport()
 
 	Loader::SymbolRecord out {};
 	Loader::ImportResolver::Resolve(&linker, U"sanitizedNid#lib-id#module-id", Loader::SymbolType::Func, &importer, &out);
-	Expect(out.vaddr == hle_vaddr, "Resolve must return HLE vaddr, not module export");
+	Expect(out.vaddr == module_vaddr, "Resolve must return module export for non-allocator identity");
 	Expect(Loader::ImportResolver::HleOwns(&linker, sr), "HLE owns identity");
-	Expect(Loader::ImportResolver::ResolvedMatchesHle(&linker, sr, out.vaddr), "resolved matches HLE");
-	Expect(out.vaddr != module_vaddr, "must not prefer module export over HLE");
+	Expect(!Loader::ImportResolver::ResolvedMatchesHle(&linker, sr, out.vaddr), "non-allocator export is not HLE-bound");
+	Expect(out.vaddr != hle_vaddr, "must not replace module export with HLE");
 	return 0;
 }
 
@@ -773,9 +773,9 @@ int main(int argc, char** argv)
 	{
 		return ScenarioLocatorPrimaryNames();
 	}
-	if (scenario == "hle_wins_over_module_export")
+	if (scenario == "module_export_wins_over_hle")
 	{
-		return ScenarioHleWinsOverModuleExport();
+		return ScenarioModuleExportWinsOverHle();
 	}
 	if (scenario == "export_conflict_reported")
 	{
