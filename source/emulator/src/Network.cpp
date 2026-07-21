@@ -1355,7 +1355,7 @@ int KYTY_SYSV_ABI NetSetsockopt(int id, int level, int option, const void* /*val
 uint32_t KYTY_SYSV_ABI NetHtonl(uint32_t hostlong)
 {
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-	return ::htonl(hostlong);
+	return htonl(hostlong);
 #else
 	return hostlong;
 #endif
@@ -1364,7 +1364,7 @@ uint32_t KYTY_SYSV_ABI NetHtonl(uint32_t hostlong)
 uint16_t KYTY_SYSV_ABI NetHtons(uint16_t hostshort)
 {
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-	return ::htons(hostshort);
+	return htons(hostshort);
 #else
 	return hostshort;
 #endif
