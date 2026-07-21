@@ -6,6 +6,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
+#include "Emulator/Loader/SystemContent.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -227,6 +228,50 @@ static int KYTY_SYSV_ABI SystemServiceSetNoticeScreenSkipFlag()
 	return OK;
 }
 
+static int KYTY_SYSV_ABI SystemServiceParamGetString(int param_id, char* buf, size_t buf_size)
+{
+	PRINT_NAME();
+	if (buf == nullptr || buf_size == 0)
+	{
+		return SYSTEM_SERVICE_ERROR_PARAMETER;
+	}
+	buf[0] = '\0';
+	switch (param_id)
+	{
+		case PARAM_ID_SYSTEM_NAME:
+			snprintf(buf, buf_size, "Kyty");
+			break;
+		default:
+			break;
+	}
+	return OK;
+}
+
+static int KYTY_SYSV_ABI SystemServiceGetMainAppTitleId(char* title_id)
+{
+	PRINT_NAME();
+	if (title_id == nullptr)
+	{
+		return SYSTEM_SERVICE_ERROR_PARAMETER;
+	}
+	String id;
+	String version;
+	if (!Loader::SystemContentGetMetadata(&id, &version) || id.IsEmpty())
+	{
+		snprintf(title_id, 16, "PPSA00000");
+	} else
+	{
+		snprintf(title_id, 16, "%s", id.C_Str());
+	}
+	return OK;
+}
+
+static int KYTY_SYSV_ABI SystemServiceReportAbnormalTermination()
+{
+	PRINT_NAME();
+	return OK;
+}
+
 } // namespace SystemService
 
 LIB_DEFINE(InitSystemService_1)
@@ -234,6 +279,9 @@ LIB_DEFINE(InitSystemService_1)
 	LIB_FUNC("Vo5V8KAwCmk", SystemService::SystemServiceHideSplashScreen);
 	LIB_FUNC("656LMQSrg6U", SystemService::SystemServiceReceiveEvent);
 	LIB_FUNC("fZo48un7LK4", SystemService::SystemServiceParamGetInt);
+	LIB_FUNC("SsC-m-S9JTA", SystemService::SystemServiceParamGetString);
+	LIB_FUNC("4veE0XiIugA", SystemService::SystemServiceGetMainAppTitleId);
+	LIB_FUNC("3s8cHiCBKBE", SystemService::SystemServiceReportAbnormalTermination);
 	LIB_FUNC("rPo6tV8D9bM", SystemService::SystemServiceGetStatus);
 	LIB_FUNC("1n37q1Bvc5Y", SystemService::SystemServiceGetDisplaySafeAreaInfo);
 	LIB_FUNC("mPpPxv5CZt4", SystemService::SystemServiceGetHdrToneMapLuminance);

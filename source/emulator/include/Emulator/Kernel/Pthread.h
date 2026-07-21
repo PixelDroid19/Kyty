@@ -11,6 +11,16 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+// MinGW's winpthread header defines this POSIX helper as a macro. Kyty
+// exposes the guest ABI symbol with the same spelling, so keep the macro from
+// rewriting the declaration below.
+#ifdef pthread_attr_getguardsize
+#undef pthread_attr_getguardsize
+#endif
+#ifdef pthread_attr_setguardsize
+#undef pthread_attr_setguardsize
+#endif
+
 extern "C" {
 struct sched_param;
 }
@@ -53,6 +63,7 @@ using pthread_key_destructor_func_t = KYTY_SYSV_ABI void (*)(void*);
 
 void PthreadInitSelfForMainThread();
 void PthreadDeleteStaticObjects(Loader::Program* program);
+bool PthreadQueryStack(const void* addr, void** start, void** end);
 
 int KYTY_SYSV_ABI PthreadMutexattrInit(PthreadMutexattr* attr);
 int KYTY_SYSV_ABI PthreadMutexattrDestroy(PthreadMutexattr* attr);
@@ -76,6 +87,10 @@ int KYTY_SYSV_ABI     PthreadGetprio(Pthread thread, int* prio);
 int KYTY_SYSV_ABI     PthreadSetprio(Pthread thread, int prio);
 void KYTY_SYSV_ABI    PthreadTestcancel();
 int KYTY_SYSV_ABI     PthreadSetaffinity(Pthread thread, KernelCpumask mask);
+int KYTY_SYSV_ABI     PthreadGetaffinity(Pthread thread, KernelCpumask* mask);
+int KYTY_SYSV_ABI     PthreadGetschedparam(Pthread thread, int* policy, KernelSchedParam* param);
+int KYTY_SYSV_ABI     PthreadSetschedparam(Pthread thread, int policy, const KernelSchedParam* param);
+int KYTY_SYSV_ABI     PthreadRename(Pthread thread, const char* name);
 void KYTY_SYSV_ABI    PthreadExit(void* value);
 int KYTY_SYSV_ABI     PthreadEqual(Pthread thread1, Pthread thread2);
 int KYTY_SYSV_ABI     PthreadGetname(Pthread thread, char* name);
@@ -126,7 +141,9 @@ int KYTY_SYSV_ABI PthreadRwlockUnlock(PthreadRwlock* rwlock);
 int KYTY_SYSV_ABI PthreadRwlockWrlock(PthreadRwlock* rwlock);
 int KYTY_SYSV_ABI PthreadRwlockattrDestroy(PthreadRwlockattr* attr);
 int KYTY_SYSV_ABI PthreadRwlockattrInit(PthreadRwlockattr* attr);
+int KYTY_SYSV_ABI PthreadRwlockattrGetpshared(const PthreadRwlockattr* attr, int* pshared);
 int KYTY_SYSV_ABI PthreadRwlockattrGettype(PthreadRwlockattr* attr, int* type);
+int KYTY_SYSV_ABI PthreadRwlockattrSetpshared(PthreadRwlockattr* attr, int pshared);
 int KYTY_SYSV_ABI PthreadRwlockattrSettype(PthreadRwlockattr* attr, int type);
 
 int KYTY_SYSV_ABI PthreadCondattrDestroy(PthreadCondattr* attr);
@@ -138,6 +155,7 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond);
 int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread);
 int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, KernelUseconds usec);
 int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex);
+int KYTY_SYSV_ABI PthreadOnce(int* once_control, void (*init_routine)(void));
 
 struct PthreadCondWaitDiagnostic
 {
@@ -199,22 +217,43 @@ int KYTY_SYSV_ABI   getpid();
 LibKernel::Pthread KYTY_SYSV_ABI pthread_self();
 int KYTY_SYSV_ABI   pthread_create(LibKernel::Pthread* thread, const LibKernel::PthreadAttr* attr, LibKernel::pthread_entry_func_t entry,
                                    void* arg);
+int KYTY_SYSV_ABI   pthread_create_name_np(LibKernel::Pthread* thread, const LibKernel::PthreadAttr* attr,
+                                           LibKernel::pthread_entry_func_t entry, void* arg, const char* name);
+int KYTY_SYSV_ABI   pthread_equal(LibKernel::Pthread thread1, LibKernel::Pthread thread2);
+int KYTY_SYSV_ABI   pthread_setcancelstate(int state, int* old_state);
+int KYTY_SYSV_ABI   pthread_setprio(LibKernel::Pthread thread, int prio);
 int KYTY_SYSV_ABI   pthread_join(LibKernel::Pthread thread, void** value);
 // Gen5 Posix_v1 thread control (+U1R4WtXvoc detach after attr setup).
 int KYTY_SYSV_ABI   pthread_detach(LibKernel::Pthread thread);
 void KYTY_SYSV_ABI  pthread_exit(void* value);
 void KYTY_SYSV_ABI  pthread_yield();
+int KYTY_SYSV_ABI   sched_yield();
 int KYTY_SYSV_ABI   pthread_cond_init(LibKernel::PthreadCond* cond, const LibKernel::PthreadCondattr* attr);
 int KYTY_SYSV_ABI   pthread_cond_destroy(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_signal(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_broadcast(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex);
+int KYTY_SYSV_ABI   pthread_cond_timedwait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex,
+                                           const LibKernel::KernelTimespec* abstime);
+int KYTY_SYSV_ABI   pthread_once(int* once_control, void (*init_routine)(void));
 int KYTY_SYSV_ABI   pthread_mutex_lock(LibKernel::PthreadMutex* mutex);
 int KYTY_SYSV_ABI   pthread_mutex_trylock(LibKernel::PthreadMutex* mutex);
 int KYTY_SYSV_ABI   pthread_mutex_unlock(LibKernel::PthreadMutex* mutex);
+int KYTY_SYSV_ABI   pthread_rwlock_destroy(LibKernel::PthreadRwlock* rwlock);
+int KYTY_SYSV_ABI   pthread_rwlock_init(LibKernel::PthreadRwlock* rwlock, const LibKernel::PthreadRwlockattr* attr);
 int KYTY_SYSV_ABI   pthread_rwlock_rdlock(LibKernel::PthreadRwlock* rwlock);
+int KYTY_SYSV_ABI   pthread_rwlock_timedrdlock(LibKernel::PthreadRwlock* rwlock, const LibKernel::KernelTimespec* abstime);
+int KYTY_SYSV_ABI   pthread_rwlock_timedwrlock(LibKernel::PthreadRwlock* rwlock, const LibKernel::KernelTimespec* abstime);
+int KYTY_SYSV_ABI   pthread_rwlock_tryrdlock(LibKernel::PthreadRwlock* rwlock);
+int KYTY_SYSV_ABI   pthread_rwlock_trywrlock(LibKernel::PthreadRwlock* rwlock);
 int KYTY_SYSV_ABI   pthread_rwlock_unlock(LibKernel::PthreadRwlock* rwlock);
 int KYTY_SYSV_ABI   pthread_rwlock_wrlock(LibKernel::PthreadRwlock* rwlock);
+int KYTY_SYSV_ABI   pthread_rwlockattr_destroy(LibKernel::PthreadRwlockattr* attr);
+int KYTY_SYSV_ABI   pthread_rwlockattr_getpshared(const LibKernel::PthreadRwlockattr* attr, int* pshared);
+int KYTY_SYSV_ABI   pthread_rwlockattr_gettype_np(LibKernel::PthreadRwlockattr* attr, int* type);
+int KYTY_SYSV_ABI   pthread_rwlockattr_init(LibKernel::PthreadRwlockattr* attr);
+int KYTY_SYSV_ABI   pthread_rwlockattr_setpshared(LibKernel::PthreadRwlockattr* attr, int pshared);
+int KYTY_SYSV_ABI   pthread_rwlockattr_settype_np(LibKernel::PthreadRwlockattr* attr, int type);
 int KYTY_SYSV_ABI   pthread_key_create(LibKernel::PthreadKey* key, LibKernel::pthread_key_destructor_func_t destructor);
 int KYTY_SYSV_ABI   pthread_key_delete(LibKernel::PthreadKey key);
 int KYTY_SYSV_ABI   pthread_setspecific(LibKernel::PthreadKey key, void* value);
@@ -240,6 +279,11 @@ int KYTY_SYSV_ABI pthread_attr_getschedparam(const LibKernel::PthreadAttr* attr,
 int KYTY_SYSV_ABI pthread_attr_setinheritsched(LibKernel::PthreadAttr* attr, int inherit_sched);
 int KYTY_SYSV_ABI pthread_attr_setguardsize(LibKernel::PthreadAttr* attr, size_t guard_size);
 int KYTY_SYSV_ABI pthread_attr_getguardsize(const LibKernel::PthreadAttr* attr, size_t* guard_size);
+int KYTY_SYSV_ABI pthread_getschedparam(LibKernel::Pthread thread, int* policy, LibKernel::KernelSchedParam* param);
+int KYTY_SYSV_ABI pthread_setschedparam(LibKernel::Pthread thread, int policy, const LibKernel::KernelSchedParam* param);
+int KYTY_SYSV_ABI pthread_rename_np(LibKernel::Pthread thread, const char* name);
+int KYTY_SYSV_ABI pthread_getthreadid_np();
+int KYTY_SYSV_ABI pthread_mutexattr_setprotocol(LibKernel::PthreadMutexattr* attr, int protocol);
 
 LibKernel::Pthread KYTY_SYSV_ABI pthread_self();
 int KYTY_SYSV_ABI                  pthread_detach(LibKernel::Pthread thread);

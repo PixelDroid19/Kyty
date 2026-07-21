@@ -59,6 +59,7 @@ bool                               VideoOutRunBufferUnmapTransaction(uint64_t va
 // open (Gen5 WaitUntilSafe encodes handle 0 while Open returns 1). Non-zero
 // handles pass through. Ambiguous (0 or 2+ open) returns 0 unchanged.
 int VideoOutResolveHandle(int handle, const bool* opened, int num_slots);
+bool VideoOutIsValidFlipMode(int flip_mode);
 
 KYTY_SYSV_ABI int  VideoOutOpen(int user_id, int bus_type, int index, const void* param);
 KYTY_SYSV_ABI int  VideoOutClose(int handle);
@@ -71,6 +72,15 @@ KYTY_SYSV_ABI void VideoOutSetBufferAttribute2(VideoOutBufferAttribute2* attribu
 KYTY_SYSV_ABI int  VideoOutSetFlipRate(int handle, int rate);
 KYTY_SYSV_ABI int  VideoOutAddFlipEvent(LibKernel::EventQueue::KernelEqueue eq, int handle, void* udata);
 KYTY_SYSV_ABI int  VideoOutAddVblankEvent(LibKernel::EventQueue::KernelEqueue eq, int handle, void* udata);
+KYTY_SYSV_ABI int  VideoOutDeleteVblankEvent(LibKernel::EventQueue::KernelEqueue eq, int handle);
+KYTY_SYSV_ABI int  VideoOutGetEventId(const LibKernel::EventQueue::KernelEvent* ev);
+KYTY_SYSV_ABI int  VideoOutGetEventData(const LibKernel::EventQueue::KernelEvent* ev, uint64_t* data);
+KYTY_SYSV_ABI int  VideoOutConfigureOutput(int handle);
+KYTY_SYSV_ABI int  VideoOutInitializeOutputOptions(void* options);
+KYTY_SYSV_ABI int  VideoOutIsOutputSupported(int handle, uint64_t mode, const void* options, const void* reserved_pointer,
+                                               uint64_t reserved);
+KYTY_SYSV_ABI int  VideoOutUnregisterBuffers(int handle, int attribute_index);
+KYTY_SYSV_ABI int  VideoOutWaitVblank(int handle);
 KYTY_SYSV_ABI int  VideoOutRegisterBuffers(int handle, int start_index, void* const* addresses, int buffer_num,
                                            const VideoOutBufferAttribute* attribute);
 KYTY_SYSV_ABI int  VideoOutRegisterBuffers2(int handle, int set_index, int buffer_index_start, const VideoOutBuffers* buffers,

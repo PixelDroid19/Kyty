@@ -36,7 +36,75 @@ bool CommonDialogIsSystemInitialized()
 	return g_system_initialized.load(std::memory_order_acquire);
 }
 
+int KYTY_SYSV_ABI CommonDialogIsUsed()
+{
+	PRINT_NAME();
+	return OK;
+}
+
 } // namespace CommonDialog
+
+namespace ErrorDialog {
+
+LIB_NAME("ErrorDialog", "ErrorDialog");
+
+static std::atomic<int> g_status {CommonDialog::STATUS_NONE};
+static std::atomic<bool> g_initialized {false};
+
+int KYTY_SYSV_ABI ErrorDialogInitialize()
+{
+	PRINT_NAME();
+	if (g_initialized.exchange(true, std::memory_order_acq_rel))
+	{
+		return static_cast<int32_t>(0x80ED0001u);
+	}
+	g_status.store(CommonDialog::STATUS_INITIALIZED, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI ErrorDialogOpen(const void* param)
+{
+	PRINT_NAME();
+	if (param == nullptr)
+	{
+		return static_cast<int32_t>(0x80ED0005u);
+	}
+	if (!g_initialized.load(std::memory_order_acquire))
+	{
+		return static_cast<int32_t>(0x80ED0002u);
+	}
+	g_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI ErrorDialogGetStatus()
+{
+	PRINT_NAME();
+	return g_status.load(std::memory_order_acquire);
+}
+
+int KYTY_SYSV_ABI ErrorDialogUpdateStatus()
+{
+	PRINT_NAME();
+	return g_status.load(std::memory_order_acquire);
+}
+
+int KYTY_SYSV_ABI ErrorDialogClose()
+{
+	PRINT_NAME();
+	g_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI ErrorDialogTerminate()
+{
+	PRINT_NAME();
+	g_status.store(CommonDialog::STATUS_NONE, std::memory_order_release);
+	g_initialized.store(false, std::memory_order_release);
+	return OK;
+}
+
+} // namespace ErrorDialog
 
 namespace SaveDataDialog {
 
@@ -125,6 +193,41 @@ int KYTY_SYSV_ABI SaveDataDialogTerminate()
 	}
 
 	g_status.store(CommonDialog::STATUS_NONE, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI SaveDataDialogClose()
+{
+	PRINT_NAME();
+	return SaveDataDialogTerminate();
+}
+
+int KYTY_SYSV_ABI SaveDataDialogGetResult(void* /*result*/)
+{
+	PRINT_NAME();
+	if (g_status.load(std::memory_order_acquire) != CommonDialog::STATUS_FINISHED)
+	{
+		return CommonDialog::ERROR_NOT_FINISHED;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI SaveDataDialogIsReadyToDisplay(int* ready)
+{
+	PRINT_NAME();
+	if (ready == nullptr)
+	{
+		return CommonDialog::ERROR_ARG_NULL;
+	}
+	*ready = 1;
+	return OK;
+}
+
+int KYTY_SYSV_ABI SaveDataDialogProgressBarInc(int target, uint32_t delta)
+{
+	PRINT_NAME();
+	printf("\t target = %d\n", target);
+	printf("\t delta  = %u\n", delta);
 	return OK;
 }
 

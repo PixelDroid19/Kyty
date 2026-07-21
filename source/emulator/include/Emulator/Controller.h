@@ -87,11 +87,15 @@ void AgentPadApplyReadStateSample(uint32_t* buttons);
 
 int KYTY_SYSV_ABI PadInit();
 int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param);
+int KYTY_SYSV_ABI PadOpenExt(int user_id, int type, int index, const void* param);
+int KYTY_SYSV_ABI PadClose(int handle);
 int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index);
 int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable);
 int KYTY_SYSV_ABI PadSetTiltCorrectionState(int handle, bool enable);
 int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable);
 int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformation* info);
+int KYTY_SYSV_ABI PadGetExtControllerInformation(int handle, void* info);
+int KYTY_SYSV_ABI PadDeviceClassGetExtendedInformation(int handle, void* info);
 int KYTY_SYSV_ABI PadReadState(int handle, PadData* data);
 int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num);
 int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param);

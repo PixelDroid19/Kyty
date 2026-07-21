@@ -71,7 +71,11 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("wRbq6ZjNop4", Gen5::GraphicsGetRegisterDefaults2Internal);
 	// Patch helpers (3.20 export names): wait-mem / DMA destination rewrite.
 	LIB_FUNC("3KDcnM3lrcU", Gen5::GraphicsAgcWaitRegMemPatchAddress);
+	LIB_FUNC("n485EBnIWmk", Gen5::GraphicsAgcWaitRegMemPatchCompareFunction);
+	LIB_FUNC("7nOoijNPvEU", Gen5::GraphicsAgcWaitRegMemPatchReference);
+	LIB_FUNC("hXAnLgDHCoI", Gen5::GraphicsAgcWaitRegMemPatchMask);
 	LIB_FUNC("IxYiarKlXxM", Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset);
+	LIB_FUNC("cdDRpqcFGbU", Gen5::GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate);
 	// Lkf86B98qPc: sceAgcGetPacketSize (type-3 dword length).
 	LIB_FUNC("Lkf86B98qPc", Gen5::GraphicsGetDataPacketSizeDw);
 	LIB_FUNC("f3dg2CSgRKY", Gen5::GraphicsCreateShader);
@@ -89,13 +93,20 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	// WmAc2MEj6Io: sceAgcDcbDmaData. Distinct from MWiElSNE8j8 WaitUntilSafe.
 	LIB_FUNC("WmAc2MEj6Io", Gen5::GraphicsDcbDmaData);
 	LIB_FUNC("-RnpfpxIhec", Gen5::GraphicsDcbDmaData); // sceAgcAcbDmaData alias
+	LIB_FUNC("2ccJz9LQI+w", Gen5::GraphicsDcbDmaDataGetSize);
 	LIB_FUNC("u2T2DiA5hRI", Gen5::GraphicsDcbStallCommandBufferParser);
+	LIB_FUNC("+u6dKSLWM2o", Gen5::GraphicsDcbStallCommandBufferParserGetSize);
 	LIB_FUNC("D9sr1xGUriE", Gen5::GraphicsCreatePrimState);
 	LIB_FUNC("HV4j+E0MBHE", Gen5::GraphicsCreateInterpolantMapping);
 	LIB_FUNC("V++UgBtQhn0", Gen5::GraphicsGetDataPacketPayloadAddress);
 	LIB_FUNC("h9z6+0hEydk", Gen5::GraphicsSuspendPoint);
 	LIB_FUNC("0fWWK5uG9rQ", Gen5::GraphicsAgcQueueEndOfPipeActionPatchAddress);
+	LIB_FUNC("MlEw1feXcjg", Gen5::GraphicsAgcQueueEndOfPipeActionPatchData);
+	LIB_FUNC("J8YCgfKAMQs", Gen5::GraphicsAgcQueueEndOfPipeActionPatchGcrCntl);
+	LIB_FUNC("T9fjQIINoeE", Gen5::GraphicsAgcQueueEndOfPipeActionPatchType);
 	LIB_FUNC("fPSCdQxgpSw", Gen5::GraphicsWriteDataPatchSetAddressOrOffset);
+	LIB_FUNC("eAy8eGNsCuU", Gen5::GraphicsWriteDataPatchSetCachePolicy);
+	LIB_FUNC("tmy-+rBpspY", Gen5::GraphicsWriteDataPatchSetDst);
 	LIB_FUNC("BfBDZGbti7A", Gen5::GraphicsGetIsTrinityMode);
 	LIB_FUNC("T6xuVw0KUJo", Gen5::GraphicsDebugRaiseException);
 
@@ -117,7 +128,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("8N2tmT3jmC8", Gen5::GraphicsDcbSetIndexCount);
 	LIB_FUNC("tSBxhAPyytQ", Gen5::GraphicsDcbSetNumInstances);
 	LIB_FUNC("Yw0jKSqop+E", Gen5::GraphicsDcbDrawIndexAuto);
-	// Provenance: external reference sceAgcDcbDrawIndexOffset NID B+aG9DUnTKA (MIT).
+	// sceAgcDcbDrawIndexOffset NID B+aG9DUnTKA.
 	// Misbinding this to DrawIndexAutoWithBase made UI quads ignore IndexBase
 	// (indices 0,1,2,1,2,3) and walk sequential verts → shear + diagonal wipe.
 	LIB_FUNC("B+aG9DUnTKA", Gen5::GraphicsDcbDrawIndexOffset);
@@ -170,6 +181,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("AhGvpITrf4M", Gen5Driver::GraphicsDriverSubmitDcb);
 	LIB_FUNC("gSRnr79F8tQ", Gen5Driver::GraphicsDriverSubmitAcb);
 	LIB_FUNC("w2rJhmD+dsE", Gen5Driver::GraphicsDriverAddEqEvent);
+	LIB_FUNC("XlNp7jzGiPo", Gen5Driver::GraphicsDriverSetTFRing);
+	LIB_FUNC("MM4IZSEYytQ", Gen5Driver::GraphicsDriverSetHsOffchipParam);
 }
 
 } // namespace LibGen5Driver
@@ -194,7 +207,9 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("t7PlZ9nt5Lc", Gen5::GraphicsCbNopGetSize);
 	LIB_FUNC("WmAc2MEj6Io", Gen5::GraphicsDcbDmaData);
 	LIB_FUNC("-RnpfpxIhec", Gen5::GraphicsDcbDmaData);
+	LIB_FUNC("2ccJz9LQI+w", Gen5::GraphicsDcbDmaDataGetSize);
 	LIB_FUNC("u2T2DiA5hRI", Gen5::GraphicsDcbStallCommandBufferParser);
+	LIB_FUNC("+u6dKSLWM2o", Gen5::GraphicsDcbStallCommandBufferParserGetSize);
 	LIB_FUNC("TRO721eVt4g", Gen5::GraphicsDcbResetQueue);
 	LIB_FUNC("JrtiDtKeS38", Gen5::GraphicsAcbResetQueue);
 	LIB_FUNC("MWiElSNE8j8", Gen5::GraphicsDcbWaitUntilSafeForRendering);
@@ -207,7 +222,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("8N2tmT3jmC8", Gen5::GraphicsDcbSetIndexCount);
 	LIB_FUNC("tSBxhAPyytQ", Gen5::GraphicsDcbSetNumInstances);
 	LIB_FUNC("Yw0jKSqop+E", Gen5::GraphicsDcbDrawIndexAuto);
-	// Provenance: external reference sceAgcDcbDrawIndexOffset NID B+aG9DUnTKA (MIT).
+	// sceAgcDcbDrawIndexOffset NID B+aG9DUnTKA.
 	// Misbinding this to DrawIndexAutoWithBase made UI quads ignore IndexBase
 	// (indices 0,1,2,1,2,3) and walk sequential verts → shear + diagonal wipe.
 	LIB_FUNC("B+aG9DUnTKA", Gen5::GraphicsDcbDrawIndexOffset);
@@ -255,10 +270,19 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("V++UgBtQhn0", Gen5::GraphicsGetDataPacketPayloadAddress);
 	LIB_FUNC("h9z6+0hEydk", Gen5::GraphicsSuspendPoint);
 	LIB_FUNC("0fWWK5uG9rQ", Gen5::GraphicsAgcQueueEndOfPipeActionPatchAddress);
+	LIB_FUNC("MlEw1feXcjg", Gen5::GraphicsAgcQueueEndOfPipeActionPatchData);
+	LIB_FUNC("J8YCgfKAMQs", Gen5::GraphicsAgcQueueEndOfPipeActionPatchGcrCntl);
+	LIB_FUNC("T9fjQIINoeE", Gen5::GraphicsAgcQueueEndOfPipeActionPatchType);
 	LIB_FUNC("3KDcnM3lrcU", Gen5::GraphicsAgcWaitRegMemPatchAddress);
+	LIB_FUNC("n485EBnIWmk", Gen5::GraphicsAgcWaitRegMemPatchCompareFunction);
+	LIB_FUNC("7nOoijNPvEU", Gen5::GraphicsAgcWaitRegMemPatchReference);
+	LIB_FUNC("hXAnLgDHCoI", Gen5::GraphicsAgcWaitRegMemPatchMask);
 	LIB_FUNC("IxYiarKlXxM", Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset);
+	LIB_FUNC("cdDRpqcFGbU", Gen5::GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate);
 	LIB_FUNC("Lkf86B98qPc", Gen5::GraphicsGetDataPacketSizeDw);
 	LIB_FUNC("fPSCdQxgpSw", Gen5::GraphicsWriteDataPatchSetAddressOrOffset);
+	LIB_FUNC("eAy8eGNsCuU", Gen5::GraphicsWriteDataPatchSetCachePolicy);
+	LIB_FUNC("tmy-+rBpspY", Gen5::GraphicsWriteDataPatchSetDst);
 	LIB_FUNC("BfBDZGbti7A", Gen5::GraphicsGetIsTrinityMode);
 	LIB_FUNC("T6xuVw0KUJo", Gen5::GraphicsDebugRaiseException);
 }

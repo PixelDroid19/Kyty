@@ -78,10 +78,23 @@ static KYTY_SYSV_ABI int64_t stub_impl()
 	return kyty_missing_func_return_zero();
 }
 
-template <int... Is>
-static constexpr void fill_stub_table(StubFn* t, std::integer_sequence<int, Is...> /*seq*/)
+template <int Offset, int... Is>
+static constexpr void fill_stub_table_chunk(StubFn* t, std::integer_sequence<int, Is...> /*seq*/)
 {
-	((t[Is] = &stub_impl<Is>), ...);
+	((t[Offset + Is] = &stub_impl<Offset + Is>), ...);
+}
+
+template <int Offset = 0>
+static constexpr void fill_stub_table(StubFn* t)
+{
+	constexpr int chunk_size = 128;
+	constexpr int remaining  = static_cast<int>(kCapacity) - Offset;
+	constexpr int count      = remaining < chunk_size ? remaining : chunk_size;
+	fill_stub_table_chunk<Offset>(t, std::make_integer_sequence<int, count> {});
+	if constexpr (remaining > chunk_size)
+	{
+		fill_stub_table<Offset + chunk_size>(t);
+	}
 }
 
 class StubAllocator
@@ -108,7 +121,7 @@ private:
 		static bool   init = false;
 		if (!init)
 		{
-			fill_stub_table(table, std::make_integer_sequence<int, static_cast<int>(kCapacity)> {});
+			fill_stub_table(table);
 			init = true;
 		}
 		return table;

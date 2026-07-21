@@ -1123,6 +1123,13 @@ int KYTY_SYSV_ABI AjmInitialize(int64_t reserved, uint32_t* context)
 	return OK;
 }
 
+int KYTY_SYSV_ABI AjmFinalize(uint32_t context)
+{
+	PRINT_NAME();
+	printf("\t context = %u\n", context);
+	return OK;
+}
+
 int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t reserved)
 {
 	PRINT_NAME();
@@ -1144,6 +1151,14 @@ int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t re
 		default: EXIT("unknown codec\n");
 	}
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmModuleUnregister(uint32_t context, uint32_t codec)
+{
+	PRINT_NAME();
+	printf("\t context = %u\n", context);
+	printf("\t codec   = %u\n", codec);
 	return OK;
 }
 
@@ -2371,6 +2386,123 @@ int KYTY_SYSV_ABI Ngs2SystemCreate(const Ngs2SystemOption* option, const Ngs2Con
 	g_ngs_list = ngs;
 	*handle    = reinterpret_cast<uintptr_t>(ngs);
 
+	return OK;
+}
+
+static bool Ngs2ValidateSystem(uintptr_t system_handle, Ngs2Internal** out_ngs)
+{
+	if (system_handle == 0 || out_ngs == nullptr)
+	{
+		return false;
+	}
+	auto* ngs = reinterpret_cast<Ngs2Internal*>(system_handle);
+	for (auto* it = g_ngs_list; it != nullptr; it = it->next)
+	{
+		if (it == ngs)
+		{
+			*out_ngs = ngs;
+			return true;
+		}
+	}
+	return false;
+}
+
+int KYTY_SYSV_ABI Ngs2SystemDestroy(uintptr_t system_handle)
+{
+	PRINT_NAME();
+	Ngs2Internal* ngs = nullptr;
+	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	{
+		return static_cast<int32_t>(0x804a0201u);
+	}
+	Core::LockGuard lock(ngs->mutex);
+	auto** link = &g_racks_list;
+	while (*link != nullptr)
+	{
+		if ((*link)->ngs == ngs)
+		{
+			auto* rack = *link;
+			*link = rack->next;
+			auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack + 1);
+			for (uint32_t i = 0; i < rack->option.common.max_voices; i++)
+			{
+				g_pcm_streams.erase(voices + i);
+			}
+			rack->~Ngs2RackInternal();
+			continue;
+		}
+		link = &(*link)->next;
+	}
+	auto** sys_link = &g_ngs_list;
+	while (*sys_link != nullptr && *sys_link != ngs)
+	{
+		sys_link = &(*sys_link)->next;
+	}
+	if (*sys_link != nullptr)
+	{
+		*sys_link = ngs->next;
+	}
+	ngs->~Ngs2Internal();
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2SystemLock(uintptr_t system_handle)
+{
+	PRINT_NAME();
+	Ngs2Internal* ngs = nullptr;
+	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	{
+		return static_cast<int32_t>(0x804a0201u);
+	}
+	ngs->mutex.Lock();
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2SystemUnlock(uintptr_t system_handle)
+{
+	PRINT_NAME();
+	Ngs2Internal* ngs = nullptr;
+	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	{
+		return static_cast<int32_t>(0x804a0201u);
+	}
+	ngs->mutex.Unlock();
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2SystemSetGrainSamples(uintptr_t system_handle, uint32_t grain_samples)
+{
+	PRINT_NAME();
+	Ngs2Internal* ngs = nullptr;
+	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	{
+		return static_cast<int32_t>(0x804a0201u);
+	}
+	if (grain_samples > 0 && grain_samples <= 8192)
+	{
+		ngs->option.num_grain_samples = grain_samples;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2SystemSetSampleRate(uintptr_t system_handle, uint32_t sample_rate)
+{
+	PRINT_NAME();
+	Ngs2Internal* ngs = nullptr;
+	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	{
+		return static_cast<int32_t>(0x804a0201u);
+	}
+	if (sample_rate > 0)
+	{
+		ngs->option.sample_rate = sample_rate;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2PanInit(void* /*pan_param*/)
+{
+	PRINT_NAME();
 	return OK;
 }
 

@@ -29,10 +29,19 @@ uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_
                                         VirtualMemory::Mode mode, uint64_t alignment);
 bool     sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                       VirtualMemory::Mode mode);
+bool     sys_virtual_map_shared_fixed_replacing_owned_reservation(void* backing, uint64_t address, uint64_t backing_offset,
+                                                                  uint64_t size, VirtualMemory::Mode mode);
+bool     sys_virtual_supports_shared_fixed_owned_reservation_replacement();
 uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                                    VirtualMemory::Mode mode, uint64_t alignment);
 bool     sys_virtual_free(uint64_t address);
 bool     sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode = nullptr);
+VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint64_t address, uint64_t size,
+	                                                                      VirtualMemory::CapturedProtectionVisitor visitor,
+	                                                                      void* context) noexcept;
+bool     sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+bool     sys_virtual_restore_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+bool     sys_virtual_restore_protection_signal_safe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
 bool     sys_virtual_protect_write_signal_safe(uint64_t address, uint64_t size);
 bool     sys_virtual_flush_instruction_cache(uint64_t address, uint64_t size);
 bool     sys_virtual_patch_replace(uint64_t vaddr, uint64_t value);

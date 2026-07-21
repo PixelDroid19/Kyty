@@ -109,12 +109,50 @@ bool           DiscardSharedBackingRange(SharedBacking* backing, uint64_t backin
 uint64_t       MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                                 uint64_t alignment);
 bool           MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode);
+// Replace only a NoAccess reservation owned by this process. Prefix and suffix
+// remain reserved and independently releasable.
+bool MapSharedFixedReplacingOwnedReservation(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
+                                             Mode mode);
+bool SupportsSharedFixedOwnedReservationReplacement();
 // Preserve the requested view when possible. A host may relocate only when
 // its own runtime occupies the range and Kyty does not own the collision.
 uint64_t MapSharedFixedOrRelocated(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                                    uint64_t alignment);
 bool           Free(uint64_t address);
 bool           Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nullptr);
+enum class ProtectionChangeStatus : uint32_t
+{
+	Success,
+	InvalidRange,
+	UnmappedRange,
+	UnsupportedProtection,
+	ApplyFailedRolledBack,
+	RollbackFailed
+};
+struct CapturedProtectionRun
+{
+	uint64_t address = 0;
+	uint64_t size = 0;
+	Mode mode = Mode::NoAccess;
+	uint32_t restore_token = 0;
+};
+using CapturedProtectionVisitor = bool (*)(void* context, const CapturedProtectionRun& run) noexcept;
+struct ProtectionChangeResult
+{
+	ProtectionChangeStatus status = ProtectionChangeStatus::InvalidRange;
+	uint32_t applied_runs = 0;
+	uint64_t applied_bytes = 0;
+	[[nodiscard]] bool Succeeded() const noexcept { return status == ProtectionChangeStatus::Success; }
+};
+// The visitor runs synchronously while the host protection transaction is locked. It must not call
+// Protect(), RemoveWriteAndCapture(), or RestoreProtection(). Returning false aborts before native
+// protection changes, but does not undo side effects produced by earlier visitor calls. Every run
+// is visited before write access is removed so fault handlers can always restore a published token.
+ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor,
+	                                         void* context) noexcept;
+bool RemoveWriteFromProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+bool RestoreProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+bool RestoreProtectionSignalSafe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
 // Write-enable a page from an access-violation handler without taking Kyty's
 // virtual-memory bookkeeping lock. This is intentionally narrow: callers must
 // restore tracked protection with Protect() outside the handler.

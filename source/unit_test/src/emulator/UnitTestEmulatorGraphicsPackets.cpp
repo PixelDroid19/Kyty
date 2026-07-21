@@ -725,6 +725,89 @@ TEST(EmulatorGraphicsPackets, PatchesReleaseMemEndOfPipeAddress)
 	EXPECT_EQ(Gen5::GraphicsAgcQueueEndOfPipeActionPatchAddress(nullptr, 1), Libs::LibKernel::KERNEL_ERROR_EINVAL);
 }
 
+TEST(EmulatorGraphicsPackets, PatchesReleaseMemEndOfPipeFields)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t command[8] = {};
+	command[0]           = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	command[2]           = 0x00ab0000u;
+
+	EXPECT_EQ(Gen5::GraphicsAgcQueueEndOfPipeActionPatchGcrCntl(command, 0x1234u), 0);
+	EXPECT_EQ(command[2] & 0xffffu, 0x1234u);
+	EXPECT_EQ((command[2] >> 16u) & 0xffu, 0xabu);
+
+	EXPECT_EQ(Gen5::GraphicsAgcQueueEndOfPipeActionPatchType(command, 2u), 0);
+	EXPECT_EQ((command[2] >> 16u) & 0xffu, 2u);
+
+	EXPECT_EQ(Gen5::GraphicsAgcQueueEndOfPipeActionPatchData(command, 0x1122334455667788ull), 0);
+	EXPECT_EQ(command[5], 0x55667788u);
+	EXPECT_EQ(command[6], 0x11223344u);
+
+	EXPECT_NE(Gen5::GraphicsAgcQueueEndOfPipeActionPatchType(command, 4u), 0);
+}
+
+TEST(EmulatorGraphicsPackets, PatchesWaitRegMemCompareReferenceAndMask)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t wait64[9] = {};
+	wait64[0]          = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	wait64[7]          = 0u;
+
+	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchCompareFunction(wait64, 5u), 0);
+	EXPECT_EQ(wait64[7] & 0x7u, 5u);
+	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchReference(wait64, 0x00000001deadbeefull), 0);
+	EXPECT_EQ(wait64[5], 0xdeadbeefu);
+	EXPECT_EQ(wait64[6], 0x00000001u);
+	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchMask(wait64, 0x00000000ffffffffull), 0);
+	EXPECT_EQ(wait64[3], 0xffffffffu);
+	EXPECT_EQ(wait64[4], 0u);
+
+	uint32_t it_wait[7] = {};
+	it_wait[0]          = KYTY_PM4(7, Pm4::IT_WAIT_REG_MEM, 0);
+	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchCompareFunction(it_wait, 3u), 0);
+	EXPECT_EQ(it_wait[1] & 0x7u, 3u);
+	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchReference(it_wait, 0x42u), 0);
+	EXPECT_EQ(it_wait[4], 0x42u);
+	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchMask(it_wait, 0xffu), 0);
+	EXPECT_EQ(it_wait[5], 0xffu);
+
+	EXPECT_NE(Gen5::GraphicsAgcWaitRegMemPatchCompareFunction(it_wait, 8u), 0);
+}
+
+TEST(EmulatorGraphicsPackets, PatchesWriteDataControlBytes)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t write_cmd[5] = {};
+	write_cmd[0]          = KYTY_PM4(5, Pm4::IT_NOP, Pm4::R_WRITE_DATA);
+	write_cmd[1]          = 0x00010203u;
+
+	EXPECT_EQ(Gen5::GraphicsWriteDataPatchSetDst(write_cmd, 0xabu), 0);
+	EXPECT_EQ(write_cmd[1] & 0xffu, 0xabu);
+	EXPECT_EQ(Gen5::GraphicsWriteDataPatchSetCachePolicy(write_cmd, 0xcdu), 0);
+	EXPECT_EQ((write_cmd[1] >> 8u) & 0xffu, 0xcdu);
+}
+
+TEST(EmulatorGraphicsPackets, ReportsDcbStallAndDmaDataPacketSizes)
+{
+	EXPECT_EQ(Gen5::GraphicsDcbStallCommandBufferParserGetSize(), 8u);
+	EXPECT_EQ(Gen5::GraphicsDcbDmaDataGetSize(), 32u);
+}
+
 // Observed post-Play: guest encodes WaitMem/ReleaseMem with a placeholder then
 // patches the address through GetDataPacketPayloadAddress. WaitMem stores the
 // 64-bit address in the first body dwords (cmd+1); ReleaseMem stores it after
@@ -1323,6 +1406,18 @@ TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel3WithInterrupt)
 	EXPECT_EQ(cmd[2], 0x01030000u); // interrupt=1 << 24 | data_sel=3 << 16
 	EXPECT_EQ(cmd[3], 0x200u);
 	EXPECT_EQ(cmd[7], 0x11u);
+}
+
+TEST(EmulatorGraphicsPackets, DecodesReleaseMemWriteConfirmInterrupt)
+{
+	// Captured EOP packet: GCR writeback, 64-bit immediate, interrupt on
+	// write confirmation. These fields are independent in the AGC envelope.
+	const auto control = GraphicsDecodeAgcReleaseMemControl(0x02020200u);
+	EXPECT_EQ(control.gcr_cntl, 0x0200u);
+	EXPECT_EQ(control.data_sel, 2u);
+	EXPECT_EQ(control.interrupt, 2u);
+	EXPECT_EQ(GraphicsAgcReleaseMemCacheAction(control.gcr_cntl), 0x38u);
+	EXPECT_EQ(GraphicsAgcReleaseMemCacheAction(0x0100u), 0x00u);
 }
 
 TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1WithNullDestination)

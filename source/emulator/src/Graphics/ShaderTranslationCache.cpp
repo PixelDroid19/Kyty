@@ -166,7 +166,7 @@ ShaderTranslationCacheResult ShaderTranslationCache::GetOrCompile(const ShaderMo
 	binary = compiler();
 	if (!binary.IsEmpty() && persistent_eligible)
 	{
-		(void)m_state->persistent_store->StoreModule(key, m_state->validation_enabled, binary);
+		(void)m_state->persistent_store->QueueStoreModule(key, m_state->validation_enabled, binary);
 	}
 	{
 		std::lock_guard<std::mutex> lock(m_state->mutex);
