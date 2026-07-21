@@ -28,6 +28,13 @@ static void InitVideoOutCommon(Loader::SymbolDatabase* symbols, int module_versi
 	add("i6-sR91Wt-4", reinterpret_cast<uint64_t>(VideoOut::VideoOutSetBufferAttribute), U"VideoOut::VideoOutSetBufferAttribute");
 	add("HXzjK9yI30k", reinterpret_cast<uint64_t>(VideoOut::VideoOutAddFlipEvent), U"VideoOut::VideoOutAddFlipEvent");
 	add("Xru92wHJRmg", reinterpret_cast<uint64_t>(VideoOut::VideoOutAddVblankEvent), U"VideoOut::VideoOutAddVblankEvent");
+	add("oNOQn3knW6s", reinterpret_cast<uint64_t>(VideoOut::VideoOutDeleteVblankEvent), U"VideoOut::VideoOutDeleteVblankEvent");
+	add("U2JJtSqNKZI", reinterpret_cast<uint64_t>(VideoOut::VideoOutGetEventId), U"VideoOut::VideoOutGetEventId");
+	add("rWUTcKdkUzQ", reinterpret_cast<uint64_t>(VideoOut::VideoOutGetEventData), U"VideoOut::VideoOutGetEventData");
+	add("w0hLuNarQxY", reinterpret_cast<uint64_t>(VideoOut::VideoOutConfigureOutput), U"VideoOut::VideoOutConfigureOutput");
+	add("+I4K03i3EL0", reinterpret_cast<uint64_t>(VideoOut::VideoOutInitializeOutputOptions),
+	    U"VideoOut::VideoOutInitializeOutputOptions");
+	add("j6RaAUlaLv0", reinterpret_cast<uint64_t>(VideoOut::VideoOutWaitVblank), U"VideoOut::VideoOutWaitVblank");
 	add("w3BY+tAEiQY", reinterpret_cast<uint64_t>(VideoOut::VideoOutRegisterBuffers), U"VideoOut::VideoOutRegisterBuffers");
 	add("U46NwOiJpys", reinterpret_cast<uint64_t>(VideoOut::VideoOutSubmitFlip), U"VideoOut::VideoOutSubmitFlip");
 	add("SbU3dwp80lQ", reinterpret_cast<uint64_t>(VideoOut::VideoOutGetFlipStatus), U"VideoOut::VideoOutGetFlipStatus");
@@ -64,6 +71,8 @@ LIB_DEFINE(InitVideoOut_1)
 	LIB_FUNC("DYhhWbJSeRg", VideoOut::VideoOutColorSettingsSetGamma);
 	LIB_FUNC("pv9CI5VC+R0", VideoOut::VideoOutAdjustColor);
 	LIB_FUNC("HuViW4HnrOw", VideoOut::VideoOutSubmitChangeBufferAttribute2);
+	LIB_FUNC("Nv8c-Kb+DUM", VideoOut::VideoOutIsOutputSupported);
+	LIB_FUNC("N5KDtkIjjJ4", VideoOut::VideoOutUnregisterBuffers);
 	InitVideoOutCommon(s, 1, 1);
 }
 

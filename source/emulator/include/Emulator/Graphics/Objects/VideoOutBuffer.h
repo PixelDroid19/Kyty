@@ -10,6 +10,9 @@
 
 namespace Kyty::Libs::Graphics {
 
+struct GraphicContext;
+struct VideoOutVulkanImage;
+
 enum class VideoOutBufferFormat : uint64_t
 {
 	Unknown,
@@ -26,6 +29,78 @@ enum class VideoOutBufferFormat : uint64_t
 {
 	return !tiled;
 }
+
+[[nodiscard]] bool VideoOutBufferNeedsMaterialization(const VideoOutVulkanImage* image);
+void               VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* image);
+
+enum class VideoOutHostExtentStatus
+{
+	Selected,
+	StickyMatch,
+	StickyMismatch,
+	InvalidArgument,
+};
+
+struct VideoOutHostExtentState
+{
+	uint32_t width        = 0;
+	uint32_t height       = 0;
+	bool     selected     = false;
+	bool     materialized = false;
+};
+
+enum class VideoOutHostExtentSetSelectionStatus
+{
+	Selected,
+	StickyMatch,
+	StickyMismatch,
+	InvalidArgument,
+	Empty,
+};
+
+[[nodiscard]] const char* VideoOutHostExtentSetSelectionStatusName(VideoOutHostExtentSetSelectionStatus status);
+
+enum class VideoOutHostExtentSetInspectionStatus
+{
+	Uniform,
+	Unselected,
+	NonUniform,
+	InvalidArgument,
+	Empty,
+};
+
+struct VideoOutHostExtentSetState
+{
+	uint32_t width       = 0;
+	uint32_t height      = 0;
+	uint32_t image_count = 0;
+};
+
+[[nodiscard]] VideoOutHostExtentStatus VideoOutBufferSelectHostExtent(VideoOutVulkanImage* image, uint32_t width, uint32_t height,
+                                                                      VideoOutHostExtentState* state);
+[[nodiscard]] bool                     VideoOutBufferGetHostExtentState(VideoOutVulkanImage* image, VideoOutHostExtentState* state);
+
+enum class VideoOutPublishedImageRefreshStatus
+{
+	Published,
+	ExtentConflict,
+	InvalidArgument,
+};
+
+// Applies the VideoOut-owned host extent before publishing a newly resolved
+// GpuMemory backing. The cache is observational only and remains unchanged if
+// the current backing cannot honor the registered extent.
+[[nodiscard]] VideoOutPublishedImageRefreshStatus
+VideoOutBufferRefreshPublishedImage(VideoOutVulkanImage* current, uint32_t host_width, uint32_t host_height,
+                                    VideoOutVulkanImage** published_cache);
+
+// Locks every unique image in a stable order and preflights the complete set before selecting any image, so concurrent set selection cannot
+// publish a partial or non-uniform extent. Duplicate images are invalid input.
+[[nodiscard]] VideoOutHostExtentSetSelectionStatus VideoOutBufferSelectHostExtentSet(VideoOutVulkanImage* const* images,
+                                                                                     uint32_t image_count, uint32_t width, uint32_t height,
+                                                                                     VideoOutHostExtentSetState* state);
+[[nodiscard]] VideoOutHostExtentSetInspectionStatus
+VideoOutBufferInspectHostExtentSet(VideoOutVulkanImage* const* images, uint32_t image_count, VideoOutHostExtentSetState* state);
 
 class VideoOutBufferObject: public GpuObject
 {

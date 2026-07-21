@@ -15,7 +15,9 @@
 
 namespace Kyty::Libs::Graphics {
 
-inline constexpr uint32_t kShaderTranslatorVersion = 1;
+inline constexpr uint32_t kShaderTranslatorVersion = 2;
+
+class SpirvBinaryCacheStore;
 
 enum class ShaderModuleStage : uint8_t
 {
@@ -30,10 +32,12 @@ struct ShaderModuleKey
 	ShaderModuleStage              stage              = ShaderModuleStage::Vertex;
 	Config::ShaderOptimizationType optimization       = Config::ShaderOptimizationType::None;
 	bool                           next_gen            = false;
+	bool                           debug_printf_enabled = false;
 	uint32_t                       translator_version = kShaderTranslatorVersion;
 
 	[[nodiscard]] static ShaderModuleKey Create(const ShaderId& shader_id, ShaderModuleStage stage,
-	                                            Config::ShaderOptimizationType optimization, bool next_gen);
+	                                            Config::ShaderOptimizationType optimization, bool next_gen,
+	                                            bool debug_printf_enabled = false);
 	[[nodiscard]] bool operator==(const ShaderModuleKey& other) const;
 	[[nodiscard]] bool operator!=(const ShaderModuleKey& other) const { return !(*this == other); }
 };
@@ -50,7 +54,8 @@ class ShaderTranslationCache final
 public:
 	using Compiler = std::function<Vector<uint32_t>()>;
 
-	explicit ShaderTranslationCache(size_t max_entries);
+	explicit ShaderTranslationCache(size_t max_entries, SpirvBinaryCacheStore* persistent_store = nullptr,
+	                                bool validation_enabled = false);
 	~ShaderTranslationCache();
 	KYTY_CLASS_NO_COPY(ShaderTranslationCache);
 

@@ -96,6 +96,23 @@ int KYTY_SYSV_ABI AppContentAppParamGetInt(uint32_t param_id, int32_t* value)
 	return OK;
 }
 
+int KYTY_SYSV_ABI AppContentTemporaryDataMount2(const void* /*param*/)
+{
+	PRINT_NAME();
+	return OK;
+}
+
+int KYTY_SYSV_ABI AppContentDownloadDataGetAvailableSpaceKb(uint64_t* available_kb)
+{
+	PRINT_NAME();
+	if (available_kb == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	*available_kb = 1024ULL * 1024ULL;
+	return OK;
+}
+
 } // namespace AppContent
 
 LIB_DEFINE(InitAppContent_1)
@@ -103,6 +120,8 @@ LIB_DEFINE(InitAppContent_1)
 	LIB_FUNC("R9lA82OraNs", AppContent::AppContentInitialize);
 	LIB_FUNC("xnd8BJzAxmk", AppContent::AppContentGetAddcontInfoList);
 	LIB_FUNC("99b82IKXpH4", AppContent::AppContentAppParamGetInt);
+	LIB_FUNC("buYbeLOGWmA", AppContent::AppContentTemporaryDataMount2);
+	LIB_FUNC("Gl6w5i0JokY", AppContent::AppContentDownloadDataGetAvailableSpaceKb);
 }
 
 } // namespace Kyty::Libs

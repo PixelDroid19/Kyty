@@ -18,6 +18,7 @@ class Shader;
 } // namespace HW
 
 class CommandProcessor;
+class TransientBufferPool;
 struct VideoOutVulkanImage;
 struct DepthStencilVulkanImage;
 struct TextureVulkanImage;
@@ -55,6 +56,7 @@ public:
 	void WaitForFenceWithoutLabelCallbacks();
 	void WaitForFenceAndReset();
 	void WaitForFenceAndResetWithoutLabelCallbacks();
+	[[nodiscard]] bool TryCompleteFenceAndResetWithoutLabelCallbacks();
 
 	[[nodiscard]] uint32_t GetIndex() const { return m_index; }
 	VulkanCommandPool*     GetPool() { return m_pool; }
@@ -73,6 +75,7 @@ public:
 		*submission = m_submission;
 		return true;
 	}
+	VulkanBuffer* UploadTransientBuffer(const void* data, uint64_t size, uint32_t usage);
 
 private:
 	VulkanCommandPool* m_pool    = nullptr;
@@ -82,12 +85,17 @@ private:
 	CommandProcessor*  m_parent  = nullptr;
 	SubmissionId       m_submission;
 	bool               m_has_submission = false;
+	TransientBufferPool* m_transient_buffers = nullptr;
 
 	void WaitForFence(bool drain_label_callbacks, bool reset_command_buffer);
 };
 
 void GraphicsRenderInit();
 void GraphicsRenderCreateContext();
+
+// Resolves the Gen5 rect-list auto-draw expansion without depending on Vulkan
+// objects, so the guest primitive contract can be tested deterministically.
+bool GraphicsResolveRectListAutoDraw(uint32_t primitive_type, uint32_t index_count, int vertex_buffers_num, uint32_t* vertex_count);
 
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint32_t flags, uint32_t type);
@@ -109,7 +117,10 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t submit_id, 
                                                             uint64_t value);
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value);
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value);
-void GraphicsRenderWriteBack(CommandProcessor* cp);
+// Records a completion-only write-back action in the current command buffer.
+// The caller submits after releasing its CommandProcessor mutex so publication
+// cannot precede GPU -> CPU materialization.
+void GraphicsRenderPrepareWriteBack(CommandBuffer* buffer);
 void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
                                   uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
 void GraphicsRenderMemoryBarrier(CommandBuffer* buffer);

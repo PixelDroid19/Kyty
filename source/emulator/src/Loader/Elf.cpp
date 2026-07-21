@@ -471,7 +471,11 @@ bool Elf64::IsSelf() const
 		return false;
 	}
 
-	if (m_self->ident[0] != 0x4f || m_self->ident[1] != 0x15 || m_self->ident[2] != 0x3d || m_self->ident[3] != 0x1d)
+	const bool primary_signature =
+	    m_self->ident[0] == 0x4f && m_self->ident[1] == 0x15 && m_self->ident[2] == 0x3d && m_self->ident[3] == 0x1d;
+	const bool alternate_gen5_signature =
+	    m_self->ident[0] == 0x54 && m_self->ident[1] == 0x14 && m_self->ident[2] == 0xf5 && m_self->ident[3] == 0xee;
+	if (!primary_signature && !alternate_gen5_signature)
 	{
 		return false;
 	}
@@ -616,9 +620,11 @@ void Elf64::Open(const String& file_name)
 	if (m_ehdr != nullptr /*&& m_self == nullptr*/)
 	{
 		m_phdr = load_phdr_64(*m_f, ehdr_pos + m_ehdr->e_phoff, m_ehdr->e_phnum);
-		m_shdr = load_shdr_64(*m_f, ehdr_pos + m_ehdr->e_shoff, m_ehdr->e_shnum);
-
-		EXIT_NOT_IMPLEMENTED(m_shdr != nullptr && m_self != nullptr);
+		// SELF program loading is defined by its embedded ELF program headers and
+		// segment table. Some valid containers retain ELF section metadata whose
+		// payload is not stored in the file; sections are debug/link metadata and
+		// are not required for runtime segment loading.
+		m_shdr = (m_self == nullptr ? load_shdr_64(*m_f, ehdr_pos + m_ehdr->e_shoff, m_ehdr->e_shnum) : nullptr);
 
 		if (m_shdr != nullptr)
 		{

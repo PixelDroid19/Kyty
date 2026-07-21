@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Work only in `/home/monasterios/Documents/PS5/Kyty`; do not create another worktree.
-- Never copy GPL implementation code from SharpEmu; use only clean-room architectural observations.
+- Never copy GPL or third-party implementation code; use only clean-room architectural observations.
 - Never put private workload paths, title identifiers, assets, screenshots, or raw runtime logs in tracked files or commit messages.
 - Preserve strict behavior: no permissive GPU skips, fabricated synchronization, assumed formats, or behavioral fallbacks.
 - Prove the current producer and add a deterministic failing test before editing production behavior.

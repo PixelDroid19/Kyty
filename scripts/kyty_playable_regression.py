@@ -60,13 +60,20 @@ DEFAULT_PROFILE: dict[str, Any] = {
     "milestones": {
         "min_present_after_ready": 1,
         "present_delta_stable": 15,
-        "min_pad_taps": 1,
+        "min_pad_taps": 3,
         "min_guest_read_state_samples": 1,
     },
     "pad_sequence": [
         {"tool": "pad_tap", "button": "cross"},
         {"tool": "pad_tap", "button": "cross"},
+        {"tool": "pad_tap", "button": "cross"},
     ],
+    "input": {"menu_settle_s": 5, "inter_tap_settle_s": 3},
+    "post_input": {
+        "require_loading_transition": True,
+        "min_present_delta": 240,
+        "min_settle_s": 15,
+    },
     "visual": {"require_baseline": True, "require_capture": True},
 }
 
@@ -206,8 +213,11 @@ def kill_process_group(proc: subprocess.Popen[Any], notes: list[str]) -> None:
             os.killpg(proc.pid, signal.SIGKILL)
         else:
             proc.kill()
-        proc.wait(timeout=5)
-        notes.append("killed_sigkill")
+        try:
+            proc.wait(timeout=5)
+            notes.append("killed_sigkill")
+        except subprocess.TimeoutExpired:
+            notes.append("kill_timeout")
     except ProcessLookupError:
         notes.append("process_already_gone")
     except OSError as exc:
@@ -274,8 +284,15 @@ def first_actionable_from_log(log_path: Path) -> str:
         text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
         s = line.strip()
+        if s in ("--- Error ---", "--- Fatal Error ---"):
+            for diagnostic in lines[index + 1 :]:
+                diagnostic = diagnostic.strip()
+                if not diagnostic or diagnostic.startswith("---") or diagnostic.startswith(" in /"):
+                    continue
+                return diagnostic[:160]
         if not s or s.startswith("---") or s.startswith("["):
             continue
         if "/home/" in s or "Documents/" in s or s.startswith(" in /"):
@@ -358,6 +375,8 @@ class RunReport:
             "notes": self.notes,
             "profile_deadlines_s": self.profile.get("deadlines_s", {}),
             "profile_milestones": self.profile.get("milestones", {}),
+            "profile_input": self.profile.get("input", {}),
+            "profile_post_input": self.profile.get("post_input", {}),
         }
         return sanitize_obj(payload, guest_root)
 
@@ -372,6 +391,125 @@ def pad_counters(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def deadline_timeout(deadline: float, cap: float, *, clock: Any = time.monotonic) -> float:
+    return max(0.0, min(cap, deadline - clock()))
+
+
+def deliver_pad_sequence(
+    sock: Path,
+    steps: list[dict[str, Any]],
+    *,
+    call: Any = agent_call,
+    pause: Any = time.sleep,
+    deadline: Optional[float] = None,
+    clock: Any = time.monotonic,
+    inter_tap_settle_s: float = 0.0,
+) -> tuple[bool, list[dict[str, Any]]]:
+    events: list[dict[str, Any]] = []
+    success = True
+    supported = frozenset(("pad_tap", "pad_down", "pad_up"))
+    action_deadline = deadline
+    if deadline is not None:
+        initial_budget = max(0.0, deadline - clock())
+        clear_reserve = min(2.0, max(0.1, initial_budget * 0.2), initial_budget)
+        action_deadline = deadline - clear_reserve
+
+    def action_timeout(cap: float) -> float:
+        if action_deadline is None:
+            return cap
+        return deadline_timeout(action_deadline, cap, clock=clock)
+
+    try:
+        for step_index, step in enumerate(steps):
+            if action_deadline is not None and clock() >= action_deadline:
+                success = False
+                break
+            tool = str(step.get("tool") or "pad_tap")
+            button = str(step.get("button") or "cross")
+            if tool not in supported:
+                events.append({"event": tool, "button": button, "ok": False})
+                success = False
+                break
+
+            code, _obj = call(sock, tool, {"button": button}, timeout=action_timeout(2.0))
+            events.append({"event": tool, "button": button, "ok": code == 0})
+            if code != 0:
+                success = False
+                break
+
+            if tool == "pad_tap":
+                tap_completed = False
+                for _attempt in range(60):
+                    if action_deadline is not None and clock() >= action_deadline:
+                        break
+                    status_code, status_obj = call(sock, "status", {}, timeout=action_timeout(2.0))
+                    if status_code != 0:
+                        success = False
+                        break
+                    if not pad_counters(extract_result(status_obj))["tap_pending"]:
+                        tap_completed = True
+                        break
+                    wait_s = (
+                        0.05
+                        if action_deadline is None
+                        else min(0.05, max(0.0, action_deadline - clock()))
+                    )
+                    if wait_s > 0.0:
+                        pause(wait_s)
+                if not tap_completed:
+                    success = False
+                    break
+                if step_index + 1 < len(steps) and inter_tap_settle_s > 0.0:
+                    settle_until = clock() + inter_tap_settle_s
+                    if action_deadline is not None:
+                        settle_until = min(settle_until, action_deadline)
+                    while clock() < settle_until:
+                        pause(min(0.05, settle_until - clock()))
+                    if action_deadline is not None and clock() >= action_deadline:
+                        success = False
+                        break
+    finally:
+        clear_timeout = 2.0 if deadline is None else deadline_timeout(deadline, 2.0, clock=clock)
+        clear_code, _clear_obj = call(sock, "pad_clear", {}, timeout=max(0.001, clear_timeout))
+        events.append({"event": "pad_clear", "ok": clear_code == 0})
+        success = success and clear_code == 0
+
+    return success, events
+
+
+def advance_post_input_wait(
+    require_loading_transition: bool,
+    loading_seen: bool,
+    phase: str,
+    present_delta: int,
+    elapsed_s: float,
+    min_present_delta: int,
+    min_settle_s: float,
+) -> tuple[bool, bool]:
+    loading_seen = loading_seen or phase == "loading"
+    loading_ok = loading_seen or not require_loading_transition
+    settled = present_delta >= min_present_delta and elapsed_s >= min_settle_s
+    return loading_seen, loading_ok and settled and phase == "interactive"
+
+
+def can_start_pad_sequence(
+    agent_ready: bool,
+    first_present: Optional[int],
+    phase: str,
+    presents_stable: bool,
+    elapsed: float,
+    stability_fallback_at: float,
+    menu_ready_at: float = 0.0,
+) -> bool:
+    return (
+        agent_ready
+        and first_present is not None
+        and phase == "interactive"
+        and elapsed >= menu_ready_at
+        and (presents_stable or elapsed >= stability_fallback_at)
+    )
+
+
 def classify_exit(exit_code: Optional[int], timed_out: bool) -> str:
     if timed_out:
         return "controlled_timeout"
@@ -379,7 +517,7 @@ def classify_exit(exit_code: Optional[int], timed_out: bool) -> str:
         return "unknown"
     if exit_code == 0:
         return "guest_exit_ok"
-    if exit_code in (139, 132, 134, 136, 65, 321):
+    if exit_code in (-6, 139, 132, 134, 136, 65, 321):
         return "host_crash"
     if exit_code in (-15, -9, 143, 137):
         return "controlled_kill"
@@ -402,6 +540,7 @@ def evaluate_gates(
     first_error: str,
     milestones: dict[str, Any],
     visual_require_baseline: bool,
+    input_sequence_ok: bool = True,
 ) -> list[GateResult]:
     gates: list[GateResult] = []
     gates.append(GateResult("agent_ready", agent_ready, "agent_ready" if agent_ready else "agent_not_ready"))
@@ -435,10 +574,19 @@ def evaluate_gates(
     reads_before = int(input_before.get("guest_read_state_samples") or 0)
     reads_after = int(input_after.get("guest_read_state_samples") or 0)
     min_reads = int(milestones.get("min_guest_read_state_samples") or 1)
-    taps_ok = (taps_after - taps_before) >= min_taps
-    # Prefer delivered_taps; fall back to guest actually sampling pad state after our taps.
+    tap_delta = taps_after - taps_before
+    taps_ok = tap_delta == min_taps
+    # A configured tap sequence is accepted only when every required tap was
+    # delivered. Guest reads alone cannot prove that a rejected tap reached it.
     reads_ok = (reads_after - reads_before) >= min_reads
-    input_ok = taps_ok or (taps_after > taps_before) or reads_ok
+    gates.append(
+        GateResult(
+            "input_sequence_complete",
+            input_sequence_ok,
+            "sequence_and_clear_ok" if input_sequence_ok else "tap_or_clear_failed",
+        )
+    )
+    input_ok = input_sequence_ok and (taps_ok if min_taps > 0 else reads_ok)
     gates.append(
         GateResult(
             "input_delivered",
@@ -484,6 +632,17 @@ def evaluate_gates(
 def material_visual_checks(raw_compare: dict[str, Any]) -> dict[str, bool]:
     checks = raw_compare.get("checks") if isinstance(raw_compare.get("checks"), dict) else {}
     return {key: bool(checks.get(key, False)) for key in MATERIAL_VISUAL_CHECKS}
+
+
+def compare_playable_visual_metrics(capture_mod: Any, metrics: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    raw_compare = capture_mod.compare_metrics(metrics, baseline)
+    material = material_visual_checks(raw_compare)
+    return {
+        "pass": all(material.values()),
+        "checks": material,
+        "delta": raw_compare.get("delta") or {},
+        "raw_checks": raw_compare.get("checks") or {},
+    }
 
 
 def visual_floor_from_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
@@ -582,6 +741,19 @@ def run_session(
     phase_input_done = False
     phase_stable_done = False
     phase_capture_done = False
+    input_sequence_ok = False
+    post_input_config = profile.get("post_input") or {}
+    input_config = profile.get("input") or {}
+    menu_settle_s = float(input_config.get("menu_settle_s") or 0.0)
+    inter_tap_settle_s = float(input_config.get("inter_tap_settle_s") or 0.0)
+    require_loading_transition = bool(post_input_config.get("require_loading_transition", True))
+    post_input_min_present_delta = int(post_input_config.get("min_present_delta") or 240)
+    post_input_min_settle_s = float(post_input_config.get("min_settle_s") or 15)
+    post_input_loading_seen = False
+    post_input_ready = False
+    post_input_start_present: Optional[int] = None
+    post_input_started_at: Optional[float] = None
+    interactive_since: Optional[float] = None
 
     try:
         while time.monotonic() < deadline_total:
@@ -597,21 +769,40 @@ def run_session(
                     notes.append("agent_ready_deadline")
                     timed_out = True
                     break
-                code, obj = agent_call(sock, "ping", timeout=1.0)
+                call_timeout = deadline_timeout(deadline_total, 1.0)
+                if call_timeout <= 0.0:
+                    timed_out = True
+                    notes.append("total_deadline")
+                    break
+                code, obj = agent_call(sock, "ping", timeout=call_timeout)
                 if code == 0:
                     agent_ready = True
                     notes.append("agent_ready")
                     report.timeline.append({"t": round(elapsed, 3), "event": "agent_ready"})
-                time.sleep(0.25)
+                time.sleep(min(0.25, max(0.0, deadline_total - time.monotonic())))
                 continue
 
-            code, obj = agent_call(sock, "status", timeout=2.0)
+            phase = ""
+            call_timeout = deadline_timeout(deadline_total, 2.0)
+            if call_timeout <= 0.0:
+                timed_out = True
+                notes.append("total_deadline")
+                break
+            code, obj = agent_call(sock, "status", timeout=call_timeout)
             if code == 0:
                 status = extract_result(obj)
                 present = int(status.get("present") or 0)
                 frame = int(status.get("frame") or 0)
                 graphic = bool(status.get("graphic_ready"))
                 phase = str(status.get("phase") or "")
+                if not phase_input_done:
+                    if phase == "interactive":
+                        if interactive_since is None:
+                            interactive_since = elapsed
+                    else:
+                        interactive_since = None
+                if phase_input_done:
+                    input_after = pad_counters(status)
                 report.timeline.append(
                     {
                         "t": round(elapsed, 3),
@@ -631,8 +822,42 @@ def run_session(
                     report.timeline.append({"t": round(elapsed, 3), "event": "first_present", "present": present})
                     present_at_stable_start = present
 
+                if phase_input_done and not post_input_ready:
+                    present_since_input = max(0, present - int(post_input_start_present or present))
+                    elapsed_since_input = max(0.0, now - float(post_input_started_at or now))
+                    was_loading_seen = post_input_loading_seen
+                    post_input_loading_seen, post_input_ready = advance_post_input_wait(
+                        require_loading_transition,
+                        post_input_loading_seen,
+                        phase,
+                        present_since_input,
+                        elapsed_since_input,
+                        post_input_min_present_delta,
+                        post_input_min_settle_s,
+                    )
+                    if post_input_loading_seen and not was_loading_seen:
+                        notes.append("post_input_loading_seen")
+                        report.timeline.append({"t": round(elapsed, 3), "event": "post_input_loading"})
+                    if post_input_ready:
+                        notes.append("post_input_interactive")
+                        report.timeline.append(
+                            {
+                                "t": round(elapsed, 3),
+                                "event": "post_input_interactive",
+                                "present_delta": present_since_input,
+                                "settle_s": round(elapsed_since_input, 3),
+                            }
+                        )
+            elif not phase_input_done:
+                interactive_since = None
+
             # last_error snapshot
-            ecode, eobj = agent_call(sock, "last_error", timeout=1.0)
+            call_timeout = deadline_timeout(deadline_total, 1.0)
+            if call_timeout <= 0.0:
+                timed_out = True
+                notes.append("total_deadline")
+                break
+            ecode, eobj = agent_call(sock, "last_error", timeout=call_timeout)
             if ecode == 0:
                 ev = extract_result(eobj).get("event")
                 if isinstance(ev, dict) and not report.first_error:
@@ -660,42 +885,76 @@ def run_session(
                     notes.append("present_stability_deadline")
                     # continue to try input/capture with whatever we have
 
-            # Input phase once we have some presents (or stability deadline passed)
-            if agent_ready and first_present is not None and not phase_input_done:
-                if phase_stable_done or elapsed > first_present_s + stability_s * 0.5:
-                    code, sobj = agent_call(sock, "status", timeout=2.0)
-                    if code == 0:
-                        input_before = pad_counters(extract_result(sobj))
-                    for step in profile.get("pad_sequence") or []:
-                        button = str(step.get("button") or "cross")
-                        tool = str(step.get("tool") or "pad_tap")
-                        if tool == "pad_tap":
-                            agent_call(sock, "pad_tap", {"button": button}, timeout=2.0)
-                        elif tool == "pad_down":
-                            agent_call(sock, "pad_down", {"button": button}, timeout=2.0)
-                        elif tool == "pad_up":
-                            agent_call(sock, "pad_up", {"button": button}, timeout=2.0)
+            # Input begins only on a stable interactive menu. Never send startup
+            # taps while booting or loading.
+            if not phase_input_done and can_start_pad_sequence(
+                agent_ready,
+                first_present,
+                phase,
+                phase_stable_done,
+                elapsed,
+                first_present_s + stability_s * 0.5,
+                float(interactive_since if interactive_since is not None else elapsed) + menu_settle_s,
+            ):
+                call_timeout = deadline_timeout(deadline_total, 2.0)
+                if call_timeout <= 0.0:
+                    timed_out = True
+                    notes.append("total_deadline")
+                    break
+                code, sobj = agent_call(sock, "status", timeout=call_timeout)
+                pre_input_status = extract_result(sobj) if code == 0 else {}
+                if code != 0 or str(pre_input_status.get("phase") or "") != "interactive":
+                    interactive_since = None
+                else:
+                    input_before = pad_counters(pre_input_status)
+                    input_sequence_ok, input_events = deliver_pad_sequence(
+                        sock,
+                        profile.get("pad_sequence") or [],
+                        deadline=min(deadline_total, time.monotonic() + input_s),
+                        inter_tap_settle_s=inter_tap_settle_s,
+                    )
+                    for event in input_events:
                         report.timeline.append(
-                            {"t": round(time.monotonic() - started, 3), "event": tool, "button": button}
+                            {"t": round(time.monotonic() - started, 3), **event}
                         )
-                        time.sleep(0.15)
-                    # Wait a few presents for guest to sample overlay
-                    agent_call(sock, "wait_present", {"delta": 5, "timeout_ms": int(input_s * 1000)}, timeout=input_s + 2)
-                    code, sobj = agent_call(sock, "status", timeout=2.0)
-                    if code == 0:
-                        input_after = pad_counters(extract_result(sobj))
-                        st = extract_result(sobj)
-                        present_now = int(st.get("present") or 0)
-                        if present_at_stable_start is not None:
-                            present_delta = max(present_delta, present_now - int(present_at_stable_start))
+                    if not input_sequence_ok:
+                        notes.append("input_sequence_failed")
+                    fresh_timeout = deadline_timeout(deadline_total, 2.0)
+                    fresh_code, fresh_obj = agent_call(sock, "status", timeout=max(0.001, fresh_timeout))
+                    if fresh_code == 0:
+                        status = extract_result(fresh_obj)
+                        input_after = pad_counters(status)
+                        if str(status.get("phase") or "") == "loading":
+                            post_input_loading_seen = True
+                            notes.append("post_input_loading_seen")
+                            report.timeline.append(
+                                {
+                                    "t": round(time.monotonic() - started, 3),
+                                    "event": "post_input_loading",
+                                }
+                            )
+                    else:
+                        input_sequence_ok = False
+                        notes.append("post_input_status_failed")
+                    post_input_start_present = int(status.get("present") or 0)
+                    post_input_started_at = time.monotonic()
                     phase_input_done = True
                     notes.append("input_sequence_done")
 
             # Capture once input attempted or presents stable
             if agent_ready and first_present is not None and not phase_capture_done:
-                if phase_input_done or phase_stable_done:
+                if phase_input_done and post_input_ready:
+                    capture_budget = deadline_timeout(deadline_total, 20.0)
+                    if capture_budget < 2.0:
+                        timed_out = True
+                        notes.append("capture_budget_exhausted")
+                        break
+                    server_timeout_ms = min(15000, max(1, int((capture_budget - 0.25) * 1000)))
                     ccode, cobj = agent_call(
-                        sock, "capture", {"timeout_ms": 15000, "score": True}, timeout=20.0
+                        sock,
+                        "capture",
+                        {"timeout_ms": server_timeout_ms, "score": True},
+                        timeout=capture_budget,
                     )
                     if ccode == 0:
                         cres = extract_result(cobj)
@@ -755,16 +1014,7 @@ def run_session(
                                         # Support both raw score_image and wrapped baseline
                                         baseline_metrics = bas if "world" in bas else {"world": bas}
                                         current = {"world": metrics["world"]}
-                                        compare = capture_mod.compare_metrics(current, baseline_metrics)
-                                        # Playable regression: do not require scene_is_gameplay OCR
-                                        # (title-specific OCR is diagnostic). Material regress gates only.
-                                        material = material_visual_checks(compare)
-                                        compare = {
-                                            "pass": all(material.values()),
-                                            "checks": material,
-                                            "delta": compare.get("delta") or {},
-                                            "raw_checks": checks,
-                                        }
+                                        compare = compare_playable_visual_metrics(capture_mod, current, baseline_metrics)
                                         notes.append("visual_compare_done")
                                 except Exception as exc:  # noqa: BLE001 — record and fail visual gate
                                     notes.append(f"visual_metrics_error:{type(exc).__name__}")
@@ -778,7 +1028,7 @@ def run_session(
                 notes.append("session_milestones_complete")
                 break
 
-            time.sleep(0.35)
+            time.sleep(min(0.35, max(0.0, deadline_total - time.monotonic())))
         else:
             timed_out = True
             notes.append("total_deadline")
@@ -823,6 +1073,7 @@ def run_session(
         first_error=report.first_error,
         milestones=milestones,
         visual_require_baseline=visual_req,
+        input_sequence_ok=input_sequence_ok,
     )
 
     summary = report.to_sanitized_dict(guest_root)

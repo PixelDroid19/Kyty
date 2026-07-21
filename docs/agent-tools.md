@@ -96,7 +96,9 @@ Do not “fix” a `125` by sleeping longer. Machine-readable example:
 500 ms plus one overflow bucket. The wire response contains only sample count,
 p50/p95/p99/max in integer microseconds, and counts above 50/100/250 ms; it
 never serializes histogram buckets. Samples without a positive finite frame
-time are excluded. `--reset` returns the completed window and opens an empty
+time are excluded. Each sample is the monotonic interval between consecutive
+host frame-loop timestamps; it is not reconstructed from the periodically
+averaged FPS value. `--reset` returns the completed window and opens an empty
 one; a snapshot without reset is read-only.
 
 Resource-work fields use the same resettable window and report
@@ -114,7 +116,25 @@ subphases; those subphase times must not be added to it. The renderer also
 reports exact in-memory shader-translation cache hits,
 misses, and host-side evictions; a hit reuses final SPIR-V only when the full
 shader identity, stage, optimization mode, generation mode, and translator
-version match.
+version match. `pipeline_cache_checkpoint_*` reports the exact synchronous
+driver-cache snapshot boundary: attempts, attempted bytes, total/maximum time,
+and written/failed/budget-exceeded outcomes.
+
+`performance.slow_frames` is a fixed 64-record ring containing only flips
+strictly slower than 50 ms. Records remain in chronological order and expose
+`capacity`, current `size`, and overwritten-record `dropped` count. Each record
+contains the frame duration and flip sequence together with the changes since
+the preceding flip in graphics/compute pipeline misses, SPIR-V compilation,
+GPU-memory creation, upload, and writeback work. The first flip establishes the
+baseline and is never attributed earlier work. `--reset` returns and clears the
+ring, then establishes a new baseline from the current cumulative counters.
+These fields provide **temporal correlation, not causality**: overlapping work
+can identify a seam to investigate, but cannot by itself prove the producer of
+a stall. Flip publication and snapshot/reset share one short mutex boundary so
+a frame cannot be split across histogram, threshold, and ring windows. Work
+producers remain concurrent after a short admission step. A pending flip
+temporarily closes admission, waits only for already-active publishers, copies
+the fixed cumulative counters, and immediately reopens publication.
 
 `performance.gpu_memory` is a fixed nine-row array ordered and named as
 `video_out_buffer`, `depth_stencil_buffer`, `label`, `index_buffer`,
@@ -125,6 +145,16 @@ to exactly one of `fast_reuse`, `exact_reuse`, `new_standalone`, `new_linked`,
 `live` is the current absolute count and is therefore not reset with the
 measurement window. The existing top-level `creates` remains the number of
 new logical objects, not total `CreateObject` calls.
+
+`performance.gpu_memory.slow_creates` retains at most 64 `CreateObject`
+operations strictly slower than 5 ms. Records classify type, outcome, requested
+bytes, range count, alias work, lock waits, hashing, dirty tracking, Vulkan
+allocation/binding, object callbacks, and uploads without retaining guest
+addresses or object identifiers. `create_func_ns` and `update_func_ns` are
+**inclusive**: their Vulkan and upload subphases are reported separately for
+attribution but must not be added to the parent callback time. Likewise,
+`dirty_track_ns` includes `dirty_register_ns` and `dirty_prepare_ns`. These
+records are diagnostic correlation only and never control guest behavior.
 
 ### `status.phase`
 
@@ -139,13 +169,18 @@ new logical objects, not total `CreateObject` calls.
 Prefer `wait-present --delta` and `wait-phase interactive` over absolute
 `wait-present --min` with multi-minute timeouts.
 
-```bash
-kyty_agent pad tap cross
-kyty_agent wait-phase loading --timeout-ms 10000      # optional
-kyty_agent wait-phase interactive --timeout-ms 45000
-kyty_agent capture --no-score
-```
-
+Use `scripts/kyty_playable_regression.py` for automated startup input. Its
+bounded sequence waits for `tap_pending=false` after each of exactly three
+Cross taps, gives the initial menu five seconds to settle, gives each
+subsequent UI transition three seconds, performs an
+explicit clear, then observes a bounded post-input settle without further
+input. The shipped strict profile requires a loading transition, then observes
+at least 15 seconds and 240 further presents before capturing. Do not script
+consecutive raw `pad tap` commands: the
+server acknowledges scheduling before the release edge is necessarily
+delivered, so the next tap can be rejected or the final clear can cancel it.
+Continuous or repeated input can trigger jumps and reopen menus, invalidating
+cache and frame-time measurements.
 Protocol: JSON lines, **`protocol_version` 4**. Pad tools are **diagnostic_input**
 only — not gameplay acceptance (same rule as `KYTY_AUTO_CROSS`).
 

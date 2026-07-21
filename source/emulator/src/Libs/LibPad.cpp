@@ -15,12 +15,16 @@ LIB_DEFINE(InitPad_1)
 
 	LIB_FUNC("hv1luiJrqQM", Controller::PadInit);
 	LIB_FUNC("xk0AcarP3V4", Controller::PadOpen);
+	LIB_FUNC("WFIiSfXGUq8", Controller::PadOpenExt);
+	LIB_FUNC("6ncge5+l5Qs", Controller::PadClose);
 	// scePadGetHandle — returns the handle from PadOpen for the same user/type/index.
 	LIB_FUNC("u1GRHp+oWoY", Controller::PadGetHandle);
 	LIB_FUNC("clVvL4ZDntw", Controller::PadSetMotionSensorState);
 	LIB_FUNC("vDLMoJLde8I", Controller::PadSetTiltCorrectionState);
 	LIB_FUNC("r44mAxdSG+U", Controller::PadSetAngularVelocityDeadbandState);
 	LIB_FUNC("gjP9-KQzoUk", Controller::PadGetControllerInformation);
+	LIB_FUNC("hGbf2QTBmqc", Controller::PadGetExtControllerInformation);
+	LIB_FUNC("AcslpN1jHR8", Controller::PadDeviceClassGetExtendedInformation);
 	LIB_FUNC("YndgXqQVV7c", Controller::PadReadState);
 	LIB_FUNC("q1cHNfGycLI", Controller::PadRead);
 	LIB_FUNC("yFVnOdGxvZY", Controller::PadSetVibration);

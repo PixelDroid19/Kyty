@@ -12,6 +12,19 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <atomic>
+#include <cinttypes>
+#include <cstring>
+#include <unordered_map>
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX || defined(__APPLE__)
+#include <arpa/inet.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#define KYTY_NET_HOST_POSIX 1
+#endif
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -877,6 +890,523 @@ int KYTY_SYSV_ABI NetGetMacAddress(NetEtherAddr* addr, int flags)
 	return OK;
 }
 
+struct SocketState
+{
+	bool     active  = true;
+	bool     bound   = false;
+	uint16_t port    = 0;
+	uint8_t  addr[4] {};
+#if KYTY_NET_HOST_POSIX
+	int host_fd = -1;
+#endif
+};
+
+static std::atomic<int> g_next_socket_id {1};
+static std::unordered_map<int, SocketState> g_sockets;
+
+static bool ParseGuestSockaddrIn(const void* addr, int len, uint16_t* port_out, uint8_t ip_out[4])
+{
+	if (addr == nullptr || len < 8 || port_out == nullptr || ip_out == nullptr)
+	{
+		return false;
+	}
+	const auto* bytes = static_cast<const uint8_t*>(addr);
+	if (bytes[1] != 2)
+	{
+		return false;
+	}
+	*port_out = static_cast<uint16_t>((static_cast<uint16_t>(bytes[2]) << 8u) | bytes[3]);
+	std::memcpy(ip_out, bytes + 4, 4);
+	return true;
+}
+
+static void WriteGuestSockaddrIn(void* addr, int* len, int max_len, uint16_t port, const uint8_t ip[4])
+{
+	if (addr == nullptr || len == nullptr || max_len < 8 || ip == nullptr)
+	{
+		return;
+	}
+	auto* out = static_cast<uint8_t*>(addr);
+	out[0]    = 16;
+	out[1]    = 2;
+	out[2]    = static_cast<uint8_t>((port >> 8u) & 0xffu);
+	out[3]    = static_cast<uint8_t>(port & 0xffu);
+	std::memcpy(out + 4, ip, 4);
+	const int write_len = max_len < 16 ? max_len : 16;
+	*len                = write_len;
+}
+
+#if KYTY_NET_HOST_POSIX
+static int HostErrnoToNet(int host_errno)
+{
+	switch (host_errno)
+	{
+		case EBADF: return NET_ERROR_EBADF;
+		case EINTR: return NET_ERROR_EINTR;
+		case EIO: return NET_ERROR_EIO;
+		case EFAULT: return NET_ERROR_EFAULT;
+		case EINVAL: return NET_ERROR_EINVAL;
+		case EACCES: return NET_ERROR_EACCES;
+		case EAGAIN: return NET_ERROR_EAGAIN;
+		case EALREADY: return NET_ERROR_EALREADY;
+		case EINPROGRESS: return NET_ERROR_EINPROGRESS;
+		case ENOTSOCK: return NET_ERROR_ENOTSOCK;
+		case EDESTADDRREQ: return NET_ERROR_EDESTADDRREQ;
+		case EMSGSIZE: return NET_ERROR_EMSGSIZE;
+		case EPROTOTYPE: return NET_ERROR_EPROTOTYPE;
+		case ENOPROTOOPT: return NET_ERROR_ENOPROTOOPT;
+		case EPROTONOSUPPORT: return NET_ERROR_EPROTONOSUPPORT;
+		case EOPNOTSUPP: return NET_ERROR_EOPNOTSUPP;
+		case EAFNOSUPPORT: return NET_ERROR_EAFNOSUPPORT;
+		case EADDRINUSE: return NET_ERROR_EADDRINUSE;
+		case EADDRNOTAVAIL: return NET_ERROR_EADDRNOTAVAIL;
+		case ENETDOWN: return NET_ERROR_ENETDOWN;
+		case ENETUNREACH: return NET_ERROR_ENETUNREACH;
+		case ECONNABORTED: return NET_ERROR_ECONNABORTED;
+		case ECONNRESET: return NET_ERROR_ECONNRESET;
+		case ENOBUFS: return NET_ERROR_ENOBUFS;
+		case EISCONN: return NET_ERROR_EISCONN;
+		case ENOTCONN: return NET_ERROR_ENOTCONN;
+		case ETIMEDOUT: return NET_ERROR_ETIMEDOUT;
+		case ECONNREFUSED: return NET_ERROR_ECONNREFUSED;
+		case EPIPE: return NET_ERROR_EPIPE;
+		default: return NET_ERROR_EINVAL;
+	}
+}
+
+static bool TranslateGuestSocketParams(int family, int type, int protocol, int* host_family, int* host_type,
+                                       int* host_protocol)
+{
+	if (host_family == nullptr || host_type == nullptr || host_protocol == nullptr)
+	{
+		return false;
+	}
+
+	switch (family)
+	{
+		case 2: *host_family = AF_INET; break;
+		case 28: *host_family = AF_INET6; break;
+		default: return false;
+	}
+
+	switch (type & 0xf)
+	{
+		case 1: *host_type = SOCK_STREAM; break;
+		case 2: *host_type = SOCK_DGRAM; break;
+		default: return false;
+	}
+
+	if (protocol == 0)
+	{
+		*host_protocol = (*host_type == SOCK_STREAM ? IPPROTO_TCP : IPPROTO_UDP);
+	}
+	else if (protocol == 6)
+	{
+		*host_protocol = IPPROTO_TCP;
+	}
+	else if (protocol == 17)
+	{
+		*host_protocol = IPPROTO_UDP;
+	}
+	else
+	{
+		return false;
+	}
+
+	return true;
+}
+
+static bool GuestToHostSockaddrIn(const void* addr, int len, sockaddr_in* out)
+{
+	uint16_t port = 0;
+	uint8_t  ip[4] {};
+	if (out == nullptr || !ParseGuestSockaddrIn(addr, len, &port, ip))
+	{
+		return false;
+	}
+	std::memset(out, 0, sizeof(*out));
+	out->sin_family = AF_INET;
+	out->sin_port   = htons(port);
+	std::memcpy(&out->sin_addr, ip, 4);
+	return true;
+}
+#endif
+
+int KYTY_SYSV_ABI NetSocket(const char* name, int family, int type, int protocol)
+{
+	PRINT_NAME();
+	printf("\t name = %s\n", name != nullptr ? name : "(null)");
+	printf("\t family = %d type = %d protocol = %d\n", family, type, protocol);
+
+	SocketState state {};
+#if KYTY_NET_HOST_POSIX
+	int host_family   = 0;
+	int host_type     = 0;
+	int host_protocol = 0;
+	if (!TranslateGuestSocketParams(family, type, protocol, &host_family, &host_type, &host_protocol))
+	{
+		return NET_ERROR_EINVAL;
+	}
+	state.host_fd = ::socket(host_family, host_type, host_protocol);
+	if (state.host_fd < 0)
+	{
+		return HostErrnoToNet(errno);
+	}
+#else
+	(void)family;
+	(void)type;
+	(void)protocol;
+#endif
+
+	const int id = g_next_socket_id.fetch_add(1, std::memory_order_relaxed);
+	g_sockets[id] = state;
+	return id;
+}
+
+int KYTY_SYSV_ABI NetSocketClose(int id)
+{
+	PRINT_NAME();
+	printf("\t id = %d\n", id);
+	const auto it = g_sockets.find(id);
+	if (it == g_sockets.end())
+	{
+		return NET_ERROR_EBADF;
+	}
+#if KYTY_NET_HOST_POSIX
+	if (it->second.host_fd >= 0)
+	{
+		::close(it->second.host_fd);
+	}
+#endif
+	g_sockets.erase(it);
+	return OK;
+}
+
+int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
+{
+	PRINT_NAME();
+	printf("\t id = %d\n", id);
+	const auto it = g_sockets.find(id);
+	if (it == g_sockets.end())
+	{
+		return NET_ERROR_EBADF;
+	}
+	uint16_t port = 0;
+	uint8_t  ip[4] {};
+	if (!ParseGuestSockaddrIn(addr, len, &port, ip))
+	{
+		return NET_ERROR_EINVAL;
+	}
+#if KYTY_NET_HOST_POSIX
+	sockaddr_in host_addr {};
+	if (!GuestToHostSockaddrIn(addr, len, &host_addr))
+	{
+		return NET_ERROR_EINVAL;
+	}
+	if (::bind(it->second.host_fd, reinterpret_cast<sockaddr*>(&host_addr), sizeof(host_addr)) != 0)
+	{
+		return HostErrnoToNet(errno);
+	}
+#endif
+	it->second.bound = true;
+	it->second.port  = port;
+	std::memcpy(it->second.addr, ip, 4);
+	return OK;
+}
+
+int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len)
+{
+	PRINT_NAME();
+	printf("\t id = %d\n", id);
+	const auto it = g_sockets.find(id);
+	if (it == g_sockets.end())
+	{
+		return NET_ERROR_EBADF;
+	}
+	uint16_t port = 0;
+	uint8_t  ip[4] {};
+	if (!ParseGuestSockaddrIn(addr, len, &port, ip))
+	{
+		return NET_ERROR_EINVAL;
+	}
+#if KYTY_NET_HOST_POSIX
+	sockaddr_in host_addr {};
+	if (!GuestToHostSockaddrIn(addr, len, &host_addr))
+	{
+		return NET_ERROR_EINVAL;
+	}
+	if (::connect(it->second.host_fd, reinterpret_cast<sockaddr*>(&host_addr), sizeof(host_addr)) != 0)
+	{
+		return HostErrnoToNet(errno);
+	}
+#endif
+	it->second.bound = true;
+	it->second.port  = port;
+	std::memcpy(it->second.addr, ip, 4);
+	return OK;
+}
+
+int KYTY_SYSV_ABI NetListen(int id, int backlog)
+{
+	PRINT_NAME();
+	printf("\t id = %d backlog = %d\n", id, backlog);
+	const auto it = g_sockets.find(id);
+	if (it == g_sockets.end())
+	{
+		return NET_ERROR_EBADF;
+	}
+#if KYTY_NET_HOST_POSIX
+	if (::listen(it->second.host_fd, backlog) != 0)
+	{
+		return HostErrnoToNet(errno);
+	}
+#else
+	(void)backlog;
+#endif
+	return OK;
+}
+
+int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len)
+{
+	PRINT_NAME();
+	printf("\t id = %d\n", id);
+	const auto it = g_sockets.find(id);
+	if (it == g_sockets.end())
+	{
+		return NET_ERROR_EBADF;
+	}
+
+	SocketState accepted_state {};
+#if KYTY_NET_HOST_POSIX
+	sockaddr_in peer {};
+	socklen_t   peer_len = sizeof(peer);
+	accepted_state.host_fd =
+	    ::accept(it->second.host_fd, reinterpret_cast<sockaddr*>(&peer), &peer_len);
+	if (accepted_state.host_fd < 0)
+	{
+		return HostErrnoToNet(errno);
+	}
+	accepted_state.bound = true;
+	accepted_state.port  = ntohs(peer.sin_port);
+	std::memcpy(accepted_state.addr, &peer.sin_addr, 4);
+	if (addr != nullptr && len != nullptr)
+	{
+		WriteGuestSockaddrIn(addr, len, *len, accepted_state.port, accepted_state.addr);
+	}
+#else
+	(void)addr;
+	(void)len;
+#endif
+
+	const int accepted = g_next_socket_id.fetch_add(1, std::memory_order_relaxed);
+	g_sockets[accepted] = accepted_state;
+	return accepted;
+}
+
+int64_t KYTY_SYSV_ABI NetSend(int id, const void* buf, uint64_t len, int flags)
+{
+	PRINT_NAME();
+	printf("\t id = %d len = %" PRIu64 " flags = %d\n", id, len, flags);
+	const auto it = g_sockets.find(id);
+	if (it == g_sockets.end())
+	{
+		return NET_ERROR_EBADF;
+	}
+	if (len != 0 && buf == nullptr)
+	{
+		return NET_ERROR_EFAULT;
+	}
+	if (len == 0)
+	{
+		return 0;
+	}
+#if KYTY_NET_HOST_POSIX
+	const auto sent = ::send(it->second.host_fd, buf, static_cast<size_t>(len), flags);
+	if (sent < 0)
+	{
+		return HostErrnoToNet(errno);
+	}
+	return sent;
+#else
+	(void)flags;
+	return NET_ERROR_EOPNOTSUPP;
+#endif
+}
+
+int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags)
+{
+	PRINT_NAME();
+	printf("\t id = %d len = %" PRIu64 " flags = %d\n", id, len, flags);
+	const auto it = g_sockets.find(id);
+	if (it == g_sockets.end())
+	{
+		return NET_ERROR_EBADF;
+	}
+	if (len != 0 && buf == nullptr)
+	{
+		return NET_ERROR_EFAULT;
+	}
+	if (len == 0)
+	{
+		return 0;
+	}
+#if KYTY_NET_HOST_POSIX
+	const auto received = ::recv(it->second.host_fd, buf, static_cast<size_t>(len), flags);
+	if (received < 0)
+	{
+		return HostErrnoToNet(errno);
+	}
+	return received;
+#else
+	(void)flags;
+	return NET_ERROR_EOPNOTSUPP;
+#endif
+}
+
+int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len)
+{
+	PRINT_NAME();
+	printf("\t id = %d\n", id);
+	const auto it = g_sockets.find(id);
+	if (it == g_sockets.end() || !it->second.bound)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	if (addr == nullptr || len == nullptr || *len < 8)
+	{
+		return NET_ERROR_EINVAL;
+	}
+#if KYTY_NET_HOST_POSIX
+	sockaddr_in host_addr {};
+	socklen_t   host_len = sizeof(host_addr);
+	if (::getsockname(it->second.host_fd, reinterpret_cast<sockaddr*>(&host_addr), &host_len) == 0 &&
+	    host_addr.sin_family == AF_INET)
+	{
+		uint8_t ip[4] {};
+		std::memcpy(ip, &host_addr.sin_addr, 4);
+		WriteGuestSockaddrIn(addr, len, *len, ntohs(host_addr.sin_port), ip);
+		return OK;
+	}
+#endif
+	WriteGuestSockaddrIn(addr, len, *len, it->second.port, it->second.addr);
+	return OK;
+}
+
+int KYTY_SYSV_ABI NetGetsockopt(int id, int level, int option, void* value, int* value_len)
+{
+	PRINT_NAME();
+	printf("\t id = %d level = %d option = %d\n", id, level, option);
+	const auto it = g_sockets.find(id);
+	if (it == g_sockets.end())
+	{
+		return NET_ERROR_EBADF;
+	}
+	if (value == nullptr || value_len == nullptr || level != 0xffff)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	if (*value_len < static_cast<int>(sizeof(int)))
+	{
+		return NET_ERROR_EINVAL;
+	}
+	int stored = 0;
+	switch (option)
+	{
+		case 0x1200: stored = 0; break; // ORBIS_NET_SO_NBIO: blocking
+		case 0x0004: stored = 0; break; // SO_REUSEADDR
+		case 0x1007: stored = 0; break; // SO_ERROR
+		default: return NET_ERROR_EINVAL;
+	}
+	std::memcpy(value, &stored, sizeof(stored));
+	*value_len = static_cast<int>(sizeof(stored));
+	return OK;
+}
+
+int KYTY_SYSV_ABI NetSelect(int nfds, void* /*readfds*/, void* /*writefds*/, void* /*exceptfds*/, void* /*timeout*/)
+{
+	PRINT_NAME();
+	printf("\t nfds = %d\n", nfds);
+	return nfds < 0 ? NET_ERROR_EINVAL : nfds;
+}
+
+const char* KYTY_SYSV_ABI NetInetNtop(int af, const void* src, char* dst, int size)
+{
+	PRINT_NAME();
+	if (src == nullptr || dst == nullptr || size <= 0)
+	{
+		return nullptr;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	return ::inet_ntop(af, src, dst, static_cast<socklen_t>(size));
+#else
+	(void)af;
+	(void)size;
+	return nullptr;
+#endif
+}
+
+int KYTY_SYSV_ABI NetSetsockopt(int id, int level, int option, const void* /*value*/, int /*value_len*/)
+{
+	PRINT_NAME();
+	printf("\t id = %d level = %d option = %d\n", id, level, option);
+	return (g_sockets.find(id) != g_sockets.end() ? OK : NET_ERROR_EBADF);
+}
+
+uint32_t KYTY_SYSV_ABI NetHtonl(uint32_t hostlong)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	return ::htonl(hostlong);
+#else
+	return hostlong;
+#endif
+}
+
+uint16_t KYTY_SYSV_ABI NetHtons(uint16_t hostshort)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	return ::htons(hostshort);
+#else
+	return hostshort;
+#endif
+}
+
+uint32_t KYTY_SYSV_ABI NetNtohl(uint32_t netlong)
+{
+	return NetHtonl(netlong);
+}
+
+uint16_t KYTY_SYSV_ABI NetNtohs(uint16_t netshort)
+{
+	return NetHtons(netshort);
+}
+
+int KYTY_SYSV_ABI NetResolverCreate(const char* name, int memid, int flags)
+{
+	PRINT_NAME();
+	printf("\t name = %s memid = %d flags = %d\n", name != nullptr ? name : "(null)", memid, flags);
+	static std::atomic<int> next_resolver {1};
+	return next_resolver.fetch_add(1, std::memory_order_relaxed);
+}
+
+int KYTY_SYSV_ABI NetResolverDestroy(int rid)
+{
+	PRINT_NAME();
+	printf("\t rid = %d\n", rid);
+	return OK;
+}
+
+int KYTY_SYSV_ABI NetResolverGetError(int rid, int* result)
+{
+	PRINT_NAME();
+	printf("\t rid = %d\n", rid);
+	if (result == nullptr)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	*result = 0;
+	return OK;
+}
+
 } // namespace Net
 
 namespace Ssl {
@@ -913,6 +1443,15 @@ int KYTY_SYSV_ABI SslTerm(int ssl_ctx_id)
 	{
 		return SSL_ERROR_INVALID_ID;
 	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI SslClose(int ssl_id)
+{
+	PRINT_NAME();
+
+	printf("\t ssl_id = %d\n", ssl_id);
 
 	return OK;
 }

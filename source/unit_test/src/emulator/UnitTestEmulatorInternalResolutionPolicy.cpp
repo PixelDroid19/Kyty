@@ -173,6 +173,23 @@ TEST(EmulatorInternalResolutionPolicy, AllowsScalingToBeDisabledWithoutChangingG
 	EXPECT_EQ(decision.host_extent, decision.guest_extent);
 }
 
+TEST(EmulatorInternalResolutionPolicy, ExposesStableNativeReasonNames)
+{
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::None), "none");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::PolicyDisabled), "policy_disabled");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::ResourceKind), "resource_kind");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::Compressed), "compressed");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::UnsupportedDimension), "unsupported_dimension");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::Mipmapped), "mipmapped");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::Multisampled), "multisampled");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::ShaderWritable), "shader_writable");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::CpuTransfer), "cpu_transfer");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::AmbiguousAlias), "ambiguous_alias");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::IdentityScale), "identity_scale");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::InvalidExtent), "invalid_extent");
+	EXPECT_STREQ(ResolutionNativeReasonName(ResolutionNativeReason::ArithmeticOverflow), "arithmetic_overflow");
+}
+
 TEST(EmulatorInternalResolutionPolicy, KeepsOneToOneAttachmentsNative)
 {
 	InternalResolutionPolicy policy({1920, 1080});

@@ -4,6 +4,10 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/GpuSubmissionTracker.h"
+
+#include <mutex>
+#include <utility>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -14,9 +18,53 @@ namespace HW {
 struct CsStageRegisters;
 }
 
+// Serializes command admission with teardown transactions. A quiesced action
+// keeps admission closed across both the GPU drain and the caller-owned host
+// lifetime change (for example, unmapping guest virtual memory).
+class GpuSubmissionAdmissionGate
+{
+public:
+	GpuSubmissionAdmissionGate()  = default;
+	~GpuSubmissionAdmissionGate() = default;
+
+	KYTY_CLASS_NO_COPY(GpuSubmissionAdmissionGate);
+
+	template <typename Action>
+	decltype(auto) RunAdmitted(Action&& action)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		return std::forward<Action>(action)();
+	}
+
+	template <typename Drain, typename Action>
+	decltype(auto) RunQuiesced(Drain&& drain, Action&& action)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		std::forward<Drain>(drain)();
+		return std::forward<Action>(action)();
+	}
+
+private:
+	std::mutex m_mutex;
+};
+
+using GraphicsRunQuiescedAction = bool (*)(void*);
+
 void GraphicsRunInit();
 bool GraphicsDecodeComputeResourceLimits(HW::CsStageRegisters* regs, uint32_t cmd_offset, const uint32_t* values,
                                          uint32_t value_count);
+bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords,
+                                                const uint32_t* next_packet, uint32_t next_packet_dwords);
+
+struct GraphicsAgcReleaseMemControl
+{
+	uint16_t gcr_cntl  = 0;
+	uint8_t  data_sel  = 0;
+	uint8_t  interrupt = 0;
+};
+
+GraphicsAgcReleaseMemControl GraphicsDecodeAgcReleaseMemControl(uint32_t control_dw);
+uint32_t GraphicsAgcReleaseMemCacheAction(uint16_t gcr_cntl);
 
 void     GraphicsRunSubmit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw);
 void     GraphicsRunSubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
@@ -29,9 +77,8 @@ void     GraphicsRunDone();
 void     GraphicsRunDingDong(uint32_t ring_id, uint32_t offset_dw);
 int      GraphicsRunGetFrameNum();
 bool     GraphicsRunAreSubmitsAllowed();
+bool     GraphicsRunWithQuiescedSubmissions(GraphicsRunQuiescedAction action, void* data);
 
-void GraphicsRunCommandProcessorLock(CommandProcessor* cp);
-void GraphicsRunCommandProcessorUnlock(CommandProcessor* cp);
 void GraphicsRunCommandProcessorFlush(CommandProcessor* cp);
 void GraphicsRunCommandProcessorWait(CommandProcessor* cp);
 

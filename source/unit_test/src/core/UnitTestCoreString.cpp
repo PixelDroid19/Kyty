@@ -258,6 +258,7 @@ void test_2()
 	EXPECT_TRUE(!String::FromUtf8("abcdabcd").EndsWith(U"bc"));
 	EXPECT_TRUE(String::FromUtf8("abcdabcd").EndsWith(U"cD", String::Case::Insensitive));
 	EXPECT_TRUE(!String::FromUtf8("").EndsWith(U"cd"));
+	EXPECT_FALSE(String::FromUtf8("/").EndsWith(U".odx"));
 	EXPECT_TRUE(String::FromUtf8("abcdabcd").EndsWith(U""));
 	EXPECT_TRUE(String::FromUtf8("").EndsWith(U""));
 	EXPECT_TRUE(String::FromUtf8("abcdabcd").EndsWith(U'd'));

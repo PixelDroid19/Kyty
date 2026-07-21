@@ -26,3 +26,4 @@ _matrix_scratch/
 
 __pycache__/
 *.pyc
+_scratch_cache_runtime/

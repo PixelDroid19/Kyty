@@ -8,6 +8,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Libs/Errno.h"
+#include "Emulator/Libs/LibAmpr.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 
@@ -21,7 +22,7 @@
 
 namespace Kyty::Libs::LibKernel::FileSystem {
 
-using Kyty::Libs::Graphics::GpuMemoryCheckAccessViolation;
+using Kyty::Libs::Graphics::GpuMemoryNotifyHostWrite;
 
 LIB_NAME("libkernel", "libkernel");
 
@@ -61,6 +62,7 @@ struct File
 	String                       real_name;
 	std::atomic_bool             opened;
 	std::atomic_bool             directory;
+	std::atomic_uint32_t         ref_count {1};
 	Core::Mutex                  mutex;
 	Vector<Core::File::DirEntry> dents;
 	uint32_t                     dents_index;
@@ -76,11 +78,16 @@ public:
 
 	int   CreateDescriptor();
 	void  DeleteDescriptor(int d);
+	int   DupDescriptor(int old_d);
+	int   Dup2Descriptor(int old_d, int new_d);
 	File* GetFile(int d);
 	File* GetFile(const String& real_name);
 	void  CloseAll();
 
 private:
+	void  ReleaseFile(File* file);
+	void  EnsureDescriptorCapacity(uint32_t index);
+
 	Vector<File*> m_files;
 	Core::Mutex   m_mutex;
 };
@@ -104,6 +111,7 @@ int FileDescriptors::CreateDescriptor()
 	auto* file      = new File {};
 	file->opened    = false;
 	file->directory = false;
+	file->ref_count = 1;
 
 	int files_num = static_cast<int>(m_files.Size());
 	for (int index = 0; index < files_num; index++)
@@ -119,18 +127,19 @@ int FileDescriptors::CreateDescriptor()
 	return static_cast<int>(m_files.Size()) + DESCRIPTOR_MIN - 1;
 }
 
-void FileDescriptors::DeleteDescriptor(int d)
+void FileDescriptors::ReleaseFile(File* file)
 {
-	Core::LockGuard lock(m_mutex);
+	if (file == nullptr)
+	{
+		return;
+	}
 
-	auto index = static_cast<uint32_t>(d - DESCRIPTOR_MIN);
+	const uint32_t remaining = file->ref_count.fetch_sub(1, std::memory_order_acq_rel) - 1;
+	if (remaining > 0)
+	{
+		return;
+	}
 
-	EXIT_IF(!m_files.IndexValid(index));
-	EXIT_IF(m_files.At(index) == nullptr);
-
-	// Allow cleanup of descriptors that opened the host file but never
-	// published opened=true (failed create/truncate paths).
-	auto* file = m_files.At(index);
 	if (file->opened || !file->f.IsInvalid())
 	{
 		if (!file->directory)
@@ -141,7 +150,112 @@ void FileDescriptors::DeleteDescriptor(int d)
 	}
 
 	delete file;
+}
+
+void FileDescriptors::EnsureDescriptorCapacity(uint32_t index)
+{
+	while (m_files.Size() <= index)
+	{
+		m_files.Add(nullptr);
+	}
+}
+
+void FileDescriptors::DeleteDescriptor(int d)
+{
+	Core::LockGuard lock(m_mutex);
+
+	auto index = static_cast<uint32_t>(d - DESCRIPTOR_MIN);
+
+	EXIT_IF(!m_files.IndexValid(index));
+	EXIT_IF(m_files.At(index) == nullptr);
+
+	auto* file = m_files.At(index);
 	m_files[index] = nullptr;
+	ReleaseFile(file);
+}
+
+int FileDescriptors::DupDescriptor(int old_d)
+{
+	Core::LockGuard lock(m_mutex);
+
+	if (old_d < DESCRIPTOR_MIN)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	const auto old_index = static_cast<uint32_t>(old_d - DESCRIPTOR_MIN);
+	if (!m_files.IndexValid(old_index))
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	auto* file = m_files.At(old_index);
+	if (file == nullptr || !file->opened)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	int new_fd = -1;
+	const int  files_num = static_cast<int>(m_files.Size());
+	for (int index = 0; index < files_num; index++)
+	{
+		if (m_files.At(static_cast<uint32_t>(index)) == nullptr)
+		{
+			new_fd = index + DESCRIPTOR_MIN;
+			m_files[static_cast<uint32_t>(index)] = file;
+			break;
+		}
+	}
+
+	if (new_fd < 0)
+	{
+		m_files.Add(file);
+		new_fd = static_cast<int>(m_files.Size()) + DESCRIPTOR_MIN - 1;
+	}
+
+	file->ref_count.fetch_add(1, std::memory_order_relaxed);
+	return new_fd;
+}
+
+int FileDescriptors::Dup2Descriptor(int old_d, int new_d)
+{
+	Core::LockGuard lock(m_mutex);
+
+	if (old_d < DESCRIPTOR_MIN || new_d < DESCRIPTOR_MIN)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	const auto old_index = static_cast<uint32_t>(old_d - DESCRIPTOR_MIN);
+	if (!m_files.IndexValid(old_index))
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	auto* source = m_files.At(old_index);
+	if (source == nullptr || !source->opened)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	if (old_d == new_d)
+	{
+		return new_d;
+	}
+
+	const auto new_index = static_cast<uint32_t>(new_d - DESCRIPTOR_MIN);
+	EnsureDescriptorCapacity(new_index);
+
+	auto* existing = m_files.At(new_index);
+	if (existing != nullptr && existing != source)
+	{
+		m_files[new_index] = nullptr;
+		ReleaseFile(existing);
+	}
+
+	source->ref_count.fetch_add(1, std::memory_order_relaxed);
+	m_files[new_index] = source;
+	return new_d;
 }
 
 File* FileDescriptors::GetFile(int d)
@@ -490,7 +604,7 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
 
 	file->mutex.Unlock();
-	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(buf), bytes_read);
+	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
 
 	if (is_invalid)
 	{
@@ -892,6 +1006,37 @@ int KYTY_SYSV_ABI KernelUnlink(const char* path)
 
 	printf("\tKernelUnlink: %s\n", path);
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelRename(const char* from, const char* to)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_mount_points == nullptr);
+
+	if (from == nullptr || to == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	const auto from_s = String::FromUtf8(from);
+	const auto to_s   = String::FromUtf8(to);
+	const auto from_real =
+	    ResolveExistingHostFile(from_s, g_mount_points->GetRealFilename(from_s));
+	const auto to_real = g_mount_points->GetRealFilename(to_s);
+
+	if (!Core::File::IsFileExisting(from_real) && !Core::File::IsDirectoryExisting(from_real))
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+
+	if (!Core::File::MoveFile(from_real, to_real))
+	{
+		return KERNEL_ERROR_EIO;
+	}
+
+	printf("\tKernelRename: %s -> %s\n", from, to);
 	return OK;
 }
 
@@ -1665,10 +1810,7 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBuffer(void* cmd, uint64_t arg1, void* a
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	// Command payloads (ReadFile / WriteAddress / equeue wake) are applied when
-	// the Ampr builder APIs append them. Hardware defers work until this submit;
-	// sync HLE has nothing left to drain.
-	return OK;
+	return Ampr::SubmitCommandBuffer(cmd, static_cast<uintptr_t>(arg3));
 }
 
 static uint32_t AprAllocateSubmissionId(uint64_t cmd)
@@ -1741,6 +1883,69 @@ int KYTY_SYSV_ABI KernelAprWaitCommandBuffer(uint32_t submission_id)
 	}
 	g_apr_submissions.erase(it);
 	return OK;
+}
+
+namespace {
+
+constexpr int16_t kPollIn  = 0x0001;
+constexpr int16_t kPollOut = 0x0004;
+
+} // namespace
+
+int KYTY_SYSV_ABI KernelDup(int old_d)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_files == nullptr);
+
+	printf("\t old_d = %d\n", old_d);
+
+	const int new_d = g_files->DupDescriptor(old_d);
+	if (new_d < 0)
+	{
+		return new_d;
+	}
+
+	printf("\t new_d = %d\n", new_d);
+	return new_d;
+}
+
+int KYTY_SYSV_ABI KernelDup2(int old_d, int new_d)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_files == nullptr);
+
+	printf("\t old_d = %d\n", old_d);
+	printf("\t new_d = %d\n", new_d);
+
+	return g_files->Dup2Descriptor(old_d, new_d);
+}
+
+int KYTY_SYSV_ABI KernelPoll(KernelPollFd* fds, uint32_t count, int /*timeout*/)
+{
+	PRINT_NAME();
+
+	if (fds == nullptr || count == 0)
+	{
+		return 0;
+	}
+
+	printf("\t count = %" PRIu32 "\n", count);
+
+	int ready = 0;
+	for (uint32_t i = 0; i < count && i < 4096; i++)
+	{
+		auto& entry = fds[i];
+		entry.revents = static_cast<int16_t>(entry.events & (kPollIn | kPollOut));
+		if (entry.revents != 0)
+		{
+			ready++;
+		}
+	}
+
+	printf("\t ready = %d\n", ready);
+	return ready;
 }
 
 } // namespace Kyty::Libs::LibKernel::FileSystem

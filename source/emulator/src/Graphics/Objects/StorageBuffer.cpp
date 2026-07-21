@@ -5,7 +5,6 @@
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
-#include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Utils.h"
@@ -31,6 +30,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* o
 	// vkMapMemory(ctx->device, vk_obj->memory.memory, vk_obj->memory.offset, *size, 0, &data);
 	VulkanMapMemory(ctx, &vk_obj->memory, &data);
 	memcpy(data, reinterpret_cast<void*>(*vaddr), *size);
+	vk_obj->writeback_cache.Reset(data, *size);
 	// HTILE clears often arrive through GpuMemory Update before the world draw.
 	if (vk_obj->depth_meta_addr != 0 && DepthMetaIsClearPattern(data, *size))
 	{
@@ -77,11 +77,6 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
 	EXIT_IF(vk_obj->buffer == nullptr);
 	EXIT_IF(ctx == nullptr);
 
-	EXIT_IF(vk_obj->cp == nullptr);
-
-	// All submitted commands that refer to any element of pDescriptorSets must have completed execution
-	GraphicsRunCommandProcessorWait(vk_obj->cp);
-
 	if (vk_obj->depth_meta_addr != 0)
 	{
 		void* data = nullptr;
@@ -97,8 +92,8 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
 	delete vk_obj;
 }
 
-static void write_back(GraphicContext* ctx, const uint64_t* /*params*/, void* obj, const uint64_t* vaddr, const uint64_t* size,
-                       int vaddr_num)
+static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* /*params*/, void* obj, const uint64_t* vaddr,
+                                     const uint64_t* size, int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back");
 
@@ -116,7 +111,8 @@ static void write_back(GraphicContext* ctx, const uint64_t* /*params*/, void* ob
 	KYTY_PROFILER_END_BLOCK;
 
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::memcpy");
-	LabelWriteBackCopy(reinterpret_cast<void*>(*vaddr), data, *size);
+	const auto result =
+	    LabelWriteBackCopy(reinterpret_cast<void*>(*vaddr), data, *size, &vk_obj->writeback_cache);
 	if (vk_obj->depth_meta_addr != 0 && DepthMetaIsClearPattern(data, *size))
 	{
 		DepthMetaMarkClear(vk_obj->depth_meta_addr);
@@ -127,11 +123,15 @@ static void write_back(GraphicContext* ctx, const uint64_t* /*params*/, void* ob
 	// vkUnmapMemory(ctx->device, vk_obj->memory.memory);
 	VulkanUnmapMemory(ctx, &vk_obj->memory);
 	KYTY_PROFILER_END_BLOCK;
+	return result;
 }
 
 bool StorageBufferGpuObject::Equal(const uint64_t* other) const
 {
-	return params[0] == other[0] && params[1] == other[1];
+	// GpuMemory calls Equal only after type and guest byte ranges match.
+	// Stride and record count describe the shader view; they do not affect the
+	// VkBuffer backing created above.
+	return other != nullptr;
 }
 
 GpuObject::create_func_t StorageBufferGpuObject::GetCreateFunc() const
@@ -152,11 +152,6 @@ GpuObject::delete_func_t StorageBufferGpuObject::GetDeleteFunc() const
 GpuObject::update_func_t StorageBufferGpuObject::GetUpdateFunc() const
 {
 	return update_func;
-}
-
-void StorageBufferSet(CommandBuffer* cmd_buffer, StorageVulkanBuffer* buffer)
-{
-	buffer->cp = cmd_buffer->GetParent();
 }
 
 } // namespace Kyty::Libs::Graphics

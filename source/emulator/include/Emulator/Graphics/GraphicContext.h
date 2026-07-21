@@ -5,6 +5,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 
 #include <vulkan/vulkan_core.h> // IWYU pragma: export
 
@@ -35,8 +36,6 @@ typedef struct VkPipelineViewportDepthClipControlCreateInfoEXT
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
-
-class CommandProcessor;
 
 struct VulkanSwapchain
 {
@@ -90,6 +89,8 @@ struct GraphicContext
 	VkDevice                 device          = nullptr;
 	VkPipelineCache          pipeline_cache   = nullptr;
 	VulkanQueueInfo          queues[QUEUES_NUM];
+	Core::Mutex              queue_mutexes[QUEUES_NUM];
+	uint32_t                 queue_mutex_count = 0;
 
 	// VK_EXT_color_write_enable is unavailable on some drivers (notably MoltenVK
 	// on Apple Silicon). When false, color write masking falls back to being
@@ -146,7 +147,14 @@ struct VulkanImage
 
 	void SetHostExtent(uint32_t width, uint32_t height) { extent = {width, height}; }
 
+	[[nodiscard]] VkExtent2D GetGuestExtent() const { return guest_extent; }
+
 	[[nodiscard]] VkExtent2D GetHostExtent() const { return extent; }
+
+	[[nodiscard]] bool MatchesGuestExtent(uint32_t width, uint32_t height) const
+	{
+		return guest_extent.width == width && guest_extent.height == height;
+	}
 
 	[[nodiscard]] bool IsResolutionScaled() const
 	{
@@ -170,6 +178,15 @@ struct VulkanImage
 struct VideoOutVulkanImage: public VulkanImage
 {
 	VideoOutVulkanImage(): VulkanImage(VulkanImageType::VideoOut) {}
+
+	// Registration owns the guest resource identity immediately, while Vulkan
+	// storage may be materialized by the first renderer/present consumer.
+	Core::Mutex materialize_mutex;
+	bool        host_extent_selected = false;
+	uint64_t    guest_vaddr = 0;
+	uint64_t    guest_pitch = 0;
+	bool        tiled       = false;
+	bool        neo         = false;
 };
 
 struct DepthStencilVulkanImage: public VulkanImage
@@ -202,10 +219,10 @@ struct VulkanBuffer
 
 struct StorageVulkanBuffer: public VulkanBuffer
 {
-	CommandProcessor* cp              = nullptr;
-	uint64_t          guest_addr      = 0;
-	uint64_t          guest_size      = 0;
-	uint64_t          depth_meta_addr = 0;
+	uint64_t              guest_addr      = 0;
+	uint64_t              guest_size      = 0;
+	uint64_t              depth_meta_addr = 0;
+	GpuWritebackPageCache writeback_cache;
 };
 
 } // namespace Kyty::Libs::Graphics

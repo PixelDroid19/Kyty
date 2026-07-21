@@ -24,6 +24,7 @@
 #include "Emulator/Graphics/KeyboardInput.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
+#include "Emulator/Graphics/VulkanQueueIdentity.h"
 #include "Emulator/Loader/SystemContent.h"
 #include "Emulator/Profiler.h"
 
@@ -2701,17 +2702,13 @@ static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 	EXIT_IF(queues.present.Size() != 1);
 	EXIT_IF(!(queues.compute.Size() >= 1 && queues.compute.Size() <= GraphicContext::QUEUE_COMPUTE_NUM));
 
-	auto get_queue = [ctx](int id, const QueueInfo& info, bool with_mutex = false)
+	auto get_queue = [ctx](int id, const QueueInfo& info)
 	{
 		ctx->queues[id].family = info.family;
 		ctx->queues[id].index  = info.index;
 		EXIT_IF(ctx->queues[id].vk_queue != nullptr);
 		vkGetDeviceQueue(ctx->device, ctx->queues[id].family, ctx->queues[id].index, &ctx->queues[id].vk_queue);
 		EXIT_NOT_IMPLEMENTED(ctx->queues[id].vk_queue == nullptr);
-		if (with_mutex)
-		{
-			ctx->queues[id].mutex = new Core::Mutex;
-		}
 	};
 
 	get_queue(GraphicContext::QUEUE_GFX, queues.graphics.At(0));
@@ -2720,8 +2717,25 @@ static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 
 	for (int id = 0; id < GraphicContext::QUEUE_COMPUTE_NUM; id++)
 	{
-		bool with_mutex = (GraphicContext::QUEUE_COMPUTE_NUM == queues.compute.Size());
-		get_queue(GraphicContext::QUEUE_COMPUTE_START + id, queues.compute.At(id % queues.compute.Size()), with_mutex);
+		get_queue(GraphicContext::QUEUE_COMPUTE_START + id, queues.compute.At(id % queues.compute.Size()));
+	}
+
+	VulkanQueueIdentity identities[GraphicContext::QUEUES_NUM] {};
+	uint32_t            lock_indices[GraphicContext::QUEUES_NUM] {};
+	for (int id = 0; id < GraphicContext::QUEUES_NUM; id++)
+	{
+		const auto& queue = ctx->queues[id];
+		identities[id]    = {queue.family, queue.index, queue.vk_queue};
+	}
+
+	const auto assignment =
+	    VulkanAssignQueueLockIndices(identities, GraphicContext::QUEUES_NUM, lock_indices, &ctx->queue_mutex_count);
+	EXIT_NOT_IMPLEMENTED(assignment != VulkanQueueLockAssignmentStatus::Success ||
+	                     ctx->queue_mutex_count == 0 || ctx->queue_mutex_count > GraphicContext::QUEUES_NUM);
+	for (int id = 0; id < GraphicContext::QUEUES_NUM; id++)
+	{
+		EXIT_IF(lock_indices[id] >= ctx->queue_mutex_count);
+		ctx->queues[id].mutex = &ctx->queue_mutexes[lock_indices[id]];
 	}
 }
 
@@ -3297,9 +3311,12 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	UtilBlitImage(&buffer, blt_src_image, blt_dst_image);
 
-	const double now_seconds   = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_time_seconds : 0.0;
-	const double fps_now       = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_fps : 0.0;
-	const double frame_time_ms = (fps_now > 0.0) ? (1000.0 / fps_now) : 0.0;
+	const double now_seconds = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_time_seconds : 0.0;
+	const double fps_now     = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_fps : 0.0;
+	const double frame_time_ms = (g_window_ctx->game != nullptr)
+	                                 ? DebugStatsFrameIntervalMs(g_window_ctx->game->m_current_time_seconds,
+	                                                             g_window_ctx->game->m_previous_time_seconds)
+	                                 : 0.0;
 	const bool   hud_drew =
 	    DebugOverlayRecord(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, vk_buffer, now_seconds, fps_now, frame_time_ms);
 
@@ -3337,10 +3354,12 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	const auto& queue = g_window_ctx->graphic_ctx.queues[GraphicContext::QUEUE_PRESENT];
 
-	EXIT_IF(queue.mutex != nullptr);
-
 	const auto present_start = std::chrono::steady_clock::now();
-	result                   = vkQueuePresentKHR(queue.vk_queue, &present);
+	{
+		EXIT_IF(queue.mutex == nullptr);
+		Core::LockGuard queue_lock(*queue.mutex);
+		result = vkQueuePresentKHR(queue.vk_queue, &present);
+	}
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 	const auto present_ns =
 	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - present_start).count();
@@ -3375,6 +3394,12 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	}
 
 	WindowUpdateTitle();
+
+	// VideoOut retires the present-source submission immediately after this
+	// function returns. Make that lifetime boundary explicit: vkQueuePresentKHR
+	// only consumes the swapchain image, while the source image is protected
+	// through completion of this blit submission.
+	buffer.WaitForFence();
 }
 
 bool WindowGetPresentStats(WindowPresentStats* out)

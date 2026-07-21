@@ -1,16 +1,27 @@
 #include "Emulator/Graphics/Graphics.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicsState.h"
+#include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
+#include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
+#include "Emulator/Graphics/Objects/IndexBuffer.h"
+#include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
+#include "Emulator/Graphics/Objects/StorageBuffer.h"
 #include "Emulator/Graphics/Objects/Texture.h"
+#include "Emulator/Graphics/Objects/VertexBuffer.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/PipelineCacheStore.h"
+#include "Emulator/Graphics/SpirvBinaryCacheStore.h"
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Libs/Libs.h"
@@ -21,20 +32,79 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <condition_variable>
+#include <filesystem>
+#include <fstream>
+#include <future>
+#include <mutex>
+#include <thread>
+
 UT_BEGIN(EmulatorGraphicsState);
 
 using namespace Libs::Graphics;
 
 namespace {
 
-int g_test_gpu_object_deletes = 0;
+class ScopedSpirvCacheDirectory final
+{
+public:
+	ScopedSpirvCacheDirectory()
+	{
+		const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+		path             = std::filesystem::temp_directory_path() / ("kyty-spirv-cache-test-" + std::to_string(nonce));
+	}
+	~ScopedSpirvCacheDirectory()
+	{
+		std::error_code error;
+		std::filesystem::remove_all(path, error);
+	}
+
+	std::filesystem::path path;
+};
+
+struct PausedSpirvCacheWrite
+{
+	std::mutex              mutex;
+	std::condition_variable condition;
+	bool                    entered = false;
+	bool                    release = false;
+};
+
+void PauseSpirvCacheWrite(void* opaque)
+{
+	auto* pause = static_cast<PausedSpirvCacheWrite*>(opaque);
+	std::unique_lock<std::mutex> lock(pause->mutex);
+	pause->entered = true;
+	pause->condition.notify_all();
+	pause->condition.wait(lock, [pause] { return pause->release; });
+}
+
+int                   g_test_gpu_object_deletes = 0;
+int                   g_versioned_gpu_object_creates = 0;
+int                   g_versioned_gpu_object_updates = 0;
+int                   g_versioned_gpu_object_deletes = 0;
+int                   g_covered_index_creates        = 0;
+int                   g_covered_index_updates        = 0;
+int                   g_covered_index_deletes        = 0;
+bool                  g_covered_index_invalid_update = false;
+std::atomic_uint64_t   g_versioned_submission_sequence {0};
+std::atomic_uint64_t   g_covered_index_submission_sequence {0};
+std::mutex             g_versioned_gpu_object_mutex;
+std::condition_variable g_versioned_gpu_object_cond;
+bool                    g_versioned_gpu_object_block_second   = false;
+bool                    g_versioned_gpu_object_second_entered = false;
+bool                    g_versioned_gpu_object_release_second = false;
 
 struct TestGpuObject: public GpuObject
 {
-	TestGpuObject()
+	explicit TestGpuObject(GpuMemoryObjectType object_type = GpuMemoryObjectType::StorageBuffer, bool is_read_only = false)
 	{
-		type       = GpuMemoryObjectType::StorageBuffer;
-		params[0] = 0x53544f5241474555ull;
+		type       = object_type;
+		params[0] = 0x53544f5241474555ull ^ static_cast<uint64_t>(object_type);
+		read_only  = is_read_only;
 	}
 
 	bool Equal(const uint64_t* other) const override { return other != nullptr && other[0] == params[0]; }
@@ -62,6 +132,148 @@ struct TestGpuObject: public GpuObject
 	update_func_t GetUpdateFunc() const override { return nullptr; }
 };
 
+struct VersionedTestBacking
+{
+	int serial = 0;
+};
+
+struct VersionedTestGpuObject: public GpuObject
+{
+	explicit VersionedTestGpuObject(bool write_back = false)
+	{
+		type       = GpuMemoryObjectType::VertexBuffer;
+		params[0] = 0x56455253494f4e31ull;
+		check_hash = true;
+		read_only  = false;
+		m_write_back = write_back;
+	}
+
+	bool Equal(const uint64_t* other) const override { return other != nullptr && other[0] == params[0]; }
+
+	create_func_t GetCreateFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, const uint64_t* /*vaddr*/, const uint64_t* /*size*/,
+		          int /*vaddr_num*/, VulkanMemory* /*mem*/) -> void*
+		{
+			auto* backing = new VersionedTestBacking;
+			backing->serial = ++g_versioned_gpu_object_creates;
+			if (backing->serial == 2 && g_versioned_gpu_object_block_second)
+			{
+				std::unique_lock lock(g_versioned_gpu_object_mutex);
+				g_versioned_gpu_object_second_entered = true;
+				g_versioned_gpu_object_cond.notify_all();
+				g_versioned_gpu_object_cond.wait(lock, [] { return g_versioned_gpu_object_release_second; });
+			}
+			return backing;
+		};
+	}
+
+	create_from_objects_func_t GetCreateFromObjectsFunc() const override { return nullptr; }
+
+	write_back_func_t GetWriteBackFunc() const override
+	{
+		if (!m_write_back)
+		{
+			return nullptr;
+		}
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, void* /*obj*/, const uint64_t* /*vaddr*/,
+		          const uint64_t* size, int /*vaddr_num*/)
+		{
+			return GpuWritebackResult {.changed_pages = 1u, .copied_bytes = *size, .content_changed = true};
+		};
+	}
+
+	delete_func_t GetDeleteFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, void* obj, VulkanMemory* /*mem*/)
+		{
+			delete static_cast<VersionedTestBacking*>(obj);
+			g_versioned_gpu_object_deletes++;
+		};
+	}
+
+	update_func_t GetUpdateFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, void* /*obj*/, const uint64_t* /*vaddr*/,
+		          const uint64_t* /*size*/, int /*vaddr_num*/) { g_versioned_gpu_object_updates++; };
+	}
+
+private:
+	bool m_write_back = false;
+};
+
+struct CoveredIndexTestBacking
+{
+	int       serial = 0;
+	uint64_t  size   = 0;
+	uint8_t*  bytes  = nullptr;
+};
+
+struct CoveredIndexTestGpuObject: public GpuObject
+{
+	CoveredIndexTestGpuObject()
+	{
+		type       = GpuMemoryObjectType::IndexBuffer;
+		params[0] = 0x434f564552454449ull;
+		check_hash = true;
+		read_only  = false;
+	}
+
+	bool Equal(const uint64_t* other) const override { return other != nullptr && other[0] == params[0]; }
+
+	create_func_t GetCreateFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
+		          VulkanMemory* /*mem*/) -> void*
+		{
+			if (vaddr == nullptr || size == nullptr || vaddr_num != 1 || vaddr[0] == 0 || size[0] == 0)
+			{
+				return nullptr;
+			}
+			auto* backing   = new CoveredIndexTestBacking;
+			backing->serial = ++g_covered_index_creates;
+			backing->size   = size[0];
+			backing->bytes  = new uint8_t[backing->size];
+			std::memcpy(backing->bytes, reinterpret_cast<const void*>(vaddr[0]), backing->size);
+			return backing;
+		};
+	}
+
+	create_from_objects_func_t GetCreateFromObjectsFunc() const override { return nullptr; }
+	write_back_func_t          GetWriteBackFunc() const override { return nullptr; }
+
+	delete_func_t GetDeleteFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, void* obj, VulkanMemory* /*mem*/)
+		{
+			auto* backing = static_cast<CoveredIndexTestBacking*>(obj);
+			if (backing != nullptr)
+			{
+				delete[] backing->bytes;
+				delete backing;
+				g_covered_index_deletes++;
+			}
+		};
+	}
+
+	update_func_t GetUpdateFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, void* obj, const uint64_t* vaddr, const uint64_t* size,
+		          int vaddr_num)
+		{
+			auto* backing = static_cast<CoveredIndexTestBacking*>(obj);
+			if (backing == nullptr || vaddr == nullptr || size == nullptr || vaddr_num != 1 || vaddr[0] == 0 || size[0] == 0 ||
+			    size[0] > backing->size)
+			{
+				g_covered_index_invalid_update = true;
+				return;
+			}
+			std::memcpy(backing->bytes, reinterpret_cast<const void*>(vaddr[0]), size[0]);
+			g_covered_index_updates++;
+		};
+	}
+};
+
 void EnsureGpuMemoryForTests()
 {
 	static bool initialized = false;
@@ -79,10 +291,31 @@ void EnsureGpuMemoryForTests()
 
 } // namespace
 
+TEST(EmulatorGraphicsState, ResolvesGen5RectListAutoDrawExpansion)
+{
+	uint32_t vertex_count = 0;
+	EXPECT_TRUE(GraphicsResolveRectListAutoDraw(7, 3, 0, &vertex_count));
+	EXPECT_EQ(vertex_count, 4u);
+
+	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(7, 4, 0, &vertex_count));
+	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(7, 3, 1, &vertex_count));
+	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(17, 3, 0, &vertex_count));
+	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(7, 3, 0, nullptr));
+}
+
 TEST(EmulatorGraphicsState, TiledVideoOutBufferUpdateDoesNotCpuUpload)
 {
 	EXPECT_FALSE(VideoOutBufferShouldCpuUploadOnUpdate(true));
 	EXPECT_TRUE(VideoOutBufferShouldCpuUploadOnUpdate(false));
+}
+
+TEST(EmulatorGraphicsState, VideoOutBufferMaterializationStateTracksTheHostImage)
+{
+	VideoOutVulkanImage image;
+	EXPECT_TRUE(VideoOutBufferNeedsMaterialization(&image));
+	image.image = reinterpret_cast<VkImage>(0x1);
+	EXPECT_FALSE(VideoOutBufferNeedsMaterialization(&image));
+	EXPECT_FALSE(VideoOutBufferNeedsMaterialization(nullptr));
 }
 
 TEST(EmulatorGraphicsState, GpuOwnedTiledRenderTextureSkipsCpuHash)
@@ -159,6 +392,240 @@ TEST(EmulatorGraphicsState, PipelineCacheRejectsMalformedOrForeignData)
 	EXPECT_FALSE(PipelineCacheDataMatchesDevice(&header, PipelineCacheStoreMaxBytes() + 1, properties));
 }
 
+TEST(EmulatorGraphicsState, PipelineCacheCheckpointsAreDirtyAndRateLimited)
+{
+	EXPECT_FALSE(PipelineCacheStoreCheckpointDue(false, false, 0));
+	EXPECT_TRUE(PipelineCacheStoreCheckpointDue(true, false, 0));
+	EXPECT_FALSE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds() - 1));
+	EXPECT_TRUE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds()));
+
+	const size_t budget = PipelineCacheStoreSessionWriteBudgetBytes();
+	EXPECT_TRUE(PipelineCacheStoreWriteBudgetAllows(0, budget));
+	EXPECT_TRUE(PipelineCacheStoreWriteBudgetAllows(budget - 1, 1));
+	EXPECT_FALSE(PipelineCacheStoreWriteBudgetAllows(1, budget));
+	EXPECT_FALSE(PipelineCacheStoreWriteBudgetAllows(budget, 1));
+
+	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(0, budget / 2), budget / 2);
+	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget / 2, budget / 2), budget);
+	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget - 1, 2), budget);
+	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget, 1), budget);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheRequiresExactSourceAndCompileOptions)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheStore     cache(directory.path);
+	const String8             source_a("OpCapability Shader\nOpMemoryModel Logical GLSL450\n");
+	const String8             source_b("OpCapability Shader\nOpMemoryModel Logical Vulkan\n");
+	Vector<uint32_t>          expected {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+	Vector<uint32_t>          loaded;
+
+	EXPECT_EQ(cache.Store(source_a, 0, false, expected), SpirvBinaryCacheStoreResult::Written);
+	EXPECT_EQ(cache.Load(source_a, 0, false, &loaded), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(loaded, expected);
+	EXPECT_EQ(cache.Load(source_b, 0, false, &loaded), SpirvBinaryCacheLoadResult::Miss);
+	EXPECT_EQ(cache.Load(source_a, 1, false, &loaded), SpirvBinaryCacheLoadResult::Miss);
+	EXPECT_EQ(cache.Load(source_a, 0, true, &loaded), SpirvBinaryCacheLoadResult::Miss);
+}
+
+TEST(EmulatorGraphicsState, SpirvModuleCacheRequiresExactTranslationIdentity)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheStore     cache(directory.path);
+	ShaderId                  shader_id;
+	shader_id.hash0 = 0x11223344u;
+	shader_id.crc32 = 0x55667788u;
+	shader_id.ids.Add(0x99aabbccu);
+	const auto base =
+	    ShaderModuleKey::Create(shader_id, ShaderModuleStage::Vertex, Config::ShaderOptimizationType::Performance, true);
+	Vector<uint32_t> expected {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+	Vector<uint32_t> loaded;
+
+	EXPECT_EQ(cache.StoreModule(base, false, expected), SpirvBinaryCacheStoreResult::Written);
+	EXPECT_EQ(cache.LoadModule(base, false, &loaded), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(loaded, expected);
+	EXPECT_EQ(cache.LoadModule(ShaderModuleKey::Create(shader_id, ShaderModuleStage::Pixel,
+	                                                  Config::ShaderOptimizationType::Performance, true),
+	                           false, &loaded),
+	          SpirvBinaryCacheLoadResult::Miss);
+	EXPECT_EQ(cache.LoadModule(base, true, &loaded), SpirvBinaryCacheLoadResult::Miss);
+
+	auto newer = base;
+	newer.translator_version++;
+	EXPECT_EQ(cache.LoadModule(newer, false, &loaded), SpirvBinaryCacheLoadResult::Miss);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheRejectsCorruptEntry)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheStore     cache(directory.path);
+	const String8             source("OpCapability Shader\n");
+	Vector<uint32_t>          expected {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+	Vector<uint32_t>          loaded;
+
+	ASSERT_EQ(cache.Store(source, 0, false, expected), SpirvBinaryCacheStoreResult::Written);
+	for (const auto& entry: std::filesystem::directory_iterator(directory.path))
+	{
+		if (entry.is_regular_file() && entry.path().extension() == ".spvbin")
+		{
+			std::ofstream file(entry.path(), std::ios::binary | std::ios::trunc);
+			file.write("broken", 6);
+		}
+	}
+
+	EXPECT_EQ(cache.Load(source, 0, false, &loaded), SpirvBinaryCacheLoadResult::Corrupt);
+	EXPECT_TRUE(loaded.IsEmpty());
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheEnforcesDiskAndSessionBudgets)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheLimits    limits;
+	limits.max_total_bytes      = 512;
+	limits.max_entry_bytes      = 256;
+	limits.session_write_budget = 512;
+	SpirvBinaryCacheStore cache(directory.path, limits);
+	Vector<uint32_t>      binary {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+
+	for (uint32_t i = 0; i < 8; ++i)
+	{
+		const auto source = String8::FromPrintf("OpCapability Shader\n; entry %u\n", i);
+		const auto result = cache.Store(source, 0, false, binary);
+		EXPECT_TRUE(result == SpirvBinaryCacheStoreResult::Written || result == SpirvBinaryCacheStoreResult::BudgetExceeded);
+		EXPECT_LE(cache.DiskUsageBytes(), limits.max_total_bytes);
+	}
+	EXPECT_LE(cache.SessionBytesAttempted(), limits.session_write_budget);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheReplacementDoesNotEvictUnrelatedEntry)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheLimits    limits;
+	limits.max_total_bytes      = 300;
+	limits.max_entry_bytes      = 256;
+	limits.session_write_budget = 1024;
+	SpirvBinaryCacheStore cache(directory.path, limits);
+	const String8         source_a("OpCapability Shader\n; entry a\n");
+	const String8         source_b("OpCapability Shader\n; entry b\n");
+	Vector<uint32_t>      binary_a {0x07230203u, 0x00010500u, 1u, 4u, 0u};
+	Vector<uint32_t>      binary_b {0x07230203u, 0x00010500u, 2u, 4u, 0u};
+	Vector<uint32_t>      replacement {0x07230203u, 0x00010500u, 3u, 4u, 0u};
+	Vector<uint32_t>      loaded;
+
+	ASSERT_EQ(cache.Store(source_a, 0, false, binary_a), SpirvBinaryCacheStoreResult::Written);
+	ASSERT_EQ(cache.Store(source_b, 0, false, binary_b), SpirvBinaryCacheStoreResult::Written);
+	ASSERT_EQ(cache.Store(source_a, 0, false, replacement), SpirvBinaryCacheStoreResult::Written);
+
+	EXPECT_EQ(cache.Load(source_a, 0, false, &loaded), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(loaded, replacement);
+	EXPECT_EQ(cache.Load(source_b, 0, false, &loaded), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(loaded, binary_b);
+	EXPECT_LE(cache.DiskUsageBytes(), limits.max_total_bytes);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheWriteBehindCoalescesAndDrainsOnDestruction)
+{
+	ScopedSpirvCacheDirectory directory;
+	const String8             source("OpCapability Shader\n; queued entry\n");
+	Vector<uint32_t>          expected {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+
+	{
+		SpirvBinaryCacheStore cache(directory.path);
+		EXPECT_EQ(cache.QueueStore(source, 0, false, expected), SpirvBinaryCacheQueueResult::Queued);
+		EXPECT_EQ(cache.QueueStore(source, 0, false, expected), SpirvBinaryCacheQueueResult::Coalesced);
+	}
+
+	SpirvBinaryCacheStore cache(directory.path);
+	Vector<uint32_t>      loaded;
+	EXPECT_EQ(cache.Load(source, 0, false, &loaded), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(loaded, expected);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheWriteBehindDropsSaturatedQueuesWithinBounds)
+{
+	ScopedSpirvCacheDirectory directory;
+	const String8             source("OpCapability Shader\n; dropped entry\n");
+	Vector<uint32_t>          binary {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+
+	{
+		SpirvBinaryCacheLimits limits;
+		limits.max_pending_entries = 0;
+		SpirvBinaryCacheStore cache(directory.path, limits);
+		EXPECT_EQ(cache.QueueStore(source, 0, false, binary), SpirvBinaryCacheQueueResult::QueueFull);
+		const auto stats = cache.AsyncStats();
+		EXPECT_EQ(stats.dropped, 1u);
+		EXPECT_EQ(stats.pending_entries, 0u);
+		EXPECT_EQ(stats.pending_bytes, 0u);
+	}
+	{
+		SpirvBinaryCacheLimits limits;
+		limits.max_pending_entries = 4;
+		limits.max_pending_bytes   = 1;
+		SpirvBinaryCacheStore cache(directory.path, limits);
+		EXPECT_EQ(cache.QueueStore(source, 0, false, binary), SpirvBinaryCacheQueueResult::QueueFull);
+		EXPECT_EQ(cache.AsyncStats().dropped, 1u);
+	}
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheLoadDoesNotWaitForAnUnrelatedWrite)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheStore     cache(directory.path);
+	const String8             readable("OpCapability Shader\n; readable entry\n");
+	const String8             writing("OpCapability Shader\n; paused write\n");
+	Vector<uint32_t>          binary {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+	ASSERT_EQ(cache.Store(readable, 0, false, binary), SpirvBinaryCacheStoreResult::Written);
+
+	PausedSpirvCacheWrite pause;
+	cache.SetWriteHookForTesting(PauseSpirvCacheWrite, &pause);
+	ASSERT_EQ(cache.QueueStore(writing, 0, false, binary), SpirvBinaryCacheQueueResult::Queued);
+	{
+		std::unique_lock<std::mutex> lock(pause.mutex);
+		pause.condition.wait(lock, [&pause] { return pause.entered; });
+	}
+
+	std::promise<void> reader_started;
+	auto               reader_started_future = reader_started.get_future();
+	auto reader = std::async(std::launch::async,
+	                         [&]
+	                         {
+		                         reader_started.set_value();
+		                         Vector<uint32_t> loaded;
+		                         return cache.Load(readable, 0, false, &loaded);
+	                         });
+	reader_started_future.wait();
+	const auto reader_status = reader.wait_for(std::chrono::seconds(2));
+	{
+		std::lock_guard<std::mutex> lock(pause.mutex);
+		pause.release = true;
+	}
+	pause.condition.notify_all();
+
+	EXPECT_EQ(reader_status, std::future_status::ready);
+	EXPECT_EQ(reader.get(), SpirvBinaryCacheLoadResult::Hit);
+	cache.Drain();
+	cache.SetWriteHookForTesting(nullptr, nullptr);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheCompletedIdentityHistoryIsBounded)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheLimits    limits;
+	limits.max_completed_entries = 1;
+	SpirvBinaryCacheStore cache(directory.path, limits);
+	const String8         source_a("OpCapability Shader\n; completed a\n");
+	const String8         source_b("OpCapability Shader\n; completed b\n");
+	Vector<uint32_t>      binary {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+
+	ASSERT_EQ(cache.QueueStore(source_a, 0, false, binary), SpirvBinaryCacheQueueResult::Queued);
+	cache.Drain();
+	EXPECT_EQ(cache.QueueStore(source_a, 0, false, binary), SpirvBinaryCacheQueueResult::Coalesced);
+	ASSERT_EQ(cache.QueueStore(source_b, 0, false, binary), SpirvBinaryCacheQueueResult::Queued);
+	cache.Drain();
+	EXPECT_EQ(cache.AsyncStats().completed_entries, 1u);
+	EXPECT_EQ(cache.QueueStore(source_a, 0, false, binary), SpirvBinaryCacheQueueResult::Queued);
+}
+
 TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
 {
 	EnsureGpuMemoryForTests();
@@ -175,10 +642,557 @@ TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
 	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, obj_addr, obj_size, TestGpuObject()), nullptr);
 	EXPECT_EQ(GpuMemoryFindObjects(obj_addr, obj_size, GpuMemoryObjectType::StorageBuffer, true, false).Size(), 1u);
 
-	GpuMemoryFree(&ctx, obj_addr, obj_size, false);
+	GpuMemoryFree(&ctx, obj_addr, obj_size);
 
 	EXPECT_EQ(g_test_gpu_object_deletes, 1);
 	EXPECT_TRUE(GpuMemoryFindObjects(obj_addr, obj_size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryValidatesTheCompleteAllocatedGuestRangeReadOnly)
+{
+	EnsureGpuMemoryForTests();
+
+	const uint64_t heap_base = 0x0000005101000000ull;
+	const uint64_t heap_size = 0x20000ull;
+	GpuMemorySetAllocatedRange(heap_base, heap_size);
+
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(heap_base, heap_size), GpuMemoryRangeValidationStatus::Valid);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(heap_base + 0x1000ull, 8), GpuMemoryRangeValidationStatus::Valid);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(heap_base - 1, 8), GpuMemoryRangeValidationStatus::Unallocated);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(heap_base + heap_size - 4, 8), GpuMemoryRangeValidationStatus::Unallocated);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(heap_base, 0), GpuMemoryRangeValidationStatus::InvalidArgument);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(UINT64_MAX - 3, 8), GpuMemoryRangeValidationStatus::InvalidArgument);
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryFindForSubmissionDefersDeletionUntilCompletion)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	const uint64_t heap_base = 0x0000005110000000ull;
+	const uint64_t heap_size = 0x20000ull;
+	const uint64_t obj_addr  = heap_base + 0x4000ull;
+	const uint64_t obj_size  = 0x1000ull;
+	const SubmissionId submission {GpuQueueId(97), 1};
+
+	GpuMemorySetAllocatedRange(heap_base, heap_size);
+	g_test_gpu_object_deletes = 0;
+
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, obj_addr, obj_size, TestGpuObject()), nullptr);
+	const auto found = GpuMemoryFindObjectsForSubmission(submission, obj_addr, obj_size, GpuMemoryObjectType::StorageBuffer, true, false);
+	ASSERT_EQ(found.Size(), 1u);
+	EXPECT_EQ(found[0].obj, reinterpret_cast<void*>(0x51515151ull));
+
+	GpuMemoryFree(&ctx, obj_addr, obj_size);
+
+	EXPECT_EQ(g_test_gpu_object_deletes, 0);
+	EXPECT_TRUE(GpuMemoryFindObjects(obj_addr, obj_size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
+
+	GpuMemoryCompleteSubmission(submission);
+	EXPECT_EQ(g_test_gpu_object_deletes, 1);
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryVersionsChangedBackingWithPendingUse)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	auto*          guest = new uint8_t[0x1000] {};
+	const uint64_t addr  = reinterpret_cast<uint64_t>(guest);
+	const uint64_t size  = 0x1000;
+	const SubmissionId submission {GpuQueueId(190), 1};
+
+	GpuMemorySetAllocatedRange(addr, size);
+	g_versioned_gpu_object_creates = 0;
+	g_versioned_gpu_object_updates = 0;
+	g_versioned_gpu_object_deletes = 0;
+
+	void* const old_backing = GpuMemoryCreateObject(1, &ctx, nullptr, addr, size, VersionedTestGpuObject());
+	ASSERT_NE(old_backing, nullptr);
+	ASSERT_EQ(GpuMemoryFindObjectsForSubmission(submission, addr, size, GpuMemoryObjectType::VertexBuffer, true, false).Size(), 1u);
+
+	guest[0] = 0x7f;
+	void* const new_backing = GpuMemoryCreateObject(2, &ctx, nullptr, addr, size, VersionedTestGpuObject());
+
+	EXPECT_NE(new_backing, old_backing);
+	EXPECT_EQ(g_versioned_gpu_object_creates, 2);
+	EXPECT_EQ(g_versioned_gpu_object_updates, 0);
+	EXPECT_EQ(g_versioned_gpu_object_deletes, 0);
+
+	// The replacement may be recorded by the same still-recording submission;
+	// that must not retire the old backing before the submission completes.
+	const auto current =
+	    GpuMemoryFindObjectsForSubmission(submission, addr, size, GpuMemoryObjectType::VertexBuffer, true, false);
+	ASSERT_EQ(current.Size(), 1u);
+	EXPECT_EQ(current[0].obj, new_backing);
+	EXPECT_EQ(g_versioned_gpu_object_deletes, 0);
+
+	GpuMemoryCompleteSubmission(submission);
+	EXPECT_EQ(g_versioned_gpu_object_deletes, 1);
+
+	GpuMemoryFree(&ctx, addr, size);
+	EXPECT_EQ(g_versioned_gpu_object_deletes, 2);
+}
+
+TEST(EmulatorGraphicsState, VideoOutResolverPublishesCowReplacementOnlyAfterRestoring720pExtent)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	constexpr uint32_t guest_width  = 1920;
+	constexpr uint32_t guest_height = 1080;
+	constexpr uint32_t host_width   = 1280;
+	constexpr uint32_t host_height  = 720;
+	const uint64_t     size         = static_cast<uint64_t>(guest_width) * guest_height * 4;
+	auto*              guest        = new uint8_t[size] {};
+	const uint64_t     addr         = reinterpret_cast<uint64_t>(guest);
+	const SubmissionId old_use {GpuQueueId(194), 1};
+	const SubmissionId new_use {GpuQueueId(195), 1};
+
+	GpuMemorySetAllocatedRange(addr, size);
+	const VideoOutBufferObject info(VideoOutBufferFormat::R8G8B8A8Srgb, guest_width, guest_height, false, false, guest_width);
+	auto* const old_image = static_cast<VideoOutVulkanImage*>(GpuMemoryCreateObject(1, &ctx, nullptr, addr, size, info));
+	ASSERT_NE(old_image, nullptr);
+
+	VideoOutHostExtentState extent_state;
+	ASSERT_EQ(VideoOutBufferSelectHostExtent(old_image, host_width, host_height, &extent_state),
+	          VideoOutHostExtentStatus::Selected);
+	ASSERT_EQ(GpuMemoryFindObjectsForSubmission(old_use, addr, size, GpuMemoryObjectType::VideoOutBuffer, true, false).Size(), 1u);
+
+	guest[0] = 0x7f;
+	auto* const current_image = static_cast<VideoOutVulkanImage*>(GpuMemoryCreateObject(2, &ctx, nullptr, addr, size, info));
+	ASSERT_NE(current_image, nullptr);
+	ASSERT_NE(current_image, old_image);
+
+	VideoOutVulkanImage* published_cache = old_image;
+	const auto current =
+	    GpuMemoryFindObjectsForSubmission(new_use, addr, size, GpuMemoryObjectType::VideoOutBuffer, true, false);
+	ASSERT_EQ(current.Size(), 1u);
+	ASSERT_EQ(current[0].obj, current_image);
+	EXPECT_EQ(VideoOutBufferRefreshPublishedImage(current_image, host_width, host_height, &published_cache),
+	          VideoOutPublishedImageRefreshStatus::Published);
+	EXPECT_EQ(published_cache, current_image);
+	ASSERT_TRUE(VideoOutBufferGetHostExtentState(current_image, &extent_state));
+	EXPECT_TRUE(extent_state.selected);
+	EXPECT_EQ(extent_state.width, host_width);
+	EXPECT_EQ(extent_state.height, host_height);
+
+	GpuMemoryCompleteSubmission(old_use);
+	GpuMemoryCompleteSubmission(new_use);
+	GpuMemoryFree(&ctx, addr, size);
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryDoesNotVersionUnchangedBacking)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	auto*          guest = new uint8_t[0x1000] {};
+	const uint64_t addr  = reinterpret_cast<uint64_t>(guest);
+	const uint64_t size  = 0x1000;
+	const SubmissionId submission {GpuQueueId(191), 1};
+
+	GpuMemorySetAllocatedRange(addr, size);
+	g_versioned_gpu_object_creates = 0;
+	g_versioned_gpu_object_updates = 0;
+	g_versioned_gpu_object_deletes = 0;
+
+	void* const initial = GpuMemoryCreateObject(1, &ctx, nullptr, addr, size, VersionedTestGpuObject());
+	ASSERT_NE(initial, nullptr);
+	ASSERT_EQ(GpuMemoryFindObjectsForSubmission(submission, addr, size, GpuMemoryObjectType::VertexBuffer, true, false).Size(), 1u);
+
+	void* const reused = GpuMemoryCreateObject(2, &ctx, nullptr, addr, size, VersionedTestGpuObject());
+	EXPECT_EQ(reused, initial);
+	EXPECT_EQ(g_versioned_gpu_object_creates, 1);
+	EXPECT_EQ(g_versioned_gpu_object_updates, 0);
+	EXPECT_EQ(g_versioned_gpu_object_deletes, 0);
+
+	GpuMemoryCompleteSubmission(submission);
+	GpuMemoryFree(&ctx, addr, size);
+	EXPECT_EQ(g_versioned_gpu_object_deletes, 1);
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryConcurrentUsePinsOldBackingDuringVersionCreation)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	auto*          guest = new uint8_t[0x1000] {};
+	const uint64_t addr  = reinterpret_cast<uint64_t>(guest);
+	const uint64_t size  = 0x1000;
+	const uint64_t sequence = g_versioned_submission_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+	const SubmissionId first_use {GpuQueueId(192), sequence};
+	const SubmissionId concurrent_use {GpuQueueId(193), sequence};
+
+	GpuMemorySetAllocatedRange(addr, size);
+	g_versioned_gpu_object_creates = 0;
+	g_versioned_gpu_object_updates = 0;
+	g_versioned_gpu_object_deletes = 0;
+	{
+		std::lock_guard lock(g_versioned_gpu_object_mutex);
+		g_versioned_gpu_object_block_second   = true;
+		g_versioned_gpu_object_second_entered = false;
+		g_versioned_gpu_object_release_second = false;
+	}
+
+	void* const old_backing = GpuMemoryCreateObject(1, &ctx, nullptr, addr, size, VersionedTestGpuObject());
+	ASSERT_NE(old_backing, nullptr);
+	ASSERT_EQ(GpuMemoryFindObjectsForSubmission(first_use, addr, size, GpuMemoryObjectType::VertexBuffer, true, false).Size(), 1u);
+
+	guest[0] = 0xa5;
+	void* new_backing = nullptr;
+	std::thread version_thread(
+	    [&] { new_backing = GpuMemoryCreateObject(2, &ctx, nullptr, addr, size, VersionedTestGpuObject()); });
+
+	bool factory_entered = false;
+	{
+		std::unique_lock lock(g_versioned_gpu_object_mutex);
+		factory_entered = g_versioned_gpu_object_cond.wait_for(
+		    lock, std::chrono::seconds(2), [] { return g_versioned_gpu_object_second_entered; });
+	}
+	if (factory_entered)
+	{
+		const auto during_create =
+		    GpuMemoryFindObjectsForSubmission(concurrent_use, addr, size, GpuMemoryObjectType::VertexBuffer, true, false);
+		EXPECT_EQ(during_create.Size(), 1u);
+		if (!during_create.IsEmpty())
+		{
+			EXPECT_EQ(during_create[0].obj, old_backing);
+		}
+	}
+	{
+		std::lock_guard lock(g_versioned_gpu_object_mutex);
+		g_versioned_gpu_object_release_second = true;
+	}
+	g_versioned_gpu_object_cond.notify_all();
+	version_thread.join();
+	g_versioned_gpu_object_block_second = false;
+
+	ASSERT_TRUE(factory_entered);
+	ASSERT_NE(new_backing, nullptr);
+	EXPECT_NE(new_backing, old_backing);
+	EXPECT_EQ(g_versioned_gpu_object_deletes, 0);
+
+	GpuMemoryCompleteSubmission(first_use);
+	EXPECT_EQ(g_versioned_gpu_object_deletes, 0);
+	GpuMemoryCompleteSubmission(concurrent_use);
+	EXPECT_EQ(g_versioned_gpu_object_deletes, 1);
+
+	GpuMemoryFree(&ctx, addr, size);
+	EXPECT_EQ(g_versioned_gpu_object_deletes, 2);
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryMutationPolicyKeepsWriteBackConflictStrict)
+{
+	EXPECT_EQ(GpuMemoryChooseMutationAction(false, false, true, false), GpuMemoryMutationAction::None);
+	EXPECT_EQ(GpuMemoryChooseMutationAction(true, true, true, false), GpuMemoryMutationAction::None);
+	EXPECT_EQ(GpuMemoryChooseMutationAction(true, false, false, false), GpuMemoryMutationAction::UpdateInPlace);
+	EXPECT_EQ(GpuMemoryChooseMutationAction(true, false, true, false), GpuMemoryMutationAction::VersionBacking);
+	EXPECT_EQ(GpuMemoryChooseMutationAction(true, false, true, true), GpuMemoryMutationAction::RejectWriteBackConflict);
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryCoveredIndexReusePreservesOneBackingAndVersionsSafely)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	constexpr uint64_t heap_size    = 0x1000;
+	constexpr uint64_t initial_size = 0x100;
+	constexpr uint64_t covered_size = 0x80;
+	constexpr uint64_t grown_size   = 0x180;
+	auto*              guest        = new uint8_t[heap_size];
+	for (uint64_t i = 0; i < heap_size; i++)
+	{
+		guest[i] = static_cast<uint8_t>(i);
+	}
+	const uint64_t base = reinterpret_cast<uint64_t>(guest);
+	const uint32_t stats_index = static_cast<uint32_t>(GpuMemoryObjectType::IndexBuffer) -
+	                             static_cast<uint32_t>(GpuMemoryObjectType::VideoOutBuffer);
+	const uint64_t submission_sequence = g_covered_index_submission_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+	const SubmissionId pending_use {GpuQueueId(210), submission_sequence};
+
+	GpuMemorySetAllocatedRange(base, heap_size);
+	g_covered_index_creates        = 0;
+	g_covered_index_updates        = 0;
+	g_covered_index_deletes        = 0;
+	g_covered_index_invalid_update = false;
+
+	auto* const initial = static_cast<CoveredIndexTestBacking*>(
+	    GpuMemoryCreateObject(1000, &ctx, nullptr, base, initial_size, CoveredIndexTestGpuObject()));
+	ASSERT_NE(initial, nullptr);
+	ASSERT_EQ(initial->size, initial_size);
+	ASSERT_EQ(g_covered_index_creates, 1);
+
+	const auto before_covered = DebugStatsGetPerformanceSnapshot(false);
+	auto* const covered = static_cast<CoveredIndexTestBacking*>(
+	    GpuMemoryCreateObject(1001, &ctx, nullptr, base, covered_size, CoveredIndexTestGpuObject()));
+	const auto after_covered = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(covered, initial);
+	EXPECT_EQ(g_covered_index_creates, 1);
+	EXPECT_EQ(g_covered_index_deletes, 0);
+	EXPECT_EQ(after_covered.gpu_memory_types[stats_index].covered_reuse,
+	          before_covered.gpu_memory_types[stats_index].covered_reuse + 1);
+	EXPECT_EQ(after_covered.gpu_memory_types[stats_index].reclaim_new,
+	          before_covered.gpu_memory_types[stats_index].reclaim_new);
+	EXPECT_EQ(after_covered.gpu_memory_types[stats_index].logical_free,
+	          before_covered.gpu_memory_types[stats_index].logical_free);
+
+	GpuMemoryOverlapSnapshot overlap;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&base, &covered_size, 1, &overlap));
+	EXPECT_EQ(overlap.total_count, 1u);
+	EXPECT_EQ(GpuMemoryFindObjects(base, initial_size, GpuMemoryObjectType::IndexBuffer, true, false).Size(), 1u);
+	EXPECT_TRUE(GpuMemoryFindObjects(base, covered_size, GpuMemoryObjectType::IndexBuffer, true, false).IsEmpty());
+
+	guest[0] = 0xa5;
+	auto* const updated = static_cast<CoveredIndexTestBacking*>(
+	    GpuMemoryCreateObject(1002, &ctx, nullptr, base, covered_size, CoveredIndexTestGpuObject()));
+	ASSERT_EQ(updated, initial);
+	EXPECT_EQ(g_covered_index_updates, 1);
+	EXPECT_EQ(updated->bytes[0], 0xa5);
+	EXPECT_EQ(updated->bytes[initial_size - 1], static_cast<uint8_t>(initial_size - 1));
+	EXPECT_FALSE(g_covered_index_invalid_update);
+
+	ASSERT_EQ(GpuMemoryFindObjectsForSubmission(pending_use, base, initial_size, GpuMemoryObjectType::IndexBuffer, true, false).Size(),
+	          1u);
+	guest[1] = 0x5a;
+	auto* const versioned = static_cast<CoveredIndexTestBacking*>(
+	    GpuMemoryCreateObject(1003, &ctx, nullptr, base, covered_size, CoveredIndexTestGpuObject()));
+	ASSERT_NE(versioned, nullptr);
+	EXPECT_NE(versioned, updated);
+	EXPECT_EQ(g_covered_index_creates, 2);
+	EXPECT_EQ(g_covered_index_updates, 1);
+	EXPECT_EQ(g_covered_index_deletes, 0);
+	EXPECT_EQ(versioned->bytes[0], 0xa5);
+	EXPECT_EQ(versioned->bytes[1], 0x5a);
+
+	auto* const versioned_reuse = static_cast<CoveredIndexTestBacking*>(
+	    GpuMemoryCreateObject(1004, &ctx, nullptr, base, covered_size, CoveredIndexTestGpuObject()));
+	EXPECT_EQ(versioned_reuse, versioned);
+	EXPECT_EQ(g_covered_index_creates, 2);
+	EXPECT_EQ(g_covered_index_updates, 1);
+	EXPECT_EQ(g_covered_index_deletes, 0);
+	EXPECT_EQ(GpuMemoryFindObjects(base, initial_size, GpuMemoryObjectType::IndexBuffer, true, false).Size(), 1u);
+
+	GpuMemoryCompleteSubmission(pending_use);
+	EXPECT_EQ(g_covered_index_deletes, 1);
+
+	const auto before_growth = DebugStatsGetPerformanceSnapshot(false);
+	auto* const grown = static_cast<CoveredIndexTestBacking*>(
+	    GpuMemoryCreateObject(1005, &ctx, nullptr, base, grown_size, CoveredIndexTestGpuObject()));
+	const auto after_growth = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_NE(grown, nullptr);
+	EXPECT_NE(grown, versioned);
+	EXPECT_EQ(grown->size, grown_size);
+	EXPECT_EQ(g_covered_index_creates, 3);
+	EXPECT_EQ(g_covered_index_deletes, 2);
+	EXPECT_EQ(after_growth.gpu_memory_types[stats_index].reclaim_new,
+	          before_growth.gpu_memory_types[stats_index].reclaim_new + 1);
+	EXPECT_EQ(after_growth.gpu_memory_types[stats_index].logical_free,
+	          before_growth.gpu_memory_types[stats_index].logical_free + 1);
+
+	auto* const grown_covered = static_cast<CoveredIndexTestBacking*>(
+	    GpuMemoryCreateObject(1006, &ctx, nullptr, base, covered_size, CoveredIndexTestGpuObject()));
+	EXPECT_EQ(grown_covered, grown);
+	EXPECT_EQ(g_covered_index_creates, 3);
+	EXPECT_EQ(g_covered_index_deletes, 2);
+	EXPECT_EQ(GpuMemoryFindObjects(base, grown_size, GpuMemoryObjectType::IndexBuffer, true, false).Size(), 1u);
+
+	const uint64_t shifted_base = base + 4;
+	const uint64_t shifted_size = 0x40;
+	const auto     before_shift  = DebugStatsGetPerformanceSnapshot(false);
+	auto* const shifted = static_cast<CoveredIndexTestBacking*>(
+	    GpuMemoryCreateObject(1007, &ctx, nullptr, shifted_base, shifted_size, CoveredIndexTestGpuObject()));
+	const auto after_shift = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_NE(shifted, nullptr);
+	EXPECT_NE(shifted, grown);
+	EXPECT_EQ(g_covered_index_creates, 4);
+	EXPECT_EQ(g_covered_index_deletes, 3);
+	EXPECT_EQ(after_shift.gpu_memory_types[stats_index].covered_reuse,
+	          before_shift.gpu_memory_types[stats_index].covered_reuse);
+	EXPECT_EQ(after_shift.gpu_memory_types[stats_index].reclaim_new,
+	          before_shift.gpu_memory_types[stats_index].reclaim_new + 1);
+	EXPECT_EQ(after_shift.gpu_memory_types[stats_index].logical_free,
+	          before_shift.gpu_memory_types[stats_index].logical_free + 1);
+	EXPECT_EQ(GpuMemoryFindObjects(shifted_base, shifted_size, GpuMemoryObjectType::IndexBuffer, true, false).Size(), 1u);
+
+	GpuMemoryFree(&ctx, shifted_base, shifted_size);
+	EXPECT_EQ(g_covered_index_deletes, 4);
+	EXPECT_FALSE(g_covered_index_invalid_update);
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryOverlapQueryIsBoundedAndReadOnly)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	const uint64_t heap_base        = 0x0000005200000000ull;
+	const uint64_t second_heap_base = heap_base + 0x40000ull;
+	const uint64_t heap_size        = 0x20000ull;
+	const uint64_t first            = heap_base + 0x4000ull;
+	const uint64_t second           = second_heap_base + 0x6000ull;
+	const uint64_t obj_size         = 0x1000ull;
+	GpuMemorySetAllocatedRange(heap_base, heap_size);
+	GpuMemorySetAllocatedRange(second_heap_base, heap_size);
+
+	g_test_gpu_object_deletes = 0;
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, first, obj_size,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, second, obj_size, TestGpuObject(GpuMemoryObjectType::VertexBuffer)), nullptr);
+
+	GpuMemoryOverlapSnapshot snapshot;
+	const uint64_t           none_addr = heap_base + 0x9000ull;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&none_addr, &obj_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 0u);
+	EXPECT_EQ(snapshot.entry_count, 0u);
+	EXPECT_FALSE(snapshot.truncated);
+
+	const auto stats_before = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&first, &obj_size, 1, &snapshot));
+	ASSERT_EQ(snapshot.total_count, 1u);
+	ASSERT_EQ(snapshot.entry_count, 1u);
+	EXPECT_EQ(snapshot.exact_count, 1u);
+	EXPECT_EQ(snapshot.entries[0].type, GpuMemoryObjectType::StorageBuffer);
+	EXPECT_EQ(snapshot.entries[0].relation, GpuMemoryOverlapType::Equals);
+	EXPECT_TRUE(snapshot.entries[0].exact);
+	EXPECT_EQ(snapshot.entries[0].count, 1u);
+	EXPECT_TRUE(snapshot.entries[0].all_read_only);
+
+	const uint64_t partial_addr = first + 0x800ull;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&partial_addr, &obj_size, 1, &snapshot));
+	ASSERT_EQ(snapshot.total_count, 1u);
+	EXPECT_EQ(snapshot.entries[0].relation, GpuMemoryOverlapType::Crosses);
+	EXPECT_FALSE(snapshot.entries[0].exact);
+
+	const uint64_t covering_size = (second + obj_size) - first;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&first, &covering_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 2u);
+	EXPECT_EQ(snapshot.entry_count, 2u);
+	EXPECT_EQ(snapshot.exact_count, 0u);
+	EXPECT_FALSE(snapshot.truncated);
+
+	const uint64_t outer_addr = heap_base - 0x1000ull;
+	const uint64_t outer_size = (second_heap_base + heap_size + 0x1000ull) - outer_addr;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&outer_addr, &outer_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 2u);
+
+	const uint64_t range_addrs[] = {first, second};
+	const uint64_t range_sizes[] = {obj_size, obj_size};
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(range_addrs, range_sizes, 2, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 2u);
+	EXPECT_EQ(snapshot.exact_count, 0u);
+
+	const uint64_t last_addr = UINT64_MAX;
+	const uint64_t last_size = 1;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&last_addr, &last_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 0u);
+
+	const auto stats_after = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(stats_after.hash_calls, stats_before.hash_calls);
+	EXPECT_EQ(stats_after.hash_bytes, stats_before.hash_bytes);
+	EXPECT_EQ(stats_after.hash_ns, stats_before.hash_ns);
+	EXPECT_EQ(stats_after.gpu_memory_create_calls, stats_before.gpu_memory_create_calls);
+	EXPECT_EQ(stats_after.gpu_memory_create_ns, stats_before.gpu_memory_create_ns);
+	EXPECT_EQ(stats_after.live_objects, stats_before.live_objects);
+	for (uint32_t type = 0; type < kDebugStatsGpuMemoryTypeCount; type++)
+	{
+		EXPECT_EQ(stats_after.gpu_memory_types[type].fast_reuse, stats_before.gpu_memory_types[type].fast_reuse);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].exact_reuse, stats_before.gpu_memory_types[type].exact_reuse);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].covered_reuse, stats_before.gpu_memory_types[type].covered_reuse);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].new_standalone, stats_before.gpu_memory_types[type].new_standalone);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].new_linked, stats_before.gpu_memory_types[type].new_linked);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].new_from_objects, stats_before.gpu_memory_types[type].new_from_objects);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].reclaim_new, stats_before.gpu_memory_types[type].reclaim_new);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].logical_free, stats_before.gpu_memory_types[type].logical_free);
+		EXPECT_EQ(stats_after.gpu_memory_types[type].live, stats_before.gpu_memory_types[type].live);
+	}
+	EXPECT_EQ(g_test_gpu_object_deletes, 0);
+	EXPECT_EQ(GpuMemoryFindObjects(first, obj_size, GpuMemoryObjectType::StorageBuffer, true, false).Size(), 1u);
+	EXPECT_EQ(GpuMemoryFindObjects(second, obj_size, GpuMemoryObjectType::VertexBuffer, true, false).Size(), 1u);
+
+	GpuMemoryFree(&ctx, first, obj_size);
+	GpuMemoryFree(&ctx, second, obj_size);
+	EXPECT_EQ(g_test_gpu_object_deletes, 2);
+}
+
+TEST(EmulatorGraphicsState, StorageBufferBackingIdentityIgnoresViewShape)
+{
+	const StorageBufferGpuObject dword_view(4, 16, true);
+	const StorageBufferGpuObject vec4_view(16, 4, true);
+
+	EXPECT_TRUE(dword_view.Equal(vec4_view.params));
+	EXPECT_TRUE(vec4_view.Equal(dword_view.params));
+	EXPECT_FALSE(dword_view.Equal(nullptr));
+}
+
+TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
+{
+	GpuMemoryOverlapSnapshot empty;
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(empty));
+
+	GpuMemoryOverlapSnapshot read_only_storage;
+	read_only_storage.total_count              = 2;
+	read_only_storage.entry_count              = 1;
+	read_only_storage.entries[0].type          = GpuMemoryObjectType::StorageBuffer;
+	read_only_storage.entries[0].relation      = GpuMemoryOverlapType::Crosses;
+	read_only_storage.entries[0].count         = 2;
+	read_only_storage.entries[0].all_read_only = true;
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_storage));
+
+	auto read_only_vertex            = read_only_storage;
+	read_only_vertex.entries[0].type = GpuMemoryObjectType::VertexBuffer;
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_vertex));
+
+	auto read_only_index            = read_only_storage;
+	read_only_index.entries[0].type = GpuMemoryObjectType::IndexBuffer;
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_index));
+
+	auto writable_storage                     = read_only_storage;
+	writable_storage.entries[0].all_read_only = false;
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage));
+
+	auto surface            = read_only_storage;
+	surface.entries[0].type = GpuMemoryObjectType::RenderTexture;
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface));
+
+	auto truncated      = read_only_storage;
+	truncated.truncated = true;
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(truncated));
+}
+
+TEST(EmulatorGraphicsState, UsesTransientBuffersOnlyForSmallSafeReadOnlyViews)
+{
+	EXPECT_TRUE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x80u, true, true));
+	EXPECT_TRUE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x1000u, true, true));
+	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(false, 0x80u, true, false));
+	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x1001u, true, false));
+	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x80u, false, false));
+	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x80u, true, false));
+}
+
+TEST(EmulatorGraphicsState, VertexAndIndexBuffersDeclareReadOnlyGpuUse)
+{
+	EXPECT_TRUE(VertexBufferGpuObject().read_only);
+	EXPECT_TRUE(IndexBufferGpuObject().read_only);
+}
+
+TEST(EmulatorGraphicsState, TransientBufferPoolReservesCapacityPerUsage)
+{
+	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 512u, 0u, 0x80u));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(512u, 512u, 0u, 0x80u));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 1536u, 0u, 0x80u));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 16u * 1024u * 1024u, 0x80u));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 0u, 0u));
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryAccumulatesWriteIntentUntilWriteBack)
+{
+	EXPECT_FALSE(GpuMemoryMergeReadOnlyUse(true, false, true));
+	EXPECT_FALSE(GpuMemoryMergeReadOnlyUse(true, true, false));
+	EXPECT_TRUE(GpuMemoryMergeReadOnlyUse(true, true, true));
+
+	EXPECT_TRUE(GpuMemoryMergeReadOnlyUse(false, false, true));
+	EXPECT_FALSE(GpuMemoryMergeReadOnlyUse(false, true, false));
 }
 
 TEST(EmulatorGraphicsState, BlitInitializesUndefinedSource)
@@ -381,6 +1395,48 @@ TEST(EmulatorGraphicsState, Gen5CodeUnavailableSkipsInvalidDirectStorageDescript
 	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
 	EXPECT_EQ(usage.storage_buffers_readonly, 0);
 	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
+}
+
+TEST(EmulatorGraphicsState, Gen5DirectImageSampleBindsTextureAndSampler)
+{
+	const uint32_t word0 = (0x3cu << 26u) | (0x20u << 18u) | (0xfu << 8u);
+	const uint32_t word1 = 2u << 21u; // T#0 = s[0:7], S#2 = s[8:11].
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 12; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	user_sgpr.value[3] = 9u << 28u;
+
+	uint16_t direct_offsets[2] = {0xffffu, 0u};
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 2;
+	user_data.srt_size_dw            = 4;
+
+	ShaderParsedUsage  usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 12, &code);
+
+	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
+	ASSERT_EQ(bind.textures2D.textures_num, 1);
+	EXPECT_EQ(bind.textures2D.desc[0].start_register, 0);
+	EXPECT_EQ(bind.textures2D.desc[0].usage, ShaderTextureUsage::ReadOnly);
+	ASSERT_EQ(bind.samplers.samplers_num, 1);
+	EXPECT_EQ(bind.samplers.start_register[0], 8);
 }
 
 TEST(EmulatorGraphicsState, Gen5DirectSgprsAllowFullUserWindow)
@@ -690,6 +1746,12 @@ TEST(EmulatorGraphicsState, Gen5AgcSizeHelpersAndTrinityMode)
 // Missing Gen5 AGC / AgcDriver exports that blocked Astro after Ampr/VideoOut.
 TEST(EmulatorGraphicsState, ResolvesGen5AgcAndDriverExports)
 {
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libGraphicsDriver_1", &symbols));
 
@@ -713,6 +1775,10 @@ TEST(EmulatorGraphicsState, ResolvesGen5AgcAndDriverExports)
 	EXPECT_TRUE(resolve(u"AhGvpITrf4M", u"Graphics5Driver", u"Graphics5Driver"));
 	EXPECT_TRUE(resolve(u"gSRnr79F8tQ", u"Graphics5Driver", u"Graphics5Driver"));
 	EXPECT_TRUE(resolve(u"w2rJhmD+dsE", u"Graphics5Driver", u"Graphics5Driver"));
+	EXPECT_TRUE(resolve(u"XlNp7jzGiPo", u"Graphics5Driver", u"Graphics5Driver"));
+	EXPECT_TRUE(resolve(u"MM4IZSEYytQ", u"Graphics5Driver", u"Graphics5Driver"));
+	EXPECT_EQ(Gen5Driver::GraphicsDriverSetTFRing(reinterpret_cast<const volatile void*>(0x10000), 0x3fff8), OK);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverSetHsOffchipParam(0, 0x1ff, 0), OK);
 }
 
 // WaitFlipDone body observed post-Play: handle=0, index=3 while Open() left
@@ -1118,6 +2184,17 @@ TEST(EmulatorGraphicsState, AllowsIndexContainedInTextureSurface)
 	                                                    GpuMemoryObjectType::VertexBuffer));
 }
 
+TEST(EmulatorGraphicsState, ReusesOnlySameBaseCoveringIndexBacking)
+{
+	constexpr uint64_t base = 0x100000;
+
+	EXPECT_TRUE(GpuMemoryCanReuseIndexBacking(base, 0x100, base, 0xe4));
+	EXPECT_TRUE(GpuMemoryCanReuseIndexBacking(base, 0x100, base, 0x100));
+	EXPECT_FALSE(GpuMemoryCanReuseIndexBacking(base, 0xe4, base, 0x100));
+	EXPECT_FALSE(GpuMemoryCanReuseIndexBacking(base, 0x100, base + 4, 0xfc));
+	EXPECT_FALSE(GpuMemoryCanReuseIndexBacking(base, 0, base, 0));
+}
+
 // Captured: VertexBuffer Contained by co-located StorageBuffer + RenderTexture.
 // Multi-parent load also uses surface IsContainedWithin/Crosses + peer VB reclaim.
 TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
@@ -1129,6 +2206,8 @@ TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
 	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::IsContainedWithin,
 	                                                   GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Crosses,
+	                                                   GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
 	                                                   GpuMemoryObjectType::VertexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
 	                                                    GpuMemoryObjectType::VertexBuffer));
@@ -1143,6 +2222,8 @@ TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
 	                                                 GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
 	                                                 GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Equals,
+	                                                 GpuMemoryObjectType::VertexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsVertexLinkIndexBuffer(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
 	                                                  GpuMemoryObjectType::VertexBuffer));
 	// Captured: IndexBuffer IsContainedWithin + VertexBuffer Contains → reclaim
@@ -1150,6 +2231,8 @@ TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
 	EXPECT_TRUE(GpuMemoryAllowsIndexReclaimIndex(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::IsContainedWithin,
 	                                             GpuMemoryObjectType::IndexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsIndexLinkVertexBuffer(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
+	                                                 GpuMemoryObjectType::IndexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsIndexLinkVertexBuffer(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Equals,
 	                                                 GpuMemoryObjectType::IndexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsIndexLinkVertexBuffer(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
 	                                                  GpuMemoryObjectType::IndexBuffer));
@@ -1166,7 +2249,13 @@ TEST(EmulatorGraphicsState, AllowsRenderTargetMultiSurfaceParents)
 	                                                    GpuMemoryObjectType::RenderTexture));
 	EXPECT_TRUE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
 	                                                    GpuMemoryObjectType::RenderTexture));
-	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::Label, GpuMemoryOverlapType::Equals,
+	EXPECT_TRUE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::RenderTexture));
+	EXPECT_TRUE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
+	                                                    GpuMemoryObjectType::RenderTexture));
+	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
+	                                                     GpuMemoryObjectType::RenderTexture));
+	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
 	                                                     GpuMemoryObjectType::RenderTexture));
 	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Equals,
 	                                                     GpuMemoryObjectType::Texture));
@@ -1210,6 +2299,12 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	                                                    GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureContainedInSurface(GpuMemoryObjectType::VideoOutBuffer, GpuMemoryOverlapType::Contains,
 	                                                     GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureLinkDepthMetadata(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
+	                                                   GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureLinkDepthMetadata(GpuMemoryObjectType::DepthStencilBuffer,
+	                                                    GpuMemoryOverlapType::Contains, GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureLinkDepthMetadata(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Crosses,
+	                                                    GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                                GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
@@ -1518,6 +2613,60 @@ TEST(EmulatorGraphicsState, MemcpySkipAbsoluteRangesPreservesFenceHoles)
 	}
 }
 
+TEST(EmulatorGraphicsState, GpuWritebackPageCacheCopiesOnlyChangedPagesAndPreservesFenceHoles)
+{
+	using namespace Kyty::Libs::Graphics;
+	constexpr uint64_t PageSize = 16u;
+	uint8_t            guest[PageSize * 3u] {};
+	uint8_t            gpu[PageSize * 3u] {};
+	for (uint64_t i = 0; i < sizeof(gpu); ++i)
+	{
+		guest[i] = static_cast<uint8_t>(i);
+		gpu[i]   = static_cast<uint8_t>(i);
+	}
+
+	GpuWritebackPageCache cache(PageSize);
+	cache.Reset(gpu, sizeof(gpu));
+
+	gpu[PageSize + 2u] = 0xe1u;
+	gpu[PageSize + 8u] = 0xe2u;
+	const uint64_t hole_begin = reinterpret_cast<uint64_t>(guest) + PageSize + 8u;
+	const uint64_t hole_end   = hole_begin + 1u;
+
+	struct Notifications
+	{
+		uint64_t calls   = 0;
+		uint64_t address = 0;
+		uint64_t size    = 0;
+	} notifications;
+	const auto notify = [](void* opaque, uint64_t address, uint64_t size)
+	{
+		auto* state = static_cast<Notifications*>(opaque);
+		state->calls++;
+		state->address = address;
+		state->size = size;
+	};
+
+	const auto first =
+	    cache.CopyChangedPages(guest, gpu, sizeof(gpu), &hole_begin, &hole_end, 1, notify, &notifications);
+	EXPECT_TRUE(first.content_changed);
+	EXPECT_EQ(first.changed_pages, 1u);
+	EXPECT_EQ(first.copied_bytes, PageSize);
+	EXPECT_EQ(notifications.calls, 1u);
+	EXPECT_EQ(notifications.address, reinterpret_cast<uint64_t>(guest) + PageSize);
+	EXPECT_EQ(notifications.size, PageSize);
+	EXPECT_EQ(guest[PageSize + 2u], 0xe1u);
+	EXPECT_NE(guest[PageSize + 8u], 0xe2u);
+
+	notifications = {};
+	const auto second =
+	    cache.CopyChangedPages(guest, gpu, sizeof(gpu), &hole_begin, &hole_end, 1, notify, &notifications);
+	EXPECT_FALSE(second.content_changed);
+	EXPECT_EQ(second.changed_pages, 0u);
+	EXPECT_EQ(second.copied_bytes, 0u);
+	EXPECT_EQ(notifications.calls, 0u);
+}
+
 // OnlyFlip → ActiveDeleted must be force-completed with Active after BufferFlush.
 // Skipping ActiveDeleted left VideoOutSubmitFlip on vkGetEventStatus (empty Flip
 // queue; guest ThreadFlag bit 0x1 And+ClearBits soft-lock around present 2400).
@@ -1530,23 +2679,117 @@ TEST(EmulatorGraphicsState, LabelForceCompleteFiresActiveDeletedOnlyFlip)
 	EXPECT_EQ(LabelForceCompleteActionFor(true, true), LabelForceCompleteKind::FireKeep);
 }
 
-// Label⊂StorageBuffer must stay linked so WriteBack holes preserve EOP fences.
-// Deleting Labels let StorageBuffer WriteBack zero guest fences → EVENTFLAG_SET=0.
-TEST(EmulatorGraphicsState, GpuMemoryKeepsLabelWriteBackHoleUnderStorageBuffer)
+TEST(EmulatorGraphicsState, LabelFenceRegistryPreservesUniqueHolesAfterTransientOwnersRetire)
 {
-	using namespace Kyty::Libs::Graphics;
-	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::IsContainedWithin,
-	                                            GpuMemoryObjectType::StorageBuffer));
-	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::Equals,
-	                                            GpuMemoryObjectType::StorageBuffer));
-	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::Crosses,
-	                                            GpuMemoryObjectType::StorageBuffer));
-	EXPECT_TRUE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
-	                                            GpuMemoryObjectType::Label));
-	EXPECT_FALSE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::Label, GpuMemoryOverlapType::IsContainedWithin,
-	                                             GpuMemoryObjectType::Texture));
-	EXPECT_FALSE(GpuMemoryKeepLabelWriteBackHole(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
-	                                             GpuMemoryObjectType::StorageBuffer));
+	uint8_t dst[32] = {};
+	uint8_t src[32] = {};
+	for (int i = 0; i < 32; i++)
+	{
+		dst[i] = static_cast<uint8_t>(0xa0 + i);
+		src[i] = static_cast<uint8_t>(0x10 + i);
+	}
+
+	LabelFenceRegistry registry;
+	const uint64_t     hole = reinterpret_cast<uint64_t>(dst) + 8u;
+	EXPECT_EQ(registry.Register(hole, 8), LabelFenceRegistrationStatus::Inserted);
+	EXPECT_EQ(registry.Register(hole, 8), LabelFenceRegistrationStatus::AlreadyRegistered);
+	EXPECT_EQ(registry.Register(hole, 0), LabelFenceRegistrationStatus::InvalidArgument);
+	EXPECT_EQ(registry.Register(UINT64_MAX - 3, 8), LabelFenceRegistrationStatus::InvalidArgument);
+	EXPECT_EQ(registry.Size(), 1u);
+
+	Vector<uint64_t> hole_begin;
+	Vector<uint64_t> hole_end;
+	registry.Snapshot(&hole_begin, &hole_end);
+	ASSERT_EQ(hole_begin.Size(), 1u);
+	ASSERT_EQ(hole_end.Size(), 1u);
+
+	// The registry is the durable owner. No live Label object is needed here.
+	MemcpySkipAbsoluteRanges(dst, src, sizeof(dst), hole_begin.GetData(), hole_end.GetData(),
+	                         static_cast<int>(hole_begin.Size()));
+	for (int i = 0; i < 32; i++)
+	{
+		const auto expected = static_cast<uint8_t>((i >= 8 && i < 16) ? (0xa0 + i) : (0x10 + i));
+		EXPECT_EQ(dst[i], expected);
+	}
+}
+
+TEST(EmulatorGraphicsState, LabelFenceRegistryUnmapRemovesHolesBeforeAddressReuse)
+{
+	uint8_t            storage[64];
+	uint8_t            source[64];
+	for (int i = 0; i < 64; i++)
+	{
+		storage[i] = static_cast<uint8_t>(0xa0 + i);
+		source[i]  = static_cast<uint8_t>(0x10 + i);
+	}
+	LabelFenceRegistry registry;
+	const uint64_t     allocation = reinterpret_cast<uint64_t>(storage);
+
+	ASSERT_EQ(registry.Register(allocation + 8u, 8u), LabelFenceRegistrationStatus::Inserted);
+	ASSERT_EQ(registry.Register(allocation + 32u, 12u), LabelFenceRegistrationStatus::Inserted);
+	ASSERT_EQ(registry.Size(), 2u);
+
+	Vector<uint64_t> begin;
+	Vector<uint64_t> end;
+	registry.Snapshot(&begin, &end);
+	MemcpySkipAbsoluteRanges(storage, source, sizeof(storage), begin.GetData(), end.GetData(), static_cast<int>(begin.Size()));
+	for (int i = 0; i < 64; i++)
+	{
+		const bool protected_byte = (i >= 8 && i < 16) || (i >= 32 && i < 44);
+		EXPECT_EQ(storage[i], static_cast<uint8_t>(protected_byte ? (0xa0 + i) : (0x10 + i)));
+	}
+
+	EXPECT_EQ(registry.ReleaseAllocation(allocation + 10u, 4u), LabelFenceReleaseStatus::PartialOverlap);
+	EXPECT_EQ(registry.Size(), 2u);
+	EXPECT_EQ(registry.ReleaseAllocation(allocation, sizeof(storage)), LabelFenceReleaseStatus::Released);
+	EXPECT_EQ(registry.Size(), 0u);
+
+	std::memset(storage, 0xa5, sizeof(storage));
+	registry.Snapshot(&begin, &end);
+	MemcpySkipAbsoluteRanges(storage, source, sizeof(storage), begin.GetData(), end.GetData(), static_cast<int>(begin.Size()));
+	EXPECT_EQ(std::memcmp(storage, source, sizeof(storage)), 0);
+
+	EXPECT_EQ(registry.Register(allocation + 8u, 4u), LabelFenceRegistrationStatus::Inserted);
+	EXPECT_EQ(registry.Size(), 1u);
+	EXPECT_EQ(registry.ReleaseAllocation(allocation + sizeof(storage), 16u), LabelFenceReleaseStatus::NotFound);
+	EXPECT_EQ(registry.ReleaseAllocation(allocation, 0u), LabelFenceReleaseStatus::InvalidArgument);
+	EXPECT_EQ(registry.ReleaseAllocation(UINT64_MAX - 3u, 8u), LabelFenceReleaseStatus::InvalidArgument);
+
+	registry.Snapshot(&begin, &end);
+	ASSERT_EQ(begin.Size(), 1u);
+	ASSERT_EQ(end.Size(), 1u);
+	EXPECT_EQ(begin.At(0), allocation + 8u);
+	EXPECT_EQ(end.At(0), allocation + 12u);
+}
+
+TEST(EmulatorGraphicsState, LabelFenceGdsStoreProtectsEveryWrittenDword)
+{
+	uint8_t dst[32];
+	uint8_t src[32];
+	for (int i = 0; i < 32; i++)
+	{
+		dst[i] = static_cast<uint8_t>(0xa0 + i);
+		src[i] = static_cast<uint8_t>(0x10 + i);
+	}
+
+	constexpr uint32_t dword_count = 3;
+	const uint64_t     base        = reinterpret_cast<uint64_t>(dst);
+	const uint64_t     store_bytes = LabelDwordStoreSizeBytes(dword_count);
+	ASSERT_EQ(store_bytes, 12u);
+
+	LabelFenceRegistry registry;
+	ASSERT_EQ(registry.Register(base + 8u, store_bytes), LabelFenceRegistrationStatus::Inserted);
+
+	Vector<uint64_t> begin;
+	Vector<uint64_t> end;
+	registry.Snapshot(&begin, &end);
+	MemcpySkipAbsoluteRanges(dst, src, sizeof(dst), begin.GetData(), end.GetData(), static_cast<int>(begin.Size()));
+
+	for (int i = 0; i < 32; i++)
+	{
+		const auto expected = static_cast<uint8_t>((i >= 8 && i < 20) ? (0xa0 + i) : (0x10 + i));
+		EXPECT_EQ(dst[i], expected);
+	}
 }
 
 // SubmitAndFlip without an embedded R_FLIP/0x777 must still flip after BufferFlush.
@@ -1559,6 +2802,16 @@ TEST(EmulatorGraphicsState, GraphicsBatchNeedsApiFlipWhenDcbOmitsFlip)
 	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(true, true));
 	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(false, false));
 	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(false, true));
+}
+
+// A flip becomes guest-visible only when the exact submission containing its
+// post-fence callback is published. Leaving that retirement to a later batch
+// deadlocks titles that wait for the first flip event before submitting again.
+TEST(EmulatorGraphicsState, GraphicsBatchWaitsForSubmissionContainingFlip)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(GraphicsBatchNeedsSubmissionCompletion(true));
+	EXPECT_FALSE(GraphicsBatchNeedsSubmissionCompletion(false));
 }
 
 // Host presentation: default swapchain selection must stay LDR sRGB even when a

@@ -3,10 +3,69 @@
 
 #include <chrono>
 #include <cstdint>
+#include <array>
 
 UT_BEGIN(CoreVirtualMemory);
 
 using namespace Core::VirtualMemory;
+
+namespace {
+struct ProtectionCapture
+{
+	std::array<CapturedProtectionRun, 8> runs {};
+	size_t size = 0;
+};
+
+bool CaptureProtection(void* context, const CapturedProtectionRun& run) noexcept
+{
+	auto* capture = static_cast<ProtectionCapture*>(context);
+	if (capture->size >= capture->runs.size())
+	{
+		return false;
+	}
+	capture->runs[capture->size++] = run;
+	return true;
+}
+} // namespace
+
+TEST(CoreVirtualMemory, RemoveWriteCapturesAndRestoresMixedProtectionRuns)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address = Alloc(0, page_size * 4u, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	ASSERT_TRUE(Protect(address + page_size * 2u, page_size, Mode::ExecuteReadWrite));
+	ProtectionCapture capture;
+	const auto change = RemoveWriteAndCapture(address, page_size * 4u, &CaptureProtection, &capture);
+	ASSERT_TRUE(change.Succeeded());
+	ASSERT_EQ(capture.size, 3u);
+	EXPECT_EQ(change.applied_runs, 3u);
+	EXPECT_EQ(capture.runs[0].mode, Mode::ReadWrite);
+	EXPECT_EQ(capture.runs[1].mode, Mode::ExecuteReadWrite);
+	EXPECT_EQ(capture.runs[2].mode, Mode::ReadWrite);
+	for (size_t i = 0; i < capture.size; i++)
+	{
+		EXPECT_TRUE(RestoreProtection(capture.runs[i].address, capture.runs[i].size, capture.runs[i].restore_token));
+	}
+	auto* bytes = reinterpret_cast<uint8_t*>(address);
+	bytes[0] = 0x5a;
+	bytes[page_size * 2u] = 0xc3;
+	EXPECT_TRUE(Free(address));
+}
+
+TEST(CoreVirtualMemory, UniformLargeRangeUsesOneProtectionTransition)
+{
+	constexpr uint64_t size = 64u * 1024u * 1024u;
+	const uint64_t address = Alloc(0, size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	ProtectionCapture capture;
+	const auto change = RemoveWriteAndCapture(address, size, &CaptureProtection, &capture);
+	ASSERT_TRUE(change.Succeeded());
+	ASSERT_EQ(capture.size, 1u);
+	EXPECT_EQ(change.applied_runs, 1u);
+	EXPECT_EQ(change.applied_bytes, size);
+	EXPECT_TRUE(RestoreProtection(capture.runs[0].address, capture.runs[0].size, capture.runs[0].restore_token));
+	EXPECT_TRUE(Free(address));
+}
 
 // Shared host backing must keep alias views byte-coherent: a write through one
 // map is visible through another map of the same backing offset.
@@ -105,11 +164,41 @@ TEST(CoreVirtualMemory, FixedSharedMappingRejectsOccupiedRange)
 	SharedBacking* replacement_backing = CreateSharedBacking(page_size);
 	ASSERT_NE(replacement_backing, nullptr);
 	EXPECT_FALSE(MapSharedFixed(replacement_backing, occupied, 0, page_size, Mode::ReadWrite));
+	EXPECT_EQ(MapSharedFixedOrRelocated(replacement_backing, occupied, 0, page_size, Mode::ReadWrite, page_size), 0u);
 	EXPECT_EQ(occupied_bytes[0], 0x5a);
 
 	DestroySharedBacking(replacement_backing);
 	ASSERT_TRUE(Free(occupied));
 	DestroySharedBacking(occupied_backing);
+}
+
+TEST(CoreVirtualMemory, FixedSharedMappingReplacesOnlyOwnedReservationSubrange)
+{
+#if defined(_WIN32)
+	GTEST_SKIP() << "owned reservation replacement is not available on this host";
+#else
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+
+	const uint64_t reservation = Alloc(0, page_size * 4u, Mode::NoAccess);
+	ASSERT_NE(reservation, 0u);
+	SharedBacking* backing = CreateSharedBacking(page_size * 2u);
+	ASSERT_NE(backing, nullptr);
+
+	ASSERT_TRUE(MapSharedFixedReplacingOwnedReservation(backing, reservation + page_size, 0, page_size * 2u,
+	                                                   Mode::ReadWrite));
+	auto* bytes = reinterpret_cast<uint8_t*>(reservation + page_size);
+	bytes[0] = 0x5a;
+	bytes[page_size * 2u - 1u] = 0xc3;
+	EXPECT_EQ(bytes[0], 0x5a);
+	EXPECT_EQ(bytes[page_size * 2u - 1u], 0xc3);
+
+	EXPECT_FALSE(MapSharedFixedReplacingOwnedReservation(backing, reservation + page_size, 0, page_size, Mode::ReadWrite));
+	ASSERT_TRUE(Free(reservation));
+	ASSERT_TRUE(Free(reservation + page_size));
+	ASSERT_TRUE(Free(reservation + page_size * 3u));
+	DestroySharedBacking(backing);
+#endif
 }
 
 TEST(CoreVirtualMemory, DemandMapUsesHostPageSize)

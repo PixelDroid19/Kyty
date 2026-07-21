@@ -1692,6 +1692,10 @@ bool String::EndsWith(const String& str, Case cs) const
 	{
 		return false;
 	}
+	if (str_size > size)
+	{
+		return false;
+	}
 	return FindLastIndex(str, size - 1, cs) == (size - str_size);
 }
 

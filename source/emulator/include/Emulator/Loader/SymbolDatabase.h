@@ -52,6 +52,7 @@ public:
 	void AddAliases(SymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr, const String& dbg_name);
 
 	[[nodiscard]] const SymbolRecord* Find(const SymbolResolve& s) const;
+	[[nodiscard]] const SymbolRecord* FindByNid(const String& nid, SymbolType type) const;
 	// Lookup by full GenerateName key (used for export-conflict scans).
 	[[nodiscard]] const SymbolRecord* FindByCanonicalName(const String& canonical_name) const;
 	[[nodiscard]] uint32_t            SymbolCount() const;
@@ -67,6 +68,8 @@ private:
 	Vector<SymbolRecord>            m_symbols;
 	Core::Hashmap<String, uint32_t> m_map;
 };
+
+[[nodiscard]] String EncodeNameAsNid(const char* name);
 
 } // namespace Kyty::Loader
 

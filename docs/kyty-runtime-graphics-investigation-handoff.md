@@ -1,6 +1,6 @@
 # Kyty Gen5 runtime graphics investigation handoff
 
-Updated: 2026-07-18
+Updated: 2026-07-21
 
 Status: the runtime advances into sustained gameplay-era presentation without
 a process-killing error. The opaque black sprite/prop rectangles are absent
@@ -70,6 +70,10 @@ the gameplay-era checkpoint or advances the first failure.
 | Striped or missing output around multi-render-target shaders | Null MRT export tails lost their discard/no-write semantics during SPIR-V generation | Preserve null MRT0–3 tails as no-write exports instead of fabricating color output or truncating the export contract | Focused shader/SPIR-V export test |
 | Opaque black rectangles in transparent sprite or prop bounds | Kill-enabled `EarlyZThenLateZ` pixel shaders were emitted with Vulkan `EarlyFragmentTests`, allowing depth commit before `OpKill` | Omit `EarlyFragmentTests` for pixel-kill shaders so discarded fragments cannot write depth; retain it for opaque early-Z shaders | Red/green SPIR-V test and native gameplay-era capture |
 | Large first-run stalls recur after restarting Kyty | `VkPipelineCache` was always created empty and never persisted | Validate the standard cache header against vendor/device/UUID, load compatible bounded data, and save dirty cache data atomically at a rate limit | Header tests plus isolated cold/warm driver measurements |
+| Pipeline-cache writes can exceed the session budget after an I/O failure | A failed temporary-file write, flush, or replace did not consume budget and was retried on every pipeline lookup | Charge every disk attempt conservatively, rate-limit retries, and stop attempting after 64 MiB per process | Budget saturation test plus strict runtime disk counters |
+| First-use shader persistence pauses the render path | Every new SPIR-V entry scanned the cache directory and performed write, flush, and rename synchronously on the compiling thread | Queue immutable entries to one bounded writer, coalesce duplicate identities, and keep persistence best-effort without invalidating the in-memory shader | Queue saturation/drain tests, cold/warm restart, and strict visual regression |
+| Frame histogram reports hundreds of multi-second frames while presents advance | Every sample used `1000 / averaged_fps`; one slow FPS window was therefore copied into many fast frames | Record the monotonic delta between consecutive frame-loop timestamps and retain FPS only as a rate metric | Red/green interval test plus strict cold/warm runtime pair |
+| Reload exits while a sampled texture overlaps live color/depth aliases | The texture crosses the color RT/storage pair and the depth metadata plane, but the mixed-parent policy did not recognize the exact DepthStencil relation | Link only the captured `DepthStencilBuffer Crosses Texture` metadata alias; materialize the image from the existing color surface | Exact policy test plus input-driven strict runtime beyond the former exit |
 | Scene reached only with automatic Cross input | Input automation bypasses the real press/release acceptance contract | Do not change graphics or synthesize completion. Re-run with real keyboard/controller edges and treat inability to reach gameplay as a separate input/synchronization frontier | Pending real-input acceptance |
 
 ### Pipeline compilation hitches across restarts
@@ -89,13 +93,24 @@ The cache store now:
 - retries with an empty cache if a driver rejects otherwise compatible data;
 - writes a sibling temporary file and replaces the destination;
 - saves after the first new pipeline and consolidates later dirty data at most
-  once every five seconds.
+  once every 30 seconds;
+- charges attempted bytes before opening the temporary file, including failed
+  write, flush, and replace operations;
+- enforces a 64 MiB attempted-write budget per process, so I/O failures and a
+  long session cannot repeatedly replace the bounded blob into gigabytes of
+  cumulative writes.
 
 With Mesa's independent shader cache disabled to isolate this path, a bounded
 cold run spent 268 ms in 87 `vkCreate*Pipelines` calls (maximum 25 ms). The
 equivalent warm run spent 6 ms in 84 calls (maximum 6 ms), a 97.8% reduction
 in the measured driver-pipeline stage. Cache snapshots were approximately
 0.6 MiB and took about 1–2 ms each.
+
+The Vulkan driver blob is not stable enough for whole-file content
+deduplication on the current Linux driver: two equivalent warm runs produced
+the same 1.1 MiB size but differed in about 855,000 bytes. The hard per-process
+write budget is therefore the disk-wear guarantee; texture/resource caches stay
+in RAM/VRAM and are never serialized per frame.
 
 This does **not** prove that every pipeline miss is cheap: guest shader parsing,
 SPIR-V generation/optimization, and application pipeline lookup occur outside
@@ -113,6 +128,51 @@ If the cache is suspected after a driver update:
 
 Malformed, foreign-device, oversized, and unreadable files are ignored; cache
 I/O failure is a performance miss, not a guest-visible semantic fallback.
+
+### SPIR-V persistence without render-thread write I/O
+
+SPIR-V cache misses previously compiled the shader and then synchronously
+scanned the cache directory, evicted old files when necessary, wrote a
+temporary entry, flushed it, and replaced the destination. A module compiled
+through the translation cache could exercise both the source and module cache
+paths. The data volume was bounded, but filesystem latency remained part of
+the first-use frame.
+
+Persistence now uses one writer thread per cache store. Producers copy a
+validated immutable entry into a queue bounded to 64 entries and 8 MiB. The
+worker retains the existing file format, exact identity validation, atomic
+replacement, 64 MiB total capacity, 4 MiB entry limit, and 16 MiB attempted
+write budget per session. Duplicate queued, in-flight, or successfully written
+identities are coalesced. If the queue is full or persistence fails, the
+compiled shader remains valid in the in-memory translation cache; disk I/O is
+only a performance aid.
+
+The store drains and joins its worker before destruction. Tests that need to
+inspect, corrupt, or reopen a just-enqueued entry call the explicit drain
+barrier rather than racing the writer. Queue saturation is observable through
+stats and never causes a second compilation inside the same in-memory cache.
+Cache reads do not acquire the writer's filesystem lock: they consume either
+the immutable queued entry or a completely published file, so a directory
+scan, eviction, flush, or rename cannot stall an unrelated cache hit.
+
+An isolated cold run persisted 69 SPIR-V entries (about 4.2 MiB) and a 0.54 MiB
+driver cache. After the scene warmed, a 30-second gameplay window presented
+1,185 frames at about 46 FPS with p95/p99 frame times of 27/28 ms and no frame
+over 50 ms. A restart against those files reported 23 translation-cache hits,
+zero misses, and zero SPIR-V compilations. The strict three-edge visual gate
+also passed against the prior baseline. These measurements verify persistence
+and absence of a steady-state regression; they do not claim that shader or
+pipeline compilation itself is asynchronous.
+
+A later isolated cold/warm pair disabled the host driver's shader cache and
+used the same Kyty cache population. The warm restart changed 4 SPIR-V
+compilations into 23 exact translation-cache hits and reduced inclusive
+pipeline-miss time from about 425 ms to 0.49 ms. With real frame intervals,
+startup samples above 50/100 ms fell from 14/9 to 11/7; the single multi-second
+loading interval remained in both runs and is therefore not attributed to the
+cache. The synchronous Vulkan-cache checkpoint was also measured directly:
+0.081 ms cold and 0.341 ms warm in this pair, too small to justify another
+writer solely for frame-time improvement.
 
 ### Redundant hashes on GPU-owned surfaces
 
@@ -315,19 +375,116 @@ Object teardown unregisters ranges before object IDs are recycled. The tracker
 uses tombstones for page-table removal and range reference counts to preserve
 collision and overlap correctness.
 
-Focused validation currently passes 6/6 dirty-tracker tests and 220/220
-GraphicsPackets/GraphicsState/CoreVirtualMemory tests (one macOS-only test is
-skipped on Linux). During the first disabled-mode hardening pass, lazy tracker
+During the first disabled-mode hardening pass, lazy tracker
 metadata exposed a rollback path that called `UnregisterRange` without a
 registration attempt; that dereferenced a null mutex and terminated the game
 before its first present. Disabled tracker APIs now return through the hash
 fallback contract, rollback runs only after an attempted registration, and a
-regression test covers the no-metadata path. The tracker is deliberately opt-in with
-`KYTY_ENABLE_GPU_DIRTY_TRACKING=1`: a short A/B capture showed that the first
-page-fault implementation was slower than the hash baseline and once exited
-before the second present. The normal runtime therefore keeps XXH64 active
-until a longer, controlled run proves a gain. When profiling the prototype,
-compare hash bytes/time, skipped scans, upload time, median FPS, p99 frame time,
-and visual correctness against the prior Release+Silent baseline. If any
-false-clean upload or visual change appears, leave the affected ranges on
-XXH64 fallback and use the counters/tests to isolate the producer.
+regression test covers the no-metadata path.
+
+Exact registered-range queries now bypass the per-page scan across every range.
+Two controlled Release+Silent gameplay runs then sustained 500 and 1,000
+presents with healthy captures, movement/action input, no frame over 50 ms,
+and higher FPS than the hash-only baseline. A debugger capture then traced the
+remaining intermittent fatal fault to a protected page whose tracking entry had
+already been discarded. Retired page metadata now remains in the fixed table so
+late faults can restore the known writable host mode. Tracking remains opt-in
+at this historical checkpoint. Untracked, capacity-limited, or uncertain ranges
+continue to use XXH3 automatically.
+
+A later opt-in repetition reproduced that intermittent fault after more than
+10,500 healthy presents. GDB found the fatal page still read-only with zero
+references, writable original mode, and retained `Retired` metadata. This
+identified a `Rearm`/final-`UnregisterRange` protection race rather than disk
+cache growth or missing metadata. Rearm and range registration transitions now
+share the registration mutex; final unregister claims `Disarming` before
+publishing zero references; and an arming transaction rolls back read-only
+protection if it observes `Retired`. A subsequent Release+Silent run sustained
+more than 14,000 presents past the previous failure, with a healthy capture and
+a stable 2,008-frame window at about 31 FPS (p50 33 ms, p99 36 ms, no frame
+over 50 ms). At that checkpoint the tracker remained opt-in pending longer
+default-path validation.
+
+The next controlled gameplay comparison identified tracker capacity—not an
+unbounded disk cache—as the remaining texture-hash fallback. The original
+fixed page table had 65,536 metadata slots and a 32,768-page limit per
+registered range. Once that cover filled, a stable large texture range fell
+back to 3,715 full hashes (106.7 GB read, 4.72 s CPU) in 30 seconds; every
+comparison was unchanged. Expanding the bounded table to 262,144 slots with a
+131,072-page per-range limit eliminated all steady-state texture hashes in the
+equivalent scene. The 30-second window improved from 24.39 FPS / p50 42 ms /
+p99 44 ms to 28.51 FPS / p50 34 ms / p99 37 ms, with no frame over 50 ms.
+A subsequent 218-second gameplay window sustained 6,915 presents, p50 32 ms,
+p99 37 ms, eight frames over 50 ms, no frame over 100 ms, healthy native
+captures, delivered movement/action input, and no structured error. The larger
+fixed table adds bounded RAM metadata only; it does not serialize textures or
+increase persistent cache writes.
+
+Generation tracking is now enabled on the normal runtime path. Set
+`KYTY_DISABLE_GPU_DIRTY_TRACKING=1` only to diagnose tracker-specific problems;
+the process-wide tracker does not arm until the runtime fault handler is
+installed, and disabled or uncovered ranges use the conservative hash path. A strict
+Release+Silent default-path run, with neither enable nor disable variables set,
+reached a coherent interactive scene and exceeded 11,000 presents. Its
+45-second movement/action window advanced 1,499 frames and presents, ended at
+33.40 FPS, measured p50 31 ms / p99 36 ms, had no frame over 100 ms, and
+reported no structured error. During that window the process wrote about
+1.07 MB to disk and the bounded persistent Vulkan cache remained 1.1 MB; the
+tracker itself writes no texture data to disk.
+
+A later long interactive run exposed a separate presentation freeze after more
+than 80,000 frames. A debugger capture stopped at the first bounded
+`WaitRegMem64` timeout and preserved the command stream. The wait expected
+64-bit value `1`; the immediately preceding confirmed custom `WriteData`
+contained that same address and value, but its early host `memcpy` had been
+overwritten by a later GPU-to-CPU materialization. Confirmed 64-bit
+`WriteData -> WaitMem64` pairs now publish through the exact GPU submission,
+register that submission as the wait producer, and use the existing durable
+label-hole protection. Other `WriteData` packets retain their established
+behavior. A strict Release+Silent rerun sustained 300 seconds and passed the
+previous reproduction point, reaching more than 8,100 presents with no
+structured error; process disk writes remained about 10 MB.
+
+## NGS2 state and lifetime exports
+
+The captured import set includes `sceNgs2VoiceGetStateFlags` and
+`sceNgs2RackDestroy`, but neither export was previously registered. A missing
+import fallback could therefore return success without writing voice state or
+retiring rack-owned streams. The state-flags export now shares the exact state
+mapping used by `sceNgs2VoiceGetState`. Rack destruction unlinks the rack,
+removes every associated PCM stream, returns caller-provided storage, and uses
+the registered free callback for allocator-owned storage.
+
+A strict runtime audio-boundary capture showed the workload creating Custom
+Sampler, Mastering, and Reverb racks, submitting stereo PCM blocks, and issuing
+the observed play command. Initial blocks were intentionally silent. A later
+89,800-frame source block had a signed-PCM peak of 12,987; `Ngs2SystemRender`
+produced a floating-point peak of 0.071069, and `AudioOut` delivered the same
+peak to the host device queue. This locates the earlier silence before the host
+backend and confirms that the final NGS2-to-device path can carry non-zero
+audio. Temporary amplitude probes were removed after capture.
+
+## Descriptor-layout cache startup phase
+
+The descriptor cache previously created the complete Cartesian product of
+layout counts on first use. With limits of 16 storage buffers, 16 sampled
+images, 16 storage images, 16 samplers, one GDS buffer, and three shader
+stages, that path issued 501,123 Vulkan layout creations while holding the
+cache mutex. Most combinations were never requested by the workload.
+
+Layouts are now created on demand in their existing per-stage/count slot. The
+descriptor key, binding order, stage flags, pool allocation, and lifetime are
+unchanged; repeated requests still reuse the same Vulkan layout. This removes
+the eager combinatorial work without adding persistent data or disk writes.
+
+A Release+Silent strict run reached a coherent interactive scene after the
+change using exactly three initial input taps and no repeated automation. A
+native 1280x720 capture was classified as gameplay-like, scene-correct, and
+free of stripe artifacts. The first cumulative window reduced frames above
+250 ms from 187 in the prior baseline to 143. After scene discovery completed,
+an 89.684-second stable window advanced 2,613 presents (29.136 presents/s),
+with frame p50/p95/p99 of 35/38/39 ms, a 40.239 ms maximum, and no frame above
+50 ms. The comparable prior stable window advanced at 28.364 presents/s with
+36/40/46 ms p50/p95/p99 and eight frames above 50 ms. These measurements
+validate removal of the startup pause and preservation of rendering; they do
+not establish a universal FPS result across titles or hosts.

@@ -11,7 +11,6 @@
 namespace Kyty::Libs::Graphics {
 
 struct StorageVulkanBuffer;
-class CommandBuffer;
 
 class StorageBufferGpuObject: public GpuObject
 {
@@ -33,8 +32,6 @@ public:
 	[[nodiscard]] delete_func_t              GetDeleteFunc() const override;
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
-
-void StorageBufferSet(CommandBuffer* cmd_buffer, StorageVulkanBuffer* buffer);
 
 } // namespace Kyty::Libs::Graphics
 

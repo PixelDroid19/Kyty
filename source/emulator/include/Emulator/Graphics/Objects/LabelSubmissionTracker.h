@@ -39,6 +39,7 @@ public:
 	LabelSubmissionResult TakeCompleted(SubmissionId submission, Vector<LabelSubmissionCompletion>* completed);
 
 	[[nodiscard]] bool IsBound(uint64_t token) const;
+	[[nodiscard]] uint32_t PendingCount() const { return m_entries.Size(); }
 
 private:
 	struct Entry

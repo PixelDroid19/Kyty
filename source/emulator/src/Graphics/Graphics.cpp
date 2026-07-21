@@ -10,6 +10,7 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
+#include "Emulator/Graphics/InternalResolutionRuntime.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -36,6 +37,9 @@ KYTY_SUBSYSTEM_INIT(Graphics)
 {
 	auto width  = Config::GetScreenWidth();
 	auto height = Config::GetScreenHeight();
+	const auto resolution_status = InternalResolutionRuntimeInitialize(
+	    {Config::GetInternalResolutionWidth(), Config::GetInternalResolutionHeight()});
+	EXIT_IF(resolution_status != ResolutionPolicyStatus::Success);
 
 	WindowInit(width, height);
 	VideoOut::VideoOutInit(width, height);
@@ -2403,9 +2407,206 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t addr
 	return OK;
 }
 
+// sceAgcWaitRegMemPatchCompareFunction (NID n485EBnIWmk).
+// IT_WAIT_REG_MEM: compare at +4; R_WAIT_MEM_32: +16; R_WAIT_MEM_64: +28.
+int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchCompareFunction(uint32_t* cmd, uint32_t compare_function)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " compare_function = %" PRIu32 "\n", reinterpret_cast<uint64_t>(cmd), compare_function);
 
+	if (cmd == nullptr || compare_function > 7u)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
 
+	uint32_t byte_off = 0;
+	switch (GraphicsGetWaitRegMemForm(cmd[0]))
+	{
+		case GraphicsWaitRegMemForm::ItWaitRegMem: byte_off = 4u; break;
+		case GraphicsWaitRegMemForm::CustomWaitMem32: byte_off = 16u; break;
+		case GraphicsWaitRegMemForm::CustomWaitMem64: byte_off = 28u; break;
+		default: return LibKernel::KERNEL_ERROR_EINVAL;
+	}
 
+	const uint32_t dw = byte_off / 4u;
+	cmd[dw]           = GraphicsPatchUInt32Bits(cmd[dw], 0x7u, compare_function);
+	return OK;
+}
+
+// sceAgcWaitRegMemPatchReference (NID 7nOoijNPvEU).
+int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchReference(uint32_t* cmd, uint64_t reference)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " reference = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), reference);
+
+	if (cmd == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	switch (GraphicsGetWaitRegMemForm(cmd[0]))
+	{
+		case GraphicsWaitRegMemForm::ItWaitRegMem:
+			cmd[4] = static_cast<uint32_t>(reference);
+			return OK;
+		case GraphicsWaitRegMemForm::CustomWaitMem32:
+			cmd[5] = static_cast<uint32_t>(reference);
+			return OK;
+		case GraphicsWaitRegMemForm::CustomWaitMem64:
+			cmd[5] = static_cast<uint32_t>(reference & 0xffffffffu);
+			cmd[6] = static_cast<uint32_t>((reference >> 32u) & 0xffffffffu);
+			return OK;
+		default: return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+}
+
+// sceAgcWaitRegMemPatchMask (NID hXAnLgDHCoI).
+int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchMask(uint32_t* cmd, uint64_t mask)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " mask = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), mask);
+
+	if (cmd == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	switch (GraphicsGetWaitRegMemForm(cmd[0]))
+	{
+		case GraphicsWaitRegMemForm::ItWaitRegMem:
+			cmd[5] = static_cast<uint32_t>(mask);
+			return OK;
+		case GraphicsWaitRegMemForm::CustomWaitMem32:
+			cmd[3] = static_cast<uint32_t>(mask);
+			return OK;
+		case GraphicsWaitRegMemForm::CustomWaitMem64:
+			cmd[3] = static_cast<uint32_t>(mask & 0xffffffffu);
+			cmd[4] = static_cast<uint32_t>((mask >> 32u) & 0xffffffffu);
+			return OK;
+		default: return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+}
+
+// sceAgcQueueEndOfPipeActionPatchGcrCntl (NID J8YCgfKAMQs).
+int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchGcrCntl(uint32_t* cmd, uint32_t gcr_cntl)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " gcr_cntl = 0x%04" PRIx32 "\n", reinterpret_cast<uint64_t>(cmd), gcr_cntl & 0xffffu);
+
+	if (cmd == nullptr || !GraphicsIsAgcReleaseMemPacket(cmd[0]))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	cmd[2] = GraphicsPatchUInt32Bits(cmd[2], 0x0000ffffu, gcr_cntl);
+	return OK;
+}
+
+// sceAgcQueueEndOfPipeActionPatchData (NID MlEw1feXcjg).
+int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchData(uint32_t* cmd, uint64_t data)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " data = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), data);
+
+	if (cmd == nullptr || !GraphicsIsAgcReleaseMemPacket(cmd[0]))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	cmd[5] = static_cast<uint32_t>(data & 0xffffffffu);
+	cmd[6] = static_cast<uint32_t>((data >> 32u) & 0xffffffffu);
+	return OK;
+}
+
+// sceAgcQueueEndOfPipeActionPatchType (NID T9fjQIINoeE).
+int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchType(uint32_t* cmd, uint32_t data_selection)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " data_selection = %" PRIu32 "\n", reinterpret_cast<uint64_t>(cmd), data_selection);
+
+	if (cmd == nullptr || data_selection > 3u || !GraphicsIsAgcReleaseMemPacket(cmd[0]))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	cmd[2] = GraphicsPatchUInt32Bits(cmd[2], 0x00ff0000u, data_selection << 16u);
+	return OK;
+}
+
+static bool GraphicsResolveWriteDataPatchArgs(uint64_t first, uint64_t second, uint32_t** cmd_out, uint32_t* value_out)
+{
+	auto* first_cmd  = reinterpret_cast<uint32_t*>(first);
+	auto* second_cmd = reinterpret_cast<uint32_t*>(second);
+	if (first_cmd != nullptr && GraphicsIsWriteDataPacket(first_cmd[0]))
+	{
+		*cmd_out   = first_cmd;
+		*value_out = static_cast<uint32_t>(second);
+		return true;
+	}
+	if (second_cmd != nullptr && GraphicsIsWriteDataPacket(second_cmd[0]))
+	{
+		*cmd_out   = second_cmd;
+		*value_out = static_cast<uint32_t>(first);
+		return true;
+	}
+	return false;
+}
+
+static int GraphicsWriteDataPatchControlByte(uint32_t* cmd, uint32_t value, uint32_t byte_index)
+{
+	if (cmd == nullptr || !GraphicsIsWriteDataPacket(cmd[0]) || byte_index > 3u)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	const uint32_t shift = byte_index * 8u;
+	cmd[1]               = GraphicsPatchUInt32Bits(cmd[1], 0xffu << shift, (value & 0xffu) << shift);
+	return OK;
+}
+
+// sceAgcWriteDataPatchSetCachePolicy (NID eAy8eGNsCuU).
+int KYTY_SYSV_ABI GraphicsWriteDataPatchSetCachePolicy(uint32_t* cmd, uintptr_t arg1)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " arg1 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd),
+	       static_cast<uint64_t>(arg1));
+
+	uint32_t* packet = nullptr;
+	uint32_t  value  = 0;
+	if (!GraphicsResolveWriteDataPatchArgs(reinterpret_cast<uint64_t>(cmd), static_cast<uint64_t>(arg1), &packet, &value))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	return GraphicsWriteDataPatchControlByte(packet, value, 1u);
+}
+
+// sceAgcWriteDataPatchSetDst (NID tmy-+rBpspY).
+int KYTY_SYSV_ABI GraphicsWriteDataPatchSetDst(uint32_t* cmd, uintptr_t arg1)
+{
+	PRINT_NAME();
+	printf("\t cmd = 0x%016" PRIx64 " arg1 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd),
+	       static_cast<uint64_t>(arg1));
+
+	uint32_t* packet = nullptr;
+	uint32_t  value  = 0;
+	if (!GraphicsResolveWriteDataPatchArgs(reinterpret_cast<uint64_t>(cmd), static_cast<uint64_t>(arg1), &packet, &value))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	return GraphicsWriteDataPatchControlByte(packet, value, 0u);
+}
+
+// sceAgcDcbStallCommandBufferParserGetSize (NID +u6dKSLWM2o).
+uint32_t KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParserGetSize()
+{
+	return 2u * sizeof(uint32_t);
+}
+
+// sceAgcDcbDmaDataGetSize (NID 2ccJz9LQI+w).
+uint32_t KYTY_SYSV_ABI GraphicsDcbDmaDataGetSize()
+{
+	return 8u * sizeof(uint32_t);
+}
 
 int KYTY_SYSV_ABI GraphicsAgcDriverUnknownKRzWekV120()
 {
@@ -2779,7 +2980,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoWithBase(CommandBuffer* buf, uin
 	return GraphicsDcbDrawIndexAuto(buf, index_count, modifier);
 }
 
-// sceAgcDcbDrawIndexOffset — NID B+aG9DUnTKA (sharpemu MIT / aerolib name).
+// sceAgcDcbDrawIndexOffset — NID B+aG9DUnTKA.
 // Packet layout (5 DW): header, index_count, index_offset, index_count, flags&0xE0000001.
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t index_offset, uint32_t index_count, uint32_t flags)
 {
@@ -3478,6 +3679,11 @@ LIB_NAME("Graphics5Driver", "Graphics5Driver");
 
 static Core::Mutex     g_resource_registration_mutex;
 static Vector<uint32_t> g_registered_resources;
+static std::atomic<uint64_t> g_tf_ring_base {0};
+static std::atomic<uint32_t> g_tf_ring_size {0};
+static std::atomic<uint64_t> g_hs_offchip_value0 {0};
+static std::atomic<uint64_t> g_hs_offchip_value1 {0};
+static std::atomic<uint64_t> g_hs_offchip_value2 {0};
 
 struct Packet
 {
@@ -3623,6 +3829,28 @@ int KYTY_SYSV_ABI GraphicsDriverUnregisterResource(uint32_t resource)
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	g_registered_resources.RemoveAt(index);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverSetTFRing(const volatile void* base, uint32_t size)
+{
+	PRINT_NAME();
+	g_tf_ring_base.store(reinterpret_cast<uint64_t>(base), std::memory_order_release);
+	g_tf_ring_size.store(size, std::memory_order_release);
+	printf("\t base = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
+	printf("\t size = 0x%08" PRIx32 "\n", size);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverSetHsOffchipParam(uint64_t value0, uint64_t value1, uint64_t value2)
+{
+	PRINT_NAME();
+	g_hs_offchip_value0.store(value0, std::memory_order_release);
+	g_hs_offchip_value1.store(value1, std::memory_order_release);
+	g_hs_offchip_value2.store(value2, std::memory_order_release);
+	printf("\t value0 = 0x%016" PRIx64 "\n", value0);
+	printf("\t value1 = 0x%016" PRIx64 "\n", value1);
+	printf("\t value2 = 0x%016" PRIx64 "\n", value2);
 	return OK;
 }
 

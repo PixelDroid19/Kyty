@@ -32,6 +32,12 @@ GpuSubmissionResult GpuSubmissionCoordinator::AddCompletionAction(SubmissionId i
 	return m_tracker.AddCompletionAction(id, phase, token);
 }
 
+GpuSubmissionResult GpuSubmissionCoordinator::RegisterProducer(SubmissionId id, uint64_t address, uint32_t size_bytes, uint64_t value)
+{
+	Core::LockGuard lock(m_mutex);
+	return m_tracker.RegisterProducer(id, address, size_bytes, value);
+}
+
 GpuSubmissionResult GpuSubmissionCoordinator::MarkSubmitted(SubmissionId id)
 {
 	Core::LockGuard lock(m_mutex);
@@ -69,6 +75,13 @@ GpuSubmissionResult GpuSubmissionCoordinator::GetState(SubmissionId id, GpuSubmi
 {
 	Core::LockGuard lock(m_mutex);
 	return m_tracker.GetState(id, state);
+}
+
+GpuSubmissionResult GpuSubmissionCoordinator::FindPendingProducer(uint64_t address, uint32_t size_bytes, uint64_t reference, uint64_t mask,
+                                                                  SubmissionDependency* dependency)
+{
+	Core::LockGuard lock(m_mutex);
+	return m_tracker.FindPendingProducer(address, size_bytes, reference, mask, dependency);
 }
 
 } // namespace Kyty::Libs::Graphics

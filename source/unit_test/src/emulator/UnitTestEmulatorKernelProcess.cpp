@@ -12,9 +12,13 @@
 #include "Emulator/Log.h"
 #include "Kyty/UnitTest.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <future>
 #include <string>
+#include <thread>
 
 UT_BEGIN(EmulatorKernelProcess);
 
@@ -22,6 +26,14 @@ using namespace Libs;
 using namespace Libs::LibKernel::EventQueue;
 
 namespace {
+
+void CountDeletedEvent(KernelEqueue /*eq*/, KernelEqueueEvent* event)
+{
+	ASSERT_NE(event, nullptr);
+	auto* count = static_cast<std::atomic<uint32_t>*>(event->filter.data);
+	ASSERT_NE(count, nullptr);
+	count->fetch_add(1, std::memory_order_relaxed);
+}
 
 class ScopedUtcTimezone
 {
@@ -72,6 +84,22 @@ void EnsureKernelProcessSubsystems()
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 		Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
+	static bool pthread_initialized = false;
+	if (!pthread_initialized)
+	{
+		LibKernel::PthreadSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		pthread_initialized = true;
+	}
+}
+
+void* KYTY_SYSV_ABI HoldPthreadUntilReleased(void* arg)
+{
+	auto* release = static_cast<std::atomic_bool*>(arg);
+	while (!release->load(std::memory_order_acquire))
+	{
+		std::this_thread::yield();
+	}
+	return nullptr;
 }
 
 } // namespace
@@ -81,6 +109,48 @@ TEST(EmulatorKernelProcess, GuestProcessIdIsStable)
 	const int first = Posix::getpid();
 	EXPECT_GT(first, 0);
 	EXPECT_EQ(Posix::getpid(), first);
+}
+
+TEST(EmulatorKernelProcess, DeleteSemaphoreWakesBlockedWaiter)
+{
+	EnsureKernelProcessSubsystems();
+
+	LibKernel::Semaphore::KernelSema sem = nullptr;
+	ASSERT_EQ(LibKernel::Semaphore::KernelCreateSema(&sem, "delete-wait-test", 1, 0, 1, nullptr), OK);
+	ASSERT_NE(sem, nullptr);
+
+	auto waiter1 = std::async(std::launch::async, [sem] { return LibKernel::Semaphore::KernelWaitSema(sem, 1, nullptr); });
+	auto waiter2 = std::async(std::launch::async, [sem] { return LibKernel::Semaphore::KernelWaitSema(sem, 1, nullptr); });
+	ASSERT_EQ(waiter1.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+	ASSERT_EQ(waiter2.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+	ASSERT_EQ(LibKernel::Semaphore::KernelDeleteSema(sem), OK);
+	ASSERT_EQ(waiter1.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	ASSERT_EQ(waiter2.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(waiter1.get(), LibKernel::KERNEL_ERROR_EACCES);
+	EXPECT_EQ(waiter2.get(), LibKernel::KERNEL_ERROR_EACCES);
+	EXPECT_EQ(LibKernel::Semaphore::KernelWaitSema(sem, 1, nullptr), LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(LibKernel::Semaphore::KernelSignalSema(sem, 1), LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(LibKernel::Semaphore::KernelDeleteSema(sem), LibKernel::KERNEL_ERROR_ESRCH);
+}
+
+TEST(EmulatorKernelProcess, PthreadPriorityRoundTripsGuestValue)
+{
+	EnsureKernelProcessSubsystems();
+
+	std::atomic_bool             release = false;
+	LibKernel::Pthread           thread  = nullptr;
+	ASSERT_EQ(LibKernel::PthreadCreate(&thread, nullptr, HoldPthreadUntilReleased, &release, "priority-test"), OK);
+	ASSERT_NE(thread, nullptr);
+
+	const int set_result = LibKernel::PthreadSetprio(thread, 260);
+	int       priority   = -1;
+	const int get_result = LibKernel::PthreadGetprio(thread, &priority);
+
+	release.store(true, std::memory_order_release);
+	ASSERT_EQ(LibKernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_EQ(set_result, OK);
+	EXPECT_EQ(get_result, OK);
+	EXPECT_EQ(priority, 260);
 }
 
 // Retail non-devkit sceKernelGetGPI (NID 4oXYe9Xmk0Q) returns 0 without GPI state.
@@ -172,6 +242,134 @@ TEST(EmulatorKernelProcess, AddAmprEventRegistersAndTriggers)
 	EXPECT_EQ(KernelDeleteEqueue(eq), OK);
 }
 
+TEST(EmulatorKernelProcess, DeleteEqueueWaitsForOutstandingLifetimePins)
+{
+	EnsureKernelProcessSubsystems();
+
+	KernelEqueue eq = nullptr;
+	ASSERT_EQ(KernelCreateEqueue(&eq, "lifetime-pin-test"), OK);
+	auto pin = KernelAcquireEqueue(eq);
+	ASSERT_TRUE(pin);
+	const auto identity = pin.GetIdentity();
+
+	std::promise<void> delete_started;
+	std::promise<int>  delete_result;
+	auto               started = delete_started.get_future();
+	auto               result  = delete_result.get_future();
+	std::thread         deleter(
+        [&]
+        {
+	        delete_started.set_value();
+	        delete_result.set_value(KernelDeleteEqueue(eq));
+        });
+
+	ASSERT_EQ(started.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(result.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+	bool       closing  = false;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+		auto probe = KernelAcquireEqueue(identity);
+		if (!probe)
+		{
+			closing = true;
+			break;
+		}
+		probe.Reset();
+		std::this_thread::yield();
+	}
+	ASSERT_TRUE(closing);
+
+	pin.Reset();
+	ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(result.get(), OK);
+	EXPECT_FALSE(KernelAcquireEqueue(eq));
+	EXPECT_FALSE(KernelAcquireEqueue(identity));
+	KernelWaitEqueueClosed(identity);
+	deleter.join();
+}
+
+TEST(EmulatorKernelProcess, DeleteEqueueWakesInfiniteWaiter)
+{
+	EnsureKernelProcessSubsystems();
+
+	KernelEqueue eq = nullptr;
+	ASSERT_EQ(KernelCreateEqueue(&eq, "wait-close-test"), OK);
+
+	std::promise<void> waiter_started;
+	std::promise<int>  waiter_result;
+	auto               started = waiter_started.get_future();
+	auto               result  = waiter_result.get_future();
+	std::thread         waiter(
+        [&]
+        {
+	        KernelEvent event {};
+	        int         out = -1;
+	        waiter_started.set_value();
+	        waiter_result.set_value(KernelWaitEqueue(eq, &event, 1, &out, nullptr));
+        });
+
+	ASSERT_EQ(started.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(result.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+	ASSERT_EQ(KernelDeleteEqueue(eq), OK);
+	ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(result.get(), LibKernel::KERNEL_ERROR_EBADF);
+	waiter.join();
+}
+
+TEST(EmulatorKernelProcess, ReplacingEventRunsEachDeleteCallbackExactlyOnce)
+{
+	EnsureKernelProcessSubsystems();
+
+	KernelEqueue eq = nullptr;
+	ASSERT_EQ(KernelCreateEqueue(&eq, "replace-callback-test"), OK);
+
+	std::atomic<uint32_t> first_deleted {0};
+	std::atomic<uint32_t> second_deleted {0};
+	KernelEqueueEvent     first {};
+	first.event.ident              = 7;
+	first.event.filter             = KERNEL_EVFILT_AMPR;
+	first.filter.delete_event_func = CountDeletedEvent;
+	first.filter.data              = &first_deleted;
+	KernelEqueueEvent second        = first;
+	second.filter.data              = &second_deleted;
+
+	ASSERT_EQ(KernelAddEvent(eq, first), OK);
+	ASSERT_EQ(KernelAddEvent(eq, second), OK);
+	EXPECT_EQ(first_deleted.load(std::memory_order_relaxed), 1u);
+	EXPECT_EQ(second_deleted.load(std::memory_order_relaxed), 0u);
+
+	ASSERT_EQ(KernelDeleteEqueue(eq), OK);
+	EXPECT_EQ(first_deleted.load(std::memory_order_relaxed), 1u);
+	EXPECT_EQ(second_deleted.load(std::memory_order_relaxed), 1u);
+}
+
+TEST(EmulatorKernelProcess, ResolvesKernelGetEventId)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"mJ7aghmgvfc";
+	query.library              = U"libkernel";
+	query.library_version      = 1;
+	query.module               = U"libkernel";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* rec            = symbols.Find(query);
+	ASSERT_NE(rec, nullptr);
+
+	using get_event_id_fn_t = uintptr_t (*)(const KernelEvent*);
+	auto* get_event_id      = reinterpret_cast<get_event_id_fn_t>(static_cast<uintptr_t>(rec->vaddr));
+	ASSERT_NE(get_event_id, nullptr);
+
+	KernelEvent ev {};
+	ev.ident = 0x120a8;
+	EXPECT_EQ(get_event_id(&ev), static_cast<uintptr_t>(0x120a8));
+	EXPECT_EQ(get_event_id(nullptr), static_cast<uintptr_t>(0));
+}
+
 TEST(EmulatorKernelProcess, AprSubmitCommandBufferRejectsNullAndAckNonNull)
 {
 	EnsureKernelProcessSubsystems();
@@ -179,6 +377,76 @@ TEST(EmulatorKernelProcess, AprSubmitCommandBufferRejectsNullAndAckNonNull)
 	uint64_t fake_cmd = 0x1111;
 	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(nullptr, 1, nullptr, 2, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
 	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(&fake_cmd, 1, &fake_cmd, 2, &fake_cmd), OK);
+}
+
+TEST(EmulatorKernelProcess, AprSubmitUsesSubmitIdentForDeferredCompletion)
+{
+	EnsureKernelProcessSubsystems();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libAmpr_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"8aI7R7WaOlc";
+	query.library              = U"Ampr";
+	query.library_version      = 1;
+	query.module               = U"Ampr";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* ctor_rec       = symbols.Find(query);
+	ASSERT_NE(ctor_rec, nullptr);
+
+	query.name            = U"o67gODLFpls";
+	const auto* event_rec = symbols.Find(query);
+	ASSERT_NE(event_rec, nullptr);
+
+	query.name            = U"baQO9ez2gL4";
+	const auto* reset_rec = symbols.Find(query);
+	ASSERT_NE(reset_rec, nullptr);
+
+	using ctor_fn_t   = uint64_t (*)(void*, void*, uint64_t);
+	using event_fn_t  = int (*)(void*, void*, uint64_t, uint64_t, uint64_t);
+	using reset_fn_t  = int (*)(void*);
+	auto* ctor        = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(ctor_rec->vaddr));
+	auto* add_event   = reinterpret_cast<event_fn_t>(static_cast<uintptr_t>(event_rec->vaddr));
+	auto* reset       = reinterpret_cast<reset_fn_t>(static_cast<uintptr_t>(reset_rec->vaddr));
+
+	alignas(8) uint8_t cmd[0x28] {};
+	alignas(8) uint8_t stream[0x80] {};
+	ASSERT_EQ(ctor(cmd, stream, sizeof(stream)), reinterpret_cast<uint64_t>(cmd));
+
+	KernelEqueue eq = nullptr;
+	ASSERT_EQ(KernelCreateEqueue(&eq, "ampr-submit-test"), OK);
+	int udata_probe = 0;
+	ASSERT_EQ(KernelAddAmprEvent(eq, 0, 0, /*ident=*/2, &udata_probe), OK);
+
+	ASSERT_EQ(add_event(cmd, eq, /*builder_ident=*/0, /*completion_token=*/0x42, /*user_data=*/0), OK);
+
+	KernelEvent ev {};
+	int         out  = 0;
+	LibKernel::KernelUseconds zero = 0;
+	EXPECT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
+
+	ASSERT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr), OK);
+	ASSERT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), OK);
+	EXPECT_EQ(out, 1);
+	EXPECT_EQ(ev.ident, static_cast<uintptr_t>(2));
+	EXPECT_EQ(ev.filter, KERNEL_EVFILT_AMPR);
+	EXPECT_EQ(ev.udata, &udata_probe);
+	EXPECT_EQ(ev.data, static_cast<intptr_t>(0x42));
+
+	ASSERT_EQ(add_event(cmd, eq, /*builder_ident=*/0, /*completion_token=*/0x43, /*user_data=*/0), OK);
+	ASSERT_EQ(reset(cmd), OK);
+	ASSERT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr), OK);
+	out = 0;
+	EXPECT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
+
+	ASSERT_EQ(add_event(cmd, eq, /*builder_ident=*/0, /*completion_token=*/0x44, /*user_data=*/0), OK);
+	ASSERT_EQ(KernelDeleteEqueue(eq), OK);
+	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr),
+	          LibKernel::KERNEL_ERROR_EBADF);
+	EXPECT_EQ(reset(cmd), OK);
 }
 
 TEST(EmulatorKernelProcess, AprSubmitGetIdAndWaitRoundTrip)
@@ -261,6 +529,25 @@ TEST(EmulatorKernelProcess, HostExtensionAliasMapsOdxToOdxb)
 	EXPECT_EQ(LibKernel::FileSystem::PreferHostExtensionAlias(dir + U"missing.odx"), dir + U"missing.odx");
 
 	Core::File::DeleteDirectories(dir);
+}
+
+TEST(EmulatorKernelProcess, OpenLinuxFileReportsTimestampsByDescriptor)
+{
+	const String path = U"/tmp/kyty_open_file_timestamp_test.bin";
+	Core::File::DeleteFile(path);
+
+	Core::File file;
+	ASSERT_TRUE(file.Create(path));
+	file.Write(U"timestamp");
+
+	Core::DateTime access;
+	Core::DateTime write;
+	file.GetLastAccessAndWriteTimeUTC(&access, &write);
+
+	EXPECT_FALSE(access.IsInvalid());
+	EXPECT_FALSE(write.IsInvalid());
+	file.Close();
+	Core::File::DeleteFile(path);
 }
 
 // Astro path builders open /app0/prein/... while package files live under /app0/data/prein/...
@@ -385,6 +672,18 @@ TEST(EmulatorKernelProcess, PosixPthreadDetachRejectsNull)
 	EXPECT_NE(Posix::pthread_detach(nullptr), OK);
 }
 
+TEST(EmulatorKernelProcess, PosixPthreadCondInitUsesGuestConditionLayout)
+{
+	EnsureKernelProcessSubsystems();
+	LibKernel::PthreadCondattr attr = nullptr;
+	ASSERT_EQ(LibKernel::PthreadCondattrInit(&attr), OK);
+	LibKernel::PthreadCond cond = nullptr;
+	EXPECT_EQ(Posix::pthread_cond_init(&cond, &attr), OK);
+	ASSERT_NE(cond, nullptr);
+	EXPECT_EQ(Posix::pthread_cond_destroy(&cond), OK);
+	EXPECT_EQ(LibKernel::PthreadCondattrDestroy(&attr), OK);
+}
+
 // Gen5 memory helpers: null size rejects; range name is success no-op.
 TEST(EmulatorKernelProcess, ConfiguredFlexibleAndRangeNameBoundaries)
 {
@@ -423,8 +722,11 @@ TEST(EmulatorKernelProcess, ResolvesGen5PthreadSpecificNids)
 	EXPECT_TRUE(resolve(u"+BzXYkqYeLE"));
 	EXPECT_TRUE(resolve(u"eoht7mQOCmo"));
 	EXPECT_TRUE(resolve(u"rVjRvHJ0X6c"));
+	EXPECT_TRUE(resolve(u"yDBwVAolDgg"));
 	EXPECT_TRUE(resolve(u"XD3mDeybCnk"));
 	EXPECT_TRUE(resolve(u"mkgXxsoxWHg"));
+	EXPECT_TRUE(resolve(u"0TyVk4MSLt0"));
+	EXPECT_TRUE(resolve(u"RXXqi4CtF8w"));
 }
 
 TEST(EmulatorKernelProcess, ClearVirtualRangeNameSucceeds)

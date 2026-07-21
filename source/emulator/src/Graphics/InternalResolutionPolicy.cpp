@@ -5,6 +5,27 @@
 
 namespace Kyty::Libs::Graphics {
 
+const char* ResolutionNativeReasonName(ResolutionNativeReason reason)
+{
+	switch (reason)
+	{
+		case ResolutionNativeReason::None: return "none";
+		case ResolutionNativeReason::PolicyDisabled: return "policy_disabled";
+		case ResolutionNativeReason::ResourceKind: return "resource_kind";
+		case ResolutionNativeReason::Compressed: return "compressed";
+		case ResolutionNativeReason::UnsupportedDimension: return "unsupported_dimension";
+		case ResolutionNativeReason::Mipmapped: return "mipmapped";
+		case ResolutionNativeReason::Multisampled: return "multisampled";
+		case ResolutionNativeReason::ShaderWritable: return "shader_writable";
+		case ResolutionNativeReason::CpuTransfer: return "cpu_transfer";
+		case ResolutionNativeReason::AmbiguousAlias: return "ambiguous_alias";
+		case ResolutionNativeReason::IdentityScale: return "identity_scale";
+		case ResolutionNativeReason::InvalidExtent: return "invalid_extent";
+		case ResolutionNativeReason::ArithmeticOverflow: return "arithmetic_overflow";
+	}
+	return "unknown";
+}
+
 namespace {
 
 [[nodiscard]] bool ScaleFloor(uint32_t value, ResolutionScale scale, uint32_t* result)

@@ -184,6 +184,18 @@ static volatile sig_atomic_t g_signal_skip_ud2  = 0;
 static volatile sig_atomic_t g_signal_fault_log = 0;
 static volatile sig_atomic_t g_signal_extrq_reported = 0;
 
+// Guest ELF images are placed at 0x900000000 + n*0x10000000 (see RuntimeLinker
+// CODE_BASE_OFFSET / CODE_BASE_INCR). Adjacent PRX loads routinely land at
+// 0x980000000 and beyond; the old 0x900..0x920 window missed those modules, so
+// SIGILL/ud2 diagnostics never dumped bytes and KYTY_SKIP_UD2 never applied.
+static constexpr uint64_t kGuestCodeAddrBegin = 0x900000000ull;
+static constexpr uint64_t kGuestCodeAddrEnd   = 0xB00000000ull;
+
+static inline bool IsGuestCodeAddress(uint64_t rip) noexcept
+{
+	return rip >= kGuestCodeAddrBegin && rip < kGuestCodeAddrEnd;
+}
+
 static void LoadSignalDiagnosticsConfigFromEnvironment() noexcept
 {
 	const auto config = MakeSignalDiagnosticsConfig(getenv("KYTY_SKIP_UD2"), getenv("KYTY_FAULT_LOG"));
@@ -393,7 +405,7 @@ static void kyty_sigprof_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontex
 	static volatile sig_atomic_t n = 0;
 	if (n++ < 200)
 	{
-		const char* tag = (rip >= 0x900000000ull && rip < 0x920000000ull) ? "PROF-GUEST"
+		const char* tag = IsGuestCodeAddress(rip)                              ? "PROF-GUEST"
 		                  : (rip >= 0x100000000ull && rip < 0x110000000ull) ? "PROF-FC"
 		                                                                    : "PROF-OTHER";
 		sigsafe_fault(tag, rip, 0);
@@ -424,7 +436,7 @@ static void kyty_sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontex
 		return;
 	}
 	g_trace_total--;
-	if (rip >= 0x900000000ull && rip < 0x920000000ull) // any guest module
+	if (IsGuestCodeAddress(rip)) // any guest module
 	{
 		sigsafe_fault("TRACE", rip, 0);
 		g_trace_guest--;
@@ -543,7 +555,7 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 	{
 		uint64_t rip = uc_get_rip(uc);
 	#if defined(__x86_64__) || defined(__i386__)
-		if (rip >= 0x900000000ull && rip < 0x920000000ull)
+		if (IsGuestCodeAddress(rip))
 		{
 		#if defined(__APPLE__)
 			if (try_emulate_guest_extrq(uc))
@@ -567,7 +579,7 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 		// debug-raise codes are soft: the kernel logs and RESUMES past the trap. When
 		// KYTY_SKIP_UD2 is set, emulate that: skip the ud2 in guest code and continue,
 		// to determine whether the raised condition is actually recoverable.
-		if (g_signal_skip_ud2 != 0 && rip >= 0x900000000ull && rip < 0x920000000ull)
+		if (g_signal_skip_ud2 != 0 && IsGuestCodeAddress(rip))
 		{
 			const auto* code = reinterpret_cast<const uint8_t*>(rip);
 			if (code[0] == 0x0F && code[1] == 0x0B)
@@ -626,6 +638,25 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 			sigsafe_fault("  rax/rbx", uc_get_rax(uc), uc_get_rbx(uc));
 			sigsafe_fault("  rcx/rdx", uc_get_rcx(uc), uc_get_rdx(uc));
 			sigsafe_fault("  rbp/rsp", uc_get_rbp(uc), uc_get_rsp(uc));
+			sigsafe_fault("  r8/r9", uc_get_r8(uc), uc_get_r9(uc));
+			sigsafe_fault("  r10/r11", uc_get_r10(uc), uc_get_r11(uc));
+			sigsafe_fault("  r12/r13", uc_get_r12(uc), uc_get_r13(uc));
+			sigsafe_fault("  r14/r15", uc_get_r14(uc), uc_get_r15(uc));
+			const uint64_t rbp = uc_get_rbp(uc);
+			if (rbp >= 0x1000ull)
+			{
+				const auto* frame = reinterpret_cast<const uint64_t*>(rbp);
+				for (int depth = 0; depth < 4; depth++)
+				{
+					const uint64_t next = frame[0];
+					sigsafe_fault("  frame", next, frame[1]);
+					if (next <= reinterpret_cast<uint64_t>(frame) || next - reinterpret_cast<uint64_t>(frame) > 0x10000ull)
+					{
+						break;
+					}
+					frame = reinterpret_cast<const uint64_t*>(next);
+				}
+			}
 			sigsafe_fault("  tid", static_cast<uint64_t>(host_tid()), 0);
 			sigsafe_fault("  anchor", reinterpret_cast<uint64_t>(&kyty_posix_signal_handler), 0);
 			// Captured Gen5 RBP walkers do mov (%rdx),%rdx; mov 0x8(%rdx),… and
@@ -926,6 +957,32 @@ bool MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_o
 	return sys_virtual_map_shared_fixed(backing->handle, address, backing_offset, size, mode);
 }
 
+bool MapSharedFixedReplacingOwnedReservation(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
+                                             Mode mode)
+{
+	if (address == 0 || !shared_range_is_valid(backing, backing_offset, size))
+	{
+		return false;
+	}
+	return sys_virtual_map_shared_fixed_replacing_owned_reservation(backing->handle, address, backing_offset, size, mode);
+}
+
+bool SupportsSharedFixedOwnedReservationReplacement()
+{
+	return sys_virtual_supports_shared_fixed_owned_reservation_replacement();
+}
+
+uint64_t MapSharedFixedOrRelocated(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
+                                   uint64_t alignment)
+{
+	if (address == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0 ||
+	    !shared_range_is_valid(backing, backing_offset, size))
+	{
+		return 0;
+	}
+	return sys_virtual_map_shared_fixed_or_relocated(backing->handle, address, backing_offset, size, mode, alignment);
+}
+
 bool Free(uint64_t address)
 {
 	return sys_virtual_free(address);
@@ -934,6 +991,27 @@ bool Free(uint64_t address)
 bool Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode)
 {
 	return sys_virtual_protect(address, size, mode, old_mode);
+}
+
+ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor,
+	                                         void* context) noexcept
+{
+	return sys_virtual_remove_write_and_capture(address, size, visitor, context);
+}
+
+bool RemoveWriteFromProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	return sys_virtual_remove_write_from_protection(address, size, restore_token);
+}
+
+bool RestoreProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	return sys_virtual_restore_protection(address, size, restore_token);
+}
+
+bool RestoreProtectionSignalSafe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	return sys_virtual_restore_protection_signal_safe(address, size, restore_token);
 }
 
 bool ProtectWriteSignalSafe(uint64_t address, uint64_t size)

@@ -168,7 +168,8 @@ TEST(EmulatorGpuSubmissionTracker, NewerProducerShadowsOlderMatchingValue)
 	ASSERT_EQ(tracker.RegisterProducer(second, 0x1000, 4, 2), GpuSubmissionResult::Success);
 	ASSERT_EQ(tracker.MarkSubmitted(second), GpuSubmissionResult::Success);
 
-	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 4, 1, UINT32_MAX, &dependency), GpuSubmissionResult::ProducerNotFound);
+	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 4, 1, UINT32_MAX, &dependency), GpuSubmissionResult::ProducerValueMismatch);
+	EXPECT_EQ(dependency.producer, second);
 	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 4, 2, UINT32_MAX, &dependency), GpuSubmissionResult::Success);
 	EXPECT_EQ(dependency.producer, second);
 }
@@ -187,12 +188,15 @@ TEST(EmulatorGpuSubmissionTracker, MatchesOnlyMaskedBytesCoveredByProducerRange)
 	const uint64_t covered_ref  = 0xaabbccdd00000000ull;
 	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 8, covered_ref, covered_mask, &dependency), GpuSubmissionResult::Success);
 	EXPECT_EQ(dependency.producer, id);
-	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 8, covered_ref, UINT64_MAX, &dependency), GpuSubmissionResult::ProducerNotFound);
+	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 8, covered_ref, UINT64_MAX, &dependency),
+	          GpuSubmissionResult::ProducerValueMismatch);
+	EXPECT_EQ(dependency.producer, id);
 	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 8, 0x1122334400000000ull, covered_mask, &dependency),
-	          GpuSubmissionResult::ProducerNotFound);
+	          GpuSubmissionResult::ProducerValueMismatch);
+	EXPECT_EQ(dependency.producer, id);
 }
 
-TEST(EmulatorGpuSubmissionTracker, CompletionRemovesOnlyItsPendingProducers)
+TEST(EmulatorGpuSubmissionTracker, CompletionKeepsProducerUntilGuestPublicationRetiresIt)
 {
 	GpuSubmissionTracker tracker;
 	SubmissionId         first;
@@ -208,7 +212,13 @@ TEST(EmulatorGpuSubmissionTracker, CompletionRemovesOnlyItsPendingProducers)
 
 	RecordingSink sink;
 	ASSERT_EQ(tracker.MarkCompleted(second, &sink), GpuSubmissionResult::Success);
-	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 4, 2, UINT32_MAX, &dependency), GpuSubmissionResult::ProducerNotFound);
+	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 4, 2, UINT32_MAX, &dependency), GpuSubmissionResult::Success);
+	EXPECT_EQ(dependency.producer, second);
+	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 4, 1, UINT32_MAX, &dependency),
+	          GpuSubmissionResult::ProducerValueMismatch);
+	EXPECT_EQ(dependency.producer, second);
+
+	ASSERT_EQ(tracker.RetireCompleted(second), GpuSubmissionResult::Success);
 	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 4, 1, UINT32_MAX, &dependency), GpuSubmissionResult::Success);
 	EXPECT_EQ(dependency.producer, first);
 }
