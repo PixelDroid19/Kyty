@@ -578,6 +578,169 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	EXPECT_EQ(json.find("PPSA"), std::string::npos);
 }
 
+TEST(AgentTools, GpuMemorySlowCreateRecordsOnlyBoundedDetailedEvents)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	DebugStatsGpuMemorySlowCreateRecord detail {};
+	detail.requested_bytes        = 114402412;
+	detail.range_count            = 2;
+	detail.backing_lock_wait_ns   = 101;
+	detail.registry_lock_wait_ns  = 102;
+	detail.classification_ns      = 103;
+	detail.overlap_candidates     = 4;
+	detail.overlap_relation_mask  = 5;
+	detail.reclaimed_objects      = 6;
+	detail.create_from_objects    = true;
+	detail.hash_calls             = 7;
+	detail.hash_bytes             = 8;
+	detail.hash_ns                = 109;
+	detail.vulkan_allocate_calls  = 9;
+	detail.vulkan_allocate_ns     = 110;
+	detail.vulkan_bind_calls      = 10;
+	detail.vulkan_bind_ns         = 111;
+	detail.create_func_calls      = 11;
+	detail.create_func_ns         = 112;
+	detail.update_func_calls      = 12;
+	detail.update_func_ns         = 113;
+	detail.dirty_register_ns      = 115;
+	detail.dirty_prepare_ns       = 116;
+	detail.upload_calls           = 13;
+	detail.upload_bytes           = 14;
+	detail.upload_ns              = 114;
+
+	DebugStatsRecordGpuMemoryCreate(6, DebugStatsGpuMemoryCreateOutcome::NewLinked,
+	                                kDebugStatsGpuMemorySlowCreateThresholdNs, &detail);
+	EXPECT_EQ(DebugStatsGetPerformanceSnapshot(false).gpu_memory_slow_creates.size, 0u);
+
+	DebugStatsRecordGpuMemoryCreate(6, DebugStatsGpuMemoryCreateOutcome::NewLinked,
+	                                kDebugStatsGpuMemorySlowCreateThresholdNs + 1u, &detail);
+	const auto snapshot = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_EQ(snapshot.gpu_memory_slow_creates.size, 1u);
+	EXPECT_EQ(snapshot.gpu_memory_slow_creates.capacity, kDebugStatsGpuMemorySlowCreateCapacity);
+	EXPECT_EQ(snapshot.gpu_memory_slow_creates.dropped, 0u);
+	const auto& record = snapshot.gpu_memory_slow_creates.records[0];
+	EXPECT_EQ(record.seq, 1u);
+	EXPECT_EQ(record.duration_us, 5001u);
+	EXPECT_EQ(record.type_index, 6u);
+	EXPECT_EQ(record.outcome, DebugStatsGpuMemoryCreateOutcome::NewLinked);
+	EXPECT_EQ(record.requested_bytes, detail.requested_bytes);
+	EXPECT_EQ(record.range_count, detail.range_count);
+	EXPECT_EQ(record.backing_lock_wait_ns, detail.backing_lock_wait_ns);
+	EXPECT_EQ(record.registry_lock_wait_ns, detail.registry_lock_wait_ns);
+	EXPECT_EQ(record.classification_ns, detail.classification_ns);
+	EXPECT_EQ(record.overlap_candidates, detail.overlap_candidates);
+	EXPECT_EQ(record.overlap_relation_mask, detail.overlap_relation_mask);
+	EXPECT_EQ(record.reclaimed_objects, detail.reclaimed_objects);
+	EXPECT_EQ(record.create_from_objects, detail.create_from_objects);
+	EXPECT_EQ(record.hash_calls, detail.hash_calls);
+	EXPECT_EQ(record.hash_bytes, detail.hash_bytes);
+	EXPECT_EQ(record.hash_ns, detail.hash_ns);
+	EXPECT_EQ(record.vulkan_allocate_calls, detail.vulkan_allocate_calls);
+	EXPECT_EQ(record.vulkan_allocate_ns, detail.vulkan_allocate_ns);
+	EXPECT_EQ(record.vulkan_bind_calls, detail.vulkan_bind_calls);
+	EXPECT_EQ(record.vulkan_bind_ns, detail.vulkan_bind_ns);
+	EXPECT_EQ(record.create_func_calls, detail.create_func_calls);
+	EXPECT_EQ(record.create_func_ns, detail.create_func_ns);
+	EXPECT_EQ(record.update_func_calls, detail.update_func_calls);
+	EXPECT_EQ(record.update_func_ns, detail.update_func_ns);
+	EXPECT_EQ(record.dirty_register_ns, detail.dirty_register_ns);
+	EXPECT_EQ(record.dirty_prepare_ns, detail.dirty_prepare_ns);
+	EXPECT_EQ(record.upload_calls, detail.upload_calls);
+	EXPECT_EQ(record.upload_bytes, detail.upload_bytes);
+	EXPECT_EQ(record.upload_ns, detail.upload_ns);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, GpuMemorySlowCreateRingKeepsNewestAndResetsItsWindow)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	for (uint64_t i = 0; i < kDebugStatsGpuMemorySlowCreateCapacity + 3u; ++i)
+	{
+		DebugStatsGpuMemorySlowCreateRecord detail {};
+		detail.requested_bytes = i + 1u;
+		DebugStatsRecordGpuMemoryCreate(4, DebugStatsGpuMemoryCreateOutcome::FastReuse,
+		                                kDebugStatsGpuMemorySlowCreateThresholdNs + i + 1u, &detail);
+	}
+
+	const auto before_reset = DebugStatsGetPerformanceSnapshot(true);
+	ASSERT_EQ(before_reset.gpu_memory_slow_creates.size, kDebugStatsGpuMemorySlowCreateCapacity);
+	EXPECT_EQ(before_reset.gpu_memory_slow_creates.dropped, 3u);
+	EXPECT_EQ(before_reset.gpu_memory_slow_creates.records.front().seq, 4u);
+	EXPECT_EQ(before_reset.gpu_memory_slow_creates.records.front().requested_bytes, 4u);
+	EXPECT_EQ(before_reset.gpu_memory_slow_creates.records.back().seq, kDebugStatsGpuMemorySlowCreateCapacity + 3u);
+	EXPECT_EQ(DebugStatsGetPerformanceSnapshot(false).gpu_memory_slow_creates.size, 0u);
+	DebugStatsShutdown();
+}
+
+TEST(AgentTools, GpuMemorySlowCreateJsonIsBoundedAndAnonymous)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsPerformanceSnapshot snapshot {};
+	snapshot.gpu_memory_slow_creates.capacity = 999;
+	snapshot.gpu_memory_slow_creates.size = kDebugStatsGpuMemorySlowCreateCapacity + 10u;
+	auto& record                = snapshot.gpu_memory_slow_creates.records[0];
+	record.seq                  = 7;
+	record.duration_us          = 8000;
+	record.type_index           = 6;
+	record.outcome              = DebugStatsGpuMemoryCreateOutcome::NewLinked;
+	record.requested_bytes      = 114402412;
+	record.range_count          = 2;
+	record.classification_ns    = 103;
+	record.create_func_calls    = 1;
+	record.create_func_ns       = 104;
+	record.upload_calls         = 1;
+	record.upload_bytes         = 114402412;
+	record.upload_ns            = 105;
+
+	std::string json;
+	AppendGpuMemoryPerformanceJson(snapshot, &json);
+	EXPECT_NE(json.find(R"("slow_creates":{"capacity":64,"size":64)"), std::string::npos);
+	EXPECT_NE(json.find(R"("seq":7,"duration_us":8000,"type":"texture","outcome":"new_linked")"),
+	          std::string::npos);
+	EXPECT_NE(json.find(R"("requested_bytes":114402412,"range_count":2)"), std::string::npos);
+	EXPECT_EQ(json.find("vaddr"), std::string::npos);
+	EXPECT_EQ(json.find("address"), std::string::npos);
+	EXPECT_EQ(json.find("heap_id"), std::string::npos);
+	EXPECT_EQ(json.find("object_id"), std::string::npos);
+}
+
+TEST(AgentTools, GpuMemorySlowCreateNestedTraceRestoresItsParent)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	DebugStatsInit();
+	{
+		DebugStatsGpuMemoryCreateTrace parent(4, 100, 1);
+		{
+			DebugStatsGpuMemoryCreateTrace child(5, 200, 2);
+			DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::Upload, 11, 7);
+			child.Complete(DebugStatsGpuMemoryCreateOutcome::NewStandalone);
+			std::this_thread::sleep_for(std::chrono::milliseconds(6));
+		}
+		DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::Hash, 13, 9);
+		parent.Complete(DebugStatsGpuMemoryCreateOutcome::FastReuse);
+	}
+
+	const auto snapshot = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_EQ(snapshot.gpu_memory_slow_creates.size, 2u);
+	const auto& child  = snapshot.gpu_memory_slow_creates.records[0];
+	const auto& parent = snapshot.gpu_memory_slow_creates.records[1];
+	EXPECT_EQ(child.type_index, 5u);
+	EXPECT_EQ(child.upload_calls, 1u);
+	EXPECT_EQ(child.upload_bytes, 7u);
+	EXPECT_EQ(child.hash_calls, 0u);
+	EXPECT_EQ(parent.type_index, 4u);
+	EXPECT_EQ(parent.upload_calls, 0u);
+	EXPECT_EQ(parent.hash_calls, 1u);
+	EXPECT_EQ(parent.hash_bytes, 9u);
+	DebugStatsShutdown();
+}
+
 TEST(AgentTools, PerformanceSnapshotReportsPresentSourceAndDestination)
 {
 	using namespace Kyty::Libs::Graphics;
