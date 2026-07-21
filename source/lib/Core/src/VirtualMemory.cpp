@@ -993,6 +993,27 @@ bool Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode)
 	return sys_virtual_protect(address, size, mode, old_mode);
 }
 
+ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor,
+	                                         void* context) noexcept
+{
+	return sys_virtual_remove_write_and_capture(address, size, visitor, context);
+}
+
+bool RemoveWriteFromProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	return sys_virtual_remove_write_from_protection(address, size, restore_token);
+}
+
+bool RestoreProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	return sys_virtual_restore_protection(address, size, restore_token);
+}
+
+bool RestoreProtectionSignalSafe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	return sys_virtual_restore_protection_signal_safe(address, size, restore_token);
+}
+
 bool ProtectWriteSignalSafe(uint64_t address, uint64_t size)
 {
 	return sys_virtual_protect_write_signal_safe(address, size);

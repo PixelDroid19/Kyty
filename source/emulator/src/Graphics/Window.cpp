@@ -3311,9 +3311,12 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	UtilBlitImage(&buffer, blt_src_image, blt_dst_image);
 
-	const double now_seconds   = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_time_seconds : 0.0;
-	const double fps_now       = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_fps : 0.0;
-	const double frame_time_ms = (fps_now > 0.0) ? (1000.0 / fps_now) : 0.0;
+	const double now_seconds = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_time_seconds : 0.0;
+	const double fps_now     = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_fps : 0.0;
+	const double frame_time_ms = (g_window_ctx->game != nullptr)
+	                                 ? DebugStatsFrameIntervalMs(g_window_ctx->game->m_current_time_seconds,
+	                                                             g_window_ctx->game->m_previous_time_seconds)
+	                                 : 0.0;
 	const bool   hud_drew =
 	    DebugOverlayRecord(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, vk_buffer, now_seconds, fps_now, frame_time_ms);
 

@@ -44,40 +44,6 @@ constexpr uint32_t GpuMemoryStatsTypeIndex(GpuMemoryObjectType type)
 	return static_cast<uint32_t>(type) - static_cast<uint32_t>(GpuMemoryObjectType::VideoOutBuffer);
 }
 
-class GpuMemoryCreateStatsScope final
-{
-public:
-	explicit GpuMemoryCreateStatsScope(GpuMemoryObjectType type)
-	    : m_type_index(GpuMemoryStatsTypeIndex(type)), m_start(std::chrono::steady_clock::now())
-	{
-	}
-
-	~GpuMemoryCreateStatsScope()
-	{
-		if (m_completed)
-		{
-			const auto elapsed =
-			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
-			DebugStatsRecordGpuMemoryCreate(m_type_index, m_outcome, static_cast<uint64_t>(elapsed));
-		}
-	}
-
-	KYTY_CLASS_NO_COPY(GpuMemoryCreateStatsScope);
-
-	void Complete(DebugStatsGpuMemoryCreateOutcome outcome)
-	{
-		EXIT_IF(m_completed);
-		m_outcome   = outcome;
-		m_completed = true;
-	}
-
-private:
-	uint32_t                              m_type_index = 0;
-	std::chrono::steady_clock::time_point m_start;
-	DebugStatsGpuMemoryCreateOutcome      m_outcome = DebugStatsGpuMemoryCreateOutcome::FastReuse;
-	bool                                  m_completed = false;
-};
-
 constexpr uint64_t ObjectsRelation(GpuMemoryObjectType b, OverlapType relation, GpuMemoryObjectType a)
 {
 	return static_cast<uint64_t>(a) * static_cast<uint64_t>(GpuMemoryObjectType::Max) * static_cast<uint64_t>(OverlapType::Max) +
@@ -714,6 +680,7 @@ static uint64_t calc_hash(GpuMemoryObjectType type, const uint8_t* buf, uint64_t
 	const auto elapsed =
 	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
 	DebugStatsRecordGpuMemoryHash(GpuMemoryStatsTypeIndex(type), size, static_cast<uint64_t>(elapsed));
+	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::Hash, static_cast<uint64_t>(elapsed), size);
 	return result;
 }
 
@@ -785,7 +752,12 @@ void GpuMemory::VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vec
 	// global GpuMemory mutex across that work.
 	m_mutex.Unlock();
 	VulkanMemory new_memory {};
-	void* const  new_object = create_func(ctx, params, vaddr, size, vaddr_num, &new_memory);
+	const auto create_start = std::chrono::steady_clock::now();
+	void* const new_object  = create_func(ctx, params, vaddr, size, vaddr_num, &new_memory);
+	const auto create_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
+	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc,
+	                                               static_cast<uint64_t>(create_ns));
 	m_mutex.Lock();
 
 	auto& current_heap = m_heaps[heap_id];
@@ -961,7 +933,12 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			VersionBacking(ctx, heap_id, obj_id, destructors);
 		} else if (mutation == GpuMemoryMutationAction::UpdateInPlace)
 		{
+			const auto update_start = std::chrono::steady_clock::now();
 			o.update_func(ctx, o.params, o.object.obj, h.block.vaddr, h.block.size, h.block.vaddr_num);
+			const auto update_ns =
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - update_start).count();
+			DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::UpdateFunc,
+			                                               static_cast<uint64_t>(update_ns));
 		}
 
 		// VersionBacking may have released m_mutex, so reacquire the current
@@ -1284,9 +1261,38 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	EXIT_IF(info.type == GpuMemoryObjectType::Invalid);
 	EXIT_IF(vaddr == nullptr || size == nullptr || vaddr_num > VADDR_BLOCKS_MAX || vaddr_num <= 0);
 
-	GpuMemoryCreateStatsScope create_stats(info.type);
+	uint64_t requested_bytes = 0;
+	for (int vi = 0; vi < vaddr_num; ++vi)
+	{
+		requested_bytes = size[vi] > UINT64_MAX - requested_bytes ? UINT64_MAX : requested_bytes + size[vi];
+	}
+	DebugStatsGpuMemoryCreateTrace create_stats(GpuMemoryStatsTypeIndex(info.type), requested_bytes,
+	                                           static_cast<uint32_t>(vaddr_num));
+	const auto backing_lock_start = std::chrono::steady_clock::now();
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	const auto backing_lock_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - backing_lock_start).count();
+	create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::BackingLockWait, static_cast<uint64_t>(backing_lock_ns));
+	const auto registry_lock_start = std::chrono::steady_clock::now();
 	Core::LockGuard lock(m_mutex);
+	const auto registry_lock_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - registry_lock_start).count();
+	create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::RegistryLockWait, static_cast<uint64_t>(registry_lock_ns));
+	const auto classification_start = std::chrono::steady_clock::now();
+	bool       classification_done  = false;
+	const auto finish_classification = [&](uint32_t candidates = 0, uint32_t relation_mask = 0, uint32_t reclaimed = 0,
+	                                      bool from_objects = false)
+	{
+		if (classification_done)
+		{
+			return;
+		}
+		const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - classification_start)
+		                         .count();
+		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::Classification, static_cast<uint64_t>(elapsed));
+		create_stats.SetClassification(candidates, relation_mask, reclaimed, from_objects);
+		classification_done = true;
+	};
 	Vector<Destructor> destructors;
 
 	int heap_id = GetHeapId(vaddr[0], size[0]);
@@ -1351,6 +1357,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				o.in_use         = true;
 				o.check_hash     = info.check_hash;
 				RecordUse(&o, buffer);
+				finish_classification();
 				create_stats.Complete(DebugStatsGpuMemoryCreateOutcome::CachedReuse);
 				return o.object.obj;
 			}
@@ -1394,6 +1401,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 		if (h.scenario == GpuMemoryScenario::Common && info.Equal(o.params))
 		{
+			finish_classification();
 			Update(submit_id, ctx, heap_id, fast_id, &destructors);
 
 			o.use_num++;
@@ -1423,6 +1431,16 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			EXIT_IF(h.free);
 			auto& o = h.info;
 
+			uint32_t relation_mask = 0;
+			for (const auto& candidate: others)
+			{
+				const auto relation = static_cast<uint32_t>(candidate.relation);
+				if (relation < 32u)
+				{
+					relation_mask |= 1u << relation;
+				}
+			}
+			finish_classification(others.Size(), relation_mask);
 			Update(submit_id, ctx, heap_id, existing_id, &destructors);
 
 			o.use_num++;
@@ -2017,6 +2035,18 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	{
 		EXIT_NOT_IMPLEMENTED(!IsAllocated(vaddr[vi], size[vi]));
 	}
+	uint32_t relation_mask = 0;
+	for (const auto& candidate: others)
+	{
+		const auto relation = static_cast<uint32_t>(candidate.relation);
+		if (relation < 32u)
+		{
+			relation_mask |= 1u << relation;
+		}
+	}
+	const uint32_t reclaimed_count =
+	    delete_all ? others.Size() : static_cast<uint32_t>(texture_reclaim_vertex_ids.Size());
+	finish_classification(others.Size(), relation_mask, reclaimed_count, create_from_objects);
 
 	ObjectInfo o {};
 
@@ -2062,7 +2092,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		}
 		auto create_func = info.GetCreateFromObjectsFunc();
 		EXIT_IF(create_func == nullptr);
+		const auto create_start = std::chrono::steady_clock::now();
 		o.object.obj = create_func(ctx, buffer, o.params, scenario, objects, &o.mem);
+		const auto create_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
+		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc, static_cast<uint64_t>(create_ns));
 		// Texture CreateFromObjects may leave layout UNDEFINED when no
 		// format+extent surface parent is usable. Fall back to guest upload so
 		// package tiles are not replaced by transparent AABBs over god-rays.
@@ -2073,13 +2107,21 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				auto update = info.GetUpdateFunc();
 				EXIT_IF(update == nullptr);
+				const auto update_start = std::chrono::steady_clock::now();
 				update(ctx, o.params, o.object.obj, vaddr, size, vaddr_num);
+				const auto update_ns =
+				    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - update_start).count();
+				create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::UpdateFunc, static_cast<uint64_t>(update_ns));
 			}
 		}
 	} else
 	{
 		EXIT_IF(o.create_func == nullptr);
+		const auto create_start = std::chrono::steady_clock::now();
 		o.object.obj = o.create_func(ctx, o.params, vaddr, size, vaddr_num, &o.mem);
+		const auto create_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
+		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc, static_cast<uint64_t>(create_ns));
 	}
 
 	if (info.type == GpuMemoryObjectType::StorageBuffer && vaddr_num == 1)
@@ -2186,18 +2228,27 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	if (info.check_hash)
 	{
+		const auto dirty_track_start = std::chrono::steady_clock::now();
 		auto& created  = heap.objects[index];
 		bool  tracked  = GpuDirtyPageTracker::Instance().Enabled();
 		bool  attempted = false;
+		const auto dirty_register_start = std::chrono::steady_clock::now();
 		for (int vi = 0; tracked && vi < created.block.vaddr_num; vi++)
 		{
 			attempted = true;
 			tracked = GpuDirtyPageTracker::Instance().RegisterRange(created.block.vaddr[vi], created.block.size[vi]);
 		}
+		const auto dirty_register_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_register_start).count();
+		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyRegister, static_cast<uint64_t>(dirty_register_ns));
+		const auto dirty_prepare_start = std::chrono::steady_clock::now();
 		for (int vi = 0; tracked && vi < created.block.vaddr_num; vi++)
 		{
 			tracked = GpuDirtyPageTracker::Instance().PrepareForRead(created.block.vaddr[vi], created.block.size[vi]);
 		}
+		const auto dirty_prepare_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_prepare_start).count();
+		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyPrepare, static_cast<uint64_t>(dirty_prepare_ns));
 		if (tracked)
 		{
 			created.info.dirty_registered = true;
@@ -2213,6 +2264,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				(void)GpuDirtyPageTracker::Instance().UnregisterRange(created.block.vaddr[vi], created.block.size[vi]);
 			}
 		}
+		const auto dirty_track_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_track_start).count();
+		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyTrack, static_cast<uint64_t>(dirty_track_ns));
 	}
 
 	cache_materialization(index);
@@ -3785,7 +3839,12 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
 
 	mem->unique_id = ++seq;
 
+	const auto allocate_start = std::chrono::steady_clock::now();
 	auto result = vkAllocateMemory(ctx->device, &alloc_info, nullptr, &mem->memory);
+	const auto allocate_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - allocate_start).count();
+	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanAllocate,
+	                                               static_cast<uint64_t>(allocate_ns), mem->requirements.size);
 
 	if (result == VK_SUCCESS)
 	{
@@ -3853,7 +3912,11 @@ void VulkanBindImageMemory(GraphicContext* ctx, VulkanImage* image, VulkanMemory
 	EXIT_IF(mem == nullptr);
 	EXIT_IF(image == nullptr);
 
+	const auto bind_start = std::chrono::steady_clock::now();
 	vkBindImageMemory(ctx->device, image->image, mem->memory, mem->offset);
+	const auto bind_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - bind_start).count();
+	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanBind, static_cast<uint64_t>(bind_ns));
 }
 
 void VulkanBindBufferMemory(GraphicContext* ctx, VulkanBuffer* buffer, VulkanMemory* mem)
@@ -3864,7 +3927,11 @@ void VulkanBindBufferMemory(GraphicContext* ctx, VulkanBuffer* buffer, VulkanMem
 	EXIT_IF(mem == nullptr);
 	EXIT_IF(buffer == nullptr);
 
+	const auto bind_start = std::chrono::steady_clock::now();
 	vkBindBufferMemory(ctx->device, buffer->buffer, mem->memory, mem->offset);
+	const auto bind_ns =
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - bind_start).count();
+	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanBind, static_cast<uint64_t>(bind_ns));
 }
 
 void GpuMemoryRegisterOwner(uint32_t* owner_handle, const char* name)
