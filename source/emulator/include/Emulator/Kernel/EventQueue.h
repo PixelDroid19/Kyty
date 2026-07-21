@@ -110,6 +110,15 @@ int KYTY_SYSV_ABI KernelAddAmprEvent(KernelEqueue eq, uint64_t reserved0, uint64
 // sceKernelDeleteAmprEvent — NID bMmid3pfyjo.
 int KYTY_SYSV_ABI KernelDeleteAmprEvent(KernelEqueue eq, uintptr_t ident);
 
+// sceKernelAddUserEvent — NID 4R6-OvI2cEA. ABI: (eq, id).
+int KYTY_SYSV_ABI KernelAddUserEvent(KernelEqueue eq, int id);
+// sceKernelAddUserEventEdge — NID WDszmSbWuDk. ABI: (eq, id).
+int KYTY_SYSV_ABI KernelAddUserEventEdge(KernelEqueue eq, int id);
+// sceKernelDeleteUserEvent — NID LJDwdSNTnDg. ABI: (eq, id).
+int KYTY_SYSV_ABI KernelDeleteUserEvent(KernelEqueue eq, int id);
+// sceKernelTriggerUserEvent — NID F6e0kwo4cnk. ABI: (eq, id, udata).
+int KYTY_SYSV_ABI KernelTriggerUserEvent(KernelEqueue eq, int id, void* udata);
+
 intptr_t KYTY_SYSV_ABI  KernelGetEventData(const KernelEvent* ev);
 intptr_t KYTY_SYSV_ABI  KernelGetEventFflags(const KernelEvent* ev);
 int KYTY_SYSV_ABI       KernelGetEventFilter(const KernelEvent* ev);

@@ -75,6 +75,23 @@ struct PadControllerInformation
 	int      device_class;
 };
 
+// ScePadExtControllerInformation — 0x40 bytes.
+struct PadExtControllerInformation
+{
+	PadControllerInformation base;
+	uint8_t                  device_class_ext;
+	uint8_t                  connected_ext;
+	uint8_t                  connection_type_ext;
+	uint8_t                  reserved[0x40 - 0x1F];
+};
+
+// ScePadDeviceClassExtendedInformation — 0x20 bytes; deviceClass int32 at +0x00.
+struct PadDeviceClassExtendedInformation
+{
+	int32_t device_class;
+	uint8_t reserved[0x20 - sizeof(int32_t)];
+};
+
 struct PadVibrationParam
 {
 	uint8_t large_motor;
@@ -754,21 +771,17 @@ constexpr int PAD_ERROR_DEVICE_NO_HANDLE   = static_cast<int>(0x80920008u);
 // without requiring a physical SDL controller (playability on hosts with only a keyboard).
 constexpr int kPrimaryHandle = 1;
 
+static bool IsPrimaryPadHandle(int handle)
+{
+	return handle == 0 || handle == kPrimaryHandle;
+}
+
 static bool g_pad_initialized = false;
 static bool g_pad_opened      = false;
 // Counts PadReadState calls since last PadOpen (many titles Open then Read twice per tick).
 static int  g_reads_since_open = 0;
 
-int KYTY_SYSV_ABI PadInit()
-{
-	PRINT_NAME();
-
-	g_pad_initialized = true;
-
-	return OK;
-}
-
-int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param)
+static int PadOpenCore(int user_id, int type, int index, const void* param, bool extended)
 {
 	PRINT_NAME();
 
@@ -783,10 +796,11 @@ int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param)
 		return PAD_ERROR_DEVICE_NO_HANDLE;
 	}
 
-	EXIT_NOT_IMPLEMENTED(user_id != 1);
-	EXIT_NOT_IMPLEMENTED(type != 0);
-	EXIT_NOT_IMPLEMENTED(index != 0);
-	EXIT_NOT_IMPLEMENTED(param != nullptr);
+	const bool type_accepted = extended ? (type >= 0 && type <= 2) : (type == 0);
+	if (user_id != 1 || !type_accepted || index != 0 || (!extended && param != nullptr))
+	{
+		return PAD_ERROR_DEVICE_NO_HANDLE;
+	}
 
 	// Ensure a virtual pad is present for keyboard input and for connected=true.
 	EXIT_IF(g_controller == nullptr);
@@ -811,6 +825,37 @@ int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param)
 	g_pad_opened = true;
 
 	return kPrimaryHandle;
+}
+
+int KYTY_SYSV_ABI PadInit()
+{
+	PRINT_NAME();
+
+	g_pad_initialized = true;
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param)
+{
+	return PadOpenCore(user_id, type, index, param, false);
+}
+
+int KYTY_SYSV_ABI PadOpenExt(int user_id, int type, int index, const void* param)
+{
+	return PadOpenCore(user_id, type, index, param, true);
+}
+
+int KYTY_SYSV_ABI PadClose(int handle)
+{
+	PRINT_NAME();
+
+	if (handle != 0 && handle != kPrimaryHandle)
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+
+	return OK;
 }
 
 int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index)
@@ -872,6 +917,19 @@ int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable)
 	return OK;
 }
 
+static void FillPadControllerInformation(PadControllerInformation* info, int connected_count)
+{
+	info->touch_pixel_density   = 44.86f;
+	info->touch_resolution_x    = 1920;
+	info->touch_resolution_y    = 943;
+	info->stick_dead_zone_left  = controller_get_axis(-32768, 32767, 8000) - 128;
+	info->stick_dead_zone_right = controller_get_axis(-32768, 32767, 8000) - 128;
+	info->connection_type       = 0;
+	info->connected_count       = (connected_count > 0 ? (connected_count > 255 ? 255 : connected_count) : 1);
+	info->connected             = true;
+	info->device_class          = 0;
+}
+
 int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformation* info)
 {
 	PRINT_NAME();
@@ -886,16 +944,56 @@ int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformati
 	EXIT_NOT_IMPLEMENTED(handle != 1);
 	EXIT_NOT_IMPLEMENTED(info == nullptr);
 
-	info->touch_pixel_density   = 44.86f;
-	info->touch_resolution_x    = 1920;
-	info->touch_resolution_y    = 943;
-	info->stick_dead_zone_left  = controller_get_axis(-32768, 32767, 8000) - 128;
-	info->stick_dead_zone_right = controller_get_axis(-32768, 32767, 8000) - 128;
-	info->connection_type       = 0;
-	// After PadOpen the virtual pad is always present for keyboard hosts.
-	info->connected_count       = (connected_count > 0 ? (connected_count > 255 ? 255 : connected_count) : 1);
-	info->connected             = true;
-	info->device_class          = 0;
+	FillPadControllerInformation(info, connected_count);
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadGetExtControllerInformation(int handle, void* info)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_controller == nullptr);
+
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	if (info == nullptr)
+	{
+		return PAD_ERROR_INVALID_ARG;
+	}
+
+	int  connected_count = 0;
+	bool connected       = false;
+	g_controller->GetConnectionInfo(&connected, &connected_count);
+
+	auto* out = static_cast<PadExtControllerInformation*>(info);
+	std::memset(out, 0, sizeof(*out));
+	FillPadControllerInformation(&out->base, connected_count);
+	out->device_class_ext    = 0;
+	out->connected_ext       = 1;
+	out->connection_type_ext = 0;
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadDeviceClassGetExtendedInformation(int handle, void* info)
+{
+	PRINT_NAME();
+
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	if (info == nullptr)
+	{
+		return PAD_ERROR_INVALID_ARG;
+	}
+
+	auto* out = static_cast<PadDeviceClassExtendedInformation*>(info);
+	std::memset(out, 0, sizeof(*out));
+	out->device_class = 0;
 
 	return OK;
 }

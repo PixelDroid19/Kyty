@@ -184,6 +184,18 @@ static volatile sig_atomic_t g_signal_skip_ud2  = 0;
 static volatile sig_atomic_t g_signal_fault_log = 0;
 static volatile sig_atomic_t g_signal_extrq_reported = 0;
 
+// Guest ELF images are placed at 0x900000000 + n*0x10000000 (see RuntimeLinker
+// CODE_BASE_OFFSET / CODE_BASE_INCR). Adjacent PRX loads routinely land at
+// 0x980000000 and beyond; the old 0x900..0x920 window missed those modules, so
+// SIGILL/ud2 diagnostics never dumped bytes and KYTY_SKIP_UD2 never applied.
+static constexpr uint64_t kGuestCodeAddrBegin = 0x900000000ull;
+static constexpr uint64_t kGuestCodeAddrEnd   = 0xB00000000ull;
+
+static inline bool IsGuestCodeAddress(uint64_t rip) noexcept
+{
+	return rip >= kGuestCodeAddrBegin && rip < kGuestCodeAddrEnd;
+}
+
 static void LoadSignalDiagnosticsConfigFromEnvironment() noexcept
 {
 	const auto config = MakeSignalDiagnosticsConfig(getenv("KYTY_SKIP_UD2"), getenv("KYTY_FAULT_LOG"));
@@ -393,7 +405,7 @@ static void kyty_sigprof_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontex
 	static volatile sig_atomic_t n = 0;
 	if (n++ < 200)
 	{
-		const char* tag = (rip >= 0x900000000ull && rip < 0x920000000ull) ? "PROF-GUEST"
+		const char* tag = IsGuestCodeAddress(rip)                              ? "PROF-GUEST"
 		                  : (rip >= 0x100000000ull && rip < 0x110000000ull) ? "PROF-FC"
 		                                                                    : "PROF-OTHER";
 		sigsafe_fault(tag, rip, 0);
@@ -424,7 +436,7 @@ static void kyty_sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontex
 		return;
 	}
 	g_trace_total--;
-	if (rip >= 0x900000000ull && rip < 0x920000000ull) // any guest module
+	if (IsGuestCodeAddress(rip)) // any guest module
 	{
 		sigsafe_fault("TRACE", rip, 0);
 		g_trace_guest--;
@@ -543,7 +555,7 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 	{
 		uint64_t rip = uc_get_rip(uc);
 	#if defined(__x86_64__) || defined(__i386__)
-		if (rip >= 0x900000000ull && rip < 0x920000000ull)
+		if (IsGuestCodeAddress(rip))
 		{
 		#if defined(__APPLE__)
 			if (try_emulate_guest_extrq(uc))
@@ -567,7 +579,7 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 		// debug-raise codes are soft: the kernel logs and RESUMES past the trap. When
 		// KYTY_SKIP_UD2 is set, emulate that: skip the ud2 in guest code and continue,
 		// to determine whether the raised condition is actually recoverable.
-		if (g_signal_skip_ud2 != 0 && rip >= 0x900000000ull && rip < 0x920000000ull)
+		if (g_signal_skip_ud2 != 0 && IsGuestCodeAddress(rip))
 		{
 			const auto* code = reinterpret_cast<const uint8_t*>(rip);
 			if (code[0] == 0x0F && code[1] == 0x0B)

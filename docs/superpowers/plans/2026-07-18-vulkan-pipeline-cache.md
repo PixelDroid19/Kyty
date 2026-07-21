@@ -12,7 +12,7 @@
 
 - Keep all work in the current worktree and branch.
 - Never store private workload paths, identifiers, assets, or shader/pipeline keys in Git.
-- Treat external reference only as clean-room architectural evidence because its implementation is GPL.
+- Treat other emulators only as clean-room architectural evidence; do not paste their implementations.
 - Option 1, persistent driver `VkPipelineCache`: chosen because captures directly show 200–500 ms cold pipeline misses and Vulkan provides a device-qualified opaque cache.
 - Option 2, persist Kyty's complete SPIR-V and application pipeline keys: potentially larger benefit but substantially broader serialization/versioning work.
 - Option 3, asynchronous compilation with a provisional pipeline: rejected because drawing with a substitute pipeline is a behavioral fallback and violates rendering correctness.

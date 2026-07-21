@@ -53,11 +53,9 @@ LIB_DEFINE(InitAudio_1_AudioOut2)
 
 	// Residual NIDs adjacent to AudioOut2 imports on a Gen5 eboot; names not
 	// yet resolved. Log-and-OK until triangulated.
-	LIB_FUNC("45ggEzakPJQ", AudioOut2::AudioOut2LogAndOk);
-	LIB_FUNC("fZOeZIOEmLw", AudioOut2::AudioOut2LogAndOk);
-	LIB_FUNC("fFxGkxF2bVo", AudioOut2::AudioOut2LogAndOk);
+	// Do not register Posix/Net socket NIDs here (TU-d9PfIHPM socket,
+	// fFxGkxF2bVo setsockopt, fZOeZIOEmLw send, 45ggEzakPJQ SocketClose).
 	LIB_FUNC("TUuiYS2kE8s", AudioOut2::AudioOut2LogAndOk);
-	LIB_FUNC("TU-d9PfIHPM", AudioOut2::AudioOut2LogAndOk);
 	LIB_FUNC("jbz9I9vkqkk", AudioOut2::AudioOut2LogAndOk);
 	LIB_FUNC("3BytPOQgVKc", AudioOut2::AudioOut2LogAndOk);
 	LIB_FUNC("Ec63y59l9tw", AudioOut2::AudioOut2LogAndOk);
@@ -171,6 +169,12 @@ LIB_DEFINE(InitAudio_1_Ngs2)
 	LIB_FUNC("-TOuuAQ-buE", Ngs2::Ngs2VoiceGetState);
 	LIB_FUNC("rEh728kXk3w", Ngs2::Ngs2VoiceGetStateFlags);
 	LIB_FUNC("i0VnXM-C9fc", Ngs2::Ngs2SystemRender);
+	LIB_FUNC("u-WrYDaJA3k", Ngs2::Ngs2SystemDestroy);
+	LIB_FUNC("gThZqM5PYlQ", Ngs2::Ngs2SystemLock);
+	LIB_FUNC("JXRC5n0RQls", Ngs2::Ngs2SystemUnlock);
+	LIB_FUNC("l4Q2dWEH6UM", Ngs2::Ngs2SystemSetGrainSamples);
+	LIB_FUNC("-tbc2SxQD60", Ngs2::Ngs2SystemSetSampleRate);
+	LIB_FUNC("xa8oL9dmXkM", Ngs2::Ngs2PanInit);
 	// Positional audio geometry (Ngs2 geom exports used on Gen5 boot).
 	LIB_FUNC("0lbbayqDNoE", Ngs2::Ngs2GeomResetSourceParam);
 	LIB_FUNC("7Lcfo8SmpsU", Ngs2::Ngs2GeomResetListenerParam);

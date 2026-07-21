@@ -16,9 +16,28 @@ namespace CommonDialog = Dialog::CommonDialog;
 LIB_DEFINE(InitDialog_1_CommonDialog)
 {
 	LIB_FUNC("uoUpLGNkygk", CommonDialog::CommonDialogInitialize);
+	LIB_FUNC("BQ3tey0JmQM", CommonDialog::CommonDialogIsUsed);
 }
 
 } // namespace LibCommonDialog
+
+namespace LibErrorDialog {
+
+LIB_VERSION("ErrorDialog", 1, "ErrorDialog", 1, 1);
+
+namespace ErrorDialog = Dialog::ErrorDialog;
+
+LIB_DEFINE(InitDialog_1_ErrorDialog)
+{
+	LIB_FUNC("I88KChlynSs", ErrorDialog::ErrorDialogInitialize);
+	LIB_FUNC("M2ZF-ClLhgY", ErrorDialog::ErrorDialogOpen);
+	LIB_FUNC("t2FvHRXzgqk", ErrorDialog::ErrorDialogGetStatus);
+	LIB_FUNC("WWiGuh9XfgQ", ErrorDialog::ErrorDialogUpdateStatus);
+	LIB_FUNC("ekXHb1kDBl0", ErrorDialog::ErrorDialogClose);
+	LIB_FUNC("9XAxK2PMwk8", ErrorDialog::ErrorDialogTerminate);
+}
+
+} // namespace LibErrorDialog
 
 namespace LibSaveDataDialog {
 
@@ -36,6 +55,10 @@ static void RegisterSaveDataDialogFuncs(Loader::SymbolDatabase* s)
 	LIB_FUNC("ERKzksauAJA", SaveDataDialog::SaveDataDialogGetStatus);
 	LIB_FUNC("KK3Bdg1RWK0", SaveDataDialog::SaveDataDialogUpdateStatus);
 	LIB_FUNC("YuH2FA7azqQ", SaveDataDialog::SaveDataDialogTerminate);
+	LIB_FUNC("fH46Lag88XY", SaveDataDialog::SaveDataDialogClose);
+	LIB_FUNC("yEiJ-qqr6Cg", SaveDataDialog::SaveDataDialogGetResult);
+	LIB_FUNC("en7gNVnh878", SaveDataDialog::SaveDataDialogIsReadyToDisplay);
+	LIB_FUNC("V-uEeFKARJU", SaveDataDialog::SaveDataDialogProgressBarInc);
 	LIB_FUNC("hay1CfTmLyA", SaveDataDialog::SaveDataDialogProgressBarSetValue);
 }
 
@@ -60,6 +83,10 @@ LIB_DEFINE(InitDialog_1_SaveDataDialogNative)
 	LIB_FUNC("ERKzksauAJA", SaveDataDialog::SaveDataDialogGetStatus);
 	LIB_FUNC("KK3Bdg1RWK0", SaveDataDialog::SaveDataDialogUpdateStatus);
 	LIB_FUNC("YuH2FA7azqQ", SaveDataDialog::SaveDataDialogTerminate);
+	LIB_FUNC("fH46Lag88XY", SaveDataDialog::SaveDataDialogClose);
+	LIB_FUNC("yEiJ-qqr6Cg", SaveDataDialog::SaveDataDialogGetResult);
+	LIB_FUNC("en7gNVnh878", SaveDataDialog::SaveDataDialogIsReadyToDisplay);
+	LIB_FUNC("V-uEeFKARJU", SaveDataDialog::SaveDataDialogProgressBarInc);
 	LIB_FUNC("hay1CfTmLyA", SaveDataDialog::SaveDataDialogProgressBarSetValue);
 }
 
@@ -108,6 +135,7 @@ LIB_DEFINE(InitDialog_1_MsgDialogNative)
 LIB_DEFINE(InitDialog_1)
 {
 	LibCommonDialog::InitDialog_1_CommonDialog(s);
+	LibErrorDialog::InitDialog_1_ErrorDialog(s);
 	LibSaveDataDialog::InitDialog_1_SaveDataDialog(s);
 	LibSaveDataDialogNative::InitDialog_1_SaveDataDialogNative(s);
 	LibMsgDialog::InitDialog_1_MsgDialog(s);
