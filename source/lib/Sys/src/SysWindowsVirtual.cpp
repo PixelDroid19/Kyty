@@ -13,6 +13,7 @@
 
 #include <mutex>
 #include <unordered_set>
+#include <vector>
 #include <windows.h> // IWYU pragma: keep
 
 // IWYU pragma: no_include <basetsd.h>
@@ -39,6 +40,7 @@ struct SharedBacking
 };
 
 std::mutex                   g_shared_views_mutex;
+std::mutex                   g_protection_transaction_mutex;
 std::unordered_set<uint64_t> g_shared_views;
 
 constexpr uint64_t SYSTEM_MANAGED_MIN = 0x0000040000u;
@@ -178,9 +180,11 @@ static VirtualMemory::Mode get_protection_flag(DWORD mode)
 		case PAGE_NOACCESS: return VirtualMemory::Mode::NoAccess;
 		case PAGE_READONLY: return VirtualMemory::Mode::Read;
 		case PAGE_READWRITE: return VirtualMemory::Mode::ReadWrite;
+		case PAGE_WRITECOPY: return VirtualMemory::Mode::ReadWrite;
 		case PAGE_EXECUTE: return VirtualMemory::Mode::Execute;
 		case PAGE_EXECUTE_READ: return VirtualMemory::Mode::ExecuteRead;
 		case PAGE_EXECUTE_READWRITE: return VirtualMemory::Mode::ExecuteReadWrite;
+		case PAGE_EXECUTE_WRITECOPY: return VirtualMemory::Mode::ExecuteReadWrite;
 		default: return VirtualMemory::Mode::NoAccess;
 	}
 }
@@ -444,6 +448,7 @@ bool sys_virtual_free(uint64_t address)
 
 bool sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode)
 {
+	std::scoped_lock transaction(g_protection_transaction_mutex);
 	DWORD old_protect = 0;
 	if (VirtualProtect(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size, get_protection_flag(mode), &old_protect) == 0)
 	{
@@ -455,6 +460,130 @@ bool sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mo
 		*old_mode = get_protection_flag(old_protect);
 	}
 	return true;
+}
+
+static bool remove_write_protection(DWORD original, DWORD* target) noexcept
+{
+	const DWORD modifiers = original & ~0xffu;
+	if ((modifiers & PAGE_GUARD) != 0)
+	{
+		return false;
+	}
+	switch (original & 0xffu)
+	{
+		case PAGE_READWRITE:
+		case PAGE_WRITECOPY: *target = PAGE_READONLY | modifiers; return true;
+		case PAGE_EXECUTE_READWRITE:
+		case PAGE_EXECUTE_WRITECOPY: *target = PAGE_EXECUTE_READ | modifiers; return true;
+		default: return false;
+	}
+}
+
+VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(
+	uint64_t address, uint64_t size, VirtualMemory::CapturedProtectionVisitor visitor, void* context) noexcept
+{
+	using Status = VirtualMemory::ProtectionChangeStatus;
+	VirtualMemory::ProtectionChangeResult result {};
+	if (visitor == nullptr || size == 0 || address > std::numeric_limits<uint64_t>::max() - size)
+	{
+		result.status = Status::InvalidRange;
+		return result;
+	}
+	struct NativeRun
+	{
+		uint64_t address = 0;
+		uint64_t size = 0;
+		DWORD original = PAGE_NOACCESS;
+		DWORD target = PAGE_NOACCESS;
+	};
+	std::vector<NativeRun> runs;
+	const uint64_t end = address + size;
+	std::scoped_lock transaction(g_protection_transaction_mutex);
+	for (uint64_t cursor = address; cursor < end;)
+	{
+		MEMORY_BASIC_INFORMATION info {};
+		if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(cursor)), &info, sizeof(info)) == 0 ||
+		    info.State != MEM_COMMIT)
+		{
+			result.status = Status::UnmappedRange;
+			return result;
+		}
+		const uint64_t region_start = reinterpret_cast<uint64_t>(info.BaseAddress);
+		if (region_start > std::numeric_limits<uint64_t>::max() - info.RegionSize)
+		{
+			result.status = Status::InvalidRange;
+			return result;
+		}
+		const uint64_t run_end = std::min(end, region_start + info.RegionSize);
+		DWORD target = PAGE_NOACCESS;
+		if (!remove_write_protection(info.Protect, &target) || run_end <= cursor)
+		{
+			result.status = Status::UnsupportedProtection;
+			return result;
+		}
+		runs.push_back({cursor, run_end - cursor, info.Protect, target});
+		cursor = run_end;
+	}
+
+	auto rollback = [&]() noexcept
+	{
+		bool restored = true;
+		for (const auto& run: runs)
+		{
+			DWORD ignored = 0;
+			restored = VirtualProtect(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(run.address)), run.size, run.original,
+			                          &ignored) != 0 && restored;
+		}
+		return restored;
+	};
+	for (const auto& run: runs)
+	{
+		VirtualMemory::CapturedProtectionRun captured {run.address, run.size, get_protection_flag(run.original & 0xffu), run.original};
+		if (!visitor(context, captured))
+		{
+			result.status = Status::ApplyFailedRolledBack;
+			return result;
+		}
+	}
+	for (const auto& run: runs)
+	{
+		DWORD ignored = 0;
+		if (VirtualProtect(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(run.address)), run.size, run.target, &ignored) == 0)
+		{
+			result.status = rollback() ? Status::ApplyFailedRolledBack : Status::RollbackFailed;
+			return result;
+		}
+		result.applied_runs++;
+		result.applied_bytes += run.size;
+	}
+	result.status = Status::Success;
+	return result;
+}
+
+bool sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	DWORD target = PAGE_NOACCESS;
+	if (size == 0 || !remove_write_protection(restore_token, &target))
+	{
+		return false;
+	}
+	std::scoped_lock transaction(g_protection_transaction_mutex);
+	DWORD old_protect = 0;
+	return VirtualProtect(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size, target, &old_protect) != 0;
+}
+
+bool sys_virtual_restore_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	std::scoped_lock transaction(g_protection_transaction_mutex);
+	DWORD old_protect = 0;
+	return VirtualProtect(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size, restore_token, &old_protect) != 0;
+}
+
+bool sys_virtual_restore_protection_signal_safe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	DWORD old_protect = 0;
+	return size != 0 &&
+	       VirtualProtect(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size, restore_token, &old_protect) != 0;
 }
 
 bool sys_virtual_protect_write_signal_safe(uint64_t address, uint64_t size)

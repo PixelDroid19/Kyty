@@ -1,5 +1,6 @@
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 
+#include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/VirtualMemory.h"
 
 #include <atomic>
@@ -17,6 +18,7 @@ struct GpuDirtyPageTracker::PageEntry
 	std::atomic<uint32_t>  refs {0};
 	std::atomic<uint32_t>  protection_state {static_cast<uint32_t>(GpuDirtyProtectionState::Writable)};
 	std::atomic<uint32_t>  original_mode {0};
+	std::atomic<uint32_t>  original_token {0};
 	std::atomic<uint32_t>  original_mode_valid {0};
 };
 
@@ -52,32 +54,33 @@ void AtomicMax(std::atomic<uint64_t>* target, uint64_t value) noexcept
 	}
 }
 
-[[nodiscard]] Core::VirtualMemory::Mode ReadOnlyMode(Core::VirtualMemory::Mode original) noexcept
+Core::VirtualMemory::ProtectionChangeResult DefaultRemoveWriteAndCapture(
+	void*, uintptr_t address, size_t size, Core::VirtualMemory::CapturedProtectionVisitor visitor, void* context) noexcept
 {
-	uint32_t bits = static_cast<uint32_t>(original);
-	bits &= ~static_cast<uint32_t>(Core::VirtualMemory::Mode::Write);
-	if ((bits & static_cast<uint32_t>(Core::VirtualMemory::Mode::Read)) == 0u &&
-	    (bits & static_cast<uint32_t>(Core::VirtualMemory::Mode::Execute)) == 0u)
-	{
-		bits |= static_cast<uint32_t>(Core::VirtualMemory::Mode::Read);
-	}
-	return static_cast<Core::VirtualMemory::Mode>(bits);
+	return Core::VirtualMemory::RemoveWriteAndCapture(address, size, visitor, context);
 }
 
-bool DefaultProtect(void*, uintptr_t address, size_t size, Core::VirtualMemory::Mode mode, Core::VirtualMemory::Mode* old_mode) noexcept
+bool DefaultRemoveWrite(void*, uintptr_t address, size_t size, uint32_t restore_token) noexcept
 {
-	return Core::VirtualMemory::Protect(address, size, mode, old_mode);
+	return Core::VirtualMemory::RemoveWriteFromProtection(address, size, restore_token);
 }
 
-bool DefaultProtectWriteSignalSafe(void*, uintptr_t address, size_t size) noexcept
+bool DefaultRestore(void*, uintptr_t address, size_t size, uint32_t restore_token) noexcept
 {
-	return Core::VirtualMemory::ProtectWriteSignalSafe(address, size);
+	return Core::VirtualMemory::RestoreProtection(address, size, restore_token);
+}
+
+bool DefaultRestoreSignalSafe(void*, uintptr_t address, size_t size, uint32_t restore_token) noexcept
+{
+	return Core::VirtualMemory::RestoreProtectionSignalSafe(address, size, restore_token);
 }
 
 } // namespace
 
 GpuDirtyPageTracker::GpuDirtyPageTracker(bool enabled)
-    : GpuDirtyPageTracker(GpuDirtyPageProtectionOps {nullptr, &DefaultProtect, &DefaultProtectWriteSignalSafe}, enabled)
+    : GpuDirtyPageTracker(GpuDirtyPageProtectionOps {nullptr, &DefaultRemoveWriteAndCapture, &DefaultRemoveWrite, &DefaultRestore,
+	                                                  &DefaultRestoreSignalSafe},
+	                          enabled)
 {
 }
 
@@ -85,7 +88,8 @@ GpuDirtyPageTracker::GpuDirtyPageTracker(const GpuDirtyPageProtectionOps& protec
     : m_page_size(Core::VirtualMemory::GetPageSize()), m_pages(enabled ? new PageEntry[kPageTableSize] : nullptr),
       m_ranges(enabled ? new RangeEntry[kMaxRanges] : nullptr), m_registration_mutex(enabled ? new std::mutex : nullptr),
       m_epoch(enabled ? new std::atomic<uint64_t>(0) : nullptr), m_protection_ops(protection_ops),
-      m_enabled(enabled && protection_ops.protect != nullptr && protection_ops.protect_write_signal_safe != nullptr)
+	      m_enabled(enabled && protection_ops.remove_write_and_capture != nullptr && protection_ops.remove_write != nullptr &&
+	                protection_ops.restore != nullptr && protection_ops.restore_signal_safe != nullptr)
 {
 }
 
@@ -155,6 +159,9 @@ GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t 
 			    entry.protection_state.load(std::memory_order_acquire) == static_cast<uint32_t>(GpuDirtyProtectionState::Retired))
 			{
 				entry.generation.store(0, std::memory_order_relaxed);
+				entry.original_mode.store(0, std::memory_order_relaxed);
+				entry.original_token.store(0, std::memory_order_relaxed);
+				entry.original_mode_valid.store(0, std::memory_order_relaxed);
 				entry.protection_state.store(static_cast<uint32_t>(GpuDirtyProtectionState::Writable), std::memory_order_release);
 			}
 			return &entry;
@@ -164,6 +171,8 @@ GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t 
 			entry.generation.store(0, std::memory_order_relaxed);
 			entry.refs.store(0, std::memory_order_relaxed);
 			entry.protection_state.store(static_cast<uint32_t>(GpuDirtyProtectionState::Writable), std::memory_order_relaxed);
+			entry.original_mode.store(0, std::memory_order_relaxed);
+			entry.original_token.store(0, std::memory_order_relaxed);
 			entry.original_mode_valid.store(0, std::memory_order_relaxed);
 			entry.key.store(page, std::memory_order_release);
 			return &entry;
@@ -308,8 +317,8 @@ bool GpuDirtyPageTracker::UnregisterRange(uintptr_t address, size_t size) noexce
 				entry->refs.store(0, std::memory_order_release);
 				if (entry->original_mode_valid.load(std::memory_order_acquire) != 0u)
 				{
-					const auto mode = static_cast<Core::VirtualMemory::Mode>(entry->original_mode.load(std::memory_order_relaxed));
-					result          = m_protection_ops.protect(m_protection_ops.context, page, m_page_size, mode, nullptr) && result;
+					const uint32_t token = entry->original_token.load(std::memory_order_relaxed);
+					result = m_protection_ops.restore(m_protection_ops.context, page, m_page_size, token) && result;
 				}
 				entry->protection_state.store(static_cast<uint32_t>(GpuDirtyProtectionState::Retired), std::memory_order_release);
 			} else if (refs > 1u)
@@ -468,7 +477,9 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 				if (entry->protection_state.compare_exchange_strong(expected, static_cast<uint32_t>(GpuDirtyProtectionState::Disarming),
 				                                                    std::memory_order_acq_rel, std::memory_order_acquire))
 				{
-					const bool restored = m_protection_ops.protect_write_signal_safe(m_protection_ops.context, page, m_page_size);
+					const uint32_t token = entry->original_token.load(std::memory_order_relaxed);
+					const bool restored =
+					    m_protection_ops.restore_signal_safe(m_protection_ops.context, page, m_page_size, token);
 					entry->protection_state.store(restored ? rollback_state
 					                                       : (rollback_state == static_cast<uint32_t>(GpuDirtyProtectionState::Retired)
 					                                              ? rollback_state
@@ -482,6 +493,124 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 			}
 		}
 	};
+	auto capture_pages = [](void* context, const Core::VirtualMemory::CapturedProtectionRun& run) noexcept
+	{
+		auto* self = static_cast<GpuDirtyPageTracker*>(context);
+		if (run.mode == Core::VirtualMemory::Mode::NoAccess || run.size == 0)
+		{
+			return false;
+		}
+		const uintptr_t run_first = self->PageStart(run.address);
+		const uintptr_t run_last = self->PageStart(run.address + run.size - 1u);
+		for (uintptr_t page = run_first;; page += self->m_page_size)
+		{
+			auto* entry = self->FindPage(page);
+			if (entry == nullptr || entry->protection_state.load(std::memory_order_acquire) !=
+			                            static_cast<uint32_t>(GpuDirtyProtectionState::Capturing))
+			{
+				return false;
+			}
+			entry->original_mode.store(static_cast<uint32_t>(run.mode), std::memory_order_relaxed);
+			entry->original_token.store(run.restore_token, std::memory_order_relaxed);
+			entry->original_mode_valid.store(1, std::memory_order_release);
+			entry->protection_state.store(static_cast<uint32_t>(GpuDirtyProtectionState::Arming), std::memory_order_release);
+			if (page == run_last || page > run_last - self->m_page_size) { break; }
+		}
+		return true;
+	};
+	auto discard_captured_metadata = [this](uintptr_t begin, uintptr_t finish) noexcept
+	{
+		for (uintptr_t page = begin;; page += m_page_size)
+		{
+			if (auto* entry = FindPage(page); entry != nullptr)
+			{
+				entry->original_mode_valid.store(0, std::memory_order_release);
+				uint32_t state = entry->protection_state.load(std::memory_order_acquire);
+				while ((state == static_cast<uint32_t>(GpuDirtyProtectionState::Capturing) ||
+				        state == static_cast<uint32_t>(GpuDirtyProtectionState::Arming)) &&
+				       !entry->protection_state.compare_exchange_weak(
+				           state, static_cast<uint32_t>(GpuDirtyProtectionState::Writable), std::memory_order_release,
+				           std::memory_order_acquire))
+				{
+				}
+			}
+			if (page == finish || page > finish - m_page_size) { break; }
+		}
+	};
+
+	bool first_arm = true;
+	for (uintptr_t page = first;; page += m_page_size)
+	{
+		auto* entry = FindPage(page);
+		if (entry == nullptr || entry->refs.load(std::memory_order_acquire) == 0u ||
+		    entry->protection_state.load(std::memory_order_acquire) != static_cast<uint32_t>(GpuDirtyProtectionState::Writable) ||
+		    entry->original_mode_valid.load(std::memory_order_acquire) != 0u)
+		{
+			first_arm = false;
+			break;
+		}
+		if (page == last || page > last - m_page_size)
+		{
+			break;
+		}
+	}
+	if (first_arm)
+	{
+		uintptr_t claimed_last = first;
+		for (uintptr_t page = first;; page += m_page_size)
+		{
+			auto* entry = FindPage(page);
+			uint32_t expected = static_cast<uint32_t>(GpuDirtyProtectionState::Writable);
+			if (!entry->protection_state.compare_exchange_strong(expected, static_cast<uint32_t>(GpuDirtyProtectionState::Capturing),
+			                                                     std::memory_order_acq_rel, std::memory_order_acquire))
+			{
+				for (uintptr_t rollback = first;; rollback += m_page_size)
+				{
+					if (auto* old = FindPage(rollback); old != nullptr)
+					{
+						uint32_t arming = static_cast<uint32_t>(GpuDirtyProtectionState::Capturing);
+						(void)old->protection_state.compare_exchange_strong(
+						    arming, static_cast<uint32_t>(GpuDirtyProtectionState::Writable), std::memory_order_release,
+						    std::memory_order_acquire);
+					}
+					if (rollback == claimed_last || rollback > claimed_last - m_page_size) { break; }
+				}
+				first_arm = false;
+				break;
+			}
+			claimed_last = page;
+			if (page == last || page > last - m_page_size) { break; }
+		}
+		if (first_arm)
+		{
+			const auto change =
+			    m_protection_ops.remove_write_and_capture(m_protection_ops.context, first, end - first, capture_pages, this);
+			if (!change.Succeeded())
+			{
+				EXIT_IF(change.status == Core::VirtualMemory::ProtectionChangeStatus::RollbackFailed);
+				discard_captured_metadata(first, last);
+				for (uintptr_t page = first;; page += m_page_size)
+				{
+					if (auto* entry = FindPage(page); entry != nullptr)
+					{
+						uint32_t arming = static_cast<uint32_t>(GpuDirtyProtectionState::Arming);
+						(void)entry->protection_state.compare_exchange_strong(
+						    arming, static_cast<uint32_t>(GpuDirtyProtectionState::Writable), std::memory_order_release,
+						    std::memory_order_acquire);
+					}
+					if (page == last || page > last - m_page_size) { break; }
+				}
+				MarkFallback(first, end);
+				return false;
+			}
+			for (uintptr_t page = first;; page += m_page_size)
+			{
+				finalize_arming(page, FindPage(page));
+				if (page == last || page > last - m_page_size) { break; }
+			}
+			return true;
+		}
+	}
 
 	for (uintptr_t page = first; page <= last;)
 	{
@@ -497,8 +626,10 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 			MarkFallback(first, end);
 			return false;
 		}
+		const bool needs_capture = entry->original_mode_valid.load(std::memory_order_acquire) == 0u;
 		uint32_t expected = static_cast<uint32_t>(GpuDirtyProtectionState::Writable);
-		if (!entry->protection_state.compare_exchange_strong(expected, static_cast<uint32_t>(GpuDirtyProtectionState::Arming),
+		if (!entry->protection_state.compare_exchange_strong(
+		        expected, static_cast<uint32_t>(needs_capture ? GpuDirtyProtectionState::Capturing : GpuDirtyProtectionState::Arming),
 		                                                     std::memory_order_acq_rel, std::memory_order_acquire))
 		{
 			if (page == last || page > last - m_page_size)
@@ -509,28 +640,60 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 			continue;
 		}
 
-		if (entry->original_mode_valid.load(std::memory_order_acquire) == 0u)
+		if (needs_capture)
 		{
-			Core::VirtualMemory::Mode original = Core::VirtualMemory::Mode::ReadWrite;
-			if (!m_protection_ops.protect(m_protection_ops.context, page, m_page_size, Core::VirtualMemory::Mode::Read, &original) ||
-			    original == Core::VirtualMemory::Mode::NoAccess)
+			const uintptr_t run_start = page;
+			uintptr_t run_last = page;
+			while (run_last != last && run_last <= last - m_page_size)
 			{
-				entry->protection_state.store(static_cast<uint32_t>(GpuDirtyProtectionState::Writable), std::memory_order_release);
+				const uintptr_t next_page = run_last + m_page_size;
+				auto* next = FindPage(next_page);
+				if (next == nullptr || next->refs.load(std::memory_order_acquire) == 0u ||
+				    next->original_mode_valid.load(std::memory_order_acquire) != 0u)
+				{
+					break;
+				}
+				uint32_t next_expected = static_cast<uint32_t>(GpuDirtyProtectionState::Writable);
+				if (!next->protection_state.compare_exchange_strong(next_expected,
+				                                                    static_cast<uint32_t>(GpuDirtyProtectionState::Capturing),
+				                                                    std::memory_order_acq_rel, std::memory_order_acquire))
+				{
+					break;
+				}
+				run_last = next_page;
+			}
+			const size_t run_size = run_last - run_start + m_page_size;
+			const auto change = m_protection_ops.remove_write_and_capture(m_protection_ops.context, run_start, run_size,
+			                                                                capture_pages, this);
+			if (!change.Succeeded())
+			{
+				EXIT_IF(change.status == Core::VirtualMemory::ProtectionChangeStatus::RollbackFailed);
+				discard_captured_metadata(run_start, run_last);
+				for (uintptr_t rollback = run_start;; rollback += m_page_size)
+				{
+					if (auto* claimed = FindPage(rollback); claimed != nullptr)
+					{
+						uint32_t arming = static_cast<uint32_t>(GpuDirtyProtectionState::Arming);
+						(void)claimed->protection_state.compare_exchange_strong(
+						    arming, static_cast<uint32_t>(GpuDirtyProtectionState::Writable), std::memory_order_release,
+						    std::memory_order_acquire);
+					}
+					if (rollback == run_last || rollback > run_last - m_page_size) { break; }
+				}
 				MarkFallback(first, end);
 				return false;
 			}
-			entry->original_mode.store(static_cast<uint32_t>(original), std::memory_order_relaxed);
-			entry->original_mode_valid.store(1, std::memory_order_release);
-			finalize_arming(page, entry);
-			if (page == last || page > last - m_page_size)
+			for (uintptr_t armed = run_start;; armed += m_page_size)
 			{
-				break;
+				finalize_arming(armed, FindPage(armed));
+				if (armed == run_last || armed > run_last - m_page_size) { break; }
 			}
-			page += m_page_size;
+			if (run_last == last || run_last > last - m_page_size) { break; }
+			page = run_last + m_page_size;
 			continue;
 		}
 
-		const auto target_mode = ReadOnlyMode(static_cast<Core::VirtualMemory::Mode>(entry->original_mode.load(std::memory_order_relaxed)));
+		const uint32_t token = entry->original_token.load(std::memory_order_relaxed);
 		const uintptr_t run_start = page;
 		uintptr_t       run_last  = page;
 		while (run_last != last && run_last <= last - m_page_size)
@@ -540,7 +703,7 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 			if (next == nullptr || next->refs.load(std::memory_order_acquire) == 0u ||
 			    next->protection_state.load(std::memory_order_acquire) == static_cast<uint32_t>(GpuDirtyProtectionState::Retired) ||
 			    next->original_mode_valid.load(std::memory_order_acquire) == 0u ||
-			    ReadOnlyMode(static_cast<Core::VirtualMemory::Mode>(next->original_mode.load(std::memory_order_relaxed))) != target_mode)
+			    next->original_token.load(std::memory_order_relaxed) != token)
 			{
 				break;
 			}
@@ -554,7 +717,7 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 		}
 		const size_t run_size = run_last - run_start + m_page_size;
 
-		if (!m_protection_ops.protect(m_protection_ops.context, run_start, run_size, target_mode, nullptr))
+		if (!m_protection_ops.remove_write(m_protection_ops.context, run_start, run_size, token))
 		{
 			for (uintptr_t rollback = run_start;; rollback += m_page_size)
 			{
@@ -574,12 +737,12 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 						                                                      static_cast<uint32_t>(GpuDirtyProtectionState::Disarming),
 						                                                      std::memory_order_acq_rel, std::memory_order_acquire))
 						{
-							const auto original =
-							    static_cast<Core::VirtualMemory::Mode>(claimed->original_mode.load(std::memory_order_relaxed));
-							bool restored = m_protection_ops.protect(m_protection_ops.context, rollback, m_page_size, original, nullptr);
+							const uint32_t token = claimed->original_token.load(std::memory_order_relaxed);
+							bool restored = m_protection_ops.restore(m_protection_ops.context, rollback, m_page_size, token);
 							if (!restored)
 							{
-								restored = m_protection_ops.protect_write_signal_safe(m_protection_ops.context, rollback, m_page_size);
+									restored =
+									    m_protection_ops.restore_signal_safe(m_protection_ops.context, rollback, m_page_size, token);
 							}
 							claimed->protection_state.store(restored
 							                                    ? (restore_state == static_cast<uint32_t>(GpuDirtyProtectionState::Arming)
@@ -649,7 +812,8 @@ bool GpuDirtyPageTracker::HandleWriteFault(uintptr_t address) noexcept
 		}
 		const auto original = static_cast<Core::VirtualMemory::Mode>(entry->original_mode.load(std::memory_order_relaxed));
 		const bool writable = (static_cast<uint32_t>(original) & static_cast<uint32_t>(Core::VirtualMemory::Mode::Write)) != 0u;
-		return writable && m_protection_ops.protect_write_signal_safe(m_protection_ops.context, page_address, m_page_size);
+		const uint32_t token = entry->original_token.load(std::memory_order_relaxed);
+		return writable && m_protection_ops.restore_signal_safe(m_protection_ops.context, page_address, m_page_size, token);
 	}
 	for (;;)
 	{
@@ -671,7 +835,9 @@ bool GpuDirtyPageTracker::HandleWriteFault(uintptr_t address) noexcept
 	}
 
 	MarkPageWrite(entry);
-	const bool restored = m_protection_ops.protect_write_signal_safe(m_protection_ops.context, page_address, m_page_size);
+	const uint32_t token = entry->original_token.load(std::memory_order_relaxed);
+	const bool restored =
+	    m_protection_ops.restore_signal_safe(m_protection_ops.context, page_address, m_page_size, token);
 	entry->protection_state.store(static_cast<uint32_t>(restored ? GpuDirtyProtectionState::Writable : GpuDirtyProtectionState::Armed),
 	                              std::memory_order_release);
 	if (!restored)
@@ -702,6 +868,11 @@ bool GpuDirtyPageTracker::NotifyWrite(uintptr_t address, size_t size) noexcept
 		{
 			handled        = true;
 			uint32_t state = entry->protection_state.load(std::memory_order_acquire);
+			while (state == static_cast<uint32_t>(GpuDirtyProtectionState::Capturing))
+			{
+				std::this_thread::yield();
+				state = entry->protection_state.load(std::memory_order_acquire);
+			}
 			while (state != static_cast<uint32_t>(GpuDirtyProtectionState::Writable) &&
 			       state != static_cast<uint32_t>(GpuDirtyProtectionState::Disarming) &&
 			       !entry->protection_state.compare_exchange_weak(state, static_cast<uint32_t>(GpuDirtyProtectionState::Disarming),
@@ -715,7 +886,9 @@ bool GpuDirtyPageTracker::NotifyWrite(uintptr_t address, size_t size) noexcept
 			if (state != static_cast<uint32_t>(GpuDirtyProtectionState::Writable) &&
 			    state != static_cast<uint32_t>(GpuDirtyProtectionState::Disarming))
 			{
-				const bool restored = m_protection_ops.protect_write_signal_safe(m_protection_ops.context, page_address, m_page_size);
+				const uint32_t token = entry->original_token.load(std::memory_order_relaxed);
+				const bool restored =
+				    m_protection_ops.restore_signal_safe(m_protection_ops.context, page_address, m_page_size, token);
 				entry->protection_state.store(
 				    static_cast<uint32_t>(restored ? GpuDirtyProtectionState::Writable : GpuDirtyProtectionState::Armed),
 				    std::memory_order_release);

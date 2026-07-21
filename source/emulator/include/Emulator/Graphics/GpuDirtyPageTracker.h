@@ -20,6 +20,7 @@ enum class GpuDirtyTrackingMode : uint32_t
 enum class GpuDirtyProtectionState : uint32_t
 {
 	Writable,
+	Capturing,
 	Arming,
 	Armed,
 	Disarming,
@@ -28,7 +29,7 @@ enum class GpuDirtyProtectionState : uint32_t
 
 [[nodiscard]] constexpr bool GpuDirtyProtectionStateHandlesFault(GpuDirtyProtectionState state)
 {
-	return state != GpuDirtyProtectionState::Writable;
+	return state != GpuDirtyProtectionState::Writable && state != GpuDirtyProtectionState::Capturing;
 }
 
 [[nodiscard]] constexpr bool GpuDirtyProtectionStateNeedsArmingRollback(GpuDirtyProtectionState observed)
@@ -53,10 +54,13 @@ struct GpuDirtyReadObservation
 
 struct GpuDirtyPageProtectionOps
 {
-	void* context                                                                             = nullptr;
-	bool (*protect)(void* context, uintptr_t address, size_t size, Core::VirtualMemory::Mode mode,
-	                Core::VirtualMemory::Mode* old_mode) noexcept                             = nullptr;
-	bool (*protect_write_signal_safe)(void* context, uintptr_t address, size_t size) noexcept = nullptr;
+	void* context = nullptr;
+	Core::VirtualMemory::ProtectionChangeResult (*remove_write_and_capture)(
+	    void* context, uintptr_t address, size_t size, Core::VirtualMemory::CapturedProtectionVisitor visitor,
+	    void* visitor_context) noexcept = nullptr;
+	bool (*remove_write)(void* context, uintptr_t address, size_t size, uint32_t restore_token) noexcept = nullptr;
+	bool (*restore)(void* context, uintptr_t address, size_t size, uint32_t restore_token) noexcept = nullptr;
+	bool (*restore_signal_safe)(void* context, uintptr_t address, size_t size, uint32_t restore_token) noexcept = nullptr;
 };
 
 // Fixed-capacity, signal-safe dirty-page metadata. Registration and protection
