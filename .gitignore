@@ -2,14 +2,24 @@
 .vs/
 .idea/
 .vscode/
+.cursor/
+.claude/
+.codex/
+.agents/
 .DS_Store
 
 # Build output
 _build*/
 _bin*/
+_Build/
+__bin/
 build/
 out/
 cmake-build-*/
+*.exe
+*.pdb
+*.ilk
+*.map
 
 # Backup / patch leftovers
 *.orig

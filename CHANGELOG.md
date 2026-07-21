@@ -15,6 +15,8 @@ use semantic version tags where practical.
 
 ### Changed
 
+- Repository packaging no longer tracks generated executables, legacy build
+  wrappers, obsolete AppVeyor configuration, or editor-specific agent files.
 - Vulkan queue selection can share the graphics family when exclusive resources
   do not perform queue-family ownership transfers.
 - Vulkan format validation now checks the optimal tiling mode used by render and
