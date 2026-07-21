@@ -2,6 +2,8 @@
 
 #include "Kyty/UnitTest.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -155,6 +157,23 @@ static bool TestGuestRead64(uint64_t addr, uint64_t* out, void* ctx)
 	}
 	std::memcpy(out, g->bytes.data() + off, sizeof(uint64_t));
 	return true;
+}
+
+TEST(EmulatorLoaderTls, InitializesOnlyFileBackedTlsPrefix)
+{
+	using Kyty::Loader::LoaderInitializeThreadTlsImage;
+
+	constexpr uint64_t kImageSize = 32;
+	constexpr uint64_t kInitSize  = 12;
+	std::array<uint8_t, kImageSize> source {};
+	std::array<uint8_t, kImageSize> tls {};
+	source.fill(0xa5);
+	tls.fill(0xcc);
+
+	LoaderInitializeThreadTlsImage(tls.data(), tls.size(), source.data(), kInitSize);
+
+	EXPECT_TRUE(std::equal(tls.begin(), tls.begin() + kInitSize, source.begin()));
+	EXPECT_TRUE(std::all_of(tls.begin() + kInitSize, tls.end(), [](uint8_t value) { return value == 0; }));
 }
 
 TEST(EmulatorLoaderTls, PreparesThreadTlsRelocatesSelfAndClearsUnconstructedContext)

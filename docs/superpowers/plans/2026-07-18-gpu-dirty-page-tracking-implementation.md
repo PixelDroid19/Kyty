@@ -15,7 +15,7 @@
 - Use `Core::VirtualMemory::GetPageSize()`; never assume 4 KiB.
 - Preserve existing XXH64 behavior on registration/protection/capacity/upload failure.
 - Darwin ARM64 write-fault classification remains fallback in this phase.
-- Do not copy SharpEmu code; use only clean-room architectural concepts.
+- Do not copy third-party emulator code; use only clean-room architectural concepts.
 
 ### Task 1: Fixed-capacity dirty-page tracker
 

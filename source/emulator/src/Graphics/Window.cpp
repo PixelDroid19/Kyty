@@ -1703,7 +1703,6 @@ void game_main_loop(GameApi* game, void* data)
 
 	Core::Timer timer;
 	timer.Start();
-
 	if (!game->init(game, timer, data))
 	{
 		need_exit = true;
@@ -1884,45 +1883,14 @@ struct VulkanQueues
 	Vector<QueueInfo> present;
 };
 
-static void VulkanDumpQueues(const VulkanQueues& qs)
-{
-	printf("Queues selected:\n");
-	printf("\t family_count = %u\n", qs.family_count);
-	Core::StringList nums;
-	for (auto u: qs.family_used)
-	{
-		nums.Add(String::FromPrintf("%u", u));
-	}
-	printf("\t family_used = [%s]\n", nums.Concat(U", ").C_Str());
-	printf("\t graphics:\n");
-	for (const auto& q: qs.graphics)
-	{
-		printf("\t\t family = %u, index = %u\n", q.family, q.index);
-	}
-	printf("\t compute:\n");
-	for (const auto& q: qs.compute)
-	{
-		printf("\t\t family = %u, index = %u\n", q.family, q.index);
-	}
-	printf("\t transfer:\n");
-	for (const auto& q: qs.transfer)
-	{
-		printf("\t\t family = %u, index = %u\n", q.family, q.index);
-	}
-	printf("\t present:\n");
-	for (const auto& q: qs.present)
-	{
-		printf("\t\t family = %u, index = %u\n", q.family, q.index);
-	}
-}
-
-static VulkanQueues VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, uint32_t graphics_num, uint32_t compute_num,
-                                     uint32_t transfer_num, uint32_t present_num)
+static void VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, uint32_t graphics_num, uint32_t compute_num,
+                             uint32_t transfer_num, uint32_t present_num, VulkanQueues* out)
 {
 	EXIT_IF(device == nullptr);
 	EXIT_IF(surface == nullptr);
+	EXIT_IF(out == nullptr);
 
-	VulkanQueues qs;
+	VulkanQueues& qs = *out;
 
 	uint32_t queue_family_count = 0;
 	vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nullptr);
@@ -1936,9 +1904,6 @@ static VulkanQueues VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surfa
 	{
 		VkBool32 presentation_supported = VK_FALSE;
 		vkGetPhysicalDeviceSurfaceSupportKHR(device, family, surface, &presentation_supported);
-
-		printf("\tqueue family: %s [count = %u], [present = %s]\n", string_VkQueueFlags(f.queueFlags).c_str(), f.queueCount,
-		       (presentation_supported == VK_TRUE ? "true" : "false"));
 
 		for (uint32_t i = 0; i < f.queueCount; i++)
 		{
@@ -1970,33 +1935,63 @@ static VulkanQueues VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surfa
 		}
 	}
 
-	for (uint32_t i = 0; i < compute_num; i++)
+	// Keep exclusive resources on the graphics queue family whenever possible.
+	// The renderer uses VK_SHARING_MODE_EXCLUSIVE and does not emit queue-family
+	// ownership transfers, so selecting a separate compute/transfer family makes
+	// uploads and presentation invalid on drivers that expose dedicated families.
+	if (!qs.graphics.IsEmpty())
 	{
-		if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.compute == b; }); qs.available.IndexValid(index))
+		const QueueInfo primary = qs.graphics.At(0);
+		if (primary.compute)
 		{
-			qs.family_used[qs.available.At(index).family]++;
-			qs.compute.Add(qs.available.At(index));
-			qs.available.RemoveAt(index);
+			qs.compute.Add(primary);
+		}
+		if (primary.transfer)
+		{
+			qs.transfer.Add(primary);
+		}
+		if (primary.present)
+		{
+			qs.present.Add(primary);
 		}
 	}
 
-	for (uint32_t i = 0; i < transfer_num; i++)
+	if (qs.compute.IsEmpty())
 	{
-		if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.transfer == b; }); qs.available.IndexValid(index))
+		for (uint32_t i = 0; i < compute_num; i++)
 		{
-			qs.family_used[qs.available.At(index).family]++;
-			qs.transfer.Add(qs.available.At(index));
-			qs.available.RemoveAt(index);
+			if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.compute == b; }); qs.available.IndexValid(index))
+			{
+				qs.family_used[qs.available.At(index).family]++;
+				qs.compute.Add(qs.available.At(index));
+				qs.available.RemoveAt(index);
+			}
 		}
 	}
 
-	for (uint32_t i = 0; i < present_num; i++)
+	if (qs.transfer.IsEmpty())
 	{
-		if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.present == b; }); qs.available.IndexValid(index))
+		for (uint32_t i = 0; i < transfer_num; i++)
 		{
-			qs.family_used[qs.available.At(index).family]++;
-			qs.present.Add(qs.available.At(index));
-			qs.available.RemoveAt(index);
+			if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.transfer == b; }); qs.available.IndexValid(index))
+			{
+				qs.family_used[qs.available.At(index).family]++;
+				qs.transfer.Add(qs.available.At(index));
+				qs.available.RemoveAt(index);
+			}
+		}
+	}
+
+	if (qs.present.IsEmpty())
+	{
+		for (uint32_t i = 0; i < present_num; i++)
+		{
+			if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.present == b; }); qs.available.IndexValid(index))
+			{
+				qs.family_used[qs.available.At(index).family]++;
+				qs.present.Add(qs.available.At(index));
+				qs.available.RemoveAt(index);
+			}
 		}
 	}
 
@@ -2037,7 +2032,6 @@ static VulkanQueues VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surfa
 		}
 	}
 
-	return qs;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -2080,10 +2074,9 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 
 		printf("Vulkan device: %s\n", device_properties.deviceName);
 
-		auto qs = VulkanFindQueues(device, surface, GraphicContext::QUEUE_GFX_NUM, GraphicContext::QUEUE_COMPUTE_NUM,
-		                           GraphicContext::QUEUE_UTIL_NUM, GraphicContext::QUEUE_PRESENT_NUM);
-
-		VulkanDumpQueues(qs);
+		VulkanQueues qs;
+		VulkanFindQueues(device, surface, GraphicContext::QUEUE_GFX_NUM, GraphicContext::QUEUE_COMPUTE_NUM,
+		                 GraphicContext::QUEUE_UTIL_NUM, GraphicContext::QUEUE_PRESENT_NUM, &qs);
 
 		if (qs.graphics.Size() != GraphicContext::QUEUE_GFX_NUM ||
 		    !(qs.compute.Size() >= 1 && qs.compute.Size() <= GraphicContext::QUEUE_COMPUTE_NUM) ||
@@ -2167,7 +2160,7 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 			}
 		}
 
-		if (!skip_device && !CheckFormat(device, VK_FORMAT_R8G8B8A8_SRGB, false, VK_FORMAT_FEATURE_BLIT_SRC_BIT))
+		if (!skip_device && !CheckFormat(device, VK_FORMAT_R8G8B8A8_SRGB, true, VK_FORMAT_FEATURE_BLIT_SRC_BIT))
 		{
 			printf("Format VK_FORMAT_R8G8B8A8_SRGB cannot be used as transfer source\n");
 			skip_device = true;
@@ -2272,12 +2265,12 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		if (best_device == nullptr || device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
 		{
 			best_device = device;
-			best_queues = qs;
+			best_queues = std::move(qs);
 		}
 	}
 
 	*out_device = best_device;
-	*out_queues = best_queues;
+	*out_queues = std::move(best_queues);
 }
 
 static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VulkanExtensions* r,
@@ -2944,6 +2937,7 @@ static void VulkanCreate(WindowContext* ctx)
 
 	if (ctx->graphic_ctx.physical_device == nullptr)
 	{
+		std::fflush(stdout);
 		EXIT("Could not find suitable device");
 	}
 
@@ -3311,9 +3305,12 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	UtilBlitImage(&buffer, blt_src_image, blt_dst_image);
 
-	const double now_seconds   = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_time_seconds : 0.0;
-	const double fps_now       = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_fps : 0.0;
-	const double frame_time_ms = (fps_now > 0.0) ? (1000.0 / fps_now) : 0.0;
+	const double now_seconds = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_time_seconds : 0.0;
+	const double fps_now     = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_fps : 0.0;
+	const double frame_time_ms = (g_window_ctx->game != nullptr)
+	                                 ? DebugStatsFrameIntervalMs(g_window_ctx->game->m_current_time_seconds,
+	                                                             g_window_ctx->game->m_previous_time_seconds)
+	                                 : 0.0;
 	const bool   hud_drew =
 	    DebugOverlayRecord(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, vk_buffer, now_seconds, fps_now, frame_time_ms);
 

@@ -5,6 +5,7 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 
 #include <atomic>
+#include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -47,19 +48,71 @@ int KYTY_SYSV_ABI RegisterContext(int32_t context, int32_t handle, uint64_t opti
 }
 
 // sceNpTrophy2RegisterUnlockCallback — NID sUXGfNMalIo
-// Gen5 capture: rdi is a guest code pointer (callback), not a context out-param.
-// Name/ABI from public Gen5 export tables. Host has no trophy UI; accept registration without invoking the callback.
 int KYTY_SYSV_ABI RegisterUnlockCallback(void* /*callback*/, void* /*userdata*/)
 {
 	return OK;
 }
 
+int KYTY_SYSV_ABI DestroyContext(int32_t context)
+{
+	return (context > 0 ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI DestroyHandle(int32_t handle)
+{
+	return (handle > 0 ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI AbortHandle(int32_t handle)
+{
+	return (handle > 0 ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI UnregisterUnlockCallback(void* /*callback*/)
+{
+	return OK;
+}
+
+int KYTY_SYSV_ABI GetGameInfo(int32_t context, void* game_info)
+{
+	if (context <= 0 || game_info == nullptr)
+	{
+		return error_invalid_argument;
+	}
+	std::memset(game_info, 0, 0x40);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GetTrophyInfo(int32_t context, int32_t trophy_id, void* trophy_info)
+{
+	if (context <= 0 || trophy_info == nullptr)
+	{
+		return error_invalid_argument;
+	}
+	(void)trophy_id;
+	std::memset(trophy_info, 0, 0x80);
+	return OK;
+}
+
+int KYTY_SYSV_ABI ShowTrophyList(int32_t context, int32_t handle, uint32_t /*flags*/)
+{
+	return (context > 0 && handle > 0 ? OK : error_invalid_argument);
+}
+
 LIB_DEFINE(InitNpTrophy2_1)
 {
+	LIB_FUNC("Bagshr7OQ6Q", CreateContext);
 	LIB_FUNC("Fbshr7OQ6Q", CreateContext);
 	LIB_FUNC("Gz1rmUZpROM", CreateHandle);
 	LIB_FUNC("bIDov3wBu5Q", RegisterContext);
 	LIB_FUNC("sUXGfNMalIo", RegisterUnlockCallback);
+	LIB_FUNC("sysY2FHYff4", DestroyContext);
+	LIB_FUNC("d8P11CI40KE", DestroyHandle);
+	LIB_FUNC("fYapWA9xVmA", AbortHandle);
+	LIB_FUNC("wVqxM58sIKs", UnregisterUnlockCallback);
+	LIB_FUNC("4IzqhhUQ3nk", GetGameInfo);
+	LIB_FUNC("EwNylPdWUTM", GetTrophyInfo);
+	LIB_FUNC("EHQEDVXZ0TI", ShowTrophyList);
 }
 
 } // namespace Kyty::Libs::NpTrophy2

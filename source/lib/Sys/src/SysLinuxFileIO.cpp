@@ -516,9 +516,32 @@ void sys_file_get_last_access_and_write_time_utc(const String& name, SysFileTime
 	}
 }
 
-void sys_file_get_last_access_and_write_time_utc(sys_file_t& /*f*/, SysFileTimeStruct& /*a*/, SysFileTimeStruct& /*w*/)
+void sys_file_get_last_access_and_write_time_utc(sys_file_t& f, SysFileTimeStruct& a, SysFileTimeStruct& w)
 {
-	EXIT("not implemented\n");
+	if (f.type == SYS_FILE_FILE && f.f != nullptr)
+	{
+		struct stat s
+		{
+		};
+		if (::fstat(::fileno(f.f), &s) == 0)
+		{
+			a.time       = s.st_atime;
+			w.time       = s.st_mtime;
+			a.is_invalid = false;
+			w.is_invalid = false;
+			return;
+		}
+	} else if (f.type == SYS_FILE_MEMORY_STAT || f.type == SYS_FILE_MEMORY_DYN)
+	{
+		SysTimeStruct now {};
+		sys_get_system_time_utc(now);
+		sys_system_to_file_time_utc(now, a);
+		sys_system_to_file_time_utc(now, w);
+		return;
+	}
+
+	a.is_invalid = true;
+	w.is_invalid = true;
 }
 
 bool sys_file_set_last_access_time_utc(const String& name, SysFileTimeStruct& access)

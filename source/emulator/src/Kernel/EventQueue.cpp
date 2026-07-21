@@ -423,6 +423,84 @@ int KYTY_SYSV_ABI KernelDeleteAmprEvent(KernelEqueue eq, uintptr_t ident)
 	return KernelDeleteEvent(eq, ident, KERNEL_EVFILT_AMPR);
 }
 
+static void user_event_reset_func(KernelEqueueEvent* event)
+{
+	EXIT_IF(event == nullptr);
+	event->triggered    = false;
+	event->event.fflags = 0;
+	event->event.data   = 0;
+}
+
+static void user_event_trigger_func(KernelEqueueEvent* event, void* trigger_data)
+{
+	EXIT_IF(event == nullptr);
+	event->triggered = true;
+	event->event.fflags |= 0x21;
+	if (trigger_data != nullptr)
+	{
+		event->event.data = reinterpret_cast<intptr_t>(trigger_data);
+	}
+}
+
+static int KernelAddUserEventInternal(KernelEqueue eq, int id, bool /*edge*/)
+{
+	PRINT_NAME();
+
+	printf("\t eq = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
+	printf("\t id = %d\n", id);
+
+	if (eq == nullptr)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	KernelEqueueEvent event;
+	event.triggered                = false;
+	event.event.ident              = static_cast<uintptr_t>(id);
+	event.event.filter             = KERNEL_EVFILT_USER;
+	event.event.flags              = 0;
+	event.event.fflags             = 0;
+	event.event.data               = 0;
+	event.event.udata              = nullptr;
+	event.filter.trigger_func      = user_event_trigger_func;
+	event.filter.reset_func        = user_event_reset_func;
+	event.filter.delete_event_func = nullptr;
+	event.filter.data              = nullptr;
+
+	return KernelAddEvent(eq, event);
+}
+
+int KYTY_SYSV_ABI KernelAddUserEvent(KernelEqueue eq, int id)
+{
+	return KernelAddUserEventInternal(eq, id, false);
+}
+
+int KYTY_SYSV_ABI KernelAddUserEventEdge(KernelEqueue eq, int id)
+{
+	return KernelAddUserEventInternal(eq, id, true);
+}
+
+int KYTY_SYSV_ABI KernelDeleteUserEvent(KernelEqueue eq, int id)
+{
+	PRINT_NAME();
+
+	printf("\t eq = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
+	printf("\t id = %d\n", id);
+
+	return KernelDeleteEvent(eq, static_cast<uintptr_t>(id), KERNEL_EVFILT_USER);
+}
+
+int KYTY_SYSV_ABI KernelTriggerUserEvent(KernelEqueue eq, int id, void* udata)
+{
+	PRINT_NAME();
+
+	printf("\t eq    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
+	printf("\t id    = %d\n", id);
+	printf("\t udata = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(udata));
+
+	return KernelTriggerEvent(eq, static_cast<uintptr_t>(id), KERNEL_EVFILT_USER, udata);
+}
+
 int KYTY_SYSV_ABI KernelAddEvent(KernelEqueue eq, const KernelEqueueEvent& event)
 {
 	auto pin = KernelAcquireEqueue(eq);
@@ -592,7 +670,6 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 		// printf("\ttimedout\n");
 		return KERNEL_ERROR_ETIMEDOUT;
 	}
-
 	// printf("\treceived %u events\n", *out);
 
 	return OK;

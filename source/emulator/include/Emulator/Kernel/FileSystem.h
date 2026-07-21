@@ -35,6 +35,13 @@ struct FileStat
 	unsigned int: (8 / 2) * (16 - static_cast<int>(sizeof(KernelTimespec)));
 };
 
+struct KernelPollFd
+{
+	int32_t  fd;
+	int16_t  events;
+	int16_t  revents;
+};
+
 KYTY_SUBSYSTEM_DEFINE(FileSystem);
 
 void   Mount(const String& folder, const String& point);
@@ -80,11 +87,15 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence);
 int KYTY_SYSV_ABI     KernelStat(const char* path, FileStat* sb);
 int KYTY_SYSV_ABI     KernelFstat(int d, FileStat* sb);
+int KYTY_SYSV_ABI     KernelRename(const char* from, const char* to);
 int KYTY_SYSV_ABI     KernelUnlink(const char* path);
 int KYTY_SYSV_ABI     KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep);
 int KYTY_SYSV_ABI     KernelGetdents(int fd, char* buf, int nbytes);
 int KYTY_SYSV_ABI     KernelMkdir(const char* path, uint16_t mode);
 int KYTY_SYSV_ABI     KernelRmdir(const char* path);
+int KYTY_SYSV_ABI     KernelDup(int old_d);
+int KYTY_SYSV_ABI     KernelDup2(int old_d, int new_d);
+int KYTY_SYSV_ABI     KernelPoll(struct KernelPollFd* fds, uint32_t count, int /*timeout*/);
 // sceKernelAprResolveFilepathsToIdsAndFileSizes: paths[count] → ids[count] (u32, optional)
 // and sizes[count] (u64, optional). File ids are stable host-side hashes of the guest path.
 int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* paths, uint64_t count, uint32_t* ids,

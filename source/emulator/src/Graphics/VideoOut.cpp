@@ -30,6 +30,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <utility>
 #include <vector>
 
@@ -2013,13 +2014,21 @@ VideoOutRegisteredHostExtentStatus VideoOutGetRegisteredHostExtent(Graphics::Com
 	return g_video_out_context->GetRegisteredHostExtent(buffer, guest_width, guest_height, host_width, host_height);
 }
 
+bool VideoOutIsValidFlipMode(int flip_mode)
+{
+	return flip_mode >= 1 && flip_mode <= 4;
+}
+
 KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg)
 {
 	PRINT_NAME();
 
 	EXIT_IF(g_video_out_context == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(flip_mode != 1);
+	if (!VideoOutIsValidFlipMode(flip_mode))
+	{
+		return VIDEO_OUT_ERROR_INVALID_VALUE;
+	}
 
 	if (index < 0 || index > 15)
 	{
@@ -2039,7 +2048,7 @@ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64
 void VideoOutSubmitFlipInternal(int handle, int index, int flip_mode, int64_t flip_arg)
 {
 	EXIT_IF(g_video_out_context == nullptr);
-	if (flip_mode != 1)
+	if (!VideoOutIsValidFlipMode(flip_mode))
 	{
 		EXIT("Internal VideoOut flip has unsupported mode: handle=%d index=%d mode=%d\n", handle, index, flip_mode);
 	}
@@ -2240,6 +2249,247 @@ KYTY_SYSV_ABI int VideoOutSetWindowModeMargins(int handle, int top, int bottom)
 
 	printf("\t top    = %d\n", top);
 	printf("\t bottom = %d\n", bottom);
+
+	return OK;
+}
+
+namespace {
+
+constexpr uint64_t kVideoOutOutputModeDefault   = 1;
+constexpr uint64_t kVideoOutOutputMode119_88Hz  = 0xF;
+constexpr size_t   kVideoOutOutputOptionsSize   = 0x40;
+
+bool IsValidVideoOutEvent(const LibKernel::EventQueue::KernelEvent* ev)
+{
+	return ev != nullptr && ev->filter == EventQueue::KERNEL_EVFILT_VIDEO_OUT &&
+	       (ev->ident == VIDEO_OUT_EVENT_FLIP || ev->ident == VIDEO_OUT_EVENT_VBLANK);
+}
+
+} // namespace
+
+KYTY_SYSV_ABI int VideoOutDeleteVblankEvent(LibKernel::EventQueue::KernelEqueue eq, int handle)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_video_out_context == nullptr);
+
+	auto session = g_video_out_context->AcquireSession(handle);
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+
+	std::vector<EventQueue::KernelEqueuePin> pins;
+	{
+		auto* ctx = session.Get();
+		Core::LockGuard config_lock(ctx->mutex);
+		for (auto* binding: ctx->vblank_events)
+		{
+			if (binding != nullptr && binding->identity.eq == eq)
+			{
+				if (auto pin = EventQueue::KernelAcquireEqueue(binding->identity))
+				{
+					pins.push_back(std::move(pin));
+				}
+			}
+		}
+	}
+
+	for (auto& pin: pins)
+	{
+		const auto result =
+		    EventQueue::KernelDeleteEvent(pin, VIDEO_OUT_EVENT_VBLANK, EventQueue::KERNEL_EVFILT_VIDEO_OUT);
+		EXIT_NOT_IMPLEMENTED(result != OK && result != LibKernel::KERNEL_ERROR_ENOENT);
+	}
+
+	return OK;
+}
+
+KYTY_SYSV_ABI int VideoOutGetEventId(const LibKernel::EventQueue::KernelEvent* ev)
+{
+	PRINT_NAME();
+
+	if (ev == nullptr)
+	{
+		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+	}
+
+	if (!IsValidVideoOutEvent(ev))
+	{
+		return VIDEO_OUT_ERROR_INVALID_EVENT;
+	}
+
+	return static_cast<int>(ev->ident);
+}
+
+KYTY_SYSV_ABI int VideoOutGetEventData(const LibKernel::EventQueue::KernelEvent* ev, uint64_t* data)
+{
+	PRINT_NAME();
+
+	if (ev == nullptr || data == nullptr)
+	{
+		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+	}
+
+	if (!IsValidVideoOutEvent(ev))
+	{
+		return VIDEO_OUT_ERROR_INVALID_EVENT;
+	}
+
+	*data = static_cast<uint64_t>(ev->data);
+	return OK;
+}
+
+KYTY_SYSV_ABI int VideoOutConfigureOutput(int handle)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_video_out_context == nullptr);
+
+	auto session = g_video_out_context->AcquireSession(handle);
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+
+	return OK;
+}
+
+KYTY_SYSV_ABI int VideoOutInitializeOutputOptions(void* options)
+{
+	PRINT_NAME();
+
+	if (options == nullptr)
+	{
+		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+	}
+
+	std::memset(options, 0, kVideoOutOutputOptionsSize);
+	return OK;
+}
+
+KYTY_SYSV_ABI int VideoOutIsOutputSupported(int handle, uint64_t mode, const void* options, const void* reserved_pointer,
+                                            uint64_t reserved)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_video_out_context == nullptr);
+
+	auto session = g_video_out_context->AcquireSession(handle);
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+
+	if (reserved_pointer != nullptr || reserved != 0)
+	{
+		return VIDEO_OUT_ERROR_INVALID_VALUE;
+	}
+
+	if (options != nullptr)
+	{
+		const auto* bytes = static_cast<const uint8_t*>(options);
+		for (size_t i = 0; i < kVideoOutOutputOptionsSize; i++)
+		{
+			if (bytes[i] != 0)
+			{
+				return VIDEO_OUT_ERROR_INVALID_OPTION;
+			}
+		}
+	}
+
+	if (mode != kVideoOutOutputModeDefault && mode != kVideoOutOutputMode119_88Hz)
+	{
+		return VIDEO_OUT_ERROR_UNSUPPORTED_OUTPUT_MODE;
+	}
+
+	return mode == kVideoOutOutputModeDefault ? 1 : 0;
+}
+
+KYTY_SYSV_ABI int VideoOutUnregisterBuffers(int handle, int attribute_index)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_video_out_context == nullptr);
+
+	if (attribute_index < 0)
+	{
+		return VIDEO_OUT_ERROR_INVALID_VALUE;
+	}
+
+	auto session = g_video_out_context->AcquireSession(handle);
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+
+	auto* ctx = session.Get();
+	Core::LockGuard config_lock(ctx->mutex);
+
+	int set_index = -1;
+	if (attribute_index < static_cast<int>(ctx->buffers_sets.Size()))
+	{
+		set_index = attribute_index;
+	} else
+	{
+		for (int i = 0; i < static_cast<int>(ctx->buffers_sets.Size()); i++)
+		{
+			if (ctx->buffers_sets[i].set_id == attribute_index)
+			{
+				set_index = i;
+				break;
+			}
+		}
+	}
+
+	if (set_index < 0)
+	{
+		return VIDEO_OUT_ERROR_INVALID_VALUE;
+	}
+
+	const auto& set = ctx->buffers_sets[set_index];
+	for (int slot = set.start_index; slot < set.start_index + set.num; slot++)
+	{
+		if (slot >= 0 && slot < 16)
+		{
+			ctx->buffers[slot] = {};
+		}
+	}
+	ctx->buffers_sets.RemoveAt(set_index);
+	return OK;
+}
+
+KYTY_SYSV_ABI int VideoOutWaitVblank(int handle)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_video_out_context == nullptr);
+
+	auto session = g_video_out_context->AcquireSession(handle);
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+
+	auto* ctx = session.Get();
+	uint64_t start_count = 0;
+	{
+		Core::LockGuard config_lock(ctx->mutex);
+		start_count = ctx->vblank_status.count;
+	}
+
+	constexpr LibKernel::KernelUseconds frame_us = 16667;
+	for (LibKernel::KernelUseconds waited = 0; waited <= frame_us; waited += 1000)
+	{
+		{
+			Core::LockGuard config_lock(ctx->mutex);
+			if (ctx->vblank_status.count > start_count)
+			{
+				return OK;
+			}
+		}
+		LibKernel::KernelUsleep(1000);
+	}
 
 	return OK;
 }

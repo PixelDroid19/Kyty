@@ -49,6 +49,17 @@ GpuMemoryOverlapSnapshot Snapshot(std::initializer_list<GpuMemoryOverlapEntry> e
 
 } // namespace
 
+TEST(EmulatorVideoOutResolution, AcceptsDefinedVsyncFlipModes)
+{
+	using namespace Libs::VideoOut;
+	EXPECT_FALSE(VideoOutIsValidFlipMode(0));
+	EXPECT_TRUE(VideoOutIsValidFlipMode(1));
+	EXPECT_TRUE(VideoOutIsValidFlipMode(2));
+	EXPECT_TRUE(VideoOutIsValidFlipMode(3));
+	EXPECT_TRUE(VideoOutIsValidFlipMode(4));
+	EXPECT_FALSE(VideoOutIsValidFlipMode(5));
+}
+
 TEST(EmulatorVideoOutResolution, SelectsEveryImageBeforeReportingScaledSetSuccess)
 {
 	VideoOutVulkanImage first;

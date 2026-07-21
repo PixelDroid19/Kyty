@@ -67,13 +67,108 @@ int KYTY_SYSV_ABI NetGetMacAddress(Net::NetEtherAddr* addr, int flags)
 	return NET_CALL(Net::NetGetMacAddress(addr, flags));
 }
 
+static int KYTY_SYSV_ABI NetEpollCreate(const char* name, int flags)
+{
+	PRINT_NAME();
+	printf("\t name  = %s\n", name != nullptr ? name : "(null)");
+	printf("\t flags = %d\n", flags);
+	EXIT("Net epoll is not implemented\n");
+	return -1;
+}
+
+static int KYTY_SYSV_ABI NetEpollDestroy(int epoll_id)
+{
+	PRINT_NAME();
+	printf("\t epoll_id = %d\n", epoll_id);
+	EXIT("Net epoll is not implemented\n");
+	return -1;
+}
+
+static int KYTY_SYSV_ABI NetEpollControl(int epoll_id, int operation, int socket, const void* event)
+{
+	PRINT_NAME();
+	printf("\t epoll_id = %d\n", epoll_id);
+	printf("\t operation = %d\n", operation);
+	printf("\t socket    = %d\n", socket);
+	printf("\t event     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(event));
+	EXIT("Net epoll is not implemented\n");
+	return -1;
+}
+
+static int KYTY_SYSV_ABI NetEpollWait(int epoll_id, void* events, int max_events, int timeout_ms)
+{
+	PRINT_NAME();
+	printf("\t epoll_id   = %d\n", epoll_id);
+	printf("\t events     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(events));
+	printf("\t max_events = %d\n", max_events);
+	printf("\t timeout_ms = %d\n", timeout_ms);
+	EXIT("Net epoll is not implemented\n");
+	return -1;
+}
+
+static int KYTY_SYSV_ABI NetResolverStartNtoa(int resolver_id, const char* hostname, void* address, int timeout_ms, int retries,
+                                              int flags)
+{
+	PRINT_NAME();
+	printf("\t resolver_id = %d\n", resolver_id);
+	printf("\t hostname    = %s\n", hostname != nullptr ? hostname : "(null)");
+	printf("\t address     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
+	printf("\t timeout_ms  = %d\n", timeout_ms);
+	printf("\t retries     = %d\n", retries);
+	printf("\t flags       = %d\n", flags);
+	EXIT("Net resolver is not implemented\n");
+	return -1;
+}
+
+static int KYTY_SYSV_ABI NetResolverStartAton()
+{
+	PRINT_NAME();
+	EXIT("Net address-to-name resolver is not implemented\n");
+	return -1;
+}
+
+static int KYTY_SYSV_ABI NetGetSockInfo(int socket, void* info, int info_size, int flags)
+{
+	PRINT_NAME();
+	printf("\t socket    = %d\n", socket);
+	printf("\t info      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
+	printf("\t info_size = %d\n", info_size);
+	printf("\t flags     = %d\n", flags);
+	EXIT("Net socket information is not implemented\n");
+	return -1;
+}
+
 LIB_DEFINE(InitNet_1_Net)
 {
 	LIB_FUNC("Nlev7Lg8k3A", LibNet::NetInit);
+	LIB_FUNC("cTGkc6-TBlI", Net::NetTerm);
 	LIB_FUNC("dgJBaeJnGpo", LibNet::NetPoolCreate);
+	LIB_FUNC("K7RlrTkI-mw", Net::NetPoolDestroy);
+	LIB_FUNC("HQOwnfMGipQ", LibNet::GetNetErrorAddr);
+	LIB_FUNC("Q4qBuN-c0ZM", Net::NetSocket);
+	LIB_FUNC("45ggEzakPJQ", Net::NetSocketClose);
+	LIB_FUNC("bErx49PgxyY", Net::NetBind);
+	LIB_FUNC("kOj1HiAGE54", Net::NetListen);
+	LIB_FUNC("PIWqhn9oSxc", Net::NetAccept);
+	LIB_FUNC("2mKX2Spso7I", Net::NetSetsockopt);
+	LIB_FUNC("xphrZusl78E", Net::NetGetsockopt);
+	LIB_FUNC("9T2pDF2Ryqg", Net::NetHtonl);
+	LIB_FUNC("iWQWrwiSt8A", Net::NetHtons);
+	LIB_FUNC("pQGpHYopAIY", Net::NetNtohl);
+	LIB_FUNC("Rbvt+5Y2iEw", Net::NetNtohs);
+	LIB_FUNC("C4UgDHHPvdw", Net::NetResolverCreate);
+	LIB_FUNC("kJlYH5uMAWI", Net::NetResolverDestroy);
+	LIB_FUNC("J5i3hiLJMPk", Net::NetResolverGetError);
 	LIB_FUNC("8Kcp5d-q1Uo", LibNet::NetInetPton);
 	LIB_FUNC("v6M4txecCuo", LibNet::NetEtherNtostr);
 	LIB_FUNC("6Oc0bLsIYe0", LibNet::NetGetMacAddress);
+	LIB_FUNC("SF47kB2MNTo", LibNet::NetEpollCreate);
+	LIB_FUNC("Inp1lfL+Jdw", LibNet::NetEpollDestroy);
+	LIB_FUNC("ZVw46bsasAk", LibNet::NetEpollControl);
+	LIB_FUNC("drjIbDbA7UQ", LibNet::NetEpollWait);
+	LIB_FUNC("Nd91WaWmG2w", LibNet::NetResolverStartNtoa);
+	LIB_FUNC("Apb4YDxKsRI", LibNet::NetResolverStartAton);
+	LIB_FUNC("hLuXdjHnhiI", LibNet::NetGetSockInfo);
 }
 
 } // namespace LibNet
@@ -87,6 +182,8 @@ namespace Ssl = Network::Ssl;
 LIB_DEFINE(InitNet_1_Ssl)
 {
 	LIB_FUNC("hdpVEUDFW3s", Ssl::SslInit);
+	LIB_FUNC("0K1yQ6Lv-Yc", Ssl::SslTerm);
+	LIB_FUNC("viRXSHZYd0c", Ssl::SslClose);
 }
 
 } // namespace LibSsl
@@ -100,6 +197,7 @@ namespace Http = Network::Http;
 LIB_DEFINE(InitNet_1_Http)
 {
 	LIB_FUNC("A9cVMUtEp4Y", Http::HttpInit);
+	LIB_FUNC("Ik-KpLTlf7Q", Http::HttpTerm);
 	LIB_FUNC("0gYjPTR-6cY", Http::HttpCreateTemplate);
 	LIB_FUNC("4I8vEpuEhZ8", Http::HttpDeleteTemplate);
 	LIB_FUNC("s2-NPIvz+iA", Http::HttpSetNonblock);
@@ -139,6 +237,7 @@ LIB_DEFINE(InitNet_1_NetCtl)
 	LIB_FUNC("iQw3iQPhvUQ", NetCtl::NetCtlCheckCallback);
 	LIB_FUNC("uBPlr0lbuiI", NetCtl::NetCtlGetState);
 	LIB_FUNC("UJ+Z7Q+4ck0", NetCtl::NetCtlRegisterCallback);
+	LIB_FUNC("1NE9OWdBIww", NetCtl::NetCtlRegisterCallback);
 	LIB_FUNC("obuxdTiwkF8", NetCtl::NetCtlGetInfo);
 }
 

@@ -1,8 +1,10 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/ShaderResolutionUsageCache.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Log.h"
 
 UT_BEGIN(EmulatorShaderResolutionUsageCache);
 
@@ -47,6 +49,14 @@ TEST(EmulatorShaderResolutionUsageCache, RetainsParsedIrForReadWriteClassificati
 {
 	ShaderResolutionUsageCache cache(1);
 	const uint32_t             shader[] = {0xe01c2000u, 0x80000004u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
 	const auto result = cache.GetOrAnalyze(
 	    {0x1000, 1, 1},
 	    [&shader]()

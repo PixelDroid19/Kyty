@@ -8,6 +8,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Kernel/FileSystem.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/CxaDynamicCast.h"
 #include "Emulator/Libs/CxxLocale.h"
@@ -19,6 +20,7 @@
 #include "Emulator/Loader/RuntimeLinker.h"
 
 #include <cctype>
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -27,14 +29,64 @@
 #include <ctime>
 #include <cwchar>
 #include <mutex>
+#include <setjmp.h>
 #include <strings.h>
 #include <unordered_map>
 
-// setjmp/longjmp: must NOT be wrapped in a C++ function (the wrapper frame would
-// be gone by the time longjmp fires). Kyty runs guest code natively, so we bind
-// the guest NIDs straight to the host implementations.
-extern "C" int  _setjmp(void*);
-extern "C" void _longjmp(void*, int);
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
+// Orbis uses the FreeBSD amd64 _setjmp layout (72 bytes). UCRT's jmp_buf is
+// 256 bytes and has a different layout, so forwarding to host setjmp corrupts
+// adjacent guest memory. Save and restore the guest SysV context directly.
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+extern "C" KYTY_SYSV_ABI __attribute__((naked)) int kyty_setjmp(void* /*env*/)
+{
+	__asm__ volatile("movq (%rsp), %rdx\n\t"
+	                 "movq %rdx, 0(%rdi)\n\t"
+	                 "movq %rbx, 8(%rdi)\n\t"
+	                 "movq %rsp, 16(%rdi)\n\t"
+	                 "movq %rbp, 24(%rdi)\n\t"
+	                 "movq %r12, 32(%rdi)\n\t"
+	                 "movq %r13, 40(%rdi)\n\t"
+	                 "movq %r14, 48(%rdi)\n\t"
+	                 "movq %r15, 56(%rdi)\n\t"
+	                 "fnstcw 64(%rdi)\n\t"
+	                 "stmxcsr 68(%rdi)\n\t"
+	                 "xorl %eax, %eax\n\t"
+	                 "ret\n\t");
+}
+
+extern "C" KYTY_SYSV_ABI __attribute__((naked)) void kyty_longjmp(void* /*env*/, int /*value*/)
+{
+	__asm__ volatile("movq %rdi, %rdx\n\t"
+	                 "stmxcsr -4(%rsp)\n\t"
+	                 "movl 68(%rdx), %eax\n\t"
+	                 "andl $0xffffffc0, %eax\n\t"
+	                 "movl -4(%rsp), %edi\n\t"
+	                 "andl $0x3f, %edi\n\t"
+	                 "xorl %eax, %edi\n\t"
+	                 "movl %edi, -4(%rsp)\n\t"
+	                 "ldmxcsr -4(%rsp)\n\t"
+	                 "movl %esi, %eax\n\t"
+	                 "movq 0(%rdx), %rcx\n\t"
+	                 "movq 8(%rdx), %rbx\n\t"
+	                 "movq 16(%rdx), %rsp\n\t"
+	                 "movq 24(%rdx), %rbp\n\t"
+	                 "movq 32(%rdx), %r12\n\t"
+	                 "movq 40(%rdx), %r13\n\t"
+	                 "movq 48(%rdx), %r14\n\t"
+	                 "movq 56(%rdx), %r15\n\t"
+	                 "fldcw 64(%rdx)\n\t"
+	                 "testl %eax, %eax\n\t"
+	                 "jnz 1f\n\t"
+	                 "incl %eax\n\t"
+	                 "1:\n\t"
+	                 "movq %rcx, (%rsp)\n\t"
+	                 "ret\n\t");
+}
+#endif
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -46,10 +98,13 @@ using Kyty::Libs::Graphics::GpuMemoryNotifyHostWrite;
 
 LIB_VERSION("libc", 1, "libc", 1, 1);
 
-// Gen5 libc/libSceLibcInternal "need" flag: 0 means already initialized so the
-// guest skips redundant CRT bootstrap. 1 re-enters init and was observed to
-// leave application globals half-built after ApplicationHeap create.
-static uint32_t g_need_flag = 0;
+// Gen5 libc/libSceLibcInternal "need" flag: non-zero asks the guest CRT to run
+// heap/TSD bootstrap. Zero claims "already initialized" and skips that path.
+// A title that uses libc's internal mspace before ApplicationHeap create can
+// leave the mspace at BSS zero when this stays 0, so operator new
+// returns null → bad_alloc → terminate (DebugRaiseException 0xa0020008).
+// Keep both LibC and LibcInternal objects in sync.
+static uint32_t g_need_flag = 1;
 
 using cxa_destructor_func_t = void (*)(void*);
 
@@ -75,6 +130,15 @@ static KYTY_SYSV_ABI void exit(int code)
 static KYTY_SYSV_ABI void init_env()
 {
 	PRINT_NAME();
+}
+
+// The C++ runtime uses _Cnd_t as a pointer to the kernel condition object.
+// _Cnd_init receives the address of that handle and owns its allocation; use
+// the same condition implementation as the public pthread ABI so both paths
+// share lifetime and error handling.
+static KYTY_SYSV_ABI int c_cnd_init(LibKernel::PthreadCond* cond)
+{
+	return LibKernel::PthreadCondInit(cond, nullptr, nullptr);
 }
 
 enum class AllocationOwner
@@ -172,6 +236,48 @@ static bool free_by_owner(void* ptr)
 	return true;
 }
 
+// Capture the host allocator's live accounting for the libc bootstrap path.
+// The startup path calls malloc_stats_fast before the application heap table
+// is published, so forwarding to a guest slot at that point would recurse into
+// an uninitialized allocator. mallinfo2 is used where glibc exposes it; the
+// ledger remains the portable lower-bound fallback on other hosts.
+static void collect_host_malloc_stats(Core::MSpaceSize* out)
+{
+	if (out == nullptr)
+	{
+		return;
+	}
+
+	size_t current_inuse = 0;
+	{
+		std::lock_guard lock(g_allocations_mutex);
+		for (const auto& [ptr, record]: g_allocations)
+		{
+			(void)ptr;
+			if (record.size <= SIZE_MAX - current_inuse)
+			{
+				current_inuse += record.size;
+			}
+		}
+	}
+
+	size_t current_system = current_inuse;
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+	const auto host_info = ::mallinfo2();
+	if (host_info.arena <= static_cast<size_t>(SIZE_MAX - host_info.hblkhd))
+	{
+		current_system = std::max(current_system, static_cast<size_t>(host_info.arena + host_info.hblkhd));
+	}
+	current_inuse = std::max(current_inuse, static_cast<size_t>(host_info.uordblks));
+#endif
+
+	current_system              = std::max(current_system, current_inuse);
+	out->max_system_size     = current_system;
+	out->current_system_size = current_system;
+	out->max_inuse_size      = current_inuse;
+	out->current_inuse_size  = current_inuse;
+}
+
 // Standard C allocation routes through the guest application heap after the
 // title registers and creates it. Before that point, host allocation remains
 // the bootstrap fallback for HLE-owned libc objects.
@@ -249,29 +355,8 @@ static KYTY_SYSV_ABI void* c_memalign(size_t alignment, size_t size)
 		return nullptr;
 	}
 
-	if (LibKernel::ApplicationHeap::IsInitialized())
-	{
-		constexpr size_t kGuestMallocAlignment = 16;
-		if (alignment > kGuestMallocAlignment)
-		{
-			EXIT_NOT_IMPLEMENTED(true);
-		}
-
-		void* ptr = allocate_with_owner(size);
-		if (ptr == nullptr)
-		{
-			return nullptr;
-		}
-		if ((reinterpret_cast<uintptr_t>(ptr) & (alignment - 1)) != 0)
-		{
-			(void)free_by_owner(ptr);
-			return nullptr;
-		}
-		return ptr;
-	}
-
 	const size_t total = size + alignment - 1;
-	void*        base  = ::malloc(total);
+	void*        base  = allocate_with_owner(total);
 	if (base == nullptr)
 	{
 		return nullptr;
@@ -281,7 +366,7 @@ static KYTY_SYSV_ABI void* c_memalign(size_t alignment, size_t size)
 	const auto aligned = (raw + alignment - 1) & ~(static_cast<uintptr_t>(alignment) - 1);
 	if (!register_aligned_allocation(reinterpret_cast<void*>(aligned), AlignedAllocation {base, size, alignment}))
 	{
-		::free(base);
+		(void)free_by_owner(base);
 		return nullptr;
 	}
 	return reinterpret_cast<void*>(aligned);
@@ -313,7 +398,10 @@ static KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 		}
 
 		::memcpy(replacement, p, (allocation.size < size ? allocation.size : size));
-		::free(allocation.base);
+		if (!free_by_owner(allocation.base))
+		{
+			EXIT("ApplicationHeap free failed during aligned realloc\n");
+		}
 		return replacement;
 	}
 
@@ -360,7 +448,10 @@ static KYTY_SYSV_ABI void c_free(void* p)
 	AlignedAllocation allocation {};
 	if (claim_aligned_allocation(p, &allocation))
 	{
-		::free(allocation.base);
+		if (!free_by_owner(allocation.base))
+		{
+			EXIT("ApplicationHeap aligned free failed\n");
+		}
 		return;
 	}
 	if (!free_by_owner(p))
@@ -598,9 +689,58 @@ static KYTY_SYSV_ABI char* c_strstr(const char* haystack, const char* needle)
 {
 	return const_cast<char*>(::strrchr(s, c));
 }
-[[maybe_unused]] static KYTY_SYSV_ABI size_t c_strnlen(const char* s, size_t n)
+static KYTY_SYSV_ABI size_t c_strnlen(const char* s, size_t n)
 {
 	return ::strnlen(s, n);
+}
+static KYTY_SYSV_ABI void* c_aligned_alloc(size_t alignment, size_t size)
+{
+	return c_memalign(alignment, size);
+}
+static KYTY_SYSV_ABI int c_posix_memalign(void** memptr, size_t alignment, size_t size)
+{
+	if (memptr == nullptr)
+	{
+		return 22;
+	}
+	void* ptr = c_memalign(alignment, size);
+	if (ptr == nullptr)
+	{
+		return 12;
+	}
+	*memptr = ptr;
+	return 0;
+}
+static KYTY_SYSV_ABI int c_pthread_equal(LibKernel::Pthread thread1, LibKernel::Pthread thread2)
+{
+	return LibKernel::PthreadEqual(thread1, thread2);
+}
+static KYTY_SYSV_ABI int c_fstat(int fd, LibKernel::FileSystem::FileStat* sb)
+{
+	return LibKernel::FileSystem::KernelFstat(fd, sb);
+}
+static KYTY_SYSV_ABI int c_wcscmp(const wchar_t* s1, const wchar_t* s2)
+{
+	return ::wcscmp(s1, s2);
+}
+static KYTY_SYSV_ABI void c_perror(const char* s)
+{
+	::perror(s);
+}
+static KYTY_SYSV_ABI void c_rewind(FILE* f)
+{
+	if (f != nullptr)
+	{
+		::rewind(f);
+	}
+}
+static KYTY_SYSV_ABI int c_fgetc(FILE* f)
+{
+	return (f != nullptr ? ::fgetc(f) : EOF);
+}
+static KYTY_SYSV_ABI int c_getc(FILE* f)
+{
+	return c_fgetc(f);
 }
 static KYTY_SYSV_ABI void c_srand(unsigned int seed)
 {
@@ -912,6 +1052,24 @@ static KYTY_SYSV_ABI int c_fprintf(VA_ARGS)
 	::fwrite(buffer, 1, static_cast<size_t>(written), f);
 	return written;
 }
+static KYTY_SYSV_ABI int c_vfprintf(VA_ARGS)
+{
+	VA_CONTEXT(ctx);
+	FILE*       f   = VaArg_ptr<FILE>(&ctx.va_list);
+	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
+	if (f == nullptr || fmt == nullptr)
+	{
+		return -1;
+	}
+	char      buffer[C_UNBOUNDED_FORMAT];
+	const int written = Format(buffer, sizeof(buffer), fmt, &ctx.va_list);
+	if (written < 0)
+	{
+		return written;
+	}
+	::fwrite(buffer, 1, static_cast<size_t>(written), f);
+	return written;
+}
 // scanf parses a guest input string into guest output pointers. Kyty has no input
 // converter yet; forward to the host, which reads the guest string and writes back
 // through the pointer arguments. This is input parsing, not output formatting.
@@ -1052,9 +1210,28 @@ static KYTY_SYSV_ABI double c_atof(const char* s)
 {
 	return ::atof(s);
 }
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+using GuestQsortCompare = int(KYTY_SYSV_ABI*)(const void*, const void*);
+static thread_local GuestQsortCompare g_guest_qsort_compare = nullptr;
+
+static int qsort_compare_bridge(const void* lhs, const void* rhs)
+{
+	EXIT_IF(g_guest_qsort_compare == nullptr);
+	return g_guest_qsort_compare(lhs, rhs);
+}
+#endif
+
 static KYTY_SYSV_ABI void c_qsort(void* base, size_t n, size_t sz, int(KYTY_SYSV_ABI* cmp)(const void*, const void*))
 {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	auto previous         = g_guest_qsort_compare;
+	g_guest_qsort_compare = cmp;
+	::qsort(base, n, sz, qsort_compare_bridge);
+	g_guest_qsort_compare = previous;
+#else
 	::qsort(base, n, sz, reinterpret_cast<int (*)(const void*, const void*)>(cmp));
+#endif
 }
 static KYTY_SYSV_ABI void c_abort()
 {
@@ -1777,8 +1954,8 @@ namespace LibcInternal {
 
 LIB_VERSION("LibcInternal", 1, "LibcInternal", 1, 1);
 
-// Same contract as LibC::g_need_flag — already-initialized, skip CRT re-entry.
-static uint32_t g_need_flag = 0;
+// Same contract as LibC::g_need_flag — request CRT heap/TSD bootstrap.
+static uint32_t g_need_flag = 1;
 
 int KYTY_SYSV_ABI vprintf(const char* str, VaList* c)
 {
@@ -1939,6 +2116,39 @@ int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
 	return 0;
 }
 
+// libc malloc_stats_fast — NID KuOuD58hqn4.  The public replacement-table
+// ABI is int(void*), unlike the internal mspace form above.  During bootstrap
+// there is no application-heap handle; report the host allocator snapshot.
+int KYTY_SYSV_ABI LibcMallocStatsFast(void* stats)
+{
+	PRINT_NAME();
+	if (stats == nullptr)
+	{
+		return -1;
+	}
+
+	if (LibKernel::ApplicationHeap::HasMallocStatsFast())
+	{
+		return LibKernel::ApplicationHeap::MallocStatsFast(stats);
+	}
+	if (LibKernel::ApplicationHeap::IsInitialized())
+	{
+		return -1;
+	}
+
+	Core::MSpaceSize sizes {};
+	LibC::collect_host_malloc_stats(&sizes);
+
+	auto* out                = static_cast<LibcMallocManagedSize*>(stats);
+	out->size_version        = 0x00010028u;
+	out->reserved            = 0;
+	out->max_system_size     = sizes.max_system_size;
+	out->current_system_size = sizes.current_system_size;
+	out->max_inuse_size      = sizes.max_inuse_size;
+	out->current_inuse_size  = sizes.current_inuse_size;
+	return 0;
+}
+
 void KYTY_SYSV_ABI LibcMspaceFree(void* msp, void* ptr)
 {
 	PRINT_NAME();
@@ -2084,6 +2294,12 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Y7aJ1uydPMo", LibC::c_realloc);
 	LIB_FUNC("tIhsqj0qsFE", LibC::c_free);
 	LIB_FUNC("Ujf3KzMvRmI", LibC::c_memalign);
+	LIB_FUNC("2Btkg8k24Zg", LibC::c_aligned_alloc);
+	LIB_FUNC("cVSk9y8URbc", LibC::c_posix_memalign);
+	LIB_FUNC("KuOuD58hqn4", LibcInternal::LibcMallocStatsFast);
+	LIB_FUNC("SreZybSRWpU", LibC::c_cnd_init);
+	LIB_FUNC("7Xl257M4VNI", LibC::c_pthread_equal);
+	LIB_FUNC("mqQMh1zPPT8", LibC::c_fstat);
 	LIB_FUNC("Q3VBxCXhUHs", LibC::c_memcpy);
 	// Gen5 second memcpy NID — Dreaming Sarah std::string SSO short-assign path
 	// after __cxa_dynamic_cast (Construct Action setup): (dst, src, n=1..).
@@ -2095,6 +2311,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("h8GwqPFbu6I", LibC::c_memset_s);
 	LIB_FUNC("DfivPArhucg", LibC::c_memcmp);
 	LIB_FUNC("j4ViWNHEgww", LibC::c_strlen);
+	LIB_FUNC("5jNubw4vlAA", LibC::c_strnlen);
 	LIB_FUNC("WkkeywLJcgU", LibC::c_wcslen);
 	LIB_FUNC("0nV21JjYCH8", LibC::c_wcsncpy);
 	LIB_FUNC("CyXs2l-1kNA", LibC::c_Iswctype);
@@ -2113,9 +2330,9 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 libc_v1 strstr.
 	LIB_FUNC("viiwFMaNamA", LibC::c_strstr);
 	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new); // operator new(size_t)
-	// Gen5 libc_v1 — second operator new(size_t) NID (Dreaming Sarah after
-	// VideoOut flip path; call is `mov $size,%edi; call`).
-	LIB_FUNC("cfAXurvfl5o", LibC::cxx_new);
+	// Gen5 libc_v1 — public NID cfAXurvfl5o is __cxa_allocate_exception (not
+	// operator new). Mis-binding it to cxx_new corrupts the throw path.
+	LIB_FUNC("cfAXurvfl5o", LibC::cxa_allocate_exception);
 	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete); // operator delete(void*)
 	// Gen5 libc_v1 C++ EH — Dreaming Sarah throw path after flip/init.
 	// vkuuLfhnSZI: __cxa_throw (rdi=obj, rsi=typeinfo, rdx=dtor; ud2 after).
@@ -2170,6 +2387,12 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 sprintf_s — NID xEszJVGpybs (hard-abort after Fiber init on Astro).
 	LIB_FUNC("xEszJVGpybs", LibC::c_sprintf_s);
 	LIB_FUNC("fffwELXNVFA", LibC::c_fprintf);
+	LIB_FUNC("pDBDcY6uLSA", LibC::c_vfprintf);
+	LIB_FUNC("EMutwaQ34Jo", LibC::c_perror);
+	LIB_FUNC("3QIPIh-GDjw", LibC::c_rewind);
+	LIB_FUNC("AEuF3F2f8TA", LibC::c_fgetc);
+	LIB_FUNC("8Q60JLJ6Rv4", LibC::c_getc);
+	LIB_FUNC("pNtJdE3x49E", LibC::c_wcscmp);
 	LIB_FUNC("1Pk0qZQGeWo", LibC::c_sscanf);
 	LIB_FUNC("24m4Z4bUaoY", LibC::c_sscanf_s);
 	LIB_FUNC("jbz9I9vkqkk", LibC::c_vsprintf);
@@ -2264,8 +2487,13 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("tQIo+GIPklo", LibC::c_Xlength_error);
 
 	// setjmp / longjmp (bound directly to host — no C++ wrapper)
+	#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	LIB_FUNC("gNQ1V2vfXDE", kyty_setjmp);
+	LIB_FUNC("lKEN2IebgJ0", kyty_longjmp);
+	#else
 	LIB_FUNC("gNQ1V2vfXDE", _setjmp);
 	LIB_FUNC("lKEN2IebgJ0", _longjmp);
+	#endif
 }
 
 } // namespace Kyty::Libs

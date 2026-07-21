@@ -1,0 +1,167 @@
+name: Build and Release
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kyty-build-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build-windows:
+    name: Windows x64
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install MinGW toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-ninja
+
+      - name: Configure
+        shell: msys2 {0}
+        run: >-
+          cmake -S source -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DKYTY_PROJECT_NAME=Emulator
+          -DKYTY_WARNINGS_ARE_ERRORS=OFF
+          -DKYTY_BUILD_LAUNCHER=OFF
+          -DKYTY_BUILD_DEVTOOLS=OFF
+          -DKYTY_BUILD_UNIT_TESTS=OFF
+          -DKYTY_GENERATE_MAP_CSV=OFF
+
+      - name: Build
+        shell: msys2 {0}
+        run: cmake --build build --target fc_script --parallel 4
+
+      - name: Stage archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item build/fc_script.exe dist/
+          Copy-Item source/3rdparty/winpthread/bin/libwinpthread-1.dll dist/
+          Copy-Item scripts/run_guest.lua,README.md,CHANGELOG.md,LICENSE dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kyty-windows-x64-${{ github.sha }}
+          path: dist
+          if-no-files-found: error
+
+  build-posix:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-24.04
+            artifact: linux-x64
+          - name: macOS x64
+            os: macos-15-intel
+            artifact: macos-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libvulkan-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libasound2-dev libpulse-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure
+        run: >-
+          cmake -S source -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES=x86_64
+          -DKYTY_PROJECT_NAME=Emulator
+          -DKYTY_WARNINGS_ARE_ERRORS=OFF
+          -DKYTY_BUILD_LAUNCHER=OFF
+          -DKYTY_BUILD_DEVTOOLS=OFF
+          -DKYTY_BUILD_UNIT_TESTS=OFF
+          -DKYTY_GENERATE_MAP_CSV=OFF
+
+      - name: Build
+        run: cmake --build build --target fc_script --parallel 4
+
+      - name: Stage archive
+        run: |
+          mkdir -p dist
+          cp build/fc_script scripts/run_guest.lua README.md CHANGELOG.md LICENSE dist/
+          chmod +x dist/fc_script
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            cp source/3rdparty/vulkan/lib/macos/libMoltenVK.dylib dist/
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kyty-${{ matrix.artifact }}-${{ github.sha }}
+          path: dist
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-posix]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          win_dir="$(find artifacts -maxdepth 1 -type d -name 'kyty-windows-x64-*' -print -quit)"
+          linux_dir="$(find artifacts -maxdepth 1 -type d -name 'kyty-linux-x64-*' -print -quit)"
+          mac_dir="$(find artifacts -maxdepth 1 -type d -name 'kyty-macos-x64-*' -print -quit)"
+          test -n "$win_dir" && test -n "$linux_dir" && test -n "$mac_dir"
+          (cd "$win_dir" && zip -q -r "../../release-assets/kyty-${GITHUB_REF_NAME}-windows-x64.zip" .)
+          tar -czf "release-assets/kyty-${GITHUB_REF_NAME}-linux-x64.tar.gz" -C "$linux_dir" .
+          tar -czf "release-assets/kyty-${GITHUB_REF_NAME}-macos-x64.tar.gz" -C "$mac_dir" .
+
+      - name: Create immutable release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}" release-assets/*
+          --verify-tag
+          --title "Kyty ${GITHUB_REF_NAME}"
+          --generate-notes

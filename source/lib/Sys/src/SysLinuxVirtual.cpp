@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include <cstdlib>
 #include <chrono>
+#include <vector>
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -976,6 +977,82 @@ bool sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t back
 	return true;
 }
 
+bool sys_virtual_map_shared_fixed_replacing_owned_reservation(void* backing, uint64_t address, uint64_t backing_offset,
+                                                              uint64_t size, VirtualMemory::Mode mode)
+{
+	EXIT_IF(g_allocs == nullptr);
+
+	auto* shared = static_cast<SharedBacking*>(backing);
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (!shared_mapping_valid(shared, address, backing_offset, size, page_size, true))
+	{
+		return false;
+	}
+
+	const auto addr = static_cast<uintptr_t>(address);
+	if (addr > UINTPTR_MAX - size)
+	{
+		return false;
+	}
+	const auto end = addr + static_cast<uintptr_t>(size);
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	if (!get_host_page_range(addr, size, &page_start, &page_end))
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	auto owner = g_allocs->upper_bound(addr);
+	if (owner == g_allocs->begin())
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	--owner;
+	const uintptr_t owner_addr = owner->first;
+	const size_t    owner_size = owner->second;
+	const auto*     protection = find_protection_range(page_start);
+	if (addr < owner_addr || owner_size > UINTPTR_MAX - owner_addr || end > owner_addr + owner_size || protection == nullptr ||
+	    protection->protect != PROT_NONE || protection->end_page < page_end)
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+
+	// The caller has proved that this interval belongs to its reservation.
+	// MAP_FIXED replaces only the requested pages in one kernel operation, so
+	// the untouched prefix and suffix never become available to another thread.
+	// NOLINTNEXTLINE
+	void* ptr = mmap(reinterpret_cast<void*>(addr), size, get_protection_flag(mode), MAP_FIXED | MAP_SHARED, shared->fd,
+	                 static_cast<off_t>(backing_offset));
+	if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != addr)
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+
+	g_allocs->erase(owner);
+	if (owner_addr < addr)
+	{
+		(*g_allocs)[owner_addr] = addr - owner_addr;
+	}
+	(*g_allocs)[addr] = size;
+	const uintptr_t owner_end = owner_addr + owner_size;
+	if (end < owner_end)
+	{
+		(*g_allocs)[end] = owner_end - end;
+	}
+	assign_protection_range(page_start, page_end, get_protection_flag(mode));
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
+}
+
+bool sys_virtual_supports_shared_fixed_owned_reservation_replacement()
+{
+	return true;
+}
+
 uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                                    VirtualMemory::Mode mode, uint64_t alignment)
 {
@@ -1118,18 +1195,165 @@ bool sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mo
 			*old_mode = VirtualMemory::Mode::NoAccess;
 		}
 	}
-	pthread_mutex_unlock(&g_virtual_mutex);
-
 	const uint64_t page_size = sys_virtual_get_page_size();
 	if (mprotect(reinterpret_cast<void*>(page_start * page_size), (page_end - page_start) * page_size, get_protection_flag(mode)) == 0)
 	{
-		pthread_mutex_lock(&g_virtual_mutex);
 		assign_protection_range(page_start, page_end, get_protection_flag(mode));
 		pthread_mutex_unlock(&g_virtual_mutex);
 		return true;
 	}
-
+	pthread_mutex_unlock(&g_virtual_mutex);
 	return false;
+}
+
+VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(
+	uint64_t address, uint64_t size, VirtualMemory::CapturedProtectionVisitor visitor, void* context) noexcept
+{
+	using Status = VirtualMemory::ProtectionChangeStatus;
+	VirtualMemory::ProtectionChangeResult result {};
+	uintptr_t page_start = 0;
+	uintptr_t page_end = 0;
+	if (visitor == nullptr || !get_host_page_range(static_cast<uintptr_t>(address), size, &page_start, &page_end))
+	{
+		result.status = Status::InvalidRange;
+		return result;
+	}
+	struct NativeRun
+	{
+		uintptr_t begin = 0;
+		uintptr_t end = 0;
+		int original = PROT_NONE;
+		int target = PROT_NONE;
+	};
+	std::vector<NativeRun> runs;
+	const uint64_t page_size = sys_virtual_get_page_size();
+	pthread_mutex_lock(&g_virtual_mutex);
+	for (uintptr_t page = page_start; page < page_end;)
+	{
+		const auto* protection = find_protection_range(page);
+		if (protection == nullptr)
+		{
+			result.status = Status::UnmappedRange;
+			pthread_mutex_unlock(&g_virtual_mutex);
+			return result;
+		}
+		const uintptr_t run_end = std::min(protection->end_page, page_end);
+		if ((protection->protect & PROT_WRITE) == 0)
+		{
+			result.status = Status::UnsupportedProtection;
+			pthread_mutex_unlock(&g_virtual_mutex);
+			return result;
+		}
+		int target = protection->protect & ~PROT_WRITE;
+		if ((target & (PROT_READ | PROT_EXEC)) == 0)
+		{
+			target |= PROT_READ;
+		}
+		runs.push_back({page, run_end, protection->protect, target});
+		page = run_end;
+	}
+
+	auto rollback = [&]() noexcept
+	{
+		bool restored = true;
+		for (const auto& run: runs)
+		{
+			restored = mprotect(reinterpret_cast<void*>(run.begin * page_size), (run.end - run.begin) * page_size,
+			                    run.original) == 0 && restored;
+		}
+		return restored;
+	};
+
+	for (const auto& run: runs)
+	{
+		VirtualMemory::CapturedProtectionRun captured {run.begin * page_size, (run.end - run.begin) * page_size,
+		                                                   get_protection_flag(run.original), static_cast<uint32_t>(run.original)};
+		if (!visitor(context, captured))
+		{
+			result.status = Status::ApplyFailedRolledBack;
+			pthread_mutex_unlock(&g_virtual_mutex);
+			return result;
+		}
+	}
+	for (const auto& run: runs)
+	{
+		const uint64_t run_size = (run.end - run.begin) * page_size;
+		if (mprotect(reinterpret_cast<void*>(run.begin * page_size), run_size, run.target) != 0)
+		{
+			result.status = rollback() ? Status::ApplyFailedRolledBack : Status::RollbackFailed;
+			pthread_mutex_unlock(&g_virtual_mutex);
+			return result;
+		}
+		result.applied_runs++;
+		result.applied_bytes += run_size;
+	}
+	for (const auto& run: runs)
+	{
+		assign_protection_range(run.begin, run.end, run.target);
+	}
+	result.status = Status::Success;
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return result;
+}
+
+bool sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	uintptr_t page_start = 0;
+	uintptr_t page_end = 0;
+	if (!get_host_page_range(static_cast<uintptr_t>(address), size, &page_start, &page_end))
+	{
+		return false;
+	}
+	const int original = static_cast<int>(restore_token);
+	if ((original & PROT_WRITE) == 0)
+	{
+		return false;
+	}
+	int target = original & ~PROT_WRITE;
+	if ((target & (PROT_READ | PROT_EXEC)) == 0)
+	{
+		target |= PROT_READ;
+	}
+	const uint64_t page_size = sys_virtual_get_page_size();
+	pthread_mutex_lock(&g_virtual_mutex);
+	if (mprotect(reinterpret_cast<void*>(page_start * page_size), (page_end - page_start) * page_size, target) != 0)
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	assign_protection_range(page_start, page_end, target);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
+}
+
+bool sys_virtual_restore_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	uintptr_t page_start = 0;
+	uintptr_t page_end = 0;
+	if (!get_host_page_range(static_cast<uintptr_t>(address), size, &page_start, &page_end))
+	{
+		return false;
+	}
+	const int protection = static_cast<int>(restore_token);
+	const uint64_t page_size = sys_virtual_get_page_size();
+	pthread_mutex_lock(&g_virtual_mutex);
+	if (mprotect(reinterpret_cast<void*>(page_start * page_size), (page_end - page_start) * page_size, protection) != 0)
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	assign_protection_range(page_start, page_end, protection);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
+}
+
+bool sys_virtual_restore_protection_signal_safe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+{
+	if (size == 0)
+	{
+		return false;
+	}
+	return mprotect(reinterpret_cast<void*>(static_cast<uintptr_t>(address)), size, static_cast<int>(restore_token)) == 0;
 }
 
 bool sys_virtual_protect_write_signal_safe(uint64_t address, uint64_t size)

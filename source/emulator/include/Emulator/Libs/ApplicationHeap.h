@@ -5,48 +5,34 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-#include <cstdint>
-
-namespace Kyty::Loader {
-class Program;
-} // namespace Kyty::Loader
+#include <cstddef>
 
 namespace Kyty::Libs::LibKernel::ApplicationHeap {
 
-constexpr uint64_t kApiV2Size    = 0x78;
-constexpr uint64_t kApiV2Version = 2;
+constexpr size_t kApiSlotCount         = 10;
+constexpr size_t kMallocSlot           = 0;
+constexpr size_t kFreeSlot             = 1;
+constexpr size_t kPosixMemalignSlot    = 6;
+// The replacement table follows the Gen5 order used by libkernel's
+// MallocReplace record: malloc_stats is slot 7 and malloc_stats_fast is slot 8.
+constexpr size_t kMallocStatsFastSlot = 8;
 
-struct ApiV2
+struct Api
 {
-	uint64_t size;
-	uint64_t version;
-	void(KYTY_SYSV_ABI* create)();
-	void(KYTY_SYSV_ABI* destroy)();
-	void*(KYTY_SYSV_ABI* malloc)(size_t size);
-	void(KYTY_SYSV_ABI* free)(void* ptr);
+	void* slots[kApiSlotCount];
 };
 
-[[nodiscard]] bool IsApiV2Header(uint64_t size, uint64_t version);
+[[nodiscard]] bool IsValidApi(const Api* api);
 
-[[nodiscard]] bool IsGuestCodePointer(uint64_t addr, uint64_t text_begin, uint64_t text_end);
-
-// All v2 allocator slots must point into the main image text before create runs.
-[[nodiscard]] bool IsValidApiV2Table(const ApiV2* table, uint64_t text_begin, uint64_t text_end);
-
-// Persist the table registered by KernelRtldSetApplicationHeapAPI and invoke the
-// evidenced v2 create slot when present.
-void RegisterApi(void* api);
-
-// Invoke create on the registered v2 table, or (fallback) locate a fully
-// validated table in main-image readable PT_LOAD and invoke its create slot.
-// Required when the guest never calls KernelRtldSetApplicationHeapAPI before
-// the first application-heap malloc (captured Gen5 startup path).
-void EnsureInitialized(Loader::Program* program);
+// The runtime linker supplies a direct function table. Registration does not
+// execute any slot; libc owns construction and publishes the table when ready.
+void RegisterApi(void* const api[kApiSlotCount]);
 
 [[nodiscard]] bool IsInitialized();
-
 [[nodiscard]] bool HasAllocator();
+[[nodiscard]] bool HasMallocStatsFast();
 [[nodiscard]] void* Malloc(size_t size);
+int                 MallocStatsFast(void* stats);
 bool                Free(void* ptr);
 
 void Reset();

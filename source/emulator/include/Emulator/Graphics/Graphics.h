@@ -139,8 +139,28 @@ int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetDstAddressOrOffset(uint32_t* cmd, ui
 int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(uint32_t* cmd, uint64_t source_value);
 // sceAgcWaitRegMemPatchAddress (NID 3KDcnM3lrcU): patch wait-mem address field.
 int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t address);
+// sceAgcWaitRegMemPatchCompareFunction (NID n485EBnIWmk).
+int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchCompareFunction(uint32_t* cmd, uint32_t compare_function);
+// sceAgcWaitRegMemPatchReference (NID 7nOoijNPvEU).
+int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchReference(uint32_t* cmd, uint64_t reference);
+// sceAgcWaitRegMemPatchMask (NID hXAnLgDHCoI).
+int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchMask(uint32_t* cmd, uint64_t mask);
+// sceAgcQueueEndOfPipeActionPatchGcrCntl (NID J8YCgfKAMQs).
+int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchGcrCntl(uint32_t* cmd, uint32_t gcr_cntl);
+// sceAgcQueueEndOfPipeActionPatchData (NID MlEw1feXcjg).
+int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchData(uint32_t* cmd, uint64_t data);
+// sceAgcQueueEndOfPipeActionPatchType (NID T9fjQIINoeE).
+int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchType(uint32_t* cmd, uint32_t data_selection);
+// sceAgcWriteDataPatchSetCachePolicy (NID eAy8eGNsCuU).
+int KYTY_SYSV_ABI GraphicsWriteDataPatchSetCachePolicy(uint32_t* cmd, uintptr_t arg1);
+// sceAgcWriteDataPatchSetDst (NID tmy-+rBpspY).
+int KYTY_SYSV_ABI GraphicsWriteDataPatchSetDst(uint32_t* cmd, uintptr_t arg1);
 // Patch IT_WRITE_DATA destination address dwords (NID fPSCdQxgpSw).
 int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64_t address_or_offset);
+// sceAgcDcbStallCommandBufferParserGetSize (NID +u6dKSLWM2o): fixed 2-dword packet.
+uint32_t KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParserGetSize();
+// sceAgcDcbDmaDataGetSize (NID 2ccJz9LQI+w): fixed 8-dword packet.
+uint32_t KYTY_SYSV_ABI GraphicsDcbDmaDataGetSize();
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
 int KYTY_SYSV_ABI   GraphicsAgcDriverUnknownKRzWekV120();
 // PS5 Pro / Trinity GPU mode query (NID BfBDZGbti7A). Base Prospero reports 0.
@@ -174,7 +194,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirect(CommandBuffer* buf, co
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t index_size, uint8_t cache_policy);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t index_count, uint64_t modifier);
-// sceAgcDcbDrawIndexOffset (NID B+aG9DUnTKA, sharpemu/aerolib): IT_DRAW_INDEX_OFFSET_2.
+// sceAgcDcbDrawIndexOffset (NID B+aG9DUnTKA): IT_DRAW_INDEX_OFFSET_2.
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t index_offset, uint32_t index_count, uint32_t flags);
 // Optional base-vertex auto-draw helper. Not bound to B+aG9DUnTKA (that NID is Offset).
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoWithBase(CommandBuffer* buf, uint32_t base_vertex, uint32_t index_count,
@@ -252,6 +272,8 @@ int KYTY_SYSV_ABI GraphicsDriverRegisterOwner(uint32_t* owner, const char* name)
 int KYTY_SYSV_ABI GraphicsDriverRegisterResource(uint32_t* resource, uint32_t owner, const void* base, uint64_t size, const char* name,
                                                  uint32_t type, uint64_t user_data);
 int KYTY_SYSV_ABI GraphicsDriverUnregisterResource(uint32_t resource);
+int KYTY_SYSV_ABI GraphicsDriverSetTFRing(const volatile void* base, uint32_t size);
+int KYTY_SYSV_ABI GraphicsDriverSetHsOffchipParam(uint64_t value0, uint64_t value1, uint64_t value2);
 
 } // namespace Gen5Driver
 

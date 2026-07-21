@@ -80,6 +80,8 @@ int KYTY_SYSV_ABI    KernelSetVirtualRangeName(const void* addr, uint64_t len, c
 int KYTY_SYSV_ABI    KernelClearVirtualRangeName(const void* addr, uint64_t len);
 int KYTY_SYSV_ABI    KernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot);
 int KYTY_SYSV_ABI    KernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size);
+int KYTY_SYSV_ABI    KernelAvailableDirectMemorySize(int64_t arg0, int64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
+int KYTY_SYSV_ABI    KernelBatchMap2(void* entries, int entry_count, int* processed_out, int flags);
 int KYTY_SYSV_ABI    KernelAvailableFlexibleMemorySize(size_t* size);
 // Configured flexible size for Gen5 queries (same budget as available for now).
 int KYTY_SYSV_ABI    KernelConfiguredFlexibleMemorySize(uint64_t* size);
@@ -109,6 +111,7 @@ struct VirtualQueryInfo
 static_assert(sizeof(VirtualQueryInfo) == 72, "VirtualQueryInfo size");
 
 int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size);
+int KYTY_SYSV_ABI KernelIsStack(const void* addr, void** start, void** end);
 
 } // namespace Kyty::Libs::LibKernel::Memory
 

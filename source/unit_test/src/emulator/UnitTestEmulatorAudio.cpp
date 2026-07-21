@@ -10,6 +10,22 @@ UT_BEGIN(EmulatorAudio);
 
 using namespace Libs::Audio;
 
+TEST(EmulatorAudio, UnregistersCapturedAjmCodecModule)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t context = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	ASSERT_EQ(context, 1u);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+	EXPECT_EQ(Ajm::AjmModuleUnregister(context, 1), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
 TEST(EmulatorAudio, QueriesDefaultNgs2SystemBufferContract)
 {
 	if (!Config::IsInitialized())

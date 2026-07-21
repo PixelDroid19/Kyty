@@ -1,8 +1,6 @@
 #include "Emulator/Libs/ApplicationHeap.h"
 
-#include "Emulator/Loader/Elf.h"
 #include "Emulator/Loader/GuestCall.h"
-#include "Emulator/Loader/RuntimeLinker.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -10,220 +8,52 @@ namespace Kyty::Libs::LibKernel::ApplicationHeap {
 
 namespace {
 
-using Kyty::Loader::Elf64_Half;
-using Kyty::Loader::Elf64_Phdr;
-using Kyty::Loader::PF_R;
-using Kyty::Loader::PF_X;
-using Kyty::Loader::PT_LOAD;
+using MallocFunc = void*(KYTY_SYSV_ABI*)(size_t);
+using FreeFunc   = void(KYTY_SYSV_ABI*)(void*);
+using StatsFunc  = int(KYTY_SYSV_ABI*)(void*);
 
-static ApiV2* g_registered_api = nullptr;
-static bool   g_initialized    = false;
+static MallocFunc g_malloc     = nullptr;
+static FreeFunc   g_free       = nullptr;
+static StatsFunc  g_stats_fast = nullptr;
 
 static thread_local bool g_in_guest_allocator = false;
 
-static uint64_t get_aligned_size(const Elf64_Phdr* p)
-{
-	return (p->p_align != 0 ? (p->p_memsz + (p->p_align - 1)) & ~(p->p_align - 1) : p->p_memsz);
-}
-
-static void get_text_bounds(Loader::Program* program, uint64_t* text_begin, uint64_t* text_end)
-{
-	*text_begin = 0;
-	*text_end   = 0;
-
-	if (program == nullptr || program->elf == nullptr)
-	{
-		return;
-	}
-
-	const auto* ehdr = program->elf->GetEhdr();
-	const auto* phdr = program->elf->GetPhdr();
-	if (ehdr == nullptr || phdr == nullptr)
-	{
-		return;
-	}
-
-	for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
-	{
-		if (phdr[i].p_memsz == 0 || phdr[i].p_type != PT_LOAD)
-		{
-			continue;
-		}
-
-		if ((phdr[i].p_flags & PF_X) == 0)
-		{
-			continue;
-		}
-
-		const uint64_t begin = phdr[i].p_vaddr + program->base_vaddr;
-		const uint64_t end   = begin + get_aligned_size(phdr + i);
-
-		if (*text_begin == 0 || begin < *text_begin)
-		{
-			*text_begin = begin;
-		}
-		if (end > *text_end)
-		{
-			*text_end = end;
-		}
-	}
-}
-
-static bool try_invoke_create(ApiV2* table, uint64_t text_begin, uint64_t text_end)
-{
-	if (table == nullptr || g_initialized)
-	{
-		return g_initialized;
-	}
-
-	// Full four-slot validation: header-only false positives must not call create.
-	if (!IsValidApiV2Table(table, text_begin, text_end))
-	{
-		return false;
-	}
-
-	Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(table->create), 0, 0, 0);
-	g_initialized = true;
-	return true;
-}
-
-// Fallback when the guest never calls KernelRtldSetApplicationHeapAPI before
-// early malloc (observed on a Gen5 startup path: GetGPI then null-mspace assert). Scan
-// readable PT_LOAD for a fully validated v2 table; create is guest code.
-static bool scan_segment_for_table(uint64_t segment_addr, uint64_t segment_size, uint64_t text_begin, uint64_t text_end)
-{
-	if (segment_size < sizeof(ApiV2))
-	{
-		return false;
-	}
-
-	auto* base = reinterpret_cast<uint8_t*>(segment_addr);
-	for (uint64_t off = 0; off + sizeof(ApiV2) <= segment_size; off += alignof(uint64_t))
-	{
-		auto* candidate = reinterpret_cast<ApiV2*>(base + off);
-		if (try_invoke_create(candidate, text_begin, text_end))
-		{
-			g_registered_api = candidate;
-			return true;
-		}
-	}
-
-	return false;
-}
-
 } // namespace
 
-bool IsApiV2Header(uint64_t size, uint64_t version)
+bool IsValidApi(const Api* api)
 {
-	return size == kApiV2Size && version == kApiV2Version;
+	return api != nullptr && api->slots[kMallocSlot] != nullptr && api->slots[kFreeSlot] != nullptr;
 }
 
-bool IsGuestCodePointer(uint64_t addr, uint64_t text_begin, uint64_t text_end)
+void RegisterApi(void* const api[kApiSlotCount])
 {
-	return addr >= text_begin && addr < text_end;
-}
-
-bool IsValidApiV2Table(const ApiV2* table, uint64_t text_begin, uint64_t text_end)
-{
-	if (table == nullptr || text_begin == 0 || text_end <= text_begin)
+	const auto* table = reinterpret_cast<const Api*>(api);
+	if (!IsValidApi(table))
 	{
-		return false;
-	}
-
-	if (!IsApiV2Header(table->size, table->version))
-	{
-		return false;
-	}
-
-	const uint64_t create    = reinterpret_cast<uint64_t>(table->create);
-	const uint64_t destroy   = reinterpret_cast<uint64_t>(table->destroy);
-	const uint64_t malloc_fn = reinterpret_cast<uint64_t>(table->malloc);
-	const uint64_t free_fn   = reinterpret_cast<uint64_t>(table->free);
-
-	return create != 0 && destroy != 0 && malloc_fn != 0 && free_fn != 0 && IsGuestCodePointer(create, text_begin, text_end) &&
-	       IsGuestCodePointer(destroy, text_begin, text_end) && IsGuestCodePointer(malloc_fn, text_begin, text_end) &&
-	       IsGuestCodePointer(free_fn, text_begin, text_end);
-}
-
-void RegisterApi(void* api)
-{
-	if (api == nullptr)
-	{
+		g_malloc     = nullptr;
+		g_free       = nullptr;
+		g_stats_fast = nullptr;
 		return;
 	}
 
-	auto* words = reinterpret_cast<uint64_t*>(api);
-	if (IsApiV2Header(words[0], words[1]))
-	{
-		g_registered_api = reinterpret_cast<ApiV2*>(api);
-		return;
-	}
-
-	// Legacy HeapAPI tables (malloc-first) are not the evidenced v2 layout.
-	g_registered_api = nullptr;
-}
-
-void EnsureInitialized(Loader::Program* program)
-{
-	if (g_initialized)
-	{
-		return;
-	}
-
-	uint64_t text_begin = 0;
-	uint64_t text_end   = 0;
-	get_text_bounds(program, &text_begin, &text_end);
-
-	if (g_registered_api != nullptr && try_invoke_create(g_registered_api, text_begin, text_end))
-	{
-		return;
-	}
-
-	if (program == nullptr || program->elf == nullptr)
-	{
-		return;
-	}
-
-	const auto* ehdr = program->elf->GetEhdr();
-	const auto* phdr = program->elf->GetPhdr();
-	if (ehdr == nullptr || phdr == nullptr)
-	{
-		return;
-	}
-
-	// Prefer registered API; if absent, scan main-image readable LOAD segments
-	// with IsValidApiV2Table only (create/destroy/malloc/free all in text).
-	for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
-	{
-		if (phdr[i].p_memsz == 0 || phdr[i].p_type != PT_LOAD)
-		{
-			continue;
-		}
-
-		if ((phdr[i].p_flags & PF_R) == 0)
-		{
-			continue;
-		}
-
-		const uint64_t segment_addr = phdr[i].p_vaddr + program->base_vaddr;
-		const uint64_t segment_size = get_aligned_size(phdr + i);
-
-		if (scan_segment_for_table(segment_addr, segment_size, text_begin, text_end))
-		{
-			return;
-		}
-	}
+	g_malloc     = reinterpret_cast<MallocFunc>(table->slots[kMallocSlot]);
+	g_free       = reinterpret_cast<FreeFunc>(table->slots[kFreeSlot]);
+	g_stats_fast = reinterpret_cast<StatsFunc>(table->slots[kMallocStatsFastSlot]);
 }
 
 bool IsInitialized()
 {
-	return g_initialized;
+	return g_malloc != nullptr && g_free != nullptr;
 }
 
 bool HasAllocator()
 {
-	return g_initialized && g_registered_api != nullptr && g_registered_api->malloc != nullptr && g_registered_api->free != nullptr &&
-	       !g_in_guest_allocator;
+	return IsInitialized() && !g_in_guest_allocator;
+}
+
+bool HasMallocStatsFast()
+{
+	return HasAllocator() && g_stats_fast != nullptr;
 }
 
 void* Malloc(size_t size)
@@ -233,13 +63,24 @@ void* Malloc(size_t size)
 		return nullptr;
 	}
 
-	auto* table = g_registered_api;
+	g_in_guest_allocator = true;
+	const uint64_t ptr   = Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_malloc), size, 0, 0);
+	g_in_guest_allocator = false;
+	return reinterpret_cast<void*>(ptr);
+}
+
+int MallocStatsFast(void* stats)
+{
+	if (!HasMallocStatsFast() || stats == nullptr)
+	{
+		return -1;
+	}
 
 	g_in_guest_allocator = true;
-	const uint64_t ptr   = Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(table->malloc), size, 0, 0);
+	const int result = static_cast<int>(Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_stats_fast),
+	                                                              reinterpret_cast<uint64_t>(stats), 0, 0));
 	g_in_guest_allocator = false;
-
-	return reinterpret_cast<void*>(ptr);
+	return result;
 }
 
 bool Free(void* ptr)
@@ -254,19 +95,18 @@ bool Free(void* ptr)
 		return false;
 	}
 
-	auto* table = g_registered_api;
-
 	g_in_guest_allocator = true;
-	Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(table->free), reinterpret_cast<uint64_t>(ptr), 0, 0);
+	Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_free), reinterpret_cast<uint64_t>(ptr), 0, 0);
 	g_in_guest_allocator = false;
 	return true;
 }
 
 void Reset()
 {
-	g_registered_api      = nullptr;
-	g_initialized         = false;
-	g_in_guest_allocator  = false;
+	g_malloc             = nullptr;
+	g_free               = nullptr;
+	g_stats_fast         = nullptr;
+	g_in_guest_allocator = false;
 }
 
 } // namespace Kyty::Libs::LibKernel::ApplicationHeap

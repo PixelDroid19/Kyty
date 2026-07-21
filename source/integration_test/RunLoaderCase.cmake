@@ -26,7 +26,7 @@ elseif(SCENARIO MATCHES "multi_module_stable_order|duplicate_identity_rejected|f
 	set(ENV{KYTY_BRINGUP_MODE} "unsafe")
 	set(ENV{KYTY_BRINGUP_FEATURES} "adjacent_module_discovery")
 	set(ENV{KYTY_BRINGUP_SUBSYSTEMS} "loader")
-elseif(SCENARIO MATCHES "hle_wins_over_module_export|export_conflict_reported")
+elseif(SCENARIO MATCHES "module_export_wins_over_hle|export_conflict_reported")
 	# HLE/export scans need a live linker; discovery feature not required.
 	set(ENV{KYTY_BRINGUP_MODE} "unsafe")
 	set(ENV{KYTY_BRINGUP_FEATURES} "not_implemented")

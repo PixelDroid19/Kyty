@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <unordered_set>
 #include <vector>
@@ -559,8 +560,40 @@ int KYTY_SYSV_ABI SaveDataGetMountInfo(const SaveDataMountPoint* mount_point, Sa
 	return OK;
 }
 
+// In-process save-memory slot (zero-filled until Set writes).
+static std::mutex           g_save_memory_mutex;
+static std::vector<uint8_t> g_save_data_memory(0x10000);
+static bool                 g_save_memory_ready = false;
+
+// Async save-data events (SceSaveDataEvent is 0x60 bytes).
+struct SaveDataEvent
+{
+	uint32_t type;
+	int32_t  error_code;
+	int32_t  user_id;
+	uint8_t  reserved[4];
+	char     dir_name[32];
+	uint8_t  padding[0x60 - 0x30];
+};
+
+static std::mutex                g_event_mutex;
+static std::deque<SaveDataEvent> g_events;
+
+static void EnqueueSaveDataEvent(uint32_t type, int32_t user_id, const char* dir_name = "", int32_t error_code = 0)
+{
+	SaveDataEvent event {};
+	event.type       = type;
+	event.error_code = error_code;
+	event.user_id    = user_id;
+	if (dir_name != nullptr)
+	{
+		std::snprintf(event.dir_name, sizeof(event.dir_name), "%s", dir_name);
+	}
+	std::lock_guard lock(g_event_mutex);
+	g_events.push_back(event);
+}
+
 // sceSaveDataGetEventResult — polled after async save operations.
-// When the HLE event queue is empty, return NOT_FOUND (no pending event).
 int KYTY_SYSV_ABI SaveDataGetEventResult(const void* /*event_param*/, void* event)
 {
 	PRINT_NAME();
@@ -570,7 +603,77 @@ int KYTY_SYSV_ABI SaveDataGetEventResult(const void* /*event_param*/, void* even
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	return SAVE_DATA_ERROR_NOT_FOUND;
+	SaveDataEvent pending {};
+	{
+		std::lock_guard lock(g_event_mutex);
+		if (g_events.empty())
+		{
+			return SAVE_DATA_ERROR_NOT_FOUND;
+		}
+		pending = g_events.front();
+		g_events.pop_front();
+	}
+
+	std::memset(event, 0, 0x60);
+	auto* out           = static_cast<uint8_t*>(event);
+	*reinterpret_cast<uint32_t*>(out + 0x00) = pending.type;
+	*reinterpret_cast<int32_t*>(out + 0x04)    = pending.error_code;
+	*reinterpret_cast<int32_t*>(out + 0x08)  = pending.user_id;
+	std::memcpy(out + 0x10, pending.dir_name, sizeof(pending.dir_name));
+	return OK;
+}
+
+// sceSaveDataSyncSaveDataMemory (NID wiT9jeC7xPw) — sync param: user_id at +0x00.
+struct SaveDataMemorySync
+{
+	int32_t user_id;
+};
+
+int KYTY_SYSV_ABI SaveDataSyncSaveDataMemory(const SaveDataMemorySync* sync)
+{
+	PRINT_NAME();
+
+	if (sync == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	if (sync->user_id < 0)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	printf("\t user_id = %d\n", sync->user_id);
+
+	{
+		std::lock_guard lock(g_save_memory_mutex);
+		if (!g_save_memory_ready)
+		{
+			return SAVE_DATA_ERROR_MEMORY_NOT_READY;
+		}
+	}
+
+	// Guest workers poll GetEventResult for SAVE_DATA_MEMORY_SYNC_END (type 3).
+	EnqueueSaveDataEvent(3u, sync->user_id);
+	return OK;
+}
+
+// sceSaveDataGetProgress — 8-byte struct; progress float at +0x00 (1.0 = complete).
+int KYTY_SYSV_ABI SaveDataGetProgress(void* progress)
+{
+	PRINT_NAME();
+
+	if (progress != nullptr)
+	{
+		std::memset(progress, 0, 8);
+		*static_cast<float*>(progress) = 1.0f;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI SaveDataClearProgress()
+{
+	PRINT_NAME();
+	return OK;
 }
 
 // sceSaveDataCommit — completes a save transaction descriptor supplied by the guest.
@@ -652,10 +755,6 @@ struct SaveDataMemorySet2
 	uint8_t                   reserved[24];
 };
 
-// In-process save-memory slot (zero-filled until Set writes).
-static std::mutex           g_save_memory_mutex;
-static std::vector<uint8_t> g_save_data_memory(0x10000);
-
 // sceSaveDataSetupSaveDataMemory2 (NID oQySEUfgXRA)
 int KYTY_SYSV_ABI SaveDataSetupSaveDataMemory2(void* setup_param, void* result_out)
 {
@@ -676,6 +775,7 @@ int KYTY_SYSV_ABI SaveDataSetupSaveDataMemory2(void* setup_param, void* result_o
 		{
 			g_save_data_memory.resize(setup->memory_size, 0);
 		}
+		g_save_memory_ready = true;
 		if (result_out != nullptr)
 		{
 			auto* result                  = static_cast<SaveDataMemorySetupResult*>(result_out);
@@ -700,6 +800,7 @@ int KYTY_SYSV_ABI SaveDataGetSaveDataMemory2(void* get_param)
 	printf("\t user_id=%d data=%p slot=%u\n", get->user_id, static_cast<void*>(get->data), get->slot_id);
 
 	std::lock_guard lock(g_save_memory_mutex);
+	g_save_memory_ready = true;
 	if (get->data != nullptr)
 	{
 		auto* data = get->data;
@@ -736,6 +837,7 @@ int KYTY_SYSV_ABI SaveDataSetSaveDataMemory2(void* set_param)
 	       set->data_num, set->slot_id);
 
 	std::lock_guard lock(g_save_memory_mutex);
+	g_save_memory_ready = true;
 	const uint32_t  data_num = (set->data_num == 0 ? 1u : set->data_num);
 	if (set->data != nullptr)
 	{
@@ -754,6 +856,43 @@ int KYTY_SYSV_ABI SaveDataSetSaveDataMemory2(void* set_param)
 			std::memcpy(g_save_data_memory.data() + offset, data.buf, data.buf_size);
 		}
 	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI SaveDataTerminate()
+{
+	PRINT_NAME();
+	return OK;
+}
+
+int KYTY_SYSV_ABI SaveDataAbort()
+{
+	PRINT_NAME();
+	return OK;
+}
+
+int KYTY_SYSV_ABI SaveDataIsMounted(uint32_t* mounted)
+{
+	PRINT_NAME();
+	if (mounted == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	*mounted = 1;
+	return OK;
+}
+
+int KYTY_SYSV_ABI SaveDataGetParam(const SaveDataMountPoint* mount_point, uint32_t param_type, void* param_buf, size_t param_buf_size)
+{
+	PRINT_NAME();
+	if (mount_point == nullptr || param_buf == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	printf("\t mount_point    = %s\n", mount_point->data);
+	printf("\t param_type     = %u\n", param_type);
+	printf("\t param_buf_size = %" PRIu64 "\n", static_cast<uint64_t>(param_buf_size));
+	std::memset(param_buf, 0, param_buf_size);
 	return OK;
 }
 
@@ -781,7 +920,14 @@ LIB_DEFINE(InitSaveData_1)
 	LIB_FUNC("oQySEUfgXRA", SaveData::SaveDataSetupSaveDataMemory2);
 	LIB_FUNC("QwOO7vegnV8", SaveData::SaveDataGetSaveDataMemory2);
 	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);
-	// TransferringMount also appears on SaveData_v1 tables.
+	LIB_FUNC("wiT9jeC7xPw", SaveData::SaveDataSyncSaveDataMemory);
+	LIB_FUNC("ANmSWUiyyGQ", SaveData::SaveDataGetProgress);
+	LIB_FUNC("Wz-4JZfeO9g", SaveData::SaveDataClearProgress);
+	LIB_FUNC("yKDy8S5yLA0", SaveData::SaveDataTerminate);
+	LIB_FUNC("dQ2GohUHXzk", SaveData::SaveDataAbort);
+	LIB_FUNC("ieP6jP138Qo", SaveData::SaveDataIsMounted);
+	LIB_FUNC("XgvSuIdnMlw", SaveData::SaveDataGetParam);
+	LIB_FUNC("lJUQuaKqoKY", SaveData::SaveDataDeleteTransactionResource);
 	LIB_FUNC("WAzWTZm1H+I", SaveData::SaveDataTransferringMount);
 	LIB_FUNC("RjMlsR8EXrw", SaveData::SaveDataTransferringMount);
 }
@@ -823,6 +969,14 @@ LIB_DEFINE(InitSaveDataNative_1)
 	LIB_FUNC("WAzWTZm1H+I", SaveData::SaveDataTransferringMount);
 	LIB_FUNC("RjMlsR8EXrw", SaveData::SaveDataTransferringMount);
 	LIB_FUNC("cduy9v4YmT4", SaveData::SaveDataSetSaveDataMemory2);
+	LIB_FUNC("wiT9jeC7xPw", SaveData::SaveDataSyncSaveDataMemory);
+	LIB_FUNC("ANmSWUiyyGQ", SaveData::SaveDataGetProgress);
+	LIB_FUNC("Wz-4JZfeO9g", SaveData::SaveDataClearProgress);
+	LIB_FUNC("yKDy8S5yLA0", SaveData::SaveDataTerminate);
+	LIB_FUNC("dQ2GohUHXzk", SaveData::SaveDataAbort);
+	LIB_FUNC("ieP6jP138Qo", SaveData::SaveDataIsMounted);
+	LIB_FUNC("XgvSuIdnMlw", SaveData::SaveDataGetParam);
+	LIB_FUNC("lJUQuaKqoKY", SaveData::SaveDataDeleteTransactionResource);
 }
 
 } // namespace SaveDataNative

@@ -10,9 +10,9 @@ The remaining cost is serialized by the global GPU-memory mutex and is large
 enough to explain the low gameplay frame rate. The fix must preserve the
 existing hash path whenever dirty tracking cannot prove a write.
 
-SharpEmu provides a useful clean-room architectural reference: protect guest
-pages read-only, mark the first write, and explicitly notify writes performed
-by host code. Kyty must not copy implementation details, and must address
+A useful clean-room architectural pattern is: protect guest pages read-only,
+mark the first write, and explicitly notify writes performed by host code.
+Kyty must not copy third-party implementation details, and must address
 physical aliases, platform page sizes, signal-handler safety, and the race
 between upload and re-arming.
 
@@ -34,7 +34,7 @@ between upload and re-arming.
 - No attempt to make Darwin ARM64 write-fault classification work in this phase;
   those ranges remain hash fallback until the platform signal context exposes a
   reliable write bit.
-- No copy of SharpEmu code or private implementation details.
+- No copy of third-party emulator code or private implementation details.
 - No submit batching or fence redesign in this phase.
 
 ## Architecture

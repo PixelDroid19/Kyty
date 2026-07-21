@@ -23,6 +23,26 @@ int KYTY_SYSV_ABI NetPoolDestroy(int memid);
 int KYTY_SYSV_ABI NetInetPton(int af, const char* src, void* dst);
 int KYTY_SYSV_ABI NetEtherNtostr(const NetEtherAddr* n, char* str, size_t len);
 int KYTY_SYSV_ABI NetGetMacAddress(NetEtherAddr* addr, int flags);
+int KYTY_SYSV_ABI NetSocket(const char* name, int family, int type, int protocol);
+int KYTY_SYSV_ABI NetSocketClose(int id);
+int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len);
+int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len);
+int KYTY_SYSV_ABI NetListen(int id, int backlog);
+int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len);
+int64_t KYTY_SYSV_ABI NetSend(int id, const void* buf, uint64_t len, int flags);
+int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags);
+int KYTY_SYSV_ABI NetSetsockopt(int id, int level, int option, const void* value, int value_len);
+int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len);
+int KYTY_SYSV_ABI NetGetsockopt(int id, int level, int option, void* value, int* value_len);
+int KYTY_SYSV_ABI NetSelect(int nfds, void* readfds, void* writefds, void* exceptfds, void* timeout);
+const char* KYTY_SYSV_ABI NetInetNtop(int af, const void* src, char* dst, int size);
+uint32_t KYTY_SYSV_ABI NetHtonl(uint32_t hostlong);
+uint16_t KYTY_SYSV_ABI NetHtons(uint16_t hostshort);
+uint32_t KYTY_SYSV_ABI NetNtohl(uint32_t netlong);
+uint16_t KYTY_SYSV_ABI NetNtohs(uint16_t netshort);
+int KYTY_SYSV_ABI NetResolverCreate(const char* name, int memid, int flags);
+int KYTY_SYSV_ABI NetResolverDestroy(int rid);
+int KYTY_SYSV_ABI NetResolverGetError(int rid, int* result);
 
 } // namespace Net
 
@@ -30,6 +50,7 @@ namespace Ssl {
 
 int KYTY_SYSV_ABI SslInit(uint64_t pool_size);
 int KYTY_SYSV_ABI SslTerm(int ssl_ctx_id);
+int KYTY_SYSV_ABI SslClose(int ssl_id);
 
 } // namespace Ssl
 
