@@ -1408,6 +1408,18 @@ TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel3WithInterrupt)
 	EXPECT_EQ(cmd[7], 0x11u);
 }
 
+TEST(EmulatorGraphicsPackets, DecodesReleaseMemWriteConfirmInterrupt)
+{
+	// Captured EOP packet: GCR writeback, 64-bit immediate, interrupt on
+	// write confirmation. These fields are independent in the AGC envelope.
+	const auto control = GraphicsDecodeAgcReleaseMemControl(0x02020200u);
+	EXPECT_EQ(control.gcr_cntl, 0x0200u);
+	EXPECT_EQ(control.data_sel, 2u);
+	EXPECT_EQ(control.interrupt, 2u);
+	EXPECT_EQ(GraphicsAgcReleaseMemCacheAction(control.gcr_cntl), 0x38u);
+	EXPECT_EQ(GraphicsAgcReleaseMemCacheAction(0x0100u), 0x00u);
+}
+
 TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1WithNullDestination)
 {
 	struct AlignasCommandBuffer

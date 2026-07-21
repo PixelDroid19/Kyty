@@ -2014,13 +2014,21 @@ VideoOutRegisteredHostExtentStatus VideoOutGetRegisteredHostExtent(Graphics::Com
 	return g_video_out_context->GetRegisteredHostExtent(buffer, guest_width, guest_height, host_width, host_height);
 }
 
+bool VideoOutIsValidFlipMode(int flip_mode)
+{
+	return flip_mode >= 1 && flip_mode <= 4;
+}
+
 KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg)
 {
 	PRINT_NAME();
 
 	EXIT_IF(g_video_out_context == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(flip_mode != 1);
+	if (!VideoOutIsValidFlipMode(flip_mode))
+	{
+		return VIDEO_OUT_ERROR_INVALID_VALUE;
+	}
 
 	if (index < 0 || index > 15)
 	{
@@ -2040,7 +2048,7 @@ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64
 void VideoOutSubmitFlipInternal(int handle, int index, int flip_mode, int64_t flip_arg)
 {
 	EXIT_IF(g_video_out_context == nullptr);
-	if (flip_mode != 1)
+	if (!VideoOutIsValidFlipMode(flip_mode))
 	{
 		EXIT("Internal VideoOut flip has unsupported mode: handle=%d index=%d mode=%d\n", handle, index, flip_mode);
 	}

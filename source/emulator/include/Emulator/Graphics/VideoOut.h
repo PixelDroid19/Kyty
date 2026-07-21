@@ -59,6 +59,7 @@ bool                               VideoOutRunBufferUnmapTransaction(uint64_t va
 // open (Gen5 WaitUntilSafe encodes handle 0 while Open returns 1). Non-zero
 // handles pass through. Ambiguous (0 or 2+ open) returns 0 unchanged.
 int VideoOutResolveHandle(int handle, const bool* opened, int num_slots);
+bool VideoOutIsValidFlipMode(int flip_mode);
 
 KYTY_SYSV_ABI int  VideoOutOpen(int user_id, int bus_type, int index, const void* param);
 KYTY_SYSV_ABI int  VideoOutClose(int handle);

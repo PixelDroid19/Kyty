@@ -1179,6 +1179,21 @@ bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint
 	       (write_value & wait_mask) == (wait_ref & wait_mask);
 }
 
+GraphicsAgcReleaseMemControl GraphicsDecodeAgcReleaseMemControl(uint32_t control_dw)
+{
+	GraphicsAgcReleaseMemControl control {};
+	control.gcr_cntl  = static_cast<uint16_t>(control_dw & 0xffffu);
+	control.data_sel  = static_cast<uint8_t>((control_dw >> 16u) & 0xffu);
+	control.interrupt = static_cast<uint8_t>((control_dw >> 24u) & 0x7u);
+	return control;
+}
+
+uint32_t GraphicsAgcReleaseMemCacheAction(uint16_t gcr_cntl)
+{
+	constexpr uint16_t GcrGl2Writeback = 1u << 9u;
+	return ((gcr_cntl & GcrGl2Writeback) != 0u) ? 0x38u : 0x00u;
+}
+
 void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom,
                                  bool matching_wait_mem64)
 {
@@ -1920,13 +1935,22 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 		GraphicsRenderWriteAtEndOfPipe32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr),
 		                                 static_cast<uint32_t>(value));
 		producer_size = 4;
-	} else if (((eop_event_type == 0x04 && event_index == 0x05) || (eop_event_type == 0x28 && event_index == 0x05) ||
+	} else if (((eop_event_type == 0x04 && (event_index == 0x00 || event_index == 0x05)) ||
+	            (eop_event_type == 0x28 && (event_index == 0x00 || event_index == 0x05)) ||
 	            (eop_event_type == 0x2f && event_index == 0x06) || (eop_event_type == 0x14 && event_index == 0x00) ||
-	            (eop_event_type == 0x28 && event_index == 0x00) || (eop_event_type == 0x30 && event_index == 0x00) ||
+	            (eop_event_type == 0x30 && event_index == 0x00) ||
 	            (eop_event_type == 0x2f && event_index == 0x00)) &&
-	           cache_action == 0x38 && source64 && !with_interrupt)
+	           cache_action == 0x38 && source64)
 	{
-		GraphicsRenderWriteAtEndOfPipeWithWriteBack64(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint64_t*>(dst_gpu_addr), value);
+		if (with_interrupt)
+		{
+			GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(m_sumbit_id, m_buffer[m_current_buffer],
+			                                                       static_cast<uint64_t*>(dst_gpu_addr), value);
+		} else
+		{
+			GraphicsRenderWriteAtEndOfPipeWithWriteBack64(m_sumbit_id, m_buffer[m_current_buffer],
+			                                              static_cast<uint64_t*>(dst_gpu_addr), value);
+		}
 		producer_size = 8;
 	} else if (((eop_event_type == 0x04 && event_index == 0x05) || (eop_event_type == 0x28 && event_index == 0x00)) &&
 	           cache_action == 0x00 && source_counter && !with_interrupt)
@@ -4258,8 +4282,10 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 
 	if (custom)
 	{
-		uint32_t gcr_cntl = buffer[1] & 0xffffu;
-		uint32_t data_sel = (buffer[1] >> 16u) & 0xffu;
+		const auto control = GraphicsDecodeAgcReleaseMemControl(buffer[1]);
+		uint32_t   gcr_cntl = control.gcr_cntl;
+		uint32_t   data_sel = control.data_sel;
+		interrupt_selector  = control.interrupt;
 
 		// data_sel matches GraphicsCbReleaseMem: 0 = no destination write
 		// (flush/barrier only), 1 = 32-bit immediate, 2 = 64-bit immediate,
@@ -4311,28 +4337,28 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 			event_index        = 0;
 			event_write_dest   = 0;
 			event_write_source = 1; // 32-bit immediate
-			interrupt_selector = 0;
 		} else if (data_sel == 2)
 		{
-			// 0x0200 was the first observed writeback form; other non-zero gcr
-			// values still publish a 64-bit immediate. Normalize event fields
-			// to the known WriteAtEndOfPipe64 branches (writeback vs plain).
+			// GCR cache behavior and queued-interrupt selection are independent.
+			// GL2 writeback maps to the existing 0x38 execution path while the
+			// interrupt selector is preserved for completion signaling.
 			if (gcr_cntl != 0u)
 			{
-				cache_action   = 0x38;
-				eop_event_type = 0x14;
-				event_index    = 0;
-			} else
+				cp->MemoryBarrier();
+			}
+			cache_action = GraphicsAgcReleaseMemCacheAction(static_cast<uint16_t>(gcr_cntl));
+			if (gcr_cntl == 0u)
 			{
-				cache_action   = 0x00;
 				eop_event_type = 0x04;
 				event_index    = 0x05;
+			} else
+			{
+				event_index = 0;
 			}
 
 			cache_policy       = 0;
 			event_write_dest   = 0;
 			event_write_source = 2;
-			interrupt_selector = 0;
 		} else if (data_sel == 3)
 		{
 			if (gcr_cntl != 0u)
@@ -4345,7 +4371,6 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 			event_index        = 0;
 			event_write_dest   = 0;
 			event_write_source = 4;
-			interrupt_selector = 0;
 		} else
 		{
 			EXIT("unsupported ReleaseMem data_sel=%u event=%u gcr=%u\n", data_sel, eop_event_type, gcr_cntl);

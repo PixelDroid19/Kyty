@@ -105,7 +105,9 @@ namespace Ajm = Audio::Ajm;
 LIB_DEFINE(InitAudio_1_Ajm)
 {
 	LIB_FUNC("dl+4eHSzUu4", Ajm::AjmInitialize);
+	LIB_FUNC("MHur6qCsUus", Ajm::AjmFinalize);
 	LIB_FUNC("Q3dyFuwGn64", Ajm::AjmModuleRegister);
+	LIB_FUNC("Wi7DtlLV+KI", Ajm::AjmModuleUnregister);
 }
 
 } // namespace LibAjm

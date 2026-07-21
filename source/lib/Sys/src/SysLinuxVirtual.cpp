@@ -976,6 +976,82 @@ bool sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t back
 	return true;
 }
 
+bool sys_virtual_map_shared_fixed_replacing_owned_reservation(void* backing, uint64_t address, uint64_t backing_offset,
+                                                              uint64_t size, VirtualMemory::Mode mode)
+{
+	EXIT_IF(g_allocs == nullptr);
+
+	auto* shared = static_cast<SharedBacking*>(backing);
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (!shared_mapping_valid(shared, address, backing_offset, size, page_size, true))
+	{
+		return false;
+	}
+
+	const auto addr = static_cast<uintptr_t>(address);
+	if (addr > UINTPTR_MAX - size)
+	{
+		return false;
+	}
+	const auto end = addr + static_cast<uintptr_t>(size);
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	if (!get_host_page_range(addr, size, &page_start, &page_end))
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	auto owner = g_allocs->upper_bound(addr);
+	if (owner == g_allocs->begin())
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	--owner;
+	const uintptr_t owner_addr = owner->first;
+	const size_t    owner_size = owner->second;
+	const auto*     protection = find_protection_range(page_start);
+	if (addr < owner_addr || owner_size > UINTPTR_MAX - owner_addr || end > owner_addr + owner_size || protection == nullptr ||
+	    protection->protect != PROT_NONE || protection->end_page < page_end)
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+
+	// The caller has proved that this interval belongs to its reservation.
+	// MAP_FIXED replaces only the requested pages in one kernel operation, so
+	// the untouched prefix and suffix never become available to another thread.
+	// NOLINTNEXTLINE
+	void* ptr = mmap(reinterpret_cast<void*>(addr), size, get_protection_flag(mode), MAP_FIXED | MAP_SHARED, shared->fd,
+	                 static_cast<off_t>(backing_offset));
+	if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != addr)
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+
+	g_allocs->erase(owner);
+	if (owner_addr < addr)
+	{
+		(*g_allocs)[owner_addr] = addr - owner_addr;
+	}
+	(*g_allocs)[addr] = size;
+	const uintptr_t owner_end = owner_addr + owner_size;
+	if (end < owner_end)
+	{
+		(*g_allocs)[end] = owner_end - end;
+	}
+	assign_protection_range(page_start, page_end, get_protection_flag(mode));
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
+}
+
+bool sys_virtual_supports_shared_fixed_owned_reservation_replacement()
+{
+	return true;
+}
+
 uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                                    VirtualMemory::Mode mode, uint64_t alignment)
 {

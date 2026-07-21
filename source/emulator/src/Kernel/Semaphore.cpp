@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <unordered_map>
 
 #ifdef KYTY_EMU_ENABLED
@@ -39,6 +40,7 @@ public:
 	KYTY_CLASS_NO_COPY(KernelSemaPrivate);
 
 	Result Cancel(int set_count, int* num_waiting_threads);
+	void   Delete();
 	Result Signal(int signal_count);
 	Result Wait(int need_count, uint32_t* ptr_micros);
 
@@ -71,25 +73,14 @@ private:
 
 KernelSemaPrivate::~KernelSemaPrivate()
 {
+	Delete();
+}
+
+void KernelSemaPrivate::Delete()
+{
 	Core::LockGuard lock(m_mutex);
-
-	while (m_status != Status::Set)
-	{
-		m_mutex.Unlock();
-		Core::Thread::SleepMicro(10);
-		m_mutex.Lock();
-	}
-
 	m_status = Status::Deleted;
-
 	m_cond_var.SignalAll();
-
-	while (!m_waiting_threads.IsEmpty())
-	{
-		m_mutex.Unlock();
-		Core::Thread::SleepMicro(10);
-		m_mutex.Lock();
-	}
 }
 
 KernelSemaPrivate::Result KernelSemaPrivate::Cancel(int set_count, int* num_waiting_threads)
@@ -101,13 +92,20 @@ KernelSemaPrivate::Result KernelSemaPrivate::Cancel(int set_count, int* num_wait
 		return Result::InvalCount;
 	}
 
-	EXIT_NOT_IMPLEMENTED(m_status == Status::Deleted);
+	if (m_status == Status::Deleted)
+	{
+		return Result::Deleted;
+	}
 
 	while (m_status != Status::Set)
 	{
 		m_mutex.Unlock();
 		Core::Thread::SleepMicro(10);
 		m_mutex.Lock();
+		if (m_status == Status::Deleted)
+		{
+			return Result::Deleted;
+		}
 	}
 
 	if (num_waiting_threads != nullptr)
@@ -128,6 +126,11 @@ KernelSemaPrivate::Result KernelSemaPrivate::Cancel(int set_count, int* num_wait
 		m_mutex.Lock();
 	}
 
+	if (m_status == Status::Deleted)
+	{
+		return Result::Deleted;
+	}
+
 	m_status = Status::Set;
 
 	return Result::Ok;
@@ -137,13 +140,20 @@ KernelSemaPrivate::Result KernelSemaPrivate::Signal(int signal_count)
 {
 	Core::LockGuard lock(m_mutex);
 
-	EXIT_NOT_IMPLEMENTED(m_status == Status::Deleted);
+	if (m_status == Status::Deleted)
+	{
+		return Result::Deleted;
+	}
 
 	while (m_status != Status::Set)
 	{
 		m_mutex.Unlock();
 		Core::Thread::SleepMicro(10);
 		m_mutex.Lock();
+		if (m_status == Status::Deleted)
+		{
+			return Result::Deleted;
+		}
 	}
 
 	if (m_count + signal_count > m_max_count)
@@ -165,6 +175,11 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 	if (need_count < 1 || need_count > m_max_count)
 	{
 		return Result::InvalCount;
+	}
+
+	if (m_status == Status::Deleted)
+	{
+		return Result::Deleted;
 	}
 
 	uint32_t micros     = 0;
@@ -232,6 +247,25 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 	return Result::Ok;
 }
 
+namespace {
+
+Core::Mutex                                                    g_sema_registry_mutex;
+std::unordered_map<KernelSema, std::shared_ptr<KernelSemaPrivate>> g_live_semas;
+
+std::shared_ptr<KernelSemaPrivate> AcquireSema(KernelSema sem)
+{
+	if (sem == nullptr)
+	{
+		return {};
+	}
+
+	Core::LockGuard lock(g_sema_registry_mutex);
+	auto            it = g_live_semas.find(sem);
+	return it == g_live_semas.end() ? std::shared_ptr<KernelSemaPrivate> {} : it->second;
+}
+
+} // namespace
+
 int KYTY_SYSV_ABI KernelCreateSema(KernelSema* sem, const char* name, uint32_t attr, int init, int max, void* opt)
 {
 	PRINT_NAME();
@@ -252,7 +286,12 @@ int KYTY_SYSV_ABI KernelCreateSema(KernelSema* sem, const char* name, uint32_t a
 		default: fifo = false; break;
 	}
 
-	*sem = new KernelSemaPrivate(String::FromUtf8(name), fifo, init, max);
+	auto object = std::make_shared<KernelSemaPrivate>(String::FromUtf8(name), fifo, init, max);
+	*sem        = object.get();
+	{
+		Core::LockGuard lock(g_sema_registry_mutex);
+		g_live_semas.emplace(*sem, std::move(object));
+	}
 
 	printf("\t Semaphore create: %s, %d, %d\n", name, init, max);
 
@@ -263,12 +302,24 @@ int KYTY_SYSV_ABI KernelDeleteSema(KernelSema sem)
 {
 	PRINT_NAME();
 
-	if (sem == nullptr)
+	std::shared_ptr<KernelSemaPrivate> object;
+	{
+		Core::LockGuard lock(g_sema_registry_mutex);
+		auto            it = g_live_semas.find(sem);
+		if (it == g_live_semas.end())
+		{
+			return KERNEL_ERROR_ESRCH;
+		}
+		object = std::move(it->second);
+		g_live_semas.erase(it);
+	}
+
+	if (!object)
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	delete sem;
+	object->Delete();
 
 	return OK;
 }
@@ -277,14 +328,15 @@ int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time)
 {
 	PRINT_NAME();
 
-	if (sem == nullptr)
+	auto object = AcquireSema(sem);
+	if (!object)
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	printf("\t Semaphore wait: %s, %d, %d\n", sem->GetName().C_Str(), need, (time != nullptr ? *time : -1));
+	printf("\t Semaphore wait: %s, %d, %d\n", object->GetName().C_Str(), need, (time != nullptr ? *time : -1));
 
-	auto result = sem->Wait(need, time);
+	auto result = object->Wait(need, time);
 
 	int ret = OK;
 
@@ -304,14 +356,15 @@ int KYTY_SYSV_ABI KernelPollSema(KernelSema sem, int need)
 {
 	PRINT_NAME();
 
-	if (sem == nullptr)
+	auto object = AcquireSema(sem);
+	if (!object)
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	printf("\t Semaphore poll: %s, %d\n", sem->GetName().C_Str(), need);
+	printf("\t Semaphore poll: %s, %d\n", object->GetName().C_Str(), need);
 
-	auto result = sem->Poll(need);
+	auto result = object->Poll(need);
 
 	int ret = OK;
 
@@ -331,14 +384,15 @@ int KYTY_SYSV_ABI KernelSignalSema(KernelSema sem, int count)
 {
 	PRINT_NAME();
 
-	if (sem == nullptr)
+	auto object = AcquireSema(sem);
+	if (!object)
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	printf("\t Semaphore signal: %s, %d\n", sem->GetName().C_Str(), count);
+	printf("\t Semaphore signal: %s, %d\n", object->GetName().C_Str(), count);
 
-	auto result = sem->Signal(count);
+	auto result = object->Signal(count);
 
 	int ret = OK;
 
@@ -358,12 +412,13 @@ int KYTY_SYSV_ABI KernelCancelSema(KernelSema sem, int count, int* threads)
 {
 	PRINT_NAME();
 
-	if (sem == nullptr)
+	auto object = AcquireSema(sem);
+	if (!object)
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	auto result = sem->Cancel(count, threads);
+	auto result = object->Cancel(count, threads);
 
 	int ret = OK;
 

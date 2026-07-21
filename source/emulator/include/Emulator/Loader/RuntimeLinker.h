@@ -52,6 +52,7 @@ struct LibraryId
 struct ThreadLocalStorage
 {
 	uint64_t image_vaddr   = 0;
+	uint64_t init_size     = 0;
 	uint64_t image_size    = 0;
 	uint64_t handler_vaddr = 0;
 	uint64_t module_id     = 0;
@@ -144,6 +145,23 @@ struct LoadedModuleSnapshot
 	uint64_t entry_point = 0;
 };
 
+struct EhFrameInfo
+{
+	uint64_t header_addr = 0;
+	uint64_t frame_addr  = 0;
+	uint64_t frame_size  = 0;
+};
+
+struct ProgramUnwindInfo
+{
+	String   file_name;
+	uint64_t eh_frame_header_addr = 0;
+	uint64_t eh_frame_addr        = 0;
+	uint64_t eh_frame_size        = 0;
+	uint64_t image_addr           = 0;
+	uint64_t image_size           = 0;
+};
+
 struct ModuleStartDescriptor
 {
 	String         file_name;
@@ -156,6 +174,11 @@ struct ModuleStartDescriptor
 // libc.prx is visited first when present so CRT heap/TSD bootstrap runs before
 // C++ module constructors that call operator new (captured GRIS start path).
 Vector<uint32_t> LoaderBuildModuleStartOrder(const Vector<ModuleStartDescriptor>& modules);
+
+// Decode the captured GNU EH-frame header form (version 1, pcrel+sdata4).
+// readable_end is the exclusive bound of the mapped readable range.
+bool LoaderDecodeEhFrameHeader(const uint8_t* header, size_t header_size, uint64_t header_addr, uint64_t readable_end,
+                               EhFrameInfo* out_info);
 
 // MissingImportDiagnostics is defined in MissingImport.h (owned by
 // ImportDiagnostics / MissingImportRegistry).
@@ -183,6 +206,9 @@ public:
 	[[nodiscard]] uint64_t GetProcParam();
 
 	void RelocateAll();
+	// Relocate a newly loaded module without replaying relocation records of
+	// initialized modules whose GOT entries may be runtime-managed.
+	void RelocateProgram(Program* program);
 
 	void Execute();
 	int  StartModule(Program* program, size_t args, const void* argp, module_func_t func);
@@ -202,6 +228,7 @@ public:
 	[[nodiscard]] uint32_t LoadedProgramCount();
 	[[nodiscard]] Vector<ProgramExportSnapshot> SnapshotExportPrograms();
 	[[nodiscard]] Vector<LoadedModuleSnapshot>  SnapshotLoadedModules();
+	[[nodiscard]] bool TryGetProgramUnwindInfoByAddr(uint64_t vaddr, ProgramUnwindInfo* out_info);
 
 	static uint64_t ReadFromElf(Program* program, uint64_t vaddr);
 	Program*        FindProgramByAddr(uint64_t vaddr);
@@ -257,6 +284,10 @@ uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handle
 // TPOFF64 writes the negative static offset from the thread pointer.
 uint64_t LoaderTlsRelocationValue(uint32_t relocation_type, uint64_t module_id, uint64_t symbol_offset, int64_t addend,
                                   uint64_t static_tls_size);
+
+// Initialize a per-thread PT_TLS image. Only the file-backed prefix is copied;
+// the remaining memory image is TLS BSS and must start at zero.
+void LoaderInitializeThreadTlsImage(uint8_t* tls, uint64_t image_size, const uint8_t* template_data, uint64_t init_size);
 
 // Prepare a per-thread TLS image after memcpy from the PT_TLS template:
 // 1) Relocate absolute pointers that fall inside [template_vaddr, +image_size)
