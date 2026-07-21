@@ -67,7 +67,9 @@ int KYTY_SYSV_ABI VoiceQoSInit(void* mem_block, uint32_t mem_size, int32_t app_t
 namespace Ajm {
 
 int KYTY_SYSV_ABI AjmInitialize(int64_t reserved, uint32_t* context);
+int KYTY_SYSV_ABI AjmFinalize(uint32_t context);
 int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t reserved);
+int KYTY_SYSV_ABI AjmModuleUnregister(uint32_t context, uint32_t codec);
 
 } // namespace Ajm
 
@@ -122,11 +124,19 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 int KYTY_SYSV_ABI Ngs2SystemCreateWithAllocator(const Ngs2SystemOption* option, const Ngs2BufferAllocator* allocator, uintptr_t* handle);
 int KYTY_SYSV_ABI Ngs2RackCreateWithAllocator(uintptr_t system_handle, uint32_t rack_id, const Ngs2RackOption* option,
                                               const Ngs2BufferAllocator* allocator, uintptr_t* handle);
+int KYTY_SYSV_ABI Ngs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* buffer_info);
 int KYTY_SYSV_ABI Ngs2RackGetVoiceHandle(uintptr_t rack_handle, uint32_t voice_id, uintptr_t* handle);
 int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamHeader* param_list);
 int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* commands, uint32_t num_commands);
 int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* state, size_t state_size);
+int KYTY_SYSV_ABI Ngs2VoiceGetStateFlags(uintptr_t voice_handle, uint32_t* state_flags);
 int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBufferInfo* buffer_info, uint32_t num_buffer_info);
+int KYTY_SYSV_ABI Ngs2SystemDestroy(uintptr_t system_handle);
+int KYTY_SYSV_ABI Ngs2SystemLock(uintptr_t system_handle);
+int KYTY_SYSV_ABI Ngs2SystemUnlock(uintptr_t system_handle);
+int KYTY_SYSV_ABI Ngs2SystemSetGrainSamples(uintptr_t system_handle, uint32_t grain_samples);
+int KYTY_SYSV_ABI Ngs2SystemSetSampleRate(uintptr_t system_handle, uint32_t sample_rate);
+int KYTY_SYSV_ABI Ngs2PanInit(void* pan_param);
 // 3D geometry helpers (positional audio). Observed NIDs: ResetSource/Listener, CalcListener, Apply.
 int KYTY_SYSV_ABI Ngs2GeomResetSourceParam(void* out_source_param);
 int KYTY_SYSV_ABI Ngs2GeomResetListenerParam(void* out_listener_param);

@@ -8,6 +8,8 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Loader/SystemContent.h"
 
+#include <cstring>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs {
@@ -149,6 +151,116 @@ static int KYTY_SYSV_ABI PlayGoGetChunkId(int handle, uint16_t* out_chunk_id_lis
 	return OK;
 }
 
+static int KYTY_SYSV_ABI PlayGoGetProgress(int handle, const uint16_t* chunk_ids, uint32_t number_of_entries, void* out_progress)
+{
+	PRINT_NAME();
+	if (handle != 1)
+	{
+		return PLAYGO_ERROR_BAD_HANDLE;
+	}
+	if (chunk_ids == nullptr || out_progress == nullptr)
+	{
+		return PLAYGO_ERROR_BAD_POINTER;
+	}
+	if (number_of_entries == 0)
+	{
+		return PLAYGO_ERROR_BAD_SIZE;
+	}
+	std::memset(out_progress, 0, 16);
+	return OK;
+}
+
+static int KYTY_SYSV_ABI PlayGoPrefetch(int handle, const uint16_t* chunk_ids, uint32_t number_of_entries, uint32_t /*offset*/, uint32_t /*size*/)
+{
+	PRINT_NAME();
+	if (handle != 1)
+	{
+		return PLAYGO_ERROR_BAD_HANDLE;
+	}
+	if (chunk_ids == nullptr || number_of_entries == 0)
+	{
+		return PLAYGO_ERROR_BAD_POINTER;
+	}
+	return OK;
+}
+
+static int KYTY_SYSV_ABI PlayGoGetLanguageMask(int handle, uint64_t* mask)
+{
+	PRINT_NAME();
+	if (handle != 1)
+	{
+		return PLAYGO_ERROR_BAD_HANDLE;
+	}
+	if (mask == nullptr)
+	{
+		return PLAYGO_ERROR_BAD_POINTER;
+	}
+	*mask = 0;
+	return OK;
+}
+
+static int KYTY_SYSV_ABI PlayGoSetLanguageMask(int handle, uint64_t mask)
+{
+	PRINT_NAME();
+	printf("\t handle = %d\n", handle);
+	printf("\t mask   = %" PRIu64 "\n", mask);
+	return (handle == 1 ? OK : PLAYGO_ERROR_BAD_HANDLE);
+}
+
+static int KYTY_SYSV_ABI PlayGoGetToDoList(int handle, void* out_list, uint32_t number_of_entries, uint32_t* out_entries)
+{
+	PRINT_NAME();
+	if (handle != 1)
+	{
+		return PLAYGO_ERROR_BAD_HANDLE;
+	}
+	if (out_list == nullptr || out_entries == nullptr)
+	{
+		return PLAYGO_ERROR_BAD_POINTER;
+	}
+	*out_entries = 0;
+	return OK;
+}
+
+static int KYTY_SYSV_ABI PlayGoSetToDoList(int handle, const void* list, uint32_t number_of_entries)
+{
+	PRINT_NAME();
+	printf("\t handle            = %d\n", handle);
+	printf("\t number_of_entries = %" PRIu32 "\n", number_of_entries);
+	(void)list;
+	return (handle == 1 ? OK : PLAYGO_ERROR_BAD_HANDLE);
+}
+
+static int KYTY_SYSV_ABI PlayGoGetInstallSpeed(int handle, int32_t* speed)
+{
+	PRINT_NAME();
+	if (handle != 1)
+	{
+		return PLAYGO_ERROR_BAD_HANDLE;
+	}
+	if (speed == nullptr)
+	{
+		return PLAYGO_ERROR_BAD_POINTER;
+	}
+	*speed = 2;
+	return OK;
+}
+
+static int KYTY_SYSV_ABI PlayGoGetEta(int handle, const uint16_t* chunk_ids, uint32_t number_of_entries, uint32_t* out_eta)
+{
+	PRINT_NAME();
+	if (handle != 1)
+	{
+		return PLAYGO_ERROR_BAD_HANDLE;
+	}
+	if (chunk_ids == nullptr || out_eta == nullptr || number_of_entries == 0)
+	{
+		return PLAYGO_ERROR_BAD_POINTER;
+	}
+	*out_eta = 0;
+	return OK;
+}
+
 } // namespace PlayGo
 
 LIB_DEFINE(InitPlayGo_1)
@@ -160,6 +272,14 @@ LIB_DEFINE(InitPlayGo_1)
 	LIB_FUNC("uWIYLFkkwqk", PlayGo::PlayGoGetLocus);
 	LIB_FUNC("4AAcTU9R3XM", PlayGo::PlayGoSetInstallSpeed);
 	LIB_FUNC("73fF1MFU8hA", PlayGo::PlayGoGetChunkId);
+	LIB_FUNC("-RJWNMK3fC8", PlayGo::PlayGoGetProgress);
+	LIB_FUNC("-Q1-u1a7p0g", PlayGo::PlayGoPrefetch);
+	LIB_FUNC("3OMbYZBaa50", PlayGo::PlayGoGetLanguageMask);
+	LIB_FUNC("LosLlHOpNqQ", PlayGo::PlayGoSetLanguageMask);
+	LIB_FUNC("Nn7zKwnA5q0", PlayGo::PlayGoGetToDoList);
+	LIB_FUNC("gUPGiOQ1tmQ", PlayGo::PlayGoSetToDoList);
+	LIB_FUNC("rvBSfTimejE", PlayGo::PlayGoGetInstallSpeed);
+	LIB_FUNC("v6EZ-YWRdMs", PlayGo::PlayGoGetEta);
 }
 
 } // namespace Kyty::Libs

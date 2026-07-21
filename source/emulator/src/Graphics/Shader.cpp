@@ -13,7 +13,10 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Graphics/ShaderResolutionUsageCache.h"
+#include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Profiler.h"
 
 
@@ -36,6 +39,8 @@
 KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>(Kyty::Libs::Graphics::ShaderInstructionType::ZMax));
 
 namespace Kyty::Libs::Graphics {
+
+static ShaderResolutionUsageCache g_shader_resolution_usage_cache(512);
 
 static void RecordShaderInputAnalysis(uint64_t elapsed_ns)
 {
@@ -1059,7 +1064,7 @@ static bool SpirvToGlsl(const uint32_t* /*src_binary*/, size_t /*src_binary_size
 	return true;
 }
 
-static bool SpirvRun(const String8& src, Vector<uint32_t>* dst, String8* err_msg)
+static bool SpirvCompile(const String8& src, Vector<uint32_t>* dst, String8* err_msg)
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(err_msg == nullptr);
@@ -1121,6 +1126,32 @@ static bool SpirvRun(const String8& src, Vector<uint32_t>* dst, String8* err_msg
 	dst->Add(spirv.data(), spirv.size());
 
 	return true;
+}
+
+static bool SpirvRun(const String8& src, Vector<uint32_t>* dst, String8* err_msg)
+{
+	EXIT_IF(dst == nullptr);
+	EXIT_IF(err_msg == nullptr);
+
+	const auto optimization = static_cast<uint32_t>(Config::GetShaderOptimizationType());
+	const bool validation   = Config::ShaderValidationEnabled();
+	auto&      cache        = SpirvBinaryCacheDefaultStore();
+	const auto lookup       = cache.Load(src, optimization, validation, dst);
+	if (lookup == SpirvBinaryCacheLoadResult::Hit)
+	{
+		return true;
+	}
+
+	bool compiled = false;
+	{
+		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
+		compiled = SpirvCompile(src, dst, err_msg);
+	}
+	if (compiled)
+	{
+		(void)cache.QueueStore(src, optimization, validation, *dst);
+	}
+	return compiled;
 }
 
 static const ShaderBinaryInfo* GetBinaryInfo(const uint32_t* code)
@@ -1803,6 +1834,52 @@ static ShaderStorageAccess ShaderGetDirectStorageAccess(const ShaderCode& code, 
 	return AnalyzeShaderStorageUse(code, start_register).access;
 }
 
+struct ShaderDirectImageUse
+{
+	ShaderTextureUsage texture = ShaderTextureUsage::Unknown;
+	int                sampler_register = -1;
+};
+
+static ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register)
+{
+	ShaderDirectImageUse result;
+
+	for (const auto& inst: code.GetInstructions())
+	{
+		const bool read =
+		    inst.type == ShaderInstructionType::ImageLoad || inst.type == ShaderInstructionType::ImageSample ||
+		    inst.type == ShaderInstructionType::ImageSampleLz || inst.type == ShaderInstructionType::ImageSampleLzO;
+		const bool write = inst.type == ShaderInstructionType::ImageStore || inst.type == ShaderInstructionType::ImageStoreMip;
+		if ((!read && !write) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
+		    inst.src[1].register_id != start_register || inst.src[1].size != 8)
+		{
+			continue;
+		}
+
+		if (write)
+		{
+			result.texture = ShaderTextureUsage::ReadWrite;
+		} else if (result.texture == ShaderTextureUsage::Unknown)
+		{
+			result.texture = ShaderTextureUsage::ReadOnly;
+		}
+
+		const bool sampled = inst.type == ShaderInstructionType::ImageSample || inst.type == ShaderInstructionType::ImageSampleLz ||
+		                     inst.type == ShaderInstructionType::ImageSampleLzO;
+		if (sampled && inst.src_num >= 3 && inst.src[2].type == ShaderOperandType::Sgpr && inst.src[2].size == 4)
+		{
+			if (result.sampler_register >= 0 && result.sampler_register != inst.src[2].register_id)
+			{
+				EXIT("direct image resource uses multiple sampler ranges: texture_sgpr=%d first_sampler=%d next_sampler=%d\n",
+				     start_register, result.sampler_register, inst.src[2].register_id);
+			}
+			result.sampler_register = inst.src[2].register_id;
+		}
+	}
+
+	return result;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                       int user_sgpr_num)
@@ -2131,6 +2208,32 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				// fallthrough
 			default:
 			{
+				if (code != nullptr)
+				{
+					const auto image = AnalyzeShaderDirectImageUse(*code, reg + user_data_register_base);
+					if (image.texture != ShaderTextureUsage::Unknown)
+					{
+						ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, reg, bind->textures2D.textures_num, image.texture,
+						                       user_sgpr, nullptr);
+						if (image.texture == ShaderTextureUsage::ReadWrite)
+						{
+							info->textures2D_readwrite++;
+						} else
+						{
+							info->textures2D_readonly++;
+						}
+						if (image.sampler_register >= 0)
+						{
+							const int sampler_register = image.sampler_register - user_data_register_base;
+							EXIT_NOT_IMPLEMENTED(sampler_register < 0);
+							ShaderGetSampler(&bind->samplers, direct_sgprs, sampler_register, bind->samplers.samplers_num,
+							                 user_sgpr, nullptr);
+							info->samplers++;
+						}
+						break;
+					}
+				}
+
 				// When the instruction stream is unavailable (VS/PS Gen5 path),
 				// default to ReadOnly rather than failing. CS passes &code and
 				// reclassifies stores as ReadWrite via ShaderGetDirectStorageUsage.
@@ -2522,7 +2625,21 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	{
 		EXIT_NOT_IMPLEMENTED(data.user_data == nullptr);
 
-		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr);
+		const auto analysis = g_shader_resolution_usage_cache.GetOrAnalyze(
+		    {regs->ps_regs.data_addr, regs->ps_regs.chksum, kShaderTranslatorVersion},
+		    [regs]()
+		    {
+			    auto code = std::make_shared<ShaderCode>();
+			    code->SetType(ShaderType::Pixel);
+			    {
+				    DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
+				    ShaderParse(reinterpret_cast<const uint32_t*>(regs->ps_regs.data_addr), code.get());
+			    }
+			    return ShaderResolutionAnalysis {AnalyzeResolutionShaderUsage(*code), code};
+		    });
+		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
+		ps_info->image_size_query          = analysis.usage.image_size_query;
+		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr, analysis.code.get());
 	} else
 	{
 		ShaderParseUsage(regs->ps_regs.data_addr, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr);
@@ -3141,10 +3258,7 @@ Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInp
 
 	String8 err_msg;
 	bool    spirv_ok = false;
-	{
-		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
-		spirv_ok = SpirvRun(source, &ret, &err_msg);
-	}
+	spirv_ok = SpirvRun(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
 		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());
@@ -3256,10 +3370,7 @@ Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInpu
 
 	String8 err_msg;
 	bool    spirv_ok = false;
-	{
-		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
-		spirv_ok = SpirvRun(source, &ret, &err_msg);
-	}
+	spirv_ok = SpirvRun(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
 		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());
@@ -3356,10 +3467,7 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 
 	String8 err_msg;
 	bool    spirv_ok = false;
-	{
-		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
-		spirv_ok = SpirvRun(source, &ret, &err_msg);
-	}
+	spirv_ok = SpirvRun(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
 		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());
@@ -3636,6 +3744,9 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_external));
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_embedded));
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_inline));
+	ret.ids.Add(static_cast<uint32_t>(input_info->gs_prolog));
+	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_reg));
+	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_buffer_reg));
 	ret.ids.Add(input_info->resources_num);
 	ret.ids.Add(input_info->export_count);
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_data_num));
@@ -3724,6 +3835,10 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 
 	ret.ids.Add(input_info->input_num);
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pos_xy));
+	ret.ids.Add(input_info->host_to_guest_scale.x_guest_numerator);
+	ret.ids.Add(input_info->host_to_guest_scale.x_host_denominator);
+	ret.ids.Add(input_info->host_to_guest_scale.y_guest_numerator);
+	ret.ids.Add(input_info->host_to_guest_scale.y_host_denominator);
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pixel_kill_enable));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_early_z));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_execute_on_noop));

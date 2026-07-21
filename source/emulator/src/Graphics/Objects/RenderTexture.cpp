@@ -159,8 +159,9 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	{
 		auto* src_obj = static_cast<StorageTextureVulkanImage*>(objects.At(2).obj);
 
-		uint32_t mip_width  = src_obj->extent.width;
-		uint32_t mip_height = src_obj->extent.height;
+		const auto src_guest_extent = src_obj->GetGuestExtent();
+		uint32_t   mip_width        = src_guest_extent.width;
+		uint32_t   mip_height       = src_guest_extent.height;
 
 		Vector<ImageImageCopy> regions(1);
 
@@ -422,7 +423,8 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 	delete vk_obj;
 }
 
-static void write_back(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
+static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr,
+                                     const uint64_t* size, int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("RenderTextureObject::write_back");
 
@@ -443,6 +445,8 @@ static void write_back(GraphicContext* ctx, const uint64_t* params, void* obj, c
 
 	UtilFillBuffer(ctx, reinterpret_cast<void*>(*vaddr), *size, pitch, vk_obj,
 	               static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+	const uint64_t changed_pages = *size / 4096u + ((*size % 4096u) == 0u ? 0u : 1u);
+	return {.changed_pages = changed_pages, .copied_bytes = *size, .content_changed = true};
 }
 
 bool RenderTextureObject::Equal(const uint64_t* other) const

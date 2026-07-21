@@ -2,6 +2,7 @@
 
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/GpuSubmissionCoordinator.h"
+#include "Emulator/Graphics/GpuSubmissionPublicationGate.h"
 #include "Emulator/Graphics/Objects/LabelSubmissionTracker.h"
 #include "Emulator/Graphics/Utils.h"
 
@@ -164,13 +165,120 @@ TEST(EmulatorGpuSubmissionCoordinator, RotatesCommandProcessorSlotsWithExactMono
 		EXPECT_EQ(id.queue, GpuQueueId(3));
 		EXPECT_EQ(id.sequence, static_cast<uint64_t>(slot) + 1);
 		ASSERT_EQ(slots.MarkSubmitted(slot), GpuSubmissionResult::Success);
-		ASSERT_EQ(slots.MarkCompletedWithoutActionsAndRetire(slot), GpuSubmissionResult::Success);
+		ASSERT_EQ(slots.MarkFenceCompleted(slot), GpuSubmissionResult::Success);
+		ASSERT_EQ(slots.RetirePublished(id), GpuSubmissionResult::Success);
 	}
 
 	SubmissionId reused;
 	ASSERT_EQ(slots.BeginRecording(0, &reused, nullptr), GpuSubmissionResult::Success);
 	EXPECT_EQ(reused.queue, GpuQueueId(3));
 	EXPECT_EQ(reused.sequence, 5u);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, KeepsFourCommandProcessorSubmissionsInFlightUntilExactSlotReuse)
+{
+	GpuSubmissionCoordinator        coordinator;
+	CommandProcessorSubmissionSlots slots(&coordinator, GpuQueueId(3));
+	SubmissionId                    in_flight[CommandProcessorSubmissionSlots::SlotCount];
+
+	for (uint32_t slot = 0; slot < CommandProcessorSubmissionSlots::SlotCount; slot++)
+	{
+		ASSERT_EQ(slots.BeginRecording(slot, &in_flight[slot], nullptr), GpuSubmissionResult::Success);
+		ASSERT_EQ(slots.MarkSubmitted(slot), GpuSubmissionResult::Success);
+	}
+
+	SubmissionId         blocked;
+	SubmissionDependency dependency;
+	EXPECT_EQ(slots.BeginRecording(0, &blocked, &dependency), GpuSubmissionResult::SlotBusy);
+	EXPECT_EQ(dependency.producer, in_flight[0]);
+
+	ASSERT_EQ(slots.MarkFenceCompleted(0), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.BeginRecording(0, &blocked, nullptr), GpuSubmissionResult::Success);
+	EXPECT_EQ(blocked.sequence, 5u);
+	ASSERT_EQ(slots.RetirePublished(in_flight[0]), GpuSubmissionResult::Success);
+
+	for (uint32_t slot = 1; slot < CommandProcessorSubmissionSlots::SlotCount; slot++)
+	{
+		GpuSubmissionState state = GpuSubmissionState::Recording;
+		ASSERT_EQ(coordinator.GetState(in_flight[slot], &state), GpuSubmissionResult::Success);
+		EXPECT_EQ(state, GpuSubmissionState::Submitted);
+	}
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, ResolvesSubmissionOwnerToItsExactCommandProcessorSlot)
+{
+	GpuSubmissionCoordinator        coordinator;
+	CommandProcessorSubmissionSlots slots(&coordinator, GpuQueueId(5));
+	SubmissionId                    first;
+	SubmissionId                    second;
+	uint32_t                        slot = UINT32_MAX;
+
+	ASSERT_EQ(slots.BeginRecording(0, &first, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.MarkSubmitted(0), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.BeginRecording(1, &second, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.MarkSubmitted(1), GpuSubmissionResult::Success);
+
+	EXPECT_EQ(slots.FindSlot(first, &slot), GpuSubmissionResult::Success);
+	EXPECT_EQ(slot, 0u);
+	EXPECT_EQ(slots.FindSlot(second, &slot), GpuSubmissionResult::Success);
+	EXPECT_EQ(slot, 1u);
+	EXPECT_EQ(slots.FindSlot({GpuQueueId(5), 99}, &slot), GpuSubmissionResult::UnknownSubmission);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, FindsExactKnownWaitProducerAndReportsUnknownAddress)
+{
+	GpuSubmissionCoordinator        coordinator;
+	CommandProcessorSubmissionSlots slots(&coordinator, GpuQueueId(6));
+	SubmissionId                    producer;
+	SubmissionDependency            dependency;
+
+	ASSERT_EQ(slots.BeginRecording(2, &producer, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.RegisterProducer(2, 0x4000, 4, 0x11223344), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.MarkSubmitted(2), GpuSubmissionResult::Success);
+
+	EXPECT_EQ(slots.FindPendingProducer(0x4000, 4, 0x11223344, UINT32_MAX, &dependency), GpuSubmissionResult::Success);
+	EXPECT_EQ(dependency.producer, producer);
+	EXPECT_EQ(slots.FindPendingProducer(0x5000, 4, 0x11223344, UINT32_MAX, &dependency),
+	          GpuSubmissionResult::ProducerNotFound);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, ReportsNewestCrossQueueProducerWhenItsValueShadowsTheWait)
+{
+	GpuSubmissionCoordinator coordinator;
+	SubmissionId              older;
+	SubmissionId              newer;
+	SubmissionDependency      dependency;
+
+	ASSERT_EQ(coordinator.BeginRecording(GpuQueueId(1), 0, &older, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(coordinator.RegisterProducer(older, 0x4000, 4, 1), GpuSubmissionResult::Success);
+	ASSERT_EQ(coordinator.MarkSubmitted(older), GpuSubmissionResult::Success);
+	ASSERT_EQ(coordinator.BeginRecording(GpuQueueId(2), 0, &newer, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(coordinator.RegisterProducer(newer, 0x4000, 4, 2), GpuSubmissionResult::Success);
+	ASSERT_EQ(coordinator.MarkSubmitted(newer), GpuSubmissionResult::Success);
+
+	EXPECT_EQ(coordinator.FindPendingProducer(0x4000, 4, 1, UINT32_MAX, &dependency),
+	          GpuSubmissionResult::ProducerValueMismatch);
+	EXPECT_EQ(dependency.producer, newer);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, CrossQueueWaitIdentifiesRecordingProducerAtItsOwner)
+{
+	GpuSubmissionCoordinator        coordinator;
+	CommandProcessorSubmissionSlots waiter(&coordinator, GpuQueueId(1));
+	CommandProcessorSubmissionSlots producer(&coordinator, GpuQueueId(2));
+	SubmissionId                    producer_id;
+	SubmissionDependency            dependency;
+	GpuSubmissionState              state = GpuSubmissionState::Completed;
+	uint32_t                        slot  = UINT32_MAX;
+
+	ASSERT_EQ(producer.BeginRecording(3, &producer_id, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(producer.RegisterProducer(3, 0x6000, 8, 0x44), GpuSubmissionResult::Success);
+	ASSERT_EQ(waiter.FindPendingProducer(0x6000, 8, 0x44, UINT64_MAX, &dependency), GpuSubmissionResult::Success);
+	EXPECT_EQ(dependency.producer, producer_id);
+	ASSERT_EQ(producer.GetState(dependency.producer, &state), GpuSubmissionResult::Success);
+	EXPECT_EQ(state, GpuSubmissionState::Recording);
+	ASSERT_EQ(producer.FindSlot(dependency.producer, &slot), GpuSubmissionResult::Success);
+	EXPECT_EQ(slot, 3u);
 }
 
 TEST(EmulatorGpuSubmissionCoordinator, CompletesOnlyTheSubmissionOwnedByTheFenceSlot)
@@ -184,14 +292,117 @@ TEST(EmulatorGpuSubmissionCoordinator, CompletesOnlyTheSubmissionOwnedByTheFence
 	ASSERT_EQ(slots.BeginRecording(1, &second, nullptr), GpuSubmissionResult::Success);
 	ASSERT_EQ(slots.MarkSubmitted(0), GpuSubmissionResult::Success);
 	ASSERT_EQ(slots.MarkSubmitted(1), GpuSubmissionResult::Success);
-	ASSERT_EQ(slots.MarkCompletedWithoutActionsAndRetire(1), GpuSubmissionResult::Success);
+	EXPECT_EQ(slots.MarkFenceCompleted(1), GpuSubmissionResult::InvalidTransition);
+	ASSERT_EQ(slots.MarkFenceCompleted(0), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.MarkFenceCompleted(1), GpuSubmissionResult::Success);
 
 	GpuSubmissionState first_state = GpuSubmissionState::Recording;
 	ASSERT_EQ(coordinator.GetState(first, &first_state), GpuSubmissionResult::Success);
-	EXPECT_EQ(first_state, GpuSubmissionState::Submitted);
+	EXPECT_EQ(first_state, GpuSubmissionState::Completed);
 
 	GpuSubmissionState second_state = GpuSubmissionState::Recording;
-	EXPECT_EQ(coordinator.GetState(second, &second_state), GpuSubmissionResult::UnknownSubmission);
+	ASSERT_EQ(coordinator.GetState(second, &second_state), GpuSubmissionResult::Success);
+	EXPECT_EQ(second_state, GpuSubmissionState::Completed);
+
+	ASSERT_EQ(slots.RetirePublished(first), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.RetirePublished(second), GpuSubmissionResult::Success);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, ReportsSubmittedSlotsInFifoSequenceOrder)
+{
+	GpuSubmissionCoordinator        coordinator;
+	CommandProcessorSubmissionSlots slots(&coordinator, GpuQueueId(9));
+	SubmissionId                    submitted[CommandProcessorSubmissionSlots::SlotCount];
+
+	for (uint32_t slot = 0; slot < CommandProcessorSubmissionSlots::SlotCount; slot++)
+	{
+		ASSERT_EQ(slots.BeginRecording(slot, &submitted[slot], nullptr), GpuSubmissionResult::Success);
+		ASSERT_EQ(slots.MarkSubmitted(slot), GpuSubmissionResult::Success);
+	}
+
+	for (uint32_t expected_slot = 0; expected_slot < CommandProcessorSubmissionSlots::SlotCount; expected_slot++)
+	{
+		uint32_t     slot = UINT32_MAX;
+		SubmissionId id;
+		ASSERT_EQ(slots.GetOldestSubmitted(&slot, &id), GpuSubmissionResult::Success);
+		EXPECT_EQ(slot, expected_slot);
+		EXPECT_EQ(id, submitted[expected_slot]);
+		ASSERT_EQ(slots.MarkFenceCompleted(slot), GpuSubmissionResult::Success);
+		ASSERT_EQ(slots.RetirePublished(id), GpuSubmissionResult::Success);
+	}
+
+	uint32_t     slot = UINT32_MAX;
+	SubmissionId id;
+	EXPECT_EQ(slots.GetOldestSubmitted(&slot, &id), GpuSubmissionResult::UnknownSubmission);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, PublicationWaitsUntilCallbacksFinishAfterFenceRetirement)
+{
+	GpuSubmissionPublicationGate gate(GpuQueueId(4));
+	const SubmissionId           submission {GpuQueueId(4), 1};
+
+	ASSERT_EQ(gate.RegisterSubmitted(submission), GpuSubmissionPublicationResult::Success);
+	ASSERT_EQ(gate.MarkFenceComplete(submission), GpuSubmissionPublicationResult::Success);
+
+	std::mutex              mutex;
+	std::condition_variable condition;
+	bool                    waiting = false;
+	bool                    returned = false;
+	std::thread waiter([&] {
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			waiting = true;
+		}
+		condition.notify_all();
+		EXPECT_EQ(gate.WaitUntilPublished(submission), GpuSubmissionPublicationResult::Success);
+		std::lock_guard<std::mutex> lock(mutex);
+		returned = true;
+		condition.notify_all();
+	});
+
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		condition.wait(lock, [&] { return waiting; });
+		EXPECT_FALSE(returned);
+	}
+
+	SubmissionId ready;
+	ASSERT_EQ(gate.TryAcquireNextForPublication(&ready), GpuSubmissionPublicationResult::Success);
+	EXPECT_EQ(ready, submission);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		EXPECT_FALSE(returned);
+	}
+	ASSERT_EQ(gate.MarkPublished(submission), GpuSubmissionPublicationResult::Success);
+	waiter.join();
+	EXPECT_TRUE(returned);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, PublicationPreservesFifoUnderConcurrentAndReentrantCompletion)
+{
+	GpuSubmissionPublicationGate gate(GpuQueueId(5));
+	const SubmissionId           first {GpuQueueId(5), 1};
+	const SubmissionId           second {GpuQueueId(5), 2};
+	SubmissionId                 ready;
+
+	ASSERT_EQ(gate.RegisterSubmitted(first), GpuSubmissionPublicationResult::Success);
+	ASSERT_EQ(gate.RegisterSubmitted(second), GpuSubmissionPublicationResult::Success);
+	ASSERT_EQ(gate.MarkFenceComplete(second), GpuSubmissionPublicationResult::Success);
+	EXPECT_EQ(gate.TryAcquireNextForPublication(&ready), GpuSubmissionPublicationResult::NotReady);
+
+	ASSERT_EQ(gate.MarkFenceComplete(first), GpuSubmissionPublicationResult::Success);
+	ASSERT_EQ(gate.TryAcquireNextForPublication(&ready), GpuSubmissionPublicationResult::Success);
+	EXPECT_EQ(ready, first);
+	EXPECT_TRUE(gate.IsPublishingOnCurrentThread());
+	// A callback can complete a later fence reentrantly, but it cannot publish
+	// that submission while the prior callback is still executing.
+	EXPECT_EQ(gate.TryAcquireNextForPublication(&ready), GpuSubmissionPublicationResult::NotReady);
+	ASSERT_EQ(gate.MarkPublished(first), GpuSubmissionPublicationResult::Success);
+	EXPECT_FALSE(gate.IsPublishingOnCurrentThread());
+	ASSERT_EQ(gate.TryAcquireNextForPublication(&ready), GpuSubmissionPublicationResult::Success);
+	EXPECT_EQ(ready, second);
+	ASSERT_EQ(gate.MarkPublished(second), GpuSubmissionPublicationResult::Success);
+	EXPECT_EQ(gate.WaitUntilPublished(second), GpuSubmissionPublicationResult::Success);
 }
 
 TEST(EmulatorGpuSubmissionCoordinator, RejectsCommandProcessorSlotLifecycleWithoutAnActiveIdentity)
@@ -200,7 +411,7 @@ TEST(EmulatorGpuSubmissionCoordinator, RejectsCommandProcessorSlotLifecycleWitho
 	CommandProcessorSubmissionSlots slots(&coordinator, GpuQueueId(0));
 
 	EXPECT_EQ(slots.MarkSubmitted(0), GpuSubmissionResult::UnknownSubmission);
-	EXPECT_EQ(slots.MarkCompletedWithoutActionsAndRetire(0), GpuSubmissionResult::UnknownSubmission);
+	EXPECT_EQ(slots.MarkFenceCompleted(0), GpuSubmissionResult::UnknownSubmission);
 	EXPECT_EQ(slots.BeginRecording(CommandProcessorSubmissionSlots::SlotCount, nullptr, nullptr), GpuSubmissionResult::InvalidArgument);
 }
 
@@ -216,7 +427,7 @@ TEST(EmulatorGpuSubmissionCoordinator, RotatesToRecordingSlotBeforeCompletionCal
 	// A synchronous completion callback flushing before rotation would submit
 	// the same slot twice, which is the strict runtime failure this guards.
 	EXPECT_EQ(slots.MarkSubmitted(0), GpuSubmissionResult::InvalidTransition);
-	ASSERT_EQ(slots.CompleteAndRetireThenBeginRecording(0, 1, &callback_recording, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(slots.CompleteFenceThenBeginRecording(0, 1, &callback_recording, nullptr), GpuSubmissionResult::Success);
 
 	EXPECT_EQ(callback_recording.queue, GpuQueueId(8));
 	EXPECT_EQ(callback_recording.sequence, 2u);
@@ -296,6 +507,28 @@ TEST(EmulatorGpuSubmissionCoordinator, LabelCompletionKeepsDistinctLabelsAtAReus
 	ASSERT_EQ(completed.Size(), 1u);
 	EXPECT_EQ(completed.At(0).token, 401u);
 	EXPECT_TRUE(tracker.IsBound(402));
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, TransientLabelsLeaveNoOwnershipAfterExactCompletion)
+{
+	LabelSubmissionTracker tracker;
+	Vector<LabelSubmissionCompletion> completed;
+
+	for (uint64_t sequence = 1; sequence <= 1024; sequence++)
+	{
+		const uint64_t     token = sequence;
+		const SubmissionId submission {GpuQueueId(11), sequence};
+		ASSERT_EQ(tracker.Bind(token, submission), LabelSubmissionResult::Success);
+		ASSERT_EQ(tracker.MarkDeleted(token), LabelSubmissionResult::Success);
+		ASSERT_EQ(tracker.TakeCompleted(submission, &completed), LabelSubmissionResult::Success);
+		ASSERT_EQ(completed.Size(), 1u);
+		EXPECT_EQ(completed.At(0).token, token);
+		EXPECT_EQ(completed.At(0).kind, LabelSubmissionCompletionKind::Destroy);
+		EXPECT_EQ(tracker.PendingCount(), 0u);
+
+		ASSERT_EQ(tracker.TakeCompleted(submission, &completed), LabelSubmissionResult::Success);
+		EXPECT_TRUE(completed.IsEmpty());
+	}
 }
 
 UT_END();

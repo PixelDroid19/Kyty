@@ -9,6 +9,7 @@
 #include "Emulator/Graphics/AsyncJob.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/GpuSubmissionPublicationGate.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRender.h"
@@ -89,6 +90,7 @@ private:
 		case GpuSubmissionResult::SubmissionFrozen: return "SubmissionFrozen";
 		case GpuSubmissionResult::SlotBusy: return "SlotBusy";
 		case GpuSubmissionResult::ProducerNotFound: return "ProducerNotFound";
+		case GpuSubmissionResult::ProducerValueMismatch: return "ProducerValueMismatch";
 		case GpuSubmissionResult::AlreadyCompleted: return "AlreadyCompleted";
 		case GpuSubmissionResult::CompletionActionsPending: return "CompletionActionsPending";
 	}
@@ -101,6 +103,28 @@ void require_submission_success(GpuSubmissionResult result, const char* operatio
 	{
 		EXIT("GPU submission lifecycle failed: operation=%s queue=%d slot=%" PRIu32 " result=%s\n", operation, queue, slot,
 		     gpu_submission_result_name(result));
+	}
+}
+
+[[nodiscard]] const char* gpu_submission_publication_result_name(GpuSubmissionPublicationResult result)
+{
+	switch (result)
+	{
+		case GpuSubmissionPublicationResult::Success: return "Success";
+		case GpuSubmissionPublicationResult::InvalidArgument: return "InvalidArgument";
+		case GpuSubmissionPublicationResult::UnknownSubmission: return "UnknownSubmission";
+		case GpuSubmissionPublicationResult::InvalidTransition: return "InvalidTransition";
+		case GpuSubmissionPublicationResult::NotReady: return "NotReady";
+	}
+	return "UnknownResult";
+}
+
+void require_publication_success(GpuSubmissionPublicationResult result, const char* operation, int queue, SubmissionId submission)
+{
+	if (result != GpuSubmissionPublicationResult::Success)
+	{
+		EXIT("GPU submission publication failed: operation=%s queue=%d sequence=%" PRIu64 " result=%s\n", operation, queue,
+		     submission.sequence, gpu_submission_publication_result_name(result));
 	}
 }
 
@@ -118,7 +142,8 @@ public:
 	};
 
 	CommandProcessor(GpuSubmissionCoordinator* submission_coordinator, int queue):
-	    m_submission_slots(submission_coordinator, GpuQueueId(static_cast<uint32_t>(queue))), m_queue(queue)
+	    m_submission_slots(submission_coordinator, GpuQueueId(static_cast<uint32_t>(queue))),
+	    m_publication_gate(GpuQueueId(static_cast<uint32_t>(queue))), m_queue(queue)
 	{
 		EXIT_IF(submission_coordinator == nullptr);
 		EXIT_IF(queue < 0 || queue >= GraphicContext::QUEUES_NUM);
@@ -130,13 +155,17 @@ public:
 	void Reset();
 
 	void BufferInit();
-	void BufferFlush();
+	SubmissionId BufferFlush();
 	void BufferWait();
+	void SubmitAndWait();
+	void WaitSubmission(SubmissionId submission);
+	[[nodiscard]] bool OwnsSubmissionQueue(SubmissionId submission) const
+	{
+		return submission.queue == GpuQueueId(static_cast<uint32_t>(m_queue));
+	}
 
 	void RunLock() { m_run_mutex.Lock(); }
 	void RunUnlock() { m_run_mutex.Unlock(); }
-	void Lock() { m_mutex.Lock(); }
-	void Unlock() { m_mutex.Unlock(); }
 
 	HW::Context*    GetCtx() { return &m_ctx; }
 	HW::UserConfig* GetUcfg() { return &m_ucfg; }
@@ -187,7 +216,8 @@ public:
 
 	void WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll);
 	void WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll);
-	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom);
+	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom,
+	               bool matching_wait_mem64);
 
 	void Run(uint32_t* data, uint32_t num_dw);
 
@@ -204,6 +234,11 @@ public:
 
 private:
 	static constexpr int VK_BUFFERS_NUM = static_cast<int>(CommandProcessorSubmissionSlots::SlotCount);
+	void CompleteSubmittedThroughLocked(SubmissionId target, SubmissionId* latest_completed);
+	void TryCompleteSubmittedLocked(SubmissionId* latest_completed);
+	SubmissionId SubmitCurrentLocked(SubmissionId* latest_completed);
+	void PublishCompletedSubmissions();
+	void WaitUntilPublishedUnlessReentrant(SubmissionId submission);
 
 	struct Counter
 	{
@@ -227,6 +262,7 @@ private:
 	CommandBuffer* m_buffer[VK_BUFFERS_NUM] = {};
 	int            m_current_buffer         = -1;
 	CommandProcessorSubmissionSlots m_submission_slots;
+	GpuSubmissionPublicationGate   m_publication_gate;
 	int            m_queue                  = -1;
 
 	Counter m_de_counter;
@@ -373,16 +409,20 @@ public:
 	void     DingDong(uint32_t ring_id, uint32_t offset_dw);
 	void     Done();
 	void     Wait();
+	void     WaitSubmission(SubmissionId submission);
+	bool     RunQuiesced(GraphicsRunQuiescedAction action, void* data);
 	int      GetFrameNum();
 	bool     AreSubmitsAllowed();
 
 private:
 	void Init();
+	void WaitLocked();
 
 	ComputeRing* GetRing(uint32_t ring_id);
 
-	Core::Mutex m_mutex;
-	GpuSubmissionCoordinator m_submission_coordinator;
+	GpuSubmissionAdmissionGate m_submission_admission_gate;
+	std::mutex                 m_topology_mutex;
+	GpuSubmissionCoordinator   m_submission_coordinator;
 
 	CommandProcessor* m_gfx_cp   = nullptr;
 	GraphicsRing*     m_gfx_ring = nullptr;
@@ -428,15 +468,21 @@ void GraphicsRunInit()
 
 void Gpu::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw)
 {
-	Core::LockGuard lock(m_mutex);
-
-	m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, 0, 0, 0, 0, false);
+	m_submission_admission_gate.RunAdmitted(
+	    [&]
+	    {
+		    m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, 0, 0, 0, 0, false);
+	    });
 }
 
 void Gpu::SubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle,
                         int index, int flip_mode, int64_t flip_arg)
 {
-	m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, handle, index, flip_mode, flip_arg, true);
+	m_submission_admission_gate.RunAdmitted(
+	    [&]
+	    {
+		    m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, handle, index, flip_mode, flip_arg, true);
+	    });
 }
 
 uint32_t Gpu::MapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint32_t* ring_addr, uint32_t ring_size_dw, uint32_t* read_ptr_addr)
@@ -445,105 +491,113 @@ uint32_t Gpu::MapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint32_t* rin
 	EXIT_NOT_IMPLEMENTED(ring_size_dw == 0);
 	EXIT_NOT_IMPLEMENTED(read_ptr_addr == nullptr);
 
-	Core::LockGuard lock(m_mutex);
+	return m_submission_admission_gate.RunAdmitted(
+	    [&]
+	    {
+		    auto v = pipe_id * 8 + queue_id;
 
-	auto v = pipe_id * 8 + queue_id;
+		    EXIT_NOT_IMPLEMENTED(v >= 64);
 
-	EXIT_NOT_IMPLEMENTED(v >= 64);
+		    //	for (int i = 0; i < 8; i++)
+		    //	{
+		    //		EXIT_NOT_IMPLEMENTED(m_compute_ring[pipe_id * 8 + i] != nullptr && m_compute_ring[pipe_id * 8 + i]->IsActive());
+		    //	}
 
-	//	for (int i = 0; i < 8; i++)
-	//	{
-	//		EXIT_NOT_IMPLEMENTED(m_compute_ring[pipe_id * 8 + i] != nullptr && m_compute_ring[pipe_id * 8 + i]->IsActive());
-	//	}
+		    auto* ring = GetRing(v + 1);
 
-	auto* ring = GetRing(v + 1);
+		    ring->MapComputeQueue(ring_addr, ring_size_dw, read_ptr_addr);
 
-	ring->MapComputeQueue(ring_addr, ring_size_dw, read_ptr_addr);
+		    EXIT_IF(!ring->IsActive());
 
-	EXIT_IF(!ring->IsActive());
+		    *read_ptr_addr = 0;
 
-	*read_ptr_addr = 0;
-
-	return v + 1;
+		    return v + 1;
+	    });
 }
 
 void Gpu::Unmap(uint32_t ring_id)
 {
-	Core::LockGuard lock(m_mutex);
+	m_submission_admission_gate.RunAdmitted(
+	    [&]
+	    {
+		    EXIT_NOT_IMPLEMENTED(ring_id < 1 || ring_id > 64);
 
-	EXIT_NOT_IMPLEMENTED(ring_id < 1 || ring_id > 64);
+		    auto* ring = GetRing(ring_id);
 
-	auto* ring = GetRing(ring_id);
+		    EXIT_NOT_IMPLEMENTED(!ring->IsActive());
 
-	EXIT_NOT_IMPLEMENTED(!ring->IsActive());
-
-	ring->SetActive(false);
+		    ring->SetActive(false);
+	    });
 }
 
 void Gpu::DingDong(uint32_t ring_id, uint32_t offset_dw)
 {
-	Core::LockGuard lock(m_mutex);
+	m_submission_admission_gate.RunAdmitted(
+	    [&]
+	    {
+		    EXIT_NOT_IMPLEMENTED(ring_id < 1 || ring_id > 64);
+		    EXIT_NOT_IMPLEMENTED(offset_dw == 0);
 
-	EXIT_NOT_IMPLEMENTED(ring_id < 1 || ring_id > 64);
-	EXIT_NOT_IMPLEMENTED(offset_dw == 0);
+		    auto* ring = GetRing(ring_id);
 
-	auto* ring = GetRing(ring_id);
+		    EXIT_NOT_IMPLEMENTED(!ring->IsActive());
 
-	EXIT_NOT_IMPLEMENTED(!ring->IsActive());
-
-	ring->DingDong(offset_dw);
+		    ring->DingDong(offset_dw);
+	    });
 }
 
 void Gpu::Done()
 {
-	Core::LockGuard lock(m_mutex);
+	m_submission_admission_gate.RunAdmitted(
+	    [&]
+	    {
+		    m_gfx_ring->Done();
+		    for (auto& cr: m_compute_ring)
+		    {
+			    if (cr != nullptr)
+			    {
+				    cr->Done();
+			    }
+		    }
 
-	m_gfx_ring->Done();
-	for (auto& cr: m_compute_ring)
-	{
-		if (cr != nullptr)
-		{
-			cr->Done();
-		}
-	}
-
-	m_done_num++;
+		    m_done_num++;
+	    });
 }
 
 bool Gpu::AreSubmitsAllowed()
 {
-	Core::LockGuard lock(m_mutex);
-
-	if (m_gfx_ring->IsIdle())
-	{
-		for (auto& cr: m_compute_ring)
-		{
-			if (cr != nullptr)
-			{
-				if (!cr->IsIdle())
-				{
-					return false;
-				}
-			}
-		}
-		return true;
-	}
-	return false;
+	return m_submission_admission_gate.RunAdmitted(
+	    [&]
+	    {
+		    if (m_gfx_ring->IsIdle())
+		    {
+			    for (auto& cr: m_compute_ring)
+			    {
+				    if (cr != nullptr && !cr->IsIdle())
+				    {
+					    return false;
+				    }
+			    }
+			    return true;
+		    }
+		    return false;
+	    });
 }
 
 int Gpu::GetFrameNum()
 {
-	// Core::LockGuard lock(m_mutex);
-
 	return m_done_num;
 }
 
 void Gpu::Wait()
 {
-	Core::LockGuard lock(m_mutex);
+	m_submission_admission_gate.RunAdmitted([&] { WaitLocked(); });
+}
 
+void Gpu::WaitLocked()
+{
 	m_gfx_ring->WaitForIdle();
-	m_gfx_cp->BufferWait();
+	m_gfx_cp->SubmitAndWait();
 	for (auto& cr: m_compute_ring)
 	{
 		if (cr != nullptr)
@@ -555,9 +609,47 @@ void Gpu::Wait()
 	{
 		if (cp != nullptr)
 		{
-			cp->BufferWait();
+			cp->SubmitAndWait();
 		}
 	}
+}
+
+void Gpu::WaitSubmission(SubmissionId submission)
+{
+	// This is completion of work that already crossed the admission gate, not
+	// a new admission. A quiesce drain waits for the ring worker, so taking the
+	// gate here would deadlock that worker against WaitForIdle.
+	CommandProcessor* owner = nullptr;
+	{
+		std::lock_guard<std::mutex> topology_lock(m_topology_mutex);
+		if (m_gfx_cp->OwnsSubmissionQueue(submission))
+		{
+			owner = m_gfx_cp;
+		} else
+		{
+			for (auto* cp: m_compute_cp)
+			{
+				if (cp != nullptr && cp->OwnsSubmissionQueue(submission))
+				{
+					owner = cp;
+					break;
+				}
+			}
+		}
+	}
+	if (owner != nullptr)
+	{
+		owner->WaitSubmission(submission);
+		return;
+	}
+	EXIT("GPU submission wait has no owning command processor: queue=%" PRIu32 " sequence=%" PRIu64 "\n",
+	     submission.queue.Value(), submission.sequence);
+}
+
+bool Gpu::RunQuiesced(GraphicsRunQuiescedAction action, void* data)
+{
+	EXIT_IF(action == nullptr);
+	return m_submission_admission_gate.RunQuiesced([&] { WaitLocked(); }, [&] { return action(data); });
 }
 
 void Gpu::Init()
@@ -574,6 +666,8 @@ void Gpu::Init()
 
 ComputeRing* Gpu::GetRing(uint32_t ring_id)
 {
+	std::lock_guard<std::mutex> topology_lock(m_topology_mutex);
+
 	int v        = static_cast<int>(ring_id - 1);
 	int pipe_id  = v / 8;
 	int queue_id = v % 8;
@@ -597,9 +691,9 @@ ComputeRing* Gpu::GetRing(uint32_t ring_id)
 
 void CommandProcessor::Reset()
 {
-	Core::LockGuard lock(m_mutex);
-
 	BufferWait();
+
+	Core::LockGuard lock(m_mutex);
 
 	GraphicsRenderDeleteIndexBuffers();
 
@@ -638,85 +732,219 @@ void CommandProcessor::BufferInit()
 	}
 }
 
-void CommandProcessor::BufferFlush()
+SubmissionId CommandProcessor::BufferFlush()
 {
-	Core::LockGuard lock(m_mutex);
+	SubmissionId latest_completed;
+	SubmissionId submitted;
+
+	{
+		Core::LockGuard lock(m_mutex);
+		submitted = SubmitCurrentLocked(&latest_completed);
+	}
+
+	PublishCompletedSubmissions();
+	WaitUntilPublishedUnlessReentrant(latest_completed);
+	return submitted;
+}
+
+SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_completed)
+{
+	EXIT_IF(latest_completed == nullptr);
 	DebugStatsRecordBufferFlush();
+	TryCompleteSubmittedLocked(latest_completed);
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 	EXIT_IF(m_buffer[m_current_buffer] == nullptr);
 
-	// Submit the current Vulkan buffer, then wait for *that* submission before
-	// rotating. Waiting only on the next slot left EOP label events (and their
-	// host memory writes) incomplete when WaitRegMem polled immediately after
-	// flush — observed as post-Play loading soft-lock: val stays 0 for ref=1.
-	const int submitted = m_current_buffer;
-	SubmissionId completed_submission;
-	EXIT_NOT_IMPLEMENTED(!m_buffer[submitted]->GetSubmissionId(&completed_submission));
-	m_buffer[submitted]->End();
-	m_buffer[submitted]->Execute();
-	require_submission_success(m_submission_slots.MarkSubmitted(static_cast<uint32_t>(submitted)), "MarkSubmitted", m_queue,
-	                           static_cast<uint32_t>(submitted));
-	m_buffer[submitted]->WaitForFenceWithoutLabelCallbacks();
+	const uint32_t submitted_slot = static_cast<uint32_t>(m_current_buffer);
+	SubmissionId   submitted_id;
+	EXIT_NOT_IMPLEMENTED(!m_buffer[submitted_slot]->GetSubmissionId(&submitted_id));
+	m_buffer[submitted_slot]->End();
+	m_buffer[submitted_slot]->Execute();
+	require_submission_success(m_submission_slots.MarkSubmitted(submitted_slot), "MarkSubmitted", m_queue, submitted_slot);
+	require_publication_success(m_publication_gate.RegisterSubmitted(submitted_id), "RegisterSubmitted", m_queue, submitted_id);
 
-	m_current_buffer = (submitted + 1) % VK_BUFFERS_NUM;
+	const uint32_t recording_slot = (submitted_slot + 1u) % static_cast<uint32_t>(VK_BUFFERS_NUM);
+	EXIT_IF(m_buffer[recording_slot] == nullptr);
 
-	EXIT_IF(m_buffer[m_current_buffer] == nullptr);
+	TryCompleteSubmittedLocked(latest_completed);
+	if (m_buffer[recording_slot]->IsExecute())
+	{
+		SubmissionId slot_owner;
+		EXIT_NOT_IMPLEMENTED(!m_buffer[recording_slot]->GetSubmissionId(&slot_owner));
+		CompleteSubmittedThroughLocked(slot_owner, latest_completed);
+	}
 
-	m_buffer[m_current_buffer]->WaitForFenceAndResetWithoutLabelCallbacks();
-	SubmissionId submission;
-	require_submission_success(
-	    m_submission_slots.CompleteAndRetireThenBeginRecording(static_cast<uint32_t>(submitted),
-	                                                           static_cast<uint32_t>(m_current_buffer), &submission, nullptr),
-	    "CompleteAndRetireThenBeginRecording", m_queue, static_cast<uint32_t>(submitted));
-	m_buffer[m_current_buffer]->SetSubmissionId(submission);
-	m_buffer[m_current_buffer]->Begin();
+	SubmissionId recording_id;
+	require_submission_success(m_submission_slots.BeginRecording(recording_slot, &recording_id, nullptr), "BeginRecording", m_queue,
+	                           recording_slot);
+	m_current_buffer = static_cast<int>(recording_slot);
+	m_buffer[recording_slot]->SetSubmissionId(recording_id);
+	m_buffer[recording_slot]->Begin();
+	return submitted_id;
+}
 
-	// Fence wait is authoritative on MoltenVK: vkGetEventStatus often never
-	// observes vkCmdSetEvent, so DrainCompleted alone skips WriteBack/EOP stores.
-	// Publish only after the completed slot is retired and the next slot is
-	// recording: write-back callbacks may synchronously flush this CP.
+void CommandProcessor::TryCompleteSubmittedLocked(SubmissionId* latest_completed)
+{
+	EXIT_IF(latest_completed == nullptr);
+
+	for (;;)
+	{
+		uint32_t     slot = 0;
+		SubmissionId oldest;
+		const auto result = m_submission_slots.GetOldestSubmitted(&slot, &oldest);
+		if (result == GpuSubmissionResult::UnknownSubmission)
+		{
+			return;
+		}
+		require_submission_success(result, "GetOldestSubmitted", m_queue, slot);
+		EXIT_IF(slot >= static_cast<uint32_t>(VK_BUFFERS_NUM));
+		EXIT_IF(!m_buffer[slot]->IsExecute());
+		if (!m_buffer[slot]->TryCompleteFenceAndResetWithoutLabelCallbacks())
+		{
+			return;
+		}
+
+		require_submission_success(m_submission_slots.MarkFenceCompleted(slot), "MarkFenceCompleted", m_queue, slot);
+		require_publication_success(m_publication_gate.MarkFenceComplete(oldest), "MarkFenceComplete", m_queue, oldest);
+		*latest_completed = oldest;
+	}
+}
+
+void CommandProcessor::CompleteSubmittedThroughLocked(SubmissionId target, SubmissionId* latest_completed)
+{
+	EXIT_IF(latest_completed == nullptr);
+	EXIT_IF(!OwnsSubmissionQueue(target));
+
+	for (;;)
+	{
+		uint32_t     slot = 0;
+		SubmissionId oldest;
+		require_submission_success(m_submission_slots.GetOldestSubmitted(&slot, &oldest), "GetOldestSubmitted", m_queue, slot);
+		EXIT_IF(slot >= static_cast<uint32_t>(VK_BUFFERS_NUM));
+		EXIT_IF(!m_buffer[slot]->IsExecute());
+
+		m_buffer[slot]->WaitForFenceAndResetWithoutLabelCallbacks();
+		require_submission_success(m_submission_slots.MarkFenceCompleted(slot), "MarkFenceCompleted", m_queue, slot);
+		require_publication_success(m_publication_gate.MarkFenceComplete(oldest), "MarkFenceComplete", m_queue, oldest);
+		*latest_completed = oldest;
+
+		if (oldest == target)
+		{
+			return;
+		}
+	}
+}
+
+void CommandProcessor::PublishCompletedSubmissions()
+{
 	LabelDrainCompleted();
-	LabelCompleteSubmission(completed_submission);
+	for (;;)
+	{
+		SubmissionId ready;
+		const auto   result = m_publication_gate.TryAcquireNextForPublication(&ready);
+		if (result == GpuSubmissionPublicationResult::NotReady)
+		{
+			return;
+		}
+		require_publication_success(result, "TryAcquireNextForPublication", m_queue, ready);
+		LabelCompleteSubmission(ready);
+		GpuMemoryCompleteSubmission(ready);
+		require_publication_success(m_publication_gate.MarkPublished(ready), "MarkPublished", m_queue, ready);
+		require_submission_success(m_submission_slots.RetirePublished(ready), "RetirePublished", m_queue, 0);
+	}
+}
+
+void CommandProcessor::WaitUntilPublishedUnlessReentrant(SubmissionId submission)
+{
+	if (submission.sequence == 0 || m_publication_gate.IsPublishingOnCurrentThread())
+	{
+		return;
+	}
+	require_publication_success(m_publication_gate.WaitUntilPublished(submission), "WaitUntilPublished", m_queue, submission);
+}
+
+void CommandProcessor::WaitSubmission(SubmissionId submission)
+{
+	EXIT_IF(!OwnsSubmissionQueue(submission));
+
+	SubmissionId latest_completed;
+
+	{
+		Core::LockGuard lock(m_mutex);
+
+		uint32_t           slot  = 0;
+		GpuSubmissionState state = GpuSubmissionState::Completed;
+		auto                find  = m_submission_slots.FindSlot(submission, &slot);
+		if (find == GpuSubmissionResult::Success)
+		{
+			require_submission_success(m_submission_slots.GetState(submission, &state), "GetState", m_queue, slot);
+		}
+		if (find == GpuSubmissionResult::Success && state == GpuSubmissionState::Recording)
+		{
+			EXIT_IF(slot != static_cast<uint32_t>(m_current_buffer));
+			(void)SubmitCurrentLocked(&latest_completed);
+			find = m_submission_slots.FindSlot(submission, &slot);
+			if (find == GpuSubmissionResult::Success)
+			{
+				require_submission_success(m_submission_slots.GetState(submission, &state), "GetState", m_queue, slot);
+			}
+		}
+		if (find == GpuSubmissionResult::Success)
+		{
+			EXIT_IF(state != GpuSubmissionState::Submitted || !m_buffer[slot]->IsExecute());
+			CompleteSubmittedThroughLocked(submission, &latest_completed);
+		} else if (find != GpuSubmissionResult::UnknownSubmission)
+		{
+			require_submission_success(find, "FindSlot", m_queue, slot);
+		}
+	}
+
+	PublishCompletedSubmissions();
+	WaitUntilPublishedUnlessReentrant(submission);
 }
 
 void CommandProcessor::BufferWait()
 {
 	BufferInit();
 
-	SubmissionId completed_submissions[VK_BUFFERS_NUM];
-	uint32_t     completed_count = 0;
+	SubmissionId latest_completed;
 
 	{
 		Core::LockGuard lock(m_mutex);
 
-		for (uint32_t slot = 0; slot < VK_BUFFERS_NUM; slot++)
+		for (;;)
 		{
-			auto* buf = m_buffer[slot];
-			EXIT_IF(buf == nullptr);
-
-			const bool submitted = buf->IsExecute();
-			if (submitted)
+			uint32_t     slot = 0;
+			SubmissionId oldest;
+			const auto   result = m_submission_slots.GetOldestSubmitted(&slot, &oldest);
+			if (result == GpuSubmissionResult::UnknownSubmission)
 			{
-				EXIT_NOT_IMPLEMENTED(!buf->GetSubmissionId(&completed_submissions[completed_count]));
+				break;
 			}
-			buf->WaitForFenceAndResetWithoutLabelCallbacks();
-			if (submitted)
-			{
-				require_submission_success(m_submission_slots.MarkCompletedWithoutActionsAndRetire(slot),
-				                           "MarkCompletedWithoutActionsAndRetire", m_queue, slot);
-				completed_count++;
-			}
+			require_submission_success(result, "GetOldestSubmitted", m_queue, slot);
+			CompleteSubmittedThroughLocked(oldest, &latest_completed);
 		}
+
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		EXIT_IF(m_buffer[m_current_buffer]->IsExecute());
+		SubmissionId recording;
+		uint32_t     recording_slot = 0;
+		EXIT_NOT_IMPLEMENTED(!m_buffer[m_current_buffer]->GetSubmissionId(&recording));
+		require_submission_success(m_submission_slots.FindSlot(recording, &recording_slot), "FindSlot", m_queue,
+		                           static_cast<uint32_t>(m_current_buffer));
+		EXIT_IF(recording_slot != static_cast<uint32_t>(m_current_buffer));
 	}
 
-	// Completion callbacks can synchronously flush this CP. Run them only after
-	// every waited submission is retired and the CP mutex is released.
-	LabelDrainCompleted();
-	for (uint32_t index = 0; index < completed_count; index++)
-	{
-		LabelCompleteSubmission(completed_submissions[index]);
-	}
+	PublishCompletedSubmissions();
+	WaitUntilPublishedUnlessReentrant(latest_completed);
+}
+
+void CommandProcessor::SubmitAndWait()
+{
+	BufferInit();
+	BufferFlush();
+	BufferWait();
 }
 
 void CommandProcessor::ResetDeCe()
@@ -789,7 +1017,7 @@ void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_
 {
 	Core::LockGuard lock(m_mutex);
 
-	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
+	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
 
 	memcpy(dst, m_const_ram + offset / 4, static_cast<size_t>(dw_num) * 4);
 
@@ -803,7 +1031,26 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
 
 	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitRegMem);
+	if (((*addr) & mask) == (ref & mask))
+	{
+		return;
+	}
+
+	SubmissionDependency       dependency;
+	const auto producer =
+	    m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(addr), 4, ref, mask, &dependency);
+	EXIT_NOT_IMPLEMENTED(producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
+	                     producer != GpuSubmissionResult::ProducerNotFound);
 	BufferFlush();
+	if (producer == GpuSubmissionResult::Success || producer == GpuSubmissionResult::ProducerValueMismatch)
+	{
+		g_gpu->WaitSubmission(dependency.producer);
+	} else
+	{
+		// With no evidenced producer, preserve the old conservative ordering
+		// contract before falling back to bounded guest-memory polling.
+		BufferWait();
+	}
 
 	// Unbounded polls freeze loading screens while the window still flips.
 	// Bound the wait so a stuck label becomes a structured fail with values.
@@ -843,7 +1090,24 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
 
 	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitRegMem);
+	if (((*addr) & mask) == (ref & mask))
+	{
+		return;
+	}
+
+	SubmissionDependency       dependency;
+	const auto producer =
+	    m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(addr), 8, ref, mask, &dependency);
+	EXIT_NOT_IMPLEMENTED(producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
+	                     producer != GpuSubmissionResult::ProducerNotFound);
 	BufferFlush();
+	if (producer == GpuSubmissionResult::Success || producer == GpuSubmissionResult::ProducerValueMismatch)
+	{
+		g_gpu->WaitSubmission(dependency.producer);
+	} else
+	{
+		BufferWait();
+	}
 
 	// Only record waits that actually block — satisfied fences are noise and
 	// flood the agent event ring during load/gameplay.
@@ -895,7 +1159,43 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	}
 }
 
-void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom)
+bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords,
+                                                const uint32_t* next_packet, uint32_t next_packet_dwords)
+{
+	if (write_body == nullptr || next_packet == nullptr || write_body_dwords != 5u || next_packet_dwords < 9u ||
+	    next_packet[0] != 0xc0071058u)
+	{
+		return false;
+	}
+
+	const uint32_t write_confirm = (write_body[0] >> 24u) & 0xffu;
+	const uint64_t write_address = write_body[1] | (static_cast<uint64_t>(write_body[2]) << 32u);
+	const uint64_t write_value   = write_body[3] | (static_cast<uint64_t>(write_body[4]) << 32u);
+	const uint64_t wait_address  = next_packet[1] | (static_cast<uint64_t>(next_packet[2]) << 32u);
+	const uint64_t wait_mask     = next_packet[3] | (static_cast<uint64_t>(next_packet[4]) << 32u);
+	const uint64_t wait_ref      = next_packet[5] | (static_cast<uint64_t>(next_packet[6]) << 32u);
+
+	return write_confirm == 1u && write_address != 0u && write_address == wait_address &&
+	       (write_value & wait_mask) == (wait_ref & wait_mask);
+}
+
+GraphicsAgcReleaseMemControl GraphicsDecodeAgcReleaseMemControl(uint32_t control_dw)
+{
+	GraphicsAgcReleaseMemControl control {};
+	control.gcr_cntl  = static_cast<uint16_t>(control_dw & 0xffffu);
+	control.data_sel  = static_cast<uint8_t>((control_dw >> 16u) & 0xffu);
+	control.interrupt = static_cast<uint8_t>((control_dw >> 24u) & 0x7u);
+	return control;
+}
+
+uint32_t GraphicsAgcReleaseMemCacheAction(uint16_t gcr_cntl)
+{
+	constexpr uint16_t GcrGl2Writeback = 1u << 9u;
+	return ((gcr_cntl & GcrGl2Writeback) != 0u) ? 0x38u : 0x00u;
+}
+
+void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom,
+                                 bool matching_wait_mem64)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -925,7 +1225,20 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 		}
 	}
 
-	GpuMemoryCheckAccessViolation(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
+	if (matching_wait_mem64)
+	{
+		EXIT_IF(!custom || dw_num != 2u);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		const uint64_t value = src[0] | (static_cast<uint64_t>(src[1]) << 32u);
+		GraphicsRenderWriteAtEndOfPipe64(m_sumbit_id, m_buffer[m_current_buffer], reinterpret_cast<uint64_t*>(dst), value);
+		require_submission_success(
+		    m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer), reinterpret_cast<uint64_t>(dst),
+		                                        sizeof(uint64_t), value),
+		    "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
+		return;
+	}
+
+	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
 
 	memcpy(dst, src, static_cast<size_t>(dw_num) * 4);
 
@@ -1060,7 +1373,7 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			ring->m_job2.Execute([cp, buf](void* /*unused*/) { cp->Run(buf.draw_buffer.data, buf.draw_buffer.num_dw); });
 			ring->m_job2.Wait();
 
-			cp->BufferFlush();
+			SubmissionId flip_submission = cp->BufferFlush();
 
 			// SubmitAndFlip carries flip args on the batch. DCBs often embed
 			// R_FLIP / marker 0x777 (which sets m_flip_issued); when they do not,
@@ -1069,7 +1382,11 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			if (GraphicsBatchNeedsApiFlip(buf.with_api_flip, cp->FlipIssued()))
 			{
 				cp->Flip();
-				cp->BufferFlush();
+				flip_submission = cp->BufferFlush();
+			}
+			if (GraphicsBatchNeedsSubmissionCompletion(cp->FlipIssued()))
+			{
+				cp->WaitSubmission(flip_submission);
 			}
 		}
 		cp->RunUnlock();
@@ -1497,7 +1814,15 @@ void CommandProcessor::ReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_si
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index)
 {
 	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitFlipDone);
+
+	SubmissionId submission;
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		EXIT_NOT_IMPLEMENTED(!m_buffer[m_current_buffer]->GetSubmissionId(&submission));
+	}
 	BufferFlush();
+	g_gpu->WaitSubmission(submission);
 
 	VideoOut::VideoOutWaitFlipDone(static_cast<int>(video_out_handle), static_cast<int>(display_buffer_index));
 }
@@ -1528,6 +1853,9 @@ void CommandProcessor::WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_
 	if (event_write_source == 0x00000002 && eop_event_type == 0x0000002f && cache_action == 0x00000000 && event_index == 0x00000006)
 	{
 		GraphicsRenderWriteAtEndOfPipe32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value);
+		require_submission_success(
+		    m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer), reinterpret_cast<uint64_t>(dst_gpu_addr), 4, value),
+		    "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
 	} else if (event_write_source == 0x00000001 && eop_event_type == 0x0000002f && cache_action == 0x00000000 && event_index == 0x00000006)
 	{
 		GraphicsRenderWriteAtEndOfPipeGds32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value & 0xffffu,
@@ -1565,6 +1893,7 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	bool source64       = (event_write_source == 0x02);
 	bool source32       = (event_write_source == 0x01);
 	bool source_counter = (event_write_source == 0x04);
+	uint32_t producer_size = 0;
 
 	switch (interrupt_selector)
 	{
@@ -1591,9 +1920,11 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	if (eop_event_type == 0x04 && cache_action == 0x00 && event_index == 0x05 && source64 && !with_interrupt)
 	{
 		GraphicsRenderWriteAtEndOfPipe64(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint64_t*>(dst_gpu_addr), value);
+		producer_size = 8;
 	} else if (eop_event_type == 0x04 && cache_action == 0x00 && event_index == 0x05 && source32 && !with_interrupt)
 	{
 		GraphicsRenderWriteAtEndOfPipe32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value);
+		producer_size = 4;
 	} else if (((eop_event_type == 0x14 && event_index == 0x00) || (eop_event_type == 0x30 && event_index == 0x00) ||
 	            (eop_event_type == 0x2f && event_index == 0x00)) &&
 	           cache_action == 0x00 && source32 && !with_interrupt)
@@ -1603,13 +1934,24 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 		// data_sel. Observed: 0x14 (CACHE_FLUSH_AND_INV_TS), 0x30, 0x2f@0.
 		GraphicsRenderWriteAtEndOfPipe32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr),
 		                                 static_cast<uint32_t>(value));
-	} else if (((eop_event_type == 0x04 && event_index == 0x05) || (eop_event_type == 0x28 && event_index == 0x05) ||
+		producer_size = 4;
+	} else if (((eop_event_type == 0x04 && (event_index == 0x00 || event_index == 0x05)) ||
+	            (eop_event_type == 0x28 && (event_index == 0x00 || event_index == 0x05)) ||
 	            (eop_event_type == 0x2f && event_index == 0x06) || (eop_event_type == 0x14 && event_index == 0x00) ||
-	            (eop_event_type == 0x28 && event_index == 0x00) || (eop_event_type == 0x30 && event_index == 0x00) ||
+	            (eop_event_type == 0x30 && event_index == 0x00) ||
 	            (eop_event_type == 0x2f && event_index == 0x00)) &&
-	           cache_action == 0x38 && source64 && !with_interrupt)
+	           cache_action == 0x38 && source64)
 	{
-		GraphicsRenderWriteAtEndOfPipeWithWriteBack64(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint64_t*>(dst_gpu_addr), value);
+		if (with_interrupt)
+		{
+			GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(m_sumbit_id, m_buffer[m_current_buffer],
+			                                                       static_cast<uint64_t*>(dst_gpu_addr), value);
+		} else
+		{
+			GraphicsRenderWriteAtEndOfPipeWithWriteBack64(m_sumbit_id, m_buffer[m_current_buffer],
+			                                              static_cast<uint64_t*>(dst_gpu_addr), value);
+		}
+		producer_size = 8;
 	} else if (((eop_event_type == 0x04 && event_index == 0x05) || (eop_event_type == 0x28 && event_index == 0x00)) &&
 	           cache_action == 0x00 && source_counter && !with_interrupt)
 	{
@@ -1617,18 +1959,28 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	} else if ((eop_event_type == 0x04 && event_index == 0x05) && cache_action == 0x00 && source64 && with_interrupt)
 	{
 		GraphicsRenderWriteAtEndOfPipeWithInterrupt64(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint64_t*>(dst_gpu_addr), value);
+		producer_size = 8;
 	} else if ((eop_event_type == 0x04 && event_index == 0x05) && cache_action == 0x00 && source32 && with_interrupt)
 	{
 		GraphicsRenderWriteAtEndOfPipeWithInterrupt32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value);
+		producer_size = 4;
 	} else if ((eop_event_type == 0x04 && event_index == 0x05) && cache_action == 0x3b && source64 && with_interrupt)
 	{
 		GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(m_sumbit_id, m_buffer[m_current_buffer],
 		                                                       static_cast<uint64_t*>(dst_gpu_addr), value);
+		producer_size = 8;
 	} else
 	{
 		EXIT("unknown event type (EOP64 event=0x%" PRIx32 " cache=0x%" PRIx32 " index=0x%" PRIx32 " source=0x%" PRIx32
 		     " interrupt=0x%" PRIx32 ")\n",
 		     eop_event_type, cache_action, event_index, event_write_source, interrupt_selector);
+	}
+
+	if (producer_size != 0)
+	{
+		require_submission_success(m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer),
+		                                                               reinterpret_cast<uint64_t>(dst_gpu_addr), producer_size, value),
+		                           "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
 	}
 }
 
@@ -1749,9 +2101,16 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 
 void CommandProcessor::WriteBack()
 {
-	Core::LockGuard lock(m_mutex);
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		GraphicsRenderPrepareWriteBack(m_buffer[m_current_buffer]);
+	}
 
-	GraphicsRenderWriteBack(this);
+	// The completion-only label runs in the WriteBack phase before this
+	// submission is published or its resources become retirement-eligible.
+	BufferFlush();
+	BufferWait();
 }
 
 // void CommandBuffer::CommandProcessorWait()
@@ -1823,6 +2182,14 @@ bool GraphicsRunAreSubmitsAllowed()
 	return g_gpu->AreSubmitsAllowed();
 }
 
+bool GraphicsRunWithQuiescedSubmissions(GraphicsRunQuiescedAction action, void* data)
+{
+	EXIT_IF(g_gpu == nullptr);
+	EXIT_IF(action == nullptr);
+
+	return g_gpu->RunQuiesced(action, data);
+}
+
 int GraphicsRunGetFrameNum()
 {
 	EXIT_IF(g_gpu == nullptr);
@@ -1842,20 +2209,6 @@ void GraphicsRunCommandProcessorWait(CommandProcessor* cp)
 	EXIT_IF(cp == nullptr);
 
 	cp->BufferWait();
-}
-
-void GraphicsRunCommandProcessorLock(CommandProcessor* cp)
-{
-	EXIT_IF(cp == nullptr);
-
-	cp->Lock();
-}
-
-void GraphicsRunCommandProcessorUnlock(CommandProcessor* cp)
-{
-	EXIT_IF(cp == nullptr);
-
-	cp->Unlock();
 }
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_aa_config)
@@ -3289,7 +3642,7 @@ KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
 		return 7;
 	}
 
-	GpuMemoryCheckAccessViolation(dst, byte_count);
+	GpuMemoryNotifyHostWrite(dst, byte_count);
 	memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), byte_count);
 	GraphicsRenderMemoryFlush(dst, byte_count);
 	return 7;
@@ -3929,8 +4282,10 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 
 	if (custom)
 	{
-		uint32_t gcr_cntl = buffer[1] & 0xffffu;
-		uint32_t data_sel = (buffer[1] >> 16u) & 0xffu;
+		const auto control = GraphicsDecodeAgcReleaseMemControl(buffer[1]);
+		uint32_t   gcr_cntl = control.gcr_cntl;
+		uint32_t   data_sel = control.data_sel;
+		interrupt_selector  = control.interrupt;
 
 		// data_sel matches GraphicsCbReleaseMem: 0 = no destination write
 		// (flush/barrier only), 1 = 32-bit immediate, 2 = 64-bit immediate,
@@ -3982,28 +4337,28 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 			event_index        = 0;
 			event_write_dest   = 0;
 			event_write_source = 1; // 32-bit immediate
-			interrupt_selector = 0;
 		} else if (data_sel == 2)
 		{
-			// 0x0200 was the first observed writeback form; other non-zero gcr
-			// values still publish a 64-bit immediate. Normalize event fields
-			// to the known WriteAtEndOfPipe64 branches (writeback vs plain).
+			// GCR cache behavior and queued-interrupt selection are independent.
+			// GL2 writeback maps to the existing 0x38 execution path while the
+			// interrupt selector is preserved for completion signaling.
 			if (gcr_cntl != 0u)
 			{
-				cache_action   = 0x38;
-				eop_event_type = 0x14;
-				event_index    = 0;
-			} else
+				cp->MemoryBarrier();
+			}
+			cache_action = GraphicsAgcReleaseMemCacheAction(static_cast<uint16_t>(gcr_cntl));
+			if (gcr_cntl == 0u)
 			{
-				cache_action   = 0x00;
 				eop_event_type = 0x04;
 				event_index    = 0x05;
+			} else
+			{
+				event_index = 0;
 			}
 
 			cache_policy       = 0;
 			event_write_dest   = 0;
 			event_write_source = 2;
-			interrupt_selector = 0;
 		} else if (data_sel == 3)
 		{
 			if (gcr_cntl != 0u)
@@ -4016,7 +4371,6 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 			event_index        = 0;
 			event_write_dest   = 0;
 			event_write_source = 4;
-			interrupt_selector = 0;
 		} else
 		{
 			EXIT("unsupported ReleaseMem data_sel=%u event=%u gcr=%u\n", data_sel, eop_event_type, gcr_cntl);
@@ -4260,7 +4614,14 @@ KYTY_CP_OP_PARSER(cp_op_write_data)
 	auto  write_control = buffer[0];
 	auto* dst           = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 
-	cp->WriteData(dst, buffer + 3, dw_num - 2, write_control, custom);
+	const uint32_t write_body_dwords = 1u + dw_num;
+	const uint32_t next_packet_dwords =
+	    (dw > 1u + write_body_dwords) ? (dw - 1u - write_body_dwords) : 0u;
+	const uint32_t* next_packet = buffer + write_body_dwords;
+	const bool matching_wait_mem64 =
+	    custom && GraphicsWriteDataPrecedesMatchingWaitMem64(buffer, write_body_dwords, next_packet, next_packet_dwords);
+
+	cp->WriteData(dst, buffer + 3, dw_num - 2, write_control, custom, matching_wait_mem64);
 
 	return 1 + dw_num;
 }

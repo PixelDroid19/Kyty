@@ -13,7 +13,12 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstring>
+#include <unordered_map>
+#include <vector>
+
+#include "SDL.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -64,8 +69,8 @@ public:
 		const void* data = nullptr;
 	};
 
-	Audio()          = default;
-	virtual ~Audio() = default;
+	Audio() = default;
+	~Audio();
 
 	KYTY_CLASS_NO_COPY(Audio);
 
@@ -73,7 +78,7 @@ public:
 	bool     AudioOutClose(Id handle);
 	bool     AudioOutValid(Id handle);
 	bool     AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume);
-	uint32_t AudioOutOutputs(OutputParam* params, uint32_t num);
+	bool     AudioOutOutputs(OutputParam* params, uint32_t num, uint32_t* samples_num);
 	bool     AudioOutGetStatus(Id handle, int* type, int* channels_num);
 
 	Id       AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format);
@@ -94,6 +99,7 @@ private:
 		uint64_t last_output_time = 0;
 		int      channels_num     = 0;
 		int      volume[8]        = {};
+		uint32_t device_id        = 0;
 	};
 
 	struct PortIn
@@ -113,16 +119,65 @@ private:
 
 static Audio* g_audio = nullptr;
 
+static int InitHostAudio()
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	if (SDL_getenv("SDL_AUDIODRIVER") == nullptr)
+	{
+		for (int i = 0; i < SDL_GetNumAudioDrivers(); i++)
+		{
+			if (strcmp(SDL_GetAudioDriver(i), "pipewire") == 0)
+			{
+				if (SDL_AudioInit("pipewire") == 0)
+				{
+					return 0;
+				}
+				SDL_AudioQuit();
+				break;
+			}
+		}
+	}
+#endif
+	return SDL_InitSubSystem(SDL_INIT_AUDIO);
+}
+
 KYTY_SUBSYSTEM_INIT(Audio)
 {
 	EXIT_IF(g_audio != nullptr);
+	if (InitHostAudio() < 0)
+	{
+		KYTY_SUBSYSTEM_FAIL("%s\n", SDL_GetError());
+	}
 
 	g_audio = new Audio;
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Audio) {}
+KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Audio)
+{
+	delete g_audio;
+	g_audio = nullptr;
+	SDL_QuitSubSystem(SDL_INIT_AUDIO);
+}
 
-KYTY_SUBSYSTEM_DESTROY(Audio) {}
+KYTY_SUBSYSTEM_DESTROY(Audio)
+{
+	delete g_audio;
+	g_audio = nullptr;
+	SDL_QuitSubSystem(SDL_INIT_AUDIO);
+}
+
+Audio::~Audio()
+{
+	for (auto& port: m_out_ports)
+	{
+		if (port.device_id != 0)
+		{
+			SDL_ClearQueuedAudio(port.device_id);
+			SDL_CloseAudioDevice(port.device_id);
+			port.device_id = 0;
+		}
+	}
+}
 
 Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format)
 {
@@ -159,6 +214,32 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 				port.volume[i] = 32768;
 			}
 
+			if (type == 0 || type == 1)
+			{
+				SDL_AudioSpec desired {};
+				SDL_AudioSpec obtained {};
+				desired.freq     = static_cast<int>(freq);
+				desired.format   = (format == Format::Signed16bitMono || format == Format::Signed16bitStereo ||
+				                    format == Format::Signed16bit8Ch || format == Format::Signed16bit8ChStd)
+				                       ? AUDIO_S16SYS
+				                       : AUDIO_F32SYS;
+				desired.channels = static_cast<uint8_t>(port.channels_num);
+				desired.samples  = static_cast<uint16_t>(samples_num);
+				desired.callback = nullptr;
+				port.device_id   = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
+				if (port.device_id == 0 || obtained.freq != desired.freq || obtained.format != desired.format ||
+				    obtained.channels != desired.channels)
+				{
+					if (port.device_id != 0)
+					{
+						SDL_CloseAudioDevice(port.device_id);
+					}
+					port = PortOut {};
+					return Id::Invalid();
+				}
+				SDL_PauseAudioDevice(port.device_id, 0);
+			}
+
 			return Id::Create(id);
 		}
 	}
@@ -172,7 +253,13 @@ bool Audio::AudioOutClose(Id handle)
 
 	if (AudioOutValid(handle))
 	{
-		m_out_ports[handle.GetId()].used = false;
+		auto& port = m_out_ports[handle.GetId()];
+		if (port.device_id != 0)
+		{
+			SDL_ClearQueuedAudio(port.device_id);
+			SDL_CloseAudioDevice(port.device_id);
+		}
+		port = PortOut {};
 		return true;
 	}
 
@@ -241,12 +328,22 @@ bool Audio::AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume)
 	return false;
 }
 
-uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num)
+bool Audio::AudioOutOutputs(OutputParam* params, uint32_t num, uint32_t* samples_num)
 {
+	Core::LockGuard lock(m_mutex);
+
 	EXIT_NOT_IMPLEMENTED(num == 0);
-	EXIT_NOT_IMPLEMENTED(!AudioOutValid(params[0].handle));
+	EXIT_IF(samples_num == nullptr);
+	for (uint32_t i = 0; i < num; i++)
+	{
+		if (!AudioOutValid(params[i].handle))
+		{
+			return false;
+		}
+	}
 
 	const auto& first_port = m_out_ports[params[0].handle.GetId()];
+	*samples_num           = first_port.samples_num;
 
 	uint64_t block_time   = (params->data != nullptr ? (1000000 * first_port.samples_num) / first_port.freq : 0);
 	uint64_t current_time = LibKernel::KernelGetProcessTime();
@@ -260,15 +357,40 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num)
 		max_wait_time      = (wait_time > max_wait_time ? wait_time : max_wait_time);
 	}
 
-	// TODO(): Audio output is not yet implemented, so simulate audio delay
-	Core::Thread::SleepMicro(max_wait_time);
+	bool queued_to_device = false;
+	for (uint32_t i = 0; i < num; i++)
+	{
+		auto& port = m_out_ports[params[i].handle.GetId()];
+		if (params[i].data == nullptr || port.device_id == 0)
+		{
+			continue;
+		}
+		const bool is_float = port.format == Format::FloatMono || port.format == Format::FloatStereo ||
+		                      port.format == Format::Float8Ch || port.format == Format::Float8ChStd;
+		const uint32_t bytes = port.samples_num * static_cast<uint32_t>(port.channels_num) * (is_float ? sizeof(float) : sizeof(int16_t));
+		const uint32_t high_watermark = bytes * 4u;
+		while (SDL_GetQueuedAudioSize(port.device_id) >= high_watermark)
+		{
+			Core::Thread::SleepMicro(1000);
+		}
+		if (SDL_QueueAudio(port.device_id, params[i].data, bytes) != 0)
+		{
+			EXIT("audio queue failed: %s\n", SDL_GetError());
+		}
+		queued_to_device = true;
+	}
+
+	if (!queued_to_device)
+	{
+		Core::Thread::SleepMicro(max_wait_time);
+	}
 
 	for (uint32_t i = 0; i < num; i++)
 	{
 		m_out_ports[params[i].handle.GetId()].last_output_time = LibKernel::KernelGetProcessTime();
 	}
 
-	return first_port.samples_num;
+	return true;
 }
 
 Audio::Id Audio::AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format)
@@ -498,14 +620,10 @@ int KYTY_SYSV_ABI AudioOutOutputs(AudioOutOutputParam* param, uint32_t num)
 	{
 		params[i].handle = Audio::Id(param[i].handle);
 		params[i].data   = param[i].ptr;
-
-		if (!g_audio->AudioOutValid(params[i].handle))
-		{
-			return AUDIO_OUT_ERROR_INVALID_PORT;
-		}
 	}
 
-	return static_cast<int>(g_audio->AudioOutOutputs(params, num));
+	uint32_t samples_num = 0;
+	return g_audio->AudioOutOutputs(params, num, &samples_num) ? static_cast<int>(samples_num) : AUDIO_OUT_ERROR_INVALID_PORT;
 }
 
 int KYTY_SYSV_ABI AudioOutOutput(int handle, const void* ptr)
@@ -523,12 +641,8 @@ int KYTY_SYSV_ABI AudioOutOutput(int handle, const void* ptr)
 	params[0].handle = Audio::Id(handle);
 	params[0].data   = ptr;
 
-	if (!g_audio->AudioOutValid(params[0].handle))
-	{
-		return AUDIO_OUT_ERROR_INVALID_PORT;
-	}
-
-	return static_cast<int>(g_audio->AudioOutOutputs(params, 1));
+	uint32_t samples_num = 0;
+	return g_audio->AudioOutOutputs(params, 1, &samples_num) ? static_cast<int>(samples_num) : AUDIO_OUT_ERROR_INVALID_PORT;
 }
 
 } // namespace AudioOut
@@ -1009,6 +1123,13 @@ int KYTY_SYSV_ABI AjmInitialize(int64_t reserved, uint32_t* context)
 	return OK;
 }
 
+int KYTY_SYSV_ABI AjmFinalize(uint32_t context)
+{
+	PRINT_NAME();
+	printf("\t context = %u\n", context);
+	return OK;
+}
+
 int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t reserved)
 {
 	PRINT_NAME();
@@ -1030,6 +1151,14 @@ int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t re
 		default: EXIT("unknown codec\n");
 	}
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmModuleUnregister(uint32_t context, uint32_t codec)
+{
+	PRINT_NAME();
+	printf("\t context = %u\n", context);
+	printf("\t codec   = %u\n", codec);
 	return OK;
 }
 
@@ -1959,12 +2088,69 @@ struct Ngs2VoiceInternal
 	uint32_t           play_ticks      = 0;
 };
 
+struct Ngs2PcmBlock
+{
+	const int16_t* samples = nullptr;
+	uint64_t       frames  = 0;
+};
+
+struct Ngs2PcmStream
+{
+	uint32_t                  format_id    = 0;
+	uint32_t                  channels     = 0;
+	uint32_t                  sample_rate  = 0;
+	float                     gain         = 1.0f;
+	bool                      playing      = false;
+	std::vector<Ngs2PcmBlock> blocks;
+	size_t                    block_index  = 0;
+	double                    source_frame = 0.0;
+};
+
 struct Ngs2VoiceParamHeader
 {
 	uint16_t size;
 	int16_t  next;
 	uint32_t id;
 };
+
+struct Ngs2CustomSamplerFormatParam
+{
+	Ngs2VoiceParamHeader header;
+	uint32_t             format_id;
+	uint32_t             channels;
+	uint32_t             sample_rate;
+	uint32_t             reserved[5];
+};
+static_assert(sizeof(Ngs2CustomSamplerFormatParam) == 40);
+
+struct Ngs2CustomSamplerWaveformContext
+{
+	uint64_t offset_frames;
+	uint64_t data_size;
+	uint64_t reserved;
+	uint64_t frame_count;
+	uint64_t user_data;
+};
+static_assert(sizeof(Ngs2CustomSamplerWaveformContext) == 40);
+
+struct Ngs2CustomSamplerWaveformParam
+{
+	Ngs2VoiceParamHeader                    header;
+	const int16_t*                          data;
+	uint32_t                                flags;
+	uint32_t                                block_count;
+	const Ngs2CustomSamplerWaveformContext* context;
+};
+static_assert(sizeof(Ngs2CustomSamplerWaveformParam) == 32);
+
+struct Ngs2RenderBufferInfoImpl
+{
+	float*   data;
+	size_t   data_size;
+	uint32_t size;
+	uint32_t channels;
+};
+static_assert(sizeof(Ngs2RenderBufferInfoImpl) == 24);
 
 struct Ngs2VoiceEventParam
 {
@@ -2022,6 +2208,68 @@ struct Ngs2SamplerVoiceState
 
 static Ngs2Internal*     g_ngs_list   = nullptr;
 static Ngs2RackInternal* g_racks_list = nullptr;
+static std::unordered_map<Ngs2VoiceInternal*, Ngs2PcmStream> g_pcm_streams;
+
+static uint32_t Ngs2GetVoiceStateFlags(const Ngs2VoiceInternal* voice)
+{
+	EXIT_IF(voice == nullptr);
+	switch (voice->state)
+	{
+		case Ngs2VoicePlayState::Empty: return 0;
+		case Ngs2VoicePlayState::Playing: return 0x3;
+		case Ngs2VoicePlayState::Paused: return 0x5;
+		case Ngs2VoicePlayState::Stopped: return 0xb;
+	}
+	EXIT("unknown voice state\n");
+	return 0;
+}
+
+static bool Ngs2MixPcmStream(Ngs2PcmStream* stream, float* output, uint32_t output_frames, uint32_t output_channels,
+	                         uint32_t output_rate)
+{
+	EXIT_IF(stream == nullptr || output == nullptr);
+	EXIT_IF(stream->channels != 1 && stream->channels != 2);
+	EXIT_IF(output_channels != 2 || stream->sample_rate == 0 || output_rate == 0);
+
+	const double step = static_cast<double>(stream->sample_rate) / static_cast<double>(output_rate);
+	for (uint32_t frame = 0; frame < output_frames; frame++)
+	{
+		while (stream->block_index < stream->blocks.size() &&
+		       stream->source_frame >= static_cast<double>(stream->blocks[stream->block_index].frames))
+		{
+			stream->source_frame -= static_cast<double>(stream->blocks[stream->block_index].frames);
+			stream->block_index++;
+		}
+		if (stream->block_index >= stream->blocks.size())
+		{
+			stream->playing = false;
+			return false;
+		}
+
+		const auto& block = stream->blocks[stream->block_index];
+		const auto  index = static_cast<uint64_t>(stream->source_frame);
+		const float fraction = static_cast<float>(stream->source_frame - static_cast<double>(index));
+		const auto  next_index = (index + 1 < block.frames ? index + 1 : index);
+		for (uint32_t channel = 0; channel < 2; channel++)
+		{
+			const uint32_t source_channel = (stream->channels == 1 ? 0 : channel);
+			const float current = static_cast<float>(block.samples[index * stream->channels + source_channel]) / 32768.0f;
+			const float next = static_cast<float>(block.samples[next_index * stream->channels + source_channel]) / 32768.0f;
+			const float sample = (current + (next - current) * fraction) * stream->gain;
+			float&      dest   = output[frame * output_channels + channel];
+			dest += sample;
+			if (dest > 1.0f)
+			{
+				dest = 1.0f;
+			} else if (dest < -1.0f)
+			{
+				dest = -1.0f;
+			}
+		}
+		stream->source_frame += step;
+	}
+	return true;
+}
 
 static const Ngs2RackOption* Ngs2ResolveRackOption(uint32_t rack_id, const Ngs2RackOption* option,
                                                    Ngs2MasteringRackOption* default_mastering)
@@ -2138,6 +2386,123 @@ int KYTY_SYSV_ABI Ngs2SystemCreate(const Ngs2SystemOption* option, const Ngs2Con
 	g_ngs_list = ngs;
 	*handle    = reinterpret_cast<uintptr_t>(ngs);
 
+	return OK;
+}
+
+static bool Ngs2ValidateSystem(uintptr_t system_handle, Ngs2Internal** out_ngs)
+{
+	if (system_handle == 0 || out_ngs == nullptr)
+	{
+		return false;
+	}
+	auto* ngs = reinterpret_cast<Ngs2Internal*>(system_handle);
+	for (auto* it = g_ngs_list; it != nullptr; it = it->next)
+	{
+		if (it == ngs)
+		{
+			*out_ngs = ngs;
+			return true;
+		}
+	}
+	return false;
+}
+
+int KYTY_SYSV_ABI Ngs2SystemDestroy(uintptr_t system_handle)
+{
+	PRINT_NAME();
+	Ngs2Internal* ngs = nullptr;
+	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	{
+		return static_cast<int32_t>(0x804a0201u);
+	}
+	Core::LockGuard lock(ngs->mutex);
+	auto** link = &g_racks_list;
+	while (*link != nullptr)
+	{
+		if ((*link)->ngs == ngs)
+		{
+			auto* rack = *link;
+			*link = rack->next;
+			auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack + 1);
+			for (uint32_t i = 0; i < rack->option.common.max_voices; i++)
+			{
+				g_pcm_streams.erase(voices + i);
+			}
+			rack->~Ngs2RackInternal();
+			continue;
+		}
+		link = &(*link)->next;
+	}
+	auto** sys_link = &g_ngs_list;
+	while (*sys_link != nullptr && *sys_link != ngs)
+	{
+		sys_link = &(*sys_link)->next;
+	}
+	if (*sys_link != nullptr)
+	{
+		*sys_link = ngs->next;
+	}
+	ngs->~Ngs2Internal();
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2SystemLock(uintptr_t system_handle)
+{
+	PRINT_NAME();
+	Ngs2Internal* ngs = nullptr;
+	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	{
+		return static_cast<int32_t>(0x804a0201u);
+	}
+	ngs->mutex.Lock();
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2SystemUnlock(uintptr_t system_handle)
+{
+	PRINT_NAME();
+	Ngs2Internal* ngs = nullptr;
+	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	{
+		return static_cast<int32_t>(0x804a0201u);
+	}
+	ngs->mutex.Unlock();
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2SystemSetGrainSamples(uintptr_t system_handle, uint32_t grain_samples)
+{
+	PRINT_NAME();
+	Ngs2Internal* ngs = nullptr;
+	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	{
+		return static_cast<int32_t>(0x804a0201u);
+	}
+	if (grain_samples > 0 && grain_samples <= 8192)
+	{
+		ngs->option.num_grain_samples = grain_samples;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2SystemSetSampleRate(uintptr_t system_handle, uint32_t sample_rate)
+{
+	PRINT_NAME();
+	Ngs2Internal* ngs = nullptr;
+	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	{
+		return static_cast<int32_t>(0x804a0201u);
+	}
+	if (sample_rate > 0)
+	{
+		ngs->option.sample_rate = sample_rate;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2PanInit(void* /*pan_param*/)
+{
+	PRINT_NAME();
 	return OK;
 }
 
@@ -2351,15 +2716,75 @@ int KYTY_SYSV_ABI Ngs2RackCreateWithAllocator(uintptr_t system_handle, uint32_t 
 	return result;
 }
 
+int KYTY_SYSV_ABI Ngs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* buffer_info)
+{
+	PRINT_NAME();
+
+	if (rack_handle == 0)
+	{
+		return static_cast<int32_t>(0x804a0261u);
+	}
+
+	auto* rack = reinterpret_cast<Ngs2RackInternal*>(rack_handle);
+	auto* ngs  = rack->ngs;
+	EXIT_IF(ngs == nullptr);
+
+	Ngs2ContextBufferInfo released {};
+	released.host_buffer      = rack;
+	released.host_buffer_size = sizeof(Ngs2RackInternal) + sizeof(Ngs2VoiceInternal) * rack->option.common.max_voices;
+	released.user_data        = rack->allocator.user_data;
+	const auto allocator      = rack->allocator;
+
+	{
+		Core::LockGuard lock(ngs->mutex);
+
+		auto** link = &g_racks_list;
+		while (*link != nullptr && *link != rack)
+		{
+			link = &(*link)->next;
+		}
+		if (*link == nullptr)
+		{
+			return static_cast<int32_t>(0x804a0261u);
+		}
+		*link = rack->next;
+
+		auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack + 1);
+		for (uint32_t i = 0; i < rack->option.common.max_voices; i++)
+		{
+			g_pcm_streams.erase(voices + i);
+		}
+		rack->~Ngs2RackInternal();
+	}
+
+	if (allocator.free_handler != nullptr)
+	{
+		return allocator.free_handler(&released);
+	}
+	if (buffer_info != nullptr)
+	{
+		*buffer_info = released;
+	}
+	return OK;
+}
+
 int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBufferInfo* buffer_info, uint32_t num_buffer_info)
 {
 	PRINT_NAME();
 
 	EXIT_NOT_IMPLEMENTED(buffer_info == nullptr);
 	EXIT_NOT_IMPLEMENTED(system_handle == 0);
-	EXIT_NOT_IMPLEMENTED(num_buffer_info == 0);
+	EXIT_NOT_IMPLEMENTED(num_buffer_info != 1);
 
 	auto* ngs = reinterpret_cast<Ngs2Internal*>(system_handle);
+	const auto* render = reinterpret_cast<const Ngs2RenderBufferInfoImpl*>(buffer_info);
+	EXIT_NOT_IMPLEMENTED(render->data == nullptr);
+	EXIT_NOT_IMPLEMENTED(render->size != sizeof(Ngs2RenderBufferInfoImpl));
+	EXIT_NOT_IMPLEMENTED(render->channels != 2);
+	EXIT_NOT_IMPLEMENTED(ngs->option.num_grain_samples == 0 || ngs->option.sample_rate == 0);
+	const size_t render_size = static_cast<size_t>(ngs->option.num_grain_samples) * render->channels * sizeof(float);
+	EXIT_NOT_IMPLEMENTED(render->data_size < render_size);
+	std::memset(render->data, 0, render_size);
 
 	Core::LockGuard lock(ngs->mutex);
 
@@ -2413,10 +2838,17 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 				}
 				voice.event = Ngs2VoicePlayEvent::None;
 
-				// Without sample-accurate envelopes, end short logo/jingle voices after
-				// enough SystemRender ticks (~2s at 48 kHz / 256-frame AudioOut blocks).
-				if (voice.state == Ngs2VoicePlayState::Playing)
+				auto stream_it = g_pcm_streams.find(&voice);
+				if (voice.state == Ngs2VoicePlayState::Playing && stream_it != g_pcm_streams.end() && stream_it->second.playing)
 				{
+					if (!Ngs2MixPcmStream(&stream_it->second, render->data, ngs->option.num_grain_samples, render->channels,
+					                      ngs->option.sample_rate))
+					{
+						voice.state = Ngs2VoicePlayState::Stopped;
+					}
+				} else if (voice.state == Ngs2VoicePlayState::Playing && stream_it == g_pcm_streams.end())
+				{
+					// Preserve state timing for rack types whose PCM contract is still opaque.
 					voice.play_ticks++;
 					if (voice.play_ticks >= 400)
 					{
@@ -2561,7 +2993,50 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 			// VoiceControl param id 0x40010000 with size 40 after logo path.
 			// Accept like other rack-class ids: type-check only until a field
 			// of this 40-byte block is shown to affect guest-visible state.
-			case 0x4001: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSampler); break;
+			case 0x4001:
+			{
+				EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSampler);
+				const uint32_t control_id = param->id & 0xffffu;
+				if (control_id == 0)
+				{
+					EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2CustomSamplerFormatParam));
+					const auto* format = reinterpret_cast<const Ngs2CustomSamplerFormatParam*>(param);
+					EXIT_NOT_IMPLEMENTED(format->format_id != 0x12u);
+					EXIT_NOT_IMPLEMENTED(format->channels != 1 && format->channels != 2);
+					EXIT_NOT_IMPLEMENTED(format->sample_rate != 44100);
+					auto& stream        = g_pcm_streams[voice];
+					stream               = Ngs2PcmStream {};
+					stream.format_id     = format->format_id;
+					stream.channels      = format->channels;
+					stream.sample_rate   = format->sample_rate;
+				} else if (control_id == 1)
+				{
+					EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2CustomSamplerWaveformParam));
+					const auto* waveform = reinterpret_cast<const Ngs2CustomSamplerWaveformParam*>(param);
+					auto&       stream   = g_pcm_streams[voice];
+					EXIT_NOT_IMPLEMENTED(stream.format_id != 0x12u || stream.channels == 0 || stream.sample_rate == 0);
+					if (waveform->data == nullptr && waveform->context == nullptr)
+					{
+						stream.blocks.clear();
+						stream.block_index  = 0;
+						stream.source_frame = 0.0;
+						stream.playing      = false;
+					} else
+					{
+						EXIT_NOT_IMPLEMENTED(waveform->data == nullptr || waveform->context == nullptr);
+						EXIT_NOT_IMPLEMENTED(waveform->flags != 0x11u || waveform->block_count != 1u);
+						const uint64_t bytes_per_frame = static_cast<uint64_t>(stream.channels) * sizeof(int16_t);
+						EXIT_NOT_IMPLEMENTED(waveform->context->frame_count > UINT64_MAX / bytes_per_frame);
+						EXIT_NOT_IMPLEMENTED(waveform->context->data_size != waveform->context->frame_count * bytes_per_frame);
+						stream.blocks.push_back({waveform->data, waveform->context->frame_count});
+					}
+				} else
+				{
+					// Other module controls retain their established opaque handling until
+					// a guest-visible effect identifies their contract.
+				}
+				break;
+			}
 			case 0x4002: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSubmixer); break;
 			default: EXIT("unknown rack_id: 0x%" PRIx32 "\n", rack_id);
 		}
@@ -2604,6 +3079,30 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 	for (int i = 0; i < 3; i++)
 	{
 		voice->last_command[i] = command[i];
+	}
+	if (voice->rack->type == Ngs2RackType::CustomSampler)
+	{
+		auto stream_it = g_pcm_streams.find(voice);
+		if (command[0] == 2u && command[1] == 0x400u && stream_it != g_pcm_streams.end())
+		{
+			if (command[2] == 1u)
+			{
+				voice->event              = Ngs2VoicePlayEvent::Play;
+				stream_it->second.playing = true;
+			} else if (command[2] == 8u)
+			{
+				voice->event               = Ngs2VoicePlayEvent::StopImm;
+				stream_it->second.playing  = false;
+				stream_it->second.block_index  = 0;
+				stream_it->second.source_frame = 0.0;
+			}
+		} else if (command[0] == 6u && command[1] == 0x100u && stream_it != g_pcm_streams.end())
+		{
+			float gain = 0.0f;
+			std::memcpy(&gain, &command[2], sizeof(gain));
+			EXIT_NOT_IMPLEMENTED(!std::isfinite(gain) || gain < 0.0f);
+			stream_it->second.gain = gain;
+		}
 	}
 
 	printf("\t command = {%08" PRIx32 ", %08" PRIx32 ", %08" PRIx32 "}\n", voice->last_command[0], voice->last_command[1],
@@ -2769,13 +3268,7 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 		{
 			EXIT_NOT_IMPLEMENTED(state_size != sizeof(Ngs2SamplerVoiceState));
 			auto* sampler = reinterpret_cast<Ngs2SamplerVoiceState*>(state);
-			switch (voice->state)
-			{
-				case Ngs2VoicePlayState::Empty: sampler->voice_state.state_flags = 0; break;
-				case Ngs2VoicePlayState::Playing: sampler->voice_state.state_flags = 0x3; break;
-				case Ngs2VoicePlayState::Paused: sampler->voice_state.state_flags = 0x5; break;
-				case Ngs2VoicePlayState::Stopped: sampler->voice_state.state_flags = 0xb; break;
-			}
+			sampler->voice_state.state_flags = Ngs2GetVoiceStateFlags(voice);
 			sampler->envelope_height     = 1.0f;
 			sampler->peak_height         = 0.0f;
 			sampler->reserved            = 0;
@@ -2788,6 +3281,23 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 		}
 		default: EXIT("unknown type: %s\n", Core::EnumName(voice->rack->type).C_Str());
 	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI Ngs2VoiceGetStateFlags(uintptr_t voice_handle, uint32_t* state_flags)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(state_flags == nullptr);
+	EXIT_NOT_IMPLEMENTED(voice_handle == 0);
+
+	auto* voice = reinterpret_cast<Ngs2VoiceInternal*>(voice_handle);
+
+	Core::LockGuard lock(voice->rack->ngs->mutex);
+
+	*state_flags = Ngs2GetVoiceStateFlags(voice);
+	printf("\t state_flags = %u\n", *state_flags);
 
 	return OK;
 }

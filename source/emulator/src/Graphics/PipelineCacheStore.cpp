@@ -1,6 +1,5 @@
 #include "Emulator/Graphics/PipelineCacheStore.h"
 
-#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -107,35 +106,40 @@ std::vector<uint8_t> PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& pr
 	return data;
 }
 
-bool PipelineCacheStoreSave(VkDevice device, VkPipelineCache cache, const VkPhysicalDeviceProperties& properties, size_t* saved_size)
+PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineCache cache, const VkPhysicalDeviceProperties& properties,
+                                                    size_t remaining_write_budget, size_t* attempted_size)
 {
-	if (saved_size != nullptr)
+	if (attempted_size != nullptr)
 	{
-		*saved_size = 0;
+		*attempted_size = 0;
 	}
 	if (device == VK_NULL_HANDLE || cache == VK_NULL_HANDLE)
 	{
-		return false;
+		return PipelineCacheStoreSaveResult::Failed;
 	}
 
 	size_t size   = 0;
 	auto   result = vkGetPipelineCacheData(device, cache, &size, nullptr);
 	if (result != VK_SUCCESS || size < sizeof(PipelineCacheHeaderV1) || size > PipelineCacheStoreMaxBytes())
 	{
-		return false;
+		return PipelineCacheStoreSaveResult::Failed;
 	}
 
 	std::vector<uint8_t> data(size);
 	result = vkGetPipelineCacheData(device, cache, &size, data.data());
 	if (result != VK_SUCCESS || size != data.size() || !PipelineCacheDataMatchesDevice(data.data(), data.size(), properties))
 	{
-		return false;
+		return PipelineCacheStoreSaveResult::Failed;
 	}
 
 	const auto path = CachePath(properties);
 	if (path.empty())
 	{
-		return false;
+		return PipelineCacheStoreSaveResult::Failed;
+	}
+	if (data.size() > remaining_write_budget)
+	{
+		return PipelineCacheStoreSaveResult::BudgetExceeded;
 	}
 
 	std::error_code error;
@@ -145,32 +149,35 @@ bool PipelineCacheStoreSave(VkDevice device, VkPipelineCache cache, const VkPhys
 		std::filesystem::create_directories(parent, error);
 		if (error)
 		{
-			return false;
+			return PipelineCacheStoreSaveResult::Failed;
 		}
 	}
 
 	auto temporary = path;
 	temporary += ".tmp";
+	if (attempted_size != nullptr)
+	{
+		// Charge the complete blob before opening the temporary file. This is a
+		// conservative upper bound for partial writes and failed flush/replace
+		// operations, which must not bypass the per-session disk budget.
+		*attempted_size = data.size();
+	}
 	{
 		std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
 		if (!file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size())) || !file.flush())
 		{
 			std::filesystem::remove(temporary, error);
-			return false;
+			return PipelineCacheStoreSaveResult::Failed;
 		}
 	}
 
 	if (!ReplaceFile(temporary, path))
 	{
 		std::filesystem::remove(temporary, error);
-		return false;
+		return PipelineCacheStoreSaveResult::Failed;
 	}
 
-	if (saved_size != nullptr)
-	{
-		*saved_size = data.size();
-	}
-	return true;
+	return PipelineCacheStoreSaveResult::Written;
 }
 
 } // namespace Kyty::Libs::Graphics

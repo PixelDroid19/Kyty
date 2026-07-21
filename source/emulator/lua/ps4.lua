@@ -2,6 +2,8 @@
 local cfg = {
 	ScreenWidth = 1280;
 	ScreenHeight = 720;
+	InternalResolutionWidth = 1280;
+	InternalResolutionHeight = 720;
 	Neo = true;
 	VulkanValidationEnabled = false;
 	ShaderValidationEnabled = false;

@@ -22,6 +22,42 @@ void RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func);
 // and GpuMemoryMode. Returns false for unsupported prot values.
 bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode);
 
+enum class KernelGpuMappingPromotionStatus : uint8_t
+{
+	Promoted,
+	Retained,
+	NotContained,
+	InvalidArgument,
+	UnmapPending,
+};
+
+enum class KernelGpuMappingRegistrationAction : uint8_t
+{
+	RegisterOwnerMapping,
+	RegisterProtectedRange,
+	Retain,
+	Reject,
+};
+
+constexpr KernelGpuMappingRegistrationAction KernelGpuMappingRegistrationActionFor(KernelGpuMappingPromotionStatus status)
+{
+	switch (status)
+	{
+		case KernelGpuMappingPromotionStatus::Promoted: return KernelGpuMappingRegistrationAction::RegisterOwnerMapping;
+		case KernelGpuMappingPromotionStatus::Retained: return KernelGpuMappingRegistrationAction::Retain;
+		case KernelGpuMappingPromotionStatus::NotContained: return KernelGpuMappingRegistrationAction::RegisterProtectedRange;
+		case KernelGpuMappingPromotionStatus::InvalidArgument:
+		case KernelGpuMappingPromotionStatus::UnmapPending: return KernelGpuMappingRegistrationAction::Reject;
+	}
+	return KernelGpuMappingRegistrationAction::Reject;
+}
+
+// A mapping that has ever become GPU-visible owns GPU cleanup until unmap.
+// NoAccess protection changes never demote this lifetime obligation.
+[[nodiscard]] KernelGpuMappingPromotionStatus KernelPromoteGpuMappingRange(
+    uint64_t mapping_addr, uint64_t mapping_size, uint64_t protected_addr, uint64_t protected_size,
+    Graphics::GpuMemoryMode requested_mode, Graphics::GpuMemoryMode* cleanup_mode);
+
 int KYTY_SYSV_ABI    KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags, const char* name);
 int KYTY_SYSV_ABI    KernelMapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags);
 int KYTY_SYSV_ABI    KernelReserveVirtualRange(void** addr_in_out, uint64_t len, int flags, uint64_t alignment);
@@ -44,6 +80,8 @@ int KYTY_SYSV_ABI    KernelSetVirtualRangeName(const void* addr, uint64_t len, c
 int KYTY_SYSV_ABI    KernelClearVirtualRangeName(const void* addr, uint64_t len);
 int KYTY_SYSV_ABI    KernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot);
 int KYTY_SYSV_ABI    KernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size);
+int KYTY_SYSV_ABI    KernelAvailableDirectMemorySize(int64_t arg0, int64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
+int KYTY_SYSV_ABI    KernelBatchMap2(void* entries, int entry_count, int* processed_out, int flags);
 int KYTY_SYSV_ABI    KernelAvailableFlexibleMemorySize(size_t* size);
 // Configured flexible size for Gen5 queries (same budget as available for now).
 int KYTY_SYSV_ABI    KernelConfiguredFlexibleMemorySize(uint64_t* size);
@@ -73,6 +111,7 @@ struct VirtualQueryInfo
 static_assert(sizeof(VirtualQueryInfo) == 72, "VirtualQueryInfo size");
 
 int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size);
+int KYTY_SYSV_ABI KernelIsStack(const void* addr, void** start, void** end);
 
 } // namespace Kyty::Libs::LibKernel::Memory
 

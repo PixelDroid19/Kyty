@@ -5,62 +5,40 @@
 
 UT_BEGIN(EmulatorApplicationHeap);
 
-using Kyty::Libs::LibKernel::ApplicationHeap::ApiV2;
-using Kyty::Libs::LibKernel::ApplicationHeap::IsApiV2Header;
-using Kyty::Libs::LibKernel::ApplicationHeap::IsGuestCodePointer;
-using Kyty::Libs::LibKernel::ApplicationHeap::IsValidApiV2Table;
-using Kyty::Libs::LibKernel::ApplicationHeap::kApiV2Size;
-using Kyty::Libs::LibKernel::ApplicationHeap::kApiV2Version;
+using Kyty::Libs::LibKernel::ApplicationHeap::Api;
+using Kyty::Libs::LibKernel::ApplicationHeap::IsInitialized;
+using Kyty::Libs::LibKernel::ApplicationHeap::IsValidApi;
+using Kyty::Libs::LibKernel::ApplicationHeap::RegisterApi;
+using Kyty::Libs::LibKernel::ApplicationHeap::Reset;
+using Kyty::Libs::LibKernel::ApplicationHeap::kFreeSlot;
+using Kyty::Libs::LibKernel::ApplicationHeap::kMallocSlot;
 
-// Captured Gen5 application-heap table header at a synthetic guest address.
-TEST(EmulatorApplicationHeap, RecognizesCapturedV2Header)
+TEST(EmulatorApplicationHeap, AcceptsDirectRuntimeFunctionTable)
 {
-	EXPECT_EQ(kApiV2Size, 0x78u);
-	EXPECT_EQ(kApiV2Version, 2u);
-	EXPECT_TRUE(IsApiV2Header(kApiV2Size, kApiV2Version));
-	EXPECT_FALSE(IsApiV2Header(kApiV2Size, 1u));
-	EXPECT_FALSE(IsApiV2Header(0x70, kApiV2Version));
+	Api api {};
+	api.slots[kMallocSlot] = reinterpret_cast<void*>(0x900f09370ull);
+	api.slots[kFreeSlot]   = reinterpret_cast<void*>(0x900f08920ull);
+
+	EXPECT_TRUE(IsValidApi(&api));
+	EXPECT_FALSE(IsValidApi(nullptr));
+
+	api.slots[kMallocSlot] = nullptr;
+	EXPECT_FALSE(IsValidApi(&api));
 }
 
-TEST(EmulatorApplicationHeap, CreateSlotMustPointIntoExecutableImage)
+TEST(EmulatorApplicationHeap, RegistrationRequiresMallocAndFree)
 {
-	constexpr uint64_t text_begin = 0x900000000ull;
-	constexpr uint64_t text_end   = 0x908000000ull;
+	Reset();
+	EXPECT_FALSE(IsInitialized());
 
-	EXPECT_TRUE(IsGuestCodePointer(0x90027cea0, text_begin, text_end));
-	EXPECT_FALSE(IsGuestCodePointer(0x2, text_begin, text_end));
-	EXPECT_FALSE(IsGuestCodePointer(0x9088e0158, text_begin, text_end));
-}
+	Api api {};
+	api.slots[kMallocSlot] = reinterpret_cast<void*>(0x900f09370ull);
+	api.slots[kFreeSlot]   = reinterpret_cast<void*>(0x900f08920ull);
+	RegisterApi(api.slots);
+	EXPECT_TRUE(IsInitialized());
 
-// Captured Gen5 v2 table (create/destroy/malloc/free in the executable image).
-TEST(EmulatorApplicationHeap, CapturedV2TablePassesFullValidation)
-{
-	constexpr uint64_t text_begin = 0x900000000ull;
-	constexpr uint64_t text_end   = 0x908000000ull;
-
-	ApiV2 table {};
-	table.size    = kApiV2Size;
-	table.version = kApiV2Version;
-	table.create  = reinterpret_cast<void(KYTY_SYSV_ABI*)()>(0x90027cea0);
-	table.destroy = reinterpret_cast<void(KYTY_SYSV_ABI*)()>(0x90027ced0);
-	table.malloc  = reinterpret_cast<void*(KYTY_SYSV_ABI*)(size_t)>(0x90027cf00);
-	table.free    = reinterpret_cast<void(KYTY_SYSV_ABI*)(void*)>(0x90027cf30);
-
-	EXPECT_TRUE(IsValidApiV2Table(&table, text_begin, text_end));
-}
-
-TEST(EmulatorApplicationHeap, RejectsHeaderOnlyFalsePositive)
-{
-	constexpr uint64_t text_begin = 0x900000000ull;
-	constexpr uint64_t text_end   = 0x908000000ull;
-
-	ApiV2 table {};
-	table.size    = kApiV2Size;
-	table.version = kApiV2Version;
-	table.create  = reinterpret_cast<void(KYTY_SYSV_ABI*)()>(0x90027cea0);
-	// destroy/malloc/free left null — must not qualify for create.
-
-	EXPECT_FALSE(IsValidApiV2Table(&table, text_begin, text_end));
+	RegisterApi(nullptr);
+	EXPECT_FALSE(IsInitialized());
 }
 
 UT_END();

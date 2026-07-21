@@ -253,6 +253,68 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	return op == 0x10u && r == 0x19u && len >= 8u;
 }
 
+enum class GraphicsWaitRegMemForm : uint8_t
+{
+	None = 0,
+	ItWaitRegMem,
+	CustomWaitMem32,
+	CustomWaitMem64,
+};
+
+// Classifies WaitRegMem-family packets for patch helpers.
+[[nodiscard]] inline GraphicsWaitRegMemForm GraphicsGetWaitRegMemForm(uint32_t header)
+{
+	if ((header >> 30u) != 3u)
+	{
+		return GraphicsWaitRegMemForm::None;
+	}
+	const uint32_t op = (header >> 8u) & 0xffu;
+	const uint32_t r  = (header >> 2u) & 0x3fu;
+	if (op == 0x3cu) // IT_WAIT_REG_MEM
+	{
+		return GraphicsWaitRegMemForm::ItWaitRegMem;
+	}
+	if (op == 0x10u && r == 0x0au) // IT_NOP + R_WAIT_MEM_32
+	{
+		return GraphicsWaitRegMemForm::CustomWaitMem32;
+	}
+	if (op == 0x10u && r == 0x16u) // IT_NOP + R_WAIT_MEM_64
+	{
+		return GraphicsWaitRegMemForm::CustomWaitMem64;
+	}
+	return GraphicsWaitRegMemForm::None;
+}
+
+// True for IT_WRITE_DATA or custom IT_NOP/R_WRITE_DATA.
+[[nodiscard]] inline bool GraphicsIsWriteDataPacket(uint32_t header)
+{
+	if ((header >> 30u) != 3u)
+	{
+		return false;
+	}
+	const uint32_t op = (header >> 8u) & 0xffu;
+	const uint32_t r  = (header >> 2u) & 0x3fu;
+	return op == 0x37u || (op == 0x10u && r == 0x15u);
+}
+
+// True for custom IT_NOP/R_RELEASE_MEM (EOP patch family).
+[[nodiscard]] inline bool GraphicsIsAgcReleaseMemPacket(uint32_t header)
+{
+	if ((header >> 30u) != 3u)
+	{
+		return false;
+	}
+	const uint32_t op  = (header >> 8u) & 0xffu;
+	const uint32_t r   = (header >> 2u) & 0x3fu;
+	const uint32_t len = ((header >> 16u) & 0x3fffu) + 2u;
+	return op == 0x10u && r == 0x18u && len >= 7u;
+}
+
+[[nodiscard]] inline uint32_t GraphicsPatchUInt32Bits(uint32_t current, uint32_t mask, uint32_t value)
+{
+	return (current & ~mask) | (value & mask);
+}
+
 [[nodiscard]] inline bool DepthFormatHasStencil(VkFormat format)
 {
 	return format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
@@ -621,6 +683,15 @@ enum class LabelForceCompleteKind : uint8_t
 [[nodiscard]] inline bool GraphicsBatchNeedsApiFlip(bool submit_and_flip, bool flip_issued_during_run)
 {
 	return submit_and_flip && !flip_issued_during_run;
+}
+
+// Flip callbacks are post-fence completion actions. A batch that issued a flip
+// must retire the exact containing submission even when the guest does not
+// submit another batch; otherwise a guest waiting for its first flip event can
+// starve the only code path that publishes that event.
+[[nodiscard]] inline bool GraphicsBatchNeedsSubmissionCompletion(bool flip_issued_during_run)
+{
+	return flip_issued_during_run;
 }
 
 // GPU→CPU buffer write-back with absolute holes [hole_begin[i], hole_end[i]).
