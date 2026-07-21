@@ -3,6 +3,12 @@
 #define _GNU_SOURCE
 #endif
 
+// macOS hides the deprecated ucontext API unless this feature-test macro is
+// visible before any system header is included.
+#if defined(__APPLE__) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 1
+#endif
+
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Kyty/Sys/SysVirtual.h"
@@ -21,9 +27,6 @@
 #include <cstdlib>
 
 #ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
-#if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__)) && !defined(_XOPEN_SOURCE)
-#define _XOPEN_SOURCE 1
-#endif
 #include <csignal>
 #include <sys/syscall.h>
 #include <sys/time.h>
