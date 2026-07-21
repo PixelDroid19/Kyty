@@ -281,7 +281,7 @@ StallResult Observe(const ObservationInput& input, const StallSettings& settings
 		state->first_observed_ns  = input.sample_time_ns;
 		state->suspected_ns       = 0;
 		state->confirmed_ns       = 0;
-		state->suspected          = {};
+		state->suspected          = SuspectedEvidence {};
 		state->suspected.causal_fingerprint    = fingerprint;
 		state->suspected.category              = candidate;
 		state->suspected.sample_time_ns        = input.sample_time_ns;

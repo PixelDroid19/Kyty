@@ -37,6 +37,12 @@
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #include <pthread_time.h>
+#ifdef pthread_attr_getguardsize
+#undef pthread_attr_getguardsize
+#endif
+#ifdef pthread_attr_setguardsize
+#undef pthread_attr_setguardsize
+#endif
 #endif
 
 namespace Kyty::Libs {
@@ -2672,7 +2678,8 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 		// via setstack and is deprecated.
 		void*  stack_addr = nullptr;
 		size_t stack_size = 0;
-		if (pthread_attr_getstack(&(*attr)->p, &stack_addr, &stack_size) == 0 && stack_addr != nullptr && stack_size != 0)
+		if (pthread_attr_getstack(&(*attr)->p, &stack_addr, &stack_size) == 0 && stack_addr != nullptr && stack_size != 0 &&
+		    reinterpret_cast<uintptr_t>(stack_addr) <= UINTPTR_MAX - stack_size)
 		{
 			(*thread)->guest_stack_base = reinterpret_cast<uint64_t>(stack_addr);
 			(*thread)->guest_stack_size = stack_size;

@@ -2354,7 +2354,7 @@ bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int v
 	{
 		return false;
 	}
-	*out = {};
+	*out = GpuMemoryOverlapSnapshot {};
 
 	if (vaddr == nullptr || size == nullptr || vaddr_num <= 0 || vaddr_num > VADDR_BLOCKS_MAX)
 	{
@@ -3710,7 +3710,7 @@ bool GpuMemoryQueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vad
 	{
 		return false;
 	}
-	*out = {};
+	*out = GpuMemoryOverlapSnapshot {};
 
 	return g_gpu_memory != nullptr && g_gpu_memory->QueryOverlaps(vaddr, size, vaddr_num, out);
 }

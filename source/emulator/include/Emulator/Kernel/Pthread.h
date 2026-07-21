@@ -11,6 +11,16 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+// MinGW's winpthread header defines this POSIX helper as a macro. Kyty
+// exposes the guest ABI symbol with the same spelling, so keep the macro from
+// rewriting the declaration below.
+#ifdef pthread_attr_getguardsize
+#undef pthread_attr_getguardsize
+#endif
+#ifdef pthread_attr_setguardsize
+#undef pthread_attr_setguardsize
+#endif
+
 extern "C" {
 struct sched_param;
 }
