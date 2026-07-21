@@ -172,7 +172,7 @@ struct ModuleStartDescriptor
 // Return stable dependency-first indices. Dependencies not present in the
 // loaded set are supplied by HLE or loaded later through the module API.
 // libc.prx is visited first when present so CRT heap/TSD bootstrap runs before
-// C++ module constructors that call operator new (captured GRIS start path).
+// C++ module constructors that call operator new during startup.
 Vector<uint32_t> LoaderBuildModuleStartOrder(const Vector<ModuleStartDescriptor>& modules);
 
 // Decode the captured GNU EH-frame header form (version 1, pcrel+sdata4).
