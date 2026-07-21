@@ -38,6 +38,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <thread>
 
@@ -63,6 +64,23 @@ public:
 
 	std::filesystem::path path;
 };
+
+struct PausedSpirvCacheWrite
+{
+	std::mutex              mutex;
+	std::condition_variable condition;
+	bool                    entered = false;
+	bool                    release = false;
+};
+
+void PauseSpirvCacheWrite(void* opaque)
+{
+	auto* pause = static_cast<PausedSpirvCacheWrite*>(opaque);
+	std::unique_lock<std::mutex> lock(pause->mutex);
+	pause->entered = true;
+	pause->condition.notify_all();
+	pause->condition.wait(lock, [pause] { return pause->release; });
+}
 
 int                   g_test_gpu_object_deletes = 0;
 int                   g_versioned_gpu_object_creates = 0;
@@ -503,6 +521,109 @@ TEST(EmulatorGraphicsState, SpirvBinaryCacheReplacementDoesNotEvictUnrelatedEntr
 	EXPECT_EQ(cache.Load(source_b, 0, false, &loaded), SpirvBinaryCacheLoadResult::Hit);
 	EXPECT_EQ(loaded, binary_b);
 	EXPECT_LE(cache.DiskUsageBytes(), limits.max_total_bytes);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheWriteBehindCoalescesAndDrainsOnDestruction)
+{
+	ScopedSpirvCacheDirectory directory;
+	const String8             source("OpCapability Shader\n; queued entry\n");
+	Vector<uint32_t>          expected {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+
+	{
+		SpirvBinaryCacheStore cache(directory.path);
+		EXPECT_EQ(cache.QueueStore(source, 0, false, expected), SpirvBinaryCacheQueueResult::Queued);
+		EXPECT_EQ(cache.QueueStore(source, 0, false, expected), SpirvBinaryCacheQueueResult::Coalesced);
+	}
+
+	SpirvBinaryCacheStore cache(directory.path);
+	Vector<uint32_t>      loaded;
+	EXPECT_EQ(cache.Load(source, 0, false, &loaded), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(loaded, expected);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheWriteBehindDropsSaturatedQueuesWithinBounds)
+{
+	ScopedSpirvCacheDirectory directory;
+	const String8             source("OpCapability Shader\n; dropped entry\n");
+	Vector<uint32_t>          binary {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+
+	{
+		SpirvBinaryCacheLimits limits;
+		limits.max_pending_entries = 0;
+		SpirvBinaryCacheStore cache(directory.path, limits);
+		EXPECT_EQ(cache.QueueStore(source, 0, false, binary), SpirvBinaryCacheQueueResult::QueueFull);
+		const auto stats = cache.AsyncStats();
+		EXPECT_EQ(stats.dropped, 1u);
+		EXPECT_EQ(stats.pending_entries, 0u);
+		EXPECT_EQ(stats.pending_bytes, 0u);
+	}
+	{
+		SpirvBinaryCacheLimits limits;
+		limits.max_pending_entries = 4;
+		limits.max_pending_bytes   = 1;
+		SpirvBinaryCacheStore cache(directory.path, limits);
+		EXPECT_EQ(cache.QueueStore(source, 0, false, binary), SpirvBinaryCacheQueueResult::QueueFull);
+		EXPECT_EQ(cache.AsyncStats().dropped, 1u);
+	}
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheLoadDoesNotWaitForAnUnrelatedWrite)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheStore     cache(directory.path);
+	const String8             readable("OpCapability Shader\n; readable entry\n");
+	const String8             writing("OpCapability Shader\n; paused write\n");
+	Vector<uint32_t>          binary {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+	ASSERT_EQ(cache.Store(readable, 0, false, binary), SpirvBinaryCacheStoreResult::Written);
+
+	PausedSpirvCacheWrite pause;
+	cache.SetWriteHookForTesting(PauseSpirvCacheWrite, &pause);
+	ASSERT_EQ(cache.QueueStore(writing, 0, false, binary), SpirvBinaryCacheQueueResult::Queued);
+	{
+		std::unique_lock<std::mutex> lock(pause.mutex);
+		pause.condition.wait(lock, [&pause] { return pause.entered; });
+	}
+
+	std::promise<void> reader_started;
+	auto               reader_started_future = reader_started.get_future();
+	auto reader = std::async(std::launch::async,
+	                         [&]
+	                         {
+		                         reader_started.set_value();
+		                         Vector<uint32_t> loaded;
+		                         return cache.Load(readable, 0, false, &loaded);
+	                         });
+	reader_started_future.wait();
+	const auto reader_status = reader.wait_for(std::chrono::seconds(2));
+	{
+		std::lock_guard<std::mutex> lock(pause.mutex);
+		pause.release = true;
+	}
+	pause.condition.notify_all();
+
+	EXPECT_EQ(reader_status, std::future_status::ready);
+	EXPECT_EQ(reader.get(), SpirvBinaryCacheLoadResult::Hit);
+	cache.Drain();
+	cache.SetWriteHookForTesting(nullptr, nullptr);
+}
+
+TEST(EmulatorGraphicsState, SpirvBinaryCacheCompletedIdentityHistoryIsBounded)
+{
+	ScopedSpirvCacheDirectory directory;
+	SpirvBinaryCacheLimits    limits;
+	limits.max_completed_entries = 1;
+	SpirvBinaryCacheStore cache(directory.path, limits);
+	const String8         source_a("OpCapability Shader\n; completed a\n");
+	const String8         source_b("OpCapability Shader\n; completed b\n");
+	Vector<uint32_t>      binary {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+
+	ASSERT_EQ(cache.QueueStore(source_a, 0, false, binary), SpirvBinaryCacheQueueResult::Queued);
+	cache.Drain();
+	EXPECT_EQ(cache.QueueStore(source_a, 0, false, binary), SpirvBinaryCacheQueueResult::Coalesced);
+	ASSERT_EQ(cache.QueueStore(source_b, 0, false, binary), SpirvBinaryCacheQueueResult::Queued);
+	cache.Drain();
+	EXPECT_EQ(cache.AsyncStats().completed_entries, 1u);
+	EXPECT_EQ(cache.QueueStore(source_a, 0, false, binary), SpirvBinaryCacheQueueResult::Queued);
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
