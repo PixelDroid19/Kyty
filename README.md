@@ -69,6 +69,17 @@ release is built by GitHub Actions for Windows, Linux, and macOS.
 Artifacts from untagged commits are development snapshots. They may be useful
 for testing but can be unstable and are not releases.
 
+Versions follow [Semantic Versioning](https://semver.org/):
+
+- `major` releases contain incompatible or foundational changes and come from
+  `main`;
+- `minor` releases add backward-compatible functionality and come from `main`;
+- `patch` releases contain compatible bug fixes and come from `release`.
+
+Maintainers create versions through the **Create Version** GitHub Actions
+workflow. Creating a version tag starts the Windows, Linux, and macOS release
+build and publishes the resulting archives.
+
 ## Building from source
 
 ### Requirements
@@ -142,6 +153,14 @@ Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before
 opening an issue or pull request. Changes should be focused, testable,
 maintainable, and based on lawful clean-room research or other compatible
 sources.
+
+Development uses two long-lived branches:
+
+- new features and other evolutionary work branch from and return to `main`;
+- bug fixes branch from and return to `release`.
+
+CI builds pull requests targeting either branch. Ordinary pushes to feature and
+fix branches do not create redundant multiplatform builds.
 
 ## Special thanks
 

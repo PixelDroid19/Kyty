@@ -39,13 +39,58 @@ private identifying details from the test material.
 
 ## Development workflow
 
-1. Fork the repository and create a branch from the latest `main`.
+Kyty uses two long-lived integration branches:
+
+- `main` contains ongoing development. Create `feature/*`, `refactor/*`, and
+  other evolutionary branches from `main`, then open the pull request back to
+  `main`.
+- `release` contains the stable release line. Create `fix/*` branches from
+  `release`, then open the pull request back to `release`.
+
+Do not merge new features into `release`. A bug fix needed by ongoing
+development should be integrated into `release` first and then brought forward
+to `main` without rewriting either branch's published history.
+
+Suggested commands for a feature:
+
+```sh
+git fetch origin
+git switch --create feature/short-description origin/main
+```
+
+Suggested commands for a bug fix:
+
+```sh
+git fetch origin
+git switch --create fix/short-description origin/release
+```
+
+The contribution flow is:
+
+1. Fork the repository and select the correct base branch.
 2. Make one coherent change per branch.
 3. Add or update tests and documentation where appropriate.
 4. Build the affected targets locally.
 5. Review the complete diff for generated files, secrets, private paths, and
    unrelated formatting changes.
 6. Open a pull request with clear verification evidence.
+
+## Versioning and releases
+
+Kyty follows Semantic Versioning:
+
+- `major`: incompatible or foundational change from `main`;
+- `minor`: backward-compatible functionality from `main`;
+- `patch`: backward-compatible bug fix from `release`.
+
+Maintainers use the **Create Version** workflow in GitHub Actions and choose the
+version component to increment. The workflow selects the source branch, creates
+an immutable `vMAJOR.MINOR.PATCH` tag, and starts the multiplatform release
+build. Do not create release tags manually unless recovering the automation.
+
+The build workflow runs for pull requests into `main` or `release`, version
+tags, and explicit manual requests. It does not build every push to every topic
+branch.
 
 Use descriptive commit messages. A concise conventional form is preferred:
 

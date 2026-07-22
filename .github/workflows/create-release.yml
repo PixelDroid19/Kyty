@@ -1,0 +1,115 @@
+name: Create Version
+
+run-name: Create ${{ inputs.bump }} version from ${{ inputs.bump == 'patch' && 'release' || 'main' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semantic version component to increment
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: kyty-create-version
+  cancel-in-progress: false
+
+jobs:
+  create-tag:
+    name: Tag ${{ inputs.bump }} release
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_BRANCH: ${{ inputs.bump == 'patch' && 'release' || 'main' }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_BRANCH }}
+          fetch-depth: 0
+
+      - name: Calculate next semantic version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+          current="${latest:-v0.0.0}"
+
+          if [[ ! "$current" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Latest tag is not a supported semantic version: $current" >&2
+            exit 1
+          fi
+
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          patch="${BASH_REMATCH[3]}"
+
+          case "${{ inputs.bump }}" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+            *)
+              echo "Unsupported version bump: ${{ inputs.bump }}" >&2
+              exit 1
+              ;;
+          esac
+
+          version="v${major}.${minor}.${patch}"
+          if git rev-parse "$version" >/dev/null 2>&1; then
+            echo "Tag already exists: $version" >&2
+            exit 1
+          fi
+
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create immutable version tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "$VERSION" --message "Kyty $VERSION"
+          git push origin "$VERSION"
+
+      - name: Start multiplatform release build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: gh workflow run build-release.yml --ref "$VERSION"
+
+      - name: Write summary
+        env:
+          CURRENT: ${{ steps.version.outputs.current }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          {
+            echo "## Version created"
+            echo
+            echo "- Source branch: \`$SOURCE_BRANCH\`"
+            echo "- Previous version: \`$CURRENT\`"
+            echo "- New version: \`$VERSION\`"
+            echo "- Build workflow: dispatched for Windows, Linux, and macOS"
+          } >> "$GITHUB_STEP_SUMMARY"
