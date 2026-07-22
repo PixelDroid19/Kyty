@@ -95,7 +95,8 @@ Contributors remain responsible for local validation, and maintainers should
 request a manual build when a risky change needs hosted-runner coverage before
 release.
 
-Use descriptive commit messages. A concise conventional form is preferred:
+Commit messages and squash-merge titles must follow
+[Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/):
 
 ```text
 fix(graphics): preserve attachment state across queue reset

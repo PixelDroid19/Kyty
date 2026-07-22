@@ -4,6 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#supported-platforms)
 
+**Project website:** [pixeldroid19.github.io/kyty-web](https://pixeldroid19.github.io/kyty-web/)
+
 Kyty is an experimental, open-source emulator research project focused on the
 execution and rendering requirements of PlayStation 4 and PlayStation 5
 software. It is designed for lawful interoperability research, homebrew
@@ -153,6 +155,11 @@ Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before
 opening an issue or pull request. Changes should be focused, testable,
 maintainable, and based on lawful clean-room research or other compatible
 sources.
+
+Commit messages and squash-merge titles follow
+[Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
+Repository-wide engineering and automation rules are documented in
+[AGENTS.md](AGENTS.md).
 
 Development uses two long-lived branches:
 
