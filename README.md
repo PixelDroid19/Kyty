@@ -159,8 +159,10 @@ Development uses two long-lived branches:
 - new features and other evolutionary work branch from and return to `main`;
 - bug fixes branch from and return to `release`.
 
-CI builds pull requests targeting either branch. Ordinary pushes to feature and
-fix branches do not create redundant multiplatform builds.
+Feature and fix commits can be accumulated without creating a multiplatform
+build for every push or pull request. Maintainers can request a manual build
+when validation is needed. Official Windows, Linux, and macOS archives are
+created only when a semantic version is released.
 
 ## Special thanks
 

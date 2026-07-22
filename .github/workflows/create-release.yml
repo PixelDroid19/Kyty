@@ -30,7 +30,7 @@ jobs:
       SOURCE_BRANCH: ${{ inputs.bump == 'patch' && 'release' || 'main' }}
     steps:
       - name: Checkout release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.SOURCE_BRANCH }}
           fetch-depth: 0
