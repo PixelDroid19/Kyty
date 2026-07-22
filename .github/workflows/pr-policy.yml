@@ -1,0 +1,42 @@
+name: Pull Request Policy
+
+on:
+  pull_request:
+    branches: [main, release]
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Conventional title and branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate pull request policy
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+          TITLE: ${{ github.event.pull_request.title }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          conventional='^(feat|fix|perf|refactor|test|docs|build|ci|chore|revert)(\([a-z0-9][a-z0-9._/-]*\))?(!)?: .+'
+          if [[ ! "$TITLE" =~ $conventional ]]; then
+            echo "Pull request title must follow Conventional Commits 1.0.0." >&2
+            echo "Example: fix(graphics): preserve attachment state" >&2
+            exit 1
+          fi
+
+          if [[ "$BASE" == "release" && ! "$HEAD" =~ ^(fix|hotfix)/ ]]; then
+            echo "Pull requests into release must use a fix/* or hotfix/* branch." >&2
+            exit 1
+          fi
+
+          if [[ "$BASE" == "main" && "$HEAD" =~ ^(fix|hotfix)/ ]]; then
+            echo "Fix branches target release first, then the accepted fix is brought forward to main." >&2
+            exit 1
+          fi
+
+          echo "Conventional title and branch policy are valid."
