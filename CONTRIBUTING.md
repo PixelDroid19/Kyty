@@ -88,9 +88,12 @@ version component to increment. The workflow selects the source branch, creates
 an immutable `vMAJOR.MINOR.PATCH` tag, and starts the multiplatform release
 build. Do not create release tags manually unless recovering the automation.
 
-The build workflow runs for pull requests into `main` or `release`, version
-tags, and explicit manual requests. It does not build every push to every topic
-branch.
+The multiplatform build workflow runs for version tags and explicit manual
+requests. It does not build every push or pull request. This allows multiple
+features or fixes to accumulate before a `major`, `minor`, or `patch` release.
+Contributors remain responsible for local validation, and maintainers should
+request a manual build when a risky change needs hosted-runner coverage before
+release.
 
 Use descriptive commit messages. A concise conventional form is preferred:
 
