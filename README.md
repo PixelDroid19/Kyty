@@ -1,140 +1,161 @@
-[![Build and Release](https://github.com/PixelDroid19/Kyty/actions/workflows/build-release.yml/badge.svg)](https://github.com/PixelDroid19/Kyty/actions/workflows/build-release.yml)
-
 # Kyty
 
-Kyty is an experimental, open-source research project that studies the
-execution and rendering requirements of PlayStation 4 and PlayStation 5
-software. The project is intended for lawful development, testing,
-interoperability research, education, and preservation work.
+[![Build and Release](https://github.com/PixelDroid19/Kyty/actions/workflows/build-release.yml/badge.svg)](https://github.com/PixelDroid19/Kyty/actions/workflows/build-release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#supported-platforms)
 
-Kyty is early-stage software. Compatibility is incomplete and may vary by
-title, host operating system, graphics driver, and hardware. A successful boot,
-window, or frame does not mean that a title is fully supported.
+Kyty is an experimental, open-source emulator research project focused on the
+execution and rendering requirements of PlayStation 4 and PlayStation 5
+software. It is designed for lawful interoperability research, homebrew
+development, education, testing, and preservation.
+
+> [!IMPORTANT]
+> Kyty is under active development. Compatibility, performance, graphics,
+> audio, and stability are incomplete. A title reaching a window or rendering
+> frames does not mean it is fully supported.
+
+## Project goals
+
+Kyty explores and implements:
+
+- guest ABI and operating-system compatibility layers;
+- executable loading, linking, memory management, and CPU execution;
+- graphics command processing, shader translation, and Vulkan presentation;
+- audio, input, filesystem, and other guest-facing services;
+- deterministic diagnostics and regression tests;
+- portable builds for Windows, Linux, and macOS.
+
+The project favors general, evidence-based implementations over title-specific
+hacks. Compatibility claims should always include the tested commit, host
+configuration, graphics hardware, driver, workload, and known limitations.
 
 ## Legal and responsible use
 
-Kyty does not endorse copyright infringement, piracy, unauthorized access, or
-the circumvention of access controls. You are responsible for complying with
-the laws and regulations that apply where you live and for respecting the
-terms under which you obtained any software or hardware.
+This repository contains emulator source code only. It does not provide or
+request commercial games, firmware, BIOS files, encryption keys, certificates,
+decrypted executables, or other copyrighted console material.
 
-This repository contains emulator source code only. It does not provide,
-request, or link to:
+Use Kyty only with software and system data that you created or are legally
+authorized to use. Do not upload protected content, private dumps, keys, game
+assets, or confidential information to issues, pull requests, CI artifacts, or
+public discussions.
 
-- commercial games or other copyrighted game assets;
-- console firmware, BIOS files, encryption keys, certificates, or title keys;
-- unauthorized dumps, decrypted executables, extracted shaders, or textures;
-- instructions for bypassing platform security, DRM, licensing, or account
-  controls;
-- hosted download services or third-party repositories distributing protected
-  material.
-
-Use only software, system files, and data that you created yourself or are
-authorized to use, and only in ways permitted by applicable law. Do not upload
-copyrighted game files, firmware, keys, save data, crash dumps, screenshots, or
-other proprietary material to this repository, its issue tracker, pull
-requests, CI artifacts, or public discussion. When reporting a problem, use a
-minimal sanitized reproducer and describe the relevant behavior without
-attaching protected content.
-
-Nothing in this README is legal advice. Laws differ by jurisdiction and can
-change. If your use case involves commercial distribution, interoperability
-exceptions, reverse engineering, preservation, or security research, obtain
-advice from a qualified lawyer in the relevant jurisdiction.
-
-## Project scope
-
-The project focuses on emulator engineering, including:
-
-- guest ABI and operating-system compatibility layers;
-- CPU execution and memory-management research;
-- graphics command processing, shader translation, resource layouts, and
-  presentation;
-- portable Vulkan integration and host capability detection;
-- deterministic tests and sanitized hardware-behavior fixtures.
+Kyty does not endorse piracy, unauthorized access, DRM circumvention, or
+copyright infringement. Nothing in this document is legal advice.
 
 Kyty is not affiliated with, sponsored by, or endorsed by Sony Interactive
-Entertainment or any game publisher. PlayStation is a trademark of its owner.
-All other names and marks belong to their respective owners and are used only
-for identification.
+Entertainment or any game publisher. PlayStation and all other trademarks
+belong to their respective owners.
 
-## Current status
+## Supported platforms
 
-Kyty is experimental. Some homebrew and research workloads may run, while
-others may fail to boot, render incorrectly, lose audio, freeze, crash, or
-perform poorly. Known areas of incomplete support include, among others,
-audio, video playback, networking, multi-user behavior, system settings, and
-parts of PS4/PS5 graphics and guest services.
+The continuous-integration pipeline currently builds the following targets:
 
-Compatibility claims must be backed by a reproducible test and must identify
-the host, build, graphics device, workload category, and limitations. Do not
-interpret screenshots or a process that remains alive as a compatibility
-guarantee.
+| Platform | Architecture | CI environment | Graphics path |
+| --- | --- | --- | --- |
+| Windows | x86-64 | Windows Server 2022 / MinGW-w64 | Vulkan |
+| Linux | x86-64 | Ubuntu 24.04 | Vulkan |
+| macOS | x86-64 | macOS 15 Intel | MoltenVK |
 
-## Building
+These are build targets, not guarantees that every workload behaves identically
+on every operating system, GPU, or driver.
 
-The build uses CMake and Ninja. The exact toolchain and dependencies depend on
-the host and are maintained by the build files and CI configuration. Vulkan is
-required for the graphics path. Start by installing a current C++17-capable
-compiler, CMake, Ninja, and a Vulkan SDK appropriate for your platform, then
-configure a separate build directory:
+## Downloads
+
+Tagged releases are published on the
+[GitHub Releases](https://github.com/PixelDroid19/Kyty/releases) page. Every
+release is built by GitHub Actions for Windows, Linux, and macOS.
+
+Artifacts from untagged commits are development snapshots. They may be useful
+for testing but can be unstable and are not releases.
+
+## Building from source
+
+### Requirements
+
+- Git;
+- CMake;
+- Ninja;
+- a C++17-capable compiler;
+- Vulkan development files appropriate for the host platform;
+- platform-specific window, input, and audio development packages.
+
+The CI workflow is the authoritative reference for tested dependencies and
+compiler configuration.
+
+### Configure and build
+
+From the repository root:
 
 ```sh
-cmake -S . -B _build -G Ninja
-ninja -C _build
+cmake -S source -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DKYTY_PROJECT_NAME=Emulator \
+  -DKYTY_WARNINGS_ARE_ERRORS=OFF \
+  -DKYTY_BUILD_LAUNCHER=OFF \
+  -DKYTY_BUILD_DEVTOOLS=OFF \
+  -DKYTY_BUILD_UNIT_TESTS=OFF \
+  -DKYTY_GENERATE_MAP_CSV=OFF
+
+cmake --build build --target fc_script --parallel 4
 ```
 
-Host-specific setup and generated files should remain outside tracked source
-files. Check the CI workflows and CMake configuration for the currently tested
-platform combinations; do not assume that a successful build on one GPU or OS
-proves portability.
+The resulting executable is `build/fc_script.exe` on Windows and
+`build/fc_script` on Linux and macOS.
 
-## Testing and reporting issues
+## Running a lawful test workload
 
-Run focused tests while developing. The repository's `AGENTS.md` is the
-canonical engineering guide and documents strict-runtime verification.
+Kyty uses a Lua entry point. The repository includes `scripts/run_guest.lua`
+for authorized local workloads:
 
-When reporting an issue, include:
+```sh
+build/fc_script scripts/run_guest.lua "/path/to/authorized/workload"
+```
 
-- Kyty commit or release identifier;
-- host operating system, CPU, GPU, driver, and Vulkan implementation;
-- exact build and test commands;
-- the first reproducible error and relevant sanitized logs;
-- whether the behavior occurs with a minimal lawful test workload.
+On Windows PowerShell:
 
-Do not include game dumps, firmware, keys, private paths, title identifiers,
-or other proprietary data. Maintainers may close or remove reports that request
-copyrighted files, circumvention help, or unauthorized distribution.
+```powershell
+build\fc_script.exe scripts\run_guest.lua "C:\path\to\authorized\workload"
+```
 
-## Contributions
+Only use files you are legally permitted to access. Paths, dumps, and logs may
+contain private information; sanitize them before sharing a report.
 
-By contributing, you agree that your contribution is submitted under the
-repository's license and that you have the right to submit it. Contributions
-must be original or compatible with the applicable license, must not include
-proprietary game material, and must not add piracy or circumvention features.
+## Reporting issues
 
-Please read [AGENTS.md](AGENTS.md) before changing code. Contributions should
-include focused tests, preserve supported behavior, document evidence for guest
-ABI and GPU semantics, and keep platform-specific code at platform boundaries.
-Do not copy code whose license is incompatible with this repository.
+Before opening an issue, reproduce the problem on the latest `main` build and
+search for an existing report. Include:
 
-## Security and responsible disclosure
+- the exact Kyty commit or release;
+- operating system, CPU, GPU, graphics driver, and Vulkan implementation;
+- build and launch commands;
+- the first reproducible error and a short sanitized log;
+- expected behavior, actual behavior, and reproduction frequency.
 
-Do not publish private dumps, keys, exploit chains, or instructions that enable
-unauthorized access. For a security issue in the project itself, contact the
-maintainers privately before public disclosure when possible. Security reports
-should include a minimal reproduction that contains no protected third-party
-content.
+Do not attach games, firmware, keys, decrypted assets, proprietary symbols, or
+other protected material. A report that depends on private content should use a
+minimal sanitized reproducer whenever possible.
+
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before
+opening an issue or pull request. Changes should be focused, testable,
+maintainable, and based on lawful clean-room research or other compatible
+sources.
+
+## Special thanks
+
+The following independent open-source projects provide useful public
+architectural and portability references:
+
+- [RPCSX](https://github.com/RPCSX/rpcsx)
+- [Ryubing/Ryujinx](https://git.ryujinx.app/projects/Ryubing/ryujinx)
+
+These projects are independent from Kyty. Their inclusion does not imply an
+affiliation, endorsement, partnership, or exchange of source code.
 
 ## License
 
-Kyty source code is distributed under the MIT License; see [LICENSE](LICENSE).
-Third-party components may have separate licenses, which remain applicable to
-those components. Nothing in this project grants rights to software or data
-owned by third parties.
-
-## Contact
-
-For project questions, use GitHub Issues or Discussions. Please keep support
-requests focused on emulator behavior and do not ask other users to share
-copyrighted game files, firmware, keys, or private dumps.
+Kyty is distributed under the [MIT License](LICENSE). Third-party components
+retain their respective licenses and notices. The Kyty license does not grant
+rights to games, firmware, system software, or other third-party content.
