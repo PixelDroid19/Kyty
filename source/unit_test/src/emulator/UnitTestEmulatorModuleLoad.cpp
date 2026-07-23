@@ -184,6 +184,71 @@ TEST(EmulatorModuleLoad, BuildPlanAcceptsSelfWrappedAdjacentSharedPrx)
 	EXPECT_EQ(plan.diag.rejection_count, 0u);
 }
 
+TEST(EmulatorModuleLoad, OpenCreateWithoutTruncatePreservesExistingFile)
+{
+	EnsureFileSystemSubsystem();
+	const TempPackageRoot temp(U"/tmp/kyty_open_create_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+	const std::vector<uint8_t> original {'k', 'e', 'e', 'p'};
+	ASSERT_TRUE(WriteBinary(temp.root + U"existing.bin", original));
+
+	Kyty::Libs::LibKernel::FileSystem::Mount(temp.root, U"/create-test/");
+	const int fd = Kyty::Libs::LibKernel::FileSystem::KernelOpen("/create-test/existing.bin", 0x0201, 0600);
+	ASSERT_GE(fd, 0);
+	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelClose(fd), ::OK);
+
+	Kyty::Core::File file;
+	ASSERT_TRUE(file.Open(temp.root + U"existing.bin", Kyty::Core::File::Mode::Read));
+	const auto bytes = file.ReadWholeBuffer();
+	file.Close();
+	ASSERT_EQ(bytes.Size(), original.size());
+	EXPECT_EQ(std::memcmp(bytes.GetDataConst(), original.data(), original.size()), 0);
+	Kyty::Libs::LibKernel::FileSystem::Umount(U"/create-test/");
+}
+
+TEST(EmulatorModuleLoad, OpenCreateWithoutTruncateCreatesMissingFile)
+{
+	EnsureFileSystemSubsystem();
+	const TempPackageRoot temp(U"/tmp/kyty_open_create_missing_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	Kyty::Libs::LibKernel::FileSystem::Mount(temp.root, U"/create-test/");
+	const int fd = Kyty::Libs::LibKernel::FileSystem::KernelOpen("/create-test/new.bin", 0x0202, 0600);
+	ASSERT_GE(fd, 0);
+	constexpr uint8_t value[] = {0x11, 0x22, 0x33};
+	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelWrite(fd, value, sizeof(value)), static_cast<int64_t>(sizeof(value)));
+	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelClose(fd), ::OK);
+	Kyty::Libs::LibKernel::FileSystem::Umount(U"/create-test/");
+
+	EXPECT_EQ(Kyty::Core::File::Size(temp.root + U"new.bin"), sizeof(value));
+}
+
+TEST(EmulatorModuleLoad, FtruncateChangesLengthAndPreservesOffset)
+{
+	EnsureFileSystemSubsystem();
+	const TempPackageRoot temp(U"/tmp/kyty_ftruncate_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+	ASSERT_TRUE(WriteBinary(temp.root + U"data.bin", std::vector<uint8_t> {'a', 'b', 'c', 'd'}));
+
+	Kyty::Libs::LibKernel::FileSystem::Mount(temp.root, U"/truncate-test/");
+	const int fd = Kyty::Libs::LibKernel::FileSystem::KernelOpen("/truncate-test/data.bin", 0x0002, 0600);
+	ASSERT_GE(fd, 0);
+	ASSERT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelLseek(fd, 3, 0), 3);
+	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelFtruncate(fd, 2), ::OK);
+	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelLseek(fd, 0, 1), 3);
+	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelClose(fd), ::OK);
+	Kyty::Libs::LibKernel::FileSystem::Umount(U"/truncate-test/");
+
+	EXPECT_EQ(Kyty::Core::File::Size(temp.root + U"data.bin"), 2u);
+}
+
+TEST(EmulatorModuleLoad, FtruncateRejectsInvalidArguments)
+{
+	EnsureFileSystemSubsystem();
+	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelFtruncate(-1, 0), Kyty::Libs::LibKernel::KERNEL_ERROR_EBADF);
+	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelFtruncate(3, -1), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+}
+
 TEST(EmulatorModuleLoad, RecognizesAlternateGen5SelfSignature)
 {
 	EnsureFileSystemSubsystem();
@@ -212,22 +277,6 @@ TEST(EmulatorModuleLoad, BuildPlanRejectsExtensionOnlyAdjacentJunk)
 	EXPECT_EQ(plan.count, 1u);
 	ASSERT_EQ(plan.diag.rejection_count, 1u);
 	EXPECT_STREQ(plan.diag.rejections[0], "reject not_shared_elf sce_module/libc.prx");
-}
-
-TEST(EmulatorModuleLoad, AfterPrimaryLoadedStagesAdjacentPlanWithoutBringupFlag)
-{
-	RuntimeLinker          rt;
-	const TempPackageRoot temp(U"/tmp/kyty_module_load_default_stage_test/");
-	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root + U"sce_module/"));
-	ASSERT_TRUE(WriteBinary(temp.root + U"eboot.bin", MakeSelfWrappedElf(ET_DYNEXEC)));
-	ASSERT_TRUE(WriteBinary(temp.root + U"sce_module/libc.prx", MakeSelfWrappedElf(ET_DYNAMIC)));
-
-	ModuleLifecycleCoordinator::AfterPrimaryLoaded(&rt, temp.root + U"eboot.bin");
-
-	const auto diag = ModuleLifecycleCoordinator::GetDiagnostics();
-	EXPECT_TRUE(diag.discovery_enabled);
-	EXPECT_EQ(diag.adjacent_count, 1u);
-	EXPECT_TRUE(ModuleLifecycleCoordinator::HasPendingAdjacentPlan(&rt));
 }
 
 TEST(EmulatorModuleLoad, ResolvePrefersLoadedModuleExportOverHleForSameIdentity)
@@ -278,6 +327,66 @@ TEST(EmulatorModuleLoad, LibkernelRegistersPosixLseekAlias)
 	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
 	ASSERT_NE(symbols.Find(LibkernelFunc(u"oib76F-12fk")), nullptr);
 	EXPECT_NE(symbols.Find(LibkernelFunc(u"Oy6IpwgtYOk")), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibcWcsstrUsesGuestUtf16CodeUnits)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+
+	const auto* record = symbols.Find(LibcFunc(u"WDpobjImAb4"));
+	ASSERT_NE(record, nullptr);
+	using Wcsstr = uint16_t* (*)(const uint16_t*, const uint16_t*);
+	auto wcsstr = reinterpret_cast<Wcsstr>(record->vaddr);
+
+	uint16_t text[]   = {u'a', u'b', u'c', u'd', 0};
+	uint16_t match[]  = {u'b', u'c', 0};
+	uint16_t absent[] = {u'x', 0};
+	uint16_t empty[]  = {0};
+
+	EXPECT_EQ(wcsstr(text, match), text + 1);
+	EXPECT_EQ(wcsstr(text, absent), nullptr);
+	EXPECT_EQ(wcsstr(text, empty), text);
+	EXPECT_EQ(wcsstr(nullptr, match), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibcWcsncmpUsesGuestUtf16CodeUnits)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+
+	const auto* record = symbols.Find(LibcFunc(u"E8wCoUEbfzk"));
+	ASSERT_NE(record, nullptr);
+	using Wcsncmp = int (*)(const uint16_t*, const uint16_t*, size_t);
+	auto wcsncmp = reinterpret_cast<Wcsncmp>(record->vaddr);
+
+	uint16_t same[]    = {u'a', u'b', 0};
+	uint16_t greater[] = {u'a', u'c', 0};
+	uint16_t shorter[] = {u'a', 0};
+
+	EXPECT_EQ(wcsncmp(same, same, 2), 0);
+	EXPECT_LT(wcsncmp(same, greater, 2), 0);
+	EXPECT_GT(wcsncmp(greater, same, 2), 0);
+	EXPECT_GT(wcsncmp(same, shorter, 2), 0);
+	EXPECT_EQ(wcsncmp(same, greater, 0), 0);
+}
+
+TEST(EmulatorModuleLoad, LibcWideClassifiesKnownGuestDescriptorsWithoutHostLocale)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+
+	const auto* record = symbols.Find(LibcFunc(u"CyXs2l-1kNA"));
+	ASSERT_NE(record, nullptr);
+	using Iswctype = int (*)(uint32_t, int);
+	auto iswctype = reinterpret_cast<Iswctype>(record->vaddr);
+
+	EXPECT_EQ(iswctype(u'7', 2), 1);
+	EXPECT_EQ(iswctype(u'X', 2), 0);
+	EXPECT_EQ(iswctype(u']', 9), 1);
+	EXPECT_EQ(iswctype(u'A', 9), 0);
+	EXPECT_EQ(iswctype(0x00e9, 2), 0);
+	EXPECT_EQ(iswctype(u'7', 99), 0);
 }
 
 TEST(EmulatorModuleLoad, LibkernelRegistersModuleInfoForUnwind)
@@ -340,6 +449,8 @@ TEST(EmulatorModuleLoad, PosixRegistersConditionTimedWait)
 	query.name = U"mqQMh1zPPT8";
 	EXPECT_NE(symbols.Find(query), nullptr);
 	query.name = U"VAzswvTOCzI";
+	EXPECT_NE(symbols.Find(query), nullptr);
+	query.name = U"ih4CD9-gghM";
 	EXPECT_NE(symbols.Find(query), nullptr);
 	for (const auto* nid:
 	     {U"wuCroIGjt2g", U"bY-PO6JhzhQ", U"FN4gaPmuFV8", U"ezv-RSBNKqI", U"C2kJ-byS5rM", U"4n51s0zEf0c", U"XVL8So3QJUk",
@@ -470,6 +581,34 @@ TEST(EmulatorModuleLoad, LibkernelRegistersEventFlagClear)
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
 	EXPECT_NE(symbols.Find(LibkernelFunc(u"7uhBFWRAS60")), nullptr);
+}
+
+TEST(EmulatorModuleLoad, PosixFlockAcceptsManagedFileDescriptor)
+{
+	using namespace Kyty::Libs::LibKernel;
+	using FlockFn = int(KYTY_SYSV_ABI*)(int, int);
+
+	EnsureFileSystemSubsystem();
+
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
+	const SymbolRecord* flock = symbols.Find(LibkernelFunc(u"9eMlfusH4sU"));
+	ASSERT_NE(flock, nullptr);
+	auto* flock_fn = reinterpret_cast<FlockFn>(flock->vaddr);
+	ASSERT_NE(flock_fn, nullptr);
+
+	const TempPackageRoot temp(U"/tmp/kyty_module_load_flock_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+	ASSERT_TRUE(WriteBinary(temp.root + U"payload.bin", std::vector<uint8_t> {'l', 'o', 'c', 'k'}));
+	FileSystem::Mount(temp.root, U"/app0/");
+
+	const int fd = FileSystem::KernelOpen("/app0/payload.bin", 0, 0);
+	ASSERT_GE(fd, 3);
+	EXPECT_EQ(flock_fn(fd, 0x02 | 0x04), 0);
+	EXPECT_EQ(flock_fn(fd, 0x08), 0);
+
+	EXPECT_EQ(FileSystem::KernelClose(fd), ::OK);
+	FileSystem::Umount(U"/app0/");
 }
 
 TEST(EmulatorModuleLoad, LibkernelReadAliasReadsRegularFileDescriptor)

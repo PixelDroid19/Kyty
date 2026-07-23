@@ -50,6 +50,25 @@ TEST(EmulatorLoaderModuleStart, SeedsLibcBeforeConsumerWithoutNeededEdge)
 	EXPECT_EQ(order[1], 0u);
 }
 
+TEST(EmulatorLoaderModuleStart, BreaksRuntimeDependencyCycleAtLibc)
+{
+	Vector<ModuleStartDescriptor> modules;
+	ModuleStartDescriptor         fios {};
+	fios.file_name = U"libSceFios2.prx";
+	fios.needed.Add(U"libc.prx");
+	modules.Add(fios);
+
+	ModuleStartDescriptor libc {};
+	libc.file_name = U"libc.prx";
+	libc.needed.Add(U"libSceFios2.prx");
+	modules.Add(libc);
+
+	const auto order = LoaderBuildModuleStartOrder(modules);
+	ASSERT_EQ(order.Size(), 2u);
+	EXPECT_EQ(order[0], 1u);
+	EXPECT_EQ(order[1], 0u);
+}
+
 UT_END();
 
 #endif // KYTY_EMU_ENABLED

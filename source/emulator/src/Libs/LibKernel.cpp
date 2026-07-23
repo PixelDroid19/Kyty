@@ -1,5 +1,6 @@
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
+#include "Kyty/Core/File.h"
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
@@ -158,14 +159,30 @@ static KYTY_SYSV_ABI KernelModule KernelLoadStartModule(const char* module_file_
 
 	// EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
 
-	printf("\tmodule_file_name = %s\n", module_file_name);
+	printf("\tmodule_file_name = %s\n", (module_file_name != nullptr ? module_file_name : "<null>"));
 
-	EXIT_NOT_IMPLEMENTED(flags != 0);
-	EXIT_NOT_IMPLEMENTED(opt != nullptr);
+	if (module_file_name == nullptr || module_file_name[0] == '\0' || flags != 0 || opt != nullptr)
+	{
+		if (res != nullptr)
+		{
+			*res = KERNEL_ERROR_EINVAL;
+		}
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	const auto module_path = FileSystem::GetRealFilename(String::FromUtf8(module_file_name));
+	if (!Core::File::IsFileExisting(module_path))
+	{
+		if (res != nullptr)
+		{
+			*res = KERNEL_ERROR_ENOENT;
+		}
+		return KERNEL_ERROR_ENOENT;
+	}
 
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
 
-	auto* program = rt->LoadProgram(FileSystem::GetRealFilename(String::FromUtf8(module_file_name)));
+	auto* program = rt->LoadProgram(module_path);
 
 	auto handle = program->unique_id;
 
@@ -1052,6 +1069,11 @@ static int64_t KYTY_SYSV_ABI PosixFstat(int fd, FileSystem::FileStat* stat)
 	return POSIX_N_CALL(FileSystem::KernelFstat(fd, stat));
 }
 
+static int KYTY_SYSV_ABI PosixFtruncate(int fd, int64_t length)
+{
+	return POSIX_CALL(FileSystem::KernelFtruncate(fd, length));
+}
+
 static int KYTY_SYSV_ABI PosixUnlink(const char* path)
 {
 	return POSIX_N_CALL(FileSystem::KernelUnlink(path));
@@ -1318,6 +1340,34 @@ int KYTY_SYSV_ABI mkdir(const char* path, uint16_t mode)
 	return POSIX_CALL(LibKernel::FileSystem::KernelMkdir(path, mode));
 }
 
+int KYTY_SYSV_ABI flock(int descriptor, int operation)
+{
+	constexpr int kLockShared    = 0x01;
+	constexpr int kLockExclusive = 0x02;
+	constexpr int kLockNonBlock  = 0x04;
+	constexpr int kLockUnlock    = 0x08;
+
+	const int lock_mode = operation & ~kLockNonBlock;
+	if (lock_mode != kLockShared && lock_mode != kLockExclusive && lock_mode != kLockUnlock)
+	{
+		*GetErrorAddr() = POSIX_EINVAL;
+		return -1;
+	}
+
+	// Guest file descriptors are emulator-managed handles, so validating the
+	// descriptor is sufficient for this single-process runtime. The lock has no
+	// additional host-visible effect until multi-process guest execution exists.
+	LibKernel::FileSystem::FileStat stat {};
+	const int                       result = LibKernel::FileSystem::KernelFstat(descriptor, &stat);
+	if (result != OK)
+	{
+		*GetErrorAddr() = LibKernel::KernelToPosix(result);
+		return -1;
+	}
+
+	return 0;
+}
+
 // Gen5 import NID cfwBSQyr5Ys: public name unresolved. Log args and return 0 so
 // loaders that import it can continue.
 uint64_t KYTY_SYSV_ABI cfwBSQyr5Ys(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
@@ -1343,6 +1393,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("k+AXqu2-eBc", getpagesize);
 	LIB_FUNC("E6ao34wPw+U", stat);
 	LIB_FUNC("JGMio+21L4c", mkdir);
+	LIB_FUNC("9eMlfusH4sU", flock);
 	LIB_FUNC("HoLVWNanBBc", getpid);
 	// Gen5 Posix_v1 pthread_self — EotR8a3ASf4 (Astro audio path after Acm).
 	LIB_FUNC("EotR8a3ASf4", pthread_self);
@@ -1427,6 +1478,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("bY-PO6JhzhQ", LibKernel::close);
 	LIB_FUNC("AqBioC2vF3I", LibKernel::read);
 	LIB_FUNC("mqQMh1zPPT8", LibKernel::PosixFstat);
+	LIB_FUNC("ih4CD9-gghM", LibKernel::PosixFtruncate);
 	LIB_FUNC("VAzswvTOCzI", LibKernel::PosixUnlink);
 	LIB_FUNC("FN4gaPmuFV8", LibKernel::write);
 	LIB_FUNC("ezv-RSBNKqI", LibKernel::pread);
@@ -1486,6 +1538,7 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("nKWi-N2HBV4", FileSystem::KernelPwrite);
 	LIB_FUNC("eV9wAD2riIA", FileSystem::KernelStat);
 	LIB_FUNC("kBwCPsYX-m4", FileSystem::KernelFstat);
+	LIB_FUNC("VW3TVZiM4-E", FileSystem::KernelFtruncate);
 	LIB_FUNC("AUXVxWeJU-A", FileSystem::KernelUnlink);
 	LIB_FUNC("52NcYU9+lEo", FileSystem::KernelRename);
 	LIB_FUNC("taRWhTJFTgE", FileSystem::KernelGetdirentries);

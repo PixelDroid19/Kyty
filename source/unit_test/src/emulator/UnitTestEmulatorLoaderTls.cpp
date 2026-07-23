@@ -1,4 +1,5 @@
 #include "Emulator/Loader/RuntimeLinker.h"
+#include "Emulator/Loader/Jit.h"
 
 #include "Kyty/UnitTest.h"
 
@@ -14,6 +15,51 @@ UT_BEGIN(EmulatorLoaderTls);
 
 using Kyty::Loader::LoaderRewriteTlsGdCallRexPrefix;
 using Kyty::Loader::LoaderPatchTlsFsBaseLoads;
+
+TEST(EmulatorLoaderTls, SafeCallAlignsUnknownGuestStackBeforeHostCallback)
+{
+	Kyty::Loader::Jit::SafeCall call;
+
+	EXPECT_EQ(call.code[0x0c], 0x53u);
+	EXPECT_EQ(call.code[0x40], 0x48u);
+	EXPECT_EQ(call.code[0x41], 0x89u);
+	EXPECT_EQ(call.code[0x42], 0xe3u);
+	EXPECT_EQ(call.code[0x43], 0x48u);
+	EXPECT_EQ(call.code[0x44], 0x83u);
+	EXPECT_EQ(call.code[0x45], 0xe4u);
+	EXPECT_EQ(call.code[0x46], 0xf0u);
+	EXPECT_EQ(call.code[0x47], 0x48u);
+	EXPECT_EQ(call.code[0x48], 0x83u);
+	EXPECT_EQ(call.code[0x49], 0xecu);
+	EXPECT_EQ(call.code[0x4a], 0x20u);
+	EXPECT_EQ(call.code[0x51], 0x48u);
+	EXPECT_EQ(call.code[0x52], 0x89u);
+	EXPECT_EQ(call.code[0x53], 0xdcu);
+	EXPECT_EQ(call.code[0x6a], 0x5bu);
+}
+
+TEST(EmulatorLoaderTls, CallPltPreservesGuestArgumentsAcrossLazyResolution)
+{
+	alignas(Kyty::Loader::Jit::CallPlt)
+	    std::array<uint8_t, Kyty::Loader::Jit::CallPlt::GetSize(1)> storage {};
+	auto* call = new (storage.data()) Kyty::Loader::Jit::CallPlt(1);
+
+	EXPECT_EQ(Kyty::Loader::Jit::CallPlt::GetSize(1), Kyty::Loader::Jit::CallPlt::kResolverSize + 16u);
+	EXPECT_EQ(call->code[0], 0x49u);
+	EXPECT_EQ(call->code[1], 0xbbu);
+	EXPECT_EQ(call->code[19], 0x48u);
+	EXPECT_EQ(call->code[20], 0x81u);
+	EXPECT_EQ(call->code[21], 0xecu);
+	EXPECT_EQ(call->code[22], 0x88u);
+	EXPECT_EQ(call->code[73], 0x49u);
+	EXPECT_EQ(call->code[74], 0x8bu);
+	EXPECT_EQ(call->code[85], 0x49u);
+	EXPECT_EQ(call->code[86], 0xbau);
+	EXPECT_EQ(call->code[164], 0x48u);
+	EXPECT_EQ(call->code[168], 0x41u);
+	EXPECT_EQ(call->code[169], 0xffu);
+	EXPECT_EQ(call->code[170], 0xe3u);
+}
 
 // Captured guest encoding: three 0x66 prefixes + E8 rel32 (should be REX.W).
 // Real image had 730 sites, all targeting the TLS handler after rewrite to 64-bit.
@@ -253,6 +299,29 @@ TEST(EmulatorLoaderTls, PreparesThreadTlsClearsStaticDescriptorContextSlots)
 	EXPECT_GE(n, 1u);
 	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x70), 0u);
 	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x58), live_va);
+}
+
+// Freelist control lives at TP-0x158 (TLS offset image_size-0x158). Prepare must
+// not rewrite non-program sentinel words there; corrupting them produces the
+// recycle crash at guest object-init (begin patterns like 0x1fffffffe).
+TEST(EmulatorLoaderTls, PrepareThreadTlsPreservesFreelistSentinelWords)
+{
+	using Kyty::Loader::LoaderPrepareThreadTlsImage;
+
+	constexpr uint64_t kImgSize = 0xa80;
+	constexpr uint64_t kFlOff   = kImgSize - 0x158; // 0x928
+	constexpr uint64_t kTmpl    = 0x900000000ull;
+	std::vector<uint8_t> tls(kImgSize, 0);
+	*reinterpret_cast<uint64_t*>(tls.data() + kFlOff)     = 0x00000001fffffffeULL;
+	*reinterpret_cast<uint64_t*>(tls.data() + kFlOff + 8) = 0x00000003ffffffffULL;
+
+	GuestMem guest;
+	guest.base = 0x1000;
+	guest.bytes.assign(0x100, 0);
+
+	EXPECT_EQ(LoaderPrepareThreadTlsImage(tls.data(), kImgSize, kTmpl, guest.base, guest.bytes.size(), TestGuestRead64, &guest), 0u);
+	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + kFlOff), 0x00000001fffffffeULL);
+	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + kFlOff + 8), 0x00000003ffffffffULL);
 }
 
 UT_END();

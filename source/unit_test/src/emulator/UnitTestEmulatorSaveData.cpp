@@ -1,7 +1,10 @@
 #include "Kyty/UnitTest.h"
 
+#include "Kyty/Core/File.h"
+#include "Kyty/Core/String.h"
 #include "Emulator/Config.h"
 #include "Emulator/Dialog.h"
+#include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/SaveData.h"
@@ -35,6 +38,38 @@ void EnsureLogSubsystem()
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 }
+
+void EnsureFileSystemSubsystem()
+{
+	static bool initialized = false;
+	if (!initialized)
+	{
+		EnsureLogSubsystem();
+		Libs::LibKernel::FileSystem::FileSystemSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		initialized = true;
+	}
+}
+
+struct SaveDataMount2Layout
+{
+	int32_t                      user_id;
+	int32_t                      pad;
+	const Libs::SaveData::SaveDataDirName* dir_name;
+	uint64_t                     blocks;
+	uint32_t                     mount_mode;
+	uint8_t                      reserved[32];
+	int32_t                      pad2;
+};
+
+struct SaveDataMountResultLayout
+{
+	Libs::SaveData::SaveDataMountPoint mount_point;
+	uint64_t                 required_blocks;
+	uint32_t                 unused;
+	uint32_t                 mount_status;
+	uint8_t                  reserved[28];
+	int32_t                  pad;
+};
 
 } // namespace
 
@@ -99,6 +134,46 @@ TEST(EmulatorSaveData, GetMountInfoValidatesAndReportsCapacity)
 	EXPECT_GT(info.blocks, 0u);
 	EXPECT_GT(info.free_blocks, 0u);
 	EXPECT_LE(info.free_blocks, info.blocks);
+}
+
+TEST(EmulatorSaveData, Mount2CreatesMissingDirectoryForCreateIfMissingMode)
+{
+	using Mount2 = int(KYTY_SYSV_ABI*)(const SaveDataMount2Layout*, SaveDataMountResultLayout*);
+
+	EnsureLogSubsystem();
+	EnsureFileSystemSubsystem();
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libSaveData_1", &symbols));
+	const auto* record = symbols.Find(SaveDataNativeFunc(u"0z45PIH+SNI"));
+	ASSERT_NE(record, nullptr);
+
+	auto* mount2 = reinterpret_cast<Mount2>(record->vaddr);
+	ASSERT_NE(mount2, nullptr);
+
+	constexpr char kDirectory[] = "ut-mount2-cim";
+	const String   host_directory = String(U"_SaveData/") + String::FromUtf8(kDirectory);
+	Core::File::DeleteDirectories(host_directory);
+
+	Libs::SaveData::SaveDataDirName dir_name {};
+	std::memcpy(dir_name.data, kDirectory, sizeof(kDirectory));
+	SaveDataMount2Layout mount {};
+	mount.user_id    = 0;
+	mount.dir_name   = &dir_name;
+	mount.mount_mode = 0x30;
+	EXPECT_EXIT(
+	    {
+		    SaveDataMountResultLayout result {};
+		    const int mount_result = mount2(&mount, &result);
+		    if (mount_result != 0 || result.mount_status != 1u || std::strcmp(result.mount_point.data, "/savedata0") != 0)
+		    {
+			    std::_Exit(1);
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+	EXPECT_TRUE(Core::File::IsDirectoryExisting(host_directory));
+
+	Core::File::DeleteDirectories(host_directory);
 }
 
 TEST(EmulatorSaveData, GetEventResultReportsEmptyQueue)

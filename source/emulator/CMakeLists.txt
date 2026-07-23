@@ -31,6 +31,7 @@ target_sources(emulator PRIVATE
 	src/Agent/AgentSubsystem.cpp
 	src/Agent/AgentLifecycle.cpp
 	src/Kernel/Time.cpp
+	src/Libs/ProcessEnvironment.cpp
 	src/Graphics/PipelineCacheStore.cpp
 	src/Graphics/GpuDirtyPageTracker.cpp
 	src/Graphics/CommandProcessorSubmissionSlots.cpp
@@ -83,6 +84,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/VulkanResolutionCapability.h
 	include/Emulator/Graphics/VulkanQueueIdentity.h
 	include/Emulator/Graphics/ShaderCoordinateScale.h
+	include/Emulator/Libs/ProcessEnvironment.h
 	src/Validation/DomainValidators.cpp
 	include/Emulator/Validation/DomainValidators.h
 	include/Emulator/Agent/EventRing.h

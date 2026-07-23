@@ -9,11 +9,13 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/CxaDynamicCast.h"
 #include "Emulator/Libs/CxxLocale.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/Memalign.h"
+#include "Emulator/Libs/ProcessEnvironment.h"
 #include "Emulator/Libs/Printf.h"
 #include "Emulator/Libs/VaContext.h"
 #include "Emulator/Loader/SymbolDatabase.h"
@@ -22,6 +24,8 @@
 #include <cctype>
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
+#include <clocale>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -127,9 +131,11 @@ static KYTY_SYSV_ABI void exit(int code)
 	::exit(code);
 }
 
-static KYTY_SYSV_ABI void init_env()
+static KYTY_SYSV_ABI void init_env(const ProcessEnvironment::InitParameters* parameters)
 {
 	PRINT_NAME();
+
+	(void)ProcessEnvironment::Initialize(parameters);
 }
 
 // The C++ runtime uses _Cnd_t as a pointer to the kernel condition object.
@@ -139,6 +145,22 @@ static KYTY_SYSV_ABI void init_env()
 static KYTY_SYSV_ABI int c_cnd_init(LibKernel::PthreadCond* cond)
 {
 	return LibKernel::PthreadCondInit(cond, nullptr, nullptr);
+}
+
+enum class CThreadResult : int
+{
+	Success = 0,
+	Error   = 4,
+};
+
+static int c_thread_result(int result)
+{
+	return result == OK ? static_cast<int>(CThreadResult::Success) : static_cast<int>(CThreadResult::Error);
+}
+
+static KYTY_SYSV_ABI int c_cnd_broadcast(LibKernel::PthreadCond* cond)
+{
+	return c_thread_result(LibKernel::PthreadCondBroadcast(cond));
 }
 
 enum class AllocationOwner
@@ -540,11 +562,24 @@ static KYTY_SYSV_ABI uint16_t* c_wcsncpy(uint16_t* destination, const uint16_t* 
 }
 static KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
 {
-	// Captured wide-formatter contract: class 2 scans "08x  size: %%ld"
-	// as decimal digits. This is intentionally not a general CRT classifier.
-	EXIT_NOT_IMPLEMENTED(character_class != 2);
-	EXIT_NOT_IMPLEMENTED(character > 0x7f);
-	return character >= '0' && character <= '9' ? 1 : 0;
+	if (character > 0x7f)
+	{
+		return 0;
+	}
+
+	// These descriptor values are passed directly by the guest CRT. Keep the
+	// classification local and deterministic instead of delegating to the host
+	// locale, whose wchar_t width and locale tables differ from the guest ABI.
+	switch (character_class)
+	{
+		case 2: return character >= '0' && character <= '9' ? 1 : 0;
+		case 9:
+			return (character >= '!' && character <= '/') || (character >= ':' && character <= '@') ||
+			               (character >= '[' && character <= '`') || (character >= '{' && character <= '~')
+			           ? 1
+			           : 0;
+		default: return 0;
+	}
 }
 static KYTY_SYSV_ABI int c_Wctombx(char* dst, uint32_t character, std::mbstate_t* /*state*/, const void* /*cvtvec*/)
 {
@@ -684,6 +719,70 @@ static KYTY_SYSV_ABI char* c_strstr(const char* haystack, const char* needle)
 {
 	return const_cast<char*>(::strstr(haystack, needle));
 }
+static KYTY_SYSV_ABI char* c_getenv(const char* name)
+{
+	const char* value = ProcessEnvironment::GetEnvironmentVariable(name);
+	return const_cast<char*>(value != nullptr ? value : (name != nullptr ? ::getenv(name) : nullptr));
+}
+static KYTY_SYSV_ABI char* c_setlocale(int category, const char* locale)
+{
+	return ::setlocale(category, locale);
+}
+static KYTY_SYSV_ABI unsigned __int128 c_udivti3(unsigned __int128 numerator, unsigned __int128 denominator)
+{
+	return numerator / denominator;
+}
+static KYTY_SYSV_ABI uint16_t* c_wcsstr(const uint16_t* haystack, const uint16_t* needle)
+{
+	if (haystack == nullptr || needle == nullptr)
+	{
+		return nullptr;
+	}
+	if (*needle == 0)
+	{
+		return const_cast<uint16_t*>(haystack);
+	}
+
+	for (auto* candidate = haystack; *candidate != 0; ++candidate)
+	{
+		const uint16_t* left  = candidate;
+		const uint16_t* right = needle;
+		while (*left != 0 && *right != 0 && *left == *right)
+		{
+			++left;
+			++right;
+		}
+		if (*right == 0)
+		{
+			return const_cast<uint16_t*>(candidate);
+		}
+	}
+	return nullptr;
+}
+static KYTY_SYSV_ABI int c_wcsncmp(const uint16_t* left, const uint16_t* right, size_t count)
+{
+	if (count == 0 || left == right)
+	{
+		return 0;
+	}
+	if (left == nullptr || right == nullptr)
+	{
+		return left == nullptr ? -1 : 1;
+	}
+
+	for (size_t index = 0; index < count; ++index)
+	{
+		if (left[index] != right[index])
+		{
+			return left[index] < right[index] ? -1 : 1;
+		}
+		if (left[index] == 0)
+		{
+			return 0;
+		}
+	}
+	return 0;
+}
 // Helpers kept for pending NID registration; not yet bound via LIB_FUNC.
 [[maybe_unused]] static KYTY_SYSV_ABI char* c_strrchr(const char* s, int c)
 {
@@ -763,6 +862,10 @@ static KYTY_SYSV_ABI void* cxx_new(size_t size)
 {
 	return allocate_with_owner(size != 0 ? size : 1);
 }
+static KYTY_SYSV_ABI void* cxx_new_nothrow(size_t size, const void* /*nothrow_tag*/)
+{
+	return allocate_with_owner(size != 0 ? size : 1);
+}
 static KYTY_SYSV_ABI void cxx_delete(void* p)
 {
 	if (!free_by_owner(p))
@@ -771,6 +874,10 @@ static KYTY_SYSV_ABI void cxx_delete(void* p)
 	}
 }
 static KYTY_SYSV_ABI void* cxx_new_array(size_t size)
+{
+	return allocate_with_owner(size != 0 ? size : 1);
+}
+static KYTY_SYSV_ABI void* cxx_new_array_nothrow(size_t size, const void* /*nothrow_tag*/)
 {
 	return allocate_with_owner(size != 0 ? size : 1);
 }
@@ -809,6 +916,30 @@ static KYTY_SYSV_ABI int c_bcmp(const void* a, const void* b, size_t n)
 static KYTY_SYSV_ABI char* c_strerror(int e)
 {
 	return ::strerror(e);
+}
+static KYTY_SYSV_ABI int c_strerror_r(int e, char* destination, size_t size)
+{
+	if (destination == nullptr)
+	{
+		return Posix::POSIX_EINVAL;
+	}
+	if (size == 0)
+	{
+		return Posix::POSIX_ERANGE;
+	}
+
+	const char* message = ::strerror(e);
+	if (message == nullptr)
+	{
+		destination[0] = '\0';
+		return Posix::POSIX_EINVAL;
+	}
+
+	const size_t message_size = std::strlen(message);
+	const size_t copy_size    = std::min(message_size, size - 1u);
+	std::memcpy(destination, message, copy_size);
+	destination[copy_size] = '\0';
+	return (message_size < size ? 0 : Posix::POSIX_ERANGE);
 }
 // strncpy_s(dst, dstsz, src, count) -> errno_t (0 on success)
 static KYTY_SYSV_ABI int c_strncpy_s(char* d, size_t dn, const char* s, size_t n)
@@ -960,6 +1091,18 @@ static KYTY_SYSV_ABI int c_feof(FILE* f)
 static KYTY_SYSV_ABI int c_ferror(FILE* f)
 {
 	return ::ferror(f);
+}
+static KYTY_SYSV_ABI int c_fileno(FILE* f)
+{
+	if (f == nullptr)
+	{
+		return -1;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return ::_fileno(f);
+#else
+	return ::fileno(f);
+#endif
 }
 static KYTY_SYSV_ABI int c_fputc(int ch, FILE* f)
 {
@@ -1119,9 +1262,6 @@ static KYTY_SYSV_ABI int c_vsnprintf_s(char* s, size_t dn, size_t count, const c
 	return Format(s, n, fmt, ap);
 }
 
-// Bring-up evidence currently proves only literal text, %% and %08x. Keep every
-// other conversion explicit until its guest va_list and wide-character ABI is
-// captured.
 static bool c_wide_format_supported(const char* format)
 {
 	for (const char* cursor = format; *cursor != '\0'; cursor++)
@@ -1135,11 +1275,51 @@ static bool c_wide_format_supported(const char* format)
 		{
 			continue;
 		}
-		if (std::strncmp(cursor, "08x", 3) != 0)
+
+		while (*cursor == '-' || *cursor == '+' || *cursor == ' ' || *cursor == '#' || *cursor == '0')
+		{
+			cursor++;
+		}
+		if (*cursor == '*')
+		{
+			cursor++;
+		} else
+		{
+			while (std::isdigit(static_cast<unsigned char>(*cursor)) != 0)
+			{
+				cursor++;
+			}
+		}
+		if (*cursor == '.')
+		{
+			cursor++;
+			if (*cursor == '*')
+			{
+				cursor++;
+			} else
+			{
+				while (std::isdigit(static_cast<unsigned char>(*cursor)) != 0)
+				{
+					cursor++;
+				}
+			}
+		}
+		if (*cursor == 'h' || *cursor == 'l')
+		{
+			const char length = *cursor++;
+			if (*cursor == length)
+			{
+				cursor++;
+			}
+		} else if (*cursor == 't' || *cursor == 'j' || *cursor == 'z')
+		{
+			cursor++;
+		}
+
+		if (std::strchr("diuxXobfFeEgGcsp", *cursor) == nullptr)
 		{
 			return false;
 		}
-		cursor += 2;
 	}
 	return true;
 }
@@ -1319,6 +1499,26 @@ static KYTY_SYSV_ABI double c_fmod(double x, double y)
 {
 	return ::fmod(x, y);
 }
+static KYTY_SYSV_ABI double c_ceil(double x)
+{
+	return ::ceil(x);
+}
+static KYTY_SYSV_ABI double c_floor(double x)
+{
+	return ::floor(x);
+}
+static KYTY_SYSV_ABI double c_round(double x)
+{
+	return ::round(x);
+}
+static KYTY_SYSV_ABI double c_sqrt(double x)
+{
+	return ::sqrt(x);
+}
+static KYTY_SYSV_ABI double c_fabs(double x)
+{
+	return ::fabs(x);
+}
 static KYTY_SYSV_ABI double c_modf(double x, double* ip)
 {
 	return ::modf(x, ip);
@@ -1470,6 +1670,94 @@ static KYTY_SYSV_ABI void c_cxa_guard_abort(uint64_t* g)
 {
 	*reinterpret_cast<volatile uint8_t*>(g) = 0;
 }
+
+using execute_once_callback_t = KYTY_SYSV_ABI int (*)(void*, void*, void**);
+
+static std::mutex              g_execute_once_mutex;
+static std::condition_variable g_execute_once_cv;
+
+static KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callback, void* context)
+{
+	PRINT_NAME();
+
+	if (flag == nullptr || callback == nullptr)
+	{
+		return 0;
+	}
+
+	constexpr int once_uninitialized = 0;
+	constexpr int once_complete      = 1;
+	constexpr int once_running       = 2;
+
+	{
+		std::unique_lock lock(g_execute_once_mutex);
+		g_execute_once_cv.wait(lock, [flag] { return *flag != once_running; });
+		if (*flag == once_complete)
+		{
+			return 1;
+		}
+		*flag = once_running;
+	}
+
+	void* callback_result = nullptr;
+	const int result      = callback(nullptr, context, &callback_result);
+
+	{
+		std::lock_guard lock(g_execute_once_mutex);
+		*flag = result != 0 ? once_complete : once_uninitialized;
+	}
+	g_execute_once_cv.notify_all();
+
+	return result;
+}
+
+static KYTY_SYSV_ABI int c_mtx_init(LibKernel::PthreadMutex* mutex, int type)
+{
+	PRINT_NAME();
+
+	if (mutex == nullptr)
+	{
+		return static_cast<int>(CThreadResult::Error);
+	}
+
+	constexpr int mtx_recursive = 0x100;
+	if ((type & mtx_recursive) == 0)
+	{
+		return c_thread_result(LibKernel::PthreadMutexInit(mutex, nullptr, nullptr));
+	}
+
+	LibKernel::PthreadMutexattr attr = nullptr;
+	int result                       = LibKernel::PthreadMutexattrInit(&attr);
+	if (result == OK)
+	{
+		result = LibKernel::PthreadMutexattrSettype(&attr, 2);
+	}
+	if (result == OK)
+	{
+		result = LibKernel::PthreadMutexInit(mutex, &attr, nullptr);
+	}
+	if (attr != nullptr)
+	{
+		(void)LibKernel::PthreadMutexattrDestroy(&attr);
+	}
+
+	return c_thread_result(result);
+}
+
+static KYTY_SYSV_ABI int c_mtx_lock(LibKernel::PthreadMutex* mutex)
+{
+	PRINT_NAME();
+
+	return c_thread_result(LibKernel::PthreadMutexLock(mutex));
+}
+
+static KYTY_SYSV_ABI int c_mtx_unlock(LibKernel::PthreadMutex* mutex)
+{
+	PRINT_NAME();
+
+	return c_thread_result(LibKernel::PthreadMutexUnlock(mutex));
+}
+
 static KYTY_SYSV_ABI void c_Xout_of_range(const char* msg)
 {
 	EXIT("std::out_of_range: %s\n", msg != nullptr ? msg : "");
@@ -1688,6 +1976,10 @@ static KYTY_SYSV_ABI void c_cxa_pure_virtual()
 	EXIT("__cxa_pure_virtual\n");
 }
 
+// std::exception::_Doraise() is the base virtual hook. It intentionally does
+// nothing; derived exception types override it when they need to raise.
+static KYTY_SYSV_ABI void c_exception_doraise(const void* /*self*/) {}
+
 // std::uncaught_exception() — returns non-zero while an exception is active.
 // Full EH is not implemented; report "no active exception" so destructors that
 // probe this during Construct string/locale work continue (Dreaming Sarah).
@@ -1721,6 +2013,16 @@ static KYTY_SYSV_ABI void cxa_free_exception(void* thrown_exception)
 	}
 	constexpr size_t kHeader = 128;
 	::free(static_cast<uint8_t*>(thrown_exception) - kHeader);
+}
+
+static KYTY_SYSV_ABI void cxa_decrement_exception_refcount(void* thrown_exception)
+{
+	if (thrown_exception == nullptr)
+	{
+		return;
+	}
+
+	EXIT("__cxa_decrement_exception_refcount requires an exception header: obj=%p\n", thrown_exception);
 }
 
 // Only touch pointers that are known host-mapped. Reject the NoAccess
@@ -1977,7 +2279,7 @@ int KYTY_SYSV_ABI fflush(FILE* stream)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(stream != stdout);
+	EXIT_NOT_IMPLEMENTED(stream != stdout && stream != stderr);
 
 	return ::fflush(stream);
 }
@@ -2179,6 +2481,11 @@ LIB_DEFINE(InitLibcInternal_1)
 
 	LIB_FUNC("tsvEmnenz48", LibC::cxa_atexit);
 	LIB_FUNC("H2e8t5ScQGc", LibC::cxa_finalize);
+	LIB_FUNC("DiGVep5yB5w", LibC::c_execute_once);
+	LIB_FUNC("YaHc3GS7y7g", LibC::c_mtx_init);
+	LIB_FUNC("iS4aWbUonl0", LibC::c_mtx_lock);
+	LIB_FUNC("gTuXQwP9rrs", LibC::c_mtx_unlock);
+	LIB_FUNC("VsP3daJgmVA", LibC::c_cnd_broadcast);
 
 	LIB_FUNC("-hn1tcVHq5Q", LibcInternal::LibcMspaceCreate);
 	LIB_FUNC("OJjm-QOIHlI", LibcInternal::LibcMspaceMalloc);
@@ -2268,6 +2575,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("p6LrHjIQMdk", LibC::c_locale_DestroyTemporaryInfo);
 	LIB_FUNC("QW2jL1J5rwY", LibC::c_locale_RegisterFacet);
 	LIB_FUNC("zr094EQ39Ww", LibC::c_cxa_pure_virtual);
+	LIB_FUNC("tyHd3P7oDrU", LibC::c_exception_doraise);
 	// std::uncaught_exception — Q1BL70XVV0o after classic-locale probe.
 	LIB_FUNC("Q1BL70XVV0o", LibC::c_uncaught_exception);
 	// std::ios_base::~ios_base — P8F2oavZXtY after interactive presents start.
@@ -2287,10 +2595,17 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("XKRegsFpEpk", LibC::catchReturnFromMain);
 	LIB_FUNC("tsvEmnenz48", LibC::cxa_atexit);
 	LIB_FUNC("H2e8t5ScQGc", LibC::cxa_finalize);
+	LIB_FUNC("DiGVep5yB5w", LibC::c_execute_once);
+	LIB_FUNC("YaHc3GS7y7g", LibC::c_mtx_init);
+	LIB_FUNC("iS4aWbUonl0", LibC::c_mtx_lock);
+	LIB_FUNC("gTuXQwP9rrs", LibC::c_mtx_unlock);
 
 	// Standard C allocation uses the guest application heap after it is ready.
 	LIB_FUNC("gQX+4GDQjpM", LibC::c_malloc);
 	LIB_FUNC("2X5agFjKxMc", LibC::c_calloc);
+	LIB_FUNC("smbQukfxYJM", LibC::c_getenv);
+	LIB_FUNC("PtsB1Q9wsFA", LibC::c_setlocale);
+	LIB_FUNC("802pFCwC9w0", LibC::c_udivti3);
 	LIB_FUNC("Y7aJ1uydPMo", LibC::c_realloc);
 	LIB_FUNC("tIhsqj0qsFE", LibC::c_free);
 	LIB_FUNC("Ujf3KzMvRmI", LibC::c_memalign);
@@ -2298,6 +2613,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("cVSk9y8URbc", LibC::c_posix_memalign);
 	LIB_FUNC("KuOuD58hqn4", LibcInternal::LibcMallocStatsFast);
 	LIB_FUNC("SreZybSRWpU", LibC::c_cnd_init);
+	LIB_FUNC("VsP3daJgmVA", LibC::c_cnd_broadcast);
 	LIB_FUNC("7Xl257M4VNI", LibC::c_pthread_equal);
 	LIB_FUNC("mqQMh1zPPT8", LibC::c_fstat);
 	LIB_FUNC("Q3VBxCXhUHs", LibC::c_memcpy);
@@ -2329,16 +2645,21 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("9yDWMxEFdJU", LibC::c_strrchr);
 	// Gen5 libc_v1 strstr.
 	LIB_FUNC("viiwFMaNamA", LibC::c_strstr);
-	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new); // operator new(size_t)
+	LIB_FUNC("WDpobjImAb4", LibC::c_wcsstr);
+	LIB_FUNC("E8wCoUEbfzk", LibC::c_wcsncmp);
+	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);         // operator new(size_t)
+	LIB_FUNC("ryUxD-60bKM", LibC::cxx_new_nothrow); // operator new(size_t, const std::nothrow_t&)
 	// Gen5 libc_v1 — public NID cfAXurvfl5o is __cxa_allocate_exception (not
 	// operator new). Mis-binding it to cxx_new corrupts the throw path.
 	LIB_FUNC("cfAXurvfl5o", LibC::cxa_allocate_exception);
+	LIB_FUNC("MQFPAqQPt1s", LibC::cxa_decrement_exception_refcount);
 	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete); // operator delete(void*)
 	// Gen5 libc_v1 C++ EH — Dreaming Sarah throw path after flip/init.
 	// vkuuLfhnSZI: __cxa_throw (rdi=obj, rsi=typeinfo, rdx=dtor; ud2 after).
 	LIB_FUNC("vkuuLfhnSZI", LibC::cxa_throw);
-	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);    // operator new[](size_t)
-	LIB_FUNC("MLWl90SFWNE", LibC::cxx_delete_array); // operator delete[](void*)
+	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);         // operator new[](size_t)
+	LIB_FUNC("Jh5qUcwiSEk", LibC::cxx_new_array_nothrow); // operator new[](size_t, const std::nothrow_t&)
+	LIB_FUNC("MLWl90SFWNE", LibC::cxx_delete_array);      // operator delete[](void*)
 	LIB_FUNC("iPBqs+YUUFw", LibC::c_atomic_cmpset_32);
 	LIB_FUNC("2HnmKiLmV6s", LibC::c_atomic_cmpset_32);
 
@@ -2353,6 +2674,7 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 strcpy_s — NID 5Xa2ACNECdo (next hard-abort after thread stack reprotect).
 	LIB_FUNC("5Xa2ACNECdo", LibC::c_strcpy_s);
 	LIB_FUNC("RIa6GnWp+iU", LibC::c_strerror);
+	LIB_FUNC("RBcs3uut1TA", LibC::c_strerror_r);
 	LIB_FUNC("YNzNkJzYqEg", LibC::c_strncpy_s);
 
 	// ctype
@@ -2372,6 +2694,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Qazy8LmXTvw", LibC::c_ftell);
 	LIB_FUNC("LxcEU+ICu8U", LibC::c_feof);
 	LIB_FUNC("AHxyhN96dy4", LibC::c_ferror);
+	LIB_FUNC("Fm-dmyywH9Q", LibC::c_fileno);
 	LIB_FUNC("aZK8lNei-Qw", LibC::c_fputc);
 	LIB_FUNC("MZO7FXyAPU8", LibC::c_remove);
 
@@ -2439,6 +2762,13 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("rtV7-jWC6Yg", LibC::c_log);
 	LIB_FUNC("9LCjpWyQ5Zc", LibC::c_pow);
 	LIB_FUNC("pKwslsMUmSk", LibC::c_fmod);
+	// Gen5 libc_v1 double rounding and absolute-value exports. Float variants
+	// are registered below.
+	LIB_FUNC("gacfOmO8hNs", LibC::c_ceil);
+	LIB_FUNC("mpcTgMzhUY8", LibC::c_floor);
+	LIB_FUNC("nlaojL9hDtA", LibC::c_round);
+	LIB_FUNC("MXRNWnosNlM", LibC::c_sqrt);
+	LIB_FUNC("388LcMWHRCA", LibC::c_fabs);
 	LIB_FUNC("0WMHDb5Dt94", LibC::c_modf);
 	LIB_FUNC("JrwFIMzKNr0", LibC::c_ldexp);
 	LIB_FUNC("kA-TdiOCsaY", LibC::c_frexp);

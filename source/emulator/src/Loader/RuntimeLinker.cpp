@@ -79,15 +79,17 @@ Vector<uint32_t> LoaderBuildModuleStartOrder(const Vector<ModuleStartDescriptor>
 		order.Add(index);
 	};
 
-	// Seed CRT providers before the generic walk. Some game PRXes import libc
-	// symbols without listing libc.prx in DT_NEEDED; starting them first still
-	// leaves the BSS mspace uninitialized for their constructors.
+	// Initialize CRT providers before traversing service dependencies. Some
+	// runtime modules have an implicit allocator dependency while libc declares
+	// them as a service dependency, so recursively visiting libc here reverses
+	// the required constructor order.
 	for (uint32_t i = 0; i < modules.Size(); i++)
 	{
 		if (modules[i].file_name == U"libc.prx" || modules[i].so_name == U"libc.prx" ||
 		    modules[i].file_name == U"libSceLibcInternal.sprx" || modules[i].so_name == U"libSceLibcInternal.sprx")
 		{
-			visit(i);
+			state[i] = 2;
+			order.Add(i);
 		}
 	}
 
@@ -658,7 +660,7 @@ static void relocate(uint32_t index, Elf64_Rela* r, Program* program, bool jmpre
 		if (ri.type == SymbolType::Object && weak)
 		{
 			value = g_invalid_memory;
-		} else if (ri.type == SymbolType::Func && jmprela_table && weak)
+		} else if (ri.type == SymbolType::Func && jmprela_table)
 		{
 			if (program->custom_call_plt_vaddr != 0)
 			{
@@ -717,39 +719,23 @@ static void relocate_all(Elf64_Rela* records, uint64_t size, Program* program, b
 	}
 }
 
-static KYTY_SYSV_ABI void RelocateHandler(uint64_t rdi, uint64_t rsi, uint64_t rdx, uint64_t rcx, uint64_t r8, uint64_t r9,
-                                          RelocateHandlerStack s)
+static KYTY_SYSV_ABI uint64_t ResolveLazyPlt(void* program_ptr, uint64_t rel_index)
 {
-	auto*  stack          = s.stack;
-	auto*  program        = reinterpret_cast<Program*>(stack[-1]);
-	auto   rel_index      = stack[0];
-	auto   return_address = stack[1];
-	String name           = U"<unknown function>";
-
-	if (program != nullptr && program->dynamic_info != nullptr && program->dynamic_info->jmprela_table != nullptr)
+	auto* program = reinterpret_cast<Program*>(program_ptr);
+	if (program == nullptr || program->dynamic_info == nullptr || program->dynamic_info->jmprela_table == nullptr ||
+	    rel_index >= program->dynamic_info->jmprela_table_size / sizeof(Elf64_Rela))
 	{
-		auto ri = GetRelocationInfo(program->dynamic_info->jmprela_table + rel_index, program);
-
-		name = String::FromPrintf(FG_BRIGHT_RED "%s" DEFAULT, ri.name.C_Str());
+		EXIT("invalid lazy PLT relocation: program=%p index=%" PRIu64 "\n", program_ptr, rel_index);
 	}
 
-	// Restore return address (for stack trace)
-	stack[-1] = stack[1];
+	auto ri = GetRelocationInfo(program->dynamic_info->jmprela_table + rel_index, program);
+	if (!ri.resolved || ri.value == 0 || !Core::VirtualMemory::PatchReplace(ri.vaddr, ri.value))
+	{
+		const auto clean_name = Log::IsColoredPrintf() ? ri.name : Log::RemoveColors(ri.name);
+		EXIT("can't resolve lazy PLT import: %s\n", clean_name.C_Str());
+	}
 
-	Core::Singleton<Loader::RuntimeLinker>::Instance()->StackTrace(reinterpret_cast<uint64_t>(s.stack - 2));
-	// Never touch return_address memory here: an unmapped page would SIGSEGV
-	// before EXIT could report the missing NID (silent guest close).
-	static constexpr uint8_t kCallerBytesUnknown[16] = {};
-
-	EXIT("=== Unpatched function!!! ===\n[%d]\t%s\n"
-	     "SysV arguments: rdi=%016" PRIx64 " rsi=%016" PRIx64 " rdx=%016" PRIx64 " rcx=%016" PRIx64 " r8=%016" PRIx64 " r9=%016" PRIx64
-	     " return=%016" PRIx64 "\n"
-	     "Caller bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-	     Core::Thread::GetThreadIdUnique(), (Log::IsColoredPrintf() ? name : Log::RemoveColors(name)).C_Str(), rdi, rsi, rdx, rcx, r8, r9,
-	     return_address, kCallerBytesUnknown[0], kCallerBytesUnknown[1], kCallerBytesUnknown[2], kCallerBytesUnknown[3],
-	     kCallerBytesUnknown[4], kCallerBytesUnknown[5], kCallerBytesUnknown[6], kCallerBytesUnknown[7], kCallerBytesUnknown[8],
-	     kCallerBytesUnknown[9], kCallerBytesUnknown[10], kCallerBytesUnknown[11], kCallerBytesUnknown[12], kCallerBytesUnknown[13],
-	     kCallerBytesUnknown[14], kCallerBytesUnknown[15]);
+	return ri.value;
 }
 
 static KYTY_MS_ABI uint8_t* TlsMainGetAddr()
@@ -1268,7 +1254,6 @@ void RuntimeLinker::Execute()
 	KYTY_PROFILER_THREAD("Thread_Main");
 
 	Libs::LibKernel::PthreadInitSelfForMainThread();
-
 	RelocateAll();
 	StartAllModules();
 
@@ -1341,7 +1326,6 @@ void RuntimeLinker::Execute()
 		EntryParams p {};
 		p.argc    = 1;
 		p.argv[0] = "KytyEmu";
-
 		printf("stack_addr = %" PRIx64 "\n", reinterpret_cast<uint64_t>(&p));
 
 		Core::mem_guest_thread_enter();
@@ -1429,16 +1413,17 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 	// Guest libc.prx exports the allocation family, but constructors can reach
 	// those imports before its allocator initialization is complete. Its internal
 	// mspace can also remain BSS-zero when the legacy ApplicationHeap table is used.
-	// Prefer the HLE allocator for these NIDs so constructors do not throw
-	// (DebugRaiseException 0xa0020008). Other exports still win over HLE.
-	const bool prefer_hle_allocator =
+	// Keep process-global runtime services on one side of the ABI boundary.
+	// Mixing guest allocation/environment state with their HLE initialization
+	// leaves the corresponding guest globals uninitialized.
+	const bool prefer_hle_runtime =
 	    hle_record != nullptr &&
 	    (resolve.name == U"gQX+4GDQjpM" || resolve.name == U"2X5agFjKxMc" || resolve.name == U"Y7aJ1uydPMo" ||
 	     resolve.name == U"tIhsqj0qsFE" || resolve.name == U"Ujf3KzMvRmI" || resolve.name == U"2Btkg8k24Zg" ||
 	     resolve.name == U"cVSk9y8URbc" || resolve.name == U"fJnpuVVBbKk" || resolve.name == U"hdm0YfMa7TQ" ||
-	     resolve.name == U"z+P+xCnWLBk" || resolve.name == U"MLWl90SFWNE");
+	     resolve.name == U"z+P+xCnWLBk" || resolve.name == U"MLWl90SFWNE" || resolve.name == U"smbQukfxYJM");
 	const SymbolRecord* record =
-	    prefer_hle_allocator ? hle_record : (export_record != nullptr ? export_record : hle_record);
+	    prefer_hle_runtime ? hle_record : (export_record != nullptr ? export_record : hle_record);
 
 	const String canonical_name = SymbolDatabase::GenerateName(resolve);
 	const auto   identity       = MissingImport::SymbolIdentity::From(resolve, canonical_name);
@@ -2244,7 +2229,7 @@ static void InstallRelocateHandler(Program* program)
 	Core::VirtualMemory::Protect(pltgot_vaddr, pltgot_size, Core::VirtualMemory::Mode::Write, &old_mode);
 
 	pltgot[1] = program;
-	pltgot[2] = reinterpret_cast<void*>(RelocateHandler);
+	pltgot[2] = nullptr;
 
 	Core::VirtualMemory::Protect(pltgot_vaddr, pltgot_size, old_mode);
 
@@ -2262,6 +2247,7 @@ static void InstallRelocateHandler(Program* program)
 		EXIT_NOT_IMPLEMENTED(program->custom_call_plt_vaddr == 0);
 		auto* code = new (reinterpret_cast<void*>(program->custom_call_plt_vaddr)) Jit::CallPlt(program->custom_call_plt_num);
 		code->SetPltGot(pltgot_vaddr);
+		code->SetResolver(&ResolveLazyPlt);
 		Core::VirtualMemory::Protect(program->custom_call_plt_vaddr, size, Core::VirtualMemory::Mode::Execute);
 		Core::VirtualMemory::FlushInstructionCache(program->custom_call_plt_vaddr, size);
 	}
