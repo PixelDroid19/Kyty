@@ -66,10 +66,42 @@ int KYTY_SYSV_ABI VoiceQoSInit(void* mem_block, uint32_t mem_size, int32_t app_t
 
 namespace Ajm {
 
+struct AjmBuffer
+{
+	void*  address;
+	size_t size;
+};
+
+struct AjmBatchError
+{
+	int32_t     error_code;
+	const void* job_address;
+	uint32_t    command_offset;
+	const void* job_return_address;
+};
+
 int KYTY_SYSV_ABI AjmInitialize(int64_t reserved, uint32_t* context);
 int KYTY_SYSV_ABI AjmFinalize(uint32_t context);
 int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t reserved);
 int KYTY_SYSV_ABI AjmModuleUnregister(uint32_t context, uint32_t codec);
+int KYTY_SYSV_ABI AjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t flags, uint32_t* instance);
+int KYTY_SYSV_ABI AjmInstanceDestroy(uint32_t context, uint32_t instance);
+void* KYTY_SYSV_ABI AjmBatchJobControlBufferRa(void* buffer, uint32_t instance, uint64_t flags, void* sideband_input,
+                                               size_t sideband_input_size, void* sideband_output, size_t sideband_output_size,
+                                               void* return_address);
+void* KYTY_SYSV_ABI AjmBatchJobInlineBuffer(void* buffer, const void* data_input, size_t data_input_size,
+                                            const void** batch_address);
+void* KYTY_SYSV_ABI AjmBatchJobRunBufferRa(void* buffer, uint32_t instance, uint64_t flags, void* data_input,
+                                           size_t data_input_size, void* data_output, size_t data_output_size,
+                                           void* sideband_output, size_t sideband_output_size, void* return_address);
+void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(void* buffer, uint32_t instance, uint64_t flags,
+                                                const AjmBuffer* data_input_buffers, size_t data_input_buffer_count,
+                                                const AjmBuffer* data_output_buffers, size_t data_output_buffer_count,
+                                                void* sideband_output, size_t sideband_output_size, void* return_address);
+int KYTY_SYSV_ABI AjmBatchStartBuffer(uint32_t context, uint8_t* batch_buffer, uint32_t batch_size, int priority,
+                                      AjmBatchError* error, uint32_t* batch_id);
+int KYTY_SYSV_ABI AjmBatchWait(uint32_t context, uint32_t batch_id, uint32_t timeout, AjmBatchError* error);
+int KYTY_SYSV_ABI AjmBatchCancel(uint32_t context, uint32_t batch_id);
 
 } // namespace Ajm
 
@@ -100,7 +132,11 @@ int KYTY_SYSV_ABI  Audio3dInitialize(int64_t reserved);
 void KYTY_SYSV_ABI Audio3dGetDefaultOpenParameters(Audio3dOpenParameters* p);
 int KYTY_SYSV_ABI  Audio3dPortOpen(int user_id, const Audio3dOpenParameters* parameters, uint32_t* id);
 int KYTY_SYSV_ABI  Audio3dPortSetAttribute(uint32_t port_id, uint32_t attribute_id, const void* attribute, size_t attribute_size);
+int KYTY_SYSV_ABI  Audio3dPortGetAttributesSupported(uint32_t port_id, uint32_t* capabilities, uint32_t* num_capabilities);
 int KYTY_SYSV_ABI  Audio3dPortGetQueueLevel(uint32_t port_id, uint32_t* queue_level, uint32_t* queue_available);
+int KYTY_SYSV_ABI  Audio3dAudioOutOpen(uint32_t port_id, int user_id, int type, int index, uint32_t len, uint32_t freq, uint32_t param);
+int KYTY_SYSV_ABI  Audio3dAudioOutOutput(int handle, const void* data);
+int KYTY_SYSV_ABI  Audio3dAudioOutClose(int handle);
 int KYTY_SYSV_ABI  Audio3dPortAdvance(uint32_t port_id);
 int KYTY_SYSV_ABI  Audio3dPortPush(uint32_t port_id, uint32_t blocking);
 

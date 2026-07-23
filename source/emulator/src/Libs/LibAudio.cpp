@@ -108,6 +108,15 @@ LIB_DEFINE(InitAudio_1_Ajm)
 	LIB_FUNC("MHur6qCsUus", Ajm::AjmFinalize);
 	LIB_FUNC("Q3dyFuwGn64", Ajm::AjmModuleRegister);
 	LIB_FUNC("Wi7DtlLV+KI", Ajm::AjmModuleUnregister);
+	LIB_FUNC("AxoDrINp4J8", Ajm::AjmInstanceCreate);
+	LIB_FUNC("RbLbuKv8zho", Ajm::AjmInstanceDestroy);
+	LIB_FUNC("dmDybN--Fn8", Ajm::AjmBatchJobControlBufferRa);
+	LIB_FUNC("stlghnic3Jc", Ajm::AjmBatchJobInlineBuffer);
+	LIB_FUNC("ElslOCpOIns", Ajm::AjmBatchJobRunBufferRa);
+	LIB_FUNC("7jdAXK+2fMo", Ajm::AjmBatchJobRunSplitBufferRa);
+	LIB_FUNC("fFFkk0xfGWs", Ajm::AjmBatchStartBuffer);
+	LIB_FUNC("-qLsfDAywIY", Ajm::AjmBatchWait);
+	LIB_FUNC("NVDXiUesSbA", Ajm::AjmBatchCancel);
 }
 
 } // namespace LibAjm
@@ -143,7 +152,11 @@ LIB_DEFINE(InitAudio_1_Audio3d)
 	LIB_FUNC("Im+jOoa5WAI", Audio3d::Audio3dGetDefaultOpenParameters);
 	LIB_FUNC("XeDDK0xJWQA", Audio3d::Audio3dPortOpen);
 	LIB_FUNC("Yq9bfUQ0uJg", Audio3d::Audio3dPortSetAttribute);
+	LIB_FUNC("9ZA23Ia46Po", Audio3d::Audio3dPortGetAttributesSupported);
 	LIB_FUNC("YaaDbDwKpFM", Audio3d::Audio3dPortGetQueueLevel);
+	LIB_FUNC("ucEsi62soTo", Audio3d::Audio3dAudioOutOpen);
+	LIB_FUNC("7NYEzJ9SJbM", Audio3d::Audio3dAudioOutOutput);
+	LIB_FUNC("pZlOm1aF3aA", Audio3d::Audio3dAudioOutClose);
 	LIB_FUNC("lw0qrdSjZt8", Audio3d::Audio3dPortAdvance);
 	LIB_FUNC("VEVhZ9qd4ZY", Audio3d::Audio3dPortPush);
 }

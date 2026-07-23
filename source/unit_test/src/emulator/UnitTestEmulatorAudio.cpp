@@ -4,6 +4,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Log.h"
 
+#include <cstring>
 #include <memory>
 
 UT_BEGIN(EmulatorAudio);
@@ -24,6 +25,182 @@ TEST(EmulatorAudio, UnregistersCapturedAjmCodecModule)
 	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
 	EXPECT_EQ(Ajm::AjmModuleUnregister(context, 1), 0);
 	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
+TEST(EmulatorAudio, TracksAjmInstanceLifecycle)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	constexpr auto invalid_instance     = static_cast<int32_t>(0x80930003u);
+	constexpr auto codec_not_registered = static_cast<int32_t>(0x8093000au);
+	constexpr auto wrong_revision       = static_cast<int32_t>(0x8093000bu);
+
+	uint32_t context  = 0;
+	uint32_t instance = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	EXPECT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), codec_not_registered);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+	EXPECT_EQ(Ajm::AjmInstanceCreate(context, 1, 0, &instance), wrong_revision);
+	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
+	EXPECT_EQ(instance >> 14u, 1u);
+	EXPECT_NE(instance & 0x3fffu, 0u);
+	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
+	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), invalid_instance);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
+TEST(EmulatorAudio, SerializesAjmControlBatchJob)
+{
+	alignas(uint64_t) uint8_t batch[64] {};
+	alignas(uint64_t) uint8_t sideband_input[16] {};
+	alignas(uint64_t) uint8_t sideband_output[32] {};
+	constexpr uint32_t instance = 0x4001u;
+	constexpr uint64_t flags    = 0x000060000000c007ull;
+
+	auto* next = static_cast<uint8_t*>(Ajm::AjmBatchJobControlBufferRa(batch, instance, flags, sideband_input,
+	                                                                  sizeof(sideband_input), sideband_output,
+	                                                                  sizeof(sideband_output), nullptr));
+	ASSERT_EQ(next, batch + 48u);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(batch + 0u), instance << 6u);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(batch + 4u), 40u);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(batch + 8u), 2u);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(batch + 12u), sizeof(sideband_input));
+	EXPECT_EQ(*reinterpret_cast<void**>(batch + 16u), sideband_input);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(batch + 24u), 3u | (0x6000u << 6u));
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(batch + 28u), 0x0000c007u);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(batch + 32u), 18u);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(batch + 36u), sizeof(sideband_output));
+	EXPECT_EQ(*reinterpret_cast<void**>(batch + 40u), sideband_output);
+}
+
+TEST(EmulatorAudio, CompletesAjmBufferBatchWithBoundedOutputs)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t context  = 0;
+	uint32_t instance = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
+
+	alignas(uint64_t) uint8_t batch[128] {};
+	uint8_t input[8] {};
+	uint8_t output[16];
+	alignas(uint64_t) uint8_t sideband[32];
+	std::memset(output, 0xa5, sizeof(output));
+	std::memset(sideband, 0xa5, sizeof(sideband));
+	auto* end = static_cast<uint8_t*>(Ajm::AjmBatchJobRunBufferRa(batch, instance, (1ull << 47u) | 1u, input,
+	                                                              sizeof(input), output, sizeof(output), sideband,
+	                                                              sizeof(sideband), nullptr));
+	ASSERT_NE(end, nullptr);
+
+	Ajm::AjmBatchError error {};
+	uint32_t           batch_id = 0;
+	ASSERT_EQ(Ajm::AjmBatchStartBuffer(context, batch, static_cast<uint32_t>(end - batch), 0, &error, &batch_id), 0);
+	EXPECT_NE(batch_id, 0u);
+	EXPECT_EQ(error.error_code, 0);
+	for (auto value: output)
+	{
+		EXPECT_EQ(value, 0u);
+	}
+	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 0u), 0);
+	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 8u), static_cast<int32_t>(sizeof(input)));
+	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 12u), static_cast<int32_t>(sizeof(output)));
+	EXPECT_EQ(Ajm::AjmBatchWait(context, batch_id, UINT32_MAX, &error), 0);
+	EXPECT_EQ(Ajm::AjmBatchWait(context, batch_id, UINT32_MAX, &error), static_cast<int32_t>(0x80930004u));
+	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
+TEST(EmulatorAudio, WritesCombinedAjmSidebandsInAbiOrder)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t context  = 0;
+	uint32_t instance = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
+
+	alignas(uint64_t) uint8_t batch[128] {};
+	uint8_t                   input[256] {};
+	uint8_t                   output[4096] {};
+	alignas(uint64_t) uint8_t sideband[56];
+	std::memset(sideband, 0xa5, sizeof(sideband));
+	constexpr uint64_t flags = (1ull << 46u) | (1ull << 47u) | (1ull << 12u) | 1u;
+	auto* end = static_cast<uint8_t*>(Ajm::AjmBatchJobRunBufferRa(batch, instance, flags, input, sizeof(input), output,
+	                                                              sizeof(output), sideband, sizeof(sideband), nullptr));
+	ASSERT_NE(end, nullptr);
+
+	Ajm::AjmBatchError error {};
+	uint32_t           batch_id = 0;
+	ASSERT_EQ(Ajm::AjmBatchStartBuffer(context, batch, static_cast<uint32_t>(end - batch), 40, &error, &batch_id), 0);
+	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 0u), 0);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(sideband + 8u), 2u);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(sideband + 12u), 3u);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(sideband + 16u), 48000u);
+	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 32u), static_cast<int32_t>(sizeof(input)));
+	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 36u), static_cast<int32_t>(sizeof(output)));
+	EXPECT_EQ(*reinterpret_cast<uint64_t*>(sideband + 40u), sizeof(output) / 4u);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(sideband + 48u), 1u);
+	EXPECT_EQ(Ajm::AjmBatchWait(context, batch_id, UINT32_MAX, &error), 0);
+	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
+TEST(EmulatorAudio, AcceptsExtendedAudio3dOpenParameters)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	alignas(uint64_t) uint8_t parameters[0x28] = {};
+	*reinterpret_cast<uint64_t*>(parameters + 0x00) = sizeof(parameters);
+	*reinterpret_cast<uint32_t*>(parameters + 0x08) = 0x200;
+	*reinterpret_cast<uint32_t*>(parameters + 0x0c) = 0;
+	*reinterpret_cast<uint32_t*>(parameters + 0x10) = 128;
+	*reinterpret_cast<uint32_t*>(parameters + 0x14) = 4;
+	*reinterpret_cast<uint32_t*>(parameters + 0x18) = 2;
+	*reinterpret_cast<uint32_t*>(parameters + 0x20) = 2;
+
+	uint32_t port = UINT32_MAX;
+	ASSERT_EQ(Audio3d::Audio3dInitialize(0), 0);
+	ASSERT_EQ(Audio3d::Audio3dPortOpen(255, reinterpret_cast<const Audio3d::Audio3dOpenParameters*>(parameters), &port), 0);
+	EXPECT_LT(port, 4u);
+
+	uint32_t queue_level     = UINT32_MAX;
+	uint32_t queue_available = 0;
+	EXPECT_EQ(Audio3d::Audio3dPortGetQueueLevel(port, &queue_level, &queue_available), 0);
+	EXPECT_EQ(queue_level, 0u);
+	EXPECT_EQ(queue_available, 4u);
+
+	uint32_t capability_count = 0;
+	ASSERT_EQ(Audio3d::Audio3dPortGetAttributesSupported(port, nullptr, &capability_count), 0);
+	ASSERT_EQ(capability_count, 3u);
+	uint32_t capabilities[3] = {};
+	ASSERT_EQ(Audio3d::Audio3dPortGetAttributesSupported(port, capabilities, &capability_count), 0);
+	EXPECT_EQ(capability_count, 3u);
+	EXPECT_EQ(capabilities[0], 1u);
+	EXPECT_EQ(capabilities[1], 3u);
+	EXPECT_EQ(capabilities[2], 9u);
+
+	EXPECT_EQ(Audio3d::Audio3dAudioOutOpen(port, 255, 126, 0, 256, 48000, 1), static_cast<int32_t>(0x80ea0004u));
+	EXPECT_EQ(Audio3d::Audio3dAudioOutOutput(1, nullptr), static_cast<int32_t>(0x80ea0004u));
+	EXPECT_EQ(Audio3d::Audio3dAudioOutClose(999), static_cast<int32_t>(0x80ea0002u));
 }
 
 TEST(EmulatorAudio, QueriesDefaultNgs2SystemBufferContract)
