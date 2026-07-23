@@ -225,6 +225,7 @@ TEST(EmulatorKernelMemory, DirectMemoryAllocationFindsAFreeEarlierRange)
 TEST(EmulatorKernelMemory, ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap)
 {
 	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
 
 	constexpr size_t kSize = 0x10000;
 	int64_t          physical_address = 0;
@@ -266,11 +267,48 @@ TEST(EmulatorKernelMemory, ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap)
 		EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(mapping), kSize), OK);
 		EXPECT_EQ(KernelQueryMemoryProtection(mapping, nullptr, nullptr, nullptr), LibKernel::KERNEL_ERROR_EACCES);
 	}
+	Config::SetNextGen(false);
+}
+
+TEST(EmulatorKernelMemory, FixedDirectMapReplacesOwnedMappingAfterPhysicalRelease)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(false);
+
+	constexpr size_t  kSize       = 0x4000;
+	constexpr int64_t kFirstPhys  = 0x02000000;
+	constexpr int64_t kSecondPhys = 0x03000000;
+
+	int64_t first_physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kFirstPhys, kFirstPhys + kSize, kSize, kSize, 12, &first_physical_address), OK);
+
+	void* mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&mapping, kSize, 0x02, 0, first_physical_address, kSize), OK);
+	ASSERT_NE(mapping, nullptr);
+	static_cast<uint8_t*>(mapping)[0] = 0x5a;
+	ASSERT_EQ(KernelCheckedReleaseDirectMemory(first_physical_address, kSize), OK);
+
+	int64_t second_physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kSecondPhys, kSecondPhys + kSize, kSize, kSize, 12, &second_physical_address), OK);
+
+	void* remapped = mapping;
+	ASSERT_EQ(KernelMapDirectMemory(&remapped, kSize, 0x02, 0x10, second_physical_address, kSize), OK);
+	ASSERT_EQ(remapped, mapping);
+	VirtualQueryInfo info {};
+	ASSERT_EQ(KernelVirtualQuery(remapped, 0, &info, sizeof(info)), OK);
+	EXPECT_EQ(info.offset, static_cast<uint64_t>(second_physical_address));
+	EXPECT_EQ(info.memory_type, 12);
+	static_cast<uint8_t*>(remapped)[0] = 0xc3;
+	EXPECT_EQ(static_cast<uint8_t*>(remapped)[0], 0xc3);
+
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(remapped), kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
 }
 
 TEST(EmulatorKernelMemory, ReusedDirectMemoryKeepsVirtualAliasesCoherent)
 {
 	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
 
 	constexpr size_t  kSize        = 0x10000;
 	constexpr int64_t kSearchStart = 0x100000;
@@ -323,6 +361,7 @@ TEST(EmulatorKernelMemory, ReusedDirectMemoryKeepsVirtualAliasesCoherent)
 	EXPECT_EQ(static_cast<uint8_t*>(remapped_at_first_address)[2], 0x7e);
 	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(remapped_at_first_address), kSize), OK);
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
+	Config::SetNextGen(false);
 }
 
 TEST(EmulatorKernelMemory, FixedDirectMemoryRemapsFreedReadWriteView)
@@ -395,6 +434,10 @@ TEST(EmulatorKernelMemory, DecodesGen5MprotectProtectionFamily)
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x0, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::NoAccess);
+	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::NoAccess);
+
+	ASSERT_TRUE(KernelDecodeMprotectProt(0x03, &mode, &gpu));
+	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
 	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::NoAccess);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x11, &mode, &gpu));

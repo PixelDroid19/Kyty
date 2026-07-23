@@ -262,9 +262,17 @@ File* FileDescriptors::GetFile(int d)
 {
 	Core::LockGuard lock(m_mutex);
 
+	if (d < DESCRIPTOR_MIN)
+	{
+		return nullptr;
+	}
+
 	auto index = static_cast<uint32_t>(d - DESCRIPTOR_MIN);
 
-	EXIT_IF(!m_files.IndexValid(index));
+	if (!m_files.IndexValid(index))
+	{
+		return nullptr;
+	}
 
 	return m_files.At(index);
 }
@@ -500,14 +508,21 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 		}
 	} else
 	{
-		bool result = false;
+		bool       result      = false;
+		const bool file_exists = Core::File::IsFileExisting(file->real_name);
 
-		if (creat)
+		if (creat && (trunc || !file_exists))
 		{
 			result = file->f.Create(file->real_name);
 
 			printf("\tCreate: " FG_WHITE BOLD "%s" DEFAULT ", %s\n", file->real_name.C_Str(),
 			       (result ? FG_GREEN "[ok]" FG_DEFAULT : FG_RED "[fail]" FG_DEFAULT));
+
+			if (result && !trunc)
+			{
+				file->f.Close();
+				result = file->f.Open(file->real_name, rw_mode);
+			}
 		} else
 		{
 			result = file->f.Open(file->real_name, rw_mode);
@@ -515,8 +530,6 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 			printf("\tOpen: " FG_WHITE BOLD "%s" DEFAULT ", %s\n", file->real_name.C_Str(),
 			       (result ? FG_GREEN "[ok]" FG_DEFAULT : FG_RED "[fail]" FG_DEFAULT));
 		}
-
-		EXIT_NOT_IMPLEMENTED(creat && !trunc);
 
 		if (result && trunc)
 		{
@@ -709,6 +722,7 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	file->f.Seek(pos);
 
 	file->mutex.Unlock();
+	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
 
 	if (is_invalid)
 	{
@@ -963,6 +977,42 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 	sb->st_birthtim = sb->st_mtim;
 
 	return OK;
+}
+
+int KYTY_SYSV_ABI KernelFtruncate(int d, int64_t length)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_files == nullptr);
+
+	if (d < DESCRIPTOR_MIN)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	if (length < 0)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	auto* file = g_files->GetFile(d);
+	if (file == nullptr || !file->opened)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	if (file->directory)
+	{
+		return KERNEL_ERROR_EISDIR;
+	}
+
+	Core::LockGuard lock(file->mutex);
+	if (file->f.IsInvalid())
+	{
+		return KERNEL_ERROR_EIO;
+	}
+
+	return file->f.Truncate(static_cast<uint64_t>(length)) ? OK : KERNEL_ERROR_EIO;
 }
 
 int KYTY_SYSV_ABI KernelUnlink(const char* path)

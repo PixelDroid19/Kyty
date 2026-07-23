@@ -327,9 +327,22 @@ uint64_t sys_file_size(const String& file_name)
 	return size;
 }
 
-bool sys_file_truncate(sys_file_t& /*f*/, uint64_t /*size*/)
+bool sys_file_truncate(sys_file_t& f, uint64_t size)
 {
-	return false;
+	if (f.type != SYS_FILE_FILE || f.f == nullptr || size > static_cast<uint64_t>(INT64_MAX))
+	{
+		return false;
+	}
+
+	fpos_t position {};
+	if (fgetpos(f.f, &position) != 0 || fflush(f.f) != 0)
+	{
+		return false;
+	}
+
+	const bool truncated = (::ftruncate(fileno(f.f), static_cast<off_t>(size)) == 0);
+	const bool restored  = (fsetpos(f.f, &position) == 0);
+	return truncated && restored;
 }
 
 bool sys_file_seek(sys_file_t& f, uint64_t offset)

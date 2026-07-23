@@ -20,6 +20,10 @@
 #include <string>
 #include <thread>
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#include <unistd.h>
+#endif
+
 UT_BEGIN(EmulatorKernelProcess);
 
 using namespace Libs;
@@ -92,6 +96,17 @@ void EnsureKernelProcessSubsystems()
 	}
 }
 
+void EnsureFileSystemSubsystem()
+{
+	static bool initialized = false;
+	if (!initialized)
+	{
+		EnsureKernelProcessSubsystems();
+		LibKernel::FileSystem::FileSystemSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		initialized = true;
+	}
+}
+
 void* KYTY_SYSV_ABI HoldPthreadUntilReleased(void* arg)
 {
 	auto* release = static_cast<std::atomic_bool*>(arg);
@@ -100,6 +115,19 @@ void* KYTY_SYSV_ABI HoldPthreadUntilReleased(void* arg)
 		std::this_thread::yield();
 	}
 	return nullptr;
+}
+
+Kyty::Loader::SymbolResolve KernelNativeFunc(const char16_t* nid)
+{
+	Kyty::Loader::SymbolResolve sr {};
+	sr.name                 = nid;
+	sr.library              = U"libkernel";
+	sr.library_version      = 1;
+	sr.module               = U"libkernel";
+	sr.module_version_major = 1;
+	sr.module_version_minor = 1;
+	sr.type                 = Kyty::Loader::SymbolType::Func;
+	return sr;
 }
 
 } // namespace
@@ -151,6 +179,126 @@ TEST(EmulatorKernelProcess, PthreadPriorityRoundTripsGuestValue)
 	EXPECT_EQ(set_result, OK);
 	EXPECT_EQ(get_result, OK);
 	EXPECT_EQ(priority, 260);
+}
+
+TEST(EmulatorKernelProcess, NormalPthreadMutexNestedLockCompletes)
+{
+	EnsureKernelProcessSubsystems();
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	EXPECT_EXIT(
+	    {
+		    ::alarm(1);
+
+		    LibKernel::PthreadMutexattr attr = nullptr;
+		    LibKernel::PthreadMutex     mutex = nullptr;
+		    if (LibKernel::PthreadMutexattrInit(&attr) != OK ||
+		        LibKernel::PthreadMutexattrSettype(&attr, 3) != OK ||
+		        LibKernel::PthreadMutexInit(&mutex, &attr, nullptr) != OK ||
+		        LibKernel::PthreadMutexLock(&mutex) != OK || LibKernel::PthreadMutexLock(&mutex) != OK ||
+		        LibKernel::PthreadMutexUnlock(&mutex) != OK || LibKernel::PthreadMutexUnlock(&mutex) != OK)
+		    {
+			    std::_Exit(1);
+		    }
+
+		    (void)LibKernel::PthreadMutexDestroy(&mutex);
+		    (void)LibKernel::PthreadMutexattrDestroy(&attr);
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+#else
+	GTEST_SKIP() << "requires a bounded process watchdog";
+#endif
+}
+
+TEST(EmulatorKernelProcess, PthreadCondWaitReleasesRecursiveMutex)
+{
+	EnsureKernelProcessSubsystems();
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	EXPECT_EXIT(
+	    {
+		    ::alarm(2);
+
+		    LibKernel::PthreadMutexattr attr  = nullptr;
+		    LibKernel::PthreadMutex     mutex = nullptr;
+		    LibKernel::PthreadCond      cond   = nullptr;
+		    std::atomic_bool            worker_started {false};
+		    std::atomic_bool            predicate {false};
+
+		    if (LibKernel::PthreadMutexattrInit(&attr) != OK ||
+		        LibKernel::PthreadMutexattrSettype(&attr, 2) != OK ||
+		        LibKernel::PthreadMutexInit(&mutex, &attr, nullptr) != OK ||
+		        LibKernel::PthreadCondInit(&cond, nullptr, nullptr) != OK || LibKernel::PthreadMutexLock(&mutex) != OK)
+		    {
+			    std::_Exit(1);
+		    }
+
+		    std::thread worker([&] {
+			    worker_started.store(true, std::memory_order_release);
+			    if (LibKernel::PthreadMutexLock(&mutex) != OK)
+			    {
+				    std::_Exit(2);
+			    }
+			    predicate.store(true, std::memory_order_release);
+			    if (LibKernel::PthreadCondSignal(&cond) != OK || LibKernel::PthreadMutexUnlock(&mutex) != OK)
+			    {
+				    std::_Exit(3);
+			    }
+		    });
+
+		    while (!worker_started.load(std::memory_order_acquire))
+		    {
+			    std::this_thread::yield();
+		    }
+		    while (!predicate.load(std::memory_order_acquire))
+		    {
+			    if (LibKernel::PthreadCondWait(&cond, &mutex) != OK)
+			    {
+				    std::_Exit(4);
+			    }
+		    }
+
+		    if (LibKernel::PthreadMutexUnlock(&mutex) != OK)
+		    {
+			    std::_Exit(5);
+		    }
+		    worker.join();
+		    (void)LibKernel::PthreadCondDestroy(&cond);
+		    (void)LibKernel::PthreadMutexDestroy(&mutex);
+		    (void)LibKernel::PthreadMutexattrDestroy(&attr);
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+#else
+	GTEST_SKIP() << "requires a bounded process watchdog";
+#endif
+}
+
+TEST(EmulatorKernelProcess, LoadStartModuleReturnsEnoentForMissingModule)
+{
+	EnsureFileSystemSubsystem();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+	const auto* rec = symbols.Find(KernelNativeFunc(u"wzvqT4UqKX8"));
+	ASSERT_NE(rec, nullptr);
+
+	using load_start_module_fn_t = KYTY_SYSV_ABI int (*)(const char*, size_t, const void*, uint32_t, const void*, int*);
+	auto* load_start_module = reinterpret_cast<load_start_module_fn_t>(static_cast<uintptr_t>(rec->vaddr));
+	ASSERT_NE(load_start_module, nullptr);
+
+	int start_result = OK;
+	EXPECT_EQ(load_start_module("missing-module.prx", 0, nullptr, 0, nullptr, &start_result), LibKernel::KERNEL_ERROR_ENOENT);
+	EXPECT_EQ(start_result, LibKernel::KERNEL_ERROR_ENOENT);
+}
+
+TEST(EmulatorKernelProcess, FileSystemRejectsUntrackedDescriptorWithoutAborting)
+{
+	EnsureFileSystemSubsystem();
+
+	LibKernel::FileSystem::FileStat stat {};
+	EXPECT_EQ(LibKernel::FileSystem::KernelFstat(0x7fffffff, &stat), LibKernel::KERNEL_ERROR_EBADF);
 }
 
 // Retail non-devkit sceKernelGetGPI (NID 4oXYe9Xmk0Q) returns 0 without GPI state.

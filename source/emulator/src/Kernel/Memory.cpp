@@ -77,6 +77,7 @@ public:
 		uint64_t                map_size;
 		int                     prot;
 		VirtualMemory::Mode     mode;
+		int                     memory_type;
 		// Monotonic lifetime marker consumed by ClaimUnmap. It records that
 		// cleanup is required, not the mapping's latest protection.
 		Graphics::GpuMemoryMode gpu_cleanup_mode;
@@ -106,13 +107,15 @@ public:
 
 	bool Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out, int memory_type);
 	bool Release(uint64_t start, size_t len);
+	bool FindMappingsForPhysicalRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings);
 	uint64_t Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode,
 	             uint64_t alignment, bool fixed, bool replace_owned_reservation, bool* physical_range_valid);
 	bool ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
 	bool CompleteUnmap(uint64_t vaddr, uint64_t size);
 	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode,
 	                                               uint64_t* mapping_addr, uint64_t* mapping_size);
-	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode);
+	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode,
+	          Graphics::GpuMemoryMode* gpu_mode, uint64_t* phys_addr = nullptr, int* memory_type = nullptr);
 	bool Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
 	uint64_t TotalAllocatedBytes();
 	bool     FindLargestAvailableSpan(uint64_t search_start, uint64_t search_end, uint64_t alignment, uint64_t* span_start,
@@ -517,6 +520,33 @@ bool PhysicalMemory::Release(uint64_t start, size_t len)
 	return false;
 }
 
+bool PhysicalMemory::FindMappingsForPhysicalRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings)
+{
+	if (mappings == nullptr || len == 0 || start > std::numeric_limits<uint64_t>::max() - len)
+	{
+		return false;
+	}
+
+	Core::LockGuard lock(m_mutex);
+	const bool allocation_exists = std::any_of(m_allocated.begin(), m_allocated.end(),
+	                                           [start, len](const AllocatedBlock& block)
+	                                           { return block.start_addr == start && block.size == len; });
+	if (!allocation_exists)
+	{
+		return false;
+	}
+
+	mappings->Clear();
+	for (const auto& mapping: m_mapped)
+	{
+		if (mapping.phys_addr < start + len && start < mapping.phys_addr + mapping.map_size)
+		{
+			mappings->Add(mapping);
+		}
+	}
+	return true;
+}
+
 uint64_t PhysicalMemory::TotalAllocatedBytes()
 {
 	Core::LockGuard lock(m_mutex);
@@ -616,14 +646,14 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 		return 0;
 	}
 
-	const uint64_t map_size  = len;
-	const bool     allocated = std::any_of(m_allocated.begin(), m_allocated.end(),
-	                                       [phys_addr, map_size](const auto& b)
-	                                       {
-		                                       return phys_addr >= b.start_addr && map_size <= b.size &&
-		                                              phys_addr - b.start_addr <= b.size - map_size;
-	                                       });
-	if (!allocated)
+	const uint64_t map_size = len;
+	const auto allocation = std::find_if(m_allocated.begin(), m_allocated.end(),
+	                                     [phys_addr, map_size](const auto& block)
+	                                     {
+		                                     return phys_addr >= block.start_addr && map_size <= block.size &&
+		                                            phys_addr - block.start_addr <= block.size - map_size;
+	                                     });
+	if (allocation == m_allocated.end())
 	{
 		return 0;
 	}
@@ -658,6 +688,7 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 	b.map_size  = map_size;
 	b.prot      = prot;
 	b.mode      = mode;
+	b.memory_type = allocation->memory_type;
 	b.gpu_cleanup_mode = gpu_mode;
 	m_mapped.Add(b);
 
@@ -806,12 +837,12 @@ bool PhysicalMemory::Find(uint64_t phys_addr, bool next, AllocatedBlock* out)
 }
 
 bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode,
-                          Graphics::GpuMemoryMode* gpu_mode)
+                          Graphics::GpuMemoryMode* gpu_mode, uint64_t* phys_addr, int* memory_type)
 {
 	Core::LockGuard lock(m_mutex);
 
 	return std::any_of(m_mapped.begin(), m_mapped.end(),
-	                   [vaddr, base_addr, len, prot, mode, gpu_mode](auto& b)
+	                   [vaddr, base_addr, len, prot, mode, gpu_mode, phys_addr, memory_type](auto& b)
 	                   {
 		                   if (vaddr >= b.map_vaddr && vaddr - b.map_vaddr < b.map_size)
 		                   {
@@ -831,10 +862,18 @@ bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 			                   {
 				                   *mode = b.mode;
 			                   }
-			                   if (gpu_mode != nullptr)
-			                   {
-				                   *gpu_mode = b.gpu_cleanup_mode;
-			                   }
+				                   if (gpu_mode != nullptr)
+				                   {
+					                   *gpu_mode = b.gpu_cleanup_mode;
+				                   }
+				                   if (phys_addr != nullptr)
+				                   {
+					                   *phys_addr = b.phys_addr;
+				                   }
+				                   if (memory_type != nullptr)
+				                   {
+					                   *memory_type = b.memory_type;
+				                   }
 
 			                   return true;
 		                   }
@@ -1388,7 +1427,24 @@ static int release_direct_memory(int64_t start, size_t len)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	bool result = g_physical_memory->Release(start, len);
+	if (!Config::IsNextGen())
+	{
+		Vector<PhysicalMemory::MappedBlock> mappings;
+		if (!g_physical_memory->FindMappingsForPhysicalRelease(static_cast<uint64_t>(start), len, &mappings))
+		{
+			return KERNEL_ERROR_ENOENT;
+		}
+		for (const auto& mapping: mappings)
+		{
+			const int unmap_result = KernelMunmap(mapping.map_vaddr, mapping.map_size);
+			if (unmap_result != OK)
+			{
+				return unmap_result;
+			}
+		}
+	}
+
+	bool result = g_physical_memory->Release(static_cast<uint64_t>(start), len);
 
 	if (!result)
 	{
@@ -1821,8 +1877,10 @@ int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryIn
 	bool     is_direct   = false;
 	bool     is_flexible = false;
 	bool     is_reserved = false;
+	uint64_t physical_offset = 0;
+	int      memory_type     = 0;
 
-	if (g_physical_memory->Find(vaddr, &base, &len, &prot, nullptr, nullptr))
+	if (g_physical_memory->Find(vaddr, &base, &len, &prot, nullptr, nullptr, &physical_offset, &memory_type))
 	{
 		is_direct = true;
 	}
@@ -1847,9 +1905,9 @@ int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryIn
 	std::memset(info, 0, sizeof(VirtualQueryInfo));
 	info->start        = static_cast<uintptr_t>(base);
 	info->end          = static_cast<uintptr_t>(base + len);
-	info->offset       = 0;
+	info->offset       = physical_offset;
 	info->protection   = prot;
-	info->memory_type  = 0;
+	info->memory_type  = memory_type;
 	info->is_flexible  = is_flexible ? 1u : 0u;
 	info->is_direct    = is_direct ? 1u : 0u;
 	info->is_committed = is_reserved ? 0u : 1u;
@@ -1891,16 +1949,34 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 {
 	EXIT_IF(mode == nullptr || gpu_mode == nullptr);
 
-	// Orbis/PS5 protection mixes CPU bits (low nibble) with AMPR access bits.
-	// The Gen5 title emits the explicit 0x42/0x82/0xC2 family from one
-	// allocation path: 0x40/0x80/0xC0 select AMPR read, write, or read-write,
-	// while 0x02 keeps the CPU mapping writable. GpuMemoryMode is Kyty's
-	// normalized access-direction representation for the same range tracking.
-	// prot=0 is a full NoAccess demotion (observed on Astro after Posix sems).
+	// CPU-only callers use the ordinary POSIX protection bitmask. GPU-visible
+	// mappings add AMPR access bits to the same CPU protection field.
 	switch (prot)
 	{
 		case 0x0:
 			*mode     = VirtualMemory::Mode::NoAccess;
+			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			return true;
+		case 0x1:
+			*mode     = VirtualMemory::Mode::Read;
+			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			return true;
+		case 0x2:
+		case 0x3:
+			*mode     = VirtualMemory::Mode::ReadWrite;
+			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			return true;
+		case 0x4:
+			*mode     = VirtualMemory::Mode::Execute;
+			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			return true;
+		case 0x5:
+			*mode     = VirtualMemory::Mode::ExecuteRead;
+			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			return true;
+		case 0x6:
+		case 0x7:
+			*mode     = VirtualMemory::Mode::ExecuteReadWrite;
 			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
 			return true;
 		case 0x11:
