@@ -37,11 +37,9 @@ void EnsureLog()
 
 void EnsurePthread()
 {
-	static bool initialized = false;
-	if (!initialized)
+	if (!Libs::LibKernel::PthreadIsInitialized())
 	{
 		Libs::LibKernel::PthreadSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-		initialized = true;
 	}
 }
 

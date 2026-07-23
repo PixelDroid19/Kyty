@@ -284,6 +284,11 @@ void PthreadDeleteStaticObjects(Loader::Program* program)
 	pthread_static_objects->DeleteObjects(program);
 }
 
+bool PthreadIsInitialized()
+{
+	return g_pthread_context != nullptr;
+}
+
 void PthreadInitSelfForMainThread()
 {
 	EXIT_IF(g_pthread_self != nullptr);

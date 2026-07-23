@@ -88,11 +88,9 @@ void EnsureKernelProcessSubsystems()
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 		Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
-	static bool pthread_initialized = false;
-	if (!pthread_initialized)
+	if (!LibKernel::PthreadIsInitialized())
 	{
 		LibKernel::PthreadSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-		pthread_initialized = true;
 	}
 }
 
