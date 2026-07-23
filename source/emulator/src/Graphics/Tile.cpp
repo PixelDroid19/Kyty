@@ -97,6 +97,22 @@ public:
 		m_bank_bits = neo ? 3 : 4;
 	}
 
+	// Display_2dThin / dynamic tile-10: pad pitch and height to 128-texel macro tiles.
+	void InitDisplayThin(uint32_t /*width*/, uint32_t height, uint32_t pitch, bool neo)
+	{
+		const auto align_up = [](uint32_t value, uint32_t alignment) -> uint32_t {
+			return ((value + alignment - 1u) / alignment) * alignment;
+		};
+		m_macro_tile_height = 128;
+		m_bank_height       = neo ? 2 : 1;
+		m_num_banks         = neo ? 8 : 16;
+		m_num_pipes         = neo ? 16 : 8;
+		m_padded_width      = align_up(pitch, 128u);
+		m_padded_height     = align_up(height, 128u);
+		m_pipe_bits         = neo ? 4 : 3;
+		m_bank_bits         = neo ? 3 : 4;
+	}
+
 	static uint32_t GetElementIndex(uint32_t x, uint32_t y)
 	{
 		uint32_t elem = 0;
@@ -222,7 +238,15 @@ public:
 		m_height = height;
 		m_pitch  = pitch;
 
-		if ((nfmt == 9 && dfmt == 10) || (nfmt == 0 && dfmt == 10))
+		if (nfmt == 0 && dfmt == 1)
+		{
+			// R8
+			m_bits_per_element = 8;
+		} else if (nfmt == 0 && dfmt == 3)
+		{
+			// R8G8
+			m_bits_per_element = 16;
+		} else if ((nfmt == 9 && dfmt == 10) || (nfmt == 0 && dfmt == 10))
 		{
 			// R8G8B8A8
 			m_bits_per_element = 32;
@@ -280,7 +304,10 @@ static void init_maps();
 
 void TileInit()
 {
-	EXIT_IF(g_tiler != nullptr);
+	if (g_tiler != nullptr)
+	{
+		return;
+	}
 
 	g_tiler = new Tiler;
 
@@ -435,9 +462,28 @@ static void Detile128(const Tiler1d* t, uint32_t width, uint32_t height, uint32_
 	}
 }
 
+static void DetileSmallElements(const Tiler1d* t, uint32_t bytes_per_element, uint8_t* dst, const uint8_t* src, bool neo)
+{
+	for (uint32_t y = 0; y < t->m_height; ++y)
+	{
+		for (uint32_t x = 0; x < t->m_width; ++x)
+		{
+			const uint64_t linear_offset = (static_cast<uint64_t>(y) * t->m_pitch + x) * bytes_per_element;
+			const uint64_t tiled_offset  = t->GetTiledOffset(x, y, neo);
+			std::memcpy(dst + linear_offset, src + tiled_offset, bytes_per_element);
+		}
+	}
+}
+
 static void Detile1d(const Tiler1d* t, uint8_t* dst, const uint8_t* src, bool neo)
 {
-	if (t->m_bits_per_element == 32)
+	if (t->m_bits_per_element == 8)
+	{
+		DetileSmallElements(t, 1, dst, src, neo);
+	} else if (t->m_bits_per_element == 16)
+	{
+		DetileSmallElements(t, 2, dst, src, neo);
+	} else if (t->m_bits_per_element == 32)
 	{
 		Detile32(t, t->m_width, t->m_height, t->m_pitch, dst, src, neo);
 	} else if (t->m_bits_per_element == 64)
@@ -460,6 +506,23 @@ void TileConvertTiledToLinear(void* dst, const void* src, TileMode mode, uint32_
 
 	Tiler32 t;
 	t.Init(width, height, neo);
+
+	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * 4u);
+	Detile32(&t, width, height, width, static_cast<uint8_t*>(dst), static_cast<const uint8_t*>(src), neo);
+}
+
+void TileConvertDisplayThinBgraToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch, bool neo)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_IF(dst == nullptr);
+	EXIT_IF(src == nullptr);
+	EXIT_IF(width == 0 || height == 0 || pitch == 0);
+	EXIT_NOT_IMPLEMENTED(pitch < width);
+
+	Tiler32 t;
+	t.InitDisplayThin(width, height, pitch, neo);
+	EXIT_NOT_IMPLEMENTED(t.m_padded_width == 0 || t.m_padded_height == 0);
 
 	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * 4u);
 	Detile32(&t, width, height, width, static_cast<uint8_t*>(dst), static_cast<const uint8_t*>(src), neo);
@@ -1280,6 +1343,98 @@ static void FindTextureInfo2(uint32_t fmt, uint32_t width, uint32_t height, uint
 	}
 }
 
+struct MicroTiledFormatLayout
+{
+	uint32_t block_width       = 1;
+	uint32_t block_height      = 1;
+	uint32_t bytes_per_element = 0;
+};
+
+static bool GetMicroTiledFormatLayout(uint32_t dfmt, uint32_t nfmt, MicroTiledFormatLayout* layout)
+{
+	EXIT_IF(layout == nullptr);
+
+	if (dfmt == 1 && nfmt == 0)
+	{
+		*layout = {1, 1, 1};
+		return true;
+	}
+	if (dfmt == 3 && nfmt == 0)
+	{
+		*layout = {1, 1, 2};
+		return true;
+	}
+	if (dfmt == 10 && (nfmt == 0 || nfmt == 9))
+	{
+		*layout = {1, 1, 4};
+		return true;
+	}
+	if (dfmt == 35 && nfmt == 0)
+	{
+		*layout = {4, 4, 8};
+		return true;
+	}
+	if ((dfmt == 36 && nfmt == 0) || (dfmt == 37 && (nfmt == 0 || nfmt == 9)))
+	{
+		*layout = {4, 4, 16};
+		return true;
+	}
+	return false;
+}
+
+static bool GetDynamicMicroTiledTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t height, uint32_t pitch,
+	                                         uint32_t levels, TileSizeAlign* total_size, TileSizeOffset* level_sizes,
+	                                         TilePaddedSize* padded_size)
+{
+	MicroTiledFormatLayout format {};
+	if (!GetMicroTiledFormatLayout(dfmt, nfmt, &format))
+	{
+		return false;
+	}
+
+	const auto align_up = [](uint32_t value, uint32_t alignment) -> uint32_t {
+		return ((value + alignment - 1u) / alignment) * alignment;
+	};
+
+	uint64_t offset = 0;
+	uint32_t mip_width  = width;
+	uint32_t mip_height = height;
+	uint32_t mip_pitch  = (pitch != 0 ? pitch : width);
+	for (uint32_t level = 0; level < levels; level++)
+	{
+		const uint32_t element_width  = std::max((mip_width + format.block_width - 1u) / format.block_width, 1u);
+		const uint32_t element_height = std::max((mip_height + format.block_height - 1u) / format.block_height, 1u);
+		const uint32_t element_pitch  = std::max((mip_pitch + format.block_width - 1u) / format.block_width, element_width);
+		const uint32_t padded_width   = align_up(element_pitch, 8u);
+		const uint32_t padded_height  = align_up(element_height, 8u);
+		const uint64_t level_size = static_cast<uint64_t>(padded_width) * padded_height * format.bytes_per_element;
+
+		EXIT_NOT_IMPLEMENTED(level_size > 0xffffffffull || offset + level_size > 0xffffffffull);
+		if (level_sizes != nullptr)
+		{
+			level_sizes[level].offset = static_cast<uint32_t>(offset);
+			level_sizes[level].size   = static_cast<uint32_t>(level_size);
+		}
+		if (padded_size != nullptr)
+		{
+			padded_size[level].width  = padded_width;
+			padded_size[level].height = padded_height;
+		}
+
+		offset += level_size;
+		mip_width  = std::max(mip_width / 2u, 1u);
+		mip_height = std::max(mip_height / 2u, 1u);
+		mip_pitch  = std::max(mip_pitch / 2u, 1u);
+	}
+
+	if (total_size != nullptr)
+	{
+		total_size->size  = static_cast<uint32_t>(offset);
+		total_size->align = 256u;
+	}
+	return true;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile,
                         bool neo, TileSizeAlign* total_size, TileSizeOffset* level_sizes, TilePaddedSize* padded_size)
@@ -1293,7 +1448,10 @@ void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t h
 
 	FindTextureInfo(dfmt, nfmt, width, height, pitch, tile, neo, &infos, &num, pow2);
 
-	EXIT_NOT_IMPLEMENTED(tile != 31 && tile != 8 && infos == nullptr);
+	const bool dynamic_display_thin = (tile == 10 && dfmt == 10 && nfmt == 0 && levels == 1);
+	MicroTiledFormatLayout dynamic_micro_format {};
+	const bool dynamic_micro_tiled = tile == 13 && GetMicroTiledFormatLayout(dfmt, nfmt, &dynamic_micro_format);
+	EXIT_NOT_IMPLEMENTED(tile != 31 && tile != 8 && infos == nullptr && !dynamic_display_thin && !dynamic_micro_tiled);
 
 	EXIT_IF(levels == 0 || levels > 16);
 
@@ -1335,6 +1493,42 @@ void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t h
 			}
 			return;
 		}
+	}
+
+	if (tile == 13 && GetDynamicMicroTiledTextureSize(dfmt, nfmt, width, height, pitch, levels, total_size, level_sizes, padded_size))
+	{
+		return;
+	}
+
+	// Display_2dThin BGRA8 surfaces are arranged in 128x128 texel blocks on
+	// Gen5. The table covers common resolutions; this preserves that same
+	// layout for valid dynamic display dimensions.
+	if (dynamic_display_thin)
+	{
+		const auto align_up = [](uint32_t value, uint32_t alignment) -> uint32_t {
+			return ((value + alignment - 1u) / alignment) * alignment;
+		};
+		const uint32_t padded_width  = align_up(pitch, 128u);
+		const uint32_t padded_height = align_up(height, 128u);
+		const uint64_t size          = static_cast<uint64_t>(padded_width) * padded_height * 4u;
+		EXIT_NOT_IMPLEMENTED(size > 0xffffffffull);
+
+		if (total_size != nullptr)
+		{
+			total_size->size  = static_cast<uint32_t>(size);
+			total_size->align = (neo ? 65536u : 32768u);
+		}
+		if (level_sizes != nullptr)
+		{
+			level_sizes[0].size   = static_cast<uint32_t>(size);
+			level_sizes[0].offset = 0;
+		}
+		if (padded_size != nullptr)
+		{
+			padded_size[0].width  = padded_width;
+			padded_size[0].height = padded_height;
+		}
+		return;
 	}
 
 	if ((tile == 8 || tile == 31) && levels == 1)

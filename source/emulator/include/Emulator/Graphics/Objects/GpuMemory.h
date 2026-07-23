@@ -422,6 +422,23 @@ inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing
 	return false;
 }
 
+// A depth/stencil binding supersedes an earlier generic surface view of the
+// same guest allocation. This is the single-parent form of the existing
+// multi-plane depth reclaim path.
+inline bool GpuMemoryAllowsDepthStencilReclaimSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                      GpuMemoryObjectType incoming_type)
+{
+	if (incoming_type != GpuMemoryObjectType::DepthStencilBuffer || existing_type == GpuMemoryObjectType::DepthStencilBuffer)
+	{
+		return false;
+	}
+	const bool surface = existing_type == GpuMemoryObjectType::Texture || existing_type == GpuMemoryObjectType::StorageBuffer ||
+	                     existing_type == GpuMemoryObjectType::StorageTexture || existing_type == GpuMemoryObjectType::RenderTexture ||
+	                     existing_type == GpuMemoryObjectType::VertexBuffer;
+	return surface && (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::Contains ||
+	                   relation == GpuMemoryOverlapType::IsContainedWithin || relation == GpuMemoryOverlapType::Equals);
+}
+
 // Incoming StorageBuffer overlapping existing color/depth surfaces (not only
 // Texture alias / Vertex share). Captured: RT+SB Crosses and IsContainedWithin
 // multi-parent set during the same load path as RenderTexture surface alias.

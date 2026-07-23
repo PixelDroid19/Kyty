@@ -291,6 +291,16 @@ void EnsureGpuMemoryForTests()
 
 } // namespace
 
+TEST(EmulatorGraphicsState, RegistersAnonymousGpuResourceBeforeOwnerRegistration)
+{
+	EnsureGpuMemoryForTests();
+
+	uint32_t resource_handle = UINT32_MAX;
+	GpuMemoryRegisterResource(&resource_handle, 0, reinterpret_cast<void*>(static_cast<uintptr_t>(0x100000)), 100,
+	                          "bootstrap-resource", 1, 0);
+	GpuMemoryUnregisterResource(resource_handle);
+}
+
 TEST(EmulatorGraphicsState, ResolvesGen5RectListAutoDrawExpansion)
 {
 	uint32_t vertex_count = 0;
@@ -341,6 +351,18 @@ TEST(EmulatorGraphicsState, TiledVideoOutBufferSkipsCpuHash)
 TEST(EmulatorGraphicsState, DisabledShaderFilterIgnoresNullAddress)
 {
 	EXPECT_FALSE(ShaderIsDisabled(0));
+}
+
+TEST(EmulatorGraphicsState, UserConfigTracksGuestVertexOffset)
+{
+	HW::UserConfig config;
+	EXPECT_EQ(config.GetIndexOffset(), 0u);
+
+	config.SetIndexOffset(37u);
+	EXPECT_EQ(config.GetIndexOffset(), 37u);
+
+	config.Reset();
+	EXPECT_EQ(config.GetIndexOffset(), 0u);
 }
 
 TEST(EmulatorGraphicsState, PipelineCacheAcceptsMatchingVulkanHeader)
@@ -1397,6 +1419,21 @@ TEST(EmulatorGraphicsState, Gen5CodeUnavailableSkipsInvalidDirectStorageDescript
 	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
 }
 
+TEST(EmulatorGraphicsState, RawStorageDescriptorOnlyRequiresDwordStride)
+{
+	ShaderBufferResource raw {};
+	raw.fields[1] = 12u << 16u;
+	raw.fields[3] = 0xffffffffu;
+	EXPECT_TRUE(ShaderRawStorageDescriptorSupported(raw));
+
+	raw.fields[1] = 10u << 16u;
+	EXPECT_FALSE(ShaderRawStorageDescriptorSupported(raw));
+
+	raw.fields[1] = 0u;
+	raw.fields[2] = 0x6000u;
+	EXPECT_TRUE(ShaderRawStorageDescriptorSupported(raw));
+}
+
 TEST(EmulatorGraphicsState, Gen5DirectImageSampleBindsTextureAndSampler)
 {
 	const uint32_t word0 = (0x3cu << 26u) | (0x20u << 18u) | (0xfu << 8u);
@@ -1480,6 +1517,89 @@ TEST(EmulatorGraphicsState, DecodesModeControl)
 	EXPECT_EQ(mode.polymode_front_ptype, 3);
 	EXPECT_EQ(mode.polymode_back_ptype, 4);
 	EXPECT_TRUE(mode.provoking_vtx_last);
+}
+
+TEST(EmulatorGraphicsState, DecodesPolygonOffsetRegisters)
+{
+	HW::Context context;
+
+	State::SetPolygonOffsetRegister(context, Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL, 0x1e9u);
+	State::SetPolygonOffsetRegister(context, Pm4::PA_SU_POLY_OFFSET_CLAMP, 0x40200000u);
+	State::SetPolygonOffsetRegister(context, Pm4::PA_SU_POLY_OFFSET_FRONT_SCALE, 0x42000000u);
+	State::SetPolygonOffsetRegister(context, Pm4::PA_SU_POLY_OFFSET_FRONT_OFFSET, 0x40800000u);
+	State::SetPolygonOffsetRegister(context, Pm4::PA_SU_POLY_OFFSET_BACK_SCALE, 0x42400000u);
+	State::SetPolygonOffsetRegister(context, Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET, 0x40c00000u);
+
+	const auto& offset = context.GetPolygonOffset();
+	EXPECT_EQ(offset.db_format_control, 0x1e9u);
+	EXPECT_FLOAT_EQ(offset.clamp, 2.5f);
+	EXPECT_FLOAT_EQ(offset.front_scale, 32.0f);
+	EXPECT_FLOAT_EQ(offset.front_offset, 4.0f);
+	EXPECT_FLOAT_EQ(offset.back_scale, 48.0f);
+	EXPECT_FLOAT_EQ(offset.back_offset, 6.0f);
+}
+
+TEST(EmulatorGraphicsState, ResolvesFrontPolygonOffsetForVulkan)
+{
+	HW::ModeControl mode;
+	mode.poly_offset_front_enable = true;
+
+	HW::PolygonOffset offset;
+	offset.clamp        = 2.5f;
+	offset.front_scale  = 32.0f;
+	offset.front_offset = 4.0f;
+	offset.back_scale   = 48.0f;
+	offset.back_offset  = 6.0f;
+
+	const auto bias = State::ResolveDepthBias(mode, offset);
+	EXPECT_TRUE(bias.enabled);
+	EXPECT_FLOAT_EQ(bias.constant_factor, 4.0f);
+	EXPECT_FLOAT_EQ(bias.clamp, 2.5f);
+	EXPECT_FLOAT_EQ(bias.slope_factor, 2.0f);
+}
+
+TEST(EmulatorGraphicsState, ResolvesBackPolygonOffsetWhenFrontIsDisabled)
+{
+	HW::ModeControl mode;
+	mode.poly_offset_back_enable = true;
+
+	HW::PolygonOffset offset;
+	offset.clamp       = 1.5f;
+	offset.back_scale  = 48.0f;
+	offset.back_offset = 6.0f;
+
+	const auto bias = State::ResolveDepthBias(mode, offset);
+	EXPECT_TRUE(bias.enabled);
+	EXPECT_FLOAT_EQ(bias.constant_factor, 6.0f);
+	EXPECT_FLOAT_EQ(bias.clamp, 1.5f);
+	EXPECT_FLOAT_EQ(bias.slope_factor, 3.0f);
+}
+
+TEST(EmulatorGraphicsState, DisablesDepthBiasWhenPolygonOffsetIsDisabled)
+{
+	const auto bias = State::ResolveDepthBias(HW::ModeControl {}, HW::PolygonOffset {});
+	EXPECT_FALSE(bias.enabled);
+	EXPECT_FLOAT_EQ(bias.constant_factor, 0.0f);
+	EXPECT_FLOAT_EQ(bias.clamp, 0.0f);
+	EXPECT_FLOAT_EQ(bias.slope_factor, 0.0f);
+}
+
+TEST(EmulatorGraphicsState, AcceptsSupportedPixelInputLayouts)
+{
+	EXPECT_TRUE(ShaderPixelInputMaskSupported(0x00000002u, 0x00000002u));
+	EXPECT_TRUE(ShaderPixelInputMaskSupported(0x00000020u, 0x00000020u));
+	EXPECT_TRUE(ShaderPixelInputMaskSupported(0x00000302u, 0x00000302u));
+	EXPECT_TRUE(ShaderPixelInputMaskSupported(0x00000320u, 0x00000320u));
+
+	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000022u, 0x00000022u));
+	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000120u, 0x00000120u));
+	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000020u, 0x00000002u));
+}
+
+TEST(EmulatorGraphicsState, DetectsPixelPositionFromInputBits)
+{
+	EXPECT_FALSE(ShaderPixelPositionEnabled(0x00000020u, 0x00000020u));
+	EXPECT_TRUE(ShaderPixelPositionEnabled(0x00000320u, 0x00000320u));
 }
 
 TEST(EmulatorGraphicsState, DecodesBlendControl)
@@ -2040,8 +2160,8 @@ TEST(EmulatorGraphicsState, Gen5SampleMayCopyFromSurfaceParentMatchesFormatFamil
 	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(14u, VK_FORMAT_R16G16B16A16_SFLOAT));
 }
 
-// Dead Cells residual: bind only exact sample extent. A larger parent without a
-// crop view left banded/false-color world tiles (never fall back to non-exact).
+// Bind only the exact sample extent. A larger parent without a crop view leaves
+// banded or false-color tiles, so it must not be used as a fallback.
 TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesPrefersExactExtent)
 {
 	using namespace Kyty::Libs::Graphics;
@@ -2261,6 +2381,18 @@ TEST(EmulatorGraphicsState, AllowsRenderTargetMultiSurfaceParents)
 	                                                     GpuMemoryObjectType::Texture));
 }
 
+TEST(EmulatorGraphicsState, ReclaimsSingleSurfaceForDepthStencilReuse)
+{
+	EXPECT_TRUE(GpuMemoryAllowsDepthStencilReclaimSurface(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Crosses,
+	                                                      GpuMemoryObjectType::DepthStencilBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsDepthStencilReclaimSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Equals,
+	                                                      GpuMemoryObjectType::DepthStencilBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilReclaimSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
+	                                                       GpuMemoryObjectType::DepthStencilBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilReclaimSurface(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Crosses,
+	                                                       GpuMemoryObjectType::Texture));
+}
+
 // Captured: StorageBuffer with RT+SB Crosses and IsContainedWithin parents.
 // Also dual-strict after VOP1 SDWA: SB 0x8000 Crosses DepthStencilBuffer.
 TEST(EmulatorGraphicsState, AllowsStorageSurfaceShareWithContainedWithin)
@@ -2390,6 +2522,19 @@ TEST(EmulatorGraphicsState, WriteBackClassifiesMultiParentStorageTopology)
 	EXPECT_FALSE(recompute);
 	EXPECT_EQ(equals, 1u);
 	EXPECT_EQ(inv, 8u);
+
+	// WriteBackObjectLocked must classify arbitrary parent counts (stack
+	// limit of 64 was observed too small after logo video dispose).
+	GpuMemoryOverlapType wide[96];
+	for (auto& rel: wide)
+	{
+		rel = GpuMemoryOverlapType::Crosses;
+	}
+	wide[95] = GpuMemoryOverlapType::Equals;
+	ASSERT_TRUE(GpuMemoryWriteBackClassifyParents(wide, 96, &recompute, &equals, &inv));
+	EXPECT_FALSE(recompute);
+	EXPECT_EQ(equals, 1u);
+	EXPECT_EQ(inv, 95u);
 
 	// Only partial overlaps: still recompute self after GPU->CPU write-back.
 	const GpuMemoryOverlapType only_vb[] = {GpuMemoryOverlapType::Crosses, GpuMemoryOverlapType::IsContainedWithin};
@@ -2804,10 +2949,9 @@ TEST(EmulatorGraphicsState, GraphicsBatchNeedsApiFlipWhenDcbOmitsFlip)
 	EXPECT_FALSE(GraphicsBatchNeedsApiFlip(false, true));
 }
 
-// A flip becomes guest-visible only when the exact submission containing its
-// post-fence callback is published. Leaving that retirement to a later batch
-// deadlocks titles that wait for the first flip event before submitting again.
-TEST(EmulatorGraphicsState, GraphicsBatchWaitsForSubmissionContainingFlip)
+// Guest-visible completion callbacks must not depend on a later batch to
+// publish their containing submission.
+TEST(EmulatorGraphicsState, GraphicsBatchWaitsForSubmissionContainingCallback)
 {
 	using namespace Kyty::Libs::Graphics;
 	EXPECT_TRUE(GraphicsBatchNeedsSubmissionCompletion(true));

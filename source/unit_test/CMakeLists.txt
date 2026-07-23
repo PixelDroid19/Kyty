@@ -5,6 +5,12 @@ file(GLOB unit_test_src
     "src/emulator/*.cpp"
 )
 
+# The disabled implementation is selected by the top-level CMake file only
+# when KYTY_BUILD_UNIT_TESTS is OFF.  Keep it out of the test target when the
+# source glob is active so the enabled and disabled subsystem definitions
+# cannot be linked together.
+list(FILTER unit_test_src EXCLUDE REGEX "/UnitTestDisabled\\.cpp$")
+
 # DevTools tests are listed explicitly (no recursive glob expansion for new modules).
 list(APPEND unit_test_src
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsEventRing.cpp"

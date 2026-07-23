@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <mutex>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -53,12 +54,20 @@ LIB_NAME("libkernel", "libkernel");
 
 constexpr int KEYS_MAX              = 256;
 constexpr int DESTRUCTOR_ITERATIONS = 4;
+constexpr int MUTEX_TYPE_ERRORCHECK = 1;
+constexpr int MUTEX_TYPE_RECURSIVE  = 2;
+constexpr int MUTEX_TYPE_NORMAL     = 3;
+constexpr int MUTEX_TYPE_ADAPTIVE   = 4;
 
 struct PthreadMutexPrivate
 {
 	uint8_t         reserved[256];
 	String          name;
 	pthread_mutex_t p;
+	std::mutex      state_mutex;
+	pthread_t       owner {};
+	uint32_t        recursion_count = 0;
+	int             type            = MUTEX_TYPE_ERRORCHECK;
 };
 
 struct PthreadMutexattrPrivate
@@ -66,6 +75,7 @@ struct PthreadMutexattrPrivate
 	uint8_t             reserved[64];
 	pthread_mutexattr_t p;
 	int                 pprotocol;
+	int                 type = MUTEX_TYPE_ERRORCHECK;
 };
 
 struct PthreadAttrPrivate
@@ -272,6 +282,11 @@ void PthreadDeleteStaticObjects(Loader::Program* program)
 	EXIT_IF(pthread_static_objects == nullptr);
 
 	pthread_static_objects->DeleteObjects(program);
+}
+
+bool PthreadIsInitialized()
+{
+	return g_pthread_context != nullptr;
 }
 
 void PthreadInitSelfForMainThread()
@@ -793,7 +808,7 @@ int KYTY_SYSV_ABI PthreadMutexattrInit(PthreadMutexattr* attr)
 
 	int result = pthread_mutexattr_init(&(*attr)->p);
 
-	result = (result == 0 ? PthreadMutexattrSettype(attr, 1) : result);
+	result = (result == 0 ? PthreadMutexattrSettype(attr, MUTEX_TYPE_ERRORCHECK) : result);
 	result = (result == 0 ? PthreadMutexattrSetprotocol(attr, 0) : result);
 
 	switch (result)
@@ -832,10 +847,10 @@ int KYTY_SYSV_ABI PthreadMutexattrSettype(PthreadMutexattr* attr, int type)
 	int ptype = PTHREAD_MUTEX_DEFAULT;
 	switch (type)
 	{
-		case 1: ptype = PTHREAD_MUTEX_ERRORCHECK; break;
-		case 2: ptype = PTHREAD_MUTEX_RECURSIVE; break;
-		case 3:
-		case 4: ptype = PTHREAD_MUTEX_NORMAL; break;
+		case MUTEX_TYPE_ERRORCHECK: ptype = PTHREAD_MUTEX_ERRORCHECK; break;
+		case MUTEX_TYPE_RECURSIVE: ptype = PTHREAD_MUTEX_RECURSIVE; break;
+		case MUTEX_TYPE_NORMAL:
+		case MUTEX_TYPE_ADAPTIVE: ptype = PTHREAD_MUTEX_NORMAL; break;
 		default: EXIT("invalid type: %d\n", type);
 	}
 
@@ -843,6 +858,7 @@ int KYTY_SYSV_ABI PthreadMutexattrSettype(PthreadMutexattr* attr, int type)
 
 	if (result == 0)
 	{
+		(*attr)->type = type;
 		return OK;
 	}
 
@@ -899,6 +915,7 @@ int KYTY_SYSV_ABI PthreadMutexInit(PthreadMutex* mutex, const PthreadMutexattr* 
 	*mutex = new PthreadMutexPrivate {};
 
 	(*mutex)->name = name;
+	(*mutex)->type = (*attr)->type;
 
 	int result = pthread_mutex_init(&(*mutex)->p, &(*attr)->p);
 
@@ -961,7 +978,32 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex)
 
 	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
 
-	int result = pthread_mutex_lock(&(*mutex)->p);
+	auto* private_mutex = *mutex;
+	{
+		std::lock_guard lock(private_mutex->state_mutex);
+		if (private_mutex->recursion_count != 0 && pthread_equal(private_mutex->owner, pthread_self()) != 0)
+		{
+			if (private_mutex->type == MUTEX_TYPE_ERRORCHECK)
+			{
+				return KERNEL_ERROR_EDEADLK;
+			}
+
+			// Some guest runtimes layer normal or adaptive lock calls within one
+			// logical critical section. Keep their depth in the guest object so a
+			// host normal mutex cannot deadlock the owning guest thread.
+			private_mutex->recursion_count++;
+			return OK;
+		}
+	}
+
+	int result = pthread_mutex_lock(&private_mutex->p);
+
+	if (result == 0)
+	{
+		std::lock_guard lock(private_mutex->state_mutex);
+		private_mutex->owner           = pthread_self();
+		private_mutex->recursion_count = 1;
+	}
 
 	// printf("\tmutex lock: %s, %d\n", (*mutex)->name.C_Str(), result);
 
@@ -991,7 +1033,28 @@ int KYTY_SYSV_ABI PthreadMutexTrylock(PthreadMutex* mutex)
 
 	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
 
-	int result = pthread_mutex_trylock(&(*mutex)->p);
+	auto* private_mutex = *mutex;
+	{
+		std::lock_guard lock(private_mutex->state_mutex);
+		if (private_mutex->recursion_count != 0 && pthread_equal(private_mutex->owner, pthread_self()) != 0)
+		{
+			if (private_mutex->type == MUTEX_TYPE_RECURSIVE)
+			{
+				private_mutex->recursion_count++;
+				return OK;
+			}
+			return KERNEL_ERROR_EBUSY;
+		}
+	}
+
+	int result = pthread_mutex_trylock(&private_mutex->p);
+
+	if (result == 0)
+	{
+		std::lock_guard lock(private_mutex->state_mutex);
+		private_mutex->owner           = pthread_self();
+		private_mutex->recursion_count = 1;
+	}
 
 	// printf("\tmutex trylock: %s, %d\n", (*mutex)->name.C_Str(), result);
 
@@ -1020,14 +1083,31 @@ int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec
 
 	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
 
+	auto* private_mutex = *mutex;
+	{
+		std::lock_guard lock(private_mutex->state_mutex);
+		if (private_mutex->recursion_count != 0 && pthread_equal(private_mutex->owner, pthread_self()) != 0 &&
+		    private_mutex->type == MUTEX_TYPE_RECURSIVE)
+		{
+			private_mutex->recursion_count++;
+			return OK;
+		}
+	}
+
 	timespec t {};
 	usec_to_timespec(&t, usec);
 
 #ifdef __APPLE__
-	const int result = mutex_timedlock_poll(&(*mutex)->p, &t);
+	const int result = mutex_timedlock_poll(&private_mutex->p, &t);
 #else
-	const int result = pthread_mutex_timedlock(&(*mutex)->p, &t);
+	const int result = pthread_mutex_timedlock(&private_mutex->p, &t);
 #endif
+	if (result == 0)
+	{
+		std::lock_guard lock(private_mutex->state_mutex);
+		private_mutex->owner           = pthread_self();
+		private_mutex->recursion_count = 1;
+	}
 	switch (result)
 	{
 		case 0: return OK;
@@ -1058,7 +1138,25 @@ int KYTY_SYSV_ABI PthreadMutexUnlock(PthreadMutex* mutex)
 
 	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
 
-	int result = pthread_mutex_unlock(&(*mutex)->p);
+	auto* private_mutex = *mutex;
+	std::lock_guard lock(private_mutex->state_mutex);
+	if (private_mutex->recursion_count == 0 || pthread_equal(private_mutex->owner, pthread_self()) == 0)
+	{
+		return KERNEL_ERROR_EPERM;
+	}
+
+	if (private_mutex->recursion_count > 1)
+	{
+		private_mutex->recursion_count--;
+		return OK;
+	}
+
+	int result = pthread_mutex_unlock(&private_mutex->p);
+	if (result == 0)
+	{
+		private_mutex->owner           = {};
+		private_mutex->recursion_count = 0;
+	}
 
 	// printf("\tmutex unlock: %s, %d\n", (*mutex)->name.C_Str(), result);
 
@@ -1951,8 +2049,8 @@ int KYTY_SYSV_ABI PthreadCondattrInit(PthreadCondattr* attr)
 	}
 }
 
-// Soft-lock diagnostic (Dead Cells): identify which guest cond/mutex the
-// CondWait at ~0x90173da75 uses, and whether Signal/Broadcast ever reaches it.
+// Soft-lock diagnostic: identify which guest condition/mutex a blocked wait
+// uses, and whether Signal/Broadcast ever reaches it.
 // Opt-in via KYTY_SLOT_TRACE=1; only after present>=2200 for event spam, but
 // blocked-waiter slots are always recorded under the env so Flip-idle can dump
 // a waiter that entered CondWait before the present cliff.
@@ -2427,6 +2525,31 @@ int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread)
 	return KERNEL_ERROR_EINVAL;
 }
 
+static int pthread_cond_release_mutex_state(PthreadMutexPrivate* mutex)
+{
+	std::lock_guard lock(mutex->state_mutex);
+
+	if (mutex->recursion_count == 0 || pthread_equal(mutex->owner, pthread_self()) == 0)
+	{
+		return EPERM;
+	}
+	if (mutex->recursion_count != 1)
+	{
+		return EINVAL;
+	}
+
+	mutex->owner           = {};
+	mutex->recursion_count = 0;
+	return 0;
+}
+
+static void pthread_cond_restore_mutex_state(PthreadMutexPrivate* mutex)
+{
+	std::lock_guard lock(mutex->state_mutex);
+	mutex->owner           = pthread_self();
+	mutex->recursion_count = 1;
+}
+
 int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, KernelUseconds usec)
 {
 	PRINT_NAME();
@@ -2449,7 +2572,13 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, K
 	timespec t {};
 	usec_to_timespec(&t, usec);
 
-	int result = pthread_cond_timedwait(&(*cond)->p, &(*mutex)->p, &t);
+	auto* private_mutex = *mutex;
+	int   result        = pthread_cond_release_mutex_state(private_mutex);
+	if (result == 0)
+	{
+		result = pthread_cond_timedwait(&(*cond)->p, &private_mutex->p, &t);
+		pthread_cond_restore_mutex_state(private_mutex);
+	}
 
 	// printf("\tcond timedwait: %s, %d\n", (*cond)->name.C_Str(), result);
 
@@ -2556,7 +2685,13 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 		waiter_slot = slot_trace_register_waiter(cond_addr, mutex_addr, ret_addr, cond_h, mutex_h);
 	}
 
-	int result = pthread_cond_wait(&(*cond)->p, &(*mutex)->p);
+	auto* private_mutex = *mutex;
+	int   result        = pthread_cond_release_mutex_state(private_mutex);
+	if (result == 0)
+	{
+		result = pthread_cond_wait(&(*cond)->p, &private_mutex->p);
+		pthread_cond_restore_mutex_state(private_mutex);
+	}
 
 	slot_trace_unregister_waiter(waiter_slot);
 
@@ -2755,10 +2890,15 @@ int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void** value)
 	thread->almost_done = false;
 	thread->free        = true;
 
-	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
-	rt->DeleteTlss(id);
-
+	// Key destructors may still touch guest TLS / allocator state. Run them
+	// before releasing the TLS image.
 	g_pthread_context->GetPthreadKeys()->Destruct(id);
+
+	// Do not DeleteTlss(id) here. Gen5 titles (and FNA/Mono-style runtimes) can
+	// keep freelist control blocks at TP-0x158 alive across threads; freeing the
+	// image at join turns those slots into use-after-free (observed begin/end
+	// patterns 0x1fffffffe / TCB self-pointer). TLS blocks are released with the
+	// process / RuntimeLinker teardown instead.
 
 	switch (result)
 	{
@@ -3070,7 +3210,7 @@ int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rm
 
 	uint64_t nanos = rqtp->tv_sec * 1000000000 + rqtp->tv_nsec;
 
-	// Soft-lock diagnostic (Dead Cells): job pump sleep-polls via Nanosleep while
+	// Soft-lock diagnostic: a job pump may sleep-poll via Nanosleep while
 	// waiting on guest slot table 0x901c434c8 (0x20-byte entries). Guest VAs are
 	// host-mapped only after load — never read the table before present>=2200.
 	// Opt-in via KYTY_SLOT_TRACE=1. Do not invent EventFlag wakes.

@@ -1,11 +1,17 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/CxxLocale.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Libs/ProcessEnvironment.h"
+#include "Emulator/Libs/VaContext.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 
+#include <cstdio>
+#include <clocale>
 #include <cstring>
 #include <cwchar>
 
@@ -29,7 +35,323 @@ void EnsureLog()
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 }
 
+void EnsurePthread()
+{
+	if (!Libs::LibKernel::PthreadIsInitialized())
+	{
+		Libs::LibKernel::PthreadSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+}
+
+using ExecuteOnceCallback = KYTY_SYSV_ABI int (*)(void*, void*, void**);
+
+struct ExecuteOnceContext
+{
+	int  invocations = 0;
+	bool succeed     = true;
+};
+
+int KYTY_SYSV_ABI ExecuteOnceCallbackImpl(void* first, void* context, void** result)
+{
+	EXPECT_EQ(first, nullptr);
+
+	auto* state = static_cast<ExecuteOnceContext*>(context);
+	EXPECT_NE(state, nullptr);
+	EXPECT_NE(result, nullptr);
+
+	state->invocations++;
+	*result = state;
+	return state->succeed ? 1 : 0;
+}
+
+const Loader::SymbolRecord* ResolveLibcFunction(Loader::SymbolDatabase* symbols, const char16_t* nid)
+{
+	Loader::SymbolResolve query {};
+	query.name                 = nid;
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	return symbols->FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+}
+
 } // namespace
+
+TEST(EmulatorLibcCxxLocale, ExecuteOnceRunsCallbackOnceAndRetriesFailure)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"DiGVep5yB5w");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using ExecuteOnce = KYTY_SYSV_ABI int (*)(int* flag, ExecuteOnceCallback callback, void* context);
+	auto* execute_once = reinterpret_cast<ExecuteOnce>(rec->vaddr);
+
+	int                flag = 0;
+	ExecuteOnceContext context {};
+
+	EXPECT_EQ(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 1);
+	EXPECT_EQ(flag, 1);
+	EXPECT_EQ(context.invocations, 1);
+	EXPECT_EQ(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 1);
+	EXPECT_EQ(context.invocations, 1);
+
+	flag            = 0;
+	context.succeed = false;
+	EXPECT_EQ(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 0);
+	EXPECT_EQ(flag, 0);
+	EXPECT_EQ(context.invocations, 2);
+	context.succeed = true;
+	EXPECT_EQ(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 1);
+	EXPECT_EQ(flag, 1);
+	EXPECT_EQ(context.invocations, 3);
+}
+
+TEST(EmulatorLibcCxxLocale, SetlocaleExposesTheStandardLocaleContract)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"PtsB1Q9wsFA");
+	ASSERT_NE(rec, nullptr);
+	using Setlocale = KYTY_SYSV_ABI char* (*)(int category, const char* locale);
+	auto* setlocale = reinterpret_cast<Setlocale>(rec->vaddr);
+	ASSERT_NE(setlocale, nullptr);
+
+	const char* current = setlocale(LC_ALL, nullptr);
+	ASSERT_NE(current, nullptr);
+	EXPECT_NE(current[0], '\0');
+}
+
+TEST(EmulatorLibcCxxLocale, MtxInitUsesGuestPthreadStorage)
+{
+	EnsureLog();
+	EnsurePthread();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"YaHc3GS7y7g");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+	const auto* lock_rec = ResolveLibcFunction(&symbols, u"iS4aWbUonl0");
+	ASSERT_NE(lock_rec, nullptr);
+	ASSERT_NE(lock_rec->vaddr, 0u);
+	const auto* unlock_rec = ResolveLibcFunction(&symbols, u"gTuXQwP9rrs");
+	ASSERT_NE(unlock_rec, nullptr);
+	ASSERT_NE(unlock_rec->vaddr, 0u);
+
+	using MtxInit = KYTY_SYSV_ABI int (*)(Libs::LibKernel::PthreadMutex* mutex, int type);
+	using MtxLock = KYTY_SYSV_ABI int (*)(Libs::LibKernel::PthreadMutex* mutex);
+	auto* mtx_init = reinterpret_cast<MtxInit>(rec->vaddr);
+	auto* mtx_lock = reinterpret_cast<MtxLock>(lock_rec->vaddr);
+	auto* mtx_unlock = reinterpret_cast<MtxLock>(unlock_rec->vaddr);
+
+	Libs::LibKernel::PthreadMutex mutex = nullptr;
+	EXPECT_EQ(mtx_init(&mutex, 2), 0);
+	ASSERT_NE(mutex, nullptr);
+	EXPECT_EQ(mtx_lock(&mutex), 0);
+	EXPECT_EQ(mtx_unlock(&mutex), 0);
+	EXPECT_EQ(Libs::LibKernel::PthreadMutexDestroy(&mutex), OK);
+}
+
+TEST(EmulatorLibcCxxLocale, CndBroadcastUsesGuestPthreadStorage)
+{
+	EnsureLog();
+	EnsurePthread();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* init_rec = ResolveLibcFunction(&symbols, u"SreZybSRWpU");
+	ASSERT_NE(init_rec, nullptr);
+	ASSERT_NE(init_rec->vaddr, 0u);
+	const auto* broadcast_rec = ResolveLibcFunction(&symbols, u"VsP3daJgmVA");
+	ASSERT_NE(broadcast_rec, nullptr);
+	ASSERT_NE(broadcast_rec->vaddr, 0u);
+
+	using CndOperation = KYTY_SYSV_ABI int (*)(Libs::LibKernel::PthreadCond* cond);
+	auto* cnd_init      = reinterpret_cast<CndOperation>(init_rec->vaddr);
+	auto* cnd_broadcast = reinterpret_cast<CndOperation>(broadcast_rec->vaddr);
+
+	Libs::LibKernel::PthreadCond cond = nullptr;
+	EXPECT_EQ(cnd_init(&cond), 0);
+	ASSERT_NE(cond, nullptr);
+	EXPECT_EQ(cnd_broadcast(&cond), 0);
+	EXPECT_EQ(Libs::LibKernel::PthreadCondDestroy(&cond), OK);
+}
+
+TEST(EmulatorLibcCxxLocale, FlushesCapturedStandardErrorStream)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"MUjC4lbHrK4");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Flush = KYTY_SYSV_ABI int (*)(FILE* stream);
+	auto* flush = reinterpret_cast<Flush>(rec->vaddr);
+
+	EXPECT_EQ(flush(stderr), 0);
+}
+
+TEST(EmulatorLibcCxxLocale, FilenoReturnsHostDescriptorForGuestStream)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"Fm-dmyywH9Q");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Fileno = KYTY_SYSV_ABI int (*)(FILE* stream);
+	auto* fileno_guest = reinterpret_cast<Fileno>(rec->vaddr);
+
+	FILE* stream = std::tmpfile();
+	ASSERT_NE(stream, nullptr);
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	EXPECT_EQ(fileno_guest(stream), ::_fileno(stream));
+#else
+	EXPECT_EQ(fileno_guest(stream), ::fileno(stream));
+#endif
+	EXPECT_EQ(fileno_guest(nullptr), -1);
+	EXPECT_EQ(std::fclose(stream), 0);
+}
+
+TEST(EmulatorLibcCxxLocale, DecrementExceptionRefcountAcceptsNullException)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"MQFPAqQPt1s");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using DecrementExceptionRefcount = KYTY_SYSV_ABI void (*)(void* exception);
+	auto* decrement = reinterpret_cast<DecrementExceptionRefcount>(rec->vaddr);
+	decrement(nullptr);
+}
+
+TEST(EmulatorLibcCxxLocale, InitEnvCapturesBoundedProcessArguments)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"bzQExy189ZI");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using InitEnv = KYTY_SYSV_ABI void (*)(const Libs::ProcessEnvironment::InitParameters* parameters);
+	auto* init_env = reinterpret_cast<InitEnv>(rec->vaddr);
+
+	Libs::ProcessEnvironment::InitParameters parameters {};
+	parameters.argc    = 1;
+	parameters.argv[0] = "guest-program";
+	init_env(&parameters);
+
+	const auto arguments = Libs::ProcessEnvironment::GetArguments();
+	EXPECT_EQ(arguments.argc, 1);
+	EXPECT_STREQ(arguments.argv[0], "guest-program");
+	EXPECT_EQ(arguments.argv[1], nullptr);
+}
+
+TEST(EmulatorLibcCxxLocale, GetenvExposesHostProcessConfiguration)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"smbQukfxYJM");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Getenv = KYTY_SYSV_ABI char* (*)(const char* name);
+	auto* getenv = reinterpret_cast<Getenv>(rec->vaddr);
+
+	EXPECT_EQ(getenv("PATH"), ::getenv("PATH"));
+}
+
+TEST(EmulatorLibcCxxLocale, CeilDoubleMatchesLibcContract)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"gacfOmO8hNs");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Ceil = KYTY_SYSV_ABI double (*)(double);
+	auto* ceil_fn = reinterpret_cast<Ceil>(rec->vaddr);
+
+	EXPECT_DOUBLE_EQ(ceil_fn(1.1), 2.0);
+	EXPECT_DOUBLE_EQ(ceil_fn(-1.1), -1.0);
+	EXPECT_DOUBLE_EQ(ceil_fn(2.0), 2.0);
+}
+
+TEST(EmulatorLibcCxxLocale, Udivti3DividesGuestUnsigned128BitValues)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* rec = ResolveLibcFunction(&symbols, u"802pFCwC9w0");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Udivti3 = KYTY_SYSV_ABI unsigned __int128 (*)(unsigned __int128 numerator, unsigned __int128 denominator);
+	auto* udivti3 = reinterpret_cast<Udivti3>(rec->vaddr);
+
+	const unsigned __int128 numerator = (static_cast<unsigned __int128>(9) << 80u) + 77u;
+	const unsigned __int128 denominator = 9u;
+	EXPECT_EQ(udivti3(numerator, denominator), numerator / denominator);
+}
+
+TEST(EmulatorLibcCxxLocale, VswprintfFormatsGuestUtf16SignedInteger)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"u0XOsuOmOzc");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Vswprintf = KYTY_SYSV_ABI int (*)(uint16_t* output, size_t output_count, const uint16_t* format, Libs::VaList* arguments);
+	auto* vswprintf = reinterpret_cast<Vswprintf>(rec->vaddr);
+
+	uint16_t              output[64] = {};
+	const char16_t        format[]   = u"PlatformMisc::RequestExit(%i)";
+	Libs::VaRegSave       registers {};
+	Libs::VaList          arguments {};
+	registers.gp[0]               = 8;
+	arguments.gp_offset           = 0;
+	arguments.fp_offset           = offsetof(Libs::VaRegSave, fp);
+	arguments.reg_save_area       = &registers;
+
+	const char16_t expected[] = u"PlatformMisc::RequestExit(8)";
+	EXPECT_EQ(vswprintf(output, std::size(output), reinterpret_cast<const uint16_t*>(format), &arguments),
+	          static_cast<int>(std::size(expected) - 1));
+	EXPECT_EQ(std::char_traits<char16_t>::compare(reinterpret_cast<const char16_t*>(output), expected, std::size(expected)), 0);
+}
 
 TEST(EmulatorLibcCxxLocale, ClassicLocimpFacetLookupMatchesGuestUseFacetLayout)
 {
@@ -423,6 +745,100 @@ TEST(EmulatorLibcCxxLocale, ResolvesRegexErrorHelperAsFunctionOnly)
 
 	query.type = Loader::SymbolType::Object;
 	EXPECT_EQ(symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query)), nullptr);
+}
+
+TEST(EmulatorLibcCxxLocale, ResolvesBaseExceptionDoraiseAsVoidFunction)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"tyHd3P7oDrU";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Doraise = KYTY_SYSV_ABI void (*)(const void* self);
+	auto* fn      = reinterpret_cast<Doraise>(rec->vaddr);
+	fn(reinterpret_cast<const void*>(0x840000000));
+}
+
+TEST(EmulatorLibcCxxLocale, NothrowNewOverloadsResolveAndUseLibcAllocationOwnership)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	auto resolve = [&](const char16_t* nid) -> const Loader::SymbolRecord*
+	{
+		Loader::SymbolResolve query {};
+		query.name                 = nid;
+		query.library              = U"libc";
+		query.library_version      = 1;
+		query.module               = U"libc";
+		query.module_version_major = 1;
+		query.module_version_minor = 1;
+		query.type                 = Loader::SymbolType::Func;
+		return symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	};
+
+	const auto* new_rec          = resolve(u"ryUxD-60bKM");
+	const auto* new_array_rec    = resolve(u"Jh5qUcwiSEk");
+	const auto* delete_rec       = resolve(u"z+P+xCnWLBk");
+	const auto* delete_array_rec = resolve(u"MLWl90SFWNE");
+	ASSERT_NE(new_rec, nullptr);
+	ASSERT_NE(new_array_rec, nullptr);
+	ASSERT_NE(delete_rec, nullptr);
+	ASSERT_NE(delete_array_rec, nullptr);
+
+	using NothrowNew      = KYTY_SYSV_ABI void* (*)(size_t size, const void* nothrow_tag);
+	using Delete          = KYTY_SYSV_ABI void (*)(void* ptr);
+	auto* new_fn          = reinterpret_cast<NothrowNew>(new_rec->vaddr);
+	auto* new_array_fn    = reinterpret_cast<NothrowNew>(new_array_rec->vaddr);
+	auto* delete_fn       = reinterpret_cast<Delete>(delete_rec->vaddr);
+	auto* delete_array_fn = reinterpret_cast<Delete>(delete_array_rec->vaddr);
+
+	void* ptr = new_fn(0x40, reinterpret_cast<const void*>(0x840000000));
+	ASSERT_NE(ptr, nullptr);
+	delete_fn(ptr);
+
+	void* array_ptr = new_array_fn(0x40000, reinterpret_cast<const void*>(0x840000000));
+	ASSERT_NE(array_ptr, nullptr);
+	delete_array_fn(array_ptr);
+}
+
+TEST(EmulatorLibcCxxLocale, StrerrorRResolvesAndCopiesIntoGuestBuffer)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"RBcs3uut1TA");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using StrerrorR = KYTY_SYSV_ABI int (*)(int error, char* destination, size_t size);
+	auto* strerror_r = reinterpret_cast<StrerrorR>(rec->vaddr);
+
+	char destination[64] {};
+	EXPECT_EQ(strerror_r(Libs::Posix::POSIX_ENOENT, destination, sizeof(destination)), 0);
+	EXPECT_NE(destination[0], '\0');
+
+	char short_destination[2] = {'x', 'x'};
+	EXPECT_EQ(strerror_r(Libs::Posix::POSIX_ENOENT, short_destination, sizeof(short_destination)), Libs::Posix::POSIX_ERANGE);
+	EXPECT_EQ(short_destination[sizeof(short_destination) - 1], '\0');
+	EXPECT_EQ(strerror_r(Libs::Posix::POSIX_ENOENT, nullptr, sizeof(destination)), Libs::Posix::POSIX_EINVAL);
 }
 
 UT_END();

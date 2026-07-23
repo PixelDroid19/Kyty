@@ -18,6 +18,12 @@ LIB_VERSION("NpCppWebApi", 1, "NpCppWebApi", 1, 1);
 
 namespace NpCppWebApi {
 
+// The guest export is a single pointer load from the IntrusivePtr object.
+static KYTY_SYSV_ABI void* NpCppWebApiIntrusivePtrArrow(const void* self)
+{
+	return *static_cast<void* const*>(self);
+}
+
 // NID Y295ygEccqk — first NpCppWebApi import on Astro boot after Http2Init.
 // Observed SysV args: rdi = "/app0/param.sfx" (or this-pointer), rsi = 0x24,
 // rdx = 0x12. Guest continues without consuming the return value before the
@@ -76,6 +82,7 @@ static int KYTY_SYSV_ABI NpCppWebApiUnknown52Al(void* self, int user_or_flag)
 
 LIB_DEFINE(InitNpCppWebApi_1)
 {
+	LIB_FUNC("KJTzMXmYY+U", NpCppWebApi::NpCppWebApiIntrusivePtrArrow);
 	LIB_FUNC("Y295ygEccqk", NpCppWebApi::NpCppWebApiUnknownY295);
 	LIB_FUNC("8x++mBOUeso", NpCppWebApi::NpCppWebApiUnknown8x);
 	LIB_FUNC("UYPxv8MIzGo", NpCppWebApi::NpCppWebApiUnknownUY);

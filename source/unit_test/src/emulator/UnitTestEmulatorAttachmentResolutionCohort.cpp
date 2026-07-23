@@ -203,6 +203,38 @@ TEST(EmulatorAttachmentResolutionCohort, RejectsEmptyAndInvalidInputsStructurall
 	EXPECT_EQ(EvaluateResolutionCohort(policy, {nullptr, 1, 1, {}}).reason, ResolutionCohortReason::InvalidInput);
 }
 
+TEST(EmulatorAttachmentResolutionCohort, AllowsDepthPrepassToUseRegisteredScaledDisplayExtent)
+{
+	ResolutionCohortDecision candidate;
+	candidate.classification   = ResolutionClassification::Scaled;
+	candidate.reason           = ResolutionCohortReason::None;
+	candidate.guest_extent     = {1920, 1080};
+	candidate.host_extent      = {1280, 720};
+	candidate.scale            = {2, 3};
+	candidate.attachment_count = 1;
+
+	const auto decision =
+	    EvaluateDepthOnlyDisplayExtentCompatibility({1920, 1080}, {1280, 720}, candidate);
+	EXPECT_EQ(decision.classification, ResolutionClassification::Scaled);
+	EXPECT_EQ(decision.reason, ResolutionCohortReason::None);
+	EXPECT_EQ(decision.guest_extent, (ResolutionExtent {1920, 1080}));
+	EXPECT_EQ(decision.host_extent, (ResolutionExtent {1280, 720}));
+}
+
+TEST(EmulatorAttachmentResolutionCohort, RejectsDepthPrepassExtentOutsideValidatedCandidate)
+{
+	ResolutionCohortDecision candidate;
+	candidate.classification   = ResolutionClassification::Scaled;
+	candidate.guest_extent     = {1920, 1080};
+	candidate.host_extent      = {960, 540};
+	candidate.attachment_count = 1;
+
+	const auto decision =
+	    EvaluateDepthOnlyDisplayExtentCompatibility({1920, 1080}, {1280, 720}, candidate);
+	EXPECT_EQ(decision.classification, ResolutionClassification::Unsupported);
+	EXPECT_EQ(decision.reason, ResolutionCohortReason::MismatchedHostExtent);
+}
+
 TEST(EmulatorAttachmentResolutionCohort, ExposesStableCohortReasonNames)
 {
 	EXPECT_STREQ(ResolutionCohortReasonName(ResolutionCohortReason::None), "none");

@@ -37,6 +37,12 @@ LIB_DEFINE(InitNpEntitlementAccess_1);
 namespace NpManager {
 LIB_DEFINE(InitNpManager_1);
 } // namespace NpManager
+namespace NpProfileDialog {
+LIB_DEFINE(InitNpProfileDialog_1);
+} // namespace NpProfileDialog
+namespace NpToolkit2 {
+LIB_DEFINE(InitNpToolkit2_1);
+} // namespace NpToolkit2
 namespace NpTrophy2 {
 LIB_DEFINE(InitNpTrophy2_1);
 } // namespace NpTrophy2
@@ -85,6 +91,8 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libNpGameIntent_1", NpGameIntent::InitNpGameIntent_1);
 	LIB_CHECK(U"libNpEntitlementAccess_1", NpEntitlementAccess::InitNpEntitlementAccess_1);
 	LIB_CHECK(U"libNpManager_1", NpManager::InitNpManager_1);
+	LIB_CHECK(U"libNpProfileDialog_1", NpProfileDialog::InitNpProfileDialog_1);
+	LIB_CHECK(U"libNpToolkit2_1", NpToolkit2::InitNpToolkit2_1);
 	LIB_CHECK(U"libNpTrophy2_1", NpTrophy2::InitNpTrophy2_1);
 	LIB_CHECK(U"libNpManager_1", NpManager::InitNpManager_1);
 	if (id == U"libSaveData_1")
@@ -138,6 +146,8 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(NpGameIntent::InitNpGameIntent_1);
 	LIB_LOAD(NpEntitlementAccess::InitNpEntitlementAccess_1);
 	LIB_LOAD(NpManager::InitNpManager_1);
+	LIB_LOAD(NpProfileDialog::InitNpProfileDialog_1);
+	LIB_LOAD(NpToolkit2::InitNpToolkit2_1);
 	LIB_LOAD(NpTrophy2::InitNpTrophy2_1);
 	LIB_LOAD(NpManager::InitNpManager_1);
 	LIB_LOAD(InitSaveData_1);

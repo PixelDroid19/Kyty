@@ -5,6 +5,8 @@
 #include "Emulator/Graphics/Pm4.h"
 
 #include <algorithm>
+#include <cinttypes>
+#include <cstring>
 #include <iterator>
 
 #ifdef KYTY_EMU_ENABLED
@@ -398,6 +400,42 @@ void SetModeControl(HW::Context& context, uint32_t value)
 	mode.persp_corr_dis           = KYTY_PM4_GET(value, PA_SU_SC_MODE_CNTL, PERSP_CORR_DIS) != 0;
 
 	context.SetModeControl(mode);
+}
+
+void SetPolygonOffsetRegister(HW::Context& context, uint32_t reg, uint32_t value)
+{
+	auto offset = context.GetPolygonOffset();
+	float float_value = 0.0f;
+	std::memcpy(&float_value, &value, sizeof(float_value));
+
+	switch (reg)
+	{
+		case Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL: offset.db_format_control = value; break;
+		case Pm4::PA_SU_POLY_OFFSET_CLAMP: offset.clamp = float_value; break;
+		case Pm4::PA_SU_POLY_OFFSET_FRONT_SCALE: offset.front_scale = float_value; break;
+		case Pm4::PA_SU_POLY_OFFSET_FRONT_OFFSET: offset.front_offset = float_value; break;
+		case Pm4::PA_SU_POLY_OFFSET_BACK_SCALE: offset.back_scale = float_value; break;
+		case Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET: offset.back_offset = float_value; break;
+		default: EXIT("invalid polygon offset register: 0x%08" PRIx32 "\n", reg);
+	}
+
+	context.SetPolygonOffset(offset);
+}
+
+DepthBias ResolveDepthBias(const HW::ModeControl& mode, const HW::PolygonOffset& offset)
+{
+	DepthBias bias;
+	bias.enabled = mode.poly_offset_front_enable || mode.poly_offset_back_enable;
+	if (!bias.enabled)
+	{
+		return bias;
+	}
+
+	const bool front     = mode.poly_offset_front_enable;
+	bias.constant_factor = front ? offset.front_offset : offset.back_offset;
+	bias.clamp           = offset.clamp;
+	bias.slope_factor    = (front ? offset.front_scale : offset.back_scale) / 16.0f;
+	return bias;
 }
 
 void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value)

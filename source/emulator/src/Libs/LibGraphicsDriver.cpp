@@ -26,6 +26,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("Kx-h-nWQJ8A", Gen4::GraphicsSetCsShaderWithModifier);
 	LIB_FUNC("HlTPoZ-oY7Y", Gen4::GraphicsDrawIndex);
 	LIB_FUNC("GGsn7jMTxw4", Gen4::GraphicsDrawIndexAuto);
+	LIB_FUNC("oYM+YzfCm2Y", Gen4::GraphicsDrawIndexOffset);
 	LIB_FUNC("zwY0YV91TTI", Gen4::GraphicsSubmitCommandBuffers);
 	LIB_FUNC("xbxNatawohc", Gen4::GraphicsSubmitAndFlipCommandBuffers);
 	LIB_FUNC("yvZ73uQUqrk", Gen4::GraphicsSubmitDone);

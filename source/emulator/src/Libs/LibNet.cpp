@@ -339,6 +339,9 @@ namespace LibNpWebApi2 {
 
 LIB_VERSION("NpWebApi2", 1, "NpWebApi2", 1, 1);
 
+static constexpr int kNpWebApi2ErrorInvalidArgument = static_cast<int>(0x80553402u);
+static constexpr int kNpWebApi2ErrorRequestNotFound = static_cast<int>(0x80553406u);
+
 // Gen5 sceNpWebApi2Initialize (NID +o9816YQhqQ). Returns a positive library
 // context id; no real NP traffic yet.
 static int g_npwebapi2_next = 1;
@@ -411,6 +414,17 @@ static int KYTY_SYSV_ABI NpWebApi2CheckTimeout(int lib_ctx_id)
 	return OK;
 }
 
+static int KYTY_SYSV_ABI NpWebApi2GetHttpResponseHeaderValueLength(int64_t /*request_id*/, const char* field_name,
+	                                                                  size_t* value_length)
+{
+	PRINT_NAME();
+	if (field_name == nullptr || value_length == nullptr)
+	{
+		return kNpWebApi2ErrorInvalidArgument;
+	}
+	return kNpWebApi2ErrorRequestNotFound;
+}
+
 LIB_DEFINE(InitNet_1_NpWebApi2)
 {
 	LIB_FUNC("+o9816YQhqQ", LibNpWebApi2::NpWebApi2Initialize);
@@ -422,6 +436,7 @@ LIB_DEFINE(InitNet_1_NpWebApi2)
 	LIB_FUNC("MsaFhR+lPE4", LibNpWebApi2::NpWebApi2PushEventCreateFilter);
 	LIB_FUNC("fY3QqeNkF8k", LibNpWebApi2::NpWebApi2PushEventRegisterCallback);
 	LIB_FUNC("3Tt9zL3tkoc", LibNpWebApi2::NpWebApi2CheckTimeout);
+	LIB_FUNC("HwP3aM+c85c", LibNpWebApi2::NpWebApi2GetHttpResponseHeaderValueLength);
 }
 
 } // namespace LibNpWebApi2

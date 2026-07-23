@@ -2769,8 +2769,7 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 	uint32_t vdata   = (buffer[1] >> 8u) & 0xffu;
 	uint32_t vaddr   = (buffer[1] >> 0u) & 0xffu;
 
-	EXIT_NOT_IMPLEMENTED(idxen == 0);
-	EXIT_NOT_IMPLEMENTED(offen == 1 && (!next_gen || opcode != 0x0cu));
+	EXIT_NOT_IMPLEMENTED(offen == 1 && idxen == 1 && opcode != 0x0cu);
 	// Non-zero 12-bit offset is folded into soffset when that source is an
 	// immediate/inline constant (observed Gen5 buffer_load_dwordx* paths).
 	EXIT_NOT_IMPLEMENTED(glc == 1);
@@ -2892,7 +2891,8 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 		case 0x1A: KYTY_NI("buffer_store_short"); break;
 		case 0x1c:
 			inst.type        = ShaderInstructionType::BufferStoreDword;
-			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.format      = (offen == 1 ? ShaderInstructionFormat::Vdata1VaddrSvSoffsOffen
+			                              : ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen);
 			inst.src[1].size = 4;
 			break;
 		case 0x1D:
@@ -3391,7 +3391,17 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x21: KYTY_NI("image_sample_cl"); break;
 		case 0x22: KYTY_NI("image_sample_d"); break;
 		case 0x23: KYTY_NI("image_sample_d_cl"); break;
-		case 0x24: KYTY_NI("image_sample_l"); break;
+		case 0x24:
+			inst.type        = ShaderInstructionType::ImageSampleL;
+			inst.src[0].size = 3;
+			inst.src[1].size = 8;
+			inst.src[2].size = 4;
+			if (dmask == 0xf)
+			{
+				inst.format   = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;
+				inst.dst.size = 4;
+			}
+			break;
 		case 0x25: KYTY_NI("image_sample_b"); break;
 		case 0x26: KYTY_NI("image_sample_b_cl"); break;
 		case 0x27:

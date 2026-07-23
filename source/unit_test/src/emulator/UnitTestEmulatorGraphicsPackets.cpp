@@ -278,6 +278,78 @@ TEST(EmulatorGraphicsPackets, ParsesGen5Vop2Opcode25AsAddNoCarry)
 	EXPECT_NE(source.FindIndex("OpIAdd %uint"), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, ResolvesEmbeddedVertexOffsetFromUserSgpr)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+
+	ShaderInstruction add;
+	add.type               = ShaderInstructionType::VAddI32;
+	add.dst.type           = ShaderOperandType::Vgpr;
+	add.dst.register_id    = 5;
+	add.src[0].type        = ShaderOperandType::Sgpr;
+	add.src[0].register_id = 11;
+	add.src[1].type        = ShaderOperandType::Vgpr;
+	add.src[1].register_id = 5;
+	add.src_num            = 2;
+	code.GetInstructions().Add(add);
+
+	EXPECT_EQ(ShaderDetectVertexOffsetSgpr(code, 8, 8), 11);
+
+	ShaderVertexInputInfo input {};
+	input.fetch_external      = true;
+	input.vertex_offset_sgpr  = 11;
+	input.vertex_offset_value = 24;
+
+	EXPECT_EQ(ShaderResolveVertexOffset(0, input), 24);
+	EXPECT_EQ(ShaderResolveVertexOffset(7, input), 7);
+
+	input.fetch_external = false;
+	input.fetch_embedded = true;
+	EXPECT_EQ(ShaderResolveVertexOffset(0, input), 0);
+}
+
+TEST(EmulatorGraphicsPackets, DetectsExternalFetchVertexOffset)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Fetch);
+
+	ShaderInstruction add;
+	add.type               = ShaderInstructionType::VAddI32;
+	add.dst.type           = ShaderOperandType::Vgpr;
+	add.dst.register_id    = 0;
+	add.src[0].type        = ShaderOperandType::Sgpr;
+	add.src[0].register_id = 3;
+	add.src[1].type        = ShaderOperandType::Vgpr;
+	add.src[1].register_id = 0;
+	add.src_num            = 2;
+	code.GetInstructions().Add(add);
+
+	EXPECT_EQ(ShaderDetectVertexOffsetSgpr(code, 0, 8), 3);
+}
+
+TEST(EmulatorGraphicsPackets, RejectsAmbiguousEmbeddedVertexOffset)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+
+	for (int sgpr: {10, 11})
+	{
+		ShaderInstruction add;
+		add.type               = ShaderInstructionType::VAddI32;
+		add.dst.type           = ShaderOperandType::Vgpr;
+		add.dst.register_id    = 5;
+		add.src[0].type        = ShaderOperandType::Sgpr;
+		add.src[0].register_id = sgpr;
+		add.src[1].type        = ShaderOperandType::Vgpr;
+		add.src[1].register_id = 5;
+		add.src_num            = 2;
+		code.GetInstructions().Add(add);
+	}
+
+	EXPECT_EQ(ShaderDetectVertexOffsetSgpr(code, 8, 8), -1);
+}
+
 TEST(EmulatorGraphicsPackets, ParsesBufferStoreFormatXyzw)
 {
 	const uint32_t shader[] = {0xe01c2000u, 0x80010004u, 0xbf810000u};
@@ -352,6 +424,33 @@ TEST(EmulatorGraphicsPackets, MubufLiteralSoffsetUsesIntConstant)
 	EXPECT_NE(source.FindIndex("OpStore %temp_int_2 %int_56"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("OpStore %temp_int_2 %uint_56"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("unknown_int_constant"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesMubufStoreWithVectorOffset)
+{
+	// buffer_store_dword v1, v7, s[8:11], 0 offen offset: v7 supplies the
+	// byte offset while the descriptor supplies the buffer base and stride.
+	const uint32_t shader[] = {(0x38u << 26u) | (0x1cu << 18u) | (1u << 12u),
+	                           (128u << 24u) | (2u << 16u) | (1u << 8u) | 7u,
+	                           0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_GE(code.GetInstructions().Size(), 1u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::BufferStoreDword);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::Vdata1VaddrSvSoffsOffen);
+	EXPECT_EQ(instruction.src[0].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.src[0].register_id, 7);
 }
 
 TEST(EmulatorGraphicsPackets, ClassifiesDirectBufferStoreAsReadWrite)
@@ -1983,7 +2082,7 @@ TEST(EmulatorGraphicsPackets, ResolvesGen5LinearPitchFromDescriptorWord4)
 TEST(EmulatorGraphicsPackets, DecodesGen5WidthHeightFullIsaFields)
 {
 	ShaderTextureResource r {};
-	// width-1 uses word2[13:0]; old 12-bit mask dropped bit 12 → wrong widths >= 16385.
+	// width-1 uses word2[13:0]; old 12-bit mask dropped bit 12 -> wrong widths >= 16385.
 	r.fields[1] = (0x3u << 30u);
 	r.fields[2] = 0x1000u;
 	EXPECT_EQ(r.Width5() + 1u, 16388u);
@@ -2063,6 +2162,144 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleLzDmaskF)
 	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::ImageSampleLz);
 	EXPECT_EQ(code.GetInstructions().At(0).format, ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF);
 	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 4);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesImageSampleLWithExplicitLod)
+{
+	const uint32_t word0 = (0x3cu << 26u) | (0x24u << 18u) | (0xfu << 8u);
+	const uint32_t shader[] = {word0, 0u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::ImageSampleL);
+	EXPECT_EQ(code.GetInstructions().At(0).format, ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF);
+	EXPECT_EQ(code.GetInstructions().At(0).src[0].size, 3);
+	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 4);
+}
+
+TEST(EmulatorGraphicsPackets, SizesDynamicDisplayThinBgraSurface)
+{
+	TileSizeAlign  layout {};
+	TilePaddedSize padded[1] {};
+	TileGetTextureSize(10u, 0u, 800u, 480u, 896u, 1u, 10u, true, &layout, nullptr, padded);
+
+	EXPECT_EQ(layout.size, 896u * 512u * 4u);
+	EXPECT_EQ(layout.align, 65536u);
+	EXPECT_EQ(padded[0].width, 896u);
+	EXPECT_EQ(padded[0].height, 512u);
+}
+
+// Display-thin UI atlases place texel (0,0) at byte 0 in the tiled buffer;
+// detiling must place those four bytes at linear (0,0).
+TEST(EmulatorGraphicsPackets, DetilesDisplayThinBgraOriginTexel)
+{
+	TileInit();
+	TileSizeAlign layout {};
+	TileGetTextureSize(10u, 0u, 800u, 480u, 896u, 1u, 10u, true, &layout, nullptr, nullptr);
+	ASSERT_GT(layout.size, 4u);
+
+	std::vector<uint8_t> tiled(layout.size, 0);
+	std::vector<uint8_t> linear(static_cast<size_t>(800u * 480u * 4u), 0xAAu);
+	tiled[0] = 0x11u;
+	tiled[1] = 0x22u;
+	tiled[2] = 0x33u;
+	tiled[3] = 0x44u;
+
+	TileConvertDisplayThinBgraToLinear(linear.data(), tiled.data(), 800u, 480u, 896u, true);
+
+	EXPECT_EQ(linear[0], 0x11u);
+	EXPECT_EQ(linear[1], 0x22u);
+	EXPECT_EQ(linear[2], 0x33u);
+	EXPECT_EQ(linear[3], 0x44u);
+	EXPECT_EQ(linear[4], 0u);
+}
+
+// 1080p Display Thin padding matches the existing VideoOut neo 1080 path (1152).
+TEST(EmulatorGraphicsPackets, DetilesDisplayThinBgra1080MatchesVideoOutOrigin)
+{
+	TileInit();
+	TileSizeAlign layout {};
+	TileGetTextureSize(10u, 0u, 1920u, 1080u, 1920u, 1u, 10u, true, &layout, nullptr, nullptr);
+	ASSERT_EQ(layout.size, 1920u * 1152u * 4u);
+
+	std::vector<uint8_t> tiled(layout.size, 0);
+	std::vector<uint8_t> linear_display(static_cast<size_t>(1920u * 1080u * 4u), 0);
+	std::vector<uint8_t> linear_video(static_cast<size_t>(1920u * 1080u * 4u), 0);
+	tiled[0] = 0xABu;
+	tiled[1] = 0xCDu;
+	tiled[2] = 0xEFu;
+	tiled[3] = 0x01u;
+
+	TileConvertDisplayThinBgraToLinear(linear_display.data(), tiled.data(), 1920u, 1080u, 1920u, true);
+	TileConvertTiledToLinear(linear_video.data(), tiled.data(), TileMode::VideoOutTiled, 1920u, 1080u, true);
+
+	EXPECT_EQ(linear_display[0], linear_video[0]);
+	EXPECT_EQ(linear_display[1], linear_video[1]);
+	EXPECT_EQ(linear_display[2], linear_video[2]);
+	EXPECT_EQ(linear_display[3], linear_video[3]);
+}
+
+TEST(EmulatorGraphicsPackets, SizesDynamicMicroTiledBc3Texture)
+{
+	TileSizeAlign  layout {};
+	TileSizeOffset levels[1] {};
+	TilePaddedSize padded[1] {};
+	TileGetTextureSize(37u, 0u, 120u, 120u, 128u, 1u, 13u, true, &layout, levels, padded);
+
+	EXPECT_EQ(layout.size, 32u * 32u * 16u);
+	EXPECT_EQ(layout.align, 256u);
+	EXPECT_EQ(levels[0].offset, 0u);
+	EXPECT_EQ(levels[0].size, layout.size);
+	EXPECT_EQ(padded[0].width, 32u);
+	EXPECT_EQ(padded[0].height, 32u);
+}
+
+TEST(EmulatorGraphicsPackets, SizesDynamicMicroTiledEightBitVideoPlane)
+{
+	TileSizeAlign  layout {};
+	TileSizeOffset levels[1] {};
+	TilePaddedSize padded[1] {};
+	TileGetTextureSize(1u, 0u, 1920u, 1080u, 1920u, 1u, 13u, true, &layout, levels, padded);
+
+	EXPECT_EQ(layout.size, 1920u * 1080u);
+	EXPECT_EQ(layout.align, 256u);
+	EXPECT_EQ(levels[0].offset, 0u);
+	EXPECT_EQ(levels[0].size, layout.size);
+	EXPECT_EQ(padded[0].width, 1920u);
+	EXPECT_EQ(padded[0].height, 1080u);
+}
+
+TEST(EmulatorGraphicsPackets, DetilesEightBitMicroTiledVideoPlane)
+{
+	std::vector<uint8_t> tiled(64u);
+	std::vector<uint8_t> linear(64u, 0xffu);
+	for (uint32_t index = 0; index < tiled.size(); ++index)
+	{
+		tiled[index] = static_cast<uint8_t>(index);
+	}
+
+	TileConvertTiledToLinear(linear.data(), tiled.data(), TileMode::TextureTiled, 1u, 0u, 8u, 8u, 8u, 1u, true);
+
+	for (uint32_t y = 0; y < 8u; ++y)
+	{
+		for (uint32_t x = 0; x < 8u; ++x)
+		{
+			const uint32_t tiled_index = ((x & 1u) << 0u) | ((y & 1u) << 1u) | (((x >> 1u) & 1u) << 2u) |
+			                              (((y >> 1u) & 1u) << 3u) | (((x >> 2u) & 1u) << 4u) |
+			                              (((y >> 2u) & 1u) << 5u);
+			EXPECT_EQ(linear[y * 8u + x], tiled_index);
+		}
+	}
 }
 
 TEST(EmulatorGraphicsPackets, ParsesAndMaterializesImageLoadDmask1)
@@ -3464,6 +3701,29 @@ TEST(EmulatorGraphicsPackets, EncodesDrawIndexOffset)
 	EXPECT_EQ(cmd[2], 0x10u);
 	EXPECT_EQ(cmd[3], 0x30u);
 	EXPECT_EQ(cmd[4], 0x40000000u & 0xE0000001u);
+}
+
+TEST(EmulatorGraphicsPackets, EncodesGen4DrawIndexOffset)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(false);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t command[9] = {};
+
+	ASSERT_EQ(Gen4::GraphicsDrawIndexOffset(command, 9, 0x10u, 0x30u, 0u), 0);
+	EXPECT_EQ(command[0], KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u));
+	EXPECT_EQ(command[1], 0x30u);
+	EXPECT_EQ(command[2], 0x10u);
+	EXPECT_EQ(command[3], 0x30u);
+	EXPECT_EQ(command[4], 0u);
+	EXPECT_EQ(command[5], KYTY_PM4(4, Pm4::IT_NOP, 0u));
+	EXPECT_EQ(command[6], 0u);
+	EXPECT_EQ(command[7], 0u);
+	EXPECT_EQ(command[8], 0u);
 }
 
 // Captured UI batch (Dreaming Sarah title logo): IndexBase holds 0,1,2,1,2,3 for a

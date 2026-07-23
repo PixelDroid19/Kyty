@@ -23,6 +23,14 @@ struct DepthStencilUsage
 	bool depth_write_enable = false;
 };
 
+struct DepthBias
+{
+	bool  enabled         = false;
+	float constant_factor = 0.0f;
+	float clamp           = 0.0f;
+	float slope_factor    = 0.0f;
+};
+
 // A null stencil plane with TILE_STENCIL_DISABLE is a depth-only target.
 [[nodiscard]] inline uint32_t ResolveEffectiveStencilFormat(const HW::DepthRenderTarget& target)
 {
@@ -89,7 +97,10 @@ void SetStencilControl(HW::Context& context, uint32_t value);
 void SetStencilRefMask(HW::Context& context, uint32_t value);
 void SetStencilRefMaskBf(HW::Context& context, uint32_t value);
 void SetModeControl(HW::Context& context, uint32_t value);
+void SetPolygonOffsetRegister(HW::Context& context, uint32_t reg, uint32_t value);
 void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
+
+[[nodiscard]] DepthBias ResolveDepthBias(const HW::ModeControl& mode, const HW::PolygonOffset& offset);
 
 // Guest top-left coordinates are inclusive, bottom-right coordinates are exclusive, and enabled rectangles intersect.
 [[nodiscard]] ScissorRect ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanModeControl& mode, uint32_t viewport_id);

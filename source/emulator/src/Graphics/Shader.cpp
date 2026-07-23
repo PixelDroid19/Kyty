@@ -68,13 +68,20 @@ bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 	return format == 20 || format == 22;
 }
 
+bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource)
+{
+	// Raw BUFFER_*_DWORD instructions address the descriptor in DWORDs and do
+	// not consume its typed-format metadata. A zero stride denotes a
+	// byte-addressed range whose record field is its byte size.
+	return resource.Stride() != 0 ? (resource.Stride() & 0x3u) == 0
+	                              : resource.NumRecords() != 0 && (resource.NumRecords() & 0x3u) == 0;
+}
+
 bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access)
 {
 	if (access == ShaderStorageAccess::Raw)
 	{
-		// Raw BUFFER_*_DWORD instructions do not consume the descriptor's typed format.
-		// The existing SPIR-V address path operates in DWORDs, so record strides must preserve DWORD alignment.
-		return resource.Stride() != 0 && (resource.Stride() & 0x3u) == 0;
+		return ShaderRawStorageDescriptorSupported(resource);
 	}
 
 	const bool four_component = resource.Stride() == 16 && resource.DstSelXYZW() == DstSel(4, 5, 6, 7) &&
@@ -280,13 +287,15 @@ struct ShaderDebugPrintfCmds
 
 static Vector<uint64_t>*                               g_disabled_shaders = nullptr;
 static Vector<ShaderDebugPrintfCmds>*                  g_debug_printfs    = nullptr;
-static std::unordered_map<uint64_t, ShaderMappedData>* g_shader_map       = nullptr;
+static std::unordered_map<uint64_t, ShaderMappedData>* g_shader_map              = nullptr;
+static std::unordered_map<uint64_t, int32_t>*          g_vertex_offset_sgpr_map = nullptr;
 
 void ShaderInit()
 {
 	EXIT_IF(g_shader_map != nullptr);
 
-	g_shader_map = new std::unordered_map<uint64_t, ShaderMappedData>();
+	g_shader_map             = new std::unordered_map<uint64_t, ShaderMappedData>();
+	g_vertex_offset_sgpr_map = new std::unordered_map<uint64_t, int32_t>();
 }
 
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
@@ -985,8 +994,7 @@ static void ps_check(const HW::PsStageRegisters& ps, const HW::ShaderRegisters& 
 	EXIT_NOT_IMPLEMENTED(ps.rsrc2.shared_vgprs != 0);
 
 	EXIT_NOT_IMPLEMENTED(sh.shader_z_format != 0x00000000);
-	EXIT_NOT_IMPLEMENTED(sh.ps_input_ena != 0x00000002 && sh.ps_input_ena != 0x00000302);
-	EXIT_NOT_IMPLEMENTED(sh.ps_input_addr != 0x00000002 && sh.ps_input_addr != 0x00000302);
+	EXIT_NOT_IMPLEMENTED(!ShaderPixelInputMaskSupported(sh.ps_input_ena, sh.ps_input_addr));
 	// EXIT_NOT_IMPLEMENTED(ps.m_spiPsInControl != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(sh.baryc_cntl != 0x00000000 && sh.baryc_cntl != 0x01000000);
 	// CB_SHADER_MASK: 4 enable bits per RT0..RT7. Captured values: 0xf (RT0)
@@ -1002,6 +1010,29 @@ static void ps_check(const HW::PsStageRegisters& ps, const HW::ShaderRegisters& 
 
 	EXIT_NOT_IMPLEMENTED(sh.db_shader_control.other_bits != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(sh.m_paScShaderControl != 0x00000000);
+}
+
+bool ShaderPixelInputMaskSupported(uint32_t enable_mask, uint32_t address_mask)
+{
+	constexpr uint32_t kPerspectiveCenter = 1u << 1u;
+	constexpr uint32_t kLinearCenter      = 1u << 5u;
+	constexpr uint32_t kPositionXy        = (1u << 8u) | (1u << 9u);
+	constexpr uint32_t kSupported         = kPerspectiveCenter | kLinearCenter | kPositionXy;
+
+	if (enable_mask != address_mask || (enable_mask & ~kSupported) != 0)
+	{
+		return false;
+	}
+	const uint32_t interpolation = enable_mask & (kPerspectiveCenter | kLinearCenter);
+	const uint32_t position      = enable_mask & kPositionXy;
+	return (interpolation == kPerspectiveCenter || interpolation == kLinearCenter) &&
+	       (position == 0 || position == kPositionXy);
+}
+
+bool ShaderPixelPositionEnabled(uint32_t enable_mask, uint32_t address_mask)
+{
+	constexpr uint32_t kPositionXy = (1u << 8u) | (1u << 9u);
+	return (enable_mask & kPositionXy) == kPositionXy && (address_mask & kPositionXy) == kPositionXy;
 }
 
 static void cs_check(const HW::CsStageRegisters& cs, const HW::ShaderRegisters& /*sh*/)
@@ -1250,7 +1281,7 @@ static void ShaderDetectBuffers(ShaderVertexInputInfo* info, bool ps5)
 	}
 }
 
-static void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const uint32_t* buffer)
+static void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const uint32_t* buffer, uint32_t user_sgpr_num)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -1265,6 +1296,7 @@ static void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch,
 		DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
 		ShaderParse(fetch, &code);
 	}
+	info->vertex_offset_sgpr = ShaderDetectVertexOffsetSgpr(code, 0, user_sgpr_num);
 
 	KYTY_PROFILER_END_BLOCK;
 
@@ -2456,6 +2488,69 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
 }
 
+int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base, uint32_t user_data_count)
+{
+	int32_t candidate = -1;
+
+	auto is_zero = [](const ShaderOperand& operand)
+	{
+		return (operand.type == ShaderOperandType::IntegerInlineConstant ||
+		        operand.type == ShaderOperandType::LiteralConstant) &&
+		       operand.constant.u == 0;
+	};
+
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.type == ShaderInstructionType::BufferLoadFormatX || inst.type == ShaderInstructionType::BufferLoadFormatXy ||
+		    inst.type == ShaderInstructionType::BufferLoadFormatXyz || inst.type == ShaderInstructionType::BufferLoadFormatXyzw)
+		{
+			break;
+		}
+		if (inst.dst.type != ShaderOperandType::Vgpr)
+		{
+			continue;
+		}
+
+		const bool vertex_index = inst.dst.register_id == 0 || (user_data_base == 8 && inst.dst.register_id == 5);
+		const bool add_offset = inst.type == ShaderInstructionType::VAddI32 && inst.src_num >= 2 &&
+		                        inst.src[0].type == ShaderOperandType::Sgpr && inst.src[1].type == ShaderOperandType::Vgpr &&
+		                        inst.src[1].register_id == inst.dst.register_id;
+		const bool sad_offset = user_data_base == 8 && inst.dst.register_id == 5 && inst.type == ShaderInstructionType::VSadU32 &&
+		                        inst.src_num >= 3 && inst.src[0].type == ShaderOperandType::Sgpr && is_zero(inst.src[1]) &&
+		                        inst.src[2].type == ShaderOperandType::Vgpr && inst.src[2].register_id == inst.dst.register_id;
+		if (!vertex_index || (!add_offset && !sad_offset))
+		{
+			continue;
+		}
+
+		const auto sgpr = static_cast<uint32_t>(inst.src[0].register_id);
+		if (sgpr < user_data_base || sgpr - user_data_base >= user_data_count)
+		{
+			continue;
+		}
+		if (candidate >= 0 && candidate != static_cast<int32_t>(sgpr))
+		{
+			return -1;
+		}
+		candidate = static_cast<int32_t>(sgpr);
+	}
+
+	return candidate;
+}
+
+int32_t ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info)
+{
+	if (index_offset != 0)
+	{
+		return static_cast<int32_t>(index_offset);
+	}
+	if (!input_info.fetch_external || input_info.vertex_offset_sgpr < 0)
+	{
+		return 0;
+	}
+	return static_cast<int32_t>(input_info.vertex_offset_value);
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info)
 {
@@ -2543,6 +2638,26 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 		ShaderParseAttrib(info, data.input_semantics, data.num_input_semantics, attrib, buffer);
 		ShaderDetectBuffers(info, ps5);
+
+		constexpr uint32_t user_data_base = 8;
+		auto               cached         = g_vertex_offset_sgpr_map->find(shader_addr);
+		if (cached == g_vertex_offset_sgpr_map->end())
+		{
+			ShaderCode code;
+			code.SetType(ShaderType::Vertex);
+			ShaderParse(reinterpret_cast<const uint32_t*>(shader_addr), &code);
+			const int32_t detected = ShaderDetectVertexOffsetSgpr(code, user_data_base, user_sgpr_num);
+			cached                 = g_vertex_offset_sgpr_map->insert({shader_addr, detected}).first;
+		}
+		info->vertex_offset_sgpr = cached->second;
+		if (info->vertex_offset_sgpr >= static_cast<int32_t>(user_data_base))
+		{
+			const auto index = static_cast<uint32_t>(info->vertex_offset_sgpr) - user_data_base;
+			if (index < user_sgpr_num && index < static_cast<uint32_t>(HW::UserSgprInfo::SGPRS_MAX))
+			{
+				info->vertex_offset_value = user_sgpr.value[index];
+			}
+		}
 	}
 
 	if (usage.fetch && usage.vertex_buffer)
@@ -2564,8 +2679,14 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 		EXIT_NOT_IMPLEMENTED(fetch == nullptr || buffer == nullptr);
 
-		ShaderParseFetch(info, fetch, buffer);
+		ShaderParseFetch(info, fetch, buffer, user_sgpr_num);
 		ShaderDetectBuffers(info, ps5);
+		if (info->vertex_offset_sgpr >= 0 &&
+		    static_cast<uint32_t>(info->vertex_offset_sgpr) < user_sgpr_num &&
+		    static_cast<uint32_t>(info->vertex_offset_sgpr) < static_cast<uint32_t>(HW::UserSgprInfo::SGPRS_MAX))
+		{
+			info->vertex_offset_value = user_sgpr.value[info->vertex_offset_sgpr];
+		}
 	}
 
 	ShaderCalcBindingIndices(&info->bind);
@@ -2587,7 +2708,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	}
 
 	ps_info->input_num            = sh->ps_in_control;
-	ps_info->ps_pos_xy            = (sh->ps_input_ena == 0x00000302 && sh->ps_input_addr == 0x00000302);
+	ps_info->ps_pos_xy            = ShaderPixelPositionEnabled(sh->ps_input_ena, sh->ps_input_addr);
 	ps_info->ps_pixel_kill_enable = sh->db_shader_control.shader_kill_enable;
 	ps_info->ps_early_z           = (sh->db_shader_control.shader_z_behavior == 1);
 	ps_info->ps_execute_on_noop   = sh->db_shader_control.shader_execute_on_noop;

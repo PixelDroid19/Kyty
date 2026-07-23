@@ -56,7 +56,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 //   1) sample ufmt and surface VkFormat are the same family, and
 //   2) Vulkan extent equals the sample descriptor (exact width×height).
 // Binding a larger parent without a crop view samples the wrong tiles and
-// leaves horizontal bands / false-color props (Dead Cells residual). For known
+// leaves horizontal bands or false-color geometry. For known
 // ufmts 56/71, zero exact+format matches → reject alias (fall through); never
 // fall back to a format-compatible different extent.
 //
@@ -107,7 +107,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 
 // Sample guest upload must not flush StorageBuffers first: SSBOs are linear
 // MUBUF data, not texture tiles. Write-back then detile/linear-upload corrupts
-// package atlases and intermediates (Dead Cells cyan/banded props).
+// package atlases and intermediate surfaces.
 [[nodiscard]] inline bool Gen5SampleMayWriteBackStorageBeforeGuestUpload()
 {
 	return false;
@@ -547,7 +547,7 @@ struct ColorAttachmentLoadOps
 {
 	ColorAttachmentLoadOps ops {};
 	// First bind (UNDEFINED) and rebind after sampling (SHADER_READ_ONLY) must CLEAR.
-	// Captured Dead Cells lighting: RGBA16F + SRC_ALPHA,ONE with no guest fast-clear;
+	// Additive RGBA16F lighting can omit a guest fast-clear;
 	// LOAD after sample keeps prior-frame light and accumulates into hot yellow/red slabs.
 	// Within-frame light draws stay COLOR_ATTACHMENT_OPTIMAL and still LOAD.
 	// BeginRenderPass barriers non-COLOR layouts to COLOR before vkCmdBeginRenderPass,
@@ -685,13 +685,12 @@ enum class LabelForceCompleteKind : uint8_t
 	return submit_and_flip && !flip_issued_during_run;
 }
 
-// Flip callbacks are post-fence completion actions. A batch that issued a flip
-// must retire the exact containing submission even when the guest does not
-// submit another batch; otherwise a guest waiting for its first flip event can
-// starve the only code path that publishes that event.
-[[nodiscard]] inline bool GraphicsBatchNeedsSubmissionCompletion(bool flip_issued_during_run)
+// Completion callbacks publish guest-visible interrupts and flips after the
+// GPU fence. Retire their containing submission even when the guest cannot
+// submit another batch until that callback runs.
+[[nodiscard]] inline bool GraphicsBatchNeedsSubmissionCompletion(bool completion_callback_issued)
 {
-	return flip_issued_during_run;
+	return completion_callback_issued;
 }
 
 // GPU→CPU buffer write-back with absolute holes [hole_begin[i], hole_end[i]).

@@ -81,6 +81,55 @@ struct SaveDataMountResult
 	int                pad;
 };
 
+static int MountSaveDataDirectory(const String& mount_dir, uint32_t mount_mode, SaveDataMountResult* mount_result)
+{
+	if (mount_result == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	const bool create            = (mount_mode & 0x04u) != 0;
+	const bool create_if_missing = (mount_mode & 0x20u) != 0;
+	const bool open              = !create && !create_if_missing && (mount_mode & 0x03u) != 0;
+	if (!create && !create_if_missing && !open)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	const bool existed = Core::File::IsDirectoryExisting(mount_dir);
+	if (open && !existed)
+	{
+		return SAVE_DATA_ERROR_NOT_FOUND;
+	}
+	if (create && existed)
+	{
+		return SAVE_DATA_ERROR_EXISTS;
+	}
+
+	bool created = false;
+	if (!existed)
+	{
+		Core::File::CreateDirectories(mount_dir);
+		if (!Core::File::IsDirectoryExisting(mount_dir))
+		{
+			return SAVE_DATA_ERROR_INTERNAL;
+		}
+		created = true;
+	}
+
+	const String mount_point = SAVE_DATA_POINT;
+	LibKernel::FileSystem::Mount(mount_dir, mount_point);
+	std::memset(mount_result, 0, sizeof(*mount_result));
+	const int written = std::snprintf(mount_result->mount_point.data, sizeof(mount_result->mount_point.data), "%s", mount_point.C_Str());
+	if (written < 0 || written >= static_cast<int>(sizeof(mount_result->mount_point.data)))
+	{
+		return SAVE_DATA_ERROR_INTERNAL;
+	}
+
+	mount_result->mount_status = created ? 1u : 0u;
+	return OK;
+}
+
 struct SaveDataParam
 {
 	char     title[128];
@@ -279,55 +328,8 @@ int KYTY_SYSV_ABI SaveDataMount(const SaveDataMount* mount, SaveDataMountResult*
 	printf("\t blocks      = %" PRIu64 "\n", mount->blocks);
 	printf("\t mount_mode  = %" PRIu32 "\n", mount->mount_mode);
 
-	String mount_dir   = String(SAVE_DATA_DIR) + U"/" + String::FromUtf8(mount->dir_name);
-	String mount_point = SAVE_DATA_POINT;
-	bool   create      = (mount->mount_mode == 6 || mount->mount_mode == 22);
-	bool   open        = (mount->mount_mode == 1 || mount->mount_mode == 2);
-
-	if (!create && !open)
-	{
-		EXIT("unknown mount mode: %u", mount->mount_mode);
-	}
-
-	if (open)
-	{
-		EXIT_NOT_IMPLEMENTED(create);
-
-		if (!Core::File::IsDirectoryExisting(mount_dir))
-		{
-			return SAVE_DATA_ERROR_NOT_FOUND;
-		}
-
-		LibKernel::FileSystem::Mount(mount_dir, mount_point);
-
-		mount_result->mount_status = 0;
-	}
-
-	if (create)
-	{
-		EXIT_NOT_IMPLEMENTED(open);
-
-		if (Core::File::IsDirectoryExisting(mount_dir))
-		{
-			return SAVE_DATA_ERROR_EXISTS;
-		}
-
-		Core::File::CreateDirectories(mount_dir);
-
-		EXIT_NOT_IMPLEMENTED((!Core::File::IsDirectoryExisting(mount_dir)));
-
-		LibKernel::FileSystem::Mount(mount_dir, mount_point);
-
-		mount_result->mount_status = 1;
-	}
-
-	int s = snprintf(mount_result->mount_point.data, 16, "%s", mount_point.C_Str());
-
-	EXIT_NOT_IMPLEMENTED(s >= 16);
-
-	mount_result->required_blocks = 0;
-
-	return OK;
+	const String mount_dir = String(SAVE_DATA_DIR) + U"/" + String::FromUtf8(mount->dir_name);
+	return MountSaveDataDirectory(mount_dir, mount->mount_mode, mount_result);
 }
 
 int KYTY_SYSV_ABI SaveDataMount2(const SaveDataMount2* mount, SaveDataMountResult* mount_result)
@@ -342,55 +344,8 @@ int KYTY_SYSV_ABI SaveDataMount2(const SaveDataMount2* mount, SaveDataMountResul
 	printf("\t blocks     = %" PRIu64 "\n", mount->blocks);
 	printf("\t mount_mode = %" PRIu32 "\n", mount->mount_mode);
 
-	String mount_dir   = String(SAVE_DATA_DIR) + U"/" + String::FromUtf8(mount->dir_name->data);
-	String mount_point = SAVE_DATA_POINT;
-	bool   create      = (mount->mount_mode == 6 || mount->mount_mode == 22);
-	bool   open        = (mount->mount_mode == 1 || mount->mount_mode == 2);
-
-	if (!create && !open)
-	{
-		EXIT("unknown mount mode: %u", mount->mount_mode);
-	}
-
-	if (open)
-	{
-		EXIT_NOT_IMPLEMENTED(create);
-
-		if (!Core::File::IsDirectoryExisting(mount_dir))
-		{
-			return SAVE_DATA_ERROR_NOT_FOUND;
-		}
-
-		LibKernel::FileSystem::Mount(mount_dir, mount_point);
-
-		mount_result->mount_status = 0;
-	}
-
-	if (create)
-	{
-		EXIT_NOT_IMPLEMENTED(open);
-
-		if (Core::File::IsDirectoryExisting(mount_dir))
-		{
-			return SAVE_DATA_ERROR_EXISTS;
-		}
-
-		Core::File::CreateDirectories(mount_dir);
-
-		EXIT_NOT_IMPLEMENTED((!Core::File::IsDirectoryExisting(mount_dir)));
-
-		LibKernel::FileSystem::Mount(mount_dir, mount_point);
-
-		mount_result->mount_status = 1;
-	}
-
-	int s = snprintf(mount_result->mount_point.data, 16, "%s", mount_point.C_Str());
-
-	EXIT_NOT_IMPLEMENTED(s >= 16);
-
-	mount_result->required_blocks = 0;
-
-	return OK;
+	const String mount_dir = String(SAVE_DATA_DIR) + U"/" + String::FromUtf8(mount->dir_name->data);
+	return MountSaveDataDirectory(mount_dir, mount->mount_mode, mount_result);
 }
 
 int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult* mount_result)

@@ -60,6 +60,7 @@ enum class ShaderInstructionType : uint32_t
 	Exp,
 	ImageLoad,
 	ImageSample,
+	ImageSampleL,
 	ImageSampleLz,
 	ImageSampleLzO,
 	ImageStore,
@@ -405,6 +406,7 @@ enum Format : uint64_t
 	Vdata1Vaddr3StSsDmask4              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask4}),
 	Vdata1Vaddr3StSsDmask8              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask8}),
 	Vdata1Vaddr2SvSoffsOffenIdxen       = FormatDefine({D, S0A2, S1A4, S2, Offen, Idxen}),
+	Vdata1VaddrSvSoffsOffen             = FormatDefine({D, S0, S1A4, S2, Offen}),
 	Vdata1VaddrSvSoffsIdxen             = FormatDefine({D, S0, S1A4, S2, Idxen}),
 	Vdata1VaddrSvSoffsIdxenFloat1       = FormatDefine({D, S0, S1A4, S2, Idxen, Float1}),
 	Vdata2Vaddr3StSsDmask3              = FormatDefine({DA2, S0A3, S1A8, S2A4, Dmask3}),
@@ -958,6 +960,7 @@ struct ShaderStorageResources
 };
 
 [[nodiscard]] bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access);
+[[nodiscard]] bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource);
 [[nodiscard]] ShaderStorageAccessEvidence ResolveShaderStorageAccessEvidence(bool code_available, ShaderStorageBindingSource source,
                                                                              ShaderStorageAccess exact_match,
                                                                              ShaderStorageAccess unbased_match, bool decoded_unknown,
@@ -1078,6 +1081,8 @@ struct ShaderVertexInputInfo
 	int      fetch_buffer_reg           = 0;
 	int      buffers_num                = 0;
 	int      export_count               = 0;
+	int32_t  vertex_offset_sgpr         = -1;
+	uint32_t vertex_offset_value        = 0;
 	bool     fetch_external             = false;
 	bool     fetch_embedded             = false;
 	bool     fetch_inline               = false;
@@ -1114,6 +1119,9 @@ struct ShaderPixelInputInfo
 	bool                ps_execute_on_noop        = false;
 	ShaderBindResources bind;
 };
+
+[[nodiscard]] bool ShaderPixelInputMaskSupported(uint32_t enable_mask, uint32_t address_mask);
+[[nodiscard]] bool ShaderPixelPositionEnabled(uint32_t enable_mask, uint32_t address_mask);
 
 struct ShaderSharp
 {
@@ -1237,6 +1245,9 @@ void ShaderInit();
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
 
 void               ShaderCalcBindingIndices(ShaderBindResources* bind);
+[[nodiscard]] int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base,
+                                                    uint32_t user_data_count);
+[[nodiscard]] int32_t ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info);
 ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register);
 bool               ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type);
 void               ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info);

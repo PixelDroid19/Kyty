@@ -1,5 +1,6 @@
 #include "Emulator/Libs/Np.h"
 
+#include "Emulator/Dialog.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
@@ -376,12 +377,56 @@ static KYTY_SYSV_ABI int GetAccountIdA(int32_t user_id, uint64_t* account_id)
 	return kNpErrorSignedOut;
 }
 
+static KYTY_SYSV_ABI int GetUserIdByAccountId(uint64_t account_id, int32_t* user_id)
+{
+	PRINT_NAME();
+	if (account_id == 0 || user_id == nullptr)
+	{
+		return kNpErrorInvalidArgument;
+	}
+	return kNpErrorSignedOut;
+}
+
 LIB_DEFINE(InitNpManager_1)
 {
 	LIB_FUNC("JT+t00a3TxA", GetAccountCountryA);
 	LIB_FUNC("rbknaUjpqWo", GetAccountIdA);
+	LIB_FUNC("VgYczPGB5ss", GetUserIdByAccountId);
 }
 
 } // namespace Kyty::Libs::NpManager
+
+namespace Kyty::Libs::NpProfileDialog {
+
+LIB_VERSION("NpProfileDialog", 1, "NpProfileDialog", 1, 1);
+
+static KYTY_SYSV_ABI int UpdateStatus()
+{
+	PRINT_NAME();
+	return Dialog::CommonDialog::STATUS_NONE;
+}
+
+LIB_DEFINE(InitNpProfileDialog_1)
+{
+	LIB_FUNC("haVZE9FgKqE", UpdateStatus);
+}
+
+} // namespace Kyty::Libs::NpProfileDialog
+
+namespace Kyty::Libs::NpToolkit2 {
+
+LIB_VERSION("NpToolkit2", 1, "NpToolkit2", 0, 0);
+
+static KYTY_SYSV_ABI void FriendGetFriendsUnsupported()
+{
+	EXIT("NpToolkit2 Friend::getFriends is not implemented\n");
+}
+
+LIB_DEFINE(InitNpToolkit2_1)
+{
+	LIB_FUNC("7zsee5IHLis", FriendGetFriendsUnsupported);
+}
+
+} // namespace Kyty::Libs::NpToolkit2
 
 #endif // KYTY_EMU_ENABLED

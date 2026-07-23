@@ -1,6 +1,8 @@
 #include "Emulator/Libs/Np.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
+#include "Emulator/Config.h"
+#include "Emulator/Log.h"
 #include "Kyty/UnitTest.h"
 
 #include <cstring>
@@ -8,6 +10,19 @@
 UT_BEGIN(EmulatorNp);
 
 using namespace Libs;
+
+namespace {
+
+void EnsureLog()
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+}
+
+} // namespace
 
 TEST(EmulatorNp, ResolvesSessionSignalingInitialize)
 {
@@ -39,6 +54,128 @@ TEST(EmulatorNp, ResolvesAlternateStateCallbackExport)
 	query.module_version_minor = 1;
 	query.type                 = Loader::SymbolType::Func;
 	EXPECT_NE(symbols.Find(query), nullptr);
+}
+
+TEST(EmulatorNp, ResolvesCppWebApiIntrusivePointerArrow)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNpCppWebApi_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"KJTzMXmYY+U";
+	query.library              = U"NpCppWebApi";
+	query.library_version      = 1;
+	query.module               = U"NpCppWebApi";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.Find(query);
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	int   value = 0;
+	void* slot  = &value;
+	using OperatorArrow = KYTY_SYSV_ABI void* (*)(const void* self);
+	auto* fn            = reinterpret_cast<OperatorArrow>(rec->vaddr);
+	EXPECT_EQ(fn(&slot), &value);
+}
+
+TEST(EmulatorNp, ReportsSignedOutForAccountIdLookup)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNpManager_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"VgYczPGB5ss";
+	query.library              = U"NpManager";
+	query.library_version      = 1;
+	query.module               = U"NpManager";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.Find(query);
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using GetUserIdByAccountId = KYTY_SYSV_ABI int (*)(uint64_t account_id, int32_t* user_id);
+	auto* fn                   = reinterpret_cast<GetUserIdByAccountId>(rec->vaddr);
+	int32_t user_id            = -1;
+	EXPECT_EQ(fn(0, &user_id), static_cast<int>(0x80550003u));
+	EXPECT_EQ(fn(1, nullptr), static_cast<int>(0x80550003u));
+	EXPECT_EQ(fn(1, &user_id), static_cast<int>(0x80550006u));
+	EXPECT_EQ(user_id, -1);
+}
+
+TEST(EmulatorNp, ReportsNoProfileDialogWhenItHasNotBeenOpened)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNpProfileDialog_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"haVZE9FgKqE";
+	query.library              = U"NpProfileDialog";
+	query.library_version      = 1;
+	query.module               = U"NpProfileDialog";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.Find(query);
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using UpdateStatus = KYTY_SYSV_ABI int (*)();
+	auto* fn           = reinterpret_cast<UpdateStatus>(rec->vaddr);
+	EXPECT_EQ(fn(), 0);
+}
+
+TEST(EmulatorNp, ResolvesToolkitFriendsRequestAsStructuredUnsupportedOperation)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNpToolkit2_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"7zsee5IHLis";
+	query.library              = U"NpToolkit2";
+	query.library_version      = 1;
+	query.module               = U"NpToolkit2";
+	query.module_version_major = 0;
+	query.module_version_minor = 0;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.Find(query);
+	ASSERT_NE(rec, nullptr);
+	EXPECT_NE(rec->vaddr, 0u);
+}
+
+TEST(EmulatorNp, ReportsMissingWebApiResponseHeaderForUnknownRequest)
+{
+	EnsureLog();
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNet_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"HwP3aM+c85c";
+	query.library              = U"NpWebApi2";
+	query.library_version      = 1;
+	query.module               = U"NpWebApi2";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* rec = symbols.Find(query);
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using GetHeaderLength = KYTY_SYSV_ABI int (*)(int64_t request_id, const char* field_name, size_t* value_length);
+	auto* fn              = reinterpret_cast<GetHeaderLength>(rec->vaddr);
+	size_t value_length   = 99;
+	EXPECT_EQ(fn(1, nullptr, &value_length), static_cast<int>(0x80553402u));
+	EXPECT_EQ(fn(1, "Content-Type", nullptr), static_cast<int>(0x80553402u));
+	EXPECT_EQ(fn(1, "Content-Type", &value_length), static_cast<int>(0x80553406u));
+	EXPECT_EQ(value_length, 99u);
 }
 
 TEST(EmulatorNp, ValidatesAndCreatesStableHandles)

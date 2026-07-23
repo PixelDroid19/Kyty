@@ -360,6 +360,34 @@ int KYTY_SYSV_ABI GraphicsDrawIndexAuto(uint32_t* cmd, uint64_t size, uint32_t i
 	return OK;
 }
 
+int KYTY_SYSV_ABI GraphicsDrawIndexOffset(uint32_t* cmd, uint64_t size, uint32_t index_offset, uint32_t index_count, uint32_t flags)
+{
+	PRINT_NAME();
+
+	if (cmd == nullptr || size != 9)
+	{
+		return -1;
+	}
+
+	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+	printf("\t size        = %" PRIu64 "\n", size);
+	printf("\t index_offset = %" PRIu32 "\n", index_offset);
+	printf("\t index_count = %" PRIu32 "\n", index_count);
+	printf("\t flags       = %08" PRIx32 "\n", flags);
+
+	cmd[0] = KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u) | (flags & 1u);
+	cmd[1] = index_count;
+	cmd[2] = index_offset;
+	cmd[3] = index_count;
+	cmd[4] = Config::IsNeo() ? (flags & 0xE0000000u) : 0u;
+	cmd[5] = KYTY_PM4(4, Pm4::IT_NOP, 0u);
+	cmd[6] = 0u;
+	cmd[7] = 0u;
+	cmd[8] = 0u;
+
+	return OK;
+}
+
 int KYTY_SYSV_ABI GraphicsInsertWaitFlipDone(uint32_t* cmd, uint64_t size, uint32_t video_out_handle, uint32_t display_buffer_index)
 {
 	PRINT_NAME();

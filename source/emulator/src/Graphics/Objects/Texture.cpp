@@ -234,7 +234,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, nullptr);
 	} else
 	{
-		EXIT_NOT_IMPLEMENTED(tile != 8 && tile != 13);
+		EXIT_NOT_IMPLEMENTED(tile != 8 && tile != 13 && tile != 10);
 
 		TileGetTextureSize(dfmt, nfmt, width, height, pitch, levels, tile, neo, nullptr, level_sizes, nullptr);
 	}
@@ -282,6 +282,20 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			TileConvertTiledToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), TileMode::TextureTiled, dfmt, nfmt, width, height, pitch,
 			                         levels, neo);
 			UtilFillImage(ctx, vk_obj, temp_buf, *size, regions, static_cast<uint64_t>(vk_layout));
+			delete[] temp_buf;
+		} else if (tile == 10)
+		{
+			// Display_2dThin BGRA8 (SDL_GPU/Gnm UI and display surfaces). Do not treat
+			// these as GPU-owned RenderTextures: that path skipped CPU upload and left
+			// tiled guest bytes unread, which sampled as horizontally smeared UI.
+			EXIT_NOT_IMPLEMENTED(!(dfmt == 10 && nfmt == 0));
+			EXIT_NOT_IMPLEMENTED(levels != 1);
+			const uint64_t linear_bytes = static_cast<uint64_t>(width) * height * 4u;
+			EXIT_NOT_IMPLEMENTED(linear_bytes == 0);
+			auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
+			TileConvertDisplayThinBgraToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), width, height, pitch, neo);
+			regions[0].pitch = static_cast<uint32_t>(width);
+			UtilFillImage(ctx, vk_obj, temp_buf, linear_bytes, regions, static_cast<uint64_t>(vk_layout));
 			delete[] temp_buf;
 		} else if (tile == 8)
 		{
