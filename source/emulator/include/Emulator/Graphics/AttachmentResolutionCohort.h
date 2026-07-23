@@ -67,6 +67,8 @@ struct ResolutionCohortDecision
 [[nodiscard]] ResolutionCohortDecision EvaluateResolutionCohort(const InternalResolutionPolicy& policy, const ResolutionCohortInput& input);
 [[nodiscard]] ResolutionCohortDecision EvaluateNativeDisplayExtentCompatibility(ResolutionExtent guest_extent,
                                                                                  ResolutionExtent registered_host_extent);
+[[nodiscard]] ResolutionCohortDecision EvaluateDepthOnlyDisplayExtentCompatibility(
+    ResolutionExtent guest_extent, ResolutionExtent registered_host_extent, const ResolutionCohortDecision& scalable_candidate);
 // Only instruction-derived hazards are reported here. Fragment-coordinate use
 // comes from normalized pixel input state, and its support is set only after a
 // valid host-to-guest scale has been built.

@@ -139,6 +139,40 @@ ResolutionCohortDecision EvaluateNativeDisplayExtentCompatibility(ResolutionExte
 	return decision;
 }
 
+ResolutionCohortDecision EvaluateDepthOnlyDisplayExtentCompatibility(
+    ResolutionExtent guest_extent, ResolutionExtent registered_host_extent, const ResolutionCohortDecision& scalable_candidate)
+{
+	if (registered_host_extent == guest_extent)
+	{
+		return EvaluateNativeDisplayExtentCompatibility(guest_extent, registered_host_extent);
+	}
+
+	ResolutionCohortDecision decision = scalable_candidate;
+	decision.guest_extent             = guest_extent;
+	decision.host_extent              = registered_host_extent;
+	decision.attachment_count         = 1;
+	if (guest_extent.width == 0 || guest_extent.height == 0 || registered_host_extent.width == 0 ||
+	    registered_host_extent.height == 0)
+	{
+		decision.classification = ResolutionClassification::Unsupported;
+		decision.reason         = ResolutionCohortReason::InvalidInput;
+		return decision;
+	}
+	if (scalable_candidate.classification != ResolutionClassification::Scaled ||
+	    scalable_candidate.guest_extent != guest_extent || scalable_candidate.host_extent != registered_host_extent)
+	{
+		decision.classification = ResolutionClassification::Unsupported;
+		decision.reason = scalable_candidate.classification == ResolutionClassification::Scaled
+		                      ? ResolutionCohortReason::MismatchedHostExtent
+		                      : (scalable_candidate.reason == ResolutionCohortReason::None
+		                             ? ResolutionCohortReason::AttachmentNotScalable
+		                             : scalable_candidate.reason);
+		return decision;
+	}
+
+	return decision;
+}
+
 ResolutionShaderCoordinateUsage AnalyzeResolutionShaderUsage(const ShaderCode& code)
 {
 	ResolutionShaderCoordinateUsage usage;

@@ -41,6 +41,9 @@ void TileInit();
 void TileConvertTiledToLinear(void* dst, const void* src, TileMode mode, uint32_t width, uint32_t height, bool neo);
 void TileConvertTiledToLinear(void* dst, const void* src, TileMode mode, uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t height,
                               uint32_t pitch, uint32_t levels, bool neo);
+// Display_2dThin (tile mode 10) BGRA8: 128x128 macro tiles; padded pitch/height from
+// TileGetTextureSize's dynamic Display Thin rule. Dest rows are tightly packed (width).
+void TileConvertDisplayThinBgraToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch, bool neo);
 
 bool TileGetDepthSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t z_format, uint32_t stencil_format, bool htile, bool neo,
                       bool next_gen, TileSizeAlign* stencil_size, TileSizeAlign* htile_size, TileSizeAlign* depth_size);

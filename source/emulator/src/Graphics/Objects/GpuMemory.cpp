@@ -509,7 +509,9 @@ uint32_t GpuResources::AddResource(uint32_t owner_handle, uint64_t memory, size_
 {
 	Core::LockGuard lock(m_mutex);
 
-	EXIT_NOT_IMPLEMENTED(!m_owners.IndexValid(owner_handle));
+	// Owner handle zero is a valid anonymous-resource scope. Some graphics
+	// runtimes register bootstrap allocations before establishing an owner.
+	EXIT_NOT_IMPLEMENTED(owner_handle != 0 && !m_owners.IndexValid(owner_handle));
 	EXIT_NOT_IMPLEMENTED(memory == 0);
 
 	Info info;
@@ -541,6 +543,18 @@ void GpuResources::DeleteOwner(uint32_t owner_handle)
 {
 	Core::LockGuard lock(m_mutex);
 
+	if (owner_handle == 0 && !m_owners.IndexValid(owner_handle))
+	{
+		for (auto& i: m_infos)
+		{
+			if (!i.free && i.owner == owner_handle)
+			{
+				i.free = true;
+			}
+		}
+		return;
+	}
+
 	EXIT_NOT_IMPLEMENTED(!m_owners.IndexValid(owner_handle));
 
 	for (auto& i: m_infos)
@@ -560,7 +574,7 @@ void GpuResources::DeleteResources(uint32_t owner_handle)
 {
 	Core::LockGuard lock(m_mutex);
 
-	EXIT_NOT_IMPLEMENTED(!m_owners.IndexValid(owner_handle));
+	EXIT_NOT_IMPLEMENTED(owner_handle != 0 && !m_owners.IndexValid(owner_handle));
 
 	for (auto& i: m_infos)
 	{
@@ -1506,6 +1520,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// Single-parent RT/DS/Texture/SB share with an incoming StorageBuffer
 				// (captured DepthStencilBuffer Crosses StorageBuffer 0x8000).
 				overlap = true;
+			} else if (GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type))
+			{
+				delete_all = true;
 			} else
 			switch (ObjectsRelation(o.object.type, obj.relation, info.type))
 			{
@@ -1762,14 +1779,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					const auto& h = heap.objects[obj.object_id];
 					EXIT_IF(h.free);
 					const auto& o = h.info;
-					const bool surface = o.object.type == GpuMemoryObjectType::Texture ||
-					                     o.object.type == GpuMemoryObjectType::StorageBuffer ||
-					                     o.object.type == GpuMemoryObjectType::StorageTexture ||
-					                     o.object.type == GpuMemoryObjectType::RenderTexture ||
-					                     o.object.type == GpuMemoryObjectType::VertexBuffer;
-					const bool rel_ok  = obj.relation == OverlapType::Crosses || obj.relation == OverlapType::Contains ||
-					                    obj.relation == OverlapType::IsContainedWithin || obj.relation == OverlapType::Equals;
-					if (!surface || !rel_ok)
+					if (!GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type))
 					{
 						multi_depth_stencil_reclaim = false;
 						break;
@@ -2188,41 +2198,6 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		for (const auto& obj: others)
 		{
 			Link(heap_id, index, obj.object_id, obj.relation, scenario);
-		}
-
-		// Evidence: multi-parent alias graphs break WriteBack's single-Equals
-		// parent contract. Log the producer link set when a write-back-capable
-		// object ends up with more than one parent. Always go to stderr so Silent
-		// PrintfDirection runs still capture this evidence.
-		const auto& created = heap.objects[index];
-		if (created.info.write_back_func != nullptr && !created.info.read_only && created.others.Size() > 1)
-		{
-			const auto type_name = Core::EnumName(created.info.object.type);
-			std::fprintf(stderr, "GpuMemory CreateObject multi-parent write-back link:\n");
-			std::fprintf(stderr, "\t new: heap=%d id=%d type=%s read_only=%s others=%u\n", heap_id, index, type_name.C_Str(),
-			             (created.info.read_only ? "true" : "false"), static_cast<unsigned>(created.others.Size()));
-			for (int vi = 0; vi < created.block.vaddr_num; vi++)
-			{
-				std::fprintf(stderr, "\t new range[%d]: vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", vi, created.block.vaddr[vi],
-				             created.block.size[vi]);
-			}
-			for (uint32_t oi = 0; oi < created.others.Size(); oi++)
-			{
-				const auto& other  = created.others.At(static_cast<int>(oi));
-				const auto& parent = heap.objects[other.object_id];
-				std::fprintf(stderr, "\t parent[%u]: id=%d type=%s relation=%s read_only=%s\n", oi, other.object_id,
-				             Core::EnumName(parent.info.object.type).C_Str(), Core::EnumName(other.relation).C_Str(),
-				             (parent.info.read_only ? "true" : "false"));
-				if (!parent.free)
-				{
-					for (int vi = 0; vi < parent.block.vaddr_num; vi++)
-					{
-						std::fprintf(stderr, "\t parent[%u] range[%d]: vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", oi, vi,
-						             parent.block.vaddr[vi], parent.block.size[vi]);
-					}
-				}
-			}
-			std::fflush(stderr);
 		}
 	}
 
@@ -3056,19 +3031,18 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	// Classify alias parents before touching GPU memory. Gen5 can attach
 	// many VertexBuffer Crosses/IsContainedWithin links plus one Equals
 	// RenderTexture peer to a RW StorageBuffer; only Equals parents get
-	// full hash propagation.
-	constexpr uint32_t kMaxWriteBackParents = 64;
-	EXIT_NOT_IMPLEMENTED(h.others.Size() > kMaxWriteBackParents);
-	GpuMemoryOverlapType parent_rels[kMaxWriteBackParents] {};
-	for (uint32_t oi = 0; oi < h.others.Size(); oi++)
+	// full hash propagation. Parent count is not capped — post-logo FNA
+	// dispose topologies exceed the former stack limit of 64.
+	const uint32_t parent_count = static_cast<uint32_t>(h.others.Size());
+	Vector<GpuMemoryOverlapType> parent_rels;
+	for (uint32_t oi = 0; oi < parent_count; oi++)
 	{
-		parent_rels[oi] = h.others.At(static_cast<int>(oi)).relation;
+		parent_rels.Add(h.others.At(static_cast<int>(oi)).relation);
 	}
 	bool     recompute_self   = true;
 	uint32_t equals_count     = 0;
 	uint32_t invalidate_count = 0;
-	if (!GpuMemoryWriteBackClassifyParents(parent_rels, static_cast<uint32_t>(h.others.Size()), &recompute_self, &equals_count,
-	                                       &invalidate_count))
+	if (!GpuMemoryWriteBackClassifyParents(parent_rels.GetData(), parent_count, &recompute_self, &equals_count, &invalidate_count))
 	{
 		std::fprintf(stderr, "GpuMemory WriteBack unsupported parent relation in alias topology:\n");
 		std::fprintf(stderr, "\t self: heap=%d id=%d type=%s others=%u\n", heap_id, object_id,

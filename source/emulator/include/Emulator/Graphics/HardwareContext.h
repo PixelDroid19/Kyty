@@ -312,6 +312,16 @@ struct ModeControl
 	bool    persp_corr_dis           = false;
 };
 
+struct PolygonOffset
+{
+	uint32_t db_format_control = 0;
+	float    clamp             = 0.0f;
+	float    front_scale       = 0.0f;
+	float    front_offset      = 0.0f;
+	float    back_scale        = 0.0f;
+	float    back_offset       = 0.0f;
+};
+
 struct BlendControl
 {
 	uint8_t color_srcblend       = 0;
@@ -795,6 +805,8 @@ public:
 	void                                 SetDepthControl(const DepthControl& control) { m_depth_control = control; }
 	[[nodiscard]] const ModeControl&     GetModeControl() const { return m_mode_control; }
 	void                                 SetModeControl(const ModeControl& control) { m_mode_control = control; }
+	[[nodiscard]] const PolygonOffset&   GetPolygonOffset() const { return m_polygon_offset; }
+	void                                 SetPolygonOffset(const PolygonOffset& offset) { m_polygon_offset = offset; }
 	[[nodiscard]] const EqaaControl&     GetEqaaControl() const { return m_eqaa_control; }
 	void                                 SetEqaaControl(const EqaaControl& control) { m_eqaa_control = control; }
 	[[nodiscard]] const StencilControl&  GetStencilControl() const { return m_stencil_control; }
@@ -874,8 +886,9 @@ private:
 	float             m_depth_clear_value   = 0.0f;
 	uint8_t           m_stencil_clear_value = 0;
 
-	ModeControl m_mode_control;
-	EqaaControl m_eqaa_control;
+	ModeControl   m_mode_control;
+	PolygonOffset m_polygon_offset;
+	EqaaControl   m_eqaa_control;
 
 	ShaderRegisters m_sh_regs;
 };
@@ -892,6 +905,8 @@ public:
 
 	void                   SetPrimitiveType(uint32_t prim_type) { m_prim_type = prim_type; }
 	[[nodiscard]] uint32_t GetPrimType() const { return m_prim_type; }
+	void                   SetIndexOffset(uint32_t index_offset) { m_index_offset = index_offset; }
+	[[nodiscard]] uint32_t GetIndexOffset() const { return m_index_offset; }
 
 	[[nodiscard]] const GeControl&    GetGeControl() const { return m_ge_cntl; }
 	void                              SetGeControl(const GeControl& control) { m_ge_cntl = control; }
@@ -899,7 +914,8 @@ public:
 	void                              SetGeUserVgprEn(const GeUserVgprEn& en) { m_ge_user_vgpr_en = en; }
 
 private:
-	uint32_t m_prim_type = 0;
+	uint32_t m_prim_type    = 0;
+	uint32_t m_index_offset = 0;
 
 	GeControl    m_ge_cntl;
 	GeUserVgprEn m_ge_user_vgpr_en;

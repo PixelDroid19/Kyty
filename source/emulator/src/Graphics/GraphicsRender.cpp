@@ -49,6 +49,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -117,6 +118,7 @@ struct PipelineStaticParameters
 	bool                       cull_front                     = false;
 	bool                       cull_back                      = false;
 	bool                       face                           = false;
+	bool                       depth_bias_enable              = false;
 	uint8_t                    color_srcblend[8]              = {};
 	uint8_t                    color_comb_fcn[8]              = {};
 	uint8_t                    color_destblend[8]             = {};
@@ -140,6 +142,7 @@ struct PipelineDynamicParameters
 	bool vk_dynamic_state_viewport               = false;
 	bool vk_dynamic_state_scissor                = false;
 	bool vk_dynamic_state_blend_constants        = false;
+	bool vk_dynamic_state_depth_bias             = false;
 
 	float line_width         = 1.0f;
 	bool  color_write_enable = true;
@@ -152,6 +155,10 @@ struct PipelineDynamicParameters
 	float blend_color_green = 0.0f;
 	float blend_color_blue  = 0.0f;
 	float blend_color_alpha = 0.0f;
+
+	float depth_bias_constant_factor = 0.0f;
+	float depth_bias_clamp           = 0.0f;
+	float depth_bias_slope_factor    = 0.0f;
 
 	PipelineStencilDynamicState stencil_front;
 	PipelineStencilDynamicState stencil_back;
@@ -1146,7 +1153,8 @@ static void clip_check(const HW::ClipControl& c)
 {
 	EXIT_NOT_IMPLEMENTED(c.user_clip_planes != 0);
 	EXIT_NOT_IMPLEMENTED(c.user_clip_plane_mode != 0);
-	EXIT_NOT_IMPLEMENTED(c.dx_clip_space != false);
+	// Both depth conventions are translated by ResolveViewportDepth and the
+	// Vulkan pipeline carries the matching depth-clip control state.
 	EXIT_NOT_IMPLEMENTED(c.vertex_kill_any != false);
 	EXIT_NOT_IMPLEMENTED(c.min_z_clip_disable != false);
 	EXIT_NOT_IMPLEMENTED(c.max_z_clip_disable != false);
@@ -1207,8 +1215,6 @@ static void mc_check(const HW::ModeControl& c)
 	EXIT_NOT_IMPLEMENTED(c.poly_mode != 0);
 	EXIT_NOT_IMPLEMENTED(c.polymode_front_ptype != 0 && c.polymode_front_ptype != 2);
 	EXIT_NOT_IMPLEMENTED(c.polymode_back_ptype != 0 && c.polymode_back_ptype != 2);
-	EXIT_NOT_IMPLEMENTED(c.poly_offset_front_enable != false);
-	EXIT_NOT_IMPLEMENTED(c.poly_offset_back_enable != false);
 	EXIT_NOT_IMPLEMENTED(c.vtx_window_offset_enable != false);
 	EXIT_NOT_IMPLEMENTED(c.provoking_vtx_last != false);
 	EXIT_NOT_IMPLEMENTED(c.persp_corr_dis != false);
@@ -1244,10 +1250,12 @@ static void bc_check(const HW::BlendControl& /*c*/, const HW::BlendColor& color,
 	// EXIT_NOT_IMPLEMENTED(c.alpha_destblend != 0);
 	// EXIT_NOT_IMPLEMENTED(c.separate_alpha_blend != false);
 	// EXIT_NOT_IMPLEMENTED(c.enable != false);
-	EXIT_NOT_IMPLEMENTED(color.red != 0.0f);
-	EXIT_NOT_IMPLEMENTED(color.green != 0.0f);
-	EXIT_NOT_IMPLEMENTED(color.blue != 0.0f);
-	EXIT_NOT_IMPLEMENTED(color.alpha != 0.0f);
+	// Blend constants are emitted through vkCmdSetBlendConstants when the
+	// pipeline uses dynamic blend state, so all finite values are valid.
+	EXIT_NOT_IMPLEMENTED(!std::isfinite(color.red));
+	EXIT_NOT_IMPLEMENTED(!std::isfinite(color.green));
+	EXIT_NOT_IMPLEMENTED(!std::isfinite(color.blue));
+	EXIT_NOT_IMPLEMENTED(!std::isfinite(color.alpha));
 	EXIT_NOT_IMPLEMENTED(cc.mode != 1 && cc.mode != 0);
 	EXIT_NOT_IMPLEMENTED(cc.op != 0xCC);
 }
@@ -1289,7 +1297,7 @@ static void d_check(const HW::DepthControl& c, const HW::StencilControl& s, cons
 	// EXIT_NOT_IMPLEMENTED(c.z_write_enable != false);
 	EXIT_NOT_IMPLEMENTED(c.depth_bounds_enable != false);
 	// EXIT_NOT_IMPLEMENTED(c.zfunc != 0);
-	EXIT_NOT_IMPLEMENTED(c.backface_enable != false);
+	// Front and back stencil faces are translated independently below.
 	// EXIT_NOT_IMPLEMENTED(c.stencilfunc != 0);
 	// EXIT_NOT_IMPLEMENTED(c.stencilfunc_bf != 0);
 	EXIT_NOT_IMPLEMENTED(c.color_writes_on_depth_fail_enable != false);
@@ -1407,7 +1415,9 @@ static void vp_check(const HW::ScreenViewport& vp, const HW::ScanModeControl& sm
 {
 	bool ps5 = Config::IsNextGen();
 
-	EXIT_NOT_IMPLEMENTED(smc.msaa_enable);
+	// This control also enables coverage processing for single-sample render
+	// targets. Attachment sample counts, rather than this flag alone, select
+	// Vulkan multisampling.
 	// EXIT_NOT_IMPLEMENTED(smc.vport_scissor_enable);
 	EXIT_NOT_IMPLEMENTED(smc.line_stipple_enable);
 
@@ -2668,10 +2678,10 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	rasterizer.polygonMode             = VK_POLYGON_MODE_FILL;
 	rasterizer.cullMode                = cull_mode;
 	rasterizer.frontFace               = front_face;
-	rasterizer.depthBiasEnable         = VK_FALSE;
-	rasterizer.depthBiasConstantFactor = 0.0f;
-	rasterizer.depthBiasClamp          = 0.0f;
-	rasterizer.depthBiasSlopeFactor    = 0.0f;
+	rasterizer.depthBiasEnable         = static_params->depth_bias_enable ? VK_TRUE : VK_FALSE;
+	rasterizer.depthBiasConstantFactor = dynamic_params->depth_bias_constant_factor;
+	rasterizer.depthBiasClamp          = dynamic_params->depth_bias_clamp;
+	rasterizer.depthBiasSlopeFactor    = dynamic_params->depth_bias_slope_factor;
 	rasterizer.lineWidth               = dynamic_params->line_width;
 
 	VkPipelineMultisampleStateCreateInfo multisampling {};
@@ -2845,6 +2855,10 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	{
 		dynamic_states[dynamic_states_count++] = VK_DYNAMIC_STATE_BLEND_CONSTANTS;
 	}
+	if (dynamic_params->vk_dynamic_state_depth_bias)
+	{
+		dynamic_states[dynamic_states_count++] = VK_DYNAMIC_STATE_DEPTH_BIAS;
+	}
 
 	VkPipelineDynamicStateCreateInfo dynamic_state {};
 	dynamic_state.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
@@ -2992,7 +3006,8 @@ bool PipelineDynamicParameters::operator==(const PipelineDynamicParameters& othe
 	        vk_dynamic_state_color_write_enable_ext != other.vk_dynamic_state_color_write_enable_ext ||
 	        vk_dynamic_state_viewport != other.vk_dynamic_state_viewport ||
 	        vk_dynamic_state_scissor != other.vk_dynamic_state_scissor ||
-	        vk_dynamic_state_blend_constants != other.vk_dynamic_state_blend_constants);
+	        vk_dynamic_state_blend_constants != other.vk_dynamic_state_blend_constants ||
+	        vk_dynamic_state_depth_bias != other.vk_dynamic_state_depth_bias);
 
 	if (!vk_dynamic_state_line_width)
 	{
@@ -3050,6 +3065,14 @@ bool PipelineDynamicParameters::operator==(const PipelineDynamicParameters& othe
 	{
 		if (blend_color_red != other.blend_color_red || blend_color_green != other.blend_color_green ||
 		    blend_color_blue != other.blend_color_blue || blend_color_alpha != other.blend_color_alpha)
+		{
+			return false;
+		}
+	}
+	if (!vk_dynamic_state_depth_bias)
+	{
+		if (depth_bias_constant_factor != other.depth_bias_constant_factor || depth_bias_clamp != other.depth_bias_clamp ||
+		    depth_bias_slope_factor != other.depth_bias_slope_factor)
 		{
 			return false;
 		}
@@ -3211,6 +3234,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.dynamic_params->vk_dynamic_state_viewport             = true;
 	p.dynamic_params->vk_dynamic_state_scissor              = true;
 	p.dynamic_params->vk_dynamic_state_blend_constants      = true;
+	p.dynamic_params->vk_dynamic_state_depth_bias           = true;
 	p.dynamic_params->color_write_enable                    = true;
 
 	EXIT_NOT_IMPLEMENTED(depth->depth_test_enable && ps_input_info->ps_execute_on_noop);
@@ -3295,6 +3319,16 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.static_params->cull_back                = mc.cull_back;
 	p.static_params->cull_front               = mc.cull_front;
 	p.static_params->face                     = mc.face;
+	const auto depth_bias = State::ResolveDepthBias(mc, ctx->GetPolygonOffset());
+	EXIT_NOT_IMPLEMENTED(depth_bias.enabled &&
+	                     (!std::isfinite(depth_bias.constant_factor) || !std::isfinite(depth_bias.clamp) ||
+	                      !std::isfinite(depth_bias.slope_factor)));
+	EXIT_NOT_IMPLEMENTED(depth_bias.enabled && depth_bias.clamp != 0.0f &&
+	                     !g_render_ctx->GetGraphicCtx()->depth_bias_clamp_supported);
+	p.static_params->depth_bias_enable              = depth_bias.enabled;
+	p.dynamic_params->depth_bias_constant_factor    = depth_bias.constant_factor;
+	p.dynamic_params->depth_bias_clamp              = depth_bias.clamp;
+	p.dynamic_params->depth_bias_slope_factor       = depth_bias.slope_factor;
 	p.dynamic_params->blend_color_red         = bclr.red;
 	p.dynamic_params->blend_color_green       = bclr.green;
 	p.dynamic_params->blend_color_blue        = bclr.blue;
@@ -4654,7 +4688,6 @@ static void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 		r->stencil_dynamic_back  = {};
 	}
 	// EXIT_NOT_IMPLEMENTED(r->stencil_test_enable);
-	EXIT_NOT_IMPLEMENTED(dc.backface_enable);
 
 	if (r->format != VK_FORMAT_UNDEFINED)
 	{
@@ -4949,18 +4982,25 @@ static void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer
 	}
 }
 
-static void FreezeDepthOnlyDisplayAtNative(CommandBuffer* buffer, const RenderColorInfo& color, const RenderDepthInfo& depth)
+static ResolutionCohortDecision PrepareDepthOnlyDisplayResolutionCohort(CommandBuffer* buffer, const RenderColorInfo& color,
+                                                                         const RenderDepthInfo& depth)
 {
 	EXIT_IF(buffer == nullptr);
+	ResolutionCohortDecision native;
+	native.classification   = ResolutionClassification::Native;
+	native.reason           = ResolutionCohortReason::None;
+	native.guest_extent     = {depth.width, depth.height};
+	native.host_extent      = native.guest_extent;
+	native.attachment_count = depth.format == VK_FORMAT_UNDEFINED ? 0u : 1u;
 	if (color.targets_num != 0 || depth.format == VK_FORMAT_UNDEFINED)
 	{
-		return;
+		return native;
 	}
 	const auto snapshot = InternalResolutionRuntimeGetSnapshot();
 	const ResolutionExtent depth_extent {depth.width, depth.height};
 	if (!snapshot.guest_registered || depth_extent != snapshot.guest_display_extent)
 	{
-		return;
+		return native;
 	}
 	uint32_t registered_width  = 0;
 	uint32_t registered_height = 0;
@@ -4968,28 +5008,90 @@ static void FreezeDepthOnlyDisplayAtNative(CommandBuffer* buffer, const RenderCo
 	    VideoOut::VideoOutGetRegisteredHostExtent(buffer, depth_extent.width, depth_extent.height, &registered_width, &registered_height);
 	if (registered_status != VideoOut::VideoOutRegisteredHostExtentStatus::Uniform)
 	{
-		EXIT("Depth-only display prepass cannot inspect registered host extent: guest=%ux%u status=%s(%u)\n", depth_extent.width,
-		     depth_extent.height, VideoOut::VideoOutRegisteredHostExtentStatusName(registered_status),
-		     static_cast<unsigned>(registered_status));
+		native.classification = ResolutionClassification::Unsupported;
+		native.reason         = ResolutionCohortReason::MismatchedHostExtent;
+		return native;
 	}
 	const ResolutionExtent registered_extent {registered_width, registered_height};
-	const auto compatibility = EvaluateNativeDisplayExtentCompatibility(depth_extent, registered_extent);
-	if (compatibility.classification == ResolutionClassification::Unsupported)
+
+	ResolutionAttachmentCandidate attachment;
+	attachment.guest_extent             = depth_extent;
+	attachment.resource.kind            = ResolutionResourceKind::DepthStencilAttachment;
+	attachment.resource.compressed      = depth.htile;
+	attachment.resource.ambiguous_alias = !ResolutionAliasPolicyAllowsRanges(
+	    depth.vaddr, depth.size, depth.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer, true);
+	ResolutionCohortInput input;
+	input.attachments      = &attachment;
+	input.attachment_count = 1;
+	input.expected_count   = 1;
+	const auto candidate = InternalResolutionRuntimeEvaluateCohort(input);
+	auto decision = EvaluateDepthOnlyDisplayExtentCompatibility(depth_extent, registered_extent, candidate);
+	if (decision.classification == ResolutionClassification::Unsupported)
 	{
-		EXIT("Depth-only display prepass conflicts with registered host extent: guest=%ux%u registered=%ux%u reason=%s(%u)\n",
-		     depth_extent.width, depth_extent.height, registered_extent.width, registered_extent.height,
-		     ResolutionCohortReasonName(compatibility.reason), static_cast<unsigned>(compatibility.reason));
+		std::fprintf(stderr,
+		             "Depth-only display selection rejected before materialization: guest=%ux%u registered=%ux%u reason=%s "
+		             "attachment_reason=%s htile=%u ambiguous_alias=%u\n",
+		             depth_extent.width, depth_extent.height, registered_extent.width, registered_extent.height,
+		             ResolutionCohortReasonName(decision.reason), ResolutionNativeReasonName(candidate.attachment_native_reason),
+		             depth.htile ? 1u : 0u, attachment.resource.ambiguous_alias ? 1u : 0u);
+		std::fflush(stderr);
+		return decision;
+	}
+	if (decision.classification == ResolutionClassification::Scaled)
+	{
+		VulkanResolutionAttachmentRequest request;
+		request.extent = decision.host_extent;
+		request.format = depth.format;
+		request.usage  = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+		                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (depth.sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
+		const auto capability = EvaluateVulkanResolutionAttachment(g_render_ctx->GetGraphicCtx(), request);
+		if (capability.status != VulkanResolutionCapabilityStatus::Success ||
+		    capability.decision.status != ResolutionImageCapabilityStatus::Supported)
+		{
+			decision.classification = ResolutionClassification::Unsupported;
+			decision.reason         = ResolutionCohortReason::DepthCapabilityUnsupported;
+			return decision;
+		}
 	}
 
-	ResolutionExtent selected;
-	const auto status = InternalResolutionRuntimeSelectDisplayHostExtent(depth_extent, depth_extent, nullptr, &selected);
-	if (status == InternalResolutionDisplaySelectionStatus::StickyMismatch)
+	ResolutionExtent selected = registered_extent;
+	const auto* authorization = decision.classification == ResolutionClassification::Scaled ? &decision : nullptr;
+	const auto status =
+	    InternalResolutionRuntimeSelectDisplayHostExtent(depth_extent, registered_extent, authorization, &selected);
+	if (status != InternalResolutionDisplaySelectionStatus::Selected && status != InternalResolutionDisplaySelectionStatus::StickyMatch)
 	{
-		EXIT("Depth-only display prepass conflicts with selected host extent: guest=%ux%u selected=%ux%u\n", depth_extent.width,
-		     depth_extent.height, selected.width, selected.height);
+		decision.classification = ResolutionClassification::Unsupported;
+		decision.reason         = ResolutionCohortReason::MismatchedHostExtent;
+		decision.host_extent    = selected;
+		return decision;
 	}
-	EXIT_IF(status != InternalResolutionDisplaySelectionStatus::Selected &&
-	        status != InternalResolutionDisplaySelectionStatus::StickyMatch);
+
+	const auto existing_depth = GpuMemoryFindObjectsForSubmission(
+	    buffer, depth.vaddr, depth.size, depth.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer, true, false);
+	if (existing_depth.Size() > 1)
+	{
+		std::fprintf(stderr, "Depth-only display selection found %u exact depth objects\n", existing_depth.Size());
+		std::fflush(stderr);
+		decision.classification = ResolutionClassification::Unsupported;
+		decision.reason         = ResolutionCohortReason::MismatchedHostExtent;
+		return decision;
+	}
+	if (!existing_depth.IsEmpty())
+	{
+		const auto* image = static_cast<const DepthStencilVulkanImage*>(existing_depth[0].obj);
+		if (image == nullptr || image->extent.width != selected.width || image->extent.height != selected.height)
+		{
+			std::fprintf(stderr,
+			             "Depth-only display selection conflicts with materialized depth extent: current=%ux%u selected=%ux%u\n",
+			             image != nullptr ? image->extent.width : 0u, image != nullptr ? image->extent.height : 0u, selected.width,
+			             selected.height);
+			std::fflush(stderr);
+			decision.classification = ResolutionClassification::Unsupported;
+			decision.reason         = ResolutionCohortReason::MismatchedHostExtent;
+			return decision;
+		}
+	}
+	return decision;
 }
 
 static ResolutionCohortDecision PrepareDisplayResolutionCohort(CommandBuffer* buffer, RenderColorInfo* color,
@@ -5290,17 +5392,27 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 			}
 		} else
 		{
-			EXIT_NOT_IMPLEMENTED(!((r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 0) && r.Dfmt() == 4 && r.Nfmt() == 4) ||
-			                       (r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 1) && r.Dfmt() == 4 && r.Nfmt() == 7) ||
-			                       (r.Stride() == 8 && r.DstSelXYZW() == DstSel(4, 5, 0, 0) && r.Dfmt() == 11 && r.Nfmt() == 4) ||
-			                       (r.Stride() == 16 && r.DstSelXYZW() == DstSel(4, 5, 6, 7) && r.Dfmt() == 14 && r.Nfmt() == 7)));
+			const bool address_only_descriptor = storage_buffers.accesses[i] == ShaderStorageAccess::Raw ||
+			                                     (storage_buffers.accesses[i] == ShaderStorageAccess::Unknown &&
+			                                      !storage_buffers.code_available[i]);
+			if (address_only_descriptor)
+			{
+				EXIT_NOT_IMPLEMENTED(!ShaderRawStorageDescriptorSupported(r));
+			} else
+			{
+				EXIT_NOT_IMPLEMENTED(!((r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 0) && r.Dfmt() == 4 && r.Nfmt() == 4) ||
+				                       (r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 1) && r.Dfmt() == 4 && r.Nfmt() == 7) ||
+				                       (r.Stride() == 8 && r.DstSelXYZW() == DstSel(4, 5, 0, 0) && r.Dfmt() == 11 && r.Nfmt() == 4) ||
+				                       (r.Stride() == 16 && r.DstSelXYZW() == DstSel(4, 5, 6, 7) && r.Dfmt() == 14 && r.Nfmt() == 7)));
+			}
 			EXIT_NOT_IMPLEMENTED(!(r.MemoryType() == 0x00 || r.MemoryType() == 0x10 || r.MemoryType() == 0x6d));
 		}
 
 		auto addr        = (gen5 ? r.Base48() : r.Base44());
 		auto stride      = r.Stride();
 		auto num_records = r.NumRecords();
-		const uint64_t size = static_cast<uint64_t>(stride) * static_cast<uint64_t>(num_records);
+		const uint64_t size = stride == 0 ? static_cast<uint64_t>(num_records)
+		                                  : static_cast<uint64_t>(stride) * static_cast<uint64_t>(num_records);
 		EXIT_NOT_IMPLEMENTED(size == 0);
 		EXIT_NOT_IMPLEMENTED((size & 0x3u) != 0);
 
@@ -5580,6 +5692,15 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				rtex           = FindRenderTexture(buffer, addr, size.size, false);
 				render_texture = !rtex.IsEmpty();
 			}
+			// Gen4 Display_2dThin (tile 10) UI often samples a CB whose guest size is
+			// width*height*4 while the sample descriptor sizes the Display Thin pad
+			// (pitch×align128(height)×4). Exact miss then created an empty RT; allow
+			// non-exact alias before guest detile upload.
+			if (!render_texture && !gen5 && tile == 10)
+			{
+				rtex           = FindRenderTexture(buffer, addr, size.size, false);
+				render_texture = !rtex.IsEmpty();
+			}
 			if (render_texture)
 			{
 				if (swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7) && swizzle != DstSel(7, 6, 5, 4))
@@ -5606,7 +5727,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				//
 				// Extent: among format-compatible RTs, prefer exact sample
 				// width×height. Binding a full-screen parent without a crop view
-				// left horizontal bands / wrong atlas tiles on Dead Cells.
+				// leaves horizontal bands and selects the wrong atlas tiles.
 				const size_t cand_n = static_cast<size_t>(rtex.Size() < 16 ? rtex.Size() : 16);
 				VkFormat     cand_fmt[16] = {};
 				uint32_t     cand_w[16]   = {};
@@ -5621,8 +5742,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				int    filtered[16] = {};
 				size_t filtered_n   = 0;
 				bool   reject_alias = false;
-				Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered,
-				                             &filtered_n, &reject_alias);
+				EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered,
+				                                            &filtered_n, &reject_alias));
 				if (reject_alias)
 				{
 					render_texture = false;
@@ -5709,8 +5830,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					int    filtered[16] = {};
 					size_t filtered_n   = 0;
 					bool   reject_st    = false;
-					Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered,
-					                             &filtered_n, &reject_st);
+					EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered,
+					                                            &filtered_n, &reject_st));
 					if (!reject_st)
 					{
 						storage_texture          = true;
@@ -5806,38 +5927,25 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			{
 				EXIT_NOT_IMPLEMENTED(textures.desc[i].usage != ShaderTextureUsage::ReadOnly);
 
-				if (!gen5 && tile == 10)
+				// Tile 10 used to create a GPU-owned RenderTexture with no CPU upload.
+				// Display-thin atlases are guest surfaces; that path never detiled
+				// them and sampled garbage or smeared glyphs.
+				// Fall through to TextureObject, which detiles Display Thin BGRA8.
+				EXIT_IF(Gen5SampleMayWriteBackStorageBeforeGuestUpload());
+				// Tiled samples under a live RT/ST that was not bound as alias
+				// must not detile GPU-owned guest (catalog: 642x362 tile27 guest).
+				bool live_cover = false;
+				if (gen5 && (tile == 27u || tile == 9u))
 				{
-					RenderTextureFormat rt_format = RenderTextureFormat::Unknown;
-					if (dfmt == 10 && nfmt == 0)
-					{
-						rt_format = RenderTextureFormat::R8G8B8A8Unorm;
-					}
-
-					RenderTextureObject vulkan_buffer_info(rt_format, width, height, true, neo, pitch, false);
-					tex = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
-					    submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_buffer_info));
-				} else
-				{
-					// Never flush StorageBuffers before sample guest upload (Kyty
-					// contract): SSBOs are linear MUBUF data, not texture content.
-					// Write-back then linear/tile upload corrupts package atlases.
-					EXIT_IF(Gen5SampleMayWriteBackStorageBeforeGuestUpload());
-					// Tiled samples under a live RT/ST that was not bound as alias
-					// must not detile GPU-owned guest (catalog: 642x362 tile27 guest).
-					bool live_cover = false;
-					if (gen5 && (tile == 27u || tile == 9u))
-					{
-						const auto r_cover = FindRenderTexture(buffer, addr, size.size, false);
-						const auto s_cover = FindStorageTexture(buffer, addr, size.size, false);
-						live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
-					}
-					const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
-					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
-					                                  force_degamma, skip_guest);
-					tex = static_cast<TextureVulkanImage*>(
-					    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
+					const auto r_cover = FindRenderTexture(buffer, addr, size.size, false);
+					const auto s_cover = FindStorageTexture(buffer, addr, size.size, false);
+					live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
 				}
+				const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
+				TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
+				                                  force_degamma, skip_guest);
+				tex = static_cast<TextureVulkanImage*>(
+				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 			}
 		}
 
@@ -6182,6 +6290,12 @@ static void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline
 		                                  pipeline->dynamic_params->blend_color_blue, pipeline->dynamic_params->blend_color_alpha};
 		vkCmdSetBlendConstants(vk_buffer, blend_constants);
 	}
+
+	if (pipeline->static_params->depth_bias_enable && pipeline->dynamic_params->vk_dynamic_state_depth_bias)
+	{
+		vkCmdSetDepthBias(vk_buffer, pipeline->dynamic_params->depth_bias_constant_factor,
+		                  pipeline->dynamic_params->depth_bias_clamp, pipeline->dynamic_params->depth_bias_slope_factor);
+	}
 }
 
 static bool shader_is_disabled(HW::Shader* sh_ctx)
@@ -6292,7 +6406,14 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
-	FreezeDepthOnlyDisplayAtNative(buffer, color_info, depth_info);
+	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
+	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
+	{
+		EXIT("Depth-only display cohort conflict: guest=%ux%u selected=%ux%u reason=%s(%u)\n",
+		     depth_only_resolution.guest_extent.width, depth_only_resolution.guest_extent.height,
+		     depth_only_resolution.host_extent.width, depth_only_resolution.host_extent.height,
+		     ResolutionCohortReasonName(depth_only_resolution.reason), static_cast<unsigned>(depth_only_resolution.reason));
+	}
 
 	ShaderVertexInputInfo vs_input_info;
 	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info);
@@ -6309,9 +6430,15 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		     ResolutionNativeReasonName(resolution.attachment_native_reason),
 		     static_cast<unsigned>(resolution.attachment_native_reason), resolution.blocking_attachment_index);
 	}
+	const auto& materialization_resolution =
+	    color_info.targets_num == 0 ? depth_only_resolution : resolution;
 	MaterializeRenderDepthInfo(submit_id, buffer, &depth_info,
-	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.width : 0,
-	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.height : 0);
+	                           materialization_resolution.classification == ResolutionClassification::Scaled
+	                               ? materialization_resolution.host_extent.width
+	                               : 0,
+	                           materialization_resolution.classification == ResolutionClassification::Scaled
+	                               ? materialization_resolution.host_extent.height
+	                               : 0);
 	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
 	if (resolution.classification == ResolutionClassification::Scaled)
 	{
@@ -6388,6 +6515,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
 
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info);
+	const int32_t vertex_offset = ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info);
 
 	switch (ucfg->GetPrimType())
 	{
@@ -6395,14 +6523,14 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		case 5:
 		case 6:
 		case 17:
-			vkCmdDrawIndexed(vk_buffer, index_count, 1, 0, 0, 0);
+			vkCmdDrawIndexed(vk_buffer, index_count, 1, 0, vertex_offset, 0);
 			DebugStatsRecordDraw();
 			break;
 		case 19:
 			EXIT_NOT_IMPLEMENTED((index_count & 0x3u) != 0);
 			for (uint32_t i = 0; i < index_count; i += 4)
 			{
-				vkCmdDrawIndexed(vk_buffer, 4, 1, i, 0, 0);
+				vkCmdDrawIndexed(vk_buffer, 4, 1, i, vertex_offset, 0);
 				DebugStatsRecordDraw();
 			}
 			break;
@@ -6461,7 +6589,14 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
-	FreezeDepthOnlyDisplayAtNative(buffer, color_info, depth_info);
+	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
+	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
+	{
+		EXIT("Depth-only display cohort conflict: guest=%ux%u selected=%ux%u reason=%s(%u)\n",
+		     depth_only_resolution.guest_extent.width, depth_only_resolution.guest_extent.height,
+		     depth_only_resolution.host_extent.width, depth_only_resolution.host_extent.height,
+		     ResolutionCohortReasonName(depth_only_resolution.reason), static_cast<unsigned>(depth_only_resolution.reason));
+	}
 
 	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
 
@@ -6495,9 +6630,15 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		     ResolutionNativeReasonName(resolution.attachment_native_reason),
 		     static_cast<unsigned>(resolution.attachment_native_reason), resolution.blocking_attachment_index);
 	}
+	const auto& materialization_resolution =
+	    color_info.targets_num == 0 ? depth_only_resolution : resolution;
 	MaterializeRenderDepthInfo(submit_id, buffer, &depth_info,
-	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.width : 0,
-	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.height : 0);
+	                           materialization_resolution.classification == ResolutionClassification::Scaled
+	                               ? materialization_resolution.host_extent.width
+	                               : 0,
+	                           materialization_resolution.classification == ResolutionClassification::Scaled
+	                               ? materialization_resolution.host_extent.height
+	                               : 0);
 	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
 	if (resolution.classification == ResolutionClassification::Scaled)
 	{
@@ -6562,33 +6703,34 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
 
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info);
+	const uint32_t first_vertex = static_cast<uint32_t>(ShaderResolveVertexOffset(0, vs_input_info));
 
 	switch (ucfg->GetPrimType())
 	{
 		case 4:
 		case 5:
 		case 6:
-			vkCmdDraw(vk_buffer, index_count, 1, 0, 0);
+			vkCmdDraw(vk_buffer, index_count, 1, first_vertex, 0);
 			DebugStatsRecordDraw();
 			break;
 		case 7:
 		{
 			uint32_t vertex_count = 0;
 			EXIT_NOT_IMPLEMENTED(!GraphicsResolveRectListAutoDraw(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, &vertex_count));
-			vkCmdDraw(vk_buffer, vertex_count, 1, 0, 0);
+			vkCmdDraw(vk_buffer, vertex_count, 1, first_vertex, 0);
 			DebugStatsRecordDraw();
 			break;
 		}
 		case 17:
 			EXIT_NOT_IMPLEMENTED(!(index_count == 3 && vs_input_info.buffers_num == 0));
-			vkCmdDraw(vk_buffer, 4, 1, 0, 0);
+			vkCmdDraw(vk_buffer, 4, 1, first_vertex, 0);
 			DebugStatsRecordDraw();
 			break;
 		case 19:
 			EXIT_NOT_IMPLEMENTED((index_count & 0x3u) != 0);
 			for (uint32_t i = 0; i < index_count; i += 4)
 			{
-				vkCmdDraw(vk_buffer, 4, 1, i, 0);
+				vkCmdDraw(vk_buffer, 4, 1, first_vertex + i, 0);
 				DebugStatsRecordDraw();
 			}
 			break;
@@ -6621,8 +6763,8 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		return;
 	}
 
-	// COMPUTE_DISPATCH_INITIATOR bits. COMPUTE_SHADER_EN must be set to dispatch.
-	// USE_THREAD_DIMENSIONS means the packet carries thread counts instead of
+	// COMPUTE_DISPATCH_INITIATOR bits. Direct-dispatch packets already select the
+	// compute queue; USE_THREAD_DIMENSIONS means the packet carries thread counts instead of
 	// group counts, so they are divided by the shader's threadgroup size. The
 	// remaining bits observed (FORCE_START_AT_000, ORDER_MODE, wave ordering) are
 	// hardware scheduling hints that do not change the dispatched grid.
@@ -6634,7 +6776,6 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	constexpr uint32_t DISPATCH_KNOWN_BITS = DISPATCH_COMPUTE_SHADER_EN | DISPATCH_PARTIAL_TG_EN | DISPATCH_FORCE_START_AT_000 |
 	                                         DISPATCH_USE_THREAD_DIMENSIONS | DISPATCH_ORDER_MODE;
 
-	EXIT_NOT_IMPLEMENTED((mode & DISPATCH_COMPUTE_SHADER_EN) == 0);
 	EXIT_NOT_IMPLEMENTED((mode & ~DISPATCH_KNOWN_BITS) != 0);
 
 	const auto& cs_regs = sh_ctx->GetCs();

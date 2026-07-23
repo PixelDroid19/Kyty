@@ -224,10 +224,12 @@ public:
 	[[nodiscard]] const FlipInfo& GetFlip() const { return m_flip; }
 	void                          SetFlip(const FlipInfo& flip)
 	{
-		m_flip        = flip;
-		m_flip_issued = false;
+		m_flip                       = flip;
+		m_flip_issued                = false;
+		m_completion_callback_issued = false;
 	}
 	[[nodiscard]] bool FlipIssued() const { return m_flip_issued; }
+	[[nodiscard]] bool CompletionCallbackIssued() const { return m_completion_callback_issued; }
 
 	[[nodiscard]] uint64_t GetSumbitId() const { return m_sumbit_id; }
 	void                   SetSumbitId(uint64_t sumbit_id) { m_sumbit_id = sumbit_id; }
@@ -271,8 +273,9 @@ private:
 	uint32_t m_const_ram[0x3000] = {0};
 
 	FlipInfo m_flip;
-	bool     m_flip_issued = false;
-	uint64_t m_sumbit_id = 0;
+	bool     m_flip_issued                = false;
+	bool     m_completion_callback_issued = false;
+	uint64_t m_sumbit_id                  = 0;
 };
 
 class GraphicsRing
@@ -1384,7 +1387,7 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				cp->Flip();
 				flip_submission = cp->BufferFlush();
 			}
-			if (GraphicsBatchNeedsSubmissionCompletion(cp->FlipIssued()))
+			if (GraphicsBatchNeedsSubmissionCompletion(cp->CompletionCallbackIssued()))
 			{
 				cp->WaitSubmission(flip_submission);
 			}
@@ -1982,6 +1985,10 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 		                                                               reinterpret_cast<uint64_t>(dst_gpu_addr), producer_size, value),
 		                           "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
 	}
+	if (with_interrupt)
+	{
+		m_completion_callback_issued = true;
+	}
 }
 
 void CommandProcessor::MemoryBarrier()
@@ -2057,7 +2064,8 @@ void CommandProcessor::Flip()
 
 	GraphicsRenderWriteAtEndOfPipeOnlyFlip(m_sumbit_id, m_buffer[m_current_buffer], m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                       m_flip.flip_arg);
-	m_flip_issued = true;
+	m_flip_issued                = true;
+	m_completion_callback_issued = true;
 }
 
 void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value)
@@ -2072,7 +2080,8 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value)
 
 	GraphicsRenderWriteAtEndOfPipeWithFlip32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value,
 	                                         m_flip.handle, m_flip.index, m_flip.flip_mode, m_flip.flip_arg);
-	m_flip_issued = true;
+	m_flip_issued                = true;
+	m_completion_callback_issued = true;
 }
 
 void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr, uint32_t value)
@@ -2092,7 +2101,8 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 		GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(m_sumbit_id, m_buffer[m_current_buffer],
 		                                                           static_cast<uint32_t*>(dst_gpu_addr), value, m_flip.handle, m_flip.index,
 		                                                           m_flip.flip_mode, m_flip.flip_arg);
-		m_flip_issued = true;
+		m_flip_issued                = true;
+		m_completion_callback_issued = true;
 	} else
 	{
 		EXIT("unknown event type\n");
@@ -2610,6 +2620,21 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_mode_control)
 	return 1;
 }
 
+KYTY_HW_CTX_PARSER(hw_ctx_set_polygon_offset)
+{
+	const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
+	EXIT_NOT_IMPLEMENTED(count == 0);
+	EXIT_NOT_IMPLEMENTED(cmd_offset < Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL ||
+	                     cmd_offset + count > Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET + 1u);
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		State::SetPolygonOffsetRegister(*cp->GetCtx(), cmd_offset + i, buffer[i]);
+	}
+
+	return count;
+}
+
 KYTY_HW_CTX_PARSER(hw_ctx_set_ps_input)
 {
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::SPI_PS_INPUT_CNTL_0);
@@ -2892,17 +2917,41 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_mask)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_scale_offset)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0066900);
+	const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
+	EXIT_NOT_IMPLEMENTED(count == 0 || count > 6);
+	EXIT_NOT_IMPLEMENTED(cmd_offset < Pm4::PA_CL_VPORT_XSCALE || cmd_offset > Pm4::PA_CL_VPORT_ZOFFSET_15);
 
-	uint32_t param = (cmd_offset - Pm4::PA_CL_VPORT_XSCALE) / 6;
+	const uint32_t relative  = cmd_offset - Pm4::PA_CL_VPORT_XSCALE;
+	const uint32_t viewport  = relative / 6;
+	const uint32_t component = relative % 6;
+	EXIT_NOT_IMPLEMENTED(component + count > 6);
 
-	EXIT_NOT_IMPLEMENTED(param != 0);
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const float value = *reinterpret_cast<const float*>(buffer + i);
+		switch (component + i)
+		{
+			case 0: cp->GetCtx()->SetViewportXScale(viewport, value); break;
+			case 1: cp->GetCtx()->SetViewportXOffset(viewport, value); break;
+			case 2: cp->GetCtx()->SetViewportYScale(viewport, value); break;
+			case 3: cp->GetCtx()->SetViewportYOffset(viewport, value); break;
+			case 4: cp->GetCtx()->SetViewportZScale(viewport, value); break;
+			case 5: cp->GetCtx()->SetViewportZOffset(viewport, value); break;
+			default: EXIT("invalid viewport component\n");
+		}
+	}
 
-	cp->GetCtx()->SetViewportScaleOffset(param, *reinterpret_cast<const float*>(buffer), *reinterpret_cast<const float*>(buffer + 1),
-	                                     *reinterpret_cast<const float*>(buffer + 2), *reinterpret_cast<const float*>(buffer + 3),
-	                                     *reinterpret_cast<const float*>(buffer + 4), *reinterpret_cast<const float*>(buffer + 5));
+	return count;
+}
 
-	return 6;
+KYTY_HW_CTX_PARSER(hw_ctx_ignore)
+{
+	const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
+	EXIT_NOT_IMPLEMENTED(count == 0);
+	(void)cp;
+	(void)cmd_offset;
+	(void)buffer;
+	return count;
 }
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_transform_control)
@@ -3703,7 +3752,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 KYTY_CP_OP_PARSER(cp_op_draw_index_offset)
 {
 	KYTY_PROFILER_FUNCTION();
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0033500);
+	EXIT_NOT_IMPLEMENTED((cmd_id & ~1u) != 0xc0033500);
 	EXIT_NOT_IMPLEMENTED(buffer[0] != buffer[2]);
 	EXIT_NOT_IMPLEMENTED((buffer[3] & ~0xE0000001u) != 0);
 	cp->DrawIndexOffset(buffer[1], buffer[0], buffer[3] & 0xE0000001u);
@@ -4655,6 +4704,13 @@ static void graphics_init_jmp_tables_cx_indirect()
 	{
 		State::SetModeControl(*cp->GetCtx(), value);
 	};
+	for (uint32_t reg = Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL; reg <= Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET; reg++)
+	{
+		g_hw_ctx_indirect_func[reg] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+		{
+			State::SetPolygonOffsetRegister(*cp->GetCtx(), cmd_offset, value);
+		};
+	}
 	// Gen5 CX-indirect emits DB_RENDER_CONTROL (offset 0) as a lone pair; direct
 	// SET_CONTEXT_REG already uses the same decoder.
 	g_hw_ctx_indirect_func[Pm4::DB_RENDER_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
@@ -5082,12 +5138,6 @@ static void graphics_init_jmp_tables_cx_indirect()
 	g_hw_ctx_indirect_func[Pm4::VGT_DRAW_PAYLOAD_CNTL]                 = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::VGT_PRIMITIVEID_RESET]                 = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::PA_CL_OBJPRIM_ID_CNTL]                 = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL]         = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_CLAMP]               = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_FRONT_SCALE]         = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_FRONT_OFFSET]        = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_BACK_SCALE]          = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET]         = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::PA_SC_FOV_WINDOW_LR]                   = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::PA_SC_FOV_WINDOW_TB]                   = ignore_cx;
 	// PA_SC_FSR_ENABLE / FSR_RECURSIONS* use host-only fake offsets
@@ -5545,9 +5595,9 @@ static void graphics_init_jmp_tables_uc_indirect()
 	g_hw_uc_indirect_func[Pm4::VGT_INDEX_TYPE] = [](KYTY_HW_UC_INDIRECT_ARGS) { cp->SetIndexType(value & 0x3u); };
 
 	// Remaining UCONFIG regs accepted without host state until HardwareContext
-	// gains matching setters (matches Kyty ignore/set-index-offset path).
+	// gains matching setters.
 	const auto ignore_uc = [](KYTY_HW_UC_INDIRECT_ARGS) { (void)cp; (void)cmd_offset; (void)value; };
-	g_hw_uc_indirect_func[Pm4::GE_INDX_OFFSET]            = ignore_uc;
+	g_hw_uc_indirect_func[Pm4::GE_INDX_OFFSET] = [](KYTY_HW_UC_INDIRECT_ARGS) { cp->GetUcfg()->SetIndexOffset(value); };
 	g_hw_uc_indirect_func[Pm4::GE_MULTI_PRIM_IB_RESET_EN] = ignore_uc;
 	g_hw_uc_indirect_func[Pm4::VGT_OBJECT_ID]             = ignore_uc;
 	g_hw_uc_indirect_func[Pm4::TEXTURE_GRADIENT_FACTORS]  = ignore_uc;
@@ -5585,11 +5635,65 @@ static void graphics_init_jmp_tables()
 	g_hw_ctx_func[Pm4::CB_COLOR_CONTROL]                  = hw_ctx_set_color_control;
 	g_hw_ctx_func[Pm4::PA_CL_CLIP_CNTL]                   = hw_ctx_set_clip_control;
 	g_hw_ctx_func[Pm4::PA_SU_SC_MODE_CNTL]                = hw_ctx_set_mode_control;
+	for (uint32_t reg = Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL; reg <= Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET; reg++)
+	{
+		g_hw_ctx_func[reg] = hw_ctx_set_polygon_offset;
+	}
 	g_hw_ctx_func[Pm4::PA_CL_VTE_CNTL]                    = hw_ctx_set_viewport_transform_control;
 	g_hw_ctx_func[Pm4::PA_SU_LINE_CNTL]                   = hw_ctx_set_line_control;
 	g_hw_ctx_func[Pm4::PA_SC_MODE_CNTL_0]                 = hw_ctx_set_scan_mode_control;
 	g_hw_ctx_func[Pm4::PA_SC_AA_CONFIG]                   = hw_ctx_set_aa_config;
 	g_hw_ctx_func[Pm4::PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0] = hw_ctx_set_aa_sample_control;
+	// Sample masks are already intentionally ignored by the indirect register
+	// path. Accept the direct form as well so both PM4 encodings agree.
+	g_hw_ctx_func[Pm4::PA_SC_AA_MASK_X0Y0_X1Y0] = hw_ctx_ignore;
+	g_hw_ctx_func[Pm4::PA_SC_AA_MASK_X0Y1_X1Y1] = hw_ctx_ignore;
+	// Keep direct and indirect handling aligned for metadata-only registers.
+	for (const uint32_t reg: {Pm4::CB_DCC_CONTROL,
+	                          Pm4::DB_COUNT_CONTROL,
+	                          Pm4::DB_RENDER_OVERRIDE,
+	                          Pm4::DB_RENDER_OVERRIDE2,
+	                          Pm4::DB_DFSM_CONTROL,
+	                          Pm4::DB_RMI_L2_CACHE_CONTROL,
+	                          Pm4::CB_RMI_GL2_CACHE_CONTROL,
+	                          Pm4::TA_BC_BASE_ADDR,
+	                          Pm4::TA_BC_BASE_ADDR_HI,
+	                          Pm4::PA_SU_POINT_SIZE,
+	                          Pm4::PA_SU_POINT_MINMAX,
+	                          Pm4::SPI_TMPRING_SIZE,
+	                          Pm4::VGT_MULTI_PRIM_IB_RESET_INDX,
+	                          Pm4::VGT_DRAW_PAYLOAD_CNTL,
+	                          Pm4::VGT_PRIMITIVEID_RESET,
+	                          Pm4::PA_CL_OBJPRIM_ID_CNTL,
+	                          Pm4::PA_SC_FOV_WINDOW_LR,
+	                          Pm4::PA_SC_FOV_WINDOW_TB,
+	                          Pm4::PA_SC_MODE_CNTL_1,
+	                          Pm4::PA_SU_VTX_CNTL,
+	                          Pm4::PS_SHADER_SAMPLE_EXCLUSION_MASK,
+	                          Pm4::PA_SC_BINNER_CNTL_0,
+	                          Pm4::PA_SC_BINNER_CNTL_1,
+	                          Pm4::PA_SC_CONSERVATIVE_RASTERIZATION_CNTL,
+	                          Pm4::PA_SC_NGG_MODE_CNTL,
+	                          Pm4::DB_ALPHA_TO_MASK,
+	                          Pm4::PA_SC_WINDOW_OFFSET,
+	                          Pm4::PA_SC_WINDOW_SCISSOR_TL,
+	                          Pm4::PA_SC_WINDOW_SCISSOR_BR,
+	                          Pm4::VGT_HOS_MAX_TESS_LEVEL,
+	                          Pm4::VGT_HOS_MIN_TESS_LEVEL,
+	                          Pm4::VGT_PRIMITIVEID_EN,
+	                          Pm4::VGT_REUSE_OFF,
+	                          Pm4::VGT_TESS_DISTRIBUTION,
+	                          Pm4::VGT_LS_HS_CONFIG,
+	                          Pm4::VGT_TF_PARAM,
+	                          Pm4::DB_DEPTH_BOUNDS_MIN,
+	                          Pm4::DB_DEPTH_BOUNDS_MAX,
+	                          Pm4::DB_HTILE_SURFACE,
+	                          Pm4::DB_DEPTH_INFO,
+	                          Pm4::DB_DEPTH_SIZE,
+	                          Pm4::DB_DEPTH_SLICE})
+	{
+		g_hw_ctx_func[reg] = hw_ctx_ignore;
+	}
 	g_hw_ctx_func[Pm4::VGT_SHADER_STAGES_EN]              = hw_ctx_set_shader_stages;
 	g_hw_ctx_func[Pm4::PA_CL_GB_VERT_CLIP_ADJ]            = hw_ctx_set_guard_bands;
 
@@ -5604,7 +5708,10 @@ static void graphics_init_jmp_tables()
 	for (uint32_t viewport = 0; viewport < 16; viewport++)
 	{
 		g_hw_ctx_func[Pm4::PA_SC_VPORT_ZMIN_0 + viewport * 2] = hw_ctx_set_viewport_z;
-		g_hw_ctx_func[Pm4::PA_CL_VPORT_XSCALE + viewport * 6] = hw_ctx_set_viewport_scale_offset;
+		for (uint32_t component = 0; component < 6; component++)
+		{
+			g_hw_ctx_func[Pm4::PA_CL_VPORT_XSCALE + viewport * 6 + component] = hw_ctx_set_viewport_scale_offset;
+		}
 	}
 
 	for (auto& func: g_hw_sh_func)

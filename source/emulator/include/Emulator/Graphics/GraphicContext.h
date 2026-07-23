@@ -107,6 +107,9 @@ struct GraphicContext
 
 	// VK_EXT_depth_range_unrestricted allows viewport min/maxDepth outside [0,1].
 	bool depth_range_unrestricted_supported = false;
+
+	// Core depthBiasClamp is optional and must be enabled explicitly at device creation.
+	bool depth_bias_clamp_supported = false;
 };
 
 struct VulkanMemory
