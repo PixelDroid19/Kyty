@@ -29,9 +29,32 @@ public:
 	// When set, update_func clears transparent black and never reads guest
 	// (GPU-owned range under a live color surface that is not bindable).
 	static constexpr int PARAM_SKIP_GUEST_UPLOAD = 8;
+	static constexpr int PARAM_RESOURCE_INFO     = 9;
+
+	static constexpr uint64_t PackResourceInfo(uint8_t resource_type, uint32_t depth, uint32_t base_array = 0u)
+	{
+		return static_cast<uint64_t>(resource_type) | (static_cast<uint64_t>(depth) << 8u) |
+		       (static_cast<uint64_t>(base_array) << 24u);
+	}
+
+	static constexpr uint8_t GetResourceType(uint64_t resource_info)
+	{
+		return static_cast<uint8_t>(resource_info & 0xffu);
+	}
+
+	static constexpr uint32_t GetResourceDepth(uint64_t resource_info)
+	{
+		return static_cast<uint32_t>((resource_info >> 8u) & 0xffffu);
+	}
+
+	static constexpr uint32_t GetResourceBaseArray(uint64_t resource_info)
+	{
+		return static_cast<uint32_t>(resource_info >> 24u);
+	}
 
 	TextureObject(uint8_t dfmt, uint8_t nfmt, uint16_t fmt, uint32_t width, uint32_t height, uint32_t pitch, uint32_t base_level,
-	              uint32_t levels, uint32_t tile, bool neo, uint32_t swizzle, bool force_degamma, bool skip_guest_upload = false)
+	              uint32_t levels, uint32_t tile, bool neo, uint32_t swizzle, bool force_degamma, bool skip_guest_upload = false,
+	              uint8_t resource_type = 9u, uint32_t depth = 1u, uint32_t base_array = 0u)
 	{
 		params[PARAM_FORMAT]            = (static_cast<uint64_t>(fmt) << 16u) | (static_cast<uint64_t>(dfmt) << 8u) | nfmt;
 		params[PARAM_PITCH]             = pitch;
@@ -42,6 +65,7 @@ public:
 		params[PARAM_SWIZZLE]            = swizzle;
 		params[PARAM_FORCE_DEGAMMA]      = force_degamma ? 1 : 0;
 		params[PARAM_SKIP_GUEST_UPLOAD] = skip_guest_upload ? 1 : 0;
+		params[PARAM_RESOURCE_INFO]     = PackResourceInfo(resource_type, depth, base_array);
 		check_hash                      = Gen5SampleTextureUsesHashRefresh(fmt);
 		type                            = Graphics::GpuMemoryObjectType::Texture;
 	}

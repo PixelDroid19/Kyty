@@ -64,6 +64,21 @@ void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint
 uint64_t TileGetStandard64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems);
 void     TileConvertStandard64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height,
                                            uint32_t pitch_elems);
+// Gen5 kStandard4KB (tile mode 5) 32bpp surfaces. The layout is used by
+// integer image load/store resources as well as sampled textures.
+uint64_t TileGetStandard4KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems);
+void     TileConvertStandard4KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height,
+                                          uint32_t pitch_elems);
+// Gen5 kStandard4KB volumetric R32_UINT resources use 8x16x8 swizzle blocks.
+// These helpers are intentionally separate from the 2D layout above: a 3D
+// descriptor interleaves Z inside each 4 KiB block and therefore cannot be
+// represented as independently tiled 2D slices.
+uint64_t TileGetStandard4KB32VolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems,
+                                          uint32_t height);
+void     TileConvertStandard4KB32VolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height,
+                                                uint32_t depth, uint32_t pitch_elems);
+void     TileGetStandard4KB32VolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems,
+                                        TileSizeAlign* size);
 void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile,
                         bool neo, TileSizeAlign* total_size, TileSizeOffset* level_sizes, TilePaddedSize* padded_size);
 void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile,

@@ -151,6 +151,9 @@ def clean_child_env(
     env["KYTY_PRINTF_DIRECTION"] = "Silent"
     env["KYTY_SCREEN_WIDTH"] = base.get("KYTY_SCREEN_WIDTH", "1280")
     env["KYTY_SCREEN_HEIGHT"] = base.get("KYTY_SCREEN_HEIGHT", "720")
+    for key in ("KYTY_INTERNAL_RESOLUTION_WIDTH", "KYTY_INTERNAL_RESOLUTION_HEIGHT"):
+        if base.get(key):
+            env[key] = base[key]
     env["KYTY_NATIVE_CAPTURE_MAX_EDGE"] = base.get("KYTY_NATIVE_CAPTURE_MAX_EDGE", "1280")
     for k in FORBIDDEN_CHILD_ENV:
         env.pop(k, None)

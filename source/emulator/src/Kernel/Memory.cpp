@@ -479,7 +479,9 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 	block.start_addr  = candidate;
 	block.memory_type = memory_type;
 
-	m_allocated.Add(block);
+	const auto insert_pos = std::lower_bound(m_allocated.begin(), m_allocated.end(), block.start_addr,
+	                                         [](const AllocatedBlock& existing, uint64_t start) { return existing.start_addr < start; });
+	m_allocated.InsertAt(static_cast<uint32_t>(insert_pos - m_allocated.begin()), block);
 
 	*phys_addr_out = candidate;
 	return true;
@@ -805,35 +807,29 @@ bool PhysicalMemory::Find(uint64_t phys_addr, bool next, AllocatedBlock* out)
 
 	Core::LockGuard lock(m_mutex);
 
-	for (auto& b: m_allocated)
+	const auto first_after = std::lower_bound(m_allocated.begin(), m_allocated.end(), phys_addr,
+	                                          [](const AllocatedBlock& block, uint64_t address)
+	                                          { return block.start_addr + block.size <= address; });
+	if (first_after == m_allocated.end())
 	{
-		if (phys_addr >= b.start_addr && phys_addr < b.start_addr + b.size)
-		{
-			*out = b;
-			return true;
-		}
+		return false;
 	}
 
-	if (next)
+	const bool contains_address = phys_addr >= first_after->start_addr && phys_addr - first_after->start_addr < first_after->size;
+	if (!contains_address && !next)
 	{
-		uint64_t        min_start_addr = UINT64_MAX;
-		AllocatedBlock* next           = nullptr;
-		for (auto& b: m_allocated)
-		{
-			if (b.start_addr > phys_addr && b.start_addr < min_start_addr)
-			{
-				min_start_addr = b.start_addr;
-				next           = &b;
-			}
-		}
-		if (next != nullptr)
-		{
-			*out = *next;
-			return true;
-		}
+		return false;
 	}
 
-	return false;
+	*out = *first_after;
+	for (auto current = first_after + 1; current != m_allocated.end() && current->memory_type == out->memory_type &&
+	                                      current->start_addr == out->start_addr + out->size;
+	     ++current)
+	{
+		out->size += current->size;
+	}
+
+	return true;
 }
 
 bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode,

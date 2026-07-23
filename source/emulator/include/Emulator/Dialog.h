@@ -37,6 +37,12 @@ int KYTY_SYSV_ABI CommonDialogIsUsed();
 
 } // namespace CommonDialog
 
+namespace ImeDialog {
+
+int KYTY_SYSV_ABI ImeDialogGetStatus();
+
+} // namespace ImeDialog
+
 namespace ErrorDialog {
 
 int KYTY_SYSV_ABI ErrorDialogInitialize();

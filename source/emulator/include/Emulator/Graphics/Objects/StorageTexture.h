@@ -20,9 +20,13 @@ public:
 	static constexpr int PARAM_TILE         = 4;
 	static constexpr int PARAM_NEO          = 5;
 	static constexpr int PARAM_SWIZZLE      = 6;
+	static constexpr int PARAM_RESOURCE_TYPE = 7;
+	static constexpr int PARAM_DEPTH         = 8;
+	static constexpr int PARAM_BASE_ARRAY    = 9;
 
 	StorageTextureObject(uint8_t dfmt, uint8_t nfmt, uint16_t fmt, uint32_t width, uint32_t height, uint32_t pitch, uint32_t base_level,
-	                     uint32_t levels, uint32_t tile, bool neo, uint32_t swizzle)
+	                     uint32_t levels, uint32_t tile, bool neo, uint32_t swizzle, uint8_t resource_type = 9u, uint32_t depth = 1u,
+	                     uint32_t base_array = 0u)
 	{
 		params[PARAM_FORMAT]       = (static_cast<uint64_t>(fmt) << 16u) | (static_cast<uint64_t>(dfmt) << 8u) | nfmt;
 		params[PARAM_PITCH]        = pitch;
@@ -31,6 +35,9 @@ public:
 		params[PARAM_TILE]         = tile;
 		params[PARAM_NEO]          = neo ? 1 : 0;
 		params[PARAM_SWIZZLE]      = swizzle;
+		params[PARAM_RESOURCE_TYPE] = resource_type;
+		params[PARAM_DEPTH]         = depth;
+		params[PARAM_BASE_ARRAY]    = base_array;
 		check_hash                 = true;
 		type                       = Graphics::GpuMemoryObjectType::StorageTexture;
 	}

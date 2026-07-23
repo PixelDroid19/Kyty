@@ -1327,6 +1327,8 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 13), VK_FORMAT_R16_SFLOAT);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(13), 2u);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 14), VK_FORMAT_R8G8_UNORM);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 20), VK_FORMAT_R32_UINT);
+	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(20), 4u);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 71), VK_FORMAT_R16G16B16A16_SFLOAT);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 133), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
 }
@@ -1358,6 +1360,33 @@ TEST(EmulatorGraphicsState, Gen5SharpSampledTextureAcceptsTexture2DType)
 	EXPECT_EQ(bind.textures2D.desc[0].texture.Type(), 9);
 	EXPECT_EQ(bind.textures2D.desc[0].usage, ShaderTextureUsage::ReadOnly);
 	EXPECT_EQ(usage.textures2D_readonly, 1);
+}
+
+TEST(EmulatorGraphicsState, Gen5SharpSampledTextureAcceptsTexture2DArrayType)
+{
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 8; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Vsharp;
+	}
+	user_sgpr.value[3] = 13u << 28u;
+
+	ShaderSharp read_only_texture {};
+	read_only_texture.offset_dw = 0;
+	read_only_texture.size      = 0;
+
+	ShaderUserData user_data {};
+	user_data.sharp_resource_offset[0] = &read_only_texture;
+	user_data.sharp_resource_count[0]  = 1;
+
+	ShaderParsedUsage  usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 8);
+
+	ASSERT_EQ(bind.textures2D.textures_num, 1);
+	EXPECT_EQ(bind.textures2D.textures2d_sampled_num, 1);
+	EXPECT_EQ(bind.textures2D.desc[0].texture.Type(), 13);
+	EXPECT_EQ(bind.textures2D.desc[0].usage, ShaderTextureUsage::ReadOnly);
 }
 
 TEST(EmulatorGraphicsState, Gen5SharpNullBufferDescriptorIsNotStorageBuffer)
@@ -1493,6 +1522,13 @@ TEST(EmulatorGraphicsState, Gen5DirectSgprsAllowFullUserWindow)
 
 	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 28);
 	EXPECT_EQ(usage.direct_sgprs, 28);
+}
+
+TEST(EmulatorGraphicsState, ResolvesWrittenComputeSgprsForEudMetadata)
+{
+	EXPECT_EQ(ShaderResolveGen5UserSgprCount(0u, 14u, 8u), 14u);
+	EXPECT_EQ(ShaderResolveGen5UserSgprCount(4u, 14u, 8u), 4u);
+	EXPECT_EQ(ShaderResolveGen5UserSgprCount(0u, 14u, 0u), 0u);
 }
 
 TEST(EmulatorGraphicsState, DecodesModeControl)
@@ -1897,8 +1933,49 @@ TEST(EmulatorGraphicsState, ResolvesGen5AgcAndDriverExports)
 	EXPECT_TRUE(resolve(u"w2rJhmD+dsE", u"Graphics5Driver", u"Graphics5Driver"));
 	EXPECT_TRUE(resolve(u"XlNp7jzGiPo", u"Graphics5Driver", u"Graphics5Driver"));
 	EXPECT_TRUE(resolve(u"MM4IZSEYytQ", u"Graphics5Driver", u"Graphics5Driver"));
+	EXPECT_TRUE(resolve(u"dbOlWdppb4o", u"Graphics5", u"Graphics5"));
 	EXPECT_EQ(Gen5Driver::GraphicsDriverSetTFRing(reinterpret_cast<const volatile void*>(0x10000), 0x3fff8), OK);
 	EXPECT_EQ(Gen5Driver::GraphicsDriverSetHsOffchipParam(0, 0x1ff, 0), OK);
+}
+
+TEST(EmulatorGraphicsState, BuildsGraphics5DescriptorTableForDefaultAndMaskedEntries)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	using Kyty::Libs::Graphics::Gen5::GraphicsBuildDescriptorTable;
+
+	uint64_t output[32] {};
+	EXPECT_EQ(GraphicsBuildDescriptorTable(reinterpret_cast<uint64_t>(output), 0, 0, 0, 0, 0), OK);
+	EXPECT_EQ(output[0], 0x0000000010000000ull);
+	EXPECT_EQ(output[31], 0x0000001f1000001full);
+
+	uint8_t descriptor[0x58] {};
+	uint8_t source[0x58] {};
+	uint32_t masks[] = {0u};
+	uint32_t source_entries[] = {0x01000000u};
+	const uint16_t mask_count = 1;
+	uint32_t entry_count = 1;
+	const uint64_t mask_address = reinterpret_cast<uint64_t>(masks);
+	const uint64_t source_entries_address = reinterpret_cast<uint64_t>(source_entries);
+	std::memcpy(descriptor + 0x38u, &mask_address, sizeof(mask_address));
+	std::memcpy(descriptor + 0x56u, &mask_count, sizeof(mask_count));
+	std::memcpy(source + 0x30u, &source_entries_address, sizeof(source_entries_address));
+	std::memcpy(source + 0x50u, &entry_count, sizeof(entry_count));
+
+	EXPECT_EQ(GraphicsBuildDescriptorTable(reinterpret_cast<uint64_t>(output), reinterpret_cast<uint64_t>(descriptor),
+	                                     reinterpret_cast<uint64_t>(source), 0, 0, 0), OK);
+	EXPECT_EQ(output[0], 0x0000042010000000ull);
+	EXPECT_EQ(output[1], 0x0000000110000001ull);
+
+	EXPECT_EQ(GraphicsBuildDescriptorTable(0, 0, 0, 0, 0, 0), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	entry_count = 33;
+	std::memcpy(source + 0x50u, &entry_count, sizeof(entry_count));
+	EXPECT_EQ(GraphicsBuildDescriptorTable(reinterpret_cast<uint64_t>(output), reinterpret_cast<uint64_t>(descriptor),
+	                                     reinterpret_cast<uint64_t>(source), 0, 0, 0), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
 }
 
 // WaitFlipDone body observed post-Play: handle=0, index=3 while Open() left

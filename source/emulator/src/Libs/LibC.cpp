@@ -560,6 +560,18 @@ static KYTY_SYSV_ABI uint16_t* c_wcsncpy(uint16_t* destination, const uint16_t* 
 	}
 	return destination;
 }
+static bool c_is_ascii_alphanumeric(uint32_t character)
+{
+	return (character >= '0' && character <= '9') || (character >= 'A' && character <= 'Z') ||
+	       (character >= 'a' && character <= 'z');
+}
+
+static bool c_is_ascii_punctuation(uint32_t character)
+{
+	return (character >= '!' && character <= '/') || (character >= ':' && character <= '@') ||
+	       (character >= '[' && character <= '`') || (character >= '{' && character <= '~');
+}
+
 static KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
 {
 	if (character > 0x7f)
@@ -567,17 +579,14 @@ static KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
 		return 0;
 	}
 
-	// These descriptor values are passed directly by the guest CRT. Keep the
-	// classification local and deterministic instead of delegating to the host
-	// locale, whose wchar_t width and locale tables differ from the guest ABI.
+	// The guest CRT passes compact descriptor values rather than host wctype_t
+	// masks. Class 2 appears in its wide printf parser and must accept conversion
+	// letters as well as decimal width and precision digits. Keep this ASCII-only
+	// so host locale state cannot alter guest control flow.
 	switch (character_class)
 	{
-		case 2: return character >= '0' && character <= '9' ? 1 : 0;
-		case 9:
-			return (character >= '!' && character <= '/') || (character >= ':' && character <= '@') ||
-			               (character >= '[' && character <= '`') || (character >= '{' && character <= '~')
-			           ? 1
-			           : 0;
+		case 2: return c_is_ascii_alphanumeric(character) ? 1 : 0;
+		case 9: return c_is_ascii_punctuation(character) ? 1 : 0;
 		default: return 0;
 	}
 }

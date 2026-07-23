@@ -36,6 +36,10 @@ static VkFormat get_texture_format(uint32_t dfmt, uint32_t nfmt, uint32_t fmt)
 		EXIT("unknown format: nfmt = %u, dfmt = %u\n", nfmt, dfmt);
 	} else
 	{
+		if (fmt == 20)
+		{
+			return VK_FORMAT_R32_UINT;
+		}
 		EXIT("unknown format: fmt = %u\n", fmt);
 	}
 	return VK_FORMAT_UNDEFINED;
@@ -124,6 +128,12 @@ static bool CheckSwizzle(GraphicContext* /*ctx*/, VkImageCreateInfo* image_info,
 	return true;
 }
 
+static bool IsR32UintReadSwizzle(const VkComponentMapping& components)
+{
+	return components.r == VK_COMPONENT_SWIZZLE_R && components.g == VK_COMPONENT_SWIZZLE_ZERO &&
+	       components.b == VK_COMPONENT_SWIZZLE_ZERO && components.a == VK_COMPONENT_SWIZZLE_ONE;
+}
+
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("StorageTextureObject::update_func");
@@ -144,13 +154,68 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	// auto base_level = params[StorageTextureObject::PARAM_LEVELS] >> 32u;
 	auto levels = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
 	auto pitch  = params[StorageTextureObject::PARAM_PITCH];
+	auto resource_type = params[StorageTextureObject::PARAM_RESOURCE_TYPE];
+	auto depth = params[StorageTextureObject::PARAM_DEPTH];
+	auto base_array = params[StorageTextureObject::PARAM_BASE_ARRAY];
 	bool neo    = Config::IsNeo();
+	const bool three_dimensional = resource_type == 10u;
+	const bool arrayed_2d = resource_type == 13u;
 
 	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_GENERAL;
 
 	EXIT_NOT_IMPLEMENTED(levels >= 16);
+	EXIT_NOT_IMPLEMENTED(three_dimensional && (fmt != 20u || tile != 5u || levels != 1u || depth == 0u));
+	if (three_dimensional)
+	{
+		TileSizeAlign tiled_size {};
+		TileGetStandard4KB32VolumeSize(width, height, static_cast<uint32_t>(depth), static_cast<uint32_t>(pitch), &tiled_size);
+		EXIT_NOT_IMPLEMENTED(*size != tiled_size.size);
+		const uint64_t linear_bytes = static_cast<uint64_t>(pitch) * height * depth * 4u;
+		EXIT_NOT_IMPLEMENTED(linear_bytes == 0u || linear_bytes > *size);
+		auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
+		TileConvertStandard4KB32VolumeToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), static_cast<uint32_t>(width),
+		                                      static_cast<uint32_t>(height), static_cast<uint32_t>(depth), static_cast<uint32_t>(pitch));
+		Vector<BufferImageCopy> regions(1);
+		regions[0].offset = 0;
+		regions[0].pitch = static_cast<uint32_t>(pitch);
+		regions[0].width = static_cast<uint32_t>(width);
+		regions[0].height = static_cast<uint32_t>(height);
+		regions[0].depth = static_cast<uint32_t>(depth);
+		regions[0].dst_level = 0;
+		regions[0].dst_x = 0;
+		regions[0].dst_y = 0;
+		regions[0].dst_z = 0;
+		UtilFillImage(ctx, vk_obj, temp_buf, linear_bytes, regions, static_cast<uint64_t>(vk_layout));
+		delete[] temp_buf;
+		return;
+	}
+	if (arrayed_2d)
+	{
+		EXIT_NOT_IMPLEMENTED(fmt != 20u || tile != 5u || levels != 1u || depth == 0u || base_array >= depth || depth >= 16u);
+		TileSizeAlign slice_size {};
+		TileGetTextureSize2(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+		                    static_cast<uint32_t>(pitch), 1u, static_cast<uint32_t>(tile), &slice_size, nullptr, nullptr);
+		EXIT_NOT_IMPLEMENTED(*size != static_cast<uint64_t>(slice_size.size) * depth);
+		const uint64_t linear_slice_bytes = static_cast<uint64_t>(pitch) * height * 4u;
+		std::vector<uint8_t> linear(static_cast<size_t>(linear_slice_bytes * depth));
+		Vector<BufferImageCopy> regions(static_cast<int>(depth));
+		for (uint32_t layer = 0; layer < depth; ++layer)
+		{
+			TileConvertStandard4KB32ToLinear(linear.data() + layer * linear_slice_bytes,
+			                                  reinterpret_cast<const uint8_t*>(*vaddr) + layer * slice_size.size,
+			                                  static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(pitch));
+			regions[layer].offset = static_cast<uint32_t>(layer * linear_slice_bytes);
+			regions[layer].pitch = static_cast<uint32_t>(pitch);
+			regions[layer].width = static_cast<uint32_t>(width);
+			regions[layer].height = static_cast<uint32_t>(height);
+			regions[layer].dst_level = 0;
+			regions[layer].dst_array_layer = layer;
+		}
+		UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
+		return;
+	}
 
-	EXIT_NOT_IMPLEMENTED(tile != 8 && tile != 13);
+	EXIT_NOT_IMPLEMENTED(tile != 8 && tile != 13 && tile != 5);
 
 	TileSizeOffset level_sizes[16];
 
@@ -206,6 +271,19 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		                         levels, neo);
 		UtilFillImage(ctx, vk_obj, temp_buf, *size, regions, static_cast<uint64_t>(vk_layout));
 		delete[] temp_buf;
+	} else if (tile == 5)
+	{
+		EXIT_NOT_IMPLEMENTED(fmt != 20u || levels != 1u);
+		const uint64_t linear_bytes = static_cast<uint64_t>(pitch) * height * 4u;
+		EXIT_NOT_IMPLEMENTED(linear_bytes == 0u || linear_bytes > *size);
+		auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
+		TileConvertStandard4KB32ToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), width, height, pitch);
+		regions[0].offset = 0;
+		regions[0].pitch  = pitch;
+		regions[0].width  = width;
+		regions[0].height = height;
+		UtilFillImage(ctx, vk_obj, temp_buf, linear_bytes, regions, static_cast<uint64_t>(vk_layout));
+		delete[] temp_buf;
 	} else if (tile == 8)
 	{
 		UtilFillImage(ctx, vk_obj, reinterpret_cast<void*>(*vaddr), *size, regions, static_cast<uint64_t>(vk_layout));
@@ -230,6 +308,12 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto base_level = params[StorageTextureObject::PARAM_LEVELS] >> 32u;
 	auto levels     = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
 	auto swizzle    = params[StorageTextureObject::PARAM_SWIZZLE];
+	auto resource_type = params[StorageTextureObject::PARAM_RESOURCE_TYPE];
+	auto depth      = params[StorageTextureObject::PARAM_DEPTH];
+	auto base_array = params[StorageTextureObject::PARAM_BASE_ARRAY];
+	const bool three_dimensional = resource_type == 10u;
+	const bool arrayed_2d = resource_type == 13u;
+	EXIT_NOT_IMPLEMENTED(resource_type != 8u && resource_type != 9u && resource_type != 13u && !three_dimensional);
 
 	EXIT_NOT_IMPLEMENTED(base_level != 0);
 
@@ -247,6 +331,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	EXIT_NOT_IMPLEMENTED(pixel_format == VK_FORMAT_UNDEFINED);
 	EXIT_NOT_IMPLEMENTED(width == 0);
 	EXIT_NOT_IMPLEMENTED(height == 0);
+	EXIT_NOT_IMPLEMENTED(three_dimensional && depth == 0u);
 
 	auto real_height = ((levels > 1) ? height + (height > 1 ? height / 2 : 1) : height);
 
@@ -256,18 +341,31 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	image_info.pNext         = nullptr;
 	image_info.flags         = 0;
-	image_info.imageType     = VK_IMAGE_TYPE_2D;
+	image_info.imageType     = (three_dimensional ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D);
 	image_info.extent.width  = width;
 	image_info.extent.height = real_height;
-	image_info.extent.depth  = 1;
+	image_info.extent.depth  = (three_dimensional ? depth : 1u);
 	image_info.mipLevels     = 1;
-	image_info.arrayLayers   = 1;
+	image_info.arrayLayers   = (arrayed_2d ? depth : 1u);
 	image_info.format        = pixel_format;
 	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
 	image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	image_info.usage         = vk_usage;
 	image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
 	image_info.samples       = VK_SAMPLE_COUNT_1_BIT;
+
+	// Storage image views must use identity component mapping. For R32_UINT,
+	// the guest's R,0,0,1 selector describes the read result; writes still
+	// address only the R component. Preserve that exact data contract by using
+	// identity on the writable view while the paired sampled view retains the
+	// guest swizzle.
+	if (pixel_format == VK_FORMAT_R32_UINT && IsR32UintReadSwizzle(components))
+	{
+		components.r = VK_COMPONENT_SWIZZLE_R;
+		components.g = VK_COMPONENT_SWIZZLE_G;
+		components.b = VK_COMPONENT_SWIZZLE_B;
+		components.a = VK_COMPONENT_SWIZZLE_A;
+	}
 
 	if (!CheckSwizzle(ctx, &image_info, &components))
 	{
@@ -313,7 +411,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	create_info.pNext                           = nullptr;
 	create_info.flags                           = 0;
 	create_info.image                           = vk_obj->image;
-	create_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+	create_info.viewType                        = (three_dimensional ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D);
 	create_info.format                          = vk_obj->format;
 	create_info.components                      = components;
 	create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -322,9 +420,17 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	create_info.subresourceRange.layerCount     = 1;
 	create_info.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
 
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
+	const int view_index = (three_dimensional ? VulkanImage::VIEW_3D : VulkanImage::VIEW_DEFAULT);
+	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[view_index]);
+	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[view_index] == nullptr);
+	if (!three_dimensional)
+	{
+		create_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+		create_info.subresourceRange.baseArrayLayer = (arrayed_2d ? base_array : 0u);
+		create_info.subresourceRange.layerCount = (arrayed_2d ? depth - base_array : 1u);
+		vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]);
+		EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_ARRAY] == nullptr);
+	}
 
 	return vk_obj;
 }
@@ -340,7 +446,13 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 
 	DeleteDescriptor(vk_obj);
 
-	vkDestroyImageView(ctx->device, vk_obj->image_view[VulkanImage::VIEW_DEFAULT], nullptr);
+	for (auto view: vk_obj->image_view)
+	{
+		if (view != nullptr)
+		{
+			vkDestroyImageView(ctx->device, view, nullptr);
+		}
+	}
 
 	vkDestroyImage(ctx->device, vk_obj->image, nullptr);
 
@@ -354,7 +466,8 @@ bool StorageTextureObject::Equal(const uint64_t* other) const
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
 	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && params[PARAM_LEVELS] == other[PARAM_LEVELS] &&
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
-	        params[PARAM_SWIZZLE] == other[PARAM_SWIZZLE]);
+	        params[PARAM_SWIZZLE] == other[PARAM_SWIZZLE] && params[PARAM_RESOURCE_TYPE] == other[PARAM_RESOURCE_TYPE] &&
+	        params[PARAM_DEPTH] == other[PARAM_DEPTH] && params[PARAM_BASE_ARRAY] == other[PARAM_BASE_ARRAY]);
 }
 
 GpuObject::create_func_t StorageTextureObject::GetCreateFunc() const

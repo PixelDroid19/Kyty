@@ -101,9 +101,10 @@ int main(int argc, char** argv)
 	const char* captured_sequence = "08x  size: %%ld";
 	for (const char* cursor = captured_sequence; *cursor != '\0'; cursor++)
 	{
-		const bool expected_digit = *cursor >= '0' && *cursor <= '9';
-		Expect((iswctype(static_cast<uint8_t>(*cursor), 2) != 0) == expected_digit,
-		       "class 2 must classify only decimal digits in the captured formatter sequence");
+		const bool expected_alphanumeric = (*cursor >= '0' && *cursor <= '9') || (*cursor >= 'a' && *cursor <= 'z') ||
+		                                  (*cursor >= 'A' && *cursor <= 'Z');
+		Expect((iswctype(static_cast<uint8_t>(*cursor), 2) != 0) == expected_alphanumeric,
+		       "class 2 must classify ASCII alphanumeric formatter tokens");
 	}
 
 	const uint16_t text[] = {'A', 'b', 'c', 0};

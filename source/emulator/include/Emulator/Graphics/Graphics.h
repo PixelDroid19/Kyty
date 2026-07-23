@@ -100,6 +100,10 @@ struct Label;
 }
 
 int KYTY_SYSV_ABI   GraphicsInit(uint32_t* state, uint32_t ver);
+// NID dbOlWdppb4o has no public symbol name. It builds the fixed 32-entry
+// descriptor table consumed by the Graphics5 resource setup path.
+int KYTY_SYSV_ABI   GraphicsBuildDescriptorTable(uint64_t output, uint64_t descriptor, uint64_t source, uint64_t arg3,
+                                                 uint64_t arg4, uint64_t arg5);
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2(uint32_t ver);
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2Internal(uint32_t ver);
 int KYTY_SYSV_ABI   GraphicsCreateShader(Shader** dst, void* header, const volatile void* code);

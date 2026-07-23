@@ -1021,6 +1021,129 @@ uint64_t TileGetStandard64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elem
 	return (blk_idx * k_block_bytes) + Standard64KB32WithinBlockOffset(x % k_block, y % k_block);
 }
 
+static uint32_t Standard4KB32WithinBlockOffset(uint32_t x, uint32_t y)
+{
+	uint32_t offset = 0;
+	offset ^= (y << 4u) & 0x070u;
+	offset ^= (y << 5u) & 0x100u;
+	offset ^= (y << 6u) & 0x400u;
+	offset ^= (x << 2u) & 0x00cu;
+	offset ^= (x << 5u) & 0x080u;
+	offset ^= (x << 6u) & 0x200u;
+	offset ^= (x << 7u) & 0x800u;
+	return offset;
+}
+
+uint64_t TileGetStandard4KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems)
+{
+	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u);
+
+	static constexpr uint32_t k_block       = 32u;
+	static constexpr uint32_t k_block_bytes = 4096u;
+	const uint32_t            blocks_x      = (pitch_elems + k_block - 1u) / k_block;
+	const uint32_t            xb            = x / k_block;
+	const uint32_t            yb            = y / k_block;
+	const uint64_t            block_index   = static_cast<uint64_t>(yb) * blocks_x + xb;
+	return (block_index * k_block_bytes) + Standard4KB32WithinBlockOffset(x % k_block, y % k_block);
+}
+
+void TileConvertStandard4KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems)
+{
+	EXIT_IF(dst == nullptr);
+	EXIT_IF(src == nullptr);
+	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u || pitch_elems < width);
+
+	auto*       d = static_cast<uint8_t*>(dst);
+	const auto* s = static_cast<const uint8_t*>(src);
+	static constexpr uint32_t k_bpp = 4u;
+	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * k_bpp);
+	for (uint32_t y = 0; y < height; y++)
+	{
+		for (uint32_t x = 0; x < width; x++)
+		{
+			const uint64_t tiled  = TileGetStandard4KB32Offset(x, y, pitch_elems);
+			const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * k_bpp;
+			std::memcpy(d + linear, s + tiled, k_bpp);
+		}
+	}
+}
+
+static uint32_t Standard4KB32VolumeWithinBlockOffset(uint32_t x, uint32_t y, uint32_t z)
+{
+	uint32_t offset = 0;
+	offset ^= (x << 2u) & 0x004u;
+	offset ^= (x << 5u) & 0x040u;
+	offset ^= (x << 7u) & 0x200u;
+	offset ^= (y << 3u) & 0x008u;
+	offset ^= (y << 4u) & 0x020u;
+	offset ^= (y << 6u) & 0x100u;
+	offset ^= (y << 8u) & 0x800u;
+	offset ^= (z << 4u) & 0x010u;
+	offset ^= (z << 6u) & 0x080u;
+	offset ^= (z << 8u) & 0x400u;
+	return offset;
+}
+
+uint64_t TileGetStandard4KB32VolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems, uint32_t height)
+{
+	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u || height == 0u);
+
+	static constexpr uint32_t k_block_width  = 8u;
+	static constexpr uint32_t k_block_height = 16u;
+	static constexpr uint32_t k_block_depth  = 8u;
+	static constexpr uint32_t k_block_bytes  = 4096u;
+	const uint32_t blocks_x = (pitch_elems + k_block_width - 1u) / k_block_width;
+	const uint32_t blocks_y = (height + k_block_height - 1u) / k_block_height;
+	const uint64_t block_index =
+	    ((static_cast<uint64_t>(z / k_block_depth) * blocks_y) + (y / k_block_height)) * blocks_x + (x / k_block_width);
+	return (block_index * k_block_bytes) + Standard4KB32VolumeWithinBlockOffset(x % k_block_width, y % k_block_height,
+	                                                                              z % k_block_depth);
+}
+
+void TileConvertStandard4KB32VolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
+	                                         uint32_t pitch_elems)
+{
+	EXIT_IF(dst == nullptr);
+	EXIT_IF(src == nullptr);
+	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u || depth == 0u || pitch_elems < width);
+
+	auto*       d = static_cast<uint8_t*>(dst);
+	const auto* s = static_cast<const uint8_t*>(src);
+	static constexpr uint32_t k_bpp = 4u;
+	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * depth * k_bpp);
+	for (uint32_t z = 0; z < depth; ++z)
+	{
+		for (uint32_t y = 0; y < height; ++y)
+		{
+			for (uint32_t x = 0; x < width; ++x)
+			{
+				const uint64_t tiled  = TileGetStandard4KB32VolumeOffset(x, y, z, pitch_elems, height);
+				const uint64_t linear = ((static_cast<uint64_t>(z) * height * pitch_elems) +
+				                         (static_cast<uint64_t>(y) * pitch_elems) + x) * k_bpp;
+				std::memcpy(d + linear, s + tiled, k_bpp);
+			}
+		}
+	}
+}
+
+void TileGetStandard4KB32VolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems, TileSizeAlign* size)
+{
+	EXIT_IF(size == nullptr);
+	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u || depth == 0u || pitch_elems < width);
+
+	static constexpr uint32_t k_block_width  = 8u;
+	static constexpr uint32_t k_block_height = 16u;
+	static constexpr uint32_t k_block_depth  = 8u;
+	static constexpr uint32_t k_block_bytes  = 4096u;
+	const uint64_t blocks_x = (static_cast<uint64_t>(pitch_elems) + k_block_width - 1u) / k_block_width;
+	const uint64_t blocks_y = (static_cast<uint64_t>(height) + k_block_height - 1u) / k_block_height;
+	const uint64_t blocks_z = (static_cast<uint64_t>(depth) + k_block_depth - 1u) / k_block_depth;
+	const uint64_t bytes = blocks_x * blocks_y * blocks_z * k_block_bytes;
+	EXIT_NOT_IMPLEMENTED(bytes > UINT32_MAX);
+	size->size  = static_cast<uint32_t>(bytes);
+	size->align = k_block_bytes;
+}
+
 void TileConvertStandard64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems)
 {
 	EXIT_IF(dst == nullptr);
@@ -1672,6 +1795,37 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 				const uint32_t padded_h = ((elem_height + block_h - 1u) / block_h) * block_h;
 				padded_size[0].width    = bc1 ? padded_w * 4u : padded_w;
 				padded_size[0].height   = bc1 ? padded_h * 4u : padded_h;
+			}
+			return;
+		}
+
+		// kStandard4KB has a 32x32 block for 32-bit elements. This path is
+		// intentionally limited to a single mip until the tail layout is
+		// independently exercised; it still covers any dimensions/pitches that
+		// fit the documented one-level block geometry.
+		if (tile == 0x05u)
+		{
+			const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
+			EXIT_NOT_IMPLEMENTED(bpp != 4u || levels != 1u);
+			const uint32_t element_pitch = (pitch != 0u ? pitch : width);
+			const uint32_t padded_width  = (element_pitch + 31u) & ~31u;
+			const uint32_t padded_height = (height + 31u) & ~31u;
+			const uint64_t bytes = static_cast<uint64_t>(padded_width) * padded_height * bpp;
+			EXIT_NOT_IMPLEMENTED(bytes > UINT32_MAX);
+			if (total_size != nullptr)
+			{
+				total_size->size  = static_cast<uint32_t>(bytes);
+				total_size->align = 4096u;
+			}
+			if (level_sizes != nullptr)
+			{
+				level_sizes[0].offset = 0;
+				level_sizes[0].size   = static_cast<uint32_t>(bytes);
+			}
+			if (padded_size != nullptr)
+			{
+				padded_size[0].width  = padded_width;
+				padded_size[0].height = padded_height;
 			}
 			return;
 		}

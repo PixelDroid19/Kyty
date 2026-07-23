@@ -218,13 +218,13 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanIm
 	{
 		region[index].bufferOffset                    = r.offset;
 		region[index].bufferRowLength                 = (r.width != r.pitch ? r.pitch : 0);
-		region[index].bufferImageHeight               = 0;
+		region[index].bufferImageHeight               = (r.depth != 1u ? r.height : 0);
 		region[index].imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
 		region[index].imageSubresource.mipLevel       = r.dst_level;
-		region[index].imageSubresource.baseArrayLayer = 0;
+		region[index].imageSubresource.baseArrayLayer = r.dst_array_layer;
 		region[index].imageSubresource.layerCount     = 1;
-		region[index].imageOffset                     = {r.dst_x, r.dst_y, 0};
-		region[index].imageExtent                     = {r.width, r.height, 1};
+		region[index].imageOffset                     = {r.dst_x, r.dst_y, r.dst_z};
+		region[index].imageExtent                     = {r.width, r.height, r.depth};
 		index++;
 	}
 

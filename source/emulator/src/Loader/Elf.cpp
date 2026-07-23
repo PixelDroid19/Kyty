@@ -334,9 +334,17 @@ bool Elf64::IsShared() const
 	return (m_ehdr->e_type == ET_DYNAMIC);
 }
 
-bool Elf64::IsNextGen() const
+GuestPlatform Elf64::GetGuestPlatform() const
 {
-	return (m_ehdr->e_ident[EI_ABIVERSION] == 2);
+	EXIT_IF(m_ehdr == nullptr);
+	switch (m_ehdr->e_ident[EI_ABIVERSION])
+	{
+		case 0: return GuestPlatform::Ps4;
+		case 2: return GuestPlatform::Ps5;
+		default:
+			EXIT("unsupported guest ABI version: 0x%x\n", m_ehdr->e_ident[EI_ABIVERSION]);
+			return GuestPlatform::Unknown;
+	}
 }
 
 void Elf64::Clear()

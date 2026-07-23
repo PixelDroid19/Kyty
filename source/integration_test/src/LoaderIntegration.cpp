@@ -110,7 +110,7 @@ int InitializeHostThread(int argc, char** argv)
 
 // Minimal PS-style shared ELF header that satisfies Elf64::IsValid + IsShared.
 // Not a full guest module — only used for plan-time probes and soft apply.
-bool WriteMinimalSharedElf(const Core::String& path)
+bool WriteMinimalSharedElf(const Core::String& path, uint8_t abi_version = 2)
 {
 	// Elf64_Ehdr is 64 bytes; e_phentsize must be sizeof(Elf64_Phdr)=56.
 	unsigned char buf[64] = {};
@@ -122,6 +122,7 @@ bool WriteMinimalSharedElf(const Core::String& path)
 	buf[5]                = 1; // ELFDATA2LSB
 	buf[6]                = 1; // EV_CURRENT
 	buf[7]                = 9; // ELFOSABI_FREEBSD
+	buf[8]                = abi_version;
 	// e_type = ET_DYNAMIC (0xfe18) at offset 16, little-endian
 	buf[16] = 0x18;
 	buf[17] = 0xfe;
@@ -368,6 +369,35 @@ int ScenarioFailBeforeMutate()
 	Expect(linker.LoadedProgramCount() == baseline, "no partial adjacent load on revalidation failure");
 	const auto diag = Loader::ModuleLifecycleCoordinator::GetDiagnostics();
 	Expect(diag.applied_count == 0, "applied_count stays 0");
+	return 0;
+}
+
+int ScenarioPlatformRevalidationRejectsChange()
+{
+	const Core::String root    = MakeTempPackageRoot();
+	const Core::String primary = root + U"/eboot.bin";
+	Expect(WriteJunkFile(primary, "", 0), "write primary");
+	EnsureDir(root + U"/sce_module");
+	const Core::String adjacent = root + U"/sce_module/platform.prx";
+	Expect(WriteMinimalSharedElf(adjacent, 2), "write PS5 shared module");
+
+	Loader::RuntimeLinker linker;
+	const uint32_t        baseline = linker.LoadedProgramCount();
+	Loader::ModuleLifecycleCoordinator::AfterPrimaryLoaded(&linker, primary);
+	Expect(Loader::ModuleLifecycleCoordinator::HasPendingAdjacentPlan(&linker), "plan staged before ABI mutation");
+
+	Expect(WriteMinimalSharedElf(adjacent, 0), "rewrite module with PS4 ABI");
+	Loader::ModuleLifecycleCoordinator::AfterHleSymbolsRegistered(&linker);
+	Expect(linker.LoadedProgramCount() == baseline, "ABI mismatch does not partially load adjacent modules");
+
+	const auto diag = Loader::ModuleLifecycleCoordinator::GetDiagnostics();
+	bool       saw_platform_rejection = false;
+	for (uint32_t i = 0; i < diag.rejection_count; ++i)
+	{
+		saw_platform_rejection = saw_platform_rejection ||
+		                         std::strstr(diag.rejections[i], "apply_aborted_platform_mismatch") != nullptr;
+	}
+	Expect(saw_platform_rejection, "revalidation reports ABI mutation");
 	return 0;
 }
 
@@ -764,6 +794,10 @@ int main(int argc, char** argv)
 	if (scenario == "fail_before_mutate")
 	{
 		return ScenarioFailBeforeMutate();
+	}
+	if (scenario == "platform_revalidation_rejects_change")
+	{
+		return ScenarioPlatformRevalidationRejectsChange();
 	}
 	if (scenario == "agent_load_plan_diagnostics")
 	{

@@ -362,6 +362,9 @@ void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* 
 	create_info.subresourceRange.levelCount     = 1;
 
 	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]);
+	create_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]);
+	create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
 
 	create_info.components.r = VK_COMPONENT_SWIZZLE_B;
 	create_info.components.g = VK_COMPONENT_SWIZZLE_G;
@@ -376,6 +379,7 @@ void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* 
 	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ABGR]);
 
 	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
+	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_ARRAY] == nullptr);
 	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_BGRA] == nullptr);
 	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_ABGR] == nullptr);
 }

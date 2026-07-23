@@ -1426,6 +1426,153 @@ static RegisterDefaults g_reg_defaults1 = { // @suppress("Invalid arguments")
 static RegisterDefaults g_reg_defaults2 = { // @suppress("Invalid arguments")
     g_tbl_cx2, g_tbl_sh2, g_tbl_uc2, nullptr, {0, 0}, g_tbl_index2, sizeof(g_tbl_index2) / 12};
 
+namespace {
+
+constexpr uint32_t kDescriptorTableEntries = 32;
+
+template <typename T> T ReadDescriptorField(const uint8_t* data, size_t offset)
+{
+	T value {};
+	std::memcpy(&value, data + offset, sizeof(value));
+	return value;
+}
+
+uint32_t ExtractDescriptorBits(uint32_t value, uint32_t first_bit, uint32_t bit_count)
+{
+	return (value >> first_bit) & ((1u << bit_count) - 1u);
+}
+
+uint32_t ReplaceDescriptorTwoBitField(uint32_t value, uint32_t field, uint32_t shift)
+{
+	const uint32_t mask = 0x3u << shift;
+	return (value & ~mask) | ((field & 0x3u) << shift);
+}
+
+uint32_t ApplyDescriptorMask(uint32_t flags, uint32_t source_value, uint32_t mask_value)
+{
+	flags &= 0xffffffe0u;
+	flags |= ExtractDescriptorBits(mask_value, 8u, 5u);
+	flags &= 0xfffffbffu;
+	flags |= ((source_value & 0x400000u) != 0u ? 0x400u : ((source_value >> 14u) & 0x400u));
+	return flags;
+}
+
+void WriteDefaultDescriptorEntries(uint64_t* output, uint32_t first_entry)
+{
+	for (uint32_t i = first_entry; i < kDescriptorTableEntries; ++i)
+	{
+		output[i] = (static_cast<uint64_t>(i) << 32u) | (0x10000000u + i);
+	}
+}
+
+uint32_t BuildDescriptorFlags(uint32_t source_value, bool has_mask, uint32_t mask_value)
+{
+	const uint32_t mode = (source_value >> 20u) & 0x3u;
+	uint32_t       flags = 0;
+
+	if (mode == 0u)
+	{
+		flags = (((source_value >> 24u) & 0x1u) | (has_mask ? 0u : 1u)) << 5u;
+		flags = ReplaceDescriptorTwoBitField(flags, source_value >> 28u, 8u);
+	}
+	else
+	{
+		flags = ((source_value << 4u) & 0x03000000u) + 0x80000u;
+		if (mode == 2u)
+		{
+			flags &= 0xffefffdfu;
+			flags |= has_mask ? ((~(mask_value & source_value) >> 16u) & 0x20u) : 0x20u;
+			flags = ReplaceDescriptorTwoBitField(flags, source_value >> 30u, 8u);
+			flags = ReplaceDescriptorTwoBitField(flags, source_value >> 30u, 21u);
+		}
+		else if (has_mask)
+		{
+			const uint32_t masked = mask_value & source_value;
+			flags &= 0xffffffdfu;
+			flags |= (masked >> 15u) & 0x20u;
+			flags ^= 0x20u;
+			flags &= 0xffefffffu;
+			flags |= (~masked >> 1u) & 0x100000u;
+			flags = ReplaceDescriptorTwoBitField(flags, source_value >> 30u, 8u);
+			flags = ReplaceDescriptorTwoBitField(flags, source_value >> 30u, 21u);
+		}
+		else
+		{
+			flags |= 0x100020u;
+			flags = ReplaceDescriptorTwoBitField(flags, source_value >> 28u, 8u);
+			flags = ReplaceDescriptorTwoBitField(flags, source_value >> 30u, 21u);
+		}
+	}
+
+	return has_mask ? ApplyDescriptorMask(flags, source_value, mask_value) : (flags & 0xfffffbe0u);
+}
+
+} // namespace
+
+int KYTY_SYSV_ABI GraphicsBuildDescriptorTable(uint64_t output_address, uint64_t descriptor_address, uint64_t source_address,
+	                                           uint64_t arg3, uint64_t arg4, uint64_t arg5)
+{
+	PRINT_NAME();
+	(void)arg3;
+	(void)arg4;
+	(void)arg5;
+
+	auto* output = reinterpret_cast<uint64_t*>(output_address);
+	if (output == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	if (source_address == 0u)
+	{
+		WriteDefaultDescriptorEntries(output, 0);
+		return OK;
+	}
+
+	const auto* source   = reinterpret_cast<const uint8_t*>(source_address);
+	const uint32_t count = ReadDescriptorField<uint32_t>(source, 0x50u);
+	if (count == 0u)
+	{
+		WriteDefaultDescriptorEntries(output, 0);
+		return OK;
+	}
+	if (descriptor_address == 0u || count > kDescriptorTableEntries)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	const auto* descriptor = reinterpret_cast<const uint8_t*>(descriptor_address);
+	const uint16_t mask_count = ReadDescriptorField<uint16_t>(descriptor, 0x56u);
+	const auto* masks = reinterpret_cast<const uint32_t*>(ReadDescriptorField<uint64_t>(descriptor, 0x38u));
+	const auto* source_entries = reinterpret_cast<const uint32_t*>(ReadDescriptorField<uint64_t>(source, 0x30u));
+	if (source_entries == nullptr || (mask_count != 0u && masks == nullptr))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		const uint32_t source_value = source_entries[i];
+		uint32_t       matching_mask = mask_count;
+		for (uint32_t j = 0; j < mask_count; ++j)
+		{
+			if (static_cast<uint8_t>(masks[j]) == static_cast<uint8_t>(source_value))
+			{
+				matching_mask = j;
+				break;
+			}
+		}
+
+		const bool has_mask = matching_mask < mask_count;
+		const uint32_t mask_value = has_mask ? masks[matching_mask] : 0u;
+		const uint32_t flags = BuildDescriptorFlags(source_value, has_mask, mask_value);
+		output[i] = (static_cast<uint64_t>(flags) << 32u) | (0x10000000u + i);
+	}
+
+	WriteDefaultDescriptorEntries(output, count);
+	return OK;
+}
+
 int KYTY_SYSV_ABI GraphicsInit(uint32_t* state, uint32_t ver)
 {
 	PRINT_NAME();

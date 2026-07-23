@@ -203,6 +203,7 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 	// compressed block after dimensions are converted to block elements.
 	switch (format)
 	{
+		case 20: return 4; // UFMT_32_UINT
 		case 13: return 2; // UFMT_16_FLOAT
 		case 14: return 2; // UFMT_8_8_UNORM
 		case 56: return 4; // UFMT_8_8_8_8_UNORM
@@ -1045,7 +1046,9 @@ static void cs_check(const HW::CsStageRegisters& cs, const HW::ShaderRegisters& 
 	EXIT_NOT_IMPLEMENTED(cs.bulky != 0x00);
 	EXIT_NOT_IMPLEMENTED(cs.scratch_en != 0x00);
 	// EXIT_NOT_IMPLEMENTED(cs.user_sgpr != 0x0c);
-	EXIT_NOT_IMPLEMENTED(cs.tgid_x_en != 0x01);
+	// TGID_X_EN controls whether the shader receives WorkGroupID.x. Zero is a
+	// valid ABI state for compute shaders that do not consume a group id.
+	EXIT_NOT_IMPLEMENTED(cs.tgid_x_en > 0x01);
 	// EXIT_NOT_IMPLEMENTED(cs.tgid_y_en != 0x00);
 	// EXIT_NOT_IMPLEMENTED(cs.tgid_z_en != 0x00);
 	EXIT_NOT_IMPLEMENTED(cs.tg_size_en != 0x00);
@@ -2070,12 +2073,28 @@ static bool Gen5HasEudPointer(const ShaderUserData* user_data)
 	       user_data->direct_resource_offset[k_gen5_eud_direct_type] != 0xffff;
 }
 
-// Virtual base of EUD data in the sharp-offset address space: user_sgpr_num
-// rounded up to a multiple of 4 (30 → 32). Captured S#@0x20 maps to eud[0].
-static int Gen5EudOffsetBase(int user_sgpr_num)
+// The EUD sharp namespace begins at ABI slot 0x20. Wider user-SGPR windows can
+// push that boundary forward, but a narrow window must not reinterpret
+// S#@0x20 as an offset from slot 0x10 (14 → 16). Captured PS and CS layouts
+// both map S#@0x20 to eud[0].
+int ShaderGen5EudOffsetBase(int user_sgpr_num)
 {
 	EXIT_NOT_IMPLEMENTED(user_sgpr_num <= 0);
-	return (user_sgpr_num + 3) & ~3;
+	constexpr int abi_eud_offset_base = 0x20;
+	const int     rounded_user_sgprs  = (user_sgpr_num + 3) & ~3;
+	return (rounded_user_sgprs > abi_eud_offset_base ? rounded_user_sgprs : abi_eud_offset_base);
+}
+
+uint32_t ShaderResolveGen5UserSgprCount(uint32_t declared_count, uint32_t written_count, uint16_t eud_size_dw)
+{
+	// Some Gen5 compute packets leave USER_SGPR at zero while writing an EUD
+	// pointer through COMPUTE_USER_DATA. EUD metadata is the evidence that the
+	// written window is part of this shader's ABI; without it, zero remains zero.
+	if (declared_count != 0 || eud_size_dw == 0)
+	{
+		return declared_count;
+	}
+	return written_count;
 }
 
 static bool Gen5SharpNeedsEud(int offset_dw, int dwords, int user_sgpr_num)
@@ -2087,7 +2106,7 @@ static bool Gen5SharpNeedsEud(int offset_dw, int dwords, int user_sgpr_num)
 // sharp offset so that eud[0] is addressed as start=16.
 static int Gen5EudApiIndex(int offset_dw, int user_sgpr_num)
 {
-	const int eud_base = Gen5EudOffsetBase(user_sgpr_num);
+	const int eud_base = ShaderGen5EudOffsetBase(user_sgpr_num);
 	EXIT_NOT_IMPLEMENTED(offset_dw < eud_base);
 	return 16 + (offset_dw - eud_base);
 }
@@ -2100,19 +2119,19 @@ static uint32_t Gen5SharpUserSgprDword(int offset_dw, int user_sgpr_num, const H
 		return user_sgpr.value[offset_dw];
 	}
 	EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
-	const int eud_base = Gen5EudOffsetBase(user_sgpr_num);
+	const int eud_base = ShaderGen5EudOffsetBase(user_sgpr_num);
 	EXIT_NOT_IMPLEMENTED(offset_dw < eud_base);
 	return extended_buffer[offset_dw - eud_base];
 }
 
-// Gen5 texture type nibble: 8 = 1D, 9 = 2D. SizeFlag clear selects an
-// 8-dword T#; when dword3's type nibble is not 1D/2D the slot is a 4-dword V#.
+// Gen5 texture type nibble: 8 = 1D, 9 = 2D, 10 = 3D, 13 = 2D array. SizeFlag clear
+// selects an 8-dword T#; other type values in this path are 4-dword V#.
 static bool Gen5SharpIsImageDescriptor(int offset_dw, int user_sgpr_num, const HW::UserSgprInfo& user_sgpr,
                                      const uint32_t* extended_buffer)
 {
 	const uint32_t word3 = Gen5SharpUserSgprDword(offset_dw + 3, user_sgpr_num, user_sgpr, extended_buffer);
 	const uint8_t  type  = static_cast<uint8_t>((word3 >> 28u) & 0xFu);
-	return type == 8u || type == 9u;
+	return type == 8u || type == 9u || type == 10u || type == 13u;
 }
 
 static bool Gen5SharpUseTextureDescriptor(bool size_flag, int offset_dw, int user_sgpr_num,
@@ -2812,7 +2831,9 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
 			ShaderParse(reinterpret_cast<const uint32_t*>(regs->cs_regs.data_addr), &code);
 		}
-		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(regs->cs_regs.user_sgpr), &code);
+		const auto user_sgpr_num = ShaderResolveGen5UserSgprCount(regs->cs_regs.user_sgpr, regs->cs_user_sgpr.count,
+		                                                          data.user_data->eud_size_dw);
+		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code);
 	} else
 	{
 		ShaderParseUsage(regs->cs_regs.data_addr, &usage, &info->bind, regs->cs_user_sgpr, regs->cs_regs.user_sgpr);

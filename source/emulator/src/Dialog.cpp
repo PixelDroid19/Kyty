@@ -44,6 +44,22 @@ int KYTY_SYSV_ABI CommonDialogIsUsed()
 
 } // namespace CommonDialog
 
+namespace ImeDialog {
+
+LIB_NAME("ImeDialog", "ImeDialog");
+
+// The dialog starts unused. Until sceImeDialogInit is implemented, no supported
+// call can transition this state, so GetStatus accurately reports STATUS_NONE.
+static std::atomic<int> g_status {CommonDialog::STATUS_NONE};
+
+int KYTY_SYSV_ABI ImeDialogGetStatus()
+{
+	PRINT_NAME();
+	return g_status.load(std::memory_order_acquire);
+}
+
+} // namespace ImeDialog
+
 namespace ErrorDialog {
 
 LIB_NAME("ErrorDialog", "ErrorDialog");

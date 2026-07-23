@@ -47,6 +47,10 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	{
 		return vk == VK_FORMAT_R16G16B16A16_SFLOAT;
 	}
+	if (gen5_ufmt == 20u)
+	{
+		return vk == VK_FORMAT_R32_UINT;
+	}
 	return true;
 }
 
@@ -586,8 +590,11 @@ struct BufferImageCopy
 	uint32_t dst_level;
 	uint32_t width;
 	uint32_t height;
+	uint32_t depth = 1;
+	uint32_t dst_array_layer = 0;
 	int      dst_x;
 	int      dst_y;
+	int      dst_z = 0;
 };
 
 struct ImageImageCopy

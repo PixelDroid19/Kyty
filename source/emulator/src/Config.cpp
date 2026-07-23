@@ -15,7 +15,7 @@ struct Config
 	uint32_t               internal_resolution_width   = 1280;
 	uint32_t               internal_resolution_height  = 720;
 	bool                   neo                         = true;
-	bool                   next_gen                    = false;
+	GuestPlatform          guest_platform              = GuestPlatform::Unknown;
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;
 	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::None;
@@ -133,7 +133,7 @@ uint32_t GetInternalResolutionHeight()
 
 bool IsNeo()
 {
-	return g_config->neo || g_config->next_gen;
+	return g_config->neo || g_config->guest_platform == GuestPlatform::Ps5;
 }
 
 bool VulkanValidationEnabled()
@@ -211,9 +211,43 @@ String GetPipelineDumpFolder()
 	return g_config->pipeline_dump_folder;
 }
 
+bool SetGuestPlatform(GuestPlatform platform)
+{
+	EXIT_IF(g_config == nullptr);
+	if (platform == GuestPlatform::Unknown)
+	{
+		printf("guest platform cannot be set to unknown\n");
+		return false;
+	}
+	if (g_config->guest_platform != GuestPlatform::Unknown && g_config->guest_platform != platform)
+	{
+		printf("guest platform conflict: established=%s requested=%s\n", GuestPlatformName(g_config->guest_platform),
+		       GuestPlatformName(platform));
+		return false;
+	}
+	g_config->guest_platform = platform;
+	return true;
+}
+
+GuestPlatform GetGuestPlatform()
+{
+	EXIT_IF(g_config == nullptr);
+	return g_config->guest_platform;
+}
+
+void ResetGuestPlatform()
+{
+	EXIT_IF(g_config == nullptr);
+	g_config->guest_platform = GuestPlatform::Unknown;
+}
+
 void SetNextGen(bool mode)
 {
-	g_config->next_gen = mode;
+	// Compatibility seam for existing unit tests. RuntimeLinker owns the
+	// production lifecycle and uses SetGuestPlatform instead.
+	ResetGuestPlatform();
+	const bool set = SetGuestPlatform(mode ? GuestPlatform::Ps5 : GuestPlatform::Ps4);
+	EXIT_IF(!set);
 }
 
 bool IsInitialized()
@@ -223,7 +257,8 @@ bool IsInitialized()
 
 bool IsNextGen()
 {
-	return g_config->next_gen;
+	EXIT_IF(g_config == nullptr || g_config->guest_platform == GuestPlatform::Unknown);
+	return g_config->guest_platform == GuestPlatform::Ps5;
 }
 
 } // namespace Kyty::Config

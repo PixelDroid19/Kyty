@@ -222,6 +222,39 @@ TEST(EmulatorKernelMemory, DirectMemoryAllocationFindsAFreeEarlierRange)
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(upper_addr, kSize), OK);
 }
 
+TEST(EmulatorKernelMemory, DirectMemoryQueryCoalescesAdjacentAllocationsOfTheSameType)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr int64_t kBase = 0x300000000;
+	constexpr size_t  kSize = 0x4000;
+	int64_t           first = 0;
+	int64_t           second = 0;
+
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 2 * kSize, kSize, kSize, 12, &first), OK);
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 2 * kSize, kSize, kSize, 12, &second), OK);
+	ASSERT_EQ(first, kBase);
+	ASSERT_EQ(second, kBase + static_cast<int64_t>(kSize));
+
+	struct DirectMemoryInfo
+	{
+		int64_t start;
+		int64_t end;
+		int     memory_type;
+	};
+	DirectMemoryInfo info {};
+
+	ASSERT_EQ(KernelDirectMemoryQuery(first, 1, &info, sizeof(info)), OK);
+	EXPECT_EQ(info.start, first);
+	EXPECT_EQ(info.end, first + 2 * static_cast<int64_t>(kSize));
+	EXPECT_EQ(info.memory_type, 12);
+
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(first, kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(second, kSize), OK);
+	Config::SetNextGen(false);
+}
+
 TEST(EmulatorKernelMemory, ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap)
 {
 	EnsureMemorySubsystemInitialized();

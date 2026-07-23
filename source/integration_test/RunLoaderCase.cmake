@@ -22,7 +22,7 @@ elseif(SCENARIO STREQUAL "discovery_feature_off")
 	set(ENV{KYTY_BRINGUP_SUBSYSTEMS} "loader")
 elseif(SCENARIO STREQUAL "locator_primary_names")
 	# Strict; pure name checks.
-elseif(SCENARIO MATCHES "multi_module_stable_order|duplicate_identity_rejected|fail_before_mutate|agent_load_plan_diagnostics|apply_export_conflict_rollback|discovery_capacity_rejects_whole_plan|adjacent_apply_deferred_until_hle")
+elseif(SCENARIO MATCHES "multi_module_stable_order|duplicate_identity_rejected|fail_before_mutate|platform_revalidation_rejects_change|agent_load_plan_diagnostics|apply_export_conflict_rollback|discovery_capacity_rejects_whole_plan|adjacent_apply_deferred_until_hle")
 	set(ENV{KYTY_BRINGUP_MODE} "unsafe")
 	set(ENV{KYTY_BRINGUP_FEATURES} "adjacent_module_discovery")
 	set(ENV{KYTY_BRINGUP_SUBSYSTEMS} "loader")

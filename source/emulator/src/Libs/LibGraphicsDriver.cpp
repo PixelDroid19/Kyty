@@ -68,6 +68,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	PRINT_NAME_ENABLE(true);
 
 	LIB_FUNC("23LRUSvYu1M", Gen5::GraphicsInit);
+	LIB_FUNC("dbOlWdppb4o", Gen5::GraphicsBuildDescriptorTable);
 	LIB_FUNC("2JtWUUiYBXs", Gen5::GraphicsGetRegisterDefaults2);
 	LIB_FUNC("wRbq6ZjNop4", Gen5::GraphicsGetRegisterDefaults2Internal);
 	// Patch helpers (3.20 export names): wait-mem / DMA destination rewrite.

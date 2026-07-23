@@ -4,6 +4,7 @@
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Dialog.h"
 #include "Emulator/Config.h"
 #include "Emulator/Log.h"
 
@@ -43,7 +44,8 @@ void AppendPod(std::vector<uint8_t>* out, const T& value)
 	out->insert(out->end(), bytes, bytes + sizeof(T));
 }
 
-std::vector<uint8_t> MakeSelfWrappedElf(Elf64_Half type, bool alternate_signature = false, bool unstored_sections = false)
+std::vector<uint8_t> MakeSelfWrappedElf(Elf64_Half type, uint8_t abi_version = 2, bool alternate_signature = false,
+                                        bool unstored_sections = false)
 {
 	SelfHeader self {};
 	const uint8_t ident[] = {alternate_signature ? uint8_t {0x54} : uint8_t {0x4f},
@@ -65,7 +67,7 @@ std::vector<uint8_t> MakeSelfWrappedElf(Elf64_Half type, bool alternate_signatur
 	ehdr.e_ident[EI_DATA]       = ELFDATA2LSB;
 	ehdr.e_ident[EI_VERSION]    = EV_CURRENT;
 	ehdr.e_ident[EI_OSABI]      = ELFOSABI_FREEBSD;
-	ehdr.e_ident[EI_ABIVERSION] = 2;
+	ehdr.e_ident[EI_ABIVERSION] = abi_version;
 	ehdr.e_type                 = type;
 	ehdr.e_machine              = EM_X86_64;
 	ehdr.e_version              = EV_CURRENT;
@@ -134,6 +136,19 @@ SymbolResolve LibkernelFunc(const char16_t* nid)
 	return sr;
 }
 
+SymbolResolve ImeDialogFunc(const char16_t* nid)
+{
+	SymbolResolve sr {};
+	sr.name                 = nid;
+	sr.library              = U"ImeDialog";
+	sr.library_version      = 1;
+	sr.module               = U"ImeDialog";
+	sr.module_version_major = 1;
+	sr.module_version_minor = 1;
+	sr.type                 = SymbolType::Func;
+	return sr;
+}
+
 void AddLibcImportIds(Program* program)
 {
 	ASSERT_NE(program, nullptr);
@@ -182,6 +197,55 @@ TEST(EmulatorModuleLoad, BuildPlanAcceptsSelfWrappedAdjacentSharedPrx)
 	EXPECT_STREQ(plan.entries[1].relative_key, "sce_module/libc.prx");
 	EXPECT_EQ(plan.entries[1].role, ModulePlanRole::AdjacentShared);
 	EXPECT_EQ(plan.diag.rejection_count, 0u);
+}
+
+TEST(EmulatorModuleLoad, ElfPlatformComesFromAbiVersion)
+{
+	EnsureFileSystemSubsystem();
+	const TempPackageRoot temp(U"/tmp/kyty_module_load_platform_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	const String ps4_path = temp.root + U"ps4.bin";
+	const String ps5_path = temp.root + U"ps5.bin";
+	ASSERT_TRUE(WriteBinary(ps4_path, MakeSelfWrappedElf(ET_DYNEXEC, 0)));
+	ASSERT_TRUE(WriteBinary(ps5_path, MakeSelfWrappedElf(ET_DYNEXEC, 2)));
+
+	Elf64 ps4;
+	ps4.Open(ps4_path);
+	ASSERT_TRUE(ps4.IsValid());
+	EXPECT_EQ(ps4.GetGuestPlatform(), Kyty::GuestPlatform::Ps4);
+
+	Elf64 ps5;
+	ps5.Open(ps5_path);
+	ASSERT_TRUE(ps5.IsValid());
+	EXPECT_EQ(ps5.GetGuestPlatform(), Kyty::GuestPlatform::Ps5);
+}
+
+TEST(EmulatorModuleLoad, BuildPlanRejectsCrossPlatformAdjacentPrx)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_module_load_cross_platform_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root + U"sce_module/"));
+	ASSERT_TRUE(WriteBinary(temp.root + U"eboot.bin", MakeSelfWrappedElf(ET_DYNEXEC, 2)));
+	ASSERT_TRUE(WriteBinary(temp.root + U"sce_module/legacy.prx", MakeSelfWrappedElf(ET_DYNAMIC, 0)));
+
+	const auto plan = ModuleLoadPlanning::BuildPlan(temp.root + U"eboot.bin", true);
+
+	ASSERT_TRUE(plan.valid) << plan.error;
+	EXPECT_EQ(plan.diag.detected_platform, Kyty::GuestPlatform::Ps5);
+	EXPECT_EQ(plan.diag.adjacent_count, 0u);
+	ASSERT_EQ(plan.diag.rejection_count, 1u);
+	EXPECT_STREQ(plan.diag.rejections[0], "reject platform_mismatch sce_module/legacy.prx");
+}
+
+TEST(EmulatorModuleLoad, GuestPlatformCannotChangeDuringSession)
+{
+	EnsureFileSystemSubsystem();
+	Kyty::Config::ResetGuestPlatform();
+	EXPECT_EQ(Kyty::Config::GetGuestPlatform(), Kyty::GuestPlatform::Unknown);
+	EXPECT_TRUE(Kyty::Config::SetGuestPlatform(Kyty::GuestPlatform::Ps4));
+	EXPECT_FALSE(Kyty::Config::SetGuestPlatform(Kyty::GuestPlatform::Ps5));
+	EXPECT_EQ(Kyty::Config::GetGuestPlatform(), Kyty::GuestPlatform::Ps4);
+	Kyty::Config::ResetGuestPlatform();
 }
 
 TEST(EmulatorModuleLoad, OpenCreateWithoutTruncatePreservesExistingFile)
@@ -255,7 +319,7 @@ TEST(EmulatorModuleLoad, RecognizesAlternateGen5SelfSignature)
 	const TempPackageRoot temp(U"/tmp/kyty_module_load_alternate_self_test/");
 	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
 	const String path = temp.root + U"eboot.bin";
-	ASSERT_TRUE(WriteBinary(path, MakeSelfWrappedElf(ET_DYNEXEC, true, true)));
+	ASSERT_TRUE(WriteBinary(path, MakeSelfWrappedElf(ET_DYNEXEC, 2, true, true)));
 
 	Elf64 elf;
 	elf.Open(path);
@@ -371,7 +435,7 @@ TEST(EmulatorModuleLoad, LibcWcsncmpUsesGuestUtf16CodeUnits)
 	EXPECT_EQ(wcsncmp(same, greater, 0), 0);
 }
 
-TEST(EmulatorModuleLoad, LibcWideClassifiesKnownGuestDescriptorsWithoutHostLocale)
+TEST(EmulatorModuleLoad, LibcWideClassifiesObservedGuestDescriptorsWithoutHostLocale)
 {
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
@@ -381,12 +445,27 @@ TEST(EmulatorModuleLoad, LibcWideClassifiesKnownGuestDescriptorsWithoutHostLocal
 	using Iswctype = int (*)(uint32_t, int);
 	auto iswctype = reinterpret_cast<Iswctype>(record->vaddr);
 
+	EXPECT_EQ(iswctype(u'i', 2), 1);
 	EXPECT_EQ(iswctype(u'7', 2), 1);
-	EXPECT_EQ(iswctype(u'X', 2), 0);
+	EXPECT_EQ(iswctype(u'%', 2), 0);
 	EXPECT_EQ(iswctype(u']', 9), 1);
 	EXPECT_EQ(iswctype(u'A', 9), 0);
 	EXPECT_EQ(iswctype(0x00e9, 2), 0);
 	EXPECT_EQ(iswctype(u'7', 99), 0);
+}
+
+TEST(EmulatorModuleLoad, ImeDialogGetStatusReportsTheUninitializedState)
+{
+	EnsureFileSystemSubsystem();
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libImeDialog_1", &symbols));
+
+	const auto* record = symbols.Find(ImeDialogFunc(u"IADmD4tScBY"));
+	ASSERT_NE(record, nullptr);
+	using GetStatus = int(KYTY_SYSV_ABI*)();
+	auto get_status = reinterpret_cast<GetStatus>(record->vaddr);
+
+	EXPECT_EQ(get_status(), Kyty::Libs::Dialog::CommonDialog::STATUS_NONE);
 }
 
 TEST(EmulatorModuleLoad, LibkernelRegistersModuleInfoForUnwind)

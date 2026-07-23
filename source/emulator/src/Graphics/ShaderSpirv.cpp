@@ -1973,6 +1973,94 @@ static void ValidateImageSampleLz2dAddresses(const ShaderInstruction& inst)
 	}
 }
 
+static bool UsesArrayed2dImages(const ShaderBindResources* bind)
+{
+	if (bind == nullptr || bind->textures2D.textures_num == 0)
+	{
+		return false;
+	}
+
+	bool has_arrayed = false;
+	bool has_flat    = false;
+	for (int i = 0; i < bind->textures2D.textures_num; ++i)
+	{
+		if (bind->textures2D.desc[i].texture.Type() == 13u)
+		{
+			has_arrayed = true;
+		} else
+		{
+			has_flat = true;
+		}
+	}
+
+	// A single SPIR-V descriptor array cannot contain both Image2D and
+	// Image2DArray elements. Keep this boundary explicit until bindings are
+	// split by image shape.
+	EXIT_NOT_IMPLEMENTED(has_arrayed && has_flat);
+	return has_arrayed;
+}
+
+static bool UsesThreeDimensionalImages(const ShaderBindResources* bind)
+{
+	if (bind == nullptr || bind->textures2D.textures_num == 0)
+	{
+		return false;
+	}
+
+	bool has_3d    = false;
+	bool has_other = false;
+	for (int i = 0; i < bind->textures2D.textures_num; ++i)
+	{
+		if (bind->textures2D.desc[i].texture.Type() == 10u)
+		{
+			has_3d = true;
+		} else
+		{
+			has_other = true;
+		}
+	}
+	EXIT_NOT_IMPLEMENTED(has_3d && has_other);
+	return has_3d;
+}
+
+static bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst)
+{
+	return (inst.type == ShaderInstructionType::ImageLoad || inst.type == ShaderInstructionType::ImageStore) &&
+	       inst.format == ShaderInstructionFormat::Vdata4Vaddr3StDmaskF;
+}
+
+static bool UsesUnsignedIntegerImages(const ShaderBindResources* bind)
+{
+	if (bind == nullptr || bind->textures2D.textures_num == 0)
+	{
+		return false;
+	}
+
+	for (int i = 0; i < bind->textures2D.textures_num; ++i)
+	{
+		if (bind->textures2D.desc[i].texture.Format() != 20u)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool IsImageInstruction(const ShaderInstruction& inst)
+{
+	switch (inst.type)
+	{
+		case ShaderInstructionType::ImageLoad:
+		case ShaderInstructionType::ImageSample:
+		case ShaderInstructionType::ImageSampleL:
+		case ShaderInstructionType::ImageSampleLz:
+		case ShaderInstructionType::ImageSampleLzO:
+		case ShaderInstructionType::ImageStore:
+		case ShaderInstructionType::ImageStoreMip: return true;
+		default: return false;
+	}
+}
+
 static bool operand_is_exec(ShaderOperand op)
 {
 	switch (op.type)
@@ -4764,6 +4852,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_Vdata4Vaddr3StDmaskF)
 
 	if (bind_info != nullptr && bind_info->textures2D.textures2d_sampled_num > 0)
 	{
+		const bool arrayed = UsesArrayed2dImages(bind_info);
+		const bool three_dimensional = UsesThreeDimensionalImages(bind_info);
+		const bool uint_images = UsesUnsignedIntegerImages(bind_info);
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
 		auto dst_value2  = operand_variable_to_str(inst.dst, 2);
@@ -4790,27 +4881,37 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_Vdata4Vaddr3StDmaskF)
          %t69_<index> = OpBitcast %uint %t67_<index>
          %t70_<index> = OpLoad %float %<src0_value1>
          %t71_<index> = OpBitcast %uint %t70_<index>
-         %t73_<index> = OpCompositeConstruct %v2uint %t69_<index> %t71_<index>
-         %t74_<index> = OpImageFetch %v4float %t27_<index> %t73_<index>
-               OpStore %temp_v4float %t74_<index>
-         %t46_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_0
-         %t47_<index> = OpLoad %float %t46_<index>
+<array_coordinate_load>         %t73_<index> = OpCompositeConstruct %<coordinate_type> %t69_<index> %t71_<index><array_coordinate_value>
+         %t74_<index> = OpImageFetch %<image_vector> %t27_<index> %t73_<index>
+         %t741_<index> = OpCompositeExtract %<image_scalar> %t74_<index> 0
+         %t47_<index> = <scalar_to_float> %float %t741_<index>
                OpStore %<dst_value0> %t47_<index>
-         %t50_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_1
-         %t51_<index> = OpLoad %float %t50_<index>
+         %t751_<index> = OpCompositeExtract %<image_scalar> %t74_<index> 1
+         %t51_<index> = <scalar_to_float> %float %t751_<index>
                OpStore %<dst_value1> %t51_<index>
-         %t54_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_2
-         %t55_<index> = OpLoad %float %t54_<index>
+         %t761_<index> = OpCompositeExtract %<image_scalar> %t74_<index> 2
+         %t55_<index> = <scalar_to_float> %float %t761_<index>
                OpStore %<dst_value2> %t55_<index>
-         %t57_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_3
-         %t58_<index> = OpLoad %float %t57_<index>
+         %t771_<index> = OpCompositeExtract %<image_scalar> %t74_<index> 3
+         %t58_<index> = <scalar_to_float> %float %t771_<index>
                OpStore %<dst_value3> %t58_<index>
 )";
+		const String8 index_string = String8::FromPrintf("%u", index);
+		const String8 array_coordinate_load =
+		    ((arrayed || three_dimensional) ? String8("         %t72_<index> = OpLoad %float %<src0_value2>\n         %t721_<index> = OpBitcast %uint %t72_<index>\n")
+		                   .ReplaceStr("<index>", index_string)
+		                   .ReplaceStr("<src0_value2>", src0_value2.value) :
+		               String8(""));
 		*dst_source += String8(text)
-		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<array_coordinate_load>", array_coordinate_load)
+		                   .ReplaceStr("<coordinate_type>", (arrayed || three_dimensional) ? "v3uint" : "v2uint")
+		                   .ReplaceStr("<array_coordinate_value>", (arrayed || three_dimensional) ? String8::FromPrintf(" %%t721_%u", index) : String8(""))
+		                   .ReplaceStr("<image_scalar>", uint_images ? "uint" : "float")
+		                   .ReplaceStr("<image_vector>", uint_images ? "v4uint" : "v4float")
+		                   .ReplaceStr("<scalar_to_float>", uint_images ? "OpBitcast" : "OpCopyObject")
+		                   .ReplaceStr("<index>", index_string)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value)
 		                   .ReplaceStr("<src0_value1>", src0_value1.value)
-		                   .ReplaceStr("<src0_value2>", src0_value2.value)
 		                   .ReplaceStr("<src1_value0>", src1_value0.value)
 		                   .ReplaceStr("<dst_value0>", dst_value0.value)
 		                   .ReplaceStr("<dst_value1>", dst_value1.value)
@@ -4873,6 +4974,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_Vdata4Vaddr3StDmaskF)
 
 	if (bind_info != nullptr && bind_info->textures2D.textures2d_storage_num > 0)
 	{
+		const bool arrayed = UsesArrayed2dImages(bind_info);
+		const bool three_dimensional = UsesThreeDimensionalImages(bind_info);
+		const bool uint_images = UsesUnsignedIntegerImages(bind_info);
 		auto dst_value0 = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1 = operand_variable_to_str(inst.dst, 1);
 		auto dst_value2 = operand_variable_to_str(inst.dst, 2);
@@ -4908,16 +5012,33 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_Vdata4Vaddr3StDmaskF)
          %t69_<index> = OpBitcast %uint %t67_<index>
          %t70_<index> = OpLoad %float %<src0_value1>
          %t71_<index> = OpBitcast %uint %t70_<index>
-         %t73_<index> = OpCompositeConstruct %v2uint %t69_<index> %t71_<index>
+<array_coordinate_load>         %t73_<index> = OpCompositeConstruct %<coordinate_type> %t69_<index> %t71_<index><array_coordinate_value>
          %t84_<index> = OpLoad %float %<dst_value0>
          %t85_<index> = OpLoad %float %<dst_value1>
          %t86_<index> = OpLoad %float %<dst_value2>
          %t87_<index> = OpLoad %float %<dst_value3>
-         %t88_<index> = OpCompositeConstruct %v4float %t84_<index> %t85_<index> %t86_<index> %t87_<index>
+         %t881_<index> = <float_to_scalar> %<image_scalar> %t84_<index>
+         %t882_<index> = <float_to_scalar> %<image_scalar> %t85_<index>
+         %t883_<index> = <float_to_scalar> %<image_scalar> %t86_<index>
+         %t884_<index> = <float_to_scalar> %<image_scalar> %t87_<index>
+         %t88_<index> = OpCompositeConstruct %<image_vector> %t881_<index> %t882_<index> %t883_<index> %t884_<index>
                OpImageWrite %t27_<index> %t73_<index> %t88_<index>
 )";
+		const auto src0_value2 = mimg_address_to_str(inst, 2);
+		const String8 index_string = String8::FromPrintf("%u", index);
+		const String8 array_coordinate_load =
+		    ((arrayed || three_dimensional) ? String8("         %t72_<index> = OpLoad %float %<src0_value2>\n         %t721_<index> = OpBitcast %uint %t72_<index>\n")
+		                   .ReplaceStr("<index>", index_string)
+		                   .ReplaceStr("<src0_value2>", src0_value2.value) :
+		               String8(""));
 		*dst_source += String8(text)
-		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<array_coordinate_load>", array_coordinate_load)
+		                   .ReplaceStr("<coordinate_type>", (arrayed || three_dimensional) ? "v3uint" : "v2uint")
+		                   .ReplaceStr("<array_coordinate_value>", (arrayed || three_dimensional) ? String8::FromPrintf(" %%t721_%u", index) : String8(""))
+		                   .ReplaceStr("<image_scalar>", uint_images ? "uint" : "float")
+		                   .ReplaceStr("<image_vector>", uint_images ? "v4uint" : "v4float")
+		                   .ReplaceStr("<float_to_scalar>", uint_images ? "OpBitcast" : "OpCopyObject")
+		                   .ReplaceStr("<index>", index_string)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value)
 		                   .ReplaceStr("<src0_value1>", src0_value1.value)
 		                   .ReplaceStr("<src1_value0>", src1_value0.value)
@@ -9370,8 +9491,8 @@ static const char* compute_types = R"(
 %_ptr_StorageBuffer__arr_BufferObject_uint_<buffers_num> = OpTypePointer StorageBuffer %_arr_BufferObject_uint_<buffers_num>
 )";
 
-	static const char* textures_sampled_types = R"(
-                                             %ImageS = OpTypeImage %float 2D 0 0 0 1 Unknown
+static const char* textures_sampled_types = R"(
+                                             %ImageS = OpTypeImage %<image_scalar> <image_dimension> 0 <arrayed> 0 1 Unknown
                     %textures2D_S_uint_<buffers_num> = OpConstant %uint <buffers_num>
                      %_arr_ImageS_uint_<buffers_num> = OpTypeArray %ImageS %textures2D_S_uint_<buffers_num>
 %_ptr_UniformConstant__arr_ImageS_uint_<buffers_num> = OpTypePointer UniformConstant %_arr_ImageS_uint_<buffers_num>
@@ -9379,8 +9500,8 @@ static const char* compute_types = R"(
                                        %SampledImage = OpTypeSampledImage %ImageS
 )";
 
-	static const char* textures_loaded_types = R"(
-                                             %ImageL = OpTypeImage %float 2D 0 0 0 2 Rgba8
+static const char* textures_loaded_types = R"(
+                                             %ImageL = OpTypeImage %<image_scalar> <image_dimension> 0 <arrayed> 0 2 <image_format>
                     %textures2D_L_uint_<buffers_num> = OpConstant %uint <buffers_num>
                      %_arr_ImageL_uint_<buffers_num> = OpTypeArray %ImageL %textures2D_L_uint_<buffers_num>
 %_ptr_UniformConstant__arr_ImageL_uint_<buffers_num> = OpTypePointer UniformConstant %_arr_ImageL_uint_<buffers_num>
@@ -9413,6 +9534,12 @@ static const char* compute_types = R"(
 
 	if (m_bind != nullptr)
 	{
+		const char* arrayed = UsesArrayed2dImages(m_bind) ? "1" : "0";
+		const bool three_dimensional = UsesThreeDimensionalImages(m_bind);
+		const bool uint_images = UsesUnsignedIntegerImages(m_bind);
+		const char* image_scalar = uint_images ? "uint" : "float";
+		const char* image_format = uint_images ? "R32ui" : "Rgba8";
+		const char* image_dimension = three_dimensional ? "3D" : "2D";
 		if (m_bind->storage_buffers.buffers_num > 0)
 		{
 			m_source +=
@@ -9421,12 +9548,19 @@ static const char* compute_types = R"(
 		if (m_bind->textures2D.textures2d_sampled_num > 0)
 		{
 			m_source += String8(textures_sampled_types)
-			                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_sampled_num));
+			                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_sampled_num))
+			                .ReplaceStr("<image_scalar>", image_scalar)
+			                .ReplaceStr("<image_dimension>", image_dimension)
+			                .ReplaceStr("<arrayed>", arrayed);
 		}
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
 			m_source += String8(textures_loaded_types)
-			                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_storage_num));
+			                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_storage_num))
+			                .ReplaceStr("<image_scalar>", image_scalar)
+			                .ReplaceStr("<image_format>", image_format)
+			                .ReplaceStr("<image_dimension>", image_dimension)
+			                .ReplaceStr("<arrayed>", arrayed);
 		}
 		if (m_bind->samplers.samplers_num > 0)
 		{
@@ -10210,12 +10344,18 @@ void Spirv::WriteInstructions()
 {
 	ModifyCode();
 
+	const bool  uses_arrayed_2d_images = UsesArrayed2dImages(m_bind);
+	const bool  uses_three_dimensional_images = UsesThreeDimensionalImages(m_bind);
+	const bool  uses_uint_images       = UsesUnsignedIntegerImages(m_bind);
 	int         index        = -1;
 	const auto& instructions = m_code.GetInstructions();
 	bool        need_debug   = (Config::SpirvDebugPrintfEnabled() && !m_code.GetDebugPrintfs().IsEmpty());
 	for (const auto& inst: instructions)
 	{
 		index++;
+		EXIT_NOT_IMPLEMENTED(uses_arrayed_2d_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst));
+		EXIT_NOT_IMPLEMENTED(uses_three_dimensional_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst));
+		EXIT_NOT_IMPLEMENTED(uses_uint_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst));
 
 		WriteLabel(index);
 

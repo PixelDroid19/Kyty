@@ -81,6 +81,7 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libDbgAddressSanitizer_1", InitDbgAddressSanitizer_1);
 	LIB_CHECK(U"libDebug_1", InitDebug_1);
 	LIB_CHECK(U"libDialog_1", InitDialog_1);
+	LIB_CHECK(U"libImeDialog_1", InitDialog_1);
 	LIB_CHECK(U"libDiscMap_1", InitDiscMap_1);
 	LIB_CHECK(U"libGraphicsDriver_1", InitGraphicsDriver_1);
 	LIB_CHECK(U"libkernel_1", InitLibKernel_1);

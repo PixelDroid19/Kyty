@@ -5,6 +5,7 @@
 #include "Kyty/Core/String.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/GuestPlatform.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
 #include <cstdint>
@@ -39,6 +40,8 @@ struct ModulePlanEntry
 	// Basename without extension (module identity for duplicate detection).
 	char           identity[96] = {};
 	ModulePlanRole role         = ModulePlanRole::Primary;
+	GuestPlatform  platform     = GuestPlatform::Unknown;
+	uint8_t        elf_abi      = 0xff;
 };
 
 struct ModuleLoadPlanDiagnostics
@@ -51,6 +54,10 @@ struct ModuleLoadPlanDiagnostics
 	uint32_t applied_count       = 0;
 	// Conflicting export symbols (same GenerateName from two sources).
 	uint32_t export_conflict_count = 0;
+	GuestPlatform detected_platform = GuestPlatform::Unknown;
+	GuestPlatform metadata_platform = GuestPlatform::Unknown;
+	uint8_t       elf_abi           = 0xff;
+	bool          platform_conflict = false;
 	// Sanitized relative keys only (no host paths / title IDs).
 	char entries[kModuleLoadPlanMaxEntries][192]       = {};
 	char rejections[kModuleLoadPlanMaxRejections][160] = {};
@@ -148,6 +155,12 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const Core::String& primary_host_path
 // Consume the staged plan only after the complete HLE symbol database exists.
 void               AfterHleSymbolsRegistered(RuntimeLinker* rt);
 [[nodiscard]] bool HasPendingAdjacentPlan(RuntimeLinker* rt);
+
+// Resolves a strict lazy PLT miss from one validated package provider. The
+// candidate must declare the requested module identity; a module is never
+// selected only because it happens to be adjacent on disk.
+[[nodiscard]] bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const Core::String& import_name, SymbolType type);
+void               ClearPending(RuntimeLinker* rt);
 
 } // namespace ModuleLifecycleCoordinator
 

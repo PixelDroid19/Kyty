@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
+#include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
@@ -65,6 +66,12 @@ TEST(EmulatorGraphicsPackets, TreatsZeroPm4DwordAsSinglePadding)
 {
 	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0u), 1u);
 	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0x01fe0000u), 2u);
+}
+
+TEST(EmulatorGraphicsPackets, CountsIndirectRegisterDwordsAsPairs)
+{
+	EXPECT_EQ(GraphicsIndirectRegisterPairCount(2u), 1u);
+	EXPECT_EQ(GraphicsIndirectRegisterPairCount(126u), 63u);
 }
 
 TEST(EmulatorGraphicsPackets, ParsesGen5LshlAddU32)
@@ -653,6 +660,29 @@ TEST(EmulatorGraphicsPackets, PreservesComputeResourceLimitsSchedulingState)
 	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, nullptr, 1));
 	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, observed_value, 0));
 	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, observed_value, 2));
+}
+
+TEST(EmulatorGraphicsPackets, AcceptsComputeShaderWithoutWorkgroupId)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	static const uint32_t shader[] = {0xbf810000u}; // s_endpgm
+	HW::ComputeShaderInfo regs {};
+	regs.cs_regs.data_addr = reinterpret_cast<uint64_t>(shader);
+	regs.cs_regs.tgid_x_en = 0;
+	HW::ShaderRegisters shader_regs {};
+
+	ASSERT_EXIT(
+	    {
+		const auto parsed = ShaderParseCS(&regs, &shader_regs);
+		_exit(parsed.GetInstructions().IsEmpty() ? 1 : 0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorGraphicsPackets, UsesForwardSBranchBeforeTargetAsSelectionMerge)
@@ -1587,6 +1617,102 @@ TEST(EmulatorGraphicsPackets, SizesGen5RotatedXSampleTextures)
 	EXPECT_EQ(size_zero_pitch.align, size.align);
 }
 
+TEST(EmulatorGraphicsPackets, SizesAndDetilesGen5Standard4KbUintTextures)
+{
+	TileSizeAlign size {};
+	TileGetTextureSize2(20, 33, 1, 33, 1, 5, &size, nullptr, nullptr);
+	EXPECT_EQ(size.size, 8192u);
+	EXPECT_EQ(size.align, 4096u);
+
+	bool seen[4096] {};
+	for (uint32_t y = 0; y < 32; ++y)
+	{
+		for (uint32_t x = 0; x < 32; ++x)
+		{
+			const uint64_t offset = TileGetStandard4KB32Offset(x, y, 32);
+			ASSERT_LT(offset, 4096u);
+			ASSERT_EQ(offset % 4u, 0u);
+			ASSERT_FALSE(seen[offset]);
+			seen[offset] = true;
+		}
+	}
+
+	uint32_t tiled[1024] {};
+	uint32_t linear[1024] {};
+	for (uint32_t i = 0; i < 1024; ++i)
+	{
+		tiled[i] = i;
+	}
+	TileConvertStandard4KB32ToLinear(linear, tiled, 32, 32, 32);
+	for (uint32_t y = 0; y < 32; ++y)
+	{
+		for (uint32_t x = 0; x < 32; ++x)
+		{
+			EXPECT_EQ(linear[y * 32u + x], TileGetStandard4KB32Offset(x, y, 32) / 4u);
+		}
+	}
+}
+
+TEST(EmulatorGraphicsPackets, SizesAndDetilesGen5Standard4KbUintVolumeTextures)
+{
+	TileSizeAlign size {};
+	TileGetStandard4KB32VolumeSize(8, 16, 9, 8, &size);
+	EXPECT_EQ(size.size, 8192u);
+	EXPECT_EQ(size.align, 4096u);
+
+	bool seen[4096] {};
+	for (uint32_t z = 0; z < 8; ++z)
+	{
+		for (uint32_t y = 0; y < 16; ++y)
+		{
+			for (uint32_t x = 0; x < 8; ++x)
+			{
+				const uint64_t offset = TileGetStandard4KB32VolumeOffset(x, y, z, 8, 16);
+				ASSERT_LT(offset, 4096u);
+				ASSERT_EQ(offset % 4u, 0u);
+				ASSERT_FALSE(seen[offset]);
+				seen[offset] = true;
+			}
+		}
+	}
+
+	uint32_t tiled[2048] {};
+	uint32_t linear[8 * 16 * 9] {};
+	for (uint32_t i = 0; i < 2048; ++i)
+	{
+		tiled[i] = i;
+	}
+	TileConvertStandard4KB32VolumeToLinear(linear, tiled, 8, 16, 9, 8);
+	for (uint32_t z = 0; z < 9; ++z)
+	{
+		for (uint32_t y = 0; y < 16; ++y)
+		{
+			for (uint32_t x = 0; x < 8; ++x)
+			{
+				const uint64_t tiled_offset = TileGetStandard4KB32VolumeOffset(x, y, z, 8, 16);
+				const uint64_t linear_offset = (static_cast<uint64_t>(z) * 16u * 8u) + (static_cast<uint64_t>(y) * 8u) + x;
+				EXPECT_EQ(linear[linear_offset], tiled[tiled_offset / 4u]);
+			}
+		}
+	}
+}
+
+TEST(EmulatorGraphicsPackets, PacksColor3DTextureMetadataWithinObjectParameterBudget)
+{
+	static_assert(TextureObject::PARAM_RESOURCE_INFO < GpuObject::PARAMS_MAX);
+	const auto info = TextureObject::PackResourceInfo(10u, 517u, 1u);
+	EXPECT_EQ(TextureObject::GetResourceType(info), 10u);
+	EXPECT_EQ(TextureObject::GetResourceDepth(info), 517u);
+	EXPECT_EQ(TextureObject::GetResourceBaseArray(info), 1u);
+}
+
+TEST(EmulatorGraphicsPackets, DistinguishesLayerAddressingFromColor3DDescriptorState)
+{
+	EXPECT_TRUE(ShaderGen5TextureTypeUsesArrayAddressing(13u));
+	EXPECT_FALSE(ShaderGen5TextureTypeUsesArrayAddressing(10u));
+	EXPECT_FALSE(ShaderGen5TextureTypeUsesArrayAddressing(9u));
+}
+
 // Captured first fail after GPU chain: format 56, 800x320, tile 27 → 0x150000.
 TEST(EmulatorGraphicsPackets, SizesGen5RotatedXTexture800x320)
 {
@@ -2349,6 +2475,67 @@ TEST(EmulatorGraphicsPackets, ParsesAndMaterializesImageLoadDmask1)
 	EXPECT_NE(source.FindIndex("%t74_0 = OpImageFetch %v4float %t27_0 %t73_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%t46_0 = OpCompositeExtract %float %t74_0 0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpStore %v4 %t46_0"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, MaterializesArrayedGen5ImageLoadAndStoreCoordinates)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction load {};
+	load.type               = ShaderInstructionType::ImageLoad;
+	load.format             = ShaderInstructionFormat::Vdata4Vaddr3StDmaskF;
+	load.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	load.src[0]             = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 3};
+	load.src[1]             = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 8};
+	load.src_num            = 2;
+
+	ShaderInstruction store {};
+	store.type               = ShaderInstructionType::ImageStore;
+	store.format             = ShaderInstructionFormat::Vdata4Vaddr3StDmaskF;
+	store.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 8, .size = 4};
+	store.src[0]             = {.type = ShaderOperandType::Vgpr, .register_id = 12, .size = 3};
+	store.src[1]             = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 8};
+	store.src_num            = 2;
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(load);
+	code.GetInstructions().Add(store);
+	code.GetInstructions().Add(end);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0]                         = 1;
+	input.threads_num[1]                         = 1;
+	input.threads_num[2]                         = 1;
+	input.bind.push_constant_size                = 64;
+	input.bind.textures2D.textures_num           = 2;
+	input.bind.textures2D.textures2d_sampled_num = 1;
+	input.bind.textures2D.textures2d_storage_num = 1;
+	input.bind.textures2D.desc[0].start_register = 0;
+	input.bind.textures2D.desc[0].texture.fields[1] = 20u << 20u;
+	input.bind.textures2D.desc[0].texture.fields[3] = 13u << 28u;
+	input.bind.textures2D.desc[1].start_register = 0;
+	input.bind.textures2D.desc[1].texture.fields[1] = 20u << 20u;
+	input.bind.textures2D.desc[1].texture.fields[3] = 13u << 28u;
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+
+	EXPECT_NE(source.FindIndex("%ImageS = OpTypeImage %uint 2D 0 1 0 1 Unknown"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%ImageL = OpTypeImage %uint 2D 0 1 0 2 R32ui"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpCompositeConstruct %v3uint"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpImageFetch %v4uint"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpBitcast %float"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpBitcast %uint"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpImageWrite"), Core::STRING8_INVALID_INDEX);
 }
 
 // image_sample (MIMG op 0x20) with single-channel dmasks — captured post-Play
@@ -3306,7 +3493,7 @@ TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)
 TEST(EmulatorGraphicsPackets, Gen5EudOverflowSharpOffsetMapping)
 {
 	constexpr int user_sgpr_num = 30;
-	constexpr int eud_base      = (user_sgpr_num + 3) & ~3;
+	const int     eud_base      = ShaderGen5EudOffsetBase(user_sgpr_num);
 	EXPECT_EQ(eud_base, 32);
 
 	// S0@0x18 (4 dwords) fits in the SGPR window.
@@ -3319,6 +3506,13 @@ TEST(EmulatorGraphicsPackets, Gen5EudOverflowSharpOffsetMapping)
 	EXPECT_EQ(16 + (0x24 - eud_base), 20); // eud[4]
 	// eud_size=12 covers both 4-dword samplers (indices 0..7).
 	EXPECT_LE((0x24 - eud_base) + 4, 12);
+}
+
+TEST(EmulatorGraphicsPackets, Gen5EudUsesAbiBaseForNarrowUserSgprWindows)
+{
+	EXPECT_EQ(ShaderGen5EudOffsetBase(14), 0x20);
+	EXPECT_EQ(ShaderGen5EudOffsetBase(30), 0x20);
+	EXPECT_EQ(ShaderGen5EudOffsetBase(36), 36);
 }
 
 TEST(EmulatorGraphicsPackets, Gen5DsWriteB32UsesConfiguredWorkgroupLds)

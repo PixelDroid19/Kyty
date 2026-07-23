@@ -782,6 +782,33 @@ static void KYTY_SYSV_ABI KernelDebugRaiseExceptionOnReleaseMode(int /*c1*/, int
 	PRINT_NAME();
 }
 
+static void PrintGuestRaiseLocation(uint64_t return_address)
+{
+	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
+	if (rt == nullptr)
+	{
+		return;
+	}
+
+	const auto modules = rt->SnapshotLoadedModules();
+	for (const auto& module: modules)
+	{
+		if (module.base_size == 0 || return_address < module.base_vaddr || return_address - module.base_vaddr >= module.base_size)
+		{
+			continue;
+		}
+
+		const auto name = module.file_name.FilenameWithoutDirectory();
+		std::fprintf(stderr, "KernelDebugRaiseException: module=%s offset=0x%016" PRIx64 "\n", name.C_Str(),
+		             return_address - module.base_vaddr);
+		std::fflush(stderr);
+		return;
+	}
+
+	std::fprintf(stderr, "KernelDebugRaiseException: module=unknown return_addr=0x%016" PRIx64 "\n", return_address);
+	std::fflush(stderr);
+}
+
 static void KYTY_SYSV_ABI KernelDebugRaiseException(uint64_t c1, uint64_t c2)
 {
 	PRINT_NAME();
@@ -789,11 +816,13 @@ static void KYTY_SYSV_ABI KernelDebugRaiseException(uint64_t c1, uint64_t c2)
 	// codes, and returning here lands on the guest `ud2` after a noreturn call
 	// (SIGILL). Keep this a structured EXIT so the next frontier is the raise
 	// itself, not an opaque illegal-instruction trap.
+	const auto return_address = reinterpret_cast<uint64_t>(__builtin_return_address(0));
 	std::fprintf(stderr,
 	             "KernelDebugRaiseException: error=0x%016" PRIx64 " arg=0x%016" PRIx64
-	             ", return addr=%p\n",
-	             c1, c2, __builtin_return_address(0));
+	             ", return addr=0x%016" PRIx64 "\n",
+	             c1, c2, return_address);
 	std::fflush(stderr);
+	PrintGuestRaiseLocation(return_address);
 	EXIT("KernelDebugRaiseException: error=0x%016" PRIx64 " arg=0x%016" PRIx64 "\n", c1, c2);
 }
 

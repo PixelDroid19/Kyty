@@ -6,6 +6,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/GuestPlatform.h"
 
 namespace Kyty::Core {
 class File;
@@ -266,7 +267,7 @@ public:
 	[[nodiscard]] bool IsSelf() const;
 	[[nodiscard]] bool IsValid() const;
 	[[nodiscard]] bool IsShared() const;
-	[[nodiscard]] bool IsNextGen() const;
+	[[nodiscard]] GuestPlatform GetGuestPlatform() const;
 
 	void LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size);
 

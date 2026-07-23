@@ -56,6 +56,8 @@ bool GraphicsDecodeComputeResourceLimits(HW::CsStageRegisters* regs, uint32_t cm
 bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords,
                                                 const uint32_t* next_packet, uint32_t next_packet_dwords);
 
+constexpr uint32_t GraphicsIndirectRegisterPairCount(uint32_t dword_count) { return dword_count / 2u; }
+
 struct GraphicsAgcReleaseMemControl
 {
 	uint16_t gcr_cntl  = 0;

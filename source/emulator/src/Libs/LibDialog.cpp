@@ -21,6 +21,19 @@ LIB_DEFINE(InitDialog_1_CommonDialog)
 
 } // namespace LibCommonDialog
 
+namespace LibImeDialog {
+
+LIB_VERSION("ImeDialog", 1, "ImeDialog", 1, 1);
+
+namespace ImeDialog = Dialog::ImeDialog;
+
+LIB_DEFINE(InitDialog_1_ImeDialog)
+{
+	LIB_FUNC("IADmD4tScBY", ImeDialog::ImeDialogGetStatus);
+}
+
+} // namespace LibImeDialog
+
 namespace LibErrorDialog {
 
 LIB_VERSION("ErrorDialog", 1, "ErrorDialog", 1, 1);
@@ -135,6 +148,7 @@ LIB_DEFINE(InitDialog_1_MsgDialogNative)
 LIB_DEFINE(InitDialog_1)
 {
 	LibCommonDialog::InitDialog_1_CommonDialog(s);
+	LibImeDialog::InitDialog_1_ImeDialog(s);
 	LibErrorDialog::InitDialog_1_ErrorDialog(s);
 	LibSaveDataDialog::InitDialog_1_SaveDataDialog(s);
 	LibSaveDataDialogNative::InitDialog_1_SaveDataDialogNative(s);

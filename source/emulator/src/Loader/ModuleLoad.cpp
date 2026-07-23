@@ -8,8 +8,10 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Agent/AgentLifecycle.h"
+#include "Emulator/Config.h"
 #include "Emulator/Loader/Elf.h"
 #include "Emulator/Loader/RuntimeLinker.h"
+#include "Emulator/Loader/SystemContent.h"
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <algorithm>
@@ -26,12 +28,19 @@ using Core::File;
 using Core::String;
 
 Core::Mutex               g_diag_mutex;
+// Lazy PLT misses are rare first-use events. Serializing provider admission
+// prevents a second guest thread from observing an in-progress provider as an
+// exhausted candidate and failing before its exports are registered.
+Core::Mutex               g_lazy_provider_mutex;
 ModuleLoadPlanDiagnostics g_last_diag {};
 
 struct PendingModulePlan
 {
-	RuntimeLinker* owner = nullptr;
-	ModuleLoadPlan plan {};
+	RuntimeLinker* owner     = nullptr;
+	ModuleLoadPlan plan      {};
+	bool           eager     = false;
+	bool           hle_ready = false;
+	bool           attempted[kModuleLoadPlanMaxEntries] {};
 };
 
 PendingModulePlan g_pending {};
@@ -109,7 +118,7 @@ bool IsContainedRegularFile(const String& package_root, const String& host_path)
 	return first == relative.end() || *first != "..";
 }
 
-bool ProbeSharedElf(const String& package_root, const String& host_path)
+bool ProbeSharedElf(const String& package_root, const String& host_path, GuestPlatform* platform = nullptr)
 {
 	if (!IsContainedRegularFile(package_root, host_path))
 	{
@@ -118,7 +127,97 @@ bool ProbeSharedElf(const String& package_root, const String& host_path)
 
 	Elf64 elf;
 	elf.Open(host_path);
-	return elf.IsValid() && elf.IsShared();
+	if (!elf.IsValid() || !elf.IsShared())
+	{
+		return false;
+	}
+	if (platform != nullptr)
+	{
+		*platform = elf.GetGuestPlatform();
+	}
+	return true;
+}
+
+bool ProbePrimaryElf(const String& host_path, GuestPlatform* platform)
+{
+	if (platform == nullptr)
+	{
+		return false;
+	}
+	Elf64 elf;
+	elf.Open(host_path);
+	if (!elf.IsValid() || elf.IsShared())
+	{
+		return false;
+	}
+	*platform = elf.GetGuestPlatform();
+	return true;
+}
+
+bool ProviderExportsResolvedImport(RuntimeLinker* rt, Program* provider, const String& import_name, SymbolType type)
+{
+	if (rt == nullptr || provider == nullptr || import_name.IsEmpty() || type != SymbolType::Func)
+	{
+		return false;
+	}
+
+	const auto programs = rt->SnapshotExportPrograms();
+	for (const auto& program: programs)
+	{
+		if (program.unique_id == provider->unique_id)
+		{
+			for (const auto& export_name: program.export_names)
+			{
+				if (export_name == import_name)
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+	}
+	return false;
+}
+
+void PersistPendingDiagnostics(RuntimeLinker* rt, const ModuleLoadPlanDiagnostics& diag)
+{
+	Core::LockGuard lock(g_diag_mutex);
+	if (rt != nullptr && g_pending.owner == rt)
+	{
+		g_pending.plan.diag = diag;
+	}
+}
+
+void ReportLazyProviderEvent(const char* event, const String& requested_module, const ModulePlanEntry* entry = nullptr)
+{
+	if (entry == nullptr)
+	{
+		std::fprintf(stderr, "KYTY_LOADER: lazy_provider event=%s module=%s\n", event, requested_module.C_Str());
+	} else
+	{
+		std::fprintf(stderr, "KYTY_LOADER: lazy_provider event=%s module=%s candidate=%s\n", event, requested_module.C_Str(),
+		             entry->relative_key);
+	}
+	std::fflush(stderr);
+}
+
+GuestPlatform MetadataPlatform()
+{
+	String title_id;
+	String app_version;
+	if (!SystemContentGetMetadata(&title_id, &app_version))
+	{
+		return GuestPlatform::Unknown;
+	}
+	if (title_id.StartsWith(U"PPSA", String::Case::Insensitive))
+	{
+		return GuestPlatform::Ps5;
+	}
+	if (title_id.StartsWith(U"CUSA", String::Case::Insensitive))
+	{
+		return GuestPlatform::Ps4;
+	}
+	return GuestPlatform::Unknown;
 }
 
 String NormalizeRoot(const String& root_in)
@@ -318,6 +417,18 @@ ModuleLoadPlan BuildPlan(const String& primary_host_path, bool discovery_enabled
 	CopyString(primary.relative_key, sizeof(primary.relative_key), primary_base);
 	CopyString(primary.identity, sizeof(primary.identity), primary_base.FilenameWithoutExtension());
 	primary.role = ModulePlanRole::Primary;
+	GuestPlatform primary_platform = GuestPlatform::Unknown;
+	if (ProbePrimaryElf(primary_host_path, &primary_platform))
+	{
+		primary.platform       = primary_platform;
+		primary.elf_abi        = GuestPlatformAbiVersion(primary_platform);
+		plan.diag.detected_platform = primary_platform;
+		plan.diag.elf_abi           = primary.elf_abi;
+	}
+	plan.diag.metadata_platform = MetadataPlatform();
+	plan.diag.platform_conflict = plan.diag.detected_platform != GuestPlatform::Unknown &&
+	                              plan.diag.metadata_platform != GuestPlatform::Unknown &&
+	                              plan.diag.detected_platform != plan.diag.metadata_platform;
 
 	plan.entries[0] = primary;
 	plan.count      = 1;
@@ -375,9 +486,15 @@ ModuleLoadPlan BuildPlan(const String& primary_host_path, bool discovery_enabled
 		}
 
 		// Shared ELF required — never load extension-only junk.
-		if (!ProbeSharedElf(package_root, host))
+		GuestPlatform module_platform = GuestPlatform::Unknown;
+		if (!ProbeSharedElf(package_root, host, &module_platform))
 		{
 			PushRejection(&plan.diag, U"reject not_shared_elf " + rel);
+			continue;
+		}
+		if (primary_platform != GuestPlatform::Unknown && module_platform != primary_platform)
+		{
+			PushRejection(&plan.diag, U"reject platform_mismatch " + rel);
 			continue;
 		}
 
@@ -394,6 +511,8 @@ ModuleLoadPlan BuildPlan(const String& primary_host_path, bool discovery_enabled
 		CopyString(entry.relative_key, sizeof(entry.relative_key), rel);
 		CopyCStr(entry.identity, sizeof(entry.identity), identity);
 		entry.role               = ModulePlanRole::AdjacentShared;
+		entry.platform           = module_platform;
+		entry.elf_abi            = GuestPlatformAbiVersion(module_platform);
 		plan.entries[plan.count] = entry;
 		++plan.count;
 	}
@@ -733,7 +852,8 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 		}
 		const String host         = String::FromUtf8(plan.entries[i].host_path);
 		const String package_root = String::FromUtf8(plan.entries[0].host_path).DirectoryWithoutFilename();
-		if (!ProbeSharedElf(package_root, host))
+		GuestPlatform observed_platform = GuestPlatform::Unknown;
+		if (!ProbeSharedElf(package_root, host, &observed_platform))
 		{
 			std::fprintf(stderr,
 			             "KYTY_LOADER: adjacent plan re-validation failed for %s; "
@@ -741,6 +861,21 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 			             plan.entries[i].relative_key);
 			std::fflush(stderr);
 			PushRejection(&diag, "apply_aborted_revalidation");
+			PublishDiagnostics(diag);
+			return 0;
+		}
+
+		const GuestPlatform planned_platform = plan.entries[i].platform;
+		const GuestPlatform session_platform = Config::GetGuestPlatform();
+		if ((planned_platform != GuestPlatform::Unknown && observed_platform != planned_platform) ||
+		    (session_platform != GuestPlatform::Unknown && observed_platform != session_platform))
+		{
+			std::fprintf(stderr,
+			             "KYTY_LOADER: adjacent plan platform mismatch for %s; planned=%s observed=%s session=%s\n",
+			             plan.entries[i].relative_key, GuestPlatformName(planned_platform), GuestPlatformName(observed_platform),
+			             GuestPlatformName(session_platform));
+			std::fflush(stderr);
+			PushRejection(&diag, "apply_aborted_platform_mismatch");
 			PublishDiagnostics(diag);
 			return 0;
 		}
@@ -803,14 +938,37 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const String& primary_host_path)
 	const bool diagnostic =
 	    Core::BringUp::IsEnabled(Core::BringUp::Feature::AdjacentModuleDiscovery, Core::BringUp::Subsystem::Loader);
 
-	// Apply the loader feature policy at planning time so diagnostics and the
-	// pending load set cannot claim adjacent discovery when it is disabled.
-	const ModuleLoadPlan plan = ModuleLoadPlanning::BuildPlan(primary_host_path, diagnostic);
-	PublishDiagnostics(plan.diag);
+	// Discovery is cheap and lets a later lazy PLT miss select a provider by its
+	// declared module identity. Eager application remains diagnostic because
+	// loading every PRX would alter an otherwise working title's runtime.
+	const ModuleLoadPlan plan = ModuleLoadPlanning::BuildPlan(primary_host_path, true);
+	ModuleLoadPlanDiagnostics published_diag = plan.diag;
+	if (!diagnostic)
+	{
+		// The provider index is an internal implementation detail in normal
+		// mode. Preserve the public contract: no eager adjacent discovery was
+		// requested or applied.
+		published_diag.discovery_enabled   = false;
+		published_diag.discovery_attempted = false;
+		published_diag.entry_count         = 1;
+		published_diag.adjacent_count      = 0;
+		published_diag.rejection_count     = 0;
+		published_diag.entries[0][0]       = '\0';
+		CopyCStr(published_diag.entries[0], sizeof(published_diag.entries[0]), plan.entries[0].relative_key);
+		for (uint32_t i = 1; i < kModuleLoadPlanMaxEntries; ++i)
+		{
+			published_diag.entries[i][0] = '\0';
+		}
+	} else
+	{
+		published_diag.discovery_enabled = true;
+	}
+	PublishDiagnostics(published_diag);
 
 	// Agent observation only (sanitized basenames / relative keys).
 	Emulator::Agent::Lifecycle::EmitExecutableDiscovered(plan.diag.primary_identity);
-	Emulator::Agent::Lifecycle::EmitModuleDiscovery(plan.diag.entry_count, plan.diag.adjacent_count, plan.diag.rejection_count);
+	Emulator::Agent::Lifecycle::EmitModuleDiscovery(published_diag.entry_count, published_diag.adjacent_count,
+	                                                published_diag.rejection_count);
 
 	if (!plan.valid)
 	{
@@ -849,14 +1007,17 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const String& primary_host_path)
 	}
 
 	Core::LockGuard lock(g_diag_mutex);
-	g_pending.owner = rt;
-	g_pending.plan  = plan;
+	g_pending.owner     = rt;
+	g_pending.plan      = plan;
+	g_pending.eager     = diagnostic;
+	g_pending.hle_ready = false;
+	std::memset(g_pending.attempted, 0, sizeof(g_pending.attempted));
 }
 
 bool HasPendingAdjacentPlan(RuntimeLinker* rt)
 {
 	Core::LockGuard lock(g_diag_mutex);
-	return rt != nullptr && g_pending.owner == rt;
+	return rt != nullptr && g_pending.owner == rt && g_pending.eager;
 }
 
 void AfterHleSymbolsRegistered(RuntimeLinker* rt)
@@ -870,11 +1031,131 @@ void AfterHleSymbolsRegistered(RuntimeLinker* rt)
 		{
 			return;
 		}
+		if (!g_pending.eager)
+		{
+			g_pending.hle_ready = true;
+			return;
+		}
 		plan      = g_pending.plan;
 		g_pending = {};
 	}
 
 	(void)ApplyPlanAfterHle(rt, plan);
+}
+
+bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, SymbolType type)
+{
+	if (rt == nullptr || type != SymbolType::Func)
+	{
+		return false;
+	}
+	Core::LockGuard lazy_provider_lock(g_lazy_provider_mutex);
+
+	// GetRelocationInfo has already canonicalized the raw ELF identity. Keep
+	// that complete identity intact: the versioned export key is the contract
+	// used by the program export table.
+	const String requested_import = import_name;
+
+	for (;;)
+	{
+		ModulePlanEntry entry {};
+		ModuleLoadPlanDiagnostics diag {};
+		String primary_host;
+		bool found = false;
+		{
+			Core::LockGuard lock(g_diag_mutex);
+			if (g_pending.owner != rt || g_pending.eager || !g_pending.hle_ready || !g_pending.plan.valid)
+			{
+				return false;
+			}
+
+			for (uint32_t i = 0; i < g_pending.plan.count; ++i)
+			{
+				if (g_pending.attempted[i] || g_pending.plan.entries[i].role != ModulePlanRole::AdjacentShared)
+				{
+					continue;
+				}
+				g_pending.attempted[i] = true;
+				entry                  = g_pending.plan.entries[i];
+				diag                   = g_pending.plan.diag;
+				primary_host           = String::FromUtf8(g_pending.plan.entries[0].host_path);
+				found                  = true;
+				break;
+			}
+		}
+
+		if (!found)
+		{
+			ReportLazyProviderEvent("no_candidate", requested_import);
+			return false;
+		}
+
+		const String host = String::FromUtf8(entry.host_path);
+		const String package_root = primary_host.DirectoryWithoutFilename();
+		GuestPlatform observed_platform = GuestPlatform::Unknown;
+		if (!ProbeSharedElf(package_root, host, &observed_platform) || observed_platform != entry.platform ||
+		    observed_platform != Config::GetGuestPlatform())
+		{
+			ReportLazyProviderEvent("platform_mismatch", requested_import, &entry);
+			PushRejection(&diag, "lazy_aborted_platform_mismatch");
+			PersistPendingDiagnostics(rt, diag);
+			PublishDiagnostics(diag);
+			return false;
+		}
+
+		// Mapping a candidate runs no guest code. Module-info names are loader
+		// labels (for example libSceFios2), while imports use public module names
+		// (Fios2). Resolve the complete versioned NID and verify its owning
+		// program instead of inferring equivalence between those two namespaces.
+		// Only the exact provider is relocated and initialized below.
+		Program* provider = ProgramLoader::Load(rt, host);
+		if (provider == nullptr)
+		{
+			ReportLazyProviderEvent("load_failed", requested_import, &entry);
+			PushRejection(&diag, "lazy_rejected_load_failed");
+			PersistPendingDiagnostics(rt, diag);
+			PublishDiagnostics(diag);
+			continue;
+		}
+
+		const bool exports_import = ProviderExportsResolvedImport(rt, provider, requested_import, type);
+		if (!exports_import)
+		{
+			ReportLazyProviderEvent("export_missing", requested_import, &entry);
+			PushRejection(&diag, "lazy_rejected_export_missing");
+			ProgramLoader::Unload(rt, provider);
+			PersistPendingDiagnostics(rt, diag);
+			PublishDiagnostics(diag);
+			continue;
+		}
+
+		rt->RelocateProgram(provider);
+		const int init_result = rt->StartModule(provider, 0, nullptr, nullptr);
+		if (init_result != 0)
+		{
+			ReportLazyProviderEvent("module_init_failed", requested_import, &entry);
+			PushRejection(&diag, "lazy_aborted_module_init");
+			PersistPendingDiagnostics(rt, diag);
+			PublishDiagnostics(diag);
+			return false;
+		}
+
+		diag.applied_count++;
+		ReportLazyProviderEvent("loaded", requested_import, &entry);
+		PersistPendingDiagnostics(rt, diag);
+		PublishDiagnostics(diag);
+		Emulator::Agent::Lifecycle::EmitModuleLoaded(entry.relative_key);
+		return true;
+	}
+}
+
+void ClearPending(RuntimeLinker* rt)
+{
+	Core::LockGuard lock(g_diag_mutex);
+	if (rt == nullptr || g_pending.owner == rt)
+	{
+		g_pending = {};
+	}
 }
 
 } // namespace ModuleLifecycleCoordinator

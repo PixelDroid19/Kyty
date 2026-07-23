@@ -6,6 +6,7 @@
 #include "Kyty/Core/Subsystems.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/GuestPlatform.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -41,6 +42,14 @@ enum class ProfilerDirection
 
 void Load(const Scripts::ScriptVar& cfg);
 
+// The primary guest executable establishes this once per runtime session.
+// A different platform is rejected so PS4 cannot remain an implicit default.
+[[nodiscard]] bool  SetGuestPlatform(GuestPlatform platform);
+[[nodiscard]] GuestPlatform GetGuestPlatform();
+void                 ResetGuestPlatform();
+
+// Compatibility adapter for existing tests and callers. Production loading
+// must use SetGuestPlatform so a session cannot be silently reclassified.
 void SetNextGen(bool mode);
 
 bool     IsInitialized();

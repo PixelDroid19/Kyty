@@ -981,6 +981,10 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	out += ",\"rejection_count\":" + std::to_string(load_plan.rejection_count);
 	out += ",\"applied_count\":" + std::to_string(load_plan.applied_count);
 	out += ",\"export_conflict_count\":" + std::to_string(load_plan.export_conflict_count);
+	out += ",\"detected_platform\":" + JsonString(GuestPlatformName(load_plan.detected_platform));
+	out += ",\"elf_abi\":" + std::to_string(load_plan.elf_abi);
+	out += ",\"metadata_platform\":" + JsonString(GuestPlatformName(load_plan.metadata_platform));
+	out += ",\"platform_conflict\":" + std::string(load_plan.platform_conflict ? "true" : "false");
 	out += ",\"truncated\":" + std::string(truncated ? "true" : "false");
 	out += ",\"primary_identity\":" + JsonString(load_plan.primary_identity);
 	out += ",\"entries\":[";

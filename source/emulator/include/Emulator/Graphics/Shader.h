@@ -651,6 +651,9 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format);
 uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format);
 // Resolve sample row pitch for Gen5 linear (tile 0): max(width, descriptor pitch), then 256-byte align.
 uint32_t ShaderGen5ResolveLinearPitch(uint32_t width, uint32_t format, uint8_t type, uint32_t word4);
+// Only layered image types use the descriptor's array-addressing fields.
+// Color3D has a separate volume layout and must not be validated as an array.
+constexpr bool ShaderGen5TextureTypeUsesArrayAddressing(uint8_t type) { return type == 13u; }
 
 inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 {
@@ -1146,6 +1149,9 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 // Gen5 EUD sharp span policy: metadata eud_size_dw is a lower bound. Type-5
 // guest pointer tables may extend past it (Astro: eud=24, sharp@40 needs 28).
 // api is the ShaderGet* start index (16 + eud_index). Hard-cap runaway offsets.
+[[nodiscard]] int ShaderGen5EudOffsetBase(int user_sgpr_num);
+[[nodiscard]] uint32_t ShaderResolveGen5UserSgprCount(uint32_t declared_count, uint32_t written_count,
+                                                       uint16_t eud_size_dw);
 [[nodiscard]] inline bool ShaderGen5EudSpanAllowed(int api, int dwords, uint16_t eud_size_dw)
 {
 	const int need = api - 16 + dwords;

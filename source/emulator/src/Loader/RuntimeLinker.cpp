@@ -21,6 +21,7 @@
 #include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/Jit.h"
 #include "Emulator/Loader/MissingImport.h"
+#include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/Validation/DomainValidators.h"
@@ -729,6 +730,11 @@ static KYTY_SYSV_ABI uint64_t ResolveLazyPlt(void* program_ptr, uint64_t rel_ind
 	}
 
 	auto ri = GetRelocationInfo(program->dynamic_info->jmprela_table + rel_index, program);
+	if (!ri.resolved && program->rt != nullptr &&
+	    ModuleLifecycleCoordinator::TryLoadProviderForLazyImport(program->rt, ri.name, ri.type))
+	{
+		ri = GetRelocationInfo(program->dynamic_info->jmprela_table + rel_index, program);
+	}
 	if (!ri.resolved || ri.value == 0 || !Core::VirtualMemory::PatchReplace(ri.vaddr, ri.value))
 	{
 		const auto clean_name = Log::IsColoredPrintf() ? ri.name : Log::RemoveColors(ri.name);
@@ -1187,6 +1193,18 @@ Program* RuntimeLinker::LoadProgram(const String& elf_name)
 
 	if (program->elf->IsValid())
 	{
+		const GuestPlatform platform = program->elf->GetGuestPlatform();
+		if (!program->elf->IsShared())
+		{
+			if (!Config::SetGuestPlatform(platform))
+			{
+				EXIT("primary executable platform conflicts with active session: %s\n", GuestPlatformName(platform));
+			}
+		} else if (Config::GetGuestPlatform() == GuestPlatform::Unknown || Config::GetGuestPlatform() != platform)
+		{
+			EXIT("shared module platform mismatch: module=%s platform=%s session=%s\n", elf_name_utf8.GetData(),
+			     GuestPlatformName(platform), GuestPlatformName(Config::GetGuestPlatform()));
+		}
 		LoadProgramToMemory(program);
 		ParseProgramDynamicInfo(program);
 		CreateSymbolDatabase(program);
@@ -1341,6 +1359,10 @@ void RuntimeLinker::Clear()
 {
 	// EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
 
+	// The lazy-provider registry owns no linker state. Clear it before taking
+	// the linker mutex so a concurrent lazy resolver can never form a lock
+	// cycle while it is about to load a provider.
+	ModuleLifecycleCoordinator::ClearPending(this);
 	Core::LockGuard lock(m_mutex);
 
 	for (auto* p: m_programs)
@@ -1353,6 +1375,7 @@ void RuntimeLinker::Clear()
 	m_relocated           = false;
 	g_next_tls_module_id  = 1;
 	Kyty::Libs::LibKernel::ApplicationHeap::Reset();
+	Config::ResetGuestPlatform();
 }
 
 void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* program, SymbolRecord* out_info, bool* bind_self)
@@ -1957,18 +1980,13 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 
 	// static uint64_t desired_base_addr = DESIRED_BASE_ADDR;
 
-	bool is_shared   = program->elf->IsShared();
-	bool is_next_gen = program->elf->IsNextGen();
+	const bool is_shared   = program->elf->IsShared();
+	const bool is_next_gen = program->elf->GetGuestPlatform() == GuestPlatform::Ps5;
 
 	const auto* ehdr = program->elf->GetEhdr();
 	const auto* phdr = program->elf->GetPhdr();
 
 	EXIT_IF(phdr == nullptr || ehdr == nullptr);
-
-	if (is_next_gen && !is_shared)
-	{
-		Config::SetNextGen(true);
-	}
 
 	program->base_size         = calc_base_size(ehdr, phdr);
 	program->base_size_aligned = (program->base_size & ~(static_cast<uint64_t>(0x1000) - 1)) + 0x1000;

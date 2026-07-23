@@ -259,7 +259,8 @@ public:
 	void                 Free(VulkanDescriptorSet* set);
 
 	VulkanDescriptorSet* GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
-	                                   const int* textures2d_sampled_view, VulkanImage** textures2d_storage, uint64_t* samplers,
+	                                   const int* textures2d_sampled_view, VulkanImage** textures2d_storage,
+	                                   const int* textures2d_storage_view, uint64_t* samplers,
 	                                   VulkanBuffer** gds_buffers, const ShaderBindResources& bind);
 	void                 FreeDescriptor(VulkanBuffer* buffer);
 	void                 FreeDescriptor(VulkanImage* image);
@@ -278,6 +279,7 @@ private:
 		uint8_t              textures2d_sampled_view[TEXTURES_SAMPLED_MAX] = {};
 		int                  textures2d_storage_num                      = 0;
 		uint64_t             textures2d_storage_id[TEXTURES_STORAGE_MAX] = {};
+		uint8_t              textures2d_storage_view[TEXTURES_STORAGE_MAX] = {};
 		int                  samplers_num                                = 0;
 		uint64_t             samplers_id[SAMPLERS_MAX]                   = {};
 		int                  gds_buffers_num                             = 0;
@@ -3870,6 +3872,7 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 	for (int i = 0; i < s.textures2d_storage_num; i++)
 	{
 		hash += Core::hash64(s.textures2d_storage_id[i]);
+		hash ^= Core::hash8(s.textures2d_storage_view[i]);
 	}
 	for (int i = 0; i < s.samplers_num; i++)
 	{
@@ -3921,7 +3924,8 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 				{
 					for (int i = 0; i < s.textures2d_storage_num; i++)
 					{
-						if (s.textures2d_storage_id[i] != set.textures2d_storage_id[i])
+						if (s.textures2d_storage_id[i] != set.textures2d_storage_id[i] ||
+						    s.textures2d_storage_view[i] != set.textures2d_storage_view[i])
 						{
 							match = false;
 							break;
@@ -3963,7 +3967,8 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
                                                     const int* textures2d_sampled_view, VulkanImage** textures2d_storage,
-                                                    uint64_t* samplers, VulkanBuffer** gds_buffers, const ShaderBindResources& bind)
+                                                    const int* textures2d_storage_view, uint64_t* samplers, VulkanBuffer** gds_buffers,
+                                                    const ShaderBindResources& bind)
 {
 	KYTY_PROFILER_BLOCK("DescriptorCache::GetDescriptor::search");
 
@@ -4003,7 +4008,8 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	}
 	for (int i = 0; i < textures2d_storage_num; i++)
 	{
-		nset.textures2d_storage_id[i] = textures2d_storage[i]->memory.unique_id;
+		nset.textures2d_storage_id[i]   = textures2d_storage[i]->memory.unique_id;
+		nset.textures2d_storage_view[i] = static_cast<uint8_t>(textures2d_storage_view[i]);
 	}
 	for (int i = 0; i < samplers_num; i++)
 	{
@@ -4049,7 +4055,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	for (int i = 0; i < textures2d_storage_num; i++)
 	{
 		texture2d_storage_info[i].sampler     = nullptr;
-		texture2d_storage_info[i].imageView   = textures2d_storage[i]->image_view[VulkanImage::VIEW_DEFAULT];
+		texture2d_storage_info[i].imageView   = textures2d_storage[i]->image_view[textures2d_storage_view[i]];
 		texture2d_storage_info[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 	}
 
@@ -5018,8 +5024,12 @@ static ResolutionCohortDecision PrepareDepthOnlyDisplayResolutionCohort(CommandB
 	attachment.guest_extent             = depth_extent;
 	attachment.resource.kind            = ResolutionResourceKind::DepthStencilAttachment;
 	attachment.resource.compressed      = depth.htile;
-	attachment.resource.ambiguous_alias = !ResolutionAliasPolicyAllowsRanges(
-	    depth.vaddr, depth.size, depth.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer, true);
+	GpuMemoryOverlapSnapshot overlap {};
+	const bool overlap_available =
+	    GpuMemoryQueryOverlaps(depth.vaddr, depth.size, depth.vaddr_num, &overlap);
+	const bool alias_safe = overlap_available &&
+	                        ResolutionAliasPolicyAllowsSnapshot(overlap, GpuMemoryObjectType::DepthStencilBuffer, true);
+	attachment.resource.ambiguous_alias = !alias_safe;
 	ResolutionCohortInput input;
 	input.attachments      = &attachment;
 	input.attachment_count = 1;
@@ -5030,10 +5040,18 @@ static ResolutionCohortDecision PrepareDepthOnlyDisplayResolutionCohort(CommandB
 	{
 		std::fprintf(stderr,
 		             "Depth-only display selection rejected before materialization: guest=%ux%u registered=%ux%u reason=%s "
-		             "attachment_reason=%s htile=%u ambiguous_alias=%u\n",
+		             "attachment_reason=%s htile=%u ambiguous_alias=%u overlaps=%u exact=%u entries=%u truncated=%u\n",
 		             depth_extent.width, depth_extent.height, registered_extent.width, registered_extent.height,
 		             ResolutionCohortReasonName(decision.reason), ResolutionNativeReasonName(candidate.attachment_native_reason),
-		             depth.htile ? 1u : 0u, attachment.resource.ambiguous_alias ? 1u : 0u);
+		             depth.htile ? 1u : 0u, attachment.resource.ambiguous_alias ? 1u : 0u, overlap.total_count, overlap.exact_count,
+		             overlap.entry_count, overlap.truncated ? 1u : 0u);
+		for (uint32_t index = 0; index < overlap.entry_count; ++index)
+		{
+			const auto& entry = overlap.entries[index];
+			std::fprintf(stderr, "Depth-only display overlap: type=%u relation=%u count=%u exact=%u read_only=%u\n",
+			             static_cast<unsigned>(entry.type), static_cast<unsigned>(entry.relation), entry.count, entry.exact ? 1u : 0u,
+			             entry.all_read_only ? 1u : 0u);
+		}
 		std::fflush(stderr);
 		return decision;
 	}
@@ -5468,12 +5486,14 @@ static bool ShouldForceGen5Degamma(const ShaderSamplerResources& samplers, int s
 
 static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
                             const ShaderSamplerResources& samplers, VulkanImage** images_sampled, VulkanImage** images_storage,
-                            int* images_sampled_view, uint32_t** sgprs)
+                            int* images_sampled_view, int* images_storage_view, uint32_t** sgprs)
 {
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(images_sampled == nullptr);
 	EXIT_IF(images_storage == nullptr);
+	EXIT_IF(images_sampled_view == nullptr);
+	EXIT_IF(images_storage_view == nullptr);
 	EXIT_IF(sgprs == nullptr);
 	EXIT_IF(*sgprs == nullptr);
 
@@ -5485,6 +5505,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 	for (int i = 0; i < textures.textures_num; i++)
 	{
 		auto r = textures.desc[i].texture;
+		const bool arrayed_2d = gen5 && ShaderGen5TextureTypeUsesArrayAddressing(r.Type());
+		const bool three_dimensional = gen5 && r.Type() == 10u;
 
 		if (gen5)
 		{
@@ -5495,16 +5517,25 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			// - Tile 27, format 71 = 16_16_16_16_FLOAT (RGBA16F), 642x362 alias of RT
 			// - Tile 27, format 133 = BC1 RGBA UNORM, 3840x2160 title texture
 			// - Tile 9 = kStandard64KB static atlases (RGBA8 detile path)
-			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 27 && r.TileMode() != 9);
-			if (r.Format() != 56 && r.Format() != 13 && r.Format() != 14 && r.Format() != 71 && r.Format() != 133)
+			// - Tile 5, format 20 = kStandard4KB R32_UINT image load/store
+			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 5 && r.TileMode() != 27 && r.TileMode() != 9);
+			if (r.Format() != 20 && r.Format() != 56 && r.Format() != 13 && r.Format() != 14 && r.Format() != 71 && r.Format() != 133)
 			{
 				EXIT("unsupported Gen5 sampled texture format: fmt=%u tile=%u width=%u height=%u base=0x%012" PRIx64 " type=%u\n",
 				     r.Format(), r.TileMode(), r.Width5() + 1u, r.Height5() + 1u, r.Base40(), r.Type());
 			}
 			EXIT_NOT_IMPLEMENTED(r.PerfMod5() != 7 && r.PerfMod5() != 0);
 			EXIT_NOT_IMPLEMENTED(r.BCSwizzle() != 0);
-			EXIT_NOT_IMPLEMENTED(r.BaseArray5() != 0);
-			EXIT_NOT_IMPLEMENTED(r.ArrayPitch() != 0);
+			// BaseArray5 and ArrayPitch are layer-addressing fields. Their bit
+			// positions are not array state for Color3D descriptors.
+			if (!three_dimensional && !arrayed_2d && r.BaseArray5() != 0)
+			{
+				EXIT("unsupported Gen5 array addressing: type=%u base_array=%u array_pitch=%u format=%u tile=%u "
+				     "dwords=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+				     r.Type(), r.BaseArray5(), r.ArrayPitch(), r.Format(), r.TileMode(), r.fields[0], r.fields[1], r.fields[2],
+				     r.fields[3], r.fields[4], r.fields[5], r.fields[6], r.fields[7]);
+			}
+			EXIT_NOT_IMPLEMENTED(!three_dimensional && !arrayed_2d && r.ArrayPitch() != 0);
 			EXIT_NOT_IMPLEMENTED(r.MaxMip() != 0);
 			EXIT_NOT_IMPLEMENTED(r.MinLodWarn5() != 0);
 			EXIT_NOT_IMPLEMENTED(r.MipStatsCntId() != 0);
@@ -5538,7 +5569,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		}
 		EXIT_NOT_IMPLEMENTED((gen5 ? r.Base40() : r.Base38()) == 0);
 		EXIT_NOT_IMPLEMENTED(r.MinLod() != 0);
-		EXIT_NOT_IMPLEMENTED(r.Type() != 8 && r.Type() != 9);
+		EXIT_NOT_IMPLEMENTED(r.Type() != 8 && r.Type() != 9 && !arrayed_2d && !three_dimensional);
+		EXIT_NOT_IMPLEMENTED(arrayed_2d && (r.ArrayPitch() != 0 || r.BaseArray5() > r.Depth()));
 		// Gen5 2D resources encode pitch in word4[13:0]; Depth() overlaps those bits.
 		if (!gen5)
 		{
@@ -5554,6 +5586,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		bool          neo        = Config::IsNeo();
 		auto          width  = (gen5 ? r.Width5() : r.Width4()) + 1;
 		auto          height = (gen5 ? r.Height5() : r.Height4()) + 1;
+		const uint32_t depth = ((three_dimensional || arrayed_2d) ? static_cast<uint32_t>(r.Depth()) + 1u : 1u);
+		const uint32_t base_array = (arrayed_2d ? static_cast<uint32_t>(r.BaseArray5()) : 0u);
 		auto          tile       = r.TileMode();
 		// Gen5 linear rows are 256-byte aligned (e.g. RGBA8 pitch = align(width, 64)).
 		// Using width alone mis-unpacks non-pow2 logos into horizontal bands.
@@ -5596,7 +5630,18 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		bool check_depth_texture = (!gen5 && tile == 2);
 
-		if (gen5)
+		if (three_dimensional)
+		{
+			EXIT_NOT_IMPLEMENTED(fmt != 20u || tile != 5u || levels != 1u);
+			TileGetStandard4KB32VolumeSize(width, height, depth, pitch, &size);
+		} else if (arrayed_2d)
+		{
+			EXIT_NOT_IMPLEMENTED(fmt != 20u || tile != 5u || levels != 1u);
+			TileGetTextureSize2(fmt, width, height, pitch, levels, tile, &size, nullptr, nullptr);
+			const uint64_t array_size = static_cast<uint64_t>(size.size) * depth;
+			EXIT_NOT_IMPLEMENTED(array_size > UINT32_MAX);
+			size.size = static_cast<uint32_t>(array_size);
+		} else if (gen5)
 		{
 			TileGetTextureSize2(fmt, width, height, pitch, levels, tile, &size, nullptr, nullptr);
 		} else
@@ -5920,7 +5965,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			{
 				EXIT_NOT_IMPLEMENTED(textures.desc[i].usage != ShaderTextureUsage::ReadWrite);
 
-				StorageTextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle);
+				StorageTextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
+				                                          r.Type(), depth, base_array);
 				tex = static_cast<StorageTextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 			} else
@@ -5943,7 +5989,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				}
 				const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
 				TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
-				                                  force_degamma, skip_guest);
+				                                  force_degamma, skip_guest, r.Type(), depth, base_array);
 				tex = static_cast<TextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 			}
@@ -5971,6 +6017,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (textures.desc[i].textures2d_without_sampler)
 		{
 			images_storage[index_storage] = tex;
+			images_storage_view[index_storage] =
+			    (three_dimensional ? VulkanImage::VIEW_3D : (arrayed_2d ? VulkanImage::VIEW_ARRAY : VulkanImage::VIEW_DEFAULT));
 			if (gen5)
 			{
 				r.UpdateAddress40(index_storage);
@@ -5982,7 +6030,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		} else
 		{
 			images_sampled[index_sampled]      = tex;
-			images_sampled_view[index_sampled] = (depth_texture ? VulkanImage::VIEW_DEPTH_TEXTURE : view_type);
+			EXIT_NOT_IMPLEMENTED((arrayed_2d || three_dimensional) && (depth_texture || view_type != VulkanImage::VIEW_DEFAULT));
+			images_sampled_view[index_sampled] =
+			    (three_dimensional ? VulkanImage::VIEW_3D :
+			     (arrayed_2d ? VulkanImage::VIEW_ARRAY : (depth_texture ? VulkanImage::VIEW_DEPTH_TEXTURE : view_type)));
 			if (gen5)
 			{
 				r.UpdateAddress40(index_sampled);
@@ -6131,6 +6182,7 @@ static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelin
 		VulkanImage*  textures2d_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX];
 		int           textures2d_sampled_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
 		VulkanImage*  textures2d_storage[DescriptorCache::TEXTURES_STORAGE_MAX];
+		int           textures2d_storage_view[DescriptorCache::TEXTURES_STORAGE_MAX];
 		uint64_t      samplers[DescriptorCache::SAMPLERS_MAX];
 		uint32_t      sgprs[DescriptorCache::PUSH_CONSTANTS_MAX];
 
@@ -6145,8 +6197,8 @@ static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelin
 		}
 		if (bind.textures2D.textures_num > 0)
 		{
-			PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage, textures2d_sampled_view,
-			                &sgprs_ptr);
+			PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage,
+			                textures2d_sampled_view, textures2d_storage_view, &sgprs_ptr);
 			need_descriptor = true;
 		}
 		if (bind.samplers.samplers_num > 0)
@@ -6187,7 +6239,8 @@ static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelin
 		if (need_descriptor)
 		{
 			auto* descriptor_set = g_render_ctx->GetDescriptorCache()->GetDescriptor(
-			    stage, storage_buffers, textures2d_sampled, textures2d_sampled_view, textures2d_storage, samplers, &gds_buffer, bind);
+			    stage, storage_buffers, textures2d_sampled, textures2d_sampled_view, textures2d_storage, textures2d_storage_view,
+			    samplers, &gds_buffer, bind);
 
 			EXIT_IF(descriptor_set == nullptr);
 

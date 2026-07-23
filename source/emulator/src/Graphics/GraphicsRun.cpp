@@ -4069,14 +4069,19 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 	uint32_t indirect_num_dw = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(indirect_num_dw == 0);
+	EXIT_NOT_IMPLEMENTED(indirect_num_dw == 0 || (indirect_num_dw & 1u) != 0);
 
-	for (uint32_t i = 0; i < indirect_num_dw; i++, indirect_buffer += 2)
+	for (uint32_t i = 0; i < GraphicsIndirectRegisterPairCount(indirect_num_dw); i++, indirect_buffer += 2)
 	{
 		auto cmd_offset = indirect_buffer[0];
 		auto value      = indirect_buffer[1];
 
-		EXIT_NOT_IMPLEMENTED(cmd_offset >= Pm4::CX_NUM);
+		if (cmd_offset >= Pm4::CX_NUM)
+		{
+			EXIT("unsupported indirect CX register: pair=%u offset=0x%08" PRIx32 " value=0x%08" PRIx32
+			     " words=%u\n",
+			     i, cmd_offset, value, indirect_num_dw);
+		}
 
 		auto pfunc = g_hw_ctx_indirect_func[cmd_offset & (Pm4::CX_NUM - 1)];
 
@@ -4111,9 +4116,9 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 	uint32_t indirect_num_dw = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(indirect_num_dw == 0);
+	EXIT_NOT_IMPLEMENTED(indirect_num_dw == 0 || (indirect_num_dw & 1u) != 0);
 
-	for (uint32_t i = 0; i < indirect_num_dw; i++, indirect_buffer += 2)
+	for (uint32_t i = 0; i < GraphicsIndirectRegisterPairCount(indirect_num_dw); i++, indirect_buffer += 2)
 	{
 		auto cmd_offset = indirect_buffer[0];
 		auto value      = indirect_buffer[1];
@@ -4153,9 +4158,9 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 	uint32_t indirect_num_dw = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(indirect_num_dw == 0);
+	EXIT_NOT_IMPLEMENTED(indirect_num_dw == 0 || (indirect_num_dw & 1u) != 0);
 
-	for (uint32_t i = 0; i < indirect_num_dw; i++, indirect_buffer += 2)
+	for (uint32_t i = 0; i < GraphicsIndirectRegisterPairCount(indirect_num_dw); i++, indirect_buffer += 2)
 	{
 		auto cmd_offset = indirect_buffer[0];
 		auto value      = indirect_buffer[1];
