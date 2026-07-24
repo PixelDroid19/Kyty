@@ -98,7 +98,7 @@ target_sources(emulator PRIVATE
 )
 add_dependencies(emulator KytyBuildInfo)
 
-target_link_libraries(emulator core math scripts lua unit_test kyty_devtools_core vulkan-1 spirv-tools-opt spirv-tools easy_profiler imgui SDL2-static)
+target_link_libraries(emulator core math scripts lua unit_test kyty_agent_transport kyty_devtools_core kyty_astcenc vulkan-1 spirv-tools-opt spirv-tools easy_profiler imgui SDL2-static)
 
 target_include_directories(emulator PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -113,6 +113,7 @@ list(APPEND inc_headers
 	${CMAKE_SOURCE_DIR}/3rdparty/xxhash/include
 	${CMAKE_SOURCE_DIR}/3rdparty/cpuinfo/include
 	${CMAKE_SOURCE_DIR}/3rdparty/stb
+	${CMAKE_SOURCE_DIR}/3rdparty/miniz/src
 )
 
 if (MSVC AND CLANG)

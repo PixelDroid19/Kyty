@@ -463,6 +463,108 @@ TEST(EmulatorKernelProcess, DeleteEqueueWakesInfiniteWaiter)
 	waiter.join();
 }
 
+TEST(EmulatorKernelProcess, WaitEqueueRejectsNullResultCount)
+{
+	EnsureKernelProcessSubsystems();
+
+	KernelEqueue eq = nullptr;
+	ASSERT_EQ(KernelCreateEqueue(&eq, "null-result-count"), OK);
+
+	KernelEvent             event {};
+	LibKernel::KernelUseconds zero = 0;
+	EXPECT_EQ(KernelWaitEqueue(eq, &event, 1, nullptr, &zero), LibKernel::KERNEL_ERROR_EFAULT);
+	EXPECT_EQ(KernelDeleteEqueue(eq), OK);
+}
+
+TEST(EmulatorKernelProcess, GetEventErrorReadsErrorEvents)
+{
+	KernelEvent event {};
+	event.flags = 0x4000u;
+	event.data  = LibKernel::KERNEL_ERROR_EBADF;
+	EXPECT_EQ(KernelGetEventError(&event), LibKernel::KERNEL_ERROR_EBADF);
+
+	event.flags = 0;
+	EXPECT_EQ(KernelGetEventError(&event), 0);
+	EXPECT_EQ(KernelGetEventError(nullptr), 0);
+}
+
+TEST(EmulatorKernelProcess, RtldThreadAtexitCounterRoundTrip)
+{
+	EnsureKernelProcessSubsystems();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"Tz4RNUCBbGI";
+	query.library              = U"libkernel";
+	query.library_version      = 1;
+	query.module               = U"libkernel";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* increment_record = symbols.Find(query);
+	ASSERT_NE(increment_record, nullptr);
+	query.name                   = U"8OnWXlgQlvo";
+	const auto* decrement_record = symbols.Find(query);
+	ASSERT_NE(decrement_record, nullptr);
+
+	using counter_fn_t = KYTY_SYSV_ABI int (*)(uint64_t*);
+	auto* increment    = reinterpret_cast<counter_fn_t>(static_cast<uintptr_t>(increment_record->vaddr));
+	auto* decrement    = reinterpret_cast<counter_fn_t>(static_cast<uintptr_t>(decrement_record->vaddr));
+
+	uint64_t count = 0;
+	EXPECT_EQ(increment(&count), OK);
+	EXPECT_EQ(count, 1u);
+	EXPECT_EQ(increment(&count), OK);
+	EXPECT_EQ(count, 2u);
+	EXPECT_EQ(decrement(&count), OK);
+	EXPECT_EQ(count, 1u);
+	EXPECT_EQ(increment(nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(decrement(nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+TEST(EmulatorKernelProcess, UnsupportedPosixMessageApisReturnEnosys)
+{
+	EnsureKernelProcessSubsystems();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.library              = U"libkernel";
+	query.library_version      = 1;
+	query.module               = U"libkernel";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	query.name                   = U"lUk6wrGXyMw";
+	const auto* recvfrom_record  = symbols.Find(query);
+	ASSERT_NE(recvfrom_record, nullptr);
+	query.name                   = U"aNeavPDNKzA";
+	const auto* sendmsg_record   = symbols.Find(query);
+	ASSERT_NE(sendmsg_record, nullptr);
+	query.name                   = U"hI7oVeOluPM";
+	const auto* recvmsg_record   = symbols.Find(query);
+	ASSERT_NE(recvmsg_record, nullptr);
+
+	using recvfrom_fn_t = KYTY_SYSV_ABI int64_t (*)(int, void*, uint64_t, int, void*, uint32_t*);
+	using sendmsg_fn_t  = KYTY_SYSV_ABI int (*)(int, const void*, int);
+	using recvmsg_fn_t  = KYTY_SYSV_ABI int64_t (*)(int, void*, int);
+	auto* recvfrom_fn   = reinterpret_cast<recvfrom_fn_t>(static_cast<uintptr_t>(recvfrom_record->vaddr));
+	auto* sendmsg_fn    = reinterpret_cast<sendmsg_fn_t>(static_cast<uintptr_t>(sendmsg_record->vaddr));
+	auto* recvmsg_fn    = reinterpret_cast<recvmsg_fn_t>(static_cast<uintptr_t>(recvmsg_record->vaddr));
+
+	EXPECT_EQ(recvfrom_fn(-1, nullptr, 0, 0, nullptr, nullptr), -1);
+	EXPECT_EQ(*Posix::GetErrorAddr(), Posix::POSIX_ENOSYS);
+	EXPECT_EQ(sendmsg_fn(-1, nullptr, 0), -1);
+	EXPECT_EQ(*Posix::GetErrorAddr(), Posix::POSIX_ENOSYS);
+	EXPECT_EQ(recvmsg_fn(-1, nullptr, 0), -1);
+	EXPECT_EQ(*Posix::GetErrorAddr(), Posix::POSIX_ENOSYS);
+}
+
 TEST(EmulatorKernelProcess, ReplacingEventRunsEachDeleteCallbackExactlyOnce)
 {
 	EnsureKernelProcessSubsystems();

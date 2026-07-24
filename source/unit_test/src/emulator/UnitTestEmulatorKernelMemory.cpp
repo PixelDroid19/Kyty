@@ -14,6 +14,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <thread>
 
@@ -306,7 +307,7 @@ TEST(EmulatorKernelMemory, ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap)
 TEST(EmulatorKernelMemory, FixedDirectMapReplacesOwnedMappingAfterPhysicalRelease)
 {
 	EnsureMemorySubsystemInitialized();
-	Config::SetNextGen(false);
+	Config::SetNextGen(true);
 
 	constexpr size_t  kSize       = 0x4000;
 	constexpr int64_t kFirstPhys  = 0x02000000;
@@ -320,6 +321,7 @@ TEST(EmulatorKernelMemory, FixedDirectMapReplacesOwnedMappingAfterPhysicalReleas
 	ASSERT_NE(mapping, nullptr);
 	static_cast<uint8_t*>(mapping)[0] = 0x5a;
 	ASSERT_EQ(KernelCheckedReleaseDirectMemory(first_physical_address, kSize), OK);
+	EXPECT_EQ(KernelQueryMemoryProtection(mapping, nullptr, nullptr, nullptr), OK);
 
 	int64_t second_physical_address = 0;
 	ASSERT_EQ(KernelAllocateDirectMemory(kSecondPhys, kSecondPhys + kSize, kSize, kSize, 12, &second_physical_address), OK);
@@ -336,6 +338,7 @@ TEST(EmulatorKernelMemory, FixedDirectMapReplacesOwnedMappingAfterPhysicalReleas
 
 	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(remapped), kSize), OK);
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
+	Config::SetNextGen(false);
 }
 
 TEST(EmulatorKernelMemory, ReusedDirectMemoryKeepsVirtualAliasesCoherent)
@@ -458,6 +461,103 @@ TEST(EmulatorKernelMemory, InternalNamedFlexibleMemoryNidUsesOutPointerAbi)
 	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(*out_addr), kSize), OK);
 }
 
+TEST(EmulatorKernelMemory, GuestMemoryValidationReturnsKernelErrors)
+{
+	EnsureMemorySubsystemInitialized();
+
+	void* address = nullptr;
+	EXPECT_EQ(KernelMapNamedFlexibleMemory(nullptr, 0x4000, 0x03, 0, ""), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelMapNamedFlexibleMemory(&address, 0, 0x03, 0, ""), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelMapNamedFlexibleMemory(&address, 0x4000, 0x99, 0, ""), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelMapNamedFlexibleMemory(&address, 0x4000, 0x03, 0x4000, ""), LibKernel::KERNEL_ERROR_EINVAL);
+
+	EXPECT_EQ(KernelMunmap(0, 0x4000), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelMunmap(std::numeric_limits<uint64_t>::max() - 0x1000, 0x2000), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelMunmap(0x0000030000000000, 0x4000), LibKernel::KERNEL_ERROR_ENOENT);
+
+	EXPECT_EQ(KernelQueryMemoryProtection(nullptr, nullptr, nullptr, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelAvailableFlexibleMemorySize(nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+
+	EXPECT_EQ(KernelMapDirectMemory(nullptr, 0x4000, 0x03, 0, 0, 0x4000), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelMapDirectMemory(&address, 0x4000, 0x99, 0, 0, 0x4000), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelMapDirectMemory(&address, 0x4000, 0x03, 0, 0x70000000, 0x4000),
+	          LibKernel::KERNEL_ERROR_EACCES);
+
+	EXPECT_EQ(KernelMprotect(nullptr, 0x4000, 0x03), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelMprotect(reinterpret_cast<void*>(0x0000030000000000), 0, 0x03), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelMprotect(reinterpret_cast<void*>(0x0000030000000000), 0x4000, 0x99),
+	          LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelMprotect(reinterpret_cast<void*>(0x0000030000000000), 0x4000, 0x03),
+	          LibKernel::KERNEL_ERROR_ENOENT);
+}
+
+TEST(EmulatorKernelMemory, FixedFlexibleMapPreservesReservationSuffix)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t kReservationSize = 0x10000;
+	constexpr size_t kMappingSize     = 0x4000;
+	void*            reservation      = nullptr;
+	ASSERT_EQ(KernelReserveVirtualRange(&reservation, kReservationSize, 0, kReservationSize), OK);
+	const auto reservation_base = reinterpret_cast<uint64_t>(reservation);
+
+	void* mapping = reservation;
+	ASSERT_EQ(KernelMapNamedFlexibleMemory(&mapping, kMappingSize, 0x03, 0x10, "fixed-flexible"), OK);
+	ASSERT_EQ(mapping, reservation);
+
+	VirtualQueryInfo mapped_info {};
+	ASSERT_EQ(KernelVirtualQuery(mapping, 0, &mapped_info, sizeof(mapped_info)), OK);
+	EXPECT_EQ(mapped_info.start, reservation_base);
+	EXPECT_EQ(mapped_info.end, reservation_base + kMappingSize);
+	EXPECT_EQ(mapped_info.protection, 0x03);
+	EXPECT_EQ(mapped_info.is_flexible, 1u);
+	EXPECT_EQ(mapped_info.is_committed, 1u);
+
+	VirtualQueryInfo suffix_info {};
+	ASSERT_EQ(KernelVirtualQuery(reinterpret_cast<void*>(reservation_base + kMappingSize), 0, &suffix_info,
+	                             sizeof(suffix_info)),
+	          OK);
+	EXPECT_EQ(suffix_info.start, reservation_base + kMappingSize);
+	EXPECT_EQ(suffix_info.end, reservation_base + kReservationSize);
+	EXPECT_EQ(suffix_info.is_committed, 0u);
+
+	EXPECT_EQ(KernelMunmap(reservation_base, kMappingSize), OK);
+	EXPECT_EQ(KernelMunmap(reservation_base + kMappingSize, kReservationSize - kMappingSize), OK);
+}
+
+TEST(EmulatorKernelMemory, MprotectUpdatesTrackedProtectionSlices)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t kSize = 0x10000;
+	void*            mapping = nullptr;
+	ASSERT_EQ(KernelMapNamedFlexibleMemory(&mapping, kSize, 0x03, 0, "protection-slices"), OK);
+	ASSERT_NE(mapping, nullptr);
+	const auto base = reinterpret_cast<uint64_t>(mapping);
+
+	ASSERT_EQ(KernelMprotect(reinterpret_cast<void*>(base + 0x4000), 0x4000, 0x01), OK);
+
+	void* start = nullptr;
+	void* end   = nullptr;
+	int   protection = 0;
+	ASSERT_EQ(KernelQueryMemoryProtection(mapping, &start, &end, &protection), OK);
+	EXPECT_EQ(start, mapping);
+	EXPECT_EQ(end, reinterpret_cast<void*>(base + 0x3fff));
+	EXPECT_EQ(protection, 0x03);
+
+	ASSERT_EQ(KernelQueryMemoryProtection(reinterpret_cast<void*>(base + 0x4000), &start, &end, &protection), OK);
+	EXPECT_EQ(start, reinterpret_cast<void*>(base + 0x4000));
+	EXPECT_EQ(end, reinterpret_cast<void*>(base + 0x7fff));
+	EXPECT_EQ(protection, 0x01);
+
+	ASSERT_EQ(KernelQueryMemoryProtection(reinterpret_cast<void*>(base + 0x8000), &start, &end, &protection), OK);
+	EXPECT_EQ(start, reinterpret_cast<void*>(base + 0x8000));
+	EXPECT_EQ(end, reinterpret_cast<void*>(base + kSize - 1));
+	EXPECT_EQ(protection, 0x03);
+
+	EXPECT_EQ(KernelMunmap(base, kSize), OK);
+}
+
 // Covers the explicit Gen5 protection family observed in one allocation path.
 // The pure decoder is the shipped decision path used by KernelMprotect.
 TEST(EmulatorKernelMemory, DecodesGen5MprotectProtectionFamily)
@@ -482,6 +582,18 @@ TEST(EmulatorKernelMemory, DecodesGen5MprotectProtectionFamily)
 	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::Read);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0xC2, &mode, &gpu));
+	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
+	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::ReadWrite);
+
+	ASSERT_TRUE(KernelDecodeMprotectProt(0xF3, &mode, &gpu));
+	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
+	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::ReadWrite);
+
+	ASSERT_TRUE(KernelDecodeMprotectProt(0x3F2, &mode, &gpu));
+	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
+	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::ReadWrite);
+
+	ASSERT_TRUE(KernelDecodeMprotectProt(0x3F3, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
 	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::ReadWrite);
 

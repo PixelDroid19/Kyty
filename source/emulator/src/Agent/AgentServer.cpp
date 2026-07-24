@@ -15,6 +15,7 @@
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/RuntimeLinker.h"
 
+#include "Kyty/Agent/LocalTransport.h"
 #include "KytyBuildInfo.h"
 
 #include <atomic>
@@ -26,12 +27,6 @@
 #include <string>
 #include <vector>
 
-#if !defined(_WIN32)
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
-#endif
-
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Emulator::Agent {
@@ -39,9 +34,8 @@ namespace {
 
 std::atomic<bool> g_active {false};
 std::atomic<bool> g_stop {false};
-Core::Thread*     g_thread    = nullptr;
-int               g_listen_fd = -1;
-std::string       g_sock_path;
+Core::Thread*     g_thread = nullptr;
+Kyty::Agent::LocalTransport::Listener g_listener {};
 std::atomic<bool> g_client_busy {false};
 uint64_t          g_start_ms = 0;
 std::string       g_last_capture_path;
@@ -963,74 +957,34 @@ std::string Dispatch(const Request& req)
 	return HandleUnknown(req);
 }
 
-#if !defined(_WIN32)
-
-bool WriteAll(int fd, const std::string& line)
+bool WriteAll(Kyty::Agent::LocalTransport::Connection* connection, const std::string& line)
 {
 	std::string payload = line;
 	payload.push_back('\n');
-	size_t off = 0;
-	while (off < payload.size())
-	{
-		const ssize_t n = ::write(fd, payload.data() + off, payload.size() - off);
-		if (n < 0)
-		{
-			if (errno == EINTR)
-			{
-				continue;
-			}
-			return false;
-		}
-		off += static_cast<size_t>(n);
-	}
-	return true;
+	return Kyty::Agent::LocalTransport::WriteAll(connection, payload.data(), payload.size()) ==
+	       Kyty::Agent::LocalTransport::Result::Ok;
 }
 
-bool ReadLine(int fd, std::string* out)
+bool ReadLine(Kyty::Agent::LocalTransport::Connection* connection, std::string* out)
 {
-	out->clear();
-	char ch = 0;
-	while (out->size() < Kyty::Agent::kRequestLineMax)
-	{
-		const ssize_t n = ::read(fd, &ch, 1);
-		if (n < 0)
-		{
-			if (errno == EINTR)
-			{
-				continue;
-			}
-			return false;
-		}
-		if (n == 0)
-		{
-			return !out->empty();
-		}
-		if (ch == '\n')
-		{
-			return true;
-		}
-		if (ch != '\r')
-		{
-			out->push_back(ch);
-		}
-	}
-	return false;
+	return Kyty::Agent::LocalTransport::ReadLine(connection, out, Kyty::Agent::kRequestLineMax) ==
+	       Kyty::Agent::LocalTransport::Result::Ok;
 }
 
-void HandleClient(int client_fd)
+void HandleClient(Kyty::Agent::LocalTransport::Connection* connection)
 {
 	bool expected = false;
 	if (!g_client_busy.compare_exchange_strong(expected, true))
 	{
-		(void)WriteAll(client_fd, FormatErr(0, "busy", "only one agent client is supported"));
-		::close(client_fd);
+		(void)WriteAll(connection, FormatErr(0, "busy", "only one agent client is supported"));
+		Kyty::Agent::LocalTransport::Close(connection);
 		return;
 	}
 
 	while (!g_stop.load())
 	{
 		std::string line;
-		if (!ReadLine(client_fd, &line))
+		if (!ReadLine(connection, &line))
 		{
 			break;
 		}
@@ -1042,20 +996,20 @@ void HandleClient(int client_fd)
 		ErrorInfo error {};
 		if (!ParseRequestLine(line.c_str(), &req, &error))
 		{
-			if (!WriteAll(client_fd, FormatErr(0, error.code.c_str(), error.message.c_str())))
+			if (!WriteAll(connection, FormatErr(0, error.code.c_str(), error.message.c_str())))
 			{
 				break;
 			}
 			continue;
 		}
 		const std::string response = Dispatch(req);
-		if (!WriteAll(client_fd, response))
+		if (!WriteAll(connection, response))
 		{
 			break;
 		}
 	}
 
-	::close(client_fd);
+	Kyty::Agent::LocalTransport::Close(connection);
 	g_client_busy.store(false);
 }
 
@@ -1063,13 +1017,10 @@ void ServerThread(void* /*arg*/)
 {
 	while (!g_stop.load())
 	{
-		const int client = ::accept(g_listen_fd, nullptr, nullptr);
-		if (client < 0)
+		Kyty::Agent::LocalTransport::Connection connection {};
+		const auto result = Kyty::Agent::LocalTransport::Accept(&g_listener, &connection);
+		if (result != Kyty::Agent::LocalTransport::Result::Ok)
 		{
-			if (errno == EINTR)
-			{
-				continue;
-			}
 			if (g_stop.load())
 			{
 				break;
@@ -1077,46 +1028,14 @@ void ServerThread(void* /*arg*/)
 			Core::Thread::Sleep(10);
 			continue;
 		}
-		HandleClient(client);
+		if (g_stop.load())
+		{
+			Kyty::Agent::LocalTransport::Close(&connection);
+			break;
+		}
+		HandleClient(&connection);
 	}
 }
-
-bool ListenUnix(const char* path)
-{
-	g_listen_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-	if (g_listen_fd < 0)
-	{
-		return false;
-	}
-
-	::unlink(path);
-
-	sockaddr_un addr {};
-	addr.sun_family = AF_UNIX;
-	if (std::strlen(path) >= sizeof(addr.sun_path))
-	{
-		::close(g_listen_fd);
-		g_listen_fd = -1;
-		return false;
-	}
-	std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
-	if (::bind(g_listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
-	{
-		::close(g_listen_fd);
-		g_listen_fd = -1;
-		return false;
-	}
-	if (::listen(g_listen_fd, 1) != 0)
-	{
-		::close(g_listen_fd);
-		g_listen_fd = -1;
-		::unlink(path);
-		return false;
-	}
-	return true;
-}
-
-#endif // !_WIN32
 
 } // namespace
 
@@ -1127,38 +1046,39 @@ bool StartFromEnv()
 		return true;
 	}
 
-	const char* path = std::getenv("KYTY_AGENT_SOCK");
-	if (path == nullptr || path[0] == '\0')
+	const char* endpoint = std::getenv("KYTY_AGENT_ENDPOINT");
+	if (endpoint == nullptr || endpoint[0] == '\0')
+	{
+		endpoint = std::getenv("KYTY_AGENT_SOCK");
+	}
+	if (endpoint == nullptr || endpoint[0] == '\0')
 	{
 		return true;
 	}
-#if defined(_WIN32)
-	std::fprintf(stderr, "KYTY_AGENT_SOCK is set but the agent server is POSIX-only in this build\n");
-	return true;
-#else
-	if (path[0] != '/')
+	if (!Kyty::Agent::LocalTransport::IsValidEndpoint(endpoint))
 	{
-		std::fprintf(stderr, "KYTY_AGENT_SOCK must be an absolute path\n");
-		EventRing::Instance().Push(EventKind::Error, "invalid_sock", "KYTY_AGENT_SOCK must be absolute");
+		std::fprintf(stderr, "KYTY_AGENT_ENDPOINT is not a valid %s endpoint\n",
+		             Kyty::Agent::LocalTransport::EndpointKind());
+		EventRing::Instance().Push(EventKind::Error, "invalid_endpoint", Kyty::Agent::LocalTransport::EndpointKind());
 		return false;
 	}
 
-	g_sock_path = path;
 	g_stop.store(false);
 	g_start_ms = SteadyMs();
-	if (!ListenUnix(path))
+	const auto listen_result = Kyty::Agent::LocalTransport::Listen(&g_listener, endpoint);
+	if (listen_result != Kyty::Agent::LocalTransport::Result::Ok)
 	{
-		std::fprintf(stderr, "KYTY_AGENT failed to listen on %s\n", path);
-		EventRing::Instance().Push(EventKind::Error, "listen_failed", path);
+		std::fprintf(stderr, "KYTY_AGENT failed to listen on %s: %s\n", endpoint,
+		             Kyty::Agent::LocalTransport::ResultName(listen_result));
+		EventRing::Instance().Push(EventKind::Error, "listen_failed", Kyty::Agent::LocalTransport::ResultName(listen_result));
 		return false;
 	}
 
 	g_thread = new Core::Thread(ServerThread, nullptr);
 	g_active.store(true);
-	EventRing::Instance().Push(EventKind::Info, "agent_start", path);
-	std::fprintf(stderr, "KYTY_AGENT listening on %s\n", path);
+	EventRing::Instance().Push(EventKind::Info, "agent_start", Kyty::Agent::LocalTransport::EndpointKind());
+	std::fprintf(stderr, "KYTY_AGENT listening on %s\n", endpoint);
 	return true;
-#endif
 }
 
 void Stop()
@@ -1168,25 +1088,14 @@ void Stop()
 		return;
 	}
 	g_stop.store(true);
-#if !defined(_WIN32)
-	if (g_listen_fd >= 0)
-	{
-		::shutdown(g_listen_fd, SHUT_RDWR);
-		::close(g_listen_fd);
-		g_listen_fd = -1;
-	}
+	Kyty::Agent::LocalTransport::Interrupt(&g_listener);
 	if (g_thread != nullptr)
 	{
 		g_thread->Join();
 		delete g_thread;
 		g_thread = nullptr;
 	}
-	if (!g_sock_path.empty())
-	{
-		::unlink(g_sock_path.c_str());
-		g_sock_path.clear();
-	}
-#endif
+	Kyty::Agent::LocalTransport::Close(&g_listener);
 	Libs::Controller::AgentPadClear();
 	g_active.store(false);
 	g_client_busy.store(false);

@@ -1015,22 +1015,30 @@ void KYTY_SYSV_ABI KernelSetThreadAtexitReport(thread_atexit_report_func_t func)
 	g_thread_atexit_report_func = func;
 }
 
-int KYTY_SYSV_ABI KernelRtldThreadAtexitIncrement(uint64_t* /*c*/)
+int KYTY_SYSV_ABI KernelRtldThreadAtexitIncrement(uint64_t* c)
 {
 	PRINT_NAME();
 
-	//__sync_fetch_and_add(c, 1);
+	if (c == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
-	return 0;
+	__atomic_fetch_add(c, 1u, __ATOMIC_ACQ_REL);
+	return OK;
 }
 
-int KYTY_SYSV_ABI KernelRtldThreadAtexitDecrement(uint64_t* /*c*/)
+int KYTY_SYSV_ABI KernelRtldThreadAtexitDecrement(uint64_t* c)
 {
 	PRINT_NAME();
 
-	//__sync_fetch_and_sub(c, 1);
+	if (c == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
-	return 0;
+	__atomic_fetch_sub(c, 1u, __ATOMIC_ACQ_REL);
+	return OK;
 }
 
 int KYTY_SYSV_ABI KernelIsNeoMode()
@@ -1223,7 +1231,7 @@ static int64_t KYTY_SYSV_ABI PosixRecvfrom(int socket, void* buffer, uint64_t le
 	printf("\t flags       = %d\n", flags);
 	printf("\t address     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
 	printf("\t address_len = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address_len));
-	EXIT("POSIX recvfrom is not implemented\n");
+	*Posix::GetErrorAddr() = Posix::POSIX_ENOSYS;
 	return -1;
 }
 
@@ -1233,7 +1241,7 @@ static int KYTY_SYSV_ABI PosixSendmsg(int socket, const void* message, int flags
 	printf("\t socket  = %d\n", socket);
 	printf("\t message = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(message));
 	printf("\t flags   = %d\n", flags);
-	EXIT("POSIX sendmsg is not implemented\n");
+	*Posix::GetErrorAddr() = Posix::POSIX_ENOSYS;
 	return -1;
 }
 
@@ -1243,7 +1251,7 @@ static int64_t KYTY_SYSV_ABI PosixRecvmsg(int socket, void* message, int flags)
 	printf("\t socket  = %d\n", socket);
 	printf("\t message = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(message));
 	printf("\t flags   = %d\n", flags);
-	EXIT("POSIX recvmsg is not implemented\n");
+	*Posix::GetErrorAddr() = Posix::POSIX_ENOSYS;
 	return -1;
 }
 

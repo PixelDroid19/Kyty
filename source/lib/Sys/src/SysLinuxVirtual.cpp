@@ -556,6 +556,21 @@ uint64_t sys_virtual_alloc_aligned(uint64_t address, uint64_t size, VirtualMemor
 	return ret_addr;
 }
 
+uint64_t sys_virtual_reserve(uint64_t address, uint64_t size)
+{
+	return sys_virtual_alloc(address, size, VirtualMemory::Mode::NoAccess);
+}
+
+uint64_t sys_virtual_reserve_aligned(uint64_t address, uint64_t size, uint64_t alignment)
+{
+	return sys_virtual_alloc_aligned(address, size, VirtualMemory::Mode::NoAccess, alignment);
+}
+
+bool sys_virtual_reserve_fixed(uint64_t address, uint64_t size)
+{
+	return sys_virtual_alloc_fixed(address, size, VirtualMemory::Mode::NoAccess);
+}
+
 #ifdef __APPLE__
 
 enum class MappedRangeState
@@ -1129,6 +1144,67 @@ bool sys_virtual_alloc_fixed(uint64_t address, uint64_t size, VirtualMemory::Mod
 	}
 
 	return false;
+}
+
+bool sys_virtual_alloc_fixed_replacing_owned_reservation(uint64_t address, uint64_t size, VirtualMemory::Mode mode)
+{
+	EXIT_IF(g_allocs == nullptr);
+
+	if (address == 0 || size == 0 || address > UINTPTR_MAX - size)
+	{
+		return false;
+	}
+
+	const auto addr = static_cast<uintptr_t>(address);
+	const auto end  = addr + static_cast<uintptr_t>(size);
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	if (!get_host_page_range(addr, size, &page_start, &page_end))
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	auto owner = g_allocs->upper_bound(addr);
+	if (owner == g_allocs->begin())
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	--owner;
+	const uintptr_t owner_addr = owner->first;
+	const size_t    owner_size = owner->second;
+	const auto*     protection = find_protection_range(page_start);
+	if (addr < owner_addr || owner_size > UINTPTR_MAX - owner_addr || end > owner_addr + owner_size || protection == nullptr ||
+	    protection->protect != PROT_NONE || protection->end_page < page_end)
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+
+	const int protect = get_protection_flag(mode);
+	// NOLINTNEXTLINE
+	void* ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != addr)
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+
+	g_allocs->erase(owner);
+	if (owner_addr < addr)
+	{
+		(*g_allocs)[owner_addr] = addr - owner_addr;
+	}
+	(*g_allocs)[addr] = size;
+	const uintptr_t owner_end = owner_addr + owner_size;
+	if (end < owner_end)
+	{
+		(*g_allocs)[end] = owner_end - end;
+	}
+	assign_protection_range(page_start, page_end, protect);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
 }
 
 bool sys_virtual_free(uint64_t address)

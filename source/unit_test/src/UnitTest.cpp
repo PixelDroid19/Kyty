@@ -12,9 +12,11 @@ UT_LINK(DevToolsEventRing);
 UT_LINK(DevToolsProgress);
 UT_LINK(DevToolsClassifier);
 UT_LINK(DevToolsProtocol);
+#if !defined(_WIN32)
 UT_LINK(DevToolsSupervisor);
 UT_LINK(DevToolsBundle);
 UT_LINK(DevToolsLifecycle);
+#endif
 UT_LINK(DevToolsExportCatalog);
 UT_LINK(EmulatorGraphicsState);
 UT_LINK(EmulatorGraphicsDirtyTracking);

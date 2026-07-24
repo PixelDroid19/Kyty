@@ -108,6 +108,8 @@ LIB_DEFINE(InitAudio_1_Ajm)
 	LIB_FUNC("MHur6qCsUus", Ajm::AjmFinalize);
 	LIB_FUNC("Q3dyFuwGn64", Ajm::AjmModuleRegister);
 	LIB_FUNC("Wi7DtlLV+KI", Ajm::AjmModuleUnregister);
+	LIB_FUNC("bkRHEYG6lEM", Ajm::AjmMemoryRegister);
+	LIB_FUNC("MmpF1XsQiHw", Ajm::AjmBatchInitializeBuffer);
 	LIB_FUNC("AxoDrINp4J8", Ajm::AjmInstanceCreate);
 	LIB_FUNC("RbLbuKv8zho", Ajm::AjmInstanceDestroy);
 	LIB_FUNC("dmDybN--Fn8", Ajm::AjmBatchJobControlBufferRa);

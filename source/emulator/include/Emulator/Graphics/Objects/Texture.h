@@ -14,6 +14,7 @@
 namespace Kyty::Libs::Graphics {
 
 VkFormat TextureResolveSampledVkFormat(uint8_t dfmt, uint8_t nfmt, uint16_t fmt, bool force_degamma = false);
+bool     TextureSupportsGen5SampledFormat(uint16_t fmt);
 
 class TextureObject: public GpuObject
 {

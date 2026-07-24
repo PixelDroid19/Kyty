@@ -56,7 +56,36 @@ bool GraphicsDecodeComputeResourceLimits(HW::CsStageRegisters* regs, uint32_t cm
 bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords,
                                                 const uint32_t* next_packet, uint32_t next_packet_dwords);
 
-constexpr uint32_t GraphicsIndirectRegisterPairCount(uint32_t dword_count) { return dword_count / 2u; }
+constexpr bool GraphicsNormalizeIndirectRegisterPair(uint32_t register_limit, uint32_t& offset, uint32_t& value)
+{
+	if (offset < register_limit)
+	{
+		return true;
+	}
+	if (value < register_limit)
+	{
+		const uint32_t original_offset = offset;
+		offset                         = value;
+		value                          = original_offset;
+		return true;
+	}
+	return false;
+}
+
+// GraphicsCreate*IndirectBuffers fills unused descriptor-table entries with
+// (0x10000000 + register, register). They are sent alongside real pairs but do
+// not represent register writes. In particular, treating them as reversed
+// pairs corrupts low context registers such as the screen scissor.
+constexpr bool GraphicsIsDefaultIndirectRegisterPair(uint32_t offset, uint32_t value)
+{
+	return offset == 0x10000000u + value;
+}
+
+constexpr bool GraphicsAgcFullTargetBarrierGcrSupported(uint32_t gcr_cntl)
+{
+	const uint32_t invalidate_mode = gcr_cntl & ~0x8000u;
+	return invalidate_mode == 0x280u || invalidate_mode == 0x300u;
+}
 
 struct GraphicsAgcReleaseMemControl
 {

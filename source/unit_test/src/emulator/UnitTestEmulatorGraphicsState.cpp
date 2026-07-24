@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/StorageBuffer.h"
+#include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VertexBuffer.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
@@ -1147,6 +1148,39 @@ TEST(EmulatorGraphicsState, StorageBufferBackingIdentityIgnoresViewShape)
 	EXPECT_FALSE(dword_view.Equal(nullptr));
 }
 
+TEST(EmulatorGraphicsState, StorageTextureBackingIdentityNormalizesTypedStorageSwizzles)
+{
+	const StorageTextureObject r32_uint_read(0u, 0u, 20u, 64u, 64u, 64u, 0u, 1u, 8u, false, DstSel(4, 0, 0, 1));
+	const StorageTextureObject r32_uint_identity(0u, 0u, 20u, 64u, 64u, 64u, 0u, 1u, 8u, false, DstSel(4, 5, 6, 7));
+	const StorageTextureObject rg32_uint_identity(0u, 0u, 62u, 64u, 64u, 64u, 0u, 1u, 8u, false, DstSel(4, 5, 6, 7));
+	const StorageTextureObject rg32_uint_guest(0u, 0u, 62u, 64u, 64u, 64u, 0u, 1u, 8u, false, DstSel(4, 0, 0, 1));
+
+	EXPECT_TRUE(r32_uint_read.Equal(r32_uint_identity.params));
+	EXPECT_TRUE(r32_uint_identity.Equal(r32_uint_read.params));
+	EXPECT_TRUE(rg32_uint_identity.Equal(rg32_uint_guest.params));
+	EXPECT_TRUE(rg32_uint_guest.Equal(rg32_uint_identity.params));
+
+	const StorageTextureObject r8_video_identity(0u, 0u, 5u, 64u, 64u, 64u, 0u, 1u, 5u, false, DstSel(4, 5, 6, 7));
+	const StorageTextureObject r8_video_guest(0u, 0u, 5u, 64u, 64u, 64u, 0u, 1u, 5u, false, DstSel(6, 5, 4, 7));
+	const StorageTextureObject rg8_video_identity(0u, 0u, 14u, 64u, 64u, 64u, 0u, 1u, 5u, false, DstSel(4, 5, 6, 7));
+	const StorageTextureObject rg8_video_guest(0u, 0u, 14u, 64u, 64u, 64u, 0u, 1u, 5u, false, DstSel(5, 4, 0, 1));
+
+	EXPECT_TRUE(r8_video_identity.Equal(r8_video_guest.params));
+	EXPECT_TRUE(r8_video_guest.Equal(r8_video_identity.params));
+	EXPECT_TRUE(rg8_video_identity.Equal(rg8_video_guest.params));
+	EXPECT_TRUE(rg8_video_guest.Equal(rg8_video_identity.params));
+}
+
+TEST(EmulatorGraphicsState, StorageTextureBackingIdentityKeepsDistinctViewFamilies)
+{
+	const StorageTextureObject rgba_identity(10u, 0u, 0u, 64u, 64u, 64u, 0u, 1u, 8u, false, DstSel(4, 5, 6, 7));
+	const StorageTextureObject rgba_bgra(10u, 0u, 0u, 64u, 64u, 64u, 0u, 1u, 8u, false, DstSel(6, 5, 4, 7));
+
+	EXPECT_FALSE(rgba_identity.Equal(rgba_bgra.params));
+	EXPECT_FALSE(rgba_bgra.Equal(rgba_identity.params));
+	EXPECT_FALSE(rgba_identity.Equal(nullptr));
+}
+
 TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
 {
 	GpuMemoryOverlapSnapshot empty;
@@ -1322,6 +1356,15 @@ TEST(EmulatorGraphicsState, DecodesStencilControlAndRefMaskHalves)
 
 TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 {
+	EXPECT_TRUE(Kyty::Libs::Graphics::TextureSupportsGen5SampledFormat(1));
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 1), VK_FORMAT_R8_UNORM);
+	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(1), 1u);
+	EXPECT_TRUE(Kyty::Libs::Graphics::Gen5SampleFormatMatchesVulkan(1, VK_FORMAT_R8_UNORM));
+	EXPECT_FALSE(Kyty::Libs::Graphics::Gen5SampleFormatMatchesVulkan(1, VK_FORMAT_R8_UINT));
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 5), VK_FORMAT_R8_UNORM);
+	EXPECT_EQ(Kyty::Libs::Graphics::StorageTextureResolveVkFormat(0, 0, 5), VK_FORMAT_R8_UNORM);
+	EXPECT_EQ(Kyty::Libs::Graphics::StorageTextureResolveVkFormat(0, 0, 14), VK_FORMAT_R8G8_UNORM);
+	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(5), 1u);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 56), VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 56, true), VK_FORMAT_R8G8B8A8_SRGB);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 13), VK_FORMAT_R16_SFLOAT);
@@ -1330,7 +1373,21 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 20), VK_FORMAT_R32_UINT);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(20), 4u);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 71), VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 75), VK_FORMAT_R32G32B32A32_UINT);
+	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(75), 16u);
 	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 133), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+	EXPECT_EQ(Kyty::Libs::Graphics::TextureResolveSampledVkFormat(0, 0, 173), VK_FORMAT_BC3_UNORM_BLOCK);
+	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(173), 16u);
+	EXPECT_TRUE(Kyty::Libs::Graphics::Gen5SampleFormatMatchesVulkan(173, VK_FORMAT_BC3_UNORM_BLOCK));
+	EXPECT_FALSE(Kyty::Libs::Graphics::Gen5SampleFormatMatchesVulkan(173, VK_FORMAT_R32G32B32A32_UINT));
+	uint32_t copy_width  = 0;
+	uint32_t copy_height = 0;
+	EXPECT_TRUE(Kyty::Libs::Graphics::Gen5BlockCompressedStorageCopyExtent(
+	    173, 116, 120, VK_FORMAT_R32G32B32A32_UINT, 29, 30, &copy_width, &copy_height));
+	EXPECT_EQ(copy_width, 29u);
+	EXPECT_EQ(copy_height, 30u);
+	EXPECT_FALSE(Kyty::Libs::Graphics::Gen5BlockCompressedStorageCopyExtent(
+	    173, 116, 120, VK_FORMAT_R32G32B32A32_UINT, 30, 30, &copy_width, &copy_height));
 }
 
 TEST(EmulatorGraphicsState, Gen5SharpSampledTextureAcceptsTexture2DType)
@@ -2146,6 +2203,8 @@ TEST(EmulatorGraphicsState, Gen5SampleFormatMatchesVulkanRejectsFloatForRgba8)
 	EXPECT_FALSE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_R16G16B16A16_SFLOAT));
 	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(71u, VK_FORMAT_R16G16B16A16_SFLOAT));
 	EXPECT_FALSE(Gen5SampleFormatMatchesVulkan(71u, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(5u, VK_FORMAT_R8_UNORM));
+	EXPECT_FALSE(Gen5SampleFormatMatchesVulkan(5u, VK_FORMAT_R8_UINT));
 	// Unknown ufmt: do not invent a filter that drops every match.
 	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(14u, VK_FORMAT_R8G8_UNORM));
 	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(14u, VK_FORMAT_R16G16B16A16_SFLOAT));
@@ -2314,6 +2373,36 @@ TEST(EmulatorGraphicsState, NativeCaptureDefaultsAndPruneBoundDisk)
 	EXPECT_EQ(NativeCapturePruneCount(8, 8), 0u);
 	EXPECT_EQ(NativeCapturePruneCount(12, 8), 4u);
 	EXPECT_EQ(NativeCapturePruneCount(5, 0), 0u);
+}
+
+TEST(EmulatorGraphicsState, NativeCaptureRejectsBlackBootFrames)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	std::vector<uint8_t> black(400 * 4, 0);
+	for (size_t pixel = 0; pixel < 400; pixel++)
+	{
+		black[pixel * 4 + 3] = 0xff;
+	}
+	EXPECT_FALSE(NativeCaptureFrameHasVisibleColor(black.data(), black.size()));
+
+	std::vector<uint8_t> uniform_gray(400 * 4, 0x50);
+	EXPECT_FALSE(NativeCaptureFrameHasVisibleColor(uniform_gray.data(), uniform_gray.size()));
+
+	auto sparse = black;
+	for (size_t pixel = 0; pixel < 3; pixel++)
+	{
+		sparse[pixel * 4] = 0xff;
+	}
+	EXPECT_FALSE(NativeCaptureFrameHasVisibleColor(sparse.data(), sparse.size()));
+
+	auto visible = black;
+	for (size_t pixel = 0; pixel < 8; pixel++)
+	{
+		visible[pixel * 4 + 1] = 0x40;
+	}
+	EXPECT_TRUE(NativeCaptureFrameHasVisibleColor(visible.data(), visible.size()));
+	EXPECT_FALSE(NativeCaptureFrameHasVisibleColor(nullptr, 0));
 }
 
 // Pipeline cache must recycle slots instead of EXIT when variants exceed the cap.
@@ -2536,6 +2625,7 @@ TEST(EmulatorGraphicsState, SkipWriteBackInvalidateForGpuOwnedRenderTexture)
 	EXPECT_FALSE(GpuMemoryIsGpuOwnedRenderTextureParams(cpu_wb));
 	EXPECT_FALSE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::RenderTexture, cpu_wb));
 
+	EXPECT_TRUE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::StorageTexture, nullptr));
 	EXPECT_FALSE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::Texture, gpu_owned));
 	EXPECT_FALSE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::VertexBuffer, gpu_owned));
 }
@@ -2805,6 +2895,24 @@ TEST(EmulatorGraphicsState, WaitRegMemCompareMasksBothSides)
 	const uint64_t mask = 0x00000000ffffffffull;
 	EXPECT_EQ((val & mask), (ref & mask));
 	EXPECT_NE((val & mask), ref);
+}
+
+TEST(EmulatorGraphicsState, WaitRegMemSupportsGen5CompareFunctions)
+{
+	using Kyty::Libs::Graphics::GraphicsWaitRegMemCompare;
+
+	EXPECT_TRUE(GraphicsWaitRegMemCompare(0, 9, 4, 0xff));
+	EXPECT_TRUE(GraphicsWaitRegMemCompare(1, 3, 4, 0xff));
+	EXPECT_TRUE(GraphicsWaitRegMemCompare(2, 4, 4, 0xff));
+	EXPECT_TRUE(GraphicsWaitRegMemCompare(3, 0x100000004ull, 4, 0xffffffffull));
+	EXPECT_TRUE(GraphicsWaitRegMemCompare(4, 5, 4, 0xff));
+	EXPECT_TRUE(GraphicsWaitRegMemCompare(5, 4, 4, 0xff));
+	EXPECT_TRUE(GraphicsWaitRegMemCompare(6, 5, 4, 0xff));
+	EXPECT_TRUE(GraphicsWaitRegMemCompare(7, 0, 1, 0xff));
+
+	EXPECT_FALSE(GraphicsWaitRegMemCompare(1, 5, 4, 0xff));
+	EXPECT_FALSE(GraphicsWaitRegMemCompare(3, 5, 4, 0xff));
+	EXPECT_FALSE(GraphicsWaitRegMemCompare(6, 3, 4, 0xff));
 }
 
 TEST(EmulatorGraphicsState, MemcpySkipAbsoluteRangesPreservesFenceHoles)

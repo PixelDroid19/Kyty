@@ -2049,8 +2049,15 @@ int KYTY_SYSV_ABI GraphicsSetCxRegIndirectPatchAddRegisters(uint32_t* cmd, uint3
 	printf("\t cmd      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
 	printf("\t num_regs = %" PRIu32 "\n", num_regs);
 
-	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+	if (cmd == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
 
+	if (num_regs > UINT32_MAX - cmd[1])
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
 	cmd[1] += num_regs;
 
 	return OK;
@@ -2063,8 +2070,15 @@ int KYTY_SYSV_ABI GraphicsSetShRegIndirectPatchAddRegisters(uint32_t* cmd, uint3
 	printf("\t cmd      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
 	printf("\t num_regs = %" PRIu32 "\n", num_regs);
 
-	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+	if (cmd == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
 
+	if (num_regs > UINT32_MAX - cmd[1])
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
 	cmd[1] += num_regs;
 
 	return OK;
@@ -2077,8 +2091,15 @@ int KYTY_SYSV_ABI GraphicsSetUcRegIndirectPatchAddRegisters(uint32_t* cmd, uint3
 	printf("\t cmd      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
 	printf("\t num_regs = %" PRIu32 "\n", num_regs);
 
-	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+	if (cmd == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
 
+	if (num_regs > UINT32_MAX - cmd[1])
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
 	cmd[1] += num_regs;
 
 	return OK;
@@ -2577,13 +2598,26 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t addr
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	const uint32_t dw = byte_off / 4u;
-	cmd[dw]     = static_cast<uint32_t>(address & 0xffffffffu);
-	cmd[dw + 1] = static_cast<uint32_t>((address >> 32u) & 0xffffffffu);
+	switch (GraphicsGetWaitRegMemForm(cmd[0]))
+	{
+		case GraphicsWaitRegMemForm::CustomWaitMem32:
+			cmd[dw]     = static_cast<uint32_t>(address) & ~0x3u;
+			cmd[dw + 1] = static_cast<uint32_t>(address >> 32u) & 0x3ffffu;
+			break;
+		case GraphicsWaitRegMemForm::CustomWaitMem64:
+			cmd[dw]     = static_cast<uint32_t>(address) & ~0x7u;
+			cmd[dw + 1] = static_cast<uint32_t>(address >> 32u) & 0x3ffffu;
+			break;
+		default:
+			cmd[dw]     = static_cast<uint32_t>(address);
+			cmd[dw + 1] = static_cast<uint32_t>(address >> 32u);
+			break;
+	}
 	return OK;
 }
 
 // sceAgcWaitRegMemPatchCompareFunction (NID n485EBnIWmk).
-// IT_WAIT_REG_MEM: compare at +4; R_WAIT_MEM_32: +16; R_WAIT_MEM_64: +28.
+// IT_WAIT_REG_MEM: compare at +4; R_WAIT_MEM_32: +20; R_WAIT_MEM_64: +28.
 int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchCompareFunction(uint32_t* cmd, uint32_t compare_function)
 {
 	PRINT_NAME();
@@ -2598,7 +2632,7 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchCompareFunction(uint32_t* cmd, uint3
 	switch (GraphicsGetWaitRegMemForm(cmd[0]))
 	{
 		case GraphicsWaitRegMemForm::ItWaitRegMem: byte_off = 4u; break;
-		case GraphicsWaitRegMemForm::CustomWaitMem32: byte_off = 16u; break;
+		case GraphicsWaitRegMemForm::CustomWaitMem32: byte_off = 20u; break;
 		case GraphicsWaitRegMemForm::CustomWaitMem64: byte_off = 28u; break;
 		default: return LibKernel::KERNEL_ERROR_EINVAL;
 	}
@@ -3011,7 +3045,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirect(CommandBuffer* buf, co
 	printf("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
 	printf("\t num_regs = %" PRIu32 "\n", num_regs);
 
-	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 
 	buf->DbgDump();
 
@@ -3036,7 +3073,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirect(CommandBuffer* buf, co
 	printf("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
 	printf("\t num_regs = %" PRIu32 "\n", num_regs);
 
-	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 
 	buf->DbgDump();
 
@@ -3061,7 +3101,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirect(CommandBuffer* buf, co
 	printf("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
 	printf("\t num_regs = %" PRIu32 "\n", num_regs);
 
-	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 
 	buf->DbgDump();
 
@@ -3111,6 +3154,14 @@ static uint32_t decode_draw_index_initiator(uint64_t modifier)
 	return (static_cast<uint32_t>(modifier) >> 3u) & 0x20u;
 }
 
+static bool draw_index_auto_modifier_supported(uint64_t modifier)
+{
+	// ShaderDrawModifier defines the low 32 bits plus is_default at bit 32.
+	// Bits 33..63 are reserved and cannot be represented by the draw packet.
+	constexpr uint64_t defined_bits = (1ull << 33u) - 1ull;
+	return (modifier & ~defined_bits) == 0;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t index_count, uint64_t modifier)
 {
 	PRINT_NAME();
@@ -3119,15 +3170,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	// Observed Gen5 modifiers: 0x40000000 (default) and 0x80000000 (Astro
-	// post-compute path). Other bits remain unsupported until evidenced.
-	EXIT_NOT_IMPLEMENTED(modifier != 0x40000000ull && modifier != 0x80000000ull);
+	EXIT_NOT_IMPLEMENTED(!draw_index_auto_modifier_supported(modifier));
 
 	buf->DbgDump();
 
-	// IT_DRAW_INDEX_AUTO consumes the decoded draw initiator, not the AGC
-	// modifier itself. Both observed Gen5 modifiers currently decode to the
-	// standard auto-draw initiator value 2.
+	// IT_DRAW_INDEX_AUTO consumes the decoded draw initiator, not the complete
+	// shader modifier. Direct auto draws provide zero start vertex/instance;
+	// their SGPR locations therefore do not add packet payload.
 	auto* cmd = buf->AllocateDW(3);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3547,39 +3596,46 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 	printf("\t mask             = 0x%016" PRIx64 "\n", mask);
 	printf("\t poll_cycles      = %" PRIu32 "\n", poll_cycles);
 
-	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	// size 0 = 32-bit memory wait (observed after ReleaseMem data_sel=1),
-	// size 1 = 64-bit wait (existing path). Encode 32-bit waits with zeroed
-	// high halves in the same R_WAIT_MEM_64 packet layout the CP already runs.
-	EXIT_NOT_IMPLEMENTED(size != 0 && size != 1);
-	// op 0/1: observed memory-wait forms (op=0 size=0 cmp=3 ref=1 mask=~0 after
-	// ReleaseMem data_sel=1; op=1 was the prior path). Packet encoding is shared.
-	EXIT_NOT_IMPLEMENTED(op != 0 && op != 1);
-	// cache_policy is a builder-side GPU-cache hint. The normalized R_WAIT_MEM_64
-	// packet has no policy field; host CP polls guest memory the same regardless.
-	// Observed values: 0/1/2 (WriteData-era) and 0x03 on early Gen5 WaitRegMem.
-	EXIT_NOT_IMPLEMENTED(cache_policy > 3);
+	if (buf == nullptr || size > 1 || compare_function > 7 || op > 4 || cache_policy > 3)
+	{
+		return nullptr;
+	}
 
 	buf->DbgDump();
 
-	auto* cmd = buf->AllocateDW(9);
+	const uint32_t packet_dwords = (size == 0 ? 7u : 9u);
+	auto*          cmd           = buf->AllocateDW(packet_dwords);
 
-	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
-	// The host CP has one normalized 64-bit packet form. A guest size=0 wait
-	// still has 32-bit comparison semantics, so its upper mask/reference
-	// dwords must not participate in that normalized comparison.
-	const uint64_t effective_mask      = (size == 0 ? (mask & 0xffffffffull) : mask);
-	const uint64_t effective_reference = (size == 0 ? (reference & 0xffffffffull) : reference);
-	cmd[0] = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
-	cmd[1] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(address) & 0xffffffffu);
-	cmd[2] = static_cast<uint32_t>((reinterpret_cast<uint64_t>(address) >> 32u) & 0xffffffffu);
-	cmd[3] = static_cast<uint32_t>(effective_mask & 0xffffffffu);
-	cmd[4] = static_cast<uint32_t>((effective_mask >> 32u) & 0xffffffffu);
-	cmd[5] = static_cast<uint32_t>(effective_reference & 0xffffffffu);
-	cmd[6] = static_cast<uint32_t>((effective_reference >> 32u) & 0xffffffffu);
-	cmd[7] = compare_function;
-	cmd[8] = poll_cycles / 40;
+	const uint64_t address_value = reinterpret_cast<uint64_t>(address);
+	const uint32_t poll          = std::min(poll_cycles >> 4u, 0xffffu);
+
+	cmd[0] = KYTY_PM4(packet_dwords, Pm4::IT_NOP, size == 0 ? Pm4::R_WAIT_MEM_32 : Pm4::R_WAIT_MEM_64);
+	cmd[1] = static_cast<uint32_t>(address_value) & (size == 0 ? ~0x3u : ~0x7u);
+	cmd[2] = static_cast<uint32_t>(address_value >> 32u) & 0x3ffffu;
+	cmd[3] = static_cast<uint32_t>(mask);
+
+	if (size == 0)
+	{
+		cmd[4] = static_cast<uint32_t>(reference);
+		cmd[5] = 0x10u | (static_cast<uint32_t>(compare_function) & 0x7u) |
+		         ((static_cast<uint32_t>(op) & 0x3u) << 8u) | ((static_cast<uint32_t>(op) & 0xcu) << 4u) |
+		         ((static_cast<uint32_t>(cache_policy) & 0x3u) << 25u);
+		cmd[6] = poll;
+	} else
+	{
+		cmd[4] = static_cast<uint32_t>(mask >> 32u);
+		cmd[5] = static_cast<uint32_t>(reference);
+		cmd[6] = static_cast<uint32_t>(reference >> 32u);
+		cmd[7] = 0x10u | (static_cast<uint32_t>(compare_function) & 0x7u) |
+		         ((static_cast<uint32_t>(op) & 0x1u) << 8u) | ((static_cast<uint32_t>(op) & 0x6u) << 5u) |
+		         ((static_cast<uint32_t>(cache_policy) & 0x3u) << 25u);
+		cmd[8] = poll;
+	}
 
 	return cmd;
 }

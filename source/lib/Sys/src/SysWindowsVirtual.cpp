@@ -11,7 +11,9 @@
 
 #include "cpuinfo.h"
 
+#include <algorithm>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <windows.h> // IWYU pragma: keep
@@ -39,9 +41,18 @@ struct SharedBacking
 	uint64_t size    = 0;
 };
 
+struct ReservationRoot
+{
+	uint64_t address = 0;
+	uint64_t size    = 0;
+};
+
 std::mutex                   g_shared_views_mutex;
 std::mutex                   g_protection_transaction_mutex;
+std::mutex                   g_reservations_mutex;
 std::unordered_set<uint64_t> g_shared_views;
+std::unordered_map<uint64_t, uint64_t> g_private_shared_views;
+std::vector<ReservationRoot>           g_reservation_roots;
 
 constexpr uint64_t SYSTEM_MANAGED_MIN = 0x0000040000u;
 constexpr uint64_t SYSTEM_MANAGED_MAX = 0x07FFFFBFFFu;
@@ -53,6 +64,66 @@ bool is_power_of_two(uint64_t value)
 	return value != 0 && (value & (value - 1)) == 0;
 }
 
+bool range_contains(uint64_t outer_address, uint64_t outer_size, uint64_t address, uint64_t size)
+{
+	return size != 0 && outer_size != 0 && address >= outer_address && address - outer_address <= outer_size &&
+	       size <= outer_size - (address - outer_address);
+}
+
+bool find_reservation_root(uint64_t address, uint64_t size, ReservationRoot* root)
+{
+	std::scoped_lock lock(g_reservations_mutex);
+	const auto       reservation = std::find_if(g_reservation_roots.begin(), g_reservation_roots.end(),
+	                                            [address, size](const ReservationRoot& candidate)
+	                                            { return range_contains(candidate.address, candidate.size, address, size); });
+	if (reservation == g_reservation_roots.end())
+	{
+		return false;
+	}
+	if (root != nullptr)
+	{
+		*root = *reservation;
+	}
+	return true;
+}
+
+void register_reservation_root(uint64_t address, uint64_t size)
+{
+	std::scoped_lock lock(g_reservations_mutex);
+	g_reservation_roots.push_back({address, size});
+}
+
+bool range_is_uncommitted(uint64_t address, uint64_t size)
+{
+	if (size == 0 || address > UINT64_MAX - size)
+	{
+		return false;
+	}
+
+	const uint64_t end = address + size;
+	for (uint64_t cursor = address; cursor < end;)
+	{
+		MEMORY_BASIC_INFORMATION info {};
+		if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(cursor)), &info, sizeof(info)) == 0 ||
+		    info.State != MEM_RESERVE)
+		{
+			return false;
+		}
+		const uint64_t region_address = reinterpret_cast<uint64_t>(info.BaseAddress);
+		if (info.RegionSize == 0 || region_address > UINT64_MAX - info.RegionSize)
+		{
+			return false;
+		}
+		const uint64_t next = std::min(end, region_address + info.RegionSize);
+		if (next <= cursor)
+		{
+			return false;
+		}
+		cursor = next;
+	}
+	return true;
+}
+
 uint64_t get_allocation_granularity()
 {
 	SYSTEM_INFO info {};
@@ -60,11 +131,16 @@ uint64_t get_allocation_granularity()
 	return info.dwAllocationGranularity;
 }
 
+bool shared_range_is_valid(const SharedBacking* backing, uint64_t backing_offset, uint64_t size)
+{
+	return backing != nullptr && backing->mapping != nullptr && size != 0 && backing_offset <= backing->size &&
+	       size <= backing->size - backing_offset && size <= SIZE_MAX;
+}
+
 bool validate_shared_range(const SharedBacking* backing, uint64_t backing_offset, uint64_t size)
 {
 	const auto granularity = get_allocation_granularity();
-	return backing != nullptr && backing->mapping != nullptr && size != 0 && backing_offset % granularity == 0 &&
-	       backing_offset <= backing->size && size <= backing->size - backing_offset && size <= SIZE_MAX;
+	return shared_range_is_valid(backing, backing_offset, size) && backing_offset % granularity == 0;
 }
 
 uint64_t map_shared_at(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
@@ -276,7 +352,17 @@ uint64_t sys_virtual_alloc_aligned(uint64_t address, uint64_t size, VirtualMemor
 
 	static auto virtual_alloc2 = ResolveVirtualAlloc2();
 
-	EXIT_NOT_IMPLEMENTED(virtual_alloc2 == nullptr);
+	if (virtual_alloc2 == nullptr)
+	{
+		const auto granularity = get_allocation_granularity();
+		if (alignment > granularity)
+		{
+			return 0;
+		}
+		return reinterpret_cast<uint64_t>(
+		    VirtualAlloc(address == 0 ? nullptr : reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size,
+		                 MEM_COMMIT | MEM_RESERVE, get_protection_flag(mode)));
+	}
 
 	auto ptr = reinterpret_cast<uintptr_t>(virtual_alloc2(GetCurrentProcess(), nullptr, size,
 	                                                      static_cast<DWORD>(MEM_COMMIT) | static_cast<DWORD>(MEM_RESERVE),
@@ -303,6 +389,102 @@ uint64_t sys_virtual_alloc_aligned(uint64_t address, uint64_t size, VirtualMemor
 	return ptr;
 }
 
+uint64_t sys_virtual_reserve(uint64_t address, uint64_t size)
+{
+	return sys_virtual_reserve_aligned(address, size, 1);
+}
+
+uint64_t sys_virtual_reserve_aligned(uint64_t address, uint64_t size, uint64_t alignment)
+{
+	if (alignment == 0)
+	{
+		return 0;
+	}
+
+	MEM_ADDRESS_REQUIREMENTS req {};
+	MEM_EXTENDED_PARAMETER   param {};
+	req.LowestStartingAddress =
+	    (address == 0 ? reinterpret_cast<PVOID>(SYSTEM_MANAGED_MIN) : reinterpret_cast<PVOID>(align_up(address, alignment)));
+	req.HighestEndingAddress = (address == 0 ? reinterpret_cast<PVOID>(SYSTEM_MANAGED_MAX) : reinterpret_cast<PVOID>(USER_MAX));
+	req.Alignment            = alignment;
+	param.Type               = MemExtendedParameterAddressRequirements;
+	param.Pointer            = &req;
+
+	MEM_ADDRESS_REQUIREMENTS req2 {};
+	MEM_EXTENDED_PARAMETER   param2 {};
+	req2.LowestStartingAddress =
+	    (address == 0 ? reinterpret_cast<PVOID>(USER_MIN) : reinterpret_cast<PVOID>(align_up(address, alignment)));
+	req2.HighestEndingAddress = reinterpret_cast<PVOID>(USER_MAX);
+	req2.Alignment            = alignment;
+	param2.Type               = MemExtendedParameterAddressRequirements;
+	param2.Pointer            = &req2;
+
+	static auto virtual_alloc2 = ResolveVirtualAlloc2();
+	if (virtual_alloc2 == nullptr)
+	{
+		const auto granularity = get_allocation_granularity();
+		if (alignment > granularity)
+		{
+			return 0;
+		}
+		const auto ptr = reinterpret_cast<uint64_t>(
+		    VirtualAlloc(address == 0 ? nullptr : reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size, MEM_RESERVE,
+		                 PAGE_NOACCESS));
+		if (ptr != 0)
+		{
+			register_reservation_root(ptr, size);
+		}
+		return ptr;
+	}
+
+	auto ptr = reinterpret_cast<uintptr_t>(
+	    virtual_alloc2(GetCurrentProcess(), nullptr, size, MEM_RESERVE, PAGE_NOACCESS, &param, 1));
+	if (ptr == 0)
+	{
+		ptr = reinterpret_cast<uintptr_t>(
+		    virtual_alloc2(GetCurrentProcess(), nullptr, size, MEM_RESERVE, PAGE_NOACCESS, &param2, 1));
+	}
+	if (ptr == 0)
+	{
+		const auto err = static_cast<uint32_t>(GetLastError());
+		if (err == ERROR_INVALID_PARAMETER && alignment <= (UINT64_MAX >> 1u))
+		{
+			return sys_virtual_reserve_aligned(address, size, alignment << 1u);
+		}
+		printf("VirtualAlloc2 reserve (alignment = 0x%016" PRIx64 ") failed: 0x%08" PRIx32 "\n", alignment, err);
+	} else
+	{
+		register_reservation_root(ptr, size);
+	}
+	return ptr;
+}
+
+bool sys_virtual_reserve_fixed(uint64_t address, uint64_t size)
+{
+	if (find_reservation_root(address, size, nullptr) && range_is_uncommitted(address, size))
+	{
+		// A guest reservation can be split at 16 KiB boundaries, while Windows
+		// owns the containing VirtualAlloc reservation as one larger region.
+		// The address space is already reserved; only Kyty's logical ownership
+		// needs to be restored for this sub-range.
+		return true;
+	}
+
+	auto* ptr = VirtualAlloc(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size, MEM_RESERVE, PAGE_NOACCESS);
+	if (ptr == nullptr)
+	{
+		printf("VirtualAlloc reserve failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
+		return false;
+	}
+	if (reinterpret_cast<uint64_t>(ptr) != address)
+	{
+		VirtualFree(ptr, 0, MEM_RELEASE);
+		return false;
+	}
+	register_reservation_root(address, size);
+	return true;
+}
+
 bool sys_virtual_alloc_fixed(uint64_t address, uint64_t size, VirtualMemory::Mode mode)
 {
 	auto ptr = reinterpret_cast<uintptr_t>(VirtualAlloc(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size,
@@ -324,6 +506,29 @@ bool sys_virtual_alloc_fixed(uint64_t address, uint64_t size, VirtualMemory::Mod
 		return false;
 	}
 
+	return true;
+}
+
+bool sys_virtual_alloc_fixed_replacing_owned_reservation(uint64_t address, uint64_t size, VirtualMemory::Mode mode)
+{
+	if (address == 0 || size == 0 || !find_reservation_root(address, size, nullptr) || !range_is_uncommitted(address, size))
+	{
+		return false;
+	}
+
+	auto* committed = VirtualAlloc(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), static_cast<SIZE_T>(size),
+	                               MEM_COMMIT, get_protection_flag(mode));
+	if (committed != reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)))
+	{
+		return false;
+	}
+
+	std::scoped_lock lock(g_reservations_mutex);
+	if (!g_private_shared_views.emplace(address, size).second)
+	{
+		VirtualFree(committed, static_cast<SIZE_T>(size), MEM_DECOMMIT);
+		return false;
+	}
 	return true;
 }
 
@@ -417,16 +622,46 @@ bool sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t back
 	return map_shared_at(shared, address, backing_offset, size, mode) == address;
 }
 
-bool sys_virtual_map_shared_fixed_replacing_owned_reservation(void* /*backing*/, uint64_t /*address*/,
-                                                              uint64_t /*backing_offset*/, uint64_t /*size*/,
-                                                              VirtualMemory::Mode /*mode*/)
+bool sys_virtual_map_shared_fixed_replacing_owned_reservation(void* backing, uint64_t address, uint64_t backing_offset,
+                                                              uint64_t size, VirtualMemory::Mode mode)
 {
-	return false;
+	auto* shared = static_cast<SharedBacking*>(backing);
+	if (!shared_range_is_valid(shared, backing_offset, size) || address == 0 ||
+	    !find_reservation_root(address, size, nullptr) || !range_is_uncommitted(address, size))
+	{
+		return false;
+	}
+
+	// Windows section views require both their address and file offset to have
+	// the same 64 KiB allocation-granularity congruence. PS5 direct memory uses
+	// 16 KiB pages, so mappings such as VA % 64 KiB == 0 with physical offset
+	// % 64 KiB == 16 KiB cannot be represented by MapViewOfFile. Commit private
+	// pages inside Kyty's owned reservation for that case. Coherent section
+	// views remain the normal path for mappings that do not replace a reserved
+	// guest range.
+	auto* committed = VirtualAlloc(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), static_cast<SIZE_T>(size),
+	                               MEM_COMMIT, get_protection_flag(mode));
+	if (committed != reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)))
+	{
+		printf("VirtualAlloc(shared reservation fallback) failed: 0x%08" PRIx32 "\n",
+		       static_cast<uint32_t>(GetLastError()));
+		return false;
+	}
+
+	{
+		std::scoped_lock lock(g_reservations_mutex);
+		if (!g_private_shared_views.emplace(address, size).second)
+		{
+			VirtualFree(committed, static_cast<SIZE_T>(size), MEM_DECOMMIT);
+			return false;
+		}
+	}
+	return true;
 }
 
 bool sys_virtual_supports_shared_fixed_owned_reservation_replacement()
 {
-	return false;
+	return true;
 }
 
 uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
@@ -447,6 +682,43 @@ bool sys_virtual_free(uint64_t address)
 				return false;
 			}
 			g_shared_views.erase(address);
+			return true;
+		}
+	}
+	{
+		std::scoped_lock lock(g_reservations_mutex);
+		const auto       private_view = g_private_shared_views.find(address);
+		if (private_view != g_private_shared_views.end())
+		{
+			if (VirtualFree(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)),
+			                static_cast<SIZE_T>(private_view->second), MEM_DECOMMIT) == 0)
+			{
+				printf("VirtualFree(private shared view) failed: 0x%08" PRIx32 "\n",
+				       static_cast<uint32_t>(GetLastError()));
+				return false;
+			}
+			g_private_shared_views.erase(private_view);
+			return true;
+		}
+
+		const auto reservation = std::find_if(g_reservation_roots.begin(), g_reservation_roots.end(),
+		                                      [address](const ReservationRoot& root)
+		                                      { return range_contains(root.address, root.size, address, 1); });
+		if (reservation != g_reservation_roots.end())
+		{
+			if (reservation->address != address)
+			{
+				// Logical sub-ranges of a Windows reservation cannot be released
+				// independently. Keep the host reservation and release ownership
+				// in Kyty's ReservedMemory bookkeeping.
+				return true;
+			}
+			if (VirtualFree(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), 0, MEM_RELEASE) == 0)
+			{
+				printf("VirtualFree(reservation) failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
+				return false;
+			}
+			g_reservation_roots.erase(reservation);
 			return true;
 		}
 	}

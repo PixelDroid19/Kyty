@@ -123,7 +123,10 @@ if (CLANG AND (KYTY_LINKER STREQUAL LLD))
 endif()
 
 if (KYTY_LINKER STREQUAL LD AND NOT LINUX AND NOT MACOS)
-	set(KYTY_LD_OPTIONS "-Wl,--image-base=0x100000000000")
+	# Keep host stacks and ASLR allocations outside the PS5 fixed-address
+	# windows. MSVC already disables dynamic-base relocation below; MinGW only
+	# needs high-entropy VA disabled to retain ASLR without occupying guest VAs.
+	set(KYTY_LD_OPTIONS "-Wl,--image-base=0x100000000000 -Wl,--disable-high-entropy-va")
 endif()
 
 project(Kyty${KYTY_PROJECT_NAME}${CMAKE_BUILD_TYPE}${KYTY_COMPILER} VERSION 0.2.2)
@@ -188,6 +191,7 @@ set(KYTY_LIB_HEADERS ${PROJECT_SOURCE_DIR}/include)
 config_compiler_and_linker()  
   
 add_subdirectory(3rdparty)
+add_subdirectory(agent_transport)
 add_subdirectory(emulator)
 if(KYTY_BUILD_UNIT_TESTS)
 	add_subdirectory(unit_test)

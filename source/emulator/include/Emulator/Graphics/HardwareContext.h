@@ -569,6 +569,7 @@ struct ShaderRegisters
 	uint32_t m_paClVsOutCntl      = 0;
 
 	uint32_t ps_interpolator_settings[32] = {0};
+	uint32_t ps_interpolator_written_mask = 0;
 	// uint32_t ps_input_num                 = 0;
 
 	uint32_t m_spiShaderIdxFormat     = 0;
@@ -847,6 +848,7 @@ public:
 	void SetPsInputSettings(uint32_t id, uint32_t value)
 	{
 		m_sh_regs.ps_interpolator_settings[id] = value;
+		m_sh_regs.ps_interpolator_written_mask |= 1u << id;
 		// m_sh_regs.ps_input_num                 = ((id + 1) > m_sh_regs.ps_input_num ? (id + 1) : m_sh_regs.ps_input_num);
 	}
 

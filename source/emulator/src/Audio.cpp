@@ -1126,7 +1126,8 @@ constexpr int32_t AJM_ERROR_CODEC_ALREADY_REGISTERED = static_cast<int32_t>(0x80
 constexpr int32_t AJM_ERROR_CODEC_NOT_REGISTERED     = static_cast<int32_t>(0x8093000au);
 constexpr int32_t AJM_ERROR_WRONG_REVISION_FLAG      = static_cast<int32_t>(0x8093000bu);
 constexpr int32_t AJM_ERROR_MALFORMED_BATCH          = static_cast<int32_t>(0x80930011u);
-constexpr uint32_t AJM_MAX_CODEC_TYPE                = 23;
+constexpr uint32_t AJM_MAX_CODEC_TYPE                = 25;
+constexpr int64_t  AJM_GEN5_INITIALIZATION_FLAGS     = INT64_C(0x300000000);
 constexpr uint32_t AJM_MAX_INSTANCE_SLOT             = 0x2fff;
 constexpr uint32_t AJM_INSTANCE_SLOT_MASK            = 0x3fff;
 constexpr uint64_t AJM_FLAG_RUN_GET_CODEC_INFO       = 1ull << 11u;
@@ -1385,7 +1386,7 @@ int KYTY_SYSV_ABI AjmInitialize(int64_t reserved, uint32_t* context)
 {
 	PRINT_NAME();
 
-	if (context == nullptr || reserved != 0)
+	if (context == nullptr || (reserved != 0 && reserved != AJM_GEN5_INITIALIZATION_FLAGS))
 	{
 		return AJM_ERROR_INVALID_PARAMETER;
 	}
@@ -1463,6 +1464,41 @@ int KYTY_SYSV_ABI AjmModuleUnregister(uint32_t context, uint32_t codec)
 	{
 		return AJM_ERROR_CODEC_NOT_REGISTERED;
 	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmMemoryRegister(uint32_t context, const void* address, size_t num_pages)
+{
+	PRINT_NAME();
+
+	if (address == nullptr || num_pages == 0)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	std::scoped_lock lock(g_ajm_mutex);
+	if (g_ajm_contexts.find(context) == g_ajm_contexts.end())
+	{
+		return AJM_ERROR_INVALID_CONTEXT;
+	}
+
+	// AJM hardware requires explicit shared-memory registration. HLE decoders
+	// already share the guest address space, so the validated range needs no
+	// additional host mapping.
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchInitializeBuffer(void* buffer, size_t buffer_size, void* control)
+{
+	PRINT_NAME();
+
+	if (buffer == nullptr || buffer_size == 0 || control == nullptr)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	// Gen5 Wwise supplies its own batch storage and control object. Kyty's HLE
+	// batch parser has no hardware-side context to construct here.
 	return OK;
 }
 

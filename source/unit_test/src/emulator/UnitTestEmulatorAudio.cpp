@@ -27,6 +27,27 @@ TEST(EmulatorAudio, UnregistersCapturedAjmCodecModule)
 	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
 }
 
+TEST(EmulatorAudio, AcceptsGen5AjmInitializationFlagsAndCodecModules)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t context = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(INT64_C(0x300000000), &context), 0);
+	ASSERT_NE(context, 0u);
+	uint8_t registered_page[4096] {};
+	EXPECT_EQ(Ajm::AjmMemoryRegister(context, registered_page, 1), 0);
+	uint8_t batch_storage[0x708] {};
+	uint8_t batch_control[64] {};
+	EXPECT_EQ(Ajm::AjmBatchInitializeBuffer(batch_storage, sizeof(batch_storage), batch_control), 0);
+	EXPECT_EQ(Ajm::AjmModuleRegister(context, 24, 0), 0);
+	EXPECT_EQ(Ajm::AjmModuleRegister(context, 14, 0), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
 TEST(EmulatorAudio, TracksAjmInstanceLifecycle)
 {
 	if (!Config::IsInitialized())

@@ -51,6 +51,24 @@ public:
 		uint64_t            access_violation_vaddr = 0;
 		uint64_t            exception_address      = 0;
 		uint64_t            rbp                    = 0;
+		uint64_t            rsp                    = 0;
+		uint64_t            rflags                 = 0;
+		uint64_t            rax                    = 0;
+		uint64_t            rbx                    = 0;
+		uint64_t            rcx                    = 0;
+		uint64_t            rdx                    = 0;
+		uint64_t            rsi                    = 0;
+		uint64_t            rdi                    = 0;
+		uint64_t            r8                     = 0;
+		uint64_t            r9                     = 0;
+		uint64_t            r10                    = 0;
+		uint64_t            r11                    = 0;
+		uint64_t            r12                    = 0;
+		uint64_t            r13                    = 0;
+		uint64_t            r14                    = 0;
+		uint64_t            r15                    = 0;
+		uint64_t            stack[16]              = {};
+		uint32_t            stack_count             = 0;
 		uint32_t            exception_win_code     = 0;
 	};
 
@@ -98,6 +116,14 @@ uint64_t GetPageSize();
 uint64_t Alloc(uint64_t address, uint64_t size, Mode mode);
 uint64_t AllocAligned(uint64_t address, uint64_t size, Mode mode, uint64_t alignment);
 bool     AllocFixed(uint64_t address, uint64_t size, Mode mode);
+// Commit private pages inside a NoAccess reservation owned by this process.
+// Prefix and suffix remain reserved.
+bool     AllocFixedReplacingOwnedReservation(uint64_t address, uint64_t size, Mode mode);
+// Reserve guest virtual address space without committing host memory. On
+// POSIX this is a PROT_NONE/no-reserve mapping; on Windows it is MEM_RESERVE.
+uint64_t Reserve(uint64_t address, uint64_t size);
+uint64_t ReserveAligned(uint64_t address, uint64_t size, uint64_t alignment);
+bool     ReserveFixed(uint64_t address, uint64_t size);
 
 // Sparse host backing whose views share bytes by backing_offset. Free() unmaps
 // individual views without destroying the backing or other aliases.
@@ -174,7 +200,15 @@ void StartGuestProfiler();
 void RegisterDemandRange(uint64_t addr, uint64_t size);
 bool TryDemandMap(uint64_t vaddr);
 
-// Async-signal-safe fatal fault report + terminate (no allocator use).
+// Configure an optional fixed-path native crash report. The path is copied
+// before guest execution; the fatal handler never allocates.
+void ConfigureFatalFaultReport(const char* path) noexcept;
+
+// Native fatal fault report + terminate. The report contains the bounded
+// register and stack snapshot captured at the exception boundary.
+void FatalFault(const ExceptionHandler::ExceptionInfo* info) noexcept;
+
+// Compatibility overload for callers that only have an address and RIP.
 void FatalFault(uint64_t vaddr, uint64_t rip);
 
 } // namespace VirtualMemory

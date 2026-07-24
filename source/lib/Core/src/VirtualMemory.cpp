@@ -28,6 +28,7 @@
 
 #ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
 #include <csignal>
+#include <fcntl.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/mman.h>
@@ -57,6 +58,133 @@ SystemInfo GetSystemInfo()
 }
 
 namespace VirtualMemory {
+
+namespace {
+
+constexpr size_t kCrashReportPathMax = 512;
+char             g_crash_report_path[kCrashReportPathMax] = {};
+size_t           g_crash_report_path_size                = 0;
+
+void AppendText(char* buffer, size_t capacity, size_t* offset, const char* text) noexcept
+{
+	if (buffer == nullptr || offset == nullptr || text == nullptr)
+	{
+		return;
+	}
+	while (*text != '\0' && *offset + 1 < capacity)
+	{
+		buffer[(*offset)++] = *text++;
+	}
+}
+
+void AppendHex(char* buffer, size_t capacity, size_t* offset, uint64_t value) noexcept
+{
+	static constexpr char kHex[] = "0123456789abcdef";
+	AppendText(buffer, capacity, offset, "0x");
+	for (int shift = 60; shift >= 0 && *offset + 1 < capacity; shift -= 4)
+	{
+		buffer[(*offset)++] = kHex[(value >> shift) & 0xfu];
+	}
+}
+
+void AppendHexJson(char* buffer, size_t capacity, size_t* offset, uint64_t value) noexcept
+{
+	AppendText(buffer, capacity, offset, "\"");
+	AppendHex(buffer, capacity, offset, value);
+	AppendText(buffer, capacity, offset, "\"");
+}
+
+const char* AccessName(ExceptionHandler::AccessViolationType type) noexcept
+{
+	switch (type)
+	{
+		case ExceptionHandler::AccessViolationType::Read: return "read";
+		case ExceptionHandler::AccessViolationType::Write: return "write";
+		case ExceptionHandler::AccessViolationType::Execute: return "execute";
+		default: return "unknown";
+	}
+}
+
+void WriteCrashReport(const ExceptionHandler::ExceptionInfo& info) noexcept
+{
+	if (g_crash_report_path_size == 0)
+	{
+		return;
+	}
+	char   json[4096] = {};
+	size_t size       = 0;
+	AppendText(json, sizeof(json), &size, "{\"schema\":\"kyty_crash_context_v1\",\"type\":\"");
+	AppendText(json, sizeof(json), &size,
+	           info.type == ExceptionHandler::ExceptionType::AccessViolation ? "access_violation" : "unknown");
+	AppendText(json, sizeof(json), &size, "\",\"access\":\"");
+	AppendText(json, sizeof(json), &size, AccessName(info.access_violation_type));
+	AppendText(json, sizeof(json), &size, "\",\"exception_code\":");
+	AppendHexJson(json, sizeof(json), &size, info.exception_win_code);
+	AppendText(json, sizeof(json), &size, ",\"fault_address\":");
+	AppendHexJson(json, sizeof(json), &size, info.access_violation_vaddr);
+	AppendText(json, sizeof(json), &size, ",\"rip\":");
+	AppendHexJson(json, sizeof(json), &size, info.exception_address);
+	AppendText(json, sizeof(json), &size, ",\"registers\":{");
+	static constexpr const char* names[] = {"rsp", "rbp", "rflags", "rax", "rbx", "rcx", "rdx", "rsi", "rdi",
+	                                        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
+	const uint64_t values[] = {info.rsp, info.rbp, info.rflags, info.rax, info.rbx, info.rcx, info.rdx, info.rsi, info.rdi,
+	                           info.r8, info.r9, info.r10, info.r11, info.r12, info.r13, info.r14, info.r15};
+	for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i)
+	{
+		if (i != 0)
+		{
+			AppendText(json, sizeof(json), &size, ",");
+		}
+		AppendText(json, sizeof(json), &size, "\"");
+		AppendText(json, sizeof(json), &size, names[i]);
+		AppendText(json, sizeof(json), &size, "\":");
+		AppendHexJson(json, sizeof(json), &size, values[i]);
+	}
+	AppendText(json, sizeof(json), &size, "},\"stack\":[");
+	const uint32_t stack_count = info.stack_count > 16u ? 16u : info.stack_count;
+	for (uint32_t i = 0; i < stack_count; ++i)
+	{
+		if (i != 0u)
+		{
+			AppendText(json, sizeof(json), &size, ",");
+		}
+		AppendHexJson(json, sizeof(json), &size, info.stack[i]);
+	}
+	AppendText(json, sizeof(json), &size, "]}\n");
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	HANDLE file = CreateFileA(g_crash_report_path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (file != INVALID_HANDLE_VALUE)
+	{
+		DWORD written = 0;
+		(void)WriteFile(file, json, static_cast<DWORD>(size), &written, nullptr);
+		(void)CloseHandle(file);
+	}
+#else
+	const int fd = ::open(g_crash_report_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (fd >= 0)
+	{
+		(void)::write(fd, json, size);
+		(void)::close(fd);
+	}
+#endif
+}
+
+} // namespace
+
+void ConfigureFatalFaultReport(const char* path) noexcept
+{
+	g_crash_report_path_size = 0;
+	if (path == nullptr || path[0] == '\0')
+	{
+		return;
+	}
+	while (path[g_crash_report_path_size] != '\0' && g_crash_report_path_size + 1 < kCrashReportPathMax)
+	{
+		g_crash_report_path[g_crash_report_path_size] = path[g_crash_report_path_size];
+		++g_crash_report_path_size;
+	}
+	g_crash_report_path[g_crash_report_path_size] = '\0';
+}
 
 SignalDiagnosticsConfig MakeSignalDiagnosticsConfig(const char* skip_ud2, const char* fault_log) noexcept
 {
@@ -128,7 +256,33 @@ public:
 			info.access_violation_vaddr = exception_record->ExceptionInformation[1];
 		}
 
-		info.rbp                = dispatcher_context->ContextRecord->Rbp;
+		const PCONTEXT context = dispatcher_context->ContextRecord;
+		info.rbp               = context->Rbp;
+		info.rsp               = context->Rsp;
+		info.rflags            = context->EFlags;
+		info.rax               = context->Rax;
+		info.rbx               = context->Rbx;
+		info.rcx               = context->Rcx;
+		info.rdx               = context->Rdx;
+		info.rsi               = context->Rsi;
+		info.rdi               = context->Rdi;
+		info.r8                = context->R8;
+		info.r9                = context->R9;
+		info.r10               = context->R10;
+		info.r11               = context->R11;
+		info.r12               = context->R12;
+		info.r13               = context->R13;
+		info.r14               = context->R14;
+		info.r15               = context->R15;
+		if (context->Rsp >= 0x1000u)
+		{
+			const auto* stack = reinterpret_cast<const uint64_t*>(context->Rsp);
+			for (uint32_t i = 0; i < 16u; ++i)
+			{
+				info.stack[i] = stack[i];
+			}
+			info.stack_count = 16;
+		}
 		info.exception_win_code = exception_record->ExceptionCode;
 
 		auto* p = *static_cast<ExceptionHandlerPrivate**>(dispatcher_context->HandlerData);
@@ -234,6 +388,7 @@ static inline uint64_t uc_get_r12(ucontext_t* uc) { return static_cast<uint64_t>
 static inline uint64_t uc_get_r13(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[9]); }
 static inline uint64_t uc_get_r14(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[10]); }
 static inline uint64_t uc_get_r15(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext->__ss.__x[11]); }
+static inline uint64_t uc_get_rflags(ucontext_t* /*uc*/) { return 0; }
 // Darwin arm64 signal contexts do not expose an x86 page-fault error code.
 // The signal info still supplies the fault address; classify it as a read when
 // no architecture-specific access bit is available.
@@ -515,14 +670,6 @@ bool TryDemandMap(uint64_t vaddr)
 	return try_demand_map(vaddr);
 }
 
-void FatalFault(uint64_t vaddr, uint64_t rip)
-{
-	// Async-signal-safe fatal exit: report and terminate without touching the
-	// allocator (which the faulting thread may hold locked, dead-locking printf).
-	sigsafe_fault("FATAL-ACCESS-VIOLATION", vaddr, rip);
-	::_Exit(139);
-}
-
 // Async-signal-safe: write "<tag> <vaddr> <rip>\n" to stderr without any malloc.
 static void sigsafe_fault(const char* tag, uint64_t a, uint64_t b)
 {
@@ -614,6 +761,22 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 	einfo.type              = ExceptionHandler::ExceptionType::AccessViolation;
 	einfo.exception_address = uc_get_rip(uc);
 	einfo.rbp               = uc_get_rbp(uc);
+	einfo.rsp               = uc_get_rsp(uc);
+	einfo.rflags            = uc_get_rflags(uc);
+	einfo.rax               = uc_get_rax(uc);
+	einfo.rbx               = uc_get_rbx(uc);
+	einfo.rcx               = uc_get_rcx(uc);
+	einfo.rdx               = uc_get_rdx(uc);
+	einfo.rsi               = uc_get_rsi(uc);
+	einfo.rdi               = uc_get_rdi(uc);
+	einfo.r8                = uc_get_r8(uc);
+	einfo.r9                = uc_get_r9(uc);
+	einfo.r10               = uc_get_r10(uc);
+	einfo.r11               = uc_get_r11(uc);
+	einfo.r12               = uc_get_r12(uc);
+	einfo.r13               = uc_get_r13(uc);
+	einfo.r14               = uc_get_r14(uc);
+	einfo.r15               = uc_get_r15(uc);
 
 	einfo.access_violation_vaddr = reinterpret_cast<uint64_t>(info->si_addr);
 
@@ -693,6 +856,25 @@ class ExceptionHandlerPrivate
 };
 #endif
 
+void FatalFault(const ExceptionHandler::ExceptionInfo* info) noexcept
+{
+	if (info != nullptr)
+	{
+		WriteCrashReport(*info);
+	}
+	std::_Exit(139);
+}
+
+void FatalFault(uint64_t vaddr, uint64_t rip)
+{
+	ExceptionHandler::ExceptionInfo info {};
+	info.type                   = ExceptionHandler::ExceptionType::AccessViolation;
+	info.access_violation_type = ExceptionHandler::AccessViolationType::Unknown;
+	info.access_violation_vaddr = vaddr;
+	info.exception_address      = rip;
+	FatalFault(&info);
+}
+
 #if !defined(KYTY_HAS_SIGNAL_EXCEPTIONS)
 void RegisterDemandRange(uint64_t, uint64_t) {}
 
@@ -701,10 +883,6 @@ bool TryDemandMap(uint64_t)
 	return false;
 }
 
-void FatalFault(uint64_t, uint64_t)
-{
-	std::abort();
-}
 #endif
 
 ExceptionHandler::ExceptionHandler(): m_p(new ExceptionHandlerPrivate) {}
@@ -776,6 +954,16 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception)
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
+	if (exception_record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+	{
+		// Host libraries use SEH for recoverable control flow. In particular,
+		// Intel's Vulkan compiler raises and handles floating-point exceptions
+		// while creating pipelines. Kyty's vectored handler only owns access
+		// violations used by guest demand paging and GPU write watches; let every
+		// other exception continue to the component that raised it.
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
 	if (exception_record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
 	{
 		info.type = ExceptionHandler::ExceptionType::AccessViolation;
@@ -789,7 +977,32 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception)
 		info.access_violation_vaddr = exception_record->ExceptionInformation[1];
 	}
 
-	info.rbp                = exception->ContextRecord->Rbp;
+	info.rbp               = exception->ContextRecord->Rbp;
+	info.rsp               = exception->ContextRecord->Rsp;
+	info.rflags            = exception->ContextRecord->EFlags;
+	info.rax               = exception->ContextRecord->Rax;
+	info.rbx               = exception->ContextRecord->Rbx;
+	info.rcx               = exception->ContextRecord->Rcx;
+	info.rdx               = exception->ContextRecord->Rdx;
+	info.rsi               = exception->ContextRecord->Rsi;
+	info.rdi               = exception->ContextRecord->Rdi;
+	info.r8                = exception->ContextRecord->R8;
+	info.r9                = exception->ContextRecord->R9;
+	info.r10               = exception->ContextRecord->R10;
+	info.r11               = exception->ContextRecord->R11;
+	info.r12               = exception->ContextRecord->R12;
+	info.r13               = exception->ContextRecord->R13;
+	info.r14               = exception->ContextRecord->R14;
+	info.r15               = exception->ContextRecord->R15;
+	if (exception->ContextRecord->Rsp >= 0x1000u)
+	{
+		const auto* stack = reinterpret_cast<const uint64_t*>(exception->ContextRecord->Rsp);
+		for (uint32_t i = 0; i < 16u; ++i)
+		{
+			info.stack[i] = stack[i];
+		}
+		info.stack_count = 16;
+	}
 	info.exception_win_code = exception_record->ExceptionCode;
 
 	ExceptionHandlerPrivate::g_vec_func(&info);
@@ -874,6 +1087,18 @@ bool ExceptionHandler::Uninstall()
 
 void Init()
 {
+	const char* crash_report = std::getenv("KYTY_CRASH_REPORT");
+	char        default_report[kCrashReportPathMax] = {};
+	if (crash_report == nullptr || crash_report[0] == '\0')
+	{
+		const char* capture_dir = std::getenv("KYTY_CAPTURE_DIR");
+		if (capture_dir != nullptr && capture_dir[0] != '\0')
+		{
+			std::snprintf(default_report, sizeof(default_report), "%s/crash-context.json", capture_dir);
+			crash_report = default_report;
+		}
+	}
+	ConfigureFatalFaultReport(crash_report);
 #ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
 	LoadSignalDiagnosticsConfigFromEnvironment();
 #endif
@@ -908,6 +1133,34 @@ uint64_t AllocAligned(uint64_t address, uint64_t size, Mode mode, uint64_t align
 bool AllocFixed(uint64_t address, uint64_t size, Mode mode)
 {
 	return sys_virtual_alloc_fixed(address, size, mode);
+}
+
+bool AllocFixedReplacingOwnedReservation(uint64_t address, uint64_t size, Mode mode)
+{
+	if (address == 0 || size == 0 || address > UINT64_MAX - size)
+	{
+		return false;
+	}
+	return sys_virtual_alloc_fixed_replacing_owned_reservation(address, size, mode);
+}
+
+uint64_t Reserve(uint64_t address, uint64_t size)
+{
+	return sys_virtual_reserve(address, size);
+}
+
+uint64_t ReserveAligned(uint64_t address, uint64_t size, uint64_t alignment)
+{
+	if (alignment == 0)
+	{
+		return Reserve(address, size);
+	}
+	return sys_virtual_reserve_aligned(address, size, alignment);
+}
+
+bool ReserveFixed(uint64_t address, uint64_t size)
+{
+	return sys_virtual_reserve_fixed(address, size);
 }
 
 class SharedBacking

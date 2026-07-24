@@ -13,11 +13,13 @@
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
+#include <vector>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
 
-static VkFormat get_texture_format(uint32_t dfmt, uint32_t nfmt, uint32_t fmt)
+VkFormat StorageTextureResolveVkFormat(uint32_t dfmt, uint32_t nfmt, uint32_t fmt)
 {
 	if (fmt == 0)
 	{
@@ -36,9 +38,27 @@ static VkFormat get_texture_format(uint32_t dfmt, uint32_t nfmt, uint32_t fmt)
 		EXIT("unknown format: nfmt = %u, dfmt = %u\n", nfmt, dfmt);
 	} else
 	{
+		if (fmt == 5)
+		{
+			// The Gen5 video path uses float storage-image operations for this
+			// 8-bit plane, so its host view must normalize the written values.
+			return VK_FORMAT_R8_UNORM;
+		}
+		if (fmt == 14)
+		{
+			return VK_FORMAT_R8G8_UNORM;
+		}
 		if (fmt == 20)
 		{
 			return VK_FORMAT_R32_UINT;
+		}
+		if (fmt == 75)
+		{
+			return VK_FORMAT_R32G32B32A32_UINT;
+		}
+		if (fmt == 62)
+		{
+			return VK_FORMAT_R32G32_UINT;
 		}
 		EXIT("unknown format: fmt = %u\n", fmt);
 	}
@@ -134,6 +154,23 @@ static bool IsR32UintReadSwizzle(const VkComponentMapping& components)
 	       components.b == VK_COMPONENT_SWIZZLE_ZERO && components.a == VK_COMPONENT_SWIZZLE_ONE;
 }
 
+static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
+{
+	// Storage image views for these typed formats use identity component
+	// mapping. Reuse must follow the effective host view contract rather than
+	// the raw guest selector bits, otherwise equivalent bindings churn a fresh
+	// GpuMemory object every frame.
+	if (fmt == 5u || fmt == 14u || fmt == 62u)
+	{
+		return DstSel(4, 5, 6, 7);
+	}
+	if (fmt == 20u && (swizzle == DstSel(4, 0, 0, 1) || swizzle == DstSel(4, 0, 0, 0)))
+	{
+		return DstSel(4, 5, 6, 7);
+	}
+	return swizzle;
+}
+
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("StorageTextureObject::update_func");
@@ -191,19 +228,22 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	}
 	if (arrayed_2d)
 	{
-		EXIT_NOT_IMPLEMENTED(fmt != 20u || tile != 5u || levels != 1u || depth == 0u || base_array >= depth || depth >= 16u);
+		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
+		EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || tile != 5u || levels != 1u ||
+		                     depth == 0u || base_array >= depth || depth >= 16u);
 		TileSizeAlign slice_size {};
 		TileGetTextureSize2(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
 		                    static_cast<uint32_t>(pitch), 1u, static_cast<uint32_t>(tile), &slice_size, nullptr, nullptr);
 		EXIT_NOT_IMPLEMENTED(*size != static_cast<uint64_t>(slice_size.size) * depth);
-		const uint64_t linear_slice_bytes = static_cast<uint64_t>(pitch) * height * 4u;
+		const uint64_t linear_slice_bytes = static_cast<uint64_t>(pitch) * height * bytes_per_element;
 		std::vector<uint8_t> linear(static_cast<size_t>(linear_slice_bytes * depth));
 		Vector<BufferImageCopy> regions(static_cast<int>(depth));
 		for (uint32_t layer = 0; layer < depth; ++layer)
 		{
-			TileConvertStandard4KB32ToLinear(linear.data() + layer * linear_slice_bytes,
-			                                  reinterpret_cast<const uint8_t*>(*vaddr) + layer * slice_size.size,
-			                                  static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(pitch));
+			TileConvertStandard4KBToLinear(linear.data() + layer * linear_slice_bytes,
+			                              reinterpret_cast<const uint8_t*>(*vaddr) + layer * slice_size.size,
+			                              static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+			                              static_cast<uint32_t>(pitch), bytes_per_element);
 			regions[layer].offset = static_cast<uint32_t>(layer * linear_slice_bytes);
 			regions[layer].pitch = static_cast<uint32_t>(pitch);
 			regions[layer].width = static_cast<uint32_t>(width);
@@ -273,11 +313,12 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		delete[] temp_buf;
 	} else if (tile == 5)
 	{
-		EXIT_NOT_IMPLEMENTED(fmt != 20u || levels != 1u);
-		const uint64_t linear_bytes = static_cast<uint64_t>(pitch) * height * 4u;
+		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
+		EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || levels != 1u);
+		const uint64_t linear_bytes = static_cast<uint64_t>(pitch) * height * bytes_per_element;
 		EXIT_NOT_IMPLEMENTED(linear_bytes == 0u || linear_bytes > *size);
 		auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
-		TileConvertStandard4KB32ToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), width, height, pitch);
+		TileConvertStandard4KBToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), width, height, pitch, bytes_per_element);
 		regions[0].offset = 0;
 		regions[0].pitch  = pitch;
 		regions[0].width  = width;
@@ -307,7 +348,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto height     = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
 	auto base_level = params[StorageTextureObject::PARAM_LEVELS] >> 32u;
 	auto levels     = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
-	auto swizzle    = params[StorageTextureObject::PARAM_SWIZZLE];
+	auto swizzle    = NormalizeStorageTextureSwizzle(fmt, params[StorageTextureObject::PARAM_SWIZZLE]);
 	auto resource_type = params[StorageTextureObject::PARAM_RESOURCE_TYPE];
 	auto depth      = params[StorageTextureObject::PARAM_DEPTH];
 	auto base_array = params[StorageTextureObject::PARAM_BASE_ARRAY];
@@ -326,7 +367,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	components.b = get_swizzle(GetDstSel(swizzle, 2));
 	components.a = get_swizzle(GetDstSel(swizzle, 3));
 
-	auto pixel_format = get_texture_format(dfmt, nfmt, fmt);
+	auto pixel_format = StorageTextureResolveVkFormat(dfmt, nfmt, fmt);
 
 	EXIT_NOT_IMPLEMENTED(pixel_format == VK_FORMAT_UNDEFINED);
 	EXIT_NOT_IMPLEMENTED(width == 0);
@@ -359,7 +400,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	// address only the R component. Preserve that exact data contract by using
 	// identity on the writable view while the paired sampled view retains the
 	// guest swizzle.
-	if (pixel_format == VK_FORMAT_R32_UINT && IsR32UintReadSwizzle(components))
+	if ((pixel_format == VK_FORMAT_R32_UINT && IsR32UintReadSwizzle(components)) || fmt == 5u || fmt == 14u || fmt == 62u)
 	{
 		components.r = VK_COMPONENT_SWIZZLE_R;
 		components.g = VK_COMPONENT_SWIZZLE_G;
@@ -463,11 +504,20 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 
 bool StorageTextureObject::Equal(const uint64_t* other) const
 {
+	if (other == nullptr)
+	{
+		return false;
+	}
+
+	const auto fmt = static_cast<uint32_t>((params[PARAM_FORMAT] >> 16u) & 0xffffu);
+	const auto other_fmt = static_cast<uint32_t>((other[PARAM_FORMAT] >> 16u) & 0xffffu);
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
 	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && params[PARAM_LEVELS] == other[PARAM_LEVELS] &&
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
-	        params[PARAM_SWIZZLE] == other[PARAM_SWIZZLE] && params[PARAM_RESOURCE_TYPE] == other[PARAM_RESOURCE_TYPE] &&
-	        params[PARAM_DEPTH] == other[PARAM_DEPTH] && params[PARAM_BASE_ARRAY] == other[PARAM_BASE_ARRAY]);
+	        NormalizeStorageTextureSwizzle(fmt, params[PARAM_SWIZZLE]) ==
+	            NormalizeStorageTextureSwizzle(other_fmt, other[PARAM_SWIZZLE]) &&
+	        params[PARAM_RESOURCE_TYPE] == other[PARAM_RESOURCE_TYPE] && params[PARAM_DEPTH] == other[PARAM_DEPTH] &&
+	        params[PARAM_BASE_ARRAY] == other[PARAM_BASE_ARRAY]);
 }
 
 GpuObject::create_func_t StorageTextureObject::GetCreateFunc() const

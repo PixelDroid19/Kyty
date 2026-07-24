@@ -1029,12 +1029,11 @@ void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_
 
 void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll)
 {
-	EXIT_NOT_IMPLEMENTED(func != 3);
-	EXIT_NOT_IMPLEMENTED(poll != 10);
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
+	(void)poll;
 
 	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitRegMem);
-	if (((*addr) & mask) == (ref & mask))
+	if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 	{
 		return;
 	}
@@ -1060,7 +1059,7 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	constexpr int kMaxIters = 500000; // ~5s at 10us sleep
 	for (int i = 0; i < kMaxIters; i++)
 	{
-		if (((*addr) & mask) == (ref & mask))
+		if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 		{
 			return;
 		}
@@ -1075,7 +1074,7 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	       static_cast<const void*>(addr), *addr, ref, mask);
 	for (;;)
 	{
-		if (((*addr) & mask) == (ref & mask))
+		if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 		{
 			return;
 		}
@@ -1086,14 +1085,13 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 
 void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll)
 {
-	EXIT_NOT_IMPLEMENTED(func != 3);
-	EXIT_NOT_IMPLEMENTED(poll != 10);
 	// Null address is rejected: post-Play null fences must be bound at encode
 	// (ReleaseMem data_sel=1 + WaitRegMem size=0) or patched by the guest.
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
+	(void)poll;
 
 	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitRegMem);
-	if (((*addr) & mask) == (ref & mask))
+	if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 	{
 		return;
 	}
@@ -1114,7 +1112,7 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 
 	// Only record waits that actually block — satisfied fences are noise and
 	// flood the agent event ring during load/gameplay.
-	if (((*addr) & mask) != (ref & mask))
+	if (!GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 	{
 		char wait_msg[128];
 		std::snprintf(wait_msg, sizeof(wait_msg), "addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64, static_cast<const void*>(addr),
@@ -1128,7 +1126,7 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	constexpr int kMaxIters = 500000; // ~5s at 10us sleep
 	for (int i = 0; i < kMaxIters; i++)
 	{
-		if (((*addr) & mask) == (ref & mask))
+		if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 		{
 			return;
 		}
@@ -1153,7 +1151,7 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	       static_cast<const void*>(addr), *addr, ref, mask);
 	for (;;)
 	{
-		if (((*addr) & mask) == (ref & mask))
+		if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 		{
 			return;
 		}
@@ -2644,8 +2642,13 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_ps_input)
 	EXIT_NOT_IMPLEMENTED(count == 0);
 	EXIT_NOT_IMPLEMENTED(count > 32);
 
+	static const bool dump_ps_input_writes = std::getenv("KYTY_DUMP_PS_INPUT_WRITES") != nullptr;
 	for (uint32_t i = 0; i < count; i++)
 	{
+		if (dump_ps_input_writes)
+		{
+			std::fprintf(stderr, "KYTY_PS_INPUT_WRITE direct slot=%u value=0x%08" PRIx32 " count=%u\n", i, buffer[i], count);
+		}
 		cp->GetCtx()->SetPsInputSettings(i, buffer[i]);
 	}
 
@@ -3525,7 +3528,7 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			// action:          0x00 (none)
 			// Gen5 emits the same GL0/GL1 invalidate bits with an additional
 			// 0x8000 cache-control qualifier on this full-target barrier.
-			if ((gcr_cntl & ~0x8000u) != 0x280u)
+			if (!GraphicsAgcFullTargetBarrierGcrSupported(gcr_cntl))
 			{
 				EXIT("unsupported full-target barrier gcr_cntl=0x%08" PRIx32 "\n", gcr_cntl);
 			}
@@ -4066,21 +4069,33 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0021048);
 
 	auto*    indirect_buffer = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
-	uint32_t indirect_num_dw = buffer[0];
+	uint32_t indirect_num_regs = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(indirect_num_dw == 0 || (indirect_num_dw & 1u) != 0);
+	EXIT_NOT_IMPLEMENTED(indirect_num_regs == 0);
 
-	for (uint32_t i = 0; i < GraphicsIndirectRegisterPairCount(indirect_num_dw); i++, indirect_buffer += 2)
+	static const bool dump_ps_input_writes = std::getenv("KYTY_DUMP_PS_INPUT_WRITES") != nullptr;
+	for (uint32_t i = 0; i < indirect_num_regs; i++, indirect_buffer += 2)
 	{
 		auto cmd_offset = indirect_buffer[0];
 		auto value      = indirect_buffer[1];
 
-		if (cmd_offset >= Pm4::CX_NUM)
+		if (GraphicsIsDefaultIndirectRegisterPair(cmd_offset, value))
+		{
+			continue;
+		}
+		if (!GraphicsNormalizeIndirectRegisterPair(Pm4::CX_NUM, cmd_offset, value))
 		{
 			EXIT("unsupported indirect CX register: pair=%u offset=0x%08" PRIx32 " value=0x%08" PRIx32
-			     " words=%u\n",
-			     i, cmd_offset, value, indirect_num_dw);
+			     " registers=%u\n",
+			     i, cmd_offset, value, indirect_num_regs);
+		}
+		if (dump_ps_input_writes && cmd_offset >= Pm4::SPI_PS_INPUT_CNTL_0 && cmd_offset <= Pm4::SPI_PS_INPUT_CNTL_31)
+		{
+			std::fprintf(stderr,
+			             "KYTY_PS_INPUT_WRITE indirect pair=%u slot=%u value=0x%08" PRIx32 " count=%u base=%p\n", i,
+			             cmd_offset - Pm4::SPI_PS_INPUT_CNTL_0, value, indirect_num_regs,
+			             static_cast<void*>(indirect_buffer - i * 2u));
 		}
 
 		auto pfunc = g_hw_ctx_indirect_func[cmd_offset & (Pm4::CX_NUM - 1)];
@@ -4113,17 +4128,21 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0021044);
 
 	auto*    indirect_buffer = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
-	uint32_t indirect_num_dw = buffer[0];
+	uint32_t indirect_num_regs = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(indirect_num_dw == 0 || (indirect_num_dw & 1u) != 0);
+	EXIT_NOT_IMPLEMENTED(indirect_num_regs == 0);
 
-	for (uint32_t i = 0; i < GraphicsIndirectRegisterPairCount(indirect_num_dw); i++, indirect_buffer += 2)
+	for (uint32_t i = 0; i < indirect_num_regs; i++, indirect_buffer += 2)
 	{
 		auto cmd_offset = indirect_buffer[0];
 		auto value      = indirect_buffer[1];
 
-		EXIT_NOT_IMPLEMENTED(cmd_offset >= Pm4::SH_NUM);
+		if (GraphicsIsDefaultIndirectRegisterPair(cmd_offset, value))
+		{
+			continue;
+		}
+		EXIT_NOT_IMPLEMENTED(!GraphicsNormalizeIndirectRegisterPair(Pm4::SH_NUM, cmd_offset, value));
 
 		auto pfunc = g_hw_sh_indirect_func[cmd_offset & (Pm4::SH_NUM - 1)];
 
@@ -4155,17 +4174,21 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc002104c);
 
 	auto*    indirect_buffer = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
-	uint32_t indirect_num_dw = buffer[0];
+	uint32_t indirect_num_regs = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(indirect_num_dw == 0 || (indirect_num_dw & 1u) != 0);
+	EXIT_NOT_IMPLEMENTED(indirect_num_regs == 0);
 
-	for (uint32_t i = 0; i < GraphicsIndirectRegisterPairCount(indirect_num_dw); i++, indirect_buffer += 2)
+	for (uint32_t i = 0; i < indirect_num_regs; i++, indirect_buffer += 2)
 	{
 		auto cmd_offset = indirect_buffer[0];
 		auto value      = indirect_buffer[1];
 
-		EXIT_NOT_IMPLEMENTED(cmd_offset >= Pm4::UC_NUM);
+		if (GraphicsIsDefaultIndirectRegisterPair(cmd_offset, value))
+		{
+			continue;
+		}
+		EXIT_NOT_IMPLEMENTED(!GraphicsNormalizeIndirectRegisterPair(Pm4::UC_NUM, cmd_offset, value));
 
 		auto pfunc = g_hw_uc_indirect_func[cmd_offset & (Pm4::UC_NUM - 1)];
 
@@ -4549,17 +4572,33 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_32)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC00C1028);
+	auto*    addr = reinterpret_cast<uint32_t*>(buffer[0] | (static_cast<uint64_t>(buffer[1]) << 32u));
+	uint32_t mask = buffer[2];
+	uint32_t func = 0;
+	uint32_t ref  = 0;
+	uint32_t poll = 0;
+	uint32_t used = 0;
 
-	auto* addr = reinterpret_cast<uint32_t*>(buffer[0] | (static_cast<uint64_t>(buffer[1]) << 32u));
-	auto  mask = buffer[2];
-	auto  func = buffer[3];
-	auto  ref  = buffer[4];
-	auto  poll = 10;
+	if (cmd_id == 0xc0051028u)
+	{
+		ref  = buffer[3];
+		func = buffer[4] & 0x7u;
+		poll = buffer[5];
+		used = 6;
+	} else if (cmd_id == 0xc00c1028u)
+	{
+		func = buffer[3];
+		ref  = buffer[4];
+		poll = 10;
+		used = 13;
+	} else
+	{
+		EXIT("unknown WaitRegMem32 packet: %08" PRIx32 "\n", cmd_id);
+	}
 
 	cp->WaitRegMem32(func, addr, ref, mask, poll);
 
-	return 13;
+	return used;
 }
 
 KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_64)
@@ -4571,7 +4610,7 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_64)
 	auto* addr = reinterpret_cast<uint64_t*>(buffer[0] | (static_cast<uint64_t>(buffer[1]) << 32u));
 	auto  mask = buffer[2] | (static_cast<uint64_t>(buffer[3]) << 32u);
 	auto  ref  = buffer[4] | (static_cast<uint64_t>(buffer[5]) << 32u);
-	auto  func = buffer[6];
+	auto  func = buffer[6] & 0x7u;
 	auto  poll = buffer[7];
 
 	// Post-Play: WaitMem often keeps address=0 while the preceding contiguous
@@ -5124,6 +5163,16 @@ static void graphics_init_jmp_tables_cx_indirect()
 		cp->GetCtx()->SetBlendColor(color);
 	};
 
+	for (uint32_t sample = 0; sample < 16u; sample++)
+	{
+		g_hw_ctx_indirect_func[Pm4::PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0 + sample] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+		{
+			auto control = cp->GetCtx()->GetAaSampleControl();
+			control.locations[cmd_offset - Pm4::PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0] = value;
+			cp->GetCtx()->SetAaSampleControl(control);
+		};
+	}
+
 	// Host-irrelevant GPU metadata / modes that Kyty accepts without state
 	// (no guest-visible Vulkan mapping yet). Accept to keep PM4 streams moving.
 	const auto ignore_cx = [](KYTY_HW_CTX_INDIRECT_ARGS) { (void)cp; (void)cmd_offset; (void)value; };
@@ -5176,6 +5225,10 @@ static void graphics_init_jmp_tables_cx_indirect()
 	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_INFO]           = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_SIZE]           = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_SLICE]          = ignore_cx;
+	// Legacy EPITCH fields. GFX10 Vulkan depth resources derive their geometry
+	// from the image descriptor rather than these GFX9-era context registers.
+	g_hw_ctx_indirect_func[Pm4::DB_Z_INFO2]               = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_STENCIL_INFO2]         = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::PA_SC_CENTROID_PRIORITY_0] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 	{
 		auto r               = cp->GetCtx()->GetAaSampleControl();

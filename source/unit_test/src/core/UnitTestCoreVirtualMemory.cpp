@@ -4,6 +4,15 @@
 #include <chrono>
 #include <cstdint>
 #include <array>
+#include <cstdio>
+#include <fstream>
+#include <string>
+
+#if !defined(_WIN32)
+#include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 UT_BEGIN(CoreVirtualMemory);
 
@@ -26,6 +35,13 @@ bool CaptureProtection(void* context, const CapturedProtectionRun& run) noexcept
 	capture->runs[capture->size++] = run;
 	return true;
 }
+
+#if !defined(_WIN32)
+void FatalFromSignal(const ExceptionHandler::ExceptionInfo* info)
+{
+	FatalFault(info);
+}
+#endif
 } // namespace
 
 TEST(CoreVirtualMemory, RemoveWriteCapturesAndRestoresMixedProtectionRuns)
@@ -174,13 +190,10 @@ TEST(CoreVirtualMemory, FixedSharedMappingRejectsOccupiedRange)
 
 TEST(CoreVirtualMemory, FixedSharedMappingReplacesOnlyOwnedReservationSubrange)
 {
-#if defined(_WIN32)
-	GTEST_SKIP() << "owned reservation replacement is not available on this host";
-#else
 	const uint64_t page_size = GetPageSize();
 	ASSERT_NE(page_size, 0u);
 
-	const uint64_t reservation = Alloc(0, page_size * 4u, Mode::NoAccess);
+	const uint64_t reservation = Reserve(0, page_size * 4u);
 	ASSERT_NE(reservation, 0u);
 	SharedBacking* backing = CreateSharedBacking(page_size * 2u);
 	ASSERT_NE(backing, nullptr);
@@ -194,11 +207,15 @@ TEST(CoreVirtualMemory, FixedSharedMappingReplacesOnlyOwnedReservationSubrange)
 	EXPECT_EQ(bytes[page_size * 2u - 1u], 0xc3);
 
 	EXPECT_FALSE(MapSharedFixedReplacingOwnedReservation(backing, reservation + page_size, 0, page_size, Mode::ReadWrite));
+#if defined(_WIN32)
+	ASSERT_TRUE(Free(reservation + page_size));
+	ASSERT_TRUE(Free(reservation));
+#else
 	ASSERT_TRUE(Free(reservation));
 	ASSERT_TRUE(Free(reservation + page_size));
 	ASSERT_TRUE(Free(reservation + page_size * 3u));
-	DestroySharedBacking(backing);
 #endif
+	DestroySharedBacking(backing);
 }
 
 TEST(CoreVirtualMemory, DemandMapUsesHostPageSize)
@@ -237,6 +254,42 @@ TEST(CoreVirtualMemory, SignalDiagnosticsConfigurationUsesPresenceSemantics)
 	const auto partial = MakeSignalDiagnosticsConfig("1", nullptr);
 	EXPECT_TRUE(partial.skip_ud2);
 	EXPECT_FALSE(partial.fault_log);
+}
+
+TEST(CoreVirtualMemory, PosixFatalReportCapturesSignalContext)
+{
+#if defined(_WIN32)
+	GTEST_SKIP() << "POSIX signal-context coverage";
+#else
+	char report_path[128] = {};
+	std::snprintf(report_path, sizeof(report_path), "/tmp/kyty-fault-context-%ld.json", static_cast<long>(::getpid()));
+	(void)std::remove(report_path);
+
+	const pid_t child = ::fork();
+	ASSERT_GE(child, 0);
+	if (child == 0)
+	{
+		ConfigureFatalFaultReport(report_path);
+		if (!ExceptionHandler::InstallVectored(FatalFromSignal))
+		{
+			::_Exit(126);
+		}
+		(void)::raise(SIGSEGV);
+		::_Exit(127);
+	}
+
+	int status = 0;
+	ASSERT_EQ(::waitpid(child, &status, 0), child);
+	ASSERT_TRUE(WIFEXITED(status));
+	ASSERT_EQ(WEXITSTATUS(status), 139);
+
+	std::ifstream report(report_path);
+	ASSERT_TRUE(report.good());
+	const std::string json((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+	EXPECT_EQ(json.find("\"rsp\":\"0x0000000000000000\""), std::string::npos);
+	EXPECT_EQ(json.find("\"rip\":\"0x0000000000000000\""), std::string::npos);
+	(void)std::remove(report_path);
+#endif
 }
 
 // Released direct-memory ranges must reclaim host pages via punch-hole so a

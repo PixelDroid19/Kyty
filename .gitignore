@@ -35,7 +35,7 @@ _SaveData/
 _gpu_memory.db
 _scratch_playable/
 _matrix_scratch/
-
 __pycache__/
 *.pyc
 _scratch_cache_runtime/
+*_scratch_*/

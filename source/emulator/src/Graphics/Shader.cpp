@@ -71,10 +71,12 @@ bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource)
 {
 	// Raw BUFFER_*_DWORD instructions address the descriptor in DWORDs and do
-	// not consume its typed-format metadata. A zero stride denotes a
-	// byte-addressed range whose record field is its byte size.
-	return resource.Stride() != 0 ? (resource.Stride() & 0x3u) == 0
-	                              : resource.NumRecords() != 0 && (resource.NumRecords() & 0x3u) == 0;
+	// not consume its typed-format metadata. The descriptor stride still
+	// determines the bounded byte range, but individual records do not need to
+	// be DWORD-sized when the resulting range is DWORD-aligned.
+	const uint64_t size = resource.Stride() == 0 ? static_cast<uint64_t>(resource.NumRecords())
+	                                             : static_cast<uint64_t>(resource.Stride()) * resource.NumRecords();
+	return size != 0 && (size & 0x3u) == 0;
 }
 
 bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access)
@@ -162,10 +164,30 @@ uint32_t ShaderGen5VertexInputComponentCount(uint8_t format)
 	switch (format)
 	{
 		case 22: return 1; // 32_FLOAT
+		case 56: return 4; // 8_8_8_8_UNORM
 		case 64: return 2; // 32_32_FLOAT
 		case 74: return 3; // 32_32_32_FLOAT
 		case 77: return 4; // 32_32_32_32_FLOAT
 		default: return 0;
+	}
+}
+
+bool ShaderGen5VertexAttribFormat(uint16_t attrib_format, uint8_t* unified_format)
+{
+	if (unified_format == nullptr)
+	{
+		return false;
+	}
+
+	// AGC's packed vertex-attribute table uses a separate 9-bit format enum.
+	// Convert the formats to the Gfx10 unified IDs consumed by SQ buffer
+	// descriptors and the Vulkan vertex-input path.
+	switch (attrib_format)
+	{
+		case 0x0E3: *unified_format = 56; return true;  // 8_8_8_8_UNORM
+		case 0x101: *unified_format = 64; return true;  // 32_32_FLOAT
+		case 0x12A: *unified_format = 74; return true;  // 32_32_32_FLOAT
+		default: return false;
 	}
 }
 
@@ -203,11 +225,16 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 	// compressed block after dimensions are converted to block elements.
 	switch (format)
 	{
+		case 1: return 1; // UFMT_8_UNORM
+		case 5: return 1; // UFMT_8_UINT
 		case 20: return 4; // UFMT_32_UINT
 		case 13: return 2; // UFMT_16_FLOAT
 		case 14: return 2; // UFMT_8_8_UNORM
-		case 56: return 4; // UFMT_8_8_8_8_UNORM
-		case 71: return 8; // UFMT_16_16_16_16_FLOAT
+			case 56: return 4; // UFMT_8_8_8_8_UNORM
+			case 62: return 8; // UFMT_32_32_UINT
+			case 71: return 8; // UFMT_16_16_16_16_FLOAT
+		case 75: return 16; // UFMT_32_32_32_32_UINT
+		case 173: return 16; // UFMT_BC3_UNORM, 4x4 texels per block
 		case 133: return 8; // VK_FORMAT_BC1_RGBA_UNORM_BLOCK, 4x4 texels per block
 		default: return 0;
 	}
@@ -1036,6 +1063,26 @@ bool ShaderPixelPositionEnabled(uint32_t enable_mask, uint32_t address_mask)
 	return (enable_mask & kPositionXy) == kPositionXy && (address_mask & kPositionXy) == kPositionXy;
 }
 
+uint32_t ShaderResolvePixelInterpolatorSetting(uint32_t stored_setting, uint32_t written_mask, uint32_t index)
+{
+	EXIT_IF(index >= 32u);
+	return ((written_mask & (1u << index)) != 0 ? stored_setting : index);
+}
+
+uint32_t ShaderPixelCanonicalInterpolator(const ShaderPixelInputInfo& info, uint32_t index)
+{
+	EXIT_IF(index >= info.input_num);
+	const uint32_t setting = info.interpolator_settings[index];
+	for (uint32_t i = 0; i < index; ++i)
+	{
+		if (info.interpolator_settings[i] == setting)
+		{
+			return i;
+		}
+	}
+	return index;
+}
+
 static void cs_check(const HW::CsStageRegisters& cs, const HW::ShaderRegisters& /*sh*/)
 {
 	// EXIT_NOT_IMPLEMENTED(cs.num_thread_x != 0x00000040);
@@ -1418,8 +1465,6 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 		uint32_t offset      = (attrib[in.semantic] >> 14u) & 0xfffu;
 		uint32_t fetch_index = (attrib[in.semantic] >> 26u) & 0x1u;
 
-		EXIT_NOT_IMPLEMENTED(format != 0);
-		EXIT_NOT_IMPLEMENTED(offset != 0);
 		EXIT_NOT_IMPLEMENTED(fetch_index != 0);
 
 		EXIT_NOT_IMPLEMENTED(index >= ShaderVertexInputInfo::RES_MAX);
@@ -1431,11 +1476,40 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 		auto& r           = info->resources[info->resources_num];
 		auto& rd          = info->resources_dst[info->resources_num];
 		rd.register_start = static_cast<int>(reg);
-		rd.registers_num  = static_cast<int>(size);
 		r.fields[0]       = sharp[0];
 		r.fields[1]       = sharp[1];
 		r.fields[2]       = sharp[2];
 		r.fields[3]       = sharp[3];
+		if (format != 0)
+		{
+			uint8_t unified_format = 0;
+			EXIT_NOT_IMPLEMENTED(!ShaderGen5VertexAttribFormat(static_cast<uint16_t>(format), &unified_format));
+			const uint32_t component_count = ShaderGen5VertexInputComponentCount(unified_format);
+			EXIT_NOT_IMPLEMENTED(component_count == 0 || component_count > size);
+			uint32_t swizzle = DstSel(4, 0, 0, 1);
+			switch (component_count)
+			{
+				case 2: swizzle = DstSel(4, 5, 0, 1); break;
+				case 3: swizzle = DstSel(4, 5, 6, 1); break;
+				case 4: swizzle = DstSel(4, 5, 6, 7); break;
+				default: break;
+			}
+			r.fields[3] = (r.fields[3] & ~((0x7fu << 12u) | 0xfffu)) |
+			              (static_cast<uint32_t>(unified_format) << 12u) | swizzle;
+			// AGC emits a four-VGPR fetch for RGB32F so the descriptor's default
+			// W component is materialized. Other captured formats write their
+			// physical component count.
+			rd.registers_num = static_cast<int>(unified_format == 74 ? size : component_count);
+		} else
+		{
+			rd.registers_num = static_cast<int>(size);
+		}
+		if (offset != 0)
+		{
+			const uint64_t base = r.Base48();
+			EXIT_NOT_IMPLEMENTED(base > UINT64_MAX - offset);
+			r.UpdateAddress48(base + offset);
+		}
 
 		info->resources_num++;
 	}
@@ -2734,7 +2808,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 
 	for (uint32_t i = 0; i < ps_info->input_num; i++)
 	{
-		ps_info->interpolator_settings[i] = sh->ps_interpolator_settings[i];
+		ps_info->interpolator_settings[i] =
+		    ShaderResolvePixelInterpolatorSetting(sh->ps_interpolator_settings[i], sh->ps_interpolator_written_mask, i);
 	}
 
 	ps_info->bind.descriptor_set_slot  = (vs_info->bind.storage_buffers.buffers_num > 0 ? 1 : 0);

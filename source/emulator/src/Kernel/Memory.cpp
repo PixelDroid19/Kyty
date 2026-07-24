@@ -18,12 +18,12 @@
 #include "Emulator/Kernel/Pthread.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <cstdlib>
 #include <chrono>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -36,6 +36,81 @@ LIB_NAME("libkernel", "libkernel");
 static bool is_representable_range(uint64_t addr, uint64_t size)
 {
 	return size != 0 && size <= UINT64_MAX - addr;
+}
+
+struct MemoryProtectionBlock
+{
+	uint64_t            address;
+	uint64_t            size;
+	int                 prot;
+	VirtualMemory::Mode mode;
+};
+
+static bool apply_protection_blocks(std::vector<MemoryProtectionBlock>* blocks, uint64_t address, uint64_t size, int prot,
+                                    VirtualMemory::Mode mode)
+{
+	if (blocks == nullptr || !is_representable_range(address, size))
+	{
+		return false;
+	}
+
+	const uint64_t end = address + size;
+	std::vector<MemoryProtectionBlock> covered;
+	for (const auto& block: *blocks)
+	{
+		const uint64_t block_end = block.address + block.size;
+		if (block.address < end && address < block_end)
+		{
+			covered.push_back(
+			    {std::max(address, block.address), std::min(end, block_end) - std::max(address, block.address), prot, mode});
+		}
+	}
+	std::sort(covered.begin(), covered.end(),
+	          [](const MemoryProtectionBlock& left, const MemoryProtectionBlock& right) { return left.address < right.address; });
+
+	uint64_t cursor = address;
+	for (const auto& block: covered)
+	{
+		if (block.address > cursor)
+		{
+			return false;
+		}
+		cursor = std::max(cursor, block.address + block.size);
+		if (cursor >= end)
+		{
+			break;
+		}
+	}
+	if (cursor < end)
+	{
+		return false;
+	}
+
+	std::vector<MemoryProtectionBlock> updated;
+	updated.reserve(blocks->size() + covered.size() * 2);
+	for (const auto& block: *blocks)
+	{
+		const uint64_t block_end = block.address + block.size;
+		if (block.address >= end || block_end <= address)
+		{
+			updated.push_back(block);
+			continue;
+		}
+
+		const uint64_t protected_start = std::max(address, block.address);
+		const uint64_t protected_end   = std::min(end, block_end);
+		if (block.address < protected_start)
+		{
+			updated.push_back({block.address, protected_start - block.address, block.prot, block.mode});
+		}
+		updated.push_back({protected_start, protected_end - protected_start, prot, mode});
+		if (protected_end < block_end)
+		{
+			updated.push_back({protected_end, block_end - protected_end, block.prot, block.mode});
+		}
+	}
+	*blocks = std::move(updated);
+	return true;
 }
 
 KernelGpuMappingPromotionStatus KernelPromoteGpuMappingRange(uint64_t mapping_addr, uint64_t mapping_size, uint64_t protected_addr,
@@ -82,18 +157,26 @@ public:
 		// cleanup is required, not the mapping's latest protection.
 		Graphics::GpuMemoryMode gpu_cleanup_mode;
 		bool                    unmap_pending = false;
+		bool                    physical_released = false;
 	};
 
 	PhysicalMemory()
 	{
-		EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+		EXIT_IF(!Core::Thread::IsMainThread());
 		// The backing is sized for the largest supported generation before the
 		// loader identifies the guest. Allocation policy still exposes only the
 		// guest generation's capacity.
 		m_backing = VirtualMemory::CreateSharedBacking(BackingSize());
-		EXIT_NOT_IMPLEMENTED(m_backing == nullptr);
+		EXIT_IF(m_backing == nullptr);
 	}
-	virtual ~PhysicalMemory() { VirtualMemory::DestroySharedBacking(m_backing); }
+	virtual ~PhysicalMemory()
+	{
+		for (const auto& mapping: m_mapped)
+		{
+			(void)VirtualMemory::Free(mapping.map_vaddr);
+		}
+		VirtualMemory::DestroySharedBacking(m_backing);
+	}
 
 	KYTY_CLASS_NO_COPY(PhysicalMemory);
 
@@ -108,10 +191,12 @@ public:
 	bool Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out, int memory_type);
 	bool Release(uint64_t start, size_t len);
 	bool FindMappingsForPhysicalRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings);
+	bool CanReplaceReleasedMapping(uint64_t vaddr, uint64_t size, uint64_t new_phys_addr, uint64_t new_phys_size);
 	uint64_t Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode,
 	             uint64_t alignment, bool fixed, bool replace_owned_reservation, bool* physical_range_valid);
 	bool ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
 	bool CompleteUnmap(uint64_t vaddr, uint64_t size);
+	bool ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode);
 	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode,
 	                                               uint64_t* mapping_addr, uint64_t* mapping_size);
 	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode,
@@ -130,6 +215,7 @@ private:
 	// SharedBacking maps keep re-used physical ranges byte-coherent across aliases.
 	Vector<AllocatedBlock>        m_allocated;
 	Vector<MappedBlock>           m_mapped;
+	std::vector<MemoryProtectionBlock> m_protections;
 	Core::Mutex                   m_mutex;
 	VirtualMemory::SharedBacking* m_backing = nullptr;
 };
@@ -147,8 +233,14 @@ public:
 		bool                    unmap_pending = false;
 	};
 
-	FlexibleMemory() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
-	virtual ~FlexibleMemory() { KYTY_NOT_IMPLEMENTED; }
+	FlexibleMemory() { EXIT_IF(!Core::Thread::IsMainThread()); }
+	virtual ~FlexibleMemory()
+	{
+		for (const auto& mapping: m_allocated)
+		{
+			(void)VirtualMemory::Free(mapping.map_vaddr);
+		}
+	}
 
 	KYTY_CLASS_NO_COPY(FlexibleMemory);
 
@@ -158,6 +250,7 @@ public:
 	bool Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode);
 	bool ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
 	bool CompleteUnmap(uint64_t vaddr, uint64_t size);
+	bool ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode);
 	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode,
 	                                               uint64_t* mapping_addr, uint64_t* mapping_size);
 	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode);
@@ -167,6 +260,7 @@ public:
 
 private:
 	Vector<AllocatedBlock> m_allocated;
+	std::vector<MemoryProtectionBlock> m_protections;
 	uint64_t               m_allocated_total = 0;
 	Core::Mutex            m_mutex;
 };
@@ -309,8 +403,8 @@ public:
 			}
 			m_blocks.RemoveAt(index);
 
-			const bool prefix_ok = prefix_size == 0 || VirtualMemory::AllocFixed(block.addr, prefix_size, VirtualMemory::Mode::NoAccess);
-			const bool suffix_ok = suffix_size == 0 || VirtualMemory::AllocFixed(suffix_addr, suffix_size, VirtualMemory::Mode::NoAccess);
+			const bool prefix_ok = prefix_size == 0 || VirtualMemory::ReserveFixed(block.addr, prefix_size);
+			const bool suffix_ok = suffix_size == 0 || VirtualMemory::ReserveFixed(suffix_addr, suffix_size);
 			if (!prefix_ok || !suffix_ok)
 			{
 				if (prefix_ok && prefix_size != 0)
@@ -321,7 +415,7 @@ public:
 				{
 					EXIT_IF(!VirtualMemory::Free(suffix_addr));
 				}
-				EXIT_IF(!VirtualMemory::AllocFixed(block.addr, block.size, VirtualMemory::Mode::NoAccess));
+				EXIT_IF(!VirtualMemory::ReserveFixed(block.addr, block.size));
 				m_blocks.Add(block);
 				return false;
 			}
@@ -377,7 +471,17 @@ KYTY_SUBSYSTEM_INIT(Memory)
 
 KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Memory) {}
 
-KYTY_SUBSYSTEM_DESTROY(Memory) {}
+KYTY_SUBSYSTEM_DESTROY(Memory)
+{
+	delete g_flexible_memory;
+	g_flexible_memory = nullptr;
+	delete g_physical_memory;
+	g_physical_memory = nullptr;
+	delete g_reserved_memory;
+	g_reserved_memory = nullptr;
+	g_alloc_callback = nullptr;
+	g_free_callback  = nullptr;
+}
 
 static bool get_aligned_pos(uint64_t pos, size_t align, uint64_t* aligned_pos)
 {
@@ -498,6 +602,14 @@ bool PhysicalMemory::Release(uint64_t start, size_t len)
 		{
 			m_allocated.RemoveAt(index);
 
+			for (auto& mapped: m_mapped)
+			{
+				if (mapped.phys_addr < start + len && mapped.phys_addr + mapped.map_size > start)
+				{
+					mapped.physical_released = true;
+				}
+			}
+
 			// Reclaim host RAM only when no live map still covers this physical
 			// range. Gen5 may release the reservation while a mapping remains;
 			// Unmap performs the discard in that case.
@@ -547,6 +659,35 @@ bool PhysicalMemory::FindMappingsForPhysicalRelease(uint64_t start, size_t len, 
 		}
 	}
 	return true;
+}
+
+bool PhysicalMemory::CanReplaceReleasedMapping(uint64_t vaddr, uint64_t size, uint64_t new_phys_addr,
+                                               uint64_t new_phys_size)
+{
+	if (!is_representable_range(vaddr, size) || !is_representable_range(new_phys_addr, new_phys_size))
+	{
+		return false;
+	}
+
+	Core::LockGuard lock(m_mutex);
+	const bool new_range_allocated = std::any_of(
+	    m_allocated.begin(), m_allocated.end(),
+	    [new_phys_addr, new_phys_size](const AllocatedBlock& block)
+	    {
+		    return new_phys_addr >= block.start_addr && new_phys_size <= block.size &&
+		           new_phys_addr - block.start_addr <= block.size - new_phys_size;
+	    });
+	if (!new_range_allocated)
+	{
+		return false;
+	}
+
+	return std::any_of(m_mapped.begin(), m_mapped.end(),
+	                   [vaddr, size](const MappedBlock& block)
+	                   {
+		                   return block.map_vaddr == vaddr && block.map_size == size && block.physical_released &&
+		                          !block.unmap_pending;
+	                   });
 }
 
 uint64_t PhysicalMemory::TotalAllocatedBytes()
@@ -693,6 +834,7 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 	b.memory_type = allocation->memory_type;
 	b.gpu_cleanup_mode = gpu_mode;
 	m_mapped.Add(b);
+	m_protections.push_back({map_vaddr, map_size, prot, mode});
 
 	return map_vaddr;
 }
@@ -767,6 +909,11 @@ bool PhysicalMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 				return false;
 			}
 			m_mapped.RemoveAt(index);
+			m_protections.erase(
+			    std::remove_if(m_protections.begin(), m_protections.end(),
+			                   [vaddr, size](const MemoryProtectionBlock& block)
+			                   { return block.address >= vaddr && block.address - vaddr < size; }),
+			    m_protections.end());
 
 			// If the physical reservation was already released (Gen5 unmap after
 			// Release) and no alias maps remain, drop the host pages.
@@ -799,6 +946,12 @@ bool PhysicalMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 	}
 
 	return false;
+}
+
+bool PhysicalMemory::ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode)
+{
+	Core::LockGuard lock(m_mutex);
+	return apply_protection_blocks(&m_protections, vaddr, size, prot, mode);
 }
 
 bool PhysicalMemory::Find(uint64_t phys_addr, bool next, AllocatedBlock* out)
@@ -838,33 +991,38 @@ bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 	Core::LockGuard lock(m_mutex);
 
 	return std::any_of(m_mapped.begin(), m_mapped.end(),
-	                   [vaddr, base_addr, len, prot, mode, gpu_mode, phys_addr, memory_type](auto& b)
+	                   [this, vaddr, base_addr, len, prot, mode, gpu_mode, phys_addr, memory_type](auto& b)
 	                   {
 		                   if (vaddr >= b.map_vaddr && vaddr - b.map_vaddr < b.map_size)
 		                   {
+			                   const auto protection = std::find_if(
+			                       m_protections.begin(), m_protections.end(),
+			                       [vaddr](const MemoryProtectionBlock& block)
+			                       { return vaddr >= block.address && vaddr - block.address < block.size; });
+			                   const bool has_protection = protection != m_protections.end();
 			                   if (base_addr != nullptr)
 			                   {
-				                   *base_addr = b.map_vaddr;
+				                   *base_addr = has_protection ? protection->address : b.map_vaddr;
 			                   }
 			                   if (len != nullptr)
 			                   {
-				                   *len = b.map_size;
+				                   *len = has_protection ? protection->size : b.map_size;
 			                   }
 			                   if (prot != nullptr)
 			                   {
-				                   *prot = b.prot;
+				                   *prot = has_protection ? protection->prot : b.prot;
 			                   }
 			                   if (mode != nullptr)
 			                   {
-				                   *mode = b.mode;
+				                   *mode = has_protection ? protection->mode : b.mode;
 			                   }
 				                   if (gpu_mode != nullptr)
 				                   {
 					                   *gpu_mode = b.gpu_cleanup_mode;
 				                   }
-				                   if (phys_addr != nullptr)
-				                   {
-					                   *phys_addr = b.phys_addr;
+			                   if (phys_addr != nullptr)
+			                   {
+				                   *phys_addr = b.phys_addr + ((has_protection ? protection->address : b.map_vaddr) - b.map_vaddr);
 				                   }
 				                   if (memory_type != nullptr)
 				                   {
@@ -889,6 +1047,7 @@ bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mo
 	b.gpu_cleanup_mode = gpu_mode;
 
 	m_allocated.Add(b);
+	m_protections.push_back({vaddr, len, prot, mode});
 	m_allocated_total += len;
 
 	return true;
@@ -963,6 +1122,11 @@ bool FlexibleMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 			}
 
 			m_allocated.RemoveAt(index);
+			m_protections.erase(
+			    std::remove_if(m_protections.begin(), m_protections.end(),
+			                   [vaddr, size](const MemoryProtectionBlock& block)
+			                   { return block.address >= vaddr && block.address - vaddr < size; }),
+			    m_protections.end());
 			m_allocated_total -= size;
 			return true;
 		}
@@ -972,31 +1136,42 @@ bool FlexibleMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 	return false;
 }
 
+bool FlexibleMemory::ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode)
+{
+	Core::LockGuard lock(m_mutex);
+	return apply_protection_blocks(&m_protections, vaddr, size, prot, mode);
+}
+
 bool FlexibleMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode,
                           Graphics::GpuMemoryMode* gpu_mode)
 {
 	Core::LockGuard lock(m_mutex);
 
 	return std::any_of(m_allocated.begin(), m_allocated.end(),
-	                   [vaddr, base_addr, len, prot, mode, gpu_mode](auto& b)
+	                   [this, vaddr, base_addr, len, prot, mode, gpu_mode](auto& b)
 	                   {
 		                   if (vaddr >= b.map_vaddr && vaddr < b.map_vaddr + b.map_size)
 		                   {
+			                   const auto protection = std::find_if(
+			                       m_protections.begin(), m_protections.end(),
+			                       [vaddr](const MemoryProtectionBlock& block)
+			                       { return vaddr >= block.address && vaddr - block.address < block.size; });
+			                   const bool has_protection = protection != m_protections.end();
 			                   if (base_addr != nullptr)
 			                   {
-				                   *base_addr = b.map_vaddr;
+				                   *base_addr = has_protection ? protection->address : b.map_vaddr;
 			                   }
 			                   if (len != nullptr)
 			                   {
-				                   *len = b.map_size;
+				                   *len = has_protection ? protection->size : b.map_size;
 			                   }
 			                   if (prot != nullptr)
 			                   {
-				                   *prot = b.prot;
+				                   *prot = has_protection ? protection->prot : b.prot;
 			                   }
 			                   if (mode != nullptr)
 			                   {
-				                   *mode = b.mode;
+				                   *mode = has_protection ? protection->mode : b.mode;
 			                   }
 			                   if (gpu_mode != nullptr)
 			                   {
@@ -1023,45 +1198,61 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	EXIT_IF(g_flexible_memory == nullptr);
 	const bool trace_flex = std::getenv("KYTY_DEBUG_FLEX_ALLOC") != nullptr;
 
-	EXIT_NOT_IMPLEMENTED(addr_in_out == nullptr);
-	// PS5 titles pass flags such as 0x8000 (fixed-address request); accept the
-	// known bits instead of bailing. Unknown bits still trip the assert.
-	EXIT_NOT_IMPLEMENTED((flags & ~static_cast<int>(0x8000)) != 0);
+	constexpr int kFixed          = 0x10;
+	constexpr int kNoOverwrite    = 0x80;
+	constexpr int kInternal       = 0x8000;
+	constexpr int kSupportedFlags = kFixed | kNoOverwrite | kInternal;
+	if (addr_in_out == nullptr || len == 0 || (flags & ~kSupportedFlags) != 0)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	if (len > g_flexible_memory->Available())
+	{
+		return KERNEL_ERROR_ENOMEM;
+	}
 
 	VirtualMemory::Mode     mode     = VirtualMemory::Mode::NoAccess;
 	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
 
-	switch (prot)
+	if (!KernelDecodeMprotectProt(prot, &mode, &gpu_mode))
 	{
-		case 0: mode = VirtualMemory::Mode::NoAccess; break;
-		case 1: mode = VirtualMemory::Mode::Read; break;
-		case 2:
-		case 3: mode = VirtualMemory::Mode::ReadWrite; break;
-		case 4: mode = VirtualMemory::Mode::Execute; break;
-		case 5: mode = VirtualMemory::Mode::ExecuteRead; break;
-		case 6:
-		case 7: mode = VirtualMemory::Mode::ExecuteReadWrite; break;
-		case 0x32:
-		case 0x33:
-		case 0xf2:
-		case 0xf3:
-			// 0xf2/0xf3: Gen5 direct-map style GPU+CPU RW (heap / large maps).
-			// 0xf2 observed after Fiber/thread bring-up on Astro (decimal 242).
-			mode     = VirtualMemory::Mode::ReadWrite;
-			gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
-			break;
-		default: EXIT("unknown prot: %d\n", prot);
+		return KERNEL_ERROR_EINVAL;
 	}
 
 	auto in_addr = reinterpret_cast<uint64_t>(*addr_in_out);
+	const bool fixed     = (flags & kFixed) != 0;
+	const auto page_size = VirtualMemory::GetPageSize();
+	if ((in_addr != 0 && !is_representable_range(in_addr, len)) ||
+	    (fixed && (in_addr == 0 || page_size == 0 || (in_addr & (page_size - 1)) != 0)))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 	const auto start_us = trace_flex ? std::chrono::duration_cast<std::chrono::microseconds>(
 	                                      std::chrono::steady_clock::now().time_since_epoch()).count() : 0;
 	if (trace_flex)
 	{
 		printf("[FlexMap] request in_addr=0x%016" PRIx64 " len=%" PRIu64 " prot=0x%x flags=0x%x name=%s\n", in_addr,
-		       static_cast<uint64_t>(len), prot, flags, name);
+		       static_cast<uint64_t>(len), prot, flags, name != nullptr ? name : "");
 	}
-	auto out_addr = VirtualMemory::Alloc(in_addr, len, mode);
+	uint64_t out_addr = 0;
+	bool     consumed_reservation = false;
+	if (fixed && g_reserved_memory != nullptr && g_reserved_memory->Contains(in_addr, len))
+	{
+		consumed_reservation = g_reserved_memory->ReplaceAndConsume(
+		    in_addr, len,
+		    [&]
+		    {
+			    const bool mapped = VirtualMemory::AllocFixedReplacingOwnedReservation(in_addr, len, mode);
+			    out_addr          = mapped ? in_addr : 0;
+			    return mapped;
+		    });
+	} else if (fixed)
+	{
+		out_addr = VirtualMemory::AllocFixed(in_addr, len, mode) ? in_addr : 0;
+	} else
+	{
+		out_addr = VirtualMemory::Alloc(in_addr, len, mode);
+	}
 	*addr_in_out  = reinterpret_cast<void*>(out_addr);
 	if (trace_flex)
 	{
@@ -1070,10 +1261,20 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 		printf("[FlexMap] after_alloc out_addr=0x%016" PRIx64 " elapsed_us=%" PRIu64 "\n", out_addr, now_us - start_us);
 	}
 
+	if (out_addr == 0)
+	{
+		return fixed ? KERNEL_ERROR_EBUSY : KERNEL_ERROR_ENOMEM;
+	}
+
 	if (!g_flexible_memory->Map(out_addr, len, prot, mode, gpu_mode))
 	{
 		printf(FG_RED "\t [Fail]\n" FG_DEFAULT);
 		VirtualMemory::Free(out_addr);
+		if (consumed_reservation)
+		{
+			const bool restored = VirtualMemory::ReserveFixed(in_addr, len) && g_reserved_memory->Add(in_addr, len);
+			EXIT_IF(!restored);
+		}
 		return KERNEL_ERROR_ENOMEM;
 	}
 	if (trace_flex)
@@ -1087,13 +1288,8 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	printf("\t out_addr = 0x%016" PRIx64 "\n", out_addr);
 	printf("\t size     = %" PRIu64 "\n", len);
 	printf("\t mode     = %s\n", Core::EnumName(mode).C_Str());
-	printf("\t name     = %s\n", name);
+	printf("\t name     = %s\n", name != nullptr ? name : "");
 	printf("\t gpu_mode = %s\n", Core::EnumName(gpu_mode).C_Str());
-
-	if (out_addr == 0)
-	{
-		return KERNEL_ERROR_ENOMEM;
-	}
 
 	if (gpu_mode != Graphics::GpuMemoryMode::NoAccess)
 	{
@@ -1168,17 +1364,17 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr_in_out, uint64_t len, in
 	uint64_t reserved_addr = 0;
 	if (fixed)
 	{
-		reserved_addr = VirtualMemory::AllocFixed(requested_addr, len, VirtualMemory::Mode::NoAccess) ? requested_addr : 0;
+		reserved_addr = VirtualMemory::ReserveFixed(requested_addr, len) ? requested_addr : 0;
 	} else
 	{
-		reserved_addr = VirtualMemory::AllocAligned(requested_addr, len, VirtualMemory::Mode::NoAccess, alignment);
+		reserved_addr = VirtualMemory::ReserveAligned(requested_addr, len, alignment);
 		if (reserved_addr == 0 && requested_addr == 0)
 		{
 			// ReserveVirtualRange can request an address-space hole larger than
 			// Kyty's normal low allocation arena. Keep using the portable host
 			// abstraction, but give it a valid high guest-VA hint.
 			constexpr uint64_t kLargeReservationHint = UINT64_C(1) << 40;
-			reserved_addr = VirtualMemory::AllocAligned(kLargeReservationHint, len, VirtualMemory::Mode::NoAccess, alignment);
+			reserved_addr = VirtualMemory::ReserveAligned(kLargeReservationHint, len, alignment);
 		}
 	}
 	if (reserved_addr == 0)
@@ -1260,7 +1456,7 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 	EXIT_IF(g_physical_memory == nullptr);
 	EXIT_IF(g_flexible_memory == nullptr);
 
-	if (vaddr < 0 || len == 0)
+	if (vaddr == 0 || len == 0 || vaddr > UINT64_MAX - len)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
@@ -1291,7 +1487,10 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 		result = g_reserved_memory->Unmap(vaddr, len);
 	}
 
-	EXIT_NOT_IMPLEMENTED(!result);
+	if (!result)
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
 
 	if (g_free_callback != nullptr)
 	{
@@ -1476,8 +1675,8 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 
 	EXIT_IF(g_physical_memory == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(addr == nullptr);
-	if (len == 0 || direct_memory_start < 0)
+	if (addr == nullptr || len == 0 || direct_memory_start < 0 ||
+	    static_cast<uint64_t>(direct_memory_start) > UINT64_MAX - len)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
@@ -1500,34 +1699,39 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 
 	if (!KernelDecodeMprotectProt(prot, &mode, &gpu_mode))
 	{
-		switch (prot)
-		{
-			case 0x01: mode = VirtualMemory::Mode::Read; break;
-			case 0x02:
-			case 0x03: mode = VirtualMemory::Mode::ReadWrite; break;
-			case 0x04: mode = VirtualMemory::Mode::Execute; break;
-			case 0x05: mode = VirtualMemory::Mode::ExecuteRead; break;
-			case 0x06:
-			case 0x07: mode = VirtualMemory::Mode::ExecuteReadWrite; break;
-			case 0x32:
-			case 0x33:
-			case 0xf2:
-			case 0xf3:
-				// 0xf2/0xf3: Gen5 direct-map style GPU+CPU RW (heap / large maps).
-				// 0xf2 observed after Fiber/thread bring-up on Astro (decimal 242).
-				mode     = VirtualMemory::Mode::ReadWrite;
-				gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
-				break;
-			default: EXIT("unknown prot: %d\n", prot);
-		}
+		return KERNEL_ERROR_EINVAL;
 	}
 
 	auto in_addr = reinterpret_cast<uint64_t>(*addr);
 
 	if (fixed)
 	{
-		EXIT_NOT_IMPLEMENTED(in_addr == 0);
-		EXIT_NOT_IMPLEMENTED((in_addr & (alignment - 1)) != 0);
+		if (in_addr == 0 || (in_addr & (alignment - 1)) != 0 || in_addr > UINT64_MAX - len)
+		{
+			return KERNEL_ERROR_EINVAL;
+		}
+	}
+
+	if (fixed && g_physical_memory->CanReplaceReleasedMapping(in_addr, len, static_cast<uint64_t>(direct_memory_start), len))
+	{
+		const int unmap_result = KernelMunmap(in_addr, len);
+		if (unmap_result != OK)
+		{
+			return unmap_result;
+		}
+
+		// The host range may still belong to a larger guest reservation (notably
+		// Windows' 64 KiB reservation granularity). Restore logical ownership so
+		// the normal fixed-map transaction can replace only this released view.
+		if (g_reserved_memory == nullptr || !VirtualMemory::ReserveFixed(in_addr, len))
+		{
+			return KERNEL_ERROR_EBUSY;
+		}
+		if (!g_reserved_memory->Add(in_addr, len))
+		{
+			EXIT_IF(!VirtualMemory::Free(in_addr));
+			return KERNEL_ERROR_EBUSY;
+		}
 	}
 
 	bool     physical_range_valid  = false;
@@ -1554,7 +1758,7 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 	}
 	if (out_addr == 0 && consumed_reservation)
 	{
-		const bool restored = VirtualMemory::AllocFixed(in_addr, len, VirtualMemory::Mode::NoAccess) &&
+		const bool restored = VirtualMemory::ReserveFixed(in_addr, len) &&
 		                      g_reserved_memory->Add(in_addr, len);
 		EXIT_IF(!restored);
 	}
@@ -1570,8 +1774,7 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 
 	if (!physical_range_valid)
 	{
-		EXIT("direct-memory range is not allocated: phys=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
-		     static_cast<uint64_t>(direct_memory_start), len);
+		return KERNEL_ERROR_EACCES;
 	}
 
 	if (out_addr == 0)
@@ -1642,7 +1845,10 @@ int KYTY_SYSV_ABI KernelQueryMemoryProtection(void* addr, void** start, void** e
 	EXIT_IF(g_physical_memory == nullptr);
 	EXIT_IF(g_flexible_memory == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(addr == nullptr);
+	if (addr == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	size_t   len  = 0;
 	int      p    = 0;
@@ -1825,7 +2031,10 @@ int KYTY_SYSV_ABI KernelAvailableFlexibleMemorySize(size_t* size)
 
 	EXIT_IF(g_flexible_memory == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(size == nullptr);
+	if (size == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	*size = g_flexible_memory->Available();
 
@@ -1992,79 +2201,77 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 			*gpu_mode = Graphics::GpuMemoryMode::Write;
 			return true;
 		case 0xC2:
-			*mode     = VirtualMemory::Mode::ReadWrite;
-			*gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
-			return true;
+			case 0x32:
+			case 0x33:
+			case 0xF2:
+			case 0xF3:
+			case 0x3F2:
+			case 0x3F3:
+				*mode     = VirtualMemory::Mode::ReadWrite;
+				*gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
+				return true;
 		default: return false;
 	}
-}
-
-static const char* gpu_mapping_promotion_status_name(KernelGpuMappingPromotionStatus status)
-{
-	switch (status)
-	{
-		case KernelGpuMappingPromotionStatus::Promoted: return "Promoted";
-		case KernelGpuMappingPromotionStatus::Retained: return "Retained";
-		case KernelGpuMappingPromotionStatus::NotContained: return "NotContained";
-		case KernelGpuMappingPromotionStatus::InvalidArgument: return "InvalidArgument";
-		case KernelGpuMappingPromotionStatus::UnmapPending: return "UnmapPending";
-	}
-	return "Unknown";
 }
 
 int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 {
 	PRINT_NAME();
 
-	auto vaddr = reinterpret_cast<uint64_t>(addr);
+	const auto vaddr = reinterpret_cast<uint64_t>(addr);
 
 	printf("\t addr = 0x%016" PRIx64 "\n", vaddr);
 	printf("\t len  = 0x%016" PRIx64 "\n", static_cast<uint64_t>(len));
 	printf("\t prot = 0x%x\n", prot);
-
-	// Always log early mprotect calls even when PRINT_NAME is Silent — needed
-	// to correlate NoAccess demotions with later FATAL-ACCESS-VIOLATION sites.
-	static std::atomic<uint32_t> mprotect_log_count {0};
-	if (mprotect_log_count.fetch_add(1) < 32u)
-	{
-		std::fprintf(stderr, "KernelMprotect addr=0x%016" PRIx64 " len=0x%016" PRIx64 " prot=0x%x\n", vaddr,
-		             static_cast<uint64_t>(len), prot);
-	}
 
 	VirtualMemory::Mode     mode     = VirtualMemory::Mode::NoAccess;
 	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
 
 	if (!KernelDecodeMprotectProt(prot, &mode, &gpu_mode))
 	{
-		EXIT("unknown prot: 0x%x (%d)\n", prot, prot);
+		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (len == 0)
+	constexpr uint64_t kGuestPage = 0x4000;
+	if (vaddr == 0 || len == 0 || vaddr > UINT64_MAX - len)
 	{
-		return OK;
+		return KERNEL_ERROR_EINVAL;
 	}
+	const uint64_t range_end     = vaddr + len;
+	const uint64_t aligned_vaddr = vaddr & ~(kGuestPage - 1);
+	if (range_end > UINT64_MAX - (kGuestPage - 1))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	const uint64_t aligned_end = (range_end + kGuestPage - 1) & ~(kGuestPage - 1);
+	const uint64_t aligned_len = aligned_end - aligned_vaddr;
 
 	VirtualMemory::Mode old_mode {};
-	bool                ok = VirtualMemory::Protect(vaddr, len, mode, &old_mode);
+	const bool          ok = VirtualMemory::Protect(aligned_vaddr, aligned_len, mode, &old_mode);
+	if (!ok)
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
 
-	EXIT_NOT_IMPLEMENTED(!ok);
+	if (!g_physical_memory->ApplyProtection(aligned_vaddr, aligned_len, prot, mode))
+	{
+		(void)g_flexible_memory->ApplyProtection(aligned_vaddr, aligned_len, prot, mode);
+	}
 
 	if (gpu_mode != Graphics::GpuMemoryMode::NoAccess)
 	{
 		uint64_t mapping_addr = 0;
 		uint64_t mapping_size = 0;
-		auto     promotion = g_physical_memory->PromoteGpuRange(vaddr, len, gpu_mode, &mapping_addr, &mapping_size);
+		auto promotion =
+		    g_physical_memory->PromoteGpuRange(aligned_vaddr, aligned_len, gpu_mode, &mapping_addr, &mapping_size);
 		if (promotion == KernelGpuMappingPromotionStatus::NotContained)
 		{
-			promotion = g_flexible_memory->PromoteGpuRange(vaddr, len, gpu_mode, &mapping_addr, &mapping_size);
+			promotion = g_flexible_memory->PromoteGpuRange(aligned_vaddr, aligned_len, gpu_mode, &mapping_addr, &mapping_size);
 		}
 		const auto registration_action = KernelGpuMappingRegistrationActionFor(promotion);
 		if (registration_action == KernelGpuMappingRegistrationAction::Reject)
 		{
-			EXIT("GPU-visible mprotect range registration failed: address=0x%016" PRIx64 ", size=0x%016" PRIx64
-			     ", mode=%s, status=%s(%u)\n",
-			     vaddr, static_cast<uint64_t>(len), Core::EnumName(gpu_mode).C_Str(),
-			     gpu_mapping_promotion_status_name(promotion), static_cast<uint32_t>(promotion));
+			return promotion == KernelGpuMappingPromotionStatus::UnmapPending ? KERNEL_ERROR_EBUSY : KERNEL_ERROR_EINVAL;
 		}
 		if (registration_action == KernelGpuMappingRegistrationAction::RegisterOwnerMapping)
 		{
@@ -2073,7 +2280,7 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 		{
 			// Preserve the pre-lifecycle behavior for valid external regions
 			// that are not owned by PhysicalMemory or FlexibleMemory.
-			Graphics::GpuMemorySetAllocatedRange(vaddr, len);
+			Graphics::GpuMemorySetAllocatedRange(aligned_vaddr, aligned_len);
 		}
 	}
 

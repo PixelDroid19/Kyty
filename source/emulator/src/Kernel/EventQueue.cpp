@@ -20,6 +20,8 @@ LIB_NAME("libkernel", "libkernel");
 
 namespace {
 
+constexpr uint16_t EventErrorFlag = 0x4000u;
+
 struct KernelEqueueLifetime
 {
 	uint64_t generation = 0;
@@ -634,7 +636,10 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	EXIT_NOT_IMPLEMENTED(out == nullptr);
+	if (out == nullptr)
+	{
+		return KERNEL_ERROR_EFAULT;
+	}
 
 	auto pin = KernelAcquireEqueue(eq);
 	if (!pin)
@@ -735,11 +740,14 @@ void* KYTY_SYSV_ABI KernelGetEventUserData(const KernelEvent* ev)
 	return nullptr;
 }
 
-int KYTY_SYSV_ABI KernelGetEventError(const KernelEvent* /*ev*/)
+int KYTY_SYSV_ABI KernelGetEventError(const KernelEvent* ev)
 {
 	PRINT_NAME();
 
-	KYTY_NOT_IMPLEMENTED;
+	if (ev != nullptr && (ev->flags & EventErrorFlag) != 0)
+	{
+		return static_cast<int>(ev->data);
+	}
 
 	return 0;
 }

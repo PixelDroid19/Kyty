@@ -418,10 +418,10 @@ static void kyty_exception_handler(const Core::VirtualMemory::ExceptionHandler::
 		// Real access violation. Report async-signal-safe and terminate: this runs in
 		// a signal handler and the faulting thread may hold the allocator lock, so
 		// printf/StackTrace (which allocate) would dead-lock instead of reporting.
-		Core::VirtualMemory::FatalFault(info->access_violation_vaddr, info->exception_address);
+		Core::VirtualMemory::FatalFault(info);
 	}
 
-	Core::VirtualMemory::FatalFault(0, info->exception_address);
+	Core::VirtualMemory::FatalFault(info);
 }
 
 static void encode_id_64(uint16_t in_id, String* out_id)

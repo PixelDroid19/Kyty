@@ -203,6 +203,9 @@ struct DepthStencilVulkanImage: public VulkanImage
 struct TextureVulkanImage: public VulkanImage
 {
 	TextureVulkanImage(): VulkanImage(VulkanImageType::Texture) {}
+	// Set when sampling ASTC10x5 falls back to CPU decode and the Vulkan image is
+	// created as a plain RGBA8 texture.
+	bool astc10x5_cpu_fallback = false;
 };
 
 struct StorageTextureVulkanImage: public VulkanImage

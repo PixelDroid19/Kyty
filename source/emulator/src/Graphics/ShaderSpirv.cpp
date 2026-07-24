@@ -7503,7 +7503,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VInterpP2F32_VdstVsrcAttrChan)
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	String8 load0 = String8::FromPrintf("%%t0_<index> = OpAccessChain %%_ptr_Input_float %%attr%u %%uint_%u", inst.src[1].constant.u,
+	const auto* ps_info = spirv->GetPsInputInfo();
+	EXIT_IF(ps_info == nullptr);
+	const uint32_t attr = ShaderPixelCanonicalInterpolator(*ps_info, inst.src[1].constant.u);
+	String8 load0 = String8::FromPrintf("%%t0_<index> = OpAccessChain %%_ptr_Input_float %%attr%u %%uint_%u", attr,
 	                                    inst.src[2].constant.u);
 
 	// TODO() check VSKIP
@@ -7534,7 +7537,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VInterpMovF32_VdstVsrcAttrChan)
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	String8 load0 = String8::FromPrintf("%%t0_<index> = OpAccessChain %%_ptr_Input_float %%attr%u %%uint_%u", inst.src[1].constant.u,
+	const auto* ps_info = spirv->GetPsInputInfo();
+	EXIT_IF(ps_info == nullptr);
+	const uint32_t attr = ShaderPixelCanonicalInterpolator(*ps_info, inst.src[1].constant.u);
+	String8 load0 = String8::FromPrintf("%%t0_<index> = OpAccessChain %%_ptr_Input_float %%attr%u %%uint_%u", attr,
 	                                    inst.src[2].constant.u);
 
 	// TODO() check VSKIP
@@ -8394,9 +8400,37 @@ KYTY_RECOMPILER_FUNC(Recompile_Fetch)
 	{
 		int attrib_id = inst.src[2].constant.i;
 
+		EXIT_IF(attrib_id < 0 || attrib_id >= input_info->resources_num || attrib_id >= ShaderVertexInputInfo::RES_MAX);
+
 		const auto& r = input_info->resources_dst[attrib_id];
 
-		EXIT_NOT_IMPLEMENTED(r.registers_num != inst.dst.size);
+		if (inst.dst.size < 1 || inst.dst.size > 4 || r.registers_num < inst.dst.size || r.registers_num > 4)
+		{
+			EXIT("invalid embedded fetch width: attrib=%d resource_regs=%d instruction_regs=%d "
+			     "dst=v%d format=%u\n",
+			     attrib_id, r.registers_num, inst.dst.size, inst.dst.register_id,
+			     static_cast<unsigned>(inst.format));
+		}
+
+		if (r.registers_num > inst.dst.size)
+		{
+			const String8 index_str = String8::FromPrintf("%d_%u", attrib_id, index);
+			const String8 vector_type =
+			    String8::FromPrintf("v%dfloat", r.registers_num);
+			const String8 value_id = String8::FromPrintf("tfetch_prefix_%s", index_str.c_str());
+
+			*dst_source += String8::FromPrintf("%%%s = OpLoad %%%s %%attr%d\n", value_id.c_str(), vector_type.c_str(), attrib_id);
+			for (int component = 0; component < inst.dst.size; component++)
+			{
+				const String8 component_id =
+				    String8::FromPrintf("tfetch_prefix_component_%s_%d", index_str.c_str(), component);
+				*dst_source += String8::FromPrintf("%%%s = OpCompositeExtract %%float %%%s %d\n"
+				                                  "OpStore %%v%d %%%s\n",
+				                                  component_id.c_str(), value_id.c_str(), component,
+				                                  inst.dst.register_id + component, component_id.c_str());
+			}
+			return true;
+		}
 
 		String8 text;
 
@@ -9157,7 +9191,10 @@ void Spirv::WriteHeader()
 				}
 				for (uint32_t i = 0; i < m_ps_input_info->input_num; i++)
 				{
-					vars.Add(String8::FromPrintf("%%attr%d", i));
+					if (ShaderPixelCanonicalInterpolator(*m_ps_input_info, i) == i)
+					{
+						vars.Add(String8::FromPrintf("%%attr%d", i));
+					}
 				}
 				if (m_ps_input_info->ps_pos_xy)
 				{
@@ -9269,6 +9306,10 @@ void Spirv::WriteAnnotations()
 				}
 				for (uint32_t i = 0; i < m_ps_input_info->input_num; i++)
 				{
+					if (ShaderPixelCanonicalInterpolator(*m_ps_input_info, i) != i)
+					{
+						continue;
+					}
 					EXIT_NOT_IMPLEMENTED((m_ps_input_info->interpolator_settings[i] & ~static_cast<uint32_t>(0x41fu)) != 0);
 
 					bool     flat     = (m_ps_input_info->interpolator_settings[i] & 0x400u) != 0;
@@ -9676,7 +9717,10 @@ void Spirv::WriteGlobalVariables()
 			{
 				for (uint32_t i = 0; i < m_ps_input_info->input_num; i++)
 				{
-					vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_v4float Input", i));
+					if (ShaderPixelCanonicalInterpolator(*m_ps_input_info, i) == i)
+					{
+						vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_v4float Input", i));
+					}
 				}
 				if (m_ps_input_info->ps_pos_xy)
 				{

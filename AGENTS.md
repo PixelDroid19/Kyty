@@ -106,3 +106,21 @@ Before opening or merging a pull request:
 Do not claim compatibility from a boot, window, or isolated frame alone.
 Compatibility reports must identify the commit, host, GPU, driver, workload,
 duration, and known limitations.
+
+## Runtime diagnostics
+
+Use the native `kyty_agent` interface documented in
+[`docs/agent-tools.md`](docs/agent-tools.md) as the canonical runtime debugging
+surface. Do not add a Python- or debugger-dependent workflow when the native
+agent can provide the same evidence.
+
+For hangs or runtime failures, collect evidence in this order: `wait-ready`,
+`doctor`, a condition-based wait or `watch`, `events`, `last-error`, `threads`,
+`sync-waits`, `diagnostics`, and a capture when graphics are live. Prefer
+machine-readable JSON and bounded timeouts over terminal scraping and fixed
+sleeps.
+
+Agent-facing mutations must be explicit, bounded, local-only, auditable, and
+disabled by default unless they are established diagnostic input. Never expose
+arbitrary host memory, arbitrary host paths, shell execution, credentials, or
+protected workload data through the agent protocol.

@@ -1034,38 +1034,118 @@ static uint32_t Standard4KB32WithinBlockOffset(uint32_t x, uint32_t y)
 	return offset;
 }
 
-uint64_t TileGetStandard4KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems)
+static uint32_t Standard4KB8WithinBlockOffset(uint32_t x, uint32_t y)
 {
-	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u);
-
-	static constexpr uint32_t k_block       = 32u;
-	static constexpr uint32_t k_block_bytes = 4096u;
-	const uint32_t            blocks_x      = (pitch_elems + k_block - 1u) / k_block;
-	const uint32_t            xb            = x / k_block;
-	const uint32_t            yb            = y / k_block;
-	const uint64_t            block_index   = static_cast<uint64_t>(yb) * blocks_x + xb;
-	return (block_index * k_block_bytes) + Standard4KB32WithinBlockOffset(x % k_block, y % k_block);
+	// AMD AddrLib GFX10 SW_4K_S, 1-byte elements. Address bits 0..11 are
+	// X0,X1,X2,X3,Y0,Y1,Y2,Y3,Y4,X4,Y5,X5.
+	uint32_t offset = 0;
+	offset ^= x & 0x00fu;
+	offset ^= (y << 4u) & 0x1f0u;
+	offset ^= (x << 5u) & 0x200u;
+	offset ^= (y << 5u) & 0x400u;
+	offset ^= (x << 6u) & 0x800u;
+	return offset;
 }
 
-void TileConvertStandard4KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems)
+static uint32_t Standard4KB16WithinBlockOffset(uint32_t x, uint32_t y)
+{
+	// AMD AddrLib GFX10 SW_4K_S, 2-byte elements. Address bit 0 selects the
+	// byte within the element; bits 1..11 are X0,X1,X2,Y0,Y1,Y2,X3,Y3,X4,Y4,X5.
+	uint32_t offset = 0;
+	offset ^= (x << 1u) & 0x00eu;
+	offset ^= (y << 4u) & 0x070u;
+	offset ^= (x << 4u) & 0x080u;
+	offset ^= (y << 5u) & 0x100u;
+	offset ^= (x << 5u) & 0x200u;
+	offset ^= (y << 6u) & 0x400u;
+	offset ^= (x << 6u) & 0x800u;
+	return offset;
+}
+
+static uint32_t Standard4KB128WithinBlockOffset(uint32_t x, uint32_t y)
+{
+	// AMD AddrLib GFX10 SW_4K_S, 16-byte elements. Address bits 0..3 select
+	// bytes within the element; bits 4..11 are Y0,Y1,X0,X1,Y2,X2,Y3,X3.
+	uint32_t offset = 0;
+	offset ^= (y << 4u) & 0x030u;
+	offset ^= (y << 6u) & 0x100u;
+	offset ^= (y << 7u) & 0x400u;
+	offset ^= (x << 6u) & 0x0c0u;
+	offset ^= (x << 7u) & 0x200u;
+	offset ^= (x << 8u) & 0x800u;
+	return offset;
+}
+
+static uint32_t Standard4KB64WithinBlockOffset(uint32_t x, uint32_t y)
+{
+	// AMD AddrLib GFX10 SW_4K_S, 8-byte elements. Address bits 0..2 select
+	// bytes within the element; bits 3..11 are X0,Y0,Y1,X1,X2,Y2,X3,Y3,X4.
+	uint32_t offset = 0;
+	offset ^= (x << 3u) & 0x008u;
+	offset ^= (x << 5u) & 0x0c0u;
+	offset ^= (y << 4u) & 0x030u;
+	offset ^= (y << 6u) & 0x100u;
+	offset ^= (y << 7u) & 0x400u;
+	offset ^= (x << 6u) & 0x200u;
+	offset ^= (x << 7u) & 0x800u;
+	return offset;
+}
+
+uint64_t TileGetStandard4KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
+{
+	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u);
+	EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || bytes_per_element > 16u ||
+	                     (bytes_per_element & (bytes_per_element - 1u)) != 0u);
+
+	static constexpr uint32_t k_block_bytes = 4096u;
+	const uint32_t block_width  = bytes_per_element <= 2u ? 64u : (bytes_per_element <= 8u ? 32u : 16u);
+	const uint32_t block_height = bytes_per_element == 1u ? 64u : (bytes_per_element <= 4u ? 32u : 16u);
+	const uint32_t blocks_x = (pitch_elems + block_width - 1u) / block_width;
+	const uint32_t xb = x / block_width;
+	const uint32_t yb = y / block_height;
+	const uint64_t block_index = static_cast<uint64_t>(yb) * blocks_x + xb;
+	const uint32_t local_x = x % block_width;
+	const uint32_t local_y = y % block_height;
+	const uint32_t within = bytes_per_element == 1u   ? Standard4KB8WithinBlockOffset(local_x, local_y)
+	                        : bytes_per_element == 2u ? Standard4KB16WithinBlockOffset(local_x, local_y)
+	                        : bytes_per_element == 4u ? Standard4KB32WithinBlockOffset(local_x, local_y)
+	                        : bytes_per_element == 8u ? Standard4KB64WithinBlockOffset(local_x, local_y)
+	                                                  : Standard4KB128WithinBlockOffset(local_x, local_y);
+	return (block_index * k_block_bytes) + within;
+}
+
+uint64_t TileGetStandard4KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems)
+{
+	return TileGetStandard4KBOffset(x, y, pitch_elems, 4u);
+}
+
+void TileConvertStandard4KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
+                                   uint32_t bytes_per_element)
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
 	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u || pitch_elems < width);
+	EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || bytes_per_element > 16u ||
+	                     (bytes_per_element & (bytes_per_element - 1u)) != 0u);
 
 	auto*       d = static_cast<uint8_t*>(dst);
 	const auto* s = static_cast<const uint8_t*>(src);
-	static constexpr uint32_t k_bpp = 4u;
-	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * k_bpp);
+	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile,
+	                                      static_cast<uint64_t>(width) * height * bytes_per_element);
 	for (uint32_t y = 0; y < height; y++)
 	{
 		for (uint32_t x = 0; x < width; x++)
 		{
-			const uint64_t tiled  = TileGetStandard4KB32Offset(x, y, pitch_elems);
-			const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * k_bpp;
-			std::memcpy(d + linear, s + tiled, k_bpp);
+			const uint64_t tiled  = TileGetStandard4KBOffset(x, y, pitch_elems, bytes_per_element);
+			const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * bytes_per_element;
+			std::memcpy(d + linear, s + tiled, bytes_per_element);
 		}
 	}
+}
+
+void TileConvertStandard4KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems)
+{
+	TileConvertStandard4KBToLinear(dst, src, width, height, pitch_elems, 4u);
 }
 
 static uint32_t Standard4KB32VolumeWithinBlockOffset(uint32_t x, uint32_t y, uint32_t z)
@@ -1799,17 +1879,23 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			return;
 		}
 
-		// kStandard4KB has a 32x32 block for 32-bit elements. This path is
-		// intentionally limited to a single mip until the tail layout is
+		// kStandard4KB block dimensions depend on element size: 64x64 (8-bit),
+		// 64x32 (16-bit), 32x32 (32-bit), 32x16 (64-bit), and 16x16 (128-bit).
+		// This path is intentionally limited to a single mip until the tail layout is
 		// independently exercised; it still covers any dimensions/pitches that
 		// fit the documented one-level block geometry.
 		if (tile == 0x05u)
 		{
 			const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
-			EXIT_NOT_IMPLEMENTED(bpp != 4u || levels != 1u);
-			const uint32_t element_pitch = (pitch != 0u ? pitch : width);
-			const uint32_t padded_width  = (element_pitch + 31u) & ~31u;
-			const uint32_t padded_height = (height + 31u) & ~31u;
+			EXIT_NOT_IMPLEMENTED(bpp == 0u || bpp > 16u || (bpp & (bpp - 1u)) != 0u || levels != 1u);
+			const bool bc3 = format == 173u;
+			const uint32_t element_height = bc3 ? (height + 3u) / 4u : height;
+			const uint32_t pitch_texels = (pitch != 0u ? pitch : width);
+			const uint32_t element_pitch = bc3 ? (pitch_texels + 3u) / 4u : pitch_texels;
+			const uint32_t block_width  = bpp <= 2u ? 64u : (bpp <= 8u ? 32u : 16u);
+			const uint32_t block_height = bpp == 1u ? 64u : (bpp <= 4u ? 32u : 16u);
+			const uint32_t padded_width  = (element_pitch + block_width - 1u) & ~(block_width - 1u);
+			const uint32_t padded_height = (element_height + block_height - 1u) & ~(block_height - 1u);
 			const uint64_t bytes = static_cast<uint64_t>(padded_width) * padded_height * bpp;
 			EXIT_NOT_IMPLEMENTED(bytes > UINT32_MAX);
 			if (total_size != nullptr)
@@ -1824,8 +1910,8 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			}
 			if (padded_size != nullptr)
 			{
-				padded_size[0].width  = padded_width;
-				padded_size[0].height = padded_height;
+				padded_size[0].width  = bc3 ? padded_width * 4u : padded_width;
+				padded_size[0].height = bc3 ? padded_height * 4u : padded_height;
 			}
 			return;
 		}

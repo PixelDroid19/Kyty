@@ -1409,7 +1409,13 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x2D:
 			if (next_gen)
 			{
-				KYTY_UNKNOWN_OP();
+				inst.type              = ShaderInstructionType::VFmaF32;
+				inst.format            = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+				inst.src_num           = 3;
+				inst.src[2].type       = ShaderOperandType::LiteralConstant;
+				inst.src[2].constant.u = buffer[size];
+				inst.src[2].size       = 0;
+				size++;
 			} else
 			{
 				KYTY_NI("v_cvt_pknorm_i16_f32")

@@ -17,15 +17,23 @@ list(APPEND unit_test_src
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsProgress.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsClassifier.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsProtocol.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsSupervisor.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsBundle.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsLifecycle.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsExportCatalog.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorGraphicsDirtyTracking.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorExactStagingPool.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorShaderResolutionUsageCache.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorVideoOutResolution.cpp"
 )
+
+# These suites exercise POSIX process, descriptor and environment primitives.
+# Their Windows counterparts need a dedicated port; do not make unrelated
+# emulator tests depend on unavailable sys/wait.h, pipe or O_CLOEXEC APIs.
+if(NOT WIN32)
+	list(APPEND unit_test_src
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsSupervisor.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsBundle.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsLifecycle.cpp"
+	)
+endif()
 
 if (MSVC AND CLANG)
 	set_source_files_properties(${unit_test_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack")

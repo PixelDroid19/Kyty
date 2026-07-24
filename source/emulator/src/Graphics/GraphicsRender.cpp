@@ -532,6 +532,9 @@ struct RenderColorInfo
 static constexpr uint32_t k_dump_rt_slots = 4;
 static VulkanImage*       g_dump_rt_images[k_dump_rt_slots] {};
 static uint32_t           g_dump_rt_count = 0;
+static VulkanImage*       g_dump_bc3_image = nullptr;
+static VulkanImage*       g_dump_bc3_compute_source = nullptr;
+static VulkanImage*       g_dump_bc3_compute_destination = nullptr;
 
 static void RememberDumpRt(VulkanImage* img)
 {
@@ -572,6 +575,69 @@ void GraphicsDumpRememberedRts(GraphicContext* ctx, const char* prefix)
 		std::snprintf(tag, sizeof(tag), "rt%u", i);
 		UtilDumpVulkanImageRgba8Bmp(ctx, g_dump_rt_images[i], prefix, tag);
 	}
+	if (g_dump_bc3_image != nullptr && g_dump_bc3_image->format == VK_FORMAT_BC3_UNORM_BLOCK)
+	{
+		const uint32_t width  = g_dump_bc3_image->extent.width;
+		const uint32_t height = g_dump_bc3_image->extent.height;
+		const uint64_t bytes  = static_cast<uint64_t>((width + 3u) / 4u) * ((height + 3u) / 4u) * 16u;
+		std::vector<uint8_t> data(static_cast<size_t>(bytes));
+		UtilFillBuffer(ctx, data.data(), bytes, width, g_dump_bc3_image, static_cast<uint64_t>(g_dump_bc3_image->layout));
+		char path[192];
+		std::snprintf(path, sizeof(path), "%s-bc3-%ux%u.dds", prefix, width, height);
+		if (FILE* file = std::fopen(path, "wb"); file != nullptr)
+		{
+			uint32_t dds[31] {};
+			dds[0]  = 124u;
+			dds[1]  = 0x00081007u;
+			dds[2]  = height;
+			dds[3]  = width;
+			dds[4]  = static_cast<uint32_t>(bytes);
+			dds[6]  = 1u;
+			dds[18] = 32u;
+			dds[19] = 4u;
+			dds[20] = 0x35545844u;
+			dds[26] = 0x1000u;
+			std::fwrite("DDS ", 1, 4, file);
+			std::fwrite(dds, sizeof(dds), 1, file);
+			std::fwrite(data.data(), 1, data.size(), file);
+			std::fclose(file);
+		}
+	}
+	const auto dump_uint4_as_bc3 = [ctx, prefix](VulkanImage* image, const char* tag) {
+		if (image == nullptr || image->format != VK_FORMAT_R32G32B32A32_UINT)
+		{
+			return;
+		}
+		const uint32_t block_width  = image->extent.width;
+		const uint32_t block_height = image->extent.height;
+		const uint32_t width        = block_width * 4u;
+		const uint32_t height       = block_height * 4u;
+		const uint64_t bytes        = static_cast<uint64_t>(block_width) * block_height * 16u;
+		std::vector<uint8_t> data(static_cast<size_t>(bytes));
+		UtilFillBuffer(ctx, data.data(), bytes, block_width, image, static_cast<uint64_t>(image->layout));
+		char path[192];
+		std::snprintf(path, sizeof(path), "%s-%s-%ux%u.dds", prefix, tag, width, height);
+		if (FILE* file = std::fopen(path, "wb"); file != nullptr)
+		{
+			uint32_t dds[31] {};
+			dds[0]  = 124u;
+			dds[1]  = 0x00081007u;
+			dds[2]  = height;
+			dds[3]  = width;
+			dds[4]  = static_cast<uint32_t>(bytes);
+			dds[6]  = 1u;
+			dds[18] = 32u;
+			dds[19] = 4u;
+			dds[20] = 0x35545844u;
+			dds[26] = 0x1000u;
+			std::fwrite("DDS ", 1, 4, file);
+			std::fwrite(dds, sizeof(dds), 1, file);
+			std::fwrite(data.data(), 1, data.size(), file);
+			std::fclose(file);
+		}
+	};
+	dump_uint4_as_bc3(g_dump_bc3_compute_source, "bc3-compute-source");
+	dump_uint4_as_bc3(g_dump_bc3_compute_destination, "bc3-compute-destination");
 }
 
 // Opt-in: KYTY_DUMP_DRAW=1 logs unique draws into 1280x720 color targets that
@@ -585,13 +651,14 @@ static void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInpu
 	{
 		return;
 	}
+	const bool dump_all = std::strcmp(enabled, "all") == 0;
 	bool rt720 = false;
 	uint32_t rt_w = 0;
 	uint32_t rt_h = 0;
 	for (uint32_t slot = 0; slot < color.targets_num; slot++)
 	{
 		VulkanImage* img = color.vulkan_buffer[slot];
-		if (img != nullptr && img->extent.width == 1280u && img->extent.height == 720u)
+		if (img != nullptr && (dump_all || (img->extent.width == 1280u && img->extent.height == 720u)))
 		{
 			rt720 = true;
 			rt_w  = img->extent.width;
@@ -620,7 +687,8 @@ static void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInpu
 			logo = true;
 		}
 		tex_len += static_cast<size_t>(
-		    std::snprintf(tex_buf + tex_len, sizeof(tex_buf) - tex_len, "%s%ux%u:fmt%u:tile%u", (tex_len ? "," : ""), tw, th, tf, tt));
+		    std::snprintf(tex_buf + tex_len, sizeof(tex_buf) - tex_len, "%s0x%" PRIx64 ":%ux%u:fmt%u:tile%u", (tex_len ? "," : ""),
+		                  Config::IsNextGen() ? r.Base40() : r.Base38(), tw, th, tf, tt));
 		if (tex_len + 8 >= sizeof(tex_buf))
 		{
 			break;
@@ -655,13 +723,33 @@ static void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInpu
 	const auto& vp = hw.GetScreenViewport().viewports[0];
 	const auto  xy = State::ResolveViewportXy(vp.xscale, vp.xoffset, vp.yscale, vp.yoffset);
 	const auto  sc = State::ResolveScissor(hw.GetScreenViewport(), hw.GetScanModeControl(), 0);
+	const auto& blend = hw.GetBlendControl(0);
+	const auto& mode = hw.GetModeControl();
+	const auto& depth_control = hw.GetDepthControl();
 
-	char line[768];
+	char ps_input_buf[256] {};
+	size_t ps_input_len = 0;
+	for (uint32_t i = 0; i < ps_input.input_num && ps_input_len + 16u < sizeof(ps_input_buf); ++i)
+	{
+		ps_input_len += static_cast<size_t>(
+		    std::snprintf(ps_input_buf + ps_input_len, sizeof(ps_input_buf) - ps_input_len, "%s%08x",
+		                  (ps_input_len == 0 ? "" : ","), ps_input.interpolator_settings[i]));
+	}
+
+	char line[1024];
 	std::snprintf(line, sizeof(line),
-	              "rt=%ux%u logo=%d prim=%u idx=%u itype=%u indexed=%d flags=0x%x vs_bufs=%d [%s] tex=[%s] "
-	              "vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d\n",
-	              rt_w, rt_h, logo ? 1 : 0, ucfg.GetPrimType(), index_count, index_type_and_size, indexed ? 1 : 0, flags,
-	              vs_input.buffers_num, vs_buf, tex_buf, xy.x, xy.y, xy.width, xy.height, sc.left, sc.top, sc.right, sc.bottom);
+	              "rt=0x%012" PRIx64 ":%ux%u logo=%d prim=%u idx=%u itype=%u indexed=%d flags=0x%x vs_bufs=%d [%s] tex=[%s] "
+	              "ps_inputs=%u:[%s] vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d clear=%d:%08x:%08x "
+	              "mask=%08x cull=%d:%d:%d depth=%d:%d:%u blend=%d:%u:%u:%u:%u:%u:%u\n",
+	              static_cast<uint64_t>(color.base_addr[0]), rt_w, rt_h, logo ? 1 : 0, ucfg.GetPrimType(), index_count,
+	              index_type_and_size, indexed ? 1 : 0, flags,
+	              vs_input.buffers_num, vs_buf, tex_buf, ps_input.input_num, ps_input_buf, xy.x, xy.y, xy.width, xy.height,
+	              sc.left, sc.top, sc.right, sc.bottom,
+	              color.cmask_fast_clear_enable[0] ? 1 : 0, color.clear_word0[0], color.clear_word1[0],
+	              hw.GetRenderTargetMask(), mode.cull_front ? 1 : 0, mode.cull_back ? 1 : 0, mode.face ? 1 : 0,
+	              depth_control.z_enable ? 1 : 0, depth_control.z_write_enable ? 1 : 0, depth_control.zfunc,
+	              blend.enable ? 1 : 0, blend.color_srcblend, blend.color_comb_fcn, blend.color_destblend,
+	              blend.alpha_srcblend, blend.alpha_comb_fcn, blend.alpha_destblend);
 
 	static std::set<std::string> seen;
 	static uint32_t              non_logo_left = 8;
@@ -679,9 +767,21 @@ static void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInpu
 	}
 
 	std::fprintf(stderr, "KYTY_DUMP_DRAW %s", line);
+	const auto& ps_buffers = ps_input.bind.storage_buffers;
+	for (int bi = 0; bi < ps_buffers.buffers_num; ++bi)
+	{
+		const auto& resource = ps_buffers.buffers[bi];
+		const uint64_t address = Config::IsNextGen() ? resource.Base48() : resource.Base44();
+		const auto* words = reinterpret_cast<const uint32_t*>(address);
+		std::fprintf(stderr,
+		             "KYTY_DUMP_DRAW_PS_BUFFER slot=%d reg=%d usage=%u addr=0x%012" PRIx64
+		             " stride=%u records=%u words=%08x,%08x,%08x,%08x,%08x\n",
+		             ps_buffers.slots[bi], ps_buffers.start_register[bi], static_cast<unsigned>(ps_buffers.usages[bi]),
+		             address, resource.Stride(), resource.NumRecords(), words[0], words[1], words[2], words[3], words[4]);
+	}
 
 	// First vertex records as floats (cheap evidence for stride/fmt / shear).
-	if (logo && vs_input.buffers_num > 0)
+	if ((logo || dump_all) && vs_input.buffers_num > 0)
 	{
 		const auto& b = vs_input.buffers[0];
 		if (b.addr != 0 && b.stride >= 4 && b.stride <= 256)
@@ -1111,8 +1211,14 @@ static void validate_depth_target_layout(const HW::DepthRenderTarget& z, bool ps
 static void z_check(const HW::DepthRenderTarget& z, const HW::RenderControl& render_control,
                     const HW::DepthControl& depth_control)
 {
-	validate_depth_plane(z);
 	const auto stencil = validate_stencil_plane(z, render_control, depth_control);
+	const auto usage   = State::ResolveDepthStencilUsage(z, render_control, depth_control);
+	if (!usage.target_active && !render_control.depth_clear_enable && stencil == State::StencilPlaneValidation::Inactive)
+	{
+		return;
+	}
+
+	validate_depth_plane(z);
 	if (z.z_info.format == 0 && stencil == State::StencilPlaneValidation::Inactive)
 	{
 		return;
@@ -1214,7 +1320,10 @@ static void mc_check(const HW::ModeControl& c)
 	// EXIT_NOT_IMPLEMENTED(c.cull_front != false);
 	// EXIT_NOT_IMPLEMENTED(c.cull_back != false);
 	// EXIT_NOT_IMPLEMENTED(c.face != false);
-	EXIT_NOT_IMPLEMENTED(c.poly_mode != 0);
+	// Dual polygon mode with triangles selected for both faces is equivalent
+	// to the solid-fill Vulkan state used below.
+	EXIT_NOT_IMPLEMENTED(c.poly_mode != 0 &&
+	                     !(c.poly_mode == 1 && c.polymode_front_ptype == 2 && c.polymode_back_ptype == 2));
 	EXIT_NOT_IMPLEMENTED(c.polymode_front_ptype != 0 && c.polymode_front_ptype != 2);
 	EXIT_NOT_IMPLEMENTED(c.polymode_back_ptype != 0 && c.polymode_back_ptype != 2);
 	EXIT_NOT_IMPLEMENTED(c.vtx_window_offset_enable != false);
@@ -1483,7 +1592,9 @@ static void hw_check(const HW::Context& hw)
 	// CB_TARGET_MASK may enable multiple MRT slots (captured 0x0000ffff =
 	// RT0..RT3 full RGBA). Pipeline creation still binds a single color
 	// attachment and applies the RT0 nibble as colorWriteMask.
-	EXIT_NOT_IMPLEMENTED(hw.GetDepthClearValue() != 0.0f && hw.GetDepthClearValue() != 1.0f);
+	const float depth_clear = hw.GetDepthClearValue();
+	EXIT_NOT_IMPLEMENTED(rc.depth_clear_enable &&
+	                     (!std::isfinite(depth_clear) || depth_clear < 0.0f || depth_clear > 1.0f));
 	// EXIT_NOT_IMPLEMENTED(hw.GetStencilClearValue() != 0);
 }
 
@@ -2345,11 +2456,15 @@ static void get_input_format(const ShaderBufferResource& res, VkFormat* format, 
 		{
 			*format = VK_FORMAT_R32G32_SFLOAT;
 			*size   = 2;
-		} else if (fmt == 77)
-		{
-			// AGC float4 vertex format (follows RG32F=64 / RGB32F=74).
-			*format = VK_FORMAT_R32G32B32A32_SFLOAT;
-			*size   = 4;
+			} else if (fmt == 77)
+			{
+				// AGC float4 vertex format (follows RG32F=64 / RGB32F=74).
+				*format = VK_FORMAT_R32G32B32A32_SFLOAT;
+				*size   = 4;
+			} else if (fmt == 56)
+			{
+				*format = VK_FORMAT_R8G8B8A8_UNORM;
+				*size   = 4;
 		} else if (fmt == 20)
 		{
 			*format = VK_FORMAT_R32_UINT;
@@ -5517,9 +5632,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			// - Tile 27, format 71 = 16_16_16_16_FLOAT (RGBA16F), 642x362 alias of RT
 			// - Tile 27, format 133 = BC1 RGBA UNORM, 3840x2160 title texture
 			// - Tile 9 = kStandard64KB static atlases (RGBA8 detile path)
+			// - Tile 5, format 5 = kStandard4KB R8_UINT video planes
 			// - Tile 5, format 20 = kStandard4KB R32_UINT image load/store
 			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 5 && r.TileMode() != 27 && r.TileMode() != 9);
-			if (r.Format() != 20 && r.Format() != 56 && r.Format() != 13 && r.Format() != 14 && r.Format() != 71 && r.Format() != 133)
+			if (!TextureSupportsGen5SampledFormat(r.Format()))
 			{
 				EXIT("unsupported Gen5 sampled texture format: fmt=%u tile=%u width=%u height=%u base=0x%012" PRIx64 " type=%u\n",
 				     r.Format(), r.TileMode(), r.Width5() + 1u, r.Height5() + 1u, r.Base40(), r.Type());
@@ -5636,7 +5752,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			TileGetStandard4KB32VolumeSize(width, height, depth, pitch, &size);
 		} else if (arrayed_2d)
 		{
-			EXIT_NOT_IMPLEMENTED(fmt != 20u || tile != 5u || levels != 1u);
+			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(fmt);
+			EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || tile != 5u || levels != 1u);
 			TileGetTextureSize2(fmt, width, height, pitch, levels, tile, &size, nullptr, nullptr);
 			const uint64_t array_size = static_cast<uint64_t>(size.size) * depth;
 			EXIT_NOT_IMPLEMENTED(array_size > UINT32_MAX);
@@ -5996,6 +6113,29 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		}
 
 		EXIT_NOT_IMPLEMENTED(tex == nullptr);
+		if (fmt == 75u && width == 29u && height == 30u && tex->format == VK_FORMAT_R32G32B32A32_UINT)
+		{
+			if (textures.desc[i].textures2d_without_sampler)
+			{
+				g_dump_bc3_compute_destination = tex;
+			} else
+			{
+				g_dump_bc3_compute_source = tex;
+			}
+		}
+		if (fmt == 173u && width == 116u && height == 120u && tex->format == VK_FORMAT_BC3_UNORM_BLOCK)
+		{
+			g_dump_bc3_image = tex;
+		}
+		static const char* bound_dump_spec = std::getenv("KYTY_DUMP_BOUND_SAMPLE");
+		uint32_t           bound_dump_width = 0;
+		uint32_t           bound_dump_height = 0;
+		if (bound_dump_spec != nullptr &&
+		    std::sscanf(bound_dump_spec, "%ux%u", &bound_dump_width, &bound_dump_height) == 2 &&
+		    bound_dump_width == width && bound_dump_height == height)
+		{
+			UtilDumpVulkanImageRgba8Bmp(g_render_ctx->GetGraphicCtx(), tex, "/tmp/kyty-dump-bound-sample", "bound");
+		}
 
 		if (render_texture)
 		{
@@ -6045,6 +6185,18 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		}
 
 		EXIT_NOT_IMPLEMENTED(((gen5 ? r.Base40() : r.Base38()) >> 32u) != 0);
+		if (bound_dump_spec != nullptr &&
+		    std::sscanf(bound_dump_spec, "%ux%u", &bound_dump_width, &bound_dump_height) == 2 &&
+		    bound_dump_width == width && bound_dump_height == height)
+		{
+			std::fprintf(stderr,
+			             "KYTY_DUMP_BOUND_SAMPLE addr=0x%012" PRIx64 " id=%" PRIu64 " type=%u format=%u layout=%u "
+			             "index=%d descriptor=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+			             static_cast<uint64_t>(addr), tex->memory.unique_id, static_cast<unsigned>(tex->type),
+			             static_cast<unsigned>(tex->format), static_cast<unsigned>(tex->layout), index_sampled - 1,
+			             r.fields[0], r.fields[1], r.fields[2], r.fields[3],
+			             r.fields[4], r.fields[5], r.fields[6], r.fields[7]);
+		}
 
 		(*sgprs)[0] = r.fields[0];
 		(*sgprs)[1] = r.fields[1];
@@ -6847,6 +6999,58 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 
 	ShaderComputeInputInfo input_info;
 	ShaderGetInputInfoCS(&cs_regs, &sh_regs, &input_info);
+	static const char* dump_dispatch = std::getenv("KYTY_DUMP_DISPATCH");
+	if (dump_dispatch != nullptr && dump_dispatch[0] != '\0' && GraphicsRunGetFrameNum() <= 5)
+	{
+		std::fprintf(stderr,
+		             "KYTY_DUMP_DISPATCH frame=%d shader=0x%012" PRIx64 " groups=%ux%ux%u local=%ux%ux%u mode=0x%x "
+		             "storage=%d textures=%d direct=%d\n",
+		             GraphicsRunGetFrameNum(), cs_regs.cs_regs.data_addr, thread_group_x, thread_group_y, thread_group_z,
+		             input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2], mode,
+		             input_info.bind.storage_buffers.buffers_num, input_info.bind.textures2D.textures_num,
+		             input_info.bind.direct_sgprs.sgprs_num);
+		for (int i = 0; i < input_info.bind.storage_buffers.buffers_num; ++i)
+		{
+			const auto& resource = input_info.bind.storage_buffers.buffers[i];
+			std::fprintf(stderr,
+			             "  storage[%d] reg=%d slot=%d usage=%u access=%u addr=0x%012" PRIx64
+			             " stride=%u records=%u fmt=%u dstsel=0x%03" PRIx32 " add_tid=%u fields=%08x,%08x,%08x,%08x\n",
+			             i, input_info.bind.storage_buffers.start_register[i], input_info.bind.storage_buffers.slots[i],
+			             static_cast<unsigned>(input_info.bind.storage_buffers.usages[i]),
+			             static_cast<unsigned>(input_info.bind.storage_buffers.accesses[i]), resource.Base48(),
+			             resource.Stride(), resource.NumRecords(), resource.Format(), resource.DstSelXYZW(),
+			             resource.AddTid() ? 1u : 0u, resource.fields[0], resource.fields[1], resource.fields[2],
+			             resource.fields[3]);
+			if (resource.Base48() != 0u && resource.Stride() == 16u && resource.NumRecords() <= 16u)
+			{
+				const auto* words = reinterpret_cast<const uint32_t*>(resource.Base48());
+				std::fprintf(stderr, "    words=");
+				for (uint32_t word = 0; word < resource.NumRecords() * 4u; ++word)
+				{
+					std::fprintf(stderr, "%s%08x", word == 0u ? "" : ",", words[word]);
+				}
+				std::fprintf(stderr, "\n");
+			}
+		}
+		for (int i = 0; i < input_info.bind.textures2D.textures_num; ++i)
+		{
+			const auto& texture = input_info.bind.textures2D.desc[i].texture;
+			std::fprintf(stderr,
+			             "  texture[%d] reg=%d slot=%d usage=%u addr=0x%012" PRIx64
+			             " fmt=%u tile=%u size=%ux%u type=%u fields=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+			             i, input_info.bind.textures2D.desc[i].start_register, input_info.bind.textures2D.desc[i].slot,
+			             static_cast<unsigned>(input_info.bind.textures2D.desc[i].usage), texture.Base40(), texture.Format(),
+			             texture.TileMode(), static_cast<unsigned>(texture.Width5()) + 1u,
+			             static_cast<unsigned>(texture.Height5()) + 1u, texture.Type(), texture.fields[0], texture.fields[1],
+			             texture.fields[2], texture.fields[3], texture.fields[4], texture.fields[5], texture.fields[6],
+			             texture.fields[7]);
+		}
+		for (int i = 0; i < input_info.bind.direct_sgprs.sgprs_num; ++i)
+		{
+			std::fprintf(stderr, "  direct[%d] reg=%d value=0x%08x\n", i,
+			             input_info.bind.direct_sgprs.start_register[i], input_info.bind.direct_sgprs.sgprs[i].field);
+		}
+	}
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 

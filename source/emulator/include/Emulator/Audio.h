@@ -84,6 +84,8 @@ int KYTY_SYSV_ABI AjmInitialize(int64_t reserved, uint32_t* context);
 int KYTY_SYSV_ABI AjmFinalize(uint32_t context);
 int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t reserved);
 int KYTY_SYSV_ABI AjmModuleUnregister(uint32_t context, uint32_t codec);
+int KYTY_SYSV_ABI AjmMemoryRegister(uint32_t context, const void* address, size_t num_pages);
+int KYTY_SYSV_ABI AjmBatchInitializeBuffer(void* buffer, size_t buffer_size, void* control);
 int KYTY_SYSV_ABI AjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t flags, uint32_t* instance);
 int KYTY_SYSV_ABI AjmInstanceDestroy(uint32_t context, uint32_t instance);
 void* KYTY_SYSV_ABI AjmBatchJobControlBufferRa(void* buffer, uint32_t instance, uint64_t flags, void* sideband_input,

@@ -16,6 +16,7 @@
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
 #include <unordered_map>
 
 #ifdef KYTY_EMU_ENABLED
@@ -931,7 +932,49 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 
 	if (file == nullptr)
 	{
-		return KERNEL_ERROR_EBADF;
+		// libc FILE* functions are backed by the host C runtime. A guest that
+		// calls fopen -> fileno -> fstat therefore presents a valid host
+		// descriptor which is intentionally absent from Kyty's guest table.
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		struct _stat64 host_stat {};
+		if (::_fstat64(d, &host_stat) != 0)
+#else
+		struct stat host_stat {};
+		if (::fstat(d, &host_stat) != 0)
+#endif
+		{
+			return KERNEL_ERROR_EBADF;
+		}
+
+		memset(sb, 0, sizeof(FileStat));
+		sb->st_dev   = static_cast<uint32_t>(host_stat.st_dev);
+		sb->st_ino   = static_cast<uint32_t>(host_stat.st_ino);
+		sb->st_mode  = static_cast<uint16_t>(host_stat.st_mode);
+		sb->st_nlink = static_cast<uint16_t>(host_stat.st_nlink);
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+		sb->st_uid  = static_cast<uint32_t>(host_stat.st_uid);
+		sb->st_gid  = static_cast<uint32_t>(host_stat.st_gid);
+		sb->st_rdev = static_cast<uint32_t>(host_stat.st_rdev);
+#endif
+		sb->st_size = static_cast<int64_t>(host_stat.st_size);
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		sb->st_blksize     = 512;
+		sb->st_blocks      = (sb->st_size + 511) / 512;
+		sb->st_atim.tv_sec = static_cast<int64_t>(host_stat.st_atime);
+		sb->st_mtim.tv_sec = static_cast<int64_t>(host_stat.st_mtime);
+		sb->st_ctim.tv_sec = static_cast<int64_t>(host_stat.st_ctime);
+#else
+		sb->st_blocks       = static_cast<int64_t>(host_stat.st_blocks);
+		sb->st_blksize      = static_cast<uint32_t>(host_stat.st_blksize);
+		sb->st_atim.tv_sec  = static_cast<int64_t>(host_stat.st_atim.tv_sec);
+		sb->st_atim.tv_nsec = static_cast<int64_t>(host_stat.st_atim.tv_nsec);
+		sb->st_mtim.tv_sec  = static_cast<int64_t>(host_stat.st_mtim.tv_sec);
+		sb->st_mtim.tv_nsec = static_cast<int64_t>(host_stat.st_mtim.tv_nsec);
+		sb->st_ctim.tv_sec  = static_cast<int64_t>(host_stat.st_ctim.tv_sec);
+		sb->st_ctim.tv_nsec = static_cast<int64_t>(host_stat.st_ctim.tv_nsec);
+#endif
+		sb->st_birthtim = sb->st_mtim;
+		return OK;
 	}
 
 	EXIT_IF(!file->opened);

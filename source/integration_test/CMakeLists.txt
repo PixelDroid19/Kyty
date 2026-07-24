@@ -483,28 +483,22 @@ add_kyty_agent_protocol_case(EventRingOverflowVisible event_ring_overflow_visibl
 add_kyty_agent_protocol_case(LifecycleEventsSanitize lifecycle_events_sanitize 0)
 add_kyty_agent_protocol_case(SeqMonotonic seq_monotonic 0)
 
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-
-add_test(
-	NAME KytyGamesMatrixIntegration.ProcessBoundaries
-	COMMAND
-		"${Python3_EXECUTABLE}"
-		"${CMAKE_CURRENT_SOURCE_DIR}/TestGamesMatrix.py"
-)
-set_tests_properties(KytyGamesMatrixIntegration.ProcessBoundaries PROPERTIES
-	TIMEOUT 30
+add_executable(kyty_agent_transport_integration
+	src/AgentTransportIntegration.cpp
 )
 
-add_test(
-	NAME KytyAgentProtocol.WaitReadySingleResponse
-	COMMAND
-		"${Python3_EXECUTABLE}"
-		"${CMAKE_CURRENT_SOURCE_DIR}/TestAgentWaitReady.py"
-		$<TARGET_FILE:kyty_agent>
+target_link_libraries(kyty_agent_transport_integration
+	PRIVATE
+		kyty_agent_cli
+		kyty_agent_transport
 )
-set_tests_properties(KytyAgentProtocol.WaitReadySingleResponse PROPERTIES
+
+add_test(
+	NAME KytyAgentTransport.NativeRoundTrip
+	COMMAND $<TARGET_FILE:kyty_agent_transport_integration>
+)
+set_tests_properties(KytyAgentTransport.NativeRoundTrip PROPERTIES
 	TIMEOUT 15
-	FIXTURES_REQUIRED KytyAgentProtocolBinary
 )
 
 # Every fixture rebuilds a target that ultimately writes shared archives in the

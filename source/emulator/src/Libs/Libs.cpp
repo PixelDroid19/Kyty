@@ -71,6 +71,7 @@ LIB_DEFINE(InitAcm_1);
 LIB_DEFINE(InitRtc_1);
 LIB_DEFINE(InitRandom_1);
 LIB_DEFINE(InitCoredump_1);
+LIB_DEFINE(InitEOSSDKPS5Shipping_1);
 
 bool Init(const String& id, Loader::SymbolDatabase* s)
 {
@@ -124,6 +125,9 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libSceRtc_1", InitRtc_1);
 	LIB_CHECK(U"libSceRandom_1", InitRandom_1);
 	LIB_CHECK(U"libSceCoredump_1", InitCoredump_1);
+	LIB_CHECK(U"EOSSDK-PS5-Shipping", InitEOSSDKPS5Shipping_1);
+	LIB_CHECK(U"EOSSDK-PS5-Shipping_v1", InitEOSSDKPS5Shipping_1);
+	LIB_CHECK(U"EOSSDK-PS5-Shipping_v1.1", InitEOSSDKPS5Shipping_1);
 
 	return false;
 }
@@ -175,6 +179,7 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(InitRtc_1);
 	LIB_LOAD(InitRandom_1);
 	LIB_LOAD(InitCoredump_1);
+	LIB_LOAD(InitEOSSDKPS5Shipping_1);
 }
 
 } // namespace Kyty::Libs

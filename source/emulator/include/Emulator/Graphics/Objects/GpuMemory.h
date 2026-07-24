@@ -493,6 +493,10 @@ inline bool GpuMemoryIsGpuOwnedRenderTextureParams(const uint64_t* params)
 
 inline bool GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType parent_type, const uint64_t* parent_params)
 {
+	if (parent_type == GpuMemoryObjectType::StorageTexture)
+	{
+		return true;
+	}
 	return parent_type == GpuMemoryObjectType::RenderTexture && GpuMemoryIsGpuOwnedRenderTextureParams(parent_params);
 }
 

@@ -274,6 +274,8 @@ struct WindowContext
 		uint32_t              max_edge      = 0;
 		uint32_t              keep_files    = 8;
 		bool                  first_pending = false;
+		uint64_t              first_probe_after_ms = 0;
+		uint64_t              first_probe_deadline_ms = 0;
 		bool                  manual_pending = false;
 		uint64_t              sequence      = 0;
 		uint64_t              present_count = 0;
@@ -426,6 +428,7 @@ static void NativeCaptureConfigure(WindowContext* ctx)
 	ctx->native_capture.first_present = NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_FIRST_PRESENT") ||
 	                                   NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_NOW");
 	ctx->native_capture.first_pending = ctx->native_capture.first_present;
+	ctx->native_capture.first_probe_deadline_ms = WindowSteadyMs() + 30000;
 	ctx->native_capture.every_present = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_EVERY");
 	ctx->native_capture.telemetry     = NativeCaptureEnvEnabled("KYTY_NATIVE_TELEMETRY");
 	// Default edge cap bounds disk/RAM for 4K VideoOut captures; set
@@ -459,7 +462,7 @@ static NativeCaptureMilestone NativeCaptureNext(WindowContext* ctx)
 		return NativeCaptureMilestone::None;
 	}
 
-	if (ctx->native_capture.first_pending)
+	if (ctx->native_capture.first_pending && WindowSteadyMs() >= ctx->native_capture.first_probe_after_ms)
 	{
 		return NativeCaptureMilestone::FirstPresent;
 	}
@@ -542,10 +545,6 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		return ctx->native_capture.manual_pending || ctx->native_capture.request_id > ctx->native_capture.completed_id;
 	}();
 
-	if (milestone == NativeCaptureMilestone::FirstPresent)
-	{
-		ctx->native_capture.first_pending = false;
-	}
 	if (milestone == NativeCaptureMilestone::Manual && !ctx->native_capture.trigger_file.empty())
 	{
 		std::error_code error;
@@ -554,6 +553,10 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 
 	if (image->format != VK_FORMAT_B8G8R8A8_SRGB && image->format != VK_FORMAT_R8G8B8A8_SRGB)
 	{
+		if (milestone == NativeCaptureMilestone::FirstPresent)
+		{
+			ctx->native_capture.first_pending = false;
+		}
 		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=readback frame=%d format=%s recoverable=0\n", frame,
 		             NativeCaptureFormatName(image->format));
 		if (agent_waiting)
@@ -568,6 +571,10 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	const uint64_t height = image->extent.height;
 	if (width == 0 || height == 0 || width > UINT64_MAX / height || width * height > UINT64_MAX / 4)
 	{
+		if (milestone == NativeCaptureMilestone::FirstPresent)
+		{
+			ctx->native_capture.first_pending = false;
+		}
 		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=validate_extent frame=%d recoverable=0\n", frame);
 		if (agent_waiting)
 		{
@@ -581,6 +588,16 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	std::vector<uint8_t> pixels(size);
 	UtilFillBuffer(&ctx->graphic_ctx, pixels.data(), size, static_cast<uint32_t>(width), image,
 	               static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+	if (milestone == NativeCaptureMilestone::FirstPresent)
+	{
+		const uint64_t now_ms = WindowSteadyMs();
+		if (!NativeCaptureFrameHasVisibleColor(pixels.data(), pixels.size()) && now_ms < ctx->native_capture.first_probe_deadline_ms)
+		{
+			ctx->native_capture.first_probe_after_ms = now_ms + 1000;
+			return;
+		}
+		ctx->native_capture.first_pending = false;
+	}
 
 	Core::String title_id;
 	Core::String app_ver;

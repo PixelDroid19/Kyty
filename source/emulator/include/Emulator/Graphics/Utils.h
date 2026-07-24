@@ -51,6 +51,46 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	{
 		return vk == VK_FORMAT_R32_UINT;
 	}
+	if (gen5_ufmt == 1u || gen5_ufmt == 5u)
+	{
+		return vk == VK_FORMAT_R8_UNORM;
+	}
+	if (gen5_ufmt == 75u)
+	{
+		return vk == VK_FORMAT_R32G32B32A32_UINT;
+	}
+	if (gen5_ufmt == 62u)
+	{
+		return vk == VK_FORMAT_R32G32_UINT;
+	}
+	if (gen5_ufmt == 173u)
+	{
+		return vk == VK_FORMAT_BC3_UNORM_BLOCK;
+	}
+	return true;
+}
+
+// A BC3 sample can be produced through a writable R32G32B32A32_UINT image:
+// one 128-bit storage texel is exactly one 4x4 BC3 block. Vulkan image copies
+// scale the destination extent according to the two formats' block extents.
+[[nodiscard]] inline bool Gen5BlockCompressedStorageCopyExtent(uint32_t sample_ufmt, uint32_t sample_width,
+                                                               uint32_t sample_height, VkFormat storage_format,
+                                                               uint32_t storage_width, uint32_t storage_height,
+                                                               uint32_t* copy_width, uint32_t* copy_height)
+{
+	if (copy_width == nullptr || copy_height == nullptr || sample_ufmt != 173u ||
+	    storage_format != VK_FORMAT_R32G32B32A32_UINT)
+	{
+		return false;
+	}
+	const uint32_t block_width  = (sample_width + 3u) / 4u;
+	const uint32_t block_height = (sample_height + 3u) / 4u;
+	if (storage_width != block_width || storage_height != block_height)
+	{
+		return false;
+	}
+	*copy_width  = block_width;
+	*copy_height = block_height;
 	return true;
 }
 
@@ -209,6 +249,38 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	return file_count - keep;
 }
 
+// A capture is useful for automated visual checks only after more than a tiny
+// fraction of its RGB pixels have left the boot clear and the frame is not a
+// uniform transition color.
+[[nodiscard]] inline bool NativeCaptureFrameHasVisibleColor(const uint8_t* pixels, size_t size)
+{
+	if (pixels == nullptr || size < 4)
+	{
+		return false;
+	}
+
+	const size_t pixel_count     = size / 4;
+	const size_t required_count = std::max<size_t>(1, pixel_count / 50);
+	size_t       visible_count  = 0;
+	size_t       varied_count   = 0;
+	const auto*  base_color     = pixels;
+	for (size_t pixel = 0; pixel < pixel_count; pixel++)
+	{
+		const auto* color = pixels + pixel * 4;
+		if (std::max({color[0], color[1], color[2]}) > 8)
+		{
+			visible_count++;
+		}
+		if (std::max({std::abs(static_cast<int>(color[0]) - static_cast<int>(base_color[0])),
+		              std::abs(static_cast<int>(color[1]) - static_cast<int>(base_color[1])),
+		              std::abs(static_cast<int>(color[2]) - static_cast<int>(base_color[2]))}) > 8)
+		{
+			varied_count++;
+		}
+	}
+	return visible_count >= required_count && varied_count >= required_count;
+}
+
 // Round-robin pipeline slot to replace when the cache is full. Avoids EXIT on
 // long sessions that exceed MAX_PIPELINES unique variants.
 [[nodiscard]] inline uint32_t PipelineCacheNextEvictIndex(uint32_t size, uint32_t* cursor)
@@ -264,6 +336,24 @@ enum class GraphicsWaitRegMemForm : uint8_t
 	CustomWaitMem32,
 	CustomWaitMem64,
 };
+
+[[nodiscard]] inline bool GraphicsWaitRegMemCompare(uint32_t compare_function, uint64_t value, uint64_t reference, uint64_t mask)
+{
+	const uint64_t masked_value     = value & mask;
+	const uint64_t masked_reference = reference & mask;
+
+	switch (compare_function)
+	{
+		case 0: return true;
+		case 1: return masked_value < masked_reference;
+		case 2: return masked_value <= masked_reference;
+		case 3: return masked_value == masked_reference;
+		case 4: return masked_value != masked_reference;
+		case 5: return masked_value >= masked_reference;
+		case 6: return masked_value > masked_reference;
+		default: return true;
+	}
+}
 
 // Classifies WaitRegMem-family packets for patch helpers.
 [[nodiscard]] inline GraphicsWaitRegMemForm GraphicsGetWaitRegMemForm(uint32_t header)

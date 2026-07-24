@@ -69,6 +69,9 @@ void     TileConvertStandard64KB32ToLinear(void* dst, const void* src, uint32_t 
 uint64_t TileGetStandard4KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems);
 void     TileConvertStandard4KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height,
                                           uint32_t pitch_elems);
+uint64_t TileGetStandard4KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element);
+void     TileConvertStandard4KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height,
+                                        uint32_t pitch_elems, uint32_t bytes_per_element);
 // Gen5 kStandard4KB volumetric R32_UINT resources use 8x16x8 swizzle blocks.
 // These helpers are intentionally separate from the 2D layout above: a 3D
 // descriptor interleaves Z inside each 4 KiB block and therefore cannot be

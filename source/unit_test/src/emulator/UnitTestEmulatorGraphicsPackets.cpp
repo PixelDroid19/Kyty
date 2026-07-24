@@ -68,10 +68,66 @@ TEST(EmulatorGraphicsPackets, TreatsZeroPm4DwordAsSinglePadding)
 	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0x01fe0000u), 2u);
 }
 
-TEST(EmulatorGraphicsPackets, CountsIndirectRegisterDwordsAsPairs)
+TEST(EmulatorGraphicsPackets, PreservesIndirectRegisterCount)
 {
-	EXPECT_EQ(GraphicsIndirectRegisterPairCount(2u), 1u);
-	EXPECT_EQ(GraphicsIndirectRegisterPairCount(126u), 63u);
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t command[] = {0u, 0u, 0u, 0u};
+
+	EXPECT_EQ(Gen5::GraphicsSetShRegIndirectPatchAddRegisters(command, 10u), 0);
+	EXPECT_EQ(command[1], 10u);
+	EXPECT_EQ(Gen5::GraphicsSetShRegIndirectPatchAddRegisters(command, 6u), 0);
+	EXPECT_EQ(command[1], 16u);
+}
+
+TEST(EmulatorGraphicsPackets, NormalizesReversedIndirectRegisterPair)
+{
+	uint32_t offset = 0x88f5e915u;
+	uint32_t value  = Pm4::PA_SC_FOV_WINDOW_LR;
+
+	EXPECT_TRUE(GraphicsNormalizeIndirectRegisterPair(Pm4::CX_NUM, offset, value));
+	EXPECT_EQ(offset, Pm4::PA_SC_FOV_WINDOW_LR);
+	EXPECT_EQ(value, 0x88f5e915u);
+
+	offset = Pm4::CX_NUM;
+	value  = Pm4::CX_NUM + 1u;
+	EXPECT_FALSE(GraphicsNormalizeIndirectRegisterPair(Pm4::CX_NUM, offset, value));
+}
+
+TEST(EmulatorGraphicsPackets, IdentifiesDefaultIndirectRegisterPlaceholders)
+{
+	EXPECT_TRUE(GraphicsIsDefaultIndirectRegisterPair(0x10000000u, 0u));
+	EXPECT_TRUE(GraphicsIsDefaultIndirectRegisterPair(0x1000000cu, 0x0cu));
+	EXPECT_TRUE(GraphicsIsDefaultIndirectRegisterPair(0x100002ffu, 0x2ffu));
+	EXPECT_FALSE(GraphicsIsDefaultIndirectRegisterPair(0x1000000cu, 0x0du));
+	EXPECT_FALSE(GraphicsIsDefaultIndirectRegisterPair(0x88f5e915u, Pm4::PA_SC_FOV_WINDOW_LR));
+}
+
+TEST(EmulatorGraphicsPackets, AcceptsObservedFullTargetBarrierInvalidations)
+{
+	EXPECT_TRUE(GraphicsAgcFullTargetBarrierGcrSupported(0x280u));
+	EXPECT_TRUE(GraphicsAgcFullTargetBarrierGcrSupported(0x300u));
+	EXPECT_TRUE(GraphicsAgcFullTargetBarrierGcrSupported(0x8280u));
+	EXPECT_FALSE(GraphicsAgcFullTargetBarrierGcrSupported(0u));
+}
+
+TEST(EmulatorGraphicsPackets, AcceptsByteStrideRawStorageWithDwordAlignedRange)
+{
+	ShaderBufferResource resource {};
+	resource.fields[1] = 1u << 16u;
+	resource.fields[2] = 24576u;
+	resource.fields[3] = (5u << 12u) | DstSel(4, 0, 0, 0);
+
+	EXPECT_TRUE(ShaderRawStorageDescriptorSupported(resource));
+	EXPECT_TRUE(ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw));
+
+	resource.fields[2] = 24577u;
+	EXPECT_FALSE(ShaderRawStorageDescriptorSupported(resource));
 }
 
 TEST(EmulatorGraphicsPackets, ParsesGen5LshlAddU32)
@@ -125,6 +181,39 @@ TEST(EmulatorGraphicsPackets, ParsesGen5Add3U32)
 	EXPECT_EQ(instruction.src[0].register_id, 0);
 	EXPECT_EQ(instruction.src[1].register_id, 1);
 	EXPECT_EQ(instruction.src[2].register_id, 2);
+}
+
+// RDNA VOP2 opcode 0x2d is v_fmaak_f32: dst = src0 * src1 + literal.
+TEST(EmulatorGraphicsPackets, ParsesGen5FmaakF32Literal)
+{
+	const uint32_t word0    = (0x2du << 25u) | (3u << 17u) | (2u << 9u) | 257u;
+	const uint32_t literal  = 0x3f000000u;
+	const uint32_t shader[] = {word0, literal, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VFmaF32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2);
+	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.dst.register_id, 3);
+	EXPECT_EQ(instruction.src_num, 3);
+	EXPECT_EQ(instruction.src[0].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.src[0].register_id, 1);
+	EXPECT_EQ(instruction.src[1].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(instruction.src[1].register_id, 2);
+	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::LiteralConstant);
+	EXPECT_EQ(instruction.src[2].constant.u, literal);
 }
 
 // VOP2 SDWA with SRC0_NEG (bit 20 of SDWA control). Captured post-Play path
@@ -958,7 +1047,7 @@ TEST(EmulatorGraphicsPackets, ResolvesDataPacketPayloadAddressByOpcode)
 	ASSERT_EQ(Gen5::GraphicsGetDataPacketPayloadAddress(&payload, wait_mem, 1), 0);
 	EXPECT_EQ(payload, wait_mem + 1);
 
-	wait_mem[0] = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WAIT_MEM_32);
+	wait_mem[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_MEM_32);
 	ASSERT_EQ(Gen5::GraphicsGetDataPacketPayloadAddress(&payload, wait_mem, 0), 0);
 	EXPECT_EQ(payload, wait_mem + 1);
 
@@ -1045,6 +1134,45 @@ TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoModifier80000000)
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u));
 	EXPECT_EQ(cmd[1], 1u);
+	EXPECT_EQ(cmd[2], 0x2u);
+}
+
+// Draw modifiers describe optional shader inputs and compiler metadata.  A
+// direct auto draw still encodes only the hardware draw initiator; enabled
+// start-vertex/start-instance inputs are zero for this draw form.
+TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoShaderInputModifier)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	// start-vertex at SGPR 4, start-instance at SGPR 5, vertex stage.
+	constexpr uint64_t modifier = 0x40280805ull;
+	uint32_t* cmd = Gen5::GraphicsDcbDrawIndexAuto(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 3u, modifier);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u));
+	EXPECT_EQ(cmd[1], 3u);
 	EXPECT_EQ(cmd[2], 0x2u);
 }
 
@@ -1234,10 +1362,7 @@ TEST(EmulatorGraphicsPackets, EncodesWriteDataZeroAddressThenPatches)
 	EXPECT_EQ(cmd[3], 0x00000001u);
 }
 
-// The host CP normalizes guest waits into R_WAIT_MEM_64. A size=0 guest wait
-// must keep its 32-bit predicate when its reference/mask arguments carry
-// upper bits that the guest packet width does not consume.
-TEST(EmulatorGraphicsPackets, Encodes32BitWaitWithInactiveUpperPredicate)
+TEST(EmulatorGraphicsPackets, EncodesGen5WaitRegMem32Packet)
 {
 	struct AlignasCommandBuffer
 	{
@@ -1264,24 +1389,41 @@ TEST(EmulatorGraphicsPackets, Encodes32BitWaitWithInactiveUpperPredicate)
 	cb.cursor_up   = storage;
 	cb.cursor_down = storage + 16;
 
-	uint32_t* cmd = Gen5::GraphicsDcbWaitRegMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0, 3, 0, 0,
-	                                             reinterpret_cast<const volatile void*>(0x00000001268815d0ull),
-	                                             0xfeedface00000001ull, 0xffffffffffffffffull, 400);
+	uint32_t* cmd = Gen5::GraphicsDcbWaitRegMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0, 3, 4, 2,
+	                                             reinterpret_cast<const volatile void*>(0x0000000100000c03ull),
+	                                             0x1122334455667788ull, 0xaabbccddeeff0011ull, 0x123456u);
 	ASSERT_NE(cmd, nullptr);
-	EXPECT_EQ(cmd[0], KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64));
-	EXPECT_EQ(cmd[1], 0x268815d0u);
+	EXPECT_EQ(cmd[0], 0xc0051028u);
+	EXPECT_EQ(cmd[1], 0x00000c00u);
 	EXPECT_EQ(cmd[2], 0x00000001u);
-	EXPECT_EQ(cmd[3], 0xffffffffu);
-	EXPECT_EQ(cmd[4], 0u);
-	EXPECT_EQ(cmd[5], 1u);
-	EXPECT_EQ(cmd[6], 0u);
-	EXPECT_EQ(cmd[7], 3u);
-	EXPECT_EQ(cmd[8], 10u);
+	EXPECT_EQ(cmd[3], 0xeeff0011u);
+	EXPECT_EQ(cmd[4], 0x55667788u);
+	EXPECT_EQ(cmd[5], 0x04000053u);
+	EXPECT_EQ(cmd[6], 0x0000ffffu);
 }
 
-// WaitRegMem cache_policy is not packed into R_WAIT_MEM_64; stream (1),
-// bypass-style (2), and observed policy 3 must still encode the same poll packet.
-TEST(EmulatorGraphicsPackets, EncodesWaitRegMemCachePolicy1And2SamePacket)
+TEST(EmulatorGraphicsPackets, CanonicalizesAliasedPixelInterpolators)
+{
+	ShaderPixelInputInfo input {};
+	input.input_num = 3;
+	input.interpolator_settings[0] = 0x000u;
+	input.interpolator_settings[1] = 0x000u;
+	input.interpolator_settings[2] = 0x401u;
+
+	EXPECT_EQ(ShaderPixelCanonicalInterpolator(input, 0), 0u);
+	EXPECT_EQ(ShaderPixelCanonicalInterpolator(input, 1), 0u);
+	EXPECT_EQ(ShaderPixelCanonicalInterpolator(input, 2), 2u);
+}
+
+TEST(EmulatorGraphicsPackets, DefaultsUnwrittenPixelInterpolatorsToIdentity)
+{
+	EXPECT_EQ(ShaderResolvePixelInterpolatorSetting(0u, 0u, 0u), 0u);
+	EXPECT_EQ(ShaderResolvePixelInterpolatorSetting(0u, 0u, 1u), 1u);
+	EXPECT_EQ(ShaderResolvePixelInterpolatorSetting(0u, 1u << 1u, 1u), 0u);
+	EXPECT_EQ(ShaderResolvePixelInterpolatorSetting(0x401u, 1u << 2u, 2u), 0x401u);
+}
+
+TEST(EmulatorGraphicsPackets, EncodesGen5WaitRegMem64Packet)
 {
 	struct AlignasCommandBuffer
 	{
@@ -1301,27 +1443,26 @@ TEST(EmulatorGraphicsPackets, EncodesWaitRegMemCachePolicy1And2SamePacket)
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	auto encode = [](uint8_t policy) {
-		uint32_t             storage[16] = {};
-		AlignasCommandBuffer cb {};
-		cb.bottom      = storage;
-		cb.top         = storage + 16;
-		cb.cursor_up   = storage;
-		cb.cursor_down = storage + 16;
-		uint32_t* cmd  = Gen5::GraphicsDcbWaitRegMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0, 3, 0, policy,
-		                                             reinterpret_cast<const volatile void*>(0x00000001268815d0ull),
-		                                             0x0000000000000001ull, 0x00000000ffffffffull, 400);
-		EXPECT_NE(cmd, nullptr);
-		EXPECT_EQ(cmd[0], KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64));
-		EXPECT_EQ(cmd[1], 0x268815d0u);
-		EXPECT_EQ(cmd[5], 1u);
-		EXPECT_EQ(cmd[7], 3u);
-		return cmd[8];
-	};
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
 
-	EXPECT_EQ(encode(1), 10u);
-	EXPECT_EQ(encode(2), 10u);
-	EXPECT_EQ(encode(3), 10u);
+	uint32_t* cmd = Gen5::GraphicsDcbWaitRegMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1, 6, 3, 1,
+	                                             reinterpret_cast<const volatile void*>(0x000000022345678full),
+	                                             0x1122334455667788ull, 0xaabbccddeeff0011ull, 800);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd[0], 0xc0071058u);
+	EXPECT_EQ(cmd[1], 0x23456788u);
+	EXPECT_EQ(cmd[2], 0x00000002u);
+	EXPECT_EQ(cmd[3], 0xeeff0011u);
+	EXPECT_EQ(cmd[4], 0xaabbccddu);
+	EXPECT_EQ(cmd[5], 0x55667788u);
+	EXPECT_EQ(cmd[6], 0x11223344u);
+	EXPECT_EQ(cmd[7], 0x02000156u);
+	EXPECT_EQ(cmd[8], 0x00000032u);
 }
 
 TEST(EmulatorGraphicsPackets, PublishesConfirmedCompactWriteDataWithItsSubmission)
@@ -2841,6 +2982,51 @@ TEST(EmulatorGraphicsPackets, MaterializesFetchAttribSLoadDwordAndX2)
 	EXPECT_NE(source.FindIndex("0xa1b2c303"), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, EmbeddedFetchMayConsumePrefixOfWiderVertexAttribute)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction fetch {};
+	fetch.type              = ShaderInstructionType::FetchXyz;
+	fetch.format            = ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen;
+	fetch.dst.type          = ShaderOperandType::Vgpr;
+	fetch.dst.register_id   = 0;
+	fetch.dst.size          = 3;
+	fetch.src[0].type       = ShaderOperandType::Vgpr;
+	fetch.src[0].register_id = 4;
+	fetch.src[0].size       = 1;
+	fetch.src[1].type       = ShaderOperandType::Sgpr;
+	fetch.src[1].register_id = 0;
+	fetch.src[1].size       = 4;
+	fetch.src[2].type       = ShaderOperandType::IntegerInlineConstant;
+	fetch.src[2].constant.i = 0;
+	fetch.src_num           = 3;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	code.GetInstructions().Add(fetch);
+
+	ShaderVertexInputInfo input {};
+	input.fetch_embedded                  = true;
+	input.gs_prolog                       = true;
+	input.resources_num                   = 1;
+	input.resources_dst[0].register_start = 0;
+	input.resources_dst[0].registers_num  = 4;
+
+	const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpLoad %v4float %attr0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpStore %v3"), Core::STRING8_INVALID_INDEX);
+}
+
 // Gen5 SMEM: s_buffer_load_dwordx8 s[32:39], s[8:11], 0; s_nop; s_endpgm
 // Encoding matches the SMRD opcode table (0x0B); recompiler already supports Sdst8SvSoffset.
 TEST(EmulatorGraphicsPackets, ParsesGen5SBufferLoadDwordx8)
@@ -3685,7 +3871,7 @@ TEST(EmulatorGraphicsPackets, WaitRegMemAndDmaDataPatchFieldOffsets)
 	// Custom R_WAIT_MEM_64: address at +4 bytes.
 	const uint32_t wait64 = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
 	EXPECT_EQ(GraphicsWaitRegMemAddressByteOffset(wait64), 4u);
-	const uint32_t wait32 = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WAIT_MEM_32);
+	const uint32_t wait32 = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_MEM_32);
 	EXPECT_EQ(GraphicsWaitRegMemAddressByteOffset(wait32), 4u);
 	// Hardware IT_WAIT_REG_MEM: address at +8 bytes.
 	const uint32_t it_wait = KYTY_PM4(7, Pm4::IT_WAIT_REG_MEM, 0);
@@ -3721,7 +3907,127 @@ TEST(EmulatorGraphicsPackets, PatchesDmaDataDestinationAndWaitRegMemAddress)
 	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchAddress(wait, 0x00000001abcdef00ull), 0);
 	EXPECT_EQ(wait[1], 0xabcdef00u);
 	EXPECT_EQ(wait[2], 0x00000001u);
+
+	uint32_t wait32_packet[7] = {};
+	wait32_packet[0]          = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_MEM_32);
+	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchAddress(wait32_packet, 0x000fffffabcdef03ull), 0);
+	EXPECT_EQ(wait32_packet[1], 0xabcdef00u);
+	EXPECT_EQ(wait32_packet[2], 0x0003ffffu);
 	EXPECT_EQ(Gen5::GraphicsAgcWaitRegMemPatchAddress(not_dma, 1), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+TEST(EmulatorGraphicsPackets, SizesAndDetilesGen5Standard4KbRgba32UintTextures)
+{
+	TileSizeAlign size {};
+	TileGetTextureSize2(75, 28, 30, 28, 1, 5, &size, nullptr, nullptr);
+	// 28x30 uint4 texels occupy a 2x2 grid of 16x16 Standard4KB blocks.
+	EXPECT_EQ(size.size, 16384u);
+	EXPECT_EQ(size.align, 4096u);
+
+	bool seen[4096] {};
+	for (uint32_t y = 0; y < 16; ++y)
+	{
+		for (uint32_t x = 0; x < 16; ++x)
+		{
+			const uint64_t offset = TileGetStandard4KBOffset(x, y, 16, 16);
+			ASSERT_LT(offset, 4096u);
+			ASSERT_EQ(offset % 16u, 0u);
+			ASSERT_FALSE(seen[offset]);
+			seen[offset] = true;
+		}
+	}
+}
+
+TEST(EmulatorGraphicsPackets, MatchesAddrLibStandard4Kb64BitSwizzleEquation)
+{
+	// AMD AddrLib GFX10 SW_4K_S, 8-byte elements:
+	// addr[11:3] = X4,Y3,X3,Y2,X2,X1,Y1,Y0,X0.
+	EXPECT_EQ(TileGetStandard4KBOffset(1, 0, 32, 8), 0x008u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 1, 32, 8), 0x010u);
+	EXPECT_EQ(TileGetStandard4KBOffset(2, 0, 32, 8), 0x040u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 2, 32, 8), 0x020u);
+	EXPECT_EQ(TileGetStandard4KBOffset(4, 0, 32, 8), 0x080u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 4, 32, 8), 0x100u);
+	EXPECT_EQ(TileGetStandard4KBOffset(8, 0, 32, 8), 0x200u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 8, 32, 8), 0x400u);
+	EXPECT_EQ(TileGetStandard4KBOffset(16, 0, 32, 8), 0x800u);
+}
+
+TEST(EmulatorGraphicsPackets, MatchesAddrLibStandard4Kb8BitSwizzleEquation)
+{
+	// AMD AddrLib GFX10 SW_4K_S, 1-byte elements:
+	// addr[11:0] = X5,Y5,X4,Y4,Y3,Y2,Y1,Y0,X3,X2,X1,X0.
+	EXPECT_EQ(TileGetStandard4KBOffset(1, 0, 64, 1), 0x001u);
+	EXPECT_EQ(TileGetStandard4KBOffset(2, 0, 64, 1), 0x002u);
+	EXPECT_EQ(TileGetStandard4KBOffset(4, 0, 64, 1), 0x004u);
+	EXPECT_EQ(TileGetStandard4KBOffset(8, 0, 64, 1), 0x008u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 1, 64, 1), 0x010u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 2, 64, 1), 0x020u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 4, 64, 1), 0x040u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 8, 64, 1), 0x080u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 16, 64, 1), 0x100u);
+	EXPECT_EQ(TileGetStandard4KBOffset(16, 0, 64, 1), 0x200u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 32, 64, 1), 0x400u);
+	EXPECT_EQ(TileGetStandard4KBOffset(32, 0, 64, 1), 0x800u);
+}
+
+TEST(EmulatorGraphicsPackets, MatchesAddrLibStandard4Kb16BitSwizzleEquation)
+{
+	// AMD AddrLib GFX10 SW_4K_S, 2-byte elements:
+	// addr[11:1] = X5,Y4,X4,Y3,X3,Y2,Y1,Y0,X2,X1,X0.
+	EXPECT_EQ(TileGetStandard4KBOffset(1, 0, 64, 2), 0x002u);
+	EXPECT_EQ(TileGetStandard4KBOffset(2, 0, 64, 2), 0x004u);
+	EXPECT_EQ(TileGetStandard4KBOffset(4, 0, 64, 2), 0x008u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 1, 64, 2), 0x010u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 2, 64, 2), 0x020u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 4, 64, 2), 0x040u);
+	EXPECT_EQ(TileGetStandard4KBOffset(8, 0, 64, 2), 0x080u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 8, 64, 2), 0x100u);
+	EXPECT_EQ(TileGetStandard4KBOffset(16, 0, 64, 2), 0x200u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 16, 64, 2), 0x400u);
+	EXPECT_EQ(TileGetStandard4KBOffset(32, 0, 64, 2), 0x800u);
+}
+
+TEST(EmulatorGraphicsPackets, SizesGen5Standard4Kb8BitVideoTextures)
+{
+	TileSizeAlign size {};
+	TilePaddedSize padded {};
+	TileGetTextureSize2(5, 1920, 1080, 2048, 1, 5, &size, nullptr, &padded);
+
+	// The 8-bit SW_4K_S block is 64x64 elements. A 2048-element pitch and
+	// 1080 visible rows occupy 32x17 blocks.
+	EXPECT_EQ(size.size, 2228224u);
+	EXPECT_EQ(size.align, 4096u);
+	EXPECT_EQ(padded.width, 2048u);
+	EXPECT_EQ(padded.height, 1088u);
+}
+
+TEST(EmulatorGraphicsPackets, MatchesAddrLibStandard4Kb128BitSwizzleEquation)
+{
+	// AMD AddrLib GFX10 SW_4K_S, 16-byte elements:
+	// addr[11:4] = X3,Y3,X2,Y2,X1,X0,Y1,Y0.
+	EXPECT_EQ(TileGetStandard4KBOffset(1, 0, 16, 16), 0x040u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 1, 16, 16), 0x010u);
+	EXPECT_EQ(TileGetStandard4KBOffset(2, 0, 16, 16), 0x080u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 2, 16, 16), 0x020u);
+	EXPECT_EQ(TileGetStandard4KBOffset(4, 0, 16, 16), 0x200u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 4, 16, 16), 0x100u);
+	EXPECT_EQ(TileGetStandard4KBOffset(8, 0, 16, 16), 0x800u);
+	EXPECT_EQ(TileGetStandard4KBOffset(0, 8, 16, 16), 0x400u);
+}
+
+TEST(EmulatorGraphicsPackets, SizesGen5Standard4KbBc3Textures)
+{
+	TileSizeAlign size {};
+	TilePaddedSize padded {};
+	TileGetTextureSize2(173, 116, 120, 128, 1, 5, &size, nullptr, &padded);
+
+	// BC3 uses one 16-byte block per 4x4 texels. The 128x120 pitch/height
+	// therefore occupies a 32x30 block grid, padded to two 4 KiB tiles.
+	EXPECT_EQ(size.size, 16384u);
+	EXPECT_EQ(size.align, 4096u);
+	EXPECT_EQ(padded.width, 128u);
+	EXPECT_EQ(padded.height, 128u);
 }
 
 TEST(EmulatorGraphicsPackets, EncodesCbNopAsFullType3Packet)

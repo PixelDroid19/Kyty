@@ -643,6 +643,7 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
 uint32_t ShaderGen5VertexInputComponentCount(uint8_t format);
+bool     ShaderGen5VertexAttribFormat(uint16_t attrib_format, uint8_t* unified_format);
 bool     ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format);
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component);
 // Bytes per element for Gen5 sampled formats; compressed formats use block elements (0 if unknown).
@@ -1125,6 +1126,8 @@ struct ShaderPixelInputInfo
 
 [[nodiscard]] bool ShaderPixelInputMaskSupported(uint32_t enable_mask, uint32_t address_mask);
 [[nodiscard]] bool ShaderPixelPositionEnabled(uint32_t enable_mask, uint32_t address_mask);
+[[nodiscard]] uint32_t ShaderResolvePixelInterpolatorSetting(uint32_t stored_setting, uint32_t written_mask, uint32_t index);
+[[nodiscard]] uint32_t ShaderPixelCanonicalInterpolator(const ShaderPixelInputInfo& info, uint32_t index);
 
 struct ShaderSharp
 {

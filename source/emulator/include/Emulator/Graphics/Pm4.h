@@ -247,6 +247,9 @@ constexpr uint32_t DB_DEPTH_SLICE                      = 0x17;
 constexpr uint32_t DB_DEPTH_SLICE_SLICE_TILE_MAX_SHIFT = 0;
 constexpr uint32_t DB_DEPTH_SLICE_SLICE_TILE_MAX_MASK  = 0x3FFFFF;
 
+constexpr uint32_t DB_Z_INFO2       = 0x18;
+constexpr uint32_t DB_STENCIL_INFO2 = 0x19;
+
 constexpr uint32_t DB_Z_READ_BASE_HI        = 0x1A;
 constexpr uint32_t DB_STENCIL_READ_BASE_HI  = 0x1B;
 constexpr uint32_t DB_Z_WRITE_BASE_HI       = 0x1C;
