@@ -8060,18 +8060,32 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 		auto* device = g_render_ctx->GetGraphicCtx()->device;
 
 		const auto wait_start = std::chrono::steady_clock::now();
-		const auto wait_result = vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, UINT64_MAX);
+		const auto wait_result = vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, 10000000000ULL);  // 10s bounded timeout to prevent GPU pipeline freeze
 		const auto wait_ns =
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
-		EXIT_NOT_IMPLEMENTED(wait_result != VK_SUCCESS);
+		if (wait_result == VK_TIMEOUT)
+		{
+			printf("WARNING: vkWaitForFences timeout on slot %" PRIu32 " after %" PRId64 "ns (fence may still signal)\n",
+			       m_index, static_cast<int64_t>(wait_ns));
+		}
+		EXIT_NOT_IMPLEMENTED(wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT);
 		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
 		DebugStatsRecordSubmissionComplete();
 		if (drain_label_callbacks)
 		{
 			LabelDrainCompleted();
 		}
-		const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
-		EXIT_NOT_IMPLEMENTED(fence_reset_result != VK_SUCCESS);
+		if (wait_result != VK_TIMEOUT)
+		{
+			const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
+			EXIT_NOT_IMPLEMENTED(fence_reset_result != VK_SUCCESS);
+		}
+		else
+		{
+			// Fence did not signal within timeout — skip reset to avoid
+			// VK_ERROR_DEVICE_LOST.  The fence slot will be reclaimed on
+			// the next successful WaitForFence pass for this slot.
+		}
 		if (reset_command_buffer)
 		{
 			const auto command_reset_result =

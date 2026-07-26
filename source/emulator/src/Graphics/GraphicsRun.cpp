@@ -1072,15 +1072,10 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	printf("--- Error ---\nWaitRegMem32 timeout addr=%p val=0x%08" PRIx32 " ref=0x%08" PRIx32 " mask=0x%08" PRIx32
 	       " (continuing; fence producer still pending)\n",
 	       static_cast<const void*>(addr), *addr, ref, mask);
-	for (;;)
-	{
-		if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
-		{
-			return;
-		}
-		LabelDrainCompleted();
-		Core::Thread::SleepMicro(1000);
-	}
+	// Force-continue after timeout: an infinite poll blocks the command
+	// processor thread and freezes the entire GPU pipeline.
+	LabelDrainCompleted();
+	return;
 }
 
 void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll)
@@ -1149,15 +1144,10 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	printf("--- Error ---\nWaitRegMem64 timeout addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64 " mask=0x%016" PRIx64
 	       " (continuing; fence producer still pending)\n",
 	       static_cast<const void*>(addr), *addr, ref, mask);
-	for (;;)
-	{
-		if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
-		{
-			return;
-		}
-		LabelDrainCompleted();
-		Core::Thread::SleepMicro(1000);
-	}
+	// Force-continue after timeout: an infinite poll blocks the command
+	// processor thread and freezes the entire GPU pipeline.
+	LabelDrainCompleted();
+	return;
 }
 
 bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords,
