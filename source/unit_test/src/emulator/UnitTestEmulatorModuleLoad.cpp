@@ -199,6 +199,23 @@ TEST(EmulatorModuleLoad, BuildPlanAcceptsSelfWrappedAdjacentSharedPrx)
 	EXPECT_EQ(plan.diag.rejection_count, 0u);
 }
 
+TEST(EmulatorModuleLoad, BuildPlanAcceptsRootSharedSidecarPrx)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_module_load_root_sidecar_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+	ASSERT_TRUE(WriteBinary(temp.root + U"eboot.bin", MakeSelfWrappedElf(ET_DYNEXEC)));
+	ASSERT_TRUE(WriteBinary(temp.root + U"EOSSDK-PS5-Shipping.prx", MakeSelfWrappedElf(ET_DYNAMIC)));
+
+	const auto plan = ModuleLoadPlanning::BuildPlan(temp.root + U"eboot.bin", true);
+
+	ASSERT_TRUE(plan.valid) << plan.error;
+	EXPECT_EQ(plan.diag.adjacent_count, 1u);
+	ASSERT_EQ(plan.count, 2u);
+	EXPECT_STREQ(plan.entries[1].relative_key, "EOSSDK-PS5-Shipping.prx");
+	EXPECT_EQ(plan.entries[1].role, ModulePlanRole::PackageSidecar);
+	EXPECT_EQ(plan.diag.rejection_count, 0u);
+}
+
 TEST(EmulatorModuleLoad, ElfPlatformComesFromAbiVersion)
 {
 	EnsureFileSystemSubsystem();

@@ -28,7 +28,8 @@ constexpr uint32_t kModuleLoadPlanMaxConflicts  = 16;
 enum class ModulePlanRole : uint8_t
 {
 	Primary        = 0,
-	AdjacentShared = 1,
+	PackageSidecar = 1,
+	AdjacentShared = 2,
 };
 
 struct ModulePlanEntry

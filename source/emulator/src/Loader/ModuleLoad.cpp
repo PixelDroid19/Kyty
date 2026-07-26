@@ -306,9 +306,11 @@ bool IsSupportedPackageSubdir(const char* relative_subdir)
 	{
 		return false;
 	}
-	// Generic package locations only — no title-specific directories.
-	return std::strcmp(relative_subdir, "sce_module/") == 0 || std::strcmp(relative_subdir, "modules/") == 0 ||
-	       std::strcmp(relative_subdir, "Media/Modules/") == 0;
+	// Generic package locations only — no title-specific directories. A shared
+	// PRX beside eboot.bin is a package sidecar; system-style modules remain in
+	// their conventional subdirectories.
+	return std::strcmp(relative_subdir, "") == 0 || std::strcmp(relative_subdir, "sce_module/") == 0 ||
+	       std::strcmp(relative_subdir, "modules/") == 0 || std::strcmp(relative_subdir, "Media/Modules/") == 0;
 }
 
 DiscoveryResult DiscoverAdjacentCandidates(const String& package_root_host, String* out_host_paths, String* out_relative_keys,
@@ -325,7 +327,7 @@ DiscoveryResult DiscoverAdjacentCandidates(const String& package_root_host, Stri
 	}
 
 	const String root      = NormalizeRoot(package_root_host);
-	const char*  subdirs[] = {"sce_module/", "modules/", "Media/Modules/"};
+	const char*  subdirs[] = {"", "sce_module/", "modules/", "Media/Modules/"};
 
 	for (const char* sub: subdirs)
 	{
@@ -510,7 +512,11 @@ ModuleLoadPlan BuildPlan(const String& primary_host_path, bool discovery_enabled
 		CopyString(entry.host_path, sizeof(entry.host_path), host);
 		CopyString(entry.relative_key, sizeof(entry.relative_key), rel);
 		CopyCStr(entry.identity, sizeof(entry.identity), identity);
-		entry.role               = ModulePlanRole::AdjacentShared;
+		// A PRX directly beside the primary executable is part of the
+		// application package. Modules below package subdirectories remain
+		// deferred providers: starting every system-facing PRX at boot can run
+		// unrelated CRT or service initialization.
+		entry.role               = rel.ContainsStr(U"/") ? ModulePlanRole::AdjacentShared : ModulePlanRole::PackageSidecar;
 		entry.platform           = module_platform;
 		entry.elf_abi            = GuestPlatformAbiVersion(module_platform);
 		plan.entries[plan.count] = entry;
@@ -846,7 +852,7 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 	// Fail-before-mutate: re-probe every adjacent entry before loading any.
 	for (uint32_t i = 0; i < plan.count; ++i)
 	{
-		if (plan.entries[i].role != ModulePlanRole::AdjacentShared)
+		if (plan.entries[i].role != ModulePlanRole::PackageSidecar)
 		{
 			continue;
 		}
@@ -887,7 +893,7 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 
 	for (uint32_t i = 0; i < plan.count; ++i)
 	{
-		if (plan.entries[i].role != ModulePlanRole::AdjacentShared)
+		if (plan.entries[i].role != ModulePlanRole::PackageSidecar)
 		{
 			continue;
 		}
@@ -1071,7 +1077,9 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 
 			for (uint32_t i = 0; i < g_pending.plan.count; ++i)
 			{
-				if (g_pending.attempted[i] || g_pending.plan.entries[i].role != ModulePlanRole::AdjacentShared)
+				if (g_pending.attempted[i] ||
+				    (g_pending.plan.entries[i].role != ModulePlanRole::AdjacentShared &&
+				     g_pending.plan.entries[i].role != ModulePlanRole::PackageSidecar))
 				{
 					continue;
 				}
