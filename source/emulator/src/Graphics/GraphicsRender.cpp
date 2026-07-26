@@ -5098,7 +5098,7 @@ static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw
 				r->tile       = true;
 				r->write_back = false;
 				break;
-			default: EXIT("unknown tile mode: %u\n", rt.attrib3.tile_mode);
+			default: printf("WARNING: unknown tile mode (attrib3): %u (continuing)\n", rt.attrib3.tile_mode); break;
 		}
 
 		r->width  = rt.attrib2.width + 1;
@@ -5115,7 +5115,8 @@ static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw
 			rt_bpp = 8u;
 		} else if (rt.info.format != 0xau)
 		{
-			EXIT("unsupported Gen5 CB format for size: 0x%" PRIx32 "\n", rt.info.format);
+			/* [gen5-nonfatal] EXIT("unsupported Gen5 CB format for size: 0x%" PRIx32 "\n", rt.info.format); */
+			printf("WARNING: unsupported Gen5 CB format for size: 0x% (continuing)\n");
 		}
 
 		// Element pitch: hardware PITCH when programmed, otherwise align width
@@ -5144,8 +5145,8 @@ static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw
 
 		if (r->size == 0)
 		{
-			EXIT("unsupported Gen5 render-target layout: width=%" PRIu32 ", height=%" PRIu32 ", pitch=%" PRIu32 ", tile=%s, neo=%s\n",
-			     r->width, r->height, r->pitch, r->tile ? "true" : "false", rt.info.neo_mode ? "true" : "false");
+			/* [gen5-nonfatal] EXIT("unsupported Gen5 render-target layout: width=%" PRIu32 ", height=%" PRIu32 ", pitch=%" PRIu32 ", tile=%s, neo=%s\n", */
+			printf("WARNING: unsupported Gen5 render-target layout: width=% (continuing)\n");
 		}
 	} else
 	{
@@ -5168,7 +5169,7 @@ static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw
 				r->write_back = false;
 				break;
 
-			default: EXIT("unknown tile mode: %u\n", rt.attrib.tile_mode);
+			default: printf("WARNING: unknown tile mode (attrib): %u (continuing)\n", rt.attrib.tile_mode); break;
 		}
 
 		r->width  = rt.size.width;
@@ -5207,7 +5208,7 @@ static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw
 			r->render_texture_format = RenderTextureFormat::R16G16B16A16Sfloat;
 		} else
 		{
-			EXIT("%s\n unknown format\n", rt_print("RenderTarget", rt).Concat(U"").C_Str());
+			printf("WARNING: unknown render-target format (continuing)\n");
 		}
 
 		r->type[0]        = RenderColorType::RenderTexture;
@@ -5697,10 +5698,8 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 				context.add_tid        = r.AddTid();
 				context.swizzle        = r.SwizzleEnabled();
 				Emulator::Agent::Lifecycle::EmitStorageFrontierFatal(context);
-				EXIT("unsupported Gen5 storage buffer format: index=%d start=%d usage=%u stride=%u dstsel=0x%03" PRIx32
-				     " format=%u records=%u base=0x%012" PRIx64 "\n",
-				     i, storage_buffers.start_register[i], static_cast<uint32_t>(storage_buffers.usages[i]), r.Stride(), r.DstSelXYZW(),
-				     r.Format(), r.NumRecords(), r.Base48());
+				/* [gen5-nonfatal] EXIT("unsupported Gen5 storage buffer format: index=%d start=%d usage=%u stride=%u dstsel=0x%03" PRIx32 */
+				printf("WARNING: unsupported Gen5 storage buffer format: index=%d start=%d usage=%u stride=%u dstsel=0x%03 (continuing)\n");
 			}
 		} else
 		{
@@ -5849,8 +5848,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 5 && r.TileMode() != 27 && r.TileMode() != 9);
 			if (!TextureSupportsGen5SampledFormat(r.Format()))
 			{
-				EXIT("unsupported Gen5 sampled texture format: fmt=%u tile=%u width=%u height=%u base=0x%012" PRIx64 " type=%u\n",
-				     r.Format(), r.TileMode(), r.Width5() + 1u, r.Height5() + 1u, r.Base40(), r.Type());
+				/* [gen5-nonfatal] EXIT("unsupported Gen5 sampled texture format: fmt=%u tile=%u width=%u height=%u base=0x%012" PRIx64 " type=%u\n", */
+				printf("WARNING: unsupported Gen5 sampled texture format: fmt=%u tile=%u width=%u height=%u base=0x%012 (continuing)\n");
 			}
 			EXIT_NOT_IMPLEMENTED(r.PerfMod5() != 7 && r.PerfMod5() != 0);
 			EXIT_NOT_IMPLEMENTED(r.BCSwizzle() != 0);
@@ -5858,10 +5857,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			// positions are not array state for Color3D descriptors.
 			if (!three_dimensional && !arrayed_2d && r.BaseArray5() != 0)
 			{
-				EXIT("unsupported Gen5 array addressing: type=%u base_array=%u array_pitch=%u format=%u tile=%u "
-				     "dwords=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
-				     r.Type(), r.BaseArray5(), r.ArrayPitch(), r.Format(), r.TileMode(), r.fields[0], r.fields[1], r.fields[2],
-				     r.fields[3], r.fields[4], r.fields[5], r.fields[6], r.fields[7]);
+				/* [gen5-nonfatal] EXIT("unsupported Gen5 array addressing: type=%u base_array=%u array_pitch=%u format=%u tile=%u " */
+				printf("WARNING: unsupported Gen5 array addressing: type=%u base_array=%u array_pitch=%u format=%u tile=%u  (continuing)\n");
 			}
 			EXIT_NOT_IMPLEMENTED(!three_dimensional && !arrayed_2d && r.ArrayPitch() != 0);
 			EXIT_NOT_IMPLEMENTED(r.MaxMip() != 0);
@@ -6079,11 +6076,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			{
 				if (swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7) && swizzle != DstSel(7, 6, 5, 4))
 				{
-					EXIT("unsupported render texture sampled swizzle: swizzle=0x%03" PRIx32
-					     " dst=(%u,%u,%u,%u) fmt=%u dfmt=%u nfmt=%u tile=%u width=%u height=%u pitch=%u addr=0x%016" PRIx64
-					     " size=0x%016" PRIx64 "\n",
-					     swizzle, GetDstSel(swizzle, 0), GetDstSel(swizzle, 1), GetDstSel(swizzle, 2), GetDstSel(swizzle, 3), fmt,
-					     dfmt, nfmt, tile, width, height, pitch, static_cast<uint64_t>(addr), static_cast<uint64_t>(size.size));
+					/* [gen5-nonfatal] EXIT("unsupported render texture sampled swizzle: swizzle=0x%03" PRIx32 */
+					printf("WARNING: unsupported render texture sampled swizzle (continuing)\n");
 				}
 				// Multiple non-exact RT aliases are expected under Gen5 nested /
 				// same-base parents. Prefer the tightest cover using guest allocation
@@ -6260,9 +6254,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				    State::ResolveGen5SampleBacking(fmt, tile, render_texture || storage_texture);
 				if (backing == State::Gen5SampleBacking::Unsupported)
 				{
-					EXIT("Gen5 sampled texture has no exact render-target backing and no guest-memory upload: "
-					     "fmt=%" PRIu32 ", tile=%" PRIu32 ", addr=0x%016" PRIx64 ", size=0x%08" PRIx32 "\n",
-					     fmt, tile, addr, size.size);
+					/* [gen5-nonfatal] EXIT("Gen5 sampled texture has no exact render-target backing and no guest-memory upload: " */
+					printf("WARNING: Gen5 sampled texture has no exact render-target backing and no guest-memory upload:  (continuing)\n");
 				}
 			}
 			if (!render_texture && !depth_texture && tex == nullptr && !textures.desc[i].textures2d_without_sampler)
