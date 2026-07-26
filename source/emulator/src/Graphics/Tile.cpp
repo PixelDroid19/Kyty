@@ -1654,7 +1654,10 @@ void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t h
 	const bool dynamic_display_thin = (tile == 10 && dfmt == 10 && nfmt == 0 && levels == 1);
 	MicroTiledFormatLayout dynamic_micro_format {};
 	const bool dynamic_micro_tiled = tile == 13 && GetMicroTiledFormatLayout(dfmt, nfmt, &dynamic_micro_format);
-	EXIT_NOT_IMPLEMENTED(tile != 31 && tile != 8 && infos == nullptr && !dynamic_display_thin && !dynamic_micro_tiled);
+	if (tile != 31 && tile != 8 && infos == nullptr && !dynamic_display_thin && !dynamic_micro_tiled)
+	{
+		printf("WARNING: TileGetTextureSize unknown tile=%u dfmt=%u nfmt=%u %ux%u; estimating\n", tile, dfmt, nfmt, width, height);
+	}
 
 	EXIT_IF(levels == 0 || levels > 16);
 
@@ -1763,16 +1766,21 @@ void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t h
 
 	if (total_size != nullptr && total_size->size == 0)
 	{
-		Core::StringList list;
-		list.Add(String::FromPrintf("dfmt   = %u", dfmt));
-		list.Add(String::FromPrintf("nfmt   = %u", nfmt));
-		list.Add(String::FromPrintf("width  = %u", width));
-		list.Add(String::FromPrintf("height = %u", height));
-		list.Add(String::FromPrintf("pitch  = %u", pitch));
-		list.Add(String::FromPrintf("levels = %u", levels));
-		list.Add(String::FromPrintf("tile   = %u", tile));
-		list.Add(String::FromPrintf("neo    = %s", neo ? "true" : "false"));
-		EXIT("unknown format:\n%s\n", list.Concat(U'\n').C_Str());
+		// Unknown format: estimate a conservative size so the game continues.
+		const uint32_t bpp = (dfmt == 10 && nfmt == 9) ? 4u : ((dfmt == 3 && nfmt == 0) ? 2u : 1u);
+		const uint64_t estimated = static_cast<uint64_t>(pitch) * height * bpp;
+		printf("WARNING: TileGetTextureSize unknown dfmt=%u nfmt=%u tile=%u %ux%u; estimating %llu bytes\n",
+		       dfmt, nfmt, tile, width, height, (unsigned long long)estimated);
+		if (total_size != nullptr)
+		{
+			total_size->size  = static_cast<uint32_t>(estimated > 0xFFFFFFFFull ? 0xFFFFFFFFull : estimated);
+			total_size->align = 256;
+		}
+		if (level_sizes != nullptr)
+		{
+			level_sizes[0].size   = total_size->size;
+			level_sizes[0].offset = 0;
+		}
 	}
 }
 

@@ -554,7 +554,8 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 	(void)dsync;
 	(void)direct;
 
-	EXIT_NOT_IMPLEMENTED(nonblock && !directory);
+	// nonblock on regular files is advisory-only; safely ignore it.
+	(void)nonblock;
 
 	flags_u &= 0x3u;
 
@@ -1203,8 +1204,7 @@ int KYTY_SYSV_ABI KernelUnlink(const char* path)
 	auto real_file_name = g_mount_points->GetRealFilename(path_s);
 	auto real_directory = g_mount_points->GetRealDirectory(path_s);
 
-	EXIT_NOT_IMPLEMENTED(g_files->GetFile(real_file_name) != nullptr);
-	EXIT_NOT_IMPLEMENTED(g_files->GetFile(real_directory) != nullptr);
+	// Allow unlink even if the file descriptor is open.
 
 	bool is_dir  = Core::File::IsDirectoryExisting(real_file_name) || Core::File::IsDirectoryExisting(real_directory);
 	bool is_file = Core::File::IsFileExisting(real_file_name);

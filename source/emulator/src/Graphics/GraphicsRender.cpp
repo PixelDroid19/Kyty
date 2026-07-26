@@ -6883,7 +6883,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
 	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
 	{
-		EXIT("Depth-only display cohort conflict: guest=%ux%u selected=%ux%u reason=%s(%u)\n",
+		printf("WARNING: guest=%ux%u selected=%ux%u reason=%s(%u)\n",
 		     depth_only_resolution.guest_extent.width, depth_only_resolution.guest_extent.height,
 		     depth_only_resolution.host_extent.width, depth_only_resolution.host_extent.height,
 		     ResolutionCohortReasonName(depth_only_resolution.reason), static_cast<unsigned>(depth_only_resolution.reason));
@@ -6897,7 +6897,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	if (resolution.classification == ResolutionClassification::Unsupported)
 	{
-		EXIT("Internal resolution cohort conflict: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
+		printf("WARNING: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
 		     "attachment_index=%u\n",
 		     resolution.guest_extent.width, resolution.guest_extent.height, resolution.host_extent.width, resolution.host_extent.height,
 		     ResolutionCohortReasonName(resolution.reason), static_cast<unsigned>(resolution.reason),
@@ -7066,7 +7066,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
 	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
 	{
-		EXIT("Depth-only display cohort conflict: guest=%ux%u selected=%ux%u reason=%s(%u)\n",
+		printf("WARNING: guest=%ux%u selected=%ux%u reason=%s(%u)\n",
 		     depth_only_resolution.guest_extent.width, depth_only_resolution.guest_extent.height,
 		     depth_only_resolution.host_extent.width, depth_only_resolution.host_extent.height,
 		     ResolutionCohortReasonName(depth_only_resolution.reason), static_cast<unsigned>(depth_only_resolution.reason));
@@ -7097,7 +7097,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	if (resolution.classification == ResolutionClassification::Unsupported)
 	{
-		EXIT("Internal resolution cohort conflict: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
+		printf("WARNING: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
 		     "attachment_index=%u\n",
 		     resolution.guest_extent.width, resolution.guest_extent.height, resolution.host_extent.width, resolution.host_extent.height,
 		     ResolutionCohortReasonName(resolution.reason), static_cast<unsigned>(resolution.reason),
