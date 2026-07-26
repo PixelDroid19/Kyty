@@ -914,6 +914,20 @@ TEST(EmulatorGraphicsState, GpuMemoryMutationPolicyKeepsWriteBackConflictStrict)
 	EXPECT_EQ(GpuMemoryChooseMutationAction(true, false, true, true), GpuMemoryMutationAction::RejectWriteBackConflict);
 }
 
+TEST(EmulatorGraphicsState, GpuMemoryAliasLookupRefreshesTheUseFrame)
+{
+	EXPECT_EQ(GpuMemoryAliasLookupUseFrame(42, 7), 42u);
+	EXPECT_EQ(GpuMemoryAliasLookupUseFrame(0, 7), 0u);
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryRetirementBudgetKeepsUpWithTransientCreation)
+{
+	EXPECT_EQ(GpuMemoryRetirementBatchLimit(0), 256u);
+	EXPECT_EQ(GpuMemoryRetirementBatchLimit(128), 256u);
+	EXPECT_EQ(GpuMemoryRetirementBatchLimit(500), 1000u);
+	EXPECT_EQ(GpuMemoryRetirementBatchLimit(1500), 2048u);
+}
+
 TEST(EmulatorGraphicsState, GpuMemoryCoveredIndexReusePreservesOneBackingAndVersionsSafely)
 {
 	EnsureGpuMemoryForTests();

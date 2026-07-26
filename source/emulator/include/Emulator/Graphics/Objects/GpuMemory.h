@@ -12,6 +12,27 @@
 
 namespace Kyty::Libs::Graphics {
 
+// Submission-scoped alias lookup is a real resource use. Keep the logical
+// liveness clock independent from submission dependency tracking so eviction
+// cannot classify a currently sampled GPU-only image as stale.
+[[nodiscard]] inline uint64_t GpuMemoryAliasLookupUseFrame(uint64_t current_frame, uint64_t /*previous_use_frame*/)
+{
+	return current_frame;
+}
+
+// Frame retirement runs periodically. Its bounded work budget must still
+// exceed the recent creation rate, otherwise transient standalone images grow
+// without bound even when every candidate is safe to retire.
+[[nodiscard]] inline uint32_t GpuMemoryRetirementBatchLimit(uint32_t transient_creates_since_last_pass)
+{
+	constexpr uint32_t kMinimumBatch = 256;
+	constexpr uint32_t kMaximumBatch = 2048;
+	const uint32_t doubled = transient_creates_since_last_pass > kMaximumBatch / 2u
+	                             ? kMaximumBatch
+	                             : transient_creates_since_last_pass * 2u;
+	return doubled > kMinimumBatch ? doubled : kMinimumBatch;
+}
+
 class CommandBuffer;
 class CommandProcessor;
 struct GraphicContext;

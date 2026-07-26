@@ -15,6 +15,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
+#include "Emulator/Graphics/Window.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -267,7 +268,7 @@ public:
 	void* CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
 	                   int vaddr_num, const GpuObject& info);
 	void  ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type);
-	void  FrameDone();
+	void  FrameDone(GraphicContext* ctx);
 
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first, const SubmissionId* submission = nullptr);
@@ -428,6 +429,7 @@ private:
 	Vector<Heap> m_heaps;
 
 	uint64_t m_current_frame = 0;
+	uint32_t m_transient_creates_since_retirement = 0;
 
 	MaterializationCache m_materialization_cache;
 
@@ -2253,6 +2255,14 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		created_bytes += size[vi];
 	}
 	DebugStatsRecordAlloc(created_bytes);
+	if (info.type == GpuMemoryObjectType::Texture || info.type == GpuMemoryObjectType::StorageTexture ||
+	    info.type == GpuMemoryObjectType::StorageBuffer)
+	{
+		if (m_transient_creates_since_retirement != UINT32_MAX)
+		{
+			m_transient_creates_since_retirement++;
+		}
+	}
 
 	if (reclaimed_existing)
 	{
@@ -2297,6 +2307,7 @@ Vector<GpuMemoryObject> GpuMemory::FindObjects(const uint64_t* vaddr, const uint
 			if (submission != nullptr)
 			{
 				RecordUse(&h.info, *submission);
+				h.info.use_last_frame = GpuMemoryAliasLookupUseFrame(m_current_frame, h.info.use_last_frame);
 			}
 			ret.Add(h.info.object);
 		}
@@ -2315,6 +2326,7 @@ Vector<GpuMemoryObject> GpuMemory::FindObjects(const uint64_t* vaddr, const uint
 			if (submission != nullptr)
 			{
 				RecordUse(&h.info, *submission);
+				h.info.use_last_frame = GpuMemoryAliasLookupUseFrame(m_current_frame, h.info.use_last_frame);
 			}
 			ret.Add(h.info.object);
 		}
@@ -2995,11 +3007,67 @@ void GpuMemory::DeleteBlock(Block* b, int heap_id, int obj_id)
 	}
 }
 
-void GpuMemory::FrameDone()
+void GpuMemory::FrameDone(GraphicContext* ctx)
 {
+	EXIT_IF(ctx == nullptr);
+
+	constexpr uint64_t kRetireAfterFrames = 120;
+
+	Vector<Destructor> destructors;
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
 
 	m_current_frame++;
+	if (m_current_frame < kRetireAfterFrames || (m_current_frame % 30u) != 0u)
+	{
+		return;
+	}
+
+	const uint32_t retire_batch_limit = GpuMemoryRetirementBatchLimit(m_transient_creates_since_retirement);
+	m_transient_creates_since_retirement = 0;
+	uint32_t retired = 0;
+	int      heap_id = 0;
+	for (auto& heap: m_heaps)
+	{
+		int object_id = 0;
+		for (auto& h: heap.objects)
+		{
+			if (retired >= retire_batch_limit)
+			{
+				break;
+			}
+			if (h.free || h.scenario != GpuMemoryScenario::Common || !h.others.IsEmpty())
+			{
+				object_id++;
+				continue;
+			}
+
+			auto& object = h.info;
+			const bool reclaimable_type = object.object.type == GpuMemoryObjectType::Texture ||
+			                              object.object.type == GpuMemoryObjectType::StorageTexture ||
+			                              object.object.type == GpuMemoryObjectType::StorageBuffer;
+			const bool storage_buffer_safe = object.object.type != GpuMemoryObjectType::StorageBuffer ||
+			                                  object.write_back_func == nullptr || object.read_only;
+			const bool old_enough = m_current_frame - object.use_last_frame >= kRetireAfterFrames;
+			const bool dependencies_complete = m_deferred_deletions.AreDependenciesComplete(object.submission_uses.Dependencies());
+			if (reclaimable_type && storage_buffer_safe && old_enough && dependencies_complete)
+			{
+				destructors.Add(Free(heap_id, object_id));
+				retired++;
+			}
+			object_id++;
+		}
+		heap_id++;
+		if (retired >= retire_batch_limit)
+		{
+			break;
+		}
+	}
+
+	if (!destructors.IsEmpty())
+	{
+		ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
+	}
 }
 
 void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors,
@@ -3737,7 +3805,7 @@ void GpuMemoryFrameDone()
 {
 	EXIT_IF(g_gpu_memory == nullptr);
 
-	g_gpu_memory->FrameDone();
+	g_gpu_memory->FrameDone(WindowGetGraphicContext());
 }
 
 void GpuMemoryWriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission)
