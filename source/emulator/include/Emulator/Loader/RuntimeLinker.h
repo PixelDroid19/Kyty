@@ -277,17 +277,12 @@ private:
 // Returns the number of sites rewritten. Pure buffer transform for unit tests.
 uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size);
 
-// Legacy narrow TLS-base-load rewrite. Retained for compatibility with
-// existing callers; production guest code uses LoaderRewriteGuestFsToGs.
+// Patch direct guest TLS-base loads in executable code:
+//   [66 ...] mov rax, qword ptr fs:[0]
+// into a call to Kyty's per-thread guest TLS handler. Returns the number of
+// load sites rewritten. Pure buffer transform for unit tests; callers own page
+// permissions and instruction-cache flushing.
 uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handler_vaddr);
-
-// Rewrites decoded FS-segment guest memory operands to GS operands. Kyty keeps
-// the host FS base intact for libc while GS is installed with the per-thread
-// guest TCB around guest execution. Returns zero when the host cannot provide
-// that isolated guest segment base.
-uint64_t LoaderRewriteGuestFsToGs(uint8_t* code, uint64_t size);
-[[nodiscard]] bool LoaderEnterGuestSegment();
-void               LoaderLeaveGuestSegment();
 
 // Calculate x86-64 TLS relocation payloads in guest terms. DTPMOD64 writes the
 // stable guest TLS module id; DTPOFF64 writes the module-local TLS offset; and

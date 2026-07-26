@@ -1,7 +1,5 @@
 #include "Emulator/Loader/GuestCall.h"
 
-#include "Emulator/Loader/RuntimeLinker.h"
-
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Loader::GuestCall {
@@ -10,8 +8,6 @@ namespace Kyty::Loader::GuestCall {
 
 uint64_t KYTY_SYSV_ABI Invoke(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2)
 {
-	EXIT_IF(!LoaderEnterGuestSegment());
-
 	uint64_t result = 0;
 
 	// The guest ABI permits an RBP walker to follow frames until a frame whose
@@ -46,7 +42,6 @@ uint64_t KYTY_SYSV_ABI Invoke(uint64_t target, uint64_t arg0, uint64_t arg1, uin
 	             : "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11", "st", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6",
 	               "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
 
-	LoaderLeaveGuestSegment();
 	return result;
 }
 
