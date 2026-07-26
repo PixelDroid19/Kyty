@@ -8,6 +8,8 @@
 
 #include <cinttypes>
 #include <cstddef>
+#include <map>
+#include <mutex>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -441,6 +443,152 @@ LIB_DEFINE(InitNet_1_NpWebApi2)
 
 } // namespace LibNpWebApi2
 
+namespace LibGameUpdate {
+
+LIB_VERSION("GameUpdate", 1, "GameUpdate", 1, 1);
+
+constexpr int GAME_UPDATE_ERROR_NOT_INITIALIZED   = static_cast<int>(0x80412801);
+constexpr int GAME_UPDATE_ERROR_INVALID_ARG       = static_cast<int>(0x80412803);
+constexpr int GAME_UPDATE_ERROR_INVALID_SIZE      = static_cast<int>(0x80412804);
+constexpr int GAME_UPDATE_ERROR_REQUEST_NOT_FOUND = static_cast<int>(0x80412805);
+
+struct GameUpdateCheckParam
+{
+	uint64_t size;
+	uint32_t option;
+	uint32_t reserved[9];
+};
+
+struct GameUpdateCheckResult
+{
+	uint64_t size;
+	uint8_t  found;
+	uint8_t  addcont_found;
+	uint8_t  padding[2];
+	char     content_version[11];
+	uint8_t  padding2;
+	uint32_t reserved[6];
+};
+
+struct GameUpdateAddcontVersionInfo
+{
+	uint64_t size;
+	uint8_t  found;
+	char     content_version[11];
+	uint32_t reserved[6];
+};
+
+static std::mutex    g_game_update_mutex;
+static bool          g_game_update_initialized = false;
+static int           g_game_update_next_request = 1;
+static std::map<int, bool> g_game_update_requests;
+
+static int KYTY_SYSV_ABI GameUpdateInitialize()
+{
+	std::lock_guard lock(g_game_update_mutex);
+	g_game_update_initialized = true;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI GameUpdateTerminate()
+{
+	std::lock_guard lock(g_game_update_mutex);
+	g_game_update_initialized = false;
+	g_game_update_requests.clear();
+	return 0;
+}
+
+static int KYTY_SYSV_ABI GameUpdateCreateRequest()
+{
+	std::lock_guard lock(g_game_update_mutex);
+	if (!g_game_update_initialized)
+	{
+		return GAME_UPDATE_ERROR_NOT_INITIALIZED;
+	}
+	const int request_id = g_game_update_next_request++;
+	g_game_update_requests[request_id] = true;
+	return request_id;
+}
+
+static int KYTY_SYSV_ABI GameUpdateCheck(int request_id, const GameUpdateCheckParam* param, GameUpdateCheckResult* result)
+{
+	std::lock_guard lock(g_game_update_mutex);
+	if (!g_game_update_initialized)
+	{
+		return GAME_UPDATE_ERROR_NOT_INITIALIZED;
+	}
+	if (g_game_update_requests.find(request_id) == g_game_update_requests.end())
+	{
+		return GAME_UPDATE_ERROR_REQUEST_NOT_FOUND;
+	}
+	if (param == nullptr || result == nullptr)
+	{
+		return GAME_UPDATE_ERROR_INVALID_ARG;
+	}
+	if (param->size < sizeof(GameUpdateCheckParam) || result->size < sizeof(GameUpdateCheckResult))
+	{
+		return GAME_UPDATE_ERROR_INVALID_SIZE;
+	}
+	const uint64_t result_size = result->size;
+	*result = {};
+	result->size = result_size;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI GameUpdateAbortRequest(int request_id)
+{
+	std::lock_guard lock(g_game_update_mutex);
+	if (!g_game_update_initialized)
+	{
+		return GAME_UPDATE_ERROR_NOT_INITIALIZED;
+	}
+	return g_game_update_requests.find(request_id) != g_game_update_requests.end() ? 0 : GAME_UPDATE_ERROR_REQUEST_NOT_FOUND;
+}
+
+static int KYTY_SYSV_ABI GameUpdateDeleteRequest(int request_id)
+{
+	std::lock_guard lock(g_game_update_mutex);
+	if (!g_game_update_initialized)
+	{
+		return GAME_UPDATE_ERROR_NOT_INITIALIZED;
+	}
+	return g_game_update_requests.erase(request_id) != 0 ? 0 : GAME_UPDATE_ERROR_REQUEST_NOT_FOUND;
+}
+
+static int KYTY_SYSV_ABI GameUpdateGetAddcontLatestVersion(uint32_t, const void*, GameUpdateAddcontVersionInfo* info)
+{
+	std::lock_guard lock(g_game_update_mutex);
+	if (!g_game_update_initialized)
+	{
+		return GAME_UPDATE_ERROR_NOT_INITIALIZED;
+	}
+	if (info == nullptr)
+	{
+		return GAME_UPDATE_ERROR_INVALID_ARG;
+	}
+	if (info->size < sizeof(GameUpdateAddcontVersionInfo))
+	{
+		return GAME_UPDATE_ERROR_INVALID_SIZE;
+	}
+	const uint64_t info_size = info->size;
+	*info = {};
+	info->size = info_size;
+	return 0;
+}
+
+LIB_DEFINE(InitNet_1_GameUpdate)
+{
+	LIB_FUNC("YJtKLttI9fM", GameUpdateInitialize);
+	LIB_FUNC("NSH-C-OmoNI", GameUpdateTerminate);
+	LIB_FUNC("UvcvKaFvupA", GameUpdateCreateRequest);
+	LIB_FUNC("LYVV9z8+owM", GameUpdateCheck);
+	LIB_FUNC("d1CNGEOaK28", GameUpdateAbortRequest);
+	LIB_FUNC("bcCyjHN5sn0", GameUpdateDeleteRequest);
+	LIB_FUNC("0g0+Oq9xcI0", GameUpdateGetAddcontLatestVersion);
+}
+
+} // namespace LibGameUpdate
+
 namespace LibHttp2 {
 
 LIB_VERSION("Http2", 1, "Http2", 1, 1);
@@ -478,6 +626,7 @@ LIB_DEFINE(InitNet_1)
 	LibNpTrophy::InitNet_1_NpTrophy(s);
 	LibNpWebApi::InitNet_1_NpWebApi(s);
 	LibNpWebApi2::InitNet_1_NpWebApi2(s);
+	LibGameUpdate::InitNet_1_GameUpdate(s);
 }
 
 } // namespace Kyty::Libs

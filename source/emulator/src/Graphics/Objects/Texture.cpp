@@ -36,6 +36,7 @@ bool TextureSupportsGen5SampledFormat(uint16_t fmt)
 	{
 		case 1:
 		case 5:
+		case 7:
 		case 13:
 		case 14:
 		case 20:
@@ -103,6 +104,11 @@ VkFormat TextureResolveSampledVkFormat(uint8_t dfmt, uint8_t nfmt, uint16_t fmt,
 			// 32-bit integer image. Use a normalized host view here so hardware
 			// sampling has the same 0..1 result consumed by video shaders.
 			return VK_FORMAT_R8_UNORM;
+		}
+		if (fmt == 7)
+		{
+			// UfmtGFX10: dfmt=2 (16), nfmt=0 (UNORM) → R16_UNORM
+			return VK_FORMAT_R16_UNORM;
 		}
 		if (fmt == 13)
 		{

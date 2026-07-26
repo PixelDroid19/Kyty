@@ -1,9 +1,14 @@
 #include "Kyty/Core/SDLSubsystem.h"
 
 #include "Kyty/Core/Common.h"
-#include "Kyty/Core/MemoryAlloc.h"
 
+#include <cstddef>
+#include <cstdlib>
 #include <cstring>
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#include <windows.h>
+#endif
 
 // IWYU pragma: no_include <intrin.h>
 // IWYU pragma: no_include "SDL_error.h"
@@ -15,42 +20,127 @@
 
 namespace Kyty::Core {
 
-void* SDLCALL game_malloc_func(size_t size)
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+struct alignas(std::max_align_t) SdlHostAllocation
 {
-	return Core::mem_alloc(size);
+	size_t size = 0;
+};
+
+static void* sdl_host_virtual_alloc(size_t size)
+{
+	if (size == 0)
+	{
+		size = 1;
+	}
+	if (size > SIZE_MAX - sizeof(SdlHostAllocation))
+	{
+		return nullptr;
+	}
+
+	const SIZE_T total_size = static_cast<SIZE_T>(sizeof(SdlHostAllocation) + size);
+	for (uint32_t attempt = 0; attempt < 8; ++attempt)
+	{
+		auto* raw = VirtualAlloc(nullptr, total_size, MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN, PAGE_READWRITE);
+		if (raw == nullptr)
+		{
+			return nullptr;
+		}
+		if (reinterpret_cast<uintptr_t>(raw) >= UINT64_C(0x100000000))
+		{
+			auto* allocation = static_cast<SdlHostAllocation*>(raw);
+			allocation->size = size;
+			return allocation + 1;
+		}
+		VirtualFree(raw, 0, MEM_RELEASE);
+	}
+	return nullptr;
 }
 
-void* SDLCALL game_calloc_func(size_t nmemb, size_t size)
+static SdlHostAllocation* sdl_host_allocation(void* memory)
 {
-	void* p = Core::mem_alloc(nmemb * size);
-	std::memset(p, 0, nmemb * size);
-	return p;
+	return static_cast<SdlHostAllocation*>(memory) - 1;
+}
+#endif
+
+static void* sdl_host_malloc(size_t size)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return sdl_host_virtual_alloc(size);
+#else
+	if (size == 0)
+	{
+		size = 1;
+	}
+	return std::malloc(size);
+#endif
 }
 
-void* SDLCALL game_realloc_func(void* mem, size_t size)
+static void* sdl_host_calloc(size_t nmemb, size_t size)
 {
-	return Core::mem_realloc(mem, size);
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	if (size != 0 && nmemb > SIZE_MAX / size)
+	{
+		return nullptr;
+	}
+	void* memory = sdl_host_virtual_alloc(nmemb * size);
+	if (memory != nullptr)
+	{
+		std::memset(memory, 0, nmemb * size);
+	}
+	return memory;
+#else
+	return std::calloc(nmemb, size);
+#endif
 }
 
-void SDLCALL game_free_func(void* mem)
+static void* sdl_host_realloc(void* memory, size_t size)
 {
-	Core::mem_free(mem);
+	if (size == 0)
+	{
+		size = 1;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	if (memory == nullptr)
+	{
+		return sdl_host_virtual_alloc(size);
+	}
+	void* replacement = sdl_host_virtual_alloc(size);
+	if (replacement != nullptr)
+	{
+		auto* allocation = sdl_host_allocation(memory);
+		std::memcpy(replacement, memory, allocation->size < size ? allocation->size : size);
+		VirtualFree(allocation, 0, MEM_RELEASE);
+	}
+	return replacement;
+#else
+	if (size == 0)
+	{
+		size = 1;
+	}
+	return std::realloc(memory, size);
+#endif
+}
+
+static void sdl_host_free(void* memory)
+{
+	if (memory == nullptr)
+	{
+		return;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	VirtualFree(sdl_host_allocation(memory), 0, MEM_RELEASE);
+#else
+	std::free(memory);
+#endif
 }
 
 KYTY_SUBSYSTEM_INIT(SDL)
 {
-	int sdl_alloc = SDL_GetNumAllocations();
-
-	if (sdl_alloc != 0)
+	if (SDL_SetMemoryFunctions(sdl_host_malloc, sdl_host_calloc, sdl_host_realloc, sdl_host_free) != 0)
 	{
-		printf("warning: SDL static alloc: %d blocks\n", sdl_alloc);
-	} else
-	{
-		if (SDL_SetMemoryFunctions(game_malloc_func, game_calloc_func, game_realloc_func, game_free_func) != 0)
-		{
-			KYTY_SUBSYSTEM_FAIL("%s\n", SDL_GetError());
-		}
+		KYTY_SUBSYSTEM_FAIL("%s\n", SDL_GetError());
 	}
+	SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, "0");
 
 #if SDL_DYNAMIC_API != 0
 #error "SDL_DYNAMIC_API"

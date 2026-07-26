@@ -343,10 +343,11 @@ std::string SyncWaitsResult()
 		char        item[384];
 		std::snprintf(item, sizeof(item),
 		              "{\"cond\":\"0x%016llx\",\"mutex\":\"0x%016llx\",\"return_addr\":\"0x%016llx\","
-		              "\"cond_handle\":\"0x%016llx\",\"mutex_handle\":\"0x%016llx\",\"signal_count\":%u}",
+			              "\"cond_handle\":\"0x%016llx\",\"mutex_handle\":\"0x%016llx\",\"last_signal_return_addr\":\"0x%016llx\",\"signal_count\":%u}",
 		              static_cast<unsigned long long>(waiter.cond), static_cast<unsigned long long>(waiter.mutex),
 		              static_cast<unsigned long long>(waiter.return_addr), static_cast<unsigned long long>(waiter.cond_handle),
-		              static_cast<unsigned long long>(waiter.mutex_handle), waiter.signal_count);
+			              static_cast<unsigned long long>(waiter.mutex_handle),
+			              static_cast<unsigned long long>(waiter.last_signal_return_addr), waiter.signal_count);
 		out += item;
 	}
 	out += "]}";

@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <mutex>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 #include <windows.h> // IWYU pragma: keep
 
@@ -47,10 +46,16 @@ struct ReservationRoot
 	uint64_t size    = 0;
 };
 
+struct SharedView
+{
+	uint64_t mapped_address = 0;
+	uint64_t mapped_size    = 0;
+};
+
 std::mutex                   g_shared_views_mutex;
 std::mutex                   g_protection_transaction_mutex;
 std::mutex                   g_reservations_mutex;
-std::unordered_set<uint64_t> g_shared_views;
+std::unordered_map<uint64_t, SharedView> g_shared_views;
 std::unordered_map<uint64_t, uint64_t> g_private_shared_views;
 std::vector<ReservationRoot>           g_reservation_roots;
 
@@ -146,10 +151,29 @@ bool validate_shared_range(const SharedBacking* backing, uint64_t backing_offset
 uint64_t map_shared_at(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
 	                    VirtualMemory::Mode mode)
 {
-	const auto offset_high = static_cast<DWORD>(backing_offset >> 32u);
-	const auto offset_low  = static_cast<DWORD>(backing_offset & 0xffffffffu);
+	const auto granularity = get_allocation_granularity();
+	if (!shared_range_is_valid(backing, backing_offset, size) || granularity == 0)
+	{
+		return 0;
+	}
+
+	// MapViewOfFile requires the section offset to be aligned to the host
+	// allocation granularity (64 KiB on Windows), while guest direct memory is
+	// page-aligned at 16 KiB. Map the containing section range and expose the
+	// requested guest page inside that view. The visible address is tracked
+	// separately so unmapping releases the actual section base.
+	const auto offset_delta = backing_offset % granularity;
+	const auto section_offset = backing_offset - offset_delta;
+	if (offset_delta > UINT64_MAX - size || !shared_range_is_valid(backing, section_offset, size + offset_delta))
+	{
+		return 0;
+	}
+	const auto view_size = size + offset_delta;
+
+	const auto offset_high = static_cast<DWORD>(section_offset >> 32u);
+	const auto offset_low  = static_cast<DWORD>(section_offset & 0xffffffffu);
 	auto*      view        = MapViewOfFileEx(backing->mapping, FILE_MAP_ALL_ACCESS | FILE_MAP_EXECUTE, offset_high, offset_low,
-	                                          static_cast<SIZE_T>(size), reinterpret_cast<LPVOID>(address));
+	                                          static_cast<SIZE_T>(view_size), reinterpret_cast<LPVOID>(address));
 	if (view == nullptr)
 	{
 		return 0;
@@ -162,7 +186,7 @@ uint64_t map_shared_at(SharedBacking* backing, uint64_t address, uint64_t backin
 		return 0;
 	}
 
-	auto* committed = VirtualAlloc(view, static_cast<SIZE_T>(size), MEM_COMMIT, PAGE_READWRITE);
+	auto* committed = VirtualAlloc(view, static_cast<SIZE_T>(view_size), MEM_COMMIT, PAGE_READWRITE);
 	if (committed != view)
 	{
 		printf("VirtualAlloc(shared view) failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
@@ -171,18 +195,30 @@ uint64_t map_shared_at(SharedBacking* backing, uint64_t address, uint64_t backin
 	}
 
 	DWORD old_protect = 0;
-	if (VirtualProtect(view, static_cast<SIZE_T>(size), get_protection_flag(mode), &old_protect) == 0)
+	if (VirtualProtect(view, static_cast<SIZE_T>(view_size), get_protection_flag(mode), &old_protect) == 0)
 	{
 		printf("VirtualProtect(shared view) failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
 		UnmapViewOfFile(view);
 		return 0;
 	}
 
+	if (mapped_address > UINT64_MAX - offset_delta)
+	{
+		UnmapViewOfFile(view);
+		return 0;
+	}
+	const auto visible_address = mapped_address + offset_delta;
+	if (visible_address < address)
+	{
+		UnmapViewOfFile(view);
+		return 0;
+	}
+
 	{
 		std::scoped_lock lock(g_shared_views_mutex);
-		g_shared_views.insert(mapped_address);
+		g_shared_views.emplace(visible_address, SharedView {mapped_address, view_size});
 	}
-	return mapped_address;
+	return visible_address;
 }
 
 uint64_t probe_shared_range(SharedBacking* backing, uint64_t begin, uint64_t end, uint64_t backing_offset, uint64_t size,
@@ -585,7 +621,7 @@ uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_
 	                                    VirtualMemory::Mode mode, uint64_t alignment)
 {
 	auto* shared = static_cast<SharedBacking*>(backing);
-	if (!validate_shared_range(shared, backing_offset, size) || !is_power_of_two(alignment))
+	if (!shared_range_is_valid(shared, backing_offset, size) || !is_power_of_two(alignment))
 	{
 		return 0;
 	}
@@ -674,9 +710,10 @@ bool sys_virtual_free(uint64_t address)
 {
 	{
 		std::scoped_lock lock(g_shared_views_mutex);
-		if (g_shared_views.find(address) != g_shared_views.end())
+		const auto view = g_shared_views.find(address);
+		if (view != g_shared_views.end())
 		{
-			if (UnmapViewOfFile(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(address))) == 0)
+			if (UnmapViewOfFile(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(view->second.mapped_address))) == 0)
 			{
 				printf("UnmapViewOfFile() failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
 				return false;

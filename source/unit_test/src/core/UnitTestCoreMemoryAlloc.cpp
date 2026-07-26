@@ -43,6 +43,23 @@ TEST(CoreMemoryAlloc, GuestDomainUsesCompleteThreadTokens)
 	EXPECT_TRUE(registry.Contains(second_token));
 }
 
+TEST(CoreMemoryAlloc, GuestDomainSupportsConcurrentWorkerPool)
+{
+	Core::MemoryAllocDetail::ThreadDomainRegistry registry;
+
+	for (uint64_t token = 1; token <= Core::MemoryAllocDetail::ThreadDomainRegistry::capacity; ++token)
+	{
+		EXPECT_TRUE(registry.Add(token));
+		EXPECT_TRUE(registry.Contains(token));
+	}
+	EXPECT_FALSE(registry.Add(Core::MemoryAllocDetail::ThreadDomainRegistry::capacity + 1));
+
+	for (uint64_t token = 1; token <= Core::MemoryAllocDetail::ThreadDomainRegistry::capacity; ++token)
+	{
+		EXPECT_TRUE(registry.Remove(token));
+	}
+}
+
 TEST(CoreMemoryAlloc, ReallocatesUntrackedSystemBlocks)
 {
 	Core::mem_tracker_disable();

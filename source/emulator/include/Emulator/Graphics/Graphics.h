@@ -173,6 +173,8 @@ int KYTY_SYSV_ABI   GraphicsAgcDriverUnknownKRzWekV120();
 uint64_t KYTY_SYSV_ABI GraphicsGetIsTrinityMode();
 // Debug exception raise used by titles as a soft breakpoint; returns OK.
 int KYTY_SYSV_ABI GraphicsDebugRaiseException(uint32_t exception_id);
+// sceAgcDriverRegisterWorkloadStream (NID 3AyTaWcF-H8): register a Gen5 workload stream descriptor.
+int KYTY_SYSV_ABI GraphicsDriverRegisterWorkloadStream(uint32_t stream_id, const void* stream);
 
 uint32_t GraphicsGetShRegistersPacketSize(const ShaderRegister* regs, uint32_t num_regs);
 uint32_t GraphicsEncodeShRegisters(uint32_t* cmd, uint32_t capacity_dw, const ShaderRegister* regs, uint32_t num_regs);
@@ -194,6 +196,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
                                              uint16_t gds_size, uint8_t interrupt, uint32_t interrupt_ctx_id);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbResetQueue(CommandBuffer* buf, uint32_t op, uint32_t state);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitUntilSafeForRendering(CommandBuffer* buf, uint32_t video_out_handle, uint32_t display_buffer_index);
+// sceAgcDcbSetWorkloadsActive / Complete: encode workload tracking NOP payloads.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetWorkloadsActive(CommandBuffer* buf, uint32_t stream_id, const uint32_t* workload_ids,
+                                                      uint32_t workload_count);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetWorkloadComplete(CommandBuffer* buf, uint32_t stream_id, uint32_t workload_id);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegisterDirect(CommandBuffer* buf, ShaderRegister reg);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs);

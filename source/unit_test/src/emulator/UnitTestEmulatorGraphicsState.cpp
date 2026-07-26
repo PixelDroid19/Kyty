@@ -1806,6 +1806,38 @@ TEST(EmulatorGraphicsState, ResolvesViewportAndGenericScissorWithoutScreenState)
 	EXPECT_EQ(scissor.bottom, 216);
 }
 
+TEST(EmulatorGraphicsState, AppliesWindowOffsetToEnabledScissors)
+{
+	HW::Context context;
+	context.SetWindowOffset(7, -3);
+	context.SetGenericScissor(10, 20, 90, 100, true);
+	context.SetViewportScissor(0, 20, 30, 80, 90, true);
+
+	HW::ScanModeControl mode;
+	mode.vport_scissor_enable = true;
+
+	const auto scissor = State::ResolveScissor(context.GetScreenViewport(), mode, 0);
+	EXPECT_EQ(scissor.left, 27);
+	EXPECT_EQ(scissor.top, 27);
+	EXPECT_EQ(scissor.right, 87);
+	EXPECT_EQ(scissor.bottom, 87);
+}
+
+TEST(EmulatorGraphicsState, RecognizesSingleSampleRenderControlSelectionAsNoOp)
+{
+	HW::RenderControl control {};
+	EXPECT_TRUE(State::RenderControlSampleSelectionIsNoOp(control, 0));
+
+	control.copy_centroid = true;
+	control.copy_sample   = 15;
+	EXPECT_TRUE(State::RenderControlSampleSelectionIsNoOp(control, 0));
+	EXPECT_FALSE(State::RenderControlSampleSelectionIsNoOp(control, 1));
+
+	control.copy_centroid = false;
+	control.copy_sample   = 1;
+	EXPECT_FALSE(State::RenderControlSampleSelectionIsNoOp(control, 0));
+}
+
 TEST(EmulatorGraphicsState, RequiresAnActiveDepthStencilOperationForTargetBinding)
 {
 	HW::DepthRenderTarget target;
@@ -1844,6 +1876,11 @@ TEST(EmulatorGraphicsState, RequiresAnActiveDepthStencilOperationForTargetBindin
 	target.z_info.tile_surface_enable = false;
 	usage                             = State::ResolveDepthStencilUsage(target, render_control, depth_control);
 	EXPECT_FALSE(usage.target_active);
+	EXPECT_FALSE(usage.depth_write_enable);
+
+	render_control.resummarize_enable = true;
+	usage                            = State::ResolveDepthStencilUsage(target, render_control, depth_control);
+	EXPECT_TRUE(usage.target_active);
 	EXPECT_FALSE(usage.depth_write_enable);
 }
 
@@ -3365,9 +3402,21 @@ TEST(EmulatorGraphicsState, Gen5SampledFormatsPreserveFloatAndUnormContracts)
 TEST(EmulatorGraphicsState, RegularImageSamplingDisablesSamplerComparison)
 {
 	using namespace Kyty::Libs::Graphics::State;
-	const auto comparison = ResolveSamplerComparison(0, ImageSampleOperation::Regular);
+	const auto comparison = ResolveSamplerComparison(4, ImageSampleOperation::Regular);
 	EXPECT_FALSE(comparison.enabled);
-	EXPECT_EQ(comparison.function, 0);
+	EXPECT_EQ(comparison.function, 4);
+}
+
+TEST(EmulatorGraphicsState, UnnormalizedSamplerCoordinatesUseVulkanCompatiblePolicy)
+{
+	using namespace Kyty::Libs::Graphics::State;
+	const auto policy = ResolveUnnormalizedSamplerPolicy(true);
+	EXPECT_TRUE(policy.enabled);
+	EXPECT_EQ(policy.address_mode, SamplerAddressMode::ClampToEdge);
+	EXPECT_TRUE(policy.force_base_mip);
+	EXPECT_TRUE(policy.disable_anisotropy);
+	EXPECT_TRUE(policy.disable_comparison);
+	EXPECT_TRUE(policy.reset_lod_bias);
 }
 
 // GraphicsInit must publish API version and feature-flag words into the guest

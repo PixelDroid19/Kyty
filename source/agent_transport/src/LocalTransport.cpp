@@ -372,7 +372,11 @@ Result WriteAll(Connection* connection, const void* data, size_t size) noexcept
 		}
 		offset += written;
 #else
-		const ssize_t written = ::write(ToFd(connection->native), static_cast<const uint8_t*>(data) + offset, size - offset);
+		// A diagnostic client may time out and disconnect while the server is
+		// preparing a response. Never let that local disconnect raise SIGPIPE in
+		// the emulator process; report the transport error to the caller instead.
+		const ssize_t written = ::send(ToFd(connection->native), static_cast<const uint8_t*>(data) + offset, size - offset,
+		                               MSG_NOSIGNAL);
 		if (written < 0)
 		{
 			if (errno == EINTR)

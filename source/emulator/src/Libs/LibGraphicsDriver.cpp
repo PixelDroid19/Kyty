@@ -121,6 +121,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("TRO721eVt4g", Gen5::GraphicsDcbResetQueue);
 	LIB_FUNC("JrtiDtKeS38", Gen5::GraphicsAcbResetQueue);
 	LIB_FUNC("MWiElSNE8j8", Gen5::GraphicsDcbWaitUntilSafeForRendering);
+	LIB_FUNC("LFSPFmGc9Hg", Gen5::GraphicsDcbSetWorkloadsActive);
+	LIB_FUNC("hEK26Wdny6s", Gen5::GraphicsDcbSetWorkloadComplete);
 	LIB_FUNC("pFLArOT53+w", Gen5::GraphicsDcbSetShRegisterDirect);
 	LIB_FUNC("ZvwO9euwYzc", Gen5::GraphicsDcbSetCxRegistersIndirect);
 	LIB_FUNC("-HOOCn0JY48", Gen5::GraphicsDcbSetShRegistersIndirect);
@@ -179,6 +181,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("X-Nm5KLREeg", Gen5Driver::GraphicsDriverRegisterOwner);
 	LIB_FUNC("W5z4eZrjEas", Gen5Driver::GraphicsDriverRegisterResource);
 	LIB_FUNC("pWLG7WOpVcw", Gen5Driver::GraphicsDriverUnregisterResource);
+	LIB_FUNC("3AyTaWcF-H8", Graphics::Gen5::GraphicsDriverRegisterWorkloadStream);
 	LIB_FUNC("UglJIZjGssM", Gen5Driver::GraphicsDriverSubmitDcb);
 	LIB_FUNC("AhGvpITrf4M", Gen5Driver::GraphicsDriverSubmitDcb);
 	LIB_FUNC("gSRnr79F8tQ", Gen5Driver::GraphicsDriverSubmitAcb);
@@ -215,6 +218,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("TRO721eVt4g", Gen5::GraphicsDcbResetQueue);
 	LIB_FUNC("JrtiDtKeS38", Gen5::GraphicsAcbResetQueue);
 	LIB_FUNC("MWiElSNE8j8", Gen5::GraphicsDcbWaitUntilSafeForRendering);
+	LIB_FUNC("LFSPFmGc9Hg", Gen5::GraphicsDcbSetWorkloadsActive);
+	LIB_FUNC("hEK26Wdny6s", Gen5::GraphicsDcbSetWorkloadComplete);
 	LIB_FUNC("pFLArOT53+w", Gen5::GraphicsDcbSetShRegisterDirect);
 	LIB_FUNC("ZvwO9euwYzc", Gen5::GraphicsDcbSetCxRegistersIndirect);
 	LIB_FUNC("-HOOCn0JY48", Gen5::GraphicsDcbSetShRegistersIndirect);

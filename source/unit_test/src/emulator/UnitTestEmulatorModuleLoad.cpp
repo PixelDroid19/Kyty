@@ -136,6 +136,19 @@ SymbolResolve LibkernelFunc(const char16_t* nid)
 	return sr;
 }
 
+SymbolResolve SysmoduleFunc(const char16_t* nid)
+{
+	SymbolResolve sr {};
+	sr.name                 = nid;
+	sr.library              = U"Sysmodule";
+	sr.library_version      = 1;
+	sr.module               = U"Sysmodule";
+	sr.module_version_major = 1;
+	sr.module_version_minor = 1;
+	sr.type                 = SymbolType::Func;
+	return sr;
+}
+
 SymbolResolve ImeDialogFunc(const char16_t* nid)
 {
 	SymbolResolve sr {};
@@ -143,6 +156,19 @@ SymbolResolve ImeDialogFunc(const char16_t* nid)
 	sr.library              = U"ImeDialog";
 	sr.library_version      = 1;
 	sr.module               = U"ImeDialog";
+	sr.module_version_major = 1;
+	sr.module_version_minor = 1;
+	sr.type                 = SymbolType::Func;
+	return sr;
+}
+
+SymbolResolve Ps5UtilFunc(const char16_t* nid)
+{
+	SymbolResolve sr {};
+	sr.name                 = nid;
+	sr.library              = U"PS5Util";
+	sr.library_version      = 1;
+	sr.module               = U"PS5Util";
 	sr.module_version_major = 1;
 	sr.module_version_minor = 1;
 	sr.type                 = SymbolType::Func;
@@ -199,6 +225,22 @@ TEST(EmulatorModuleLoad, BuildPlanAcceptsSelfWrappedAdjacentSharedPrx)
 	EXPECT_EQ(plan.diag.rejection_count, 0u);
 }
 
+void AddPs5UtilImportIds(Program* program)
+{
+	ASSERT_NE(program, nullptr);
+	ASSERT_NE(program->dynamic_info, nullptr);
+	program->dynamic_info->import_libs.Add(LibraryId {U"ps5util-lib-id", 1, U"PS5Util"});
+	program->dynamic_info->import_modules.Add(ModuleId {U"ps5util-mod-id", 1, 1, U"PS5Util"});
+}
+
+void AddPs5UtilExportIds(Program* program)
+{
+	ASSERT_NE(program, nullptr);
+	ASSERT_NE(program->dynamic_info, nullptr);
+	program->dynamic_info->export_libs.Add(LibraryId {U"ps5util-lib-id", 1, U"PS5Util"});
+	program->dynamic_info->export_modules.Add(ModuleId {U"ps5util-mod-id", 1, 1, U"PS5Util"});
+}
+
 TEST(EmulatorModuleLoad, BuildPlanAcceptsRootSharedSidecarPrx)
 {
 	const TempPackageRoot temp(U"/tmp/kyty_module_load_root_sidecar_test/");
@@ -214,6 +256,22 @@ TEST(EmulatorModuleLoad, BuildPlanAcceptsRootSharedSidecarPrx)
 	EXPECT_STREQ(plan.entries[1].relative_key, "EOSSDK-PS5-Shipping.prx");
 	EXPECT_EQ(plan.entries[1].role, ModulePlanRole::PackageSidecar);
 	EXPECT_EQ(plan.diag.rejection_count, 0u);
+}
+
+TEST(EmulatorModuleLoad, BuildPlanTreatsMediaModulesAsApplicationRuntimeSidecars)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_module_load_media_runtime_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root + U"Media/Modules/"));
+	ASSERT_TRUE(WriteBinary(temp.root + U"eboot.bin", MakeSelfWrappedElf(ET_DYNEXEC)));
+	ASSERT_TRUE(WriteBinary(temp.root + U"Media/Modules/Il2CppUserAssemblies.prx", MakeSelfWrappedElf(ET_DYNAMIC)));
+
+	const auto plan = ModuleLoadPlanning::BuildPlan(temp.root + U"eboot.bin", true);
+
+	ASSERT_TRUE(plan.valid) << plan.error;
+	ASSERT_EQ(plan.count, 2u);
+	EXPECT_STREQ(plan.entries[1].relative_key, "Media/Modules/Il2CppUserAssemblies.prx");
+	EXPECT_EQ(plan.entries[1].role, ModulePlanRole::PackageSidecar);
+	EXPECT_TRUE(ModuleLoadPlanning::RequiresFullPackageBootstrap(plan));
 }
 
 TEST(EmulatorModuleLoad, ElfPlatformComesFromAbiVersion)
@@ -402,6 +460,28 @@ TEST(EmulatorModuleLoad, ResolvePrefersHleMemalignOverUninitializedGuestLibcHeap
 	EXPECT_FALSE(bind_self);
 }
 
+TEST(EmulatorModuleLoad, ResolvePrefersHlePs5UtilThreadContextRequestOverGuestShim)
+{
+	EnsureFileSystemSubsystem();
+	RuntimeLinker rt;
+	const auto    sr = Ps5UtilFunc(u"J3edELK4FvM");
+	rt.Symbols()->Add(sr, 0x11110000, U"hle_ps5util_thread_context_request");
+
+	Program* importer = RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&rt, U"/tmp/eboot.bin");
+	AddPs5UtilImportIds(importer);
+
+	Program* ps5_util = RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&rt, U"/tmp/sce_module/PS5Util.prx");
+	AddPs5UtilExportIds(ps5_util);
+	ps5_util->export_symbols->Add(sr, 0x22220000, U"guest_ps5util_thread_context_request");
+
+	SymbolRecord out {};
+	bool         bind_self = true;
+	rt.Resolve(U"J3edELK4FvM#ps5util-lib-id#ps5util-mod-id", SymbolType::Func, importer, &out, &bind_self);
+
+	EXPECT_EQ(out.vaddr, 0x11110000u);
+	EXPECT_FALSE(bind_self);
+}
+
 TEST(EmulatorModuleLoad, LibkernelRegistersPosixLseekAlias)
 {
 	SymbolDatabase symbols;
@@ -490,6 +570,49 @@ TEST(EmulatorModuleLoad, LibkernelRegistersModuleInfoForUnwind)
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
 	EXPECT_NE(symbols.Find(LibkernelFunc(u"RpQJJVKTiFM")), nullptr);
+}
+
+TEST(EmulatorModuleLoad, LibkernelRegistersSignalReturnProbe)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
+	const auto* record = symbols.Find(LibkernelFunc(u"crb5j7mkk1c"));
+	ASSERT_NE(record, nullptr);
+
+	using IsSignalReturn = int(KYTY_SYSV_ABI*)();
+	EXPECT_EQ(reinterpret_cast<IsSignalReturn>(record->vaddr)(), 0);
+}
+
+TEST(EmulatorModuleLoad, SysmoduleRegistersModuleInfoForUnwind)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libSysmodule_1", &symbols));
+	EXPECT_NE(symbols.Find(SysmoduleFunc(u"4fU5yvOkVG4")), nullptr);
+}
+
+TEST(EmulatorModuleLoad, SysmoduleTracksLoadAndUnloadState)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libSysmodule_1", &symbols));
+
+	using ModuleFn = int(KYTY_SYSV_ABI*)(uint16_t);
+	const auto* load_record = symbols.Find(SysmoduleFunc(u"g8cM39EUZ6o"));
+	const auto* unload_record = symbols.Find(SysmoduleFunc(u"eR2bZFAAU0Q"));
+	const auto* is_loaded_record = symbols.Find(SysmoduleFunc(u"fMP5NHUOaMk"));
+	ASSERT_NE(load_record, nullptr);
+	ASSERT_NE(unload_record, nullptr);
+	ASSERT_NE(is_loaded_record, nullptr);
+	auto load = reinterpret_cast<ModuleFn>(load_record->vaddr);
+	auto unload = reinterpret_cast<ModuleFn>(unload_record->vaddr);
+	auto is_loaded = reinterpret_cast<ModuleFn>(is_loaded_record->vaddr);
+
+	constexpr uint16_t module_id = 0xfffe;
+	EXPECT_EQ(unload(module_id), 0);
+	EXPECT_EQ(is_loaded(module_id), Kyty::Libs::LibKernel::KERNEL_ERROR_ENOENT);
+	EXPECT_EQ(load(module_id), 0);
+	EXPECT_EQ(is_loaded(module_id), 0);
+	EXPECT_EQ(unload(module_id), 0);
+	EXPECT_EQ(is_loaded(module_id), Kyty::Libs::LibKernel::KERNEL_ERROR_ENOENT);
 }
 
 TEST(EmulatorModuleLoad, LibkernelRegistersKernelSleep)
@@ -604,6 +727,35 @@ TEST(EmulatorModuleLoad, LibkernelRegistersDlsym)
 
 	EXPECT_EQ(result, Kyty::Libs::LibKernel::KERNEL_ERROR_ESRCH);
 	EXPECT_EQ(address, preserved);
+}
+
+TEST(EmulatorModuleLoad, Ps5UtilRegistersThreadContextRequest)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"PS5Util_v1", &symbols));
+
+	SymbolResolve query {};
+	query.name                 = U"J3edELK4FvM";
+	query.library              = U"PS5Util";
+	query.library_version      = 1;
+	query.module               = U"PS5Util";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = SymbolType::Func;
+
+	const auto* record = symbols.Find(query);
+	ASSERT_NE(record, nullptr);
+	ASSERT_NE(record->vaddr, 0u);
+}
+
+TEST(EmulatorModuleLoad, MainModuleHandleResolvesToPrimaryExecutable)
+{
+	RuntimeLinker rt;
+
+	Program* main = RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&rt, U"/tmp/eboot.bin");
+	ASSERT_NE(main, nullptr);
+	EXPECT_EQ(rt.FindProgramById(0), main);
+	EXPECT_EQ(rt.FindProgramById(main->unique_id), main);
 }
 
 TEST(EmulatorModuleLoad, NetRegistersEpollCreate)

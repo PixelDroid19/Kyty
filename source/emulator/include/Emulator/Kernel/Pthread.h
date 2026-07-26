@@ -62,6 +62,7 @@ using thread_dtors_func_t           = KYTY_SYSV_ABI void (*)();
 using pthread_key_destructor_func_t = KYTY_SYSV_ABI void (*)(void*);
 
 void PthreadInitSelfForMainThread();
+void* PthreadCreateMainGuestStack();
 void PthreadDeleteStaticObjects(Loader::Program* program);
 [[nodiscard]] bool PthreadIsInitialized();
 bool PthreadQueryStack(const void* addr, void** start, void** end);
@@ -78,6 +79,8 @@ int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec
 int KYTY_SYSV_ABI PthreadMutexUnlock(PthreadMutex* mutex);
 
 Pthread KYTY_SYSV_ABI PthreadSelf();
+int KYTY_SYSV_ABI     PthreadSignal(Pthread thread, int signum);
+int KYTY_SYSV_ABI     PthreadSignalWithValue(Pthread thread, int signum, void* value);
 int KYTY_SYSV_ABI     PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthread_entry_func_t entry, void* arg, const char* name);
 int KYTY_SYSV_ABI     PthreadDetach(Pthread thread);
 int KYTY_SYSV_ABI     PthreadJoin(Pthread thread, void** value);
@@ -165,6 +168,7 @@ struct PthreadCondWaitDiagnostic
 	uint64_t return_addr = 0;
 	uint64_t cond_handle = 0;
 	uint64_t mutex_handle = 0;
+	uint64_t last_signal_return_addr = 0;
 	uint32_t signal_count = 0;
 };
 

@@ -85,6 +85,7 @@ struct DepthClearActions
 
 void SetGenericScissorTl(HW::Context& context, uint32_t value);
 void SetGenericScissorBr(HW::Context& context, uint32_t value);
+void SetWindowOffset(HW::Context& context, uint32_t value);
 void SetScreenScissorTl(HW::Context& context, uint32_t value);
 void SetScreenScissorBr(HW::Context& context, uint32_t value);
 void SetRenderControl(HW::Context& context, uint32_t value);
@@ -101,6 +102,11 @@ void SetPolygonOffsetRegister(HW::Context& context, uint32_t reg, uint32_t value
 void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
 
 [[nodiscard]] DepthBias ResolveDepthBias(const HW::ModeControl& mode, const HW::PolygonOffset& offset);
+
+// DB_RENDER_CONTROL sample selection is invisible on a one-sample depth
+// attachment: centroid search and every wrapped COPY_SAMPLE select sample 0.
+// `num_samples` uses the hardware encoding where zero means one sample.
+[[nodiscard]] bool RenderControlSampleSelectionIsNoOp(const HW::RenderControl& control, uint8_t num_samples);
 
 // Guest top-left coordinates are inclusive, bottom-right coordinates are exclusive, and enabled rectangles intersect.
 [[nodiscard]] ScissorRect ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanModeControl& mode, uint32_t viewport_id);
@@ -172,9 +178,20 @@ struct SamplerComparison
 	uint8_t function = 0;
 };
 
+struct UnnormalizedSamplerPolicy
+{
+	bool               enabled             = false;
+	SamplerAddressMode address_mode        = SamplerAddressMode::ClampToEdge;
+	bool               force_base_mip      = false;
+	bool               disable_anisotropy  = false;
+	bool               disable_comparison  = false;
+	bool               reset_lod_bias      = false;
+};
+
 [[nodiscard]] SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp);
 // Vulkan requires sampler comparison state to agree with the SPIR-V image instruction.
 [[nodiscard]] SamplerComparison ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation);
+[[nodiscard]] UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormalized_coordinates);
 
 } // namespace Kyty::Libs::Graphics::State
 

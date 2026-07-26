@@ -5,6 +5,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
+#include "Emulator/Graphics/Pm4.h"
 
 #include <mutex>
 #include <utility>
@@ -85,6 +86,11 @@ constexpr bool GraphicsAgcFullTargetBarrierGcrSupported(uint32_t gcr_cntl)
 {
 	const uint32_t invalidate_mode = gcr_cntl & ~0x8000u;
 	return invalidate_mode == 0x280u || invalidate_mode == 0x300u;
+}
+
+constexpr bool GraphicsDrawIndexAutoFlagsSupported(uint32_t flags)
+{
+	return (flags & ~0x22u) == 0;
 }
 
 struct GraphicsAgcReleaseMemControl

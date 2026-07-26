@@ -1865,6 +1865,11 @@ static CxxLocaleLayout g_sce_classic_locale {&g_classic_locimp};
 
 // std::ctype<char>::id and locale::id::_Id_cnt (pre-assigned to match facets).
 static std::uint64_t g_ctype_char_id = kCxxCtypeCharId;
+// std::codecvt<char, char, mbstate_t>::id starts unassigned. libc assigns a
+// locale-facet index lazily, so this must be distinct stable guest storage.
+static std::uint64_t g_codecvt_char_id = 0;
+// libc math constant imported by C++ locale initialization.
+static const double g_positive_infinity = INFINITY;
 static std::uint64_t g_locale_id_2   = 2;
 static std::uint64_t g_locale_id_3   = 3;
 static std::uint64_t g_locale_id_4   = 4;
@@ -1930,6 +1935,10 @@ static void* g_system_error_vtable[8]       = KYTY_CXX_NOOP_VTBL;
 static void* g_bad_cast_vtable[8]           = KYTY_CXX_NOOP_VTBL;
 static void* g_ios_failure_vtable[8]        = KYTY_CXX_NOOP_VTBL;
 static void* g_num_put_char_vtable[8]       = KYTY_CXX_NOOP_VTBL;
+// std::codecvt<char, char, mbstate_t> virtual dispatch. Keep it distinct from
+// other facets: it is ABI-compatible storage, but its behavior must not be
+// conflated with ctype before a guest conversion call provides evidence.
+static void* g_codecvt_char_vtable[8]       = KYTY_CXX_NOOP_VTBL;
 #undef KYTY_CXX_NOOP_VTBL
 
 static const char g_ti_name_exception[]         = "St9exception";
@@ -1997,9 +2006,29 @@ static KYTY_SYSV_ABI int c_uncaught_exception()
 	return 0;
 }
 
+// Itanium ABI __gxx_personality_v0. The current HLE exception path stops at
+// __cxa_throw, so this is only required to relocate guest unwind metadata.
+// Returning _URC_CONTINUE_UNWIND (8) is the conservative choice if a guest
+// unwinder reaches it: do not claim to recognize or handle a foreign frame.
+static KYTY_SYSV_ABI int c_gxx_personality_v0(int /*version*/, int /*actions*/, uint64_t /*exception_class*/,
+                                              void* /*exception_object*/, void* /*context*/)
+{
+	return 8;
+}
+
 // std::ios_base::~ios_base() — guest tears down temporary stream objects after
 // locale/ctype probes. No host side-effects required for the stub ios_base.
 static KYTY_SYSV_ABI void c_ios_base_dtor(void* /*self*/) {}
+
+// std::ios_base::failure::~failure() [complete object]. Guest code owns the
+// storage; the HLE exception/locale objects have no host-side payload to tear
+// down, so destruction deliberately leaves the guest allocation untouched.
+static KYTY_SYSV_ABI void c_ios_base_failure_dtor(void* /*self*/) {}
+
+// std::bad_cast has no state beyond its std::exception base. The complete
+// destructor therefore has no storage to release; deletion remains the
+// responsibility of the caller's deleting destructor path.
+static KYTY_SYSV_ABI void c_bad_cast_dtor(void* /*self*/) {}
 
 // Itanium C++ ABI exception entry points (Gen5 libc_v1). Full unwind is not
 // implemented; throws are host-fatal with a decoded type/message so the
@@ -2531,6 +2560,12 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("VmqsS6auJzo", &LibC::g_ctype_wchar_id);
 	LIB_OBJECT("irGo1yaJ-vM", &LibC::g_collate_wchar_id);
 	LIB_OBJECT("E14mW8pVpoE", &LibC::g_num_put_char_id);
+	// std::codecvt<char, char, mbstate_t>::id — eVFYZnYNDo0.
+	LIB_OBJECT("eVFYZnYNDo0", &LibC::g_codecvt_char_id);
+	// std::codecvt<char, char, mbstate_t> vtable — aK1Ymf-NhAs.
+	LIB_OBJECT("aK1Ymf-NhAs", LibC::g_codecvt_char_vtable);
+	// _Inf — HIhqigNaOns.
+	LIB_OBJECT("HIhqigNaOns", &LibC::g_positive_infinity);
 	LIB_OBJECT("byV+FWlAnB4", LibC::g_class_type_info_vtable);
 	LIB_OBJECT("pZ9WXcClPO8", LibC::g_si_class_type_info_vtable);
 	LIB_OBJECT("9ByRMdo7ywg", LibC::g_vmi_class_type_info_vtable);
@@ -2587,8 +2622,14 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("tyHd3P7oDrU", LibC::c_exception_doraise);
 	// std::uncaught_exception — Q1BL70XVV0o after classic-locale probe.
 	LIB_FUNC("Q1BL70XVV0o", LibC::c_uncaught_exception);
+	// __gxx_personality_v0 — XwLA5cTHjt4 (PS5 export-name catalog).
+	LIB_FUNC("XwLA5cTHjt4", LibC::c_gxx_personality_v0);
 	// std::ios_base::~ios_base — P8F2oavZXtY after interactive presents start.
 	LIB_FUNC("P8F2oavZXtY", LibC::c_ios_base_dtor);
+	// std::ios_base::failure::~failure() [complete object] — N2f485TmJms.
+	LIB_FUNC("N2f485TmJms", LibC::c_ios_base_failure_dtor);
+	// std::bad_cast::~bad_cast() [complete object] — 47RvLSo2HN8.
+	LIB_FUNC("47RvLSo2HN8", LibC::c_bad_cast_dtor);
 
 	LIB_FUNC("uMei1W9uyNo", LibC::exit);
 	LIB_FUNC("bzQExy189ZI", LibC::init_env);

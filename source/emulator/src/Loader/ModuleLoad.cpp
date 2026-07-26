@@ -512,11 +512,12 @@ ModuleLoadPlan BuildPlan(const String& primary_host_path, bool discovery_enabled
 		CopyString(entry.host_path, sizeof(entry.host_path), host);
 		CopyString(entry.relative_key, sizeof(entry.relative_key), rel);
 		CopyCStr(entry.identity, sizeof(entry.identity), identity);
-		// A PRX directly beside the primary executable is part of the
-		// application package. Modules below package subdirectories remain
-		// deferred providers: starting every system-facing PRX at boot can run
-		// unrelated CRT or service initialization.
-		entry.role               = rel.ContainsStr(U"/") ? ModulePlanRole::AdjacentShared : ModulePlanRole::PackageSidecar;
+		// Application runtime modules are loaded from Media/Modules by the main
+		// executable before its static metadata constructors run. They are not
+		// interchangeable with sce_module services, whose initialization remains
+		// deferred unless the explicit diagnostics policy is active.
+		entry.role = (!rel.ContainsStr(U"/") || rel.StartsWith(U"Media/Modules/")) ? ModulePlanRole::PackageSidecar :
+		                                                                                ModulePlanRole::AdjacentShared;
 		entry.platform           = module_platform;
 		entry.elf_abi            = GuestPlatformAbiVersion(module_platform);
 		plan.entries[plan.count] = entry;
@@ -541,6 +542,23 @@ ModuleLoadPlan BuildPlan(const String& primary_host_path, bool discovery_enabled
 	}
 	plan.valid = true;
 	return plan;
+}
+
+bool RequiresFullPackageBootstrap(const ModuleLoadPlan& plan)
+{
+	if (!plan.valid)
+	{
+		return false;
+	}
+	for (uint32_t i = 1; i < plan.count; ++i)
+	{
+		const String relative_key = String::FromUtf8(plan.entries[i].relative_key);
+		if (plan.entries[i].role == ModulePlanRole::PackageSidecar && relative_key.StartsWith(U"Media/Modules/"))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 } // namespace ModuleLoadPlanning
@@ -616,6 +634,12 @@ bool ResolvedMatchesHle(RuntimeLinker* rt, const SymbolResolve& sr, uint64_t res
 
 namespace ModuleLifecycleCoordinator {
 namespace {
+
+bool IsBootModule(const ModuleLoadPlan& plan, const ModulePlanEntry& entry)
+{
+	return entry.role == ModulePlanRole::PackageSidecar ||
+	       (ModuleLoadPlanning::RequiresFullPackageBootstrap(plan) && entry.role == ModulePlanRole::AdjacentShared);
+}
 
 void PushExportConflict(ModuleLoadPlanDiagnostics* diag, const String& note)
 {
@@ -852,7 +876,7 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 	// Fail-before-mutate: re-probe every adjacent entry before loading any.
 	for (uint32_t i = 0; i < plan.count; ++i)
 	{
-		if (plan.entries[i].role != ModulePlanRole::PackageSidecar)
+		if (!IsBootModule(plan, plan.entries[i]))
 		{
 			continue;
 		}
@@ -893,7 +917,7 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 
 	for (uint32_t i = 0; i < plan.count; ++i)
 	{
-		if (plan.entries[i].role != ModulePlanRole::PackageSidecar)
+		if (!IsBootModule(plan, plan.entries[i]))
 		{
 			continue;
 		}
@@ -945,8 +969,9 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const String& primary_host_path)
 	    Core::BringUp::IsEnabled(Core::BringUp::Feature::AdjacentModuleDiscovery, Core::BringUp::Subsystem::Loader);
 
 	// Discovery is cheap and lets a later lazy PLT miss select a provider by its
-	// declared module identity. Eager application remains diagnostic because
-	// loading every PRX would alter an otherwise working title's runtime.
+	// declared module identity. Only application runtime modules under
+	// Media/Modules are admitted for normal eager application; service modules
+	// remain lazy providers.
 	const ModuleLoadPlan plan = ModuleLoadPlanning::BuildPlan(primary_host_path, true);
 	ModuleLoadPlanDiagnostics published_diag = plan.diag;
 	if (!diagnostic)
@@ -1015,7 +1040,7 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const String& primary_host_path)
 	Core::LockGuard lock(g_diag_mutex);
 	g_pending.owner     = rt;
 	g_pending.plan      = plan;
-	g_pending.eager     = diagnostic;
+	g_pending.eager     = diagnostic || ModuleLoadPlanning::RequiresFullPackageBootstrap(plan);
 	g_pending.hle_ready = false;
 	std::memset(g_pending.attempted, 0, sizeof(g_pending.attempted));
 }
@@ -1042,8 +1067,20 @@ void AfterHleSymbolsRegistered(RuntimeLinker* rt)
 			g_pending.hle_ready = true;
 			return;
 		}
-		plan      = g_pending.plan;
-		g_pending = {};
+		plan               = g_pending.plan;
+		g_pending.eager    = false;
+		g_pending.hle_ready = true;
+		// Keep the validated plan after boot application. A package with
+		// Media/Modules has already admitted all service constructors; other
+		// packages continue to resolve their deferred providers only on a
+		// versioned lazy PLT import.
+		for (uint32_t i = 0; i < plan.count; ++i)
+		{
+			if (IsBootModule(plan, plan.entries[i]))
+			{
+				g_pending.attempted[i] = true;
+			}
+		}
 	}
 
 	(void)ApplyPlanAfterHle(rt, plan);
@@ -1116,7 +1153,12 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 		// (Fios2). Resolve the complete versioned NID and verify its owning
 		// program instead of inferring equivalence between those two namespaces.
 		// Only the exact provider is relocated and initialized below.
-		Program* provider = ProgramLoader::Load(rt, host);
+		Program* provider = rt->FindProgramByFile(host);
+		const bool already_loaded = (provider != nullptr);
+		if (provider == nullptr)
+		{
+			provider = ProgramLoader::Load(rt, host);
+		}
 		if (provider == nullptr)
 		{
 			ReportLazyProviderEvent("load_failed", requested_import, &entry);
@@ -1131,10 +1173,20 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 		{
 			ReportLazyProviderEvent("export_missing", requested_import, &entry);
 			PushRejection(&diag, "lazy_rejected_export_missing");
-			ProgramLoader::Unload(rt, provider);
+			if (!already_loaded)
+			{
+				ProgramLoader::Unload(rt, provider);
+			}
 			PersistPendingDiagnostics(rt, diag);
 			PublishDiagnostics(diag);
 			continue;
+		}
+		if (already_loaded)
+		{
+			ReportLazyProviderEvent("already_loaded", requested_import, &entry);
+			PersistPendingDiagnostics(rt, diag);
+			PublishDiagnostics(diag);
+			return true;
 		}
 
 		rt->RelocateProgram(provider);

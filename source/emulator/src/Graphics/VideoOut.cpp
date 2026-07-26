@@ -126,16 +126,18 @@ struct VideoOutBufferAttribute2
 
 struct VideoOutFlipStatus
 {
-	uint64_t count          = 0;
-	uint64_t processTime    = 0;
-	uint64_t tsc            = 0;
-	int64_t  flipArg        = 0;
-	uint64_t submitTsc      = 0;
-	uint64_t reserved0      = 0;
-	int32_t  gcQueueNum     = 0;
-	int32_t  flipPendingNum = 0;
-	int32_t  currentBuffer  = 0;
-	uint32_t reserved1      = 0;
+	uint64_t count                    = 0;
+	uint64_t processTime              = 0;
+	uint64_t reserved0                = 0;
+	int64_t  flipArg                  = 0;
+	uint64_t reserved1                = 0;
+	uint64_t processTimeCounter       = 0;
+	int32_t  gcQueueNum               = 0;
+	int32_t  flipPendingNum           = 0;
+	int32_t  currentBuffer            = 0;
+	uint32_t reserved2                = 0;
+	uint64_t submitProcessTimeCounter = 0;
+	uint64_t reserved3[7]             = {};
 };
 
 struct VideoOutVblankStatus
@@ -1166,9 +1168,9 @@ bool FlipQueue::Flip(uint32_t micros)
 	m_mutex.Lock();
 
 	r.cfg->flip_status.count++;
-	r.cfg->flip_status.processTime    = LibKernel::KernelGetProcessTime();
-	r.cfg->flip_status.tsc            = LibKernel::KernelReadTsc();
-	r.cfg->flip_status.submitTsc      = r.submit_tsc;
+	r.cfg->flip_status.processTime              = LibKernel::KernelGetProcessTime();
+	r.cfg->flip_status.processTimeCounter       = LibKernel::KernelReadTsc();
+	r.cfg->flip_status.submitProcessTimeCounter = r.submit_tsc;
 	r.cfg->flip_status.flipArg        = r.flip_arg;
 	r.cfg->flip_status.currentBuffer  = r.index;
 	r.cfg->flip_status.flipPendingNum = static_cast<int>(m_requests.Size() - 1);
@@ -1352,6 +1354,20 @@ static void flip_event_reset_func(LibKernel::EventQueue::KernelEqueueEvent* even
 	event->event.data   = 0;
 }
 
+static intptr_t make_video_out_event_data(intptr_t current_data, void* trigger_data)
+{
+	const auto old_data = static_cast<uint64_t>(current_data);
+	auto       counter  = (old_data >> 12u) & 0xfu;
+	if (counter != 0xfu)
+	{
+		counter++;
+	}
+
+	const auto timestamp = LibKernel::KernelReadTsc() & 0xfffu;
+	const auto payload   = static_cast<uint64_t>(reinterpret_cast<intptr_t>(trigger_data));
+	return static_cast<intptr_t>(timestamp | (counter << 12u) | ((payload & 0x0000ffffffffffffULL) << 16u));
+}
+
 static void flip_event_delete_func(EventQueue::KernelEqueue eq, LibKernel::EventQueue::KernelEqueueEvent* event)
 {
 	EXIT_IF(event == nullptr);
@@ -1386,9 +1402,17 @@ static void flip_event_delete_func(EventQueue::KernelEqueue eq, LibKernel::Event
 static void flip_event_trigger_func(LibKernel::EventQueue::KernelEqueueEvent* event, void* trigger_data)
 {
 	EXIT_IF(event == nullptr);
+
+	auto triggered_event    = event->event;
+	triggered_event.fflags  = triggered_event.fflags < 0xfu ? triggered_event.fflags + 1u : triggered_event.fflags;
+	triggered_event.data    = make_video_out_event_data(triggered_event.data, trigger_data);
+	if (event->triggered)
+	{
+		event->pending_events.Add(triggered_event);
+		return;
+	}
+	event->event     = triggered_event;
 	event->triggered = true;
-	event->event.fflags++;
-	event->event.data = reinterpret_cast<intptr_t>(trigger_data);
 }
 
 static void vblank_event_reset_func(LibKernel::EventQueue::KernelEqueueEvent* event)
@@ -1433,9 +1457,17 @@ static void vblank_event_delete_func(EventQueue::KernelEqueue eq, LibKernel::Eve
 static void vblank_event_trigger_func(LibKernel::EventQueue::KernelEqueueEvent* event, void* trigger_data)
 {
 	EXIT_IF(event == nullptr);
+
+	auto triggered_event    = event->event;
+	triggered_event.fflags  = triggered_event.fflags < 0xfu ? triggered_event.fflags + 1u : triggered_event.fflags;
+	triggered_event.data    = make_video_out_event_data(triggered_event.data, trigger_data);
+	if (event->triggered)
+	{
+		event->pending_events.Add(triggered_event);
+		return;
+	}
+	event->event     = triggered_event;
 	event->triggered = true;
-	event->event.fflags++;
-	event->event.data = reinterpret_cast<intptr_t>(trigger_data);
 }
 
 KYTY_SYSV_ABI int VideoOutAddFlipEvent(EventQueue::KernelEqueue eq, int handle, void* udata)
@@ -2102,8 +2134,8 @@ KYTY_SYSV_ABI int VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status)
 
 	printf("\t count = %" PRIu64 "\n", status->count);
 	printf("\t processTime = %" PRIu64 "\n", status->processTime);
-	printf("\t tsc = %" PRIu64 "\n", status->tsc);
-	printf("\t submitTsc = %" PRIu64 "\n", status->submitTsc);
+	printf("\t processTimeCounter = %" PRIu64 "\n", status->processTimeCounter);
+	printf("\t submitProcessTimeCounter = %" PRIu64 "\n", status->submitProcessTimeCounter);
 	printf("\t flipArg = %" PRId64 "\n", status->flipArg);
 	printf("\t gcQueueNum = %d\n", status->gcQueueNum);
 	printf("\t flipPendingNum = %d\n", status->flipPendingNum);
@@ -2305,6 +2337,44 @@ KYTY_SYSV_ABI int VideoOutDeleteVblankEvent(LibKernel::EventQueue::KernelEqueue 
 	return OK;
 }
 
+KYTY_SYSV_ABI int VideoOutDeleteFlipEvent(LibKernel::EventQueue::KernelEqueue eq, int handle)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_video_out_context == nullptr);
+
+	auto session = g_video_out_context->AcquireSession(handle);
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+
+	std::vector<EventQueue::KernelEqueuePin> pins;
+	{
+		auto* ctx = session.Get();
+		Core::LockGuard config_lock(ctx->mutex);
+		for (auto* binding: ctx->flip_events)
+		{
+			if (binding != nullptr && binding->identity.eq == eq)
+			{
+				if (auto pin = EventQueue::KernelAcquireEqueue(binding->identity))
+				{
+					pins.push_back(std::move(pin));
+				}
+			}
+		}
+	}
+
+	for (auto& pin: pins)
+	{
+		const auto result =
+		    EventQueue::KernelDeleteEvent(pin, VIDEO_OUT_EVENT_FLIP, EventQueue::KERNEL_EVFILT_VIDEO_OUT);
+		EXIT_NOT_IMPLEMENTED(result != OK && result != LibKernel::KERNEL_ERROR_ENOENT);
+	}
+
+	return OK;
+}
+
 KYTY_SYSV_ABI int VideoOutGetEventId(const LibKernel::EventQueue::KernelEvent* ev)
 {
 	PRINT_NAME();
@@ -2336,7 +2406,12 @@ KYTY_SYSV_ABI int VideoOutGetEventData(const LibKernel::EventQueue::KernelEvent*
 		return VIDEO_OUT_ERROR_INVALID_EVENT;
 	}
 
-	*data = static_cast<uint64_t>(ev->data);
+	auto event_data = static_cast<uint64_t>(ev->data) >> 16u;
+	if (ev->ident == VIDEO_OUT_EVENT_FLIP && (static_cast<uint64_t>(ev->data) & 0x8000000000000000ULL) != 0)
+	{
+		event_data |= 0xffff000000000000ULL;
+	}
+	*data = event_data;
 	return OK;
 }
 

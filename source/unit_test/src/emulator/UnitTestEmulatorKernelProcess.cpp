@@ -911,6 +911,10 @@ TEST(EmulatorKernelProcess, PosixPthreadAttrInitAndSetstacksize)
 	size_t stack_size = 0;
 	EXPECT_EQ(Posix::pthread_attr_getstacksize(&attr, &stack_size), OK);
 	EXPECT_EQ(stack_size, static_cast<size_t>(0x400000));
+	void* stack_addr = reinterpret_cast<void*>(1);
+	EXPECT_EQ(Posix::pthread_attr_getstack(&attr, &stack_addr, &stack_size), OK);
+	EXPECT_EQ(stack_addr, nullptr);
+	EXPECT_EQ(stack_size, static_cast<size_t>(0x400000));
 	EXPECT_EQ(Posix::pthread_attr_destroy(&attr), OK);
 }
 

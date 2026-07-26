@@ -186,6 +186,10 @@ bool ProtectWriteSignalSafe(uint64_t address, uint64_t size);
 bool FlushInstructionCache(uint64_t address, uint64_t size);
 bool PatchReplace(uint64_t vaddr, uint64_t value);
 
+// Returns the decoded x86-64 instruction length, or zero when the opcode is
+// unsupported. The decoder does not allocate and is suitable for executable
+// image transforms that first verify a complete 15-byte instruction window.
+
 // Diagnostic single-step tracer (macOS/Rosetta): logs the next `steps` guest
 // instructions on the current thread via the x86 trap flag. No-op elsewhere.
 void SetGuestTrace(int steps);

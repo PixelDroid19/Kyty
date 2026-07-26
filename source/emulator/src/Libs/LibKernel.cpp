@@ -20,21 +20,31 @@
 #include "Emulator/Kernel/Time.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/Errno.h"
+#include "Emulator/Libs/KernelException.h"
+#include "Emulator/Libs/KernelModuleInfo.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Network.h"
 #include "Emulator/Loader/RuntimeLinker.h"
+#include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Loader/Elf.h"
 
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <cstdio>
+#include <memory>
 #include <mutex>
+#include <new>
+#include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #include <arpa/inet.h>
+#include <csignal>
+#include <sys/syscall.h>
+#include <ucontext.h>
 #include <unistd.h>
 #endif
 
@@ -181,6 +191,14 @@ static KYTY_SYSV_ABI KernelModule KernelLoadStartModule(const char* module_file_
 	}
 
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
+	if (auto* existing = rt->FindProgramByFile(module_path); existing != nullptr)
+	{
+		if (res != nullptr)
+		{
+			*res = OK;
+		}
+		return static_cast<KernelModule>(existing->unique_id);
+	}
 
 	auto* program = rt->LoadProgram(module_path);
 
@@ -529,21 +547,6 @@ static int KYTY_SYSV_ABI KernelGetModuleInfoFromAddr(uint64_t addr, int n, Modul
 
 namespace {
 
-#pragma pack(push, 1)
-struct ModuleInfoForUnwind
-{
-	uint64_t st_size;
-	char     name[256];
-	uint64_t eh_frame_hdr_addr;
-	uint64_t eh_frame_addr;
-	uint64_t eh_frame_size;
-	uint64_t seg0_addr;
-	uint64_t seg0_size;
-};
-#pragma pack(pop)
-
-static_assert(sizeof(ModuleInfoForUnwind) == 0x130);
-
 constexpr Loader::Elf64_Word kPtGnuEhFrame = 0x6474e550;
 
 bool DecodeEhFramePointer(const uint8_t* data, const uint8_t* end, uint8_t encoding, uint64_t field_addr,
@@ -831,8 +834,8 @@ static bool is_allowed_exception_signal(int signum)
 	return signum == 1 || signum == 4 || signum == 8 || signum == 10 || signum == 11 || signum == 30;
 }
 
-static std::array<void*, 128> g_exception_handlers {};
-static std::mutex             g_exception_handlers_mutex;
+static std::array<std::atomic<uintptr_t>, 128> g_exception_handlers {};
+static std::mutex                              g_exception_handlers_mutex;
 
 struct SignalMcontext
 {
@@ -863,7 +866,6 @@ struct SignalMcontext
 	uint64_t mc_rip;
 	uint64_t mc_cs;
 	uint64_t mc_rflags;
-	uint64_t mc_reserved[8];
 	uint64_t mc_rsp;
 	uint64_t mc_ss;
 	uint64_t mc_len;
@@ -881,11 +883,133 @@ struct SignalMcontext
 
 struct SignalUcontext
 {
+	uint8_t        uc_sigmask[0x10] {};
+	uint8_t        uc_private[0x30] {};
 	SignalMcontext uc_mcontext;
 };
 
+static_assert(offsetof(SignalUcontext, uc_mcontext) == 0x40);
 static_assert(offsetof(SignalMcontext, mc_rip) == 0xa0);
-static_assert(offsetof(SignalMcontext, mc_rsp) == 0xf8);
+static_assert(offsetof(SignalMcontext, mc_rsp) == 0xb8);
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+constexpr size_t kHostContextTrampolineStackSize = 1024 * 1024;
+
+struct HostContextRequest
+{
+	SignalUcontext              guest_context {};
+	ucontext_t                  resume_context {};
+	std::unique_ptr<uint8_t[]> trampoline_stack {};
+	ucontext_t*                 signal_context = nullptr;
+	uintptr_t                   signal_frame   = 0;
+	uintptr_t                   handler = 0;
+	std::atomic_bool            completed {false};
+};
+
+static std::mutex                        g_host_context_requests_mutex;
+static std::vector<HostContextRequest*> g_host_context_requests;
+
+static void ReclaimCompletedHostContextRequests()
+{
+	std::lock_guard lock(g_host_context_requests_mutex);
+	const auto new_end = std::remove_if(g_host_context_requests.begin(), g_host_context_requests.end(), [](HostContextRequest* request) {
+		if (!request->completed.load(std::memory_order_acquire))
+		{
+			return false;
+		}
+		delete request;
+		return true;
+	});
+	g_host_context_requests.erase(new_end, g_host_context_requests.end());
+}
+#endif
+
+static int HostContextSignal()
+{
+	return SIGRTMIN + 6;
+}
+
+static void CopyHostContext(SignalMcontext* guest, const ucontext_t* host)
+{
+	EXIT_IF(guest == nullptr || host == nullptr);
+
+	guest->mc_len    = sizeof(SignalMcontext);
+	guest->mc_rdi    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RDI]);
+	guest->mc_rsi    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RSI]);
+	guest->mc_rdx    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RDX]);
+	guest->mc_rcx    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RCX]);
+	guest->mc_r8     = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R8]);
+	guest->mc_r9     = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R9]);
+	guest->mc_rax    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RAX]);
+	guest->mc_rbx    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RBX]);
+	guest->mc_rbp    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RBP]);
+	guest->mc_r10    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R10]);
+	guest->mc_r11    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R11]);
+	guest->mc_r12    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R12]);
+	guest->mc_r13    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R13]);
+	guest->mc_r14    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R14]);
+	guest->mc_r15    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R15]);
+	guest->mc_rip    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RIP]);
+	guest->mc_rflags = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_EFL]);
+	guest->mc_rsp    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RSP]);
+}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+[[noreturn]] static void HostContextTrampoline(HostContextRequest* request)
+{
+	Loader::GuestCall::Invoke(request->handler, 30, reinterpret_cast<uint64_t>(&request->guest_context), 0);
+	request->completed.store(true, std::memory_order_release);
+
+	// Returning through rt_sigreturn instead of setcontext preserves Linux's
+	// restart handling for a futex or other syscall interrupted by this signal.
+	*request->signal_context = request->resume_context;
+	asm volatile("mov %0, %%rsp\n\t"
+	             "mov %1, %%rax\n\t"
+	             "syscall\n\t"
+	             :
+	             : "r"(request->signal_frame), "i"(SYS_rt_sigreturn)
+	             : "memory", "rax");
+	std::abort();
+	__builtin_unreachable();
+}
+
+static void HostContextSignalHandler(int signal, siginfo_t* info, void* raw_context)
+{
+	if (signal != HostContextSignal() || info == nullptr || info->si_code != SI_QUEUE || raw_context == nullptr)
+	{
+		return;
+	}
+
+	auto* request = static_cast<HostContextRequest*>(info->si_value.sival_ptr);
+	if (request == nullptr || request->handler == 0 || request->trampoline_stack == nullptr)
+	{
+		return;
+	}
+
+	auto* host_context = static_cast<ucontext_t*>(raw_context);
+	CopyHostContext(&request->guest_context.uc_mcontext, host_context);
+	request->resume_context = *host_context;
+	request->signal_context = host_context;
+	// libc's signal restorer returns through the synthetic return address
+	// before issuing rt_sigreturn, leaving RSP at the ucontext itself.
+	request->signal_frame = reinterpret_cast<uintptr_t>(host_context);
+
+	uintptr_t stack_top = reinterpret_cast<uintptr_t>(request->trampoline_stack.get()) + kHostContextTrampolineStackSize;
+	stack_top &= ~static_cast<uintptr_t>(0xf);
+	stack_top -= sizeof(uintptr_t);
+	*reinterpret_cast<uintptr_t*>(stack_top) = 0;
+	host_context->uc_mcontext.gregs[REG_RIP] = reinterpret_cast<greg_t>(HostContextTrampoline);
+	host_context->uc_mcontext.gregs[REG_RDI] = reinterpret_cast<greg_t>(request);
+	host_context->uc_mcontext.gregs[REG_RSP] = static_cast<greg_t>(stack_top);
+}
+#endif
+
+static int KYTY_SYSV_ABI KernelIsSignalReturn()
+{
+	// Guest code never executes the host's rt_sigreturn trampoline. The host
+	// bridge restores that context only after the guest handler has returned.
+	return 0;
+}
 
 static int KYTY_SYSV_ABI KernelInstallExceptionHandler(int signum, void* handler)
 {
@@ -896,39 +1020,76 @@ static int KYTY_SYSV_ABI KernelInstallExceptionHandler(int signum, void* handler
 	}
 
 	std::lock_guard lock(g_exception_handlers_mutex);
-	if (g_exception_handlers[static_cast<size_t>(signum)] != nullptr)
+	if (g_exception_handlers[static_cast<size_t>(signum)].load(std::memory_order_relaxed) != 0)
 	{
 		return KERNEL_ERROR_EAGAIN;
 	}
-	g_exception_handlers[static_cast<size_t>(signum)] = handler;
+	if (signum == 30)
+	{
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+		struct sigaction action {};
+		action.sa_sigaction = HostContextSignalHandler;
+		sigemptyset(&action.sa_mask);
+		action.sa_flags = SA_SIGINFO | SA_RESTART;
+		if (sigaction(HostContextSignal(), &action, nullptr) != 0)
+		{
+			return KERNEL_ERROR_EINVAL;
+		}
+#else
+		return KERNEL_ERROR_EINVAL;
+#endif
+	}
+	g_exception_handlers[static_cast<size_t>(signum)].store(reinterpret_cast<uintptr_t>(handler), std::memory_order_release);
 	return OK;
 }
 
-static int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum)
+int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum)
 {
 	if (thread == nullptr || signum != 30)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	void* handler = nullptr;
-	{
-		std::lock_guard lock(g_exception_handlers_mutex);
-		handler = g_exception_handlers[static_cast<size_t>(signum)];
-	}
-	if (handler == nullptr)
+	if (g_exception_handlers[static_cast<size_t>(signum)].load(std::memory_order_acquire) == 0)
 	{
 		return OK;
 	}
 
-	SignalUcontext context {};
-	context.uc_mcontext.mc_len = sizeof(SignalMcontext);
-	context.uc_mcontext.mc_rsp = reinterpret_cast<uint64_t>(__builtin_frame_address(0));
-	context.uc_mcontext.mc_rbp = reinterpret_cast<uint64_t>(__builtin_frame_address(0));
-	context.uc_mcontext.mc_rip = reinterpret_cast<uint64_t>(__builtin_return_address(0));
-	using handler_func_t       = KYTY_SYSV_ABI void (*)(int, SignalUcontext*);
-	reinterpret_cast<handler_func_t>(handler)(signum, &context);
-	return OK;
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	ReclaimCompletedHostContextRequests();
+	auto* request = new (std::nothrow) HostContextRequest {};
+	if (request == nullptr)
+	{
+		return KERNEL_ERROR_ENOMEM;
+	}
+	request->trampoline_stack = std::unique_ptr<uint8_t[]>(new (std::nothrow) uint8_t[kHostContextTrampolineStackSize]);
+	if (request->trampoline_stack == nullptr)
+	{
+		delete request;
+		return KERNEL_ERROR_ENOMEM;
+	}
+	request->handler = g_exception_handlers[static_cast<size_t>(signum)].load(std::memory_order_acquire);
+
+	{
+		std::lock_guard lock(g_host_context_requests_mutex);
+		g_host_context_requests.push_back(request);
+	}
+
+	const int result = PthreadSignalWithValue(thread, HostContextSignal(), request);
+	if (result != OK)
+	{
+		std::lock_guard lock(g_host_context_requests_mutex);
+		const auto iterator = std::find(g_host_context_requests.begin(), g_host_context_requests.end(), request);
+		if (iterator != g_host_context_requests.end())
+		{
+			g_host_context_requests.erase(iterator);
+		}
+		delete request;
+	}
+	return result;
+#else
+	return KERNEL_ERROR_EINVAL;
+#endif
 }
 
 static KYTY_SYSV_ABI int KernelIsAddressSanitizerEnabled()
@@ -1829,6 +1990,7 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("NNtFaKJbPt0", LibKernel::close);
 	LIB_FUNC("OMDRKKAZ8I4", LibKernel::KernelDebugRaiseException);
 	LIB_FUNC("il03nluKfMk", LibKernel::KernelRaiseException);
+	LIB_FUNC("crb5j7mkk1c", LibKernel::KernelIsSignalReturn);
 	LIB_FUNC("WkwEd3N7w0Y", LibKernel::KernelInstallExceptionHandler);
 	LIB_FUNC("jh+8XiK4LeE", LibKernel::KernelIsAddressSanitizerEnabled);
 	LIB_FUNC("-o5uEDpN+oY", LibKernel::KernelConvertUtcToLocaltime);

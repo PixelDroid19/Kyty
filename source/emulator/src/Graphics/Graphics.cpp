@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <mutex>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -1428,6 +1429,20 @@ static RegisterDefaults g_reg_defaults2 = { // @suppress("Invalid arguments")
 
 namespace {
 
+constexpr int      GRAPHICS5_DRIVER_ERROR_INVALID_VALUE    = static_cast<int>(0x8a6c0033u);
+constexpr int      GRAPHICS5_DRIVER_ERROR_INVALID_ARGUMENT = static_cast<int>(0x8a6c0035u);
+constexpr uint32_t WORKLOAD_STREAM_RECORD_SIZE             = 32u;
+constexpr uint32_t WORKLOAD_ACTIVE_PACKET_SIZE_DW          = 18u;
+constexpr uint32_t WORKLOAD_COMPLETE_PACKET_SIZE_DW        = 12u;
+constexpr uint32_t WORKLOAD_STREAM_MIN_ID                  = 1u;
+constexpr uint32_t WORKLOAD_STREAM_MAX_ID                  = 31u;
+constexpr uint32_t WORKLOAD_ID_MAX                         = 63u;
+constexpr uint32_t WORKLOAD_ACTIVE_COUNT_MAX               = 63u;
+
+std::mutex g_workload_stream_mutex;
+uint32_t   g_workload_stream_mask = 0;
+uint8_t    g_workload_streams[WORKLOAD_STREAM_MAX_ID + 1u][WORKLOAD_STREAM_RECORD_SIZE] = {};
+
 constexpr uint32_t kDescriptorTableEntries = 32;
 
 template <typename T> T ReadDescriptorField(const uint8_t* data, size_t offset)
@@ -1769,6 +1784,7 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 	map.user_data           = h->user_data;
 	map.input_semantics     = h->input_semantics;
 	map.num_input_semantics = h->num_input_semantics;
+	map.code_size_bytes     = h->shader_size;
 
 	ShaderMapUserData(base, map);
 
@@ -1825,6 +1841,11 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 			    (static_cast<uint64_t>(h->sh_registers[lo_index].value) << 8u) |
 			    ((static_cast<uint64_t>(h->sh_registers[hi_index].value) & 0xffu) << 40u);
 			const uint64_t addr = base + shader_offset;
+
+			// PGM_LO/HI name the effective entry point, which may be inside the
+			// supplied code allocation. Resource metadata belongs to that address,
+			// not only to the allocation base.
+			ShaderMapUserData(addr, map);
 
 			h->sh_registers[lo_index].value = static_cast<uint32_t>((addr >> 8u) & 0xffffffffu);
 			h->sh_registers[hi_index].value =
@@ -2384,8 +2405,9 @@ int KYTY_SYSV_ABI GraphicsSuspendPoint()
 {
 	PRINT_NAME();
 
-	GraphicsRunDone();
-
+	// sceAgcSuspendPoint is a cooperative driver checkpoint, not a graphics
+	// shutdown request. Unity calls it during normal frame progression; tearing
+	// down the run loop here permanently stops presentation after boot frames.
 	return OK;
 }
 
@@ -3015,6 +3037,135 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitUntilSafeForRendering(CommandBuffer* buf,
 	cmd[4] = 0;
 	cmd[5] = 0;
 	cmd[6] = 0;
+
+	return cmd;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverRegisterWorkloadStream(uint32_t stream_id, const void* stream)
+{
+	PRINT_NAME();
+
+	printf("\t stream_id = %" PRIu32 "\n", stream_id);
+	printf("\t stream    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(stream));
+
+	if (stream_id < WORKLOAD_STREAM_MIN_ID || stream_id > WORKLOAD_STREAM_MAX_ID)
+	{
+		return GRAPHICS5_DRIVER_ERROR_INVALID_VALUE;
+	}
+
+	if (stream == nullptr)
+	{
+		return GRAPHICS5_DRIVER_ERROR_INVALID_ARGUMENT;
+	}
+
+	std::lock_guard lock(g_workload_stream_mutex);
+
+	const uint32_t stream_bit = 1u << stream_id;
+	if ((g_workload_stream_mask & stream_bit) != 0)
+	{
+		return GRAPHICS5_DRIVER_ERROR_INVALID_VALUE;
+	}
+
+	std::memset(g_workload_streams[stream_id], 0, WORKLOAD_STREAM_RECORD_SIZE);
+	std::memcpy(g_workload_streams[stream_id], stream, WORKLOAD_STREAM_RECORD_SIZE);
+	g_workload_stream_mask |= stream_bit;
+
+	return OK;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetWorkloadsActive(CommandBuffer* buf, uint32_t stream_id, const uint32_t* workload_ids,
+                                                      uint32_t workload_count)
+{
+	PRINT_NAME();
+
+	printf("\t stream_id      = %" PRIu32 "\n", stream_id);
+	printf("\t workload_ids   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(workload_ids));
+	printf("\t workload_count = %" PRIu32 "\n", workload_count);
+
+	if (buf == nullptr || workload_ids == nullptr || workload_count == 0 || workload_count > WORKLOAD_ACTIVE_COUNT_MAX ||
+	    stream_id < WORKLOAD_STREAM_MIN_ID || stream_id > WORKLOAD_STREAM_MAX_ID)
+	{
+		return nullptr;
+	}
+
+	uint64_t workload_mask = 0;
+	for (uint32_t i = 0; i < workload_count; i++)
+	{
+		const uint32_t workload_id = workload_ids[i];
+		if (workload_id > WORKLOAD_ID_MAX)
+		{
+			return nullptr;
+		}
+
+		const uint64_t workload_bit = 1ull << workload_id;
+		if ((workload_mask & workload_bit) != 0)
+		{
+			return nullptr;
+		}
+		workload_mask |= workload_bit;
+	}
+
+	{
+		std::lock_guard lock(g_workload_stream_mutex);
+		if ((g_workload_stream_mask & (1u << stream_id)) == 0)
+		{
+			return nullptr;
+		}
+	}
+
+	buf->DbgDump();
+
+	auto* cmd = buf->AllocateDW(WORKLOAD_ACTIVE_PACKET_SIZE_DW);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	cmd[0] = KYTY_PM4(WORKLOAD_ACTIVE_PACKET_SIZE_DW, Pm4::IT_NOP, Pm4::R_ZERO);
+	std::memset(cmd + 1, 0, static_cast<size_t>(WORKLOAD_ACTIVE_PACKET_SIZE_DW - 1u) * sizeof(uint32_t));
+	cmd[1] = stream_id;
+	cmd[2] = static_cast<uint32_t>(workload_mask & 0xffffffffu);
+	cmd[3] = static_cast<uint32_t>((workload_mask >> 32u) & 0xffffffffu);
+
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetWorkloadComplete(CommandBuffer* buf, uint32_t stream_id, uint32_t workload_id)
+{
+	PRINT_NAME();
+
+	printf("\t stream_id   = %" PRIu32 "\n", stream_id);
+	printf("\t workload_id = %" PRIu32 "\n", workload_id);
+
+	if (buf == nullptr || stream_id < WORKLOAD_STREAM_MIN_ID || stream_id > WORKLOAD_STREAM_MAX_ID || workload_id > WORKLOAD_ID_MAX)
+	{
+		return nullptr;
+	}
+
+	{
+		std::lock_guard lock(g_workload_stream_mutex);
+		if ((g_workload_stream_mask & (1u << stream_id)) == 0)
+		{
+			return nullptr;
+		}
+	}
+
+	buf->DbgDump();
+
+	auto* cmd = buf->AllocateDW(WORKLOAD_COMPLETE_PACKET_SIZE_DW);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	const uint64_t workload_clear_mask = ~(1ull << workload_id);
+
+	cmd[0] = KYTY_PM4(WORKLOAD_COMPLETE_PACKET_SIZE_DW, Pm4::IT_NOP, Pm4::R_ZERO);
+	std::memset(cmd + 1, 0, static_cast<size_t>(WORKLOAD_COMPLETE_PACKET_SIZE_DW - 1u) * sizeof(uint32_t));
+	cmd[1] = stream_id;
+	cmd[2] = workload_id;
+	cmd[3] = static_cast<uint32_t>(workload_clear_mask & 0xffffffffu);
+	cmd[4] = static_cast<uint32_t>((workload_clear_mask >> 32u) & 0xffffffffu);
 
 	return cmd;
 }

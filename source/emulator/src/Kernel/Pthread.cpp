@@ -34,6 +34,7 @@
 #endif
 
 #include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -83,6 +84,8 @@ struct PthreadAttrPrivate
 	uint8_t        reserved[64];
 	KernelCpumask  affinity;
 	size_t         guard_size;
+	void*          stack_addr = nullptr;
+	size_t         stack_size = 0;
 	int            policy;
 	bool           detached;
 	pthread_attr_t p;
@@ -303,6 +306,26 @@ void PthreadInitSelfForMainThread()
 	g_pthread_self->almost_done = false;
 	g_pthread_self->entry       = nullptr;
 	g_pthread_self->arg         = nullptr;
+}
+
+void* PthreadCreateMainGuestStack()
+{
+	EXIT_IF(g_pthread_self == nullptr || g_pthread_self->attr == nullptr);
+
+	auto* attr = g_pthread_self->attr;
+	if (attr->stack_addr == nullptr)
+	{
+		constexpr uint64_t kMainGuestStackSize = 2ull * 1024ull * 1024ull;
+		const uint64_t     base = Core::VirtualMemory::Alloc(0, kMainGuestStackSize, Core::VirtualMemory::Mode::ReadWrite);
+		if (base == 0)
+		{
+			return nullptr;
+		}
+		attr->stack_addr = reinterpret_cast<void*>(base);
+		attr->stack_size = kMainGuestStackSize;
+	}
+
+	return reinterpret_cast<void*>((reinterpret_cast<uintptr_t>(attr->stack_addr) + attr->stack_size) & ~static_cast<uintptr_t>(0xf));
 }
 
 KYTY_SUBSYSTEM_INIT(Pthread)
@@ -1177,6 +1200,10 @@ int KYTY_SYSV_ABI PthreadAttrInit(PthreadAttr* attr)
 	*attr = new PthreadAttrPrivate {};
 
 	int result = pthread_attr_init(&(*attr)->p);
+	if (result == 0)
+	{
+		result = pthread_attr_getstacksize(&(*attr)->p, &(*attr)->stack_size);
+	}
 
 	(*attr)->affinity   = 0x7f;
 	(*attr)->guard_size = 0x1000;
@@ -1229,7 +1256,35 @@ int KYTY_SYSV_ABI PthreadAttrGet(Pthread thread, PthreadAttr* attr)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	return pthread_attr_copy(attr, &thread->attr);
+	const int copy_result = pthread_attr_copy(attr, &thread->attr);
+	if (copy_result != OK)
+	{
+		return copy_result;
+	}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	// pthread attributes are queried by IL2CPP while registering conservative
+	// GC roots.  The creation template keeps a null stack address when Linux
+	// chooses the native stack, so expose the active pthread mapping instead.
+	// This must agree with the stack pointer captured by KernelRaiseException.
+	pthread_attr_t native_attr {};
+	if ((*attr)->stack_addr == nullptr && pthread_getattr_np(thread->p, &native_attr) == 0)
+	{
+		void*  stack_addr = nullptr;
+		size_t stack_size = 0;
+		const int get_result = pthread_attr_getstack(&native_attr, &stack_addr, &stack_size);
+		pthread_attr_destroy(&native_attr);
+		if (get_result != 0 || stack_addr == nullptr || stack_size == 0 ||
+		    pthread_attr_setstack(&(*attr)->p, stack_addr, stack_size) != 0)
+		{
+			return KERNEL_ERROR_EINVAL;
+		}
+		(*attr)->stack_addr = stack_addr;
+		(*attr)->stack_size = stack_size;
+	}
+#endif
+
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadAttrGetaffinity(const PthreadAttr* attr, KernelCpumask* mask)
@@ -1377,14 +1432,9 @@ int KYTY_SYSV_ABI PthreadAttrGetstack(const PthreadAttr* __restrict attr, void**
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result1 = pthread_attr_getstackaddr(&(*attr)->p, stack_addr);
-	int result2 = pthread_attr_getstacksize(&(*attr)->p, stack_size);
-
-	if (result1 == 0 && result2 == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	*stack_addr = (*attr)->stack_addr;
+	*stack_size = (*attr)->stack_size;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadAttrGetstackaddr(const PthreadAttr* attr, void** stack_addr)
@@ -1396,13 +1446,8 @@ int KYTY_SYSV_ABI PthreadAttrGetstackaddr(const PthreadAttr* attr, void** stack_
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result1 = pthread_attr_getstackaddr(&(*attr)->p, stack_addr);
-
-	if (result1 == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	*stack_addr = (*attr)->stack_addr;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadAttrGetstacksize(const PthreadAttr* attr, size_t* stack_size)
@@ -1414,13 +1459,8 @@ int KYTY_SYSV_ABI PthreadAttrGetstacksize(const PthreadAttr* attr, size_t* stack
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result2 = pthread_attr_getstacksize(&(*attr)->p, stack_size);
-
-	if (result2 == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	*stack_size = (*attr)->stack_size;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadAttrSetaffinity(PthreadAttr* attr, KernelCpumask mask)
@@ -1559,11 +1599,12 @@ int KYTY_SYSV_ABI PthreadAttrSetstack(PthreadAttr* attr, void* addr, size_t size
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result1 = pthread_attr_setstackaddr(&(*attr)->p, addr);
-	int result2 = pthread_attr_setstacksize(&(*attr)->p, size);
+	const int result = pthread_attr_setstack(&(*attr)->p, addr, size);
 
-	if (result1 == 0 && result2 == 0)
+	if (result == 0)
 	{
+		(*attr)->stack_addr = addr;
+		(*attr)->stack_size = size;
 		return OK;
 	}
 	return KERNEL_ERROR_EINVAL;
@@ -1578,10 +1619,17 @@ int KYTY_SYSV_ABI PthreadAttrSetstackaddr(PthreadAttr* attr, void* addr)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result1 = pthread_attr_setstackaddr(&(*attr)->p, addr);
-
-	if (result1 == 0)
+	const size_t stack_size = (*attr)->stack_size;
+	if (stack_size == 0)
 	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	const int result = pthread_attr_setstack(&(*attr)->p, addr, stack_size);
+
+	if (result == 0)
+	{
+		(*attr)->stack_addr = addr;
 		return OK;
 	}
 	return KERNEL_ERROR_EINVAL;
@@ -1596,10 +1644,12 @@ int KYTY_SYSV_ABI PthreadAttrSetstacksize(PthreadAttr* attr, size_t stack_size)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result2 = pthread_attr_setstacksize(&(*attr)->p, stack_size);
+	const int result2 = ((*attr)->stack_addr == nullptr ? pthread_attr_setstacksize(&(*attr)->p, stack_size) :
+	                                                     pthread_attr_setstack(&(*attr)->p, (*attr)->stack_addr, stack_size));
 
 	if (result2 == 0)
 	{
+		(*attr)->stack_size = stack_size;
 		return OK;
 	}
 	return KERNEL_ERROR_EINVAL;
@@ -2075,6 +2125,7 @@ static std::atomic<uint64_t>      g_slot_trace_stall_present {0};
 struct SlotTraceSigCount
 {
 	std::atomic<uint64_t> cond {0};
+	std::atomic<uint64_t> last_return_addr {0};
 	std::atomic<uint32_t> count {0};
 	std::atomic<uint32_t> after_stall {0};
 };
@@ -2086,7 +2137,7 @@ static bool slot_trace_env()
 	return std::getenv("KYTY_SLOT_TRACE") != nullptr;
 }
 
-static void slot_trace_note_signal(uint64_t cond_addr)
+static void slot_trace_note_signal(uint64_t cond_addr, uint64_t return_addr)
 {
 	if (!slot_trace_env() || cond_addr == 0)
 	{
@@ -2098,6 +2149,7 @@ static void slot_trace_note_signal(uint64_t cond_addr)
 		uint64_t cur = g_slot_trace_sigs[i].cond.load();
 		if (cur == cond_addr)
 		{
+			g_slot_trace_sigs[i].last_return_addr.store(return_addr, std::memory_order_relaxed);
 			g_slot_trace_sigs[i].count.fetch_add(1);
 			if (after_stall)
 			{
@@ -2118,6 +2170,7 @@ static void slot_trace_note_signal(uint64_t cond_addr)
 			uint64_t expected = 0;
 			if (g_slot_trace_sigs[i].cond.compare_exchange_strong(expected, cond_addr))
 			{
+				g_slot_trace_sigs[i].last_return_addr.store(return_addr, std::memory_order_relaxed);
 				g_slot_trace_sigs[i].count.fetch_add(1);
 				if (after_stall)
 				{
@@ -2215,6 +2268,18 @@ static uint32_t slot_trace_signal_count(uint64_t cond)
 	return 0;
 }
 
+static uint64_t slot_trace_last_signal_return_addr(uint64_t cond)
+{
+	for (uint32_t i = 0; i < kSlotTraceSigSlots; i++)
+	{
+		if (g_slot_trace_sigs[i].cond.load() == cond)
+		{
+			return g_slot_trace_sigs[i].last_return_addr.load(std::memory_order_relaxed);
+		}
+	}
+	return 0;
+}
+
 bool PthreadGetCondWaitDiagnostics(PthreadCondWaitDiagnostics* out)
 {
 	if (out == nullptr)
@@ -2248,6 +2313,7 @@ bool PthreadGetCondWaitDiagnostics(PthreadCondWaitDiagnostics* out)
 		waiter.cond_handle   = g_slot_trace_waiters[i].cond_h.load();
 		waiter.mutex_handle  = g_slot_trace_waiters[i].mutex_h.load();
 		waiter.signal_count  = slot_trace_signal_count(waiter.cond);
+		waiter.last_signal_return_addr = slot_trace_last_signal_return_addr(waiter.cond);
 	}
 	return true;
 }
@@ -2304,8 +2370,9 @@ void SlotTraceDumpBlockedCondWaiters()
 		{
 			continue;
 		}
-		std::fprintf(stderr, "COND_SIGCNT cond=0x%016" PRIx64 " total=%u after_stall=%u\n", c, g_slot_trace_sigs[i].count.load(),
-		             g_slot_trace_sigs[i].after_stall.load());
+		std::fprintf(stderr, "COND_SIGCNT cond=0x%016" PRIx64 " total=%u after_stall=%u last_ret=0x%016" PRIx64 "\n", c,
+		             g_slot_trace_sigs[i].count.load(), g_slot_trace_sigs[i].after_stall.load(),
+		             g_slot_trace_sigs[i].last_return_addr.load(std::memory_order_relaxed));
 	}
 	std::fflush(stderr);
 }
@@ -2384,7 +2451,7 @@ int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 	EXIT_IF(pthread_static_objects == nullptr);
 
 	const auto ret_addr = reinterpret_cast<uint64_t>(__builtin_return_address(0));
-	slot_trace_note_signal(reinterpret_cast<uint64_t>(cond));
+	slot_trace_note_signal(reinterpret_cast<uint64_t>(cond), ret_addr);
 	slot_trace_cond_event("BCAST", cond, nullptr, ret_addr);
 
 	cond = static_cast<PthreadCond*>(pthread_static_objects->CreateObject(cond, PthreadStaticObject::Type::Cond));
@@ -2480,7 +2547,7 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 	}
 
 	const auto ret_addr = reinterpret_cast<uint64_t>(__builtin_return_address(0));
-	slot_trace_note_signal(reinterpret_cast<uint64_t>(cond));
+	slot_trace_note_signal(reinterpret_cast<uint64_t>(cond), ret_addr);
 	slot_trace_cond_event("SIGNAL", cond, nullptr, ret_addr);
 
 	// Lazily initialize a statically-initialized cond (sentinel), like the other paths.
@@ -2715,6 +2782,47 @@ Pthread KYTY_SYSV_ABI PthreadSelf()
 	return g_pthread_self;
 }
 
+int KYTY_SYSV_ABI PthreadSignal(Pthread thread, int signum)
+{
+	if (thread == nullptr || thread->free.load(std::memory_order_acquire))
+	{
+		return KERNEL_ERROR_ESRCH;
+	}
+
+	switch (pthread_kill(thread->p, signum))
+	{
+		case 0: return OK;
+		case ESRCH: return KERNEL_ERROR_ESRCH;
+		case EINVAL: return KERNEL_ERROR_EINVAL;
+		default: return KERNEL_ERROR_EINVAL;
+	}
+}
+
+int KYTY_SYSV_ABI PthreadSignalWithValue(Pthread thread, int signum, void* value)
+{
+	if (thread == nullptr || thread->free.load(std::memory_order_acquire))
+	{
+		return KERNEL_ERROR_ESRCH;
+	}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	union sigval signal_value {};
+	signal_value.sival_ptr = value;
+	switch (pthread_sigqueue(thread->p, signum, signal_value))
+	{
+		case 0: return OK;
+		case ESRCH: return KERNEL_ERROR_ESRCH;
+		case EAGAIN: return KERNEL_ERROR_EAGAIN;
+		case EINVAL: return KERNEL_ERROR_EINVAL;
+		default: return KERNEL_ERROR_EINVAL;
+	}
+#else
+	(void)signum;
+	(void)value;
+	return KERNEL_ERROR_EINVAL;
+#endif
+}
+
 static void cleanup_thread(void* arg)
 {
 	auto* thread = static_cast<Pthread>(arg);
@@ -2809,11 +2917,12 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 		// often demote a guard page with mprotect(prot=0) first; leaving that
 		// page PROT_NONE makes libc pthread_create SIGSEGV in host memset.
 		// Ensure the configured stack is host-writable for the create path.
-		// Prefer pthread_attr_getstack — getstackaddr alone can miss stacks set
-		// via setstack and is deprecated.
+		// Only a guest-requested stack mapping is safe to reprotect. Linux uses
+		// a negative sentinel for the address returned by pthread_attr_getstack
+		// when only the size was configured.
 		void*  stack_addr = nullptr;
 		size_t stack_size = 0;
-		if (pthread_attr_getstack(&(*attr)->p, &stack_addr, &stack_size) == 0 && stack_addr != nullptr && stack_size != 0 &&
+		if (PthreadAttrGetstack(attr, &stack_addr, &stack_size) == OK && stack_addr != nullptr && stack_size != 0 &&
 		    reinterpret_cast<uintptr_t>(stack_addr) <= UINTPTR_MAX - stack_size)
 		{
 			(*thread)->guest_stack_base = reinterpret_cast<uint64_t>(stack_addr);

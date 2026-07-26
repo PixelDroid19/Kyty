@@ -13,7 +13,9 @@ namespace MemoryAllocDetail {
 class ThreadDomainRegistry
 {
 public:
-	static constexpr size_t capacity = 64;
+	// Keep the registry allocation-free and bounded, while covering the large
+	// concurrent worker pools created by modern game engines.
+	static constexpr size_t capacity = 256;
 
 	bool Add(uint64_t thread_token)
 	{

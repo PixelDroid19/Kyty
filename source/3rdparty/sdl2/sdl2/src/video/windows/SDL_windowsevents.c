@@ -1820,6 +1820,7 @@ static void WIN_UpdateClipCursorForWindows(void)
     }
 }
 
+#if !defined(KYTY_SDL_STATIC)
 static void WIN_UpdateMouseCapture(void)
 {
     SDL_Window *focusWindow = SDL_GetKeyboardFocus();
@@ -1848,6 +1849,7 @@ static void WIN_UpdateMouseCapture(void)
         }
     }
 }
+#endif
 #endif /*!defined(__XBOXONE__) && !defined(__XBOXSERIES__)*/
 
 /* A message hook called before TranslateMessage() */
@@ -1989,8 +1991,10 @@ void WIN_PumpEvents(_THIS)
     /* Update the clipping rect in case someone else has stolen it */
     WIN_UpdateClipCursorForWindows();
 
+#if !defined(KYTY_SDL_STATIC)
     /* Update mouse capture */
     WIN_UpdateMouseCapture();
+#endif
 #endif /*!defined(__XBOXONE__) && !defined(__XBOXSERIES__)*/
 
 #ifdef __GDK__

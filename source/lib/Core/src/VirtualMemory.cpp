@@ -530,6 +530,21 @@ static inline uint64_t uc_get_r15(ucontext_t* uc) { return static_cast<uint64_t>
 static inline uint64_t uc_get_err(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_ERR]); }
 static inline uint64_t uc_get_rflags(ucontext_t* uc) { return static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_EFL]); }
 static inline void     uc_set_rflags(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_EFL] = static_cast<greg_t>(v); }
+static inline void     uc_set_rax(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_RAX] = static_cast<greg_t>(v); }
+static inline void     uc_set_rbx(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_RBX] = static_cast<greg_t>(v); }
+static inline void     uc_set_rcx(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_RCX] = static_cast<greg_t>(v); }
+static inline void     uc_set_rdx(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_RDX] = static_cast<greg_t>(v); }
+static inline void     uc_set_rsi(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_RSI] = static_cast<greg_t>(v); }
+static inline void     uc_set_rdi(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_RDI] = static_cast<greg_t>(v); }
+static inline void     uc_set_rbp(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_RBP] = static_cast<greg_t>(v); }
+static inline void     uc_set_r8(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_R8] = static_cast<greg_t>(v); }
+static inline void     uc_set_r9(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_R9] = static_cast<greg_t>(v); }
+static inline void     uc_set_r10(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_R10] = static_cast<greg_t>(v); }
+static inline void     uc_set_r11(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_R11] = static_cast<greg_t>(v); }
+static inline void     uc_set_r12(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_R12] = static_cast<greg_t>(v); }
+static inline void     uc_set_r13(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_R13] = static_cast<greg_t>(v); }
+static inline void     uc_set_r14(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_R14] = static_cast<greg_t>(v); }
+static inline void     uc_set_r15(ucontext_t* uc, uint64_t v) { uc->uc_mcontext.gregs[REG_R15] = static_cast<greg_t>(v); }
 static inline long     host_tid() { return ::syscall(SYS_gettid); }
 #else
 #error "KYTY_HAS_SIGNAL_EXCEPTIONS requires Apple or Linux ucontext accessors"
@@ -697,6 +712,352 @@ static void sigsafe_fault(const char* tag, uint64_t a, uint64_t b)
 // SIGSEGV/SIGBUS handler: translates the Mach fault into Kyty's ExceptionInfo and
 // dispatches to the installed handler. If the handler returns (e.g. a GPU memory
 // watchpoint unprotected the page), the faulting instruction is retried.
+// ---------------------------------------------------------------------------
+// Minimal x86-64 instruction length decoder (signal-safe, no allocations).
+// Returns instruction length in bytes, or 0 if the instruction cannot be
+// decoded. Used to skip null-page data faults that cannot be backed by mmap
+// when vm.mmap_min_addr prevents mapping pages below 64 KiB.
+// ---------------------------------------------------------------------------
+#if defined(__x86_64__) || defined(__i386__)
+
+// Opcode table encoding: bit0 = has ModRM, bits 4..7 = immediate size in bytes.
+// 0xFF = invalid/unknown opcode (decoder bails out).
+static constexpr uint8_t kModRM = 0x01;
+
+// One-byte opcode map (256 entries).
+// Encoding: (imm_size << 4) | has_modrm
+//   imm_size: 0=none, 1=imm8, 2=imm16, 3=imm16+imm8(ENTER), 4=imm32, 8=imm64/moffs
+// clang-format off
+static constexpr uint8_t kOpcodeMap1[256] = {
+	/* 00-03 ADD r/m,r  */ 0x11,0x11,0x11,0x11,
+	/* 04-05 ADD AL,r   */ 0x10,0x40,
+	/* 06-07 invalid64  */ 0xFF,0xFF,
+	/* 08-0B OR         */ 0x11,0x11,0x11,0x11,
+	/* 0C-0D OR AL,r    */ 0x10,0x40,
+	/* 0E-0F invalid/2byte */ 0xFF,0xFF,
+	/* 10-13 ADC        */ 0x11,0x11,0x11,0x11,
+	/* 14-15 ADC AL,r   */ 0x10,0x40,
+	/* 16-17 invalid64  */ 0xFF,0xFF,
+	/* 18-1B SBB        */ 0x11,0x11,0x11,0x11,
+	/* 1C-1D SBB AL,r   */ 0x10,0x40,
+	/* 1E-1F invalid64  */ 0xFF,0xFF,
+	/* 20-23 AND        */ 0x11,0x11,0x11,0x11,
+	/* 24-25 AND AL,r   */ 0x10,0x40,
+	/* 26-27 prefix/inv */ 0xFF,0xFF,
+	/* 28-2B SUB        */ 0x11,0x11,0x11,0x11,
+	/* 2C-2D SUB AL,r   */ 0x10,0x40,
+	/* 2E-2F prefix/inv */ 0xFF,0xFF,
+	/* 30-33 XOR        */ 0x11,0x11,0x11,0x11,
+	/* 34-35 XOR AL,r   */ 0x10,0x40,
+	/* 36-37 prefix/inv */ 0xFF,0xFF,
+	/* 38-3B CMP        */ 0x11,0x11,0x11,0x11,
+	/* 3C-3D CMP AL,r   */ 0x10,0x40,
+	/* 3E-3F prefix/inv */ 0xFF,0xFF,
+	/* 40-4F REX (64-bit) */ 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+	                         0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+	/* 50-57 PUSH reg   */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	/* 58-5F POP reg    */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	/* 60-62 invalid64  */ 0xFF,0xFF,0xFF,
+	/* 63 MOVSXD        */ 0x01,
+	/* 64-67 prefix     */ 0xFF,0xFF,0xFF,0xFF,
+	/* 68 PUSH imm32    */ 0x40,
+	/* 69 IMUL r,r/m,imm32 */ 0x41,
+	/* 6A PUSH imm8     */ 0x10,
+	/* 6B IMUL r,r/m,imm8  */ 0x11,
+	/* 6C-6F INS/OUTS   */ 0x00,0x00,0x00,0x00,
+	/* 70-7F Jcc rel8   */ 0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,
+	                         0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,
+	/* 80 group1 r/m,imm8  */ 0x11,
+	/* 81 group1 r/m,imm32 */ 0x41,
+	/* 82 group1 r/m,imm8 (alias) */ 0x11,
+	/* 83 group1 r/m,imm8se */ 0x11,
+	/* 84-85 TEST r/m,r */ 0x01,0x01,
+	/* 86-87 XCHG r/m,r */ 0x01,0x01,
+	/* 88-8B MOV r/m,r  */ 0x01,0x01,0x01,0x01,
+	/* 8C MOV r/m,seg   */ 0x01,
+	/* 8D LEA           */ 0x01,
+	/* 8E MOV seg,r/m   */ 0x01,
+	/* 8F POP r/m       */ 0x01,
+	/* 90-97 NOP/XCHG   */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	/* 98-9F CBW/CWD/etc */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	/* A0-A3 MOV moffs  */ 0x80,0x80,0x80,0x80,
+	/* A4-A7 MOVS/CMPS  */ 0x00,0x00,0x00,0x00,
+	/* A8-A9 TEST AL,r  */ 0x10,0x40,
+	/* AA-AF STOS/LODS/SCAS */ 0x00,0x00,0x00,0x00,0x00,0x00,
+	/* B0-B7 MOV r8,imm8 */ 0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,
+	/* B8-BF MOV r64,imm64 */ 0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,
+	/* C0 group2 r/m,imm8 */ 0x11,
+	/* C1 group2 r/m,imm8 */ 0x11,
+	/* C2 RET imm16     */ 0x20,
+	/* C3 RET           */ 0x00,
+	/* C4-C5 VEX inv64  */ 0xFF,0xFF,
+	/* C6 MOV r/m8,imm8 */ 0x11,
+	/* C7 MOV r/m,imm32 */ 0x41,
+	/* C8 ENTER imm16+8 */ 0x30,
+	/* C9 LEAVE         */ 0x00,
+	/* CA RETF imm16    */ 0x20,
+	/* CB RETF          */ 0x00,
+	/* CC-CE INT/INTO   */ 0x00,0x00,0x00,
+	/* CF IRET          */ 0x00,
+	/* D0-D3 group2     */ 0x01,0x01,0x01,0x01,
+	/* D4-D7 invalid64  */ 0xFF,0xFF,0xFF,0xFF,
+	/* D8-DF x87 ModRM  */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* E0-E3 LOOPx/JCXZ */ 0x10,0x10,0x10,0x10,
+	/* E4-E7 IN/OUT imm8 */ 0x10,0x10,0x10,0x10,
+	/* E8 CALL rel32    */ 0x40,
+	/* E9 JMP rel32     */ 0x40,
+	/* EA JMPF inv64    */ 0xFF,
+	/* EB JMP rel8      */ 0x10,
+	/* EC-EF IN/OUT DX  */ 0x00,0x00,0x00,0x00,
+	/* F0-F3 prefixes   */ 0xFF,0xFF,0xFF,0xFF,
+	/* F4-F5 HLT/CMC    */ 0x00,0x00,
+	/* F6 group3 r/m8   */ 0x01,
+	/* F7 group3 r/m    */ 0x01,
+	/* F8-FD flags      */ 0x00,0x00,0x00,0x00,0x00,0x00,
+	/* FE group4 inc/dec */ 0x01,
+	/* FF group5 call/jmp/push */ 0x01,
+};
+
+// Two-byte opcode map (0F xx).
+static constexpr uint8_t kOpcodeMap2[256] = {
+	/* 0F 00-01 group6/7 */ 0x01,0x01,
+	/* 0F 02-03 LAR/LSL  */ 0x01,0x01,
+	/* 0F 04-05 inv      */ 0xFF,0x00,
+	/* 0F 06-07 CLTS/INV */ 0x00,0x00,
+	/* 0F 08-09 INVD/etc */ 0x00,0x00,
+	/* 0F 0A-0B inv/UD2  */ 0xFF,0x00,
+	/* 0F 0C-0F inv      */ 0xFF,0xFF,0xFF,0xFF,
+	/* 0F 10-17 SSE MOV  */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* 0F 18-1F prefetch */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* 0F 20-23 MOV CR/DR */ 0x01,0x01,0x01,0x01,
+	/* 0F 24-27 inv      */ 0xFF,0xFF,0xFF,0xFF,
+	/* 0F 28-2F SSE MOV  */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* 0F 30-37 sys      */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	/* 0F 38-3F 3byte esc */ 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+	/* 0F 40-4F CMOVcc   */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	                         0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* 0F 50-5F SSE      */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	                         0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* 0F 60-6F SSE/MMX  */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	                         0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* 0F 70-77 SSE shift */ 0x11,0x11,0x11,0x11,0x01,0x01,0x01,0x00,
+	                         0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* 0F 80-8F Jcc rel32 */ 0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,
+	                          0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,
+	/* 0F 90-9F SETcc    */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	                         0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* 0F A0-AF          */ 0x00,0x00,0x00,0x01,0x11,0x01,0xFF,0xFF,
+	                         0x00,0x00,0x00,0x01,0x11,0x01,0x01,0x01,
+	/* 0F B0-BF          */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	                         0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* 0F C0-CF          */ 0x01,0x01,0x11,0x01,0x11,0x11,0x11,0x11,
+	                         0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	/* 0F D0-DF SSE/MMX  */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	                         0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* 0F E0-EF SSE/MMX  */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	                         0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	/* 0F F0-FF SSE/MMX  */ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	                         0x01,0x01,0x01,0x01,0x01,0x01,0x01,0xFF,
+};
+// clang-format on
+
+// Decode the length of the x86-64 instruction at |code|. Returns 0 on failure.
+static int x64_instruction_length(const uint8_t* code, bool* has_rex_w) noexcept
+{
+	int  i      = 0;
+	bool opsize = false;
+	bool rex_w  = false;
+
+	// Legacy prefixes
+	for (;; i++)
+	{
+		const uint8_t b = code[i];
+		if (b == 0x66) { opsize = true; continue; }
+		if (b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+		    b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 ||
+		    b == 0x64 || b == 0x65) { continue; }
+		break;
+	}
+
+	// REX prefix (0x40-0x4F)
+	if ((code[i] & 0xF0) == 0x40)
+	{
+		if (code[i] & 0x08) rex_w = true;
+		i++;
+	}
+
+	if (has_rex_w != nullptr) *has_rex_w = rex_w;
+
+	// Opcode
+	uint8_t op = code[i++];
+	const uint8_t* table;
+	if (op == 0x0F)
+	{
+		op    = code[i++];
+		table = kOpcodeMap2;
+	} else
+	{
+		table = kOpcodeMap1;
+	}
+
+	const uint8_t flags = table[op];
+	if (flags == 0xFF) return 0;
+
+	const uint8_t imm_size = (flags >> 4) & 0x0F;
+
+	// ModRM + SIB + displacement
+	int modrm_pos = -1;
+	if (flags & kModRM)
+	{
+		modrm_pos       = i;
+		const uint8_t modrm = code[i++];
+		const uint8_t mod   = modrm >> 6;
+		const uint8_t rm    = modrm & 0x07;
+
+		if (mod != 3)
+		{
+			if (rm == 4) // SIB
+			{
+				const uint8_t sib  = code[i++];
+				const uint8_t base = sib & 0x07;
+				if (mod == 0 && base == 5)
+				{
+					i += 4; // disp32
+				}
+			}
+			if (mod == 0 && rm == 5)
+			{
+				i += 4; // RIP-relative disp32
+			} else if (mod == 1)
+			{
+				i += 1; // disp8
+			} else if (mod == 2)
+			{
+				i += 4; // disp32
+			}
+		}
+	}
+
+	// Immediate
+	if (imm_size == 1)
+	{
+		i += 1;
+	} else if (imm_size == 2)
+	{
+		i += 2;
+	} else if (imm_size == 3)
+	{
+		i += 3; // ENTER: imm16 + imm8
+	} else if (imm_size == 4)
+	{
+		i += (opsize ? 2 : 4);
+	} else if (imm_size == 8)
+	{
+		// MOV reg, imm64 (B8-BF with REX.W) or moffs (A0-A3 in 64-bit)
+		if (op >= 0xB8 && op <= 0xBF && rex_w)
+		{
+			i += 8;
+		} else if (op >= 0xA0 && op <= 0xA3)
+		{
+			i += 8; // moffs64
+		} else
+		{
+			i += (opsize ? 2 : 4);
+		}
+	}
+
+	// F6/F7 group3: TEST (/0,/1) has an immediate that the table doesn't encode.
+	if ((op == 0xF6 || op == 0xF7) && modrm_pos >= 0)
+	{
+		const uint8_t reg_field = (code[modrm_pos] >> 3) & 0x07;
+		if (reg_field <= 1) // TEST
+		{
+			i += (op == 0xF6) ? 1 : (opsize ? 2 : 4);
+		}
+	}
+
+	return i;
+}
+
+// Set the register identified by ModRM.reg (with REX.R extension) to zero.
+// Used to emulate a zero-read from the null page.
+static void null_page_zero_dest_reg(ucontext_t* uc, const uint8_t* code) noexcept
+{
+	int  i     = 0;
+	bool rex_r = false;
+	// Skip legacy prefixes
+	for (;; i++)
+	{
+		const uint8_t b = code[i];
+		if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+		    b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 ||
+		    b == 0x64 || b == 0x65) continue;
+		break;
+	}
+	// REX
+	if ((code[i] & 0xF0) == 0x40)
+	{
+		rex_r = (code[i] & 0x04) != 0;
+		i++;
+	}
+	// Skip opcode (1 or 2 bytes)
+	if (code[i] == 0x0F) i++;
+	i++;
+	// ModRM byte
+	const uint8_t modrm = code[i];
+	const int     reg  = ((modrm >> 3) & 0x07) | (rex_r ? 8 : 0);
+
+	switch (reg)
+	{
+		case 0: uc_set_rax(uc, 0); break;
+		case 1: uc_set_rcx(uc, 0); break;
+		case 2: uc_set_rdx(uc, 0); break;
+		case 3: uc_set_rbx(uc, 0); break;
+		case 4: /* RSP — never zero */ break;
+		case 5: uc_set_rbp(uc, 0); break;
+		case 6: uc_set_rsi(uc, 0); break;
+		case 7: uc_set_rdi(uc, 0); break;
+		case 8: uc_set_r8(uc, 0); break;
+		case 9: uc_set_r9(uc, 0); break;
+		case 10: uc_set_r10(uc, 0); break;
+		case 11: uc_set_r11(uc, 0); break;
+		case 12: uc_set_r12(uc, 0); break;
+		case 13: uc_set_r13(uc, 0); break;
+		case 14: uc_set_r14(uc, 0); break;
+		case 15: uc_set_r15(uc, 0); break;
+		default: break;
+	}
+}
+
+// Attempt to handle a null-page data fault by skipping the faulting instruction.
+// Returns true if the instruction was decoded and skipped.
+static bool try_skip_null_page_fault(ucontext_t* uc, uint64_t fault_addr, bool is_write) noexcept
+{
+	// Only handle faults in the unmappable region (below mmap_min_addr).
+	if (fault_addr >= 0x10000ull) return false;
+
+	const uint64_t rip = uc_get_rip(uc);
+	if (!IsGuestCodeAddress(rip)) return false;
+
+	const auto* code = reinterpret_cast<const uint8_t*>(rip);
+	bool        rex_w = false;
+	const int   len   = x64_instruction_length(code, &rex_w);
+	if (len <= 0 || len > 15) return false;
+
+	// For read faults, zero the destination register to emulate reading zeros
+	// from the PS5's mapped null page.
+	if (!is_write)
+	{
+		null_page_zero_dest_reg(uc, code);
+	}
+
+	uc_set_rip(uc, rip + static_cast<uint64_t>(len));
+	return true;
+}
+
+#endif // __x86_64__ || __i386__
+
+
 // Guest soft-debug `int $0x41` is NOP'd at load time (LoaderPatchGuestSoftDebugInterrupts);
 // do not peek guest RIP here — LOAD code can be X-only and re-fault in the handler.
 static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)

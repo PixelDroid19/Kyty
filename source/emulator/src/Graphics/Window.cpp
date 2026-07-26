@@ -2396,7 +2396,11 @@ static void VulkanGetExtensions(SDL_Window* window, VulkanExtensions* r)
 
 	EXIT_NOT_IMPLEMENTED(available_extensions_count != r->available_extensions.Size());
 
+#if defined(KYTY_ENABLE_VULKAN_VALIDATION)
 	r->enable_validation_layers = Config::VulkanValidationEnabled();
+#else
+	r->enable_validation_layers = false;
+#endif
 
 	if (r->available_extensions.Contains(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, [](auto s, auto l) { return strcmp(s.extensionName, l) == 0; }))
 	{

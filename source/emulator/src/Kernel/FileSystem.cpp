@@ -13,6 +13,7 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <climits>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +31,101 @@ LIB_NAME("libkernel", "libkernel");
 static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name);
 
 constexpr int DESCRIPTOR_MIN = 3;
+
+// PS5 SSD files report a non-zero st_flags indicating hardware async-read
+// capability. Unity (and other engines) check this field to decide whether
+// APR (Async Parallel Read) is usable. A zero value causes the engine to
+// reject the file for APR and fall back to synchronous I/O — or log
+// "not considered suitable for apr reads flags:0x0".
+constexpr uint32_t kPs5StFlagsAprCapable = 0x00000001u;
+
+// ---------------------------------------------------------------------------
+// Guest-writable sandbox
+// ---------------------------------------------------------------------------
+// Guest paths that do not fall under any explicit mount point (e.g. /devlog,
+// /download0, /temp0, or Unity's root-level case-sensitivity probe) are mapped
+// into a host-side sandbox directory so that mkdir/open(O_CREAT)/write succeed
+// without touching the real filesystem root.
+
+static Core::Mutex g_sandbox_mutex;
+static String      g_sandbox_root; // trailing slash included
+static bool        g_sandbox_initialized = false;
+
+static String GetSandboxRoot()
+{
+	Core::LockGuard lock(g_sandbox_mutex);
+	if (!g_sandbox_initialized)
+	{
+		g_sandbox_initialized = true;
+		const char* env = std::getenv("KYTY_SANDBOX_DIR");
+		if (env != nullptr && env[0] != '\0')
+		{
+			g_sandbox_root = String::FromUtf8(env).FixDirectorySlash();
+		} else
+		{
+			g_sandbox_root = U"/tmp/kyty_sandbox/";
+		}
+		if (!Core::File::IsDirectoryExisting(g_sandbox_root))
+		{
+			Core::File::CreateDirectory(g_sandbox_root);
+		}
+	}
+	return g_sandbox_root;
+}
+
+// Create all intermediate directories for a host path (like mkdir -p).
+static bool CreateDirectoryRecursive(const String& dir_path)
+{
+	if (dir_path.IsEmpty())
+	{
+		return false;
+	}
+	const String fixed = dir_path.FixDirectorySlash();
+	if (Core::File::IsDirectoryExisting(fixed))
+	{
+		return true;
+	}
+
+	// Walk from root, creating each segment.
+	const auto parts = fixed.Split(U"/");
+	String     accum;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// Preserve drive letter (e.g. "C:").
+	if (parts.Size() > 0 && parts.At(0).EndsWith(U":"))
+	{
+		accum = parts.At(0) + U"/";
+	}
+#endif
+	for (const auto& part: parts)
+	{
+		if (part.IsEmpty())
+		{
+			continue;
+		}
+		accum = accum + part + U"/";
+		if (!Core::File::IsDirectoryExisting(accum))
+		{
+			if (!Core::File::CreateDirectory(accum))
+			{
+				return false;
+			}
+		}
+	}
+	return Core::File::IsDirectoryExisting(fixed);
+}
+
+// Map an unmapped guest path into the sandbox. guest_path must start with '/'.
+static String MapToSandbox(const String& guest_path)
+{
+	const String root = GetSandboxRoot();
+	// Strip leading slash so we get sandbox/devlog/... not sandbox//devlog/...
+	if (guest_path.StartsWith(U"/"))
+	{
+		return root + guest_path.RemoveFirst(1);
+	}
+	return root + guest_path;
+}
+
 
 class MountPoints
 {
@@ -352,7 +448,9 @@ String MountPoints::GetRealFilename(const String& mounted_file_name)
 		return p.dir + mounted_file_name.RemoveFirst(p.point.Size());
 	}
 
-	return mounted_file_name;
+		// No mount matched — redirect to the writable sandbox so that file
+		// creation and writes succeed without touching the host root.
+		return MapToSandbox(mounted_file_name);
 }
 
 String MountPoints::GetRealDirectory(const String& mounted_directory)
@@ -368,13 +466,18 @@ String MountPoints::GetRealDirectory(const String& mounted_directory)
 		return p.dir + mounted_directory.RemoveFirst(p.point.Size());
 	}
 
-	return mounted_directory;
+		// No mount matched — redirect to the writable sandbox.
+		return MapToSandbox(mounted_directory);
 }
 
 KYTY_SUBSYSTEM_INIT(FileSystem)
 {
 	g_mount_points = new MountPoints;
 	g_files        = new FileDescriptors;
+
+	// Eagerly initialize the sandbox root so the directory exists before any
+	// guest filesystem call.
+	GetSandboxRoot();
 }
 
 KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(FileSystem)
@@ -443,7 +546,13 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 	bool direct    = (flags_u & 0x00010000u) != 0;
 	bool directory = (flags_u & 0x00020000u) != 0;
 
-	EXIT_NOT_IMPLEMENTED(append || fsync || sync || excl || dsync || direct);
+	// Core::File has buffered host I/O. Its close/flush boundary is the strongest
+	// durability contract available here; the PS5 advisory sync/direct flags do
+	// not change guest-visible read/write semantics.
+	(void)fsync;
+	(void)sync;
+	(void)dsync;
+	(void)direct;
 
 	EXIT_NOT_IMPLEMENTED(nonblock && !directory);
 
@@ -512,8 +621,20 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 		bool       result      = false;
 		const bool file_exists = Core::File::IsFileExisting(file->real_name);
 
+		if (creat && excl && file_exists)
+		{
+			g_files->DeleteDescriptor(descriptor);
+			return KERNEL_ERROR_EEXIST;
+		}
+
 		if (creat && (trunc || !file_exists))
 		{
+			// Ensure parent directories exist for sandbox-mapped paths.
+			const String parent_dir = file->real_name.DirectoryWithoutFilename();
+			if (!parent_dir.IsEmpty() && !Core::File::IsDirectoryExisting(parent_dir))
+			{
+				CreateDirectoryRecursive(parent_dir);
+			}
 			result = file->f.Create(file->real_name);
 
 			printf("\tCreate: " FG_WHITE BOLD "%s" DEFAULT ", %s\n", file->real_name.C_Str(),
@@ -535,6 +656,10 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 		if (result && trunc)
 		{
 			result = file->f.Truncate(0);
+		}
+		if (result && append)
+		{
+			result = file->f.Seek(file->f.Size());
 		}
 
 		if (!result || file->f.IsInvalid())
@@ -886,6 +1011,7 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 	memset(sb, 0, sizeof(FileStat));
 
 	sb->st_mode = 0000777u | (is_dir ? 0040000u : 0100000u);
+	sb->st_flags = is_dir ? 0u : kPs5StFlagsAprCapable;
 
 	Core::DateTime at;
 	Core::DateTime wt;
@@ -958,12 +1084,14 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 #endif
 		sb->st_size = static_cast<int64_t>(host_stat.st_size);
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		sb->st_flags       = ((host_stat.st_mode & _S_IFMT) == _S_IFREG) ? kPs5StFlagsAprCapable : 0u;
 		sb->st_blksize     = 512;
 		sb->st_blocks      = (sb->st_size + 511) / 512;
 		sb->st_atim.tv_sec = static_cast<int64_t>(host_stat.st_atime);
 		sb->st_mtim.tv_sec = static_cast<int64_t>(host_stat.st_mtime);
 		sb->st_ctim.tv_sec = static_cast<int64_t>(host_stat.st_ctime);
 #else
+		sb->st_flags        = S_ISREG(host_stat.st_mode) ? kPs5StFlagsAprCapable : 0u;
 		sb->st_blocks       = static_cast<int64_t>(host_stat.st_blocks);
 		sb->st_blksize      = static_cast<uint32_t>(host_stat.st_blksize);
 		sb->st_atim.tv_sec  = static_cast<int64_t>(host_stat.st_atim.tv_sec);
@@ -984,6 +1112,7 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 	memset(sb, 0, sizeof(FileStat));
 
 	sb->st_mode = 0000777u | (file->directory ? 0040000u : 0100000u);
+	sb->st_flags = file->directory ? 0u : kPs5StFlagsAprCapable;
 
 	Core::DateTime at;
 	Core::DateTime wt;
@@ -1223,7 +1352,8 @@ int KYTY_SYSV_ABI KernelMkdir(const char* path, uint16_t mode)
 		return KERNEL_ERROR_EEXIST;
 	}
 
-	if (!Core::File::CreateDirectory(real_name))
+	// Ensure parent directories exist (sandbox paths may be nested).
+	if (!CreateDirectoryRecursive(real_name))
 	{
 		return KERNEL_ERROR_EIO;
 	}
@@ -1882,6 +2012,7 @@ int KYTY_SYSV_ABI KernelAprGetFileStat(uint32_t file_id, FileStat* st)
 	}
 	memset(st, 0, sizeof(FileStat));
 	st->st_mode    = 0000777u | 0100000u;
+	st->st_flags   = kPs5StFlagsAprCapable;
 	st->st_size    = static_cast<int64_t>(Core::File::Size(host_path));
 	st->st_blksize = 512;
 	st->st_blocks  = (st->st_size + 511) / 512;

@@ -130,6 +130,12 @@ TEST(EmulatorGraphicsPackets, AcceptsByteStrideRawStorageWithDwordAlignedRange)
 	EXPECT_FALSE(ShaderRawStorageDescriptorSupported(resource));
 }
 
+TEST(EmulatorGraphicsPackets, ComputesZeroStrideBufferFootprintFromRecords)
+{
+	EXPECT_EQ(ShaderBufferByteSize(0u, 4u), 4u);
+	EXPECT_EQ(ShaderBufferByteSize(16u, 4u), 64u);
+}
+
 TEST(EmulatorGraphicsPackets, ParsesGen5LshlAddU32)
 {
 	const uint32_t shader[] = {0xd7460003u, 0x040a0300u, 0xbf810000u};
@@ -214,6 +220,114 @@ TEST(EmulatorGraphicsPackets, ParsesGen5FmaakF32Literal)
 	EXPECT_EQ(instruction.src[1].register_id, 2);
 	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::LiteralConstant);
 	EXPECT_EQ(instruction.src[2].constant.u, literal);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesGen5CubetcF32)
+{
+	const uint32_t word0 = (0x35u << 26u) | (0x146u << 16u) | 3u;
+	const uint32_t word1 = 257u | (258u << 9u) | (259u << 18u);
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VCubetcF32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2);
+	EXPECT_EQ(instruction.dst.register_id, 3);
+	EXPECT_EQ(instruction.src_num, 3);
+	EXPECT_EQ(instruction.src[0].register_id, 1);
+	EXPECT_EQ(instruction.src[1].register_id, 2);
+	EXPECT_EQ(instruction.src[2].register_id, 3);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesGen5CubescF32)
+{
+	const uint32_t word0 = (0x35u << 26u) | (0x145u << 16u) | 3u;
+	const uint32_t word1 = 257u | (258u << 9u) | (259u << 18u);
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VCubescF32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2);
+	EXPECT_EQ(instruction.dst.register_id, 3);
+	EXPECT_EQ(instruction.src_num, 3);
+	EXPECT_EQ(instruction.src[0].register_id, 1);
+	EXPECT_EQ(instruction.src[1].register_id, 2);
+	EXPECT_EQ(instruction.src[2].register_id, 3);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesGen5CubeidF32)
+{
+	const uint32_t word0 = (0x35u << 26u) | (0x144u << 16u) | 3u;
+	const uint32_t word1 = 257u | (258u << 9u) | (259u << 18u);
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VCubeIdF32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2);
+	EXPECT_EQ(instruction.dst.register_id, 3);
+	EXPECT_EQ(instruction.src_num, 3);
+	EXPECT_EQ(instruction.src[0].register_id, 1);
+	EXPECT_EQ(instruction.src[1].register_id, 2);
+	EXPECT_EQ(instruction.src[2].register_id, 3);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesGen5CubemaF32)
+{
+	const uint32_t word0 = (0x35u << 26u) | (0x147u << 16u) | 3u;
+	const uint32_t word1 = 257u | (258u << 9u) | (259u << 18u);
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VCubeMaF32);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2);
+	EXPECT_EQ(instruction.src_num, 3);
 }
 
 // VOP2 SDWA with SRC0_NEG (bit 20 of SDWA control). Captured post-Play path
@@ -1135,6 +1249,15 @@ TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoModifier80000000)
 	EXPECT_EQ(cmd[0], KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u));
 	EXPECT_EQ(cmd[1], 1u);
 	EXPECT_EQ(cmd[2], 0x2u);
+}
+
+TEST(EmulatorGraphicsPackets, AcceptsStandardDrawIndexAutoInitiatorFlags)
+{
+	EXPECT_TRUE(GraphicsDrawIndexAutoFlagsSupported(0u));
+	EXPECT_TRUE(GraphicsDrawIndexAutoFlagsSupported(0x2u));
+	EXPECT_TRUE(GraphicsDrawIndexAutoFlagsSupported(0x20u));
+	EXPECT_TRUE(GraphicsDrawIndexAutoFlagsSupported(0x22u));
+	EXPECT_FALSE(GraphicsDrawIndexAutoFlagsSupported(0x4u));
 }
 
 // Draw modifiers describe optional shader inputs and compiler metadata.  A
@@ -3180,7 +3303,8 @@ TEST(EmulatorGraphicsPackets, Gen5EudSpanAllowsModestMetadataOverrun)
 	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16, 4, 24));  // fully inside metadata
 	EXPECT_TRUE(ShaderGen5EudSpanAllowed(40, 4, 24));  // need 28 > 24, still ok
 	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + 24 - 4, 4, 24)); // last in-bound
-	EXPECT_FALSE(ShaderGen5EudSpanAllowed(16, 257, 24)); // past hard cap
+	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + SHADER_GEN5_EUD_MAX_DWORDS - 4, 4, 24));
+	EXPECT_FALSE(ShaderGen5EudSpanAllowed(16 + SHADER_GEN5_EUD_MAX_DWORDS - 3, 4, 24));
 }
 
 // Captured EXP target 0x03: MRT3 compressed (half2), done may be 0.
@@ -3251,7 +3375,7 @@ TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0)
 	// VOP1: bits[24:17]=vdst, bits[16:9]=op, bits[8:0]=src0; encoding via VOP2 trampoline 0x3f.
 	const uint32_t word0 = (0x3fu << 25u) | (0u << 17u) | (0x01u << 9u) | 249u;
 	const uint32_t word1 = 2u | (6u << 8u) | (6u << 16u) | (1u << 20u); // src vgpr2, DWORD, src0_neg
-	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
 	{
@@ -3271,6 +3395,175 @@ TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0)
 	EXPECT_EQ(inst.src[0].register_id, 2);
 	EXPECT_TRUE(inst.src[0].negate);
 	EXPECT_EQ(inst.src[0].swizzle, 6u);
+}
+
+// DPP is selected by the src0 escape value 250. The control word encodes the
+// source VGPR in its low byte and a lane permutation in bits [16:8]. This is
+// the v_mov_b32 sequence captured while starting Blasphemous 2.
+TEST(EmulatorGraphicsPackets, ParsesVop1DppQuadPermSource)
+{
+	const uint32_t word0 = (0x3fu << 25u) | (10u << 17u) | (0x01u << 9u) | 250u;
+	const uint32_t word1 = 0xff085508u;
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::VMovB32);
+	EXPECT_EQ(inst.dst.register_id, 10);
+	EXPECT_EQ(inst.src[0].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(inst.src[0].register_id, 8);
+	EXPECT_TRUE(inst.src[0].dpp);
+	EXPECT_EQ(inst.src[0].dpp_ctrl, 0x55u);
+	EXPECT_EQ(inst.src[0].dpp_row_mask, 0xfu);
+	EXPECT_EQ(inst.src[0].dpp_bank_mask, 0xfu);
+	EXPECT_FALSE(inst.src[0].dpp_fetch_inactive);
+	EXPECT_TRUE(inst.src[0].dpp_bound_ctrl);
+}
+
+TEST(EmulatorGraphicsPackets, EmitsVop1DppQuadPermAsSubgroupShuffle)
+{
+	const uint32_t word0 = (0x3fu << 25u) | (10u << 17u) | (0x01u << 9u) | 250u;
+	const uint32_t word1 = 0xff085508u;
+	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpCapability GroupNonUniformShuffle"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gl_SubgroupInvocationID"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("BuiltIn SubgroupLocalInvocationId"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpGroupNonUniformShuffle %uint"), Core::STRING8_INVALID_INDEX);
+}
+
+// On Gen5, MTBUF dfmt=6/nfmt=1 is the encoded 32_FLOAT buffer format.
+// Blasphemous 2 issues this while loading level0.
+TEST(EmulatorGraphicsPackets, ParsesGen5MtbufFloat32)
+{
+	const uint32_t word0 = (0x3au << 26u) | (1u << 23u) | (6u << 19u) | (1u << 13u);
+	const uint32_t word1 = 128u << 24u;
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::TBufferLoadFormatX);
+	EXPECT_EQ(inst.format, ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxenFloat1);
+	EXPECT_EQ(inst.dst.type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(inst.dst.size, 1);
+}
+
+// Gen5 encodes 32_32_32_32_FLOAT as dfmt=13/nfmt=4. It maps directly to the
+// existing typed four-component MTBUF load contract.
+TEST(EmulatorGraphicsPackets, ParsesGen5MtbufFloat32x4)
+{
+	const uint32_t word0 = (0x3au << 26u) | (4u << 23u) | (13u << 19u) | (3u << 16u) | (1u << 13u);
+	const uint32_t word1 = 128u << 24u;
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::TBufferLoadFormatXyzw);
+	EXPECT_EQ(inst.format, ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxenFloat4);
+	EXPECT_EQ(inst.dst.type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(inst.dst.size, 4);
+}
+
+TEST(EmulatorGraphicsPackets, MovesLargeDescriptorMetadataToUniformBuffer)
+{
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num = 9; // 9 * 16 bytes exceeds portable push constants.
+
+	ShaderCalcBindingIndices(&bind);
+
+	EXPECT_EQ(bind.push_constant_size, 144u);
+	EXPECT_TRUE(bind.vsharp_uniform_buffer);
+	EXPECT_EQ(bind.vsharp_binding_index, 1);
+}
+
+TEST(EmulatorGraphicsPackets, EmitsLargeDescriptorMetadataAsUniformBuffer)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	for (int i = 0; i < 2; i++)
+	{
+		ShaderInstruction nop {};
+		nop.type   = ShaderInstructionType::VNop;
+		nop.format = ShaderInstructionFormat::Empty;
+		code.GetInstructions().Add(nop);
+	}
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	code.GetInstructions().Add(end);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0]                  = 1;
+	input.threads_num[1]                  = 1;
+	input.threads_num[2]                  = 1;
+	input.bind.storage_buffers.buffers_num = 9;
+	input.bind.direct_sgprs.sgprs_num      = 1;
+	input.bind.direct_sgprs.start_register[0] = 8;
+	ShaderCalcBindingIndices(&input.bind);
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("OpTypePointer Uniform %BufferResource"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpVariable %_ptr_Uniform_BufferResource Uniform"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpDecorate %vsharp Binding 1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpDecorate %vsharp_arr_v4uint_uint_10 ArrayStride 16"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_Uniform_uint %vsharp"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("<vsharp_uint_ptr>"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpVariable %_ptr_PushConstant_BufferResource PushConstant"), Core::STRING8_INVALID_INDEX);
 }
 
 // SOP1 s_not_b64 (op 0x08): bitwise not of a 64-bit SGPR pair.

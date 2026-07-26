@@ -48,14 +48,29 @@ ScissorRect ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanMod
 		resolved.right  = std::min(resolved.right, scissor.right);
 		resolved.bottom = std::min(resolved.bottom, scissor.bottom);
 	};
+	const auto with_window_offset = [&viewport](ScissorRect scissor, bool enabled)
+	{
+		if (enabled)
+		{
+			scissor.left += viewport.window_offset_x;
+			scissor.top += viewport.window_offset_y;
+			scissor.right += viewport.window_offset_x;
+			scissor.bottom += viewport.window_offset_y;
+		}
+		return scissor;
+	};
 
 	include({viewport.screen_scissor_left, viewport.screen_scissor_top, viewport.screen_scissor_right, viewport.screen_scissor_bottom});
-	include({viewport.generic_scissor_left, viewport.generic_scissor_top, viewport.generic_scissor_right, viewport.generic_scissor_bottom});
+	include(with_window_offset({viewport.generic_scissor_left, viewport.generic_scissor_top, viewport.generic_scissor_right,
+	                            viewport.generic_scissor_bottom},
+	                           viewport.generic_scissor_window_offset_enable));
 
 	if (mode.vport_scissor_enable)
 	{
 		const auto& vport = viewport.viewports[viewport_id];
-		include({vport.viewport_scissor_left, vport.viewport_scissor_top, vport.viewport_scissor_right, vport.viewport_scissor_bottom});
+		include(with_window_offset({vport.viewport_scissor_left, vport.viewport_scissor_top, vport.viewport_scissor_right,
+		                            vport.viewport_scissor_bottom},
+		                           vport.viewport_scissor_window_offset_enable));
 	}
 
 	if (has_scissor)
@@ -67,14 +82,25 @@ ScissorRect ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanMod
 	return resolved;
 }
 
+void SetWindowOffset(HW::Context& context, uint32_t value)
+{
+	const int offset_x = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_WINDOW_OFFSET, WINDOW_X)));
+	const int offset_y = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_WINDOW_OFFSET, WINDOW_Y)));
+	context.SetWindowOffset(offset_x, offset_y);
+}
+
 DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, const HW::RenderControl& render_control,
                                            const HW::DepthControl& depth_control)
 {
 	const bool decompress =
 	    target.z_info.tile_surface_enable && (render_control.depth_compress_disable || render_control.stencil_compress_disable);
+	// Resummarization updates only Prospero's depth metadata. Vulkan owns the
+	// equivalent compression state, but the depth attachment must still be
+	// admitted so its logical contents remain synchronized with the draw.
+	const bool resummarize = render_control.resummarize_enable;
 
 	DepthStencilUsage usage;
-	usage.target_active      = depth_control.z_enable || depth_control.stencil_enable || decompress;
+	usage.target_active      = depth_control.z_enable || depth_control.stencil_enable || decompress || resummarize;
 	usage.depth_write_enable = depth_control.z_enable && depth_control.z_write_enable;
 	return usage;
 }
@@ -250,6 +276,20 @@ SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp)
 SamplerComparison ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation)
 {
 	return {operation == ImageSampleOperation::DepthReference, depth_compare_function};
+}
+
+UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormalized_coordinates)
+{
+	if (!force_unnormalized_coordinates)
+	{
+		return {};
+	}
+	return {.enabled = true,
+	        .address_mode = SamplerAddressMode::ClampToEdge,
+	        .force_base_mip = true,
+	        .disable_anisotropy = true,
+	        .disable_comparison = true,
+	        .reset_lod_bias = true};
 }
 
 void SetGenericScissorTl(HW::Context& context, uint32_t value)
@@ -436,6 +476,15 @@ DepthBias ResolveDepthBias(const HW::ModeControl& mode, const HW::PolygonOffset&
 	bias.clamp           = offset.clamp;
 	bias.slope_factor    = (front ? offset.front_scale : offset.back_scale) / 16.0f;
 	return bias;
+}
+
+bool RenderControlSampleSelectionIsNoOp(const HW::RenderControl& control, uint8_t num_samples)
+{
+	if (!control.copy_centroid && control.copy_sample == 0)
+	{
+		return true;
+	}
+	return control.copy_centroid && num_samples == 0;
 }
 
 void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value)

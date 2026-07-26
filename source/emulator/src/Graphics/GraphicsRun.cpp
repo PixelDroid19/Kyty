@@ -2590,6 +2590,14 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_hardware_screen_offset)
 	return 1;
 }
 
+KYTY_HW_CTX_PARSER(hw_ctx_set_window_offset)
+{
+	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
+	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SC_WINDOW_OFFSET);
+	State::SetWindowOffset(*cp->GetCtx(), buffer[0]);
+	return 1;
+}
+
 KYTY_HW_CTX_PARSER(hw_ctx_set_line_control)
 {
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
@@ -3781,29 +3789,15 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_auto)
 	if (cmd_id == 0xc0012d00)
 	{
 		uint32_t index_count = buffer[0];
-		uint32_t flags       = 0;
+		uint32_t flags       = buffer[1];
 
-		EXIT_NOT_IMPLEMENTED(buffer[1] != 2);
+		EXIT_NOT_IMPLEMENTED(!GraphicsDrawIndexAutoFlagsSupported(flags));
 
-		cp->DrawIndexAuto(index_count, flags);
+		cp->DrawIndexAuto(index_count, 0);
 
-		if (dw >= 4 && buffer[2] == 0xc0001000)
-		{
-			EXIT_NOT_IMPLEMENTED(buffer[3] != 0);
-
-			return 4;
-		}
-
-		if (dw >= 6 && buffer[2] == 0xc0021000)
-		{
-			EXIT_NOT_IMPLEMENTED(buffer[3] != 0);
-
-			return 6;
-		}
-
-		// Standard IT_DRAW_INDEX_AUTO ends after the index count and
-		// draw-initiator payload. The optional trailer belongs to the
-		// legacy wrapped command stream handled above.
+		// The Type3 packet has exactly two body dwords. Do not consume a
+		// following packet header as a legacy trailer; CommandProcessor::Run
+		// dispatches it on the next iteration.
 		return 2;
 	}
 
@@ -4189,6 +4183,20 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 			continue;
 		}
 		EXIT_NOT_IMPLEMENTED(!GraphicsNormalizeIndirectRegisterPair(Pm4::UC_NUM, cmd_offset, value));
+
+		// AGC can place a context-register write in an indirect UCONFIG
+		// stream. The register spaces overlap numerically, so consult the CX
+		// dispatch table first and fall through to UCONFIG when it has no
+		// matching context handler.
+		if (cmd_offset < Pm4::CX_NUM)
+		{
+			auto context_func = g_hw_ctx_indirect_func[cmd_offset & (Pm4::CX_NUM - 1)];
+			if (context_func != nullptr)
+			{
+				context_func(cp, cmd_offset, value);
+				continue;
+			}
+		}
 
 		auto pfunc = g_hw_uc_indirect_func[cmd_offset & (Pm4::UC_NUM - 1)];
 
@@ -5209,7 +5217,8 @@ static void graphics_init_jmp_tables_cx_indirect()
 	// Window scissor/offset and tessellation stage regs need full Context
 	// fields (Kyty). Accept values for now so Gen5 bootstreams proceed;
 	// geometry that depends on them will need the proper setters later.
-	g_hw_ctx_indirect_func[Pm4::PA_SC_WINDOW_OFFSET]     = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_WINDOW_OFFSET] = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{ State::SetWindowOffset(*cp->GetCtx(), value); };
 	g_hw_ctx_indirect_func[Pm4::PA_SC_WINDOW_SCISSOR_TL] = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::PA_SC_WINDOW_SCISSOR_BR] = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::VGT_HOS_MAX_TESS_LEVEL]  = ignore_cx;
@@ -5682,6 +5691,7 @@ static void graphics_init_jmp_tables()
 	g_hw_ctx_func[Pm4::DB_Z_INFO]                         = hw_ctx_set_depth_render_target;
 	g_hw_ctx_func[Pm4::DB_STENCIL_INFO]                   = hw_ctx_set_stencil_info;
 	g_hw_ctx_func[Pm4::PA_SU_HARDWARE_SCREEN_OFFSET]      = hw_ctx_set_hardware_screen_offset;
+	g_hw_ctx_func[Pm4::PA_SC_WINDOW_OFFSET]               = hw_ctx_set_window_offset;
 	g_hw_ctx_func[Pm4::CB_TARGET_MASK]                    = hw_ctx_set_render_target_mask;
 	g_hw_ctx_func[Pm4::PA_SC_GENERIC_SCISSOR_TL]          = hw_ctx_set_generic_scissor;
 	g_hw_ctx_func[Pm4::CB_BLEND_RED]                      = hw_ctx_set_blend_color;
@@ -5733,7 +5743,6 @@ static void graphics_init_jmp_tables()
 	                          Pm4::PA_SC_CONSERVATIVE_RASTERIZATION_CNTL,
 	                          Pm4::PA_SC_NGG_MODE_CNTL,
 	                          Pm4::DB_ALPHA_TO_MASK,
-	                          Pm4::PA_SC_WINDOW_OFFSET,
 	                          Pm4::PA_SC_WINDOW_SCISSOR_TL,
 	                          Pm4::PA_SC_WINDOW_SCISSOR_BR,
 	                          Pm4::VGT_HOS_MAX_TESS_LEVEL,

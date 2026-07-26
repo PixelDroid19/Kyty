@@ -39,6 +39,29 @@ struct GuestZlibStream72
 
 static_assert(sizeof(GuestZlibStream72) == 72, "GuestZlibStream72 expected size 0x48");
 
+struct GuestZlibStream112
+{
+	const void*        next_in;
+	uint32_t           avail_in;
+	uint32_t           avail_in_pad;
+	uint64_t           total_in;
+	void*              next_out;
+	uint32_t           avail_out;
+	uint32_t           avail_out_pad;
+	uint64_t           total_out;
+	char*              msg;
+	mz_internal_state* state;
+	mz_alloc_func      zalloc;
+	mz_free_func       zfree;
+	void*              opaque;
+	int32_t            data_type;
+	uint32_t           data_type_pad;
+	uint64_t           adler;
+	uint64_t           reserved;
+};
+
+static_assert(sizeof(GuestZlibStream112) == 112, "GuestZlibStream112 expected size 0x70");
+
 struct StreamLayoutInfo
 {
 	int size = 0;
@@ -47,9 +70,14 @@ struct StreamLayoutInfo
 static Core::Mutex g_eos_stream_mutex;
 static std::unordered_map<mz_streamp, StreamLayoutInfo> g_eos_stream_layouts;
 
-static bool IsCompatLegacyStream(int stream_size)
+static bool IsCompatLegacyStream72(int stream_size)
 {
 	return stream_size == static_cast<int>(sizeof(GuestZlibStream72));
+}
+
+static bool IsCompatStream112(int stream_size)
+{
+	return stream_size == static_cast<int>(sizeof(GuestZlibStream112));
 }
 
 static void* HostAlloc(void* /*opaque*/, size_t items, size_t size)
@@ -108,7 +136,7 @@ static bool GetLegacyStreamLayout(mz_streamp strm, StreamLayoutInfo* out)
 static int InflateInitCompatInitImpl(mz_streamp strm, int window_bits, const char* version, int stream_size)
 {
 	mz_stream host_stream {};
-	if (IsCompatLegacyStream(stream_size))
+	if (IsCompatLegacyStream72(stream_size))
 	{
 		GuestZlibStream72 guest_stream {};
 		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
@@ -130,6 +158,26 @@ static int InflateInitCompatInitImpl(mz_streamp strm, int window_bits, const cha
 		host_stream.adler     = 0;
 		host_stream.reserved  = 0;
 	}
+	else if (IsCompatStream112(stream_size))
+	{
+		GuestZlibStream112 guest_stream {};
+		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
+
+		host_stream.next_in    = reinterpret_cast<const unsigned char*>(guest_stream.next_in);
+		host_stream.avail_in   = guest_stream.avail_in;
+		host_stream.total_in   = static_cast<mz_ulong>(guest_stream.total_in);
+		host_stream.next_out   = reinterpret_cast<unsigned char*>(guest_stream.next_out);
+		host_stream.avail_out  = guest_stream.avail_out;
+		host_stream.total_out  = static_cast<mz_ulong>(guest_stream.total_out);
+		host_stream.msg        = guest_stream.msg;
+		host_stream.state      = guest_stream.state;
+		host_stream.zalloc     = HostAlloc;
+		host_stream.zfree      = HostFree;
+		host_stream.opaque     = nullptr;
+		host_stream.data_type = guest_stream.data_type;
+		host_stream.adler     = static_cast<mz_ulong>(guest_stream.adler);
+		host_stream.reserved  = static_cast<mz_ulong>(guest_stream.reserved);
+	}
 	else
 	{
 		host_stream = *strm;
@@ -137,7 +185,7 @@ static int InflateInitCompatInitImpl(mz_streamp strm, int window_bits, const cha
 
 	const int rc = inflateInit2(&host_stream, window_bits);
 
-	if (IsCompatLegacyStream(stream_size))
+	if (IsCompatLegacyStream72(stream_size))
 	{
 		GuestZlibStream72 guest_stream {};
 		guest_stream.next_in      = host_stream.next_in;
@@ -149,6 +197,24 @@ static int InflateInitCompatInitImpl(mz_streamp strm, int window_bits, const cha
 		guest_stream.msg         = host_stream.msg;
 		guest_stream.state       = reinterpret_cast<mz_internal_state*>(host_stream.state);
 		guest_stream.zalloc      = host_stream.zalloc;
+		std::memcpy(strm, &guest_stream, sizeof(guest_stream));
+		return rc;
+	}
+	if (IsCompatStream112(stream_size))
+	{
+		GuestZlibStream112 guest_stream {};
+		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
+		guest_stream.next_in   = host_stream.next_in;
+		guest_stream.avail_in  = host_stream.avail_in;
+		guest_stream.total_in  = host_stream.total_in;
+		guest_stream.next_out  = host_stream.next_out;
+		guest_stream.avail_out = host_stream.avail_out;
+		guest_stream.total_out = host_stream.total_out;
+		guest_stream.msg       = host_stream.msg;
+		guest_stream.state     = reinterpret_cast<mz_internal_state*>(host_stream.state);
+		guest_stream.data_type = host_stream.data_type;
+		guest_stream.adler     = host_stream.adler;
+		guest_stream.reserved  = host_stream.reserved;
 		std::memcpy(strm, &guest_stream, sizeof(guest_stream));
 		return rc;
 	}
@@ -165,7 +231,7 @@ static int InflateCompatImpl(mz_streamp strm, int flush)
 		return inflate(strm, flush);
 	}
 
-	if (IsCompatLegacyStream(layout.size))
+	if (IsCompatLegacyStream72(layout.size))
 	{
 		GuestZlibStream72 guest_stream {};
 		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
@@ -197,6 +263,43 @@ static int InflateCompatImpl(mz_streamp strm, int flush)
 		std::memcpy(strm, &guest_stream, sizeof(guest_stream));
 		return rc;
 	}
+	if (IsCompatStream112(layout.size))
+	{
+		GuestZlibStream112 guest_stream {};
+		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
+
+		mz_stream host_stream {};
+		host_stream.next_in    = reinterpret_cast<const unsigned char*>(guest_stream.next_in);
+		host_stream.avail_in   = guest_stream.avail_in;
+		host_stream.total_in   = static_cast<mz_ulong>(guest_stream.total_in);
+		host_stream.next_out   = reinterpret_cast<unsigned char*>(guest_stream.next_out);
+		host_stream.avail_out  = guest_stream.avail_out;
+		host_stream.total_out  = static_cast<mz_ulong>(guest_stream.total_out);
+		host_stream.msg        = guest_stream.msg;
+		host_stream.state      = guest_stream.state;
+		host_stream.zalloc     = HostAlloc;
+		host_stream.zfree      = HostFree;
+		host_stream.opaque     = nullptr;
+		host_stream.data_type  = guest_stream.data_type;
+		host_stream.adler      = static_cast<mz_ulong>(guest_stream.adler);
+		host_stream.reserved   = static_cast<mz_ulong>(guest_stream.reserved);
+
+		const int rc = inflate(&host_stream, flush);
+
+		guest_stream.next_in   = host_stream.next_in;
+		guest_stream.avail_in  = host_stream.avail_in;
+		guest_stream.total_in  = host_stream.total_in;
+		guest_stream.next_out  = host_stream.next_out;
+		guest_stream.avail_out = host_stream.avail_out;
+		guest_stream.total_out = host_stream.total_out;
+		guest_stream.msg       = host_stream.msg;
+		guest_stream.state     = reinterpret_cast<mz_internal_state*>(host_stream.state);
+		guest_stream.data_type = host_stream.data_type;
+		guest_stream.adler     = host_stream.adler;
+		guest_stream.reserved  = host_stream.reserved;
+		std::memcpy(strm, &guest_stream, sizeof(guest_stream));
+		return rc;
+	}
 
 	return inflate(strm, flush);
 }
@@ -209,7 +312,7 @@ static int InflateEndCompatImpl(mz_streamp strm)
 		return inflateEnd(strm);
 	}
 
-	if (IsCompatLegacyStream(layout.size))
+	if (IsCompatLegacyStream72(layout.size))
 	{
 		GuestZlibStream72 guest_stream {};
 		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
@@ -226,6 +329,31 @@ static int InflateEndCompatImpl(mz_streamp strm)
 		host_stream.zalloc    = HostAlloc;
 		host_stream.zfree     = HostFree;
 		host_stream.opaque    = nullptr;
+
+		const int rc = inflateEnd(&host_stream);
+		ForgetLegacyStreamLayout(strm);
+		return rc;
+	}
+	if (IsCompatStream112(layout.size))
+	{
+		GuestZlibStream112 guest_stream {};
+		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
+
+		mz_stream host_stream {};
+		host_stream.next_in    = reinterpret_cast<const unsigned char*>(guest_stream.next_in);
+		host_stream.avail_in   = guest_stream.avail_in;
+		host_stream.total_in   = static_cast<mz_ulong>(guest_stream.total_in);
+		host_stream.next_out   = reinterpret_cast<unsigned char*>(guest_stream.next_out);
+		host_stream.avail_out  = guest_stream.avail_out;
+		host_stream.total_out  = static_cast<mz_ulong>(guest_stream.total_out);
+		host_stream.msg        = guest_stream.msg;
+		host_stream.state      = guest_stream.state;
+		host_stream.zalloc     = HostAlloc;
+		host_stream.zfree      = HostFree;
+		host_stream.opaque     = nullptr;
+		host_stream.data_type  = guest_stream.data_type;
+		host_stream.adler      = static_cast<mz_ulong>(guest_stream.adler);
+		host_stream.reserved   = static_cast<mz_ulong>(guest_stream.reserved);
 
 		const int rc = inflateEnd(&host_stream);
 		ForgetLegacyStreamLayout(strm);
@@ -250,7 +378,7 @@ static KYTY_SYSV_ABI int InflateInit(void* strm, const char* version, int stream
 		return Z_STREAM_ERROR;
 	}
 
-	if (IsCompatLegacyStream(stream_size))
+	if (IsCompatLegacyStream72(stream_size) || IsCompatStream112(stream_size))
 	{
 		const int rc = InflateInitCompatInitImpl(static_cast<mz_streamp>(strm), MZ_DEFAULT_WINDOW_BITS, version, stream_size);
 		RegisterLegacyStreamLayout(static_cast<mz_streamp>(strm), stream_size);
@@ -278,7 +406,7 @@ static KYTY_SYSV_ABI int InflateInit2(void* strm, int window_bits, const char* v
 		return Z_STREAM_ERROR;
 	}
 
-	if (IsCompatLegacyStream(stream_size))
+	if (IsCompatLegacyStream72(stream_size) || IsCompatStream112(stream_size))
 	{
 		const int rc = InflateInitCompatInitImpl(static_cast<mz_streamp>(strm), window_bits, version, stream_size);
 		RegisterLegacyStreamLayout(static_cast<mz_streamp>(strm), stream_size);

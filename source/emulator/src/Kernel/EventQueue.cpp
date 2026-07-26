@@ -209,9 +209,17 @@ int KernelEqueuePrivate::GetTriggeredEvents(KernelEvent* ev, int num)
 		{
 			ev[ret++] = event.event;
 
-			if (event.filter.reset_func != nullptr)
+			if (event.pending_events.Size() != 0)
+			{
+				const auto pending_index = event.pending_events.First();
+				event.event             = event.pending_events.At(pending_index);
+				event.pending_events.Remove(pending_index);
+			} else if (event.filter.reset_func != nullptr)
 			{
 				event.filter.reset_func(&event);
+			} else
+			{
+				event.triggered = false;
 			}
 
 			if (ret >= num)

@@ -638,7 +638,10 @@ void GpuMemory::SetAllocatedRange(uint64_t vaddr, uint64_t size)
 
 bool GpuMemory::IsAllocated(uint64_t vaddr, uint64_t size)
 {
-	EXIT_IF(size == 0);
+	if (size == 0)
+	{
+		return false;
+	}
 
 	Core::LockGuard lock(m_mutex);
 
@@ -2862,6 +2865,15 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 
 	Vector<GpuMemory::OverlappedBlock> ret;
 	EXIT_IF(heap.overlap_cache == nullptr);
+	for (int i = 0; i < vaddr_num; ++i)
+	{
+		// An empty range cannot overlap a GPU object and must not enter the
+		// range-query cache, whose keys intentionally reject zero-sized spans.
+		if (size[i] == 0)
+		{
+			return ret;
+		}
+	}
 	const auto query = GpuMemoryRangeQueryKey::Create(vaddr, size, vaddr_num, only_first);
 	EXIT_IF(!query.Valid());
 	if (heap.overlap_cache->Lookup(query, &ret))

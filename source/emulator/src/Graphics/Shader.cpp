@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -74,13 +75,24 @@ bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource)
 	// not consume its typed-format metadata. The descriptor stride still
 	// determines the bounded byte range, but individual records do not need to
 	// be DWORD-sized when the resulting range is DWORD-aligned.
-	const uint64_t size = resource.Stride() == 0 ? static_cast<uint64_t>(resource.NumRecords())
-	                                             : static_cast<uint64_t>(resource.Stride()) * resource.NumRecords();
+	// Gen5 titles may set NumRecords=0 for dynamically-sized or unbounded raw
+	// buffers; treat stride > 0 as sufficient for raw access validity.
+	if (resource.NumRecords() == 0)
+	{
+		return resource.Stride() > 0 && (resource.Stride() & 0x3u) == 0;
+	}
+	const uint64_t size = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
 	return size != 0 && (size & 0x3u) == 0;
 }
 
 bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access)
 {
+	// Gen5 titles leave uninitialized descriptors with NumRecords=0; accept them
+	// here and let the downstream unallocated-range guard skip the binding.
+	if (resource.NumRecords() == 0)
+	{
+		return true;
+	}
 	if (access == ShaderStorageAccess::Raw)
 	{
 		return ShaderRawStorageDescriptorSupported(resource);
@@ -227,6 +239,7 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 	{
 		case 1: return 1; // UFMT_8_UNORM
 		case 5: return 1; // UFMT_8_UINT
+		case 7: return 2; // UFMT_16_UNORM
 		case 20: return 4; // UFMT_32_UINT
 		case 13: return 2; // UFMT_16_FLOAT
 		case 14: return 2; // UFMT_8_8_UNORM
@@ -316,6 +329,7 @@ struct ShaderDebugPrintfCmds
 static Vector<uint64_t>*                               g_disabled_shaders = nullptr;
 static Vector<ShaderDebugPrintfCmds>*                  g_debug_printfs    = nullptr;
 static std::unordered_map<uint64_t, ShaderMappedData>* g_shader_map              = nullptr;
+static std::mutex                                       g_shader_map_mutex;
 static std::unordered_map<uint64_t, int32_t>*          g_vertex_offset_sgpr_map = nullptr;
 
 void ShaderInit()
@@ -330,7 +344,46 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
 {
 	EXIT_IF(g_shader_map == nullptr);
 
-	g_shader_map->insert({addr, data});
+	std::scoped_lock lock(g_shader_map_mutex);
+	g_shader_map->insert_or_assign(addr, data);
+}
+
+static bool ShaderGetMappedData(uint64_t addr, ShaderMappedData* data)
+{
+	EXIT_IF(g_shader_map == nullptr || data == nullptr);
+	std::scoped_lock lock(g_shader_map_mutex);
+	if (auto exact = g_shader_map->find(addr); exact != g_shader_map->end())
+	{
+		*data = exact->second;
+		return true;
+	}
+	uint64_t best_base = 0;
+	const ShaderMappedData* best = nullptr;
+	for (const auto& [base, mapped]: *g_shader_map)
+	{
+		if (mapped.code_size_bytes != 0 && addr >= base && addr - base < mapped.code_size_bytes && (best == nullptr || base > best_base))
+		{
+			best_base = base;
+			best = &mapped;
+		}
+	}
+	if (best == nullptr)
+	{
+		std::fprintf(stderr, "KYTY_SHADER_MAP_MISS addr=0x%016" PRIx64 " entries=%zu\n", addr, g_shader_map->size());
+		int shown = 0;
+		for (const auto& [base, mapped]: *g_shader_map)
+		{
+			if (shown++ >= 8)
+			{
+				break;
+			}
+			std::fprintf(stderr, "  map base=0x%016" PRIx64 " size=0x%08" PRIx32 " user=%p\n", base,
+			             mapped.code_size_bytes, static_cast<void*>(mapped.user_data));
+		}
+		return false;
+	}
+	*data = *best;
+	return true;
 }
 
 static String8 operand_to_str(ShaderOperand op)
@@ -361,6 +414,7 @@ static String8 operand_to_str(ShaderOperand op)
 	switch (op.type)
 	{
 		case ShaderOperandType::VccHi: ret = "vcc_hi"; break;
+		case ShaderOperandType::VccZ: ret = "vccz"; break;
 		case ShaderOperandType::VccLo: ret = "vcc_lo"; break;
 		case ShaderOperandType::ExecHi: ret = "exec_hi"; break;
 		case ShaderOperandType::ExecLo: ret = "exec_lo"; break;
@@ -484,6 +538,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen: return "Vdata1VaddrSvSoffsIdxen"; break;
 		case ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxenFloat1: return "Vdata1VaddrSvSoffsIdxenFloat1"; break;
 		case ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen: return "Vdata2VaddrSvSoffsIdxen"; break;
+		case ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxenFloat2: return "Vdata2VaddrSvSoffsIdxenFloat2"; break;
 		case ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen: return "Vdata3VaddrSvSoffsIdxen"; break;
 		case ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen: return "Vdata4VaddrSvSoffsIdxen"; break;
 		case ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxenFloat4: return "Vdata4VaddrSvSoffsIdxenFloat4"; break;
@@ -563,6 +618,7 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::Idxen: s = "idxen"; break;
 			case ShaderInstructionFormat::Offen: s = "offen"; break;
 			case ShaderInstructionFormat::Float1: s = "format:float1"; break;
+			case ShaderInstructionFormat::Float2: s = "format:float2"; break;
 			case ShaderInstructionFormat::Float4: s = "format:float4"; break;
 			case ShaderInstructionFormat::Pos0: s = "pos0"; break;
 			case ShaderInstructionFormat::Done: s = "done"; break;
@@ -1281,6 +1337,13 @@ static void ShaderDetectBuffers(ShaderVertexInputInfo* info, bool ps5)
 	for (int ri = 0; ri < info->resources_num; ri++)
 	{
 		const auto& r = info->resources[ri];
+		// Empty V# descriptors occur in Gen5 metadata for attributes that are
+		// inactive in the current draw. They have no backing range and cannot be
+		// represented as a Vulkan vertex-buffer binding.
+		if (r.NumRecords() == 0)
+		{
+			continue;
+		}
 
 		bool merged = false;
 		for (int bi = 0; bi < info->buffers_num; bi++)
@@ -1409,6 +1472,7 @@ static void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch,
 			auto& rd          = info->resources_dst[info->resources_num];
 			rd.register_start = inst.dst.register_id;
 			rd.registers_num  = registers_num;
+			rd.semantic       = info->resources_num;
 			r.fields[0]       = temp_value[t + 0];
 			r.fields[1]       = temp_value[t + 1];
 			r.fields[2]       = temp_value[t + 2];
@@ -1476,6 +1540,7 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 		auto& r           = info->resources[info->resources_num];
 		auto& rd          = info->resources_dst[info->resources_num];
 		rd.register_start = static_cast<int>(reg);
+		rd.semantic       = static_cast<int>(in.semantic);
 		r.fields[0]       = sharp[0];
 		r.fields[1]       = sharp[1];
 		r.fields[2]       = sharp[2];
@@ -1604,16 +1669,6 @@ static void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sg
 
 	EXIT_IF(usage == ShaderTextureUsage::Unknown);
 
-	if (usage == ShaderTextureUsage::ReadWrite)
-	{
-		info->textures2d_storage_num++;
-		info->desc[index].textures2d_without_sampler = true;
-	} else
-	{
-		info->textures2d_sampled_num++;
-		info->desc[index].textures2d_without_sampler = false;
-	}
-
 	if (!extended)
 	{
 		for (int j = 0; j < 8; j++)
@@ -1634,6 +1689,22 @@ static void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sg
 	info->desc[index].texture.fields[5] = (extended ? extended_buffer[start_index - 16 + 5] : user_sgpr.value[start_index + 5]);
 	info->desc[index].texture.fields[6] = (extended ? extended_buffer[start_index - 16 + 6] : user_sgpr.value[start_index + 6]);
 	info->desc[index].texture.fields[7] = (extended ? extended_buffer[start_index - 16 + 7] : user_sgpr.value[start_index + 7]);
+
+	if (usage == ShaderTextureUsage::ReadWrite)
+	{
+		info->textures2d_storage_num++;
+		info->desc[index].textures2d_without_sampler = true;
+	} else
+	{
+		if (info->desc[index].texture.Type() == 10u)
+		{
+			info->textures3d_sampled_num++;
+		} else
+		{
+			info->textures2d_sampled_num++;
+		}
+		info->desc[index].textures2d_without_sampler = false;
+	}
 
 	info->textures_num++;
 }
@@ -1772,6 +1843,10 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	{
 		bind->textures2D.binding_sampled_index = binding_index++;
 		bind->textures2D.binding_storage_index = binding_index++;
+		// Keep the typed 3D binding reserved for every texture-bearing shader.
+		// Descriptor layouts are cached by resource counts, while individual
+		// shaders may specialize the same count to 2D or 3D resources.
+		bind->textures2D.binding_sampled_3d_index = binding_index++;
 
 		bind->push_constant_size += bind->textures2D.textures_num * 32;
 	}
@@ -1794,6 +1869,8 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	}
 
 	EXIT_IF((bind->push_constant_size % 16) != 0);
+	bind->vsharp_uniform_buffer = bind->push_constant_size > ShaderBindResources::PORTABLE_PUSH_CONSTANT_BYTES;
+	bind->vsharp_binding_index  = bind->vsharp_uniform_buffer ? binding_index++ : -1;
 }
 
 ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register)
@@ -1880,16 +1957,20 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 			case ShaderInstructionType::SBufferLoadDwordx2:
 			case ShaderInstructionType::SBufferLoadDwordx4:
 			case ShaderInstructionType::SBufferLoadDwordx8:
-			case ShaderInstructionType::SBufferLoadDwordx16: candidate_raw = true; break;
+			case ShaderInstructionType::SBufferLoadDwordx16:
+			// MTBUF/TBUFFER encodes its typed data/number format in the
+			// instruction. Its resource descriptor contributes address, stride and
+			// bounds only, so descriptor validation follows the raw-buffer contract.
+			case ShaderInstructionType::TBufferLoadFormatX:
+			case ShaderInstructionType::TBufferLoadFormatXy:
+			case ShaderInstructionType::TBufferLoadFormatXyzw: candidate_raw = true; break;
 			case ShaderInstructionType::BufferLoadFormatX:
 			case ShaderInstructionType::BufferLoadFormatXy:
 			case ShaderInstructionType::BufferLoadFormatXyz:
 			case ShaderInstructionType::BufferLoadFormatXyzw:
 			case ShaderInstructionType::BufferStoreFormatX:
 			case ShaderInstructionType::BufferStoreFormatXy:
-			case ShaderInstructionType::BufferStoreFormatXyzw:
-			case ShaderInstructionType::TBufferLoadFormatX:
-			case ShaderInstructionType::TBufferLoadFormatXyzw: candidate_typed = true; break;
+			case ShaderInstructionType::BufferStoreFormatXyzw: candidate_typed = true; break;
 			default: break;
 		}
 		if (!candidate_raw && !candidate_typed)
@@ -2239,7 +2320,7 @@ static bool Gen5CodeUnavailableDirectResourceLooksStorage(const HW::UserSgprInfo
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
 	                       const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code,
-	                       int user_data_register_base)
+	                       int user_data_register_base, bool vertex_resource_types)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -2298,6 +2379,13 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		switch (type)
 		{
 			case 8:
+				if (!vertex_resource_types)
+				{
+					ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, reg, bind->textures2D.textures_num,
+					                       ShaderTextureUsage::ReadOnly, user_sgpr, nullptr);
+					info->textures2D_readonly++;
+					break;
+				}
 				info->vertex_buffer                       = true;
 				info->vertex_buffer_reg                   = reg;
 				direct_sgprs[info->vertex_buffer_reg]     = false;
@@ -2305,6 +2393,12 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				break;
 
 			case 10:
+				if (!vertex_resource_types)
+				{
+					ShaderGetSampler(&bind->samplers, direct_sgprs, reg, bind->samplers.samplers_num, user_sgpr, nullptr);
+					info->samplers++;
+					break;
+				}
 				info->vertex_attrib                       = true;
 				info->vertex_attrib_reg                   = reg;
 				direct_sgprs[info->vertex_attrib_reg]     = false;
@@ -2547,6 +2641,53 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		}
 	}
 
+	// Gen5 metadata is advisory: some shaders address an S# descriptor directly
+	// from the EUD/user-SGPR namespace without listing it in the sharp table.
+	// Reconcile decoded scalar-buffer accesses with the binding set, preserving
+	// null-descriptor rejection and the same EUD translation used by metadata.
+	if (code != nullptr)
+	{
+		for (const auto& inst: code->GetInstructions())
+		{
+			const bool scalar_buffer_load =
+			    inst.type == ShaderInstructionType::SBufferLoadDword || inst.type == ShaderInstructionType::SBufferLoadDwordx2 ||
+			    inst.type == ShaderInstructionType::SBufferLoadDwordx4 || inst.type == ShaderInstructionType::SBufferLoadDwordx8 ||
+			    inst.type == ShaderInstructionType::SBufferLoadDwordx16;
+			if (!scalar_buffer_load || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].size != 4)
+			{
+				continue;
+			}
+
+			const int raw_start = inst.src[0].register_id - user_data_register_base;
+			if (raw_start < 0)
+			{
+				continue;
+			}
+			const bool needs_eud = Gen5SharpNeedsEud(raw_start, 4, user_sgpr_num);
+			if (needs_eud && (!has_eud_ptr || extended_buffer == nullptr || raw_start < ShaderGen5EudOffsetBase(user_sgpr_num)))
+			{
+				continue;
+			}
+			const int api_start = needs_eud ? Gen5EudApiIndex(raw_start, user_sgpr_num) : raw_start;
+			bool      already_bound = false;
+			for (int i = 0; i < bind->storage_buffers.buffers_num; ++i)
+			{
+				already_bound = already_bound ||
+				                (bind->storage_buffers.start_register[i] == api_start && bind->storage_buffers.extended[i] == needs_eud);
+			}
+			if (already_bound)
+			{
+				continue;
+			}
+			const int slot = bind->storage_buffers.buffers_num;
+			if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api_start, slot, ShaderStorageUsage::ReadOnly, user_sgpr,
+			                           needs_eud ? extended_buffer : nullptr))
+			{
+				info->storage_buffers_readonly++;
+			}
+		}
+	}
+
 	for (int i = 0; i < HW::UserSgprInfo::SGPRS_MAX; i++)
 	{
 		if (direct_sgprs[i])
@@ -2558,7 +2699,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 
 	for (int i = 0; i < bind->storage_buffers.buffers_num; ++i)
 	{
-		const int register_with_base = bind->storage_buffers.start_register[i] + user_data_register_base;
+		const int binding_register = bind->storage_buffers.extended[i]
+		                                 ? ShaderGen5EudOffsetBase(user_sgpr_num) +
+		                                       (bind->storage_buffers.start_register[i] - 16)
+		                                 : bind->storage_buffers.start_register[i];
+		const int register_with_base = binding_register + user_data_register_base;
 		const auto exact_evidence =
 		    code != nullptr ? AnalyzeShaderStorageUse(*code, register_with_base) : ShaderStorageUseEvidence {};
 		const auto exact = exact_evidence.access;
@@ -2651,6 +2796,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 	EXIT_IF(info == nullptr || regs == nullptr);
 
+	info->bind = {};
 	info->export_count              = static_cast<int>(sh->GetExportCount());
 	info->bind.push_constant_offset = 0;
 	info->bind.push_constant_size   = 0;
@@ -2676,10 +2822,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 	if (ps5)
 	{
-		if (auto iter = g_shader_map->find(shader_addr); iter != g_shader_map->end())
-		{
-			data = iter->second;
-		}
+		(void)ShaderGetMappedData(shader_addr, &data);
 	}
 
 	if (ps5)
@@ -2795,6 +2938,12 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	EXIT_IF(regs == nullptr);
 	EXIT_IF(sh == nullptr);
 
+	*ps_info = {};
+	if (!regs->ps_embedded && regs->ps_regs.data_addr == 0)
+	{
+		ps_info->stage_enabled = false;
+		return;
+	}
 	if (regs->ps_embedded)
 	{
 		return;
@@ -2812,8 +2961,12 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		    ShaderResolvePixelInterpolatorSetting(sh->ps_interpolator_settings[i], sh->ps_interpolator_written_mask, i);
 	}
 
-	ps_info->bind.descriptor_set_slot  = (vs_info->bind.storage_buffers.buffers_num > 0 ? 1 : 0);
-	ps_info->bind.push_constant_offset = vs_info->bind.push_constant_offset + vs_info->bind.push_constant_size;
+	const bool vs_uses_descriptor = vs_info->bind.storage_buffers.buffers_num > 0 || vs_info->bind.textures2D.textures_num > 0 ||
+	                                vs_info->bind.samplers.samplers_num > 0 || vs_info->bind.gds_pointers.pointers_num > 0 ||
+	                                vs_info->bind.vsharp_uniform_buffer;
+	ps_info->bind.descriptor_set_slot  = (vs_uses_descriptor ? 1 : 0);
+	ps_info->bind.push_constant_offset =
+	    vs_info->bind.push_constant_offset + (vs_info->bind.vsharp_uniform_buffer ? 0u : vs_info->bind.push_constant_size);
 	ps_info->bind.push_constant_size   = 0;
 
 	for (int i = 0; i < 8; i++)
@@ -2828,10 +2981,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 
 	if (ps5)
 	{
-		if (auto iter = g_shader_map->find(regs->ps_regs.data_addr); iter != g_shader_map->end())
-		{
-			data = iter->second;
-		}
+		(void)ShaderGetMappedData(regs->ps_regs.data_addr, &data);
 	}
 
 	ShaderParsedUsage usage;
@@ -2854,13 +3004,17 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		    });
 		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
 		ps_info->image_size_query          = analysis.usage.image_size_query;
-		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr, analysis.code.get());
+		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr,
+		                  analysis.code.get(), 0, false);
 	} else
 	{
 		ShaderParseUsage(regs->ps_regs.data_addr, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr);
 	}
 
-	EXIT_NOT_IMPLEMENTED(usage.fetch || usage.vertex_buffer || usage.vertex_attrib);
+	// Gen5 user-data is shared by linked stages. A PS can therefore carry the
+	// VS fetch/V#/attrib metadata in its direct-resource table even though its
+	// instruction stream never consumes it. ShaderParseUsage2 records those
+	// slots for the vertex path; they do not create PS descriptor bindings.
 	EXIT_NOT_IMPLEMENTED(usage.storage_buffers_readwrite > 0);
 	EXIT_NOT_IMPLEMENTED(usage.gds_pointers > 0);
 
@@ -2872,6 +3026,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 	EXIT_IF(info == nullptr);
 	EXIT_IF(regs == nullptr);
 
+	info->bind = {};
 	info->threads_num[0] = regs->cs_regs.num_thread_x;
 	info->threads_num[1] = regs->cs_regs.num_thread_y;
 	info->threads_num[2] = regs->cs_regs.num_thread_z;
@@ -2895,10 +3050,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		// PS5 shaders describe their resources through the mapped shader user-data
 		// block, not an embedded usage-slot table.
 		ShaderMappedData data;
-		if (auto iter = g_shader_map->find(regs->cs_regs.data_addr); iter != g_shader_map->end())
-		{
-			data = iter->second;
-		}
+		(void)ShaderGetMappedData(regs->cs_regs.data_addr, &data);
 		EXIT_NOT_IMPLEMENTED(data.user_data == nullptr);
 		ShaderCode code;
 		code.SetType(ShaderType::Compute);
@@ -2908,7 +3060,8 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		}
 		const auto user_sgpr_num = ShaderResolveGen5UserSgprCount(regs->cs_regs.user_sgpr, regs->cs_user_sgpr.count,
 		                                                          data.user_data->eud_size_dw);
-		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code);
+		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code, 0,
+		                  false);
 	} else
 	{
 		ShaderParseUsage(regs->cs_regs.data_addr, &usage, &info->bind, regs->cs_user_sgpr, regs->cs_regs.user_sgpr);
@@ -2916,7 +3069,8 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 
 	// Gen5 compute may bind S# samplers for image_sample / image_sample_lz
 	// (same sharp[2] path as PS). PS already allows usage.samplers > 0.
-	EXIT_NOT_IMPLEMENTED(usage.fetch || usage.vertex_buffer || usage.vertex_attrib);
+	// As with PS, shared Gen5 user-data may include vertex-only direct-resource
+	// metadata. Compute binding construction ignores those entries.
 
 	ShaderCalcBindingIndices(&info->bind);
 }
@@ -3828,7 +3982,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 
 	for (int i = 0; i < bind.textures2D.textures_num; i++)
 	{
-		// const auto& r = bind.textures2D.textures[i];
+		const auto& r = bind.textures2D.desc[i].texture;
 		// ret->ids.Add(r.MinLod());
 		// ret->ids.Add(r.Dfmt());
 		// ret->ids.Add(r.Nfmt());
@@ -3844,7 +3998,11 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		// ret->ids.Add(r.LastLevel());
 		// ret->ids.Add(r.TilingIdx());
 		// ret->ids.Add(static_cast<uint32_t>(r.Pow2Pad()));
-		// ret->ids.Add(r.Type());
+		// Image type and format determine the SPIR-V image declaration. They
+		// must participate in the module key so a pipeline cannot reuse a
+		// shader specialized for a differently shaped or integer texture.
+		ret->ids.Add(r.Type());
+		ret->ids.Add(r.Format());
 		// ret->ids.Add(r.Depth());
 		// ret->ids.Add(r.Pitch());
 		// ret->ids.Add(r.BaseArray());
@@ -3979,6 +4137,7 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 
 		ret.ids.Add(rd.register_start);
 		ret.ids.Add(rd.registers_num);
+		ret.ids.Add(static_cast<uint32_t>(rd.semantic));
 		ret.ids.Add(r.Stride());
 		ret.ids.Add(static_cast<uint32_t>(r.SwizzleEnabled()));
 		ret.ids.Add(r.DstSelX());
@@ -4021,6 +4180,11 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	KYTY_PROFILER_FUNCTION();
 
 	ShaderId ret;
+	if (!input_info->stage_enabled)
+	{
+		ret.ids.Add(0x50534f46u);
+		return ret;
+	}
 
 	if (regs->ps_embedded)
 	{

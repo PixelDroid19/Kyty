@@ -421,6 +421,8 @@ struct ScreenViewport
 	int      generic_scissor_right                = 0;
 	int      generic_scissor_bottom               = 0;
 	bool     generic_scissor_window_offset_enable = false;
+	int      window_offset_x                       = 0;
+	int      window_offset_y                       = 0;
 	uint32_t hw_offset_x                          = 0;
 	uint32_t hw_offset_y                          = 0;
 	float    guard_band_horz_clip                 = 0.0f;
@@ -781,6 +783,11 @@ public:
 		m_screen_viewport.generic_scissor_right                = right;
 		m_screen_viewport.generic_scissor_bottom               = bottom;
 		m_screen_viewport.generic_scissor_window_offset_enable = window_offset_enable;
+	}
+	void SetWindowOffset(int offset_x, int offset_y)
+	{
+		m_screen_viewport.window_offset_x = offset_x;
+		m_screen_viewport.window_offset_y = offset_y;
 	}
 	void SetHardwareScreenOffset(uint32_t offset_x, uint32_t offset_y)
 	{

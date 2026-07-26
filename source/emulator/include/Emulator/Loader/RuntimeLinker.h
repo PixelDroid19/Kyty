@@ -198,6 +198,9 @@ public:
 	Program* LoadProgram(const String& elf_name);
 	// True if a program with this exact host path is already in the load list.
 	[[nodiscard]] bool HasProgramFile(const String& elf_name);
+	// Returns the already loaded program for an exact canonical host path.
+	// Callers must not unload or initialize a returned program a second time.
+	Program* FindProgramByFile(const String& elf_name);
 	void     SaveMainProgram(const String& elf_name);
 	void     SaveProgram(Program* program, const String& elf_name);
 	void     UnloadProgram(Program* program);
@@ -232,6 +235,8 @@ public:
 
 	static uint64_t ReadFromElf(Program* program, uint64_t vaddr);
 	Program*        FindProgramByAddr(uint64_t vaddr);
+	// Kernel module handle 0 denotes the process main executable (RTLD_DEFAULT
+	// for sceKernelDlsym). Other values are concrete loader module handles.
 	Program*        FindProgramById(int32_t id);
 
 	static uint8_t* TlsGetAddr(Program* program);
@@ -272,12 +277,17 @@ private:
 // Returns the number of sites rewritten. Pure buffer transform for unit tests.
 uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size);
 
-// Patch direct guest TLS-base loads in executable code:
-//   [66 ...] mov rax, qword ptr fs:[0]
-// into a call to Kyty's per-thread guest TLS handler. Returns the number of
-// load sites rewritten. Pure buffer transform for unit tests; callers own page
-// permissions and instruction-cache flushing.
+// Legacy narrow TLS-base-load rewrite. Retained for compatibility with
+// existing callers; production guest code uses LoaderRewriteGuestFsToGs.
 uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handler_vaddr);
+
+// Rewrites decoded FS-segment guest memory operands to GS operands. Kyty keeps
+// the host FS base intact for libc while GS is installed with the per-thread
+// guest TCB around guest execution. Returns zero when the host cannot provide
+// that isolated guest segment base.
+uint64_t LoaderRewriteGuestFsToGs(uint8_t* code, uint64_t size);
+[[nodiscard]] bool LoaderEnterGuestSegment();
+void               LoaderLeaveGuestSegment();
 
 // Calculate x86-64 TLS relocation payloads in guest terms. DTPMOD64 writes the
 // stable guest TLS module id; DTPOFF64 writes the module-local TLS offset; and

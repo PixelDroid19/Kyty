@@ -27,10 +27,17 @@
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <limits>
 #include <utility>
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#include <asm/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -188,6 +195,28 @@ struct RelocationInfo
 	bool       bind_self = false;
 };
 
+static bool IsTracedPltRelocation(uint64_t index)
+{
+	const char* trace_index = std::getenv("KYTY_LAZY_PLT_TRACE_INDEX");
+	if (trace_index == nullptr || trace_index[0] == '\0')
+	{
+		return false;
+	}
+
+	char*      end       = nullptr;
+	const auto requested = std::strtoull(trace_index, &end, 0);
+	return end != trace_index && *end == '\0' && requested == index;
+}
+
+static void EmitTracedPltRelocation(uint64_t index, const RelocationInfo& ri)
+{
+	const auto clean_name = Log::IsColoredPrintf() ? ri.name : Log::RemoveColors(ri.name);
+	const auto message    = String::FromPrintf("index=%" PRIu64 " import=%s", index, clean_name.C_Str());
+	Emulator::Agent::Lifecycle::Emit(Emulator::Agent::EventKind::Info, "lazy_plt_trace", message.C_Str());
+	std::fprintf(stderr, "KYTY_LAZY_PLT_TRACE %s\n", message.C_Str());
+	std::fflush(stderr);
+}
+
 // The structure will be passed via the stack
 // since the size of an object is larger than 16 bytes
 struct RelocateHandlerStack
@@ -212,8 +241,65 @@ static Program* g_tls_main_program = nullptr;
 alignas(64) static uint8_t g_tls_reg_save_area[XSAVE_BUFFER_SIZE + sizeof(XSAVE_CHK_GUARD)];
 static uint8_t g_tls_spinlock = 0;
 
-static KYTY_SYSV_ABI void run_entry(uint64_t addr, EntryParams* params, atexit_func_t atexit_func)
+namespace {
+
+bool g_guest_segment_enabled = false;
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__x86_64__)
+struct GuestSegmentState
 {
+	uint64_t host_gs_base = 0;
+	uint32_t depth        = 0;
+};
+
+thread_local GuestSegmentState g_guest_segment_state {};
+
+bool GetGsBase(uint64_t* base)
+{
+	return base != nullptr && syscall(SYS_arch_prctl, ARCH_GET_GS, base) == 0;
+}
+
+bool SetGsBase(uint64_t base)
+{
+	return syscall(SYS_arch_prctl, ARCH_SET_GS, base) == 0;
+}
+#endif
+
+} // namespace
+
+static KYTY_SYSV_ABI void run_entry(uint64_t addr, EntryParams* params, atexit_func_t atexit_func, void* stack_top)
+{
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+	if (stack_top != nullptr)
+	{
+		const uintptr_t guest_rsp = reinterpret_cast<uintptr_t>(stack_top) & ~static_cast<uintptr_t>(0xf);
+		const uintptr_t guest_rbp = guest_rsp - 4u * sizeof(uint64_t);
+		auto* const      root      = reinterpret_cast<uintptr_t*>(guest_rbp);
+		root[0]                     = 0;
+		root[1]                     = 0;
+
+		asm volatile("movq %[entry], %%rax\n\t"
+		             "movq %[params], %%rdi\n\t"
+		             "movq %[atexit_func], %%rsi\n\t"
+		             "pushq %%r12\n\t"
+		             "pushq %%r13\n\t"
+		             "movq %%rsp, %%r12\n\t"
+		             "movq %%rbp, %%r13\n\t"
+		             "movq %[guest_rsp], %%rsp\n\t"
+		             "movq %[guest_rbp], %%rbp\n\t"
+		             "callq *%%rax\n\t"
+		             "movq %%r13, %%rbp\n\t"
+		             "movq %%r12, %%rsp\n\t"
+		             "popq %%r13\n\t"
+		             "popq %%r12\n\t"
+		             :
+		             : [entry] "r"(addr), [params] "r"(params), [atexit_func] "r"(atexit_func), [guest_rsp] "r"(guest_rsp),
+		               [guest_rbp] "r"(guest_rbp)
+		             : "cc", "memory", "rax", "rdi", "rsi", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3",
+		               "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+		return;
+	}
+#endif
 	GuestCall::Invoke(addr, reinterpret_cast<uint64_t>(params), reinterpret_cast<uint64_t>(atexit_func), 0);
 }
 
@@ -646,6 +732,10 @@ static void relocate(uint32_t index, Elf64_Rela* r, Program* program, bool jmpre
 	KYTY_PROFILER_FUNCTION();
 
 	auto ri = GetRelocationInfo(r, program);
+	if (jmprela_table && IsTracedPltRelocation(index))
+	{
+		EmitTracedPltRelocation(index, ri);
+	}
 
 	[[maybe_unused]] bool patched = false;
 
@@ -730,6 +820,10 @@ static KYTY_SYSV_ABI uint64_t ResolveLazyPlt(void* program_ptr, uint64_t rel_ind
 	}
 
 	auto ri = GetRelocationInfo(program->dynamic_info->jmprela_table + rel_index, program);
+	if (IsTracedPltRelocation(rel_index))
+	{
+		EmitTracedPltRelocation(rel_index, ri);
+	}
 	if (!ri.resolved && program->rt != nullptr &&
 	    ModuleLifecycleCoordinator::TryLoadProviderForLazyImport(program->rt, ri.name, ri.type))
 	{
@@ -831,6 +925,112 @@ uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handle
 		i += instruction_size - 1;
 	}
 	return patched;
+}
+
+uint64_t LoaderRewriteGuestFsToGs(uint8_t* code, uint64_t size)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__x86_64__)
+	if (code == nullptr || size < 8)
+	{
+		return 0;
+	}
+
+	uint64_t host_gs_base = 0;
+	if (!GetGsBase(&host_gs_base))
+	{
+		return 0;
+	}
+
+	uint64_t rewritten = 0;
+	for (uint64_t offset = 0; offset + 8 <= size; offset++)
+	{
+		if (code[offset] != 0x64)
+		{
+			continue;
+		}
+
+		// Guest TLS generated by the PS5 Clang toolchain uses an absolute SIB
+		// memory operand (fs:[disp32]). Match that complete operand encoding,
+		// rather than attempting to re-synchronise a partial x86 decoder across
+		// arbitrary executable bytes. The SIB form has mod=0, r/m=4 and a
+		// no-index, disp32 SIB byte (0x25).
+		uint64_t cursor = offset + 1;
+		while (cursor < size && (code[cursor] == 0x66 || code[cursor] == 0x67 || code[cursor] == 0xf0 ||
+		                         code[cursor] == 0xf2 || code[cursor] == 0xf3))
+		{
+			cursor++;
+		}
+		if (cursor < size && (code[cursor] & 0xf0) == 0x40)
+		{
+			cursor++;
+		}
+		if (cursor + 6 > size)
+		{
+			continue;
+		}
+
+		const uint8_t opcode = code[cursor++];
+		if ((opcode != 0x88 && opcode != 0x89 && opcode != 0x8a && opcode != 0x8b) ||
+		    (code[cursor] & 0xc7) != 0x04 || code[cursor + 1] != 0x25)
+		{
+			continue;
+		}
+
+		code[offset] = 0x65;
+		rewritten++;
+	}
+
+	g_guest_segment_enabled = g_guest_segment_enabled || rewritten != 0;
+	return rewritten;
+#else
+	(void)code;
+	(void)size;
+	return 0;
+#endif
+}
+
+bool LoaderEnterGuestSegment()
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__x86_64__)
+	if (!g_guest_segment_enabled || g_tls_main_program == nullptr)
+	{
+		return true;
+	}
+
+	auto& state = g_guest_segment_state;
+	if (state.depth++ != 0)
+	{
+		return true;
+	}
+
+	const uint64_t guest_gs_base =
+	    reinterpret_cast<uint64_t>(RuntimeLinker::TlsGetAddr(g_tls_main_program) + g_tls_main_program->tls.image_size);
+	if (!GetGsBase(&state.host_gs_base) || !SetGsBase(guest_gs_base))
+	{
+		state.depth = 0;
+		return false;
+	}
+	return true;
+#else
+	return true;
+#endif
+}
+
+void LoaderLeaveGuestSegment()
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__x86_64__)
+	if (!g_guest_segment_enabled || g_tls_main_program == nullptr)
+	{
+		return;
+	}
+
+	auto& state = g_guest_segment_state;
+	EXIT_IF(state.depth == 0);
+	if (--state.depth == 0)
+	{
+		EXIT_IF(!SetGsBase(state.host_gs_base));
+	}
+#endif
 }
 
 uint64_t LoaderPrepareThreadTlsImage(uint8_t* tls, uint64_t image_size, uint64_t template_vaddr, uint64_t program_base,
@@ -950,26 +1150,24 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size)
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->elf == nullptr);
 
-	// Always rewrite broken TLS GD call prefixes on executable segments, even
-	// when the TLS handler is not yet published — the relative targets already
-	// land on the handler slot Kyty allocates after base_size_aligned.
+	// Preserve the existing fs:[0] TLS-GD lowering for all forms that are not
+	// covered by the direct guest-FS virtualization below.
 	if (!program->elf->IsShared() && size >= 8)
 	{
 		auto*          start_ptr = reinterpret_cast<uint8_t*>(address);
-		const uint64_t rex_sites = LoaderRewriteTlsGdCallRexPrefix(start_ptr, size);
-		if (rex_sites != 0)
+		const uint64_t tls_gd_sites = LoaderPatchTlsFsBaseLoads(start_ptr, size, program->tls.handler_vaddr);
+		if (tls_gd_sites != 0)
 		{
-			std::fprintf(stderr, "Patch tls GD call REX.W at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, rex_sites);
-			printf("Patch tls GD call REX.W at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, rex_sites);
+			printf("Patch TLS fs:[0] at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, tls_gd_sites);
 		}
 	}
 
-	if (!program->elf->IsShared() && program->tls.handler_vaddr != 0)
+	if (size >= 15)
 	{
-		const uint64_t tls_sites = LoaderPatchTlsFsBaseLoads(reinterpret_cast<uint8_t*>(address), size, program->tls.handler_vaddr);
+		const uint64_t tls_sites = LoaderRewriteGuestFsToGs(reinterpret_cast<uint8_t*>(address), size);
 		if (tls_sites != 0)
 		{
-			printf("Patch tls at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, tls_sites);
+			printf("Rewrite guest FS to GS at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, tls_sites);
 		}
 	}
 }
@@ -1145,6 +1343,24 @@ RuntimeLinker::~RuntimeLinker()
 	Clear();
 }
 
+bool RuntimeLinker::HasProgramFile(const String& elf_name)
+{
+	return FindProgramByFile(elf_name) != nullptr;
+}
+
+Program* RuntimeLinker::FindProgramByFile(const String& elf_name)
+{
+	Core::LockGuard lock(m_mutex);
+	for (auto* program: m_programs)
+	{
+		if (program != nullptr && program->file_name == elf_name)
+		{
+			return program;
+		}
+	}
+	return nullptr;
+}
+
 Program* RuntimeLinker::LoadProgram(const String& elf_name)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -1272,6 +1488,11 @@ void RuntimeLinker::Execute()
 	KYTY_PROFILER_THREAD("Thread_Main");
 
 	Libs::LibKernel::PthreadInitSelfForMainThread();
+	void* main_stack_top = Libs::LibKernel::PthreadCreateMainGuestStack();
+	if (main_stack_top == nullptr)
+	{
+		EXIT("failed to allocate main guest stack\n");
+	}
 	RelocateAll();
 	StartAllModules();
 
@@ -1341,14 +1562,16 @@ void RuntimeLinker::Execute()
 
 	if (auto entry = GetEntry(); entry != 0)
 	{
-		EntryParams p {};
-		p.argc    = 1;
-		p.argv[0] = "KytyEmu";
-		printf("stack_addr = %" PRIx64 "\n", reinterpret_cast<uint64_t>(&p));
+		auto* p = reinterpret_cast<EntryParams*>((reinterpret_cast<uintptr_t>(main_stack_top) - 0x100u) & ~static_cast<uintptr_t>(0xf));
+		std::memset(p, 0, sizeof(EntryParams));
+		p->argc    = 1;
+		p->argv[0] = "KytyEmu";
+		printf("stack_addr = %" PRIx64 "\n", reinterpret_cast<uint64_t>(p));
 
 		Core::mem_guest_thread_enter();
-
-		run_entry(entry, &p, ProgramExitHandler);
+		EXIT_IF(!LoaderEnterGuestSegment());
+		run_entry(entry, p, ProgramExitHandler, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(p) - 0x1000u));
+		LoaderLeaveGuestSegment();
 		Core::mem_guest_thread_leave();
 		// Guest main returned (or long-running titles never reach here). Observation only.
 		Emulator::Agent::Lifecycle::EmitGuestExit(0);
@@ -1433,18 +1656,18 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 			*bind_self = (exporter == program);
 		}
 	}
-	// Guest libc.prx exports the allocation family, but constructors can reach
-	// those imports before its allocator initialization is complete. Its internal
-	// mspace can also remain BSS-zero when the legacy ApplicationHeap table is used.
-	// Keep process-global runtime services on one side of the ABI boundary.
-	// Mixing guest allocation/environment state with their HLE initialization
-	// leaves the corresponding guest globals uninitialized.
+	// Some guest runtime shims export host-service entrypoints but cannot perform
+	// their platform work under the emulator. Keep those process-global services
+	// on the HLE side of the ABI boundary: libc allocation constructors can run
+	// before their mspace is initialized, and PS5Util's thread-context shim would
+	// otherwise claim that an asynchronous request was delivered when it was not.
 	const bool prefer_hle_runtime =
 	    hle_record != nullptr &&
 	    (resolve.name == U"gQX+4GDQjpM" || resolve.name == U"2X5agFjKxMc" || resolve.name == U"Y7aJ1uydPMo" ||
 	     resolve.name == U"tIhsqj0qsFE" || resolve.name == U"Ujf3KzMvRmI" || resolve.name == U"2Btkg8k24Zg" ||
 	     resolve.name == U"cVSk9y8URbc" || resolve.name == U"fJnpuVVBbKk" || resolve.name == U"hdm0YfMa7TQ" ||
-	     resolve.name == U"z+P+xCnWLBk" || resolve.name == U"MLWl90SFWNE" || resolve.name == U"smbQukfxYJM");
+	     resolve.name == U"z+P+xCnWLBk" || resolve.name == U"MLWl90SFWNE" || resolve.name == U"smbQukfxYJM" ||
+	     resolve.name == U"J3edELK4FvM");
 	const SymbolRecord* record =
 	    prefer_hle_runtime ? hle_record : (export_record != nullptr ? export_record : hle_record);
 
@@ -1736,6 +1959,28 @@ Program* RuntimeLinker::FindProgramById(int32_t id)
 {
 	Core::LockGuard lock(m_mutex);
 
+	if (id == 0)
+	{
+		for (auto* p: m_programs)
+		{
+			if (p->elf != nullptr && !p->elf->IsShared())
+			{
+				return p;
+			}
+		}
+
+		// Synthetic export-only programs have no ELF. Keeping this fallback
+		// preserves the same process-main contract for linker integration tests.
+		for (auto* p: m_programs)
+		{
+			if (p->file_name.FilenameWithoutDirectory().ToLower() == U"eboot.bin")
+			{
+				return p;
+			}
+		}
+		return nullptr;
+	}
+
 	for (auto* p: m_programs)
 	{
 		if (p->unique_id == id)
@@ -1858,7 +2103,21 @@ int RuntimeLinker::StartModule(Program* program, size_t args, const void* argp, 
 	printf(FG_BRIGHT_YELLOW "--- Start module: " BG_BLUE BOLD "%s" BG_DEFAULT NO_BOLD DEFAULT "\n", program->file_name.C_Str());
 	printf(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
 
-	return run_ini_fini(program->dynamic_info->init_vaddr + program->base_vaddr, args, argp, func);
+	// Shared objects follow the ELF constructor order: DT_INIT first, then
+	// DT_INIT_ARRAY.  Several Unity modules populate native registration tables
+	// from their array constructors, so invoking only DT_INIT leaves the module
+	// linked but semantically uninitialised.
+	int result = 0;
+	if (program->dynamic_info->init_vaddr != 0)
+	{
+		result = run_ini_fini(program->dynamic_info->init_vaddr + program->base_vaddr, args, argp, func);
+	}
+	if (result == 0)
+	{
+		run_init_array(program->base_vaddr, program->dynamic_info->init_array_vaddr, program->dynamic_info->init_array_size);
+	}
+
+	return result;
 }
 
 int RuntimeLinker::StopModule(Program* program, size_t args, const void* argp, module_func_t func)

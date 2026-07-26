@@ -226,7 +226,7 @@ static void free_hid_device(hid_device *dev)
 	CloseHandle(dev->ol.hEvent);
 	CloseHandle(dev->write_ol.hEvent);
 	CloseHandle(dev->device_handle);
-	LocalFree(dev->last_error_str);
+	free(dev->last_error_str);
 	free(dev->read_buf);
 	free(dev);
 }
@@ -235,16 +235,21 @@ static void register_error(hid_device *device, const char *op)
 {
 	WCHAR *ptr, *msg;
 
-	DWORD count = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER |
-		FORMAT_MESSAGE_FROM_SYSTEM |
+	msg = (WCHAR *)malloc(512u * sizeof(*msg));
+	if (!msg)
+		return;
+
+	DWORD count = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM |
 		FORMAT_MESSAGE_IGNORE_INSERTS,
 		NULL,
 		GetLastError(),
 		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-		(LPWSTR)&msg, 0/*sz*/,
+		msg, 512,
 		NULL);
-	if (!count)
+	if (!count) {
+		free(msg);
 		return;
+	}
 	
 	/* Get rid of the CR and LF that FormatMessage() sticks at the
 	   end of the message. Thanks Microsoft! */
@@ -259,7 +264,7 @@ static void register_error(hid_device *device, const char *op)
 
 	/* Store the message off in the Device entry so that
 	   the hid_error() function can pick it up. */
-	LocalFree(device->last_error_str);
+	free(device->last_error_str);
 	device->last_error_str = msg;
 }
 

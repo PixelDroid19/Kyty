@@ -137,6 +137,7 @@ enum class ShaderInstructionType : uint32_t
 	SXnorB64,
 	SXorB64,
 	TBufferLoadFormatX,
+	TBufferLoadFormatXy,
 	TBufferLoadFormatXyzw,
 	VAddF32,
 	VAddI32,
@@ -187,24 +188,34 @@ enum class ShaderInstructionType : uint32_t
 	VCmpTruF32,
 	VCmpTU32,
 	VCmpUF32,
+	VCmpxEqF32,
 	VCmpxEqI32,
 	VCmpxEqU32,
+	VCmpxGeF32,
 	VCmpxGeI32,
 	VCmpxGeU32,
 	VCmpxGtF32,
 	VCmpxGtI32,
 	VCmpxGtU32,
+	VCmpxLeF32,
 	VCmpxLeI32,
+	VCmpxLgF32,
 	VCmpxLtF32,
 	VCmpxLtI32,
 	VCmpxLtU32,
+	VCmpxNgeF32,
+	VCmpxNgtF32,
 	VCmpxNleF32,
+	VCmpxNlgF32,
 	VCmpxNltF32,
 	VCmpxNeqF32,
 	VCmpxNeI32,
 	VCmpxNeU32,
 	VCndmaskB32,
 	VCosF32,
+	VCubeIdF32,
+	VCubescF32,
+	VCubetcF32,
 	VCvtF32F16,
 	VCvtF32I32,
 	VCvtF32U32,
@@ -235,6 +246,7 @@ enum class ShaderInstructionType : uint32_t
 	VMadmkF32,
 	VMadU32U24,
 	VMadU64U32,
+	VCubeMaF32,
 	VMax3F32,
 	VMaxF32,
 	VMbcntHiU32B32,
@@ -309,6 +321,7 @@ enum FormatByte : uint64_t
 	Idxen,  // idxen
 	Offen,  // offen
 	Float1, // format:float1
+	Float2, // format:float2
 	Float4, // format:float4
 	Pos0,   // pos0
 	Done,   // done
@@ -414,6 +427,7 @@ enum Format : uint64_t
 	Vdata2Vaddr3StSsDmask9              = FormatDefine({DA2, S0A3, S1A8, S2A4, Dmask9}),
 	Vdata2Vaddr3StSsDmaskA              = FormatDefine({DA2, S0A3, S1A8, S2A4, DmaskA}),
 	Vdata2VaddrSvSoffsIdxen             = FormatDefine({DA2, S0, S1A4, S2, Idxen}),
+	Vdata2VaddrSvSoffsIdxenFloat2       = FormatDefine({DA2, S0, S1A4, S2, Idxen, Float2}),
 	Vdata3Vaddr3StSsDmask7              = FormatDefine({DA3, S0A3, S1A8, S2A4, Dmask7}),
 	Vdata3Vaddr3StSsDmaskB              = FormatDefine({DA3, S0A3, S1A8, S2A4, DmaskB}),
 	Vdata3Vaddr4StSsDmask7              = FormatDefine({DA3, S0A4, S1A8, S2A4, Dmask7}),
@@ -452,6 +466,7 @@ enum class ShaderOperandType
 	FloatInlineConstant,
 	VccLo,
 	VccHi,
+	VccZ,
 	ExecLo,
 	ExecHi,
 	ExecZ,
@@ -482,11 +497,20 @@ struct ShaderOperand
 	// SDWA channel select (GCN/RDNA): 0-3 = BYTE_n, 4-5 = WORD_n, 6 = DWORD.
 	// Applied as zero-extend extract when loading the operand for recompile.
 	uint8_t swizzle = 6;
+	// DPP (data-parallel primitive) sources read a VGPR from another wave lane.
+	// Keep its routing controls in the IR; they cannot be folded into a register.
+	bool     dpp                = false;
+	uint16_t dpp_ctrl           = 0;
+	uint8_t  dpp_row_mask       = 0;
+	uint8_t  dpp_bank_mask      = 0;
+	bool     dpp_fetch_inactive = false;
+	bool     dpp_bound_ctrl     = false;
 
 	bool operator==(const ShaderOperand& other) const
 	{
 		return type == other.type && constant.u == other.constant.u && register_id == other.register_id && size == other.size &&
-		       swizzle == other.swizzle;
+		       swizzle == other.swizzle && dpp == other.dpp && dpp_ctrl == other.dpp_ctrl && dpp_row_mask == other.dpp_row_mask &&
+		       dpp_bank_mask == other.dpp_bank_mask && dpp_fetch_inactive == other.dpp_fetch_inactive && dpp_bound_ctrl == other.dpp_bound_ctrl;
 	}
 };
 
@@ -512,6 +536,9 @@ struct ShaderInstruction
 	// - DsRead2B32: packed as (offset1 << 8) | offset0; each offset is dword-scaled
 	//   while src[0] remains a byte address (addr_i = vaddr + offset_i * 4).
 	uint16_t ds_offset = 0;
+	// EXP channel enable mask. Compressed exports map bits 0..1 to the two
+	// halves of src0 and bits 2..3 to src1.
+	uint8_t exp_enable_mask = 0x0f;
 };
 
 class ShaderLabel
@@ -880,6 +907,9 @@ struct ShaderVertexDestination
 {
 	int register_start = 0;
 	int registers_num  = 0;
+	// Guest attribute-table semantic. This is not necessarily the dense Vulkan
+	// input location used by resources/resources_dst.
+	int semantic       = -1;
 };
 
 enum class ShaderStorageUsage
@@ -963,6 +993,11 @@ struct ShaderStorageResources
 	int                        binding_index                        = 0;
 };
 
+[[nodiscard]] constexpr uint64_t ShaderBufferByteSize(uint32_t stride, uint32_t records)
+{
+	return stride == 0 ? static_cast<uint64_t>(records) : static_cast<uint64_t>(stride) * records;
+}
+
 [[nodiscard]] bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access);
 [[nodiscard]] bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource);
 [[nodiscard]] ShaderStorageAccessEvidence ResolveShaderStorageAccessEvidence(bool code_available, ShaderStorageBindingSource source,
@@ -985,12 +1020,19 @@ struct ShaderTextureDescriptor
 struct ShaderTextureResources
 {
 	static constexpr int RES_MAX = 16;
+	// A virtual texture descriptor carries a local descriptor-array index. The
+	// high bit selects the 3D sampled-image array; all remaining bits are the
+	// index within the selected, homogeneously typed array.
+	static constexpr uint32_t THREE_DIMENSIONAL_INDEX_TAG = 0x80000000u;
+	static constexpr uint32_t DESCRIPTOR_INDEX_MASK       = ~THREE_DIMENSIONAL_INDEX_TAG;
 
 	ShaderTextureDescriptor desc[RES_MAX];
 	int                     textures_num           = 0;
 	int                     textures2d_sampled_num = 0;
+	int                     textures3d_sampled_num = 0;
 	int                     textures2d_storage_num = 0;
 	int                     binding_sampled_index  = 0;
+	int                     binding_sampled_3d_index = -1;
 	int                     binding_storage_index  = 0;
 };
 
@@ -1037,9 +1079,15 @@ struct ShaderExtendedResources
 
 struct ShaderBindResources
 {
+	// Vulkan guarantees only 128 bytes of push constants. Larger descriptor
+	// metadata is supplied through a transient UBO so layouts remain portable.
+	static constexpr uint32_t PORTABLE_PUSH_CONSTANT_BYTES = 128;
+
 	uint32_t                   push_constant_offset = 0;
 	uint32_t                   push_constant_size   = 0;
 	uint32_t                   descriptor_set_slot  = 0;
+	bool                       vsharp_uniform_buffer = false;
+	int                        vsharp_binding_index  = -1;
 	ShaderStorageResources     storage_buffers;
 	ShaderTextureResources     textures2D;
 	ShaderSamplerResources     samplers;
@@ -1110,6 +1158,7 @@ struct ShaderComputeInputInfo
 
 struct ShaderPixelInputInfo
 {
+	bool                stage_enabled             = true;
 	uint32_t            interpolator_settings[32] = {0};
 	uint32_t            input_num                 = 0;
 	uint8_t             target_output_mode[8]     = {};
@@ -1147,11 +1196,12 @@ struct ShaderUserData
 
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
-                       int user_data_register_base = 0);
+                       int user_data_register_base = 0, bool vertex_resource_types = true);
 
 // Gen5 EUD sharp span policy: metadata eud_size_dw is a lower bound. Type-5
 // guest pointer tables may extend past it (Astro: eud=24, sharp@40 needs 28).
 // api is the ShaderGet* start index (16 + eud_index). Hard-cap runaway offsets.
+constexpr int SHADER_GEN5_EUD_MAX_DWORDS = 256;
 [[nodiscard]] int ShaderGen5EudOffsetBase(int user_sgpr_num);
 [[nodiscard]] uint32_t ShaderResolveGen5UserSgprCount(uint32_t declared_count, uint32_t written_count,
                                                        uint16_t eud_size_dw);
@@ -1162,8 +1212,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	{
 		return true;
 	}
-	constexpr int k_max_eud_dwords = 256;
-	return need <= k_max_eud_dwords;
+	return need <= SHADER_GEN5_EUD_MAX_DWORDS;
 }
 
 struct ShaderRegisterRange
@@ -1248,6 +1297,7 @@ struct ShaderMappedData
 	ShaderUserData* user_data           = nullptr;
 	ShaderSemantic* input_semantics     = nullptr;
 	uint32_t        num_input_semantics = 0;
+	uint32_t        code_size_bytes     = 0;
 };
 
 void ShaderInit();

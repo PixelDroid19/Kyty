@@ -73,6 +73,7 @@ LIB_DEFINE(InitVideoOut_1)
 	LIB_FUNC("HuViW4HnrOw", VideoOut::VideoOutSubmitChangeBufferAttribute2);
 	LIB_FUNC("Nv8c-Kb+DUM", VideoOut::VideoOutIsOutputSupported);
 	LIB_FUNC("N5KDtkIjjJ4", VideoOut::VideoOutUnregisterBuffers);
+	LIB_FUNC("-Ozn0F1AFRg", VideoOut::VideoOutDeleteFlipEvent);
 	InitVideoOutCommon(s, 1, 1);
 }
 

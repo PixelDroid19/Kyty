@@ -2,6 +2,7 @@
 #define EMULATOR_INCLUDE_EMULATOR_KERNEL_EVENTQUEUE_H_
 
 #include "Kyty/Core/Common.h"
+#include "Kyty/Core/LinkList.h"
 
 #include "Emulator/Common.h"
 #include "Emulator/Kernel/Pthread.h"
@@ -84,9 +85,10 @@ struct KernelFilter
 
 struct KernelEqueueEvent
 {
-	bool         triggered = false;
-	KernelEvent  event;
-	KernelFilter filter;
+	bool                   triggered = false;
+	KernelEvent            event;
+	KernelFilter           filter;
+	Core::List<KernelEvent> pending_events;
 };
 
 int KYTY_SYSV_ABI KernelAddEvent(KernelEqueue eq, const KernelEqueueEvent& event);

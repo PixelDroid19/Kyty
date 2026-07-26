@@ -11,6 +11,7 @@
 #include "Emulator/Log.h"
 
 #include <cstdio>
+#include <cmath>
 #include <clocale>
 #include <cstring>
 #include <cwchar>
@@ -427,6 +428,9 @@ TEST(EmulatorLibcCxxLocale, ResolvesDomainErrorTypeInfoObject)
 	    u"yLE5H3058Ao", // _ZTVNSt8ios_base7failureE
 	    u"1kZFcktOm+s", // _ZTVSt7num_put<char,...>
 	    u"E14mW8pVpoE", // num_put<char>::id
+	    u"eVFYZnYNDo0", // codecvt<char, char, mbstate_t>::id
+	    u"aK1Ymf-NhAs", // codecvt<char, char, mbstate_t> vtable
+	    u"HIhqigNaOns", // _Inf
 	    u"VmqsS6auJzo", // ctype<wchar_t>::id
 	    u"irGo1yaJ-vM", // collate<wchar_t>::id
 	};
@@ -436,6 +440,12 @@ TEST(EmulatorLibcCxxLocale, ResolvesDomainErrorTypeInfoObject)
 		ASSERT_NE(rec, nullptr) << "missing Object NID";
 		ASSERT_NE(rec->vaddr, 0u);
 	}
+
+	const auto* inf_rec = resolve_object(u"HIhqigNaOns");
+	ASSERT_NE(inf_rec, nullptr);
+	const auto inf = *reinterpret_cast<const double*>(inf_rec->vaddr);
+	EXPECT_TRUE(std::isinf(inf));
+	EXPECT_GT(inf, 0.0);
 }
 
 TEST(EmulatorLibcCxxLocale, Qj5xWideCompareMatchesGuestSixteenBitCodeUnits)
@@ -770,6 +780,54 @@ TEST(EmulatorLibcCxxLocale, ResolvesBaseExceptionDoraiseAsVoidFunction)
 	using Doraise = KYTY_SYSV_ABI void (*)(const void* self);
 	auto* fn      = reinterpret_cast<Doraise>(rec->vaddr);
 	fn(reinterpret_cast<const void*>(0x840000000));
+}
+
+TEST(EmulatorLibcCxxLocale, ResolvesGxxPersonalityAndContinuesUnwind)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"XwLA5cTHjt4");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using GxxPersonality = KYTY_SYSV_ABI int (*)(int, int, uint64_t, void*, void*);
+	auto* fn              = reinterpret_cast<GxxPersonality>(rec->vaddr);
+	EXPECT_EQ(fn(1, 0, 0, nullptr, nullptr), 8);
+}
+
+TEST(EmulatorLibcCxxLocale, ResolvesIosBaseFailureCompleteDestructor)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"N2f485TmJms");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Destructor = KYTY_SYSV_ABI void (*)(void*);
+	auto* fn          = reinterpret_cast<Destructor>(rec->vaddr);
+	fn(nullptr);
+}
+
+TEST(EmulatorLibcCxxLocale, ResolvesBadCastCompleteDestructor)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"47RvLSo2HN8");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Destructor = KYTY_SYSV_ABI void (*)(void*);
+	auto* fn          = reinterpret_cast<Destructor>(rec->vaddr);
+	fn(nullptr);
 }
 
 TEST(EmulatorLibcCxxLocale, NothrowNewOverloadsResolveAndUseLibcAllocationOwnership)
