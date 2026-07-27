@@ -133,6 +133,23 @@ int   mem_new_state();
 bool  mem_tracker_enabled();
 void  mem_tracker_enable();
 void  mem_tracker_disable();
+// Temporarily bypass the debug allocator tracker for a bounded host-side
+// bootstrap operation. Unlike the per-thread enable flag, this is visible to
+// every allocator caller before it probes guest thread state, so it is safe
+// for code that can run while guest TLS is active.
+void  mem_tracker_suspend();
+void  mem_tracker_resume();
+bool  mem_tracker_suspended();
+
+class MemTrackerSuspendScope
+{
+public:
+	MemTrackerSuspendScope() { mem_tracker_suspend(); }
+	~MemTrackerSuspendScope() { mem_tracker_resume(); }
+
+	KYTY_CLASS_NO_COPY(MemTrackerSuspendScope);
+};
+
 bool  mem_check(const void* ptr);
 void  mem_guest_thread_enter();
 void  mem_guest_thread_leave();

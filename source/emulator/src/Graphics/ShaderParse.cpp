@@ -2823,9 +2823,6 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 	uint32_t vdata   = (buffer[1] >> 8u) & 0xffu;
 	uint32_t vaddr   = (buffer[1] >> 0u) & 0xffu;
 
-	EXIT_NOT_IMPLEMENTED(offen == 1 && idxen == 1 && opcode != 0x0cu);
-	// Non-zero 12-bit offset is folded into soffset when that source is an
-	// immediate/inline constant (observed Gen5 buffer_load_dwordx* paths).
 	EXIT_NOT_IMPLEMENTED(glc == 1);
 	EXIT_NOT_IMPLEMENTED(slc == 1);
 	EXIT_NOT_IMPLEMENTED(lds == 1);
@@ -2840,6 +2837,10 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 	inst.src[0]  = operand_parse(vaddr + 256);
 	inst.src[1]  = operand_parse(srsrc * 4);
 	inst.src[2]  = operand_parse(soffset);
+	inst.buffer_imm_offset = static_cast<uint16_t>(offset);
+	inst.buffer_idxen      = idxen == 1;
+	inst.buffer_offen      = offen == 1;
+	inst.src[0].size += static_cast<int>(offen);
 
 	if (inst.src[2].type == ShaderOperandType::LiteralConstant)
 	{
@@ -2847,7 +2848,10 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 		size++;
 	}
 
-	if (offset != 0u)
+	// Legacy recompiler paths still encode the immediate in the scalar offset.
+	// Gen5 takes the split path above so the immediate remains inside the
+	// descriptor swizzle and S_OFFSET remains outside it.
+	if (!next_gen && offset != 0u)
 	{
 		if (inst.src[2].type == ShaderOperandType::IntegerInlineConstant)
 		{
@@ -2859,10 +2863,9 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.src[2].constant.u += offset;
 		} else
 		{
-			// SGPR soffset + non-zero instruction offset needs a host add;
-			// not observed yet for this title's first MUBUF paths.
 			EXIT_NOT_IMPLEMENTED(true);
 		}
+		inst.buffer_imm_offset = 0;
 	}
 
 	switch (opcode)
@@ -2920,7 +2923,6 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.type = ShaderInstructionType::BufferLoadDword;
 			inst.format =
 			    (offen == 1 ? ShaderInstructionFormat::Vdata1Vaddr2SvSoffsOffenIdxen : ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen);
-			inst.src[0].size += static_cast<int>(offen);
 			inst.src[1].size = 4;
 			break;
 		case 0x0D:
@@ -3645,9 +3647,6 @@ KYTY_SHADER_PARSER(shader_parse_mtbuf)
 	uint32_t vdata   = (buffer[1] >> 8u) & 0xffu;
 	uint32_t vaddr   = (buffer[1] >> 0u) & 0xffu;
 
-	EXIT_NOT_IMPLEMENTED(idxen == 0);
-	// EXIT_NOT_IMPLEMENTED(offen == 1);
-	EXIT_NOT_IMPLEMENTED(offset != 0);
 	EXIT_NOT_IMPLEMENTED(glc == 1);
 	EXIT_NOT_IMPLEMENTED(slc == 1);
 	EXIT_NOT_IMPLEMENTED(tfe == 1);
@@ -3677,6 +3676,10 @@ KYTY_SHADER_PARSER(shader_parse_mtbuf)
 	inst.src[0]  = operand_parse(vaddr + 256);
 	inst.src[1]  = operand_parse(srsrc * 4);
 	inst.src[2]  = operand_parse(soffset);
+	inst.buffer_imm_offset = static_cast<uint16_t>(offset);
+	inst.buffer_idxen      = idxen == 1;
+	inst.buffer_offen      = offen == 1;
+	inst.src[0].size += static_cast<int>(offen);
 
 	if (inst.src[2].type == ShaderOperandType::LiteralConstant)
 	{
@@ -3691,14 +3694,12 @@ KYTY_SHADER_PARSER(shader_parse_mtbuf)
 		case 0x00:
 			inst.type   = ShaderInstructionType::TBufferLoadFormatX;
 			inst.format = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxenFloat1;
-			EXIT_NOT_IMPLEMENTED(offen == 1);
 			EXIT_NOT_IMPLEMENTED(!float1_format);
 			break;
 		case 0x01:
 			inst.type   = ShaderInstructionType::TBufferLoadFormatXy;
 			inst.format = ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxenFloat2;
 			inst.dst.size = 2;
-			EXIT_NOT_IMPLEMENTED(offen == 1);
 			EXIT_NOT_IMPLEMENTED(!float2_format);
 			break;
 		case 0x02: KYTY_NI("tbuffer_load_format_xyz"); break;
@@ -3706,7 +3707,6 @@ KYTY_SHADER_PARSER(shader_parse_mtbuf)
 			inst.type   = ShaderInstructionType::TBufferLoadFormatXyzw;
 			inst.format = (offen == 1 ? ShaderInstructionFormat::Vdata4Vaddr2SvSoffsOffenIdxenFloat4
 			                          : ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxenFloat4);
-			inst.src[0].size += static_cast<int>(offen);
 			inst.dst.size = 4;
 			EXIT_NOT_IMPLEMENTED(!float4_format);
 			break;

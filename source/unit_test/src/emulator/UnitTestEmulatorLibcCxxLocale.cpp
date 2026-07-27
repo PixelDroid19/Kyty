@@ -48,17 +48,17 @@ using ExecuteOnceCallback = KYTY_SYSV_ABI int (*)(void*, void*, void**);
 
 struct ExecuteOnceContext
 {
-	int  invocations = 0;
-	bool succeed     = true;
+	void* expected_flag = nullptr;
+	int   invocations   = 0;
+	bool  succeed       = true;
 };
 
 int KYTY_SYSV_ABI ExecuteOnceCallbackImpl(void* first, void* context, void** result)
 {
-	EXPECT_EQ(first, nullptr);
-
 	auto* state = static_cast<ExecuteOnceContext*>(context);
 	EXPECT_NE(state, nullptr);
 	EXPECT_NE(result, nullptr);
+	EXPECT_EQ(first, state->expected_flag);
 
 	state->invocations++;
 	*result = state;
@@ -80,7 +80,7 @@ const Loader::SymbolRecord* ResolveLibcFunction(Loader::SymbolDatabase* symbols,
 
 } // namespace
 
-TEST(EmulatorLibcCxxLocale, ExecuteOnceRunsCallbackOnceAndRetriesFailure)
+TEST(EmulatorLibcCxxLocale, ExecuteOnceUsesPs5FlagStatesAndRetriesFailure)
 {
 	EnsureLog();
 
@@ -96,21 +96,22 @@ TEST(EmulatorLibcCxxLocale, ExecuteOnceRunsCallbackOnceAndRetriesFailure)
 
 	int                flag = 0;
 	ExecuteOnceContext context {};
+	context.expected_flag = &flag;
 
-	EXPECT_EQ(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 1);
-	EXPECT_EQ(flag, 1);
+	EXPECT_EQ(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 0);
+	EXPECT_EQ(flag, 2);
 	EXPECT_EQ(context.invocations, 1);
-	EXPECT_EQ(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 1);
+	EXPECT_EQ(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 0);
 	EXPECT_EQ(context.invocations, 1);
 
 	flag            = 0;
 	context.succeed = false;
-	EXPECT_EQ(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 0);
+	EXPECT_NE(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 0);
 	EXPECT_EQ(flag, 0);
 	EXPECT_EQ(context.invocations, 2);
 	context.succeed = true;
-	EXPECT_EQ(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 1);
-	EXPECT_EQ(flag, 1);
+	EXPECT_EQ(execute_once(&flag, ExecuteOnceCallbackImpl, &context), 0);
+	EXPECT_EQ(flag, 2);
 	EXPECT_EQ(context.invocations, 3);
 }
 

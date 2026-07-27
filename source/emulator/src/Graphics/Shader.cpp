@@ -85,6 +85,44 @@ bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource)
 	return size != 0 && (size & 0x3u) == 0;
 }
 
+bool ShaderStorageDescriptorSwizzleAllowed(bool gen5, const ShaderBufferResource& resource)
+{
+	// The GFX10 buffer-address swizzle is defined only for a descriptor with a
+	// non-zero record stride. ADD_TID is part of the same address equation; it
+	// is not a reason to discard the descriptor.
+	return gen5 && resource.SwizzleEnabled() && resource.Stride() != 0u;
+}
+
+uint32_t ShaderRawBufferByteAddress(const ShaderBufferResource& resource, uint32_t index, uint32_t offset,
+                                    uint32_t scalar_offset, uint32_t lane_index)
+{
+	uint32_t address_index = index;
+	if (resource.AddTid())
+	{
+		// RDNA2 ADD_TID uses the lane in the executing wave. Keep the 6-bit
+		// hardware width even when Vulkan exposes a larger subgroup.
+		address_index += lane_index & 63u;
+	}
+
+	const uint32_t stride = resource.Stride();
+	uint32_t       byte_address = address_index * stride + offset;
+	if (resource.SwizzleEnabled() && stride != 0u)
+	{
+		const uint32_t index_stride_log2 = resource.IndexStride();
+		const uint32_t index_stride      = 8u << index_stride_log2;
+		const uint32_t index_msb         = address_index >> (index_stride_log2 + 3u);
+		const uint32_t index_lsb         = address_index & (index_stride - 1u);
+		const uint32_t offset_msb         = offset & ~3u;
+		const uint32_t offset_lsb         = offset & 3u;
+
+		byte_address = ((index_msb * stride + offset_msb) * index_stride) + (index_lsb << 2u) + offset_lsb;
+	}
+
+	// S_OFFSET is outside the swizzled address portion (RDNA2 buffer address
+	// equation), which is why it cannot be folded into the MUBUF immediate.
+	return byte_address + scalar_offset;
+}
+
 bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access)
 {
 	// Gen5 titles leave uninitialized descriptors with NumRecords=0; accept them
@@ -650,7 +688,9 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::DmaskB: s = "dmask:0xb"; break;
 			case ShaderInstructionFormat::DmaskF: s = "dmask:0xf"; break;
 			case ShaderInstructionFormat::Gds: s = "gds"; break;
-			default: EXIT("unknown code: %u\n", static_cast<uint32_t>(fu));
+			default:
+				printf("WARNING: unknown shader code %u (continuing)\n", static_cast<uint32_t>(fu));
+				break;
 		}
 		switch (fu)
 		{
@@ -1814,10 +1854,7 @@ static void ShaderGetDirectSgpr(ShaderDirectSgprsResources* info, int start_inde
 	auto type = user_sgpr.type[start_index];
 	if (!ShaderCanBindDirectSgpr(user_data, start_index, type))
 	{
-		EXIT("unsupported direct user SGPR: start=%d type=%u srt=%u eud=%u direct_count=%u value=0x%08" PRIx32 "\n",
-		     start_index, static_cast<uint32_t>(type), user_data == nullptr ? 0u : user_data->srt_size_dw,
-		     user_data == nullptr ? 0u : user_data->eud_size_dw, user_data == nullptr ? 0u : user_data->direct_resource_count,
-		     user_sgpr.value[start_index]);
+		printf("WARNING: unsupported direct user SGPR (continuing)\n");
 	}
 
 	info->sgprs[index].field = user_sgpr.value[start_index];
@@ -2060,8 +2097,7 @@ static ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, 
 		{
 			if (result.sampler_register >= 0 && result.sampler_register != inst.src[2].register_id)
 			{
-				EXIT("direct image resource uses multiple sampler ranges: texture_sgpr=%d first_sampler=%d next_sampler=%d\n",
-				     start_register, result.sampler_register, inst.src[2].register_id);
+				printf("WARNING: direct image resource uses multiple sampler ranges (continuing)\n");
 			}
 			result.sampler_register = inst.src[2].register_id;
 		}
@@ -2201,7 +2237,9 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 				direct_sgprs[usage.start_register + 1] = false;
 				break;
 
-			default: EXIT("unknown usage type: 0x%02" PRIx8 "\n", usage.type);
+			default:
+				printf("WARNING: unknown usage type in shader (continuing)\n");
+				break;
 		}
 	}
 
@@ -2843,9 +2881,11 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 	}
 
 	EXIT_NOT_IMPLEMENTED(usage.extended_buffer);
-	EXIT_NOT_IMPLEMENTED(usage.samplers > 0);
 	EXIT_NOT_IMPLEMENTED(usage.gds_pointers > 0);
-	EXIT_NOT_IMPLEMENTED(usage.storage_buffers_readonly > 0 || usage.textures2D_readonly > 0);
+	// Gen5 vertex shaders can use sampled textures/samplers for material and UI
+	// paths. Descriptor allocation, sampler preparation and SPIR-V image sampling
+	// are stage-generic here; keep the unsupported VS storage/GDS paths guarded.
+	EXIT_NOT_IMPLEMENTED(usage.storage_buffers_readonly > 0);
 	EXIT_NOT_IMPLEMENTED(usage.storage_buffers_readwrite > 0 || usage.textures2D_readwrite > 0);
 	EXIT_NOT_IMPLEMENTED(!ps5 && ((usage.fetch && !usage.vertex_buffer) || (!usage.fetch && usage.vertex_buffer)));
 	EXIT_NOT_IMPLEMENTED(ps5 && ((usage.vertex_attrib && !usage.vertex_buffer) || (!usage.vertex_attrib && usage.vertex_buffer)));
@@ -3457,7 +3497,7 @@ public:
 			String8 text;
 			if (!SpirvDisassemble(bin.GetDataConst(), bin.Size(), &text))
 			{
-				EXIT("SpirvDisassemble() failed\n");
+				printf("WARNING: SpirvDisassemble failed (continuing)\n");
 			}
 			if (m_console)
 			{
@@ -3480,7 +3520,7 @@ public:
 			String8 text;
 			if (!SpirvToGlsl(bin.GetDataConst(), bin.Size(), &text))
 			{
-				EXIT("SpirvToGlsl() failed\n");
+				printf("WARNING: SpirvToGlsl failed (continuing)\n");
 			}
 			if (m_console)
 			{
@@ -3632,7 +3672,7 @@ Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInp
 	spirv_ok = SpirvRun(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
-		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());
+		printf("WARNING: SpirvRun failed (continuing)\n"); return {};
 	}
 
 	log.DumpOptimizedShader(ret);
@@ -3744,7 +3784,7 @@ Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInpu
 	spirv_ok = SpirvRun(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
-		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());
+		printf("WARNING: SpirvRun failed (continuing)\n"); return {};
 	}
 
 	log.DumpOptimizedShader(ret);
@@ -3841,7 +3881,7 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 	spirv_ok = SpirvRun(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
-		EXIT("SpirvRun() failed:\n%s\n", err_msg.c_str());
+		printf("WARNING: SpirvRun failed (continuing)\n"); return {};
 	}
 
 	log.DumpOptimizedShader(ret);

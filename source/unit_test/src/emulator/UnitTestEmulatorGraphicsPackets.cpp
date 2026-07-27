@@ -3,6 +3,8 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
+#include "Emulator/Graphics/Gen5TextureMipLayout.h"
+#include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/Texture.h"
@@ -591,10 +593,9 @@ TEST(EmulatorGraphicsPackets, ParsesBufferStoreFormatXyzw)
 	EXPECT_EQ(instruction.src[2].constant.u, 0u);
 }
 
-// MUBUF buffer_load_dwordx4 with 12-bit offset folded into a LiteralConstant
-// soffset. SPIR-V must OpStore the offset into %temp_int_* as %int_N (not
-// %uint_N), and FindConstants must register the Int twin for that literal.
-TEST(EmulatorGraphicsPackets, MubufLiteralSoffsetUsesIntConstant)
+// MUBUF's 12-bit immediate is distinct from S_OFFSET: it belongs inside the
+// optional descriptor swizzle, while S_OFFSET is added after that transform.
+TEST(EmulatorGraphicsPackets, MubufImmediateOffsetStaysSeparateFromSoffset)
 {
 	// op=0x0E buffer_load_dwordx4, idxen=1, offset=56, soffset=inline 0 (128),
 	// srsrc=2 → s[8:11], vdata=v30, vaddr=v43; s_nop then s_endpgm.
@@ -616,8 +617,11 @@ TEST(EmulatorGraphicsPackets, MubufLiteralSoffsetUsesIntConstant)
 	ASSERT_GE(code.GetInstructions().Size(), 1u);
 	const auto& instruction = code.GetInstructions().At(0);
 	EXPECT_EQ(instruction.type, ShaderInstructionType::BufferLoadDwordx4);
-	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::LiteralConstant);
-	EXPECT_EQ(instruction.src[2].constant.u, 56u);
+	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::IntegerInlineConstant);
+	EXPECT_EQ(instruction.src[2].constant.u, 0u);
+	EXPECT_EQ(instruction.buffer_imm_offset, 56u);
+	EXPECT_TRUE(instruction.buffer_idxen);
+	EXPECT_FALSE(instruction.buffer_offen);
 
 	ShaderComputeInputInfo input {};
 	input.threads_num[0]                         = 1;
@@ -630,10 +634,40 @@ TEST(EmulatorGraphicsPackets, MubufLiteralSoffsetUsesIntConstant)
 
 	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
 
-	EXPECT_NE(source.FindIndex("%int_56 = OpConstant %int 56"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %temp_int_2 %int_56"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(source.FindIndex("OpStore %temp_int_2 %uint_56"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(source.FindIndex("unknown_int_constant"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buffer_raw_address = OpFunction"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpFunctionCall %uint %buffer_raw_address"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%uint_56 = OpConstant %uint 56"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_index_0_0 %uint_56"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%buf_addr_index_0_0 uint_56"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, MtbufImmediateOffsetIsPreservedForAddressing)
+{
+	// tbuffer_load_format_x, Gen5 32_FLOAT, idxen=1, immediate byte offset=28,
+	// S_OFFSET=inline 0. This used to stop in shader_parse_mtbuf.
+	const uint32_t word0 = (0x3au << 26u) | (1u << 23u) | (6u << 19u) | (1u << 13u) | 28u;
+	const uint32_t word1 = 128u << 24u;
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_GE(code.GetInstructions().Size(), 1u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::TBufferLoadFormatX);
+	EXPECT_EQ(instruction.buffer_imm_offset, 28u);
+	EXPECT_TRUE(instruction.buffer_idxen);
+	EXPECT_FALSE(instruction.buffer_offen);
+	EXPECT_EQ(instruction.src[2].type, ShaderOperandType::IntegerInlineConstant);
+	EXPECT_EQ(instruction.src[2].constant.u, 0u);
 }
 
 TEST(EmulatorGraphicsPackets, ParsesMubufStoreWithVectorOffset)
@@ -1958,6 +1992,68 @@ TEST(EmulatorGraphicsPackets, SizesAndDetilesGen5Standard4KbUintVolumeTextures)
 				EXPECT_EQ(linear[linear_offset], tiled[tiled_offset / 4u]);
 			}
 		}
+	}
+}
+
+TEST(EmulatorGraphicsPackets, ResolvesGen5Color3DVolumeLayoutOnceForSampledAndStorageUploads)
+{
+	Gen5TextureVolumeLayout layout {};
+	ASSERT_TRUE(Gen5GetStandard4KBVolumeTextureLayout(56u, 8u, 16u, 9u, 8u, 1u, 5u, &layout));
+	EXPECT_EQ(layout.bytes_per_element, 4u);
+	EXPECT_EQ(layout.tiled.size, 8192u);
+	EXPECT_EQ(layout.tiled.align, 4096u);
+	EXPECT_EQ(layout.linear_size, 8u * 16u * 9u * 4u);
+
+	EXPECT_FALSE(Gen5GetStandard4KBVolumeTextureLayout(56u, 8u, 16u, 9u, 8u, 2u, 5u, &layout));
+	EXPECT_FALSE(Gen5GetStandard4KBVolumeTextureLayout(75u, 8u, 16u, 9u, 8u, 1u, 5u, &layout));
+}
+
+// Captured Blasphemous 2 package descriptor: BC3, kStandard4KB,
+// 2048x1024, MAX_MIP=11. Levels 6..11 share the physical 4 KiB mip tail.
+TEST(EmulatorGraphicsPackets, DetilesGen5Standard4KbBc3MipTail)
+{
+	Gen5TextureMipLayout layout {};
+	ASSERT_TRUE(Gen5GetStandard4KBTextureMipLayout(173u, 2048u, 1024u, 2048u, 12u, &layout));
+	EXPECT_EQ(layout.bytes_per_element, 16u);
+	EXPECT_EQ(layout.texels_per_element_x, 4u);
+	EXPECT_EQ(layout.texels_per_element_y, 4u);
+	EXPECT_EQ(layout.first_tail_level, 6u);
+	EXPECT_EQ(layout.tiled.align, 4096u);
+	EXPECT_EQ(layout.tiled.size, 2801664u);
+	EXPECT_EQ(layout.linear_size, 2796240u);
+	EXPECT_EQ(layout.level[0].tiled_offset, 704512u);
+	EXPECT_EQ(layout.level[5].tiled_offset, 4096u);
+	EXPECT_TRUE(layout.level[6].in_mip_tail);
+	EXPECT_EQ(layout.level[6].tail_x, 8u);
+	EXPECT_EQ(layout.level[6].tail_y, 0u);
+	EXPECT_EQ(layout.level[11].tail_x, 4u);
+	EXPECT_EQ(layout.level[11].tail_y, 0u);
+
+	std::vector<uint8_t> tiled(layout.tiled.size, 0u);
+	for (uint32_t level = 0; level < layout.levels; level++)
+	{
+		const auto& level_layout = layout.level[level];
+		for (uint32_t y = 0; y < level_layout.element_height; y++)
+		{
+			for (uint32_t x = 0; x < level_layout.element_width; x++)
+			{
+				const uint32_t tile_x = level_layout.in_mip_tail ? level_layout.tail_x + x : x;
+				const uint32_t tile_y = level_layout.in_mip_tail ? level_layout.tail_y + y : y;
+				const uint64_t offset = static_cast<uint64_t>(level_layout.tiled_offset) +
+				                        TileGetStandard4KBOffset(tile_x, tile_y, level_layout.tiled_pitch, 16u);
+				ASSERT_LE(offset + 16u, tiled.size());
+				std::memset(tiled.data() + offset, static_cast<int>(level + 1u), 16u);
+			}
+		}
+	}
+
+	std::vector<uint8_t> linear(static_cast<size_t>(layout.linear_size), 0u);
+	ASSERT_TRUE(Gen5DetileStandard4KBTextureMipChain(linear.data(), linear.size(), tiled.data(), tiled.size(), layout));
+	for (uint32_t level = 0; level < layout.levels; level++)
+	{
+		const auto& level_layout = layout.level[level];
+		EXPECT_EQ(linear[level_layout.linear_offset], level + 1u) << "level " << level;
+		EXPECT_EQ(linear[level_layout.linear_offset + level_layout.linear_size - 1u], level + 1u) << "level " << level;
 	}
 }
 

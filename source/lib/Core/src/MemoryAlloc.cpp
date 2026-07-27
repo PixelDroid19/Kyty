@@ -48,6 +48,12 @@ static bool                                    g_mem_initialized = false;
 static sys_heap_id_t                           g_default_heap    = nullptr;
 static size_t                                  g_mem_max_size    = 0;
 static MemoryAllocDetail::ThreadDomainRegistry g_guest_thread_domains;
+// Bootstrap symbol loading can allocate one tiny object per guest export. The
+// debug tracker records a stack and a hashmap entry for each one, which is
+// useful for leak diagnostics but pathological on the emulator's launch path.
+// This process-wide counter is deliberately independent of C++ TLS: guest code
+// can replace TLS, so a fast-path decision must not read thread-local state.
+static std::atomic<uint32_t>                   g_mem_tracker_suspend_count {0};
 
 enum class MemBlockDomain : uint32_t
 {
@@ -372,6 +378,13 @@ void* mem_alloc(size_t size)
 	}
 
 	mem_init();
+	if (g_mem_tracker_suspend_count.load(std::memory_order_acquire) != 0)
+	{
+		// A suspended tracker is a host bootstrap policy, not a guest-domain
+		// classification. Allocate a self-describing system block so it remains
+		// safe to realloc/free after tracking resumes or from another thread.
+		return mem_alloc_check_alignment(mem_system_alloc(size));
+	}
 	if (mem_guest_thread_is_active())
 	{
 		// Guest execution may replace the native TLS segment or leave through a
@@ -818,6 +831,30 @@ void mem_tracker_disable()
 #ifdef MEM_TRACKER
 	g_mem_tracker_enabled = false;
 #endif
+}
+
+void mem_tracker_suspend()
+{
+	g_mem_tracker_suspend_count.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void mem_tracker_resume()
+{
+	uint32_t depth = g_mem_tracker_suspend_count.load(std::memory_order_acquire);
+	for (;;)
+	{
+		EXIT_IF(depth == 0);
+		if (g_mem_tracker_suspend_count.compare_exchange_weak(depth, depth - 1, std::memory_order_acq_rel,
+		                                                       std::memory_order_acquire))
+		{
+			return;
+		}
+	}
+}
+
+bool mem_tracker_suspended()
+{
+	return g_mem_tracker_suspend_count.load(std::memory_order_acquire) != 0;
 }
 
 #if KYTY_COMPILER == KYTY_COMPILER_MSVC

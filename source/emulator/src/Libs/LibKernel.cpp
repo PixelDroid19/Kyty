@@ -42,6 +42,7 @@
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #include <arpa/inet.h>
+#include <asm/prctl.h>
 #include <csignal>
 #include <sys/syscall.h>
 #include <ucontext.h>
@@ -622,6 +623,18 @@ bool DecodeEhFramePointer(const uint8_t* data, const uint8_t* end, uint8_t encod
 
 } // namespace
 
+// IL2CPP queries unwind metadata repeatedly while it suspends and resumes
+// workers.  Keep the full metadata dump available for diagnosis, but never
+// synchronously flush it on the normal guest execution path.
+static bool unwind_trace_enabled()
+{
+	static const bool enabled = []() {
+		const char* value = std::getenv("KYTY_UNWIND_TRACE");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
 int KYTY_SYSV_ABI KernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleInfoForUnwind* info)
 {
 	PRINT_NAME();
@@ -769,13 +782,16 @@ int KYTY_SYSV_ABI KernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleI
 		}
 	}
 
-	std::fprintf(stderr,
-	             "GetModuleInfoForUnwind: addr=0x%016" PRIx64 " flags=%d name=%s "
-	             "eh_hdr=0x%016" PRIx64 " eh=0x%016" PRIx64 " eh_sz=0x%016" PRIx64
-	             " seg0=0x%016" PRIx64 " seg0_sz=0x%016" PRIx64 "\n",
-	             addr, flags, info->name, info->eh_frame_hdr_addr, info->eh_frame_addr, info->eh_frame_size,
-	             info->seg0_addr, info->seg0_size);
-	std::fflush(stderr);
+	if (unwind_trace_enabled())
+	{
+		std::fprintf(stderr,
+		             "GetModuleInfoForUnwind: addr=0x%016" PRIx64 " flags=%d name=%s "
+		             "eh_hdr=0x%016" PRIx64 " eh=0x%016" PRIx64 " eh_sz=0x%016" PRIx64
+		             " seg0=0x%016" PRIx64 " seg0_sz=0x%016" PRIx64 "\n",
+		             addr, flags, info->name, info->eh_frame_hdr_addr, info->eh_frame_addr, info->eh_frame_size,
+		             info->seg0_addr, info->seg0_size);
+		std::fflush(stderr);
+	}
 
 	return OK;
 }
@@ -891,6 +907,8 @@ struct SignalUcontext
 static_assert(offsetof(SignalUcontext, uc_mcontext) == 0x40);
 static_assert(offsetof(SignalMcontext, mc_rip) == 0xa0);
 static_assert(offsetof(SignalMcontext, mc_rsp) == 0xb8);
+static_assert(offsetof(SignalMcontext, mc_fsbase) == 0x440);
+static_assert(offsetof(SignalMcontext, mc_gsbase) == 0x448);
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 constexpr size_t kHostContextTrampolineStackSize = 1024 * 1024;
@@ -903,11 +921,45 @@ struct HostContextRequest
 	ucontext_t*                 signal_context = nullptr;
 	uintptr_t                   signal_frame   = 0;
 	uintptr_t                   handler = 0;
+	uint64_t                    trace_id = 0;
 	std::atomic_bool            completed {false};
 };
 
 static std::mutex                        g_host_context_requests_mutex;
 static std::vector<HostContextRequest*> g_host_context_requests;
+static std::atomic<uint64_t>             g_host_context_next_trace_id {1};
+static std::atomic<uint32_t>             g_host_context_trace_count {0};
+
+// The IL2CPP collector's context handshake can deadlock without producing a
+// guest error. Keep its diagnostic path explicitly opt-in and avoid logging in
+// HostContextSignalHandler itself, where only async-signal-safe work is valid.
+static bool HostContextTraceEnabled()
+{
+	static const bool enabled = []() {
+		const char* value = std::getenv("KYTY_CONTEXT_TRACE");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
+static void HostContextTrace(const char* stage, uint64_t trace_id, const void* request, const void* target, uintptr_t handler,
+	                             uint64_t result)
+{
+	if (!HostContextTraceEnabled())
+	{
+		return;
+	}
+	if (g_host_context_trace_count.fetch_add(1, std::memory_order_relaxed) >= 512)
+	{
+		return;
+	}
+
+	std::fprintf(stderr,
+	             "CONTEXT_TRACE stage=%s id=%llu request=%p target=%p handler=0x%016llx result=0x%016llx\n", stage,
+	             static_cast<unsigned long long>(trace_id), request, target, static_cast<unsigned long long>(handler),
+	             static_cast<unsigned long long>(result));
+	std::fflush(stderr);
+}
 
 static void ReclaimCompletedHostContextRequests()
 {
@@ -917,6 +969,7 @@ static void ReclaimCompletedHostContextRequests()
 		{
 			return false;
 		}
+		HostContextTrace("reclaim", request->trace_id, request, nullptr, request->handler, 0);
 		delete request;
 		return true;
 	});
@@ -928,6 +981,19 @@ static int HostContextSignal()
 {
 	return SIGRTMIN + 6;
 }
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+// Linux does not place FSBASE/GSBASE in the public x86_64 gregset. The
+// exception is delivered on the interrupted guest thread, so ARCH_GET_* reads
+// the exact TLS bases that the PS5 callback must see in its ucontext.
+// This path performs only raw kernel queries and stack-local writes, which is
+// safe for the signal-delivery bridge.
+static uint64_t ReadHostSegmentBase(int selector)
+{
+	uint64_t value = 0;
+	return (::syscall(SYS_arch_prctl, selector, &value) == 0 ? value : 0);
+}
+#endif
 
 static void CopyHostContext(SignalMcontext* guest, const ucontext_t* host)
 {
@@ -952,13 +1018,19 @@ static void CopyHostContext(SignalMcontext* guest, const ucontext_t* host)
 	guest->mc_rip    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RIP]);
 	guest->mc_rflags = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_EFL]);
 	guest->mc_rsp    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RSP]);
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	guest->mc_fsbase = ReadHostSegmentBase(ARCH_GET_FS);
+	guest->mc_gsbase = ReadHostSegmentBase(ARCH_GET_GS);
+#endif
 }
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 [[noreturn]] static void HostContextTrampoline(HostContextRequest* request)
 {
-	Loader::GuestCall::Invoke(request->handler, 30, reinterpret_cast<uint64_t>(&request->guest_context), 0);
+	HostContextTrace("trampoline_enter", request->trace_id, request, nullptr, request->handler, 0);
+	const uint64_t guest_result = Loader::GuestCall::Invoke(request->handler, 30, reinterpret_cast<uint64_t>(&request->guest_context), 0);
 	request->completed.store(true, std::memory_order_release);
+	HostContextTrace("trampoline_done", request->trace_id, request, nullptr, request->handler, guest_result);
 
 	// Returning through rt_sigreturn instead of setcontext preserves Linux's
 	// restart handling for a futex or other syscall interrupted by this signal.
@@ -1035,6 +1107,7 @@ static int KYTY_SYSV_ABI KernelInstallExceptionHandler(int signum, void* handler
 		{
 			return KERNEL_ERROR_EINVAL;
 		}
+		HostContextTrace("install", 0, nullptr, nullptr, reinterpret_cast<uintptr_t>(handler), 0);
 #else
 		return KERNEL_ERROR_EINVAL;
 #endif
@@ -1050,8 +1123,12 @@ int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (g_exception_handlers[static_cast<size_t>(signum)].load(std::memory_order_acquire) == 0)
+	const uintptr_t handler = g_exception_handlers[static_cast<size_t>(signum)].load(std::memory_order_acquire);
+	if (handler == 0)
 	{
+		#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+		HostContextTrace("raise_no_handler", 0, nullptr, thread, 0, 0);
+		#endif
 		return OK;
 	}
 
@@ -1068,7 +1145,8 @@ int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum)
 		delete request;
 		return KERNEL_ERROR_ENOMEM;
 	}
-	request->handler = g_exception_handlers[static_cast<size_t>(signum)].load(std::memory_order_acquire);
+	request->handler  = handler;
+	request->trace_id = g_host_context_next_trace_id.fetch_add(1, std::memory_order_relaxed);
 
 	{
 		std::lock_guard lock(g_host_context_requests_mutex);
@@ -1076,8 +1154,10 @@ int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum)
 	}
 
 	const int result = PthreadSignalWithValue(thread, HostContextSignal(), request);
+	HostContextTrace("raise_queued", request->trace_id, request, thread, request->handler, static_cast<uint64_t>(result));
 	if (result != OK)
 	{
+		HostContextTrace("raise_failed", request->trace_id, request, thread, request->handler, static_cast<uint64_t>(result));
 		std::lock_guard lock(g_host_context_requests_mutex);
 		const auto iterator = std::find(g_host_context_requests.begin(), g_host_context_requests.end(), request);
 		if (iterator != g_host_context_requests.end())

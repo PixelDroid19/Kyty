@@ -79,6 +79,35 @@ TEST(CoreMemoryAlloc, ReallocatesUntrackedSystemBlocks)
 	Core::mem_free(memory);
 }
 
+TEST(CoreMemoryAlloc, TrackerSuspendScopeKeepsBootstrapAllocationsOutOfTracker)
+{
+	Core::mem_tracker_enable();
+	Core::MemStats before {};
+	Core::mem_get_stat(&before);
+
+	uint8_t* memory = nullptr;
+	{
+		Core::MemTrackerSuspendScope outer_scope;
+		EXPECT_TRUE(Core::mem_tracker_suspended());
+		{
+			Core::MemTrackerSuspendScope inner_scope;
+			EXPECT_TRUE(Core::mem_tracker_suspended());
+			memory = static_cast<uint8_t*>(Core::mem_alloc(48));
+		}
+		EXPECT_TRUE(Core::mem_tracker_suspended());
+	}
+
+	ASSERT_NE(memory, nullptr);
+	EXPECT_FALSE(Core::mem_tracker_suspended());
+	EXPECT_FALSE(Core::mem_check(memory));
+	Core::mem_free(memory);
+
+	Core::MemStats after {};
+	Core::mem_get_stat(&after);
+	EXPECT_EQ(after.blocks_num, before.blocks_num);
+	EXPECT_EQ(after.total_allocated, before.total_allocated);
+}
+
 TEST(CoreMemoryAlloc, GuestDomainRoutesAllOperationsToTheSystemAllocator)
 {
 	// Outside a guest domain the query is false and the tracker owns allocations.

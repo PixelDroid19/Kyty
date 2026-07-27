@@ -11,7 +11,11 @@
 #include "Emulator/Kernel/Time.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <unordered_map>
 
@@ -70,6 +74,82 @@ private:
 	int m_init_count;
 	int m_max_count;
 };
+
+// Keep the synchronization trace independent from the global printf direction.
+// A title can stall before normal HLE logging is practical, and an opt-in,
+// bounded trace makes it possible to establish whether a waiter has a matching
+// signal without turning on every import call.
+static bool sema_trace_enabled()
+{
+	return std::getenv("KYTY_SEMA_TRACE") != nullptr;
+}
+
+static uint64_t sema_trace_focus_caller()
+{
+	static const uint64_t caller = []() {
+		const char* value = std::getenv("KYTY_SEMA_TRACE_CALLER");
+		return (value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull);
+	}();
+	return caller;
+}
+
+// Keep a long-running trace useful when a title creates many unrelated
+// semaphores before it reaches the blocked one. Unlike the caller focus, this
+// filter applies to Create as well, so it exposes the initial count and every
+// subsequent operation for one named guest semaphore.
+static const char* sema_trace_name_filter()
+{
+	static const char* name = []() {
+		const char* value = std::getenv("KYTY_SEMA_TRACE_NAME");
+		return (value != nullptr && value[0] != '\0' ? value : nullptr);
+	}();
+	return name;
+}
+
+static std::atomic<KernelSema> g_sema_trace_focus {nullptr};
+
+static void sema_trace(const char* operation, KernelSema sem, const KernelSemaPrivate* object, int value, int result,
+	                   uint64_t caller)
+{
+	if (!sema_trace_enabled())
+	{
+		return;
+	}
+
+	if (const char* name_filter = sema_trace_name_filter(); name_filter != nullptr)
+	{
+		if (object == nullptr || std::strcmp(object->GetName().C_Str(), name_filter) != 0)
+		{
+			return;
+		}
+	}
+
+	const uint64_t focus_caller = sema_trace_focus_caller();
+	if (focus_caller != 0)
+	{
+		if (std::strcmp(operation, "wait") == 0 && caller == focus_caller)
+		{
+			g_sema_trace_focus.store(sem, std::memory_order_relaxed);
+		}
+		if (g_sema_trace_focus.load(std::memory_order_relaxed) != sem)
+		{
+			return;
+		}
+	}
+
+	static std::atomic<uint32_t> trace_count {0};
+	constexpr uint32_t           kMaxTraceEvents = 512;
+	const uint32_t               index           = trace_count.fetch_add(1, std::memory_order_relaxed);
+	if (index >= kMaxTraceEvents)
+	{
+		return;
+	}
+
+	std::fprintf(stderr, "SEMA_TRACE %s n=%u handle=%p name=%s value=%d result=%d caller=0x%016llx\n", operation, index,
+	             reinterpret_cast<void*>(sem), (object != nullptr ? object->GetName().C_Str() : "<null>"), value, result,
+	             static_cast<unsigned long long>(caller));
+	std::fflush(stderr);
+}
 
 KernelSemaPrivate::~KernelSemaPrivate()
 {
@@ -292,6 +372,8 @@ int KYTY_SYSV_ABI KernelCreateSema(KernelSema* sem, const char* name, uint32_t a
 		Core::LockGuard lock(g_sema_registry_mutex);
 		g_live_semas.emplace(*sem, std::move(object));
 	}
+	const auto caller = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+	sema_trace("create", *sem, AcquireSema(*sem).get(), init, max, caller);
 
 	printf("\t Semaphore create: %s, %d, %d\n", name, init, max);
 
@@ -334,7 +416,9 @@ int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time)
 		return KERNEL_ERROR_ESRCH;
 	}
 
+	const auto caller = reinterpret_cast<uint64_t>(__builtin_return_address(0));
 	printf("\t Semaphore wait: %s, %d, %d\n", object->GetName().C_Str(), need, (time != nullptr ? *time : -1));
+	sema_trace("wait", sem, object.get(), need, 0, caller);
 
 	auto result = object->Wait(need, time);
 
@@ -348,6 +432,7 @@ int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time)
 		case KernelSemaPrivate::Result::Canceled: ret = KERNEL_ERROR_ECANCELED; break;
 		case KernelSemaPrivate::Result::Deleted: ret = KERNEL_ERROR_EACCES; break;
 	}
+	sema_trace("wait_done", sem, object.get(), need, ret, caller);
 
 	return ret;
 }
@@ -390,7 +475,9 @@ int KYTY_SYSV_ABI KernelSignalSema(KernelSema sem, int count)
 		return KERNEL_ERROR_ESRCH;
 	}
 
+	const auto caller = reinterpret_cast<uint64_t>(__builtin_return_address(0));
 	printf("\t Semaphore signal: %s, %d\n", object->GetName().C_Str(), count);
+	sema_trace("signal", sem, object.get(), count, 0, caller);
 
 	auto result = object->Signal(count);
 
@@ -404,6 +491,7 @@ int KYTY_SYSV_ABI KernelSignalSema(KernelSema sem, int count)
 		case KernelSemaPrivate::Result::Canceled:
 		case KernelSemaPrivate::Result::Deleted: ret = KERNEL_ERROR_EINVAL; break;
 	}
+	sema_trace("signal_done", sem, object.get(), count, ret, caller);
 
 	return ret;
 }

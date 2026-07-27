@@ -1694,22 +1694,26 @@ static KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callb
 		return 0;
 	}
 
+	// PS5 libc's once_flag follows the usual three-state ABI: zero has not
+	// started, one is executing, and two is permanently complete. The callback
+	// receives the once flag itself as its first argument; Unity's static
+	// initializers retain that pointer while they publish their result.
 	constexpr int once_uninitialized = 0;
-	constexpr int once_complete      = 1;
-	constexpr int once_running       = 2;
+	constexpr int once_running       = 1;
+	constexpr int once_complete      = 2;
 
 	{
 		std::unique_lock lock(g_execute_once_mutex);
 		g_execute_once_cv.wait(lock, [flag] { return *flag != once_running; });
 		if (*flag == once_complete)
 		{
-			return 1;
+			return 0;
 		}
 		*flag = once_running;
 	}
 
 	void* callback_result = nullptr;
-	const int result      = callback(nullptr, context, &callback_result);
+	const int result      = callback(flag, context, &callback_result);
 
 	{
 		std::lock_guard lock(g_execute_once_mutex);
@@ -1717,7 +1721,7 @@ static KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callb
 	}
 	g_execute_once_cv.notify_all();
 
-	return result;
+	return result != 0 ? 0 : LibKernel::KERNEL_ERROR_EAGAIN;
 }
 
 static KYTY_SYSV_ABI int c_mtx_init(LibKernel::PthreadMutex* mutex, int type)

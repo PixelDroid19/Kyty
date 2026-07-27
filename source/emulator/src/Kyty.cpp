@@ -1,6 +1,7 @@
 #include "Kyty/Core/Core.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/MagicEnum.h"
+#include "Kyty/Core/MemoryAlloc.h"
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Subsystems.h"
@@ -244,6 +245,11 @@ KYTY_SCRIPT_FUNC(kyty_load_symbols_all_func)
 
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
 
+	// Building HLE and package symbol databases is a bounded bootstrap phase.
+	// Keep it synchronous for linker correctness, but bypass the debug allocator
+	// tracker: recording a stack and hashmap entry per export made this phase
+	// monopolize the UI/guest launch thread for seconds.
+	Core::MemTrackerSuspendScope tracker_suspend;
 	load_symbols_all(rt);
 	Loader::ModuleLifecycleCoordinator::AfterHleSymbolsRegistered(rt);
 

@@ -1534,6 +1534,24 @@ TEST(EmulatorGraphicsState, RawStorageDescriptorOnlyRequiresDwordStride)
 	EXPECT_TRUE(ShaderRawStorageDescriptorSupported(raw));
 }
 
+TEST(EmulatorGraphicsState, Gen5StorageDescriptorCarriesSwizzleAndAddTidToRawAddressing)
+{
+	ShaderBufferResource resource {};
+	resource.fields[1] = (16u << 16u) | (1u << 31u);
+	resource.fields[3] = DstSel(4, 5, 6, 7) | (75u << 12u) | (1u << 21u) | (1u << 23u);
+
+	EXPECT_TRUE(resource.SwizzleEnabled());
+	EXPECT_EQ(resource.IndexStride(), 1u);
+	EXPECT_TRUE(resource.AddTid());
+	EXPECT_TRUE(ShaderStorageDescriptorSwizzleAllowed(true, resource));
+	EXPECT_FALSE(ShaderStorageDescriptorSwizzleAllowed(false, resource));
+	EXPECT_EQ(ShaderRawBufferByteAddress(resource, 16u, 12u, 7u, 2u), 463u);
+	EXPECT_EQ(ShaderRawBufferByteAddress(resource, 16u, 12u, 7u, 66u), 463u);
+
+	resource.fields[1] &= ~(1u << 31u);
+	EXPECT_EQ(ShaderRawBufferByteAddress(resource, 16u, 12u, 7u, 2u), 307u);
+}
+
 TEST(EmulatorGraphicsState, Gen5DirectImageSampleBindsTextureAndSampler)
 {
 	const uint32_t word0 = (0x3cu << 26u) | (0x20u << 18u) | (0xfu << 8u);
