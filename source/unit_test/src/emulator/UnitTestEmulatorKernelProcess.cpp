@@ -39,10 +39,10 @@ void CountDeletedEvent(KernelEqueue /*eq*/, KernelEqueueEvent* event)
 	count->fetch_add(1, std::memory_order_relaxed);
 }
 
-class ScopedUtcTimezone
+class ScopedTimezone
 {
 public:
-	ScopedUtcTimezone()
+	explicit ScopedTimezone(const char* timezone)
 	{
 		const char* current = std::getenv("TZ");
 		if (current != nullptr)
@@ -51,15 +51,15 @@ public:
 			m_value     = current;
 		}
 	#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		_putenv_s("TZ", "UTC");
+		_putenv_s("TZ", timezone);
 		_tzset();
 	#else
-		::setenv("TZ", "UTC", 1);
+		::setenv("TZ", timezone, 1);
 		::tzset();
 	#endif
 	}
 
-	~ScopedUtcTimezone()
+	~ScopedTimezone()
 	{
 	#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		_putenv_s("TZ", m_had_value ? m_value.c_str() : "");
@@ -323,7 +323,7 @@ TEST(EmulatorKernelProcess, GettimeofdayAdvancesWithinOneSecond)
 TEST(EmulatorKernelProcess, ConvertUtcToLocaltimeWritesUtcTimezoneOutputs)
 {
 	EnsureKernelProcessSubsystems();
-	ScopedUtcTimezone utc_timezone;
+	ScopedTimezone utc_timezone("UTC");
 
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
@@ -356,6 +356,64 @@ TEST(EmulatorKernelProcess, ConvertUtcToLocaltimeWritesUtcTimezoneOutputs)
 	EXPECT_EQ(timesec.dst_seconds, 0u);
 	EXPECT_EQ(dst_seconds, 0u);
 }
+
+TEST(EmulatorKernelProcess, ConvertLocaltimeToUtcResolvesNidAndWritesTimezoneOutputs)
+{
+	EnsureKernelProcessSubsystems();
+	ScopedTimezone utc_timezone("UTC");
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	const auto* rec = symbols.Find(KernelNativeFunc(u"0NTHN1NKONI"));
+	ASSERT_NE(rec, nullptr);
+
+	using convert_localtime_to_utc_fn_t = int (*)(int64_t, int64_t, int64_t*, LibKernel::KernelTimezone*, int32_t*);
+	auto* convert_localtime_to_utc = reinterpret_cast<convert_localtime_to_utc_fn_t>(static_cast<uintptr_t>(rec->vaddr));
+	ASSERT_NE(convert_localtime_to_utc, nullptr);
+
+	constexpr int64_t kLocalSeconds = 1234567890;
+	int64_t           utc_time      = -1;
+	int32_t           dst_seconds   = -1;
+	LibKernel::KernelTimezone timezone {-1, -1};
+
+	EXPECT_EQ(convert_localtime_to_utc(kLocalSeconds, 0, &utc_time, nullptr, &dst_seconds), LibKernel::KERNEL_ERROR_EINVAL);
+	ASSERT_EQ(convert_localtime_to_utc(kLocalSeconds, 0, &utc_time, &timezone, &dst_seconds), OK);
+	EXPECT_EQ(utc_time, kLocalSeconds);
+	EXPECT_EQ(timezone.tz_minuteswest, 0);
+	EXPECT_EQ(timezone.tz_dsttime, 0);
+	EXPECT_EQ(dst_seconds, 0);
+	EXPECT_EQ(convert_localtime_to_utc(kLocalSeconds, 0, nullptr, &timezone, nullptr), OK);
+}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+TEST(EmulatorKernelProcess, ConvertLocaltimeToUtcSeparatesStandardOffsetFromDst)
+{
+	EnsureKernelProcessSubsystems();
+	ScopedTimezone eastern_timezone("EST5EDT,M3.2.0,M11.1.0");
+
+	constexpr int64_t kLocalSeconds = 1719835200;
+	constexpr int64_t kUtcSeconds   = 1719849600;
+	int64_t           utc_time      = -1;
+	int32_t           dst_seconds   = -1;
+	LibKernel::KernelTimezone timezone {-1, -1};
+
+	ASSERT_EQ(LibKernel::KernelConvertLocaltimeToUtc(kLocalSeconds, 0, &utc_time, &timezone, &dst_seconds), OK);
+	EXPECT_EQ(utc_time, kUtcSeconds);
+	EXPECT_EQ(timezone.tz_minuteswest, 300);
+	EXPECT_EQ(timezone.tz_dsttime, 4);
+	EXPECT_EQ(dst_seconds, 3600);
+
+	int64_t                 local_time = -1;
+	LibKernel::KernelTimesec timesec {};
+	uint64_t                utc_dst_seconds = 0;
+	ASSERT_EQ(LibKernel::KernelConvertUtcToLocaltime(kUtcSeconds, &local_time, &timesec, &utc_dst_seconds), OK);
+	EXPECT_EQ(local_time, kLocalSeconds);
+	EXPECT_EQ(timesec.offset_seconds, static_cast<uint32_t>(-18000));
+	EXPECT_EQ(timesec.dst_seconds, 3600u);
+	EXPECT_EQ(utc_dst_seconds, 3600u);
+}
+#endif
 
 // sceKernelAddAmprEvent (bBfz7kMF2Ho): register Ampr completion interest and wake via Trigger.
 TEST(EmulatorKernelProcess, AddAmprEventRegistersAndTriggers)

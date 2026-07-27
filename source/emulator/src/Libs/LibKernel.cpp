@@ -2073,6 +2073,8 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("crb5j7mkk1c", LibKernel::KernelIsSignalReturn);
 	LIB_FUNC("WkwEd3N7w0Y", LibKernel::KernelInstallExceptionHandler);
 	LIB_FUNC("jh+8XiK4LeE", LibKernel::KernelIsAddressSanitizerEnabled);
+	LIB_FUNC("kOcnerypnQA", LibKernel::KernelGettimezone);
+	LIB_FUNC("0NTHN1NKONI", LibKernel::KernelConvertLocaltimeToUtc);
 	LIB_FUNC("-o5uEDpN+oY", LibKernel::KernelConvertUtcToLocaltime);
 	// sceKernelMapNamedFlexibleMemoryInternal uses the same out-pointer ABI as
 	// the public named-flexible mapper.

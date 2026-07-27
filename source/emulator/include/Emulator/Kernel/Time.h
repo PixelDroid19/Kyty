@@ -21,6 +21,13 @@ struct KernelTimeval
 	int64_t tv_usec;
 };
 
+struct KernelTimezone
+{
+	int32_t tz_minuteswest;
+	int32_t tz_dsttime;
+};
+static_assert(sizeof(KernelTimezone) == 8);
+
 struct KernelTimesec
 {
 	int64_t  time;
@@ -34,6 +41,9 @@ using KernelClockid = int32_t;
 int KYTY_SYSV_ABI      KernelClockGetres(KernelClockid clock_id, KernelTimespec* tp);
 int KYTY_SYSV_ABI      KernelClockGettime(KernelClockid clock_id, KernelTimespec* tp);
 int KYTY_SYSV_ABI      KernelGettimeofday(KernelTimeval* tp);
+int KYTY_SYSV_ABI      KernelGettimezone(KernelTimezone* timezone);
+int KYTY_SYSV_ABI      KernelConvertLocaltimeToUtc(int64_t local_time, int64_t reserved, int64_t* utc_time,
+                                                    KernelTimezone* timezone, int32_t* dst_seconds);
 int KYTY_SYSV_ABI      KernelConvertUtcToLocaltime(int64_t utc_seconds, int64_t* local_time, KernelTimesec* timesec, uint64_t* dst_seconds);
 uint64_t KYTY_SYSV_ABI KernelGetTscFrequency();
 uint64_t KYTY_SYSV_ABI KernelReadTsc();

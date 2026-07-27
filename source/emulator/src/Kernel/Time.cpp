@@ -8,6 +8,7 @@
 #include "Emulator/Loader/Timer.h"
 
 #include <ctime>
+#include <limits>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -53,6 +54,61 @@ static bool LocaltimeFromUtc(int64_t utc_seconds, std::tm* out)
 #else
 	return localtime_r(&raw_time, out) != nullptr;
 #endif
+}
+
+static bool GmtimeFromUnixSeconds(int64_t seconds, std::tm* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+
+	const auto raw_time = static_cast<std::time_t>(seconds);
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return gmtime_s(out, &raw_time) == 0;
+#else
+	return gmtime_r(&raw_time, out) != nullptr;
+#endif
+}
+
+static bool TimezoneFromUtc(int64_t utc_seconds, KernelTimezone* timezone, int32_t* dst_seconds)
+{
+	if (timezone == nullptr)
+	{
+		return false;
+	}
+
+	std::tm local {};
+	if (!LocaltimeFromUtc(utc_seconds, &local))
+	{
+		return false;
+	}
+
+	const int64_t local_seconds = CivilToUnixSeconds(local);
+	std::tm       standard_time = local;
+	standard_time.tm_isdst      = 0;
+	const auto standard_utc = std::mktime(&standard_time);
+	if (standard_utc == static_cast<std::time_t>(-1))
+	{
+		return false;
+	}
+
+	const int64_t standard_offset_seconds = local_seconds - static_cast<int64_t>(standard_utc);
+	const int64_t dst_delta_64            = local_seconds - utc_seconds - standard_offset_seconds;
+	if (dst_delta_64 < std::numeric_limits<int32_t>::min() || dst_delta_64 > std::numeric_limits<int32_t>::max())
+	{
+		return false;
+	}
+	const int32_t dst_delta                = static_cast<int32_t>(dst_delta_64);
+
+	timezone->tz_minuteswest = static_cast<int32_t>(-standard_offset_seconds / 60);
+	timezone->tz_dsttime     = dst_delta != 0 ? 4 : 0;
+	if (dst_seconds != nullptr)
+	{
+		*dst_seconds = dst_delta;
+	}
+
+	return true;
 }
 
 int KYTY_SYSV_ABI KernelClockGetres(KernelClockid clock_id, KernelTimespec* tp)
@@ -123,6 +179,61 @@ int KYTY_SYSV_ABI KernelGettimeofday(KernelTimeval* tp)
 	return result == 0 ? OK : KERNEL_ERROR_EINVAL;
 }
 
+int KYTY_SYSV_ABI KernelGettimezone(KernelTimezone* timezone)
+{
+	PRINT_NAME();
+
+	if (timezone == nullptr)
+	{
+		return KERNEL_ERROR_EFAULT;
+	}
+
+	const auto now = std::time(nullptr);
+	return TimezoneFromUtc(static_cast<int64_t>(now), timezone, nullptr) ? OK : KERNEL_ERROR_EINVAL;
+}
+
+int KYTY_SYSV_ABI KernelConvertLocaltimeToUtc(int64_t local_time, int64_t /*reserved*/, int64_t* utc_time,
+                                               KernelTimezone* timezone, int32_t* dst_seconds)
+{
+	PRINT_NAME();
+
+	if (timezone == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	std::tm local {};
+	if (!GmtimeFromUnixSeconds(local_time, &local))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	local.tm_isdst = -1;
+	const auto converted = std::mktime(&local);
+	if (converted == static_cast<std::time_t>(-1))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	const int64_t utc_seconds = static_cast<int64_t>(converted);
+	int32_t       dst_delta   = 0;
+	if (!TimezoneFromUtc(utc_seconds, timezone, &dst_delta))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	if (utc_time != nullptr)
+	{
+		*utc_time = utc_seconds;
+	}
+	if (dst_seconds != nullptr)
+	{
+		*dst_seconds = dst_delta;
+	}
+
+	return OK;
+}
+
 int KYTY_SYSV_ABI KernelConvertUtcToLocaltime(int64_t utc_seconds, int64_t* local_time, KernelTimesec* timesec, uint64_t* dst_seconds)
 {
 	PRINT_NAME();
@@ -138,20 +249,26 @@ int KYTY_SYSV_ABI KernelConvertUtcToLocaltime(int64_t utc_seconds, int64_t* loca
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	const int64_t local_seconds  = CivilToUnixSeconds(local);
-	const int64_t offset_seconds = local_seconds - utc_seconds;
-	const uint32_t dst_delta     = local.tm_isdst > 0 ? 3600u : 0u;
+	KernelTimezone timezone {};
+	int32_t        dst_delta = 0;
+	if (!TimezoneFromUtc(utc_seconds, &timezone, &dst_delta))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	const int64_t local_seconds             = CivilToUnixSeconds(local);
+	const int64_t standard_offset_seconds   = -static_cast<int64_t>(timezone.tz_minuteswest) * 60;
 
 	*local_time = local_seconds;
 	if (timesec != nullptr)
 	{
 		timesec->time           = utc_seconds;
-		timesec->offset_seconds = static_cast<uint32_t>(static_cast<int32_t>(offset_seconds));
-		timesec->dst_seconds    = dst_delta;
+		timesec->offset_seconds = static_cast<uint32_t>(static_cast<int32_t>(standard_offset_seconds));
+		timesec->dst_seconds    = static_cast<uint32_t>(dst_delta);
 	}
 	if (dst_seconds != nullptr)
 	{
-		*dst_seconds = dst_delta;
+		*dst_seconds = static_cast<uint32_t>(dst_delta);
 	}
 
 	return OK;
