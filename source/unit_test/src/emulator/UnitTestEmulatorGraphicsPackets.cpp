@@ -119,18 +119,19 @@ TEST(EmulatorGraphicsPackets, AcceptsObservedFullTargetBarrierInvalidations)
 	EXPECT_FALSE(GraphicsAgcFullTargetBarrierGcrSupported(0u));
 }
 
-TEST(EmulatorGraphicsPackets, AcceptsByteStrideRawStorageWithDwordAlignedRange)
+TEST(EmulatorGraphicsPackets, RejectsNonDwordStrideRawStorageEvenWithAlignedRange)
 {
 	ShaderBufferResource resource {};
 	resource.fields[1] = 1u << 16u;
 	resource.fields[2] = 24576u;
 	resource.fields[3] = (5u << 12u) | DstSel(4, 0, 0, 0);
 
-	EXPECT_TRUE(ShaderRawStorageDescriptorSupported(resource));
-	EXPECT_TRUE(ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw));
-
-	resource.fields[2] = 24577u;
 	EXPECT_FALSE(ShaderRawStorageDescriptorSupported(resource));
+	EXPECT_FALSE(ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw));
+
+	resource.fields[1] = 4u << 16u;
+	resource.fields[2] = 24577u;
+	EXPECT_TRUE(ShaderRawStorageDescriptorSupported(resource));
 }
 
 TEST(EmulatorGraphicsPackets, ComputesZeroStrideBufferFootprintFromRecords)

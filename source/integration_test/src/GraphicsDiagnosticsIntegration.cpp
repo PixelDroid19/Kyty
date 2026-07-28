@@ -472,8 +472,9 @@ void VerifyUnsignedByteBufferLoad()
 	Expect(load.src[0].type == ShaderOperandType::Vgpr && load.src[0].register_id == 43, "byte buffer load address decoded");
 	Expect(load.src[1].type == ShaderOperandType::Sgpr && load.src[1].register_id == 8 && load.src[1].size == 4,
 	       "byte buffer load descriptor decoded");
-	Expect(load.src[2].type == ShaderOperandType::LiteralConstant && load.src[2].constant.u == 3u,
-	       "byte buffer load byte offset preserved");
+	Expect(load.buffer_imm_offset == 3u, "byte buffer load immediate offset preserved separately");
+	Expect(load.src[2].type == ShaderOperandType::IntegerInlineConstant && load.src[2].constant.i == 0,
+	       "byte buffer load keeps the scalar offset outside descriptor addressing");
 
 	Expect(ShaderGetDirectStorageUsage(code, 8) == ShaderStorageUsage::ReadOnly,
 	       "unsigned byte load remains an active read-only storage use");
@@ -536,8 +537,9 @@ void VerifyGen5BufferLoadDwordIdxen()
 	       "idxen buffer load preserves its single index VGPR");
 	Expect(load.src[1].type == ShaderOperandType::Sgpr && load.src[1].register_id == 8 && load.src[1].size == 4,
 	       "idxen buffer load descriptor decoded");
-	Expect(load.src[2].type == ShaderOperandType::LiteralConstant && load.src[2].constant.u == 0x38u,
-	       "idxen buffer load preserves the instruction byte offset");
+	Expect(load.buffer_imm_offset == 0x38u, "idxen buffer load preserves the instruction byte offset");
+	Expect(load.src[2].type == ShaderOperandType::IntegerInlineConstant && load.src[2].constant.i == 0,
+	       "idxen buffer load keeps scalar offset independent from the instruction byte offset");
 
 	ShaderComputeInputInfo input {};
 	input.bind.storage_buffers.buffers_num       = 1;
@@ -567,8 +569,9 @@ void VerifyGen5BufferLoadDwordOffenIdxen()
 	       "offen buffer load preserves the offset and index VGPR pair");
 	Expect(load.src[1].type == ShaderOperandType::Sgpr && load.src[1].register_id == 8 && load.src[1].size == 4,
 	       "offen buffer load descriptor decoded");
-	Expect(load.src[2].type == ShaderOperandType::LiteralConstant && load.src[2].constant.u == 0x90u,
-	       "offen buffer load preserves the instruction byte offset");
+	Expect(load.buffer_imm_offset == 0x90u, "offen buffer load preserves the instruction byte offset");
+	Expect(load.src[2].type == ShaderOperandType::IntegerInlineConstant && load.src[2].constant.i == 0,
+	       "offen buffer load keeps scalar offset independent from the instruction byte offset");
 
 	ShaderComputeInputInfo input {};
 	input.bind.storage_buffers.buffers_num       = 1;

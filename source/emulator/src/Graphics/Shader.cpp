@@ -72,17 +72,10 @@ bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource)
 {
 	// Raw BUFFER_*_DWORD instructions address the descriptor in DWORDs and do
-	// not consume its typed-format metadata. The descriptor stride still
-	// determines the bounded byte range, but individual records do not need to
-	// be DWORD-sized when the resulting range is DWORD-aligned.
-	// Gen5 titles may set NumRecords=0 for dynamically-sized or unbounded raw
-	// buffers; treat stride > 0 as sufficient for raw access validity.
-	if (resource.NumRecords() == 0)
-	{
-		return resource.Stride() > 0 && (resource.Stride() & 0x3u) == 0;
-	}
-	const uint64_t size = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
-	return size != 0 && (size & 0x3u) == 0;
+	// not consume its typed-format metadata. Each indexed record must preserve
+	// DWORD alignment; aligning only the total range would misalign every later
+	// record for a non-aligned stride.
+	return resource.Stride() != 0 && (resource.Stride() & 0x3u) == 0;
 }
 
 bool ShaderStorageDescriptorSwizzleAllowed(bool gen5, const ShaderBufferResource& resource)
@@ -125,12 +118,6 @@ uint32_t ShaderRawBufferByteAddress(const ShaderBufferResource& resource, uint32
 
 bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access)
 {
-	// Gen5 titles leave uninitialized descriptors with NumRecords=0; accept them
-	// here and let the downstream unallocated-range guard skip the binding.
-	if (resource.NumRecords() == 0)
-	{
-		return true;
-	}
 	if (access == ShaderStorageAccess::Raw)
 	{
 		return ShaderRawStorageDescriptorSupported(resource);

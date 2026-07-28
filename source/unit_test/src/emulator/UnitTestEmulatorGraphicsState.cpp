@@ -1552,7 +1552,7 @@ TEST(EmulatorGraphicsState, Gen5CodeUnavailableSkipsInvalidDirectStorageDescript
 	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
 }
 
-TEST(EmulatorGraphicsState, RawStorageDescriptorOnlyRequiresDwordStride)
+TEST(EmulatorGraphicsState, RawStorageDescriptorRequiresNonZeroDwordStride)
 {
 	ShaderBufferResource raw {};
 	raw.fields[1] = 12u << 16u;
@@ -1564,7 +1564,7 @@ TEST(EmulatorGraphicsState, RawStorageDescriptorOnlyRequiresDwordStride)
 
 	raw.fields[1] = 0u;
 	raw.fields[2] = 0x6000u;
-	EXPECT_TRUE(ShaderRawStorageDescriptorSupported(raw));
+	EXPECT_FALSE(ShaderRawStorageDescriptorSupported(raw));
 }
 
 TEST(EmulatorGraphicsState, Gen5StorageDescriptorCarriesSwizzleAndAddTidToRawAddressing)

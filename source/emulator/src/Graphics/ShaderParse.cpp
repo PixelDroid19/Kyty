@@ -952,13 +952,6 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 
 		default: KYTY_UNKNOWN_OP();
 	}
-	if (next_gen && opcode >= 0x10u && opcode <= 0x1fu && inst.type != ShaderInstructionType::Unknown)
-	{
-		inst.dst.type        = ShaderOperandType::ExecLo;
-		inst.dst.register_id = 0;
-		inst.dst.size        = 2;
-	}
-
 	dst->GetInstructions().Add(inst);
 
 	return size;
@@ -2391,13 +2384,6 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 
 		default: KYTY_UNKNOWN_OP();
 	}
-	if (next_gen && opcode >= 0x10u && opcode <= 0x1fu && inst.type != ShaderInstructionType::Unknown)
-	{
-		inst.dst.type        = ShaderOperandType::ExecLo;
-		inst.dst.register_id = 0;
-		inst.dst.size        = 2;
-	}
-
 	if (inst.dst2.type == ShaderOperandType::Unknown)
 	{
 		if ((abs & 0x1u) != 0)
