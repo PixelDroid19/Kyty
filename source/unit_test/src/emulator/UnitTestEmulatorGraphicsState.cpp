@@ -1929,6 +1929,25 @@ TEST(EmulatorGraphicsState, RequiresAnActiveDepthStencilOperationForTargetBindin
 	EXPECT_FALSE(usage.depth_write_enable);
 }
 
+TEST(EmulatorGraphicsState, IgnoresMetadataOnlyStencilControlWithoutStencilPlane)
+{
+	HW::DepthRenderTarget target {};
+	target.stencil_info.tile_stencil_disable = true;
+
+	HW::RenderControl render_control {};
+	render_control.depth_compress_disable   = true;
+	render_control.stencil_compress_disable = true;
+	render_control.resummarize_enable       = true;
+	render_control.copy_centroid            = true;
+	render_control.copy_sample              = 15;
+
+	HW::DepthControl depth_control {};
+	EXPECT_EQ(State::ValidateStencilPlane(target, render_control, depth_control), State::StencilPlaneValidation::Inactive);
+
+	depth_control.stencil_enable = true;
+	EXPECT_EQ(State::ValidateStencilPlane(target, render_control, depth_control), State::StencilPlaneValidation::MissingReadBase);
+}
+
 TEST(EmulatorGraphicsState, ResolvesViewportDepthForClipSpaceAndHostLimits)
 {
 	// Captured first MRT world pass: zscale=1, zoffset=0, dx_clip_space=false.
