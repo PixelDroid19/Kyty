@@ -944,7 +944,7 @@ TEST(EmulatorKernelMemory, ThreadDiagnosticsAreUnavailableWithoutPthreadContext)
 	EXPECT_EQ(diagnostics.thread_count, 0u);
 }
 
-TEST(EmulatorKernelMemory, SyncOnAddressHonorsPredicateAndTimeout)
+TEST(EmulatorKernelMemory, SyncOnAddressReturnsImmediatelyWhenValueDiffers)
 {
 	using namespace LibKernel::SyncOnAddress;
 	EnsureMemorySubsystemInitialized();
@@ -952,9 +952,27 @@ TEST(EmulatorKernelMemory, SyncOnAddressHonorsPredicateAndTimeout)
 	uint32_t value   = 1;
 	uint32_t timeout = 0;
 	EXPECT_EQ(KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value), 0, &timeout, 0), OK);
+}
 
-	value = 0;
-	EXPECT_EQ(static_cast<uint32_t>(KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value), 0, &timeout, 0)), 0x80020060u);
+TEST(EmulatorKernelMemory, SyncOnAddressReturnsKernelTimeoutWhenValueDoesNotChange)
+{
+	using namespace LibKernel::SyncOnAddress;
+	EnsureMemorySubsystemInitialized();
+
+	uint32_t value   = 0;
+	uint32_t timeout = 0;
+	EXPECT_EQ(KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value), 0, &timeout, 0), LibKernel::KERNEL_ERROR_ETIMEDOUT);
+}
+
+TEST(EmulatorKernelMemory, SyncOnAddressRejectsUnsupportedFlagsAndUnalignedAddress)
+{
+	using namespace LibKernel::SyncOnAddress;
+	EnsureMemorySubsystemInitialized();
+
+	uint32_t value   = 0;
+	uint32_t timeout = 0;
+	EXPECT_EQ(KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value), 0, &timeout, 1), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value) + 1u, 0, &timeout, 0), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
 TEST(EmulatorKernelMemory, SyncOnAddressWakeReleasesMatchingWaiter)
