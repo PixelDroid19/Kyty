@@ -178,7 +178,7 @@ LIB_DEFINE(InitNet_1_Net)
 
 namespace LibSsl {
 
-LIB_VERSION("Ssl", 1, "Ssl", 1, 1);
+LIB_VERSION("Ssl", 1, "Ssl", 2, 1);
 
 namespace Ssl = Network::Ssl;
 

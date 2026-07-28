@@ -93,6 +93,7 @@ int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index);
 int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable);
 int KYTY_SYSV_ABI PadSetTiltCorrectionState(int handle, bool enable);
 int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable);
+int KYTY_SYSV_ABI PadResetOrientation(int handle);
 int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformation* info);
 int KYTY_SYSV_ABI PadGetExtControllerInformation(int handle, void* info);
 int KYTY_SYSV_ABI PadDeviceClassGetExtendedInformation(int handle, void* info);

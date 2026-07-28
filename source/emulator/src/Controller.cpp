@@ -917,6 +917,20 @@ int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable)
 	return OK;
 }
 
+int KYTY_SYSV_ABI PadResetOrientation(int handle)
+{
+	PRINT_NAME();
+
+	if (handle != kPrimaryHandle)
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+
+	// PadReadState and PadRead expose the neutral host orientation, so there is
+	// no calibration state to retain after a reset.
+	return OK;
+}
+
 static void FillPadControllerInformation(PadControllerInformation* info, int connected_count)
 {
 	info->touch_pixel_density   = 44.86f;

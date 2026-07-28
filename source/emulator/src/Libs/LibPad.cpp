@@ -22,6 +22,7 @@ LIB_DEFINE(InitPad_1)
 	LIB_FUNC("clVvL4ZDntw", Controller::PadSetMotionSensorState);
 	LIB_FUNC("vDLMoJLde8I", Controller::PadSetTiltCorrectionState);
 	LIB_FUNC("r44mAxdSG+U", Controller::PadSetAngularVelocityDeadbandState);
+	LIB_FUNC("rIZnR6eSpvk", Controller::PadResetOrientation);
 	LIB_FUNC("gjP9-KQzoUk", Controller::PadGetControllerInformation);
 	LIB_FUNC("hGbf2QTBmqc", Controller::PadGetExtControllerInformation);
 	LIB_FUNC("AcslpN1jHR8", Controller::PadDeviceClassGetExtendedInformation);

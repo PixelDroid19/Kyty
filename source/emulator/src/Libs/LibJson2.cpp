@@ -16,12 +16,12 @@
 
 namespace Kyty::Libs {
 
-LIB_VERSION("Json2", 1, "Json2", 1, 1);
+LIB_VERSION("Json2", 1, "Json", 1, 1);
 
 namespace Json2 {
 
-// Gen5 libSceJson2 constructor surface used while Astro builds its parser
-// context. Zero objects and return this; expand parse/serialize when hit.
+// Gen5 libSceJson2 constructor surface initializes the parser context. Zero
+// objects and return this; expand parse/serialize when the data path reaches it.
 
 enum JsonValueType : uint32_t
 {

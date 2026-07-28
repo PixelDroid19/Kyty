@@ -1711,7 +1711,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("WrOLvHU0yQM", Posix::pthread_setspecific);
 	LIB_FUNC("0-KXaS70xy4", Posix::pthread_getspecific);
 
-	// Posix pthread_rwlock_* / attr NIDs (libkernel + libScePosix shared NID table).
+	// Posix pthread_rwlock_* and attribute NIDs.
 	LIB_FUNC("1471ajPzxh0", Posix::pthread_rwlock_destroy);
 	LIB_FUNC("ytQULN-nhL4", Posix::pthread_rwlock_init);
 	LIB_FUNC("iGjsr1WAtI0", Posix::pthread_rwlock_rdlock);
@@ -1742,6 +1742,9 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("wuCroIGjt2g", LibKernel::open);
 	LIB_FUNC("bY-PO6JhzhQ", LibKernel::close);
 	LIB_FUNC("AqBioC2vF3I", LibKernel::read);
+	// lseek is imported through both exact library identities; register the
+	// Posix contract directly instead of relying on cross-library NID matching.
+	LIB_FUNC("Oy6IpwgtYOk", LibKernel::lseek);
 	LIB_FUNC("mqQMh1zPPT8", LibKernel::PosixFstat);
 	LIB_FUNC("ih4CD9-gghM", LibKernel::PosixFtruncate);
 	LIB_FUNC("VAzswvTOCzI", LibKernel::PosixUnlink);
@@ -1960,6 +1963,10 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("6ULAa0fq4jA", LibKernel::PthreadRwlockInit);
 	LIB_FUNC("BB+kb08Tl9A", LibKernel::PthreadRwlockDestroy);
 	LIB_FUNC("Ox9i0c7L5w0", LibKernel::PthreadRwlockRdlock);
+	// These NIDs are also imported with the libkernel identity. Register the
+	// established Posix ABI explicitly instead of weakening exact resolution.
+	LIB_FUNC("iGjsr1WAtI0", Posix::pthread_rwlock_rdlock);
+	LIB_FUNC("EgmLo6EWgso", Posix::pthread_rwlock_unlock);
 	LIB_FUNC("+L98PIbGttk", LibKernel::PthreadRwlockUnlock);
 	LIB_FUNC("mqdNorrB+gI", LibKernel::PthreadRwlockWrlock);
 	// Gen5 rwlock / attr NIDs observed as strict Unpatched imports.

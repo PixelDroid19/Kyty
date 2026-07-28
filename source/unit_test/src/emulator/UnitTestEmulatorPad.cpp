@@ -50,6 +50,16 @@ TEST(EmulatorPad, GetHandleAndDualsenseNoops)
 	EXPECT_EQ(PadSetTriggerEffect(99, nullptr), static_cast<int>(0x80920003u));
 }
 
+TEST(EmulatorPad, ResetOrientationValidatesOpenHandle)
+{
+	EnsurePadSubsystems();
+
+	ASSERT_EQ(PadInit(), 0);
+	ASSERT_EQ(PadOpen(1, 0, 0, nullptr), 1);
+	EXPECT_EQ(PadResetOrientation(1), 0);
+	EXPECT_EQ(PadResetOrientation(99), static_cast<int>(0x80920003u));
+}
+
 TEST(EmulatorPad, KeyboardButtonsRemainVisibleWithPhysicalController)
 {
 	EnsurePadSubsystems();

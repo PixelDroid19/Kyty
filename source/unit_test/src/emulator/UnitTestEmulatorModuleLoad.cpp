@@ -188,6 +188,19 @@ SymbolResolve Ps5UtilFunc(const char16_t* nid)
 	return sr;
 }
 
+SymbolResolve PadFunc(const char16_t* nid)
+{
+	SymbolResolve sr {};
+	sr.name                 = nid;
+	sr.library              = U"Pad";
+	sr.library_version      = 1;
+	sr.module               = U"Pad";
+	sr.module_version_major = 1;
+	sr.module_version_minor = 1;
+	sr.type                 = SymbolType::Func;
+	return sr;
+}
+
 void AddLibcImportIds(Program* program)
 {
 	ASSERT_NE(program, nullptr);
@@ -513,12 +526,37 @@ TEST(EmulatorModuleLoad, ResolvePrefersHlePs5UtilThreadContextRequestOverGuestSh
 	EXPECT_FALSE(bind_self);
 }
 
-TEST(EmulatorModuleLoad, LibkernelRegistersPosixLseekAlias)
+TEST(EmulatorModuleLoad, LseekRegistersExactKernelAndPosixIdentities)
 {
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
-	ASSERT_NE(symbols.Find(LibkernelFunc(u"oib76F-12fk")), nullptr);
-	EXPECT_NE(symbols.Find(LibkernelFunc(u"Oy6IpwgtYOk")), nullptr);
+
+	const auto* kernel_lseek = symbols.Find(LibkernelFunc(u"Oy6IpwgtYOk"));
+	const auto* posix_lseek  = symbols.Find(PosixFunc(u"Oy6IpwgtYOk"));
+
+	ASSERT_NE(kernel_lseek, nullptr);
+	ASSERT_NE(posix_lseek, nullptr);
+	EXPECT_EQ(kernel_lseek->vaddr, posix_lseek->vaddr);
+}
+
+TEST(EmulatorModuleLoad, Json2InitializerRegistersExactJsonModuleIdentity)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libJson2_1", &symbols));
+
+	SymbolResolve query {};
+	query.name                 = U"cK6bYHf-Q5E";
+	query.library              = U"Json2";
+	query.library_version      = 1;
+	query.module               = U"Json";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = SymbolType::Func;
+
+	EXPECT_NE(symbols.Find(query), nullptr);
+
+	query.module = U"Json2";
+	EXPECT_EQ(symbols.Find(query), nullptr);
 }
 
 TEST(EmulatorModuleLoad, LibcWcsstrUsesGuestUtf16CodeUnits)
@@ -776,6 +814,18 @@ TEST(EmulatorModuleLoad, Ps5UtilRegistersThreadContextRequest)
 	ASSERT_NE(record->vaddr, 0u);
 }
 
+TEST(EmulatorModuleLoad, PadRegistersResetOrientationWithExactIdentity)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libPad_1", &symbols));
+
+	auto query = PadFunc(u"rIZnR6eSpvk");
+	EXPECT_NE(symbols.Find(query), nullptr);
+
+	query.module_version_minor = 2;
+	EXPECT_EQ(symbols.Find(query), nullptr);
+}
+
 TEST(EmulatorModuleLoad, MainModuleHandleResolvesToPrimaryExecutable)
 {
 	RuntimeLinker rt;
@@ -808,6 +858,26 @@ TEST(EmulatorModuleLoad, NetRegistersEpollCreate)
 	}
 }
 
+TEST(EmulatorModuleLoad, SslRegistersExactVersionTwoModuleIdentity)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNet_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"hdpVEUDFW3s";
+	query.library              = U"Ssl";
+	query.library_version      = 1;
+	query.module               = U"Ssl";
+	query.module_version_major = 2;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	EXPECT_NE(symbols.Find(query), nullptr);
+
+	query.module_version_major = 1;
+	EXPECT_EQ(symbols.Find(query), nullptr);
+}
+
 TEST(EmulatorModuleLoad, RtcRegistersCurrentTick)
 {
 	Loader::SymbolDatabase symbols;
@@ -824,20 +894,30 @@ TEST(EmulatorModuleLoad, RtcRegistersCurrentTick)
 	EXPECT_NE(symbols.Find(query), nullptr);
 }
 
-TEST(EmulatorModuleLoad, PosixRegistersRwlockReadLockWithExactIdentity)
+TEST(EmulatorModuleLoad, RwlockReadLockRegistersExactKernelAndPosixIdentities)
 {
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
-	EXPECT_NE(symbols.Find(PosixFunc(u"iGjsr1WAtI0")), nullptr);
-	EXPECT_EQ(symbols.Find(LibkernelFunc(u"iGjsr1WAtI0")), nullptr);
+
+	const auto* kernel_rdlock = symbols.Find(LibkernelFunc(u"iGjsr1WAtI0"));
+	const auto* posix_rdlock  = symbols.Find(PosixFunc(u"iGjsr1WAtI0"));
+
+	ASSERT_NE(kernel_rdlock, nullptr);
+	ASSERT_NE(posix_rdlock, nullptr);
+	EXPECT_EQ(kernel_rdlock->vaddr, posix_rdlock->vaddr);
 }
 
-TEST(EmulatorModuleLoad, PosixRegistersRwlockUnlockWithExactIdentity)
+TEST(EmulatorModuleLoad, RwlockUnlockRegistersExactKernelAndPosixIdentities)
 {
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
-	EXPECT_NE(symbols.Find(PosixFunc(u"EgmLo6EWgso")), nullptr);
-	EXPECT_EQ(symbols.Find(LibkernelFunc(u"EgmLo6EWgso")), nullptr);
+
+	const auto* kernel_unlock = symbols.Find(LibkernelFunc(u"EgmLo6EWgso"));
+	const auto* posix_unlock  = symbols.Find(PosixFunc(u"EgmLo6EWgso"));
+
+	ASSERT_NE(kernel_unlock, nullptr);
+	ASSERT_NE(posix_unlock, nullptr);
+	EXPECT_EQ(kernel_unlock->vaddr, posix_unlock->vaddr);
 }
 
 TEST(EmulatorModuleLoad, PosixRegistersRwlockInitWithExactIdentity)
