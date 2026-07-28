@@ -800,17 +800,7 @@ Decision Report(Feature feature, Subsystem subsystem, const char* identity, cons
 
 Decision ReportNotImplemented(const char* expression, const char* file, int line) noexcept
 {
-	// Permissive mode: always continue past not-implemented checks so the
-	// guest can progress.  The first hit per site is still logged for
-	// diagnostics; later hits are counter-only.
-	static bool warned = false;
-	if (!warned)
-	{
-		std::fprintf(stderr, "KYTY_PERMISSIVE_NOT_IMPLEMENTED %s in %s:%d\n",
-		             expression ? expression : "(null)", file ? file : "(null)", line);
-		warned = true;
-	}
-	return Decision::Continue;
+	return Report(Feature::NotImplemented, ClassifySourceFile(file), expression, file, line);
 }
 
 void SetDecisionHook(DecisionHook hook) noexcept
