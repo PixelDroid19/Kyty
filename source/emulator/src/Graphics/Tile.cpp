@@ -100,9 +100,8 @@ public:
 	// Display_2dThin / dynamic tile-10: pad pitch and height to 128-texel macro tiles.
 	void InitDisplayThin(uint32_t /*width*/, uint32_t height, uint32_t pitch, bool neo)
 	{
-		const auto align_up = [](uint32_t value, uint32_t alignment) -> uint32_t {
-			return ((value + alignment - 1u) / alignment) * alignment;
-		};
+		const auto align_up = [](uint32_t value, uint32_t alignment) -> uint32_t
+		{ return ((value + alignment - 1u) / alignment) * alignment; };
 		m_macro_tile_height = 128;
 		m_bank_height       = neo ? 2 : 1;
 		m_num_banks         = neo ? 8 : 16;
@@ -726,10 +725,10 @@ bool TileGetDepthSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t 
 			*stencil_size = TileSizeAlign();
 			return false;
 		}
-		const uint32_t h_pad     = align_up(height, 128);
+		const uint32_t h_pad       = align_up(height, 128);
 		const uint32_t depth_pitch = (z_format == 1) ? align_up(width, 256) : width;
-		depth_size->size         = (bpp == 0) ? 0 : depth_pitch * h_pad * bpp;
-		depth_size->align        = 65536;
+		depth_size->size           = (bpp == 0) ? 0 : depth_pitch * h_pad * bpp;
+		depth_size->align          = 65536;
 		if (stencil_format != 0)
 		{
 			stencil_size->size  = align_up(width, 256) * align_up(height, 256);
@@ -874,8 +873,8 @@ void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, ui
 	size->size  = 0;
 	size->align = 0;
 
-	if (tile_mode != 0x1bu || (bytes_per_texel != 1u && bytes_per_texel != 2u && bytes_per_texel != 4u && bytes_per_texel != 8u &&
-	                          bytes_per_texel != 16u))
+	if (tile_mode != 0x1bu ||
+	    (bytes_per_texel != 1u && bytes_per_texel != 2u && bytes_per_texel != 4u && bytes_per_texel != 8u && bytes_per_texel != 16u))
 	{
 		return;
 	}
@@ -893,10 +892,9 @@ void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, ui
 	}
 
 	const uint32_t effective_pitch = (pitch != 0 ? pitch : width);
-	const uint64_t blocks_x        = (static_cast<uint64_t>(effective_pitch) + block_width[element_log2] - 1u) /
-	                           block_width[element_log2];
-	const uint64_t blocks_y = (static_cast<uint64_t>(height) + block_height[element_log2] - 1u) / block_height[element_log2];
-	const uint64_t total = blocks_x * blocks_y * 65536u;
+	const uint64_t blocks_x        = (static_cast<uint64_t>(effective_pitch) + block_width[element_log2] - 1u) / block_width[element_log2];
+	const uint64_t blocks_y        = (static_cast<uint64_t>(height) + block_height[element_log2] - 1u) / block_height[element_log2];
+	const uint64_t total           = blocks_x * blocks_y * 65536u;
 	if (total <= UINT32_MAX)
 	{
 		size->size  = static_cast<uint32_t>(total);
@@ -971,17 +969,40 @@ uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint
 	EXIT_NOT_IMPLEMENTED(bytes_per_element != 4u && bytes_per_element != 8u);
 	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u);
 
-	static constexpr uint32_t k_block_w     = 128u;
 	static constexpr uint32_t k_block_bytes = 65536u;
+	const uint32_t            block_w       = TileGet64KBBlockWidth(bytes_per_element);
 	const uint32_t            block_h       = (bytes_per_element == 8u ? 64u : 128u);
 
-	const uint32_t blocks_x = (pitch_elems + k_block_w - 1u) / k_block_w;
-	const uint32_t xb       = x / k_block_w;
+	const uint32_t blocks_x = (pitch_elems + block_w - 1u) / block_w;
+	const uint32_t xb       = x / block_w;
 	const uint32_t yb       = y / block_h;
 	const uint64_t blk_idx  = static_cast<uint64_t>(yb) * blocks_x + xb;
-	const uint32_t lx       = x % k_block_w;
+	const uint32_t lx       = x % block_w;
 	const uint32_t ly       = y % block_h;
 	return (blk_idx * k_block_bytes) + Sw64kRxWithinBlockOffset(lx, ly, bytes_per_element);
+}
+
+uint32_t TileGet64KBBlockWidth(uint32_t bytes_per_element)
+{
+	switch (bytes_per_element)
+	{
+		case 1:
+		case 2: return 256u;
+		case 4:
+		case 8: return 128u;
+		case 16: return 64u;
+		default: return 0u;
+	}
+}
+
+uint32_t TileAlign64KBPitch(uint32_t width, uint32_t bytes_per_element)
+{
+	const uint32_t block_width = TileGet64KBBlockWidth(bytes_per_element);
+	if (width == 0u || block_width == 0u)
+	{
+		return 0u;
+	}
+	return (width + block_width - 1u) & ~(block_width - 1u);
 }
 
 void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
@@ -1094,23 +1115,22 @@ static uint32_t Standard4KB64WithinBlockOffset(uint32_t x, uint32_t y)
 uint64_t TileGetStandard4KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
 {
 	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u);
-	EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || bytes_per_element > 16u ||
-	                     (bytes_per_element & (bytes_per_element - 1u)) != 0u);
+	EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || bytes_per_element > 16u || (bytes_per_element & (bytes_per_element - 1u)) != 0u);
 
 	static constexpr uint32_t k_block_bytes = 4096u;
-	const uint32_t block_width  = bytes_per_element <= 2u ? 64u : (bytes_per_element <= 8u ? 32u : 16u);
-	const uint32_t block_height = bytes_per_element == 1u ? 64u : (bytes_per_element <= 4u ? 32u : 16u);
-	const uint32_t blocks_x = (pitch_elems + block_width - 1u) / block_width;
-	const uint32_t xb = x / block_width;
-	const uint32_t yb = y / block_height;
-	const uint64_t block_index = static_cast<uint64_t>(yb) * blocks_x + xb;
-	const uint32_t local_x = x % block_width;
-	const uint32_t local_y = y % block_height;
-	const uint32_t within = bytes_per_element == 1u   ? Standard4KB8WithinBlockOffset(local_x, local_y)
-	                        : bytes_per_element == 2u ? Standard4KB16WithinBlockOffset(local_x, local_y)
-	                        : bytes_per_element == 4u ? Standard4KB32WithinBlockOffset(local_x, local_y)
-	                        : bytes_per_element == 8u ? Standard4KB64WithinBlockOffset(local_x, local_y)
-	                                                  : Standard4KB128WithinBlockOffset(local_x, local_y);
+	const uint32_t            block_width   = bytes_per_element <= 2u ? 64u : (bytes_per_element <= 8u ? 32u : 16u);
+	const uint32_t            block_height  = bytes_per_element == 1u ? 64u : (bytes_per_element <= 4u ? 32u : 16u);
+	const uint32_t            blocks_x      = (pitch_elems + block_width - 1u) / block_width;
+	const uint32_t            xb            = x / block_width;
+	const uint32_t            yb            = y / block_height;
+	const uint64_t            block_index   = static_cast<uint64_t>(yb) * blocks_x + xb;
+	const uint32_t            local_x       = x % block_width;
+	const uint32_t            local_y       = y % block_height;
+	const uint32_t            within        = bytes_per_element == 1u   ? Standard4KB8WithinBlockOffset(local_x, local_y)
+	                                          : bytes_per_element == 2u ? Standard4KB16WithinBlockOffset(local_x, local_y)
+	                                          : bytes_per_element == 4u ? Standard4KB32WithinBlockOffset(local_x, local_y)
+	                                          : bytes_per_element == 8u ? Standard4KB64WithinBlockOffset(local_x, local_y)
+	                                                                    : Standard4KB128WithinBlockOffset(local_x, local_y);
 	return (block_index * k_block_bytes) + within;
 }
 
@@ -1120,18 +1140,16 @@ uint64_t TileGetStandard4KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems
 }
 
 void TileConvertStandard4KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
-                                   uint32_t bytes_per_element)
+                                    uint32_t bytes_per_element)
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
 	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u || pitch_elems < width);
-	EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || bytes_per_element > 16u ||
-	                     (bytes_per_element & (bytes_per_element - 1u)) != 0u);
+	EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || bytes_per_element > 16u || (bytes_per_element & (bytes_per_element - 1u)) != 0u);
 
-	auto*       d = static_cast<uint8_t*>(dst);
-	const auto* s = static_cast<const uint8_t*>(src);
-	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile,
-	                                      static_cast<uint64_t>(width) * height * bytes_per_element);
+	auto*                      d = static_cast<uint8_t*>(dst);
+	const auto*                s = static_cast<const uint8_t*>(src);
+	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * bytes_per_element);
 	for (uint32_t y = 0; y < height; y++)
 	{
 		for (uint32_t x = 0; x < width; x++)
@@ -1172,24 +1190,23 @@ uint64_t TileGetStandard4KB32VolumeOffset(uint32_t x, uint32_t y, uint32_t z, ui
 	static constexpr uint32_t k_block_height = 16u;
 	static constexpr uint32_t k_block_depth  = 8u;
 	static constexpr uint32_t k_block_bytes  = 4096u;
-	const uint32_t blocks_x = (pitch_elems + k_block_width - 1u) / k_block_width;
-	const uint32_t blocks_y = (height + k_block_height - 1u) / k_block_height;
-	const uint64_t block_index =
+	const uint32_t            blocks_x       = (pitch_elems + k_block_width - 1u) / k_block_width;
+	const uint32_t            blocks_y       = (height + k_block_height - 1u) / k_block_height;
+	const uint64_t            block_index =
 	    ((static_cast<uint64_t>(z / k_block_depth) * blocks_y) + (y / k_block_height)) * blocks_x + (x / k_block_width);
-	return (block_index * k_block_bytes) + Standard4KB32VolumeWithinBlockOffset(x % k_block_width, y % k_block_height,
-	                                                                              z % k_block_depth);
+	return (block_index * k_block_bytes) + Standard4KB32VolumeWithinBlockOffset(x % k_block_width, y % k_block_height, z % k_block_depth);
 }
 
 void TileConvertStandard4KB32VolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
-	                                         uint32_t pitch_elems)
+                                            uint32_t pitch_elems)
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
 	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u || depth == 0u || pitch_elems < width);
 
-	auto*       d = static_cast<uint8_t*>(dst);
-	const auto* s = static_cast<const uint8_t*>(src);
-	static constexpr uint32_t k_bpp = 4u;
+	auto*                      d     = static_cast<uint8_t*>(dst);
+	const auto*                s     = static_cast<const uint8_t*>(src);
+	static constexpr uint32_t  k_bpp = 4u;
 	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * depth * k_bpp);
 	for (uint32_t z = 0; z < depth; ++z)
 	{
@@ -1197,9 +1214,9 @@ void TileConvertStandard4KB32VolumeToLinear(void* dst, const void* src, uint32_t
 		{
 			for (uint32_t x = 0; x < width; ++x)
 			{
-				const uint64_t tiled  = TileGetStandard4KB32VolumeOffset(x, y, z, pitch_elems, height);
-				const uint64_t linear = ((static_cast<uint64_t>(z) * height * pitch_elems) +
-				                         (static_cast<uint64_t>(y) * pitch_elems) + x) * k_bpp;
+				const uint64_t tiled = TileGetStandard4KB32VolumeOffset(x, y, z, pitch_elems, height);
+				const uint64_t linear =
+				    ((static_cast<uint64_t>(z) * height * pitch_elems) + (static_cast<uint64_t>(y) * pitch_elems) + x) * k_bpp;
 				std::memcpy(d + linear, s + tiled, k_bpp);
 			}
 		}
@@ -1215,10 +1232,10 @@ void TileGetStandard4KB32VolumeSize(uint32_t width, uint32_t height, uint32_t de
 	static constexpr uint32_t k_block_height = 16u;
 	static constexpr uint32_t k_block_depth  = 8u;
 	static constexpr uint32_t k_block_bytes  = 4096u;
-	const uint64_t blocks_x = (static_cast<uint64_t>(pitch_elems) + k_block_width - 1u) / k_block_width;
-	const uint64_t blocks_y = (static_cast<uint64_t>(height) + k_block_height - 1u) / k_block_height;
-	const uint64_t blocks_z = (static_cast<uint64_t>(depth) + k_block_depth - 1u) / k_block_depth;
-	const uint64_t bytes = blocks_x * blocks_y * blocks_z * k_block_bytes;
+	const uint64_t            blocks_x       = (static_cast<uint64_t>(pitch_elems) + k_block_width - 1u) / k_block_width;
+	const uint64_t            blocks_y       = (static_cast<uint64_t>(height) + k_block_height - 1u) / k_block_height;
+	const uint64_t            blocks_z       = (static_cast<uint64_t>(depth) + k_block_depth - 1u) / k_block_depth;
+	const uint64_t            bytes          = blocks_x * blocks_y * blocks_z * k_block_bytes;
 	EXIT_NOT_IMPLEMENTED(bytes > UINT32_MAX);
 	size->size  = static_cast<uint32_t>(bytes);
 	size->align = k_block_bytes;
@@ -1585,9 +1602,8 @@ static bool GetMicroTiledFormatLayout(uint32_t dfmt, uint32_t nfmt, MicroTiledFo
 	return false;
 }
 
-static bool GetDynamicMicroTiledTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t height, uint32_t pitch,
-	                                         uint32_t levels, TileSizeAlign* total_size, TileSizeOffset* level_sizes,
-	                                         TilePaddedSize* padded_size)
+static bool GetDynamicMicroTiledTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels,
+                                            TileSizeAlign* total_size, TileSizeOffset* level_sizes, TilePaddedSize* padded_size)
 {
 	MicroTiledFormatLayout format {};
 	if (!GetMicroTiledFormatLayout(dfmt, nfmt, &format))
@@ -1595,11 +1611,9 @@ static bool GetDynamicMicroTiledTextureSize(uint32_t dfmt, uint32_t nfmt, uint32
 		return false;
 	}
 
-	const auto align_up = [](uint32_t value, uint32_t alignment) -> uint32_t {
-		return ((value + alignment - 1u) / alignment) * alignment;
-	};
+	const auto align_up = [](uint32_t value, uint32_t alignment) -> uint32_t { return ((value + alignment - 1u) / alignment) * alignment; };
 
-	uint64_t offset = 0;
+	uint64_t offset     = 0;
 	uint32_t mip_width  = width;
 	uint32_t mip_height = height;
 	uint32_t mip_pitch  = (pitch != 0 ? pitch : width);
@@ -1610,7 +1624,7 @@ static bool GetDynamicMicroTiledTextureSize(uint32_t dfmt, uint32_t nfmt, uint32
 		const uint32_t element_pitch  = std::max((mip_pitch + format.block_width - 1u) / format.block_width, element_width);
 		const uint32_t padded_width   = align_up(element_pitch, 8u);
 		const uint32_t padded_height  = align_up(element_height, 8u);
-		const uint64_t level_size = static_cast<uint64_t>(padded_width) * padded_height * format.bytes_per_element;
+		const uint64_t level_size     = static_cast<uint64_t>(padded_width) * padded_height * format.bytes_per_element;
 
 		EXIT_NOT_IMPLEMENTED(level_size > 0xffffffffull || offset + level_size > 0xffffffffull);
 		if (level_sizes != nullptr)
@@ -1651,9 +1665,9 @@ void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t h
 
 	FindTextureInfo(dfmt, nfmt, width, height, pitch, tile, neo, &infos, &num, pow2);
 
-	const bool dynamic_display_thin = (tile == 10 && dfmt == 10 && nfmt == 0 && levels == 1);
+	const bool             dynamic_display_thin = (tile == 10 && dfmt == 10 && nfmt == 0 && levels == 1);
 	MicroTiledFormatLayout dynamic_micro_format {};
-	const bool dynamic_micro_tiled = tile == 13 && GetMicroTiledFormatLayout(dfmt, nfmt, &dynamic_micro_format);
+	const bool             dynamic_micro_tiled = tile == 13 && GetMicroTiledFormatLayout(dfmt, nfmt, &dynamic_micro_format);
 	if (tile != 31 && tile != 8 && infos == nullptr && !dynamic_display_thin && !dynamic_micro_tiled)
 	{
 		printf("WARNING: TileGetTextureSize unknown tile=%u dfmt=%u nfmt=%u %ux%u; estimating\n", tile, dfmt, nfmt, width, height);
@@ -1711,9 +1725,8 @@ void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t h
 	// layout for valid dynamic display dimensions.
 	if (dynamic_display_thin)
 	{
-		const auto align_up = [](uint32_t value, uint32_t alignment) -> uint32_t {
-			return ((value + alignment - 1u) / alignment) * alignment;
-		};
+		const auto align_up = [](uint32_t value, uint32_t alignment) -> uint32_t
+		{ return ((value + alignment - 1u) / alignment) * alignment; };
 		const uint32_t padded_width  = align_up(pitch, 128u);
 		const uint32_t padded_height = align_up(height, 128u);
 		const uint64_t size          = static_cast<uint64_t>(padded_width) * padded_height * 4u;
@@ -1767,10 +1780,10 @@ void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t h
 	if (total_size != nullptr && total_size->size == 0)
 	{
 		// Unknown format: estimate a conservative size so the game continues.
-		const uint32_t bpp = (dfmt == 10 && nfmt == 9) ? 4u : ((dfmt == 3 && nfmt == 0) ? 2u : 1u);
+		const uint32_t bpp       = (dfmt == 10 && nfmt == 9) ? 4u : ((dfmt == 3 && nfmt == 0) ? 2u : 1u);
 		const uint64_t estimated = static_cast<uint64_t>(pitch) * height * bpp;
-		printf("WARNING: TileGetTextureSize unknown dfmt=%u nfmt=%u tile=%u %ux%u; estimating %llu bytes\n",
-		       dfmt, nfmt, tile, width, height, (unsigned long long)estimated);
+		printf("WARNING: TileGetTextureSize unknown dfmt=%u nfmt=%u tile=%u %ux%u; estimating %llu bytes\n", dfmt, nfmt, tile, width,
+		       height, (unsigned long long)estimated);
 		if (total_size != nullptr)
 		{
 			total_size->size  = static_cast<uint32_t>(estimated > 0xFFFFFFFFull ? 0xFFFFFFFFull : estimated);
@@ -1877,8 +1890,8 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			{
 				// Block geometry from TileGetRenderTargetSize: 4 BPE → 128x128,
 				// 8 BPE → 128x64 elements per 64 KiB block.
-				const uint32_t block_w = 128u;
-				const uint32_t block_h = (bpp == 8u ? 64u : 128u);
+				const uint32_t block_w  = TileGet64KBBlockWidth(bpp);
+				const uint32_t block_h  = (bpp == 8u ? 64u : 128u);
 				const uint32_t padded_w = ((elem_width + block_w - 1u) / block_w) * block_w;
 				const uint32_t padded_h = ((elem_height + block_h - 1u) / block_h) * block_h;
 				padded_size[0].width    = bc1 ? padded_w * 4u : padded_w;
@@ -1896,15 +1909,15 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		{
 			const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
 			EXIT_NOT_IMPLEMENTED(bpp == 0u || bpp > 16u || (bpp & (bpp - 1u)) != 0u || levels != 1u);
-			const bool bc3 = format == 173u;
+			const bool     bc3            = format == 173u;
 			const uint32_t element_height = bc3 ? (height + 3u) / 4u : height;
-			const uint32_t pitch_texels = (pitch != 0u ? pitch : width);
-			const uint32_t element_pitch = bc3 ? (pitch_texels + 3u) / 4u : pitch_texels;
-			const uint32_t block_width  = bpp <= 2u ? 64u : (bpp <= 8u ? 32u : 16u);
-			const uint32_t block_height = bpp == 1u ? 64u : (bpp <= 4u ? 32u : 16u);
-			const uint32_t padded_width  = (element_pitch + block_width - 1u) & ~(block_width - 1u);
-			const uint32_t padded_height = (element_height + block_height - 1u) & ~(block_height - 1u);
-			const uint64_t bytes = static_cast<uint64_t>(padded_width) * padded_height * bpp;
+			const uint32_t pitch_texels   = (pitch != 0u ? pitch : width);
+			const uint32_t element_pitch  = bc3 ? (pitch_texels + 3u) / 4u : pitch_texels;
+			const uint32_t block_width    = bpp <= 2u ? 64u : (bpp <= 8u ? 32u : 16u);
+			const uint32_t block_height   = bpp == 1u ? 64u : (bpp <= 4u ? 32u : 16u);
+			const uint32_t padded_width   = (element_pitch + block_width - 1u) & ~(block_width - 1u);
+			const uint32_t padded_height  = (element_height + block_height - 1u) & ~(block_height - 1u);
+			const uint64_t bytes          = static_cast<uint64_t>(padded_width) * padded_height * bpp;
 			EXIT_NOT_IMPLEMENTED(bytes > UINT32_MAX);
 			if (total_size != nullptr)
 			{
@@ -1935,7 +1948,7 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		// Linear layout: pitch already carries the row stride from the caller. Keep
 		// the estimate tight (no coarse dimension rounding) so it does not swallow
 		// neighbouring buffers in the GPU-memory overlap tracker.
-		uint32_t row = (pitch != 0 ? pitch : width);
+		uint32_t row   = (pitch != 0 ? pitch : width);
 		uint64_t total = 0;
 		for (uint32_t l = 0; l < levels; l++)
 		{

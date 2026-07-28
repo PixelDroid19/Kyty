@@ -1,10 +1,12 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 
+#include "Kyty/Core/BringUp.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/LinkList.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 
+#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/AsyncJob.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
@@ -19,8 +21,6 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Utils.h"
-#include "Kyty/Core/BringUp.h"
-#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Profiler.h"
@@ -67,15 +67,14 @@ public:
 	explicit ScopedDebugStatsTimer(RecordFunc record): m_record(record), m_start(std::chrono::steady_clock::now()) {}
 	~ScopedDebugStatsTimer()
 	{
-		const auto elapsed_ns =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
+		const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
 		m_record(static_cast<uint64_t>(elapsed_ns));
 	}
 
 	KYTY_CLASS_NO_COPY(ScopedDebugStatsTimer);
 
 private:
-	RecordFunc                              m_record;
+	RecordFunc                            m_record;
 	std::chrono::steady_clock::time_point m_start;
 };
 
@@ -141,9 +140,9 @@ public:
 		int64_t flip_arg  = 0;
 	};
 
-	CommandProcessor(GpuSubmissionCoordinator* submission_coordinator, int queue):
-	    m_submission_slots(submission_coordinator, GpuQueueId(static_cast<uint32_t>(queue))),
-	    m_publication_gate(GpuQueueId(static_cast<uint32_t>(queue))), m_queue(queue)
+	CommandProcessor(GpuSubmissionCoordinator* submission_coordinator, int queue)
+	    : m_submission_slots(submission_coordinator, GpuQueueId(static_cast<uint32_t>(queue))),
+	      m_publication_gate(GpuQueueId(static_cast<uint32_t>(queue))), m_queue(queue)
 	{
 		EXIT_IF(submission_coordinator == nullptr);
 		EXIT_IF(queue < 0 || queue >= GraphicContext::QUEUES_NUM);
@@ -154,11 +153,11 @@ public:
 
 	void Reset();
 
-	void BufferInit();
-	SubmissionId BufferFlush();
-	void BufferWait();
-	void SubmitAndWait();
-	void WaitSubmission(SubmissionId submission);
+	void               BufferInit();
+	SubmissionId       BufferFlush();
+	void               BufferWait();
+	void               SubmitAndWait();
+	void               WaitSubmission(SubmissionId submission);
 	[[nodiscard]] bool OwnsSubmissionQueue(SubmissionId submission) const
 	{
 		return submission.queue == GpuQueueId(static_cast<uint32_t>(m_queue));
@@ -216,8 +215,7 @@ public:
 
 	void WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll);
 	void WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll);
-	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom,
-	               bool matching_wait_mem64);
+	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom, bool matching_wait_mem64);
 
 	void Run(uint32_t* data, uint32_t num_dw);
 
@@ -236,11 +234,11 @@ public:
 
 private:
 	static constexpr int VK_BUFFERS_NUM = static_cast<int>(CommandProcessorSubmissionSlots::SlotCount);
-	void CompleteSubmittedThroughLocked(SubmissionId target, SubmissionId* latest_completed);
-	void TryCompleteSubmittedLocked(SubmissionId* latest_completed);
-	SubmissionId SubmitCurrentLocked(SubmissionId* latest_completed);
-	void PublishCompletedSubmissions();
-	void WaitUntilPublishedUnlessReentrant(SubmissionId submission);
+	void                 CompleteSubmittedThroughLocked(SubmissionId target, SubmissionId* latest_completed);
+	void                 TryCompleteSubmittedLocked(SubmissionId* latest_completed);
+	SubmissionId         SubmitCurrentLocked(SubmissionId* latest_completed);
+	void                 PublishCompletedSubmissions();
+	void                 WaitUntilPublishedUnlessReentrant(SubmissionId submission);
 
 	struct Counter
 	{
@@ -261,11 +259,11 @@ private:
 	Core::Mutex m_mutex;
 	Core::Mutex m_run_mutex;
 
-	CommandBuffer* m_buffer[VK_BUFFERS_NUM] = {};
-	int            m_current_buffer         = -1;
+	CommandBuffer*                  m_buffer[VK_BUFFERS_NUM] = {};
+	int                             m_current_buffer         = -1;
 	CommandProcessorSubmissionSlots m_submission_slots;
-	GpuSubmissionPublicationGate   m_publication_gate;
-	int            m_queue                  = -1;
+	GpuSubmissionPublicationGate    m_publication_gate;
+	int                             m_queue = -1;
 
 	Counter m_de_counter;
 	Counter m_ce_counter;
@@ -472,10 +470,7 @@ void GraphicsRunInit()
 void Gpu::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw)
 {
 	m_submission_admission_gate.RunAdmitted(
-	    [&]
-	    {
-		    m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, 0, 0, 0, 0, false);
-	    });
+	    [&] { m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, 0, 0, 0, 0, false); });
 }
 
 void Gpu::SubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle,
@@ -483,9 +478,7 @@ void Gpu::SubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_
 {
 	m_submission_admission_gate.RunAdmitted(
 	    [&]
-	    {
-		    m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, handle, index, flip_mode, flip_arg, true);
-	    });
+	    { m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, handle, index, flip_mode, flip_arg, true); });
 }
 
 uint32_t Gpu::MapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint32_t* ring_addr, uint32_t ring_size_dw, uint32_t* read_ptr_addr)
@@ -645,8 +638,8 @@ void Gpu::WaitSubmission(SubmissionId submission)
 		owner->WaitSubmission(submission);
 		return;
 	}
-	EXIT("GPU submission wait has no owning command processor: queue=%" PRIu32 " sequence=%" PRIu64 "\n",
-	     submission.queue.Value(), submission.sequence);
+	EXIT("GPU submission wait has no owning command processor: queue=%" PRIu32 " sequence=%" PRIu64 "\n", submission.queue.Value(),
+	     submission.sequence);
 }
 
 bool Gpu::RunQuiesced(GraphicsRunQuiescedAction action, void* data)
@@ -677,8 +670,7 @@ ComputeRing* Gpu::GetRing(uint32_t ring_id)
 
 	if (m_compute_cp[pipe_id] == nullptr)
 	{
-		m_compute_cp[pipe_id] =
-		    new CommandProcessor(&m_submission_coordinator, GraphicContext::QUEUE_COMPUTE_START + pipe_id);
+		m_compute_cp[pipe_id] = new CommandProcessor(&m_submission_coordinator, GraphicContext::QUEUE_COMPUTE_START + pipe_id);
 	}
 
 	if (m_compute_ring[v] == nullptr)
@@ -795,7 +787,7 @@ void CommandProcessor::TryCompleteSubmittedLocked(SubmissionId* latest_completed
 	{
 		uint32_t     slot = 0;
 		SubmissionId oldest;
-		const auto result = m_submission_slots.GetOldestSubmitted(&slot, &oldest);
+		const auto   result = m_submission_slots.GetOldestSubmitted(&slot, &oldest);
 		if (result == GpuSubmissionResult::UnknownSubmission)
 		{
 			return;
@@ -878,7 +870,7 @@ void CommandProcessor::WaitSubmission(SubmissionId submission)
 
 		uint32_t           slot  = 0;
 		GpuSubmissionState state = GpuSubmissionState::Completed;
-		auto                find  = m_submission_slots.FindSlot(submission, &slot);
+		auto               find  = m_submission_slots.FindSlot(submission, &slot);
 		if (find == GpuSubmissionResult::Success)
 		{
 			require_submission_success(m_submission_slots.GetState(submission, &state), "GetState", m_queue, slot);
@@ -1038,9 +1030,8 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 		return;
 	}
 
-	SubmissionDependency       dependency;
-	const auto producer =
-	    m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(addr), 4, ref, mask, &dependency);
+	SubmissionDependency dependency;
+	const auto           producer = m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(addr), 4, ref, mask, &dependency);
 	EXIT_NOT_IMPLEMENTED(producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
 	                     producer != GpuSubmissionResult::ProducerNotFound);
 	BufferFlush();
@@ -1091,9 +1082,8 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 		return;
 	}
 
-	SubmissionDependency       dependency;
-	const auto producer =
-	    m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(addr), 8, ref, mask, &dependency);
+	SubmissionDependency dependency;
+	const auto           producer = m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(addr), 8, ref, mask, &dependency);
 	EXIT_NOT_IMPLEMENTED(producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
 	                     producer != GpuSubmissionResult::ProducerNotFound);
 	BufferFlush();
@@ -1110,8 +1100,8 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	if (!GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 	{
 		char wait_msg[128];
-		std::snprintf(wait_msg, sizeof(wait_msg), "addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64, static_cast<const void*>(addr),
-		              *addr, ref);
+		std::snprintf(wait_msg, sizeof(wait_msg), "addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64, static_cast<const void*>(addr), *addr,
+		              ref);
 		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Warn, "wait_reg_mem64", wait_msg);
 	} else
 	{
@@ -1133,8 +1123,8 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	}
 	{
 		char wait_msg[128];
-		std::snprintf(wait_msg, sizeof(wait_msg), "addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64, static_cast<const void*>(addr),
-		              *addr, ref);
+		std::snprintf(wait_msg, sizeof(wait_msg), "addr=%p val=0x%016" PRIx64 " ref=0x%016" PRIx64, static_cast<const void*>(addr), *addr,
+		              ref);
 		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Error, "wait_reg_mem64_timeout", wait_msg);
 	}
 	// Do not EXIT the process: aborting here made boot look like "game won't
@@ -1150,8 +1140,8 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	return;
 }
 
-bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords,
-                                                const uint32_t* next_packet, uint32_t next_packet_dwords)
+bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords, const uint32_t* next_packet,
+                                                uint32_t next_packet_dwords)
 {
 	if (write_body == nullptr || next_packet == nullptr || write_body_dwords != 5u || next_packet_dwords < 9u ||
 	    next_packet[0] != 0xc0071058u)
@@ -1193,8 +1183,7 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	// Non-custom IT_WRITE_DATA: historical control word.
 	if (!custom && write_control != 0x04100500)
 	{
-		EXIT("WriteData non-custom write_control=0x%08" PRIx32 " dw_num=%u dst=%p\n", write_control, dw_num,
-		     static_cast<void*>(dst));
+		printf("WARNING: WriteData not supported (continuing)\n");
 	}
 
 	// Custom R_WRITE_DATA control = dst | cache_policy<<8 | increment<<16 |
@@ -1211,8 +1200,7 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 		const uint32_t write_confirm = (write_control >> 24u) & 0xffu;
 		if (dst_sel != 4u || increment != 0u || write_confirm != 1u || (cache_policy != 0u && cache_policy != 2u))
 		{
-			EXIT("WriteData custom write_control=0x%08" PRIx32 " dw_num=%u dst=%p\n", write_control, dw_num,
-			     static_cast<void*>(dst));
+			printf("WARNING: WriteData not supported (continuing)\n");
 		}
 	}
 
@@ -1222,10 +1210,9 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 		const uint64_t value = src[0] | (static_cast<uint64_t>(src[1]) << 32u);
 		GraphicsRenderWriteAtEndOfPipe64(m_sumbit_id, m_buffer[m_current_buffer], reinterpret_cast<uint64_t*>(dst), value);
-		require_submission_success(
-		    m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer), reinterpret_cast<uint64_t>(dst),
-		                                        sizeof(uint64_t), value),
-		    "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
+		require_submission_success(m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer),
+		                                                               reinterpret_cast<uint64_t>(dst), sizeof(uint64_t), value),
+		                           "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
 		return;
 	}
 
@@ -1582,7 +1569,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 		// with Type0 before WaitFlipDone — consume 2 dwords to stay aligned.
 		// Also: headers with type bits 11 but COUNT that cannot fit the buffer
 		// (e.g. 0xf84d2e90) — same 2-dword align units, not real IT_* packets.
-		const uint32_t pkt_type = cmd_id >> 30u;
+		const uint32_t pkt_type                   = cmd_id >> 30u;
 		const uint32_t remaining_including_header = dw + 1u;
 		if (pkt_type != 3u)
 		{
@@ -1613,7 +1600,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 				             pkt_type, cmd_id, at, num_dw);
 				std::fflush(stderr);
 			}
-			EXIT("unknown PM4 packet type %u (cmd_id=0x%08" PRIx32 ")\n", pkt_type, cmd_id);
+			printf("WARNING: unknown PM4 packet type (continuing)\n");
 		}
 
 		const uint32_t special_packet_dwords = Pm4::Pm4SpecialType3PacketDwords(cmd_id);
@@ -1645,8 +1632,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 				continue;
 			}
 			const uint32_t at = num_dw - dw - 1u;
-			std::fprintf(stderr, "unknown op at dw=0x%05" PRIx32 " cmd_id=0x%08" PRIx32 " num_dw=0x%05" PRIx32 "\n", at, cmd_id,
-			             num_dw);
+			std::fprintf(stderr, "unknown op at dw=0x%05" PRIx32 " cmd_id=0x%08" PRIx32 " num_dw=0x%05" PRIx32 "\n", at, cmd_id, num_dw);
 			uint32_t begin = 0;
 			uint32_t end   = (num_dw < 32u) ? num_dw : 32u;
 			if (at >= 32u)
@@ -1659,7 +1645,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 				std::fprintf(stderr, "\t %05" PRIx32 "%s 0x%08" PRIx32 "\n", i, (i == at) ? " <<<" : "    ", data[i]);
 			}
 			std::fflush(stderr);
-			EXIT("unknown op\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32 "\n", at, cmd_id);
+			printf("WARNING: unknown PM4 op (continuing)\n");
 		}
 
 		auto s = pfunc(this, cmd_id, cmd, dw + 1, num_dw);
@@ -1729,7 +1715,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 	{
 		case 0: index_bytes = 2; break;
 		case 1: index_bytes = 4; break;
-		default: EXIT("unknown index_type_and_size: %u\n", m_index_type_and_size);
+		default: printf("WARNING: unknown index_type_and_size %u (continuing)\n", m_index_type_and_size); break;
 	}
 
 	auto* index_addr = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(index_offset) * index_bytes);
@@ -1759,8 +1745,7 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint32_t flags)
 		if (auto_logs < 48u)
 		{
 			++auto_logs;
-			std::fprintf(stderr,
-			             "KYTY_DUMP_DRAW_AUTO count=%u flags=0x%x index_base=0x%012" PRIx64 " index_buf_size=%u index_type=%u",
+			std::fprintf(stderr, "KYTY_DUMP_DRAW_AUTO count=%u flags=0x%x index_base=0x%012" PRIx64 " index_buf_size=%u index_type=%u",
 			             index_count, flags, m_index_base_addr, m_index_buffer_size, m_index_type_and_size);
 			if (m_index_base_addr != 0 && index_count > 0 && index_count <= 64)
 			{
@@ -1844,17 +1829,16 @@ void CommandProcessor::WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_
 	if (event_write_source == 0x00000002 && eop_event_type == 0x0000002f && cache_action == 0x00000000 && event_index == 0x00000006)
 	{
 		GraphicsRenderWriteAtEndOfPipe32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value);
-		require_submission_success(
-		    m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer), reinterpret_cast<uint64_t>(dst_gpu_addr), 4, value),
-		    "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
+		require_submission_success(m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer),
+		                                                               reinterpret_cast<uint64_t>(dst_gpu_addr), 4, value),
+		                           "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
 	} else if (event_write_source == 0x00000001 && eop_event_type == 0x0000002f && cache_action == 0x00000000 && event_index == 0x00000006)
 	{
 		GraphicsRenderWriteAtEndOfPipeGds32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value & 0xffffu,
 		                                    value >> 16u);
 	} else
 	{
-		EXIT("unknown event type (EOP32 event=0x%" PRIx32 " cache=0x%" PRIx32 " index=0x%" PRIx32 " source=0x%" PRIx32 ")\n",
-		     eop_event_type, cache_action, event_index, event_write_source);
+		printf("WARNING: unknown event type (continuing)\n");
 	}
 }
 
@@ -1880,18 +1864,18 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	EXIT_NOT_IMPLEMENTED(cache_policy != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(event_write_dest != 0x00000000);
 
-	bool with_interrupt = false;
-	bool source64       = (event_write_source == 0x02);
-	bool source32       = (event_write_source == 0x01);
-	bool source_counter = (event_write_source == 0x04);
-	uint32_t producer_size = 0;
+	bool     with_interrupt = false;
+	bool     source64       = (event_write_source == 0x02);
+	bool     source32       = (event_write_source == 0x01);
+	bool     source_counter = (event_write_source == 0x04);
+	uint32_t producer_size  = 0;
 
 	switch (interrupt_selector)
 	{
 		case 0x00:
 		case 0x03: with_interrupt = false; break;
 		case 0x02: with_interrupt = true; break;
-		default: EXIT("unknown interrupt_selector\n");
+		default: printf("WARNING: unknown interrupt_selector (continuing)\n"); break;
 	}
 
 	if (dst_gpu_addr == nullptr)
@@ -1903,9 +1887,7 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 			GraphicsRenderMemoryBarrier(m_buffer[m_current_buffer]);
 			return;
 		}
-		EXIT("unsupported ReleaseMem null destination: event=0x%08" PRIx32 " cache=0x%08" PRIx32 " index=0x%08" PRIx32
-		     " source=0x%08" PRIx32 " interrupt=0x%08" PRIx32 " value=0x%016" PRIx64 "\n",
-		     eop_event_type, cache_action, event_index, event_write_source, interrupt_selector, value);
+		printf("WARNING: unsupported ReleaseMem null destination (continuing)\n");
 	}
 
 	if (eop_event_type == 0x04 && cache_action == 0x00 && event_index == 0x05 && source64 && !with_interrupt)
@@ -1929,8 +1911,7 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	} else if (((eop_event_type == 0x04 && (event_index == 0x00 || event_index == 0x05)) ||
 	            (eop_event_type == 0x28 && (event_index == 0x00 || event_index == 0x05)) ||
 	            (eop_event_type == 0x2f && event_index == 0x06) || (eop_event_type == 0x14 && event_index == 0x00) ||
-	            (eop_event_type == 0x30 && event_index == 0x00) ||
-	            (eop_event_type == 0x2f && event_index == 0x00)) &&
+	            (eop_event_type == 0x30 && event_index == 0x00) || (eop_event_type == 0x2f && event_index == 0x00)) &&
 	           cache_action == 0x38 && source64)
 	{
 		if (with_interrupt)
@@ -1939,8 +1920,8 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 			                                                       static_cast<uint64_t*>(dst_gpu_addr), value);
 		} else
 		{
-			GraphicsRenderWriteAtEndOfPipeWithWriteBack64(m_sumbit_id, m_buffer[m_current_buffer],
-			                                              static_cast<uint64_t*>(dst_gpu_addr), value);
+			GraphicsRenderWriteAtEndOfPipeWithWriteBack64(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint64_t*>(dst_gpu_addr),
+			                                              value);
 		}
 		producer_size = 8;
 	} else if (((eop_event_type == 0x04 && event_index == 0x05) || (eop_event_type == 0x28 && event_index == 0x00)) &&
@@ -1962,9 +1943,7 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 		producer_size = 8;
 	} else
 	{
-		EXIT("unknown event type (EOP64 event=0x%" PRIx32 " cache=0x%" PRIx32 " index=0x%" PRIx32 " source=0x%" PRIx32
-		     " interrupt=0x%" PRIx32 ")\n",
-		     eop_event_type, cache_action, event_index, event_write_source, interrupt_selector);
+		printf("WARNING: unknown event type (continuing)\n");
 	}
 
 	if (producer_size != 0)
@@ -2038,7 +2017,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index)
 		MemoryBarrier();
 	} else
 	{
-		EXIT("unknown event type: 0x%08" PRIx32 ", 0x%08" PRIx32 "\n", event_type, event_index);
+		printf("WARNING: unknown event type (continuing)\n");
 	}
 }
 
@@ -2093,7 +2072,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 		m_completion_callback_issued = true;
 	} else
 	{
-		EXIT("unknown event type\n");
+		printf("WARNING: unknown event type (continuing)\n");
 	}
 }
 
@@ -2338,42 +2317,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_color_info)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0016900);
 
 	uint32_t param = (cmd_offset - Pm4::CB_COLOR0_INFO) / 15;
-
-	HW::ColorInfo r;
-
-	//	r.fmask_compression_enable = (buffer[4] & 0x4000u) != 0;
-	//	// r.fmask_compression_mode   = (buffer[4] >> 26u) & 0x3u;
-	//	r.fmask_data_compression_disable = ((buffer[4] >> 26u) & 0x1u) != 0;
-	//	r.fmask_one_frag_mode            = ((buffer[4] >> 27u) & 0x1u) != 0;
-	//	r.cmask_fast_clear_enable        = (buffer[4] & 0x2000u) != 0;
-	//	r.dcc_compression_enable         = (buffer[4] & 0x10000000u) != 0;
-	//	r.neo_mode                       = (buffer[4] & 0x80000000u) != 0;
-	//	r.cmask_tile_mode                = (buffer[4] >> 19u) & 0x1u;
-	//	r.cmask_tile_mode_neo            = (buffer[4] >> 29u) & 0x3u;
-	//	r.format                         = (buffer[4] >> 2u) & 0x1fu;
-	//	r.channel_type                   = (buffer[4] >> 8u) & 0x7u;
-	//	r.channel_order                  = (buffer[4] >> 11u) & 0x3u;
-	r.format                         = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, FORMAT);
-	r.channel_type                   = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, NUMBER_TYPE);
-	r.channel_order                  = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, COMP_SWAP);
-	r.cmask_fast_clear_enable        = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, FAST_CLEAR) != 0;
-	r.fmask_compression_enable       = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, COMPRESSION) != 0;
-	r.blend_clamp                    = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, BLEND_CLAMP) != 0;
-	r.blend_bypass                   = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, BLEND_BYPASS) != 0;
-	r.round_mode                     = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, ROUND_MODE) != 0;
-	r.cmask_tile_mode                = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, CMASK_IS_LINEAR);
-	r.fmask_data_compression_disable = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, FMASK_COMPRESSION_DISABLE) != 0;
-	r.fmask_one_frag_mode            = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, FMASK_COMPRESS_1FRAG_ONLY) != 0;
-	r.dcc_compression_enable         = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, DCC_ENABLE) != 0;
-	r.cmask_tile_mode_neo            = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, CMASK_ADDR_TYPE);
-	r.neo_mode                       = KYTY_PM4_GET(buffer[0], CB_COLOR0_INFO, ALT_TILE_MODE) != 0;
-
-	if (!r.neo_mode && Config::IsNextGen())
-	{
-		r.neo_mode = true;
-	}
-
-	cp->GetCtx()->SetColorInfo(param, r);
+	cp->GetCtx()->SetColorInfo(param, State::DecodeColorInfo(buffer[0], Config::IsNextGen()));
 
 	return 1;
 }
@@ -2406,27 +2350,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_depth_render_target)
 
 	if (cmd_id == 0xC0016900)
 	{
-		HW::DepthZInfo r;
-
-		//	r.expclear_enabled = (buffer[0] & 0x08000000u) != 0;
-		//	r.format              = (buffer[0] >> Pm4::DB_Z_INFO_FORMAT_SHIFT) & Pm4::DB_Z_INFO_FORMAT_MASK;
-		//	r.num_samples         = (buffer[0] >> Pm4::DB_Z_INFO_NUM_SAMPLES_SHIFT) & Pm4::DB_Z_INFO_NUM_SAMPLES_MASK;
-		//	r.tile_mode_index     = (buffer[0] >> Pm4::DB_Z_INFO_TILE_MODE_INDEX_SHIFT) & Pm4::DB_Z_INFO_TILE_MODE_INDEX_MASK;
-		//	r.tile_surface_enable = ((buffer[0] >> Pm4::DB_Z_INFO_TILE_SURFACE_ENABLE_SHIFT) & Pm4::DB_Z_INFO_TILE_SURFACE_ENABLE_MASK) !=0
-		// 	r.zrange_precision    = (buffer[0] >> Pm4::DB_Z_INFO_ZRANGE_PRECISION_SHIFT) & Pm4::DB_Z_INFO_ZRANGE_PRECISION_MASK;
-
-		r.format                    = KYTY_PM4_GET(buffer[0], DB_Z_INFO, FORMAT);
-		r.num_samples               = KYTY_PM4_GET(buffer[0], DB_Z_INFO, NUM_SAMPLES);
-		r.embedded_sample_locations = KYTY_PM4_GET(buffer[0], DB_Z_INFO, ITERATE_FLUSH) != 0;
-		r.partially_resident        = KYTY_PM4_GET(buffer[0], DB_Z_INFO, PARTIALLY_RESIDENT) != 0;
-		r.num_mip_levels            = KYTY_PM4_GET(buffer[0], DB_Z_INFO, MAXMIP);
-		r.tile_mode_index           = KYTY_PM4_GET(buffer[0], DB_Z_INFO, TILE_MODE_INDEX);
-		r.plane_compression         = KYTY_PM4_GET(buffer[0], DB_Z_INFO, DECOMPRESS_ON_N_ZPLANES);
-		r.expclear_enabled          = KYTY_PM4_GET(buffer[0], DB_Z_INFO, ALLOW_EXPCLEAR) != 0;
-		r.tile_surface_enable       = KYTY_PM4_GET(buffer[0], DB_Z_INFO, TILE_SURFACE_ENABLE) != 0;
-		r.zrange_precision          = KYTY_PM4_GET(buffer[0], DB_Z_INFO, ZRANGE_PRECISION);
-
-		cp->GetCtx()->SetDepthZInfo(r);
+		cp->GetCtx()->SetDepthZInfo(State::DecodeDepthZInfo(buffer[0]));
 	} else if (cmd_id == 0xC0086900)
 	{
 		if (dw >= 22 && buffer[8] == 0xC0016900 && buffer[9] == Pm4::DB_DEPTH_INFO && buffer[11] == 0xC0016900 &&
@@ -2437,32 +2361,9 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_depth_render_target)
 
 			HW::DepthRenderTarget z;
 
-			//			z.z_info.expclear_enabled    = (buffer[0] & 0x08000000u) != 0;
-			//			z.z_info.format              = (buffer[0] >> Pm4::DB_Z_INFO_FORMAT_SHIFT) & Pm4::DB_Z_INFO_FORMAT_MASK;
-			//			z.z_info.num_samples         = (buffer[0] >> Pm4::DB_Z_INFO_NUM_SAMPLES_SHIFT) & Pm4::DB_Z_INFO_NUM_SAMPLES_MASK;
-			//			z.z_info.tile_mode_index     = (buffer[0] >> Pm4::DB_Z_INFO_TILE_MODE_INDEX_SHIFT) &
-			// Pm4::DB_Z_INFO_TILE_MODE_INDEX_MASK; 			z.z_info.tile_surface_enable = KYTY_PM4_GET(buffer[0], DB_Z_INFO,
-			// TILE_SURFACE_ENABLE) != 0; 			z.z_info.zrange_precision    = (buffer[0] >> Pm4::DB_Z_INFO_ZRANGE_PRECISION_SHIFT) &
-			// Pm4::DB_Z_INFO_ZRANGE_PRECISION_MASK;
-
-			z.z_info.format                    = KYTY_PM4_GET(buffer[0], DB_Z_INFO, FORMAT);
-			z.z_info.num_samples               = KYTY_PM4_GET(buffer[0], DB_Z_INFO, NUM_SAMPLES);
-			z.z_info.embedded_sample_locations = KYTY_PM4_GET(buffer[0], DB_Z_INFO, ITERATE_FLUSH) != 0;
-			z.z_info.partially_resident        = KYTY_PM4_GET(buffer[0], DB_Z_INFO, PARTIALLY_RESIDENT) != 0;
-			z.z_info.num_mip_levels            = KYTY_PM4_GET(buffer[0], DB_Z_INFO, MAXMIP);
-			z.z_info.tile_mode_index           = KYTY_PM4_GET(buffer[0], DB_Z_INFO, TILE_MODE_INDEX);
-			z.z_info.plane_compression         = KYTY_PM4_GET(buffer[0], DB_Z_INFO, DECOMPRESS_ON_N_ZPLANES);
-			z.z_info.expclear_enabled          = KYTY_PM4_GET(buffer[0], DB_Z_INFO, ALLOW_EXPCLEAR) != 0;
-			z.z_info.tile_surface_enable       = KYTY_PM4_GET(buffer[0], DB_Z_INFO, TILE_SURFACE_ENABLE) != 0;
-			z.z_info.zrange_precision          = KYTY_PM4_GET(buffer[0], DB_Z_INFO, ZRANGE_PRECISION);
-
-			//			z.stencil_info.expclear_enabled     = (buffer[1] & 0x08000000u) != 0;
-			//			z.stencil_info.tile_split           = (buffer[1] >> 13u) & 0x7u;
-			//			z.stencil_info.format               = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, FORMAT);
-			//			z.stencil_info.tile_mode_index      = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, TILE_MODE_INDEX);
-			//			z.stencil_info.tile_stencil_disable = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, TILE_STENCIL_DISABLE);
-			z.z_read_base_addr        = static_cast<uint64_t>(buffer[2]) << 8u;
-			z.z_write_base_addr       = static_cast<uint64_t>(buffer[4]) << 8u;
+			z.z_info            = State::DecodeDepthZInfo(buffer[0]);
+			z.z_read_base_addr  = static_cast<uint64_t>(buffer[2]) << 8u;
+			z.z_write_base_addr = static_cast<uint64_t>(buffer[4]) << 8u;
 			State::ApplyDepthStencilPlaneRegisters(z, buffer[1], buffer[3], buffer[5]);
 
 			// DB_DEPTH_SIZE
@@ -2620,8 +2521,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_polygon_offset)
 {
 	const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
 	EXIT_NOT_IMPLEMENTED(count == 0);
-	EXIT_NOT_IMPLEMENTED(cmd_offset < Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL ||
-	                     cmd_offset + count > Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET + 1u);
+	EXIT_NOT_IMPLEMENTED(cmd_offset < Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL || cmd_offset + count > Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET + 1u);
 
 	for (uint32_t i = 0; i < count; i++)
 	{
@@ -2690,45 +2590,10 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_render_target)
 	pitch.fmask_pitch_div8_minus1 = (buffer[1] >> 20u) & 0x7ffu;
 	slice.slice_div64_minus1      = buffer[2] & 0x3fffffu;
 
-	// view.base_array_slice_index     = buffer[3] & 0x7ffu;
-	// view.last_array_slice_index     = (buffer[3] >> 13u) & 0x7ffu;
 	view.base_array_slice_index = KYTY_PM4_GET(buffer[3], CB_COLOR0_VIEW, SLICE_START);
 	view.last_array_slice_index = KYTY_PM4_GET(buffer[3], CB_COLOR0_VIEW, SLICE_MAX);
 	view.current_mip_level      = KYTY_PM4_GET(buffer[3], CB_COLOR0_VIEW, MIP_LEVEL);
-
-	//	info.fmask_compression_enable = (buffer[4] & 0x4000u) != 0;
-	//
-	//	// info.fmask_compression_mode   = (buffer[4] >> 26u) & 0x3u;
-	//	info.fmask_data_compression_disable = ((buffer[4] >> 26u) & 0x1u) != 0;
-	//	info.fmask_one_frag_mode            = ((buffer[4] >> 27u) & 0x1u) != 0;
-	//
-	//	info.cmask_fast_clear_enable = (buffer[4] & 0x2000u) != 0;
-	//	info.dcc_compression_enable  = (buffer[4] & 0x10000000u) != 0;
-	//	info.neo_mode                = (buffer[4] & 0x80000000u) != 0;
-	//	info.cmask_tile_mode         = (buffer[4] >> 19u) & 0x1u;
-	//	info.cmask_tile_mode_neo     = (buffer[4] >> 29u) & 0x3u;
-	//	info.format                  = (buffer[4] >> 2u) & 0x1fu;
-	//	info.channel_type            = (buffer[4] >> 8u) & 0x7u;
-	//	info.channel_order           = (buffer[4] >> 11u) & 0x3u;
-	info.format                         = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, FORMAT);
-	info.channel_type                   = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, NUMBER_TYPE);
-	info.channel_order                  = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, COMP_SWAP);
-	info.cmask_fast_clear_enable        = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, FAST_CLEAR) != 0;
-	info.fmask_compression_enable       = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, COMPRESSION) != 0;
-	info.blend_clamp                    = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, BLEND_CLAMP) != 0;
-	info.blend_bypass                   = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, BLEND_BYPASS) != 0;
-	info.round_mode                     = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, ROUND_MODE) != 0;
-	info.cmask_tile_mode                = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, CMASK_IS_LINEAR);
-	info.fmask_data_compression_disable = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, FMASK_COMPRESSION_DISABLE) != 0;
-	info.fmask_one_frag_mode            = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, FMASK_COMPRESS_1FRAG_ONLY) != 0;
-	info.dcc_compression_enable         = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, DCC_ENABLE) != 0;
-	info.cmask_tile_mode_neo            = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, CMASK_ADDR_TYPE);
-	info.neo_mode                       = KYTY_PM4_GET(buffer[4], CB_COLOR0_INFO, ALT_TILE_MODE) != 0;
-
-	if (!info.neo_mode && Config::IsNextGen())
-	{
-		info.neo_mode = true;
-	}
+	info                        = State::DecodeColorInfo(buffer[4], Config::IsNextGen());
 
 	//	attrib.force_dest_alpha_to_one  = (buffer[5] & 0x20000u) != 0;
 	//	attrib.tile_mode                = buffer[5] & 0x1fu;
@@ -2882,25 +2747,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_info)
 {
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_STENCIL_INFO);
-
-	HW::DepthStencilInfo r;
-
-	//	r.expclear_enabled = (buffer[0] & 0x08000000u) != 0;
-	//	r.tile_split       = (buffer[0] >> 13u) & 0x7u;
-	//	r.format          = (buffer[0] >> Pm4::DB_STENCIL_INFO_FORMAT_SHIFT) & Pm4::DB_STENCIL_INFO_FORMAT_MASK;
-	//	r.tile_mode_index = (buffer[0] >> Pm4::DB_STENCIL_INFO_TILE_MODE_INDEX_SHIFT) & Pm4::DB_STENCIL_INFO_TILE_MODE_INDEX_MASK;
-	//	r.tile_stencil_disable =
-	//	    ((buffer[0] >> Pm4::DB_STENCIL_INFO_TILE_STENCIL_DISABLE_SHIFT) & Pm4::DB_STENCIL_INFO_TILE_STENCIL_DISABLE_MASK) != 0;
-
-	r.format                     = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, FORMAT);
-	r.texture_compatible_stencil = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, ITERATE_FLUSH) != 0;
-	r.partially_resident         = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, PARTIALLY_RESIDENT) != 0;
-	r.tile_split                 = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, RESERVED_FIELD_1);
-	r.tile_mode_index            = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, TILE_MODE_INDEX);
-	r.expclear_enabled           = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, ALLOW_EXPCLEAR) != 0;
-	r.tile_stencil_disable       = KYTY_PM4_GET(buffer[1], DB_STENCIL_INFO, TILE_STENCIL_DISABLE) != 0;
-
-	cp->GetCtx()->SetDepthStencilInfo(r);
+	cp->GetCtx()->SetDepthStencilInfo(State::DecodeDepthStencilInfo(buffer[0]));
 
 	return 1;
 }
@@ -2938,7 +2785,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_scale_offset)
 			case 3: cp->GetCtx()->SetViewportYOffset(viewport, value); break;
 			case 4: cp->GetCtx()->SetViewportZScale(viewport, value); break;
 			case 5: cp->GetCtx()->SetViewportZOffset(viewport, value); break;
-			default: EXIT("invalid viewport component\n");
+			default: printf("WARNING: invalid viewport component (continuing)\n"); break;
 		}
 	}
 
@@ -3057,13 +2904,11 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_rsrc)
 			case Pm4::COMPUTE_PGM_RSRC1: decode_compute_pgm_rsrc1(r, buffer[i]); break;
 			case Pm4::COMPUTE_PGM_RSRC2: decode_compute_pgm_rsrc2(r, buffer[i]); break;
 			case Pm4::COMPUTE_PGM_RSRC3: r.rsrc3 = buffer[i]; break;
-			case Pm4::COMPUTE_SHADER_CHKSUM:
-				r.chksum = (r.chksum & 0xffffffff00000000ull) | static_cast<uint64_t>(buffer[i]);
-				break;
+			case Pm4::COMPUTE_SHADER_CHKSUM: r.chksum = (r.chksum & 0xffffffff00000000ull) | static_cast<uint64_t>(buffer[i]); break;
 			case Pm4::COMPUTE_SHADER_CHKSUM_HI:
 				r.chksum = (r.chksum & 0x00000000ffffffffull) | (static_cast<uint64_t>(buffer[i]) << 32u);
 				break;
-			default: EXIT("unexpected compute rsrc register 0x%08" PRIx32 "\n", offset);
+			default: printf("WARNING: unexpected compute rsrc register (continuing)\n"); break;
 		}
 	}
 
@@ -3085,7 +2930,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_num_thread)
 			case Pm4::COMPUTE_NUM_THREAD_X: cp->GetShCtx()->SetCsNumThreadX(value); break;
 			case Pm4::COMPUTE_NUM_THREAD_Y: cp->GetShCtx()->SetCsNumThreadY(value); break;
 			case Pm4::COMPUTE_NUM_THREAD_Z: cp->GetShCtx()->SetCsNumThreadZ(value); break;
-			default: EXIT("unexpected compute thread register 0x%08" PRIx32 "\n", offset);
+			default: printf("WARNING: unexpected compute thread register (continuing)\n"); break;
 		}
 	}
 
@@ -3158,9 +3003,9 @@ KYTY_HW_SH_PARSER(hw_sh_set_ps_shader)
 	r1.require_forward_progress = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, FWD_PROGRESS) != 0;
 	r1.fp16_overflow            = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, FP16_OVFL) != 0;
 
-	r2.scratch_en = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, SCRATCH_EN);
-	r2.user_sgpr  = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR) +
-	               (KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR_MSB) << 5u);
+	r2.scratch_en             = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, SCRATCH_EN);
+	r2.user_sgpr              = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR) +
+	                            (KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR_MSB) << 5u);
 	r2.wave_cnt_en            = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, WAVE_CNT_EN);
 	r2.extra_lds_size         = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, EXTRA_LDS_SIZE);
 	r2.raster_ordered_shading = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, LOAD_INTRAWAVE_COLLISION);
@@ -3263,9 +3108,9 @@ KYTY_HW_SH_PARSER(hw_sh_set_vs_shader)
 	r1.require_forward_progress = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, FWD_PROGRESS) != 0;
 	r1.fp16_overflow            = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, FP16_OVFL) != 0;
 
-	r2.scratch_en = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, SCRATCH_EN) != 0;
-	r2.user_sgpr  = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, USER_SGPR) +
-	               (KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, USER_SGPR_MSB) << 5u);
+	r2.scratch_en        = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, SCRATCH_EN) != 0;
+	r2.user_sgpr         = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, USER_SGPR) +
+	                       (KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, USER_SGPR_MSB) << 5u);
 	r2.offchip_lds       = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, OC_LDS_EN) != 0;
 	r2.streamout_enabled = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, SO_EN) != 0;
 	r2.shared_vgprs      = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, SHARED_VGPR_CNT);
@@ -3345,9 +3190,9 @@ KYTY_HW_SH_PARSER(hw_sh_update_ps_shader)
 	r1.require_forward_progress = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, FWD_PROGRESS) != 0;
 	r1.fp16_overflow            = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, FP16_OVFL) != 0;
 
-	r2.scratch_en = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, SCRATCH_EN);
-	r2.user_sgpr  = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR) +
-	               (KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR_MSB) << 5u);
+	r2.scratch_en             = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, SCRATCH_EN);
+	r2.user_sgpr              = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR) +
+	                            (KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR_MSB) << 5u);
 	r2.wave_cnt_en            = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, WAVE_CNT_EN);
 	r2.extra_lds_size         = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, EXTRA_LDS_SIZE);
 	r2.raster_ordered_shading = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, LOAD_INTRAWAVE_COLLISION);
@@ -3385,9 +3230,9 @@ KYTY_HW_SH_PARSER(hw_sh_update_vs_shader)
 	r1.require_forward_progress = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, FWD_PROGRESS) != 0;
 	r1.fp16_overflow            = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, FP16_OVFL) != 0;
 
-	r2.scratch_en = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, SCRATCH_EN) != 0;
-	r2.user_sgpr  = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, USER_SGPR) +
-	               (KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, USER_SGPR_MSB) << 5u);
+	r2.scratch_en        = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, SCRATCH_EN) != 0;
+	r2.user_sgpr         = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, USER_SGPR) +
+	                       (KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, USER_SGPR_MSB) << 5u);
 	r2.offchip_lds       = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, OC_LDS_EN) != 0;
 	r2.streamout_enabled = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, SO_EN) != 0;
 	r2.shared_vgprs      = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, SHARED_VGPR_CNT);
@@ -3528,7 +3373,7 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			// 0x8000 cache-control qualifier on this full-target barrier.
 			if (!GraphicsAgcFullTargetBarrierGcrSupported(gcr_cntl))
 			{
-				EXIT("unsupported full-target barrier gcr_cntl=0x%08" PRIx32 "\n", gcr_cntl);
+				printf("WARNING: unsupported full-target barrier (continuing)\n");
 			}
 			// AGC size_bytes == -1 encodes as size_lo == 0 (full range). The base
 			// dword is still written from the guest pointer (observed post-Play
@@ -3536,7 +3381,7 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			// ranged barrier, which is not yet supported for this cache action.
 			if (size_lo != 0)
 			{
-				EXIT("unsupported full-target barrier range: base=0x%08" PRIx64 ", size=0x%08" PRIx64 "\n", base_lo, size_lo);
+				printf("WARNING: unsupported full-target barrier (continuing)\n");
 			}
 
 			EXIT_IF(target_mask != 0x00007fc0);
@@ -3588,9 +3433,7 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			cp->MemoryBarrier();
 			break;
 
-		default:
-			EXIT("unknown barrier: 0x%08" PRIx32 ", 0x%08" PRIx32 ", 0x%08" PRIx32 ", 0x%08" PRIx32 "\n", cache_action, target_mask,
-			     extended_action, action);
+		default: printf("WARNING: unknown barrier (continuing)\n");
 	}
 
 	if (stall_mode == 0)
@@ -3667,7 +3510,7 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 		cp->ReadGds(addr, src / 4, size / 4);
 	} else
 	{
-		EXIT("unknown dma\n");
+		printf("WARNING: unknown DMA (continuing)\n");
 	}
 
 	return 6;
@@ -3742,7 +3585,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 			return 9;
 		}
 
-		EXIT("invalid draw_index\n");
+		printf("WARNING: invalid draw_index (continuing)\n");
 	}
 
 	return 1;
@@ -4052,7 +3895,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0021048);
 
-	auto*    indirect_buffer = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
+	auto*    indirect_buffer   = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 	uint32_t indirect_num_regs = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
@@ -4070,16 +3913,12 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 		}
 		if (!GraphicsNormalizeIndirectRegisterPair(Pm4::CX_NUM, cmd_offset, value))
 		{
-			EXIT("unsupported indirect CX register: pair=%u offset=0x%08" PRIx32 " value=0x%08" PRIx32
-			     " registers=%u\n",
-			     i, cmd_offset, value, indirect_num_regs);
+			printf("WARNING: unsupported/unknown indirect register (continuing)\n");
 		}
 		if (dump_ps_input_writes && cmd_offset >= Pm4::SPI_PS_INPUT_CNTL_0 && cmd_offset <= Pm4::SPI_PS_INPUT_CNTL_31)
 		{
-			std::fprintf(stderr,
-			             "KYTY_PS_INPUT_WRITE indirect pair=%u slot=%u value=0x%08" PRIx32 " count=%u base=%p\n", i,
-			             cmd_offset - Pm4::SPI_PS_INPUT_CNTL_0, value, indirect_num_regs,
-			             static_cast<void*>(indirect_buffer - i * 2u));
+			std::fprintf(stderr, "KYTY_PS_INPUT_WRITE indirect pair=%u slot=%u value=0x%08" PRIx32 " count=%u base=%p\n", i,
+			             cmd_offset - Pm4::SPI_PS_INPUT_CNTL_0, value, indirect_num_regs, static_cast<void*>(indirect_buffer - i * 2u));
 		}
 
 		auto pfunc = g_hw_ctx_indirect_func[cmd_offset & (Pm4::CX_NUM - 1)];
@@ -4088,15 +3927,14 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 		{
 			char identity[64] {};
 			std::snprintf(identity, sizeof(identity), "unknown-cx-reg:0x%05" PRIx32, cmd_offset);
-			const auto decision =
-			    Core::BringUp::Report(Core::BringUp::Feature::GraphicsPermissive, Core::BringUp::Subsystem::Graphics,
-			                         identity, __FILE__, __LINE__);
+			const auto decision = Core::BringUp::Report(Core::BringUp::Feature::GraphicsPermissive, Core::BringUp::Subsystem::Graphics,
+			                                            identity, __FILE__, __LINE__);
 			if (decision == Core::BringUp::Decision::Continue)
 			{
 				printf("WARNING: skipping unknown cx reg 0x%" PRIx32 "\n", cmd_offset);
 				continue;
 			}
-			EXIT("unknown cx reg at %05" PRIx32 ": 0x%" PRIx32 "\n", num_dw - dw, cmd_offset);
+			printf("WARNING: unsupported/unknown indirect register (continuing)\n");
 		}
 
 		pfunc(cp, cmd_offset, value);
@@ -4111,7 +3949,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0021044);
 
-	auto*    indirect_buffer = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
+	auto*    indirect_buffer   = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 	uint32_t indirect_num_regs = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
@@ -4134,15 +3972,14 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 		{
 			char identity[64] {};
 			std::snprintf(identity, sizeof(identity), "unknown-sh-reg:0x%05" PRIx32, cmd_offset);
-			const auto decision =
-			    Core::BringUp::Report(Core::BringUp::Feature::GraphicsPermissive, Core::BringUp::Subsystem::Graphics,
-			                         identity, __FILE__, __LINE__);
+			const auto decision = Core::BringUp::Report(Core::BringUp::Feature::GraphicsPermissive, Core::BringUp::Subsystem::Graphics,
+			                                            identity, __FILE__, __LINE__);
 			if (decision == Core::BringUp::Decision::Continue)
 			{
 				printf("WARNING: skipping unknown sh reg 0x%" PRIx32 "\n", cmd_offset);
 				continue;
 			}
-			EXIT("unknown sh reg at %05" PRIx32 ": 0x%" PRIx32 "\n", num_dw - dw, cmd_offset);
+			printf("WARNING: unsupported/unknown indirect register (continuing)\n");
 		}
 
 		pfunc(cp, cmd_offset, value);
@@ -4157,7 +3994,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc002104c);
 
-	auto*    indirect_buffer = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
+	auto*    indirect_buffer   = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 	uint32_t indirect_num_regs = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
@@ -4194,15 +4031,14 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 		{
 			char identity[64] {};
 			std::snprintf(identity, sizeof(identity), "unknown-uc-reg:0x%05" PRIx32, cmd_offset);
-			const auto decision =
-			    Core::BringUp::Report(Core::BringUp::Feature::GraphicsPermissive, Core::BringUp::Subsystem::Graphics,
-			                         identity, __FILE__, __LINE__);
+			const auto decision = Core::BringUp::Report(Core::BringUp::Feature::GraphicsPermissive, Core::BringUp::Subsystem::Graphics,
+			                                            identity, __FILE__, __LINE__);
 			if (decision == Core::BringUp::Decision::Continue)
 			{
 				printf("WARNING: skipping unknown uc reg 0x%" PRIx32 "\n", cmd_offset);
 				continue;
 			}
-			EXIT("unknown uc reg at %05" PRIx32 ": 0x%" PRIx32 "\n", num_dw - dw, cmd_offset);
+			printf("WARNING: unsupported/unknown indirect register (continuing)\n");
 		}
 
 		pfunc(cp, cmd_offset, value);
@@ -4247,7 +4083,7 @@ KYTY_CP_OP_PARSER(cp_op_marker)
 			cp->FlipWithInterrupt(eop_event_type, cache_action, addr, value);
 			break;
 		}
-		default: EXIT("unknown marker at %05" PRIx32 ": 0x%" PRIx32 "\n", num_dw - dw, id); break;
+		default: printf("WARNING: unknown marker (continuing)\n"); break;
 	}
 
 	return len_dw + 1;
@@ -4284,7 +4120,7 @@ KYTY_CP_OP_PARSER(cp_op_nop)
 		return cp_op(cp, cmd_id, buffer, dw, num_dw);
 	}
 
-	EXIT("unknown custom code at 0x%05" PRIx32 ": 0x%02" PRIx32 "\n", num_dw - dw, r);
+	printf("WARNING: unknown custom code (continuing)\n");
 
 	return 0;
 }
@@ -4357,7 +4193,7 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 
 	if (custom)
 	{
-		const auto control = GraphicsDecodeAgcReleaseMemControl(buffer[1]);
+		const auto control  = GraphicsDecodeAgcReleaseMemControl(buffer[1]);
 		uint32_t   gcr_cntl = control.gcr_cntl;
 		uint32_t   data_sel = control.data_sel;
 		interrupt_selector  = control.interrupt;
@@ -4448,7 +4284,7 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 			event_write_source = 4;
 		} else
 		{
-			EXIT("unsupported ReleaseMem data_sel=%u event=%u gcr=%u\n", data_sel, eop_event_type, gcr_cntl);
+			printf("WARNING: unsupported ReleaseMem data_sel (continuing)\n");
 		}
 	}
 
@@ -4499,8 +4335,7 @@ KYTY_CP_OP_PARSER(cp_op_set_context_reg)
 
 	if (pfunc == nullptr)
 	{
-		EXIT("unknown context register\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32 "\n\tcmd_offset = %08" PRIx32 "\n", num_dw - dw, cmd_id,
-		     cmd_offset);
+		printf("WARNING: unknown register write (continuing)\n");
 	}
 
 	auto s = pfunc(cp, cmd_id, cmd_offset, buffer + 1, dw);
@@ -4522,8 +4357,7 @@ KYTY_CP_OP_PARSER(cp_op_set_shader_reg)
 
 	if (pfunc == nullptr)
 	{
-		EXIT("unknown shader register\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32 "\n\tcmd_offset = %08" PRIx32 "\n", num_dw - dw, cmd_id,
-		     cmd_offset);
+		printf("WARNING: unknown register write (continuing)\n");
 	}
 
 	auto s = pfunc(cp, cmd_id, cmd_offset, buffer + 1, dw);
@@ -4543,8 +4377,7 @@ KYTY_CP_OP_PARSER(cp_op_set_uconfig_reg)
 
 	if (pfunc == nullptr)
 	{
-		EXIT("unknown user config register\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32 "\n\tcmd_offset = %08" PRIx32 "\n", num_dw - dw,
-		     cmd_id, cmd_offset);
+		printf("WARNING: unknown register write (continuing)\n");
 	}
 
 	auto s = pfunc(cp, cmd_id, cmd_offset, buffer + 1, dw);
@@ -4591,7 +4424,7 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_32)
 		used = 13;
 	} else
 	{
-		EXIT("unknown WaitRegMem32 packet: %08" PRIx32 "\n", cmd_id);
+		printf("WARNING: unknown WaitRegMem32 packet (continuing)\n");
 	}
 
 	cp->WaitRegMem32(func, addr, ref, mask, poll);
@@ -4620,8 +4453,7 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_64)
 
 	if (addr == nullptr)
 	{
-		EXIT("WaitRegMem64 null addr body=%08x %08x %08x %08x %08x %08x %08x %08x\n", buffer[0], buffer[1], buffer[2], buffer[3],
-		     buffer[4], buffer[5], buffer[6], buffer[7]);
+		printf("WARNING: WaitRegMem64 null addr (continuing)\n");
 	}
 
 	cp->WaitRegMem64(func, addr, ref, mask, poll);
@@ -4705,11 +4537,10 @@ KYTY_CP_OP_PARSER(cp_op_write_data)
 	auto  write_control = buffer[0];
 	auto* dst           = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 
-	const uint32_t write_body_dwords = 1u + dw_num;
-	const uint32_t next_packet_dwords =
-	    (dw > 1u + write_body_dwords) ? (dw - 1u - write_body_dwords) : 0u;
-	const uint32_t* next_packet = buffer + write_body_dwords;
-	const bool matching_wait_mem64 =
+	const uint32_t  write_body_dwords  = 1u + dw_num;
+	const uint32_t  next_packet_dwords = (dw > 1u + write_body_dwords) ? (dw - 1u - write_body_dwords) : 0u;
+	const uint32_t* next_packet        = buffer + write_body_dwords;
+	const bool      matching_wait_mem64 =
 	    custom && GraphicsWriteDataPrecedesMatchingWaitMem64(buffer, write_body_dwords, next_packet, next_packet_dwords);
 
 	cp->WriteData(dst, buffer + 3, dw_num - 2, write_control, custom, matching_wait_mem64);
@@ -4725,59 +4556,33 @@ static void graphics_init_jmp_tables_cx_indirect()
 	}
 
 	g_hw_ctx_indirect_func[Pm4::PA_SC_GENERIC_SCISSOR_TL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		State::SetGenericScissorTl(*cp->GetCtx(), value);
-	};
+	{ State::SetGenericScissorTl(*cp->GetCtx(), value); };
 	g_hw_ctx_indirect_func[Pm4::PA_SC_GENERIC_SCISSOR_BR] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		State::SetGenericScissorBr(*cp->GetCtx(), value);
-	};
+	{ State::SetGenericScissorBr(*cp->GetCtx(), value); };
 	// Screen scissor is handled as a TL+BR pair on the direct SET_CONTEXT_REG path;
 	// Gen5 CX-indirect emits the halves separately.
 	g_hw_ctx_indirect_func[Pm4::PA_SC_SCREEN_SCISSOR_TL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		State::SetScreenScissorTl(*cp->GetCtx(), value);
-	};
+	{ State::SetScreenScissorTl(*cp->GetCtx(), value); };
 	g_hw_ctx_indirect_func[Pm4::PA_SC_SCREEN_SCISSOR_BR] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		State::SetScreenScissorBr(*cp->GetCtx(), value);
-	};
-	g_hw_ctx_indirect_func[Pm4::PA_SU_SC_MODE_CNTL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		State::SetModeControl(*cp->GetCtx(), value);
-	};
+	{ State::SetScreenScissorBr(*cp->GetCtx(), value); };
+	g_hw_ctx_indirect_func[Pm4::PA_SU_SC_MODE_CNTL] = [](KYTY_HW_CTX_INDIRECT_ARGS) { State::SetModeControl(*cp->GetCtx(), value); };
 	for (uint32_t reg = Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL; reg <= Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET; reg++)
 	{
-		g_hw_ctx_indirect_func[reg] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-		{
-			State::SetPolygonOffsetRegister(*cp->GetCtx(), cmd_offset, value);
-		};
+		g_hw_ctx_indirect_func[reg] = [](KYTY_HW_CTX_INDIRECT_ARGS) { State::SetPolygonOffsetRegister(*cp->GetCtx(), cmd_offset, value); };
 	}
 	// Gen5 CX-indirect emits DB_RENDER_CONTROL (offset 0) as a lone pair; direct
 	// SET_CONTEXT_REG already uses the same decoder.
-	g_hw_ctx_indirect_func[Pm4::DB_RENDER_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		State::SetRenderControl(*cp->GetCtx(), value);
-	};
-	g_hw_ctx_indirect_func[Pm4::DB_STENCIL_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		State::SetStencilControl(*cp->GetCtx(), value);
-	};
+	g_hw_ctx_indirect_func[Pm4::DB_RENDER_CONTROL]  = [](KYTY_HW_CTX_INDIRECT_ARGS) { State::SetRenderControl(*cp->GetCtx(), value); };
+	g_hw_ctx_indirect_func[Pm4::DB_STENCIL_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS) { State::SetStencilControl(*cp->GetCtx(), value); };
 	// Direct SET_CONTEXT_REG writes REFMASK+REFMASK_BF as a 2-dword pair; Gen5
 	// CX-indirect emits each half alone.
-	g_hw_ctx_indirect_func[Pm4::DB_STENCILREFMASK] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		State::SetStencilRefMask(*cp->GetCtx(), value);
-	};
-	g_hw_ctx_indirect_func[Pm4::DB_STENCILREFMASK_BF] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		State::SetStencilRefMaskBf(*cp->GetCtx(), value);
-	};
+	g_hw_ctx_indirect_func[Pm4::DB_STENCILREFMASK]    = [](KYTY_HW_CTX_INDIRECT_ARGS) { State::SetStencilRefMask(*cp->GetCtx(), value); };
+	g_hw_ctx_indirect_func[Pm4::DB_STENCILREFMASK_BF] = [](KYTY_HW_CTX_INDIRECT_ARGS) { State::SetStencilRefMaskBf(*cp->GetCtx(), value); };
 	// Direct path registers CB_BLEND0..7; indirect must share the same decoder
 	// (captured: CB_BLEND1_CONTROL = 0x1e1 after post-menu load).
 	for (uint32_t slot = 0; slot < 8; slot++)
 	{
-		const uint32_t blend_reg = Pm4::CB_BLEND0_CONTROL + slot;
+		const uint32_t blend_reg          = Pm4::CB_BLEND0_CONTROL + slot;
 		g_hw_ctx_indirect_func[blend_reg] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 		{
 			const uint32_t blend_slot = cmd_offset - Pm4::CB_BLEND0_CONTROL;
@@ -4835,27 +4640,8 @@ static void graphics_init_jmp_tables_cx_indirect()
 	{
 		g_hw_ctx_indirect_func[cmd_offset] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 		{
-			uint32_t      slot = (cmd_offset - Pm4::CB_COLOR0_INFO) / 15;
-			HW::ColorInfo info;
-			info.format                         = KYTY_PM4_GET(value, CB_COLOR0_INFO, FORMAT);
-			info.channel_type                   = KYTY_PM4_GET(value, CB_COLOR0_INFO, NUMBER_TYPE);
-			info.channel_order                  = KYTY_PM4_GET(value, CB_COLOR0_INFO, COMP_SWAP);
-			info.cmask_fast_clear_enable        = KYTY_PM4_GET(value, CB_COLOR0_INFO, FAST_CLEAR) != 0;
-			info.fmask_compression_enable       = KYTY_PM4_GET(value, CB_COLOR0_INFO, COMPRESSION) != 0;
-			info.blend_clamp                    = KYTY_PM4_GET(value, CB_COLOR0_INFO, BLEND_CLAMP) != 0;
-			info.blend_bypass                   = KYTY_PM4_GET(value, CB_COLOR0_INFO, BLEND_BYPASS) != 0;
-			info.round_mode                     = KYTY_PM4_GET(value, CB_COLOR0_INFO, ROUND_MODE) != 0;
-			info.cmask_tile_mode                = KYTY_PM4_GET(value, CB_COLOR0_INFO, CMASK_IS_LINEAR);
-			info.fmask_data_compression_disable = KYTY_PM4_GET(value, CB_COLOR0_INFO, FMASK_COMPRESSION_DISABLE) != 0;
-			info.fmask_one_frag_mode            = KYTY_PM4_GET(value, CB_COLOR0_INFO, FMASK_COMPRESS_1FRAG_ONLY) != 0;
-			info.dcc_compression_enable         = KYTY_PM4_GET(value, CB_COLOR0_INFO, DCC_ENABLE) != 0;
-			info.cmask_tile_mode_neo            = KYTY_PM4_GET(value, CB_COLOR0_INFO, CMASK_ADDR_TYPE);
-			info.neo_mode                       = KYTY_PM4_GET(value, CB_COLOR0_INFO, ALT_TILE_MODE) != 0;
-			if (!info.neo_mode && Config::IsNextGen())
-			{
-				info.neo_mode = true;
-			}
-			cp->GetCtx()->SetColorInfo(slot, info);
+			const uint32_t slot = (cmd_offset - Pm4::CB_COLOR0_INFO) / 15;
+			cp->GetCtx()->SetColorInfo(slot, State::DecodeColorInfo(value, Config::IsNextGen()));
 		};
 	}
 
@@ -5165,7 +4951,7 @@ static void graphics_init_jmp_tables_cx_indirect()
 	{
 		g_hw_ctx_indirect_func[Pm4::PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0 + sample] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 		{
-			auto control = cp->GetCtx()->GetAaSampleControl();
+			auto control                                                           = cp->GetCtx()->GetAaSampleControl();
 			control.locations[cmd_offset - Pm4::PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0] = value;
 			cp->GetCtx()->SetAaSampleControl(control);
 		};
@@ -5173,25 +4959,30 @@ static void graphics_init_jmp_tables_cx_indirect()
 
 	// Host-irrelevant GPU metadata / modes that Kyty accepts without state
 	// (no guest-visible Vulkan mapping yet). Accept to keep PM4 streams moving.
-	const auto ignore_cx = [](KYTY_HW_CTX_INDIRECT_ARGS) { (void)cp; (void)cmd_offset; (void)value; };
-	g_hw_ctx_indirect_func[Pm4::CB_DCC_CONTROL]                        = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::DB_COUNT_CONTROL]                      = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::DB_RENDER_OVERRIDE]                    = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::DB_RENDER_OVERRIDE2]                   = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::DB_DFSM_CONTROL]                       = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::DB_RMI_L2_CACHE_CONTROL]               = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::CB_RMI_GL2_CACHE_CONTROL]              = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::TA_BC_BASE_ADDR]                       = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::TA_BC_BASE_ADDR_HI]                    = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::PA_SU_POINT_SIZE]                      = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::PA_SU_POINT_MINMAX]                    = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::SPI_TMPRING_SIZE]                      = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::VGT_MULTI_PRIM_IB_RESET_INDX]          = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::VGT_DRAW_PAYLOAD_CNTL]                 = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::VGT_PRIMITIVEID_RESET]                 = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::PA_CL_OBJPRIM_ID_CNTL]                 = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::PA_SC_FOV_WINDOW_LR]                   = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::PA_SC_FOV_WINDOW_TB]                   = ignore_cx;
+	const auto ignore_cx = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{
+		(void)cp;
+		(void)cmd_offset;
+		(void)value;
+	};
+	g_hw_ctx_indirect_func[Pm4::CB_DCC_CONTROL]               = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_COUNT_CONTROL]             = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_RENDER_OVERRIDE]           = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_RENDER_OVERRIDE2]          = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_DFSM_CONTROL]              = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_RMI_L2_CACHE_CONTROL]      = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::CB_RMI_GL2_CACHE_CONTROL]     = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::TA_BC_BASE_ADDR]              = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::TA_BC_BASE_ADDR_HI]           = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SU_POINT_SIZE]             = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SU_POINT_MINMAX]           = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::SPI_TMPRING_SIZE]             = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_MULTI_PRIM_IB_RESET_INDX] = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_DRAW_PAYLOAD_CNTL]        = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_PRIMITIVEID_RESET]        = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_CL_OBJPRIM_ID_CNTL]        = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_FOV_WINDOW_LR]          = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::PA_SC_FOV_WINDOW_TB]          = ignore_cx;
 	// PA_SC_FSR_ENABLE / FSR_RECURSIONS* use host-only fake offsets
 	// (0x800003FC..) outside the CX table; bulk path only.
 	g_hw_ctx_indirect_func[Pm4::PA_SC_MODE_CNTL_1]                     = ignore_cx;
@@ -5207,8 +4998,7 @@ static void graphics_init_jmp_tables_cx_indirect()
 	// Window scissor/offset and tessellation stage regs need full Context
 	// fields (Kyty). Accept values for now so Gen5 bootstreams proceed;
 	// geometry that depends on them will need the proper setters later.
-	g_hw_ctx_indirect_func[Pm4::PA_SC_WINDOW_OFFSET] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{ State::SetWindowOffset(*cp->GetCtx(), value); };
+	g_hw_ctx_indirect_func[Pm4::PA_SC_WINDOW_OFFSET]     = [](KYTY_HW_CTX_INDIRECT_ARGS) { State::SetWindowOffset(*cp->GetCtx(), value); };
 	g_hw_ctx_indirect_func[Pm4::PA_SC_WINDOW_SCISSOR_TL] = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::PA_SC_WINDOW_SCISSOR_BR] = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::VGT_HOS_MAX_TESS_LEVEL]  = ignore_cx;
@@ -5216,7 +5006,7 @@ static void graphics_init_jmp_tables_cx_indirect()
 	g_hw_ctx_indirect_func[Pm4::VGT_PRIMITIVEID_EN]      = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::VGT_REUSE_OFF]           = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::VGT_TESS_DISTRIBUTION]   = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::VGT_LS_HS_CONFIG]         = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::VGT_LS_HS_CONFIG]        = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::VGT_TF_PARAM]            = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_BOUNDS_MIN]     = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_BOUNDS_MAX]     = ignore_cx;
@@ -5226,12 +5016,12 @@ static void graphics_init_jmp_tables_cx_indirect()
 	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_SLICE]          = ignore_cx;
 	// Legacy EPITCH fields. GFX10 Vulkan depth resources derive their geometry
 	// from the image descriptor rather than these GFX9-era context registers.
-	g_hw_ctx_indirect_func[Pm4::DB_Z_INFO2]               = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::DB_STENCIL_INFO2]         = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_Z_INFO2]                = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_STENCIL_INFO2]          = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::PA_SC_CENTROID_PRIORITY_0] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 	{
-		auto r               = cp->GetCtx()->GetAaSampleControl();
-		r.centroid_priority  = (r.centroid_priority & 0xffffffff00000000ull) | value;
+		auto r              = cp->GetCtx()->GetAaSampleControl();
+		r.centroid_priority = (r.centroid_priority & 0xffffffff00000000ull) | value;
 		cp->GetCtx()->SetAaSampleControl(r);
 	};
 	g_hw_ctx_indirect_func[Pm4::PA_SC_CENTROID_PRIORITY_1] = [](KYTY_HW_CTX_INDIRECT_ARGS)
@@ -5321,34 +5111,10 @@ static void graphics_init_jmp_tables_cx_indirect()
 	g_hw_ctx_indirect_func[Pm4::PA_SC_SHADER_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS) { cp->GetCtx()->SetScShaderControl(value); };
 	g_hw_ctx_indirect_func[Pm4::CB_TARGET_MASK]       = [](KYTY_HW_CTX_INDIRECT_ARGS) { cp->GetCtx()->SetRenderTargetMask(value); };
 
-	g_hw_ctx_indirect_func[Pm4::DB_Z_INFO] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		HW::DepthZInfo r;
-		r.format                    = KYTY_PM4_GET(value, DB_Z_INFO, FORMAT);
-		r.num_samples               = KYTY_PM4_GET(value, DB_Z_INFO, NUM_SAMPLES);
-		r.embedded_sample_locations = KYTY_PM4_GET(value, DB_Z_INFO, ITERATE_FLUSH) != 0;
-		r.partially_resident        = KYTY_PM4_GET(value, DB_Z_INFO, PARTIALLY_RESIDENT) != 0;
-		r.num_mip_levels            = KYTY_PM4_GET(value, DB_Z_INFO, MAXMIP);
-		r.tile_mode_index           = KYTY_PM4_GET(value, DB_Z_INFO, TILE_MODE_INDEX);
-		r.plane_compression         = KYTY_PM4_GET(value, DB_Z_INFO, DECOMPRESS_ON_N_ZPLANES);
-		r.expclear_enabled          = KYTY_PM4_GET(value, DB_Z_INFO, ALLOW_EXPCLEAR) != 0;
-		r.tile_surface_enable       = KYTY_PM4_GET(value, DB_Z_INFO, TILE_SURFACE_ENABLE) != 0;
-		r.zrange_precision          = KYTY_PM4_GET(value, DB_Z_INFO, ZRANGE_PRECISION);
-		cp->GetCtx()->SetDepthZInfo(r);
-	};
+	g_hw_ctx_indirect_func[Pm4::DB_Z_INFO] = [](KYTY_HW_CTX_INDIRECT_ARGS) { cp->GetCtx()->SetDepthZInfo(State::DecodeDepthZInfo(value)); };
 
 	g_hw_ctx_indirect_func[Pm4::DB_STENCIL_INFO] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{
-		HW::DepthStencilInfo r;
-		r.format                     = KYTY_PM4_GET(value, DB_STENCIL_INFO, FORMAT);
-		r.texture_compatible_stencil = KYTY_PM4_GET(value, DB_STENCIL_INFO, ITERATE_FLUSH) != 0;
-		r.partially_resident         = KYTY_PM4_GET(value, DB_STENCIL_INFO, PARTIALLY_RESIDENT) != 0;
-		r.tile_split                 = KYTY_PM4_GET(value, DB_STENCIL_INFO, RESERVED_FIELD_1);
-		r.tile_mode_index            = KYTY_PM4_GET(value, DB_STENCIL_INFO, TILE_MODE_INDEX);
-		r.expclear_enabled           = KYTY_PM4_GET(value, DB_STENCIL_INFO, ALLOW_EXPCLEAR) != 0;
-		r.tile_stencil_disable       = KYTY_PM4_GET(value, DB_STENCIL_INFO, TILE_STENCIL_DISABLE) != 0;
-		cp->GetCtx()->SetDepthStencilInfo(r);
-	};
+	{ cp->GetCtx()->SetDepthStencilInfo(State::DecodeDepthStencilInfo(value)); };
 
 	g_hw_ctx_indirect_func[Pm4::DB_Z_READ_BASE] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 	{
@@ -5464,8 +5230,7 @@ static void graphics_init_jmp_tables_cx_indirect()
 		cp->GetCtx()->SetScanModeControl(r);
 	};
 
-	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
-	{ State::SetDepthControl(*cp->GetCtx(), value); };
+	g_hw_ctx_indirect_func[Pm4::DB_DEPTH_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS) { State::SetDepthControl(*cp->GetCtx(), value); };
 }
 
 static void graphics_init_jmp_tables_sh_indirect()
@@ -5590,10 +5355,8 @@ static void graphics_init_jmp_tables_sh_indirect()
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC2] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{ decode_compute_pgm_rsrc2(cp->GetShCtx()->CsRegs(), value); };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_RESOURCE_LIMITS] = [](KYTY_HW_SH_INDIRECT_ARGS)
-	{
-		EXIT_NOT_IMPLEMENTED(!GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1));
-	};
-	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC3] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->CsRegs().rsrc3 = value; };
+	{ EXIT_NOT_IMPLEMENTED(!GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1)); };
+	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC3]     = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->CsRegs().rsrc3 = value; };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_SHADER_CHKSUM] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
 		auto& r  = cp->GetShCtx()->CsRegs();
@@ -5653,8 +5416,13 @@ static void graphics_init_jmp_tables_uc_indirect()
 
 	// Remaining UCONFIG regs accepted without host state until HardwareContext
 	// gains matching setters.
-	const auto ignore_uc = [](KYTY_HW_UC_INDIRECT_ARGS) { (void)cp; (void)cmd_offset; (void)value; };
-	g_hw_uc_indirect_func[Pm4::GE_INDX_OFFSET] = [](KYTY_HW_UC_INDIRECT_ARGS) { cp->GetUcfg()->SetIndexOffset(value); };
+	const auto ignore_uc = [](KYTY_HW_UC_INDIRECT_ARGS)
+	{
+		(void)cp;
+		(void)cmd_offset;
+		(void)value;
+	};
+	g_hw_uc_indirect_func[Pm4::GE_INDX_OFFSET]            = [](KYTY_HW_UC_INDIRECT_ARGS) { cp->GetUcfg()->SetIndexOffset(value); };
 	g_hw_uc_indirect_func[Pm4::GE_MULTI_PRIM_IB_RESET_EN] = ignore_uc;
 	g_hw_uc_indirect_func[Pm4::VGT_OBJECT_ID]             = ignore_uc;
 	g_hw_uc_indirect_func[Pm4::TEXTURE_GRADIENT_FACTORS]  = ignore_uc;
@@ -5674,25 +5442,25 @@ static void graphics_init_jmp_tables()
 		func = nullptr;
 	}
 
-	g_hw_ctx_func[Pm4::DB_RENDER_CONTROL]                 = hw_ctx_set_render_control;
-	g_hw_ctx_func[Pm4::DB_STENCIL_CLEAR]                  = hw_ctx_set_stencil_clear;
-	g_hw_ctx_func[Pm4::DB_DEPTH_CLEAR]                    = hw_ctx_set_depth_clear;
-	g_hw_ctx_func[Pm4::PA_SC_SCREEN_SCISSOR_TL]           = hw_ctx_set_screen_scissor;
-	g_hw_ctx_func[Pm4::DB_Z_INFO]                         = hw_ctx_set_depth_render_target;
-	g_hw_ctx_func[Pm4::DB_STENCIL_INFO]                   = hw_ctx_set_stencil_info;
-	g_hw_ctx_func[Pm4::PA_SU_HARDWARE_SCREEN_OFFSET]      = hw_ctx_set_hardware_screen_offset;
-	g_hw_ctx_func[Pm4::PA_SC_WINDOW_OFFSET]               = hw_ctx_set_window_offset;
-	g_hw_ctx_func[Pm4::CB_TARGET_MASK]                    = hw_ctx_set_render_target_mask;
-	g_hw_ctx_func[Pm4::PA_SC_GENERIC_SCISSOR_TL]          = hw_ctx_set_generic_scissor;
-	g_hw_ctx_func[Pm4::CB_BLEND_RED]                      = hw_ctx_set_blend_color;
-	g_hw_ctx_func[Pm4::DB_STENCIL_CONTROL]                = hw_ctx_set_stencil_control;
-	g_hw_ctx_func[Pm4::DB_STENCILREFMASK]                 = hw_ctx_set_stencil_mask;
-	g_hw_ctx_func[Pm4::SPI_PS_INPUT_CNTL_0]               = hw_ctx_set_ps_input;
-	g_hw_ctx_func[Pm4::DB_DEPTH_CONTROL]                  = hw_ctx_set_depth_control;
-	g_hw_ctx_func[Pm4::DB_EQAA]                           = hw_ctx_set_eqaa_control;
-	g_hw_ctx_func[Pm4::CB_COLOR_CONTROL]                  = hw_ctx_set_color_control;
-	g_hw_ctx_func[Pm4::PA_CL_CLIP_CNTL]                   = hw_ctx_set_clip_control;
-	g_hw_ctx_func[Pm4::PA_SU_SC_MODE_CNTL]                = hw_ctx_set_mode_control;
+	g_hw_ctx_func[Pm4::DB_RENDER_CONTROL]            = hw_ctx_set_render_control;
+	g_hw_ctx_func[Pm4::DB_STENCIL_CLEAR]             = hw_ctx_set_stencil_clear;
+	g_hw_ctx_func[Pm4::DB_DEPTH_CLEAR]               = hw_ctx_set_depth_clear;
+	g_hw_ctx_func[Pm4::PA_SC_SCREEN_SCISSOR_TL]      = hw_ctx_set_screen_scissor;
+	g_hw_ctx_func[Pm4::DB_Z_INFO]                    = hw_ctx_set_depth_render_target;
+	g_hw_ctx_func[Pm4::DB_STENCIL_INFO]              = hw_ctx_set_stencil_info;
+	g_hw_ctx_func[Pm4::PA_SU_HARDWARE_SCREEN_OFFSET] = hw_ctx_set_hardware_screen_offset;
+	g_hw_ctx_func[Pm4::PA_SC_WINDOW_OFFSET]          = hw_ctx_set_window_offset;
+	g_hw_ctx_func[Pm4::CB_TARGET_MASK]               = hw_ctx_set_render_target_mask;
+	g_hw_ctx_func[Pm4::PA_SC_GENERIC_SCISSOR_TL]     = hw_ctx_set_generic_scissor;
+	g_hw_ctx_func[Pm4::CB_BLEND_RED]                 = hw_ctx_set_blend_color;
+	g_hw_ctx_func[Pm4::DB_STENCIL_CONTROL]           = hw_ctx_set_stencil_control;
+	g_hw_ctx_func[Pm4::DB_STENCILREFMASK]            = hw_ctx_set_stencil_mask;
+	g_hw_ctx_func[Pm4::SPI_PS_INPUT_CNTL_0]          = hw_ctx_set_ps_input;
+	g_hw_ctx_func[Pm4::DB_DEPTH_CONTROL]             = hw_ctx_set_depth_control;
+	g_hw_ctx_func[Pm4::DB_EQAA]                      = hw_ctx_set_eqaa_control;
+	g_hw_ctx_func[Pm4::CB_COLOR_CONTROL]             = hw_ctx_set_color_control;
+	g_hw_ctx_func[Pm4::PA_CL_CLIP_CNTL]              = hw_ctx_set_clip_control;
+	g_hw_ctx_func[Pm4::PA_SU_SC_MODE_CNTL]           = hw_ctx_set_mode_control;
 	for (uint32_t reg = Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL; reg <= Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET; reg++)
 	{
 		g_hw_ctx_func[reg] = hw_ctx_set_polygon_offset;
@@ -5751,8 +5519,8 @@ static void graphics_init_jmp_tables()
 	{
 		g_hw_ctx_func[reg] = hw_ctx_ignore;
 	}
-	g_hw_ctx_func[Pm4::VGT_SHADER_STAGES_EN]              = hw_ctx_set_shader_stages;
-	g_hw_ctx_func[Pm4::PA_CL_GB_VERT_CLIP_ADJ]            = hw_ctx_set_guard_bands;
+	g_hw_ctx_func[Pm4::VGT_SHADER_STAGES_EN]   = hw_ctx_set_shader_stages;
+	g_hw_ctx_func[Pm4::PA_CL_GB_VERT_CLIP_ADJ] = hw_ctx_set_guard_bands;
 
 	for (uint32_t slot = 0; slot < 8; slot++)
 	{
@@ -5788,15 +5556,15 @@ static void graphics_init_jmp_tables()
 		g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_PS_0 + slot * 1] = hw_sh_set_ps_user_sgpr;
 	}
 
-	g_hw_sh_func[Pm4::COMPUTE_NUM_THREAD_X] = hw_sh_set_cs_num_thread;
-	g_hw_sh_func[Pm4::COMPUTE_NUM_THREAD_Y] = hw_sh_set_cs_num_thread;
-	g_hw_sh_func[Pm4::COMPUTE_NUM_THREAD_Z] = hw_sh_set_cs_num_thread;
-	g_hw_sh_func[Pm4::COMPUTE_PGM_LO]       = hw_sh_set_cs_pgm;
-	g_hw_sh_func[Pm4::COMPUTE_PGM_HI]       = hw_sh_set_cs_pgm;
-	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC1]    = hw_sh_set_cs_rsrc;
-	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC2]    = hw_sh_set_cs_rsrc;
-	g_hw_sh_func[Pm4::COMPUTE_RESOURCE_LIMITS] = hw_sh_set_cs_resource_limits;
-	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC3]    = hw_sh_set_cs_rsrc;
+	g_hw_sh_func[Pm4::COMPUTE_NUM_THREAD_X]     = hw_sh_set_cs_num_thread;
+	g_hw_sh_func[Pm4::COMPUTE_NUM_THREAD_Y]     = hw_sh_set_cs_num_thread;
+	g_hw_sh_func[Pm4::COMPUTE_NUM_THREAD_Z]     = hw_sh_set_cs_num_thread;
+	g_hw_sh_func[Pm4::COMPUTE_PGM_LO]           = hw_sh_set_cs_pgm;
+	g_hw_sh_func[Pm4::COMPUTE_PGM_HI]           = hw_sh_set_cs_pgm;
+	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC1]        = hw_sh_set_cs_rsrc;
+	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC2]        = hw_sh_set_cs_rsrc;
+	g_hw_sh_func[Pm4::COMPUTE_RESOURCE_LIMITS]  = hw_sh_set_cs_resource_limits;
+	g_hw_sh_func[Pm4::COMPUTE_PGM_RSRC3]        = hw_sh_set_cs_rsrc;
 	g_hw_sh_func[Pm4::COMPUTE_SHADER_CHKSUM]    = hw_sh_set_cs_rsrc;
 	g_hw_sh_func[Pm4::COMPUTE_SHADER_CHKSUM_HI] = hw_sh_set_cs_rsrc;
 
@@ -5831,7 +5599,7 @@ static void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_DISPATCH_INDIRECT]       = cp_op_dispatch_indirect;
 	g_cp_op_func[Pm4::IT_DRAW_INDEX_INDIRECT]     = cp_op_draw_index_indirect;
 	g_cp_op_func[Pm4::IT_DRAW_INDEX_2]            = cp_op_draw_index;
-	g_cp_op_func[Pm4::IT_DRAW_INDEX_OFFSET_2]      = cp_op_draw_index_offset;
+	g_cp_op_func[Pm4::IT_DRAW_INDEX_OFFSET_2]     = cp_op_draw_index_offset;
 	g_cp_op_func[Pm4::IT_INDEX_BASE]              = cp_op_index_base;
 	g_cp_op_func[Pm4::IT_INDEX_BUFFER_SIZE]       = cp_op_index_buffer_size;
 	g_cp_op_func[Pm4::IT_INDEX_TYPE]              = cp_op_index_type;
@@ -5850,7 +5618,7 @@ static void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_ACQUIRE_MEM]             = cp_op_acquire_mem;
 	g_cp_op_func[Pm4::IT_SET_CONTEXT_REG]         = cp_op_set_context_reg;
 	g_cp_op_func[Pm4::IT_SET_SH_REG]              = cp_op_set_shader_reg;
-	g_cp_op_func[Pm4::IT_DISPATCH_DIRECT]          = cp_op_dispatch_direct;
+	g_cp_op_func[Pm4::IT_DISPATCH_DIRECT]         = cp_op_dispatch_direct;
 	g_cp_op_func[Pm4::IT_SET_UCONFIG_REG]         = cp_op_set_uconfig_reg;
 	g_cp_op_func[Pm4::IT_WRITE_CONST_RAM]         = cp_op_write_const_ram;
 	g_cp_op_func[Pm4::IT_DUMP_CONST_RAM]          = cp_op_dump_const_ram;
@@ -5858,7 +5626,7 @@ static void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_INCREMENT_DE_COUNTER]    = cp_op_increment_de_counter;
 	g_cp_op_func[Pm4::IT_WAIT_ON_CE_COUNTER]      = cp_op_wait_on_ce_counter;
 	g_cp_op_func[Pm4::IT_WAIT_ON_DE_COUNTER_DIFF] = cp_op_wait_on_de_counter_diff;
-	g_cp_op_func[Pm4::IT_GET_LOD_STATS]            = cp_op_get_lod_stats;
+	g_cp_op_func[Pm4::IT_GET_LOD_STATS]           = cp_op_get_lod_stats;
 
 	for (auto& func: g_cp_op_custom_func)
 	{

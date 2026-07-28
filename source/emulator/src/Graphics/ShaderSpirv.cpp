@@ -1949,7 +1949,7 @@ static SpirvValue operand_variable_to_str(ShaderOperand op, int shift)
 {
 	SpirvValue ret;
 
-	EXIT_IF(op.size < 2 || op.size <= shift);
+	EXIT_IF(op.size <= shift || shift < 0);
 
 	switch (op.type)
 	{
@@ -6332,10 +6332,39 @@ KYTY_RECOMPILER_FUNC(Recompile_SCmp_XXX_U32_Ssrc0Ssrc1)
 	return true;
 }
 
+static bool RecompileNullSBufferLoad(const ShaderInstruction& inst, uint32_t components, const ShaderBindResources* bind_info,
+                                    String8* dst_source)
+{
+	if (bind_info == nullptr || dst_source == nullptr || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr)
+	{
+		return false;
+	}
+	bool null_descriptor = false;
+	for (int i = 0; i < bind_info->null_storage_buffers.buffers_num; ++i)
+	{
+		null_descriptor = null_descriptor || bind_info->null_storage_buffers.start_register[i] == inst.src[0].register_id;
+	}
+	if (!null_descriptor)
+	{
+		return false;
+	}
+	for (uint32_t component = 0; component < components; ++component)
+	{
+		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component));
+		EXIT_NOT_IMPLEMENTED(dst.type != SpirvType::Uint);
+		*dst_source += String8::FromPrintf("               OpStore %%%s %%uint_0\n", dst.value.c_str());
+	}
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDword_SdstSvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (RecompileNullSBufferLoad(inst, 1, bind_info, dst_source))
+	{
+		return true;
+	}
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -6389,6 +6418,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx2_Sdst2SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (RecompileNullSBufferLoad(inst, 2, bind_info, dst_source))
+	{
+		return true;
+	}
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -6444,6 +6477,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (RecompileNullSBufferLoad(inst, 4, bind_info, dst_source))
+	{
+		return true;
+	}
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -6513,6 +6550,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (RecompileNullSBufferLoad(inst, 8, bind_info, dst_source))
+	{
+		return true;
+	}
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -6561,6 +6602,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (RecompileNullSBufferLoad(inst, 16, bind_info, dst_source))
+	{
+		return true;
+	}
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -9766,6 +9811,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 
     {Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2,  ShaderInstructionType::VMadF32,    ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {"%t_<index> = OpExtInst %float %GLSL_std_450 Fma %t0_<index> %t1_<index> %t2_<index>"}},
     {Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2,  ShaderInstructionType::VFmaF32,    ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {"%t_<index> = OpExtInst %float %GLSL_std_450 Fma %t0_<index> %t1_<index> %t2_<index>"}},
+    {Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2,  ShaderInstructionType::VFmaMixF32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {"%t_<index> = OpExtInst %float %GLSL_std_450 Fma %t0_<index> %t1_<index> %t2_<index>"}},
 	{Recompile_VCubetcF32_VdstVsrc0Vsrc1Vsrc2,   ShaderInstructionType::VCubetcF32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {""}},
 	{Recompile_VCubescF32_VdstVsrc0Vsrc1Vsrc2,   ShaderInstructionType::VCubescF32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {""}},
 	{Recompile_VCubeIdF32_VdstVsrc0Vsrc1Vsrc2,   ShaderInstructionType::VCubeIdF32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {""}},
@@ -11661,7 +11707,8 @@ void Spirv::WriteFunctions()
 		m_source += TBUFFER_STORE_FORMAT_XYZW;
 	}
 
-	if (m_code.HasAnyOf({ShaderInstructionType::SBufferLoadDword, ShaderInstructionType::SBufferLoadDwordx2,
+	if (m_bind != nullptr && m_bind->storage_buffers.buffers_num > 0 &&
+	    m_code.HasAnyOf({ShaderInstructionType::SBufferLoadDword, ShaderInstructionType::SBufferLoadDwordx2,
 	                     ShaderInstructionType::SBufferLoadDwordx4, ShaderInstructionType::SBufferLoadDwordx8,
 	                     ShaderInstructionType::SBufferLoadDwordx16}))
 	{

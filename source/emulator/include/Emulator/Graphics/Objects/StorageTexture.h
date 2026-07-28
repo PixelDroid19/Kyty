@@ -6,15 +6,9 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 
-#include <vulkan/vulkan_core.h>
-
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
-
-// Host format used by writable guest images. Kept separate from sampled
-// format resolution because storage image conversion rules differ for sRGB.
-[[nodiscard]] VkFormat StorageTextureResolveVkFormat(uint32_t dfmt, uint32_t nfmt, uint32_t fmt);
 
 class StorageTextureObject: public GpuObject
 {

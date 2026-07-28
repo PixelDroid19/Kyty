@@ -229,6 +229,9 @@ enum class ShaderInstructionType : uint32_t
 	VExpF32,
 	VFloorF32,
 	VFmaF32,
+	// VOP3P v_fma_mix_f32: mixed-precision FMA used by Unity HDR/URP shaders.
+	// Computes fma(a,b,c) with per-operand f16↔f32 conversion via op_sel_hi.
+	VFmaMixF32,
 	VFractF32,
 	VInterpMovF32,
 	VInterpP1F32,
@@ -441,13 +444,13 @@ enum Format : uint64_t
 	VdstGds                             = FormatDefine({D, Gds}),
 	VaddrVdataOffset                    = FormatDefine({S0, S1}),
 	// ds_read2_b32: vdst is a VGPR pair; offsets live in ds_offset (see field comment).
-	Vdst2VaddrOffset01                  = FormatDefine({DA2, S0}),
-	VdstSdst2Vsrc0Vsrc1                 = FormatDefine({D, D2A2, S0, S1}),
-	VdstSdst2Vsrc0Vsrc1Ssrc2A2          = FormatDefine({D, D2A2, S0, S1, S2A2}),
-	Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair       = FormatDefine({DA2, D2A2, S0, S1, S2A2}),
-	VdstVsrc0Vsrc1Smask2                = FormatDefine({D, S0, S1, S2A2}),
-	VdstVsrc0Vsrc1Vsrc2                 = FormatDefine({D, S0, S1, S2}),
-	VdstVsrcAttrChan                    = FormatDefine({D, S0, Attr}),
+	Vdst2VaddrOffset01            = FormatDefine({DA2, S0}),
+	VdstSdst2Vsrc0Vsrc1           = FormatDefine({D, D2A2, S0, S1}),
+	VdstSdst2Vsrc0Vsrc1Ssrc2A2    = FormatDefine({D, D2A2, S0, S1, S2A2}),
+	Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair = FormatDefine({DA2, D2A2, S0, S1, S2A2}),
+	VdstVsrc0Vsrc1Smask2          = FormatDefine({D, S0, S1, S2A2}),
+	VdstVsrc0Vsrc1Vsrc2           = FormatDefine({D, S0, S1, S2}),
+	VdstVsrcAttrChan              = FormatDefine({D, S0, Attr}),
 };
 
 } // namespace ShaderInstructionFormat
@@ -510,7 +513,8 @@ struct ShaderOperand
 	{
 		return type == other.type && constant.u == other.constant.u && register_id == other.register_id && size == other.size &&
 		       swizzle == other.swizzle && dpp == other.dpp && dpp_ctrl == other.dpp_ctrl && dpp_row_mask == other.dpp_row_mask &&
-		       dpp_bank_mask == other.dpp_bank_mask && dpp_fetch_inactive == other.dpp_fetch_inactive && dpp_bound_ctrl == other.dpp_bound_ctrl;
+		       dpp_bank_mask == other.dpp_bank_mask && dpp_fetch_inactive == other.dpp_fetch_inactive &&
+		       dpp_bound_ctrl == other.dpp_bound_ctrl;
 	}
 };
 
@@ -531,6 +535,12 @@ struct ShaderInstruction
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;
+	// MUBUF/MTBUF byte-address controls. The instruction's 12-bit immediate is
+	// deliberately separate from src[2] (S_OFFSET): Gen5 swizzle applies to
+	// index * stride + (imm + V_OFFSET), and adds S_OFFSET afterwards.
+	uint16_t buffer_imm_offset = 0;
+	bool     buffer_idxen      = false;
+	bool     buffer_offen      = false;
 	// DS addressing:
 	// - DsWriteB32: byte offset added to the byte address in src[0].
 	// - DsRead2B32: packed as (offset1 << 8) | offset0; each offset is dword-scaled
@@ -669,7 +679,6 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
-uint32_t ShaderGen5VertexInputComponentCount(uint8_t format);
 bool     ShaderGen5VertexAttribFormat(uint16_t attrib_format, uint8_t* unified_format);
 bool     ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format);
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component);
@@ -681,7 +690,10 @@ uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format);
 uint32_t ShaderGen5ResolveLinearPitch(uint32_t width, uint32_t format, uint8_t type, uint32_t word4);
 // Only layered image types use the descriptor's array-addressing fields.
 // Color3D has a separate volume layout and must not be validated as an array.
-constexpr bool ShaderGen5TextureTypeUsesArrayAddressing(uint8_t type) { return type == 13u; }
+constexpr bool ShaderGen5TextureTypeUsesArrayAddressing(uint8_t type)
+{
+	return type == 13u;
+}
 
 inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 {
@@ -718,6 +730,7 @@ struct ShaderBufferResource
 	[[nodiscard]] uint32_t DstSelXY() const { return (fields[3] >> 0u) & 0x3Fu; }
 	[[nodiscard]] uint32_t DstSelXYZ() const { return (fields[3] >> 0u) & 0x1FFu; }
 	[[nodiscard]] uint32_t DstSelXYZW() const { return (fields[3] >> 0u) & 0xFFFu; }
+	[[nodiscard]] uint8_t  IndexStride() const { return (fields[3] >> 21u) & 0x3u; }
 	[[nodiscard]] bool     AddTid() const { return ((fields[3] >> 23u) & 0x1u) == 1; }
 
 	[[nodiscard]] uint64_t Base48() const { return (fields[0] | (static_cast<uint64_t>(fields[1]) << 32u)) & 0xFFFFFFFFFFFFu; }
@@ -909,7 +922,7 @@ struct ShaderVertexDestination
 	int registers_num  = 0;
 	// Guest attribute-table semantic. This is not necessarily the dense Vulkan
 	// input location used by resources/resources_dst.
-	int semantic       = -1;
+	int semantic = -1;
 };
 
 enum class ShaderStorageUsage
@@ -993,6 +1006,14 @@ struct ShaderStorageResources
 	int                        binding_index                        = 0;
 };
 
+struct ShaderNullStorageResources
+{
+	static constexpr int BUFFERS_MAX = 16;
+
+	int start_register[BUFFERS_MAX] = {0};
+	int buffers_num                 = 0;
+};
+
 [[nodiscard]] constexpr uint64_t ShaderBufferByteSize(uint32_t stride, uint32_t records)
 {
 	return stride == 0 ? static_cast<uint64_t>(records) : static_cast<uint64_t>(stride) * records;
@@ -1000,6 +1021,12 @@ struct ShaderStorageResources
 
 [[nodiscard]] bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access);
 [[nodiscard]] bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource);
+[[nodiscard]] bool ShaderStorageDescriptorSwizzleAllowed(bool gen5, const ShaderBufferResource& resource);
+// GFX10 buffer byte-address calculation. offset is the MUBUF immediate plus
+// VADDR offset; scalar_offset is S_OFFSET and is added after descriptor
+// swizzling, as required by the descriptor addressing mode.
+[[nodiscard]] uint32_t                    ShaderRawBufferByteAddress(const ShaderBufferResource& resource, uint32_t index, uint32_t offset,
+                                                                     uint32_t scalar_offset, uint32_t lane_index);
 [[nodiscard]] ShaderStorageAccessEvidence ResolveShaderStorageAccessEvidence(bool code_available, ShaderStorageBindingSource source,
                                                                              ShaderStorageAccess exact_match,
                                                                              ShaderStorageAccess unbased_match, bool decoded_unknown,
@@ -1027,13 +1054,13 @@ struct ShaderTextureResources
 	static constexpr uint32_t DESCRIPTOR_INDEX_MASK       = ~THREE_DIMENSIONAL_INDEX_TAG;
 
 	ShaderTextureDescriptor desc[RES_MAX];
-	int                     textures_num           = 0;
-	int                     textures2d_sampled_num = 0;
-	int                     textures3d_sampled_num = 0;
-	int                     textures2d_storage_num = 0;
-	int                     binding_sampled_index  = 0;
+	int                     textures_num             = 0;
+	int                     textures2d_sampled_num   = 0;
+	int                     textures3d_sampled_num   = 0;
+	int                     textures2d_storage_num   = 0;
+	int                     binding_sampled_index    = 0;
 	int                     binding_sampled_3d_index = -1;
-	int                     binding_storage_index  = 0;
+	int                     binding_storage_index    = 0;
 };
 
 struct ShaderSamplerResources
@@ -1083,12 +1110,13 @@ struct ShaderBindResources
 	// metadata is supplied through a transient UBO so layouts remain portable.
 	static constexpr uint32_t PORTABLE_PUSH_CONSTANT_BYTES = 128;
 
-	uint32_t                   push_constant_offset = 0;
-	uint32_t                   push_constant_size   = 0;
-	uint32_t                   descriptor_set_slot  = 0;
+	uint32_t                   push_constant_offset  = 0;
+	uint32_t                   push_constant_size    = 0;
+	uint32_t                   descriptor_set_slot   = 0;
 	bool                       vsharp_uniform_buffer = false;
 	int                        vsharp_binding_index  = -1;
 	ShaderStorageResources     storage_buffers;
+	ShaderNullStorageResources null_storage_buffers;
 	ShaderTextureResources     textures2D;
 	ShaderSamplerResources     samplers;
 	ShaderGdsResources         gds_pointers;
@@ -1158,23 +1186,23 @@ struct ShaderComputeInputInfo
 
 struct ShaderPixelInputInfo
 {
-	bool                stage_enabled             = true;
-	uint32_t            interpolator_settings[32] = {0};
-	uint32_t            input_num                 = 0;
-	uint8_t             target_output_mode[8]     = {};
-	uint8_t             target_output_order[8]    = {};
+	bool                   stage_enabled             = true;
+	uint32_t               interpolator_settings[32] = {0};
+	uint32_t               input_num                 = 0;
+	uint8_t                target_output_mode[8]     = {};
+	uint8_t                target_output_order[8]    = {};
 	ShaderHostToGuestScale host_to_guest_scale;
-	bool                ps_pos_xy                 = false;
-	bool                integer_image_coordinates = false;
-	bool                image_size_query          = false;
-	bool                ps_pixel_kill_enable      = false;
-	bool                ps_early_z                = false;
-	bool                ps_execute_on_noop        = false;
-	ShaderBindResources bind;
+	bool                   ps_pos_xy                 = false;
+	bool                   integer_image_coordinates = false;
+	bool                   image_size_query          = false;
+	bool                   ps_pixel_kill_enable      = false;
+	bool                   ps_early_z                = false;
+	bool                   ps_execute_on_noop        = false;
+	ShaderBindResources    bind;
 };
 
-[[nodiscard]] bool ShaderPixelInputMaskSupported(uint32_t enable_mask, uint32_t address_mask);
-[[nodiscard]] bool ShaderPixelPositionEnabled(uint32_t enable_mask, uint32_t address_mask);
+[[nodiscard]] bool     ShaderPixelInputMaskSupported(uint32_t enable_mask, uint32_t address_mask);
+[[nodiscard]] bool     ShaderPixelPositionEnabled(uint32_t enable_mask, uint32_t address_mask);
 [[nodiscard]] uint32_t ShaderResolvePixelInterpolatorSetting(uint32_t stored_setting, uint32_t written_mask, uint32_t index);
 [[nodiscard]] uint32_t ShaderPixelCanonicalInterpolator(const ShaderPixelInputInfo& info, uint32_t index);
 
@@ -1201,10 +1229,9 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 // Gen5 EUD sharp span policy: metadata eud_size_dw is a lower bound. Type-5
 // guest pointer tables may extend past it (Astro: eud=24, sharp@40 needs 28).
 // api is the ShaderGet* start index (16 + eud_index). Hard-cap runaway offsets.
-constexpr int SHADER_GEN5_EUD_MAX_DWORDS = 256;
-[[nodiscard]] int ShaderGen5EudOffsetBase(int user_sgpr_num);
-[[nodiscard]] uint32_t ShaderResolveGen5UserSgprCount(uint32_t declared_count, uint32_t written_count,
-                                                       uint16_t eud_size_dw);
+constexpr int             SHADER_GEN5_EUD_MAX_DWORDS = 256;
+[[nodiscard]] int         ShaderGen5EudOffsetBase(int user_sgpr_num);
+[[nodiscard]] uint32_t    ShaderResolveGen5UserSgprCount(uint32_t declared_count, uint32_t written_count, uint16_t eud_size_dw);
 [[nodiscard]] inline bool ShaderGen5EudSpanAllowed(int api, int dwords, uint16_t eud_size_dw)
 {
 	const int need = api - 16 + dwords;
@@ -1303,13 +1330,12 @@ struct ShaderMappedData
 void ShaderInit();
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
 
-void               ShaderCalcBindingIndices(ShaderBindResources* bind);
-[[nodiscard]] int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base,
-                                                    uint32_t user_data_count);
+void                  ShaderCalcBindingIndices(ShaderBindResources* bind);
+[[nodiscard]] int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base, uint32_t user_data_count);
 [[nodiscard]] int32_t ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info);
-ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register);
-bool               ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type);
-void               ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info);
+ShaderStorageUsage    ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register);
+bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type);
+void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info);
 void             ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
                                       ShaderPixelInputInfo* ps_info);
 void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderComputeInputInfo* info);

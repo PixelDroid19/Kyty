@@ -61,16 +61,16 @@ ScissorRect ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanMod
 	};
 
 	include({viewport.screen_scissor_left, viewport.screen_scissor_top, viewport.screen_scissor_right, viewport.screen_scissor_bottom});
-	include(with_window_offset({viewport.generic_scissor_left, viewport.generic_scissor_top, viewport.generic_scissor_right,
-	                            viewport.generic_scissor_bottom},
-	                           viewport.generic_scissor_window_offset_enable));
+	include(with_window_offset(
+	    {viewport.generic_scissor_left, viewport.generic_scissor_top, viewport.generic_scissor_right, viewport.generic_scissor_bottom},
+	    viewport.generic_scissor_window_offset_enable));
 
 	if (mode.vport_scissor_enable)
 	{
 		const auto& vport = viewport.viewports[viewport_id];
-		include(with_window_offset({vport.viewport_scissor_left, vport.viewport_scissor_top, vport.viewport_scissor_right,
-		                            vport.viewport_scissor_bottom},
-		                           vport.viewport_scissor_window_offset_enable));
+		include(with_window_offset(
+		    {vport.viewport_scissor_left, vport.viewport_scissor_top, vport.viewport_scissor_right, vport.viewport_scissor_bottom},
+		    vport.viewport_scissor_window_offset_enable));
 	}
 
 	if (has_scissor)
@@ -105,16 +105,15 @@ DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, 
 	return usage;
 }
 
-StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target,
-                                            const HW::RenderControl& render_control,
+StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target, const HW::RenderControl& render_control,
                                             const HW::DepthControl& depth_control)
 {
-	const bool decompress = target.z_info.tile_surface_enable && render_control.stencil_compress_disable;
-	const bool needs_read = depth_control.stencil_enable || decompress || render_control.resummarize_enable ||
-	                        render_control.copy_centroid || render_control.copy_sample != 0;
+	const bool decompress  = target.z_info.tile_surface_enable && render_control.stencil_compress_disable;
+	const bool needs_read  = depth_control.stencil_enable || decompress || render_control.resummarize_enable ||
+	                         render_control.copy_centroid || render_control.copy_sample != 0;
 	const bool needs_write = render_control.stencil_clear_enable ||
-	                         (depth_control.stencil_enable && !target.depth_view.stencil_write_disable) ||
-	                         decompress || render_control.resummarize_enable;
+	                         (depth_control.stencil_enable && !target.depth_view.stencil_write_disable) || decompress ||
+	                         render_control.resummarize_enable;
 
 	if (!needs_read && !needs_write)
 	{
@@ -133,6 +132,24 @@ StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target,
 		return StencilPlaneValidation::MismatchedBases;
 	}
 	return StencilPlaneValidation::Valid;
+}
+
+HW::DepthRenderTarget ResolveDepthStencilBasePairs(const HW::DepthRenderTarget& target)
+{
+	auto       resolved          = target;
+	const auto recover_lone_zero = [](uint64_t* read_base, uint64_t* write_base)
+	{
+		if (*read_base == 0 && *write_base != 0)
+		{
+			*read_base = *write_base;
+		} else if (*write_base == 0 && *read_base != 0)
+		{
+			*write_base = *read_base;
+		}
+	};
+	recover_lone_zero(&resolved.z_read_base_addr, &resolved.z_write_base_addr);
+	recover_lone_zero(&resolved.stencil_read_base_addr, &resolved.stencil_write_base_addr);
+	return resolved;
 }
 
 ViewportXy ResolveViewportXy(float xscale, float xoffset, float yscale, float yoffset)
@@ -284,20 +301,20 @@ UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormaliz
 	{
 		return {};
 	}
-	return {.enabled = true,
-	        .address_mode = SamplerAddressMode::ClampToEdge,
-	        .force_base_mip = true,
+	return {.enabled            = true,
+	        .address_mode       = SamplerAddressMode::ClampToEdge,
+	        .force_base_mip     = true,
 	        .disable_anisotropy = true,
 	        .disable_comparison = true,
-	        .reset_lod_bias = true};
+	        .reset_lod_bias     = true};
 }
 
 void SetGenericScissorTl(HW::Context& context, uint32_t value)
 {
-	const auto& viewport = context.GetScreenViewport();
-	const int left = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_GENERIC_SCISSOR_TL, TL_X)));
-	const int top  = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_GENERIC_SCISSOR_TL, TL_Y)));
-	const bool window_offset_disable = KYTY_PM4_GET(value, PA_SC_GENERIC_SCISSOR_TL, WINDOW_OFFSET_DISABLE) != 0;
+	const auto& viewport              = context.GetScreenViewport();
+	const int   left                  = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_GENERIC_SCISSOR_TL, TL_X)));
+	const int   top                   = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_GENERIC_SCISSOR_TL, TL_Y)));
+	const bool  window_offset_disable = KYTY_PM4_GET(value, PA_SC_GENERIC_SCISSOR_TL, WINDOW_OFFSET_DISABLE) != 0;
 
 	context.SetGenericScissor(left, top, viewport.generic_scissor_right, viewport.generic_scissor_bottom, !window_offset_disable);
 }
@@ -305,8 +322,8 @@ void SetGenericScissorTl(HW::Context& context, uint32_t value)
 void SetGenericScissorBr(HW::Context& context, uint32_t value)
 {
 	const auto& viewport = context.GetScreenViewport();
-	const int right  = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_GENERIC_SCISSOR_BR, BR_X)));
-	const int bottom = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_GENERIC_SCISSOR_BR, BR_Y)));
+	const int   right    = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_GENERIC_SCISSOR_BR, BR_X)));
+	const int   bottom   = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_GENERIC_SCISSOR_BR, BR_Y)));
 
 	context.SetGenericScissor(viewport.generic_scissor_left, viewport.generic_scissor_top, right, bottom,
 	                          viewport.generic_scissor_window_offset_enable);
@@ -361,24 +378,64 @@ void SetDepthControl(HW::Context& context, uint32_t value)
 	context.SetDepthControl(r);
 }
 
-void ApplyDepthStencilPlaneRegisters(HW::DepthRenderTarget& target, uint32_t stencil_info,
-                                     uint32_t stencil_read_base, uint32_t stencil_write_base)
+HW::ColorInfo DecodeColorInfo(uint32_t value, bool next_gen)
+{
+	HW::ColorInfo info;
+	info.format                         = KYTY_PM4_GET(value, CB_COLOR0_INFO, FORMAT);
+	info.channel_type                   = KYTY_PM4_GET(value, CB_COLOR0_INFO, NUMBER_TYPE);
+	info.channel_order                  = KYTY_PM4_GET(value, CB_COLOR0_INFO, COMP_SWAP);
+	info.cmask_fast_clear_enable        = KYTY_PM4_GET(value, CB_COLOR0_INFO, FAST_CLEAR) != 0;
+	info.fmask_compression_enable       = KYTY_PM4_GET(value, CB_COLOR0_INFO, COMPRESSION) != 0;
+	info.blend_clamp                    = KYTY_PM4_GET(value, CB_COLOR0_INFO, BLEND_CLAMP) != 0;
+	info.blend_bypass                   = KYTY_PM4_GET(value, CB_COLOR0_INFO, BLEND_BYPASS) != 0;
+	info.round_mode                     = KYTY_PM4_GET(value, CB_COLOR0_INFO, ROUND_MODE) != 0;
+	info.cmask_tile_mode                = KYTY_PM4_GET(value, CB_COLOR0_INFO, CMASK_IS_LINEAR);
+	info.fmask_data_compression_disable = KYTY_PM4_GET(value, CB_COLOR0_INFO, FMASK_COMPRESSION_DISABLE) != 0;
+	info.fmask_one_frag_mode            = KYTY_PM4_GET(value, CB_COLOR0_INFO, FMASK_COMPRESS_1FRAG_ONLY) != 0;
+	info.dcc_compression_enable         = KYTY_PM4_GET(value, CB_COLOR0_INFO, DCC_ENABLE) != 0;
+	info.cmask_tile_mode_neo            = KYTY_PM4_GET(value, CB_COLOR0_INFO, CMASK_ADDR_TYPE);
+	info.neo_mode                       = KYTY_PM4_GET(value, CB_COLOR0_INFO, ALT_TILE_MODE) != 0 || next_gen;
+	return info;
+}
+
+HW::DepthZInfo DecodeDepthZInfo(uint32_t value)
+{
+	HW::DepthZInfo info;
+	info.format                    = KYTY_PM4_GET(value, DB_Z_INFO, FORMAT);
+	info.num_samples               = KYTY_PM4_GET(value, DB_Z_INFO, NUM_SAMPLES);
+	info.embedded_sample_locations = KYTY_PM4_GET(value, DB_Z_INFO, ITERATE_FLUSH) != 0;
+	info.partially_resident        = KYTY_PM4_GET(value, DB_Z_INFO, PARTIALLY_RESIDENT) != 0;
+	info.num_mip_levels            = KYTY_PM4_GET(value, DB_Z_INFO, MAXMIP);
+	info.tile_mode_index           = KYTY_PM4_GET(value, DB_Z_INFO, TILE_MODE_INDEX);
+	info.plane_compression         = KYTY_PM4_GET(value, DB_Z_INFO, DECOMPRESS_ON_N_ZPLANES);
+	info.expclear_enabled          = KYTY_PM4_GET(value, DB_Z_INFO, ALLOW_EXPCLEAR) != 0;
+	info.tile_surface_enable       = KYTY_PM4_GET(value, DB_Z_INFO, TILE_SURFACE_ENABLE) != 0;
+	info.zrange_precision          = KYTY_PM4_GET(value, DB_Z_INFO, ZRANGE_PRECISION);
+	return info;
+}
+
+HW::DepthStencilInfo DecodeDepthStencilInfo(uint32_t value)
 {
 	HW::DepthStencilInfo info;
-	info.format                     = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, FORMAT);
-	info.texture_compatible_stencil = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, ITERATE_FLUSH) != 0;
-	info.partially_resident         = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, PARTIALLY_RESIDENT) != 0;
-	info.tile_split                 = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, RESERVED_FIELD_1);
-	info.tile_mode_index            = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, TILE_MODE_INDEX);
-	info.expclear_enabled           = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, ALLOW_EXPCLEAR) != 0;
-	info.tile_stencil_disable       = KYTY_PM4_GET(stencil_info, DB_STENCIL_INFO, TILE_STENCIL_DISABLE) != 0;
-	target.stencil_info            = info;
+	info.format                     = KYTY_PM4_GET(value, DB_STENCIL_INFO, FORMAT);
+	info.texture_compatible_stencil = KYTY_PM4_GET(value, DB_STENCIL_INFO, ITERATE_FLUSH) != 0;
+	info.partially_resident         = KYTY_PM4_GET(value, DB_STENCIL_INFO, PARTIALLY_RESIDENT) != 0;
+	info.tile_split                 = KYTY_PM4_GET(value, DB_STENCIL_INFO, RESERVED_FIELD_1);
+	info.tile_mode_index            = KYTY_PM4_GET(value, DB_STENCIL_INFO, TILE_MODE_INDEX);
+	info.expclear_enabled           = KYTY_PM4_GET(value, DB_STENCIL_INFO, ALLOW_EXPCLEAR) != 0;
+	info.tile_stencil_disable       = KYTY_PM4_GET(value, DB_STENCIL_INFO, TILE_STENCIL_DISABLE) != 0;
+	return info;
+}
+
+void ApplyDepthStencilPlaneRegisters(HW::DepthRenderTarget& target, uint32_t stencil_info, uint32_t stencil_read_base,
+                                     uint32_t stencil_write_base)
+{
+	target.stencil_info            = DecodeDepthStencilInfo(stencil_info);
 	target.stencil_read_base_addr  = static_cast<uint64_t>(stencil_read_base) << 8u;
 	target.stencil_write_base_addr = static_cast<uint64_t>(stencil_write_base) << 8u;
 }
 
-void ApplyDepthStencilPlaneRegisters(HW::Context& context, uint32_t stencil_info, uint32_t stencil_read_base,
-                                     uint32_t stencil_write_base)
+void ApplyDepthStencilPlaneRegisters(HW::Context& context, uint32_t stencil_info, uint32_t stencil_read_base, uint32_t stencil_write_base)
 {
 	auto target = context.GetDepthRenderTarget();
 	ApplyDepthStencilPlaneRegisters(target, stencil_info, stencil_read_base, stencil_write_base);
@@ -444,7 +501,7 @@ void SetModeControl(HW::Context& context, uint32_t value)
 
 void SetPolygonOffsetRegister(HW::Context& context, uint32_t reg, uint32_t value)
 {
-	auto offset = context.GetPolygonOffset();
+	auto  offset      = context.GetPolygonOffset();
 	float float_value = 0.0f;
 	std::memcpy(&float_value, &value, sizeof(float_value));
 
@@ -493,12 +550,12 @@ void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value)
 
 	HW::BlendControl blend;
 
-	blend.color_srcblend  = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, COLOR_SRCBLEND);
-	blend.color_comb_fcn  = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, COLOR_COMB_FCN);
-	blend.color_destblend = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, COLOR_DESTBLEND);
-	blend.alpha_srcblend  = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, ALPHA_SRCBLEND);
-	blend.alpha_comb_fcn  = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, ALPHA_COMB_FCN);
-	blend.alpha_destblend = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, ALPHA_DESTBLEND);
+	blend.color_srcblend       = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, COLOR_SRCBLEND);
+	blend.color_comb_fcn       = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, COLOR_COMB_FCN);
+	blend.color_destblend      = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, COLOR_DESTBLEND);
+	blend.alpha_srcblend       = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, ALPHA_SRCBLEND);
+	blend.alpha_comb_fcn       = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, ALPHA_COMB_FCN);
+	blend.alpha_destblend      = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, ALPHA_DESTBLEND);
 	blend.separate_alpha_blend = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, SEPARATE_ALPHA_BLEND) != 0;
 	blend.enable               = KYTY_PM4_GET(value, CB_BLEND0_CONTROL, ENABLE) != 0;
 

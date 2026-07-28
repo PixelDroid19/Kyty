@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
+#include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
 
@@ -47,10 +48,10 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	vk_obj->SetNativeExtent(guest_width, guest_height);
 	vk_obj->SetHostExtent(host_width, host_height);
-	vk_obj->format        = pixel_format;
-	vk_obj->image         = nullptr;
-	vk_obj->layout        = VK_IMAGE_LAYOUT_UNDEFINED;
-	vk_obj->guest_size    = *size;
+	vk_obj->format     = pixel_format;
+	vk_obj->image      = nullptr;
+	vk_obj->layout     = VK_IMAGE_LAYOUT_UNDEFINED;
+	vk_obj->guest_size = *size;
 
 	for (auto& view: vk_obj->image_view)
 	{
@@ -59,86 +60,28 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	vk_obj->compressed = !htile;
 
-	VkImageCreateInfo image_info {};
-	image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	image_info.pNext         = nullptr;
-	image_info.flags         = 0;
-	image_info.imageType     = VK_IMAGE_TYPE_2D;
-	image_info.extent.width  = vk_obj->extent.width;
-	image_info.extent.height = vk_obj->extent.height;
-	image_info.extent.depth  = 1;
-	image_info.mipLevels     = 1;
-	image_info.arrayLayers   = 1;
-	image_info.format        = vk_obj->format;
-	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-	image_info.initialLayout = vk_obj->layout;
-	image_info.usage = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) |
-	                   static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_TRANSFER_DST_BIT) |
-	                   static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_TRANSFER_SRC_BIT) |
-	                   (sampled ? static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_SAMPLED_BIT) : static_cast<VkImageUsageFlags>(0));
-	image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	image_info.samples     = VK_SAMPLE_COUNT_1_BIT;
-
-	vkCreateImage(ctx->device, &image_info, nullptr, &vk_obj->image);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image == nullptr);
-
-	vkGetImageMemoryRequirements(ctx->device, vk_obj->image, &mem->requirements);
-
-	mem->property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-
-	bool allocated = VulkanAllocate(ctx, mem);
-
-	EXIT_NOT_IMPLEMENTED(!allocated);
-
-	VulkanBindImageMemory(ctx, vk_obj, mem);
-
-	vk_obj->memory = *mem;
+	VulkanImageDescriptor image_descriptor {};
+	image_descriptor.extent         = {vk_obj->extent.width, vk_obj->extent.height, 1};
+	image_descriptor.format         = vk_obj->format;
+	image_descriptor.initial_layout = vk_obj->layout;
+	image_descriptor.usage = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+	                                                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0));
+	const auto image_info  = VulkanBuildImageCreateInfo(image_descriptor);
+	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem));
 
 	// EXIT_NOT_IMPLEMENTED(mem->requirements.size > *size);
 
 	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
 
-	VkImageViewCreateInfo create_info {};
-	create_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create_info.pNext                           = nullptr;
-	create_info.flags                           = 0;
-	create_info.image                           = vk_obj->image;
-	create_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-	create_info.format                          = vk_obj->format;
-	create_info.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.subresourceRange.aspectMask     = DepthFormatAspectMask(vk_obj->format);
-	create_info.subresourceRange.baseArrayLayer = 0;
-	create_info.subresourceRange.baseMipLevel   = 0;
-	create_info.subresourceRange.layerCount     = 1;
-	create_info.subresourceRange.levelCount     = 1;
+	VulkanImageViewDescriptor view_descriptor {};
+	view_descriptor.image       = vk_obj->image;
+	view_descriptor.format      = vk_obj->format;
+	view_descriptor.aspect_mask = DepthFormatAspectMask(vk_obj->format);
+	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]));
 
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]);
-
-	VkImageViewCreateInfo create_info2 {};
-	create_info2.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create_info2.pNext                           = nullptr;
-	create_info2.flags                           = 0;
-	create_info2.image                           = vk_obj->image;
-	create_info2.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-	create_info2.format                          = vk_obj->format;
-	create_info2.components.r                    = VK_COMPONENT_SWIZZLE_R;
-	create_info2.components.g                    = VK_COMPONENT_SWIZZLE_R;
-	create_info2.components.b                    = VK_COMPONENT_SWIZZLE_R;
-	create_info2.components.a                    = VK_COMPONENT_SWIZZLE_R;
-	create_info2.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
-	create_info2.subresourceRange.baseArrayLayer = 0;
-	create_info2.subresourceRange.baseMipLevel   = 0;
-	create_info2.subresourceRange.layerCount     = 1;
-	create_info2.subresourceRange.levelCount     = 1;
-
-	vkCreateImageView(ctx->device, &create_info2, nullptr, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE]);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE] == nullptr);
+	view_descriptor.components  = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R};
+	view_descriptor.aspect_mask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE]));
 
 	// First bind of an HTILE depth target: pending Vulkan clear. Leave layout
 	// UNDEFINED so FindRenderDepthInfo → loadOp CLEAR can discard+clear. Non-HTILE

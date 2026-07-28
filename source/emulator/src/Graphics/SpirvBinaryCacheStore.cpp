@@ -2,15 +2,13 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/AtomicFile.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 
 #define XXH_INLINE_ALL
-#include <xxhash/xxhash.h>
-
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -24,12 +22,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
+#include <xxhash/xxhash.h>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -37,12 +30,12 @@ namespace Kyty::Libs::Graphics {
 
 namespace {
 
-constexpr uint8_t  k_magic[8]       = {'K', 'Y', 'T', 'S', 'P', 'V', '1', '\0'};
-constexpr uint32_t k_header_size    = 80;
-constexpr uint32_t k_format_version = 1;
-constexpr uint32_t k_target_vulkan_12 = 1;
-constexpr uint32_t k_spirv_magic      = 0x07230203u;
-constexpr char     k_key_domain[]      = "KytySpirvAssemblyCacheKey";
+constexpr uint8_t  k_magic[8]            = {'K', 'Y', 'T', 'S', 'P', 'V', '1', '\0'};
+constexpr uint32_t k_header_size         = 80;
+constexpr uint32_t k_format_version      = 1;
+constexpr uint32_t k_target_vulkan_12    = 1;
+constexpr uint32_t k_spirv_magic         = 0x07230203u;
+constexpr char     k_key_domain[]        = "KytySpirvAssemblyCacheKey";
 constexpr char     k_module_key_domain[] = "KytySpirvModuleCacheKey";
 constexpr char     k_source_extension[]  = ".spvbin";
 constexpr char     k_module_extension[]  = ".spvmod";
@@ -154,24 +147,6 @@ size_t CacheUsage(const std::filesystem::path& root)
 	return total;
 }
 
-bool ReplaceFile(const std::filesystem::path& source, const std::filesystem::path& destination)
-{
-#ifdef _WIN32
-	return MoveFileExW(source.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
-#else
-	return std::rename(source.c_str(), destination.c_str()) == 0;
-#endif
-}
-
-uint64_t ProcessId()
-{
-#ifdef _WIN32
-	return GetCurrentProcessId();
-#else
-	return static_cast<uint64_t>(getpid());
-#endif
-}
-
 } // namespace
 
 struct SpirvBinaryCacheStore::State
@@ -182,11 +157,11 @@ struct SpirvBinaryCacheStore::State
 		Vector<uint32_t>     binary;
 		std::string          key_name;
 		std::string          extension;
-		uint32_t             optimization      = 0;
+		uint32_t             optimization       = 0;
 		bool                 validation_enabled = false;
-		uint64_t             key_low           = 0;
-		uint64_t             key_high          = 0;
-		size_t               entry_size        = 0;
+		uint64_t             key_low            = 0;
+		uint64_t             key_high           = 0;
+		size_t               entry_size         = 0;
 	};
 	struct CompletedIdentity
 	{
@@ -194,24 +169,23 @@ struct SpirvBinaryCacheStore::State
 		std::vector<uint8_t> identity;
 	};
 
-	std::filesystem::path root;
+	std::filesystem::path  root;
 	SpirvBinaryCacheLimits limits;
 	size_t                 session_bytes_attempted = 0;
 	mutable std::mutex     write_mutex;
-	std::atomic<uint64_t>  temporary_sequence {0};
 
-	mutable std::mutex queue_mutex;
-	std::condition_variable queue_ready;
-	std::deque<std::shared_ptr<PendingEntry>> queue;
+	mutable std::mutex                                             queue_mutex;
+	std::condition_variable                                        queue_ready;
+	std::deque<std::shared_ptr<PendingEntry>>                      queue;
 	std::unordered_map<std::string, std::shared_ptr<PendingEntry>> active;
-	std::deque<CompletedIdentity> completed;
-	std::thread worker;
-	bool stopping = false;
-	size_t pending_bytes = 0;
-	SpirvBinaryCacheAsyncStats async_stats;
-	std::mutex hook_mutex;
-	WriteHookForTesting write_hook = nullptr;
-	void* write_hook_opaque = nullptr;
+	std::deque<CompletedIdentity>                                  completed;
+	std::thread                                                    worker;
+	bool                                                           stopping      = false;
+	size_t                                                         pending_bytes = 0;
+	SpirvBinaryCacheAsyncStats                                     async_stats;
+	std::mutex                                                     hook_mutex;
+	WriteHookForTesting                                            write_hook        = nullptr;
+	void*                                                          write_hook_opaque = nullptr;
 };
 
 SpirvBinaryCacheStore::SpirvBinaryCacheStore(std::filesystem::path root, SpirvBinaryCacheLimits limits): m_state(new State)
@@ -247,13 +221,12 @@ SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::Load(const String8& source, ui
 	                 key.high64, k_source_extension, binary);
 }
 
-SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::LoadModule(const ShaderModuleKey& key, bool validation_enabled,
-                                                             Vector<uint32_t>* binary)
+SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::LoadModule(const ShaderModuleKey& key, bool validation_enabled, Vector<uint32_t>* binary)
 {
 	const auto identity = ModuleIdentity(key, validation_enabled);
 	const auto hash     = XXH3_128bits(identity.data(), identity.size());
-	return LoadEntry(identity.data(), identity.size(), static_cast<uint32_t>(key.optimization), validation_enabled, hash.low64,
-	                 hash.high64, k_module_extension, binary);
+	return LoadEntry(identity.data(), identity.size(), static_cast<uint32_t>(key.optimization), validation_enabled, hash.low64, hash.high64,
+	                 k_module_extension, binary);
 }
 
 SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::LoadEntry(const uint8_t* identity, size_t identity_size, uint32_t optimization,
@@ -267,23 +240,21 @@ SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::LoadEntry(const uint8_t* ident
 	binary->Clear();
 
 	const XXH128_hash_t key {key_low, key_high};
-	const auto          key_name = KeyName(key, extension);
+	const auto          key_name   = KeyName(key, extension);
 	const auto          cache_miss = [this, &key_name]
 	{
 		std::lock_guard<std::mutex> queue_lock(m_state->queue_mutex);
-		m_state->completed.erase(
-		    std::remove_if(m_state->completed.begin(), m_state->completed.end(),
-		                   [&key_name](const auto& entry) { return entry.key_name == key_name; }),
-		    m_state->completed.end());
+		m_state->completed.erase(std::remove_if(m_state->completed.begin(), m_state->completed.end(),
+		                                        [&key_name](const auto& entry) { return entry.key_name == key_name; }),
+		                         m_state->completed.end());
 		return SpirvBinaryCacheLoadResult::Miss;
 	};
 	const auto cache_corrupt = [this, &key_name]
 	{
 		std::lock_guard<std::mutex> queue_lock(m_state->queue_mutex);
-		m_state->completed.erase(
-		    std::remove_if(m_state->completed.begin(), m_state->completed.end(),
-		                   [&key_name](const auto& entry) { return entry.key_name == key_name; }),
-		    m_state->completed.end());
+		m_state->completed.erase(std::remove_if(m_state->completed.begin(), m_state->completed.end(),
+		                                        [&key_name](const auto& entry) { return entry.key_name == key_name; }),
+		                         m_state->completed.end());
 		return SpirvBinaryCacheLoadResult::Corrupt;
 	};
 	{
@@ -328,21 +299,18 @@ SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::LoadEntry(const uint8_t* ident
 	}
 
 	const uint8_t* header = data.data();
-	if (memcmp(header, k_magic, sizeof(k_magic)) != 0 || ReadU32(header + 8) != k_header_size ||
-	    ReadU32(header + 12) != k_format_version || ReadU32(header + 16) != kSpirvBinaryCacheSchemaVersion ||
-	    ReadU32(header + 20) != k_target_vulkan_12 || ReadU32(header + 24) != optimization ||
-	    ReadU32(header + 28) != (validation_enabled ? 1u : 0u))
+	if (memcmp(header, k_magic, sizeof(k_magic)) != 0 || ReadU32(header + 8) != k_header_size || ReadU32(header + 12) != k_format_version ||
+	    ReadU32(header + 16) != kSpirvBinaryCacheSchemaVersion || ReadU32(header + 20) != k_target_vulkan_12 ||
+	    ReadU32(header + 24) != optimization || ReadU32(header + 28) != (validation_enabled ? 1u : 0u))
 	{
 		return cache_corrupt();
 	}
 
 	const uint64_t stored_identity_size = ReadU64(header + 32);
 	const uint64_t word_count           = ReadU64(header + 40);
-	const uint64_t payload_size = ReadU64(header + 72);
-	if (stored_identity_size != identity_size || word_count == 0 ||
-	    word_count > (m_state->limits.max_entry_bytes / sizeof(uint32_t)) ||
-	    stored_identity_size > m_state->limits.max_entry_bytes ||
-	    word_count > (UINT64_MAX - stored_identity_size) / sizeof(uint32_t) ||
+	const uint64_t payload_size         = ReadU64(header + 72);
+	if (stored_identity_size != identity_size || word_count == 0 || word_count > (m_state->limits.max_entry_bytes / sizeof(uint32_t)) ||
+	    stored_identity_size > m_state->limits.max_entry_bytes || word_count > (UINT64_MAX - stored_identity_size) / sizeof(uint32_t) ||
 	    payload_size != stored_identity_size + word_count * sizeof(uint32_t) || payload_size > UINT64_MAX - k_header_size ||
 	    file_size != k_header_size + payload_size || ReadU64(header + 48) != key.low64 || ReadU64(header + 56) != key.high64)
 	{
@@ -411,8 +379,7 @@ SpirvBinaryCacheQueueResult SpirvBinaryCacheStore::QueueEntry(const uint8_t* ide
 		return SpirvBinaryCacheQueueResult::Failed;
 	}
 	if (identity_size > std::numeric_limits<size_t>::max() - k_header_size ||
-	    static_cast<size_t>(binary.Size()) >
-	        (std::numeric_limits<size_t>::max() - k_header_size - identity_size) / sizeof(uint32_t))
+	    static_cast<size_t>(binary.Size()) > (std::numeric_limits<size_t>::max() - k_header_size - identity_size) / sizeof(uint32_t))
 	{
 		return SpirvBinaryCacheQueueResult::TooLarge;
 	}
@@ -422,7 +389,7 @@ SpirvBinaryCacheQueueResult SpirvBinaryCacheStore::QueueEntry(const uint8_t* ide
 		return SpirvBinaryCacheQueueResult::TooLarge;
 	}
 
-	const std::string key_name = KeyName(XXH128_hash_t {key_low, key_high}, extension);
+	const std::string           key_name = KeyName(XXH128_hash_t {key_low, key_high}, extension);
 	std::lock_guard<std::mutex> lock(m_state->queue_mutex);
 	if (m_state->stopping)
 	{
@@ -453,8 +420,7 @@ SpirvBinaryCacheQueueResult SpirvBinaryCacheStore::QueueEntry(const uint8_t* ide
 		m_state->async_stats.coalesced++;
 		return SpirvBinaryCacheQueueResult::Coalesced;
 	}
-	if (m_state->active.size() >= m_state->limits.max_pending_entries ||
-	    entry_size > m_state->limits.max_pending_bytes ||
+	if (m_state->active.size() >= m_state->limits.max_pending_entries || entry_size > m_state->limits.max_pending_bytes ||
 	    m_state->pending_bytes > m_state->limits.max_pending_bytes - entry_size)
 	{
 		m_state->async_stats.dropped++;
@@ -502,9 +468,9 @@ void SpirvBinaryCacheStore::WorkerMain()
 			m_state->queue.pop_front();
 		}
 
-		const auto result = StoreEntry(pending->identity.data(), pending->identity.size(), pending->optimization,
-		                               pending->validation_enabled, pending->key_low, pending->key_high,
-		                               pending->extension.c_str(), pending->binary);
+		const auto result =
+		    StoreEntry(pending->identity.data(), pending->identity.size(), pending->optimization, pending->validation_enabled,
+		               pending->key_low, pending->key_high, pending->extension.c_str(), pending->binary);
 		{
 			std::lock_guard<std::mutex> lock(m_state->queue_mutex);
 			m_state->active.erase(pending->key_name);
@@ -514,10 +480,9 @@ void SpirvBinaryCacheStore::WorkerMain()
 			{
 				if (m_state->limits.max_completed_entries != 0)
 				{
-					m_state->completed.erase(
-					    std::remove_if(m_state->completed.begin(), m_state->completed.end(),
-					                   [&pending](const auto& entry) { return entry.key_name == pending->key_name; }),
-					    m_state->completed.end());
+					m_state->completed.erase(std::remove_if(m_state->completed.begin(), m_state->completed.end(),
+					                                        [&pending](const auto& entry) { return entry.key_name == pending->key_name; }),
+					                         m_state->completed.end());
 					while (m_state->completed.size() >= m_state->limits.max_completed_entries)
 					{
 						m_state->completed.pop_front();
@@ -561,8 +526,8 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreEntry(const uint8_t* ide
 	// temporary-file + atomic-replace protocol. On Windows, a replacement that
 	// loses to an open reader fails without exposing a partial destination.
 	std::lock_guard<std::mutex> lock(m_state->write_mutex);
-	WriteHookForTesting hook = nullptr;
-	void*               hook_opaque = nullptr;
+	WriteHookForTesting         hook        = nullptr;
+	void*                       hook_opaque = nullptr;
 	{
 		std::lock_guard<std::mutex> hook_lock(m_state->hook_mutex);
 		hook        = m_state->write_hook;
@@ -585,7 +550,7 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreEntry(const uint8_t* ide
 		return SpirvBinaryCacheStoreResult::Failed;
 	}
 
-	size_t usage = CacheUsage(m_state->root);
+	size_t     usage         = CacheUsage(m_state->root);
 	const auto existing_size = std::filesystem::file_size(path, error);
 	if (!error && existing_size <= usage)
 	{
@@ -595,9 +560,9 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreEntry(const uint8_t* ide
 
 	struct Candidate
 	{
-		std::filesystem::path path;
+		std::filesystem::path           path;
 		std::filesystem::file_time_type time;
-		size_t size;
+		size_t                          size;
 	};
 	std::vector<Candidate> candidates;
 	for (std::filesystem::directory_iterator it(m_state->root, error), end; !error && it != end; it.increment(error))
@@ -616,9 +581,7 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreEntry(const uint8_t* ide
 		error.clear();
 	}
 	std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b)
-	{
-		return a.time != b.time ? a.time < b.time : a.path.string() < b.path.string();
-	});
+	          { return a.time != b.time ? a.time < b.time : a.path.string() < b.path.string(); });
 	for (const auto& candidate: candidates)
 	{
 		if (usage <= m_state->limits.max_total_bytes - entry_size)
@@ -663,19 +626,8 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreEntry(const uint8_t* ide
 	EXIT_IF(data.size() != entry_size);
 
 	m_state->session_bytes_attempted += entry_size;
-	auto temporary = path;
-	temporary += "." + std::to_string(ProcessId()) + "." + std::to_string(m_state->temporary_sequence.fetch_add(1)) + ".tmp";
+	if (!AtomicFileWrite(path, data.data(), data.size()))
 	{
-		std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
-		if (!file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size())) || !file.flush())
-		{
-			std::filesystem::remove(temporary, error);
-			return SpirvBinaryCacheStoreResult::Failed;
-		}
-	}
-	if (!ReplaceFile(temporary, path))
-	{
-		std::filesystem::remove(temporary, error);
 		return SpirvBinaryCacheStoreResult::Failed;
 	}
 	return SpirvBinaryCacheStoreResult::Written;
@@ -699,10 +651,10 @@ SpirvBinaryCacheAsyncStats SpirvBinaryCacheStore::AsyncStats() const
 {
 	EXIT_IF(m_state == nullptr);
 	std::lock_guard<std::mutex> lock(m_state->queue_mutex);
-	auto stats              = m_state->async_stats;
-	stats.pending_entries   = m_state->active.size();
-	stats.pending_bytes     = m_state->pending_bytes;
-	stats.completed_entries = m_state->completed.size();
+	auto                        stats = m_state->async_stats;
+	stats.pending_entries             = m_state->active.size();
+	stats.pending_bytes               = m_state->pending_bytes;
+	stats.completed_entries           = m_state->completed.size();
 	return stats;
 }
 

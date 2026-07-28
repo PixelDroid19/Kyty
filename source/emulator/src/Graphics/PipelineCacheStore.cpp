@@ -1,16 +1,13 @@
 #include "Emulator/Graphics/PipelineCacheStore.h"
 
-#include <cstdio>
+#include "Emulator/AtomicFile.h"
+
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <system_error>
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -68,15 +65,6 @@ std::filesystem::path CachePath(const VkPhysicalDeviceProperties& properties)
 	}
 	name << ".bin";
 	return configured / name.str();
-}
-
-bool ReplaceFile(const std::filesystem::path& source, const std::filesystem::path& destination)
-{
-#ifdef _WIN32
-	return MoveFileExW(source.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
-#else
-	return std::rename(source.c_str(), destination.c_str()) == 0;
-#endif
 }
 
 } // namespace
@@ -142,19 +130,6 @@ PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineC
 		return PipelineCacheStoreSaveResult::BudgetExceeded;
 	}
 
-	std::error_code error;
-	const auto      parent = path.parent_path();
-	if (!parent.empty())
-	{
-		std::filesystem::create_directories(parent, error);
-		if (error)
-		{
-			return PipelineCacheStoreSaveResult::Failed;
-		}
-	}
-
-	auto temporary = path;
-	temporary += ".tmp";
 	if (attempted_size != nullptr)
 	{
 		// Charge the complete blob before opening the temporary file. This is a
@@ -162,18 +137,8 @@ PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineC
 		// operations, which must not bypass the per-session disk budget.
 		*attempted_size = data.size();
 	}
+	if (!AtomicFileWrite(path, data.data(), data.size()))
 	{
-		std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
-		if (!file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size())) || !file.flush())
-		{
-			std::filesystem::remove(temporary, error);
-			return PipelineCacheStoreSaveResult::Failed;
-		}
-	}
-
-	if (!ReplaceFile(temporary, path))
-	{
-		std::filesystem::remove(temporary, error);
 		return PipelineCacheStoreSaveResult::Failed;
 	}
 

@@ -10,24 +10,26 @@
 #include "Kyty/Core/Vector.h"
 #include "Kyty/Core/VirtualMemory.h"
 
-#include "KytyBuildInfo.h"
-
-#include "Emulator/Config.h"
-#include "Emulator/Controller.h"
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Agent/EventRing.h"
-#include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Audio.h"
+#include "Emulator/Config.h"
+#include "Emulator/Controller.h"
 #include "Emulator/Graphics/DebugOverlay.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Image.h"
 #include "Emulator/Graphics/KeyboardInput.h"
+#include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VulkanQueueIdentity.h"
+#include "Emulator/Graphics/WindowControls.h"
 #include "Emulator/Loader/SystemContent.h"
 #include "Emulator/Profiler.h"
 
+#include "KytyBuildInfo.h"
 #include "SDL.h"
 #include "SDL_error.h"
 #include "SDL_events.h"
@@ -48,11 +50,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <ctime>
+#include <filesystem>
 #include <set>
 #include <string>
-#include <vector>
 #include <system_error>
 #include <vector>
 
@@ -66,7 +67,7 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-//#define KYTY_ENABLE_BEST_PRACTICES
+// #define KYTY_ENABLE_BEST_PRACTICES
 #define KYTY_ENABLE_DEBUG_PRINTF
 #define KYTY_DBG_INPUT
 
@@ -250,12 +251,17 @@ struct SurfaceCapabilities
 struct WindowContext
 {
 	GraphicContext       graphic_ctx;
-	VulkanSwapchain*     swapchain            = nullptr;
-	SDL_Window*          window               = nullptr;
-	bool                 window_hidden        = true;
-	VkSurfaceKHR         surface              = nullptr;
-	SurfaceCapabilities* surface_capabilities = nullptr;
-	GameApi*             game                 = nullptr;
+	VulkanSwapchain*     swapchain               = nullptr;
+	SDL_Window*          window                  = nullptr;
+	bool                 window_hidden           = true;
+	bool                 fullscreen_requested    = false;
+	bool                 window_minimized        = false;
+	bool                 cursor_visible          = true;
+	uint64_t             cursor_hide_deadline_ms = 0;
+	VkSurfaceKHR         surface                 = nullptr;
+	SurfaceCapabilities* surface_capabilities    = nullptr;
+	GameApi*             game                    = nullptr;
+	HostWindowControls   controls;
 
 	char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = {0};
 	char processor_name[64]                            = {0};
@@ -268,33 +274,33 @@ struct WindowContext
 	{
 		std::filesystem::path directory;
 		std::filesystem::path trigger_file;
-		bool                  first_present = false;
-		uint32_t              every_present = 0;
-		bool                  telemetry     = false;
-		uint32_t              max_edge      = 0;
-		uint32_t              keep_files    = 8;
-		bool                  first_pending = false;
-		uint64_t              first_probe_after_ms = 0;
+		bool                  first_present           = false;
+		uint32_t              every_present           = 0;
+		bool                  telemetry               = false;
+		uint32_t              max_edge                = 0;
+		uint32_t              keep_files              = 8;
+		bool                  first_pending           = false;
+		uint64_t              first_probe_after_ms    = 0;
 		uint64_t              first_probe_deadline_ms = 0;
-		bool                  manual_pending = false;
-		uint64_t              sequence      = 0;
-		uint64_t              present_count = 0;
-		double                last_log_time = 0.0;
-		uint64_t              last_present_steady_ms = 0;
-		uint64_t              last_frame_steady_ms   = 0;
-		int                   last_seen_frame        = -1;
+		bool                  manual_pending          = false;
+		uint64_t              sequence                = 0;
+		uint64_t              present_count           = 0;
+		double                last_log_time           = 0.0;
+		uint64_t              last_present_steady_ms  = 0;
+		uint64_t              last_frame_steady_ms    = 0;
+		int                   last_seen_frame         = -1;
 
 		Core::Mutex   result_mutex;
 		Core::CondVar result_cv;
-		uint64_t      request_id    = 0;
-		uint64_t      completed_id  = 0;
-		bool          last_ok       = false;
+		uint64_t      request_id   = 0;
+		uint64_t      completed_id = 0;
+		bool          last_ok      = false;
 		std::string   last_path;
 		std::string   last_milestone;
 		std::string   last_format;
-		uint32_t      last_width  = 0;
-		uint32_t      last_height = 0;
-		int           last_frame  = 0;
+		uint32_t      last_width   = 0;
+		uint32_t      last_height  = 0;
+		int           last_frame   = 0;
 		uint64_t      last_present = 0;
 		std::string   last_error_code;
 		std::string   last_error_message;
@@ -306,8 +312,62 @@ static WindowContext* g_window_ctx = nullptr;
 static uint64_t WindowSteadyMs()
 {
 	using clock = std::chrono::steady_clock;
-	return static_cast<uint64_t>(
-	    std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count());
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count());
+}
+
+constexpr uint64_t HOST_CURSOR_HIDE_DELAY_MS = 2000;
+
+static void SetHostCursorVisible(bool visible)
+{
+	if (g_window_ctx == nullptr || g_window_ctx->cursor_visible == visible)
+	{
+		return;
+	}
+	SDL_ShowCursor(visible ? SDL_ENABLE : SDL_DISABLE);
+	g_window_ctx->cursor_visible = visible;
+}
+
+static void UpdateHostCursorPolicy(bool temporary_visibility = false)
+{
+	if (g_window_ctx == nullptr)
+	{
+		return;
+	}
+	if (!g_window_ctx->fullscreen_requested)
+	{
+		g_window_ctx->cursor_hide_deadline_ms = 0;
+		SetHostCursorVisible(true);
+		return;
+	}
+	if (temporary_visibility)
+	{
+		SetHostCursorVisible(true);
+		g_window_ctx->cursor_hide_deadline_ms = WindowSteadyMs() + HOST_CURSOR_HIDE_DELAY_MS;
+		return;
+	}
+	if (g_window_ctx->cursor_hide_deadline_ms == 0 || WindowSteadyMs() >= g_window_ctx->cursor_hide_deadline_ms)
+	{
+		g_window_ctx->cursor_hide_deadline_ms = 0;
+		SetHostCursorVisible(false);
+	}
+}
+
+static bool ToggleHostFullscreen()
+{
+	if (g_window_ctx == nullptr || g_window_ctx->window == nullptr)
+	{
+		return false;
+	}
+	const bool     target = !g_window_ctx->fullscreen_requested;
+	const uint32_t flags  = target ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0u;
+	if (SDL_SetWindowFullscreen(g_window_ctx->window, flags) != 0)
+	{
+		std::fprintf(stderr, "Kyty window fullscreen toggle failed: %s\n", SDL_GetError());
+		return false;
+	}
+	g_window_ctx->fullscreen_requested = target;
+	UpdateHostCursorPolicy();
+	return true;
 }
 
 static bool NativeCaptureEnvEnabled(const char* name)
@@ -324,7 +384,7 @@ static uint32_t NativeCaptureEnvPositive(const char* name)
 		return 0;
 	}
 
-	char* end = nullptr;
+	char*      end    = nullptr;
 	const auto parsed = std::strtoul(value, &end, 10);
 	if (end == value || *end != '\0' || parsed == 0 || parsed > UINT32_MAX)
 	{
@@ -425,16 +485,16 @@ static void NativeCaptureConfigure(WindowContext* ctx)
 		}
 	}
 
-	ctx->native_capture.first_present = NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_FIRST_PRESENT") ||
-	                                   NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_NOW");
-	ctx->native_capture.first_pending = ctx->native_capture.first_present;
+	ctx->native_capture.first_present =
+	    NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_FIRST_PRESENT") || NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_NOW");
+	ctx->native_capture.first_pending           = ctx->native_capture.first_present;
 	ctx->native_capture.first_probe_deadline_ms = WindowSteadyMs() + 30000;
-	ctx->native_capture.every_present = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_EVERY");
-	ctx->native_capture.telemetry     = NativeCaptureEnvEnabled("KYTY_NATIVE_TELEMETRY");
+	ctx->native_capture.every_present           = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_EVERY");
+	ctx->native_capture.telemetry               = NativeCaptureEnvEnabled("KYTY_NATIVE_TELEMETRY");
 	// Default edge cap bounds disk/RAM for 4K VideoOut captures; set
 	// KYTY_NATIVE_CAPTURE_MAX_EDGE=0 for full-resolution dumps.
-	ctx->native_capture.max_edge      = NativeCaptureResolveMaxEdge(std::getenv("KYTY_NATIVE_CAPTURE_MAX_EDGE"));
-	ctx->native_capture.keep_files    = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_KEEP");
+	ctx->native_capture.max_edge   = NativeCaptureResolveMaxEdge(std::getenv("KYTY_NATIVE_CAPTURE_MAX_EDGE"));
+	ctx->native_capture.keep_files = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_KEEP");
 	if (ctx->native_capture.keep_files == 0)
 	{
 		ctx->native_capture.keep_files = 8;
@@ -442,8 +502,7 @@ static void NativeCaptureConfigure(WindowContext* ctx)
 
 	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE_CONFIG enabled=1 first=%d every=%u trigger=%d max_edge=%u keep=%u\n",
 	             ctx->native_capture.first_present ? 1 : 0, ctx->native_capture.every_present,
-	             ctx->native_capture.trigger_file.empty() ? 0 : 1, ctx->native_capture.max_edge,
-	             ctx->native_capture.keep_files);
+	             ctx->native_capture.trigger_file.empty() ? 0 : 1, ctx->native_capture.max_edge, ctx->native_capture.keep_files);
 }
 
 enum class NativeCaptureMilestone
@@ -524,8 +583,7 @@ static void NativeCapturePublishResult(WindowContext* ctx, bool ok, const char* 
 
 	if (ok)
 	{
-		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Capture, "capture_ok",
-		                                            path != nullptr ? path : "");
+		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Capture, "capture_ok", path != nullptr ? path : "");
 	} else
 	{
 		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Error,
@@ -540,7 +598,8 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	EXIT_IF(image == nullptr);
 	EXIT_IF(milestone == NativeCaptureMilestone::None);
 
-	const bool agent_waiting = [&]() {
+	const bool agent_waiting = [&]()
+	{
 		Core::LockGuard lock(ctx->native_capture.result_mutex);
 		return ctx->native_capture.manual_pending || ctx->native_capture.request_id > ctx->native_capture.completed_id;
 	}();
@@ -584,7 +643,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		return;
 	}
 
-	const uint64_t size = width * height * 4;
+	const uint64_t       size = width * height * 4;
 	std::vector<uint8_t> pixels(size);
 	UtilFillBuffer(&ctx->graphic_ctx, pixels.data(), size, static_cast<uint32_t>(width), image,
 	               static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
@@ -608,7 +667,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	const auto stamp        = NativeCaptureUtcStamp();
 	const auto sequence     = ctx->native_capture.sequence++;
 	const auto filename     = title_name + "-" + version_name + "-" + revision + "-frame-" + std::to_string(frame) + "-" + stamp + "-" +
-	                      std::to_string(sequence) + ".bmp";
+	                          std::to_string(sequence) + ".bmp";
 
 	std::error_code error;
 	std::filesystem::create_directories(ctx->native_capture.directory, error);
@@ -624,13 +683,13 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		return;
 	}
 
-	const auto image_path = ctx->native_capture.directory / filename;
-	const uint32_t r_mask = image->format == VK_FORMAT_B8G8R8A8_SRGB ? 0x00FF0000u : 0x000000FFu;
-	const uint32_t g_mask = 0x0000FF00u;
-	const uint32_t b_mask = image->format == VK_FORMAT_B8G8R8A8_SRGB ? 0x000000FFu : 0x00FF0000u;
-	const uint32_t a_mask = 0xFF000000u;
-	auto* surface = SDL_CreateRGBSurfaceFrom(pixels.data(), static_cast<int>(width), static_cast<int>(height), 32,
-	                                         static_cast<int>(width * 4), r_mask, g_mask, b_mask, a_mask);
+	const auto     image_path = ctx->native_capture.directory / filename;
+	const uint32_t r_mask     = image->format == VK_FORMAT_B8G8R8A8_SRGB ? 0x00FF0000u : 0x000000FFu;
+	const uint32_t g_mask     = 0x0000FF00u;
+	const uint32_t b_mask     = image->format == VK_FORMAT_B8G8R8A8_SRGB ? 0x000000FFu : 0x00FF0000u;
+	const uint32_t a_mask     = 0xFF000000u;
+	auto*          surface    = SDL_CreateRGBSurfaceFrom(pixels.data(), static_cast<int>(width), static_cast<int>(height), 32,
+	                                                     static_cast<int>(width * 4), r_mask, g_mask, b_mask, a_mask);
 	if (surface == nullptr)
 	{
 		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=create_surface frame=%d recoverable=0\n", frame);
@@ -653,7 +712,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		    static_cast<double>(ctx->native_capture.max_edge) / static_cast<double>(out_width > out_height ? out_width : out_height);
 		out_width  = std::max(1u, static_cast<uint32_t>(static_cast<double>(out_width) * scale + 0.5));
 		out_height = std::max(1u, static_cast<uint32_t>(static_cast<double>(out_height) * scale + 0.5));
-		scaled = SDL_CreateRGBSurface(0, static_cast<int>(out_width), static_cast<int>(out_height), 32, r_mask, g_mask, b_mask, a_mask);
+		scaled     = SDL_CreateRGBSurface(0, static_cast<int>(out_width), static_cast<int>(out_height), 32, r_mask, g_mask, b_mask, a_mask);
 		if (scaled != nullptr && SDL_BlitScaled(surface, nullptr, scaled, nullptr) == 0)
 		{
 			save_surface = scaled;
@@ -691,7 +750,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	// Bound capture-directory growth: keep only the newest N BMP(+json) pairs.
 	if (ctx->native_capture.keep_files > 0 && !ctx->native_capture.directory.empty())
 	{
-		std::error_code          list_error;
+		std::error_code                               list_error;
 		std::vector<std::filesystem::directory_entry> bmps;
 		for (const auto& entry: std::filesystem::directory_iterator(ctx->native_capture.directory, list_error))
 		{
@@ -726,10 +785,11 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		             "\"format\": \"%s\",\n  \"width\": %llu,\n  \"height\": %llu,\n  "
 		             "\"source_width\": %llu,\n  \"source_height\": %llu,\n  "
 		             "\"image\": \"%s\",\n  \"host_peak_rss_bytes\": %llu\n}\n",
-		             NativeCaptureMilestoneName(milestone), frame, static_cast<unsigned long long>(ctx->native_capture.present_count), title_name.c_str(),
-		             version_name.c_str(), revision.c_str(), BuildInfo::Dirty ? "true" : "false", NativeCaptureFormatName(image->format),
-		             static_cast<unsigned long long>(out_width), static_cast<unsigned long long>(out_height),
-		             static_cast<unsigned long long>(width), static_cast<unsigned long long>(height), image_path.filename().string().c_str(),
+		             NativeCaptureMilestoneName(milestone), frame, static_cast<unsigned long long>(ctx->native_capture.present_count),
+		             title_name.c_str(), version_name.c_str(), revision.c_str(), BuildInfo::Dirty ? "true" : "false",
+		             NativeCaptureFormatName(image->format), static_cast<unsigned long long>(out_width),
+		             static_cast<unsigned long long>(out_height), static_cast<unsigned long long>(width),
+		             static_cast<unsigned long long>(height), image_path.filename().string().c_str(),
 		             static_cast<unsigned long long>(NativeCaptureHostPeakRssBytes()));
 		std::fclose(metadata);
 	} else
@@ -833,6 +893,7 @@ static void SetPause(GameApi* game, bool flag)
 {
 	printf("Pause: %s\n", flag ? "true" : "false");
 
+	Audio::AudioOut::AudioOutSetHostPaused(flag);
 	game->m_game_is_paused = flag;
 }
 
@@ -917,6 +978,7 @@ void game_show_window(GameApi* game, const Core::Timer& timer)
 	auto* p = static_cast<GameApiPrivateStruct*>(game->data1);
 
 	EXIT_IF(!p);
+	UpdateHostCursorPolicy();
 
 	p->mutex.Lock();
 	{
@@ -977,9 +1039,31 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 	       (key->repeat ? "repeat" : ""), key->scan_code, key->key_code, key->mod);
 #endif
 
+	HostWindowKey host_key {};
+	host_key.pressed = key->down;
+	host_key.repeat  = key->repeat;
+	host_key.escape  = key->key_code == SDLK_ESCAPE;
+	host_key.pause   = key->key_code == SDLK_F9;
+	host_key.f11     = key->key_code == SDLK_F11;
+	host_key.enter   = key->key_code == SDLK_RETURN || key->key_code == SDLK_KP_ENTER;
+	host_key.alt     = (key->mod & KMOD_ALT) != 0;
+
+	const bool enter_allowed_before = g_window_ctx == nullptr || g_window_ctx->controls.GuestEnterAllowed();
+	const auto host_command         = g_window_ctx == nullptr ? HostWindowCommand::None : g_window_ctx->controls.HandleKey(host_key);
+	const bool enter_allowed_after  = g_window_ctx == nullptr || g_window_ctx->controls.GuestEnterAllowed();
+	const bool suppress_guest_enter = host_key.enter && (!enter_allowed_before || !enter_allowed_after);
+
+	switch (host_command)
+	{
+		case HostWindowCommand::Quit: game->m_game_need_exit = true; break;
+		case HostWindowCommand::TogglePause: SetPause(game, !game->m_game_is_paused); break;
+		case HostWindowCommand::ToggleFullscreen: ToggleHostFullscreen(); break;
+		case HostWindowCommand::None: break;
+	}
+
 	// Virtual pad (id 0): keyboard maps to DualShock buttons so splash/menus are skippable
 	// without a physical controller. Repeat is ignored to avoid stuck buttons.
-	if (!key->repeat && (key->down || key->up))
+	if (!key->repeat && (key->down || key->up) && !suppress_guest_enter)
 	{
 		const bool down = key->down;
 		ApplyKeyboardLeftStickControllerAxes(ApplyKeyboardLeftStickKey(g_keyboard_left_stick, key->key_code, down));
@@ -1010,19 +1094,8 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 	}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS || KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-	if (key->down && key->key_code == SDLK_ESCAPE)
-	{
-		game->m_game_need_exit = true;
-	}
-
-	// Host pause uses F9 so Space reaches the guest (Construct "Press any key" / Spacebar).
-	if (key->down && key->key_code == SDLK_F9)
-	{
-		SetPause(game, !game->m_game_is_paused);
-	}
-
 	// Host debug HUD toggle (does not map to guest pad).
-	if (key->down && key->key_code == SDLK_F1)
+	if (key->down && !key->repeat && key->key_code == SDLK_F1)
 	{
 		DebugOverlayToggle();
 	}
@@ -1048,6 +1121,15 @@ void game_event_mouse([[maybe_unused]] GameApi* game, [[maybe_unused]] const Eve
 		       (mb->pressed ? "pressed" : ""), (mb->released ? "released" : ""), mb->x, mb->y);
 	}
 #endif
+	if (mb->motion || mb->down)
+	{
+		UpdateHostCursorPolicy(true);
+	}
+	if (HostWindowControls::HandlePrimaryClick(mb->left, mb->down, static_cast<uint8_t>(mb->num_of_clicks)) ==
+	    HostWindowCommand::ToggleFullscreen)
+	{
+		ToggleHostFullscreen();
+	}
 }
 
 void game_event_finger([[maybe_unused]] GameApi* game, [[maybe_unused]] const EventFinger* f)
@@ -1073,8 +1155,6 @@ void game_event_finger([[maybe_unused]] GameApi* game, [[maybe_unused]] const Ev
 
 void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] const EventController* f)
 {
-	EXIT_NOT_IMPLEMENTED(f->remapped);
-
 #ifdef KYTY_DBG_INPUT
 	if (f->added || f->removed)
 	{
@@ -1090,11 +1170,21 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 		       f->button, f->timestamp_seconds);
 	}
 #endif
+	if (f->remapped)
+	{
+		// SDL has already updated the active mapping. Subsequent axis/button
+		// events use it; the guest connection identity remains unchanged.
+		return;
+	}
 
 	if (f->added)
 	{
 		auto* pad = SDL_GameControllerOpen(f->id);
-		EXIT_NOT_IMPLEMENTED(pad == nullptr);
+		if (pad == nullptr)
+		{
+			std::fprintf(stderr, "Kyty controller open failed for device %d: %s\n", f->id, SDL_GetError());
+			return;
+		}
 		int id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad));
 		Controller::ControllerConnect(id);
 	}
@@ -1102,7 +1192,10 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 	if (f->removed)
 	{
 		Controller::ControllerDisconnect(f->id);
-		SDL_GameControllerClose(SDL_GameControllerFromInstanceID(f->id));
+		if (auto* pad = SDL_GameControllerFromInstanceID(f->id); pad != nullptr)
+		{
+			SDL_GameControllerClose(pad);
+		}
 	}
 
 	if (f->down || f->up)
@@ -1209,7 +1302,7 @@ bool game_need_exit(GameApi* game)
 
 bool game_is_paused(GameApi* game)
 {
-	return game->m_game_is_paused;
+	return game->m_game_is_paused || (g_window_ctx != nullptr && g_window_ctx->window_minimized);
 }
 
 void game_event_resize(GameApi* game, uint32_t new_width, uint32_t new_height)
@@ -1250,40 +1343,58 @@ static void process_window_event(GameApi* game, SDL_WindowEvent window)
 			break;
 
 		case SDL_WINDOWEVENT_RESIZED:
-			printf("Window %" PRIu32 " resized to %" PRId32 "x%" PRId32 "\n", window.windowID, window.data1, window.data2);
-
-			if (game->event_resize != nullptr)
-			{
-				printf("m: %d\n", static_cast<int>(SDL_ThreadID()));
-				//				dbg_check();
-				game->event_resize(game, window.data1, window.data2);
-			}
-
-			break;
-
 		case SDL_WINDOWEVENT_SIZE_CHANGED:
-			printf("Window %" PRIu32 " size changed to %" PRId32 "x%" PRId32 "\n", window.windowID, window.data1, window.data2);
-
-			if (game->event_resize != nullptr)
+			printf("Window %" PRIu32 " drawable size changed to %" PRId32 "x%" PRId32 "\n", window.windowID, window.data1, window.data2);
+			if (game->event_resize != nullptr && window.data1 > 0 && window.data2 > 0 &&
+			    (game->m_screen_width != static_cast<uint32_t>(window.data1) ||
+			     game->m_screen_height != static_cast<uint32_t>(window.data2)))
 			{
-				printf("m: %d\n", static_cast<int>(SDL_ThreadID()));
-				//				dbg_check();
 				game->event_resize(game, window.data1, window.data2);
 			}
-
 			break;
 
-		case SDL_WINDOWEVENT_MINIMIZED: printf("Window %" PRIu32 " minimized\n", window.windowID); break;
+		case SDL_WINDOWEVENT_MINIMIZED:
+			printf("Window %" PRIu32 " minimized\n", window.windowID);
+			if (g_window_ctx != nullptr)
+			{
+				g_window_ctx->window_minimized = true;
+				SetHostCursorVisible(true);
+			}
+			break;
 		case SDL_WINDOWEVENT_MAXIMIZED: printf("Window %" PRIu32 " maximized\n", window.windowID); break;
-		case SDL_WINDOWEVENT_RESTORED: printf("Window %" PRIu32 " restored\n", window.windowID); break;
+		case SDL_WINDOWEVENT_RESTORED:
+			printf("Window %" PRIu32 " restored\n", window.windowID);
+			if (g_window_ctx != nullptr)
+			{
+				g_window_ctx->window_minimized = false;
+				UpdateHostCursorPolicy();
+			}
+			break;
 		case SDL_WINDOWEVENT_ENTER: printf("Mouse entered window %" PRIu32 "\n", window.windowID); break;
 		case SDL_WINDOWEVENT_LEAVE: printf("Mouse left window %" PRIu32 "\n", window.windowID); break;
-		case SDL_WINDOWEVENT_FOCUS_GAINED: printf("Window %" PRIu32 " gained keyboard focus\n", window.windowID); break;
+		case SDL_WINDOWEVENT_FOCUS_GAINED:
+			printf("Window %" PRIu32 " gained keyboard focus\n", window.windowID);
+			if (g_window_ctx != nullptr)
+			{
+				g_window_ctx->controls.SetFocused(true);
+				const uint8_t* keyboard = SDL_GetKeyboardState(nullptr);
+				g_window_ctx->controls.ReconcileEnter(keyboard[SDL_SCANCODE_RETURN] != 0 || keyboard[SDL_SCANCODE_KP_ENTER] != 0);
+				UpdateHostCursorPolicy();
+			}
+			break;
 		case SDL_WINDOWEVENT_FOCUS_LOST:
 			printf("Window %" PRIu32 " lost keyboard focus\n", window.windowID);
+			if (g_window_ctx != nullptr)
+			{
+				g_window_ctx->controls.SetFocused(false);
+				SetHostCursorVisible(true);
+			}
 			ApplyKeyboardLeftStickControllerAxes(ResetKeyboardLeftStick(g_keyboard_left_stick));
 			break;
-		case SDL_WINDOWEVENT_CLOSE: printf("Window %" PRIu32 " closed\n", window.windowID); break;
+		case SDL_WINDOWEVENT_CLOSE:
+			printf("Window %" PRIu32 " closed\n", window.windowID);
+			game->m_game_need_exit = true;
+			break;
 		default: printf("Window %" PRIu32 " got unknown event %" PRIu8 "\n", window.windowID, window.event); break;
 	}
 }
@@ -1819,7 +1930,11 @@ static void WindowCreate(WindowContext* ctx)
 		EXIT("%s\n", SDL_GetError());
 	}
 
-	SDL_SetWindowResizable(ctx->window, SDL_FALSE);
+	SDL_SetWindowResizable(ctx->window, SDL_TRUE);
+	const uint32_t window_flags = SDL_GetWindowFlags(ctx->window);
+	ctx->fullscreen_requested   = (window_flags & SDL_WINDOW_FULLSCREEN) != 0u;
+	ctx->window_minimized       = (window_flags & SDL_WINDOW_MINIMIZED) != 0u;
+	ctx->controls.SetFocused((window_flags & SDL_WINDOW_INPUT_FOCUS) != 0u);
 }
 
 static void VulkanGetSurfaceCapabilities(VkPhysicalDevice physical_device, VkSurfaceKHR surface, SurfaceCapabilities* r)
@@ -2048,7 +2163,6 @@ static void VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, uint
 			}
 		}
 	}
-
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -2092,8 +2206,8 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		printf("Vulkan device: %s\n", device_properties.deviceName);
 
 		VulkanQueues qs;
-		VulkanFindQueues(device, surface, GraphicContext::QUEUE_GFX_NUM, GraphicContext::QUEUE_COMPUTE_NUM,
-		                 GraphicContext::QUEUE_UTIL_NUM, GraphicContext::QUEUE_PRESENT_NUM, &qs);
+		VulkanFindQueues(device, surface, GraphicContext::QUEUE_GFX_NUM, GraphicContext::QUEUE_COMPUTE_NUM, GraphicContext::QUEUE_UTIL_NUM,
+		                 GraphicContext::QUEUE_PRESENT_NUM, &qs);
 
 		if (qs.graphics.Size() != GraphicContext::QUEUE_GFX_NUM ||
 		    !(qs.compute.Size() >= 1 && qs.compute.Size() <= GraphicContext::QUEUE_COMPUTE_NUM) ||
@@ -2344,10 +2458,10 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	color_write_ext.colorWriteEnable = VK_TRUE;
 
 	VkDeviceCreateInfo create_info {};
-	create_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-	create_info.pNext                   = (color_write_enable_supported
-	                                           ? static_cast<const void*>(&color_write_ext)
-	                                           : (depth_clip_control_supported ? static_cast<const void*>(&depth_clip_control_ext) : nullptr));
+	create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+	create_info.pNext =
+	    (color_write_enable_supported ? static_cast<const void*>(&color_write_ext)
+	                                  : (depth_clip_control_supported ? static_cast<const void*>(&depth_clip_control_ext) : nullptr));
 	create_info.flags                   = 0;
 	create_info.pQueueCreateInfos       = queue_create_info.GetDataConst();
 	create_info.queueCreateInfoCount    = queue_create_info_num;
@@ -2555,10 +2669,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 
 [[maybe_unused]] static VkSwapchainKHR VulkanCreateSwapchainInternal(VkDevice device, VkSurfaceKHR surface, VkSwapchainKHR old_swapchain,
                                                                      uint32_t width, uint32_t height, uint32_t image_count,
-                                                                     SurfaceCapabilities* r,
-                                                                     VkFormat* swapchain_format, VkExtent2D* swapchain_extent,
-                                                                     VkImage** swapchain_images, VkImageView** swapchain_image_views,
-                                                                     uint32_t* swapchain_images_count)
+                                                                     SurfaceCapabilities* r, VkFormat* swapchain_format,
+                                                                     VkExtent2D* swapchain_extent, VkImage** swapchain_images,
+                                                                     VkImageView** swapchain_image_views, uint32_t* swapchain_images_count)
 {
 	EXIT_IF(device == nullptr);
 	EXIT_IF(surface == nullptr);
@@ -2618,8 +2731,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 		create_info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 	} else
 	{
-		const auto chosen =
-		    SelectDefaultSwapchainSurfaceFormat(r->formats.GetData(), static_cast<uint32_t>(r->formats.Size()));
+		const auto chosen           = SelectDefaultSwapchainSurfaceFormat(r->formats.GetData(), static_cast<uint32_t>(r->formats.Size()));
 		create_info.imageFormat     = chosen.format;
 		create_info.imageColorSpace = chosen.colorSpace;
 	}
@@ -2687,24 +2799,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	*swapchain_image_views = new VkImageView[*swapchain_images_count];
 	for (uint32_t i = 0; i < *swapchain_images_count; i++)
 	{
-		VkImageViewCreateInfo create_info {};
-		create_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-		create_info.pNext                           = nullptr;
-		create_info.flags                           = 0;
-		create_info.image                           = (*swapchain_images)[i];
-		create_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-		create_info.format                          = *swapchain_format;
-		create_info.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-		create_info.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-		create_info.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-		create_info.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-		create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-		create_info.subresourceRange.baseArrayLayer = 0;
-		create_info.subresourceRange.baseMipLevel   = 0;
-		create_info.subresourceRange.layerCount     = 1;
-		create_info.subresourceRange.levelCount     = 1;
-
-		vkCreateImageView(device, &create_info, nullptr, &((*swapchain_image_views)[i]));
+		VulkanImageViewDescriptor view_descriptor {};
+		view_descriptor.image  = (*swapchain_images)[i];
+		view_descriptor.format = *swapchain_format;
+		EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(device, view_descriptor, &((*swapchain_image_views)[i])));
 	}
 
 	return swapchain;
@@ -2745,10 +2843,9 @@ static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 		identities[id]    = {queue.family, queue.index, queue.vk_queue};
 	}
 
-	const auto assignment =
-	    VulkanAssignQueueLockIndices(identities, GraphicContext::QUEUES_NUM, lock_indices, &ctx->queue_mutex_count);
-	EXIT_NOT_IMPLEMENTED(assignment != VulkanQueueLockAssignmentStatus::Success ||
-	                     ctx->queue_mutex_count == 0 || ctx->queue_mutex_count > GraphicContext::QUEUES_NUM);
+	const auto assignment = VulkanAssignQueueLockIndices(identities, GraphicContext::QUEUES_NUM, lock_indices, &ctx->queue_mutex_count);
+	EXIT_NOT_IMPLEMENTED(assignment != VulkanQueueLockAssignmentStatus::Success || ctx->queue_mutex_count == 0 ||
+	                     ctx->queue_mutex_count > GraphicContext::QUEUES_NUM);
 	for (int id = 0; id < GraphicContext::QUEUES_NUM; id++)
 	{
 		EXIT_IF(lock_indices[id] >= ctx->queue_mutex_count);
@@ -2767,9 +2864,9 @@ static VulkanSwapchain* VulkanCreateSwapchain(GraphicContext* ctx, uint32_t imag
 
 	auto* s = new VulkanSwapchain;
 
-	s->swapchain = VulkanCreateSwapchainInternal(ctx->device, g_window_ctx->surface, nullptr, ctx->screen_width, ctx->screen_height,
-	                                             image_count, g_window_ctx->surface_capabilities, &s->swapchain_format, &s->swapchain_extent,
-	                                             &s->swapchain_images, &s->swapchain_image_views, &s->swapchain_images_count);
+	s->swapchain = VulkanCreateSwapchainInternal(
+	    ctx->device, g_window_ctx->surface, nullptr, ctx->screen_width, ctx->screen_height, image_count, g_window_ctx->surface_capabilities,
+	    &s->swapchain_format, &s->swapchain_extent, &s->swapchain_images, &s->swapchain_image_views, &s->swapchain_images_count);
 	if (s->swapchain == nullptr)
 	{
 		EXIT("Could not create swapchain");
@@ -2827,9 +2924,9 @@ static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uin
 
 	VulkanGetSurfaceCapabilities(ctx->physical_device, g_window_ctx->surface, g_window_ctx->surface_capabilities);
 
-	s->swapchain = VulkanCreateSwapchainInternal(ctx->device, g_window_ctx->surface, old, ctx->screen_width, ctx->screen_height, image_count,
-	                                             g_window_ctx->surface_capabilities, &s->swapchain_format, &s->swapchain_extent,
-	                                             &s->swapchain_images, &s->swapchain_image_views, &s->swapchain_images_count);
+	s->swapchain = VulkanCreateSwapchainInternal(
+	    ctx->device, g_window_ctx->surface, old, ctx->screen_width, ctx->screen_height, image_count, g_window_ctx->surface_capabilities,
+	    &s->swapchain_format, &s->swapchain_extent, &s->swapchain_images, &s->swapchain_image_views, &s->swapchain_images_count);
 	if (s->swapchain == nullptr)
 	{
 		EXIT("Could not recreate swapchain");
@@ -2901,9 +2998,9 @@ static void VulkanCreate(WindowContext* ctx)
 	                                  static_cast<uint32_t>(VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) |
 	                                  static_cast<uint32_t>(VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) |
 	                                  static_cast<uint32_t>(VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT);
-	dbg_create_info.messageType = static_cast<uint32_t>(VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) |
-	                              static_cast<uint32_t>(VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) |
-	                              static_cast<uint32_t>(VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT);
+	dbg_create_info.messageType     = static_cast<uint32_t>(VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) |
+	                                  static_cast<uint32_t>(VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) |
+	                                  static_cast<uint32_t>(VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT);
 	dbg_create_info.pfnUserCallback = VulkanDebugMessengerCallback;
 	dbg_create_info.pUserData       = nullptr;
 
@@ -2941,9 +3038,9 @@ static void VulkanCreate(WindowContext* ctx)
 		EXIT("Could not create a Vulkan surface");
 	}
 
-	Vector<const char*> device_extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME,
-	                                         VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
-	                                         VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME, "VK_KHR_maintenance1"};
+	Vector<const char*> device_extensions = {
+	    VK_KHR_SWAPCHAIN_EXTENSION_NAME,          VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME,        VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME,
+	    VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME, VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME, "VK_KHR_maintenance1"};
 
 #ifdef KYTY_ENABLE_DEBUG_PRINTF
 	if (Config::SpirvDebugPrintfEnabled())
@@ -2974,10 +3071,10 @@ static void VulkanCreate(WindowContext* ctx)
 		dev_exts.Memset(0);
 		vkEnumerateDeviceExtensionProperties(ctx->graphic_ctx.physical_device, nullptr, &dev_ext_count, dev_exts.GetData());
 
-		auto has_ext = [&](const char* name) {
-			return dev_exts.Contains(name, [](auto s, auto l) { return strcmp(s.extensionName, l) == 0; });
-		};
-		auto drop_ext = [&](const char* name) {
+		auto has_ext = [&](const char* name)
+		{ return dev_exts.Contains(name, [](auto s, auto l) { return strcmp(s.extensionName, l) == 0; }); };
+		auto drop_ext = [&](const char* name)
+		{
 			if (auto idx = device_extensions.Find(name, [](auto s, auto l) { return strcmp(s, l) == 0; });
 			    device_extensions.IndexValid(idx))
 			{
@@ -3004,8 +3101,7 @@ static void VulkanCreate(WindowContext* ctx)
 		{
 			drop_ext(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
 			printf("VK_EXT_depth_clip_control absent: OpenGL clip space needs host remapping\n");
-		} else if (!device_extensions.Contains(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
-		                                       [](auto s, auto l) { return strcmp(s, l) == 0; }))
+		} else if (!device_extensions.Contains(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME, [](auto s, auto l) { return strcmp(s, l) == 0; }))
 		{
 			device_extensions.Add(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
 		}
@@ -3032,9 +3128,9 @@ static void VulkanCreate(WindowContext* ctx)
 	memcpy(ctx->device_name, device_properties.deviceName, sizeof(ctx->device_name));
 	memcpy(ctx->processor_name, Core::GetSystemInfo().ProcessorName.C_Str(), sizeof(ctx->processor_name));
 
-	ctx->graphic_ctx.device = VulkanCreateDevice(ctx->graphic_ctx.physical_device, ctx->surface, &r, queues, device_extensions,
-	                                             ctx->graphic_ctx.color_write_enable_supported,
-	                                             ctx->graphic_ctx.depth_clip_control_supported);
+	ctx->graphic_ctx.device =
+	    VulkanCreateDevice(ctx->graphic_ctx.physical_device, ctx->surface, &r, queues, device_extensions,
+	                       ctx->graphic_ctx.color_write_enable_supported, ctx->graphic_ctx.depth_clip_control_supported);
 	if (ctx->graphic_ctx.device == nullptr)
 	{
 		EXIT("Could not create device");
@@ -3215,9 +3311,9 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	g_window_ctx->swapchain->current_index = static_cast<uint32_t>(-1);
 
 	const auto acquire_start = std::chrono::steady_clock::now();
-	auto result = vkAcquireNextImageKHR(g_window_ctx->graphic_ctx.device, g_window_ctx->swapchain->swapchain, UINT64_MAX,
-	                                    /*g_window_ctx->swapchain->present_complete_semaphore*/ nullptr,
-	                                    g_window_ctx->swapchain->present_complete_fence, &g_window_ctx->swapchain->current_index);
+	auto       result = vkAcquireNextImageKHR(g_window_ctx->graphic_ctx.device, g_window_ctx->swapchain->swapchain, UINT64_MAX,
+	                                          /*g_window_ctx->swapchain->present_complete_semaphore*/ nullptr,
+	                                          g_window_ctx->swapchain->present_complete_fence, &g_window_ctx->swapchain->current_index);
 
 	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
 	{
@@ -3248,12 +3344,11 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 
 	vkResetFences(g_window_ctx->graphic_ctx.device, 1, &g_window_ctx->swapchain->present_complete_fence);
-	const auto acquire_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - acquire_start).count();
+	const auto acquire_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - acquire_start).count();
 	DebugStatsRecordAcquire(static_cast<uint64_t>(acquire_ns));
 
-	auto* blt_src_image = image;
-	auto* blt_dst_image = g_window_ctx->swapchain;
+	auto*      blt_src_image     = image;
+	auto*      blt_dst_image     = g_window_ctx->swapchain;
 	const auto capture_milestone = NativeCaptureNext(g_window_ctx);
 
 	EXIT_IF(blt_src_image == nullptr);
@@ -3297,8 +3392,8 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 						std::memcpy(hdr + 2, &file_size, 4);
 						std::memcpy(hdr + 10, &off, 4);
 						std::memcpy(hdr + 14, &dib, 4);
-						int32_t  wi = static_cast<int32_t>(w);
-						int32_t  hi = -static_cast<int32_t>(h);
+						int32_t  wi     = static_cast<int32_t>(w);
+						int32_t  hi     = -static_cast<int32_t>(h);
 						uint16_t planes = 1;
 						uint16_t bpp    = 32;
 						std::memcpy(hdr + 18, &wi, 4);
@@ -3332,32 +3427,30 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	UtilBlitImage(&buffer, blt_src_image, blt_dst_image);
 
-	const double now_seconds = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_time_seconds : 0.0;
-	const double fps_now     = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_fps : 0.0;
-	const double frame_time_ms = (g_window_ctx->game != nullptr)
-	                                 ? DebugStatsFrameIntervalMs(g_window_ctx->game->m_current_time_seconds,
-	                                                             g_window_ctx->game->m_previous_time_seconds)
-	                                 : 0.0;
+	const double now_seconds   = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_time_seconds : 0.0;
+	const double fps_now       = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_fps : 0.0;
+	const double frame_time_ms = (g_window_ctx->game != nullptr) ? DebugStatsFrameIntervalMs(g_window_ctx->game->m_current_time_seconds,
+	                                                                                         g_window_ctx->game->m_previous_time_seconds)
+	                                                             : 0.0;
 	const bool   hud_drew =
 	    DebugOverlayRecord(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, vk_buffer, now_seconds, fps_now, frame_time_ms);
 
 	VkImageMemoryBarrier pre_present_barrier {};
-	pre_present_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	pre_present_barrier.pNext                           = nullptr;
-	pre_present_barrier.srcAccessMask                   = hud_drew ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
-	pre_present_barrier.dstAccessMask                   = VK_ACCESS_MEMORY_READ_BIT;
-	pre_present_barrier.oldLayout = hud_drew ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	pre_present_barrier.newLayout                       = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-	pre_present_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-	pre_present_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	pre_present_barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	pre_present_barrier.pNext               = nullptr;
+	pre_present_barrier.srcAccessMask       = hud_drew ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
+	pre_present_barrier.dstAccessMask       = VK_ACCESS_MEMORY_READ_BIT;
+	pre_present_barrier.oldLayout           = hud_drew ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	pre_present_barrier.newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+	pre_present_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	pre_present_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	pre_present_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
 	pre_present_barrier.subresourceRange.baseMipLevel   = 0;
 	pre_present_barrier.subresourceRange.levelCount     = 1;
 	pre_present_barrier.subresourceRange.baseArrayLayer = 0;
 	pre_present_barrier.subresourceRange.layerCount     = 1;
 	pre_present_barrier.image                           = g_window_ctx->swapchain->swapchain_images[g_window_ctx->swapchain->current_index];
-	const VkPipelineStageFlags src_stage =
-	    hud_drew ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+	const VkPipelineStageFlags src_stage = hud_drew ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 	vkCmdPipelineBarrier(vk_buffer, src_stage, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &pre_present_barrier);
 
 	buffer.End();
@@ -3382,8 +3475,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 		result = vkQueuePresentKHR(queue.vk_queue, &present);
 	}
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
-	const auto present_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - present_start).count();
+	const auto present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - present_start).count();
 	DebugStatsRecordPresent(static_cast<uint64_t>(present_ns));
 
 	g_window_ctx->native_capture.present_count++;
@@ -3408,8 +3500,8 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 		{
 			std::fprintf(stderr, "KYTY_PRESENT_TELEMETRY frame=%d present=%llu fps=%.3f peak_rss_bytes=%llu size=%ux%u format=%s\n",
 			             g_window_ctx->game->m_frame_num, static_cast<unsigned long long>(g_window_ctx->native_capture.present_count),
-			             g_window_ctx->game->m_current_fps, static_cast<unsigned long long>(NativeCaptureHostPeakRssBytes()), image->extent.width,
-			             image->extent.height, NativeCaptureFormatName(image->format));
+			             g_window_ctx->game->m_current_fps, static_cast<unsigned long long>(NativeCaptureHostPeakRssBytes()),
+			             image->extent.width, image->extent.height, NativeCaptureFormatName(image->format));
 			g_window_ctx->native_capture.last_log_time = t;
 		}
 	}
@@ -3436,10 +3528,10 @@ bool WindowGetPresentStats(WindowPresentStats* out)
 	}
 
 	const uint64_t now_ms = WindowSteadyMs();
-	out->graphic_ready   = g_window_ctx->graphic_initialized;
-	out->capture_dir_set = !g_window_ctx->native_capture.directory.empty();
-	out->capture_ready   = out->capture_dir_set && out->graphic_ready;
-	out->present         = g_window_ctx->native_capture.present_count;
+	out->graphic_ready    = g_window_ctx->graphic_initialized;
+	out->capture_dir_set  = !g_window_ctx->native_capture.directory.empty();
+	out->capture_ready    = out->capture_dir_set && out->graphic_ready;
+	out->present          = g_window_ctx->native_capture.present_count;
 	if (g_window_ctx->game != nullptr)
 	{
 		out->frame = g_window_ctx->game->m_frame_num;
@@ -3520,12 +3612,11 @@ bool WindowWaitNativeCapture(uint64_t request_id, uint32_t timeout_ms, WindowNat
 		return false;
 	}
 
-	auto& capture = g_window_ctx->native_capture;
+	auto&          capture = g_window_ctx->native_capture;
 	const uint64_t deadline_us =
 	    static_cast<uint64_t>(timeout_ms) * 1000ull +
-	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-	                             std::chrono::steady_clock::now().time_since_epoch())
-	                             .count());
+	    static_cast<uint64_t>(
+	        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 
 	Core::LockGuard lock(capture.result_mutex);
 	while (capture.completed_id < request_id)
@@ -3539,10 +3630,10 @@ bool WindowWaitNativeCapture(uint64_t request_id, uint32_t timeout_ms, WindowNat
 			// stalls VideoOut when readback is slow or already wedged).
 			if (capture.manual_pending && capture.request_id == request_id)
 			{
-				capture.manual_pending = false;
-				capture.completed_id   = request_id;
-				capture.last_ok        = false;
-				capture.last_error_code = "timeout";
+				capture.manual_pending     = false;
+				capture.completed_id       = request_id;
+				capture.last_ok            = false;
+				capture.last_error_code    = "timeout";
 				capture.last_error_message = "timed out waiting for native capture";
 				capture.result_cv.Signal();
 			}
@@ -3551,19 +3642,18 @@ bool WindowWaitNativeCapture(uint64_t request_id, uint32_t timeout_ms, WindowNat
 			return false;
 		}
 		const uint64_t remaining_us = deadline_us - now_us;
-		const uint32_t slice_us =
-		    remaining_us > 200000ull ? 200000u : static_cast<uint32_t>(remaining_us == 0 ? 1 : remaining_us);
+		const uint32_t slice_us     = remaining_us > 200000ull ? 200000u : static_cast<uint32_t>(remaining_us == 0 ? 1 : remaining_us);
 		capture.result_cv.WaitFor(&capture.result_mutex, slice_us);
 	}
 
-	out->ok        = capture.last_ok;
-	out->path      = capture.last_path;
-	out->milestone = capture.last_milestone;
-	out->format    = capture.last_format;
-	out->width     = capture.last_width;
-	out->height    = capture.last_height;
-	out->present   = capture.last_present;
-	out->frame     = capture.last_frame;
+	out->ok            = capture.last_ok;
+	out->path          = capture.last_path;
+	out->milestone     = capture.last_milestone;
+	out->format        = capture.last_format;
+	out->width         = capture.last_width;
+	out->height        = capture.last_height;
+	out->present       = capture.last_present;
+	out->frame         = capture.last_frame;
 	out->error_code    = capture.last_error_code;
 	out->error_message = capture.last_error_message;
 	return capture.last_ok;

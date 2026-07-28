@@ -1,10 +1,10 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Config.h"
-#include "Emulator/Graphics/GraphicContext.h"
-#include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
+#include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/Texture.h"
@@ -14,6 +14,7 @@
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
+#include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
@@ -226,8 +227,8 @@ TEST(EmulatorGraphicsPackets, ParsesGen5FmaakF32Literal)
 
 TEST(EmulatorGraphicsPackets, ParsesGen5CubetcF32)
 {
-	const uint32_t word0 = (0x35u << 26u) | (0x146u << 16u) | 3u;
-	const uint32_t word1 = 257u | (258u << 9u) | (259u << 18u);
+	const uint32_t word0    = (0x35u << 26u) | (0x146u << 16u) | 3u;
+	const uint32_t word1    = 257u | (258u << 9u) | (259u << 18u);
 	const uint32_t shader[] = {word0, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -254,8 +255,8 @@ TEST(EmulatorGraphicsPackets, ParsesGen5CubetcF32)
 
 TEST(EmulatorGraphicsPackets, ParsesGen5CubescF32)
 {
-	const uint32_t word0 = (0x35u << 26u) | (0x145u << 16u) | 3u;
-	const uint32_t word1 = 257u | (258u << 9u) | (259u << 18u);
+	const uint32_t word0    = (0x35u << 26u) | (0x145u << 16u) | 3u;
+	const uint32_t word1    = 257u | (258u << 9u) | (259u << 18u);
 	const uint32_t shader[] = {word0, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -282,8 +283,8 @@ TEST(EmulatorGraphicsPackets, ParsesGen5CubescF32)
 
 TEST(EmulatorGraphicsPackets, ParsesGen5CubeidF32)
 {
-	const uint32_t word0 = (0x35u << 26u) | (0x144u << 16u) | 3u;
-	const uint32_t word1 = 257u | (258u << 9u) | (259u << 18u);
+	const uint32_t word0    = (0x35u << 26u) | (0x144u << 16u) | 3u;
+	const uint32_t word1    = 257u | (258u << 9u) | (259u << 18u);
 	const uint32_t shader[] = {word0, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -310,8 +311,8 @@ TEST(EmulatorGraphicsPackets, ParsesGen5CubeidF32)
 
 TEST(EmulatorGraphicsPackets, ParsesGen5CubemaF32)
 {
-	const uint32_t word0 = (0x35u << 26u) | (0x147u << 16u) | 3u;
-	const uint32_t word1 = 257u | (258u << 9u) | (259u << 18u);
+	const uint32_t word0    = (0x35u << 26u) | (0x147u << 16u) | 3u;
+	const uint32_t word1    = 257u | (258u << 9u) | (259u << 18u);
 	const uint32_t shader[] = {word0, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -337,8 +338,8 @@ TEST(EmulatorGraphicsPackets, ParsesGen5CubemaF32)
 TEST(EmulatorGraphicsPackets, ParsesVop2SdwaSrc0Negate)
 {
 	// v_add_f32 v0, |−v2|, v1 with SDWA: src0=SDWA(249), opcode=3.
-	const uint32_t word0 = (0x03u << 25u) | (0u << 17u) | (1u << 9u) | 249u;
-	const uint32_t word1 = 2u | (6u << 8u) | (6u << 16u) | (1u << 20u) | (0u << 23u) | (6u << 24u);
+	const uint32_t word0    = (0x03u << 25u) | (0u << 17u) | (1u << 9u) | 249u;
+	const uint32_t word1    = 2u | (6u << 8u) | (6u << 16u) | (1u << 20u) | (0u << 23u) | (6u << 24u);
 	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -370,8 +371,8 @@ TEST(EmulatorGraphicsPackets, ParsesVop2SdwaSrc0Negate)
 TEST(EmulatorGraphicsPackets, ParsesVop2SdwaOmod)
 {
 	// v_mul_f32 v0, v2, v1 with SDWA OMOD=2 (x4).
-	const uint32_t word0 = (0x08u << 25u) | (0u << 17u) | (1u << 9u) | 249u;
-	const uint32_t word1 = 2u | (6u << 8u) | (2u << 14u) | (6u << 16u) | (0u << 23u) | (6u << 24u);
+	const uint32_t word0    = (0x08u << 25u) | (0u << 17u) | (1u << 9u) | 249u;
+	const uint32_t word1    = 2u | (6u << 8u) | (2u << 14u) | (6u << 16u) | (0u << 23u) | (6u << 24u);
 	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -393,15 +394,15 @@ TEST(EmulatorGraphicsPackets, ParsesVop2SdwaOmod)
 
 	ShaderPixelInputInfo input {};
 	input.target_output_mode[0] = 4;
-	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	const auto source           = SpirvGenerateSource(code, nullptr, &input, nullptr);
 	EXPECT_NE(source.FindIndex("%m200_0 = OpFMul %float %m197_0 %float_4_000000"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, ParsesVopcSdwaAbsolute)
 {
 	// v_cmp_gt_f32 |v2|, v1 with SDWA: VOP2 opcode 0x3e dispatches VOPC.
-	const uint32_t word0 = (0x3eu << 25u) | (0x04u << 17u) | (1u << 9u) | 249u;
-	const uint32_t word1 = 2u | (6u << 16u) | (1u << 21u) | (0u << 23u) | (6u << 24u);
+	const uint32_t word0    = (0x3eu << 25u) | (0x04u << 17u) | (1u << 9u) | 249u;
+	const uint32_t word1    = 2u | (6u << 16u) | (1u << 21u) | (0u << 23u) | (6u << 24u);
 	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -422,7 +423,7 @@ TEST(EmulatorGraphicsPackets, ParsesVopcSdwaAbsolute)
 
 	ShaderPixelInputInfo input {};
 	input.target_output_mode[0] = 4;
-	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	const auto source           = SpirvGenerateSource(code, nullptr, &input, nullptr);
 	EXPECT_NE(source.FindIndex("OpExtInst %float %GLSL_std_450 FAbs"), Core::STRING8_INVALID_INDEX);
 }
 
@@ -460,7 +461,7 @@ TEST(EmulatorGraphicsPackets, ParsesGen5Vop2Op0AsCndmask)
 // GFX10/RDNA VOP2 opcode 0x25 is v_add_u32/v_add_nc_u32: no carry/VCC dst.
 TEST(EmulatorGraphicsPackets, ParsesGen5Vop2Opcode25AsAddNoCarry)
 {
-	const uint32_t word0 = (0x25u << 25u) | (0u << 17u) | (1u << 9u) | (2u + 256u);
+	const uint32_t word0    = (0x25u << 25u) | (0u << 17u) | (1u << 9u) | (2u + 256u);
 	const uint32_t shader[] = {word0, 0xbf800000u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -486,7 +487,7 @@ TEST(EmulatorGraphicsPackets, ParsesGen5Vop2Opcode25AsAddNoCarry)
 
 	ShaderPixelInputInfo input {};
 	input.target_output_mode[0] = 4;
-	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	const auto source           = SpirvGenerateSource(code, nullptr, &input, nullptr);
 	EXPECT_NE(source.FindIndex("OpIAdd %uint"), Core::STRING8_INVALID_INDEX);
 }
 
@@ -599,8 +600,8 @@ TEST(EmulatorGraphicsPackets, MubufImmediateOffsetStaysSeparateFromSoffset)
 {
 	// op=0x0E buffer_load_dwordx4, idxen=1, offset=56, soffset=inline 0 (128),
 	// srsrc=2 → s[8:11], vdata=v30, vaddr=v43; s_nop then s_endpgm.
-	const uint32_t word0 = (0x38u << 26u) | (0x0Eu << 18u) | (1u << 13u) | 56u;
-	const uint32_t word1 = (128u << 24u) | (2u << 16u) | (30u << 8u) | 43u;
+	const uint32_t word0    = (0x38u << 26u) | (0x0Eu << 18u) | (1u << 13u) | 56u;
+	const uint32_t word1    = (128u << 24u) | (2u << 16u) | (30u << 8u) | 43u;
 	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -645,8 +646,8 @@ TEST(EmulatorGraphicsPackets, MtbufImmediateOffsetIsPreservedForAddressing)
 {
 	// tbuffer_load_format_x, Gen5 32_FLOAT, idxen=1, immediate byte offset=28,
 	// S_OFFSET=inline 0. This used to stop in shader_parse_mtbuf.
-	const uint32_t word0 = (0x3au << 26u) | (1u << 23u) | (6u << 19u) | (1u << 13u) | 28u;
-	const uint32_t word1 = 128u << 24u;
+	const uint32_t word0    = (0x3au << 26u) | (1u << 23u) | (6u << 19u) | (1u << 13u) | 28u;
+	const uint32_t word1    = 128u << 24u;
 	const uint32_t shader[] = {word0, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -674,9 +675,7 @@ TEST(EmulatorGraphicsPackets, ParsesMubufStoreWithVectorOffset)
 {
 	// buffer_store_dword v1, v7, s[8:11], 0 offen offset: v7 supplies the
 	// byte offset while the descriptor supplies the buffer base and stride.
-	const uint32_t shader[] = {(0x38u << 26u) | (0x1cu << 18u) | (1u << 12u),
-	                           (128u << 24u) | (2u << 16u) | (1u << 8u) | 7u,
-	                           0xbf810000u};
+	const uint32_t shader[] = {(0x38u << 26u) | (0x1cu << 18u) | (1u << 12u), (128u << 24u) | (2u << 16u) | (1u << 8u) | 7u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
 	{
@@ -916,8 +915,8 @@ TEST(EmulatorGraphicsPackets, AcceptsComputeShaderWithoutWorkgroupId)
 
 	ASSERT_EXIT(
 	    {
-		const auto parsed = ShaderParseCS(&regs, &shader_regs);
-		_exit(parsed.GetInstructions().IsEmpty() ? 1 : 0);
+		    const auto parsed = ShaderParseCS(&regs, &shader_regs);
+		    _exit(parsed.GetInstructions().IsEmpty() ? 1 : 0);
 	    },
 	    ::testing::ExitedWithCode(0), "");
 }
@@ -958,10 +957,10 @@ TEST(EmulatorGraphicsPackets, UsesForwardSBranchBeforeTargetAsSelectionMerge)
 		return inst;
 	};
 
-	auto outer      = make_branch(0x00, ShaderInstructionType::SCbranchVccz, 0x1c);   // -> 0x20
-	auto inner      = make_branch(0x08, ShaderInstructionType::SCbranchExecz, 0x0c); // -> 0x18
-	auto then_exit  = make_branch(0x10, ShaderInstructionType::SBranch, 0x1c);       // -> 0x30
-	auto else_exit  = make_branch(0x1c, ShaderInstructionType::SBranch, 0x10);       // -> 0x30
+	auto              outer     = make_branch(0x00, ShaderInstructionType::SCbranchVccz, 0x1c);  // -> 0x20
+	auto              inner     = make_branch(0x08, ShaderInstructionType::SCbranchExecz, 0x0c); // -> 0x18
+	auto              then_exit = make_branch(0x10, ShaderInstructionType::SBranch, 0x1c);       // -> 0x30
+	auto              else_exit = make_branch(0x1c, ShaderInstructionType::SBranch, 0x10);       // -> 0x30
 	ShaderInstruction end;
 	end.pc     = 0x30;
 	end.type   = ShaderInstructionType::SEndpgm;
@@ -1002,14 +1001,24 @@ TEST(EmulatorGraphicsPackets, ClassifiesGen5FourComponent32BitBufferFormats)
 	EXPECT_FALSE(ShaderIsGen5FourComponent32BitBufferFormat(78));
 }
 
-TEST(EmulatorGraphicsPackets, Gen5VertexInputComponentCounts)
+TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether)
 {
-	// Gfx10 unified 22 → (dfmt=4,nfmt=7) = 32_FLOAT; 64/74/77 are existing floatN.
-	EXPECT_EQ(ShaderGen5VertexInputComponentCount(22), 1u);
-	EXPECT_EQ(ShaderGen5VertexInputComponentCount(64), 2u);
-	EXPECT_EQ(ShaderGen5VertexInputComponentCount(74), 3u);
-	EXPECT_EQ(ShaderGen5VertexInputComponentCount(77), 4u);
-	EXPECT_EQ(ShaderGen5VertexInputComponentCount(0), 0u);
+	const auto scalar = VulkanResolveGen5VertexInputFormat(22);
+	EXPECT_EQ(scalar.format, VK_FORMAT_R32_SFLOAT);
+	EXPECT_EQ(scalar.component_count, 1u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(64).format, VK_FORMAT_R32G32_SFLOAT);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(74).component_count, 3u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(77).format, VK_FORMAT_R32G32B32A32_SFLOAT);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(56).format, VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(20).format, VK_FORMAT_R32_UINT);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).format, VK_FORMAT_UNDEFINED);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).component_count, 0u);
+
+	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(14, 7).format, VK_FORMAT_R32G32B32A32_SFLOAT);
+	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(13, 7).component_count, 3u);
+	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(11, 7).format, VK_FORMAT_R32G32_SFLOAT);
+	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(10, 0).format, VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(0, 0).format, VK_FORMAT_UNDEFINED);
 	EXPECT_TRUE(ShaderIsGen5SingleComponent32BitBufferFormat(22));
 }
 
@@ -1080,7 +1089,7 @@ TEST(EmulatorGraphicsPackets, PatchesReleaseMemEndOfPipeAddress)
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	uint32_t command[7] = {};
-	command[0]           = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	command[0]          = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
 
 	EXPECT_EQ(Gen5::GraphicsAgcQueueEndOfPipeActionPatchAddress(command, 0x123456789abcdef0ull), 0);
 	EXPECT_EQ(command[3], 0x9abcdef0u);
@@ -1100,8 +1109,8 @@ TEST(EmulatorGraphicsPackets, PatchesReleaseMemEndOfPipeFields)
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	uint32_t command[8] = {};
-	command[0]           = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
-	command[2]           = 0x00ab0000u;
+	command[0]          = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	command[2]          = 0x00ab0000u;
 
 	EXPECT_EQ(Gen5::GraphicsAgcQueueEndOfPipeActionPatchGcrCntl(command, 0x1234u), 0);
 	EXPECT_EQ(command[2] & 0xffffu, 0x1234u);
@@ -1326,7 +1335,7 @@ TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoShaderInputModifier)
 
 	// start-vertex at SGPR 4, start-instance at SGPR 5, vertex stage.
 	constexpr uint64_t modifier = 0x40280805ull;
-	uint32_t* cmd = Gen5::GraphicsDcbDrawIndexAuto(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 3u, modifier);
+	uint32_t*          cmd      = Gen5::GraphicsDcbDrawIndexAuto(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 3u, modifier);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u));
 	EXPECT_EQ(cmd[1], 3u);
@@ -1395,8 +1404,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbSetBaseIndirectArgs)
 	cb.cursor_up   = storage;
 	cb.cursor_down = storage + 16;
 
-	uint32_t* cmd =
-	    Gen5::GraphicsDcbSetBaseIndirectArgs(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 0x00000005074063c0ull);
+	uint32_t* cmd = Gen5::GraphicsDcbSetBaseIndirectArgs(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 0x00000005074063c0ull);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], KYTY_PM4(4, Pm4::IT_SET_BASE, 0u) | (1u << 1u));
 	EXPECT_EQ(cmd[1], 1u);
@@ -1467,8 +1475,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDrawIndexIndirectModifier80000000)
 	cb.cursor_up   = storage;
 	cb.cursor_down = storage + 16;
 
-	uint32_t* cmd =
-	    Gen5::GraphicsDcbDrawIndexIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0x80000000ull);
+	uint32_t* cmd = Gen5::GraphicsDcbDrawIndexIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0x80000000ull);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_DRAW_INDEX_INDIRECT, 0u));
 	EXPECT_EQ(cmd[1], 0u);
@@ -1547,8 +1554,8 @@ TEST(EmulatorGraphicsPackets, EncodesGen5WaitRegMem32Packet)
 	cb.cursor_down = storage + 16;
 
 	uint32_t* cmd = Gen5::GraphicsDcbWaitRegMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0, 3, 4, 2,
-	                                             reinterpret_cast<const volatile void*>(0x0000000100000c03ull),
-	                                             0x1122334455667788ull, 0xaabbccddeeff0011ull, 0x123456u);
+	                                            reinterpret_cast<const volatile void*>(0x0000000100000c03ull), 0x1122334455667788ull,
+	                                            0xaabbccddeeff0011ull, 0x123456u);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], 0xc0051028u);
 	EXPECT_EQ(cmd[1], 0x00000c00u);
@@ -1562,7 +1569,7 @@ TEST(EmulatorGraphicsPackets, EncodesGen5WaitRegMem32Packet)
 TEST(EmulatorGraphicsPackets, CanonicalizesAliasedPixelInterpolators)
 {
 	ShaderPixelInputInfo input {};
-	input.input_num = 3;
+	input.input_num                = 3;
 	input.interpolator_settings[0] = 0x000u;
 	input.interpolator_settings[1] = 0x000u;
 	input.interpolator_settings[2] = 0x401u;
@@ -1608,8 +1615,8 @@ TEST(EmulatorGraphicsPackets, EncodesGen5WaitRegMem64Packet)
 	cb.cursor_down = storage + 16;
 
 	uint32_t* cmd = Gen5::GraphicsDcbWaitRegMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1, 6, 3, 1,
-	                                             reinterpret_cast<const volatile void*>(0x000000022345678full),
-	                                             0x1122334455667788ull, 0xaabbccddeeff0011ull, 800);
+	                                            reinterpret_cast<const volatile void*>(0x000000022345678full), 0x1122334455667788ull,
+	                                            0xaabbccddeeff0011ull, 800);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], 0xc0071058u);
 	EXPECT_EQ(cmd[1], 0x23456788u);
@@ -1624,9 +1631,8 @@ TEST(EmulatorGraphicsPackets, EncodesGen5WaitRegMem64Packet)
 
 TEST(EmulatorGraphicsPackets, PublishesConfirmedCompactWriteDataWithItsSubmission)
 {
-	uint32_t write_body[5] = {0x01000004u, 0x19fbf0b0u, 0u, 1u, 0u};
-	uint32_t wait_packet[9] = {KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64), 0x19fbf0b0u, 0u,
-	                           0xffffffffu, 0xffffffffu, 1u, 0u, 3u, 10u};
+	uint32_t write_body[5]  = {0x01000004u, 0x19fbf0b0u, 0u, 1u, 0u};
+	uint32_t wait_packet[9] = {KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64), 0x19fbf0b0u, 0u, 0xffffffffu, 0xffffffffu, 1u, 0u, 3u, 10u};
 
 	EXPECT_TRUE(GraphicsWriteDataPrecedesMatchingWaitMem64(write_body, 5u, wait_packet, 9u));
 
@@ -1703,8 +1709,7 @@ TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1Immediate32)
 
 	// Observed post-Play: action=0x14, gcr=0, data_sel=1, data=1.
 	const auto* label = reinterpret_cast<const volatile Gen5::Label*>(static_cast<uintptr_t>(0x100));
-	uint32_t*   cmd =
-	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x14, 0, 1, 0, label, 1, 1, 0, 1, 0, 0);
+	uint32_t*   cmd   = Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x14, 0, 1, 0, label, 1, 1, 0, 1, 0, 0);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
 	EXPECT_EQ(cmd[1], 0x14u);
@@ -1745,8 +1750,7 @@ TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel0Barrier)
 	cb.cursor_down = storage + 16;
 
 	const auto* label = reinterpret_cast<const volatile Gen5::Label*>(static_cast<uintptr_t>(0x100));
-	uint32_t*   cmd =
-	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x28, 0, 1, 0, label, 0, 0, 0, 0, 0, 0);
+	uint32_t*   cmd   = Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x28, 0, 1, 0, label, 0, 0, 0, 0, 0, 0);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
 	EXPECT_EQ(cmd[1], 0x28u);
@@ -1787,8 +1791,7 @@ TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel1WithUnusedGdsSize0)
 	cb.cursor_down = storage + 16;
 
 	const auto* label = reinterpret_cast<const volatile Gen5::Label*>(static_cast<uintptr_t>(0x100));
-	uint32_t*   cmd =
-	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x14, 0, 1, 0, label, 1, 1, 0, 0, 0, 0);
+	uint32_t*   cmd   = Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x14, 0, 1, 0, label, 1, 1, 0, 0, 0, 0);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
 	EXPECT_EQ(cmd[2], 0x00010000u);
@@ -1825,8 +1828,7 @@ TEST(EmulatorGraphicsPackets, EncodesReleaseMemDataSel3WithInterrupt)
 	cb.cursor_down = storage + 16;
 
 	const auto* label = reinterpret_cast<const volatile Gen5::Label*>(static_cast<uintptr_t>(0x200));
-	uint32_t*   cmd =
-	    Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x28, 0, 1, 0, label, 3, 0, 0, 1, 1, 0x11u);
+	uint32_t*   cmd   = Gen5::GraphicsCbReleaseMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x28, 0, 1, 0, label, 3, 0, 0, 1, 1, 0x11u);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM));
 	EXPECT_EQ(cmd[1], 0x28u);
@@ -1987,7 +1989,7 @@ TEST(EmulatorGraphicsPackets, SizesAndDetilesGen5Standard4KbUintVolumeTextures)
 		{
 			for (uint32_t x = 0; x < 8; ++x)
 			{
-				const uint64_t tiled_offset = TileGetStandard4KB32VolumeOffset(x, y, z, 8, 16);
+				const uint64_t tiled_offset  = TileGetStandard4KB32VolumeOffset(x, y, z, 8, 16);
 				const uint64_t linear_offset = (static_cast<uint64_t>(z) * 16u * 8u) + (static_cast<uint64_t>(y) * 8u) + x;
 				EXPECT_EQ(linear[linear_offset], tiled[tiled_offset / 4u]);
 			}
@@ -2086,7 +2088,7 @@ TEST(EmulatorGraphicsPackets, SizesGen5RotatedXTexture800x320)
 // The tile-27 allocation is computed in block elements, not source texels.
 TEST(EmulatorGraphicsPackets, SizesGen5RotatedXSampledBc1Texture)
 {
-	TileSizeAlign size {};
+	TileSizeAlign  size {};
 	TilePaddedSize padded {};
 	TileGetTextureSize2(133, 3840, 2160, 3840, 1, 27, &size, nullptr, &padded);
 
@@ -2123,6 +2125,20 @@ TEST(EmulatorGraphicsPackets, Sw64kRx4bppWithinBlockIsBijective)
 	EXPECT_EQ(TileGetSw64kRxOffset(1, 0, k_block, 4), 4u);
 	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x8u);
 	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0xcu);
+}
+
+TEST(EmulatorGraphicsPackets, UsesOneCanonical64KbPitchGeometry)
+{
+	EXPECT_EQ(TileGet64KBBlockWidth(1), 256u);
+	EXPECT_EQ(TileGet64KBBlockWidth(2), 256u);
+	EXPECT_EQ(TileGet64KBBlockWidth(4), 128u);
+	EXPECT_EQ(TileGet64KBBlockWidth(8), 128u);
+	EXPECT_EQ(TileGet64KBBlockWidth(16), 64u);
+	EXPECT_EQ(TileGet64KBBlockWidth(3), 0u);
+	EXPECT_EQ(TileAlign64KBPitch(642, 4), 768u);
+	EXPECT_EQ(TileAlign64KBPitch(642, 8), 768u);
+	EXPECT_EQ(TileAlign64KBPitch(642, 16), 704u);
+	EXPECT_EQ(TileAlign64KBPitch(642, 3), 0u);
 }
 
 // kStandard64KB (tile 9) 32bpp uses a different within-block interleave.
@@ -2181,9 +2197,9 @@ TEST(EmulatorGraphicsPackets, Sw64kRx8bppWithinBlockIsBijective)
 // and recover the original linear image.
 TEST(EmulatorGraphicsPackets, Sw64kRx4bppDetileRoundTrip)
 {
-	constexpr uint32_t k_w     = 160u;
-	constexpr uint32_t k_h     = 96u;
-	constexpr uint32_t k_bpp   = 4u;
+	constexpr uint32_t k_w   = 160u;
+	constexpr uint32_t k_h   = 96u;
+	constexpr uint32_t k_bpp = 4u;
 	TileSizeAlign      size {};
 	TileGetRenderTargetSize(k_w, k_h, k_w, 0x1b, k_bpp, &size);
 	ASSERT_GT(size.size, 0u);
@@ -2283,9 +2299,8 @@ TEST(EmulatorGraphicsPackets, SizesGen5RotatedXGbuffer642x362Rgba8MatchesSample5
 TEST(EmulatorGraphicsPackets, WalksGen5Type0RunBeforeWaitFlipDone)
 {
 	const uint32_t stream[] = {
-	    0x00000001u, 0x00000007u, 0x00000007u, 0x00000000u, 0x00000080u, 0x00000080u, 0x00000001u, 0x00000001u,
-	    0x01fe0000u, 0x00000000u, 0xc0051018u, 0x00000000u, 0x00000003u, 0x00000000u, 0x00000000u, 0x00000000u,
-	    0x00000000u,
+	    0x00000001u, 0x00000007u, 0x00000007u, 0x00000000u, 0x00000080u, 0x00000080u, 0x00000001u, 0x00000001u, 0x01fe0000u,
+	    0x00000000u, 0xc0051018u, 0x00000000u, 0x00000003u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
 	};
 
 	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0xc0051018u), 0u); // Type3
@@ -2311,9 +2326,8 @@ TEST(EmulatorGraphicsPackets, WalksGen5Type0RunBeforeWaitFlipDone)
 TEST(EmulatorGraphicsPackets, WalksGen5Type1PairsBeforeWaitFlipDone)
 {
 	const uint32_t stream[] = {
-	    0xc0004600u, 0x0000002cu, 0x7d0703e0u, 0x00007fccu, 0x00000003u, 0x00000000u, 0x7d070440u, 0x00007fccu,
-	    0x00000003u, 0x00000000u, 0x7d070440u, 0x00007fccu, 0xc0051018u, 0x00000000u, 0x00000000u, 0x00000000u,
-	    0x00000000u, 0x00000000u, 0x00000000u,
+	    0xc0004600u, 0x0000002cu, 0x7d0703e0u, 0x00007fccu, 0x00000003u, 0x00000000u, 0x7d070440u, 0x00007fccu, 0x00000003u, 0x00000000u,
+	    0x7d070440u, 0x00007fccu, 0xc0051018u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
 	};
 
 	EXPECT_EQ(Pm4::Pm4NonType3PacketDwords(0x7d0703e0u), 2u);
@@ -2338,9 +2352,9 @@ TEST(EmulatorGraphicsPackets, WalksGen5Type1PairsBeforeWaitFlipDone)
 TEST(EmulatorGraphicsPackets, WalksGen5OversizedType3PairsBeforeWaitFlipDone)
 {
 	const uint32_t stream[] = {
-	    0xc0004600u, 0x0000002eu, 0xc0004600u, 0x0000002cu, 0xf84d2e90u, 0x00007f9bu, 0x0bbb68c0u, 0x00000003u,
-	    0xf84d3300u, 0x00007f9bu, 0x15dd6a84u, 0x00007ff8u, 0xf84d3360u, 0x00007f9bu, 0xc0051018u, 0x00000000u,
-	    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+	    0xc0004600u, 0x0000002eu, 0xc0004600u, 0x0000002cu, 0xf84d2e90u, 0x00007f9bu, 0x0bbb68c0u,
+	    0x00000003u, 0xf84d3300u, 0x00007f9bu, 0x15dd6a84u, 0x00007ff8u, 0xf84d3360u, 0x00007f9bu,
+	    0xc0051018u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
 	};
 
 	const uint32_t total = static_cast<uint32_t>(sizeof(stream) / sizeof(stream[0]));
@@ -2365,9 +2379,8 @@ TEST(EmulatorGraphicsPackets, WalksGen5OversizedType3PairsBeforeWaitFlipDone)
 TEST(EmulatorGraphicsPackets, WalksGen5OneRegWriteBeforeWaitFlipDone)
 {
 	const uint32_t stream[] = {
-	    0xc0004600u, 0x0000002cu, 0x00000000u, 0x00000000u, 0xc15857a0u, 0x00000001u, 0x00000000u, 0x00000000u,
-	    0x0000001eu, 0x00000000u, 0x00000001u, 0x00000000u, 0xc0051018u, 0x00000000u, 0x00000000u, 0x00000000u,
-	    0x00000000u, 0x00000000u, 0x00000000u,
+	    0xc0004600u, 0x0000002cu, 0x00000000u, 0x00000000u, 0xc15857a0u, 0x00000001u, 0x00000000u, 0x00000000u, 0x0000001eu, 0x00000000u,
+	    0x00000001u, 0x00000000u, 0xc0051018u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
 	};
 
 	EXPECT_EQ(Pm4::Pm4SpecialType3PacketDwords(0xc15857a0u), 2u);
@@ -2580,7 +2593,7 @@ TEST(EmulatorGraphicsPackets, DecodesGen5WidthHeightFullIsaFields)
 // Size must be pitch*height*2 with 256-byte row alignment (pitch == width here).
 TEST(EmulatorGraphicsPackets, SizesGen5LinearRg8Texture2048x4096)
 {
-	TileSizeAlign size {};
+	TileSizeAlign  size {};
 	const uint32_t width  = 2048;
 	const uint32_t height = 4096;
 	const uint32_t pitch  = ShaderGen5LinearTexturePitch(width, 14);
@@ -2596,7 +2609,7 @@ TEST(EmulatorGraphicsPackets, SizesGen5LinearRg8Texture2048x4096)
 // FindRenderTexture can alias the RT.
 TEST(EmulatorGraphicsPackets, SizesGen5RotatedXRenderTargetRgba16Float)
 {
-	TileSizeAlign size {};
+	TileSizeAlign  size {};
 	const uint32_t width  = 0x281u + 1u;
 	const uint32_t height = 0x169u + 1u;
 	EXPECT_EQ(width, 642u);
@@ -2630,7 +2643,7 @@ TEST(EmulatorGraphicsPackets, DecodesCbColorInfoRoundModeBit)
 // image_sample_lz (MIMG op 0x27) with dmask 0xf — observed after PlayGo/Resident.
 TEST(EmulatorGraphicsPackets, ParsesImageSampleLzDmaskF)
 {
-	const uint32_t word0 = (0x3cu << 26u) | (0x27u << 18u) | (0xfu << 8u);
+	const uint32_t word0    = (0x3cu << 26u) | (0x27u << 18u) | (0xfu << 8u);
 	const uint32_t shader[] = {word0, 0u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -2652,7 +2665,7 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleLzDmaskF)
 
 TEST(EmulatorGraphicsPackets, ParsesImageSampleLWithExplicitLod)
 {
-	const uint32_t word0 = (0x3cu << 26u) | (0x24u << 18u) | (0xfu << 8u);
+	const uint32_t word0    = (0x3cu << 26u) | (0x24u << 18u) | (0xfu << 8u);
 	const uint32_t shader[] = {word0, 0u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -2780,9 +2793,8 @@ TEST(EmulatorGraphicsPackets, DetilesEightBitMicroTiledVideoPlane)
 	{
 		for (uint32_t x = 0; x < 8u; ++x)
 		{
-			const uint32_t tiled_index = ((x & 1u) << 0u) | ((y & 1u) << 1u) | (((x >> 1u) & 1u) << 2u) |
-			                              (((y >> 1u) & 1u) << 3u) | (((x >> 2u) & 1u) << 4u) |
-			                              (((y >> 2u) & 1u) << 5u);
+			const uint32_t tiled_index = ((x & 1u) << 0u) | ((y & 1u) << 1u) | (((x >> 1u) & 1u) << 2u) | (((y >> 1u) & 1u) << 3u) |
+			                             (((x >> 2u) & 1u) << 4u) | (((y >> 2u) & 1u) << 5u);
 			EXPECT_EQ(linear[y * 8u + x], tiled_index);
 		}
 	}
@@ -2847,20 +2859,20 @@ TEST(EmulatorGraphicsPackets, MaterializesArrayedGen5ImageLoadAndStoreCoordinate
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	ShaderInstruction load {};
-	load.type               = ShaderInstructionType::ImageLoad;
-	load.format             = ShaderInstructionFormat::Vdata4Vaddr3StDmaskF;
-	load.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
-	load.src[0]             = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 3};
-	load.src[1]             = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 8};
-	load.src_num            = 2;
+	load.type    = ShaderInstructionType::ImageLoad;
+	load.format  = ShaderInstructionFormat::Vdata4Vaddr3StDmaskF;
+	load.dst     = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	load.src[0]  = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 3};
+	load.src[1]  = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 8};
+	load.src_num = 2;
 
 	ShaderInstruction store {};
-	store.type               = ShaderInstructionType::ImageStore;
-	store.format             = ShaderInstructionFormat::Vdata4Vaddr3StDmaskF;
-	store.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 8, .size = 4};
-	store.src[0]             = {.type = ShaderOperandType::Vgpr, .register_id = 12, .size = 3};
-	store.src[1]             = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 8};
-	store.src_num            = 2;
+	store.type    = ShaderInstructionType::ImageStore;
+	store.format  = ShaderInstructionFormat::Vdata4Vaddr3StDmaskF;
+	store.dst     = {.type = ShaderOperandType::Vgpr, .register_id = 8, .size = 4};
+	store.src[0]  = {.type = ShaderOperandType::Vgpr, .register_id = 12, .size = 3};
+	store.src[1]  = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 8};
+	store.src_num = 2;
 
 	ShaderInstruction end {};
 	end.type   = ShaderInstructionType::SEndpgm;
@@ -2873,17 +2885,17 @@ TEST(EmulatorGraphicsPackets, MaterializesArrayedGen5ImageLoadAndStoreCoordinate
 	code.GetInstructions().Add(end);
 
 	ShaderComputeInputInfo input {};
-	input.threads_num[0]                         = 1;
-	input.threads_num[1]                         = 1;
-	input.threads_num[2]                         = 1;
-	input.bind.push_constant_size                = 64;
-	input.bind.textures2D.textures_num           = 2;
-	input.bind.textures2D.textures2d_sampled_num = 1;
-	input.bind.textures2D.textures2d_storage_num = 1;
-	input.bind.textures2D.desc[0].start_register = 0;
+	input.threads_num[0]                            = 1;
+	input.threads_num[1]                            = 1;
+	input.threads_num[2]                            = 1;
+	input.bind.push_constant_size                   = 64;
+	input.bind.textures2D.textures_num              = 2;
+	input.bind.textures2D.textures2d_sampled_num    = 1;
+	input.bind.textures2D.textures2d_storage_num    = 1;
+	input.bind.textures2D.desc[0].start_register    = 0;
 	input.bind.textures2D.desc[0].texture.fields[1] = 20u << 20u;
 	input.bind.textures2D.desc[0].texture.fields[3] = 13u << 28u;
-	input.bind.textures2D.desc[1].start_register = 0;
+	input.bind.textures2D.desc[1].start_register    = 0;
 	input.bind.textures2D.desc[1].texture.fields[1] = 20u << 20u;
 	input.bind.textures2D.desc[1].texture.fields[3] = 13u << 28u;
 
@@ -2903,10 +2915,10 @@ TEST(EmulatorGraphicsPackets, MaterializesArrayedGen5ImageLoadAndStoreCoordinate
 TEST(EmulatorGraphicsPackets, ParsesImageSampleSingleChannelDmasks)
 {
 	// MIMG encoding: bits[31:26]=0x3c, opcode bits[24:18], dmask bits[11:8].
-	const uint32_t enc = 0x3cu << 26u;
-	const uint32_t dmask4 = enc | (0x20u << 18u) | (0x4u << 8u);
-	const uint32_t dmask2 = enc | (0x20u << 18u) | (0x2u << 8u);
-	const uint32_t word1  = 0u;
+	const uint32_t enc      = 0x3cu << 26u;
+	const uint32_t dmask4   = enc | (0x20u << 18u) | (0x4u << 8u);
+	const uint32_t dmask2   = enc | (0x20u << 18u) | (0x2u << 8u);
+	const uint32_t word1    = 0u;
 	const uint32_t shader[] = {dmask4, word1, dmask2, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -2932,7 +2944,7 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleSingleChannelDmasks)
 // Captured after NGS2 voice fix: image_sample dmask 0xb (R+G+A) at PC 0x40.
 TEST(EmulatorGraphicsPackets, ParsesImageSampleDmaskB)
 {
-	const uint32_t word0 = (0x3cu << 26u) | (0x20u << 18u) | (0xbu << 8u);
+	const uint32_t word0    = (0x3cu << 26u) | (0x20u << 18u) | (0xbu << 8u);
 	const uint32_t shader[] = {word0, 0u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -2955,7 +2967,7 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleDmaskB)
 // image_sample dmask 0xa materializes the G and A channels.
 TEST(EmulatorGraphicsPackets, ParsesAndMaterializesImageSampleDmaskA)
 {
-	const uint32_t word0 = (0x3cu << 26u) | (0x20u << 18u) | (0xau << 8u);
+	const uint32_t word0    = (0x3cu << 26u) | (0x20u << 18u) | (0xau << 8u);
 	const uint32_t shader[] = {word0, 0u, 0xbf800000u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -2981,7 +2993,7 @@ TEST(EmulatorGraphicsPackets, ParsesAndMaterializesImageSampleDmaskA)
 	input.bind.textures2D.desc[0].start_register = 8;
 	input.bind.samplers.samplers_num             = 1;
 	input.bind.samplers.start_register[0]        = 20;
-	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	const auto source                            = SpirvGenerateSource(code, nullptr, &input, nullptr);
 
 	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_Function_float %temp_v4float %uint_1"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_Function_float %temp_v4float %uint_3"), Core::STRING8_INVALID_INDEX);
@@ -2993,9 +3005,7 @@ TEST(EmulatorGraphicsPackets, ParsesAndMaterializesImageSampleDmaskA)
 TEST(EmulatorGraphicsPackets, ParsesImageSampleNonSequentialAddresses)
 {
 	const uint32_t shader[] = {
-	    0xf080040au, 0x00a20602u, 0x00000005u,
-	    0xf0800f0au, 0x00800005u, 0x00000004u,
-	    0xbf810000u,
+	    0xf080040au, 0x00a20602u, 0x00000005u, 0xf0800f0au, 0x00800005u, 0x00000004u, 0xbf810000u,
 	};
 
 	if (!Config::IsInitialized())
@@ -3031,9 +3041,7 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleNonSequentialAddresses)
 TEST(EmulatorGraphicsPackets, MaterializesImageSampleNonSequentialCoordinates)
 {
 	const uint32_t shader[] = {
-	    0xbf800000u,
-	    0xf080040au, 0x00a20602u, 0x00000005u,
-	    0xbf810000u,
+	    0xbf800000u, 0xf080040au, 0x00a20602u, 0x00000005u, 0xbf810000u,
 	};
 
 	if (!Config::IsInitialized())
@@ -3048,13 +3056,13 @@ TEST(EmulatorGraphicsPackets, MaterializesImageSampleNonSequentialCoordinates)
 	ShaderParse(shader, &code);
 
 	ShaderPixelInputInfo input {};
-	input.bind.push_constant_size                   = 48;
-	input.bind.textures2D.textures_num              = 1;
-	input.bind.textures2D.textures2d_sampled_num    = 1;
-	input.bind.textures2D.desc[0].start_register    = 8;
-	input.bind.samplers.samplers_num                = 1;
-	input.bind.samplers.start_register[0]           = 20;
-	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	input.bind.push_constant_size                = 48;
+	input.bind.textures2D.textures_num           = 1;
+	input.bind.textures2D.textures2d_sampled_num = 1;
+	input.bind.textures2D.desc[0].start_register = 8;
+	input.bind.samplers.samplers_num             = 1;
+	input.bind.samplers.start_register[0]        = 20;
+	const auto source                            = SpirvGenerateSource(code, nullptr, &input, nullptr);
 
 	EXPECT_NE(source.FindIndex("OpLoad %float %v2"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
@@ -3180,10 +3188,10 @@ TEST(EmulatorGraphicsPackets, MaterializesFetchAttribSLoadDwordAndX2)
 	EXPECT_EQ(code.GetInstructions().At(1).dst.register_id, 50);
 
 	ShaderVertexInputInfo input {};
-	input.fetch_embedded        = true;
-	input.gs_prolog             = true;
-	input.fetch_attrib_reg      = 6; // physical s14 with +8 shift
-	input.fetch_buffer_reg      = 4; // physical s12
+	input.fetch_embedded   = true;
+	input.gs_prolog        = true;
+	input.fetch_attrib_reg = 6; // physical s14 with +8 shift
+	input.fetch_buffer_reg = 4; // physical s12
 	// Values >= 256 so SPIR-V emits hex constants (see Spirv::AddConstant).
 	input.fetch_attrib_data[0]  = 0xa1b2c301u;
 	input.fetch_attrib_data[1]  = 0xa1b2c302u;
@@ -3211,20 +3219,20 @@ TEST(EmulatorGraphicsPackets, EmbeddedFetchMayConsumePrefixOfWiderVertexAttribut
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	ShaderInstruction fetch {};
-	fetch.type              = ShaderInstructionType::FetchXyz;
-	fetch.format            = ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen;
-	fetch.dst.type          = ShaderOperandType::Vgpr;
-	fetch.dst.register_id   = 0;
-	fetch.dst.size          = 3;
-	fetch.src[0].type       = ShaderOperandType::Vgpr;
+	fetch.type               = ShaderInstructionType::FetchXyz;
+	fetch.format             = ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen;
+	fetch.dst.type           = ShaderOperandType::Vgpr;
+	fetch.dst.register_id    = 0;
+	fetch.dst.size           = 3;
+	fetch.src[0].type        = ShaderOperandType::Vgpr;
 	fetch.src[0].register_id = 4;
-	fetch.src[0].size       = 1;
-	fetch.src[1].type       = ShaderOperandType::Sgpr;
+	fetch.src[0].size        = 1;
+	fetch.src[1].type        = ShaderOperandType::Sgpr;
 	fetch.src[1].register_id = 0;
-	fetch.src[1].size       = 4;
-	fetch.src[2].type       = ShaderOperandType::IntegerInlineConstant;
-	fetch.src[2].constant.i = 0;
-	fetch.src_num           = 3;
+	fetch.src[1].size        = 4;
+	fetch.src[2].type        = ShaderOperandType::IntegerInlineConstant;
+	fetch.src[2].constant.i  = 0;
+	fetch.src_num            = 3;
 
 	ShaderCode code;
 	code.SetType(ShaderType::Vertex);
@@ -3363,7 +3371,7 @@ TEST(EmulatorGraphicsPackets, MapsPixelInputsFromVertexOutputSuperset)
 	EXPECT_EQ(regs[1].offset, Pm4::SPI_PS_INPUT_CNTL_0 + 1);
 	EXPECT_EQ(regs[1].value, 0u);
 
-	inputs[0].semantic = 17;
+	inputs[0].semantic      = 17;
 	inputs[0].default_value = 0;
 	ASSERT_TRUE(Gen5::GraphicsBuildInterpolantMapping(regs, outputs, 2, inputs, 1));
 	EXPECT_EQ(regs[0].value, 0x20u);
@@ -3376,7 +3384,6 @@ TEST(EmulatorGraphicsPackets, MapsPixelInputsFromVertexOutputSuperset)
 	EXPECT_EQ(regs[0].value, 5u);
 	EXPECT_EQ(regs[1].value, 7u);
 }
-
 
 // Captured: ShaderUserData eud_size_dw=12, srt_size_dw=0, user_sgpr_num=30
 // without a type-5 pointer. Descriptors fit in the SGPR window.
@@ -3396,8 +3403,8 @@ TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
 // dwords=4, eud_size=24 → need=28 still allowed under the hard 256 cap.
 TEST(EmulatorGraphicsPackets, Gen5EudSpanAllowsModestMetadataOverrun)
 {
-	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16, 4, 24));  // fully inside metadata
-	EXPECT_TRUE(ShaderGen5EudSpanAllowed(40, 4, 24));  // need 28 > 24, still ok
+	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16, 4, 24));          // fully inside metadata
+	EXPECT_TRUE(ShaderGen5EudSpanAllowed(40, 4, 24));          // need 28 > 24, still ok
 	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + 24 - 4, 4, 24)); // last in-bound
 	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + SHADER_GEN5_EUD_MAX_DWORDS - 4, 4, 24));
 	EXPECT_FALSE(ShaderGen5EudSpanAllowed(16 + SHADER_GEN5_EUD_MAX_DWORDS - 3, 4, 24));
@@ -3434,7 +3441,8 @@ TEST(EmulatorGraphicsPackets, Vop1Opcode8IsVCvtI32F32)
 // either 0 (disabled) or 0xf (RGBA); partial channel enables are unsupported.
 TEST(EmulatorGraphicsPackets, CbShaderMaskFullChannelNibbles)
 {
-	auto nibble_ok = [](uint32_t mask) {
+	auto nibble_ok = [](uint32_t mask)
+	{
 		for (uint32_t rt = 0; rt < 8u; rt++)
 		{
 			const uint32_t n = (mask >> (rt * 4u)) & 0xfu;
@@ -3469,9 +3477,9 @@ TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0)
 {
 	// v_mov_b32 v0, -v2 with SDWA: opcode 1 (mov), src0=249.
 	// VOP1: bits[24:17]=vdst, bits[16:9]=op, bits[8:0]=src0; encoding via VOP2 trampoline 0x3f.
-	const uint32_t word0 = (0x3fu << 25u) | (0u << 17u) | (0x01u << 9u) | 249u;
-	const uint32_t word1 = 2u | (6u << 8u) | (6u << 16u) | (1u << 20u); // src vgpr2, DWORD, src0_neg
-	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
+	const uint32_t word0    = (0x3fu << 25u) | (0u << 17u) | (0x01u << 9u) | 249u;
+	const uint32_t word1    = 2u | (6u << 8u) | (6u << 16u) | (1u << 20u); // src vgpr2, DWORD, src0_neg
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
 	{
@@ -3498,8 +3506,8 @@ TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0)
 // the v_mov_b32 sequence captured while starting Blasphemous 2.
 TEST(EmulatorGraphicsPackets, ParsesVop1DppQuadPermSource)
 {
-	const uint32_t word0 = (0x3fu << 25u) | (10u << 17u) | (0x01u << 9u) | 250u;
-	const uint32_t word1 = 0xff085508u;
+	const uint32_t word0    = (0x3fu << 25u) | (10u << 17u) | (0x01u << 9u) | 250u;
+	const uint32_t word1    = 0xff085508u;
 	const uint32_t shader[] = {word0, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -3529,8 +3537,8 @@ TEST(EmulatorGraphicsPackets, ParsesVop1DppQuadPermSource)
 
 TEST(EmulatorGraphicsPackets, EmitsVop1DppQuadPermAsSubgroupShuffle)
 {
-	const uint32_t word0 = (0x3fu << 25u) | (10u << 17u) | (0x01u << 9u) | 250u;
-	const uint32_t word1 = 0xff085508u;
+	const uint32_t word0    = (0x3fu << 25u) | (10u << 17u) | (0x01u << 9u) | 250u;
+	const uint32_t word1    = 0xff085508u;
 	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -3546,7 +3554,7 @@ TEST(EmulatorGraphicsPackets, EmitsVop1DppQuadPermAsSubgroupShuffle)
 
 	ShaderPixelInputInfo input {};
 	input.target_output_mode[0] = 4;
-	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	const auto source           = SpirvGenerateSource(code, nullptr, &input, nullptr);
 
 	EXPECT_NE(source.FindIndex("OpCapability GroupNonUniformShuffle"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%gl_SubgroupInvocationID"), Core::STRING8_INVALID_INDEX);
@@ -3558,8 +3566,8 @@ TEST(EmulatorGraphicsPackets, EmitsVop1DppQuadPermAsSubgroupShuffle)
 // Blasphemous 2 issues this while loading level0.
 TEST(EmulatorGraphicsPackets, ParsesGen5MtbufFloat32)
 {
-	const uint32_t word0 = (0x3au << 26u) | (1u << 23u) | (6u << 19u) | (1u << 13u);
-	const uint32_t word1 = 128u << 24u;
+	const uint32_t word0    = (0x3au << 26u) | (1u << 23u) | (6u << 19u) | (1u << 13u);
+	const uint32_t word1    = 128u << 24u;
 	const uint32_t shader[] = {word0, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -3585,8 +3593,8 @@ TEST(EmulatorGraphicsPackets, ParsesGen5MtbufFloat32)
 // existing typed four-component MTBUF load contract.
 TEST(EmulatorGraphicsPackets, ParsesGen5MtbufFloat32x4)
 {
-	const uint32_t word0 = (0x3au << 26u) | (4u << 23u) | (13u << 19u) | (3u << 16u) | (1u << 13u);
-	const uint32_t word1 = 128u << 24u;
+	const uint32_t word0    = (0x3au << 26u) | (4u << 23u) | (13u << 19u) | (3u << 16u) | (1u << 13u);
+	const uint32_t word1    = 128u << 24u;
 	const uint32_t shader[] = {word0, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -3644,11 +3652,11 @@ TEST(EmulatorGraphicsPackets, EmitsLargeDescriptorMetadataAsUniformBuffer)
 	code.GetInstructions().Add(end);
 
 	ShaderComputeInputInfo input {};
-	input.threads_num[0]                  = 1;
-	input.threads_num[1]                  = 1;
-	input.threads_num[2]                  = 1;
-	input.bind.storage_buffers.buffers_num = 9;
-	input.bind.direct_sgprs.sgprs_num      = 1;
+	input.threads_num[0]                      = 1;
+	input.threads_num[1]                      = 1;
+	input.threads_num[2]                      = 1;
+	input.bind.storage_buffers.buffers_num    = 9;
+	input.bind.direct_sgprs.sgprs_num         = 1;
 	input.bind.direct_sgprs.start_register[0] = 8;
 	ShaderCalcBindingIndices(&input.bind);
 
@@ -3667,7 +3675,7 @@ TEST(EmulatorGraphicsPackets, ParsesGen5SNotB64)
 {
 	// SOP1 encoding: [31:23]=0b101111101, [22:16]=sdst, [15:8]=op, [7:0]=ssrc0
 	// s_not_b64 s[0:1], s[2:3] → sdst=0, op=0x08, ssrc0=2
-	const uint32_t word0 = (0x17Du << 23u) | (0u << 16u) | (0x08u << 8u) | 2u;
+	const uint32_t word0    = (0x17Du << 23u) | (0u << 16u) | (0x08u << 8u) | 2u;
 	const uint32_t shader[] = {word0, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -3695,8 +3703,8 @@ TEST(EmulatorGraphicsPackets, ParsesGen5SNotB64)
 TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0Byte0)
 {
 	// v_mov_b32 v0, v2.b0 with SDWA: opcode 1, src0_sel=0 (BYTE_0), dst_sel=DWORD.
-	const uint32_t word0 = (0x3fu << 25u) | (0u << 17u) | (0x01u << 9u) | 249u;
-	const uint32_t word1 = 2u | (6u << 8u) | (0u << 16u); // vgpr2, dst DWORD, src0 BYTE_0
+	const uint32_t word0    = (0x3fu << 25u) | (0u << 17u) | (0x01u << 9u) | 249u;
+	const uint32_t word1    = 2u | (6u << 8u) | (0u << 16u); // vgpr2, dst DWORD, src0 BYTE_0
 	const uint32_t shader[] = {word0, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -3922,8 +3930,8 @@ TEST(EmulatorGraphicsPackets, AlphaKillDoesNotCommitDepthWithEarlyFragmentTests)
 	code.GetInstructions().Add(export_mrt);
 
 	ShaderPixelInputInfo kill_input {};
-	kill_input.ps_early_z           = true;
-	kill_input.ps_pixel_kill_enable = true;
+	kill_input.ps_early_z            = true;
+	kill_input.ps_pixel_kill_enable  = true;
 	kill_input.target_output_mode[0] = 4;
 
 	const auto kill_source = SpirvGenerateSource(code, nullptr, &kill_input, nullptr);
@@ -4038,8 +4046,8 @@ TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
 TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)
 {
 	// EXP encoding: bits[31:26]=0x3e, target bits[9:4], en bits[3:0].
-	const uint32_t word0 = (0x3eu << 26u) | (0x26u << 4u) | 0xfu;
-	const uint32_t word1 = 0x03020100u; // v0..v3
+	const uint32_t word0    = (0x3eu << 26u) | (0x26u << 4u) | 0xfu;
+	const uint32_t word1    = 0x03020100u; // v0..v3
 	const uint32_t shader[] = {word0, word1, 0xbf810000u};
 
 	if (!Config::IsInitialized())
@@ -4379,7 +4387,7 @@ TEST(EmulatorGraphicsPackets, MatchesAddrLibStandard4Kb16BitSwizzleEquation)
 
 TEST(EmulatorGraphicsPackets, SizesGen5Standard4Kb8BitVideoTextures)
 {
-	TileSizeAlign size {};
+	TileSizeAlign  size {};
 	TilePaddedSize padded {};
 	TileGetTextureSize2(5, 1920, 1080, 2048, 1, 5, &size, nullptr, &padded);
 
@@ -4407,7 +4415,7 @@ TEST(EmulatorGraphicsPackets, MatchesAddrLibStandard4Kb128BitSwizzleEquation)
 
 TEST(EmulatorGraphicsPackets, SizesGen5Standard4KbBc3Textures)
 {
-	TileSizeAlign size {};
+	TileSizeAlign  size {};
 	TilePaddedSize padded {};
 	TileGetTextureSize2(173, 116, 120, 128, 1, 5, &size, nullptr, &padded);
 
@@ -4493,8 +4501,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDmaDataCustomPacket)
 
 	const uint64_t dst = 0x0000000120000000ull;
 	const uint64_t src = 0x0000000130000000ull;
-	uint32_t*      cmd =
-	    Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4, 0, 0, dst, 0, 0, src, 64, 0, 0, 0);
+	uint32_t*      cmd = Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4, 0, 0, dst, 0, 0, src, 64, 0, 0, 0);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA));
 	EXPECT_EQ(cmd[1], 0x00000004u);
@@ -4506,8 +4513,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDmaDataCustomPacket)
 	EXPECT_EQ(cmd[7], 0x00000001u);
 
 	// Invalid byte_count must not allocate.
-	EXPECT_EQ(Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4, 0, 0, dst, 0, 0, src, 3, 0, 0, 0),
-	          nullptr);
+	EXPECT_EQ(Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4, 0, 0, dst, 0, 0, src, 3, 0, 0, 0), nullptr);
 }
 
 // IT_INDEX_BASE (0x26) / IT_INDEX_BUFFER_SIZE (0x13): DCB encoders must emit the
@@ -4540,16 +4546,14 @@ TEST(EmulatorGraphicsPackets, EncodesDcbIndexBaseAndBufferSize)
 	cb.cursor_down = storage + 16;
 
 	const uint64_t index_addr = 0x00007f5a6805eb90ull;
-	uint32_t*      base_cmd =
-	    Gen5::GraphicsDcbSetIndexBuffer(reinterpret_cast<Gen5::CommandBuffer*>(&cb), index_addr);
+	uint32_t*      base_cmd   = Gen5::GraphicsDcbSetIndexBuffer(reinterpret_cast<Gen5::CommandBuffer*>(&cb), index_addr);
 	ASSERT_NE(base_cmd, nullptr);
 	EXPECT_EQ(base_cmd[0], KYTY_PM4(3, Pm4::IT_INDEX_BASE, 0u));
 	EXPECT_EQ(base_cmd[0], 0xc0012600u);
 	EXPECT_EQ(base_cmd[1], 0x6805eb90u);
 	EXPECT_EQ(base_cmd[2], 0x00007f5au);
 
-	uint32_t* size_cmd =
-	    Gen5::GraphicsDcbSetIndexCount(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x1234u);
+	uint32_t* size_cmd = Gen5::GraphicsDcbSetIndexCount(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x1234u);
 	ASSERT_NE(size_cmd, nullptr);
 	EXPECT_EQ(size_cmd[0], KYTY_PM4(2, Pm4::IT_INDEX_BUFFER_SIZE, 0u));
 	EXPECT_EQ(size_cmd[0], 0xc0001300u);

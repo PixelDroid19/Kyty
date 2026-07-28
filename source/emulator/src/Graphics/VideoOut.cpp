@@ -1127,6 +1127,20 @@ bool FlipQueue::Flip(uint32_t micros)
 	Graphics::WindowDrawBuffer(buffer);
 	Graphics::GpuMemoryCompleteSubmission(present_submission);
 
+	// A flip event announces a completed flip. Publish the completion snapshot
+	// first so a woken guest can immediately query the matching count and
+	// flipArg. Signalling first lets the event consumer observe the previous
+	// completion and can permanently drain a frame-pacing token.
+	m_mutex.Lock();
+	r.cfg->flip_status.count++;
+	r.cfg->flip_status.processTime              = LibKernel::KernelGetProcessTime();
+	r.cfg->flip_status.processTimeCounter       = LibKernel::KernelReadTsc();
+	r.cfg->flip_status.submitProcessTimeCounter = r.submit_tsc;
+	r.cfg->flip_status.flipArg                   = r.flip_arg;
+	r.cfg->flip_status.currentBuffer             = r.index;
+	r.cfg->flip_status.flipPendingNum            = static_cast<int>(m_requests.Size() - 1);
+	m_mutex.Unlock();
+
 	std::vector<EventQueue::KernelEqueuePin> flip_queues;
 	{
 		Core::LockGuard config_lock(r.cfg->mutex);
@@ -1166,14 +1180,6 @@ bool FlipQueue::Flip(uint32_t micros)
 	printf("Flip done: %d\n", r.index);
 
 	m_mutex.Lock();
-
-	r.cfg->flip_status.count++;
-	r.cfg->flip_status.processTime              = LibKernel::KernelGetProcessTime();
-	r.cfg->flip_status.processTimeCounter       = LibKernel::KernelReadTsc();
-	r.cfg->flip_status.submitProcessTimeCounter = r.submit_tsc;
-	r.cfg->flip_status.flipArg        = r.flip_arg;
-	r.cfg->flip_status.currentBuffer  = r.index;
-	r.cfg->flip_status.flipPendingNum = static_cast<int>(m_requests.Size() - 1);
 
 	m_requests.Remove(first);
 	m_done_cond_var.SignalAll();
@@ -1405,7 +1411,10 @@ static void flip_event_trigger_func(LibKernel::EventQueue::KernelEqueueEvent* ev
 
 	auto triggered_event    = event->event;
 	triggered_event.fflags  = triggered_event.fflags < 0xfu ? triggered_event.fflags + 1u : triggered_event.fflags;
-	triggered_event.data    = make_video_out_event_data(triggered_event.data, trigger_data);
+	// Flip completion carries the submitted 64-bit flipArg verbatim. Frame
+	// pacers use its high bit to distinguish completion records; packing it as
+	// vblank timing data discards that bit and makes the completion invisible.
+	triggered_event.data = reinterpret_cast<intptr_t>(trigger_data);
 	if (event->triggered)
 	{
 		event->pending_events.Add(triggered_event);
@@ -2406,12 +2415,7 @@ KYTY_SYSV_ABI int VideoOutGetEventData(const LibKernel::EventQueue::KernelEvent*
 		return VIDEO_OUT_ERROR_INVALID_EVENT;
 	}
 
-	auto event_data = static_cast<uint64_t>(ev->data) >> 16u;
-	if (ev->ident == VIDEO_OUT_EVENT_FLIP && (static_cast<uint64_t>(ev->data) & 0x8000000000000000ULL) != 0)
-	{
-		event_data |= 0xffff000000000000ULL;
-	}
-	*data = event_data;
+	*data = ev->ident == VIDEO_OUT_EVENT_FLIP ? static_cast<uint64_t>(ev->data) : static_cast<uint64_t>(ev->data) >> 16u;
 	return OK;
 }
 

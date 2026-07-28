@@ -90,10 +90,14 @@ void SetScreenScissorTl(HW::Context& context, uint32_t value);
 void SetScreenScissorBr(HW::Context& context, uint32_t value);
 void SetRenderControl(HW::Context& context, uint32_t value);
 void SetDepthControl(HW::Context& context, uint32_t value);
-void ApplyDepthStencilPlaneRegisters(HW::DepthRenderTarget& target, uint32_t stencil_info,
-                                     uint32_t stencil_read_base, uint32_t stencil_write_base);
-void ApplyDepthStencilPlaneRegisters(HW::Context& context, uint32_t stencil_info, uint32_t stencil_read_base,
+// Canonical PM4 register decoders shared by direct, batched, and indirect register writes.
+// next_gen makes the Gen5 color-tile interpretation explicit instead of hiding it at call sites.
+[[nodiscard]] HW::ColorInfo        DecodeColorInfo(uint32_t value, bool next_gen);
+[[nodiscard]] HW::DepthZInfo       DecodeDepthZInfo(uint32_t value);
+[[nodiscard]] HW::DepthStencilInfo DecodeDepthStencilInfo(uint32_t value);
+void ApplyDepthStencilPlaneRegisters(HW::DepthRenderTarget& target, uint32_t stencil_info, uint32_t stencil_read_base,
                                      uint32_t stencil_write_base);
+void ApplyDepthStencilPlaneRegisters(HW::Context& context, uint32_t stencil_info, uint32_t stencil_read_base, uint32_t stencil_write_base);
 void SetStencilControl(HW::Context& context, uint32_t value);
 void SetStencilRefMask(HW::Context& context, uint32_t value);
 void SetStencilRefMaskBf(HW::Context& context, uint32_t value);
@@ -109,12 +113,12 @@ void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
 [[nodiscard]] bool RenderControlSampleSelectionIsNoOp(const HW::RenderControl& control, uint8_t num_samples);
 
 // Guest top-left coordinates are inclusive, bottom-right coordinates are exclusive, and enabled rectangles intersect.
-[[nodiscard]] ScissorRect ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanModeControl& mode, uint32_t viewport_id);
+[[nodiscard]] ScissorRect       ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanModeControl& mode, uint32_t viewport_id);
 [[nodiscard]] DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, const HW::RenderControl& render_control,
                                                          const HW::DepthControl& depth_control);
-[[nodiscard]] StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target,
-                                                          const HW::RenderControl& render_control,
+[[nodiscard]] StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target, const HW::RenderControl& render_control,
                                                           const HW::DepthControl& depth_control);
+[[nodiscard]] HW::DepthRenderTarget  ResolveDepthStencilBasePairs(const HW::DepthRenderTarget& target);
 
 // AMD VTE window Z: OpenGL clip ([-W,+W]) uses zoffset±zscale; DX clip ([0,+W]) uses [zoffset, zoffset+zscale].
 // Without VK_EXT_depth_range_unrestricted, clamp to [0,1] and pair with negativeOneToOne for OpenGL clip.
@@ -137,7 +141,7 @@ struct ColorTargetLayout
 	static constexpr uint32_t kMaxTargets = 8;
 	uint32_t                  count       = 0;
 	uint8_t                   nibbles[kMaxTargets] {};
-	ColorTargetLayoutError    error       = ColorTargetLayoutError::None;
+	ColorTargetLayoutError    error = ColorTargetLayoutError::None;
 };
 
 [[nodiscard]] ColorTargetLayout ResolveColorTargetLayout(uint32_t mask);
@@ -180,17 +184,17 @@ struct SamplerComparison
 
 struct UnnormalizedSamplerPolicy
 {
-	bool               enabled             = false;
-	SamplerAddressMode address_mode        = SamplerAddressMode::ClampToEdge;
-	bool               force_base_mip      = false;
-	bool               disable_anisotropy  = false;
-	bool               disable_comparison  = false;
-	bool               reset_lod_bias      = false;
+	bool               enabled            = false;
+	SamplerAddressMode address_mode       = SamplerAddressMode::ClampToEdge;
+	bool               force_base_mip     = false;
+	bool               disable_anisotropy = false;
+	bool               disable_comparison = false;
+	bool               reset_lod_bias     = false;
 };
 
 [[nodiscard]] SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp);
 // Vulkan requires sampler comparison state to agree with the SPIR-V image instruction.
-[[nodiscard]] SamplerComparison ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation);
+[[nodiscard]] SamplerComparison         ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation);
 [[nodiscard]] UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormalized_coordinates);
 
 } // namespace Kyty::Libs::Graphics::State

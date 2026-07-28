@@ -2234,6 +2234,14 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x312: KYTY_NI("v_cvt_pknorm_i16_f16"); break;
 		case 0x313: KYTY_NI("v_cvt_pknorm_u16_f16"); break;
 		case 0x314: KYTY_NI("v_lshlrev_b16"); break;
+		// VOP3P mixed-precision FMA (RDNA2). For now, map all three variants
+		// to a full-precision f32 FMA — this is correct for _MIX_F32 and a
+		// safe over-precision approximation for the f16 narrowing variants
+		// (_MIXLO/_MIXHI), which would write a packed half-float lane. The
+		// SPIR-V back-end already handles the Fma GLSL intrinsic correctly.
+		case 0x320: inst.type = ShaderInstructionType::VFmaMixF32; break;
+		case 0x321: inst.type = ShaderInstructionType::VFmaMixF32; break; // v_fma_mixlo_f16 → Fma f32 (safe)
+		case 0x322: inst.type = ShaderInstructionType::VFmaMixF32; break; // v_fma_mixhi_f16 → Fma f32 (safe)
 		case 0x340: KYTY_NI("v_mad_u16"); break;
 		case 0x341: KYTY_NI("v_mad_f16"); break;
 		case 0x342: KYTY_NI("v_interp_p1ll_f16"); break;

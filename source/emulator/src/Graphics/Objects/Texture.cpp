@@ -5,8 +5,12 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/Gen5TextureMipLayout.h"
+#include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
+#include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
@@ -30,144 +34,6 @@
 
 namespace Kyty::Libs::Graphics {
 
-bool TextureSupportsGen5SampledFormat(uint16_t fmt)
-{
-	switch (fmt)
-	{
-		case 1:
-		case 5:
-		case 7:
-		case 13:
-		case 14:
-		case 20:
-		case 56:
-		case 62:
-		case 71:
-		case 75:
-		case 133:
-		case 173: return true;
-		default: return false;
-	}
-}
-
-// Sampled texture formats only. Storage images and render-target aliases use
-// their own object format resolvers because sRGB storage/image-write semantics
-// are not interchangeable with sampled degamma.
-VkFormat TextureResolveSampledVkFormat(uint8_t dfmt, uint8_t nfmt, uint16_t fmt, bool force_degamma)
-{
-	if (fmt == 0)
-	{
-		if (nfmt == 9 && dfmt == 10)
-		{
-			return VK_FORMAT_R8G8B8A8_SRGB;
-		}
-		if (nfmt == 0 && dfmt == 10)
-		{
-			return VK_FORMAT_R8G8B8A8_UNORM;
-		}
-		if (nfmt == 0 && dfmt == 1)
-		{
-			return VK_FORMAT_R8_UNORM;
-		}
-		if (nfmt == 0 && dfmt == 3)
-		{
-			return VK_FORMAT_R8G8_UNORM;
-		}
-		if (nfmt == 9 && dfmt == 37)
-		{
-			return VK_FORMAT_BC3_SRGB_BLOCK;
-		}
-		if (nfmt == 0 && dfmt == 37)
-		{
-			return VK_FORMAT_BC3_UNORM_BLOCK;
-		}
-		if (nfmt == 0 && dfmt == 36)
-		{
-			return VK_FORMAT_BC2_UNORM_BLOCK;
-		}
-		if (nfmt == 0 && dfmt == 35)
-		{
-			return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
-		}
-		EXIT("unknown format: nfmt = %u, dfmt = %u\n", nfmt, dfmt);
-	} else
-	{
-		// Gen5 unified image formats (UfmtGFX10).
-		if (fmt == 1)
-		{
-			return VK_FORMAT_R8_UNORM;
-		}
-		if (fmt == 5)
-		{
-			// UfmtGFX10 calls this 8_UINT, but the sampled-image recompiler
-			// emits float image operations unless every image in the shader is a
-			// 32-bit integer image. Use a normalized host view here so hardware
-			// sampling has the same 0..1 result consumed by video shaders.
-			return VK_FORMAT_R8_UNORM;
-		}
-		if (fmt == 7)
-		{
-			// UfmtGFX10: dfmt=2 (16), nfmt=0 (UNORM) → R16_UNORM
-			return VK_FORMAT_R16_UNORM;
-		}
-		if (fmt == 13)
-		{
-			return VK_FORMAT_R16_SFLOAT;
-		}
-		if (fmt == 14)
-		{
-			return VK_FORMAT_R8G8_UNORM;
-		}
-		if (fmt == 20)
-		{
-			return VK_FORMAT_R32_UINT;
-		}
-		if (fmt == 56)
-		{
-			return (force_degamma ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM);
-		}
-		if (fmt == 62)
-		{
-			return VK_FORMAT_R32G32_UINT;
-		}
-		if (fmt == 71)
-		{
-			return VK_FORMAT_R16G16B16A16_SFLOAT;
-		}
-		if (fmt == 75)
-		{
-			return VK_FORMAT_R32G32B32A32_UINT;
-		}
-		if (fmt == 173)
-		{
-			return VK_FORMAT_BC3_UNORM_BLOCK;
-		}
-		if (fmt == 133)
-		{
-			return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
-		}
-		EXIT("unknown format: fmt = %u\n", fmt);
-	}
-	return VK_FORMAT_UNDEFINED;
-}
-
-static VkComponentSwizzle get_swizzle(uint8_t s)
-{
-	switch (s)
-	{
-		case 0: return VK_COMPONENT_SWIZZLE_ZERO; break;
-		case 1: return VK_COMPONENT_SWIZZLE_ONE; break;
-		case 4: return VK_COMPONENT_SWIZZLE_R; break;
-		case 5: return VK_COMPONENT_SWIZZLE_G; break;
-		case 6: return VK_COMPONENT_SWIZZLE_B; break;
-		case 7: return VK_COMPONENT_SWIZZLE_A; break;
-		case 2:
-		case 3:
-		default: EXIT("unknown swizzle: %d\n", static_cast<int>(s));
-	}
-	return VK_COMPONENT_SWIZZLE_IDENTITY;
-}
-
 static VkImageUsageFlags get_usage()
 {
 	VkImageUsageFlags vk_usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -177,65 +43,7 @@ static VkImageUsageFlags get_usage()
 	return vk_usage;
 }
 
-static bool CheckFormat(GraphicContext* ctx, VkImageCreateInfo* image_info)
-{
-	VkImageFormatProperties props {};
-	if (vkGetPhysicalDeviceImageFormatProperties(ctx->physical_device, image_info->format, image_info->imageType, image_info->tiling,
-	                                             image_info->usage, image_info->flags, &props) == VK_ERROR_FORMAT_NOT_SUPPORTED)
-	{
-		if (image_info->format == VK_FORMAT_R8G8B8A8_SRGB)
-		{
-			// TODO() convert SRGB -> LINEAR in shader
-			image_info->format = VK_FORMAT_R8G8B8A8_UNORM;
-			bool result        = CheckFormat(ctx, image_info);
-			printf("replace VK_FORMAT_R8G8B8A8_SRGB => VK_FORMAT_R8G8B8A8_UNORM [%s]\n", (!result ? "FAIL" : "SUCCESS"));
-			return result;
-		}
-		if (image_info->format == VK_FORMAT_B8G8R8A8_SRGB)
-		{
-			// TODO() convert SRGB -> LINEAR in shader
-			image_info->format = VK_FORMAT_B8G8R8A8_UNORM;
-			bool result        = CheckFormat(ctx, image_info);
-			printf("replace VK_FORMAT_B8G8R8A8_SRGB => VK_FORMAT_B8G8R8A8_UNORM [%s]\n", (!result ? "FAIL" : "SUCCESS"));
-			return result;
-		}
-		return false;
-	}
-	return true;
-}
-
-static bool CheckSwizzle(GraphicContext* /*ctx*/, VkImageCreateInfo* image_info, VkComponentMapping* components)
-{
-	if ((image_info->usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0)
-	{
-		if (components->r == VK_COMPONENT_SWIZZLE_R && components->g == VK_COMPONENT_SWIZZLE_G && components->b == VK_COMPONENT_SWIZZLE_B &&
-		    components->a == VK_COMPONENT_SWIZZLE_A)
-		{
-			return true;
-		}
-
-		if (components->r == VK_COMPONENT_SWIZZLE_B && components->g == VK_COMPONENT_SWIZZLE_G && components->b == VK_COMPONENT_SWIZZLE_R &&
-		    components->a == VK_COMPONENT_SWIZZLE_A && image_info->format == VK_FORMAT_R8G8B8A8_SRGB)
-		{
-			printf("replace VK_FORMAT_R8G8B8A8_SRGB => VK_FORMAT_B8G8R8A8_SRGB\n");
-
-			components->r      = VK_COMPONENT_SWIZZLE_R;
-			components->g      = VK_COMPONENT_SWIZZLE_G;
-			components->b      = VK_COMPONENT_SWIZZLE_B;
-			components->a      = VK_COMPONENT_SWIZZLE_A;
-			image_info->format = VK_FORMAT_B8G8R8A8_SRGB;
-			return true;
-		}
-
-		// TODO() swizzle channels in shader
-
-		return false;
-	}
-	return true;
-}
-
-namespace
-{
+namespace {
 astcenc_context* g_astc10x5_decoder_ctx = nullptr;
 std::mutex       g_astc10x5_decoder_mutex;
 
@@ -269,8 +77,7 @@ bool DecodeAstc10x5ToRgba8(uint32_t width, uint32_t height, const uint8_t* sourc
 
 	const auto blocks_x = (static_cast<size_t>(width) + 9u) / 10u;
 	const auto blocks_y = (static_cast<size_t>(height) + 4u) / 5u;
-	if (blocks_x > std::numeric_limits<size_t>::max() / blocks_y ||
-	    blocks_x * blocks_y > std::numeric_limits<size_t>::max() / 16u ||
+	if (blocks_x > std::numeric_limits<size_t>::max() / blocks_y || blocks_x * blocks_y > std::numeric_limits<size_t>::max() / 16u ||
 	    source_size < blocks_x * blocks_y * 16u)
 	{
 		return false;
@@ -292,13 +99,13 @@ bool DecodeAstc10x5ToRgba8(uint32_t width, uint32_t height, const uint8_t* sourc
 
 	output.resize(output_size);
 
-	void* output_data[1] = {output.data()};
+	void*         output_data[1] = {output.data()};
 	astcenc_image image_out {};
-	image_out.dim_x = width;
-	image_out.dim_y = height;
-	image_out.dim_z = 1u;
+	image_out.dim_x     = width;
+	image_out.dim_y     = height;
+	image_out.dim_z     = 1u;
 	image_out.data_type = ASTCENC_TYPE_U8;
-	image_out.data = output_data;
+	image_out.data      = output_data;
 
 	const astcenc_swizzle swizzle {ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A};
 	if (astcenc_decompress_image(g_astc10x5_decoder_ctx, source, source_size, &image_out, &swizzle, 0) != ASTCENC_SUCCESS)
@@ -322,101 +129,151 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 
 	auto* vk_obj = static_cast<TextureVulkanImage*>(obj);
 
-	auto tile   = params[TextureObject::PARAM_TILE];
-	auto fmt    = (params[TextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
-	auto dfmt   = (params[TextureObject::PARAM_FORMAT] >> 8u) & 0xffu;
-	auto nfmt   = (params[TextureObject::PARAM_FORMAT]) & 0xffu;
-	auto width  = params[TextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
-	auto height = params[TextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
-	auto levels = params[TextureObject::PARAM_LEVELS] & 0xffffffffu;
-	auto pitch  = params[TextureObject::PARAM_PITCH];
-	auto resource_info = params[TextureObject::PARAM_RESOURCE_INFO];
-	auto resource_type = TextureObject::GetResourceType(resource_info);
-	auto depth = TextureObject::GetResourceDepth(resource_info);
-	auto base_array = TextureObject::GetResourceBaseArray(resource_info);
-	bool neo    = Config::IsNeo();
-	const bool skip_guest = params[TextureObject::PARAM_SKIP_GUEST_UPLOAD] != 0;
+	auto       tile              = params[TextureObject::PARAM_TILE];
+	auto       fmt               = (params[TextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
+	auto       dfmt              = (params[TextureObject::PARAM_FORMAT] >> 8u) & 0xffu;
+	auto       nfmt              = (params[TextureObject::PARAM_FORMAT]) & 0xffu;
+	auto       width             = params[TextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
+	auto       height            = params[TextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
+	auto       levels            = params[TextureObject::PARAM_LEVELS] & 0xffffffffu;
+	auto       pitch             = params[TextureObject::PARAM_PITCH];
+	auto       resource_info     = params[TextureObject::PARAM_RESOURCE_INFO];
+	auto       resource_type     = TextureObject::GetResourceType(resource_info);
+	auto       depth             = TextureObject::GetResourceDepth(resource_info);
+	auto       base_array        = TextureObject::GetResourceBaseArray(resource_info);
+	bool       neo               = Config::IsNeo();
+	const bool skip_guest        = params[TextureObject::PARAM_SKIP_GUEST_UPLOAD] != 0;
 	const bool three_dimensional = resource_type == 10u;
-	const bool arrayed_2d = resource_type == 13u;
+	const bool arrayed_2d        = resource_type == 13u;
 
 	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	// SKIPPED: levels >= 16
-	if (levels >= 16) { printf("WARNING: skipped check: levels >= 16\n"); }
-	// SKIPPED: three_dimensional && (fmt != 20u || tile != 5u || levels != 1u || depth == 0u)
-	if (three_dimensional && (fmt != 20u || tile != 5u || levels != 1u || depth == 0u)) { printf("WARNING: skipped check: three_dimensional && (fmt != 20u || tile != 5u || levels != 1u || depth == 0u)\n"); }
+	if (levels >= 16)
+	{
+		printf("WARNING: skipped check: levels >= 16\n");
+	}
 	if (three_dimensional)
 	{
-		TileSizeAlign tiled_size {};
-		TileGetStandard4KB32VolumeSize(width, height, static_cast<uint32_t>(depth), static_cast<uint32_t>(pitch), &tiled_size);
-		// SKIPPED: *size != tiled_size.size
-		if (*size != tiled_size.size) { printf("WARNING: skipped check: *size != tiled_size.size\n"); }
-		const uint64_t linear_bytes = static_cast<uint64_t>(pitch) * height * depth * 4u;
-		// SKIPPED: linear_bytes == 0u || linear_bytes > *size
-		if (linear_bytes == 0u || linear_bytes > *size) { printf("WARNING: skipped check: linear_bytes == 0u || linear_bytes > *size\n"); }
-		auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
-		TileConvertStandard4KB32VolumeToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), static_cast<uint32_t>(width),
-		                                      static_cast<uint32_t>(height), static_cast<uint32_t>(depth), static_cast<uint32_t>(pitch));
+		Gen5TextureVolumeLayout volume_layout {};
+		const bool              is_standard = Gen5GetStandard4KBVolumeTextureLayout(
+		    static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
+		    static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), &volume_layout);
+		if (!is_standard)
+		{
+			const uint32_t bpe        = std::max(1u, ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt)));
+			volume_layout.linear_size = static_cast<uint64_t>(pitch) * height * depth * bpe;
+			volume_layout.tiled.size  = std::max(4096u, static_cast<uint32_t>(volume_layout.linear_size));
+			volume_layout.tiled.align = 4096;
+		}
+		std::vector<uint8_t> linear(static_cast<size_t>(volume_layout.linear_size));
+		if (is_standard && !linear.empty())
+		{
+			TileConvertStandard4KB32VolumeToLinear(linear.data(), reinterpret_cast<void*>(*vaddr), static_cast<uint32_t>(width),
+			                                       static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
+			                                       static_cast<uint32_t>(pitch));
+		} else if (!linear.empty())
+		{
+			std::memcpy(linear.data(), reinterpret_cast<void*>(*vaddr), linear.size());
+		}
 		Vector<BufferImageCopy> regions(1);
-		regions[0].offset = 0;
-		regions[0].pitch = static_cast<uint32_t>(pitch);
-		regions[0].width = static_cast<uint32_t>(width);
-		regions[0].height = static_cast<uint32_t>(height);
-		regions[0].depth = static_cast<uint32_t>(depth);
+		regions[0].offset    = 0;
+		regions[0].pitch     = static_cast<uint32_t>(pitch);
+		regions[0].width     = static_cast<uint32_t>(width);
+		regions[0].height    = static_cast<uint32_t>(height);
+		regions[0].depth     = static_cast<uint32_t>(depth);
 		regions[0].dst_level = 0;
-		regions[0].dst_x = 0;
-		regions[0].dst_y = 0;
-		regions[0].dst_z = 0;
-		UtilFillImage(ctx, vk_obj, temp_buf, linear_bytes, regions, static_cast<uint64_t>(vk_layout));
-		delete[] temp_buf;
+		regions[0].dst_x     = 0;
+		regions[0].dst_y     = 0;
+		regions[0].dst_z     = 0;
+		if (!linear.empty())
+		{
+			UtilFillImage(ctx, vk_obj, linear.data(), volume_layout.linear_size, regions, static_cast<uint64_t>(vk_layout));
+		}
 		return;
 	}
 	if (arrayed_2d)
 	{
 		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-		EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || tile != 5u || levels != 1u ||
-		                     depth == 0u || base_array >= depth || depth >= 16u);
+		EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || tile != 5u || levels != 1u || depth == 0u || base_array >= depth || depth >= 16u);
 		TileSizeAlign slice_size {};
 		TileGetTextureSize2(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
 		                    static_cast<uint32_t>(pitch), 1u, static_cast<uint32_t>(tile), &slice_size, nullptr, nullptr);
 		// SKIPPED: *size != static_cast<uint64_t>(slice_size.size) * depth
-		if (*size != static_cast<uint64_t>(slice_size.size) * depth) { printf("WARNING: skipped check: *size != static_cast<uint64_t>(slice_size.size) * depth\n"); }
-		const uint64_t linear_slice_bytes = static_cast<uint64_t>(pitch) * height * bytes_per_element;
-		std::vector<uint8_t> linear(static_cast<size_t>(linear_slice_bytes * depth));
+		if (*size != static_cast<uint64_t>(slice_size.size) * depth)
+		{
+			printf("WARNING: skipped check: *size != static_cast<uint64_t>(slice_size.size) * depth\n");
+		}
+		const uint64_t          linear_slice_bytes = static_cast<uint64_t>(pitch) * height * bytes_per_element;
+		std::vector<uint8_t>    linear(static_cast<size_t>(linear_slice_bytes * depth));
 		Vector<BufferImageCopy> regions(static_cast<int>(depth));
-			for (uint32_t layer = 0; layer < depth; ++layer)
+		for (uint32_t layer = 0; layer < depth; ++layer)
 		{
 			TileConvertStandard4KBToLinear(linear.data() + layer * linear_slice_bytes,
-			                              reinterpret_cast<const uint8_t*>(*vaddr) + layer * slice_size.size,
-			                              static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-			                              static_cast<uint32_t>(pitch), bytes_per_element);
-			regions[layer].offset = static_cast<uint32_t>(layer * linear_slice_bytes);
-			regions[layer].pitch = static_cast<uint32_t>(pitch);
-			regions[layer].width = static_cast<uint32_t>(width);
-			regions[layer].height = static_cast<uint32_t>(height);
-			regions[layer].dst_level = 0;
-				regions[layer].dst_array_layer = layer;
-			}
-			UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
-			return;
+			                               reinterpret_cast<const uint8_t*>(*vaddr) + layer * slice_size.size, static_cast<uint32_t>(width),
+			                               static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), bytes_per_element);
+			regions[layer].offset          = static_cast<uint32_t>(layer * linear_slice_bytes);
+			regions[layer].pitch           = static_cast<uint32_t>(pitch);
+			regions[layer].width           = static_cast<uint32_t>(width);
+			regions[layer].height          = static_cast<uint32_t>(height);
+			regions[layer].dst_level       = 0;
+			regions[layer].dst_array_layer = layer;
+		}
+		UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
+		return;
+	}
+	if (fmt != 0u && tile == 5u && levels > 1u)
+	{
+		Gen5TextureMipLayout mip_layout {};
+		EXIT_NOT_IMPLEMENTED(!Gen5GetStandard4KBTextureMipLayout(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+		                                                         static_cast<uint32_t>(height), static_cast<uint32_t>(pitch),
+		                                                         static_cast<uint32_t>(levels), &mip_layout));
+		EXIT_NOT_IMPLEMENTED(*size != mip_layout.tiled.size);
+		// The only fallback formerly associated with ufmt 173 decodes a
+		// different ASTC format, so it cannot represent a BC3 mip chain.
+		EXIT_NOT_IMPLEMENTED(vk_obj->astc10x5_cpu_fallback);
+
+		std::vector<uint8_t> linear(static_cast<size_t>(mip_layout.linear_size));
+		EXIT_NOT_IMPLEMENTED(
+		    !Gen5DetileStandard4KBTextureMipChain(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, mip_layout));
+
+		Vector<BufferImageCopy> regions(static_cast<int>(levels));
+		for (uint32_t level = 0; level < levels; level++)
+		{
+			const auto&    level_layout = mip_layout.level[level];
+			const uint64_t row_pitch    = static_cast<uint64_t>(level_layout.element_width) * mip_layout.texels_per_element_x;
+			EXIT_NOT_IMPLEMENTED(row_pitch == 0u || row_pitch > UINT32_MAX);
+			regions[level].offset    = level_layout.linear_offset;
+			regions[level].pitch     = static_cast<uint32_t>(row_pitch);
+			regions[level].width     = level_layout.width;
+			regions[level].height    = level_layout.height;
+			regions[level].dst_level = level;
+			regions[level].dst_x     = 0;
+			regions[level].dst_y     = 0;
+		}
+
+		UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
+		return;
 	}
 
 	// GPU-owned range under a live color surface that could not be bound as an
 	// alias: never detile guest (period-16 bands). Transparent black clear.
-	static const char* skipped_dump_spec = std::getenv("KYTY_DUMP_TILED_SAMPLE");
-	uint32_t           skipped_dump_width = 0;
-	uint32_t           skipped_dump_height = 0;
-	const bool inspect_skipped_guest =
-	    skipped_dump_spec != nullptr &&
-	    std::sscanf(skipped_dump_spec, "%ux%u", &skipped_dump_width, &skipped_dump_height) == 2 &&
-	    skipped_dump_width == width && skipped_dump_height == height;
+	static const char* skipped_dump_spec     = std::getenv("KYTY_DUMP_TILED_SAMPLE");
+	uint32_t           skipped_dump_width    = 0;
+	uint32_t           skipped_dump_height   = 0;
+	const bool         inspect_skipped_guest = skipped_dump_spec != nullptr &&
+	                                           std::sscanf(skipped_dump_spec, "%ux%u", &skipped_dump_width, &skipped_dump_height) == 2 &&
+	                                           skipped_dump_width == width && skipped_dump_height == height;
 	if (skip_guest && !inspect_skipped_guest)
 	{
 		const uint32_t bpp   = (fmt != 0u ? ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt)) : 4u);
 		const uint64_t bytes = static_cast<uint64_t>(width) * height * bpp;
 		// SKIPPED: bytes == 0u
-		if (bytes == 0u) { printf("WARNING: skipped check: bytes == 0u\n"); }
-		std::vector<uint8_t> zeros(static_cast<size_t>(bytes), 0);
+		if (bytes == 0u)
+		{
+			printf("WARNING: skipped check: bytes == 0u\n");
+		}
+		std::vector<uint8_t>    zeros(static_cast<size_t>(bytes), 0);
 		Vector<BufferImageCopy> clear_regions(1);
 		clear_regions[0].offset    = 0;
 		clear_regions[0].pitch     = static_cast<uint32_t>(width);
@@ -437,13 +294,19 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		// 9 = kStandard64KB.
 		// Other modes remain unsupported until their layout is evidenced.
 		// SKIPPED: tile != 0 && tile != 5 && tile != 27 && tile != 9
-		if (tile != 0 && tile != 5 && tile != 27 && tile != 9) { printf("WARNING: skipped check: tile != 0 && tile != 5 && tile != 27 && tile != 9\n"); }
+		if (tile != 0 && tile != 5 && tile != 27 && tile != 9)
+		{
+			printf("WARNING: skipped check: tile != 0 && tile != 5 && tile != 27 && tile != 9\n");
+		}
 
 		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, nullptr);
 	} else
 	{
 		// SKIPPED: tile != 8 && tile != 13 && tile != 10
-		if (tile != 8 && tile != 13 && tile != 10) { printf("WARNING: skipped check: tile != 8 && tile != 13 && tile != 10\n"); }
+		if (tile != 8 && tile != 13 && tile != 10)
+		{
+			printf("WARNING: skipped check: tile != 8 && tile != 13 && tile != 10\n");
+		}
 
 		TileGetTextureSize(dfmt, nfmt, width, height, pitch, levels, tile, neo, nullptr, level_sizes, nullptr);
 	}
@@ -458,7 +321,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	for (uint32_t i = 0; i < levels; i++)
 	{
 		// SKIPPED: level_sizes[i].size == 0
-		if (level_sizes[i].size == 0) { printf("WARNING: skipped check: level_sizes[i].size == 0\n"); }
+		if (level_sizes[i].size == 0)
+		{
+			printf("WARNING: skipped check: level_sizes[i].size == 0\n");
+		}
 
 		regions[i].offset    = level_sizes[i].offset;
 		regions[i].width     = mip_width;
@@ -487,9 +353,15 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		if (tile == 13)
 		{
 			// SKIPPED: pitch != width
-			if (pitch != width) { printf("WARNING: skipped check: pitch != width\n"); }
+			if (pitch != width)
+			{
+				printf("WARNING: skipped check: pitch != width\n");
+			}
 			// SKIPPED: fmt != 0
-			if (fmt != 0) { printf("WARNING: skipped check: fmt != 0\n"); }
+			if (fmt != 0)
+			{
+				printf("WARNING: skipped check: fmt != 0\n");
+			}
 			auto* temp_buf = new uint8_t[*size];
 			TileConvertTiledToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), TileMode::TextureTiled, dfmt, nfmt, width, height, pitch,
 			                         levels, neo);
@@ -501,12 +373,21 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// these as GPU-owned RenderTextures: that path skipped CPU upload and left
 			// tiled guest bytes unread, which sampled as horizontally smeared UI.
 			// SKIPPED: !(dfmt == 10 && nfmt == 0)
-			if (!(dfmt == 10 && nfmt == 0)) { printf("WARNING: skipped check: !(dfmt == 10 && nfmt == 0)\n"); }
+			if (!(dfmt == 10 && nfmt == 0))
+			{
+				printf("WARNING: skipped check: !(dfmt == 10 && nfmt == 0)\n");
+			}
 			// SKIPPED: levels != 1
-			if (levels != 1) { printf("WARNING: skipped check: levels != 1\n"); }
+			if (levels != 1)
+			{
+				printf("WARNING: skipped check: levels != 1\n");
+			}
 			const uint64_t linear_bytes = static_cast<uint64_t>(width) * height * 4u;
 			// SKIPPED: linear_bytes == 0
-			if (linear_bytes == 0) { printf("WARNING: skipped check: linear_bytes == 0\n"); }
+			if (linear_bytes == 0)
+			{
+				printf("WARNING: skipped check: linear_bytes == 0\n");
+			}
 			auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
 			TileConvertDisplayThinBgraToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), width, height, pitch, neo);
 			regions[0].pitch = static_cast<uint32_t>(width);
@@ -536,55 +417,16 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 						if (dumped_sizes.insert(key).second)
 						{
 							char out_path[128];
-							std::snprintf(out_path, sizeof(out_path), "/tmp/kyty-dump-linear-%ux%u.bmp",
-							              static_cast<unsigned>(width), static_cast<unsigned>(height));
+							std::snprintf(out_path, sizeof(out_path), "/tmp/kyty-dump-linear-%ux%u.bmp", static_cast<unsigned>(width),
+							              static_cast<unsigned>(height));
 							char out_path_w[128];
 							std::snprintf(out_path_w, sizeof(out_path_w), "/tmp/kyty-dump-linear-%ux%u-widthpitch.bmp",
 							              static_cast<unsigned>(width), static_cast<unsigned>(height));
-							auto write_bmp = [](const char* path, const uint8_t* src, uint32_t w, uint32_t h, uint32_t src_pitch) {
-								FILE* f = std::fopen(path, "wb");
-								if (f == nullptr)
-								{
-									return;
-								}
-								const uint32_t row_bytes = w * 4u;
-								const uint32_t pad       = (4u - (row_bytes % 4u)) % 4u;
-								const uint32_t dib       = 40u;
-								const uint32_t off       = 14u + dib;
-								const uint32_t size_img  = (row_bytes + pad) * h;
-								const uint32_t file_size = off + size_img;
-								uint8_t        hdr[54] {};
-								hdr[0] = 'B';
-								hdr[1] = 'M';
-								std::memcpy(hdr + 2, &file_size, 4);
-								std::memcpy(hdr + 10, &off, 4);
-								std::memcpy(hdr + 14, &dib, 4);
-								int32_t wi = static_cast<int32_t>(w);
-								int32_t hi = -static_cast<int32_t>(h);
-								std::memcpy(hdr + 18, &wi, 4);
-								std::memcpy(hdr + 22, &hi, 4);
-								uint16_t planes = 1;
-								uint16_t bpp    = 32;
-								std::memcpy(hdr + 26, &planes, 2);
-								std::memcpy(hdr + 28, &bpp, 2);
-								std::fwrite(hdr, 1, 54, f);
-								std::vector<uint8_t> zero(pad, 0);
-								for (uint32_t y = 0; y < h; y++)
-								{
-									const uint8_t* row = src + static_cast<uint64_t>(y) * src_pitch * 4u;
-									std::fwrite(row, 1, row_bytes, f);
-									if (pad != 0)
-									{
-										std::fwrite(zero.data(), 1, pad, f);
-									}
-								}
-								std::fclose(f);
-							};
 							const auto* base = reinterpret_cast<const uint8_t*>(*vaddr);
-							write_bmp(out_path, base, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-							          static_cast<uint32_t>(pitch));
-							write_bmp(out_path_w, base, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-							          static_cast<uint32_t>(width));
+							UtilWriteRgba8Bmp(out_path, base, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+							                  static_cast<uint32_t>(pitch));
+							UtilWriteRgba8Bmp(out_path_w, base, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+							                  static_cast<uint32_t>(width));
 							printf("KYTY_DUMP_LINEAR_SAMPLE wrote %ux%u pitch=%u -> %s\n", static_cast<unsigned>(width),
 							       static_cast<unsigned>(height), static_cast<unsigned>(pitch), out_path);
 						}
@@ -595,37 +437,43 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		} else if (tile == 5)
 		{
 			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-			const bool bc3 = fmt == 173u;
+			const bool     bc3               = fmt == 173u;
 			// SKIPPED: bytes_per_element == 0u || levels != 1u
-			if (bytes_per_element == 0u || levels != 1u) { printf("WARNING: skipped check: bytes_per_element == 0u || levels != 1u\n"); }
-			const uint32_t element_width = bc3 ? (width + 3u) / 4u : width;
+			if (bytes_per_element == 0u || levels != 1u)
+			{
+				printf("WARNING: skipped check: bytes_per_element == 0u || levels != 1u\n");
+			}
+			const uint32_t element_width  = bc3 ? (width + 3u) / 4u : width;
 			const uint32_t element_height = bc3 ? (height + 3u) / 4u : height;
-			const uint32_t element_pitch = bc3 ? (pitch + 3u) / 4u : pitch;
-			const uint64_t linear_bytes = static_cast<uint64_t>(element_pitch) * element_height * bytes_per_element;
+			const uint32_t element_pitch  = bc3 ? (pitch + 3u) / 4u : pitch;
+			const uint64_t linear_bytes   = static_cast<uint64_t>(element_pitch) * element_height * bytes_per_element;
 			// SKIPPED: linear_bytes == 0u || linear_bytes > *size
-			if (linear_bytes == 0u || linear_bytes > *size) { printf("WARNING: skipped check: linear_bytes == 0u || linear_bytes > *size\n"); }
+			if (linear_bytes == 0u || linear_bytes > *size)
+			{
+				printf("WARNING: skipped check: linear_bytes == 0u || linear_bytes > *size\n");
+			}
 			std::vector<uint8_t> temp_buf(static_cast<size_t>(linear_bytes));
-			TileConvertStandard4KBToLinear(temp_buf.data(), reinterpret_cast<void*>(*vaddr), element_width, element_height,
-		                              element_pitch, bytes_per_element);
+			TileConvertStandard4KBToLinear(temp_buf.data(), reinterpret_cast<void*>(*vaddr), element_width, element_height, element_pitch,
+			                               bytes_per_element);
 			if (bc3 && std::getenv("KYTY_DUMP_ASTC_BLOCKS") != nullptr)
 			{
-				const auto* guest = reinterpret_cast<const uint8_t*>(*vaddr);
-				uint64_t raw_nonzero = 0;
-				uint64_t detiled_nonzero = 0;
-				uint64_t raw_hash = 1469598103934665603ull;
-				uint64_t detiled_hash = 1469598103934665603ull;
+				const auto* guest           = reinterpret_cast<const uint8_t*>(*vaddr);
+				uint64_t    raw_nonzero     = 0;
+				uint64_t    detiled_nonzero = 0;
+				uint64_t    raw_hash        = 1469598103934665603ull;
+				uint64_t    detiled_hash    = 1469598103934665603ull;
 				for (uint64_t i = 0; i < linear_bytes; ++i)
 				{
 					raw_nonzero += (guest[i] != 0u ? 1u : 0u);
 					detiled_nonzero += (temp_buf[i] != 0u ? 1u : 0u);
-					raw_hash = (raw_hash ^ guest[i]) * 1099511628211ull;
+					raw_hash     = (raw_hash ^ guest[i]) * 1099511628211ull;
 					detiled_hash = (detiled_hash ^ temp_buf[i]) * 1099511628211ull;
 				}
-				std::fprintf(stderr, "KYTY_DUMP_ASTC_BLOCKS addr=0x%012" PRIx64 " size=%" PRIu64
-				                     " elem=%ux%u pitch=%u raw_nonzero=%" PRIu64 " detiled_nonzero=%" PRIu64
-				                     " raw_hash=%016" PRIx64 " detiled_hash=%016" PRIx64 " raw=",
-				             *vaddr, linear_bytes, element_width, element_height, element_pitch, raw_nonzero, detiled_nonzero,
-				             raw_hash, detiled_hash);
+				std::fprintf(stderr,
+				             "KYTY_DUMP_ASTC_BLOCKS addr=0x%012" PRIx64 " size=%" PRIu64 " elem=%ux%u pitch=%u raw_nonzero=%" PRIu64
+				             " detiled_nonzero=%" PRIu64 " raw_hash=%016" PRIx64 " detiled_hash=%016" PRIx64 " raw=",
+				             *vaddr, linear_bytes, element_width, element_height, element_pitch, raw_nonzero, detiled_nonzero, raw_hash,
+				             detiled_hash);
 				for (uint32_t i = 0; i < 64u && i < linear_bytes; ++i)
 				{
 					std::fprintf(stderr, "%02x", guest[i]);
@@ -644,11 +492,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			{
 				std::vector<uint8_t> decoded;
 				EXIT_NOT_IMPLEMENTED(!DecodeAstc10x5ToRgba8(static_cast<uint32_t>(width), static_cast<uint32_t>(height), temp_buf.data(),
-				                                          static_cast<size_t>(linear_bytes), decoded));
+				                                            static_cast<size_t>(linear_bytes), decoded));
 				regions[0].pitch = static_cast<uint32_t>(width);
 				UtilFillImage(ctx, vk_obj, decoded.data(), decoded.size(), regions, static_cast<uint64_t>(vk_layout));
-			}
-			else
+			} else
 			{
 				regions[0].pitch = pitch;
 				UtilFillImage(ctx, vk_obj, temp_buf.data(), linear_bytes, regions, static_cast<uint64_t>(vk_layout));
@@ -662,14 +509,26 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// BC1 (fmt 133) detiles compressed 4x4 blocks as 8-byte elements on
 			// tile 27 only.
 			// SKIPPED: tile == 9 && fmt != 56
-			if (tile == 9 && fmt != 56) { printf("WARNING: skipped check: tile == 9 && fmt != 56\n"); }
+			if (tile == 9 && fmt != 56)
+			{
+				printf("WARNING: skipped check: tile == 9 && fmt != 56\n");
+			}
 			// SKIPPED: fmt != 56 && fmt != 133
-			if (fmt != 56 && fmt != 133) { printf("WARNING: skipped check: fmt != 56 && fmt != 133\n"); }
+			if (fmt != 56 && fmt != 133)
+			{
+				printf("WARNING: skipped check: fmt != 56 && fmt != 133\n");
+			}
 			// SKIPPED: levels != 1
-			if (levels != 1) { printf("WARNING: skipped check: levels != 1\n"); }
+			if (levels != 1)
+			{
+				printf("WARNING: skipped check: levels != 1\n");
+			}
 			const bool bc1 = (fmt == 133u);
 			// SKIPPED: bc1 && tile != 27
-			if (bc1 && tile != 27) { printf("WARNING: skipped check: bc1 && tile != 27\n"); }
+			if (bc1 && tile != 27)
+			{
+				printf("WARNING: skipped check: bc1 && tile != 27\n");
+			}
 			const uint32_t bpp          = (bc1 ? 8u : 4u);
 			const uint32_t copy_width   = bc1 ? std::max((static_cast<uint32_t>(width) + 3u) / 4u, 1u) : static_cast<uint32_t>(width);
 			const uint32_t copy_height  = bc1 ? std::max((static_cast<uint32_t>(height) + 3u) / 4u, 1u) : static_cast<uint32_t>(height);
@@ -713,18 +572,18 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			UtilFillImage(ctx, vk_obj, temp_buf, linear_bytes, regions, static_cast<uint64_t>(vk_layout));
 			if (!bc1)
 			{
-				static const char* dump_spec = std::getenv("KYTY_DUMP_TILED_SAMPLE");
-				uint32_t           dump_width = 0;
+				static const char* dump_spec   = std::getenv("KYTY_DUMP_TILED_SAMPLE");
+				uint32_t           dump_width  = 0;
 				uint32_t           dump_height = 0;
-				if (dump_spec != nullptr && std::sscanf(dump_spec, "%ux%u", &dump_width, &dump_height) == 2 &&
-				    dump_width == width && dump_height == height)
+				if (dump_spec != nullptr && std::sscanf(dump_spec, "%ux%u", &dump_width, &dump_height) == 2 && dump_width == width &&
+				    dump_height == height)
 				{
 					static std::set<uint64_t> dumped;
-					const uint64_t key = (static_cast<uint64_t>(width) << 32u) | height;
+					const uint64_t            key = (static_cast<uint64_t>(width) << 32u) | height;
 					if (dumped.insert(key).second)
 					{
-						const auto* pixels = reinterpret_cast<const uint32_t*>(temp_buf);
-						const size_t count = static_cast<size_t>(linear_bytes / sizeof(uint32_t));
+						const auto*        pixels = reinterpret_cast<const uint32_t*>(temp_buf);
+						const size_t       count  = static_cast<size_t>(linear_bytes / sizeof(uint32_t));
 						std::set<uint32_t> colors;
 						for (size_t pixel = 0; pixel < count && colors.size() <= 256u; pixel++)
 						{
@@ -766,7 +625,10 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	// SKIPPED: levels >= 16
-	if (levels >= 16) { printf("WARNING: skipped check: levels >= 16\n"); }
+	if (levels >= 16)
+	{
+		printf("WARNING: skipped check: levels >= 16\n");
+	}
 
 	uint32_t mip_width  = width;
 	uint32_t mip_height = height;
@@ -775,13 +637,12 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 
 	auto fmt = (params[TextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
 
-	static const char* update2_dump_spec = std::getenv("KYTY_DUMP_TILED_SAMPLE");
-	uint32_t           update2_dump_width = 0;
+	static const char* update2_dump_spec   = std::getenv("KYTY_DUMP_TILED_SAMPLE");
+	uint32_t           update2_dump_width  = 0;
 	uint32_t           update2_dump_height = 0;
-	const bool dump_update2 =
-	    update2_dump_spec != nullptr &&
-	    std::sscanf(update2_dump_spec, "%ux%u", &update2_dump_width, &update2_dump_height) == 2 &&
-	    update2_dump_width == width && update2_dump_height == height;
+	const bool         dump_update2        = update2_dump_spec != nullptr &&
+	                                         std::sscanf(update2_dump_spec, "%ux%u", &update2_dump_width, &update2_dump_height) == 2 &&
+	                                         update2_dump_width == width && update2_dump_height == height;
 	if (dump_update2)
 	{
 		static std::atomic_uint dump_count {0};
@@ -799,10 +660,10 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 				                     : parent.type == GpuMemoryObjectType::StorageTexture
 				                         ? static_cast<const VulkanImage*>(static_cast<const StorageTextureVulkanImage*>(parent.obj))
 				                         : nullptr;
-				const auto extent = image != nullptr ? image->GetGuestExtent() : VkExtent2D {};
+				const auto  extent = image != nullptr ? image->GetGuestExtent() : VkExtent2D {};
 				std::fprintf(stderr, "  parent[%u] type=%u obj=%p extent=%ux%u format=%u layout=%u guest_size=%" PRIu64 "\n",
-				             static_cast<unsigned>(i), static_cast<unsigned>(parent.type), parent.obj,
-				             static_cast<unsigned>(extent.width), static_cast<unsigned>(extent.height),
+				             static_cast<unsigned>(i), static_cast<unsigned>(parent.type), parent.obj, static_cast<unsigned>(extent.width),
+				             static_cast<unsigned>(extent.height),
 				             static_cast<unsigned>(image != nullptr ? image->format : VK_FORMAT_UNDEFINED),
 				             static_cast<unsigned>(image != nullptr ? image->layout : VK_IMAGE_LAYOUT_UNDEFINED),
 				             image != nullptr ? image->guest_size : 0u);
@@ -815,7 +676,8 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	// and the parent extent equals this mip. Copying float lighting into RGBA8
 	// reinterprets bits as cyan/hot garbage; copying a larger parent without a
 	// crop view leaves horizontal bands on world tiles.
-	const auto surface_parent_ok = [fmt](VulkanImage* img, uint32_t need_w, uint32_t need_h) -> bool {
+	const auto surface_parent_ok = [fmt](VulkanImage* img, uint32_t need_w, uint32_t need_h) -> bool
+	{
 		if (img == nullptr)
 		{
 			return false;
@@ -834,7 +696,8 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	// Leave layout UNDEFINED when no valid surface parent. GpuMemory then
 	// guest-uploads (package tiles) instead of leaving transparent-black
 	// AABBs that only show god-ray bands through alpha.
-	const auto skip_surface_copy = [&]() {
+	const auto skip_surface_copy = [&]()
+	{
 		(void)ctx;
 		(void)vk_obj;
 		(void)vk_layout;
@@ -842,20 +705,19 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 
 	if (objects.Size() == 1 && objects.At(0).type == GpuMemoryObjectType::StorageTexture && scenario == GpuMemoryScenario::Common)
 	{
-		auto* src_obj = static_cast<StorageTextureVulkanImage*>(objects.At(0).obj);
-		const auto src_guest_extent = (src_obj != nullptr ? src_obj->GetGuestExtent() : VkExtent2D {});
+		auto*      src_obj           = static_cast<StorageTextureVulkanImage*>(objects.At(0).obj);
+		const auto src_guest_extent  = (src_obj != nullptr ? src_obj->GetGuestExtent() : VkExtent2D {});
 		uint32_t   block_copy_width  = 0;
 		uint32_t   block_copy_height = 0;
-		const bool block_copy =
-		    levels == 1u && src_obj != nullptr &&
-		    Gen5BlockCompressedStorageCopyExtent(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
-		                                         static_cast<uint32_t>(height), src_obj->format, src_guest_extent.width,
-		                                         src_guest_extent.height, &block_copy_width, &block_copy_height);
+		const bool block_copy = levels == 1u && src_obj != nullptr &&
+		                        Gen5BlockCompressedStorageCopyExtent(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+		                                                             static_cast<uint32_t>(height), src_obj->format, src_guest_extent.width,
+		                                                             src_guest_extent.height, &block_copy_width, &block_copy_height);
 		if (block_copy)
 		{
 			if (std::getenv("KYTY_DUMP_BLOCK_STORAGE") != nullptr)
 			{
-				const uint64_t bytes = static_cast<uint64_t>(block_copy_width) * block_copy_height * 16u;
+				const uint64_t       bytes = static_cast<uint64_t>(block_copy_width) * block_copy_height * 16u;
 				std::vector<uint8_t> source(static_cast<size_t>(bytes));
 				UtilFillBuffer(ctx, source.data(), bytes, block_copy_width, src_obj, static_cast<uint64_t>(src_obj->layout));
 				uint64_t nonzero = 0;
@@ -865,8 +727,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 					nonzero += (value != 0u ? 1u : 0u);
 					hash = (hash ^ value) * 1099511628211ull;
 				}
-				std::fprintf(stderr,
-				             "KYTY_DUMP_BLOCK_STORAGE extent=%ux%u bytes=%" PRIu64 " nonzero=%" PRIu64 " hash=%016" PRIx64 "\n",
+				std::fprintf(stderr, "KYTY_DUMP_BLOCK_STORAGE extent=%ux%u bytes=%" PRIu64 " nonzero=%" PRIu64 " hash=%016" PRIx64 "\n",
 				             block_copy_width, block_copy_height, bytes, nonzero, hash);
 				static std::atomic_bool dds_dumped {false};
 				if (block_copy_width == 29u && block_copy_height == 30u && !dds_dumped.exchange(true))
@@ -904,46 +765,45 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 			regions[0].dst_y     = 0;
 		} else
 		{
-		// Single ST parent: exact sample extent, or a larger atlas that can host
-		// mip offsets (legacy GenerateMips-style). Wrong-format parents rejected.
-		const bool st_ok =
-		    src_obj != nullptr && src_guest_extent.width >= width && src_guest_extent.height >= height &&
-		    (fmt == 0u || Gen5SampleMayCopyFromSurfaceParent(static_cast<uint32_t>(fmt), src_obj->format));
-		if (!st_ok)
-		{
-			skip_surface_copy();
-			return;
-		}
-
-		for (uint32_t i = 0; i < levels; i++)
-		{
-			auto mipmap_offset = UtilCalcMipmapOffset(i, width, height);
-
-			regions[i].src_image = src_obj;
-			regions[i].src_level = 0;
-			regions[i].dst_level = i;
-			regions[i].width     = mip_width;
-			regions[i].height    = mip_height;
-			regions[i].src_x     = mipmap_offset.first;
-			regions[i].src_y     = mipmap_offset.second;
-			regions[i].dst_x     = 0;
-			regions[i].dst_y     = 0;
-
-			if (mip_width > 1)
+			// Single ST parent: exact sample extent, or a larger atlas that can host
+			// mip offsets (legacy GenerateMips-style). Wrong-format parents rejected.
+			const bool st_ok = src_obj != nullptr && src_guest_extent.width >= width && src_guest_extent.height >= height &&
+			                   (fmt == 0u || Gen5SampleMayCopyFromSurfaceParent(static_cast<uint32_t>(fmt), src_obj->format));
+			if (!st_ok)
 			{
-				mip_width /= 2;
+				skip_surface_copy();
+				return;
 			}
-			if (mip_height > 1)
+
+			for (uint32_t i = 0; i < levels; i++)
 			{
-				mip_height /= 2;
+				auto mipmap_offset = UtilCalcMipmapOffset(i, width, height);
+
+				regions[i].src_image = src_obj;
+				regions[i].src_level = 0;
+				regions[i].dst_level = i;
+				regions[i].width     = mip_width;
+				regions[i].height    = mip_height;
+				regions[i].src_x     = mipmap_offset.first;
+				regions[i].src_y     = mipmap_offset.second;
+				regions[i].dst_x     = 0;
+				regions[i].dst_y     = 0;
+
+				if (mip_width > 1)
+				{
+					mip_width /= 2;
+				}
+				if (mip_height > 1)
+				{
+					mip_height /= 2;
+				}
 			}
-		}
 		}
 	} else if (levels == objects.Size() && scenario == GpuMemoryScenario::Common)
 	{
-		bool parents_ok = true;
-		uint32_t check_w = static_cast<uint32_t>(width);
-		uint32_t check_h = static_cast<uint32_t>(height);
+		bool     parents_ok = true;
+		uint32_t check_w    = static_cast<uint32_t>(width);
+		uint32_t check_h    = static_cast<uint32_t>(height);
 		for (uint32_t i = 0; i < levels; i++)
 		{
 			const auto& object = objects.At(i);
@@ -1032,7 +892,10 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 			}
 
 			// SKIPPED: src_image == nullptr
-			if (src_image == nullptr) { printf("WARNING: skipped check: src_image == nullptr\n"); }
+			if (src_image == nullptr)
+			{
+				printf("WARNING: skipped check: src_image == nullptr\n");
+			}
 
 			if (storage)
 			{
@@ -1157,154 +1020,117 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	}
 }
 
-static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
-                         VulkanMemory* mem)
+struct TextureImageViewConfiguration
 {
-	KYTY_PROFILER_BLOCK("TextureObject::Create");
-
-	EXIT_IF(size == nullptr || vaddr == nullptr);
-	EXIT_IF(mem == nullptr);
-	EXIT_IF(ctx == nullptr);
-	EXIT_IF(params == nullptr);
-
-	auto fmt        = (params[TextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
-	auto dfmt       = (params[TextureObject::PARAM_FORMAT] >> 8u) & 0xffu;
-	auto nfmt       = (params[TextureObject::PARAM_FORMAT]) & 0xffu;
-	auto width      = params[TextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
-	auto height     = params[TextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
-	auto base_level = params[TextureObject::PARAM_LEVELS] >> 32u;
-	auto levels     = params[TextureObject::PARAM_LEVELS] & 0xffffffffu;
-	auto swizzle    = params[TextureObject::PARAM_SWIZZLE];
-	auto resource_info = params[TextureObject::PARAM_RESOURCE_INFO];
-	auto resource_type = TextureObject::GetResourceType(resource_info);
-	auto depth      = TextureObject::GetResourceDepth(resource_info);
-	auto base_array = TextureObject::GetResourceBaseArray(resource_info);
-	auto tile       = params[TextureObject::PARAM_TILE];
-	auto force_degamma = params[TextureObject::PARAM_FORCE_DEGAMMA] != 0;
-	const bool three_dimensional = resource_type == 10u;
-	const bool arrayed_2d = resource_type == 13u;
-	// SKIPPED: resource_type != 8u && resource_type != 9u && resource_type != 13u && !three_dimensional
-	if (resource_type != 8u && resource_type != 9u && resource_type != 13u && !three_dimensional) { printf("WARNING: skipped check: resource_type != 8u && resource_type != 9u && resource_type != 13u && !three_dimensional\n"); }
-
-	VkImageUsageFlags vk_usage = get_usage();
-
 	VkComponentMapping components {};
+	uint32_t           base_level        = 0;
+	uint32_t           base_array        = 0;
+	uint32_t           depth             = 1;
+	bool               three_dimensional = false;
+	bool               arrayed_2d        = false;
+};
 
-	components.r = get_swizzle(GetDstSel(swizzle, 0));
-	components.g = get_swizzle(GetDstSel(swizzle, 1));
-	components.b = get_swizzle(GetDstSel(swizzle, 2));
-	components.a = get_swizzle(GetDstSel(swizzle, 3));
+static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint64_t* params, VulkanMemory* mem,
+                                                TextureImageViewConfiguration* view_config)
+{
+	EXIT_IF(ctx == nullptr || params == nullptr || mem == nullptr || view_config == nullptr);
 
-	auto pixel_format = TextureResolveSampledVkFormat(dfmt, nfmt, fmt, force_degamma);
+	const auto fmt           = static_cast<uint16_t>((params[TextureObject::PARAM_FORMAT] >> 16u) & 0xffffu);
+	const auto dfmt          = static_cast<uint8_t>((params[TextureObject::PARAM_FORMAT] >> 8u) & 0xffu);
+	const auto nfmt          = static_cast<uint8_t>(params[TextureObject::PARAM_FORMAT] & 0xffu);
+	const auto width         = static_cast<uint32_t>(params[TextureObject::PARAM_WIDTH_HEIGHT] >> 32u);
+	const auto height        = static_cast<uint32_t>(params[TextureObject::PARAM_WIDTH_HEIGHT]);
+	const auto levels        = static_cast<uint32_t>(params[TextureObject::PARAM_LEVELS]);
+	const auto tile          = static_cast<uint32_t>(params[TextureObject::PARAM_TILE]);
+	const auto resource_info = params[TextureObject::PARAM_RESOURCE_INFO];
+	const auto resource_type = TextureObject::GetResourceType(resource_info);
+	const auto force_degamma = params[TextureObject::PARAM_FORCE_DEGAMMA] != 0;
 
-	// SKIPPED: pixel_format == VK_FORMAT_UNDEFINED
-	if (pixel_format == VK_FORMAT_UNDEFINED) { printf("WARNING: skipped check: pixel_format == VK_FORMAT_UNDEFINED\n"); }
-	// SKIPPED: width == 0
-	if (width == 0) { printf("WARNING: skipped check: width == 0\n"); }
-	// SKIPPED: height == 0
-	if (height == 0) { printf("WARNING: skipped check: height == 0\n"); }
-	// SKIPPED: three_dimensional && depth == 0u
-	if (three_dimensional && depth == 0u) { printf("WARNING: skipped check: three_dimensional && depth == 0u\n"); }
+	view_config->base_level        = static_cast<uint32_t>(params[TextureObject::PARAM_LEVELS] >> 32u);
+	view_config->depth             = TextureObject::GetResourceDepth(resource_info);
+	view_config->base_array        = TextureObject::GetResourceBaseArray(resource_info);
+	view_config->three_dimensional = resource_type == 10u;
+	view_config->arrayed_2d        = resource_type == 13u;
 
-	auto* vk_obj = new TextureVulkanImage;
+	EXIT_NOT_IMPLEMENTED(resource_type != 8u && resource_type != 9u && !view_config->arrayed_2d && !view_config->three_dimensional);
+	EXIT_NOT_IMPLEMENTED(width == 0 || height == 0 || levels == 0);
+	EXIT_NOT_IMPLEMENTED((view_config->three_dimensional || view_config->arrayed_2d) && view_config->depth == 0u);
+	EXIT_NOT_IMPLEMENTED(view_config->arrayed_2d && view_config->base_array >= view_config->depth);
+	EXIT_NOT_IMPLEMENTED(
+	    !VulkanDecodeComponentMapping(static_cast<uint32_t>(params[TextureObject::PARAM_SWIZZLE]), &view_config->components));
 
-	VkImageCreateInfo image_info {};
-	image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	image_info.pNext         = nullptr;
-	image_info.flags         = 0;
-	image_info.imageType     = (three_dimensional ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D);
-	image_info.extent.width  = width;
-	image_info.extent.height = height;
-	image_info.extent.depth  = (three_dimensional ? depth : 1u);
-	image_info.mipLevels     = levels;
-	image_info.arrayLayers   = (arrayed_2d ? depth : 1u);
-	image_info.format        = pixel_format;
-	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-	image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	image_info.usage         = vk_usage;
-	image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
-	image_info.samples       = VK_SAMPLE_COUNT_1_BIT;
-	bool astc10x5_cpu_fallback = false;
+	const auto pixel_format = VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, dfmt, nfmt, fmt, force_degamma);
+	EXIT_NOT_IMPLEMENTED(pixel_format == VK_FORMAT_UNDEFINED);
 
-	if (!CheckSwizzle(ctx, &image_info, &components))
+	VulkanImageDescriptor image_descriptor {};
+	image_descriptor.image_type   = view_config->three_dimensional ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+	image_descriptor.extent       = {width, height, view_config->three_dimensional ? view_config->depth : 1u};
+	image_descriptor.mip_levels   = levels;
+	image_descriptor.array_layers = view_config->arrayed_2d ? view_config->depth : 1u;
+	image_descriptor.format       = pixel_format;
+	image_descriptor.usage        = get_usage();
+	auto image_info               = VulkanBuildImageCreateInfo(image_descriptor);
+	bool astc10x5_cpu_fallback    = false;
+
+	if (!VulkanImageFormatSupported(ctx, image_info))
 	{
-		EXIT("swizzle is not supported");
+		const bool can_decode_astc10x5 = fmt == 173u && tile == 5u && !view_config->three_dimensional && !view_config->arrayed_2d;
+		if (can_decode_astc10x5)
+		{
+			image_info.format     = VK_FORMAT_R8G8B8A8_UNORM;
+			astc10x5_cpu_fallback = VulkanImageFormatSupported(ctx, image_info);
+		}
+		if (!astc10x5_cpu_fallback)
+		{
+			EXIT("texture format is not supported\n");
+		}
 	}
 
-	if (!CheckFormat(ctx, &image_info))
-	{
-		if (fmt == 173u && tile == 5u && !three_dimensional && !arrayed_2d)
-			{
-				image_info.format            = VK_FORMAT_R8G8B8A8_UNORM;
-				astc10x5_cpu_fallback = CheckFormat(ctx, &image_info);
-			}
-			if (!astc10x5_cpu_fallback)
-			{
-				EXIT("format is not supported: fmt=%u vk=%u tile=%u size=%ux%u type=%u depth=%u\n", static_cast<unsigned>(fmt),
-				     static_cast<unsigned>(image_info.format), static_cast<unsigned>(tile), static_cast<unsigned>(width),
-				     static_cast<unsigned>(height), static_cast<unsigned>(resource_type), static_cast<unsigned>(depth));
-			}
-		}
-
+	auto* vk_obj = new TextureVulkanImage;
 	vk_obj->SetNativeExtent(width, height);
 	vk_obj->format                = image_info.format;
 	vk_obj->astc10x5_cpu_fallback = astc10x5_cpu_fallback;
-	vk_obj->image         = nullptr;
-	vk_obj->layout        = image_info.initialLayout;
-
+	vk_obj->image                 = nullptr;
+	vk_obj->layout                = image_info.initialLayout;
 	for (auto& view: vk_obj->image_view)
 	{
 		view = nullptr;
 	}
+	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem));
+	return vk_obj;
+}
 
-	vkCreateImage(ctx->device, &image_info, nullptr, &vk_obj->image);
+static void create_texture_image_views(GraphicContext* ctx, TextureVulkanImage* vk_obj, const TextureImageViewConfiguration& config)
+{
+	VulkanImageViewDescriptor descriptor {};
+	descriptor.image          = vk_obj->image;
+	descriptor.view_type      = config.three_dimensional ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
+	descriptor.format         = vk_obj->format;
+	descriptor.components     = config.components;
+	descriptor.base_mip_level = config.base_level;
+	descriptor.level_count    = VK_REMAINING_MIP_LEVELS;
 
-	// SKIPPED: vk_obj->image == nullptr
-	if (vk_obj->image == nullptr) { printf("WARNING: skipped check: vk_obj->image == nullptr\n"); }
-
-	vkGetImageMemoryRequirements(ctx->device, vk_obj->image, &mem->requirements);
-
-	mem->property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-
-	bool allocated = VulkanAllocate(ctx, mem);
-
-	// SKIPPED: !allocated
-	if (!allocated) { printf("WARNING: skipped check: !allocated\n"); }
-
-	VulkanBindImageMemory(ctx, vk_obj, mem);
-
-	vk_obj->memory = *mem;
-
-	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
-
-	VkImageViewCreateInfo create_info {};
-	create_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create_info.pNext                           = nullptr;
-	create_info.flags                           = 0;
-	create_info.image                           = vk_obj->image;
-	create_info.viewType                        = (three_dimensional ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D);
-	create_info.format                          = vk_obj->format;
-	create_info.components                      = components;
-	create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create_info.subresourceRange.baseArrayLayer = 0;
-	create_info.subresourceRange.baseMipLevel   = base_level;
-	create_info.subresourceRange.layerCount     = 1;
-	create_info.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
-
-	const int view_index = (three_dimensional ? VulkanImage::VIEW_3D : VulkanImage::VIEW_DEFAULT);
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[view_index]);
-	// SKIPPED: vk_obj->image_view[view_index] == nullptr
-	if (vk_obj->image_view[view_index] == nullptr) { printf("WARNING: skipped check: vk_obj->image_view[view_index] == nullptr\n"); }
-	if (!three_dimensional)
+	const int view_index = config.three_dimensional ? VulkanImage::VIEW_3D : VulkanImage::VIEW_DEFAULT;
+	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[view_index]));
+	if (!config.three_dimensional)
 	{
-		create_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-		create_info.subresourceRange.baseArrayLayer = (arrayed_2d ? base_array : 0u);
-		create_info.subresourceRange.layerCount = (arrayed_2d ? depth - base_array : 1u);
-		vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]);
-		// SKIPPED: vk_obj->image_view[VulkanImage::VIEW_ARRAY] == nullptr
-		if (vk_obj->image_view[VulkanImage::VIEW_ARRAY] == nullptr) { printf("WARNING: skipped check: vk_obj->image_view[VulkanImage::VIEW_ARRAY] == nullptr\n"); }
+		descriptor.view_type        = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+		descriptor.base_array_layer = config.arrayed_2d ? config.base_array : 0u;
+		descriptor.layer_count      = config.arrayed_2d ? config.depth - config.base_array : 1u;
+		EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]));
 	}
+}
 
+static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
+                         VulkanMemory* mem)
+{
+	KYTY_PROFILER_BLOCK("TextureObject::Create");
+	EXIT_IF(size == nullptr || vaddr == nullptr);
+
+	TextureImageViewConfiguration view_config {};
+	auto*                         vk_obj = create_texture_image(ctx, params, mem, &view_config);
+	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
+	create_texture_image_views(ctx, vk_obj, view_config);
 	return vk_obj;
 }
 
@@ -1312,146 +1138,12 @@ static void* create2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint
                           const Vector<GpuMemoryObject>& objects, VulkanMemory* mem)
 {
 	KYTY_PROFILER_BLOCK("TextureObject::CreateFromObjects");
-
 	EXIT_IF(objects.IsEmpty());
-	EXIT_IF(mem == nullptr);
-	EXIT_IF(ctx == nullptr);
-	EXIT_IF(params == nullptr);
 
-	auto fmt        = (params[TextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
-	auto dfmt       = (params[TextureObject::PARAM_FORMAT] >> 8u) & 0xffu;
-	auto nfmt       = (params[TextureObject::PARAM_FORMAT]) & 0xffu;
-	auto width      = params[TextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
-	auto height     = params[TextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
-	auto base_level = params[TextureObject::PARAM_LEVELS] >> 32u;
-	auto levels     = params[TextureObject::PARAM_LEVELS] & 0xffffffffu;
-	auto tile       = params[TextureObject::PARAM_TILE];
-	auto swizzle    = params[TextureObject::PARAM_SWIZZLE];
-	auto resource_info = params[TextureObject::PARAM_RESOURCE_INFO];
-	auto resource_type = TextureObject::GetResourceType(resource_info);
-	auto depth      = TextureObject::GetResourceDepth(resource_info);
-	auto force_degamma = params[TextureObject::PARAM_FORCE_DEGAMMA] != 0;
-	const bool three_dimensional = resource_type == 10u;
-	// SKIPPED: resource_type != 8u && resource_type != 9u && resource_type != 13u && !three_dimensional
-	if (resource_type != 8u && resource_type != 9u && resource_type != 13u && !three_dimensional) { printf("WARNING: skipped check: resource_type != 8u && resource_type != 9u && resource_type != 13u && !three_dimensional\n"); }
-
-	VkImageUsageFlags vk_usage = get_usage();
-
-	VkComponentMapping components {};
-
-	components.r = get_swizzle(GetDstSel(swizzle, 0));
-	components.g = get_swizzle(GetDstSel(swizzle, 1));
-	components.b = get_swizzle(GetDstSel(swizzle, 2));
-	components.a = get_swizzle(GetDstSel(swizzle, 3));
-
-	auto pixel_format = TextureResolveSampledVkFormat(dfmt, nfmt, fmt, force_degamma);
-
-	// SKIPPED: pixel_format == VK_FORMAT_UNDEFINED
-	if (pixel_format == VK_FORMAT_UNDEFINED) { printf("WARNING: skipped check: pixel_format == VK_FORMAT_UNDEFINED\n"); }
-	// SKIPPED: width == 0
-	if (width == 0) { printf("WARNING: skipped check: width == 0\n"); }
-	// SKIPPED: height == 0
-	if (height == 0) { printf("WARNING: skipped check: height == 0\n"); }
-	// SKIPPED: three_dimensional && depth == 0u
-	if (three_dimensional && depth == 0u) { printf("WARNING: skipped check: three_dimensional && depth == 0u\n"); }
-
-	auto* vk_obj = new TextureVulkanImage;
-
-	VkImageCreateInfo image_info {};
-	image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	image_info.pNext         = nullptr;
-	image_info.flags         = 0;
-	image_info.imageType     = (three_dimensional ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D);
-	image_info.extent.width  = width;
-	image_info.extent.height = height;
-	image_info.extent.depth  = depth;
-	image_info.mipLevels     = levels;
-	image_info.arrayLayers   = 1;
-	image_info.format        = pixel_format;
-	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-	image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	image_info.usage         = vk_usage;
-	image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
-	image_info.samples       = VK_SAMPLE_COUNT_1_BIT;
-	bool astc10x5_cpu_fallback = false;
-
-	if (!CheckSwizzle(ctx, &image_info, &components))
-	{
-		EXIT("swizzle is not supported");
-	}
-
-	if (!CheckFormat(ctx, &image_info))
-	{
-		if (fmt == 173u && tile == 5u && !three_dimensional && resource_type != 13u)
-		{
-			image_info.format            = VK_FORMAT_R8G8B8A8_UNORM;
-			astc10x5_cpu_fallback = CheckFormat(ctx, &image_info);
-		}
-		if (!astc10x5_cpu_fallback)
-		{
-			EXIT("format is not supported: fmt=%u dfmt=%u nfmt=%u size=%ux%u resource_type=%u\n", static_cast<unsigned>(fmt),
-			     static_cast<unsigned>(dfmt), static_cast<unsigned>(nfmt), static_cast<unsigned>(width), static_cast<unsigned>(height),
-			     static_cast<unsigned>(resource_type));
-		}
-	}
-
-	vk_obj->SetNativeExtent(width, height);
-	vk_obj->format                 = image_info.format;
-	vk_obj->astc10x5_cpu_fallback = astc10x5_cpu_fallback;
-	vk_obj->image                  = nullptr;
-	vk_obj->layout                 = image_info.initialLayout;
-
-	for (auto& view: vk_obj->image_view)
-	{
-		view = nullptr;
-	}
-
-	vkCreateImage(ctx->device, &image_info, nullptr, &vk_obj->image);
-
-	// SKIPPED: vk_obj->image == nullptr
-	if (vk_obj->image == nullptr) { printf("WARNING: skipped check: vk_obj->image == nullptr\n"); }
-
-	vkGetImageMemoryRequirements(ctx->device, vk_obj->image, &mem->requirements);
-
-	mem->property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-
-	bool allocated = VulkanAllocate(ctx, mem);
-
-	// SKIPPED: !allocated
-	if (!allocated) { printf("WARNING: skipped check: !allocated\n"); }
-
-	VulkanBindImageMemory(ctx, vk_obj, mem);
-
-	vk_obj->memory = *mem;
-
+	TextureImageViewConfiguration view_config {};
+	auto*                         vk_obj = create_texture_image(ctx, params, mem, &view_config);
 	update2_func(ctx, buffer, params, vk_obj, scenario, objects);
-
-	VkImageViewCreateInfo create_info {};
-	create_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create_info.pNext                           = nullptr;
-	create_info.flags                           = 0;
-	create_info.image                           = vk_obj->image;
-	create_info.viewType                        = (three_dimensional ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D);
-	create_info.format                          = vk_obj->format;
-	create_info.components                      = components;
-	create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create_info.subresourceRange.baseArrayLayer = 0;
-	create_info.subresourceRange.baseMipLevel   = base_level;
-	create_info.subresourceRange.layerCount     = 1;
-	create_info.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
-
-	const int view_index = (three_dimensional ? VulkanImage::VIEW_3D : VulkanImage::VIEW_DEFAULT);
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[view_index]);
-	// SKIPPED: vk_obj->image_view[view_index] == nullptr
-	if (vk_obj->image_view[view_index] == nullptr) { printf("WARNING: skipped check: vk_obj->image_view[view_index] == nullptr\n"); }
-	if (!three_dimensional)
-	{
-		create_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-		vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]);
-		// SKIPPED: vk_obj->image_view[VulkanImage::VIEW_ARRAY] == nullptr
-		if (vk_obj->image_view[VulkanImage::VIEW_ARRAY] == nullptr) { printf("WARNING: skipped check: vk_obj->image_view[VulkanImage::VIEW_ARRAY] == nullptr\n"); }
-	}
-
+	create_texture_image_views(ctx, vk_obj, view_config);
 	return vk_obj;
 }
 
@@ -1487,8 +1179,7 @@ bool TextureObject::Equal(const uint64_t* other) const
 	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && params[PARAM_LEVELS] == other[PARAM_LEVELS] &&
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
 	        params[PARAM_SWIZZLE] == other[PARAM_SWIZZLE] && params[PARAM_FORCE_DEGAMMA] == other[PARAM_FORCE_DEGAMMA] &&
-	        params[PARAM_SKIP_GUEST_UPLOAD] == other[PARAM_SKIP_GUEST_UPLOAD] &&
-	        params[PARAM_RESOURCE_INFO] == other[PARAM_RESOURCE_INFO]);
+	        params[PARAM_SKIP_GUEST_UPLOAD] == other[PARAM_SKIP_GUEST_UPLOAD] && params[PARAM_RESOURCE_INFO] == other[PARAM_RESOURCE_INFO]);
 }
 
 GpuObject::create_func_t TextureObject::GetCreateFunc() const

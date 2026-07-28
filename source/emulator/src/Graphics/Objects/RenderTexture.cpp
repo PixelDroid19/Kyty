@@ -5,6 +5,7 @@
 
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
 
@@ -36,47 +37,7 @@ static void create_render_texture_image_views(GraphicContext* ctx, RenderTexture
 {
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(vk_obj == nullptr);
-
-	VkImageViewCreateInfo create_info {};
-	create_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create_info.pNext                           = nullptr;
-	create_info.flags                           = 0;
-	create_info.image                           = vk_obj->image;
-	create_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-	create_info.format                          = vk_obj->format;
-	create_info.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-	create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create_info.subresourceRange.baseArrayLayer = 0;
-	create_info.subresourceRange.baseMipLevel   = 0;
-	create_info.subresourceRange.layerCount     = 1;
-	create_info.subresourceRange.levelCount     = 1;
-
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]);
-	create_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]);
-	create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-
-	create_info.components.r = VK_COMPONENT_SWIZZLE_B;
-	create_info.components.g = VK_COMPONENT_SWIZZLE_G;
-	create_info.components.b = VK_COMPONENT_SWIZZLE_R;
-	create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_BGRA]);
-
-	create_info.components.r = VK_COMPONENT_SWIZZLE_A;
-	create_info.components.g = VK_COMPONENT_SWIZZLE_B;
-	create_info.components.b = VK_COMPONENT_SWIZZLE_G;
-	create_info.components.a = VK_COMPONENT_SWIZZLE_R;
-
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ABGR]);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_ARRAY] == nullptr);
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_BGRA] == nullptr);
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_ABGR] == nullptr);
+	EXIT_NOT_IMPLEMENTED(!VulkanCreateStandardColorImageViews(ctx, vk_obj));
 }
 
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
@@ -215,82 +176,63 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	}
 }
 
+static VkFormat resolve_render_texture_format(uint64_t format)
+{
+	switch (static_cast<RenderTextureFormat>(format))
+	{
+		case RenderTextureFormat::R8Unorm: return VK_FORMAT_R8_UNORM;
+		case RenderTextureFormat::R8G8B8A8Unorm: return VK_FORMAT_R8G8B8A8_UNORM;
+		case RenderTextureFormat::R8G8B8A8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
+		case RenderTextureFormat::B8G8R8A8Unorm: return VK_FORMAT_B8G8R8A8_UNORM;
+		case RenderTextureFormat::B8G8R8A8Srgb: return VK_FORMAT_B8G8R8A8_SRGB;
+		case RenderTextureFormat::R16G16B16A16Sfloat: return VK_FORMAT_R16G16B16A16_SFLOAT;
+		case RenderTextureFormat::Unknown: break;
+	}
+	return VK_FORMAT_UNDEFINED;
+}
+
+static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx, const uint64_t* params, VulkanMemory* mem,
+                                                             const uint64_t* guest_size)
+{
+	EXIT_IF(ctx == nullptr || params == nullptr || mem == nullptr);
+
+	const auto width     = params[RenderTextureObject::PARAM_WIDTH];
+	const auto height    = params[RenderTextureObject::PARAM_HEIGHT];
+	const auto vk_format = resolve_render_texture_format(params[RenderTextureObject::PARAM_FORMAT]);
+	EXIT_NOT_IMPLEMENTED(vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0);
+
+	auto* vk_obj = new RenderTextureVulkanImage;
+	vk_obj->SetNativeExtent(width, height);
+	vk_obj->format = vk_format;
+	vk_obj->image  = nullptr;
+	if (guest_size != nullptr)
+	{
+		vk_obj->guest_size = *guest_size;
+	}
+	for (auto& view: vk_obj->image_view)
+	{
+		view = nullptr;
+	}
+
+	VulkanImageDescriptor image_descriptor {};
+	image_descriptor.extent = {vk_obj->extent.width, vk_obj->extent.height, 1};
+	image_descriptor.format = vk_obj->format;
+	image_descriptor.usage  = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+	                                                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+	const auto image_info   = VulkanBuildImageCreateInfo(image_descriptor);
+	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem));
+	return vk_obj;
+}
+
 static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
                          VulkanMemory* mem)
 {
 	KYTY_PROFILER_BLOCK("RenderTextureObject::Create");
 
 	EXIT_IF(vaddr_num != 1 || size == nullptr || vaddr == nullptr);
-	EXIT_IF(mem == nullptr);
-	EXIT_IF(ctx == nullptr);
-
-	auto pixel_format = params[RenderTextureObject::PARAM_FORMAT];
-	auto width        = params[RenderTextureObject::PARAM_WIDTH];
-	auto height       = params[RenderTextureObject::PARAM_HEIGHT];
-
-	VkFormat vk_format = VK_FORMAT_UNDEFINED;
-
-	switch (pixel_format)
-	{
-		case static_cast<uint64_t>(RenderTextureFormat::R8Unorm): vk_format = VK_FORMAT_R8_UNORM; break;
-		case static_cast<uint64_t>(RenderTextureFormat::R8G8B8A8Unorm): vk_format = VK_FORMAT_R8G8B8A8_UNORM; break;
-		case static_cast<uint64_t>(RenderTextureFormat::R8G8B8A8Srgb): vk_format = VK_FORMAT_R8G8B8A8_SRGB; break;
-		case static_cast<uint64_t>(RenderTextureFormat::B8G8R8A8Unorm): vk_format = VK_FORMAT_B8G8R8A8_UNORM; break;
-		case static_cast<uint64_t>(RenderTextureFormat::B8G8R8A8Srgb): vk_format = VK_FORMAT_B8G8R8A8_SRGB; break;
-		case static_cast<uint64_t>(RenderTextureFormat::R16G16B16A16Sfloat): vk_format = VK_FORMAT_R16G16B16A16_SFLOAT; break;
-		default: EXIT("unknown format: %" PRIu64 "\n", pixel_format);
-	}
-
-	EXIT_NOT_IMPLEMENTED(width == 0);
-	EXIT_NOT_IMPLEMENTED(height == 0);
-
-	auto* vk_obj = new RenderTextureVulkanImage;
-
-	vk_obj->SetNativeExtent(width, height);
-	vk_obj->format        = vk_format;
-	vk_obj->image         = nullptr;
-	vk_obj->guest_size    = *size;
-
-	for (auto& view: vk_obj->image_view)
-	{
-		view = nullptr;
-	}
-
-	VkImageCreateInfo image_info {};
-	image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	image_info.pNext         = nullptr;
-	image_info.flags         = 0;
-	image_info.imageType     = VK_IMAGE_TYPE_2D;
-	image_info.extent.width  = vk_obj->extent.width;
-	image_info.extent.height = vk_obj->extent.height;
-	image_info.extent.depth  = 1;
-	image_info.mipLevels     = 1;
-	image_info.arrayLayers   = 1;
-	image_info.format        = vk_obj->format;
-	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-	image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	image_info.usage         = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) |
-	                   static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_TRANSFER_SRC_BIT) |
-	                   static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_TRANSFER_DST_BIT) |
-	                   static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_SAMPLED_BIT);
-	image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	image_info.samples     = VK_SAMPLE_COUNT_1_BIT;
-
-	vkCreateImage(ctx->device, &image_info, nullptr, &vk_obj->image);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image == nullptr);
-
-	vkGetImageMemoryRequirements(ctx->device, vk_obj->image, &mem->requirements);
-
-	mem->property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-
-	bool allocated = VulkanAllocate(ctx, mem);
-
-	EXIT_NOT_IMPLEMENTED(!allocated);
-
-	VulkanBindImageMemory(ctx, vk_obj, mem);
-
-	vk_obj->memory = *mem;
+	auto*      vk_obj = create_render_texture_image(ctx, params, mem, size);
+	const auto width  = params[RenderTextureObject::PARAM_WIDTH];
+	const auto height = params[RenderTextureObject::PARAM_HEIGHT];
 
 	printf("RenderTextureObject::Create()\n");
 	printf("\t mem->requirements.size = %" PRIu64 "\n", mem->requirements.size);
@@ -313,76 +255,9 @@ static void* create2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint
 	KYTY_PROFILER_BLOCK("RenderTextureObject::CreateFromObjects");
 
 	EXIT_IF(objects.IsEmpty());
-	EXIT_IF(mem == nullptr);
-	EXIT_IF(ctx == nullptr);
-
-	auto pixel_format = params[RenderTextureObject::PARAM_FORMAT];
-	auto width        = params[RenderTextureObject::PARAM_WIDTH];
-	auto height       = params[RenderTextureObject::PARAM_HEIGHT];
-
-	VkFormat vk_format = VK_FORMAT_UNDEFINED;
-
-	switch (pixel_format)
-	{
-		case static_cast<uint64_t>(RenderTextureFormat::R8Unorm): vk_format = VK_FORMAT_R8_UNORM; break;
-		case static_cast<uint64_t>(RenderTextureFormat::R8G8B8A8Unorm): vk_format = VK_FORMAT_R8G8B8A8_UNORM; break;
-		case static_cast<uint64_t>(RenderTextureFormat::R8G8B8A8Srgb): vk_format = VK_FORMAT_R8G8B8A8_SRGB; break;
-		case static_cast<uint64_t>(RenderTextureFormat::B8G8R8A8Unorm): vk_format = VK_FORMAT_B8G8R8A8_UNORM; break;
-		case static_cast<uint64_t>(RenderTextureFormat::B8G8R8A8Srgb): vk_format = VK_FORMAT_B8G8R8A8_SRGB; break;
-		case static_cast<uint64_t>(RenderTextureFormat::R16G16B16A16Sfloat): vk_format = VK_FORMAT_R16G16B16A16_SFLOAT; break;
-		default: EXIT("unknown format: %" PRIu64 "\n", pixel_format);
-	}
-
-	EXIT_NOT_IMPLEMENTED(width == 0);
-	EXIT_NOT_IMPLEMENTED(height == 0);
-
-	auto* vk_obj = new RenderTextureVulkanImage;
-
-	vk_obj->SetNativeExtent(width, height);
-	vk_obj->format        = vk_format;
-	vk_obj->image         = nullptr;
-	// CreateFromObjects has no guest allocation size; Prefer falls back to extent area.
-
-	for (auto& view: vk_obj->image_view)
-	{
-		view = nullptr;
-	}
-
-	VkImageCreateInfo image_info {};
-	image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	image_info.pNext         = nullptr;
-	image_info.flags         = 0;
-	image_info.imageType     = VK_IMAGE_TYPE_2D;
-	image_info.extent.width  = vk_obj->extent.width;
-	image_info.extent.height = vk_obj->extent.height;
-	image_info.extent.depth  = 1;
-	image_info.mipLevels     = 1;
-	image_info.arrayLayers   = 1;
-	image_info.format        = vk_obj->format;
-	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-	image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	image_info.usage         = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) |
-	                   static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_TRANSFER_SRC_BIT) |
-	                   static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_TRANSFER_DST_BIT) |
-	                   static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_SAMPLED_BIT);
-	image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	image_info.samples     = VK_SAMPLE_COUNT_1_BIT;
-
-	vkCreateImage(ctx->device, &image_info, nullptr, &vk_obj->image);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image == nullptr);
-
-	vkGetImageMemoryRequirements(ctx->device, vk_obj->image, &mem->requirements);
-
-	mem->property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-
-	bool allocated = VulkanAllocate(ctx, mem);
-
-	EXIT_NOT_IMPLEMENTED(!allocated);
-
-	VulkanBindImageMemory(ctx, vk_obj, mem);
-
-	vk_obj->memory = *mem;
+	auto*      vk_obj = create_render_texture_image(ctx, params, mem, nullptr);
+	const auto width  = params[RenderTextureObject::PARAM_WIDTH];
+	const auto height = params[RenderTextureObject::PARAM_HEIGHT];
 
 	printf("RenderTextureObject::CreateFromObjects()\n");
 	printf("\t mem->requirements.size = %" PRIu64 "\n", mem->requirements.size);
@@ -427,8 +302,8 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 	delete vk_obj;
 }
 
-static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr,
-                                     const uint64_t* size, int vaddr_num)
+static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size,
+                                     int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("RenderTextureObject::write_back");
 
@@ -457,8 +332,7 @@ bool RenderTextureObject::Equal(const uint64_t* other) const
 {
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_WIDTH] == other[PARAM_WIDTH] &&
 	        params[PARAM_HEIGHT] == other[PARAM_HEIGHT] && params[PARAM_TILED] == other[PARAM_TILED] &&
-	        params[PARAM_PITCH] == other[PARAM_PITCH] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
-	        params[PARAM_WRITE_BACK] == other[PARAM_WRITE_BACK]);
+	        params[PARAM_PITCH] == other[PARAM_PITCH] && params[PARAM_WRITE_BACK] == other[PARAM_WRITE_BACK]);
 }
 
 GpuObject::create_func_t RenderTextureObject::GetCreateFunc() const

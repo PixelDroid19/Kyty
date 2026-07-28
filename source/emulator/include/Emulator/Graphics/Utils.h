@@ -73,13 +73,11 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 // A BC3 sample can be produced through a writable R32G32B32A32_UINT image:
 // one 128-bit storage texel is exactly one 4x4 BC3 block. Vulkan image copies
 // scale the destination extent according to the two formats' block extents.
-[[nodiscard]] inline bool Gen5BlockCompressedStorageCopyExtent(uint32_t sample_ufmt, uint32_t sample_width,
-                                                               uint32_t sample_height, VkFormat storage_format,
-                                                               uint32_t storage_width, uint32_t storage_height,
+[[nodiscard]] inline bool Gen5BlockCompressedStorageCopyExtent(uint32_t sample_ufmt, uint32_t sample_width, uint32_t sample_height,
+                                                               VkFormat storage_format, uint32_t storage_width, uint32_t storage_height,
                                                                uint32_t* copy_width, uint32_t* copy_height)
 {
-	if (copy_width == nullptr || copy_height == nullptr || sample_ufmt != 173u ||
-	    storage_format != VK_FORMAT_R32G32B32A32_UINT)
+	if (copy_width == nullptr || copy_height == nullptr || sample_ufmt != 173u || storage_format != VK_FORMAT_R32G32B32A32_UINT)
 	{
 		return false;
 	}
@@ -107,19 +105,17 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 // formats[i]/extents_w[i]/extents_h[i] describe candidate i of candidate_count
 // (capped at 16). On success, out_indices[0..out_count) are candidate indices
 // in preference order; out_count==0 && !reject means "use full unfiltered list".
-[[nodiscard]] inline bool Gen5PickSampleSurfaceAliases(uint32_t sample_ufmt, uint32_t sample_width,
-                                                       uint32_t sample_height, size_t candidate_count,
-                                                       const VkFormat* formats, const uint32_t* extents_w,
-                                                       const uint32_t* extents_h, int* out_indices,
-                                                       size_t* out_count, bool* reject)
+[[nodiscard]] inline bool Gen5PickSampleSurfaceAliases(uint32_t sample_ufmt, uint32_t sample_width, uint32_t sample_height,
+                                                       size_t candidate_count, const VkFormat* formats, const uint32_t* extents_w,
+                                                       const uint32_t* extents_h, int* out_indices, size_t* out_count, bool* reject)
 {
-	if (formats == nullptr || extents_w == nullptr || extents_h == nullptr || out_indices == nullptr ||
-	    out_count == nullptr || reject == nullptr)
+	if (formats == nullptr || extents_w == nullptr || extents_h == nullptr || out_indices == nullptr || out_count == nullptr ||
+	    reject == nullptr)
 	{
 		return false;
 	}
-	*out_count = 0;
-	*reject    = false;
+	*out_count                = 0;
+	*reject                   = false;
 	int          exact_ok[16] = {};
 	size_t       exact_n      = 0;
 	const size_t n            = candidate_count < 16 ? candidate_count : 16;
@@ -167,8 +163,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 // always wrong even when FindRenderTexture misses on the first bind. BC1 (ufmt
 // 133) package textures may still detile from guest when uncovered.
 // Tile 9 (kStandard64KB) remains package-RGBA8 when uncovered.
-[[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, uint32_t ufmt,
-                                                        bool live_color_surface_covers)
+[[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, uint32_t ufmt, bool live_color_surface_covers)
 {
 	if (tile == 0u)
 	{
@@ -259,7 +254,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 		return false;
 	}
 
-	const size_t pixel_count     = size / 4;
+	const size_t pixel_count    = size / 4;
 	const size_t required_count = std::max<size_t>(1, pixel_count / 50);
 	size_t       visible_count  = 0;
 	size_t       varied_count   = 0;
@@ -646,13 +641,12 @@ struct ColorAttachmentLoadOps
 	// Within-frame light draws stay COLOR_ATTACHMENT_OPTIMAL and still LOAD.
 	// BeginRenderPass barriers non-COLOR layouts to COLOR before vkCmdBeginRenderPass,
 	// so SHADER_READ rebinds use COLOR as the render-pass initial layout.
-	const bool clear_on_bind =
-	    tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED || tracked_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	const bool clear_on_bind = tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED || tracked_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	if (clear_on_bind)
 	{
-		ops.load_op        = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		ops.initial_layout = (tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_IMAGE_LAYOUT_UNDEFINED
-		                                                                  : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		ops.load_op = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		ops.initial_layout =
+		    (tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		// Known Mesa/RADV packings decode WORD=0 to transparent black (A=0). Inventing
 		// opaque A=1 on RGBA8 left sprite/GBuffer intermediates cleared opaque-black,
 		// which then composite as black quads around alpha sprites (Prisoners' Quarters).
@@ -680,7 +674,7 @@ struct BufferImageCopy
 	uint32_t dst_level;
 	uint32_t width;
 	uint32_t height;
-	uint32_t depth = 1;
+	uint32_t depth           = 1;
 	uint32_t dst_array_layer = 0;
 	int      dst_x;
 	int      dst_y;
@@ -714,6 +708,10 @@ void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, V
 void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image, uint64_t src_layout);
 // Opt-in RGBA8 BMP dump for RT vs VideoOut localization (scratch paths only).
 // Returns false if skipped (wrong format/size, already dumped, or env unset).
+// Write tightly or strided 32-bit rows as a top-down BMP. This is the only BMP
+// encoder used by graphics diagnostics; callers decide whether R/B must swap.
+bool UtilWriteRgba8Bmp(const char* path, const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t row_pitch_pixels,
+                       bool swap_red_blue = false);
 bool UtilDumpVulkanImageRgba8Bmp(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag);
 void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t size);
 void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image);

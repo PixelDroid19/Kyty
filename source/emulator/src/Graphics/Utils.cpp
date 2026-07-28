@@ -71,13 +71,11 @@ static void set_image_layout(VkCommandBuffer buffer, VulkanImage* dst_image, uin
 			break;
 		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
 			image_memory_barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-			src_stages                         = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-													   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			src_stages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 			break;
 		case VK_IMAGE_LAYOUT_GENERAL:
 			image_memory_barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-			src_stages                         = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-													   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			src_stages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 			break;
 		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
 			image_memory_barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
@@ -86,7 +84,7 @@ static void set_image_layout(VkCommandBuffer buffer, VulkanImage* dst_image, uin
 		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
 			image_memory_barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
 			src_stages                         = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
-													   VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			                                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
 			break;
 		default:
 			image_memory_barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -106,13 +104,13 @@ static void set_image_layout(VkCommandBuffer buffer, VulkanImage* dst_image, uin
 			break;
 		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
 			image_memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-			dest_stages                        = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-													   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			dest_stages =
+			    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 			break;
 		case VK_IMAGE_LAYOUT_GENERAL:
 			image_memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-			dest_stages                        = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-													   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			dest_stages =
+			    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 			break;
 		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
 			image_memory_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -125,7 +123,7 @@ static void set_image_layout(VkCommandBuffer buffer, VulkanImage* dst_image, uin
 		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
 			image_memory_barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
 			dest_stages                        = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
-													   VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			                                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
 			break;
 		default:
 			image_memory_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -228,8 +226,7 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanIm
 		index++;
 	}
 
-	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
-	                 UtilGetImageUploadSourceLayout(dst_image),
+	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 	vkCmdCopyBufferToImage(vk_buffer, src_buffer->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, index, region);
@@ -247,8 +244,7 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 
 	EXIT_NOT_IMPLEMENTED(regions.Size() >= 16);
 
-	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
-	                 UtilGetImageUploadSourceLayout(dst_image),
+	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 	for (const auto& r: regions)
@@ -305,7 +301,7 @@ void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchai
 		set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
 		                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-		VkClearColorValue clear_color {{0.0f, 0.0f, 0.0f, 1.0f}};
+		VkClearColorValue       clear_color {{0.0f, 0.0f, 0.0f, 1.0f}};
 		VkImageSubresourceRange clear_range {};
 		clear_range.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
 		clear_range.baseMipLevel   = 0;
@@ -458,14 +454,76 @@ void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t
 	VulkanDeleteBuffer(ctx, &staging_buffer);
 }
 
+bool UtilWriteRgba8Bmp(const char* path, const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t row_pitch_pixels,
+                       bool swap_red_blue)
+{
+	if (path == nullptr || path[0] == '\0' || pixels == nullptr || width == 0 || height == 0 || row_pitch_pixels < width || width > 8192 ||
+	    height > 8192)
+	{
+		return false;
+	}
+
+	const uint64_t row_bytes64 = static_cast<uint64_t>(width) * 4u;
+	const uint64_t image_size  = row_bytes64 * height;
+	if (row_bytes64 > UINT32_MAX || image_size > UINT32_MAX - 54u)
+	{
+		return false;
+	}
+	const uint32_t row_bytes = static_cast<uint32_t>(row_bytes64);
+	const uint32_t dib       = 40u;
+	const uint32_t offset    = 14u + dib;
+	const uint32_t file_size = offset + static_cast<uint32_t>(image_size);
+
+	FILE* file = std::fopen(path, "wb");
+	if (file == nullptr)
+	{
+		return false;
+	}
+
+	uint8_t header[54] {};
+	header[0] = 'B';
+	header[1] = 'M';
+	std::memcpy(header + 2, &file_size, 4);
+	std::memcpy(header + 10, &offset, 4);
+	std::memcpy(header + 14, &dib, 4);
+	const int32_t  signed_width   = static_cast<int32_t>(width);
+	const int32_t  signed_height  = -static_cast<int32_t>(height);
+	const uint16_t planes         = 1;
+	const uint16_t bits_per_pixel = 32;
+	std::memcpy(header + 18, &signed_width, 4);
+	std::memcpy(header + 22, &signed_height, 4);
+	std::memcpy(header + 26, &planes, 2);
+	std::memcpy(header + 28, &bits_per_pixel, 2);
+
+	bool written = std::fwrite(header, 1, sizeof(header), file) == sizeof(header);
+	for (uint32_t y = 0; y < height && written; y++)
+	{
+		const uint8_t* row = pixels + static_cast<uint64_t>(y) * row_pitch_pixels * 4u;
+		if (!swap_red_blue)
+		{
+			written = std::fwrite(row, 1, row_bytes, file) == row_bytes;
+		} else
+		{
+			for (uint32_t x = 0; x < width && written; x++)
+			{
+				const uint8_t* pixel     = row + x * 4u;
+				const uint8_t  output[4] = {pixel[2], pixel[1], pixel[0], pixel[3]};
+				written                  = std::fwrite(output, 1, sizeof(output), file) == sizeof(output);
+			}
+		}
+	}
+	written = std::fclose(file) == 0 && written;
+	return written;
+}
+
 bool UtilDumpVulkanImageRgba8Bmp(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag)
 {
 	if (ctx == nullptr || image == nullptr || image->image == nullptr || path_prefix == nullptr || path_prefix[0] == '\0')
 	{
 		return false;
 	}
-	if (image->format != VK_FORMAT_R8G8B8A8_SRGB && image->format != VK_FORMAT_R8G8B8A8_UNORM &&
-	    image->format != VK_FORMAT_B8G8R8A8_SRGB && image->format != VK_FORMAT_B8G8R8A8_UNORM)
+	if (image->format != VK_FORMAT_R8G8B8A8_SRGB && image->format != VK_FORMAT_R8G8B8A8_UNORM && image->format != VK_FORMAT_B8G8R8A8_SRGB &&
+	    image->format != VK_FORMAT_B8G8R8A8_UNORM)
 	{
 		return false;
 	}
@@ -477,8 +535,7 @@ bool UtilDumpVulkanImageRgba8Bmp(GraphicContext* ctx, VulkanImage* image, const 
 	}
 	static std::set<std::string> dumped;
 	char                         key_buf[320];
-	std::snprintf(key_buf, sizeof(key_buf), "%s|%llu|%ux%u", path_prefix,
-	              static_cast<unsigned long long>(image->memory.unique_id), w, h);
+	std::snprintf(key_buf, sizeof(key_buf), "%s|%llu|%ux%u", path_prefix, static_cast<unsigned long long>(image->memory.unique_id), w, h);
 	if (!dumped.insert(key_buf).second || dumped.size() > 64u)
 	{
 		return false;
@@ -492,56 +549,11 @@ bool UtilDumpVulkanImageRgba8Bmp(GraphicContext* ctx, VulkanImage* image, const 
 	std::snprintf(path, sizeof(path), "%s-%s-%ux%u-id%llu.bmp", path_prefix, (tag != nullptr ? tag : "img"), w, h,
 	              static_cast<unsigned long long>(image->memory.unique_id));
 
-	FILE* f = std::fopen(path, "wb");
-	if (f == nullptr)
+	const bool swap_red_blue = (image->format == VK_FORMAT_B8G8R8A8_SRGB || image->format == VK_FORMAT_B8G8R8A8_UNORM);
+	if (!UtilWriteRgba8Bmp(path, pixels.data(), w, h, w, swap_red_blue))
 	{
 		return false;
 	}
-	const uint32_t row_bytes = w * 4u;
-	const uint32_t pad       = (4u - (row_bytes % 4u)) % 4u;
-	const uint32_t dib       = 40u;
-	const uint32_t off       = 14u + dib;
-	const uint32_t size_img  = (row_bytes + pad) * h;
-	const uint32_t file_size = off + size_img;
-	uint8_t        hdr[54] {};
-	hdr[0] = 'B';
-	hdr[1] = 'M';
-	std::memcpy(hdr + 2, &file_size, 4);
-	std::memcpy(hdr + 10, &off, 4);
-	std::memcpy(hdr + 14, &dib, 4);
-	int32_t  wi     = static_cast<int32_t>(w);
-	int32_t  hi     = -static_cast<int32_t>(h);
-	uint16_t planes = 1;
-	uint16_t bpp    = 32;
-	std::memcpy(hdr + 18, &wi, 4);
-	std::memcpy(hdr + 22, &hi, 4);
-	std::memcpy(hdr + 26, &planes, 2);
-	std::memcpy(hdr + 28, &bpp, 2);
-	std::fwrite(hdr, 1, 54, f);
-	std::vector<uint8_t> zero(pad, 0);
-	const bool           swap_rb =
-	    (image->format == VK_FORMAT_B8G8R8A8_SRGB || image->format == VK_FORMAT_B8G8R8A8_UNORM);
-	for (uint32_t y = 0; y < h; y++)
-	{
-		const uint8_t* row = pixels.data() + static_cast<uint64_t>(y) * row_bytes;
-		if (!swap_rb)
-		{
-			std::fwrite(row, 1, row_bytes, f);
-		} else
-		{
-			for (uint32_t x = 0; x < w; x++)
-			{
-				const uint8_t* px     = row + x * 4u;
-				const uint8_t  out[4] = {px[2], px[1], px[0], px[3]};
-				std::fwrite(out, 1, 4, f);
-			}
-		}
-		if (pad != 0)
-		{
-			std::fwrite(zero.data(), 1, pad, f);
-		}
-	}
-	std::fclose(f);
 	std::fprintf(stderr, "KYTY_DUMP_VK_IMAGE wrote %s layout=%u fmt=%d\n", path, static_cast<unsigned>(image->layout),
 	             static_cast<int>(image->format));
 	return true;

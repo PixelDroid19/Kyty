@@ -7,14 +7,9 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Utils.h"
 
-#include <vulkan/vulkan_core.h>
-
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
-
-VkFormat TextureResolveSampledVkFormat(uint8_t dfmt, uint8_t nfmt, uint16_t fmt, bool force_degamma = false);
-bool     TextureSupportsGen5SampledFormat(uint16_t fmt);
 
 class TextureObject: public GpuObject
 {

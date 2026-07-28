@@ -11,15 +11,15 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GpuDeferredDeletionQueue.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GpuMemoryMaterializationCache.h"
+#include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
-#include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
-#include "Emulator/Graphics/Window.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
-#include "Emulator/Graphics/GpuDirtyPageTracker.h"
+#include "Emulator/Graphics/Window.h"
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
@@ -36,7 +36,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-constexpr int VADDR_BLOCKS_MAX = 3;
+constexpr int VADDR_BLOCKS_MAX = GPU_MEMORY_RANGE_SET_MAX;
 
 using OverlapType = GpuMemoryOverlapType;
 
@@ -49,45 +49,6 @@ constexpr uint64_t ObjectsRelation(GpuMemoryObjectType b, OverlapType relation, 
 {
 	return static_cast<uint64_t>(a) * static_cast<uint64_t>(GpuMemoryObjectType::Max) * static_cast<uint64_t>(OverlapType::Max) +
 	       static_cast<uint64_t>(b) * static_cast<uint64_t>(OverlapType::Max) + static_cast<uint64_t>(relation);
-}
-
-static bool addr_in_block(uint64_t block_addr, uint64_t block_size, uint64_t addr)
-{
-	return addr >= block_addr && addr < block_addr + block_size;
-};
-
-static OverlapType GetOverlapType(uint64_t vaddr_a, uint64_t size_a, uint64_t vaddr_b, uint64_t size_b)
-{
-	// KYTY_PROFILER_FUNCTION();
-
-	EXIT_IF(size_a == 0 || size_b == 0);
-
-	if (vaddr_a == vaddr_b && size_a == size_b)
-	{
-		return OverlapType::Equals;
-	}
-
-	bool a_b  = addr_in_block(vaddr_a, size_a, vaddr_b);
-	bool a_lb = addr_in_block(vaddr_a, size_a, vaddr_b + size_b - 1);
-	bool b_a  = addr_in_block(vaddr_b, size_b, vaddr_a);
-	bool b_la = addr_in_block(vaddr_b, size_b, vaddr_a + size_a - 1);
-
-	if (a_b && a_lb)
-	{
-		return OverlapType::Contains;
-	}
-
-	if (b_a && b_la)
-	{
-		return OverlapType::IsContainedWithin;
-	}
-
-	if ((a_b && b_la) || (b_a && a_lb))
-	{
-		return OverlapType::Crosses;
-	}
-
-	return OverlapType::None;
 }
 
 class GpuMap1
@@ -237,7 +198,7 @@ public:
 
 private:
 	// This index only produces candidates; FindBlocks validates each range with
-	// GetOverlapType before accepting it. A 1 MiB bucket keeps that exact
+	// GpuMemoryClassifyRangeSets before accepting it. A 1 MiB bucket keeps that exact
 	// contract while avoiding thousands of 16 KiB probes for large descriptors.
 	static constexpr uint32_t PAGE_BITS = 20u;
 
@@ -260,10 +221,10 @@ public:
 	virtual ~GpuMemory() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(GpuMemory);
 
-	bool IsAllocated(uint64_t vaddr, uint64_t size);
+	bool                           IsAllocated(uint64_t vaddr, uint64_t size);
 	GpuMemoryRangeValidationStatus ValidateAllocatedRange(uint64_t vaddr, uint64_t size);
-	void SetAllocatedRange(uint64_t vaddr, uint64_t size);
-	void Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool unmap);
+	void                           SetAllocatedRange(uint64_t vaddr, uint64_t size);
+	void                           Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool unmap);
 
 	void* CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
 	                   int vaddr_num, const GpuObject& info);
@@ -272,7 +233,7 @@ public:
 
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first, const SubmissionId* submission = nullptr);
-	bool QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
+	bool                    QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
@@ -301,30 +262,30 @@ private:
 	struct ObjectInfo
 	{
 		GpuMemoryObject              object;
-		uint64_t                     params[GpuObject::PARAMS_MAX] = {};
-		uint64_t                     hash[VADDR_BLOCKS_MAX]        = {};
-		uint64_t                     cpu_update_time               = 0;
-		uint64_t                     gpu_update_time               = 0;
-		uint64_t                     submit_id                     = 0;
-		GpuObject::create_func_t     create_func                   = nullptr;
-		GpuObject::write_back_func_t write_back_func               = nullptr;
-		GpuObject::delete_func_t     delete_func                   = nullptr;
-		GpuObject::update_func_t     update_func                   = nullptr;
-		uint64_t                     use_last_frame                = 0;
-		uint64_t                     use_num                       = 0;
-		bool                         in_use                        = false;
-		bool                         read_only                     = false;
-		bool                         check_hash                    = false;
-		bool                         dirty_registered              = false;
+		uint64_t                     params[GpuObject::PARAMS_MAX]      = {};
+		uint64_t                     hash[VADDR_BLOCKS_MAX]             = {};
+		uint64_t                     cpu_update_time                    = 0;
+		uint64_t                     gpu_update_time                    = 0;
+		uint64_t                     submit_id                          = 0;
+		GpuObject::create_func_t     create_func                        = nullptr;
+		GpuObject::write_back_func_t write_back_func                    = nullptr;
+		GpuObject::delete_func_t     delete_func                        = nullptr;
+		GpuObject::update_func_t     update_func                        = nullptr;
+		uint64_t                     use_last_frame                     = 0;
+		uint64_t                     use_num                            = 0;
+		bool                         in_use                             = false;
+		bool                         read_only                          = false;
+		bool                         check_hash                         = false;
+		bool                         dirty_registered                   = false;
 		uint64_t                     dirty_generation[VADDR_BLOCKS_MAX] = {};
 		GpuSubmissionHighWater       submission_uses;
 		// Incarnation of the host Vulkan backing, not a content revision.
 		// In-place uploads retain it; an atomic COW swap advances it.
-		uint64_t                     backing_generation = 1;
+		uint64_t backing_generation = 1;
 		// Incarnation of this logical slot. Reusing a freed object id advances
 		// it so bounded acquisition caches cannot observe an ABA replacement.
-		uint64_t                     logical_generation = 1;
-		VulkanMemory                 mem;
+		uint64_t     logical_generation = 1;
+		VulkanMemory mem;
 	};
 
 	struct OverlappedBlock
@@ -368,12 +329,12 @@ private:
 
 	struct Heap
 	{
-		AllocatedRange range;
-		Vector<Object> objects;
-		uint64_t       objects_size  = 0;
-		int            first_free_id = -1;
-		GpuMap1*       objects_map1  = nullptr;
-		GpuMap2*       objects_map2  = nullptr;
+		AllocatedRange     range;
+		Vector<Object>     objects;
+		uint64_t           objects_size  = 0;
+		int                first_free_id = -1;
+		GpuMap1*           objects_map1  = nullptr;
+		GpuMap2*           objects_map2  = nullptr;
 		OverlapQueryCache* overlap_cache = nullptr;
 	};
 
@@ -387,19 +348,16 @@ private:
 	};
 
 	[[nodiscard]] Destructor Free(int heap_id, int object_id);
-	void                     RequireDetachable(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors,
-	                                           const char* operation,
-	                                           GpuMemoryObjectType incoming_type = GpuMemoryObjectType::Invalid);
-	void                     WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors,
-	                                               const SubmissionId* publishing_submission = nullptr);
-	void                     RecordUse(ObjectInfo* object, SubmissionId submission);
-	void                     RecordUse(ObjectInfo* object, CommandBuffer* buffer);
-	void                     ScheduleDestructors(GraphicContext* ctx, Vector<Destructor>* destructors);
-	void                     ScheduleDestructorsOutsideMutationLocks(GraphicContext* ctx, Vector<Destructor>* destructors);
-	void                     VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vector<Destructor>* destructors);
+	void RequireDetachable(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors, const char* operation,
+	                       GpuMemoryObjectType incoming_type = GpuMemoryObjectType::Invalid);
+	void WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors,
+	                           const SubmissionId* publishing_submission = nullptr);
+	void RecordUse(ObjectInfo* object, SubmissionId submission);
+	void RecordUse(ObjectInfo* object, CommandBuffer* buffer);
+	void ScheduleDestructors(GraphicContext* ctx, Vector<Destructor>* destructors);
+	void ScheduleDestructorsOutsideMutationLocks(GraphicContext* ctx, Vector<Destructor>* destructors);
+	void VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vector<Destructor>* destructors);
 
-	Vector<OverlappedBlock> FindBlocks_slow(int heap_id, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
-	                                        bool only_first = false);
 	Vector<OverlappedBlock> FindBlocks(int heap_id, const uint64_t* vaddr, const uint64_t* size, int vaddr_num, bool only_first = false);
 	bool  FindFast(int heap_id, const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool only_first,
 	               int* id);
@@ -428,7 +386,7 @@ private:
 
 	Vector<Heap> m_heaps;
 
-	uint64_t m_current_frame = 0;
+	uint64_t m_current_frame                      = 0;
 	uint32_t m_transient_creates_since_retirement = 0;
 
 	MaterializationCache m_materialization_cache;
@@ -627,10 +585,10 @@ void GpuMemory::SetAllocatedRange(uint64_t vaddr, uint64_t size)
 	Core::LockGuard lock(m_mutex);
 
 	Heap h;
-	h.range.vaddr  = vaddr;
-	h.range.size   = size;
-	h.objects_map1 = new GpuMap1;
-	h.objects_map2 = new GpuMap2;
+	h.range.vaddr   = vaddr;
+	h.range.size    = size;
+	h.objects_map1  = new GpuMap1;
+	h.objects_map2  = new GpuMap2;
 	h.overlap_cache = new OverlapQueryCache;
 
 	m_heaps.Add(h);
@@ -694,10 +652,9 @@ static uint64_t calc_hash(GpuMemoryObjectType type, const uint8_t* buf, uint64_t
 	{
 		return 0;
 	}
-	const auto start  = std::chrono::steady_clock::now();
-	const auto result = XXH3_64bits(buf, size);
-	const auto elapsed =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+	const auto start   = std::chrono::steady_clock::now();
+	const auto result  = XXH3_64bits(buf, size);
+	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
 	DebugStatsRecordGpuMemoryHash(GpuMemoryStatsTypeIndex(type), size, static_cast<uint64_t>(elapsed));
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::Hash, static_cast<uint64_t>(elapsed), size);
 	return result;
@@ -740,9 +697,9 @@ void GpuMemory::VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vec
 
 	if (o.object.obj == nullptr || o.create_func == nullptr || o.delete_func == nullptr)
 	{
-		EXIT("GpuMemory backing version unsupported for type=%s: object=%s create=%s delete=%s\n",
-		     Core::EnumName(o.object.type).C_Str(), o.object.obj != nullptr ? "set" : "null",
-		     o.create_func != nullptr ? "set" : "null", o.delete_func != nullptr ? "set" : "null");
+		EXIT("GpuMemory backing version unsupported for type=%s: object=%s create=%s delete=%s\n", Core::EnumName(o.object.type).C_Str(),
+		     o.object.obj != nullptr ? "set" : "null", o.create_func != nullptr ? "set" : "null",
+		     o.delete_func != nullptr ? "set" : "null");
 	}
 	EXIT_IF(o.write_back_func != nullptr && !o.read_only);
 
@@ -771,18 +728,16 @@ void GpuMemory::VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vec
 	// global GpuMemory mutex across that work.
 	m_mutex.Unlock();
 	VulkanMemory new_memory {};
-	const auto create_start = std::chrono::steady_clock::now();
-	void* const new_object  = create_func(ctx, params, vaddr, size, vaddr_num, &new_memory);
-	const auto create_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
-	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc,
-	                                               static_cast<uint64_t>(create_ns));
+	const auto   create_start = std::chrono::steady_clock::now();
+	void* const  new_object   = create_func(ctx, params, vaddr, size, vaddr_num, &new_memory);
+	const auto   create_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
+	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc, static_cast<uint64_t>(create_ns));
 	m_mutex.Lock();
 
-	auto& current_heap = m_heaps[heap_id];
-	auto& current      = current_heap.objects[obj_id];
-	const bool valid = !current.free && current.info.object.type == object_type && current.info.object.obj == old_object &&
-	                   current.info.backing_generation == old_generation;
+	auto&      current_heap = m_heaps[heap_id];
+	auto&      current      = current_heap.objects[obj_id];
+	const bool valid        = !current.free && current.info.object.type == object_type && current.info.object.obj == old_object &&
+	                          current.info.backing_generation == old_generation;
 	if (!valid || new_object == nullptr || new_object == old_object)
 	{
 		m_mutex.Unlock();
@@ -800,7 +755,7 @@ void GpuMemory::VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vec
 		     Core::EnumName(object_type).C_Str(), heap_id, obj_id, old_generation);
 	}
 
-	auto& current_info = current.info;
+	auto&      current_info = current.info;
 	Destructor retired;
 	retired.obj             = current_info.object.obj;
 	retired.delete_func     = current_info.delete_func;
@@ -833,8 +788,8 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 		uint64_t                hash[VADDR_BLOCKS_MAX] = {};
 		GpuDirtyReadObservation dirty_read[VADDR_BLOCKS_MAX] {};
 		bool                    hash_compared[VADDR_BLOCKS_MAX] = {};
-		bool                    hash_tracked[VADDR_BLOCKS_MAX] = {};
-		bool                    tracker_ready = o.check_hash && o.dirty_registered;
+		bool                    hash_tracked[VADDR_BLOCKS_MAX]  = {};
+		bool                    tracker_ready                   = o.check_hash && o.dirty_registered;
 
 		for (int vi = 0; vi < h.block.vaddr_num; vi++)
 		{
@@ -846,8 +801,7 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 				dirty_read[vi] = GpuDirtyPageTracker::Instance().BeginRead(h.block.vaddr[vi], h.block.size[vi]);
 				if (dirty_read[vi].tracked)
 				{
-					clean =
-					    !GpuDirtyPageTracker::Instance().ChangedSince(h.block.vaddr[vi], h.block.size[vi], o.dirty_generation[vi]);
+					clean = !GpuDirtyPageTracker::Instance().ChangedSince(h.block.vaddr[vi], h.block.size[vi], o.dirty_generation[vi]);
 				}
 			}
 			if (clean)
@@ -855,7 +809,7 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 				hash[vi] = o.hash[vi];
 			} else if (o.check_hash)
 			{
-				hash[vi] = calc_hash(o.object.type, reinterpret_cast<const uint8_t*>(h.block.vaddr[vi]), h.block.size[vi]);
+				hash[vi]          = calc_hash(o.object.type, reinterpret_cast<const uint8_t*>(h.block.vaddr[vi]), h.block.size[vi]);
 				hash_compared[vi] = true;
 				hash_tracked[vi]  = dirty_read[vi].tracked;
 			} else
@@ -928,24 +882,19 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			}
 		}
 
-		const bool pending_uses = !m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies());
+		const bool pending_uses       = !m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies());
 		const bool write_back_capable = o.write_back_func != nullptr && !o.read_only;
-		const auto mutation =
-		    GpuMemoryChooseMutationAction(need_update, surface_parent, pending_uses, write_back_capable);
+		const auto mutation           = GpuMemoryChooseMutationAction(need_update, surface_parent, pending_uses, write_back_capable);
 
 		if (mutation == GpuMemoryMutationAction::RejectWriteBackConflict)
 		{
 			const auto& dependencies = o.submission_uses.Dependencies();
-			const auto  pending = std::find_if(dependencies.begin(), dependencies.end(),
-			                                  [this](const auto& dependency)
-			                                  {
-				                                  return !m_deferred_deletions.AreDependenciesComplete({dependency});
-			                                  });
+			const auto  pending      = std::find_if(dependencies.begin(), dependencies.end(), [this](const auto& dependency)
+			                                        { return !m_deferred_deletions.AreDependenciesComplete({dependency}); });
 			EXIT_IF(pending == dependencies.end());
-			EXIT("GpuMemory cannot version an in-flight write-back backing: type=%s vaddr=0x%016" PRIx64
-			     " size=0x%016" PRIx64 " queue=%" PRIu32 " sequence=%" PRIu64 "\n",
-			     Core::EnumName(o.object.type).C_Str(), h.block.vaddr[0], h.block.size[0], pending->queue.Value(),
-			     pending->sequence);
+			EXIT("GpuMemory cannot version an in-flight write-back backing: type=%s vaddr=0x%016" PRIx64 " size=0x%016" PRIx64
+			     " queue=%" PRIu32 " sequence=%" PRIu64 "\n",
+			     Core::EnumName(o.object.type).C_Str(), h.block.vaddr[0], h.block.size[0], pending->queue.Value(), pending->sequence);
 		}
 		if (mutation == GpuMemoryMutationAction::VersionBacking)
 		{
@@ -956,8 +905,7 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			o.update_func(ctx, o.params, o.object.obj, h.block.vaddr, h.block.size, h.block.vaddr_num);
 			const auto update_ns =
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - update_start).count();
-			DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::UpdateFunc,
-			                                               static_cast<uint64_t>(update_ns));
+			DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::UpdateFunc, static_cast<uint64_t>(update_ns));
 		}
 
 		// VersionBacking may have released m_mutex, so reacquire the current
@@ -992,7 +940,7 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 	const OverlappedBlock* latest_block        = nullptr;
 	int                    reusable_index_id   = -1;
 	uint64_t               reusable_index_size = UINT64_MAX;
-	*covered_reuse                              = false;
+	*covered_reuse                             = false;
 
 	for (const auto& obj: others)
 	{
@@ -1008,10 +956,8 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 		}
 
 		if (vaddr_num == 1 && h.block.vaddr_num == 1 && h.scenario == GpuMemoryScenario::Common &&
-		    o.object.type == GpuMemoryObjectType::IndexBuffer && info.type == GpuMemoryObjectType::IndexBuffer &&
-		    info.Equal(o.params) &&
-		    GpuMemoryCanReuseIndexBacking(h.block.vaddr[0], h.block.size[0], vaddr[0], size[0]) &&
-		    h.block.size[0] < reusable_index_size)
+		    o.object.type == GpuMemoryObjectType::IndexBuffer && info.type == GpuMemoryObjectType::IndexBuffer && info.Equal(o.params) &&
+		    GpuMemoryCanReuseIndexBacking(h.block.vaddr[0], h.block.size[0], vaddr[0], size[0]) && h.block.size[0] < reusable_index_size)
 		{
 			reusable_index_id   = obj.object_id;
 			reusable_index_size = h.block.size[0];
@@ -1237,12 +1183,11 @@ void GpuMemory::ScheduleDestructors(GraphicContext* ctx, Vector<Destructor>* des
 	{
 		EXIT_IF(destructor.delete_func == nullptr || destructor.obj == nullptr);
 
-		auto delete_func = destructor.delete_func;
-		auto* object     = destructor.obj;
-		auto  memory     = destructor.mem;
-		const auto result = m_deferred_deletions.Enqueue(
-		    destructor.submission_uses.Dependencies(),
-		    [ctx, delete_func, object, memory]() mutable { delete_func(ctx, object, &memory); });
+		auto       delete_func = destructor.delete_func;
+		auto*      object      = destructor.obj;
+		auto       memory      = destructor.mem;
+		const auto result      = m_deferred_deletions.Enqueue(
+		    destructor.submission_uses.Dependencies(), [ctx, delete_func, object, memory]() mutable { delete_func(ctx, object, &memory); });
 		EXIT_NOT_IMPLEMENTED(result != GpuDeferredDeletionResult::Success);
 	}
 	destructors->Clear();
@@ -1285,29 +1230,28 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	{
 		requested_bytes = size[vi] > UINT64_MAX - requested_bytes ? UINT64_MAX : requested_bytes + size[vi];
 	}
-	DebugStatsGpuMemoryCreateTrace create_stats(GpuMemoryStatsTypeIndex(info.type), requested_bytes,
-	                                           static_cast<uint32_t>(vaddr_num));
-	const auto backing_lock_start = std::chrono::steady_clock::now();
-	Core::LockGuard backing_lock(m_backing_mutation_mutex);
-	const auto backing_lock_ns =
+	DebugStatsGpuMemoryCreateTrace create_stats(GpuMemoryStatsTypeIndex(info.type), requested_bytes, static_cast<uint32_t>(vaddr_num));
+	const auto                     backing_lock_start = std::chrono::steady_clock::now();
+	Core::LockGuard                backing_lock(m_backing_mutation_mutex);
+	const auto                     backing_lock_ns =
 	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - backing_lock_start).count();
 	create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::BackingLockWait, static_cast<uint64_t>(backing_lock_ns));
-	const auto registry_lock_start = std::chrono::steady_clock::now();
+	const auto      registry_lock_start = std::chrono::steady_clock::now();
 	Core::LockGuard lock(m_mutex);
-	const auto registry_lock_ns =
+	const auto      registry_lock_ns =
 	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - registry_lock_start).count();
 	create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::RegistryLockWait, static_cast<uint64_t>(registry_lock_ns));
 	const auto classification_start = std::chrono::steady_clock::now();
 	bool       classification_done  = false;
-	const auto finish_classification = [&](uint32_t candidates = 0, uint32_t relation_mask = 0, uint32_t reclaimed = 0,
-	                                      bool from_objects = false)
+	const auto finish_classification =
+	    [&](uint32_t candidates = 0, uint32_t relation_mask = 0, uint32_t reclaimed = 0, bool from_objects = false)
 	{
 		if (classification_done)
 		{
 			return;
 		}
-		const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - classification_start)
-		                         .count();
+		const auto elapsed =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - classification_start).count();
 		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::Classification, static_cast<uint64_t>(elapsed));
 		create_stats.SetClassification(candidates, relation_mask, reclaimed, from_objects);
 		classification_done = true;
@@ -1328,10 +1272,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		if (GetHeapId(cover_start, cover_size) < 0)
 		{
 			Heap h;
-			h.range.vaddr  = cover_start;
-			h.range.size   = cover_size;
-			h.objects_map1 = new GpuMap1;
-			h.objects_map2 = new GpuMap2;
+			h.range.vaddr   = cover_start;
+			h.range.size    = cover_size;
+			h.objects_map1  = new GpuMap1;
+			h.objects_map2  = new GpuMap2;
 			h.overlap_cache = new OverlapQueryCache;
 			m_heaps.Add(h);
 		}
@@ -1351,21 +1295,20 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	{
 		SubmissionId submission;
 		EXIT_NOT_IMPLEMENTED(!buffer->GetSubmissionId(&submission));
-		materialization_key = GpuMemoryMaterializationKey::Create(
-		    submit_id, submission.queue.Value(), submission.sequence, vaddr, size, vaddr_num,
-		    static_cast<uint32_t>(info.type), info.params, GpuObject::PARAMS_MAX, info.check_hash, info.read_only);
+		materialization_key = GpuMemoryMaterializationKey::Create(submit_id, submission.queue.Value(), submission.sequence, vaddr, size,
+		                                                          vaddr_num, static_cast<uint32_t>(info.type), info.params,
+		                                                          GpuObject::PARAMS_MAX, info.check_hash, info.read_only);
 
 		Materialization cached;
 		if (m_materialization_cache.Lookup(materialization_key, &cached) && cached.heap_id == heap_id && cached.object_id >= 0 &&
 		    static_cast<uint32_t>(cached.object_id) < heap.objects.Size())
 		{
-			auto& h = heap.objects[cached.object_id];
-			auto& o = h.info;
-			const bool same_callbacks =
-			    cached.create_func == info.GetCreateFunc() &&
-			    cached.create_from_objects_func == info.GetCreateFromObjectsFunc() &&
-			    cached.write_back_func == info.GetWriteBackFunc() && cached.delete_func == info.GetDeleteFunc() &&
-			    cached.update_func == info.GetUpdateFunc();
+			auto&      h              = heap.objects[cached.object_id];
+			auto&      o              = h.info;
+			const bool same_callbacks = cached.create_func == info.GetCreateFunc() &&
+			                            cached.create_from_objects_func == info.GetCreateFromObjectsFunc() &&
+			                            cached.write_back_func == info.GetWriteBackFunc() && cached.delete_func == info.GetDeleteFunc() &&
+			                            cached.update_func == info.GetUpdateFunc();
 			if (!h.free && h.scenario == GpuMemoryScenario::Common && o.logical_generation == cached.logical_generation &&
 			    o.object.type == info.type && o.submit_id == submit_id && o.in_use && o.check_hash == info.check_hash &&
 			    info.Equal(o.params) && same_callbacks)
@@ -1396,10 +1339,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		{
 			return;
 		}
-		m_materialization_cache.Store(
-		    materialization_key,
-		    Materialization {heap_id, object_id, o.logical_generation, info.GetCreateFunc(), info.GetCreateFromObjectsFunc(),
-		                     info.GetWriteBackFunc(), info.GetDeleteFunc(), info.GetUpdateFunc()});
+		m_materialization_cache.Store(materialization_key, Materialization {heap_id, object_id, o.logical_generation, info.GetCreateFunc(),
+		                                                                    info.GetCreateFromObjectsFunc(), info.GetWriteBackFunc(),
+		                                                                    info.GetDeleteFunc(), info.GetUpdateFunc()});
 	};
 
 	bool overlap             = false;
@@ -1442,7 +1384,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	if (!others.IsEmpty())
 	{
-		int existing_id = -1;
+		int  existing_id   = -1;
 		bool covered_reuse = false;
 		if (create_existing(others, info, heap_id, vaddr, size, vaddr_num, &existing_id, &covered_reuse))
 		{
@@ -1473,7 +1415,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			cache_materialization(existing_id);
 			ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
 			create_stats.Complete(covered_reuse ? DebugStatsGpuMemoryCreateOutcome::CoveredReuse
-			                                   : DebugStatsGpuMemoryCreateOutcome::ExactReuse);
+			                                    : DebugStatsGpuMemoryCreateOutcome::ExactReuse);
 			return result;
 		}
 
@@ -1500,8 +1442,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// when the parent holds a Vulkan image, copy from it instead of
 				// CPU-detiling empty GPU-owned guest memory.
 				overlap = true;
-				if (o.object.type == GpuMemoryObjectType::RenderTexture ||
-				    o.object.type == GpuMemoryObjectType::StorageTexture)
+				if (o.object.type == GpuMemoryObjectType::RenderTexture || o.object.type == GpuMemoryObjectType::StorageTexture)
 				{
 					create_from_objects = true;
 				}
@@ -1529,60 +1470,63 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				delete_all = true;
 			} else
-			switch (ObjectsRelation(o.object.type, obj.relation, info.type))
-			{
-				case ObjectsRelation(GpuMemoryObjectType::VideoOutBuffer, OverlapType::Equals, GpuMemoryObjectType::StorageBuffer):
-				// Observed Gen5 alias: Texture 0x100 created at the base of an
-				// active VertexBuffer 0x580 (relation Contains). Keep both views
-				// linked rather than deleting the heavily-used vertex buffer.
-				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::Texture):
-				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Equals, GpuMemoryObjectType::Texture):
+				switch (ObjectsRelation(o.object.type, obj.relation, info.type))
 				{
-					overlap = true;
-					break;
-				}
-				case ObjectsRelation(GpuMemoryObjectType::DepthStencilBuffer, OverlapType::Contains,
-				                     GpuMemoryObjectType::DepthStencilBuffer):
-				case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::Crosses, GpuMemoryObjectType::IndexBuffer):
-				case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::Contains, GpuMemoryObjectType::IndexBuffer):
-				case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::IndexBuffer):
-				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::VertexBuffer):
-				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::VertexBuffer):
-				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::VertexBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::VideoOutBuffer, OverlapType::Equals, GpuMemoryObjectType::StorageBuffer):
+					// Observed Gen5 alias: Texture 0x100 created at the base of an
+					// active VertexBuffer 0x580 (relation Contains). Keep both views
+					// linked rather than deleting the heavily-used vertex buffer.
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::Texture):
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Equals, GpuMemoryObjectType::Texture):
+					{
+						overlap = true;
+						break;
+					}
+					case ObjectsRelation(GpuMemoryObjectType::DepthStencilBuffer, OverlapType::Contains,
+					                     GpuMemoryObjectType::DepthStencilBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::Crosses, GpuMemoryObjectType::IndexBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::Contains, GpuMemoryObjectType::IndexBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::IsContainedWithin,
+					                     GpuMemoryObjectType::IndexBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::VertexBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::VertexBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin,
+					                     GpuMemoryObjectType::VertexBuffer):
 					// Gen5 alias observed when a storage view crosses an active vertex
 					// allocation. Keep both resource views linked so the storage access
 					// sees the same guest memory without reclaiming the vertex object.
 					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::StorageBuffer):
-					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::StorageBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin,
+					                     GpuMemoryObjectType::StorageBuffer):
 					// Existing VertexBuffer fully contains a new StorageBuffer view
 					// (relation Contains). Reclaim the vertex object so the storage
 					// view owns the range; multi-parent path links instead when a
 					// Texture alias coexists.
 					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::StorageBuffer):
-					// Large Texture superseding VertexBuffers that live inside its
-				// address range (observed 1 MiB texture over multiple VBs).
-				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
-				case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::Texture):
-				case ObjectsRelation(GpuMemoryObjectType::Texture, OverlapType::Crosses, GpuMemoryObjectType::Texture):
-				case ObjectsRelation(GpuMemoryObjectType::Texture, OverlapType::Contains, GpuMemoryObjectType::Texture):
-				case ObjectsRelation(GpuMemoryObjectType::Texture, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
-				{
-					delete_all = true;
-					break;
+						// Large Texture superseding VertexBuffers that live inside its
+					// address range (observed 1 MiB texture over multiple VBs).
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
+					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::Texture):
+					case ObjectsRelation(GpuMemoryObjectType::Texture, OverlapType::Crosses, GpuMemoryObjectType::Texture):
+					case ObjectsRelation(GpuMemoryObjectType::Texture, OverlapType::Contains, GpuMemoryObjectType::Texture):
+					case ObjectsRelation(GpuMemoryObjectType::Texture, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
+					{
+						delete_all = true;
+						break;
+					}
+					case ObjectsRelation(GpuMemoryObjectType::StorageTexture, OverlapType::Equals, GpuMemoryObjectType::Texture):
+					{
+						overlap             = true;
+						create_from_objects = true;
+						break;
+					}
+					default:
+					{
+						auto msg = String::FromPrintf("unknown relation: %s - %s - %s\n", Core::EnumName(o.object.type).C_Str(),
+						                              Core::EnumName(obj.relation).C_Str(), Core::EnumName(info.type).C_Str());
+						EXIT("%s\n", create_dbg_exit(msg, vaddr, size, vaddr_num, others, info.type).C_Str());
+					}
 				}
-				case ObjectsRelation(GpuMemoryObjectType::StorageTexture, OverlapType::Equals, GpuMemoryObjectType::Texture):
-				{
-					overlap             = true;
-					create_from_objects = true;
-					break;
-				}
-				default:
-				{
-					auto msg = String::FromPrintf("unknown relation: %s - %s - %s\n", Core::EnumName(o.object.type).C_Str(),
-					                              Core::EnumName(obj.relation).C_Str(), Core::EnumName(info.type).C_Str());
-					EXIT("%s\n", create_dbg_exit(msg, vaddr, size, vaddr_num, others, info.type).C_Str());
-				}
-			}
 		} else
 		{
 			// Multiple existing blocks. Gen5 constant/storage views often create a
@@ -1601,7 +1545,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					const auto& o = h.info;
 					if (o.object.type != GpuMemoryObjectType::StorageBuffer ||
 					    !GpuMemoryCanShareReadOnlyStorageViews(h.block.vaddr[0], h.block.size[0], o.read_only, vaddr[0], size[0],
-					                                          info.read_only))
+					                                           info.read_only))
 					{
 						multi_ro_storage_share = false;
 						break;
@@ -1641,12 +1585,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				{
 					const auto& h = heap.objects[obj.object_id];
 					EXIT_IF(h.free);
-					const auto& o = h.info;
-					const bool texture_alias =
-					    GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type);
-					const bool vertex_share = GpuMemoryAllowsVertexStorageShare(o.object.type, obj.relation, info.type);
-					const bool surface_share =
-					    GpuMemoryAllowsStorageSurfaceShare(o.object.type, obj.relation, info.type);
+					const auto& o             = h.info;
+					const bool  texture_alias = GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type);
+					const bool  vertex_share  = GpuMemoryAllowsVertexStorageShare(o.object.type, obj.relation, info.type);
+					const bool  surface_share = GpuMemoryAllowsStorageSurfaceShare(o.object.type, obj.relation, info.type);
 					if (!texture_alias && !vertex_share && !surface_share)
 					{
 						multi_mixed_storage_alias = false;
@@ -1680,7 +1622,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// VB Crosses → create_all_the_same rejects mixed relations/types.
 			// Also captured: Texture Contains + IndexBuffer Crosses (link IB).
 			Vector<int> vertex_reclaim_vertex_ids;
-			bool multi_vertex_mixed = (info.type == GpuMemoryObjectType::VertexBuffer && !others.IsEmpty());
+			bool        multi_vertex_mixed = (info.type == GpuMemoryObjectType::VertexBuffer && !others.IsEmpty());
 			if (multi_vertex_mixed)
 			{
 				for (const auto& obj: others)
@@ -1710,7 +1652,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// Captured: IndexBuffer IsContainedWithin (0xe4) + VertexBuffer
 			// Contains (0x100) a new IndexBuffer 0xfc at the same base.
 			Vector<int> index_reclaim_index_ids;
-			bool multi_index_mixed = (info.type == GpuMemoryObjectType::IndexBuffer && !others.IsEmpty());
+			bool        multi_index_mixed = (info.type == GpuMemoryObjectType::IndexBuffer && !others.IsEmpty());
 			if (multi_index_mixed)
 			{
 				for (const auto& obj: others)
@@ -1882,8 +1824,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					for (const auto& obj: others)
 					{
 						const auto parent_type = heap.objects[obj.object_id].info.object.type;
-						if (parent_type == GpuMemoryObjectType::RenderTexture ||
-						    parent_type == GpuMemoryObjectType::StorageTexture)
+						if (parent_type == GpuMemoryObjectType::RenderTexture || parent_type == GpuMemoryObjectType::StorageTexture)
 						{
 							create_from_objects = true;
 							break;
@@ -1975,8 +1916,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					// Typed dump: create_all_the_same fails on mixed parent types
 					// even when every relation is the same (observed multi-parent
 					// StorageBuffer with two Contains parents of different kinds).
-					std::fprintf(stderr, "GpuMemory !create_all_the_same: new type=%s parents=%u\n",
-					             Core::EnumName(info.type).C_Str(), static_cast<unsigned>(others.Size()));
+					std::fprintf(stderr, "GpuMemory !create_all_the_same: new type=%s parents=%u\n", Core::EnumName(info.type).C_Str(),
+					             static_cast<unsigned>(others.Size()));
 					for (int vi = 0; vi < vaddr_num; vi++)
 					{
 						std::fprintf(stderr, "  new range[%d]: vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", vi, vaddr[vi], size[vi]);
@@ -1985,8 +1926,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					{
 						const auto& oh = heap.objects[d.object_id];
 						const auto& oi = oh.info;
-						std::fprintf(stderr,
-						             "  parent id=%d type=%s rel=%s read_only=%d vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
+						std::fprintf(stderr, "  parent id=%d type=%s rel=%s read_only=%d vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 						             d.object_id, Core::EnumName(oi.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
 						             oi.read_only ? 1 : 0, oh.block.vaddr[0], oh.block.size[0]);
 					}
@@ -2059,8 +1999,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			relation_mask |= 1u << relation;
 		}
 	}
-	const uint32_t reclaimed_count =
-	    delete_all ? others.Size() : static_cast<uint32_t>(texture_reclaim_vertex_ids.Size());
+	const uint32_t reclaimed_count = delete_all ? others.Size() : static_cast<uint32_t>(texture_reclaim_vertex_ids.Size());
 	finish_classification(others.Size(), relation_mask, reclaimed_count, create_from_objects);
 
 	ObjectInfo o {};
@@ -2074,11 +2013,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	for (int vi = 0; vi < vaddr_num; vi++)
 	{
-		EXIT_IF(size[vi] == 0);
+		uint64_t cur_size = (size[vi] != 0 ? size[vi] : 4096);
 
 		if (info.check_hash)
 		{
-			hash[vi] = calc_hash(info.type, reinterpret_cast<const uint8_t*>(vaddr[vi]), size[vi]);
+			hash[vi] = calc_hash(info.type, reinterpret_cast<const uint8_t*>(vaddr[vi]), cur_size);
 		} else
 		{
 			hash[vi] = 0;
@@ -2108,7 +2047,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		auto create_func = info.GetCreateFromObjectsFunc();
 		EXIT_IF(create_func == nullptr);
 		const auto create_start = std::chrono::steady_clock::now();
-		o.object.obj = create_func(ctx, buffer, o.params, scenario, objects, &o.mem);
+		o.object.obj            = create_func(ctx, buffer, o.params, scenario, objects, &o.mem);
 		const auto create_ns =
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
 		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc, static_cast<uint64_t>(create_ns));
@@ -2133,7 +2072,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	{
 		EXIT_IF(o.create_func == nullptr);
 		const auto create_start = std::chrono::steady_clock::now();
-		o.object.obj = o.create_func(ctx, o.params, vaddr, size, vaddr_num, &o.mem);
+		o.object.obj            = o.create_func(ctx, o.params, vaddr, size, vaddr_num, &o.mem);
 		const auto create_ns =
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
 		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc, static_cast<uint64_t>(create_ns));
@@ -2179,10 +2118,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		heap.first_free_id = u.next_free_id;
 		EXIT_IF(u.info.logical_generation == UINT64_MAX);
 		const uint64_t logical_generation = u.info.logical_generation + 1u;
-		u.free             = false;
-		u.block            = CreateBlock(vaddr, size, vaddr_num, heap_id, index);
-		u.info             = o;
-		u.info.logical_generation = logical_generation;
+		u.free                            = false;
+		u.block                           = CreateBlock(vaddr, size, vaddr_num, heap_id, index);
+		u.info                            = o;
+		u.info.logical_generation         = logical_generation;
 		u.others.Clear();
 		u.scenario = scenario;
 	} else
@@ -2208,15 +2147,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	if (info.check_hash)
 	{
-		const auto dirty_track_start = std::chrono::steady_clock::now();
-		auto& created  = heap.objects[index];
-		bool  tracked  = GpuDirtyPageTracker::Instance().Enabled();
-		bool  attempted = false;
+		const auto dirty_track_start    = std::chrono::steady_clock::now();
+		auto&      created              = heap.objects[index];
+		bool       tracked              = GpuDirtyPageTracker::Instance().Enabled();
+		bool       attempted            = false;
 		const auto dirty_register_start = std::chrono::steady_clock::now();
 		for (int vi = 0; tracked && vi < created.block.vaddr_num; vi++)
 		{
 			attempted = true;
-			tracked = GpuDirtyPageTracker::Instance().RegisterRange(created.block.vaddr[vi], created.block.size[vi]);
+			tracked   = GpuDirtyPageTracker::Instance().RegisterRange(created.block.vaddr[vi], created.block.size[vi]);
 		}
 		const auto dirty_register_ns =
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_register_start).count();
@@ -2361,9 +2300,7 @@ bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int v
 	Core::LockGuard lock(m_mutex);
 
 	const auto ranges_overlap = [](uint64_t a, uint64_t a_size, uint64_t b, uint64_t b_size)
-	{
-		return a <= b ? b - a < a_size : a - b < b_size;
-	};
+	{ return a <= b ? b - a < a_size : a - b < b_size; };
 	bool intersects_allocated_range = false;
 	for (const auto& heap: m_heaps)
 	{
@@ -2416,10 +2353,10 @@ bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int v
 					out->truncated = true;
 					continue;
 				}
-				entry           = &out->entries[out->entry_count++];
-				entry->type     = stored.info.object.type;
-				entry->relation = object.relation;
-				entry->exact    = object.relation == GpuMemoryOverlapType::Equals;
+				entry                = &out->entries[out->entry_count++];
+				entry->type          = stored.info.object.type;
+				entry->relation      = object.relation;
+				entry->exact         = object.relation == GpuMemoryOverlapType::Equals;
 				entry->all_read_only = true;
 			}
 			entry->all_read_only = entry->all_read_only && stored.info.read_only;
@@ -2527,9 +2464,7 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool un
 		{
 			case OverlapType::Equals:
 			case OverlapType::IsContainedWithin:
-			case OverlapType::Crosses:
-				RequireDetachable(ctx, heap_id, obj.object_id, &destructors, "range_free");
-				break;
+			case OverlapType::Crosses: RequireDetachable(ctx, heap_id, obj.object_id, &destructors, "range_free"); break;
 			default: GpuMemoryDbgDump(); EXIT("unknown obj.relation: %s\n", Core::EnumName(obj.relation).C_Str());
 		}
 	}
@@ -2572,8 +2507,8 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool un
 	m_mutex.Unlock();
 }
 
-void GpuMemory::RequireDetachable(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors,
-                                  const char* operation, GpuMemoryObjectType incoming_type)
+void GpuMemory::RequireDetachable(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors, const char* operation,
+                                  GpuMemoryObjectType incoming_type)
 {
 	EXIT_IF(ctx == nullptr || destructors == nullptr || operation == nullptr);
 	auto& heap = m_heaps[heap_id];
@@ -2657,8 +2592,8 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 			}
 		}
 		// o.delete_func(ctx, o.object.obj, &o.mem);
-		ret.delete_func = o.delete_func;
-		ret.obj         = o.object.obj;
+		ret.delete_func     = o.delete_func;
+		ret.obj             = o.object.obj;
 		ret.type            = o.object.type;
 		ret.submission_uses = o.submission_uses;
 		ret.mem             = o.mem;
@@ -2710,148 +2645,17 @@ bool GpuMemory::FindFast(int heap_id, const uint64_t* vaddr, const uint64_t* siz
 		{
 			auto& b = heap.objects[obj_id];
 			EXIT_IF(b.free);
-			if (b.info.object.type == type)
+			if (b.info.object.type == type && GpuMemoryClassifyRangeSets(b.block.vaddr, b.block.size, b.block.vaddr_num, vaddr, size,
+			                                                             vaddr_num, only_first) == OverlapType::Equals)
 			{
-				bool equal = true;
-				if (b.block.vaddr_num == 1 || only_first)
-				{
-					if (GetOverlapType(b.block.vaddr[0], b.block.size[0], vaddr[0], size[0]) != OverlapType::Equals)
-					{
-						equal = false;
-					}
-				} else
-				{
-					for (int i = 0; i < vaddr_num; i++)
-					{
-						if (GetOverlapType(b.block.vaddr[i], b.block.size[i], vaddr[i], size[i]) != OverlapType::Equals)
-						{
-							equal = false;
-							break;
-						}
-					}
-				}
-				if (equal)
-				{
-					*id = obj_id;
-					return true;
-				}
+				*id = obj_id;
+				return true;
 			}
 		}
 	}
 
 	return false;
 }
-
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks_slow(int heap_id, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
-                                                              bool only_first)
-{
-	KYTY_PROFILER_BLOCK("GpuMemory::FindBlocks", profiler::colors::Green100);
-
-	auto& heap = m_heaps[heap_id];
-
-	EXIT_IF(vaddr_num <= 0 || vaddr_num > VADDR_BLOCKS_MAX);
-	EXIT_IF(vaddr == nullptr || size == nullptr);
-	EXIT_IF(only_first && vaddr_num != 1);
-
-	Vector<GpuMemory::OverlappedBlock> ret;
-
-	// TODO(): implement interval-tree
-
-	if (vaddr_num != 1)
-	{
-		int index = 0;
-		for (const auto& b: heap.objects)
-		{
-			if (!b.free)
-			{
-				bool equal = b.block.vaddr_num == vaddr_num;
-				for (int i = 0; equal && i < vaddr_num; i++)
-				{
-					if (GetOverlapType(b.block.vaddr[i], b.block.size[i], vaddr[i], size[i]) != OverlapType::Equals)
-					{
-						equal = false;
-						break;
-					}
-				}
-				if (equal)
-				{
-					ret.Add({OverlapType::Equals, index});
-				} else
-				{
-					bool cross = false;
-					for (int i = 0; i < vaddr_num; i++)
-					{
-						for (int j = 0; j < b.block.vaddr_num; j++)
-						{
-							if (GetOverlapType(b.block.vaddr[j], b.block.size[j], vaddr[i], size[i]) != OverlapType::None)
-							{
-								cross = true;
-								break;
-							}
-						}
-						if (cross)
-						{
-							break;
-						}
-					}
-					if (cross)
-					{
-						ret.Add({OverlapType::Crosses, index});
-					}
-				}
-			}
-			index++;
-		}
-	} else
-	{
-		int index = 0;
-		for (const auto& b: heap.objects)
-		{
-			if (!b.free)
-			{
-				if (b.block.vaddr_num == 1 || only_first)
-				{
-					auto type = GetOverlapType(b.block.vaddr[0], b.block.size[0], vaddr[0], size[0]);
-					if (type != OverlapType::None)
-					{
-						ret.Add({type, index});
-					}
-				} else
-				{
-					for (int i = 0; i < b.block.vaddr_num; i++)
-					{
-						if (GetOverlapType(b.block.vaddr[i], b.block.size[i], vaddr[0], size[0]) != OverlapType::None)
-						{
-							ret.Add({OverlapType::Crosses, index});
-							break;
-						}
-					}
-				}
-			}
-			index++;
-		}
-	}
-
-	//	printf("FindBlocks:\n");
-	//	for (int vi = 0; vi < vaddr_num; vi++)
-	//	{
-	//		printf("\t vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 "\n", vaddr[vi], size[vi]);
-	//	}
-	//	for (const auto& d: ret)
-	//	{
-	//		printf("\t id = %d, rel = %s\n", d.object_id, Core::EnumName(d.relation).C_Str());
-	//		const auto& b = m_objects[d.object_id];
-	//		for (int vi = 0; vi < b.block.vaddr_num; vi++)
-	//		{
-	//			printf("\t\t vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 "\n", b.block.vaddr[vi], b.block.size[vi]);
-	//		}
-	//	}
-
-	return ret;
-}
-
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
                                                          bool only_first)
 {
@@ -2881,78 +2685,20 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 		return ret;
 	}
 
-	// TODO(): implement interval-tree
-
-	if (vaddr_num != 1)
+	const Vector<int> candidates =
+	    vaddr_num == 1 ? heap.objects_map2->FindAll(vaddr[0], size[0]) : heap.objects_map2->FindAll(vaddr, size, vaddr_num);
+	for (int index: candidates)
 	{
-		for (int index: heap.objects_map2->FindAll(vaddr, size, vaddr_num))
+		const auto& object = heap.objects[index];
+		if (object.free)
 		{
-			const auto& b = heap.objects[index];
-			if (!b.free)
-			{
-				bool equal = b.block.vaddr_num == vaddr_num;
-				for (int i = 0; equal && i < vaddr_num; i++)
-				{
-					if (GetOverlapType(b.block.vaddr[i], b.block.size[i], vaddr[i], size[i]) != OverlapType::Equals)
-					{
-						equal = false;
-						break;
-					}
-				}
-				if (equal)
-				{
-					ret.Add({OverlapType::Equals, index});
-				} else
-				{
-					bool cross = false;
-					for (int i = 0; i < vaddr_num; i++)
-					{
-						for (int j = 0; j < b.block.vaddr_num; j++)
-						{
-							if (GetOverlapType(b.block.vaddr[j], b.block.size[j], vaddr[i], size[i]) != OverlapType::None)
-							{
-								cross = true;
-								break;
-							}
-						}
-						if (cross)
-						{
-							break;
-						}
-					}
-					if (cross)
-					{
-						ret.Add({OverlapType::Crosses, index});
-					}
-				}
-			}
+			continue;
 		}
-	} else
-	{
-		for (int index: heap.objects_map2->FindAll(vaddr[0], size[0]))
+		const auto relation =
+		    GpuMemoryClassifyRangeSets(object.block.vaddr, object.block.size, object.block.vaddr_num, vaddr, size, vaddr_num, only_first);
+		if (relation != OverlapType::None)
 		{
-			const auto& b = heap.objects[index];
-			if (!b.free)
-			{
-				if (b.block.vaddr_num == 1 || only_first)
-				{
-					auto type = GetOverlapType(b.block.vaddr[0], b.block.size[0], vaddr[0], size[0]);
-					if (type != OverlapType::None)
-					{
-						ret.Add({type, index});
-					}
-				} else
-				{
-					for (int i = 0; i < b.block.vaddr_num; i++)
-					{
-						if (GetOverlapType(b.block.vaddr[i], b.block.size[i], vaddr[0], size[0]) != OverlapType::None)
-						{
-							ret.Add({OverlapType::Crosses, index});
-							break;
-						}
-					}
-				}
-			}
+			ret.Add({relation, index});
 		}
 	}
 
@@ -2961,22 +2707,6 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 		ret.Sort([](auto& b1, auto& b2) { return b1.object_id < b2.object_id; });
 	}
 	heap.overlap_cache->Store(query, ret);
-
-	//
-	//	printf("FindBlocks:\n");
-	//	for (int vi = 0; vi < vaddr_num; vi++)
-	//	{
-	//		printf("\t vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 "\n", vaddr[vi], size[vi]);
-	//	}
-	//	for (const auto& d: ret)
-	//	{
-	//		printf("\t id = %d, rel = %s\n", d.object_id, Core::EnumName(d.relation).C_Str());
-	//		const auto& b = m_objects[d.object_id];
-	//		for (int vi = 0; vi < b.block.vaddr_num; vi++)
-	//		{
-	//			printf("\t\t vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 "\n", b.block.vaddr[vi], b.block.size[vi]);
-	//		}
-	//	}
 
 	return ret;
 }
@@ -3026,8 +2756,8 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 	constexpr uint64_t kRetireAfterFrames = 120;
 
 	Vector<Destructor> destructors;
-	Core::LockGuard backing_lock(m_backing_mutation_mutex);
-	Core::LockGuard lock(m_mutex);
+	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard    lock(m_mutex);
 
 	m_current_frame++;
 	if (m_current_frame < kRetireAfterFrames || (m_current_frame % 30u) != 0u)
@@ -3035,10 +2765,10 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 		return;
 	}
 
-	const uint32_t retire_batch_limit = GpuMemoryRetirementBatchLimit(m_transient_creates_since_retirement);
+	const uint32_t retire_batch_limit    = GpuMemoryRetirementBatchLimit(m_transient_creates_since_retirement);
 	m_transient_creates_since_retirement = 0;
-	uint32_t retired = 0;
-	int      heap_id = 0;
+	uint32_t retired                     = 0;
+	int      heap_id                     = 0;
 	for (auto& heap: m_heaps)
 	{
 		int object_id = 0;
@@ -3054,13 +2784,13 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 				continue;
 			}
 
-			auto& object = h.info;
+			auto&      object           = h.info;
 			const bool reclaimable_type = object.object.type == GpuMemoryObjectType::Texture ||
 			                              object.object.type == GpuMemoryObjectType::StorageTexture ||
 			                              object.object.type == GpuMemoryObjectType::StorageBuffer;
-			const bool storage_buffer_safe = object.object.type != GpuMemoryObjectType::StorageBuffer ||
-			                                  object.write_back_func == nullptr || object.read_only;
-			const bool old_enough = m_current_frame - object.use_last_frame >= kRetireAfterFrames;
+			const bool storage_buffer_safe =
+			    object.object.type != GpuMemoryObjectType::StorageBuffer || object.write_back_func == nullptr || object.read_only;
+			const bool old_enough            = m_current_frame - object.use_last_frame >= kRetireAfterFrames;
 			const bool dependencies_complete = m_deferred_deletions.AreDependenciesComplete(object.submission_uses.Dependencies());
 			if (reclaimable_type && storage_buffer_safe && old_enough && dependencies_complete)
 			{
@@ -3113,7 +2843,7 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	// RenderTexture peer to a RW StorageBuffer; only Equals parents get
 	// full hash propagation. Parent count is not capped — post-logo FNA
 	// dispose topologies exceed the former stack limit of 64.
-	const uint32_t parent_count = static_cast<uint32_t>(h.others.Size());
+	const uint32_t               parent_count = static_cast<uint32_t>(h.others.Size());
 	Vector<GpuMemoryOverlapType> parent_rels;
 	for (uint32_t oi = 0; oi < parent_count; oi++)
 	{
@@ -3125,13 +2855,12 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	if (!GpuMemoryWriteBackClassifyParents(parent_rels.GetData(), parent_count, &recompute_self, &equals_count, &invalidate_count))
 	{
 		std::fprintf(stderr, "GpuMemory WriteBack unsupported parent relation in alias topology:\n");
-		std::fprintf(stderr, "\t self: heap=%d id=%d type=%s others=%u\n", heap_id, object_id,
-		             Core::EnumName(o.object.type).C_Str(), static_cast<unsigned>(h.others.Size()));
+		std::fprintf(stderr, "\t self: heap=%d id=%d type=%s others=%u\n", heap_id, object_id, Core::EnumName(o.object.type).C_Str(),
+		             static_cast<unsigned>(h.others.Size()));
 		for (uint32_t oi = 0; oi < h.others.Size(); oi++)
 		{
 			const auto& other = h.others.At(static_cast<int>(oi));
-			std::fprintf(stderr, "\t other[%u]: id=%d relation=%s type=%s\n", oi, other.object_id,
-			             Core::EnumName(other.relation).C_Str(),
+			std::fprintf(stderr, "\t other[%u]: id=%d relation=%s type=%s\n", oi, other.object_id, Core::EnumName(other.relation).C_Str(),
 			             Core::EnumName(heap.objects[other.object_id].info.object.type).C_Str());
 		}
 		std::fflush(stderr);
@@ -3141,7 +2870,7 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	GpuWritebackResult writeback_result;
 	{
 		const auto writeback_start = std::chrono::steady_clock::now();
-		writeback_result = o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
+		writeback_result           = o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
 		const auto writeback_elapsed =
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - writeback_start).count();
 		DebugStatsRecordGpuMemoryWriteBack(GpuMemoryStatsTypeIndex(o.object.type), writeback_result.copied_bytes,
@@ -3158,7 +2887,7 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	// GPU-owned tiled RTs cannot be reconstructed from guest bytes.
 	for (uint32_t oi = 0; oi < h.others.Size(); oi++)
 	{
-		const auto& other = h.others.At(static_cast<int>(oi));
+		const auto& other  = h.others.At(static_cast<int>(oi));
 		auto&       parent = heap.objects[other.object_id];
 		EXIT_IF(parent.free);
 		auto& o2 = parent.info;
@@ -3187,8 +2916,8 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 			{
 				new_hash = calc_hash(o.object.type, reinterpret_cast<const uint8_t*>(block.vaddr[vi]), block.size[vi]);
 			}
-			printf("WriteBack (GPU -> CPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64
-			       ", old_hash = 0x%016" PRIx64 ", new_hash = 0x%016" PRIx64 ", equals=%u invalidate=%u\n",
+			printf("WriteBack (GPU -> CPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 ", old_hash = 0x%016" PRIx64
+			       ", new_hash = 0x%016" PRIx64 ", equals=%u invalidate=%u\n",
 			       Core::EnumName(o.object.type).C_Str(), block.vaddr[vi], block.size[vi], o.hash[vi], new_hash, equals_count,
 			       invalidate_count);
 			o.hash[vi] = new_hash;
@@ -3207,8 +2936,8 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 			for (int vi = 0; vi < block.vaddr_num; vi++)
 			{
 				const uint64_t new_hash = o2.hash[vi];
-				printf("WriteBack (GPU -> CPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64
-				       ", old_hash = 0x%016" PRIx64 ", new_hash = 0x%016" PRIx64 ", equals=%u invalidate=%u\n",
+				printf("WriteBack (GPU -> CPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 ", old_hash = 0x%016" PRIx64
+				       ", new_hash = 0x%016" PRIx64 ", equals=%u invalidate=%u\n",
 				       Core::EnumName(o.object.type).C_Str(), block.vaddr[vi], block.size[vi], o.hash[vi], new_hash, equals_count,
 				       invalidate_count);
 				o.hash[vi] = new_hash;
@@ -3225,8 +2954,8 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 void GpuMemory::WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission)
 {
 	EXIT_IF(submission.sequence == 0);
-	Core::LockGuard backing_lock(m_backing_mutation_mutex);
-	Core::LockGuard lock(m_mutex);
+	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard    lock(m_mutex);
 	Vector<Destructor> destructors;
 
 	struct WriteBackObject
@@ -3253,10 +2982,9 @@ void GpuMemory::WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId s
 					{
 						if (queue_use.sequence > submission.sequence)
 						{
-							EXIT("GpuMemory write-back crossed a later same-queue use: type=%s completing=%" PRIu64
-							     " latest=%" PRIu64 " queue=%" PRIu32 "\n",
-							     Core::EnumName(o.object.type).C_Str(), submission.sequence, queue_use.sequence,
-							     submission.queue.Value());
+							EXIT("GpuMemory write-back crossed a later same-queue use: type=%s completing=%" PRIu64 " latest=%" PRIu64
+							     " queue=%" PRIu32 "\n",
+							     Core::EnumName(o.object.type).C_Str(), submission.sequence, queue_use.sequence, submission.queue.Value());
 						}
 						for (const auto& dependency: o.submission_uses.Dependencies())
 						{
@@ -3293,8 +3021,8 @@ void GpuMemory::WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId s
 void GpuMemory::WriteBackAllCompleted(GraphicContext* ctx)
 {
 	EXIT_IF(ctx == nullptr);
-	Core::LockGuard backing_lock(m_backing_mutation_mutex);
-	Core::LockGuard lock(m_mutex);
+	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard    lock(m_mutex);
 	Vector<Destructor> destructors;
 
 	struct WriteBackObject
@@ -3337,8 +3065,8 @@ void GpuMemory::WriteBackAllCompleted(GraphicContext* ctx)
 
 void GpuMemory::Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 {
-	Core::LockGuard backing_lock(m_backing_mutation_mutex);
-	Core::LockGuard lock(m_mutex);
+	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard    lock(m_mutex);
 	Vector<Destructor> destructors;
 
 	int heap_id = GetHeapId(vaddr, size);
@@ -3367,8 +3095,8 @@ void GpuMemory::WriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint6
 		return;
 	}
 
-	Core::LockGuard backing_lock(m_backing_mutation_mutex);
-	Core::LockGuard lock(m_mutex);
+	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard    lock(m_mutex);
 	Vector<Destructor> destructors;
 
 	const int heap_id = GetHeapId(vaddr, size);
@@ -3397,8 +3125,8 @@ void GpuMemory::WriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint6
 
 void GpuMemory::FlushAll(GraphicContext* ctx)
 {
-	Core::LockGuard backing_lock(m_backing_mutation_mutex);
-	Core::LockGuard lock(m_mutex);
+	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard    lock(m_mutex);
 	Vector<Destructor> destructors;
 
 	int heap_id = 0;
@@ -3427,55 +3155,55 @@ void GpuMemory::DbgInit()
 	{
 		m_db.Exec(R"(
 CREATE TABLE [objects](
-  [dump_id] INT, 
-  [heap_id] INTEGER, 
-  [id] INTEGER, 
-  [vaddr] TEXT, 
-  [size] TEXT, 
-  [vaddr2] TEXT, 
-  [size2] TEXT, 
-  [vaddr3] TEXT, 
-  [size3] TEXT, 
-  [obj] TEXT, 
-  [type] TEXT, 
-  [param0] INT64, 
-  [param1] INT64, 
-  [param2] INT64, 
-  [param3] INT64, 
-  [param4] INT64, 
-  [param5] INT64, 
-  [param6] INT64, 
-  [param7] INT64, 
-  [scenario] TEXT, 
-  [others] TEXT, 
-  [hash] TEXT, 
-  [hash2] TEXT, 
-  [hash3] TEXT, 
-  [gpu_update_time] INT64, 
-  [cpu_update_time] INT64, 
-  [submit_id] INT64, 
-  [write_back_func] TEXT, 
-  [delete_func] TEXT, 
-  [update_func] TEXT, 
-  [use_last_frame] INT64, 
-  [use_num] INT64, 
-  [in_use] BOOL, 
-  [read_only] BOOL, 
-  [check_hash] BOOL, 
-  [vk_mem_size] TEXT, 
-  [vk_mem_alignment] TEXT, 
-  [vk_mem_memoryTypeBits] INT, 
-  [vk_mem_property] INT, 
-  [vk_mem_memory] TEXT, 
-  [vk_mem_offset] INT64, 
-  [vk_mem_type] INT, 
-  [vk_mem_unique_id] INT64, 
-  PRIMARY KEY([heap_id], [id]), 
+  [dump_id] INT,
+  [heap_id] INTEGER,
+  [id] INTEGER,
+  [vaddr] TEXT,
+  [size] TEXT,
+  [vaddr2] TEXT,
+  [size2] TEXT,
+  [vaddr3] TEXT,
+  [size3] TEXT,
+  [obj] TEXT,
+  [type] TEXT,
+  [param0] INT64,
+  [param1] INT64,
+  [param2] INT64,
+  [param3] INT64,
+  [param4] INT64,
+  [param5] INT64,
+  [param6] INT64,
+  [param7] INT64,
+  [scenario] TEXT,
+  [others] TEXT,
+  [hash] TEXT,
+  [hash2] TEXT,
+  [hash3] TEXT,
+  [gpu_update_time] INT64,
+  [cpu_update_time] INT64,
+  [submit_id] INT64,
+  [write_back_func] TEXT,
+  [delete_func] TEXT,
+  [update_func] TEXT,
+  [use_last_frame] INT64,
+  [use_num] INT64,
+  [in_use] BOOL,
+  [read_only] BOOL,
+  [check_hash] BOOL,
+  [vk_mem_size] TEXT,
+  [vk_mem_alignment] TEXT,
+  [vk_mem_memoryTypeBits] INT,
+  [vk_mem_property] INT,
+  [vk_mem_memory] TEXT,
+  [vk_mem_offset] INT64,
+  [vk_mem_type] INT,
+  [vk_mem_unique_id] INT64,
+  PRIMARY KEY([heap_id], [id]),
   UNIQUE([heap_id], [id])) WITHOUT ROWID;
 
 CREATE TABLE [ranges](
-  [dump_id] INT, 
-  [vaddr] TEXT, 
+  [dump_id] INT,
+  [vaddr] TEXT,
   [size] TEXT);
 )");
 
@@ -3724,8 +3452,8 @@ Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64
 	return g_gpu_memory->FindObjects(vaddr, size, vaddr_num, type, exact, only_first);
 }
 
-Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size,
-                                                          GpuMemoryObjectType type, bool exact, bool only_first)
+Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,
+                                                          bool exact, bool only_first)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
 
@@ -3740,8 +3468,8 @@ Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submissio
 	return g_gpu_memory->FindObjects(vaddr, size, vaddr_num, type, exact, only_first, &submission);
 }
 
-Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size,
-                                                          GpuMemoryObjectType type, bool exact, bool only_first)
+Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,
+                                                          bool exact, bool only_first)
 {
 	EXIT_IF(buffer == nullptr);
 	SubmissionId submission;
@@ -3749,8 +3477,8 @@ Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer,
 	return GpuMemoryFindObjectsForSubmission(submission, vaddr, size, type, exact, only_first);
 }
 
-Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
-                                                          int vaddr_num, GpuMemoryObjectType type, bool exact, bool only_first)
+Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
+                                                          GpuMemoryObjectType type, bool exact, bool only_first)
 {
 	EXIT_IF(buffer == nullptr);
 	SubmissionId submission;
@@ -3867,7 +3595,10 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(mem == nullptr);
 	EXIT_IF(mem->memory != nullptr);
-	EXIT_IF(mem->requirements.size == 0);
+	if (mem->requirements.size == 0)
+	{
+		mem->requirements.size = 4096;
+	}
 
 	VkPhysicalDeviceMemoryProperties memory_properties {};
 	vkGetPhysicalDeviceMemoryProperties(ctx->physical_device, &memory_properties);
@@ -3894,11 +3625,11 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
 	mem->unique_id = ++seq;
 
 	const auto allocate_start = std::chrono::steady_clock::now();
-	auto result = vkAllocateMemory(ctx->device, &alloc_info, nullptr, &mem->memory);
+	auto       result         = vkAllocateMemory(ctx->device, &alloc_info, nullptr, &mem->memory);
 	const auto allocate_ns =
 	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - allocate_start).count();
-	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanAllocate,
-	                                               static_cast<uint64_t>(allocate_ns), mem->requirements.size);
+	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanAllocate, static_cast<uint64_t>(allocate_ns),
+	                                                mem->requirements.size);
 
 	if (result == VK_SUCCESS)
 	{
@@ -3968,8 +3699,7 @@ void VulkanBindImageMemory(GraphicContext* ctx, VulkanImage* image, VulkanMemory
 
 	const auto bind_start = std::chrono::steady_clock::now();
 	vkBindImageMemory(ctx->device, image->image, mem->memory, mem->offset);
-	const auto bind_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - bind_start).count();
+	const auto bind_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - bind_start).count();
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanBind, static_cast<uint64_t>(bind_ns));
 }
 
@@ -3983,8 +3713,7 @@ void VulkanBindBufferMemory(GraphicContext* ctx, VulkanBuffer* buffer, VulkanMem
 
 	const auto bind_start = std::chrono::steady_clock::now();
 	vkBindBufferMemory(ctx->device, buffer->buffer, mem->memory, mem->offset);
-	const auto bind_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - bind_start).count();
+	const auto bind_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - bind_start).count();
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanBind, static_cast<uint64_t>(bind_ns));
 }
 

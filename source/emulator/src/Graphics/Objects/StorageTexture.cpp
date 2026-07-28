@@ -4,8 +4,11 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
+#include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
@@ -19,69 +22,6 @@
 
 namespace Kyty::Libs::Graphics {
 
-VkFormat StorageTextureResolveVkFormat(uint32_t dfmt, uint32_t nfmt, uint32_t fmt)
-{
-	if (fmt == 0)
-	{
-		if (nfmt == 9 && dfmt == 10)
-		{
-			return VK_FORMAT_R8G8B8A8_SRGB;
-		}
-		if (nfmt == 0 && dfmt == 10)
-		{
-			return VK_FORMAT_R8G8B8A8_UNORM;
-		}
-		if (nfmt == 9 && dfmt == 37)
-		{
-			return VK_FORMAT_BC3_SRGB_BLOCK;
-		}
-		EXIT("unknown format: nfmt = %u, dfmt = %u\n", nfmt, dfmt);
-	} else
-	{
-		if (fmt == 5)
-		{
-			// The Gen5 video path uses float storage-image operations for this
-			// 8-bit plane, so its host view must normalize the written values.
-			return VK_FORMAT_R8_UNORM;
-		}
-		if (fmt == 14)
-		{
-			return VK_FORMAT_R8G8_UNORM;
-		}
-		if (fmt == 20)
-		{
-			return VK_FORMAT_R32_UINT;
-		}
-		if (fmt == 75)
-		{
-			return VK_FORMAT_R32G32B32A32_UINT;
-		}
-		if (fmt == 62)
-		{
-			return VK_FORMAT_R32G32_UINT;
-		}
-		EXIT("unknown format: fmt = %u\n", fmt);
-	}
-	return VK_FORMAT_UNDEFINED;
-}
-
-static VkComponentSwizzle get_swizzle(uint8_t s)
-{
-	switch (s)
-	{
-		case 0: return VK_COMPONENT_SWIZZLE_ZERO; break;
-		case 1: return VK_COMPONENT_SWIZZLE_ONE; break;
-		case 4: return VK_COMPONENT_SWIZZLE_R; break;
-		case 5: return VK_COMPONENT_SWIZZLE_G; break;
-		case 6: return VK_COMPONENT_SWIZZLE_B; break;
-		case 7: return VK_COMPONENT_SWIZZLE_A; break;
-		case 2:
-		case 3:
-		default: EXIT("unknown swizzle: %d\n", static_cast<int>(s));
-	}
-	return VK_COMPONENT_SWIZZLE_IDENTITY;
-}
-
 static VkImageUsageFlags get_usage()
 {
 	VkImageUsageFlags vk_usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -89,63 +29,6 @@ static VkImageUsageFlags get_usage()
 	vk_usage |= VK_IMAGE_USAGE_STORAGE_BIT;
 
 	return vk_usage;
-}
-
-static bool CheckFormat(GraphicContext* ctx, VkImageCreateInfo* image_info)
-{
-	VkImageFormatProperties props {};
-	if (vkGetPhysicalDeviceImageFormatProperties(ctx->physical_device, image_info->format, image_info->imageType, image_info->tiling,
-	                                             image_info->usage, image_info->flags, &props) == VK_ERROR_FORMAT_NOT_SUPPORTED)
-	{
-		if (image_info->format == VK_FORMAT_R8G8B8A8_SRGB)
-		{
-			// TODO() convert SRGB -> LINEAR in shader
-			image_info->format = VK_FORMAT_R8G8B8A8_UNORM;
-			bool result        = CheckFormat(ctx, image_info);
-			printf("replace VK_FORMAT_R8G8B8A8_SRGB => VK_FORMAT_R8G8B8A8_UNORM [%s]\n", (!result ? "FAIL" : "SUCCESS"));
-			return result;
-		}
-		if (image_info->format == VK_FORMAT_B8G8R8A8_SRGB)
-		{
-			// TODO() convert SRGB -> LINEAR in shader
-			image_info->format = VK_FORMAT_B8G8R8A8_UNORM;
-			bool result        = CheckFormat(ctx, image_info);
-			printf("replace VK_FORMAT_B8G8R8A8_SRGB => VK_FORMAT_B8G8R8A8_UNORM [%s]\n", (!result ? "FAIL" : "SUCCESS"));
-			return result;
-		}
-		return false;
-	}
-	return true;
-}
-
-static bool CheckSwizzle(GraphicContext* /*ctx*/, VkImageCreateInfo* image_info, VkComponentMapping* components)
-{
-	if ((image_info->usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0)
-	{
-		if (components->r == VK_COMPONENT_SWIZZLE_R && components->g == VK_COMPONENT_SWIZZLE_G && components->b == VK_COMPONENT_SWIZZLE_B &&
-		    components->a == VK_COMPONENT_SWIZZLE_A)
-		{
-			return true;
-		}
-
-		if (components->r == VK_COMPONENT_SWIZZLE_B && components->g == VK_COMPONENT_SWIZZLE_G && components->b == VK_COMPONENT_SWIZZLE_R &&
-		    components->a == VK_COMPONENT_SWIZZLE_A && image_info->format == VK_FORMAT_R8G8B8A8_SRGB)
-		{
-			printf("replace VK_FORMAT_R8G8B8A8_SRGB => VK_FORMAT_B8G8R8A8_SRGB\n");
-
-			components->r      = VK_COMPONENT_SWIZZLE_R;
-			components->g      = VK_COMPONENT_SWIZZLE_G;
-			components->b      = VK_COMPONENT_SWIZZLE_B;
-			components->a      = VK_COMPONENT_SWIZZLE_A;
-			image_info->format = VK_FORMAT_B8G8R8A8_SRGB;
-			return true;
-		}
-
-		// TODO() swizzle channels in shader
-
-		return false;
-	}
-	return true;
 }
 
 static bool IsR32UintReadSwizzle(const VkComponentMapping& components)
@@ -189,66 +72,78 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	auto width  = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
 	auto height = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
 	// auto base_level = params[StorageTextureObject::PARAM_LEVELS] >> 32u;
-	auto levels = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
-	auto pitch  = params[StorageTextureObject::PARAM_PITCH];
-	auto resource_type = params[StorageTextureObject::PARAM_RESOURCE_TYPE];
-	auto depth = params[StorageTextureObject::PARAM_DEPTH];
-	auto base_array = params[StorageTextureObject::PARAM_BASE_ARRAY];
-	bool neo    = Config::IsNeo();
+	auto       levels            = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
+	auto       pitch             = params[StorageTextureObject::PARAM_PITCH];
+	auto       resource_type     = params[StorageTextureObject::PARAM_RESOURCE_TYPE];
+	auto       depth             = params[StorageTextureObject::PARAM_DEPTH];
+	auto       base_array        = params[StorageTextureObject::PARAM_BASE_ARRAY];
+	bool       neo               = Config::IsNeo();
 	const bool three_dimensional = resource_type == 10u;
-	const bool arrayed_2d = resource_type == 13u;
+	const bool arrayed_2d        = resource_type == 13u;
 
 	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_GENERAL;
 
 	EXIT_NOT_IMPLEMENTED(levels >= 16);
-	EXIT_NOT_IMPLEMENTED(three_dimensional && (fmt != 20u || tile != 5u || levels != 1u || depth == 0u));
 	if (three_dimensional)
 	{
-		TileSizeAlign tiled_size {};
-		TileGetStandard4KB32VolumeSize(width, height, static_cast<uint32_t>(depth), static_cast<uint32_t>(pitch), &tiled_size);
-		EXIT_NOT_IMPLEMENTED(*size != tiled_size.size);
-		const uint64_t linear_bytes = static_cast<uint64_t>(pitch) * height * depth * 4u;
-		EXIT_NOT_IMPLEMENTED(linear_bytes == 0u || linear_bytes > *size);
-		auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
-		TileConvertStandard4KB32VolumeToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), static_cast<uint32_t>(width),
-		                                      static_cast<uint32_t>(height), static_cast<uint32_t>(depth), static_cast<uint32_t>(pitch));
+		Gen5TextureVolumeLayout volume_layout {};
+		const bool              is_standard = Gen5GetStandard4KBVolumeTextureLayout(
+		    static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
+		    static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), &volume_layout);
+		if (!is_standard)
+		{
+			const uint32_t bpe        = std::max(1u, ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt)));
+			volume_layout.linear_size = static_cast<uint64_t>(pitch) * height * depth * bpe;
+			volume_layout.tiled.size  = std::max(4096u, static_cast<uint32_t>(volume_layout.linear_size));
+			volume_layout.tiled.align = 4096;
+		}
+		std::vector<uint8_t> linear(static_cast<size_t>(volume_layout.linear_size));
+		if (is_standard && !linear.empty())
+		{
+			TileConvertStandard4KB32VolumeToLinear(linear.data(), reinterpret_cast<void*>(*vaddr), static_cast<uint32_t>(width),
+			                                       static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
+			                                       static_cast<uint32_t>(pitch));
+		} else if (!linear.empty())
+		{
+			std::memcpy(linear.data(), reinterpret_cast<void*>(*vaddr), linear.size());
+		}
 		Vector<BufferImageCopy> regions(1);
-		regions[0].offset = 0;
-		regions[0].pitch = static_cast<uint32_t>(pitch);
-		regions[0].width = static_cast<uint32_t>(width);
-		regions[0].height = static_cast<uint32_t>(height);
-		regions[0].depth = static_cast<uint32_t>(depth);
+		regions[0].offset    = 0;
+		regions[0].pitch     = static_cast<uint32_t>(pitch);
+		regions[0].width     = static_cast<uint32_t>(width);
+		regions[0].height    = static_cast<uint32_t>(height);
+		regions[0].depth     = static_cast<uint32_t>(depth);
 		regions[0].dst_level = 0;
-		regions[0].dst_x = 0;
-		regions[0].dst_y = 0;
-		regions[0].dst_z = 0;
-		UtilFillImage(ctx, vk_obj, temp_buf, linear_bytes, regions, static_cast<uint64_t>(vk_layout));
-		delete[] temp_buf;
+		regions[0].dst_x     = 0;
+		regions[0].dst_y     = 0;
+		regions[0].dst_z     = 0;
+		if (!linear.empty())
+		{
+			UtilFillImage(ctx, vk_obj, linear.data(), volume_layout.linear_size, regions, static_cast<uint64_t>(vk_layout));
+		}
 		return;
 	}
 	if (arrayed_2d)
 	{
 		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-		EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || tile != 5u || levels != 1u ||
-		                     depth == 0u || base_array >= depth || depth >= 16u);
+		EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || tile != 5u || levels != 1u || depth == 0u || base_array >= depth || depth >= 16u);
 		TileSizeAlign slice_size {};
 		TileGetTextureSize2(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
 		                    static_cast<uint32_t>(pitch), 1u, static_cast<uint32_t>(tile), &slice_size, nullptr, nullptr);
 		EXIT_NOT_IMPLEMENTED(*size != static_cast<uint64_t>(slice_size.size) * depth);
-		const uint64_t linear_slice_bytes = static_cast<uint64_t>(pitch) * height * bytes_per_element;
-		std::vector<uint8_t> linear(static_cast<size_t>(linear_slice_bytes * depth));
+		const uint64_t          linear_slice_bytes = static_cast<uint64_t>(pitch) * height * bytes_per_element;
+		std::vector<uint8_t>    linear(static_cast<size_t>(linear_slice_bytes * depth));
 		Vector<BufferImageCopy> regions(static_cast<int>(depth));
 		for (uint32_t layer = 0; layer < depth; ++layer)
 		{
 			TileConvertStandard4KBToLinear(linear.data() + layer * linear_slice_bytes,
-			                              reinterpret_cast<const uint8_t*>(*vaddr) + layer * slice_size.size,
-			                              static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-			                              static_cast<uint32_t>(pitch), bytes_per_element);
-			regions[layer].offset = static_cast<uint32_t>(layer * linear_slice_bytes);
-			regions[layer].pitch = static_cast<uint32_t>(pitch);
-			regions[layer].width = static_cast<uint32_t>(width);
-			regions[layer].height = static_cast<uint32_t>(height);
-			regions[layer].dst_level = 0;
+			                               reinterpret_cast<const uint8_t*>(*vaddr) + layer * slice_size.size, static_cast<uint32_t>(width),
+			                               static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), bytes_per_element);
+			regions[layer].offset          = static_cast<uint32_t>(layer * linear_slice_bytes);
+			regions[layer].pitch           = static_cast<uint32_t>(pitch);
+			regions[layer].width           = static_cast<uint32_t>(width);
+			regions[layer].height          = static_cast<uint32_t>(height);
+			regions[layer].dst_level       = 0;
 			regions[layer].dst_array_layer = layer;
 		}
 		UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
@@ -341,19 +236,19 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(params == nullptr);
 
-	auto fmt        = (params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
-	auto dfmt       = (params[StorageTextureObject::PARAM_FORMAT] >> 8u) & 0xffu;
-	auto nfmt       = (params[StorageTextureObject::PARAM_FORMAT]) & 0xffu;
-	auto width      = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
-	auto height     = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
-	auto base_level = params[StorageTextureObject::PARAM_LEVELS] >> 32u;
-	auto levels     = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
-	auto swizzle    = NormalizeStorageTextureSwizzle(fmt, params[StorageTextureObject::PARAM_SWIZZLE]);
-	auto resource_type = params[StorageTextureObject::PARAM_RESOURCE_TYPE];
-	auto depth      = params[StorageTextureObject::PARAM_DEPTH];
-	auto base_array = params[StorageTextureObject::PARAM_BASE_ARRAY];
+	auto       fmt               = (params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
+	auto       dfmt              = (params[StorageTextureObject::PARAM_FORMAT] >> 8u) & 0xffu;
+	auto       nfmt              = (params[StorageTextureObject::PARAM_FORMAT]) & 0xffu;
+	auto       width             = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
+	auto       height            = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
+	auto       base_level        = params[StorageTextureObject::PARAM_LEVELS] >> 32u;
+	auto       levels            = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
+	auto       swizzle           = NormalizeStorageTextureSwizzle(fmt, params[StorageTextureObject::PARAM_SWIZZLE]);
+	auto       resource_type     = params[StorageTextureObject::PARAM_RESOURCE_TYPE];
+	auto       depth             = params[StorageTextureObject::PARAM_DEPTH];
+	auto       base_array        = params[StorageTextureObject::PARAM_BASE_ARRAY];
 	const bool three_dimensional = resource_type == 10u;
-	const bool arrayed_2d = resource_type == 13u;
+	const bool arrayed_2d        = resource_type == 13u;
 	EXIT_NOT_IMPLEMENTED(resource_type != 8u && resource_type != 9u && resource_type != 13u && !three_dimensional);
 
 	EXIT_NOT_IMPLEMENTED(base_level != 0);
@@ -361,39 +256,29 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	VkImageUsageFlags vk_usage = get_usage();
 
 	VkComponentMapping components {};
+	EXIT_IF(!VulkanDecodeComponentMapping(static_cast<uint32_t>(swizzle), &components));
 
-	components.r = get_swizzle(GetDstSel(swizzle, 0));
-	components.g = get_swizzle(GetDstSel(swizzle, 1));
-	components.b = get_swizzle(GetDstSel(swizzle, 2));
-	components.a = get_swizzle(GetDstSel(swizzle, 3));
-
-	auto pixel_format = StorageTextureResolveVkFormat(dfmt, nfmt, fmt);
+	auto pixel_format = VulkanResolveGuestImageFormat(GuestImageUsage::Storage, static_cast<uint8_t>(dfmt), static_cast<uint8_t>(nfmt),
+	                                                  static_cast<uint16_t>(fmt));
 
 	EXIT_NOT_IMPLEMENTED(pixel_format == VK_FORMAT_UNDEFINED);
 	EXIT_NOT_IMPLEMENTED(width == 0);
 	EXIT_NOT_IMPLEMENTED(height == 0);
 	EXIT_NOT_IMPLEMENTED(three_dimensional && depth == 0u);
+	EXIT_NOT_IMPLEMENTED(arrayed_2d && (depth == 0u || base_array >= depth));
 
 	auto real_height = ((levels > 1) ? height + (height > 1 ? height / 2 : 1) : height);
 
 	auto* vk_obj = new StorageTextureVulkanImage;
 
-	VkImageCreateInfo image_info {};
-	image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	image_info.pNext         = nullptr;
-	image_info.flags         = 0;
-	image_info.imageType     = (three_dimensional ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D);
-	image_info.extent.width  = width;
-	image_info.extent.height = real_height;
-	image_info.extent.depth  = (three_dimensional ? depth : 1u);
-	image_info.mipLevels     = 1;
-	image_info.arrayLayers   = (arrayed_2d ? depth : 1u);
-	image_info.format        = pixel_format;
-	image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-	image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	image_info.usage         = vk_usage;
-	image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
-	image_info.samples       = VK_SAMPLE_COUNT_1_BIT;
+	VulkanImageDescriptor image_descriptor {};
+	image_descriptor.image_type   = three_dimensional ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+	image_descriptor.extent       = {static_cast<uint32_t>(width), static_cast<uint32_t>(real_height),
+	                                 static_cast<uint32_t>(three_dimensional ? depth : 1u)};
+	image_descriptor.array_layers = static_cast<uint32_t>(arrayed_2d ? depth : 1u);
+	image_descriptor.format       = pixel_format;
+	image_descriptor.usage        = vk_usage;
+	auto image_info               = VulkanBuildImageCreateInfo(image_descriptor);
 
 	// Storage image views must use identity component mapping. For R32_UINT,
 	// the guest's R,0,0,1 selector describes the read result; writes still
@@ -408,69 +293,45 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		components.a = VK_COMPONENT_SWIZZLE_A;
 	}
 
-	if (!CheckSwizzle(ctx, &image_info, &components))
+	if (!VulkanNormalizeStorageComponentMapping(&image_info.format, &components))
 	{
 		EXIT("swizzle is not supported");
 	}
 
-	if (!CheckFormat(ctx, &image_info))
+	if (!VulkanImageFormatSupported(ctx, image_info))
 	{
 		EXIT("format is not supported");
 	}
 
 	vk_obj->SetNativeExtent(width, height);
-	vk_obj->format        = image_info.format;
-	vk_obj->image         = nullptr;
-	vk_obj->layout        = image_info.initialLayout;
-	vk_obj->guest_size    = *size;
+	vk_obj->format     = image_info.format;
+	vk_obj->image      = nullptr;
+	vk_obj->layout     = image_info.initialLayout;
+	vk_obj->guest_size = *size;
 
 	for (auto& view: vk_obj->image_view)
 	{
 		view = nullptr;
 	}
 
-	vkCreateImage(ctx->device, &image_info, nullptr, &vk_obj->image);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image == nullptr);
-
-	vkGetImageMemoryRequirements(ctx->device, vk_obj->image, &mem->requirements);
-
-	mem->property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-
-	bool allocated = VulkanAllocate(ctx, mem);
-
-	EXIT_NOT_IMPLEMENTED(!allocated);
-
-	VulkanBindImageMemory(ctx, vk_obj, mem);
-
-	vk_obj->memory = *mem;
+	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem));
 
 	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
 
-	VkImageViewCreateInfo create_info {};
-	create_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create_info.pNext                           = nullptr;
-	create_info.flags                           = 0;
-	create_info.image                           = vk_obj->image;
-	create_info.viewType                        = (three_dimensional ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D);
-	create_info.format                          = vk_obj->format;
-	create_info.components                      = components;
-	create_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create_info.subresourceRange.baseArrayLayer = 0;
-	create_info.subresourceRange.baseMipLevel   = 0;
-	create_info.subresourceRange.layerCount     = 1;
-	create_info.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
-
-	const int view_index = (three_dimensional ? VulkanImage::VIEW_3D : VulkanImage::VIEW_DEFAULT);
-	vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[view_index]);
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[view_index] == nullptr);
+	VulkanImageViewDescriptor view_descriptor {};
+	view_descriptor.image       = vk_obj->image;
+	view_descriptor.view_type   = three_dimensional ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
+	view_descriptor.format      = vk_obj->format;
+	view_descriptor.components  = components;
+	view_descriptor.level_count = VK_REMAINING_MIP_LEVELS;
+	const int view_index        = (three_dimensional ? VulkanImage::VIEW_3D : VulkanImage::VIEW_DEFAULT);
+	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[view_index]));
 	if (!three_dimensional)
 	{
-		create_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-		create_info.subresourceRange.baseArrayLayer = (arrayed_2d ? base_array : 0u);
-		create_info.subresourceRange.layerCount = (arrayed_2d ? depth - base_array : 1u);
-		vkCreateImageView(ctx->device, &create_info, nullptr, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]);
-		EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_ARRAY] == nullptr);
+		view_descriptor.view_type        = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+		view_descriptor.base_array_layer = arrayed_2d ? static_cast<uint32_t>(base_array) : 0u;
+		view_descriptor.layer_count      = arrayed_2d ? static_cast<uint32_t>(depth - base_array) : 1u;
+		EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]));
 	}
 
 	return vk_obj;
@@ -509,13 +370,12 @@ bool StorageTextureObject::Equal(const uint64_t* other) const
 		return false;
 	}
 
-	const auto fmt = static_cast<uint32_t>((params[PARAM_FORMAT] >> 16u) & 0xffffu);
+	const auto fmt       = static_cast<uint32_t>((params[PARAM_FORMAT] >> 16u) & 0xffffu);
 	const auto other_fmt = static_cast<uint32_t>((other[PARAM_FORMAT] >> 16u) & 0xffffu);
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
 	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && params[PARAM_LEVELS] == other[PARAM_LEVELS] &&
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
-	        NormalizeStorageTextureSwizzle(fmt, params[PARAM_SWIZZLE]) ==
-	            NormalizeStorageTextureSwizzle(other_fmt, other[PARAM_SWIZZLE]) &&
+	        NormalizeStorageTextureSwizzle(fmt, params[PARAM_SWIZZLE]) == NormalizeStorageTextureSwizzle(other_fmt, other[PARAM_SWIZZLE]) &&
 	        params[PARAM_RESOURCE_TYPE] == other[PARAM_RESOURCE_TYPE] && params[PARAM_DEPTH] == other[PARAM_DEPTH] &&
 	        params[PARAM_BASE_ARRAY] == other[PARAM_BASE_ARRAY]);
 }
