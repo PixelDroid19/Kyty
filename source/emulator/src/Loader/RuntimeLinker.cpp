@@ -797,11 +797,17 @@ static KYTY_SYSV_ABI uint64_t ResolveLazyPlt(void* program_ptr, uint64_t rel_ind
 	{
 		ri = GetRelocationInfo(program->dynamic_info->jmprela_table + rel_index, program);
 	}
-	if (!ri.resolved || ri.value == 0 || !Core::VirtualMemory::PatchReplace(ri.vaddr, ri.value))
+	if (!ri.resolved || ri.value == 0)
 	{
 		const auto clean_name = Log::IsColoredPrintf() ? ri.name : Log::RemoveColors(ri.name);
+		std::fprintf(stderr, "KYTY_LOADER: lazy_plt unresolved=%u value=%u import=%s\n", ri.resolved ? 0u : 1u,
+		             ri.value != 0 ? 1u : 0u, clean_name.C_Str());
+		std::fflush(stderr);
 		EXIT("can't resolve lazy PLT import: %s\n", clean_name.C_Str());
 	}
+	// PatchReplace reports whether the slot changed. A relocation that already
+	// installed this exact target is valid and must remain idempotent here.
+	(void)Core::VirtualMemory::PatchReplace(ri.vaddr, ri.value);
 
 	return ri.value;
 }
