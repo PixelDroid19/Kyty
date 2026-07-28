@@ -561,35 +561,24 @@ static KYTY_SYSV_ABI uint16_t* c_wcsncpy(uint16_t* destination, const uint16_t* 
 	}
 	return destination;
 }
-static bool c_is_ascii_alphanumeric(uint32_t character)
-{
-	return (character >= '0' && character <= '9') || (character >= 'A' && character <= 'Z') ||
-	       (character >= 'a' && character <= 'z');
-}
-
-static bool c_is_ascii_punctuation(uint32_t character)
-{
-	return (character >= '!' && character <= '/') || (character >= ':' && character <= '@') ||
-	       (character >= '[' && character <= '`') || (character >= '{' && character <= '~');
-}
-
 static KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
 {
 	if (character > 0x7f)
 	{
+		EXIT_NOT_IMPLEMENTED(character > 0x7f);
 		return 0;
 	}
 
-	// The guest CRT passes compact descriptor values rather than host wctype_t
-	// masks. Class 2 appears in its wide printf parser and must accept conversion
-	// letters as well as decimal width and precision digits. Keep this ASCII-only
-	// so host locale state cannot alter guest control flow.
-	switch (character_class)
+	// The verified descriptor scans decimal width characters. Do not delegate to
+	// the host locale or accept unrelated descriptor values: either behavior can
+	// change guest control flow without an established ABI contract.
+	if (character_class != 2)
 	{
-		case 2: return c_is_ascii_alphanumeric(character) ? 1 : 0;
-		case 9: return c_is_ascii_punctuation(character) ? 1 : 0;
-		default: return 0;
+		EXIT_NOT_IMPLEMENTED(character_class != 2);
+		return 0;
 	}
+
+	return character >= '0' && character <= '9' ? 1 : 0;
 }
 static KYTY_SYSV_ABI int c_Wctombx(char* dst, uint32_t character, std::mbstate_t* /*state*/, const void* /*cvtvec*/)
 {
@@ -1274,6 +1263,10 @@ static KYTY_SYSV_ABI int c_vsnprintf_s(char* s, size_t dn, size_t count, const c
 
 static bool c_wide_format_supported(const char* format)
 {
+	// The narrow formatter consumes the guest VaList. Keep the accepted grammar
+	// limited to formats whose argument consumption is established: literal text,
+	// %% , %i and %08x. Accepting the host printf grammar here would silently
+	// misinterpret unsupported guest argument layouts.
 	for (const char* cursor = format; *cursor != '\0'; cursor++)
 	{
 		if (*cursor != '%')
@@ -1281,55 +1274,15 @@ static bool c_wide_format_supported(const char* format)
 			continue;
 		}
 		cursor++;
-		if (*cursor == '%')
+		if (*cursor == '%' || *cursor == 'i')
 		{
 			continue;
 		}
-
-		while (*cursor == '-' || *cursor == '+' || *cursor == ' ' || *cursor == '#' || *cursor == '0')
-		{
-			cursor++;
-		}
-		if (*cursor == '*')
-		{
-			cursor++;
-		} else
-		{
-			while (std::isdigit(static_cast<unsigned char>(*cursor)) != 0)
-			{
-				cursor++;
-			}
-		}
-		if (*cursor == '.')
-		{
-			cursor++;
-			if (*cursor == '*')
-			{
-				cursor++;
-			} else
-			{
-				while (std::isdigit(static_cast<unsigned char>(*cursor)) != 0)
-				{
-					cursor++;
-				}
-			}
-		}
-		if (*cursor == 'h' || *cursor == 'l')
-		{
-			const char length = *cursor++;
-			if (*cursor == length)
-			{
-				cursor++;
-			}
-		} else if (*cursor == 't' || *cursor == 'j' || *cursor == 'z')
-		{
-			cursor++;
-		}
-
-		if (std::strchr("diuxXobfFeEgGcsp", *cursor) == nullptr)
+		if (std::strncmp(cursor, "08x", 3) != 0)
 		{
 			return false;
 		}
+		cursor += 2;
 	}
 	return true;
 }
