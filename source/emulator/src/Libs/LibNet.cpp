@@ -5,6 +5,7 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Network.h"
+#include "Emulator/Network/HttpUri.h"
 
 #include <cinttypes>
 #include <cstddef>
@@ -222,6 +223,7 @@ LIB_DEFINE(InitNet_1_Http)
 	LIB_FUNC("yigr4V0-HTM", Http::HttpSetRecvTimeOut);
 	LIB_FUNC("T-mGo9f3Pu4", Http::HttpSetAutoRedirect);
 	LIB_FUNC("qFg2SuyTJJY", Http::HttpSetAuthEnabled);
+	LIB_FUNC("IWalAn-guFs", Http::HttpUriParse);
 }
 
 } // namespace LibHttp
