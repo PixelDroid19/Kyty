@@ -131,6 +131,14 @@ int KYTY_SYSV_ABI   GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, u
 uint32_t* KYTY_SYSV_ABI GraphicsCbNop(CommandBuffer* buf, uint32_t num_dw);
 // Legacy name used by older call sites; same entry as GraphicsCbNop.
 uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw);
+// Emits the fixed indexed UCONFIG command used during Gen5 command-buffer
+// initialization. The established ABI supplies zero for both controls; other
+// encodings are rejected until their hardware fields are verified.
+uint32_t* KYTY_SYSV_ABI GraphicsCbEmitDefaultIndexedUconfig(CommandBuffer* buf, uint32_t control0, uint32_t control1);
+// Decodes the indexed UCONFIG form that writes VGT_INDEX_TYPE. available_dwords
+// includes the selector and value, and may include later PM4 packets.
+bool GraphicsDecodeIndexedUconfigVgtIndexType(uint32_t header, const uint32_t* body, uint32_t available_dwords,
+                                              uint32_t* index_type);
 // Byte size of a CbNop of the given dword length (header included).
 uint32_t KYTY_SYSV_ABI GraphicsCbNopGetSize(uint32_t size_in_dwords);
 // Byte size of GraphicsCbDispatch (fixed 5-dword packet).

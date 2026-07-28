@@ -4385,6 +4385,17 @@ KYTY_CP_OP_PARSER(cp_op_set_uconfig_reg)
 	return s + 1;
 }
 
+KYTY_CP_OP_PARSER(cp_op_set_uconfig_reg_index)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	uint32_t index_type = 0;
+	EXIT_NOT_IMPLEMENTED(!Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(cmd_id, buffer, dw, &index_type));
+
+	cp->SetIndexType(index_type);
+	return 2;
+}
+
 KYTY_CP_OP_PARSER(cp_op_wait_flip_done)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -5620,6 +5631,7 @@ static void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_SET_SH_REG]              = cp_op_set_shader_reg;
 	g_cp_op_func[Pm4::IT_DISPATCH_DIRECT]         = cp_op_dispatch_direct;
 	g_cp_op_func[Pm4::IT_SET_UCONFIG_REG]         = cp_op_set_uconfig_reg;
+	g_cp_op_func[Pm4::IT_SET_UCONFIG_REG_INDEX]   = cp_op_set_uconfig_reg_index;
 	g_cp_op_func[Pm4::IT_WRITE_CONST_RAM]         = cp_op_write_const_ram;
 	g_cp_op_func[Pm4::IT_DUMP_CONST_RAM]          = cp_op_dump_const_ram;
 	g_cp_op_func[Pm4::IT_INCREMENT_CE_COUNTER]    = cp_op_increment_ce_counter;

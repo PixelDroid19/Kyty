@@ -16,6 +16,8 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Libs/Errno.h"
+#include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 
 #include <cstring>
@@ -4463,6 +4465,79 @@ TEST(EmulatorGraphicsPackets, EncodesCbNopAsFullType3Packet)
 	EXPECT_EQ(cmd[3], 0u);
 	EXPECT_EQ(Gen5::GraphicsCbNop(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1), nullptr);
 	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(cmd), 4u);
+}
+
+TEST(EmulatorGraphicsPackets, RegistersAndEncodesDefaultIndexedUconfig)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libGraphicsDriver_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"-KRzWekV120";
+	query.library              = U"Agc";
+	query.library_version      = 1;
+	query.module               = U"Agc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* record = symbols.Find(query);
+	ASSERT_NE(record, nullptr);
+
+	using EmitIndexedUconfig = uint32_t* (KYTY_SYSV_ABI*)(Gen5::CommandBuffer*, uint32_t, uint32_t);
+	auto emit_indexed_uconfig = reinterpret_cast<EmitIndexedUconfig>(record->vaddr);
+	ASSERT_NE(emit_indexed_uconfig, nullptr);
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	EXPECT_EQ(emit_indexed_uconfig(nullptr, 0u, 0u), nullptr);
+	EXPECT_EQ(emit_indexed_uconfig(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 0u), nullptr);
+
+	uint32_t* cmd = emit_indexed_uconfig(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd, storage);
+	EXPECT_EQ(cb.cursor_up, storage + 3);
+	EXPECT_EQ(cmd[0], 0xc0017a00u);
+	EXPECT_EQ(cmd[1], 0x20000243u);
+	EXPECT_EQ(cmd[2], 0x00000400u);
+}
+
+TEST(EmulatorGraphicsPackets, DecodesIndexedUconfigVgtIndexType)
+{
+	const uint32_t body[] = {0x20000243u, 0x00000400u};
+	uint32_t       index_type = 0xffffffffu;
+
+	EXPECT_TRUE(Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(0xc0017a00u, body, 2u, &index_type));
+	EXPECT_EQ(index_type, 0u);
+	EXPECT_FALSE(Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(0xc0017900u, body, 2u, &index_type));
+	EXPECT_FALSE(Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(0xc0017a00u, body, 1u, &index_type));
+	EXPECT_FALSE(Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(0xc0017a00u, body, 2u, nullptr));
+
+	const uint32_t other_register[] = {0x20000242u, 0x00000400u};
+	EXPECT_FALSE(Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(0xc0017a00u, other_register, 2u, &index_type));
 }
 
 TEST(EmulatorGraphicsPackets, DecodesCbNopBodyWithoutSideEffects)

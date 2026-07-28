@@ -2493,6 +2493,42 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t nu
 	return GraphicsCbNop(buf, num_dw);
 }
 
+uint32_t* KYTY_SYSV_ABI GraphicsCbEmitDefaultIndexedUconfig(CommandBuffer* buf, uint32_t control0, uint32_t control1)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr || control0 != 0u || control1 != 0u)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(3);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	// SET_UCONFIG_REG_INDEX selects the indexed UCONFIG bootstrap register.
+	cmd[0] = KYTY_PM4(3, Pm4::IT_SET_UCONFIG_REG_INDEX, 0u);
+	cmd[1] = Pm4::VGT_INDEX_TYPE_INDEXED_UCONFIG_SELECTOR;
+	cmd[2] = Pm4::VGT_INDEX_TYPE_DEFAULT_VALUE;
+	return cmd;
+}
+
+bool GraphicsDecodeIndexedUconfigVgtIndexType(uint32_t header, const uint32_t* body, uint32_t available_dwords,
+                                              uint32_t* index_type)
+{
+	if (body == nullptr || index_type == nullptr || available_dwords < 2u ||
+	    header != KYTY_PM4(3, Pm4::IT_SET_UCONFIG_REG_INDEX, 0u) || body[0] != Pm4::VGT_INDEX_TYPE_INDEXED_UCONFIG_SELECTOR)
+	{
+		return false;
+	}
+
+	// VGT_INDEX_TYPE shares the low two-bit index-size field with IT_INDEX_TYPE.
+	*index_type = body[1] & Pm4::VGT_INDEX_TYPE_SIZE_MASK;
+	return true;
+}
+
 uint32_t KYTY_SYSV_ABI GraphicsCbNopGetSize(uint32_t size_in_dwords)
 {
 	return 4u * size_in_dwords;

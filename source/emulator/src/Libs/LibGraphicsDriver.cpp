@@ -91,6 +91,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("vRoArM9zaIk", Gen5::GraphicsSetUcRegIndirectPatchAddRegisters);
 	// LtTouSCZjHM: sceAgcCbNop (encode NOP of length num_dw).
 	LIB_FUNC("LtTouSCZjHM", Gen5::GraphicsCbNop);
+	LIB_FUNC("-KRzWekV120", Gen5::GraphicsCbEmitDefaultIndexedUconfig);
 	LIB_FUNC("t7PlZ9nt5Lc", Gen5::GraphicsCbNopGetSize);
 	// WmAc2MEj6Io: sceAgcDcbDmaData. Distinct from MWiElSNE8j8 WaitUntilSafe.
 	LIB_FUNC("WmAc2MEj6Io", Gen5::GraphicsDcbDmaData);

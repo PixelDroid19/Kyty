@@ -63,6 +63,7 @@ constexpr uint32_t IT_SET_CONTEXT_REG           = 0x69;
 constexpr uint32_t IT_SET_SH_REG                = 0x76;
 constexpr uint32_t IT_SET_QUEUE_REG             = 0x78;
 constexpr uint32_t IT_SET_UCONFIG_REG           = 0x79;
+constexpr uint32_t IT_SET_UCONFIG_REG_INDEX     = 0x7A;
 constexpr uint32_t IT_WRITE_CONST_RAM           = 0x81;
 constexpr uint32_t IT_DUMP_CONST_RAM            = 0x83;
 constexpr uint32_t IT_INCREMENT_CE_COUNTER      = 0x84;
@@ -966,6 +967,9 @@ constexpr uint32_t VGT_PRIMITIVE_TYPE                 = 0x242;
 constexpr uint32_t VGT_PRIMITIVE_TYPE_PRIM_TYPE_SHIFT = 0;
 constexpr uint32_t VGT_PRIMITIVE_TYPE_PRIM_TYPE_MASK  = 0x3F;
 constexpr uint32_t VGT_INDEX_TYPE                     = 0x243;
+constexpr uint32_t VGT_INDEX_TYPE_INDEXED_UCONFIG_SELECTOR = (2u << 28u) | VGT_INDEX_TYPE;
+constexpr uint32_t VGT_INDEX_TYPE_DEFAULT_VALUE            = 0x00000400u;
+constexpr uint32_t VGT_INDEX_TYPE_SIZE_MASK                = 0x3u;
 
 constexpr uint32_t VGT_OBJECT_ID             = 0x248;
 constexpr uint32_t GE_INDX_OFFSET            = 0x24A;
