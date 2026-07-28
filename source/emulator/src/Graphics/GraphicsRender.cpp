@@ -3344,7 +3344,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
 		{
 			const auto& blend                         = ctx->GetBlendControl(rt);
-			p.static_params->color_mask[rt]           = (ctx->GetRenderTargetMask() >> (rt * 4u)) & 0xFu;
+			p.static_params->color_mask[rt]           =
+			    State::ResolveColorWriteMask(ctx->GetRenderTargetMask(), sh_regs.m_cbShaderMask, rt);
 			p.static_params->color_srcblend[rt]       = blend.color_srcblend;
 			p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
 			p.static_params->color_destblend[rt]      = blend.color_destblend;

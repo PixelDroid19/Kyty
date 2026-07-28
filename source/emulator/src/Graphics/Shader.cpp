@@ -1087,16 +1087,9 @@ static void ps_check(const HW::PsStageRegisters& ps, const HW::ShaderRegisters& 
 	EXIT_NOT_IMPLEMENTED(!ShaderPixelInputMaskSupported(sh.ps_input_ena, sh.ps_input_addr));
 	// EXIT_NOT_IMPLEMENTED(ps.m_spiPsInControl != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(sh.baryc_cntl != 0x00000000 && sh.baryc_cntl != 0x01000000);
-	// CB_SHADER_MASK: 4 enable bits per RT0..RT7. Captured values: 0xf (RT0)
-	// and 0xffff (RT0+RT1). Partial nibble channel masks are not yet modeled.
-	{
-		const uint32_t mask = sh.m_cbShaderMask;
-		for (uint32_t rt = 0; rt < 8u; rt++)
-		{
-			const uint32_t nibble = (mask >> (rt * 4u)) & 0xfu;
-			EXIT_NOT_IMPLEMENTED(nibble != 0u && nibble != 0xfu);
-		}
-	}
+	// CB_SHADER_MASK is a four-bit per-target channel gate. Partial masks are
+	// valid hardware state and are intersected with CB_TARGET_MASK when the
+	// Vulkan color-write state is assembled.
 
 	EXIT_NOT_IMPLEMENTED(sh.db_shader_control.other_bits != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(sh.m_paScShaderControl != 0x00000000);

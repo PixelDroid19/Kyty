@@ -244,6 +244,13 @@ ColorTargetLayout ResolveColorTargetLayout(uint32_t mask, uint32_t configured_ta
 	return layout;
 }
 
+uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32_t target_index)
+{
+	EXIT_NOT_IMPLEMENTED(target_index >= ColorTargetLayout::kMaxTargets);
+	const uint32_t shift = target_index * 4u;
+	return static_cast<uint8_t>(((target_mask >> shift) & (shader_mask >> shift)) & 0xFu);
+}
+
 Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exact_render_target_found)
 {
 	if (exact_render_target_found)

@@ -146,6 +146,9 @@ struct ColorTargetLayout
 
 [[nodiscard]] ColorTargetLayout ResolveColorTargetLayout(uint32_t mask);
 [[nodiscard]] ColorTargetLayout ResolveColorTargetLayout(uint32_t mask, uint32_t configured_target_count);
+// CB_TARGET_MASK admits a render-target channel and CB_SHADER_MASK admits the
+// corresponding pixel-shader export. Vulkan must receive their intersection.
+[[nodiscard]] uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32_t target_index);
 
 // A sampled surface may reuse a render target or storage texture when
 // FindRenderTexture / FindStorageTexture found a live object (Equals, non-exact
