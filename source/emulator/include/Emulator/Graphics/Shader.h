@@ -1239,10 +1239,26 @@ struct ShaderPixelInputInfo
 	ShaderBindResources    bind;
 };
 
+enum class ShaderPixelInterpolatorSource
+{
+	Parameter,
+	Default
+};
+
+struct ShaderPixelInterpolator
+{
+	ShaderPixelInterpolatorSource source        = ShaderPixelInterpolatorSource::Parameter;
+	uint32_t                      location      = 0;
+	bool                          flat          = false;
+	uint32_t                      default_value = 0;
+};
+
 [[nodiscard]] bool     ShaderPixelInputMaskSupported(uint32_t enable_mask, uint32_t address_mask);
 [[nodiscard]] bool     ShaderPixelPositionEnabled(uint32_t enable_mask, uint32_t address_mask);
 [[nodiscard]] uint32_t ShaderResolvePixelInterpolatorSetting(uint32_t stored_setting, uint32_t written_mask, uint32_t index);
 [[nodiscard]] uint32_t ShaderPixelCanonicalInterpolator(const ShaderPixelInputInfo& info, uint32_t index);
+[[nodiscard]] bool ShaderDecodePixelInterpolator(uint32_t setting, ShaderPixelInterpolator* interpolator);
+[[nodiscard]] float ShaderPixelInterpolatorDefaultComponent(const ShaderPixelInterpolator& interpolator, uint32_t component);
 
 struct ShaderSharp
 {

@@ -8353,6 +8353,45 @@ KYTY_RECOMPILER_FUNC(Recompile_VInterpP1F32_VdstVsrcAttrChan)
 	return true;
 }
 
+static bool RecompilePixelInterpolatorLoad(Spirv* spirv, const ShaderPixelInputInfo* ps_info, uint32_t input, uint32_t component,
+                                           const String8& index_str, const String8& dst, String8* dst_source)
+{
+	EXIT_IF(spirv == nullptr);
+	EXIT_IF(ps_info == nullptr);
+	EXIT_IF(dst_source == nullptr);
+	EXIT_NOT_IMPLEMENTED(input >= ps_info->input_num);
+	EXIT_NOT_IMPLEMENTED(component >= 4u);
+
+	ShaderPixelInterpolator interpolator {};
+	EXIT_NOT_IMPLEMENTED(!ShaderDecodePixelInterpolator(ps_info->interpolator_settings[input], &interpolator));
+
+	if (interpolator.source == ShaderPixelInterpolatorSource::Default)
+	{
+		const auto value = spirv->GetConstantFloat(ShaderPixelInterpolatorDefaultComponent(interpolator, component));
+		EXIT_IF(value == "unknown_float_constant");
+
+		static const char* default_text = R"(
+                       OpStore %<dst> %<value>
+)";
+		*dst_source += String8(default_text).ReplaceStr("<dst>", dst).ReplaceStr("<value>", value);
+		return true;
+	}
+
+	const uint32_t attr = ShaderPixelCanonicalInterpolator(*ps_info, input);
+	String8 load0 = String8::FromPrintf("%%t0_<index> = OpAccessChain %%_ptr_Input_float %%attr%u %%uint_%u", attr, component);
+
+	static const char* parameter_text = R"(
+         <load0>
+         %t1_<index> = OpLoad %float %t0_<index>
+                       OpStore %<dst> %t1_<index>
+)";
+	*dst_source += String8(parameter_text)
+	                   .ReplaceStr("<dst>", dst)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VInterpP2F32_VdstVsrcAttrChan)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -8368,21 +8407,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VInterpP2F32_VdstVsrcAttrChan)
 
 	const auto* ps_info = spirv->GetPsInputInfo();
 	EXIT_IF(ps_info == nullptr);
-	const uint32_t attr = ShaderPixelCanonicalInterpolator(*ps_info, inst.src[1].constant.u);
-	String8 load0 = String8::FromPrintf("%%t0_<index> = OpAccessChain %%_ptr_Input_float %%attr%u %%uint_%u", attr,
-	                                    inst.src[2].constant.u);
-
-	// TODO() check VSKIP
-	// TODO() check EXEC
-
-	static const char* text = R"(
-         <load0>
-         %t1_<index> = OpLoad %float %t0_<index>
-                       OpStore %<dst> %t1_<index>
-)";
-	*dst_source += String8(text).ReplaceStr("<dst>", dst_value.value).ReplaceStr("<load0>", load0).ReplaceStr("<index>", index_str);
-
-	return true;
+	return RecompilePixelInterpolatorLoad(spirv, ps_info, inst.src[1].constant.u, inst.src[2].constant.u, index_str, dst_value.value,
+	                                      dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VInterpMovF32_VdstVsrcAttrChan)
@@ -8402,21 +8428,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VInterpMovF32_VdstVsrcAttrChan)
 
 	const auto* ps_info = spirv->GetPsInputInfo();
 	EXIT_IF(ps_info == nullptr);
-	const uint32_t attr = ShaderPixelCanonicalInterpolator(*ps_info, inst.src[1].constant.u);
-	String8 load0 = String8::FromPrintf("%%t0_<index> = OpAccessChain %%_ptr_Input_float %%attr%u %%uint_%u", attr,
-	                                    inst.src[2].constant.u);
-
-	// TODO() check VSKIP
-	// TODO() check EXEC
-
-	static const char* text = R"(
-         <load0>
-         %t1_<index> = OpLoad %float %t0_<index>
-                       OpStore %<dst> %t1_<index>
-)";
-	*dst_source += String8(text).ReplaceStr("<dst>", dst_value.value).ReplaceStr("<load0>", load0).ReplaceStr("<index>", index_str);
-
-	return true;
+	return RecompilePixelInterpolatorLoad(spirv, ps_info, inst.src[1].constant.u, inst.src[2].constant.u, index_str, dst_value.value,
+	                                      dst_source);
 }
 
 /* XXX: Mad, Madak, Madmk, Max3, Min3, Med3, Fma */
@@ -10353,7 +10366,12 @@ void Spirv::WriteHeader()
 				{
 					if (ShaderPixelCanonicalInterpolator(*m_ps_input_info, i) == i)
 					{
-						vars.Add(String8::FromPrintf("%%attr%d", i));
+						ShaderPixelInterpolator interpolator {};
+						EXIT_NOT_IMPLEMENTED(!ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator));
+						if (interpolator.source == ShaderPixelInterpolatorSource::Parameter)
+						{
+							vars.Add(String8::FromPrintf("%%attr%d", i));
+						}
 					}
 				}
 				if (m_ps_input_info->ps_pos_xy)
@@ -10475,16 +10493,19 @@ void Spirv::WriteAnnotations()
 					{
 						continue;
 					}
-					EXIT_NOT_IMPLEMENTED((m_ps_input_info->interpolator_settings[i] & ~static_cast<uint32_t>(0x41fu)) != 0);
 
-					bool     flat     = (m_ps_input_info->interpolator_settings[i] & 0x400u) != 0;
-					uint32_t location = m_ps_input_info->interpolator_settings[i] & 0x1fu;
+					ShaderPixelInterpolator interpolator {};
+					EXIT_NOT_IMPLEMENTED(!ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator));
+					if (interpolator.source == ShaderPixelInterpolatorSource::Default)
+					{
+						continue;
+					}
 
-					if (flat)
+					if (interpolator.flat)
 					{
 						vars.Add(String8::FromPrintf("OpDecorate %%attr%u Flat", i));
 					}
-					vars.Add(String8::FromPrintf("OpDecorate %%attr%u Location %u", i, location));
+					vars.Add(String8::FromPrintf("OpDecorate %%attr%u Location %u", i, interpolator.location));
 				}
 				if (m_ps_input_info->ps_pos_xy)
 				{
@@ -10943,7 +10964,12 @@ void Spirv::WriteGlobalVariables()
 				{
 					if (ShaderPixelCanonicalInterpolator(*m_ps_input_info, i) == i)
 					{
-						vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_v4float Input", i));
+						ShaderPixelInterpolator interpolator {};
+						EXIT_NOT_IMPLEMENTED(!ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator));
+						if (interpolator.source == ShaderPixelInterpolatorSource::Parameter)
+						{
+							vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_v4float Input", i));
+						}
 					}
 				}
 				if (m_ps_input_info->ps_pos_xy)

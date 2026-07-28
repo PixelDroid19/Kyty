@@ -1168,6 +1168,57 @@ uint32_t ShaderPixelCanonicalInterpolator(const ShaderPixelInputInfo& info, uint
 	return index;
 }
 
+bool ShaderDecodePixelInterpolator(uint32_t setting, ShaderPixelInterpolator* interpolator)
+{
+	constexpr uint32_t kOffsetMask       = 0x3fu;
+	constexpr uint32_t kDefaultOffset    = 0x20u;
+	constexpr uint32_t kDefaultValueMask = 0x300u;
+	constexpr uint32_t kFlatMask         = 0x400u;
+	constexpr uint32_t kKnownMask        = kOffsetMask | kDefaultValueMask | kFlatMask;
+
+	EXIT_IF(interpolator == nullptr);
+	if ((setting & ~kKnownMask) != 0)
+	{
+		return false;
+	}
+
+	const uint32_t offset = setting & kOffsetMask;
+	if (offset < kDefaultOffset)
+	{
+		if ((setting & kDefaultValueMask) != 0)
+		{
+			return false;
+		}
+		interpolator->source        = ShaderPixelInterpolatorSource::Parameter;
+		interpolator->location      = offset;
+		interpolator->flat          = (setting & kFlatMask) != 0;
+		interpolator->default_value = 0;
+		return true;
+	}
+
+	// OFFSET=0x20 selects a fixed-function default vector. The flat form is
+	// ambiguous with a parameter-cache mode and requires producer metadata.
+	if (offset != kDefaultOffset || (setting & kFlatMask) != 0)
+	{
+		return false;
+	}
+
+	interpolator->source        = ShaderPixelInterpolatorSource::Default;
+	interpolator->location      = 0;
+	interpolator->flat          = false;
+	interpolator->default_value = (setting & kDefaultValueMask) >> 8u;
+	return true;
+}
+
+float ShaderPixelInterpolatorDefaultComponent(const ShaderPixelInterpolator& interpolator, uint32_t component)
+{
+	EXIT_IF(interpolator.source != ShaderPixelInterpolatorSource::Default);
+	EXIT_IF(component >= 4u);
+
+	const bool one = (component == 3u ? (interpolator.default_value & 0x1u) != 0 : (interpolator.default_value & 0x2u) != 0);
+	return (one ? 1.0f : 0.0f);
+}
+
 static void cs_check(const HW::CsStageRegisters& cs, const HW::ShaderRegisters& /*sh*/)
 {
 	// EXIT_NOT_IMPLEMENTED(cs.num_thread_x != 0x00000040);
