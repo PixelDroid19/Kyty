@@ -2010,7 +2010,7 @@ TEST(EmulatorGraphicsPackets, ResolvesGen5Color3DVolumeLayoutOnceForSampledAndSt
 	EXPECT_FALSE(Gen5GetStandard4KBVolumeTextureLayout(75u, 8u, 16u, 9u, 8u, 1u, 5u, &layout));
 }
 
-// Captured Blasphemous 2 package descriptor: BC3, kStandard4KB,
+// Captured package descriptor: BC3, kStandard4KB,
 // 2048x1024, MAX_MIP=11. Levels 6..11 share the physical 4 KiB mip tail.
 TEST(EmulatorGraphicsPackets, DetilesGen5Standard4KbBc3MipTail)
 {
@@ -3503,7 +3503,7 @@ TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0)
 
 // DPP is selected by the src0 escape value 250. The control word encodes the
 // source VGPR in its low byte and a lane permutation in bits [16:8]. This is
-// the v_mov_b32 sequence captured while starting Blasphemous 2.
+// the v_mov_b32 sequence captured during guest startup.
 TEST(EmulatorGraphicsPackets, ParsesVop1DppQuadPermSource)
 {
 	const uint32_t word0    = (0x3fu << 25u) | (10u << 17u) | (0x01u << 9u) | 250u;
@@ -3563,7 +3563,7 @@ TEST(EmulatorGraphicsPackets, EmitsVop1DppQuadPermAsSubgroupShuffle)
 }
 
 // On Gen5, MTBUF dfmt=6/nfmt=1 is the encoded 32_FLOAT buffer format.
-// Blasphemous 2 issues this while loading level0.
+// A guest submits this while loading its first level.
 TEST(EmulatorGraphicsPackets, ParsesGen5MtbufFloat32)
 {
 	const uint32_t word0    = (0x3au << 26u) | (1u << 23u) | (6u << 19u) | (1u << 13u);
