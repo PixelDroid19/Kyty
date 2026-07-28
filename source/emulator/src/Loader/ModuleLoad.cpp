@@ -634,10 +634,9 @@ bool ResolvedMatchesHle(RuntimeLinker* rt, const SymbolResolve& sr, uint64_t res
 namespace ModuleLifecycleCoordinator {
 namespace {
 
-bool IsBootModule(const ModuleLoadPlan& plan, const ModulePlanEntry& entry)
+bool IsEagerPlanEntry(const ModulePlanEntry& entry)
 {
-	return entry.role == ModulePlanRole::PackageSidecar ||
-	       (ModuleLoadPlanning::RequiresFullPackageBootstrap(plan) && entry.role == ModulePlanRole::AdjacentShared);
+	return entry.role == ModulePlanRole::PackageSidecar || entry.role == ModulePlanRole::AdjacentShared;
 }
 
 void PushExportConflict(ModuleLoadPlanDiagnostics* diag, const String& note)
@@ -875,7 +874,7 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 	// Fail-before-mutate: re-probe every adjacent entry before loading any.
 	for (uint32_t i = 0; i < plan.count; ++i)
 	{
-		if (!IsBootModule(plan, plan.entries[i]))
+		if (!IsEagerPlanEntry(plan.entries[i]))
 		{
 			continue;
 		}
@@ -916,7 +915,7 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 
 	for (uint32_t i = 0; i < plan.count; ++i)
 	{
-		if (!IsBootModule(plan, plan.entries[i]))
+		if (!IsEagerPlanEntry(plan.entries[i]))
 		{
 			continue;
 		}
@@ -1069,13 +1068,13 @@ void AfterHleSymbolsRegistered(RuntimeLinker* rt)
 		plan               = g_pending.plan;
 		g_pending.eager    = false;
 		g_pending.hle_ready = true;
-		// Keep the validated plan after boot application. A package with
-		// Media/Modules has already admitted all service constructors; other
-		// packages continue to resolve their deferred providers only on a
-		// versioned lazy PLT import.
+		// This path is entered only for an explicit diagnostic session or a
+		// validated complete package bootstrap. Revalidate and apply the same
+		// complete adjacent set as one transaction; ordinary sessions continue
+		// to defer providers to an exact lazy import.
 		for (uint32_t i = 0; i < plan.count; ++i)
 		{
-			if (IsBootModule(plan, plan.entries[i]))
+			if (IsEagerPlanEntry(plan.entries[i]))
 			{
 				g_pending.attempted[i] = true;
 			}
