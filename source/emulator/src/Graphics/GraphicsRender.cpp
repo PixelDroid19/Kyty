@@ -5227,25 +5227,12 @@ static ResolutionCohortDecision PrepareDepthOnlyDisplayResolutionCohort(CommandB
 	input.expected_count   = 1;
 	const auto candidate   = InternalResolutionRuntimeEvaluateCohort(input);
 	auto       decision    = EvaluateDepthOnlyDisplayExtentCompatibility(depth_extent, registered_extent, candidate);
-	if (decision.classification == ResolutionClassification::Unsupported)
+	if (decision.classification != ResolutionClassification::Scaled)
 	{
-		std::fprintf(stderr,
-		             "Depth-only display selection rejected before materialization: guest=%ux%u registered=%ux%u reason=%s "
-		             "attachment_reason=%s htile=%u ambiguous_alias=%u overlaps=%u exact=%u entries=%u truncated=%u (FALLBACK ALLOWED)\n",
-		             depth_extent.width, depth_extent.height, registered_extent.width, registered_extent.height,
-		             ResolutionCohortReasonName(decision.reason), ResolutionNativeReasonName(candidate.attachment_native_reason),
-		             depth.htile ? 1u : 0u, attachment.resource.ambiguous_alias ? 1u : 0u, overlap.total_count, overlap.exact_count,
-		             overlap.entry_count, overlap.truncated ? 1u : 0u);
-		for (uint32_t index = 0; index < overlap.entry_count; ++index)
-		{
-			const auto& entry = overlap.entries[index];
-			std::fprintf(stderr, "Depth-only display overlap: type=%u relation=%u count=%u exact=%u read_only=%u\n",
-			             static_cast<unsigned>(entry.type), static_cast<unsigned>(entry.relation), entry.count, entry.exact ? 1u : 0u,
-			             entry.all_read_only ? 1u : 0u);
-		}
-		std::fflush(stderr);
-		decision.classification = ResolutionClassification::Scaled;
-		decision.host_extent    = registered_extent;
+		// A depth-only pass has no display attachment to resize. If its depth
+		// resource is not part of a valid scaling cohort, preserving its guest
+		// extent avoids changing compressed or aliased depth coordinates.
+		return native;
 	}
 	if (decision.classification == ResolutionClassification::Scaled)
 	{
