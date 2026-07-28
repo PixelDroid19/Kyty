@@ -1,9 +1,10 @@
-#include "Emulator/Libs/Np.h"
-#include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/SymbolDatabase.h"
-#include "Emulator/Config.h"
-#include "Emulator/Log.h"
 #include "Kyty/UnitTest.h"
+
+#include "Emulator/Config.h"
+#include "Emulator/Libs/Libs.h"
+#include "Emulator/Libs/Np.h"
+#include "Emulator/Loader/SymbolDatabase.h"
+#include "Emulator/Log.h"
 
 #include <cstring>
 
@@ -74,20 +75,22 @@ TEST(EmulatorNp, ResolvesCppWebApiIntrusivePointerArrow)
 	ASSERT_NE(rec, nullptr);
 	ASSERT_NE(rec->vaddr, 0u);
 
-	int   value = 0;
-	void* slot  = &value;
+	int   value         = 0;
+	void* slot          = &value;
 	using OperatorArrow = KYTY_SYSV_ABI void* (*)(const void* self);
 	auto* fn            = reinterpret_cast<OperatorArrow>(rec->vaddr);
 	EXPECT_EQ(fn(&slot), &value);
 }
 
-TEST(EmulatorNp, ReportsSignedOutForAccountIdLookup)
+TEST(EmulatorNp, ReportsSignedOutForOfflineAccountLookups)
 {
+	EnsureLog();
+
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libNpManager_1", &symbols));
 
 	Loader::SymbolResolve query {};
-	query.name                 = U"VgYczPGB5ss";
+	query.name                 = U"rbknaUjpqWo";
 	query.library              = U"NpManager";
 	query.library_version      = 1;
 	query.module               = U"NpManager";
@@ -95,12 +98,23 @@ TEST(EmulatorNp, ReportsSignedOutForAccountIdLookup)
 	query.module_version_minor = 1;
 	query.type                 = Loader::SymbolType::Func;
 
-	const auto* rec = symbols.Find(query);
-	ASSERT_NE(rec, nullptr);
-	ASSERT_NE(rec->vaddr, 0u);
+	const auto* account_record = symbols.Find(query);
+	ASSERT_NE(account_record, nullptr);
+	ASSERT_NE(account_record->vaddr, 0u);
+
+	using GetAccountId      = KYTY_SYSV_ABI int (*)(int32_t user_id, uint64_t* account_id);
+	auto*    get_account_id = reinterpret_cast<GetAccountId>(account_record->vaddr);
+	uint64_t account_id     = 0xffffffffffffffffull;
+	EXPECT_EQ(get_account_id(1, &account_id), static_cast<int>(0x80550006u));
+	EXPECT_EQ(account_id, 0u);
+
+	query.name              = U"VgYczPGB5ss";
+	const auto* user_record = symbols.Find(query);
+	ASSERT_NE(user_record, nullptr);
+	ASSERT_NE(user_record->vaddr, 0u);
 
 	using GetUserIdByAccountId = KYTY_SYSV_ABI int (*)(uint64_t account_id, int32_t* user_id);
-	auto* fn                   = reinterpret_cast<GetUserIdByAccountId>(rec->vaddr);
+	auto*   fn                 = reinterpret_cast<GetUserIdByAccountId>(user_record->vaddr);
 	int32_t user_id            = -1;
 	EXPECT_EQ(fn(0, &user_id), static_cast<int>(0x80550003u));
 	EXPECT_EQ(fn(1, nullptr), static_cast<int>(0x80550003u));
@@ -170,7 +184,7 @@ TEST(EmulatorNp, ReportsMissingWebApiResponseHeaderForUnknownRequest)
 	ASSERT_NE(rec->vaddr, 0u);
 
 	using GetHeaderLength = KYTY_SYSV_ABI int (*)(int64_t request_id, const char* field_name, size_t* value_length);
-	auto* fn              = reinterpret_cast<GetHeaderLength>(rec->vaddr);
+	auto*  fn             = reinterpret_cast<GetHeaderLength>(rec->vaddr);
 	size_t value_length   = 99;
 	EXPECT_EQ(fn(1, nullptr, &value_length), static_cast<int>(0x80553402u));
 	EXPECT_EQ(fn(1, "Content-Type", nullptr), static_cast<int>(0x80553402u));
@@ -310,7 +324,7 @@ TEST(EmulatorNp, GetAddcontEntitlementInfoValidatesArguments)
 	EXPECT_EQ(GetAddcontEntitlementInfo(0, &no_nul, &info), ERROR_PARAMETER);
 
 	UnifiedEntitlementLabel bad_pad = label;
-	bad_pad.padding[0]             = 1;
+	bad_pad.padding[0]              = 1;
 	EXPECT_EQ(GetAddcontEntitlementInfo(0, &bad_pad, &info), ERROR_PARAMETER);
 }
 

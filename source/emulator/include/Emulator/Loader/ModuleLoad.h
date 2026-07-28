@@ -108,8 +108,8 @@ struct DiscoveryResult
 namespace ModuleLoadPlanning {
 
 [[nodiscard]] ModuleLoadPlan BuildPlan(const Core::String& primary_host_path, bool discovery_enabled);
-// Media/Modules runtime images register metadata through service-module
-// constructors, so their package needs a complete validated bootstrap set.
+// Media runtime images register metadata through service-module constructors,
+// so their package needs a complete validated bootstrap set.
 [[nodiscard]] bool RequiresFullPackageBootstrap(const ModuleLoadPlan& plan);
 
 } // namespace ModuleLoadPlanning

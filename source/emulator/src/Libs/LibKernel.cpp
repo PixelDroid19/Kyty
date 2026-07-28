@@ -22,19 +22,20 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/KernelException.h"
 #include "Emulator/Libs/KernelModuleInfo.h"
+#include "Emulator/Libs/LibraryRegistration.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Network.h"
-#include "Emulator/Loader/RuntimeLinker.h"
-#include "Emulator/Loader/GuestCall.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Loader/Elf.h"
+#include "Emulator/Loader/GuestCall.h"
+#include "Emulator/Loader/RuntimeLinker.h"
+#include "Emulator/Loader/SymbolDatabase.h"
+#include "Emulator/Network.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <algorithm>
-#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -425,16 +426,14 @@ bool WriteSceKernelModuleInfo(void* out_info, const Loader::LoadedModuleSnapshot
 	std::strncpy(reinterpret_cast<char*>(out + 0x08), basename.C_Str(), 255);
 
 	*reinterpret_cast<uint64_t*>(out + 0x108) = module.base_vaddr;
-	const uint32_t segment_size =
-	    static_cast<uint32_t>(std::min(module.base_size, static_cast<uint64_t>(UINT32_MAX)));
+	const uint32_t segment_size               = static_cast<uint32_t>(std::min(module.base_size, static_cast<uint64_t>(UINT32_MAX)));
 	*reinterpret_cast<uint32_t*>(out + 0x110) = segment_size;
 	*reinterpret_cast<int32_t*>(out + 0x114)  = 5;
 	*reinterpret_cast<uint32_t*>(out + 0x148) = 1;
 	return true;
 }
 
-const Loader::LoadedModuleSnapshot* FindLoadedModuleSnapshot(const Kyty::Vector<Loader::LoadedModuleSnapshot>& modules,
-                                                             int32_t handle)
+const Loader::LoadedModuleSnapshot* FindLoadedModuleSnapshot(const Kyty::Vector<Loader::LoadedModuleSnapshot>& modules, int32_t handle)
 {
 	for (const auto& module: modules)
 	{
@@ -466,9 +465,9 @@ static int KYTY_SYSV_ABI KernelGetModuleInfo(KernelModule handle, void* out_info
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
-	const auto modules = rt->SnapshotLoadedModules();
-	const auto* module = FindLoadedModuleSnapshot(modules, handle);
+	auto*       rt      = Core::Singleton<Loader::RuntimeLinker>::Instance();
+	const auto  modules = rt->SnapshotLoadedModules();
+	const auto* module  = FindLoadedModuleSnapshot(modules, handle);
 	if (module == nullptr)
 	{
 		return KERNEL_ERROR_ENOENT;
@@ -486,15 +485,14 @@ static int KYTY_SYSV_ABI KernelGetModuleList(int32_t* handles, uint64_t capacity
 {
 	PRINT_NAME();
 
-	printf("\t handles = %p capacity = %" PRIu64 " out_count = %p\n", static_cast<void*>(handles), capacity,
-	       static_cast<void*>(out_count));
+	printf("\t handles = %p capacity = %" PRIu64 " out_count = %p\n", static_cast<void*>(handles), capacity, static_cast<void*>(out_count));
 
 	if (out_count == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
+	auto*      rt      = Core::Singleton<Loader::RuntimeLinker>::Instance();
 	const auto modules = rt->SnapshotLoadedModules();
 
 	*out_count = modules.Size();
@@ -550,17 +548,16 @@ namespace {
 
 constexpr Loader::Elf64_Word kPtGnuEhFrame = 0x6474e550;
 
-bool DecodeEhFramePointer(const uint8_t* data, const uint8_t* end, uint8_t encoding, uint64_t field_addr,
-                          uint64_t* value)
+bool DecodeEhFramePointer(const uint8_t* data, const uint8_t* end, uint8_t encoding, uint64_t field_addr, uint64_t* value)
 {
 	if (value == nullptr || encoding == 0xff)
 	{
 		return false;
 	}
 
-	uint64_t out       = 0;
-	const auto format  = static_cast<uint8_t>(encoding & 0x0fu);
-	const auto app     = static_cast<uint8_t>(encoding & 0x70u);
+	uint64_t   out       = 0;
+	const auto format    = static_cast<uint8_t>(encoding & 0x0fu);
+	const auto app       = static_cast<uint8_t>(encoding & 0x70u);
 	bool       is_signed = false;
 
 	switch (format)
@@ -609,10 +606,8 @@ bool DecodeEhFramePointer(const uint8_t* data, const uint8_t* end, uint8_t encod
 
 	if (app == 0x10)
 	{
-		out = (is_signed ? static_cast<uint64_t>(static_cast<int64_t>(field_addr) + static_cast<int64_t>(out))
-		                 : field_addr + out);
-	}
-	else if (app != 0)
+		out = (is_signed ? static_cast<uint64_t>(static_cast<int64_t>(field_addr) + static_cast<int64_t>(out)) : field_addr + out);
+	} else if (app != 0)
 	{
 		return false;
 	}
@@ -628,7 +623,8 @@ bool DecodeEhFramePointer(const uint8_t* data, const uint8_t* end, uint8_t encod
 // synchronously flush it on the normal guest execution path.
 static bool unwind_trace_enabled()
 {
-	static const bool enabled = []() {
+	static const bool enabled = []()
+	{
 		const char* value = std::getenv("KYTY_UNWIND_TRACE");
 		return value != nullptr && value[0] == '1';
 	}();
@@ -679,12 +675,10 @@ int KYTY_SYSV_ABI KernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleI
 	std::memset(info, 0, sizeof(ModuleInfoForUnwind));
 	info->st_size = sizeof(ModuleInfoForUnwind);
 
-	if (program->dynamic_info != nullptr && program->dynamic_info->so_name != nullptr &&
-	    program->dynamic_info->so_name[0] != '\0')
+	if (program->dynamic_info != nullptr && program->dynamic_info->so_name != nullptr && program->dynamic_info->so_name[0] != '\0')
 	{
 		std::snprintf(info->name, sizeof(info->name), "%s", program->dynamic_info->so_name);
-	}
-	else
+	} else
 	{
 		const String fallback = program->file_name.FixFilenameSlash().FilenameWithoutDirectory();
 		std::snprintf(info->name, sizeof(info->name), "%s", fallback.C_Str());
@@ -743,14 +737,11 @@ int KYTY_SYSV_ABI KernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleI
 				if (info->eh_frame_size == 0 && info->eh_frame_hdr_addr > eh_frame_addr)
 				{
 					info->eh_frame_size = info->eh_frame_hdr_addr - eh_frame_addr;
-				}
-				else if (info->eh_frame_size == 0 &&
-				         program->base_size_aligned > eh_frame_addr - program->base_vaddr)
+				} else if (info->eh_frame_size == 0 && program->base_size_aligned > eh_frame_addr - program->base_vaddr)
 				{
 					// eh_frame sits after the header (common): size is the rest of the
 					// image from the frame address, not from the header.
-					info->eh_frame_size =
-					    program->base_size_aligned - (eh_frame_addr - program->base_vaddr);
+					info->eh_frame_size = program->base_size_aligned - (eh_frame_addr - program->base_vaddr);
 				}
 			}
 		}
@@ -766,8 +757,7 @@ int KYTY_SYSV_ABI KernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleI
 	{
 		for (Loader::Elf64_Half i = 0; i < ehdr->e_phnum; i++)
 		{
-			if (phdr[i].p_memsz == 0 ||
-			    (phdr[i].p_type != Loader::PT_LOAD && phdr[i].p_type != Loader::PT_OS_RELRO))
+			if (phdr[i].p_memsz == 0 || (phdr[i].p_type != Loader::PT_LOAD && phdr[i].p_type != Loader::PT_OS_RELRO))
 			{
 				continue;
 			}
@@ -786,10 +776,9 @@ int KYTY_SYSV_ABI KernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleI
 	{
 		std::fprintf(stderr,
 		             "GetModuleInfoForUnwind: addr=0x%016" PRIx64 " flags=%d name=%s "
-		             "eh_hdr=0x%016" PRIx64 " eh=0x%016" PRIx64 " eh_sz=0x%016" PRIx64
-		             " seg0=0x%016" PRIx64 " seg0_sz=0x%016" PRIx64 "\n",
-		             addr, flags, info->name, info->eh_frame_hdr_addr, info->eh_frame_addr, info->eh_frame_size,
-		             info->seg0_addr, info->seg0_size);
+		             "eh_hdr=0x%016" PRIx64 " eh=0x%016" PRIx64 " eh_sz=0x%016" PRIx64 " seg0=0x%016" PRIx64 " seg0_sz=0x%016" PRIx64 "\n",
+		             addr, flags, info->name, info->eh_frame_hdr_addr, info->eh_frame_addr, info->eh_frame_size, info->seg0_addr,
+		             info->seg0_size);
 		std::fflush(stderr);
 	}
 
@@ -836,10 +825,8 @@ static void KYTY_SYSV_ABI KernelDebugRaiseException(uint64_t c1, uint64_t c2)
 	// (SIGILL). Keep this a structured EXIT so the next frontier is the raise
 	// itself, not an opaque illegal-instruction trap.
 	const auto return_address = reinterpret_cast<uint64_t>(__builtin_return_address(0));
-	std::fprintf(stderr,
-	             "KernelDebugRaiseException: error=0x%016" PRIx64 " arg=0x%016" PRIx64
-	             ", return addr=0x%016" PRIx64 "\n",
-	             c1, c2, return_address);
+	std::fprintf(stderr, "KernelDebugRaiseException: error=0x%016" PRIx64 " arg=0x%016" PRIx64 ", return addr=0x%016" PRIx64 "\n", c1, c2,
+	             return_address);
 	std::fflush(stderr);
 	PrintGuestRaiseLocation(return_address);
 	EXIT("KernelDebugRaiseException: error=0x%016" PRIx64 " arg=0x%016" PRIx64 "\n", c1, c2);
@@ -915,27 +902,28 @@ constexpr size_t kHostContextTrampolineStackSize = 1024 * 1024;
 
 struct HostContextRequest
 {
-	SignalUcontext              guest_context {};
-	ucontext_t                  resume_context {};
+	SignalUcontext             guest_context {};
+	ucontext_t                 resume_context {};
 	std::unique_ptr<uint8_t[]> trampoline_stack {};
-	ucontext_t*                 signal_context = nullptr;
-	uintptr_t                   signal_frame   = 0;
-	uintptr_t                   handler = 0;
-	uint64_t                    trace_id = 0;
-	std::atomic_bool            completed {false};
+	ucontext_t*                signal_context = nullptr;
+	uintptr_t                  signal_frame   = 0;
+	uintptr_t                  handler        = 0;
+	uint64_t                   trace_id       = 0;
+	std::atomic_bool           completed {false};
 };
 
-static std::mutex                        g_host_context_requests_mutex;
+static std::mutex                       g_host_context_requests_mutex;
 static std::vector<HostContextRequest*> g_host_context_requests;
-static std::atomic<uint64_t>             g_host_context_next_trace_id {1};
-static std::atomic<uint32_t>             g_host_context_trace_count {0};
+static std::atomic<uint64_t>            g_host_context_next_trace_id {1};
+static std::atomic<uint32_t>            g_host_context_trace_count {0};
 
 // The IL2CPP collector's context handshake can deadlock without producing a
 // guest error. Keep its diagnostic path explicitly opt-in and avoid logging in
 // HostContextSignalHandler itself, where only async-signal-safe work is valid.
 static bool HostContextTraceEnabled()
 {
-	static const bool enabled = []() {
+	static const bool enabled = []()
+	{
 		const char* value = std::getenv("KYTY_CONTEXT_TRACE");
 		return value != nullptr && value[0] == '1';
 	}();
@@ -943,7 +931,7 @@ static bool HostContextTraceEnabled()
 }
 
 static void HostContextTrace(const char* stage, uint64_t trace_id, const void* request, const void* target, uintptr_t handler,
-	                             uint64_t result)
+                             uint64_t result)
 {
 	if (!HostContextTraceEnabled())
 	{
@@ -954,8 +942,7 @@ static void HostContextTrace(const char* stage, uint64_t trace_id, const void* r
 		return;
 	}
 
-	std::fprintf(stderr,
-	             "CONTEXT_TRACE stage=%s id=%llu request=%p target=%p handler=0x%016llx result=0x%016llx\n", stage,
+	std::fprintf(stderr, "CONTEXT_TRACE stage=%s id=%llu request=%p target=%p handler=0x%016llx result=0x%016llx\n", stage,
 	             static_cast<unsigned long long>(trace_id), request, target, static_cast<unsigned long long>(handler),
 	             static_cast<unsigned long long>(result));
 	std::fflush(stderr);
@@ -964,15 +951,17 @@ static void HostContextTrace(const char* stage, uint64_t trace_id, const void* r
 static void ReclaimCompletedHostContextRequests()
 {
 	std::lock_guard lock(g_host_context_requests_mutex);
-	const auto new_end = std::remove_if(g_host_context_requests.begin(), g_host_context_requests.end(), [](HostContextRequest* request) {
-		if (!request->completed.load(std::memory_order_acquire))
-		{
-			return false;
-		}
-		HostContextTrace("reclaim", request->trace_id, request, nullptr, request->handler, 0);
-		delete request;
-		return true;
-	});
+	const auto      new_end = std::remove_if(g_host_context_requests.begin(), g_host_context_requests.end(),
+	                                         [](HostContextRequest* request)
+	                                         {
+		                                    if (!request->completed.load(std::memory_order_acquire))
+		                                    {
+			                                    return false;
+		                                    }
+		                                    HostContextTrace("reclaim", request->trace_id, request, nullptr, request->handler, 0);
+		                                    delete request;
+		                                    return true;
+	                                         });
 	g_host_context_requests.erase(new_end, g_host_context_requests.end());
 }
 #endif
@@ -1126,9 +1115,9 @@ int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum)
 	const uintptr_t handler = g_exception_handlers[static_cast<size_t>(signum)].load(std::memory_order_acquire);
 	if (handler == 0)
 	{
-		#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 		HostContextTrace("raise_no_handler", 0, nullptr, thread, 0, 0);
-		#endif
+#endif
 		return OK;
 	}
 
@@ -1159,7 +1148,7 @@ int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum)
 	{
 		HostContextTrace("raise_failed", request->trace_id, request, thread, request->handler, static_cast<uint64_t>(result));
 		std::lock_guard lock(g_host_context_requests_mutex);
-		const auto iterator = std::find(g_host_context_requests.begin(), g_host_context_requests.end(), request);
+		const auto      iterator = std::find(g_host_context_requests.begin(), g_host_context_requests.end(), request);
 		if (iterator != g_host_context_requests.end())
 		{
 			g_host_context_requests.erase(iterator);
@@ -1462,8 +1451,7 @@ static int KYTY_SYSV_ABI PosixGetsockopt(int id, int level, int option, void* va
 	return POSIX_NET_CALL(Network::Net::NetGetsockopt(id, level, option, value, value_len));
 }
 
-static int64_t KYTY_SYSV_ABI PosixRecvfrom(int socket, void* buffer, uint64_t length, int flags, void* address,
-                                           uint32_t* address_len)
+static int64_t KYTY_SYSV_ABI PosixRecvfrom(int socket, void* buffer, uint64_t length, int flags, void* address, uint32_t* address_len)
 {
 	PRINT_NAME();
 	printf("\t socket      = %d\n", socket);
@@ -1648,8 +1636,7 @@ int KYTY_SYSV_ABI flock(int descriptor, int operation)
 
 // Gen5 import NID cfwBSQyr5Ys: public name unresolved. Log args and return 0 so
 // loaders that import it can continue.
-uint64_t KYTY_SYSV_ABI cfwBSQyr5Ys(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
-                                   uint64_t a6)
+uint64_t KYTY_SYSV_ABI cfwBSQyr5Ys(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6)
 {
 	PRINT_NAME();
 	printf("\t a1=0x%016" PRIx64 " a2=0x%016" PRIx64 " a3=0x%016" PRIx64 "\n"
@@ -1799,12 +1786,12 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 
 } // namespace Posix
 
-namespace FileSystem = LibKernel::FileSystem;
-namespace Memory     = LibKernel::Memory;
+namespace FileSystem    = LibKernel::FileSystem;
+namespace Memory        = LibKernel::Memory;
 namespace SyncOnAddress = LibKernel::SyncOnAddress;
-namespace EventQueue = LibKernel::EventQueue;
-namespace EventFlag  = LibKernel::EventFlag;
-namespace Semaphore  = LibKernel::Semaphore;
+namespace EventQueue    = LibKernel::EventQueue;
+namespace EventFlag     = LibKernel::EventFlag;
+namespace Semaphore     = LibKernel::Semaphore;
 
 LIB_DEFINE(InitLibKernel_1_FS)
 {
@@ -2036,6 +2023,14 @@ LIB_DEFINE(InitLibKernel_1)
 	InitLibKernel_1_Semaphore(s);
 	InitLibKernel_1_Pthread(s);
 	Posix::InitLibKernel_1_Posix(s);
+
+	// Unity imports these exception functions through a distinct guest library
+	// identity. Register that identity explicitly; SymbolDatabase deliberately
+	// never falls back to a NID-only match across libraries.
+	constexpr LibraryIdentity libkernel_unity {"libkernel_unity", 1, "libkernel", 1, 1};
+	RegisterLibraryFunction(s, libkernel_unity, "WkwEd3N7w0Y", &LibKernel::KernelInstallExceptionHandler,
+	                        U"LibKernel::KernelInstallExceptionHandler");
+	RegisterLibraryFunction(s, libkernel_unity, "il03nluKfMk", &LibKernel::KernelRaiseException, U"LibKernel::KernelRaiseException");
 
 	LIB_OBJECT("f7uOxY9mM1U", &LibKernel::g_stack_chk_guard);
 	LIB_OBJECT("djxxOmW6-aw", &LibKernel::g_progname);

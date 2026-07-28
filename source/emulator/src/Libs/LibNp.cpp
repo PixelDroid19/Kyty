@@ -1,8 +1,7 @@
-#include "Emulator/Libs/Np.h"
-
 #include "Emulator/Dialog.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Libs/Np.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
 #include <atomic>
@@ -14,7 +13,7 @@ namespace Kyty::Libs::NpUniversalDataSystem {
 
 LIB_VERSION("NpUniversalDataSystem", 1, "NpUniversalDataSystem", 1, 1);
 
-static constexpr int error_invalid_argument = static_cast<int32_t>(0x80553102u);
+static constexpr int        error_invalid_argument = static_cast<int32_t>(0x80553102u);
 static std::atomic<int32_t> g_next_handle {1};
 
 static constexpr uint64_t event_magic            = 0x4b59545955445345ull;
@@ -111,8 +110,7 @@ int KYTY_SYSV_ABI EventPropertyObjectSetArray(EventPropertyObject* properties, c
 		if (value != nullptr)
 		{
 			*value_ptr = const_cast<EventPropertyArray*>(value);
-		}
-		else
+		} else
 		{
 			*value_ptr = new EventPropertyArray;
 		}
@@ -344,7 +342,7 @@ namespace Kyty::Libs::NpManager {
 // country before online services. Does not contact PSN.
 LIB_VERSION("NpManager", 1, "NpManager", 1, 1);
 
-// SCE_NP_ERROR_SIGNED_OUT — offline titles must tolerate signed-out NP.
+// SCE_NP_ERROR_SIGNED_OUT — an offline runtime has no authenticated NP account.
 static constexpr int kNpErrorSignedOut       = static_cast<int>(0x80550006u);
 static constexpr int kNpErrorInvalidArgument = static_cast<int>(0x80550003u);
 
@@ -363,8 +361,8 @@ static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
 	return OK;
 }
 
-// sceNpGetAccountIdA — NID rbknaUjpqWo. Observed Astro after UserService privacy:
-// (user_id=1, account_id*). Report signed-out offline account id 0.
+// sceNpGetAccountIdA — NID rbknaUjpqWo. The runtime is offline, so leave no
+// fabricated account identity behind and report the signed-out state.
 static KYTY_SYSV_ABI int GetAccountIdA(int32_t user_id, uint64_t* account_id)
 {
 	PRINT_NAME();

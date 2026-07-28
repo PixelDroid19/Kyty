@@ -1,7 +1,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Dialog.h"
+#include "Emulator/Libs/LibraryRegistration.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -52,95 +52,83 @@ LIB_DEFINE(InitDialog_1_ErrorDialog)
 
 } // namespace LibErrorDialog
 
-namespace LibSaveDataDialog {
+namespace {
 
-// Standard and .native library names are both exported by Gen5 titles.
-LIB_VERSION("SaveDataDialog", 1, "SaveDataDialog", 1, 1);
+constexpr LibraryIdentity SAVE_DATA_DIALOG        = {"SaveDataDialog", 1, "SaveDataDialog", 1, 1};
+constexpr LibraryIdentity SAVE_DATA_DIALOG_NATIVE = {"SaveDataDialog.native", 1, "SaveDataDialog", 1, 1};
+constexpr LibraryIdentity MSG_DIALOG              = {"MsgDialog", 1, "MsgDialog", 1, 1};
+constexpr LibraryIdentity MSG_DIALOG_NATIVE       = {"MsgDialog.native", 1, "MsgDialog", 1, 1};
 
-namespace SaveDataDialog = Dialog::SaveDataDialog;
-
-static void RegisterSaveDataDialogFuncs(Loader::SymbolDatabase* s)
+void RegisterSaveDataDialogFunctions(Loader::SymbolDatabase* symbols, const LibraryIdentity& identity)
 {
-	// sceSaveDataDialogInitialize / Open — required before UpdateStatus flows.
-	LIB_FUNC("s9e3+YpRnzw", SaveDataDialog::SaveDataDialogInitialize);
-	LIB_FUNC("4tPhsP6FpDI", SaveDataDialog::SaveDataDialogOpen);
-	// sceSaveDataDialogGetStatus
-	LIB_FUNC("ERKzksauAJA", SaveDataDialog::SaveDataDialogGetStatus);
-	LIB_FUNC("KK3Bdg1RWK0", SaveDataDialog::SaveDataDialogUpdateStatus);
-	LIB_FUNC("YuH2FA7azqQ", SaveDataDialog::SaveDataDialogTerminate);
-	LIB_FUNC("fH46Lag88XY", SaveDataDialog::SaveDataDialogClose);
-	LIB_FUNC("yEiJ-qqr6Cg", SaveDataDialog::SaveDataDialogGetResult);
-	LIB_FUNC("en7gNVnh878", SaveDataDialog::SaveDataDialogIsReadyToDisplay);
-	LIB_FUNC("V-uEeFKARJU", SaveDataDialog::SaveDataDialogProgressBarInc);
-	LIB_FUNC("hay1CfTmLyA", SaveDataDialog::SaveDataDialogProgressBarSetValue);
+	using namespace Dialog::SaveDataDialog;
+	RegisterLibraryFunction(symbols, identity, "s9e3+YpRnzw", SaveDataDialogInitialize,
+	                        U"Dialog::SaveDataDialog::SaveDataDialogInitialize");
+	RegisterLibraryFunction(symbols, identity, "4tPhsP6FpDI", SaveDataDialogOpen, U"Dialog::SaveDataDialog::SaveDataDialogOpen");
+	RegisterLibraryFunction(symbols, identity, "ERKzksauAJA", SaveDataDialogGetStatus, U"Dialog::SaveDataDialog::SaveDataDialogGetStatus");
+	RegisterLibraryFunction(symbols, identity, "KK3Bdg1RWK0", SaveDataDialogUpdateStatus,
+	                        U"Dialog::SaveDataDialog::SaveDataDialogUpdateStatus");
+	RegisterLibraryFunction(symbols, identity, "YuH2FA7azqQ", SaveDataDialogTerminate, U"Dialog::SaveDataDialog::SaveDataDialogTerminate");
+	RegisterLibraryFunction(symbols, identity, "fH46Lag88XY", SaveDataDialogClose, U"Dialog::SaveDataDialog::SaveDataDialogClose");
+	RegisterLibraryFunction(symbols, identity, "yEiJ-qqr6Cg", SaveDataDialogGetResult, U"Dialog::SaveDataDialog::SaveDataDialogGetResult");
+	RegisterLibraryFunction(symbols, identity, "en7gNVnh878", SaveDataDialogIsReadyToDisplay,
+	                        U"Dialog::SaveDataDialog::SaveDataDialogIsReadyToDisplay");
+	RegisterLibraryFunction(symbols, identity, "V-uEeFKARJU", SaveDataDialogProgressBarInc,
+	                        U"Dialog::SaveDataDialog::SaveDataDialogProgressBarInc");
+	RegisterLibraryFunction(symbols, identity, "hay1CfTmLyA", SaveDataDialogProgressBarSetValue,
+	                        U"Dialog::SaveDataDialog::SaveDataDialogProgressBarSetValue");
 }
+
+void RegisterMsgDialogFunctions(Loader::SymbolDatabase* symbols, const LibraryIdentity& identity)
+{
+	using namespace Dialog::MsgDialog;
+	RegisterLibraryFunction(symbols, identity, "lDqxaY1UbEo", MsgDialogInitialize, U"Dialog::MsgDialog::MsgDialogInitialize");
+	RegisterLibraryFunction(symbols, identity, "b06Hh0DPEaE", MsgDialogOpen, U"Dialog::MsgDialog::MsgDialogOpen");
+	RegisterLibraryFunction(symbols, identity, "CWVW78Qc3fI", MsgDialogGetStatus, U"Dialog::MsgDialog::MsgDialogGetStatus");
+	RegisterLibraryFunction(symbols, identity, "6fIC3XKt2k0", MsgDialogUpdateStatus, U"Dialog::MsgDialog::MsgDialogUpdateStatus");
+	RegisterLibraryFunction(symbols, identity, "Lr8ovHH9l6A", MsgDialogGetResult, U"Dialog::MsgDialog::MsgDialogGetResult");
+	RegisterLibraryFunction(symbols, identity, "HTrcDKlFKuM", MsgDialogClose, U"Dialog::MsgDialog::MsgDialogClose");
+	RegisterLibraryFunction(symbols, identity, "ePw-kqZmelo", MsgDialogTerminate, U"Dialog::MsgDialog::MsgDialogTerminate");
+	RegisterLibraryFunction(symbols, identity, "Gc5k1qcK4fs", MsgDialogProgressBarInc, U"Dialog::MsgDialog::MsgDialogProgressBarInc");
+	RegisterLibraryFunction(symbols, identity, "6H-71OdrpXM", MsgDialogProgressBarSetMsg, U"Dialog::MsgDialog::MsgDialogProgressBarSetMsg");
+	RegisterLibraryFunction(symbols, identity, "wTpfglkmv34", MsgDialogProgressBarSetValue,
+	                        U"Dialog::MsgDialog::MsgDialogProgressBarSetValue");
+}
+
+} // namespace
+
+namespace LibSaveDataDialog {
 
 LIB_DEFINE(InitDialog_1_SaveDataDialog)
 {
-	RegisterSaveDataDialogFuncs(s);
+	RegisterSaveDataDialogFunctions(s, SAVE_DATA_DIALOG);
 }
 
 } // namespace LibSaveDataDialog
 
 namespace LibSaveDataDialogNative {
 
-LIB_VERSION("SaveDataDialog.native", 1, "SaveDataDialog", 1, 1);
-
-namespace SaveDataDialog = Dialog::SaveDataDialog;
-
 LIB_DEFINE(InitDialog_1_SaveDataDialogNative)
 {
-	// Same HLE contracts as SaveDataDialog; distinct library id for native PS5.
-	LIB_FUNC("s9e3+YpRnzw", SaveDataDialog::SaveDataDialogInitialize);
-	LIB_FUNC("4tPhsP6FpDI", SaveDataDialog::SaveDataDialogOpen);
-	LIB_FUNC("ERKzksauAJA", SaveDataDialog::SaveDataDialogGetStatus);
-	LIB_FUNC("KK3Bdg1RWK0", SaveDataDialog::SaveDataDialogUpdateStatus);
-	LIB_FUNC("YuH2FA7azqQ", SaveDataDialog::SaveDataDialogTerminate);
-	LIB_FUNC("fH46Lag88XY", SaveDataDialog::SaveDataDialogClose);
-	LIB_FUNC("yEiJ-qqr6Cg", SaveDataDialog::SaveDataDialogGetResult);
-	LIB_FUNC("en7gNVnh878", SaveDataDialog::SaveDataDialogIsReadyToDisplay);
-	LIB_FUNC("V-uEeFKARJU", SaveDataDialog::SaveDataDialogProgressBarInc);
-	LIB_FUNC("hay1CfTmLyA", SaveDataDialog::SaveDataDialogProgressBarSetValue);
+	RegisterSaveDataDialogFunctions(s, SAVE_DATA_DIALOG_NATIVE);
 }
 
 } // namespace LibSaveDataDialogNative
 
 namespace LibMsgDialog {
 
-LIB_VERSION("MsgDialog", 1, "MsgDialog", 1, 1);
-
-namespace MsgDialog = Dialog::MsgDialog;
-
-static void RegisterMsgDialogFuncs(Loader::SymbolDatabase* s)
-{
-	LIB_FUNC("lDqxaY1UbEo", MsgDialog::MsgDialogInitialize);
-	LIB_FUNC("b06Hh0DPEaE", MsgDialog::MsgDialogOpen);
-	LIB_FUNC("CWVW78Qc3fI", MsgDialog::MsgDialogGetStatus);
-	LIB_FUNC("6fIC3XKt2k0", MsgDialog::MsgDialogUpdateStatus);
-	LIB_FUNC("Lr8ovHH9l6A", MsgDialog::MsgDialogGetResult);
-	LIB_FUNC("HTrcDKlFKuM", MsgDialog::MsgDialogClose);
-	LIB_FUNC("ePw-kqZmelo", MsgDialog::MsgDialogTerminate);
-	LIB_FUNC("Gc5k1qcK4fs", MsgDialog::MsgDialogProgressBarInc);
-	LIB_FUNC("6H-71OdrpXM", MsgDialog::MsgDialogProgressBarSetMsg);
-	LIB_FUNC("wTpfglkmv34", MsgDialog::MsgDialogProgressBarSetValue);
-}
-
 LIB_DEFINE(InitDialog_1_MsgDialog)
 {
-	RegisterMsgDialogFuncs(s);
+	RegisterMsgDialogFunctions(s, MSG_DIALOG);
 }
 
 } // namespace LibMsgDialog
 
 namespace LibMsgDialogNative {
 
-LIB_VERSION("MsgDialog.native", 1, "MsgDialog", 1, 1);
-
-namespace MsgDialog = Dialog::MsgDialog;
-
 LIB_DEFINE(InitDialog_1_MsgDialogNative)
 {
-	LibMsgDialog::RegisterMsgDialogFuncs(s);
+	RegisterMsgDialogFunctions(s, MSG_DIALOG_NATIVE);
 }
 
 } // namespace LibMsgDialogNative

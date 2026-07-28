@@ -3,6 +3,7 @@
 #include "Emulator/Kernel/EventFlag.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/SyncOnAddress.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
@@ -941,6 +942,43 @@ TEST(EmulatorKernelMemory, ThreadDiagnosticsAreUnavailableWithoutPthreadContext)
 	EXPECT_FALSE(diagnostics.available);
 	EXPECT_EQ(diagnostics.allocated_count, 0u);
 	EXPECT_EQ(diagnostics.thread_count, 0u);
+}
+
+TEST(EmulatorKernelMemory, SyncOnAddressHonorsPredicateAndTimeout)
+{
+	using namespace LibKernel::SyncOnAddress;
+	EnsureMemorySubsystemInitialized();
+
+	uint32_t value   = 1;
+	uint32_t timeout = 0;
+	EXPECT_EQ(KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value), 0, &timeout, 0), OK);
+
+	value = 0;
+	EXPECT_EQ(static_cast<uint32_t>(KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value), 0, &timeout, 0)), 0x80020060u);
+}
+
+TEST(EmulatorKernelMemory, SyncOnAddressWakeReleasesMatchingWaiter)
+{
+	using namespace LibKernel::SyncOnAddress;
+	EnsureMemorySubsystemInitialized();
+
+	uint32_t        value   = 0;
+	uint32_t        timeout = 1000000;
+	std::atomic_bool waiting = false;
+	int              result  = -1;
+	std::thread waiter([&]
+	                   {
+		                   waiting = true;
+		                   result = KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value), 0, &timeout, 0);
+	                   });
+	while (!waiting.load())
+	{
+		std::this_thread::yield();
+	}
+	__atomic_store_n(&value, 1u, __ATOMIC_RELEASE);
+	EXPECT_EQ(KernelSyncOnAddressWake(reinterpret_cast<uint64_t>(&value), 1), OK);
+	waiter.join();
+	EXPECT_EQ(result, OK);
 }
 
 // Live EventFlag registry: Wait/Set/Delete on garbage handles must return

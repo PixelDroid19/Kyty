@@ -35,6 +35,7 @@
 #include <mutex>
 #include <setjmp.h>
 #include <strings.h>
+#include <thread>
 #include <unordered_map>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
@@ -1665,19 +1666,73 @@ static KYTY_SYSV_ABI void c_sincosf(float x, float* s, float* c)
 }
 
 // --- C++ runtime -------------------------------------------------------------
-// One-time static-init guard. jmp_buf-free implementation over the guard byte.
+// Thread-safe one-time static-init guard matching the PS5 libc ABI.
+// Three states:
+//   0x00 = uninitialized (no thread has started init)
+//   0x100 = pending (a thread is running the initializer)
+//   0x01 = complete (initializer finished, skip forever)
+// This fixes deadlocks seen in Unity IL2CPP GC and NIS engine games when
+// concurrent threads attempt to initialize the same static variable.
 static KYTY_SYSV_ABI int c_cxa_guard_acquire(uint64_t* g)
 {
-	auto* done = reinterpret_cast<volatile uint8_t*>(g);
-	return (*done == 0) ? 1 : 0;
+	if (g == nullptr)
+	{
+		return 0;
+	}
+	auto* guard = reinterpret_cast<std::atomic<uint64_t>*>(g);
+	for (;;)
+	{
+		uint64_t val = guard->load(std::memory_order_acquire);
+		// Bit 0 set → already initialized.
+		if ((val & 0x01) != 0)
+		{
+			return 0;
+		}
+		// No one is initializing → try to claim.
+		if ((val & 0xFF00) == 0)
+		{
+			uint64_t expected = val;
+			uint64_t desired  = val | 0x0100;
+			if (guard->compare_exchange_weak(expected, desired, std::memory_order_acq_rel))
+			{
+				return 1; // caller runs the initializer
+			}
+			continue; // CAS failed, retry
+		}
+		// Another thread is initializing → spin-yield.
+		std::this_thread::yield();
+	}
 }
 static KYTY_SYSV_ABI void c_cxa_guard_release(uint64_t* g)
 {
-	*reinterpret_cast<volatile uint8_t*>(g) = 1;
+	if (g == nullptr)
+	{
+		return;
+	}
+	auto* guard = reinterpret_cast<std::atomic<uint64_t>*>(g);
+	// Clear pending, set complete.
+	uint64_t val = guard->load(std::memory_order_relaxed);
+	guard->store((val & ~static_cast<uint64_t>(0xFFFF)) | 0x0001, std::memory_order_release);
 }
 static KYTY_SYSV_ABI void c_cxa_guard_abort(uint64_t* g)
 {
-	*reinterpret_cast<volatile uint8_t*>(g) = 0;
+	if (g == nullptr)
+	{
+		return;
+	}
+	auto* guard = reinterpret_cast<std::atomic<uint64_t>*>(g);
+	// Clear pending, reset to uninitialized.
+	uint64_t val = guard->load(std::memory_order_relaxed);
+	guard->store(val & ~static_cast<uint64_t>(0xFFFF), std::memory_order_release);
+}
+
+// __cxa_thread_atexit_impl — registers a destructor to run when a thread exits.
+// Unity IL2CPP's GC threads use this for thread-local cleanup. The PS5 libc
+// accepts (dtor, obj, dso_handle) and returns 0 on success. We simply record
+// nothing because the emulator's thread lifetime is managed by the host.
+static KYTY_SYSV_ABI int c_cxa_thread_atexit(void (*/*dtor*/)(void*), void* /*obj*/, void* /*dso_handle*/)
+{
+	return 0;
 }
 
 using execute_once_callback_t = KYTY_SYSV_ABI int (*)(void*, void*, void**);
@@ -1773,15 +1828,15 @@ static KYTY_SYSV_ABI int c_mtx_unlock(LibKernel::PthreadMutex* mutex)
 
 static KYTY_SYSV_ABI void c_Xout_of_range(const char* msg)
 {
-	EXIT("std::out_of_range: %s\n", msg != nullptr ? msg : "");
+	printf("std::out_of_range warning: %s\n", msg != nullptr ? msg : "");
 }
 static KYTY_SYSV_ABI void c_Xlength_error(const char* msg)
 {
-	EXIT("std::length_error: %s\n", msg != nullptr ? msg : "");
+	printf("std::length_error warning: %s\n", msg != nullptr ? msg : "");
 }
 static KYTY_SYSV_ABI void c_Xregex_error(int error_type)
 {
-	EXIT("std::regex_error: error_type=%d\n", error_type);
+	printf("std::regex_error warning: error_type=%d\n", error_type);
 }
 
 // Itanium __cxa_dynamic_cast (NID hMAe+TWS9mQ). Captured Dreaming Sarah after
@@ -2865,6 +2920,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("3GPpjQdAMTw", LibC::c_cxa_guard_acquire);
 	LIB_FUNC("9rAeANT2tyE", LibC::c_cxa_guard_release);
 	LIB_FUNC("2emaaluWzUw", LibC::c_cxa_guard_abort);
+	LIB_FUNC("Z2tTVqGDPGQ", LibC::c_cxa_thread_atexit);
 	// Gen5 __cxa_dynamic_cast — Dreaming Sarah Construct ConditionOrAction→Action.
 	LIB_FUNC("hMAe+TWS9mQ", LibC::cxa_dynamic_cast);
 	LIB_FUNC("ozMAr28BwSY", LibC::c_Xout_of_range);

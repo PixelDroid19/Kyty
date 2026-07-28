@@ -1007,6 +1007,49 @@ static bool TlsGuestRead64(uint64_t addr, uint64_t* out, void* /*ctx*/)
 	return true;
 }
 
+static uint64_t LoaderPatchNullRdiSanitizers(uint8_t* code, uint64_t size)
+{
+	if (code == nullptr || size < 25)
+	{
+		return 0;
+	}
+	uint64_t count = 0;
+	for (uint64_t i = 10; i <= size - 25; ++i)
+	{
+		if (code[i - 10] == 0x55 && code[i - 9] == 0x48 && code[i - 8] == 0x89 &&
+		    code[i - 7] == 0xe5 && code[i - 6] == 0x41 && code[i - 5] == 0x57 &&
+		    code[i - 4] == 0x41 && code[i - 3] == 0x56 && code[i - 2] == 0x53 &&
+		    code[i - 1] == 0x50 &&
+		    code[i + 0] == 0xf6 && code[i + 1] == 0x87 && code[i + 2] == 0x70 &&
+		    code[i + 3] == 0x03 && code[i + 4] == 0x00 && code[i + 5] == 0x00 &&
+		    code[i + 6] == 0x02)
+		{
+			// Safe null check at entry:
+			// 0x00: test %rdi, %rdi (48 85 ff)
+			// 0x03: jnz +0x0e        (75 0e -> skip to 0x13 mov %rsi, %rbx)
+			// 0x05: xor %eax, %eax   (31 c0)
+			// 0x07: add $8, %rsp     (48 83 c4 08)
+			// 0x0b: pop %rbx         (5b)
+			// 0x0c: pop %r14         (41 5e)
+			// 0x0e: pop %r15         (41 5f)
+			// 0x10: pop %rbp         (5d)
+			// 0x11: ret              (c3)
+			// 0x12: nop              (90)
+			// 0x13: mov %rsi, %rbx   (48 89 f3)
+			// 0x16: mov %rdi, %r14   (49 89 f6)
+			static const uint8_t patch[25] = {
+			    0x48, 0x85, 0xff, 0x75, 0x0e, 0x31, 0xc0, 0x48, 0x83, 0xc4, 0x08, 0x5b, 0x41,
+			    0x5e, 0x41, 0x5f, 0x5d, 0xc3, 0x90, 0x48, 0x89, 0xf3, 0x49, 0x89, 0xf6};
+			for (size_t k = 0; k < 25; ++k)
+			{
+				code[i + k] = patch[k];
+			}
+			count++;
+		}
+	}
+	return count;
+}
+
 static void PatchProgram(Program* program, uint64_t address, uint64_t size)
 {
 	EXIT_IF(program == nullptr);
@@ -1023,6 +1066,13 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size)
 		{
 			std::fprintf(stderr, "Patch tls GD call REX.W at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, rex_sites);
 			printf("Patch tls GD call REX.W at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, rex_sites);
+		}
+
+		const uint64_t null_rdi_sites = LoaderPatchNullRdiSanitizers(start_ptr, size);
+		if (null_rdi_sites != 0)
+		{
+			std::fprintf(stderr, "Patch null rdi sanitizer at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, null_rdi_sites);
+			printf("Patch null rdi sanitizer at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, null_rdi_sites);
 		}
 	}
 
@@ -1966,7 +2016,7 @@ int RuntimeLinker::StartModule(Program* program, size_t args, const void* argp, 
 	printf(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
 
 	// Shared objects follow the ELF constructor order: DT_INIT first, then
-	// DT_INIT_ARRAY.  Several Unity modules populate native registration tables
+	// DT_INIT_ARRAY. Several Unity modules populate native registration tables
 	// from their array constructors, so invoking only DT_INIT leaves the module
 	// linked but semantically uninitialised.
 	int result = 0;

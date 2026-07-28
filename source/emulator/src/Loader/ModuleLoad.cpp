@@ -308,7 +308,8 @@ bool IsSupportedPackageSubdir(const char* relative_subdir)
 	}
 	// Generic package locations only — no title-specific directories. A shared
 	// PRX beside eboot.bin is a package sidecar; system-style modules remain in
-	// their conventional subdirectories.
+	// their conventional subdirectories. Media/Plugins is deliberately absent:
+	// a filename cannot authorize bootstrap or synthesize its runtime ABI.
 	return std::strcmp(relative_subdir, "") == 0 || std::strcmp(relative_subdir, "sce_module/") == 0 ||
 	       std::strcmp(relative_subdir, "modules/") == 0 || std::strcmp(relative_subdir, "Media/Modules/") == 0;
 }
@@ -512,12 +513,10 @@ ModuleLoadPlan BuildPlan(const String& primary_host_path, bool discovery_enabled
 		CopyString(entry.host_path, sizeof(entry.host_path), host);
 		CopyString(entry.relative_key, sizeof(entry.relative_key), rel);
 		CopyCStr(entry.identity, sizeof(entry.identity), identity);
-		// Application runtime modules are loaded from Media/Modules by the main
-		// executable before its static metadata constructors run. They are not
-		// interchangeable with sce_module services, whose initialization remains
-		// deferred unless the explicit diagnostics policy is active.
-		entry.role = (!rel.ContainsStr(U"/") || rel.StartsWith(U"Media/Modules/")) ? ModulePlanRole::PackageSidecar :
-		                                                                                ModulePlanRole::AdjacentShared;
+		// Root sidecars and Media/Modules are package-owned runtime images. Other
+		// conventional module directories retain their deferred service role.
+		entry.role =
+		    (!rel.ContainsStr(U"/") || rel.StartsWith(U"Media/Modules/")) ? ModulePlanRole::PackageSidecar : ModulePlanRole::AdjacentShared;
 		entry.platform           = module_platform;
 		entry.elf_abi            = GuestPlatformAbiVersion(module_platform);
 		plan.entries[plan.count] = entry;
@@ -969,9 +968,9 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const String& primary_host_path)
 	    Core::BringUp::IsEnabled(Core::BringUp::Feature::AdjacentModuleDiscovery, Core::BringUp::Subsystem::Loader);
 
 	// Discovery is cheap and lets a later lazy PLT miss select a provider by its
-	// declared module identity. Only application runtime modules under
-	// Media/Modules are admitted for normal eager application; service modules
-	// remain lazy providers.
+	// declared module identity. Application runtime modules and approved early
+	// plugins are admitted for normal eager application; service modules remain
+	// lazy providers.
 	const ModuleLoadPlan plan = ModuleLoadPlanning::BuildPlan(primary_host_path, true);
 	ModuleLoadPlanDiagnostics published_diag = plan.diag;
 	if (!diagnostic)

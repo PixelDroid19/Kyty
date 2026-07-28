@@ -46,9 +46,6 @@ LIB_DEFINE(InitNpToolkit2_1);
 namespace NpTrophy2 {
 LIB_DEFINE(InitNpTrophy2_1);
 } // namespace NpTrophy2
-namespace NpManager {
-LIB_DEFINE(InitNpManager_1);
-} // namespace NpManager
 LIB_DEFINE(InitSysmodule_1);
 LIB_DEFINE(InitSystemService_1);
 LIB_DEFINE(InitUserService_1);
@@ -97,7 +94,6 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	LIB_CHECK(U"libNpProfileDialog_1", NpProfileDialog::InitNpProfileDialog_1);
 	LIB_CHECK(U"libNpToolkit2_1", NpToolkit2::InitNpToolkit2_1);
 	LIB_CHECK(U"libNpTrophy2_1", NpTrophy2::InitNpTrophy2_1);
-	LIB_CHECK(U"libNpManager_1", NpManager::InitNpManager_1);
 	if (id == U"libSaveData_1")
 	{
 		InitSaveData_1(s);
@@ -140,7 +136,6 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(InitAudio_1);
 	LIB_LOAD(InitAppContent_1);
 	LIB_LOAD(InitLibC_1);
-	LIB_LOAD(LibcInternal::InitLibcInternal_1);
 	LIB_LOAD(InitDbgAddressSanitizer_1);
 	LIB_LOAD(InitDebug_1);
 	LIB_LOAD(InitDialog_1);
@@ -157,7 +152,6 @@ void InitAll(Loader::SymbolDatabase* s)
 	LIB_LOAD(NpProfileDialog::InitNpProfileDialog_1);
 	LIB_LOAD(NpToolkit2::InitNpToolkit2_1);
 	LIB_LOAD(NpTrophy2::InitNpTrophy2_1);
-	LIB_LOAD(NpManager::InitNpManager_1);
 	LIB_LOAD(InitSaveData_1);
 	LIB_LOAD(SaveDataNative::InitSaveDataNative_1);
 	LIB_LOAD(InitSysmodule_1);

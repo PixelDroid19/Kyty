@@ -51,9 +51,11 @@ public:
 	void Add(const SymbolResolve& s, uint64_t vaddr, const String& dbg_name);
 	void AddAliases(SymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr, const String& dbg_name);
 
+	// Runtime resolution requires the complete canonical identity. It never falls back to a NID-only match.
 	[[nodiscard]] const SymbolRecord* Find(const SymbolResolve& s) const;
+	// Deliberately NID-only inspection API; runtime linking must use Find or FindByCanonicalName.
 	[[nodiscard]] const SymbolRecord* FindByNid(const String& nid, SymbolType type) const;
-	// Lookup by full GenerateName key (used for export-conflict scans).
+	// Exact lookup by full GenerateName key (used for export-conflict scans).
 	[[nodiscard]] const SymbolRecord* FindByCanonicalName(const String& canonical_name) const;
 	[[nodiscard]] uint32_t            SymbolCount() const;
 	[[nodiscard]] const SymbolRecord* SymbolAt(uint32_t index) const;

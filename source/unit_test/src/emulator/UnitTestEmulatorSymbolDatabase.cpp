@@ -1,5 +1,6 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
 UT_BEGIN(EmulatorSymbolDatabase);
@@ -19,15 +20,66 @@ Loader::SymbolResolve Resolve(const char16_t* nid, Loader::SymbolType type)
 	return query;
 }
 
+Loader::SymbolResolve ResolveFor(const char16_t* nid, Loader::SymbolType type, const char32_t* library, const char32_t* module)
+{
+	auto query    = Resolve(nid, type);
+	query.library = library;
+	query.module  = module;
+	return query;
+}
+
 } // namespace
 
-TEST(EmulatorSymbolDatabase, NidPrefixFallbackDoesNotCrossSymbolTypes)
+TEST(EmulatorSymbolDatabase, FindRequiresTheCompleteCanonicalIdentity)
 {
 	Loader::SymbolDatabase symbols;
 	symbols.Add(Resolve(u"same-nid", Loader::SymbolType::Object), 0x1000);
 
 	EXPECT_EQ(symbols.Find(Resolve(u"same-nid", Loader::SymbolType::Func)), nullptr);
+	EXPECT_EQ(symbols.Find(ResolveFor(u"same-nid", Loader::SymbolType::Object, U"AudioOut2", U"AudioOut")), nullptr);
 	ASSERT_NE(symbols.Find(Resolve(u"same-nid", Loader::SymbolType::Object)), nullptr);
+}
+
+TEST(EmulatorSymbolDatabase, CanonicalIdentityDoesNotRewriteLibraryNames)
+{
+	const auto agc       = ResolveFor(u"same-nid", Loader::SymbolType::Func, U"Agc", U"Agc");
+	const auto graphics5 = ResolveFor(u"same-nid", Loader::SymbolType::Func, U"Graphics5", U"Graphics5");
+	EXPECT_NE(Loader::SymbolDatabase::GenerateName(agc), Loader::SymbolDatabase::GenerateName(graphics5));
+
+	const auto gnm_driver      = ResolveFor(u"same-nid", Loader::SymbolType::Func, U"GnmDriver", U"GnmDriver");
+	const auto graphics_driver = ResolveFor(u"same-nid", Loader::SymbolType::Func, U"GraphicsDriver", U"GraphicsDriver");
+	EXPECT_NE(Loader::SymbolDatabase::GenerateName(gnm_driver), Loader::SymbolDatabase::GenerateName(graphics_driver));
+}
+
+TEST(EmulatorSymbolDatabase, InitAllRegistersEachCanonicalSymbolOnce)
+{
+	Loader::SymbolDatabase symbols;
+	Libs::InitAll(&symbols);
+
+	for (uint32_t first_index = 0; first_index < symbols.SymbolCount(); first_index++)
+	{
+		const auto* first = symbols.SymbolAt(first_index);
+		ASSERT_NE(first, nullptr);
+		for (uint32_t second_index = first_index + 1; second_index < symbols.SymbolCount(); second_index++)
+		{
+			const auto* second = symbols.SymbolAt(second_index);
+			ASSERT_NE(second, nullptr);
+			ASSERT_NE(first->name, second->name) << first->name.C_Str();
+		}
+	}
+}
+
+TEST(EmulatorSymbolDatabase, AudioOut2RegistersOnlyIdentifiedExports)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libAudio_1", &symbols));
+
+	const char16_t* unresolved_nids[] = {u"TUuiYS2kE8s", u"jbz9I9vkqkk", u"3BytPOQgVKc", u"Ec63y59l9tw", u"fYapWA9xVmA",
+	                                     u"Bagshr7OQ6Q", u"Gz1rmUZpROM", u"sysY2FHYff4", u"DImz2Ft9E2g"};
+	for (const auto* nid: unresolved_nids)
+	{
+		EXPECT_EQ(symbols.Find(ResolveFor(nid, Loader::SymbolType::Func, U"AudioOut2", U"AudioOut")), nullptr);
+	}
 }
 
 TEST(EmulatorSymbolDatabase, AddAliasesRegistersEveryNidWithOneHandler)

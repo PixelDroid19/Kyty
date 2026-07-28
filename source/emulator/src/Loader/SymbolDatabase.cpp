@@ -109,9 +109,8 @@ std::array<uint8_t, 20> Sha1(const uint8_t* data, size_t size)
 
 String EncodeNameAsNid(const char* name)
 {
-	static constexpr uint8_t suffix[] = {0x51, 0x8d, 0x64, 0xa6, 0x35, 0xde, 0xd8, 0xc1,
-	                                     0xe6, 0xb0, 0x39, 0xb1, 0xc3, 0xe5, 0x52, 0x30};
-	static constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
+	static constexpr uint8_t suffix[]   = {0x51, 0x8d, 0x64, 0xa6, 0x35, 0xde, 0xd8, 0xc1, 0xe6, 0xb0, 0x39, 0xb1, 0xc3, 0xe5, 0x52, 0x30};
+	static constexpr char    alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
 	if (name == nullptr)
 	{
 		return {};
@@ -135,22 +134,18 @@ String EncodeNameAsNid(const char* name)
 }
 
 constexpr char32_t LIB_PREFIX[] = {0x0000006c, 0x00000069, 0x00000062, 0x00000053, 0x00000063, 0x00000065, 0};
-constexpr char32_t LIB_OLD_4[]  = {0x00000047, 0x0000006e, 0x0000006d, 0};
-constexpr char32_t LIB_NEW_4[]  = {0x00000047, 0x00000072, 0x00000061, 0x00000070, 0x00000068, 0x00000069, 0x00000063, 0x00000073, 0};
-constexpr char32_t LIB_OLD_5[]  = {0x00000041, 0x00000067, 0x00000063, 0};
-constexpr char32_t LIB_NEW_5[]  = {0x00000047, 0x00000072, 0x00000061, 0x00000070, 0x00000068,
-                                   0x00000069, 0x00000063, 0x00000073, 0x00000035, 0};
 
-static String update_name(const String& str)
+static String CanonicalComponent(const String& value)
 {
-	auto ret = (str.StartsWith(LIB_PREFIX) ? str.RemoveFirst(6) : str);
-	return ret.ReplaceStr(LIB_OLD_4, LIB_NEW_4).ReplaceStr(LIB_OLD_5, LIB_NEW_5);
+	// ELF metadata may include the syntactic libSce prefix. Removing that prefix
+	// does not merge distinct API identities such as Agc/Graphics5 or Gnm/Graphics.
+	return value.StartsWith(LIB_PREFIX) ? value.RemoveFirst(6) : value;
 }
 
 String SymbolDatabase::GenerateName(const SymbolResolve& s)
 {
-	auto library = update_name(s.library);
-	auto module  = update_name(s.module);
+	auto library = CanonicalComponent(s.library);
+	auto module  = CanonicalComponent(s.module);
 	return String::FromPrintf("%s[%s_v%d][%s_v%d.%d][%s]", s.name.C_Str(), library.C_Str(), s.library_version, module.C_Str(),
 	                          s.module_version_major, s.module_version_minor, Core::EnumName(s.type).C_Str());
 }
@@ -205,40 +200,7 @@ const SymbolRecord* SymbolDatabase::Find(const SymbolResolve& s) const
 {
 	const String key   = GenerateName(s);
 	const auto   index = m_map.Get(key, decltype(m_symbols)::INVALID_INDEX);
-	if (m_symbols.IndexValid(index))
-	{
-		return &m_symbols.At(index);
-	}
-
-	// Fallback when the hashmap misses a key that is present in m_symbols.
-	// Observed for some Gen5 NIDs (e.g. NpTrophy2 Fbshr7OQ6Q): Put/Get key
-	// mismatch while DbgDump still lists the record. Prefer the vector scan
-	// over a silent unresolved PLT so HLE registrations remain authoritative.
-	for (const auto& sym: m_symbols)
-	{
-		if (sym.name == key)
-		{
-			return &sym;
-		}
-	}
-
-	// Last resort: match on NID prefix only when the requested symbol type also
-	// matches. A Func lookup must not bind an Object placeholder with the same NID.
-	const uint32_t bracket = key.FindIndex(U'[');
-	if (bracket != Core::STRING_INVALID_INDEX && bracket > 0)
-	{
-		const String nid  = key.Left(bracket);
-		const String type = String::FromPrintf("[%s]", Core::EnumName(s.type).C_Str());
-		for (const auto& sym: m_symbols)
-		{
-			if (sym.name.StartsWith(nid + U"[") && sym.name.EndsWith(type))
-			{
-				return &sym;
-			}
-		}
-	}
-
-	return nullptr;
+	return m_symbols.IndexValid(index) ? &m_symbols.At(index) : nullptr;
 }
 
 const SymbolRecord* SymbolDatabase::FindByNid(const String& nid, SymbolType type) const
@@ -265,18 +227,7 @@ const SymbolRecord* SymbolDatabase::FindByCanonicalName(const String& canonical_
 		return nullptr;
 	}
 	const auto index = m_map.Get(canonical_name, decltype(m_symbols)::INVALID_INDEX);
-	if (m_symbols.IndexValid(index))
-	{
-		return &m_symbols.At(index);
-	}
-	for (const auto& sym: m_symbols)
-	{
-		if (sym.name == canonical_name)
-		{
-			return &sym;
-		}
-	}
-	return nullptr;
+	return m_symbols.IndexValid(index) ? &m_symbols.At(index) : nullptr;
 }
 
 uint32_t SymbolDatabase::SymbolCount() const

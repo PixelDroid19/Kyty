@@ -36,7 +36,7 @@ namespace AudioOut2 = Audio::AudioOut2;
 LIB_DEFINE(InitAudio_1_AudioOut2)
 {
 	// Named exports (SCE NID encoding of public sceAudioOut2* symbols).
-	LIB_FUNC("g2tViFIohHE", AudioOut2::AudioOut2Initialize);          // Initialize
+	LIB_FUNC("g2tViFIohHE", AudioOut2::AudioOut2Initialize);           // Initialize
 	LIB_FUNC("t5YrizufpQc", AudioOut2::AudioOut2ContextResetParam);    // ContextResetParam
 	LIB_FUNC("pDmme7Bgm6E", AudioOut2::AudioOut2ContextQueryMemory);   // ContextQueryMemory
 	LIB_FUNC("0x6o1VVAYSY", AudioOut2::AudioOut2ContextCreate);        // ContextCreate
@@ -50,21 +50,6 @@ LIB_DEFINE(InitAudio_1_AudioOut2)
 	LIB_FUNC("gatEUKG+Ea4", AudioOut2::AudioOut2PortGetState);         // PortGetState
 	LIB_FUNC("xywYcRB7nbQ", AudioOut2::AudioOut2UserCreate);           // UserCreate
 	LIB_FUNC("IaZXJ9M79uo", AudioOut2::AudioOut2UserDestroy);          // UserDestroy
-
-	// Residual NIDs adjacent to AudioOut2 imports on a Gen5 eboot; names not
-	// yet resolved. Log-and-OK until triangulated.
-	// Do not register Posix/Net socket NIDs here (TU-d9PfIHPM socket,
-	// fFxGkxF2bVo setsockopt, fZOeZIOEmLw send, 45ggEzakPJQ SocketClose).
-	LIB_FUNC("TUuiYS2kE8s", AudioOut2::AudioOut2LogAndOk);
-	LIB_FUNC("jbz9I9vkqkk", AudioOut2::AudioOut2LogAndOk);
-	LIB_FUNC("3BytPOQgVKc", AudioOut2::AudioOut2LogAndOk);
-	LIB_FUNC("Ec63y59l9tw", AudioOut2::AudioOut2LogAndOk);
-	LIB_FUNC("fYapWA9xVmA", AudioOut2::AudioOut2LogAndOk);
-	LIB_FUNC("Bagshr7OQ6Q", AudioOut2::AudioOut2LogAndOk);
-	LIB_FUNC("Gz1rmUZpROM", AudioOut2::AudioOut2LogAndOk);
-	LIB_FUNC("sysY2FHYff4", AudioOut2::AudioOut2LogAndOk);
-	// Astro after AcmContextCreate: DImz2Ft9E2g (name unresolved; one-arg query-like).
-	LIB_FUNC("DImz2Ft9E2g", AudioOut2::AudioOut2LogAndOk);
 }
 
 } // namespace LibAudioOut2
@@ -119,6 +104,10 @@ LIB_DEFINE(InitAudio_1_Ajm)
 	LIB_FUNC("fFFkk0xfGWs", Ajm::AjmBatchStartBuffer);
 	LIB_FUNC("-qLsfDAywIY", Ajm::AjmBatchWait);
 	LIB_FUNC("NVDXiUesSbA", Ajm::AjmBatchCancel);
+	LIB_FUNC("ezM2OhNxzck", Ajm::AjmBatchJobInitialize);
+	LIB_FUNC("39WxhR-ePew", Ajm::AjmBatchJobDecode);
+	LIB_FUNC("SkEwpiu3tZg", Ajm::AjmBatchJobSetGaplessDecode);
+	LIB_FUNC("5tOfnaClcqM", Ajm::AjmBatchStart);
 }
 
 } // namespace LibAjm

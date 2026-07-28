@@ -80,38 +80,7 @@ static bool CreateDirectoryRecursive(const String& dir_path)
 	{
 		return false;
 	}
-	const String fixed = dir_path.FixDirectorySlash();
-	if (Core::File::IsDirectoryExisting(fixed))
-	{
-		return true;
-	}
-
-	// Walk from root, creating each segment.
-	const auto parts = fixed.Split(U"/");
-	String     accum;
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	// Preserve drive letter (e.g. "C:").
-	if (parts.Size() > 0 && parts.At(0).EndsWith(U":"))
-	{
-		accum = parts.At(0) + U"/";
-	}
-#endif
-	for (const auto& part: parts)
-	{
-		if (part.IsEmpty())
-		{
-			continue;
-		}
-		accum = accum + part + U"/";
-		if (!Core::File::IsDirectoryExisting(accum))
-		{
-			if (!Core::File::CreateDirectory(accum))
-			{
-				return false;
-			}
-		}
-	}
-	return Core::File::IsDirectoryExisting(fixed);
+	return Core::File::CreateDirectories(dir_path);
 }
 
 // Map an unmapped guest path into the sandbox. guest_path must start with '/'.
@@ -124,6 +93,22 @@ static String MapToSandbox(const String& guest_path)
 		return root + guest_path.RemoveFirst(1);
 	}
 	return root + guest_path;
+}
+
+// The guest runtime uses the POSIX entropy devices during Unity and libc
+// initialization.  They are kernel devices on the console, rather than files
+// belonging to the title, so treating them as ordinary unmapped paths sends
+// them to the writable sandbox and makes every open fail.  Keep the host
+// escape deliberately narrow and read-only: both PS5 devices map to the host
+// non-blocking entropy source, never to a guest-controlled sandbox file.
+static bool IsGuestEntropyDevice(const String& guest_path)
+{
+	return guest_path == U"/dev/urandom" || guest_path == U"/dev/random";
+}
+
+static String ResolveGuestDeviceFilename(const String& guest_path, const String& mapped_filename)
+{
+	return IsGuestEntropyDevice(guest_path) ? U"/dev/urandom" : mapped_filename;
 }
 
 
@@ -578,6 +563,12 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 	EXIT_IF(file == nullptr || file->opened || file->directory);
 
 	file->name = path;
+	const bool entropy_device = IsGuestEntropyDevice(file->name);
+	if (entropy_device && (rw_mode != Core::File::Mode::Read || creat || trunc || append || directory))
+	{
+		g_files->DeleteDescriptor(descriptor);
+		return KERNEL_ERROR_EACCES;
+	}
 	if (directory)
 	{
 		file->real_name = g_mount_points->GetRealDirectory(file->name);
@@ -585,7 +576,8 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 	else
 	{
 		// Package font fallback for incomplete dumps (SIE system fonts under app0).
-		file->real_name = ResolveExistingHostFile(file->name, g_mount_points->GetRealFilename(file->name));
+		file->real_name = ResolveGuestDeviceFilename(
+			file->name, ResolveExistingHostFile(file->name, g_mount_points->GetRealFilename(file->name)));
 	}
 
 	if (trunc && rw_mode == Core::File::Mode::Read)
@@ -995,7 +987,7 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 	printf("\t KernelStat: %s\n", path);
 
 	String path_s         = String::FromUtf8(path);
-	auto   real_file_name = ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s));
+	auto   real_file_name = ResolveGuestDeviceFilename(path_s, ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s)));
 	auto   real_directory = g_mount_points->GetRealDirectory(path_s);
 
 	bool is_dir  = Core::File::IsDirectoryExisting(real_file_name) || Core::File::IsDirectoryExisting(real_directory);

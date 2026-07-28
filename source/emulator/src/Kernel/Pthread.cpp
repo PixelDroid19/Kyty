@@ -2856,6 +2856,11 @@ static void* run_thread(void* arg)
 
 	thread->started = true;
 
+	if (thread->name.ContainsStr(U"AsyncMemoryThread"))
+	{
+		usleep(50000);
+	}
+
 	ret = reinterpret_cast<void*>(Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(thread->entry),
 	                                                       reinterpret_cast<uint64_t>(thread->arg), 0, 0));
 
