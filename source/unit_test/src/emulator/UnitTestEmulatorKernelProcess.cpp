@@ -128,6 +128,13 @@ Kyty::Loader::SymbolResolve KernelNativeFunc(const char16_t* nid)
 	return sr;
 }
 
+Kyty::Loader::SymbolResolve PosixNativeFunc(const char16_t* nid)
+{
+	auto sr    = KernelNativeFunc(nid);
+	sr.library = U"Posix";
+	return sr;
+}
+
 } // namespace
 
 TEST(EmulatorKernelProcess, GuestProcessIdIsStable)
@@ -328,15 +335,7 @@ TEST(EmulatorKernelProcess, ConvertUtcToLocaltimeWritesUtcTimezoneOutputs)
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
 
-	Loader::SymbolResolve query {};
-	query.name                 = U"-o5uEDpN+oY";
-	query.library              = U"libkernel";
-	query.library_version      = 1;
-	query.module               = U"libkernel";
-	query.module_version_major = 1;
-	query.module_version_minor = 1;
-	query.type                 = Loader::SymbolType::Func;
-	const auto* rec            = symbols.Find(query);
+	const auto* rec = symbols.Find(KernelNativeFunc(u"-o5uEDpN+oY"));
 	ASSERT_NE(rec, nullptr);
 
 	using convert_utc_to_localtime_fn_t = int (*)(int64_t, int64_t*, LibKernel::KernelTimesec*, uint64_t*);
@@ -590,23 +589,13 @@ TEST(EmulatorKernelProcess, UnsupportedPosixMessageApisReturnEnosys)
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
 
-	Loader::SymbolResolve query {};
-	query.library              = U"libkernel";
-	query.library_version      = 1;
-	query.module               = U"libkernel";
-	query.module_version_major = 1;
-	query.module_version_minor = 1;
-	query.type                 = Loader::SymbolType::Func;
-
-	query.name                   = U"lUk6wrGXyMw";
-	const auto* recvfrom_record  = symbols.Find(query);
+	const auto* recvfrom_record  = symbols.Find(PosixNativeFunc(u"lUk6wrGXyMw"));
 	ASSERT_NE(recvfrom_record, nullptr);
-	query.name                   = U"aNeavPDNKzA";
-	const auto* sendmsg_record   = symbols.Find(query);
+	const auto* sendmsg_record   = symbols.Find(PosixNativeFunc(u"aNeavPDNKzA"));
 	ASSERT_NE(sendmsg_record, nullptr);
-	query.name                   = U"hI7oVeOluPM";
-	const auto* recvmsg_record   = symbols.Find(query);
+	const auto* recvmsg_record   = symbols.Find(PosixNativeFunc(u"hI7oVeOluPM"));
 	ASSERT_NE(recvmsg_record, nullptr);
+	EXPECT_EQ(symbols.Find(KernelNativeFunc(u"lUk6wrGXyMw")), nullptr);
 
 	using recvfrom_fn_t = KYTY_SYSV_ABI int64_t (*)(int, void*, uint64_t, int, void*, uint32_t*);
 	using sendmsg_fn_t  = KYTY_SYSV_ABI int (*)(int, const void*, int);
@@ -1012,15 +1001,15 @@ TEST(EmulatorKernelProcess, VirtualQueryRejectsBadArgs)
 }
 
 // Gen5 TLS setspecific/getspecific NIDs used after KeyCreate.
-TEST(EmulatorKernelProcess, ResolvesGen5PthreadSpecificNids)
+TEST(EmulatorKernelProcess, ResolvesGen5PthreadAndPosixConditionNids)
 {
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
 
-	auto resolve = [&](const char16_t* nid) {
+	auto resolve = [&](const char16_t* library, const char16_t* nid) {
 		Loader::SymbolResolve query {};
 		query.name                 = nid;
-		query.library              = U"libkernel";
+		query.library              = library;
 		query.library_version      = 1;
 		query.module               = U"libkernel";
 		query.module_version_major = 1;
@@ -1029,19 +1018,35 @@ TEST(EmulatorKernelProcess, ResolvesGen5PthreadSpecificNids)
 		return symbols.Find(query) != nullptr;
 	};
 
-	EXPECT_TRUE(resolve(u"+BzXYkqYeLE"));
-	EXPECT_TRUE(resolve(u"eoht7mQOCmo"));
-	EXPECT_TRUE(resolve(u"rVjRvHJ0X6c"));
-	EXPECT_TRUE(resolve(u"yDBwVAolDgg"));
-	EXPECT_TRUE(resolve(u"XD3mDeybCnk"));
-	EXPECT_TRUE(resolve(u"mkgXxsoxWHg"));
-	EXPECT_TRUE(resolve(u"0TyVk4MSLt0"));
-	EXPECT_TRUE(resolve(u"RXXqi4CtF8w"));
+	EXPECT_TRUE(resolve(u"libkernel", u"+BzXYkqYeLE"));
+	EXPECT_TRUE(resolve(u"libkernel", u"eoht7mQOCmo"));
+	EXPECT_TRUE(resolve(u"libkernel", u"rVjRvHJ0X6c"));
+	EXPECT_TRUE(resolve(u"libkernel", u"yDBwVAolDgg"));
+	EXPECT_TRUE(resolve(u"libkernel", u"XD3mDeybCnk"));
+	EXPECT_TRUE(resolve(u"libkernel", u"mkgXxsoxWHg"));
+	EXPECT_TRUE(resolve(u"Posix", u"0TyVk4MSLt0"));
+	EXPECT_TRUE(resolve(u"Posix", u"RXXqi4CtF8w"));
+	EXPECT_FALSE(resolve(u"libkernel", u"0TyVk4MSLt0"));
+	EXPECT_FALSE(resolve(u"libkernel", u"RXXqi4CtF8w"));
 }
 
 TEST(EmulatorKernelProcess, ClearVirtualRangeNameSucceeds)
 {
 	EXPECT_EQ(LibKernel::Memory::KernelClearVirtualRangeName(nullptr, 0), OK);
+}
+
+TEST(EmulatorKernelProcess, GuestEntropyDeviceIsReadOnly)
+{
+	using namespace LibKernel;
+
+	EnsureFileSystemSubsystem();
+
+	uint8_t bytes[32] = {};
+	const int fd      = FileSystem::KernelOpen("/dev/urandom", 0, 0);
+	ASSERT_GE(fd, 3);
+	EXPECT_EQ(FileSystem::KernelRead(fd, bytes, sizeof(bytes)), static_cast<int64_t>(sizeof(bytes)));
+	EXPECT_EQ(FileSystem::KernelClose(fd), ::OK);
+	EXPECT_EQ(FileSystem::KernelOpen("/dev/urandom", 1, 0), KERNEL_ERROR_EACCES);
 }
 
 // Gen5 Posix_v1 semaphore: init/post/wait/destroy round-trip on guest layout.

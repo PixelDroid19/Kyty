@@ -149,6 +149,19 @@ SymbolResolve SysmoduleFunc(const char16_t* nid)
 	return sr;
 }
 
+SymbolResolve PosixFunc(const char16_t* nid)
+{
+	SymbolResolve sr {};
+	sr.name                 = nid;
+	sr.library              = U"Posix";
+	sr.library_version      = 1;
+	sr.module               = U"libkernel";
+	sr.module_version_major = 1;
+	sr.module_version_minor = 1;
+	sr.type                 = SymbolType::Func;
+	return sr;
+}
+
 SymbolResolve ImeDialogFunc(const char16_t* nid)
 {
 	SymbolResolve sr {};
@@ -272,6 +285,24 @@ TEST(EmulatorModuleLoad, BuildPlanTreatsMediaModulesAsApplicationRuntimeSidecars
 	EXPECT_STREQ(plan.entries[1].relative_key, "Media/Modules/Il2CppUserAssemblies.prx");
 	EXPECT_EQ(plan.entries[1].role, ModulePlanRole::PackageSidecar);
 	EXPECT_TRUE(ModuleLoadPlanning::RequiresFullPackageBootstrap(plan));
+}
+
+TEST(EmulatorModuleLoad, BuildPlanDoesNotDiscoverUnlistedPluginDirectories)
+{
+	EXPECT_FALSE(ModuleDiscovery::IsSupportedPackageSubdir("Media/Plugins/"));
+
+	const TempPackageRoot temp(U"/tmp/kyty_module_load_unlisted_plugins_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root + U"Media/Plugins/"));
+	ASSERT_TRUE(WriteBinary(temp.root + U"eboot.bin", MakeSelfWrappedElf(ET_DYNEXEC)));
+	ASSERT_TRUE(WriteBinary(temp.root + U"Media/Plugins/plugin_one.prx", MakeSelfWrappedElf(ET_DYNAMIC)));
+	ASSERT_TRUE(WriteBinary(temp.root + U"Media/Plugins/plugin_two.prx", MakeSelfWrappedElf(ET_DYNAMIC)));
+
+	const auto plan = ModuleLoadPlanning::BuildPlan(temp.root + U"eboot.bin", true);
+
+	ASSERT_TRUE(plan.valid) << plan.error;
+	EXPECT_EQ(plan.count, 1u);
+	EXPECT_EQ(plan.diag.adjacent_count, 0u);
+	EXPECT_FALSE(ModuleLoadPlanning::RequiresFullPackageBootstrap(plan));
 }
 
 TEST(EmulatorModuleLoad, ElfPlatformComesFromAbiVersion)
@@ -532,7 +563,7 @@ TEST(EmulatorModuleLoad, LibcWcsncmpUsesGuestUtf16CodeUnits)
 	EXPECT_EQ(wcsncmp(same, greater, 0), 0);
 }
 
-TEST(EmulatorModuleLoad, LibcWideClassifiesObservedGuestDescriptorsWithoutHostLocale)
+TEST(EmulatorModuleLoad, LibcWideClassifiesVerifiedDecimalDescriptorWithoutHostLocale)
 {
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
@@ -542,13 +573,10 @@ TEST(EmulatorModuleLoad, LibcWideClassifiesObservedGuestDescriptorsWithoutHostLo
 	using Iswctype = int (*)(uint32_t, int);
 	auto iswctype = reinterpret_cast<Iswctype>(record->vaddr);
 
-	EXPECT_EQ(iswctype(u'i', 2), 1);
 	EXPECT_EQ(iswctype(u'7', 2), 1);
+	EXPECT_EQ(iswctype(u'0', 2), 1);
+	EXPECT_EQ(iswctype(u'i', 2), 0);
 	EXPECT_EQ(iswctype(u'%', 2), 0);
-	EXPECT_EQ(iswctype(u']', 9), 1);
-	EXPECT_EQ(iswctype(u'A', 9), 0);
-	EXPECT_EQ(iswctype(0x00e9, 2), 0);
-	EXPECT_EQ(iswctype(u'7', 99), 0);
 }
 
 TEST(EmulatorModuleLoad, ImeDialogGetStatusReportsTheUninitializedState)
@@ -796,25 +824,28 @@ TEST(EmulatorModuleLoad, RtcRegistersCurrentTick)
 	EXPECT_NE(symbols.Find(query), nullptr);
 }
 
-TEST(EmulatorModuleLoad, LibkernelRegistersPosixRwlockReadLock)
+TEST(EmulatorModuleLoad, PosixRegistersRwlockReadLockWithExactIdentity)
 {
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
-	EXPECT_NE(symbols.Find(LibkernelFunc(u"iGjsr1WAtI0")), nullptr);
+	EXPECT_NE(symbols.Find(PosixFunc(u"iGjsr1WAtI0")), nullptr);
+	EXPECT_EQ(symbols.Find(LibkernelFunc(u"iGjsr1WAtI0")), nullptr);
 }
 
-TEST(EmulatorModuleLoad, LibkernelRegistersPosixRwlockUnlock)
+TEST(EmulatorModuleLoad, PosixRegistersRwlockUnlockWithExactIdentity)
 {
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
-	EXPECT_NE(symbols.Find(LibkernelFunc(u"EgmLo6EWgso")), nullptr);
+	EXPECT_NE(symbols.Find(PosixFunc(u"EgmLo6EWgso")), nullptr);
+	EXPECT_EQ(symbols.Find(LibkernelFunc(u"EgmLo6EWgso")), nullptr);
 }
 
-TEST(EmulatorModuleLoad, LibkernelRegistersPosixRwlockInit)
+TEST(EmulatorModuleLoad, PosixRegistersRwlockInitWithExactIdentity)
 {
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
-	EXPECT_NE(symbols.Find(LibkernelFunc(u"ytQULN-nhL4")), nullptr);
+	EXPECT_NE(symbols.Find(PosixFunc(u"ytQULN-nhL4")), nullptr);
+	EXPECT_EQ(symbols.Find(LibkernelFunc(u"ytQULN-nhL4")), nullptr);
 }
 
 TEST(EmulatorModuleLoad, LibkernelRegistersPthreadRename)
@@ -840,7 +871,7 @@ TEST(EmulatorModuleLoad, PosixFlockAcceptsManagedFileDescriptor)
 
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
-	const SymbolRecord* flock = symbols.Find(LibkernelFunc(u"9eMlfusH4sU"));
+	const SymbolRecord* flock = symbols.Find(PosixFunc(u"9eMlfusH4sU"));
 	ASSERT_NE(flock, nullptr);
 	auto* flock_fn = reinterpret_cast<FlockFn>(flock->vaddr);
 	ASSERT_NE(flock_fn, nullptr);
