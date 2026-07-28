@@ -1,5 +1,7 @@
 #include "Emulator/Agent/Protocol.h"
 
+#include "Kyty/Agent/Json.h"
+
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/InternalResolutionRuntime.h"
@@ -13,6 +15,9 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Emulator::Agent {
+using Kyty::Agent::JsonEscape;
+using Kyty::Agent::JsonString;
+
 namespace {
 
 const char* BringUpModeName(Core::BringUp::Mode mode)
@@ -531,46 +536,6 @@ bool FindObjectField(const char* json, const char* key, const char** value_start
 	return false;
 }
 
-std::string JsonEscape(const char* value)
-{
-	std::string out;
-	if (value == nullptr)
-	{
-		return out;
-	}
-	for (const char* p = value; *p != '\0'; ++p)
-	{
-		const auto ch = static_cast<unsigned char>(*p);
-		switch (ch)
-		{
-			case '"': out += "\\\""; break;
-			case '\\': out += "\\\\"; break;
-			case '\b': out += "\\b"; break;
-			case '\f': out += "\\f"; break;
-			case '\n': out += "\\n"; break;
-			case '\r': out += "\\r"; break;
-			case '\t': out += "\\t"; break;
-			default:
-				if (ch < 0x20)
-				{
-					char escaped[7];
-					std::snprintf(escaped, sizeof(escaped), "\\u%04x", ch);
-					out += escaped;
-				} else
-				{
-					out.push_back(*p);
-				}
-				break;
-		}
-	}
-	return out;
-}
-
-std::string JsonString(const char* value)
-{
-	return std::string("\"") + JsonEscape(value) + "\"";
-}
-
 void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceSnapshot& performance, std::string* out)
 {
 	EXIT_IF(out == nullptr);
@@ -580,8 +545,8 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 	*out += ",\"create_max_ns\":" + std::to_string(performance.gpu_memory_create_max_ns);
 	*out += ",\"types\":[";
 	constexpr const char* type_names[Libs::Graphics::kDebugStatsGpuMemoryTypeCount] = {
-	    "video_out_buffer", "depth_stencil_buffer", "label",         "index_buffer",  "vertex_buffer",
-	    "storage_buffer",   "texture",              "render_texture", "storage_texture"};
+	    "video_out_buffer", "depth_stencil_buffer", "label",          "index_buffer", "vertex_buffer", "storage_buffer",
+	    "texture",          "render_texture",       "storage_texture"};
 	for (uint32_t i = 0; i < Libs::Graphics::kDebugStatsGpuMemoryTypeCount; ++i)
 	{
 		if (i != 0)
@@ -615,10 +580,10 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 		*out += ",\"hash_fallback_unchanged\":" + std::to_string(type.hash_fallback_unchanged);
 		*out += '}';
 	}
-	const auto& slow = performance.gpu_memory_slow_creates;
-	const uint32_t slow_size = std::min<uint32_t>(slow.size, static_cast<uint32_t>(slow.records.size()));
-	constexpr const char* outcome_names[] = {"cached_reuse", "fast_reuse", "exact_reuse", "covered_reuse", "new_standalone",
-	                                         "new_linked", "new_from_objects", "reclaim_new"};
+	const auto&           slow            = performance.gpu_memory_slow_creates;
+	const uint32_t        slow_size       = std::min<uint32_t>(slow.size, static_cast<uint32_t>(slow.records.size()));
+	constexpr const char* outcome_names[] = {"cached_reuse",   "fast_reuse", "exact_reuse",      "covered_reuse",
+	                                         "new_standalone", "new_linked", "new_from_objects", "reclaim_new"};
 	*out += "],\"slow_creates\":{\"capacity\":" + std::to_string(slow.records.size());
 	*out += ",\"size\":" + std::to_string(slow_size);
 	*out += ",\"dropped\":" + std::to_string(slow.dropped);
@@ -629,10 +594,10 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 		{
 			*out += ',';
 		}
-		const auto& record = slow.records[i];
+		const auto&    record        = slow.records[i];
 		const uint32_t outcome_index = static_cast<uint32_t>(record.outcome);
-		const char* type_name = record.type_index < Libs::Graphics::kDebugStatsGpuMemoryTypeCount ? type_names[record.type_index]
-		                                                                                          : "unknown";
+		const char*    type_name =
+		    record.type_index < Libs::Graphics::kDebugStatsGpuMemoryTypeCount ? type_names[record.type_index] : "unknown";
 		const char* outcome_name = outcome_index < std::size(outcome_names) ? outcome_names[outcome_index] : "unknown";
 		*out += "{\"seq\":" + std::to_string(record.seq);
 		*out += ",\"duration_us\":" + std::to_string(record.duration_us);
@@ -675,7 +640,7 @@ void AppendSlowFramePerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 {
 	EXIT_IF(out == nullptr);
 
-	const auto& slow = performance.slow_frames;
+	const auto&    slow = performance.slow_frames;
 	const uint32_t size = std::min<uint32_t>(slow.size, static_cast<uint32_t>(slow.records.size()));
 	*out += "\"slow_frames\":{\"capacity\":" + std::to_string(slow.records.size());
 	*out += ",\"size\":" + std::to_string(size);
@@ -934,12 +899,9 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	    static_cast<unsigned long long>(performance.shader_ir_pipeline_miss_count),
 	    static_cast<unsigned long long>(performance.shader_ir_pipeline_miss_ns),
 	    static_cast<unsigned long long>(performance.shader_ir_pipeline_miss_max_ns),
-	    static_cast<unsigned long long>(performance.spirv_source_count),
-	    static_cast<unsigned long long>(performance.spirv_source_ns),
-	    static_cast<unsigned long long>(performance.spirv_source_max_ns),
-	    static_cast<unsigned long long>(performance.spirv_compile_count),
-	    static_cast<unsigned long long>(performance.spirv_compile_ns),
-	    static_cast<unsigned long long>(performance.spirv_compile_max_ns),
+	    static_cast<unsigned long long>(performance.spirv_source_count), static_cast<unsigned long long>(performance.spirv_source_ns),
+	    static_cast<unsigned long long>(performance.spirv_source_max_ns), static_cast<unsigned long long>(performance.spirv_compile_count),
+	    static_cast<unsigned long long>(performance.spirv_compile_ns), static_cast<unsigned long long>(performance.spirv_compile_max_ns),
 	    static_cast<unsigned long long>(performance.vk_graphics_pipeline_create_count),
 	    static_cast<unsigned long long>(performance.vk_graphics_pipeline_create_ns),
 	    static_cast<unsigned long long>(performance.vk_graphics_pipeline_create_max_ns),

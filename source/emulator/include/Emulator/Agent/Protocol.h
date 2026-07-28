@@ -86,9 +86,6 @@ void AppendInternalResolutionPerformanceJson(const Libs::Graphics::InternalResol
 std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Core::BringUp::Diagnostics& diagnostics,
                                    const Loader::MissingImportDiagnostics& imports, const Loader::ModuleLoadPlanDiagnostics& load_plan);
 
-std::string JsonEscape(const char* value);
-std::string JsonString(const char* value);
-
 } // namespace Kyty::Emulator::Agent
 
 #endif // KYTY_EMU_ENABLED

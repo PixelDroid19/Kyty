@@ -1,6 +1,7 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Audio.h"
+#include "Emulator/AudioPcm.h"
 #include "Emulator/Config.h"
 #include "Emulator/Log.h"
 
@@ -10,6 +11,27 @@
 UT_BEGIN(EmulatorAudio);
 
 using namespace Libs::Audio;
+
+TEST(EmulatorAudio, AppliesGuestChannelVolumesWithoutChangingLayout)
+{
+	const int16_t        source[]  = {12000, -12000, 8000, -8000};
+	const int            volumes[] = {16384, 8192};
+	std::vector<uint8_t> output;
+	ASSERT_TRUE(AudioPcmApplyChannelVolumes(source, 2, 2, AudioPcmFormat::Signed16, volumes, &output));
+	ASSERT_EQ(output.size(), sizeof(source));
+	const auto* samples = reinterpret_cast<const int16_t*>(output.data());
+	EXPECT_EQ(samples[0], 6000);
+	EXPECT_EQ(samples[1], -3000);
+	EXPECT_EQ(samples[2], 4000);
+	EXPECT_EQ(samples[3], -2000);
+}
+
+TEST(EmulatorAudio, ComputesHostQueueCapacityFromTimeAndFormat)
+{
+	EXPECT_EQ(AudioPcmQueueBytes(48000, 2, AudioPcmFormat::Signed16, 60), 11520u);
+	EXPECT_EQ(AudioPcmQueueBytes(48000, 8, AudioPcmFormat::Float32, 60), 92160u);
+	EXPECT_EQ(AudioPcmQueueBytes(0, 2, AudioPcmFormat::Signed16, 60), 0u);
+}
 
 TEST(EmulatorAudio, UnregistersCapturedAjmCodecModule)
 {
@@ -79,12 +101,11 @@ TEST(EmulatorAudio, SerializesAjmControlBatchJob)
 	alignas(uint64_t) uint8_t batch[64] {};
 	alignas(uint64_t) uint8_t sideband_input[16] {};
 	alignas(uint64_t) uint8_t sideband_output[32] {};
-	constexpr uint32_t instance = 0x4001u;
-	constexpr uint64_t flags    = 0x000060000000c007ull;
+	constexpr uint32_t        instance = 0x4001u;
+	constexpr uint64_t        flags    = 0x000060000000c007ull;
 
-	auto* next = static_cast<uint8_t*>(Ajm::AjmBatchJobControlBufferRa(batch, instance, flags, sideband_input,
-	                                                                  sizeof(sideband_input), sideband_output,
-	                                                                  sizeof(sideband_output), nullptr));
+	auto* next = static_cast<uint8_t*>(Ajm::AjmBatchJobControlBufferRa(batch, instance, flags, sideband_input, sizeof(sideband_input),
+	                                                                   sideband_output, sizeof(sideband_output), nullptr));
 	ASSERT_EQ(next, batch + 48u);
 	EXPECT_EQ(*reinterpret_cast<uint32_t*>(batch + 0u), instance << 6u);
 	EXPECT_EQ(*reinterpret_cast<uint32_t*>(batch + 4u), 40u);
@@ -113,14 +134,13 @@ TEST(EmulatorAudio, CompletesAjmBufferBatchWithBoundedOutputs)
 	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
 
 	alignas(uint64_t) uint8_t batch[128] {};
-	uint8_t input[8] {};
-	uint8_t output[16];
+	uint8_t                   input[8] {};
+	uint8_t                   output[16];
 	alignas(uint64_t) uint8_t sideband[32];
 	std::memset(output, 0xa5, sizeof(output));
 	std::memset(sideband, 0xa5, sizeof(sideband));
-	auto* end = static_cast<uint8_t*>(Ajm::AjmBatchJobRunBufferRa(batch, instance, (1ull << 47u) | 1u, input,
-	                                                              sizeof(input), output, sizeof(output), sideband,
-	                                                              sizeof(sideband), nullptr));
+	auto* end = static_cast<uint8_t*>(Ajm::AjmBatchJobRunBufferRa(batch, instance, (1ull << 47u) | 1u, input, sizeof(input), output,
+	                                                              sizeof(output), sideband, sizeof(sideband), nullptr));
 	ASSERT_NE(end, nullptr);
 
 	Ajm::AjmBatchError error {};
@@ -161,8 +181,8 @@ TEST(EmulatorAudio, WritesCombinedAjmSidebandsInAbiOrder)
 	alignas(uint64_t) uint8_t sideband[56];
 	std::memset(sideband, 0xa5, sizeof(sideband));
 	constexpr uint64_t flags = (1ull << 46u) | (1ull << 47u) | (1ull << 12u) | 1u;
-	auto* end = static_cast<uint8_t*>(Ajm::AjmBatchJobRunBufferRa(batch, instance, flags, input, sizeof(input), output,
-	                                                              sizeof(output), sideband, sizeof(sideband), nullptr));
+	auto* end = static_cast<uint8_t*>(Ajm::AjmBatchJobRunBufferRa(batch, instance, flags, input, sizeof(input), output, sizeof(output),
+	                                                              sideband, sizeof(sideband), nullptr));
 	ASSERT_NE(end, nullptr);
 
 	Ajm::AjmBatchError error {};
@@ -181,6 +201,50 @@ TEST(EmulatorAudio, WritesCombinedAjmSidebandsInAbiOrder)
 	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
 }
 
+TEST(EmulatorAudio, CompletesQueuedAjmDecodeJobs)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t context  = 0;
+	uint32_t instance = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
+
+	alignas(uint64_t) uint8_t batch[64] {};
+	uint8_t                   config[8] {0xfe, 0x72, 0x09, 0xf0};
+	uint8_t                   init_result[8];
+	uint8_t                   input[32] {};
+	uint8_t                   output[128];
+	alignas(uint64_t) uint8_t decode_result[32];
+	std::memset(init_result, 0xa5, sizeof(init_result));
+	std::memset(output, 0xa5, sizeof(output));
+	std::memset(decode_result, 0xa5, sizeof(decode_result));
+
+	ASSERT_EQ(Ajm::AjmBatchJobInitialize(batch, instance, config, sizeof(config), init_result), 0);
+	ASSERT_EQ(
+	    Ajm::AjmBatchJobDecode(batch, instance, input, sizeof(input), output, sizeof(output), decode_result, nullptr, 0, decode_result), 0);
+	Ajm::AjmBatchError error {};
+	uint32_t           batch_id = 0;
+	ASSERT_EQ(Ajm::AjmBatchStart(context, batch, 0, &error, &batch_id), 0);
+	EXPECT_NE(batch_id, 0u);
+	for (auto value: output)
+	{
+		EXPECT_EQ(value, 0u);
+	}
+	EXPECT_EQ(*reinterpret_cast<int32_t*>(decode_result + 0u), 0);
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(decode_result + 8u), sizeof(input));
+	EXPECT_EQ(*reinterpret_cast<uint32_t*>(decode_result + 12u), sizeof(output));
+	EXPECT_EQ(*reinterpret_cast<uint64_t*>(decode_result + 16u), sizeof(output) / 4u);
+	EXPECT_EQ(Ajm::AjmBatchWait(context, batch_id, UINT32_MAX, &error), 0);
+	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
 TEST(EmulatorAudio, AcceptsExtendedAudio3dOpenParameters)
 {
 	if (!Config::IsInitialized())
@@ -189,7 +253,7 @@ TEST(EmulatorAudio, AcceptsExtendedAudio3dOpenParameters)
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	alignas(uint64_t) uint8_t parameters[0x28] = {};
+	alignas(uint64_t) uint8_t parameters[0x28]      = {};
 	*reinterpret_cast<uint64_t*>(parameters + 0x00) = sizeof(parameters);
 	*reinterpret_cast<uint32_t*>(parameters + 0x08) = 0x200;
 	*reinterpret_cast<uint32_t*>(parameters + 0x0c) = 0;
@@ -331,8 +395,8 @@ TEST(EmulatorAudio, ReadsGen5ExtendedReverbRackVoiceCountAndHandles)
 	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, sys_info, &system), 0);
 
 	// Classic max_voices at +0x20 left 0; extended field at +0x50 is the real count.
-	alignas(uint64_t) uint8_t raw_option[0xb8] = {};
-	*reinterpret_cast<size_t*>(raw_option)     = sizeof(raw_option);
+	alignas(uint64_t) uint8_t raw_option[0xb8]      = {};
+	*reinterpret_cast<size_t*>(raw_option)          = sizeof(raw_option);
 	*reinterpret_cast<uint32_t*>(raw_option + 0x20) = 0;
 	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = 16;
 
@@ -347,7 +411,7 @@ TEST(EmulatorAudio, ReadsGen5ExtendedReverbRackVoiceCountAndHandles)
 	uintptr_t rack   = 0;
 	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x2001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info, &rack), 0);
 
-	uintptr_t voice0 = 0;
+	uintptr_t voice0  = 0;
 	uintptr_t voice15 = 0;
 	uintptr_t voice16 = UINTPTR_MAX;
 	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, &voice0), 0);
@@ -399,10 +463,10 @@ TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 
 	// Observed frontier param: id 0x40010000 (rack class 0x4001), size 40, next 0.
 	// Layout matches Ngs2VoiceParamHeader: size, next, id — then opaque payload.
-	alignas(uint64_t) uint8_t param_blob[40] = {};
-	*reinterpret_cast<uint16_t*>(param_blob + 0) = 40;
-	*reinterpret_cast<int16_t*>(param_blob + 2)  = 0;
-	*reinterpret_cast<uint32_t*>(param_blob + 4) = 0x40010000u;
+	alignas(uint64_t) uint8_t param_blob[40]      = {};
+	*reinterpret_cast<uint16_t*>(param_blob + 0)  = 40;
+	*reinterpret_cast<int16_t*>(param_blob + 2)   = 0;
+	*reinterpret_cast<uint32_t*>(param_blob + 4)  = 0x40010000u;
 	*reinterpret_cast<uint32_t*>(param_blob + 8)  = 0x12u;
 	*reinterpret_cast<uint32_t*>(param_blob + 12) = 2;
 	*reinterpret_cast<uint32_t*>(param_blob + 16) = 44100;
@@ -411,7 +475,7 @@ TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 
 	// Common param id 0x0007: VoiceCallback block, size 32 (header + handler +
 	// data + flags + reserved). Observed immediately after 0x40010000 at frontier.
-	alignas(uint64_t) uint8_t callback_blob[32] = {};
+	alignas(uint64_t) uint8_t callback_blob[32]     = {};
 	*reinterpret_cast<uint16_t*>(callback_blob + 0) = 32;
 	*reinterpret_cast<int16_t*>(callback_blob + 2)  = 0;
 	*reinterpret_cast<uint32_t*>(callback_blob + 4) = 0x00000007u;
@@ -424,7 +488,7 @@ TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(callback_blob)), 0);
 
 	// Observed 0x4000-class module param (id 0x40001300, size 48) on CustomSampler.
-	alignas(uint64_t) uint8_t custom_module_blob[48] = {};
+	alignas(uint64_t) uint8_t custom_module_blob[48]     = {};
 	*reinterpret_cast<uint16_t*>(custom_module_blob + 0) = 48;
 	*reinterpret_cast<int16_t*>(custom_module_blob + 2)  = 0;
 	*reinterpret_cast<uint32_t*>(custom_module_blob + 4) = 0x40001300u;
@@ -432,7 +496,7 @@ TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 
 	// Additional custom-sampler module controls remain opaque until their
 	// guest-visible effect is captured; accepting the class must not abort.
-	alignas(uint64_t) uint8_t opaque_sampler_blob[8] = {};
+	alignas(uint64_t) uint8_t opaque_sampler_blob[8]      = {};
 	*reinterpret_cast<uint16_t*>(opaque_sampler_blob + 0) = sizeof(opaque_sampler_blob);
 	*reinterpret_cast<uint32_t*>(opaque_sampler_blob + 4) = 0x40010005u;
 	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(opaque_sampler_blob)), 0);
@@ -476,7 +540,7 @@ TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
 	*reinterpret_cast<size_t*>(raw_option)          = sizeof(raw_option);
 	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = 1;
 	alignas(uint64_t) uint64_t raw_rack_info[8]     = {};
-	auto*                      rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	auto*                      rack_info            = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
 	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info), 0);
 	std::unique_ptr<uint8_t[]> rack_storage(new uint8_t[raw_rack_info[1]]);
 	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.get());
@@ -485,7 +549,7 @@ TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
 	uintptr_t voice = 0;
 	ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, &voice), 0);
 
-	alignas(uint64_t) uint8_t format_param[40] = {};
+	alignas(uint64_t) uint8_t format_param[40]      = {};
 	*reinterpret_cast<uint16_t*>(format_param + 0)  = sizeof(format_param);
 	*reinterpret_cast<uint32_t*>(format_param + 4)  = 0x40010000u;
 	*reinterpret_cast<uint32_t*>(format_param + 8)  = 0x12u;
@@ -493,27 +557,27 @@ TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
 	*reinterpret_cast<uint32_t*>(format_param + 16) = 44100;
 	ASSERT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(format_param)), 0);
 
-	constexpr uint64_t kSourceFrames = 512;
+	constexpr uint64_t        kSourceFrames = 512;
 	alignas(uint64_t) int16_t source[kSourceFrames];
 	for (auto& sample: source)
 	{
 		sample = 16384;
 	}
-	alignas(uint64_t) uint64_t waveform_context[5] = {0, sizeof(source), 0, kSourceFrames, 0};
-	alignas(uint64_t) uint8_t  waveform_param[32]   = {};
-	*reinterpret_cast<uint16_t*>(waveform_param + 0)  = sizeof(waveform_param);
-	*reinterpret_cast<uint32_t*>(waveform_param + 4)  = 0x40010001u;
-	*reinterpret_cast<uintptr_t*>(waveform_param + 8) = reinterpret_cast<uintptr_t>(source);
-	*reinterpret_cast<uint32_t*>(waveform_param + 16) = 0x11u;
-	*reinterpret_cast<uint32_t*>(waveform_param + 20) = 1u;
+	alignas(uint64_t) uint64_t waveform_context[5]     = {0, sizeof(source), 0, kSourceFrames, 0};
+	alignas(uint64_t) uint8_t  waveform_param[32]      = {};
+	*reinterpret_cast<uint16_t*>(waveform_param + 0)   = sizeof(waveform_param);
+	*reinterpret_cast<uint32_t*>(waveform_param + 4)   = 0x40010001u;
+	*reinterpret_cast<uintptr_t*>(waveform_param + 8)  = reinterpret_cast<uintptr_t>(source);
+	*reinterpret_cast<uint32_t*>(waveform_param + 16)  = 0x11u;
+	*reinterpret_cast<uint32_t*>(waveform_param + 20)  = 1u;
 	*reinterpret_cast<uintptr_t*>(waveform_param + 24) = reinterpret_cast<uintptr_t>(waveform_context);
 	ASSERT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(waveform_param)), 0);
 
 	const uint32_t play_command[3] = {2, 0x400, 1};
 	ASSERT_EQ(Ngs2::Ngs2VoiceRunCommands(voice, play_command, 1), 0);
 
-	alignas(uint64_t) float output[256 * 2] = {};
-	alignas(uint64_t) uint64_t render_info[3] = {reinterpret_cast<uintptr_t>(output), sizeof(output), (uint64_t {2} << 32u) | 24u};
+	alignas(uint64_t) float    output[256 * 2] = {};
+	alignas(uint64_t) uint64_t render_info[3]  = {reinterpret_cast<uintptr_t>(output), sizeof(output), (uint64_t {2} << 32u) | 24u};
 	ASSERT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1), 0);
 	EXPECT_NE(output[0], 0.0f);
 	EXPECT_FLOAT_EQ(output[0], output[1]);

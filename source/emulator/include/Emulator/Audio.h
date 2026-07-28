@@ -25,6 +25,10 @@ int KYTY_SYSV_ABI AudioOutOutput(int handle, const void* ptr);
 int KYTY_SYSV_ABI AudioOutClose(int handle);
 int KYTY_SYSV_ABI AudioOutGetPortState(int handle, AudioOutPortState* state);
 
+// Host lifecycle control. Pausing closes the producer gate before freezing
+// devices; resuming starts devices before releasing waiting guest producers.
+void AudioOutSetHostPaused(bool paused);
+
 } // namespace AudioOut
 
 // Gen5 AudioOut2 library (same module AudioOut_v1.1, distinct library AudioOut2_v1).
@@ -45,9 +49,6 @@ int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr);
 int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out);
 int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* user_out);
 int KYTY_SYSV_ABI AudioOut2UserDestroy(int32_t user);
-// Residual AudioOut2 NIDs imported by Gen5 titles whose names are not yet
-// triangulated; log SysV args and return SCE_OK so boot can proceed.
-int KYTY_SYSV_ABI AudioOut2LogAndOk(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3);
 
 } // namespace AudioOut2
 
@@ -80,30 +81,34 @@ struct AjmBatchError
 	const void* job_return_address;
 };
 
-int KYTY_SYSV_ABI AjmInitialize(int64_t reserved, uint32_t* context);
-int KYTY_SYSV_ABI AjmFinalize(uint32_t context);
-int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t reserved);
-int KYTY_SYSV_ABI AjmModuleUnregister(uint32_t context, uint32_t codec);
-int KYTY_SYSV_ABI AjmMemoryRegister(uint32_t context, const void* address, size_t num_pages);
-int KYTY_SYSV_ABI AjmBatchInitializeBuffer(void* buffer, size_t buffer_size, void* control);
-int KYTY_SYSV_ABI AjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t flags, uint32_t* instance);
-int KYTY_SYSV_ABI AjmInstanceDestroy(uint32_t context, uint32_t instance);
+int KYTY_SYSV_ABI   AjmInitialize(int64_t reserved, uint32_t* context);
+int KYTY_SYSV_ABI   AjmFinalize(uint32_t context);
+int KYTY_SYSV_ABI   AjmModuleRegister(uint32_t context, uint32_t codec, int64_t reserved);
+int KYTY_SYSV_ABI   AjmModuleUnregister(uint32_t context, uint32_t codec);
+int KYTY_SYSV_ABI   AjmMemoryRegister(uint32_t context, const void* address, size_t num_pages);
+int KYTY_SYSV_ABI   AjmBatchInitializeBuffer(void* buffer, size_t buffer_size, void* control);
+int KYTY_SYSV_ABI   AjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t flags, uint32_t* instance);
+int KYTY_SYSV_ABI   AjmInstanceDestroy(uint32_t context, uint32_t instance);
 void* KYTY_SYSV_ABI AjmBatchJobControlBufferRa(void* buffer, uint32_t instance, uint64_t flags, void* sideband_input,
                                                size_t sideband_input_size, void* sideband_output, size_t sideband_output_size,
                                                void* return_address);
-void* KYTY_SYSV_ABI AjmBatchJobInlineBuffer(void* buffer, const void* data_input, size_t data_input_size,
-                                            const void** batch_address);
-void* KYTY_SYSV_ABI AjmBatchJobRunBufferRa(void* buffer, uint32_t instance, uint64_t flags, void* data_input,
-                                           size_t data_input_size, void* data_output, size_t data_output_size,
-                                           void* sideband_output, size_t sideband_output_size, void* return_address);
-void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(void* buffer, uint32_t instance, uint64_t flags,
-                                                const AjmBuffer* data_input_buffers, size_t data_input_buffer_count,
-                                                const AjmBuffer* data_output_buffers, size_t data_output_buffer_count,
-                                                void* sideband_output, size_t sideband_output_size, void* return_address);
-int KYTY_SYSV_ABI AjmBatchStartBuffer(uint32_t context, uint8_t* batch_buffer, uint32_t batch_size, int priority,
-                                      AjmBatchError* error, uint32_t* batch_id);
-int KYTY_SYSV_ABI AjmBatchWait(uint32_t context, uint32_t batch_id, uint32_t timeout, AjmBatchError* error);
-int KYTY_SYSV_ABI AjmBatchCancel(uint32_t context, uint32_t batch_id);
+void* KYTY_SYSV_ABI AjmBatchJobInlineBuffer(void* buffer, const void* data_input, size_t data_input_size, const void** batch_address);
+void* KYTY_SYSV_ABI AjmBatchJobRunBufferRa(void* buffer, uint32_t instance, uint64_t flags, void* data_input, size_t data_input_size,
+                                           void* data_output, size_t data_output_size, void* sideband_output, size_t sideband_output_size,
+                                           void* return_address);
+void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(void* buffer, uint32_t instance, uint64_t flags, const AjmBuffer* data_input_buffers,
+                                                size_t data_input_buffer_count, const AjmBuffer* data_output_buffers,
+                                                size_t data_output_buffer_count, void* sideband_output, size_t sideband_output_size,
+                                                void* return_address);
+int KYTY_SYSV_ABI   AjmBatchStartBuffer(uint32_t context, uint8_t* batch_buffer, uint32_t batch_size, int priority, AjmBatchError* error,
+                                        uint32_t* batch_id);
+int KYTY_SYSV_ABI   AjmBatchWait(uint32_t context, uint32_t batch_id, uint32_t timeout, AjmBatchError* error);
+int KYTY_SYSV_ABI   AjmBatchCancel(uint32_t context, uint32_t batch_id);
+int KYTY_SYSV_ABI   AjmBatchJobInitialize(void* batch, uint32_t instance, const void* config, size_t config_size, void* result);
+int KYTY_SYSV_ABI   AjmBatchJobSetGaplessDecode(void* batch, uint32_t instance, const void* config, uint64_t enabled, void* result);
+int KYTY_SYSV_ABI   AjmBatchJobDecode(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
+                                      size_t data_output_size, void* result, void* return_address, uint64_t reserved, void* result_alias);
+int KYTY_SYSV_ABI   AjmBatchStart(uint32_t context, void* batch, int priority, AjmBatchError* error, uint32_t* batch_id);
 
 } // namespace Ajm
 

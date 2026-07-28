@@ -1,4 +1,5 @@
 #include "Emulator/Agent/FrameScore.h"
+#include "Kyty/Agent/Json.h"
 
 #include "Emulator/Agent/Protocol.h"
 
@@ -12,6 +13,8 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Emulator::Agent {
+using Kyty::Agent::JsonString;
+
 namespace {
 
 struct BmpInfo

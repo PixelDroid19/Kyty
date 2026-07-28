@@ -6,22 +6,25 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 
+#include "Emulator/AudioPcm.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Semaphore.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include "SDL.h"
+
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
-#include "SDL.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -77,12 +80,13 @@ public:
 
 	KYTY_CLASS_NO_COPY(Audio);
 
-	Id       AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format);
-	bool     AudioOutClose(Id handle);
-	bool     AudioOutValid(Id handle);
-	bool     AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume);
-	bool     AudioOutOutputs(OutputParam* params, uint32_t num, uint32_t* samples_num);
-	bool     AudioOutGetStatus(Id handle, int* type, int* channels_num);
+	Id   AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format);
+	bool AudioOutClose(Id handle);
+	bool AudioOutValid(Id handle);
+	bool AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume);
+	bool AudioOutOutputs(OutputParam* params, uint32_t num, uint32_t* samples_num);
+	bool AudioOutGetStatus(Id handle, int* type, int* channels_num);
+	void SetHostPaused(bool paused);
 
 	Id       AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format);
 	bool     AudioInValid(Id handle);
@@ -94,16 +98,25 @@ public:
 private:
 	struct PortOut
 	{
-		bool     used             = false;
-		int      type             = 0;
-		uint32_t samples_num      = 0;
-		uint32_t freq             = 0;
-		Format   format           = Format::Unknown;
-		uint64_t last_output_time = 0;
-		int      channels_num     = 0;
-		int      volume[8]        = {};
-		uint32_t device_id        = 0;
+		bool                 used                 = false;
+		int                  type                 = 0;
+		uint32_t             samples_num          = 0;
+		uint32_t             freq                 = 0;
+		Format               format               = Format::Unknown;
+		uint64_t             last_output_time     = 0;
+		int                  channels_num         = 0;
+		int                  volume[8]            = {};
+		uint32_t             device_id            = 0;
+		SDL_AudioStream*     conversion_stream    = nullptr;
+		AudioPcmFormat       pcm_format           = AudioPcmFormat::Signed16;
+		size_t               queue_capacity       = 0;
+		bool                 queue_error_logged   = false;
+		bool                 queue_overrun_logged = false;
+		std::vector<uint8_t> volume_buffer;
+		std::vector<uint8_t> device_buffer;
 	};
+
+	static void CloseOutputPort(PortOut* port);
 
 	struct PortIn
 	{
@@ -115,9 +128,11 @@ private:
 		uint64_t last_input_time = 0;
 	};
 
-	Core::Mutex m_mutex;
-	PortOut     m_out_ports[OUT_PORTS_MAX];
-	PortIn      m_in_ports[IN_PORTS_MAX];
+	Core::Mutex   m_mutex;
+	Core::CondVar m_host_pause_changed;
+	bool          m_host_paused = false;
+	PortOut       m_out_ports[OUT_PORTS_MAX];
+	PortIn        m_in_ports[IN_PORTS_MAX];
 };
 
 static Audio* g_audio = nullptr;
@@ -169,16 +184,31 @@ KYTY_SUBSYSTEM_DESTROY(Audio)
 	SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
+constexpr uint32_t HOST_AUDIO_TARGET_QUEUE_MS = 60;
+constexpr uint32_t HOST_AUDIO_MAXIMUM_WAIT_MS = 250;
+
+void Audio::CloseOutputPort(PortOut* port)
+{
+	EXIT_IF(port == nullptr);
+	if (port->conversion_stream != nullptr)
+	{
+		SDL_FreeAudioStream(port->conversion_stream);
+		port->conversion_stream = nullptr;
+	}
+	if (port->device_id != 0)
+	{
+		SDL_ClearQueuedAudio(port->device_id);
+		SDL_CloseAudioDevice(port->device_id);
+		port->device_id = 0;
+	}
+	*port = PortOut {};
+}
+
 Audio::~Audio()
 {
 	for (auto& port: m_out_ports)
 	{
-		if (port.device_id != 0)
-		{
-			SDL_ClearQueuedAudio(port.device_id);
-			SDL_CloseAudioDevice(port.device_id);
-			port.device_id = 0;
-		}
+		CloseOutputPort(&port);
 	}
 }
 
@@ -221,26 +251,45 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 			{
 				SDL_AudioSpec desired {};
 				SDL_AudioSpec obtained {};
-				desired.freq     = static_cast<int>(freq);
-				desired.format   = (format == Format::Signed16bitMono || format == Format::Signed16bitStereo ||
+				port.pcm_format  = (format == Format::Signed16bitMono || format == Format::Signed16bitStereo ||
 				                    format == Format::Signed16bit8Ch || format == Format::Signed16bit8ChStd)
-				                       ? AUDIO_S16SYS
-				                       : AUDIO_F32SYS;
+				                       ? AudioPcmFormat::Signed16
+				                       : AudioPcmFormat::Float32;
+				desired.freq     = static_cast<int>(freq);
+				desired.format   = port.pcm_format == AudioPcmFormat::Signed16 ? AUDIO_S16SYS : AUDIO_F32SYS;
 				desired.channels = static_cast<uint8_t>(port.channels_num);
 				desired.samples  = static_cast<uint16_t>(samples_num);
 				desired.callback = nullptr;
-				port.device_id   = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
-				if (port.device_id == 0 || obtained.freq != desired.freq || obtained.format != desired.format ||
-				    obtained.channels != desired.channels)
+				constexpr int allowed_changes =
+				    SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
+				port.device_id = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, allowed_changes);
+				if (port.device_id == 0 || obtained.format != desired.format)
 				{
-					if (port.device_id != 0)
-					{
-						SDL_CloseAudioDevice(port.device_id);
-					}
-					port = PortOut {};
+					CloseOutputPort(&port);
 					return Id::Invalid();
 				}
-				SDL_PauseAudioDevice(port.device_id, 0);
+
+				port.queue_capacity = AudioPcmQueueBytes(static_cast<uint32_t>(obtained.freq), obtained.channels, port.pcm_format,
+				                                         HOST_AUDIO_TARGET_QUEUE_MS);
+				if (port.queue_capacity == 0)
+				{
+					CloseOutputPort(&port);
+					return Id::Invalid();
+				}
+
+				if (obtained.freq != desired.freq || obtained.format != desired.format || obtained.channels != desired.channels)
+				{
+					port.conversion_stream = SDL_NewAudioStream(desired.format, desired.channels, desired.freq, obtained.format,
+					                                            obtained.channels, obtained.freq);
+					if (port.conversion_stream == nullptr)
+					{
+						CloseOutputPort(&port);
+						return Id::Invalid();
+					}
+					std::fprintf(stderr, "Kyty audio conversion: %d Hz/%u ch/0x%x -> %d Hz/%u ch/0x%x\n", desired.freq, desired.channels,
+					             desired.format, obtained.freq, obtained.channels, obtained.format);
+				}
+				SDL_PauseAudioDevice(port.device_id, m_host_paused ? 1 : 0);
 			}
 
 			return Id::Create(id);
@@ -257,12 +306,7 @@ bool Audio::AudioOutClose(Id handle)
 	if (AudioOutValid(handle))
 	{
 		auto& port = m_out_ports[handle.GetId()];
-		if (port.device_id != 0)
-		{
-			SDL_ClearQueuedAudio(port.device_id);
-			SDL_CloseAudioDevice(port.device_id);
-		}
-		port = PortOut {};
+		CloseOutputPort(&port);
 		return true;
 	}
 
@@ -331,9 +375,42 @@ bool Audio::AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume)
 	return false;
 }
 
+void Audio::SetHostPaused(bool paused)
+{
+	Core::LockGuard lock(m_mutex);
+	if (m_host_paused == paused)
+	{
+		return;
+	}
+
+	// Close the producer gate before pausing devices. On resume, start devices
+	// before releasing producers so the first grain cannot queue behind a
+	// device that is still paused.
+	if (paused)
+	{
+		m_host_paused = true;
+	}
+	for (auto& port: m_out_ports)
+	{
+		if (port.device_id != 0)
+		{
+			SDL_PauseAudioDevice(port.device_id, paused ? 1 : 0);
+		}
+	}
+	if (!paused)
+	{
+		m_host_paused = false;
+		m_host_pause_changed.SignalAll();
+	}
+}
+
 bool Audio::AudioOutOutputs(OutputParam* params, uint32_t num, uint32_t* samples_num)
 {
 	Core::LockGuard lock(m_mutex);
+	while (m_host_paused)
+	{
+		m_host_pause_changed.Wait(&m_mutex);
+	}
 
 	EXIT_NOT_IMPLEMENTED(num == 0);
 	EXIT_IF(samples_num == nullptr);
@@ -368,17 +445,80 @@ bool Audio::AudioOutOutputs(OutputParam* params, uint32_t num, uint32_t* samples
 		{
 			continue;
 		}
-		const bool is_float = port.format == Format::FloatMono || port.format == Format::FloatStereo ||
-		                      port.format == Format::Float8Ch || port.format == Format::Float8ChStd;
-		const uint32_t bytes = port.samples_num * static_cast<uint32_t>(port.channels_num) * (is_float ? sizeof(float) : sizeof(int16_t));
-		const uint32_t high_watermark = bytes * 4u;
-		while (SDL_GetQueuedAudioSize(port.device_id) >= high_watermark)
+		if (!AudioPcmApplyChannelVolumes(params[i].data, port.samples_num, static_cast<uint32_t>(port.channels_num), port.pcm_format,
+		                                 port.volume, &port.volume_buffer) ||
+		    port.volume_buffer.size() > static_cast<size_t>(INT_MAX))
 		{
+			return false;
+		}
+
+		const auto queue_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(HOST_AUDIO_MAXIMUM_WAIT_MS);
+		while (static_cast<size_t>(SDL_GetQueuedAudioSize(port.device_id)) >= port.queue_capacity)
+		{
+			if (std::chrono::steady_clock::now() >= queue_deadline)
+			{
+				if (!port.queue_overrun_logged)
+				{
+					std::fprintf(stderr, "Kyty audio queue remained above %zu bytes for %u ms; accepting one grain\n", port.queue_capacity,
+					             HOST_AUDIO_MAXIMUM_WAIT_MS);
+					port.queue_overrun_logged = true;
+				}
+				break;
+			}
 			Core::Thread::SleepMicro(1000);
 		}
-		if (SDL_QueueAudio(port.device_id, params[i].data, bytes) != 0)
+
+		const void* queue_data = port.volume_buffer.data();
+		size_t      queue_size = port.volume_buffer.size();
+		if (port.conversion_stream != nullptr)
 		{
-			EXIT("audio queue failed: %s\n", SDL_GetError());
+			if (SDL_AudioStreamPut(port.conversion_stream, queue_data, static_cast<int>(queue_size)) != 0)
+			{
+				if (!port.queue_error_logged)
+				{
+					std::fprintf(stderr, "Kyty audio conversion input failed: %s\n", SDL_GetError());
+					port.queue_error_logged = true;
+				}
+				continue;
+			}
+			const int available = SDL_AudioStreamAvailable(port.conversion_stream);
+			if (available < 0)
+			{
+				if (!port.queue_error_logged)
+				{
+					std::fprintf(stderr, "Kyty audio conversion query failed: %s\n", SDL_GetError());
+					port.queue_error_logged = true;
+				}
+				continue;
+			}
+			if (available == 0)
+			{
+				queued_to_device = true;
+				continue;
+			}
+			port.device_buffer.resize(static_cast<size_t>(available));
+			const int converted = SDL_AudioStreamGet(port.conversion_stream, port.device_buffer.data(), available);
+			if (converted < 0)
+			{
+				if (!port.queue_error_logged)
+				{
+					std::fprintf(stderr, "Kyty audio conversion output failed: %s\n", SDL_GetError());
+					port.queue_error_logged = true;
+				}
+				continue;
+			}
+			queue_data = port.device_buffer.data();
+			queue_size = static_cast<size_t>(converted);
+		}
+
+		if (queue_size != 0 && SDL_QueueAudio(port.device_id, queue_data, static_cast<uint32_t>(queue_size)) != 0)
+		{
+			if (!port.queue_error_logged)
+			{
+				std::fprintf(stderr, "Kyty audio queue failed: %s\n", SDL_GetError());
+				port.queue_error_logged = true;
+			}
+			continue;
 		}
 		queued_to_device = true;
 	}
@@ -390,7 +530,11 @@ bool Audio::AudioOutOutputs(OutputParam* params, uint32_t num, uint32_t* samples
 
 	for (uint32_t i = 0; i < num; i++)
 	{
-		m_out_ports[params[i].handle.GetId()].last_output_time = LibKernel::KernelGetProcessTime();
+		const int id = params[i].handle.GetId();
+		if (id >= 0 && id < OUT_PORTS_MAX && m_out_ports[id].used)
+		{
+			m_out_ports[id].last_output_time = LibKernel::KernelGetProcessTime();
+		}
 	}
 
 	return true;
@@ -457,6 +601,14 @@ uint32_t Audio::AudioInInput(Id handle, void* dest)
 namespace AudioOut {
 
 LIB_NAME("AudioOut", "AudioOut");
+
+void AudioOutSetHostPaused(bool paused)
+{
+	if (g_audio != nullptr)
+	{
+		g_audio->SetHostPaused(paused);
+	}
+}
 
 struct AudioOutOutputParam
 {
@@ -658,24 +810,24 @@ LIB_NAME("AudioOut2", "AudioOut");
 // Host-side AudioOut2 object table. Guest receives opaque positive handles.
 // Layout/API reimplemented from public export names (SCE NID encoding) and
 // observed Gen5 import/call order; no third-party implementation code copied.
-constexpr int32_t  kMaxContexts          = 8;
-constexpr int32_t  kMaxPorts             = 16;
-constexpr int32_t  kMaxUsers             = 8;
-constexpr uint64_t kDefaultContextBytes  = 0x10000; // host workspace until layout is measured
-constexpr uint32_t kDefaultQueueDepth    = 4;
+constexpr int32_t  kMaxContexts         = 8;
+constexpr int32_t  kMaxPorts            = 16;
+constexpr int32_t  kMaxUsers            = 8;
+constexpr uint64_t kDefaultContextBytes = 0x10000; // host workspace until layout is measured
+constexpr uint32_t kDefaultQueueDepth   = 4;
 
 struct ContextSlot
 {
-	bool     used      = false;
-	void*    buffer    = nullptr;
-	uint64_t size      = 0;
+	bool     used       = false;
+	void*    buffer     = nullptr;
+	uint64_t size       = 0;
 	uint32_t queue_used = 0;
 };
 
 struct PortSlot
 {
-	bool     used     = false;
-	int32_t  context  = 0;
+	bool    used    = false;
+	int32_t context = 0;
 	// PortGetState fields (0x20-byte guest state blob).
 	uint16_t output   = 0x01;
 	uint8_t  channels = 2;
@@ -933,9 +1085,9 @@ int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr)
 	if (attr != nullptr)
 	{
 		// Best-effort first entry: id at +0, value at +8.
-		const auto* words = static_cast<const uint32_t*>(attr);
+		const auto*   words        = static_cast<const uint32_t*>(attr);
 		const int32_t attribute_id = static_cast<int32_t>(words[0]);
-		uint64_t value = 0;
+		uint64_t      value        = 0;
 		std::memcpy(&value, static_cast<const uint8_t*>(attr) + 8, sizeof(value));
 		auto& p = g_ports[port - 1];
 		switch (attribute_id)
@@ -962,15 +1114,15 @@ int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out)
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	constexpr size_t kPortStateSize = 0x20;
-	void* start = nullptr;
-	void* end   = nullptr;
+	void*            start          = nullptr;
+	void*            end            = nullptr;
 	if (LibKernel::Memory::KernelQueryMemoryProtection(state_out, &start, &end, nullptr) != OK ||
 	    reinterpret_cast<uintptr_t>(state_out) > reinterpret_cast<uintptr_t>(end) - kPortStateSize + 1)
 	{
 		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
 	const auto& p = g_ports[port - 1];
-	uint8_t blob[kPortStateSize] {};
+	uint8_t     blob[kPortStateSize] {};
 	blob[0] = static_cast<uint8_t>(p.output & 0xffu);
 	blob[1] = static_cast<uint8_t>((p.output >> 8) & 0xffu);
 	blob[2] = p.channels;
@@ -1018,16 +1170,6 @@ int KYTY_SYSV_ABI AudioOut2UserDestroy(int32_t user)
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	g_users[user - 1] = UserSlot {};
-	return OK;
-}
-
-int KYTY_SYSV_ABI AudioOut2LogAndOk(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
-{
-	PRINT_NAME();
-	printf("\t a0 = 0x%016" PRIx64 "\n", a0);
-	printf("\t a1 = 0x%016" PRIx64 "\n", a1);
-	printf("\t a2 = 0x%016" PRIx64 "\n", a2);
-	printf("\t a3 = 0x%016" PRIx64 "\n", a3);
 	return OK;
 }
 
@@ -1117,43 +1259,70 @@ LIB_NAME("Ajm", "Ajm");
 
 namespace {
 
-constexpr int32_t AJM_ERROR_INVALID_CONTEXT          = static_cast<int32_t>(0x80930002u);
-constexpr int32_t AJM_ERROR_INVALID_INSTANCE         = static_cast<int32_t>(0x80930003u);
-constexpr int32_t AJM_ERROR_INVALID_BATCH            = static_cast<int32_t>(0x80930004u);
-constexpr int32_t AJM_ERROR_INVALID_PARAMETER        = static_cast<int32_t>(0x80930005u);
-constexpr int32_t AJM_ERROR_OUT_OF_RESOURCES         = static_cast<int32_t>(0x80930007u);
-constexpr int32_t AJM_ERROR_CODEC_ALREADY_REGISTERED = static_cast<int32_t>(0x80930009u);
-constexpr int32_t AJM_ERROR_CODEC_NOT_REGISTERED     = static_cast<int32_t>(0x8093000au);
-constexpr int32_t AJM_ERROR_WRONG_REVISION_FLAG      = static_cast<int32_t>(0x8093000bu);
-constexpr int32_t AJM_ERROR_MALFORMED_BATCH          = static_cast<int32_t>(0x80930011u);
-constexpr uint32_t AJM_MAX_CODEC_TYPE                = 25;
-constexpr int64_t  AJM_GEN5_INITIALIZATION_FLAGS     = INT64_C(0x300000000);
-constexpr uint32_t AJM_MAX_INSTANCE_SLOT             = 0x2fff;
-constexpr uint32_t AJM_INSTANCE_SLOT_MASK            = 0x3fff;
-constexpr uint64_t AJM_FLAG_RUN_GET_CODEC_INFO       = 1ull << 11u;
-constexpr uint64_t AJM_FLAG_RUN_MULTIPLE_FRAMES      = 1ull << 12u;
-constexpr uint64_t AJM_FLAG_SIDEBAND_RESAMPLE_INFO   = 1ull << 44u;
-constexpr uint64_t AJM_FLAG_SIDEBAND_GAPLESS         = 1ull << 45u;
-constexpr uint64_t AJM_FLAG_SIDEBAND_FORMAT          = 1ull << 46u;
-constexpr uint64_t AJM_FLAG_SIDEBAND_STREAM          = 1ull << 47u;
-constexpr uint32_t AJM_SIDEBAND_RESULT_SIZE          = 8u;
-constexpr uint32_t AJM_SIDEBAND_RESAMPLE_INFO_SIZE   = 40u;
-constexpr uint32_t AJM_SIDEBAND_GAPLESS_SIZE         = 8u;
-constexpr uint32_t AJM_SIDEBAND_FORMAT_SIZE          = 24u;
-constexpr uint32_t AJM_SIDEBAND_STREAM_SIZE          = 16u;
-constexpr uint32_t AJM_SIDEBAND_MULTIPLE_FRAMES_SIZE = 8u;
+constexpr int32_t  AJM_ERROR_INVALID_CONTEXT          = static_cast<int32_t>(0x80930002u);
+constexpr int32_t  AJM_ERROR_INVALID_INSTANCE         = static_cast<int32_t>(0x80930003u);
+constexpr int32_t  AJM_ERROR_INVALID_BATCH            = static_cast<int32_t>(0x80930004u);
+constexpr int32_t  AJM_ERROR_INVALID_PARAMETER        = static_cast<int32_t>(0x80930005u);
+constexpr int32_t  AJM_ERROR_OUT_OF_RESOURCES         = static_cast<int32_t>(0x80930007u);
+constexpr int32_t  AJM_ERROR_CODEC_ALREADY_REGISTERED = static_cast<int32_t>(0x80930009u);
+constexpr int32_t  AJM_ERROR_CODEC_NOT_REGISTERED     = static_cast<int32_t>(0x8093000au);
+constexpr int32_t  AJM_ERROR_WRONG_REVISION_FLAG      = static_cast<int32_t>(0x8093000bu);
+constexpr int32_t  AJM_ERROR_MALFORMED_BATCH          = static_cast<int32_t>(0x80930011u);
+constexpr uint32_t AJM_MAX_CODEC_TYPE                 = 25;
+constexpr int64_t  AJM_GEN5_INITIALIZATION_FLAGS      = INT64_C(0x300000000);
+constexpr uint32_t AJM_MAX_INSTANCE_SLOT              = 0x2fff;
+constexpr uint32_t AJM_INSTANCE_SLOT_MASK             = 0x3fff;
+constexpr uint64_t AJM_FLAG_RUN_GET_CODEC_INFO        = 1ull << 11u;
+constexpr uint64_t AJM_FLAG_RUN_MULTIPLE_FRAMES       = 1ull << 12u;
+constexpr uint64_t AJM_FLAG_SIDEBAND_RESAMPLE_INFO    = 1ull << 44u;
+constexpr uint64_t AJM_FLAG_SIDEBAND_GAPLESS          = 1ull << 45u;
+constexpr uint64_t AJM_FLAG_SIDEBAND_FORMAT           = 1ull << 46u;
+constexpr uint64_t AJM_FLAG_SIDEBAND_STREAM           = 1ull << 47u;
+constexpr uint32_t AJM_SIDEBAND_RESULT_SIZE           = 8u;
+constexpr uint32_t AJM_SIDEBAND_RESAMPLE_INFO_SIZE    = 40u;
+constexpr uint32_t AJM_SIDEBAND_GAPLESS_SIZE          = 8u;
+constexpr uint32_t AJM_SIDEBAND_FORMAT_SIZE           = 24u;
+constexpr uint32_t AJM_SIDEBAND_STREAM_SIZE           = 16u;
+constexpr uint32_t AJM_SIDEBAND_MULTIPLE_FRAMES_SIZE  = 8u;
 
 struct AjmContextState
 {
-	std::unordered_set<uint32_t> registered_codecs;
+	std::unordered_set<uint32_t>           registered_codecs;
 	std::unordered_map<uint32_t, uint32_t> instances_by_slot;
-	std::unordered_set<uint32_t> completed_batches;
-	uint32_t next_instance_slot = 0;
-	uint32_t next_batch_id      = 0;
+	std::unordered_set<uint32_t>           completed_batches;
+	uint32_t                               next_instance_slot = 0;
+	uint32_t                               next_batch_id      = 0;
 };
 
-std::mutex                                    g_ajm_mutex;
-std::unordered_map<uint32_t, AjmContextState> g_ajm_contexts;
+struct AjmBatch2DecodeJob
+{
+	uint32_t    instance         = 0;
+	const void* data_input       = nullptr;
+	uint32_t    data_input_size  = 0;
+	void*       data_output      = nullptr;
+	uint32_t    data_output_size = 0;
+	void*       result           = nullptr;
+};
+
+struct AjmDecodeResult
+{
+	int32_t  result                = 0;
+	int32_t  codec_result          = 0;
+	uint32_t input_bytes_consumed  = 0;
+	uint32_t output_bytes_produced = 0;
+	uint64_t total_decoded_samples = 0;
+	uint32_t decoded_frames        = 0;
+	uint32_t reserved              = 0;
+};
+
+static_assert(sizeof(AjmDecodeResult) == 32);
+
+std::mutex                                                     g_ajm_mutex;
+std::unordered_map<uint32_t, AjmContextState>                  g_ajm_contexts;
+std::unordered_map<uintptr_t, std::vector<AjmBatch2DecodeJob>> g_ajm_batch2_jobs;
+std::unordered_map<uint32_t, uint64_t>                         g_ajm_decoded_samples;
+
+constexpr size_t AJM_MAX_BATCH2_BUFFER_SIZE = 64u * 1024u * 1024u;
 
 uint32_t AllocateContextId()
 {
@@ -1236,9 +1405,9 @@ bool ProcessAjmJobBuffer(const uint8_t* job, uint32_t job_size, uint32_t instanc
 		}
 	}
 
-	uint64_t                    flags        = 0;
-	uint64_t                    input_size   = 0;
-	uint64_t                    output_size  = 0;
+	uint64_t                    flags       = 0;
+	uint64_t                    input_size  = 0;
+	uint64_t                    output_size = 0;
 	std::vector<AjmOutputChunk> outputs;
 	uint32_t                    offset = 0;
 	while (offset < job_size)
@@ -1310,8 +1479,7 @@ bool ProcessAjmJobBuffer(const uint8_t* job, uint32_t job_size, uint32_t instanc
 				sideband_offset += codec_info_size;
 			}
 		}
-		if ((flags & AJM_FLAG_SIDEBAND_RESAMPLE_INFO) != 0 &&
-		    output.size >= sideband_offset + AJM_SIDEBAND_RESAMPLE_INFO_SIZE)
+		if ((flags & AJM_FLAG_SIDEBAND_RESAMPLE_INFO) != 0 && output.size >= sideband_offset + AJM_SIDEBAND_RESAMPLE_INFO_SIZE)
 		{
 			const float ratio = 1.0f;
 			std::memcpy(sideband + sideband_offset, &ratio, sizeof(ratio));
@@ -1337,8 +1505,7 @@ bool ProcessAjmJobBuffer(const uint8_t* job, uint32_t job_size, uint32_t instanc
 			std::memcpy(sideband + sideband_offset + 8u, &samples, sizeof(samples));
 			sideband_offset += AJM_SIDEBAND_STREAM_SIZE;
 		}
-		if ((flags & AJM_FLAG_RUN_MULTIPLE_FRAMES) != 0 &&
-		    output.size >= sideband_offset + AJM_SIDEBAND_MULTIPLE_FRAMES_SIZE)
+		if ((flags & AJM_FLAG_RUN_MULTIPLE_FRAMES) != 0 && output.size >= sideband_offset + AJM_SIDEBAND_MULTIPLE_FRAMES_SIZE)
 		{
 			WriteAjmU32(sideband + sideband_offset, input_size != 0 ? 1u : 0u);
 		}
@@ -1566,6 +1733,12 @@ int KYTY_SYSV_ABI AjmInstanceDestroy(uint32_t context, uint32_t instance)
 	{
 		return AJM_ERROR_INVALID_INSTANCE;
 	}
+	g_ajm_decoded_samples.erase(instance);
+	for (auto& [batch, jobs]: g_ajm_batch2_jobs)
+	{
+		(void)batch;
+		jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [instance](const auto& job) { return job.instance == instance; }), jobs.end());
+	}
 
 	printf("\t context  = %u\n", context);
 	printf("\t instance = 0x%08" PRIx32 "\n", instance);
@@ -1573,8 +1746,8 @@ int KYTY_SYSV_ABI AjmInstanceDestroy(uint32_t context, uint32_t instance)
 }
 
 void* KYTY_SYSV_ABI AjmBatchJobControlBufferRa(void* buffer, uint32_t instance, uint64_t flags, void* sideband_input,
-	                                             size_t sideband_input_size, void* sideband_output,
-	                                             size_t sideband_output_size, void* return_address)
+                                               size_t sideband_input_size, void* sideband_output, size_t sideband_output_size,
+                                               void* return_address)
 {
 	PRINT_NAME();
 	if (buffer == nullptr || sideband_input_size > UINT32_MAX || sideband_output_size > UINT32_MAX)
@@ -1582,7 +1755,7 @@ void* KYTY_SYSV_ABI AjmBatchJobControlBufferRa(void* buffer, uint32_t instance, 
 		return nullptr;
 	}
 
-	auto* const begin = static_cast<uint8_t*>(buffer);
+	auto* const begin   = static_cast<uint8_t*>(buffer);
 	auto*       current = begin + 8u;
 	if (return_address != nullptr)
 	{
@@ -1610,8 +1783,7 @@ void* KYTY_SYSV_ABI AjmBatchJobControlBufferRa(void* buffer, uint32_t instance, 
 	return current;
 }
 
-void* KYTY_SYSV_ABI AjmBatchJobInlineBuffer(void* buffer, const void* data_input, size_t data_input_size,
-	                                          const void** batch_address)
+void* KYTY_SYSV_ABI AjmBatchJobInlineBuffer(void* buffer, const void* data_input, size_t data_input_size, const void** batch_address)
 {
 	PRINT_NAME();
 	if (buffer == nullptr || batch_address == nullptr || (data_input == nullptr && data_input_size != 0) ||
@@ -1620,7 +1792,7 @@ void* KYTY_SYSV_ABI AjmBatchJobInlineBuffer(void* buffer, const void* data_input
 		return nullptr;
 	}
 
-	auto* const begin        = static_cast<uint8_t*>(buffer);
+	auto* const  begin        = static_cast<uint8_t*>(buffer);
 	const size_t aligned_size = (data_input_size + 7u) & ~size_t {7u};
 	WriteAjmU32(begin, MakeAjmChunkHeader(7u));
 	WriteAjmU32(begin + 4u, static_cast<uint32_t>(aligned_size));
@@ -1636,18 +1808,17 @@ void* KYTY_SYSV_ABI AjmBatchJobInlineBuffer(void* buffer, const void* data_input
 	return begin + 8u + aligned_size;
 }
 
-void* KYTY_SYSV_ABI AjmBatchJobRunBufferRa(void* buffer, uint32_t instance, uint64_t flags, void* data_input,
-	                                        size_t data_input_size, void* data_output, size_t data_output_size,
-	                                        void* sideband_output, size_t sideband_output_size, void* return_address)
+void* KYTY_SYSV_ABI AjmBatchJobRunBufferRa(void* buffer, uint32_t instance, uint64_t flags, void* data_input, size_t data_input_size,
+                                           void* data_output, size_t data_output_size, void* sideband_output, size_t sideband_output_size,
+                                           void* return_address)
 {
 	PRINT_NAME();
-	if (buffer == nullptr || data_input_size > UINT32_MAX || data_output_size > UINT32_MAX ||
-	    sideband_output_size > UINT32_MAX)
+	if (buffer == nullptr || data_input_size > UINT32_MAX || data_output_size > UINT32_MAX || sideband_output_size > UINT32_MAX)
 	{
 		return nullptr;
 	}
 
-	auto* const begin = static_cast<uint8_t*>(buffer);
+	auto* const begin   = static_cast<uint8_t*>(buffer);
 	auto*       current = begin + 8u;
 	if (return_address != nullptr)
 	{
@@ -1668,12 +1839,10 @@ void* KYTY_SYSV_ABI AjmBatchJobRunBufferRa(void* buffer, uint32_t instance, uint
 	return current;
 }
 
-void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(void* buffer, uint32_t instance, uint64_t flags,
-	                                             const AjmBuffer* data_input_buffers,
-	                                             size_t data_input_buffer_count,
-	                                             const AjmBuffer* data_output_buffers,
-	                                             size_t data_output_buffer_count, void* sideband_output,
-	                                             size_t sideband_output_size, void* return_address)
+void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(void* buffer, uint32_t instance, uint64_t flags, const AjmBuffer* data_input_buffers,
+                                                size_t data_input_buffer_count, const AjmBuffer* data_output_buffers,
+                                                size_t data_output_buffer_count, void* sideband_output, size_t sideband_output_size,
+                                                void* return_address)
 {
 	PRINT_NAME();
 	if (buffer == nullptr || (data_input_buffers == nullptr && data_input_buffer_count != 0) ||
@@ -1682,7 +1851,7 @@ void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(void* buffer, uint32_t instance,
 		return nullptr;
 	}
 
-	auto* const begin = static_cast<uint8_t*>(buffer);
+	auto* const begin   = static_cast<uint8_t*>(buffer);
 	auto*       current = begin + 8u;
 	if (return_address != nullptr)
 	{
@@ -1721,8 +1890,8 @@ void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(void* buffer, uint32_t instance,
 	return current;
 }
 
-int KYTY_SYSV_ABI AjmBatchStartBuffer(uint32_t context, uint8_t* batch_buffer, uint32_t batch_size, int priority,
-	                                   AjmBatchError* error, uint32_t* batch_id)
+int KYTY_SYSV_ABI AjmBatchStartBuffer(uint32_t context, uint8_t* batch_buffer, uint32_t batch_size, int priority, AjmBatchError* error,
+                                      uint32_t* batch_id)
 {
 	PRINT_NAME();
 	if (error != nullptr)
@@ -1794,6 +1963,112 @@ int KYTY_SYSV_ABI AjmBatchCancel(uint32_t context, uint32_t batch_id)
 	{
 		return AJM_ERROR_INVALID_BATCH;
 	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobInitialize(void* batch, uint32_t instance, const void* config, size_t config_size, void* result)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0 || config == nullptr || config_size == 0 || config_size > AJM_MAX_BATCH2_BUFFER_SIZE)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	if (result != nullptr)
+	{
+		std::memset(result, 0, AJM_SIDEBAND_RESULT_SIZE);
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobSetGaplessDecode(void* batch, uint32_t instance, const void* config, uint64_t enabled, void* result)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0 || config == nullptr || enabled > 1)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	if (result != nullptr)
+	{
+		std::memset(result, 0, AJM_SIDEBAND_RESULT_SIZE);
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobDecode(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
+                                    size_t data_output_size, void* result, void* return_address, uint64_t reserved, void* result_alias)
+{
+	PRINT_NAME();
+	(void)return_address;
+	(void)reserved;
+	(void)result_alias;
+	if (batch == nullptr || instance == 0 || data_input == nullptr || data_output == nullptr ||
+	    data_input_size > AJM_MAX_BATCH2_BUFFER_SIZE || data_output_size > AJM_MAX_BATCH2_BUFFER_SIZE)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	std::scoped_lock lock(g_ajm_mutex);
+	g_ajm_batch2_jobs[reinterpret_cast<uintptr_t>(batch)].push_back(
+	    {instance, data_input, static_cast<uint32_t>(data_input_size), data_output, static_cast<uint32_t>(data_output_size), result});
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, AjmBatchError* error, uint32_t* batch_id)
+{
+	PRINT_NAME();
+	if (error != nullptr)
+	{
+		std::memset(error, 0, sizeof(*error));
+	}
+	if (batch == nullptr || batch_id == nullptr || priority < 0)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	std::scoped_lock lock(g_ajm_mutex);
+	auto             context_it = g_ajm_contexts.find(context);
+	if (context_it == g_ajm_contexts.end())
+	{
+		return AJM_ERROR_INVALID_CONTEXT;
+	}
+
+	auto jobs_it = g_ajm_batch2_jobs.find(reinterpret_cast<uintptr_t>(batch));
+	if (jobs_it != g_ajm_batch2_jobs.end())
+	{
+		for (const auto& job: jobs_it->second)
+		{
+			const uint32_t slot = job.instance & AJM_INSTANCE_SLOT_MASK;
+			if (slot == 0 || context_it->second.instances_by_slot.find(slot) == context_it->second.instances_by_slot.end())
+			{
+				return AJM_ERROR_INVALID_INSTANCE;
+			}
+		}
+		for (const auto& job: jobs_it->second)
+		{
+			std::memset(job.data_output, 0, job.data_output_size);
+			auto& total = g_ajm_decoded_samples[job.instance];
+			total += job.data_output_size / 4u;
+			if (job.result != nullptr)
+			{
+				const AjmDecodeResult decode_result {
+				    0, 0, job.data_input_size, job.data_output_size, total, job.data_input_size != 0 ? 1u : 0u, 0};
+				std::memcpy(job.result, &decode_result, sizeof(decode_result));
+			}
+		}
+		g_ajm_batch2_jobs.erase(jobs_it);
+	}
+
+	auto& state = context_it->second;
+	do
+	{
+		++state.next_batch_id;
+		if (state.next_batch_id == 0)
+		{
+			++state.next_batch_id;
+		}
+	} while (state.completed_batches.find(state.next_batch_id) != state.completed_batches.end());
+	state.completed_batches.insert(state.next_batch_id);
+	*batch_id = state.next_batch_id;
 	return OK;
 }
 
@@ -2243,7 +2518,7 @@ struct Audio3dInternal
 	uint32_t              data_index                  = 0;
 	bool                  used                        = false;
 	std::atomic_bool      playback_finished           = false;
-	int                   audio_out_handles[32]        = {};
+	int                   audio_out_handles[32]       = {};
 	uint32_t              audio_out_handle_count      = 0;
 };
 
@@ -2365,9 +2640,8 @@ int KYTY_SYSV_ABI Audio3dPortOpen(int user_id, const Audio3dOpenParameters* para
 	printf("\t buffer_mode = %u\n", effective.buffer_mode);
 	printf("\t num_beds    = %u\n", effective.num_beds);
 
-	if ((user_id != 255 && user_id != 1) || effective.rate != 0 || effective.granularity < 0x100 ||
-	    (effective.granularity & 0xffu) != 0 || effective.max_objects == 0 || effective.queue_depth == 0 ||
-	    effective.buffer_mode > 2)
+	if ((user_id != 255 && user_id != 1) || effective.rate != 0 || effective.granularity < 0x100 || (effective.granularity & 0xffu) != 0 ||
+	    effective.max_objects == 0 || effective.queue_depth == 0 || effective.buffer_mode > 2)
 	{
 		return AUDIO3D_ERROR_INVALID_PARAMETER;
 	}
@@ -2404,8 +2678,8 @@ int KYTY_SYSV_ABI Audio3dPortOpen(int user_id, const Audio3dOpenParameters* para
 		g_ports[port].data[d].state = Audio3dData::State::Empty;
 	}
 
-	int result = Semaphore::KernelCreateSema(&g_ports[port].playback_sema, "audio3d_play", 0x01, 0,
-	                                         static_cast<int>(effective.queue_depth), nullptr);
+	int result = Semaphore::KernelCreateSema(&g_ports[port].playback_sema, "audio3d_play", 0x01, 0, static_cast<int>(effective.queue_depth),
+	                                         nullptr);
 	EXIT_NOT_IMPLEMENTED(result != OK);
 
 	g_ports[port].playback_finished = false;
@@ -2866,7 +3140,7 @@ struct Ngs2VoiceInternal
 	Ngs2RackInternal*  rack            = nullptr;
 	uint32_t           last_command[3] = {};
 	// Render ticks spent in Playing (approximate natural end for short voices).
-	uint32_t           play_ticks      = 0;
+	uint32_t play_ticks = 0;
 };
 
 struct Ngs2PcmBlock
@@ -2877,11 +3151,11 @@ struct Ngs2PcmBlock
 
 struct Ngs2PcmStream
 {
-	uint32_t                  format_id    = 0;
-	uint32_t                  channels     = 0;
-	uint32_t                  sample_rate  = 0;
-	float                     gain         = 1.0f;
-	bool                      playing      = false;
+	uint32_t                  format_id   = 0;
+	uint32_t                  channels    = 0;
+	uint32_t                  sample_rate = 0;
+	float                     gain        = 1.0f;
+	bool                      playing     = false;
 	std::vector<Ngs2PcmBlock> blocks;
 	size_t                    block_index  = 0;
 	double                    source_frame = 0.0;
@@ -2985,10 +3259,8 @@ struct Ngs2SamplerVoiceState
 	const void*    waveform_data;
 };
 
-
-
-static Ngs2Internal*     g_ngs_list   = nullptr;
-static Ngs2RackInternal* g_racks_list = nullptr;
+static Ngs2Internal*                                         g_ngs_list   = nullptr;
+static Ngs2RackInternal*                                     g_racks_list = nullptr;
 static std::unordered_map<Ngs2VoiceInternal*, Ngs2PcmStream> g_pcm_streams;
 
 static uint32_t Ngs2GetVoiceStateFlags(const Ngs2VoiceInternal* voice)
@@ -3005,8 +3277,7 @@ static uint32_t Ngs2GetVoiceStateFlags(const Ngs2VoiceInternal* voice)
 	return 0;
 }
 
-static bool Ngs2MixPcmStream(Ngs2PcmStream* stream, float* output, uint32_t output_frames, uint32_t output_channels,
-	                         uint32_t output_rate)
+static bool Ngs2MixPcmStream(Ngs2PcmStream* stream, float* output, uint32_t output_frames, uint32_t output_channels, uint32_t output_rate)
 {
 	EXIT_IF(stream == nullptr || output == nullptr);
 	EXIT_IF(stream->channels != 1 && stream->channels != 2);
@@ -3027,17 +3298,17 @@ static bool Ngs2MixPcmStream(Ngs2PcmStream* stream, float* output, uint32_t outp
 			return false;
 		}
 
-		const auto& block = stream->blocks[stream->block_index];
-		const auto  index = static_cast<uint64_t>(stream->source_frame);
-		const float fraction = static_cast<float>(stream->source_frame - static_cast<double>(index));
+		const auto& block      = stream->blocks[stream->block_index];
+		const auto  index      = static_cast<uint64_t>(stream->source_frame);
+		const float fraction   = static_cast<float>(stream->source_frame - static_cast<double>(index));
 		const auto  next_index = (index + 1 < block.frames ? index + 1 : index);
 		for (uint32_t channel = 0; channel < 2; channel++)
 		{
 			const uint32_t source_channel = (stream->channels == 1 ? 0 : channel);
-			const float current = static_cast<float>(block.samples[index * stream->channels + source_channel]) / 32768.0f;
-			const float next = static_cast<float>(block.samples[next_index * stream->channels + source_channel]) / 32768.0f;
-			const float sample = (current + (next - current) * fraction) * stream->gain;
-			float&      dest   = output[frame * output_channels + channel];
+			const float    current        = static_cast<float>(block.samples[index * stream->channels + source_channel]) / 32768.0f;
+			const float    next           = static_cast<float>(block.samples[next_index * stream->channels + source_channel]) / 32768.0f;
+			const float    sample         = (current + (next - current) * fraction) * stream->gain;
+			float&         dest           = output[frame * output_channels + channel];
 			dest += sample;
 			if (dest > 1.0f)
 			{
@@ -3197,13 +3468,13 @@ int KYTY_SYSV_ABI Ngs2SystemDestroy(uintptr_t system_handle)
 		return static_cast<int32_t>(0x804a0201u);
 	}
 	Core::LockGuard lock(ngs->mutex);
-	auto** link = &g_racks_list;
+	auto**          link = &g_racks_list;
 	while (*link != nullptr)
 	{
 		if ((*link)->ngs == ngs)
 		{
-			auto* rack = *link;
-			*link = rack->next;
+			auto* rack   = *link;
+			*link        = rack->next;
 			auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack + 1);
 			for (uint32_t i = 0; i < rack->option.common.max_voices; i++)
 			{
@@ -3557,7 +3828,7 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 	EXIT_NOT_IMPLEMENTED(system_handle == 0);
 	EXIT_NOT_IMPLEMENTED(num_buffer_info != 1);
 
-	auto* ngs = reinterpret_cast<Ngs2Internal*>(system_handle);
+	auto*       ngs    = reinterpret_cast<Ngs2Internal*>(system_handle);
 	const auto* render = reinterpret_cast<const Ngs2RenderBufferInfoImpl*>(buffer_info);
 	EXIT_NOT_IMPLEMENTED(render->data == nullptr);
 	EXIT_NOT_IMPLEMENTED(render->size != sizeof(Ngs2RenderBufferInfoImpl));
@@ -3592,7 +3863,7 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 					case Ngs2VoicePlayEvent::Play:
 						if (voice.state == Ngs2VoicePlayState::Empty)
 						{
-							voice.state       = Ngs2VoicePlayState::Playing;
+							voice.state      = Ngs2VoicePlayState::Playing;
 							voice.play_ticks = 0;
 						}
 						break;
@@ -3633,7 +3904,7 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 					voice.play_ticks++;
 					if (voice.play_ticks >= 400)
 					{
-						voice.state       = Ngs2VoicePlayState::Stopped;
+						voice.state      = Ngs2VoicePlayState::Stopped;
 						voice.play_ticks = 0;
 					}
 				}
@@ -3767,8 +4038,7 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 			// 0x40010001 → 0x00000005 → 0x40001300 (size 48). Type-check only
 			// until a field of the 48-byte block is shown to affect guest state.
 			case 0x4000:
-				EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSubmixer &&
-				                     voice->rack->type != Ngs2RackType::CustomSampler);
+				EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSubmixer && voice->rack->type != Ngs2RackType::CustomSampler);
 				break;
 			// Gen5 custom-sampler rack (created via rack_id 0x4001). Observed
 			// VoiceControl param id 0x40010000 with size 40 after logo path.
@@ -3785,11 +4055,11 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 					EXIT_NOT_IMPLEMENTED(format->format_id != 0x12u);
 					EXIT_NOT_IMPLEMENTED(format->channels != 1 && format->channels != 2);
 					EXIT_NOT_IMPLEMENTED(format->sample_rate != 44100);
-					auto& stream        = g_pcm_streams[voice];
-					stream               = Ngs2PcmStream {};
-					stream.format_id     = format->format_id;
-					stream.channels      = format->channels;
-					stream.sample_rate   = format->sample_rate;
+					auto& stream       = g_pcm_streams[voice];
+					stream             = Ngs2PcmStream {};
+					stream.format_id   = format->format_id;
+					stream.channels    = format->channels;
+					stream.sample_rate = format->sample_rate;
 				} else if (control_id == 1)
 				{
 					EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2CustomSamplerWaveformParam));
@@ -3872,8 +4142,8 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 				stream_it->second.playing = true;
 			} else if (command[2] == 8u)
 			{
-				voice->event               = Ngs2VoicePlayEvent::StopImm;
-				stream_it->second.playing  = false;
+				voice->event                   = Ngs2VoicePlayEvent::StopImm;
+				stream_it->second.playing      = false;
 				stream_it->second.block_index  = 0;
 				stream_it->second.source_frame = 0.0;
 			}
@@ -3900,10 +4170,10 @@ struct Ngs2GeomVector
 };
 struct Ngs2GeomCone
 {
-	float inner_level  = 0;
-	float inner_angle  = 0;
-	float outer_level  = 0;
-	float outer_angle  = 0;
+	float inner_level = 0;
+	float inner_angle = 0;
+	float outer_level = 0;
+	float outer_angle = 0;
 };
 struct Ngs2GeomRolloff
 {
@@ -3954,15 +4224,15 @@ int KYTY_SYSV_ABI Ngs2GeomResetSourceParam(void* out_source_param)
 	// Sony reset: zero then set identity-ish defaults for a non-spatialised source.
 	if (out_source_param != nullptr)
 	{
-		auto* p             = static_cast<Ngs2GeomSourceParam*>(out_source_param);
-		*p                  = Ngs2GeomSourceParam {};
-		p->cone.inner_level = 1.0f;
-		p->cone.outer_level = 1.0f;
-		p->cone.outer_angle = 3.14159265f; // 180 deg — omnidirectional default
+		auto* p                       = static_cast<Ngs2GeomSourceParam*>(out_source_param);
+		*p                            = Ngs2GeomSourceParam {};
+		p->cone.inner_level           = 1.0f;
+		p->cone.outer_level           = 1.0f;
+		p->cone.outer_angle           = 3.14159265f; // 180 deg — omnidirectional default
 		p->rolloff.max_distance       = 1000.0f;
 		p->rolloff.rolloff_factor     = 1.0f;
 		p->rolloff.reference_distance = 1.0f;
-		p->doppler_factor              = 1.0f;
+		p->doppler_factor             = 1.0f;
 		p->fbw_level                  = 1.0f;
 		p->lfe_level                  = 1.0f;
 		p->max_level                  = 1.0f;
@@ -3979,11 +4249,11 @@ int KYTY_SYSV_ABI Ngs2GeomResetListenerParam(void* out_listener_param)
 
 	if (out_listener_param != nullptr)
 	{
-		auto* p             = static_cast<Ngs2GeomListenerParam*>(out_listener_param);
-		*p                  = Ngs2GeomListenerParam {};
-		p->orient_front.z   = -1.0f; // look down -Z
-		p->orient_up.y      = 1.0f;
-		p->sound_speed      = 340.0f;
+		auto* p           = static_cast<Ngs2GeomListenerParam*>(out_listener_param);
+		*p                = Ngs2GeomListenerParam {};
+		p->orient_front.z = -1.0f; // look down -Z
+		p->orient_up.y    = 1.0f;
+		p->sound_speed    = 340.0f;
 	}
 	return OK;
 }
@@ -4001,8 +4271,8 @@ int KYTY_SYSV_ABI Ngs2GeomCalcListener(const void* listener_param, void* out_wor
 		w->matrix[0][0] = w->matrix[1][1] = w->matrix[2][2] = w->matrix[3][3] = 1.0f;
 		if (listener_param != nullptr)
 		{
-			const auto* p = static_cast<const Ngs2GeomListenerParam*>(listener_param);
-			w->velocity   = p->velocity;
+			const auto* p  = static_cast<const Ngs2GeomListenerParam*>(listener_param);
+			w->velocity    = p->velocity;
 			w->sound_speed = p->sound_speed;
 		} else
 		{
@@ -4048,15 +4318,15 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 		case Ngs2RackType::Sampler:
 		{
 			EXIT_NOT_IMPLEMENTED(state_size != sizeof(Ngs2SamplerVoiceState));
-			auto* sampler = reinterpret_cast<Ngs2SamplerVoiceState*>(state);
+			auto* sampler                    = reinterpret_cast<Ngs2SamplerVoiceState*>(state);
 			sampler->voice_state.state_flags = Ngs2GetVoiceStateFlags(voice);
-			sampler->envelope_height     = 1.0f;
-			sampler->peak_height         = 0.0f;
-			sampler->reserved            = 0;
-			sampler->num_decoded_samples = 0;
-			sampler->decoded_data_size   = 0;
-			sampler->user_data           = 0;
-			sampler->waveform_data       = nullptr;
+			sampler->envelope_height         = 1.0f;
+			sampler->peak_height             = 0.0f;
+			sampler->reserved                = 0;
+			sampler->num_decoded_samples     = 0;
+			sampler->decoded_data_size       = 0;
+			sampler->user_data               = 0;
+			sampler->waveform_data           = nullptr;
 			printf("\t state_flags = %u\n", sampler->voice_state.state_flags);
 			break;
 		}

@@ -1,5 +1,6 @@
 #include "Kyty/Agent/Cli.h"
 
+#include "Kyty/Agent/Json.h"
 #include "Kyty/Agent/LocalTransport.h"
 #include "Kyty/Agent/WireContract.h"
 
@@ -18,6 +19,7 @@ namespace {
 
 namespace Transport = Kyty::Agent::LocalTransport;
 
+using Kyty::Agent::JsonEscape;
 using Kyty::Agent::kProtocolVersion;
 using Kyty::Agent::kResponseLineMax;
 
@@ -53,41 +55,6 @@ void PrintUsage()
 	                     "Exit 125 = transport (guest dead / stale endpoint); do not retry with longer host sleeps.\n"
 	                     "watch exits 1 when present/frame/fps look stalled (loading hang).\n"
 	                     "capture/score exit 1 when frame metrics look corrupted (healthy:false).\n");
-}
-
-std::string JsonEscape(const char* value)
-{
-	std::string out;
-	if (value == nullptr)
-	{
-		return out;
-	}
-	for (const char* p = value; *p != '\0'; ++p)
-	{
-		const auto ch = static_cast<unsigned char>(*p);
-		switch (ch)
-		{
-			case '"': out += "\\\""; break;
-			case '\\': out += "\\\\"; break;
-			case '\b': out += "\\b"; break;
-			case '\f': out += "\\f"; break;
-			case '\n': out += "\\n"; break;
-			case '\r': out += "\\r"; break;
-			case '\t': out += "\\t"; break;
-			default:
-				if (ch < 0x20)
-				{
-					char escaped[7];
-					std::snprintf(escaped, sizeof(escaped), "\\u%04x", ch);
-					out += escaped;
-				} else
-				{
-					out.push_back(*p);
-				}
-				break;
-		}
-	}
-	return out;
 }
 
 // Stable machine-readable CLI failure codes (stdout JSON when applicable).
@@ -324,13 +291,13 @@ int Main(int argc, char** argv)
 	}
 
 	const char* endpoint = nullptr;
-	int         i    = 1;
+	int         i        = 1;
 	for (; i < argc; ++i)
 	{
 		if (std::strcmp(argv[i], "--endpoint") == 0 || std::strcmp(argv[i], "--sock") == 0)
 		{
 			const char* flag = argv[i];
-			endpoint = RequireArg(argc, argv, &i, flag);
+			endpoint         = RequireArg(argc, argv, &i, flag);
 			if (endpoint == nullptr)
 			{
 				return 125;
@@ -446,7 +413,7 @@ int Main(int argc, char** argv)
 			return 125;
 		}
 		return Call(endpoint, reset ? "{\"id\":1,\"tool\":\"perf_snapshot\",\"args\":{\"reset\":true}}"
-		                        : "{\"id\":1,\"tool\":\"perf_snapshot\",\"args\":{\"reset\":false}}");
+		                            : "{\"id\":1,\"tool\":\"perf_snapshot\",\"args\":{\"reset\":false}}");
 	}
 	if (std::strcmp(cmd, "sync-waits") == 0)
 	{

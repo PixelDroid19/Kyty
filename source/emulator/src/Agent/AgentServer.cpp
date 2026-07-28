@@ -6,6 +6,7 @@
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Agent/FrameScore.h"
 #include "Emulator/Agent/Protocol.h"
+#include "Kyty/Agent/Json.h"
 #include "Emulator/Agent/StallWatch.h"
 #include "Emulator/Controller.h"
 #include "Emulator/Graphics/DebugStats.h"
@@ -30,6 +31,8 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Emulator::Agent {
+using Kyty::Agent::JsonString;
+
 namespace {
 
 std::atomic<bool> g_active {false};
