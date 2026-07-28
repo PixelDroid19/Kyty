@@ -570,12 +570,7 @@ void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image)
 
 	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
 
-	VkImageAspectFlags aspect_mask = VK_IMAGE_ASPECT_DEPTH_BIT;
-
-	if (image->format == VK_FORMAT_D24_UNORM_S8_UINT || image->format == VK_FORMAT_D32_SFLOAT_S8_UINT)
-	{
-		aspect_mask |= VK_IMAGE_ASPECT_STENCIL_BIT;
-	}
+	const VkImageAspectFlags aspect_mask = DepthFormatAspectMask(image->format);
 
 	set_image_layout(vk_buffer, image, 0, 1, aspect_mask, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 

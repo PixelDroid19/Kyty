@@ -97,6 +97,15 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	view_descriptor.aspect_mask = VK_IMAGE_ASPECT_DEPTH_BIT;
 	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE]));
 
+	if (DepthFormatHasStencil(vk_obj->format))
+	{
+		view_descriptor.components  = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+		                               VK_COMPONENT_SWIZZLE_IDENTITY};
+		view_descriptor.aspect_mask = VK_IMAGE_ASPECT_STENCIL_BIT;
+		EXIT_NOT_IMPLEMENTED(
+		    !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_STENCIL_TEXTURE]));
+	}
+
 	// First bind of an HTILE depth target: pending Vulkan clear. Leave layout
 	// UNDEFINED so FindRenderDepthInfo → loadOp CLEAR can discard+clear. Non-HTILE
 	// still transitions to ATTACHMENT once.
@@ -126,8 +135,14 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 
 	DeleteFramebuffer(vk_obj);
 
-	vkDestroyImageView(ctx->device, vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE], nullptr);
-	vkDestroyImageView(ctx->device, vk_obj->image_view[VulkanImage::VIEW_DEFAULT], nullptr);
+	for (auto& view: vk_obj->image_view)
+	{
+		if (view != nullptr)
+		{
+			vkDestroyImageView(ctx->device, view, nullptr);
+			view = nullptr;
+		}
+	}
 
 	vkDestroyImage(ctx->device, vk_obj->image, nullptr);
 

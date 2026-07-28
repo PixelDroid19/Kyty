@@ -4762,7 +4762,7 @@ static void GraphicsRenderDepthStencilBarrier(VkCommandBuffer vk_buffer, VulkanI
 		image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.image                           = image->image;
-		image_memory_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
+		image_memory_barrier.subresourceRange.aspectMask     = DepthFormatAspectMask(image->format);
 		image_memory_barrier.subresourceRange.baseMipLevel   = 0;
 		image_memory_barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
@@ -4946,7 +4946,10 @@ static void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 
 	if (r->format != VK_FORMAT_UNDEFINED)
 	{
-		r->sampled = ((effective_stencil == 0 && z.z_info.tile_mode_index != 0) || z.stencil_info.texture_compatible_stencil);
+		// Depth/stencil objects keep a sampled representation from their first
+		// materialization. Later fixed-function expansion and shader sampling
+		// must observe the same image allocation and its accumulated contents.
+		r->sampled = true;
 
 		EXIT_NOT_IMPLEMENTED(z.z_info.tile_mode_index != 0 && r->depth_tile_swizzle != 0);
 		EXIT_NOT_IMPLEMENTED(r->stencil_tile_swizzle != 0);
@@ -8156,7 +8159,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.image                           = depth->vulkan_buffer->image;
-		image_memory_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
+		image_memory_barrier.subresourceRange.aspectMask     = DepthFormatAspectMask(depth->vulkan_buffer->format);
 		image_memory_barrier.subresourceRange.baseMipLevel   = 0;
 		image_memory_barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
