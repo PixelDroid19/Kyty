@@ -24,7 +24,6 @@ from pathlib import Path
 import platform
 import re
 import shutil
-import signal
 import struct
 import subprocess
 import sys
@@ -32,22 +31,19 @@ import time
 from collections import Counter
 from typing import Any, Callable
 
+from kyty_runner_common import (
+    STRICT_FORBIDDEN_ENVIRONMENT_KEYS,
+    build_child_environment,
+    find_active_environment_keys,
+    launch_process_group,
+    terminate_process_group,
+)
+
 
 SCHEMA_VERSION = 1
 DEFAULT_WORLD_CROP = (0.18, 0.08, 0.92, 0.78)
 DEFAULT_HUD_CROP = (0.02, 0.82, 0.35, 0.96)
-FORBIDDEN_ENV = (
-    "KYTY_STUB_MISSING",
-    "KYTY_GFX_PERMISSIVE",
-    # Strict captures must not inherit unsafe bring-up and still claim acceptance.
-    "KYTY_BRINGUP_MODE",
-    "KYTY_BRINGUP_FEATURES",
-    "KYTY_BRINGUP_SUBSYSTEMS",
-    "KYTY_BRINGUP_BURST_LIMIT",
-    "KYTY_BRINGUP_BURST_WINDOW_MS",
-    "KYTY_BRINGUP_ALLOW_DIAGNOSTIC",
-)
-DIAGNOSTIC_ENV = (
+CAPTURE_DIAGNOSTIC_ENVIRONMENT_KEYS = (
     "KYTY_LIGHTBUF_PROBE",
     "KYTY_SKIP_UD2",
     "KYTY_BLEND_CONSTANT_EVIDENCE",
@@ -135,11 +131,11 @@ def ensure_strict_environment(allow_diagnostics: bool, allowed: set[str] | None 
     if allow_diagnostics:
         return
     allowed = allowed or set()
-    active = [
-        name
-        for name in FORBIDDEN_ENV + DIAGNOSTIC_ENV
-        if os.environ.get(name) and name not in allowed
-    ]
+    active = find_active_environment_keys(
+        os.environ,
+        STRICT_FORBIDDEN_ENVIRONMENT_KEYS + CAPTURE_DIAGNOSTIC_ENVIRONMENT_KEYS,
+        allowed,
+    )
     if active:
         raise RuntimeError(
             "strict capture refuses diagnostic/permissive environment: "
@@ -470,17 +466,16 @@ def run_capture(args: argparse.Namespace) -> int:
     if not guest_root.exists():
         raise RuntimeError(f"guest root does not exist: {guest_root}")
 
-    env = os.environ.copy()
-    if not args.allow_diagnostics:
-        for name in DIAGNOSTIC_ENV:
-            env.pop(name, None)
-    for name in FORBIDDEN_ENV:
-        env.pop(name, None)
+    capture_directory = output / "native_frames"
+    env = build_child_environment(
+        os.environ,
+        guest_root=guest_root,
+        capture_directory=capture_directory,
+    )
     if args.auto_cross:
         env["KYTY_AUTO_CROSS"] = "1"
     else:
         env.pop("KYTY_AUTO_CROSS", None)
-    env["KYTY_NATIVE_CAPTURE_DIR"] = str(output / "native_frames")
     env["KYTY_NATIVE_CAPTURE_FIRST_PRESENT"] = "1"
     env["KYTY_NATIVE_CAPTURE_TRIGGER"] = str(output / "capture-now.trigger")
     env["KYTY_NATIVE_TELEMETRY"] = "1"
@@ -520,20 +515,12 @@ def run_capture(args: argparse.Namespace) -> int:
             command = ["arch", "-x86_64", *command]
     started_utc = utc_now()
     started = time.monotonic()
-    previous_sigterm = signal.getsignal(signal.SIGTERM)
-
-    def abort(_signum: int, _frame: Any) -> None:
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, abort)
     with log_path.open("w", encoding="utf-8") as log:
-        process = subprocess.Popen(
+        process = launch_process_group(
             command,
             cwd=root,
             env=env,
             stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=(os.name == "posix"),
         )
     captures: list[dict[str, Any]] = []
     startup_captures: list[dict[str, Any]] = []
@@ -543,6 +530,7 @@ def run_capture(args: argparse.Namespace) -> int:
     seen_native_files: set[str] = set()
     input_window: tuple[str, int] | None = None
     input_error: str | None = None
+    termination_notes: list[str] = []
     try:
         deadline = time.monotonic() + args.max_wait
         frame: int | None = None
@@ -605,17 +593,7 @@ def run_capture(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         capture_error = str(exc)
     finally:
-        if process.poll() is None:
-            if os.name == "posix":
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            else:
-                process.send_signal(signal.SIGTERM)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        signal.signal(signal.SIGTERM, previous_sigterm)
+        terminate_process_group(process, termination_notes)
 
     aggregate = aggregate_captures(captures) if captures else None
     manifest = {
@@ -658,6 +636,7 @@ def run_capture(args: argparse.Namespace) -> int:
         },
         "input": sent_keys,
         "input_error": input_error,
+        "process_termination": termination_notes,
         "startup_captures": startup_captures,
         "captures": captures,
         "aggregate": aggregate,

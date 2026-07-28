@@ -18,6 +18,12 @@ from unittest import mock
 
 import sys
 
+SCRIPTS_PATH = Path(__file__).resolve().parents[2] / "scripts"
+if str(SCRIPTS_PATH) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_PATH))
+
+import kyty_runner_common as runner
+
 MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "kyty_games_matrix.py"
 SPEC = importlib.util.spec_from_file_location("kyty_games_matrix", MODULE_PATH)
 assert SPEC and SPEC.loader
@@ -100,7 +106,7 @@ class DiscoveryTests(unittest.TestCase):
 
 
 class StrictEnvTests(unittest.TestCase):
-    def test_clean_child_env_strips_forbidden_keys(self) -> None:
+    def test_matrix_environment_strips_forbidden_keys(self) -> None:
         base = {
             "PATH": "/usr/bin",
             "HOME": "/tmp",
@@ -113,15 +119,15 @@ class StrictEnvTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             guest = Path(td) / "g"
             guest.mkdir()
-            env = matrix.clean_child_env(
+            env = matrix.build_matrix_environment(
                 base,
                 guest_root=guest,
-                agent_sock=Path(td) / "a.sock",
-                capture_dir=Path(td) / "c",
+                agent_socket=Path(td) / "a.sock",
+                capture_directory=Path(td) / "c",
             )
-        for k in matrix.FORBIDDEN_CHILD_ENV:
+        for k in runner.STRICT_FORBIDDEN_ENVIRONMENT_KEYS:
             self.assertNotIn(k, env)
-        self.assertEqual(matrix.assert_strict_env(env), [])
+        self.assertEqual(runner.find_forbidden_environment_keys(env), [])
         self.assertEqual(env["KYTY_PRINTF_DIRECTION"], "Silent")
         self.assertIn("KYTY_GUEST_ROOT", env)
         self.assertIn("KYTY_AGENT_SOCK", env)
@@ -130,11 +136,11 @@ class StrictEnvTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             guest = Path(td) / "g"
             guest.mkdir()
-            env = matrix.clean_child_env(
+            env = matrix.build_matrix_environment(
                 {"PATH": "/usr/bin"},
                 guest_root=guest,
-                agent_sock=Path(td) / "a.sock",
-                capture_dir=Path(td) / "c",
+                agent_socket=Path(td) / "a.sock",
+                capture_directory=Path(td) / "c",
                 mode="bringup",
             )
         self.assertEqual(env["KYTY_BRINGUP_MODE"], "unsafe")
@@ -146,13 +152,13 @@ class StrictEnvTests(unittest.TestCase):
 
 
 class StaleSocketTests(unittest.TestCase):
-    def test_sock_is_stale_for_orphan_file(self) -> None:
+    def test_unix_socket_is_stale_for_orphan_file(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "dead.sock"
             p.write_text("not a socket", encoding="utf-8")
-            self.assertTrue(matrix.sock_is_stale(p))
+            self.assertTrue(runner.is_stale_unix_socket(p))
             notes: list[str] = []
-            matrix.remove_stale_socket(p, notes)
+            runner.remove_stale_unix_socket(p, notes)
             self.assertFalse(p.exists())
             self.assertIn("removed_stale_socket", notes)
 
@@ -180,7 +186,7 @@ class StaleSocketTests(unittest.TestCase):
             t = threading.Thread(target=accept_loop, daemon=True)
             t.start()
             try:
-                self.assertFalse(matrix.sock_is_stale(p))
+                self.assertFalse(runner.is_stale_unix_socket(p))
             finally:
                 stop.set()
                 srv.close()
@@ -424,11 +430,11 @@ class AgentSockPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "agent.sock"
             path.write_text("owned", encoding="utf-8")
-            identity = matrix.path_identity(path)
+            identity = runner.path_identity(path)
             path.unlink()
             path.write_text("replacement", encoding="utf-8")
             notes: list[str] = []
-            matrix.unlink_owned_socket(path, identity, notes)
+            runner.unlink_owned_socket(path, identity, notes)
             self.assertTrue(path.exists())
             self.assertIn("socket_identity_changed", notes)
 
@@ -444,7 +450,7 @@ class CleanupTests(unittest.TestCase):
         ]
         notes: list[str] = []
         with mock.patch.object(matrix.os, "killpg"):
-            matrix.kill_process_group(proc, notes)
+            runner.terminate_process_group(proc, notes)
         self.assertIn("kill_timeout_after_sigkill", notes)
 
 
@@ -452,8 +458,8 @@ class FinalStatusTests(unittest.TestCase):
     def test_final_status_is_sampled_while_owned_socket_is_live(self) -> None:
         status = {"phase": "loading"}
         response = {"ok": True, "result": {"phase": "interactive", "present": 7}}
-        with mock.patch.object(matrix, "sock_is_stale", return_value=False), mock.patch.object(
-            matrix, "agent_call", return_value=(0, response)
+        with mock.patch.object(matrix, "is_stale_unix_socket", return_value=False), mock.patch.object(
+            matrix, "call_agent", return_value=(0, response)
         ) as call:
             sampled = matrix.sample_final_status(
                 Path("/tmp/owned.sock"),

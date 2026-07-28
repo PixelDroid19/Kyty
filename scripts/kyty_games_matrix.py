@@ -30,15 +30,23 @@ import hashlib
 import json
 import os
 import re
-import signal
-import socket
-import subprocess
 import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
+
+from kyty_runner_common import (
+    build_child_environment,
+    call_agent,
+    find_forbidden_environment_keys,
+    is_stale_unix_socket,
+    launch_process_group,
+    path_identity,
+    terminate_process_group,
+    unlink_owned_socket,
+)
 
 # --- Primary executable rules (must match GuestExecutableLocator) ------------
 
@@ -74,17 +82,11 @@ OUTCOMES = frozenset(
     }
 )
 
-# Env keys that must NOT appear in a strict matrix child.
-FORBIDDEN_CHILD_ENV = (
-    "KYTY_BRINGUP_MODE",
-    "KYTY_BRINGUP_FEATURES",
-    "KYTY_BRINGUP_SUBSYSTEMS",
-    "KYTY_BRINGUP_BURST_LIMIT",
-    "KYTY_BRINGUP_BURST_WINDOW_MS",
-    "KYTY_BRINGUP_ALLOW_DIAGNOSTIC",
-    "KYTY_STUB_MISSING",
-    "KYTY_GFX_PERMISSIVE",
-)
+DIAGNOSTIC_BRINGUP_ENVIRONMENT = {
+    "KYTY_BRINGUP_MODE": "unsafe",
+    "KYTY_BRINGUP_ALLOW_DIAGNOSTIC": "1",
+    "KYTY_BRINGUP_FEATURES": "not_implemented,missing_function_import,gfx_permissive,adjacent_module_discovery",
+}
 
 
 def is_primary_executable_name(name: str) -> bool:
@@ -185,63 +187,26 @@ class CaseResult:
         }
 
 
-def clean_child_env(
+def build_matrix_environment(
     base: dict[str, str],
     *,
     guest_root: Path,
-    agent_sock: Path,
-    capture_dir: Path,
+    agent_socket: Path,
+    capture_directory: Path,
     mode: str = "strict",
 ) -> dict[str, str]:
-    """Build an isolated strict or explicitly diagnostic bring-up environment."""
-    # Start from a minimal host set needed for Vulkan/display, not a full parent clone.
-    keep_keys = (
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "DISPLAY",
-        "WAYLAND_DISPLAY",
-        "XDG_RUNTIME_DIR",
-        "XAUTHORITY",
-        "XDG_SESSION_TYPE",
-        "DBUS_SESSION_BUS_ADDRESS",
-        "VK_ICD_FILENAMES",
-        "VK_DRIVER_FILES",
-        "LD_LIBRARY_PATH",
-        "LIBGL_DRIVERS_PATH",
-        "MESA_LOADER_DRIVER_OVERRIDE",
-        "AMD_VULKAN_ICD",
-        "DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1",
+    """Build the exact matrix child policy for the requested execution mode."""
+    env = build_child_environment(
+        base,
+        guest_root=guest_root,
+        agent_socket=agent_socket,
+        capture_directory=capture_directory,
     )
-    env: dict[str, str] = {}
-    for k in keep_keys:
-        if k in base and base[k]:
-            env[k] = base[k]
-    env["KYTY_GUEST_ROOT"] = str(guest_root)
-    env["KYTY_AGENT_SOCK"] = str(agent_sock)
-    env["KYTY_NATIVE_CAPTURE_DIR"] = str(capture_dir)
-    env["KYTY_PRINTF_DIRECTION"] = "Silent"
-    env["KYTY_SCREEN_WIDTH"] = base.get("KYTY_SCREEN_WIDTH", "1280")
-    env["KYTY_SCREEN_HEIGHT"] = base.get("KYTY_SCREEN_HEIGHT", "720")
-    # Explicitly ensure forbidden keys are absent
-    for k in FORBIDDEN_CHILD_ENV:
-        env.pop(k, None)
     if mode == "bringup":
-        env["KYTY_BRINGUP_MODE"] = "unsafe"
-        env["KYTY_BRINGUP_ALLOW_DIAGNOSTIC"] = "1"
-        env["KYTY_BRINGUP_FEATURES"] = (
-            "not_implemented,missing_function_import,gfx_permissive,adjacent_module_discovery"
-        )
+        env.update(DIAGNOSTIC_BRINGUP_ENVIRONMENT)
+    elif mode != "strict":
+        raise ValueError(f"unsupported matrix mode: {mode}")
     return env
-
-
-def assert_strict_env(env: dict[str, str]) -> list[str]:
-    bad = [k for k in FORBIDDEN_CHILD_ENV if k in env]
-    return bad
 
 
 def clear_untrusted_pid_file(path: Path, notes: list[str]) -> None:
@@ -255,128 +220,6 @@ def clear_untrusted_pid_file(path: Path, notes: list[str]) -> None:
         notes.append(f"stale_pid_unlink_failed:{type(exc).__name__}")
 
 
-def sock_is_stale(path: Path) -> bool:
-    if not path.exists():
-        return False
-    # Connect attempt: refused/not-a-socket → stale leftover
-    try:
-        if not path.is_socket() and not path.is_file():
-            return True
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.2)
-        try:
-            s.connect(str(path))
-            s.close()
-            return False  # live
-        except (ConnectionRefusedError, FileNotFoundError, OSError):
-            return True
-        finally:
-            try:
-                s.close()
-            except OSError:
-                pass
-    except OSError:
-        return True
-
-
-def remove_stale_socket(path: Path, notes: list[str]) -> None:
-    if path.exists() and sock_is_stale(path):
-        try:
-            path.unlink()
-            notes.append("removed_stale_socket")
-        except OSError as exc:
-            notes.append(f"stale_socket_unlink_failed:{type(exc).__name__}")
-
-
-def path_identity(path: Path) -> Optional[tuple[int, int]]:
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    return stat.st_dev, stat.st_ino
-
-
-def unlink_owned_socket(
-    path: Path,
-    expected_identity: Optional[tuple[int, int]],
-    notes: list[str],
-) -> None:
-    if expected_identity is None or not path.exists():
-        return
-    if path_identity(path) != expected_identity:
-        notes.append("socket_identity_changed")
-        return
-    try:
-        path.unlink()
-    except OSError as exc:
-        notes.append(f"socket_unlink_failed:{type(exc).__name__}")
-
-
-def kill_process_group(proc: subprocess.Popen[Any], notes: list[str]) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        if os.name == "posix":
-            os.killpg(proc.pid, signal.SIGTERM)
-        else:
-            proc.terminate()
-        try:
-            proc.wait(timeout=5)
-            notes.append("killed_sigterm")
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        if os.name == "posix":
-            os.killpg(proc.pid, signal.SIGKILL)
-        else:
-            proc.kill()
-        try:
-            proc.wait(timeout=5)
-            notes.append("killed_sigkill")
-        except subprocess.TimeoutExpired:
-            notes.append("kill_timeout_after_sigkill")
-    except ProcessLookupError:
-        notes.append("process_already_gone")
-    except OSError as exc:
-        notes.append(f"kill_failed:{type(exc).__name__}")
-
-
-def agent_call(
-    sock: Path,
-    tool: str,
-    args: Optional[dict[str, Any]] = None,
-    timeout: float = 5.0,
-) -> tuple[int, dict[str, Any]]:
-    """Call a diagnostic tool through the authoritative agent socket protocol."""
-    req = {"id": 1, "tool": tool, "args": args or {}}
-    s: Optional[socket.socket] = None
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        s.connect(str(sock))
-        payload = json.dumps(req, separators=(",", ":")) + "\n"
-        s.sendall(payload.encode("utf-8"))
-        data = b""
-        while b"\n" not in data and len(data) < 65536:
-            chunk = s.recv(4096)
-            if not chunk:
-                break
-            data += chunk
-        line = data.decode("utf-8", errors="replace").split("\n", 1)[0]
-        obj = json.loads(line) if line else {}
-        if not obj.get("ok", False):
-            return 1, obj
-        return 0, obj
-    except FileNotFoundError:
-        return 125, {"ok": False, "error": {"code": "transport", "message": "socket_missing"}}
-    except (ConnectionRefusedError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-        return 125, {"ok": False, "error": {"code": "transport", "message": type(exc).__name__}}
-    finally:
-        if s is not None:
-            try:
-                s.close()
-            except OSError:
-                pass
 
 
 def extract_status(result_obj: dict[str, Any]) -> dict[str, Any]:
@@ -547,9 +390,9 @@ def sample_final_status(
     current: dict[str, Any],
 ) -> dict[str, Any]:
     """Best-effort final observation performed before process teardown."""
-    if not agent_ready or sock_is_stale(sock):
+    if not agent_ready or is_stale_unix_socket(sock):
         return current
-    code, obj = agent_call(sock, "status", timeout=1.0)
+    code, obj = call_agent(sock, "status", timeout=1.0)
     if code != 0:
         return current
     return extract_status(obj)
@@ -592,29 +435,28 @@ def run_one_case(
         )
     clear_untrusted_pid_file(pid_path, notes)
 
-    env = clean_child_env(
+    env = build_matrix_environment(
         dict(os.environ),
         guest_root=package_root,
-        agent_sock=sock,
-        capture_dir=capture_dir,
+        agent_socket=sock,
+        capture_directory=capture_dir,
         mode=mode,
     )
-    bad = assert_strict_env(env) if mode == "strict" else []
+    bad = find_forbidden_environment_keys(env) if mode == "strict" else []
     if bad:
         notes.append("strict_env_violation:" + ",".join(bad))
     # Evidence of strict purity (keys only — no secret values / paths)
     env_dump.write_text("\n".join(sorted(env.keys())) + "\n", encoding="utf-8")
-    for k in FORBIDDEN_CHILD_ENV:
-        if mode == "strict" and k in env:
-            return CaseResult(
-                case_id=case_id,
-                outcome="launch_failed",
-                first_frontier="strict_env_violation",
-                valid_package=True,
-                attempted=False,
-                progressed=False,
-                notes=notes,
-            )
+    if bad:
+        return CaseResult(
+            case_id=case_id,
+            outcome="launch_failed",
+            first_frontier="strict_env_violation",
+            valid_package=True,
+            attempted=False,
+            progressed=False,
+            notes=notes,
+        )
 
     cmd = [str(fc_script), "scripts/run_guest.lua", str(package_root)]
     started = time.monotonic()
@@ -623,13 +465,11 @@ def run_one_case(
     present_deadline = started + present_deadline_s
 
     with log_path.open("w", encoding="utf-8") as log:
-        proc = subprocess.Popen(
+        proc = launch_process_group(
             cmd,
-            cwd=str(repo_root),
+            cwd=repo_root,
             env=env,
             stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=(os.name == "posix"),
         )
     pid_path.write_text(str(proc.pid), encoding="utf-8")
 
@@ -657,7 +497,7 @@ def run_one_case(
                     notes.append("startup_deadline")
                     timed_out = True
                     break
-                code, obj = agent_call(sock, "ping", timeout=1.0)
+                code, obj = call_agent(sock, "ping", timeout=1.0)
                 if code == 0:
                     agent_ready = True
                     best_progress = "runtime_started"
@@ -665,7 +505,7 @@ def run_one_case(
                 time.sleep(0.25)
                 continue
 
-            code, obj = agent_call(sock, "status", timeout=2.0)
+            code, obj = call_agent(sock, "status", timeout=2.0)
             if code == 0:
                 status = extract_status(obj)
                 phase = str(status.get("phase") or "")
@@ -686,7 +526,7 @@ def run_one_case(
                         break
 
             # last_error for unsupported
-            ecode, eobj = agent_call(sock, "last_error", timeout=1.0)
+            ecode, eobj = call_agent(sock, "last_error", timeout=1.0)
             if ecode == 0:
                 ev = extract_status(eobj).get("event")
                 if isinstance(ev, dict) and ev.get("code"):
@@ -719,7 +559,7 @@ def run_one_case(
             current=status,
         )
         if proc.poll() is None:
-            kill_process_group(proc, notes)
+            terminate_process_group(proc, notes)
         exit_code = proc.poll()
         unlink_owned_socket(sock, owned_socket_identity, notes)
         try:

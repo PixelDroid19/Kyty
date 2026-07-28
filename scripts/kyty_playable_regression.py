@@ -24,28 +24,21 @@ import hashlib
 import importlib.util
 import json
 import os
-import signal
-import socket
-import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-
-FORBIDDEN_CHILD_ENV = (
-    "KYTY_BRINGUP_MODE",
-    "KYTY_BRINGUP_FEATURES",
-    "KYTY_BRINGUP_SUBSYSTEMS",
-    "KYTY_BRINGUP_BURST_LIMIT",
-    "KYTY_BRINGUP_BURST_WINDOW_MS",
-    "KYTY_BRINGUP_ALLOW_DIAGNOSTIC",
-    "KYTY_STUB_MISSING",
-    "KYTY_GFX_PERMISSIVE",
-    "KYTY_AUTO_CROSS",
-    "KYTY_SKIP_UD2",
+from kyty_runner_common import (
+    build_child_environment,
+    call_agent,
+    find_forbidden_environment_keys,
+    launch_process_group,
+    remove_stale_unix_socket,
+    terminate_process_group,
 )
+
 
 DEFAULT_PROFILE: dict[str, Any] = {
     "schema": "kyty_playable_regression_profile_v1",
@@ -112,56 +105,25 @@ def load_profile(path: Optional[Path]) -> dict[str, Any]:
     return out
 
 
-def clean_child_env(
+def build_playable_environment(
     base: dict[str, str],
     *,
     guest_root: Path,
-    agent_sock: Path,
-    capture_dir: Path,
+    agent_socket: Path,
+    capture_directory: Path,
 ) -> dict[str, str]:
-    keep_keys = (
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "DISPLAY",
-        "WAYLAND_DISPLAY",
-        "XDG_RUNTIME_DIR",
-        "XAUTHORITY",
-        "XDG_SESSION_TYPE",
-        "DBUS_SESSION_BUS_ADDRESS",
-        "VK_ICD_FILENAMES",
-        "VK_DRIVER_FILES",
-        "LD_LIBRARY_PATH",
-        "LIBGL_DRIVERS_PATH",
-        "MESA_LOADER_DRIVER_OVERRIDE",
-        "AMD_VULKAN_ICD",
-        "DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1",
+    """Build the strict playable child policy on shared runner primitives."""
+    return build_child_environment(
+        base,
+        guest_root=guest_root,
+        agent_socket=agent_socket,
+        capture_directory=capture_directory,
+        optional_values=(
+            "KYTY_INTERNAL_RESOLUTION_WIDTH",
+            "KYTY_INTERNAL_RESOLUTION_HEIGHT",
+        ),
+        default_values={"KYTY_NATIVE_CAPTURE_MAX_EDGE": "1280"},
     )
-    env: dict[str, str] = {}
-    for k in keep_keys:
-        if k in base and base[k]:
-            env[k] = base[k]
-    env["KYTY_GUEST_ROOT"] = str(guest_root)
-    env["KYTY_AGENT_SOCK"] = str(agent_sock)
-    env["KYTY_NATIVE_CAPTURE_DIR"] = str(capture_dir)
-    env["KYTY_PRINTF_DIRECTION"] = "Silent"
-    env["KYTY_SCREEN_WIDTH"] = base.get("KYTY_SCREEN_WIDTH", "1280")
-    env["KYTY_SCREEN_HEIGHT"] = base.get("KYTY_SCREEN_HEIGHT", "720")
-    for key in ("KYTY_INTERNAL_RESOLUTION_WIDTH", "KYTY_INTERNAL_RESOLUTION_HEIGHT"):
-        if base.get(key):
-            env[key] = base[key]
-    env["KYTY_NATIVE_CAPTURE_MAX_EDGE"] = base.get("KYTY_NATIVE_CAPTURE_MAX_EDGE", "1280")
-    for k in FORBIDDEN_CHILD_ENV:
-        env.pop(k, None)
-    return env
-
-
-def assert_strict_env(env: dict[str, str]) -> list[str]:
-    return [k for k in FORBIDDEN_CHILD_ENV if k in env]
 
 
 def agent_sock_path(run_id: str) -> Path:
@@ -169,93 +131,6 @@ def agent_sock_path(run_id: str) -> Path:
     return Path(f"/tmp/kyty_pr_{digest}.sock")
 
 
-def sock_is_stale(path: Path) -> bool:
-    if not path.exists():
-        return False
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.2)
-        try:
-            s.connect(str(path))
-            return False
-        except (ConnectionRefusedError, FileNotFoundError, OSError):
-            return True
-        finally:
-            try:
-                s.close()
-            except OSError:
-                pass
-    except OSError:
-        return True
-
-
-def remove_stale_socket(path: Path, notes: list[str]) -> None:
-    if path.exists() and sock_is_stale(path):
-        try:
-            path.unlink()
-            notes.append("removed_stale_socket")
-        except OSError as exc:
-            notes.append(f"stale_socket_unlink_failed:{type(exc).__name__}")
-
-
-def kill_process_group(proc: subprocess.Popen[Any], notes: list[str]) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        if os.name == "posix":
-            os.killpg(proc.pid, signal.SIGTERM)
-        else:
-            proc.terminate()
-        try:
-            proc.wait(timeout=5)
-            notes.append("killed_sigterm")
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        if os.name == "posix":
-            os.killpg(proc.pid, signal.SIGKILL)
-        else:
-            proc.kill()
-        try:
-            proc.wait(timeout=5)
-            notes.append("killed_sigkill")
-        except subprocess.TimeoutExpired:
-            notes.append("kill_timeout")
-    except ProcessLookupError:
-        notes.append("process_already_gone")
-    except OSError as exc:
-        notes.append(f"kill_failed:{type(exc).__name__}")
-
-
-def agent_call(sock: Path, tool: str, args: Optional[dict[str, Any]] = None, timeout: float = 8.0) -> tuple[int, dict[str, Any]]:
-    req = {"id": 1, "tool": tool, "args": args or {}}
-    s: Optional[socket.socket] = None
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        s.connect(str(sock))
-        s.sendall((json.dumps(req, separators=(",", ":")) + "\n").encode("utf-8"))
-        data = b""
-        while b"\n" not in data and len(data) < 262144:
-            chunk = s.recv(8192)
-            if not chunk:
-                break
-            data += chunk
-        line = data.decode("utf-8", errors="replace").split("\n", 1)[0]
-        obj = json.loads(line) if line else {}
-        if not obj.get("ok", False):
-            return 1, obj
-        return 0, obj
-    except FileNotFoundError:
-        return 125, {"ok": False, "error": {"code": "transport", "message": "socket_missing"}}
-    except (ConnectionRefusedError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-        return 125, {"ok": False, "error": {"code": "transport", "message": type(exc).__name__}}
-    finally:
-        if s is not None:
-            try:
-                s.close()
-            except OSError:
-                pass
 
 
 def extract_result(obj: dict[str, Any]) -> dict[str, Any]:
@@ -402,7 +277,7 @@ def deliver_pad_sequence(
     sock: Path,
     steps: list[dict[str, Any]],
     *,
-    call: Any = agent_call,
+    call: Any = call_agent,
     pause: Any = time.sleep,
     deadline: Optional[float] = None,
     clock: Any = time.monotonic,
@@ -689,15 +564,15 @@ def run_session(
     log_path = run_dir / "child.log"
     env_keys_path = run_dir / "child_env_keys.txt"
     sock = agent_sock_path(run_id)
-    remove_stale_socket(sock, notes)
+    remove_stale_unix_socket(sock, notes)
 
-    env = clean_child_env(
+    env = build_playable_environment(
         dict(os.environ),
         guest_root=guest_root,
-        agent_sock=sock,
-        capture_dir=capture_dir,
+        agent_socket=sock,
+        capture_directory=capture_dir,
     )
-    bad = assert_strict_env(env)
+    bad = find_forbidden_environment_keys(env)
     if bad:
         notes.append("strict_env_violation:" + ",".join(bad))
         report.gates = [GateResult("strict_env", False, ",".join(bad))]
@@ -719,13 +594,11 @@ def run_session(
     started = time.monotonic()
     deadline_total = started + total_s
     with log_path.open("w", encoding="utf-8") as log:
-        proc = subprocess.Popen(
+        proc = launch_process_group(
             cmd,
-            cwd=str(repo_root),
+            cwd=repo_root,
             env=env,
             stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=(os.name == "posix"),
         )
     (run_dir / "child.pid").write_text(str(proc.pid), encoding="utf-8")
 
@@ -777,7 +650,7 @@ def run_session(
                     timed_out = True
                     notes.append("total_deadline")
                     break
-                code, obj = agent_call(sock, "ping", timeout=call_timeout)
+                code, obj = call_agent(sock, "ping", timeout=call_timeout)
                 if code == 0:
                     agent_ready = True
                     notes.append("agent_ready")
@@ -791,7 +664,7 @@ def run_session(
                 timed_out = True
                 notes.append("total_deadline")
                 break
-            code, obj = agent_call(sock, "status", timeout=call_timeout)
+            code, obj = call_agent(sock, "status", timeout=call_timeout)
             if code == 0:
                 status = extract_result(obj)
                 present = int(status.get("present") or 0)
@@ -860,7 +733,7 @@ def run_session(
                 timed_out = True
                 notes.append("total_deadline")
                 break
-            ecode, eobj = agent_call(sock, "last_error", timeout=call_timeout)
+            ecode, eobj = call_agent(sock, "last_error", timeout=call_timeout)
             if ecode == 0:
                 ev = extract_result(eobj).get("event")
                 if isinstance(ev, dict) and not report.first_error:
@@ -904,7 +777,7 @@ def run_session(
                     timed_out = True
                     notes.append("total_deadline")
                     break
-                code, sobj = agent_call(sock, "status", timeout=call_timeout)
+                code, sobj = call_agent(sock, "status", timeout=call_timeout)
                 pre_input_status = extract_result(sobj) if code == 0 else {}
                 if code != 0 or str(pre_input_status.get("phase") or "") != "interactive":
                     interactive_since = None
@@ -923,7 +796,7 @@ def run_session(
                     if not input_sequence_ok:
                         notes.append("input_sequence_failed")
                     fresh_timeout = deadline_timeout(deadline_total, 2.0)
-                    fresh_code, fresh_obj = agent_call(sock, "status", timeout=max(0.001, fresh_timeout))
+                    fresh_code, fresh_obj = call_agent(sock, "status", timeout=max(0.001, fresh_timeout))
                     if fresh_code == 0:
                         status = extract_result(fresh_obj)
                         input_after = pad_counters(status)
@@ -953,7 +826,7 @@ def run_session(
                         notes.append("capture_budget_exhausted")
                         break
                     server_timeout_ms = min(15000, max(1, int((capture_budget - 0.25) * 1000)))
-                    ccode, cobj = agent_call(
+                    ccode, cobj = call_agent(
                         sock,
                         "capture",
                         {"timeout_ms": server_timeout_ms, "score": True},
@@ -1038,7 +911,7 @@ def run_session(
 
     finally:
         if proc.poll() is None:
-            kill_process_group(proc, notes)
+            terminate_process_group(proc, notes)
             if timed_out or any(n.endswith("_deadline") for n in notes):
                 timed_out = True
         exit_code = proc.poll()

@@ -12,6 +12,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import kyty_runner_common as runner
+
 
 MODULE_PATH = Path(__file__).with_name("kyty_playable_regression.py")
 SPEC = importlib.util.spec_from_file_location("kyty_playable_regression", MODULE_PATH)
@@ -29,7 +31,7 @@ CSPEC.loader.exec_module(capture)
 
 
 class StrictEnvTests(unittest.TestCase):
-    def test_clean_child_env_strips_forbidden(self) -> None:
+    def test_playable_environment_strips_forbidden(self) -> None:
         base = {
             "PATH": "/usr/bin",
             "HOME": "/tmp",
@@ -41,15 +43,15 @@ class StrictEnvTests(unittest.TestCase):
             "KYTY_SKIP_UD2": "1",
         }
         with tempfile.TemporaryDirectory() as td:
-            env = reg.clean_child_env(
+            env = reg.build_playable_environment(
                 base,
                 guest_root=Path(td) / "g",
-                agent_sock=Path(td) / "a.sock",
-                capture_dir=Path(td) / "c",
+                agent_socket=Path(td) / "a.sock",
+                capture_directory=Path(td) / "c",
             )
-        for k in reg.FORBIDDEN_CHILD_ENV:
+        for k in runner.STRICT_FORBIDDEN_ENVIRONMENT_KEYS:
             self.assertNotIn(k, env)
-        self.assertEqual(reg.assert_strict_env(env), [])
+        self.assertEqual(runner.find_forbidden_environment_keys(env), [])
         self.assertEqual(env["KYTY_PRINTF_DIRECTION"], "Silent")
 
 
@@ -140,8 +142,8 @@ class GateClassificationTests(unittest.TestCase):
 
         notes: list[str] = []
         with mock.patch.object(reg.os, "killpg"):
-            reg.kill_process_group(Process(), notes)
-        self.assertIn("kill_timeout", notes)
+            runner.terminate_process_group(Process(), notes)
+        self.assertIn("kill_timeout_after_sigkill", notes)
 
     def test_all_gates_pass_happy_path(self) -> None:
         gates = reg.evaluate_gates(
