@@ -17,6 +17,7 @@ endif()
 #add_library(emulator STATIC $<TARGET_OBJECTS:emulator_obj>)
 add_library(emulator STATIC ${emulator_src})
 target_sources(emulator PRIVATE
+	$<TARGET_OBJECTS:imgui_sdl_backend_obj>
 	src/Loader/GuestCall.cpp
 	include/Emulator/Loader/GuestCall.h
 	src/DevTools/Runtime.cpp

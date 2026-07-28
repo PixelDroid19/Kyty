@@ -2,6 +2,7 @@
 // version consistency, malformed fail-closed, ring overflow visibility,
 // lifecycle event emission + sanitize. No second debug framework.
 
+#include "Kyty/Agent/Json.h"
 #include "Kyty/Core/BringUp.h"
 #include "Kyty/Core/DbgAssert.h"
 
@@ -172,7 +173,7 @@ int ScenarioMalformedFailClosed()
 int ScenarioJsonEscapingComplete()
 {
 	const char        raw[]   = {'a', '\b', '\f', '\n', '\r', '\t', '\x01', '"', '\\', '\0'};
-	const std::string escaped = JsonString(raw);
+	const std::string escaped = Kyty::Agent::JsonString(raw);
 	Expect(escaped == R"("a\b\f\n\r\t\u0001\"\\")", "all JSON control characters escaped");
 	for (const unsigned char ch: escaped)
 	{
