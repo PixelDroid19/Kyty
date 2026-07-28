@@ -110,6 +110,10 @@ struct GraphicContext
 
 	// Core depthBiasClamp is optional and must be enabled explicitly at device creation.
 	bool depth_bias_clamp_supported = false;
+
+	// Per-sample fragment execution is optional and must be enabled explicitly
+	// before a graphics pipeline can request sample shading.
+	bool sample_rate_shading_supported = false;
 };
 
 struct VulkanMemory
@@ -175,6 +179,7 @@ struct VulkanImage
 	VkImage                image                = nullptr;
 	VkImageView            image_view[VIEW_MAX] = {};
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkSampleCountFlagBits  samples               = VK_SAMPLE_COUNT_1_BIT;
 	Graphics::VulkanMemory memory;
 	// Guest allocation size used by PreferGpuMemoryAliasIndex when sampling.
 	uint64_t               guest_size           = 0;

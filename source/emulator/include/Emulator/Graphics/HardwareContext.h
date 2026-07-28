@@ -238,6 +238,8 @@ struct RenderControl
 {
 	bool    depth_clear_enable       = false;
 	bool    stencil_clear_enable     = false;
+	bool    depth_copy               = false;
+	bool    stencil_copy             = false;
 	bool    resummarize_enable       = false;
 	bool    stencil_compress_disable = false;
 	bool    depth_compress_disable   = false;

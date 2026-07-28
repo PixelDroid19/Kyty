@@ -7,6 +7,7 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Utils.h"
+#include "Emulator/Graphics/VulkanResolutionCapability.h"
 #include "Emulator/Profiler.h"
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -67,6 +68,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	{
 		return;
 	}
+	EXIT_NOT_IMPLEMENTED(vk_obj->samples != VK_SAMPLE_COUNT_1_BIT);
 
 	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -97,6 +99,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	EXIT_IF(objects.IsEmpty());
 
 	auto* vk_obj = static_cast<RenderTextureVulkanImage*>(obj);
+	EXIT_NOT_IMPLEMENTED(vk_obj->samples != VK_SAMPLE_COUNT_1_BIT);
 
 	// bool neo    = (params[RenderTextureObject::PARAM_NEO] != 0);
 	// auto pitch  = params[RenderTextureObject::PARAM_PITCH];
@@ -199,12 +202,24 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	const auto width     = params[RenderTextureObject::PARAM_WIDTH];
 	const auto height    = params[RenderTextureObject::PARAM_HEIGHT];
 	const auto vk_format = resolve_render_texture_format(params[RenderTextureObject::PARAM_FORMAT]);
+	const auto samples    = static_cast<VkSampleCountFlagBits>(params[RenderTextureObject::PARAM_SAMPLES]);
 	EXIT_NOT_IMPLEMENTED(vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0);
+
+	VulkanResolutionAttachmentRequest capability_request {};
+	capability_request.extent       = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+	capability_request.format       = vk_format;
+	capability_request.usage        = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+	                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	capability_request.sample_count = samples;
+	const auto capability            = EvaluateVulkanResolutionAttachment(ctx, capability_request);
+	EXIT_NOT_IMPLEMENTED(capability.status != VulkanResolutionCapabilityStatus::Success ||
+	                     capability.decision.status != ResolutionImageCapabilityStatus::Supported);
 
 	auto* vk_obj = new RenderTextureVulkanImage;
 	vk_obj->SetNativeExtent(width, height);
 	vk_obj->format = vk_format;
 	vk_obj->image  = nullptr;
+	vk_obj->samples = samples;
 	if (guest_size != nullptr)
 	{
 		vk_obj->guest_size = *guest_size;
@@ -217,6 +232,7 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	VulkanImageDescriptor image_descriptor {};
 	image_descriptor.extent = {vk_obj->extent.width, vk_obj->extent.height, 1};
 	image_descriptor.format = vk_obj->format;
+	image_descriptor.samples = vk_obj->samples;
 	image_descriptor.usage  = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
 	                                                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 	const auto image_info   = VulkanBuildImageCreateInfo(image_descriptor);
@@ -321,6 +337,7 @@ static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* params
 	EXIT_NOT_IMPLEMENTED(width != pitch);
 
 	auto* vk_obj = reinterpret_cast<RenderTextureVulkanImage*>(obj);
+	EXIT_NOT_IMPLEMENTED(vk_obj->samples != VK_SAMPLE_COUNT_1_BIT);
 
 	UtilFillBuffer(ctx, reinterpret_cast<void*>(*vaddr), *size, pitch, vk_obj,
 	               static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
@@ -332,7 +349,8 @@ bool RenderTextureObject::Equal(const uint64_t* other) const
 {
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_WIDTH] == other[PARAM_WIDTH] &&
 	        params[PARAM_HEIGHT] == other[PARAM_HEIGHT] && params[PARAM_TILED] == other[PARAM_TILED] &&
-	        params[PARAM_PITCH] == other[PARAM_PITCH] && params[PARAM_WRITE_BACK] == other[PARAM_WRITE_BACK]);
+	        params[PARAM_NEO] == other[PARAM_NEO] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
+	        params[PARAM_WRITE_BACK] == other[PARAM_WRITE_BACK] && params[PARAM_SAMPLES] == other[PARAM_SAMPLES]);
 }
 
 GpuObject::create_func_t RenderTextureObject::GetCreateFunc() const

@@ -2442,6 +2442,7 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	VkPhysicalDeviceFeatures supported_features {};
 	vkGetPhysicalDeviceFeatures(physical_device, &supported_features);
 	device_features.depthBiasClamp = supported_features.depthBiasClamp;
+	device_features.sampleRateShading = supported_features.sampleRateShading;
 	// Needed for the depthClipEnable=FALSE fallback when VK_EXT_depth_clip_enable
 	// is unavailable (MoltenVK).
 	device_features.depthClamp = VK_TRUE;
@@ -3122,6 +3123,7 @@ static void VulkanCreate(WindowContext* ctx)
 	VkPhysicalDeviceFeatures device_features {};
 	vkGetPhysicalDeviceFeatures(ctx->graphic_ctx.physical_device, &device_features);
 	ctx->graphic_ctx.depth_bias_clamp_supported = device_features.depthBiasClamp == VK_TRUE;
+	ctx->graphic_ctx.sample_rate_shading_supported = device_features.sampleRateShading == VK_TRUE;
 
 	printf("Select device: %s\n", device_properties.deviceName);
 

@@ -109,6 +109,8 @@ struct PipelineStencilDynamicState
 struct PipelineStaticParameters
 {
 	VkPrimitiveTopology        topology                 = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+	VkSampleCountFlagBits      rasterization_samples    = VK_SAMPLE_COUNT_1_BIT;
+	bool                       sample_shading_enable    = false;
 	bool                       with_depth               = false;
 	bool                       depth_test_enable        = false;
 	bool                       depth_write_enable       = false;
@@ -375,7 +377,7 @@ public:
 	void               FreeFramebufferByDepth(DepthStencilVulkanImage* image);
 
 private:
-	VideoOutVulkanImage* CreateDummyBuffer(VkFormat format, uint32_t width, uint32_t height);
+	VideoOutVulkanImage* CreateDummyBuffer(VkFormat format, uint32_t width, uint32_t height, VkSampleCountFlagBits samples);
 
 	struct Framebuffer
 	{
@@ -473,6 +475,7 @@ private:
 struct RenderDepthInfo
 {
 	VkFormat                    format                   = VK_FORMAT_UNDEFINED;
+	VkSampleCountFlagBits       samples                  = VK_SAMPLE_COUNT_1_BIT;
 	uint32_t                    width                    = 0;
 	uint32_t                    height                   = 0;
 	bool                        htile                    = false;
@@ -534,12 +537,31 @@ struct RenderColorInfo
 	VideoOutVulkanImage*      existing_video_image  = nullptr;
 	uint32_t                  width                 = 0;
 	uint32_t                  height                = 0;
+	VkSampleCountFlagBits     samples               = VK_SAMPLE_COUNT_1_BIT;
 	uint32_t                  pitch                 = 0;
 	uint32_t                  size                  = 0;
 	bool                      tile                  = false;
 	bool                      neo                   = false;
 	bool                      write_back            = false;
 };
+
+static VkSampleCountFlagBits decode_guest_sample_count(uint32_t encoded)
+{
+	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+	EXIT_NOT_IMPLEMENTED(encoded > 6u || !VulkanDecodeLog2SampleCount(static_cast<uint8_t>(encoded), &samples));
+	return samples;
+}
+
+static VkSampleCountFlagBits resolve_render_attachment_sample_count(const RenderColorInfo& color, const RenderDepthInfo& depth)
+{
+	const bool with_color = color.targets_num != 0;
+	const bool with_depth = depth.format != VK_FORMAT_UNDEFINED;
+	EXIT_NOT_IMPLEMENTED(!with_color && !with_depth);
+
+	const auto samples = with_color ? color.samples : depth.samples;
+	EXIT_NOT_IMPLEMENTED(with_color && with_depth && color.samples != depth.samples);
+	return samples;
+}
 
 // Latest 1280x720 color targets (for KYTY_DUMP_RT paired with VideoOut frame dumps).
 static constexpr uint32_t k_dump_rt_slots = 4;
@@ -1022,8 +1044,8 @@ static void rt_check(const HW::RenderTarget& rt)
 		// EXIT_NOT_IMPLEMENTED(rt.attrib.force_dest_alpha_to_one != false);
 		// EXIT_NOT_IMPLEMENTED(rt.tile_mode != 0x0000000a);
 		// EXIT_NOT_IMPLEMENTED(rt.fmask_tile_mode != 0x0000000a);
-		EXIT_NOT_IMPLEMENTED(rt.attrib.num_samples != 0x00000000);
-		EXIT_NOT_IMPLEMENTED(rt.attrib.num_fragments != 0x00000000);
+		(void)decode_guest_sample_count(rt.attrib.num_samples);
+		EXIT_NOT_IMPLEMENTED(rt.attrib.num_samples != rt.attrib.num_fragments);
 		if (ps5)
 		{
 			EXIT_NOT_IMPLEMENTED(rt.attrib2.width == 0x00000000);
@@ -1138,7 +1160,7 @@ static void validate_depth_plane(const HW::DepthRenderTarget& z)
 		return;
 	}
 	EXIT_NOT_IMPLEMENTED(z.z_info.format != 0x00000003);
-	EXIT_NOT_IMPLEMENTED(z.z_info.num_samples != 0);
+	(void)decode_guest_sample_count(z.z_info.num_samples);
 	EXIT_NOT_IMPLEMENTED(z.z_info.expclear_enabled);
 	EXIT_NOT_IMPLEMENTED(z.z_info.zrange_precision != 1);
 	EXIT_NOT_IMPLEMENTED(z.z_info.embedded_sample_locations);
@@ -1289,6 +1311,8 @@ static void rc_print(const char* func, const HW::RenderControl& c)
 
 	printf("\t depth_clear_enable       = %s\n", c.depth_clear_enable ? "true" : "false");
 	printf("\t stencil_clear_enable     = %s\n", c.stencil_clear_enable ? "true" : "false");
+	printf("\t depth_copy               = %s\n", c.depth_copy ? "true" : "false");
+	printf("\t stencil_copy             = %s\n", c.stencil_copy ? "true" : "false");
 	printf("\t resummarize_enable       = %s\n", c.resummarize_enable ? "true" : "false");
 	printf("\t stencil_compress_disable = %s\n", c.stencil_compress_disable ? "true" : "false");
 	printf("\t depth_compress_disable   = %s\n", c.depth_compress_disable ? "true" : "false");
@@ -1296,7 +1320,7 @@ static void rc_print(const char* func, const HW::RenderControl& c)
 	printf("\t copy_sample              = %" PRIu8 "\n", c.copy_sample);
 }
 
-static void rc_check(const HW::RenderControl& c, const HW::DepthRenderTarget& z)
+static void rc_check(const HW::RenderControl& c)
 {
 	// EXIT_NOT_IMPLEMENTED(c.depth_clear_enable != false);
 	// EXIT_NOT_IMPLEMENTED(c.stencil_clear_enable != false);
@@ -1305,10 +1329,8 @@ static void rc_check(const HW::RenderControl& c, const HW::DepthRenderTarget& z)
 	// the regular attachment path preserves the logical depth/stencil contents.
 	// EXIT_NOT_IMPLEMENTED(c.stencil_compress_disable != false);
 	// EXIT_NOT_IMPLEMENTED(c.depth_compress_disable != false);
-	// COPY_CENTROID searches from COPY_SAMPLE with wraparound. In the
-	// one-sample encoding this always selects sample zero, which Vulkan already
-	// exposes. Multisample sample selection still needs an explicit resolve.
-	EXIT_NOT_IMPLEMENTED(!State::RenderControlSampleSelectionIsNoOp(c, z.z_info.num_samples));
+	EXIT_NOT_IMPLEMENTED(c.depth_copy);
+	EXIT_NOT_IMPLEMENTED(c.stencil_copy);
 }
 
 static void mc_print(const char* func, const HW::ModeControl& c)
@@ -1456,12 +1478,21 @@ static void eqaa_print(const char* func, const HW::EqaaControl& c)
 	printf("\t static_anchor_associations = %s\n", c.static_anchor_associations ? "true" : "false");
 }
 
-static void eqaa_check(const HW::EqaaControl& c)
+static void eqaa_check(const HW::EqaaControl& c, const HW::AaConfig& cf)
 {
-	EXIT_NOT_IMPLEMENTED(c.max_anchor_samples != 0);
-	EXIT_NOT_IMPLEMENTED(c.ps_iter_samples != 0);
-	EXIT_NOT_IMPLEMENTED(c.mask_export_num_samples != 0);
-	EXIT_NOT_IMPLEMENTED(c.alpha_to_mask_num_samples != 0);
+	if (cf.msaa_num_samples == 0)
+	{
+		EXIT_NOT_IMPLEMENTED(c.max_anchor_samples != 0);
+		EXIT_NOT_IMPLEMENTED(c.ps_iter_samples != 0);
+		EXIT_NOT_IMPLEMENTED(c.mask_export_num_samples != 0);
+		EXIT_NOT_IMPLEMENTED(c.alpha_to_mask_num_samples != 0);
+	} else
+	{
+		EXIT_NOT_IMPLEMENTED(c.max_anchor_samples != cf.msaa_num_samples);
+		EXIT_NOT_IMPLEMENTED(c.ps_iter_samples != cf.msaa_num_samples);
+		EXIT_NOT_IMPLEMENTED(c.mask_export_num_samples != 0);
+		EXIT_NOT_IMPLEMENTED(c.alpha_to_mask_num_samples != cf.msaa_num_samples);
+	}
 	EXIT_NOT_IMPLEMENTED(c.high_quality_intersections != false);
 	EXIT_NOT_IMPLEMENTED(c.incoherent_eqaa_reads != false);
 	EXIT_NOT_IMPLEMENTED(c.interpolate_comp_z != false);
@@ -1490,10 +1521,15 @@ static void aa_check(const HW::AaSampleControl& c, const HW::AaConfig& cf)
 	{
 		EXIT_NOT_IMPLEMENTED(l != 0);
 	}
-	EXIT_NOT_IMPLEMENTED(cf.msaa_num_samples != 0);
 	EXIT_NOT_IMPLEMENTED(cf.aa_mask_centroid_dtmn != false);
-	EXIT_NOT_IMPLEMENTED(cf.max_sample_dist != 0);
-	EXIT_NOT_IMPLEMENTED(cf.msaa_exposed_samples != 0);
+	if (cf.msaa_num_samples == 0)
+	{
+		EXIT_NOT_IMPLEMENTED(cf.max_sample_dist != 0);
+		EXIT_NOT_IMPLEMENTED(cf.msaa_exposed_samples != 0);
+		return;
+	}
+	(void)decode_guest_sample_count(cf.msaa_num_samples);
+	EXIT_NOT_IMPLEMENTED(cf.msaa_exposed_samples != cf.msaa_num_samples);
 }
 
 static void vp_print(const char* func, const HW::ScreenViewport& vp, const HW::ScanModeControl& smc)
@@ -1594,11 +1630,11 @@ static void hw_check(const HW::Context& hw)
 	vp_check(vp, smc);
 	z_check(z, rc, d);
 	clip_check(c);
-	rc_check(rc, z);
+	rc_check(rc);
 	d_check(d, s, sm);
 	mc_check(mc);
 	bc_check(bc, bclr, cc);
-	eqaa_check(eqaa);
+	eqaa_check(eqaa, ac);
 	aa_check(aa, ac);
 
 	// CB_TARGET_MASK may enable multiple MRT slots (captured 0x0000ffff =
@@ -2016,6 +2052,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 
 	bool with_depth = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	bool with_color = (color->targets_num != 0 && color->vulkan_buffer[0] != nullptr);
+	const auto attachment_samples = resolve_render_attachment_sample_count(*color, *depth);
 
 	for (auto& f: m_framebuffers)
 	{
@@ -2047,7 +2084,8 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 
 	VulkanImage* vulkan_buffer =
 	    (with_color ? color->vulkan_buffer[0]
-	                : CreateDummyBuffer(VK_FORMAT_B8G8R8A8_SRGB, depth->vulkan_buffer->extent.width, depth->vulkan_buffer->extent.height));
+	                : CreateDummyBuffer(VK_FORMAT_B8G8R8A8_SRGB, depth->vulkan_buffer->extent.width, depth->vulkan_buffer->extent.height,
+	                                    attachment_samples));
 	const uint32_t color_count = (with_color ? color->targets_num : 1);
 
 	VkAttachmentDescription attachments[RenderColorInfo::TARGETS_MAX + 1]       = {};
@@ -2057,12 +2095,13 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	{
 		auto* image = (with_color ? color->vulkan_buffer[slot] : vulkan_buffer);
 		EXIT_NOT_IMPLEMENTED(image->extent.width != vulkan_buffer->extent.width || image->extent.height != vulkan_buffer->extent.height);
+		EXIT_NOT_IMPLEMENTED(image->samples != attachment_samples);
 		const auto load_ops       = ResolveColorAttachmentLoadOps(image->layout, with_color ? color->cmask_fast_clear_enable[slot] : false,
 		                                                          with_color ? color->clear_word0[slot] : 0u,
 		                                                          with_color ? color->clear_word1[slot] : 0u, image->format);
 		attachments[slot].flags   = 0;
 		attachments[slot].format  = image->format;
-		attachments[slot].samples = VK_SAMPLE_COUNT_1_BIT;
+		attachments[slot].samples = image->samples;
 		attachments[slot].loadOp  = load_ops.load_op;
 		attachments[slot].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 		attachments[slot].stencilLoadOp         = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -2079,7 +2118,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	const auto depth_load_ops        = ResolveDepthAttachmentLoadOps(depth->format, depth->depth_clear_enable, depth->stencil_clear_enable);
 	attachments[color_count].flags   = 0;
 	attachments[color_count].format  = depth->format;
-	attachments[color_count].samples = VK_SAMPLE_COUNT_1_BIT;
+	attachments[color_count].samples = with_depth ? depth->vulkan_buffer->samples : VK_SAMPLE_COUNT_1_BIT;
 	attachments[color_count].loadOp  = depth_load_ops.depth_load;
 	attachments[color_count].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	attachments[color_count].stencilLoadOp  = depth_load_ops.stencil_load;
@@ -2122,6 +2161,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 
 	if (with_depth)
 	{
+		EXIT_NOT_IMPLEMENTED(depth->vulkan_buffer->samples != attachment_samples);
 		views[color_count] = depth->vulkan_buffer->image_view[VulkanImage::VIEW_DEFAULT];
 	}
 
@@ -2249,11 +2289,11 @@ void FramebufferCache::FreeFramebufferByDepth(DepthStencilVulkanImage* image)
 	}
 }
 
-VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(VkFormat format, uint32_t width, uint32_t height)
+VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(VkFormat format, uint32_t width, uint32_t height, VkSampleCountFlagBits samples)
 {
 	for (auto* b: m_dummy_buffers)
 	{
-		if (b->extent.width == width && b->extent.height == height && b->format == format)
+		if (b->extent.width == width && b->extent.height == height && b->format == format && b->samples == samples)
 		{
 			return b;
 		}
@@ -2269,6 +2309,7 @@ VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(VkFormat format, uint32
 	vk_obj->format = format;
 	vk_obj->image  = nullptr;
 	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+	vk_obj->samples = samples;
 
 	for (auto& view: vk_obj->image_view)
 	{
@@ -2280,6 +2321,7 @@ VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(VkFormat format, uint32
 	image_descriptor.format         = vk_obj->format;
 	image_descriptor.initial_layout = vk_obj->layout;
 	image_descriptor.usage          = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	image_descriptor.samples        = vk_obj->samples;
 	const auto image_info           = VulkanBuildImageCreateInfo(image_descriptor);
 	vk_obj->host_extent_selected    = true;
 
@@ -2524,6 +2566,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 
 	EXIT_IF(gctx == nullptr);
+	EXIT_NOT_IMPLEMENTED(static_params->sample_shading_enable && !gctx->sample_rate_shading_supported);
 
 	VkShaderModule vert_shader_module = nullptr;
 	VkShaderModule frag_shader_module = nullptr;
@@ -2730,8 +2773,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	multisampling.sType                 = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
 	multisampling.pNext                 = nullptr;
 	multisampling.flags                 = 0;
-	multisampling.sampleShadingEnable   = VK_FALSE;
-	multisampling.rasterizationSamples  = VK_SAMPLE_COUNT_1_BIT;
+	multisampling.sampleShadingEnable   = static_params->sample_shading_enable ? VK_TRUE : VK_FALSE;
+	multisampling.rasterizationSamples  = static_params->rasterization_samples;
 	multisampling.minSampleShading      = 1.0f;
 	multisampling.pSampleMask           = nullptr;
 	multisampling.alphaToCoverageEnable = VK_FALSE;
@@ -3259,6 +3302,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 
 	auto vs_id = ShaderGetIdVS(&vs_regs, vs_input_info);
 	auto ps_id = ShaderGetIdPS(&ps_regs, ps_input_info);
+	auto* gctx = g_render_ctx->GetGraphicCtx();
+	EXIT_IF(gctx == nullptr);
 
 	Pipeline p {};
 	p.render_pass_id = framebuffer->render_pass_id;
@@ -3319,6 +3364,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		p.dynamic_params->scissor_ltrb[3] = static_cast<int>(host_scissor.bottom);
 	}
 	p.static_params->topology                 = topology;
+	p.static_params->rasterization_samples    = resolve_render_attachment_sample_count(*color, *depth);
+	p.static_params->sample_shading_enable    = ctx->GetEqaaControl().ps_iter_samples != 0;
+	EXIT_NOT_IMPLEMENTED(p.static_params->sample_shading_enable && !gctx->sample_rate_shading_supported);
 	p.static_params->with_depth               = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	p.static_params->depth_test_enable        = depth->depth_test_enable;
 	p.static_params->depth_write_enable       = (depth->depth_write_enable && !depth->suppress_depth_write);
@@ -4809,6 +4857,7 @@ static void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 
 	if (r->format != VK_FORMAT_UNDEFINED)
 	{
+		r->samples = decode_guest_sample_count(z.z_info.num_samples);
 		if (ps5)
 		{
 			bool size_found = TileGetDepthSize(z.size.x_max + 1, z.size.y_max + 1, 0, z.z_info.format, effective_stencil, htile, true, true,
@@ -4946,7 +4995,7 @@ static void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer
 	host_width  = host_width == 0 ? r->width : host_width;
 	host_height = host_height == 0 ? r->height : host_height;
 	DepthStencilBufferObject vulkan_buffer_info(r->format, r->width, r->height, host_width, host_height, r->htile, r->neo, r->sampled,
-	                                            r->htile_buffer_vaddr, r->htile_buffer_size);
+	                                            r->htile_buffer_vaddr, r->htile_buffer_size, static_cast<uint32_t>(r->samples));
 	r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
 	EXIT_NOT_IMPLEMENTED(r->vulkan_buffer == nullptr);
@@ -4993,6 +5042,7 @@ static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw
 	EXIT_NOT_IMPLEMENTED(layout.error == State::ColorTargetLayoutError::Gapped);
 	EXIT_NOT_IMPLEMENTED(layout.count == 0 || layout.count > RenderColorInfo::TARGETS_MAX);
 	r->targets_num = layout.count;
+	r->samples     = decode_guest_sample_count(rt.attrib.num_samples);
 
 	bool ps5 = Config::IsNextGen();
 
@@ -5118,6 +5168,8 @@ static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw
 		for (uint32_t slot = 1; slot < r->targets_num; slot++)
 		{
 			const auto& other = hw.GetRenderTarget(slot);
+			EXIT_NOT_IMPLEMENTED(other.attrib.num_samples != rt.attrib.num_samples ||
+			                     other.attrib.num_fragments != rt.attrib.num_fragments);
 			if (ps5)
 			{
 				EXIT_NOT_IMPLEMENTED(other.attrib2.width != rt.attrib2.width || other.attrib2.height != rt.attrib2.height ||
@@ -5135,6 +5187,7 @@ static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw
 
 		// Display buffer (single swapchain target only).
 		EXIT_NOT_IMPLEMENTED(r->targets_num != 1);
+		EXIT_NOT_IMPLEMENTED(r->samples != VK_SAMPLE_COUNT_1_BIT);
 		EXIT_NOT_IMPLEMENTED(video_image.buffer_size != r->size);
 		EXIT_NOT_IMPLEMENTED(video_image.buffer_pitch != r->pitch);
 		r->type[0]              = RenderColorType::DisplayBuffer;
@@ -5167,10 +5220,12 @@ static void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer
 		EXIT_NOT_IMPLEMENTED(video_image.image != r->existing_video_image);
 		r->vulkan_buffer[0] = video_image.image;
 		EXIT_NOT_IMPLEMENTED(r->vulkan_buffer[0] == nullptr);
+		EXIT_NOT_IMPLEMENTED(r->vulkan_buffer[0]->samples != r->samples);
 		return;
 	}
 
-	RenderTextureObject vulkan_buffer_info(r->render_texture_format, r->width, r->height, r->tile, r->neo, r->pitch, r->write_back);
+	RenderTextureObject vulkan_buffer_info(r->render_texture_format, r->width, r->height, r->tile, r->neo, r->pitch, r->write_back,
+	                                      static_cast<uint32_t>(r->samples));
 	for (uint32_t slot = 0; slot < r->targets_num; slot++)
 	{
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
@@ -5239,6 +5294,7 @@ static ResolutionCohortDecision PrepareDepthOnlyDisplayResolutionCohort(CommandB
 		VulkanResolutionAttachmentRequest request;
 		request.extent = decision.host_extent;
 		request.format = depth.format;
+		request.sample_count = depth.samples;
 		request.usage  = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
 		                 (depth.sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
 		const auto capability = EvaluateVulkanResolutionAttachment(g_render_ctx->GetGraphicCtx(), request);
@@ -5342,6 +5398,7 @@ static ResolutionCohortDecision PrepareDisplayResolutionCohort(CommandBuffer* bu
 		VulkanResolutionAttachmentRequest color_request;
 		color_request.extent = decision.host_extent;
 		color_request.format = color->existing_video_image->format;
+		color_request.sample_count = color->existing_video_image->samples;
 		color_request.usage  = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
 		                       VK_IMAGE_USAGE_SAMPLED_BIT;
 		const auto color_capability = EvaluateVulkanResolutionAttachment(g_render_ctx->GetGraphicCtx(), color_request);
@@ -5354,6 +5411,7 @@ static ResolutionCohortDecision PrepareDisplayResolutionCohort(CommandBuffer* bu
 			VulkanResolutionAttachmentRequest depth_request;
 			depth_request.extent        = decision.host_extent;
 			depth_request.format        = depth.format;
+			depth_request.sample_count  = depth.samples;
 			depth_request.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
 			                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (depth.sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
 			const auto depth_capability = EvaluateVulkanResolutionAttachment(g_render_ctx->GetGraphicCtx(), depth_request);
@@ -6822,6 +6880,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
+	(void)resolve_render_attachment_sample_count(color_info, depth_info);
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
 	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
 	{
@@ -6995,6 +7054,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
+	(void)resolve_render_attachment_sample_count(color_info, depth_info);
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
 	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
 	{

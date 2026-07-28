@@ -107,9 +107,9 @@ void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
 
 [[nodiscard]] DepthBias ResolveDepthBias(const HW::ModeControl& mode, const HW::PolygonOffset& offset);
 
-// DB_RENDER_CONTROL sample selection is invisible on a one-sample depth
-// attachment: centroid search and every wrapped COPY_SAMPLE select sample 0.
-// `num_samples` uses the hardware encoding where zero means one sample.
+// COPY_CENTROID and COPY_SAMPLE only select a distinct sample on a multisample
+// attachment. Callers that issue a depth or stencil copy still require an
+// explicit copy implementation.
 [[nodiscard]] bool RenderControlSampleSelectionIsNoOp(const HW::RenderControl& control, uint8_t num_samples);
 
 // Guest top-left coordinates are inclusive, bottom-right coordinates are exclusive, and enabled rectangles intersect.

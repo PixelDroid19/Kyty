@@ -63,6 +63,10 @@ struct VulkanResolutionCapabilityEvaluation
 	ResolutionImageCapabilityDecision decision;
 };
 
+// Guest sample-count fields use a log2 encoding. Decode it at the Vulkan
+// boundary so attachment, pipeline, and capability paths share one contract.
+[[nodiscard]] bool VulkanDecodeLog2SampleCount(uint8_t encoded, VkSampleCountFlagBits* sample_count);
+
 [[nodiscard]] VulkanResolutionCapabilityStatus NormalizeVulkanResolutionAttachmentRequest(const VulkanResolutionAttachmentRequest& request,
                                                                                           VulkanResolutionNormalizedRequest* normalized);
 

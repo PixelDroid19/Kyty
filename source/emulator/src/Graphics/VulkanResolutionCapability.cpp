@@ -47,6 +47,26 @@ void AddUsage(bool enabled, ResolutionImageUsage usage, VkFormatFeatureFlagBits 
 
 } // namespace
 
+bool VulkanDecodeLog2SampleCount(uint8_t encoded, VkSampleCountFlagBits* sample_count)
+{
+	if (sample_count == nullptr)
+	{
+		return false;
+	}
+
+	switch (encoded)
+	{
+		case 0: *sample_count = VK_SAMPLE_COUNT_1_BIT; return true;
+		case 1: *sample_count = VK_SAMPLE_COUNT_2_BIT; return true;
+		case 2: *sample_count = VK_SAMPLE_COUNT_4_BIT; return true;
+		case 3: *sample_count = VK_SAMPLE_COUNT_8_BIT; return true;
+		case 4: *sample_count = VK_SAMPLE_COUNT_16_BIT; return true;
+		case 5: *sample_count = VK_SAMPLE_COUNT_32_BIT; return true;
+		case 6: *sample_count = VK_SAMPLE_COUNT_64_BIT; return true;
+		default: *sample_count = VK_SAMPLE_COUNT_1_BIT; return false;
+	}
+}
+
 VulkanResolutionCapabilityStatus NormalizeVulkanResolutionAttachmentRequest(const VulkanResolutionAttachmentRequest& request,
                                                                             VulkanResolutionNormalizedRequest*       normalized)
 {

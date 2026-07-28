@@ -39,9 +39,10 @@ public:
 	static constexpr int PARAM_NEO        = 4;
 	static constexpr int PARAM_PITCH      = 5;
 	static constexpr int PARAM_WRITE_BACK = 6;
+	static constexpr int PARAM_SAMPLES    = 7;
 
 	explicit RenderTextureObject(RenderTextureFormat pixel_format, uint32_t width, uint32_t height, bool tiled, bool neo, uint32_t pitch,
-	                             bool write_back)
+	                             bool write_back, uint32_t sample_count = 1)
 	{
 		params[PARAM_FORMAT]     = static_cast<uint64_t>(pixel_format);
 		params[PARAM_WIDTH]      = width;
@@ -50,6 +51,7 @@ public:
 		params[PARAM_NEO]        = neo ? 1 : 0;
 		params[PARAM_PITCH]      = pitch;
 		params[PARAM_WRITE_BACK] = write_back ? 1 : 0;
+		params[PARAM_SAMPLES]    = sample_count;
 		check_hash               = RenderTextureMayCpuUploadOnUpdate(tiled, write_back);
 		type                     = Graphics::GpuMemoryObjectType::RenderTexture;
 	}

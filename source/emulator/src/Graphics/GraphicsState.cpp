@@ -100,7 +100,8 @@ DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, 
 	const bool resummarize = render_control.resummarize_enable;
 
 	DepthStencilUsage usage;
-	usage.target_active      = depth_control.z_enable || depth_control.stencil_enable || decompress || resummarize;
+	usage.target_active      = depth_control.z_enable || depth_control.stencil_enable || decompress || resummarize ||
+	                           render_control.depth_copy || render_control.stencil_copy;
 	usage.depth_write_enable = depth_control.z_enable && depth_control.z_write_enable;
 	return usage;
 }
@@ -119,11 +120,10 @@ StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target,
 	{
 		return StencilPlaneValidation::Inactive;
 	}
-	const bool needs_read  = depth_control.stencil_enable || decompress || render_control.resummarize_enable ||
-	                         render_control.copy_centroid || render_control.copy_sample != 0;
+	const bool needs_read  = depth_control.stencil_enable || decompress || render_control.resummarize_enable || render_control.stencil_copy;
 	const bool needs_write = render_control.stencil_clear_enable ||
 	                         (depth_control.stencil_enable && !target.depth_view.stencil_write_disable) || decompress ||
-	                         render_control.resummarize_enable;
+	                         render_control.resummarize_enable || render_control.stencil_copy;
 
 	if (!needs_read && !needs_write)
 	{
@@ -370,6 +370,8 @@ void SetRenderControl(HW::Context& context, uint32_t value)
 
 	r.depth_clear_enable       = KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_CLEAR_ENABLE) != 0;
 	r.stencil_clear_enable     = KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_CLEAR_ENABLE) != 0;
+	r.depth_copy               = KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_COPY) != 0;
+	r.stencil_copy             = KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_COPY) != 0;
 	r.resummarize_enable       = KYTY_PM4_GET(value, DB_RENDER_CONTROL, RESUMMARIZE_ENABLE) != 0;
 	r.stencil_compress_disable = KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_COMPRESS_DISABLE) != 0;
 	r.depth_compress_disable   = KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_COMPRESS_DISABLE) != 0;
