@@ -116,14 +116,17 @@ void VerifyStorageFrontier()
 {
 	EventRing::Instance().ResetForTests();
 	Lifecycle::StorageFrontierContext context {};
-	context.access          = Lifecycle::StorageAccessClass::Mixed;
-	context.source          = Lifecycle::StorageBindingSource::Metadata;
-	context.unknown_reason  = Lifecycle::StorageUnknownReason::RegisterBaseMismatch;
-	context.code_available  = true;
-	context.exact_match     = false;
+	context.binding.access          = Lifecycle::StorageAccessClass::Mixed;
+	context.binding.source          = Lifecycle::StorageBindingSource::Metadata;
+	context.binding.unknown_reason  = Lifecycle::StorageUnknownReason::RegisterBaseMismatch;
+	context.binding.code_available  = true;
+	context.binding.exact_match     = false;
 	context.unbased_match   = true;
 	context.decoded_unknown = false;
-	context.indirect_use    = true;
+	context.binding.indirect_use    = true;
+	context.binding.raw_vmem_oob_guarded = true;
+	context.binding.raw_smem_use         = false;
+	context.binding.raw_tbuffer_use      = false;
 	context.resource_index  = 15;
 	context.sgpr            = 31;
 	context.slot            = 65535;
@@ -137,15 +140,57 @@ void VerifyStorageFrontier()
 
 	const auto event = LastEvent();
 	Expect(std::strcmp(event.code, Lifecycle::kCodeGraphicsStorageFrontier) == 0, "storage event code");
-	Expect(std::strstr(event.message, "access=mixed") != nullptr, "access class serialized");
-	Expect(std::strstr(event.message, "source=metadata reason=register_base_mismatch") != nullptr,
+	Expect(std::strstr(event.message, "a=mixed") != nullptr, "access class serialized");
+	Expect(std::strstr(event.message, "src=metadata r=register_base_mismatch") != nullptr,
 	       "binding source and unknown reason serialized");
-	Expect(std::strstr(event.message, "code=1 exact=0 unbased=1") != nullptr, "instruction availability and register matches serialized");
-	Expect(std::strstr(event.message, "decoded=0 indirect=1") != nullptr, "decode completeness and indirect use serialized");
-	Expect(std::strstr(event.message, "idx=15 sgpr=31 slot=65535") != nullptr, "resource identity serialized");
-	Expect(std::strstr(event.message, "usage=3 stride=16383 fmt=127") != nullptr, "descriptor geometry serialized");
-	Expect(std::strstr(event.message, "dst=0xfff tid=1 swz=1") != nullptr, "descriptor controls serialized");
+	Expect(std::strstr(event.message, "c=1 x=0 ub=1") != nullptr, "instruction availability and register matches serialized");
+	Expect(std::strstr(event.message, "d=0 i=1 vm=1 sm=0 tb=0") != nullptr,
+	       "decode completeness and raw-consumer evidence serialized");
+	Expect(std::strstr(event.message, "n=15 sg=31 sl=65535") != nullptr, "resource identity serialized");
+	Expect(std::strstr(event.message, "u=3 st=16383 f=127") != nullptr, "descriptor geometry serialized");
+	Expect(std::strstr(event.message, "ds=fff tid=1 sw=1") != nullptr, "descriptor controls serialized");
 	Expect(std::strlen(event.message) < kAgentEventMessageMax, "storage message bounded");
+}
+
+void VerifyStorageRange()
+{
+	EventRing::Instance().ResetForTests();
+	Lifecycle::StorageRangeContext context {};
+	context.binding.access          = Lifecycle::StorageAccessClass::Raw;
+	context.binding.source          = Lifecycle::StorageBindingSource::Direct;
+	context.binding.unknown_reason  = Lifecycle::StorageUnknownReason::None;
+	context.binding.code_available  = true;
+	context.binding.exact_match     = true;
+	context.binding.indirect_use    = false;
+	context.binding.raw_vmem_oob_guarded = true;
+	context.binding.raw_smem_use         = false;
+	context.binding.raw_tbuffer_use      = false;
+	context.backing                 = Lifecycle::StorageRangeBacking::Flexible;
+	context.backing_size            = 4096;
+	context.resource_index    = 7;
+	context.sgpr              = 36;
+	context.slot              = 7;
+	context.usage             = 1;
+	context.stride            = 255;
+	context.base              = 0x0000f00000006000ull;
+	context.declared_size     = 0x649b00000ull;
+	context.materialized_size = 0x06500000ull;
+	context.descriptor_words[0] = 0x11223344u;
+	context.descriptor_words[1] = 0x55667788u;
+	context.descriptor_words[2] = 0x99aabbccu;
+	context.descriptor_words[3] = 0xddeeff00u;
+	Lifecycle::EmitStorageRange(context);
+
+	const auto event = LastEvent();
+	Expect(std::strcmp(event.code, Lifecycle::kCodeGraphicsStorageRange) == 0, "storage range event code");
+	Expect(std::strstr(event.message, "a=raw src=direct r=none c=1 x=1 i=0 vm=1 sm=0 tb=0 k=flexible ks=4096") != nullptr,
+	       "storage provenance serialized");
+	Expect(std::strstr(event.message, "idx=7 sgpr=36 slot=7 u=1 st=255") != nullptr, "storage range identity serialized");
+	Expect(std::strstr(event.message, "b=0xf00000006000 d=27006074880 m=105906176") != nullptr,
+	       "storage range sizes serialized");
+	Expect(std::strstr(event.message, "w=11223344,55667788,99aabbcc,ddeeff00") != nullptr,
+	       "storage descriptor words serialized");
+	Expect(std::strlen(event.message) < kAgentEventMessageMax, "storage range message bounded");
 }
 
 void VerifyStorageUnknownReasonResolution()
@@ -303,7 +348,8 @@ void VerifyRawGen5StorageDescriptorContract()
 	Expect(!ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Unknown), "unknown access remains strict");
 
 	resource.fields[1] = 126u << 16u;
-	Expect(!ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw), "raw stride must preserve dword alignment");
+	Expect(ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw),
+	       "raw access accepts a byte-addressed stride that is not dword-aligned");
 }
 
 ShaderCode ParseUnsignedExecLessThan(bool vop3)
@@ -1343,6 +1389,7 @@ int main()
 	InitializeGraphicsConfig();
 	VerifyStencilFrontier();
 	VerifyStorageFrontier();
+	VerifyStorageRange();
 	VerifyStorageUnknownReasonResolution();
 	VerifyStorageConsumerAnalysis();
 	VerifyUnusedMetadataExclusionPreservesActiveOrdering();

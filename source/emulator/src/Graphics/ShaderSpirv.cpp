@@ -1695,6 +1695,32 @@ public:
 		*field  = m_extended_mapping[offset][1];
 	}
 
+	[[nodiscard]] bool GetDynamicSLoadMappedIndex(uint32_t instruction_pc, int offset, int* buffer, int* field) const
+	{
+		EXIT_IF(buffer == nullptr || field == nullptr);
+		if (m_bind == nullptr || offset < 0)
+		{
+			return false;
+		}
+		const auto& dynamic_sloads = m_bind->storage_buffers.dynamic_sloads;
+		for (int mapping = 0; mapping < dynamic_sloads.mappings_num; ++mapping)
+		{
+			if (dynamic_sloads.instruction_pc[mapping] != instruction_pc)
+			{
+				continue;
+			}
+			const int first_dword = dynamic_sloads.offset_dw[mapping];
+			if (offset < first_dword || offset >= first_dword + 4)
+			{
+				continue;
+			}
+			*buffer = dynamic_sloads.storage_index[mapping];
+			*field  = offset - first_dword;
+			return true;
+		}
+		return false;
+	}
+
 private:
 	struct Variable
 	{
@@ -2478,11 +2504,24 @@ static String8 GetBufferOffsetIntConstant(Spirv* spirv, ShaderOperand op)
 	return id;
 }
 
+enum class BufferAddressRangeCheck
+{
+	None,
+	RawZeroRecord,
+};
+
+struct BufferAddressSetup
+{
+	String8 source;
+	String8 access_enabled;
+};
+
 // Materialize a descriptor-driven byte address into the legacy buffer helper
 // scratch arguments. All MUBUF/MTBUF users share this so index/offset ordering
 // and the Gen5 swizzle equation cannot drift between loads and stores.
 static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& inst, int instruction_index,
-                                      uint32_t component_byte_offset, String8* setup)
+                                      uint32_t component_byte_offset, BufferAddressRangeCheck range_check,
+                                      BufferAddressSetup* setup)
 {
 	EXIT_IF(spirv == nullptr);
 	EXIT_IF(setup == nullptr);
@@ -2503,6 +2542,27 @@ static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& ins
 	const auto tag = String8::FromPrintf("%u_%u", instruction_index, component_byte_offset);
 	const auto make_name = [&tag](const char* prefix) { return String8::FromPrintf("%s_%s", prefix, tag.c_str()); };
 	const auto make_id = [](const String8& name) { return String8::FromPrintf("%%%s", name.c_str()); };
+
+	String8 range_guard;
+	setup->access_enabled = "";
+	if (range_check == BufferAddressRangeCheck::RawZeroRecord)
+	{
+		const auto descriptor2 = operand_variable_to_str(inst.src[1], 2);
+		if (descriptor2.type != SpirvType::Uint)
+		{
+			return false;
+		}
+
+		const auto access_enabled_name = make_name("buf_addr_access_enabled");
+		setup->access_enabled          = make_id(access_enabled_name);
+		range_guard = String8(R"(
+        %buf_addr_desc2_<tag> = OpLoad %uint %<desc2>
+        %buf_addr_records_empty_<tag> = OpIEqual %bool %buf_addr_desc2_<tag> %uint_0
+        %buf_addr_access_enabled_<tag> = OpLogicalNot %bool %buf_addr_records_empty_<tag>
+)")
+		                  .ReplaceStr("<tag>", tag)
+		                  .ReplaceStr("<desc2>", descriptor2.value);
+	}
 
 	String8 index_load;
 	String8 index_id = "%uint_0";
@@ -2571,6 +2631,7 @@ static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& ins
         %buf_addr_desc0_<tag> = OpLoad %uint %<desc0>
         %buf_addr_desc1_<tag> = OpLoad %uint %<desc1>
         %buf_addr_desc3_<tag> = OpLoad %uint %<desc3>
+<range_guard>
         %buf_addr_<tag> = OpFunctionCall %uint %buffer_raw_address <index_value> <offset_value> <soffset_value> %buf_addr_desc1_<tag> %buf_addr_desc3_<tag>
         %buf_addr_i_<tag> = OpBitcast %int %buf_addr_<tag>
         %buf_addr_buffer_i_<tag> = OpBitcast %int %buf_addr_desc0_<tag>
@@ -2580,34 +2641,35 @@ static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& ins
                OpStore %temp_int_4 %buf_addr_buffer_i_<tag>
 )";
 
-	*setup = index_load;
-	if (!setup->IsEmpty())
+	setup->source = index_load;
+	if (!setup->source.IsEmpty())
 	{
-		*setup += '\n';
+		setup->source += '\n';
 	}
-	*setup += vector_offset_load;
-	if (!setup->IsEmpty() && !scalar_offset_load.IsEmpty())
+	setup->source += vector_offset_load;
+	if (!setup->source.IsEmpty() && !scalar_offset_load.IsEmpty())
 	{
-		*setup += '\n';
+		setup->source += '\n';
 	}
-	*setup += scalar_offset_load;
-	if (!setup->IsEmpty() && !offset_setup.IsEmpty())
+	setup->source += scalar_offset_load;
+	if (!setup->source.IsEmpty() && !offset_setup.IsEmpty())
 	{
-		*setup += '\n';
+		setup->source += '\n';
 	}
-	*setup += offset_setup;
-	if (!setup->IsEmpty())
+	setup->source += offset_setup;
+	if (!setup->source.IsEmpty())
 	{
-		*setup += '\n';
+		setup->source += '\n';
 	}
-	*setup += String8(text)
-	              .ReplaceStr("<tag>", tag)
-	              .ReplaceStr("<desc0>", descriptor0.value)
-	              .ReplaceStr("<desc1>", descriptor1.value)
-	              .ReplaceStr("<desc3>", descriptor3.value)
-	              .ReplaceStr("<index_value>", index_id)
-	              .ReplaceStr("<offset_value>", offset_id)
-	              .ReplaceStr("<soffset_value>", make_id(scalar_offset_name));
+	setup->source += String8(text)
+	                     .ReplaceStr("<tag>", tag)
+	                     .ReplaceStr("<desc0>", descriptor0.value)
+	                     .ReplaceStr("<desc1>", descriptor1.value)
+	                     .ReplaceStr("<desc3>", descriptor3.value)
+	                     .ReplaceStr("<range_guard>", range_guard)
+	                     .ReplaceStr("<index_value>", index_id)
+	                     .ReplaceStr("<offset_value>", offset_id)
+	                     .ReplaceStr("<soffset_value>", make_id(scalar_offset_name));
 
 	return true;
 }
@@ -2618,6 +2680,13 @@ static bool emit_gen5_raw_buffer_load(Spirv* spirv, const ShaderInstruction& ins
 	EXIT_IF(spirv == nullptr);
 	EXIT_IF(dst_source == nullptr);
 
+	const auto zero_float_id = spirv->GetConstantFloat(0.0f);
+	if (zero_float_id == "unknown_float_constant")
+	{
+		return false;
+	}
+	const auto zero_float = String8::FromPrintf("%%%s", zero_float_id.c_str());
+
 	String8 source;
 	for (uint32_t component = 0; component < dwords; component++)
 	{
@@ -2626,14 +2695,31 @@ static bool emit_gen5_raw_buffer_load(Spirv* spirv, const ShaderInstruction& ins
 		{
 			return false;
 		}
-		String8 address_setup;
-		if (!emit_buffer_address_setup(spirv, inst, instruction_index, component * 4u, &address_setup))
+		BufferAddressSetup address_setup;
+		if (!emit_buffer_address_setup(spirv, inst, instruction_index, component * 4u, BufferAddressRangeCheck::RawZeroRecord,
+		                               &address_setup) ||
+		    address_setup.access_enabled.IsEmpty())
 		{
 			return false;
 		}
-		source += address_setup;
-		source += String8::FromPrintf("%%gen5_raw_load_%u_%u = OpFunctionCall %%void %%buffer_load_float1 %%%s %%temp_int_1 %%temp_int_2 %%temp_int_3 %%temp_int_4\n",
-		                              instruction_index, component, dst.value.c_str());
+		const auto tag = String8::FromPrintf("%u_%u", instruction_index, component);
+		source += String8(R"(
+<address_setup>
+               OpSelectionMerge %gen5_raw_load_merge_<tag> None
+               OpBranchConditional <access_enabled> %gen5_raw_load_then_<tag> %gen5_raw_load_oob_<tag>
+        %gen5_raw_load_then_<tag> = OpLabel
+%gen5_raw_load_<tag> = OpFunctionCall %void %buffer_load_float1 %<dst> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4
+               OpBranch %gen5_raw_load_merge_<tag>
+        %gen5_raw_load_oob_<tag> = OpLabel
+               OpStore %<dst> <zero>
+               OpBranch %gen5_raw_load_merge_<tag>
+        %gen5_raw_load_merge_<tag> = OpLabel
+)")
+		              .ReplaceStr("<address_setup>", address_setup.source)
+		              .ReplaceStr("<access_enabled>", address_setup.access_enabled)
+		              .ReplaceStr("<tag>", tag)
+		              .ReplaceStr("<zero>", zero_float)
+		              .ReplaceStr("<dst>", dst.value);
 	}
 
 	*dst_source += source;
@@ -2660,24 +2746,35 @@ static bool emit_gen5_raw_buffer_store(Spirv* spirv, const ShaderInstruction& in
 		}
 	}
 
-	String8 body;
-	for (uint32_t component = 0; component < dwords; component++)
+	BufferAddressSetup first_address_setup;
+	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, BufferAddressRangeCheck::RawZeroRecord,
+	                               &first_address_setup) ||
+	    first_address_setup.access_enabled.IsEmpty())
 	{
-		String8 address_setup;
-		if (!emit_buffer_address_setup(spirv, inst, instruction_index, component * 4u, &address_setup))
+		return false;
+	}
+
+	String8 body = String8::FromPrintf("%%gen5_raw_store_%u_0 = OpFunctionCall %%void %%buffer_store_float1 %%%s %%temp_int_1 %%temp_int_2 %%temp_int_3 %%temp_int_4\n",
+	                                  instruction_index, values[0].value.c_str());
+	for (uint32_t component = 1; component < dwords; component++)
+	{
+		BufferAddressSetup address_setup;
+		if (!emit_buffer_address_setup(spirv, inst, instruction_index, component * 4u, BufferAddressRangeCheck::None, &address_setup))
 		{
 			return false;
 		}
-		body += address_setup;
+		body += address_setup.source;
 		body += String8::FromPrintf("%%gen5_raw_store_%u_%u = OpFunctionCall %%void %%buffer_store_float1 %%%s %%temp_int_1 %%temp_int_2 %%temp_int_3 %%temp_int_4\n",
 		                             instruction_index, component, values[component].value.c_str());
 	}
 
 	static const char* text = R"(
+<address_setup>
         %gen5_raw_store_exec_<index> = OpLoad %uint %exec_lo
         %gen5_raw_store_active_<index> = OpINotEqual %bool %gen5_raw_store_exec_<index> %uint_0
+        %gen5_raw_store_enabled_<index> = OpLogicalAnd %bool %gen5_raw_store_active_<index> <access_enabled>
                OpSelectionMerge %gen5_raw_store_merge_<index> None
-               OpBranchConditional %gen5_raw_store_active_<index> %gen5_raw_store_then_<index> %gen5_raw_store_merge_<index>
+               OpBranchConditional %gen5_raw_store_enabled_<index> %gen5_raw_store_then_<index> %gen5_raw_store_merge_<index>
         %gen5_raw_store_then_<index> = OpLabel
 <body>
                OpBranch %gen5_raw_store_merge_<index>
@@ -2686,6 +2783,8 @@ static bool emit_gen5_raw_buffer_store(Spirv* spirv, const ShaderInstruction& in
 
 	*dst_source += String8(text)
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", instruction_index))
+	                   .ReplaceStr("<address_setup>", first_address_setup.source)
+	                   .ReplaceStr("<access_enabled>", first_address_setup.access_enabled)
 	                   .ReplaceStr("<body>", body);
 	return true;
 }
@@ -2707,8 +2806,8 @@ static bool emit_gen5_tbuffer_load(Spirv* spirv, const ShaderInstruction& inst, 
 		outputs += String8::FromPrintf(" %%%s", dst.value.c_str());
 	}
 
-	String8 address_setup;
-	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, &address_setup))
+	BufferAddressSetup address_setup;
+	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, BufferAddressRangeCheck::None, &address_setup))
 	{
 		return false;
 	}
@@ -2723,7 +2822,7 @@ static bool emit_gen5_tbuffer_load(Spirv* spirv, const ShaderInstruction& inst, 
                OpStore %temp_int_5 <format>
 %gen5_tbuffer_load_<index> = OpFunctionCall %void %<function><outputs> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
 )")
-	                   .ReplaceStr("<address_setup>", address_setup)
+	                   .ReplaceStr("<address_setup>", address_setup.source)
 	                   .ReplaceStr("<format>", String8::FromPrintf("%%%s", format_id.c_str()))
 	                   .ReplaceStr("<function>", function_name)
 	                   .ReplaceStr("<outputs>", outputs)
@@ -2748,8 +2847,8 @@ static bool emit_gen5_mubuf_format_load(Spirv* spirv, const ShaderInstruction& i
 		outputs += String8::FromPrintf(" %%%s", dst.value.c_str());
 	}
 
-	String8 address_setup;
-	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, &address_setup))
+	BufferAddressSetup address_setup;
+	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, BufferAddressRangeCheck::None, &address_setup))
 	{
 		return false;
 	}
@@ -2763,7 +2862,7 @@ static bool emit_gen5_mubuf_format_load(Spirv* spirv, const ShaderInstruction& i
                OpStore %temp_int_5 %gen5_mubuf_format_i_<tag>
 %gen5_mubuf_load_<tag> = OpFunctionCall %void %<function><outputs> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
 )")
-	                   .ReplaceStr("<address_setup>", address_setup)
+	                   .ReplaceStr("<address_setup>", address_setup.source)
 	                   .ReplaceStr("<tag>", tag)
 	                   .ReplaceStr("<function>", function_name)
 	                   .ReplaceStr("<outputs>", outputs);
@@ -2787,8 +2886,8 @@ static bool emit_gen5_mubuf_format_store(Spirv* spirv, const ShaderInstruction& 
 		inputs += String8::FromPrintf(" %%%s", value.value.c_str());
 	}
 
-	String8 address_setup;
-	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, &address_setup))
+	BufferAddressSetup address_setup;
+	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, BufferAddressRangeCheck::None, &address_setup))
 	{
 		return false;
 	}
@@ -2809,7 +2908,7 @@ static bool emit_gen5_mubuf_format_store(Spirv* spirv, const ShaderInstruction& 
                OpBranch %gen5_mubuf_store_merge_<tag>
         %gen5_mubuf_store_merge_<tag> = OpLabel
 )")
-	                   .ReplaceStr("<address_setup>", address_setup)
+	                   .ReplaceStr("<address_setup>", address_setup.source)
 	                   .ReplaceStr("<tag>", tag)
 	                   .ReplaceStr("<function>", function_name)
 	                   .ReplaceStr("<inputs>", inputs);
@@ -2830,20 +2929,39 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadUbyte_Vdata1VaddrSvSoffsIdxen)
 			{
 				return false;
 			}
-			String8 address_setup;
-			if (!emit_buffer_address_setup(spirv, inst, static_cast<int>(index), 0, &address_setup))
+			const auto zero_float_id = spirv->GetConstantFloat(0.0f);
+			if (zero_float_id == "unknown_float_constant")
 			{
 				return false;
 			}
+			const auto zero_float = String8::FromPrintf("%%%s", zero_float_id.c_str());
+			BufferAddressSetup address_setup;
+			if (!emit_buffer_address_setup(spirv, inst, static_cast<int>(index), 0, BufferAddressRangeCheck::RawZeroRecord,
+			                               &address_setup) ||
+			    address_setup.access_enabled.IsEmpty())
+			{
+				return false;
+			}
+			const auto tag = String8::FromPrintf("%u_0", index);
 			*dst_source += String8(R"(
 <address_setup>
-%gen5_raw_ubyte_<index> = OpFunctionCall %void %buffer_load_ubyte %temp_uint_0 %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4
-%gen5_raw_ubyte_value_<index> = OpLoad %uint %temp_uint_0
-%gen5_raw_ubyte_float_<index> = OpBitcast %float %gen5_raw_ubyte_value_<index>
-               OpStore %<dst> %gen5_raw_ubyte_float_<index>
+               OpSelectionMerge %gen5_raw_ubyte_merge_<tag> None
+               OpBranchConditional <access_enabled> %gen5_raw_ubyte_then_<tag> %gen5_raw_ubyte_oob_<tag>
+        %gen5_raw_ubyte_then_<tag> = OpLabel
+%gen5_raw_ubyte_<tag> = OpFunctionCall %void %buffer_load_ubyte %temp_uint_0 %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4
+%gen5_raw_ubyte_value_<tag> = OpLoad %uint %temp_uint_0
+%gen5_raw_ubyte_float_<tag> = OpBitcast %float %gen5_raw_ubyte_value_<tag>
+               OpStore %<dst> %gen5_raw_ubyte_float_<tag>
+               OpBranch %gen5_raw_ubyte_merge_<tag>
+        %gen5_raw_ubyte_oob_<tag> = OpLabel
+               OpStore %<dst> <zero>
+               OpBranch %gen5_raw_ubyte_merge_<tag>
+        %gen5_raw_ubyte_merge_<tag> = OpLabel
 )")
-			                   .ReplaceStr("<address_setup>", address_setup)
-			                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+			                   .ReplaceStr("<address_setup>", address_setup.source)
+			                   .ReplaceStr("<access_enabled>", address_setup.access_enabled)
+			                   .ReplaceStr("<tag>", tag)
+			                   .ReplaceStr("<zero>", zero_float)
 			                   .ReplaceStr("<dst>", dst.value);
 			return true;
 		}
@@ -6332,19 +6450,19 @@ KYTY_RECOMPILER_FUNC(Recompile_SCmp_XXX_U32_Ssrc0Ssrc1)
 	return true;
 }
 
-static bool RecompileNullSBufferLoad(const ShaderInstruction& inst, uint32_t components, const ShaderBindResources* bind_info,
-                                    String8* dst_source)
+static bool RecompileZeroSBufferLoad(const ShaderInstruction& inst, uint32_t components, const ShaderBindResources* bind_info,
+                                     String8* dst_source)
 {
 	if (bind_info == nullptr || dst_source == nullptr || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr)
 	{
 		return false;
 	}
-	bool null_descriptor = false;
-	for (int i = 0; i < bind_info->null_storage_buffers.buffers_num; ++i)
+	bool zero_descriptor = false;
+	for (int i = 0; i < bind_info->zero_sbuffer_resources.buffers_num; ++i)
 	{
-		null_descriptor = null_descriptor || bind_info->null_storage_buffers.start_register[i] == inst.src[0].register_id;
+		zero_descriptor = zero_descriptor || bind_info->zero_sbuffer_resources.start_register[i] == inst.src[0].register_id;
 	}
-	if (!null_descriptor)
+	if (!zero_descriptor)
 	{
 		return false;
 	}
@@ -6361,7 +6479,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDword_SdstSvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (RecompileNullSBufferLoad(inst, 1, bind_info, dst_source))
+	if (RecompileZeroSBufferLoad(inst, 1, bind_info, dst_source))
 	{
 		return true;
 	}
@@ -6418,7 +6536,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx2_Sdst2SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (RecompileNullSBufferLoad(inst, 2, bind_info, dst_source))
+	if (RecompileZeroSBufferLoad(inst, 2, bind_info, dst_source))
 	{
 		return true;
 	}
@@ -6477,7 +6595,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (RecompileNullSBufferLoad(inst, 4, bind_info, dst_source))
+	if (RecompileZeroSBufferLoad(inst, 4, bind_info, dst_source))
 	{
 		return true;
 	}
@@ -6550,7 +6668,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (RecompileNullSBufferLoad(inst, 8, bind_info, dst_source))
+	if (RecompileZeroSBufferLoad(inst, 8, bind_info, dst_source))
 	{
 		return true;
 	}
@@ -6602,7 +6720,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (RecompileNullSBufferLoad(inst, 16, bind_info, dst_source))
+	if (RecompileZeroSBufferLoad(inst, 16, bind_info, dst_source))
 	{
 		return true;
 	}
@@ -7033,7 +7151,10 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 	{
 		int buffer = 0;
 		int field  = 0;
-		spirv->GetMappedIndex(offset + i, &buffer, &field);
+		if (!spirv->GetDynamicSLoadMappedIndex(inst.pc, offset + i, &buffer, &field))
+		{
+			spirv->GetMappedIndex(offset + i, &buffer, &field);
+		}
 
 		*dst_source += String8(text)
 		                   .ReplaceStr("<vsharp_uint_ptr>", bind_info->vsharp_uniform_buffer ? "_ptr_Uniform_uint" : "_ptr_PushConstant_uint")
@@ -11071,6 +11192,12 @@ void Spirv::WriteLocalVariables()
 			bool extended  = m_bind->storage_buffers.extended[i];
 
 			EXIT_IF(buffer_index + i >= static_cast<int>(m_bind->push_constant_size) / 16);
+			if (m_bind->storage_buffers.dynamic_sload[i])
+			{
+				// The S_LOAD instruction below supplies these four fields. Writing
+				// them here would erase the descriptor's instruction-local lifetime.
+				continue;
+			}
 
 			String8 buffer = String8::FromPrintf("%d", buffer_index + i);
 			for (int f = 0; f < 4; f++)

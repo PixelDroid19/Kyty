@@ -223,6 +223,7 @@ public:
 
 	bool                           IsAllocated(uint64_t vaddr, uint64_t size);
 	GpuMemoryRangeValidationStatus ValidateAllocatedRange(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] uint64_t         GetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_size);
 	void                           SetAllocatedRange(uint64_t vaddr, uint64_t size);
 	void                           Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool unmap);
 
@@ -627,6 +628,31 @@ GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRange(uint64_t vaddr,
 		}
 	}
 	return GpuMemoryRangeValidationStatus::Unallocated;
+}
+
+uint64_t GpuMemory::GetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
+{
+	if (maximum_size == 0)
+	{
+		return 0;
+	}
+
+	Core::LockGuard lock(m_mutex);
+	for (const auto& heap: m_heaps)
+	{
+		if (vaddr < heap.range.vaddr)
+		{
+			continue;
+		}
+		const uint64_t offset = vaddr - heap.range.vaddr;
+		if (offset >= heap.range.size)
+		{
+			continue;
+		}
+		const uint64_t available = heap.range.size - offset;
+		return available < maximum_size ? available : maximum_size;
+	}
+	return 0;
 }
 
 int GpuMemory::GetHeapId(uint64_t vaddr, uint64_t size)
@@ -3400,6 +3426,15 @@ GpuMemoryRangeValidationStatus GpuMemoryValidateAllocatedRange(uint64_t vaddr, u
 		return GpuMemoryRangeValidationStatus::Unallocated;
 	}
 	return g_gpu_memory->ValidateAllocatedRange(vaddr, size);
+}
+
+uint64_t GpuMemoryGetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
+{
+	if (g_gpu_memory == nullptr)
+	{
+		return 0;
+	}
+	return g_gpu_memory->GetAllocatedRangePrefix(vaddr, maximum_size);
 }
 
 void GpuMemoryFree(GraphicContext* ctx, uint64_t vaddr, uint64_t size)

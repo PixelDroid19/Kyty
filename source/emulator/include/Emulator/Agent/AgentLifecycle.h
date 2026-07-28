@@ -26,6 +26,7 @@ inline constexpr const char* kCodeBringUpBreaker        = "bringup_breaker";
 inline constexpr const char* kCodeGraphicsInit          = "graphics_init";
 inline constexpr const char* kCodeGraphicsStencilFrontier = "gfx_stencil_frontier";
 inline constexpr const char* kCodeGraphicsStorageFrontier = "gfx_storage_frontier";
+inline constexpr const char* kCodeGraphicsStorageRange = "gfx_storage_range";
 inline constexpr const char* kCodeFirstFrame            = "first_frame";
 inline constexpr const char* kCodeFirstPresent          = "first_present";
 inline constexpr const char* kCodeInputReady            = "input_ready";
@@ -59,6 +60,7 @@ enum class StorageBindingSource: uint8_t
 {
 	Direct,
 	Metadata,
+	Dynamic,
 };
 
 enum class StorageUnknownReason: uint8_t
@@ -70,16 +72,34 @@ enum class StorageUnknownReason: uint8_t
 	MetadataOnlyBinding,
 };
 
-struct StorageFrontierContext
+enum class StorageRangeBacking: uint8_t
+{
+	None,
+	Physical,
+	Flexible,
+};
+
+// Evidence collected while classifying a shader storage descriptor. Keeping
+// this separate from the event-specific fields lets range and format failures
+// report the same provenance without duplicating classification logic.
+struct StorageBindingProvenance
 {
 	StorageAccessClass   access         = StorageAccessClass::Unknown;
 	StorageBindingSource source         = StorageBindingSource::Direct;
 	StorageUnknownReason unknown_reason = StorageUnknownReason::None;
 	bool                 code_available = false;
 	bool                 exact_match    = false;
+	bool                 indirect_use   = false;
+	bool                 raw_vmem_oob_guarded = false;
+	bool                 raw_smem_use         = false;
+	bool                 raw_tbuffer_use      = false;
+};
+
+struct StorageFrontierContext
+{
+	StorageBindingProvenance binding {};
 	bool                 unbased_match  = false;
 	bool                 decoded_unknown = false;
-	bool                 indirect_use   = false;
 	int                  resource_index = 0;
 	int                  sgpr           = 0;
 	int                  slot           = 0;
@@ -89,6 +109,24 @@ struct StorageFrontierContext
 	uint32_t             dst_sel        = 0;
 	bool                 add_tid        = false;
 	bool                 swizzle        = false;
+};
+
+struct StorageRangeContext
+{
+	StorageBindingProvenance binding {};
+	StorageRangeBacking      backing            = StorageRangeBacking::None;
+	uint64_t                 backing_size       = 0;
+	int                      resource_index     = 0;
+	int                      sgpr               = 0;
+	int                      slot               = 0;
+	uint32_t                 usage              = 0;
+	uint32_t                 stride             = 0;
+	uint64_t                 base               = 0;
+	uint64_t                 declared_size      = 0;
+	uint64_t                 materialized_size  = 0;
+	// Captured at descriptor decode time; emitting these words never dereferences
+	// guest memory and lets diagnostics distinguish bad metadata from bad backing.
+	uint32_t                 descriptor_words[4] = {};
 };
 
 // Read-only publish edge: never wakes guest sync or mutates execution.
@@ -109,6 +147,8 @@ void EmitGraphicsInit();
 void EmitStencilFrontier(const StencilFrontierContext& context);
 void EmitStorageFrontier(const StorageFrontierContext& context);
 void EmitStorageFrontierFatal(const StorageFrontierContext& context);
+void EmitStorageRange(const StorageRangeContext& context);
+void EmitStorageRangeFatal(const StorageRangeContext& context);
 void EmitFirstFrame(int frame);
 void EmitFirstPresent(uint64_t present);
 void EmitInputReady();

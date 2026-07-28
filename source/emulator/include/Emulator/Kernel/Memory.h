@@ -39,6 +39,24 @@ enum class KernelGpuMappingRegistrationAction : uint8_t
 	Reject,
 };
 
+// Read-only mapping provenance for subsystems that need to validate a guest
+// range without invoking a guest-visible syscall or changing protections.
+enum class KernelMappedRangeKind : uint8_t
+{
+	None,
+	Physical,
+	Flexible,
+};
+
+struct KernelMappedRange
+{
+	KernelMappedRangeKind   kind     = KernelMappedRangeKind::None;
+	uint64_t                base     = 0;
+	uint64_t                size     = 0;
+	int                     protection = 0;
+	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+};
+
 constexpr KernelGpuMappingRegistrationAction KernelGpuMappingRegistrationActionFor(KernelGpuMappingPromotionStatus status)
 {
 	switch (status)
@@ -79,6 +97,9 @@ int KYTY_SYSV_ABI    KernelSetVirtualRangeName(const void* addr, uint64_t len, c
 // Gen5 sceKernelClearVirtualRangeName — NID mkgXxsoxWHg.
 int KYTY_SYSV_ABI    KernelClearVirtualRangeName(const void* addr, uint64_t len);
 int KYTY_SYSV_ABI    KernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot);
+// Internal, side-effect-free range query. Returns true only when the entire
+// requested range lies inside one currently mapped protection segment.
+[[nodiscard]] bool   KernelQueryMappedRange(uint64_t vaddr, uint64_t size, KernelMappedRange* out);
 int KYTY_SYSV_ABI    KernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size);
 int KYTY_SYSV_ABI    KernelAvailableDirectMemorySize(int64_t arg0, int64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
 int KYTY_SYSV_ABI    KernelBatchMap2(void* entries, int entry_count, int* processed_out, int flags);

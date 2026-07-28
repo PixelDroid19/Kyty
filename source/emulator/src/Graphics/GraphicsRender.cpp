@@ -46,6 +46,7 @@
 #include "Emulator/Graphics/VulkanResolutionCapability.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
@@ -5504,6 +5505,99 @@ static VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uin
 	return buffer->UploadTransientBuffer(reinterpret_cast<const void*>(addr), size, usage);
 }
 
+static Emulator::Agent::Lifecycle::StorageBindingProvenance DescribeStorageBinding(const ShaderStorageResources& storage_buffers,
+                                                                                     int index)
+{
+	Emulator::Agent::Lifecycle::StorageBindingProvenance binding {};
+	switch (storage_buffers.accesses[index])
+	{
+		case ShaderStorageAccess::Unknown: binding.access = Emulator::Agent::Lifecycle::StorageAccessClass::Unknown; break;
+		case ShaderStorageAccess::Raw: binding.access = Emulator::Agent::Lifecycle::StorageAccessClass::Raw; break;
+		case ShaderStorageAccess::Typed: binding.access = Emulator::Agent::Lifecycle::StorageAccessClass::Typed; break;
+		case ShaderStorageAccess::Mixed: binding.access = Emulator::Agent::Lifecycle::StorageAccessClass::Mixed; break;
+		case ShaderStorageAccess::UnusedMetadata: binding.access = Emulator::Agent::Lifecycle::StorageAccessClass::Unknown; break;
+	}
+	switch (storage_buffers.sources[index])
+	{
+		case ShaderStorageBindingSource::DirectResource:
+			binding.source = Emulator::Agent::Lifecycle::StorageBindingSource::Direct;
+			break;
+		case ShaderStorageBindingSource::MetadataSharp:
+			binding.source = Emulator::Agent::Lifecycle::StorageBindingSource::Metadata;
+			break;
+		case ShaderStorageBindingSource::DynamicScalarLoad:
+			binding.source = Emulator::Agent::Lifecycle::StorageBindingSource::Dynamic;
+			break;
+	}
+	switch (storage_buffers.unknown_reasons[index])
+	{
+		case ShaderStorageUnknownReason::None: binding.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::None; break;
+		case ShaderStorageUnknownReason::CodeUnavailable:
+			binding.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::CodeUnavailable;
+			break;
+		case ShaderStorageUnknownReason::NoMatchingInstruction:
+			binding.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::NoMatchingInstruction;
+			break;
+		case ShaderStorageUnknownReason::RegisterBaseMismatch:
+			binding.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::RegisterBaseMismatch;
+			break;
+		case ShaderStorageUnknownReason::MetadataOnlyBinding:
+			binding.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::MetadataOnlyBinding;
+			break;
+	}
+	binding.code_available = storage_buffers.code_available[index];
+	binding.exact_match    = storage_buffers.exact_matches[index];
+	binding.indirect_use   = storage_buffers.indirect_descriptor_use[index];
+	binding.raw_vmem_oob_guarded = storage_buffers.raw_vmem_oob_guarded[index];
+	binding.raw_smem_use         = storage_buffers.raw_smem_use[index];
+	binding.raw_tbuffer_use      = storage_buffers.raw_tbuffer_use[index];
+	return binding;
+}
+
+static Emulator::Agent::Lifecycle::StorageRangeBacking DescribeStorageRangeBacking(
+	LibKernel::Memory::KernelMappedRangeKind kind)
+{
+	switch (kind)
+	{
+		case LibKernel::Memory::KernelMappedRangeKind::None: return Emulator::Agent::Lifecycle::StorageRangeBacking::None;
+		case LibKernel::Memory::KernelMappedRangeKind::Physical: return Emulator::Agent::Lifecycle::StorageRangeBacking::Physical;
+		case LibKernel::Memory::KernelMappedRangeKind::Flexible: return Emulator::Agent::Lifecycle::StorageRangeBacking::Flexible;
+	}
+	return Emulator::Agent::Lifecycle::StorageRangeBacking::None;
+}
+
+static void ReportStorageRange(const ShaderStorageResources& storage_buffers, int index, const ShaderBufferResource& resource,
+	                           uint64_t base, uint64_t declared_size, uint64_t materialized_size)
+{
+	LibKernel::Memory::KernelMappedRange mapped_range {};
+	const bool has_mapped_range = declared_size != 0 && LibKernel::Memory::KernelQueryMappedRange(base, declared_size, &mapped_range);
+
+	Emulator::Agent::Lifecycle::StorageRangeContext context {};
+	context.binding           = DescribeStorageBinding(storage_buffers, index);
+	context.backing           = has_mapped_range ? DescribeStorageRangeBacking(mapped_range.kind) :
+	                                              Emulator::Agent::Lifecycle::StorageRangeBacking::None;
+	context.backing_size      = has_mapped_range ? mapped_range.size : 0;
+	context.resource_index    = index;
+	context.sgpr              = storage_buffers.start_register[index];
+	context.slot              = storage_buffers.slots[index];
+	context.usage             = static_cast<uint32_t>(storage_buffers.usages[index]);
+	context.stride            = resource.Stride();
+	context.base              = base;
+	context.declared_size     = declared_size;
+	context.materialized_size = materialized_size;
+	context.descriptor_words[0] = resource.fields[0];
+	context.descriptor_words[1] = resource.fields[1];
+	context.descriptor_words[2] = resource.fields[2];
+	context.descriptor_words[3] = resource.fields[3];
+	if (declared_size == 0 || materialized_size == 0)
+	{
+		Emulator::Agent::Lifecycle::EmitStorageRangeFatal(context);
+	} else
+	{
+		Emulator::Agent::Lifecycle::EmitStorageRange(context);
+	}
+}
+
 static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, const ShaderStorageResources& storage_buffers,
                                   VulkanBuffer** buffers, uint32_t** sgprs)
 {
@@ -5532,42 +5626,9 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 			if (!ShaderGen5StorageDescriptorSupported(r, storage_buffers.accesses[i]))
 			{
 				Emulator::Agent::Lifecycle::StorageFrontierContext context {};
-				switch (storage_buffers.accesses[i])
-				{
-					case ShaderStorageAccess::Unknown: context.access = Emulator::Agent::Lifecycle::StorageAccessClass::Unknown; break;
-					case ShaderStorageAccess::Raw: context.access = Emulator::Agent::Lifecycle::StorageAccessClass::Raw; break;
-					case ShaderStorageAccess::Typed: context.access = Emulator::Agent::Lifecycle::StorageAccessClass::Typed; break;
-					case ShaderStorageAccess::Mixed: context.access = Emulator::Agent::Lifecycle::StorageAccessClass::Mixed; break;
-					case ShaderStorageAccess::UnusedMetadata:
-						context.access = Emulator::Agent::Lifecycle::StorageAccessClass::Unknown;
-						break;
-				}
-				context.source = storage_buffers.sources[i] == ShaderStorageBindingSource::MetadataSharp
-				                     ? Emulator::Agent::Lifecycle::StorageBindingSource::Metadata
-				                     : Emulator::Agent::Lifecycle::StorageBindingSource::Direct;
-				switch (storage_buffers.unknown_reasons[i])
-				{
-					case ShaderStorageUnknownReason::None:
-						context.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::None;
-						break;
-					case ShaderStorageUnknownReason::CodeUnavailable:
-						context.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::CodeUnavailable;
-						break;
-					case ShaderStorageUnknownReason::NoMatchingInstruction:
-						context.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::NoMatchingInstruction;
-						break;
-					case ShaderStorageUnknownReason::RegisterBaseMismatch:
-						context.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::RegisterBaseMismatch;
-						break;
-					case ShaderStorageUnknownReason::MetadataOnlyBinding:
-						context.unknown_reason = Emulator::Agent::Lifecycle::StorageUnknownReason::MetadataOnlyBinding;
-						break;
-				}
-				context.code_available  = storage_buffers.code_available[i];
-				context.exact_match     = storage_buffers.exact_matches[i];
+				context.binding         = DescribeStorageBinding(storage_buffers, i);
 				context.unbased_match   = storage_buffers.unbased_matches[i];
 				context.decoded_unknown = storage_buffers.decoded_unknown[i];
-				context.indirect_use    = storage_buffers.indirect_descriptor_use[i];
 				context.resource_index  = i;
 				context.sgpr            = storage_buffers.start_register[i];
 				context.slot            = storage_buffers.slots[i];
@@ -5606,47 +5667,51 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 		auto           addr        = (gen5 ? r.Base48() : r.Base44());
 		auto           stride      = r.Stride();
 		auto           num_records = r.NumRecords();
-		const uint64_t size        = ShaderBufferByteSize(stride, num_records);
-		// Gen5 raw buffers may have NumRecords=0 (unbounded/dynamic). Use stride as
-		// minimum viable size so the Vulkan SSBO allocation succeeds.
-		uint64_t effective_size    = size;
-		uint32_t effective_records = num_records;
-		if (effective_size == 0 && stride > 0)
+		const bool raw_vmem_empty_oob = storage_buffers.raw_vmem_oob_guarded[i] && ShaderGen5RawDescriptorAlwaysOutOfBounds(r);
+		const bool raw_smem_empty_oob = storage_buffers.raw_smem_use[i] && ShaderGen5SBufferDescriptorAlwaysOutOfBounds(r);
+		const bool raw_empty_oob = gen5 && storage_buffers.accesses[i] == ShaderStorageAccess::Raw &&
+		                           !storage_buffers.decoded_unknown[i] && !storage_buffers.raw_tbuffer_use[i] &&
+		                           (storage_buffers.raw_vmem_oob_guarded[i] || storage_buffers.raw_smem_use[i]) &&
+		                           (!storage_buffers.raw_vmem_oob_guarded[i] || raw_vmem_empty_oob) &&
+		                           (!storage_buffers.raw_smem_use[i] || raw_smem_empty_oob);
+
+		VulkanBuffer* buf = nullptr;
+		if (raw_empty_oob)
 		{
-			effective_size    = stride;
-			effective_records = 1;
-		}
-		EXIT_NOT_IMPLEMENTED(effective_size == 0);
-		EXIT_NOT_IMPLEMENTED((effective_size & 0x3u) != 0);
-
-		bool read_only = ShaderStorageUsageIsReadOnly(storage_buffers.usages[i]);
-
-		EXIT_NOT_IMPLEMENTED(read_only && !(storage_buffers.usages[i] == ShaderStorageUsage::ReadOnly ||
-		                                    storage_buffers.usages[i] == ShaderStorageUsage::Constant));
-
-		StorageBufferGpuObject buf_info(stride, effective_records, read_only);
-
-		VulkanBuffer* buf = TryUploadTransientReadOnlyBuffer(buffer, addr, effective_size, read_only, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-		if (buf == nullptr)
+			// Every known raw consumer is proven out of range: MUBUF is guarded in
+			// SPIR-V and S_BUFFER_LOAD is lowered to zero. Vulkan still requires a
+			// valid SSBO array element, so bind a minimal carrier with no guest-memory
+			// ownership or observable data path.
+			static constexpr uint32_t kEmptyRawStorageDescriptorCarrier = 0;
+			buf = buffer->UploadTransientBuffer(&kEmptyRawStorageDescriptorCarrier, sizeof(kEmptyRawStorageDescriptorCarrier),
+			                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+		} else
 		{
-			// Skip unallocated GPU ranges (uninitialized descriptors with records=0)
-			if (GpuMemoryValidateAllocatedRange(addr, effective_size) != GpuMemoryRangeValidationStatus::Valid)
+			const uint64_t declared_size = ShaderBufferByteSize(stride, num_records);
+			if (declared_size == 0)
 			{
-				// Create a small zero-filled placeholder so downstream descriptor
-				// writes never dereference nullptr for uninitialized GPU ranges.
-				static const uint8_t zeros[64] = {};
-				buf = buffer->UploadTransientBuffer(zeros, effective_size < 64 ? effective_size : 64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-				buffers[i] = buf;
-				// Still write descriptor SGPRs to keep push_constant_size consistent
-				(*sgprs)[0] = r.fields[0];
-				(*sgprs)[1] = r.fields[1];
-				(*sgprs)[2] = r.fields[2];
-				(*sgprs)[3] = r.fields[3];
-				(*sgprs) += 4;
-				continue;
+				ReportStorageRange(storage_buffers, i, r, addr, declared_size, 0);
+				EXIT_NOT_IMPLEMENTED(true);
 			}
-			buf = static_cast<StorageVulkanBuffer*>(
-			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, effective_size, buf_info));
+
+			const uint64_t materialized_size = GpuMemoryGetAllocatedRangePrefix(addr, declared_size);
+			if (materialized_size != declared_size)
+			{
+				ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
+			}
+			EXIT_NOT_IMPLEMENTED(materialized_size == 0);
+
+			const bool read_only = ShaderStorageUsageIsReadOnly(storage_buffers.usages[i]);
+			EXIT_NOT_IMPLEMENTED(read_only && !(storage_buffers.usages[i] == ShaderStorageUsage::ReadOnly ||
+			                                    storage_buffers.usages[i] == ShaderStorageUsage::Constant));
+
+			StorageBufferGpuObject buf_info(stride, num_records, read_only);
+			buf = TryUploadTransientReadOnlyBuffer(buffer, addr, materialized_size, read_only, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+			if (buf == nullptr)
+			{
+				buf = static_cast<StorageVulkanBuffer*>(
+				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, materialized_size, buf_info));
+			}
 		}
 
 		EXIT_NOT_IMPLEMENTED(buf == nullptr);
@@ -7207,17 +7272,6 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
 	DebugStatsRecordDispatch();
-}
-
-static const char* GpuMemoryRangeValidationStatusName(GpuMemoryRangeValidationStatus status)
-{
-	switch (status)
-	{
-		case GpuMemoryRangeValidationStatus::Valid: return "Valid";
-		case GpuMemoryRangeValidationStatus::InvalidArgument: return "InvalidArgument";
-		case GpuMemoryRangeValidationStatus::Unallocated: return "Unallocated";
-	}
-	return "Unknown";
 }
 
 static void ValidateTransientLabelDestination(const void* dst_gpu_addr, uint64_t size)

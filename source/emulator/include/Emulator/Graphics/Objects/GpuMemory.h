@@ -667,6 +667,9 @@ inline void GpuMemoryHostGuestMallocPageCover(uint64_t vaddr, uint64_t size, uin
 
 void                                         GpuMemorySetAllocatedRange(uint64_t vaddr, uint64_t size);
 [[nodiscard]] GpuMemoryRangeValidationStatus GpuMemoryValidateAllocatedRange(uint64_t vaddr, uint64_t size);
+// Returns the contiguous allocation starting at vaddr, capped at maximum_size.
+// A zero result means no registered GPU allocation begins at vaddr.
+[[nodiscard]] uint64_t                       GpuMemoryGetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_size);
 void                                         GpuMemoryFree(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 // Requires GraphicsRunWithQuiescedSubmissions to own the admission gate. The
 // guest VA must remain mapped until this call has written back and detached

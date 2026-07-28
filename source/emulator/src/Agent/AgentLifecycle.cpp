@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <cinttypes>
 #include <cstdio>
 #include <cstring>
 
@@ -20,6 +21,7 @@ std::atomic_bool g_first_present_emitted {false};
 std::atomic_bool g_input_ready_emitted {false};
 std::atomic<uint32_t> g_stencil_frontier_emits {0};
 std::atomic<uint32_t> g_storage_frontier_emits {0};
+std::atomic<uint32_t> g_storage_range_emits {0};
 
 constexpr uint32_t kGraphicsFrontierEmitLimit = 64;
 
@@ -227,32 +229,64 @@ void EmitStencilFrontier(const StencilFrontierContext& context)
 	Emit(EventKind::Error, kCodeGraphicsStencilFrontier, msg);
 }
 
+static const char* StorageAccessClassName(StorageAccessClass access)
+{
+	switch (access)
+	{
+		case StorageAccessClass::Unknown: return "unknown";
+		case StorageAccessClass::Raw: return "raw";
+		case StorageAccessClass::Typed: return "typed";
+		case StorageAccessClass::Mixed: return "mixed";
+	}
+	return "unknown";
+}
+
+static const char* StorageBindingSourceName(StorageBindingSource source)
+{
+	switch (source)
+	{
+		case StorageBindingSource::Direct: return "direct";
+		case StorageBindingSource::Metadata: return "metadata";
+		case StorageBindingSource::Dynamic: return "dynamic";
+	}
+	return "direct";
+}
+
+static const char* StorageUnknownReasonName(StorageUnknownReason reason)
+{
+	switch (reason)
+	{
+		case StorageUnknownReason::None: return "none";
+		case StorageUnknownReason::CodeUnavailable: return "code_unavailable";
+		case StorageUnknownReason::NoMatchingInstruction: return "no_matching_instruction";
+		case StorageUnknownReason::RegisterBaseMismatch: return "register_base_mismatch";
+		case StorageUnknownReason::MetadataOnlyBinding: return "metadata_only";
+	}
+	return "none";
+}
+
+static const char* StorageRangeBackingName(StorageRangeBacking backing)
+{
+	switch (backing)
+	{
+		case StorageRangeBacking::None: return "none";
+		case StorageRangeBacking::Physical: return "physical";
+		case StorageRangeBacking::Flexible: return "flexible";
+	}
+	return "none";
+}
+
 static void FormatStorageFrontier(const StorageFrontierContext& context, char* message, size_t message_size)
 {
-	const char* access = "unknown";
-	switch (context.access)
-	{
-		case StorageAccessClass::Unknown: break;
-		case StorageAccessClass::Raw: access = "raw"; break;
-		case StorageAccessClass::Typed: access = "typed"; break;
-		case StorageAccessClass::Mixed: access = "mixed"; break;
-	}
-	const char* source = context.source == StorageBindingSource::Metadata ? "metadata" : "direct";
-	const char* reason = "none";
-	switch (context.unknown_reason)
-	{
-		case StorageUnknownReason::None: break;
-		case StorageUnknownReason::CodeUnavailable: reason = "code_unavailable"; break;
-		case StorageUnknownReason::NoMatchingInstruction: reason = "no_matching_instruction"; break;
-		case StorageUnknownReason::RegisterBaseMismatch: reason = "register_base_mismatch"; break;
-		case StorageUnknownReason::MetadataOnlyBinding: reason = "metadata_only"; break;
-	}
+	const auto& binding = context.binding;
 	std::snprintf(message, message_size,
-	              "access=%s source=%s reason=%s code=%u exact=%u unbased=%u decoded=%u indirect=%u "
-	              "idx=%d sgpr=%d slot=%d usage=%u stride=%u fmt=%u "
-	              "dst=0x%03x tid=%u swz=%u",
-	              access, source, reason, context.code_available ? 1u : 0u, context.exact_match ? 1u : 0u,
-	              context.unbased_match ? 1u : 0u, context.decoded_unknown ? 1u : 0u, context.indirect_use ? 1u : 0u,
+	              "a=%s src=%s r=%s c=%u x=%u ub=%u d=%u i=%u vm=%u sm=%u tb=%u "
+	              "n=%d sg=%d sl=%d u=%u st=%u f=%u ds=%03x tid=%u sw=%u",
+	              StorageAccessClassName(binding.access), StorageBindingSourceName(binding.source),
+	              StorageUnknownReasonName(binding.unknown_reason), binding.code_available ? 1u : 0u,
+	              binding.exact_match ? 1u : 0u, context.unbased_match ? 1u : 0u,
+	              context.decoded_unknown ? 1u : 0u, binding.indirect_use ? 1u : 0u,
+	              binding.raw_vmem_oob_guarded ? 1u : 0u, binding.raw_smem_use ? 1u : 0u, binding.raw_tbuffer_use ? 1u : 0u,
 	              context.resource_index, context.sgpr, context.slot,
 	              context.usage, context.stride, context.format, context.dst_sel, context.add_tid ? 1u : 0u,
 	              context.swizzle ? 1u : 0u);
@@ -275,6 +309,43 @@ void EmitStorageFrontierFatal(const StorageFrontierContext& context)
 	FormatStorageFrontier(context, msg, sizeof(msg));
 	EmitStorageFrontier(context);
 	std::fprintf(stderr, "KYTY_AGENT_FRONTIER code=%s %s\n", kCodeGraphicsStorageFrontier, msg);
+	std::fflush(stderr);
+}
+
+static void FormatStorageRange(const StorageRangeContext& context, char* message, size_t message_size)
+{
+	const auto& binding = context.binding;
+	std::snprintf(message, message_size,
+	              "a=%s src=%s r=%s c=%u x=%u i=%u vm=%u sm=%u tb=%u k=%s ks=%" PRIu64 " idx=%d sgpr=%d slot=%d u=%u st=%u b=0x%012" PRIx64
+	              " d=%" PRIu64 " m=%" PRIu64 " w=%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32,
+	              StorageAccessClassName(binding.access), StorageBindingSourceName(binding.source),
+	              StorageUnknownReasonName(binding.unknown_reason), binding.code_available ? 1u : 0u,
+	              binding.exact_match ? 1u : 0u, binding.indirect_use ? 1u : 0u,
+	              binding.raw_vmem_oob_guarded ? 1u : 0u, binding.raw_smem_use ? 1u : 0u, binding.raw_tbuffer_use ? 1u : 0u,
+	              StorageRangeBackingName(context.backing),
+	              context.backing_size,
+	              context.resource_index, context.sgpr, context.slot, context.usage, context.stride, context.base,
+	              context.declared_size, context.materialized_size, context.descriptor_words[0], context.descriptor_words[1],
+	              context.descriptor_words[2], context.descriptor_words[3]);
+}
+
+void EmitStorageRange(const StorageRangeContext& context)
+{
+	if (g_storage_range_emits.fetch_add(1, std::memory_order_relaxed) >= kGraphicsFrontierEmitLimit)
+	{
+		return;
+	}
+	char msg[kAgentEventMessageMax] {};
+	FormatStorageRange(context, msg, sizeof(msg));
+	Emit(EventKind::Error, kCodeGraphicsStorageRange, msg);
+}
+
+void EmitStorageRangeFatal(const StorageRangeContext& context)
+{
+	char msg[kAgentEventMessageMax] {};
+	FormatStorageRange(context, msg, sizeof(msg));
+	EmitStorageRange(context);
+	std::fprintf(stderr, "KYTY_AGENT_FRONTIER code=%s %s\n", kCodeGraphicsStorageRange, msg);
 	std::fflush(stderr);
 }
 

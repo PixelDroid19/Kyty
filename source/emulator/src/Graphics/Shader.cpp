@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cinttypes>
 #include <mutex>
 #include <string>
@@ -71,11 +72,24 @@ bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 
 bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource)
 {
-	// Raw BUFFER_*_DWORD instructions address the descriptor in DWORDs and do
-	// not consume its typed-format metadata. Each indexed record must preserve
-	// DWORD alignment; aligning only the total range would misalign every later
-	// record for a non-aligned stride.
-	return resource.Stride() != 0 && (resource.Stride() & 0x3u) == 0;
+	// Raw BUFFER_* instructions use the descriptor stride as a byte count and do
+	// not consume typed-format metadata. DWORD operations align their final
+	// address in the instruction lowering, not in the descriptor contract.
+	return resource.Stride() != 0;
+}
+
+bool ShaderGen5RawDescriptorAlwaysOutOfBounds(const ShaderBufferResource& resource)
+{
+	// An empty descriptor has no addressable raw transfer. The descriptor mode
+	// can choose a bounds equation, but it cannot create a record.
+	return resource.NumRecords() == 0u;
+}
+
+bool ShaderGen5SBufferDescriptorAlwaysOutOfBounds(const ShaderBufferResource& resource)
+{
+	// Scalar-buffer loads need at least one declared record or byte. An empty
+	// descriptor therefore makes every scalar dword load out of range.
+	return resource.NumRecords() == 0u;
 }
 
 bool ShaderStorageDescriptorSwizzleAllowed(bool gen5, const ShaderBufferResource& resource)
@@ -162,6 +176,11 @@ void ExcludeUnusedMetadataStorage(ShaderStorageResources* resources)
 {
 	EXIT_IF(resources == nullptr);
 
+	int active_indices[ShaderStorageResources::BUFFERS_MAX] = {};
+	for (int& index: active_indices)
+	{
+		index = -1;
+	}
 	int active_count = 0;
 	for (int source = 0; source < resources->buffers_num; ++source)
 	{
@@ -169,6 +188,7 @@ void ExcludeUnusedMetadataStorage(ShaderStorageResources* resources)
 		{
 			continue;
 		}
+		active_indices[source] = active_count;
 		if (active_count != source)
 		{
 			resources->buffers[active_count]                 = resources->buffers[source];
@@ -181,11 +201,22 @@ void ExcludeUnusedMetadataStorage(ShaderStorageResources* resources)
 			resources->unbased_matches[active_count]         = resources->unbased_matches[source];
 			resources->decoded_unknown[active_count]         = resources->decoded_unknown[source];
 			resources->indirect_descriptor_use[active_count] = resources->indirect_descriptor_use[source];
+			resources->raw_vmem_oob_guarded[active_count]        = resources->raw_vmem_oob_guarded[source];
+			resources->raw_smem_use[active_count]                = resources->raw_smem_use[source];
+			resources->raw_tbuffer_use[active_count]             = resources->raw_tbuffer_use[source];
+			resources->dynamic_sload[active_count]               = resources->dynamic_sload[source];
 			resources->slots[active_count]                   = resources->slots[source];
 			resources->start_register[active_count]          = resources->start_register[source];
 			resources->extended[active_count]                = resources->extended[source];
 		}
 		++active_count;
+	}
+	for (int mapping = 0; mapping < resources->dynamic_sloads.mappings_num; ++mapping)
+	{
+		const int source_index = resources->dynamic_sloads.storage_index[mapping];
+		EXIT_NOT_IMPLEMENTED(source_index < 0 || source_index >= resources->buffers_num);
+		EXIT_NOT_IMPLEMENTED(active_indices[source_index] < 0);
+		resources->dynamic_sloads.storage_index[mapping] = active_indices[source_index];
 	}
 	resources->buffers_num = active_count;
 }
@@ -1639,6 +1670,22 @@ static bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sg
 	return true;
 }
 
+static void AddZeroSBufferResource(ShaderZeroSBufferResources* resources, int start_register)
+{
+	EXIT_IF(resources == nullptr);
+
+	for (int i = 0; i < resources->buffers_num; ++i)
+	{
+		if (resources->start_register[i] == start_register)
+		{
+			return;
+		}
+	}
+
+	EXIT_NOT_IMPLEMENTED(resources->buffers_num >= ShaderZeroSBufferResources::BUFFERS_MAX);
+	resources->start_register[resources->buffers_num++] = start_register;
+}
+
 static void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, int start_index, int slot, ShaderTextureUsage usage,
                                    const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer)
 {
@@ -1920,19 +1967,230 @@ static bool ShaderOperandOverlapsSgprRange(const ShaderOperand& operand, int sta
 	return operand.register_id < range_end && start_register < operand_end;
 }
 
+static uint8_t ShaderOperandSgprRangeMask(const ShaderOperand& operand, int start_register, int registers_num)
+{
+	if (!ShaderOperandOverlapsSgprRange(operand, start_register, registers_num))
+	{
+		return 0;
+	}
+
+	uint8_t mask = 0;
+	for (int index = 0; index < registers_num; ++index)
+	{
+		const int reg = start_register + index;
+		if (operand.register_id <= reg && reg < operand.register_id + operand.size)
+		{
+			mask |= static_cast<uint8_t>(1u << index);
+		}
+	}
+	return mask;
+}
+
+static void ShaderClearSgprRangeLiveness(uint8_t* live_words, const ShaderOperand& destination, int start_register,
+                                         int registers_num)
+{
+	EXIT_IF(live_words == nullptr);
+	const uint8_t written_words = ShaderOperandSgprRangeMask(destination, start_register, registers_num);
+	*live_words &= static_cast<uint8_t>(~written_words);
+}
+
+static bool ShaderInstructionIsConditionalBranch(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchScc0:
+		case ShaderInstructionType::SCbranchScc1:
+		case ShaderInstructionType::SCbranchVccz:
+		case ShaderInstructionType::SCbranchVccnz: return true;
+		default: return false;
+	}
+}
+
+static bool ShaderInstructionHasStaticBranchTarget(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::SBranch || ShaderInstructionIsConditionalBranch(type);
+}
+
+static bool ShaderTryGetStaticBranchTarget(const std::unordered_map<uint32_t, uint32_t>& instruction_index,
+                                           const ShaderInstruction& inst, uint32_t* target)
+{
+	EXIT_IF(target == nullptr);
+	if (inst.src_num < 1)
+	{
+		return false;
+	}
+
+	const auto target_it = instruction_index.find(ShaderLabel(inst).GetDst());
+	if (target_it == instruction_index.end())
+	{
+		return false;
+	}
+	*target = target_it->second;
+	return true;
+}
+
+// Returns the metadata-origin SGPR words that can reach each instruction. A
+// word stays live only when no predecessor has overwritten it. This lets
+// metadata filtering reject stale descriptors while preserving a strict result
+// at joins, indirect jumps, malformed control flow, and unparsed code paths.
+static std::vector<uint8_t> ShaderGetMetadataSgprLiveness(const ShaderCode& code, int start_register, int registers_num)
+{
+	const auto& instructions      = code.GetInstructions();
+	const auto  instruction_count = instructions.Size();
+	if (instruction_count == 0)
+	{
+		return {};
+	}
+
+	const auto descriptor_live_mask = static_cast<uint8_t>((1u << registers_num) - 1u);
+	std::unordered_map<uint32_t, uint32_t> instruction_index;
+	instruction_index.reserve(instruction_count);
+	for (uint32_t index = 0; index < instruction_count; ++index)
+	{
+		if (!instruction_index.emplace(instructions.At(index).pc, index).second)
+		{
+			return std::vector<uint8_t>(instruction_count, descriptor_live_mask);
+		}
+	}
+
+	// An indirect PC can enter any block. Keep the metadata entry strict until
+	// that control flow is represented in the shader IR.
+	if (code.HasAnyOf({ShaderInstructionType::SSetpcB64}))
+	{
+		return std::vector<uint8_t>(instruction_count, descriptor_live_mask);
+	}
+
+	std::vector<uint8_t> live_words(instruction_count, 0);
+	std::vector<uint8_t> reachable(instruction_count, 0);
+	std::vector<uint32_t> work_list;
+	work_list.reserve(instruction_count);
+	live_words[0] = descriptor_live_mask;
+	reachable[0]  = 1;
+	work_list.push_back(0);
+
+	bool unresolved_control_flow = false;
+	auto propagate = [&](uint32_t successor, uint8_t words)
+	{
+		if (successor >= instruction_count)
+		{
+			unresolved_control_flow = true;
+			return;
+		}
+
+		bool changed = false;
+		if (reachable[successor] == 0)
+		{
+			reachable[successor] = 1;
+			changed              = true;
+		}
+		const uint8_t merged_words = static_cast<uint8_t>(live_words[successor] | words);
+		if (merged_words != live_words[successor])
+		{
+			live_words[successor] = merged_words;
+			changed                = true;
+		}
+		if (changed)
+		{
+			work_list.push_back(successor);
+		}
+	};
+
+	while (!work_list.empty() && !unresolved_control_flow)
+	{
+		const uint32_t index = work_list.back();
+		work_list.pop_back();
+
+		const auto& inst = instructions.At(index);
+		uint8_t     out  = live_words[index];
+		ShaderClearSgprRangeLiveness(&out, inst.dst, start_register, registers_num);
+		ShaderClearSgprRangeLiveness(&out, inst.dst2, start_register, registers_num);
+
+		if (ShaderInstructionHasStaticBranchTarget(inst.type))
+		{
+			uint32_t target = 0;
+			if (!ShaderTryGetStaticBranchTarget(instruction_index, inst, &target))
+			{
+				unresolved_control_flow = true;
+				continue;
+			}
+			propagate(target, out);
+			if (ShaderInstructionIsConditionalBranch(inst.type))
+			{
+				propagate(index + 1, out);
+			}
+			continue;
+		}
+		if (inst.type == ShaderInstructionType::SEndpgm)
+		{
+			continue;
+		}
+		if (inst.type == ShaderInstructionType::SSetpcB64)
+		{
+			unresolved_control_flow = true;
+			continue;
+		}
+		propagate(index + 1, out);
+	}
+
+	if (unresolved_control_flow)
+	{
+		return std::vector<uint8_t>(instruction_count, descriptor_live_mask);
+	}
+	for (uint32_t index = 0; index < instruction_count; ++index)
+	{
+		// An instruction not reached by the parsed CFG might still be entered by
+		// unsupported control flow. Do not relax metadata for that case.
+		if (reachable[index] == 0)
+		{
+			live_words[index] = descriptor_live_mask;
+		}
+	}
+	return live_words;
+}
+
+static bool ShaderInstructionReadsImageResource(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::ImageLoad || type == ShaderInstructionType::ImageSample ||
+	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
+	       type == ShaderInstructionType::ImageSampleLzO;
+}
+
+static bool ShaderInstructionWritesImageResource(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::ImageStore || type == ShaderInstructionType::ImageStoreMip;
+}
+
 ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int start_register)
 {
+	constexpr int     descriptor_registers = 4;
+	constexpr uint8_t descriptor_live_mask = (1u << descriptor_registers) - 1u;
+	const auto         live_descriptor_words = ShaderGetMetadataSgprLiveness(code, start_register, descriptor_registers);
+
 	bool raw                     = false;
 	bool typed                   = false;
 	bool decoded_unknown         = false;
 	bool indirect_descriptor_use = false;
+	bool guarded_raw_vmem = false;
+	bool raw_smem_use     = false;
+	bool raw_tbuffer_use  = false;
 
-	for (const auto& inst: code.GetInstructions())
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
 	{
-		decoded_unknown = decoded_unknown || inst.type == ShaderInstructionType::Unknown;
+		const auto& inst = code.GetInstructions().At(index);
+		const uint8_t live_words = live_descriptor_words[index];
 
-		bool candidate_raw   = false;
-		bool candidate_typed = false;
+		decoded_unknown = decoded_unknown || inst.type == ShaderInstructionType::Unknown;
+		auto reads_live_descriptor = [&](const ShaderOperand& operand)
+		{
+			return (ShaderOperandSgprRangeMask(operand, start_register, descriptor_registers) & live_words) != 0;
+		};
+
+		bool candidate_raw         = false;
+		bool candidate_typed       = false;
+		bool candidate_raw_vmem    = false;
+		bool candidate_raw_smem    = false;
+		bool candidate_raw_tbuffer = false;
 		switch (inst.type)
 		{
 			case ShaderInstructionType::BufferLoadUbyte:
@@ -1944,17 +2202,26 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 			case ShaderInstructionType::BufferStoreDwordx2:
 			case ShaderInstructionType::BufferStoreDwordx3:
 			case ShaderInstructionType::BufferStoreDwordx4:
+				candidate_raw      = true;
+				candidate_raw_vmem = true;
+				break;
 			case ShaderInstructionType::SBufferLoadDword:
 			case ShaderInstructionType::SBufferLoadDwordx2:
 			case ShaderInstructionType::SBufferLoadDwordx4:
 			case ShaderInstructionType::SBufferLoadDwordx8:
 			case ShaderInstructionType::SBufferLoadDwordx16:
+				candidate_raw      = true;
+				candidate_raw_smem = true;
+				break;
 			// MTBUF/TBUFFER encodes its typed data/number format in the
 			// instruction. Its resource descriptor contributes address, stride and
 			// bounds only, so descriptor validation follows the raw-buffer contract.
 			case ShaderInstructionType::TBufferLoadFormatX:
 			case ShaderInstructionType::TBufferLoadFormatXy:
-			case ShaderInstructionType::TBufferLoadFormatXyzw: candidate_raw = true; break;
+			case ShaderInstructionType::TBufferLoadFormatXyzw:
+				candidate_raw         = true;
+				candidate_raw_tbuffer = true;
+				break;
 			case ShaderInstructionType::BufferLoadFormatX:
 			case ShaderInstructionType::BufferLoadFormatXy:
 			case ShaderInstructionType::BufferLoadFormatXyz:
@@ -1966,51 +2233,59 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 		}
 		if (!candidate_raw && !candidate_typed)
 		{
+			const bool exact_image_resource = (ShaderInstructionReadsImageResource(inst.type) ||
+			                                   ShaderInstructionWritesImageResource(inst.type)) &&
+			                                  inst.src_num >= 2 && inst.src[1].type == ShaderOperandType::Sgpr &&
+			                                  inst.src[1].register_id == start_register && inst.src[1].size == 8;
 			for (int operand = 0; operand < inst.src_num; ++operand)
 			{
-				indirect_descriptor_use = indirect_descriptor_use || ShaderOperandOverlapsSgprRange(inst.src[operand], start_register, 4);
+				if (exact_image_resource && operand == 1)
+				{
+					continue;
+				}
+				indirect_descriptor_use = indirect_descriptor_use || reads_live_descriptor(inst.src[operand]);
 			}
 			for (int operand = 0; operand < inst.mimg_address_num; ++operand)
 			{
-				indirect_descriptor_use =
-				    indirect_descriptor_use || ShaderOperandOverlapsSgprRange(inst.mimg_address[operand], start_register, 4);
+				indirect_descriptor_use = indirect_descriptor_use || reads_live_descriptor(inst.mimg_address[operand]);
 			}
-			continue;
-		}
-		bool matches = false;
-		for (int operand = 0; operand < inst.src_num; ++operand)
+		} else
 		{
-			const auto& src = inst.src[operand];
-			if (src.type == ShaderOperandType::Sgpr && src.register_id == start_register && src.size == 4)
+			bool matches = false;
+			for (int operand = 0; operand < inst.src_num; ++operand)
 			{
-				matches = true;
-			} else
+				const auto& src = inst.src[operand];
+				if (src.type == ShaderOperandType::Sgpr && src.register_id == start_register && src.size == descriptor_registers &&
+				    live_words == descriptor_live_mask)
+				{
+					matches = true;
+				} else
+				{
+					indirect_descriptor_use = indirect_descriptor_use || reads_live_descriptor(src);
+				}
+			}
+			if (matches)
 			{
-				indirect_descriptor_use = indirect_descriptor_use || ShaderOperandOverlapsSgprRange(src, start_register, 4);
+				raw   = raw || candidate_raw;
+				typed = typed || candidate_typed;
+				guarded_raw_vmem = guarded_raw_vmem || candidate_raw_vmem;
+				raw_smem_use     = raw_smem_use || candidate_raw_smem;
+				raw_tbuffer_use  = raw_tbuffer_use || candidate_raw_tbuffer;
 			}
 		}
-		if (!matches)
-		{
-			continue;
-		}
-		raw   = raw || candidate_raw;
-		typed = typed || candidate_typed;
+
 	}
 
 	if (raw && typed)
 	{
-		return {ShaderStorageAccess::Mixed, decoded_unknown, indirect_descriptor_use};
+		return {ShaderStorageAccess::Mixed, decoded_unknown, indirect_descriptor_use, guarded_raw_vmem, raw_smem_use, raw_tbuffer_use};
 	}
 	if (typed)
 	{
-		return {ShaderStorageAccess::Typed, decoded_unknown, indirect_descriptor_use};
+		return {ShaderStorageAccess::Typed, decoded_unknown, indirect_descriptor_use, guarded_raw_vmem, raw_smem_use, raw_tbuffer_use};
 	}
-	return {raw ? ShaderStorageAccess::Raw : ShaderStorageAccess::Unknown, decoded_unknown, indirect_descriptor_use};
-}
-
-static ShaderStorageAccess ShaderGetDirectStorageAccess(const ShaderCode& code, int start_register)
-{
-	return AnalyzeShaderStorageUse(code, start_register).access;
+	return {raw ? ShaderStorageAccess::Raw : ShaderStorageAccess::Unknown, decoded_unknown, indirect_descriptor_use, guarded_raw_vmem,
+	        raw_smem_use, raw_tbuffer_use};
 }
 
 struct ShaderDirectImageUse
@@ -2025,9 +2300,8 @@ static ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, 
 
 	for (const auto& inst: code.GetInstructions())
 	{
-		const bool read  = inst.type == ShaderInstructionType::ImageLoad || inst.type == ShaderInstructionType::ImageSample ||
-		                   inst.type == ShaderInstructionType::ImageSampleLz || inst.type == ShaderInstructionType::ImageSampleLzO;
-		const bool write = inst.type == ShaderInstructionType::ImageStore || inst.type == ShaderInstructionType::ImageStoreMip;
+		const bool read  = ShaderInstructionReadsImageResource(inst.type);
+		const bool write = ShaderInstructionWritesImageResource(inst.type);
 		if ((!read && !write) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
 		    inst.src[1].register_id != start_register || inst.src[1].size != 8)
 		{
@@ -2297,8 +2571,284 @@ static bool Gen5CodeUnavailableDirectResourceLooksStorage(const HW::UserSgprInfo
 		return false;
 	}
 
-	return ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw) ||
+	// Without instructions there is no evidence that this descriptor is a raw
+	// byte-addressed resource. Keep that discovery path conservative so random
+	// user SGPR data is not bound as a storage buffer.
+	const bool conservative_raw = resource.Stride() != 0 && (resource.Stride() & 0x3u) == 0;
+	return conservative_raw ||
 	       ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Typed);
+}
+
+static bool ShaderInstructionIsScalarBufferLoad(const ShaderInstruction& inst)
+{
+	switch (inst.type)
+	{
+		case ShaderInstructionType::SBufferLoadDword:
+		case ShaderInstructionType::SBufferLoadDwordx2:
+		case ShaderInstructionType::SBufferLoadDwordx4:
+		case ShaderInstructionType::SBufferLoadDwordx8:
+		case ShaderInstructionType::SBufferLoadDwordx16: return true;
+		default: return false;
+	}
+}
+
+static bool ShaderTryGetDwordOffset(const ShaderOperand& operand, int* offset_dw)
+{
+	EXIT_IF(offset_dw == nullptr);
+	if (operand.type != ShaderOperandType::IntegerInlineConstant && operand.type != ShaderOperandType::LiteralConstant)
+	{
+		return false;
+	}
+	if ((operand.constant.u & 3u) != 0u || operand.constant.u > static_cast<uint32_t>(INT_MAX))
+	{
+		return false;
+	}
+	*offset_dw = static_cast<int>(operand.constant.u >> 2u);
+	return true;
+}
+
+static bool ShaderInstructionReadsSgprRange(const ShaderInstruction& inst, int start_register, int registers_num)
+{
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		if (ShaderOperandOverlapsSgprRange(inst.src[source], start_register, registers_num))
+		{
+			return true;
+		}
+	}
+	for (int source = 0; source < inst.mimg_address_num; ++source)
+	{
+		if (ShaderOperandOverlapsSgprRange(inst.mimg_address[source], start_register, registers_num))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ShaderInstructionWritesSgprRange(const ShaderInstruction& inst, int start_register, int registers_num)
+{
+	return ShaderOperandOverlapsSgprRange(inst.dst, start_register, registers_num) ||
+	       ShaderOperandOverlapsSgprRange(inst.dst2, start_register, registers_num);
+}
+
+static bool ShaderStorageResourcesEqual(const ShaderBufferResource& first, const ShaderBufferResource& second)
+{
+	for (int field = 0; field < 4; ++field)
+	{
+		if (first.fields[field] != second.fields[field])
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool ShaderAddDynamicScalarStorageResource(ShaderStorageResources* resources, const ShaderInstruction& sload, int offset_dw,
+                                                   uint32_t last_consumer_pc, const uint32_t* extended_buffer, int* added_resources)
+{
+	EXIT_IF(resources == nullptr || extended_buffer == nullptr || added_resources == nullptr);
+	EXIT_NOT_IMPLEMENTED(sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4);
+	*added_resources = 0;
+
+	for (int mapping = 0; mapping < resources->dynamic_sloads.mappings_num; ++mapping)
+	{
+		if (resources->dynamic_sloads.instruction_pc[mapping] == sload.pc)
+		{
+			return true;
+		}
+	}
+	if (resources->dynamic_sloads.mappings_num >= ShaderDynamicSLoadMappings::MAPPINGS_MAX)
+	{
+		return false;
+	}
+
+	ShaderBufferResource resource {};
+	for (int field = 0; field < 4; ++field)
+	{
+		resource.fields[field] = extended_buffer[offset_dw + field];
+	}
+	// The existing scalar descriptor path owns null-descriptor lowering. This
+	// path materializes only a concrete V# whose S_LOAD result is consumed.
+	if ((resource.fields[0] == 0u && resource.fields[1] == 0u && resource.fields[2] == 0u && resource.fields[3] == 0u) ||
+	    (resource.Base48() == 0u && resource.NumRecords() == 0u))
+	{
+		return false;
+	}
+
+	int storage_index = -1;
+	for (int index = 0; index < resources->buffers_num; ++index)
+	{
+		if (ShaderStorageResourcesEqual(resources->buffers[index], resource))
+		{
+			storage_index = index;
+			break;
+		}
+	}
+	if (storage_index < 0)
+	{
+		if (resources->buffers_num >= ShaderStorageResources::BUFFERS_MAX)
+		{
+			return false;
+		}
+		storage_index                         = resources->buffers_num++;
+		resources->buffers[storage_index]     = resource;
+		resources->usages[storage_index]      = ShaderStorageUsage::ReadOnly;
+		resources->sources[storage_index]     = ShaderStorageBindingSource::DynamicScalarLoad;
+		resources->slots[storage_index]       = offset_dw;
+		resources->start_register[storage_index] = sload.dst.register_id;
+		resources->extended[storage_index]    = false;
+		resources->dynamic_sload[storage_index] = true;
+		*added_resources = 1;
+	}
+
+	const int mapping = resources->dynamic_sloads.mappings_num++;
+	resources->dynamic_sloads.storage_index[mapping]       = storage_index;
+	resources->dynamic_sloads.destination_register[mapping] = sload.dst.register_id;
+	resources->dynamic_sloads.instruction_pc[mapping]      = sload.pc;
+	resources->dynamic_sloads.offset_dw[mapping]           = offset_dw;
+	resources->dynamic_sloads.last_consumer_pc[mapping]    = last_consumer_pc;
+	return true;
+}
+
+// A dynamic scalar descriptor is safe to bind only when the extended-pointer
+// S_LOAD has a constant, declared-table offset and its SGPR result reaches an
+// S_BUFFER_LOAD before control flow or a clobber. The resource remains tied to
+// the S_LOAD PC because the same destination registers can be reused later.
+static int ShaderCollectDynamicScalarStorageResources(const ShaderCode& code, ShaderStorageResources* resources,
+                                                       const ShaderExtendedResources& extended, const uint32_t* extended_buffer,
+                                                       uint16_t eud_size_dw)
+{
+	if (!extended.used || extended_buffer == nullptr)
+	{
+		return 0;
+	}
+
+	int added = 0;
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		const auto& sload = code.GetInstructions().At(index);
+		if (sload.type != ShaderInstructionType::SLoadDwordx4 || sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4 ||
+		    sload.src_num < 2 || sload.src[0].type != ShaderOperandType::Sgpr || sload.src[0].register_id != extended.start_register ||
+		    sload.src[0].size != 2)
+		{
+			continue;
+		}
+
+		int offset_dw = 0;
+		if (!ShaderTryGetDwordOffset(sload.src[1], &offset_dw) || offset_dw < 0 || offset_dw + 4 > static_cast<int>(eud_size_dw))
+		{
+			continue;
+		}
+
+		bool     has_consumer    = false;
+		uint32_t last_consumer_pc = 0;
+		for (uint32_t next_index = index + 1; next_index < code.GetInstructions().Size(); ++next_index)
+		{
+			const auto& next = code.GetInstructions().At(next_index);
+			if (next.type == ShaderInstructionType::Unknown || next.type == ShaderInstructionType::SEndpgm ||
+			    next.type == ShaderInstructionType::SSetpcB64 || ShaderInstructionHasStaticBranchTarget(next.type))
+			{
+				break;
+			}
+
+			const bool direct_scalar_consumer =
+				ShaderInstructionIsScalarBufferLoad(next) && next.src_num > 0 && next.src[0].type == ShaderOperandType::Sgpr &&
+				next.src[0].register_id == sload.dst.register_id && next.src[0].size == 4;
+			if (direct_scalar_consumer)
+			{
+				bool reads_other_descriptor_word = false;
+				for (int source = 1; source < next.src_num; ++source)
+				{
+					reads_other_descriptor_word = reads_other_descriptor_word ||
+					                                 ShaderOperandOverlapsSgprRange(next.src[source], sload.dst.register_id, 4);
+				}
+				if (reads_other_descriptor_word)
+				{
+					break;
+				}
+				has_consumer     = true;
+				last_consumer_pc = next.pc;
+			}
+			else if (!has_consumer && ShaderInstructionReadsSgprRange(next, sload.dst.register_id, 4))
+			{
+				break;
+			}
+
+			if (ShaderInstructionWritesSgprRange(next, sload.dst.register_id, 4))
+			{
+				break;
+			}
+		}
+
+		int added_resources = 0;
+		if (has_consumer &&
+		    ShaderAddDynamicScalarStorageResource(resources, sload, offset_dw, last_consumer_pc, extended_buffer, &added_resources))
+		{
+			added += added_resources;
+		}
+	}
+	return added;
+}
+
+static bool ShaderIsDynamicScalarStorageConsumer(const ShaderStorageResources& resources, const ShaderInstruction& inst)
+{
+	if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr ||
+	    inst.src[0].size != 4)
+	{
+		return false;
+	}
+	for (int mapping = 0; mapping < resources.dynamic_sloads.mappings_num; ++mapping)
+	{
+		if (resources.dynamic_sloads.destination_register[mapping] == inst.src[0].register_id &&
+		    inst.pc > resources.dynamic_sloads.instruction_pc[mapping] &&
+		    inst.pc <= resources.dynamic_sloads.last_consumer_pc[mapping])
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ShaderStorageResourceHasDynamicSLoad(const ShaderStorageResources& resources, int storage_index)
+{
+	for (int mapping = 0; mapping < resources.dynamic_sloads.mappings_num; ++mapping)
+	{
+		if (resources.dynamic_sloads.storage_index[mapping] == storage_index)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// Metadata-only V# entries are not physical resources. Pruning those before
+// dynamic discovery preserves the fixed descriptor-table budget for proven
+// S_LOAD consumers without relaxing any unknown or indirect descriptor use.
+static void ShaderPruneUnusedMetadataStorage(const ShaderCode& code, ShaderStorageResources* resources, int user_sgpr_num,
+                                              int user_data_register_base)
+{
+	EXIT_IF(resources == nullptr);
+	for (int index = 0; index < resources->buffers_num; ++index)
+	{
+		if (resources->sources[index] != ShaderStorageBindingSource::MetadataSharp)
+		{
+			continue;
+		}
+		const int binding_register = resources->extended[index]
+		                                 ? ShaderGen5EudOffsetBase(user_sgpr_num) + (resources->start_register[index] - 16)
+		                                 : resources->start_register[index];
+		const auto exact = AnalyzeShaderStorageUse(code, binding_register + user_data_register_base);
+		ShaderStorageUseEvidence unbased {};
+		if (user_data_register_base != 0)
+		{
+			unbased = AnalyzeShaderStorageUse(code, binding_register);
+		}
+		resources->accesses[index] = ResolveShaderStorageAccessEvidence(true, resources->sources[index], exact.access, unbased.access,
+		                                                                 exact.decoded_unknown, exact.indirect_descriptor_use)
+		                                 .access;
+	}
+	ExcludeUnusedMetadataStorage(resources);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -2622,6 +3172,13 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		}
 	}
 
+	if (code != nullptr && has_eud_ptr && extended_buffer != nullptr)
+	{
+		ShaderPruneUnusedMetadataStorage(*code, &bind->storage_buffers, user_sgpr_num, user_data_register_base);
+		info->storage_buffers_readonly += ShaderCollectDynamicScalarStorageResources(
+		    *code, &bind->storage_buffers, bind->extended, extended_buffer, user_data->eud_size_dw);
+	}
+
 	// Gen5 metadata is advisory: some shaders address an S# descriptor directly
 	// from the EUD/user-SGPR namespace without listing it in the sharp table.
 	// Reconcile decoded scalar-buffer accesses with the binding set, preserving
@@ -2630,11 +3187,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	{
 		for (const auto& inst: code->GetInstructions())
 		{
-			const bool scalar_buffer_load =
-			    inst.type == ShaderInstructionType::SBufferLoadDword || inst.type == ShaderInstructionType::SBufferLoadDwordx2 ||
-			    inst.type == ShaderInstructionType::SBufferLoadDwordx4 || inst.type == ShaderInstructionType::SBufferLoadDwordx8 ||
-			    inst.type == ShaderInstructionType::SBufferLoadDwordx16;
-			if (!scalar_buffer_load || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].size != 4)
+			if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr ||
+			    inst.src[0].size != 4 || ShaderIsDynamicScalarStorageConsumer(bind->storage_buffers, inst))
 			{
 				continue;
 			}
@@ -2667,8 +3221,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				info->storage_buffers_readonly++;
 			} else
 			{
-				EXIT_NOT_IMPLEMENTED(bind->null_storage_buffers.buffers_num >= ShaderNullStorageResources::BUFFERS_MAX);
-				bind->null_storage_buffers.start_register[bind->null_storage_buffers.buffers_num++] = inst.src[0].register_id;
+				AddZeroSBufferResource(&bind->zero_sbuffer_resources, inst.src[0].register_id);
 			}
 		}
 	}
@@ -2684,18 +3237,35 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 
 	for (int i = 0; i < bind->storage_buffers.buffers_num; ++i)
 	{
-		const int  binding_register   = bind->storage_buffers.extended[i]
-		                                    ? ShaderGen5EudOffsetBase(user_sgpr_num) + (bind->storage_buffers.start_register[i] - 16)
-		                                    : bind->storage_buffers.start_register[i];
-		const int  register_with_base = binding_register + user_data_register_base;
-		const auto exact_evidence     = code != nullptr ? AnalyzeShaderStorageUse(*code, register_with_base) : ShaderStorageUseEvidence {};
-		const auto exact              = exact_evidence.access;
-		ShaderStorageAccess unbased   = ShaderStorageAccess::Unknown;
-		if (code != nullptr && user_data_register_base != 0)
+		const bool local_dynamic_sload = bind->storage_buffers.dynamic_sload[i];
+		const bool has_dynamic_sload = ShaderStorageResourceHasDynamicSLoad(bind->storage_buffers, i);
+		const int  binding_register = bind->storage_buffers.extended[i]
+		                                  ? ShaderGen5EudOffsetBase(user_sgpr_num) + (bind->storage_buffers.start_register[i] - 16)
+		                                  : bind->storage_buffers.start_register[i];
+		const int  register_with_base = local_dynamic_sload ? binding_register : binding_register + user_data_register_base;
+		auto exact_evidence = code != nullptr ? AnalyzeShaderStorageUse(*code, register_with_base) : ShaderStorageUseEvidence {};
+		if (has_dynamic_sload)
 		{
-			unbased = ShaderGetDirectStorageAccess(*code, bind->storage_buffers.start_register[i]);
+			// Each mapping is proven to reach an S_BUFFER_LOAD before a clobber.
+			// Merge that local raw-use proof with any independent static use of the
+			// same physical descriptor instead of assigning a synthetic entry state.
+			if (exact_evidence.access == ShaderStorageAccess::Unknown)
+			{
+				exact_evidence.access = ShaderStorageAccess::Raw;
+			} else if (exact_evidence.access == ShaderStorageAccess::Typed)
+			{
+				exact_evidence.access = ShaderStorageAccess::Mixed;
+			}
+			exact_evidence.raw_smem_use = true;
 		}
-		const auto evidence = ResolveShaderStorageAccessEvidence(code != nullptr, bind->storage_buffers.sources[i], exact, unbased,
+		const auto exact = exact_evidence.access;
+		ShaderStorageUseEvidence unbased_evidence {};
+		if (!local_dynamic_sload && code != nullptr && user_data_register_base != 0)
+		{
+			unbased_evidence = AnalyzeShaderStorageUse(*code, bind->storage_buffers.start_register[i]);
+		}
+		const auto evidence = ResolveShaderStorageAccessEvidence(code != nullptr, bind->storage_buffers.sources[i], exact,
+		                                                         unbased_evidence.access,
 		                                                         exact_evidence.decoded_unknown, exact_evidence.indirect_descriptor_use);
 		bind->storage_buffers.accesses[i]                = evidence.access;
 		bind->storage_buffers.unknown_reasons[i]         = evidence.reason;
@@ -2704,6 +3274,30 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		bind->storage_buffers.unbased_matches[i]         = evidence.unbased_match;
 		bind->storage_buffers.decoded_unknown[i]         = exact_evidence.decoded_unknown;
 		bind->storage_buffers.indirect_descriptor_use[i] = exact_evidence.indirect_descriptor_use;
+		const auto& matched_evidence = evidence.exact_match ? exact_evidence : unbased_evidence;
+		bind->storage_buffers.raw_vmem_oob_guarded[i] = matched_evidence.raw_vmem_oob_guarded;
+		bind->storage_buffers.raw_smem_use[i]         = matched_evidence.raw_smem_use;
+		bind->storage_buffers.raw_tbuffer_use[i]      = matched_evidence.raw_tbuffer_use;
+
+		if (evidence.access == ShaderStorageAccess::Raw && matched_evidence.raw_smem_use &&
+		    ShaderGen5SBufferDescriptorAlwaysOutOfBounds(bind->storage_buffers.buffers[i]))
+		{
+			if (has_dynamic_sload)
+			{
+				for (int mapping = 0; mapping < bind->storage_buffers.dynamic_sloads.mappings_num; ++mapping)
+				{
+					if (bind->storage_buffers.dynamic_sloads.storage_index[mapping] == i)
+					{
+						AddZeroSBufferResource(&bind->zero_sbuffer_resources,
+						                       bind->storage_buffers.dynamic_sloads.destination_register[mapping]);
+					}
+				}
+			} else
+			{
+				const int shader_start_register = evidence.exact_match ? register_with_base : binding_register;
+				AddZeroSBufferResource(&bind->zero_sbuffer_resources, shader_start_register);
+			}
+		}
 	}
 	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
 }
@@ -3109,7 +3703,16 @@ static void ShaderDbgDumpResources(const ShaderBindResources& bind)
 		printf("\t\t slot             = %d\n", bind.storage_buffers.slots[i]);
 		printf("\t\t start_register   = %d\n", bind.storage_buffers.start_register[i]);
 		printf("\t\t extended         = %s\n", (bind.storage_buffers.extended[i] ? "true" : "false"));
+		printf("\t\t dynamic_sload    = %s\n", (bind.storage_buffers.dynamic_sload[i] ? "true" : "false"));
 		printf("\t\t usage            = %s\n", Core::EnumName8(bind.storage_buffers.usages[i]).c_str());
+	}
+	for (int mapping = 0; mapping < bind.storage_buffers.dynamic_sloads.mappings_num; ++mapping)
+	{
+		printf("\t DynamicSLoad %d: storage=%d dst=%d pc=%08" PRIx32 " offset_dw=%d last_consumer=%08" PRIx32 "\n", mapping,
+		       bind.storage_buffers.dynamic_sloads.storage_index[mapping],
+		       bind.storage_buffers.dynamic_sloads.destination_register[mapping],
+		       bind.storage_buffers.dynamic_sloads.instruction_pc[mapping], bind.storage_buffers.dynamic_sloads.offset_dw[mapping],
+		       bind.storage_buffers.dynamic_sloads.last_consumer_pc[mapping]);
 	}
 
 	for (int i = 0; i < bind.textures2D.textures_num; i++)
@@ -3592,12 +4195,6 @@ Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInp
 		source = SpirvGetEmbeddedVs(code.GetVsEmbeddedId());
 	} else
 	{
-		for (int i = 0; i < input_info->bind.storage_buffers.buffers_num; i++)
-		{
-			const auto& r = input_info->bind.storage_buffers.buffers[i];
-			EXIT_NOT_IMPLEMENTED(((r.Stride() * r.NumRecords()) & 0x3u) != 0);
-		}
-
 		log.DumpOriginalShader(code);
 
 		{
@@ -3705,12 +4302,6 @@ Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInpu
 		//			EXIT_NOT_IMPLEMENTED(input_info->interpolator_settings[i] != i);
 		//		}
 
-		for (int i = 0; i < input_info->bind.storage_buffers.buffers_num; i++)
-		{
-			const auto& r = input_info->bind.storage_buffers.buffers[i];
-			EXIT_NOT_IMPLEMENTED(((r.Stride() * r.NumRecords()) & 0x3u) != 0);
-		}
-
 		log.DumpOriginalShader(code);
 
 		{
@@ -3800,12 +4391,6 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 	KYTY_PROFILER_FUNCTION(profiler::colors::CyanA700);
 
 	ShaderLogHelper log("cs");
-
-	for (int i = 0; i < input_info->bind.storage_buffers.buffers_num; i++)
-	{
-		const auto& r = input_info->bind.storage_buffers.buffers[i];
-		EXIT_NOT_IMPLEMENTED(((r.Stride() * r.NumRecords()) & 0x3u) != 0);
-	}
 
 	Vector<uint32_t> ret;
 
@@ -3960,12 +4545,23 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(bind.storage_buffers.start_register[i]);
 		ret->ids.Add(static_cast<uint32_t>(bind.storage_buffers.extended[i]));
 		ret->ids.Add(static_cast<uint32_t>(bind.storage_buffers.usages[i]));
+		ret->ids.Add(static_cast<uint32_t>(bind.storage_buffers.dynamic_sload[i]));
 	}
 
-	ret->ids.Add(bind.null_storage_buffers.buffers_num);
-	for (int i = 0; i < bind.null_storage_buffers.buffers_num; ++i)
+	ret->ids.Add(bind.storage_buffers.dynamic_sloads.mappings_num);
+	for (int mapping = 0; mapping < bind.storage_buffers.dynamic_sloads.mappings_num; ++mapping)
 	{
-		ret->ids.Add(bind.null_storage_buffers.start_register[i]);
+		ret->ids.Add(bind.storage_buffers.dynamic_sloads.storage_index[mapping]);
+		ret->ids.Add(bind.storage_buffers.dynamic_sloads.destination_register[mapping]);
+		ret->ids.Add(bind.storage_buffers.dynamic_sloads.instruction_pc[mapping]);
+		ret->ids.Add(static_cast<uint32_t>(bind.storage_buffers.dynamic_sloads.offset_dw[mapping]));
+		ret->ids.Add(bind.storage_buffers.dynamic_sloads.last_consumer_pc[mapping]);
+	}
+
+	ret->ids.Add(bind.zero_sbuffer_resources.buffers_num);
+	for (int i = 0; i < bind.zero_sbuffer_resources.buffers_num; ++i)
+	{
+		ret->ids.Add(bind.zero_sbuffer_resources.start_register[i]);
 	}
 
 	ret->ids.Add(bind.textures2D.textures_num);

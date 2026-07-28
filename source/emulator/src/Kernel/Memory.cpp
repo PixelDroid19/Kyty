@@ -1856,6 +1856,48 @@ int KYTY_SYSV_ABI KernelQueryMemoryProtection(void* addr, void** start, void** e
 	return OK;
 }
 
+bool KernelQueryMappedRange(uint64_t vaddr, uint64_t size, KernelMappedRange* out)
+{
+	if (out == nullptr || vaddr == 0 || size == 0 || vaddr > UINT64_MAX - (size - 1u) || g_physical_memory == nullptr ||
+	    g_flexible_memory == nullptr)
+	{
+		return false;
+	}
+
+	*out = {};
+	uint64_t            base = 0;
+	size_t              mapped_size = 0;
+	int                 protection = 0;
+	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+	if (g_physical_memory->Find(vaddr, &base, &mapped_size, &protection, nullptr, &gpu_mode))
+	{
+		if (vaddr - base > mapped_size || size > mapped_size - (vaddr - base))
+		{
+			return false;
+		}
+		out->kind       = KernelMappedRangeKind::Physical;
+		out->base       = base;
+		out->size       = mapped_size;
+		out->protection = protection;
+		out->gpu_mode   = gpu_mode;
+		return true;
+	}
+	if (g_flexible_memory->Find(vaddr, &base, &mapped_size, &protection, nullptr, &gpu_mode))
+	{
+		if (vaddr - base > mapped_size || size > mapped_size - (vaddr - base))
+		{
+			return false;
+		}
+		out->kind       = KernelMappedRangeKind::Flexible;
+		out->base       = base;
+		out->size       = mapped_size;
+		out->protection = protection;
+		out->gpu_mode   = gpu_mode;
+		return true;
+	}
+	return false;
+}
+
 int KYTY_SYSV_ABI KernelAvailableDirectMemorySize(int64_t arg0, int64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4)
 {
 	PRINT_NAME();

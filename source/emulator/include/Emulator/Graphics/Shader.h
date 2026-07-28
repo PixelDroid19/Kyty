@@ -951,6 +951,7 @@ enum class ShaderStorageBindingSource
 {
 	DirectResource,
 	MetadataSharp,
+	DynamicScalarLoad,
 };
 
 enum class ShaderStorageUnknownReason
@@ -973,9 +974,27 @@ struct ShaderStorageAccessEvidence
 
 struct ShaderStorageUseEvidence
 {
-	ShaderStorageAccess access                  = ShaderStorageAccess::Unknown;
-	bool                decoded_unknown         = false;
-	bool                indirect_descriptor_use = false;
+	ShaderStorageAccess access                      = ShaderStorageAccess::Unknown;
+	bool                decoded_unknown             = false;
+	bool                indirect_descriptor_use     = false;
+	bool                raw_vmem_oob_guarded        = false;
+	bool                raw_smem_use                = false;
+	bool                raw_tbuffer_use             = false;
+};
+
+// Dynamic S_LOAD descriptors are mappings to physical storage bindings, not
+// bindings themselves. A shader can load the same descriptor into several
+// temporary SGPR ranges, and each load must retain its own instruction PC.
+struct ShaderDynamicSLoadMappings
+{
+	static constexpr int MAPPINGS_MAX = 64;
+
+	int      storage_index[MAPPINGS_MAX]       = {};
+	int      destination_register[MAPPINGS_MAX] = {};
+	uint32_t instruction_pc[MAPPINGS_MAX]      = {};
+	int      offset_dw[MAPPINGS_MAX]           = {};
+	uint32_t last_consumer_pc[MAPPINGS_MAX]    = {};
+	int      mappings_num                      = 0;
 };
 
 enum class ShaderTextureUsage
@@ -999,14 +1018,26 @@ struct ShaderStorageResources
 	bool                       unbased_matches[BUFFERS_MAX]         = {};
 	bool                       decoded_unknown[BUFFERS_MAX]         = {};
 	bool                       indirect_descriptor_use[BUFFERS_MAX] = {};
+	// Every raw MUBUF consumer represented here is lowered with the explicit
+	// zero-record OOB guard before it can issue a storage-buffer access.
+	bool                       raw_vmem_oob_guarded[BUFFERS_MAX]        = {};
+	bool                       raw_smem_use[BUFFERS_MAX]                = {};
+	bool                       raw_tbuffer_use[BUFFERS_MAX]             = {};
+	// True only when this physical binding exists solely for a dynamic S_LOAD
+	// result and must therefore not be initialized at shader entry.
+	bool                       dynamic_sload[BUFFERS_MAX]                = {};
 	int                        slots[BUFFERS_MAX]                   = {0};
 	int                        start_register[BUFFERS_MAX]          = {0};
 	bool                       extended[BUFFERS_MAX]                = {};
+	ShaderDynamicSLoadMappings dynamic_sloads;
 	int                        buffers_num                          = 0;
 	int                        binding_index                        = 0;
 };
 
-struct ShaderNullStorageResources
+// Scalar descriptors with no readable dwords are lowered directly to zero.
+// The list is part of the shader specialization key, so a later nonempty
+// descriptor cannot reuse that lowering.
+struct ShaderZeroSBufferResources
 {
 	static constexpr int BUFFERS_MAX = 16;
 
@@ -1021,6 +1052,13 @@ struct ShaderNullStorageResources
 
 [[nodiscard]] bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access);
 [[nodiscard]] bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource);
+// A zero-record raw descriptor is architecturally empty. Such a descriptor
+// must not cause the host to materialize guest memory; every raw transfer is
+// out of bounds.
+[[nodiscard]] bool ShaderGen5RawDescriptorAlwaysOutOfBounds(const ShaderBufferResource& resource);
+// Scalar-buffer bounds use stride and NumRecords directly. A zero record count
+// leaves no scalar dword in range, regardless of OOB_SELECT.
+[[nodiscard]] bool ShaderGen5SBufferDescriptorAlwaysOutOfBounds(const ShaderBufferResource& resource);
 [[nodiscard]] bool ShaderStorageDescriptorSwizzleAllowed(bool gen5, const ShaderBufferResource& resource);
 // GFX10 buffer byte-address calculation. offset is the MUBUF immediate plus
 // VADDR offset; scalar_offset is S_OFFSET and is added after descriptor
@@ -1116,7 +1154,7 @@ struct ShaderBindResources
 	bool                       vsharp_uniform_buffer = false;
 	int                        vsharp_binding_index  = -1;
 	ShaderStorageResources     storage_buffers;
-	ShaderNullStorageResources null_storage_buffers;
+	ShaderZeroSBufferResources zero_sbuffer_resources;
 	ShaderTextureResources     textures2D;
 	ShaderSamplerResources     samplers;
 	ShaderGdsResources         gds_pointers;
