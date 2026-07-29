@@ -310,6 +310,62 @@ static uint64_t WindowSteadyMs()
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count());
 }
 
+static bool DumpVideoOutFrameSelected(int frame)
+{
+	const char* spec = std::getenv("KYTY_DUMP_VIDEOOUT_FRAMES");
+	if (spec == nullptr || spec[0] == '\0')
+	{
+		return frame > 0 && (frame % 200) == 0;
+	}
+
+	const char* cursor = spec;
+	while (*cursor != '\0')
+	{
+		char*      end   = nullptr;
+		const long start = std::strtol(cursor, &end, 10);
+		if (end == cursor)
+		{
+			return false;
+		}
+
+		long finish = start;
+		long step   = 1;
+		if (*end == '-')
+		{
+			cursor            = end + 1;
+			const long parsed = std::strtol(cursor, &end, 10);
+			if (end == cursor)
+			{
+				return false;
+			}
+			finish = parsed;
+			if (*end == ':')
+			{
+				cursor      = end + 1;
+				const long interval = std::strtol(cursor, &end, 10);
+				if (end == cursor || interval <= 0)
+				{
+					return false;
+				}
+				step = interval;
+			}
+		}
+
+		if (start <= finish && frame >= start && frame <= finish && ((frame - start) % step) == 0)
+		{
+			return true;
+		}
+
+		if (*end != ',')
+		{
+			return false;
+		}
+		cursor = end + 1;
+	}
+
+	return false;
+}
+
 constexpr uint64_t HOST_CURSOR_HIDE_DELAY_MS = 2000;
 
 static void SetHostCursorVisible(bool visible)
@@ -3278,12 +3334,14 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	EXIT_IF(blt_src_image == nullptr);
 	EXIT_IF(blt_dst_image == nullptr);
 
-	// Opt-in VideoOut dump: KYTY_DUMP_VIDEOOUT=1 writes present sources at key frames.
+	// Opt-in VideoOut dump: KYTY_DUMP_VIDEOOUT=1 writes present sources at a
+	// bounded cadence. KYTY_DUMP_VIDEOOUT_FRAMES accepts comma-separated frames
+	// and inclusive ranges with an optional step, e.g. 200,240-360:20.
 	// Dedup by frame (same Vulkan image is reused across presents).
 	if (NativeCaptureEnvEnabled("KYTY_DUMP_VIDEOOUT") && g_window_ctx->game != nullptr)
 	{
 		const int frame = g_window_ctx->game->m_frame_num;
-		if (frame == 32 || frame == 200 || frame == 400 || frame == 480 || frame == 507 || frame == 540 || frame == 560)
+		if (DumpVideoOutFrameSelected(frame))
 		{
 			char prefix[128];
 			std::snprintf(prefix, sizeof(prefix), "/tmp/kyty-dump-videoout-f%d", frame);

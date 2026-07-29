@@ -7248,6 +7248,7 @@ static void MaybeDumpIndexDrawSkip(const char* reason, uint32_t index_count, uin
 }
 
 static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDepthInfo& depth, const HW::Context& hw,
+                                    const HW::Shader& sh,
                                     const ShaderVertexInputInfo& vs_input, const ShaderPixelInputInfo& ps_input, uint32_t index_count,
                                     uint32_t index_type_and_size, uint64_t draw_modifier, uint32_t packet_type,
                                     uint32_t primitive_type)
@@ -7301,18 +7302,22 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 	const auto& rt0 = hw.GetRenderTarget(0).info;
 	const auto& cc  = hw.GetColorControl();
 	const auto& bc  = hw.GetBlendControl(0);
+	const auto& vs  = sh.GetVs();
+	const auto& ps  = sh.GetPs();
 	char        tex_buf[512] {};
 	FormatTextureList(ps_input.bind.textures2D, tex_buf, sizeof(tex_buf));
 	std::fprintf(stderr,
 	             "KYTY_DUMP_DRAW_READY_INDEX count=%u modifier=0x%016" PRIx64 " packet_type=%u prim=%u index_type=%u targets=%u active=0x%02" PRIx32
 	             " rt=0x%012" PRIx64 ":%ux%u:s%u:f%u depth=%u:%ux%u target_mask=0x%08" PRIx32
 	             " shader_mask=0x%08" PRIx32 " color_mode=%u rop3=0x%02x blend=%u:%u:%u:%u:%u:%u:%u"
+	             " vs_addr=0x%012" PRIx64 " vs_id=0x%016" PRIx64 " ps_addr=0x%012" PRIx64 " ps_id=0x%016" PRIx64
 	             " cbfmt=0x%x cbtype=0x%x cborder=0x%x vs_bufs=%d ps_tex=%d tex=[%s] ps_buf=%d"
 	             " vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d\n",
 	             index_count, draw_modifier, packet_type, primitive_type, index_type_and_size, color.targets_num, active_slots, first_addr, first_width,
 	             first_height, first_samples, first_format, static_cast<uint32_t>(depth.format), depth.width, depth.height,
 	             hw.GetRenderTargetMask(), hw.GetShaderRegisters().m_cbShaderMask, cc.mode, cc.op, bc.enable ? 1u : 0u, bc.color_srcblend, bc.color_comb_fcn,
-	             bc.color_destblend, bc.alpha_srcblend, bc.alpha_comb_fcn, bc.alpha_destblend, rt0.format, rt0.channel_type, rt0.channel_order,
+	             bc.color_destblend, bc.alpha_srcblend, bc.alpha_comb_fcn, bc.alpha_destblend, vs.vs_regs.data_addr, vs.gs_regs.chksum,
+	             ps.ps_regs.data_addr, ps.ps_regs.chksum, rt0.format, rt0.channel_type, rt0.channel_order,
 	             vs_input.buffers_num, ps_input.bind.textures2D.textures_num, tex_buf,
 	             ps_input.bind.storage_buffers.buffers_num, xy.x, xy.y, xy.width, xy.height, sc.left, sc.top, sc.right, sc.bottom);
 }
@@ -7499,7 +7504,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
-	MaybeDumpIndexDrawReady(color_info, depth_info, *ctx, vs_input_info, ps_input_info, index_count, index_type_and_size,
+	MaybeDumpIndexDrawReady(color_info, depth_info, *ctx, *sh_ctx, vs_input_info, ps_input_info, index_count, index_type_and_size,
 	                        draw_modifier, type, ucfg->GetPrimType());
 	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, index_type_and_size, true,
 	                static_cast<uint32_t>(draw_modifier));

@@ -28,6 +28,7 @@
 #include <atomic>
 #include <climits>
 #include <cinttypes>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -43,6 +44,8 @@ KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>
 namespace Kyty::Libs::Graphics {
 
 static RenderResolutionShaderUsageCache g_shader_resolution_usage_cache(512);
+
+static void ShaderProbeWrite(const char* stage, const ShaderCode& code, const String8* source, const Vector<uint32_t>* binary);
 
 static void RecordShaderInputAnalysis(uint64_t elapsed_ns)
 {
@@ -3638,10 +3641,13 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		    {
 			    auto code = std::make_shared<ShaderCode>();
 			    code->SetType(ShaderType::Pixel);
+			    code->SetHash0((regs->ps_regs.chksum >> 32u) & 0xffffffffu);
+			    code->SetCrc32(regs->ps_regs.chksum & 0xffffffffu);
 			    {
 				    DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
 				    ShaderParse(reinterpret_cast<const uint32_t*>(regs->ps_regs.data_addr), code.get());
 			    }
+			    ShaderProbeWrite("ps", *code, nullptr, nullptr);
 			    return RenderResolutionShaderAnalysis {AnalyzeResolutionShaderUsage(*code), code};
 		    });
 		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
@@ -4171,6 +4177,92 @@ private:
 	String     m_file_name;
 };
 
+static uint64_t ShaderCodeId(const ShaderCode& code)
+{
+	return (static_cast<uint64_t>(code.GetHash0()) << 32u) | static_cast<uint64_t>(code.GetCrc32());
+}
+
+static bool ShaderProbeMatches(const ShaderCode& code)
+{
+	const char* value = std::getenv("KYTY_SHADER_PROBE_ID");
+	if (value == nullptr || value[0] == '\0')
+	{
+		return false;
+	}
+
+	char*      end    = nullptr;
+	const auto parsed = std::strtoull(value, &end, 16);
+	if (end == value || *end != '\0')
+	{
+		std::fprintf(stderr, "WARNING: invalid KYTY_SHADER_PROBE_ID value: %s\n", value);
+		return false;
+	}
+
+	return parsed == ShaderCodeId(code) || parsed == code.GetCrc32();
+}
+
+static String ShaderProbeFolder()
+{
+	const char* value = std::getenv("KYTY_SHADER_PROBE_FOLDER");
+	if (value != nullptr && value[0] != '\0')
+	{
+		return String::FromUtf8(value);
+	}
+	return Config::GetShaderLogFolder();
+}
+
+static void ShaderProbeWrite(const char* stage, const ShaderCode& code, const String8* source, const Vector<uint32_t>* binary)
+{
+	if (!ShaderProbeMatches(code))
+	{
+		return;
+	}
+
+	const auto file_name = ShaderProbeFolder().FixDirectorySlash() +
+	                       String::FromPrintf("shader_probe_%s_%08" PRIx32 "_%08" PRIx32 ".log", stage, code.GetHash0(),
+	                                          code.GetCrc32());
+
+	Core::File::CreateDirectories(file_name.DirectoryWithoutFilename());
+
+	Core::File file;
+	file.Create(file_name);
+	if (file.IsInvalid())
+	{
+		std::fprintf(stderr, "WARNING: shader probe could not create %s\n", file_name.C_Str());
+		return;
+	}
+
+	file.Printf("stage = %s\n", stage);
+	file.Printf("hash0 = %08" PRIx32 "\n", code.GetHash0());
+	file.Printf("crc32 = %08" PRIx32 "\n", code.GetCrc32());
+	file.Printf("id = %016" PRIx64 "\n", ShaderCodeId(code));
+	file.Printf("--------- Original Shader ---------\n");
+	const auto original = code.DbgDump();
+	file.Printf("%s", original.c_str());
+
+	if (source != nullptr)
+	{
+		file.Printf("--------- Recompiled Shader ---------\n");
+		file.Printf("%s\n", source->c_str());
+	}
+
+	if (binary != nullptr && binary->Size() > 0)
+	{
+		String8 text;
+		if (!SpirvDisassemble(binary->GetDataConst(), binary->Size(), &text))
+		{
+			file.Printf("WARNING: SpirvDisassemble failed\n");
+		} else
+		{
+			file.Printf("--------- Optimized Shader ---------\n");
+			file.Printf("%s\n", Log::RemoveColors(String::FromUtf8(text.c_str())).C_Str());
+		}
+	}
+
+	file.Close();
+	std::fprintf(stderr, "KYTY_SHADER_PROBE wrote %s\n", file_name.C_Str());
+}
+
 ShaderCode ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh)
 {
 	KYTY_PROFILER_FUNCTION(profiler::colors::Amber300);
@@ -4270,6 +4362,7 @@ Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInp
 	}
 
 	log.DumpRecompiledShader(source);
+	ShaderProbeWrite("vs", code, &source, nullptr);
 
 	String8 err_msg;
 	bool    spirv_ok = false;
@@ -4281,6 +4374,7 @@ Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInp
 	}
 
 	log.DumpOptimizedShader(ret);
+	ShaderProbeWrite("vs", code, nullptr, &ret);
 
 	return ret;
 }
@@ -4377,6 +4471,7 @@ Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInpu
 	}
 
 	log.DumpRecompiledShader(source);
+	ShaderProbeWrite("ps", code, &source, nullptr);
 
 	String8 err_msg;
 	bool    spirv_ok = false;
@@ -4388,6 +4483,7 @@ Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInpu
 	}
 
 	log.DumpOptimizedShader(ret);
+	ShaderProbeWrite("ps", code, nullptr, &ret);
 
 	return ret;
 }
