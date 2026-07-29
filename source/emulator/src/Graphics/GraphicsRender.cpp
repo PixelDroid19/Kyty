@@ -1525,27 +1525,6 @@ static void eqaa_print(const char* func, const HW::EqaaControl& c)
 	printf("\t static_anchor_associations = %s\n", c.static_anchor_associations ? "true" : "false");
 }
 
-static void eqaa_check(const HW::EqaaControl& c, const HW::AaConfig& cf)
-{
-	if (cf.msaa_num_samples == 0)
-	{
-		EXIT_NOT_IMPLEMENTED(c.max_anchor_samples != 0);
-		EXIT_NOT_IMPLEMENTED(c.ps_iter_samples != 0);
-		EXIT_NOT_IMPLEMENTED(c.mask_export_num_samples != 0);
-		EXIT_NOT_IMPLEMENTED(c.alpha_to_mask_num_samples != 0);
-	} else
-	{
-		EXIT_NOT_IMPLEMENTED(c.max_anchor_samples != cf.msaa_num_samples);
-		EXIT_NOT_IMPLEMENTED(c.ps_iter_samples != cf.msaa_num_samples);
-		EXIT_NOT_IMPLEMENTED(c.mask_export_num_samples != 0);
-		EXIT_NOT_IMPLEMENTED(c.alpha_to_mask_num_samples != cf.msaa_num_samples);
-	}
-	EXIT_NOT_IMPLEMENTED(c.high_quality_intersections != false);
-	EXIT_NOT_IMPLEMENTED(c.incoherent_eqaa_reads != false);
-	EXIT_NOT_IMPLEMENTED(c.interpolate_comp_z != false);
-	// EXIT_NOT_IMPLEMENTED(c.static_anchor_associations != false);
-}
-
 static void aa_print(const char* func, const HW::AaSampleControl& c, const HW::AaConfig& cf)
 {
 	printf("%s\n", func);
@@ -1561,22 +1540,40 @@ static void aa_print(const char* func, const HW::AaSampleControl& c, const HW::A
 	printf("\t msaa_exposed_samples  = %" PRIu8 "\n", cf.msaa_exposed_samples);
 }
 
-static void aa_check(const HW::AaSampleControl& c, const HW::AaConfig& cf)
+// AA/EQAA registers remain programmed across draws. Validate their host mapping
+// only after attachment inspection has established that Vulkan will rasterize
+// with more than one sample; a single-sample pipeline cannot observe them.
+static void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBits attachment_samples)
 {
+	if (attachment_samples == VK_SAMPLE_COUNT_1_BIT)
+	{
+		return;
+	}
+
+	const auto& c         = hw.GetAaSampleControl();
+	const auto& cf        = hw.GetAaConfig();
+	const auto& eqaa      = hw.GetEqaaControl();
+	const auto& scan_mode = hw.GetScanModeControl();
+
+	EXIT_NOT_IMPLEMENTED(!scan_mode.msaa_enable);
+	EXIT_NOT_IMPLEMENTED(cf.msaa_num_samples == 0);
+	EXIT_NOT_IMPLEMENTED(decode_guest_sample_count(cf.msaa_num_samples) != attachment_samples);
+	EXIT_NOT_IMPLEMENTED(cf.msaa_exposed_samples != cf.msaa_num_samples);
+	EXIT_NOT_IMPLEMENTED(cf.aa_mask_centroid_dtmn);
+
+	EXIT_NOT_IMPLEMENTED(eqaa.max_anchor_samples != cf.msaa_num_samples);
+	EXIT_NOT_IMPLEMENTED(eqaa.ps_iter_samples != cf.msaa_num_samples);
+	EXIT_NOT_IMPLEMENTED(eqaa.mask_export_num_samples != 0);
+	EXIT_NOT_IMPLEMENTED(eqaa.alpha_to_mask_num_samples != cf.msaa_num_samples);
+	EXIT_NOT_IMPLEMENTED(eqaa.high_quality_intersections);
+	EXIT_NOT_IMPLEMENTED(eqaa.incoherent_eqaa_reads);
+	EXIT_NOT_IMPLEMENTED(eqaa.interpolate_comp_z);
+
 	EXIT_NOT_IMPLEMENTED(c.centroid_priority != 0);
 	for (uint32_t l: c.locations)
 	{
 		EXIT_NOT_IMPLEMENTED(l != 0);
 	}
-	EXIT_NOT_IMPLEMENTED(cf.aa_mask_centroid_dtmn != false);
-	if (cf.msaa_num_samples == 0)
-	{
-		EXIT_NOT_IMPLEMENTED(cf.max_sample_dist != 0);
-		EXIT_NOT_IMPLEMENTED(cf.msaa_exposed_samples != 0);
-		return;
-	}
-	(void)decode_guest_sample_count(cf.msaa_num_samples);
-	EXIT_NOT_IMPLEMENTED(cf.msaa_exposed_samples != cf.msaa_num_samples);
 }
 
 static void vp_print(const char* func, const HW::ScreenViewport& vp, const HW::ScanModeControl& smc)
@@ -1667,11 +1664,8 @@ static void hw_check(const HW::Context& hw, bool allow_depth_stencil_copy = fals
 	const auto& s    = hw.GetStencilControl();
 	const auto& sm   = hw.GetStencilMask();
 	const auto& mc   = hw.GetModeControl();
-	const auto& eqaa = hw.GetEqaaControl();
 	const auto& cc   = hw.GetColorControl();
 	const auto& smc  = hw.GetScanModeControl();
-	const auto& aa   = hw.GetAaSampleControl();
-	const auto& ac   = hw.GetAaConfig();
 
 	rt_check(rt);
 	vp_check(vp, smc);
@@ -1681,9 +1675,6 @@ static void hw_check(const HW::Context& hw, bool allow_depth_stencil_copy = fals
 	d_check(d, s, sm);
 	mc_check(mc);
 	bc_check(bc, bclr, cc);
-	eqaa_check(eqaa, ac);
-	aa_check(aa, ac);
-
 	// CB_TARGET_MASK may enable multiple MRT slots (captured 0x0000ffff =
 	// RT0..RT3 full RGBA). Pipeline creation still binds a single color
 	// attachment and applies the RT0 nibble as colorWriteMask.
@@ -6899,7 +6890,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
-	(void)resolve_render_attachment_sample_count(color_info, depth_info);
+	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info));
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
 	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
 	{
@@ -7299,6 +7290,7 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	HW::Context     color_context = *ctx;
 	color_context.SetRenderTargetMask(color_write_mask);
 	DescribeRenderColorInfo(buffer, color_context, &color_info);
+	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info));
 
 	EXIT_NOT_IMPLEMENTED(depth_info.format != VK_FORMAT_D32_SFLOAT_S8_UINT);
 	EXIT_NOT_IMPLEMENTED(depth_info.samples != VK_SAMPLE_COUNT_1_BIT);
@@ -7453,7 +7445,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
-	(void)resolve_render_attachment_sample_count(color_info, depth_info);
+	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info));
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
 	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
 	{
