@@ -2698,14 +2698,21 @@ struct AvPlayerInternal
 	AvPlayerEventReplacement event;
 	AvPlayerMemAllocator mem;
 	Core::Mutex          mutex;
-	void*                synthetic_frame        = nullptr;
 	std::vector<uint8_t> synthetic_storage;
+	struct VideoFrameBuffer
+	{
+		uint8_t* data        = nullptr;
+		bool     guest_owned = false;
+	};
+	std::vector<VideoFrameBuffer> video_frames;
 	std::vector<int16_t> audio_storage;
 	uint32_t             synthetic_width        = 0;
 	uint32_t             synthetic_height       = 0;
 	float                synthetic_frame_rate   = 0.0f;
 	uint32_t             synthetic_frame_count   = 0;
 	uint32_t             synthetic_obtained_num = 0;
+	uint32_t             next_video_frame       = 0;
+	size_t               video_frame_bytes      = 0;
 };
 
 static void rgb_to_yuv(float r, float g, float b, uint8_t* y, uint8_t* u, uint8_t* v)
@@ -2763,9 +2770,31 @@ static void draw_synthetic_frame(uint32_t width, uint32_t height, void* data, fl
 	}
 }
 
-static uint32_t video_frame_bytes(uint32_t width, uint32_t height)
+static bool get_video_frame_bytes(uint32_t width, uint32_t height, size_t* out)
 {
-	return width * height + (width / 2) * (height / 2) * 2;
+	if (out == nullptr || width == 0 || height == 0)
+	{
+		return false;
+	}
+	const size_t luma_width  = width;
+	const size_t luma_height = height;
+	if (luma_width > SIZE_MAX / luma_height)
+	{
+		return false;
+	}
+	const size_t luma_bytes = luma_width * luma_height;
+	const size_t chroma_rows = (luma_height + 1u) / 2u;
+	if (luma_width > SIZE_MAX / chroma_rows)
+	{
+		return false;
+	}
+	const size_t chroma_bytes = luma_width * chroma_rows;
+	if (chroma_bytes > SIZE_MAX - luma_bytes)
+	{
+		return false;
+	}
+	*out = luma_bytes + chroma_bytes;
+	return true;
 }
 
 static bool avplayer_dump_enabled()
@@ -2773,50 +2802,97 @@ static bool avplayer_dump_enabled()
 	return std::getenv("KYTY_DUMP_AVPLAYER") != nullptr;
 }
 
-static void create_synthetic_video(AvPlayerInternal* r)
+static void register_video_frame(uint8_t* frame, size_t bytes, uint32_t pitch)
+{
+	Graphics::GuestTextureLayoutRegisterLinear(reinterpret_cast<uint64_t>(frame), bytes, pitch);
+}
+
+static void unregister_video_frame(uint8_t* frame)
+{
+	Graphics::GuestTextureLayoutUnregister(reinterpret_cast<uint64_t>(frame));
+}
+
+static void release_synthetic_video(AvPlayerInternal* r)
+{
+	if (r == nullptr)
+	{
+		return;
+	}
+	for (const auto& frame: r->video_frames)
+	{
+		if (frame.data != nullptr)
+		{
+			unregister_video_frame(frame.data);
+			if (frame.guest_owned && r->mem.deallocate_texture != nullptr)
+			{
+				r->mem.deallocate_texture(r->mem.object_pointer, frame.data);
+			}
+		}
+	}
+	r->video_frames.clear();
+	r->synthetic_storage.clear();
+	r->video_frame_bytes = 0;
+	r->next_video_frame  = 0;
+}
+
+static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_framebuffers)
 {
 	constexpr uint32_t luma_width  = 1920;
 	constexpr uint32_t luma_height = 1080;
-	const uint32_t     size        = video_frame_bytes(luma_width, luma_height);
-	uint8_t*           buffer      = nullptr;
+	size_t             size        = 0;
+
+	if (r == nullptr || !get_video_frame_bytes(luma_width, luma_height, &size))
+	{
+		return false;
+	}
+
+	release_synthetic_video(r);
 
 	if (r->mem.allocate_texture != nullptr)
 	{
-		buffer = static_cast<uint8_t*>(r->mem.allocate_texture(r->mem.object_pointer, 256, size));
-	}
-	if (buffer == nullptr)
+		if (r->mem.deallocate_texture == nullptr || size > UINT32_MAX)
+		{
+			return false;
+		}
+		const int frame_count = std::clamp(requested_framebuffers > 0 ? requested_framebuffers : 2, 2, 16);
+		r->video_frames.reserve(static_cast<size_t>(frame_count));
+		for (int i = 0; i < frame_count; i++)
+		{
+			auto* frame = static_cast<uint8_t*>(r->mem.allocate_texture(r->mem.object_pointer, 256, static_cast<uint32_t>(size)));
+			if (frame == nullptr)
+			{
+				release_synthetic_video(r);
+				return false;
+			}
+			r->video_frames.push_back(AvPlayerInternal::VideoFrameBuffer {frame, true});
+			register_video_frame(frame, size, luma_width);
+		}
+	} else
 	{
 		r->synthetic_storage.assign(size, 0);
-		buffer = r->synthetic_storage.data();
+		r->video_frames.push_back(AvPlayerInternal::VideoFrameBuffer {r->synthetic_storage.data(), false});
+		register_video_frame(r->synthetic_storage.data(), size, luma_width);
 	}
 
-	r->synthetic_frame        = buffer;
 	r->synthetic_width        = luma_width;
 	r->synthetic_height       = luma_height;
 	r->synthetic_frame_rate   = 59.94f;
 	r->synthetic_frame_count    = 90;
 	r->synthetic_obtained_num = 0;
+	r->next_video_frame       = 0;
+	r->video_frame_bytes      = size;
 	r->audio_storage.assign(2 * 1024, 0);
-	Graphics::GuestTextureLayoutRegisterLinear(reinterpret_cast<uint64_t>(r->synthetic_frame), size, luma_width);
 	if (avplayer_dump_enabled())
 	{
-		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER create frame=%p size=%u pitch=%u allocator=%d\n", r->synthetic_frame, size,
+		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER create frames=%zu size=%zu pitch=%u allocator=%d\n", r->video_frames.size(), size,
 		             luma_width, r->synthetic_storage.empty() ? 1 : 0);
 	}
+	return true;
 }
 
 static void delete_synthetic_video(AvPlayerInternal* r)
 {
-	if (r->synthetic_frame != nullptr)
-	{
-		Graphics::GuestTextureLayoutUnregister(reinterpret_cast<uint64_t>(r->synthetic_frame));
-	}
-	if (r->mem.deallocate_texture != nullptr && r->synthetic_frame != nullptr && r->synthetic_storage.empty())
-	{
-		r->mem.deallocate_texture(r->mem.object_pointer, r->synthetic_frame);
-	}
-	r->synthetic_frame        = nullptr;
-	r->synthetic_storage.clear();
+	release_synthetic_video(r);
 	r->audio_storage.clear();
 	r->synthetic_width        = 0;
 	r->synthetic_height       = 0;
@@ -2906,13 +2982,18 @@ static void stop_once_after_eof(AvPlayerInternal* h)
 
 static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 {
-	if (!r->playing || r->paused || r->synthetic_frame == nullptr || !synthetic_is_playing(r))
+	if (!r->playing || r->paused || r->video_frames.empty() || !synthetic_is_playing(r))
+	{
+		return false;
+	}
+	auto* frame = r->video_frames[r->next_video_frame++ % r->video_frames.size()].data;
+	if (frame == nullptr)
 	{
 		return false;
 	}
 
 	std::memset(info, 0, sizeof(*info));
-	info->data       = r->synthetic_frame;
+	info->data       = frame;
 	info->time_stamp = current_time_ms(r);
 	fill_video_ex(r, &info->details.video);
 
@@ -2927,24 +3008,29 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		level = 1.0f - (1.0f - pos * (1.0f / 0.5f)) * (1.0f - pos * (1.0f / 0.5f));
 	}
 
-	draw_synthetic_frame(r->synthetic_width, r->synthetic_height, r->synthetic_frame, level * 0.7f);
+	draw_synthetic_frame(r->synthetic_width, r->synthetic_height, frame, level * 0.7f);
 	r->synthetic_obtained_num++;
 	if (avplayer_dump_enabled())
 	{
-		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER video handle=%p frame=%u data=%p time=%" PRIu64 " size=%ux%u\n",
+		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER video handle=%p frame=%u data=%p time=%" PRIu64 " size=%ux%u bytes=%zu\n",
 		             static_cast<void*>(r), r->synthetic_obtained_num, info->data, info->time_stamp, r->synthetic_width,
-		             r->synthetic_height);
+		             r->synthetic_height, r->video_frame_bytes);
 	}
 	return true;
 }
 
-static AvPlayerInternal* create_player(const AvPlayerMemAllocator& mem, const AvPlayerEventReplacement& event, bool auto_start)
+static AvPlayerInternal* create_player(const AvPlayerMemAllocator& mem, const AvPlayerEventReplacement& event, bool auto_start,
+                                       int32_t requested_framebuffers)
 {
 	auto* r       = new AvPlayerInternal;
 	r->mem        = mem;
 	r->event      = event;
 	r->auto_start = auto_start;
-	create_synthetic_video(r);
+	if (!create_synthetic_video(r, requested_framebuffers))
+	{
+		delete r;
+		return nullptr;
+	}
 	return r;
 }
 
@@ -2955,7 +3041,8 @@ AvPlayerInternal* KYTY_SYSV_ABI AvPlayerInit(AvPlayerInitData* init)
 	{
 		return nullptr;
 	}
-	return create_player(init->memory_replacement, init->event_replacement, init->auto_start != 0);
+	return create_player(init->memory_replacement, init->event_replacement, init->auto_start != 0,
+	                     init->num_output_video_framebuffers);
 }
 
 int KYTY_SYSV_ABI AvPlayerInitEx(const AvPlayerInitDataEx* init, AvPlayerInternal** handle)
@@ -2965,7 +3052,8 @@ int KYTY_SYSV_ABI AvPlayerInitEx(const AvPlayerInitDataEx* init, AvPlayerInterna
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
-	*handle = create_player(init->memory_replacement, init->event_replacement, init->auto_start != 0);
+	*handle = create_player(init->memory_replacement, init->event_replacement, init->auto_start != 0,
+	                        init->num_output_video_framebuffers);
 	return *handle == nullptr ? AVPLAYER_ERROR_OPERATION_FAILED : 0;
 }
 
