@@ -300,22 +300,27 @@ TEST(EmulatorModuleLoad, BuildPlanTreatsMediaModulesAsApplicationRuntimeSidecars
 	EXPECT_TRUE(ModuleLoadPlanning::RequiresFullPackageBootstrap(plan));
 }
 
-TEST(EmulatorModuleLoad, BuildPlanDoesNotDiscoverUnlistedPluginDirectories)
+TEST(EmulatorModuleLoad, BuildPlanTreatsMediaPluginsAsApplicationRuntimeSidecars)
 {
-	EXPECT_FALSE(ModuleDiscovery::IsSupportedPackageSubdir("Media/Plugins/"));
+	EXPECT_TRUE(ModuleDiscovery::IsSupportedPackageSubdir("Media/Plugins/"));
 
-	const TempPackageRoot temp(U"/tmp/kyty_module_load_unlisted_plugins_test/");
+	const TempPackageRoot temp(U"/tmp/kyty_module_load_media_plugins_test/");
 	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root + U"Media/Plugins/"));
 	ASSERT_TRUE(WriteBinary(temp.root + U"eboot.bin", MakeSelfWrappedElf(ET_DYNEXEC)));
-	ASSERT_TRUE(WriteBinary(temp.root + U"Media/Plugins/plugin_one.prx", MakeSelfWrappedElf(ET_DYNAMIC)));
+	ASSERT_TRUE(WriteBinary(temp.root + U"Media/Plugins/libfmod.prx", MakeSelfWrappedElf(ET_DYNAMIC)));
+	ASSERT_TRUE(WriteBinary(temp.root + U"Media/Plugins/libfmodstudio.prx", MakeSelfWrappedElf(ET_DYNAMIC)));
 	ASSERT_TRUE(WriteBinary(temp.root + U"Media/Plugins/plugin_two.prx", MakeSelfWrappedElf(ET_DYNAMIC)));
 
 	const auto plan = ModuleLoadPlanning::BuildPlan(temp.root + U"eboot.bin", true);
 
 	ASSERT_TRUE(plan.valid) << plan.error;
-	EXPECT_EQ(plan.count, 1u);
-	EXPECT_EQ(plan.diag.adjacent_count, 0u);
-	EXPECT_FALSE(ModuleLoadPlanning::RequiresFullPackageBootstrap(plan));
+	ASSERT_EQ(plan.count, 3u);
+	EXPECT_EQ(plan.diag.adjacent_count, 2u);
+	EXPECT_STREQ(plan.entries[1].relative_key, "Media/Plugins/libfmod.prx");
+	EXPECT_STREQ(plan.entries[2].relative_key, "Media/Plugins/libfmodstudio.prx");
+	EXPECT_EQ(plan.entries[1].role, ModulePlanRole::PackageSidecar);
+	EXPECT_EQ(plan.entries[2].role, ModulePlanRole::PackageSidecar);
+	EXPECT_TRUE(ModuleLoadPlanning::RequiresFullPackageBootstrap(plan));
 }
 
 TEST(EmulatorModuleLoad, ElfPlatformComesFromAbiVersion)

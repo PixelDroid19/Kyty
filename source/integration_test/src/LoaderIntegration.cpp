@@ -223,10 +223,13 @@ int ScenarioMultiModuleStableOrder()
 	}
 	EnsureDir(root + U"/sce_module");
 	EnsureDir(root + U"/Media/Modules");
+	EnsureDir(root + U"/Media/Plugins");
 	// Deliberately create in non-sorted filesystem order: z then a.
 	Expect(WriteMinimalSharedElf(root + U"/sce_module/z_mod.prx"), "write z_mod");
 	Expect(WriteMinimalSharedElf(root + U"/sce_module/a_mod.prx"), "write a_mod");
 	Expect(WriteMinimalSharedElf(root + U"/Media/Modules/media_mod.prx"), "write media_mod");
+	Expect(WriteMinimalSharedElf(root + U"/Media/Plugins/libfmod.prx"), "write fmod");
+	Expect(WriteMinimalSharedElf(root + U"/Media/Plugins/plugin_mod.prx"), "write plugin_mod");
 	// Extension-only junk under package root (not supported subdir) must be ignored.
 	Expect(WriteJunkFile(root + U"/loose.prx", "XXXX", 4), "write loose prx");
 	// Invalid ELF under sce_module must be rejected, not planned.
@@ -235,22 +238,24 @@ int ScenarioMultiModuleStableOrder()
 	const auto plan1 = Loader::ModuleLoadPlanning::BuildPlan(primary, true);
 	const auto plan2 = Loader::ModuleLoadPlanning::BuildPlan(primary, true);
 	Expect(plan1.valid && plan2.valid, "plans valid");
-	Expect(plan1.count == 4, "primary + 3 valid adjacent");
-	Expect(plan1.diag.adjacent_count == 3, "three adjacent");
+	Expect(plan1.count == 5, "primary + 4 valid adjacent");
+	Expect(plan1.diag.adjacent_count == 4, "four adjacent");
 	Expect(plan1.diag.rejection_count >= 1, "bad.prx rejected");
 	// Deterministic order of adjacent: a_mod before z_mod.
 	Expect(std::strcmp(plan1.entries[1].relative_key, "Media/Modules/media_mod.prx") == 0, "first adjacent media_mod");
-	Expect(std::strcmp(plan1.entries[2].relative_key, "sce_module/a_mod.prx") == 0, "second adjacent a_mod");
-	Expect(std::strcmp(plan1.entries[3].relative_key, "sce_module/z_mod.prx") == 0, "third adjacent z_mod");
+	Expect(std::strcmp(plan1.entries[2].relative_key, "Media/Plugins/libfmod.prx") == 0, "second adjacent fmod");
+	Expect(std::strcmp(plan1.entries[3].relative_key, "sce_module/a_mod.prx") == 0, "third adjacent a_mod");
+	Expect(std::strcmp(plan1.entries[4].relative_key, "sce_module/z_mod.prx") == 0, "fourth adjacent z_mod");
 	Expect(plan1.count == plan2.count, "stable count");
 	for (uint32_t i = 0; i < plan1.count; ++i)
 	{
 		Expect(std::strcmp(plan1.entries[i].relative_key, plan2.entries[i].relative_key) == 0, "stable order across two BuildPlan runs");
 	}
-	// Loose PRX outside supported dirs must never appear.
+	// Loose PRX outside supported dirs and non-prelinked package plugins must never appear.
 	for (uint32_t i = 0; i < plan1.count; ++i)
 	{
 		Expect(std::strstr(plan1.entries[i].relative_key, "loose") == nullptr, "loose prx not planned");
+		Expect(std::strstr(plan1.entries[i].relative_key, "plugin_mod") == nullptr, "non-prelinked plugin not planned");
 	}
 	return 0;
 }

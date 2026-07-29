@@ -308,10 +308,16 @@ bool IsSupportedPackageSubdir(const char* relative_subdir)
 	}
 	// Generic package locations only — no title-specific directories. A shared
 	// PRX beside eboot.bin is a package sidecar; system-style modules remain in
-	// their conventional subdirectories. Media/Plugins is deliberately absent:
-	// a filename cannot authorize bootstrap or synthesize its runtime ABI.
+	// their conventional subdirectories. Native package plugins are application
+	// runtime images and must be visible before the guest resolves them by name.
 	return std::strcmp(relative_subdir, "") == 0 || std::strcmp(relative_subdir, "sce_module/") == 0 ||
-	       std::strcmp(relative_subdir, "modules/") == 0 || std::strcmp(relative_subdir, "Media/Modules/") == 0;
+	       std::strcmp(relative_subdir, "modules/") == 0 || std::strcmp(relative_subdir, "Media/Modules/") == 0 ||
+	       std::strcmp(relative_subdir, "Media/Plugins/") == 0;
+}
+
+bool IsPrelinkedRuntimePlugin(const String& name)
+{
+	return name == U"libfmod.prx" || name == U"libfmodstudio.prx";
 }
 
 DiscoveryResult DiscoverAdjacentCandidates(const String& package_root_host, String* out_host_paths, String* out_relative_keys,
@@ -328,7 +334,7 @@ DiscoveryResult DiscoverAdjacentCandidates(const String& package_root_host, Stri
 	}
 
 	const String root      = NormalizeRoot(package_root_host);
-	const char*  subdirs[] = {"", "sce_module/", "modules/", "Media/Modules/"};
+	const char*  subdirs[] = {"", "sce_module/", "modules/", "Media/Modules/", "Media/Plugins/"};
 
 	for (const char* sub: subdirs)
 	{
@@ -354,6 +360,10 @@ DiscoveryResult DiscoverAdjacentCandidates(const String& package_root_host, Stri
 				continue;
 			}
 			if (!HasAdjacentExtension(name))
+			{
+				continue;
+			}
+			if (std::strcmp(sub, "Media/Plugins/") == 0 && !IsPrelinkedRuntimePlugin(name))
 			{
 				continue;
 			}
@@ -513,10 +523,12 @@ ModuleLoadPlan BuildPlan(const String& primary_host_path, bool discovery_enabled
 		CopyString(entry.host_path, sizeof(entry.host_path), host);
 		CopyString(entry.relative_key, sizeof(entry.relative_key), rel);
 		CopyCStr(entry.identity, sizeof(entry.identity), identity);
-		// Root sidecars and Media/Modules are package-owned runtime images. Other
-		// conventional module directories retain their deferred service role.
-		entry.role =
-		    (!rel.ContainsStr(U"/") || rel.StartsWith(U"Media/Modules/")) ? ModulePlanRole::PackageSidecar : ModulePlanRole::AdjacentShared;
+		// Root sidecars and Media runtime directories are package-owned runtime
+		// images. Other conventional module directories retain their deferred
+		// service role.
+		entry.role = (!rel.ContainsStr(U"/") || rel.StartsWith(U"Media/Modules/") || rel.StartsWith(U"Media/Plugins/"))
+		                 ? ModulePlanRole::PackageSidecar
+		                 : ModulePlanRole::AdjacentShared;
 		entry.platform           = module_platform;
 		entry.elf_abi            = GuestPlatformAbiVersion(module_platform);
 		plan.entries[plan.count] = entry;
@@ -552,7 +564,8 @@ bool RequiresFullPackageBootstrap(const ModuleLoadPlan& plan)
 	for (uint32_t i = 1; i < plan.count; ++i)
 	{
 		const String relative_key = String::FromUtf8(plan.entries[i].relative_key);
-		if (plan.entries[i].role == ModulePlanRole::PackageSidecar && relative_key.StartsWith(U"Media/Modules/"))
+		if (plan.entries[i].role == ModulePlanRole::PackageSidecar &&
+		    (relative_key.StartsWith(U"Media/Modules/") || relative_key.StartsWith(U"Media/Plugins/")))
 		{
 			return true;
 		}

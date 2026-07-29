@@ -4,13 +4,13 @@
 
 UT_BEGIN(EmulatorModuleDiscovery);
 
-TEST(EmulatorModuleDiscovery, RejectsPluginDirectoryFromPackageBootstrap)
+TEST(EmulatorModuleDiscovery, AcceptsPackageRuntimeDirectories)
 {
 	using namespace Loader::ModuleDiscovery;
 
 	EXPECT_TRUE(IsSupportedPackageSubdir(""));
 	EXPECT_TRUE(IsSupportedPackageSubdir("Media/Modules/"));
-	EXPECT_FALSE(IsSupportedPackageSubdir("Media/Plugins/"));
+	EXPECT_TRUE(IsSupportedPackageSubdir("Media/Plugins/"));
 }
 
 UT_END();
