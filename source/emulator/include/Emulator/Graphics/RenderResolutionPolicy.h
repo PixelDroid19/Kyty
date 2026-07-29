@@ -72,7 +72,7 @@ enum class ResolutionImageDimension : uint8_t
 	Cube,
 };
 
-enum class ResolutionScaleMode : uint8_t
+enum class RenderResolutionMode : uint8_t
 {
 	Native,
 	Fixed,
@@ -153,7 +153,7 @@ struct ResolutionIdentity
 	ResolutionExtent       host_resource_extent;
 	ResolutionScale        scale;
 	ResolutionResourceInfo resource;
-	ResolutionScaleMode    mode = ResolutionScaleMode::Fixed;
+	RenderResolutionMode    mode = RenderResolutionMode::Fixed;
 };
 
 [[nodiscard]] constexpr bool operator==(const ResolutionIdentity& lhs, const ResolutionIdentity& rhs)
@@ -186,7 +186,7 @@ public:
 	explicit RenderResolutionPolicy(ResolutionExtent target_extent = {1280, 720});
 
 	ResolutionPolicyStatus SetTargetExtent(ResolutionExtent target_extent);
-	void                   SetScaleMode(ResolutionScaleMode mode);
+	void                   SetScaleMode(RenderResolutionMode mode);
 	ResolutionPolicyStatus RegisterGuestDisplayExtent(ResolutionExtent guest_extent);
 
 	[[nodiscard]] ResolutionExtent       GetTargetExtent() const;
@@ -201,7 +201,7 @@ private:
 
 	ResolutionExtent    m_target_extent;
 	ResolutionExtent    m_guest_display_extent;
-	ResolutionScaleMode m_mode                     = ResolutionScaleMode::Fixed;
+	RenderResolutionMode m_mode                     = RenderResolutionMode::Fixed;
 	bool                m_guest_display_registered = false;
 };
 

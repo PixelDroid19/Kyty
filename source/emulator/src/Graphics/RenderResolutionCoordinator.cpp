@@ -23,7 +23,7 @@ RenderResolutionCoordinator::RenderResolutionCoordinator(ResolutionExtent target
 	m_snapshot.target_extent = target_extent;
 }
 
-ResolutionPolicyStatus RenderResolutionCoordinator::ConfigureTarget(ResolutionScaleMode mode, ResolutionExtent target_extent)
+ResolutionPolicyStatus RenderResolutionCoordinator::ConfigureTarget(RenderResolutionMode mode, ResolutionExtent target_extent)
 {
 	RenderResolutionPolicy policy;
 	const auto               status = policy.SetTargetExtent(target_extent);
@@ -118,7 +118,7 @@ RenderResolutionSnapshot RenderResolutionCoordinator::GetSnapshot() const
 	return m_snapshot;
 }
 
-ResolutionPolicyStatus RenderResolutionInitialize(ResolutionScaleMode mode, ResolutionExtent target_extent)
+ResolutionPolicyStatus RenderResolutionInitialize(RenderResolutionMode mode, ResolutionExtent target_extent)
 {
 	return Runtime().ConfigureTarget(mode, target_extent);
 }

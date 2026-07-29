@@ -36,8 +36,8 @@ void               VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOu
 enum class VideoOutHostExtentStatus
 {
 	Selected,
-	StickyMatch,
-	StickyMismatch,
+	ExistingMatch,
+	ExistingMismatch,
 	InvalidArgument,
 };
 
@@ -52,8 +52,8 @@ struct VideoOutHostExtentState
 enum class VideoOutHostExtentSetSelectionStatus
 {
 	Selected,
-	StickyMatch,
-	StickyMismatch,
+	ExistingMatch,
+	ExistingMismatch,
 	InvalidArgument,
 	Empty,
 };

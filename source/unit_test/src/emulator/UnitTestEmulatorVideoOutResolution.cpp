@@ -102,7 +102,7 @@ TEST(EmulatorVideoOutResolution, ExplicitlySelectsNativeExtentForEveryImage)
 	EXPECT_EQ(state.image_count, 2u);
 }
 
-TEST(EmulatorVideoOutResolution, StickyMismatchDoesNotPartiallySelectEarlierImages)
+TEST(EmulatorVideoOutResolution, ExistingMismatchDoesNotPartiallySelectEarlierImages)
 {
 	VideoOutVulkanImage first;
 	VideoOutVulkanImage second;
@@ -113,7 +113,7 @@ TEST(EmulatorVideoOutResolution, StickyMismatchDoesNotPartiallySelectEarlierImag
 	VideoOutVulkanImage* images[] = {&first, &second};
 
 	VideoOutHostExtentSetState set_state;
-	EXPECT_EQ(VideoOutBufferSelectHostExtentSet(images, 2, 1280, 720, &set_state), VideoOutHostExtentSetSelectionStatus::StickyMismatch);
+	EXPECT_EQ(VideoOutBufferSelectHostExtentSet(images, 2, 1280, 720, &set_state), VideoOutHostExtentSetSelectionStatus::ExistingMismatch);
 
 	VideoOutHostExtentState first_state;
 	ASSERT_TRUE(VideoOutBufferGetHostExtentState(&first, &first_state));
@@ -185,9 +185,9 @@ TEST(EmulatorVideoOutResolution, ConcurrentSetSelectionsCommitOneUniformExtent)
 		second_selection.join();
 
 		const bool first_won  = first_status == VideoOutHostExtentSetSelectionStatus::Selected &&
-		                        second_status == VideoOutHostExtentSetSelectionStatus::StickyMismatch;
+		                        second_status == VideoOutHostExtentSetSelectionStatus::ExistingMismatch;
 		const bool second_won = second_status == VideoOutHostExtentSetSelectionStatus::Selected &&
-		                        first_status == VideoOutHostExtentSetSelectionStatus::StickyMismatch;
+		                        first_status == VideoOutHostExtentSetSelectionStatus::ExistingMismatch;
 		EXPECT_TRUE(first_won || second_won);
 
 		VideoOutHostExtentSetState committed_state;
@@ -341,8 +341,8 @@ TEST(EmulatorVideoOutResolution, HostAccessQuiesceWaitsForAcceptedWorkAndBlocksN
 TEST(EmulatorVideoOutResolution, ExposesStableVideoOutSelectionAndInspectionStatusNames)
 {
 	EXPECT_STREQ(VideoOutHostExtentSetSelectionStatusName(VideoOutHostExtentSetSelectionStatus::Selected), "selected");
-	EXPECT_STREQ(VideoOutHostExtentSetSelectionStatusName(VideoOutHostExtentSetSelectionStatus::StickyMatch), "sticky_match");
-	EXPECT_STREQ(VideoOutHostExtentSetSelectionStatusName(VideoOutHostExtentSetSelectionStatus::StickyMismatch), "sticky_mismatch");
+	EXPECT_STREQ(VideoOutHostExtentSetSelectionStatusName(VideoOutHostExtentSetSelectionStatus::ExistingMatch), "existing_match");
+	EXPECT_STREQ(VideoOutHostExtentSetSelectionStatusName(VideoOutHostExtentSetSelectionStatus::ExistingMismatch), "existing_mismatch");
 	EXPECT_STREQ(VideoOutHostExtentSetSelectionStatusName(VideoOutHostExtentSetSelectionStatus::InvalidArgument), "invalid_argument");
 	EXPECT_STREQ(VideoOutHostExtentSetSelectionStatusName(VideoOutHostExtentSetSelectionStatus::Empty), "empty");
 

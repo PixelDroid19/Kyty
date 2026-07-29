@@ -13,7 +13,8 @@ struct RenderResolutionSnapshot
 	ResolutionExtent   guest_display_extent;
 	ResolutionDecision candidate_decision;
 	bool               guest_registered = false;
-	// This phase records policy only. Vulkan resources remain at guest extent.
+	// True only after the selected display cohort has been materialized with
+	// the immutable host extent planned for the current registered display.
 	bool scaling_applied = false;
 };
 
@@ -33,7 +34,7 @@ class RenderResolutionCoordinator final
 public:
 	explicit RenderResolutionCoordinator(ResolutionExtent target_extent = {1280, 720});
 
-	ResolutionPolicyStatus ConfigureTarget(ResolutionScaleMode mode, ResolutionExtent target_extent);
+	ResolutionPolicyStatus ConfigureTarget(RenderResolutionMode mode, ResolutionExtent target_extent);
 	ResolutionPolicyStatus RegisterGuestDisplayExtent(ResolutionExtent guest_extent);
 
 	[[nodiscard]] ResolutionDecision                Evaluate(ResolutionExtent guest_resource_extent, ResolutionResourceInfo resource) const;
@@ -50,7 +51,7 @@ private:
 	RenderResolutionSnapshot m_snapshot;
 };
 
-ResolutionPolicyStatus           RenderResolutionInitialize(ResolutionScaleMode mode, ResolutionExtent target_extent);
+ResolutionPolicyStatus           RenderResolutionInitialize(RenderResolutionMode mode, ResolutionExtent target_extent);
 ResolutionPolicyStatus           RenderResolutionRegisterGuestDisplayExtent(ResolutionExtent guest_extent);
 [[nodiscard]] ResolutionDecision RenderResolutionEvaluate(ResolutionExtent guest_resource_extent, ResolutionResourceInfo resource);
 [[nodiscard]] RenderResolutionPlan RenderResolutionEvaluatePlan(const RenderResolutionPlanInput& input);

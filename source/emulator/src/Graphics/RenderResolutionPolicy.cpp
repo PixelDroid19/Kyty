@@ -75,7 +75,7 @@ ResolutionPolicyStatus RenderResolutionPolicy::SetTargetExtent(ResolutionExtent 
 	return ResolutionPolicyStatus::Success;
 }
 
-void RenderResolutionPolicy::SetScaleMode(ResolutionScaleMode mode)
+void RenderResolutionPolicy::SetScaleMode(RenderResolutionMode mode)
 {
 	m_mode = mode;
 }
@@ -109,7 +109,7 @@ ResolutionDecision RenderResolutionPolicy::Evaluate(ResolutionExtent guest_resou
 		return decision;
 	}
 
-	if (m_mode == ResolutionScaleMode::Native)
+	if (m_mode == RenderResolutionMode::Native)
 	{
 		decision.classification = ResolutionClassification::Native;
 		decision.native_reason  = ResolutionNativeReason::PolicyDisabled;

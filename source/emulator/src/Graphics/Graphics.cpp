@@ -38,8 +38,8 @@ KYTY_SUBSYSTEM_INIT(Graphics)
 {
 	auto width  = Config::GetScreenWidth();
 	auto height = Config::GetScreenHeight();
-	const auto mode = Config::GetRenderResolutionMode() == Config::RenderResolutionMode::Native ? ResolutionScaleMode::Native
-	                                                                                            : ResolutionScaleMode::Fixed;
+	const auto mode = Config::GetRenderResolutionMode() == Config::RenderResolutionMode::Native ? RenderResolutionMode::Native
+	                                                                                            : RenderResolutionMode::Fixed;
 	const auto resolution_status = RenderResolutionInitialize(
 	    mode, {Config::GetRenderResolutionWidth(), Config::GetRenderResolutionHeight()});
 	EXIT_IF(resolution_status != ResolutionPolicyStatus::Success);

@@ -5575,9 +5575,9 @@ static RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer
 		}
 		if (!supported)
 		{
-			decision = native;
-			decision.reason =
-			    color_supported ? RenderResolutionPlanReason::DepthCapabilityUnsupported : RenderResolutionPlanReason::ColorCapabilityUnsupported;
+			decision.classification = ResolutionClassification::Unsupported;
+			decision.reason         = color_supported ? RenderResolutionPlanReason::DepthCapabilityUnsupported
+			                                          : RenderResolutionPlanReason::ColorCapabilityUnsupported;
 			decision.attachment_count          = attachment_count;
 			decision.blocking_attachment_index = color_supported ? 1u : 0u;
 		}
@@ -5655,6 +5655,47 @@ static RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer
 		}
 	}
 	return decision;
+}
+
+static void RequireSupportedRenderResolutionPlan(const RenderResolutionPlan& decision)
+{
+	if (decision.classification != ResolutionClassification::Unsupported)
+	{
+		return;
+	}
+
+	EXIT("Render resolution plan unsupported: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
+	     "attachment_index=%u\n",
+	     decision.guest_extent.width, decision.guest_extent.height, decision.host_extent.width, decision.host_extent.height,
+	     RenderResolutionPlanReasonName(decision.reason), static_cast<unsigned>(decision.reason),
+	     ResolutionNativeReasonName(decision.attachment_native_reason), static_cast<unsigned>(decision.attachment_native_reason),
+	     decision.blocking_attachment_index);
+}
+
+static void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision, const RenderColorInfo& color,
+                                                   const RenderDepthInfo& depth)
+{
+	RequireSupportedRenderResolutionPlan(decision);
+	if (decision.classification != ResolutionClassification::Scaled)
+	{
+		return;
+	}
+
+	if (color.targets_num > 0 &&
+	    (color.vulkan_buffer[0] == nullptr || color.vulkan_buffer[0]->extent.width != decision.host_extent.width ||
+	     color.vulkan_buffer[0]->extent.height != decision.host_extent.height))
+	{
+		EXIT("Render resolution color materialization mismatch: expected=%ux%u actual=%ux%u\n", decision.host_extent.width,
+		     decision.host_extent.height, color.vulkan_buffer[0] != nullptr ? color.vulkan_buffer[0]->extent.width : 0,
+		     color.vulkan_buffer[0] != nullptr ? color.vulkan_buffer[0]->extent.height : 0);
+	}
+	if (depth.vulkan_buffer != nullptr &&
+	    (depth.vulkan_buffer->extent.width != decision.host_extent.width || depth.vulkan_buffer->extent.height != decision.host_extent.height))
+	{
+		EXIT("Render resolution depth materialization mismatch: expected=%ux%u actual=%ux%u\n", decision.host_extent.width,
+		     decision.host_extent.height, depth.vulkan_buffer->extent.width, depth.vulkan_buffer->extent.height);
+	}
+	EXIT_IF(!RenderResolutionMarkScalingApplied(decision));
 }
 
 static void InvalidateMemoryObject(const RenderColorInfo& r)
@@ -7074,12 +7115,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	VulkanSampleLocationState sample_locations {};
 	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info), &sample_locations);
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
-	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
-	{
-		printf("WARNING: guest=%ux%u selected=%ux%u reason=%s(%u)\n", depth_only_resolution.guest_extent.width,
-		       depth_only_resolution.guest_extent.height, depth_only_resolution.host_extent.width, depth_only_resolution.host_extent.height,
-		       RenderResolutionPlanReasonName(depth_only_resolution.reason), static_cast<unsigned>(depth_only_resolution.reason));
-	}
+	RequireSupportedRenderResolutionPlan(depth_only_resolution);
 
 	ShaderVertexInputInfo vs_input_info;
 	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info);
@@ -7087,15 +7123,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
-	if (resolution.classification == ResolutionClassification::Unsupported)
-	{
-		printf("WARNING: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
-		       "attachment_index=%u\n",
-		       resolution.guest_extent.width, resolution.guest_extent.height, resolution.host_extent.width, resolution.host_extent.height,
-		       RenderResolutionPlanReasonName(resolution.reason), static_cast<unsigned>(resolution.reason),
-		       ResolutionNativeReasonName(resolution.attachment_native_reason), static_cast<unsigned>(resolution.attachment_native_reason),
-		       resolution.blocking_attachment_index);
-	}
+	RequireSupportedRenderResolutionPlan(resolution);
 	const auto& materialization_resolution = color_info.targets_num == 0 ? depth_only_resolution : resolution;
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
@@ -7103,17 +7131,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.height : 0,
 	    &sample_locations);
 	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
-	if (resolution.classification == ResolutionClassification::Scaled)
-	{
-		if (color_info.vulkan_buffer[0] == nullptr || color_info.vulkan_buffer[0]->extent.width != resolution.host_extent.width ||
-		    color_info.vulkan_buffer[0]->extent.height != resolution.host_extent.height ||
-		    (depth_info.vulkan_buffer != nullptr && (depth_info.vulkan_buffer->extent.width != resolution.host_extent.width ||
-		                                             depth_info.vulkan_buffer->extent.height != resolution.host_extent.height)))
-		{
-			printf("WARNING: Scaled attachment materialization mismatch (continuing)\n");
-		}
-		(void)RenderResolutionMarkScalingApplied(resolution);
-	}
+	CommitMaterializedRenderResolutionPlan(materialization_resolution, color_info, depth_info);
 
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
 
@@ -7491,15 +7509,7 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	DescribeRenderColorInfo(buffer, color_context, &color_info);
 	ShaderPixelInputInfo copy_shader_usage {};
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &copy_shader_usage);
-	if (resolution.classification == ResolutionClassification::Unsupported)
-	{
-		printf("WARNING: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
-		       "attachment_index=%u\n",
-		       resolution.guest_extent.width, resolution.guest_extent.height, resolution.host_extent.width, resolution.host_extent.height,
-		       RenderResolutionPlanReasonName(resolution.reason), static_cast<unsigned>(resolution.reason),
-		       ResolutionNativeReasonName(resolution.attachment_native_reason), static_cast<unsigned>(resolution.attachment_native_reason),
-		       resolution.blocking_attachment_index);
-	}
+	RequireSupportedRenderResolutionPlan(resolution);
 
 	EXIT_NOT_IMPLEMENTED(depth_info.format != VK_FORMAT_D32_SFLOAT_S8_UINT);
 	EXIT_NOT_IMPLEMENTED(color_info.targets_num != 1);
@@ -7510,17 +7520,7 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.height : 0,
 	                           &sample_locations);
 	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
-	if (resolution.classification == ResolutionClassification::Scaled)
-	{
-		if (color_info.vulkan_buffer[0] == nullptr || color_info.vulkan_buffer[0]->extent.width != resolution.host_extent.width ||
-		    color_info.vulkan_buffer[0]->extent.height != resolution.host_extent.height ||
-		    (depth_info.vulkan_buffer != nullptr && (depth_info.vulkan_buffer->extent.width != resolution.host_extent.width ||
-		                                             depth_info.vulkan_buffer->extent.height != resolution.host_extent.height)))
-		{
-			printf("WARNING: Scaled attachment materialization mismatch (continuing)\n");
-		}
-		(void)RenderResolutionMarkScalingApplied(resolution);
-	}
+	CommitMaterializedRenderResolutionPlan(resolution, color_info, depth_info);
 
 	auto* source = depth_info.vulkan_buffer;
 	auto* target = color_info.vulkan_buffer[0];
@@ -7685,12 +7685,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	VulkanSampleLocationState sample_locations {};
 	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info), &sample_locations);
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
-	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
-	{
-		printf("WARNING: guest=%ux%u selected=%ux%u reason=%s(%u)\n", depth_only_resolution.guest_extent.width,
-		       depth_only_resolution.guest_extent.height, depth_only_resolution.host_extent.width, depth_only_resolution.host_extent.height,
-		       RenderResolutionPlanReasonName(depth_only_resolution.reason), static_cast<unsigned>(depth_only_resolution.reason));
-	}
+	RequireSupportedRenderResolutionPlan(depth_only_resolution);
 
 	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
 
@@ -7718,15 +7713,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
-	if (resolution.classification == ResolutionClassification::Unsupported)
-	{
-		printf("WARNING: guest=%ux%u selected=%ux%u reason=%s(%u) attachment_reason=%s(%u) "
-		       "attachment_index=%u\n",
-		       resolution.guest_extent.width, resolution.guest_extent.height, resolution.host_extent.width, resolution.host_extent.height,
-		       RenderResolutionPlanReasonName(resolution.reason), static_cast<unsigned>(resolution.reason),
-		       ResolutionNativeReasonName(resolution.attachment_native_reason), static_cast<unsigned>(resolution.attachment_native_reason),
-		       resolution.blocking_attachment_index);
-	}
+	RequireSupportedRenderResolutionPlan(resolution);
 	const auto& materialization_resolution = color_info.targets_num == 0 ? depth_only_resolution : resolution;
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
@@ -7734,17 +7721,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.height : 0,
 	    &sample_locations);
 	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
-	if (resolution.classification == ResolutionClassification::Scaled)
-	{
-		if (color_info.vulkan_buffer[0] == nullptr || color_info.vulkan_buffer[0]->extent.width != resolution.host_extent.width ||
-		    color_info.vulkan_buffer[0]->extent.height != resolution.host_extent.height ||
-		    (depth_info.vulkan_buffer != nullptr && (depth_info.vulkan_buffer->extent.width != resolution.host_extent.width ||
-		                                             depth_info.vulkan_buffer->extent.height != resolution.host_extent.height)))
-		{
-			printf("WARNING: Scaled attachment materialization mismatch (continuing)\n");
-		}
-		(void)RenderResolutionMarkScalingApplied(resolution);
-	}
+	CommitMaterializedRenderResolutionPlan(materialization_resolution, color_info, depth_info);
 
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
 

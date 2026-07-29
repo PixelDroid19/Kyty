@@ -24,8 +24,8 @@ const char* VideoOutHostExtentSetSelectionStatusName(VideoOutHostExtentSetSelect
 	switch (status)
 	{
 		case VideoOutHostExtentSetSelectionStatus::Selected: return "selected";
-		case VideoOutHostExtentSetSelectionStatus::StickyMatch: return "sticky_match";
-		case VideoOutHostExtentSetSelectionStatus::StickyMismatch: return "sticky_mismatch";
+		case VideoOutHostExtentSetSelectionStatus::ExistingMatch: return "existing_match";
+		case VideoOutHostExtentSetSelectionStatus::ExistingMismatch: return "existing_mismatch";
 		case VideoOutHostExtentSetSelectionStatus::InvalidArgument: return "invalid_argument";
 		case VideoOutHostExtentSetSelectionStatus::Empty: return "empty";
 	}
@@ -96,8 +96,8 @@ VideoOutHostExtentStatus SelectHostExtentLocked(VideoOutVulkanImage* image, uint
 	{
 		image->host_extent_selected = true;
 		*state                      = GetHostExtentStateLocked(image);
-		return image->extent.width == width && image->extent.height == height ? VideoOutHostExtentStatus::StickyMatch
-		                                                                      : VideoOutHostExtentStatus::StickyMismatch;
+		return image->extent.width == width && image->extent.height == height ? VideoOutHostExtentStatus::ExistingMatch
+		                                                                      : VideoOutHostExtentStatus::ExistingMismatch;
 	}
 	if (!image->host_extent_selected)
 	{
@@ -108,8 +108,8 @@ VideoOutHostExtentStatus SelectHostExtentLocked(VideoOutVulkanImage* image, uint
 	}
 
 	*state = GetHostExtentStateLocked(image);
-	return image->extent.width == width && image->extent.height == height ? VideoOutHostExtentStatus::StickyMatch
-	                                                                      : VideoOutHostExtentStatus::StickyMismatch;
+	return image->extent.width == width && image->extent.height == height ? VideoOutHostExtentStatus::ExistingMatch
+	                                                                      : VideoOutHostExtentStatus::ExistingMismatch;
 }
 
 } // namespace
@@ -199,9 +199,9 @@ VideoOutPublishedImageRefreshStatus VideoOutBufferRefreshPublishedImage(VideoOut
 
 	VideoOutHostExtentState state;
 	const auto              selection = VideoOutBufferSelectHostExtent(current, host_width, host_height, &state);
-	if (selection != VideoOutHostExtentStatus::Selected && selection != VideoOutHostExtentStatus::StickyMatch)
+	if (selection != VideoOutHostExtentStatus::Selected && selection != VideoOutHostExtentStatus::ExistingMatch)
 	{
-		return selection == VideoOutHostExtentStatus::StickyMismatch ? VideoOutPublishedImageRefreshStatus::ExtentConflict
+		return selection == VideoOutHostExtentStatus::ExistingMismatch ? VideoOutPublishedImageRefreshStatus::ExtentConflict
 		                                                             : VideoOutPublishedImageRefreshStatus::InvalidArgument;
 	}
 
@@ -234,7 +234,7 @@ VideoOutHostExtentSetSelectionStatus VideoOutBufferSelectHostExtentSet(VideoOutV
 		if ((image_state.selected || image_state.materialized) && (image_state.width != width || image_state.height != height))
 		{
 			*state = {image_state.width, image_state.height, image_count};
-			return VideoOutHostExtentSetSelectionStatus::StickyMismatch;
+			return VideoOutHostExtentSetSelectionStatus::ExistingMismatch;
 		}
 		needs_selection = needs_selection || !image_state.selected;
 	}
@@ -243,15 +243,15 @@ VideoOutHostExtentSetSelectionStatus VideoOutBufferSelectHostExtentSet(VideoOutV
 	{
 		VideoOutHostExtentState image_state;
 		const auto              status = SelectHostExtentLocked(images[index], width, height, &image_state);
-		if (status == VideoOutHostExtentStatus::StickyMismatch)
+		if (status == VideoOutHostExtentStatus::ExistingMismatch)
 		{
 			*state = {image_state.width, image_state.height, image_count};
-			return VideoOutHostExtentSetSelectionStatus::StickyMismatch;
+			return VideoOutHostExtentSetSelectionStatus::ExistingMismatch;
 		}
 	}
 
 	*state = {width, height, image_count};
-	return needs_selection ? VideoOutHostExtentSetSelectionStatus::Selected : VideoOutHostExtentSetSelectionStatus::StickyMatch;
+	return needs_selection ? VideoOutHostExtentSetSelectionStatus::Selected : VideoOutHostExtentSetSelectionStatus::ExistingMatch;
 }
 
 VideoOutHostExtentSetInspectionStatus VideoOutBufferInspectHostExtentSet(VideoOutVulkanImage* const* images, uint32_t image_count,

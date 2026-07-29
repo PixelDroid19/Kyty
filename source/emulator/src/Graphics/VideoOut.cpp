@@ -1807,7 +1807,7 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 		    Graphics::VideoOutBufferSelectHostExtentSet(staged_images, static_cast<uint32_t>(buffer_num), host_extent.width,
 		                                                host_extent.height, &selection_state);
 		if (selection != Graphics::VideoOutHostExtentSetSelectionStatus::Selected &&
-		    selection != Graphics::VideoOutHostExtentSetSelectionStatus::StickyMatch)
+		    selection != Graphics::VideoOutHostExtentSetSelectionStatus::ExistingMatch)
 		{
 			EXIT("VideoOut buffer-set host extent conflict: guest=%ux%u requested=%ux%u selected=%ux%u status=%s(%u)\n", width,
 			     height, host_extent.width, host_extent.height, selection_state.width, selection_state.height,
