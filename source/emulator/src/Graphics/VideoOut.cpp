@@ -369,8 +369,9 @@ private:
 	[[nodiscard]] bool CaptureRegisteredImageLocked(VideoOutConfig* cfg, int index,
 	                                                VideoOutRegisteredImageSnapshot* snapshot);
 	[[nodiscard]] bool RegisteredImageMatchesLocked(const VideoOutRegisteredImageSnapshot& snapshot) const;
+	[[nodiscard]] bool SelectRegisteredHostExtentForSnapshot(VideoOutRegisteredImageSnapshot* snapshot);
 	[[nodiscard]] Graphics::VideoOutVulkanImage*
-	ResolveRegisteredImageForSubmission(const VideoOutRegisteredImageSnapshot& snapshot, Graphics::SubmissionId submission);
+	ResolveRegisteredImageForSubmission(VideoOutRegisteredImageSnapshot snapshot, Graphics::SubmissionId submission);
 	[[nodiscard]] VideoOutBufferImageInfo
 	PinImageForSubmission(const void* buffer, Graphics::SubmissionId submission, Graphics::VideoOutMaterializationGate::Pin* pin);
 	[[nodiscard]] Graphics::VideoOutVulkanImage*
@@ -788,7 +789,7 @@ bool VideoOutContext::CaptureRegisteredImageLocked(VideoOutConfig* cfg, int inde
 	}
 
 	const auto& registered = cfg->buffers[index];
-	if (registered.buffer == nullptr || registered.buffer_size == 0 || registered.host_width == 0 || registered.host_height == 0)
+	if (registered.buffer == nullptr || registered.buffer_size == 0 || registered.guest_width == 0 || registered.guest_height == 0)
 	{
 		return false;
 	}
@@ -865,10 +866,101 @@ bool VideoOutContext::RegisteredImageMatchesLocked(const VideoOutRegisteredImage
 	       registered.host_height == snapshot.host_height && registered.set_id == snapshot.set_id;
 }
 
-Graphics::VideoOutVulkanImage*
-VideoOutContext::ResolveRegisteredImageForSubmission(const VideoOutRegisteredImageSnapshot& snapshot,
-                                                     Graphics::SubmissionId submission)
+bool VideoOutContext::SelectRegisteredHostExtentForSnapshot(VideoOutRegisteredImageSnapshot* snapshot)
 {
+	if (snapshot == nullptr || snapshot->guest_width == 0 || snapshot->guest_height == 0)
+	{
+		return false;
+	}
+	if (snapshot->host_width != 0 && snapshot->host_height != 0)
+	{
+		return true;
+	}
+
+	const Graphics::ResolutionExtent guest {snapshot->guest_width, snapshot->guest_height};
+	const auto render_snapshot = Graphics::RenderResolutionGetSnapshot();
+	if (!render_snapshot.guest_registered || render_snapshot.guest_display_extent != guest)
+	{
+		return false;
+	}
+
+	Graphics::ResolutionExtent selected {};
+	if (Graphics::RenderResolutionSelectDisplayHostExtent(guest, guest, nullptr, &selected) !=
+	    Graphics::RenderDisplaySelectionStatus::Selected)
+	{
+		return false;
+	}
+
+	Graphics::VideoOutVulkanImage* images[VIDEO_OUT_NUM_MAX * 16] {};
+	uint32_t                       image_count = 0;
+	{
+		Core::LockGuard lock(m_mutex);
+		if (!RegisteredImageMatchesLocked(*snapshot))
+		{
+			return false;
+		}
+		for (auto& ctx: m_video_out_ctx)
+		{
+			if (!ctx.opened || ctx.closing)
+			{
+				continue;
+			}
+			for (auto& registered: ctx.buffers)
+			{
+				if (registered.buffer == nullptr || registered.guest_width != guest.width || registered.guest_height != guest.height)
+				{
+					continue;
+				}
+				EXIT_IF(image_count >= VIDEO_OUT_NUM_MAX * 16);
+				EXIT_IF(registered.buffer_vulkan == nullptr);
+				images[image_count++] = registered.buffer_vulkan;
+			}
+		}
+	}
+
+	Graphics::VideoOutHostExtentSetState state;
+	switch (Graphics::VideoOutBufferSelectHostExtentSet(images, image_count, selected.width, selected.height, &state))
+	{
+		case Graphics::VideoOutHostExtentSetSelectionStatus::Selected:
+		case Graphics::VideoOutHostExtentSetSelectionStatus::ExistingMatch: break;
+		case Graphics::VideoOutHostExtentSetSelectionStatus::ExistingMismatch:
+		case Graphics::VideoOutHostExtentSetSelectionStatus::InvalidArgument:
+		case Graphics::VideoOutHostExtentSetSelectionStatus::Empty: return false;
+	}
+
+	{
+		Core::LockGuard lock(m_mutex);
+		if (!RegisteredImageMatchesLocked(*snapshot))
+		{
+			return false;
+		}
+		for (auto& ctx: m_video_out_ctx)
+		{
+			if (!ctx.opened || ctx.closing)
+			{
+				continue;
+			}
+			for (auto& registered: ctx.buffers)
+			{
+				if (registered.buffer == nullptr || registered.guest_width != guest.width || registered.guest_height != guest.height)
+				{
+					continue;
+				}
+				registered.host_width  = selected.width;
+				registered.host_height = selected.height;
+			}
+		}
+		snapshot->host_width  = selected.width;
+		snapshot->host_height = selected.height;
+	}
+	return true;
+}
+
+Graphics::VideoOutVulkanImage*
+VideoOutContext::ResolveRegisteredImageForSubmission(VideoOutRegisteredImageSnapshot snapshot, Graphics::SubmissionId submission)
+{
+	EXIT_IF(!SelectRegisteredHostExtentForSnapshot(&snapshot));
+
 	const auto objects = Graphics::GpuMemoryFindObjectsForSubmission(
 	    submission, reinterpret_cast<uint64_t>(snapshot.buffer), snapshot.buffer_size,
 	    Graphics::GpuMemoryObjectType::VideoOutBuffer, true, true);

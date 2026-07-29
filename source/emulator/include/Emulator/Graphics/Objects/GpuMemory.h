@@ -386,7 +386,7 @@ inline bool GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType existing_type, 
 }
 
 // Incoming RenderTexture sharing guest memory with existing surfaces or partial
-// VertexBuffers. Captured multi-parent sets after Param5:
+// VertexBuffers. Supported multi-parent forms:
 //   - StorageBuffer Equals + StorageBuffer Contains + RenderTexture Contains
 //   - RenderTexture Contains + StorageBuffer Contains + StorageBuffer Equals
 //   - VertexBuffer Contains + StorageBuffer/RenderTexture surface parents
@@ -403,6 +403,10 @@ inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing
 	if (existing_type == GpuMemoryObjectType::DepthStencilBuffer)
 	{
 		return relation == GpuMemoryOverlapType::Crosses;
+	}
+	if (existing_type == GpuMemoryObjectType::VideoOutBuffer)
+	{
+		return relation == GpuMemoryOverlapType::Equals;
 	}
 	if (existing_type == GpuMemoryObjectType::StorageBuffer || existing_type == GpuMemoryObjectType::RenderTexture ||
 	    existing_type == GpuMemoryObjectType::Texture || existing_type == GpuMemoryObjectType::StorageTexture)

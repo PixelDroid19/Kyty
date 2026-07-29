@@ -7060,6 +7060,10 @@ bool GraphicsResolveRectListAutoDraw(uint32_t primitive_type, uint32_t index_cou
 	return true;
 }
 
+static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
+                                           HW::Shader* sh_ctx, uint32_t index_count, uint32_t index_type_and_size,
+                                           const void* index_addr);
+
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint32_t flags, uint32_t type)
 {
@@ -7075,6 +7079,26 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	if (GraphicsRenderColorResolve(submit_id, buffer, *ctx))
 	{
+		return;
+	}
+	const bool depth_stencil_copy = ctx->GetRenderControl().depth_copy || ctx->GetRenderControl().stencil_copy;
+	if (depth_stencil_copy)
+	{
+		uc_print("GraphicsRenderDrawIndex():UserConfig:", *ucfg);
+		uc_check(*ucfg);
+
+		hw_print(*ctx);
+		hw_check(*ctx, true);
+
+		printf("GraphicsRenderDrawIndex():Parameters:\n");
+		printf("\t index_type_and_size = 0x%08" PRIx32 "\n", index_type_and_size);
+		printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
+		printf("\t index_addr          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
+		printf("\t flags               = 0x%08" PRIx32 "\n", flags);
+		printf("\t type                = 0x%08" PRIx32 "\n", type);
+
+		EXIT_NOT_IMPLEMENTED(flags != 0 && flags != 0x40000000u && flags != 0x80000000u);
+		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, index_type_and_size, index_addr);
 		return;
 	}
 
@@ -7136,7 +7160,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 			break;
 	}
 
-	// Gen5 draw modifiers: 0 (legacy), 0x40000000 (default AGC), 0x80000000 (Astro).
+	// Gen5 draw modifiers are command-processor bookkeeping bits; they do not
+	// change the Vulkan draw.
 	EXIT_NOT_IMPLEMENTED(flags != 0 && flags != 0x40000000u && flags != 0x80000000u);
 	EXIT_NOT_IMPLEMENTED(type != 1);
 
@@ -7368,24 +7393,33 @@ static void GraphicsRenderDepthStencilCopySetDrawArea(const HW::Context& context
 
 static void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* buffer, VulkanFramebuffer* framebuffer,
 	                                                   RenderColorInfo* color, RenderDepthInfo* depth,
-	                                                   const DepthStencilCopyRequest& request, bool guest_triangle_strip,
-	                                                   const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count)
+	                                                   const DepthStencilCopyRequest& request, bool guest_geometry,
+	                                                   const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count,
+	                                                   VulkanBuffer* index_buffer, VkIndexType index_type, int32_t vertex_offset)
 {
 	EXIT_IF(buffer == nullptr || framebuffer == nullptr || color == nullptr || depth == nullptr);
-	EXIT_IF(guest_triangle_strip && guest_vertex_input == nullptr);
+	EXIT_IF(guest_geometry && guest_vertex_input == nullptr);
+	EXIT_IF(index_buffer != nullptr && !guest_geometry);
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 	buffer->BeginRenderPass(framebuffer, color, depth, &request.sample_locations);
 	auto* depth_stencil_copy_renderer = g_render_ctx->GetDepthStencilCopyRenderer();
 	const auto draw = depth_stencil_copy_renderer->PrepareDraw(g_render_ctx->GetGraphicCtx(), request);
 	depth_stencil_copy_renderer->BindPreparedDraw(vk_buffer, draw);
-	if (guest_triangle_strip)
+	if (guest_geometry)
 	{
 		BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, guest_vertex_input->bind,
 		                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
 		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input);
-		const uint32_t first_vertex = static_cast<uint32_t>(ShaderResolveVertexOffset(0, *guest_vertex_input));
-		vkCmdDraw(vk_buffer, index_count, 1, first_vertex, 0);
+		if (index_buffer != nullptr)
+		{
+			vkCmdBindIndexBuffer(vk_buffer, index_buffer->buffer, 0, index_type);
+			vkCmdDrawIndexed(vk_buffer, index_count, 1, 0, vertex_offset, 0);
+		} else
+		{
+			const uint32_t first_vertex = static_cast<uint32_t>(vertex_offset);
+			vkCmdDraw(vk_buffer, index_count, 1, first_vertex, 0);
+		}
 	} else
 	{
 		vkCmdDraw(vk_buffer, 3, 1, 0, 0);
@@ -7397,11 +7431,12 @@ static void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandB
 static void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 	uint64_t submit_id, CommandBuffer* buffer, const HW::Context& context, RenderDepthInfo* source_info,
 	const VulkanSampleLocationState& sample_locations, bool apply_clear,
-	bool effective_depth_write, bool guest_triangle_strip, const DepthStencilCopyVertexStage* vertex_stage,
-	const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count)
+	bool effective_depth_write, bool guest_geometry, const DepthStencilCopyVertexStage* vertex_stage,
+	const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count, VulkanBuffer* index_buffer, VkIndexType index_type,
+	int32_t vertex_offset)
 {
 	EXIT_IF(buffer == nullptr || source_info == nullptr);
-	EXIT_IF(guest_triangle_strip && guest_vertex_input == nullptr);
+	EXIT_IF(guest_geometry && guest_vertex_input == nullptr);
 
 	auto* source = source_info->vulkan_buffer;
 	EXIT_NOT_IMPLEMENTED(source == nullptr || source->samples != sample_locations.sample_count);
@@ -7430,15 +7465,16 @@ static void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 	GraphicsRenderDepthStencilCopySetStencilTest(&request.stencil_test, draw_depth, true);
 	request.vertex_stage = vertex_stage;
 	const auto source_guest = source->GetGuestExtent();
-	GraphicsRenderDepthStencilCopySetDrawArea(context, guest_triangle_strip, source_guest, source->extent, &request);
-	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &no_color, &draw_depth, request, guest_triangle_strip,
-	                                        guest_vertex_input, index_count);
+	GraphicsRenderDepthStencilCopySetDrawArea(context, guest_geometry, source_guest, source->extent, &request);
+	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &no_color, &draw_depth, request, guest_geometry,
+	                                        guest_vertex_input, index_count, index_buffer, index_type, vertex_offset);
 
 	InvalidateMemoryObject(draw_depth);
 }
 
 static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
-                                           HW::Shader* sh_ctx, uint32_t index_count)
+                                           HW::Shader* sh_ctx, uint32_t index_count, uint32_t index_type_and_size,
+                                           const void* index_addr)
 {
 	EXIT_IF(buffer == nullptr || ctx == nullptr || ucfg == nullptr || sh_ctx == nullptr);
 
@@ -7450,16 +7486,19 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	    State::ResolveColorWriteMask(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters().m_cbShaderMask, 0);
 	const bool color_expansion_enabled = (color_write_mask != 0);
 
-	// Rect-list copies synthesize full-target geometry. Triangle strips retain
-	// the guest vertex stage so the expansion covers exactly the guest pixels.
+	// Rect-list copies synthesize full-target geometry. Guest draws retain the
+	// vertex stage so the expansion covers exactly the guest pixels.
 	EXIT_NOT_IMPLEMENTED(!render_control.depth_copy || !render_control.stencil_copy);
 	EXIT_NOT_IMPLEMENTED(depth_info.format == VK_FORMAT_UNDEFINED);
 	VulkanSampleLocationState sample_locations {};
 	aa_check_for_attachment_samples(*ctx, depth_info.samples, &sample_locations);
 	const bool stencil_test_required = depth_info.stencil_test_enable;
 	const bool depth_stencil_write = effective_depth_write || GraphicsRenderDepthStencilCopyStencilTestWrites(depth_info);
-	const bool static_rect_list   = (ucfg->GetPrimType() == 7 && index_count == 3);
-	const bool guest_triangle_strip = (ucfg->GetPrimType() == 6 && index_count == 3);
+	const bool indexed_draw        = (index_addr != nullptr);
+	const bool static_rect_list    = (!indexed_draw && ucfg->GetPrimType() == 7 && index_count == 3);
+	const bool guest_triangle_strip = (!indexed_draw && ucfg->GetPrimType() == 6 && index_count == 3);
+	const bool guest_triangle_list  = (indexed_draw && ucfg->GetPrimType() == 4 && index_count >= 3 && (index_count % 3) == 0);
+	const bool guest_geometry       = guest_triangle_strip || guest_triangle_list;
 	if (!color_expansion_enabled && !depth_stencil_write)
 	{
 		// DB validation disables the color expansion when its effective component
@@ -7473,18 +7512,46 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 		}
 		return;
 	}
-	if (!static_rect_list && !guest_triangle_strip)
+	if (!static_rect_list && !guest_geometry)
 	{
 		std::fprintf(stderr, "KYTY_GRAPHICS: unsupported depth-stencil-copy primitive=%u count=%u\n", ucfg->GetPrimType(),
 		             index_count);
-		EXIT_NOT_IMPLEMENTED(!static_rect_list && !guest_triangle_strip);
+		EXIT_NOT_IMPLEMENTED(!static_rect_list && !guest_geometry);
 	}
 	ShaderVertexInputInfo        guest_vertex_input {};
 	ShaderId                     guest_vertex_id {};
 	ShaderTranslationCacheResult guest_vertex_translation {};
 	DepthStencilCopyVertexStage  guest_vertex_stage {};
 	const DepthStencilCopyVertexStage* request_vertex_stage = nullptr;
-	if (guest_triangle_strip)
+	VulkanBuffer*                indices               = nullptr;
+	VkIndexType                  index_type            = VK_INDEX_TYPE_UINT16;
+	int32_t                      vertex_offset         = 0;
+	if (indexed_draw)
+	{
+		uint64_t index_size = 0;
+		switch (index_type_and_size)
+		{
+			case 0:
+				index_type = VK_INDEX_TYPE_UINT16;
+				index_size = 2 * static_cast<uint64_t>(index_count);
+				break;
+			case 1:
+				index_type = VK_INDEX_TYPE_UINT32;
+				index_size = 4 * static_cast<uint64_t>(index_count);
+				break;
+			default:
+				EXIT_NOT_IMPLEMENTED(index_type_and_size != 0 && index_type_and_size != 1);
+		}
+		const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
+		indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		if (indices == nullptr)
+		{
+			indices = static_cast<VulkanBuffer*>(
+			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
+		}
+		EXIT_NOT_IMPLEMENTED(indices == nullptr);
+	}
+	if (guest_geometry)
 	{
 		if (vertex_shader_is_disabled(sh_ctx))
 		{
@@ -7523,20 +7590,22 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 		guest_vertex_stage.shader_id        = &guest_vertex_id;
 		guest_vertex_stage.shader_words     = guest_vertex_translation.binary.GetDataConst();
 		guest_vertex_stage.shader_word_count = guest_vertex_translation.binary.Size();
-		guest_vertex_stage.topology         = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+		guest_vertex_stage.topology         = guest_triangle_list ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+		                                                          : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
 		guest_vertex_stage.cull_front       = mode.cull_front;
 		guest_vertex_stage.cull_back        = mode.cull_back;
 		guest_vertex_stage.face             = mode.face;
 		guest_vertex_stage.dx_clip_space    = ctx->GetClipControl().dx_clip_space;
 		request_vertex_stage                 = &guest_vertex_stage;
+		vertex_offset                        = ShaderResolveVertexOffset(indexed_draw ? ucfg->GetIndexOffset() : 0, guest_vertex_input);
 	}
 
 	if (!color_expansion_enabled)
 	{
 		MaterializeRenderDepthInfo(submit_id, buffer, &depth_info, 0, 0, &sample_locations);
 		GraphicsRenderDepthStencilCopyWriteDepthStencil(
-		    submit_id, buffer, *ctx, &depth_info, sample_locations, true, effective_depth_write, guest_triangle_strip, request_vertex_stage,
-		    (guest_triangle_strip ? &guest_vertex_input : nullptr), index_count);
+		    submit_id, buffer, *ctx, &depth_info, sample_locations, true, effective_depth_write, guest_geometry, request_vertex_stage,
+		    (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices, index_type, vertex_offset);
 		return;
 	}
 
@@ -7629,9 +7698,10 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	request.depth_test.compare_op = copy_depth.depth_compare_op;
 	GraphicsRenderDepthStencilCopySetStencilTest(&request.stencil_test, copy_depth, false);
 	request.vertex_stage = request_vertex_stage;
-	GraphicsRenderDepthStencilCopySetDrawArea(*ctx, guest_triangle_strip, target_guest, target->extent, &request);
+	GraphicsRenderDepthStencilCopySetDrawArea(*ctx, guest_geometry, target_guest, target->extent, &request);
 	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &color_info, depth_attachment, request,
-	                                        guest_triangle_strip, (guest_triangle_strip ? &guest_vertex_input : nullptr), index_count);
+	                                        guest_geometry, (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices,
+	                                        index_type, vertex_offset);
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
 	InvalidateMemoryObject(color_info);
@@ -7640,9 +7710,9 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 		// The expansion samples the source in a read-only layout. Commit matching
 		// depth/stencil side effects only after that sampled pass has completed.
 		GraphicsRenderDepthStencilCopyWriteDepthStencil(
-		    submit_id, buffer, *ctx, &source_setup, sample_locations, false, effective_depth_write, guest_triangle_strip,
+		    submit_id, buffer, *ctx, &source_setup, sample_locations, false, effective_depth_write, guest_geometry,
 		    request_vertex_stage,
-		    (guest_triangle_strip ? &guest_vertex_input : nullptr), index_count);
+		    (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices, index_type, vertex_offset);
 	} else if (source_modified)
 	{
 		InvalidateMemoryObject(source_setup);
@@ -7678,12 +7748,12 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
 		printf("\t flags               = 0x%08" PRIx32 "\n", flags);
 
-		// Gen5 draw modifiers: 0 (legacy), 0x40000000 (default AGC), 0x80000000 (Astro).
-		// These are initiator bookkeeping bits; they do not change the Vulkan draw.
+		// Gen5 draw modifiers are command-processor bookkeeping bits; they do not
+		// change the Vulkan draw.
 		EXIT_NOT_IMPLEMENTED(flags != 0 && flags != 0x40000000u && flags != 0x80000000u);
 		EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
 
-		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count);
+		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, UINT32_MAX, nullptr);
 		return;
 	}
 
