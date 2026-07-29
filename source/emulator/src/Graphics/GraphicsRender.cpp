@@ -6744,12 +6744,21 @@ static void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline
 	}
 }
 
-static bool shader_is_disabled(HW::Shader* sh_ctx)
+static bool vertex_shader_is_disabled(HW::Shader* sh_ctx)
 {
 	if (const auto& vs = sh_ctx->GetVs();
 	    !vs.vs_embedded && ((vs.vs_regs.data_addr != 0 && ShaderIsDisabled(vs.vs_regs.data_addr)) ||
 	                        (vs.vs_regs.data_addr == 0 && vs.gs_regs.data_addr == 0 && vs.es_regs.data_addr != 0 &&
 	                         vs.gs_regs.chksum != 0 && ShaderIsDisabled2(vs.es_regs.data_addr, vs.gs_regs.chksum))))
+	{
+		return true;
+	}
+	return false;
+}
+
+static bool shader_is_disabled(HW::Shader* sh_ctx)
+{
+	if (vertex_shader_is_disabled(sh_ctx))
 	{
 		return true;
 	}
@@ -6982,9 +6991,8 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	const auto& stencil_control = ctx->GetStencilControl();
 	const auto& stencil_mask    = ctx->GetStencilMask();
 
-	// The fixed-function expansion has no guest shader inputs. This path is
-	// intentionally limited to the single-sample full-target operation observed
-	// on the hardware command stream.
+	// Rect-list copies synthesize full-target geometry. Triangle strips retain
+	// the guest vertex stage so the expansion covers exactly the guest pixels.
 	EXIT_NOT_IMPLEMENTED(!render_control.depth_copy || !render_control.stencil_copy);
 	// Resummarization and decompression update the guest depth metadata. Vulkan
 	// owns the corresponding compression state once the source is attached.
@@ -6998,20 +7006,81 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	    (depth_control.stencil_enable && !full_target_stencil_replace && !full_target_stencil_keep))
 	{
 		std::fprintf(stderr,
-		             "KYTY_GRAPHICS: unsupported depth-stencil-copy depth-control z-test=%u z-write=%u stencil-test=%u zfunc=%u "
-		             "stencilfunc=%u stencilfunc-bf=%u backface=%u stencil-ops=%u,%u,%u mask=%u write-mask=%u\n",
-		             depth_control.z_enable, depth_control.z_write_enable, depth_control.stencil_enable, depth_control.zfunc,
+		             "KYTY_GRAPHICS: unsupported depth-stencil-copy primitive=%u count=%u depth-control z-test=%u z-write=%u "
+		             "stencil-test=%u zfunc=%u stencilfunc=%u stencilfunc-bf=%u backface=%u stencil-ops=%u,%u,%u mask=%u "
+		             "write-mask=%u\n",
+		             ucfg->GetPrimType(), index_count, depth_control.z_enable, depth_control.z_write_enable, depth_control.stencil_enable,
+		             depth_control.zfunc,
 		             depth_control.stencilfunc, depth_control.stencilfunc_bf, depth_control.backface_enable, stencil_control.stencil_fail,
 		             stencil_control.stencil_zpass, stencil_control.stencil_zfail, stencil_mask.stencil_mask, stencil_mask.stencil_writemask);
 		EXIT_NOT_IMPLEMENTED(depth_control.z_enable || depth_control.z_write_enable ||
 		                     (depth_control.stencil_enable && !full_target_stencil_replace && !full_target_stencil_keep));
 	}
 	EXIT_NOT_IMPLEMENTED(ctx->GetRenderTargetMask() != 0x0000000fu);
-	if (ucfg->GetPrimType() != 7 || index_count != 3)
+	const bool static_rect_list   = (ucfg->GetPrimType() == 7 && index_count == 3);
+	const bool guest_triangle_strip = (ucfg->GetPrimType() == 6 && index_count == 3);
+	if (!static_rect_list && !guest_triangle_strip)
 	{
 		std::fprintf(stderr, "KYTY_GRAPHICS: unsupported depth-stencil-copy primitive=%u count=%u\n", ucfg->GetPrimType(),
 		             index_count);
-		EXIT_NOT_IMPLEMENTED(ucfg->GetPrimType() != 7 || index_count != 3);
+		EXIT_NOT_IMPLEMENTED(!static_rect_list && !guest_triangle_strip);
+	}
+	if (guest_triangle_strip && full_target_stencil_replace)
+	{
+		std::fprintf(stderr, "KYTY_GRAPHICS: guest-geometry depth-stencil copy cannot replace the source stencil plane\n");
+		EXIT_NOT_IMPLEMENTED(full_target_stencil_replace);
+	}
+
+	ShaderVertexInputInfo        guest_vertex_input {};
+	ShaderId                     guest_vertex_id {};
+	ShaderTranslationCacheResult guest_vertex_translation {};
+	DepthStencilCopyVertexStage  guest_vertex_stage {};
+	const DepthStencilCopyVertexStage* request_vertex_stage = nullptr;
+	if (guest_triangle_strip)
+	{
+		if (vertex_shader_is_disabled(sh_ctx))
+		{
+			return;
+		}
+
+		const auto& vertex_shader_info = sh_ctx->GetVs();
+		const auto& shader_registers   = ctx->GetShaderRegisters();
+		ShaderGetInputInfoVS(&vertex_shader_info, &shader_registers, &guest_vertex_input);
+		guest_vertex_id = ShaderGetIdVS(&vertex_shader_info, &guest_vertex_input);
+
+		auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
+		EXIT_IF(translation_cache == nullptr);
+		guest_vertex_translation = translation_cache->GetOrCompile(
+		    ShaderModuleKey::Create(guest_vertex_id, ShaderModuleStage::Vertex, Config::GetShaderOptimizationType(),
+		                            Config::IsNextGen(), Config::SpirvDebugPrintfEnabled()),
+		    [&]
+		    {
+			    auto vertex_code = ShaderParseVS(&vertex_shader_info, &shader_registers);
+			    return ShaderRecompileVS(vertex_code, &guest_vertex_input);
+		    });
+		DebugStatsRecordShaderTranslationCache(guest_vertex_translation.hit, guest_vertex_translation.evicted);
+		EXIT_NOT_IMPLEMENTED(guest_vertex_translation.binary.IsEmpty());
+
+		if (ShaderBindRequiresDescriptorSet(guest_vertex_input.bind))
+		{
+			EXIT_NOT_IMPLEMENTED(guest_vertex_input.bind.descriptor_set_slot != 0);
+			guest_vertex_stage.descriptor_set_layout =
+			    g_render_ctx->GetDescriptorCache()->GetDescriptorSetLayout(DescriptorCache::Stage::Vertex, guest_vertex_input.bind);
+			EXIT_NOT_IMPLEMENTED(guest_vertex_stage.descriptor_set_layout == nullptr);
+		}
+
+		const auto& mode = ctx->GetModeControl();
+		guest_vertex_stage.input            = &guest_vertex_input;
+		guest_vertex_stage.bind             = &guest_vertex_input.bind;
+		guest_vertex_stage.shader_id        = &guest_vertex_id;
+		guest_vertex_stage.shader_words     = guest_vertex_translation.binary.GetDataConst();
+		guest_vertex_stage.shader_word_count = guest_vertex_translation.binary.Size();
+		guest_vertex_stage.topology         = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+		guest_vertex_stage.cull_front       = mode.cull_front;
+		guest_vertex_stage.cull_back        = mode.cull_back;
+		guest_vertex_stage.face             = mode.face;
+		guest_vertex_stage.dx_clip_space    = ctx->GetClipControl().dx_clip_space;
+		request_vertex_stage                 = &guest_vertex_stage;
 	}
 
 	RenderDepthInfo depth_info;
@@ -7046,7 +7115,7 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	EXIT_NOT_IMPLEMENTED(source->memory.unique_id == target->memory.unique_id);
 
 	RenderDepthInfo source_setup = depth_info;
-	if (full_target_stencil_replace)
+	if (static_rect_list && full_target_stencil_replace)
 	{
 		// This full-target rect compares stencil unconditionally and replaces all
 		// bits with the reference value. A Vulkan clear establishes the same source
@@ -7054,8 +7123,16 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 		source_setup.stencil_clear_enable = true;
 		source_setup.stencil_clear_value  = stencil_mask.stencil_testval;
 	}
+	if (guest_triangle_strip && source_setup.stencil_clear_enable)
+	{
+		std::fprintf(stderr,
+		             "KYTY_GRAPHICS: guest-geometry depth-stencil copy cannot materialize source stencil clear metadata\n");
+		EXIT_NOT_IMPLEMENTED(source_setup.stencil_clear_enable);
+	}
 	if (source_setup.depth_clear_enable || source_setup.stencil_clear_enable)
 	{
+		// A deferred depth clear initializes the complete sampled source plane;
+		// it is independent of the geometry used for the color expansion.
 		RenderColorInfo no_color;
 		auto* source_framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&no_color, &source_setup);
 		EXIT_NOT_IMPLEMENTED(source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr);
@@ -7076,9 +7153,71 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	request.render_pass    = framebuffer->render_pass;
 	request.render_pass_id = framebuffer->render_pass_id;
 	request.extent         = target->extent;
+	request.vertex_stage    = request_vertex_stage;
+	if (guest_triangle_strip)
+	{
+		const auto& screen_viewport = ctx->GetScreenViewport();
+		const auto  guest_xy = State::ResolveViewportXy(screen_viewport.viewports[0].xscale, screen_viewport.viewports[0].xoffset,
+		                                                 screen_viewport.viewports[0].yscale, screen_viewport.viewports[0].yoffset);
+		const auto guest_depth = State::ResolveViewportDepth(
+		    screen_viewport.viewports[0].zscale, screen_viewport.viewports[0].zoffset, ctx->GetClipControl().dx_clip_space,
+		    g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported);
+		const auto guest_scissor = State::ResolveScissor(screen_viewport, ctx->GetScanModeControl(), 0);
+
+		ResolutionCoordinateTransform transform {};
+		const ResolutionExtent guest_extent {target_guest.width, target_guest.height};
+		const ResolutionExtent host_extent {target->extent.width, target->extent.height};
+		EXIT_NOT_IMPLEMENTED(CreateResolutionCoordinateTransform(guest_extent, host_extent, &transform) != ResolutionCoordinateStatus::Success);
+
+		const ResolutionViewport guest_viewport {guest_xy.x, guest_xy.y, guest_xy.width, guest_xy.height, guest_depth.min_depth,
+		                                         guest_depth.max_depth};
+		ResolutionViewport host_viewport {};
+		EXIT_NOT_IMPLEMENTED(MapResolutionViewport(transform, guest_viewport, &host_viewport) != ResolutionCoordinateStatus::Success);
+
+		const ResolutionScissorRect guest_scissor_rect {guest_scissor.left, guest_scissor.top, guest_scissor.right,
+		                                                guest_scissor.bottom};
+		ResolutionScissorRect host_scissor {};
+		EXIT_NOT_IMPLEMENTED(MapResolutionScissor(transform, guest_scissor_rect, &host_scissor) != ResolutionCoordinateStatus::Success);
+		EXIT_NOT_IMPLEMENTED(host_scissor.left < 0 || host_scissor.top < 0 || host_scissor.right < host_scissor.left ||
+		                     host_scissor.bottom < host_scissor.top || static_cast<uint64_t>(host_scissor.right) > target->extent.width ||
+		                     static_cast<uint64_t>(host_scissor.bottom) > target->extent.height);
+
+		request.viewport.x        = static_cast<float>(host_viewport.x);
+		request.viewport.y        = static_cast<float>(host_viewport.y);
+		request.viewport.width    = static_cast<float>(host_viewport.width);
+		request.viewport.height   = static_cast<float>(host_viewport.height);
+		request.viewport.minDepth = static_cast<float>(host_viewport.min_depth);
+		request.viewport.maxDepth = static_cast<float>(host_viewport.max_depth);
+		request.scissor.offset    = {static_cast<int32_t>(host_scissor.left), static_cast<int32_t>(host_scissor.top)};
+		request.scissor.extent    = {static_cast<uint32_t>(host_scissor.right - host_scissor.left),
+		                             static_cast<uint32_t>(host_scissor.bottom - host_scissor.top)};
+	} else
+	{
+		request.viewport.x        = 0.0f;
+		request.viewport.y        = 0.0f;
+		request.viewport.width    = static_cast<float>(target->extent.width);
+		request.viewport.height   = static_cast<float>(target->extent.height);
+		request.viewport.minDepth = 0.0f;
+		request.viewport.maxDepth = 1.0f;
+		request.scissor.offset    = {0, 0};
+		request.scissor.extent    = target->extent;
+	}
 
 	buffer->BeginRenderPass(framebuffer, &color_info, &no_depth);
-	g_render_ctx->GetDepthStencilCopyRenderer()->Render(g_render_ctx->GetGraphicCtx(), vk_buffer, request);
+	auto* depth_stencil_copy_renderer = g_render_ctx->GetDepthStencilCopyRenderer();
+	const auto draw = depth_stencil_copy_renderer->PrepareDraw(g_render_ctx->GetGraphicCtx(), request);
+	depth_stencil_copy_renderer->BindPreparedDraw(vk_buffer, draw);
+	if (guest_triangle_strip)
+	{
+		BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, guest_vertex_input.bind,
+		                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
+		BindVertexBuffers(submit_id, buffer, vk_buffer, guest_vertex_input);
+		const uint32_t first_vertex = static_cast<uint32_t>(ShaderResolveVertexOffset(0, guest_vertex_input));
+		vkCmdDraw(vk_buffer, index_count, 1, first_vertex, 0);
+	} else
+	{
+		vkCmdDraw(vk_buffer, 3, 1, 0, 0);
+	}
 	DebugStatsRecordDraw();
 	buffer->EndRenderPass();
 
