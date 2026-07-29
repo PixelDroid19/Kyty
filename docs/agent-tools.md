@@ -24,8 +24,7 @@ export KYTY_AGENT_ENDPOINT=/tmp/kyty-agent-dev.sock
 ./_build_linux/agent/kyty_agent wait-ready --timeout-ms 30000
 ```
 
-`--endpoint ENDPOINT` overrides the environment. `--sock` and
-`KYTY_AGENT_SOCK` remain compatibility aliases.
+`--endpoint ENDPOINT` overrides `KYTY_AGENT_ENDPOINT`.
 
 ## Diagnostic workflow
 

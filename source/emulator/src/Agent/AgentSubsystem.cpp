@@ -18,7 +18,7 @@ KYTY_SUBSYSTEM_INIT(AgentTools)
 
 	if (!StartFromEnv())
 	{
-		KYTY_SUBSYSTEM_FAIL("agent tools failed to start from KYTY_AGENT_SOCK");
+		KYTY_SUBSYSTEM_FAIL("agent tools failed to start from KYTY_AGENT_ENDPOINT");
 	}
 }
 

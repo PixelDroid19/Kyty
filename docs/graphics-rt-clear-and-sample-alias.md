@@ -146,12 +146,12 @@ _build_macos/fc_script '{kyty_run_tests()}' \
 
 # Authorized private fixture only; path stays in the environment
 export KYTY_GUEST_ROOT=...
-export KYTY_AGENT_SOCK=/tmp/kyty-agent.sock
+export KYTY_AGENT_ENDPOINT=/tmp/kyty-agent.sock
 export KYTY_NATIVE_CAPTURE_DIR=...   # untracked
 
 _build_macos/fc_script scripts/run_guest.lua "$KYTY_GUEST_ROOT"
-_build_macos/agent/kyty_agent --sock "$KYTY_AGENT_SOCK" status
-_build_macos/agent/kyty_agent --sock "$KYTY_AGENT_SOCK" capture
+_build_macos/agent/kyty_agent --endpoint "$KYTY_AGENT_ENDPOINT" status
+_build_macos/agent/kyty_agent --endpoint "$KYTY_AGENT_ENDPOINT" capture
 ```
 
 Judge captures against a same-scene reference: opaque black sprite boxes and

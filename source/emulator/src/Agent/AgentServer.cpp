@@ -1053,10 +1053,6 @@ bool StartFromEnv()
 	const char* endpoint = std::getenv("KYTY_AGENT_ENDPOINT");
 	if (endpoint == nullptr || endpoint[0] == '\0')
 	{
-		endpoint = std::getenv("KYTY_AGENT_SOCK");
-	}
-	if (endpoint == nullptr || endpoint[0] == '\0')
-	{
 		return true;
 	}
 	if (!Kyty::Agent::LocalTransport::IsValidEndpoint(endpoint))

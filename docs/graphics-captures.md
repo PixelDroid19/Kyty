@@ -82,8 +82,8 @@ fence, reads the source image through `UtilFillBuffer`, and emits a structured
 emulator; the external runner only coordinates timing and manifest collection.
 
 For **realtime agent control** without Python or `xdotool`, start the emulator
-with `KYTY_AGENT_SOCK` and use the native `kyty_agent` CLI (`docs/agent-tools.md`).
-That path talks to the emulator over a local Unix socket for `status`,
+with `KYTY_AGENT_ENDPOINT` and use the native `kyty_agent` CLI (`docs/agent-tools.md`).
+That path talks to the emulator over a local endpoint for `status`,
 `capture`, pad edges, and structured events while the guest is running.
 
 `--key-at FRAME:KEY` still schedules a single press/release edge through

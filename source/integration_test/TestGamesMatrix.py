@@ -130,7 +130,7 @@ class StrictEnvTests(unittest.TestCase):
         self.assertEqual(runner.find_forbidden_environment_keys(env), [])
         self.assertEqual(env["KYTY_PRINTF_DIRECTION"], "Silent")
         self.assertIn("KYTY_GUEST_ROOT", env)
-        self.assertIn("KYTY_AGENT_SOCK", env)
+        self.assertIn("KYTY_AGENT_ENDPOINT", env)
 
     def test_bringup_child_env_uses_only_central_policy(self) -> None:
         with tempfile.TemporaryDirectory() as td:

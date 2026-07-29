@@ -84,7 +84,7 @@ def build_child_environment(
         }
     )
     if agent_socket is not None:
-        env["KYTY_AGENT_SOCK"] = str(agent_socket)
+        env["KYTY_AGENT_ENDPOINT"] = str(agent_socket)
     for key in optional_values:
         if base.get(key):
             env[key] = base[key]

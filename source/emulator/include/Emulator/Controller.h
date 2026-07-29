@@ -59,8 +59,8 @@ void ControllerDisconnect(int id);
 void ControllerButton(int id, uint32_t button, bool down);
 void ControllerAxis(int id, Axis axis, int value);
 
-// Diagnostic agent overlay (KYTY_AGENT_SOCK tools). OR-ed into PadReadState/PadRead
-// separately from KYTY_AUTO_CROSS. Not gameplay acceptance.
+// Diagnostic agent overlay. OR-ed into PadReadState/PadRead separately from
+// KYTY_AUTO_CROSS. Not gameplay acceptance.
 bool AgentPadButtonFromName(const char* name, uint32_t* out_button);
 bool AgentPadAxisFromName(const char* name, Axis* out_axis);
 void AgentPadSetButton(uint32_t button, bool down);

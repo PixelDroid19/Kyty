@@ -9,8 +9,8 @@
 
 namespace Kyty::Emulator::Agent {
 
-// Opt-in realtime agent control plane. Starts only when KYTY_AGENT_SOCK is an
-// absolute Unix socket path. Disabled by default (no thread, no behavior change).
+// Opt-in realtime agent control plane. Starts only when KYTY_AGENT_ENDPOINT is
+// set to a valid local endpoint. Disabled by default.
 bool               StartFromEnv();
 void               Stop();
 [[nodiscard]] bool Active();

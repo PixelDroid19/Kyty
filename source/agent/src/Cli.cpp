@@ -48,7 +48,6 @@ void PrintUsage()
 	                     "\n"
 	                     "Windows endpoint: \\\\.\\pipe\\NAME. Linux/macOS endpoint: /absolute/socket/path.\n"
 	                     "Start the emulator with KYTY_AGENT_ENDPOINT=ENDPOINT.\n"
-	                     "--sock and KYTY_AGENT_SOCK remain compatible aliases.\n"
 	                     "Pad input is diagnostic_input, not gameplay acceptance.\n"
 	                     "status.phase: not_ready|booting|loading|interactive|stalled (use wait-phase).\n"
 	                     "Prefer wait-ready → wait-phase / wait-present --delta over absolute --min with long sleeps.\n"
@@ -294,7 +293,7 @@ int Main(int argc, char** argv)
 	int         i        = 1;
 	for (; i < argc; ++i)
 	{
-		if (std::strcmp(argv[i], "--endpoint") == 0 || std::strcmp(argv[i], "--sock") == 0)
+		if (std::strcmp(argv[i], "--endpoint") == 0)
 		{
 			const char* flag = argv[i];
 			endpoint         = RequireArg(argc, argv, &i, flag);
@@ -309,21 +308,12 @@ int Main(int argc, char** argv)
 			endpoint = argv[i] + 11;
 			continue;
 		}
-		if (std::strncmp(argv[i], "--sock=", 7) == 0)
-		{
-			endpoint = argv[i] + 7;
-			continue;
-		}
 		break;
 	}
 
 	if (endpoint == nullptr)
 	{
 		endpoint = std::getenv("KYTY_AGENT_ENDPOINT");
-	}
-	if (endpoint == nullptr || endpoint[0] == '\0')
-	{
-		endpoint = std::getenv("KYTY_AGENT_SOCK");
 	}
 	if (endpoint == nullptr || endpoint[0] == '\0')
 	{

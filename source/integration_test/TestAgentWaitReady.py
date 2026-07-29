@@ -48,7 +48,7 @@ def main() -> int:
             return 1
 
         completed = subprocess.run(
-            [sys.argv[1], "--sock", sock_path, "wait-ready", "--timeout-ms", "2000"],
+            [sys.argv[1], "--endpoint", sock_path, "wait-ready", "--timeout-ms", "2000"],
             check=False,
             capture_output=True,
             text=True,
