@@ -1451,7 +1451,7 @@ static void bc_check(const HW::BlendControl& /*c*/, const HW::BlendColor& color,
 	EXIT_NOT_IMPLEMENTED(!std::isfinite(color.green));
 	EXIT_NOT_IMPLEMENTED(!std::isfinite(color.blue));
 	EXIT_NOT_IMPLEMENTED(!std::isfinite(color.alpha));
-	EXIT_NOT_IMPLEMENTED(cc.mode != 1 && cc.mode != 0);
+	EXIT_NOT_IMPLEMENTED(cc.mode != 3 && cc.mode != 1 && cc.mode != 0);
 	EXIT_NOT_IMPLEMENTED(cc.op != 0xCC);
 }
 
@@ -4720,7 +4720,8 @@ static void GraphicsRenderRenderTextureBarrier(VkCommandBuffer vk_buffer, Vulkan
 
 	// Sample bind may alias a live color RT or a storage image written by
 	// compute; both need SHADER_READ_ONLY before the draw samples them.
-	if (image->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL || image->layout == VK_IMAGE_LAYOUT_GENERAL)
+	if (image->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL || image->layout == VK_IMAGE_LAYOUT_GENERAL ||
+	    image->layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL || image->layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
 	{
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -5040,35 +5041,19 @@ static void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw, RenderColorInfo* r)
+static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderTarget& rt, RenderColorInfo* r)
 {
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer == nullptr || r == nullptr);
 
-	const auto& rt   = hw.GetRenderTarget(0);
-	auto        mask = hw.GetRenderTargetMask();
-	r->targets_num   = 0;
+	*r = {};
 
-	if (rt.base.addr == 0 || mask == 0)
+	if (rt.base.addr == 0)
 	{
-		// No color output
-		return;
+		return false;
 	}
-
-	uint32_t configured_target_count = 1;
-	for (; configured_target_count < RenderColorInfo::TARGETS_MAX; configured_target_count++)
-	{
-		if (hw.GetRenderTarget(configured_target_count).base.addr == 0)
-		{
-			break;
-		}
-	}
-
-	const auto layout = State::ResolveColorTargetLayout(mask, configured_target_count);
-	EXIT_NOT_IMPLEMENTED(layout.error == State::ColorTargetLayoutError::Gapped);
-	EXIT_NOT_IMPLEMENTED(layout.count == 0 || layout.count > RenderColorInfo::TARGETS_MAX);
-	r->targets_num = layout.count;
+	r->targets_num = 1;
 	r->samples     = decode_guest_sample_count(rt.attrib.num_samples);
 
 	bool ps5 = Config::IsNextGen();
@@ -5190,23 +5175,6 @@ static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw
 		r->type[0]        = RenderColorType::RenderTexture;
 		r->base_addr[0]   = rt.base.addr;
 		r->buffer_size[0] = r->size;
-
-		// Additional MRTs: same dimensions/format as RT0 (captured multi-target path).
-		for (uint32_t slot = 1; slot < r->targets_num; slot++)
-		{
-			const auto& other = hw.GetRenderTarget(slot);
-			EXIT_NOT_IMPLEMENTED(other.attrib.num_samples != rt.attrib.num_samples ||
-			                     other.attrib.num_fragments != rt.attrib.num_fragments);
-			if (ps5)
-			{
-				EXIT_NOT_IMPLEMENTED(other.attrib2.width != rt.attrib2.width || other.attrib2.height != rt.attrib2.height ||
-				                     other.attrib3.tile_mode != rt.attrib3.tile_mode || other.info.format != rt.info.format ||
-				                     other.info.channel_type != rt.info.channel_type || other.info.channel_order != rt.info.channel_order);
-			}
-			r->type[slot]        = RenderColorType::RenderTexture;
-			r->base_addr[slot]   = other.base.addr;
-			r->buffer_size[slot] = r->size;
-		}
 	} else
 	{
 		EXIT_NOT_IMPLEMENTED(!(rt.info.format == 0xa && (rt.info.channel_type == 0x6 || rt.info.channel_type == 0x0) &&
@@ -5223,12 +5191,72 @@ static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw
 		r->existing_video_image = video_image.image;
 	}
 
-	for (uint32_t slot = 0; slot < r->targets_num; slot++)
+	r->cmask_fast_clear_enable[0] = rt.info.cmask_fast_clear_enable;
+	r->clear_word0[0]             = rt.clear_word0.word0;
+	r->clear_word1[0]             = rt.clear_word1.word1;
+	return true;
+}
+
+static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw, RenderColorInfo* r)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_IF(buffer == nullptr || r == nullptr);
+
+	const auto& rt   = hw.GetRenderTarget(0);
+	auto        mask = hw.GetRenderTargetMask();
+	*r              = {};
+
+	if (rt.base.addr == 0 || mask == 0)
 	{
-		const auto& rt_slot              = hw.GetRenderTarget(slot);
-		r->cmask_fast_clear_enable[slot] = rt_slot.info.cmask_fast_clear_enable;
-		r->clear_word0[slot]             = rt_slot.clear_word0.word0;
-		r->clear_word1[slot]             = rt_slot.clear_word1.word1;
+		// No color output
+		return;
+	}
+
+	uint32_t configured_target_count = 1;
+	for (; configured_target_count < RenderColorInfo::TARGETS_MAX; configured_target_count++)
+	{
+		if (hw.GetRenderTarget(configured_target_count).base.addr == 0)
+		{
+			break;
+		}
+	}
+
+	const auto layout = State::ResolveColorTargetLayout(mask, configured_target_count);
+	EXIT_NOT_IMPLEMENTED(layout.error == State::ColorTargetLayoutError::Gapped);
+	EXIT_NOT_IMPLEMENTED(layout.count == 0 || layout.count > RenderColorInfo::TARGETS_MAX);
+
+	RenderColorInfo first {};
+	if (!DescribeRenderColorSlotInfo(buffer, rt, &first))
+	{
+		return;
+	}
+	*r             = first;
+	r->targets_num = layout.count;
+
+	if (r->type[0] == RenderColorType::DisplayBuffer)
+	{
+		// Display buffer (single swapchain target only).
+		EXIT_NOT_IMPLEMENTED(r->targets_num != 1);
+		return;
+	}
+
+	// Additional MRTs share the render-pass image contract with RT0, but keep
+	// their own guest memory identity and clear metadata.
+	for (uint32_t slot = 1; slot < r->targets_num; slot++)
+	{
+		RenderColorInfo other {};
+		EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, hw.GetRenderTarget(slot), &other));
+		EXIT_NOT_IMPLEMENTED(other.type[0] != RenderColorType::RenderTexture);
+		EXIT_NOT_IMPLEMENTED(other.samples != r->samples || other.width != r->width || other.height != r->height ||
+		                     other.pitch != r->pitch || other.size != r->size || other.tile != r->tile || other.neo != r->neo ||
+		                     other.write_back != r->write_back || other.render_texture_format != r->render_texture_format);
+		r->type[slot]                    = RenderColorType::RenderTexture;
+		r->base_addr[slot]               = other.base_addr[0];
+		r->buffer_size[slot]             = other.buffer_size[0];
+		r->cmask_fast_clear_enable[slot] = other.cmask_fast_clear_enable[0];
+		r->clear_word0[slot]             = other.clear_word0[0];
+		r->clear_word1[slot]             = other.clear_word1[0];
 	}
 }
 
@@ -5260,6 +5288,105 @@ static void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer
 		EXIT_NOT_IMPLEMENTED(buffer_vulkan == nullptr);
 		r->vulkan_buffer[slot] = buffer_vulkan;
 	}
+}
+
+static void InvalidateMemoryObject(const RenderColorInfo& r);
+
+static void TransitionColorImage(VkCommandBuffer vk_buffer, VulkanImage* image, VkImageLayout new_layout, VkAccessFlags dst_access,
+                                 VkPipelineStageFlags dst_stage)
+{
+	EXIT_IF(image == nullptr);
+
+	if (image->layout == new_layout)
+	{
+		return;
+	}
+
+	VkAccessFlags        src_access = 0;
+	VkPipelineStageFlags src_stage  = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+	if (image->layout != VK_IMAGE_LAYOUT_UNDEFINED)
+	{
+		src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+		             VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+		src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
+		            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+	}
+
+	VkImageMemoryBarrier image_memory_barrier {};
+	image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	image_memory_barrier.pNext                           = nullptr;
+	image_memory_barrier.srcAccessMask                   = src_access;
+	image_memory_barrier.dstAccessMask                   = dst_access;
+	image_memory_barrier.oldLayout                       = image->layout;
+	image_memory_barrier.newLayout                       = new_layout;
+	image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	image_memory_barrier.image                           = image->image;
+	image_memory_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+	image_memory_barrier.subresourceRange.baseMipLevel   = 0;
+	image_memory_barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
+	image_memory_barrier.subresourceRange.baseArrayLayer = 0;
+	image_memory_barrier.subresourceRange.layerCount     = 1;
+
+	vkCmdPipelineBarrier(vk_buffer, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+	image->layout = new_layout;
+}
+
+static bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw)
+{
+	if (hw.GetColorControl().mode != 3)
+	{
+		return false;
+	}
+
+	EXIT_IF(buffer == nullptr || buffer->IsInvalid());
+	EXIT_NOT_IMPLEMENTED(hw.GetColorControl().op != 0xCC);
+
+	RenderColorInfo source {};
+	RenderColorInfo destination {};
+	EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, hw.GetRenderTarget(0), &source));
+	EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, hw.GetRenderTarget(1), &destination));
+	EXIT_NOT_IMPLEMENTED(source.type[0] != RenderColorType::RenderTexture ||
+	                     destination.type[0] != RenderColorType::RenderTexture);
+
+	MaterializeRenderColorInfo(submit_id, buffer, &source);
+	MaterializeRenderColorInfo(submit_id, buffer, &destination);
+
+	auto* src = source.vulkan_buffer[0];
+	auto* dst = destination.vulkan_buffer[0];
+	EXIT_NOT_IMPLEMENTED(src == nullptr || dst == nullptr);
+	if (src->memory.unique_id == dst->memory.unique_id)
+	{
+		return true;
+	}
+
+	EXIT_NOT_IMPLEMENTED(src->samples == VK_SAMPLE_COUNT_1_BIT);
+	EXIT_NOT_IMPLEMENTED(dst->samples != VK_SAMPLE_COUNT_1_BIT);
+	EXIT_NOT_IMPLEMENTED(src->format != dst->format);
+	EXIT_NOT_IMPLEMENTED(src->GetGuestExtent().width != dst->GetGuestExtent().width ||
+	                     src->GetGuestExtent().height != dst->GetGuestExtent().height);
+	EXIT_NOT_IMPLEMENTED(src->extent.width != dst->extent.width || src->extent.height != dst->extent.height);
+
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	TransitionColorImage(vk_buffer, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+	                     VK_PIPELINE_STAGE_TRANSFER_BIT);
+	TransitionColorImage(vk_buffer, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+	                     VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+	VkImageResolve region {};
+	region.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.srcSubresource.mipLevel       = 0;
+	region.srcSubresource.baseArrayLayer = 0;
+	region.srcSubresource.layerCount     = 1;
+	region.dstSubresource                = region.srcSubresource;
+	region.srcOffset                     = {0, 0, 0};
+	region.dstOffset                     = {0, 0, 0};
+	region.extent                        = {src->extent.width, src->extent.height, 1};
+
+	vkCmdResolveImage(vk_buffer, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->image,
+	                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+	InvalidateMemoryObject(destination);
+	return true;
 }
 
 static RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffer* buffer, const RenderColorInfo& color,
@@ -6868,6 +6995,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
+	if (GraphicsRenderColorResolve(submit_id, buffer, *ctx))
+	{
+		return;
+	}
+
 	if (shader_is_disabled(sh_ctx))
 	{
 		return;
@@ -7491,6 +7623,10 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	EXIT_IF(buffer == nullptr || buffer->IsInvalid());
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
+	if (GraphicsRenderColorResolve(submit_id, buffer, *ctx))
+	{
+		return;
+	}
 	const bool       depth_stencil_copy = ctx->GetRenderControl().depth_copy || ctx->GetRenderControl().stencil_copy;
 
 	if (depth_stencil_copy)
