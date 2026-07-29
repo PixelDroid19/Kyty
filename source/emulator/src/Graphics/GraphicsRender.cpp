@@ -12,6 +12,7 @@
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/DepthStencilCopy.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -441,6 +442,29 @@ public:
 	SamplerCache*           GetSamplerCache() { return m_sampler_cache; }
 	ShaderTranslationCache* GetShaderTranslationCache() { return m_shader_translation_cache; }
 	GdsBuffer*              GetGdsBuffer() { return m_gds_buffer; }
+	DepthStencilCopyRenderer* GetDepthStencilCopyRenderer()
+	{
+		if (m_depth_stencil_copy_renderer == nullptr)
+		{
+			EXIT_IF(m_graphic_ctx == nullptr);
+			m_depth_stencil_copy_renderer = new DepthStencilCopyRenderer;
+		}
+		return m_depth_stencil_copy_renderer;
+	}
+	void ReleaseDepthStencilCopySource(uint64_t source_id)
+	{
+		if (m_depth_stencil_copy_renderer != nullptr)
+		{
+			m_depth_stencil_copy_renderer->ReleaseSource(m_graphic_ctx, source_id);
+		}
+	}
+	void ReleaseDepthStencilCopyRenderPass(uint64_t render_pass_id)
+	{
+		if (m_depth_stencil_copy_renderer != nullptr)
+		{
+			m_depth_stencil_copy_renderer->ReleaseRenderPass(m_graphic_ctx, render_pass_id);
+		}
+	}
 
 	void*        BeginEopEqRegistration(LibKernel::EventQueue::KernelEqueueIdentity identity, int id);
 	void         PublishEopEqRegistration(void* registration);
@@ -466,6 +490,7 @@ private:
 	ShaderTranslationCache* m_shader_translation_cache = nullptr;
 	GraphicContext*         m_graphic_ctx              = nullptr;
 	GdsBuffer*              m_gds_buffer               = nullptr;
+	DepthStencilCopyRenderer* m_depth_stencil_copy_renderer = nullptr;
 
 	Core::Mutex                m_eop_registration_mutex;
 	Core::Mutex                m_eop_mutex;
@@ -1320,7 +1345,7 @@ static void rc_print(const char* func, const HW::RenderControl& c)
 	printf("\t copy_sample              = %" PRIu8 "\n", c.copy_sample);
 }
 
-static void rc_check(const HW::RenderControl& c)
+static void rc_check(const HW::RenderControl& c, bool allow_depth_stencil_copy = false)
 {
 	// EXIT_NOT_IMPLEMENTED(c.depth_clear_enable != false);
 	// EXIT_NOT_IMPLEMENTED(c.stencil_clear_enable != false);
@@ -1329,8 +1354,7 @@ static void rc_check(const HW::RenderControl& c)
 	// the regular attachment path preserves the logical depth/stencil contents.
 	// EXIT_NOT_IMPLEMENTED(c.stencil_compress_disable != false);
 	// EXIT_NOT_IMPLEMENTED(c.depth_compress_disable != false);
-	EXIT_NOT_IMPLEMENTED(c.depth_copy);
-	EXIT_NOT_IMPLEMENTED(c.stencil_copy);
+	EXIT_NOT_IMPLEMENTED((c.depth_copy || c.stencil_copy) && !allow_depth_stencil_copy);
 }
 
 static void mc_print(const char* func, const HW::ModeControl& c)
@@ -1607,7 +1631,7 @@ static void vp_check(const HW::ScreenViewport& vp, const HW::ScanModeControl& sm
 	// EXIT_NOT_IMPLEMENTED(viewport_scissor && vp.viewports[0].viewport_scissor_window_offset_enable != true);
 }
 
-static void hw_check(const HW::Context& hw)
+static void hw_check(const HW::Context& hw, bool allow_depth_stencil_copy = false)
 {
 	const auto& rt   = hw.GetRenderTarget(0);
 	const auto& bc   = hw.GetBlendControl(0);
@@ -1630,7 +1654,7 @@ static void hw_check(const HW::Context& hw)
 	vp_check(vp, smc);
 	z_check(z, rc, d);
 	clip_check(c);
-	rc_check(rc);
+	rc_check(rc, allow_depth_stencil_copy);
 	d_check(d, s, sm);
 	mc_check(mc);
 	bc_check(bc, bclr, cc);
@@ -2242,6 +2266,7 @@ void FramebufferCache::FreeFramebufferByColor(VulkanImage* image)
 		}
 
 		g_render_ctx->GetPipelineCache()->DeletePipelines(f.framebuffer);
+		g_render_ctx->ReleaseDepthStencilCopyRenderPass(f.framebuffer->render_pass_id);
 
 		auto* gctx = g_render_ctx->GetGraphicCtx();
 
@@ -2271,6 +2296,7 @@ void FramebufferCache::FreeFramebufferByDepth(DepthStencilVulkanImage* image)
 		if (f.framebuffer != nullptr && f.depth_id == image->memory.unique_id)
 		{
 			g_render_ctx->GetPipelineCache()->DeletePipelines(f.framebuffer);
+			g_render_ctx->ReleaseDepthStencilCopyRenderPass(f.framebuffer->render_pass_id);
 
 			auto* gctx = g_render_ctx->GetGraphicCtx();
 
@@ -4533,6 +4559,7 @@ void DeleteFramebuffer(RenderTextureVulkanImage* image)
 
 void DeleteFramebuffer(DepthStencilVulkanImage* image)
 {
+	g_render_ctx->ReleaseDepthStencilCopySource(image->memory.unique_id);
 	g_render_ctx->GetFramebufferCache()->FreeFramebufferByDepth(image);
 }
 
@@ -7013,6 +7040,120 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	InvalidateMemoryObject(depth_info);
 }
 
+static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
+                                           HW::Shader* sh_ctx, uint32_t index_count)
+{
+	EXIT_IF(buffer == nullptr || ctx == nullptr || ucfg == nullptr || sh_ctx == nullptr);
+
+	const auto& render_control  = ctx->GetRenderControl();
+	const auto& depth_control   = ctx->GetDepthControl();
+	const auto& stencil_control = ctx->GetStencilControl();
+	const auto& stencil_mask    = ctx->GetStencilMask();
+
+	// The fixed-function expansion has no guest shader inputs. This path is
+	// intentionally limited to the single-sample full-target operation observed
+	// on the hardware command stream.
+	EXIT_NOT_IMPLEMENTED(!render_control.depth_copy || !render_control.stencil_copy);
+	// Resummarization and decompression update the guest depth metadata. Vulkan
+	// owns the corresponding compression state once the source is attached.
+	const bool full_target_stencil_replace =
+	    depth_control.stencil_enable && depth_control.stencilfunc == 7 && !depth_control.backface_enable &&
+	    stencil_control.stencil_zpass == 3 && stencil_mask.stencil_writemask == 0xff;
+	const bool full_target_stencil_keep = depth_control.stencil_enable && depth_control.stencilfunc == 7 &&
+	                                      !depth_control.backface_enable && stencil_control.stencil_zpass == 0 &&
+	                                      stencil_mask.stencil_writemask == 0xff;
+	if (depth_control.z_enable || depth_control.z_write_enable ||
+	    (depth_control.stencil_enable && !full_target_stencil_replace && !full_target_stencil_keep))
+	{
+		std::fprintf(stderr,
+		             "KYTY_GRAPHICS: unsupported depth-stencil-copy depth-control z-test=%u z-write=%u stencil-test=%u zfunc=%u "
+		             "stencilfunc=%u stencilfunc-bf=%u backface=%u stencil-ops=%u,%u,%u mask=%u write-mask=%u\n",
+		             depth_control.z_enable, depth_control.z_write_enable, depth_control.stencil_enable, depth_control.zfunc,
+		             depth_control.stencilfunc, depth_control.stencilfunc_bf, depth_control.backface_enable, stencil_control.stencil_fail,
+		             stencil_control.stencil_zpass, stencil_control.stencil_zfail, stencil_mask.stencil_mask, stencil_mask.stencil_writemask);
+		EXIT_NOT_IMPLEMENTED(depth_control.z_enable || depth_control.z_write_enable ||
+		                     (depth_control.stencil_enable && !full_target_stencil_replace && !full_target_stencil_keep));
+	}
+	EXIT_NOT_IMPLEMENTED(ctx->GetRenderTargetMask() != 0x0000000fu);
+	if (ucfg->GetPrimType() != 7 || index_count != 3)
+	{
+		std::fprintf(stderr, "KYTY_GRAPHICS: unsupported depth-stencil-copy primitive=%u count=%u\n", ucfg->GetPrimType(),
+		             index_count);
+		EXIT_NOT_IMPLEMENTED(ucfg->GetPrimType() != 7 || index_count != 3);
+	}
+
+	RenderDepthInfo depth_info;
+	RenderColorInfo color_info;
+	DescribeRenderDepthInfo(*ctx, &depth_info);
+	DescribeRenderColorInfo(buffer, *ctx, &color_info);
+
+	EXIT_NOT_IMPLEMENTED(depth_info.format != VK_FORMAT_D32_SFLOAT_S8_UINT);
+	EXIT_NOT_IMPLEMENTED(depth_info.samples != VK_SAMPLE_COUNT_1_BIT);
+	EXIT_NOT_IMPLEMENTED(color_info.targets_num != 1 || color_info.samples != VK_SAMPLE_COUNT_1_BIT);
+
+	MaterializeRenderDepthInfo(submit_id, buffer, &depth_info);
+	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
+
+	auto* source = depth_info.vulkan_buffer;
+	auto* target = color_info.vulkan_buffer[0];
+	EXIT_NOT_IMPLEMENTED(source == nullptr || target == nullptr);
+	EXIT_NOT_IMPLEMENTED(source->format != VK_FORMAT_D32_SFLOAT_S8_UINT);
+	const bool supported_target_format = target->format == VK_FORMAT_R8G8B8A8_UNORM || target->format == VK_FORMAT_B8G8R8A8_UNORM ||
+	                                     target->format == VK_FORMAT_R8G8B8A8_SRGB || target->format == VK_FORMAT_B8G8R8A8_SRGB;
+	if (!supported_target_format)
+	{
+		std::fprintf(stderr, "KYTY_GRAPHICS: unsupported depth-stencil-copy target format=%d render-format=%u width=%u height=%u\n",
+		             static_cast<int>(target->format), static_cast<unsigned>(color_info.render_texture_format), target->extent.width,
+		             target->extent.height);
+		EXIT_NOT_IMPLEMENTED(!supported_target_format);
+	}
+	EXIT_NOT_IMPLEMENTED(source->samples != VK_SAMPLE_COUNT_1_BIT || target->samples != VK_SAMPLE_COUNT_1_BIT);
+	const auto source_guest = source->GetGuestExtent();
+	const auto target_guest = target->GetGuestExtent();
+	EXIT_NOT_IMPLEMENTED(source_guest.width != target_guest.width || source_guest.height != target_guest.height);
+	EXIT_NOT_IMPLEMENTED(source->memory.unique_id == target->memory.unique_id);
+
+	RenderDepthInfo source_setup = depth_info;
+	if (full_target_stencil_replace)
+	{
+		// This full-target rect compares stencil unconditionally and replaces all
+		// bits with the reference value. A Vulkan clear establishes the same source
+		// plane before the fixed-function color expansion reads it.
+		source_setup.stencil_clear_enable = true;
+		source_setup.stencil_clear_value  = stencil_mask.stencil_testval;
+	}
+	if (source_setup.depth_clear_enable || source_setup.stencil_clear_enable)
+	{
+		RenderColorInfo no_color;
+		auto* source_framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&no_color, &source_setup);
+		EXIT_NOT_IMPLEMENTED(source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr);
+		buffer->BeginRenderPass(source_framebuffer, &no_color, &source_setup);
+		buffer->EndRenderPass();
+	}
+
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	GraphicsRenderDepthStencilBarrier(vk_buffer, source);
+	EXIT_NOT_IMPLEMENTED(source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+
+	RenderDepthInfo no_depth;
+	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &no_depth);
+	EXIT_NOT_IMPLEMENTED(framebuffer == nullptr || framebuffer->render_pass == nullptr);
+
+	DepthStencilCopyRequest request {};
+	request.source         = source;
+	request.render_pass    = framebuffer->render_pass;
+	request.render_pass_id = framebuffer->render_pass_id;
+	request.extent         = target->extent;
+
+	buffer->BeginRenderPass(framebuffer, &color_info, &no_depth);
+	g_render_ctx->GetDepthStencilCopyRenderer()->Render(g_render_ctx->GetGraphicCtx(), vk_buffer, request);
+	DebugStatsRecordDraw();
+	buffer->EndRenderPass();
+
+	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
+	InvalidateMemoryObject(color_info);
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                                  uint32_t index_count, uint32_t flags)
@@ -7024,6 +7165,28 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	EXIT_IF(buffer == nullptr || buffer->IsInvalid());
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
+	const bool       depth_stencil_copy = ctx->GetRenderControl().depth_copy || ctx->GetRenderControl().stencil_copy;
+
+	if (depth_stencil_copy)
+	{
+		uc_print("GraphicsRenderDrawIndexAuto():UserConfig:", *ucfg);
+		uc_check(*ucfg);
+
+		hw_print(*ctx);
+		hw_check(*ctx, true);
+
+		printf("GraphicsRenderDrawIndex():Parameters:\n");
+		printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
+		printf("\t flags               = 0x%08" PRIx32 "\n", flags);
+
+		// Gen5 draw modifiers: 0 (legacy), 0x40000000 (default AGC), 0x80000000 (Astro).
+		// These are initiator bookkeeping bits; they do not change the Vulkan draw.
+		EXIT_NOT_IMPLEMENTED(flags != 0 && flags != 0x40000000u && flags != 0x80000000u);
+		EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
+
+		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count);
+		return;
+	}
 
 	if (shader_is_disabled(sh_ctx))
 	{
