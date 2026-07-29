@@ -1037,6 +1037,17 @@ static Core::StringList rt_print(const char* func, const HW::RenderTarget& rt)
 	return dst;
 }
 
+static bool rt_uses_cmask_metadata(const HW::RenderTarget& rt)
+{
+	return rt.info.cmask_fast_clear_enable || rt.info.cmask_tile_mode != 0 || rt.info.cmask_tile_mode_neo != 0 ||
+	       rt.cmask.addr != 0 || rt.cmask_slice.slice_minus1 != 0;
+}
+
+static bool rt_uses_dcc_metadata(const HW::RenderTarget& rt)
+{
+	return rt.info.dcc_compression_enable || rt.dcc_addr.addr != 0;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void rt_check(const HW::RenderTarget& rt)
 {
@@ -1088,8 +1099,11 @@ static void rt_check(const HW::RenderTarget& rt)
 			EXIT_NOT_IMPLEMENTED(rt.attrib3.depth != 0x00000000);
 			EXIT_NOT_IMPLEMENTED(rt.attrib3.tile_mode != 0x0000001b);
 			EXIT_NOT_IMPLEMENTED(rt.attrib3.dimension != 0x00000001);
-			EXIT_NOT_IMPLEMENTED(rt.attrib3.cmask_pipe_aligned != true);
-			EXIT_NOT_IMPLEMENTED(rt.attrib3.dcc_pipe_aligned != true);
+			// Pipe alignment only affects the separately addressed CMASK/DCC
+			// metadata surfaces. An inactive surface cannot alter the color image
+			// layout, while active metadata remains rejected below.
+			EXIT_NOT_IMPLEMENTED(rt_uses_cmask_metadata(rt) && !rt.attrib3.cmask_pipe_aligned);
+			EXIT_NOT_IMPLEMENTED(rt_uses_dcc_metadata(rt) && !rt.attrib3.dcc_pipe_aligned);
 		} else
 		{
 			EXIT_NOT_IMPLEMENTED(rt.attrib2.width != 0x00000000);
