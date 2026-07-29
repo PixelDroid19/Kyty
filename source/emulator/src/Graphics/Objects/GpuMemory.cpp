@@ -371,7 +371,7 @@ private:
 	void Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int obj_id, Vector<Destructor>* destructors = nullptr);
 
 	bool create_existing(const Vector<OverlappedBlock>& others, const GpuObject& info, int heap_id, const uint64_t* vaddr,
-	                     const uint64_t* size, int vaddr_num, int* id, bool* covered_reuse);
+	                     const uint64_t* size, int vaddr_num, int* id, bool* covered_reuse, int* stale_reuse_id);
 	bool create_generate_mips(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
 	bool create_texture_triplet(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
 	bool create_maybe_deleted(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
@@ -956,17 +956,22 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 }
 
 bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const GpuObject& info, int heap_id, const uint64_t* vaddr,
-                                const uint64_t* size, int vaddr_num, int* id, bool* covered_reuse)
+                                const uint64_t* size, int vaddr_num, int* id, bool* covered_reuse, int* stale_reuse_id)
 {
-	EXIT_IF(vaddr == nullptr || size == nullptr || id == nullptr || covered_reuse == nullptr);
+	EXIT_IF(vaddr == nullptr || size == nullptr || id == nullptr || covered_reuse == nullptr || stale_reuse_id == nullptr);
 
 	auto& heap = m_heaps[heap_id];
 
 	uint64_t               max_gpu_update_time = 0;
 	const OverlappedBlock* latest_block        = nullptr;
+	int                    exact_id            = -1;
+	uint64_t               exact_gpu_time      = 0;
+	int                    latest_surface_id   = -1;
+	uint64_t               latest_surface_time = 0;
 	int                    reusable_index_id   = -1;
 	uint64_t               reusable_index_size = UINT64_MAX;
 	*covered_reuse                             = false;
+	*stale_reuse_id                           = -1;
 
 	for (const auto& obj: others)
 	{
@@ -977,8 +982,17 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 		if (h.scenario == GpuMemoryScenario::Common && obj.relation == OverlapType::Equals && o.object.type == info.type &&
 		    info.Equal(o.params))
 		{
-			*id = obj.object_id;
-			return true;
+			exact_id       = obj.object_id;
+			exact_gpu_time = o.gpu_update_time;
+			continue;
+		}
+
+		if (info.type == GpuMemoryObjectType::Texture &&
+		    (o.object.type == GpuMemoryObjectType::RenderTexture || o.object.type == GpuMemoryObjectType::StorageTexture) &&
+		    o.gpu_update_time > latest_surface_time)
+		{
+			latest_surface_id   = obj.object_id;
+			latest_surface_time = o.gpu_update_time;
 		}
 
 		if (vaddr_num == 1 && h.block.vaddr_num == 1 && h.scenario == GpuMemoryScenario::Common &&
@@ -994,6 +1008,17 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 			max_gpu_update_time = o.gpu_update_time;
 			latest_block        = &obj;
 		}
+	}
+
+	if (exact_id >= 0)
+	{
+		if (info.type == GpuMemoryObjectType::Texture && latest_surface_id >= 0 && latest_surface_time > exact_gpu_time)
+		{
+			*stale_reuse_id = exact_id;
+			return false;
+		}
+		*id = exact_id;
+		return true;
 	}
 
 	if (reusable_index_id >= 0)
@@ -1373,9 +1398,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	bool overlap             = false;
 	bool delete_all          = false;
 	bool create_from_objects = false;
-	// VertexBuffer ids to free when a multi-parent Texture mixes reclaim with
-	// surface-link parents (see multi_texture_mixed).
-	Vector<int> texture_reclaim_vertex_ids;
+	Vector<int> selective_reclaim_ids;
 
 	GpuMemoryScenario scenario = GpuMemoryScenario::Common;
 
@@ -1412,7 +1435,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	{
 		int  existing_id   = -1;
 		bool covered_reuse = false;
-		if (create_existing(others, info, heap_id, vaddr, size, vaddr_num, &existing_id, &covered_reuse))
+		int  stale_reuse_id = -1;
+		if (create_existing(others, info, heap_id, vaddr, size, vaddr_num, &existing_id, &covered_reuse, &stale_reuse_id))
 		{
 			auto& h = heap.objects[existing_id];
 			EXIT_IF(h.free);
@@ -1443,6 +1467,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			create_stats.Complete(covered_reuse ? DebugStatsGpuMemoryCreateOutcome::CoveredReuse
 			                                    : DebugStatsGpuMemoryCreateOutcome::ExactReuse);
 			return result;
+		}
+		if (stale_reuse_id >= 0)
+		{
+			selective_reclaim_ids.Add(stale_reuse_id);
 		}
 
 		if (others.Size() == 1)
@@ -1778,7 +1806,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					const auto& o = h.info;
 					if (GpuMemoryAllowsTextureReclaimVertex(o.object.type, obj.relation, info.type))
 					{
-						texture_reclaim_vertex_ids.Add(obj.object_id);
+						selective_reclaim_ids.Add(obj.object_id);
 						continue;
 					}
 					if (GpuMemoryAllowsTextureLinkVertex(o.object.type, obj.relation, info.type))
@@ -1825,7 +1853,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			} else if (multi_texture_mixed)
 			{
 				// Drop reclaimed VBs from the link set; free them after create.
-				if (texture_reclaim_vertex_ids.Size() == others.Size())
+				if (selective_reclaim_ids.Size() == others.Size())
 				{
 					delete_all = true;
 				} else
@@ -1834,7 +1862,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					for (const auto& obj: others)
 					{
 						bool reclaim = false;
-						for (int id: texture_reclaim_vertex_ids)
+						for (int id: selective_reclaim_ids)
 						{
 							if (id == obj.object_id)
 							{
@@ -1849,9 +1877,6 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					}
 					others  = keep;
 					overlap = true;
-					// Surface parents hold live GPU images; copy from them instead
-					// of tile-27-uploading empty CPU guest memory (opaque-black
-					// props when the sample range was GPU-written).
 					for (const auto& obj: others)
 					{
 						const auto parent_type = heap.objects[obj.object_id].info.object.type;
@@ -1891,8 +1916,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 							keep.Add(obj);
 						}
 					}
-					// Reuse texture_reclaim_vertex_ids free path after create.
-					texture_reclaim_vertex_ids = vertex_reclaim_vertex_ids;
+					selective_reclaim_ids = vertex_reclaim_vertex_ids;
 					others                     = keep;
 					overlap                    = true;
 				}
@@ -1924,7 +1948,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 							keep.Add(obj);
 						}
 					}
-					texture_reclaim_vertex_ids = index_reclaim_index_ids;
+					selective_reclaim_ids = index_reclaim_index_ids;
 					others                     = keep;
 					overlap                    = true;
 				}
@@ -1993,7 +2017,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	EXIT_IF(delete_all && overlap);
 
-	const bool reclaimed_existing = delete_all || !texture_reclaim_vertex_ids.IsEmpty();
+	const bool reclaimed_existing = delete_all || !selective_reclaim_ids.IsEmpty();
 	if (delete_all)
 	{
 		for (const auto& obj: others)
@@ -2004,14 +2028,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		{
 			destructors.Add(Free(heap_id, obj.object_id));
 		}
-	} else if (!texture_reclaim_vertex_ids.IsEmpty())
+	} else if (!selective_reclaim_ids.IsEmpty())
 	{
-		// Selective free from multi_texture_mixed (VertexBuffers only).
-		for (int id: texture_reclaim_vertex_ids)
+		for (int id: selective_reclaim_ids)
 		{
 			RequireDetachable(ctx, heap_id, id, &destructors, "create_selective_reclaim", info.type);
 		}
-		for (int id: texture_reclaim_vertex_ids)
+		for (int id: selective_reclaim_ids)
 		{
 			destructors.Add(Free(heap_id, id));
 		}
@@ -2030,7 +2053,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			relation_mask |= 1u << relation;
 		}
 	}
-	const uint32_t reclaimed_count = delete_all ? others.Size() : static_cast<uint32_t>(texture_reclaim_vertex_ids.Size());
+	const uint32_t reclaimed_count = delete_all ? others.Size() : static_cast<uint32_t>(selective_reclaim_ids.Size());
 	finish_classification(others.Size(), relation_mask, reclaimed_count, create_from_objects);
 
 	ObjectInfo o {};
@@ -2405,6 +2428,11 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
+
+	for (int vi = 0; vi < vaddr_num; vi++)
+	{
+		m_materialization_cache.InvalidateRange(vaddr[vi], size[vi]);
+	}
 
 	int heap_id = GetHeapId(vaddr[0], size[0]);
 
