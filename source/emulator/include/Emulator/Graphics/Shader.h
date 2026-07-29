@@ -684,6 +684,8 @@ bool     ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format);
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component);
 // Bytes per element for Gen5 sampled formats; compressed formats use block elements (0 if unknown).
 uint32_t ShaderGen5TextureBytesPerElement(uint32_t format);
+// True when one texture element represents a 4x4 compressed texel block.
+bool ShaderGen5TextureIsBlockCompressed(uint32_t format);
 // Linear Gen5 texture row pitch in texels: 256-byte aligned rows (GFX linear surface rule).
 uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format);
 // Resolve sample row pitch for Gen5 linear (tile 0): max(width, descriptor pitch), then 256-byte align.

@@ -97,11 +97,6 @@ constexpr MipTailLocation k_standard_4kb_mip_tail[5][8] = {
 	}
 }
 
-[[nodiscard]] constexpr bool is_block_compressed(uint32_t format)
-{
-	return format == 133u || format == 173u || format == 181u || format == 182u;
-}
-
 } // namespace
 
 bool Gen5GetStandard4KBTextureMipLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch,
@@ -127,7 +122,7 @@ bool Gen5GetStandard4KBTextureMipLayout(uint32_t format, uint32_t width, uint32_
 		return false;
 	}
 
-	const uint32_t texels_per_element = (is_block_compressed(format) ? 4u : 1u);
+	const uint32_t texels_per_element = (ShaderGen5TextureIsBlockCompressed(format) ? 4u : 1u);
 	uint32_t       base_element_width = 0;
 	uint32_t       base_element_height = 0;
 	uint32_t       base_element_pitch = 0;

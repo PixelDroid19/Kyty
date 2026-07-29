@@ -284,12 +284,31 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 		case 62: return 8;   // UFMT_32_32_UINT
 		case 71: return 8;   // UFMT_16_16_16_16_FLOAT
 		case 75: return 16;  // UFMT_32_32_32_32_UINT
+		case 128: return 1;  // UFMT_8_SRGB
+		case 129: return 2;  // UFMT_8_8_SRGB
+		case 130: return 4;  // UFMT_8_8_8_8_SRGB
+		case 133: return 8;  // UFMT_BC1_UNORM, 4x4 texels per block
+		case 169: return 8;  // UFMT_BC1_UNORM, 4x4 texels per block
+		case 170: return 8;  // UFMT_BC1_SRGB, 4x4 texels per block
+		case 171: return 16; // UFMT_BC2_UNORM, 4x4 texels per block
+		case 172: return 16; // UFMT_BC2_SRGB, 4x4 texels per block
 		case 173: return 16; // UFMT_BC3_UNORM, 4x4 texels per block
+		case 174: return 16; // UFMT_BC3_SRGB, 4x4 texels per block
+		case 175: return 8;  // UFMT_BC4_UNORM, 4x4 texels per block
+		case 176: return 8;  // UFMT_BC4_SNORM, 4x4 texels per block
+		case 177: return 16; // UFMT_BC5_UNORM, 4x4 texels per block
+		case 178: return 16; // UFMT_BC5_SNORM, 4x4 texels per block
+		case 179: return 16; // UFMT_BC6H_UFLOAT, 4x4 texels per block
+		case 180: return 16; // UFMT_BC6H_SFLOAT, 4x4 texels per block
 		case 181: return 16; // UFMT_BC7_UNORM, 4x4 texels per block
 		case 182: return 16; // UFMT_BC7_SRGB, 4x4 texels per block
-		case 133: return 8;  // VK_FORMAT_BC1_RGBA_UNORM_BLOCK, 4x4 texels per block
 		default: return 0;
 	}
+}
+
+bool ShaderGen5TextureIsBlockCompressed(uint32_t format)
+{
+	return format == 133u || (format >= 169u && format <= 182u);
 }
 
 uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format)

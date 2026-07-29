@@ -17,8 +17,6 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
 
-#include "astcenc.h"
-
 // IWYU pragma: no_forward_declare VkImageView_T
 
 #include <algorithm>
@@ -27,7 +25,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <mutex>
 #include <set>
 #include <vector>
 
@@ -43,81 +40,6 @@ static VkImageUsageFlags get_usage()
 
 	return vk_usage;
 }
-
-namespace {
-astcenc_context* g_astc10x5_decoder_ctx = nullptr;
-std::mutex       g_astc10x5_decoder_mutex;
-
-bool EnsureAstc10x5Decoder()
-{
-	if (g_astc10x5_decoder_ctx != nullptr)
-	{
-		return true;
-	}
-
-	astcenc_config config {};
-	if (astcenc_config_init(ASTCENC_PRF_LDR, 10, 5, 1, ASTCENC_PRE_FASTEST, ASTCENC_FLG_DECOMPRESS_ONLY, &config) != ASTCENC_SUCCESS)
-	{
-		return false;
-	}
-
-	if (astcenc_context_alloc(&config, 1, &g_astc10x5_decoder_ctx, nullptr) != ASTCENC_SUCCESS)
-	{
-		return false;
-	}
-
-	return true;
-}
-
-bool DecodeAstc10x5ToRgba8(uint32_t width, uint32_t height, const uint8_t* source, size_t source_size, std::vector<uint8_t>& output)
-{
-	if (width == 0u || height == 0u || source == nullptr || source_size == 0u)
-	{
-		return false;
-	}
-
-	const auto blocks_x = (static_cast<size_t>(width) + 9u) / 10u;
-	const auto blocks_y = (static_cast<size_t>(height) + 4u) / 5u;
-	if (blocks_x > std::numeric_limits<size_t>::max() / blocks_y || blocks_x * blocks_y > std::numeric_limits<size_t>::max() / 16u ||
-	    source_size < blocks_x * blocks_y * 16u)
-	{
-		return false;
-	}
-
-	std::lock_guard lock(g_astc10x5_decoder_mutex);
-	if (!EnsureAstc10x5Decoder())
-	{
-		return false;
-	}
-
-	auto output_size = static_cast<size_t>(width);
-	output_size *= static_cast<size_t>(height);
-	output_size *= 4u;
-	if (output_size == 0u)
-	{
-		return false;
-	}
-
-	output.resize(output_size);
-
-	void*         output_data[1] = {output.data()};
-	astcenc_image image_out {};
-	image_out.dim_x     = width;
-	image_out.dim_y     = height;
-	image_out.dim_z     = 1u;
-	image_out.data_type = ASTCENC_TYPE_U8;
-	image_out.data      = output_data;
-
-	const astcenc_swizzle swizzle {ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A};
-	if (astcenc_decompress_image(g_astc10x5_decoder_ctx, source, source_size, &image_out, &swizzle, 0) != ASTCENC_SUCCESS)
-	{
-		return false;
-	}
-
-	return true;
-}
-
-} // namespace
 
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
 {
@@ -230,9 +152,6 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		                                                         static_cast<uint32_t>(height), static_cast<uint32_t>(pitch),
 		                                                         static_cast<uint32_t>(levels), &mip_layout));
 		EXIT_NOT_IMPLEMENTED(*size != mip_layout.tiled.size);
-		// The only fallback formerly associated with ufmt 173 decodes a
-		// different ASTC format, so it cannot represent a BC3 mip chain.
-		EXIT_NOT_IMPLEMENTED(vk_obj->astc10x5_cpu_fallback);
 
 		std::vector<uint8_t> linear(static_cast<size_t>(mip_layout.linear_size));
 		EXIT_NOT_IMPLEMENTED(
@@ -448,15 +367,15 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		} else if (tile == 5)
 		{
 			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-			const bool     bc3               = fmt == 173u;
+			const bool     block_compressed  = ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt));
 			// SKIPPED: bytes_per_element == 0u || levels != 1u
 			if (bytes_per_element == 0u || levels != 1u)
 			{
 				printf("WARNING: skipped check: bytes_per_element == 0u || levels != 1u\n");
 			}
-			const uint32_t element_width  = bc3 ? (width + 3u) / 4u : width;
-			const uint32_t element_height = bc3 ? (height + 3u) / 4u : height;
-			const uint32_t element_pitch  = bc3 ? (pitch + 3u) / 4u : pitch;
+			const uint32_t element_width  = block_compressed ? (width + 3u) / 4u : width;
+			const uint32_t element_height = block_compressed ? (height + 3u) / 4u : height;
+			const uint32_t element_pitch  = block_compressed ? (pitch + 3u) / 4u : pitch;
 			const uint64_t linear_bytes   = static_cast<uint64_t>(element_pitch) * element_height * bytes_per_element;
 			// SKIPPED: linear_bytes == 0u || linear_bytes > *size
 			if (linear_bytes == 0u || linear_bytes > *size)
@@ -466,7 +385,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			std::vector<uint8_t> temp_buf(static_cast<size_t>(linear_bytes));
 			TileConvertStandard4KBToLinear(temp_buf.data(), reinterpret_cast<void*>(*vaddr), element_width, element_height, element_pitch,
 			                               bytes_per_element);
-			if (bc3 && std::getenv("KYTY_DUMP_ASTC_BLOCKS") != nullptr)
+			if (block_compressed && std::getenv("KYTY_DUMP_TILED_BLOCKS") != nullptr)
 			{
 				const auto* guest           = reinterpret_cast<const uint8_t*>(*vaddr);
 				uint64_t    raw_nonzero     = 0;
@@ -481,7 +400,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 					detiled_hash = (detiled_hash ^ temp_buf[i]) * 1099511628211ull;
 				}
 				std::fprintf(stderr,
-				             "KYTY_DUMP_ASTC_BLOCKS addr=0x%012" PRIx64 " size=%" PRIu64 " elem=%ux%u pitch=%u raw_nonzero=%" PRIu64
+				             "KYTY_DUMP_TILED_BLOCKS addr=0x%012" PRIx64 " size=%" PRIu64 " elem=%ux%u pitch=%u raw_nonzero=%" PRIu64
 				             " detiled_nonzero=%" PRIu64 " raw_hash=%016" PRIx64 " detiled_hash=%016" PRIx64 " raw=",
 				             *vaddr, linear_bytes, element_width, element_height, element_pitch, raw_nonzero, detiled_nonzero, raw_hash,
 				             detiled_hash);
@@ -499,18 +418,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			regions[0].offset = 0;
 			regions[0].width  = width;
 			regions[0].height = height;
-			if (vk_obj->astc10x5_cpu_fallback)
-			{
-				std::vector<uint8_t> decoded;
-				EXIT_NOT_IMPLEMENTED(!DecodeAstc10x5ToRgba8(static_cast<uint32_t>(width), static_cast<uint32_t>(height), temp_buf.data(),
-				                                            static_cast<size_t>(linear_bytes), decoded));
-				regions[0].pitch = static_cast<uint32_t>(width);
-				UtilFillImage(ctx, vk_obj, decoded.data(), decoded.size(), regions, static_cast<uint64_t>(vk_layout));
-			} else
-			{
-				regions[0].pitch = pitch;
-				UtilFillImage(ctx, vk_obj, temp_buf.data(), linear_bytes, regions, static_cast<uint64_t>(vk_layout));
-			}
+			regions[0].pitch  = pitch;
+			UtilFillImage(ctx, vk_obj, temp_buf.data(), linear_bytes, regions, static_cast<uint64_t>(vk_layout));
 		} else if (tile == 27 || tile == 9)
 		{
 			// Tiled sample texture: detile into tightly packed linear rows then
@@ -1052,7 +961,6 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	const auto width         = static_cast<uint32_t>(params[TextureObject::PARAM_WIDTH_HEIGHT] >> 32u);
 	const auto height        = static_cast<uint32_t>(params[TextureObject::PARAM_WIDTH_HEIGHT]);
 	const auto levels        = static_cast<uint32_t>(params[TextureObject::PARAM_LEVELS]);
-	const auto tile          = static_cast<uint32_t>(params[TextureObject::PARAM_TILE]);
 	const auto resource_info = params[TextureObject::PARAM_RESOURCE_INFO];
 	const auto resource_type = TextureObject::GetResourceType(resource_info);
 	const auto force_degamma = params[TextureObject::PARAM_FORCE_DEGAMMA] != 0;
@@ -1081,28 +989,17 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	image_descriptor.format       = pixel_format;
 	image_descriptor.usage        = get_usage();
 	auto image_info               = VulkanBuildImageCreateInfo(image_descriptor);
-	bool astc10x5_cpu_fallback    = false;
 
 	if (!VulkanImageFormatSupported(ctx, image_info))
 	{
-		const bool can_decode_astc10x5 = fmt == 173u && tile == 5u && !view_config->three_dimensional && !view_config->arrayed_2d;
-		if (can_decode_astc10x5)
-		{
-			image_info.format     = VK_FORMAT_R8G8B8A8_UNORM;
-			astc10x5_cpu_fallback = VulkanImageFormatSupported(ctx, image_info);
-		}
-		if (!astc10x5_cpu_fallback)
-		{
-			EXIT("texture format is not supported\n");
-		}
+		EXIT("texture format is not supported\n");
 	}
 
 	auto* vk_obj = new TextureVulkanImage;
 	vk_obj->SetNativeExtent(width, height);
-	vk_obj->format                = image_info.format;
-	vk_obj->astc10x5_cpu_fallback = astc10x5_cpu_fallback;
-	vk_obj->image                 = nullptr;
-	vk_obj->layout                = image_info.initialLayout;
+	vk_obj->format = image_info.format;
+	vk_obj->image  = nullptr;
+	vk_obj->layout = image_info.initialLayout;
 	for (auto& view: vk_obj->image_view)
 	{
 		view = nullptr;
