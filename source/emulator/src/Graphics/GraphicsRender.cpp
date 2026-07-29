@@ -7257,13 +7257,18 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 	const auto  xy = State::ResolveViewportXy(vp.xscale, vp.xoffset, vp.yscale, vp.yoffset);
 	const auto  sc = State::ResolveScissor(hw.GetScreenViewport(), hw.GetScanModeControl(), 0);
 	const auto& rt0 = hw.GetRenderTarget(0).info;
+	const auto& cc  = hw.GetColorControl();
+	const auto& bc  = hw.GetBlendControl(0);
 	std::fprintf(stderr,
 	             "KYTY_DUMP_DRAW_READY_INDEX count=%u modifier=0x%016" PRIx64 " type=%u index_type=%u targets=%u active=0x%02" PRIx32
 	             " rt=0x%012" PRIx64 ":%ux%u:s%u:f%u depth=%u:%ux%u target_mask=0x%08" PRIx32
+	             " shader_mask=0x%08" PRIx32 " color_mode=%u rop3=0x%02x blend=%u:%u:%u:%u:%u:%u:%u"
 	             " cbfmt=0x%x cbtype=0x%x cborder=0x%x vs_bufs=%d ps_tex=%d ps_buf=%d vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d\n",
 	             index_count, draw_modifier, type, index_type_and_size, color.targets_num, active_slots, first_addr, first_width,
 	             first_height, first_samples, first_format, static_cast<uint32_t>(depth.format), depth.width, depth.height,
-	             hw.GetRenderTargetMask(), rt0.format, rt0.channel_type, rt0.channel_order, vs_input.buffers_num, ps_input.bind.textures2D.textures_num,
+	             hw.GetRenderTargetMask(), hw.GetShaderRegisters().m_cbShaderMask, cc.mode, cc.op, bc.enable ? 1u : 0u, bc.color_srcblend, bc.color_comb_fcn,
+	             bc.color_destblend, bc.alpha_srcblend, bc.alpha_comb_fcn, bc.alpha_destblend, rt0.format, rt0.channel_type, rt0.channel_order,
+	             vs_input.buffers_num, ps_input.bind.textures2D.textures_num,
 	             ps_input.bind.storage_buffers.buffers_num, xy.x, xy.y, xy.width, xy.height, sc.left, sc.top, sc.right, sc.bottom);
 }
 
