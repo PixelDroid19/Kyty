@@ -7,6 +7,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/AudioPcm.h"
+#include "Emulator/Graphics/GuestTextureLayout.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Semaphore.h"
@@ -2767,6 +2768,11 @@ static uint32_t video_frame_bytes(uint32_t width, uint32_t height)
 	return width * height + (width / 2) * (height / 2) * 2;
 }
 
+static bool avplayer_dump_enabled()
+{
+	return std::getenv("KYTY_DUMP_AVPLAYER") != nullptr;
+}
+
 static void create_synthetic_video(AvPlayerInternal* r)
 {
 	constexpr uint32_t luma_width  = 1920;
@@ -2791,10 +2797,20 @@ static void create_synthetic_video(AvPlayerInternal* r)
 	r->synthetic_frame_count    = 90;
 	r->synthetic_obtained_num = 0;
 	r->audio_storage.assign(2 * 1024, 0);
+	Graphics::GuestTextureLayoutRegisterLinear(reinterpret_cast<uint64_t>(r->synthetic_frame), size, luma_width);
+	if (avplayer_dump_enabled())
+	{
+		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER create frame=%p size=%u pitch=%u allocator=%d\n", r->synthetic_frame, size,
+		             luma_width, r->synthetic_storage.empty() ? 1 : 0);
+	}
 }
 
 static void delete_synthetic_video(AvPlayerInternal* r)
 {
+	if (r->synthetic_frame != nullptr)
+	{
+		Graphics::GuestTextureLayoutUnregister(reinterpret_cast<uint64_t>(r->synthetic_frame));
+	}
 	if (r->mem.deallocate_texture != nullptr && r->synthetic_frame != nullptr && r->synthetic_storage.empty())
 	{
 		r->mem.deallocate_texture(r->mem.object_pointer, r->synthetic_frame);
@@ -2913,6 +2929,12 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 
 	draw_synthetic_frame(r->synthetic_width, r->synthetic_height, r->synthetic_frame, level * 0.7f);
 	r->synthetic_obtained_num++;
+	if (avplayer_dump_enabled())
+	{
+		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER video handle=%p frame=%u data=%p time=%" PRIu64 " size=%ux%u\n",
+		             static_cast<void*>(r), r->synthetic_obtained_num, info->data, info->time_stamp, r->synthetic_width,
+		             r->synthetic_height);
+	}
 	return true;
 }
 
@@ -2969,6 +2991,11 @@ static int add_source(AvPlayerInternal* h, const char* filename)
 		h->stop_fired        = false;
 	}
 	emit_event(h, AVPLAYER_EVENT_STATE_READY);
+	if (avplayer_dump_enabled())
+	{
+		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER source handle=%p auto_start=%d\n", static_cast<void*>(h),
+		             h->auto_start ? 1 : 0);
+	}
 	if (h->auto_start)
 	{
 		return AvPlayerStart(h);
@@ -3080,6 +3107,10 @@ int KYTY_SYSV_ABI AvPlayerStart(AvPlayerInternal* h)
 		h->start_time_ms     = 0;
 	}
 	emit_event(h, AVPLAYER_EVENT_STATE_PLAY);
+	if (avplayer_dump_enabled())
+	{
+		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER start handle=%p\n", static_cast<void*>(h));
+	}
 	return 0;
 }
 

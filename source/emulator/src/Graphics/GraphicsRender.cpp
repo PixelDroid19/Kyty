@@ -7153,11 +7153,6 @@ static const char* shader_disable_reason(HW::Shader* sh_ctx)
 	return nullptr;
 }
 
-static bool shader_is_disabled(HW::Shader* sh_ctx)
-{
-	return shader_disable_reason(sh_ctx) != nullptr;
-}
-
 static void MaybeDumpAutoDrawSkip(const char* reason, uint32_t index_count, uint64_t draw_modifier)
 {
 	if (std::getenv("KYTY_DUMP_DRAW") == nullptr)
@@ -7172,6 +7167,73 @@ static void MaybeDumpAutoDrawSkip(const char* reason, uint32_t index_count, uint
 	++logs;
 	std::fprintf(stderr, "KYTY_DUMP_DRAW_SKIP_AUTO reason=%s count=%u modifier=0x%016" PRIx64 "\n", reason, index_count,
 	             draw_modifier);
+}
+
+static void MaybeDumpIndexDrawSkip(const char* reason, uint32_t index_count, uint32_t flags, uint32_t type)
+{
+	if (std::getenv("KYTY_DUMP_DRAW") == nullptr)
+	{
+		return;
+	}
+	static uint32_t logs = 0;
+	if (logs >= 32u)
+	{
+		return;
+	}
+	++logs;
+	std::fprintf(stderr, "KYTY_DUMP_DRAW_SKIP_INDEX reason=%s count=%u flags=0x%08" PRIx32 " type=%u\n", reason, index_count,
+	             flags, type);
+}
+
+static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDepthInfo& depth, const HW::Context& hw,
+                                    const ShaderVertexInputInfo& vs_input, const ShaderPixelInputInfo& ps_input, uint32_t index_count,
+                                    uint32_t index_type_and_size, uint32_t flags, uint32_t type)
+{
+	if (std::getenv("KYTY_DUMP_DRAW") == nullptr)
+	{
+		return;
+	}
+	static uint32_t logs = 0;
+	if (logs >= 48u)
+	{
+		return;
+	}
+	++logs;
+
+	uint32_t active_slots = 0;
+	uint64_t first_addr   = 0;
+	uint32_t first_width  = 0;
+	uint32_t first_height = 0;
+	uint32_t first_format = 0;
+	uint32_t first_samples = 0;
+	for (uint32_t slot = 0; slot < color.targets_num; ++slot)
+	{
+		if (color.vulkan_buffer[slot] == nullptr)
+		{
+			continue;
+		}
+		active_slots |= 1u << slot;
+		if (first_addr == 0)
+		{
+			first_addr    = color.base_addr[slot];
+			first_width   = color.vulkan_buffer[slot]->extent.width;
+			first_height  = color.vulkan_buffer[slot]->extent.height;
+			first_format  = static_cast<uint32_t>(color.vulkan_buffer[slot]->format);
+			first_samples = static_cast<uint32_t>(color.vulkan_buffer[slot]->samples);
+		}
+	}
+
+	const auto& vp = hw.GetScreenViewport().viewports[0];
+	const auto  xy = State::ResolveViewportXy(vp.xscale, vp.xoffset, vp.yscale, vp.yoffset);
+	const auto  sc = State::ResolveScissor(hw.GetScreenViewport(), hw.GetScanModeControl(), 0);
+	std::fprintf(stderr,
+	             "KYTY_DUMP_DRAW_READY_INDEX count=%u flags=0x%08" PRIx32 " type=%u index_type=%u targets=%u active=0x%02" PRIx32
+	             " rt=0x%012" PRIx64 ":%ux%u:s%u:f%u depth=%u:%ux%u target_mask=0x%08" PRIx32
+	             " vs_bufs=%d ps_tex=%d ps_buf=%d vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d\n",
+	             index_count, flags, type, index_type_and_size, color.targets_num, active_slots, first_addr, first_width, first_height,
+	             first_samples, first_format, static_cast<uint32_t>(depth.format), depth.width, depth.height, hw.GetRenderTargetMask(),
+	             vs_input.buffers_num, ps_input.bind.textures2D.textures_num, ps_input.bind.storage_buffers.buffers_num, xy.x, xy.y,
+	             xy.width, xy.height, sc.left, sc.top, sc.right, sc.bottom);
 }
 
 bool GraphicsResolveRectListAutoDraw(uint32_t primitive_type, uint32_t index_count, int vertex_buffers_num, uint32_t* vertex_count)
@@ -7201,14 +7263,29 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	EXIT_IF(buffer->IsInvalid());
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
+	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+	{
+		static uint32_t logs = 0;
+		if (logs < 48u)
+		{
+			++logs;
+			std::fprintf(stderr,
+			             "KYTY_DUMP_DRAW_ENTER_INDEX count=%u flags=0x%08" PRIx32 " type=%u color_mode=%u color_op=0x%x stages=0x%08" PRIx32
+			             "\n",
+			             index_count, flags, type, static_cast<uint32_t>(ctx->GetColorControl().mode), ctx->GetColorControl().op,
+			             ctx->GetShaderStages());
+		}
+	}
 
 	if (GraphicsRenderColorResolve(submit_id, buffer, *ctx))
 	{
+		MaybeDumpIndexDrawSkip("color-resolve", index_count, flags, type);
 		return;
 	}
 	const bool depth_stencil_copy = ctx->GetRenderControl().depth_copy || ctx->GetRenderControl().stencil_copy;
 	if (depth_stencil_copy)
 	{
+		MaybeDumpIndexDrawSkip("depth-stencil-copy", index_count, flags, type);
 		uc_print("GraphicsRenderDrawIndex():UserConfig:", *ucfg);
 		uc_check(*ucfg);
 
@@ -7227,8 +7304,9 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		return;
 	}
 
-	if (shader_is_disabled(sh_ctx))
+	if (const char* reason = shader_disable_reason(sh_ctx); reason != nullptr)
 	{
+		MaybeDumpIndexDrawSkip(reason, index_count, flags, type);
 		return;
 	}
 
@@ -7297,6 +7375,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	if (!RenderColorHasActiveTarget(color_info) && depth_info.format == VK_FORMAT_UNDEFINED)
 	{
 		// A zero target mask with depth disabled is a valid no-output draw.
+		MaybeDumpIndexDrawSkip("no-output", index_count, flags, type);
 		return;
 	}
 	VulkanSampleLocationState sample_locations {};
@@ -7327,6 +7406,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
+	MaybeDumpIndexDrawReady(color_info, depth_info, *ctx, vs_input_info, ps_input_info, index_count, index_type_and_size, flags, type);
 	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, index_type_and_size, true, flags);
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,

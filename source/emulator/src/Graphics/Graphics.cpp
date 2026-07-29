@@ -3017,11 +3017,18 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbDispatch(CommandBuffer* buf, uint32_t group_x,
 		return nullptr;
 	}
 
-	auto* cmd = buf->AllocateDW(5);
-	if (cmd == nullptr || GraphicsEncodeDispatch(cmd, 5, group_x, group_y, group_z, modifier) != 5)
+	auto* cmd = buf->AllocateDW(6);
+	if (cmd == nullptr)
 	{
 		return nullptr;
 	}
+
+	cmd[0] = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_DISPATCH_DIRECT);
+	cmd[1] = group_x;
+	cmd[2] = group_y;
+	cmd[3] = group_z;
+	cmd[4] = modifier;
+	cmd[5] = 0;
 
 	return cmd;
 }

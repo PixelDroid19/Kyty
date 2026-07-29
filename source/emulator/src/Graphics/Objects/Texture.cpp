@@ -8,6 +8,7 @@
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GuestTextureLayout.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
@@ -401,6 +402,16 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	{
 		if (tile == 0)
 		{
+			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
+			if (bytes_per_element != 0u && width <= std::numeric_limits<uint32_t>::max() / bytes_per_element)
+			{
+				const uint32_t row_bytes = static_cast<uint32_t>(width) * bytes_per_element;
+				if (const uint32_t registered_pitch = GuestTextureLayoutGetLinearRowPitch(*vaddr, row_bytes);
+				    registered_pitch != 0u && registered_pitch % bytes_per_element == 0u)
+				{
+					regions[0].pitch = registered_pitch / bytes_per_element;
+				}
+			}
 			// Opt-in dump for linear Gen5 sample investigation (scratch only).
 			// KYTY_DUMP_LINEAR_SAMPLE=WxH writes one RGBA8 BMP under /tmp.
 			if (fmt == 56u && levels == 1u)

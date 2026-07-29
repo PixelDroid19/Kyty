@@ -1698,6 +1698,20 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
+	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+	{
+		static uint32_t logs = 0;
+		if (logs < 48u)
+		{
+			++logs;
+			std::fprintf(stderr,
+			             "KYTY_DUMP_DRAW_INDEX count=%u flags=0x%08" PRIx32 " type=%u index_addr=0x%012" PRIx64
+			             " index_base=0x%012" PRIx64 " index_buf_size=%u index_type=%u\n",
+			             index_count, flags, type, reinterpret_cast<uint64_t>(index_addr), m_index_base_addr, m_index_buffer_size,
+			             m_index_type_and_size);
+		}
+	}
+
 	GraphicsRenderDrawIndex(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, index_count,
 	                        index_addr, flags, type);
 }
@@ -3452,11 +3466,11 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_direct)
 	KYTY_PROFILER_FUNCTION();
 
 	const bool standard = (cmd_id == KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, 0));
-	const bool custom   = (cmd_id == 0xC0071020);
+	const bool custom   = (cmd_id == KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_DISPATCH_DIRECT));
 
 	EXIT_NOT_IMPLEMENTED(!standard && !custom);
 	EXIT_NOT_IMPLEMENTED(standard && dw < 5);
-	EXIT_NOT_IMPLEMENTED(custom && dw < 9);
+	EXIT_NOT_IMPLEMENTED(custom && dw < 6);
 
 	uint32_t thread_group_x = buffer[0];
 	uint32_t thread_group_y = buffer[1];
@@ -3465,7 +3479,7 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_direct)
 
 	cp->DispatchDirect(thread_group_x, thread_group_y, thread_group_z, mode);
 
-	return (standard ? 4 : 8);
+	return (standard ? 4 : 5);
 }
 
 KYTY_CP_OP_PARSER(cp_op_dispatch_reset)
