@@ -279,7 +279,7 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 	                 static_cast<VkImageLayout>(dst_layout));
 }
 
-void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain)
+void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter)
 {
 	EXIT_IF(src_image == nullptr);
 	EXIT_IF(src_image->image == nullptr);
@@ -342,7 +342,7 @@ void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchai
 	region.dstOffsets[1].z               = 1;
 
 	vkCmdBlitImage(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain_image.image,
-	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
+	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, filter);
 
 	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 	                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);

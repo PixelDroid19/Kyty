@@ -22,6 +22,7 @@
 #include "Emulator/Graphics/Image.h"
 #include "Emulator/Graphics/KeyboardInput.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
+#include "Emulator/Graphics/PresentationScaler.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VulkanQueueIdentity.h"
@@ -3456,7 +3457,14 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	buffer.Begin();
 
-	UtilBlitImage(&buffer, blt_src_image, blt_dst_image);
+	const auto presentation_status =
+	    PresentationScalerBlitFinalImage(&buffer, &g_window_ctx->graphic_ctx, blt_src_image, blt_dst_image);
+	if (presentation_status != PresentationScaleStatus::Success)
+	{
+		EXIT("Presentation scaling failed: status=%s(%u) source=%ux%u swapchain=%ux%u\n",
+		     PresentationScaleStatusName(presentation_status), static_cast<unsigned>(presentation_status), blt_src_image->extent.width,
+		     blt_src_image->extent.height, blt_dst_image->swapchain_extent.width, blt_dst_image->swapchain_extent.height);
+	}
 
 	const double now_seconds   = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_time_seconds : 0.0;
 	const double fps_now       = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_fps : 0.0;
