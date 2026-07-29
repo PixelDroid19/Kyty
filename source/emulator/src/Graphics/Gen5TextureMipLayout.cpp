@@ -99,7 +99,7 @@ constexpr MipTailLocation k_standard_4kb_mip_tail[5][8] = {
 
 [[nodiscard]] constexpr bool is_block_compressed(uint32_t format)
 {
-	return format == 133u || format == 173u;
+	return format == 133u || format == 173u || format == 181u || format == 182u;
 }
 
 } // namespace

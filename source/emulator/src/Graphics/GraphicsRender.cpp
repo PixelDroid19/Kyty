@@ -365,6 +365,8 @@ struct VulkanFramebuffer
 	uint64_t                  render_pass_id                    = 0;
 	VkFramebuffer             framebuffer                       = nullptr;
 	uint32_t                  color_count                       = 0;
+	uint32_t                  attachment_count                  = 0;
+	uint32_t                  depth_attachment_index            = VK_ATTACHMENT_UNUSED;
 	VkAttachmentLoadOp        color_load_op[TARGETS_MAX]        = {};
 	VkImageLayout             color_initial_layout[TARGETS_MAX] = {};
 	VkImageLayout             depth_stencil_layout              = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -582,6 +584,40 @@ struct RenderColorInfo
 	bool                      write_back            = false;
 };
 
+static bool RenderColorSlotConfigured(const RenderColorInfo& color, uint32_t slot)
+{
+	return slot < color.targets_num && color.type[slot] != RenderColorType::NoColorOutput;
+}
+
+static bool RenderColorSlotActive(const RenderColorInfo& color, uint32_t slot)
+{
+	return RenderColorSlotConfigured(color, slot) && color.vulkan_buffer[slot] != nullptr;
+}
+
+static bool RenderColorHasActiveTarget(const RenderColorInfo& color)
+{
+	for (uint32_t slot = 0; slot < color.targets_num; slot++)
+	{
+		if (RenderColorSlotConfigured(color, slot))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static VulkanImage* RenderColorFirstActiveImage(const RenderColorInfo& color)
+{
+	for (uint32_t slot = 0; slot < color.targets_num; slot++)
+	{
+		if (RenderColorSlotActive(color, slot))
+		{
+			return color.vulkan_buffer[slot];
+		}
+	}
+	return nullptr;
+}
+
 static VkSampleCountFlagBits decode_guest_sample_count(uint32_t encoded)
 {
 	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
@@ -591,7 +627,7 @@ static VkSampleCountFlagBits decode_guest_sample_count(uint32_t encoded)
 
 static VkSampleCountFlagBits resolve_render_attachment_sample_count(const RenderColorInfo& color, const RenderDepthInfo& depth)
 {
-	const bool with_color = color.targets_num != 0;
+	const bool with_color = RenderColorHasActiveTarget(color);
 	const bool with_depth = depth.format != VK_FORMAT_UNDEFINED;
 	EXIT_NOT_IMPLEMENTED(!with_color && !with_depth);
 
@@ -2102,8 +2138,8 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	EXIT_IF(depth == nullptr);
 	EXIT_IF(g_render_ctx == nullptr);
 
-	bool with_depth = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
-	bool with_color = (color->targets_num != 0 && color->vulkan_buffer[0] != nullptr);
+	bool       with_depth              = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
+	bool       with_color              = (RenderColorHasActiveTarget(*color) && RenderColorFirstActiveImage(*color) != nullptr);
 	const bool depth_stencil_read_only = (with_depth && depth_stencil_access == DepthStencilAttachmentAccess::ReadOnly);
 	EXIT_NOT_IMPLEMENTED(depth_stencil_read_only && (depth->depth_clear_enable || depth->stencil_clear_enable));
 	const auto attachment_samples = resolve_render_attachment_sample_count(*color, *depth);
@@ -2113,11 +2149,16 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		bool same_colors = (f.targets_num == color->targets_num);
 		for (uint32_t slot = 0; same_colors && slot < color->targets_num; slot++)
 		{
+			if (!RenderColorSlotActive(*color, slot))
+			{
+				same_colors = (f.image_id[slot] == 0);
+				continue;
+			}
 			auto*      image    = color->vulkan_buffer[slot];
 			const auto load_ops = ResolveColorAttachmentLoadOps(image->layout, color->cmask_fast_clear_enable[slot],
 			                                                    color->clear_word0[slot], color->clear_word1[slot], image->format);
-			same_colors         = (f.image_id[slot] == color->vulkan_buffer[slot]->memory.unique_id) &&
-			                      (f.color_load_op[slot] == load_ops.load_op) && (f.color_initial_layout[slot] == load_ops.initial_layout);
+			same_colors         = (f.image_id[slot] == image->memory.unique_id) && (f.color_load_op[slot] == load_ops.load_op) &&
+			              (f.color_initial_layout[slot] == load_ops.initial_layout);
 		}
 		if (f.framebuffer != nullptr && same_colors && f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) &&
 		    f.depth_clear_enable == depth->depth_clear_enable && f.stencil_clear_enable == depth->stencil_clear_enable &&
@@ -2138,53 +2179,62 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	EXIT_NOT_IMPLEMENTED(!with_depth && !with_color);
 
 	VulkanImage* vulkan_buffer =
-	    (with_color ? color->vulkan_buffer[0]
+	    (with_color ? RenderColorFirstActiveImage(*color)
 	                : CreateDummyBuffer(VK_FORMAT_B8G8R8A8_SRGB, depth->vulkan_buffer->extent.width, depth->vulkan_buffer->extent.height,
 	                                    attachment_samples));
-	const uint32_t color_count = (with_color ? color->targets_num : 1);
+	const uint32_t color_count      = (with_color ? color->targets_num : 1);
+	uint32_t       attachment_count = 0;
 
 	VkAttachmentDescription attachments[RenderColorInfo::TARGETS_MAX + 1]       = {};
 	VkAttachmentReference   color_attachment_refs[RenderColorInfo::TARGETS_MAX] = {};
 	VkImageView             views[RenderColorInfo::TARGETS_MAX + 1]             = {};
 	for (uint32_t slot = 0; slot < color_count; slot++)
 	{
+		if (with_color && !RenderColorSlotActive(*color, slot))
+		{
+			color_attachment_refs[slot] = {VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED};
+			continue;
+		}
 		auto* image = (with_color ? color->vulkan_buffer[slot] : vulkan_buffer);
 		EXIT_NOT_IMPLEMENTED(image->extent.width != vulkan_buffer->extent.width || image->extent.height != vulkan_buffer->extent.height);
 		EXIT_NOT_IMPLEMENTED(image->samples != attachment_samples);
 		const auto load_ops       = ResolveColorAttachmentLoadOps(image->layout, with_color ? color->cmask_fast_clear_enable[slot] : false,
 		                                                          with_color ? color->clear_word0[slot] : 0u,
 		                                                          with_color ? color->clear_word1[slot] : 0u, image->format);
-		attachments[slot].flags   = 0;
-		attachments[slot].format  = image->format;
-		attachments[slot].samples = image->samples;
-		attachments[slot].loadOp  = load_ops.load_op;
-		attachments[slot].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		attachments[slot].stencilLoadOp         = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachments[slot].stencilStoreOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachments[slot].initialLayout         = load_ops.initial_layout;
-		attachments[slot].finalLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		color_attachment_refs[slot]             = {slot, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-		views[slot]                             = image->image_view[VulkanImage::VIEW_DEFAULT];
+		attachments[attachment_count].flags   = 0;
+		attachments[attachment_count].format  = image->format;
+		attachments[attachment_count].samples = image->samples;
+		attachments[attachment_count].loadOp  = load_ops.load_op;
+		attachments[attachment_count].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		attachments[attachment_count].stencilLoadOp         = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachments[attachment_count].stencilStoreOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachments[attachment_count].initialLayout         = load_ops.initial_layout;
+		attachments[attachment_count].finalLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		color_attachment_refs[slot]                         = {attachment_count, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+		views[attachment_count]                             = image->image_view[VulkanImage::VIEW_DEFAULT];
 		framebuffer->color_load_op[slot]        = load_ops.load_op;
 		framebuffer->color_initial_layout[slot] = load_ops.initial_layout;
+		attachment_count++;
 	}
-	framebuffer->color_count = color_count;
+	framebuffer->color_count            = color_count;
+	framebuffer->attachment_count       = attachment_count + (with_depth ? 1u : 0u);
+	framebuffer->depth_attachment_index = with_depth ? attachment_count : VK_ATTACHMENT_UNUSED;
 
 	const auto depth_load_ops = ResolveDepthAttachmentLoadOps(depth->format, depth->depth_clear_enable, depth->stencil_clear_enable);
 	const auto depth_stencil_layout =
 	    (depth_stencil_read_only ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-	attachments[color_count].flags   = 0;
-	attachments[color_count].format  = depth->format;
-	attachments[color_count].samples = with_depth ? depth->vulkan_buffer->samples : VK_SAMPLE_COUNT_1_BIT;
-	attachments[color_count].loadOp  = depth_load_ops.depth_load;
-	attachments[color_count].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-	attachments[color_count].stencilLoadOp  = depth_load_ops.stencil_load;
-	attachments[color_count].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-	attachments[color_count].initialLayout  = (depth_stencil_read_only ? depth_stencil_layout : depth_load_ops.initial_layout);
-	attachments[color_count].finalLayout    = depth_stencil_layout;
+	attachments[attachment_count].flags   = 0;
+	attachments[attachment_count].format  = depth->format;
+	attachments[attachment_count].samples = with_depth ? depth->vulkan_buffer->samples : VK_SAMPLE_COUNT_1_BIT;
+	attachments[attachment_count].loadOp  = depth_load_ops.depth_load;
+	attachments[attachment_count].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[attachment_count].stencilLoadOp  = depth_load_ops.stencil_load;
+	attachments[attachment_count].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[attachment_count].initialLayout  = (depth_stencil_read_only ? depth_stencil_layout : depth_load_ops.initial_layout);
+	attachments[attachment_count].finalLayout    = depth_stencil_layout;
 
 	VkAttachmentReference depth_attachment_ref {};
-	depth_attachment_ref.attachment = color_count;
+	depth_attachment_ref.attachment = attachment_count;
 	depth_attachment_ref.layout     = depth_stencil_layout;
 	framebuffer->depth_stencil_layout = depth_stencil_layout;
 
@@ -2204,7 +2254,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	render_pass_info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 	render_pass_info.pNext           = nullptr;
 	render_pass_info.flags           = 0;
-	render_pass_info.attachmentCount = color_count + (with_depth ? 1u : 0u);
+	render_pass_info.attachmentCount = attachment_count + (with_depth ? 1u : 0u);
 	render_pass_info.pAttachments    = attachments;
 	render_pass_info.subpassCount    = 1;
 	render_pass_info.pSubpasses      = &subpass;
@@ -2220,7 +2270,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	if (with_depth)
 	{
 		EXIT_NOT_IMPLEMENTED(depth->vulkan_buffer->samples != attachment_samples);
-		views[color_count] = depth->vulkan_buffer->image_view[VulkanImage::VIEW_DEFAULT];
+		views[attachment_count] = depth->vulkan_buffer->image_view[VulkanImage::VIEW_DEFAULT];
 	}
 
 	VkFramebufferCreateInfo framebuffer_info {};
@@ -2228,7 +2278,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	framebuffer_info.pNext           = nullptr;
 	framebuffer_info.flags           = 0;
 	framebuffer_info.renderPass      = framebuffer->render_pass;
-	framebuffer_info.attachmentCount = color_count + (with_depth ? 1u : 0u);
+	framebuffer_info.attachmentCount = attachment_count + (with_depth ? 1u : 0u);
 	framebuffer_info.pAttachments    = views;
 	framebuffer_info.width  = (with_depth && with_color) ? std::min(vulkan_buffer->extent.width, depth->vulkan_buffer->extent.width)
 	                                                     : vulkan_buffer->extent.width;
@@ -2245,7 +2295,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	fnew.targets_num = color->targets_num;
 	for (uint32_t slot = 0; slot < color->targets_num; slot++)
 	{
-		fnew.image_id[slot] = color->vulkan_buffer[slot]->memory.unique_id;
+		fnew.image_id[slot] = RenderColorSlotActive(*color, slot) ? color->vulkan_buffer[slot]->memory.unique_id : 0;
 	}
 	fnew.depth_id             = (with_depth ? depth->vulkan_buffer->memory.unique_id : 0);
 	fnew.depth_clear_enable   = depth->depth_clear_enable;
@@ -3381,7 +3431,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.static_params->stencil_front            = depth->stencil_static_front;
 	p.static_params->stencil_back             = depth->stencil_static_back;
 	p.static_params->color_targets_num        = color->targets_num;
-	if (p.static_params->color_targets_num == 0)
+	if (!RenderColorHasActiveTarget(*color))
 	{
 		// Depth-only: FramebufferCache attaches one dummy color image so the
 		// Vulkan render pass stays valid; the pipeline must match that count
@@ -3395,6 +3445,12 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		EXIT_NOT_IMPLEMENTED(p.static_params->color_targets_num > 8);
 		for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
 		{
+			if (!RenderColorSlotConfigured(*color, rt))
+			{
+				p.static_params->color_mask[rt]   = 0;
+				p.static_params->blend_enable[rt] = false;
+				continue;
+			}
 			const auto& blend                         = ctx->GetBlendControl(rt);
 			p.static_params->color_mask[rt]           =
 			    State::ResolveColorWriteMask(ctx->GetRenderTargetMask(), sh_regs.m_cbShaderMask, rt);
@@ -5197,66 +5253,86 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 	return true;
 }
 
+static void CopyRenderColorSlot(RenderColorInfo* dst, uint32_t dst_slot, const RenderColorInfo& src)
+{
+	EXIT_IF(dst == nullptr);
+	EXIT_NOT_IMPLEMENTED(dst_slot >= RenderColorInfo::TARGETS_MAX);
+	EXIT_NOT_IMPLEMENTED(!RenderColorSlotConfigured(src, 0));
+
+	if (!RenderColorHasActiveTarget(*dst))
+	{
+		dst->render_texture_format = src.render_texture_format;
+		dst->existing_video_image  = src.existing_video_image;
+		dst->width                 = src.width;
+		dst->height                = src.height;
+		dst->samples               = src.samples;
+		dst->pitch                 = src.pitch;
+		dst->size                  = src.size;
+		dst->tile                  = src.tile;
+		dst->neo                   = src.neo;
+		dst->write_back            = src.write_back;
+	} else
+	{
+		EXIT_NOT_IMPLEMENTED(src.samples != dst->samples || src.width != dst->width || src.height != dst->height ||
+		                     src.pitch != dst->pitch || src.size != dst->size || src.tile != dst->tile || src.neo != dst->neo ||
+		                     src.write_back != dst->write_back || src.render_texture_format != dst->render_texture_format);
+		EXIT_NOT_IMPLEMENTED(src.type[0] == RenderColorType::DisplayBuffer || dst->existing_video_image != nullptr);
+	}
+
+	dst->type[dst_slot]                    = src.type[0];
+	dst->base_addr[dst_slot]               = src.base_addr[0];
+	dst->buffer_size[dst_slot]             = src.buffer_size[0];
+	dst->cmask_fast_clear_enable[dst_slot] = src.cmask_fast_clear_enable[0];
+	dst->clear_word0[dst_slot]             = src.clear_word0[0];
+	dst->clear_word1[dst_slot]             = src.clear_word1[0];
+	dst->targets_num                       = std::max(dst->targets_num, dst_slot + 1);
+	if (src.type[0] == RenderColorType::DisplayBuffer)
+	{
+		dst->existing_video_image = src.existing_video_image;
+	}
+}
+
 static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw, RenderColorInfo* r)
 {
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer == nullptr || r == nullptr);
 
-	const auto& rt   = hw.GetRenderTarget(0);
-	auto        mask = hw.GetRenderTargetMask();
-	*r              = {};
+	auto mask = hw.GetRenderTargetMask();
+	*r        = {};
 
-	if (rt.base.addr == 0 || mask == 0)
+	if (mask == 0)
 	{
 		// No color output
 		return;
 	}
 
-	uint32_t configured_target_count = 1;
-	for (; configured_target_count < RenderColorInfo::TARGETS_MAX; configured_target_count++)
+	for (uint32_t slot = 0; slot < RenderColorInfo::TARGETS_MAX; slot++)
 	{
-		if (hw.GetRenderTarget(configured_target_count).base.addr == 0)
+		const auto slot_mask = (mask >> (slot * 4u)) & 0xfu;
+		if (slot_mask == 0)
 		{
-			break;
+			continue;
 		}
-	}
 
-	const auto layout = State::ResolveColorTargetLayout(mask, configured_target_count);
-	EXIT_NOT_IMPLEMENTED(layout.error == State::ColorTargetLayoutError::Gapped);
-	EXIT_NOT_IMPLEMENTED(layout.count == 0 || layout.count > RenderColorInfo::TARGETS_MAX);
-
-	RenderColorInfo first {};
-	if (!DescribeRenderColorSlotInfo(buffer, rt, &first))
-	{
-		return;
+		RenderColorInfo current {};
+		if (!DescribeRenderColorSlotInfo(buffer, hw.GetRenderTarget(slot), &current))
+		{
+			continue;
+		}
+		if (current.type[0] == RenderColorType::DisplayBuffer)
+		{
+			EXIT_NOT_IMPLEMENTED(RenderColorHasActiveTarget(*r) || slot != 0);
+		} else
+		{
+			EXIT_NOT_IMPLEMENTED(current.type[0] != RenderColorType::RenderTexture);
+		}
+		CopyRenderColorSlot(r, slot, current);
 	}
-	*r             = first;
-	r->targets_num = layout.count;
 
 	if (r->type[0] == RenderColorType::DisplayBuffer)
 	{
-		// Display buffer (single swapchain target only).
 		EXIT_NOT_IMPLEMENTED(r->targets_num != 1);
-		return;
-	}
-
-	// Additional MRTs share the render-pass image contract with RT0, but keep
-	// their own guest memory identity and clear metadata.
-	for (uint32_t slot = 1; slot < r->targets_num; slot++)
-	{
-		RenderColorInfo other {};
-		EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, hw.GetRenderTarget(slot), &other));
-		EXIT_NOT_IMPLEMENTED(other.type[0] != RenderColorType::RenderTexture);
-		EXIT_NOT_IMPLEMENTED(other.samples != r->samples || other.width != r->width || other.height != r->height ||
-		                     other.pitch != r->pitch || other.size != r->size || other.tile != r->tile || other.neo != r->neo ||
-		                     other.write_back != r->write_back || other.render_texture_format != r->render_texture_format);
-		r->type[slot]                    = RenderColorType::RenderTexture;
-		r->base_addr[slot]               = other.base_addr[0];
-		r->buffer_size[slot]             = other.buffer_size[0];
-		r->cmask_fast_clear_enable[slot] = other.cmask_fast_clear_enable[0];
-		r->clear_word0[slot]             = other.clear_word0[0];
-		r->clear_word1[slot]             = other.clear_word1[0];
 	}
 }
 
@@ -5283,6 +5359,10 @@ static void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer
 	                                      static_cast<uint32_t>(r->samples));
 	for (uint32_t slot = 0; slot < r->targets_num; slot++)
 	{
+		if (!RenderColorSlotConfigured(*r, slot))
+		{
+			continue;
+		}
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
 		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->base_addr[slot], r->size, vulkan_buffer_info));
 		EXIT_NOT_IMPLEMENTED(buffer_vulkan == nullptr);
@@ -5399,7 +5479,7 @@ static RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffe
 	native.guest_extent     = {depth.width, depth.height};
 	native.host_extent      = native.guest_extent;
 	native.attachment_count = depth.format == VK_FORMAT_UNDEFINED ? 0u : 1u;
-	if (color.targets_num != 0 || depth.format == VK_FORMAT_UNDEFINED)
+	if (RenderColorHasActiveTarget(color) || depth.format == VK_FORMAT_UNDEFINED)
 	{
 		return native;
 	}
@@ -5718,13 +5798,14 @@ static void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& d
 		return;
 	}
 
-	if (color.targets_num > 0 &&
-	    (color.vulkan_buffer[0] == nullptr || color.vulkan_buffer[0]->extent.width != decision.host_extent.width ||
-	     color.vulkan_buffer[0]->extent.height != decision.host_extent.height))
+	if (RenderColorHasActiveTarget(color))
 	{
-		EXIT("Render resolution color materialization mismatch: expected=%ux%u actual=%ux%u\n", decision.host_extent.width,
-		     decision.host_extent.height, color.vulkan_buffer[0] != nullptr ? color.vulkan_buffer[0]->extent.width : 0,
-		     color.vulkan_buffer[0] != nullptr ? color.vulkan_buffer[0]->extent.height : 0);
+		auto* image = RenderColorFirstActiveImage(color);
+		if (image == nullptr || image->extent.width != decision.host_extent.width || image->extent.height != decision.host_extent.height)
+		{
+			EXIT("Render resolution color materialization mismatch: expected=%ux%u actual=%ux%u\n", decision.host_extent.width,
+			     decision.host_extent.height, image != nullptr ? image->extent.width : 0, image != nullptr ? image->extent.height : 0);
+		}
 	}
 	if (depth.vulkan_buffer != nullptr &&
 	    (depth.vulkan_buffer->extent.width != decision.host_extent.width || depth.vulkan_buffer->extent.height != decision.host_extent.height))
@@ -5737,16 +5818,18 @@ static void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& d
 
 static void InvalidateMemoryObject(const RenderColorInfo& r)
 {
-	bool with_color = (r.vulkan_buffer[0] != nullptr);
-
-	if (with_color)
+	for (uint32_t slot = 0; slot < r.targets_num; slot++)
 	{
-		if (r.type[0] == RenderColorType::RenderTexture)
+		if (!RenderColorSlotActive(r, slot))
 		{
-			GpuMemoryResetHash(&r.base_addr[0], &r.buffer_size[0], 1, GpuMemoryObjectType::RenderTexture);
-		} else if (r.type[0] == RenderColorType::DisplayBuffer /*|| r.type == RenderColorType::OffscreenBuffer*/)
+			continue;
+		}
+		if (r.type[slot] == RenderColorType::RenderTexture)
 		{
-			GpuMemoryResetHash(&r.base_addr[0], &r.buffer_size[0], 1, GpuMemoryObjectType::VideoOutBuffer);
+			GpuMemoryResetHash(&r.base_addr[slot], &r.buffer_size[slot], 1, GpuMemoryObjectType::RenderTexture);
+		} else if (r.type[slot] == RenderColorType::DisplayBuffer /*|| r.type == RenderColorType::OffscreenBuffer*/)
+		{
+			GpuMemoryResetHash(&r.base_addr[slot], &r.buffer_size[slot], 1, GpuMemoryObjectType::VideoOutBuffer);
 		}
 	}
 }
@@ -6211,7 +6294,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (gen5 && !three_dimensional && !arrayed_2d && tile == 5u && levels > 1u)
 		{
 			Gen5TextureMipLayout mip_layout {};
-			EXIT_NOT_IMPLEMENTED(!Gen5GetStandard4KBTextureMipLayout(fmt, width, height, pitch, levels, &mip_layout));
+			if (!Gen5GetStandard4KBTextureMipLayout(fmt, width, height, pitch, levels, &mip_layout))
+			{
+				EXIT("Unsupported Gen5 Standard4KB mip texture layout: format=%u width=%u height=%u pitch=%u levels=%u\n", fmt, width,
+				     height, pitch, levels);
+			}
 			size = mip_layout.tiled;
 		} else if (three_dimensional)
 		{
@@ -7169,7 +7256,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	RenderColorInfo color_info;
 	DescribeRenderDepthInfo(*ctx, &depth_info);
 	DescribeRenderColorInfo(buffer, *ctx, &color_info);
-	if (color_info.targets_num == 0 && depth_info.format == VK_FORMAT_UNDEFINED)
+	if (!RenderColorHasActiveTarget(color_info) && depth_info.format == VK_FORMAT_UNDEFINED)
 	{
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
@@ -7186,7 +7273,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
-	const auto& materialization_resolution = color_info.targets_num == 0 ? depth_only_resolution : resolution;
+	const auto& materialization_resolution = !RenderColorHasActiveTarget(color_info) ? depth_only_resolution : resolution;
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
 	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.width : 0,
@@ -7787,7 +7874,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	RenderColorInfo color_info;
 	DescribeRenderDepthInfo(*ctx, &depth_info);
 	DescribeRenderColorInfo(buffer, *ctx, &color_info);
-	if (color_info.targets_num == 0 && depth_info.format == VK_FORMAT_UNDEFINED)
+	if (!RenderColorHasActiveTarget(color_info) && depth_info.format == VK_FORMAT_UNDEFINED)
 	{
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
@@ -7824,7 +7911,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
-	const auto& materialization_resolution = color_info.targets_num == 0 ? depth_only_resolution : resolution;
+	const auto& materialization_resolution = !RenderColorHasActiveTarget(color_info) ? depth_only_resolution : resolution;
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
 	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.width : 0,
@@ -8776,7 +8863,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	EXIT_IF(framebuffer == nullptr);
 
 	bool with_depth = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
-	bool with_color = (color->targets_num != 0 && color->vulkan_buffer[0] != nullptr);
+	bool with_color = (RenderColorHasActiveTarget(*color) && RenderColorFirstActiveImage(*color) != nullptr);
 
 	EXIT_NOT_IMPLEMENTED(!with_depth && !with_color);
 
@@ -8793,9 +8880,14 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 
 	const uint32_t color_count = (with_color ? color->targets_num : (with_depth ? 1u : 0u));
 	VkClearValue   clears[RenderColorInfo::TARGETS_MAX + 1] {};
+	uint32_t       clear_attachment = 0;
 	for (uint32_t slot = 0; slot < color_count; slot++)
 	{
-		if (framebuffer->color_count > slot && color->vulkan_buffer[slot] != nullptr)
+		if (with_color && !RenderColorSlotActive(*color, slot))
+		{
+			continue;
+		}
+		if (with_color)
 		{
 			// Clear values belong to VkRenderPassBeginInfo, not the render-pass or
 			// framebuffer identity. Keeping them in the cache key creates a fresh
@@ -8804,18 +8896,21 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 			const auto clear =
 			    ResolveColorAttachmentLoadOps(color->vulkan_buffer[slot]->layout, color->cmask_fast_clear_enable[slot],
 			                                  color->clear_word0[slot], color->clear_word1[slot], color->vulkan_buffer[slot]->format);
-			clears[slot].color = {{clear.clear_r, clear.clear_g, clear.clear_b, clear.clear_a}};
+			clears[clear_attachment].color = {{clear.clear_r, clear.clear_g, clear.clear_b, clear.clear_a}};
 		} else
 		{
-			clears[slot].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+			clears[clear_attachment].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
 		}
+		clear_attachment++;
 	}
 	if (with_depth)
 	{
-		clears[color_count].depthStencil = {depth->depth_clear_value, depth->stencil_clear_value};
+		EXIT_NOT_IMPLEMENTED(framebuffer->depth_attachment_index >= framebuffer->attachment_count);
+		clears[framebuffer->depth_attachment_index].depthStencil = {depth->depth_clear_value, depth->stencil_clear_value};
 	}
 
-	VkExtent2D extent = (with_color ? color->vulkan_buffer[0]->extent : depth->vulkan_buffer->extent);
+	auto*      first_color = RenderColorFirstActiveImage(*color);
+	VkExtent2D extent      = (with_color ? first_color->extent : depth->vulkan_buffer->extent);
 
 	VkRenderPassBeginInfo render_pass_info {};
 	render_pass_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -8824,7 +8919,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	render_pass_info.framebuffer       = framebuffer->framebuffer;
 	render_pass_info.renderArea.offset = {0, 0};
 	render_pass_info.renderArea.extent = extent;
-	render_pass_info.clearValueCount   = color_count + (with_depth ? 1u : 0u);
+	render_pass_info.clearValueCount   = framebuffer->attachment_count;
 	render_pass_info.pClearValues      = clears;
 
 	VkSampleLocationEXT current_sample_location_values[kVulkanSampleLocationMaxCount] = {};
@@ -8849,7 +8944,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 			EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsEnabled(depth_image->last_sample_locations));
 			EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsPopulateInfo(depth_image->last_sample_locations,
 			                                                       previous_sample_location_values, &previous_sample_location_info));
-			attachment_initial_sample_locations.attachmentIndex       = framebuffer->color_count;
+			attachment_initial_sample_locations.attachmentIndex       = framebuffer->depth_attachment_index;
 			attachment_initial_sample_locations.sampleLocationsInfo   = previous_sample_location_info;
 			render_pass_sample_locations.attachmentInitialSampleLocationsCount = 1;
 			render_pass_sample_locations.pAttachmentInitialSampleLocations     = &attachment_initial_sample_locations;

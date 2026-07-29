@@ -2332,6 +2332,20 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		}
 
 		if (!skip_device &&
+		    !CheckFormat(device, VK_FORMAT_BC7_UNORM_BLOCK, true, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
+		{
+			printf("Format VK_FORMAT_BC7_UNORM_BLOCK cannot be used as texture\n");
+			skip_device = true;
+		}
+
+		if (!skip_device &&
+		    !CheckFormat(device, VK_FORMAT_BC7_SRGB_BLOCK, true, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
+		{
+			printf("Format VK_FORMAT_BC7_SRGB_BLOCK cannot be used as texture\n");
+			skip_device = true;
+		}
+
+		if (!skip_device &&
 		    !CheckFormat(device, VK_FORMAT_R8G8B8A8_SRGB, true, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
 		{
 			printf("Format VK_FORMAT_R8G8B8A8_SRGB cannot be used as texture\n");

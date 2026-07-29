@@ -285,6 +285,8 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 		case 71: return 8;   // UFMT_16_16_16_16_FLOAT
 		case 75: return 16;  // UFMT_32_32_32_32_UINT
 		case 173: return 16; // UFMT_BC3_UNORM, 4x4 texels per block
+		case 181: return 16; // UFMT_BC7_UNORM, 4x4 texels per block
+		case 182: return 16; // UFMT_BC7_SRGB, 4x4 texels per block
 		case 133: return 8;  // VK_FORMAT_BC1_RGBA_UNORM_BLOCK, 4x4 texels per block
 		default: return 0;
 	}
