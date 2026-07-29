@@ -139,19 +139,45 @@ const char* KYTY_SYSV_ABI AjmStrError(int error);
 namespace AvPlayer {
 
 struct AvPlayerInitData;
-struct AvPlayerFrameInfoEx;
+struct AvPlayerInitDataEx;
 struct AvPlayerFrameInfo;
+struct AvPlayerFrameInfoEx;
+struct AvPlayerSourceDetails;
+struct AvPlayerStreamInfo;
+struct AvPlayerStreamInfoEx;
 struct AvPlayerInternal;
 
 using Bool = uint8_t;
 
 AvPlayerInternal* KYTY_SYSV_ABI AvPlayerInit(AvPlayerInitData* init);
+int KYTY_SYSV_ABI               AvPlayerInitEx(const AvPlayerInitDataEx* init, AvPlayerInternal** handle);
+int KYTY_SYSV_ABI               AvPlayerPostInit(AvPlayerInternal* h, const void* post_init);
 int KYTY_SYSV_ABI               AvPlayerAddSource(AvPlayerInternal* h, const char* filename);
+int KYTY_SYSV_ABI               AvPlayerAddSourceEx(AvPlayerInternal* h, uint32_t uri_type, const AvPlayerSourceDetails* source_details);
+int KYTY_SYSV_ABI               AvPlayerStreamCount(AvPlayerInternal* h);
+int KYTY_SYSV_ABI               AvPlayerGetStreamInfo(AvPlayerInternal* h, uint32_t stream_id, AvPlayerStreamInfo* info);
+int KYTY_SYSV_ABI               AvPlayerGetStreamInfoEx(AvPlayerInternal* h, uint32_t stream_id, AvPlayerStreamInfoEx* info);
+int KYTY_SYSV_ABI               AvPlayerEnableStream(AvPlayerInternal* h, uint32_t stream_id);
+int KYTY_SYSV_ABI               AvPlayerDisableStream(AvPlayerInternal* h, uint32_t stream_id);
+int KYTY_SYSV_ABI               AvPlayerChangeStream(AvPlayerInternal* h, uint32_t old_stream_id, uint32_t new_stream_id);
+int KYTY_SYSV_ABI               AvPlayerStart(AvPlayerInternal* h);
+int KYTY_SYSV_ABI               AvPlayerStartEx(AvPlayerInternal* h, const void* start_info_ex);
+int KYTY_SYSV_ABI               AvPlayerStop(AvPlayerInternal* h);
+int KYTY_SYSV_ABI               AvPlayerPause(AvPlayerInternal* h);
+int KYTY_SYSV_ABI               AvPlayerResume(AvPlayerInternal* h);
 int KYTY_SYSV_ABI               AvPlayerSetLooping(AvPlayerInternal* h, Bool loop);
+int KYTY_SYSV_ABI               AvPlayerSetAvSyncMode(AvPlayerInternal* h, uint32_t sync_mode);
+int KYTY_SYSV_ABI               AvPlayerSetAvailableBandwidth(AvPlayerInternal* h, uint32_t start_bandwidth,
+                                                              uint32_t minimum_bandwidth, uint32_t maximum_bandwidth);
+int KYTY_SYSV_ABI               AvPlayerSetTrickSpeed(AvPlayerInternal* h, int32_t trick_speed);
+Bool KYTY_SYSV_ABI              AvPlayerGetVideoData(AvPlayerInternal* h, AvPlayerFrameInfo* video_info);
 Bool KYTY_SYSV_ABI              AvPlayerGetVideoDataEx(AvPlayerInternal* h, AvPlayerFrameInfoEx* video_info);
 Bool KYTY_SYSV_ABI              AvPlayerGetAudioData(AvPlayerInternal* h, AvPlayerFrameInfo* audio_info);
 Bool KYTY_SYSV_ABI              AvPlayerIsActive(AvPlayerInternal* h);
+uint64_t KYTY_SYSV_ABI          AvPlayerCurrentTime(AvPlayerInternal* h);
+int KYTY_SYSV_ABI               AvPlayerJumpToTime(AvPlayerInternal* h, uint64_t time_ms);
 int KYTY_SYSV_ABI               AvPlayerClose(AvPlayerInternal* h);
+int KYTY_SYSV_ABI               AvPlayerSetLogCallback(void* callback, void* user_data);
 
 } // namespace AvPlayer
 

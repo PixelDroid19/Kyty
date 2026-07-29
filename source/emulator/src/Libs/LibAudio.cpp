@@ -136,12 +136,33 @@ namespace AvPlayer = Audio::AvPlayer;
 LIB_DEFINE(InitAudio_1_AvPlayer)
 {
 	LIB_FUNC("aS66RI0gGgo", AvPlayer::AvPlayerInit);
+	LIB_FUNC("o9eWRkSL+M4", AvPlayer::AvPlayerInitEx);
+	LIB_FUNC("HD1YKVU26-M", AvPlayer::AvPlayerPostInit);
 	LIB_FUNC("KMcEa+rHsIo", AvPlayer::AvPlayerAddSource);
+	LIB_FUNC("x8uvuFOPZhU", AvPlayer::AvPlayerAddSourceEx);
+	LIB_FUNC("hdTyRzCXQeQ", AvPlayer::AvPlayerStreamCount);
+	LIB_FUNC("d8FcbzfAdQw", AvPlayer::AvPlayerGetStreamInfo);
+	LIB_FUNC("ctTAcF5DiKQ", AvPlayer::AvPlayerGetStreamInfoEx);
+	LIB_FUNC("ODJK2sn9w4A", AvPlayer::AvPlayerEnableStream);
+	LIB_FUNC("BOVKAzRmuTQ", AvPlayer::AvPlayerDisableStream);
+	LIB_FUNC("buMCiJftcfw", AvPlayer::AvPlayerChangeStream);
+	LIB_FUNC("ET4Gr-Uu07s", AvPlayer::AvPlayerStart);
+	LIB_FUNC("NxSdL9t-KXk", AvPlayer::AvPlayerStartEx);
+	LIB_FUNC("ZC17w3vB5Lo", AvPlayer::AvPlayerStop);
+	LIB_FUNC("9y5v+fGN4Wk", AvPlayer::AvPlayerPause);
+	LIB_FUNC("w5moABNwnRY", AvPlayer::AvPlayerResume);
+	LIB_FUNC("k-q+xOxdc3E", AvPlayer::AvPlayerSetAvSyncMode);
+	LIB_FUNC("N6Oy-EjduiY", AvPlayer::AvPlayerSetAvailableBandwidth);
 	LIB_FUNC("OVths0xGfho", AvPlayer::AvPlayerSetLooping);
+	LIB_FUNC("av8Z++94rs0", AvPlayer::AvPlayerSetTrickSpeed);
+	LIB_FUNC("o3+RWnHViSg", AvPlayer::AvPlayerGetVideoData);
 	LIB_FUNC("JdksQu8pNdQ", AvPlayer::AvPlayerGetVideoDataEx);
 	LIB_FUNC("Wnp1OVcrZgk", AvPlayer::AvPlayerGetAudioData);
 	LIB_FUNC("UbQoYawOsfY", AvPlayer::AvPlayerIsActive);
+	LIB_FUNC("wwM99gjFf1Y", AvPlayer::AvPlayerCurrentTime);
+	LIB_FUNC("XC9wM+xULz8", AvPlayer::AvPlayerJumpToTime);
 	LIB_FUNC("NkJwDzKmIlw", AvPlayer::AvPlayerClose);
+	LIB_FUNC("eBTreZ84JFY", AvPlayer::AvPlayerSetLogCallback);
 }
 
 } // namespace LibAvPlayer
