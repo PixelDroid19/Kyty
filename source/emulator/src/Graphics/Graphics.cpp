@@ -20,6 +20,7 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -1752,13 +1753,15 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 
 	auto* h = static_cast<Shader*>(header);
 
-	auto update_addr = [](auto& m)
+	auto update_addr = [](auto& m) -> bool
 	{
-		if (m != nullptr)
+		const auto raw = reinterpret_cast<uintptr_t>(m);
+		if (raw == 0 || raw >= 0x100000000ull)
 		{
-			m = reinterpret_cast<typename std::remove_reference<decltype(m)>::type>(reinterpret_cast<uintptr_t>(m) +
-			                                                                        reinterpret_cast<uintptr_t>(&m));
+			return false;
 		}
+		m = reinterpret_cast<typename std::remove_reference<decltype(m)>::type>(raw + reinterpret_cast<uintptr_t>(&m));
+		return true;
 	};
 
 	update_addr(h->cx_registers);
@@ -1767,11 +1770,14 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 	update_addr(h->specials);
 	update_addr(h->input_semantics);
 	update_addr(h->output_semantics);
-	update_addr(h->user_data->direct_resource_offset);
-	update_addr(h->user_data->sharp_resource_offset[0]);
-	update_addr(h->user_data->sharp_resource_offset[1]);
-	update_addr(h->user_data->sharp_resource_offset[2]);
-	update_addr(h->user_data->sharp_resource_offset[3]);
+	if (h->user_data != nullptr)
+	{
+		update_addr(h->user_data->direct_resource_offset);
+		update_addr(h->user_data->sharp_resource_offset[0]);
+		update_addr(h->user_data->sharp_resource_offset[1]);
+		update_addr(h->user_data->sharp_resource_offset[2]);
+		update_addr(h->user_data->sharp_resource_offset[3]);
+	}
 
 	h->code = code;
 
@@ -2321,6 +2327,51 @@ bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic*
 		regs[input_index].value = value;
 	}
 	return true;
+}
+
+static bool IsReadableGuestRange(const void* address, size_t bytes)
+{
+	if (address == nullptr || bytes == 0)
+	{
+		return false;
+	}
+
+	void* start = nullptr;
+	void* end   = nullptr;
+	if (LibKernel::Memory::KernelQueryMemoryProtection(const_cast<void*>(address), &start, &end, nullptr) != OK)
+	{
+		return false;
+	}
+
+	const auto begin = reinterpret_cast<uintptr_t>(address);
+	const auto last  = begin + bytes - 1u;
+	return last >= begin && reinterpret_cast<uintptr_t>(start) <= begin && last <= reinterpret_cast<uintptr_t>(end);
+}
+
+static bool IsCreateInterpolantMappingShape(const void* producer, const void* pixel)
+{
+	if (!IsReadableGuestRange(producer, sizeof(Shader)) || !IsReadableGuestRange(pixel, sizeof(Shader)))
+	{
+		return false;
+	}
+
+	const auto* producer_shader = static_cast<const Shader*>(producer);
+	const auto* pixel_shader    = static_cast<const Shader*>(pixel);
+	return producer_shader->type == 2u && pixel_shader->type == 1u;
+}
+
+int KYTY_SYSV_ABI GraphicsBuildDescriptorTableOrInterpolantMapping(uint64_t output_address, uint64_t descriptor_address,
+                                                                   uint64_t source_address, uint64_t arg3, uint64_t arg4,
+                                                                   uint64_t arg5)
+{
+	if (IsCreateInterpolantMappingShape(reinterpret_cast<const void*>(descriptor_address), reinterpret_cast<const void*>(source_address)))
+	{
+		return GraphicsCreateInterpolantMapping(reinterpret_cast<ShaderRegister*>(output_address),
+		                                        reinterpret_cast<const Shader*>(descriptor_address),
+		                                        reinterpret_cast<const Shader*>(source_address));
+	}
+
+	return GraphicsBuildDescriptorTable(output_address, descriptor_address, source_address, arg3, arg4, arg5);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -3002,8 +3053,9 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 	// envelope. CP custom R_RELEASE_MEM already accepts 0..3.
 	EXIT_NOT_IMPLEMENTED(data_sel != 0 && data_sel != 1 && data_sel != 2 && data_sel != 3);
 	EXIT_NOT_IMPLEMENTED(gds_offset != 0);
-	// Non-GDS forms do not encode GDS fields. Guests pass gds_size 0 (unused),
-	// 1 (legacy default), or 2 (observed Gen5).
+	// Non-GDS forms do not encode GDS fields. Guests may pass gds_size 0
+	// (unused), 1 (default command buffer value), or 2 (Gen5 command buffer
+	// value).
 	EXIT_NOT_IMPLEMENTED(gds_size > 2);
 	// interrupt selector is a small enum (0 = none). Non-zero values are
 	// packed into the control dword; the CP may still treat clock/immediate
@@ -3333,16 +3385,6 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t inde
 	return cmd;
 }
 
-static uint32_t decode_draw_index_initiator(uint64_t modifier)
-{
-	if ((modifier & (1ull << 32u)) != 0)
-	{
-		return 0;
-	}
-
-	return (static_cast<uint32_t>(modifier) >> 3u) & 0x20u;
-}
-
 static bool draw_index_auto_modifier_supported(uint64_t modifier)
 {
 	// ShaderDrawModifier defines the low 32 bits plus is_default at bit 32.
@@ -3363,16 +3405,17 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 
 	buf->DbgDump();
 
-	// IT_DRAW_INDEX_AUTO consumes the decoded draw initiator, not the complete
-	// shader modifier. Direct auto draws provide zero start vertex/instance;
-	// their SGPR locations therefore do not add packet payload.
-	auto* cmd = buf->AllocateDW(3);
+	auto* cmd = buf->AllocateDW(7);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
-	cmd[0] = KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u);
+	cmd[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX_AUTO);
 	cmd[1] = index_count;
-	cmd[2] = decode_draw_index_initiator(modifier) | 0x2u;
+	cmd[2] = static_cast<uint32_t>(modifier & 0xffffffffu);
+	cmd[3] = static_cast<uint32_t>(modifier >> 32u);
+	cmd[4] = 0;
+	cmd[5] = 0;
+	cmd[6] = 0;
 
 	return cmd;
 }
