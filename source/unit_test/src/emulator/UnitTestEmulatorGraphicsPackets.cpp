@@ -1292,9 +1292,13 @@ TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoModifier80000000)
 
 	uint32_t* cmd = Gen5::GraphicsDcbDrawIndexAuto(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 0x80000000ull);
 	ASSERT_NE(cmd, nullptr);
-	EXPECT_EQ(cmd[0], KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u));
+	EXPECT_EQ(cmd[0], KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX_AUTO));
 	EXPECT_EQ(cmd[1], 1u);
-	EXPECT_EQ(cmd[2], 0x2u);
+	EXPECT_EQ(cmd[2], 0x80000000u);
+	EXPECT_EQ(cmd[3], 0u);
+	EXPECT_EQ(cmd[4], 0u);
+	EXPECT_EQ(cmd[5], 0u);
+	EXPECT_EQ(cmd[6], 0u);
 }
 
 TEST(EmulatorGraphicsPackets, AcceptsStandardDrawIndexAutoInitiatorFlags)
@@ -1306,9 +1310,9 @@ TEST(EmulatorGraphicsPackets, AcceptsStandardDrawIndexAutoInitiatorFlags)
 	EXPECT_FALSE(GraphicsDrawIndexAutoFlagsSupported(0x4u));
 }
 
-// Draw modifiers describe optional shader inputs and compiler metadata.  A
-// direct auto draw still encodes only the hardware draw initiator; enabled
-// start-vertex/start-instance inputs are zero for this draw form.
+// Draw modifiers describe optional shader inputs and compiler metadata. The
+// direct auto-draw packet preserves the full modifier for the command parser and
+// shader-input setup.
 TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoShaderInputModifier)
 {
 	struct AlignasCommandBuffer
@@ -1340,9 +1344,13 @@ TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoShaderInputModifier)
 	constexpr uint64_t modifier = 0x40280805ull;
 	uint32_t*          cmd      = Gen5::GraphicsDcbDrawIndexAuto(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 3u, modifier);
 	ASSERT_NE(cmd, nullptr);
-	EXPECT_EQ(cmd[0], KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u));
+	EXPECT_EQ(cmd[0], KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX_AUTO));
 	EXPECT_EQ(cmd[1], 3u);
-	EXPECT_EQ(cmd[2], 0x2u);
+	EXPECT_EQ(cmd[2], static_cast<uint32_t>(modifier));
+	EXPECT_EQ(cmd[3], static_cast<uint32_t>(modifier >> 32u));
+	EXPECT_EQ(cmd[4], 0u);
+	EXPECT_EQ(cmd[5], 0u);
+	EXPECT_EQ(cmd[6], 0u);
 }
 
 // Gen5 type-2 pad (NID qj7QZpgr9Uw): single 0x80000000 dword.

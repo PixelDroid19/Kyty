@@ -61,6 +61,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdarg>
 #include <mutex>
 #include <set>
 #include <string>
@@ -749,8 +750,56 @@ void GraphicsDumpRememberedRts(GraphicContext* ctx, const char* prefix)
 	dump_uint4_as_bc3(g_dump_bc3_compute_destination, "bc3-compute-destination");
 }
 
+static void AppendFormatted(char* buffer, size_t buffer_size, size_t* length, const char* format, ...)
+{
+	EXIT_IF(buffer == nullptr || length == nullptr || buffer_size == 0);
+	if (*length >= buffer_size - 1)
+	{
+		buffer[buffer_size - 1] = '\0';
+		return;
+	}
+
+	va_list args;
+	va_start(args, format);
+	const int written = std::vsnprintf(buffer + *length, buffer_size - *length, format, args);
+	va_end(args);
+	if (written <= 0)
+	{
+		return;
+	}
+	const auto available = buffer_size - *length;
+	if (static_cast<size_t>(written) >= available)
+	{
+		*length = buffer_size - 1;
+		buffer[*length] = '\0';
+		return;
+	}
+	*length += static_cast<size_t>(written);
+}
+
+static void FormatTextureList(const ShaderTextureResources& textures, char* buffer, size_t buffer_size)
+{
+	EXIT_IF(buffer == nullptr || buffer_size == 0);
+	buffer[0]      = '\0';
+	size_t tex_len = 0;
+	for (int ti = 0; ti < textures.textures_num; ti++)
+	{
+		const auto&    r  = textures.desc[ti].texture;
+		const uint32_t tw = static_cast<uint32_t>(r.Width5()) + 1u;
+		const uint32_t th = static_cast<uint32_t>(r.Height5()) + 1u;
+		const uint32_t tf = r.Format();
+		const uint32_t tt = r.TileMode();
+		AppendFormatted(buffer, buffer_size, &tex_len, "%s0x%" PRIx64 ":%ux%u:fmt%u:tile%u", (tex_len ? "," : ""),
+		                Config::IsNextGen() ? r.Base40() : r.Base38(), tw, th, tf, tt);
+		if (tex_len + 8 >= buffer_size)
+		{
+			break;
+		}
+	}
+}
+
 // Opt-in: KYTY_DUMP_DRAW=1 logs unique draws into 1280x720 color targets that
-// sample a 980x347 texture (title logo). Captures VS fmt/stride, prim, viewport.
+// sample a 980x347 texture. Captures VS fmt/stride, prim, viewport.
 static void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& vs_input, const ShaderPixelInputInfo& ps_input,
                             const HW::Context& hw, const HW::UserConfig& ucfg, uint32_t index_count, uint32_t index_type_and_size,
                             bool indexed, uint32_t flags = 0)
@@ -782,24 +831,16 @@ static void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInpu
 
 	bool        logo = false;
 	char        tex_buf[256] {};
-	size_t      tex_len  = 0;
 	const auto& textures = ps_input.bind.textures2D;
+	FormatTextureList(textures, tex_buf, sizeof(tex_buf));
 	for (int ti = 0; ti < textures.textures_num; ti++)
 	{
 		const auto&    r  = textures.desc[ti].texture;
 		const uint32_t tw = static_cast<uint32_t>(r.Width5()) + 1u;
 		const uint32_t th = static_cast<uint32_t>(r.Height5()) + 1u;
-		const uint32_t tf = r.Format();
-		const uint32_t tt = r.TileMode();
 		if (tw == 980u && th == 347u)
 		{
 			logo = true;
-		}
-		tex_len += static_cast<size_t>(std::snprintf(tex_buf + tex_len, sizeof(tex_buf) - tex_len, "%s0x%" PRIx64 ":%ux%u:fmt%u:tile%u",
-		                                             (tex_len ? "," : ""), Config::IsNextGen() ? r.Base40() : r.Base38(), tw, th, tf, tt));
-		if (tex_len + 8 >= sizeof(tex_buf))
-		{
-			break;
 		}
 	}
 	// Also log non-logo 720p draws once (wipe/bg); logo draws always preferred.
@@ -7259,16 +7300,19 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 	const auto& rt0 = hw.GetRenderTarget(0).info;
 	const auto& cc  = hw.GetColorControl();
 	const auto& bc  = hw.GetBlendControl(0);
+	char        tex_buf[512] {};
+	FormatTextureList(ps_input.bind.textures2D, tex_buf, sizeof(tex_buf));
 	std::fprintf(stderr,
 	             "KYTY_DUMP_DRAW_READY_INDEX count=%u modifier=0x%016" PRIx64 " type=%u index_type=%u targets=%u active=0x%02" PRIx32
 	             " rt=0x%012" PRIx64 ":%ux%u:s%u:f%u depth=%u:%ux%u target_mask=0x%08" PRIx32
 	             " shader_mask=0x%08" PRIx32 " color_mode=%u rop3=0x%02x blend=%u:%u:%u:%u:%u:%u:%u"
-	             " cbfmt=0x%x cbtype=0x%x cborder=0x%x vs_bufs=%d ps_tex=%d ps_buf=%d vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d\n",
+	             " cbfmt=0x%x cbtype=0x%x cborder=0x%x vs_bufs=%d ps_tex=%d tex=[%s] ps_buf=%d"
+	             " vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d\n",
 	             index_count, draw_modifier, type, index_type_and_size, color.targets_num, active_slots, first_addr, first_width,
 	             first_height, first_samples, first_format, static_cast<uint32_t>(depth.format), depth.width, depth.height,
 	             hw.GetRenderTargetMask(), hw.GetShaderRegisters().m_cbShaderMask, cc.mode, cc.op, bc.enable ? 1u : 0u, bc.color_srcblend, bc.color_comb_fcn,
 	             bc.color_destblend, bc.alpha_srcblend, bc.alpha_comb_fcn, bc.alpha_destblend, rt0.format, rt0.channel_type, rt0.channel_order,
-	             vs_input.buffers_num, ps_input.bind.textures2D.textures_num,
+	             vs_input.buffers_num, ps_input.bind.textures2D.textures_num, tex_buf,
 	             ps_input.bind.storage_buffers.buffers_num, xy.x, xy.y, xy.width, xy.height, sc.left, sc.top, sc.right, sc.bottom);
 }
 
@@ -7366,6 +7410,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		case 4: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;   // kPrimitiveTypeTriList
 		case 5: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;    // kPrimitiveTypeTriFan
 		case 6: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // kPrimitiveTypeTriStrip
+		case 7: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // kPrimitiveTypeRectList
 		case 17: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break; // kPrimitiveTypeRectList
 		case 19: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;   // kPrimitiveTypeQuadList
 		default:
@@ -7483,6 +7528,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		case 4:
 		case 5:
 		case 6:
+		case 7:
 		case 17:
 			vkCmdDrawIndexed(vk_buffer, index_count, 1, 0, vertex_offset, 0);
 			DebugStatsRecordDraw();
@@ -8053,7 +8099,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		case 4: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;   // kPrimitiveTypeTriList
 		case 5: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;    // kPrimitiveTypeTriFan
 		case 6: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // kPrimitiveTypeTriStrip
-		case 7: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // Gen5 rect list
+		case 7: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // kPrimitiveTypeRectList
 		case 17: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break; // kPrimitiveTypeRectList
 		case 19: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;   // kPrimitiveTypeQuadList
 		default:
