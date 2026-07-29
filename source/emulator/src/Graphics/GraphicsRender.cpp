@@ -2601,6 +2601,23 @@ static VkBlendFactor get_blend_factor(uint32_t factor)
 	return VK_BLEND_FACTOR_ZERO;
 }
 
+struct BlendFactors
+{
+	VkBlendFactor src;
+	VkBlendFactor dst;
+};
+
+static BlendFactors get_blend_factors(uint32_t src_factor, uint32_t dst_factor)
+{
+	switch (src_factor)
+	{
+		case /* BothSrcAlpha */ 0x0000000b: return {VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA};
+		case /* BothInverseSrcAlpha */ 0x0000000c: return {VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_FACTOR_SRC_ALPHA};
+		default: break;
+	}
+	return {get_blend_factor(src_factor), get_blend_factor(dst_factor)};
+}
+
 static VkBlendOp get_blend_op(uint32_t op)
 {
 	switch (op)
@@ -2857,14 +2874,16 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		auto& att               = color_blend_attachments[rt];
 		att.colorWriteMask      = color_write_mask;
 		att.blendEnable         = static_params->blend_enable[rt] ? VK_TRUE : VK_FALSE;
-		att.srcColorBlendFactor = get_blend_factor(static_params->color_srcblend[rt]);
-		att.dstColorBlendFactor = get_blend_factor(static_params->color_destblend[rt]);
+		const auto color_blend  = get_blend_factors(static_params->color_srcblend[rt], static_params->color_destblend[rt]);
+		const auto alpha_blend  = (static_params->separate_alpha_blend[rt]
+		                               ? get_blend_factors(static_params->alpha_srcblend[rt], static_params->alpha_destblend[rt])
+		                               : color_blend);
+		att.srcColorBlendFactor = color_blend.src;
+		att.dstColorBlendFactor = color_blend.dst;
 		att.colorBlendOp        = get_blend_op(static_params->color_comb_fcn[rt]);
-		att.srcAlphaBlendFactor =
-		    (static_params->separate_alpha_blend[rt] ? get_blend_factor(static_params->alpha_srcblend[rt]) : att.srcColorBlendFactor);
-		att.dstAlphaBlendFactor =
-		    (static_params->separate_alpha_blend[rt] ? get_blend_factor(static_params->alpha_destblend[rt]) : att.dstColorBlendFactor);
-		att.alphaBlendOp = (static_params->separate_alpha_blend[rt] ? get_blend_op(static_params->alpha_comb_fcn[rt]) : att.colorBlendOp);
+		att.srcAlphaBlendFactor = alpha_blend.src;
+		att.dstAlphaBlendFactor = alpha_blend.dst;
+		att.alphaBlendOp        = (static_params->separate_alpha_blend[rt] ? get_blend_op(static_params->alpha_comb_fcn[rt]) : att.colorBlendOp);
 		color_write_enables[rt] = (pipeline->dynamic_params->color_write_enable ? VK_TRUE : VK_FALSE);
 	}
 
