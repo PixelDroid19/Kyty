@@ -5409,17 +5409,6 @@ static RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffe
 	{
 		return native;
 	}
-	uint32_t   registered_width  = 0;
-	uint32_t   registered_height = 0;
-	const auto registered_status =
-	    VideoOut::VideoOutGetRegisteredHostExtent(buffer, depth_extent.width, depth_extent.height, &registered_width, &registered_height);
-	if (registered_status != VideoOut::VideoOutRegisteredHostExtentStatus::Uniform)
-	{
-		native.classification = ResolutionClassification::Unsupported;
-		native.reason         = RenderResolutionPlanReason::MismatchedHostExtent;
-		return native;
-	}
-	const ResolutionExtent registered_extent {registered_width, registered_height};
 
 	RenderResolutionAttachment attachment;
 	attachment.guest_extent        = depth_extent;
@@ -5435,12 +5424,42 @@ static RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffe
 	input.attachment_count = 1;
 	input.expected_count   = 1;
 	const auto candidate   = RenderResolutionEvaluatePlan(input);
+	const auto requested   = candidate.classification == ResolutionClassification::Scaled ? candidate.host_extent : depth_extent;
+
+	uint32_t   registered_width  = 0;
+	uint32_t   registered_height = 0;
+	const auto registered_status =
+	    VideoOut::VideoOutGetRegisteredHostExtent(buffer, depth_extent.width, depth_extent.height, &registered_width, &registered_height);
+	const bool             registered_selected = registered_status == VideoOut::VideoOutRegisteredHostExtentStatus::Uniform;
+	const bool             registered_pending  = registered_status == VideoOut::VideoOutRegisteredHostExtentStatus::Unselected;
+	const ResolutionExtent registered_extent {registered_selected ? registered_width : requested.width,
+	                                          registered_selected ? registered_height : requested.height};
+	if (!registered_selected && !registered_pending)
+	{
+		native.classification = ResolutionClassification::Unsupported;
+		native.reason         = RenderResolutionPlanReason::MismatchedHostExtent;
+		return native;
+	}
+	if (registered_selected && registered_extent != requested)
+	{
+		native.classification = ResolutionClassification::Unsupported;
+		native.reason         = RenderResolutionPlanReason::MismatchedHostExtent;
+		native.host_extent    = registered_extent;
+		return native;
+	}
+
 	auto       decision    = EvaluateDepthOnlyRenderExtentCompatibility(depth_extent, registered_extent, candidate);
 	if (decision.classification != ResolutionClassification::Scaled)
 	{
-		// A depth-only pass has no display attachment to resize. If its depth
-		// resource is not part of a valid scaling cohort, preserving its guest
-		// extent avoids changing compressed or aliased depth coordinates.
+		const auto video_selection =
+		    VideoOut::VideoOutSelectRegisteredHostExtent(buffer, depth_extent.width, depth_extent.height, depth_extent.width,
+		                                                 depth_extent.height);
+		if (video_selection != VideoOut::VideoOutRegisteredHostExtentStatus::Uniform)
+		{
+			native.classification = ResolutionClassification::Unsupported;
+			native.reason         = RenderResolutionPlanReason::MismatchedHostExtent;
+			return native;
+		}
 		return native;
 	}
 	if (decision.classification == ResolutionClassification::Scaled)
@@ -5461,10 +5480,19 @@ static RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffe
 		}
 	}
 
-	ResolutionExtent selected      = registered_extent;
+	ResolutionExtent selected      = requested;
 	const auto*      authorization = decision.classification == ResolutionClassification::Scaled ? &decision : nullptr;
-	const auto       status = RenderResolutionSelectDisplayHostExtent(depth_extent, registered_extent, authorization, &selected);
+	const auto       status = RenderResolutionSelectDisplayHostExtent(depth_extent, requested, authorization, &selected);
 	if (status != RenderDisplaySelectionStatus::Selected)
+	{
+		decision.classification = ResolutionClassification::Unsupported;
+		decision.reason         = RenderResolutionPlanReason::MismatchedHostExtent;
+		decision.host_extent    = selected;
+		return decision;
+	}
+	const auto video_selection =
+	    VideoOut::VideoOutSelectRegisteredHostExtent(buffer, depth_extent.width, depth_extent.height, selected.width, selected.height);
+	if (video_selection != VideoOut::VideoOutRegisteredHostExtentStatus::Uniform)
 	{
 		decision.classification = ResolutionClassification::Unsupported;
 		decision.reason         = RenderResolutionPlanReason::MismatchedHostExtent;
@@ -5600,12 +5628,15 @@ static RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer
 	uint32_t   registered_height = 0;
 	const auto registered_status =
 	    VideoOut::VideoOutGetRegisteredHostExtent(buffer, guest.width, guest.height, &registered_width, &registered_height);
-	const ResolutionExtent registered {registered_width, registered_height};
-	if (registered_status != VideoOut::VideoOutRegisteredHostExtentStatus::Uniform)
+	const bool             registered_selected = registered_status == VideoOut::VideoOutRegisteredHostExtentStatus::Uniform;
+	const bool             registered_pending  = registered_status == VideoOut::VideoOutRegisteredHostExtentStatus::Unselected;
+	const ResolutionExtent registered {registered_selected ? registered_width : requested.width,
+	                                   registered_selected ? registered_height : requested.height};
+	if (!registered_selected && !registered_pending)
 	{
 		return unsupported(registered);
 	}
-	if (registered != requested)
+	if (registered_selected && registered != requested)
 	{
 		return unsupported(registered);
 	}
@@ -5618,6 +5649,12 @@ static RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer
 		return unsupported(selected);
 	}
 	if (selected != requested)
+	{
+		return unsupported(selected);
+	}
+	const auto video_selection =
+	    VideoOut::VideoOutSelectRegisteredHostExtent(buffer, guest.width, guest.height, selected.width, selected.height);
+	if (video_selection != VideoOut::VideoOutRegisteredHostExtentStatus::Uniform)
 	{
 		return unsupported(selected);
 	}

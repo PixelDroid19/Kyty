@@ -51,6 +51,9 @@ VideoOutBufferImageInfo            VideoOutGetImageForSubmission(uint64_t addr, 
 VideoOutRegisteredHostExtentStatus VideoOutGetRegisteredHostExtent(Graphics::CommandBuffer* buffer, uint32_t guest_width,
                                                                    uint32_t guest_height, uint32_t* host_width,
                                                                    uint32_t* host_height);
+VideoOutRegisteredHostExtentStatus VideoOutSelectRegisteredHostExtent(Graphics::CommandBuffer* buffer, uint32_t guest_width,
+                                                                      uint32_t guest_height, uint32_t host_width,
+                                                                      uint32_t host_height);
 void                               VideoOutWaitFlipDone(int handle, int index);
 bool                               VideoOutRunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action,
                                                                     void* data);

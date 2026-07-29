@@ -335,6 +335,8 @@ public:
 	Graphics::VideoOutVulkanImage*     MaterializeRegisteredImage(VideoOutConfig* cfg, int index, Graphics::SubmissionId submission);
 	VideoOutRegisteredHostExtentStatus GetRegisteredHostExtent(Graphics::CommandBuffer* buffer, uint32_t guest_width,
 	                                                           uint32_t guest_height, uint32_t* host_width, uint32_t* host_height);
+	VideoOutRegisteredHostExtentStatus SelectRegisteredHostExtent(Graphics::CommandBuffer* buffer, uint32_t guest_width,
+	                                                              uint32_t guest_height, uint32_t host_width, uint32_t host_height);
 	int RegisterBuffers(int handle, int set_id, bool generate_set_id, int start_index, const void* const* addresses, int buffer_num,
 	                    const VideoOutBufferAttribute* attribute, const VideoOutBufferAttribute2* attribute2);
 	SubmitFlipStatus SubmitFlip(int handle, int index, int64_t flip_arg);
@@ -374,6 +376,12 @@ private:
 	[[nodiscard]] Graphics::VideoOutVulkanImage*
 	PinRegisteredImageForSubmission(VideoOutConfig* cfg, int index, Graphics::SubmissionId submission,
 	                                Graphics::VideoOutMaterializationGate::Pin* pin);
+	VideoOutRegisteredHostExtentStatus ResolveRegisteredImagesForSubmission(Graphics::CommandBuffer*        buffer,
+	                                                                        uint32_t                        guest_width,
+	                                                                        uint32_t                        guest_height,
+	                                                                        Graphics::VideoOutVulkanImage** images,
+	                                                                        uint32_t                        max_images,
+	                                                                        uint32_t*                       image_count);
 
 	Core::Mutex                           m_mutex;
 	Core::Mutex                           m_registration_mutex;
@@ -966,20 +974,21 @@ VideoOutContext::PinRegisteredImageForSubmission(VideoOutConfig* cfg, int index,
 	return image;
 }
 
-VideoOutRegisteredHostExtentStatus VideoOutContext::GetRegisteredHostExtent(Graphics::CommandBuffer* buffer, uint32_t guest_width,
-                                                                            uint32_t guest_height, uint32_t* host_width,
-                                                                            uint32_t* host_height)
+VideoOutRegisteredHostExtentStatus VideoOutContext::ResolveRegisteredImagesForSubmission(Graphics::CommandBuffer*        buffer,
+                                                                                         uint32_t                        guest_width,
+                                                                                         uint32_t                        guest_height,
+                                                                                         Graphics::VideoOutVulkanImage** images,
+                                                                                         uint32_t                        max_images,
+                                                                                         uint32_t*                       image_count)
 {
 	auto access = m_host_access_gate.Acquire();
-	if (buffer == nullptr || guest_width == 0 || guest_height == 0 || host_width == nullptr || host_height == nullptr)
+	if (buffer == nullptr || guest_width == 0 || guest_height == 0 || images == nullptr || image_count == nullptr ||
+	    max_images == 0)
 	{
 		return VideoOutRegisteredHostExtentStatus::InvalidArgument;
 	}
-	Graphics::SubmissionId submission;
-	EXIT_NOT_IMPLEMENTED(!buffer->GetSubmissionId(&submission));
+	*image_count = 0;
 
-	VideoOutRegisteredImageSnapshot snapshots[VIDEO_OUT_NUM_MAX * 16] {};
-	uint32_t                        snapshot_count = 0;
 	Graphics::VideoOutMaterializationGate::Pin pin;
 	{
 		Core::LockGuard lock(m_mutex);
@@ -998,25 +1007,32 @@ VideoOutRegisteredHostExtentStatus VideoOutContext::GetRegisteredHostExtent(Grap
 				{
 					continue;
 				}
-				EXIT_IF(snapshot_count >= VIDEO_OUT_NUM_MAX * 16);
-				EXIT_IF(!CaptureRegisteredImageLocked(&ctx, slot, &snapshots[snapshot_count]));
-				snapshot_count++;
+				EXIT_IF(*image_count >= max_images);
+				EXIT_IF(registered.buffer_vulkan == nullptr);
+				images[(*image_count)++] = registered.buffer_vulkan;
 			}
 		}
 	}
 
-	Graphics::VideoOutVulkanImage* images[VIDEO_OUT_NUM_MAX * 16] {};
-	uint32_t                       image_count = 0;
-	for (uint32_t i = 0; i < snapshot_count; i++)
+	return *image_count == 0 ? VideoOutRegisteredHostExtentStatus::NoBuffers : VideoOutRegisteredHostExtentStatus::Uniform;
+}
+
+VideoOutRegisteredHostExtentStatus VideoOutContext::GetRegisteredHostExtent(Graphics::CommandBuffer* buffer, uint32_t guest_width,
+                                                                            uint32_t guest_height, uint32_t* host_width,
+                                                                            uint32_t* host_height)
+{
+	if (host_width == nullptr || host_height == nullptr)
 	{
-		auto* image = ResolveRegisteredImageForSubmission(snapshots[i], submission);
-		EXIT_IF(image == nullptr);
-		images[image_count++] = image;
+		return VideoOutRegisteredHostExtentStatus::InvalidArgument;
 	}
 
-	if (image_count == 0)
+	Graphics::VideoOutVulkanImage* images[VIDEO_OUT_NUM_MAX * 16] {};
+	uint32_t                       image_count = 0;
+	const auto                     resolve_status =
+	    ResolveRegisteredImagesForSubmission(buffer, guest_width, guest_height, images, VIDEO_OUT_NUM_MAX * 16, &image_count);
+	if (resolve_status != VideoOutRegisteredHostExtentStatus::Uniform)
 	{
-		return VideoOutRegisteredHostExtentStatus::NoBuffers;
+		return resolve_status;
 	}
 
 	Graphics::VideoOutHostExtentSetState state;
@@ -1033,6 +1049,58 @@ VideoOutRegisteredHostExtentStatus VideoOutContext::GetRegisteredHostExtent(Grap
 			return VideoOutRegisteredHostExtentStatus::NonUniform;
 		case Graphics::VideoOutHostExtentSetInspectionStatus::InvalidArgument: return VideoOutRegisteredHostExtentStatus::InvalidArgument;
 		case Graphics::VideoOutHostExtentSetInspectionStatus::Empty: return VideoOutRegisteredHostExtentStatus::NoBuffers;
+	}
+	return VideoOutRegisteredHostExtentStatus::InvalidArgument;
+}
+
+VideoOutRegisteredHostExtentStatus VideoOutContext::SelectRegisteredHostExtent(Graphics::CommandBuffer* buffer, uint32_t guest_width,
+                                                                               uint32_t guest_height, uint32_t host_width,
+                                                                               uint32_t host_height)
+{
+	if (host_width == 0 || host_height == 0)
+	{
+		return VideoOutRegisteredHostExtentStatus::InvalidArgument;
+	}
+
+	Graphics::VideoOutVulkanImage* images[VIDEO_OUT_NUM_MAX * 16] {};
+	uint32_t                       image_count = 0;
+	const auto                     resolve_status =
+	    ResolveRegisteredImagesForSubmission(buffer, guest_width, guest_height, images, VIDEO_OUT_NUM_MAX * 16, &image_count);
+	if (resolve_status != VideoOutRegisteredHostExtentStatus::Uniform)
+	{
+		return resolve_status;
+	}
+
+	Graphics::VideoOutHostExtentSetState state;
+	switch (Graphics::VideoOutBufferSelectHostExtentSet(images, image_count, host_width, host_height, &state))
+	{
+		case Graphics::VideoOutHostExtentSetSelectionStatus::Selected:
+		case Graphics::VideoOutHostExtentSetSelectionStatus::ExistingMatch:
+		{
+			Core::LockGuard lock(m_mutex);
+			for (auto& ctx: m_video_out_ctx)
+			{
+				if (!ctx.opened || ctx.closing)
+				{
+					continue;
+				}
+				for (auto& registered: ctx.buffers)
+				{
+					if (registered.buffer == nullptr || registered.guest_width != guest_width ||
+					    registered.guest_height != guest_height)
+					{
+						continue;
+					}
+					registered.host_width  = host_width;
+					registered.host_height = host_height;
+				}
+			}
+			return VideoOutRegisteredHostExtentStatus::Uniform;
+		}
+		case Graphics::VideoOutHostExtentSetSelectionStatus::ExistingMismatch:
+			return VideoOutRegisteredHostExtentStatus::NonUniform;
+		case Graphics::VideoOutHostExtentSetSelectionStatus::InvalidArgument: return VideoOutRegisteredHostExtentStatus::InvalidArgument;
+		case Graphics::VideoOutHostExtentSetSelectionStatus::Empty: return VideoOutRegisteredHostExtentStatus::NoBuffers;
 	}
 	return VideoOutRegisteredHostExtentStatus::InvalidArgument;
 }
@@ -1791,28 +1859,12 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 			EXIT_IF(!ctx->buffer_registration_reserved[slot] || ctx->buffers[slot].buffer != nullptr);
 		}
 
-		// Commit the runtime extent, every staged image selection and the
-		// published set under one VideoOut observation boundary. Draw/image
-		// lookup can therefore see either the previous set or this complete
-		// cohort, never a registered candidate without its buffers.
+		// Commit the runtime guest extent and the published set under one
+		// VideoOut observation boundary. The render pass selects the host
+		// extent after color, depth/stencil, alias and shader usage are known.
 		const auto resolution_status = Graphics::RenderResolutionRegisterGuestDisplayExtent({width, height});
 		EXIT_IF(resolution_status != Graphics::ResolutionPolicyStatus::Success);
-		const auto resolution  = Graphics::RenderResolutionGetSnapshot();
-		const auto host_extent = resolution.candidate_decision.classification == Graphics::ResolutionClassification::Scaled
-		                             ? resolution.candidate_decision.host_extent
-		                             : Graphics::ResolutionExtent {width, height};
-
-		Graphics::VideoOutHostExtentSetState selection_state {};
-		const auto selection =
-		    Graphics::VideoOutBufferSelectHostExtentSet(staged_images, static_cast<uint32_t>(buffer_num), host_extent.width,
-		                                                host_extent.height, &selection_state);
-		if (selection != Graphics::VideoOutHostExtentSetSelectionStatus::Selected &&
-		    selection != Graphics::VideoOutHostExtentSetSelectionStatus::ExistingMatch)
-		{
-			EXIT("VideoOut buffer-set host extent conflict: guest=%ux%u requested=%ux%u selected=%ux%u status=%s(%u)\n", width,
-			     height, host_extent.width, host_extent.height, selection_state.width, selection_state.height,
-			     Graphics::VideoOutHostExtentSetSelectionStatusName(selection), static_cast<unsigned>(selection));
-		}
+		(void)staged_images;
 
 		// Generated set IDs are committed with publication. Validation failures
 		// such as SLOT_OCCUPIED leave the sequence unchanged.
@@ -1837,8 +1889,8 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 			staged_buffers[i].set_id                    = effective_set_id;
 			staged_buffers[i].guest_width               = width;
 			staged_buffers[i].guest_height              = height;
-			staged_buffers[i].host_width                = host_extent.width;
-			staged_buffers[i].host_height               = host_extent.height;
+			staged_buffers[i].host_width                = 0;
+			staged_buffers[i].host_height               = 0;
 			ctx->buffers[slot]                          = staged_buffers[i];
 			ctx->buffer_registration_reserved[slot]     = false;
 			printf("\tbuffers[%d] = %016" PRIx64 "\n", slot, reinterpret_cast<uint64_t>(addresses[i]));
@@ -2053,6 +2105,14 @@ VideoOutRegisteredHostExtentStatus VideoOutGetRegisteredHostExtent(Graphics::Com
 {
 	EXIT_IF(g_video_out_context == nullptr);
 	return g_video_out_context->GetRegisteredHostExtent(buffer, guest_width, guest_height, host_width, host_height);
+}
+
+VideoOutRegisteredHostExtentStatus VideoOutSelectRegisteredHostExtent(Graphics::CommandBuffer* buffer, uint32_t guest_width,
+                                                                      uint32_t guest_height, uint32_t host_width,
+                                                                      uint32_t host_height)
+{
+	EXIT_IF(g_video_out_context == nullptr);
+	return g_video_out_context->SelectRegisteredHostExtent(buffer, guest_width, guest_height, host_width, host_height);
 }
 
 bool VideoOutIsValidFlipMode(int flip_mode)
