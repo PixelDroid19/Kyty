@@ -7327,6 +7327,30 @@ bool GraphicsResolveRectListAutoDraw(uint32_t primitive_type, uint32_t index_cou
 	return true;
 }
 
+static bool GraphicsResolvePrimitiveTopology(uint32_t primitive_type, VkPrimitiveTopology* topology)
+{
+	if (topology == nullptr)
+	{
+		return false;
+	}
+
+	switch (primitive_type)
+	{
+		case 1: *topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
+		case 2: *topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
+		case 3: *topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
+		case 4: *topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;
+		case 5: *topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;
+		case 6: *topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
+		case 7:
+		case 17: *topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
+		case 19: *topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;
+		default: return false;
+	}
+
+	return true;
+}
+
 static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
                                            HW::Shader* sh_ctx, uint32_t index_count, uint32_t index_type_and_size,
                                            const void* index_addr);
@@ -7404,20 +7428,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
 
 	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
-
-	switch (ucfg->GetPrimType())
-	{
-		case 4: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;   // kPrimitiveTypeTriList
-		case 5: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;    // kPrimitiveTypeTriFan
-		case 6: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // kPrimitiveTypeTriStrip
-		case 7: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // kPrimitiveTypeRectList
-		case 17: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break; // kPrimitiveTypeRectList
-		case 19: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;   // kPrimitiveTypeQuadList
-		default:
-			printf("WARNING: unknown primitive type %u, defaulting to triangle list\n", ucfg->GetPrimType());
-			topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-			break;
-	}
+	EXIT_NOT_IMPLEMENTED(!GraphicsResolvePrimitiveTopology(ucfg->GetPrimType(), &topology));
 
 	printf("GraphicsRenderDrawIndex():Parameters:\n");
 	printf("\t index_type_and_size = 0x%08" PRIx32 "\n", index_type_and_size);
@@ -7525,6 +7536,9 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	switch (ucfg->GetPrimType())
 	{
+		case 1:
+		case 2:
+		case 3:
 		case 4:
 		case 5:
 		case 6:
@@ -7541,10 +7555,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 				DebugStatsRecordDraw();
 			}
 			break;
-		default:
-			printf("WARNING: unknown primitive type %u, defaulting to triangle list\n", ucfg->GetPrimType());
-			topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-			break;
+		default: EXIT_NOT_IMPLEMENTED(true);
 	}
 
 	buffer->EndRenderPass();
@@ -8093,20 +8104,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	RequireSupportedRenderResolutionPlan(depth_only_resolution);
 
 	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
-
-	switch (ucfg->GetPrimType())
-	{
-		case 4: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;   // kPrimitiveTypeTriList
-		case 5: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;    // kPrimitiveTypeTriFan
-		case 6: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // kPrimitiveTypeTriStrip
-		case 7: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;  // kPrimitiveTypeRectList
-		case 17: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break; // kPrimitiveTypeRectList
-		case 19: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;   // kPrimitiveTypeQuadList
-		default:
-			printf("WARNING: unknown primitive type %u, defaulting to triangle list\n", ucfg->GetPrimType());
-			topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-			break;
-	}
+	EXIT_NOT_IMPLEMENTED(!GraphicsResolvePrimitiveTopology(ucfg->GetPrimType(), &topology));
 
 	const auto& vertex_shader_info = sh_ctx->GetVs();
 	const auto& pixel_shader_info  = sh_ctx->GetPs();
@@ -8160,6 +8158,9 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	switch (ucfg->GetPrimType())
 	{
+		case 1:
+		case 2:
+		case 3:
 		case 4:
 		case 5:
 		case 6:
@@ -8188,10 +8189,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 				DebugStatsRecordDraw();
 			}
 			break;
-		default:
-			printf("WARNING: unknown primitive type %u, defaulting to triangle list\n", ucfg->GetPrimType());
-			topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-			break;
+		default: EXIT_NOT_IMPLEMENTED(true);
 	}
 
 	buffer->EndRenderPass();
