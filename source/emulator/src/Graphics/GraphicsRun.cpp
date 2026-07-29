@@ -173,9 +173,11 @@ public:
 	void SetIndexType(uint32_t index_type_and_size);
 	void SetIndexBaseAddress(uint64_t index_base_addr);
 	void SetIndexBufferSize(uint32_t index_buffer_size);
+	void SetIndirectArgsBaseAddress(uint32_t base_index, uint64_t address);
 	void SetNumInstances(uint32_t num_instances);
 	void DrawIndex(uint32_t index_count, const void* index_addr, uint32_t flags, uint32_t type);
 	void DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags);
+	void DrawIndexIndirect(uint32_t data_offset, uint32_t initiator);
 	void DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier);
 	void WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_write_dest, uint32_t eop_event_type, uint32_t cache_action,
 	                        uint32_t event_index, uint32_t event_write_source, void* dst_gpu_addr, uint32_t value,
@@ -191,6 +193,7 @@ public:
 	void RenderTextureBarrier(uint64_t vaddr, uint64_t size);
 	void DepthStencilBarrier(uint64_t vaddr, uint64_t size);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
+	void DispatchIndirect(uint32_t data_offset, uint32_t mode);
 	void WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index);
 	void TriggerEvent(uint32_t event_type, uint32_t event_index);
 
@@ -254,6 +257,8 @@ private:
 	uint32_t         m_index_type_and_size = 0;
 	uint32_t         m_index_buffer_size   = 0;
 	uint64_t         m_index_base_addr     = 0;
+	uint64_t         m_draw_indirect_args_base_addr     = 0;
+	uint64_t         m_dispatch_indirect_args_base_addr = 0;
 	uint32_t         m_num_instances       = 1;
 
 	Core::Mutex m_mutex;
@@ -1678,6 +1683,28 @@ void CommandProcessor::SetIndexBufferSize(uint32_t index_buffer_size)
 	m_index_buffer_size = index_buffer_size;
 }
 
+void CommandProcessor::SetIndirectArgsBaseAddress(uint32_t base_index, uint64_t address)
+{
+	Core::LockGuard lock(m_mutex);
+
+	switch (base_index)
+	{
+		case 0: m_draw_indirect_args_base_addr = address; break;
+		case 1: m_dispatch_indirect_args_base_addr = address; break;
+		default: EXIT_NOT_IMPLEMENTED(true); break;
+	}
+
+	if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+	{
+		static uint32_t logs = 0;
+		if (logs < 64u)
+		{
+			++logs;
+			std::fprintf(stderr, "KYTY_DUMP_INDIRECT set_base index=%u addr=0x%012" PRIx64 "\n", base_index, address);
+		}
+	}
+}
+
 void CommandProcessor::SetNumInstances(uint32_t num_instances)
 {
 	Core::LockGuard lock(m_mutex);
@@ -1737,6 +1764,75 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 	                        index_addr, 0, 1);
 }
 
+void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiator)
+{
+	struct DrawIndexedIndirectArgs
+	{
+		uint32_t index_count_per_instance;
+		uint32_t instance_count;
+		uint32_t start_index_location;
+		uint32_t base_vertex_location;
+		uint32_t start_instance_location;
+	};
+
+	Core::LockGuard lock(m_mutex);
+
+	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
+	EXIT_NOT_IMPLEMENTED(m_index_base_addr == 0);
+	EXIT_NOT_IMPLEMENTED((initiator & ~0x20u) != 2u);
+
+	DrawIndexedIndirectArgs args {};
+	memcpy(&args, reinterpret_cast<const void*>(m_draw_indirect_args_base_addr + data_offset), sizeof(args));
+	if (args.index_count_per_instance == 0 || args.instance_count == 0)
+	{
+		if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+		{
+			static uint32_t logs = 0;
+			if (logs < 64u)
+			{
+				++logs;
+				std::fprintf(stderr,
+				             "KYTY_DUMP_INDIRECT draw_index_skip offset=0x%08" PRIx32 " count=%u instances=%u base=0x%012" PRIx64
+				             "\n",
+				             data_offset, args.index_count_per_instance, args.instance_count, m_draw_indirect_args_base_addr);
+			}
+		}
+		return;
+	}
+
+	uint32_t index_bytes = 0;
+	switch (m_index_type_and_size)
+	{
+		case 0: index_bytes = 2; break;
+		case 1: index_bytes = 4; break;
+		case 2: index_bytes = 1; break;
+		default: EXIT_NOT_IMPLEMENTED(true); break;
+	}
+
+	const uint32_t index_count =
+	    (m_index_buffer_size != 0 && args.index_count_per_instance > m_index_buffer_size) ? m_index_buffer_size
+	                                                                                     : args.index_count_per_instance;
+	auto*          index_addr  = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(args.start_index_location) * index_bytes);
+
+	if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+	{
+		static uint32_t logs = 0;
+		if (logs < 64u)
+		{
+			++logs;
+			std::fprintf(stderr,
+			             "KYTY_DUMP_INDIRECT draw_index offset=0x%08" PRIx32 " count=%u instances=%u start_index=%u base_vertex=%u "
+			             "first_instance=%u initiator=0x%08" PRIx32 "\n",
+			             data_offset, index_count, args.instance_count, args.start_index_location, args.base_vertex_location,
+			             args.start_instance_location, initiator);
+		}
+	}
+
+	GraphicsRenderDrawIndex(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, index_count,
+	                        index_addr, 0, 1);
+}
+
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
 {
 	Core::LockGuard lock(m_mutex);
@@ -1745,6 +1841,54 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 
 	GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, thread_group_x, thread_group_y, thread_group_z,
 	                             mode);
+}
+
+void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
+{
+	struct DispatchIndirectArgs
+	{
+		uint32_t thread_group_x;
+		uint32_t thread_group_y;
+		uint32_t thread_group_z;
+	};
+
+	Core::LockGuard lock(m_mutex);
+
+	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+	EXIT_NOT_IMPLEMENTED(m_dispatch_indirect_args_base_addr == 0);
+
+	DispatchIndirectArgs args {};
+	memcpy(&args, reinterpret_cast<const void*>(m_dispatch_indirect_args_base_addr + data_offset), sizeof(args));
+	if (args.thread_group_x == 0 || args.thread_group_y == 0 || args.thread_group_z == 0)
+	{
+		if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+		{
+			static uint32_t logs = 0;
+			if (logs < 64u)
+			{
+				++logs;
+				std::fprintf(stderr,
+				             "KYTY_DUMP_INDIRECT dispatch_skip offset=0x%08" PRIx32 " dims=%ux%ux%u base=0x%012" PRIx64 "\n",
+				             data_offset, args.thread_group_x, args.thread_group_y, args.thread_group_z,
+				             m_dispatch_indirect_args_base_addr);
+			}
+		}
+		return;
+	}
+
+	if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+	{
+		static uint32_t logs = 0;
+		if (logs < 64u)
+		{
+			++logs;
+			std::fprintf(stderr, "KYTY_DUMP_INDIRECT dispatch offset=0x%08" PRIx32 " dims=%ux%ux%u mode=0x%08" PRIx32 "\n",
+			             data_offset, args.thread_group_x, args.thread_group_y, args.thread_group_z, mode);
+		}
+	}
+
+	GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, args.thread_group_x, args.thread_group_y,
+	                             args.thread_group_z, mode);
 }
 
 void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier)
@@ -3671,6 +3815,11 @@ KYTY_CP_OP_PARSER(cp_op_set_base)
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_NOT_IMPLEMENTED(dw < 3);
+	EXIT_NOT_IMPLEMENTED(buffer[0] != 1u);
+
+	const uint32_t base_index = (cmd_id >> 1u) & 0x1u;
+	const uint64_t address    = (buffer[1] & ~7ull) | (static_cast<uint64_t>(buffer[2]) << 32u);
+	cp->SetIndirectArgsBaseAddress(base_index, address);
 
 	return 3;
 }
@@ -3683,6 +3832,7 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_indirect)
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_NOT_IMPLEMENTED(dw < 2);
+	cp->DispatchIndirect(buffer[0], buffer[1]);
 
 	return 2;
 }
@@ -3693,6 +3843,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_indirect)
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_NOT_IMPLEMENTED(dw < 4);
+	cp->DrawIndexIndirect(buffer[0], buffer[3]);
 
 	return 4;
 }
