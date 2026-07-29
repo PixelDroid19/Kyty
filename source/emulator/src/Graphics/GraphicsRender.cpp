@@ -7169,7 +7169,7 @@ static void MaybeDumpAutoDrawSkip(const char* reason, uint32_t index_count, uint
 	             draw_modifier);
 }
 
-static void MaybeDumpIndexDrawSkip(const char* reason, uint32_t index_count, uint32_t flags, uint32_t type)
+static void MaybeDumpIndexDrawSkip(const char* reason, uint32_t index_count, uint64_t draw_modifier, uint32_t type)
 {
 	if (std::getenv("KYTY_DUMP_DRAW") == nullptr)
 	{
@@ -7181,13 +7181,13 @@ static void MaybeDumpIndexDrawSkip(const char* reason, uint32_t index_count, uin
 		return;
 	}
 	++logs;
-	std::fprintf(stderr, "KYTY_DUMP_DRAW_SKIP_INDEX reason=%s count=%u flags=0x%08" PRIx32 " type=%u\n", reason, index_count,
-	             flags, type);
+	std::fprintf(stderr, "KYTY_DUMP_DRAW_SKIP_INDEX reason=%s count=%u modifier=0x%016" PRIx64 " type=%u\n", reason, index_count,
+	             draw_modifier, type);
 }
 
 static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDepthInfo& depth, const HW::Context& hw,
                                     const ShaderVertexInputInfo& vs_input, const ShaderPixelInputInfo& ps_input, uint32_t index_count,
-                                    uint32_t index_type_and_size, uint32_t flags, uint32_t type)
+                                    uint32_t index_type_and_size, uint64_t draw_modifier, uint32_t type)
 {
 	if (std::getenv("KYTY_DUMP_DRAW") == nullptr)
 	{
@@ -7227,13 +7227,13 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 	const auto  xy = State::ResolveViewportXy(vp.xscale, vp.xoffset, vp.yscale, vp.yoffset);
 	const auto  sc = State::ResolveScissor(hw.GetScreenViewport(), hw.GetScanModeControl(), 0);
 	std::fprintf(stderr,
-	             "KYTY_DUMP_DRAW_READY_INDEX count=%u flags=0x%08" PRIx32 " type=%u index_type=%u targets=%u active=0x%02" PRIx32
+	             "KYTY_DUMP_DRAW_READY_INDEX count=%u modifier=0x%016" PRIx64 " type=%u index_type=%u targets=%u active=0x%02" PRIx32
 	             " rt=0x%012" PRIx64 ":%ux%u:s%u:f%u depth=%u:%ux%u target_mask=0x%08" PRIx32
 	             " vs_bufs=%d ps_tex=%d ps_buf=%d vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d\n",
-	             index_count, flags, type, index_type_and_size, color.targets_num, active_slots, first_addr, first_width, first_height,
-	             first_samples, first_format, static_cast<uint32_t>(depth.format), depth.width, depth.height, hw.GetRenderTargetMask(),
-	             vs_input.buffers_num, ps_input.bind.textures2D.textures_num, ps_input.bind.storage_buffers.buffers_num, xy.x, xy.y,
-	             xy.width, xy.height, sc.left, sc.top, sc.right, sc.bottom);
+	             index_count, draw_modifier, type, index_type_and_size, color.targets_num, active_slots, first_addr, first_width,
+	             first_height, first_samples, first_format, static_cast<uint32_t>(depth.format), depth.width, depth.height,
+	             hw.GetRenderTargetMask(), vs_input.buffers_num, ps_input.bind.textures2D.textures_num,
+	             ps_input.bind.storage_buffers.buffers_num, xy.x, xy.y, xy.width, xy.height, sc.left, sc.top, sc.right, sc.bottom);
 }
 
 bool GraphicsResolveRectListAutoDraw(uint32_t primitive_type, uint32_t index_count, int vertex_buffers_num, uint32_t* vertex_count)
@@ -7250,9 +7250,11 @@ bool GraphicsResolveRectListAutoDraw(uint32_t primitive_type, uint32_t index_cou
 static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
                                            HW::Shader* sh_ctx, uint32_t index_count, uint32_t index_type_and_size,
                                            const void* index_addr);
+static bool AutoDrawModifierSupported(uint64_t draw_modifier);
 
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
-                             uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint32_t flags, uint32_t type)
+                             uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
+                             uint32_t type)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -7270,22 +7272,22 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		{
 			++logs;
 			std::fprintf(stderr,
-			             "KYTY_DUMP_DRAW_ENTER_INDEX count=%u flags=0x%08" PRIx32 " type=%u color_mode=%u color_op=0x%x stages=0x%08" PRIx32
-			             "\n",
-			             index_count, flags, type, static_cast<uint32_t>(ctx->GetColorControl().mode), ctx->GetColorControl().op,
+			             "KYTY_DUMP_DRAW_ENTER_INDEX count=%u modifier=0x%016" PRIx64
+			             " type=%u color_mode=%u color_op=0x%x stages=0x%08" PRIx32 "\n",
+			             index_count, draw_modifier, type, static_cast<uint32_t>(ctx->GetColorControl().mode), ctx->GetColorControl().op,
 			             ctx->GetShaderStages());
 		}
 	}
 
 	if (GraphicsRenderColorResolve(submit_id, buffer, *ctx))
 	{
-		MaybeDumpIndexDrawSkip("color-resolve", index_count, flags, type);
+		MaybeDumpIndexDrawSkip("color-resolve", index_count, draw_modifier, type);
 		return;
 	}
 	const bool depth_stencil_copy = ctx->GetRenderControl().depth_copy || ctx->GetRenderControl().stencil_copy;
 	if (depth_stencil_copy)
 	{
-		MaybeDumpIndexDrawSkip("depth-stencil-copy", index_count, flags, type);
+		MaybeDumpIndexDrawSkip("depth-stencil-copy", index_count, draw_modifier, type);
 		uc_print("GraphicsRenderDrawIndex():UserConfig:", *ucfg);
 		uc_check(*ucfg);
 
@@ -7296,17 +7298,17 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		printf("\t index_type_and_size = 0x%08" PRIx32 "\n", index_type_and_size);
 		printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
 		printf("\t index_addr          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
-		printf("\t flags               = 0x%08" PRIx32 "\n", flags);
+		printf("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
 		printf("\t type                = 0x%08" PRIx32 "\n", type);
 
-		EXIT_NOT_IMPLEMENTED(flags != 0 && flags != 0x40000000u && flags != 0x80000000u);
+		EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
 		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, index_type_and_size, index_addr);
 		return;
 	}
 
 	if (const char* reason = shader_disable_reason(sh_ctx); reason != nullptr)
 	{
-		MaybeDumpIndexDrawSkip(reason, index_count, flags, type);
+		MaybeDumpIndexDrawSkip(reason, index_count, draw_modifier, type);
 		return;
 	}
 
@@ -7340,7 +7342,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	printf("\t index_type_and_size = 0x%08" PRIx32 "\n", index_type_and_size);
 	printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
 	printf("\t index_addr          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
-	printf("\t flags               = 0x%08" PRIx32 "\n", flags);
+	printf("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
 	printf("\t type                = 0x%08" PRIx32 "\n", type);
 
 	VkIndexType index_type = VK_INDEX_TYPE_UINT16;
@@ -7363,9 +7365,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 			break;
 	}
 
-	// Gen5 draw modifiers are command-processor bookkeeping bits; they do not
-	// change the Vulkan draw.
-	EXIT_NOT_IMPLEMENTED(flags != 0 && flags != 0x40000000u && flags != 0x80000000u);
+	EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
 	EXIT_NOT_IMPLEMENTED(type != 1);
 
 	RenderDepthInfo depth_info;
@@ -7375,7 +7375,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	if (!RenderColorHasActiveTarget(color_info) && depth_info.format == VK_FORMAT_UNDEFINED)
 	{
 		// A zero target mask with depth disabled is a valid no-output draw.
-		MaybeDumpIndexDrawSkip("no-output", index_count, flags, type);
+		MaybeDumpIndexDrawSkip("no-output", index_count, draw_modifier, type);
 		return;
 	}
 	VulkanSampleLocationState sample_locations {};
@@ -7406,8 +7406,10 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
-	MaybeDumpIndexDrawReady(color_info, depth_info, *ctx, vs_input_info, ps_input_info, index_count, index_type_and_size, flags, type);
-	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, index_type_and_size, true, flags);
+	MaybeDumpIndexDrawReady(color_info, depth_info, *ctx, vs_input_info, ps_input_info, index_count, index_type_and_size,
+	                        draw_modifier, type);
+	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, index_type_and_size, true,
+	                static_cast<uint32_t>(draw_modifier));
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, topology, sample_locations);

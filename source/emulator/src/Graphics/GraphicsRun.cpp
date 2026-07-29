@@ -175,7 +175,7 @@ public:
 	void SetIndexBufferSize(uint32_t index_buffer_size);
 	void SetIndirectArgsBaseAddress(uint32_t base_index, uint64_t address);
 	void SetNumInstances(uint32_t num_instances);
-	void DrawIndex(uint32_t index_count, const void* index_addr, uint32_t flags, uint32_t type);
+	void DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type);
 	void DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags);
 	void DrawIndexIndirect(uint32_t data_offset, uint32_t initiator);
 	void DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier);
@@ -1719,7 +1719,7 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances)
 	EXIT_NOT_IMPLEMENTED(m_num_instances != 1);
 }
 
-void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, uint32_t flags, uint32_t type)
+void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -1732,15 +1732,15 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 		{
 			++logs;
 			std::fprintf(stderr,
-			             "KYTY_DUMP_DRAW_INDEX count=%u flags=0x%08" PRIx32 " type=%u index_addr=0x%012" PRIx64
+			             "KYTY_DUMP_DRAW_INDEX count=%u modifier=0x%016" PRIx64 " type=%u index_addr=0x%012" PRIx64
 			             " index_base=0x%012" PRIx64 " index_buf_size=%u index_type=%u\n",
-			             index_count, flags, type, reinterpret_cast<uint64_t>(index_addr), m_index_base_addr, m_index_buffer_size,
-			             m_index_type_and_size);
+			             index_count, draw_modifier, type, reinterpret_cast<uint64_t>(index_addr), m_index_base_addr,
+			             m_index_buffer_size, m_index_type_and_size);
 		}
 	}
 
 	GraphicsRenderDrawIndex(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, index_count,
-	                        index_addr, flags, type);
+	                        index_addr, draw_modifier, type);
 }
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags)
@@ -1761,7 +1761,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 
 	auto* index_addr = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(index_offset) * index_bytes);
 	GraphicsRenderDrawIndex(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, index_count,
-	                        index_addr, 0, 1);
+	                        index_addr, flags, 1);
 }
 
 void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiator)
@@ -3705,21 +3705,24 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC008100C && cmd_id != 0xc0042700);
+	const uint32_t packet_len = KYTY_PM4_LEN(cmd_id);
 
-	if (cmd_id == 0xC008100C)
+	if (KYTY_PM4_R(cmd_id) == Pm4::R_DRAW_INDEX)
 	{
+		EXIT_NOT_IMPLEMENTED(packet_len != 7);
+		EXIT_NOT_IMPLEMENTED(dw < 6);
+
 		uint32_t index_count = buffer[0];
 		auto*    index_addr  = reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
-		uint32_t flags       = buffer[3];
-		uint32_t type        = buffer[4];
+		uint64_t modifier    = buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u);
+		EXIT_NOT_IMPLEMENTED(buffer[5] != 0);
 
-		cp->DrawIndex(index_count, index_addr, flags, type);
+		cp->DrawIndex(index_count, index_addr, modifier, 1);
 
-		return 9;
+		return 6;
 	}
 
-	if (cmd_id == 0xc0042700)
+	if (cmd_id == KYTY_PM4(6, Pm4::IT_DRAW_INDEX_2, 0u))
 	{
 		uint32_t index_count = buffer[0];
 		auto*    index_addr  = reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
@@ -3748,7 +3751,8 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 		printf("WARNING: invalid draw_index (continuing)\n");
 	}
 
-	return 1;
+	EXIT_NOT_IMPLEMENTED(true);
+	return 0;
 }
 
 // IT_DRAW_INDEX_OFFSET_2 (0x35): draw from IT_INDEX_BASE + index_offset.

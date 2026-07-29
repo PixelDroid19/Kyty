@@ -3470,9 +3470,6 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t 
 	return cmd;
 }
 
-// AGC indexed draw: sceAgcDcbDrawIndex(dcb, index_count, index_addr, modifier).
-// Emits the same R_DRAW_INDEX custom PM4 packet (header 0xC008100C, 9 DW) that the
-// command-processor's cp_op_draw_index handler consumes.
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_count, const void* index_addr, uint64_t modifier)
 {
 	PRINT_NAME();
@@ -3482,26 +3479,23 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_
 	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+	EXIT_NOT_IMPLEMENTED(!draw_index_auto_modifier_supported(modifier));
 
 	buf->DbgDump();
 
-	// Header 0xC008100C == KYTY_PM4(10, IT_NOP, R_DRAW_INDEX): 10 DW total.
-	auto* cmd = buf->AllocateDW(10);
+	auto* cmd = buf->AllocateDW(7);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
 	auto addr = reinterpret_cast<uint64_t>(index_addr);
 
-	cmd[0] = KYTY_PM4(10, Pm4::IT_NOP, Pm4::R_DRAW_INDEX);
+	cmd[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX);
 	cmd[1] = index_count;
 	cmd[2] = static_cast<uint32_t>(addr & 0xffffffffu);
 	cmd[3] = static_cast<uint32_t>((addr >> 32u) & 0xffffffffu);
-	cmd[4] = 0; // flags
-	cmd[5] = 1; // type (indexed)
+	cmd[4] = static_cast<uint32_t>(modifier & 0xffffffffu);
+	cmd[5] = static_cast<uint32_t>(modifier >> 32u);
 	cmd[6] = 0;
-	cmd[7] = 0;
-	cmd[8] = 0;
-	cmd[9] = 0;
 
 	return cmd;
 }
