@@ -17,7 +17,7 @@
 
 namespace Kyty::Libs::Graphics {
 struct DebugStatsPerformanceSnapshot;
-struct InternalResolutionRuntimeSnapshot;
+struct RenderResolutionSnapshot;
 } // namespace Kyty::Libs::Graphics
 
 namespace Kyty::Emulator::Agent {
@@ -81,7 +81,7 @@ bool ArgsGetBool(const std::string& args_json, const char* key, bool* out);
 
 void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceSnapshot& performance, std::string* out);
 void AppendSlowFramePerformanceJson(const Libs::Graphics::DebugStatsPerformanceSnapshot& performance, std::string* out);
-void AppendInternalResolutionPerformanceJson(const Libs::Graphics::InternalResolutionRuntimeSnapshot& resolution, std::string* out);
+void AppendRenderResolutionPerformanceJson(const Libs::Graphics::RenderResolutionSnapshot& resolution, std::string* out);
 
 std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Core::BringUp::Diagnostics& diagnostics,
                                    const Loader::MissingImportDiagnostics& imports, const Loader::ModuleLoadPlanDiagnostics& load_plan);

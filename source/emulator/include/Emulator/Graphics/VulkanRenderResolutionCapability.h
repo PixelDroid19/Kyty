@@ -1,7 +1,7 @@
-#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_VULKANRESOLUTIONCAPABILITY_H_
-#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_VULKANRESOLUTIONCAPABILITY_H_
+#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_VULKANRENDERRESOLUTIONCAPABILITY_H_
+#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_VULKANRENDERRESOLUTIONCAPABILITY_H_
 
-#include "Emulator/Graphics/ResolutionImageCapability.h"
+#include "Emulator/Graphics/RenderResolutionImageCapability.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -9,7 +9,7 @@ namespace Kyty::Libs::Graphics {
 
 struct GraphicContext;
 
-enum class VulkanResolutionCapabilityStatus : uint8_t
+enum class VulkanRenderResolutionCapabilityStatus : uint8_t
 {
 	Success,
 	InvalidArgument,
@@ -40,7 +40,7 @@ struct VulkanResolutionAttachmentRequest
 
 struct VulkanResolutionNormalizedRequest
 {
-	ResolutionImageCapabilityRequest capability_request;
+	RenderResolutionImageCapabilityRequest capability_request;
 };
 
 // Query results are represented separately so flag translation and capability
@@ -53,37 +53,37 @@ struct VulkanResolutionHostEvidence
 	bool                    exact_usage_supported         = false;
 };
 
-struct VulkanResolutionCapabilityEvaluation
+struct VulkanRenderResolutionCapabilityEvaluation
 {
-	VulkanResolutionCapabilityStatus  status       = VulkanResolutionCapabilityStatus::InvalidArgument;
+	VulkanRenderResolutionCapabilityStatus  status       = VulkanRenderResolutionCapabilityStatus::InvalidArgument;
 	VkResult                          query_result = VK_SUCCESS;
 	VulkanResolutionNormalizedRequest normalized;
 	VulkanResolutionHostEvidence      evidence;
 	ResolutionHostImageCapabilities   capabilities;
-	ResolutionImageCapabilityDecision decision;
+	RenderResolutionImageCapabilityDecision decision;
 };
 
 // Guest sample-count fields use a log2 encoding. Decode it at the Vulkan
 // boundary so attachment, pipeline, and capability paths share one contract.
 [[nodiscard]] bool VulkanDecodeLog2SampleCount(uint8_t encoded, VkSampleCountFlagBits* sample_count);
 
-[[nodiscard]] VulkanResolutionCapabilityStatus NormalizeVulkanResolutionAttachmentRequest(const VulkanResolutionAttachmentRequest& request,
+[[nodiscard]] VulkanRenderResolutionCapabilityStatus NormalizeVulkanResolutionAttachmentRequest(const VulkanResolutionAttachmentRequest& request,
                                                                                           VulkanResolutionNormalizedRequest* normalized);
 
 [[nodiscard]] ResolutionHostImageCapabilities BuildResolutionHostImageCapabilities(const VulkanResolutionHostEvidence&      evidence,
                                                                                    const VulkanResolutionNormalizedRequest& normalized);
 
-[[nodiscard]] VulkanResolutionCapabilityEvaluation
+[[nodiscard]] VulkanRenderResolutionCapabilityEvaluation
 EvaluateVulkanResolutionHostEvidence(const VulkanResolutionHostEvidence& evidence, const VulkanResolutionNormalizedRequest& normalized);
 
-[[nodiscard]] VulkanResolutionCapabilityEvaluation EvaluateVulkanResolutionAttachment(VkPhysicalDevice physical_device,
+[[nodiscard]] VulkanRenderResolutionCapabilityEvaluation EvaluateVulkanResolutionAttachment(VkPhysicalDevice physical_device,
                                                                                       const VulkanResolutionAttachmentRequest& request);
 
-[[nodiscard]] VulkanResolutionCapabilityEvaluation EvaluateVulkanResolutionAttachment(const GraphicContext*                    context,
+[[nodiscard]] VulkanRenderResolutionCapabilityEvaluation EvaluateVulkanResolutionAttachment(const GraphicContext*                    context,
                                                                                       const VulkanResolutionAttachmentRequest& request);
 
-[[nodiscard]] const char* VulkanResolutionCapabilityStatusName(VulkanResolutionCapabilityStatus status);
+[[nodiscard]] const char* VulkanRenderResolutionCapabilityStatusName(VulkanRenderResolutionCapabilityStatus status);
 
 } // namespace Kyty::Libs::Graphics
 
-#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_VULKANRESOLUTIONCAPABILITY_H_ */
+#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_VULKANRENDERRESOLUTIONCAPABILITY_H_ */

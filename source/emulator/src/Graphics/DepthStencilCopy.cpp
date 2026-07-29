@@ -123,6 +123,80 @@ constexpr uint32_t kFragmentShader[] = {
 	0x000100fdu, 0x00010038u,
 };
 
+constexpr uint32_t kFragmentShaderMultisample[] = {
+    0x07230203u, 0x00010000u, 0x0008000bu, 0x0000008cu, 0x00000000u, 0x00020011u, 0x00000001u, 0x0006000bu, 0x00000001u, 0x4c534c47u,
+    0x6474732eu, 0x3035342eu, 0x00000000u, 0x0003000eu, 0x00000000u, 0x00000001u, 0x0008000fu, 0x00000004u, 0x00000004u, 0x6e69616du,
+    0x00000000u, 0x0000000du, 0x00000035u, 0x0000007cu, 0x00030010u, 0x00000004u, 0x00000007u, 0x00030003u, 0x00000002u, 0x000001c2u,
+    0x00040005u, 0x00000004u, 0x6e69616du, 0x00000000u, 0x00060005u, 0x0000000du, 0x465f6c67u, 0x43676172u, 0x64726f6fu, 0x00000000u,
+    0x00060005u, 0x00000012u, 0x79706f43u, 0x61726150u, 0x6574656du, 0x00007372u, 0x00070006u, 0x00000012u, 0x00000000u, 0x72756f73u,
+    0x735f6563u, 0x656c6163u, 0x00000000u, 0x00070006u, 0x00000012u, 0x00000001u, 0x73726966u, 0x61735f74u, 0x656c706du, 0x00000000u,
+    0x00050006u, 0x00000012u, 0x00000002u, 0x67616c66u, 0x00000073u, 0x00040005u, 0x00000014u, 0x61726170u, 0x0000736du, 0x00060005u,
+    0x00000035u, 0x535f6c67u, 0x6c706d61u, 0x73614d65u, 0x006e496bu, 0x00060005u, 0x00000066u, 0x74706564u, 0x65745f68u, 0x72757478u,
+    0x00000065u, 0x00060005u, 0x00000072u, 0x6e657473u, 0x5f6c6963u, 0x74786574u, 0x00657275u, 0x00040005u, 0x0000007cu, 0x6f6c6f63u,
+    0x00000072u, 0x00040047u, 0x0000000du, 0x0000000bu, 0x0000000fu, 0x00030047u, 0x00000012u, 0x00000002u, 0x00050048u, 0x00000012u,
+    0x00000000u, 0x00000023u, 0x00000000u, 0x00050048u, 0x00000012u, 0x00000001u, 0x00000023u, 0x00000008u, 0x00050048u, 0x00000012u,
+    0x00000002u, 0x00000023u, 0x0000000cu, 0x00040047u, 0x00000035u, 0x0000000bu, 0x00000014u, 0x00030047u, 0x00000035u, 0x0000000eu,
+    0x00040047u, 0x00000066u, 0x00000021u, 0x00000000u, 0x00040047u, 0x00000066u, 0x00000022u, 0x00000001u, 0x00040047u, 0x00000072u,
+    0x00000021u, 0x00000001u, 0x00040047u, 0x00000072u, 0x00000022u, 0x00000001u, 0x00040047u, 0x0000007cu, 0x0000001eu, 0x00000000u,
+    0x00020013u, 0x00000002u, 0x00030021u, 0x00000003u, 0x00000002u, 0x00040015u, 0x00000006u, 0x00000020u, 0x00000001u, 0x00040017u,
+    0x00000007u, 0x00000006u, 0x00000002u, 0x00030016u, 0x0000000au, 0x00000020u, 0x00040017u, 0x0000000bu, 0x0000000au, 0x00000004u,
+    0x00040020u, 0x0000000cu, 0x00000001u, 0x0000000bu, 0x0004003bu, 0x0000000cu, 0x0000000du, 0x00000001u, 0x00040017u, 0x0000000eu,
+    0x0000000au, 0x00000002u, 0x00040015u, 0x00000011u, 0x00000020u, 0x00000000u, 0x0005001eu, 0x00000012u, 0x0000000eu, 0x00000011u,
+    0x00000011u, 0x00040020u, 0x00000013u, 0x00000009u, 0x00000012u, 0x0004003bu, 0x00000013u, 0x00000014u, 0x00000009u, 0x0004002bu,
+    0x00000006u, 0x00000015u, 0x00000000u, 0x00040020u, 0x00000016u, 0x00000009u, 0x0000000eu, 0x0004002bu, 0x00000006u, 0x0000001eu,
+    0x00000002u, 0x00040020u, 0x0000001fu, 0x00000009u, 0x00000011u, 0x0004002bu, 0x00000011u, 0x00000022u, 0x000000ffu, 0x0004002bu,
+    0x00000006u, 0x00000025u, 0x00000001u, 0x0004002bu, 0x00000011u, 0x0000002au, 0x00000100u, 0x0004002bu, 0x00000011u, 0x0000002cu,
+    0x00000000u, 0x00020014u, 0x0000002du, 0x0004002bu, 0x00000011u, 0x00000032u, 0x00000001u, 0x0004001cu, 0x00000033u, 0x00000006u,
+    0x00000032u, 0x00040020u, 0x00000034u, 0x00000001u, 0x00000033u, 0x0004003bu, 0x00000034u, 0x00000035u, 0x00000001u, 0x00040020u,
+    0x00000036u, 0x00000001u, 0x00000006u, 0x0003002au, 0x0000002du, 0x0000003cu, 0x00030029u, 0x0000002du, 0x00000058u, 0x00090019u,
+    0x00000063u, 0x0000000au, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000001u, 0x00000000u, 0x0003001bu, 0x00000064u,
+    0x00000063u, 0x00040020u, 0x00000065u, 0x00000000u, 0x00000064u, 0x0004003bu, 0x00000065u, 0x00000066u, 0x00000000u, 0x00090019u,
+    0x0000006fu, 0x00000011u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000001u, 0x00000000u, 0x0003001bu, 0x00000070u,
+    0x0000006fu, 0x00040020u, 0x00000071u, 0x00000000u, 0x00000070u, 0x0004003bu, 0x00000071u, 0x00000072u, 0x00000000u, 0x00040017u,
+    0x00000078u, 0x00000011u, 0x00000004u, 0x00040020u, 0x0000007bu, 0x00000003u, 0x0000000bu, 0x0004003bu, 0x0000007bu, 0x0000007cu,
+    0x00000003u, 0x0004002bu, 0x0000000au, 0x00000082u, 0x00000000u, 0x0004002bu, 0x0000000au, 0x00000083u, 0x3f800000u, 0x0004002bu,
+    0x0000000au, 0x00000085u, 0x3b808081u, 0x00050036u, 0x00000002u, 0x00000004u, 0x00000000u, 0x00000003u, 0x000200f8u, 0x00000005u,
+    0x0004003du, 0x0000000bu, 0x0000000fu, 0x0000000du, 0x0007004fu, 0x0000000eu, 0x00000010u, 0x0000000fu, 0x0000000fu, 0x00000000u,
+    0x00000001u, 0x00050041u, 0x00000016u, 0x00000017u, 0x00000014u, 0x00000015u, 0x0004003du, 0x0000000eu, 0x00000018u, 0x00000017u,
+    0x00050085u, 0x0000000eu, 0x00000019u, 0x00000010u, 0x00000018u, 0x0006000cu, 0x0000000eu, 0x0000001au, 0x00000001u, 0x00000008u,
+    0x00000019u, 0x0004006eu, 0x00000007u, 0x0000001bu, 0x0000001au, 0x00050041u, 0x0000001fu, 0x00000020u, 0x00000014u, 0x0000001eu,
+    0x0004003du, 0x00000011u, 0x00000021u, 0x00000020u, 0x000500c7u, 0x00000011u, 0x00000023u, 0x00000021u, 0x00000022u, 0x00050041u,
+    0x0000001fu, 0x00000026u, 0x00000014u, 0x00000025u, 0x0004003du, 0x00000011u, 0x00000027u, 0x00000026u, 0x000500c7u, 0x00000011u,
+    0x0000002bu, 0x00000021u, 0x0000002au, 0x000500abu, 0x0000002du, 0x0000002eu, 0x0000002bu, 0x0000002cu, 0x000300f7u, 0x00000030u,
+    0x00000000u, 0x000400fau, 0x0000002eu, 0x0000002fu, 0x00000030u, 0x000200f8u, 0x0000002fu, 0x00050041u, 0x00000036u, 0x00000037u,
+    0x00000035u, 0x00000015u, 0x0004003du, 0x00000006u, 0x00000038u, 0x00000037u, 0x0004007cu, 0x00000011u, 0x00000039u, 0x00000038u,
+    0x00050089u, 0x00000011u, 0x00000040u, 0x00000027u, 0x00000023u, 0x000200f9u, 0x00000042u, 0x000200f8u, 0x00000042u, 0x000700f5u,
+    0x00000011u, 0x00000086u, 0x0000002cu, 0x0000002fu, 0x0000005bu, 0x00000045u, 0x000500b0u, 0x0000002du, 0x00000049u, 0x00000086u,
+    0x00000023u, 0x000400f6u, 0x00000044u, 0x00000045u, 0x00000000u, 0x000400fau, 0x00000049u, 0x00000043u, 0x00000044u, 0x000200f8u,
+    0x00000043u, 0x00050080u, 0x00000011u, 0x0000004du, 0x00000040u, 0x00000086u, 0x00050089u, 0x00000011u, 0x0000004fu, 0x0000004du,
+    0x00000023u, 0x000500c4u, 0x00000011u, 0x00000052u, 0x00000032u, 0x0000004fu, 0x000500c7u, 0x00000011u, 0x00000053u, 0x00000039u,
+    0x00000052u, 0x000500abu, 0x0000002du, 0x00000054u, 0x00000053u, 0x0000002cu, 0x000300f7u, 0x00000056u, 0x00000000u, 0x000400fau,
+    0x00000054u, 0x00000055u, 0x00000056u, 0x000200f8u, 0x00000055u, 0x000200f9u, 0x00000044u, 0x000200f8u, 0x00000056u, 0x000200f9u,
+    0x00000045u, 0x000200f8u, 0x00000045u, 0x00050080u, 0x00000011u, 0x0000005bu, 0x00000086u, 0x00000025u, 0x000200f9u, 0x00000042u,
+    0x000200f8u, 0x00000044u, 0x000700f5u, 0x00000011u, 0x0000008bu, 0x00000040u, 0x00000042u, 0x0000004fu, 0x00000055u, 0x000700f5u,
+    0x0000002du, 0x00000088u, 0x0000003cu, 0x00000042u, 0x00000058u, 0x00000055u, 0x000400a8u, 0x0000002du, 0x0000005du, 0x00000088u,
+    0x000300f7u, 0x0000005fu, 0x00000000u, 0x000400fau, 0x0000005du, 0x0000005eu, 0x0000005fu, 0x000200f8u, 0x0000005eu, 0x000100fcu,
+    0x000200f8u, 0x0000005fu, 0x000200f9u, 0x00000030u, 0x000200f8u, 0x00000030u, 0x000700f5u, 0x00000011u, 0x0000008au, 0x00000027u,
+    0x00000005u, 0x0000008bu, 0x0000005fu, 0x0004003du, 0x00000064u, 0x00000067u, 0x00000066u, 0x0004007cu, 0x00000006u, 0x0000006au,
+    0x0000008au, 0x00040064u, 0x00000063u, 0x0000006bu, 0x00000067u, 0x0007005fu, 0x0000000bu, 0x0000006cu, 0x0000006bu, 0x0000001bu,
+    0x00000040u, 0x0000006au, 0x00050051u, 0x0000000au, 0x0000006du, 0x0000006cu, 0x00000000u, 0x0004003du, 0x00000070u, 0x00000073u,
+    0x00000072u, 0x00040064u, 0x0000006fu, 0x00000077u, 0x00000073u, 0x0007005fu, 0x00000078u, 0x00000079u, 0x00000077u, 0x0000001bu,
+    0x00000040u, 0x0000006au, 0x00050051u, 0x00000011u, 0x0000007au, 0x00000079u, 0x00000000u, 0x00040070u, 0x0000000au, 0x0000007fu,
+    0x0000007au, 0x00050085u, 0x0000000au, 0x00000081u, 0x0000007fu, 0x00000085u, 0x00070050u, 0x0000000bu, 0x00000084u, 0x0000006du,
+    0x00000081u, 0x00000082u, 0x00000083u, 0x0003003eu, 0x0000007cu, 0x00000084u, 0x000100fdu, 0x00010038u,
+};
+
+constexpr uint32_t kDepthStencilCopySampleCountMask       = 0xffu;
+constexpr uint32_t kDepthStencilCopyCentroidSelectionFlag = 0x100u;
+
+uint32_t DepthStencilCopySampleCount(const VulkanSampleLocationState& sample_locations)
+{
+	const auto sample_count = static_cast<uint32_t>(sample_locations.sample_count);
+	EXIT_NOT_IMPLEMENTED(sample_count != 1u && sample_count != 2u && sample_count != 4u && sample_count != 8u &&
+	                     sample_count != 16u);
+	return sample_count;
+}
+
 VkShaderModule CreateShaderModule(VkDevice device, const uint32_t* words, size_t word_count)
 {
 	VkShaderModuleCreateInfo create_info {};
@@ -324,6 +398,11 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	EXIT_NOT_IMPLEMENTED(request.mode != DepthStencilCopyMode::ExpandToColor && request.mode != DepthStencilCopyMode::DepthStencilOnly);
 	EXIT_NOT_IMPLEMENTED(expand_to_color && ((request.color_write_mask & ~0x0fu) != 0 || request.color_write_mask == 0));
 	EXIT_NOT_IMPLEMENTED(!expand_to_color && (request.color_write_mask != 0 || request.source != nullptr));
+	const auto sample_count = DepthStencilCopySampleCount(request.sample_locations);
+	const bool source_multisampled = (expand_to_color && sample_count != 1u);
+	EXIT_NOT_IMPLEMENTED(expand_to_color &&
+	                     (request.source == nullptr || request.source->samples != request.sample_locations.sample_count));
+	EXIT_NOT_IMPLEMENTED(source_multisampled && !request.copy_centroid && request.copy_sample >= sample_count);
 
 	const auto* vertex_stage = request.vertex_stage;
 	const bool  guest_vertex_stage = (vertex_stage != nullptr);
@@ -341,6 +420,8 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	for (auto& entry: m_pipelines)
 	{
 		if (entry.render_pass_id != request.render_pass_id || entry.guest_vertex_stage != guest_vertex_stage || entry.mode != request.mode ||
+		    entry.source_multisampled != source_multisampled ||
+		    !VulkanSampleLocationsEqual(entry.sample_locations, request.sample_locations) ||
 		    entry.color_write_mask != request.color_write_mask || entry.depth_test_enable != request.depth_test.enabled ||
 		    entry.depth_write_enable != request.depth_test.write_enable || entry.depth_compare_op != request.depth_test.compare_op ||
 		    !IsSameDepthStencilCopyStencilTest(entry.stencil_test, request.stencil_test))
@@ -367,8 +448,11 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	const size_t vertex_word_count =
 	    (guest_vertex_stage ? vertex_stage->shader_word_count : sizeof(kVertexShader) / sizeof(kVertexShader[0]));
 	const auto vertex_module = CreateShaderModule(m_device, vertex_words, vertex_word_count);
-	const auto fragment_module =
-	    (expand_to_color ? CreateShaderModule(m_device, kFragmentShader, sizeof(kFragmentShader) / sizeof(kFragmentShader[0])) : nullptr);
+	const auto* fragment_words = (source_multisampled ? kFragmentShaderMultisample : kFragmentShader);
+	const size_t fragment_word_count =
+	    (source_multisampled ? sizeof(kFragmentShaderMultisample) / sizeof(kFragmentShaderMultisample[0])
+	                         : sizeof(kFragmentShader) / sizeof(kFragmentShader[0]));
+	const auto fragment_module = (expand_to_color ? CreateShaderModule(m_device, fragment_words, fragment_word_count) : nullptr);
 
 	VkPipelineShaderStageCreateInfo stages[2] {};
 	stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -441,8 +525,21 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 
 	VkPipelineMultisampleStateCreateInfo multisample_info {};
 	multisample_info.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-	multisample_info.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+	multisample_info.rasterizationSamples = request.sample_locations.sample_count;
 	multisample_info.sampleShadingEnable  = VK_FALSE;
+
+	VkSampleLocationEXT sample_location_values[kVulkanSampleLocationMaxCount] = {};
+	VkSampleLocationsInfoEXT sample_location_info {};
+	VkPipelineSampleLocationsStateCreateInfoEXT sample_location_pipeline_state {};
+	if (VulkanSampleLocationsEnabled(request.sample_locations))
+	{
+		EXIT_NOT_IMPLEMENTED(
+		    !VulkanSampleLocationsPopulateInfo(request.sample_locations, sample_location_values, &sample_location_info));
+		sample_location_pipeline_state.sType                 = VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT;
+		sample_location_pipeline_state.sampleLocationsEnable = VK_TRUE;
+		sample_location_pipeline_state.sampleLocationsInfo   = sample_location_info;
+		multisample_info.pNext                               = &sample_location_pipeline_state;
+	}
 
 	VkPipelineColorBlendAttachmentState color_attachment {};
 	color_attachment.blendEnable    = VK_FALSE;
@@ -496,7 +593,7 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	{
 		push_constant_ranges[push_constant_range_count].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 		push_constant_ranges[push_constant_range_count].offset     = 0;
-		push_constant_ranges[push_constant_range_count].size       = sizeof(float) * 2;
+		push_constant_ranges[push_constant_range_count].size       = sizeof(DepthStencilCopyFragmentParameters);
 		push_constant_range_count++;
 	}
 
@@ -540,6 +637,8 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	entry.render_pass_id              = request.render_pass_id;
 	entry.guest_vertex_stage          = guest_vertex_stage;
 	entry.mode                        = request.mode;
+	entry.sample_locations            = request.sample_locations;
+	entry.source_multisampled         = source_multisampled;
 	entry.pipeline                    = pipeline;
 	entry.pipeline_layout             = pipeline_layout;
 	entry.vertex_descriptor_set_layout = (vertex_requires_descriptor ? vertex_stage->descriptor_set_layout : nullptr);
@@ -585,6 +684,10 @@ DepthStencilCopyPreparedDraw DepthStencilCopyRenderer::PrepareDraw(GraphicContex
 	EXIT_NOT_IMPLEMENTED(expand_to_color && request.source == nullptr);
 	EXIT_NOT_IMPLEMENTED(!expand_to_color && request.source != nullptr);
 	EXIT_NOT_IMPLEMENTED(expand_to_color && request.source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	const auto sample_count = DepthStencilCopySampleCount(request.sample_locations);
+	const bool source_multisampled = (expand_to_color && request.source->samples != VK_SAMPLE_COUNT_1_BIT);
+	EXIT_NOT_IMPLEMENTED(expand_to_color && request.source->samples != request.sample_locations.sample_count);
+	EXIT_NOT_IMPLEMENTED(source_multisampled && !request.copy_centroid && request.copy_sample >= sample_count);
 
 	Initialize(context);
 	auto*      pipeline   = GetRenderPipeline(context, request);
@@ -598,8 +701,14 @@ DepthStencilCopyPreparedDraw DepthStencilCopyRenderer::PrepareDraw(GraphicContex
 	draw.scissor           = request.scissor;
 	if (expand_to_color)
 	{
-		draw.source_scale[0] = static_cast<float>(request.source->extent.width) / static_cast<float>(request.extent.width);
-		draw.source_scale[1] = static_cast<float>(request.source->extent.height) / static_cast<float>(request.extent.height);
+		draw.fragment_parameters.source_scale[0] =
+		    static_cast<float>(request.source->extent.width) / static_cast<float>(request.extent.width);
+		draw.fragment_parameters.source_scale[1] =
+		    static_cast<float>(request.source->extent.height) / static_cast<float>(request.extent.height);
+		draw.fragment_parameters.copy_sample = request.copy_sample;
+		draw.fragment_parameters.flags =
+		    (sample_count & kDepthStencilCopySampleCountMask) |
+		    (request.copy_centroid ? kDepthStencilCopyCentroidSelectionFlag : 0u);
 	}
 	return draw;
 }
@@ -613,8 +722,8 @@ void DepthStencilCopyRenderer::BindPreparedDraw(VkCommandBuffer command_buffer, 
 	{
 		vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, 1, 1, &draw.source_descriptor, 0,
 		                        nullptr);
-		vkCmdPushConstants(command_buffer, draw.pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(draw.source_scale),
-		                   draw.source_scale);
+		vkCmdPushConstants(command_buffer, draw.pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(draw.fragment_parameters),
+		                   &draw.fragment_parameters);
 	}
 	vkCmdSetViewport(command_buffer, 0, 1, &draw.viewport);
 	vkCmdSetScissor(command_buffer, 0, 1, &draw.scissor);

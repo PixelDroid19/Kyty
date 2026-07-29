@@ -119,8 +119,10 @@ def build_playable_environment(
         agent_socket=agent_socket,
         capture_directory=capture_directory,
         optional_values=(
-            "KYTY_INTERNAL_RESOLUTION_WIDTH",
-            "KYTY_INTERNAL_RESOLUTION_HEIGHT",
+            "KYTY_RENDER_RESOLUTION_MODE",
+            "KYTY_RENDER_RESOLUTION_WIDTH",
+            "KYTY_RENDER_RESOLUTION_HEIGHT",
+            "KYTY_PRESENTATION_FILTER",
         ),
         default_values={"KYTY_NATIVE_CAPTURE_MAX_EDGE": "1280"},
     )

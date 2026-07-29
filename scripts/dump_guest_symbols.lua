@@ -29,8 +29,10 @@ end
 kyty_init({
 	ScreenWidth = env_number('KYTY_SCREEN_WIDTH', 1280);
 	ScreenHeight = env_number('KYTY_SCREEN_HEIGHT', 720);
-	InternalResolutionWidth = env_number('KYTY_INTERNAL_RESOLUTION_WIDTH', 1280);
-	InternalResolutionHeight = env_number('KYTY_INTERNAL_RESOLUTION_HEIGHT', 720);
+	RenderResolutionMode = env_or('KYTY_RENDER_RESOLUTION_MODE', 'Fixed');
+	RenderResolutionWidth = env_number('KYTY_RENDER_RESOLUTION_WIDTH', 1280);
+	RenderResolutionHeight = env_number('KYTY_RENDER_RESOLUTION_HEIGHT', 720);
+	PresentationFilter = env_or('KYTY_PRESENTATION_FILTER', 'Linear');
 	Neo = true;
 	VulkanValidationEnabled = env_bool('KYTY_VULKAN_VALIDATION', false);
 	ShaderValidationEnabled = env_bool('KYTY_SHADER_VALIDATION', false);

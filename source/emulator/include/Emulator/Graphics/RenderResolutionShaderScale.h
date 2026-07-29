@@ -1,11 +1,11 @@
-#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADERCOORDINATESCALE_H_
-#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADERCOORDINATESCALE_H_
+#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONSHADERSCALE_H_
+#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONSHADERSCALE_H_
 
 #include <cstdint>
 
 namespace Kyty::Libs::Graphics {
 
-struct ShaderCoordinateExtent
+struct RenderShaderExtent
 {
 	uint64_t width  = 0;
 	uint64_t height = 0;
@@ -13,7 +13,7 @@ struct ShaderCoordinateExtent
 
 // Converts host attachment coordinates back to guest coordinates. Reduced
 // ratios ensure mathematically equivalent scales share shader cache identity.
-struct ShaderHostToGuestScale
+struct RenderHostToGuestScale
 {
 	uint32_t x_guest_numerator  = 1;
 	uint32_t x_host_denominator = 1;
@@ -31,18 +31,18 @@ struct ShaderHostToGuestScale
 	}
 };
 
-[[nodiscard]] constexpr bool operator==(const ShaderHostToGuestScale& lhs, const ShaderHostToGuestScale& rhs)
+[[nodiscard]] constexpr bool operator==(const RenderHostToGuestScale& lhs, const RenderHostToGuestScale& rhs)
 {
 	return lhs.x_guest_numerator == rhs.x_guest_numerator && lhs.x_host_denominator == rhs.x_host_denominator &&
 	       lhs.y_guest_numerator == rhs.y_guest_numerator && lhs.y_host_denominator == rhs.y_host_denominator;
 }
 
-[[nodiscard]] constexpr bool operator!=(const ShaderHostToGuestScale& lhs, const ShaderHostToGuestScale& rhs)
+[[nodiscard]] constexpr bool operator!=(const RenderHostToGuestScale& lhs, const RenderHostToGuestScale& rhs)
 {
 	return !(lhs == rhs);
 }
 
-enum class ShaderCoordinateScaleStatus : uint8_t
+enum class RenderResolutionShaderScaleStatus : uint8_t
 {
 	Success,
 	InvalidArgument,
@@ -50,9 +50,9 @@ enum class ShaderCoordinateScaleStatus : uint8_t
 	ArithmeticOverflow,
 };
 
-[[nodiscard]] ShaderCoordinateScaleStatus BuildShaderHostToGuestScale(ShaderCoordinateExtent guest_extent,
-                                                                      ShaderCoordinateExtent host_extent, ShaderHostToGuestScale* scale);
+[[nodiscard]] RenderResolutionShaderScaleStatus BuildRenderHostToGuestScale(RenderShaderExtent guest_extent,
+                                                                      RenderShaderExtent host_extent, RenderHostToGuestScale* scale);
 
 } // namespace Kyty::Libs::Graphics
 
-#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADERCOORDINATESCALE_H_ */
+#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONSHADERSCALE_H_ */

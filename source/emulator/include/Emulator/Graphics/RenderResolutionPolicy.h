@@ -1,5 +1,5 @@
-#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_INTERNALRESOLUTIONPOLICY_H_
-#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_INTERNALRESOLUTIONPOLICY_H_
+#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONPOLICY_H_
+#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONPOLICY_H_
 
 #include <cstdint>
 
@@ -74,8 +74,15 @@ enum class ResolutionImageDimension : uint8_t
 
 enum class ResolutionScaleMode : uint8_t
 {
-	Automatic,
 	Native,
+	Fixed,
+};
+
+enum class RenderScaleState : uint8_t
+{
+	Eligible,
+	Scaled,
+	NativeRequired,
 };
 
 struct ResolutionResourceInfo
@@ -146,7 +153,7 @@ struct ResolutionIdentity
 	ResolutionExtent       host_resource_extent;
 	ResolutionScale        scale;
 	ResolutionResourceInfo resource;
-	ResolutionScaleMode    mode = ResolutionScaleMode::Automatic;
+	ResolutionScaleMode    mode = ResolutionScaleMode::Fixed;
 };
 
 [[nodiscard]] constexpr bool operator==(const ResolutionIdentity& lhs, const ResolutionIdentity& rhs)
@@ -173,10 +180,10 @@ struct ResolutionDecision
 
 // Pure, capability-neutral policy. Guest extents remain immutable; the returned
 // host extent is a separate cache/resource identity input.
-class InternalResolutionPolicy
+class RenderResolutionPolicy
 {
 public:
-	explicit InternalResolutionPolicy(ResolutionExtent target_extent = {1280, 720});
+	explicit RenderResolutionPolicy(ResolutionExtent target_extent = {1280, 720});
 
 	ResolutionPolicyStatus SetTargetExtent(ResolutionExtent target_extent);
 	void                   SetScaleMode(ResolutionScaleMode mode);
@@ -194,10 +201,10 @@ private:
 
 	ResolutionExtent    m_target_extent;
 	ResolutionExtent    m_guest_display_extent;
-	ResolutionScaleMode m_mode                     = ResolutionScaleMode::Automatic;
+	ResolutionScaleMode m_mode                     = ResolutionScaleMode::Fixed;
 	bool                m_guest_display_registered = false;
 };
 
 } // namespace Kyty::Libs::Graphics
 
-#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_INTERNALRESOLUTIONPOLICY_H_ */
+#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONPOLICY_H_ */

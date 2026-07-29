@@ -45,20 +45,20 @@ target_sources(emulator PRIVATE
 	src/Graphics/GpuDeferredDeletionQueue.cpp
 	src/Graphics/ShaderTranslationCache.cpp
 	src/Graphics/SpirvBinaryCacheStore.cpp
-	src/Graphics/ShaderResolutionUsageCache.cpp
-	src/Graphics/InternalResolutionPolicy.cpp
-	src/Graphics/InternalResolutionRuntime.cpp
-	src/Graphics/AttachmentResolutionCohort.cpp
-	src/Graphics/ResolutionAliasPolicy.cpp
+	src/Graphics/RenderResolutionShaderUsageCache.cpp
+	src/Graphics/RenderResolutionPolicy.cpp
+	src/Graphics/RenderResolutionCoordinator.cpp
+	src/Graphics/RenderResolutionPlanner.cpp
+	src/Graphics/RenderResolutionAlias.cpp
 	src/Graphics/VideoOutFlipLifecycleGate.cpp
 	src/Graphics/VideoOutFlipQueueAdmissionGate.cpp
 	src/Graphics/VideoOutHostAccessGate.cpp
 	src/Graphics/VideoOutMaterializationGate.cpp
-	src/Graphics/ResolutionImageCapability.cpp
-	src/Graphics/ResolutionCoordinateTransform.cpp
-	src/Graphics/VulkanResolutionCapability.cpp
+	src/Graphics/RenderResolutionImageCapability.cpp
+	src/Graphics/RenderResolutionTransform.cpp
+	src/Graphics/VulkanRenderResolutionCapability.cpp
 	src/Graphics/VulkanQueueIdentity.cpp
-	src/Graphics/ShaderCoordinateScale.cpp
+	src/Graphics/RenderResolutionShaderScale.cpp
 	src/Graphics/SampleLocations.cpp
 	src/Graphics/VulkanVertexInputLayout.cpp
 	src/Graphics/DepthStencilCopy.cpp
@@ -74,20 +74,20 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/GpuDeferredDeletionQueue.h
 	include/Emulator/Graphics/ShaderTranslationCache.h
 	include/Emulator/Graphics/SpirvBinaryCacheStore.h
-	include/Emulator/Graphics/ShaderResolutionUsageCache.h
-	include/Emulator/Graphics/InternalResolutionPolicy.h
-	include/Emulator/Graphics/InternalResolutionRuntime.h
-	include/Emulator/Graphics/AttachmentResolutionCohort.h
-	include/Emulator/Graphics/ResolutionAliasPolicy.h
+	include/Emulator/Graphics/RenderResolutionShaderUsageCache.h
+	include/Emulator/Graphics/RenderResolutionPolicy.h
+	include/Emulator/Graphics/RenderResolutionCoordinator.h
+	include/Emulator/Graphics/RenderResolutionPlanner.h
+	include/Emulator/Graphics/RenderResolutionAlias.h
 	include/Emulator/Graphics/VideoOutFlipLifecycleGate.h
 	include/Emulator/Graphics/VideoOutFlipQueueAdmissionGate.h
 	include/Emulator/Graphics/VideoOutHostAccessGate.h
 	include/Emulator/Graphics/VideoOutMaterializationGate.h
-	include/Emulator/Graphics/ResolutionImageCapability.h
-	include/Emulator/Graphics/ResolutionCoordinateTransform.h
-	include/Emulator/Graphics/VulkanResolutionCapability.h
+	include/Emulator/Graphics/RenderResolutionImageCapability.h
+	include/Emulator/Graphics/RenderResolutionTransform.h
+	include/Emulator/Graphics/VulkanRenderResolutionCapability.h
 	include/Emulator/Graphics/VulkanQueueIdentity.h
-	include/Emulator/Graphics/ShaderCoordinateScale.h
+	include/Emulator/Graphics/RenderResolutionShaderScale.h
 	include/Emulator/Graphics/SampleLocations.h
 	include/Emulator/Graphics/VulkanVertexInputLayout.h
 	include/Emulator/Graphics/DepthStencilCopy.h

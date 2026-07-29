@@ -1,13 +1,13 @@
-#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RESOLUTIONCOORDINATETRANSFORM_H_
-#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RESOLUTIONCOORDINATETRANSFORM_H_
+#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONTRANSFORM_H_
+#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONTRANSFORM_H_
 
-#include "Emulator/Graphics/InternalResolutionPolicy.h"
+#include "Emulator/Graphics/RenderResolutionPolicy.h"
 
 #include <cstdint>
 
 namespace Kyty::Libs::Graphics {
 
-enum class ResolutionCoordinateStatus : uint8_t
+enum class RenderResolutionTransformStatus : uint8_t
 {
 	Success,
 	InvalidArgument,
@@ -24,7 +24,7 @@ struct ResolutionAxisTransform
 	double host_to_guest = 1.0;
 };
 
-struct ResolutionCoordinateTransform
+struct RenderResolutionTransform
 {
 	ResolutionExtent        guest_extent;
 	ResolutionExtent        host_extent;
@@ -72,20 +72,20 @@ struct ResolutionScissorRect
 }
 
 // The inverse host-to-guest factors are the exact per-axis FragCoord scales.
-[[nodiscard]] ResolutionCoordinateStatus CreateResolutionCoordinateTransform(ResolutionExtent guest_extent, ResolutionExtent host_extent,
-                                                                             ResolutionCoordinateTransform* transform);
+[[nodiscard]] RenderResolutionTransformStatus CreateRenderResolutionTransform(ResolutionExtent guest_extent, ResolutionExtent host_extent,
+                                                                             RenderResolutionTransform* transform);
 
 // Vulkan permits a negative viewport height. Mapping expands coverage outwards
 // while retaining endpoint order, so inverted viewports remain inverted.
-[[nodiscard]] ResolutionCoordinateStatus MapResolutionViewport(const ResolutionCoordinateTransform& transform,
+[[nodiscard]] RenderResolutionTransformStatus MapRenderResolutionViewport(const RenderResolutionTransform& transform,
                                                                const ResolutionViewport& guest_viewport, ResolutionViewport* host_viewport);
 
 // Guest scissors are clipped to their framebuffer before mapping. A rectangle
 // with a non-positive axis remains a valid empty axis instead of wrapping.
-[[nodiscard]] ResolutionCoordinateStatus MapResolutionScissor(const ResolutionCoordinateTransform& transform,
+[[nodiscard]] RenderResolutionTransformStatus MapRenderResolutionScissor(const RenderResolutionTransform& transform,
                                                               const ResolutionScissorRect&         guest_scissor,
                                                               ResolutionScissorRect*               host_scissor);
 
 } // namespace Kyty::Libs::Graphics
 
-#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RESOLUTIONCOORDINATETRANSFORM_H_ */
+#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONTRANSFORM_H_ */

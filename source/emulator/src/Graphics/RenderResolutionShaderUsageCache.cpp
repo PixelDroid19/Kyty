@@ -1,4 +1,4 @@
-#include "Emulator/Graphics/ShaderResolutionUsageCache.h"
+#include "Emulator/Graphics/RenderResolutionShaderUsageCache.h"
 
 #include "Kyty/Core/DbgAssert.h"
 
@@ -8,7 +8,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-bool ShaderResolutionUsageKey::operator==(const ShaderResolutionUsageKey& other) const
+bool RenderResolutionShaderUsageKey::operator==(const RenderResolutionShaderUsageKey& other) const
 {
 	return address == other.address && checksum == other.checksum && translator_version == other.translator_version;
 }
@@ -16,7 +16,7 @@ bool ShaderResolutionUsageKey::operator==(const ShaderResolutionUsageKey& other)
 namespace {
 struct KeyHash
 {
-	size_t operator()(const ShaderResolutionUsageKey& key) const
+	size_t operator()(const RenderResolutionShaderUsageKey& key) const
 	{
 		size_t hash = std::hash<uint64_t> {}(key.address);
 		hash ^= std::hash<uint64_t> {}(key.checksum) + 0x9e3779b9u + (hash << 6u) + (hash >> 2u);
@@ -25,27 +25,27 @@ struct KeyHash
 };
 struct Entry
 {
-	ShaderResolutionAnalysis analysis;
+	RenderResolutionShaderAnalysis analysis;
 	uint64_t                 last_use = 0;
 };
 } // namespace
 
-struct ShaderResolutionUsageCache::State
+struct RenderResolutionShaderUsageCache::State
 {
 	explicit State(size_t limit): max_entries(limit == 0 ? 1 : limit) {}
 	size_t max_entries;
 	uint64_t use_seq = 0;
 	std::mutex mutex;
-	std::unordered_map<ShaderResolutionUsageKey, Entry, KeyHash> entries;
+	std::unordered_map<RenderResolutionShaderUsageKey, Entry, KeyHash> entries;
 };
 
-ShaderResolutionUsageCache::ShaderResolutionUsageCache(size_t max_entries): m_state(new State(max_entries)) {}
-ShaderResolutionUsageCache::~ShaderResolutionUsageCache()
+RenderResolutionShaderUsageCache::RenderResolutionShaderUsageCache(size_t max_entries): m_state(new State(max_entries)) {}
+RenderResolutionShaderUsageCache::~RenderResolutionShaderUsageCache()
 {
 	delete m_state;
 }
 
-ShaderResolutionUsageResult ShaderResolutionUsageCache::GetOrAnalyze(const ShaderResolutionUsageKey& key, const Analyzer& analyzer)
+RenderResolutionShaderUsageResult RenderResolutionShaderUsageCache::GetOrAnalyze(const RenderResolutionShaderUsageKey& key, const Analyzer& analyzer)
 {
 	EXIT_IF(m_state == nullptr || !analyzer);
 	std::lock_guard<std::mutex> lock(m_state->mutex);

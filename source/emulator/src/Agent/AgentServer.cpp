@@ -10,7 +10,7 @@
 #include "Emulator/Agent/StallWatch.h"
 #include "Emulator/Controller.h"
 #include "Emulator/Graphics/DebugStats.h"
-#include "Emulator/Graphics/InternalResolutionRuntime.h"
+#include "Emulator/Graphics/RenderResolutionCoordinator.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Loader/ModuleLoad.h"
@@ -259,7 +259,7 @@ std::string PerformanceResult(bool reset)
 	out += ",\"height\":";
 	out += std::to_string(stats.present_dst_h);
 	out += "},";
-	AppendInternalResolutionPerformanceJson(Libs::Graphics::InternalResolutionRuntimeGetSnapshot(), &out);
+	AppendRenderResolutionPerformanceJson(Libs::Graphics::RenderResolutionGetSnapshot(), &out);
 	out += ',';
 	AppendGpuMemoryPerformanceJson(stats, &out);
 	out += ',';

@@ -1,4 +1,4 @@
-#include "Emulator/Graphics/VulkanResolutionCapability.h"
+#include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 
 #include "Emulator/Graphics/GraphicContext.h"
 
@@ -67,47 +67,47 @@ bool VulkanDecodeLog2SampleCount(uint8_t encoded, VkSampleCountFlagBits* sample_
 	}
 }
 
-VulkanResolutionCapabilityStatus NormalizeVulkanResolutionAttachmentRequest(const VulkanResolutionAttachmentRequest& request,
+VulkanRenderResolutionCapabilityStatus NormalizeVulkanResolutionAttachmentRequest(const VulkanResolutionAttachmentRequest& request,
                                                                             VulkanResolutionNormalizedRequest*       normalized)
 {
 	if (normalized == nullptr)
 	{
-		return VulkanResolutionCapabilityStatus::InvalidArgument;
+		return VulkanRenderResolutionCapabilityStatus::InvalidArgument;
 	}
 	if (request.extent.width == 0 || request.extent.height == 0)
 	{
-		return VulkanResolutionCapabilityStatus::InvalidExtent;
+		return VulkanRenderResolutionCapabilityStatus::InvalidExtent;
 	}
 	if (request.format == VK_FORMAT_UNDEFINED)
 	{
-		return VulkanResolutionCapabilityStatus::InvalidFormat;
+		return VulkanRenderResolutionCapabilityStatus::InvalidFormat;
 	}
 	if (request.tiling != VK_IMAGE_TILING_LINEAR && request.tiling != VK_IMAGE_TILING_OPTIMAL)
 	{
-		return VulkanResolutionCapabilityStatus::InvalidTiling;
+		return VulkanRenderResolutionCapabilityStatus::InvalidTiling;
 	}
 	if (!IsSingleSampleCount(request.sample_count))
 	{
-		return VulkanResolutionCapabilityStatus::InvalidSampleCount;
+		return VulkanRenderResolutionCapabilityStatus::InvalidSampleCount;
 	}
 	if ((request.usage & ~kKnownAttachmentUsage) != 0)
 	{
-		return VulkanResolutionCapabilityStatus::UnsupportedUsageBits;
+		return VulkanRenderResolutionCapabilityStatus::UnsupportedUsageBits;
 	}
 
 	const bool color_attachment = (request.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0;
 	const bool depth_attachment = (request.usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
 	if (color_attachment && depth_attachment)
 	{
-		return VulkanResolutionCapabilityStatus::ConflictingAttachmentUsage;
+		return VulkanRenderResolutionCapabilityStatus::ConflictingAttachmentUsage;
 	}
 	if (!color_attachment && !depth_attachment)
 	{
-		return VulkanResolutionCapabilityStatus::MissingAttachmentUsage;
+		return VulkanRenderResolutionCapabilityStatus::MissingAttachmentUsage;
 	}
 	if (IsDepthStencilFormat(request.format) != depth_attachment)
 	{
-		return VulkanResolutionCapabilityStatus::FormatUsageMismatch;
+		return VulkanRenderResolutionCapabilityStatus::FormatUsageMismatch;
 	}
 
 	ResolutionImageUsage normalized_usage  = ResolutionImageUsage::None;
@@ -131,7 +131,7 @@ VulkanResolutionCapabilityStatus NormalizeVulkanResolutionAttachmentRequest(cons
 	    normalized_usage,
 	    static_cast<uint32_t>(request.sample_count),
 	};
-	return VulkanResolutionCapabilityStatus::Success;
+	return VulkanRenderResolutionCapabilityStatus::Success;
 }
 
 ResolutionHostImageCapabilities BuildResolutionHostImageCapabilities(const VulkanResolutionHostEvidence&      evidence,
@@ -145,10 +145,10 @@ ResolutionHostImageCapabilities BuildResolutionHostImageCapabilities(const Vulka
 	};
 }
 
-VulkanResolutionCapabilityEvaluation EvaluateVulkanResolutionHostEvidence(const VulkanResolutionHostEvidence&      evidence,
+VulkanRenderResolutionCapabilityEvaluation EvaluateVulkanResolutionHostEvidence(const VulkanResolutionHostEvidence&      evidence,
                                                                           const VulkanResolutionNormalizedRequest& normalized)
 {
-	VulkanResolutionCapabilityEvaluation evaluation {};
+	VulkanRenderResolutionCapabilityEvaluation evaluation {};
 	evaluation.normalized = normalized;
 	evaluation.evidence   = evidence;
 
@@ -156,28 +156,28 @@ VulkanResolutionCapabilityEvaluation EvaluateVulkanResolutionHostEvidence(const 
 	if (extent.width > evidence.image_format_properties.maxExtent.width ||
 	    extent.height > evidence.image_format_properties.maxExtent.height)
 	{
-		evaluation.status = VulkanResolutionCapabilityStatus::ImageExtentNotSupported;
+		evaluation.status = VulkanRenderResolutionCapabilityStatus::ImageExtentNotSupported;
 		return evaluation;
 	}
 
 	evaluation.capabilities = BuildResolutionHostImageCapabilities(evidence, normalized);
-	evaluation.decision     = EvaluateResolutionImageCapability(evaluation.capabilities, normalized.capability_request);
-	evaluation.status       = VulkanResolutionCapabilityStatus::Success;
+	evaluation.decision     = EvaluateRenderResolutionImageCapability(evaluation.capabilities, normalized.capability_request);
+	evaluation.status       = VulkanRenderResolutionCapabilityStatus::Success;
 	return evaluation;
 }
 
-VulkanResolutionCapabilityEvaluation EvaluateVulkanResolutionAttachment(VkPhysicalDevice                         physical_device,
+VulkanRenderResolutionCapabilityEvaluation EvaluateVulkanResolutionAttachment(VkPhysicalDevice                         physical_device,
                                                                         const VulkanResolutionAttachmentRequest& request)
 {
-	VulkanResolutionCapabilityEvaluation evaluation {};
+	VulkanRenderResolutionCapabilityEvaluation evaluation {};
 	if (physical_device == nullptr)
 	{
-		evaluation.status = VulkanResolutionCapabilityStatus::InvalidPhysicalDevice;
+		evaluation.status = VulkanRenderResolutionCapabilityStatus::InvalidPhysicalDevice;
 		return evaluation;
 	}
 
 	evaluation.status = NormalizeVulkanResolutionAttachmentRequest(request, &evaluation.normalized);
-	if (evaluation.status != VulkanResolutionCapabilityStatus::Success)
+	if (evaluation.status != VulkanRenderResolutionCapabilityStatus::Success)
 	{
 		return evaluation;
 	}
@@ -197,8 +197,8 @@ VulkanResolutionCapabilityEvaluation EvaluateVulkanResolutionAttachment(VkPhysic
 	if (evaluation.query_result != VK_SUCCESS)
 	{
 		evaluation.status = evaluation.query_result == VK_ERROR_FORMAT_NOT_SUPPORTED
-		                        ? VulkanResolutionCapabilityStatus::ImageFormatNotSupported
-		                        : VulkanResolutionCapabilityStatus::VulkanQueryFailed;
+		                        ? VulkanRenderResolutionCapabilityStatus::ImageFormatNotSupported
+		                        : VulkanRenderResolutionCapabilityStatus::VulkanQueryFailed;
 		return evaluation;
 	}
 
@@ -206,37 +206,37 @@ VulkanResolutionCapabilityEvaluation EvaluateVulkanResolutionAttachment(VkPhysic
 	return EvaluateVulkanResolutionHostEvidence(evaluation.evidence, evaluation.normalized);
 }
 
-VulkanResolutionCapabilityEvaluation EvaluateVulkanResolutionAttachment(const GraphicContext*                    context,
+VulkanRenderResolutionCapabilityEvaluation EvaluateVulkanResolutionAttachment(const GraphicContext*                    context,
                                                                         const VulkanResolutionAttachmentRequest& request)
 {
 	if (context == nullptr)
 	{
-		VulkanResolutionCapabilityEvaluation evaluation {};
-		evaluation.status = VulkanResolutionCapabilityStatus::InvalidContext;
+		VulkanRenderResolutionCapabilityEvaluation evaluation {};
+		evaluation.status = VulkanRenderResolutionCapabilityStatus::InvalidContext;
 		return evaluation;
 	}
 	return EvaluateVulkanResolutionAttachment(context->physical_device, request);
 }
 
-const char* VulkanResolutionCapabilityStatusName(VulkanResolutionCapabilityStatus status)
+const char* VulkanRenderResolutionCapabilityStatusName(VulkanRenderResolutionCapabilityStatus status)
 {
 	switch (status)
 	{
-		case VulkanResolutionCapabilityStatus::Success: return "success";
-		case VulkanResolutionCapabilityStatus::InvalidArgument: return "invalid_argument";
-		case VulkanResolutionCapabilityStatus::InvalidContext: return "invalid_context";
-		case VulkanResolutionCapabilityStatus::InvalidPhysicalDevice: return "invalid_physical_device";
-		case VulkanResolutionCapabilityStatus::InvalidExtent: return "invalid_extent";
-		case VulkanResolutionCapabilityStatus::InvalidFormat: return "invalid_format";
-		case VulkanResolutionCapabilityStatus::InvalidTiling: return "invalid_tiling";
-		case VulkanResolutionCapabilityStatus::InvalidSampleCount: return "invalid_sample_count";
-		case VulkanResolutionCapabilityStatus::MissingAttachmentUsage: return "missing_attachment_usage";
-		case VulkanResolutionCapabilityStatus::ConflictingAttachmentUsage: return "conflicting_attachment_usage";
-		case VulkanResolutionCapabilityStatus::FormatUsageMismatch: return "format_usage_mismatch";
-		case VulkanResolutionCapabilityStatus::UnsupportedUsageBits: return "unsupported_usage_bits";
-		case VulkanResolutionCapabilityStatus::ImageExtentNotSupported: return "image_extent_not_supported";
-		case VulkanResolutionCapabilityStatus::ImageFormatNotSupported: return "image_format_not_supported";
-		case VulkanResolutionCapabilityStatus::VulkanQueryFailed: return "vulkan_query_failed";
+		case VulkanRenderResolutionCapabilityStatus::Success: return "success";
+		case VulkanRenderResolutionCapabilityStatus::InvalidArgument: return "invalid_argument";
+		case VulkanRenderResolutionCapabilityStatus::InvalidContext: return "invalid_context";
+		case VulkanRenderResolutionCapabilityStatus::InvalidPhysicalDevice: return "invalid_physical_device";
+		case VulkanRenderResolutionCapabilityStatus::InvalidExtent: return "invalid_extent";
+		case VulkanRenderResolutionCapabilityStatus::InvalidFormat: return "invalid_format";
+		case VulkanRenderResolutionCapabilityStatus::InvalidTiling: return "invalid_tiling";
+		case VulkanRenderResolutionCapabilityStatus::InvalidSampleCount: return "invalid_sample_count";
+		case VulkanRenderResolutionCapabilityStatus::MissingAttachmentUsage: return "missing_attachment_usage";
+		case VulkanRenderResolutionCapabilityStatus::ConflictingAttachmentUsage: return "conflicting_attachment_usage";
+		case VulkanRenderResolutionCapabilityStatus::FormatUsageMismatch: return "format_usage_mismatch";
+		case VulkanRenderResolutionCapabilityStatus::UnsupportedUsageBits: return "unsupported_usage_bits";
+		case VulkanRenderResolutionCapabilityStatus::ImageExtentNotSupported: return "image_extent_not_supported";
+		case VulkanRenderResolutionCapabilityStatus::ImageFormatNotSupported: return "image_format_not_supported";
+		case VulkanRenderResolutionCapabilityStatus::VulkanQueryFailed: return "vulkan_query_failed";
 	}
 	return "unknown";
 }

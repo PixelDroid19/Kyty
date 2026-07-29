@@ -7,7 +7,7 @@
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Utils.h"
-#include "Emulator/Graphics/VulkanResolutionCapability.h"
+#include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Profiler.h"
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -56,8 +56,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	capability_request.flags        = (sample_locations_compatible ? VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT : 0);
 	capability_request.sample_count = samples;
 	const auto capability            = EvaluateVulkanResolutionAttachment(ctx, capability_request);
-	EXIT_NOT_IMPLEMENTED(capability.status != VulkanResolutionCapabilityStatus::Success ||
-	                     capability.decision.status != ResolutionImageCapabilityStatus::Supported);
+	EXIT_NOT_IMPLEMENTED(capability.status != VulkanRenderResolutionCapabilityStatus::Success ||
+	                     capability.decision.status != RenderResolutionImageCapabilityStatus::Supported);
 
 	auto* vk_obj = new DepthStencilVulkanImage;
 

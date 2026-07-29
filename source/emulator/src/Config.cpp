@@ -12,8 +12,10 @@ struct Config
 {
 	uint32_t               screen_width                = 1280;
 	uint32_t               screen_height               = 720;
-	uint32_t               internal_resolution_width   = 1280;
-	uint32_t               internal_resolution_height  = 720;
+	RenderResolutionMode   render_resolution_mode      = RenderResolutionMode::Fixed;
+	uint32_t               render_resolution_width     = 1280;
+	uint32_t               render_resolution_height    = 720;
+	PresentationFilter     presentation_filter         = PresentationFilter::Linear;
 	bool                   neo                         = true;
 	GuestPlatform          guest_platform              = GuestPlatform::Unknown;
 	bool                   vulkan_validation_enabled   = false;
@@ -78,6 +80,22 @@ void LoadEnum(T& dst, const Scripts::ScriptVar& cfg, const String& key)
 	}
 }
 
+template <class T>
+void LoadStrictEnum(T& dst, const Scripts::ScriptVar& cfg, const String& key)
+{
+	auto var = cfg.At(key);
+	if (!var.IsNil())
+	{
+		const auto text  = var.ToString();
+		const auto value = Core::EnumValue(text, dst);
+		if (Core::EnumName(value) != text)
+		{
+			EXIT("Invalid config value for %s\n", key.C_Str());
+		}
+		dst = value;
+	}
+}
+
 void LoadStr(String& dst, const Scripts::ScriptVar& cfg, const String& key)
 {
 	auto var = cfg.At(key);
@@ -91,8 +109,15 @@ void Load(const Scripts::ScriptVar& cfg)
 {
 	LoadInt(g_config->screen_width, cfg, U"ScreenWidth");
 	LoadInt(g_config->screen_height, cfg, U"ScreenHeight");
-	LoadInt(g_config->internal_resolution_width, cfg, U"InternalResolutionWidth");
-	LoadInt(g_config->internal_resolution_height, cfg, U"InternalResolutionHeight");
+	LoadStrictEnum(g_config->render_resolution_mode, cfg, U"RenderResolutionMode");
+	LoadInt(g_config->render_resolution_width, cfg, U"RenderResolutionWidth");
+	LoadInt(g_config->render_resolution_height, cfg, U"RenderResolutionHeight");
+	LoadStrictEnum(g_config->presentation_filter, cfg, U"PresentationFilter");
+	if (g_config->screen_width == 0 || g_config->screen_height == 0 || g_config->render_resolution_width == 0 ||
+	    g_config->render_resolution_height == 0)
+	{
+		EXIT("Invalid zero graphics extent in configuration\n");
+	}
 	LoadBool(g_config->neo, cfg, U"Neo");
 	LoadBool(g_config->vulkan_validation_enabled, cfg, U"VulkanValidationEnabled");
 	LoadBool(g_config->shader_validation_enabled, cfg, U"ShaderValidationEnabled");
@@ -121,14 +146,24 @@ uint32_t GetScreenHeight()
 	return g_config->screen_height;
 }
 
-uint32_t GetInternalResolutionWidth()
+RenderResolutionMode GetRenderResolutionMode()
 {
-	return g_config->internal_resolution_width;
+	return g_config->render_resolution_mode;
 }
 
-uint32_t GetInternalResolutionHeight()
+uint32_t GetRenderResolutionWidth()
 {
-	return g_config->internal_resolution_height;
+	return g_config->render_resolution_width;
+}
+
+uint32_t GetRenderResolutionHeight()
+{
+	return g_config->render_resolution_height;
+}
+
+PresentationFilter GetPresentationFilter()
+{
+	return g_config->presentation_filter;
 }
 
 bool IsNeo()

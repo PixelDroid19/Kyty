@@ -12,7 +12,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
-#include "Emulator/Graphics/InternalResolutionRuntime.h"
+#include "Emulator/Graphics/RenderResolutionCoordinator.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/Tile.h"
@@ -1795,9 +1795,9 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 		// published set under one VideoOut observation boundary. Draw/image
 		// lookup can therefore see either the previous set or this complete
 		// cohort, never a registered candidate without its buffers.
-		const auto resolution_status = Graphics::InternalResolutionRuntimeRegisterGuestDisplayExtent({width, height});
+		const auto resolution_status = Graphics::RenderResolutionRegisterGuestDisplayExtent({width, height});
 		EXIT_IF(resolution_status != Graphics::ResolutionPolicyStatus::Success);
-		const auto resolution  = Graphics::InternalResolutionRuntimeGetSnapshot();
+		const auto resolution  = Graphics::RenderResolutionGetSnapshot();
 		const auto host_extent = resolution.candidate_decision.classification == Graphics::ResolutionClassification::Scaled
 		                             ? resolution.candidate_decision.host_extent
 		                             : Graphics::ResolutionExtent {width, height};

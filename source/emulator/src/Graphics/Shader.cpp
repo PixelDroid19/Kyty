@@ -13,7 +13,7 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/ShaderParse.h"
-#include "Emulator/Graphics/ShaderResolutionUsageCache.h"
+#include "Emulator/Graphics/RenderResolutionShaderUsageCache.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
@@ -42,7 +42,7 @@ KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>
 
 namespace Kyty::Libs::Graphics {
 
-static ShaderResolutionUsageCache g_shader_resolution_usage_cache(512);
+static RenderResolutionShaderUsageCache g_shader_resolution_usage_cache(512);
 
 static void RecordShaderInputAnalysis(uint64_t elapsed_ns)
 {
@@ -3625,7 +3625,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 				    DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
 				    ShaderParse(reinterpret_cast<const uint32_t*>(regs->ps_regs.data_addr), code.get());
 			    }
-			    return ShaderResolutionAnalysis {AnalyzeResolutionShaderUsage(*code), code};
+			    return RenderResolutionShaderAnalysis {AnalyzeResolutionShaderUsage(*code), code};
 		    });
 		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
 		ps_info->image_size_query          = analysis.usage.image_size_query;

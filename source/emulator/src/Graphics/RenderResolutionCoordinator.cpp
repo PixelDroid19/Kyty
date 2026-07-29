@@ -1,4 +1,4 @@
-#include "Emulator/Graphics/InternalResolutionRuntime.h"
+#include "Emulator/Graphics/RenderResolutionCoordinator.h"
 
 namespace Kyty::Libs::Graphics {
 namespace {
@@ -10,38 +10,37 @@ ResolutionResourceInfo DisplayCandidateInfo()
 	return resource;
 }
 
-InternalResolutionRuntime& Runtime()
+RenderResolutionCoordinator& Runtime()
 {
-	static InternalResolutionRuntime runtime;
+	static RenderResolutionCoordinator runtime;
 	return runtime;
 }
 
 } // namespace
 
-InternalResolutionRuntime::InternalResolutionRuntime(ResolutionExtent target_extent): m_policy(target_extent)
+RenderResolutionCoordinator::RenderResolutionCoordinator(ResolutionExtent target_extent): m_policy(target_extent)
 {
 	m_snapshot.target_extent = target_extent;
 }
 
-ResolutionPolicyStatus InternalResolutionRuntime::ConfigureTarget(ResolutionExtent target_extent)
+ResolutionPolicyStatus RenderResolutionCoordinator::ConfigureTarget(ResolutionScaleMode mode, ResolutionExtent target_extent)
 {
-	InternalResolutionPolicy policy;
+	RenderResolutionPolicy policy;
 	const auto               status = policy.SetTargetExtent(target_extent);
 	if (status != ResolutionPolicyStatus::Success)
 	{
 		return status;
 	}
+	policy.SetScaleMode(mode);
 
 	std::lock_guard<std::mutex> lock(m_mutex);
 	m_policy                 = policy;
 	m_snapshot               = {};
 	m_snapshot.target_extent = target_extent;
-	m_selected_host_extent   = {};
-	m_display_selection_set  = false;
 	return ResolutionPolicyStatus::Success;
 }
 
-ResolutionPolicyStatus InternalResolutionRuntime::RegisterGuestDisplayExtent(ResolutionExtent guest_extent)
+ResolutionPolicyStatus RenderResolutionCoordinator::RegisterGuestDisplayExtent(ResolutionExtent guest_extent)
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	const auto                  status = m_policy.RegisterGuestDisplayExtent(guest_extent);
@@ -53,8 +52,7 @@ ResolutionPolicyStatus InternalResolutionRuntime::RegisterGuestDisplayExtent(Res
 	const bool guest_extent_changed = m_snapshot.guest_registered && guest_extent != m_snapshot.guest_display_extent;
 	if (guest_extent_changed)
 	{
-		m_selected_host_extent  = {};
-		m_display_selection_set = false;
+		m_snapshot.scaling_applied = false;
 	}
 
 	m_snapshot.target_extent        = m_policy.GetTargetExtent();
@@ -65,52 +63,44 @@ ResolutionPolicyStatus InternalResolutionRuntime::RegisterGuestDisplayExtent(Res
 	return ResolutionPolicyStatus::Success;
 }
 
-ResolutionDecision InternalResolutionRuntime::Evaluate(ResolutionExtent guest_resource_extent, ResolutionResourceInfo resource) const
+ResolutionDecision RenderResolutionCoordinator::Evaluate(ResolutionExtent guest_resource_extent, ResolutionResourceInfo resource) const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	return m_policy.Evaluate(guest_resource_extent, resource);
 }
 
-ResolutionCohortDecision InternalResolutionRuntime::EvaluateCohort(const ResolutionCohortInput& input) const
+RenderResolutionPlan RenderResolutionCoordinator::EvaluateCohort(const RenderResolutionPlanInput& input) const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
-	return EvaluateResolutionCohort(m_policy, input);
+	return EvaluateRenderResolutionPlan(m_policy, input);
 }
 
-InternalResolutionDisplaySelectionStatus InternalResolutionRuntime::SelectDisplayHostExtent(ResolutionExtent guest_extent,
+RenderDisplaySelectionStatus RenderResolutionCoordinator::SelectDisplayHostExtent(ResolutionExtent guest_extent,
                                                                                              ResolutionExtent requested_host_extent,
-                                                                                             const ResolutionCohortDecision* authorization,
+                                                                                             const RenderResolutionPlan* authorization,
                                                                                              ResolutionExtent* selected_host_extent)
 {
 	if (guest_extent.width == 0 || guest_extent.height == 0 || requested_host_extent.width == 0 || requested_host_extent.height == 0 ||
 	    selected_host_extent == nullptr)
 	{
-		return InternalResolutionDisplaySelectionStatus::InvalidExtent;
+		return RenderDisplaySelectionStatus::InvalidExtent;
 	}
 	std::lock_guard<std::mutex> lock(m_mutex);
 	if (!m_snapshot.guest_registered || guest_extent != m_snapshot.guest_display_extent)
 	{
-		return InternalResolutionDisplaySelectionStatus::UnregisteredDisplay;
+		return RenderDisplaySelectionStatus::UnregisteredDisplay;
 	}
 	if (requested_host_extent != guest_extent &&
 	    (authorization == nullptr || authorization->classification != ResolutionClassification::Scaled ||
 	     authorization->guest_extent != guest_extent || authorization->host_extent != requested_host_extent))
 	{
-		return InternalResolutionDisplaySelectionStatus::UnauthorizedExtent;
+		return RenderDisplaySelectionStatus::UnauthorizedExtent;
 	}
-	if (!m_display_selection_set)
-	{
-		m_selected_host_extent  = requested_host_extent;
-		m_display_selection_set = true;
-		*selected_host_extent   = requested_host_extent;
-		return InternalResolutionDisplaySelectionStatus::Selected;
-	}
-	*selected_host_extent = m_selected_host_extent;
-	return requested_host_extent == m_selected_host_extent ? InternalResolutionDisplaySelectionStatus::StickyMatch
-	                                                       : InternalResolutionDisplaySelectionStatus::StickyMismatch;
+	*selected_host_extent = requested_host_extent;
+	return RenderDisplaySelectionStatus::Selected;
 }
 
-bool InternalResolutionRuntime::MarkScalingApplied(const ResolutionCohortDecision& decision)
+bool RenderResolutionCoordinator::MarkScalingApplied(const RenderResolutionPlan& decision)
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	if (!m_snapshot.guest_registered || decision.classification != ResolutionClassification::Scaled ||
@@ -122,46 +112,46 @@ bool InternalResolutionRuntime::MarkScalingApplied(const ResolutionCohortDecisio
 	return true;
 }
 
-InternalResolutionRuntimeSnapshot InternalResolutionRuntime::GetSnapshot() const
+RenderResolutionSnapshot RenderResolutionCoordinator::GetSnapshot() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	return m_snapshot;
 }
 
-ResolutionPolicyStatus InternalResolutionRuntimeInitialize(ResolutionExtent target_extent)
+ResolutionPolicyStatus RenderResolutionInitialize(ResolutionScaleMode mode, ResolutionExtent target_extent)
 {
-	return Runtime().ConfigureTarget(target_extent);
+	return Runtime().ConfigureTarget(mode, target_extent);
 }
 
-ResolutionPolicyStatus InternalResolutionRuntimeRegisterGuestDisplayExtent(ResolutionExtent guest_extent)
+ResolutionPolicyStatus RenderResolutionRegisterGuestDisplayExtent(ResolutionExtent guest_extent)
 {
 	return Runtime().RegisterGuestDisplayExtent(guest_extent);
 }
 
-ResolutionDecision InternalResolutionRuntimeEvaluate(ResolutionExtent guest_resource_extent, ResolutionResourceInfo resource)
+ResolutionDecision RenderResolutionEvaluate(ResolutionExtent guest_resource_extent, ResolutionResourceInfo resource)
 {
 	return Runtime().Evaluate(guest_resource_extent, resource);
 }
 
-ResolutionCohortDecision InternalResolutionRuntimeEvaluateCohort(const ResolutionCohortInput& input)
+RenderResolutionPlan RenderResolutionEvaluatePlan(const RenderResolutionPlanInput& input)
 {
 	return Runtime().EvaluateCohort(input);
 }
 
-InternalResolutionDisplaySelectionStatus InternalResolutionRuntimeSelectDisplayHostExtent(ResolutionExtent guest_extent,
+RenderDisplaySelectionStatus RenderResolutionSelectDisplayHostExtent(ResolutionExtent guest_extent,
                                                                                            ResolutionExtent requested_host_extent,
-                                                                                           const ResolutionCohortDecision* authorization,
+                                                                                           const RenderResolutionPlan* authorization,
                                                                                            ResolutionExtent* selected_host_extent)
 {
 	return Runtime().SelectDisplayHostExtent(guest_extent, requested_host_extent, authorization, selected_host_extent);
 }
 
-bool InternalResolutionRuntimeMarkScalingApplied(const ResolutionCohortDecision& decision)
+bool RenderResolutionMarkScalingApplied(const RenderResolutionPlan& decision)
 {
 	return Runtime().MarkScalingApplied(decision);
 }
 
-InternalResolutionRuntimeSnapshot InternalResolutionRuntimeGetSnapshot()
+RenderResolutionSnapshot RenderResolutionGetSnapshot()
 {
 	return Runtime().GetSnapshot();
 }

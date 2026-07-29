@@ -253,6 +253,10 @@ static bool CreateLuaScript(Kyty::Configuration* info, const QString& file_name)
 		s << "local cfg = {\n";
 		s << "\t ScreenWidth = " << r.at(0) << ";\n";
 		s << "\t ScreenHeight = " << r.at(1) << ";\n";
+		s << "\t RenderResolutionMode = 'Fixed';\n";
+		s << "\t RenderResolutionWidth = 1280;\n";
+		s << "\t RenderResolutionHeight = 720;\n";
+		s << "\t PresentationFilter = 'Linear';\n";
 		s << "\t Neo = " << (info->neo ? "true" : "false") << ";\n";
 		s << "\t VulkanValidationEnabled = " << (info->vulkan_validation_enabled ? "true" : "false") << ";\n";
 		s << "\t ShaderValidationEnabled = " << (info->shader_validation_enabled ? "true" : "false") << ";\n";

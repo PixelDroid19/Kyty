@@ -1,4 +1,4 @@
-#include "Emulator/Graphics/InternalResolutionPolicy.h"
+#include "Emulator/Graphics/RenderResolutionPolicy.h"
 
 #include <limits>
 #include <numeric>
@@ -63,9 +63,9 @@ namespace {
 
 } // namespace
 
-InternalResolutionPolicy::InternalResolutionPolicy(ResolutionExtent target_extent): m_target_extent(target_extent) {}
+RenderResolutionPolicy::RenderResolutionPolicy(ResolutionExtent target_extent): m_target_extent(target_extent) {}
 
-ResolutionPolicyStatus InternalResolutionPolicy::SetTargetExtent(ResolutionExtent target_extent)
+ResolutionPolicyStatus RenderResolutionPolicy::SetTargetExtent(ResolutionExtent target_extent)
 {
 	if (!IsValidExtent(target_extent))
 	{
@@ -75,12 +75,12 @@ ResolutionPolicyStatus InternalResolutionPolicy::SetTargetExtent(ResolutionExten
 	return ResolutionPolicyStatus::Success;
 }
 
-void InternalResolutionPolicy::SetScaleMode(ResolutionScaleMode mode)
+void RenderResolutionPolicy::SetScaleMode(ResolutionScaleMode mode)
 {
 	m_mode = mode;
 }
 
-ResolutionPolicyStatus InternalResolutionPolicy::RegisterGuestDisplayExtent(ResolutionExtent guest_extent)
+ResolutionPolicyStatus RenderResolutionPolicy::RegisterGuestDisplayExtent(ResolutionExtent guest_extent)
 {
 	if (!IsValidExtent(m_target_extent) || !IsValidExtent(guest_extent))
 	{
@@ -91,12 +91,12 @@ ResolutionPolicyStatus InternalResolutionPolicy::RegisterGuestDisplayExtent(Reso
 	return ResolutionPolicyStatus::Success;
 }
 
-ResolutionExtent InternalResolutionPolicy::GetTargetExtent() const
+ResolutionExtent RenderResolutionPolicy::GetTargetExtent() const
 {
 	return m_target_extent;
 }
 
-ResolutionDecision InternalResolutionPolicy::Evaluate(ResolutionExtent guest_resource_extent, ResolutionResourceInfo resource) const
+ResolutionDecision RenderResolutionPolicy::Evaluate(ResolutionExtent guest_resource_extent, ResolutionResourceInfo resource) const
 {
 	ResolutionDecision decision;
 	decision.guest_extent = guest_resource_extent;
@@ -155,7 +155,7 @@ ResolutionDecision InternalResolutionPolicy::Evaluate(ResolutionExtent guest_res
 	return decision;
 }
 
-ResolutionPolicyStatus InternalResolutionPolicy::MapRect(const ResolutionDecision& decision, ResolutionRect guest_rect,
+ResolutionPolicyStatus RenderResolutionPolicy::MapRect(const ResolutionDecision& decision, ResolutionRect guest_rect,
                                                          ResolutionRect* host_rect) const
 {
 	if (host_rect == nullptr)
@@ -197,12 +197,12 @@ ResolutionPolicyStatus InternalResolutionPolicy::MapRect(const ResolutionDecisio
 	return ResolutionPolicyStatus::Success;
 }
 
-bool InternalResolutionPolicy::IsValidExtent(ResolutionExtent extent)
+bool RenderResolutionPolicy::IsValidExtent(ResolutionExtent extent)
 {
 	return extent.width != 0 && extent.height != 0;
 }
 
-ResolutionNativeReason InternalResolutionPolicy::NativeReason(const ResolutionResourceInfo& resource)
+ResolutionNativeReason RenderResolutionPolicy::NativeReason(const ResolutionResourceInfo& resource)
 {
 	if (resource.kind != ResolutionResourceKind::ColorAttachment && resource.kind != ResolutionResourceKind::DepthStencilAttachment)
 	{
@@ -239,7 +239,7 @@ ResolutionNativeReason InternalResolutionPolicy::NativeReason(const ResolutionRe
 	return ResolutionNativeReason::None;
 }
 
-bool InternalResolutionPolicy::CalculateScale(ResolutionScale* scale) const
+bool RenderResolutionPolicy::CalculateScale(ResolutionScale* scale) const
 {
 	if (scale == nullptr || !m_guest_display_registered || !IsValidExtent(m_target_extent) || !IsValidExtent(m_guest_display_extent))
 	{

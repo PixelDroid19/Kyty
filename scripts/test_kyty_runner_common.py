@@ -38,8 +38,10 @@ class ChildEnvironmentTests(unittest.TestCase):
 
     def test_preserves_only_explicit_optional_values(self) -> None:
         base = {
-            "KYTY_INTERNAL_RESOLUTION_WIDTH": "1920",
-            "KYTY_INTERNAL_RESOLUTION_HEIGHT": "1080",
+            "KYTY_RENDER_RESOLUTION_MODE": "Native",
+            "KYTY_RENDER_RESOLUTION_WIDTH": "1920",
+            "KYTY_RENDER_RESOLUTION_HEIGHT": "1080",
+            "KYTY_PRESENTATION_FILTER": "Nearest",
             "KYTY_NATIVE_CAPTURE_MAX_EDGE": "2048",
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -50,14 +52,18 @@ class ChildEnvironmentTests(unittest.TestCase):
                 agent_socket=root / "agent.sock",
                 capture_directory=root / "captures",
                 optional_values=(
-                    "KYTY_INTERNAL_RESOLUTION_WIDTH",
-                    "KYTY_INTERNAL_RESOLUTION_HEIGHT",
+                    "KYTY_RENDER_RESOLUTION_MODE",
+                    "KYTY_RENDER_RESOLUTION_WIDTH",
+                    "KYTY_RENDER_RESOLUTION_HEIGHT",
+                    "KYTY_PRESENTATION_FILTER",
                 ),
                 default_values={"KYTY_NATIVE_CAPTURE_MAX_EDGE": "1280"},
             )
 
-        self.assertEqual(env["KYTY_INTERNAL_RESOLUTION_WIDTH"], "1920")
-        self.assertEqual(env["KYTY_INTERNAL_RESOLUTION_HEIGHT"], "1080")
+        self.assertEqual(env["KYTY_RENDER_RESOLUTION_MODE"], "Native")
+        self.assertEqual(env["KYTY_RENDER_RESOLUTION_WIDTH"], "1920")
+        self.assertEqual(env["KYTY_RENDER_RESOLUTION_HEIGHT"], "1080")
+        self.assertEqual(env["KYTY_PRESENTATION_FILTER"], "Nearest")
         self.assertEqual(env["KYTY_NATIVE_CAPTURE_MAX_EDGE"], "2048")
 
 

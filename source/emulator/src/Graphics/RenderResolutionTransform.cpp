@@ -1,4 +1,4 @@
-#include "Emulator/Graphics/ResolutionCoordinateTransform.h"
+#include "Emulator/Graphics/RenderResolutionTransform.h"
 
 #include <cmath>
 #include <cstdint>
@@ -12,11 +12,11 @@ namespace {
 	return extent.width != 0 && extent.height != 0;
 }
 
-[[nodiscard]] ResolutionCoordinateStatus ValidateTransform(const ResolutionCoordinateTransform& transform)
+[[nodiscard]] RenderResolutionTransformStatus ValidateTransform(const RenderResolutionTransform& transform)
 {
 	if (!IsValidExtent(transform.guest_extent) || !IsValidExtent(transform.host_extent))
 	{
-		return ResolutionCoordinateStatus::InvalidExtent;
+		return RenderResolutionTransformStatus::InvalidExtent;
 	}
 
 	const double expected_guest_to_host_x = static_cast<double>(transform.host_extent.width) / transform.guest_extent.width;
@@ -26,9 +26,9 @@ namespace {
 	if (transform.x.guest_to_host != expected_guest_to_host_x || transform.x.host_to_guest != expected_host_to_guest_x ||
 	    transform.y.guest_to_host != expected_guest_to_host_y || transform.y.host_to_guest != expected_host_to_guest_y)
 	{
-		return ResolutionCoordinateStatus::InvalidTransform;
+		return RenderResolutionTransformStatus::InvalidTransform;
 	}
-	return ResolutionCoordinateStatus::Success;
+	return RenderResolutionTransformStatus::Success;
 }
 
 [[nodiscard]] bool MapViewportAxis(double origin, double length, double scale, double* mapped_origin, double* mapped_length)
@@ -95,19 +95,19 @@ void MapScissorAxis(int64_t guest_origin, int64_t guest_end, uint32_t guest_exte
 
 } // namespace
 
-ResolutionCoordinateStatus CreateResolutionCoordinateTransform(ResolutionExtent guest_extent, ResolutionExtent host_extent,
-                                                               ResolutionCoordinateTransform* transform)
+RenderResolutionTransformStatus CreateRenderResolutionTransform(ResolutionExtent guest_extent, ResolutionExtent host_extent,
+                                                               RenderResolutionTransform* transform)
 {
 	if (transform == nullptr)
 	{
-		return ResolutionCoordinateStatus::InvalidArgument;
+		return RenderResolutionTransformStatus::InvalidArgument;
 	}
 	if (!IsValidExtent(guest_extent) || !IsValidExtent(host_extent))
 	{
-		return ResolutionCoordinateStatus::InvalidExtent;
+		return RenderResolutionTransformStatus::InvalidExtent;
 	}
 
-	ResolutionCoordinateTransform result {};
+	RenderResolutionTransform result {};
 	result.guest_extent    = guest_extent;
 	result.host_extent     = host_extent;
 	result.x.guest_to_host = static_cast<double>(host_extent.width) / guest_extent.width;
@@ -115,52 +115,52 @@ ResolutionCoordinateStatus CreateResolutionCoordinateTransform(ResolutionExtent 
 	result.y.guest_to_host = static_cast<double>(host_extent.height) / guest_extent.height;
 	result.y.host_to_guest = static_cast<double>(guest_extent.height) / host_extent.height;
 	*transform             = result;
-	return ResolutionCoordinateStatus::Success;
+	return RenderResolutionTransformStatus::Success;
 }
 
-ResolutionCoordinateStatus MapResolutionViewport(const ResolutionCoordinateTransform& transform, const ResolutionViewport& guest_viewport,
+RenderResolutionTransformStatus MapRenderResolutionViewport(const RenderResolutionTransform& transform, const ResolutionViewport& guest_viewport,
                                                  ResolutionViewport* host_viewport)
 {
 	if (host_viewport == nullptr)
 	{
-		return ResolutionCoordinateStatus::InvalidArgument;
+		return RenderResolutionTransformStatus::InvalidArgument;
 	}
 	const auto transform_status = ValidateTransform(transform);
-	if (transform_status != ResolutionCoordinateStatus::Success)
+	if (transform_status != RenderResolutionTransformStatus::Success)
 	{
 		return transform_status;
 	}
 	if (!std::isfinite(guest_viewport.x) || !std::isfinite(guest_viewport.y) || !std::isfinite(guest_viewport.width) ||
 	    !std::isfinite(guest_viewport.height) || !std::isfinite(guest_viewport.min_depth) || !std::isfinite(guest_viewport.max_depth))
 	{
-		return ResolutionCoordinateStatus::NonFiniteViewport;
+		return RenderResolutionTransformStatus::NonFiniteViewport;
 	}
 	if (guest_viewport.width <= 0.0 || guest_viewport.height == 0.0)
 	{
-		return ResolutionCoordinateStatus::InvalidViewport;
+		return RenderResolutionTransformStatus::InvalidViewport;
 	}
 
 	ResolutionViewport result {};
 	if (!MapViewportAxis(guest_viewport.x, guest_viewport.width, transform.x.guest_to_host, &result.x, &result.width) ||
 	    !MapViewportAxis(guest_viewport.y, guest_viewport.height, transform.y.guest_to_host, &result.y, &result.height))
 	{
-		return ResolutionCoordinateStatus::ArithmeticOverflow;
+		return RenderResolutionTransformStatus::ArithmeticOverflow;
 	}
 	result.min_depth = guest_viewport.min_depth;
 	result.max_depth = guest_viewport.max_depth;
 	*host_viewport   = result;
-	return ResolutionCoordinateStatus::Success;
+	return RenderResolutionTransformStatus::Success;
 }
 
-ResolutionCoordinateStatus MapResolutionScissor(const ResolutionCoordinateTransform& transform, const ResolutionScissorRect& guest_scissor,
+RenderResolutionTransformStatus MapRenderResolutionScissor(const RenderResolutionTransform& transform, const ResolutionScissorRect& guest_scissor,
                                                 ResolutionScissorRect* host_scissor)
 {
 	if (host_scissor == nullptr)
 	{
-		return ResolutionCoordinateStatus::InvalidArgument;
+		return RenderResolutionTransformStatus::InvalidArgument;
 	}
 	const auto transform_status = ValidateTransform(transform);
-	if (transform_status != ResolutionCoordinateStatus::Success)
+	if (transform_status != RenderResolutionTransformStatus::Success)
 	{
 		return transform_status;
 	}
@@ -171,7 +171,7 @@ ResolutionCoordinateStatus MapResolutionScissor(const ResolutionCoordinateTransf
 	MapScissorAxis(guest_scissor.top, guest_scissor.bottom, transform.guest_extent.height, transform.host_extent.height, &result.top,
 	               &result.bottom);
 	*host_scissor = result;
-	return ResolutionCoordinateStatus::Success;
+	return RenderResolutionTransformStatus::Success;
 }
 
 } // namespace Kyty::Libs::Graphics

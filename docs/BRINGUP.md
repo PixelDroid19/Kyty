@@ -139,9 +139,9 @@ strict post-Play (or earlier) blocker is open. Delivery order below is absolute.
 6. **Compare working vs failing forms.** Same export with non-null address
    earlier in the run is ABI evidence; a post-Play null pair is a different
    contract to explain, not a free pass to invent addresses.
-7. **Consult references only for names and patterns.** Public Gen5 export
-   tables, RPCSX wiki, and Vulkan/AMD docs inform vocabulary; every
-   PS5-specific claim must reappear in a local capture or test. No GPL code paste.
+7. **Consult references only for names and patterns.** Public references may
+   inform vocabulary and architecture, but every PS5-specific claim must
+   reappear in a local capture or test. No incompatible code paste.
 
 ### Hypothesis and trial-and-error discipline
 
@@ -576,30 +576,17 @@ one purpose, explicit inputs/outputs, ownership, thread contract, error
 contract, and a focused test. Delete the superseded implementation in the same
 change; do not leave permanent forwarding aliases or duplicate semantics.
 
-REFERENCES AND HOW TO USE THEM
+REFERENCE MATERIAL
 
-Use references for behavioral facts, architecture patterns, and test ideas;
-never copy incompatible or GPL implementation code into Kyty:
+Use reference material only for behavioral facts, architecture patterns, and
+test ideas. Every imported claim must be verified with a local capture or a
+focused test before it affects Kyty behavior. Do not copy incompatible code,
+private assets, proprietary SDK material, firmware, keys, decrypted content, or
+implementation details that cannot be relicensed into Kyty.
 
-- Public Gen5 export / NID tables — PS4/PS5 export naming and ABI vocabulary
-  only; verify every claim with a local capture or focused test.
-- RPCSX: https://github.com/RPCSX/rpcsx and its wiki — Linux-first portability,
-  runtime boundaries, logging, and compatibility transparency.
-- EmuC0re: https://github.com/egycnq/EmuC0re — small emulator seams and
-  bring-up discipline; do not infer PS5 GPU behavior from its unrelated target.
-- Ryubing/Ryujinx: https://git.ryujinx.app/projects/Ryubing/ryujinx — mature
-  separation of guest services, translator/cache boundaries, capability-aware
-  host rendering, and regression-oriented compatibility work.
-- Vulkan specification and refpages: https://registry.khronos.org/vulkan/ —
-  authoritative synchronization, image layout, format, feature, and limit
-  semantics.
-- AMD GPUOpen/Adrenalin GPU documentation: https://gpuopen.com/ — public GPU
-  terminology and cache/tiling concepts; verify every PS5-specific claim
-  against Kyty evidence rather than assuming desktop AMD equivalence.
-
-For each borrowed fact, record the URL, license/provenance, exact behavior
-learned, and the local test that confirms it. Do not copy GPL code; reimplement
-the verified behavior using Kyty's types and MIT-compatible source.
+For each confirmed fact, record the provenance, license, behavior learned, and
+the local evidence that proves it. Reimplement confirmed behavior using Kyty's
+own types, boundaries, and diagnostics.
 
 HANDOFF REPORT TEMPLATE
 
@@ -798,7 +785,7 @@ Other diagnostics (unchanged, still not acceptance modes):
 - `KYTY_SKIP_UD2=1`: skips a guest trap for diagnostics; invalidates normal
   execution. **Not** part of the bring-up policy.
 
-Agent diagnostics JSON protocol version is **2** and includes `bringup.mode`,
+Agent diagnostics JSON protocol version is **5** and includes `bringup.mode`,
 features, subsystems, limits, unique sites, continuations, missing-import
 metrics, and last circuit-break (`BringUp::WriteDiagnosticsJson`).
 

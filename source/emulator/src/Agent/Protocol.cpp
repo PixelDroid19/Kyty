@@ -3,8 +3,9 @@
 #include "Kyty/Agent/Json.h"
 
 #include "Emulator/Agent/EventRing.h"
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
-#include "Emulator/Graphics/InternalResolutionRuntime.h"
+#include "Emulator/Graphics/RenderResolutionCoordinator.h"
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <cctype>
@@ -674,7 +675,7 @@ void AppendSlowFramePerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 	*out += "]}";
 }
 
-void AppendInternalResolutionPerformanceJson(const Libs::Graphics::InternalResolutionRuntimeSnapshot& resolution, std::string* out)
+void AppendRenderResolutionPerformanceJson(const Libs::Graphics::RenderResolutionSnapshot& resolution, std::string* out)
 {
 	EXIT_IF(out == nullptr);
 
@@ -689,7 +690,11 @@ void AppendInternalResolutionPerformanceJson(const Libs::Graphics::InternalResol
 		return "unknown";
 	};
 	const auto& decision = resolution.candidate_decision;
-	*out += "\"internal_resolution\":{\"target\":{\"width\":" + std::to_string(resolution.target_extent.width);
+	*out += "\"render_resolution\":{\"mode\":\"";
+	*out += Config::IsInitialized() && Config::GetRenderResolutionMode() == Config::RenderResolutionMode::Native ? "native" : "fixed";
+	*out += "\",\"presentation_filter\":\"";
+	*out += Config::IsInitialized() && Config::GetPresentationFilter() == Config::PresentationFilter::Nearest ? "nearest" : "linear";
+	*out += "\",\"target\":{\"width\":" + std::to_string(resolution.target_extent.width);
 	*out += ",\"height\":" + std::to_string(resolution.target_extent.height);
 	*out += "},\"guest_display\":{\"registered\":";
 	*out += resolution.guest_registered ? "true" : "false";
@@ -914,7 +919,7 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	    static_cast<unsigned long long>(performance.live_objects), performance.fps, performance.frame_time_ms);
 	out += performance_json;
 	out += ',';
-	AppendInternalResolutionPerformanceJson(Libs::Graphics::InternalResolutionRuntimeGetSnapshot(), &out);
+	AppendRenderResolutionPerformanceJson(Libs::Graphics::RenderResolutionGetSnapshot(), &out);
 	out += ',';
 	AppendGpuMemoryPerformanceJson(performance, &out);
 	out += ',';

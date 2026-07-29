@@ -7,7 +7,7 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Utils.h"
-#include "Emulator/Graphics/VulkanResolutionCapability.h"
+#include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Profiler.h"
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -212,8 +212,8 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 	capability_request.sample_count = samples;
 	const auto capability            = EvaluateVulkanResolutionAttachment(ctx, capability_request);
-	EXIT_NOT_IMPLEMENTED(capability.status != VulkanResolutionCapabilityStatus::Success ||
-	                     capability.decision.status != ResolutionImageCapabilityStatus::Supported);
+	EXIT_NOT_IMPLEMENTED(capability.status != VulkanRenderResolutionCapabilityStatus::Success ||
+	                     capability.decision.status != RenderResolutionImageCapabilityStatus::Supported);
 
 	auto* vk_obj = new RenderTextureVulkanImage;
 	vk_obj->SetNativeExtent(width, height);

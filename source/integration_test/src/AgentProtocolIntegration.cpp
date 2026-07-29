@@ -74,6 +74,7 @@ int ScenarioProtocolVersionConsistent()
 	                                                     Loader::ModuleLifecycleCoordinator::GetDiagnostics());
 	Expect(diag_body.find("\"event_ring\"") != std::string::npos, "diagnostics has event_ring");
 	Expect(diag_body.find("\"performance\"") != std::string::npos, "diagnostics has bounded performance snapshot");
+	Expect(diag_body.find("\"render_resolution\"") != std::string::npos, "performance has render resolution state");
 	Expect(diag_body.find("\"command_buffers\"") != std::string::npos, "performance has command buffer count");
 	Expect(diag_body.find("\"acquire_max_ns\"") != std::string::npos, "performance has bounded acquire timing");
 	Expect(diag_body.find("\"present_max_ns\"") != std::string::npos, "performance has bounded present timing");
@@ -125,8 +126,8 @@ int ScenarioProtocolVersionConsistent()
 	const auto bring_pos = diag_body.find("\"bring_up\"");
 	const auto ring_pos  = diag_body.find("\"event_ring\"");
 	Expect(bring_pos != std::string::npos && ring_pos != std::string::npos && ring_pos > bring_pos, "event_ring after bring_up");
-	Expect(Kyty::Agent::kProtocolVersion == 4u, "live constant is 4");
-	Expect(ParseTool("perf_snapshot") == Tool::PerfSnapshot, "perf_snapshot is part of protocol v4");
+	Expect(Kyty::Agent::kProtocolVersion == 5u, "live constant is 5");
+	Expect(ParseTool("perf_snapshot") == Tool::PerfSnapshot, "perf_snapshot is part of protocol v5");
 	std::printf("PROTOCOL_VERSION=%u\n", Kyty::Agent::kProtocolVersion);
 	return 0;
 }

@@ -2,8 +2,10 @@
 local cfg = {
 	ScreenWidth = 1280;
 	ScreenHeight = 720;
-	InternalResolutionWidth = 1280;
-	InternalResolutionHeight = 720;
+	RenderResolutionMode = 'Fixed';
+	RenderResolutionWidth = 1280;
+	RenderResolutionHeight = 720;
+	PresentationFilter = 'Linear';
 	Neo = true;
 	VulkanValidationEnabled = false;
 	ShaderValidationEnabled = false;

@@ -2,7 +2,7 @@
 
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
-#include "Emulator/Graphics/ResolutionAliasPolicy.h"
+#include "Emulator/Graphics/RenderResolutionAlias.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VideoOutFlipLifecycleGate.h"
 #include "Emulator/Graphics/VideoOutFlipQueueAdmissionGate.h"
@@ -375,7 +375,7 @@ TEST(EmulatorVideoOutResolution, InspectionRejectsUnselectedAndNonUniformSets)
 TEST(EmulatorVideoOutResolution, AllowsObservedExactVideoOutStorageAlias)
 {
 	const auto overlaps = Snapshot({Exact(GpuMemoryObjectType::VideoOutBuffer), Exact(GpuMemoryObjectType::StorageBuffer)});
-	EXPECT_TRUE(ResolutionAliasPolicyAllowsSnapshot(overlaps, GpuMemoryObjectType::VideoOutBuffer, false));
+	EXPECT_TRUE(RenderResolutionAliasAllowsSnapshot(overlaps, GpuMemoryObjectType::VideoOutBuffer, false));
 }
 
 TEST(EmulatorVideoOutResolution, RejectsPartialMultipleTruncatedAndUnexpectedAliases)
@@ -386,17 +386,17 @@ TEST(EmulatorVideoOutResolution, RejectsPartialMultipleTruncatedAndUnexpectedAli
 	auto truncated      = Snapshot({Exact(GpuMemoryObjectType::VideoOutBuffer)});
 	truncated.truncated = true;
 
-	EXPECT_FALSE(ResolutionAliasPolicyAllowsSnapshot(partial, GpuMemoryObjectType::VideoOutBuffer, false));
-	EXPECT_FALSE(ResolutionAliasPolicyAllowsSnapshot(multiple, GpuMemoryObjectType::VideoOutBuffer, false));
-	EXPECT_FALSE(ResolutionAliasPolicyAllowsSnapshot(unexpected, GpuMemoryObjectType::VideoOutBuffer, false));
-	EXPECT_FALSE(ResolutionAliasPolicyAllowsSnapshot(truncated, GpuMemoryObjectType::VideoOutBuffer, false));
+	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(partial, GpuMemoryObjectType::VideoOutBuffer, false));
+	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(multiple, GpuMemoryObjectType::VideoOutBuffer, false));
+	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(unexpected, GpuMemoryObjectType::VideoOutBuffer, false));
+	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(truncated, GpuMemoryObjectType::VideoOutBuffer, false));
 }
 
 TEST(EmulatorVideoOutResolution, AllowsEmptyDepthOnlyWhenCallerAuthorizesIt)
 {
 	const GpuMemoryOverlapSnapshot empty;
-	EXPECT_TRUE(ResolutionAliasPolicyAllowsSnapshot(empty, GpuMemoryObjectType::DepthStencilBuffer, true));
-	EXPECT_FALSE(ResolutionAliasPolicyAllowsSnapshot(empty, GpuMemoryObjectType::DepthStencilBuffer, false));
+	EXPECT_TRUE(RenderResolutionAliasAllowsSnapshot(empty, GpuMemoryObjectType::DepthStencilBuffer, true));
+	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(empty, GpuMemoryObjectType::DepthStencilBuffer, false));
 }
 
 UT_END();

@@ -1,8 +1,8 @@
-#include "Emulator/Graphics/ResolutionAliasPolicy.h"
+#include "Emulator/Graphics/RenderResolutionAlias.h"
 
 namespace Kyty::Libs::Graphics {
 
-bool ResolutionAliasPolicyAllowsSnapshot(const GpuMemoryOverlapSnapshot& overlaps, GpuMemoryObjectType expected_type, bool allow_empty)
+bool RenderResolutionAliasAllowsSnapshot(const GpuMemoryOverlapSnapshot& overlaps, GpuMemoryObjectType expected_type, bool allow_empty)
 {
 	if (overlaps.truncated)
 	{
@@ -43,12 +43,12 @@ bool ResolutionAliasPolicyAllowsSnapshot(const GpuMemoryOverlapSnapshot& overlap
 	       overlaps.exact_count == expected_total;
 }
 
-bool ResolutionAliasPolicyAllowsRanges(const uint64_t* vaddr, const uint64_t* size, int count, GpuMemoryObjectType expected_type,
+bool RenderResolutionAliasAllowsRanges(const uint64_t* vaddr, const uint64_t* size, int count, GpuMemoryObjectType expected_type,
                                        bool allow_empty)
 {
 	GpuMemoryOverlapSnapshot overlaps;
 	return GpuMemoryQueryOverlaps(vaddr, size, count, &overlaps) &&
-	       ResolutionAliasPolicyAllowsSnapshot(overlaps, expected_type, allow_empty);
+	       RenderResolutionAliasAllowsSnapshot(overlaps, expected_type, allow_empty);
 }
 
 } // namespace Kyty::Libs::Graphics

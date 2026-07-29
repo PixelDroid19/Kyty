@@ -1,7 +1,7 @@
-#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RESOLUTIONIMAGECAPABILITY_H_
-#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RESOLUTIONIMAGECAPABILITY_H_
+#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONIMAGECAPABILITY_H_
+#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONIMAGECAPABILITY_H_
 
-#include "Emulator/Graphics/InternalResolutionPolicy.h"
+#include "Emulator/Graphics/RenderResolutionPolicy.h"
 
 #include <cstdint>
 
@@ -35,7 +35,7 @@ enum class ResolutionImageUsage : uint32_t
 	return static_cast<ResolutionImageUsage>(~static_cast<uint32_t>(value));
 }
 
-enum class ResolutionImageCapabilityStatus : uint8_t
+enum class RenderResolutionImageCapabilityStatus : uint8_t
 {
 	Supported,
 	InvalidRequest,
@@ -43,7 +43,7 @@ enum class ResolutionImageCapabilityStatus : uint8_t
 	Unsupported,
 };
 
-enum class ResolutionImageCapabilityReason : uint8_t
+enum class RenderResolutionImageCapabilityReason : uint8_t
 {
 	None,
 	ZeroExtent,
@@ -65,7 +65,7 @@ struct ResolutionHostImageCapabilities
 	uint32_t             supported_sample_counts = 0;
 };
 
-struct ResolutionImageCapabilityRequest
+struct RenderResolutionImageCapabilityRequest
 {
 	ResolutionExtent     extent;
 	uint64_t             required_format_features = 0;
@@ -73,34 +73,34 @@ struct ResolutionImageCapabilityRequest
 	uint32_t             sample_count             = 0;
 };
 
-struct ResolutionImageCapabilityDecision
+struct RenderResolutionImageCapabilityDecision
 {
-	ResolutionImageCapabilityStatus status = ResolutionImageCapabilityStatus::InvalidRequest;
-	ResolutionImageCapabilityReason reason = ResolutionImageCapabilityReason::ZeroExtent;
+	RenderResolutionImageCapabilityStatus status = RenderResolutionImageCapabilityStatus::InvalidRequest;
+	RenderResolutionImageCapabilityReason reason = RenderResolutionImageCapabilityReason::ZeroExtent;
 	ResolutionExtent                extent;
 	uint32_t                        sample_count            = 0;
 	uint64_t                        missing_format_features = 0;
 	ResolutionImageUsage            missing_usage           = ResolutionImageUsage::None;
 };
 
-[[nodiscard]] constexpr bool operator==(const ResolutionImageCapabilityDecision& lhs, const ResolutionImageCapabilityDecision& rhs)
+[[nodiscard]] constexpr bool operator==(const RenderResolutionImageCapabilityDecision& lhs, const RenderResolutionImageCapabilityDecision& rhs)
 {
 	return lhs.status == rhs.status && lhs.reason == rhs.reason && lhs.extent == rhs.extent && lhs.sample_count == rhs.sample_count &&
 	       lhs.missing_format_features == rhs.missing_format_features && lhs.missing_usage == rhs.missing_usage;
 }
 
-[[nodiscard]] constexpr bool operator!=(const ResolutionImageCapabilityDecision& lhs, const ResolutionImageCapabilityDecision& rhs)
+[[nodiscard]] constexpr bool operator!=(const RenderResolutionImageCapabilityDecision& lhs, const RenderResolutionImageCapabilityDecision& rhs)
 {
 	return !(lhs == rhs);
 }
 
 // Validates only explicit host limits and exact requested properties. Device
 // names and vendor identifiers are intentionally absent from this contract.
-[[nodiscard]] ResolutionImageCapabilityDecision EvaluateResolutionImageCapability(const ResolutionHostImageCapabilities&  capabilities,
-                                                                                  const ResolutionImageCapabilityRequest& request);
-[[nodiscard]] const char*                       ResolutionImageCapabilityStatusName(ResolutionImageCapabilityStatus status);
-[[nodiscard]] const char*                       ResolutionImageCapabilityReasonName(ResolutionImageCapabilityReason reason);
+[[nodiscard]] RenderResolutionImageCapabilityDecision EvaluateRenderResolutionImageCapability(const ResolutionHostImageCapabilities&  capabilities,
+                                                                                  const RenderResolutionImageCapabilityRequest& request);
+[[nodiscard]] const char*                       RenderResolutionImageCapabilityStatusName(RenderResolutionImageCapabilityStatus status);
+[[nodiscard]] const char*                       RenderResolutionImageCapabilityReasonName(RenderResolutionImageCapabilityReason reason);
 
 } // namespace Kyty::Libs::Graphics
 
-#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RESOLUTIONIMAGECAPABILITY_H_ */
+#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_RENDERRESOLUTIONIMAGECAPABILITY_H_ */

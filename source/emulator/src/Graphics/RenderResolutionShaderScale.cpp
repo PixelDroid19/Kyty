@@ -1,4 +1,4 @@
-#include "Emulator/Graphics/ShaderCoordinateScale.h"
+#include "Emulator/Graphics/RenderResolutionShaderScale.h"
 
 #include <limits>
 #include <numeric>
@@ -24,26 +24,26 @@ namespace {
 
 } // namespace
 
-ShaderCoordinateScaleStatus BuildShaderHostToGuestScale(ShaderCoordinateExtent guest_extent, ShaderCoordinateExtent host_extent,
-                                                        ShaderHostToGuestScale* scale)
+RenderResolutionShaderScaleStatus BuildRenderHostToGuestScale(RenderShaderExtent guest_extent, RenderShaderExtent host_extent,
+                                                        RenderHostToGuestScale* scale)
 {
 	if (scale == nullptr)
 	{
-		return ShaderCoordinateScaleStatus::InvalidArgument;
+		return RenderResolutionShaderScaleStatus::InvalidArgument;
 	}
 	if (guest_extent.width == 0 || guest_extent.height == 0 || host_extent.width == 0 || host_extent.height == 0)
 	{
-		return ShaderCoordinateScaleStatus::InvalidExtent;
+		return RenderResolutionShaderScaleStatus::InvalidExtent;
 	}
 
-	ShaderHostToGuestScale result;
+	RenderHostToGuestScale result;
 	if (!ReduceAxis(guest_extent.width, host_extent.width, &result.x_guest_numerator, &result.x_host_denominator) ||
 	    !ReduceAxis(guest_extent.height, host_extent.height, &result.y_guest_numerator, &result.y_host_denominator))
 	{
-		return ShaderCoordinateScaleStatus::ArithmeticOverflow;
+		return RenderResolutionShaderScaleStatus::ArithmeticOverflow;
 	}
 	*scale = result;
-	return ShaderCoordinateScaleStatus::Success;
+	return RenderResolutionShaderScaleStatus::Success;
 }
 
 } // namespace Kyty::Libs::Graphics

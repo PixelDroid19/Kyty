@@ -4,6 +4,7 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/SampleLocations.h"
 #include "Emulator/Graphics/Shader.h"
 
 #include <cstddef>
@@ -65,27 +66,37 @@ enum class DepthStencilCopyMode
 
 struct DepthStencilCopyRequest
 {
-	DepthStencilCopyMode       mode             = DepthStencilCopyMode::ExpandToColor;
-	DepthStencilVulkanImage*   source           = nullptr;
-	VkRenderPass               render_pass      = nullptr;
-	uint64_t                   render_pass_id   = 0;
-	VkExtent2D                 extent           = {};
-	VkViewport                 viewport         = {};
-	VkRect2D                   scissor          = {};
-	uint8_t                    color_write_mask = 0;
+	DepthStencilCopyMode      mode             = DepthStencilCopyMode::ExpandToColor;
+	DepthStencilVulkanImage*  source           = nullptr;
+	VkRenderPass              render_pass      = nullptr;
+	uint64_t                  render_pass_id   = 0;
+	VkExtent2D                extent           = {};
+	VkViewport                viewport         = {};
+	VkRect2D                  scissor          = {};
+	VulkanSampleLocationState sample_locations;
+	uint32_t                  copy_sample      = 0;
+	bool                      copy_centroid    = false;
+	uint8_t                   color_write_mask = 0;
 	DepthStencilCopyDepthTest   depth_test;
 	DepthStencilCopyStencilTest stencil_test;
 	const DepthStencilCopyVertexStage* vertex_stage = nullptr;
 };
 
+struct DepthStencilCopyFragmentParameters
+{
+	float    source_scale[2] = {};
+	uint32_t copy_sample     = 0;
+	uint32_t flags           = 0;
+};
+
 struct DepthStencilCopyPreparedDraw
 {
-	VkPipeline       pipeline          = nullptr;
-	VkPipelineLayout pipeline_layout   = nullptr;
-	VkDescriptorSet  source_descriptor = nullptr;
-	VkViewport       viewport          = {};
-	VkRect2D         scissor           = {};
-	float            source_scale[2]  = {};
+	VkPipeline                         pipeline           = nullptr;
+	VkPipelineLayout                   pipeline_layout    = nullptr;
+	VkDescriptorSet                    source_descriptor  = nullptr;
+	VkViewport                         viewport           = {};
+	VkRect2D                           scissor            = {};
+	DepthStencilCopyFragmentParameters fragment_parameters;
 };
 
 // Executes fixed-function depth/stencil copy work. It either expands source
@@ -122,11 +133,13 @@ private:
 		bool                  cull_back                    = false;
 		bool                  face                         = false;
 		bool                  dx_clip_space                = true;
-		DepthStencilCopyMode  mode                         = DepthStencilCopyMode::ExpandToColor;
-		uint8_t               color_write_mask             = 0;
-		bool                  depth_test_enable            = false;
-		bool                  depth_write_enable           = false;
-		VkCompareOp           depth_compare_op              = VK_COMPARE_OP_ALWAYS;
+		DepthStencilCopyMode      mode                         = DepthStencilCopyMode::ExpandToColor;
+		VulkanSampleLocationState sample_locations;
+		bool                      source_multisampled         = false;
+		uint8_t                   color_write_mask             = 0;
+		bool                      depth_test_enable            = false;
+		bool                      depth_write_enable           = false;
+		VkCompareOp               depth_compare_op              = VK_COMPARE_OP_ALWAYS;
 		DepthStencilCopyStencilTest stencil_test;
 		uint32_t              vertex_push_constant_offset  = 0;
 		uint32_t              vertex_push_constant_size    = 0;
