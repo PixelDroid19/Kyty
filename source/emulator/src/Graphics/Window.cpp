@@ -21,6 +21,7 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Image.h"
 #include "Emulator/Graphics/KeyboardInput.h"
+#include "Emulator/Graphics/NativeCapture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/PresentationScaler.h"
 #include "Emulator/Graphics/Utils.h"
@@ -46,21 +47,14 @@
 #include "SDL_video.h"
 #include "SDL_vulkan.h"
 
-#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
-#include <ctime>
 #include <filesystem>
 #include <set>
 #include <string>
 #include <system_error>
 #include <vector>
-
-#if !defined(_WIN32)
-#include <sys/resource.h>
-#endif
 #include <vulkan/vk_enum_string_helper.h>
 #include <vulkan/vk_platform.h>
 
@@ -371,95 +365,6 @@ static bool ToggleHostFullscreen()
 	return true;
 }
 
-static bool NativeCaptureEnvEnabled(const char* name)
-{
-	const char* value = std::getenv(name);
-	return value != nullptr && value[0] == '1' && value[1] == '\0';
-}
-
-static uint32_t NativeCaptureEnvPositive(const char* name)
-{
-	const char* value = std::getenv(name);
-	if (value == nullptr || value[0] == '\0')
-	{
-		return 0;
-	}
-
-	char*      end    = nullptr;
-	const auto parsed = std::strtoul(value, &end, 10);
-	if (end == value || *end != '\0' || parsed == 0 || parsed > UINT32_MAX)
-	{
-		return 0;
-	}
-	return static_cast<uint32_t>(parsed);
-}
-
-static std::string NativeCaptureSanitize(std::string value, const char* fallback)
-{
-	for (auto& character: value)
-	{
-		const auto c = static_cast<unsigned char>(character);
-		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'))
-		{
-			character = '_';
-		}
-	}
-	if (value.empty())
-	{
-		value = fallback;
-	}
-	if (value.size() > 64)
-	{
-		value.resize(64);
-	}
-	return value;
-}
-
-static std::string NativeCaptureUtcStamp()
-{
-	const auto now = std::chrono::system_clock::now();
-	const auto tt  = std::chrono::system_clock::to_time_t(now);
-
-	std::tm utc {};
-#if defined(_WIN32)
-	gmtime_s(&utc, &tt);
-#else
-	gmtime_r(&tt, &utc);
-#endif
-
-	char stamp[32] {};
-	std::strftime(stamp, sizeof(stamp), "%Y%m%dT%H%M%SZ", &utc);
-	return stamp;
-}
-
-static const char* NativeCaptureFormatName(VkFormat format)
-{
-	switch (format)
-	{
-		case VK_FORMAT_B8G8R8A8_SRGB: return "VK_FORMAT_B8G8R8A8_SRGB";
-		case VK_FORMAT_R8G8B8A8_SRGB: return "VK_FORMAT_R8G8B8A8_SRGB";
-		default: return "VK_FORMAT_UNSUPPORTED";
-	}
-}
-
-static uint64_t NativeCaptureHostPeakRssBytes()
-{
-#if defined(_WIN32)
-	return 0;
-#else
-	struct rusage usage {};
-	if (getrusage(RUSAGE_SELF, &usage) != 0)
-	{
-		return 0;
-	}
-#if defined(__APPLE__)
-	return static_cast<uint64_t>(usage.ru_maxrss);
-#else
-	return static_cast<uint64_t>(usage.ru_maxrss) * 1024u;
-#endif
-#endif
-}
-
 static void NativeCaptureConfigure(WindowContext* ctx)
 {
 	EXIT_IF(ctx == nullptr);
@@ -593,42 +498,6 @@ static void NativeCapturePublishResult(WindowContext* ctx, bool ok, const char* 
 	}
 }
 
-static bool NativeCaptureSavePng(SDL_Surface* surface, const std::filesystem::path& path)
-{
-	if (surface == nullptr || surface->format == nullptr || surface->w <= 0 || surface->h <= 0 || surface->format->BytesPerPixel != 4)
-	{
-		return false;
-	}
-
-	const bool must_lock = SDL_MUSTLOCK(surface);
-	if (must_lock && SDL_LockSurface(surface) != 0)
-	{
-		return false;
-	}
-
-	const uint32_t       width  = static_cast<uint32_t>(surface->w);
-	const uint32_t       height = static_cast<uint32_t>(surface->h);
-	std::vector<uint8_t> rgba(static_cast<uint64_t>(width) * height * 4u);
-	for (uint32_t y = 0; y < height; y++)
-	{
-		const auto* src_row = static_cast<const uint8_t*>(surface->pixels) + static_cast<size_t>(y) * surface->pitch;
-		auto*       dst_row = rgba.data() + static_cast<uint64_t>(y) * width * 4u;
-		for (uint32_t x = 0; x < width; x++)
-		{
-			uint32_t pixel = 0;
-			std::memcpy(&pixel, src_row + static_cast<size_t>(x) * 4u, sizeof(pixel));
-			SDL_GetRGBA(pixel, surface->format, dst_row + x * 4u, dst_row + x * 4u + 1u, dst_row + x * 4u + 2u,
-			            dst_row + x * 4u + 3u);
-		}
-	}
-
-	if (must_lock)
-	{
-		SDL_UnlockSurface(surface);
-	}
-	return UtilWriteRgba8Png(path.string().c_str(), rgba.data(), width, height, width);
-}
-
 static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, int frame, NativeCaptureMilestone milestone)
 {
 	EXIT_IF(ctx == nullptr);
@@ -698,9 +567,9 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	Core::String title_id;
 	Core::String app_ver;
 	Loader::SystemContentGetMetadata(&title_id, &app_ver);
-	const auto title_name   = NativeCaptureSanitize(title_id.C_Str(), "unknown-title");
-	const auto version_name = NativeCaptureSanitize(app_ver.C_Str(), "unknown-version");
-	const auto revision     = NativeCaptureSanitize(BuildInfo::Revision, "unknown-revision");
+	const auto title_name   = NativeCaptureSanitizeName(title_id.C_Str(), "unknown-title");
+	const auto version_name = NativeCaptureSanitizeName(app_ver.C_Str(), "unknown-version");
+	const auto revision     = NativeCaptureSanitizeName(BuildInfo::Revision, "unknown-revision");
 	const auto stamp        = NativeCaptureUtcStamp();
 	const auto sequence     = ctx->native_capture.sequence++;
 	const auto filename     = title_name + "-" + version_name + "-" + revision + "-frame-" + std::to_string(frame) + "-" + stamp + "-" +
@@ -766,7 +635,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		}
 	}
 
-	const bool save_result = NativeCaptureSavePng(save_surface, image_path);
+	const bool save_result = NativeCaptureSaveSdlSurfacePng(save_surface, image_path);
 	if (scaled != nullptr)
 	{
 		SDL_FreeSurface(scaled);
@@ -784,53 +653,25 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		return;
 	}
 
-	// Bound capture-directory growth: keep only the newest N PNG(+json) pairs.
-	if (ctx->native_capture.keep_files > 0 && !ctx->native_capture.directory.empty())
-	{
-		std::error_code                               list_error;
-		std::vector<std::filesystem::directory_entry> pngs;
-		for (const auto& entry: std::filesystem::directory_iterator(ctx->native_capture.directory, list_error))
-		{
-			if (!list_error && entry.is_regular_file() && entry.path().extension() == ".png")
-			{
-				pngs.push_back(entry);
-			}
-		}
-		std::sort(pngs.begin(), pngs.end(),
-		          [](const std::filesystem::directory_entry& a, const std::filesystem::directory_entry& b)
-		          {
-			          std::error_code ea;
-			          std::error_code eb;
-			          return a.last_write_time(ea) > b.last_write_time(eb);
-		          });
-		const size_t prune = NativeCapturePruneCount(pngs.size(), ctx->native_capture.keep_files);
-		for (size_t i = pngs.size() - prune; i < pngs.size(); ++i)
-		{
-			std::error_code remove_error;
-			std::filesystem::remove(pngs[i].path(), remove_error);
-			std::filesystem::remove(pngs[i].path().string() + ".json", remove_error);
-		}
-	}
+	NativeCapturePruneDirectory(ctx->native_capture.directory, ctx->native_capture.keep_files);
 
-	const auto metadata_path = image_path.string() + ".json";
-	if (auto* metadata = std::fopen(metadata_path.c_str(), "wb"); metadata != nullptr)
-	{
-		std::fprintf(metadata,
-		             "{\n  \"schema_version\": 1,\n  \"milestone\": \"%s\",\n  \"frame\": %d,\n  "
-		             "\"present\": %llu,\n  \"title_id\": \"%s\",\n  \"app_version\": \"%s\",\n  "
-		             "\"build_revision\": \"%s\",\n  \"build_dirty\": %s,\n  \"backend\": \"Vulkan\",\n  "
-		             "\"format\": \"%s\",\n  \"image_format\": \"PNG\",\n  \"mime_type\": \"image/png\",\n  "
-		             "\"width\": %llu,\n  \"height\": %llu,\n  "
-		             "\"source_width\": %llu,\n  \"source_height\": %llu,\n  "
-		             "\"image\": \"%s\",\n  \"host_peak_rss_bytes\": %llu\n}\n",
-		             NativeCaptureMilestoneName(milestone), frame, static_cast<unsigned long long>(ctx->native_capture.present_count),
-		             title_name.c_str(), version_name.c_str(), revision.c_str(), BuildInfo::Dirty ? "true" : "false",
-		             NativeCaptureFormatName(image->format), static_cast<unsigned long long>(out_width),
-		             static_cast<unsigned long long>(out_height), static_cast<unsigned long long>(width),
-		             static_cast<unsigned long long>(height), image_path.filename().string().c_str(),
-		             static_cast<unsigned long long>(NativeCaptureHostPeakRssBytes()));
-		std::fclose(metadata);
-	} else
+	const auto            image_filename = image_path.filename().string();
+	NativeCaptureMetadata metadata {};
+	metadata.milestone           = NativeCaptureMilestoneName(milestone);
+	metadata.frame               = frame;
+	metadata.present             = ctx->native_capture.present_count;
+	metadata.title_id            = title_name.c_str();
+	metadata.app_version         = version_name.c_str();
+	metadata.build_revision      = revision.c_str();
+	metadata.build_dirty         = BuildInfo::Dirty;
+	metadata.format              = NativeCaptureFormatName(image->format);
+	metadata.width               = out_width;
+	metadata.height              = out_height;
+	metadata.source_width        = static_cast<uint32_t>(width);
+	metadata.source_height       = static_cast<uint32_t>(height);
+	metadata.image_filename      = image_filename.c_str();
+	metadata.host_peak_rss_bytes = NativeCaptureHostPeakRssBytes();
+	if (!NativeCaptureWriteMetadata(image_path, metadata))
 	{
 		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=save_metadata frame=%d recoverable=0\n", frame);
 		if (agent_waiting)
@@ -2494,7 +2335,7 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features.samplerAnisotropy        = VK_TRUE;
 	VkPhysicalDeviceFeatures supported_features {};
 	vkGetPhysicalDeviceFeatures(physical_device, &supported_features);
-	device_features.depthBiasClamp = supported_features.depthBiasClamp;
+	device_features.depthBiasClamp    = supported_features.depthBiasClamp;
 	device_features.sampleRateShading = supported_features.sampleRateShading;
 	// Needed for the depthClipEnable=FALSE fallback when VK_EXT_depth_clip_enable
 	// is unavailable (MoltenVK).
@@ -3189,7 +3030,7 @@ static void VulkanCreate(WindowContext* ctx)
 			physical_device_properties.pNext = &sample_location_properties;
 			vkGetPhysicalDeviceProperties2(ctx->graphic_ctx.physical_device, &physical_device_properties);
 
-			auto& sample_locations = ctx->graphic_ctx.sample_location_capabilities;
+			auto& sample_locations               = ctx->graphic_ctx.sample_location_capabilities;
 			sample_locations.sample_counts       = sample_location_properties.sampleLocationSampleCounts;
 			sample_locations.max_grid_size       = sample_location_properties.maxSampleLocationGridSize;
 			sample_locations.coordinate_range[0] = sample_location_properties.sampleLocationCoordinateRange[0];
@@ -3203,7 +3044,7 @@ static void VulkanCreate(WindowContext* ctx)
 	vkGetPhysicalDeviceProperties(ctx->graphic_ctx.physical_device, &device_properties);
 	VkPhysicalDeviceFeatures device_features {};
 	vkGetPhysicalDeviceFeatures(ctx->graphic_ctx.physical_device, &device_features);
-	ctx->graphic_ctx.depth_bias_clamp_supported = device_features.depthBiasClamp == VK_TRUE;
+	ctx->graphic_ctx.depth_bias_clamp_supported    = device_features.depthBiasClamp == VK_TRUE;
 	ctx->graphic_ctx.sample_rate_shading_supported = device_features.sampleRateShading == VK_TRUE;
 
 	printf("Select device: %s\n", device_properties.deviceName);
@@ -3463,8 +3304,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 					char path[192];
 					std::snprintf(path, sizeof(path), "%s-present-%ux%u.png", prefix, w, h);
 					std::vector<uint8_t> rgba(static_cast<size_t>(bytes));
-					const bool           bgra = blt_src_image->format == VK_FORMAT_B8G8R8A8_SRGB ||
-	                                      blt_src_image->format == VK_FORMAT_B8G8R8A8_UNORM;
+					const bool bgra = blt_src_image->format == VK_FORMAT_B8G8R8A8_SRGB || blt_src_image->format == VK_FORMAT_B8G8R8A8_UNORM;
 					for (uint64_t pixel = 0; pixel < static_cast<uint64_t>(w) * h; pixel++)
 					{
 						const auto src = pixel * 4u;
@@ -3497,13 +3337,12 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	buffer.Begin();
 
-	const auto presentation_status =
-	    PresentationScalerBlitFinalImage(&buffer, &g_window_ctx->graphic_ctx, blt_src_image, blt_dst_image);
+	const auto presentation_status = PresentationScalerBlitFinalImage(&buffer, &g_window_ctx->graphic_ctx, blt_src_image, blt_dst_image);
 	if (presentation_status != PresentationScaleStatus::Success)
 	{
-		EXIT("Presentation scaling failed: status=%s(%u) source=%ux%u swapchain=%ux%u\n",
-		     PresentationScaleStatusName(presentation_status), static_cast<unsigned>(presentation_status), blt_src_image->extent.width,
-		     blt_src_image->extent.height, blt_dst_image->swapchain_extent.width, blt_dst_image->swapchain_extent.height);
+		EXIT("Presentation scaling failed: status=%s(%u) source=%ux%u swapchain=%ux%u\n", PresentationScaleStatusName(presentation_status),
+		     static_cast<unsigned>(presentation_status), blt_src_image->extent.width, blt_src_image->extent.height,
+		     blt_dst_image->swapchain_extent.width, blt_dst_image->swapchain_extent.height);
 	}
 
 	const double now_seconds   = (g_window_ctx->game != nullptr) ? g_window_ctx->game->m_current_time_seconds : 0.0;

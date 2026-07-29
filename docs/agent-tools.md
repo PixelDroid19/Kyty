@@ -53,6 +53,12 @@ kyty_agent capture --timeout-ms 10000
 kyty_agent score --path C:\absolute\capture.png
 ```
 
+`capture` writes an emulator-native PNG readback, not a desktop screenshot.
+Start the emulator with `KYTY_NATIVE_CAPTURE_DIR` set to an absolute or
+process-relative output directory. `KYTY_NATIVE_CAPTURE_MAX_EDGE` bounds the
+longest written edge and `KYTY_NATIVE_CAPTURE_KEEP` bounds retained PNG/JSON
+pairs.
+
 Controller automation is explicitly diagnostic input:
 
 ```text
