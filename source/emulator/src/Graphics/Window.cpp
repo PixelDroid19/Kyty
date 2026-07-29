@@ -2259,7 +2259,8 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 				if (strcmp(ext, VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME) == 0 ||
 				    strcmp(ext, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME) == 0 ||
 				    strcmp(ext, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME) == 0 ||
-				    strcmp(ext, VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME) == 0)
+				    strcmp(ext, VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME) == 0 ||
+				    strcmp(ext, VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME) == 0)
 				{
 					continue;
 				}
@@ -3039,9 +3040,13 @@ static void VulkanCreate(WindowContext* ctx)
 		EXIT("Could not create a Vulkan surface");
 	}
 
-	Vector<const char*> device_extensions = {
-	    VK_KHR_SWAPCHAIN_EXTENSION_NAME,          VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME,        VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME,
-	    VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME, VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME, "VK_KHR_maintenance1"};
+	Vector<const char*> device_extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+	                                         VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME,
+	                                         VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME,
+	                                         VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
+	                                         VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME,
+	                                         VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME,
+	                                         "VK_KHR_maintenance1"};
 
 #ifdef KYTY_ENABLE_DEBUG_PRINTF
 	if (Config::SpirvDebugPrintfEnabled())
@@ -3115,6 +3120,30 @@ static void VulkanCreate(WindowContext* ctx)
 		                                       [](auto s, auto l) { return strcmp(s, l) == 0; }))
 		{
 			device_extensions.Add(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
+		}
+
+		ctx->graphic_ctx.sample_location_capabilities.extension_enabled = has_ext(VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME) ? 1u : 0u;
+		if (ctx->graphic_ctx.sample_location_capabilities.extension_enabled == 0)
+		{
+			drop_ext(VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME);
+			printf("VK_EXT_sample_locations absent: custom sample locations are unavailable\n");
+		} else
+		{
+			VkPhysicalDeviceSampleLocationsPropertiesEXT sample_location_properties {};
+			sample_location_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLE_LOCATIONS_PROPERTIES_EXT;
+
+			VkPhysicalDeviceProperties2 physical_device_properties {};
+			physical_device_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+			physical_device_properties.pNext = &sample_location_properties;
+			vkGetPhysicalDeviceProperties2(ctx->graphic_ctx.physical_device, &physical_device_properties);
+
+			auto& sample_locations = ctx->graphic_ctx.sample_location_capabilities;
+			sample_locations.sample_counts       = sample_location_properties.sampleLocationSampleCounts;
+			sample_locations.max_grid_size       = sample_location_properties.maxSampleLocationGridSize;
+			sample_locations.coordinate_range[0] = sample_location_properties.sampleLocationCoordinateRange[0];
+			sample_locations.coordinate_range[1] = sample_location_properties.sampleLocationCoordinateRange[1];
+			sample_locations.subpixel_bits       = sample_location_properties.sampleLocationSubPixelBits;
+			sample_locations.variable_locations  = sample_location_properties.variableSampleLocations == VK_TRUE ? 1u : 0u;
 		}
 	}
 

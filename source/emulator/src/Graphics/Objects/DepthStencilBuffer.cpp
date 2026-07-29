@@ -36,9 +36,11 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto guest_height = params[DepthStencilBufferObject::PARAM_GUEST_HEIGHT];
 	auto host_width   = params[DepthStencilBufferObject::PARAM_HOST_WIDTH];
 	auto host_height  = params[DepthStencilBufferObject::PARAM_HOST_HEIGHT];
-	bool htile        = params[DepthStencilBufferObject::PARAM_HTILE] != 0;
-	bool sampled      = params[DepthStencilBufferObject::PARAM_USAGE] == 1;
-	auto samples      = static_cast<VkSampleCountFlagBits>(params[DepthStencilBufferObject::PARAM_SAMPLES]);
+	bool htile = params[DepthStencilBufferObject::PARAM_HTILE] != 0;
+	const auto usage = params[DepthStencilBufferObject::PARAM_USAGE];
+	bool sampled = (usage & 0x1u) != 0;
+	bool sample_locations_compatible = (usage & 0x2u) != 0;
+	auto samples = static_cast<VkSampleCountFlagBits>(params[DepthStencilBufferObject::PARAM_SAMPLES]);
 
 	EXIT_NOT_IMPLEMENTED(pixel_format == VK_FORMAT_UNDEFINED);
 	EXIT_NOT_IMPLEMENTED(guest_width == 0);
@@ -51,6 +53,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	capability_request.format       = pixel_format;
 	capability_request.usage        = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
 	                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
+	capability_request.flags        = (sample_locations_compatible ? VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT : 0);
 	capability_request.sample_count = samples;
 	const auto capability            = EvaluateVulkanResolutionAttachment(ctx, capability_request);
 	EXIT_NOT_IMPLEMENTED(capability.status != VulkanResolutionCapabilityStatus::Success ||
@@ -65,6 +68,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->layout     = VK_IMAGE_LAYOUT_UNDEFINED;
 	vk_obj->samples    = samples;
 	vk_obj->guest_size = *size;
+	vk_obj->sample_locations_compatible = sample_locations_compatible;
 
 	for (auto& view: vk_obj->image_view)
 	{
@@ -76,6 +80,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	VulkanImageDescriptor image_descriptor {};
 	image_descriptor.extent         = {vk_obj->extent.width, vk_obj->extent.height, 1};
 	image_descriptor.format         = vk_obj->format;
+	image_descriptor.flags          = capability_request.flags;
 	image_descriptor.initial_layout = vk_obj->layout;
 	image_descriptor.samples        = vk_obj->samples;
 	image_descriptor.usage = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -155,7 +160,7 @@ bool DepthStencilBufferObject::Equal(const uint64_t* other) const
 {
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_GUEST_WIDTH] == other[PARAM_GUEST_WIDTH] &&
 	        params[PARAM_GUEST_HEIGHT] == other[PARAM_GUEST_HEIGHT] && params[PARAM_HTILE] == other[PARAM_HTILE] &&
-	        params[PARAM_NEO] == other[PARAM_NEO] && params[PARAM_USAGE] == other[PARAM_USAGE] &&
+	        params[PARAM_NEO] == other[PARAM_NEO] && (params[PARAM_USAGE] & 0x1u) == (other[PARAM_USAGE] & 0x1u) &&
 	        params[PARAM_HTILE_ADDR] == other[PARAM_HTILE_ADDR] && params[PARAM_HTILE_SIZE] == other[PARAM_HTILE_SIZE] &&
 	        params[PARAM_HOST_WIDTH] == other[PARAM_HOST_WIDTH] && params[PARAM_HOST_HEIGHT] == other[PARAM_HOST_HEIGHT] &&
 	        params[PARAM_SAMPLES] == other[PARAM_SAMPLES]);

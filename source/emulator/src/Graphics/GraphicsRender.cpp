@@ -37,6 +37,7 @@
 #include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/ResolutionAliasPolicy.h"
 #include "Emulator/Graphics/ResolutionCoordinateTransform.h"
+#include "Emulator/Graphics/SampleLocations.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderCoordinateScale.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
@@ -111,6 +112,7 @@ struct PipelineStaticParameters
 {
 	VkPrimitiveTopology        topology                 = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
 	VkSampleCountFlagBits      rasterization_samples    = VK_SAMPLE_COUNT_1_BIT;
+	VulkanSampleLocationState  sample_locations;
 	bool                       sample_shading_enable    = false;
 	bool                       with_depth               = false;
 	bool                       depth_test_enable        = false;
@@ -193,7 +195,8 @@ public:
 
 	VulkanPipeline* CreatePipeline(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
 	                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
-	                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology);
+	                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
+	                               const VulkanSampleLocationState& sample_locations);
 	VulkanPipeline* CreatePipeline(const ShaderComputeInputInfo* input_info, const HW::ComputeShaderInfo* cs_regs,
 	                               const HW::ShaderRegisters* sh_regs);
 	void            DeletePipeline(VulkanPipeline* pipeline);
@@ -1543,8 +1546,13 @@ static void aa_print(const char* func, const HW::AaSampleControl& c, const HW::A
 // AA/EQAA registers remain programmed across draws. Validate their host mapping
 // only after attachment inspection has established that Vulkan will rasterize
 // with more than one sample; a single-sample pipeline cannot observe them.
-static void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBits attachment_samples)
+static void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBits attachment_samples,
+                                            VulkanSampleLocationState* sample_locations)
 {
+	EXIT_IF(sample_locations == nullptr);
+	*sample_locations              = {};
+	sample_locations->sample_count = attachment_samples;
+
 	if (attachment_samples == VK_SAMPLE_COUNT_1_BIT)
 	{
 		return;
@@ -1569,10 +1577,15 @@ static void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCount
 	EXIT_NOT_IMPLEMENTED(eqaa.incoherent_eqaa_reads);
 	EXIT_NOT_IMPLEMENTED(eqaa.interpolate_comp_z);
 
-	EXIT_NOT_IMPLEMENTED(c.centroid_priority != 0);
-	for (uint32_t l: c.locations)
+	auto* graphic_context = g_render_ctx->GetGraphicCtx();
+	EXIT_IF(graphic_context == nullptr);
+	const auto sample_location_status = BuildVulkanSampleLocationState(c.locations, c.centroid_priority, attachment_samples,
+	                                                                    graphic_context->sample_location_capabilities, sample_locations);
+	if (sample_location_status != VulkanSampleLocationStatus::Success)
 	{
-		EXIT_NOT_IMPLEMENTED(l != 0);
+		std::fprintf(stderr, "KYTY_GRAPHICS: sample locations cannot be represented: %s\n",
+		             VulkanSampleLocationStatusName(sample_location_status));
+		EXIT_NOT_IMPLEMENTED(sample_location_status != VulkanSampleLocationStatus::Success);
 	}
 }
 
@@ -2753,6 +2766,19 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	multisampling.alphaToCoverageEnable = VK_FALSE;
 	multisampling.alphaToOneEnable      = VK_FALSE;
 
+	VkSampleLocationEXT sample_location_values[kVulkanSampleLocationMaxCount] = {};
+	VkSampleLocationsInfoEXT sample_location_info {};
+	VkPipelineSampleLocationsStateCreateInfoEXT sample_location_pipeline_state {};
+	if (VulkanSampleLocationsEnabled(static_params->sample_locations))
+	{
+		EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsPopulateInfo(static_params->sample_locations, sample_location_values,
+		                                                       &sample_location_info));
+		sample_location_pipeline_state.sType                 = VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT;
+		sample_location_pipeline_state.sampleLocationsEnable = VK_TRUE;
+		sample_location_pipeline_state.sampleLocationsInfo   = sample_location_info;
+		multisampling.pNext                                  = &sample_location_pipeline_state;
+	}
+
 	// CB_TARGET_MASK: 4 bits per MRT (RGBA). One blend attachment per active target.
 	EXIT_NOT_IMPLEMENTED(static_params->color_targets_num == 0 || static_params->color_targets_num > 8);
 	VkPipelineColorBlendAttachmentState color_blend_attachments[8] {};
@@ -3249,7 +3275,8 @@ void PipelineCache::SaveDriverCacheIfDue()
 
 VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
-                                              const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology)
+                                              const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
+                                              const VulkanSampleLocationState& sample_locations)
 {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
 
@@ -3282,8 +3309,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.render_pass_id = framebuffer->render_pass_id;
 	p.ps_shader_id   = ps_id;
 	p.vs_shader_id   = vs_id;
-	p.static_params  = new PipelineStaticParameters;
-	p.dynamic_params = new PipelineDynamicParameters;
+	p.static_params  = new PipelineStaticParameters {};
+	p.dynamic_params = new PipelineDynamicParameters {};
 
 	p.dynamic_params->vk_dynamic_state_line_width           = true;
 	p.dynamic_params->vk_dynamic_state_stencil_compare_mask = true;
@@ -3338,7 +3365,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	}
 	p.static_params->topology                 = topology;
 	p.static_params->rasterization_samples    = resolve_render_attachment_sample_count(*color, *depth);
-	p.static_params->sample_shading_enable    = ctx->GetEqaaControl().ps_iter_samples != 0;
+	p.static_params->sample_locations         = sample_locations;
+	EXIT_NOT_IMPLEMENTED(p.static_params->sample_locations.sample_count != p.static_params->rasterization_samples);
+	p.static_params->sample_shading_enable    = p.static_params->rasterization_samples != VK_SAMPLE_COUNT_1_BIT &&
+	                                        ctx->GetEqaaControl().ps_iter_samples != 0;
 	EXIT_NOT_IMPLEMENTED(p.static_params->sample_shading_enable && !gctx->sample_rate_shading_supported);
 	p.static_params->with_depth               = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	p.static_params->depth_test_enable        = depth->depth_test_enable;
@@ -3520,8 +3550,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 
 	Pipeline p {};
 	p.cs_shader_id   = cs_id;
-	p.static_params  = new PipelineStaticParameters;
-	p.dynamic_params = new PipelineDynamicParameters;
+	p.static_params  = new PipelineStaticParameters {};
+	p.dynamic_params = new PipelineDynamicParameters {};
 
 	p.dynamic_params->vk_dynamic_state_line_width           = true;
 	p.dynamic_params->vk_dynamic_state_stencil_compare_mask = true;
@@ -4726,9 +4756,20 @@ static void GraphicsRenderDepthStencilBarrier(VkCommandBuffer vk_buffer, VulkanI
 
 	if (image->layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 	{
+		auto* depth_image = static_cast<DepthStencilVulkanImage*>(image);
+		const bool custom_sample_locations = depth_image->sample_locations_compatible;
+		VkSampleLocationEXT sample_location_values[kVulkanSampleLocationMaxCount] = {};
+		VkSampleLocationsInfoEXT sample_location_info {};
+		if (custom_sample_locations)
+		{
+			EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsEnabled(depth_image->last_sample_locations));
+			EXIT_NOT_IMPLEMENTED(
+			    !VulkanSampleLocationsPopulateInfo(depth_image->last_sample_locations, sample_location_values, &sample_location_info));
+		}
+
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-		image_memory_barrier.pNext                           = nullptr;
+		image_memory_barrier.pNext                           = (custom_sample_locations ? &sample_location_info : nullptr);
 		image_memory_barrier.srcAccessMask                   = VK_ACCESS_MEMORY_WRITE_BIT;
 		image_memory_barrier.dstAccessMask                   = VK_ACCESS_MEMORY_READ_BIT;
 		image_memory_barrier.oldLayout                       = image->layout;
@@ -4959,7 +5000,8 @@ static void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 }
 
 static void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, RenderDepthInfo* r, uint32_t host_width = 0,
-                                       uint32_t host_height = 0)
+                                       uint32_t host_height = 0,
+                                       const VulkanSampleLocationState* sample_locations = nullptr)
 {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(r == nullptr);
@@ -4971,11 +5013,19 @@ static void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer
 
 	host_width  = host_width == 0 ? r->width : host_width;
 	host_height = host_height == 0 ? r->height : host_height;
+	const bool sample_locations_compatible =
+	    (sample_locations != nullptr && VulkanSampleLocationsEnabled(*sample_locations));
 	DepthStencilBufferObject vulkan_buffer_info(r->format, r->width, r->height, host_width, host_height, r->htile, r->neo, r->sampled,
-	                                            r->htile_buffer_vaddr, r->htile_buffer_size, static_cast<uint32_t>(r->samples));
+	                                            r->htile_buffer_vaddr, r->htile_buffer_size, static_cast<uint32_t>(r->samples),
+	                                            sample_locations_compatible);
 	r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
 	EXIT_NOT_IMPLEMENTED(r->vulkan_buffer == nullptr);
+	if (sample_locations_compatible && !r->vulkan_buffer->sample_locations_compatible)
+	{
+		std::fprintf(stderr, "KYTY_GRAPHICS: depth image was created without custom sample-location compatibility\n");
+		EXIT_NOT_IMPLEMENTED(!r->vulkan_buffer->sample_locations_compatible);
+	}
 
 	if (r->htile && DepthMetaConsumeClear(r->htile_buffer_vaddr))
 	{
@@ -6890,7 +6940,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
-	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info));
+	VulkanSampleLocationState sample_locations {};
+	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info), &sample_locations);
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
 	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
 	{
@@ -6918,7 +6969,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
 	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.width : 0,
-	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.height : 0);
+	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.height : 0,
+	    &sample_locations);
 	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
 	if (resolution.classification == ResolutionClassification::Scaled)
 	{
@@ -6942,7 +6994,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, index_type_and_size, true, flags);
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
-	                                                                  &ps_input_info, topology);
+	                                                                  &ps_input_info, topology, sample_locations);
 
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
 
@@ -6969,7 +7021,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
 
-	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info);
+	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
 	const int32_t vertex_offset = ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info);
 
 	switch (ucfg->GetPrimType())
@@ -7290,13 +7342,14 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	HW::Context     color_context = *ctx;
 	color_context.SetRenderTargetMask(color_write_mask);
 	DescribeRenderColorInfo(buffer, color_context, &color_info);
-	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info));
+	VulkanSampleLocationState sample_locations {};
+	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info), &sample_locations);
 
 	EXIT_NOT_IMPLEMENTED(depth_info.format != VK_FORMAT_D32_SFLOAT_S8_UINT);
 	EXIT_NOT_IMPLEMENTED(depth_info.samples != VK_SAMPLE_COUNT_1_BIT);
 	EXIT_NOT_IMPLEMENTED(color_info.targets_num != 1 || color_info.samples != VK_SAMPLE_COUNT_1_BIT);
 
-	MaterializeRenderDepthInfo(submit_id, buffer, &depth_info);
+	MaterializeRenderDepthInfo(submit_id, buffer, &depth_info, 0, 0, &sample_locations);
 	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
 
 	auto* source = depth_info.vulkan_buffer;
@@ -7445,7 +7498,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
-	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info));
+	VulkanSampleLocationState sample_locations {};
+	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info), &sample_locations);
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
 	if (depth_only_resolution.classification == ResolutionClassification::Unsupported)
 	{
@@ -7493,7 +7547,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
 	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.width : 0,
-	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.height : 0);
+	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.height : 0,
+	    &sample_locations);
 	MaterializeRenderColorInfo(submit_id, buffer, &color_info);
 	if (resolution.classification == ResolutionClassification::Scaled)
 	{
@@ -7517,7 +7572,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, 0xffffffffu, false, flags);
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
-	                                                                  &ps_input_info, topology);
+	                                                                  &ps_input_info, topology, sample_locations);
 
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
 
@@ -7533,7 +7588,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
 
-	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info);
+	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
 	const uint32_t first_vertex = static_cast<uint32_t>(ShaderResolveVertexOffset(0, vs_input_info));
 
 	switch (ucfg->GetPrimType())
@@ -8440,7 +8495,8 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 	}
 }
 
-void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth) const
+void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
+                                    const VulkanSampleLocationState* sample_locations) const
 {
 	EXIT_IF(IsInvalid());
 
@@ -8452,6 +8508,17 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	bool with_color = (color->targets_num != 0 && color->vulkan_buffer[0] != nullptr);
 
 	EXIT_NOT_IMPLEMENTED(!with_depth && !with_color);
+
+	auto* depth_image = (with_depth ? depth->vulkan_buffer : nullptr);
+	const bool custom_depth_locations = (depth_image != nullptr && depth_image->sample_locations_compatible);
+	if (custom_depth_locations)
+	{
+		EXIT_NOT_IMPLEMENTED(sample_locations == nullptr || !VulkanSampleLocationsEnabled(*sample_locations));
+		EXIT_NOT_IMPLEMENTED(sample_locations->sample_count != depth_image->samples);
+	} else if (sample_locations != nullptr && VulkanSampleLocationsEnabled(*sample_locations) && with_depth)
+	{
+		EXIT_NOT_IMPLEMENTED(!depth_image->sample_locations_compatible);
+	}
 
 	const uint32_t color_count = (with_color ? color->targets_num : (with_depth ? 1u : 0u));
 	VkClearValue   clears[RenderColorInfo::TARGETS_MAX + 1] {};
@@ -8489,6 +8556,36 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	render_pass_info.clearValueCount   = color_count + (with_depth ? 1u : 0u);
 	render_pass_info.pClearValues      = clears;
 
+	VkSampleLocationEXT current_sample_location_values[kVulkanSampleLocationMaxCount] = {};
+	VkSampleLocationEXT previous_sample_location_values[kVulkanSampleLocationMaxCount] = {};
+	VkSampleLocationsInfoEXT current_sample_location_info {};
+	VkSampleLocationsInfoEXT previous_sample_location_info {};
+	VkAttachmentSampleLocationsEXT attachment_initial_sample_locations {};
+	VkSubpassSampleLocationsEXT post_subpass_sample_locations {};
+	VkRenderPassSampleLocationsBeginInfoEXT render_pass_sample_locations {};
+	if (custom_depth_locations)
+	{
+		EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsPopulateInfo(*sample_locations, current_sample_location_values,
+		                                                       &current_sample_location_info));
+		post_subpass_sample_locations.subpassIndex         = 0;
+		post_subpass_sample_locations.sampleLocationsInfo  = current_sample_location_info;
+		render_pass_sample_locations.sType                 = VK_STRUCTURE_TYPE_RENDER_PASS_SAMPLE_LOCATIONS_BEGIN_INFO_EXT;
+		render_pass_sample_locations.postSubpassSampleLocationsCount = 1;
+		render_pass_sample_locations.pPostSubpassSampleLocations     = &post_subpass_sample_locations;
+
+		if (depth_image->layout != VK_IMAGE_LAYOUT_UNDEFINED)
+		{
+			EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsEnabled(depth_image->last_sample_locations));
+			EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsPopulateInfo(depth_image->last_sample_locations,
+			                                                       previous_sample_location_values, &previous_sample_location_info));
+			attachment_initial_sample_locations.attachmentIndex       = framebuffer->color_count;
+			attachment_initial_sample_locations.sampleLocationsInfo   = previous_sample_location_info;
+			render_pass_sample_locations.attachmentInitialSampleLocationsCount = 1;
+			render_pass_sample_locations.pAttachmentInitialSampleLocations     = &attachment_initial_sample_locations;
+		}
+		render_pass_info.pNext = &render_pass_sample_locations;
+	}
+
 	for (uint32_t slot = 0; slot < color_count; slot++)
 	{
 		if (!with_color || color->vulkan_buffer[slot] == nullptr ||
@@ -8525,7 +8622,8 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	{
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-		image_memory_barrier.pNext                           = nullptr;
+		image_memory_barrier.pNext =
+		    (custom_depth_locations && depth_image->layout != VK_IMAGE_LAYOUT_UNDEFINED ? &previous_sample_location_info : nullptr);
 		image_memory_barrier.srcAccessMask                   = VK_ACCESS_MEMORY_READ_BIT;
 		image_memory_barrier.dstAccessMask =
 		    (depth_stencil_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
@@ -8564,6 +8662,10 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	if (with_depth)
 	{
 		depth->vulkan_buffer->layout = depth_stencil_layout;
+		if (custom_depth_locations)
+		{
+			depth_image->last_sample_locations = *sample_locations;
+		}
 	}
 }
 

@@ -30,6 +30,7 @@ struct VulkanFramebuffer;
 struct RenderDepthInfo;
 struct RenderColorInfo;
 struct GraphicContext;
+struct VulkanSampleLocationState;
 
 class CommandBuffer
 {
@@ -50,7 +51,8 @@ public:
 	void End() const;
 	void Execute();
 	void ExecuteWithSemaphore();
-	void BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth) const;
+	void BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
+	                     const VulkanSampleLocationState* sample_locations = nullptr) const;
 	void EndRenderPass() const;
 	void WaitForFence();
 	void WaitForFenceWithoutLabelCallbacks();

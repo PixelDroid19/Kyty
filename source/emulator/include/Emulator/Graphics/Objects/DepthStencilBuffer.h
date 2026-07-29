@@ -26,20 +26,22 @@ public:
 	static constexpr int PARAM_SAMPLES      = 10;
 
 	DepthStencilBufferObject(uint64_t vk_format, uint32_t width, uint32_t height, bool htile, bool neo, bool sampled, uint64_t htile_addr,
-	                         uint64_t htile_size, uint32_t sample_count = 1)
-	    : DepthStencilBufferObject(vk_format, width, height, width, height, htile, neo, sampled, htile_addr, htile_size, sample_count)
+	                         uint64_t htile_size, uint32_t sample_count = 1, bool sample_locations_compatible = false)
+	    : DepthStencilBufferObject(vk_format, width, height, width, height, htile, neo, sampled, htile_addr, htile_size, sample_count,
+	                               sample_locations_compatible)
 	{
 	}
 
 	DepthStencilBufferObject(uint64_t vk_format, uint32_t guest_width, uint32_t guest_height, uint32_t host_width, uint32_t host_height,
-	                         bool htile, bool neo, bool sampled, uint64_t htile_addr, uint64_t htile_size, uint32_t sample_count = 1)
+	                         bool htile, bool neo, bool sampled, uint64_t htile_addr, uint64_t htile_size, uint32_t sample_count = 1,
+	                         bool sample_locations_compatible = false)
 	{
 		params[PARAM_FORMAT]       = vk_format;
 		params[PARAM_GUEST_WIDTH]  = guest_width;
 		params[PARAM_GUEST_HEIGHT] = guest_height;
 		params[PARAM_HTILE]        = htile ? 1 : 0;
 		params[PARAM_NEO]          = neo ? 1 : 0;
-		params[PARAM_USAGE]        = sampled ? 1 : 0;
+		params[PARAM_USAGE]        = (sampled ? 1u : 0u) | (sample_locations_compatible ? 2u : 0u);
 		params[PARAM_HTILE_ADDR]   = htile_addr;
 		params[PARAM_HTILE_SIZE]   = htile_size;
 		params[PARAM_HOST_WIDTH]   = host_width;

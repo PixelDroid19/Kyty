@@ -6,6 +6,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
+#include "Emulator/Graphics/SampleLocations.h"
 
 #include <vulkan/vulkan_core.h> // IWYU pragma: export
 
@@ -114,6 +115,11 @@ struct GraphicContext
 	// Per-sample fragment execution is optional and must be enabled explicitly
 	// before a graphics pipeline can request sample shading.
 	bool sample_rate_shading_supported = false;
+
+	// VK_EXT_sample_locations is optional at device discovery time. A draw that
+	// programs custom guest locations is rejected when the selected host cannot
+	// represent the exact state.
+	VulkanSampleLocationCapabilities sample_location_capabilities;
 };
 
 struct VulkanMemory
@@ -203,7 +209,9 @@ struct VideoOutVulkanImage: public VulkanImage
 struct DepthStencilVulkanImage: public VulkanImage
 {
 	DepthStencilVulkanImage(): VulkanImage(VulkanImageType::DepthStencil) {}
-	bool compressed = false;
+	bool                       compressed                   = false;
+	bool                       sample_locations_compatible = false;
+	VulkanSampleLocationState last_sample_locations;
 };
 
 struct TextureVulkanImage: public VulkanImage
