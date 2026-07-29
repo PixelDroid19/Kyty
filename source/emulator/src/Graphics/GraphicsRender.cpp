@@ -6350,7 +6350,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		// Opt-in catalog (KYTY_SAMPLE_BIND_CATALOG=/abs/path): unique sample binds
 		// for residual investigation. No guest-visible side effects when unset.
-		const auto catalog_sample = [gen5, fmt, tile, width, height, pitch, addr, &r](const char* path)
+		const auto catalog_sample = [gen5, fmt, tile, width, height, pitch, addr, swizzle, force_degamma, &r](const char* path)
 		{
 			static const char* catalog_path = std::getenv("KYTY_SAMPLE_BIND_CATALOG");
 			if (catalog_path == nullptr || catalog_path[0] == '\0' || !gen5)
@@ -6359,9 +6359,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 			static std::mutex            catalog_mu;
 			static std::set<std::string> catalog_seen;
-			char                         line[256];
-			std::snprintf(line, sizeof(line), "fmt=%u tile=%u %ux%u pitch=%u word4=0x%08x path=%s addr=0x%012" PRIx64 "\n", fmt, tile,
-			              width, height, pitch, r.fields[4], path, static_cast<uint64_t>(addr));
+			char                         line[320];
+			std::snprintf(line, sizeof(line),
+			              "fmt=%u tile=%u %ux%u pitch=%u swizzle=0x%03x degamma=%u word4=0x%08x path=%s addr=0x%012" PRIx64 "\n",
+			              fmt, tile, width, height, pitch, swizzle, force_degamma ? 1u : 0u, r.fields[4], path,
+			              static_cast<uint64_t>(addr));
 			std::lock_guard<std::mutex> lock(catalog_mu);
 			if (!catalog_seen.insert(line).second)
 			{
@@ -7194,7 +7196,16 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 		return;
 	}
 	static uint32_t logs = 0;
-	if (logs >= 48u)
+	uint32_t limit = 48u;
+	if (const char* env_limit = std::getenv("KYTY_DUMP_DRAW_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
+	{
+		const auto parsed = std::strtoul(env_limit, nullptr, 10);
+		if (parsed > 0u && parsed <= 100000u)
+		{
+			limit = static_cast<uint32_t>(parsed);
+		}
+	}
+	if (logs >= limit)
 	{
 		return;
 	}
@@ -7226,13 +7237,14 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 	const auto& vp = hw.GetScreenViewport().viewports[0];
 	const auto  xy = State::ResolveViewportXy(vp.xscale, vp.xoffset, vp.yscale, vp.yoffset);
 	const auto  sc = State::ResolveScissor(hw.GetScreenViewport(), hw.GetScanModeControl(), 0);
+	const auto& rt0 = hw.GetRenderTarget(0).info;
 	std::fprintf(stderr,
 	             "KYTY_DUMP_DRAW_READY_INDEX count=%u modifier=0x%016" PRIx64 " type=%u index_type=%u targets=%u active=0x%02" PRIx32
 	             " rt=0x%012" PRIx64 ":%ux%u:s%u:f%u depth=%u:%ux%u target_mask=0x%08" PRIx32
-	             " vs_bufs=%d ps_tex=%d ps_buf=%d vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d\n",
+	             " cbfmt=0x%x cbtype=0x%x cborder=0x%x vs_bufs=%d ps_tex=%d ps_buf=%d vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d\n",
 	             index_count, draw_modifier, type, index_type_and_size, color.targets_num, active_slots, first_addr, first_width,
 	             first_height, first_samples, first_format, static_cast<uint32_t>(depth.format), depth.width, depth.height,
-	             hw.GetRenderTargetMask(), vs_input.buffers_num, ps_input.bind.textures2D.textures_num,
+	             hw.GetRenderTargetMask(), rt0.format, rt0.channel_type, rt0.channel_order, vs_input.buffers_num, ps_input.bind.textures2D.textures_num,
 	             ps_input.bind.storage_buffers.buffers_num, xy.x, xy.y, xy.width, xy.height, sc.left, sc.top, sc.right, sc.bottom);
 }
 
