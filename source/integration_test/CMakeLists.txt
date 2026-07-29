@@ -17,20 +17,6 @@ target_include_directories(kyty_bringup_integration
 		"${CMAKE_SOURCE_DIR}/emulator/include"
 )
 
-# Force a rebuild of the integration binary before any scenario runs so a
-# stale executable cannot satisfy CTest after source edits.
-add_test(
-	NAME KytyBringUpIntegration._build
-	COMMAND "${CMAKE_COMMAND}"
-		--build "${CMAKE_BINARY_DIR}"
-		--target kyty_bringup_integration
-		--config $<CONFIG>
-)
-set_tests_properties(KytyBringUpIntegration._build PROPERTIES
-	FIXTURES_SETUP KytyBringUpIntegrationBinary
-	TIMEOUT 600
-)
-
 function(add_kyty_bringup_case name scenario expected_exit)
 	add_test(
 		NAME "KytyBringUpIntegration.${name}"
@@ -43,7 +29,7 @@ function(add_kyty_bringup_case name scenario expected_exit)
 	)
 	set_tests_properties("KytyBringUpIntegration.${name}" PROPERTIES
 		TIMEOUT 120
-		FIXTURES_REQUIRED KytyBringUpIntegrationBinary
+		FIXTURES_REQUIRED KytyIntegrationBinaries
 	)
 endfunction()
 
@@ -94,18 +80,6 @@ target_include_directories(kyty_domain_validation_integration
 		"${CMAKE_SOURCE_DIR}/emulator/include"
 )
 
-add_test(
-	NAME KytyDomainValidation._build
-	COMMAND "${CMAKE_COMMAND}"
-		--build "${CMAKE_BINARY_DIR}"
-		--target kyty_domain_validation_integration
-		--config $<CONFIG>
-)
-set_tests_properties(KytyDomainValidation._build PROPERTIES
-	FIXTURES_SETUP KytyDomainValidationBinary
-	TIMEOUT 600
-)
-
 add_executable(kyty_kernel_memory_integration
 	src/KernelMemoryIntegration.cpp
 )
@@ -123,23 +97,11 @@ target_include_directories(kyty_kernel_memory_integration
 )
 
 add_test(
-	NAME KytyKernelMemoryIntegration._build
-	COMMAND "${CMAKE_COMMAND}"
-		--build "${CMAKE_BINARY_DIR}"
-		--target kyty_kernel_memory_integration
-		--config $<CONFIG>
-)
-set_tests_properties(KytyKernelMemoryIntegration._build PROPERTIES
-	FIXTURES_SETUP KytyKernelMemoryIntegrationBinary
-	TIMEOUT 600
-)
-
-add_test(
 	NAME KytyKernelMemoryIntegration.ReserveVirtualRange
 	COMMAND $<TARGET_FILE:kyty_kernel_memory_integration>
 )
 set_tests_properties(KytyKernelMemoryIntegration.ReserveVirtualRange PROPERTIES
-	FIXTURES_REQUIRED KytyKernelMemoryIntegrationBinary
+	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 120
 )
 
@@ -160,23 +122,11 @@ target_include_directories(kyty_graphics_diagnostics_integration
 )
 
 add_test(
-	NAME KytyGraphicsDiagnosticsIntegration._build
-	COMMAND "${CMAKE_COMMAND}"
-		--build "${CMAKE_BINARY_DIR}"
-		--target kyty_graphics_diagnostics_integration
-		--config $<CONFIG>
-)
-set_tests_properties(KytyGraphicsDiagnosticsIntegration._build PROPERTIES
-	FIXTURES_SETUP KytyGraphicsDiagnosticsIntegrationBinary
-	TIMEOUT 600
-)
-
-add_test(
 	NAME KytyGraphicsDiagnosticsIntegration.SerializationAndBounds
 	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration>
 )
 set_tests_properties(KytyGraphicsDiagnosticsIntegration.SerializationAndBounds PROPERTIES
-	FIXTURES_REQUIRED KytyGraphicsDiagnosticsIntegrationBinary
+	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 120
 )
 
@@ -197,23 +147,11 @@ target_include_directories(kyty_libc_wide_integration
 )
 
 add_test(
-	NAME KytyLibcWideIntegration._build
-	COMMAND "${CMAKE_COMMAND}"
-		--build "${CMAKE_BINARY_DIR}"
-		--target kyty_libc_wide_integration
-		--config $<CONFIG>
-)
-set_tests_properties(KytyLibcWideIntegration._build PROPERTIES
-	FIXTURES_SETUP KytyLibcWideIntegrationBinary
-	TIMEOUT 600
-)
-
-add_test(
 	NAME KytyLibcWideIntegration.ExactImports
 	COMMAND $<TARGET_FILE:kyty_libc_wide_integration>
 )
 set_tests_properties(KytyLibcWideIntegration.ExactImports PROPERTIES
-	FIXTURES_REQUIRED KytyLibcWideIntegrationBinary
+	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 120
 )
 
@@ -232,7 +170,7 @@ foreach(scenario IN ITEMS reject_class reject_non_ascii)
 			-P "${CMAKE_CURRENT_SOURCE_DIR}/RunLibcWideRejection.cmake"
 	)
 	set_tests_properties("KytyLibcWideIntegration.${scenario}" PROPERTIES
-		FIXTURES_REQUIRED KytyLibcWideIntegrationBinary
+		FIXTURES_REQUIRED KytyIntegrationBinaries
 		TIMEOUT 120
 	)
 endforeach()
@@ -255,23 +193,11 @@ target_include_directories(kyty_guest_stack_frame_integration
 )
 
 add_test(
-	NAME KytyGuestStackFrameIntegration._build
-	COMMAND "${CMAKE_COMMAND}"
-		--build "${CMAKE_BINARY_DIR}"
-		--target kyty_guest_stack_frame_integration
-		--config $<CONFIG>
-)
-set_tests_properties(KytyGuestStackFrameIntegration._build PROPERTIES
-	FIXTURES_SETUP KytyGuestStackFrameIntegrationBinary
-	TIMEOUT 600
-)
-
-add_test(
 	NAME KytyGuestStackFrameIntegration.SharedGuestCallBoundary
 	COMMAND $<TARGET_FILE:kyty_guest_stack_frame_integration>
 )
 set_tests_properties(KytyGuestStackFrameIntegration.SharedGuestCallBoundary PROPERTIES
-	FIXTURES_REQUIRED KytyGuestStackFrameIntegrationBinary
+	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 60
 )
 
@@ -291,23 +217,11 @@ target_include_directories(kyty_libc_allocator_integration
 )
 
 add_test(
-	NAME KytyLibcAllocatorIntegration._build
-	COMMAND "${CMAKE_COMMAND}"
-		--build "${CMAKE_BINARY_DIR}"
-		--target kyty_libc_allocator_integration
-		--config $<CONFIG>
-)
-set_tests_properties(KytyLibcAllocatorIntegration._build PROPERTIES
-	FIXTURES_SETUP KytyLibcAllocatorIntegrationBinary
-	TIMEOUT 600
-)
-
-add_test(
 	NAME KytyLibcAllocatorIntegration.RawAndAlignedOwnership
 	COMMAND $<TARGET_FILE:kyty_libc_allocator_integration>
 )
 set_tests_properties(KytyLibcAllocatorIntegration.RawAndAlignedOwnership PROPERTIES
-	FIXTURES_REQUIRED KytyLibcAllocatorIntegrationBinary
+	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 120
 )
 
@@ -323,7 +237,7 @@ function(add_kyty_domain_validation_case name scenario expected_exit)
 	)
 	set_tests_properties("KytyDomainValidation.${name}" PROPERTIES
 		TIMEOUT 60
-		FIXTURES_REQUIRED KytyDomainValidationBinary
+		FIXTURES_REQUIRED KytyIntegrationBinaries
 	)
 endfunction()
 
@@ -384,18 +298,6 @@ target_include_directories(kyty_loader_integration
 		"${CMAKE_SOURCE_DIR}/emulator/include"
 )
 
-add_test(
-	NAME KytyLoaderIntegration._build
-	COMMAND "${CMAKE_COMMAND}"
-		--build "${CMAKE_BINARY_DIR}"
-		--target kyty_loader_integration
-		--config $<CONFIG>
-)
-set_tests_properties(KytyLoaderIntegration._build PROPERTIES
-	FIXTURES_SETUP KytyLoaderIntegrationBinary
-	TIMEOUT 600
-)
-
 function(add_kyty_loader_case name scenario expected_exit)
 	add_test(
 		NAME "KytyLoaderIntegration.${name}"
@@ -408,7 +310,7 @@ function(add_kyty_loader_case name scenario expected_exit)
 	)
 	set_tests_properties("KytyLoaderIntegration.${name}" PROPERTIES
 		TIMEOUT 60
-		FIXTURES_REQUIRED KytyLoaderIntegrationBinary
+		FIXTURES_REQUIRED KytyIntegrationBinaries
 	)
 endfunction()
 
@@ -447,18 +349,6 @@ target_include_directories(kyty_agent_protocol_integration
 		"${CMAKE_SOURCE_DIR}/emulator/include"
 )
 
-add_test(
-	NAME KytyAgentProtocol._build
-	COMMAND "${CMAKE_COMMAND}"
-		--build "${CMAKE_BINARY_DIR}"
-		--target kyty_agent_protocol_integration
-		--config $<CONFIG>
-)
-set_tests_properties(KytyAgentProtocol._build PROPERTIES
-	FIXTURES_SETUP KytyAgentProtocolBinary
-	TIMEOUT 600
-)
-
 function(add_kyty_agent_protocol_case name scenario expected_exit)
 	add_test(
 		NAME "KytyAgentProtocol.${name}"
@@ -471,7 +361,7 @@ function(add_kyty_agent_protocol_case name scenario expected_exit)
 	)
 	set_tests_properties("KytyAgentProtocol.${name}" PROPERTIES
 		TIMEOUT 60
-		FIXTURES_REQUIRED KytyAgentProtocolBinary
+		FIXTURES_REQUIRED KytyIntegrationBinaries
 	)
 endfunction()
 
@@ -498,22 +388,32 @@ add_test(
 	COMMAND $<TARGET_FILE:kyty_agent_transport_integration>
 )
 set_tests_properties(KytyAgentTransport.NativeRoundTrip PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 15
 )
 
-# Every fixture rebuilds a target that ultimately writes shared archives in the
-# same build tree. Keep those setup phases mutually exclusive under `ctest -j`;
-# scenario processes remain free to run concurrently after their fixture build.
-set_tests_properties(
-	KytyBringUpIntegration._build
-	KytyDomainValidation._build
-	KytyKernelMemoryIntegration._build
-	KytyGraphicsDiagnosticsIntegration._build
-	KytyLibcWideIntegration._build
-	KytyGuestStackFrameIntegration._build
-	KytyLibcAllocatorIntegration._build
-	KytyLoaderIntegration._build
-	KytyAgentProtocol._build
-	PROPERTIES
-		RESOURCE_LOCK KytyIntegrationBuildTree
+set(KYTY_INTEGRATION_TEST_TARGETS
+	kyty_bringup_integration
+	kyty_domain_validation_integration
+	kyty_kernel_memory_integration
+	kyty_graphics_diagnostics_integration
+	kyty_libc_wide_integration
+	kyty_guest_stack_frame_integration
+	kyty_libc_allocator_integration
+	kyty_loader_integration
+	kyty_agent_protocol_integration
+	kyty_agent_transport_integration
+)
+
+add_test(
+	NAME KytyIntegration._build
+	COMMAND "${CMAKE_COMMAND}"
+		--build "${CMAKE_BINARY_DIR}"
+		--config $<CONFIG>
+		--parallel
+		--target ${KYTY_INTEGRATION_TEST_TARGETS}
+)
+set_tests_properties(KytyIntegration._build PROPERTIES
+	FIXTURES_SETUP KytyIntegrationBinaries
+	TIMEOUT 600
 )
