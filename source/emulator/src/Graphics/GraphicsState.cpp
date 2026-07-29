@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/Pm4.h"
 
 #include <algorithm>
@@ -368,11 +369,12 @@ void SetScreenScissorBr(HW::Context& context, uint32_t value)
 void SetRenderControl(HW::Context& context, uint32_t value)
 {
 	HW::RenderControl r;
+	const bool        gen5 = Config::IsNextGen();
 
 	r.depth_clear_enable       = KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_CLEAR_ENABLE) != 0;
 	r.stencil_clear_enable     = KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_CLEAR_ENABLE) != 0;
-	r.depth_copy               = KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_COPY) != 0;
-	r.stencil_copy             = KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_COPY) != 0;
+	r.depth_copy               = !gen5 && KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_COPY) != 0;
+	r.stencil_copy             = !gen5 && KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_COPY) != 0;
 	r.resummarize_enable       = KYTY_PM4_GET(value, DB_RENDER_CONTROL, RESUMMARIZE_ENABLE) != 0;
 	r.stencil_compress_disable = KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_COMPRESS_DISABLE) != 0;
 	r.depth_compress_disable   = KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_COMPRESS_DISABLE) != 0;
