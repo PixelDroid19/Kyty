@@ -257,15 +257,11 @@ uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t outpu
 	EXIT_NOT_IMPLEMENTED(channel_order > 3);
 	EXIT_NOT_IMPLEMENTED(output_component > 3);
 
-	// AMD COMP_SWAP maps shader export components into color-buffer positions.
-	static constexpr uint32_t source_component[4][4] = {
-	    {0, 1, 2, 3}, // SWAP_STD
-	    {2, 1, 0, 3}, // SWAP_ALT
-	    {3, 2, 1, 0}, // SWAP_STD_REV
-	    {3, 0, 1, 2}, // SWAP_ALT_REV
-	};
-
-	return source_component[channel_order][output_component];
+	// The render-target VkFormat owns storage component order. Shader exports
+	// stay in logical RGBA order; reordering here double-applies COMP_SWAP for
+	// BGRA targets and corrupts render-to-texture feedback passes.
+	(void)channel_order;
+	return output_component;
 }
 
 uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
