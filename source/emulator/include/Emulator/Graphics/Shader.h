@@ -1162,6 +1162,12 @@ struct ShaderBindResources
 	ShaderExtendedResources    extended;
 };
 
+[[nodiscard]] constexpr bool ShaderBindRequiresDescriptorSet(const ShaderBindResources& bind)
+{
+	return bind.storage_buffers.buffers_num > 0 || bind.textures2D.textures_num > 0 || bind.samplers.samplers_num > 0 ||
+	       bind.gds_pointers.pointers_num > 0 || bind.vsharp_uniform_buffer;
+}
+
 struct ShaderParsedUsage
 {
 	bool fetch                     = false;

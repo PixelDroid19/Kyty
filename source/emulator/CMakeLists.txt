@@ -59,6 +59,7 @@ target_sources(emulator PRIVATE
 	src/Graphics/VulkanResolutionCapability.cpp
 	src/Graphics/VulkanQueueIdentity.cpp
 	src/Graphics/ShaderCoordinateScale.cpp
+	src/Graphics/VulkanVertexInputLayout.cpp
 	src/Graphics/DepthStencilCopy.cpp
 	include/Emulator/Graphics/PipelineCacheStore.h
 	include/Emulator/Graphics/GpuDirtyPageTracker.h
@@ -86,6 +87,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/VulkanResolutionCapability.h
 	include/Emulator/Graphics/VulkanQueueIdentity.h
 	include/Emulator/Graphics/ShaderCoordinateScale.h
+	include/Emulator/Graphics/VulkanVertexInputLayout.h
 	include/Emulator/Graphics/DepthStencilCopy.h
 	include/Emulator/Libs/ProcessEnvironment.h
 	src/Validation/DomainValidators.cpp

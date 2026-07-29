@@ -45,7 +45,7 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VulkanResolutionCapability.h"
-#include "Emulator/Graphics/VulkanVertexInputFormat.h"
+#include "Emulator/Graphics/VulkanVertexInputLayout.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/EventQueue.h"
@@ -2488,17 +2488,6 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
 	return m_samplers_size;
 }
 
-static void get_input_format(const ShaderBufferResource& res, VkFormat* format, uint32_t* size, bool ps5)
-{
-	EXIT_IF(format == nullptr);
-	EXIT_IF(size == nullptr);
-	const auto resolved = ps5 ? VulkanResolveGen5VertexInputFormat(static_cast<uint8_t>(res.Format()))
-	                          : VulkanResolveLegacyVertexInputFormat(static_cast<uint8_t>(res.Dfmt()), static_cast<uint8_t>(res.Nfmt()));
-	EXIT_IF(resolved.format == VK_FORMAT_UNDEFINED || resolved.component_count == 0);
-	*format = resolved.format;
-	*size   = resolved.component_count;
-}
-
 static VkBlendFactor get_blend_factor(uint32_t factor)
 {
 	switch (factor)
@@ -2550,8 +2539,7 @@ static void CreateLayout(VkDescriptorSetLayout* set_layouts, uint32_t* set_layou
 	EXIT_IF(push_constant_info == nullptr);
 	EXIT_IF(push_constant_info_num == nullptr);
 
-	bool need_descriptor = (bind.storage_buffers.buffers_num > 0 || bind.textures2D.textures_num > 0 || bind.samplers.samplers_num > 0 ||
-	                        bind.gds_pointers.pointers_num > 0 || bind.vsharp_uniform_buffer);
+	const bool need_descriptor = ShaderBindRequiresDescriptorSet(bind);
 
 	EXIT_IF(need_descriptor && bind.push_constant_size == 0);
 
@@ -2638,81 +2626,18 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	VkPipelineShaderStageCreateInfo shader_stages[] = {vert_shader_stage_info, frag_shader_stage_info};
 
-	VkVertexInputAttributeDescription input_attr[ShaderVertexInputInfo::RES_MAX];
-	VkVertexInputBindingDescription   input_desc[ShaderVertexInputInfo::RES_MAX];
 
-	bool gen5 = Config::IsNextGen();
-
-	for (int bi = 0; bi < vs_input_info->buffers_num; bi++)
-	{
-		const auto& b            = vs_input_info->buffers[bi];
-		input_desc[bi].binding   = bi;
-		input_desc[bi].stride    = b.stride;
-		input_desc[bi].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-		for (int ai = 0; ai < b.attr_num; ai++)
-		{
-			auto index                 = b.attr_indices[ai];
-			input_attr[index].binding  = bi;
-			input_attr[index].location = index;
-			input_attr[index].offset   = b.attr_offsets[ai];
-
-			uint32_t attr_size = 4;
-			get_input_format(vs_input_info->resources[index], &input_attr[index].format, &attr_size, gen5);
-
-			auto registers_num = vs_input_info->resources_dst[index].registers_num;
-
-			// Gen5 exposes an out-of-bounds policy in the vertex descriptor. It
-			// does not alter the Vulkan vertex-input layout; the bound resource
-			// range remains the authoritative limit for this draw.
-			EXIT_NOT_IMPLEMENTED(vs_input_info->resources[index].AddTid());
-			EXIT_NOT_IMPLEMENTED(vs_input_info->resources[index].SwizzleEnabled());
-
-			switch (registers_num)
-			{
-				case 1:
-				{
-					auto swizzle = vs_input_info->resources[index].DstSelX();
-					EXIT_NOT_IMPLEMENTED(swizzle != DstSel(4));
-					break;
-				}
-				case 2:
-				{
-					auto swizzle = vs_input_info->resources[index].DstSelXY();
-					EXIT_NOT_IMPLEMENTED(attr_size == 1 && swizzle != DstSel(4, 0));
-					EXIT_NOT_IMPLEMENTED(attr_size >= 2 && swizzle != DstSel(4, 5));
-					break;
-				}
-				case 3:
-				{
-					auto swizzle = vs_input_info->resources[index].DstSelXYZ();
-					EXIT_NOT_IMPLEMENTED(attr_size == 1 && swizzle != DstSel(4, 0, 0));
-					EXIT_NOT_IMPLEMENTED(attr_size == 2 && swizzle != DstSel(4, 5, 0));
-					EXIT_NOT_IMPLEMENTED(attr_size >= 3 && swizzle != DstSel(4, 5, 6));
-					break;
-				}
-				case 4:
-				{
-					auto swizzle = vs_input_info->resources[index].DstSelXYZW();
-					EXIT_NOT_IMPLEMENTED(attr_size == 1 && swizzle != DstSel(4, 0, 0, 1));
-					EXIT_NOT_IMPLEMENTED(attr_size == 2 && swizzle != DstSel(4, 5, 0, 1));
-					EXIT_NOT_IMPLEMENTED(attr_size == 3 && swizzle != DstSel(4, 5, 6, 1));
-					EXIT_NOT_IMPLEMENTED(attr_size == 4 && swizzle != DstSel(4, 5, 6, 7));
-					break;
-				}
-					printf("WARNING: invalid registers_num (continuing)\n");
-			}
-		}
-	}
+	VulkanVertexInputLayout input_layout {};
+	EXIT_NOT_IMPLEMENTED(!VulkanBuildVertexInputLayout(*vs_input_info, &input_layout));
 
 	VkPipelineVertexInputStateCreateInfo vertex_input_info {};
 	vertex_input_info.sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 	vertex_input_info.pNext                           = nullptr;
 	vertex_input_info.flags                           = 0;
-	vertex_input_info.vertexBindingDescriptionCount   = vs_input_info->buffers_num;
-	vertex_input_info.pVertexBindingDescriptions      = input_desc;
-	vertex_input_info.vertexAttributeDescriptionCount = vs_input_info->resources_num;
-	vertex_input_info.pVertexAttributeDescriptions    = input_attr;
+	vertex_input_info.vertexBindingDescriptionCount   = input_layout.binding_count;
+	vertex_input_info.pVertexBindingDescriptions      = input_layout.bindings;
+	vertex_input_info.vertexAttributeDescriptionCount = input_layout.attribute_count;
+	vertex_input_info.pVertexAttributeDescriptions    = input_layout.attributes;
 
 	VkPipelineInputAssemblyStateCreateInfo input_assembly {};
 	input_assembly.sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
