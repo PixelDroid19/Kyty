@@ -104,9 +104,24 @@ LIB_DEFINE(InitAudio_1_Ajm)
 	LIB_FUNC("fFFkk0xfGWs", Ajm::AjmBatchStartBuffer);
 	LIB_FUNC("-qLsfDAywIY", Ajm::AjmBatchWait);
 	LIB_FUNC("NVDXiUesSbA", Ajm::AjmBatchCancel);
+	LIB_FUNC("AxhcqVv5AYU", Ajm::AjmStrError);
 	LIB_FUNC("ezM2OhNxzck", Ajm::AjmBatchJobInitialize);
+	LIB_FUNC("uJ3m8INuikg", Ajm::AjmBatchJobClearContext);
 	LIB_FUNC("39WxhR-ePew", Ajm::AjmBatchJobDecode);
+	LIB_FUNC("5LLWbpP5xi8", Ajm::AjmBatchJobDecodeSingle);
+	LIB_FUNC("SlVIGK1Kl38", Ajm::AjmBatchJobEncode);
+	LIB_FUNC("TBWW4aPfWcA", Ajm::AjmBatchJobGetInfo);
+	LIB_FUNC("uSrXaxT+oPQ", Ajm::AjmBatchJobGetCodecInfo);
 	LIB_FUNC("SkEwpiu3tZg", Ajm::AjmBatchJobSetGaplessDecode);
+	LIB_FUNC("Esr9db8S1S0", Ajm::AjmBatchJobGetGaplessDecode);
+	LIB_FUNC("81HsnXFbWS4", Ajm::AjmBatchJobSetResampleParameters);
+	LIB_FUNC("5ldnD16rYZw", Ajm::AjmBatchJobSetResampleParametersEx);
+	LIB_FUNC("JkdNCocpu1M", Ajm::AjmBatchJobGetResampleInfo);
+	LIB_FUNC("SJ3i0DXP8vg", Ajm::AjmBatchJobDecodeSplit);
+	LIB_FUNC("3cAg7xN995U", Ajm::AjmBatchJobGetStatistics);
+	LIB_FUNC("7FZsbyVRM4U", Ajm::AjmBatchJobControl);
+	LIB_FUNC("jVCWcthifr8", Ajm::AjmBatchJobRun);
+	LIB_FUNC("Z9NVCesiP0Q", Ajm::AjmBatchJobRunSplit);
 	LIB_FUNC("5tOfnaClcqM", Ajm::AjmBatchStart);
 }
 

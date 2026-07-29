@@ -1296,12 +1296,13 @@ struct AjmContextState
 
 struct AjmBatch2DecodeJob
 {
-	uint32_t    instance         = 0;
-	const void* data_input       = nullptr;
-	uint32_t    data_input_size  = 0;
-	void*       data_output      = nullptr;
-	uint32_t    data_output_size = 0;
-	void*       result           = nullptr;
+	uint32_t               instance        = 0;
+	uint32_t               data_input_size = 0;
+	std::vector<AjmBuffer> data_outputs;
+	void*                  result          = nullptr;
+	uint64_t               sideband_flags  = 0;
+	void*                  sideband_output = nullptr;
+	uint32_t               sideband_size   = 0;
 };
 
 struct AjmDecodeResult
@@ -1317,12 +1318,108 @@ struct AjmDecodeResult
 
 static_assert(sizeof(AjmDecodeResult) == 32);
 
+struct AjmStatisticsResult
+{
+	int32_t  result = 0;
+	int32_t  codec_result = 0;
+	float    engine_usage_batch = 0.0f;
+	float    engine_usage_interval[3] {};
+	uint32_t memory[6] {};
+};
+
+static_assert(sizeof(AjmStatisticsResult) == 48);
+
 std::mutex                                                     g_ajm_mutex;
 std::unordered_map<uint32_t, AjmContextState>                  g_ajm_contexts;
 std::unordered_map<uintptr_t, std::vector<AjmBatch2DecodeJob>> g_ajm_batch2_jobs;
 std::unordered_map<uint32_t, uint64_t>                         g_ajm_decoded_samples;
 
 constexpr size_t AJM_MAX_BATCH2_BUFFER_SIZE = 64u * 1024u * 1024u;
+
+bool ValidateAjmBuffers(const AjmBuffer* buffers, size_t count, uint32_t* total_size)
+{
+	if (total_size == nullptr || (buffers == nullptr && count != 0))
+	{
+		return false;
+	}
+	uint64_t total = 0;
+	for (size_t index = 0; index < count; index++)
+	{
+		if (buffers[index].address == nullptr || buffers[index].size > AJM_MAX_BATCH2_BUFFER_SIZE)
+		{
+			return false;
+		}
+		total += buffers[index].size;
+		if (total > AJM_MAX_BATCH2_BUFFER_SIZE)
+		{
+			return false;
+		}
+	}
+	*total_size = static_cast<uint32_t>(total);
+	return true;
+}
+
+void WriteAjmResampleInfoResult(void* result)
+{
+	if (result == nullptr)
+	{
+		return;
+	}
+
+	const float ratio = 1.0f;
+	std::memset(result, 0, AJM_SIDEBAND_RESULT_SIZE + AJM_SIDEBAND_RESAMPLE_INFO_SIZE);
+	std::memcpy(static_cast<uint8_t*>(result) + AJM_SIDEBAND_RESULT_SIZE, &ratio, sizeof(ratio));
+}
+
+void WriteAjmFormatResult(void* result)
+{
+	if (result == nullptr)
+	{
+		return;
+	}
+
+	auto* const output = static_cast<uint8_t*>(result);
+	std::memset(output, 0, AJM_SIDEBAND_RESULT_SIZE + AJM_SIDEBAND_FORMAT_SIZE);
+	const uint32_t channel_format = 2u;
+	const uint32_t channel_count  = 3u;
+	const uint32_t sample_rate    = 48000u;
+	std::memcpy(output + AJM_SIDEBAND_RESULT_SIZE + 0u, &channel_format, sizeof(channel_format));
+	std::memcpy(output + AJM_SIDEBAND_RESULT_SIZE + 4u, &channel_count, sizeof(channel_count));
+	std::memcpy(output + AJM_SIDEBAND_RESULT_SIZE + 8u, &sample_rate, sizeof(sample_rate));
+}
+
+void WriteAjmGaplessResult(void* result)
+{
+	if (result != nullptr)
+	{
+		std::memset(result, 0, AJM_SIDEBAND_RESULT_SIZE + AJM_SIDEBAND_GAPLESS_SIZE);
+	}
+}
+
+bool QueueAjmDataJob(void* batch, uint32_t instance, uint32_t input_size, const AjmBuffer* outputs, size_t output_count, void* result,
+                     uint64_t sideband_flags = 0, void* sideband_output = nullptr, uint32_t sideband_size = 0)
+{
+	if (batch == nullptr || instance == 0 || (outputs == nullptr && output_count != 0))
+	{
+		return false;
+	}
+
+	AjmBatch2DecodeJob job {};
+	job.instance        = instance;
+	job.data_input_size = input_size;
+	if (output_count != 0)
+	{
+		job.data_outputs.assign(outputs, outputs + output_count);
+	}
+	job.result          = result;
+	job.sideband_flags  = sideband_flags;
+	job.sideband_output = sideband_output;
+	job.sideband_size   = sideband_size;
+
+	std::scoped_lock lock(g_ajm_mutex);
+	g_ajm_batch2_jobs[reinterpret_cast<uintptr_t>(batch)].push_back(std::move(job));
+	return true;
+}
 
 uint32_t AllocateContextId()
 {
@@ -1391,6 +1488,56 @@ uint32_t AjmCodecInfoSize(uint32_t instance)
 		case 2u: return 8u;
 		case 24u: return 4u;
 		default: return 0u;
+	}
+}
+
+void WriteAjmRunSideband(uint64_t flags, void* output, uint32_t output_size, uint32_t instance, uint64_t input_size,
+                         uint64_t data_output_size, uint64_t total_decoded_samples)
+{
+	if (output == nullptr || output_size == 0)
+	{
+		return;
+	}
+
+	std::memset(output, 0, output_size);
+	auto*    sideband        = static_cast<uint8_t*>(output);
+	uint32_t sideband_offset = AJM_SIDEBAND_RESULT_SIZE;
+
+	if ((flags & AJM_FLAG_RUN_GET_CODEC_INFO) != 0)
+	{
+		const uint32_t codec_info_size = AjmCodecInfoSize(instance);
+		if (codec_info_size != 0 && output_size >= sideband_offset + codec_info_size)
+		{
+			sideband_offset += codec_info_size;
+		}
+	}
+	if ((flags & AJM_FLAG_SIDEBAND_RESAMPLE_INFO) != 0 && output_size >= sideband_offset + AJM_SIDEBAND_RESAMPLE_INFO_SIZE)
+	{
+		const float ratio = 1.0f;
+		std::memcpy(sideband + sideband_offset, &ratio, sizeof(ratio));
+		sideband_offset += AJM_SIDEBAND_RESAMPLE_INFO_SIZE;
+	}
+	if ((flags & AJM_FLAG_SIDEBAND_GAPLESS) != 0 && output_size >= sideband_offset + AJM_SIDEBAND_GAPLESS_SIZE)
+	{
+		sideband_offset += AJM_SIDEBAND_GAPLESS_SIZE;
+	}
+	if ((flags & AJM_FLAG_SIDEBAND_FORMAT) != 0 && output_size >= sideband_offset + AJM_SIDEBAND_FORMAT_SIZE)
+	{
+		WriteAjmU32(sideband + sideband_offset + 0u, 2u);
+		WriteAjmU32(sideband + sideband_offset + 4u, 3u);
+		WriteAjmU32(sideband + sideband_offset + 8u, 48000u);
+		sideband_offset += AJM_SIDEBAND_FORMAT_SIZE;
+	}
+	if ((flags & AJM_FLAG_SIDEBAND_STREAM) != 0 && output_size >= sideband_offset + AJM_SIDEBAND_STREAM_SIZE)
+	{
+		WriteAjmU32(sideband + sideband_offset, static_cast<uint32_t>(std::min<uint64_t>(input_size, INT32_MAX)));
+		WriteAjmU32(sideband + sideband_offset + 4u, static_cast<uint32_t>(std::min<uint64_t>(data_output_size, INT32_MAX)));
+		std::memcpy(sideband + sideband_offset + 8u, &total_decoded_samples, sizeof(total_decoded_samples));
+		sideband_offset += AJM_SIDEBAND_STREAM_SIZE;
+	}
+	if ((flags & AJM_FLAG_RUN_MULTIPLE_FRAMES) != 0 && output_size >= sideband_offset + AJM_SIDEBAND_MULTIPLE_FRAMES_SIZE)
+	{
+		WriteAjmU32(sideband + sideband_offset, input_size != 0 ? 1u : 0u);
 	}
 }
 
@@ -1468,47 +1615,7 @@ bool ProcessAjmJobBuffer(const uint8_t* job, uint32_t job_size, uint32_t instanc
 			continue;
 		}
 
-		auto*    sideband        = static_cast<uint8_t*>(output.address);
-		uint32_t sideband_offset = AJM_SIDEBAND_RESULT_SIZE;
-
-		if ((flags & AJM_FLAG_RUN_GET_CODEC_INFO) != 0)
-		{
-			const uint32_t codec_info_size = AjmCodecInfoSize(instance);
-			if (codec_info_size != 0 && output.size >= sideband_offset + codec_info_size)
-			{
-				sideband_offset += codec_info_size;
-			}
-		}
-		if ((flags & AJM_FLAG_SIDEBAND_RESAMPLE_INFO) != 0 && output.size >= sideband_offset + AJM_SIDEBAND_RESAMPLE_INFO_SIZE)
-		{
-			const float ratio = 1.0f;
-			std::memcpy(sideband + sideband_offset, &ratio, sizeof(ratio));
-			sideband_offset += AJM_SIDEBAND_RESAMPLE_INFO_SIZE;
-		}
-		if ((flags & AJM_FLAG_SIDEBAND_GAPLESS) != 0 && output.size >= sideband_offset + AJM_SIDEBAND_GAPLESS_SIZE)
-		{
-			sideband_offset += AJM_SIDEBAND_GAPLESS_SIZE;
-		}
-		if ((flags & AJM_FLAG_SIDEBAND_FORMAT) != 0 && output.size >= sideband_offset + AJM_SIDEBAND_FORMAT_SIZE)
-		{
-			WriteAjmU32(sideband + sideband_offset + 0u, 2u);
-			WriteAjmU32(sideband + sideband_offset + 4u, 3u);
-			WriteAjmU32(sideband + sideband_offset + 8u, 48000u);
-			WriteAjmU32(sideband + sideband_offset + 12u, 0u);
-			sideband_offset += AJM_SIDEBAND_FORMAT_SIZE;
-		}
-		if ((flags & AJM_FLAG_SIDEBAND_STREAM) != 0 && output.size >= sideband_offset + AJM_SIDEBAND_STREAM_SIZE)
-		{
-			WriteAjmU32(sideband + sideband_offset, static_cast<uint32_t>(std::min<uint64_t>(input_size, INT32_MAX)));
-			WriteAjmU32(sideband + sideband_offset + 4u, static_cast<uint32_t>(std::min<uint64_t>(output_size, INT32_MAX)));
-			const uint64_t samples = output_size / 4u;
-			std::memcpy(sideband + sideband_offset + 8u, &samples, sizeof(samples));
-			sideband_offset += AJM_SIDEBAND_STREAM_SIZE;
-		}
-		if ((flags & AJM_FLAG_RUN_MULTIPLE_FRAMES) != 0 && output.size >= sideband_offset + AJM_SIDEBAND_MULTIPLE_FRAMES_SIZE)
-		{
-			WriteAjmU32(sideband + sideband_offset, input_size != 0 ? 1u : 0u);
-		}
+		WriteAjmRunSideband(flags, output.address, output.size, instance, input_size, output_size, output_size / 4u);
 	}
 
 	return true;
@@ -1980,6 +2087,23 @@ int KYTY_SYSV_ABI AjmBatchJobInitialize(void* batch, uint32_t instance, const vo
 	return OK;
 }
 
+int KYTY_SYSV_ABI AjmBatchJobClearContext(void* batch, uint32_t instance, void* result)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	if (result != nullptr)
+	{
+		std::memset(result, 0, AJM_SIDEBAND_RESULT_SIZE);
+	}
+
+	std::scoped_lock lock(g_ajm_mutex);
+	g_ajm_decoded_samples.erase(instance);
+	return OK;
+}
+
 int KYTY_SYSV_ABI AjmBatchJobSetGaplessDecode(void* batch, uint32_t instance, const void* config, uint64_t enabled, void* result)
 {
 	PRINT_NAME();
@@ -1994,6 +2118,68 @@ int KYTY_SYSV_ABI AjmBatchJobSetGaplessDecode(void* batch, uint32_t instance, co
 	return OK;
 }
 
+int KYTY_SYSV_ABI AjmBatchJobGetGaplessDecode(void* batch, uint32_t instance, void* result)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	WriteAjmGaplessResult(result);
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobSetResampleParameters(void* batch, uint32_t instance, float ratio, uint32_t flags, void* result)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0 || !std::isfinite(ratio))
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	if (result != nullptr)
+	{
+		std::memset(result, 0, AJM_SIDEBAND_RESULT_SIZE);
+	}
+
+	printf("\t instance = 0x%08" PRIx32 "\n", instance);
+	printf("\t ratio    = %f\n", static_cast<double>(ratio));
+	printf("\t flags    = 0x%08" PRIx32 "\n", flags);
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobSetResampleParametersEx(void* batch, uint32_t instance, float ratio_start,
+                                                     float ratio_change_per_sample, uint32_t flags, void* result)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0 || !std::isfinite(ratio_start) || !std::isfinite(ratio_change_per_sample))
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	if (result != nullptr)
+	{
+		std::memset(result, 0, AJM_SIDEBAND_RESULT_SIZE);
+	}
+
+	printf("\t instance                = 0x%08" PRIx32 "\n", instance);
+	printf("\t ratio_start             = %f\n", static_cast<double>(ratio_start));
+	printf("\t ratio_change_per_sample = %f\n", static_cast<double>(ratio_change_per_sample));
+	printf("\t flags                   = 0x%08" PRIx32 "\n", flags);
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobGetResampleInfo(void* batch, uint32_t instance, void* result)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	WriteAjmResampleInfoResult(result);
+	return OK;
+}
+
 int KYTY_SYSV_ABI AjmBatchJobDecode(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
                                     size_t data_output_size, void* result, void* return_address, uint64_t reserved, void* result_alias)
 {
@@ -2001,15 +2187,172 @@ int KYTY_SYSV_ABI AjmBatchJobDecode(void* batch, uint32_t instance, const void* 
 	(void)return_address;
 	(void)reserved;
 	(void)result_alias;
-	if (batch == nullptr || instance == 0 || data_input == nullptr || data_output == nullptr ||
+	if (batch == nullptr || instance == 0 || (data_input == nullptr && data_input_size != 0) || data_output == nullptr ||
 	    data_input_size > AJM_MAX_BATCH2_BUFFER_SIZE || data_output_size > AJM_MAX_BATCH2_BUFFER_SIZE)
 	{
 		return AJM_ERROR_INVALID_PARAMETER;
 	}
 
-	std::scoped_lock lock(g_ajm_mutex);
-	g_ajm_batch2_jobs[reinterpret_cast<uintptr_t>(batch)].push_back(
-	    {instance, data_input, static_cast<uint32_t>(data_input_size), data_output, static_cast<uint32_t>(data_output_size), result});
+	const AjmBuffer output {data_output, data_output_size};
+	if (!QueueAjmDataJob(batch, instance, static_cast<uint32_t>(data_input_size), &output, 1u, result))
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobDecodeSingle(void* batch, uint32_t instance, const void* data_input, size_t data_input_size,
+                                          void* data_output, size_t data_output_size, void* result)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0 || (data_input == nullptr && data_input_size != 0) || data_output == nullptr ||
+	    data_input_size > AJM_MAX_BATCH2_BUFFER_SIZE || data_output_size > AJM_MAX_BATCH2_BUFFER_SIZE)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	const AjmBuffer output {data_output, data_output_size};
+	if (!QueueAjmDataJob(batch, instance, static_cast<uint32_t>(data_input_size), &output, 1u, result))
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobDecodeSplit(void* batch, uint32_t instance, const AjmBuffer* data_input_buffers,
+                                         size_t data_input_buffer_count, const AjmBuffer* data_output_buffers,
+                                         size_t data_output_buffer_count, void* result)
+{
+	PRINT_NAME();
+	uint32_t input_size  = 0;
+	uint32_t output_size = 0;
+	if (batch == nullptr || instance == 0 || !ValidateAjmBuffers(data_input_buffers, data_input_buffer_count, &input_size) ||
+	    !ValidateAjmBuffers(data_output_buffers, data_output_buffer_count, &output_size) || output_size == 0)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	if (!QueueAjmDataJob(batch, instance, input_size, data_output_buffers, data_output_buffer_count, result))
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobEncode(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
+                                    size_t data_output_size, void* result)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0 || (data_input == nullptr && data_input_size != 0) || data_output == nullptr ||
+	    data_input_size > AJM_MAX_BATCH2_BUFFER_SIZE || data_output_size > AJM_MAX_BATCH2_BUFFER_SIZE)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	const AjmBuffer output {data_output, data_output_size};
+	if (!QueueAjmDataJob(batch, instance, static_cast<uint32_t>(data_input_size), &output, 1u, result))
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobGetInfo(void* batch, uint32_t instance, void* result)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	WriteAjmFormatResult(result);
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobGetCodecInfo(void* batch, uint32_t instance, void* result, size_t result_size)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0 || (result == nullptr && result_size != 0))
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	if (result != nullptr)
+	{
+		std::memset(result, 0, result_size);
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobGetStatistics(void* batch, float interval, void* result)
+{
+	PRINT_NAME();
+	if (batch == nullptr || !std::isfinite(interval))
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	if (result != nullptr)
+	{
+		const AjmStatisticsResult statistics {};
+		std::memcpy(result, &statistics, sizeof(statistics));
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobControl(void* batch, uint32_t instance, uint64_t flags, const void* sideband_input,
+                                     size_t sideband_input_size, void* sideband_output, size_t sideband_output_size)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0 || (sideband_input == nullptr && sideband_input_size != 0) ||
+	    sideband_output_size > UINT32_MAX)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	constexpr uint64_t control_flags_mask = 0x000060000000e7ffull;
+	WriteAjmRunSideband(flags & control_flags_mask, sideband_output, static_cast<uint32_t>(sideband_output_size), instance, 0, 0, 0);
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobRun(void* batch, uint32_t instance, uint64_t flags, const void* data_input, size_t data_input_size,
+                                 void* data_output, size_t data_output_size, void* sideband_output, size_t sideband_output_size)
+{
+	PRINT_NAME();
+	if (batch == nullptr || instance == 0 || (data_input == nullptr && data_input_size != 0) || data_output == nullptr ||
+	    data_input_size > AJM_MAX_BATCH2_BUFFER_SIZE || data_output_size > AJM_MAX_BATCH2_BUFFER_SIZE || sideband_output_size > UINT32_MAX)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	constexpr uint64_t run_flags_mask = 0x0000e00000001fffull;
+	const AjmBuffer    output {data_output, data_output_size};
+	if (!QueueAjmDataJob(batch, instance, static_cast<uint32_t>(data_input_size), &output, 1u, nullptr, flags & run_flags_mask,
+	                     sideband_output, static_cast<uint32_t>(sideband_output_size)))
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI AjmBatchJobRunSplit(void* batch, uint32_t instance, uint64_t flags, const AjmBuffer* data_input_buffers,
+                                      size_t data_input_buffer_count, const AjmBuffer* data_output_buffers,
+                                      size_t data_output_buffer_count, void* sideband_output, size_t sideband_output_size)
+{
+	PRINT_NAME();
+	uint32_t input_size  = 0;
+	uint32_t output_size = 0;
+	if (batch == nullptr || instance == 0 || !ValidateAjmBuffers(data_input_buffers, data_input_buffer_count, &input_size) ||
+	    !ValidateAjmBuffers(data_output_buffers, data_output_buffer_count, &output_size) || output_size == 0 ||
+	    sideband_output_size > UINT32_MAX)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+
+	constexpr uint64_t run_flags_mask = 0x0000e00000001fffull;
+	if (!QueueAjmDataJob(batch, instance, input_size, data_output_buffers, data_output_buffer_count, nullptr, flags & run_flags_mask,
+	                     sideband_output, static_cast<uint32_t>(sideband_output_size)))
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
 	return OK;
 }
 
@@ -2045,15 +2388,22 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 		}
 		for (const auto& job: jobs_it->second)
 		{
-			std::memset(job.data_output, 0, job.data_output_size);
+			uint64_t output_size = 0;
+			for (const auto& output: job.data_outputs)
+			{
+				std::memset(output.address, 0, output.size);
+				output_size += output.size;
+			}
 			auto& total = g_ajm_decoded_samples[job.instance];
-			total += job.data_output_size / 4u;
+			total += output_size / 4u;
 			if (job.result != nullptr)
 			{
 				const AjmDecodeResult decode_result {
-				    0, 0, job.data_input_size, job.data_output_size, total, job.data_input_size != 0 ? 1u : 0u, 0};
+				    0, 0, job.data_input_size, static_cast<uint32_t>(std::min<uint64_t>(output_size, UINT32_MAX)), total,
+				    job.data_input_size != 0 ? 1u : 0u, 0};
 				std::memcpy(job.result, &decode_result, sizeof(decode_result));
 			}
+			WriteAjmRunSideband(job.sideband_flags, job.sideband_output, job.sideband_size, job.instance, job.data_input_size, output_size, total);
 		}
 		g_ajm_batch2_jobs.erase(jobs_it);
 	}
@@ -2070,6 +2420,13 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 	state.completed_batches.insert(state.next_batch_id);
 	*batch_id = state.next_batch_id;
 	return OK;
+}
+
+const char* KYTY_SYSV_ABI AjmStrError(int error)
+{
+	PRINT_NAME();
+	printf("\t error = %d\n", error);
+	return "AJM";
 }
 
 } // namespace Ajm
