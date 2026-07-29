@@ -3588,9 +3588,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		    ShaderResolvePixelInterpolatorSetting(sh->ps_interpolator_settings[i], sh->ps_interpolator_written_mask, i);
 	}
 
-	const bool vs_uses_descriptor     = vs_info->bind.storage_buffers.buffers_num > 0 || vs_info->bind.textures2D.textures_num > 0 ||
-	                                    vs_info->bind.samplers.samplers_num > 0 || vs_info->bind.gds_pointers.pointers_num > 0 ||
-	                                    vs_info->bind.vsharp_uniform_buffer;
+	const bool vs_uses_descriptor     = ShaderBindRequiresDescriptorSet(vs_info->bind);
 	ps_info->bind.descriptor_set_slot = (vs_uses_descriptor ? 1 : 0);
 	ps_info->bind.push_constant_offset =
 	    vs_info->bind.push_constant_offset + (vs_info->bind.vsharp_uniform_buffer ? 0u : vs_info->bind.push_constant_size);

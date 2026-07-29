@@ -5505,6 +5505,30 @@ static VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uin
 	return buffer->UploadTransientBuffer(reinterpret_cast<const void*>(addr), size, usage);
 }
 
+static void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer,
+                              const ShaderVertexInputInfo& input)
+{
+	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
+
+	for (int i = 0; i < input.buffers_num; i++)
+	{
+		const auto& buffer_info = input.buffers[i];
+		const uint64_t address  = buffer_info.addr;
+		const uint64_t size     = ShaderBufferByteSize(buffer_info.stride, buffer_info.num_records);
+
+		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+		if (vertices == nullptr)
+		{
+			vertices = static_cast<VulkanBuffer*>(
+			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, address, size, VertexBufferGpuObject()));
+		}
+		EXIT_NOT_IMPLEMENTED(vertices == nullptr);
+
+		VkDeviceSize offset = 0;
+		vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &vertices->buffer, &offset);
+	}
+}
+
 static Emulator::Agent::Lifecycle::StorageBindingProvenance DescribeStorageBinding(const ShaderStorageResources& storage_buffers,
                                                                                      int index)
 {
@@ -6895,24 +6919,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	SetDynamicParams(vk_buffer, pipeline);
 
-	for (int i = 0; i < vs_input_info.buffers_num; i++)
-	{
-		const auto& b    = vs_input_info.buffers[i];
-		uint64_t    addr = b.addr;
-		uint64_t    size = ShaderBufferByteSize(b.stride, b.num_records);
-
-		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, addr, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-		if (vertices == nullptr)
-		{
-			vertices = static_cast<VulkanBuffer*>(
-			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size, VertexBufferGpuObject()));
-		}
-		EXIT_NOT_IMPLEMENTED(vertices == nullptr);
-
-		VkDeviceSize offset = 0;
-
-		vkCmdBindVertexBuffers(vk_buffer, i, 1, &vertices->buffer, &offset);
-	}
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info);
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
 	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
@@ -7225,24 +7232,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	SetDynamicParams(vk_buffer, pipeline);
 
-	for (int i = 0; i < vs_input_info.buffers_num; i++)
-	{
-		const auto& b    = vs_input_info.buffers[i];
-		uint64_t    addr = b.addr;
-		uint64_t    size = ShaderBufferByteSize(b.stride, b.num_records);
-
-		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, addr, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-		if (vertices == nullptr)
-		{
-			vertices = static_cast<VulkanBuffer*>(
-			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size, VertexBufferGpuObject()));
-		}
-		EXIT_NOT_IMPLEMENTED(vertices == nullptr);
-
-		VkDeviceSize offset = 0;
-
-		vkCmdBindVertexBuffers(vk_buffer, i, 1, &vertices->buffer, &offset);
-	}
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info);
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
 	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
