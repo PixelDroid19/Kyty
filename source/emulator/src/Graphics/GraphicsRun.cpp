@@ -176,7 +176,7 @@ public:
 	void SetNumInstances(uint32_t num_instances);
 	void DrawIndex(uint32_t index_count, const void* index_addr, uint32_t flags, uint32_t type);
 	void DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags);
-	void DrawIndexAuto(uint32_t index_count, uint32_t flags);
+	void DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier);
 	void WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_write_dest, uint32_t eop_event_type, uint32_t cache_action,
 	                        uint32_t event_index, uint32_t event_write_source, void* dst_gpu_addr, uint32_t value,
 	                        uint32_t interrupt_selector);
@@ -1733,7 +1733,7 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 	                             mode);
 }
 
-void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint32_t flags)
+void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -1745,8 +1745,10 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint32_t flags)
 		if (auto_logs < 48u)
 		{
 			++auto_logs;
-			std::fprintf(stderr, "KYTY_DUMP_DRAW_AUTO count=%u flags=0x%x index_base=0x%012" PRIx64 " index_buf_size=%u index_type=%u",
-			             index_count, flags, m_index_base_addr, m_index_buffer_size, m_index_type_and_size);
+			std::fprintf(stderr,
+			             "KYTY_DUMP_DRAW_AUTO count=%u modifier=0x%016" PRIx64 " index_base=0x%012" PRIx64
+			             " index_buf_size=%u index_type=%u",
+			             index_count, draw_modifier, m_index_base_addr, m_index_buffer_size, m_index_type_and_size);
 			if (m_index_base_addr != 0 && index_count > 0 && index_count <= 64)
 			{
 				std::fprintf(stderr, " idx=");
@@ -1770,7 +1772,7 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint32_t flags)
 		}
 	}
 
-	GraphicsRenderDrawIndexAuto(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, flags);
+	GraphicsRenderDrawIndexAuto(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, draw_modifier);
 }
 
 void CommandProcessor::ClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value)
@@ -3611,10 +3613,10 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_auto)
 
 	if (cmd_id == 0xC0051010)
 	{
-		uint32_t index_count = buffer[0];
-		uint32_t flags       = buffer[1];
+		uint32_t index_count    = buffer[0];
+		uint64_t draw_modifier = static_cast<uint64_t>(buffer[1]) | (static_cast<uint64_t>(buffer[2]) << 32u);
 
-		cp->DrawIndexAuto(index_count, flags);
+		cp->DrawIndexAuto(index_count, draw_modifier);
 
 		return 6;
 	}
@@ -3628,9 +3630,8 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_auto)
 
 		cp->DrawIndexAuto(index_count, 0);
 
-		// The Type3 packet has exactly two body dwords. Do not consume a
-		// following packet header as a legacy trailer; CommandProcessor::Run
-		// dispatches it on the next iteration.
+		// The Type3 packet has exactly two body dwords. CommandProcessor::Run
+		// dispatches the following packet on the next iteration.
 		return 2;
 	}
 
@@ -3683,7 +3684,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_indirect)
 }
 
 // Gen5 IT_CLEAR_STATE from GraphicsDcbResetQueue: header + 4-bit state body.
-// Same hardware effect as the legacy custom R_DRAW_RESET path (CP context reset).
+// Same hardware effect as the custom R_DRAW_RESET path: reset CP draw state.
 KYTY_CP_OP_PARSER(cp_op_clear_state)
 {
 	KYTY_PROFILER_FUNCTION();

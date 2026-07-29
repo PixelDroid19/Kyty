@@ -5435,6 +5435,22 @@ static bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer
 	auto* src = source.vulkan_buffer[0];
 	auto* dst = destination.vulkan_buffer[0];
 	EXIT_NOT_IMPLEMENTED(src == nullptr || dst == nullptr);
+	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+	{
+		static uint32_t logs = 0;
+		if (logs < 32u)
+		{
+			++logs;
+			std::fprintf(stderr,
+			             "KYTY_DUMP_COLOR_RESOLVE src_id=%" PRIu64 " dst_id=%" PRIu64
+			             " src=0x%012" PRIx64 ":%ux%u/%ux%u:s%u:f%u dst=0x%012" PRIx64 ":%ux%u/%ux%u:s%u:f%u op=0x%x\n",
+			             src->memory.unique_id, dst->memory.unique_id, source.base_addr[0], src->GetGuestExtent().width,
+			             src->GetGuestExtent().height, src->extent.width, src->extent.height, static_cast<uint32_t>(src->samples),
+			             static_cast<uint32_t>(src->format), destination.base_addr[0], dst->GetGuestExtent().width,
+			             dst->GetGuestExtent().height, dst->extent.width, dst->extent.height, static_cast<uint32_t>(dst->samples),
+			             static_cast<uint32_t>(dst->format), hw.GetColorControl().op);
+		}
+	}
 	if (src->memory.unique_id == dst->memory.unique_id)
 	{
 		return true;
@@ -5465,6 +5481,7 @@ static bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer
 
 	vkCmdResolveImage(vk_buffer, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->image,
 	                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), destination);
 	InvalidateMemoryObject(destination);
 	return true;
 }
@@ -7119,21 +7136,42 @@ static bool vertex_shader_is_disabled(HW::Shader* sh_ctx)
 	return false;
 }
 
-static bool shader_is_disabled(HW::Shader* sh_ctx)
+static const char* shader_disable_reason(HW::Shader* sh_ctx)
 {
 	if (vertex_shader_is_disabled(sh_ctx))
 	{
-		return true;
+		return "vs";
 	}
 
 	if (const auto& ps = sh_ctx->GetPs();
 	    !ps.ps_embedded && ((ps.ps_regs.chksum == 0 && ShaderIsDisabled(ps.ps_regs.data_addr)) ||
 	                        (ps.ps_regs.chksum != 0 && ShaderIsDisabled2(ps.ps_regs.data_addr, ps.ps_regs.chksum))))
 	{
-		return true;
+		return "ps";
 	}
 
-	return false;
+	return nullptr;
+}
+
+static bool shader_is_disabled(HW::Shader* sh_ctx)
+{
+	return shader_disable_reason(sh_ctx) != nullptr;
+}
+
+static void MaybeDumpAutoDrawSkip(const char* reason, uint32_t index_count, uint64_t draw_modifier)
+{
+	if (std::getenv("KYTY_DUMP_DRAW") == nullptr)
+	{
+		return;
+	}
+	static uint32_t logs = 0;
+	if (logs >= 32u)
+	{
+		return;
+	}
+	++logs;
+	std::fprintf(stderr, "KYTY_DUMP_DRAW_SKIP_AUTO reason=%s count=%u modifier=0x%016" PRIx64 "\n", reason, index_count,
+	             draw_modifier);
 }
 
 bool GraphicsResolveRectListAutoDraw(uint32_t primitive_type, uint32_t index_count, int vertex_buffers_num, uint32_t* vertex_count)
@@ -7809,9 +7847,17 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	}
 }
 
+static bool AutoDrawModifierSupported(uint64_t draw_modifier)
+{
+	constexpr uint64_t modifier_bits =
+	    (1ull << 0u) | (1ull << 1u) | (1ull << 2u) | (1ull << 3u) | (1ull << 4u) | (1ull << 5u) | (1ull << 30u) | (1ull << 31u) |
+	    (1ull << 32u);
+	return (draw_modifier & ~modifier_bits) == 0;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
-                                 uint32_t index_count, uint32_t flags)
+                                 uint32_t index_count, uint64_t draw_modifier)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -7822,6 +7868,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 	if (GraphicsRenderColorResolve(submit_id, buffer, *ctx))
 	{
+		MaybeDumpAutoDrawSkip("color-resolve", index_count, draw_modifier);
 		return;
 	}
 	const bool       depth_stencil_copy = ctx->GetRenderControl().depth_copy || ctx->GetRenderControl().stencil_copy;
@@ -7836,19 +7883,18 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 		printf("GraphicsRenderDrawIndex():Parameters:\n");
 		printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
-		printf("\t flags               = 0x%08" PRIx32 "\n", flags);
+		printf("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
 
-		// Gen5 draw modifiers are command-processor bookkeeping bits; they do not
-		// change the Vulkan draw.
-		EXIT_NOT_IMPLEMENTED(flags != 0 && flags != 0x40000000u && flags != 0x80000000u);
+		EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
 		EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
 
 		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, UINT32_MAX, nullptr);
 		return;
 	}
 
-	if (shader_is_disabled(sh_ctx))
+	if (const char* reason = shader_disable_reason(sh_ctx); reason != nullptr)
 	{
+		MaybeDumpAutoDrawSkip(reason, index_count, draw_modifier);
 		return;
 	}
 
@@ -7863,11 +7909,9 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	printf("GraphicsRenderDrawIndex():Parameters:\n");
 	printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
-	printf("\t flags               = 0x%08" PRIx32 "\n", flags);
+	printf("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
 
-	// Gen5 draw modifiers: 0 (legacy), 0x40000000 (default AGC), 0x80000000 (Astro).
-	// These are initiator bookkeeping bits; they do not change the Vulkan draw.
-	EXIT_NOT_IMPLEMENTED(flags != 0 && flags != 0x40000000u && flags != 0x80000000u);
+	EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
 	EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
 
 	RenderDepthInfo depth_info;
@@ -7927,7 +7971,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
-	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, 0xffffffffu, false, flags);
+	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, 0xffffffffu, false,
+	                static_cast<uint32_t>(draw_modifier));
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, topology, sample_locations);
