@@ -7481,6 +7481,10 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	const auto& render_control = ctx->GetRenderControl();
 	RenderDepthInfo depth_info;
 	DescribeRenderDepthInfo(*ctx, &depth_info);
+	if (depth_info.format == VK_FORMAT_UNDEFINED)
+	{
+		return;
+	}
 	const bool effective_depth_write = depth_info.depth_write_enable && !depth_info.suppress_depth_write;
 	const uint8_t color_write_mask =
 	    State::ResolveColorWriteMask(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters().m_cbShaderMask, 0);
@@ -7489,7 +7493,6 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	// Rect-list copies synthesize full-target geometry. Guest draws retain the
 	// vertex stage so the expansion covers exactly the guest pixels.
 	EXIT_NOT_IMPLEMENTED(!render_control.depth_copy || !render_control.stencil_copy);
-	EXIT_NOT_IMPLEMENTED(depth_info.format == VK_FORMAT_UNDEFINED);
 	VulkanSampleLocationState sample_locations {};
 	aa_check_for_attachment_samples(*ctx, depth_info.samples, &sample_locations);
 	const bool stencil_test_required = depth_info.stencil_test_enable;

@@ -113,12 +113,10 @@ StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target,
 	const bool plane_declared = target.stencil_info.format != 0 || target.stencil_read_base_addr != 0 ||
 	                            target.stencil_write_base_addr != 0;
 	const bool sample_selection = render_control.copy_centroid || render_control.copy_sample != 0;
-	const bool stencil_operation = depth_control.stencil_enable || render_control.stencil_clear_enable || render_control.stencil_copy ||
-	                               render_control.resummarize_enable || sample_selection || decompress;
 	// Render-control metadata operates on an existing depth/stencil target. It
 	// does not declare a stencil plane when the guest supplied neither format nor
 	// base address.
-	if (!plane_declared && !stencil_operation)
+	if (!plane_declared)
 	{
 		return StencilPlaneValidation::Inactive;
 	}
