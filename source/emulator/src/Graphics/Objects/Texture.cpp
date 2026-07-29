@@ -332,7 +332,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				}
 			}
 			// Opt-in dump for linear Gen5 sample investigation (scratch only).
-			// KYTY_DUMP_LINEAR_SAMPLE=WxH writes one RGBA8 BMP under /tmp.
+			// KYTY_DUMP_LINEAR_SAMPLE=WxH writes one RGBA8 PNG under /tmp.
 			if (fmt == 56u && levels == 1u)
 			{
 				static const char* dump_spec = std::getenv("KYTY_DUMP_LINEAR_SAMPLE");
@@ -347,15 +347,15 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 						if (dumped_sizes.insert(key).second)
 						{
 							char out_path[128];
-							std::snprintf(out_path, sizeof(out_path), "/tmp/kyty-dump-linear-%ux%u.bmp", static_cast<unsigned>(width),
+							std::snprintf(out_path, sizeof(out_path), "/tmp/kyty-dump-linear-%ux%u.png", static_cast<unsigned>(width),
 							              static_cast<unsigned>(height));
 							char out_path_w[128];
-							std::snprintf(out_path_w, sizeof(out_path_w), "/tmp/kyty-dump-linear-%ux%u-widthpitch.bmp",
+							std::snprintf(out_path_w, sizeof(out_path_w), "/tmp/kyty-dump-linear-%ux%u-widthpitch.png",
 							              static_cast<unsigned>(width), static_cast<unsigned>(height));
 							const auto* base = reinterpret_cast<const uint8_t*>(*vaddr);
-							UtilWriteRgba8Bmp(out_path, base, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+							UtilWriteRgba8Png(out_path, base, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
 							                  static_cast<uint32_t>(pitch));
-							UtilWriteRgba8Bmp(out_path_w, base, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+							UtilWriteRgba8Png(out_path_w, base, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
 							                  static_cast<uint32_t>(width));
 							printf("KYTY_DUMP_LINEAR_SAMPLE wrote %ux%u pitch=%u -> %s\n", static_cast<unsigned>(width),
 							       static_cast<unsigned>(height), static_cast<unsigned>(pitch), out_path);
@@ -516,7 +516,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 						             pitch_elems, count > 0 ? pixels[0] : 0u, colors.size(), colors.size() > 256u ? "+" : "",
 						             *size >= 4u ? *reinterpret_cast<const uint32_t*>(*vaddr) : 0u,
 						             *size >= 8u ? *(reinterpret_cast<const uint32_t*>(*vaddr) + 1) : 0u);
-						UtilDumpVulkanImageRgba8Bmp(ctx, vk_obj, "/tmp/kyty-dump-tiled-sample", "guest");
+						UtilDumpVulkanImageRgba8Png(ctx, vk_obj, "/tmp/kyty-dump-tiled-sample", "guest");
 					}
 				}
 			}

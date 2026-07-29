@@ -33,9 +33,9 @@ The command writes an ignored directory such as
 `_scratch_playable/captures/` containing:
 
 * `guest-*.log`: the complete guest log;
-* `native_frames/*.bmp`: emulator-native readbacks of the emulated `VideoOut`
+* `native_frames/*.png`: emulator-native readbacks of the emulated `VideoOut`
   source image, never screenshots of the desktop or window compositor;
-* `*.bmp.json`: per-frame metadata with title/version when the loaded content
+* `*.png.json`: per-frame metadata with title/version when the loaded content
   exposes it, build revision, Vulkan format, source extent, present count, and
   capture milestone;
 * `capture-*.json`: a sanitized manifest containing commit, host, capture

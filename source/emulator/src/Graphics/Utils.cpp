@@ -9,7 +9,10 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Profiler.h"
 
+#include "miniz.h"
+
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <set>
 #include <string>
@@ -454,69 +457,146 @@ void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t
 	VulkanDeleteBuffer(ctx, &staging_buffer);
 }
 
-bool UtilWriteRgba8Bmp(const char* path, const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t row_pitch_pixels,
-                       bool swap_red_blue)
+namespace {
+
+void* PngAlloc(void* /*opaque*/, size_t items, size_t size)
+{
+	if (items != 0 && size > SIZE_MAX / items)
+	{
+		return nullptr;
+	}
+	return std::malloc(items * size);
+}
+
+void PngFree(void* /*opaque*/, void* address)
+{
+	std::free(address);
+}
+
+void PngAppendU32(std::vector<uint8_t>* out, uint32_t value)
+{
+	out->push_back(static_cast<uint8_t>((value >> 24u) & 0xffu));
+	out->push_back(static_cast<uint8_t>((value >> 16u) & 0xffu));
+	out->push_back(static_cast<uint8_t>((value >> 8u) & 0xffu));
+	out->push_back(static_cast<uint8_t>(value & 0xffu));
+}
+
+void PngAppendChunk(std::vector<uint8_t>* out, const char type[4], const uint8_t* data, uint32_t size)
+{
+	PngAppendU32(out, size);
+	const size_t type_offset = out->size();
+	out->insert(out->end(), type, type + 4);
+	if (data != nullptr && size != 0)
+	{
+		out->insert(out->end(), data, data + size);
+	}
+	mz_ulong crc = mz_crc32(0, nullptr, 0);
+	crc          = mz_crc32(crc, out->data() + type_offset, 4u + size);
+	PngAppendU32(out, static_cast<uint32_t>(crc));
+}
+
+bool PngDeflate(const std::vector<uint8_t>& input, std::vector<uint8_t>* output)
+{
+	if (output == nullptr)
+	{
+		return false;
+	}
+	output->clear();
+
+	mz_stream stream {};
+	stream.zalloc = PngAlloc;
+	stream.zfree  = PngFree;
+	if (mz_deflateInit2(&stream, MZ_DEFAULT_COMPRESSION, MZ_DEFLATED, MZ_DEFAULT_WINDOW_BITS, 8, MZ_DEFAULT_STRATEGY) != MZ_OK)
+	{
+		return false;
+	}
+
+	constexpr size_t ChunkSize = 64 * 1024;
+	uint8_t          chunk[ChunkSize];
+	stream.next_in            = input.empty() ? nullptr : input.data();
+	stream.avail_in           = static_cast<unsigned int>(input.size());
+	int rc                    = MZ_OK;
+	while (rc != MZ_STREAM_END)
+	{
+		stream.next_out  = chunk;
+		stream.avail_out = static_cast<unsigned int>(sizeof(chunk));
+		rc               = mz_deflate(&stream, MZ_FINISH);
+		if (rc != MZ_OK && rc != MZ_STREAM_END)
+		{
+			mz_deflateEnd(&stream);
+			return false;
+		}
+		const size_t produced = sizeof(chunk) - stream.avail_out;
+		output->insert(output->end(), chunk, chunk + produced);
+	}
+	mz_deflateEnd(&stream);
+	return true;
+}
+
+} // namespace
+
+bool UtilWriteRgba8Png(const char* path, const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t row_pitch_pixels)
 {
 	if (path == nullptr || path[0] == '\0' || pixels == nullptr || width == 0 || height == 0 || row_pitch_pixels < width || width > 8192 ||
 	    height > 8192)
 	{
 		return false;
 	}
-
-	const uint64_t row_bytes64 = static_cast<uint64_t>(width) * 4u;
-	const uint64_t image_size  = row_bytes64 * height;
-	if (row_bytes64 > UINT32_MAX || image_size > UINT32_MAX - 54u)
+	const uint64_t filtered_row_size = static_cast<uint64_t>(width) * 4u + 1u;
+	const uint64_t filtered_size     = filtered_row_size * height;
+	if (filtered_row_size > UINT32_MAX || filtered_size > UINT32_MAX)
 	{
 		return false;
 	}
-	const uint32_t row_bytes = static_cast<uint32_t>(row_bytes64);
-	const uint32_t dib       = 40u;
-	const uint32_t offset    = 14u + dib;
-	const uint32_t file_size = offset + static_cast<uint32_t>(image_size);
+
+	std::vector<uint8_t> filtered(static_cast<size_t>(filtered_size));
+	for (uint32_t y = 0; y < height; y++)
+	{
+		uint8_t*       dst = filtered.data() + static_cast<uint64_t>(y) * filtered_row_size;
+		const uint8_t* src = pixels + static_cast<uint64_t>(y) * row_pitch_pixels * 4u;
+		dst[0]            = 0; // PNG filter type None keeps agent scoring deterministic.
+		std::memcpy(dst + 1, src, static_cast<uint64_t>(width) * 4u);
+	}
+
+	std::vector<uint8_t> compressed;
+	if (!PngDeflate(filtered, &compressed) || compressed.size() > UINT32_MAX)
+	{
+		return false;
+	}
+
+	std::vector<uint8_t> png;
+	png.reserve(8u + 25u + compressed.size() + 12u);
+	const uint8_t signature[8] = {0x89u, 'P', 'N', 'G', '\r', '\n', 0x1au, '\n'};
+	png.insert(png.end(), signature, signature + sizeof(signature));
+
+	uint8_t ihdr[13] {};
+	ihdr[0]  = static_cast<uint8_t>((width >> 24u) & 0xffu);
+	ihdr[1]  = static_cast<uint8_t>((width >> 16u) & 0xffu);
+	ihdr[2]  = static_cast<uint8_t>((width >> 8u) & 0xffu);
+	ihdr[3]  = static_cast<uint8_t>(width & 0xffu);
+	ihdr[4]  = static_cast<uint8_t>((height >> 24u) & 0xffu);
+	ihdr[5]  = static_cast<uint8_t>((height >> 16u) & 0xffu);
+	ihdr[6]  = static_cast<uint8_t>((height >> 8u) & 0xffu);
+	ihdr[7]  = static_cast<uint8_t>(height & 0xffu);
+	ihdr[8]  = 8; // bit depth
+	ihdr[9]  = 6; // RGBA
+	ihdr[10] = 0; // deflate
+	ihdr[11] = 0; // adaptive filtering
+	ihdr[12] = 0; // no interlace
+	PngAppendChunk(&png, "IHDR", ihdr, sizeof(ihdr));
+	PngAppendChunk(&png, "IDAT", compressed.data(), static_cast<uint32_t>(compressed.size()));
+	PngAppendChunk(&png, "IEND", nullptr, 0);
 
 	FILE* file = std::fopen(path, "wb");
 	if (file == nullptr)
 	{
 		return false;
 	}
-
-	uint8_t header[54] {};
-	header[0] = 'B';
-	header[1] = 'M';
-	std::memcpy(header + 2, &file_size, 4);
-	std::memcpy(header + 10, &offset, 4);
-	std::memcpy(header + 14, &dib, 4);
-	const int32_t  signed_width   = static_cast<int32_t>(width);
-	const int32_t  signed_height  = -static_cast<int32_t>(height);
-	const uint16_t planes         = 1;
-	const uint16_t bits_per_pixel = 32;
-	std::memcpy(header + 18, &signed_width, 4);
-	std::memcpy(header + 22, &signed_height, 4);
-	std::memcpy(header + 26, &planes, 2);
-	std::memcpy(header + 28, &bits_per_pixel, 2);
-
-	bool written = std::fwrite(header, 1, sizeof(header), file) == sizeof(header);
-	for (uint32_t y = 0; y < height && written; y++)
-	{
-		const uint8_t* row = pixels + static_cast<uint64_t>(y) * row_pitch_pixels * 4u;
-		if (!swap_red_blue)
-		{
-			written = std::fwrite(row, 1, row_bytes, file) == row_bytes;
-		} else
-		{
-			for (uint32_t x = 0; x < width && written; x++)
-			{
-				const uint8_t* pixel     = row + x * 4u;
-				const uint8_t  output[4] = {pixel[2], pixel[1], pixel[0], pixel[3]};
-				written                  = std::fwrite(output, 1, sizeof(output), file) == sizeof(output);
-			}
-		}
-	}
-	written = std::fclose(file) == 0 && written;
-	return written;
+	const bool written = std::fwrite(png.data(), 1, png.size(), file) == png.size();
+	return std::fclose(file) == 0 && written;
 }
 
-bool UtilDumpVulkanImageRgba8Bmp(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag)
+bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag)
 {
 	if (ctx == nullptr || image == nullptr || image->image == nullptr || path_prefix == nullptr || path_prefix[0] == '\0')
 	{
@@ -546,11 +626,19 @@ bool UtilDumpVulkanImageRgba8Bmp(GraphicContext* ctx, VulkanImage* image, const 
 	UtilFillBuffer(ctx, pixels.data(), bytes, w, image, static_cast<uint64_t>(image->layout));
 
 	char path[256];
-	std::snprintf(path, sizeof(path), "%s-%s-%ux%u-id%llu.bmp", path_prefix, (tag != nullptr ? tag : "img"), w, h,
+	std::snprintf(path, sizeof(path), "%s-%s-%ux%u-id%llu.png", path_prefix, (tag != nullptr ? tag : "img"), w, h,
 	              static_cast<unsigned long long>(image->memory.unique_id));
 
 	const bool swap_red_blue = (image->format == VK_FORMAT_B8G8R8A8_SRGB || image->format == VK_FORMAT_B8G8R8A8_UNORM);
-	if (!UtilWriteRgba8Bmp(path, pixels.data(), w, h, w, swap_red_blue))
+	if (swap_red_blue)
+	{
+		for (uint64_t pixel = 0; pixel < static_cast<uint64_t>(w) * h; pixel++)
+		{
+			auto* p = pixels.data() + pixel * 4u;
+			std::swap(p[0], p[2]);
+		}
+	}
+	if (!UtilWriteRgba8Png(path, pixels.data(), w, h, w))
 	{
 		return false;
 	}

@@ -4,12 +4,12 @@
 #include "Emulator/Agent/StallWatch.h"
 #include "Emulator/Controller.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/Window.h"
 #include "Kyty/UnitTest.h"
 
 #include <atomic>
 #include <cstdio>
-#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -20,79 +20,39 @@ using namespace Kyty::Emulator::Agent;
 
 namespace {
 
-void WriteBmp32(const char* path, uint32_t width, uint32_t height, uint8_t r, uint8_t g, uint8_t b)
+void WritePng32(const char* path, uint32_t width, uint32_t height, uint8_t r, uint8_t g, uint8_t b)
 {
-	const uint32_t row_bytes   = width * 4u;
-	const uint32_t pixel_bytes = row_bytes * height;
-	std::vector<uint8_t> file(54u + pixel_bytes, 0);
-	file[0]                    = 'B';
-	file[1]                    = 'M';
-	const uint32_t file_size   = static_cast<uint32_t>(file.size());
-	file[2]                    = static_cast<uint8_t>(file_size);
-	file[3]                    = static_cast<uint8_t>(file_size >> 8);
-	file[4]                    = static_cast<uint8_t>(file_size >> 16);
-	file[5]                    = static_cast<uint8_t>(file_size >> 24);
-	file[10]                   = 54;
-	file[14]                   = 40;
-	file[18]                   = static_cast<uint8_t>(width);
-	file[19]                   = static_cast<uint8_t>(width >> 8);
-	file[20]                   = static_cast<uint8_t>(width >> 16);
-	file[21]                   = static_cast<uint8_t>(width >> 24);
-	file[22]                   = static_cast<uint8_t>(height);
-	file[23]                   = static_cast<uint8_t>(height >> 8);
-	file[24]                   = static_cast<uint8_t>(height >> 16);
-	file[25]                   = static_cast<uint8_t>(height >> 24);
-	file[26]                   = 1;
-	file[28]                   = 32;
+	std::vector<uint8_t> pixels(static_cast<uint64_t>(width) * height * 4u);
 	for (uint32_t y = 0; y < height; ++y)
 	{
 		for (uint32_t x = 0; x < width; ++x)
 		{
-			const size_t off = 54u + static_cast<size_t>(y) * row_bytes + static_cast<size_t>(x) * 4u;
-			file[off + 0]    = b;
-			file[off + 1]    = g;
-			file[off + 2]    = r;
-			file[off + 3]    = 255;
+			const size_t off = (static_cast<size_t>(y) * width + x) * 4u;
+			pixels[off + 0]  = r;
+			pixels[off + 1]  = g;
+			pixels[off + 2]  = b;
+			pixels[off + 3]  = 255;
 		}
 	}
-	std::ofstream out(path, std::ios::binary);
-	out.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+	ASSERT_TRUE(Kyty::Libs::Graphics::UtilWriteRgba8Png(path, pixels.data(), width, height, width));
 }
 
-void WriteBmp32HotBlocks(const char* path, uint32_t width, uint32_t height)
+void WritePng32HotBlocks(const char* path, uint32_t width, uint32_t height)
 {
-	const uint32_t row_bytes   = width * 4u;
-	const uint32_t pixel_bytes = row_bytes * height;
-	std::vector<uint8_t> file(54u + pixel_bytes, 0);
-	file[0]                  = 'B';
-	file[1]                  = 'M';
-	const uint32_t file_size = static_cast<uint32_t>(file.size());
-	file[2]                  = static_cast<uint8_t>(file_size);
-	file[3]                  = static_cast<uint8_t>(file_size >> 8);
-	file[4]                  = static_cast<uint8_t>(file_size >> 16);
-	file[5]                  = static_cast<uint8_t>(file_size >> 24);
-	file[10]                 = 54;
-	file[14]                 = 40;
-	file[18]                 = static_cast<uint8_t>(width);
-	file[19]                 = static_cast<uint8_t>(width >> 8);
-	file[22]                 = static_cast<uint8_t>(height);
-	file[23]                 = static_cast<uint8_t>(height >> 8);
-	file[26]                 = 1;
-	file[28]                 = 32;
+	std::vector<uint8_t> pixels(static_cast<uint64_t>(width) * height * 4u);
 	for (uint32_t y = 0; y < height; ++y)
 	{
 		for (uint32_t x = 0; x < width; ++x)
 		{
-			const size_t off = 54u + static_cast<size_t>(y) * row_bytes + static_cast<size_t>(x) * 4u;
+			const size_t off = (static_cast<size_t>(y) * width + x) * 4u;
 			const bool   hot = (x < width / 3u) || (x > (2u * width) / 3u);
-			file[off + 0]    = hot ? 20 : static_cast<uint8_t>(40 + (x % 40));
-			file[off + 1]    = hot ? 240 : static_cast<uint8_t>(50 + (y % 40));
-			file[off + 2]    = hot ? 255 : static_cast<uint8_t>(30 + ((x + y) % 50));
-			file[off + 3]    = 255;
+			pixels[off + 0]  = hot ? 255 : static_cast<uint8_t>(30 + ((x + y) % 50));
+			pixels[off + 1]  = hot ? 240 : static_cast<uint8_t>(50 + (y % 40));
+			pixels[off + 2]  = hot ? 20 : static_cast<uint8_t>(40 + (x % 40));
+			pixels[off + 3]  = 255;
 		}
 	}
-	std::ofstream out(path, std::ios::binary);
-	out.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+	ASSERT_TRUE(Kyty::Libs::Graphics::UtilWriteRgba8Png(path, pixels.data(), width, height, width));
 }
 
 } // namespace
@@ -1045,7 +1005,7 @@ TEST(AgentTools, EventRingKeepsNewestAndLastError)
 	EventRing ring;
 	ring.Push(EventKind::Info, "boot", "hello");
 	ring.Push(EventKind::Error, "boom", "failed");
-	ring.Push(EventKind::Capture, "capture_ok", "/tmp/a.bmp");
+	ring.Push(EventKind::Capture, "capture_ok", "/tmp/a.png");
 
 	EventRecord err {};
 	ASSERT_TRUE(ring.LastError(&err));
@@ -1208,10 +1168,10 @@ TEST(AgentTools, PhaseHintClassifiesLoadingInteractiveAndStalled)
 
 TEST(AgentTools, FrameScoreFlagsHotCorruption)
 {
-	const char* path = "/tmp/kyty_agent_score_hot.bmp";
-	WriteBmp32HotBlocks(path, 128, 96);
+	const char* path = "/tmp/kyty_agent_score_hot.png";
+	WritePng32HotBlocks(path, 128, 96);
 	FrameScoreMetrics metrics {};
-	ASSERT_TRUE(ScoreNativeBmp(path, &metrics));
+	ASSERT_TRUE(ScoreNativePng(path, &metrics));
 	EXPECT_EQ(metrics.verdict, FrameVerdict::HotCorruption);
 	EXPECT_STREQ(metrics.verdict_name, "hot_corruption");
 	EXPECT_GE(metrics.hot_block_ratio, 0.08);
@@ -1223,10 +1183,10 @@ TEST(AgentTools, FrameScoreFlagsHotCorruption)
 
 TEST(AgentTools, FrameScoreFlagsWhiteWorld)
 {
-	const char* path = "/tmp/kyty_agent_score_white.bmp";
-	WriteBmp32(path, 96, 64, 252, 252, 252);
+	const char* path = "/tmp/kyty_agent_score_white.png";
+	WritePng32(path, 96, 64, 252, 252, 252);
 	FrameScoreMetrics metrics {};
-	ASSERT_TRUE(ScoreNativeBmp(path, &metrics));
+	ASSERT_TRUE(ScoreNativePng(path, &metrics));
 	EXPECT_EQ(metrics.verdict, FrameVerdict::WhiteWorld);
 	EXPECT_GE(metrics.white_ratio, 0.35);
 	std::remove(path);
@@ -1234,41 +1194,25 @@ TEST(AgentTools, FrameScoreFlagsWhiteWorld)
 
 TEST(AgentTools, FrameScoreAcceptsVariedGameplayLikeFrame)
 {
-	const char*    path      = "/tmp/kyty_agent_score_ok.bmp";
+	const char*    path      = "/tmp/kyty_agent_score_ok.png";
 	const uint32_t width     = 96;
 	const uint32_t height    = 64;
-	const uint32_t row_bytes = width * 4u;
-	std::vector<uint8_t> file(54u + row_bytes * height, 0);
-	file[0]                  = 'B';
-	file[1]                  = 'M';
-	const uint32_t file_size = static_cast<uint32_t>(file.size());
-	file[2]                  = static_cast<uint8_t>(file_size);
-	file[3]                  = static_cast<uint8_t>(file_size >> 8);
-	file[4]                  = static_cast<uint8_t>(file_size >> 16);
-	file[5]                  = static_cast<uint8_t>(file_size >> 24);
-	file[10]                 = 54;
-	file[14]                 = 40;
-	file[18]                 = static_cast<uint8_t>(width);
-	file[22]                 = static_cast<uint8_t>(height);
-	file[26]                 = 1;
-	file[28]                 = 32;
+	std::vector<uint8_t> pixels(static_cast<uint64_t>(width) * height * 4u);
 	for (uint32_t y = 0; y < height; ++y)
 	{
 		for (uint32_t x = 0; x < width; ++x)
 		{
-			const size_t off = 54u + static_cast<size_t>(y) * row_bytes + static_cast<size_t>(x) * 4u;
-			file[off + 0]    = static_cast<uint8_t>((x * 3 + y * 5) % 180);
-			file[off + 1]    = static_cast<uint8_t>((x * 7 + y * 2) % 160);
-			file[off + 2]    = static_cast<uint8_t>((x * 11 + y * 13) % 140);
-			file[off + 3]    = 255;
+			const size_t off = (static_cast<size_t>(y) * width + x) * 4u;
+			pixels[off + 0]  = static_cast<uint8_t>((x * 11 + y * 13) % 140);
+			pixels[off + 1]  = static_cast<uint8_t>((x * 7 + y * 2) % 160);
+			pixels[off + 2]  = static_cast<uint8_t>((x * 3 + y * 5) % 180);
+			pixels[off + 3]  = 255;
 		}
 	}
-	std::ofstream out(path, std::ios::binary);
-	out.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
-	out.close();
+	ASSERT_TRUE(Kyty::Libs::Graphics::UtilWriteRgba8Png(path, pixels.data(), width, height, width));
 
 	FrameScoreMetrics metrics {};
-	ASSERT_TRUE(ScoreNativeBmp(path, &metrics));
+	ASSERT_TRUE(ScoreNativePng(path, &metrics));
 	EXPECT_EQ(metrics.verdict, FrameVerdict::Healthy);
 	EXPECT_NE(FrameScoreToJson(metrics, path).find("\"healthy\":true"), std::string::npos);
 	std::remove(path);

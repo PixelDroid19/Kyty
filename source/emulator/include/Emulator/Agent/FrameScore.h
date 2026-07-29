@@ -41,9 +41,9 @@ struct FrameScoreMetrics
 
 const char* FrameVerdictName(FrameVerdict verdict);
 
-// Scores a native VideoOut BMP (SDL 32-bpp). Path must be absolute or cwd-relative.
+// Scores a native VideoOut PNG. Path must be absolute or cwd-relative.
 // Returns false only on I/O/parse failure (metrics.verdict = LoadFailed).
-bool ScoreNativeBmp(const char* path, FrameScoreMetrics* out);
+bool ScoreNativePng(const char* path, FrameScoreMetrics* out);
 
 std::string FrameScoreToJson(const FrameScoreMetrics& metrics, const char* path);
 

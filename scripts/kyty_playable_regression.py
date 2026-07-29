@@ -842,7 +842,7 @@ def run_session(
                             cap_src = Path(path)
                             if cap_src.is_file():
                                 present_tag = int(cres.get("present") or 0)
-                                dest = capture_dir / f"capture_present_{present_tag}.bmp"
+                                dest = capture_dir / f"capture_present_{present_tag}.png"
                                 try:
                                     dest.write_bytes(cap_src.read_bytes())
                                 except OSError:

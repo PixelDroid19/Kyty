@@ -34,7 +34,7 @@ void PrintUsage()
 	                     "  kyty_agent --endpoint ENDPOINT sync-waits|threads|last-error\n"
 	                     "  kyty_agent --endpoint ENDPOINT events [--last N] [--after-seq N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT capture [--timeout-ms N] [--no-score]\n"
-	                     "  kyty_agent --endpoint ENDPOINT score [--path ABS.bmp]\n"
+	                     "  kyty_agent --endpoint ENDPOINT score [--path ABS.png]\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad down|up|tap BUTTON\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad hold BUTTON --delta N [--timeout-ms N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad axis AXIS VALUE|clear\n"

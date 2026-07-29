@@ -216,7 +216,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	return tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
-// Native VideoOut BMPs default to a capped edge so agent loops do not write
+// Native VideoOut PNGs default to a capped edge so agent loops do not write
 // multi-dozen-MB 4K frames. Explicit env "0" means full resolution.
 [[nodiscard]] inline uint32_t NativeCaptureResolveMaxEdge(const char* env_value, uint32_t default_when_unset = 1280u)
 {
@@ -706,13 +706,11 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_
                    uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image, uint64_t src_layout);
-// Opt-in RGBA8 BMP dump for RT vs VideoOut localization (scratch paths only).
-// Returns false if skipped (wrong format/size, already dumped, or env unset).
-// Write tightly or strided 32-bit rows as a top-down BMP. This is the only BMP
-// encoder used by graphics diagnostics; callers decide whether R/B must swap.
-bool UtilWriteRgba8Bmp(const char* path, const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t row_pitch_pixels,
-                       bool swap_red_blue = false);
-bool UtilDumpVulkanImageRgba8Bmp(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag);
+// Write tightly or strided RGBA8 rows as a top-down PNG. Native capture uses
+// this path so graphics diagnostics and agent artifacts share one portable
+// image format.
+bool UtilWriteRgba8Png(const char* path, const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t row_pitch_pixels);
+bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag);
 void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t size);
 void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image);
 void UtilSetImageLayoutOptimal(VulkanImage* image);

@@ -21,7 +21,7 @@ ocultar entradas no soportadas.
 | Creación de imágenes/vistas Vulkan | `VulkanImageBuilder.h/.cpp` | Texture, StorageTexture, RenderTexture, DepthStencil, VideoOut, Window y GraphicsRender. No queda un `VkImageCreateInfo` o `VkImageViewCreateInfo` construido fuera del builder. |
 | Fábricas de objetos de imagen | Helpers internos compartidos en Texture y RenderTexture | `Create` y `CreateFromObjects` conservan entradas distintas, pero comparten validación, descriptor y construcción. |
 | Geometría tile 64 KiB | `TileGet64KBBlockWidth` y `TileAlign64KBPitch` | Render targets y texturas ya no copian tablas de ancho de bloque. Formatos desconocidos fallan explícitamente. |
-| BMP RGBA8 | `UtilWriteRgba8Bmp` | Dumps Vulkan y diagnóstico lineal de Texture usan un único encoder. |
+| PNG RGBA8 | `UtilWriteRgba8Png` | Capturas nativas y artefactos del agente usan un único encoder. |
 | Escritura atómica host | `AtomicFileWrite` | Pipeline cache, caché SPIR-V y SaveDataMemory comparten temporal único y reemplazo atómico. |
 | Runners Python | `scripts/kyty_runner_common.py` | Matrix, playable y capture comparten entorno estricto, socket, identidad del agente, proceso-grupo y terminación. |
 | Escape JSON del agente | `Kyty/Agent/Json.h` | CLI y protocolo comparten el mismo encoder; no queda un `JsonEscape` local. |

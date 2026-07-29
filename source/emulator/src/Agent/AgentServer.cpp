@@ -61,7 +61,7 @@ std::string HelpResult()
 	              "{\"tool\":\"events\",\"args\":{\"last\":50,\"after_seq\":0}},"
 	              "{\"tool\":\"last_error\"},"
 	              "{\"tool\":\"capture\",\"args\":{\"timeout_ms\":10000,\"score\":true}},"
-	              "{\"tool\":\"score\",\"args\":{\"path\":\"/abs/last.bmp\"}},"
+	              "{\"tool\":\"score\",\"args\":{\"path\":\"/abs/last.png\"}},"
 	              "{\"tool\":\"pad_down\",\"args\":{\"button\":\"cross\"}},"
 	              "{\"tool\":\"pad_up\",\"args\":{\"button\":\"cross\"}},"
 	              "{\"tool\":\"pad_tap\",\"args\":{\"button\":\"cross\"}},"
@@ -503,7 +503,7 @@ void ReportUnhealthyScore(const FrameScoreMetrics& metrics)
 std::string ScoreCaptureJson(const std::string& path)
 {
 	FrameScoreMetrics metrics {};
-	if (!ScoreNativeBmp(path.c_str(), &metrics))
+	if (!ScoreNativePng(path.c_str(), &metrics))
 	{
 		return "{\"verdict\":\"load_failed\",\"healthy\":false}";
 	}
@@ -552,7 +552,9 @@ WatchCaptureArtifacts CaptureWatchArtifacts()
 	g_last_capture_path  = result.path;
 	artifacts.score_json = ScoreCaptureJson(result.path);
 	char capture[768];
-	std::snprintf(capture, sizeof(capture), "{\"path\":%s,\"frame\":%d,\"present\":%llu,\"format\":%s,\"width\":%u,\"height\":%u}",
+	std::snprintf(capture, sizeof(capture),
+	              "{\"path\":%s,\"frame\":%d,\"present\":%llu,\"format\":%s,\"image_format\":\"PNG\",\"mime_type\":\"image/png\","
+	              "\"width\":%u,\"height\":%u}",
 	              JsonString(result.path.c_str()).c_str(), result.frame, static_cast<unsigned long long>(result.present),
 	              JsonString(result.format.c_str()).c_str(), result.width, result.height);
 	artifacts.capture_json = capture;
@@ -606,7 +608,8 @@ std::string HandleCapture(const Request& req)
 
 	char buf[1536];
 	std::snprintf(buf, sizeof(buf),
-	              "{\"path\":%s,\"milestone\":%s,\"format\":%s,\"width\":%u,\"height\":%u,\"present\":%llu,\"frame\":%d,\"score\":%s}",
+	              "{\"path\":%s,\"milestone\":%s,\"format\":%s,\"image_format\":\"PNG\",\"mime_type\":\"image/png\","
+	              "\"width\":%u,\"height\":%u,\"present\":%llu,\"frame\":%d,\"score\":%s}",
 	              JsonString(result.path.c_str()).c_str(), JsonString(result.milestone.c_str()).c_str(),
 	              JsonString(result.format.c_str()).c_str(), result.width, result.height, static_cast<unsigned long long>(result.present),
 	              result.frame, score_json.c_str());
@@ -629,9 +632,9 @@ std::string HandleScore(const Request& req)
 		return FormatErr(req.id, "invalid_args", "score path must be absolute");
 	}
 	FrameScoreMetrics metrics {};
-	if (!ScoreNativeBmp(path.c_str(), &metrics))
+	if (!ScoreNativePng(path.c_str(), &metrics))
 	{
-		return FormatErr(req.id, "load_failed", "failed to load native BMP");
+		return FormatErr(req.id, "load_failed", "failed to load native PNG");
 	}
 	ReportUnhealthyScore(metrics);
 	const std::string body = FrameScoreToJson(metrics, path.c_str());

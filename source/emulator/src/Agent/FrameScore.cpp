@@ -3,12 +3,12 @@
 
 #include "Emulator/Agent/Protocol.h"
 
+#include "stb_image.h"
+
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
-#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -17,35 +17,23 @@ using Kyty::Agent::JsonString;
 
 namespace {
 
-struct BmpInfo
+struct PngInfo
 {
-	uint32_t width      = 0;
-	uint32_t height     = 0;
-	uint32_t row_bytes  = 0;
-	bool     top_down   = false;
-	uint32_t r_mask     = 0x00ff0000u;
-	uint32_t g_mask     = 0x0000ff00u;
-	uint32_t b_mask     = 0x000000ffu;
-	std::vector<uint8_t> pixels; // tightly packed BGRA-ish via masks, 4 bpp
+	uint32_t       width  = 0;
+	uint32_t       height = 0;
+	unsigned char* pixels = nullptr; // tightly packed RGBA8
 };
 
-uint8_t ChannelFromMask(uint32_t pixel, uint32_t mask)
+void FreePng(PngInfo* png)
 {
-	if (mask == 0)
+	if (png != nullptr && png->pixels != nullptr)
 	{
-		return 0;
+		stbi_image_free(png->pixels);
+		png->pixels = nullptr;
 	}
-	uint32_t shift = 0;
-	uint32_t m     = mask;
-	while ((m & 1u) == 0u)
-	{
-		m >>= 1u;
-		++shift;
-	}
-	return static_cast<uint8_t>((pixel & mask) >> shift);
 }
 
-bool LoadBmp32(const char* path, BmpInfo* out, std::string* error)
+bool LoadPngRgba8(const char* path, PngInfo* out, std::string* error)
 {
 	if (path == nullptr || out == nullptr)
 	{
@@ -55,91 +43,38 @@ bool LoadBmp32(const char* path, BmpInfo* out, std::string* error)
 		}
 		return false;
 	}
-	std::ifstream in(path, std::ios::binary);
-	if (!in)
+	int width = 0;
+	int height = 0;
+	int channels = 0;
+	out->pixels = stbi_load(path, &width, &height, &channels, 4);
+	if (out->pixels == nullptr || width <= 0 || height <= 0)
 	{
 		if (error != nullptr)
 		{
-			*error = "open failed";
+			*error = "failed to load PNG";
 		}
 		return false;
 	}
-	uint8_t header[54] {};
-	in.read(reinterpret_cast<char*>(header), 54);
-	if (!in || header[0] != 'B' || header[1] != 'M')
+	if (static_cast<uint32_t>(width) > 8192u || static_cast<uint32_t>(height) > 8192u)
 	{
+		FreePng(out);
 		if (error != nullptr)
 		{
-			*error = "not a BMP";
+			*error = "PNG dimensions exceed capture limit";
 		}
 		return false;
 	}
-	const uint32_t data_offset = static_cast<uint32_t>(header[10]) | (static_cast<uint32_t>(header[11]) << 8) |
-	                             (static_cast<uint32_t>(header[12]) << 16) | (static_cast<uint32_t>(header[13]) << 24);
-	const int32_t width_i = static_cast<int32_t>(static_cast<uint32_t>(header[18]) | (static_cast<uint32_t>(header[19]) << 8) |
-	                                             (static_cast<uint32_t>(header[20]) << 16) | (static_cast<uint32_t>(header[21]) << 24));
-	const int32_t height_i = static_cast<int32_t>(static_cast<uint32_t>(header[22]) | (static_cast<uint32_t>(header[23]) << 8) |
-	                                              (static_cast<uint32_t>(header[24]) << 16) | (static_cast<uint32_t>(header[25]) << 24));
-	const uint16_t planes = static_cast<uint16_t>(header[26] | (header[27] << 8));
-	const uint16_t bpp    = static_cast<uint16_t>(header[28] | (header[29] << 8));
-	const uint32_t compression = static_cast<uint32_t>(header[30]) | (static_cast<uint32_t>(header[31]) << 8) |
-	                             (static_cast<uint32_t>(header[32]) << 16) | (static_cast<uint32_t>(header[33]) << 24);
-	if (planes != 1 || bpp != 32 || width_i == 0 || height_i == 0)
-	{
-		if (error != nullptr)
-		{
-			*error = "unsupported BMP (need 32-bpp)";
-		}
-		return false;
-	}
-
-	out->width    = static_cast<uint32_t>(width_i < 0 ? -width_i : width_i);
-	out->height   = static_cast<uint32_t>(height_i < 0 ? -height_i : height_i);
-	out->top_down = height_i < 0;
-	out->row_bytes = ((out->width * 4u + 3u) / 4u) * 4u;
-
-	// BI_BITFIELDS may store masks after the 40-byte DIB header.
-	out->r_mask = 0x00ff0000u;
-	out->g_mask = 0x0000ff00u;
-	out->b_mask = 0x000000ffu;
-	if (compression == 3u)
-	{
-		uint8_t masks[12] {};
-		in.read(reinterpret_cast<char*>(masks), 12);
-		if (in)
-		{
-			out->r_mask = static_cast<uint32_t>(masks[0]) | (static_cast<uint32_t>(masks[1]) << 8) |
-			              (static_cast<uint32_t>(masks[2]) << 16) | (static_cast<uint32_t>(masks[3]) << 24);
-			out->g_mask = static_cast<uint32_t>(masks[4]) | (static_cast<uint32_t>(masks[5]) << 8) |
-			              (static_cast<uint32_t>(masks[6]) << 16) | (static_cast<uint32_t>(masks[7]) << 24);
-			out->b_mask = static_cast<uint32_t>(masks[8]) | (static_cast<uint32_t>(masks[9]) << 8) |
-			              (static_cast<uint32_t>(masks[10]) << 16) | (static_cast<uint32_t>(masks[11]) << 24);
-		}
-	}
-
-	in.seekg(data_offset, std::ios::beg);
-	out->pixels.resize(static_cast<size_t>(out->row_bytes) * out->height);
-	in.read(reinterpret_cast<char*>(out->pixels.data()), static_cast<std::streamsize>(out->pixels.size()));
-	if (!in)
-	{
-		if (error != nullptr)
-		{
-			*error = "pixel read failed";
-		}
-		return false;
-	}
+	out->width  = static_cast<uint32_t>(width);
+	out->height = static_cast<uint32_t>(height);
 	return true;
 }
 
-void PixelAt(const BmpInfo& bmp, uint32_t x, uint32_t y, uint8_t* r, uint8_t* g, uint8_t* b)
+void PixelAt(const PngInfo& png, uint32_t x, uint32_t y, uint8_t* r, uint8_t* g, uint8_t* b)
 {
-	const uint32_t row = bmp.top_down ? y : (bmp.height - 1u - y);
-	const size_t   off = static_cast<size_t>(row) * bmp.row_bytes + static_cast<size_t>(x) * 4u;
-	const uint32_t px  = static_cast<uint32_t>(bmp.pixels[off]) | (static_cast<uint32_t>(bmp.pixels[off + 1]) << 8) |
-	                    (static_cast<uint32_t>(bmp.pixels[off + 2]) << 16) | (static_cast<uint32_t>(bmp.pixels[off + 3]) << 24);
-	*r = ChannelFromMask(px, bmp.r_mask);
-	*g = ChannelFromMask(px, bmp.g_mask);
-	*b = ChannelFromMask(px, bmp.b_mask);
+	const size_t off = (static_cast<size_t>(y) * png.width + x) * 4u;
+	*r               = png.pixels[off];
+	*g               = png.pixels[off + 1u];
+	*b               = png.pixels[off + 2u];
 }
 
 void Classify(FrameScoreMetrics* out)
@@ -195,31 +130,31 @@ const char* FrameVerdictName(FrameVerdict verdict)
 	return "load_failed";
 }
 
-bool ScoreNativeBmp(const char* path, FrameScoreMetrics* out)
+bool ScoreNativePng(const char* path, FrameScoreMetrics* out)
 {
 	if (out == nullptr)
 	{
 		return false;
 	}
 	*out = FrameScoreMetrics {};
-	BmpInfo     bmp {};
+	PngInfo     png {};
 	std::string error;
-	if (!LoadBmp32(path, &bmp, &error))
+	if (!LoadPngRgba8(path, &png, &error))
 	{
 		out->verdict      = FrameVerdict::LoadFailed;
 		out->verdict_name = FrameVerdictName(out->verdict);
-		out->hint         = "failed to load native BMP";
+		out->hint         = "failed to load native PNG";
 		return false;
 	}
 
-	out->width  = bmp.width;
-	out->height = bmp.height;
+	out->width  = png.width;
+	out->height = png.height;
 
 	// World crop ~full frame minus HUD strip (matches kyty_capture DEFAULT_WORLD_CROP intent).
-	const uint32_t x0 = bmp.width / 20u;
-	const uint32_t x1 = bmp.width - bmp.width / 20u;
-	const uint32_t y0 = bmp.height / 10u;
-	const uint32_t y1 = (bmp.height * 9u) / 10u;
+	const uint32_t x0 = png.width / 20u;
+	const uint32_t x1 = png.width - png.width / 20u;
+	const uint32_t y0 = png.height / 10u;
+	const uint32_t y1 = (png.height * 9u) / 10u;
 
 	uint64_t total = 0;
 	uint64_t white = 0;
@@ -242,7 +177,7 @@ bool ScoreNativeBmp(const char* path, FrameScoreMetrics* out)
 			uint8_t r = 0;
 			uint8_t g = 0;
 			uint8_t b = 0;
-			PixelAt(bmp, x, y, &r, &g, &b);
+			PixelAt(png, x, y, &r, &g, &b);
 			++total;
 			white += (r >= 245 && g >= 245 && b >= 245) ? 1u : 0u;
 			const uint8_t mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
@@ -266,7 +201,7 @@ bool ScoreNativeBmp(const char* path, FrameScoreMetrics* out)
 				uint8_t r2 = 0;
 				uint8_t g2 = 0;
 				uint8_t b2 = 0;
-				PixelAt(bmp, x + 4, y, &r2, &g2, &b2);
+				PixelAt(png, x + 4, y, &r2, &g2, &b2);
 				const int dr = std::abs(static_cast<int>(r) - r2);
 				const int dg = std::abs(static_cast<int>(g) - g2);
 				const int db = std::abs(static_cast<int>(b) - b2);
@@ -285,8 +220,8 @@ bool ScoreNativeBmp(const char* path, FrameScoreMetrics* out)
 	{
 		uint8_t a[3] {};
 		uint8_t b[3] {};
-		PixelAt(bmp, x, mid_y, &a[0], &a[1], &a[2]);
-		PixelAt(bmp, x + step, mid_y, &b[0], &b[1], &b[2]);
+		PixelAt(png, x, mid_y, &a[0], &a[1], &a[2]);
+		PixelAt(png, x + step, mid_y, &b[0], &b[1], &b[2]);
 		col_diff += std::abs(static_cast<int>(a[0]) - b[0]) + std::abs(static_cast<int>(a[1]) - b[1]) +
 		            std::abs(static_cast<int>(a[2]) - b[2]);
 		++col_samples;
@@ -295,8 +230,8 @@ bool ScoreNativeBmp(const char* path, FrameScoreMetrics* out)
 	{
 		uint8_t a[3] {};
 		uint8_t b[3] {};
-		PixelAt(bmp, mid_x, y, &a[0], &a[1], &a[2]);
-		PixelAt(bmp, mid_x, y + step, &b[0], &b[1], &b[2]);
+		PixelAt(png, mid_x, y, &a[0], &a[1], &a[2]);
+		PixelAt(png, mid_x, y + step, &b[0], &b[1], &b[2]);
 		row_diff += std::abs(static_cast<int>(a[0]) - b[0]) + std::abs(static_cast<int>(a[1]) - b[1]) +
 		            std::abs(static_cast<int>(a[2]) - b[2]);
 		++row_samples;
@@ -325,6 +260,7 @@ bool ScoreNativeBmp(const char* path, FrameScoreMetrics* out)
 	out->color_bins      = bins_used;
 	out->stripey         = avg_col > 40.0 && avg_row < 8.0 && avg_col > avg_row * 6.0;
 	Classify(out);
+	FreePng(&png);
 	return true;
 }
 

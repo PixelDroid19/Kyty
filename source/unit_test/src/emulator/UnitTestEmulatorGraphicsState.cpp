@@ -2388,26 +2388,21 @@ TEST(EmulatorGraphicsState, DecodesAndNormalizesVulkanComponentMappings)
 	EXPECT_FALSE(VulkanNormalizeStorageComponentMapping(&format, &mapping));
 }
 
-TEST(EmulatorGraphicsState, WritesRgba8BmpThroughOneCanonicalEncoder)
+TEST(EmulatorGraphicsState, WritesRgba8PngThroughOneCanonicalEncoder)
 {
 	const auto    nonce    = std::chrono::steady_clock::now().time_since_epoch().count();
-	const auto    path     = std::filesystem::temp_directory_path() / ("kyty-rgba8-" + std::to_string(nonce) + ".bmp");
+	const auto    path     = std::filesystem::temp_directory_path() / ("kyty-rgba8-" + std::to_string(nonce) + ".png");
 	const uint8_t pixels[] = {
 	    1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 9, 10, 11, 12, 13, 14, 15, 16, 0, 0, 0, 0,
 	};
-	ASSERT_TRUE(UtilWriteRgba8Bmp(path.string().c_str(), pixels, 2, 2, 3));
+	ASSERT_TRUE(UtilWriteRgba8Png(path.string().c_str(), pixels, 2, 2, 3));
 
-	std::ifstream file(path, std::ios::binary | std::ios::ate);
+	std::ifstream file(path, std::ios::binary);
 	ASSERT_TRUE(file.is_open());
-	EXPECT_EQ(file.tellg(), std::streampos(70));
-	file.seekg(0);
-	uint8_t header[54] {};
-	file.read(reinterpret_cast<char*>(header), sizeof(header));
-	EXPECT_EQ(header[0], 'B');
-	EXPECT_EQ(header[1], 'M');
-	int32_t stored_height = 0;
-	std::memcpy(&stored_height, header + 22, sizeof(stored_height));
-	EXPECT_EQ(stored_height, -2);
+	uint8_t signature[8] {};
+	file.read(reinterpret_cast<char*>(signature), sizeof(signature));
+	const uint8_t expected[8] = {0x89u, 'P', 'N', 'G', '\r', '\n', 0x1au, '\n'};
+	EXPECT_EQ(std::memcmp(signature, expected, sizeof(expected)), 0);
 	file.close();
 	std::filesystem::remove(path);
 }
@@ -2608,7 +2603,7 @@ TEST(EmulatorGraphicsState, PreferGpuMemoryAliasUsesGuestByteSizes)
 }
 
 // Capture/disk bounds: unset env defaults to 1280 so 4K VideoOut dumps are not
-// multi-dozen-MB BMPs; explicit 0 keeps full resolution; prune math is pure.
+// multi-dozen-MB PNGs; explicit 0 keeps full resolution; prune math is pure.
 TEST(EmulatorGraphicsState, NativeCaptureDefaultsAndPruneBoundDisk)
 {
 	using namespace Kyty::Libs::Graphics;

@@ -593,6 +593,42 @@ static void NativeCapturePublishResult(WindowContext* ctx, bool ok, const char* 
 	}
 }
 
+static bool NativeCaptureSavePng(SDL_Surface* surface, const std::filesystem::path& path)
+{
+	if (surface == nullptr || surface->format == nullptr || surface->w <= 0 || surface->h <= 0 || surface->format->BytesPerPixel != 4)
+	{
+		return false;
+	}
+
+	const bool must_lock = SDL_MUSTLOCK(surface);
+	if (must_lock && SDL_LockSurface(surface) != 0)
+	{
+		return false;
+	}
+
+	const uint32_t       width  = static_cast<uint32_t>(surface->w);
+	const uint32_t       height = static_cast<uint32_t>(surface->h);
+	std::vector<uint8_t> rgba(static_cast<uint64_t>(width) * height * 4u);
+	for (uint32_t y = 0; y < height; y++)
+	{
+		const auto* src_row = static_cast<const uint8_t*>(surface->pixels) + static_cast<size_t>(y) * surface->pitch;
+		auto*       dst_row = rgba.data() + static_cast<uint64_t>(y) * width * 4u;
+		for (uint32_t x = 0; x < width; x++)
+		{
+			uint32_t pixel = 0;
+			std::memcpy(&pixel, src_row + static_cast<size_t>(x) * 4u, sizeof(pixel));
+			SDL_GetRGBA(pixel, surface->format, dst_row + x * 4u, dst_row + x * 4u + 1u, dst_row + x * 4u + 2u,
+			            dst_row + x * 4u + 3u);
+		}
+	}
+
+	if (must_lock)
+	{
+		SDL_UnlockSurface(surface);
+	}
+	return UtilWriteRgba8Png(path.string().c_str(), rgba.data(), width, height, width);
+}
+
 static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, int frame, NativeCaptureMilestone milestone)
 {
 	EXIT_IF(ctx == nullptr);
@@ -668,7 +704,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	const auto stamp        = NativeCaptureUtcStamp();
 	const auto sequence     = ctx->native_capture.sequence++;
 	const auto filename     = title_name + "-" + version_name + "-" + revision + "-frame-" + std::to_string(frame) + "-" + stamp + "-" +
-	                          std::to_string(sequence) + ".bmp";
+	                          std::to_string(sequence) + ".png";
 
 	std::error_code error;
 	std::filesystem::create_directories(ctx->native_capture.directory, error);
@@ -730,49 +766,49 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		}
 	}
 
-	const int save_result = SDL_SaveBMP(save_surface, image_path.string().c_str());
+	const bool save_result = NativeCaptureSavePng(save_surface, image_path);
 	if (scaled != nullptr)
 	{
 		SDL_FreeSurface(scaled);
 	}
 	SDL_FreeSurface(surface);
-	if (save_result != 0)
+	if (!save_result)
 	{
-		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=save_image frame=%d recoverable=0 message=%s\n", frame,
-		             SDL_GetError());
+		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=save_image frame=%d recoverable=0\n", frame);
 		if (agent_waiting)
 		{
 			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
-			                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame, "save_image", SDL_GetError());
+			                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame, "save_image",
+			                           "failed to write native capture PNG");
 		}
 		return;
 	}
 
-	// Bound capture-directory growth: keep only the newest N BMP(+json) pairs.
+	// Bound capture-directory growth: keep only the newest N PNG(+json) pairs.
 	if (ctx->native_capture.keep_files > 0 && !ctx->native_capture.directory.empty())
 	{
 		std::error_code                               list_error;
-		std::vector<std::filesystem::directory_entry> bmps;
+		std::vector<std::filesystem::directory_entry> pngs;
 		for (const auto& entry: std::filesystem::directory_iterator(ctx->native_capture.directory, list_error))
 		{
-			if (!list_error && entry.is_regular_file() && entry.path().extension() == ".bmp")
+			if (!list_error && entry.is_regular_file() && entry.path().extension() == ".png")
 			{
-				bmps.push_back(entry);
+				pngs.push_back(entry);
 			}
 		}
-		std::sort(bmps.begin(), bmps.end(),
+		std::sort(pngs.begin(), pngs.end(),
 		          [](const std::filesystem::directory_entry& a, const std::filesystem::directory_entry& b)
 		          {
 			          std::error_code ea;
 			          std::error_code eb;
 			          return a.last_write_time(ea) > b.last_write_time(eb);
 		          });
-		const size_t prune = NativeCapturePruneCount(bmps.size(), ctx->native_capture.keep_files);
-		for (size_t i = bmps.size() - prune; i < bmps.size(); ++i)
+		const size_t prune = NativeCapturePruneCount(pngs.size(), ctx->native_capture.keep_files);
+		for (size_t i = pngs.size() - prune; i < pngs.size(); ++i)
 		{
 			std::error_code remove_error;
-			std::filesystem::remove(bmps[i].path(), remove_error);
-			std::filesystem::remove(bmps[i].path().string() + ".json", remove_error);
+			std::filesystem::remove(pngs[i].path(), remove_error);
+			std::filesystem::remove(pngs[i].path().string() + ".json", remove_error);
 		}
 	}
 
@@ -783,7 +819,8 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		             "{\n  \"schema_version\": 1,\n  \"milestone\": \"%s\",\n  \"frame\": %d,\n  "
 		             "\"present\": %llu,\n  \"title_id\": \"%s\",\n  \"app_version\": \"%s\",\n  "
 		             "\"build_revision\": \"%s\",\n  \"build_dirty\": %s,\n  \"backend\": \"Vulkan\",\n  "
-		             "\"format\": \"%s\",\n  \"width\": %llu,\n  \"height\": %llu,\n  "
+		             "\"format\": \"%s\",\n  \"image_format\": \"PNG\",\n  \"mime_type\": \"image/png\",\n  "
+		             "\"width\": %llu,\n  \"height\": %llu,\n  "
 		             "\"source_width\": %llu,\n  \"source_height\": %llu,\n  "
 		             "\"image\": \"%s\",\n  \"host_peak_rss_bytes\": %llu\n}\n",
 		             NativeCaptureMilestoneName(milestone), frame, static_cast<unsigned long long>(ctx->native_capture.present_count),
@@ -3424,31 +3461,20 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 					UtilFillBuffer(&g_window_ctx->graphic_ctx, pixels.data(), bytes, w, blt_src_image,
 					               static_cast<uint64_t>(blt_src_image->layout));
 					char path[192];
-					std::snprintf(path, sizeof(path), "%s-present-%ux%u.bmp", prefix, w, h);
-					FILE* f = std::fopen(path, "wb");
-					if (f != nullptr)
+					std::snprintf(path, sizeof(path), "%s-present-%ux%u.png", prefix, w, h);
+					std::vector<uint8_t> rgba(static_cast<size_t>(bytes));
+					const bool           bgra = blt_src_image->format == VK_FORMAT_B8G8R8A8_SRGB ||
+	                                      blt_src_image->format == VK_FORMAT_B8G8R8A8_UNORM;
+					for (uint64_t pixel = 0; pixel < static_cast<uint64_t>(w) * h; pixel++)
 					{
-						const uint32_t row_bytes = w * 4u;
-						const uint32_t dib       = 40u;
-						const uint32_t off       = 14u + dib;
-						const uint32_t file_size = off + row_bytes * h;
-						uint8_t        hdr[54] {};
-						hdr[0] = 'B';
-						hdr[1] = 'M';
-						std::memcpy(hdr + 2, &file_size, 4);
-						std::memcpy(hdr + 10, &off, 4);
-						std::memcpy(hdr + 14, &dib, 4);
-						int32_t  wi     = static_cast<int32_t>(w);
-						int32_t  hi     = -static_cast<int32_t>(h);
-						uint16_t planes = 1;
-						uint16_t bpp    = 32;
-						std::memcpy(hdr + 18, &wi, 4);
-						std::memcpy(hdr + 22, &hi, 4);
-						std::memcpy(hdr + 26, &planes, 2);
-						std::memcpy(hdr + 28, &bpp, 2);
-						std::fwrite(hdr, 1, 54, f);
-						std::fwrite(pixels.data(), 1, static_cast<size_t>(bytes), f);
-						std::fclose(f);
+						const auto src = pixel * 4u;
+						rgba[src + 0u] = bgra ? pixels[src + 2u] : pixels[src + 0u];
+						rgba[src + 1u] = pixels[src + 1u];
+						rgba[src + 2u] = bgra ? pixels[src + 0u] : pixels[src + 2u];
+						rgba[src + 3u] = pixels[src + 3u];
+					}
+					if (UtilWriteRgba8Png(path, rgba.data(), w, h, w))
+					{
 						std::fprintf(stderr, "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
 						char rt_prefix[128];
 						std::snprintf(rt_prefix, sizeof(rt_prefix), "/tmp/kyty-dump-rt-at-f%d", frame);

@@ -50,7 +50,7 @@ kyty_agent events --last 100
 kyty_agent last-error
 kyty_agent watch --seconds 15
 kyty_agent capture --timeout-ms 10000
-kyty_agent score --path C:\absolute\capture.bmp
+kyty_agent score --path C:\absolute\capture.png
 ```
 
 Controller automation is explicitly diagnostic input:

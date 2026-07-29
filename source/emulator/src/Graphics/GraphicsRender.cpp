@@ -681,7 +681,7 @@ void GraphicsDumpRememberedRts(GraphicContext* ctx, const char* prefix)
 	{
 		char tag[32];
 		std::snprintf(tag, sizeof(tag), "rt%u", i);
-		UtilDumpVulkanImageRgba8Bmp(ctx, g_dump_rt_images[i], prefix, tag);
+		UtilDumpVulkanImageRgba8Png(ctx, g_dump_rt_images[i], prefix, tag);
 	}
 	if (g_dump_bc3_image != nullptr && g_dump_bc3_image->format == VK_FORMAT_BC3_UNORM_BLOCK)
 	{
@@ -6706,7 +6706,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (bound_dump_spec != nullptr && std::sscanf(bound_dump_spec, "%ux%u", &bound_dump_width, &bound_dump_height) == 2 &&
 		    bound_dump_width == width && bound_dump_height == height)
 		{
-			UtilDumpVulkanImageRgba8Bmp(g_render_ctx->GetGraphicCtx(), tex, "/tmp/kyty-dump-bound-sample", "bound");
+			UtilDumpVulkanImageRgba8Png(g_render_ctx->GetGraphicCtx(), tex, "/tmp/kyty-dump-bound-sample", "bound");
 		}
 
 		if (render_texture)

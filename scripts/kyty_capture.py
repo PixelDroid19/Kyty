@@ -24,7 +24,6 @@ from pathlib import Path
 import platform
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import time
@@ -151,57 +150,9 @@ class Image:
         self.backend = backend
 
 
-def load_native_bmp(path: Path) -> Image:
-    data = path.read_bytes()
-    if len(data) < 54 or data[:2] != b"BM":
-        raise RuntimeError(f"not a BMP capture: {path}")
-
-    bits_offset = struct.unpack_from("<I", data, 10)[0]
-    dib_size = struct.unpack_from("<I", data, 14)[0]
-    width = struct.unpack_from("<i", data, 18)[0]
-    height_raw = struct.unpack_from("<i", data, 22)[0]
-    planes = struct.unpack_from("<H", data, 26)[0]
-    bits_per_pixel = struct.unpack_from("<H", data, 28)[0]
-    compression = struct.unpack_from("<I", data, 30)[0]
-    if width <= 0 or height_raw == 0 or planes != 1 or bits_per_pixel != 32:
-        raise RuntimeError(f"unsupported native BMP geometry: {path}")
-    if compression not in (0, 3):
-        raise RuntimeError(f"unsupported native BMP compression: {path}")
-
-    height = abs(height_raw)
-    mask_offset = 14 + 40
-    if dib_size >= 56:
-        mask_offset = 14 + 40
-    elif compression == 3:
-        mask_offset = 14 + dib_size
-    if mask_offset + 16 > len(data):
-        raise RuntimeError(f"native BMP masks are truncated: {path}")
-    red_mask, green_mask, blue_mask, alpha_mask = struct.unpack_from("<IIII", data, mask_offset)
-    if compression == 0:
-        red_mask, green_mask, blue_mask, alpha_mask = 0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000
-
-    row_stride = width * 4
-    if bits_offset + row_stride * height > len(data):
-        raise RuntimeError(f"native BMP pixels are truncated: {path}")
-
-    def channel(value: int, mask: int, default: int = 0) -> int:
-        if mask == 0:
-            return default
-        shift = (mask & -mask).bit_length() - 1
-        maximum = mask >> shift
-        return ((value & mask) >> shift) * 255 // maximum
-
-    def pixel(x: int, y: int) -> tuple[int, int, int]:
-        stored_y = height - 1 - y if height_raw > 0 else y
-        value = struct.unpack_from("<I", data, bits_offset + stored_y * row_stride + x * 4)[0]
-        return channel(value, red_mask), channel(value, green_mask), channel(value, blue_mask)
-
-    return Image(width, height, pixel, "native-bmp")
-
-
 def load_image(path: Path) -> Image:
-    if path.suffix.lower() == ".bmp":
-        return load_native_bmp(path)
+    if path.suffix.lower() != ".png":
+        raise RuntimeError(f"native capture scoring requires PNG: {path}")
     try:
         from PIL import Image as PILImage  # type: ignore
 
@@ -625,7 +576,7 @@ def run_capture(args: argparse.Namespace) -> int:
             "command_buffer_dump": args.command_buffer_dump,
             "pipeline_dump": args.pipeline_dump,
             "native_capture": True,
-            "native_capture_format": "BMP",
+            "native_capture_format": "PNG",
             "strict_environment": not args.allow_diagnostics,
             "strict_compatibility_candidate": False,
         },
