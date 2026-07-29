@@ -58,6 +58,7 @@
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <cstring>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -6228,10 +6229,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 	int          index_sampled            = 0;
 	int          index_sampled_3d         = 0;
 	int          index_storage            = 0;
-	VulkanImage* sampled_2d_fallback      = nullptr;
-	VulkanImage* sampled_3d_fallback      = nullptr;
-	int          sampled_2d_fallback_view = VulkanImage::VIEW_DEFAULT;
-	int          sampled_3d_fallback_view = VulkanImage::VIEW_3D;
+	VulkanImage* sampled_2d_padding_image = nullptr;
+	VulkanImage* sampled_3d_padding_image = nullptr;
+	int          sampled_2d_padding_view  = VulkanImage::VIEW_DEFAULT;
+	int          sampled_3d_padding_view  = VulkanImage::VIEW_3D;
 
 	bool gen5 = Config::IsNextGen();
 
@@ -6764,7 +6765,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		uint32_t           bound_dump_width  = 0;
 		uint32_t           bound_dump_height = 0;
 		if (bound_dump_spec != nullptr && std::sscanf(bound_dump_spec, "%ux%u", &bound_dump_width, &bound_dump_height) == 2 &&
-		    bound_dump_width == width && bound_dump_height == height)
+		    bound_dump_width == static_cast<uint32_t>(width) && bound_dump_height == static_cast<uint32_t>(height))
 		{
 			UtilDumpVulkanImageRgba8Png(g_render_ctx->GetGraphicCtx(), tex, "/tmp/kyty-dump-bound-sample", "bound");
 		}
@@ -6814,12 +6815,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			{
 				if (three_dimensional)
 				{
-					sampled_3d_fallback      = tex;
-					sampled_3d_fallback_view = sampled_views[*sampled_index];
+					sampled_3d_padding_image = tex;
+					sampled_3d_padding_view  = sampled_views[*sampled_index];
 				} else
 				{
-					sampled_2d_fallback      = tex;
-					sampled_2d_fallback_view = sampled_views[*sampled_index];
+					sampled_2d_padding_image = tex;
+					sampled_2d_padding_view  = sampled_views[*sampled_index];
 				}
 			}
 			if (gen5)
@@ -6837,7 +6838,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		const bool tagged_3d_sampled_descriptor = gen5 && three_dimensional && !textures.desc[i].textures2d_without_sampler;
 		EXIT_NOT_IMPLEMENTED(!tagged_3d_sampled_descriptor && ((gen5 ? r.Base40() : r.Base38()) >> 32u) != 0);
 		if (bound_dump_spec != nullptr && std::sscanf(bound_dump_spec, "%ux%u", &bound_dump_width, &bound_dump_height) == 2 &&
-		    bound_dump_width == width && bound_dump_height == height)
+		    bound_dump_width == static_cast<uint32_t>(width) && bound_dump_height == static_cast<uint32_t>(height))
 		{
 			std::fprintf(stderr,
 			             "KYTY_DUMP_BOUND_SAMPLE addr=0x%012" PRIx64 " id=%" PRIu64 " type=%u format=%u layout=%u "
@@ -6862,19 +6863,19 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 	// A mixed shader accesses the two typed arrays through a runtime-tagged
 	// descriptor index. Vulkan still requires every statically indexed array
-	// element to be valid, so pad each array with a same-shape fallback.
+	// element to be valid, so pad the unused slots with a same-shape descriptor.
 	if (index_sampled > 0 && index_sampled_3d > 0)
 	{
 		const int sampled_total = index_sampled + index_sampled_3d;
 		for (int i = index_sampled; i < sampled_total; ++i)
 		{
-			images_sampled[i]      = sampled_2d_fallback;
-			images_sampled_view[i] = sampled_2d_fallback_view;
+			images_sampled[i]      = sampled_2d_padding_image;
+			images_sampled_view[i] = sampled_2d_padding_view;
 		}
 		for (int i = index_sampled_3d; i < sampled_total; ++i)
 		{
-			images_sampled_3d[i]      = sampled_3d_fallback;
-			images_sampled_3d_view[i] = sampled_3d_fallback_view;
+			images_sampled_3d[i]      = sampled_3d_padding_image;
+			images_sampled_3d_view[i] = sampled_3d_padding_view;
 		}
 	}
 }
@@ -7322,39 +7323,109 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 	             ps_input.bind.storage_buffers.buffers_num, xy.x, xy.y, xy.width, xy.height, sc.left, sc.top, sc.right, sc.bottom);
 }
 
-bool GraphicsResolveRectListAutoDraw(uint32_t primitive_type, uint32_t index_count, int vertex_buffers_num, uint32_t* vertex_count)
+struct PrimitiveDrawPlan
 {
-	if (primitive_type != 7 || index_count != 3 || vertex_buffers_num != 0 || vertex_count == nullptr)
+	VkPrimitiveTopology topology      = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+	uint32_t            draw_count    = 0;
+	uint32_t            chunk_count   = 0;
+	bool                chunked       = false;
+	bool                requires_rect = false;
+};
+
+static bool GraphicsResolvePrimitiveDrawPlan(uint32_t primitive_type, uint32_t guest_count, int vertex_buffers_num, bool indexed,
+                                             PrimitiveDrawPlan* plan)
+{
+	if (plan == nullptr)
 	{
 		return false;
 	}
 
-	*vertex_count = 4;
-	return true;
-}
-
-static bool GraphicsResolvePrimitiveTopology(uint32_t primitive_type, VkPrimitiveTopology* topology)
-{
-	if (topology == nullptr)
-	{
-		return false;
-	}
+	PrimitiveDrawPlan resolved {};
+	resolved.draw_count = guest_count;
 
 	switch (primitive_type)
 	{
-		case 1: *topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
-		case 2: *topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
-		case 3: *topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
-		case 4: *topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;
-		case 5: *topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;
-		case 6: *topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
+		case 1: resolved.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
+		case 2: resolved.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
+		case 3: resolved.topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
+		case 4: resolved.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;
+		case 5: resolved.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;
+		case 6: resolved.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
 		case 7:
-		case 17: *topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
-		case 19: *topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;
+		case 17:
+			resolved.topology      = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+			resolved.requires_rect = !indexed;
+			if (!indexed && guest_count == 3 && vertex_buffers_num == 0)
+			{
+				resolved.draw_count = 4;
+			} else if (!indexed)
+			{
+				return false;
+			}
+			break;
+		case 19:
+			resolved.topology    = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+			resolved.chunked     = true;
+			resolved.chunk_count = 4;
+			if ((guest_count & 0x3u) != 0)
+			{
+				return false;
+			}
+			break;
 		default: return false;
 	}
 
+	*plan = resolved;
 	return true;
+}
+
+static bool PrimitiveDumpMatches(uint32_t primitive_type)
+{
+	const char* selector = std::getenv("KYTY_DUMP_PRIMITIVE");
+	if (selector == nullptr || selector[0] == '\0')
+	{
+		return false;
+	}
+
+	if (std::strcmp(selector, "rect") == 0)
+	{
+		return primitive_type == 7u || primitive_type == 17u;
+	}
+
+	char* end = nullptr;
+	const auto parsed = std::strtoul(selector, &end, 0);
+	return end != selector && *end == '\0' && parsed == primitive_type;
+}
+
+static void MaybeDumpPrimitiveDrawPlan(const char* path, uint32_t primitive_type, uint32_t guest_count, int vertex_buffers_num,
+                                       bool indexed, const PrimitiveDrawPlan& plan)
+{
+	if (!PrimitiveDumpMatches(primitive_type))
+	{
+		return;
+	}
+
+	static uint32_t logs = 0;
+	uint32_t        limit = 128u;
+	if (const char* env_limit = std::getenv("KYTY_DUMP_PRIMITIVE_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
+	{
+		const auto parsed = std::strtoul(env_limit, nullptr, 10);
+		if (parsed > 0u && parsed <= 100000u)
+		{
+			limit = static_cast<uint32_t>(parsed);
+		}
+	}
+	if (logs >= limit)
+	{
+		return;
+	}
+	++logs;
+
+	std::fprintf(stderr,
+	             "KYTY_DUMP_PRIMITIVE path=%s prim=%u indexed=%u guest_count=%u draw_count=%u chunked=%u chunk_count=%u vertex_buffers=%d "
+	             "topology=%u rect=%u\n",
+	             path, primitive_type, indexed ? 1u : 0u, guest_count, plan.draw_count, plan.chunked ? 1u : 0u, plan.chunk_count,
+	             vertex_buffers_num, static_cast<uint32_t>(plan.topology), plan.requires_rect ? 1u : 0u);
 }
 
 static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
@@ -7433,9 +7504,6 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
 
-	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
-	EXIT_NOT_IMPLEMENTED(!GraphicsResolvePrimitiveTopology(ucfg->GetPrimType(), &topology));
-
 	printf("GraphicsRenderDrawIndex():Parameters:\n");
 	printf("\t index_type_and_size = 0x%08" PRIx32 "\n", index_type_and_size);
 	printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
@@ -7456,11 +7524,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 			index_type = VK_INDEX_TYPE_UINT32;
 			index_size = 4 * static_cast<uint64_t>(index_count);
 			break;
-		default:
-			printf("WARNING: unknown index_type_and_size %u, defaulting to uint16\n", index_type_and_size);
-			index_type = VK_INDEX_TYPE_UINT16;
-			index_size = 2 * static_cast<uint64_t>(index_count);
-			break;
+		default: EXIT_NOT_IMPLEMENTED(index_type_and_size != 0 && index_type_and_size != 1);
 	}
 
 	EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
@@ -7483,6 +7547,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	ShaderVertexInputInfo vs_input_info;
 	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info);
+
+	PrimitiveDrawPlan primitive_plan {};
+	EXIT_NOT_IMPLEMENTED(!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true,
+	                                                       &primitive_plan));
+	MaybeDumpPrimitiveDrawPlan("indexed", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
@@ -7510,7 +7579,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	                static_cast<uint32_t>(draw_modifier));
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
-	                                                                  &ps_input_info, topology, sample_locations);
+	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
 
@@ -7540,28 +7609,17 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
 	const int32_t vertex_offset = ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info);
 
-	switch (ucfg->GetPrimType())
+	if (primitive_plan.chunked)
 	{
-		case 1:
-		case 2:
-		case 3:
-		case 4:
-		case 5:
-		case 6:
-		case 7:
-		case 17:
-			vkCmdDrawIndexed(vk_buffer, index_count, 1, 0, vertex_offset, 0);
+		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
+		{
+			vkCmdDrawIndexed(vk_buffer, primitive_plan.chunk_count, 1, i, vertex_offset, 0);
 			DebugStatsRecordDraw();
-			break;
-		case 19:
-			EXIT_NOT_IMPLEMENTED((index_count & 0x3u) != 0);
-			for (uint32_t i = 0; i < index_count; i += 4)
-			{
-				vkCmdDrawIndexed(vk_buffer, 4, 1, i, vertex_offset, 0);
-				DebugStatsRecordDraw();
-			}
-			break;
-		default: EXIT_NOT_IMPLEMENTED(true);
+		}
+	} else
+	{
+		vkCmdDrawIndexed(vk_buffer, primitive_plan.draw_count, 1, 0, vertex_offset, 0);
+		DebugStatsRecordDraw();
 	}
 
 	buffer->EndRenderPass();
@@ -7804,7 +7862,14 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	const bool stencil_test_required = depth_info.stencil_test_enable;
 	const bool depth_stencil_write = effective_depth_write || GraphicsRenderDepthStencilCopyStencilTestWrites(depth_info);
 	const bool indexed_draw        = (index_addr != nullptr);
-	const bool static_rect_list    = (!indexed_draw && ucfg->GetPrimType() == 7 && index_count == 3);
+	PrimitiveDrawPlan copy_primitive_plan {};
+	const bool supported_copy_primitive =
+	    GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, 0, indexed_draw, &copy_primitive_plan);
+	if (supported_copy_primitive)
+	{
+		MaybeDumpPrimitiveDrawPlan("depth-stencil-copy", ucfg->GetPrimType(), index_count, 0, indexed_draw, copy_primitive_plan);
+	}
+	const bool static_rect_list = supported_copy_primitive && copy_primitive_plan.requires_rect && copy_primitive_plan.draw_count == 4;
 	const bool guest_triangle_strip = (!indexed_draw && ucfg->GetPrimType() == 6 && index_count == 3);
 	const bool guest_triangle_list  = (indexed_draw && ucfg->GetPrimType() == 4 && index_count >= 3 && (index_count % 3) == 0);
 	const bool guest_geometry       = guest_triangle_strip || guest_triangle_list;
@@ -8109,15 +8174,17 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
 	RequireSupportedRenderResolutionPlan(depth_only_resolution);
 
-	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
-	EXIT_NOT_IMPLEMENTED(!GraphicsResolvePrimitiveTopology(ucfg->GetPrimType(), &topology));
-
 	const auto& vertex_shader_info = sh_ctx->GetVs();
 	const auto& pixel_shader_info  = sh_ctx->GetPs();
 	const auto& shader_regs        = ctx->GetShaderRegisters();
 
 	ShaderVertexInputInfo vs_input_info;
 	ShaderGetInputInfoVS(&vertex_shader_info, &shader_regs, &vs_input_info);
+
+	PrimitiveDrawPlan primitive_plan {};
+	EXIT_NOT_IMPLEMENTED(!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false,
+	                                                       &primitive_plan));
+	MaybeDumpPrimitiveDrawPlan("auto", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info);
@@ -8143,7 +8210,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                static_cast<uint32_t>(draw_modifier));
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
-	                                                                  &ps_input_info, topology, sample_locations);
+	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
 
@@ -8162,40 +8229,17 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
 	const uint32_t first_vertex = static_cast<uint32_t>(ShaderResolveVertexOffset(0, vs_input_info));
 
-	switch (ucfg->GetPrimType())
+	if (primitive_plan.chunked)
 	{
-		case 1:
-		case 2:
-		case 3:
-		case 4:
-		case 5:
-		case 6:
-			vkCmdDraw(vk_buffer, index_count, 1, first_vertex, 0);
-			DebugStatsRecordDraw();
-			break;
-		case 7:
+		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
-			uint32_t vertex_count = 0;
-			EXIT_NOT_IMPLEMENTED(
-			    !GraphicsResolveRectListAutoDraw(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, &vertex_count));
-			vkCmdDraw(vk_buffer, vertex_count, 1, first_vertex, 0);
+			vkCmdDraw(vk_buffer, primitive_plan.chunk_count, 1, first_vertex + i, 0);
 			DebugStatsRecordDraw();
-			break;
 		}
-		case 17:
-			EXIT_NOT_IMPLEMENTED(!(index_count == 3 && vs_input_info.buffers_num == 0));
-			vkCmdDraw(vk_buffer, 4, 1, first_vertex, 0);
-			DebugStatsRecordDraw();
-			break;
-		case 19:
-			EXIT_NOT_IMPLEMENTED((index_count & 0x3u) != 0);
-			for (uint32_t i = 0; i < index_count; i += 4)
-			{
-				vkCmdDraw(vk_buffer, 4, 1, first_vertex + i, 0);
-				DebugStatsRecordDraw();
-			}
-			break;
-		default: EXIT_NOT_IMPLEMENTED(true);
+	} else
+	{
+		vkCmdDraw(vk_buffer, primitive_plan.draw_count, 1, first_vertex, 0);
+		DebugStatsRecordDraw();
 	}
 
 	buffer->EndRenderPass();

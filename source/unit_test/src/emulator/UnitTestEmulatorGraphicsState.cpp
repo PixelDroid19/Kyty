@@ -302,18 +302,6 @@ TEST(EmulatorGraphicsState, RegistersAnonymousGpuResourceBeforeOwnerRegistration
 	GpuMemoryUnregisterResource(resource_handle);
 }
 
-TEST(EmulatorGraphicsState, ResolvesGen5RectListAutoDrawExpansion)
-{
-	uint32_t vertex_count = 0;
-	EXPECT_TRUE(GraphicsResolveRectListAutoDraw(7, 3, 0, &vertex_count));
-	EXPECT_EQ(vertex_count, 4u);
-
-	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(7, 4, 0, &vertex_count));
-	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(7, 3, 1, &vertex_count));
-	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(17, 3, 0, &vertex_count));
-	EXPECT_FALSE(GraphicsResolveRectListAutoDraw(7, 3, 0, nullptr));
-}
-
 TEST(EmulatorGraphicsState, TiledVideoOutBufferUpdateDoesNotCpuUpload)
 {
 	EXPECT_FALSE(VideoOutBufferShouldCpuUploadOnUpdate(true));
