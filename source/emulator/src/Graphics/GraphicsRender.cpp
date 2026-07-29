@@ -364,6 +364,13 @@ struct VulkanFramebuffer
 	uint32_t                  color_count                       = 0;
 	VkAttachmentLoadOp        color_load_op[TARGETS_MAX]        = {};
 	VkImageLayout             color_initial_layout[TARGETS_MAX] = {};
+	VkImageLayout             depth_stencil_layout              = VK_IMAGE_LAYOUT_UNDEFINED;
+};
+
+enum class DepthStencilAttachmentAccess
+{
+	Writable,
+	ReadOnly,
 };
 
 class FramebufferCache
@@ -373,7 +380,8 @@ public:
 	virtual ~FramebufferCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(FramebufferCache);
 
-	VulkanFramebuffer* CreateFramebuffer(RenderColorInfo* color, RenderDepthInfo* depth);
+	VulkanFramebuffer* CreateFramebuffer(RenderColorInfo* color, RenderDepthInfo* depth,
+	                                     DepthStencilAttachmentAccess depth_stencil_access = DepthStencilAttachmentAccess::Writable);
 	void               FreeFramebufferByColor(VulkanImage* image);
 	void               FreeFramebufferByDepth(DepthStencilVulkanImage* image);
 
@@ -388,6 +396,7 @@ private:
 		uint64_t           depth_id                = 0;
 		bool               depth_clear_enable      = false;
 		bool               stencil_clear_enable    = false;
+		bool               depth_stencil_read_only = false;
 		VkAttachmentLoadOp color_load_op[8]        = {};
 		VkImageLayout      color_initial_layout[8] = {};
 	};
@@ -2062,7 +2071,8 @@ void CommandPool::DeleteAll()
 	}
 }
 
-VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, RenderDepthInfo* depth)
+VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, RenderDepthInfo* depth,
+                                                        DepthStencilAttachmentAccess depth_stencil_access)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -2076,6 +2086,8 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 
 	bool with_depth = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	bool with_color = (color->targets_num != 0 && color->vulkan_buffer[0] != nullptr);
+	const bool depth_stencil_read_only = (with_depth && depth_stencil_access == DepthStencilAttachmentAccess::ReadOnly);
+	EXIT_NOT_IMPLEMENTED(depth_stencil_read_only && (depth->depth_clear_enable || depth->stencil_clear_enable));
 	const auto attachment_samples = resolve_render_attachment_sample_count(*color, *depth);
 
 	for (auto& f: m_framebuffers)
@@ -2090,7 +2102,8 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 			                      (f.color_load_op[slot] == load_ops.load_op) && (f.color_initial_layout[slot] == load_ops.initial_layout);
 		}
 		if (f.framebuffer != nullptr && same_colors && f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) &&
-		    f.depth_clear_enable == depth->depth_clear_enable && f.stencil_clear_enable == depth->stencil_clear_enable)
+		    f.depth_clear_enable == depth->depth_clear_enable && f.stencil_clear_enable == depth->stencil_clear_enable &&
+		    f.depth_stencil_read_only == depth_stencil_read_only)
 		{
 			return f.framebuffer;
 		}
@@ -2139,7 +2152,9 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	}
 	framebuffer->color_count = color_count;
 
-	const auto depth_load_ops        = ResolveDepthAttachmentLoadOps(depth->format, depth->depth_clear_enable, depth->stencil_clear_enable);
+	const auto depth_load_ops = ResolveDepthAttachmentLoadOps(depth->format, depth->depth_clear_enable, depth->stencil_clear_enable);
+	const auto depth_stencil_layout =
+	    (depth_stencil_read_only ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 	attachments[color_count].flags   = 0;
 	attachments[color_count].format  = depth->format;
 	attachments[color_count].samples = with_depth ? depth->vulkan_buffer->samples : VK_SAMPLE_COUNT_1_BIT;
@@ -2147,12 +2162,13 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	attachments[color_count].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	attachments[color_count].stencilLoadOp  = depth_load_ops.stencil_load;
 	attachments[color_count].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-	attachments[color_count].initialLayout  = depth_load_ops.initial_layout;
-	attachments[color_count].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	attachments[color_count].initialLayout  = (depth_stencil_read_only ? depth_stencil_layout : depth_load_ops.initial_layout);
+	attachments[color_count].finalLayout    = depth_stencil_layout;
 
 	VkAttachmentReference depth_attachment_ref {};
 	depth_attachment_ref.attachment = color_count;
-	depth_attachment_ref.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	depth_attachment_ref.layout     = depth_stencil_layout;
+	framebuffer->depth_stencil_layout = depth_stencil_layout;
 
 	VkSubpassDescription subpass {};
 	subpass.flags                   = 0;
@@ -2216,6 +2232,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	fnew.depth_id             = (with_depth ? depth->vulkan_buffer->memory.unique_id : 0);
 	fnew.depth_clear_enable   = depth->depth_clear_enable;
 	fnew.stencil_clear_enable = depth->stencil_clear_enable;
+	fnew.depth_stencil_read_only = depth_stencil_read_only;
 	for (uint32_t slot = 0; slot < color->targets_num; slot++)
 	{
 		fnew.color_load_op[slot]        = framebuffer->color_load_op[slot];
@@ -6981,56 +6998,228 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	InvalidateMemoryObject(depth_info);
 }
 
+static bool GraphicsRenderDepthStencilCopyClearSource(CommandBuffer* buffer, RenderDepthInfo* source)
+{
+	EXIT_IF(buffer == nullptr || source == nullptr);
+
+	if (!source->depth_clear_enable && !source->stencil_clear_enable)
+	{
+		return false;
+	}
+
+	RenderColorInfo no_color;
+	auto* source_framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&no_color, source);
+	EXIT_NOT_IMPLEMENTED(source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr);
+	buffer->BeginRenderPass(source_framebuffer, &no_color, source);
+	buffer->EndRenderPass();
+	return true;
+}
+
+static bool GraphicsRenderDepthStencilCopyStencilTestWrites(const RenderDepthInfo& depth)
+{
+	if (!depth.stencil_test_enable)
+	{
+		return false;
+	}
+
+	const auto face_writes = [](const PipelineStencilStaticState& face, const PipelineStencilDynamicState& dynamic)
+	{
+		return dynamic.writeMask != 0 &&
+		       (face.failOp != VK_STENCIL_OP_KEEP || face.passOp != VK_STENCIL_OP_KEEP || face.depthFailOp != VK_STENCIL_OP_KEEP);
+	};
+	return face_writes(depth.stencil_static_front, depth.stencil_dynamic_front) ||
+	       face_writes(depth.stencil_static_back, depth.stencil_dynamic_back);
+}
+
+static void GraphicsRenderDepthStencilCopySetStencilTest(DepthStencilCopyStencilTest* target, const RenderDepthInfo& source,
+	                                                      bool writable)
+{
+	EXIT_IF(target == nullptr);
+	target->enabled = source.stencil_test_enable;
+	if (!target->enabled)
+	{
+		return;
+	}
+
+	const auto copy_face = [writable](DepthStencilCopyStencilFace* destination, const PipelineStencilStaticState& static_state,
+	                                  const PipelineStencilDynamicState& dynamic_state)
+	{
+		destination->fail_op       = (writable ? static_state.failOp : VK_STENCIL_OP_KEEP);
+		destination->pass_op       = (writable ? static_state.passOp : VK_STENCIL_OP_KEEP);
+		destination->depth_fail_op = (writable ? static_state.depthFailOp : VK_STENCIL_OP_KEEP);
+		destination->compare_op    = static_state.compareOp;
+		destination->compare_mask  = dynamic_state.compareMask;
+		destination->write_mask    = (writable ? dynamic_state.writeMask : 0);
+		destination->reference     = dynamic_state.reference;
+	};
+	copy_face(&target->front, source.stencil_static_front, source.stencil_dynamic_front);
+	copy_face(&target->back, source.stencil_static_back, source.stencil_dynamic_back);
+}
+
+static void GraphicsRenderDepthStencilCopySetDrawArea(const HW::Context& context, bool guest_triangle_strip,
+	                                                    const VkExtent2D& guest_extent, const VkExtent2D& host_extent,
+	                                                    DepthStencilCopyRequest* request)
+{
+	EXIT_IF(request == nullptr);
+
+	if (!guest_triangle_strip)
+	{
+		request->viewport.x        = 0.0f;
+		request->viewport.y        = 0.0f;
+		request->viewport.width    = static_cast<float>(host_extent.width);
+		request->viewport.height   = static_cast<float>(host_extent.height);
+		request->viewport.minDepth = 0.0f;
+		request->viewport.maxDepth = 1.0f;
+		request->scissor.offset    = {0, 0};
+		request->scissor.extent    = host_extent;
+		return;
+	}
+
+	const auto& screen_viewport = context.GetScreenViewport();
+	const auto  guest_xy = State::ResolveViewportXy(screen_viewport.viewports[0].xscale, screen_viewport.viewports[0].xoffset,
+	                                                 screen_viewport.viewports[0].yscale, screen_viewport.viewports[0].yoffset);
+	const auto guest_depth = State::ResolveViewportDepth(
+	    screen_viewport.viewports[0].zscale, screen_viewport.viewports[0].zoffset, context.GetClipControl().dx_clip_space,
+	    g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported);
+	const auto guest_scissor = State::ResolveScissor(screen_viewport, context.GetScanModeControl(), 0);
+
+	ResolutionCoordinateTransform transform {};
+	const ResolutionExtent         guest_resolution {guest_extent.width, guest_extent.height};
+	const ResolutionExtent         host_resolution {host_extent.width, host_extent.height};
+	EXIT_NOT_IMPLEMENTED(CreateResolutionCoordinateTransform(guest_resolution, host_resolution, &transform) !=
+	                     ResolutionCoordinateStatus::Success);
+
+	const ResolutionViewport guest_viewport {guest_xy.x, guest_xy.y, guest_xy.width, guest_xy.height, guest_depth.min_depth,
+	                                         guest_depth.max_depth};
+	ResolutionViewport host_viewport {};
+	EXIT_NOT_IMPLEMENTED(MapResolutionViewport(transform, guest_viewport, &host_viewport) != ResolutionCoordinateStatus::Success);
+
+	const ResolutionScissorRect guest_scissor_rect {guest_scissor.left, guest_scissor.top, guest_scissor.right, guest_scissor.bottom};
+	ResolutionScissorRect host_scissor {};
+	EXIT_NOT_IMPLEMENTED(MapResolutionScissor(transform, guest_scissor_rect, &host_scissor) != ResolutionCoordinateStatus::Success);
+	EXIT_NOT_IMPLEMENTED(host_scissor.left < 0 || host_scissor.top < 0 || host_scissor.right < host_scissor.left ||
+	                     host_scissor.bottom < host_scissor.top || static_cast<uint64_t>(host_scissor.right) > host_extent.width ||
+	                     static_cast<uint64_t>(host_scissor.bottom) > host_extent.height);
+
+	request->viewport.x        = static_cast<float>(host_viewport.x);
+	request->viewport.y        = static_cast<float>(host_viewport.y);
+	request->viewport.width    = static_cast<float>(host_viewport.width);
+	request->viewport.height   = static_cast<float>(host_viewport.height);
+	request->viewport.minDepth = static_cast<float>(host_viewport.min_depth);
+	request->viewport.maxDepth = static_cast<float>(host_viewport.max_depth);
+	request->scissor.offset    = {static_cast<int32_t>(host_scissor.left), static_cast<int32_t>(host_scissor.top)};
+	request->scissor.extent    = {static_cast<uint32_t>(host_scissor.right - host_scissor.left),
+	                              static_cast<uint32_t>(host_scissor.bottom - host_scissor.top)};
+}
+
+static void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* buffer, VulkanFramebuffer* framebuffer,
+	                                                   RenderColorInfo* color, RenderDepthInfo* depth,
+	                                                   const DepthStencilCopyRequest& request, bool guest_triangle_strip,
+	                                                   const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count)
+{
+	EXIT_IF(buffer == nullptr || framebuffer == nullptr || color == nullptr || depth == nullptr);
+	EXIT_IF(guest_triangle_strip && guest_vertex_input == nullptr);
+
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	buffer->BeginRenderPass(framebuffer, color, depth);
+	auto* depth_stencil_copy_renderer = g_render_ctx->GetDepthStencilCopyRenderer();
+	const auto draw = depth_stencil_copy_renderer->PrepareDraw(g_render_ctx->GetGraphicCtx(), request);
+	depth_stencil_copy_renderer->BindPreparedDraw(vk_buffer, draw);
+	if (guest_triangle_strip)
+	{
+		BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, guest_vertex_input->bind,
+		                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
+		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input);
+		const uint32_t first_vertex = static_cast<uint32_t>(ShaderResolveVertexOffset(0, *guest_vertex_input));
+		vkCmdDraw(vk_buffer, index_count, 1, first_vertex, 0);
+	} else
+	{
+		vkCmdDraw(vk_buffer, 3, 1, 0, 0);
+	}
+	DebugStatsRecordDraw();
+	buffer->EndRenderPass();
+}
+
+static void GraphicsRenderDepthStencilCopyWriteDepthStencil(
+	uint64_t submit_id, CommandBuffer* buffer, const HW::Context& context, RenderDepthInfo* source_info, bool apply_clear,
+	bool effective_depth_write, bool guest_triangle_strip, const DepthStencilCopyVertexStage* vertex_stage,
+	const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count)
+{
+	EXIT_IF(buffer == nullptr || source_info == nullptr);
+	EXIT_IF(guest_triangle_strip && guest_vertex_input == nullptr);
+
+	auto* source = source_info->vulkan_buffer;
+	EXIT_NOT_IMPLEMENTED(source == nullptr || source->samples != VK_SAMPLE_COUNT_1_BIT);
+
+	RenderDepthInfo draw_depth = *source_info;
+	if (apply_clear)
+	{
+		GraphicsRenderDepthStencilCopyClearSource(buffer, &draw_depth);
+	}
+	draw_depth.depth_clear_enable   = false;
+	draw_depth.stencil_clear_enable = false;
+
+	RenderColorInfo no_color;
+	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&no_color, &draw_depth);
+	EXIT_NOT_IMPLEMENTED(framebuffer == nullptr || framebuffer->render_pass == nullptr);
+
+	DepthStencilCopyRequest request {};
+	request.mode                    = DepthStencilCopyMode::DepthStencilOnly;
+	request.render_pass             = framebuffer->render_pass;
+	request.render_pass_id          = framebuffer->render_pass_id;
+	request.extent                  = source->extent;
+	request.depth_test.enabled      = draw_depth.depth_test_enable;
+	request.depth_test.write_enable = effective_depth_write;
+	request.depth_test.compare_op   = draw_depth.depth_compare_op;
+	GraphicsRenderDepthStencilCopySetStencilTest(&request.stencil_test, draw_depth, true);
+	request.vertex_stage = vertex_stage;
+	const auto source_guest = source->GetGuestExtent();
+	GraphicsRenderDepthStencilCopySetDrawArea(context, guest_triangle_strip, source_guest, source->extent, &request);
+	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &no_color, &draw_depth, request, guest_triangle_strip,
+	                                        guest_vertex_input, index_count);
+
+	InvalidateMemoryObject(draw_depth);
+}
+
 static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
                                            HW::Shader* sh_ctx, uint32_t index_count)
 {
 	EXIT_IF(buffer == nullptr || ctx == nullptr || ucfg == nullptr || sh_ctx == nullptr);
 
-	const auto& render_control  = ctx->GetRenderControl();
-	const auto& depth_control   = ctx->GetDepthControl();
-	const auto& stencil_control = ctx->GetStencilControl();
-	const auto& stencil_mask    = ctx->GetStencilMask();
+	const auto& render_control = ctx->GetRenderControl();
+	RenderDepthInfo depth_info;
+	DescribeRenderDepthInfo(*ctx, &depth_info);
+	const bool effective_depth_write = depth_info.depth_write_enable && !depth_info.suppress_depth_write;
+	const uint8_t color_write_mask =
+	    State::ResolveColorWriteMask(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters().m_cbShaderMask, 0);
+	const bool color_expansion_enabled = (color_write_mask != 0);
 
 	// Rect-list copies synthesize full-target geometry. Triangle strips retain
 	// the guest vertex stage so the expansion covers exactly the guest pixels.
 	EXIT_NOT_IMPLEMENTED(!render_control.depth_copy || !render_control.stencil_copy);
-	// Resummarization and decompression update the guest depth metadata. Vulkan
-	// owns the corresponding compression state once the source is attached.
-	const bool full_target_stencil_replace =
-	    depth_control.stencil_enable && depth_control.stencilfunc == 7 && !depth_control.backface_enable &&
-	    stencil_control.stencil_zpass == 3 && stencil_mask.stencil_writemask == 0xff;
-	const bool full_target_stencil_keep = depth_control.stencil_enable && depth_control.stencilfunc == 7 &&
-	                                      !depth_control.backface_enable && stencil_control.stencil_zpass == 0 &&
-	                                      stencil_mask.stencil_writemask == 0xff;
-	if (depth_control.z_enable || depth_control.z_write_enable ||
-	    (depth_control.stencil_enable && !full_target_stencil_replace && !full_target_stencil_keep))
-	{
-		std::fprintf(stderr,
-		             "KYTY_GRAPHICS: unsupported depth-stencil-copy primitive=%u count=%u depth-control z-test=%u z-write=%u "
-		             "stencil-test=%u zfunc=%u stencilfunc=%u stencilfunc-bf=%u backface=%u stencil-ops=%u,%u,%u mask=%u "
-		             "write-mask=%u\n",
-		             ucfg->GetPrimType(), index_count, depth_control.z_enable, depth_control.z_write_enable, depth_control.stencil_enable,
-		             depth_control.zfunc,
-		             depth_control.stencilfunc, depth_control.stencilfunc_bf, depth_control.backface_enable, stencil_control.stencil_fail,
-		             stencil_control.stencil_zpass, stencil_control.stencil_zfail, stencil_mask.stencil_mask, stencil_mask.stencil_writemask);
-		EXIT_NOT_IMPLEMENTED(depth_control.z_enable || depth_control.z_write_enable ||
-		                     (depth_control.stencil_enable && !full_target_stencil_replace && !full_target_stencil_keep));
-	}
-	EXIT_NOT_IMPLEMENTED(ctx->GetRenderTargetMask() != 0x0000000fu);
+	const bool stencil_test_required = depth_info.stencil_test_enable;
+	const bool depth_stencil_write = effective_depth_write || GraphicsRenderDepthStencilCopyStencilTestWrites(depth_info);
 	const bool static_rect_list   = (ucfg->GetPrimType() == 7 && index_count == 3);
 	const bool guest_triangle_strip = (ucfg->GetPrimType() == 6 && index_count == 3);
+	if (!color_expansion_enabled && !depth_stencil_write)
+	{
+		// DB validation disables the color expansion when its effective component
+		// mask is empty. A clear is the only remaining observable effect.
+		MaterializeRenderDepthInfo(submit_id, buffer, &depth_info);
+
+		RenderDepthInfo source_setup = depth_info;
+		if (GraphicsRenderDepthStencilCopyClearSource(buffer, &source_setup))
+		{
+			InvalidateMemoryObject(source_setup);
+		}
+		return;
+	}
 	if (!static_rect_list && !guest_triangle_strip)
 	{
 		std::fprintf(stderr, "KYTY_GRAPHICS: unsupported depth-stencil-copy primitive=%u count=%u\n", ucfg->GetPrimType(),
 		             index_count);
 		EXIT_NOT_IMPLEMENTED(!static_rect_list && !guest_triangle_strip);
 	}
-	if (guest_triangle_strip && full_target_stencil_replace)
-	{
-		std::fprintf(stderr, "KYTY_GRAPHICS: guest-geometry depth-stencil copy cannot replace the source stencil plane\n");
-		EXIT_NOT_IMPLEMENTED(full_target_stencil_replace);
-	}
-
 	ShaderVertexInputInfo        guest_vertex_input {};
 	ShaderId                     guest_vertex_id {};
 	ShaderTranslationCacheResult guest_vertex_translation {};
@@ -7083,10 +7272,19 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 		request_vertex_stage                 = &guest_vertex_stage;
 	}
 
-	RenderDepthInfo depth_info;
+	if (!color_expansion_enabled)
+	{
+		MaterializeRenderDepthInfo(submit_id, buffer, &depth_info);
+		GraphicsRenderDepthStencilCopyWriteDepthStencil(
+		    submit_id, buffer, *ctx, &depth_info, true, effective_depth_write, guest_triangle_strip, request_vertex_stage,
+		    (guest_triangle_strip ? &guest_vertex_input : nullptr), index_count);
+		return;
+	}
+
 	RenderColorInfo color_info;
-	DescribeRenderDepthInfo(*ctx, &depth_info);
-	DescribeRenderColorInfo(buffer, *ctx, &color_info);
+	HW::Context     color_context = *ctx;
+	color_context.SetRenderTargetMask(color_write_mask);
+	DescribeRenderColorInfo(buffer, color_context, &color_info);
 
 	EXIT_NOT_IMPLEMENTED(depth_info.format != VK_FORMAT_D32_SFLOAT_S8_UINT);
 	EXIT_NOT_IMPLEMENTED(depth_info.samples != VK_SAMPLE_COUNT_1_BIT);
@@ -7115,114 +7313,64 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	EXIT_NOT_IMPLEMENTED(source->memory.unique_id == target->memory.unique_id);
 
 	RenderDepthInfo source_setup = depth_info;
-	if (static_rect_list && full_target_stencil_replace)
-	{
-		// This full-target rect compares stencil unconditionally and replaces all
-		// bits with the reference value. A Vulkan clear establishes the same source
-		// plane before the fixed-function color expansion reads it.
-		source_setup.stencil_clear_enable = true;
-		source_setup.stencil_clear_value  = stencil_mask.stencil_testval;
-	}
-	if (guest_triangle_strip && source_setup.stencil_clear_enable)
-	{
-		std::fprintf(stderr,
-		             "KYTY_GRAPHICS: guest-geometry depth-stencil copy cannot materialize source stencil clear metadata\n");
-		EXIT_NOT_IMPLEMENTED(source_setup.stencil_clear_enable);
-	}
-	if (source_setup.depth_clear_enable || source_setup.stencil_clear_enable)
-	{
-		// A deferred depth clear initializes the complete sampled source plane;
-		// it is independent of the geometry used for the color expansion.
-		RenderColorInfo no_color;
-		auto* source_framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&no_color, &source_setup);
-		EXIT_NOT_IMPLEMENTED(source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr);
-		buffer->BeginRenderPass(source_framebuffer, &no_color, &source_setup);
-		buffer->EndRenderPass();
-	}
+	// A deferred depth/stencil clear initializes the complete sampled source
+	// plane independently of the geometry used for the color expansion.
+	const bool source_modified = GraphicsRenderDepthStencilCopyClearSource(buffer, &source_setup);
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 	GraphicsRenderDepthStencilBarrier(vk_buffer, source);
 	EXIT_NOT_IMPLEMENTED(source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
 
 	RenderDepthInfo no_depth;
-	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &no_depth);
+	RenderDepthInfo copy_depth = source_setup;
+	copy_depth.stencil_test_enable = stencil_test_required;
+	RenderDepthInfo* depth_attachment = &no_depth;
+	const bool copy_requires_depth_stencil_attachment = copy_depth.depth_test_enable || stencil_test_required;
+	if (copy_requires_depth_stencil_attachment)
+	{
+		// Vulkan can sample an attached depth plane only while that attachment is
+		// read-only. A preceding clear has already materialized the source, so the
+		// copy phase preserves the guest comparison without another depth write.
+		EXIT_NOT_IMPLEMENTED(source->extent.width != target->extent.width || source->extent.height != target->extent.height);
+		copy_depth.depth_clear_enable   = false;
+		copy_depth.stencil_clear_enable = false;
+		copy_depth.depth_write_enable   = false;
+		copy_depth.suppress_depth_write = true;
+		depth_attachment                = &copy_depth;
+	}
+	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(
+	    &color_info, depth_attachment, (depth_attachment == &copy_depth ? DepthStencilAttachmentAccess::ReadOnly
+	                                                                       : DepthStencilAttachmentAccess::Writable));
 	EXIT_NOT_IMPLEMENTED(framebuffer == nullptr || framebuffer->render_pass == nullptr);
 
 	DepthStencilCopyRequest request {};
-	request.source         = source;
-	request.render_pass    = framebuffer->render_pass;
-	request.render_pass_id = framebuffer->render_pass_id;
-	request.extent         = target->extent;
-	request.vertex_stage    = request_vertex_stage;
-	if (guest_triangle_strip)
-	{
-		const auto& screen_viewport = ctx->GetScreenViewport();
-		const auto  guest_xy = State::ResolveViewportXy(screen_viewport.viewports[0].xscale, screen_viewport.viewports[0].xoffset,
-		                                                 screen_viewport.viewports[0].yscale, screen_viewport.viewports[0].yoffset);
-		const auto guest_depth = State::ResolveViewportDepth(
-		    screen_viewport.viewports[0].zscale, screen_viewport.viewports[0].zoffset, ctx->GetClipControl().dx_clip_space,
-		    g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported);
-		const auto guest_scissor = State::ResolveScissor(screen_viewport, ctx->GetScanModeControl(), 0);
-
-		ResolutionCoordinateTransform transform {};
-		const ResolutionExtent guest_extent {target_guest.width, target_guest.height};
-		const ResolutionExtent host_extent {target->extent.width, target->extent.height};
-		EXIT_NOT_IMPLEMENTED(CreateResolutionCoordinateTransform(guest_extent, host_extent, &transform) != ResolutionCoordinateStatus::Success);
-
-		const ResolutionViewport guest_viewport {guest_xy.x, guest_xy.y, guest_xy.width, guest_xy.height, guest_depth.min_depth,
-		                                         guest_depth.max_depth};
-		ResolutionViewport host_viewport {};
-		EXIT_NOT_IMPLEMENTED(MapResolutionViewport(transform, guest_viewport, &host_viewport) != ResolutionCoordinateStatus::Success);
-
-		const ResolutionScissorRect guest_scissor_rect {guest_scissor.left, guest_scissor.top, guest_scissor.right,
-		                                                guest_scissor.bottom};
-		ResolutionScissorRect host_scissor {};
-		EXIT_NOT_IMPLEMENTED(MapResolutionScissor(transform, guest_scissor_rect, &host_scissor) != ResolutionCoordinateStatus::Success);
-		EXIT_NOT_IMPLEMENTED(host_scissor.left < 0 || host_scissor.top < 0 || host_scissor.right < host_scissor.left ||
-		                     host_scissor.bottom < host_scissor.top || static_cast<uint64_t>(host_scissor.right) > target->extent.width ||
-		                     static_cast<uint64_t>(host_scissor.bottom) > target->extent.height);
-
-		request.viewport.x        = static_cast<float>(host_viewport.x);
-		request.viewport.y        = static_cast<float>(host_viewport.y);
-		request.viewport.width    = static_cast<float>(host_viewport.width);
-		request.viewport.height   = static_cast<float>(host_viewport.height);
-		request.viewport.minDepth = static_cast<float>(host_viewport.min_depth);
-		request.viewport.maxDepth = static_cast<float>(host_viewport.max_depth);
-		request.scissor.offset    = {static_cast<int32_t>(host_scissor.left), static_cast<int32_t>(host_scissor.top)};
-		request.scissor.extent    = {static_cast<uint32_t>(host_scissor.right - host_scissor.left),
-		                             static_cast<uint32_t>(host_scissor.bottom - host_scissor.top)};
-	} else
-	{
-		request.viewport.x        = 0.0f;
-		request.viewport.y        = 0.0f;
-		request.viewport.width    = static_cast<float>(target->extent.width);
-		request.viewport.height   = static_cast<float>(target->extent.height);
-		request.viewport.minDepth = 0.0f;
-		request.viewport.maxDepth = 1.0f;
-		request.scissor.offset    = {0, 0};
-		request.scissor.extent    = target->extent;
-	}
-
-	buffer->BeginRenderPass(framebuffer, &color_info, &no_depth);
-	auto* depth_stencil_copy_renderer = g_render_ctx->GetDepthStencilCopyRenderer();
-	const auto draw = depth_stencil_copy_renderer->PrepareDraw(g_render_ctx->GetGraphicCtx(), request);
-	depth_stencil_copy_renderer->BindPreparedDraw(vk_buffer, draw);
-	if (guest_triangle_strip)
-	{
-		BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, guest_vertex_input.bind,
-		                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
-		BindVertexBuffers(submit_id, buffer, vk_buffer, guest_vertex_input);
-		const uint32_t first_vertex = static_cast<uint32_t>(ShaderResolveVertexOffset(0, guest_vertex_input));
-		vkCmdDraw(vk_buffer, index_count, 1, first_vertex, 0);
-	} else
-	{
-		vkCmdDraw(vk_buffer, 3, 1, 0, 0);
-	}
-	DebugStatsRecordDraw();
-	buffer->EndRenderPass();
+	request.source           = source;
+	request.render_pass      = framebuffer->render_pass;
+	request.render_pass_id   = framebuffer->render_pass_id;
+	request.extent           = target->extent;
+	request.color_write_mask = color_write_mask;
+	request.depth_test.enabled    = copy_depth.depth_test_enable;
+	request.depth_test.write_enable = false;
+	request.depth_test.compare_op = copy_depth.depth_compare_op;
+	GraphicsRenderDepthStencilCopySetStencilTest(&request.stencil_test, copy_depth, false);
+	request.vertex_stage = request_vertex_stage;
+	GraphicsRenderDepthStencilCopySetDrawArea(*ctx, guest_triangle_strip, target_guest, target->extent, &request);
+	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &color_info, depth_attachment, request,
+	                                        guest_triangle_strip, (guest_triangle_strip ? &guest_vertex_input : nullptr), index_count);
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
 	InvalidateMemoryObject(color_info);
+	if (depth_stencil_write)
+	{
+		// The expansion samples the source in a read-only layout. Commit matching
+		// depth/stencil side effects only after that sampled pass has completed.
+		GraphicsRenderDepthStencilCopyWriteDepthStencil(
+		    submit_id, buffer, *ctx, &source_setup, false, effective_depth_write, guest_triangle_strip, request_vertex_stage,
+		    (guest_triangle_strip ? &guest_vertex_input : nullptr), index_count);
+	} else if (source_modified)
+	{
+		InvalidateMemoryObject(source_setup);
+	}
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -8364,15 +8512,21 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		color->vulkan_buffer[slot]->layout = image_memory_barrier.newLayout;
 	}
 
-	if (with_depth && depth->vulkan_buffer->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+	const auto depth_stencil_layout = framebuffer->depth_stencil_layout;
+	EXIT_NOT_IMPLEMENTED(with_depth && depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &&
+	                     depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	if (with_depth && depth->vulkan_buffer->layout != depth_stencil_layout)
 	{
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		image_memory_barrier.pNext                           = nullptr;
 		image_memory_barrier.srcAccessMask                   = VK_ACCESS_MEMORY_READ_BIT;
-		image_memory_barrier.dstAccessMask                   = VK_ACCESS_MEMORY_WRITE_BIT;
+		image_memory_barrier.dstAccessMask =
+		    (depth_stencil_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+		         ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT
+		         : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 		image_memory_barrier.oldLayout                       = depth->vulkan_buffer->layout;
-		image_memory_barrier.newLayout                       = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		image_memory_barrier.newLayout                       = depth_stencil_layout;
 		image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.image                           = depth->vulkan_buffer->image;
@@ -8400,6 +8554,10 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		{
 			color->vulkan_buffer[slot]->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		}
+	}
+	if (with_depth)
+	{
+		depth->vulkan_buffer->layout = depth_stencil_layout;
 	}
 }
 

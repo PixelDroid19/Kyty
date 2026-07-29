@@ -32,30 +32,66 @@ struct DepthStencilCopyVertexStage
 	bool                         dx_clip_space         = true;
 };
 
+struct DepthStencilCopyDepthTest
+{
+	bool        enabled      = false;
+	bool        write_enable = false;
+	VkCompareOp compare_op    = VK_COMPARE_OP_ALWAYS;
+};
+
+struct DepthStencilCopyStencilFace
+{
+	VkStencilOp fail_op       = VK_STENCIL_OP_KEEP;
+	VkStencilOp pass_op       = VK_STENCIL_OP_KEEP;
+	VkStencilOp depth_fail_op = VK_STENCIL_OP_KEEP;
+	VkCompareOp compare_op     = VK_COMPARE_OP_ALWAYS;
+	uint32_t    compare_mask   = 0;
+	uint32_t    write_mask     = 0;
+	uint32_t    reference      = 0;
+};
+
+struct DepthStencilCopyStencilTest
+{
+	bool                        enabled = false;
+	DepthStencilCopyStencilFace front;
+	DepthStencilCopyStencilFace back;
+};
+
+enum class DepthStencilCopyMode
+{
+	ExpandToColor,
+	DepthStencilOnly,
+};
+
 struct DepthStencilCopyRequest
 {
-	DepthStencilVulkanImage* source         = nullptr;
-	VkRenderPass             render_pass    = nullptr;
-	uint64_t                 render_pass_id = 0;
-	VkExtent2D               extent         = {};
-	VkViewport               viewport       = {};
-	VkRect2D                 scissor        = {};
+	DepthStencilCopyMode       mode             = DepthStencilCopyMode::ExpandToColor;
+	DepthStencilVulkanImage*   source           = nullptr;
+	VkRenderPass               render_pass      = nullptr;
+	uint64_t                   render_pass_id   = 0;
+	VkExtent2D                 extent           = {};
+	VkViewport                 viewport         = {};
+	VkRect2D                   scissor          = {};
+	uint8_t                    color_write_mask = 0;
+	DepthStencilCopyDepthTest   depth_test;
+	DepthStencilCopyStencilTest stencil_test;
 	const DepthStencilCopyVertexStage* vertex_stage = nullptr;
 };
 
 struct DepthStencilCopyPreparedDraw
 {
-	VkPipeline       pipeline        = nullptr;
-	VkPipelineLayout pipeline_layout = nullptr;
+	VkPipeline       pipeline          = nullptr;
+	VkPipelineLayout pipeline_layout   = nullptr;
 	VkDescriptorSet  source_descriptor = nullptr;
-	VkViewport       viewport        = {};
-	VkRect2D         scissor         = {};
-	float            source_scale[2] = {};
+	VkViewport       viewport          = {};
+	VkRect2D         scissor           = {};
+	float            source_scale[2]  = {};
 };
 
-// Expands fixed-function depth/stencil copy output into a color attachment.
-// The caller owns render-pass lifetime and releases its source and pass keys
-// before the corresponding Vulkan resources are destroyed.
+// Executes fixed-function depth/stencil copy work. It either expands source
+// planes into a color attachment or performs the matching depth/stencil-only
+// draw. The caller owns render-pass lifetime and releases its source and pass
+// keys before the corresponding Vulkan resources are destroyed.
 class DepthStencilCopyRenderer
 {
 public:
@@ -86,6 +122,12 @@ private:
 		bool                  cull_back                    = false;
 		bool                  face                         = false;
 		bool                  dx_clip_space                = true;
+		DepthStencilCopyMode  mode                         = DepthStencilCopyMode::ExpandToColor;
+		uint8_t               color_write_mask             = 0;
+		bool                  depth_test_enable            = false;
+		bool                  depth_write_enable           = false;
+		VkCompareOp           depth_compare_op              = VK_COMPARE_OP_ALWAYS;
+		DepthStencilCopyStencilTest stencil_test;
 		uint32_t              vertex_push_constant_offset  = 0;
 		uint32_t              vertex_push_constant_size    = 0;
 		bool                  vertex_uses_uniform_buffer   = false;
@@ -96,6 +138,7 @@ private:
 	void            Initialize(GraphicContext* context);
 	VkDescriptorSet GetSourceDescriptor(DepthStencilVulkanImage* source);
 	RenderPipeline* GetRenderPipeline(GraphicContext* context, const DepthStencilCopyRequest& request);
+	void            DestroyRenderPipeline(RenderPipeline* pipeline);
 
 	VkDevice              m_device                       = nullptr;
 	VkSampler             m_sampler                      = nullptr;
@@ -104,6 +147,7 @@ private:
 	VkDescriptorSetLayout m_source_descriptor_set_layout = nullptr;
 	std::vector<SourceDescriptor> m_sources;
 	std::vector<RenderPipeline>   m_pipelines;
+	uint32_t                      m_evict_cursor = 0;
 };
 
 } // namespace Kyty::Libs::Graphics

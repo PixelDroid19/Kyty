@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanVertexInputLayout.h"
 
@@ -14,7 +15,7 @@ namespace Kyty::Libs::Graphics {
 namespace {
 
 constexpr size_t kMaxSourceDescriptors = 256;
-constexpr size_t kMaxRenderPipelines   = 64;
+constexpr size_t kMaxRenderPipelines   = 512;
 
 // Embedded Vulkan SPIR-V for the fixed-function expansion pipeline.
 constexpr uint32_t kVertexShader[] = {
@@ -133,6 +134,64 @@ VkShaderModule CreateShaderModule(VkDevice device, const uint32_t* words, size_t
 	const auto      result = vkCreateShaderModule(device, &create_info, nullptr, &module);
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS || module == nullptr);
 	return module;
+}
+
+VkColorComponentFlags ResolveDepthStencilCopyColorWriteMask(uint8_t mask)
+{
+	EXIT_NOT_IMPLEMENTED((mask & ~0x0fu) != 0 || mask == 0);
+
+	VkColorComponentFlags flags = 0;
+	if ((mask & 0x1u) != 0)
+	{
+		flags |= VK_COLOR_COMPONENT_R_BIT;
+	}
+	if ((mask & 0x2u) != 0)
+	{
+		flags |= VK_COLOR_COMPONENT_G_BIT;
+	}
+	if ((mask & 0x4u) != 0)
+	{
+		flags |= VK_COLOR_COMPONENT_B_BIT;
+	}
+	if ((mask & 0x8u) != 0)
+	{
+		flags |= VK_COLOR_COMPONENT_A_BIT;
+	}
+
+	return flags;
+}
+
+bool IsSameDepthStencilCopyStencilTest(const DepthStencilCopyStencilTest& lhs, const DepthStencilCopyStencilTest& rhs)
+{
+	if (lhs.enabled != rhs.enabled)
+	{
+		return false;
+	}
+	if (!lhs.enabled)
+	{
+		return true;
+	}
+
+	return lhs.front.fail_op == rhs.front.fail_op && lhs.front.pass_op == rhs.front.pass_op &&
+	       lhs.front.depth_fail_op == rhs.front.depth_fail_op && lhs.front.compare_op == rhs.front.compare_op &&
+	       lhs.front.compare_mask == rhs.front.compare_mask && lhs.front.write_mask == rhs.front.write_mask &&
+	       lhs.front.reference == rhs.front.reference && lhs.back.fail_op == rhs.back.fail_op &&
+	       lhs.back.pass_op == rhs.back.pass_op && lhs.back.depth_fail_op == rhs.back.depth_fail_op &&
+	       lhs.back.compare_op == rhs.back.compare_op && lhs.back.compare_mask == rhs.back.compare_mask &&
+	       lhs.back.write_mask == rhs.back.write_mask && lhs.back.reference == rhs.back.reference;
+}
+
+VkStencilOpState ResolveDepthStencilCopyStencilFace(const DepthStencilCopyStencilFace& face)
+{
+	VkStencilOpState state {};
+	state.failOp      = face.fail_op;
+	state.passOp      = face.pass_op;
+	state.depthFailOp = face.depth_fail_op;
+	state.compareOp   = face.compare_op;
+	state.compareMask = face.compare_mask;
+	state.writeMask   = face.write_mask;
+	state.reference   = face.reference;
+	return state;
 }
 
 } // namespace
@@ -261,6 +320,10 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	                                                                                      const DepthStencilCopyRequest& request)
 {
 	EXIT_IF(context == nullptr || request.render_pass == nullptr || request.render_pass_id == 0);
+	const bool expand_to_color = (request.mode == DepthStencilCopyMode::ExpandToColor);
+	EXIT_NOT_IMPLEMENTED(request.mode != DepthStencilCopyMode::ExpandToColor && request.mode != DepthStencilCopyMode::DepthStencilOnly);
+	EXIT_NOT_IMPLEMENTED(expand_to_color && ((request.color_write_mask & ~0x0fu) != 0 || request.color_write_mask == 0));
+	EXIT_NOT_IMPLEMENTED(!expand_to_color && (request.color_write_mask != 0 || request.source != nullptr));
 
 	const auto* vertex_stage = request.vertex_stage;
 	const bool  guest_vertex_stage = (vertex_stage != nullptr);
@@ -277,7 +340,10 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 
 	for (auto& entry: m_pipelines)
 	{
-		if (entry.render_pass_id != request.render_pass_id || entry.guest_vertex_stage != guest_vertex_stage)
+		if (entry.render_pass_id != request.render_pass_id || entry.guest_vertex_stage != guest_vertex_stage || entry.mode != request.mode ||
+		    entry.color_write_mask != request.color_write_mask || entry.depth_test_enable != request.depth_test.enabled ||
+		    entry.depth_write_enable != request.depth_test.write_enable || entry.depth_compare_op != request.depth_test.compare_op ||
+		    !IsSameDepthStencilCopyStencilTest(entry.stencil_test, request.stencil_test))
 		{
 			continue;
 		}
@@ -297,23 +363,25 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 		}
 	}
 
-	EXIT_NOT_IMPLEMENTED(m_pipelines.size() >= kMaxRenderPipelines);
-
 	const auto* vertex_words = (guest_vertex_stage ? vertex_stage->shader_words : kVertexShader);
 	const size_t vertex_word_count =
 	    (guest_vertex_stage ? vertex_stage->shader_word_count : sizeof(kVertexShader) / sizeof(kVertexShader[0]));
 	const auto vertex_module = CreateShaderModule(m_device, vertex_words, vertex_word_count);
-	const auto fragment_module = CreateShaderModule(m_device, kFragmentShader, sizeof(kFragmentShader) / sizeof(kFragmentShader[0]));
+	const auto fragment_module =
+	    (expand_to_color ? CreateShaderModule(m_device, kFragmentShader, sizeof(kFragmentShader) / sizeof(kFragmentShader[0])) : nullptr);
 
 	VkPipelineShaderStageCreateInfo stages[2] {};
 	stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
 	stages[0].module = vertex_module;
 	stages[0].pName  = "main";
-	stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
-	stages[1].module = fragment_module;
-	stages[1].pName  = "main";
+	if (expand_to_color)
+	{
+		stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+		stages[1].module = fragment_module;
+		stages[1].pName  = "main";
+	}
 
 	VulkanVertexInputLayout vertex_input_layout {};
 	if (guest_vertex_stage)
@@ -378,8 +446,7 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 
 	VkPipelineColorBlendAttachmentState color_attachment {};
 	color_attachment.blendEnable    = VK_FALSE;
-	color_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
-	                                  VK_COLOR_COMPONENT_A_BIT;
+	color_attachment.colorWriteMask = (expand_to_color ? ResolveDepthStencilCopyColorWriteMask(request.color_write_mask) : 0);
 
 	VkPipelineColorBlendStateCreateInfo color_blend_info {};
 	color_blend_info.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -387,14 +454,35 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	color_blend_info.attachmentCount = 1;
 	color_blend_info.pAttachments    = &color_attachment;
 
+	VkPipelineDepthStencilStateCreateInfo depth_stencil_info {};
+	depth_stencil_info.sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	depth_stencil_info.depthTestEnable       = (request.depth_test.enabled ? VK_TRUE : VK_FALSE);
+	depth_stencil_info.depthWriteEnable      = (request.depth_test.write_enable ? VK_TRUE : VK_FALSE);
+	depth_stencil_info.depthCompareOp        = request.depth_test.compare_op;
+	depth_stencil_info.depthBoundsTestEnable = VK_FALSE;
+	depth_stencil_info.stencilTestEnable     = (request.stencil_test.enabled ? VK_TRUE : VK_FALSE);
+	depth_stencil_info.front                 = ResolveDepthStencilCopyStencilFace(request.stencil_test.front);
+	depth_stencil_info.back                  = ResolveDepthStencilCopyStencilFace(request.stencil_test.back);
+
 	const VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
 	VkPipelineDynamicStateCreateInfo dynamic_state_info {};
 	dynamic_state_info.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
 	dynamic_state_info.dynamicStateCount = 2;
 	dynamic_state_info.pDynamicStates    = dynamic_states;
 
-	VkDescriptorSetLayout set_layouts[2] = {vertex_requires_descriptor ? vertex_stage->descriptor_set_layout : m_empty_descriptor_set_layout,
-	                                        m_source_descriptor_set_layout};
+	VkDescriptorSetLayout set_layouts[2] = {};
+	uint32_t              set_layout_count = 0;
+	if (vertex_requires_descriptor)
+	{
+		set_layouts[set_layout_count++] = vertex_stage->descriptor_set_layout;
+	} else if (expand_to_color)
+	{
+		set_layouts[set_layout_count++] = m_empty_descriptor_set_layout;
+	}
+	if (expand_to_color)
+	{
+		set_layouts[set_layout_count++] = m_source_descriptor_set_layout;
+	}
 	VkPushConstantRange push_constant_ranges[2] {};
 	uint32_t            push_constant_range_count = 0;
 	if (guest_vertex_stage && !vertex_bind->vsharp_uniform_buffer && vertex_bind->push_constant_size > 0)
@@ -404,17 +492,20 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 		push_constant_ranges[push_constant_range_count].size       = vertex_bind->push_constant_size;
 		push_constant_range_count++;
 	}
-	push_constant_ranges[push_constant_range_count].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-	push_constant_ranges[push_constant_range_count].offset     = 0;
-	push_constant_ranges[push_constant_range_count].size       = sizeof(float) * 2;
-	push_constant_range_count++;
+	if (expand_to_color)
+	{
+		push_constant_ranges[push_constant_range_count].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		push_constant_ranges[push_constant_range_count].offset     = 0;
+		push_constant_ranges[push_constant_range_count].size       = sizeof(float) * 2;
+		push_constant_range_count++;
+	}
 
 	VkPipelineLayoutCreateInfo pipeline_layout_info {};
 	pipeline_layout_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipeline_layout_info.setLayoutCount         = 2;
-	pipeline_layout_info.pSetLayouts            = set_layouts;
+	pipeline_layout_info.setLayoutCount         = set_layout_count;
+	pipeline_layout_info.pSetLayouts            = (set_layout_count > 0 ? set_layouts : nullptr);
 	pipeline_layout_info.pushConstantRangeCount = push_constant_range_count;
-	pipeline_layout_info.pPushConstantRanges    = push_constant_ranges;
+	pipeline_layout_info.pPushConstantRanges    = (push_constant_range_count > 0 ? push_constant_ranges : nullptr);
 
 	VkPipelineLayout pipeline_layout = nullptr;
 	EXIT_NOT_IMPLEMENTED(vkCreatePipelineLayout(m_device, &pipeline_layout_info, nullptr, &pipeline_layout) != VK_SUCCESS ||
@@ -422,14 +513,14 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 
 	VkGraphicsPipelineCreateInfo pipeline_info {};
 	pipeline_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-	pipeline_info.stageCount          = 2;
+	pipeline_info.stageCount          = (expand_to_color ? 2u : 1u);
 	pipeline_info.pStages             = stages;
 	pipeline_info.pVertexInputState   = &vertex_input_info;
 	pipeline_info.pInputAssemblyState = &input_assembly_info;
 	pipeline_info.pViewportState      = &viewport_info;
 	pipeline_info.pRasterizationState = &rasterization_info;
 	pipeline_info.pMultisampleState   = &multisample_info;
-	pipeline_info.pDepthStencilState  = nullptr;
+	pipeline_info.pDepthStencilState  = (request.depth_test.enabled || request.stencil_test.enabled ? &depth_stencil_info : nullptr);
 	pipeline_info.pColorBlendState    = &color_blend_info;
 	pipeline_info.pDynamicState       = &dynamic_state_info;
 	pipeline_info.layout              = pipeline_layout;
@@ -438,16 +529,25 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 
 	VkPipeline pipeline = nullptr;
 	const auto result = vkCreateGraphicsPipelines(m_device, context->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline);
-	vkDestroyShaderModule(m_device, fragment_module, nullptr);
+	if (fragment_module != nullptr)
+	{
+		vkDestroyShaderModule(m_device, fragment_module, nullptr);
+	}
 	vkDestroyShaderModule(m_device, vertex_module, nullptr);
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS || pipeline == nullptr);
 
 	RenderPipeline entry {};
 	entry.render_pass_id              = request.render_pass_id;
 	entry.guest_vertex_stage          = guest_vertex_stage;
+	entry.mode                        = request.mode;
 	entry.pipeline                    = pipeline;
 	entry.pipeline_layout             = pipeline_layout;
 	entry.vertex_descriptor_set_layout = (vertex_requires_descriptor ? vertex_stage->descriptor_set_layout : nullptr);
+	entry.color_write_mask            = request.color_write_mask;
+	entry.depth_test_enable           = request.depth_test.enabled;
+	entry.depth_write_enable          = request.depth_test.write_enable;
+	entry.depth_compare_op            = request.depth_test.compare_op;
+	entry.stencil_test                = request.stencil_test;
 	if (guest_vertex_stage)
 	{
 		entry.vertex_shader_id             = *vertex_stage->shader_id;
@@ -460,20 +560,35 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 		entry.vertex_push_constant_size    = vertex_bind->push_constant_size;
 		entry.vertex_uses_uniform_buffer   = vertex_bind->vsharp_uniform_buffer;
 	}
-	m_pipelines.push_back(entry);
-	return &m_pipelines.back();
+	if (m_pipelines.size() < kMaxRenderPipelines)
+	{
+		m_pipelines.push_back(entry);
+		return &m_pipelines.back();
+	}
+
+	// Keep specialized pipelines bounded during long sessions. Pipeline handles
+	// are recreated on demand after round-robin eviction.
+	const auto evict = PipelineCacheNextEvictIndex(static_cast<uint32_t>(m_pipelines.size()), &m_evict_cursor);
+	DebugStatsRecordPipelineEviction();
+	DestroyRenderPipeline(&m_pipelines[evict]);
+	m_pipelines[evict] = entry;
+	return &m_pipelines[evict];
 }
 
 DepthStencilCopyPreparedDraw DepthStencilCopyRenderer::PrepareDraw(GraphicContext* context, const DepthStencilCopyRequest& request)
 {
-	EXIT_IF(context == nullptr || request.source == nullptr || request.render_pass == nullptr);
+	EXIT_IF(context == nullptr || request.render_pass == nullptr);
 	EXIT_NOT_IMPLEMENTED(request.extent.width == 0 || request.extent.height == 0);
-	EXIT_NOT_IMPLEMENTED(request.source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
 	EXIT_NOT_IMPLEMENTED(request.viewport.width <= 0.0f || request.viewport.height == 0.0f);
+	const bool expand_to_color = (request.mode == DepthStencilCopyMode::ExpandToColor);
+	EXIT_NOT_IMPLEMENTED(request.mode != DepthStencilCopyMode::ExpandToColor && request.mode != DepthStencilCopyMode::DepthStencilOnly);
+	EXIT_NOT_IMPLEMENTED(expand_to_color && request.source == nullptr);
+	EXIT_NOT_IMPLEMENTED(!expand_to_color && request.source != nullptr);
+	EXIT_NOT_IMPLEMENTED(expand_to_color && request.source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
 
 	Initialize(context);
-	const auto descriptor = GetSourceDescriptor(request.source);
 	auto*      pipeline   = GetRenderPipeline(context, request);
+	const auto descriptor = (expand_to_color ? GetSourceDescriptor(request.source) : nullptr);
 
 	DepthStencilCopyPreparedDraw draw {};
 	draw.pipeline          = pipeline->pipeline;
@@ -481,19 +596,26 @@ DepthStencilCopyPreparedDraw DepthStencilCopyRenderer::PrepareDraw(GraphicContex
 	draw.source_descriptor = descriptor;
 	draw.viewport          = request.viewport;
 	draw.scissor           = request.scissor;
-	draw.source_scale[0]   = static_cast<float>(request.source->extent.width) / static_cast<float>(request.extent.width);
-	draw.source_scale[1]   = static_cast<float>(request.source->extent.height) / static_cast<float>(request.extent.height);
+	if (expand_to_color)
+	{
+		draw.source_scale[0] = static_cast<float>(request.source->extent.width) / static_cast<float>(request.extent.width);
+		draw.source_scale[1] = static_cast<float>(request.source->extent.height) / static_cast<float>(request.extent.height);
+	}
 	return draw;
 }
 
 void DepthStencilCopyRenderer::BindPreparedDraw(VkCommandBuffer command_buffer, const DepthStencilCopyPreparedDraw& draw) const
 {
-	EXIT_IF(command_buffer == nullptr || draw.pipeline == nullptr || draw.pipeline_layout == nullptr || draw.source_descriptor == nullptr);
+	EXIT_IF(command_buffer == nullptr || draw.pipeline == nullptr || draw.pipeline_layout == nullptr);
 
 	vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
-	vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, 1, 1, &draw.source_descriptor, 0,
-	                        nullptr);
-	vkCmdPushConstants(command_buffer, draw.pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(draw.source_scale), draw.source_scale);
+	if (draw.source_descriptor != nullptr)
+	{
+		vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, 1, 1, &draw.source_descriptor, 0,
+		                        nullptr);
+		vkCmdPushConstants(command_buffer, draw.pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(draw.source_scale),
+		                   draw.source_scale);
+	}
 	vkCmdSetViewport(command_buffer, 0, 1, &draw.viewport);
 	vkCmdSetScissor(command_buffer, 0, 1, &draw.scissor);
 }
@@ -517,6 +639,16 @@ void DepthStencilCopyRenderer::ReleaseSource(GraphicContext* context, uint64_t s
 	}
 }
 
+void DepthStencilCopyRenderer::DestroyRenderPipeline(RenderPipeline* pipeline)
+{
+	EXIT_IF(pipeline == nullptr || pipeline->pipeline == nullptr || pipeline->pipeline_layout == nullptr);
+
+	vkDestroyPipeline(m_device, pipeline->pipeline, nullptr);
+	vkDestroyPipelineLayout(m_device, pipeline->pipeline_layout, nullptr);
+	pipeline->pipeline        = nullptr;
+	pipeline->pipeline_layout = nullptr;
+}
+
 void DepthStencilCopyRenderer::ReleaseRenderPass(GraphicContext* context, uint64_t render_pass_id)
 {
 	if (m_device == nullptr || render_pass_id == 0)
@@ -529,8 +661,7 @@ void DepthStencilCopyRenderer::ReleaseRenderPass(GraphicContext* context, uint64
 	{
 		if (it->render_pass_id == render_pass_id)
 		{
-			vkDestroyPipeline(m_device, it->pipeline, nullptr);
-			vkDestroyPipelineLayout(m_device, it->pipeline_layout, nullptr);
+			DestroyRenderPipeline(&*it);
 			it = m_pipelines.erase(it);
 			continue;
 		}
