@@ -10,6 +10,7 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/SaveData.h"
 #include "Emulator/Libs/SaveDataMemoryStore.h"
+#include "Emulator/Libs/SaveDataMountCoordinator.h"
 #include "Emulator/Libs/SaveDataPaths.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Loader/SystemContent.h"
@@ -36,10 +37,11 @@ LIB_VERSION("SaveData", 1, "SaveData", 1, 1);
 
 namespace SaveData {
 
-static constexpr char32_t          SAVE_DATA_POINT[] = U"/savedata0";
 static std::atomic<uint32_t>       g_next_transaction_resource {0};
 static std::mutex                  g_transaction_mutex;
 static std::unordered_set<int32_t> g_transaction_resources;
+static std::mutex                  g_mount_mutex;
+static SaveDataMountCoordinator    g_mount_coordinator;
 
 static std::filesystem::path ResolveSaveDataRoot(const char* title_id)
 {
@@ -63,13 +65,20 @@ static std::filesystem::path ResolveSaveDataRoot(const char* title_id)
 		SDL_free(base_path);
 	}
 
-	char current_title[64] {};
-	if ((title_id == nullptr || title_id[0] == '\0') &&
-	    Loader::SystemContentParamSfoGetString("TITLE_ID", current_title, sizeof(current_title)))
+	if (title_id != nullptr && title_id[0] != '\0')
 	{
-		title_id = current_title;
+		return SaveDataBuildTitleRoot(root.lexically_normal(), title_id);
 	}
-	return SaveDataBuildTitleRoot(root.lexically_normal(), title_id);
+
+	String metadata_title;
+	String metadata_version;
+	if (!Loader::SystemContentGetMetadata(&metadata_title, &metadata_version) || metadata_title.IsEmpty())
+	{
+		return {};
+	}
+
+	const auto title_utf8 = metadata_title.utf8_str();
+	return SaveDataBuildTitleRoot(root.lexically_normal(), title_utf8.GetData());
 }
 
 static bool ResolveSaveDataSlot(const char* title_id, const char* directory_name, String* out)
@@ -122,8 +131,9 @@ struct SaveDataMount3
 	uint64_t               blocks;
 	uint64_t               system_blocks;
 	uint32_t               mount_mode;
-	uint32_t               resource;
-	uint32_t               mode;
+	int32_t                pad2;
+	int32_t                resource;
+	uint8_t                reserved[32];
 };
 
 struct SaveDataMountResult
@@ -136,11 +146,31 @@ struct SaveDataMountResult
 	int                pad;
 };
 
-static int MountSaveDataDirectory(const String& mount_dir, uint32_t mount_mode, SaveDataMountResult* mount_result)
+static_assert(sizeof(SaveDataMount3) == 80);
+static_assert(offsetof(SaveDataMount3, dir_name) == 8);
+static_assert(offsetof(SaveDataMount3, mount_mode) == 32);
+static_assert(offsetof(SaveDataMount3, resource) == 40);
+static_assert(sizeof(SaveDataMountResult) == 64);
+static_assert(offsetof(SaveDataMountResult, required_blocks) == 16);
+static_assert(offsetof(SaveDataMountResult, mount_status) == 28);
+
+static int MountSaveDataDirectory(const char* directory_name, const String& mount_dir, uint32_t mount_mode,
+                                  SaveDataMountResult* mount_result)
 {
-	if (mount_result == nullptr)
+	if (directory_name == nullptr || mount_result == nullptr)
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	std::lock_guard lock(g_mount_mutex);
+	const auto      acquisition = g_mount_coordinator.Acquire(directory_name);
+	if (acquisition.result == SaveDataMountCoordinator::AcquireResult::AlreadyMounted)
+	{
+		return SAVE_DATA_ERROR_BUSY;
+	}
+	if (acquisition.result == SaveDataMountCoordinator::AcquireResult::Full)
+	{
+		return SAVE_DATA_ERROR_MOUNT_FULL;
 	}
 
 	const bool create            = (mount_mode & 0x04u) != 0;
@@ -172,15 +202,18 @@ static int MountSaveDataDirectory(const String& mount_dir, uint32_t mount_mode, 
 		created = true;
 	}
 
-	const String mount_point = SAVE_DATA_POINT;
+	const auto   mount_point_utf8 = SaveDataMountCoordinator::MountPoint(acquisition.slot);
+	const String mount_point      = String::FromUtf8(mount_point_utf8.c_str());
 	LibKernel::FileSystem::Mount(mount_dir, mount_point);
 	std::memset(mount_result, 0, sizeof(*mount_result));
 	const int written = std::snprintf(mount_result->mount_point.data, sizeof(mount_result->mount_point.data), "%s", mount_point.C_Str());
 	if (written < 0 || written >= static_cast<int>(sizeof(mount_result->mount_point.data)))
 	{
+		LibKernel::FileSystem::Umount(mount_point);
 		return SAVE_DATA_ERROR_INTERNAL;
 	}
 
+	g_mount_coordinator.Commit(acquisition.slot, directory_name);
 	mount_result->mount_status = created ? 1u : 0u;
 	return OK;
 }
@@ -254,17 +287,12 @@ int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id)
 	return id;
 }
 
-// NID uW4vfTwMQVo (SaveData_native). Observed SysV: rdi=resource-or-user (1),
-// rsi=MountPoint* "/savedata0" after Mount3/GetMountInfo/file create.
-// Bound as transaction-resource release: resource handles come from
-// CreateTransactionResource (first id is 1). Mount pointer is validated when
-// provided so a null second arg still fails cleanly.
-int KYTY_SYSV_ABI SaveDataDeleteTransactionResource(int32_t resource, const SaveDataMountPoint* mount_point)
+// sceSaveDataDeleteTransactionResource (NID lJUQuaKqoKY).
+int KYTY_SYSV_ABI SaveDataDeleteTransactionResource(int32_t resource)
 {
 	PRINT_NAME();
 
-	printf("\t resource    = %d\n", resource);
-	printf("\t mount_point = %s\n", (mount_point != nullptr ? mount_point->data : "(null)"));
+	printf("\t resource = %d\n", resource);
 
 	if (resource <= 0)
 	{
@@ -400,7 +428,7 @@ int KYTY_SYSV_ABI SaveDataMount(const SaveDataMount* mount, SaveDataMountResult*
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
-	return MountSaveDataDirectory(mount_dir, mount->mount_mode, mount_result);
+	return MountSaveDataDirectory(mount->dir_name, mount_dir, mount->mount_mode, mount_result);
 }
 
 int KYTY_SYSV_ABI SaveDataMount2(const SaveDataMount2* mount, SaveDataMountResult* mount_result)
@@ -422,7 +450,7 @@ int KYTY_SYSV_ABI SaveDataMount2(const SaveDataMount2* mount, SaveDataMountResul
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
-	return MountSaveDataDirectory(mount_dir, mount->mount_mode, mount_result);
+	return MountSaveDataDirectory(mount->dir_name->data, mount_dir, mount->mount_mode, mount_result);
 }
 
 int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult* mount_result)
@@ -439,7 +467,7 @@ int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResul
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
-	return MountSaveDataDirectory(mount_dir, mount->mount_mode, mount_result);
+	return MountSaveDataDirectory(mount->dir_name->data, mount_dir, mount->mount_mode, mount_result);
 }
 
 // sceSaveDataTransferringMount — NID WAzWTZm1H+I / RjMlsR8EXrw (SaveData_native).
@@ -476,19 +504,59 @@ int KYTY_SYSV_ABI SaveDataTransferringMount(const SaveDataTransferringMountParam
 	printf("\t title_id = %s\n", mount->title_id != nullptr ? mount->title_id->data : "<null>");
 	printf("\t dir_name = %s\n", mount->dir_name->data);
 
-	return MountSaveDataDirectory(mount_dir, 0x20u, mount_result);
+	return MountSaveDataDirectory(mount->dir_name->data, mount_dir, 0x20u, mount_result);
+}
+
+static int UnmountSaveDataPoint(const SaveDataMountPoint* mount_point)
+{
+	if (mount_point == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	std::lock_guard lock(g_mount_mutex);
+	const auto      slot = g_mount_coordinator.Find(mount_point->data);
+	if (!slot.has_value())
+	{
+		return SAVE_DATA_ERROR_NOT_MOUNTED;
+	}
+
+	LibKernel::FileSystem::Umount(String::FromUtf8(mount_point->data));
+	g_mount_coordinator.Release(*slot);
+	return OK;
 }
 
 int KYTY_SYSV_ABI SaveDataUmount(const SaveDataMountPoint* mount_point)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(mount_point == nullptr);
+	printf("\t mount_point = %s\n", mount_point != nullptr ? mount_point->data : "(null)");
+	return UnmountSaveDataPoint(mount_point);
+}
 
-	printf("\t mount_point = %s\n", mount_point->data);
+constexpr uint32_t SAVE_DATA_UMOUNT_MODE_BACKUP_ASYNC = 1u << 16u;
+constexpr uint32_t SAVE_DATA_EVENT_TYPE_UMOUNT_BACKUP_END = 1u;
+constexpr uint32_t SAVE_DATA_EVENT_TYPE_COMMIT_BACKUP_END = 4u;
 
-	LibKernel::FileSystem::Umount(String::FromUtf8(mount_point->data));
+static void EnqueueSaveDataEvent(uint32_t type, int32_t user_id, const char* dir_name, int32_t error_code);
 
+// sceSaveDataUmount2 (NID uW4vfTwMQVo).
+int KYTY_SYSV_ABI SaveDataUmount2(uint32_t mode, const SaveDataMountPoint* mount_point)
+{
+	PRINT_NAME();
+
+	printf("\t mode        = %u\n", mode);
+	printf("\t mount_point = %s\n", mount_point != nullptr ? mount_point->data : "(null)");
+
+	const int result = UnmountSaveDataPoint(mount_point);
+	if (result != OK)
+	{
+		return result;
+	}
+	if ((mode & SAVE_DATA_UMOUNT_MODE_BACKUP_ASYNC) != 0)
+	{
+		EnqueueSaveDataEvent(SAVE_DATA_EVENT_TYPE_UMOUNT_BACKUP_END, 0, "", 0);
+	}
 	return OK;
 }
 
@@ -676,19 +744,51 @@ int KYTY_SYSV_ABI SaveDataClearProgress()
 	return OK;
 }
 
-// sceSaveDataCommit — completes a save transaction descriptor supplied by the guest.
-// The observed caller only requires synchronous success after a non-null descriptor.
-int KYTY_SYSV_ABI SaveDataCommit(const void* commit_param)
+struct SaveDataPrepareParam
+{
+	int32_t  resource;
+	uint32_t prepare_mode;
+	uint8_t  reserved[32];
+};
+
+struct SaveDataCommitParam
+{
+	int32_t  resource;
+	uint32_t commit_mode;
+	uint8_t  reserved[32];
+};
+
+int KYTY_SYSV_ABI SaveDataPrepare(const SaveDataMountPoint* mount_point, const SaveDataPrepareParam* param)
 {
 	PRINT_NAME();
 
-	printf("\t commit_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(commit_param));
+	if (mount_point == nullptr || param == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	printf("\t mount_point  = %s\n", mount_point->data);
+	printf("\t resource     = %d\n", param->resource);
+	printf("\t prepare_mode = %u\n", param->prepare_mode);
+	return OK;
+}
+
+// sceSaveDataCommit — completes a save transaction descriptor supplied by the guest.
+int KYTY_SYSV_ABI SaveDataCommit(const SaveDataCommitParam* commit_param)
+{
+	PRINT_NAME();
 
 	if (commit_param == nullptr)
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
+	printf("\t resource    = %d\n", commit_param->resource);
+	printf("\t commit_mode = %u\n", commit_param->commit_mode);
+	if ((commit_param->commit_mode & 1u) != 0)
+	{
+		EnqueueSaveDataEvent(SAVE_DATA_EVENT_TYPE_COMMIT_BACKUP_END, 0);
+	}
 	return OK;
 }
 
@@ -942,9 +1042,10 @@ void RegisterSaveDataFunctions(Loader::SymbolDatabase* symbols, const LibraryIde
 void RegisterNativeSaveDataFunctions(Loader::SymbolDatabase* symbols)
 {
 	RegisterSaveDataFunctions(symbols, SAVE_DATA_NATIVE);
-	RegisterLibraryFunction(symbols, SAVE_DATA_NATIVE, "sDCBrmc61XU", SaveData::SaveDataGetMountInfo, U"SaveData::SaveDataGetMountInfo");
-	RegisterLibraryFunction(symbols, SAVE_DATA_NATIVE, "uW4vfTwMQVo", SaveData::SaveDataDeleteTransactionResource,
-	                        U"SaveData::SaveDataDeleteTransactionResource");
+	RegisterLibraryFunction(symbols, SAVE_DATA_NATIVE, "sDCBrmc61XU", SaveData::SaveDataPrepare, U"SaveData::SaveDataPrepare");
+	RegisterLibraryFunction(symbols, SAVE_DATA_NATIVE, "uW4vfTwMQVo", SaveData::SaveDataUmount2, U"SaveData::SaveDataUmount2");
+	RegisterLibraryFunction(symbols, SAVE_DATA_NATIVE, "X4MYzukPc3g", SaveData::SaveDataDirNameSearch,
+	                        U"SaveData::SaveDataDirNameSearch");
 }
 
 } // namespace

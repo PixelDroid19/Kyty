@@ -27,7 +27,7 @@ std::string SaveDataNormalizeTitleId(const char* title_id)
 			}
 		}
 	}
-	return result.empty() ? "UNKNOWN" : result;
+	return result;
 }
 
 bool SaveDataDirectoryNameValid(const char* directory_name)
@@ -55,7 +55,12 @@ bool SaveDataDirectoryNameValid(const char* directory_name)
 
 std::filesystem::path SaveDataBuildTitleRoot(const std::filesystem::path& save_data_root, const char* title_id)
 {
-	return save_data_root / SaveDataNormalizeTitleId(title_id);
+	const auto normalized_title_id = SaveDataNormalizeTitleId(title_id);
+	if (save_data_root.empty() || normalized_title_id.empty())
+	{
+		return {};
+	}
+	return save_data_root / normalized_title_id;
 }
 
 std::filesystem::path SaveDataBuildMemoryPath(const std::filesystem::path& title_root, int32_t user_id, uint32_t slot_id)

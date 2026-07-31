@@ -531,20 +531,17 @@ TEST(EmulatorSaveData, DeleteTransactionResourceTracksCreateHandles)
 {
 	using namespace Libs::SaveData;
 
-	SaveDataMountPoint mount {};
-	std::memcpy(mount.data, "/savedata0", 11);
-
-	EXPECT_EQ(SaveDataDeleteTransactionResource(0, &mount), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
-	EXPECT_EQ(SaveDataDeleteTransactionResource(-1, &mount), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+	EXPECT_EQ(SaveDataDeleteTransactionResource(0), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+	EXPECT_EQ(SaveDataDeleteTransactionResource(-1), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
 
 	// Unknown handle: guest-visible NOT_FOUND (not success).
-	EXPECT_EQ(SaveDataDeleteTransactionResource(99999, &mount), Libs::SaveData::SAVE_DATA_ERROR_NOT_FOUND);
+	EXPECT_EQ(SaveDataDeleteTransactionResource(99999), Libs::SaveData::SAVE_DATA_ERROR_NOT_FOUND);
 
 	const int32_t resource = SaveDataCreateTransactionResource(1);
 	EXPECT_GT(resource, 0);
-	EXPECT_EQ(SaveDataDeleteTransactionResource(resource, &mount), 0);
+	EXPECT_EQ(SaveDataDeleteTransactionResource(resource), 0);
 	// Double-delete must not invent success.
-	EXPECT_EQ(SaveDataDeleteTransactionResource(resource, &mount), Libs::SaveData::SAVE_DATA_ERROR_NOT_FOUND);
+	EXPECT_EQ(SaveDataDeleteTransactionResource(resource), Libs::SaveData::SAVE_DATA_ERROR_NOT_FOUND);
 }
 
 // sceSaveDataTransferringMount rejects null mount/result at the HLE boundary.
