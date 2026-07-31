@@ -11,6 +11,8 @@
 #include "Emulator/Loader/MissingImport.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
+#include <atomic>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Core::VirtualMemory {
@@ -57,9 +59,12 @@ struct ThreadLocalStorage
 	uint64_t handler_vaddr = 0;
 	uint64_t module_id     = 0;
 	uint64_t static_offset = 0;
+};
 
-	Core::Hashmap<int, uint8_t*> tlss;
-	Core::Mutex                  mutex;
+struct StaticTlsAllocation
+{
+	uint8_t* base      = nullptr;
+	uint64_t area_size = 0;
 };
 
 struct DynamicInfo
@@ -134,6 +139,19 @@ struct ProgramExportSnapshot
 	int32_t        unique_id = -1;
 	String         file_name;
 	Vector<String> export_names;
+};
+
+struct ImportSymbolSnapshot
+{
+	String     name;
+	SymbolType type = SymbolType::Unknown;
+};
+
+struct ProgramImportSnapshot
+{
+	int32_t                      unique_id = -1;
+	String                       file_name;
+	Vector<ImportSymbolSnapshot> imports;
 };
 
 struct LoadedModuleSnapshot
@@ -215,14 +233,20 @@ public:
 
 	void Execute();
 	int  StartModule(Program* program, size_t args, const void* argp, module_func_t func);
+	int  StartModuleOnStack(Program* program, size_t args, const void* argp, module_func_t func, void* stack_top);
 	int  StopModule(Program* program, size_t args, const void* argp, module_func_t func);
 	void StartAllModules();
+	void StartAllModulesOnStack(void* stack_top);
 	void StopAllModules();
 	void DeleteTlss(int thread_id);
 
 	void Resolve(const String& name, SymbolType type, Program* program, SymbolRecord* out_info, bool* bind_self = nullptr);
 	[[nodiscard]] MissingImportDiagnostics GetMissingImportDiagnostics() const;
 	[[nodiscard]] static MissingImportDiagnostics GetGlobalMissingImportDiagnostics();
+	// True while a program is applying RELA/JMPRELA records. Lazy package
+	// providers may be mapped and relocated during this window, but guest
+	// initializers must wait until the current relocation transaction completes.
+	[[nodiscard]] bool IsRelocationInProgress() const;
 
 	SymbolDatabase* Symbols() { return m_symbols; }
 
@@ -230,6 +254,7 @@ public:
 	// outside the lock: another lifecycle operation may unload them immediately.
 	[[nodiscard]] uint32_t LoadedProgramCount();
 	[[nodiscard]] Vector<ProgramExportSnapshot> SnapshotExportPrograms();
+	[[nodiscard]] Vector<ProgramImportSnapshot> SnapshotImportPrograms();
 	[[nodiscard]] Vector<LoadedModuleSnapshot>  SnapshotLoadedModules();
 	[[nodiscard]] bool TryGetProgramUnwindInfoByAddr(uint64_t vaddr, ProgramUnwindInfo* out_info);
 
@@ -241,7 +266,6 @@ public:
 
 	static uint8_t* TlsGetAddr(Program* program);
 	static uint8_t* TlsGetAddr(uint64_t module_id, uint64_t offset);
-	static void     DeleteTls(Program* program, int thread_id);
 
 	void StackTrace(uint64_t frame_ptr);
 
@@ -258,16 +282,22 @@ private:
 	static void Relocate(Program* program);
 	static void DeleteProgram(Program* program);
 	static void SetupTlsHandler(Program* program);
+	uint8_t*   GetStaticTlsThreadPointerLocked();
+	void       DeleteStaticTlsAllocation(int thread_id);
 
 	Program* FindProgram(const ModuleId& m, const LibraryId& l);
 
 	static const ModuleId*  FindModule(const Program& program, const String& id);
 	static const LibraryId* FindLibrary(const Program& program, const String& id);
 
-	Vector<Program*> m_programs;
-	SymbolDatabase*  m_symbols   = nullptr;
-	bool             m_relocated = false;
-	Core::Mutex      m_mutex;
+	Vector<Program*>                       m_programs;
+	SymbolDatabase*                        m_symbols            = nullptr;
+	bool                                   m_relocated          = false;
+	std::atomic<uint32_t>                  m_relocation_depth {0};
+	uint64_t                               m_static_tls_size     = 0;
+	Core::Hashmap<int, StaticTlsAllocation*> m_static_tlss;
+	Core::Mutex                            m_static_tls_mutex;
+	Core::Mutex                            m_mutex;
 };
 
 // Rewrite PS5 TLS-call sites that encode three 0x66 prefixes before E8

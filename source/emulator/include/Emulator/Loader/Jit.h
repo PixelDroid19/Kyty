@@ -139,10 +139,11 @@ struct SafeCall
 	void SetFunc(func_t func) { *reinterpret_cast<func_t*>(&code[0x23]) = func; }
 	void SetRegSaveArea(uint8_t* area) { *reinterpret_cast<uint8_t**>(&code[0x19]) = area; }
 	void SetLockVar(uint8_t* lock_var) { *reinterpret_cast<uint8_t**>(&code[0x0f]) = lock_var; }
+	void SetHostStackTop(uint8_t* stack_top) { *reinterpret_cast<uint8_t**>(&code[0x45]) = stack_top; }
 
 	static uint64_t GetSize() { return 0x1000; }
 
-	uint8_t code[0x78] = {
+	uint8_t code[0x81] = {
 	    /*00*/ 0x51,                                                       // push   rcx  /* Save general purpose registers */
 	    /*01*/ 0x52,                                                       // push   rdx
 	    /*02*/ 0x41, 0x50,                                                 // push   r8
@@ -163,27 +164,28 @@ struct SafeCall
 	    /*38*/ 0xba, 0xff, 0xff, 0xff, 0xff,                               // mov    edx,0xffffffff
 	    /*3d*/ 0x0f, 0xae, 0x26,                                           // xsave  [rsi]      /* Save float registers */
 	    /*40*/ 0x48, 0x89, 0xe3,                                           // mov    rbx,rsp
-	    /*43*/ 0x48, 0x83, 0xe4, 0xf0,                                     // and    rsp,0xfffffffffffffff0
-	    /*47*/ 0x48, 0x83, 0xec, 0x20,                                     // sub    rsp,0x20   /* MS ABI shadow space */
-	    /*4b*/ 0xff, 0xd1,                                                 // call   rcx
-	    /*4d*/ 0x48, 0x83, 0xc4, 0x20,                                     // add    rsp,0x20
-	    /*51*/ 0x48, 0x89, 0xdc,                                           // mov    rsp,rbx
-	    /*54*/ 0x48, 0x89, 0xc1,                                           // mov    rcx,rax
-	    /*57*/ 0xb8, 0xff, 0xff, 0xff, 0xff,                               // mov    eax,0xffffffff
-	    /*5c*/ 0xba, 0xff, 0xff, 0xff, 0xff,                               // mov    edx,0xffffffff
-	    /*61*/ 0x0f, 0xae, 0x2e,                                           // xrstor [rsi]      /* Restore float registers */
-	    /*64*/ 0x48, 0x89, 0xc8,                                           // mov    rax,rcx
-	    /*67*/ 0xc6, 0x07, 0x00,                                           // mov    BYTE PTR [rdi],0x0       /* Unlock */
-	    /*6a*/ 0x5b,                                                       // pop    rbx      /* Restore general purpose registers */
-	    /*6b*/ 0x5e,                                                       // pop    rsi
-	    /*6c*/ 0x5f,                                                       // pop    rdi
-	    /*6d*/ 0x41, 0x5b,                                                 // pop    r11
-	    /*6f*/ 0x41, 0x5a,                                                 // pop    r10
-	    /*71*/ 0x41, 0x59,                                                 // pop    r9
-	    /*73*/ 0x41, 0x58,                                                 // pop    r8
-	    /*75*/ 0x5a,                                                       // pop    rdx
-	    /*76*/ 0x59,                                                       // pop    rcx
-	    /*77*/ 0xc3,                                                       // ret
+	    /*43*/ 0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // movabs rax,0x1122334455667788
+	    /*4d*/ 0x48, 0x89, 0xc4,                                           // mov    rsp,rax
+	    /*50*/ 0x48, 0x83, 0xe4, 0xf0,                                     // and    rsp,0xfffffffffffffff0
+	    /*54*/ 0x48, 0x83, 0xec, 0x20,                                     // sub    rsp,0x20   /* MS ABI shadow space */
+	    /*58*/ 0xff, 0xd1,                                                 // call   rcx
+	    /*5a*/ 0x48, 0x89, 0xdc,                                           // mov    rsp,rbx
+	    /*5d*/ 0x48, 0x89, 0xc1,                                           // mov    rcx,rax
+	    /*60*/ 0xb8, 0xff, 0xff, 0xff, 0xff,                               // mov    eax,0xffffffff
+	    /*65*/ 0xba, 0xff, 0xff, 0xff, 0xff,                               // mov    edx,0xffffffff
+	    /*6a*/ 0x0f, 0xae, 0x2e,                                           // xrstor [rsi]      /* Restore float registers */
+	    /*6d*/ 0x48, 0x89, 0xc8,                                           // mov    rax,rcx
+	    /*70*/ 0xc6, 0x07, 0x00,                                           // mov    BYTE PTR [rdi],0x0       /* Unlock */
+	    /*73*/ 0x5b,                                                       // pop    rbx      /* Restore general purpose registers */
+	    /*74*/ 0x5e,                                                       // pop    rsi
+	    /*75*/ 0x5f,                                                       // pop    rdi
+	    /*76*/ 0x41, 0x5b,                                                 // pop    r11
+	    /*78*/ 0x41, 0x5a,                                                 // pop    r10
+	    /*7a*/ 0x41, 0x59,                                                 // pop    r9
+	    /*7c*/ 0x41, 0x58,                                                 // pop    r8
+	    /*7e*/ 0x5a,                                                       // pop    rdx
+	    /*7f*/ 0x59,                                                       // pop    rcx
+	    /*80*/ 0xc3,                                                       // ret
 
 	};
 };

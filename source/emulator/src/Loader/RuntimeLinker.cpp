@@ -41,6 +41,12 @@ void SetProgName(const String& name);
 
 namespace Kyty::Loader {
 
+static bool IsHleOwnedRuntimeSymbol(const String& name)
+{
+	return name == U"J3edELK4FvM" || name == U"3GPpjQdAMTw" || name == U"9rAeANT2tyE" || name == U"2emaaluWzUw" ||
+	       name == U"DiGVep5yB5w";
+}
+
 Vector<uint32_t> LoaderBuildModuleStartOrder(const Vector<ModuleStartDescriptor>& modules)
 {
 	Vector<uint32_t> order;
@@ -233,50 +239,23 @@ static uint64_t g_next_tls_module_id = 1;
 
 static Program* g_tls_main_program = nullptr;
 alignas(64) static uint8_t g_tls_reg_save_area[XSAVE_BUFFER_SIZE + sizeof(XSAVE_CHK_GUARD)];
+alignas(16) static uint8_t g_tls_host_stack[1024 * 1024];
 static uint8_t g_tls_spinlock = 0;
 
 static KYTY_SYSV_ABI void run_entry(uint64_t addr, EntryParams* params, atexit_func_t atexit_func, void* stack_top)
 {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
-	if (stack_top != nullptr)
-	{
-		const uintptr_t guest_rsp = reinterpret_cast<uintptr_t>(stack_top) & ~static_cast<uintptr_t>(0xf);
-		const uintptr_t guest_rbp = guest_rsp - 4u * sizeof(uint64_t);
-		auto* const      root      = reinterpret_cast<uintptr_t*>(guest_rbp);
-		root[0]                     = 0;
-		root[1]                     = 0;
-
-		asm volatile("movq %[entry], %%rax\n\t"
-		             "movq %[params], %%rdi\n\t"
-		             "movq %[atexit_func], %%rsi\n\t"
-		             "pushq %%r12\n\t"
-		             "pushq %%r13\n\t"
-		             "movq %%rsp, %%r12\n\t"
-		             "movq %%rbp, %%r13\n\t"
-		             "movq %[guest_rsp], %%rsp\n\t"
-		             "movq %[guest_rbp], %%rbp\n\t"
-		             "callq *%%rax\n\t"
-		             "movq %%r13, %%rbp\n\t"
-		             "movq %%r12, %%rsp\n\t"
-		             "popq %%r13\n\t"
-		             "popq %%r12\n\t"
-		             :
-		             : [entry] "r"(addr), [params] "r"(params), [atexit_func] "r"(atexit_func), [guest_rsp] "r"(guest_rsp),
-		               [guest_rbp] "r"(guest_rbp)
-		             : "cc", "memory", "rax", "rdi", "rsi", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3",
-		               "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
-		return;
-	}
-#endif
-	GuestCall::Invoke(addr, reinterpret_cast<uint64_t>(params), reinterpret_cast<uint64_t>(atexit_func), 0);
+	GuestCall::InvokeOnStack(addr, reinterpret_cast<uint64_t>(params), reinterpret_cast<uint64_t>(atexit_func), 0, stack_top);
 }
 
-static KYTY_SYSV_ABI int run_ini_fini(uint64_t addr, size_t args, const void* argp, module_func_t func)
+static KYTY_SYSV_ABI int run_ini_fini(uint64_t addr, size_t args, const void* argp, module_func_t func, void* stack_top)
 {
-	return static_cast<int>(GuestCall::Invoke(addr, args, reinterpret_cast<uint64_t>(argp), reinterpret_cast<uint64_t>(func)));
+	return (stack_top != nullptr ? static_cast<int>(GuestCall::InvokeOnStack(addr, args, reinterpret_cast<uint64_t>(argp),
+	                                                                        reinterpret_cast<uint64_t>(func), stack_top)) :
+	                               static_cast<int>(GuestCall::Invoke(addr, args, reinterpret_cast<uint64_t>(argp),
+	                                                                  reinterpret_cast<uint64_t>(func))));
 }
 
-static void run_init_array(uint64_t base_vaddr, uint64_t array_vaddr, uint64_t array_size)
+static void run_init_array(uint64_t base_vaddr, uint64_t array_vaddr, uint64_t array_size, void* stack_top)
 {
 	if (array_vaddr == 0 || array_size < sizeof(uint64_t))
 	{
@@ -291,7 +270,13 @@ static void run_init_array(uint64_t base_vaddr, uint64_t array_vaddr, uint64_t a
 		const uint64_t fn = entries[i];
 		if (fn != 0)
 		{
-			GuestCall::Invoke(fn, 0, 0, 0);
+			if (stack_top != nullptr)
+			{
+				GuestCall::InvokeOnStack(fn, 0, 0, 0, stack_top);
+			} else
+			{
+				GuestCall::Invoke(fn, 0, 0, 0);
+			}
 		}
 	}
 }
@@ -300,7 +285,7 @@ void LoaderRunProgramInitializers(uint64_t base_vaddr, const DynamicInfo& info)
 {
 	if (info.preinit_array_vaddr != 0 && info.preinit_array_size != 0)
 	{
-		run_init_array(base_vaddr, info.preinit_array_vaddr, info.preinit_array_size);
+		run_init_array(base_vaddr, info.preinit_array_vaddr, info.preinit_array_size, nullptr);
 	}
 
 	if (info.init_vaddr != 0)
@@ -310,7 +295,7 @@ void LoaderRunProgramInitializers(uint64_t base_vaddr, const DynamicInfo& info)
 
 	if (info.init_array_vaddr != 0 && info.init_array_size != 0)
 	{
-		run_init_array(base_vaddr, info.init_array_vaddr, info.init_array_size);
+		run_init_array(base_vaddr, info.init_array_vaddr, info.init_array_size, nullptr);
 	}
 }
 
@@ -709,6 +694,14 @@ static void relocate(uint32_t index, Elf64_Rela* r, Program* program, bool jmpre
 
 	// KYTY_PROFILER_BLOCK("patch");
 
+	if (!ri.resolved && ri.type == SymbolType::Object)
+	{
+		if (program->rt != nullptr && ModuleLifecycleCoordinator::TryLoadProviderForLazyImport(program->rt, ri.name, ri.type))
+		{
+			ri = GetRelocationInfo(r, program);
+		}
+	}
+
 	if (ri.resolved)
 	{
 		patched = Core::VirtualMemory::PatchReplace(ri.vaddr, ri.value);
@@ -800,8 +793,9 @@ static KYTY_SYSV_ABI uint64_t ResolveLazyPlt(void* program_ptr, uint64_t rel_ind
 	if (!ri.resolved || ri.value == 0)
 	{
 		const auto clean_name = Log::IsColoredPrintf() ? ri.name : Log::RemoveColors(ri.name);
-		std::fprintf(stderr, "KYTY_LOADER: lazy_plt unresolved=%u value=%u import=%s\n", ri.resolved ? 0u : 1u,
-		             ri.value != 0 ? 1u : 0u, clean_name.C_Str());
+		const auto requester = Log::IsColoredPrintf() ? program->file_name : Log::RemoveColors(program->file_name);
+		std::fprintf(stderr, "KYTY_LOADER: lazy_plt unresolved=%u value=%u requester=%s rel_index=%" PRIu64 " import=%s\n",
+		             ri.resolved ? 0u : 1u, ri.value != 0 ? 1u : 0u, requester.C_Str(), rel_index, clean_name.C_Str());
 		std::fflush(stderr);
 		EXIT("can't resolve lazy PLT import: %s\n", clean_name.C_Str());
 	}
@@ -821,7 +815,7 @@ static KYTY_MS_ABI uint8_t* TlsMainGetAddr()
 		EXIT("xsave buffer is too small\n");
 	}
 
-	return RuntimeLinker::TlsGetAddr(g_tls_main_program) + g_tls_main_program->tls.image_size;
+	return RuntimeLinker::TlsGetAddr(g_tls_main_program) + g_tls_main_program->tls.static_offset;
 }
 
 uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size)
@@ -1407,6 +1401,11 @@ void RuntimeLinker::Execute()
 {
 	KYTY_PROFILER_THREAD("Thread_Main");
 
+	if (!ModuleLifecycleCoordinator::PrepareProvidersForExecution(this))
+	{
+		EXIT("initial module dependency closure failed\n");
+	}
+
 	Libs::LibKernel::PthreadInitSelfForMainThread();
 	void* main_stack_top = Libs::LibKernel::PthreadCreateMainGuestStack();
 	if (main_stack_top == nullptr)
@@ -1414,7 +1413,7 @@ void RuntimeLinker::Execute()
 		EXIT("failed to allocate main guest stack\n");
 	}
 	RelocateAll();
-	StartAllModules();
+	StartAllModulesOnStack(main_stack_top);
 
 	// After load+reloc the main image is final. Rewrite TLS GD call prefixes
 	// on executable LOAD segments only (never the whole base_size — that would
@@ -1506,17 +1505,36 @@ void RuntimeLinker::Clear()
 	ModuleLifecycleCoordinator::ClearPending(this);
 	Core::LockGuard lock(m_mutex);
 
+	{
+		Core::LockGuard tls_lock(m_static_tls_mutex);
+		FOR_HASH (m_static_tlss)
+		{
+			auto* allocation = m_static_tlss.Value();
+			delete[] allocation->base;
+			delete allocation;
+		}
+		m_static_tlss.Clear();
+	}
+
 	for (auto* p: m_programs)
 	{
 		DeleteProgram(p);
 	}
 	m_programs.Clear();
 	delete m_symbols;
-	m_symbols             = nullptr;
-	m_relocated           = false;
-	g_next_tls_module_id  = 1;
+	m_symbols = nullptr;
+	m_relocated = false;
+	m_relocation_depth.store(0, std::memory_order_release);
+	m_static_tls_size  = 0;
+	g_next_tls_module_id = 1;
+	g_tls_main_program = nullptr;
 	Kyty::Libs::LibKernel::ApplicationHeap::Reset();
 	Config::ResetGuestPlatform();
+}
+
+bool RuntimeLinker::IsRelocationInProgress() const
+{
+	return m_relocation_depth.load(std::memory_order_acquire) != 0;
 }
 
 void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* program, SymbolRecord* out_info, bool* bind_self)
@@ -1574,18 +1592,10 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 			*bind_self = (exporter == program);
 		}
 	}
-	// Some guest runtime shims export host-service entrypoints but cannot perform
-	// their platform work under the emulator. Keep those process-global services
-	// on the HLE side of the ABI boundary: libc allocation constructors can run
-	// before their mspace is initialized, and PS5Util's thread-context shim would
-	// otherwise claim that an asynchronous request was delivered when it was not.
-	const bool prefer_hle_runtime =
-	    hle_record != nullptr &&
-	    (resolve.name == U"gQX+4GDQjpM" || resolve.name == U"2X5agFjKxMc" || resolve.name == U"Y7aJ1uydPMo" ||
-	     resolve.name == U"tIhsqj0qsFE" || resolve.name == U"Ujf3KzMvRmI" || resolve.name == U"2Btkg8k24Zg" ||
-	     resolve.name == U"cVSk9y8URbc" || resolve.name == U"fJnpuVVBbKk" || resolve.name == U"hdm0YfMa7TQ" ||
-	     resolve.name == U"z+P+xCnWLBk" || resolve.name == U"MLWl90SFWNE" || resolve.name == U"smbQukfxYJM" ||
-	     resolve.name == U"J3edELK4FvM");
+	// Some runtime symbols have process-wide host state or synchronization
+	// contracts. When both a guest export and HLE implementation exist, keep
+	// those imports on the HLE side of the ABI boundary.
+	const bool prefer_hle_runtime = hle_record != nullptr && IsHleOwnedRuntimeSymbol(resolve.name);
 	const SymbolRecord* record =
 	    prefer_hle_runtime ? hle_record : (export_record != nullptr ? export_record : hle_record);
 
@@ -1680,6 +1690,37 @@ Vector<ProgramExportSnapshot> RuntimeLinker::SnapshotExportPrograms()
 				if (export_symbol != nullptr && !export_symbol->name.IsEmpty())
 				{
 					program_snapshot.export_names.Add(export_symbol->name);
+				}
+			}
+		}
+		snapshot.Add(std::move(program_snapshot));
+	}
+	return snapshot;
+}
+
+Vector<ProgramImportSnapshot> RuntimeLinker::SnapshotImportPrograms()
+{
+	Core::LockGuard               lock(m_mutex);
+	Vector<ProgramImportSnapshot> snapshot;
+	for (const auto* program: m_programs)
+	{
+		if (program == nullptr)
+		{
+			continue;
+		}
+
+		ProgramImportSnapshot program_snapshot {};
+		program_snapshot.unique_id = program->unique_id;
+		program_snapshot.file_name = program->file_name;
+		if (program->import_symbols != nullptr)
+		{
+			const uint32_t import_count = program->import_symbols->SymbolCount();
+			for (uint32_t i = 0; i < import_count; ++i)
+			{
+				const SymbolRecord* import_symbol = program->import_symbols->SymbolAt(i);
+				if (import_symbol != nullptr && !import_symbol->name.IsEmpty())
+				{
+					program_snapshot.imports.Add({import_symbol->name, import_symbol->type});
 				}
 			}
 		}
@@ -1993,6 +2034,42 @@ void RuntimeLinker::StartAllModules()
 	}
 }
 
+void RuntimeLinker::StartAllModulesOnStack(void* stack_top)
+{
+	EXIT_IF(stack_top == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+
+	Vector<Program*>               shared_programs;
+	Vector<ModuleStartDescriptor> descriptors;
+	for (auto* p: m_programs)
+	{
+		if (p->elf->IsShared())
+		{
+			ModuleStartDescriptor descriptor {};
+			descriptor.file_name = p->file_name;
+			if (p->dynamic_info->so_name != nullptr)
+			{
+				descriptor.so_name = String::FromUtf8(p->dynamic_info->so_name);
+			}
+			for (const auto* dependency: p->dynamic_info->needed)
+			{
+				if (dependency != nullptr)
+				{
+					descriptor.needed.Add(String::FromUtf8(dependency));
+				}
+			}
+			shared_programs.Add(p);
+			descriptors.Add(std::move(descriptor));
+		}
+	}
+
+	for (const uint32_t index: LoaderBuildModuleStartOrder(descriptors))
+	{
+		StartModuleOnStack(shared_programs[index], 0, nullptr, nullptr, stack_top);
+	}
+}
+
 void RuntimeLinker::StopAllModules()
 {
 	// EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
@@ -2009,6 +2086,11 @@ void RuntimeLinker::StopAllModules()
 }
 
 int RuntimeLinker::StartModule(Program* program, size_t args, const void* argp, module_func_t func)
+{
+	return StartModuleOnStack(program, args, argp, func, nullptr);
+}
+
+int RuntimeLinker::StartModuleOnStack(Program* program, size_t args, const void* argp, module_func_t func, void* stack_top)
 {
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->dynamic_info == nullptr);
@@ -2028,11 +2110,11 @@ int RuntimeLinker::StartModule(Program* program, size_t args, const void* argp, 
 	int result = 0;
 	if (program->dynamic_info->init_vaddr != 0)
 	{
-		result = run_ini_fini(program->dynamic_info->init_vaddr + program->base_vaddr, args, argp, func);
+		result = run_ini_fini(program->dynamic_info->init_vaddr + program->base_vaddr, args, argp, func, stack_top);
 	}
 	if (result == 0)
 	{
-		run_init_array(program->base_vaddr, program->dynamic_info->init_array_vaddr, program->dynamic_info->init_array_size);
+		run_init_array(program->base_vaddr, program->dynamic_info->init_array_vaddr, program->dynamic_info->init_array_size, stack_top);
 	}
 
 	return result;
@@ -2051,45 +2133,61 @@ int RuntimeLinker::StopModule(Program* program, size_t args, const void* argp, m
 	printf(FG_BRIGHT_YELLOW "--- Stop module: " BG_BLUE BOLD "%s" BG_DEFAULT NO_BOLD DEFAULT "\n", program->file_name.C_Str());
 	printf(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
 
-	int result = run_ini_fini(program->dynamic_info->fini_vaddr + program->base_vaddr, args, argp, func);
+	int result = run_ini_fini(program->dynamic_info->fini_vaddr + program->base_vaddr, args, argp, func, nullptr);
 
 	Libs::LibKernel::PthreadDeleteStaticObjects(program);
 
 	return result;
 }
 
-uint8_t* RuntimeLinker::TlsGetAddr(Program* program)
+uint8_t* RuntimeLinker::GetStaticTlsThreadPointerLocked()
 {
-	EXIT_IF(program == nullptr);
+	constexpr uint64_t tcb_size = 0x1000;
+	const int          thread_id = Core::Thread::GetThreadIdUnique();
 
-	program->tls.mutex.Lock();
-
-	auto& tls = program->tls.tlss.GetOrPutDef(Core::Thread::GetThreadIdUnique(), nullptr);
-
-	if (tls == nullptr)
+	Core::LockGuard tls_lock(m_static_tls_mutex);
+	auto&           allocation = m_static_tlss.GetOrPutDef(thread_id, nullptr);
+	if (allocation != nullptr)
 	{
-		// Layout: [TLS image][TCB]. The thread pointer (fs base) is at tls + image_size
-		// and points at the TCB, whose fields (self-pointer at [0], stack canary at
-		// [0x28], etc.) the guest reads as fs:[0], fs:[0x28]. The TCB must therefore be
-		// allocated and zero-initialised past the image, with the self-pointer set;
-		// otherwise those reads land in unallocated memory (observed as 0xAAAA garbage).
-		constexpr uint64_t tcb_size = 0x1000;
-		tls                         = new uint8_t[program->tls.image_size + tcb_size];
-		LoaderInitializeThreadTlsImage(tls, program->tls.image_size, reinterpret_cast<const uint8_t*>(program->tls.image_vaddr),
-		                               program->tls.init_size);
-		LoaderPrepareThreadTlsImage(tls, program->tls.image_size, program->tls.image_vaddr, program->base_vaddr, program->base_size,
-		                            TlsGuestRead64, nullptr);
-		auto* tcb = tls + program->tls.image_size;
-		std::memset(tcb, 0, tcb_size);
-		// TCB self-pointer (fs:[0] == fs base)
-		*reinterpret_cast<uint64_t*>(tcb) = reinterpret_cast<uint64_t>(tcb);
+		EXIT_IF(allocation->area_size != m_static_tls_size);
+		return allocation->base + allocation->area_size;
 	}
 
-	uint8_t* ret = tls;
+	EXIT_IF(m_static_tls_size > std::numeric_limits<uint64_t>::max() - tcb_size);
+	allocation            = new StaticTlsAllocation;
+	allocation->area_size = m_static_tls_size;
+	allocation->base      = new uint8_t[m_static_tls_size + tcb_size];
+	std::memset(allocation->base, 0, m_static_tls_size + tcb_size);
 
-	program->tls.mutex.Unlock();
+	auto* thread_pointer = allocation->base + allocation->area_size;
+	for (auto* program: m_programs)
+	{
+		if (program == nullptr || program->tls.image_size == 0 || program->tls.static_offset == 0)
+		{
+			continue;
+		}
 
-	return ret;
+		EXIT_IF(program->tls.image_size > program->tls.static_offset);
+		EXIT_IF(program->tls.static_offset > allocation->area_size);
+		auto* destination = thread_pointer - program->tls.static_offset;
+		LoaderInitializeThreadTlsImage(destination, program->tls.image_size,
+		                               reinterpret_cast<const uint8_t*>(program->tls.image_vaddr), program->tls.init_size);
+		LoaderPrepareThreadTlsImage(destination, program->tls.image_size, program->tls.image_vaddr, program->base_vaddr,
+		                            program->base_size, TlsGuestRead64, nullptr);
+	}
+
+	*reinterpret_cast<uint64_t*>(thread_pointer) = reinterpret_cast<uint64_t>(thread_pointer);
+	return thread_pointer;
+}
+
+uint8_t* RuntimeLinker::TlsGetAddr(Program* program)
+{
+	EXIT_IF(program == nullptr || program->rt == nullptr || program->tls.image_size == 0 || program->tls.static_offset == 0);
+
+	auto* rt = program->rt;
+	Core::LockGuard lock(rt->m_mutex);
+	auto*           thread_pointer = rt->GetStaticTlsThreadPointerLocked();
+	return thread_pointer - program->tls.static_offset;
 }
 
 uint8_t* RuntimeLinker::TlsGetAddr(uint64_t module_id, uint64_t offset)
@@ -2099,35 +2197,34 @@ uint8_t* RuntimeLinker::TlsGetAddr(uint64_t module_id, uint64_t offset)
 	auto* rt = Core::Singleton<RuntimeLinker>::Instance(); // NOLINT
 	EXIT_IF(rt == nullptr);
 
-	Program* program = nullptr;
+	Core::LockGuard lock(rt->m_mutex);
+	Program*       program = nullptr;
+	for (auto* p: rt->m_programs)
 	{
-		Core::LockGuard lock(rt->m_mutex);
-		for (auto* p: rt->m_programs)
+		if (p != nullptr && p->tls.module_id == module_id)
 		{
-			if (p != nullptr && p->tls.module_id == module_id)
-			{
-				program = p;
-				break;
-			}
+			program = p;
+			break;
 		}
 	}
 
 	EXIT_IF(program == nullptr);
 	EXIT_IF(offset > program->tls.image_size);
 
-	return TlsGetAddr(program) + offset;
+	auto* thread_pointer = rt->GetStaticTlsThreadPointerLocked();
+	return thread_pointer - program->tls.static_offset + offset;
 }
 
-void RuntimeLinker::DeleteTls(Program* program, int thread_id)
+void RuntimeLinker::DeleteStaticTlsAllocation(int thread_id)
 {
-	EXIT_IF(program == nullptr);
-
-	program->tls.mutex.Lock();
-
-	delete[] program->tls.tlss.Get(thread_id, nullptr);
-	program->tls.tlss.Remove(thread_id);
-
-	program->tls.mutex.Unlock();
+	Core::LockGuard tls_lock(m_static_tls_mutex);
+	auto*           allocation = m_static_tlss.Get(thread_id, nullptr);
+	if (allocation != nullptr)
+	{
+		delete[] allocation->base;
+		delete allocation;
+		m_static_tlss.Remove(thread_id);
+	}
 }
 
 static uint64_t calc_base_size(const Elf64_Ehdr* ehdr, const Elf64_Phdr* phdr)
@@ -2249,21 +2346,39 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 			}
 		}
 
-		if (phdr[i].p_type == PT_TLS)
+		if (phdr[i].p_type == PT_TLS && phdr[i].p_memsz != 0)
 		{
 			EXIT_IF(program->tls.image_vaddr != 0 || program->tls.image_size != 0 || program->tls.module_id != 0);
 			EXIT_IF(phdr[i].p_vaddr >= program->base_size);
+			EXIT_IF(phdr[i].p_filesz > phdr[i].p_memsz);
 
-			program->tls.image_vaddr = phdr[i].p_vaddr + program->base_vaddr;
-			program->tls.image_size  = get_aligned_size(phdr + i);
-			program->tls.init_size   = std::min(phdr[i].p_filesz, program->tls.image_size);
-			program->tls.static_offset = program->tls.image_size;
+			{
+				Core::LockGuard tls_lock(program->rt->m_static_tls_mutex);
+				if (program->rt->m_static_tlss.Size() != 0)
+				{
+					EXIT("static TLS module loaded after thread materialization: %s\n", program->file_name.C_Str());
+				}
+			}
+
+			const uint64_t alignment = std::max<uint64_t>(phdr[i].p_align, 16);
+			EXIT_IF((alignment & (alignment - 1)) != 0);
+			EXIT_IF(program->rt->m_static_tls_size > std::numeric_limits<uint64_t>::max() - phdr[i].p_memsz);
+
+			const uint64_t tls_end = program->rt->m_static_tls_size + phdr[i].p_memsz;
+			EXIT_IF(tls_end > std::numeric_limits<uint64_t>::max() - (alignment - 1));
+
+			program->tls.image_vaddr   = phdr[i].p_vaddr + program->base_vaddr;
+			program->tls.image_size    = phdr[i].p_memsz;
+			program->tls.init_size     = phdr[i].p_filesz;
+			program->tls.static_offset = (tls_end + alignment - 1) & ~(alignment - 1);
 			program->tls.module_id     = g_next_tls_module_id++;
+			program->rt->m_static_tls_size = program->tls.static_offset;
 
 			printf("tls addr = 0x%016" PRIx64 "\n", program->tls.image_vaddr);
 			printf("tls init   = %" PRIu64 "\n", program->tls.init_size);
 			printf("tls size   = %" PRIu64 "\n", program->tls.image_size);
 			printf("tls module = %" PRIu64 "\n", program->tls.module_id);
+			printf("tls offset = %" PRIu64 "\n", program->tls.static_offset);
 		}
 
 		if (phdr[i].p_type == PT_OS_PROCPARAM)
@@ -2300,11 +2415,6 @@ void RuntimeLinker::DeleteProgram(Program* p)
 	delete p->exception_handler;
 	delete p->export_symbols;
 	delete p->import_symbols;
-
-	FOR_HASH (p->tls.tlss)
-	{
-		delete p->tls.tlss.Value();
-	}
 
 	delete p;
 }
@@ -2453,6 +2563,10 @@ void RuntimeLinker::Relocate(Program* program)
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(program == nullptr);
+	if (program->rt != nullptr)
+	{
+		program->rt->m_relocation_depth.fetch_add(1, std::memory_order_acq_rel);
+	}
 
 	if (g_invalid_memory == 0)
 	{
@@ -2473,6 +2587,11 @@ void RuntimeLinker::Relocate(Program* program)
 
 	relocate_all(program->dynamic_info->rela_table, program->dynamic_info->rela_table_total_size, program, false);
 	relocate_all(program->dynamic_info->jmprela_table, program->dynamic_info->jmprela_table_size, program, true);
+
+	if (program->rt != nullptr)
+	{
+		program->rt->m_relocation_depth.fetch_sub(1, std::memory_order_acq_rel);
+	}
 }
 
 Program* RuntimeLinker::FindProgram(const ModuleId& m, const LibraryId& l)
@@ -2610,6 +2729,7 @@ void RuntimeLinker::SetupTlsHandler(Program* program)
 	code->SetFunc(TlsMainGetAddr);
 	code->SetRegSaveArea(g_tls_reg_save_area);
 	code->SetLockVar(&g_tls_spinlock);
+	code->SetHostStackTop(g_tls_host_stack + sizeof(g_tls_host_stack));
 
 	Core::VirtualMemory::Protect(program->tls.handler_vaddr, Jit::SafeCall::GetSize(), Core::VirtualMemory::Mode::Execute);
 	Core::VirtualMemory::FlushInstructionCache(program->tls.handler_vaddr, Jit::SafeCall::GetSize());
@@ -2618,11 +2738,7 @@ void RuntimeLinker::SetupTlsHandler(Program* program)
 void RuntimeLinker::DeleteTlss(int thread_id)
 {
 	Core::LockGuard lock(m_mutex);
-
-	for (auto* p: m_programs)
-	{
-		DeleteTls(p, thread_id);
-	}
+	DeleteStaticTlsAllocation(thread_id);
 }
 
 } // namespace Kyty::Loader

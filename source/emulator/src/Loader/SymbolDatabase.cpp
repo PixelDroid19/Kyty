@@ -142,10 +142,21 @@ static String CanonicalComponent(const String& value)
 	return value.StartsWith(LIB_PREFIX) ? value.RemoveFirst(6) : value;
 }
 
+static String GenerateModuleIdentity(const SymbolResolve& s)
+{
+	const auto module = SymbolDatabase::CanonicalModuleName(s.module);
+	return String::FromPrintf("[%s_v%d.%d]", module.C_Str(), s.module_version_major, s.module_version_minor);
+}
+
+String SymbolDatabase::CanonicalModuleName(const String& module)
+{
+	return CanonicalComponent(module);
+}
+
 String SymbolDatabase::GenerateName(const SymbolResolve& s)
 {
 	auto library = CanonicalComponent(s.library);
-	auto module  = CanonicalComponent(s.module);
+	auto module  = CanonicalModuleName(s.module);
 	return String::FromPrintf("%s[%s_v%d][%s_v%d.%d][%s]", s.name.C_Str(), library.C_Str(), s.library_version, module.C_Str(),
 	                          s.module_version_major, s.module_version_minor, Core::EnumName(s.type).C_Str());
 }
@@ -155,6 +166,7 @@ void SymbolDatabase::Add(const SymbolResolve& s, uint64_t vaddr)
 	SymbolRecord r {};
 	r.name  = GenerateName(s);
 	r.vaddr = vaddr;
+	r.type  = s.type;
 	m_map.Put(r.name, m_symbols.Size());
 	m_symbols.Add(r);
 }
@@ -165,6 +177,7 @@ void SymbolDatabase::Add(const SymbolResolve& s, uint64_t vaddr, const String& d
 	r.name     = GenerateName(s);
 	r.vaddr    = vaddr;
 	r.dbg_name = dbg_name;
+	r.type     = s.type;
 	m_map.Put(r.name, m_symbols.Size());
 	m_symbols.Add(r);
 }
@@ -176,6 +189,36 @@ void SymbolDatabase::AddAliases(SymbolResolve s, std::initializer_list<const cha
 		EXIT_IF(name == nullptr);
 		s.name = name;
 		Add(s, vaddr, dbg_name);
+	}
+}
+
+void SymbolDatabase::AddHle(const SymbolResolve& s, uint64_t vaddr)
+{
+	AddHle(s, vaddr, {});
+}
+
+void SymbolDatabase::AddHle(const SymbolResolve& s, uint64_t vaddr, const String& dbg_name)
+{
+	const String module = GenerateModuleIdentity(s);
+	bool         known  = false;
+	for (const auto& registered: m_hle_modules)
+	{
+		known = known || registered == module;
+	}
+	if (!known)
+	{
+		m_hle_modules.Add(module);
+	}
+	Add(s, vaddr, dbg_name);
+}
+
+void SymbolDatabase::AddHleAliases(SymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr, const String& dbg_name)
+{
+	for (const auto* name: names)
+	{
+		EXIT_IF(name == nullptr);
+		s.name = name;
+		AddHle(s, vaddr, dbg_name);
 	}
 }
 
@@ -242,6 +285,31 @@ const SymbolRecord* SymbolDatabase::SymbolAt(uint32_t index) const
 		return nullptr;
 	}
 	return &m_symbols.At(index);
+}
+
+bool SymbolDatabase::HleOwnsModule(const SymbolResolve& s) const
+{
+	const String module = GenerateModuleIdentity(s);
+	for (const auto& registered: m_hle_modules)
+	{
+		if (registered == module)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool SymbolDatabase::HleOwnsCanonicalModule(const String& canonical_name) const
+{
+	for (const auto& module: m_hle_modules)
+	{
+		if (canonical_name.ContainsStr(module))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 } // namespace Kyty::Loader

@@ -23,9 +23,15 @@ static SelfHeader* load_self(Core::File& f)
 
 static SelfSegment* load_self_segments(Core::File& f, uint16_t num)
 {
+	const uint64_t table_size = static_cast<uint64_t>(sizeof(SelfSegment)) * num;
+	if (num == 0 || f.Remaining() < table_size)
+	{
+		return nullptr;
+	}
+
 	auto* segs = new SelfSegment[num];
 
-	f.Read(segs, sizeof(SelfSegment) * num);
+	f.Read(segs, static_cast<uint32_t>(table_size));
 
 	return segs;
 }
@@ -268,6 +274,7 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size)
 			if ((seg.type & 0x800u) != 0)
 			{
 				auto phdr_id = ((seg.type >> 20u) & 0xFFFu);
+				EXIT_IF(phdr_id >= m_ehdr->e_phnum);
 
 				const auto& phdr = m_phdr[phdr_id];
 
@@ -488,25 +495,27 @@ bool Elf64::IsSelf() const
 		return false;
 	}
 
-	if (m_self->ident[4] != 0x00 || m_self->ident[5] != 0x01 || m_self->ident[6] != 0x01 || m_self->ident[7] != 0x12)
+	if (m_self->ident[5] != 0x01 || m_self->ident[6] != 0x01 || m_self->ident[7] != 0x12)
 	{
-		printf("Unknown SELF file\n");
 		return false;
 	}
 
-	if (m_self->ident[8] != 0x01 || m_self->ident[9] != 0x01 || m_self->ident[10] != 0x00 || m_self->ident[11] != 0x00)
+	const uint32_t key_type = static_cast<uint32_t>(m_self->ident[8]) | (static_cast<uint32_t>(m_self->ident[9]) << 8u) |
+	                          (static_cast<uint32_t>(m_self->ident[10]) << 16u) | (static_cast<uint32_t>(m_self->ident[11]) << 24u);
+	const bool base_metadata = m_self->ident[4] == 0x00 && key_type == 0x00000101u && m_self->unknown == 0x22u;
+	const bool extended_metadata = m_self->ident[4] == 0x10 && key_type == 0x10000101u && m_self->unknown == 0x32u;
+	if (!base_metadata && !extended_metadata)
 	{
-		printf("Unknown SELF file\n");
 		return false;
 	}
 
-	if (m_self->unknown != 0x22)
+	const uint64_t table_size = static_cast<uint64_t>(sizeof(SelfSegment)) * m_self->segments_num;
+	if (m_self->segments_num == 0 || m_f->Size() < sizeof(SelfHeader) + table_size + sizeof(Elf64_Ehdr))
 	{
-		printf("Unknown SELF file\n");
 		return false;
 	}
 
-	return true;
+	return m_self->file_size != 0 && m_self->file_size <= m_f->Size() && m_self->size1 >= m_self->size2;
 }
 
 bool Elf64::IsValid() const
@@ -613,6 +622,24 @@ void Elf64::Open(const String& file_name)
 	} else
 	{
 		m_self_segments = load_self_segments(*m_f, m_self->segments_num);
+		EXIT_IF(m_self_segments == nullptr);
+
+		for (uint16_t i = 0; i < m_self->segments_num; i++)
+		{
+			const auto& seg = m_self_segments[i];
+			if ((seg.type & 0x2u) != 0)
+			{
+				EXIT("SELF segment %u is encrypted; provide an unencrypted executable\n", i);
+			}
+			if ((seg.type & 0x8u) != 0 || seg.compressed_size != seg.decompressed_size)
+			{
+				EXIT("SELF segment %u uses unsupported compression\n", i);
+			}
+			if (seg.offset > m_f->Size() || seg.compressed_size > m_f->Size() - seg.offset)
+			{
+				EXIT("SELF segment %u exceeds the file bounds\n", i);
+			}
+		}
 	}
 
 	auto ehdr_pos = m_f->Tell();

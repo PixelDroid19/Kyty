@@ -56,7 +56,7 @@
 		sr.type                  = t;                                                                                                      \
 		auto            func     = reinterpret_cast<uint64_t>(f);                                                                          \
 		const char32_t* dbg_name = U"" #f;                                                                                                 \
-		s->Add(sr, func, dbg_name);                                                                                                        \
+		s->AddHle(sr, func, dbg_name);                                                                                                     \
 	}
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_ADD_ALIASES(f, t, ...)                                                                                                         \
@@ -70,7 +70,7 @@
 		sr.type                 = t;                                                                                                       \
 		auto            func    = reinterpret_cast<uint64_t>(f);                                                                           \
 		const char32_t* dbg_name = U"" #f;                                                                                                 \
-		s->AddAliases(sr, {__VA_ARGS__}, func, dbg_name);                                                                                  \
+		s->AddHleAliases(sr, {__VA_ARGS__}, func, dbg_name);                                                                               \
 	}
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_OBJECT(n, f) LIB_ADD(n, f, Loader::SymbolType::Object)

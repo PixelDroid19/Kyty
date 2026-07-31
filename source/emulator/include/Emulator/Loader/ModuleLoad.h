@@ -159,8 +159,11 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const Core::String& primary_host_path
 // Consume the staged plan only after the complete HLE symbol database exists.
 void               AfterHleSymbolsRegistered(RuntimeLinker* rt);
 [[nodiscard]] bool HasPendingAdjacentPlan(RuntimeLinker* rt);
+// Load the direct-import provider closure before guest execution. Static TLS
+// offsets become immutable when the first guest thread materializes its block.
+[[nodiscard]] bool PrepareProvidersForExecution(RuntimeLinker* rt);
 
-// Resolves a strict lazy PLT miss from one validated package provider. The
+// Resolves a strict unresolved package import from one validated provider. The
 // candidate must declare the requested module identity; a module is never
 // selected only because it happens to be adjacent on disk.
 [[nodiscard]] bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const Core::String& import_name, SymbolType type);

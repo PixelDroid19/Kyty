@@ -28,7 +28,7 @@ using Core::File;
 using Core::String;
 
 Core::Mutex               g_diag_mutex;
-// Lazy PLT misses are rare first-use events. Serializing provider admission
+// Lazy package imports are rare first-use events. Serializing provider admission
 // prevents a second guest thread from observing an in-progress provider as an
 // exhausted candidate and failing before its exports are registered.
 Core::Mutex               g_lazy_provider_mutex;
@@ -156,7 +156,7 @@ bool ProbePrimaryElf(const String& host_path, GuestPlatform* platform)
 
 bool ProviderExportsResolvedImport(RuntimeLinker* rt, Program* provider, const String& import_name, SymbolType type)
 {
-	if (rt == nullptr || provider == nullptr || import_name.IsEmpty() || type != SymbolType::Func)
+	if (rt == nullptr || provider == nullptr || import_name.IsEmpty() || (type != SymbolType::Func && type != SymbolType::Object))
 	{
 		return false;
 	}
@@ -177,6 +177,16 @@ bool ProviderExportsResolvedImport(RuntimeLinker* rt, Program* provider, const S
 		}
 	}
 	return false;
+}
+
+bool ImportMayBelongToPlanEntry(const String& import_name, const ModulePlanEntry& entry)
+{
+	if (import_name.IsEmpty() || entry.identity[0] == '\0')
+	{
+		return false;
+	}
+
+	return import_name.ContainsStr(U"[" + String::FromUtf8(entry.identity) + U"_");
 }
 
 void PersistPendingDiagnostics(RuntimeLinker* rt, const ModuleLoadPlanDiagnostics& diag)
@@ -511,8 +521,9 @@ ModuleLoadPlan BuildPlan(const String& primary_host_path, bool discovery_enabled
 			continue;
 		}
 
-		char identity[96];
-		CopyString(identity, sizeof(identity), base);
+		char         identity[96];
+		const String canonical_identity = SymbolDatabase::CanonicalModuleName(base);
+		CopyString(identity, sizeof(identity), canonical_identity);
 		if (IdentitySeen(plan.entries, plan.count, identity))
 		{
 			PushRejection(&plan.diag, U"reject duplicate_identity " + rel);
@@ -1062,6 +1073,124 @@ bool HasPendingAdjacentPlan(RuntimeLinker* rt)
 	return rt != nullptr && g_pending.owner == rt && g_pending.eager;
 }
 
+bool PrepareProvidersForExecution(RuntimeLinker* rt)
+{
+	if (rt == nullptr)
+	{
+		return false;
+	}
+	Core::LockGuard lazy_provider_lock(g_lazy_provider_mutex);
+
+	for (;;)
+	{
+		const auto imports = rt->SnapshotImportPrograms();
+
+		ModulePlanEntry           entry {};
+		ModuleLoadPlanDiagnostics diag {};
+		String                    requested_import;
+		SymbolType                requested_type = SymbolType::Unknown;
+		String                    primary_host;
+		uint32_t                  entry_index = kModuleLoadPlanMaxEntries;
+		bool                      found       = false;
+		{
+			Core::LockGuard lock(g_diag_mutex);
+			if (g_pending.owner != rt)
+			{
+				return true;
+			}
+			if (!g_pending.hle_ready || !g_pending.plan.valid)
+			{
+				return false;
+			}
+
+			for (uint32_t i = 0; i < g_pending.plan.count && !found; ++i)
+			{
+				const auto role = g_pending.plan.entries[i].role;
+				if (g_pending.attempted[i] || (role != ModulePlanRole::AdjacentShared && role != ModulePlanRole::PackageSidecar))
+				{
+					continue;
+				}
+
+				for (const auto& program: imports)
+				{
+					for (const auto& import: program.imports)
+					{
+						const auto&         import_name = import.name;
+						const SymbolRecord* hle = rt->Symbols()->FindByCanonicalName(import_name);
+						if (!rt->Symbols()->HleOwnsCanonicalModule(import_name) && (hle == nullptr || hle->vaddr == 0) &&
+						    ImportMayBelongToPlanEntry(import_name, g_pending.plan.entries[i]))
+						{
+							entry            = g_pending.plan.entries[i];
+							entry_index      = i;
+							requested_import = import_name;
+							requested_type   = import.type;
+							primary_host     = String::FromUtf8(g_pending.plan.entries[0].host_path);
+							diag             = g_pending.plan.diag;
+							found            = true;
+							break;
+						}
+					}
+					if (found)
+					{
+						break;
+					}
+				}
+			}
+		}
+
+		if (!found)
+		{
+			return true;
+		}
+
+		const String host         = String::FromUtf8(entry.host_path);
+		const String package_root = primary_host.DirectoryWithoutFilename();
+		GuestPlatform observed_platform = GuestPlatform::Unknown;
+		if (!ProbeSharedElf(package_root, host, &observed_platform) || observed_platform != entry.platform ||
+		    observed_platform != Config::GetGuestPlatform())
+		{
+			ReportLazyProviderEvent("preload_platform_mismatch", requested_import, &entry);
+			PushRejection(&diag, "preload_aborted_platform_mismatch");
+			PersistPendingDiagnostics(rt, diag);
+			PublishDiagnostics(diag);
+			return false;
+		}
+
+		Program*   provider       = rt->FindProgramByFile(host);
+		const bool already_loaded = provider != nullptr;
+		if (provider == nullptr)
+		{
+			provider = ProgramLoader::Load(rt, host);
+		}
+		const bool provider_contract = ProviderExportsResolvedImport(rt, provider, requested_import, requested_type);
+		if (provider == nullptr || !provider_contract)
+		{
+			if (provider != nullptr && !already_loaded)
+			{
+				ProgramLoader::Unload(rt, provider);
+			}
+			ReportLazyProviderEvent("preload_failed", requested_import, &entry);
+			PushRejection(&diag, "preload_aborted_provider_contract");
+			PersistPendingDiagnostics(rt, diag);
+			PublishDiagnostics(diag);
+			return false;
+		}
+
+		{
+			Core::LockGuard lock(g_diag_mutex);
+			if (g_pending.owner == rt)
+			{
+				g_pending.attempted[entry_index] = true;
+				diag.applied_count++;
+				g_pending.plan.diag = diag;
+			}
+		}
+		PublishDiagnostics(diag);
+		ReportLazyProviderEvent("preloaded", requested_import, &entry);
+		Emulator::Agent::Lifecycle::EmitModuleLoaded(entry.relative_key);
+	}
+}
+
 void AfterHleSymbolsRegistered(RuntimeLinker* rt)
 {
 	EXIT_IF(rt == nullptr);
@@ -1099,7 +1228,7 @@ void AfterHleSymbolsRegistered(RuntimeLinker* rt)
 
 bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, SymbolType type)
 {
-	if (rt == nullptr || type != SymbolType::Func)
+	if (rt == nullptr || (type != SymbolType::Func && type != SymbolType::Object))
 	{
 		return false;
 	}
@@ -1109,13 +1238,32 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 	// that complete identity intact: the versioned export key is the contract
 	// used by the program export table.
 	const String requested_import = import_name;
+	if (rt->Symbols()->HleOwnsCanonicalModule(requested_import))
+	{
+		return false;
+	}
+	bool         attempted_this_request[kModuleLoadPlanMaxEntries] {};
+
+	const auto mark_candidate_exhausted = [rt](uint32_t index)
+	{
+		if (index >= kModuleLoadPlanMaxEntries)
+		{
+			return;
+		}
+		Core::LockGuard lock(g_diag_mutex);
+		if (g_pending.owner == rt)
+		{
+			g_pending.attempted[index] = true;
+		}
+	};
 
 	for (;;)
 	{
 		ModulePlanEntry entry {};
 		ModuleLoadPlanDiagnostics diag {};
 		String primary_host;
-		bool found = false;
+		uint32_t entry_index = kModuleLoadPlanMaxEntries;
+		bool     found       = false;
 		{
 			Core::LockGuard lock(g_diag_mutex);
 			if (g_pending.owner != rt || g_pending.eager || !g_pending.hle_ready || !g_pending.plan.valid)
@@ -1125,17 +1273,22 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 
 			for (uint32_t i = 0; i < g_pending.plan.count; ++i)
 			{
-				if (g_pending.attempted[i] ||
+				if (g_pending.attempted[i] || attempted_this_request[i] ||
 				    (g_pending.plan.entries[i].role != ModulePlanRole::AdjacentShared &&
 				     g_pending.plan.entries[i].role != ModulePlanRole::PackageSidecar))
 				{
 					continue;
 				}
-				g_pending.attempted[i] = true;
-				entry                  = g_pending.plan.entries[i];
-				diag                   = g_pending.plan.diag;
-				primary_host           = String::FromUtf8(g_pending.plan.entries[0].host_path);
-				found                  = true;
+				if (!ImportMayBelongToPlanEntry(requested_import, g_pending.plan.entries[i]))
+				{
+					continue;
+				}
+				attempted_this_request[i] = true;
+				entry                     = g_pending.plan.entries[i];
+				entry_index               = i;
+				diag                      = g_pending.plan.diag;
+				primary_host              = String::FromUtf8(g_pending.plan.entries[0].host_path);
+				found                     = true;
 				break;
 			}
 		}
@@ -1154,6 +1307,7 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 		{
 			ReportLazyProviderEvent("platform_mismatch", requested_import, &entry);
 			PushRejection(&diag, "lazy_aborted_platform_mismatch");
+			mark_candidate_exhausted(entry_index);
 			PersistPendingDiagnostics(rt, diag);
 			PublishDiagnostics(diag);
 			return false;
@@ -1174,6 +1328,7 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 		{
 			ReportLazyProviderEvent("load_failed", requested_import, &entry);
 			PushRejection(&diag, "lazy_rejected_load_failed");
+			mark_candidate_exhausted(entry_index);
 			PersistPendingDiagnostics(rt, diag);
 			PublishDiagnostics(diag);
 			continue;
@@ -1201,18 +1356,24 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 		}
 
 		rt->RelocateProgram(provider);
-		const int init_result = rt->StartModule(provider, 0, nullptr, nullptr);
-		if (init_result != 0)
+		const bool defer_initializers = rt->IsRelocationInProgress();
+		if (!defer_initializers)
 		{
-			ReportLazyProviderEvent("module_init_failed", requested_import, &entry);
-			PushRejection(&diag, "lazy_aborted_module_init");
-			PersistPendingDiagnostics(rt, diag);
-			PublishDiagnostics(diag);
-			return false;
+			const int init_result = rt->StartModule(provider, 0, nullptr, nullptr);
+			if (init_result != 0)
+			{
+				ReportLazyProviderEvent("module_init_failed", requested_import, &entry);
+				PushRejection(&diag, "lazy_aborted_module_init");
+				mark_candidate_exhausted(entry_index);
+				PersistPendingDiagnostics(rt, diag);
+				PublishDiagnostics(diag);
+				return false;
+			}
 		}
 
 		diag.applied_count++;
-		ReportLazyProviderEvent("loaded", requested_import, &entry);
+		mark_candidate_exhausted(entry_index);
+		ReportLazyProviderEvent(defer_initializers ? "loaded_deferred_init" : "loaded", requested_import, &entry);
 		PersistPendingDiagnostics(rt, diag);
 		PublishDiagnostics(diag);
 		Emulator::Agent::Lifecycle::EmitModuleLoaded(entry.relative_key);

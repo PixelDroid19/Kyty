@@ -28,6 +28,7 @@ struct SymbolRecord
 	String   name;
 	String   dbg_name;
 	uint64_t vaddr;
+	SymbolType type = SymbolType::Unknown;
 };
 
 struct SymbolResolve
@@ -50,6 +51,9 @@ public:
 	void Add(const SymbolResolve& s, uint64_t vaddr);
 	void Add(const SymbolResolve& s, uint64_t vaddr, const String& dbg_name);
 	void AddAliases(SymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr, const String& dbg_name);
+	void AddHle(const SymbolResolve& s, uint64_t vaddr);
+	void AddHle(const SymbolResolve& s, uint64_t vaddr, const String& dbg_name);
+	void AddHleAliases(SymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr, const String& dbg_name);
 
 	// Runtime resolution requires the complete canonical identity. It never falls back to a NID-only match.
 	[[nodiscard]] const SymbolRecord* Find(const SymbolResolve& s) const;
@@ -59,16 +63,20 @@ public:
 	[[nodiscard]] const SymbolRecord* FindByCanonicalName(const String& canonical_name) const;
 	[[nodiscard]] uint32_t            SymbolCount() const;
 	[[nodiscard]] const SymbolRecord* SymbolAt(uint32_t index) const;
+	[[nodiscard]] bool                HleOwnsModule(const SymbolResolve& s) const;
+	[[nodiscard]] bool                HleOwnsCanonicalModule(const String& canonical_name) const;
 
 	void DbgDump(const String& folder, const String& file_name);
 
 	KYTY_CLASS_NO_COPY(SymbolDatabase);
 
 	static String GenerateName(const SymbolResolve& s);
+	static String CanonicalModuleName(const String& module);
 
 private:
 	Vector<SymbolRecord>            m_symbols;
 	Core::Hashmap<String, uint32_t> m_map;
+	Vector<String>                  m_hle_modules;
 };
 
 [[nodiscard]] String EncodeNameAsNid(const char* name);

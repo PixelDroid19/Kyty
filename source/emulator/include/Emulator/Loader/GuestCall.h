@@ -14,6 +14,11 @@ namespace Kyty::Loader::GuestCall {
 // SysV arguments; unused arguments must be zero.
 uint64_t KYTY_SYSV_ABI Invoke(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2);
 
+// Call an x86-64 guest function after switching to an explicit guest stack.
+// The stack pointer must refer to writable guest memory owned by the current
+// emulated thread.
+uint64_t KYTY_SYSV_ABI InvokeOnStack(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2, void* stack_top);
+
 } // namespace Kyty::Loader::GuestCall
 
 #endif // KYTY_EMU_ENABLED

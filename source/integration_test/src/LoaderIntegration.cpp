@@ -754,6 +754,59 @@ int ScenarioAdjacentApplyDeferredUntilHle()
 	return 0;
 }
 
+int ScenarioHleModuleOwnershipIsExact()
+{
+	const Core::String root    = MakeTempPackageRoot();
+	const Core::String primary = root + U"/eboot.bin";
+	Expect(WriteJunkFile(primary, "", 0), "write primary");
+	EnsureDir(root + U"/sce_module");
+	Expect(WriteMinimalSharedElf(root + U"/sce_module/libSceOwned.prx"), "write owned provider");
+	Expect(WriteMinimalSharedElf(root + U"/sce_module/libcohtml.Prospero.prx"), "write dotted provider");
+
+	const auto plan = Loader::ModuleLoadPlanning::BuildPlan(primary, true);
+	Expect(plan.valid && plan.count == 3, "providers must enter the load plan");
+	Expect(std::strcmp(plan.entries[1].identity, "Owned") == 0, "plan identity must match the canonical symbol module");
+	Expect(std::strcmp(plan.entries[2].identity, "libcohtml.Prospero") == 0,
+	       "module identity must retain dots that are part of the basename");
+
+	Loader::SymbolDatabase symbols;
+	Loader::SymbolResolve  owned {};
+	owned.name                 = U"known";
+	owned.library              = U"libSceOwned";
+	owned.library_version      = 1;
+	owned.module               = U"libSceOwned";
+	owned.module_version_major = 1;
+	owned.module_version_minor = 1;
+	owned.type                 = Loader::SymbolType::Func;
+	symbols.AddHle(owned, 0x1000);
+
+	auto unresolved = owned;
+	unresolved.name = U"unresolved";
+	Expect(symbols.HleOwnsModule(unresolved), "HLE ownership covers unresolved symbols from the same module");
+
+	auto other_module   = unresolved;
+	other_module.module = U"libOther";
+	Expect(!symbols.HleOwnsModule(other_module), "HLE ownership does not leak across modules");
+
+	auto other_version                 = unresolved;
+	other_version.module_version_minor = 2;
+	Expect(!symbols.HleOwnsModule(other_version), "HLE ownership is version-exact");
+
+	Loader::RuntimeLinker linker;
+	auto* importer = Loader::RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&linker, U"synthetic_importer.prx");
+	Expect(importer != nullptr && importer->import_symbols != nullptr, "attach synthetic importer");
+	importer->import_symbols->Add(unresolved, 0);
+	linker.Symbols()->AddHle(owned, 0x1000);
+
+	const uint32_t baseline = linker.LoadedProgramCount();
+	Loader::ModuleLifecycleCoordinator::AfterPrimaryLoaded(&linker, primary);
+	Loader::ModuleLifecycleCoordinator::AfterHleSymbolsRegistered(&linker);
+	Expect(Loader::ModuleLifecycleCoordinator::PrepareProvidersForExecution(&linker),
+	       "HLE-owned unresolved imports must not admit an LLE provider");
+	Expect(linker.LoadedProgramCount() == baseline, "HLE-owned module must remain exclusively HLE");
+	return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -839,6 +892,10 @@ int main(int argc, char** argv)
 	if (scenario == "adjacent_apply_deferred_until_hle")
 	{
 		return ScenarioAdjacentApplyDeferredUntilHle();
+	}
+	if (scenario == "hle_module_ownership_is_exact")
+	{
+		return ScenarioHleModuleOwnershipIsExact();
 	}
 
 	std::fprintf(stderr, "unknown scenario: %s\n", scenario.c_str());
