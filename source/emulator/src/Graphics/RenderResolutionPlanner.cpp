@@ -19,6 +19,7 @@ const char* RenderResolutionPlanReasonName(RenderResolutionPlanReason reason)
 		case RenderResolutionPlanReason::ShaderCoordinateAccess: return "shader_coordinate_access";
 		case RenderResolutionPlanReason::ColorCapabilityUnsupported: return "color_capability_unsupported";
 		case RenderResolutionPlanReason::DepthCapabilityUnsupported: return "depth_capability_unsupported";
+		case RenderResolutionPlanReason::HostExtentCommitted: return "host_extent_committed";
 	}
 	return "unknown";
 }
@@ -173,14 +174,46 @@ RenderResolutionPlan EvaluateDepthOnlyRenderExtentCompatibility(
 	return decision;
 }
 
+RenderResolutionPlan ReconcileCommittedRenderExtent(const RenderResolutionPlan& candidate, ResolutionExtent committed_extent)
+{
+	RenderResolutionPlan decision = candidate;
+	if (committed_extent.width == 0 || committed_extent.height == 0)
+	{
+		decision.classification = ResolutionClassification::Unsupported;
+		decision.reason         = RenderResolutionPlanReason::InvalidInput;
+		decision.host_extent    = committed_extent;
+		return decision;
+	}
+	if (candidate.classification == ResolutionClassification::Unsupported)
+	{
+		return decision;
+	}
+	if (committed_extent == candidate.host_extent)
+	{
+		return decision;
+	}
+	if (committed_extent == candidate.guest_extent)
+	{
+		decision.classification           = ResolutionClassification::Native;
+		decision.reason                   = RenderResolutionPlanReason::HostExtentCommitted;
+		decision.attachment_native_reason = ResolutionNativeReason::None;
+		decision.host_extent              = candidate.guest_extent;
+		decision.scale                    = {1, 1};
+		return decision;
+	}
+
+	decision.classification = ResolutionClassification::Unsupported;
+	decision.reason         = RenderResolutionPlanReason::MismatchedHostExtent;
+	decision.host_extent    = committed_extent;
+	return decision;
+}
+
 RenderShaderCoordinateUsage AnalyzeResolutionShaderUsage(const ShaderCode& code)
 {
 	RenderShaderCoordinateUsage usage;
 	usage.integer_image_coordinates =
-	    code.HasAnyOf({ShaderInstructionType::ImageLoad, ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip});
-	// image_get_resinfo is still a structured unsupported parser opcode and has
-	// no ShaderInstructionType. A supported decoder must set this bit when that
-	// opcode is introduced; it cannot currently reach this analysis silently.
+	    code.HasAnyOf({ShaderInstructionType::ImageGetResinfo, ShaderInstructionType::ImageLoad,
+	                   ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip});
 	return usage;
 }
 

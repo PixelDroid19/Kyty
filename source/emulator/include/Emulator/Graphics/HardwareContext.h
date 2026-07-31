@@ -200,6 +200,7 @@ struct DepthDepthSizeXY
 {
 	uint16_t x_max = 0;
 	uint16_t y_max = 0;
+	bool     valid = false;
 };
 
 struct DepthRenderTargetHTileSurface

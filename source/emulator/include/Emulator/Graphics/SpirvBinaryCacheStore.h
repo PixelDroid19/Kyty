@@ -15,7 +15,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-inline constexpr uint32_t kSpirvBinaryCacheSchemaVersion = 1;
+inline constexpr uint32_t kSpirvBinaryCacheSchemaVersion = 2;
 
 struct ShaderModuleKey;
 

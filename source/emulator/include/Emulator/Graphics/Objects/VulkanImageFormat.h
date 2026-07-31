@@ -15,6 +15,14 @@ enum class GuestImageUsage
 	Storage,
 };
 
+enum class GuestImageNumericType
+{
+	Unsupported,
+	FloatingPoint,
+	UnsignedInteger,
+	SignedInteger,
+};
+
 // Resolve both legacy dfmt/nfmt and Gen5 unified image formats from one table.
 // Unsupported usage/format combinations return VK_FORMAT_UNDEFINED; callers
 // must reject them instead of substituting another host format.
@@ -22,6 +30,13 @@ enum class GuestImageUsage
                                                      bool force_degamma = false);
 
 [[nodiscard]] bool VulkanSupportsGen5ImageFormat(GuestImageUsage usage, uint16_t fmt);
+
+// Image views shared with guest render surfaces must retain their numeric
+// interpretation. This comparison accepts the regular and degamma sampled
+// variants declared by the central format table.
+[[nodiscard]] bool VulkanGen5SampleFormatMatches(uint16_t fmt, VkFormat format);
+
+[[nodiscard]] GuestImageNumericType VulkanGen5ImageNumericType(uint16_t fmt);
 
 } // namespace Kyty::Libs::Graphics
 

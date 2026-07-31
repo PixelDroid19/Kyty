@@ -18,9 +18,23 @@ enum class RenderTextureFormat : uint64_t
 	R8G8B8A8Srgb,
 	B8G8R8A8Unorm,
 	B8G8R8A8Srgb,
-	// CB COLOR_16_16_16_16 (format 0xc) + NUMBER_FLOAT (channel_type 7).
+	R16Sfloat,
+	R32Sfloat,
+	B10G11R11Ufloat,
+	R16G16B16A16Unorm,
+	R16G16B16A16Snorm,
+	R16G16B16A16Uint,
+	R16G16B16A16Sint,
 	R16G16B16A16Sfloat,
 };
+
+struct RenderTextureFormatInfo
+{
+	RenderTextureFormat format            = RenderTextureFormat::Unknown;
+	uint32_t            bytes_per_element = 0;
+};
+
+[[nodiscard]] RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t channel_type, uint32_t channel_order);
 
 // GPU-owned tiled render targets without write-back never upload guest memory
 // during Update. Other variants may consume CPU data and must retain hashing.

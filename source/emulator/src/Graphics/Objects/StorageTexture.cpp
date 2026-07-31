@@ -4,6 +4,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/Gen5TextureArrayLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
@@ -31,10 +32,9 @@ static VkImageUsageFlags get_usage()
 	return vk_usage;
 }
 
-static bool IsR32UintReadSwizzle(const VkComponentMapping& components)
+static bool IsR32SingleComponentStorageFormat(uint32_t fmt)
 {
-	return components.r == VK_COMPONENT_SWIZZLE_R && components.g == VK_COMPONENT_SWIZZLE_ZERO &&
-	       components.b == VK_COMPONENT_SWIZZLE_ZERO && components.a == VK_COMPONENT_SWIZZLE_ONE;
+	return fmt == 20u || fmt == 22u;
 }
 
 static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
@@ -47,8 +47,16 @@ static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
 	{
 		return DstSel(4, 5, 6, 7);
 	}
-	if (fmt == 20u && (swizzle == DstSel(4, 0, 0, 1) || swizzle == DstSel(4, 0, 0, 0)))
+	if (IsR32SingleComponentStorageFormat(fmt) &&
+	    (swizzle == DstSel(4, 0, 0, 1) || swizzle == DstSel(4, 0, 0, 0)))
 	{
+		return DstSel(4, 5, 6, 7);
+	}
+	if (fmt == 36u && swizzle == DstSel(4, 5, 6, 1))
+	{
+		// The packed three-component format has no physical alpha channel. Its
+		// guest selector supplies the architectural default one, whereas storage
+		// image views must keep an identity component mapping.
 		return DstSel(4, 5, 6, 7);
 	}
 	return swizzle;
@@ -80,6 +88,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	bool       neo               = Config::IsNeo();
 	const bool three_dimensional = resource_type == 10u;
 	const bool arrayed_2d        = resource_type == 13u;
+	const bool depth64kb32       = fmt == 22u && tile == 24u;
 
 	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_GENERAL;
 
@@ -123,26 +132,52 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		}
 		return;
 	}
+	if (depth64kb32)
+	{
+		const bool one_2d_layer = (resource_type == 9u && depth == 0u && base_array == 0u) ||
+		                          (arrayed_2d && depth == 1u && base_array == 0u);
+		EXIT_NOT_IMPLEMENTED(!one_2d_layer || levels != 1u || pitch < width);
+
+		TileSizeAlign tiled_size {};
+		TileGetTextureSize2(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+		                    static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), &tiled_size,
+		                    nullptr, nullptr);
+		const uint64_t linear_bytes = width * height * 4u;
+		EXIT_NOT_IMPLEMENTED(tiled_size.size != *size || linear_bytes == 0u || linear_bytes > *size);
+
+		std::vector<uint8_t> linear(static_cast<size_t>(linear_bytes));
+		TileConvertDepth64KB32ToLinear(linear.data(), reinterpret_cast<const void*>(*vaddr), static_cast<uint32_t>(width),
+		                               static_cast<uint32_t>(height), static_cast<uint32_t>(pitch));
+
+		Vector<BufferImageCopy> regions(1);
+		regions[0].offset    = 0;
+		regions[0].pitch     = static_cast<uint32_t>(width);
+		regions[0].width     = static_cast<uint32_t>(width);
+		regions[0].height    = static_cast<uint32_t>(height);
+		regions[0].dst_level = 0;
+		UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
+		return;
+	}
 	if (arrayed_2d)
 	{
-		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-		EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || tile != 5u || levels != 1u || depth == 0u || base_array >= depth || depth >= 16u);
-		TileSizeAlign slice_size {};
-		TileGetTextureSize2(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-		                    static_cast<uint32_t>(pitch), 1u, static_cast<uint32_t>(tile), &slice_size, nullptr, nullptr);
-		EXIT_NOT_IMPLEMENTED(*size != static_cast<uint64_t>(slice_size.size) * depth);
-		const uint64_t          linear_slice_bytes = static_cast<uint64_t>(pitch) * height * bytes_per_element;
-		std::vector<uint8_t>    linear(static_cast<size_t>(linear_slice_bytes * depth));
-		Vector<BufferImageCopy> regions(static_cast<int>(depth));
-		for (uint32_t layer = 0; layer < depth; ++layer)
+		Gen5TextureArrayLayout array_layout {};
+		EXIT_NOT_IMPLEMENTED(!Gen5GetTextureArrayLayout(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+		                                                static_cast<uint32_t>(height), static_cast<uint32_t>(pitch),
+		                                                static_cast<uint32_t>(levels), static_cast<uint32_t>(tile),
+		                                                static_cast<uint32_t>(depth), &array_layout));
+		EXIT_NOT_IMPLEMENTED(!Gen5ValidateTextureArrayUpload(array_layout, static_cast<uint32_t>(base_array), *size));
+
+		std::vector<uint8_t> linear(static_cast<size_t>(array_layout.linear_size));
+		EXIT_NOT_IMPLEMENTED(!Gen5DetileTextureArray(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size,
+		                                             array_layout));
+
+		Vector<BufferImageCopy> regions(static_cast<int>(array_layout.layers));
+		for (uint32_t layer = 0; layer < array_layout.layers; ++layer)
 		{
-			TileConvertStandard4KBToLinear(linear.data() + layer * linear_slice_bytes,
-			                               reinterpret_cast<const uint8_t*>(*vaddr) + layer * slice_size.size, static_cast<uint32_t>(width),
-			                               static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), bytes_per_element);
-			regions[layer].offset          = static_cast<uint32_t>(layer * linear_slice_bytes);
-			regions[layer].pitch           = static_cast<uint32_t>(pitch);
-			regions[layer].width           = static_cast<uint32_t>(width);
-			regions[layer].height          = static_cast<uint32_t>(height);
+			regions[layer].offset          = static_cast<uint32_t>(layer * array_layout.linear_slice_size);
+			regions[layer].pitch           = array_layout.host_pitch;
+			regions[layer].width           = array_layout.width;
+			regions[layer].height          = array_layout.height;
 			regions[layer].dst_level       = 0;
 			regions[layer].dst_array_layer = layer;
 		}
@@ -235,6 +270,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	EXIT_IF(mem == nullptr);
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(params == nullptr);
+	EXIT_IF(vaddr_num != 1);
 
 	auto       fmt               = (params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
 	auto       dfmt              = (params[StorageTextureObject::PARAM_FORMAT] >> 8u) & 0xffu;
@@ -247,6 +283,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto       resource_type     = params[StorageTextureObject::PARAM_RESOURCE_TYPE];
 	auto       depth             = params[StorageTextureObject::PARAM_DEPTH];
 	auto       base_array        = params[StorageTextureObject::PARAM_BASE_ARRAY];
+	auto       pitch             = params[StorageTextureObject::PARAM_PITCH];
+	auto       tile              = params[StorageTextureObject::PARAM_TILE];
 	const bool three_dimensional = resource_type == 10u;
 	const bool arrayed_2d        = resource_type == 13u;
 	EXIT_NOT_IMPLEMENTED(resource_type != 8u && resource_type != 9u && resource_type != 13u && !three_dimensional);
@@ -261,7 +299,15 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto pixel_format = VulkanResolveGuestImageFormat(GuestImageUsage::Storage, static_cast<uint8_t>(dfmt), static_cast<uint8_t>(nfmt),
 	                                                  static_cast<uint16_t>(fmt));
 
-	EXIT_NOT_IMPLEMENTED(pixel_format == VK_FORMAT_UNDEFINED);
+	if (pixel_format == VK_FORMAT_UNDEFINED)
+	{
+		EXIT("unsupported storage texture format: format=%" PRIu64 " dfmt=%" PRIu64 " nfmt=%" PRIu64 " tile=%" PRIu64
+		     " width=%" PRIu64 " height=%" PRIu64 " pitch=%" PRIu64 " levels=%" PRIu64
+		     " type=%" PRIu64 " depth=%" PRIu64 " base_array=%" PRIu64 " swizzle=0x%03" PRIx64
+		     " base=0x%012" PRIx64 " size=%" PRIu64 "\n",
+		     fmt, dfmt, nfmt, tile, width, height, pitch, levels, resource_type, depth, base_array,
+		     static_cast<uint64_t>(swizzle), *vaddr, *size);
+	}
 	EXIT_NOT_IMPLEMENTED(width == 0);
 	EXIT_NOT_IMPLEMENTED(height == 0);
 	EXIT_NOT_IMPLEMENTED(three_dimensional && depth == 0u);
@@ -280,12 +326,10 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	image_descriptor.usage        = vk_usage;
 	auto image_info               = VulkanBuildImageCreateInfo(image_descriptor);
 
-	// Storage image views must use identity component mapping. For R32_UINT,
-	// the guest's R,0,0,1 selector describes the read result; writes still
-	// address only the R component. Preserve that exact data contract by using
-	// identity on the writable view while the paired sampled view retains the
-	// guest swizzle.
-	if ((pixel_format == VK_FORMAT_R32_UINT && IsR32UintReadSwizzle(components)) || fmt == 5u || fmt == 14u || fmt == 62u)
+	// Storage image views use identity component mapping. Single-component R32
+	// resources encode their read result as R,0,0,1 while writes address R only;
+	// Normalize that view contract before Vulkan validation.
+	if (IsR32SingleComponentStorageFormat(static_cast<uint32_t>(fmt)) || fmt == 5u || fmt == 14u || fmt == 62u)
 	{
 		components.r = VK_COMPONENT_SWIZZLE_R;
 		components.g = VK_COMPONENT_SWIZZLE_G;

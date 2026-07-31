@@ -188,6 +188,7 @@ public:
 	void Flip();
 	void Flip(void* dst_gpu_addr, uint32_t value);
 	void FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr, uint32_t value);
+	void QueueQueuedGraphicsInterrupt();
 	void WriteBack();
 	void MemoryBarrier();
 	void RenderTextureBarrier(uint64_t vaddr, uint64_t size);
@@ -290,7 +291,7 @@ public:
 	KYTY_CLASS_NO_COPY(GraphicsRing);
 
 	void Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle, int index,
-	            int flip_mode, int64_t flip_arg, bool with_api_flip);
+	            int flip_mode, int64_t flip_arg, bool with_api_flip, GraphicsSubmissionCompletion completion);
 	void Done();
 	void WaitForIdle();
 	bool IsIdle();
@@ -322,7 +323,8 @@ private:
 		CommandProcessor::FlipInfo flip;
 		// True only for GraphicsRunSubmitAndFlip. Do not infer from flip.handle:
 		// handle 0 is a legal VideoOut handle, and plain Submit also stores zeros.
-		bool with_api_flip = false;
+		bool                           with_api_flip = false;
+		GraphicsSubmissionCompletion completion   = GraphicsSubmissionCompletion::None;
 	};
 
 	static void ThreadBatchRun(void* data);
@@ -407,7 +409,8 @@ public:
 
 	KYTY_CLASS_NO_COPY(Gpu);
 
-	void     Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw);
+	void     Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
+	                GraphicsSubmissionCompletion completion);
 	void     SubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle,
 	                       int index, int flip_mode, int64_t flip_arg);
 	uint32_t MapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint32_t* ring_addr, uint32_t ring_size_dw, uint32_t* read_ptr_addr);
@@ -472,10 +475,14 @@ void GraphicsRunInit()
 	g_gpu = new Gpu;
 }
 
-void Gpu::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw)
+void Gpu::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
+                 GraphicsSubmissionCompletion completion)
 {
 	m_submission_admission_gate.RunAdmitted(
-	    [&] { m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, 0, 0, 0, 0, false); });
+	    [&]
+	    {
+		    m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, 0, 0, 0, 0, false, completion);
+	    });
 }
 
 void Gpu::SubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle,
@@ -483,7 +490,10 @@ void Gpu::SubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_
 {
 	m_submission_admission_gate.RunAdmitted(
 	    [&]
-	    { m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, handle, index, flip_mode, flip_arg, true); });
+	    {
+		    m_gfx_ring->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, handle, index, flip_mode, flip_arg, true,
+		                         GraphicsSubmissionCompletion::None);
+	    });
 }
 
 uint32_t Gpu::MapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint32_t* ring_addr, uint32_t ring_size_dw, uint32_t* read_ptr_addr)
@@ -1229,7 +1239,7 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 }
 
 void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle,
-                          int index, int flip_mode, int64_t flip_arg, bool with_api_flip)
+	                          int index, int flip_mode, int64_t flip_arg, bool with_api_flip, GraphicsSubmissionCompletion completion)
 {
 	EXIT_IF(m_cp == nullptr);
 
@@ -1262,6 +1272,7 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 	buf.flip.flip_mode      = flip_mode;
 	buf.flip.flip_arg       = flip_arg;
 	buf.with_api_flip       = with_api_flip;
+	buf.completion          = completion;
 
 	m_cmd_batches.Add(buf);
 
@@ -1355,6 +1366,11 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			ring->m_job1.Wait();
 			ring->m_job2.Execute([cp, buf](void* /*unused*/) { cp->Run(buf.draw_buffer.data, buf.draw_buffer.num_dw); });
 			ring->m_job2.Wait();
+
+			if (buf.completion == GraphicsSubmissionCompletion::QueuedGraphicsInterrupt)
+			{
+				cp->QueueQueuedGraphicsInterrupt();
+			}
 
 			SubmissionId flip_submission = cp->BufferFlush();
 
@@ -2236,6 +2252,16 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	}
 }
 
+void CommandProcessor::QueueQueuedGraphicsInterrupt()
+{
+	Core::LockGuard lock(m_mutex);
+
+	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+
+	GraphicsRenderQueueQueuedGraphicsInterrupt(m_buffer[m_current_buffer]);
+	m_completion_callback_issued = true;
+}
+
 void CommandProcessor::WriteBack()
 {
 	{
@@ -2257,13 +2283,14 @@ void CommandProcessor::WriteBack()
 //	m_parent->BufferWait();
 //}
 
-void GraphicsRunSubmit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw)
+void GraphicsRunSubmit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
+                       GraphicsSubmissionCompletion completion)
 {
 	EXIT_IF(cmd_draw_buffer == nullptr);
 	EXIT_IF(num_draw_dw == 0);
 	EXIT_IF(g_gpu == nullptr);
 
-	g_gpu->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw);
+	g_gpu->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, completion);
 }
 
 void GraphicsRunSubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
@@ -4074,10 +4101,11 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 	static const bool dump_ps_input_writes = std::getenv("KYTY_DUMP_PS_INPUT_WRITES") != nullptr;
 	for (uint32_t i = 0; i < indirect_num_regs; i++, indirect_buffer += 2)
 	{
-		auto cmd_offset = indirect_buffer[0];
-		auto value      = indirect_buffer[1];
+		const auto raw_cmd_offset = indirect_buffer[0];
+		auto       cmd_offset     = GraphicsDecodeIndirectCxRegisterOffset(raw_cmd_offset);
+		auto       value          = indirect_buffer[1];
 
-		if (GraphicsIsDefaultIndirectRegisterPair(cmd_offset, value))
+		if (raw_cmd_offset == 0xffffffffu)
 		{
 			continue;
 		}
@@ -5393,6 +5421,7 @@ static void graphics_init_jmp_tables_cx_indirect()
 		HW::DepthDepthSizeXY r;
 		r.x_max = KYTY_PM4_GET(value, DB_DEPTH_SIZE_XY, X_MAX);
 		r.y_max = KYTY_PM4_GET(value, DB_DEPTH_SIZE_XY, Y_MAX);
+		r.valid = true;
 		cp->GetCtx()->SetDepthDepthSizeXY(r);
 	};
 

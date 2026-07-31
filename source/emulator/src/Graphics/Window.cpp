@@ -2171,6 +2171,13 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 			skip_device = true;
 		}
 
+		if (device_features2.features.shaderStorageImageReadWithoutFormat != VK_TRUE ||
+		    device_features2.features.shaderStorageImageWriteWithoutFormat != VK_TRUE)
+		{
+			printf("formatless storage images are not supported\n");
+			skip_device = true;
+		}
+
 		//		if (device_features2.features.shaderImageGatherExtended != VK_TRUE)
 		//		{
 		//			printf("shaderImageGatherExtended is not supported\n");
@@ -2389,6 +2396,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	VkPhysicalDeviceFeatures device_features {};
 	device_features.fragmentStoresAndAtomics = VK_TRUE;
 	device_features.samplerAnisotropy        = VK_TRUE;
+	device_features.shaderStorageImageReadWithoutFormat  = VK_TRUE;
+	device_features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
 	VkPhysicalDeviceFeatures supported_features {};
 	vkGetPhysicalDeviceFeatures(physical_device, &supported_features);
 	device_features.depthBiasClamp    = supported_features.depthBiasClamp;
@@ -3450,7 +3459,10 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 		Core::LockGuard queue_lock(*queue.mutex);
 		result = vkQueuePresentKHR(queue.vk_queue, &present);
 	}
-	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+	if (result != VK_SUCCESS)
+	{
+		EXIT("vkQueuePresentKHR failed: result=%d\n", static_cast<int>(result));
+	}
 	const auto present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - present_start).count();
 	DebugStatsRecordPresent(static_cast<uint64_t>(present_ns));
 

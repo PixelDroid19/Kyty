@@ -1322,10 +1322,10 @@ void VerifyGen5ImageSampleLzDmask1()
 	Expect(source.FindIndex("OpLoad %float %v131") != Kyty::Core::STRING8_INVALID_INDEX, "2D NSA sample consumes the encoded Y coordinate");
 	Expect(source.FindIndex("OpLoad %float %v0") == Kyty::Core::STRING8_INVALID_INDEX,
 	       "2D sample rejects extra NSA coordinates instead of consuming padding");
-	Expect(source.FindIndex("OpAccessChain %_ptr_Function_float %temp_v4float %uint_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	Expect(source.FindIndex("OpCompositeExtract %float %image_sample_lz_scalar_value_1 0") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "dmask 1 extracts component R");
-	Expect(source.FindIndex("OpAccessChain %_ptr_Function_float %temp_v4float %uint_1") == Kyty::Core::STRING8_INVALID_INDEX,
-	       "dmask 1 does not materialize component G");
+	Expect(source.FindIndex("OpCompositeExtract %float %image_sample_lz_scalar_value_1 1") == Kyty::Core::STRING8_INVALID_INDEX,
+	       "dmask 1 does not extract component G");
 }
 
 ShaderCode ParseGen5SAndn1SaveexecB64()

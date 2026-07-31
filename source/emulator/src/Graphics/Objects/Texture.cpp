@@ -5,6 +5,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/Gen5TextureArrayLayout.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -115,30 +116,26 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		}
 		return;
 	}
-	if (arrayed_2d)
+	if (arrayed_2d && tile != 24u)
 	{
-		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-		EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || tile != 5u || levels != 1u || depth == 0u || base_array >= depth || depth >= 16u);
-		TileSizeAlign slice_size {};
-		TileGetTextureSize2(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-		                    static_cast<uint32_t>(pitch), 1u, static_cast<uint32_t>(tile), &slice_size, nullptr, nullptr);
-		// SKIPPED: *size != static_cast<uint64_t>(slice_size.size) * depth
-		if (*size != static_cast<uint64_t>(slice_size.size) * depth)
+		Gen5TextureArrayLayout array_layout {};
+		EXIT_NOT_IMPLEMENTED(!Gen5GetTextureArrayLayout(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+		                                                static_cast<uint32_t>(height), static_cast<uint32_t>(pitch),
+		                                                static_cast<uint32_t>(levels), static_cast<uint32_t>(tile),
+		                                                static_cast<uint32_t>(depth), &array_layout));
+		EXIT_NOT_IMPLEMENTED(!Gen5ValidateTextureArrayUpload(array_layout, static_cast<uint32_t>(base_array), *size));
+
+		std::vector<uint8_t> linear(static_cast<size_t>(array_layout.linear_size));
+		EXIT_NOT_IMPLEMENTED(!Gen5DetileTextureArray(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size,
+		                                             array_layout));
+
+		Vector<BufferImageCopy> regions(static_cast<int>(array_layout.layers));
+		for (uint32_t layer = 0; layer < array_layout.layers; ++layer)
 		{
-			printf("WARNING: skipped check: *size != static_cast<uint64_t>(slice_size.size) * depth\n");
-		}
-		const uint64_t          linear_slice_bytes = static_cast<uint64_t>(pitch) * height * bytes_per_element;
-		std::vector<uint8_t>    linear(static_cast<size_t>(linear_slice_bytes * depth));
-		Vector<BufferImageCopy> regions(static_cast<int>(depth));
-		for (uint32_t layer = 0; layer < depth; ++layer)
-		{
-			TileConvertStandard4KBToLinear(linear.data() + layer * linear_slice_bytes,
-			                               reinterpret_cast<const uint8_t*>(*vaddr) + layer * slice_size.size, static_cast<uint32_t>(width),
-			                               static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), bytes_per_element);
-			regions[layer].offset          = static_cast<uint32_t>(layer * linear_slice_bytes);
-			regions[layer].pitch           = static_cast<uint32_t>(pitch);
-			regions[layer].width           = static_cast<uint32_t>(width);
-			regions[layer].height          = static_cast<uint32_t>(height);
+			regions[layer].offset          = static_cast<uint32_t>(layer * array_layout.linear_slice_size);
+			regions[layer].pitch           = array_layout.host_pitch;
+			regions[layer].width           = array_layout.width;
+			regions[layer].height          = array_layout.height;
 			regions[layer].dst_level       = 0;
 			regions[layer].dst_array_layer = layer;
 		}
@@ -210,11 +207,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 
 	if (fmt != 0)
 	{
-		// Gen5: tile 0 = linear; 5 = kStandard4KB; 27 = kRenderTarget;
-		// 9 = kStandard64KB.
+		// Gen5: tile 0 = linear; 5 = kStandard4KB; 9 = kStandard64KB;
+		// 24 = depth; 27 = render target.
 		// Other modes remain unsupported until their layout is evidenced.
-		// SKIPPED: tile != 0 && tile != 5 && tile != 27 && tile != 9
-		if (tile != 0 && tile != 5 && tile != 27 && tile != 9)
+		if (tile != 0 && tile != 5 && tile != 9 && tile != 24 && tile != 27)
 		{
 			printf("WARNING: skipped check: tile != 0 && tile != 5 && tile != 27 && tile != 9\n");
 		}
@@ -420,6 +416,19 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			regions[0].height = height;
 			regions[0].pitch  = pitch;
 			UtilFillImage(ctx, vk_obj, temp_buf.data(), linear_bytes, regions, static_cast<uint64_t>(vk_layout));
+		} else if (tile == 24)
+		{
+			EXIT_NOT_IMPLEMENTED(fmt != 22u || levels != 1u);
+			const uint64_t linear_bytes = static_cast<uint64_t>(width) * height * 4u;
+			EXIT_NOT_IMPLEMENTED(linear_bytes == 0u || linear_bytes > *size);
+			std::vector<uint8_t> linear(static_cast<size_t>(linear_bytes));
+			TileConvertDepth64KB32ToLinear(linear.data(), reinterpret_cast<const void*>(*vaddr), static_cast<uint32_t>(width),
+			                               static_cast<uint32_t>(height), static_cast<uint32_t>(pitch));
+			regions[0].offset = 0;
+			regions[0].width  = static_cast<uint32_t>(width);
+			regions[0].height = static_cast<uint32_t>(height);
+			regions[0].pitch  = static_cast<uint32_t>(width);
+			UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
 		} else if (tile == 27 || tile == 9)
 		{
 			// Tiled sample texture: detile into tightly packed linear rows then
@@ -467,8 +476,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				{
 					for (uint32_t x = 0; x < copy_width; x++)
 					{
-						const uint64_t tiled =
-						    (tile == 9) ? TileGetStandard64KB32Offset(x, y, pitch_elems) : TileGetSw64kRxOffset(x, y, pitch_elems, bpp);
+						const uint64_t tiled = (tile == 9) ? TileGetStandard64KBOffset(x, y, pitch_elems, bpp) :
+						                                         TileGetSw64kRxOffset(x, y, pitch_elems, bpp);
 						const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * bpp;
 						std::memcpy(d + linear, s + tiled, bpp);
 					}

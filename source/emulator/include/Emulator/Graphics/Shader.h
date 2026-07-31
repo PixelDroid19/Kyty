@@ -46,6 +46,7 @@ enum class ShaderInstructionType : uint32_t
 	BufferLoadFormatXyz,
 	BufferLoadFormatXyzw,
 	BufferLoadUbyte,
+	BufferAtomicAdd,
 	BufferStoreDword,
 	BufferStoreDwordx2,
 	BufferStoreDwordx3,
@@ -55,9 +56,13 @@ enum class ShaderInstructionType : uint32_t
 	BufferStoreFormatXyzw,
 	DsAppend,
 	DsConsume,
+	DsAddU32,
+	DsReadB32,
 	DsRead2B32,
 	DsWriteB32,
 	Exp,
+	ImageGetResinfo,
+	ImageGather4,
 	ImageLoad,
 	ImageSample,
 	ImageSampleL,
@@ -120,6 +125,7 @@ enum class ShaderInstructionType : uint32_t
 	// SOP1: bitwise not (sets SCC if result non-zero).
 	SNotB32,
 	SNotB64,
+	SBrevB32,
 	SMulHiU32,
 	SMulI32,
 	SMulkI32,
@@ -223,6 +229,7 @@ enum class ShaderInstructionType : uint32_t
 	VCvtF32Ubyte1,
 	VCvtF32Ubyte2,
 	VCvtF32Ubyte3,
+	VCvtFlrI32F32,
 	VCvtI32F32,
 	VCvtPkrtzF16F32,
 	VCvtU32F32,
@@ -237,6 +244,7 @@ enum class ShaderInstructionType : uint32_t
 	VInterpP1F32,
 	VInterpP2F32,
 	VLogF32,
+	VAddLshlU32,
 	VLshlAddU32,
 	VLshlB32,
 	VLshlOrB32,
@@ -251,17 +259,27 @@ enum class ShaderInstructionType : uint32_t
 	VMadU64U32,
 	VCubeMaF32,
 	VMax3F32,
+	VMax3I32,
+	VMax3U32,
 	VMaxF32,
+	VMaxI32,
+	VMaxU32,
 	VMbcntHiU32B32,
 	VMbcntLoU32B32,
 	VMed3F32,
+	VMed3I32,
+	VMed3U32,
 	VMin3F32,
+	VMin3I32,
+	VMin3U32,
 	VMinF32,
+	VMinI32,
 	VMinU32,
 	VMovB32,
 	// VOP1/VOP3 v_nop: padding; SPIR-V emits nothing.
 	VNop,
 	VMulF32,
+	VMulHiI32,
 	VMulHiU32,
 	VMulLoI32,
 	VMulLoU32,
@@ -356,6 +374,8 @@ enum FormatByte : uint64_t
 	Dmask2, // dmask:0x2 (G channel only)
 	DmaskB, // dmask:0xb (R+G+A, three components)
 	Gds,    // gds
+	DA,     // operand_array_to_str(inst.dst, inst.dst.size)
+	MimgDmask, // dmask carried by ShaderInstruction::mimg_dmask
 };
 
 constexpr uint64_t FormatDefine(std::initializer_list<uint64_t> f)
@@ -416,7 +436,6 @@ enum Format : uint64_t
 	Ssrc0Ssrc1                          = FormatDefine({S0, S1}),
 	SVdstSVsrc0                         = FormatDefine({D, S0}),
 	SVdstSVsrc0SVsrc1                   = FormatDefine({D, S0, S1}),
-	Vdata1Vaddr3StDmask1                = FormatDefine({D, S0A3, S1A8, Dmask1}),
 	Vdata1Vaddr3StSsDmask1              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask1}),
 	Vdata1Vaddr3StSsDmask2              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask2}),
 	Vdata1Vaddr3StSsDmask4              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask4}),
@@ -439,10 +458,21 @@ enum Format : uint64_t
 	Vdata4Vaddr3StDmaskF                = FormatDefine({DA4, S0A3, S1A8, DmaskF}),
 	Vdata4Vaddr3StSsDmaskF              = FormatDefine({DA4, S0A3, S1A8, S2A4, DmaskF}),
 	Vdata4Vaddr4StDmaskF                = FormatDefine({DA4, S0A4, S1A8, DmaskF}),
+	// image_gather4 returns four values from the selected component. The MIMG
+	// component mask selects that component; it does not alter result width.
+	Vdata4Vaddr3StSsMimgDmask           = FormatDefine({DA4, S0A3, S1A8, S2A4, MimgDmask}),
+	// image_get_resinfo writes one consecutive destination VGPR for each
+	// enabled MIMG component. Both the destination width and component mask
+	// are carried by the instruction because the hardware permits every mask.
+	VdataVaddrStDmask                   = FormatDefine({DA, S0, S1A8, MimgDmask}),
+	// image_load has the same dynamic destination mask but carries up to three
+	// integer image coordinates rather than the scalar LOD used by resinfo.
+	VdataVaddr3StDmask                  = FormatDefine({DA, S0A3, S1A8, MimgDmask}),
 	Vdata4VaddrSvSoffsIdxen             = FormatDefine({DA4, S0, S1A4, S2, Idxen}),
 	Vdata4VaddrSvSoffsIdxenFloat4       = FormatDefine({DA4, S0, S1A4, S2, Idxen, Float4}),
 	VdstGds                             = FormatDefine({D, Gds}),
 	VaddrVdataOffset                    = FormatDefine({S0, S1}),
+	VdstVaddrOffset                     = FormatDefine({D, S0}),
 	// ds_read2_b32: vdst is a VGPR pair; offsets live in ds_offset (see field comment).
 	Vdst2VaddrOffset01            = FormatDefine({DA2, S0}),
 	VdstSdst2Vsrc0Vsrc1           = FormatDefine({D, D2A2, S0, S1}),
@@ -532,6 +562,12 @@ struct ShaderInstruction
 	// the selected opcode and resource dimension.
 	ShaderOperand mimg_address[13];
 	int           mimg_address_num = 0;
+	// MIMG component mask. For image_get_resinfo it maps result components to
+	// consecutive destination VGPRs.
+	uint8_t mimg_dmask = 0;
+	// MIMG DIM field. It defines the instruction's coordinate contract and is
+	// independent from the set of descriptors bound by the pipeline.
+	uint8_t mimg_dimension = 0;
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;
@@ -541,8 +577,13 @@ struct ShaderInstruction
 	uint16_t buffer_imm_offset = 0;
 	bool     buffer_idxen      = false;
 	bool     buffer_offen      = false;
+	// MUBUF atomics replace VDATA with the pre-operation value only when GLC
+	// requests that result.
+	bool buffer_return_old_value = false;
 	// DS addressing:
+	// - DsAddU32: byte offset added to the byte address in src[0].
 	// - DsWriteB32: byte offset added to the byte address in src[0].
+	// - DsReadB32: byte offset added to the byte address in src[0].
 	// - DsRead2B32: packed as (offset1 << 8) | offset0; each offset is dword-scaled
 	//   while src[0] remains a byte address (addr_i = vaddr + offset_i * 4).
 	uint16_t ds_offset = 0;
@@ -679,7 +720,6 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
-bool     ShaderGen5VertexAttribFormat(uint16_t attrib_format, uint8_t* unified_format);
 bool     ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format);
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component);
 // Bytes per element for Gen5 sampled formats; compressed formats use block elements (0 if unknown).
@@ -695,6 +735,29 @@ uint32_t ShaderGen5ResolveLinearPitch(uint32_t width, uint32_t format, uint8_t t
 constexpr bool ShaderGen5TextureTypeUsesArrayAddressing(uint8_t type)
 {
 	return type == 13u;
+}
+
+// Sampled-image descriptor arrays have a static SPIR-V view type. Classify
+// the descriptor once so shader emission and descriptor binding select the
+// same typed array.
+enum class ShaderGen5SampledTextureShape : uint8_t
+{
+	TwoDimensional,
+	TwoDimensionalArray,
+	ThreeDimensional,
+};
+
+constexpr ShaderGen5SampledTextureShape ShaderGen5SampledTextureShapeForType(uint8_t type)
+{
+	if (type == 10u)
+	{
+		return ShaderGen5SampledTextureShape::ThreeDimensional;
+	}
+	if (ShaderGen5TextureTypeUsesArrayAddressing(type))
+	{
+		return ShaderGen5SampledTextureShape::TwoDimensionalArray;
+	}
+	return ShaderGen5SampledTextureShape::TwoDimensional;
 }
 
 inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
@@ -984,19 +1047,29 @@ struct ShaderStorageUseEvidence
 	bool                raw_tbuffer_use             = false;
 };
 
-// Dynamic S_LOAD descriptors are mappings to physical storage bindings, not
-// bindings themselves. A shader can load the same descriptor into several
-// temporary SGPR ranges, and each load must retain its own instruction PC.
+// Dynamic S_LOAD descriptors identify a physical binding without extending
+// the lifetime of the temporary SGPR result. A shader can load the same
+// descriptor into several temporary SGPR ranges, so every mapping is keyed by
+// the producing instruction rather than by the destination register alone.
+enum class ShaderDynamicSLoadResourceKind : uint8_t
+{
+	StorageBuffer,
+	Texture,
+	Sampler,
+};
+
 struct ShaderDynamicSLoadMappings
 {
 	static constexpr int MAPPINGS_MAX = 64;
 
-	int      storage_index[MAPPINGS_MAX]       = {};
-	int      destination_register[MAPPINGS_MAX] = {};
-	uint32_t instruction_pc[MAPPINGS_MAX]      = {};
-	int      offset_dw[MAPPINGS_MAX]           = {};
-	uint32_t last_consumer_pc[MAPPINGS_MAX]    = {};
-	int      mappings_num                      = 0;
+	ShaderDynamicSLoadResourceKind kind[MAPPINGS_MAX]                 = {};
+	int                            resource_index[MAPPINGS_MAX]       = {};
+	int                            destination_register[MAPPINGS_MAX] = {};
+	uint32_t                       instruction_pc[MAPPINGS_MAX]       = {};
+	int                            offset_dw[MAPPINGS_MAX]            = {};
+	int                            dword_count[MAPPINGS_MAX]          = {};
+	uint32_t                       last_consumer_pc[MAPPINGS_MAX]     = {};
+	int                            mappings_num                        = 0;
 };
 
 enum class ShaderTextureUsage
@@ -1031,9 +1104,8 @@ struct ShaderStorageResources
 	int                        slots[BUFFERS_MAX]                   = {0};
 	int                        start_register[BUFFERS_MAX]          = {0};
 	bool                       extended[BUFFERS_MAX]                = {};
-	ShaderDynamicSLoadMappings dynamic_sloads;
-	int                        buffers_num                          = 0;
-	int                        binding_index                        = 0;
+	int                        buffers_num   = 0;
+	int                        binding_index = 0;
 };
 
 // Scalar descriptors with no readable dwords are lowered directly to zero.
@@ -1081,24 +1153,31 @@ struct ShaderTextureDescriptor
 	int                   slot                       = 0;
 	int                   start_register             = 0;
 	bool                  extended                   = false;
+	bool                  dynamic_sload              = false;
 	bool                  textures2d_without_sampler = false;
 };
 
 struct ShaderTextureResources
 {
 	static constexpr int RES_MAX = 16;
-	// A virtual texture descriptor carries a local descriptor-array index. The
-	// high bit selects the 3D sampled-image array; all remaining bits are the
-	// index within the selected, homogeneously typed array.
-	static constexpr uint32_t THREE_DIMENSIONAL_INDEX_TAG = 0x80000000u;
-	static constexpr uint32_t DESCRIPTOR_INDEX_MASK       = ~THREE_DIMENSIONAL_INDEX_TAG;
+	// A virtual sampled-texture descriptor carries a local index and the
+	// SPIR-V image shape of its target descriptor array. Vulkan descriptor
+	// arrays are statically typed, so 2D, 2D-array and 3D images cannot share
+	// one array even when their guest descriptors occupy the same user-SGPR
+	// table.
+	static constexpr uint32_t UNSIGNED_INTEGER_INDEX_TAG      = 0x20000000u;
+	static constexpr uint32_t TWO_DIMENSIONAL_ARRAY_INDEX_TAG = 0x40000000u;
+	static constexpr uint32_t THREE_DIMENSIONAL_INDEX_TAG     = 0x80000000u;
+	static constexpr uint32_t DESCRIPTOR_INDEX_MASK           = 0x1fffffffu;
 
 	ShaderTextureDescriptor desc[RES_MAX];
 	int                     textures_num             = 0;
 	int                     textures2d_sampled_num   = 0;
+	int                     textures2d_array_sampled_num = 0;
 	int                     textures3d_sampled_num   = 0;
 	int                     textures2d_storage_num   = 0;
 	int                     binding_sampled_index    = 0;
+	int                     binding_sampled_array_index = -1;
 	int                     binding_sampled_3d_index = -1;
 	int                     binding_storage_index    = 0;
 };
@@ -1111,6 +1190,7 @@ struct ShaderSamplerResources
 	int                   slots[RES_MAX]          = {0};
 	int                   start_register[RES_MAX] = {0};
 	bool                  extended[RES_MAX]       = {};
+	bool                  dynamic_sload[RES_MAX]  = {};
 	int                   samplers_num            = 0;
 	int                   binding_index           = 0;
 };
@@ -1162,6 +1242,7 @@ struct ShaderBindResources
 	ShaderGdsResources         gds_pointers;
 	ShaderDirectSgprsResources direct_sgprs;
 	ShaderExtendedResources    extended;
+	ShaderDynamicSLoadMappings dynamic_sloads;
 };
 
 [[nodiscard]] constexpr bool ShaderBindRequiresDescriptorSet(const ShaderBindResources& bind)
@@ -1235,6 +1316,8 @@ struct ShaderPixelInputInfo
 	bool                   stage_enabled             = true;
 	uint32_t               interpolator_settings[32] = {0};
 	uint32_t               input_num                 = 0;
+	uint32_t               system_input_enable       = 0;
+	uint32_t               system_input_address      = 0;
 	uint8_t                target_output_mode[8]     = {};
 	uint8_t                target_output_order[8]    = {};
 	RenderHostToGuestScale host_to_guest_scale;

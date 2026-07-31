@@ -371,9 +371,12 @@ private:
 	[[nodiscard]] bool RegisteredImageMatchesLocked(const VideoOutRegisteredImageSnapshot& snapshot) const;
 	[[nodiscard]] bool SelectRegisteredHostExtentForSnapshot(VideoOutRegisteredImageSnapshot* snapshot);
 	[[nodiscard]] Graphics::VideoOutVulkanImage*
+	FindRegisteredImageForSubmission(const VideoOutRegisteredImageSnapshot& snapshot, Graphics::SubmissionId submission);
+	[[nodiscard]] Graphics::VideoOutVulkanImage*
 	ResolveRegisteredImageForSubmission(VideoOutRegisteredImageSnapshot snapshot, Graphics::SubmissionId submission);
 	[[nodiscard]] VideoOutBufferImageInfo
-	PinImageForSubmission(const void* buffer, Graphics::SubmissionId submission, Graphics::VideoOutMaterializationGate::Pin* pin);
+	PinImageForSubmission(const void* buffer, Graphics::SubmissionId submission, bool select_host_extent,
+	                      Graphics::VideoOutMaterializationGate::Pin* pin);
 	[[nodiscard]] Graphics::VideoOutVulkanImage*
 	PinRegisteredImageForSubmission(VideoOutConfig* cfg, int index, Graphics::SubmissionId submission,
 	                                Graphics::VideoOutMaterializationGate::Pin* pin);
@@ -957,10 +960,8 @@ bool VideoOutContext::SelectRegisteredHostExtentForSnapshot(VideoOutRegisteredIm
 }
 
 Graphics::VideoOutVulkanImage*
-VideoOutContext::ResolveRegisteredImageForSubmission(VideoOutRegisteredImageSnapshot snapshot, Graphics::SubmissionId submission)
+VideoOutContext::FindRegisteredImageForSubmission(const VideoOutRegisteredImageSnapshot& snapshot, Graphics::SubmissionId submission)
 {
-	EXIT_IF(!SelectRegisteredHostExtentForSnapshot(&snapshot));
-
 	const auto objects = Graphics::GpuMemoryFindObjectsForSubmission(
 	    submission, reinterpret_cast<uint64_t>(snapshot.buffer), snapshot.buffer_size,
 	    Graphics::GpuMemoryObjectType::VideoOutBuffer, true, true);
@@ -972,6 +973,15 @@ VideoOutContext::ResolveRegisteredImageForSubmission(VideoOutRegisteredImageSnap
 		EXIT("Resolved VideoOut backing has incompatible guest extent: expected=%ux%u actual=%ux%u\n", snapshot.guest_width,
 		     snapshot.guest_height, image->guest_extent.width, image->guest_extent.height);
 	}
+	return image;
+}
+
+Graphics::VideoOutVulkanImage*
+VideoOutContext::ResolveRegisteredImageForSubmission(VideoOutRegisteredImageSnapshot snapshot, Graphics::SubmissionId submission)
+{
+	EXIT_IF(!SelectRegisteredHostExtentForSnapshot(&snapshot));
+
+	auto* image = FindRegisteredImageForSubmission(snapshot, submission);
 
 	Graphics::VideoOutVulkanImage* refreshed_cache = nullptr;
 	const auto refresh = Graphics::VideoOutBufferRefreshPublishedImage(image, snapshot.host_width, snapshot.host_height,
@@ -1006,7 +1016,7 @@ VideoOutBufferImageInfo VideoOutContext::FindImageForSubmission(const void* buff
 	EXIT_NOT_IMPLEMENTED(!command_buffer->GetSubmissionId(&submission));
 
 	Graphics::VideoOutMaterializationGate::Pin pin;
-	auto                                       ret = PinImageForSubmission(buffer, submission, &pin);
+	auto                                       ret = PinImageForSubmission(buffer, submission, materialize, &pin);
 	if (materialize && ret.image != nullptr)
 	{
 		Graphics::VideoOutBufferEnsureMaterialized(graphic_ctx, ret.image);
@@ -1028,7 +1038,7 @@ Graphics::VideoOutVulkanImage* VideoOutContext::MaterializeRegisteredImage(Video
 }
 
 VideoOutBufferImageInfo VideoOutContext::PinImageForSubmission(const void* buffer, Graphics::SubmissionId submission,
-                                                               Graphics::VideoOutMaterializationGate::Pin* pin)
+	                                                           bool select_host_extent, Graphics::VideoOutMaterializationGate::Pin* pin)
 {
 	EXIT_IF(pin == nullptr);
 	VideoOutRegisteredImageSnapshot snapshot;
@@ -1041,7 +1051,11 @@ VideoOutBufferImageInfo VideoOutContext::PinImageForSubmission(const void* buffe
 		*pin = m_materialization_gate.Acquire();
 	}
 
-	auto* image = ResolveRegisteredImageForSubmission(snapshot, submission);
+	// Metadata is consumed while the renderer still assembles the complete
+	// attachment cohort. Selecting a host extent here would commit an image
+	// before color, depth, aliases, and shader usage are available.
+	auto* image = select_host_extent ? ResolveRegisteredImageForSubmission(snapshot, submission)
+	                                 : FindRegisteredImageForSubmission(snapshot, submission);
 	EXIT_IF(image == nullptr);
 	return {image, static_cast<uint32_t>(snapshot.relative_index), snapshot.buffer_size, snapshot.buffer_pitch};
 }

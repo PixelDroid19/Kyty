@@ -284,6 +284,8 @@ namespace Gen5Driver {
 struct Packet;
 
 int KYTY_SYSV_ABI GraphicsDriverSubmitDcb(const Packet* packet);
+int KYTY_SYSV_ABI GraphicsDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs, const uint32_t* dcb_sizes_in_dwords,
+                                                 uint32_t count);
 int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet);
 int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata);
 int KYTY_SYSV_ABI GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(size_t* size, uint32_t max_resources,

@@ -13,6 +13,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/DepthStencilCopy.h"
+#include "Emulator/Graphics/Gen5TextureArrayLayout.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -140,6 +141,7 @@ struct PipelineStaticParameters
 	uint8_t                    alpha_destblend[8]      = {};
 	bool                       separate_alpha_blend[8] = {};
 	bool                       blend_enable[8]         = {};
+	bool                       blend_bypass[8]         = {};
 	bool                       dx_clip_space           = false;
 
 	bool operator==(const PipelineStaticParameters& other) const;
@@ -186,6 +188,7 @@ struct VulkanPipeline
 	VkPipeline                      pipeline        = nullptr;
 	const PipelineStaticParameters* static_params   = nullptr;
 	PipelineDynamicParameters*      dynamic_params  = nullptr;
+	VkExtent2D                      framebuffer_extent {};
 };
 
 class PipelineCache
@@ -275,7 +278,8 @@ public:
 	void                 Free(VulkanDescriptorSet* set);
 
 	VulkanDescriptorSet* GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
-	                                   const int* textures2d_sampled_view, VulkanImage** textures3d_sampled,
+	                                   const int* textures2d_sampled_view, VulkanImage** textures2d_array_sampled,
+	                                   const int* textures2d_array_sampled_view, VulkanImage** textures3d_sampled,
 	                                   const int* textures3d_sampled_view, VulkanImage** textures2d_storage,
 	                                   const int* textures2d_storage_view, uint64_t* samplers, VulkanBuffer** gds_buffers,
 	                                   VulkanBuffer* vsharp_buffer, const ShaderBindResources& bind);
@@ -294,6 +298,9 @@ private:
 		int                  textures2d_sampled_num                        = 0;
 		uint64_t             textures2d_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
 		uint8_t              textures2d_sampled_view[TEXTURES_SAMPLED_MAX] = {};
+		int                  textures2d_array_sampled_num                        = 0;
+		uint64_t             textures2d_array_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
+		uint8_t              textures2d_array_sampled_view[TEXTURES_SAMPLED_MAX] = {};
 		int                  textures3d_sampled_num                        = 0;
 		uint64_t             textures3d_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
 		uint8_t              textures3d_sampled_view[TEXTURES_SAMPLED_MAX] = {};
@@ -372,6 +379,7 @@ struct VulkanFramebuffer
 	VkAttachmentLoadOp        color_load_op[TARGETS_MAX]        = {};
 	VkImageLayout             color_initial_layout[TARGETS_MAX] = {};
 	VkImageLayout             depth_stencil_layout              = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkExtent2D                 extent                            = {};
 };
 
 enum class DepthStencilAttachmentAccess
@@ -487,6 +495,7 @@ public:
 	void         CancelEopEqRegistration(void* registration);
 	void         DeleteEopEqRegistration(void* registration, LibKernel::EventQueue::KernelEqueue eq, int id);
 	void         TriggerEopEvent();
+	void         TriggerQueuedGraphicsInterrupt();
 	Core::Mutex& GetEopRegistrationMutex() { return m_eop_registration_mutex; }
 
 private:
@@ -497,6 +506,14 @@ private:
 		bool                                        published = false;
 		bool                                        deleted   = false;
 	};
+
+	enum class CompletionSignal
+	{
+		EndOfPipe,
+		QueuedGraphicsInterrupt,
+	};
+
+	void TriggerRegisteredEvents(CompletionSignal signal);
 
 	Core::Mutex             m_mutex;
 	PipelineCache*          m_pipeline_cache           = nullptr;
@@ -563,37 +580,45 @@ enum class RenderColorType
 	RenderTexture,
 };
 
+// Every color attachment owns its guest layout and host image identity. A
+// framebuffer may combine attachments with different formats and backing
+// sizes; its render area is the common extent of all attachments and all
+// attachments must use the same sample count.
+struct RenderColorAttachmentInfo
+{
+	RenderColorType       type                    = RenderColorType::NoColorOutput;
+	VulkanImage*          vulkan_buffer           = nullptr;
+	uint64_t              base_addr               = 0;
+	bool                  cmask_fast_clear_enable = false;
+	uint32_t              clear_word0             = 0;
+	uint32_t              clear_word1             = 0;
+	RenderTextureFormat   render_texture_format   = RenderTextureFormat::Unknown;
+	VideoOutVulkanImage*  existing_video_image    = nullptr;
+	uint32_t              width                   = 0;
+	uint32_t              height                  = 0;
+	VkSampleCountFlagBits samples                 = VK_SAMPLE_COUNT_1_BIT;
+	uint32_t              pitch                   = 0;
+	uint64_t              size                    = 0;
+	bool                  tile                    = false;
+	bool                  neo                     = false;
+	bool                  write_back              = false;
+};
+
 struct RenderColorInfo
 {
 	static constexpr uint32_t TARGETS_MAX = 8;
 	uint32_t                  targets_num = 0;
-	RenderColorType           type[TARGETS_MAX] {};
-	VulkanImage*              vulkan_buffer[TARGETS_MAX] {};
-	uint64_t                  base_addr[TARGETS_MAX] {};
-	uint64_t                  buffer_size[TARGETS_MAX] {};
-	bool                      cmask_fast_clear_enable[TARGETS_MAX] {};
-	uint32_t                  clear_word0[TARGETS_MAX] {};
-	uint32_t                  clear_word1[TARGETS_MAX] {};
-	RenderTextureFormat       render_texture_format = RenderTextureFormat::Unknown;
-	VideoOutVulkanImage*      existing_video_image  = nullptr;
-	uint32_t                  width                 = 0;
-	uint32_t                  height                = 0;
-	VkSampleCountFlagBits     samples               = VK_SAMPLE_COUNT_1_BIT;
-	uint32_t                  pitch                 = 0;
-	uint32_t                  size                  = 0;
-	bool                      tile                  = false;
-	bool                      neo                   = false;
-	bool                      write_back            = false;
+	RenderColorAttachmentInfo attachment[TARGETS_MAX] {};
 };
 
 static bool RenderColorSlotConfigured(const RenderColorInfo& color, uint32_t slot)
 {
-	return slot < color.targets_num && color.type[slot] != RenderColorType::NoColorOutput;
+	return slot < color.targets_num && color.attachment[slot].type != RenderColorType::NoColorOutput;
 }
 
 static bool RenderColorSlotActive(const RenderColorInfo& color, uint32_t slot)
 {
-	return RenderColorSlotConfigured(color, slot) && color.vulkan_buffer[slot] != nullptr;
+	return RenderColorSlotConfigured(color, slot) && color.attachment[slot].vulkan_buffer != nullptr;
 }
 
 static bool RenderColorHasActiveTarget(const RenderColorInfo& color)
@@ -608,13 +633,25 @@ static bool RenderColorHasActiveTarget(const RenderColorInfo& color)
 	return false;
 }
 
+static const RenderColorAttachmentInfo* RenderColorFirstConfiguredAttachment(const RenderColorInfo& color)
+{
+	for (uint32_t slot = 0; slot < color.targets_num; slot++)
+	{
+		if (RenderColorSlotConfigured(color, slot))
+		{
+			return &color.attachment[slot];
+		}
+	}
+	return nullptr;
+}
+
 static VulkanImage* RenderColorFirstActiveImage(const RenderColorInfo& color)
 {
 	for (uint32_t slot = 0; slot < color.targets_num; slot++)
 	{
 		if (RenderColorSlotActive(color, slot))
 		{
-			return color.vulkan_buffer[slot];
+			return color.attachment[slot].vulkan_buffer;
 		}
 	}
 	return nullptr;
@@ -633,9 +670,24 @@ static VkSampleCountFlagBits resolve_render_attachment_sample_count(const Render
 	const bool with_depth = depth.format != VK_FORMAT_UNDEFINED;
 	EXIT_NOT_IMPLEMENTED(!with_color && !with_depth);
 
-	const auto samples = with_color ? color.samples : depth.samples;
-	EXIT_NOT_IMPLEMENTED(with_color && with_depth && color.samples != depth.samples);
+	const auto* first_color = RenderColorFirstConfiguredAttachment(color);
+	const auto  samples     = with_color ? first_color->samples : depth.samples;
+	for (uint32_t slot = 0; slot < color.targets_num; slot++)
+	{
+		if (RenderColorSlotConfigured(color, slot))
+		{
+			EXIT_NOT_IMPLEMENTED(color.attachment[slot].samples != samples);
+		}
+	}
+	EXIT_NOT_IMPLEMENTED(with_color && with_depth && samples != depth.samples);
 	return samples;
+}
+
+static VkExtent2D IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment)
+{
+	EXIT_IF(attachment == nullptr);
+	EXIT_NOT_IMPLEMENTED(attachment->extent.width == 0 || attachment->extent.height == 0);
+	return {std::min(current.width, attachment->extent.width), std::min(current.height, attachment->extent.height)};
 }
 
 // Latest 1280x720 color targets (for KYTY_DUMP_RT paired with VideoOut frame dumps).
@@ -816,7 +868,7 @@ static void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInpu
 	uint32_t   rt_h     = 0;
 	for (uint32_t slot = 0; slot < color.targets_num; slot++)
 	{
-		VulkanImage* img = color.vulkan_buffer[slot];
+		VulkanImage* img = color.attachment[slot].vulkan_buffer;
 		if (img != nullptr && (dump_all || (img->extent.width == 1280u && img->extent.height == 720u)))
 		{
 			rt720 = true;
@@ -890,10 +942,11 @@ static void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInpu
 	              "rt=0x%012" PRIx64 ":%ux%u logo=%d prim=%u idx=%u itype=%u indexed=%d flags=0x%x vs_bufs=%d [%s] tex=[%s] "
 	              "ps_inputs=%u:[%s] vp=%.1f,%.1f,%.1fx%.1f sc=%d,%d-%d,%d clear=%d:%08x:%08x "
 	              "mask=%08x cull=%d:%d:%d depth=%d:%d:%u blend=%d:%u:%u:%u:%u:%u:%u\n",
-	              static_cast<uint64_t>(color.base_addr[0]), rt_w, rt_h, logo ? 1 : 0, ucfg.GetPrimType(), index_count, index_type_and_size,
+	              static_cast<uint64_t>(color.attachment[0].base_addr), rt_w, rt_h, logo ? 1 : 0, ucfg.GetPrimType(), index_count, index_type_and_size,
 	              indexed ? 1 : 0, flags, vs_input.buffers_num, vs_buf, tex_buf, ps_input.input_num, ps_input_buf, xy.x, xy.y, xy.width,
-	              xy.height, sc.left, sc.top, sc.right, sc.bottom, color.cmask_fast_clear_enable[0] ? 1 : 0, color.clear_word0[0],
-	              color.clear_word1[0], hw.GetRenderTargetMask(), mode.cull_front ? 1 : 0, mode.cull_back ? 1 : 0, mode.face ? 1 : 0,
+	              xy.height, sc.left, sc.top, sc.right, sc.bottom, color.attachment[0].cmask_fast_clear_enable ? 1 : 0,
+	              color.attachment[0].clear_word0, color.attachment[0].clear_word1, hw.GetRenderTargetMask(), mode.cull_front ? 1 : 0,
+	              mode.cull_back ? 1 : 0, mode.face ? 1 : 0,
 	              depth_control.z_enable ? 1 : 0, depth_control.z_write_enable ? 1 : 0, depth_control.zfunc, blend.enable ? 1 : 0,
 	              blend.color_srcblend, blend.color_comb_fcn, blend.color_destblend, blend.alpha_srcblend, blend.alpha_comb_fcn,
 	              blend.alpha_destblend);
@@ -976,7 +1029,7 @@ static void MaybeDumpColorTargets(GraphicContext* ctx, const RenderColorInfo& co
 	}
 	for (uint32_t slot = 0; slot < color.targets_num; slot++)
 	{
-		VulkanImage* img = color.vulkan_buffer[slot];
+		VulkanImage* img = color.attachment[slot].vulkan_buffer;
 		if (img == nullptr || img->extent.width != want_w || img->extent.height != want_h)
 		{
 			continue;
@@ -1157,7 +1210,6 @@ static void rt_check(const HW::RenderTarget& rt)
 		EXIT_NOT_IMPLEMENTED(!(rt.attrib.tile_mode == 0x0d) && rt.info.neo_mode != Config::IsNeo());
 		EXIT_NOT_IMPLEMENTED(rt.info.cmask_tile_mode != 0x00000000);
 		EXIT_NOT_IMPLEMENTED(rt.info.cmask_tile_mode_neo != 0x00000000);
-		EXIT_NOT_IMPLEMENTED(rt.info.blend_bypass != false);
 		// EXIT_NOT_IMPLEMENTED(rt.info.blend_clamp != false);
 		// ROUND_MODE (CB_COLOR*_INFO bit 18): truncate vs round when writing
 		// fixed-point blend results. Captured post-Play RTs set it true.
@@ -1394,8 +1446,7 @@ static void z_check(const HW::DepthRenderTarget& target, const HW::RenderControl
 	{
 		EXIT_NOT_IMPLEMENTED(z.width != 0);
 		EXIT_NOT_IMPLEMENTED(z.height != 0);
-		EXIT_NOT_IMPLEMENTED(z.size.x_max == 0);
-		EXIT_NOT_IMPLEMENTED(z.size.y_max == 0);
+		EXIT_NOT_IMPLEMENTED(!State::ResolveDepthTargetExtent(z, true).valid);
 	}
 }
 
@@ -1942,6 +1993,16 @@ void RenderContext::DeleteEopEqRegistration(void* registration_ptr, LibKernel::E
 
 void RenderContext::TriggerEopEvent()
 {
+	TriggerRegisteredEvents(CompletionSignal::EndOfPipe);
+}
+
+void RenderContext::TriggerQueuedGraphicsInterrupt()
+{
+	TriggerRegisteredEvents(CompletionSignal::QueuedGraphicsInterrupt);
+}
+
+void RenderContext::TriggerRegisteredEvents(CompletionSignal signal)
+{
 	struct PendingTrigger
 	{
 		LibKernel::EventQueue::KernelEqueuePin pin;
@@ -1953,7 +2014,9 @@ void RenderContext::TriggerEopEvent()
 		triggers.reserve(m_eop_eqs.Size());
 		for (auto* entry: m_eop_eqs)
 		{
-			if (entry->published && !entry->deleted)
+			const bool selected = (signal == CompletionSignal::EndOfPipe ? IsGraphicsEopEventId(entry->id)
+			                                                                    : entry->id == GRAPHICS_EVENT_QUEUED_GRAPHICS_INTERRUPT);
+			if (selected && entry->published && !entry->deleted)
 			{
 				auto pin = LibKernel::EventQueue::KernelAcquireEqueue(entry->identity);
 				if (pin)
@@ -1966,9 +2029,14 @@ void RenderContext::TriggerEopEvent()
 
 	for (auto& trigger: triggers)
 	{
+		void* trigger_data = nullptr;
+		if (signal == CompletionSignal::EndOfPipe)
+		{
+			trigger_data = reinterpret_cast<void*>(LibKernel::KernelReadTsc());
+		}
 		const auto result = LibKernel::EventQueue::KernelTriggerEvent(trigger.pin, static_cast<uintptr_t>(trigger.id),
 		                                                              LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
-		                                                              reinterpret_cast<void*>(LibKernel::KernelReadTsc()));
+		                                                              trigger_data);
 		EXIT_NOT_IMPLEMENTED(result != OK && result != LibKernel::KERNEL_ERROR_ENOENT);
 	}
 
@@ -1978,7 +2046,8 @@ void RenderContext::TriggerEopEvent()
 		const uint32_t               n = trigger_logs.fetch_add(1);
 		if (n < 64u)
 		{
-			std::fprintf(stderr, "EOP_TRIGGER live=%u\n", static_cast<unsigned>(triggers.size()));
+			const char* signal_name = (signal == CompletionSignal::EndOfPipe ? "EOP_TRIGGER" : "QUEUED_GRAPHICS_INTERRUPT");
+			std::fprintf(stderr, "%s live=%u\n", signal_name, static_cast<unsigned>(triggers.size()));
 		}
 	}
 }
@@ -2196,9 +2265,10 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 				same_colors = (f.image_id[slot] == 0);
 				continue;
 			}
-			auto*      image    = color->vulkan_buffer[slot];
-			const auto load_ops = ResolveColorAttachmentLoadOps(image->layout, color->cmask_fast_clear_enable[slot],
-			                                                    color->clear_word0[slot], color->clear_word1[slot], image->format);
+			const auto& attachment = color->attachment[slot];
+			auto*       image      = attachment.vulkan_buffer;
+			const auto  load_ops   = ResolveColorAttachmentLoadOps(image->layout, attachment.cmask_fast_clear_enable,
+			                                                      attachment.clear_word0, attachment.clear_word1, image->format);
 			same_colors         = (f.image_id[slot] == image->memory.unique_id) && (f.color_load_op[slot] == load_ops.load_op) &&
 			              (f.color_initial_layout[slot] == load_ops.initial_layout);
 		}
@@ -2224,6 +2294,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	    (with_color ? RenderColorFirstActiveImage(*color)
 	                : CreateDummyBuffer(VK_FORMAT_B8G8R8A8_SRGB, depth->vulkan_buffer->extent.width, depth->vulkan_buffer->extent.height,
 	                                    attachment_samples));
+	VkExtent2D framebuffer_extent {vulkan_buffer->extent.width, vulkan_buffer->extent.height};
 	const uint32_t color_count      = (with_color ? color->targets_num : 1);
 	uint32_t       attachment_count = 0;
 
@@ -2237,12 +2308,13 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 			color_attachment_refs[slot] = {VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED};
 			continue;
 		}
-		auto* image = (with_color ? color->vulkan_buffer[slot] : vulkan_buffer);
-		EXIT_NOT_IMPLEMENTED(image->extent.width != vulkan_buffer->extent.width || image->extent.height != vulkan_buffer->extent.height);
+		const auto* color_attachment = with_color ? &color->attachment[slot] : nullptr;
+		auto*       image            = with_color ? color_attachment->vulkan_buffer : vulkan_buffer;
 		EXIT_NOT_IMPLEMENTED(image->samples != attachment_samples);
-		const auto load_ops       = ResolveColorAttachmentLoadOps(image->layout, with_color ? color->cmask_fast_clear_enable[slot] : false,
-		                                                          with_color ? color->clear_word0[slot] : 0u,
-		                                                          with_color ? color->clear_word1[slot] : 0u, image->format);
+		framebuffer_extent = IntersectFramebufferAttachmentExtent(framebuffer_extent, image);
+		const auto load_ops       = ResolveColorAttachmentLoadOps(image->layout, with_color ? color_attachment->cmask_fast_clear_enable : false,
+		                                                          with_color ? color_attachment->clear_word0 : 0u,
+		                                                          with_color ? color_attachment->clear_word1 : 0u, image->format);
 		attachments[attachment_count].flags   = 0;
 		attachments[attachment_count].format  = image->format;
 		attachments[attachment_count].samples = image->samples;
@@ -2312,6 +2384,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	if (with_depth)
 	{
 		EXIT_NOT_IMPLEMENTED(depth->vulkan_buffer->samples != attachment_samples);
+		framebuffer_extent = IntersectFramebufferAttachmentExtent(framebuffer_extent, depth->vulkan_buffer);
 		views[attachment_count] = depth->vulkan_buffer->image_view[VulkanImage::VIEW_DEFAULT];
 	}
 
@@ -2322,10 +2395,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	framebuffer_info.renderPass      = framebuffer->render_pass;
 	framebuffer_info.attachmentCount = attachment_count + (with_depth ? 1u : 0u);
 	framebuffer_info.pAttachments    = views;
-	framebuffer_info.width  = (with_depth && with_color) ? std::min(vulkan_buffer->extent.width, depth->vulkan_buffer->extent.width)
-	                                                     : vulkan_buffer->extent.width;
-	framebuffer_info.height = (with_depth && with_color) ? std::min(vulkan_buffer->extent.height, depth->vulkan_buffer->extent.height)
-	                                                     : vulkan_buffer->extent.height;
+	EXIT_NOT_IMPLEMENTED(framebuffer_extent.width == 0 || framebuffer_extent.height == 0);
+	framebuffer->extent.width  = framebuffer_extent.width;
+	framebuffer->extent.height = framebuffer_extent.height;
+	framebuffer_info.width     = framebuffer->extent.width;
+	framebuffer_info.height    = framebuffer->extent.height;
 	framebuffer_info.layers = 1;
 
 	vkCreateFramebuffer(gctx->device, &framebuffer_info, nullptr, &framebuffer->framebuffer);
@@ -2337,7 +2411,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	fnew.targets_num = color->targets_num;
 	for (uint32_t slot = 0; slot < color->targets_num; slot++)
 	{
-		fnew.image_id[slot] = RenderColorSlotActive(*color, slot) ? color->vulkan_buffer[slot]->memory.unique_id : 0;
+		fnew.image_id[slot] = RenderColorSlotActive(*color, slot) ? color->attachment[slot].vulkan_buffer->memory.unique_id : 0;
 	}
 	fnew.depth_id             = (with_depth ? depth->vulkan_buffer->memory.unique_id : 0);
 	fnew.depth_clear_enable   = depth->depth_clear_enable;
@@ -2915,7 +2989,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 		auto& att               = color_blend_attachments[rt];
 		att.colorWriteMask      = color_write_mask;
-		att.blendEnable         = static_params->blend_enable[rt] ? VK_TRUE : VK_FALSE;
+		att.blendEnable         = (static_params->blend_enable[rt] && !static_params->blend_bypass[rt]) ? VK_TRUE : VK_FALSE;
 		const auto color_blend  = get_blend_factors(static_params->color_srcblend[rt], static_params->color_destblend[rt]);
 		const auto alpha_blend  = (static_params->separate_alpha_blend[rt]
 		                               ? get_blend_factors(static_params->alpha_srcblend[rt], static_params->alpha_destblend[rt])
@@ -3448,12 +3522,12 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.dynamic_params->scissor_ltrb[1]    = scissor.top;
 	p.dynamic_params->scissor_ltrb[2]    = scissor.right;
 	p.dynamic_params->scissor_ltrb[3]    = scissor.bottom;
-	if (color->targets_num == 1 && color->type[0] == RenderColorType::DisplayBuffer && color->vulkan_buffer[0] != nullptr &&
-	    color->vulkan_buffer[0]->IsResolutionScaled())
+	if (color->targets_num == 1 && color->attachment[0].type == RenderColorType::DisplayBuffer &&
+	    color->attachment[0].vulkan_buffer != nullptr && color->attachment[0].vulkan_buffer->IsResolutionScaled())
 	{
 		RenderResolutionTransform transform;
-		const ResolutionExtent        guest {color->width, color->height};
-		const ResolutionExtent        host {color->vulkan_buffer[0]->extent.width, color->vulkan_buffer[0]->extent.height};
+		const ResolutionExtent        guest {color->attachment[0].width, color->attachment[0].height};
+		const ResolutionExtent        host {color->attachment[0].vulkan_buffer->extent.width, color->attachment[0].vulkan_buffer->extent.height};
 		EXIT_NOT_IMPLEMENTED(CreateRenderResolutionTransform(guest, host, &transform) != RenderResolutionTransformStatus::Success);
 
 		const auto         xy = State::ResolveViewportXy(p.dynamic_params->viewport_scale[0], p.dynamic_params->viewport_offset[0],
@@ -3474,6 +3548,14 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		p.dynamic_params->scissor_ltrb[2] = static_cast<int>(host_scissor.right);
 		p.dynamic_params->scissor_ltrb[3] = static_cast<int>(host_scissor.bottom);
 	}
+	const auto framebuffer_scissor = State::ClampScissorToExtent(
+	    {p.dynamic_params->scissor_ltrb[0], p.dynamic_params->scissor_ltrb[1], p.dynamic_params->scissor_ltrb[2],
+	     p.dynamic_params->scissor_ltrb[3]},
+	    framebuffer->extent.width, framebuffer->extent.height);
+	p.dynamic_params->scissor_ltrb[0] = framebuffer_scissor.left;
+	p.dynamic_params->scissor_ltrb[1] = framebuffer_scissor.top;
+	p.dynamic_params->scissor_ltrb[2] = framebuffer_scissor.right;
+	p.dynamic_params->scissor_ltrb[3] = framebuffer_scissor.bottom;
 	p.static_params->topology                 = topology;
 	p.static_params->rasterization_samples    = resolve_render_attachment_sample_count(*color, *depth);
 	p.static_params->sample_locations         = sample_locations;
@@ -3523,6 +3605,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 			p.static_params->alpha_destblend[rt]      = blend.alpha_destblend;
 			p.static_params->separate_alpha_blend[rt] = blend.separate_alpha_blend;
 			p.static_params->blend_enable[rt]         = blend.enable;
+			p.static_params->blend_bypass[rt]         = ctx->GetRenderTarget(rt).info.blend_bypass;
 		}
 	}
 	p.static_params->cull_back  = mc.cull_back;
@@ -3606,6 +3689,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	                                    ps_translation.binary, p.static_params, p.dynamic_params);
 
 	EXIT_NOT_IMPLEMENTED(p.pipeline == nullptr);
+	p.pipeline->framebuffer_extent = framebuffer->extent;
 
 	bool updated = false;
 	int  index   = 0;
@@ -3809,7 +3893,7 @@ void PipelineCache::DumpPipeline(const char* action, uint32_t id)
 	}
 }
 
-static void create_layout(GraphicContext* gctx, int storage_buffers_num, int textures2d_sampled_num, int textures2d_storage_num,
+static void create_layout(GraphicContext* gctx, int storage_buffers_num, int sampled_descriptor_num, int textures2d_storage_num,
                           int samplers_num, int gds_buffers_num, bool vsharp_uniform_buffer, VkShaderStageFlags stage,
                           VkDescriptorSetLayout* dst)
 {
@@ -3817,13 +3901,13 @@ static void create_layout(GraphicContext* gctx, int storage_buffers_num, int tex
 
 	ShaderBindResources tmp {};
 	tmp.storage_buffers.buffers_num = storage_buffers_num;
-	tmp.textures2D.textures_num     = textures2d_sampled_num + textures2d_storage_num;
+	tmp.textures2D.textures_num     = sampled_descriptor_num + textures2d_storage_num;
 	tmp.samplers.samplers_num       = samplers_num;
 	tmp.gds_pointers.pointers_num   = gds_buffers_num;
 
 	ShaderCalcBindingIndices(&tmp);
 
-	constexpr uint32_t B_MAX = 7;
+	constexpr uint32_t B_MAX = 8;
 
 	VkDescriptorSetLayoutBinding ubo_layout_binding[B_MAX] = {};
 
@@ -3838,12 +3922,12 @@ static void create_layout(GraphicContext* gctx, int storage_buffers_num, int tex
 		binding_num++;
 	}
 
-	if (textures2d_sampled_num > 0)
+	if (sampled_descriptor_num > 0)
 	{
 		EXIT_IF(binding_num >= B_MAX);
 		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_index;
 		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		ubo_layout_binding[binding_num].descriptorCount    = textures2d_sampled_num;
+		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
 		ubo_layout_binding[binding_num].stageFlags         = stage;
 		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
 		binding_num++;
@@ -3882,12 +3966,23 @@ static void create_layout(GraphicContext* gctx, int storage_buffers_num, int tex
 		binding_num++;
 	}
 
-	if (textures2d_sampled_num > 0)
+	if (sampled_descriptor_num > 0)
+	{
+		EXIT_IF(binding_num >= B_MAX);
+		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_array_index;
+		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
+		ubo_layout_binding[binding_num].stageFlags         = stage;
+		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
+		binding_num++;
+	}
+
+	if (sampled_descriptor_num > 0)
 	{
 		EXIT_IF(binding_num >= B_MAX);
 		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_3d_index;
 		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		ubo_layout_binding[binding_num].descriptorCount    = textures2d_sampled_num;
+		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
 		ubo_layout_binding[binding_num].stageFlags         = stage;
 		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
 		binding_num++;
@@ -3945,7 +4040,7 @@ static void create_layout(GraphicContext* gctx, int storage_buffers_num, int tex
 	}
 };
 
-VkDescriptorSetLayout DescriptorCache::GetOrCreateLayout(Stage stage, int storage_buffers_num, int textures2d_sampled_num,
+VkDescriptorSetLayout DescriptorCache::GetOrCreateLayout(Stage stage, int storage_buffers_num, int sampled_descriptor_num,
                                                          int textures2d_storage_num, int samplers_num, int gds_buffers_num,
                                                          bool vsharp_uniform_buffer)
 {
@@ -3957,17 +4052,17 @@ VkDescriptorSetLayout DescriptorCache::GetOrCreateLayout(Stage stage, int storag
 	switch (stage)
 	{
 		case Stage::Vertex:
-			layout   = &m_descriptor_set_layout_vertex[storage_buffers_num][textures2d_sampled_num][textures2d_storage_num][samplers_num]
+			layout   = &m_descriptor_set_layout_vertex[storage_buffers_num][sampled_descriptor_num][textures2d_storage_num][samplers_num]
 			                                          [gds_buffers_num][vsharp_uniform_buffer ? 1 : 0];
 			vk_stage = VK_SHADER_STAGE_VERTEX_BIT;
 			break;
 		case Stage::Pixel:
-			layout   = &m_descriptor_set_layout_pixel[storage_buffers_num][textures2d_sampled_num][textures2d_storage_num][samplers_num]
+			layout   = &m_descriptor_set_layout_pixel[storage_buffers_num][sampled_descriptor_num][textures2d_storage_num][samplers_num]
 			                                         [gds_buffers_num][vsharp_uniform_buffer ? 1 : 0];
 			vk_stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 			break;
 		case Stage::Compute:
-			layout   = &m_descriptor_set_layout_compute[storage_buffers_num][textures2d_sampled_num][textures2d_storage_num][samplers_num]
+			layout   = &m_descriptor_set_layout_compute[storage_buffers_num][sampled_descriptor_num][textures2d_storage_num][samplers_num]
 			                                           [gds_buffers_num][vsharp_uniform_buffer ? 1 : 0];
 			vk_stage = VK_SHADER_STAGE_COMPUTE_BIT;
 			break;
@@ -3976,7 +4071,7 @@ VkDescriptorSetLayout DescriptorCache::GetOrCreateLayout(Stage stage, int storag
 
 	if (*layout == nullptr)
 	{
-		create_layout(gctx, storage_buffers_num, textures2d_sampled_num, textures2d_storage_num, samplers_num, gds_buffers_num,
+		create_layout(gctx, storage_buffers_num, sampled_descriptor_num, textures2d_storage_num, samplers_num, gds_buffers_num,
 		              vsharp_uniform_buffer, vk_stage, layout);
 	}
 	return *layout;
@@ -3995,7 +4090,7 @@ void DescriptorCache::CreatePool()
 	pool_size[0].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	pool_size[0].descriptorCount = max_sets * (BUFFERS_MAX + GDS_BUFFER_MAX);
 	pool_size[1].type            = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	pool_size[1].descriptorCount = max_sets * TEXTURES_SAMPLED_MAX * 2;
+	pool_size[1].descriptorCount = max_sets * TEXTURES_SAMPLED_MAX * 3;
 	pool_size[2].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	pool_size[2].descriptorCount = max_sets * TEXTURES_STORAGE_MAX;
 	pool_size[3].type            = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -4120,6 +4215,7 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 	hash ^= Core::hash8(static_cast<uint8_t>(s.storage_buffers_num));
 	hash += Core::hash8(static_cast<uint8_t>(s.textures2d_sampled_num));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.textures3d_sampled_num));
+	hash += Core::hash8(static_cast<uint8_t>(s.textures2d_array_sampled_num));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.textures2d_storage_num));
 	hash += Core::hash8(static_cast<uint8_t>(s.samplers_num));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.gds_buffers_num));
@@ -4131,6 +4227,11 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 	{
 		hash ^= Core::hash64(s.textures2d_sampled_id[i]);
 		hash += Core::hash8(s.textures2d_sampled_view[i]);
+	}
+	for (int i = 0; i < s.textures2d_array_sampled_num; i++)
+	{
+		hash ^= Core::hash64(s.textures2d_array_sampled_id[i]);
+		hash += Core::hash8(s.textures2d_array_sampled_view[i]);
 	}
 	for (int i = 0; i < s.textures2d_storage_num; i++)
 	{
@@ -4169,8 +4270,10 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 			auto& set = m_sets[index];
 
 			if (set.set != nullptr && set.stage == s.stage && set.storage_buffers_num == s.storage_buffers_num &&
-			    set.textures2d_sampled_num == s.textures2d_sampled_num && set.textures2d_storage_num == s.textures2d_storage_num &&
-			    set.textures3d_sampled_num == s.textures3d_sampled_num && set.samplers_num == s.samplers_num &&
+			    set.textures2d_sampled_num == s.textures2d_sampled_num &&
+			    set.textures2d_array_sampled_num == s.textures2d_array_sampled_num &&
+			    set.textures2d_storage_num == s.textures2d_storage_num && set.textures3d_sampled_num == s.textures3d_sampled_num &&
+			    set.samplers_num == s.samplers_num &&
 			    set.gds_buffers_num == s.gds_buffers_num)
 			{
 				bool match = true;
@@ -4188,6 +4291,18 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 					{
 						if (s.textures2d_sampled_id[i] != set.textures2d_sampled_id[i] ||
 						    s.textures2d_sampled_view[i] != set.textures2d_sampled_view[i])
+						{
+							match = false;
+							break;
+						}
+					}
+				}
+				if (match)
+				{
+					for (int i = 0; i < s.textures2d_array_sampled_num; i++)
+					{
+						if (s.textures2d_array_sampled_id[i] != set.textures2d_array_sampled_id[i] ||
+						    s.textures2d_array_sampled_view[i] != set.textures2d_array_sampled_view[i])
 						{
 							match = false;
 							break;
@@ -4257,7 +4372,8 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
-                                                    const int* textures2d_sampled_view, VulkanImage** textures3d_sampled,
+                                                    const int* textures2d_sampled_view, VulkanImage** textures2d_array_sampled,
+                                                    const int* textures2d_array_sampled_view, VulkanImage** textures3d_sampled,
                                                     const int* textures3d_sampled_view, VulkanImage** textures2d_storage,
                                                     const int* textures2d_storage_view, uint64_t* samplers, VulkanBuffer** gds_buffers,
                                                     VulkanBuffer* vsharp_buffer, const ShaderBindResources& bind)
@@ -4266,8 +4382,9 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 
 	int        storage_buffers_num    = bind.storage_buffers.buffers_num;
 	int        textures2d_sampled_num = bind.textures2D.textures2d_sampled_num;
+	int        textures2d_array_sampled_num = bind.textures2D.textures2d_array_sampled_num;
 	int        textures3d_sampled_num = bind.textures2D.textures3d_sampled_num;
-	int        sampled_descriptor_num = textures2d_sampled_num + textures3d_sampled_num;
+	int        sampled_descriptor_num = textures2d_sampled_num + textures2d_array_sampled_num + textures3d_sampled_num;
 	int        textures2d_storage_num = bind.textures2D.textures2d_storage_num;
 	int        samplers_num           = bind.samplers.samplers_num;
 	int        gds_buffers_num        = bind.gds_pointers.pointers_num;
@@ -4275,6 +4392,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 
 	EXIT_IF(storage_buffers_num < 0 || storage_buffers_num > BUFFERS_MAX);
 	EXIT_IF(sampled_descriptor_num < 0 || sampled_descriptor_num > TEXTURES_SAMPLED_MAX);
+	EXIT_IF(textures2d_array_sampled_num < 0 || textures2d_array_sampled_num > TEXTURES_SAMPLED_MAX);
 	EXIT_IF(textures3d_sampled_num < 0 || textures3d_sampled_num > TEXTURES_SAMPLED_MAX);
 	EXIT_IF(textures2d_storage_num < 0 || textures2d_storage_num > TEXTURES_STORAGE_MAX);
 	EXIT_IF(samplers_num < 0 || samplers_num > SAMPLERS_MAX);
@@ -4290,6 +4408,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	nset.set                    = nullptr;
 	nset.storage_buffers_num    = storage_buffers_num;
 	nset.textures2d_sampled_num = textures2d_sampled_num;
+	nset.textures2d_array_sampled_num = textures2d_array_sampled_num;
 	nset.textures3d_sampled_num = textures3d_sampled_num;
 	nset.textures2d_storage_num = textures2d_storage_num;
 	nset.samplers_num           = samplers_num;
@@ -4304,6 +4423,11 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	{
 		nset.textures2d_sampled_id[i]   = textures2d_sampled[i]->memory.unique_id;
 		nset.textures2d_sampled_view[i] = static_cast<uint8_t>(textures2d_sampled_view[i]);
+	}
+	for (int i = 0; i < textures2d_array_sampled_num; i++)
+	{
+		nset.textures2d_array_sampled_id[i]   = textures2d_array_sampled[i]->memory.unique_id;
+		nset.textures2d_array_sampled_view[i] = static_cast<uint8_t>(textures2d_array_sampled_view[i]);
 	}
 	for (int i = 0; i < textures2d_storage_num; i++)
 	{
@@ -4360,6 +4484,16 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 		                                                                  : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
+	VkDescriptorImageInfo texture2d_array_sampled_info[TEXTURES_SAMPLED_MAX] {};
+	for (int i = 0; i < textures2d_array_sampled_num; i++)
+	{
+		texture2d_array_sampled_info[i].sampler   = nullptr;
+		texture2d_array_sampled_info[i].imageView = textures2d_array_sampled[i]->image_view[textures2d_array_sampled_view[i]];
+		texture2d_array_sampled_info[i].imageLayout =
+		    (textures2d_array_sampled[i]->type == VulkanImageType::DepthStencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+		                                                                        : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	}
+
 	VkDescriptorImageInfo texture2d_storage_info[TEXTURES_STORAGE_MAX] {};
 	for (int i = 0; i < textures2d_storage_num; i++)
 	{
@@ -4402,7 +4536,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 
 	uint32_t binding_num = 0;
 
-	constexpr uint32_t B_MAX = 7;
+	constexpr uint32_t B_MAX = 8;
 
 	VkWriteDescriptorSet descriptor_write[B_MAX] = {};
 
@@ -4434,6 +4568,22 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 		descriptor_write[binding_num].descriptorCount  = textures2d_sampled_num;
 		descriptor_write[binding_num].pBufferInfo      = nullptr;
 		descriptor_write[binding_num].pImageInfo       = texture2d_sampled_info;
+		descriptor_write[binding_num].pTexelBufferView = nullptr;
+		binding_num++;
+	}
+
+	if (textures2d_array_sampled_num > 0)
+	{
+		EXIT_IF(binding_num >= B_MAX);
+		descriptor_write[binding_num].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptor_write[binding_num].pNext            = nullptr;
+		descriptor_write[binding_num].dstSet           = new_set->set;
+		descriptor_write[binding_num].dstBinding       = bind.textures2D.binding_sampled_array_index;
+		descriptor_write[binding_num].dstArrayElement  = 0;
+		descriptor_write[binding_num].descriptorType   = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		descriptor_write[binding_num].descriptorCount  = textures2d_array_sampled_num;
+		descriptor_write[binding_num].pBufferInfo      = nullptr;
+		descriptor_write[binding_num].pImageInfo       = texture2d_array_sampled_info;
 		descriptor_write[binding_num].pTexelBufferView = nullptr;
 		binding_num++;
 	}
@@ -4593,21 +4743,38 @@ void DescriptorCache::FreeDescriptor(VulkanImage* image)
 	{
 		if (set.set != nullptr)
 		{
+			bool references_image = false;
 			for (int i = 0; i < set.textures2d_sampled_num; i++)
 			{
 				if (set.textures2d_sampled_id[i] == image->memory.unique_id)
 				{
-					Free(set.set);
-					set.set           = nullptr;
-					set.next_free_set = m_first_free_set;
-					m_first_free_set  = index;
-					auto& ids         = m_sets_map[set.hash];
-					ids.Remove(index);
-					if (ids.IsEmpty())
-					{
-						m_sets_map.Remove(set.hash);
-					}
+					references_image = true;
 					break;
+				}
+			}
+			for (int i = 0; !references_image && i < set.textures2d_array_sampled_num; i++)
+			{
+				references_image = set.textures2d_array_sampled_id[i] == image->memory.unique_id;
+			}
+			for (int i = 0; !references_image && i < set.textures3d_sampled_num; i++)
+			{
+				references_image = set.textures3d_sampled_id[i] == image->memory.unique_id;
+			}
+			for (int i = 0; !references_image && i < set.textures2d_storage_num; i++)
+			{
+				references_image = set.textures2d_storage_id[i] == image->memory.unique_id;
+			}
+			if (references_image)
+			{
+				Free(set.set);
+				set.set           = nullptr;
+				set.next_free_set = m_first_free_set;
+				m_first_free_set  = index;
+				auto& ids         = m_sets_map[set.hash];
+				ids.Remove(index);
+				if (ids.IsEmpty())
+				{
+					m_sets_map.Remove(set.hash);
 				}
 			}
 		}
@@ -4618,7 +4785,8 @@ void DescriptorCache::FreeDescriptor(VulkanImage* image)
 VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind)
 {
 	int        storage_buffers_num    = bind.storage_buffers.buffers_num;
-	int        textures2d_sampled_num = bind.textures2D.textures2d_sampled_num + bind.textures2D.textures3d_sampled_num;
+	int        textures2d_sampled_num = bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_array_sampled_num +
+	                                   bind.textures2D.textures3d_sampled_num;
 	int        textures2d_storage_num = bind.textures2D.textures2d_storage_num;
 	int        samplers_num           = bind.samplers.samplers_num;
 	int        gds_buffers_num        = bind.gds_pointers.pointers_num;
@@ -4967,6 +5135,7 @@ static void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	bool           decompress        = htile && (rc.depth_compress_disable || rc.stencil_compress_disable);
 	const auto     usage             = State::ResolveDepthStencilUsage(z, rc, dc);
 	const uint32_t effective_stencil = State::ResolveEffectiveStencilFormat(z);
+	const auto     depth_extent      = State::ResolveDepthTargetExtent(z, ps5);
 
 	if (usage.target_active)
 	{
@@ -4993,7 +5162,8 @@ static void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 		r->samples = decode_guest_sample_count(z.z_info.num_samples);
 		if (ps5)
 		{
-			bool size_found = TileGetDepthSize(z.size.x_max + 1, z.size.y_max + 1, 0, z.z_info.format, effective_stencil, htile, true, true,
+			EXIT_NOT_IMPLEMENTED(!depth_extent.valid);
+			bool size_found = TileGetDepthSize(depth_extent.width, depth_extent.height, 0, z.z_info.format, effective_stencil, htile, true, true,
 			                                   &stencil_size, &htile_size, &depth_size);
 			EXIT_NOT_IMPLEMENTED(!size_found);
 		} else
@@ -5036,8 +5206,8 @@ static void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	r->htile_buffer_size    = htile_size.size;
 	r->htile_buffer_vaddr   = z.htile_data_base_addr & ~htile_addr_mask;
 	r->htile_tile_swizzle   = z.htile_data_base_addr & htile_addr_mask;
-	r->width                = (ps5 ? z.size.x_max + 1 : z.width);
-	r->height               = (ps5 ? z.size.y_max + 1 : z.height);
+	r->width                = (ps5 ? depth_extent.width : z.width);
+	r->height               = (ps5 ? depth_extent.height : z.height);
 	r->depth_clear_enable   = rc.depth_clear_enable;
 	r->suppress_depth_write = rc.depth_clear_enable;
 	r->depth_clear_value    = hw.GetDepthClearValue();
@@ -5171,7 +5341,15 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		return false;
 	}
 	r->targets_num = 1;
-	r->samples     = decode_guest_sample_count(rt.attrib.num_samples);
+	auto& attachment = r->attachment[0];
+	attachment.samples = decode_guest_sample_count(rt.attrib.num_samples);
+	const auto render_format = ResolveRenderTextureFormat(rt.info.format, rt.info.channel_type, rt.info.channel_order);
+	if (render_format.format == RenderTextureFormat::Unknown || render_format.bytes_per_element == 0)
+	{
+		EXIT("unsupported render-target format: format=0x%" PRIx32 " type=0x%" PRIx32 " order=0x%" PRIx32
+		     " samples=%u\n",
+		     rt.info.format, rt.info.channel_type, rt.info.channel_order, static_cast<unsigned>(attachment.samples));
+	}
 
 	bool ps5 = Config::IsNextGen();
 
@@ -5180,118 +5358,77 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		switch (rt.attrib3.tile_mode)
 		{
 			case 0x1b:
-				r->tile       = true;
-				r->write_back = false;
+				attachment.tile       = true;
+				attachment.write_back = false;
 				break;
-			default: printf("WARNING: unknown tile mode (attrib3): %u (continuing)\n", rt.attrib3.tile_mode); break;
+			default: EXIT("unsupported render-target tile mode: %u\n", rt.attrib3.tile_mode);
 		}
 
-		r->width  = rt.attrib2.width + 1;
-		r->height = rt.attrib2.height + 1;
+		attachment.width  = rt.attrib2.width + 1;
+		attachment.height = rt.attrib2.height + 1;
 
-		// CB_COLOR FORMAT field: 0x1 = COLOR_8 (1 Bpp), 0xa = COLOR_8_8_8_8 (4),
-		// 0xc = COLOR_16_16_16_16 (8). TileGetRenderTargetSize needs exact Bpp.
-		uint32_t rt_bpp = 4u;
-		if (rt.info.format == 0x1u)
-		{
-			rt_bpp = 1u;
-		} else if (rt.info.format == 0xcu)
-		{
-			rt_bpp = 8u;
-		} else if (rt.info.format != 0xau)
-		{
-			EXIT("unsupported Gen5 CB format for size: 0x%" PRIx32 "\n", rt.info.format);
-		}
+		const uint32_t rt_bpp = render_format.bytes_per_element;
 
 		// Element pitch: hardware PITCH when programmed, otherwise align width
 		// to the 64 KiB block width for this BPE (same rule as sample tile 27).
 		if (rt.pitch.pitch_div8_minus1 != 0)
 		{
-			r->pitch = (rt.pitch.pitch_div8_minus1 + 1u) << 3u;
+			attachment.pitch = (rt.pitch.pitch_div8_minus1 + 1u) << 3u;
 		} else
 		{
-			r->pitch = TileAlign64KBPitch(r->width, rt_bpp);
-			EXIT_NOT_IMPLEMENTED(r->pitch == 0u);
+			attachment.pitch = TileAlign64KBPitch(attachment.width, rt_bpp);
+			EXIT_NOT_IMPLEMENTED(attachment.pitch == 0u);
 		}
 
 		Graphics::TileSizeAlign size32 {};
-		Graphics::TileGetRenderTargetSize(r->width, r->height, r->pitch, rt.attrib3.tile_mode, rt_bpp, &size32);
+		Graphics::TileGetRenderTargetSize(attachment.width, attachment.height, attachment.pitch, rt.attrib3.tile_mode, rt_bpp, &size32);
 
-		r->size = size32.size;
+		attachment.size = size32.size;
 
-		if (r->size == 0)
+		if (attachment.size == 0)
 		{
-			/* [gen5-nonfatal] EXIT("unsupported Gen5 render-target layout: width=%" PRIu32 ", height=%" PRIu32 ", pitch=%" PRIu32 ",
-			 * tile=%s, neo=%s\n", */
-			printf("WARNING: unsupported Gen5 render-target layout: width=%" PRIu32 ", height=%" PRIu32 ", pitch=%" PRIu32
-			       ", tile=%s (continuing)\n",
-			       r->width, r->height, r->pitch, r->tile ? "tiled" : "linear");
+			EXIT("unsupported render-target layout: width=%" PRIu32 " height=%" PRIu32 " pitch=%" PRIu32 " tile=%u\n",
+			     attachment.width, attachment.height, attachment.pitch, rt.attrib3.tile_mode);
 		}
 	} else
 	{
 		switch (rt.attrib.tile_mode)
 		{
 			case 0x8:
-				r->tile       = false;
-				r->write_back = false;
+				attachment.tile       = false;
+				attachment.write_back = false;
 				break;
 
 			case 0x1f:
-				r->tile       = false;
-				r->write_back = true;
+				attachment.tile       = false;
+				attachment.write_back = true;
 				break;
 
 			case 0xa:
 			case 0xd:
 			case 0xe:
-				r->tile       = true;
-				r->write_back = false;
+				attachment.tile       = true;
+				attachment.write_back = false;
 				break;
 
-			default: printf("WARNING: unknown tile mode (attrib): %u (continuing)\n", rt.attrib.tile_mode); break;
+			default: EXIT("unsupported render-target tile mode: %u\n", rt.attrib.tile_mode);
 		}
 
-		r->width  = rt.size.width;
-		r->height = rt.size.height;
-		r->pitch  = (rt.pitch.pitch_div8_minus1 + 1) * 8;
-		r->size   = (rt.slice.slice_div64_minus1 + 1) * 64 * 4;
+		attachment.width  = rt.size.width;
+		attachment.height = rt.size.height;
+		attachment.pitch  = (rt.pitch.pitch_div8_minus1 + 1) * 8;
+		attachment.size   = (rt.slice.slice_div64_minus1 + 1) * 64 * 4;
 	}
-	r->neo = rt.info.neo_mode;
+	attachment.neo = rt.info.neo_mode;
 
 	auto video_image       = VideoOut::VideoOutGetImageMetadataForSubmission(rt.base.addr, buffer);
 	bool render_to_texture = (video_image.image == nullptr);
 
 	if (render_to_texture)
 	{
-		if (rt.info.format == 0xa && rt.info.channel_type == 0x0 && rt.info.channel_order == 0x0)
-		{
-			r->render_texture_format = RenderTextureFormat::R8G8B8A8Unorm;
-		} else if (rt.info.format == 0xa && rt.info.channel_type == 0x6 && rt.info.channel_order == 0x0)
-		{
-			r->render_texture_format = RenderTextureFormat::R8G8B8A8Srgb;
-		} else if (rt.info.format == 0xa && rt.info.channel_type == 0x0 && rt.info.channel_order == 0x1)
-		{
-			r->render_texture_format = RenderTextureFormat::B8G8R8A8Unorm;
-		} else if (rt.info.format == 0xa && rt.info.channel_type == 0x6 && rt.info.channel_order == 0x1)
-		{
-			r->render_texture_format = RenderTextureFormat::B8G8R8A8Srgb;
-		} else if (rt.info.format == 0x1 && rt.info.channel_type == 0x0 && rt.info.channel_order == 0x0)
-		{
-			r->render_texture_format = RenderTextureFormat::R8Unorm;
-		} else if (rt.info.format == 0xc && rt.info.channel_type == 0x7 && (rt.info.channel_order == 0x0 || rt.info.channel_order == 0x2))
-		{
-			// Captured post-Play HDR/intermediate RT: COLOR_16_16_16_16 + FLOAT.
-			// SWAP_STD_REV (2) preserves the same 4x16-bit storage; component
-			// ordering is handled at shader/sample boundaries.
-			r->render_texture_format = RenderTextureFormat::R16G16B16A16Sfloat;
-		} else
-		{
-			printf("WARNING: unknown render-target format (continuing)\n");
-		}
-
-		r->type[0]        = RenderColorType::RenderTexture;
-		r->base_addr[0]   = rt.base.addr;
-		r->buffer_size[0] = r->size;
+		attachment.render_texture_format = render_format.format;
+		attachment.type                  = RenderColorType::RenderTexture;
+		attachment.base_addr             = rt.base.addr;
 	} else
 	{
 		EXIT_NOT_IMPLEMENTED(!(rt.info.format == 0xa && (rt.info.channel_type == 0x6 || rt.info.channel_type == 0x0) &&
@@ -5299,18 +5436,17 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 
 		// Display buffer (single swapchain target only).
 		EXIT_NOT_IMPLEMENTED(r->targets_num != 1);
-		EXIT_NOT_IMPLEMENTED(r->samples != VK_SAMPLE_COUNT_1_BIT);
-		EXIT_NOT_IMPLEMENTED(video_image.buffer_size != r->size);
-		EXIT_NOT_IMPLEMENTED(video_image.buffer_pitch != r->pitch);
-		r->type[0]              = RenderColorType::DisplayBuffer;
-		r->base_addr[0]         = rt.base.addr;
-		r->buffer_size[0]       = video_image.buffer_size;
-		r->existing_video_image = video_image.image;
+		EXIT_NOT_IMPLEMENTED(attachment.samples != VK_SAMPLE_COUNT_1_BIT);
+		EXIT_NOT_IMPLEMENTED(video_image.buffer_size != attachment.size);
+		EXIT_NOT_IMPLEMENTED(video_image.buffer_pitch != attachment.pitch);
+		attachment.type                 = RenderColorType::DisplayBuffer;
+		attachment.base_addr            = rt.base.addr;
+		attachment.existing_video_image = video_image.image;
 	}
 
-	r->cmask_fast_clear_enable[0] = rt.info.cmask_fast_clear_enable;
-	r->clear_word0[0]             = rt.clear_word0.word0;
-	r->clear_word1[0]             = rt.clear_word1.word1;
+	attachment.cmask_fast_clear_enable = rt.info.cmask_fast_clear_enable;
+	attachment.clear_word0             = rt.clear_word0.word0;
+	attachment.clear_word1             = rt.clear_word1.word1;
 	return true;
 }
 
@@ -5320,37 +5456,8 @@ static void CopyRenderColorSlot(RenderColorInfo* dst, uint32_t dst_slot, const R
 	EXIT_NOT_IMPLEMENTED(dst_slot >= RenderColorInfo::TARGETS_MAX);
 	EXIT_NOT_IMPLEMENTED(!RenderColorSlotConfigured(src, 0));
 
-	if (!RenderColorHasActiveTarget(*dst))
-	{
-		dst->render_texture_format = src.render_texture_format;
-		dst->existing_video_image  = src.existing_video_image;
-		dst->width                 = src.width;
-		dst->height                = src.height;
-		dst->samples               = src.samples;
-		dst->pitch                 = src.pitch;
-		dst->size                  = src.size;
-		dst->tile                  = src.tile;
-		dst->neo                   = src.neo;
-		dst->write_back            = src.write_back;
-	} else
-	{
-		EXIT_NOT_IMPLEMENTED(src.samples != dst->samples || src.width != dst->width || src.height != dst->height ||
-		                     src.pitch != dst->pitch || src.size != dst->size || src.tile != dst->tile || src.neo != dst->neo ||
-		                     src.write_back != dst->write_back || src.render_texture_format != dst->render_texture_format);
-		EXIT_NOT_IMPLEMENTED(src.type[0] == RenderColorType::DisplayBuffer || dst->existing_video_image != nullptr);
-	}
-
-	dst->type[dst_slot]                    = src.type[0];
-	dst->base_addr[dst_slot]               = src.base_addr[0];
-	dst->buffer_size[dst_slot]             = src.buffer_size[0];
-	dst->cmask_fast_clear_enable[dst_slot] = src.cmask_fast_clear_enable[0];
-	dst->clear_word0[dst_slot]             = src.clear_word0[0];
-	dst->clear_word1[dst_slot]             = src.clear_word1[0];
-	dst->targets_num                       = std::max(dst->targets_num, dst_slot + 1);
-	if (src.type[0] == RenderColorType::DisplayBuffer)
-	{
-		dst->existing_video_image = src.existing_video_image;
-	}
+	dst->attachment[dst_slot] = src.attachment[0];
+	dst->targets_num          = std::max(dst->targets_num, dst_slot + 1);
 }
 
 static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw, RenderColorInfo* r)
@@ -5381,17 +5488,17 @@ static void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw
 		{
 			continue;
 		}
-		if (current.type[0] == RenderColorType::DisplayBuffer)
+		if (current.attachment[0].type == RenderColorType::DisplayBuffer)
 		{
 			EXIT_NOT_IMPLEMENTED(RenderColorHasActiveTarget(*r) || slot != 0);
 		} else
 		{
-			EXIT_NOT_IMPLEMENTED(current.type[0] != RenderColorType::RenderTexture);
+			EXIT_NOT_IMPLEMENTED(current.attachment[0].type != RenderColorType::RenderTexture);
 		}
 		CopyRenderColorSlot(r, slot, current);
 	}
 
-	if (r->type[0] == RenderColorType::DisplayBuffer)
+	if (r->attachment[0].type == RenderColorType::DisplayBuffer)
 	{
 		EXIT_NOT_IMPLEMENTED(r->targets_num != 1);
 	}
@@ -5406,28 +5513,30 @@ static void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer
 	{
 		return;
 	}
-	if (r->type[0] == RenderColorType::DisplayBuffer)
-	{
-		const auto video_image = VideoOut::VideoOutGetImageForSubmission(r->base_addr[0], buffer);
-		EXIT_NOT_IMPLEMENTED(video_image.image != r->existing_video_image);
-		r->vulkan_buffer[0] = video_image.image;
-		EXIT_NOT_IMPLEMENTED(r->vulkan_buffer[0] == nullptr);
-		EXIT_NOT_IMPLEMENTED(r->vulkan_buffer[0]->samples != r->samples);
-		return;
-	}
-
-	RenderTextureObject vulkan_buffer_info(r->render_texture_format, r->width, r->height, r->tile, r->neo, r->pitch, r->write_back,
-	                                      static_cast<uint32_t>(r->samples));
 	for (uint32_t slot = 0; slot < r->targets_num; slot++)
 	{
 		if (!RenderColorSlotConfigured(*r, slot))
 		{
 			continue;
 		}
+		auto& attachment = r->attachment[slot];
+		if (attachment.type == RenderColorType::DisplayBuffer)
+		{
+			const auto video_image = VideoOut::VideoOutGetImageForSubmission(attachment.base_addr, buffer);
+			EXIT_NOT_IMPLEMENTED(video_image.image != attachment.existing_video_image);
+			attachment.vulkan_buffer = video_image.image;
+			EXIT_NOT_IMPLEMENTED(attachment.vulkan_buffer == nullptr || attachment.vulkan_buffer->samples != attachment.samples);
+			continue;
+		}
+
+		EXIT_NOT_IMPLEMENTED(attachment.type != RenderColorType::RenderTexture);
+		RenderTextureObject vulkan_buffer_info(attachment.render_texture_format, attachment.width, attachment.height, attachment.tile,
+		                                      attachment.neo, attachment.pitch, attachment.write_back,
+		                                      static_cast<uint32_t>(attachment.samples));
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
-		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->base_addr[slot], r->size, vulkan_buffer_info));
+		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, attachment.base_addr, attachment.size, vulkan_buffer_info));
 		EXIT_NOT_IMPLEMENTED(buffer_vulkan == nullptr);
-		r->vulkan_buffer[slot] = buffer_vulkan;
+		attachment.vulkan_buffer = buffer_vulkan;
 	}
 }
 
@@ -5487,14 +5596,14 @@ static bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer
 	RenderColorInfo destination {};
 	EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, hw.GetRenderTarget(0), &source));
 	EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, hw.GetRenderTarget(1), &destination));
-	EXIT_NOT_IMPLEMENTED(source.type[0] != RenderColorType::RenderTexture ||
-	                     destination.type[0] != RenderColorType::RenderTexture);
+	EXIT_NOT_IMPLEMENTED(source.attachment[0].type != RenderColorType::RenderTexture ||
+	                     destination.attachment[0].type != RenderColorType::RenderTexture);
 
 	MaterializeRenderColorInfo(submit_id, buffer, &source);
 	MaterializeRenderColorInfo(submit_id, buffer, &destination);
 
-	auto* src = source.vulkan_buffer[0];
-	auto* dst = destination.vulkan_buffer[0];
+	auto* src = source.attachment[0].vulkan_buffer;
+	auto* dst = destination.attachment[0].vulkan_buffer;
 	EXIT_NOT_IMPLEMENTED(src == nullptr || dst == nullptr);
 	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
 	{
@@ -5505,9 +5614,9 @@ static bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer
 			std::fprintf(stderr,
 			             "KYTY_DUMP_COLOR_RESOLVE src_id=%" PRIu64 " dst_id=%" PRIu64
 			             " src=0x%012" PRIx64 ":%ux%u/%ux%u:s%u:f%u dst=0x%012" PRIx64 ":%ux%u/%ux%u:s%u:f%u op=0x%x\n",
-			             src->memory.unique_id, dst->memory.unique_id, source.base_addr[0], src->GetGuestExtent().width,
+			             src->memory.unique_id, dst->memory.unique_id, source.attachment[0].base_addr, src->GetGuestExtent().width,
 			             src->GetGuestExtent().height, src->extent.width, src->extent.height, static_cast<uint32_t>(src->samples),
-			             static_cast<uint32_t>(src->format), destination.base_addr[0], dst->GetGuestExtent().width,
+			             static_cast<uint32_t>(src->format), destination.attachment[0].base_addr, dst->GetGuestExtent().width,
 			             dst->GetGuestExtent().height, dst->extent.width, dst->extent.height, static_cast<uint32_t>(dst->samples),
 			             static_cast<uint32_t>(dst->format), hw.GetColorControl().op);
 		}
@@ -5687,26 +5796,29 @@ static RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer
 	EXIT_IF(buffer == nullptr);
 	RenderResolutionPlan native;
 	native.classification = ResolutionClassification::Native;
-	native.guest_extent   = {color != nullptr ? color->width : 0, color != nullptr ? color->height : 0};
+	const auto* first_attachment = color != nullptr ? RenderColorFirstConfiguredAttachment(*color) : nullptr;
+	native.guest_extent   = {first_attachment != nullptr ? first_attachment->width : 0,
+	                       first_attachment != nullptr ? first_attachment->height : 0};
 	native.host_extent    = native.guest_extent;
-	if (color == nullptr || ps == nullptr || color->targets_num != 1 || color->type[0] != RenderColorType::DisplayBuffer ||
-	    color->existing_video_image == nullptr)
+	if (color == nullptr || ps == nullptr || color->targets_num != 1 || color->attachment[0].type != RenderColorType::DisplayBuffer ||
+	    color->attachment[0].existing_video_image == nullptr)
 	{
 		return native;
 	}
 
-	const ResolutionExtent guest {color->width, color->height};
+	const auto&            display_attachment = color->attachment[0];
+	const ResolutionExtent guest {display_attachment.width, display_attachment.height};
 	const bool             has_depth = depth.format != VK_FORMAT_UNDEFINED;
 
 	const bool color_alias_safe =
-	    RenderResolutionAliasAllowsRanges(&color->base_addr[0], &color->buffer_size[0], 1, GpuMemoryObjectType::VideoOutBuffer, false);
+	    RenderResolutionAliasAllowsRanges(&display_attachment.base_addr, &display_attachment.size, 1, GpuMemoryObjectType::VideoOutBuffer, false);
 	const bool depth_alias_safe = !has_depth || RenderResolutionAliasAllowsRanges(depth.vaddr, depth.size, depth.vaddr_num,
 	                                                                              GpuMemoryObjectType::DepthStencilBuffer, true);
 
 	RenderResolutionAttachment attachments[2];
 	attachments[0].guest_extent             = guest;
 	attachments[0].resource.kind            = ResolutionResourceKind::ColorAttachment;
-	attachments[0].resource.cpu_transfer    = !color->tile;
+	attachments[0].resource.cpu_transfer    = !display_attachment.tile;
 	attachments[0].resource.ambiguous_alias = !color_alias_safe;
 	uint32_t attachment_count               = 1;
 	if (has_depth)
@@ -5733,12 +5845,19 @@ static RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer
 	    RenderResolutionShaderScaleStatus::Success;
 	auto decision = RenderResolutionEvaluatePlan(input);
 
+	VideoOutHostExtentState existing_image_state {};
+	EXIT_IF(!VideoOutBufferGetHostExtentState(display_attachment.existing_video_image, &existing_image_state));
+	if (existing_image_state.selected)
+	{
+		decision = ReconcileCommittedRenderExtent(decision, {existing_image_state.width, existing_image_state.height});
+	}
+
 	if (decision.classification == ResolutionClassification::Scaled)
 	{
 		VulkanResolutionAttachmentRequest color_request;
 		color_request.extent = decision.host_extent;
-		color_request.format = color->existing_video_image->format;
-		color_request.sample_count = color->existing_video_image->samples;
+		color_request.format = display_attachment.existing_video_image->format;
+		color_request.sample_count = display_attachment.existing_video_image->samples;
 		color_request.usage  = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
 		                       VK_IMAGE_USAGE_SAMPLED_BIT;
 		const auto color_capability = EvaluateVulkanResolutionAttachment(g_render_ctx->GetGraphicCtx(), color_request);
@@ -5816,7 +5935,11 @@ static RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer
 	{
 		return unsupported(selected);
 	}
-	if (has_depth)
+	// A mixed guest-extent cohort is intentionally native. Its color and depth
+	// images retain their respective native extents, so only a scalable or
+	// equal-extent plan may require a pre-existing depth image to match color.
+	const bool attachments_share_guest_extent = decision.reason != RenderResolutionPlanReason::MismatchedGuestExtent;
+	if (has_depth && attachments_share_guest_extent)
 	{
 		const auto existing_depth = GpuMemoryFindObjectsForSubmission(buffer, depth.vaddr, depth.size, depth.vaddr_num,
 		                                                              GpuMemoryObjectType::DepthStencilBuffer, true, false);
@@ -5835,7 +5958,7 @@ static RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer
 	}
 
 	VideoOutHostExtentState image_state {};
-	if (!VideoOutBufferGetHostExtentState(color->existing_video_image, &image_state) || !image_state.selected ||
+	if (!VideoOutBufferGetHostExtentState(display_attachment.existing_video_image, &image_state) || !image_state.selected ||
 	    image_state.width != selected.width || image_state.height != selected.height)
 	{
 		return unsupported({image_state.width, image_state.height});
@@ -5902,12 +6025,13 @@ static void InvalidateMemoryObject(const RenderColorInfo& r)
 		{
 			continue;
 		}
-		if (r.type[slot] == RenderColorType::RenderTexture)
+		const auto& attachment = r.attachment[slot];
+		if (attachment.type == RenderColorType::RenderTexture)
 		{
-			GpuMemoryResetHash(&r.base_addr[slot], &r.buffer_size[slot], 1, GpuMemoryObjectType::RenderTexture);
-		} else if (r.type[slot] == RenderColorType::DisplayBuffer /*|| r.type == RenderColorType::OffscreenBuffer*/)
+			GpuMemoryResetHash(&attachment.base_addr, &attachment.size, 1, GpuMemoryObjectType::RenderTexture);
+		} else if (attachment.type == RenderColorType::DisplayBuffer)
 		{
-			GpuMemoryResetHash(&r.base_addr[slot], &r.buffer_size[slot], 1, GpuMemoryObjectType::VideoOutBuffer);
+			GpuMemoryResetHash(&attachment.base_addr, &attachment.size, 1, GpuMemoryObjectType::VideoOutBuffer);
 		}
 	}
 }
@@ -6212,68 +6336,65 @@ static bool ShouldForceGen5Degamma(const ShaderSamplerResources& samplers, int s
 
 static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
                             const ShaderSamplerResources& samplers, VulkanImage** images_sampled, VulkanImage** images_storage,
-                            int* images_sampled_view, VulkanImage** images_sampled_3d, int* images_sampled_3d_view,
+                            int* images_sampled_view, VulkanImage** images_sampled_array, int* images_sampled_array_view,
+                            VulkanImage** images_sampled_3d, int* images_sampled_3d_view,
                             int* images_storage_view, uint32_t** sgprs)
 {
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(images_sampled == nullptr);
+	EXIT_IF(images_sampled_array == nullptr);
 	EXIT_IF(images_sampled_3d == nullptr);
 	EXIT_IF(images_storage == nullptr);
 	EXIT_IF(images_sampled_view == nullptr);
+	EXIT_IF(images_sampled_array_view == nullptr);
 	EXIT_IF(images_sampled_3d_view == nullptr);
 	EXIT_IF(images_storage_view == nullptr);
 	EXIT_IF(sgprs == nullptr);
 	EXIT_IF(*sgprs == nullptr);
 
-	int          index_sampled            = 0;
-	int          index_sampled_3d         = 0;
-	int          index_storage            = 0;
-	VulkanImage* sampled_2d_padding_image = nullptr;
-	VulkanImage* sampled_3d_padding_image = nullptr;
-	int          sampled_2d_padding_view  = VulkanImage::VIEW_DEFAULT;
-	int          sampled_3d_padding_view  = VulkanImage::VIEW_3D;
+	int          index_sampled                  = 0;
+	int          index_sampled_array            = 0;
+	int          index_sampled_3d               = 0;
+	int          index_storage                  = 0;
+	VulkanImage* sampled_2d_padding_image       = nullptr;
+	VulkanImage* sampled_2d_array_padding_image = nullptr;
+	VulkanImage* sampled_3d_padding_image       = nullptr;
+	int          sampled_2d_padding_view        = VulkanImage::VIEW_DEFAULT;
+	int          sampled_2d_array_padding_view  = VulkanImage::VIEW_ARRAY;
+	int          sampled_3d_padding_view        = VulkanImage::VIEW_3D;
 
 	bool gen5 = Config::IsNextGen();
 
 	for (int i = 0; i < textures.textures_num; i++)
 	{
 		auto       r                 = textures.desc[i].texture;
-		const bool arrayed_2d        = gen5 && ShaderGen5TextureTypeUsesArrayAddressing(r.Type());
-		const bool three_dimensional = gen5 && r.Type() == 10u;
+		const auto sampled_shape = ShaderGen5SampledTextureShapeForType(r.Type());
+		const bool arrayed_2d = gen5 && sampled_shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
+		const bool three_dimensional = gen5 && sampled_shape == ShaderGen5SampledTextureShape::ThreeDimensional;
 
 		if (gen5)
 		{
-			// Observed sample textures (UfmtGFX10):
-			// - Tile 0/9/27, format 56 = 8_8_8_8_UNORM (RGBA8)
-			// - Tile 0, format 13 = 16_FLOAT (R16F), 64x1 linear lookup
-			// - Tile 0, format 14 = 8_8_UNORM (RG8), 2048x4096 linear atlas
-			// - Tile 27, format 71 = 16_16_16_16_FLOAT (RGBA16F), 642x362 alias of RT
-			// - Tile 27, format 133 = BC1 RGBA UNORM, 3840x2160 title texture
-			// - Tile 9 = kStandard64KB static atlases (RGBA8 detile path)
-			// - Tile 5, format 5 = kStandard4KB R8_UINT video planes
-			// - Tile 5, format 20 = kStandard4KB R32_UINT image load/store
-			EXIT_NOT_IMPLEMENTED(r.TileMode() != 0 && r.TileMode() != 5 && r.TileMode() != 27 && r.TileMode() != 9);
+			const auto tile_mode = static_cast<uint32_t>(r.TileMode());
+			if (tile_mode != 0u && tile_mode != 5u && tile_mode != 9u && tile_mode != 24u && tile_mode != 27u)
+			{
+				EXIT("unsupported Gen5 sampled texture tile mode: tile=%u format=%u width=%u height=%u base=0x%012" PRIx64
+				     " type=%u\n",
+				     tile_mode, static_cast<uint32_t>(r.Format()), r.Width5() + 1u, r.Height5() + 1u, r.Base40(),
+				     static_cast<uint32_t>(r.Type()));
+			}
 			if (!VulkanSupportsGen5ImageFormat(GuestImageUsage::Sampled, r.Format()))
 			{
-				/* [gen5-nonfatal] EXIT("unsupported Gen5 sampled texture format: fmt=%u tile=%u width=%u height=%u base=0x%012" PRIx64 "
-				 * type=%u\n", */
-				printf("WARNING: unsupported Gen5 sampled texture format: fmt=%u tile=%u width=%u height=%u base=0x%012" PRIx64
-				       " type=%u (continuing)\n",
-				       static_cast<uint32_t>(r.Format()), static_cast<uint32_t>(r.TileMode()), r.Width5() + 1u, r.Height5() + 1u,
-				       r.Base40(), static_cast<uint32_t>(r.Type()));
+				EXIT("unsupported Gen5 sampled texture format: format=%u tile=%u width=%u height=%u base=0x%012" PRIx64
+				     " type=%u\n",
+				     static_cast<uint32_t>(r.Format()), tile_mode, r.Width5() + 1u, r.Height5() + 1u, r.Base40(),
+				     static_cast<uint32_t>(r.Type()));
 			}
 			EXIT_NOT_IMPLEMENTED(r.PerfMod5() != 7 && r.PerfMod5() != 0);
 			EXIT_NOT_IMPLEMENTED(r.BCSwizzle() != 0);
 			// BaseArray5 and ArrayPitch are layer-addressing fields. Their bit
 			// positions are not array state for Color3D descriptors.
-			if (!three_dimensional && !arrayed_2d && r.BaseArray5() != 0)
-			{
-				/* [gen5-nonfatal] EXIT("unsupported Gen5 array addressing: type=%u base_array=%u array_pitch=%u format=%u tile=%u " */
-				printf("WARNING: unsupported Gen5 array addressing: type=%u base_array=%u array_pitch=%u format=%u tile=%u (continuing)\n",
-				       static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.BaseArray5()), r.ArrayPitch(),
-				       static_cast<uint32_t>(r.Format()), static_cast<uint32_t>(r.TileMode()));
-			}
+			EXIT_NOT_IMPLEMENTED(!three_dimensional && !arrayed_2d && r.BaseArray5() != 0);
 			EXIT_NOT_IMPLEMENTED(!three_dimensional && !arrayed_2d && r.ArrayPitch() != 0);
 			// MAX_MIP describes the backing allocation; BASE_LEVEL/LAST_LEVEL are
 			// only the view range. The upload below creates the full allocation so
@@ -6346,9 +6467,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			const uint32_t bpp = ShaderGen5TextureBytesPerElement(r.Format());
 			pitch              = TileAlign64KBPitch(width, bpp);
 			EXIT_NOT_IMPLEMENTED(pitch == 0u);
-		} else if (tile == 9)
+		} else if (tile == 9 || tile == 24)
 		{
-			pitch = TileAlign64KBPitch(width, 4u);
+			pitch = TileAlign64KBPitch(width, ShaderGen5TextureBytesPerElement(r.Format()));
+			EXIT_NOT_IMPLEMENTED(pitch == 0u);
 		} else if (tile == 5 && !three_dimensional && !arrayed_2d)
 		{
 			// Standard4KB resources use a canonical tiled pitch. Word4 is a
@@ -6367,7 +6489,15 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		uint32_t   swizzle       = r.DstSelXYZW();
 		const bool force_degamma = gen5 && !textures.desc[i].textures2d_without_sampler && ShouldForceGen5Degamma(samplers, index_sampled);
 
-		bool check_depth_texture = (!gen5 && tile == 2);
+		const bool check_depth_texture = (!gen5 && tile == 2u) || (gen5 && tile == 24u);
+
+		if (gen5 && check_depth_texture)
+		{
+			EXIT_NOT_IMPLEMENTED(fmt != 22u || (r.Type() != 9u && r.Type() != 13u) || r.Depth() != 0u || r.BaseArray5() != 0u ||
+			                     r.BaseLevel() != 0u || r.LastLevel() != 0u || r.MaxMip() != 0u || r.BCSwizzle() != 0u || r.MsaaDepth());
+			EXIT_NOT_IMPLEMENTED(swizzle != DstSel(4, 4, 4, 4) && swizzle != DstSel(4, 0, 0, 0) &&
+			                     swizzle != DstSel(4, 0, 0, 1));
+		}
 
 		if (gen5 && !three_dimensional && !arrayed_2d && tile == 5u && levels > 1u)
 		{
@@ -6390,14 +6520,16 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			{
 				size = volume_layout.tiled;
 			}
-		} else if (arrayed_2d)
+		} else if (arrayed_2d && !check_depth_texture)
 		{
-			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(fmt);
-			EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || tile != 5u || levels != 1u);
-			TileGetTextureSize2(fmt, width, height, pitch, levels, tile, &size, nullptr, nullptr);
-			const uint64_t array_size = static_cast<uint64_t>(size.size) * depth;
-			EXIT_NOT_IMPLEMENTED(array_size > UINT32_MAX);
-			size.size = static_cast<uint32_t>(array_size);
+			Gen5TextureArrayLayout array_layout {};
+			if (!Gen5GetTextureArrayLayout(fmt, width, height, pitch, levels, tile, depth, &array_layout))
+			{
+				EXIT("Unsupported Gen5 2D-array layout: format=%u width=%u height=%u pitch=%u levels=%u tile=%u layers=%u base_array=%u\\n",
+				     fmt, width, height, pitch, levels, tile, depth, base_array);
+			}
+			size.size  = static_cast<uint32_t>(array_layout.tiled_size);
+			size.align = array_layout.tiled_slice.align;
 		} else if (gen5)
 		{
 			TileGetTextureSize2(fmt, width, height, pitch, levels, tile, &size, nullptr, nullptr);
@@ -6445,10 +6577,15 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (check_depth_texture)
 		{
 			auto dtex     = FindDepthStencil(buffer, addr, size.size, true);
+			if (dtex.IsEmpty() && gen5)
+			{
+				dtex = FindDepthStencil(buffer, addr, size.size, false);
+			}
 			depth_texture = !dtex.IsEmpty();
 			if (depth_texture)
 			{
-				EXIT_NOT_IMPLEMENTED(swizzle != DstSel(4, 4, 4, 4));
+				EXIT_NOT_IMPLEMENTED(swizzle != DstSel(4, 4, 4, 4) && swizzle != DstSel(4, 0, 0, 0) &&
+				                     swizzle != DstSel(4, 0, 0, 1));
 				EXIT_NOT_IMPLEMENTED(dtex.At(0)->compressed);
 				size_t alias_index = 0;
 				if (dtex.Size() > 1)
@@ -6696,7 +6833,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				const auto video_image = VideoOut::VideoOutGetImageForSubmission(addr, buffer);
 				if (video_image.image != nullptr && video_image.buffer_size == size.size && video_image.buffer_pitch == pitch &&
 				    video_image.image->MatchesGuestExtent(width, height) &&
-				    (!gen5 || Gen5SampleFormatMatchesVulkan(fmt, video_image.image->format)))
+				    (!gen5 || VulkanGen5SampleFormatMatches(static_cast<uint16_t>(fmt), video_image.image->format)))
 				{
 					tex = video_image.image;
 					if (swizzle == DstSel(6, 5, 4, 7))
@@ -6802,21 +6939,47 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			index_storage++;
 		} else
 		{
-			VulkanImage** sampled_images   = (three_dimensional ? images_sampled_3d : images_sampled);
-			int*          sampled_views    = (three_dimensional ? images_sampled_3d_view : images_sampled_view);
-			int*          sampled_index    = (three_dimensional ? &index_sampled_3d : &index_sampled);
+			VulkanImage** sampled_images = images_sampled;
+			int*          sampled_views  = images_sampled_view;
+			int*          sampled_index  = &index_sampled;
+			uint32_t      descriptor_tag = 0u;
+			const auto numeric_type = VulkanGen5ImageNumericType(fmt);
+			EXIT_NOT_IMPLEMENTED(numeric_type == GuestImageNumericType::Unsupported || numeric_type == GuestImageNumericType::SignedInteger);
+			if (numeric_type == GuestImageNumericType::UnsignedInteger)
+			{
+				descriptor_tag |= ShaderTextureResources::UNSIGNED_INTEGER_INDEX_TAG;
+			}
+			if (three_dimensional)
+			{
+				sampled_images = images_sampled_3d;
+				sampled_views  = images_sampled_3d_view;
+				sampled_index  = &index_sampled_3d;
+				descriptor_tag |= ShaderTextureResources::THREE_DIMENSIONAL_INDEX_TAG;
+			} else if (arrayed_2d)
+			{
+				sampled_images = images_sampled_array;
+				sampled_views  = images_sampled_array_view;
+				sampled_index  = &index_sampled_array;
+				descriptor_tag |= ShaderTextureResources::TWO_DIMENSIONAL_ARRAY_INDEX_TAG;
+			}
 			sampled_images[*sampled_index] = tex;
-			EXIT_NOT_IMPLEMENTED((arrayed_2d || three_dimensional) && (depth_texture || view_type != VulkanImage::VIEW_DEFAULT));
+			EXIT_NOT_IMPLEMENTED(three_dimensional && (depth_texture || view_type != VulkanImage::VIEW_DEFAULT));
+			EXIT_NOT_IMPLEMENTED(arrayed_2d && !depth_texture && view_type != VulkanImage::VIEW_DEFAULT);
 			sampled_views[*sampled_index] =
 			    (three_dimensional
 			         ? VulkanImage::VIEW_3D
-			         : (arrayed_2d ? VulkanImage::VIEW_ARRAY : (depth_texture ? VulkanImage::VIEW_DEPTH_TEXTURE : view_type)));
+			         : (depth_texture ? (arrayed_2d ? VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY : VulkanImage::VIEW_DEPTH_TEXTURE)
+			                          : (arrayed_2d ? VulkanImage::VIEW_ARRAY : view_type)));
 			if (*sampled_index == 0)
 			{
 				if (three_dimensional)
 				{
 					sampled_3d_padding_image = tex;
 					sampled_3d_padding_view  = sampled_views[*sampled_index];
+				} else if (arrayed_2d)
+				{
+					sampled_2d_array_padding_image = tex;
+					sampled_2d_array_padding_view  = sampled_views[*sampled_index];
 				} else
 				{
 					sampled_2d_padding_image = tex;
@@ -6825,8 +6988,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 			if (gen5)
 			{
-				const uint32_t descriptor_index =
-				    static_cast<uint32_t>(*sampled_index) | (three_dimensional ? ShaderTextureResources::THREE_DIMENSIONAL_INDEX_TAG : 0u);
+				const uint32_t descriptor_index = static_cast<uint32_t>(*sampled_index) | descriptor_tag;
 				r.UpdateAddress40(descriptor_index);
 			} else
 			{
@@ -6835,8 +6997,22 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			(*sampled_index)++;
 		}
 
-		const bool tagged_3d_sampled_descriptor = gen5 && three_dimensional && !textures.desc[i].textures2d_without_sampler;
-		EXIT_NOT_IMPLEMENTED(!tagged_3d_sampled_descriptor && ((gen5 ? r.Base40() : r.Base38()) >> 32u) != 0);
+		if (gen5 && !textures.desc[i].textures2d_without_sampler)
+		{
+			const uint32_t descriptor_shape = r.fields[0] & ~ShaderTextureResources::DESCRIPTOR_INDEX_MASK;
+			EXIT_NOT_IMPLEMENTED((r.fields[1] & 0xffu) != 0u);
+			EXIT_NOT_IMPLEMENTED(descriptor_shape != 0u &&
+			                     descriptor_shape != ShaderTextureResources::UNSIGNED_INTEGER_INDEX_TAG &&
+			                     descriptor_shape != ShaderTextureResources::TWO_DIMENSIONAL_ARRAY_INDEX_TAG &&
+			                     descriptor_shape != ShaderTextureResources::THREE_DIMENSIONAL_INDEX_TAG &&
+			                     descriptor_shape != (ShaderTextureResources::UNSIGNED_INTEGER_INDEX_TAG |
+			                                          ShaderTextureResources::TWO_DIMENSIONAL_ARRAY_INDEX_TAG) &&
+			                     descriptor_shape != (ShaderTextureResources::UNSIGNED_INTEGER_INDEX_TAG |
+			                                          ShaderTextureResources::THREE_DIMENSIONAL_INDEX_TAG));
+		} else
+		{
+			EXIT_NOT_IMPLEMENTED(((gen5 ? r.Base40() : r.Base38()) >> 32u) != 0);
+		}
 		if (bound_dump_spec != nullptr && std::sscanf(bound_dump_spec, "%ux%u", &bound_dump_width, &bound_dump_height) == 2 &&
 		    bound_dump_width == static_cast<uint32_t>(width) && bound_dump_height == static_cast<uint32_t>(height))
 		{
@@ -6845,7 +7021,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			             "index=%d descriptor=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
 			             static_cast<uint64_t>(addr), tex->memory.unique_id, static_cast<unsigned>(tex->type),
 			             static_cast<unsigned>(tex->format), static_cast<unsigned>(tex->layout),
-			             (three_dimensional ? index_sampled_3d : index_sampled) - 1, r.fields[0], r.fields[1], r.fields[2], r.fields[3],
+			             (three_dimensional ? index_sampled_3d : (arrayed_2d ? index_sampled_array : index_sampled)) - 1, r.fields[0], r.fields[1], r.fields[2], r.fields[3],
 			             r.fields[4], r.fields[5], r.fields[6], r.fields[7]);
 		}
 
@@ -6861,21 +7037,36 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		(*sgprs) += 8;
 	}
 
-	// A mixed shader accesses the two typed arrays through a runtime-tagged
+	// A mixed shader accesses typed arrays through runtime-tagged descriptor
 	// descriptor index. Vulkan still requires every statically indexed array
 	// element to be valid, so pad the unused slots with a same-shape descriptor.
-	if (index_sampled > 0 && index_sampled_3d > 0)
+	const int sampled_shape_count = (index_sampled > 0 ? 1 : 0) + (index_sampled_array > 0 ? 1 : 0) + (index_sampled_3d > 0 ? 1 : 0);
+	if (sampled_shape_count > 1)
 	{
-		const int sampled_total = index_sampled + index_sampled_3d;
-		for (int i = index_sampled; i < sampled_total; ++i)
+		const int sampled_total = index_sampled + index_sampled_array + index_sampled_3d;
+		if (index_sampled > 0)
 		{
-			images_sampled[i]      = sampled_2d_padding_image;
-			images_sampled_view[i] = sampled_2d_padding_view;
+			for (int i = index_sampled; i < sampled_total; ++i)
+			{
+				images_sampled[i]      = sampled_2d_padding_image;
+				images_sampled_view[i] = sampled_2d_padding_view;
+			}
 		}
-		for (int i = index_sampled_3d; i < sampled_total; ++i)
+		if (index_sampled_array > 0)
 		{
-			images_sampled_3d[i]      = sampled_3d_padding_image;
-			images_sampled_3d_view[i] = sampled_3d_padding_view;
+			for (int i = index_sampled_array; i < sampled_total; ++i)
+			{
+				images_sampled_array[i]      = sampled_2d_array_padding_image;
+				images_sampled_array_view[i] = sampled_2d_array_padding_view;
+			}
+		}
+		if (index_sampled_3d > 0)
+		{
+			for (int i = index_sampled_3d; i < sampled_total; ++i)
+			{
+				images_sampled_3d[i]      = sampled_3d_padding_image;
+				images_sampled_3d_view[i] = sampled_3d_padding_view;
+			}
 		}
 	}
 }
@@ -6929,7 +7120,11 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, uint64_t* sa
 		// are controlled by XY min/mag and mip filtering below.
 		// EXIT_NOT_IMPLEMENTED(r.MipFilter() != 0 && r.MipFilter() != 2);
 		EXIT_NOT_IMPLEMENTED(r.BorderColorPtr() != 0);
-		EXIT_NOT_IMPLEMENTED(r.BorderColorType() != 0);
+		// Types 0 through 2 are fixed transparent-black, opaque-black, and
+		// opaque-white values. SamplerCache translates those values directly to
+		// Vulkan. Type 3 requires a guest border-color table, which is a distinct
+		// resource contract and cannot be represented by a fixed VkBorderColor.
+		EXIT_NOT_IMPLEMENTED(r.BorderColorType() == 3);
 
 		sampler_ids[i] = g_render_ctx->GetSamplerCache()->GetSamplerId(r);
 
@@ -6998,9 +7193,10 @@ static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelin
 		EXIT_NOT_IMPLEMENTED(bind.storage_buffers.buffers_num > DescriptorCache::BUFFERS_MAX);
 		EXIT_NOT_IMPLEMENTED(
 		    (bind.textures2D.textures2d_storage_num > DescriptorCache::TEXTURES_STORAGE_MAX) ||
-		    (bind.textures2D.textures2d_sampled_num + bind.textures2D.textures3d_sampled_num > DescriptorCache::TEXTURES_SAMPLED_MAX));
+		    (bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_array_sampled_num +
+		     bind.textures2D.textures3d_sampled_num > DescriptorCache::TEXTURES_SAMPLED_MAX));
 		EXIT_NOT_IMPLEMENTED(bind.textures2D.textures2d_storage_num + bind.textures2D.textures2d_sampled_num +
-		                         bind.textures2D.textures3d_sampled_num !=
+		                         bind.textures2D.textures2d_array_sampled_num + bind.textures2D.textures3d_sampled_num !=
 		                     bind.textures2D.textures_num);
 		EXIT_NOT_IMPLEMENTED(bind.samplers.samplers_num > DescriptorCache::SAMPLERS_MAX);
 
@@ -7009,6 +7205,8 @@ static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelin
 		VulkanBuffer* storage_buffers[DescriptorCache::BUFFERS_MAX];
 		VulkanImage*  textures2d_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX];
 		int           textures2d_sampled_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
+		VulkanImage*  textures2d_array_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX];
+		int           textures2d_array_sampled_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
 		VulkanImage*  textures3d_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX];
 		int           textures3d_sampled_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
 		VulkanImage*  textures2d_storage[DescriptorCache::TEXTURES_STORAGE_MAX];
@@ -7029,7 +7227,8 @@ static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelin
 		if (bind.textures2D.textures_num > 0)
 		{
 			PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage,
-			                textures2d_sampled_view, textures3d_sampled, textures3d_sampled_view, textures2d_storage_view, &sgprs_ptr);
+			                textures2d_sampled_view, textures2d_array_sampled, textures2d_array_sampled_view, textures3d_sampled,
+			                textures3d_sampled_view, textures2d_storage_view, &sgprs_ptr);
 			need_descriptor = true;
 		}
 		if (bind.samplers.samplers_num > 0)
@@ -7060,24 +7259,30 @@ static void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelin
 
 		if (bind.textures2D.textures_num > 0)
 		{
-			for (int i = 0; i < bind.textures2D.textures2d_sampled_num; i++)
+			const auto transition_sampled_images = [&vk_buffer](VulkanImage** images, int count)
 			{
-				if (textures2d_sampled[i]->type == VulkanImageType::DepthStencil)
+				for (int i = 0; i < count; i++)
 				{
-					GraphicsRenderDepthStencilBarrier(vk_buffer, textures2d_sampled[i]);
-				} else if (textures2d_sampled[i]->type == VulkanImageType::RenderTexture ||
-				           textures2d_sampled[i]->type == VulkanImageType::VideoOut)
-				{
-					GraphicsRenderRenderTextureBarrier(vk_buffer, textures2d_sampled[i]);
+					if (images[i]->type == VulkanImageType::DepthStencil)
+					{
+						GraphicsRenderDepthStencilBarrier(vk_buffer, images[i]);
+					} else if (images[i]->type == VulkanImageType::RenderTexture || images[i]->type == VulkanImageType::VideoOut)
+					{
+						GraphicsRenderRenderTextureBarrier(vk_buffer, images[i]);
+					}
 				}
-			}
+			};
+			transition_sampled_images(textures2d_sampled, bind.textures2D.textures2d_sampled_num);
+			transition_sampled_images(textures2d_array_sampled, bind.textures2D.textures2d_array_sampled_num);
+			transition_sampled_images(textures3d_sampled, bind.textures2D.textures3d_sampled_num);
 		}
 
 		if (need_descriptor)
 		{
 			auto* descriptor_set = g_render_ctx->GetDescriptorCache()->GetDescriptor(
-			    stage, storage_buffers, textures2d_sampled, textures2d_sampled_view, textures3d_sampled, textures3d_sampled_view,
-			    textures2d_storage, textures2d_storage_view, samplers, &gds_buffer, vsharp_buffer, bind);
+			    stage, storage_buffers, textures2d_sampled, textures2d_sampled_view, textures2d_array_sampled,
+			    textures2d_array_sampled_view, textures3d_sampled, textures3d_sampled_view, textures2d_storage,
+			    textures2d_storage_view, samplers, &gds_buffer, vsharp_buffer, bind);
 
 			EXIT_IF(descriptor_set == nullptr);
 
@@ -7282,18 +7487,19 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 	uint32_t first_samples = 0;
 	for (uint32_t slot = 0; slot < color.targets_num; ++slot)
 	{
-		if (color.vulkan_buffer[slot] == nullptr)
+		const auto& attachment = color.attachment[slot];
+		if (attachment.vulkan_buffer == nullptr)
 		{
 			continue;
 		}
 		active_slots |= 1u << slot;
 		if (first_addr == 0)
 		{
-			first_addr    = color.base_addr[slot];
-			first_width   = color.vulkan_buffer[slot]->extent.width;
-			first_height  = color.vulkan_buffer[slot]->extent.height;
-			first_format  = static_cast<uint32_t>(color.vulkan_buffer[slot]->format);
-			first_samples = static_cast<uint32_t>(color.vulkan_buffer[slot]->samples);
+			first_addr    = attachment.base_addr;
+			first_width   = attachment.vulkan_buffer->extent.width;
+			first_height  = attachment.vulkan_buffer->extent.height;
+			first_format  = static_cast<uint32_t>(attachment.vulkan_buffer->format);
+			first_samples = static_cast<uint32_t>(attachment.vulkan_buffer->samples);
 		}
 	}
 
@@ -7993,7 +8199,7 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 
 	EXIT_NOT_IMPLEMENTED(depth_info.format != VK_FORMAT_D32_SFLOAT_S8_UINT);
 	EXIT_NOT_IMPLEMENTED(color_info.targets_num != 1);
-	EXIT_NOT_IMPLEMENTED(depth_info.samples != color_info.samples || sample_locations.sample_count != depth_info.samples);
+	EXIT_NOT_IMPLEMENTED(depth_info.samples != color_info.attachment[0].samples || sample_locations.sample_count != depth_info.samples);
 
 	MaterializeRenderDepthInfo(submit_id, buffer, &depth_info,
 	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.width : 0,
@@ -8003,7 +8209,7 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	CommitMaterializedRenderResolutionPlan(resolution, color_info, depth_info);
 
 	auto* source = depth_info.vulkan_buffer;
-	auto* target = color_info.vulkan_buffer[0];
+	auto* target = color_info.attachment[0].vulkan_buffer;
 	EXIT_NOT_IMPLEMENTED(source == nullptr || target == nullptr);
 	EXIT_NOT_IMPLEMENTED(source->format != VK_FORMAT_D32_SFLOAT_S8_UINT);
 	const bool supported_target_format = target->format == VK_FORMAT_R8G8B8A8_UNORM || target->format == VK_FORMAT_B8G8R8A8_UNORM ||
@@ -8011,7 +8217,7 @@ static void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* bu
 	if (!supported_target_format)
 	{
 		std::fprintf(stderr, "KYTY_GRAPHICS: unsupported depth-stencil-copy target format=%d render-format=%u width=%u height=%u\n",
-		             static_cast<int>(target->format), static_cast<unsigned>(color_info.render_texture_format), target->extent.width,
+		             static_cast<int>(target->format), static_cast<unsigned>(color_info.attachment[0].render_texture_format), target->extent.width,
 		             target->extent.height);
 		EXIT_NOT_IMPLEMENTED(!supported_target_format);
 	}
@@ -8639,6 +8845,25 @@ void GraphicsRenderWriteAtEndOfPipeOnlyFlip(uint64_t /*submit_id*/, CommandBuffe
 	    args);
 }
 
+void GraphicsRenderQueueQueuedGraphicsInterrupt(CommandBuffer* buffer)
+{
+	EXIT_IF(g_render_ctx == nullptr);
+	EXIT_IF(buffer == nullptr);
+	EXIT_IF(buffer->IsInvalid());
+
+	Core::LockGuard lock(g_render_ctx->GetMutex());
+
+	RecordTransientLabel32(
+	    buffer, nullptr, 0, 0u, nullptr,
+	    [](SubmissionId /*submission*/, const uint64_t* /*args*/)
+	    {
+		    EXIT_IF(g_render_ctx == nullptr);
+		    g_render_ctx->TriggerQueuedGraphicsInterrupt();
+		    return true;
+	    },
+	    nullptr);
+}
+
 void GraphicsRenderPrepareWriteBack(CommandBuffer* buffer)
 {
 	EXIT_IF(g_render_ctx == nullptr);
@@ -9150,9 +9375,9 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 			// framebuffer identity. Keeping them in the cache key creates a fresh
 			// render pass/pipeline for every animated clear color and stalls loading
 			// on Metal pipeline compilation.
-			const auto clear =
-			    ResolveColorAttachmentLoadOps(color->vulkan_buffer[slot]->layout, color->cmask_fast_clear_enable[slot],
-			                                  color->clear_word0[slot], color->clear_word1[slot], color->vulkan_buffer[slot]->format);
+			const auto& attachment = color->attachment[slot];
+			const auto clear = ResolveColorAttachmentLoadOps(attachment.vulkan_buffer->layout, attachment.cmask_fast_clear_enable,
+			                                                  attachment.clear_word0, attachment.clear_word1, attachment.vulkan_buffer->format);
 			clears[clear_attachment].color = {{clear.clear_r, clear.clear_g, clear.clear_b, clear.clear_a}};
 		} else
 		{
@@ -9166,8 +9391,8 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		clears[framebuffer->depth_attachment_index].depthStencil = {depth->depth_clear_value, depth->stencil_clear_value};
 	}
 
-	auto*      first_color = RenderColorFirstActiveImage(*color);
-	VkExtent2D extent      = (with_color ? first_color->extent : depth->vulkan_buffer->extent);
+	const VkExtent2D extent = framebuffer->extent;
+	EXIT_NOT_IMPLEMENTED(extent.width == 0 || extent.height == 0);
 
 	VkRenderPassBeginInfo render_pass_info {};
 	render_pass_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -9211,21 +9436,22 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 
 	for (uint32_t slot = 0; slot < color_count; slot++)
 	{
-		if (!with_color || color->vulkan_buffer[slot] == nullptr ||
-		    color->vulkan_buffer[slot]->layout == framebuffer->color_initial_layout[slot])
+		if (!with_color || color->attachment[slot].vulkan_buffer == nullptr ||
+		    color->attachment[slot].vulkan_buffer->layout == framebuffer->color_initial_layout[slot])
 		{
 			continue;
 		}
+		auto* image = color->attachment[slot].vulkan_buffer;
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		image_memory_barrier.pNext                           = nullptr;
 		image_memory_barrier.srcAccessMask                   = 0;
 		image_memory_barrier.dstAccessMask                   = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-		image_memory_barrier.oldLayout                       = color->vulkan_buffer[slot]->layout;
+		image_memory_barrier.oldLayout                       = image->layout;
 		image_memory_barrier.newLayout                       = framebuffer->color_initial_layout[slot];
 		image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-		image_memory_barrier.image                           = color->vulkan_buffer[slot]->image;
+		image_memory_barrier.image                           = image->image;
 		image_memory_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
 		image_memory_barrier.subresourceRange.baseMipLevel   = 0;
 		image_memory_barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
@@ -9235,7 +9461,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
 		                     nullptr, 1, &image_memory_barrier);
 
-		color->vulkan_buffer[slot]->layout = image_memory_barrier.newLayout;
+		image->layout = image_memory_barrier.newLayout;
 	}
 
 	const auto depth_stencil_layout = framebuffer->depth_stencil_layout;
@@ -9277,9 +9503,9 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	// attachment-to-shader-read barrier instead of treating the image as new.
 	for (uint32_t slot = 0; slot < color_count; slot++)
 	{
-		if (with_color && color->vulkan_buffer[slot] != nullptr)
+		if (with_color && color->attachment[slot].vulkan_buffer != nullptr)
 		{
-			color->vulkan_buffer[slot]->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+			color->attachment[slot].vulkan_buffer->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		}
 	}
 	if (with_depth)

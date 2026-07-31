@@ -116,6 +116,9 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t submit_id, 
                                                             uint64_t value);
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value);
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value);
+// Records completion of a driver graphics submission. The notification is
+// delivered only after the containing command buffer fence has completed.
+void GraphicsRenderQueueQueuedGraphicsInterrupt(CommandBuffer* buffer);
 // Records a completion-only write-back action in the current command buffer.
 // The caller submits after releasing its CommandProcessor mutex so publication
 // cannot precede GPU -> CPU materialization.

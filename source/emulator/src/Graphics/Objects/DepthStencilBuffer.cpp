@@ -101,6 +101,10 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	view_descriptor.components  = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R};
 	view_descriptor.aspect_mask = VK_IMAGE_ASPECT_DEPTH_BIT;
 	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE]));
+	view_descriptor.view_type   = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+	view_descriptor.layer_count = 1;
+	EXIT_NOT_IMPLEMENTED(
+	    !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY]));
 
 	if (DepthFormatHasStencil(vk_obj->format))
 	{

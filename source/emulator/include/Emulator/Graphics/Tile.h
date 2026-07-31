@@ -64,9 +64,15 @@ uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint
 // Detile kRenderTarget into tightly packed linear rows of width*bytes_per_element.
 void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
                                 uint32_t bytes_per_element);
-// Gen5 kStandard64KB (tile mode 9) 32bpp sample atlases.
-uint64_t TileGetStandard64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems);
-void     TileConvertStandard64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems);
+// Gen5 kStandard64KB (tile mode 9) sample atlas layout. The element size
+// determines the 64 KiB block geometry and the within-block swizzle.
+uint64_t TileGetStandard64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element);
+void     TileConvertStandard64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
+                                         uint32_t bytes_per_element);
+// Gen5 depth tile mode 24 stores 32-bit depth samples in 64 KiB Z-order blocks.
+// This is distinct from render-target tile mode 27 despite identical block size.
+uint64_t TileGetDepth64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems);
+void     TileConvertDepth64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems);
 // Gen5 kStandard4KB (tile mode 5) 32bpp surfaces. The layout is used by
 // integer image load/store resources as well as sampled textures.
 uint64_t TileGetStandard4KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems);

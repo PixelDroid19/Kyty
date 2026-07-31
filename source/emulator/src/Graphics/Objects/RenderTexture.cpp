@@ -16,6 +16,59 @@
 
 namespace Kyty::Libs::Graphics {
 
+RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t channel_type, uint32_t channel_order)
+{
+	if (format == 0x1u && channel_type == 0x0u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R8Unorm, 1};
+	}
+	if (format == 0x2u && channel_type == 0x7u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R16Sfloat, 2};
+	}
+	if (format == 0x4u && channel_type == 0x7u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R32Sfloat, 4};
+	}
+	if (format == 0x6u && channel_type == 0x7u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::B10G11R11Ufloat, 4};
+	}
+	if (format == 0xau && channel_type == 0x0u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R8G8B8A8Unorm, 4};
+	}
+	if (format == 0xau && channel_type == 0x6u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R8G8B8A8Srgb, 4};
+	}
+	if (format == 0xau && channel_type == 0x0u && channel_order == 0x1u)
+	{
+		return {RenderTextureFormat::B8G8R8A8Unorm, 4};
+	}
+	if (format == 0xau && channel_type == 0x6u && channel_order == 0x1u)
+	{
+		return {RenderTextureFormat::B8G8R8A8Srgb, 4};
+	}
+	if (format == 0xcu && channel_order == 0x0u)
+	{
+		switch (channel_type)
+		{
+			case 0x0u: return {RenderTextureFormat::R16G16B16A16Unorm, 8};
+			case 0x1u: return {RenderTextureFormat::R16G16B16A16Snorm, 8};
+			case 0x4u: return {RenderTextureFormat::R16G16B16A16Uint, 8};
+			case 0x5u: return {RenderTextureFormat::R16G16B16A16Sint, 8};
+			case 0x7u: return {RenderTextureFormat::R16G16B16A16Sfloat, 8};
+			default: break;
+		}
+	}
+	if (format == 0xcu && channel_type == 0x7u && channel_order == 0x2u)
+	{
+		return {RenderTextureFormat::R16G16B16A16Sfloat, 8};
+	}
+	return {};
+}
+
 static bool buffer_is_tiled(uint64_t vaddr, uint64_t size)
 {
 	if ((size & 0x7u) == 0)
@@ -188,6 +241,13 @@ static VkFormat resolve_render_texture_format(uint64_t format)
 		case RenderTextureFormat::R8G8B8A8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
 		case RenderTextureFormat::B8G8R8A8Unorm: return VK_FORMAT_B8G8R8A8_UNORM;
 		case RenderTextureFormat::B8G8R8A8Srgb: return VK_FORMAT_B8G8R8A8_SRGB;
+		case RenderTextureFormat::R16Sfloat: return VK_FORMAT_R16_SFLOAT;
+		case RenderTextureFormat::R32Sfloat: return VK_FORMAT_R32_SFLOAT;
+		case RenderTextureFormat::B10G11R11Ufloat: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+		case RenderTextureFormat::R16G16B16A16Unorm: return VK_FORMAT_R16G16B16A16_UNORM;
+		case RenderTextureFormat::R16G16B16A16Snorm: return VK_FORMAT_R16G16B16A16_SNORM;
+		case RenderTextureFormat::R16G16B16A16Uint: return VK_FORMAT_R16G16B16A16_UINT;
+		case RenderTextureFormat::R16G16B16A16Sint: return VK_FORMAT_R16G16B16A16_SINT;
 		case RenderTextureFormat::R16G16B16A16Sfloat: return VK_FORMAT_R16G16B16A16_SFLOAT;
 		case RenderTextureFormat::Unknown: break;
 	}

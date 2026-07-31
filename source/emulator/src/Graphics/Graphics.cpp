@@ -518,7 +518,7 @@ int KYTY_SYSV_ABI GraphicsSubmitCommandBuffers(uint32_t count, void* dcb_gpu_add
 	GraphicsDbgDumpDcb("d", dcb_size, dcb);
 	GraphicsDbgDumpDcb("c", ccb_size, ccb);
 
-	GraphicsRunSubmit(dcb, dcb_size, ccb, ccb_size);
+	GraphicsRunSubmit(dcb, dcb_size, ccb, ccb_size, GraphicsSubmissionCompletion::None);
 
 	return OK;
 }
@@ -2263,7 +2263,7 @@ static const ShaderSemantic* FindInterpolantOutputSemantic(const Shader* gs, uin
 
 static void SetInterpolantRegister(ShaderRegister* regs, uint32_t index, uint32_t value)
 {
-	regs[index].offset = Pm4::SPI_PS_INPUT_CNTL_0 + index;
+	regs[index].offset = Pm4::CX_PS_SHADER_USAGE_BASE + index;
 	regs[index].value  = value;
 }
 
@@ -2289,7 +2289,7 @@ bool GraphicsBuildInterpolantMapping(ShaderRegister* regs, const ShaderSemantic*
 
 	for (uint32_t i = 0; i < 32; i++)
 	{
-		regs[i].offset = Pm4::SPI_PS_INPUT_CNTL_0 + i;
+		regs[i].offset = Pm4::CX_PS_SHADER_USAGE_BASE + i;
 		regs[i].value  = 0;
 	}
 	if (inputs == nullptr && input_count == 0)
@@ -4318,20 +4318,59 @@ int KYTY_SYSV_ABI GraphicsDriverSetHsOffchipParam(uint64_t value0, uint64_t valu
 	return OK;
 }
 
+static int SubmitDcbBuffer(uint32_t* address, uint32_t size_in_dwords)
+{
+	if (size_in_dwords == 0)
+	{
+		return OK;
+	}
+	if (address == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	GraphicsDbgDumpDcb("d", size_in_dwords, address);
+	GraphicsRunSubmit(address, size_in_dwords, nullptr, 0, GraphicsSubmissionCompletion::QueuedGraphicsInterrupt);
+	return OK;
+}
+
 int KYTY_SYSV_ABI GraphicsDriverSubmitDcb(const Packet* packet)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(packet == nullptr);
-	EXIT_NOT_IMPLEMENTED(packet->pad[0] != 0);
+	if (packet == nullptr || packet->pad[0] != 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
 
 	printf("\t addr   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet->addr));
 	printf("\t dw_num = 0x%08" PRIx32 "\n", packet->dw_num);
 
-	GraphicsDbgDumpDcb("d", packet->dw_num, packet->addr);
+	return SubmitDcbBuffer(packet->addr, packet->dw_num);
+}
 
-	GraphicsRunSubmit(packet->addr, packet->dw_num, nullptr, 0);
+int KYTY_SYSV_ABI GraphicsDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs, const uint32_t* dcb_sizes_in_dwords,
+                                                uint32_t count)
+{
+	PRINT_NAME();
 
+	if (count == 0)
+	{
+		return OK;
+	}
+	if (dcb_gpu_addrs == nullptr || dcb_sizes_in_dwords == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const int result = SubmitDcbBuffer(dcb_gpu_addrs[i], dcb_sizes_in_dwords[i]);
+		if (result != OK)
+		{
+			return result;
+		}
+	}
 	return OK;
 }
 
@@ -4356,7 +4395,7 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
 	if (packet->addr != nullptr && packet->dw_num != 0)
 	{
 		GraphicsDbgDumpDcb("a", packet->dw_num, packet->addr);
-		GraphicsRunSubmit(packet->addr, packet->dw_num, nullptr, 0);
+		GraphicsRunSubmit(packet->addr, packet->dw_num, nullptr, 0, GraphicsSubmissionCompletion::None);
 	}
 	return OK;
 }

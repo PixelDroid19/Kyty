@@ -4,6 +4,7 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -31,44 +32,6 @@ struct DepthStencilVulkanImage;
 struct VulkanSwapchain;
 
 VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
-
-// Gen5 sampled ufmt → Vulkan format family for RT-alias selection.
-// ufmt 56 (RGBA8) must not bind a float lighting RT of the same size; that
-// residual false-color path left cyan/hot props while exact guest HUD textures
-// still looked correct.
-[[nodiscard]] inline bool Gen5SampleFormatMatchesVulkan(uint32_t gen5_ufmt, VkFormat vk)
-{
-	if (gen5_ufmt == 56u)
-	{
-		return vk == VK_FORMAT_R8G8B8A8_UNORM || vk == VK_FORMAT_R8G8B8A8_SRGB || vk == VK_FORMAT_B8G8R8A8_UNORM ||
-		       vk == VK_FORMAT_B8G8R8A8_SRGB;
-	}
-	if (gen5_ufmt == 71u)
-	{
-		return vk == VK_FORMAT_R16G16B16A16_SFLOAT;
-	}
-	if (gen5_ufmt == 20u)
-	{
-		return vk == VK_FORMAT_R32_UINT;
-	}
-	if (gen5_ufmt == 1u || gen5_ufmt == 5u)
-	{
-		return vk == VK_FORMAT_R8_UNORM;
-	}
-	if (gen5_ufmt == 75u)
-	{
-		return vk == VK_FORMAT_R32G32B32A32_UINT;
-	}
-	if (gen5_ufmt == 62u)
-	{
-		return vk == VK_FORMAT_R32G32_UINT;
-	}
-	if (gen5_ufmt == 173u)
-	{
-		return vk == VK_FORMAT_BC3_UNORM_BLOCK;
-	}
-	return true;
-}
 
 // A BC3 sample can be produced through a writable R32G32B32A32_UINT image:
 // one 128-bit storage texel is exactly one 4x4 BC3 block. Vulkan image copies
@@ -121,7 +84,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	const size_t n            = candidate_count < 16 ? candidate_count : 16;
 	for (size_t i = 0; i < n; i++)
 	{
-		if (!Gen5SampleFormatMatchesVulkan(sample_ufmt, formats[i]))
+		if (!VulkanGen5SampleFormatMatches(static_cast<uint16_t>(sample_ufmt), formats[i]))
 		{
 			continue;
 		}
@@ -207,7 +170,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 // reinterprets float bits as 8-bit channels → residual cyan/hot prop boxes.
 [[nodiscard]] inline bool Gen5SampleMayCopyFromSurfaceParent(uint32_t sample_ufmt, VkFormat surface_vk)
 {
-	return Gen5SampleFormatMatchesVulkan(sample_ufmt, surface_vk);
+	return VulkanGen5SampleFormatMatches(static_cast<uint16_t>(sample_ufmt), surface_vk);
 }
 
 // A blit source cannot be read before its first-use contents are established.

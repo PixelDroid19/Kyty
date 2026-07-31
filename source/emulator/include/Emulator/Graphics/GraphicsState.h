@@ -23,6 +23,16 @@ struct DepthStencilUsage
 	bool depth_write_enable = false;
 };
 
+// DB_DEPTH_SIZE_XY encodes inclusive maxima, so zero represents a 1x1
+// attachment after the register has been written. Preserve register presence
+// separately from its encoded value.
+struct DepthTargetExtent
+{
+	uint32_t width  = 0;
+	uint32_t height = 0;
+	bool     valid  = false;
+};
+
 struct DepthBias
 {
 	bool  enabled         = false;
@@ -114,11 +124,16 @@ void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
 
 // Guest top-left coordinates are inclusive, bottom-right coordinates are exclusive, and enabled rectangles intersect.
 [[nodiscard]] ScissorRect       ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanModeControl& mode, uint32_t viewport_id);
+// Vulkan framebuffer bounds are authoritative after all color and depth
+// attachments have been combined. Clamp the resolved guest rectangle before
+// issuing dynamic scissor state so it cannot address pixels outside them.
+[[nodiscard]] ScissorRect       ClampScissorToExtent(ScissorRect scissor, uint32_t width, uint32_t height);
 [[nodiscard]] DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, const HW::RenderControl& render_control,
                                                          const HW::DepthControl& depth_control);
 [[nodiscard]] StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target, const HW::RenderControl& render_control,
                                                           const HW::DepthControl& depth_control);
 [[nodiscard]] HW::DepthRenderTarget  ResolveDepthStencilBasePairs(const HW::DepthRenderTarget& target);
+[[nodiscard]] DepthTargetExtent       ResolveDepthTargetExtent(const HW::DepthRenderTarget& target, bool next_gen);
 
 // AMD VTE window Z: OpenGL clip ([-W,+W]) uses zoffset±zscale; DX clip ([0,+W]) uses [zoffset, zoffset+zscale].
 // Without VK_EXT_depth_range_unrestricted, clamp to [0,1] and pair with negativeOneToOne for OpenGL clip.

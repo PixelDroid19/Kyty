@@ -73,10 +73,19 @@ constexpr bool GraphicsNormalizeIndirectRegisterPair(uint32_t register_limit, ui
 	return false;
 }
 
-// GraphicsCreate*IndirectBuffers fills unused descriptor-table entries with
-// (0x10000000 + register, register). They are sent alongside real pairs but do
-// not represent register writes. In particular, treating them as reversed
-// pairs corrupts low context registers such as the screen scissor.
+constexpr uint32_t GraphicsDecodeIndirectCxRegisterOffset(uint32_t raw_offset)
+{
+	constexpr uint32_t selector_mask = 0x70000000u;
+	const uint32_t     selector      = raw_offset & selector_mask;
+	const uint32_t     offset        = raw_offset & ~selector_mask;
+
+	if (selector == Pm4::CX_PS_SHADER_USAGE_BASE && offset < 32u)
+	{
+		return Pm4::SPI_PS_INPUT_CNTL_0 + offset;
+	}
+	return offset;
+}
+
 constexpr bool GraphicsIsDefaultIndirectRegisterPair(uint32_t offset, uint32_t value)
 {
 	return offset == 0x10000000u + value;
@@ -100,10 +109,17 @@ struct GraphicsAgcReleaseMemControl
 	uint8_t  interrupt = 0;
 };
 
+enum class GraphicsSubmissionCompletion
+{
+	None,
+	QueuedGraphicsInterrupt,
+};
+
 GraphicsAgcReleaseMemControl GraphicsDecodeAgcReleaseMemControl(uint32_t control_dw);
 uint32_t GraphicsAgcReleaseMemCacheAction(uint16_t gcr_cntl);
 
-void     GraphicsRunSubmit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw);
+void     GraphicsRunSubmit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
+                           GraphicsSubmissionCompletion completion);
 void     GraphicsRunSubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
                                   int handle, int index, int flip_mode, int64_t flip_arg);
 uint32_t GraphicsRunMapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint32_t* ring_addr, uint32_t ring_size_dw,

@@ -210,29 +210,30 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanIm
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
-	EXIT_NOT_IMPLEMENTED(regions.Size() >= 16);
+	EXIT_IF(regions.Size() == 0u);
 
-	VkBufferImageCopy region[16];
+	std::vector<VkBufferImageCopy> copies(regions.Size());
 
 	uint32_t index = 0;
 	for (const auto& r: regions)
 	{
-		region[index].bufferOffset                    = r.offset;
-		region[index].bufferRowLength                 = (r.width != r.pitch ? r.pitch : 0);
-		region[index].bufferImageHeight               = (r.depth != 1u ? r.height : 0);
-		region[index].imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-		region[index].imageSubresource.mipLevel       = r.dst_level;
-		region[index].imageSubresource.baseArrayLayer = r.dst_array_layer;
-		region[index].imageSubresource.layerCount     = 1;
-		region[index].imageOffset                     = {r.dst_x, r.dst_y, r.dst_z};
-		region[index].imageExtent                     = {r.width, r.height, r.depth};
+		auto& copy = copies[index];
+		copy.bufferOffset                    = r.offset;
+		copy.bufferRowLength                 = (r.width != r.pitch ? r.pitch : 0);
+		copy.bufferImageHeight               = (r.depth != 1u ? r.height : 0);
+		copy.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+		copy.imageSubresource.mipLevel       = r.dst_level;
+		copy.imageSubresource.baseArrayLayer = r.dst_array_layer;
+		copy.imageSubresource.layerCount     = 1;
+		copy.imageOffset                     = {r.dst_x, r.dst_y, r.dst_z};
+		copy.imageExtent                     = {r.width, r.height, r.depth};
 		index++;
 	}
 
 	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-	vkCmdCopyBufferToImage(vk_buffer, src_buffer->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, index, region);
+	vkCmdCopyBufferToImage(vk_buffer, src_buffer->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, index, copies.data());
 
 	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 	                 static_cast<VkImageLayout>(dst_layout));

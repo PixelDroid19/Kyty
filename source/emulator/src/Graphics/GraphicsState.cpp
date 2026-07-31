@@ -83,6 +83,17 @@ ScissorRect ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanMod
 	return resolved;
 }
 
+ScissorRect ClampScissorToExtent(ScissorRect scissor, uint32_t width, uint32_t height)
+{
+	const int maximum_x = static_cast<int>(width);
+	const int maximum_y = static_cast<int>(height);
+	scissor.left        = std::clamp(scissor.left, 0, maximum_x);
+	scissor.top         = std::clamp(scissor.top, 0, maximum_y);
+	scissor.right       = std::clamp(scissor.right, scissor.left, maximum_x);
+	scissor.bottom      = std::clamp(scissor.bottom, scissor.top, maximum_y);
+	return scissor;
+}
+
 void SetWindowOffset(HW::Context& context, uint32_t value)
 {
 	const int offset_x = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(value, PA_SC_WINDOW_OFFSET, WINDOW_X)));
@@ -162,6 +173,26 @@ HW::DepthRenderTarget ResolveDepthStencilBasePairs(const HW::DepthRenderTarget& 
 	recover_lone_zero(&resolved.z_read_base_addr, &resolved.z_write_base_addr);
 	recover_lone_zero(&resolved.stencil_read_base_addr, &resolved.stencil_write_base_addr);
 	return resolved;
+}
+
+DepthTargetExtent ResolveDepthTargetExtent(const HW::DepthRenderTarget& target, bool next_gen)
+{
+	if (next_gen)
+	{
+		if (!target.size.valid)
+		{
+			return {};
+		}
+
+		return {static_cast<uint32_t>(target.size.x_max) + 1, static_cast<uint32_t>(target.size.y_max) + 1, true};
+	}
+
+	if (target.width == 0 || target.height == 0)
+	{
+		return {};
+	}
+
+	return {target.width, target.height, true};
 }
 
 ViewportXy ResolveViewportXy(float xscale, float xoffset, float yscale, float yoffset)

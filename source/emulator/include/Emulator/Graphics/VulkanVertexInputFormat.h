@@ -13,13 +13,15 @@ namespace Kyty::Libs::Graphics {
 
 struct VulkanVertexInputFormat
 {
+	uint8_t  unified_format  = 0;
 	VkFormat format          = VK_FORMAT_UNDEFINED;
 	uint32_t component_count = 0;
 };
 
-// Resolve the complete renderer contract in one table. Unknown guest formats
-// stay undefined and must be rejected by the pipeline caller.
+// Resolve Gen5 descriptors and attribute encodings through one renderer-owned
+// format table. Unknown values stay undefined and must be rejected by callers.
 [[nodiscard]] VulkanVertexInputFormat VulkanResolveGen5VertexInputFormat(uint8_t format);
+[[nodiscard]] VulkanVertexInputFormat VulkanResolveGen5VertexAttribInputFormat(uint16_t format);
 [[nodiscard]] VulkanVertexInputFormat VulkanResolveLegacyVertexInputFormat(uint8_t dfmt, uint8_t nfmt);
 
 } // namespace Kyty::Libs::Graphics

@@ -10,18 +10,21 @@ namespace {
 
 struct Gen5VertexInputFormatEntry
 {
+	uint16_t attribute_format;
 	uint8_t  guest_format;
 	VkFormat vulkan_format;
 	uint32_t component_count;
 };
 
-constexpr std::array<Gen5VertexInputFormatEntry, 6> k_gen5_formats {{
-    {20, VK_FORMAT_R32_UINT, 1},
-    {22, VK_FORMAT_R32_SFLOAT, 1},
-    {56, VK_FORMAT_R8G8B8A8_UNORM, 4},
-    {64, VK_FORMAT_R32G32_SFLOAT, 2},
-    {74, VK_FORMAT_R32G32B32_SFLOAT, 3},
-    {77, VK_FORMAT_R32G32B32A32_SFLOAT, 4},
+constexpr std::array<Gen5VertexInputFormatEntry, 8> k_gen5_formats {{
+    {0, 20, VK_FORMAT_R32_UINT, 1},
+    {0, 22, VK_FORMAT_R32_SFLOAT, 1},
+    {0x05d, 23, VK_FORMAT_R16G16_UNORM, 2},
+    {0x0e3, 56, VK_FORMAT_R8G8B8A8_UNORM, 4},
+    {0x101, 64, VK_FORMAT_R32G32_SFLOAT, 2},
+    {0x11f, 71, VK_FORMAT_R16G16B16A16_SFLOAT, 4},
+    {0x12a, 74, VK_FORMAT_R32G32B32_SFLOAT, 3},
+    {0x137, 77, VK_FORMAT_R32G32B32A32_SFLOAT, 4},
 }};
 
 struct LegacyVertexInputFormatEntry
@@ -47,7 +50,19 @@ VulkanVertexInputFormat VulkanResolveGen5VertexInputFormat(uint8_t format)
 	{
 		if (entry.guest_format == format)
 		{
-			return {entry.vulkan_format, entry.component_count};
+			return {entry.guest_format, entry.vulkan_format, entry.component_count};
+		}
+	}
+	return {};
+}
+
+VulkanVertexInputFormat VulkanResolveGen5VertexAttribInputFormat(uint16_t format)
+{
+	for (const auto& entry: k_gen5_formats)
+	{
+		if (entry.attribute_format == format && entry.attribute_format != 0)
+		{
+			return {entry.guest_format, entry.vulkan_format, entry.component_count};
 		}
 	}
 	return {};
@@ -59,7 +74,7 @@ VulkanVertexInputFormat VulkanResolveLegacyVertexInputFormat(uint8_t dfmt, uint8
 	{
 		if (entry.dfmt == dfmt && entry.nfmt == nfmt)
 		{
-			return {entry.vulkan_format, entry.component_count};
+			return {0, entry.vulkan_format, entry.component_count};
 		}
 	}
 	return {};

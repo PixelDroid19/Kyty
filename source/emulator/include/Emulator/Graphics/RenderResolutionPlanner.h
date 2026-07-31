@@ -36,6 +36,7 @@ enum class RenderResolutionPlanReason : uint8_t
 	ShaderCoordinateAccess,
 	ColorCapabilityUnsupported,
 	DepthCapabilityUnsupported,
+	HostExtentCommitted,
 };
 
 [[nodiscard]] const char* RenderResolutionPlanReasonName(RenderResolutionPlanReason reason);
@@ -69,6 +70,11 @@ struct RenderResolutionPlan
                                                                                  ResolutionExtent registered_host_extent);
 [[nodiscard]] RenderResolutionPlan EvaluateDepthOnlyRenderExtentCompatibility(
     ResolutionExtent guest_extent, ResolutionExtent registered_host_extent, const RenderResolutionPlan& scalable_candidate);
+// A materialized display image cannot change Vulkan extent in place. A prior
+// native materialization therefore requires the whole attachment cohort to
+// remain native; any unrelated committed extent is an explicit error.
+[[nodiscard]] RenderResolutionPlan ReconcileCommittedRenderExtent(const RenderResolutionPlan& candidate,
+                                                                   ResolutionExtent committed_extent);
 // Only instruction-derived hazards are reported here. Fragment-coordinate use
 // comes from normalized pixel input state, and its support is set only after a
 // valid host-to-guest scale has been built.

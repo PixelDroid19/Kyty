@@ -64,6 +64,7 @@ target_sources(emulator PRIVATE
 	src/Graphics/VulkanVertexInputLayout.cpp
 	src/Graphics/DepthStencilCopy.cpp
 	src/Graphics/GuestTextureLayout.cpp
+	src/Graphics/Gen5TextureArrayLayout.cpp
 	src/Graphics/NativeCapture.cpp
 	include/Emulator/Graphics/PipelineCacheStore.h
 	include/Emulator/Graphics/GpuDirtyPageTracker.h
@@ -96,6 +97,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Graphics/VulkanVertexInputLayout.h
 	include/Emulator/Graphics/DepthStencilCopy.h
 	include/Emulator/Graphics/GuestTextureLayout.h
+	include/Emulator/Graphics/Gen5TextureArrayLayout.h
 	include/Emulator/Graphics/NativeCapture.h
 	include/Emulator/Libs/ProcessEnvironment.h
 	src/Validation/DomainValidators.cpp
