@@ -1389,8 +1389,8 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_TRUE(VulkanSupportsGen5ImageFormat(GuestImageUsage::Sampled, 1));
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 1), VK_FORMAT_R8_UNORM);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(1), 1u);
-	EXPECT_TRUE(Kyty::Libs::Graphics::Gen5SampleFormatMatchesVulkan(1, VK_FORMAT_R8_UNORM));
-	EXPECT_FALSE(Kyty::Libs::Graphics::Gen5SampleFormatMatchesVulkan(1, VK_FORMAT_R8_UINT));
+	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(1, VK_FORMAT_R8_UNORM));
+	EXPECT_FALSE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(1, VK_FORMAT_R8_UINT));
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 5), VK_FORMAT_R8_UNORM);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 5), VK_FORMAT_R8_UNORM);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 14), VK_FORMAT_R8G8_UNORM);
@@ -1410,8 +1410,8 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 56), VK_FORMAT_UNDEFINED);
 	EXPECT_FALSE(VulkanSupportsGen5ImageFormat(GuestImageUsage::Storage, 56));
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(173), 16u);
-	EXPECT_TRUE(Kyty::Libs::Graphics::Gen5SampleFormatMatchesVulkan(173, VK_FORMAT_BC3_UNORM_BLOCK));
-	EXPECT_FALSE(Kyty::Libs::Graphics::Gen5SampleFormatMatchesVulkan(173, VK_FORMAT_R32G32B32A32_UINT));
+	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(173, VK_FORMAT_BC3_UNORM_BLOCK));
+	EXPECT_FALSE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(173, VK_FORMAT_R32G32B32A32_UINT));
 	uint32_t copy_width  = 0;
 	uint32_t copy_height = 0;
 	EXPECT_TRUE(Kyty::Libs::Graphics::Gen5BlockCompressedStorageCopyExtent(173, 116, 120, VK_FORMAT_R32G32B32A32_UINT, 29, 30, &copy_width,
@@ -2430,20 +2430,19 @@ TEST(EmulatorGraphicsState, PreferGpuMemoryAliasPicksTightestCover)
 // Residual world false-color: ufmt-56 samples must not alias float lighting RTs.
 // GraphicsRender rejects the RT alias entirely when every overlap is the wrong
 // family for known ufmts 56/71 (falls through to guest/storage upload).
-TEST(EmulatorGraphicsState, Gen5SampleFormatMatchesVulkanRejectsFloatForRgba8)
+TEST(EmulatorGraphicsState, VulkanGen5SampleFormatMatchesRejectsIncompatibleAliases)
 {
 	using namespace Kyty::Libs::Graphics;
-	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_R8G8B8A8_UNORM));
-	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_R8G8B8A8_SRGB));
-	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_B8G8R8A8_UNORM));
-	EXPECT_FALSE(Gen5SampleFormatMatchesVulkan(56u, VK_FORMAT_R16G16B16A16_SFLOAT));
-	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(71u, VK_FORMAT_R16G16B16A16_SFLOAT));
-	EXPECT_FALSE(Gen5SampleFormatMatchesVulkan(71u, VK_FORMAT_R8G8B8A8_UNORM));
-	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(5u, VK_FORMAT_R8_UNORM));
-	EXPECT_FALSE(Gen5SampleFormatMatchesVulkan(5u, VK_FORMAT_R8_UINT));
-	// Unknown ufmt: do not invent a filter that drops every match.
-	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(14u, VK_FORMAT_R8G8_UNORM));
-	EXPECT_TRUE(Gen5SampleFormatMatchesVulkan(14u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_TRUE(VulkanGen5SampleFormatMatches(56u, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_TRUE(VulkanGen5SampleFormatMatches(56u, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_TRUE(VulkanGen5SampleFormatMatches(56u, VK_FORMAT_B8G8R8A8_UNORM));
+	EXPECT_FALSE(VulkanGen5SampleFormatMatches(56u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_TRUE(VulkanGen5SampleFormatMatches(71u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_FALSE(VulkanGen5SampleFormatMatches(71u, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_TRUE(VulkanGen5SampleFormatMatches(5u, VK_FORMAT_R8_UNORM));
+	EXPECT_FALSE(VulkanGen5SampleFormatMatches(5u, VK_FORMAT_R8_UINT));
+	EXPECT_TRUE(VulkanGen5SampleFormatMatches(14u, VK_FORMAT_R8G8_UNORM));
+	EXPECT_FALSE(VulkanGen5SampleFormatMatches(14u, VK_FORMAT_R16G16B16A16_SFLOAT));
 
 	// Simulated multi-match policy used by PrepareTextures: when every RT is
 	// float and the sample is ufmt 56, zero compatible aliases → reject path.
@@ -2451,7 +2450,7 @@ TEST(EmulatorGraphicsState, Gen5SampleFormatMatchesVulkanRejectsFloatForRgba8)
 	size_t         compatible   = 0;
 	for (VkFormat f: only_float)
 	{
-		if (Gen5SampleFormatMatchesVulkan(56u, f))
+		if (VulkanGen5SampleFormatMatches(56u, f))
 		{
 			compatible++;
 		}
@@ -2461,7 +2460,7 @@ TEST(EmulatorGraphicsState, Gen5SampleFormatMatchesVulkanRejectsFloatForRgba8)
 	compatible             = 0;
 	for (VkFormat f: mixed)
 	{
-		if (Gen5SampleFormatMatchesVulkan(56u, f))
+		if (VulkanGen5SampleFormatMatches(56u, f))
 		{
 			compatible++;
 		}

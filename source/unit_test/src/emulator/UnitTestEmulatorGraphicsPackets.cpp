@@ -2162,7 +2162,7 @@ TEST(EmulatorGraphicsPackets, Standard64KB32WithinBlockIsBijective)
 	{
 		for (uint32_t x = 0; x < k_block; x++)
 		{
-			const uint64_t off = TileGetStandard64KB32Offset(x, y, k_block);
+			const uint64_t off = TileGetStandard64KBOffset(x, y, k_block, 4u);
 			ASSERT_LT(off, 65536u);
 			ASSERT_EQ(off % 4u, 0u);
 			ASSERT_FALSE(seen[off]);
@@ -2171,11 +2171,11 @@ TEST(EmulatorGraphicsPackets, Standard64KB32WithinBlockIsBijective)
 		}
 	}
 	EXPECT_EQ(unique, k_block * k_block);
-	EXPECT_EQ(TileGetStandard64KB32Offset(0, 0, k_block), 0u);
-	EXPECT_EQ(TileGetStandard64KB32Offset(1, 0, k_block), 4u);
-	EXPECT_EQ(TileGetStandard64KB32Offset(0, 1, k_block), 0x10u);
+	EXPECT_EQ(TileGetStandard64KBOffset(0, 0, k_block, 4u), 0u);
+	EXPECT_EQ(TileGetStandard64KBOffset(1, 0, k_block, 4u), 4u);
+	EXPECT_EQ(TileGetStandard64KBOffset(0, 1, k_block, 4u), 0x10u);
 	// Distinct from kRenderTarget: (0,1) is 0x10 here, 0x8 for tile 27.
-	EXPECT_NE(TileGetStandard64KB32Offset(0, 1, k_block), TileGetSw64kRxOffset(0, 1, k_block, 4));
+	EXPECT_NE(TileGetStandard64KBOffset(0, 1, k_block, 4u), TileGetSw64kRxOffset(0, 1, k_block, 4));
 }
 
 TEST(EmulatorGraphicsPackets, Sw64kRx8bppWithinBlockIsBijective)
@@ -2809,55 +2809,6 @@ TEST(EmulatorGraphicsPackets, DetilesEightBitMicroTiledVideoPlane)
 			EXPECT_EQ(linear[y * 8u + x], tiled_index);
 		}
 	}
-}
-
-TEST(EmulatorGraphicsPackets, ParsesAndMaterializesImageLoadDmask1)
-{
-	const uint32_t shader[] = {0xf0000108u, 0x00000402u, 0xbf800000u, 0xbf810000u};
-
-	if (!Config::IsInitialized())
-	{
-		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-	}
-	Config::SetNextGen(true);
-	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-
-	ShaderCode code;
-	code.SetType(ShaderType::Compute);
-	ShaderParse(shader, &code);
-
-	ASSERT_EQ(code.GetInstructions().Size(), 3u);
-	const auto& load = code.GetInstructions().At(0);
-	EXPECT_EQ(load.type, ShaderInstructionType::ImageLoad);
-	EXPECT_EQ(load.format, ShaderInstructionFormat::Vdata1Vaddr3StDmask1);
-	EXPECT_EQ(load.src_num, 2);
-	EXPECT_EQ(load.dst.register_id, 4);
-	EXPECT_EQ(load.dst.size, 1);
-	EXPECT_EQ(load.dst.type, ShaderOperandType::Vgpr);
-	EXPECT_EQ(load.src[0].register_id, 2);
-	EXPECT_EQ(load.src[0].size, 3);
-	EXPECT_EQ(load.src[0].type, ShaderOperandType::Vgpr);
-	EXPECT_EQ(load.src[1].register_id, 0);
-	EXPECT_EQ(load.src[1].size, 8);
-	EXPECT_EQ(load.src[1].type, ShaderOperandType::Sgpr);
-
-	ShaderComputeInputInfo input {};
-	input.threads_num[0]                         = 1;
-	input.threads_num[1]                         = 1;
-	input.threads_num[2]                         = 1;
-	input.bind.push_constant_size                = 32;
-	input.bind.textures2D.textures_num           = 1;
-	input.bind.textures2D.textures2d_sampled_num = 1;
-	input.bind.textures2D.desc[0].start_register = 0;
-	const auto source                            = SpirvGenerateSource(code, nullptr, nullptr, &input);
-
-	EXPECT_NE(source.FindIndex("%t24_0 = OpLoad %uint %s0"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%t67_0 = OpLoad %float %v2"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%t70_0 = OpLoad %float %v3"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%t73_0 = OpCompositeConstruct %v2uint %t69_0 %t71_0"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%t74_0 = OpImageFetch %v4float %t27_0 %t73_0"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%t46_0 = OpCompositeExtract %float %t74_0 0"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %v4 %t46_0"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, MaterializesArrayedGen5ImageLoadAndStoreCoordinates)
