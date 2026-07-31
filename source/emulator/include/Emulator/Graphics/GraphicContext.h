@@ -46,7 +46,7 @@ struct VulkanSwapchain
 	VkImage*       swapchain_images           = nullptr;
 	VkImageView*   swapchain_image_views      = nullptr;
 	uint32_t       swapchain_images_count     = 0;
-	VkSemaphore    present_complete_semaphore = nullptr;
+	VkSemaphore*   render_finished_semaphores = nullptr;
 	VkFence        present_complete_fence     = nullptr;
 	uint32_t       current_index              = 0;
 };

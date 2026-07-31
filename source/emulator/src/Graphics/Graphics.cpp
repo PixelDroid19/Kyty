@@ -2013,6 +2013,13 @@ int KYTY_SYSV_ABI GraphicsUnknownFuseShaderHalves(Shader* fused_result, const Sh
 		patch_shader_register_address(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_LO_LS, reinterpret_cast<uint64_t>(front->code));
 	}
 
+	// Front half ends with s_setpc into the separately allocated back half.
+	// Record that relationship so ES-as-VS recompilation can linearize both.
+	if (front->code != nullptr && back->code != nullptr)
+	{
+		ShaderRegisterContinuation(reinterpret_cast<uint64_t>(front->code), reinterpret_cast<uint64_t>(back->code));
+	}
+
 	fused_result->user_data = nullptr;
 	return OK;
 }

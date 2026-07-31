@@ -7,6 +7,8 @@
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 #include "Emulator/Kernel/EventQueue.h"
 
+#include <vulkan/vulkan_core.h>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -50,7 +52,7 @@ public:
 	void Begin() const;
 	void End() const;
 	void Execute();
-	void ExecuteWithSemaphore();
+	void ExecuteWithSemaphore(VkSemaphore signal_semaphore);
 	void BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
 	                     const VulkanSampleLocationState* sample_locations = nullptr) const;
 	void EndRenderPass() const;

@@ -49,7 +49,10 @@ static void set_image_layout(VkCommandBuffer buffer, VulkanImage* dst_image, uin
 	image_memory_barrier.subresourceRange.baseMipLevel   = base_level;
 	image_memory_barrier.subresourceRange.levelCount     = levels;
 	image_memory_barrier.subresourceRange.baseArrayLayer = 0;
-	image_memory_barrier.subresourceRange.layerCount     = 1;
+	// VulkanImage tracks one layout for the complete allocation. Transition all
+	// array layers with that tracker; changing layer 0 only leaves 2D-array views
+	// exposing UNDEFINED layers while descriptors advertise the tracked layout.
+	image_memory_barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 
 	VkPipelineStageFlags src_stages  = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 	VkPipelineStageFlags dest_stages = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;

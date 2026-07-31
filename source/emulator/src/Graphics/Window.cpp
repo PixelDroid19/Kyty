@@ -2164,6 +2164,17 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 			printf("fragmentStoresAndAtomics is not supported\n");
 			skip_device = true;
 		}
+		if (device_features2.features.vertexPipelineStoresAndAtomics != VK_TRUE)
+		{
+			printf("vertexPipelineStoresAndAtomics is not supported\n");
+			skip_device = true;
+		}
+
+		if (device_features2.features.robustBufferAccess != VK_TRUE)
+		{
+			printf("robustBufferAccess is not supported\n");
+			skip_device = true;
+		}
 
 		if (device_features2.features.samplerAnisotropy != VK_TRUE)
 		{
@@ -2394,6 +2405,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	}
 
 	VkPhysicalDeviceFeatures device_features {};
+	device_features.robustBufferAccess       = VK_TRUE;
+	device_features.vertexPipelineStoresAndAtomics = VK_TRUE;
 	device_features.fragmentStoresAndAtomics = VK_TRUE;
 	device_features.samplerAnisotropy        = VK_TRUE;
 	device_features.shaderStorageImageReadWithoutFormat  = VK_TRUE;
@@ -2470,7 +2483,9 @@ static void VulkanGetExtensions(SDL_Window* window, VulkanExtensions* r)
 
 	EXIT_NOT_IMPLEMENTED(available_extensions_count != r->available_extensions.Size());
 
-#if defined(KYTY_ENABLE_VULKAN_VALIDATION)
+// Allow config-driven validation without a separate compile define so
+// diagnostic runs (KYTY_VULKAN_VALIDATION=1) can surface VUID failures.
+#if defined(KYTY_ENABLE_VULKAN_VALIDATION) || 1
 	r->enable_validation_layers = Config::VulkanValidationEnabled();
 #else
 	r->enable_validation_layers = false;
@@ -2536,12 +2551,11 @@ static void VulkanGetExtensions(SDL_Window* window, VulkanExtensions* r)
 			printf("VK_LAYER_KHRONOS_validation available extension: %s, version = %u\n", ext.extensionName, ext.specVersion);
 		}
 
+		// Optional: keep validation layers even when VK_EXT_validation_features is
+		// unavailable (common on some loaders). Prefer features when present.
 		if (available_extensions.Contains("VK_EXT_validation_features", [](auto s, auto l) { return strcmp(s.extensionName, l) == 0; }))
 		{
 			r->required_extensions.Add("VK_EXT_validation_features");
-		} else
-		{
-			r->enable_validation_layers = false;
 		}
 	}
 }
@@ -2834,27 +2848,31 @@ static VulkanSwapchain* VulkanCreateSwapchain(GraphicContext* ctx, uint32_t imag
 
 	s->current_index = static_cast<uint32_t>(-1);
 
-	VkSemaphoreCreateInfo present_complete_info {};
-	present_complete_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-	present_complete_info.pNext = nullptr;
-	present_complete_info.flags = 0;
+	VkSemaphoreCreateInfo render_finished_info {};
+	render_finished_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+	render_finished_info.pNext = nullptr;
+	render_finished_info.flags = 0;
 
-	auto result = vkCreateSemaphore(ctx->device, &present_complete_info, nullptr, &s->present_complete_semaphore);
-	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+	s->render_finished_semaphores = new VkSemaphore[s->swapchain_images_count] {};
+	for (uint32_t i = 0; i < s->swapchain_images_count; i++)
+	{
+		auto result = vkCreateSemaphore(ctx->device, &render_finished_info, nullptr, &s->render_finished_semaphores[i]);
+		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+	}
 
 	VkFenceCreateInfo fence_info;
 	fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 	fence_info.pNext = nullptr;
 	fence_info.flags = 0;
 
-	result = vkCreateFence(ctx->device, &fence_info, nullptr, &s->present_complete_fence);
+	auto result = vkCreateFence(ctx->device, &fence_info, nullptr, &s->present_complete_fence);
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 
 	return s;
 }
 
 // Rebuild swapchain after surface state changes (e.g. first SDL_ShowWindow on
-// X11/Mesa). Keeps present fence/semaphore; replaces images/views only.
+// X11/Mesa). Presentation semaphores follow swapchain-image ownership.
 static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uint32_t image_count)
 {
 	EXIT_IF(g_window_ctx == nullptr);
@@ -2865,6 +2883,16 @@ static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uin
 	Core::LockGuard lock(g_window_ctx->mutex);
 
 	vkDeviceWaitIdle(ctx->device);
+
+	if (s->render_finished_semaphores != nullptr)
+	{
+		for (uint32_t i = 0; i < s->swapchain_images_count; i++)
+		{
+			vkDestroySemaphore(ctx->device, s->render_finished_semaphores[i], nullptr);
+		}
+		delete[] s->render_finished_semaphores;
+		s->render_finished_semaphores = nullptr;
+	}
 
 	if (s->swapchain_image_views != nullptr)
 	{
@@ -2890,6 +2918,18 @@ static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uin
 	if (s->swapchain == nullptr)
 	{
 		EXIT("Could not recreate swapchain");
+	}
+
+	VkSemaphoreCreateInfo render_finished_info {};
+	render_finished_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+	render_finished_info.pNext = nullptr;
+	render_finished_info.flags = 0;
+
+	s->render_finished_semaphores = new VkSemaphore[s->swapchain_images_count] {};
+	for (uint32_t i = 0; i < s->swapchain_images_count; i++)
+	{
+		auto result = vkCreateSemaphore(ctx->device, &render_finished_info, nullptr, &s->render_finished_semaphores[i]);
+		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 	}
 
 	if (old != nullptr)
@@ -3301,10 +3341,10 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	const auto acquire_start = std::chrono::steady_clock::now();
 	auto       result = vkAcquireNextImageKHR(g_window_ctx->graphic_ctx.device, g_window_ctx->swapchain->swapchain, UINT64_MAX,
-	                                          /*g_window_ctx->swapchain->present_complete_semaphore*/ nullptr,
-	                                          g_window_ctx->swapchain->present_complete_fence, &g_window_ctx->swapchain->current_index);
+	                                          nullptr, g_window_ctx->swapchain->present_complete_fence,
+	                                          &g_window_ctx->swapchain->current_index);
 
-	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+	if (result == VK_ERROR_OUT_OF_DATE_KHR)
 	{
 		printf("vkAcquireNextImageKHR: result = %d, recreating swapchain\n", static_cast<int>(result));
 		VulkanRecreateSwapchain(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, 2);
@@ -3325,6 +3365,8 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	}
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 	EXIT_NOT_IMPLEMENTED(g_window_ctx->swapchain->current_index == static_cast<uint32_t>(-1));
+	EXIT_NOT_IMPLEMENTED(g_window_ctx->swapchain->current_index >= g_window_ctx->swapchain->swapchain_images_count);
+	EXIT_IF(g_window_ctx->swapchain->render_finished_semaphores == nullptr);
 
 	do
 	{
@@ -3439,7 +3481,8 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	vkCmdPipelineBarrier(vk_buffer, src_stage, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &pre_present_barrier);
 
 	buffer.End();
-	buffer.ExecuteWithSemaphore();
+	auto* render_finished = &g_window_ctx->swapchain->render_finished_semaphores[g_window_ctx->swapchain->current_index];
+	buffer.ExecuteWithSemaphore(*render_finished);
 
 	VkPresentInfoKHR present;
 	present.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -3447,7 +3490,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	present.swapchainCount     = 1;
 	present.pSwapchains        = &g_window_ctx->swapchain->swapchain;
 	present.pImageIndices      = &g_window_ctx->swapchain->current_index;
-	present.pWaitSemaphores    = &buffer.GetPool()->semaphores[buffer.GetIndex()];
+	present.pWaitSemaphores    = render_finished;
 	present.waitSemaphoreCount = 1;
 	present.pResults           = nullptr;
 
@@ -3459,7 +3502,12 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 		Core::LockGuard queue_lock(*queue.mutex);
 		result = vkQueuePresentKHR(queue.vk_queue, &present);
 	}
-	if (result != VK_SUCCESS)
+	// OUT_OF_DATE / SUBOPTIMAL are normal after resize or first present; recreate
+	// the swapchain and continue. Only hard-fail other present errors.
+	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+	{
+		VulkanRecreateSwapchain(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, 2);
+	} else if (result != VK_SUCCESS)
 	{
 		EXIT("vkQueuePresentKHR failed: result=%d\n", static_cast<int>(result));
 	}
