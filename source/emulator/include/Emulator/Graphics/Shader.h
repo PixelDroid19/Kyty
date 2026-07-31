@@ -205,6 +205,7 @@ enum class ShaderInstructionType : uint32_t
 	VCmpxGtU32,
 	VCmpxLeF32,
 	VCmpxLeI32,
+	VCmpxLeU32,
 	VCmpxLgF32,
 	VCmpxLtF32,
 	VCmpxLtI32,
@@ -288,6 +289,8 @@ enum class ShaderInstructionType : uint32_t
 	VOrB32,
 	VXnorB32,
 	VRcpF32,
+	// VOP1/VOP3: copy the first guest-EXEC-active lane of a VGPR into an SGPR.
+	VReadfirstlaneB32,
 	VRndneF32,
 	VRsqF32,
 	VSadU32,

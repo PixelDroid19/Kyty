@@ -917,7 +917,7 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 		case 0xD0: KYTY_NI("v_cmpx_f_u32"); break;
 		case 0xD1: inst.type = ShaderInstructionType::VCmpxLtU32; break;
 		case 0xd2: inst.type = ShaderInstructionType::VCmpxEqU32; break;
-		case 0xD3: KYTY_NI("v_cmpx_le_u32"); break;
+		case 0xD3: inst.type = ShaderInstructionType::VCmpxLeU32; break;
 		case 0xd4: inst.type = ShaderInstructionType::VCmpxGtU32; break;
 		case 0xd5: inst.type = ShaderInstructionType::VCmpxNeU32; break;
 		case 0xd6: inst.type = ShaderInstructionType::VCmpxGeU32; break;
@@ -1051,7 +1051,12 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 			inst.src_num = 0;
 			break;
 		case 0x01: inst.type = ShaderInstructionType::VMovB32; break;
-		case 0x02: KYTY_NI("v_readfirstlane_b32"); break;
+		case 0x02:
+			// Destination is an SGPR even though the VOP1 encoding uses the VDST
+			// field; the source remains a VGPR/scalar operand.
+			inst.type = ShaderInstructionType::VReadfirstlaneB32;
+			inst.dst  = operand_parse(vdst);
+			break;
 		case 0x03: KYTY_NI("v_cvt_i32_f64"); break;
 		case 0x04: KYTY_NI("v_cvt_f64_i32"); break;
 		case 0x05: inst.type = ShaderInstructionType::VCvtF32I32; break;
@@ -1380,12 +1385,11 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 			};
 			break;
 		case 0x27:
-			if (next_gen)
+			// Gen5 VOP2 0x27 is v_subrev_u32/v_subrev_nc_u32 (no VCC). Legacy
+			// keeps the carry-out VCC destination.
+			inst.type = ShaderInstructionType::VSubrevI32;
+			if (!next_gen)
 			{
-				KYTY_UNKNOWN_OP();
-			} else
-			{
-				inst.type      = ShaderInstructionType::VSubrevI32;
 				inst.format    = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
 				inst.dst2.type = ShaderOperandType::VccLo;
 				inst.dst2.size = 2;
@@ -1827,7 +1831,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0xD0: KYTY_NI("v_cmpx_f_u32"); break;
 		case 0xD1: inst.type = ShaderInstructionType::VCmpxLtU32; break;
 		case 0xd2: inst.type = ShaderInstructionType::VCmpxEqU32; break;
-		case 0xD3: KYTY_NI("v_cmpx_le_u32"); break;
+		case 0xD3: inst.type = ShaderInstructionType::VCmpxLeU32; break;
 		case 0xd4: inst.type = ShaderInstructionType::VCmpxGtU32; break;
 		case 0xd5: inst.type = ShaderInstructionType::VCmpxNeU32; break;
 		case 0xd6: inst.type = ShaderInstructionType::VCmpxGeU32; break;
@@ -1984,12 +1988,10 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			};
 			break;
 		case 0x127:
-			if (next_gen)
+			// Gen5 VOP3 encoding of v_subrev_u32/v_subrev_nc_u32 (no VCC).
+			inst.type = ShaderInstructionType::VSubrevI32;
+			if (!next_gen)
 			{
-				KYTY_UNKNOWN_OP();
-			} else
-			{
-				inst.type      = ShaderInstructionType::VSubrevI32;
 				inst.format    = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
 				inst.dst2      = operand_parse(sdst);
 				inst.dst2.size = 2;
@@ -2308,7 +2310,13 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.src_num = 0;
 			break;
 		case 0x181: KYTY_NI("v_mov_b32"); break;
-		case 0x182: KYTY_NI("v_readfirstlane_b32"); break;
+		case 0x182:
+			// VOP3 encoding of v_readfirstlane_b32: SGPR destination in VDST.
+			inst.type    = ShaderInstructionType::VReadfirstlaneB32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0;
+			inst.src_num = 1;
+			inst.dst     = operand_parse(vdst);
+			break;
 		case 0x183: KYTY_NI("v_cvt_i32_f64"); break;
 		case 0x184: KYTY_NI("v_cvt_f64_i32"); break;
 		case 0x185: inst.type = ShaderInstructionType::VCvtF32I32; break;

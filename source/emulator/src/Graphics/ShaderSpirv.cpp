@@ -8095,6 +8095,38 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	auto label_next_block = ShaderLabel(next_block.last);
 	auto label_dst_block  = ShaderLabel(dst_block.last);
 
+	// A conditional branch that targets an earlier PC is a loop continue edge.
+	// Emitting OpSelectionMerge with the loop header as the merge block creates a
+	// CFG cycle (header is both merge and dominator ancestor) and stack-overflows
+	// spirv-opt's GetBlockDepth. Pair with OpLoopMerge at the header (WriteLabel).
+	if (label.GetDst() < inst.pc)
+	{
+		EXIT_NOT_IMPLEMENTED(discard);
+
+		const String8 continue_label = String8::FromPrintf("loop_continue_%04" PRIx32, inst.pc);
+		const String8 merge_label    = String8::FromPrintf("loop_merge_%04" PRIx32, inst.pc);
+		const String8 label_str      = label.ToString();
+
+		static const char* text_loop_continue = R"(
+        <param0>
+        <param1>
+               OpBranch %<continue>
+       %<continue> = OpLabel
+               OpBranchConditional %cc_b_<index> %<label> %<merge>
+       %<merge> = OpLabel
+)";
+
+		*dst_source += String8(text_loop_continue)
+		                   .ReplaceStr("<param0>", param[0])
+		                   .ReplaceStr("<param1>", param[1])
+		                   .ReplaceStr("<continue>", continue_label)
+		                   .ReplaceStr("<merge>", merge_label)
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<label>", label_str);
+
+		return true;
+	}
+
 	bool if_else = next_block.is_valid && !next_block.is_discard && dst_block.is_valid && !dst_block.is_discard &&
 	               ((next_block.last.type == ShaderInstructionType::SBranch && label_next_block.GetDst() >= dst_block.pc &&
 	                 label_next_block.GetDst() <= dst_block.last.pc) ||
@@ -8104,27 +8136,67 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	String8 label_str = label.ToString();
 	String8 label_merge =
 	    if_else ? (dst_block.last.type == ShaderInstructionType::SBranch ? label_dst_block.ToString() : label_next_block.ToString()) : "";
+	// Shared joins with more than two predecessors are switch reconvergence, not
+	// a two-sided diamond. Keep the simple forward-conditional shape instead.
+	if (if_else && label_merge.Size() != 0)
+	{
+		const auto& labels       = code.GetLabels();
+		const auto  merge_label  = (dst_block.last.type == ShaderInstructionType::SBranch ? label_dst_block : label_next_block);
+		int         join_sources = 0;
+		for (const auto& join_label: labels)
+		{
+			if (!join_label.IsDisabled() && join_label.GetDst() == merge_label.GetDst())
+			{
+				++join_sources;
+			}
+		}
+		if (join_sources > 2)
+		{
+			if_else     = false;
+			label_merge = "";
+		}
+	}
 	const uint32_t loop_backedge = find_backward_loop_for_exit(code, label);
 
+	// Promote a forward conditional to if/else only for a true diamond: the
+	// block before the taken target is an unconditional branch to a join that
+	// has exactly two incoming edges. Switch-style cascades (many cases sharing
+	// one join) must not use this path — they nest SelectionMerges onto the
+	// same reconvergence chain and fail structured CFG validation/optimization.
 	if (!if_else && label.GetDst() > inst.pc)
 	{
 		const auto& instructions = code.GetInstructions();
+		const auto& labels       = code.GetLabels();
 		for (uint32_t i = 1; i < instructions.Size(); i++)
 		{
-			if (instructions.At(i).pc == label.GetDst())
+			if (instructions.At(i).pc != label.GetDst())
 			{
-				const auto& previous = instructions.At(i - 1);
-				if (previous.type == ShaderInstructionType::SBranch)
-				{
-					auto previous_branch = ShaderLabel(previous);
-					if (previous_branch.GetDst() > label.GetDst())
-					{
-						if_else     = true;
-						label_merge = previous_branch.ToString();
-					}
-				}
+				continue;
+			}
+			const auto& previous = instructions.At(i - 1);
+			if (previous.type != ShaderInstructionType::SBranch)
+			{
 				break;
 			}
+			auto previous_branch = ShaderLabel(previous);
+			if (previous_branch.GetDst() <= label.GetDst())
+			{
+				break;
+			}
+			int join_sources = 0;
+			for (const auto& join_label: labels)
+			{
+				if (!join_label.IsDisabled() && join_label.GetDst() == previous_branch.GetDst())
+				{
+					++join_sources;
+				}
+			}
+			if (join_sources == 2)
+			{
+				if_else     = true;
+				label_merge = previous_branch.ToString();
+			}
+			break;
 		}
 	}
 
@@ -10074,6 +10146,55 @@ KYTY_RECOMPILER_FUNC(Recompile_VNop)
 	return true;
 }
 
+// v_readfirstlane_b32: SGPR := VGPR[first guest-EXEC-active lane].
+// Guest EXEC is a software mask, so SPIR-V "active" alone is insufficient;
+// ballot the per-lane EXEC bit and broadcast from its lowest set lane.
+KYTY_RECOMPILER_FUNC(Recompile_VReadfirstlaneB32_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.src_num < 1);
+
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
+
+	String8 index_str = String8::FromPrintf("%u", index);
+	String8 load0;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+        <load0>
+        %rfl_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
+        %rfl_exec_lo_<index> = OpLoad %uint %exec_lo
+        %rfl_exec_hi_<index> = OpLoad %uint %exec_hi
+        %rfl_lane_lt32_<index> = OpULessThan %bool %rfl_lane_<index> %uint_32
+        %rfl_lane_mod_<index> = OpBitwiseAnd %uint %rfl_lane_<index> %uint_31
+        %rfl_exec_word_<index> = OpSelect %uint %rfl_lane_lt32_<index> %rfl_exec_lo_<index> %rfl_exec_hi_<index>
+        %rfl_bit_<index> = OpShiftLeftLogical %uint %uint_1 %rfl_lane_mod_<index>
+        %rfl_masked_<index> = OpBitwiseAnd %uint %rfl_exec_word_<index> %rfl_bit_<index>
+        %rfl_active_<index> = OpINotEqual %bool %rfl_masked_<index> %uint_0
+        %rfl_ballot_<index> = OpGroupNonUniformBallot %v4uint %uint_3 %rfl_active_<index>
+        %rfl_any_<index> = OpGroupNonUniformBallotBitCount %uint %uint_3 Reduce %rfl_ballot_<index>
+        %rfl_empty_<index> = OpIEqual %bool %rfl_any_<index> %uint_0
+        %rfl_first_<index> = OpGroupNonUniformBallotFindLSB %uint %uint_3 %rfl_ballot_<index>
+        %rfl_lane_sel_<index> = OpSelect %uint %rfl_empty_<index> %uint_0 %rfl_first_<index>
+        %rfl_value_<index> = OpGroupNonUniformBroadcast %uint %uint_3 %t0_<index> %rfl_lane_sel_<index>
+        %rfl_result_<index> = OpSelect %uint %rfl_empty_<index> %uint_0 %rfl_value_<index>
+               OpStore %<dst> %rfl_result_<index>
+)";
+
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VMovB32_SVdstSVsrc0)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -11096,6 +11217,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_V_XXX_B32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VAndB32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpBitwiseAnd %uint %t0_<index> %t1_<index>"}},
     {Recompile_V_XXX_B32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VAddI32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpIAdd %uint %t0_<index> %t1_<index>"}},
     {Recompile_V_XXX_B32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VSubI32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpISub %uint %t0_<index> %t1_<index>"}},
+    {Recompile_V_XXX_B32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VSubrevI32,      ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpISub %uint %t1_<index> %t0_<index>"}},
     {Recompile_V_XXX_B32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VBcntU32B32,     ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%tb_<index> = OpBitCount %int %t0_<index>", "%tbu_<index> = OpBitcast %uint %tb_<index>", "%t_<index> = OpIAdd %uint %tbu_<index> %t1_<index>"}},
     {Recompile_V_XXX_B32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VBfmB32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%tcount_<index> = OpBitwiseAnd %uint %t0_<index> %uint_31", "%toffset_<index> = OpBitwiseAnd %uint %t1_<index> %uint_31", "%t_<index> = OpBitFieldInsert %uint %uint_0 %uint_0xffffffff %toffset_<index> %tcount_<index>"}},
     {Recompile_V_XXX_B32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VLshlB32,        ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%ts_<index> = OpBitwiseAnd %uint %t1_<index> %uint_31", "%t_<index> = OpShiftLeftLogical %uint %t0_<index> %ts_<index>"}},
@@ -11158,6 +11280,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VCvtF32_XXX_SVdstSVsrc0,        ShaderInstructionType::VCvtF32Ubyte2,       ShaderInstructionFormat::SVdstSVsrc0, {"%tb_<index> = OpBitFieldUExtract %uint %t0_<index> %uint_16 %uint_8", "%t_<index> = OpConvertUToF %float %tb_<index>"}},
     {Recompile_VCvtF32_XXX_SVdstSVsrc0,        ShaderInstructionType::VCvtF32Ubyte3,       ShaderInstructionFormat::SVdstSVsrc0, {"%tb_<index> = OpBitFieldUExtract %uint %t0_<index> %uint_24 %uint_8", "%t_<index> = OpConvertUToF %float %tb_<index>"}},
     {Recompile_VMovB32_SVdstSVsrc0,            ShaderInstructionType::VMovB32,             ShaderInstructionFormat::SVdstSVsrc0, {""}},
+    {Recompile_VReadfirstlaneB32_SVdstSVsrc0,  ShaderInstructionType::VReadfirstlaneB32,   ShaderInstructionFormat::SVdstSVsrc0, {""}},
     {Recompile_VNop,                           ShaderInstructionType::VNop,                ShaderInstructionFormat::Empty,       {""}},
 
     {Recompile_SSaveexecB64_Sdst2Ssrc02,       ShaderInstructionType::SAndSaveexecB64,     ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::ExecNonZero},
@@ -11238,6 +11361,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxGeI32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpSGreaterThanEqual"}},
     {Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxGeU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpUGreaterThanEqual"}},
     {Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxGtU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpUGreaterThan"}},
+    {Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxLeU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpULessThanEqual"}},
     {Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxLtU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpULessThan"}},
 
     {Recompile_SCmp_XXX_I32_Ssrc0Ssrc1,  ShaderInstructionType::SCmpEqI32,    ShaderInstructionFormat::Ssrc0Ssrc1,      {"OpIEqual"}},
@@ -11621,9 +11745,14 @@ static bool spirv_uses_buffer_atomics(const ShaderCode& code)
 	return Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd});
 }
 
+static bool spirv_uses_readfirstlane(const ShaderCode& code)
+{
+	return code.HasAnyOf({ShaderInstructionType::VReadfirstlaneB32});
+}
+
 static bool spirv_uses_subgroup_invocation(const ShaderCode& code)
 {
-	return spirv_uses_dpp(code) || spirv_uses_buffer_descriptor_addressing(code);
+	return spirv_uses_dpp(code) || spirv_uses_buffer_descriptor_addressing(code) || spirv_uses_readfirstlane(code);
 }
 
 void Spirv::WriteHeader()
@@ -11662,6 +11791,10 @@ void Spirv::WriteHeader()
 		if (spirv_uses_dpp(m_code))
 		{
 			capabilities.Add("OpCapability GroupNonUniformShuffle");
+		}
+		if (spirv_uses_readfirstlane(m_code))
+		{
+			capabilities.Add("OpCapability GroupNonUniformBallot");
 		}
 		vars.Add("%gl_SubgroupInvocationID");
 	}
@@ -12998,19 +13131,36 @@ void Spirv::WriteLabel(int index)
 				    String8(text).ReplaceStr("<branch>", (skip_branch ? "" : "OpBranch %<label>")).ReplaceStr("<label>", label.ToString());
 				labels_num++;
 
-				bool backward_sbranch = false;
+				// Backward SBranch and SCbranch* both close loops. Only pure
+				// SBranch loops with a separate labeled exit defer OpLoopMerge to
+				// that exit site; SCbranch continue edges always need the header
+				// construct so the back-edge targets a real loop header.
+				bool backward_loop_source     = false;
+				bool backward_uncond_sbranch  = false;
 				for (const auto& source_inst: instructions)
 				{
-					if (source_inst.pc == label.GetSrc())
+					if (source_inst.pc != label.GetSrc())
 					{
-						backward_sbranch = source_inst.type == ShaderInstructionType::SBranch;
+						continue;
+					}
+					if (label.GetSrc() <= label.GetDst())
+					{
 						break;
 					}
+					if (source_inst.type == ShaderInstructionType::SBranch)
+					{
+						backward_loop_source    = true;
+						backward_uncond_sbranch = true;
+					} else if (instruction_is_conditional_branch(source_inst))
+					{
+						backward_loop_source = true;
+					}
+					break;
 				}
 
-				if (backward_sbranch && label.GetSrc() > label.GetDst())
+				if (backward_loop_source)
 				{
-					if (find_backward_loop_merge(m_code, label).Size() != 0)
+					if (backward_uncond_sbranch && find_backward_loop_merge(m_code, label).Size() != 0)
 					{
 						continue;
 					}

@@ -185,7 +185,16 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		return;
 	}
 
-	EXIT_NOT_IMPLEMENTED(tile != 8 && tile != 13 && tile != 5);
+	// Gen5 storage images use the same 2D tile contracts as sampled textures:
+	// 0/8 linear, 5 Standard4KB, 9 Standard64KB, 13 TextureTiled (legacy),
+	// 27 kRenderTarget SW64k. Reject anything outside that set with values.
+	if (tile != 0 && tile != 5 && tile != 8 && tile != 9 && tile != 13 && tile != 27)
+	{
+		EXIT("unsupported storage texture tile: tile=%" PRIu64 " format=%" PRIu64 " dfmt=%" PRIu64 " nfmt=%" PRIu64
+		     " width=%" PRIu64 " height=%" PRIu64 " pitch=%" PRIu64 " levels=%" PRIu64 " type=%" PRIu64
+		     " size=%" PRIu64 "\n",
+		     tile, fmt, dfmt, nfmt, width, height, pitch, levels, resource_type, *size);
+	}
 
 	TileSizeOffset level_sizes[16];
 
@@ -255,8 +264,40 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		regions[0].height = height;
 		UtilFillImage(ctx, vk_obj, temp_buf, linear_bytes, regions, static_cast<uint64_t>(vk_layout));
 		delete[] temp_buf;
-	} else if (tile == 8)
+	} else if (tile == 9 || tile == 27)
 	{
+		// Detile Standard64KB / kRenderTarget into pitch-strided linear rows for
+		// the host storage image. Multi-mip and block-compressed storage writes
+		// are not part of this path yet.
+		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
+		EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || levels != 1u);
+		const uint32_t pitch_elems  = (pitch != 0u ? static_cast<uint32_t>(pitch) : static_cast<uint32_t>(width));
+		const uint64_t linear_bytes = static_cast<uint64_t>(pitch_elems) * height * bytes_per_element;
+		EXIT_NOT_IMPLEMENTED(linear_bytes == 0u || linear_bytes > *size);
+		auto*       temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
+		std::memset(temp_buf, 0, static_cast<size_t>(linear_bytes));
+		const auto* src = reinterpret_cast<const uint8_t*>(*vaddr);
+		for (uint32_t y = 0; y < static_cast<uint32_t>(height); y++)
+		{
+			for (uint32_t x = 0; x < static_cast<uint32_t>(width); x++)
+			{
+				const uint64_t tiled =
+				    (tile == 9) ? TileGetStandard64KBOffset(x, y, pitch_elems, bytes_per_element) :
+				                  TileGetSw64kRxOffset(x, y, pitch_elems, bytes_per_element);
+				const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * bytes_per_element;
+				std::memcpy(temp_buf + linear, src + tiled, bytes_per_element);
+			}
+		}
+		regions[0].offset = 0;
+		regions[0].pitch  = pitch_elems;
+		regions[0].width  = static_cast<uint32_t>(width);
+		regions[0].height = static_cast<uint32_t>(height);
+		UtilFillImage(ctx, vk_obj, temp_buf, linear_bytes, regions, static_cast<uint64_t>(vk_layout));
+		delete[] temp_buf;
+	} else if (tile == 0 || tile == 8)
+	{
+		// Linear general (Gen5 tile 0) and legacy linear (tile 8): guest memory is
+		// already pitch-strided host-order rows.
 		UtilFillImage(ctx, vk_obj, reinterpret_cast<void*>(*vaddr), *size, regions, static_cast<uint64_t>(vk_layout));
 	}
 }
