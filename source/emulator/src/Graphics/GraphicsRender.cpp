@@ -3159,12 +3159,17 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	EXIT_IF(pipeline->pipeline != nullptr);
 
 	const auto vk_create_start = std::chrono::steady_clock::now();
-	vkCreateGraphicsPipelines(gctx->device, gctx->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline->pipeline);
+	const VkResult create_result =
+	    vkCreateGraphicsPipelines(gctx->device, gctx->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline->pipeline);
 	const auto vk_create_ns =
 	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - vk_create_start).count();
 	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(vk_create_ns));
 
-	EXIT_NOT_IMPLEMENTED(pipeline->pipeline == nullptr);
+	if (pipeline->pipeline == nullptr || create_result != VK_SUCCESS)
+	{
+		EXIT("vkCreateGraphicsPipelines failed: result=%d pipeline=%p\n", static_cast<int>(create_result),
+		     static_cast<void*>(pipeline->pipeline));
+	}
 
 	if (frag_shader_module != nullptr)
 	{

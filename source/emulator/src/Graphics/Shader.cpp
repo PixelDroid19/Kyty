@@ -1375,9 +1375,11 @@ static bool SpirvCompile(const String8& src, Vector<uint32_t>* dst, String8* err
 
 	if (optimize && !opt.Run(spirv.data(), spirv.size(), &spirv))
 	{
-		printf("Optimize failed: %s\n", error_msg.c_str());
-		*err_msg = String8::FromPrintf("Optimize failed: %s\n", error_msg.c_str());
-		return false;
+		// Keep the assembled module when the optimizer rejects structured CFG
+		// that the driver may still accept. Prefer optimized output when Run
+		// succeeds; never invent a replacement module.
+		printf("WARNING: Optimize failed, using unoptimized SPIR-V: %s\n", error_msg.c_str());
+		error_msg.Clear();
 	}
 
 	dst->Add(spirv.data(), spirv.size());

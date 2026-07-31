@@ -8068,6 +8068,64 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 		return true;
 	}
 
+	// Retarget SBranch to a multi-predecessor join onto the innermost open
+	// sc_join synthetic merge created for switch-case SCbranch edges, so each
+	// selection reconverges before the shared guest join label.
+	{
+		const auto& instructions = code.GetInstructions();
+		uint32_t    owner_pc     = 0;
+		bool        found_owner  = false;
+		for (uint32_t i = 0; i < instructions.Size(); i++)
+		{
+			const auto& cand = instructions.At(i);
+			if (cand.pc >= inst.pc || !instruction_is_conditional_branch(cand) || !operand_is_constant(cand.src[0]))
+			{
+				continue;
+			}
+			const auto taken = ShaderLabel(cand);
+			if (taken.GetDst() <= cand.pc)
+			{
+				continue;
+			}
+			const auto taken_block = code.ReadBlock(taken.GetDst());
+			if (!taken_block.is_valid || taken_block.last.type != ShaderInstructionType::SBranch)
+			{
+				continue;
+			}
+			const auto case_join = ShaderLabel(taken_block.last);
+			if (case_join.GetDst() != branch.GetDst())
+			{
+				continue;
+			}
+			// Prefer exact case-closer; otherwise keep the latest cascade edge
+			// before this SBranch (default path of nested selections).
+			if (taken_block.last.pc == inst.pc || !found_owner || cand.pc > owner_pc)
+			{
+				owner_pc    = cand.pc;
+				found_owner = true;
+				if (taken_block.last.pc == inst.pc)
+				{
+					break;
+				}
+			}
+		}
+		if (found_owner)
+		{
+			int join_sources = 0;
+			for (const auto& join_label: code.GetLabels())
+			{
+				if (!join_label.IsDisabled() && join_label.GetDst() == branch.GetDst())
+				{
+					++join_sources;
+				}
+			}
+			if (join_sources > 2)
+			{
+				label = String8::FromPrintf("sc_join_%04" PRIx32 "_%04" PRIx32, branch.GetDst(), owner_pc);
+			}
+		}
+	}
+
 	static const char* text = R"(
                 OpBranch %<label>
 )";
@@ -8257,6 +8315,44 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
         %t230_<index> = OpLabel
 )";
 
+	// Switch-style cascade: forward SCbranch into a case block that ends with
+	// SBranch to a multi-predecessor join. variant_a (merge=case) lets the
+	// fallthrough escape past the merge to the join and fails structured CFG.
+	// Emit if/else with a unique synthetic merge; case and fallthrough both
+	// reconverge there, then the case's SBranch to the shared join runs after
+	// the selection (case body is still emitted at its label, so we instead
+	// treat the taken edge as jumping into the case and use the join as merge
+	// only when this is the sole remaining open edge — otherwise a per-branch
+	// synthetic merge that WriteLabel materializes immediately before the join
+	// chain by naming sc_join_<dst>_<src>).
+	bool switch_case = false;
+	String8 switch_merge;
+	if (!if_else && !discard && label.GetDst() > inst.pc && dst_block.is_valid && !dst_block.is_discard &&
+	    dst_block.last.type == ShaderInstructionType::SBranch)
+	{
+		const auto case_join = ShaderLabel(dst_block.last);
+		if (case_join.GetDst() > label.GetDst())
+		{
+			int join_sources = 0;
+			for (const auto& join_label: code.GetLabels())
+			{
+				if (!join_label.IsDisabled() && join_label.GetDst() == case_join.GetDst())
+				{
+					++join_sources;
+				}
+			}
+			if (join_sources > 2)
+			{
+				// Unique merge per cascade edge: sc_join_<join_pc>_<branch_pc>.
+				// WriteLabel for the shared join emits these synthetic merges in
+				// source order before the guest join label so each selection
+				// closes onto its own merge, then falls into the shared join.
+				switch_case  = true;
+				switch_merge = String8::FromPrintf("sc_join_%04" PRIx32 "_%04" PRIx32, case_join.GetDst(), inst.pc);
+			}
+		}
+	}
+
 	const char* text = text_variant_a;
 	if (discard)
 	{
@@ -8265,6 +8361,12 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	if (if_else)
 	{
 		text = text_variant_c;
+	}
+	if (switch_case)
+	{
+		// if (cc) case; else fallthrough; both meet at switch_merge.
+		text        = text_variant_c;
+		label_merge = switch_merge;
 	}
 	if (loop_backedge != 0)
 	{
@@ -13111,6 +13213,75 @@ void Spirv::WriteLabel(int index)
 
 		auto& labels     = m_code.GetLabels();
 		int   labels_num = 0;
+
+		// Materialize synthetic switch-case merges for this join PC before the
+		// guest labels so nested selections close onto sc_join_* then fall into
+		// the shared join.
+		{
+			Vector<uint32_t> sc_join_srcs;
+			for (uint32_t i = 0; i < instructions.Size(); i++)
+			{
+				const auto& cand = instructions.At(i);
+				if (!instruction_is_conditional_branch(cand) || !operand_is_constant(cand.src[0]))
+				{
+					continue;
+				}
+				const auto taken = ShaderLabel(cand);
+				if (taken.GetDst() <= cand.pc)
+				{
+					continue;
+				}
+				const auto taken_block = m_code.ReadBlock(taken.GetDst());
+				if (!taken_block.is_valid || taken_block.last.type != ShaderInstructionType::SBranch)
+				{
+					continue;
+				}
+				const auto case_join = ShaderLabel(taken_block.last);
+				if (case_join.GetDst() != inst.pc)
+				{
+					continue;
+				}
+				int join_sources = 0;
+				for (const auto& join_label: labels)
+				{
+					if (!join_label.IsDisabled() && join_label.GetDst() == inst.pc)
+					{
+						++join_sources;
+					}
+				}
+				if (join_sources > 2)
+				{
+					sc_join_srcs.Add(cand.pc);
+				}
+			}
+			// Emit from innermost (highest src pc) to outermost so each merge
+			// falls into the next outer merge, then into the guest join.
+			for (int a = 0; a < sc_join_srcs.Size(); a++)
+			{
+				for (int b = a + 1; b < sc_join_srcs.Size(); b++)
+				{
+					if (sc_join_srcs[a] < sc_join_srcs[b])
+					{
+						const auto tmp = sc_join_srcs[a];
+						sc_join_srcs[a] = sc_join_srcs[b];
+						sc_join_srcs[b] = tmp;
+					}
+				}
+			}
+			for (int s = 0; s < sc_join_srcs.Size(); s++)
+			{
+				const auto name = String8::FromPrintf("sc_join_%04" PRIx32 "_%04" PRIx32, inst.pc, sc_join_srcs[s]);
+				const bool first = (labels_num == 0);
+				const bool skip_branch =
+				    first && (instructions.At(index - 1).type == ShaderInstructionType::SEndpgm ||
+				              instructions.At(index - 1).type == ShaderInstructionType::SBranch);
+				m_source += String8::FromPrintf("%s       %%%s = OpLabel\n",
+				                                skip_branch ? "" : String8::FromPrintf("               OpBranch %%%s\n", name.c_str()).c_str(),
+				                                name.c_str());
+				labels_num++;
+			}
+		}
+
 		for (uint32_t i = labels.Size(); i > 0; i--)
 		{
 			auto& label = labels[i - 1];
