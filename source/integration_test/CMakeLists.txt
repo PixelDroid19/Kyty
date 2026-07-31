@@ -155,6 +155,54 @@ set_tests_properties(KytyLibcWideIntegration.ExactImports PROPERTIES
 	TIMEOUT 120
 )
 
+add_executable(kyty_libc_time_integration
+	src/LibcTimeIntegration.cpp
+)
+
+target_link_libraries(kyty_libc_time_integration
+	PRIVATE
+		emulator
+)
+
+target_include_directories(kyty_libc_time_integration
+	PRIVATE
+		"${CMAKE_SOURCE_DIR}/include"
+		"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+
+add_test(
+	NAME KytyLibcTimeIntegration.GuestAbi
+	COMMAND $<TARGET_FILE:kyty_libc_time_integration>
+)
+set_tests_properties(KytyLibcTimeIntegration.GuestAbi PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
+add_executable(kyty_libc_locale_integration
+	src/LibcLocaleIntegration.cpp
+)
+
+target_link_libraries(kyty_libc_locale_integration
+	PRIVATE
+		emulator
+)
+
+target_include_directories(kyty_libc_locale_integration
+	PRIVATE
+		"${CMAKE_SOURCE_DIR}/include"
+		"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+
+add_test(
+	NAME KytyLibcLocaleIntegration.ClassificationContract
+	COMMAND $<TARGET_FILE:kyty_libc_locale_integration>
+)
+set_tests_properties(KytyLibcLocaleIntegration.ClassificationContract PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
 foreach(scenario IN ITEMS reject_class reject_non_ascii)
 	if(scenario STREQUAL "reject_class")
 		set(expected_diagnostic "character_class != 2")
@@ -330,6 +378,7 @@ add_kyty_loader_case(ExportSnapshotOutlivesModule export_snapshot_outlives_modul
 add_kyty_loader_case(ApplyExportConflictRollback apply_export_conflict_rollback 0)
 add_kyty_loader_case(DiscoveryCapacityRejectsWholePlan discovery_capacity_rejects_whole_plan 0)
 add_kyty_loader_case(AdjacentApplyDeferredUntilHle adjacent_apply_deferred_until_hle 0)
+add_kyty_loader_case(HleModuleOwnershipIsExact hle_module_ownership_is_exact 0)
 
 # --- Agent protocol: single wire version, events, fail-closed ---
 
@@ -398,6 +447,8 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_kernel_memory_integration
 	kyty_graphics_diagnostics_integration
 	kyty_libc_wide_integration
+	kyty_libc_time_integration
+	kyty_libc_locale_integration
 	kyty_guest_stack_frame_integration
 	kyty_libc_allocator_integration
 	kyty_loader_integration

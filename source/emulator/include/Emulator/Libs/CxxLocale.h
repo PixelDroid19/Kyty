@@ -30,6 +30,17 @@ struct alignas(8) CxxLocaleLayout
 	CxxLocimpLayout* ptr;
 };
 
+// The narrow-character facet stores the classification table at +0x10.
+// Guest code indexes this table directly with an unsigned character.
+struct alignas(8) CxxCtypeFacetLayout
+{
+	void**               vtable;
+	std::uint64_t        references;
+	const std::uint16_t* table;
+};
+
+static_assert(offsetof(CxxCtypeFacetLayout, table) == 0x10);
+
 // Itanium type_info (libstdc++): [0]=vtable, [8]=name (mangled; leading '*' = plain).
 // __si_class_type_info adds [16]=base type_info*.
 struct alignas(8) CxxTypeInfoLayout

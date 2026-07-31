@@ -91,6 +91,21 @@ int main()
 	const uint64_t memalign_fn = Resolve(symbols, "Ujf3KzMvRmI");
 	const uint64_t realloc_fn  = Resolve(symbols, "Y7aJ1uydPMo");
 	const uint64_t free_fn     = Resolve(symbols, "tIhsqj0qsFE");
+	const uint64_t strdup_fn   = Resolve(symbols, "g7zzzLDYGw0");
+
+	Resolve(symbols, "-hn1tcVHq5Q");
+	Resolve(symbols, "OJjm-QOIHlI");
+	Resolve(symbols, "iF1iQHzxBJU");
+	Resolve(symbols, "LYo3GhIlB38");
+	Resolve(symbols, "Vla-Z+eXlxo");
+	Resolve(symbols, "k04jLXu3+Ic");
+
+	const char text[]     = "allocator-owned duplicate";
+	const auto duplicated = Loader::GuestCall::Invoke(strdup_fn, reinterpret_cast<uint64_t>(text), 0, 0);
+	Expect(duplicated != 0, "strdup must allocate a destination");
+	Expect(duplicated != reinterpret_cast<uint64_t>(text), "strdup must return independent storage");
+	Expect(std::strcmp(reinterpret_cast<const char*>(duplicated), text) == 0, "strdup must preserve the complete string");
+	Loader::GuestCall::Invoke(free_fn, duplicated, 0, 0);
 
 	const auto raw = Loader::GuestCall::Invoke(malloc_fn, 0x100000, 0, 0);
 	Expect(raw != 0, "malloc must return storage");

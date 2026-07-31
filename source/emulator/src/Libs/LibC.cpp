@@ -13,6 +13,7 @@
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/CxaDynamicCast.h"
 #include "Emulator/Libs/CxxLocale.h"
+#include "Emulator/Libs/CxxString.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/Memalign.h"
 #include "Emulator/Libs/ProcessEnvironment.h"
@@ -20,11 +21,16 @@
 #include "Emulator/Libs/VaContext.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Loader/RuntimeLinker.h"
+#include "Emulator/Loader/GuestCall.h"
 
 #include <cctype>
+#include <charconv>
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
 #include <clocale>
 #include <cstdarg>
 #include <cstdio>
@@ -34,9 +40,13 @@
 #include <cwchar>
 #include <mutex>
 #include <setjmp.h>
+#include <string>
 #include <strings.h>
+#include <system_error>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
+#include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
 #include <malloc.h>
@@ -143,43 +153,87 @@ static KYTY_SYSV_ABI void init_env(const ProcessEnvironment::InitParameters* par
 // _Cnd_init receives the address of that handle and owns its allocation; use
 // the same condition implementation as the public pthread ABI so both paths
 // share lifetime and error handling.
+static int c_thread_sync_result(int result);
+static LibKernel::KernelUseconds c_abstime_remaining_usec(const LibKernel::KernelTimespec* abstime);
+
 static KYTY_SYSV_ABI int c_cnd_init(LibKernel::PthreadCond* cond)
 {
-	return LibKernel::PthreadCondInit(cond, nullptr, nullptr);
+	return c_thread_sync_result(LibKernel::PthreadCondInit(cond, nullptr, nullptr));
+}
+
+static KYTY_SYSV_ABI int c_cnd_init_with_name(LibKernel::PthreadCond* cond, const char* name)
+{
+	return c_thread_sync_result(LibKernel::PthreadCondInit(cond, nullptr, name));
+}
+
+static KYTY_SYSV_ABI int c_cnd_init_with_default_name_override(LibKernel::PthreadCond* cond, const char* name)
+{
+	return c_cnd_init_with_name(cond, name);
 }
 
 enum class CThreadResult : int
 {
-	Success = 0,
-	Error   = 4,
+	Success  = 0,
+	TimedOut = 2,
+	Busy     = 3,
+	Error    = 4,
 };
 
-static int c_thread_result(int result)
+static int c_thread_sync_result(int result)
 {
-	return result == OK ? static_cast<int>(CThreadResult::Success) : static_cast<int>(CThreadResult::Error);
+	switch (result)
+	{
+		case OK: return static_cast<int>(CThreadResult::Success);
+		case LibKernel::KERNEL_ERROR_ETIMEDOUT: return static_cast<int>(CThreadResult::TimedOut);
+		case LibKernel::KERNEL_ERROR_EBUSY: return static_cast<int>(CThreadResult::Busy);
+		default: return static_cast<int>(CThreadResult::Error);
+	}
 }
 
 static KYTY_SYSV_ABI int c_cnd_broadcast(LibKernel::PthreadCond* cond)
 {
-	return c_thread_result(LibKernel::PthreadCondBroadcast(cond));
+	return c_thread_sync_result(LibKernel::PthreadCondBroadcast(cond));
 }
 
-enum class AllocationOwner
+static KYTY_SYSV_ABI int c_cnd_signal(LibKernel::PthreadCond* cond)
 {
-	Host,
-	ApplicationHeap,
+	return c_thread_sync_result(LibKernel::PthreadCondSignal(cond));
+}
+
+static KYTY_SYSV_ABI int c_cnd_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex)
+{
+	return c_thread_sync_result(LibKernel::PthreadCondWait(cond, mutex));
+}
+
+static KYTY_SYSV_ABI int c_cnd_timedwait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex,
+                                         const LibKernel::KernelTimespec* abstime)
+{
+	return c_thread_sync_result(LibKernel::PthreadCondTimedwaitAbsolute(cond, mutex, abstime));
+}
+
+static KYTY_SYSV_ABI void c_cnd_destroy(LibKernel::PthreadCond* cond)
+{
+	if (cond == nullptr)
+	{
+		return;
+	}
+
+	auto* private_cond = *cond;
+	if (private_cond != nullptr && reinterpret_cast<uintptr_t>(private_cond) >= 0x100000)
+	{
+		(void)LibKernel::PthreadCondDestroy(cond);
+	}
+}
+
+struct HostAllocationRecord
+{
+	size_t size;
 };
 
-struct AllocationRecord
-{
-	AllocationOwner owner;
-	size_t          size;
-};
+static std::mutex                                      g_allocations_mutex;
+static std::unordered_map<void*, HostAllocationRecord> g_allocations;
 
-static std::mutex                                  g_allocations_mutex;
-static std::unordered_map<void*, AllocationRecord> g_allocations;
-
-static bool register_allocation(void* ptr, AllocationRecord record)
+static bool register_allocation(void* ptr, HostAllocationRecord record)
 {
 	if (ptr == nullptr)
 	{
@@ -190,7 +244,7 @@ static bool register_allocation(void* ptr, AllocationRecord record)
 	return g_allocations.emplace(ptr, record).second;
 }
 
-static bool claim_allocation(void* ptr, AllocationRecord* record)
+static bool claim_allocation(void* ptr, HostAllocationRecord* record)
 {
 	if (ptr == nullptr || record == nullptr)
 	{
@@ -209,12 +263,26 @@ static bool claim_allocation(void* ptr, AllocationRecord* record)
 	return true;
 }
 
+static void* allocate_host_owned(size_t size)
+{
+	void* ptr = ::malloc(size);
+	if (ptr != nullptr)
+	{
+		const bool registered = register_allocation(ptr, {size});
+		EXIT_IF(!registered);
+	}
+	return ptr;
+}
+
 static void* allocate_with_owner(size_t size)
 {
+	if (LibKernel::ApplicationHeap::IsAllocatorCallbackActive())
+	{
+		return allocate_host_owned(size);
+	}
+
 	if (void* ptr = LibKernel::ApplicationHeap::Malloc(size); ptr != nullptr)
 	{
-		const bool registered = register_allocation(ptr, {AllocationOwner::ApplicationHeap, size});
-		EXIT_IF(!registered);
 		return ptr;
 	}
 
@@ -223,13 +291,7 @@ static void* allocate_with_owner(size_t size)
 		return nullptr;
 	}
 
-	void* ptr = ::malloc(size);
-	if (ptr != nullptr)
-	{
-		const bool registered = register_allocation(ptr, {AllocationOwner::Host, size});
-		EXIT_IF(!registered);
-	}
-	return ptr;
+	return allocate_host_owned(size);
 }
 
 static bool free_by_owner(void* ptr)
@@ -239,20 +301,20 @@ static bool free_by_owner(void* ptr)
 		return true;
 	}
 
-	AllocationRecord record {};
+	HostAllocationRecord record {};
 	if (claim_allocation(ptr, &record))
 	{
-		if (record.owner == AllocationOwner::ApplicationHeap)
-		{
-			return LibKernel::ApplicationHeap::Free(ptr);
-		}
 		::free(ptr);
 		return true;
 	}
 
-	if (LibKernel::ApplicationHeap::HasAllocator())
+	if (LibKernel::ApplicationHeap::IsInitialized())
 	{
-		return LibKernel::ApplicationHeap::Free(ptr);
+		if (LibKernel::ApplicationHeap::HasAllocator())
+		{
+			return LibKernel::ApplicationHeap::Free(ptr);
+		}
+		return false;
 	}
 
 	::free(ptr);
@@ -307,6 +369,22 @@ static void collect_host_malloc_stats(Core::MSpaceSize* out)
 static KYTY_SYSV_ABI void* c_malloc(size_t size)
 {
 	return allocate_with_owner(size);
+}
+
+static KYTY_SYSV_ABI char* c_strdup(const char* source)
+{
+	if (source == nullptr)
+	{
+		return nullptr;
+	}
+
+	const size_t size        = ::strlen(source) + 1;
+	auto*        destination = static_cast<char*>(allocate_with_owner(size));
+	if (destination != nullptr)
+	{
+		::memcpy(destination, source, size);
+	}
+	return destination;
 }
 
 static KYTY_SYSV_ABI void* c_calloc(size_t n, size_t size)
@@ -428,29 +506,14 @@ static KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 		return replacement;
 	}
 
-	AllocationRecord record {};
+	HostAllocationRecord record {};
 	if (!claim_allocation(p, &record))
 	{
-		EXIT_NOT_IMPLEMENTED(LibKernel::ApplicationHeap::HasAllocator());
+		if (LibKernel::ApplicationHeap::IsInitialized())
+		{
+			EXIT("libc HLE cannot realloc an unowned application-heap pointer\n");
+		}
 		return ::realloc(p, size);
-	}
-
-	if (record.owner == AllocationOwner::ApplicationHeap)
-	{
-		void* replacement = allocate_with_owner(size);
-		if (replacement == nullptr)
-		{
-			const bool restored = register_allocation(p, record);
-			EXIT_IF(!restored);
-			return nullptr;
-		}
-
-		::memcpy(replacement, p, (record.size < size ? record.size : size));
-		if (!LibKernel::ApplicationHeap::Free(p))
-		{
-			EXIT("ApplicationHeap free failed during realloc\n");
-		}
-		return replacement;
 	}
 
 	void* replacement = ::realloc(p, size);
@@ -461,7 +524,7 @@ static KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 		return nullptr;
 	}
 
-	const bool registered = register_allocation(replacement, {AllocationOwner::Host, size});
+	const bool registered = register_allocation(replacement, {size});
 	EXIT_IF(!registered);
 	return replacement;
 }
@@ -690,16 +753,39 @@ static KYTY_SYSV_ABI int c_strncmp(const char* a, const char* b, size_t n)
 {
 	return ::strncmp(a, b, n);
 }
-// NID AV6ipCNa4Rw. Null args are UB on host strcasecmp; guest may pass null
-// strcasecmp; guest may pass null in boot string compares — return non-zero when
-// either side is null (not equal), matching a safe strcmp-like contract.
+
+static unsigned char c_ascii_fold(unsigned char value)
+{
+	return value >= 'A' && value <= 'Z' ? static_cast<unsigned char>(value + ('a' - 'A')) : value;
+}
+
+static int c_ascii_case_compare(const char* a, const char* b, size_t count)
+{
+	EXIT_IF(a == nullptr || b == nullptr);
+	for (size_t i = 0; i < count; ++i)
+	{
+		const auto left  = c_ascii_fold(static_cast<unsigned char>(a[i]));
+		const auto right = c_ascii_fold(static_cast<unsigned char>(b[i]));
+		if (left != right)
+		{
+			return static_cast<int>(left) - static_cast<int>(right);
+		}
+		if (left == 0)
+		{
+			return 0;
+		}
+	}
+	return 0;
+}
+
 static KYTY_SYSV_ABI int c_strcasecmp(const char* a, const char* b)
 {
-	if (a == nullptr || b == nullptr)
-	{
-		return (a == b ? 0 : 1);
-	}
-	return ::strcasecmp(a, b);
+	return c_ascii_case_compare(a, b, static_cast<size_t>(-1));
+}
+
+static KYTY_SYSV_ABI int c_strncasecmp(const char* a, const char* b, size_t count)
+{
+	return c_ascii_case_compare(a, b, count);
 }
 
 static KYTY_SYSV_ABI char* c_strcat(char* d, const char* s)
@@ -709,6 +795,10 @@ static KYTY_SYSV_ABI char* c_strcat(char* d, const char* s)
 static KYTY_SYSV_ABI char* c_strncat(char* d, const char* s, size_t n)
 {
 	return ::strncat(d, s, n);
+}
+static KYTY_SYSV_ABI char* c_strpbrk(const char* string, const char* accept)
+{
+	return const_cast<char*>(::strpbrk(string, accept));
 }
 static KYTY_SYSV_ABI char* c_strchr(const char* s, int c)
 {
@@ -856,7 +946,9 @@ static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
 	return ::strtok_r(str, delim, &save);
 }
 
-// C++ operator new/delete (mangled _Znwm/_ZdlPv/_ZdaPv), same ownership as libc malloc.
+// C++ operator new/delete, same ownership as libc malloc.
+static constexpr uint8_t g_cxx_nothrow = 0;
+
 static KYTY_SYSV_ABI void* cxx_new(size_t size)
 {
 	return allocate_with_owner(size != 0 ? size : 1);
@@ -871,6 +963,14 @@ static KYTY_SYSV_ABI void cxx_delete(void* p)
 	{
 		EXIT("ApplicationHeap delete failed\n");
 	}
+}
+static KYTY_SYSV_ABI void cxx_delete_sized(void* p, size_t /*size*/)
+{
+	cxx_delete(p);
+}
+static KYTY_SYSV_ABI void cxx_delete_sized_aligned(void* p, size_t /*size*/, size_t /*alignment*/)
+{
+	cxx_delete(p);
 }
 static KYTY_SYSV_ABI void* cxx_new_array(size_t size)
 {
@@ -887,24 +987,71 @@ static KYTY_SYSV_ABI void cxx_delete_array(void* p)
 		EXIT("ApplicationHeap delete[] failed\n");
 	}
 }
-
-// Gen5 libc NIDs iPBqs+YUUFw / 2HnmKiLmV6s — same SysV ABI from call sites:
-//   lea 8(obj),%rdi; mov $expected,%esi; mov $desired,%edx; call; cmp $1,%eax
-// Observed pairs: (ptr,1,0) then (ptr,1,4) on a 32-bit state word. Success
-// returns 1 when *p matched expected (FreeBSD-style atomic_cmpset_int).
-static KYTY_SYSV_ABI int c_atomic_cmpset_32(volatile uint32_t* p, uint32_t expected, uint32_t desired)
+static KYTY_SYSV_ABI void cxx_delete_array_sized(void* p, size_t /*size*/)
 {
-	if (p == nullptr)
+	cxx_delete_array(p);
+}
+
+static std::atomic<uint32_t>* c_atomic_4_ref(uint32_t* value)
+{
+	EXIT_IF(value == nullptr || (reinterpret_cast<uintptr_t>(value) % alignof(uint32_t)) != 0);
+	static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t));
+	static_assert(alignof(std::atomic<uint32_t>) <= alignof(uint32_t));
+	return reinterpret_cast<std::atomic<uint32_t>*>(value);
+}
+
+static KYTY_SYSV_ABI uint32_t c_atomic_load_4(const uint32_t* value)
+{
+	return c_atomic_4_ref(const_cast<uint32_t*>(value))->load(std::memory_order_seq_cst);
+}
+
+static KYTY_SYSV_ABI int c_atomic_compare_exchange_weak_4(uint32_t* value, uint32_t* expected, uint32_t desired)
+{
+	EXIT_IF(expected == nullptr);
+	uint32_t observed = *expected;
+	const bool exchanged =
+	    c_atomic_4_ref(value)->compare_exchange_weak(observed, desired, std::memory_order_seq_cst, std::memory_order_seq_cst);
+	if (!exchanged)
 	{
-		return 0;
+		*expected = observed;
 	}
-	uint32_t cur = *p;
-	if (cur == expected)
+	return exchanged ? 1 : 0;
+}
+
+static KYTY_SYSV_ABI uint32_t c_atomic_fetch_add_4(uint32_t* value, uint32_t operand)
+{
+	return c_atomic_4_ref(value)->fetch_add(operand, std::memory_order_seq_cst);
+}
+
+static KYTY_SYSV_ABI uint32_t c_atomic_fetch_sub_4(uint32_t* value, uint32_t operand)
+{
+	return c_atomic_4_ref(value)->fetch_sub(operand, std::memory_order_seq_cst);
+}
+
+static KYTY_SYSV_ABI uint32_t c_thread_hardware_concurrency()
+{
+	constexpr uint32_t kGuestHardwareThreads = 8;
+	return kGuestHardwareThreads;
+}
+
+static KYTY_SYSV_ABI int c_thread_join(LibKernel::Pthread thread, int* result)
+{
+	void* joined_value = nullptr;
+	if (LibKernel::PthreadJoin(thread, &joined_value) != OK)
 	{
-		*p = desired;
-		return 1;
+		return static_cast<int>(CThreadResult::Error);
 	}
-	return 0;
+
+	if (result != nullptr)
+	{
+		*result = static_cast<int>(reinterpret_cast<intptr_t>(joined_value));
+	}
+	return static_cast<int>(CThreadResult::Success);
+}
+
+static KYTY_SYSV_ABI void c_thread_yield()
+{
+	LibKernel::PthreadYield();
 }
 
 // --- Additional string / memory ---------------------------------------------
@@ -956,35 +1103,101 @@ static KYTY_SYSV_ABI int c_strncpy_s(char* d, size_t dn, const char* s, size_t n
 	return 0;
 }
 
-// --- ctype (musl/newlib style tables) ----------------------------------------
-// The PS4 libc exposes _Getpctype/_Getptoupper returning pointers to internal
-// classification tables indexed by (c+1). We return host-derived tables.
+// --- C locale character tables -----------------------------------------------
+// The guest ABI uses fixed classification bits and an EOF entry immediately
+// before the byte-indexed table. Keep this data independent of the host locale.
+using CtypeTable = std::array<std::uint16_t, 257>;
+
+constexpr CtypeTable MakeCtypeTable()
+{
+	CtypeTable table {};
+	for (int c = 0; c < 128; ++c)
+	{
+		std::uint16_t mask = 0;
+		if (c <= 0x08 || (c >= 0x0e && c <= 0x1f) || c == 0x7f)
+		{
+			mask |= 0x080;
+		}
+		if (c >= 0x09 && c <= 0x0d)
+		{
+			mask |= 0x0c0;
+		}
+		if (c == '\t')
+		{
+			mask |= 0x400;
+		}
+		if (c == ' ')
+		{
+			mask |= 0x004;
+		}
+		if ((c >= '!' && c <= '/') || (c >= ':' && c <= '@') || (c >= '[' && c <= '`') || (c >= '{' && c <= '~'))
+		{
+			mask |= 0x008;
+		}
+		if (c >= '0' && c <= '9')
+		{
+			mask |= 0x021;
+		}
+		if (c >= 'A' && c <= 'Z')
+		{
+			mask |= static_cast<std::uint16_t>(0x002 | (c <= 'F' ? 0x001 : 0));
+		}
+		if (c >= 'a' && c <= 'z')
+		{
+			mask |= static_cast<std::uint16_t>(0x010 | (c <= 'f' ? 0x001 : 0));
+		}
+		table[static_cast<std::size_t>(c) + 1] = mask;
+	}
+	return table;
+}
+
+constexpr CtypeTable g_c_locale_ctype = MakeCtypeTable();
+
+constexpr char g_c_locale_ampm[] =
+    ":AM:PM";
+constexpr char g_c_locale_weekdays[] =
+    ":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday";
+constexpr char g_c_locale_months[] =
+    ":Jan:January:Feb:February:Mar:March:Apr:April:May:May:Jun:June:Jul:July:Aug:August:Sep:September:Oct:October:Nov:"
+    "November:Dec:December";
+constexpr char g_c_locale_time_formats[] =
+    "|%a %b %e %T %Y|%m/%d/%y|%H:%M:%S|%I:%M:%S %p";
+constexpr char g_c_locale_empty[] = "";
+
+// The runtime exposes 21 stable pointers. Repeated entries represent the same
+// C-locale data for independent time-format categories.
+constexpr std::array<const char*, 21> g_c_locale_times = {
+    g_c_locale_ampm,
+    g_c_locale_weekdays,
+    g_c_locale_weekdays,
+    g_c_locale_weekdays,
+    g_c_locale_months,
+    g_c_locale_months,
+    g_c_locale_months,
+    g_c_locale_time_formats,
+    g_c_locale_time_formats,
+    g_c_locale_time_formats,
+    g_c_locale_time_formats,
+    g_c_locale_time_formats,
+    g_c_locale_time_formats,
+    g_c_locale_time_formats,
+    g_c_locale_time_formats,
+    g_c_locale_time_formats,
+    g_c_locale_time_formats,
+    g_c_locale_empty,
+    g_c_locale_empty,
+    g_c_locale_empty,
+    g_c_locale_empty,
+};
+
 static KYTY_SYSV_ABI const unsigned short* c_Getpctype()
 {
-	static unsigned short table[384];
-	static bool           init = false;
-	if (!init)
-	{
-		for (int c = -1; c < 256; c++)
-		{
-			unsigned short m = 0;
-			if (c >= 0)
-			{
-				if (::isupper(c)) m |= 0x01;
-				if (::islower(c)) m |= 0x02;
-				if (::isdigit(c)) m |= 0x04;
-				if (::isspace(c)) m |= 0x08;
-				if (::ispunct(c)) m |= 0x10;
-				if (::iscntrl(c)) m |= 0x20;
-				if (::isxdigit(c)) m |= 0x40;
-				if (::isblank(c)) m |= 0x80;
-				if (::isalpha(c)) m |= 0x100;
-			}
-			table[c + 1] = m;
-		}
-		init = true;
-	}
-	return table + 1;
+	return g_c_locale_ctype.data() + 1;
+}
+
+static KYTY_SYSV_ABI const char* const* c_Getptimes()
+{
+	return g_c_locale_times.data();
 }
 static KYTY_SYSV_ABI const short* c_Getptoupper()
 {
@@ -1075,6 +1288,23 @@ static KYTY_SYSV_ABI size_t c_fwrite(const void* p, size_t sz, size_t n, FILE* f
 {
 	return ::fwrite(p, sz, n, f);
 }
+static KYTY_SYSV_ABI int c_setvbuf(FILE* stream, char* buffer, int mode, size_t size)
+{
+	if (stream == nullptr)
+	{
+		return -1;
+	}
+
+	int host_mode = 0;
+	switch (mode)
+	{
+		case 0: host_mode = _IOFBF; break;
+		case 1: host_mode = _IOLBF; break;
+		case 2: host_mode = _IONBF; break;
+		default: return -1;
+	}
+	return ::setvbuf(stream, buffer, host_mode, size);
+}
 static KYTY_SYSV_ABI int c_fseek(FILE* f, long off, int w)
 {
 	return ::fseek(f, off, w);
@@ -1128,6 +1358,19 @@ static KYTY_SYSV_ABI int c_snprintf(VA_ARGS)
 	size_t      n   = VaArg_size_t(&ctx.va_list);
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
 	return Format(s, n, fmt, &ctx.va_list);
+}
+
+static KYTY_SYSV_ABI int c_snprintf_s(VA_ARGS)
+{
+	VA_CONTEXT(ctx);
+	char*       output      = VaArg_ptr<char>(&ctx.va_list);
+	size_t      output_size = VaArg_size_t(&ctx.va_list);
+	const char* format      = VaArg_ptr<const char>(&ctx.va_list);
+	if (output == nullptr || output_size == 0 || format == nullptr)
+	{
+		return -1;
+	}
+	return Format(output, output_size, format, &ctx.va_list);
 }
 
 // Gen5 libc_v1 NID NC4MSB+BRQg — same SysV shape as snprintf(buf, n, fmt, ...),
@@ -1383,38 +1626,141 @@ static KYTY_SYSV_ABI void c_abort()
 }
 
 // --- time --------------------------------------------------------------------
+struct GuestTm
+{
+	int32_t sec;
+	int32_t min;
+	int32_t hour;
+	int32_t mday;
+	int32_t mon;
+	int32_t year;
+	int32_t wday;
+	int32_t yday;
+	int32_t isdst;
+};
+
+static_assert(sizeof(GuestTm) == 36);
+
+static void HostToGuestTm(const struct tm& host, GuestTm* guest)
+{
+	EXIT_IF(guest == nullptr);
+	guest->sec   = host.tm_sec;
+	guest->min   = host.tm_min;
+	guest->hour  = host.tm_hour;
+	guest->mday  = host.tm_mday;
+	guest->mon   = host.tm_mon;
+	guest->year  = host.tm_year;
+	guest->wday  = host.tm_wday;
+	guest->yday  = host.tm_yday;
+	guest->isdst = host.tm_isdst;
+}
+
+static struct tm GuestToHostTm(const GuestTm& guest)
+{
+	struct tm host {};
+	host.tm_sec   = guest.sec;
+	host.tm_min   = guest.min;
+	host.tm_hour  = guest.hour;
+	host.tm_mday  = guest.mday;
+	host.tm_mon   = guest.mon;
+	host.tm_year  = guest.year;
+	host.tm_wday  = guest.wday;
+	host.tm_yday  = guest.yday;
+	host.tm_isdst = guest.isdst;
+	return host;
+}
+
+static bool HostGmtime(time_t value, struct tm* output)
+{
+	EXIT_IF(output == nullptr);
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return ::gmtime_s(output, &value) == 0;
+#else
+	return ::gmtime_r(&value, output) != nullptr;
+#endif
+}
+
+static bool HostLocaltime(time_t value, struct tm* output)
+{
+	EXIT_IF(output == nullptr);
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return ::localtime_s(output, &value) == 0;
+#else
+	return ::localtime_r(&value, output) != nullptr;
+#endif
+}
+
+static GuestTm* ConvertTime(const int64_t* value, GuestTm* output, bool utc)
+{
+	if (value == nullptr || output == nullptr)
+	{
+		return nullptr;
+	}
+	const time_t host_value = static_cast<time_t>(*value);
+	struct tm    host {};
+	if (!(utc ? HostGmtime(host_value, &host) : HostLocaltime(host_value, &host)))
+	{
+		return nullptr;
+	}
+	HostToGuestTm(host, output);
+	return output;
+}
+
 static KYTY_SYSV_ABI int64_t c_time(int64_t* t)
 {
 	time_t r = ::time(nullptr);
 	if (t) *t = r;
 	return r;
 }
-static KYTY_SYSV_ABI int64_t c_mktime(struct tm* tmv)
+static KYTY_SYSV_ABI int64_t c_mktime(GuestTm* tmv)
 {
-	return ::mktime(tmv);
+	if (tmv == nullptr)
+	{
+		return -1;
+	}
+	struct tm host   = GuestToHostTm(*tmv);
+	const auto value = ::mktime(&host);
+	if (value != static_cast<time_t>(-1))
+	{
+		HostToGuestTm(host, tmv);
+	}
+	return static_cast<int64_t>(value);
 }
-static KYTY_SYSV_ABI struct tm* c_gmtime(const int64_t* t)
+static KYTY_SYSV_ABI GuestTm* c_gmtime(const int64_t* t)
 {
-	time_t v = *t;
-	return ::gmtime(&v);
+	static thread_local GuestTm result {};
+	return ConvertTime(t, &result, true);
 }
-static KYTY_SYSV_ABI struct tm* c_localtime(const int64_t* t)
+static KYTY_SYSV_ABI GuestTm* c_gmtime_s(const int64_t* t, GuestTm* result)
 {
-	time_t v = *t;
-	return ::localtime(&v);
+	return ConvertTime(t, result, true);
 }
-static KYTY_SYSV_ABI size_t c_strftime(char* s, size_t n, const char* f, const struct tm* tmv)
+static KYTY_SYSV_ABI GuestTm* c_localtime(const int64_t* t)
 {
-	return ::strftime(s, n, f, tmv);
+	static thread_local GuestTm result {};
+	return ConvertTime(t, &result, false);
 }
-// Gen5 libc_v1 asctime — NID jT3xiGpA3B4. Returns static host buffer (same ABI as C).
-static KYTY_SYSV_ABI char* c_asctime(const struct tm* tmv)
+static KYTY_SYSV_ABI GuestTm* c_localtime_s(const int64_t* t, GuestTm* result)
+{
+	return ConvertTime(t, result, false);
+}
+static KYTY_SYSV_ABI size_t c_strftime(char* s, size_t n, const char* f, const GuestTm* tmv)
+{
+	if (tmv == nullptr)
+	{
+		return 0;
+	}
+	const struct tm host = GuestToHostTm(*tmv);
+	return ::strftime(s, n, f, &host);
+}
+static KYTY_SYSV_ABI char* c_asctime(const GuestTm* tmv)
 {
 	if (tmv == nullptr)
 	{
 		return nullptr;
 	}
-	return ::asctime(tmv);
+	const struct tm host = GuestToHostTm(*tmv);
+	return ::asctime(&host);
 }
 
 // --- math (double) -----------------------------------------------------------
@@ -1455,6 +1801,10 @@ static KYTY_SYSV_ABI double c_log(double x)
 	return ::log(x);
 }
 static KYTY_SYSV_ABI double c_pow(double x, double y)
+{
+	return ::pow(x, y);
+}
+static KYTY_SYSV_ABI double c_powidf2(double x, int y)
 {
 	return ::pow(x, y);
 }
@@ -1618,14 +1968,24 @@ static KYTY_SYSV_ABI void c_sincosf(float x, float* s, float* c)
 	*c = ::cosf(x);
 }
 
+namespace {
+
+std::mutex                                      g_static_init_mutex;
+std::condition_variable                         g_static_init_cv;
+std::unordered_map<const void*, std::thread::id> g_static_init_owner;
+
+} // namespace
+
 // --- C++ runtime -------------------------------------------------------------
-// Thread-safe one-time static-init guard matching the PS5 libc ABI.
-// Three states:
-//   0x00 = uninitialized (no thread has started init)
-//   0x100 = pending (a thread is running the initializer)
-//   0x01 = complete (initializer finished, skip forever)
-// This fixes deadlocks seen in Unity IL2CPP GC and NIS engine games when
-// concurrent threads attempt to initialize the same static variable.
+// Process-wide static initialization guards. The guard word uses bit 0 for
+// completion and the second byte for an initializer in progress. The owner map
+// is only populated while an initializer is active; it prevents a guest thread
+// from waiting on a guard that it already owns.
+static void static_init_claim_locked(const void* key)
+{
+	g_static_init_owner[key] = std::this_thread::get_id();
+}
+
 static KYTY_SYSV_ABI int c_cxa_guard_acquire(uint64_t* g)
 {
 	if (g == nullptr)
@@ -1636,24 +1996,31 @@ static KYTY_SYSV_ABI int c_cxa_guard_acquire(uint64_t* g)
 	for (;;)
 	{
 		uint64_t val = guard->load(std::memory_order_acquire);
-		// Bit 0 set → already initialized.
 		if ((val & 0x01) != 0)
 		{
 			return 0;
 		}
-		// No one is initializing → try to claim.
+
+		std::unique_lock lock(g_static_init_mutex);
+		val = guard->load(std::memory_order_acquire);
+		if ((val & 0x01) != 0)
+		{
+			return 0;
+		}
 		if ((val & 0xFF00) == 0)
 		{
-			uint64_t expected = val;
-			uint64_t desired  = val | 0x0100;
-			if (guard->compare_exchange_weak(expected, desired, std::memory_order_acq_rel))
-			{
-				return 1; // caller runs the initializer
-			}
-			continue; // CAS failed, retry
+			guard->store(val | 0x0100, std::memory_order_release);
+			static_init_claim_locked(g);
+			return 1;
 		}
-		// Another thread is initializing → spin-yield.
-		std::this_thread::yield();
+		const auto owner = g_static_init_owner.find(g);
+		if (owner != g_static_init_owner.end() && owner->second == std::this_thread::get_id())
+		{
+			printf(FG_BRIGHT_YELLOW "libc: recursive static initialization guard %p skipped by owner thread" DEFAULT "\n",
+			       static_cast<void*>(g));
+			return 0;
+		}
+		g_static_init_cv.wait(lock, [guard] { return (guard->load(std::memory_order_acquire) & 0xFF01) != 0x0100; });
 	}
 }
 static KYTY_SYSV_ABI void c_cxa_guard_release(uint64_t* g)
@@ -1663,9 +2030,13 @@ static KYTY_SYSV_ABI void c_cxa_guard_release(uint64_t* g)
 		return;
 	}
 	auto* guard = reinterpret_cast<std::atomic<uint64_t>*>(g);
-	// Clear pending, set complete.
-	uint64_t val = guard->load(std::memory_order_relaxed);
-	guard->store((val & ~static_cast<uint64_t>(0xFFFF)) | 0x0001, std::memory_order_release);
+	{
+		std::lock_guard lock(g_static_init_mutex);
+		const uint64_t  val = guard->load(std::memory_order_relaxed);
+		guard->store((val & ~static_cast<uint64_t>(0xFFFF)) | 0x0001, std::memory_order_release);
+		g_static_init_owner.erase(g);
+	}
+	g_static_init_cv.notify_all();
 }
 static KYTY_SYSV_ABI void c_cxa_guard_abort(uint64_t* g)
 {
@@ -1674,62 +2045,120 @@ static KYTY_SYSV_ABI void c_cxa_guard_abort(uint64_t* g)
 		return;
 	}
 	auto* guard = reinterpret_cast<std::atomic<uint64_t>*>(g);
-	// Clear pending, reset to uninitialized.
-	uint64_t val = guard->load(std::memory_order_relaxed);
-	guard->store(val & ~static_cast<uint64_t>(0xFFFF), std::memory_order_release);
-}
-
-// __cxa_thread_atexit_impl — registers a destructor to run when a thread exits.
-// Unity IL2CPP's GC threads use this for thread-local cleanup. The PS5 libc
-// accepts (dtor, obj, dso_handle) and returns 0 on success. We simply record
-// nothing because the emulator's thread lifetime is managed by the host.
-static KYTY_SYSV_ABI int c_cxa_thread_atexit(void (*/*dtor*/)(void*), void* /*obj*/, void* /*dso_handle*/)
-{
-	return 0;
+	{
+		std::lock_guard lock(g_static_init_mutex);
+		const uint64_t  val = guard->load(std::memory_order_relaxed);
+		guard->store(val & ~static_cast<uint64_t>(0xFFFF), std::memory_order_release);
+		g_static_init_owner.erase(g);
+	}
+	g_static_init_cv.notify_all();
 }
 
 using execute_once_callback_t = KYTY_SYSV_ABI int (*)(void*, void*, void**);
-
-static std::mutex              g_execute_once_mutex;
-static std::condition_variable g_execute_once_cv;
 
 static KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callback, void* context)
 {
 	PRINT_NAME();
 
-	if (flag == nullptr || callback == nullptr)
+	if (callback == nullptr)
 	{
 		return 0;
 	}
 
-	// PS5 libc's once_flag follows the usual three-state ABI: zero has not
-	// started, one is executing, and two is permanently complete. The callback
-	// receives the once flag itself as its first argument; Unity's static
-	// initializers retain that pointer while they publish their result.
-	constexpr int once_uninitialized = 0;
-	constexpr int once_running       = 1;
-	constexpr int once_complete      = 2;
+	constexpr uint32_t once_uninitialized = 0;
+	constexpr uint32_t once_complete      = 1;
+	constexpr uint32_t once_running       = 2;
 
+	if (flag == nullptr)
 	{
-		std::unique_lock lock(g_execute_once_mutex);
-		g_execute_once_cv.wait(lock, [flag] { return *flag != once_running; });
-		if (*flag == once_complete)
+		void* callback_result = nullptr;
+		return callback(nullptr, context, &callback_result) != 0 ? 1 : 0;
+	}
+
+	auto* once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
+	for (;;)
+	{
+		std::unique_lock lock(g_static_init_mutex);
+		uint32_t         value = once_flag->load(std::memory_order_acquire);
+		if (value == once_complete)
 		{
+			return 1;
+		}
+		if (value == once_running)
+		{
+			const auto owner = g_static_init_owner.find(flag);
+			if (owner != g_static_init_owner.end() && owner->second == std::this_thread::get_id())
+			{
+				printf(FG_BRIGHT_YELLOW "libc: recursive one-time initialization flag %p skipped by owner thread" DEFAULT "\n",
+				       static_cast<void*>(flag));
+				return 1;
+			}
+			g_static_init_cv.wait(lock);
+			continue;
+		}
+		if (value != once_uninitialized)
+		{
+			printf(FG_BRIGHT_YELLOW "libc: invalid one-time initialization flag %p state 0x%x" DEFAULT "\n", static_cast<void*>(flag), value);
 			return 0;
 		}
-		*flag = once_running;
+
+		once_flag->store(once_running, std::memory_order_release);
+		static_init_claim_locked(flag);
+		lock.unlock();
+		void*     callback_result = nullptr;
+		const int result          = callback(flag, context, &callback_result);
+		lock.lock();
+		once_flag->store(result != 0 ? once_complete : once_uninitialized, std::memory_order_release);
+		g_static_init_owner.erase(flag);
+		lock.unlock();
+		g_static_init_cv.notify_all();
+		return result != 0 ? 1 : 0;
 	}
+}
 
-	void* callback_result = nullptr;
-	const int result      = callback(flag, context, &callback_result);
+struct ThreadAtexitEntry
+{
+	void (*destructor)(void*);
+	void* object;
+	void* dso_handle;
+};
 
+thread_local std::vector<ThreadAtexitEntry> g_thread_atexit_entries;
+thread_local bool                           g_running_thread_atexit = false;
+std::once_flag                              g_thread_atexit_hook_once;
+
+static void run_thread_atexit_destructors(void* guest_stack_top)
+{
+	EXIT_IF(guest_stack_top == nullptr);
+	if (g_running_thread_atexit)
 	{
-		std::lock_guard lock(g_execute_once_mutex);
-		*flag = result != 0 ? once_complete : once_uninitialized;
+		return;
 	}
-	g_execute_once_cv.notify_all();
 
-	return result != 0 ? 0 : LibKernel::KERNEL_ERROR_EAGAIN;
+	g_running_thread_atexit = true;
+	while (!g_thread_atexit_entries.empty())
+	{
+		const auto entry = g_thread_atexit_entries.back();
+		g_thread_atexit_entries.pop_back();
+		if (entry.destructor != nullptr)
+		{
+			Loader::GuestCall::InvokeOnStack(reinterpret_cast<uint64_t>(entry.destructor),
+			                                 reinterpret_cast<uint64_t>(entry.object), 0, 0, guest_stack_top);
+		}
+	}
+	g_running_thread_atexit = false;
+}
+
+static KYTY_SYSV_ABI int c_cxa_thread_atexit(void (*dtor)(void*), void* obj, void* dso_handle)
+{
+	if (dtor == nullptr)
+	{
+		return -1;
+	}
+
+	std::call_once(g_thread_atexit_hook_once, [] { LibKernel::PthreadSetHostThreadDtors(run_thread_atexit_destructors); });
+	g_thread_atexit_entries.push_back({dtor, obj, dso_handle});
+	return 0;
 }
 
 static KYTY_SYSV_ABI int c_mtx_init(LibKernel::PthreadMutex* mutex, int type)
@@ -1744,7 +2173,7 @@ static KYTY_SYSV_ABI int c_mtx_init(LibKernel::PthreadMutex* mutex, int type)
 	constexpr int mtx_recursive = 0x100;
 	if ((type & mtx_recursive) == 0)
 	{
-		return c_thread_result(LibKernel::PthreadMutexInit(mutex, nullptr, nullptr));
+		return c_thread_sync_result(LibKernel::PthreadMutexInit(mutex, nullptr, nullptr));
 	}
 
 	LibKernel::PthreadMutexattr attr = nullptr;
@@ -1762,21 +2191,193 @@ static KYTY_SYSV_ABI int c_mtx_init(LibKernel::PthreadMutex* mutex, int type)
 		(void)LibKernel::PthreadMutexattrDestroy(&attr);
 	}
 
-	return c_thread_result(result);
+	return c_thread_sync_result(result);
+}
+
+static KYTY_SYSV_ABI int c_mtx_init_with_name(LibKernel::PthreadMutex* mutex, int type, const char* name)
+{
+	PRINT_NAME();
+
+	if (mutex == nullptr)
+	{
+		return static_cast<int>(CThreadResult::Error);
+	}
+
+	constexpr int mtx_recursive = 0x100;
+	if ((type & mtx_recursive) == 0)
+	{
+		return c_thread_sync_result(LibKernel::PthreadMutexInit(mutex, nullptr, name));
+	}
+
+	LibKernel::PthreadMutexattr attr = nullptr;
+	int result                       = LibKernel::PthreadMutexattrInit(&attr);
+	if (result == OK)
+	{
+		result = LibKernel::PthreadMutexattrSettype(&attr, 2);
+	}
+	if (result == OK)
+	{
+		result = LibKernel::PthreadMutexInit(mutex, &attr, name);
+	}
+	if (attr != nullptr)
+	{
+		(void)LibKernel::PthreadMutexattrDestroy(&attr);
+	}
+
+	return c_thread_sync_result(result);
+}
+
+static KYTY_SYSV_ABI int c_mtx_init_with_default_name_override(LibKernel::PthreadMutex* mutex, int type, const char* name)
+{
+	PRINT_NAME();
+
+	return c_mtx_init_with_name(mutex, type, name);
+}
+
+static KYTY_SYSV_ABI void c_mtx_destroy(LibKernel::PthreadMutex* mutex)
+{
+	PRINT_NAME();
+
+	if (mutex == nullptr)
+	{
+		return;
+	}
+
+	auto* private_mutex = *mutex;
+	if (private_mutex != nullptr && reinterpret_cast<uintptr_t>(private_mutex) >= 0x100000)
+	{
+		(void)LibKernel::PthreadMutexDestroy(mutex);
+	}
 }
 
 static KYTY_SYSV_ABI int c_mtx_lock(LibKernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
-	return c_thread_result(LibKernel::PthreadMutexLock(mutex));
+	return c_thread_sync_result(LibKernel::PthreadMutexLock(mutex));
+}
+
+static KYTY_SYSV_ABI int c_mtx_trylock(LibKernel::PthreadMutex* mutex)
+{
+	PRINT_NAME();
+
+	return c_thread_sync_result(LibKernel::PthreadMutexTrylock(mutex));
+}
+
+static LibKernel::KernelUseconds c_abstime_remaining_usec(const LibKernel::KernelTimespec* abstime)
+{
+	LibKernel::KernelTimespec now {};
+	if (abstime == nullptr || LibKernel::KernelClockGettime(0, &now) != OK)
+	{
+		return 0;
+	}
+
+	const int64_t now_us = now.tv_sec * 1000000 + now.tv_nsec / 1000;
+	const int64_t abs_us = abstime->tv_sec * 1000000 + abstime->tv_nsec / 1000;
+	if (abs_us <= now_us)
+	{
+		return 0;
+	}
+
+	const int64_t delta = abs_us - now_us;
+	if (delta > static_cast<int64_t>(UINT32_MAX))
+	{
+		return UINT32_MAX;
+	}
+	return static_cast<LibKernel::KernelUseconds>(delta);
+}
+
+static KYTY_SYSV_ABI int c_mtx_timedlock(LibKernel::PthreadMutex* mutex, const LibKernel::KernelTimespec* abstime)
+{
+	PRINT_NAME();
+
+	return c_thread_sync_result(LibKernel::PthreadMutexTimedlock(mutex, c_abstime_remaining_usec(abstime)));
 }
 
 static KYTY_SYSV_ABI int c_mtx_unlock(LibKernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
-	return c_thread_result(LibKernel::PthreadMutexUnlock(mutex));
+	return c_thread_sync_result(LibKernel::PthreadMutexUnlock(mutex));
+}
+
+static KYTY_SYSV_ABI int c_mtx_current_owns(LibKernel::PthreadMutex* mutex)
+{
+	PRINT_NAME();
+
+	return LibKernel::PthreadMutexCurrentOwns(mutex) ? 1 : 0;
+}
+
+static void c_thread_require(int result, const char* operation)
+{
+	if (result != static_cast<int>(CThreadResult::Success))
+	{
+		EXIT("C thread %s failed with result %d\n", operation, result);
+	}
+}
+
+struct CndThreadExitEntry
+{
+	LibKernel::PthreadCond*  condition;
+	LibKernel::PthreadMutex* mutex;
+	int*                     completed;
+};
+
+thread_local std::vector<CndThreadExitEntry> g_cnd_thread_exit_entries;
+
+static KYTY_SYSV_ABI void c_cnd_register_at_thread_exit(LibKernel::PthreadCond* condition,
+                                                        LibKernel::PthreadMutex* mutex, int* completed)
+{
+	EXIT_IF(condition == nullptr || mutex == nullptr);
+	g_cnd_thread_exit_entries.push_back({condition, mutex, completed});
+}
+
+static KYTY_SYSV_ABI void c_cnd_unregister_at_thread_exit(LibKernel::PthreadMutex* mutex)
+{
+	if (mutex == nullptr)
+	{
+		return;
+	}
+
+	const auto first_removed =
+	    std::remove_if(g_cnd_thread_exit_entries.begin(), g_cnd_thread_exit_entries.end(),
+	                   [mutex](const auto& entry) { return entry.mutex == mutex; });
+	g_cnd_thread_exit_entries.erase(first_removed, g_cnd_thread_exit_entries.end());
+}
+
+static KYTY_SYSV_ABI void c_cnd_do_broadcast_at_thread_exit()
+{
+	for (auto& entry: g_cnd_thread_exit_entries)
+	{
+		if (entry.completed != nullptr)
+		{
+			c_thread_require(c_mtx_lock(entry.mutex), "thread-exit mutex lock");
+			*entry.completed = 1;
+			c_thread_require(c_cnd_broadcast(entry.condition), "thread-exit condition broadcast");
+			c_thread_require(c_mtx_unlock(entry.mutex), "thread-exit mutex unlock");
+		}
+		else
+		{
+			c_thread_require(c_mtx_unlock(entry.mutex), "thread-exit transferred mutex unlock");
+			c_thread_require(c_cnd_broadcast(entry.condition), "thread-exit condition broadcast");
+		}
+	}
+	g_cnd_thread_exit_entries.clear();
+}
+
+static KYTY_SYSV_ABI int64_t c_xtime_get_ticks()
+{
+	LibKernel::KernelTimespec now {};
+	if (LibKernel::KernelClockGettime(0, &now) != OK)
+	{
+		return 0;
+	}
+
+	// The C++ runtime converts these absolute ticks to nanoseconds by
+	// multiplying by 1000 before splitting them into a timespec. Its tick
+	// contract is therefore microseconds, not the 100-nanosecond host unit.
+	constexpr int64_t ticks_per_second = 1000000;
+	return now.tv_sec * ticks_per_second + now.tv_nsec / 1000;
 }
 
 static KYTY_SYSV_ABI void c_Xout_of_range(const char* msg)
@@ -1790,6 +2391,26 @@ static KYTY_SYSV_ABI void c_Xlength_error(const char* msg)
 static KYTY_SYSV_ABI void c_Xregex_error(int error_type)
 {
 	printf("std::regex_error warning: error_type=%d\n", error_type);
+}
+
+// The guest C++ runtime calls this after a synchronization primitive reports
+// an error. Guest exception unwinding is not available, so preserve the error
+// value in the fatal diagnostic instead of returning as though the throw ran.
+static KYTY_SYSV_ABI void c_Throw_C_error(int error)
+{
+	EXIT("C++ runtime error throw requested: code=%d\n", error);
+}
+
+struct SceErrorExceptionLayout
+{
+	void**    vtable;
+	uint32_t* shared_message;
+};
+
+static KYTY_SYSV_ABI const char* c_error_exception_what(const SceErrorExceptionLayout* self)
+{
+	EXIT_IF(self == nullptr || self->shared_message == nullptr);
+	return reinterpret_cast<const char*>(self->shared_message) + sizeof(uint32_t);
 }
 
 // Itanium __cxa_dynamic_cast (NID hMAe+TWS9mQ). Captured Dreaming Sarah after
@@ -1850,13 +2471,7 @@ static void* g_ctype_vtable[16] = {
     reinterpret_cast<void*>(&CxxCtypeFacetQuery), // +0x40
 };
 
-// Minimal facet object: vptr only (methods do not touch further fields).
-struct CxxFacetStub
-{
-	void** vtable;
-};
-
-static CxxFacetStub g_ctype_facet {g_ctype_vtable};
+static CxxCtypeFacetLayout g_ctype_facet {g_ctype_vtable, 0, g_c_locale_ctype.data() + 1};
 
 // Facet vector: index 0 unused; ctype at kCxxCtypeCharId (1).
 static void* g_classic_facets[kCxxLocimpFacetCount] = {nullptr, &g_ctype_facet};
@@ -1880,6 +2495,40 @@ static std::uint64_t g_ctype_char_id = kCxxCtypeCharId;
 // std::codecvt<char, char, mbstate_t>::id starts unassigned. libc assigns a
 // locale-facet index lazily, so this must be distinct stable guest storage.
 static std::uint64_t g_codecvt_char_id = 0;
+static std::uint64_t g_collate_char_id = 5;
+static std::uint64_t g_numpunct_char_id = 6;
+static std::uint64_t g_num_get_char_id = 7;
+static std::uint64_t g_time_get_char_id = 8;
+static std::uint64_t g_time_put_char_id = 9;
+static std::uint64_t g_codecvt_wchar_id = 10;
+static std::uint64_t g_codecvt_char32_id = 11;
+// Versioned facets allocate their locale indices lazily in guest code. Keep
+// each id in distinct stable storage so registration and caching remain
+// independent even when the stripped export does not expose the facet name.
+static std::uint64_t g_lazy_locale_facet_id_0 = 0;
+static std::uint64_t g_lazy_locale_facet_id_1 = 0;
+
+struct alignas(8) CxxOstreamStorage
+{
+	std::uint64_t words[13] {};
+};
+
+static_assert(sizeof(CxxOstreamStorage) == 104);
+
+static CxxOstreamStorage g_versioned_cerr;
+static CxxOstreamStorage g_versioned_clog;
+static CxxOstreamStorage g_versioned_cout;
+
+struct alignas(8) CxxClassicOstreamStorage
+{
+	std::uint64_t words[12] {};
+};
+
+static_assert(sizeof(CxxClassicOstreamStorage) == 96);
+
+static CxxClassicOstreamStorage g_classic_cerr;
+static CxxClassicOstreamStorage g_classic_cout;
+
 // libc math constant imported by C++ locale initialization.
 static const double g_positive_infinity = INFINITY;
 static std::uint64_t g_locale_id_2   = 2;
@@ -1888,7 +2537,7 @@ static std::uint64_t g_locale_id_4   = 4;
 static std::uint64_t g_locale_id_5   = 5;
 static std::uint64_t g_locale_id_6   = 6;
 static std::uint64_t g_locale_id_7   = 7;
-static std::int32_t  g_locale_id_cnt = 8;
+static std::int32_t  g_locale_id_cnt = 12;
 static std::uint64_t g_dummy_obj_1   = 0;
 static std::uint64_t g_dummy_obj_2   = 0;
 static std::uint64_t g_dummy_obj_3   = 0;
@@ -1927,6 +2576,16 @@ static void* g_si_class_type_info_vtable[8]  = {reinterpret_cast<void*>(&CxxVtab
                                                 reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
 static void* g_vmi_class_type_info_vtable[8] = {reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
                                                 reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* g_pointer_type_info_vtable[8]   = {reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
+                                                reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* g_pointer_to_member_type_info_vtable[8] = {reinterpret_cast<void*>(&CxxVtableNoop),
+                                                        reinterpret_cast<void*>(&CxxVtableNoop),
+                                                        reinterpret_cast<void*>(&CxxVtableNoop),
+                                                        reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* g_function_type_info_vtable[8]           = {reinterpret_cast<void*>(&CxxVtableNoop),
+                                                         reinterpret_cast<void*>(&CxxVtableNoop),
+                                                         reinterpret_cast<void*>(&CxxVtableNoop),
+                                                         reinterpret_cast<void*>(&CxxVtableNoop)};
 static void* g_exception_vtable[8]           = {reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
                                                 reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
 
@@ -1943,10 +2602,11 @@ static void* g_logic_error_vtable[8]        = KYTY_CXX_NOOP_VTBL;
 static void* g_out_of_range_vtable[8]       = KYTY_CXX_NOOP_VTBL;
 static void* g_runtime_error_vtable[8]      = KYTY_CXX_NOOP_VTBL;
 static void* g_invalid_argument_vtable[8]   = KYTY_CXX_NOOP_VTBL;
+static void* g_length_error_vtable[8]       = KYTY_CXX_NOOP_VTBL;
 static void* g_system_error_vtable[8]       = KYTY_CXX_NOOP_VTBL;
-static void* g_bad_cast_vtable[8]           = KYTY_CXX_NOOP_VTBL;
+static void* g_future_error_vtable[8]       = KYTY_CXX_NOOP_VTBL;
+static void* g_ios_base_vtable[8]           = KYTY_CXX_NOOP_VTBL;
 static void* g_ios_failure_vtable[8]        = KYTY_CXX_NOOP_VTBL;
-static void* g_num_put_char_vtable[8]       = KYTY_CXX_NOOP_VTBL;
 // std::codecvt<char, char, mbstate_t> virtual dispatch. Keep it distinct from
 // other facets: it is ABI-compatible storage, but its behavior must not be
 // conflated with ctype before a guest conversion call provides evidence.
@@ -1958,22 +2618,863 @@ static const char g_ti_name_domain_error[]      = "St12domain_error";
 static const char g_ti_name_out_of_range[]      = "St12out_of_range";
 static const char g_ti_name_runtime_error[]     = "St13runtime_error";
 static const char g_ti_name_invalid_argument[]  = "St16invalid_argument";
+static const char g_ti_name_length_error[]      = "St12length_error";
+static const char g_ti_name_range_error[]       = "St11range_error";
+static const char g_ti_name_overflow_error[]    = "St14overflow_error";
+static const char g_ti_name_underflow_error[]   = "St15underflow_error";
+static const char g_ti_name_future_error[]      = "St12future_error";
 static const char g_ti_name_bad_cast[]          = "St8bad_cast";
+static const char g_ti_name_bad_alloc[]         = "St9bad_alloc";
+static const char g_ti_name_bad_array_new_length[] = "St20bad_array_new_length";
 static const char g_ti_name_ios_base[]          = "St8ios_base";
 static const char g_ti_name_ios_failure[]       = "NSt8ios_base7failureE";
+static const char g_ti_name_num_put_char[]      = "St7num_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE";
 
 static CxxSiTypeInfoLayout g_typeinfo_exception {g_si_class_type_info_vtable, g_ti_name_exception, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_domain_error {g_si_class_type_info_vtable, g_ti_name_domain_error, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_out_of_range {g_si_class_type_info_vtable, g_ti_name_out_of_range, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_runtime_error {g_si_class_type_info_vtable, g_ti_name_runtime_error, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_invalid_argument {g_si_class_type_info_vtable, g_ti_name_invalid_argument, nullptr};
-static CxxSiTypeInfoLayout g_typeinfo_bad_cast {g_si_class_type_info_vtable, g_ti_name_bad_cast, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_length_error {g_si_class_type_info_vtable, g_ti_name_length_error, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_range_error {g_si_class_type_info_vtable, g_ti_name_range_error, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_overflow_error {g_si_class_type_info_vtable, g_ti_name_overflow_error, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_underflow_error {g_si_class_type_info_vtable, g_ti_name_underflow_error, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_future_error {g_si_class_type_info_vtable, g_ti_name_future_error, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_bad_cast {g_si_class_type_info_vtable, g_ti_name_bad_cast,
+                                                reinterpret_cast<const CxxTypeInfoLayout*>(&g_typeinfo_exception)};
+static CxxSiTypeInfoLayout g_typeinfo_bad_alloc {g_si_class_type_info_vtable, g_ti_name_bad_alloc,
+                                                 reinterpret_cast<const CxxTypeInfoLayout*>(&g_typeinfo_exception)};
+static CxxSiTypeInfoLayout g_typeinfo_bad_array_new_length {
+    g_si_class_type_info_vtable,
+    g_ti_name_bad_array_new_length,
+    reinterpret_cast<const CxxTypeInfoLayout*>(&g_typeinfo_bad_alloc),
+};
 static CxxSiTypeInfoLayout g_typeinfo_ios_base {g_si_class_type_info_vtable, g_ti_name_ios_base, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_ios_failure {g_si_class_type_info_vtable, g_ti_name_ios_failure, nullptr};
+static CxxSiTypeInfoLayout g_typeinfo_num_put_char {g_si_class_type_info_vtable, g_ti_name_num_put_char, nullptr};
+
+struct alignas(8) CxxFacetBase
+{
+	void**        vtable;
+	std::uint32_t references;
+	std::uint32_t reserved;
+};
+
+struct CxxOstreamIterator
+{
+	std::uint64_t failed;
+	void*         streambuf;
+};
+
+static_assert(sizeof(CxxOstreamIterator) == 16);
+
+// The fields used by num_put are part of the guest ios_base contract. Keep the
+// complete prefix opaque: it belongs to the stream implementation and is only
+// read by guest code, while these scalar formatting fields are consumed here.
+struct alignas(8) CxxIosBaseLayout
+{
+	std::byte      reserved[0x18];
+	std::uint32_t flags;
+	std::int32_t  precision;
+	std::int32_t  width;
+};
+
+static_assert(offsetof(CxxIosBaseLayout, flags) == 0x18);
+static_assert(offsetof(CxxIosBaseLayout, precision) == 0x1c);
+static_assert(offsetof(CxxIosBaseLayout, width) == 0x20);
+
+constexpr std::uint32_t kCxxIosLeft       = 0x02;
+constexpr std::uint32_t kCxxIosRight      = 0x04;
+constexpr std::uint32_t kCxxIosInternal   = 0x08;
+constexpr std::uint32_t kCxxIosAdjustMask = kCxxIosLeft | kCxxIosRight | kCxxIosInternal;
+constexpr std::uint32_t kCxxIosDec        = 0x10;
+constexpr std::uint32_t kCxxIosOct        = 0x20;
+constexpr std::uint32_t kCxxIosHex        = 0x40;
+constexpr std::uint32_t kCxxIosBaseMask   = kCxxIosDec | kCxxIosOct | kCxxIosHex;
+constexpr std::uint32_t kCxxIosShowBase   = 0x80;
+constexpr std::uint32_t kCxxIosShowPoint  = 0x100;
+constexpr std::uint32_t kCxxIosUppercase  = 0x200;
+constexpr std::uint32_t kCxxIosShowPos    = 0x400;
+constexpr std::uint32_t kCxxIosScientific = 0x800;
+constexpr std::uint32_t kCxxIosFixed      = 0x1000;
+constexpr std::uint32_t kCxxIosFloatMask  = kCxxIosScientific | kCxxIosFixed;
+constexpr std::uint32_t kCxxIosBoolAlpha  = 0x8000;
+constexpr std::int32_t  kCxxNumPutMaxWidth = 1 << 20;
+constexpr std::int32_t  kCxxNumPutMaxPrecision = 512;
+
+// std::setw(int) returns the ABI's four-byte formatting wrapper. The stream
+// insertion overload owns applying the value to ios_base::width.
+static KYTY_SYSV_ABI int c_setw(int width)
+{
+	return width;
+}
+
+static KYTY_SYSV_ABI void c_facet_dtor(CxxFacetBase* /*self*/) {}
+
+static KYTY_SYSV_ABI void c_facet_deleting_dtor(CxxFacetBase* self)
+{
+	cxx_delete(self);
+}
+
+static KYTY_SYSV_ABI void c_facet_incref(CxxFacetBase* self)
+{
+	EXIT_IF(self == nullptr);
+	__atomic_add_fetch(&self->references, 1u, __ATOMIC_RELAXED);
+}
+
+static KYTY_SYSV_ABI CxxFacetBase* c_facet_decref(CxxFacetBase* self)
+{
+	EXIT_IF(self == nullptr);
+	const std::uint32_t previous = __atomic_fetch_sub(&self->references, 1u, __ATOMIC_ACQ_REL);
+	EXIT_IF(previous == 0);
+	return previous == 1 ? self : nullptr;
+}
+
+static CxxOstreamIterator CxxOstreamWrite(CxxOstreamIterator iterator, const char* data, size_t size)
+{
+	if (iterator.failed != 0 || iterator.streambuf == nullptr || data == nullptr)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+
+	auto** streambuf_vtable = *static_cast<void***>(iterator.streambuf);
+	EXIT_IF(streambuf_vtable == nullptr || streambuf_vtable[4] == nullptr);
+	const std::uint64_t overflow = reinterpret_cast<std::uint64_t>(streambuf_vtable[4]);
+	for (size_t index = 0; index < size; ++index)
+	{
+		const std::uint64_t result =
+		    Loader::GuestCall::Invoke(overflow, reinterpret_cast<std::uint64_t>(iterator.streambuf),
+		                              static_cast<unsigned char>(data[index]), 0);
+		if (static_cast<std::int32_t>(result) == -1)
+		{
+			iterator.failed = 1;
+			break;
+		}
+	}
+	return iterator;
+}
+
+static CxxOstreamIterator CxxOstreamWriteRepeated(CxxOstreamIterator iterator, char character, size_t count)
+{
+	char padding[64];
+	::memset(padding, character, sizeof(padding));
+	while (count != 0 && iterator.failed == 0)
+	{
+		const size_t chunk = std::min(count, sizeof(padding));
+		iterator          = CxxOstreamWrite(iterator, padding, chunk);
+		count -= chunk;
+	}
+	return iterator;
+}
+
+static CxxOstreamIterator CxxOstreamWriteFormatted(CxxOstreamIterator iterator, CxxIosBaseLayout* ios_base, char fill,
+                                                    const char* output, size_t output_size, size_t prefix_size)
+{
+	if (ios_base == nullptr || output == nullptr || prefix_size > output_size)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+
+	const std::int32_t configured_width = ios_base->width;
+	ios_base->width                     = 0;
+	if (configured_width > kCxxNumPutMaxWidth)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+
+	const size_t padding = configured_width > 0 && static_cast<size_t>(configured_width) > output_size
+	                           ? static_cast<size_t>(configured_width) - output_size
+	                           : 0;
+	const std::uint32_t adjustment = ios_base->flags & kCxxIosAdjustMask;
+	if (adjustment != kCxxIosLeft && adjustment != kCxxIosInternal)
+	{
+		iterator = CxxOstreamWriteRepeated(iterator, fill, padding);
+	}
+
+	if (prefix_size != 0)
+	{
+		iterator = CxxOstreamWrite(iterator, output, prefix_size);
+	}
+	if (adjustment == kCxxIosInternal)
+	{
+		iterator = CxxOstreamWriteRepeated(iterator, fill, padding);
+	}
+	iterator = CxxOstreamWrite(iterator, output + prefix_size, output_size - prefix_size);
+	if (adjustment == kCxxIosLeft)
+	{
+		iterator = CxxOstreamWriteRepeated(iterator, fill, padding);
+	}
+	return iterator;
+}
+
+static int CxxNumPutBase(std::uint32_t flags)
+{
+	switch (flags & kCxxIosBaseMask)
+	{
+		case kCxxIosOct: return 8;
+		case kCxxIosHex: return 16;
+		default: return 10;
+	}
+}
+
+static CxxOstreamIterator CxxNumPutUnsigned(CxxOstreamIterator iterator, CxxIosBaseLayout* ios_base, char fill,
+	                                         std::uint64_t value, bool force_hex_prefix)
+{
+	if (ios_base == nullptr)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+
+	const std::uint32_t flags = ios_base->flags;
+	const int           base  = force_hex_prefix ? 16 : CxxNumPutBase(flags);
+	char                digits[65];
+	const auto [end, error] = std::to_chars(std::begin(digits), std::end(digits), value, base);
+	if (error != std::errc {})
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+
+	char   output[68];
+	size_t prefix_size = 0;
+	if ((force_hex_prefix || ((flags & kCxxIosShowBase) != 0 && value != 0)) && base == 16)
+	{
+		output[prefix_size++] = '0';
+		output[prefix_size++] = (flags & kCxxIosUppercase) != 0 ? 'X' : 'x';
+	} else if ((flags & kCxxIosShowBase) != 0 && value != 0 && base == 8)
+	{
+		output[prefix_size++] = '0';
+	}
+
+	const size_t digit_count = static_cast<size_t>(end - std::begin(digits));
+	::memcpy(output + prefix_size, digits, digit_count);
+	if ((flags & kCxxIosUppercase) != 0)
+	{
+		for (size_t index = prefix_size; index < prefix_size + digit_count; ++index)
+		{
+			if (output[index] >= 'a' && output[index] <= 'f')
+			{
+				output[index] = static_cast<char>(output[index] - ('a' - 'A'));
+			}
+		}
+	}
+	return CxxOstreamWriteFormatted(iterator, ios_base, fill, output, prefix_size + digit_count, prefix_size);
+}
+
+static CxxOstreamIterator CxxNumPutSigned(CxxOstreamIterator iterator, CxxIosBaseLayout* ios_base, char fill,
+	                                       std::int64_t value)
+{
+	if (ios_base == nullptr)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+	if (CxxNumPutBase(ios_base->flags) != 10)
+	{
+		return CxxNumPutUnsigned(iterator, ios_base, fill, static_cast<std::uint64_t>(value), false);
+	}
+
+	char output[32];
+	auto [end, error] = std::to_chars(std::begin(output), std::end(output), value);
+	if (error != std::errc {})
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+
+	size_t output_size = static_cast<size_t>(end - std::begin(output));
+	size_t prefix_size = output_size != 0 && output[0] == '-' ? 1 : 0;
+	if (prefix_size == 0 && (ios_base->flags & kCxxIosShowPos) != 0)
+	{
+		::memmove(output + 1, output, output_size);
+		output[0] = '+';
+		++output_size;
+		prefix_size = 1;
+	}
+	return CxxOstreamWriteFormatted(iterator, ios_base, fill, output, output_size, prefix_size);
+}
+
+template <typename Float>
+static CxxOstreamIterator CxxNumPutFloat(CxxOstreamIterator iterator, CxxIosBaseLayout* ios_base, char fill, Float value)
+{
+	static_assert(std::is_same_v<Float, double> || std::is_same_v<Float, long double>);
+	if (ios_base == nullptr)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+
+	const std::uint32_t flags = ios_base->flags;
+	const std::int32_t precision = ios_base->precision < 0 ? 6 : ios_base->precision;
+	if (precision > kCxxNumPutMaxPrecision)
+	{
+		ios_base->width = 0;
+		iterator.failed  = 1;
+		return iterator;
+	}
+
+	char* format = nullptr;
+	char  format_buffer[8];
+	format = format_buffer;
+	*format++ = '%';
+	if ((flags & kCxxIosShowPos) != 0)
+	{
+		*format++ = '+';
+	}
+	if ((flags & kCxxIosShowPoint) != 0)
+	{
+		*format++ = '#';
+	}
+	*format++ = '.';
+	*format++ = '*';
+	if constexpr (std::is_same_v<Float, long double>)
+	{
+		*format++ = 'L';
+	}
+
+	switch (flags & kCxxIosFloatMask)
+	{
+		case kCxxIosFixed: *format++ = 'f'; break;
+		case kCxxIosScientific: *format++ = (flags & kCxxIosUppercase) != 0 ? 'E' : 'e'; break;
+		case kCxxIosFloatMask: *format++ = (flags & kCxxIosUppercase) != 0 ? 'A' : 'a'; break;
+		default: *format++ = (flags & kCxxIosUppercase) != 0 ? 'G' : 'g'; break;
+	}
+	*format = '\0';
+
+	char output[1024];
+	const int output_size = ::snprintf(output, sizeof(output), format_buffer, precision, value);
+	if (output_size < 0 || static_cast<size_t>(output_size) >= sizeof(output))
+	{
+		ios_base->width = 0;
+		iterator.failed  = 1;
+		return iterator;
+	}
+
+	size_t prefix_size = output_size != 0 && (output[0] == '-' || output[0] == '+') ? 1 : 0;
+	return CxxOstreamWriteFormatted(iterator, ios_base, fill, output, static_cast<size_t>(output_size), prefix_size);
+}
+
+static KYTY_SYSV_ABI CxxOstreamIterator c_num_put_do_put_bool(const CxxFacetBase* self, CxxOstreamIterator iterator,
+	                                                            CxxIosBaseLayout* ios_base, char fill, bool value)
+{
+	if (self == nullptr || ios_base == nullptr)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+	if ((ios_base->flags & kCxxIosBoolAlpha) == 0)
+	{
+		const char numeric = value ? '1' : '0';
+		return CxxOstreamWriteFormatted(iterator, ios_base, fill, &numeric, 1, 0);
+	}
+	const char* text = value ? "true" : "false";
+	return CxxOstreamWriteFormatted(iterator, ios_base, fill, text, ::strlen(text), 0);
+}
+
+static KYTY_SYSV_ABI CxxOstreamIterator c_num_put_do_put_long(const CxxFacetBase* self, CxxOstreamIterator iterator,
+	                                                            CxxIosBaseLayout* ios_base, char fill, std::int64_t value)
+{
+	if (self == nullptr)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+	return CxxNumPutSigned(iterator, ios_base, fill, value);
+}
+
+static KYTY_SYSV_ABI CxxOstreamIterator c_num_put_do_put_ulong(const CxxFacetBase* self, CxxOstreamIterator iterator,
+	                                                             CxxIosBaseLayout* ios_base, char fill, std::uint64_t value)
+{
+	if (self == nullptr)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+	return CxxNumPutUnsigned(iterator, ios_base, fill, value, false);
+}
+
+static KYTY_SYSV_ABI CxxOstreamIterator c_num_put_do_put_double(const CxxFacetBase* self, CxxOstreamIterator iterator,
+	                                                              CxxIosBaseLayout* ios_base, char fill, double value)
+{
+	if (self == nullptr)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+	return CxxNumPutFloat(iterator, ios_base, fill, value);
+}
+
+static KYTY_SYSV_ABI CxxOstreamIterator c_num_put_do_put_long_double(const CxxFacetBase* self, CxxOstreamIterator iterator,
+	                                                                   CxxIosBaseLayout* ios_base, char fill, long double value)
+{
+	if (self == nullptr)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+	return CxxNumPutFloat(iterator, ios_base, fill, value);
+}
+
+static KYTY_SYSV_ABI CxxOstreamIterator c_num_put_do_put_pointer(const CxxFacetBase* self, CxxOstreamIterator iterator,
+	                                                               CxxIosBaseLayout* ios_base, char fill, const void* value)
+{
+	if (self == nullptr)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+	return CxxNumPutUnsigned(iterator, ios_base, fill, reinterpret_cast<std::uintptr_t>(value), true);
+}
+
+static KYTY_SYSV_ABI CxxOstreamIterator c_num_put_do_put_long_long(const CxxFacetBase* self, CxxOstreamIterator iterator,
+	                                                                 CxxIosBaseLayout* ios_base, char fill, std::int64_t value)
+{
+	return c_num_put_do_put_long(self, iterator, ios_base, fill, value);
+}
+
+static KYTY_SYSV_ABI CxxOstreamIterator c_num_put_do_put_ulong_long(const CxxFacetBase* self, CxxOstreamIterator iterator,
+	                                                                  CxxIosBaseLayout* ios_base, char fill, std::uint64_t value)
+{
+	return c_num_put_do_put_ulong(self, iterator, ios_base, fill, value);
+}
+
+// Itanium vtable object: offset-to-top, RTTI, two destructors, facet lifetime,
+// then the eight standard narrow-character numeric formatting overloads.
+static void* g_num_put_char_vtable[] = {
+    nullptr,
+    &g_typeinfo_num_put_char,
+    reinterpret_cast<void*>(&c_facet_dtor),
+    reinterpret_cast<void*>(&c_facet_deleting_dtor),
+    reinterpret_cast<void*>(&c_facet_incref),
+    reinterpret_cast<void*>(&c_facet_decref),
+    reinterpret_cast<void*>(&c_num_put_do_put_bool),
+    reinterpret_cast<void*>(&c_num_put_do_put_long),
+    reinterpret_cast<void*>(&c_num_put_do_put_ulong),
+    reinterpret_cast<void*>(&c_num_put_do_put_double),
+    reinterpret_cast<void*>(&c_num_put_do_put_long_double),
+    reinterpret_cast<void*>(&c_num_put_do_put_pointer),
+    reinterpret_cast<void*>(&c_num_put_do_put_long_long),
+    reinterpret_cast<void*>(&c_num_put_do_put_ulong_long),
+};
+
+static_assert(std::size(g_num_put_char_vtable) == 14);
+
+static KYTY_SYSV_ABI CxxOstreamIterator c_time_put_do_put(const CxxFacetBase* /*self*/, CxxOstreamIterator iterator,
+                                                          void* /*ios_base*/, char /*fill*/, const GuestTm* guest_time,
+                                                          char format, char modifier)
+{
+	if (iterator.failed != 0 || iterator.streambuf == nullptr || guest_time == nullptr || format == '\0')
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+
+	char format_string[4] = {'%', format, '\0', '\0'};
+	if (modifier == 'E' || modifier == 'O')
+	{
+		format_string[1] = modifier;
+		format_string[2] = format;
+	}
+
+	const std::tm host_time = GuestToHostTm(*guest_time);
+	char          output[256] {};
+	const size_t  output_size = std::strftime(output, sizeof(output), format_string, &host_time);
+	if (output_size == 0)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+
+	return CxxOstreamWrite(iterator, output, output_size);
+}
+
+static KYTY_SYSV_ABI CxxOstreamIterator c_time_put_put(const CxxFacetBase* self, CxxOstreamIterator iterator, void* ios_base,
+                                                       char fill, const GuestTm* guest_time, const char* first, const char* last)
+{
+	if (self == nullptr || first == nullptr || last == nullptr || first > last)
+	{
+		iterator.failed = 1;
+		return iterator;
+	}
+
+	while (first != last && iterator.failed == 0)
+	{
+		if (*first != '%')
+		{
+			iterator = CxxOstreamWrite(iterator, first, 1);
+			++first;
+			continue;
+		}
+
+		++first;
+		if (first == last)
+		{
+			const char percent = '%';
+			return CxxOstreamWrite(iterator, &percent, 1);
+		}
+
+		char modifier = '\0';
+		if (*first == 'E' || *first == 'O')
+		{
+			modifier = *first++;
+			if (first == last)
+			{
+				const char incomplete[] = {'%', modifier};
+				return CxxOstreamWrite(iterator, incomplete, sizeof(incomplete));
+			}
+		}
+
+		iterator = c_time_put_do_put(self, iterator, ios_base, fill, guest_time, *first, modifier);
+		++first;
+	}
+	return iterator;
+}
+
+static const char g_ti_name_time_put_char[] = "St8time_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE";
+static CxxSiTypeInfoLayout g_typeinfo_time_put_char {g_si_class_type_info_vtable, g_ti_name_time_put_char, nullptr};
+
+// Itanium vtable object: offset-to-top, type_info, destructors, facet ownership,
+// and the narrow-character formatting virtual.
+static void* g_time_put_char_vtable[] = {
+    nullptr,
+    &g_typeinfo_time_put_char,
+    reinterpret_cast<void*>(&c_facet_dtor),
+    reinterpret_cast<void*>(&c_facet_deleting_dtor),
+    reinterpret_cast<void*>(&c_facet_incref),
+    reinterpret_cast<void*>(&c_facet_decref),
+    reinterpret_cast<void*>(&c_time_put_do_put),
+};
+
+struct alignas(8) CxxThreadPad
+{
+	void**                  vtable;
+	LibKernel::PthreadCond  condition;
+	LibKernel::PthreadMutex mutex;
+	bool                    launched;
+	std::uint8_t            padding[7] {};
+};
+
+static_assert(sizeof(CxxThreadPad) == 32);
+static_assert(offsetof(CxxThreadPad, condition) == 8);
+static_assert(offsetof(CxxThreadPad, mutex) == 16);
+static_assert(offsetof(CxxThreadPad, launched) == 24);
+
+static const char       g_ti_name_thread_pad[] = "St4_Pad";
+static CxxTypeInfoLayout g_typeinfo_thread_pad {g_class_type_info_vtable, g_ti_name_thread_pad};
+
+static KYTY_SYSV_ABI void c_thread_pad_pure_virtual(CxxThreadPad* /*self*/)
+{
+	EXIT("std::_Pad virtual entry invoked before derived construction completed\n");
+}
+
+static void* g_thread_pad_vtable[] = {
+    nullptr,
+    &g_typeinfo_thread_pad,
+    reinterpret_cast<void*>(&c_thread_pad_pure_virtual),
+};
+
+static void c_thread_pad_construct(CxxThreadPad* self, const char* name)
+{
+	EXIT_IF(self == nullptr);
+
+	self->vtable   = g_thread_pad_vtable + 2;
+	self->condition = nullptr;
+	self->mutex     = nullptr;
+	self->launched  = false;
+
+	const int condition_result = c_cnd_init_with_name(&self->condition, name);
+	c_thread_require(condition_result, "std::_Pad condition initialization");
+
+	const int mutex_result = c_mtx_init_with_name(&self->mutex, 1, name);
+	if (mutex_result != static_cast<int>(CThreadResult::Success))
+	{
+		c_cnd_destroy(&self->condition);
+		c_thread_require(mutex_result, "std::_Pad mutex initialization");
+	}
+
+	c_thread_require(c_mtx_lock(&self->mutex), "std::_Pad initial mutex lock");
+}
+
+static KYTY_SYSV_ABI void c_thread_pad_ctor(CxxThreadPad* self)
+{
+	c_thread_pad_construct(self, "Thr");
+}
+
+static KYTY_SYSV_ABI void c_thread_pad_named_ctor(CxxThreadPad* self, const char* name)
+{
+	c_thread_pad_construct(self, name);
+}
+
+static KYTY_SYSV_ABI void c_thread_pad_dtor(CxxThreadPad* self)
+{
+	EXIT_IF(self == nullptr);
+
+	self->vtable = g_thread_pad_vtable + 2;
+	c_thread_require(c_mtx_unlock(&self->mutex), "std::_Pad destructor mutex unlock");
+	c_mtx_destroy(&self->mutex);
+	c_cnd_destroy(&self->condition);
+}
+
+static KYTY_SYSV_ABI void c_thread_pad_release(CxxThreadPad* self)
+{
+	EXIT_IF(self == nullptr);
+
+	c_thread_require(c_mtx_lock(&self->mutex), "std::_Pad release mutex lock");
+	self->launched = true;
+	c_thread_require(c_cnd_signal(&self->condition), "std::_Pad release condition signal");
+	c_thread_require(c_mtx_unlock(&self->mutex), "std::_Pad release mutex unlock");
+}
+
+static KYTY_SYSV_ABI void* c_thread_pad_call_func(void* argument)
+{
+	auto* self = static_cast<CxxThreadPad*>(argument);
+	EXIT_IF(self == nullptr || self->vtable == nullptr || self->vtable[0] == nullptr);
+
+	Loader::GuestCall::Invoke(reinterpret_cast<std::uint64_t>(self->vtable[0]), reinterpret_cast<std::uint64_t>(self), 0, 0);
+	c_cnd_do_broadcast_at_thread_exit();
+	return nullptr;
+}
+
+static void c_thread_pad_launch(CxxThreadPad* self, LibKernel::Pthread* thread, const LibKernel::PthreadAttr* attr,
+                                const char* name)
+{
+	EXIT_IF(self == nullptr || thread == nullptr);
+
+	const int result = LibKernel::PthreadCreate(thread, attr, c_thread_pad_call_func, self, name != nullptr ? name : "");
+	if (result != OK)
+	{
+		EXIT("std::_Pad thread creation failed with kernel result 0x%x\n", static_cast<unsigned int>(result));
+	}
+
+	while (!self->launched)
+	{
+		c_thread_require(c_cnd_wait(&self->condition, &self->mutex), "std::_Pad launch condition wait");
+	}
+}
+
+static KYTY_SYSV_ABI void c_thread_pad_launch(CxxThreadPad* self, LibKernel::Pthread* thread)
+{
+	c_thread_pad_launch(self, thread, nullptr, "");
+}
+
+static KYTY_SYSV_ABI void c_thread_pad_named_launch(CxxThreadPad* self, const char* name, LibKernel::Pthread* thread)
+{
+	c_thread_pad_launch(self, thread, nullptr, name);
+}
+
+static KYTY_SYSV_ABI void c_thread_pad_attr_launch(CxxThreadPad* self, const LibKernel::PthreadAttr* attr,
+                                                   LibKernel::Pthread* thread)
+{
+	c_thread_pad_launch(self, thread, attr, "");
+}
+
+static KYTY_SYSV_ABI void c_thread_pad_named_attr_launch(CxxThreadPad* self, const char* name,
+                                                         const LibKernel::PthreadAttr* attr, LibKernel::Pthread* thread)
+{
+	c_thread_pad_launch(self, thread, attr, name);
+}
+
+static KYTY_SYSV_ABI void c_bad_alloc_dtor(void* /*self*/) {}
+
+static KYTY_SYSV_ABI void c_bad_cast_dtor(void* /*self*/) {}
+
+static KYTY_SYSV_ABI void c_bad_cast_deleting_dtor(void* self)
+{
+	cxx_delete_sized(self, sizeof(void*));
+}
+
+static KYTY_SYSV_ABI const char* c_bad_cast_what(const void* /*self*/)
+{
+	return "bad cast";
+}
+
+static KYTY_SYSV_ABI void c_bad_cast_doraise(const void* /*self*/)
+{
+	EXIT("std::bad_cast::_Doraise requires guest exception unwinding\n");
+}
+
+static KYTY_SYSV_ABI void c_bad_alloc_deleting_dtor(void* self)
+{
+	cxx_delete_sized(self, sizeof(void*));
+}
+
+static KYTY_SYSV_ABI const char* c_bad_alloc_what(const void* /*self*/)
+{
+	return "std::bad_alloc";
+}
+
+static KYTY_SYSV_ABI void c_bad_array_new_length_dtor(void* /*self*/) {}
+
+static KYTY_SYSV_ABI void c_bad_array_new_length_deleting_dtor(void* self)
+{
+	cxx_delete_sized(self, sizeof(void*));
+}
+
+static KYTY_SYSV_ABI const char* c_bad_array_new_length_what(const void* /*self*/)
+{
+	return "bad allocation";
+}
+
+static KYTY_SYSV_ABI void c_bad_alloc_doraise(const void* /*self*/)
+{
+	EXIT("std::bad_alloc::_Doraise requires guest exception unwinding\n");
+}
+
+// Itanium ABI vtable groups begin with offset-to-top and type_info. Guest
+// relocations select the address point at slot two for object vptrs.
+static void* g_bad_cast_vtable[] = {
+    nullptr,
+    &g_typeinfo_bad_cast,
+    reinterpret_cast<void*>(&c_bad_cast_dtor),
+    reinterpret_cast<void*>(&c_bad_cast_deleting_dtor),
+    reinterpret_cast<void*>(&c_bad_cast_what),
+    reinterpret_cast<void*>(&c_bad_cast_doraise),
+};
+
+static void* g_bad_alloc_vtable[] = {
+    nullptr,
+    &g_typeinfo_bad_alloc,
+    reinterpret_cast<void*>(&c_bad_alloc_dtor),
+    reinterpret_cast<void*>(&c_bad_alloc_deleting_dtor),
+    reinterpret_cast<void*>(&c_bad_alloc_what),
+    reinterpret_cast<void*>(&c_bad_alloc_doraise),
+};
+
+static void* g_bad_array_new_length_vtable[] = {
+    nullptr,
+    &g_typeinfo_bad_array_new_length,
+    reinterpret_cast<void*>(&c_bad_array_new_length_dtor),
+    reinterpret_cast<void*>(&c_bad_array_new_length_deleting_dtor),
+    reinterpret_cast<void*>(&c_bad_array_new_length_what),
+    reinterpret_cast<void*>(&c_bad_alloc_doraise),
+};
+
+struct CxxErrorCategoryLayout;
+
+struct alignas(8) CxxErrorCodeLayout
+{
+	int32_t                       value;
+	uint32_t                      padding;
+	const CxxErrorCategoryLayout* category;
+};
+
+using CxxErrorConditionLayout = CxxErrorCodeLayout;
+
+struct alignas(8) CxxErrorCategoryLayout
+{
+	void**      vtable;
+	const char* name;
+};
+
+static KYTY_SYSV_ABI void c_error_category_dtor(CxxErrorCategoryLayout* /*self*/) {}
+static KYTY_SYSV_ABI void c_system_error_dtor(void* /*self*/) {}
+
+static KYTY_SYSV_ABI const char* c_error_category_name(const CxxErrorCategoryLayout* self)
+{
+	return self != nullptr && self->name != nullptr ? self->name : "unknown";
+}
+
+static CxxStringLayout* CxxStringConstruct(CxxStringLayout* result, const std::string& value)
+{
+	EXIT_IF(result == nullptr);
+
+	*result          = {};
+	result->capacity = sizeof(result->storage.inline_data) - 1;
+	result->size     = value.size();
+
+	char* destination = result->storage.inline_data;
+	if (value.size() > result->capacity)
+	{
+		EXIT_IF(value.size() == SIZE_MAX);
+		destination = static_cast<char*>(allocate_with_owner(value.size() + 1));
+		EXIT_IF(destination == nullptr);
+		result->storage.allocated.data = destination;
+		result->capacity               = value.size();
+	}
+
+	::memcpy(destination, value.c_str(), value.size() + 1);
+	return result;
+}
+
+static KYTY_SYSV_ABI CxxStringLayout* c_error_category_message(CxxStringLayout* result, const CxxErrorCategoryLayout* self,
+                                                               int32_t value)
+{
+	const bool system = self != nullptr && self->name != nullptr && ::strcmp(self->name, "system") == 0;
+	const auto& category = system ? std::system_category() : std::generic_category();
+	return CxxStringConstruct(result, std::error_code(value, category).message());
+}
+
+static KYTY_SYSV_ABI CxxErrorConditionLayout c_error_category_default_error_condition(const CxxErrorCategoryLayout* self, int32_t value)
+{
+	return {value, 0, self};
+}
+
+static KYTY_SYSV_ABI int c_error_category_equivalent_condition(const CxxErrorCategoryLayout* self, int32_t value,
+                                                              const CxxErrorConditionLayout* condition)
+{
+	if (condition == nullptr)
+	{
+		return 0;
+	}
+
+	const auto expected = c_error_category_default_error_condition(self, value);
+	return condition->value == expected.value && condition->category == expected.category ? 1 : 0;
+}
+
+static KYTY_SYSV_ABI int c_error_category_equivalent_code(const CxxErrorCategoryLayout* self, const CxxErrorCodeLayout* code,
+                                                          int32_t condition)
+{
+	return code != nullptr && code->value == condition && code->category == self ? 1 : 0;
+}
+
+static void* g_error_category_vtable[8] = {
+    reinterpret_cast<void*>(&c_error_category_dtor),
+    reinterpret_cast<void*>(&c_error_category_dtor),
+    reinterpret_cast<void*>(&c_error_category_name),
+    reinterpret_cast<void*>(&c_error_category_message),
+    reinterpret_cast<void*>(&c_error_category_default_error_condition),
+    reinterpret_cast<void*>(&c_error_category_equivalent_condition),
+    reinterpret_cast<void*>(&c_error_category_equivalent_code),
+    reinterpret_cast<void*>(&CxxVtableNoop),
+};
+
+static CxxErrorCategoryLayout g_generic_error_category {g_error_category_vtable, "generic"};
+static CxxErrorCategoryLayout g_system_error_category {g_error_category_vtable, "system"};
+
+static KYTY_SYSV_ABI const CxxErrorCategoryLayout* c_generic_category()
+{
+	return &g_generic_error_category;
+}
+
+static KYTY_SYSV_ABI const CxxErrorCategoryLayout* c_system_category()
+{
+	return &g_system_error_category;
+}
+
+static const char g_ti_name_error_category[] = "St14error_category";
+static CxxTypeInfoLayout g_typeinfo_error_category {g_class_type_info_vtable, g_ti_name_error_category};
 
 // streamoff sentinel and fpz (common libc++/MSVC objects; zero-safe).
 static std::int64_t g_bad_off = -1;
 static std::uint8_t g_fpz[16] {};
+
+// The shared_ptr control block uses this process-wide lock to serialize
+// reference-count ownership changes made by different guest threads.
+static Core::Mutex g_shared_ptr_spin_lock;
+
+static KYTY_SYSV_ABI void c_Lock_shared_ptr_spin_lock()
+{
+	g_shared_ptr_spin_lock.Lock();
+}
+
+static KYTY_SYSV_ABI void c_Unlock_shared_ptr_spin_lock()
+{
+	g_shared_ptr_spin_lock.Unlock();
+}
 
 // _Locksyslock / _Unlocksyslock — CRT global lock; no-op is correct while HLE
 // is single-threaded for these paths. Arg is lock index (guest passes 0).
@@ -1989,6 +3490,11 @@ static KYTY_SYSV_ABI void* c_locale_Getgloballocale()
 static KYTY_SYSV_ABI void* c_locale_CreateClassicLocimp()
 {
 	return &g_classic_locimp;
+}
+
+static KYTY_SYSV_ABI const CxxLocaleLayout* c_locale_classic()
+{
+	return &g_sce_classic_locale;
 }
 
 static KYTY_SYSV_ABI void c_locale_InitTemporaryInfo(void* /*self*/, const char* /*name*/, std::uint64_t /*category*/)
@@ -2036,11 +3542,6 @@ static KYTY_SYSV_ABI void c_ios_base_dtor(void* /*self*/) {}
 // storage; the HLE exception/locale objects have no host-side payload to tear
 // down, so destruction deliberately leaves the guest allocation untouched.
 static KYTY_SYSV_ABI void c_ios_base_failure_dtor(void* /*self*/) {}
-
-// std::bad_cast has no state beyond its std::exception base. The complete
-// destructor therefore has no storage to release; deletion remains the
-// responsibility of the caller's deleting destructor path.
-static KYTY_SYSV_ABI void c_bad_cast_dtor(void* /*self*/) {}
 
 // Itanium C++ ABI exception entry points (Gen5 libc_v1). Full unwind is not
 // implemented; throws are host-fatal with a decoded type/message so the
@@ -2298,6 +3799,7 @@ void KYTY_SYSV_ABI LibcHeapGetTraceInfo(Info* info)
 LIB_DEFINE(InitLibcInternalExt_1)
 {
 	LIB_FUNC("NWtTN10cJzE", LibcInternalExt::LibcHeapGetTraceInfo);
+	LIB_FUNC("qBS714-Jr3g", LibC::c_cxa_thread_atexit);
 }
 
 } // namespace LibcInternalExt
@@ -2404,6 +3906,13 @@ void* KYTY_SYSV_ABI LibcMspaceMemalign(void* msp, size_t align, size_t size)
 	}
 
 	return Core::MSpaceMemalign(msp, align, size);
+}
+
+size_t KYTY_SYSV_ABI LibcMspaceMallocUsableSize(const void* ptr)
+{
+	PRINT_NAME();
+
+	return Core::MSpaceMallocUsableSize(ptr);
 }
 
 // sceLibcMspaceCalloc — NID LYo3GhIlB38 (msp, nelem, size). Observed (msp, 1, 0x40).
@@ -2533,13 +4042,33 @@ LIB_DEFINE(InitLibcInternal_1)
 	LIB_FUNC("H2e8t5ScQGc", LibC::cxa_finalize);
 	LIB_FUNC("DiGVep5yB5w", LibC::c_execute_once);
 	LIB_FUNC("YaHc3GS7y7g", LibC::c_mtx_init);
+	LIB_FUNC("tgioGpKtmbE", LibC::c_mtx_init_with_name);
+	LIB_FUNC("JHp7ogc1+HY", LibC::c_mtx_init_with_default_name_override);
+	LIB_FUNC("5Lf51jvohTQ", LibC::c_mtx_destroy);
 	LIB_FUNC("iS4aWbUonl0", LibC::c_mtx_lock);
+	LIB_FUNC("k6pGNMwJB08", LibC::c_mtx_trylock);
+	LIB_FUNC("hPzYSd5Nasc", LibC::c_mtx_timedlock);
 	LIB_FUNC("gTuXQwP9rrs", LibC::c_mtx_unlock);
+	LIB_FUNC("VYQwFs4CC4Y", LibC::c_mtx_current_owns);
+	LIB_FUNC("SreZybSRWpU", LibC::c_cnd_init);
+	LIB_FUNC("2B+V3qCqz4s", LibC::c_cnd_init_with_name);
+	LIB_FUNC("jBOZAv6CwkM", LibC::c_cnd_init_with_default_name_override);
 	LIB_FUNC("VsP3daJgmVA", LibC::c_cnd_broadcast);
+	LIB_FUNC("7yMFgcS8EPA", LibC::c_cnd_destroy);
+	LIB_FUNC("0uuqgRz9qfo", LibC::c_cnd_signal);
+	LIB_FUNC("McaImWKXong", LibC::c_cnd_timedwait);
+	LIB_FUNC("vEaqE-7IZYc", LibC::c_cnd_wait);
+	LIB_FUNC("DV2AdZFFEh8", LibC::c_cnd_register_at_thread_exit);
+	LIB_FUNC("wpuIiVoCWcM", LibC::c_cnd_unregister_at_thread_exit);
+	LIB_FUNC("vyLotuB6AS4", LibC::c_cnd_do_broadcast_at_thread_exit);
+	LIB_FUNC("+fAmL52-yfQ", LibC::c_cnd_register_at_thread_exit);
+	LIB_FUNC("SwcNvp-Af6c", LibC::c_cnd_unregister_at_thread_exit);
+	LIB_FUNC("2s6aLdPIA4I", LibC::c_cnd_do_broadcast_at_thread_exit);
 
 	LIB_FUNC("-hn1tcVHq5Q", LibcInternal::LibcMspaceCreate);
 	LIB_FUNC("OJjm-QOIHlI", LibcInternal::LibcMspaceMalloc);
 	LIB_FUNC("iF1iQHzxBJU", LibcInternal::LibcMspaceMemalign);
+	LIB_FUNC("fEoW6BJsPt4", LibcInternal::LibcMspaceMallocUsableSize);
 	LIB_FUNC("LYo3GhIlB38", LibcInternal::LibcMspaceCalloc);
 	LIB_FUNC("Vla-Z+eXlxo", LibcInternal::LibcMspaceFree);
 	LIB_FUNC("k04jLXu3+Ic", LibcInternal::LibcMspaceMallocStatsFast);
@@ -2562,16 +4091,38 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("2sWzhYqFH4E", stdout);
 	LIB_OBJECT("H8AprKeZtNg", stderr);
 
+	LIB_FUNC("-hn1tcVHq5Q", LibcInternal::LibcMspaceCreate);
+	LIB_FUNC("OJjm-QOIHlI", LibcInternal::LibcMspaceMalloc);
+	LIB_FUNC("iF1iQHzxBJU", LibcInternal::LibcMspaceMemalign);
+	LIB_FUNC("fEoW6BJsPt4", LibcInternal::LibcMspaceMallocUsableSize);
+	LIB_FUNC("LYo3GhIlB38", LibcInternal::LibcMspaceCalloc);
+	LIB_FUNC("Vla-Z+eXlxo", LibcInternal::LibcMspaceFree);
+	LIB_FUNC("k04jLXu3+Ic", LibcInternal::LibcMspaceMallocStatsFast);
+
 	// C++ locale / RTTI objects — Dreaming Sarah (Qoo175Ig+-k → classic locale).
 	// dynlib: _ZSt21_sceLibcClassicLocale, ctype<char>::id, locale::id::_Id_cnt,
 	// __class_type_info / __si_class_type_info / __vmi_class_type_info vtables.
-	LIB_OBJECT("Qoo175Ig+-k", &LibC::g_sce_classic_locale);
-	LIB_OBJECT("Cv+zC4EjGMA", &LibC::g_ctype_char_id);
-	LIB_OBJECT("H4fcpQOpc08", &LibC::g_locale_id_cnt);
+	LIB_OBJECT_ALIASES(&LibC::g_sce_classic_locale, "Qoo175Ig+-k", "Mcrl2crhxu0");
+	LIB_OBJECT_ALIASES(&LibC::g_ctype_char_id, "Cv+zC4EjGMA", "MmytiDdoGBA");
+	LIB_OBJECT_ALIASES(&LibC::g_locale_id_cnt, "H4fcpQOpc08", "EIyErVBW9QI");
+	LIB_OBJECT("3ZotGOwzi9k", &LibC::g_lazy_locale_facet_id_0);
+	LIB_OBJECT("5+FD4VpX+nw", &LibC::g_lazy_locale_facet_id_1);
+	LIB_OBJECT("Jk7KrKMQzDw", &LibC::g_versioned_cerr);
+	LIB_OBJECT("tIpEi4OinAI", &LibC::g_versioned_clog);
+	LIB_OBJECT("9Qe7XFSQ4Lk", &LibC::g_versioned_cout);
+	LIB_OBJECT("TVfbf1sXt0A", &LibC::g_classic_cerr);
+	LIB_OBJECT("5PfqUBaQf4g", &LibC::g_classic_cout);
 	// Facet ::id Objects — eboot imports (Ps5Nid / ps5_names).
 	LIB_OBJECT("VmqsS6auJzo", &LibC::g_ctype_wchar_id);
 	LIB_OBJECT("irGo1yaJ-vM", &LibC::g_collate_wchar_id);
 	LIB_OBJECT("E14mW8pVpoE", &LibC::g_num_put_char_id);
+	LIB_OBJECT("7brRfHVVAlI", &LibC::g_collate_char_id);
+	LIB_OBJECT("9iXtwvGVFRI", &LibC::g_numpunct_char_id);
+	LIB_OBJECT("-mLzBSk-VGs", &LibC::g_num_get_char_id);
+	LIB_OBJECT("a54t8+k7KpY", &LibC::g_time_get_char_id);
+	LIB_OBJECT("BamOsNbUcn4", &LibC::g_time_put_char_id);
+	LIB_OBJECT("FjZCPmK0SbA", &LibC::g_codecvt_wchar_id);
+	LIB_OBJECT("u2MAta5SS84", &LibC::g_codecvt_char32_id);
 	// std::codecvt<char, char, mbstate_t>::id — eVFYZnYNDo0.
 	LIB_OBJECT("eVFYZnYNDo0", &LibC::g_codecvt_char_id);
 	// std::codecvt<char, char, mbstate_t> vtable — aK1Ymf-NhAs.
@@ -2581,6 +4132,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("byV+FWlAnB4", LibC::g_class_type_info_vtable);
 	LIB_OBJECT("pZ9WXcClPO8", LibC::g_si_class_type_info_vtable);
 	LIB_OBJECT("9ByRMdo7ywg", LibC::g_vmi_class_type_info_vtable);
+	LIB_OBJECT("aeHxLWwq0gQ", LibC::g_pointer_type_info_vtable);
+	LIB_OBJECT("2H51caHZU0Y", LibC::g_pointer_to_member_type_info_vtable);
+	LIB_OBJECT("CSEjkTYt5dw", LibC::g_function_type_info_vtable);
 	LIB_OBJECT("dCzeFfg9WWI", LibC::g_exception_vtable);
 	// Exception / iostream RTTI Objects — eboot libc_v1 imports.
 	// Prefer typed type_info/vtable Objects over generic locale-id/dummy placeholders
@@ -2590,18 +4144,48 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("dKjhNUf9FBc", &LibC::g_typeinfo_out_of_range);
 	LIB_OBJECT("bLPn1gfqSW8", &LibC::g_typeinfo_runtime_error);
 	LIB_OBJECT("XZzWt0ygWdw", &LibC::g_typeinfo_invalid_argument);
+	LIB_OBJECT("cxqzgvGm1GI", &LibC::g_typeinfo_length_error);
+	LIB_OBJECT("C0IYaaVSC1w", &LibC::g_typeinfo_range_error);
+	LIB_OBJECT("lt0mLhNwjs0", &LibC::g_typeinfo_overflow_error);
+	LIB_OBJECT("oNRAB0Zs2+0", &LibC::g_typeinfo_underflow_error);
+	LIB_OBJECT("DCY9coLQcVI", &LibC::g_typeinfo_future_error);
 	LIB_OBJECT("qOD-ksTkE08", &LibC::g_typeinfo_bad_cast);
 	LIB_OBJECT("BJCgW9-OxLA", &LibC::g_typeinfo_ios_base);
 	LIB_OBJECT("sBCTjFk7Gi4", &LibC::g_typeinfo_ios_failure);
+	LIB_OBJECT("RYlvfQvnOzo", &LibC::g_typeinfo_num_put_char);
+	LIB_OBJECT("33t+tvosxCI", &LibC::g_typeinfo_time_put_char);
 	LIB_OBJECT("oAidKrxuUv0", LibC::g_domain_error_vtable);
 	LIB_OBJECT("udTM6Nxx-Ng", LibC::g_logic_error_vtable);
 	LIB_OBJECT("n+aUKkC-3sI", LibC::g_out_of_range_vtable);
 	LIB_OBJECT("-L+-8F0+gBc", LibC::g_runtime_error_vtable);
 	LIB_OBJECT("keXoyW-rV-0", LibC::g_invalid_argument_vtable);
+	LIB_OBJECT("cqvea9uWpvQ", LibC::g_length_error_vtable);
 	LIB_OBJECT("Bq8m04PN1zw", LibC::g_system_error_vtable);
-	LIB_OBJECT("tVHE+C8vGXk", LibC::g_bad_cast_vtable);
+	LIB_OBJECT("CRoMIoZkYhU", LibC::g_thread_pad_vtable);
+	LIB_OBJECT("QQsnQ2bWkdM", &LibC::g_typeinfo_thread_pad);
+	LIB_OBJECT("qR6GVq1IplU", LibC::g_ti_name_thread_pad);
+	LIB_OBJECT_ALIASES(LibC::g_bad_cast_vtable, "tVHE+C8vGXk", "CvgG53ICQZ8");
+	LIB_OBJECT("EMNG6cHitlQ", LibC::g_bad_alloc_vtable);
+	LIB_OBJECT("Z+vcX3rnECg", LibC::g_bad_array_new_length_vtable);
+	LIB_OBJECT("DwH3gdbYfZo", &LibC::g_typeinfo_bad_alloc);
+	LIB_OBJECT("lbLEAN+Y9iI", &LibC::g_typeinfo_bad_array_new_length);
+	LIB_OBJECT("22g2xONdXV4", LibC::g_ti_name_bad_alloc);
+	LIB_OBJECT("hBvqSQD5yNk", LibC::g_ti_name_bad_array_new_length);
+	LIB_FUNC_ALIASES(LibC::c_bad_alloc_dtor, "WiH8rbVv5s4", "khbdMADH4cQ");
+	LIB_FUNC("qb6A7pSgAeY", LibC::c_bad_alloc_deleting_dtor);
+	LIB_FUNC("xvRvFtnUk3E", LibC::c_bad_alloc_what);
+	LIB_FUNC("pS-t9AJblSM", LibC::c_bad_alloc_doraise);
+	LIB_FUNC_ALIASES(LibC::c_bad_array_new_length_dtor, "15lB7flw-9w", "XO3N4SBvCy0");
+	LIB_FUNC("-UKRka-33sM", LibC::c_bad_array_new_length_deleting_dtor);
+	LIB_FUNC_ALIASES(LibC::c_bad_cast_dtor, "rF07weLXJu8", "47RvLSo2HN8");
+	LIB_FUNC("2MK5Lr9pgQc", LibC::c_bad_cast_deleting_dtor);
+	LIB_FUNC("6CPwoi-cFZM", LibC::c_bad_cast_what);
+	LIB_FUNC("NEemVJeMwd0", LibC::c_bad_cast_doraise);
+	LIB_OBJECT("6-LMlTS1nno", LibC::g_future_error_vtable);
+	LIB_OBJECT("AJsqpbcCiwY", LibC::g_ios_base_vtable);
 	LIB_OBJECT("yLE5H3058Ao", LibC::g_ios_failure_vtable);
 	LIB_OBJECT("1kZFcktOm+s", LibC::g_num_put_char_vtable);
+	LIB_OBJECT("OwfBD-2nhJQ", LibC::g_time_put_char_vtable);
 	LIB_OBJECT("FQ9NFbBHb5Y", &LibC::g_bad_off);
 	LIB_OBJECT("wiR+rIcbnlc", LibC::g_fpz);
 	// HEAD-only unresolved Object placeholders (NIDs that do not collide with RTTI above).
@@ -2614,16 +4198,22 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("QJ5xVfKkni0", LibC::c_wmemcmp16);
 	// Captured Gen5 locale setup: no args, returns a Locimp-like object.
 	LIB_FUNC("9rMML086SEE", LibC::c_locale_CreateClassicLocimp);
+	// std::locale::classic() returns the process-wide classic locale object.
+	LIB_FUNC("Uq5K8tl8I9U", LibC::c_locale_classic);
 	LIB_FUNC("QxqK-IdpumU", LibC::c_Getpmbstate);
 	LIB_FUNC("zS94yyJRSUs", LibC::c_Getpwcstate);
 	LIB_FUNC("-9SIhUr4Iuo", LibC::c_Mbtowcx);
 	LIB_FUNC("stv1S3BKfgw", LibC::c_Wctombx);
 	LIB_OBJECT("2wz4rthdiy8", &LibC::g_dummy_obj_17);
 	LIB_FUNC("UWyL6KoR96U", LibC::c_Xregex_error);
+	LIB_FUNC("bRujIheWlB0", LibC::c_Throw_C_error);
+	LIB_FUNC("3PxvyV7qPPQ", LibC::c_error_exception_what);
 	LIB_OBJECT("HUbZmOnT-Dg", &LibC::g_dummy_obj_21);
 	LIB_OBJECT("Y6Sl4Xw7gfA", &LibC::g_dummy_obj_23);
 	LIB_OBJECT("apPZ6HKZWaQ", &LibC::g_dummy_obj_24);
 	LIB_OBJECT("BgZcGDh7o9g", &LibC::g_dummy_obj_25);
+	LIB_FUNC_ALIASES(LibC::c_Lock_shared_ptr_spin_lock, "fRWufXAccuI", "XHKkoveq-CI");
+	LIB_FUNC_ALIASES(LibC::c_Unlock_shared_ptr_spin_lock, "1HYEoANqZ1w", "ySAwp2f9rqM");
 	LIB_FUNC("kALvdgEv5ME", LibC::c_Locksyslock);
 	LIB_FUNC("9nf8joUTSaQ", LibC::c_Unlocksyslock);
 	LIB_FUNC("hEQ2Yi4PJXA", LibC::c_locale_Getgloballocale);
@@ -2642,6 +4232,15 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("N2f485TmJms", LibC::c_ios_base_failure_dtor);
 	// std::bad_cast::~bad_cast() [complete object] — 47RvLSo2HN8.
 	LIB_FUNC("47RvLSo2HN8", LibC::c_bad_cast_dtor);
+	LIB_FUNC("YxwfcCH5Q0I", LibC::c_generic_category);
+	LIB_FUNC("aotaAaQK6yc", LibC::c_system_category);
+	LIB_FUNC("g8Jw7V6mn8k", LibC::c_error_category_dtor);
+	LIB_FUNC("3qWXO9GTUYU", LibC::c_system_error_dtor);
+	LIB_FUNC("8SDojuZyQaY", LibC::c_error_category_default_error_condition);
+	LIB_FUNC("GthClwqQAZs", LibC::c_error_category_equivalent_condition);
+	LIB_FUNC("9hB8AwIqQfs", LibC::c_error_category_equivalent_code);
+	LIB_OBJECT("cbvW20xPgyc", &LibC::g_typeinfo_error_category);
+	LIB_FUNC("Cj+Fw5q1tUo", LibC::c_xtime_get_ticks);
 
 	LIB_FUNC("uMei1W9uyNo", LibC::exit);
 	LIB_FUNC("bzQExy189ZI", LibC::init_env);
@@ -2659,11 +4258,18 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("H2e8t5ScQGc", LibC::cxa_finalize);
 	LIB_FUNC("DiGVep5yB5w", LibC::c_execute_once);
 	LIB_FUNC("YaHc3GS7y7g", LibC::c_mtx_init);
+	LIB_FUNC("tgioGpKtmbE", LibC::c_mtx_init_with_name);
+	LIB_FUNC("JHp7ogc1+HY", LibC::c_mtx_init_with_default_name_override);
+	LIB_FUNC("5Lf51jvohTQ", LibC::c_mtx_destroy);
 	LIB_FUNC("iS4aWbUonl0", LibC::c_mtx_lock);
+	LIB_FUNC("k6pGNMwJB08", LibC::c_mtx_trylock);
+	LIB_FUNC("hPzYSd5Nasc", LibC::c_mtx_timedlock);
 	LIB_FUNC("gTuXQwP9rrs", LibC::c_mtx_unlock);
+	LIB_FUNC("VYQwFs4CC4Y", LibC::c_mtx_current_owns);
 
 	// Standard C allocation uses the guest application heap after it is ready.
 	LIB_FUNC("gQX+4GDQjpM", LibC::c_malloc);
+	LIB_FUNC("g7zzzLDYGw0", LibC::c_strdup);
 	LIB_FUNC("2X5agFjKxMc", LibC::c_calloc);
 	LIB_FUNC("smbQukfxYJM", LibC::c_getenv);
 	LIB_FUNC("PtsB1Q9wsFA", LibC::c_setlocale);
@@ -2675,7 +4281,13 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("cVSk9y8URbc", LibC::c_posix_memalign);
 	LIB_FUNC("KuOuD58hqn4", LibcInternal::LibcMallocStatsFast);
 	LIB_FUNC("SreZybSRWpU", LibC::c_cnd_init);
+	LIB_FUNC("2B+V3qCqz4s", LibC::c_cnd_init_with_name);
+	LIB_FUNC("jBOZAv6CwkM", LibC::c_cnd_init_with_default_name_override);
 	LIB_FUNC("VsP3daJgmVA", LibC::c_cnd_broadcast);
+	LIB_FUNC("7yMFgcS8EPA", LibC::c_cnd_destroy);
+	LIB_FUNC("0uuqgRz9qfo", LibC::c_cnd_signal);
+	LIB_FUNC("McaImWKXong", LibC::c_cnd_timedwait);
+	LIB_FUNC("vEaqE-7IZYc", LibC::c_cnd_wait);
 	LIB_FUNC("7Xl257M4VNI", LibC::c_pthread_equal);
 	LIB_FUNC("mqQMh1zPPT8", LibC::c_fstat);
 	LIB_FUNC("Q3VBxCXhUHs", LibC::c_memcpy);
@@ -2701,8 +4313,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("aesyjrHVWy4", LibC::c_strncmp);
 	// sceLibc strcasecmp — NID AV6ipCNa4Rw
 	LIB_FUNC("AV6ipCNa4Rw", LibC::c_strcasecmp);
+	LIB_FUNC("pXvbDfchu6k", LibC::c_strncasecmp);
 	LIB_FUNC("Ls4tzzhimqQ", LibC::c_strcat);
 	LIB_FUNC("kHg45qPC6f0", LibC::c_strncat);
+	LIB_FUNC("kDZvoVssCgQ", LibC::c_strpbrk);
 	LIB_FUNC("ob5xAW4ln-0", LibC::c_strchr);
 	LIB_FUNC("9yDWMxEFdJU", LibC::c_strrchr);
 	// Gen5 libc_v1 strstr.
@@ -2711,19 +4325,38 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("E8wCoUEbfzk", LibC::c_wcsncmp);
 	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);         // operator new(size_t)
 	LIB_FUNC("ryUxD-60bKM", LibC::cxx_new_nothrow); // operator new(size_t, const std::nothrow_t&)
+	LIB_OBJECT("NLwJ3q+64bY", &LibC::g_cxx_nothrow); // std::nothrow
 	// Gen5 libc_v1 — public NID cfAXurvfl5o is __cxa_allocate_exception (not
 	// operator new). Mis-binding it to cxx_new corrupts the throw path.
 	LIB_FUNC("cfAXurvfl5o", LibC::cxa_allocate_exception);
 	LIB_FUNC("MQFPAqQPt1s", LibC::cxa_decrement_exception_refcount);
-	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete); // operator delete(void*)
+	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete);               // operator delete(void*)
+	LIB_FUNC("lYDzBVE5mZs", LibC::cxx_delete_sized);         // operator delete(void*, size_t)
+	LIB_FUNC("nwujzxOPXzQ", LibC::cxx_delete_sized_aligned); // operator delete(void*, size_t, align_val_t)
 	// Gen5 libc_v1 C++ EH — Dreaming Sarah throw path after flip/init.
 	// vkuuLfhnSZI: __cxa_throw (rdi=obj, rsi=typeinfo, rdx=dtor; ud2 after).
 	LIB_FUNC("vkuuLfhnSZI", LibC::cxa_throw);
 	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);         // operator new[](size_t)
 	LIB_FUNC("Jh5qUcwiSEk", LibC::cxx_new_array_nothrow); // operator new[](size_t, const std::nothrow_t&)
 	LIB_FUNC("MLWl90SFWNE", LibC::cxx_delete_array);      // operator delete[](void*)
-	LIB_FUNC("iPBqs+YUUFw", LibC::c_atomic_cmpset_32);
-	LIB_FUNC("2HnmKiLmV6s", LibC::c_atomic_cmpset_32);
+	LIB_FUNC("FOt55ZNaVJk", LibC::cxx_delete_array_sized); // operator delete[](void*, size_t)
+	LIB_FUNC("cjZEuzHkgng", LibC::c_atomic_load_4);
+	LIB_FUNC("0AgCOypbQ90", LibC::c_atomic_compare_exchange_weak_4);
+	LIB_FUNC("iPBqs+YUUFw", LibC::c_atomic_fetch_add_4);
+	LIB_FUNC("2HnmKiLmV6s", LibC::c_atomic_fetch_sub_4);
+	LIB_FUNC("np6xXcXEnXE", LibKernel::PthreadGetthreadid);
+	LIB_FUNC("CHrhwd8QSBs", LibC::c_thread_hardware_concurrency);
+	LIB_FUNC("YvmY5Jf0VYU", LibC::c_thread_join);
+	LIB_FUNC("exNzzCAQuWM", LibC::c_thread_yield);
+	LIB_FUNC("dGYo9mE8K2A", LibC::c_thread_pad_ctor);
+	LIB_FUNC("uhnb6dnXOnc", LibC::c_thread_pad_named_ctor);
+	LIB_FUNC("gjLRZgfb3i0", LibC::c_thread_pad_dtor);
+	LIB_FUNC("XyJPhPqpzMw", LibC::c_thread_pad_dtor);
+	LIB_FUNC("xZqiZvmcp9k", static_cast<void (*)(LibC::CxxThreadPad*, LibKernel::Pthread*)>(LibC::c_thread_pad_launch));
+	LIB_FUNC("PBbZjsL6nfc", LibC::c_thread_pad_named_launch);
+	LIB_FUNC("fLBZMOQh-3Y", LibC::c_thread_pad_attr_launch);
+	LIB_FUNC("H7-7Z3ixv-w", LibC::c_thread_pad_named_attr_launch);
+	LIB_FUNC("a-z7wxuYO2E", LibC::c_thread_pad_release);
 
 	// string / memory
 	LIB_FUNC("+P6FRGH4LfA", LibC::c_memmove);
@@ -2741,6 +4374,9 @@ LIB_DEFINE(InitLibC_1)
 
 	// ctype
 	LIB_FUNC("sUP1hBaouOw", LibC::c_Getpctype);
+	LIB_FUNC("8xXiEPby8h8", LibC::c_Getptimes);
+	LIB_FUNC("vU9svJtEnWc", LibC::c_setw);
+	LIB_FUNC("j9LU8GsuEGw", LibC::c_time_put_put);
 	LIB_FUNC("rcQCUr0EaRU", LibC::c_Getptoupper);
 	// Gen5 _Getptolower — Dreaming Sarah VFS path lowercasing after ~INDEX.
 	LIB_FUNC("1uJgoVq3bQU", LibC::c_Getptolower);
@@ -2752,6 +4388,7 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 fgets — NID KdP-nULpuGw (next hard-abort after asctime on Astro).
 	LIB_FUNC("KdP-nULpuGw", LibC::c_fgets);
 	LIB_FUNC("MpxhMh8QFro", LibC::c_fwrite);
+	LIB_FUNC("QMFyLoqNxIg", LibC::c_setvbuf);
 	LIB_FUNC("rQFVBXp-Cxg", LibC::c_fseek);
 	LIB_FUNC("Qazy8LmXTvw", LibC::c_ftell);
 	LIB_FUNC("LxcEU+ICu8U", LibC::c_feof);
@@ -2762,6 +4399,7 @@ LIB_DEFINE(InitLibC_1)
 
 	// printf / scanf family
 	LIB_FUNC("eLdDw6l0-bU", LibC::c_snprintf);
+	LIB_FUNC("3BytPOQgVKc", LibC::c_snprintf_s);
 	// Gen5 libc_v1 safe format — NID NC4MSB+BRQg. SysV matches snprintf, but
 	// return is 0 on success (ObjectDefinition path builder asserts r == 0).
 	LIB_FUNC("NC4MSB+BRQg", LibC::c_snprintf_errno);
@@ -2807,9 +4445,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("QZP6I9ZZxpE", LibC::c_clock);
 	LIB_FUNC("n7AepwR0s34", LibC::c_mktime);
 	LIB_FUNC("1mecP7RgI2A", LibC::c_gmtime);
+	LIB_FUNC("5bBacGLyLOs", LibC::c_gmtime_s);
 	LIB_FUNC("efhK-YSUYYQ", LibC::c_localtime);
+	LIB_FUNC("fiiNDnNBKVY", LibC::c_localtime_s);
 	LIB_FUNC("Av3zjWi64Kw", LibC::c_strftime);
-	// Gen5 libc asctime (NID jT3xiGpA3B4) — hard-aborted Astro without STUB_MISSING.
 	LIB_FUNC("jT3xiGpA3B4", LibC::c_asctime);
 
 	// math (double)
@@ -2823,6 +4462,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("NVadfnzQhHQ", LibC::c_exp);
 	LIB_FUNC("rtV7-jWC6Yg", LibC::c_log);
 	LIB_FUNC("9LCjpWyQ5Zc", LibC::c_pow);
+	LIB_FUNC("H+8UBOwfScI", LibC::c_powidf2);
 	LIB_FUNC("pKwslsMUmSk", LibC::c_fmod);
 	// Gen5 libc_v1 double rounding and absolute-value exports. Float variants
 	// are registered below.
@@ -2873,6 +4513,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("3GPpjQdAMTw", LibC::c_cxa_guard_acquire);
 	LIB_FUNC("9rAeANT2tyE", LibC::c_cxa_guard_release);
 	LIB_FUNC("2emaaluWzUw", LibC::c_cxa_guard_abort);
+	LIB_FUNC("BKSCW2bCACA", LibC::c_cxa_thread_atexit);
 	LIB_FUNC("Z2tTVqGDPGQ", LibC::c_cxa_thread_atexit);
 	// Gen5 __cxa_dynamic_cast — Dreaming Sarah Construct ConditionOrAction→Action.
 	LIB_FUNC("hMAe+TWS9mQ", LibC::cxa_dynamic_cast);
