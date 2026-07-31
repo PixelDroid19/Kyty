@@ -192,13 +192,25 @@ inline bool GpuMemoryFindObjectsAcceptsRelation(GpuMemoryOverlapType relation, b
 // Observed relations (strict captures):
 //   - Texture Contains StorageBuffer (full sub-allocation view)
 //   - Texture Crosses StorageBuffer (partial range view; same link policy)
+//   - Texture Equals StorageTexture (same guest range as sampled + storage view)
 // Inverse StorageBuffer Equals Texture/RenderTexture/StorageTexture also allowed.
+// Inverse StorageTexture Equals Texture is allowed (CreateFromObjects path for Texture).
 inline bool GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                GpuMemoryObjectType incoming_type)
 {
 	if (existing_type == GpuMemoryObjectType::StorageBuffer && relation == GpuMemoryOverlapType::Equals &&
 	    (incoming_type == GpuMemoryObjectType::RenderTexture || incoming_type == GpuMemoryObjectType::StorageTexture ||
 	     incoming_type == GpuMemoryObjectType::Texture))
+	{
+		return true;
+	}
+
+	// Same guest range re-bound as sampled Texture and RW StorageTexture (or reverse).
+	// Link both views; StorageTexture CreateFromObjects is null so ST is created
+	// standalone while remaining linked for lifetime/writeback.
+	if (relation == GpuMemoryOverlapType::Equals &&
+	    ((existing_type == GpuMemoryObjectType::Texture && incoming_type == GpuMemoryObjectType::StorageTexture) ||
+	     (existing_type == GpuMemoryObjectType::StorageTexture && incoming_type == GpuMemoryObjectType::Texture)))
 	{
 		return true;
 	}

@@ -2660,6 +2660,11 @@ TEST(EmulatorGraphicsState, AllowsOnlyObservedTextureStorageAliases)
 	// existing Texture (partial guest range) must link, not EXIT.
 	EXPECT_TRUE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
 	                                               GpuMemoryObjectType::StorageBuffer));
+	// The same guest range can be rebound from a sampled texture to a read-write storage texture.
+	EXPECT_TRUE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Equals,
+	                                               GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::StorageTexture, GpuMemoryOverlapType::Equals,
+	                                               GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::IsContainedWithin,
 	                                                GpuMemoryObjectType::StorageBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
@@ -3698,5 +3703,29 @@ TEST(EmulatorGraphicsState, WindowControlsKeepEnterSuppressedAcrossFocusChanges)
 	EXPECT_EQ(HostWindowControls::HandlePrimaryClick(true, true, 2), HostWindowCommand::ToggleFullscreen);
 	EXPECT_EQ(HostWindowControls::HandlePrimaryClick(true, true, 1), HostWindowCommand::None);
 }
+
+
+TEST(EmulatorGraphicsState, ResolveDepthTargetExtentNextGenZeroSizeIsValidOneByOne)
+{
+	// SIZE_XY x_max=y_max=0 encodes 1x1 when the size register is valid. Callers that
+	// pair depth with a full-screen color target must still treat this as undersized.
+	HW::DepthRenderTarget target {};
+	target.size.valid = true;
+	target.size.x_max = 0;
+	target.size.y_max = 0;
+	const auto extent = State::ResolveDepthTargetExtent(target, true);
+	EXPECT_TRUE(extent.valid);
+	EXPECT_EQ(extent.width, 1u);
+	EXPECT_EQ(extent.height, 1u);
+}
+
+TEST(EmulatorGraphicsState, ResolveDepthTargetExtentNextGenInvalidSize)
+{
+	HW::DepthRenderTarget target {};
+	target.size.valid = false;
+	const auto extent = State::ResolveDepthTargetExtent(target, true);
+	EXPECT_FALSE(extent.valid);
+}
+
 
 UT_END();
