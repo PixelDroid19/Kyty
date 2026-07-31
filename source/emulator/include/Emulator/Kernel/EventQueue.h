@@ -112,6 +112,14 @@ int KYTY_SYSV_ABI KernelAddAmprEvent(KernelEqueue eq, uint64_t reserved0, uint64
 // sceKernelDeleteAmprEvent — NID bMmid3pfyjo.
 int KYTY_SYSV_ABI KernelDeleteAmprEvent(KernelEqueue eq, uintptr_t ident);
 
+// Read/write event registration uses level-triggered readiness from the file
+// descriptor subsystem. The flags and user data are preserved in the event
+// returned by KernelWaitEqueue.
+int KYTY_SYSV_ABI KernelAddReadEvent(KernelEqueue eq, int fd, int flags, void* udata);
+int KYTY_SYSV_ABI KernelDeleteReadEvent(KernelEqueue eq, int fd);
+int KYTY_SYSV_ABI KernelAddWriteEvent(KernelEqueue eq, int fd, int flags, void* udata);
+int KYTY_SYSV_ABI KernelDeleteWriteEvent(KernelEqueue eq, int fd);
+
 // sceKernelAddUserEvent — NID 4R6-OvI2cEA. ABI: (eq, id).
 int KYTY_SYSV_ABI KernelAddUserEvent(KernelEqueue eq, int id);
 // sceKernelAddUserEventEdge — NID WDszmSbWuDk. ABI: (eq, id).

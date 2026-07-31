@@ -18,6 +18,19 @@ static StatsFunc  g_stats_fast = nullptr;
 
 static thread_local bool g_in_guest_allocator = false;
 
+class AllocatorCallbackScope
+{
+public:
+	AllocatorCallbackScope(): m_previous(g_in_guest_allocator) { g_in_guest_allocator = true; }
+	~AllocatorCallbackScope() { g_in_guest_allocator = m_previous; }
+
+	AllocatorCallbackScope(const AllocatorCallbackScope&)            = delete;
+	AllocatorCallbackScope& operator=(const AllocatorCallbackScope&) = delete;
+
+private:
+	bool m_previous;
+};
+
 } // namespace
 
 bool IsValidApi(const Api* api)
@@ -51,6 +64,11 @@ bool HasAllocator()
 	return IsInitialized() && !g_in_guest_allocator;
 }
 
+bool IsAllocatorCallbackActive()
+{
+	return g_in_guest_allocator;
+}
+
 bool HasMallocStatsFast()
 {
 	return HasAllocator() && g_stats_fast != nullptr;
@@ -63,9 +81,8 @@ void* Malloc(size_t size)
 		return nullptr;
 	}
 
-	g_in_guest_allocator = true;
-	const uint64_t ptr   = Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_malloc), size, 0, 0);
-	g_in_guest_allocator = false;
+	AllocatorCallbackScope scope;
+	const uint64_t         ptr = Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_malloc), size, 0, 0);
 	return reinterpret_cast<void*>(ptr);
 }
 
@@ -76,10 +93,9 @@ int MallocStatsFast(void* stats)
 		return -1;
 	}
 
-	g_in_guest_allocator = true;
+	AllocatorCallbackScope scope;
 	const int result = static_cast<int>(Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_stats_fast),
 	                                                              reinterpret_cast<uint64_t>(stats), 0, 0));
-	g_in_guest_allocator = false;
 	return result;
 }
 
@@ -95,9 +111,8 @@ bool Free(void* ptr)
 		return false;
 	}
 
-	g_in_guest_allocator = true;
+	AllocatorCallbackScope scope;
 	Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_free), reinterpret_cast<uint64_t>(ptr), 0, 0);
-	g_in_guest_allocator = false;
 	return true;
 }
 

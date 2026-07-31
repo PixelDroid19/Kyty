@@ -59,6 +59,7 @@ using PthreadKey        = int;
 
 using pthread_entry_func_t          = KYTY_SYSV_ABI void* (*)(void*);
 using thread_dtors_func_t           = KYTY_SYSV_ABI void (*)();
+using host_thread_dtors_func_t      = void (*)(void* guest_stack_top);
 using pthread_key_destructor_func_t = KYTY_SYSV_ABI void (*)(void*);
 
 void PthreadInitSelfForMainThread();
@@ -77,6 +78,7 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex);
 int KYTY_SYSV_ABI PthreadMutexTrylock(PthreadMutex* mutex);
 int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec);
 int KYTY_SYSV_ABI PthreadMutexUnlock(PthreadMutex* mutex);
+bool KYTY_SYSV_ABI PthreadMutexCurrentOwns(PthreadMutex* mutex);
 
 Pthread KYTY_SYSV_ABI PthreadSelf();
 int KYTY_SYSV_ABI     PthreadSignal(Pthread thread, int signum);
@@ -111,6 +113,7 @@ int KYTY_SYSV_ABI   PthreadSetspecific(PthreadKey key, void* value);
 void* KYTY_SYSV_ABI PthreadGetspecific(PthreadKey key);
 
 void KYTY_SYSV_ABI KernelSetThreadDtors(thread_dtors_func_t dtors);
+void              PthreadSetHostThreadDtors(host_thread_dtors_func_t dtors);
 
 int KYTY_SYSV_ABI PthreadAttrInit(PthreadAttr* attr);
 int KYTY_SYSV_ABI PthreadAttrDestroy(PthreadAttr* attr);
@@ -152,12 +155,15 @@ int KYTY_SYSV_ABI PthreadRwlockattrSettype(PthreadRwlockattr* attr, int type);
 
 int KYTY_SYSV_ABI PthreadCondattrDestroy(PthreadCondattr* attr);
 int KYTY_SYSV_ABI PthreadCondattrInit(PthreadCondattr* attr);
+int KYTY_SYSV_ABI PthreadCondattrSetclock(PthreadCondattr* attr, KernelClockid clock_id);
 int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond);
 int KYTY_SYSV_ABI PthreadCondDestroy(PthreadCond* cond);
 int KYTY_SYSV_ABI PthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr, const char* name);
 int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond);
 int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread);
 int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, KernelUseconds usec);
+int KYTY_SYSV_ABI PthreadCondTimedwaitAbsolute(PthreadCond* cond, PthreadMutex* mutex,
+                                               const KernelTimespec* abstime);
 int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex);
 int KYTY_SYSV_ABI PthreadOnce(int* once_control, void (*init_routine)(void));
 
@@ -240,6 +246,9 @@ int KYTY_SYSV_ABI   pthread_cond_broadcast(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI   pthread_cond_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex);
 int KYTY_SYSV_ABI   pthread_cond_timedwait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex,
                                            const LibKernel::KernelTimespec* abstime);
+int KYTY_SYSV_ABI   pthread_condattr_init(LibKernel::PthreadCondattr* attr);
+int KYTY_SYSV_ABI   pthread_condattr_destroy(LibKernel::PthreadCondattr* attr);
+int KYTY_SYSV_ABI   pthread_condattr_setclock(LibKernel::PthreadCondattr* attr, LibKernel::KernelClockid clock_id);
 int KYTY_SYSV_ABI   pthread_once(int* once_control, void (*init_routine)(void));
 int KYTY_SYSV_ABI   pthread_mutex_lock(LibKernel::PthreadMutex* mutex);
 int KYTY_SYSV_ABI   pthread_mutex_trylock(LibKernel::PthreadMutex* mutex);

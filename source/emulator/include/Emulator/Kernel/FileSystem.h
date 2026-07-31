@@ -80,6 +80,7 @@ String GetRealFilename(const String& mounted_file_name);
 
 int KYTY_SYSV_ABI     KernelOpen(const char* path, int flags, uint16_t mode);
 int KYTY_SYSV_ABI     KernelClose(int d);
+[[nodiscard]] bool   KernelIsStandardDescriptorOpen(int d);
 int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes);
 int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offset);
 int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes);
@@ -87,6 +88,7 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence);
 int KYTY_SYSV_ABI     KernelStat(const char* path, FileStat* sb);
 int KYTY_SYSV_ABI     KernelFstat(int d, FileStat* sb);
+int KYTY_SYSV_ABI     KernelFcntl(int d, int command, int64_t argument);
 int KYTY_SYSV_ABI     KernelFtruncate(int d, int64_t length);
 int KYTY_SYSV_ABI     KernelRename(const char* from, const char* to);
 int KYTY_SYSV_ABI     KernelUnlink(const char* path);
@@ -97,6 +99,8 @@ int KYTY_SYSV_ABI     KernelRmdir(const char* path);
 int KYTY_SYSV_ABI     KernelDup(int old_d);
 int KYTY_SYSV_ABI     KernelDup2(int old_d, int new_d);
 int KYTY_SYSV_ABI     KernelPoll(struct KernelPollFd* fds, uint32_t count, int /*timeout*/);
+int KYTY_SYSV_ABI     KernelGetReadAvailability(int fd, uint64_t* available);
+int KYTY_SYSV_ABI     KernelGetWriteAvailability(int fd, bool* available);
 // sceKernelAprResolveFilepathsToIdsAndFileSizes: paths[count] → ids[count] (u32, optional)
 // and sizes[count] (u64, optional). File ids are stable host-side hashes of the guest path.
 int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* paths, uint64_t count, uint32_t* ids,

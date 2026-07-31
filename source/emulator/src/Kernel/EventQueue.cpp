@@ -9,7 +9,9 @@
 
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Kernel/FileSystem.h"
 
+#include <limits>
 #include <unordered_map>
 
 #ifdef KYTY_EMU_ENABLED
@@ -431,6 +433,110 @@ int KYTY_SYSV_ABI KernelDeleteAmprEvent(KernelEqueue eq, uintptr_t ident)
 	printf("\t ident = 0x%016" PRIx64 "\n", static_cast<uint64_t>(ident));
 
 	return KernelDeleteEvent(eq, ident, KERNEL_EVFILT_AMPR);
+}
+
+static intptr_t ReadAvailabilityToEventData(uint64_t available)
+{
+	const auto max_data = static_cast<uint64_t>(std::numeric_limits<intptr_t>::max());
+	return static_cast<intptr_t>(available > max_data ? max_data : available);
+}
+
+static void read_event_reset_func(KernelEqueueEvent* event)
+{
+	EXIT_IF(event == nullptr || event->event.ident > static_cast<uintptr_t>(std::numeric_limits<int>::max()));
+
+	uint64_t available = 0;
+	if (FileSystem::KernelGetReadAvailability(static_cast<int>(event->event.ident), &available) != OK)
+	{
+		event->triggered = false;
+		return;
+	}
+
+	event->event.data = ReadAvailabilityToEventData(available);
+	event->triggered  = available != 0;
+}
+
+static void write_event_reset_func(KernelEqueueEvent* event)
+{
+	EXIT_IF(event == nullptr || event->event.ident > static_cast<uintptr_t>(std::numeric_limits<int>::max()));
+
+	bool available = false;
+	if (FileSystem::KernelGetWriteAvailability(static_cast<int>(event->event.ident), &available) != OK)
+	{
+		event->triggered = false;
+		return;
+	}
+
+	event->event.data = available ? 1 : 0;
+	event->triggered  = available;
+}
+
+static int KernelAddIoEvent(KernelEqueue eq, int fd, int flags, void* udata, int16_t filter)
+{
+	if (fd < 0 || flags < 0 || flags > std::numeric_limits<uint16_t>::max())
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	KernelEqueueEvent event {};
+	event.event.ident  = static_cast<uintptr_t>(fd);
+	event.event.filter = filter;
+	event.event.flags  = static_cast<uint16_t>(flags);
+	event.event.udata  = udata;
+
+	if (filter == KERNEL_EVFILT_READ)
+	{
+		uint64_t available = 0;
+		const int result    = FileSystem::KernelGetReadAvailability(fd, &available);
+		if (result != OK)
+		{
+			return result;
+		}
+		event.event.data       = ReadAvailabilityToEventData(available);
+		event.triggered        = available != 0;
+		event.filter.reset_func = read_event_reset_func;
+	} else
+	{
+		bool available     = false;
+		const int result   = FileSystem::KernelGetWriteAvailability(fd, &available);
+		if (result != OK)
+		{
+			return result;
+		}
+		event.event.data       = available ? 1 : 0;
+		event.triggered        = available;
+		event.filter.reset_func = write_event_reset_func;
+	}
+
+	return KernelAddEvent(eq, event);
+}
+
+int KYTY_SYSV_ABI KernelAddReadEvent(KernelEqueue eq, int fd, int flags, void* udata)
+{
+	PRINT_NAME();
+
+	return KernelAddIoEvent(eq, fd, flags, udata, KERNEL_EVFILT_READ);
+}
+
+int KYTY_SYSV_ABI KernelDeleteReadEvent(KernelEqueue eq, int fd)
+{
+	PRINT_NAME();
+
+	return fd < 0 ? KERNEL_ERROR_EINVAL : KernelDeleteEvent(eq, static_cast<uintptr_t>(fd), KERNEL_EVFILT_READ);
+}
+
+int KYTY_SYSV_ABI KernelAddWriteEvent(KernelEqueue eq, int fd, int flags, void* udata)
+{
+	PRINT_NAME();
+
+	return KernelAddIoEvent(eq, fd, flags, udata, KERNEL_EVFILT_WRITE);
+}
+
+int KYTY_SYSV_ABI KernelDeleteWriteEvent(KernelEqueue eq, int fd)
+{
+	PRINT_NAME();
+
+	return fd < 0 ? KERNEL_ERROR_EINVAL : KernelDeleteEvent(eq, static_cast<uintptr_t>(fd), KERNEL_EVFILT_WRITE);
 }
 
 static void user_event_reset_func(KernelEqueueEvent* event)

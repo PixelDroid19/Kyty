@@ -30,6 +30,7 @@ void RegisterApi(void* const api[kApiSlotCount]);
 
 [[nodiscard]] bool IsInitialized();
 [[nodiscard]] bool HasAllocator();
+[[nodiscard]] bool IsAllocatorCallbackActive();
 [[nodiscard]] bool HasMallocStatsFast();
 [[nodiscard]] void* Malloc(size_t size);
 int                 MallocStatsFast(void* stats);

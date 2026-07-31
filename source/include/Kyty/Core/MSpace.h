@@ -27,7 +27,7 @@ void*  MSpaceAlignedAlloc(mspace_t msp, size_t alignment, size_t size);
 void*  MSpaceMemalign(mspace_t msp, size_t boundary, size_t size);
 void*  MSpaceReallocalign(mspace_t msp, void* ptr, size_t boundary, size_t size);
 bool   MSpacePosixMemalign(mspace_t msp, void** ptr, size_t boundary, size_t size);
-size_t MSpaceMallocUsableSize(void* ptr);
+size_t MSpaceMallocUsableSize(const void* ptr);
 bool   MSpaceMallocStats(mspace_t msp, MSpaceSize* mmsize);
 bool   MSpaceMallocStatsFast(mspace_t msp, MSpaceSize* mmsize);
 bool   MSpaceIsHeapEmpty(mspace_t msp);

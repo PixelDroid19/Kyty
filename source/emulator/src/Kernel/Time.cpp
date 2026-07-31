@@ -111,6 +111,38 @@ static bool TimezoneFromUtc(int64_t utc_seconds, KernelTimezone* timezone, int32
 	return true;
 }
 
+bool KernelClockSourceFromId(KernelClockid clock_id, KernelClockSource* source)
+{
+	if (source == nullptr)
+	{
+		return false;
+	}
+
+	switch (clock_id)
+	{
+		case 0: *source = KernelClockSource::Realtime; return true;
+		case 4:
+		case 13: *source = KernelClockSource::Monotonic; return true;
+		default: return false;
+	}
+}
+
+static bool ToHostClock(KernelClockSource source, clockid_t* host_clock)
+{
+	if (host_clock == nullptr)
+	{
+		return false;
+	}
+
+	switch (source)
+	{
+		case KernelClockSource::Realtime: *host_clock = CLOCK_REALTIME; return true;
+		case KernelClockSource::Monotonic: *host_clock = CLOCK_MONOTONIC; return true;
+	}
+
+	return false;
+}
+
 int KYTY_SYSV_ABI KernelClockGetres(KernelClockid clock_id, KernelTimespec* tp)
 {
 	PRINT_NAME();
@@ -120,12 +152,11 @@ int KYTY_SYSV_ABI KernelClockGetres(KernelClockid clock_id, KernelTimespec* tp)
 		return KERNEL_ERROR_EFAULT;
 	}
 
-	clockid_t pclock_id = CLOCK_REALTIME;
-	switch (clock_id)
+	KernelClockSource source {};
+	clockid_t         pclock_id {};
+	if (!KernelClockSourceFromId(clock_id, &source) || !ToHostClock(source, &pclock_id))
 	{
-		case 0: pclock_id = CLOCK_REALTIME; break;
-		case 4: pclock_id = CLOCK_MONOTONIC; break;
-		default: EXIT("unknown clock_id: %d", clock_id);
+		return KERNEL_ERROR_EINVAL;
 	}
 
 	timespec t {};
@@ -145,13 +176,11 @@ int KYTY_SYSV_ABI KernelClockGettime(KernelClockid clock_id, KernelTimespec* tp)
 		return KERNEL_ERROR_EFAULT;
 	}
 
-	clockid_t pclock_id = CLOCK_REALTIME;
-	switch (clock_id)
+	KernelClockSource source {};
+	clockid_t         pclock_id {};
+	if (!KernelClockSourceFromId(clock_id, &source) || !ToHostClock(source, &pclock_id))
 	{
-		case 0: pclock_id = CLOCK_REALTIME; break;
-		case 13:
-		case 4: pclock_id = CLOCK_MONOTONIC; break;
-		default: EXIT("unknown clock_id: %d", clock_id);
+		return KERNEL_ERROR_EINVAL;
 	}
 
 	timespec t {};

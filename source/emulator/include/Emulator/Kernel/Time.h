@@ -38,6 +38,17 @@ static_assert(sizeof(KernelTimesec) == 16);
 
 using KernelClockid = int32_t;
 
+// Guest clock IDs are normalized before a subsystem selects its native clock
+// primitive. This keeps guest-to-host clock policy consistent for timers and
+// synchronization objects.
+enum class KernelClockSource
+{
+	Realtime,
+	Monotonic,
+};
+
+[[nodiscard]] bool KernelClockSourceFromId(KernelClockid clock_id, KernelClockSource* source);
+
 int KYTY_SYSV_ABI      KernelClockGetres(KernelClockid clock_id, KernelTimespec* tp);
 int KYTY_SYSV_ABI      KernelClockGettime(KernelClockid clock_id, KernelTimespec* tp);
 int KYTY_SYSV_ABI      KernelGettimeofday(KernelTimeval* tp);

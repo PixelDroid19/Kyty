@@ -32,6 +32,12 @@ static String ResolveExistingHostFile(const String& guest_path, const String& re
 
 constexpr int DESCRIPTOR_MIN = 3;
 
+constexpr uint8_t kStandardDescriptorMask = (1u << DESCRIPTOR_MIN) - 1u;
+
+// Guest standard descriptors are logical handles. Their lifecycle must not
+// affect the emulator process streams that provide diagnostics and input.
+static std::atomic_uint8_t g_standard_descriptors {kStandardDescriptorMask};
+
 // PS5 SSD files report a non-zero st_flags indicating hardware async-read
 // capability. Unity (and other engines) check this field to decide whether
 // APR (Async Parallel Read) is usable. A zero value causes the engine to
@@ -144,6 +150,7 @@ struct File
 	String                       real_name;
 	std::atomic_bool             opened;
 	std::atomic_bool             directory;
+	std::atomic_uint32_t         status_flags {0};
 	std::atomic_uint32_t         ref_count {1};
 	Core::Mutex                  mutex;
 	Vector<Core::File::DirEntry> dents;
@@ -459,6 +466,7 @@ KYTY_SUBSYSTEM_INIT(FileSystem)
 {
 	g_mount_points = new MountPoints;
 	g_files        = new FileDescriptors;
+	g_standard_descriptors.store(kStandardDescriptorMask, std::memory_order_release);
 
 	// Eagerly initialize the sandbox root so the directory exists before any
 	// guest filesystem call.
@@ -514,7 +522,8 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	auto flags_u = static_cast<uint32_t>(flags);
+	auto       flags_u       = static_cast<uint32_t>(flags);
+	const auto status_flags  = flags_u;
 
 	printf("\t path = %s\n", path);
 	printf("\t flags = %08" PRIx32 "\n", flags_u);
@@ -598,7 +607,15 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 		EXIT_NOT_IMPLEMENTED(!directory && rw_mode != Core::File::Mode::Read);
 		EXIT_NOT_IMPLEMENTED(!directory && (trunc || creat));
 
-		file->dents       = Core::File::GetDirEntries(file->real_name);
+		const auto host_entries = Core::File::GetDirEntries(file->real_name);
+		file->dents.Clear();
+		for (const auto& entry: host_entries)
+		{
+			if (entry.name != U"." && entry.name != U"..")
+			{
+				file->dents.Add(entry);
+			}
+		}
 		file->dents_index = 0;
 		file->directory   = true;
 
@@ -663,6 +680,7 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 	}
 
 	file->opened = true;
+	file->status_flags.store(status_flags, std::memory_order_release);
 	return descriptor;
 }
 
@@ -670,12 +688,19 @@ int KYTY_SYSV_ABI KernelClose(int d)
 {
 	PRINT_NAME();
 
-	EXIT_IF(g_files == nullptr);
-
 	if (d < DESCRIPTOR_MIN)
 	{
-		return KERNEL_ERROR_EPERM;
+		if (d < 0)
+		{
+			return KERNEL_ERROR_EBADF;
+		}
+
+		const auto descriptor_bit = static_cast<uint8_t>(1u << d);
+		const auto previous = g_standard_descriptors.fetch_and(static_cast<uint8_t>(~descriptor_bit), std::memory_order_acq_rel);
+		return (previous & descriptor_bit) != 0 ? OK : KERNEL_ERROR_EBADF;
 	}
+
+	EXIT_IF(g_files == nullptr);
 
 	auto* file = g_files->GetFile(d);
 
@@ -698,6 +723,17 @@ int KYTY_SYSV_ABI KernelClose(int d)
 	g_files->DeleteDescriptor(d);
 
 	return OK;
+}
+
+bool KernelIsStandardDescriptorOpen(int d)
+{
+	if (d < 0 || d >= DESCRIPTOR_MIN)
+	{
+		return false;
+	}
+
+	const auto descriptor_bit = static_cast<uint8_t>(1u << d);
+	return (g_standard_descriptors.load(std::memory_order_acquire) & descriptor_bit) != 0;
 }
 
 int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
@@ -1180,6 +1216,102 @@ int KYTY_SYSV_ABI KernelFtruncate(int d, int64_t length)
 	return file->f.Truncate(static_cast<uint64_t>(length)) ? OK : KERNEL_ERROR_EIO;
 }
 
+int KYTY_SYSV_ABI KernelFcntl(int d, int command, int64_t argument)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_files == nullptr);
+	auto* file = g_files->GetFile(d);
+	if (file == nullptr || !file->opened)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	constexpr int      f_getfl              = 3;
+	constexpr int      f_setfl              = 4;
+	constexpr uint32_t mutable_status_flags = 0x0004u | 0x0008u;
+	switch (command)
+	{
+		case f_getfl: return static_cast<int>(file->status_flags.load(std::memory_order_acquire));
+		case f_setfl:
+		{
+			const auto requested = static_cast<uint32_t>(argument);
+			auto       current   = file->status_flags.load(std::memory_order_acquire);
+			current              = (current & ~mutable_status_flags) | (requested & mutable_status_flags);
+			file->status_flags.store(current, std::memory_order_release);
+			return OK;
+		}
+		default: return KERNEL_ERROR_EINVAL;
+	}
+}
+
+int KYTY_SYSV_ABI KernelGetReadAvailability(int d, uint64_t* available)
+{
+	if (available == nullptr)
+	{
+		return KERNEL_ERROR_EFAULT;
+	}
+	*available = 0;
+
+	EXIT_IF(g_files == nullptr);
+	if (d < DESCRIPTOR_MIN)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	auto* file = g_files->GetFile(d);
+	if (file == nullptr || !file->opened)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	Core::LockGuard lock(file->mutex);
+	if (file->directory)
+	{
+		const uint32_t entry_count = file->dents.Size() + 2;
+		*available                 = file->dents_index < entry_count ? entry_count - file->dents_index : 0;
+		return OK;
+	}
+	if (file->f.IsInvalid())
+	{
+		return KERNEL_ERROR_EIO;
+	}
+
+	*available = file->f.Remaining();
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelGetWriteAvailability(int d, bool* available)
+{
+	if (available == nullptr)
+	{
+		return KERNEL_ERROR_EFAULT;
+	}
+	*available = false;
+
+	EXIT_IF(g_files == nullptr);
+	if (d < DESCRIPTOR_MIN)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	auto* file = g_files->GetFile(d);
+	if (file == nullptr || !file->opened)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	Core::LockGuard lock(file->mutex);
+	if (file->directory || file->f.IsInvalid())
+	{
+		return file->directory ? KERNEL_ERROR_EISDIR : KERNEL_ERROR_EIO;
+	}
+
+	const uint32_t access_mode = file->status_flags.load(std::memory_order_acquire) & 0x3u;
+	*available                 = access_mode == 1u || access_mode == 2u;
+	return OK;
+}
+
 int KYTY_SYSV_ABI KernelUnlink(const char* path)
 {
 	PRINT_NAME();
@@ -1277,43 +1409,67 @@ int KYTY_SYSV_ABI KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* ba
 		return KERNEL_ERROR_EBADF;
 	}
 
-	if (!file->directory || nbytes < 512 || file->dents_index > file->dents.Size())
+	if (!file->directory || nbytes < 32)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
 
 	EXIT_IF(!file->opened);
+	Core::LockGuard lock(file->mutex);
 
 	printf("\t dir    = %s\n", file->real_name.C_Str());
 	printf("\t nbytes = %d\n", nbytes);
 	printf("\t index = %d\n", file->dents_index);
+
+	const uint32_t entry_count = file->dents.Size() + 2;
+	if (file->dents_index > entry_count)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	if (basep != nullptr)
 	{
 		*basep = file->dents_index;
 	}
 
-	if (file->dents_index == file->dents.Size())
+	uint32_t written = 0;
+	while (file->dents_index < entry_count)
 	{
-		return 0;
+		const bool   dot_entry = file->dents_index < 2;
+		const String name      = dot_entry ? (file->dents_index == 0 ? U"." : U"..") : file->dents.At(file->dents_index - 2).name;
+		const bool   is_file   = !dot_entry && file->dents.At(file->dents_index - 2).is_file;
+		const auto   name_utf8 = name.utf8_str();
+		const auto   name_size = name_utf8.Size() - 1;
+		if (name_size > UINT8_MAX)
+		{
+			return KERNEL_ERROR_ENAMETOOLONG;
+		}
+
+		const uint32_t record_size = (8u + name_size + 1u + 3u) & ~3u;
+		if (record_size > static_cast<uint32_t>(nbytes) - written)
+		{
+			break;
+		}
+
+		char* record = buf + written;
+		std::memset(record, 0, record_size);
+		uint32_t file_number = name.Hash();
+		if (file_number == 0)
+		{
+			file_number = file->dents_index + 1;
+		}
+		*reinterpret_cast<uint32_t*>(record + 0) = file_number;
+		*reinterpret_cast<uint16_t*>(record + 4) = static_cast<uint16_t>(record_size);
+		*reinterpret_cast<uint8_t*>(record + 6)  = is_file ? 8 : 4;
+		*reinterpret_cast<uint8_t*>(record + 7)  = static_cast<uint8_t>(name_size);
+		std::memcpy(record + 8, name_utf8.GetDataConst(), name_size + 1);
+
+		printf("\t name  = %s\n", name_utf8.GetDataConst());
+		written += record_size;
+		file->dents_index++;
 	}
 
-	const auto& entry = file->dents.At(file->dents_index++);
-
-	auto str      = entry.name.utf8_str();
-	auto str_size = str.Size() - 1;
-	EXIT_NOT_IMPLEMENTED(str_size > 255);
-
-	printf("\t name  = %s\n", str.GetDataConst());
-
-	*reinterpret_cast<uint32_t*>(buf + 0) = entry.name.Hash();
-	*reinterpret_cast<uint16_t*>(buf + 4) = 512;
-	*reinterpret_cast<uint8_t*>(buf + 6)  = (entry.is_file ? 8 : 4);
-	*reinterpret_cast<uint8_t*>(buf + 7)  = static_cast<uint8_t>(str_size);
-	strncpy(buf + 8, str.GetDataConst(), 255);
-	buf[8 + 255] = '\0';
-
-	return 512;
+	return static_cast<int>(written);
 }
 
 int KYTY_SYSV_ABI KernelGetdents(int fd, char* buf, int nbytes)

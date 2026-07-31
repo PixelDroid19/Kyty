@@ -6,9 +6,11 @@
 #include "Kyty/Core/MSpace.h"
 
 #include "Kyty/Core/Common.h"
+#include "Kyty/Core/LinkList.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 
+#include <cstdint>
 #include <cstring>
 
 namespace Kyty::Core {
@@ -53,6 +55,49 @@ struct MSpaceContext
 	uint32_t              array_small[MSPACE_ARRAY_SMALL - 1] = {};
 	uint32_t              array_hash[MSPACE_ARRAY_HASH]       = {};
 };
+
+struct MSpaceRegistration
+{
+	MSpaceContext* context = nullptr;
+	uintptr_t      begin   = 0;
+	uintptr_t      end     = 0;
+};
+
+static Core::Mutex                    g_mspace_registry_mutex;
+static Core::List<MSpaceRegistration> g_mspace_registry;
+
+static bool MSpaceRegister(MSpaceContext* context, uintptr_t begin, uintptr_t end)
+{
+	if (context == nullptr || begin >= end)
+	{
+		return false;
+	}
+
+	Core::LockGuard lock(g_mspace_registry_mutex);
+	FOR_LIST(index, g_mspace_registry)
+	{
+		const auto& registered = g_mspace_registry[index];
+		if (registered.context == context || (begin < registered.end && registered.begin < end))
+		{
+			return false;
+		}
+	}
+
+	g_mspace_registry.Add({context, begin, end});
+	return true;
+}
+
+static void MSpaceUnregister(MSpaceContext* context)
+{
+	Core::LockGuard lock(g_mspace_registry_mutex);
+	const auto      index = g_mspace_registry.Find(context, [](const auto& registered, auto* value) {
+		return registered.context == value;
+	});
+	if (g_mspace_registry.IndexValid(index))
+	{
+		g_mspace_registry.Remove(index);
+	}
+}
 
 static void MSpaceInternalUnlinkFromList(MSpaceContext& ctx, uint32_t i, uint32_t* root)
 {
@@ -474,7 +519,7 @@ mspace_t MSpaceCreate(const char* name, void* base, size_t capacity, bool thread
 		return nullptr;
 	}
 
-	if (base == nullptr || capacity < MSPACE_HEADER_SIZE)
+	if (base == nullptr || capacity < MSPACE_HEADER_SIZE || capacity > UINT64_MAX - addr)
 	{
 		return nullptr;
 	}
@@ -494,6 +539,12 @@ mspace_t MSpaceCreate(const char* name, void* base, size_t capacity, bool thread
 		return nullptr;
 	}
 
+	if (!MSpaceRegister(ctx, addr, addr + capacity))
+	{
+		MSpaceInternalShutdown(*ctx);
+		return nullptr;
+	}
+
 	return ctx;
 }
 
@@ -506,6 +557,7 @@ bool MSpaceDestroy(mspace_t msp)
 
 	auto* ctx = static_cast<MSpaceContext*>(msp);
 
+	MSpaceUnregister(ctx);
 	MSpaceInternalShutdown(*ctx);
 
 	return true;
@@ -602,6 +654,68 @@ void* MSpaceCalloc(mspace_t msp, size_t nelem, size_t size)
 void* MSpaceAlignedAlloc(mspace_t msp, size_t alignment, size_t size)
 {
 	return MSpaceMemalign(msp, alignment, size);
+}
+
+size_t MSpaceMallocUsableSize(const void* ptr)
+{
+	if (ptr == nullptr)
+	{
+		return 0;
+	}
+
+	const auto user = reinterpret_cast<uintptr_t>(ptr);
+	Core::LockGuard registry_lock(g_mspace_registry_mutex);
+	const auto registration = g_mspace_registry.Find(user, [](const auto& registered, uintptr_t address) {
+		return address >= registered.begin && address < registered.end;
+	});
+	if (!g_mspace_registry.IndexValid(registration))
+	{
+		return 0;
+	}
+
+	auto* ctx = g_mspace_registry[registration].context;
+	EXIT_IF(ctx == nullptr);
+	MSpaceInternalEnter(*ctx);
+
+	const auto base = reinterpret_cast<uintptr_t>(ctx->base);
+	const auto end  = base + (static_cast<size_t>(ctx->capacity) + 2u) * sizeof(MSpaceBlock);
+	if (user < base + sizeof(uint64_t) || user >= end)
+	{
+		MSpaceInternalLeave(*ctx);
+		return 0;
+	}
+
+	uint64_t allocation_address = 0;
+	std::memcpy(&allocation_address, reinterpret_cast<const void*>(user - sizeof(uint64_t)), sizeof(allocation_address));
+	if (allocation_address < base + sizeof(MSpaceBlock) || allocation_address >= end)
+	{
+		MSpaceInternalLeave(*ctx);
+		return 0;
+	}
+
+	const auto allocation = static_cast<uintptr_t>(allocation_address);
+	const auto header     = allocation - sizeof(MSpaceBlock);
+	uint32_t   size_4x    = 0;
+	std::memcpy(&size_4x, reinterpret_cast<const void*>(header + sizeof(uint32_t)), sizeof(size_4x));
+	if ((size_4x & 1u) == 0u)
+	{
+		MSpaceInternalLeave(*ctx);
+		return 0;
+	}
+
+	const size_t block_count = static_cast<size_t>(size_4x & ~3u) / 4u;
+	if (block_count == 0u || block_count > (end - allocation) / sizeof(MSpaceBlock))
+	{
+		MSpaceInternalLeave(*ctx);
+		return 0;
+	}
+
+	const size_t allocation_size = block_count * sizeof(MSpaceBlock) - sizeof(uint32_t);
+	const size_t user_offset     = user - allocation;
+	const size_t usable_size     = (user_offset <= allocation_size ? allocation_size - user_offset : 0u);
+
+	MSpaceInternalLeave(*ctx);
+	return usable_size;
 }
 
 static bool MSpaceInternalStats(MSpaceContext& ctx, MSpaceSize* mmsize)

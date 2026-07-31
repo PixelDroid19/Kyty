@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -285,6 +286,11 @@ static void* KYTY_SYSV_ABI KernelGetProcParam()
 	return reinterpret_cast<void*>(rt->GetProcParam());
 }
 
+static void KYTY_SYSV_ABI KernelSync()
+{
+	std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+
 static int KYTY_SYSV_ABI KernelDlsym(KernelModule handle, const char* symbol, void** address)
 {
 	PRINT_NAME();
@@ -337,16 +343,39 @@ static int64_t KYTY_SYSV_ABI write(int d, const char* str, int64_t size)
 {
 	// PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(d < 0);
+	if (d < 0)
+	{
+		return POSIX_N_CALL(KERNEL_ERROR_EBADF);
+	}
+	if (size < 0)
+	{
+		return POSIX_N_CALL(KERNEL_ERROR_EINVAL);
+	}
 
 	if (d > 2)
 	{
-		return POSIX_N_CALL(FileSystem::KernelWrite(d, str, size));
+		return POSIX_N_CALL(FileSystem::KernelWrite(d, str, static_cast<size_t>(size)));
+	}
+
+	if (d == 0 || !FileSystem::KernelIsStandardDescriptorOpen(d))
+	{
+		return POSIX_N_CALL(KERNEL_ERROR_EBADF);
+	}
+	if (size > INT_MAX)
+	{
+		return POSIX_N_CALL(KERNEL_ERROR_EINVAL);
+	}
+	if (str == nullptr && size != 0)
+	{
+		return POSIX_N_CALL(KERNEL_ERROR_EFAULT);
 	}
 
 	int size_int = static_cast<int>(size);
 
-	emu_printf(FG_BRIGHT_MAGENTA "%.*s" DEFAULT, size_int, str);
+	if (size_int != 0)
+	{
+		emu_printf(FG_BRIGHT_MAGENTA "%.*s" DEFAULT, size_int, str);
+	}
 
 	return size_int;
 }
@@ -358,8 +387,6 @@ static int KYTY_SYSV_ABI open(const char* path, int flags, int mode)
 
 static int KYTY_SYSV_ABI close(int d)
 {
-	EXIT_NOT_IMPLEMENTED(d <= 2);
-
 	return POSIX_CALL(FileSystem::KernelClose(d));
 }
 
@@ -371,15 +398,35 @@ static int64_t KYTY_SYSV_ABI lseek(int d, int64_t offset, int whence)
 static int64_t KYTY_SYSV_ABI read(int d, void* buf, uint64_t nbytes)
 {
 	// PRINT_NAME();
+	if (d < 0)
+	{
+		return POSIX_N_CALL(KERNEL_ERROR_EBADF);
+	}
 
 	if (d > 2)
 	{
 		return POSIX_N_CALL(FileSystem::KernelRead(d, buf, nbytes));
 	}
 
-	EXIT_NOT_IMPLEMENTED(d != 0);
+	if (d != 0 || !FileSystem::KernelIsStandardDescriptorOpen(d))
+	{
+		return POSIX_N_CALL(KERNEL_ERROR_EBADF);
+	}
+	if (nbytes == 0)
+	{
+		return 0;
+	}
+	if (buf == nullptr)
+	{
+		return POSIX_N_CALL(KERNEL_ERROR_EFAULT);
+	}
+	if (nbytes > INT_MAX)
+	{
+		return POSIX_N_CALL(KERNEL_ERROR_EINVAL);
+	}
 
-	return static_cast<int64_t>(strlen(std::fgets(static_cast<char*>(buf), static_cast<int>(nbytes), stdin)));
+	char* const line = std::fgets(static_cast<char*>(buf), static_cast<int>(nbytes), stdin);
+	return line == nullptr ? 0 : static_cast<int64_t>(std::strlen(line));
 }
 
 static int64_t KYTY_SYSV_ABI pread(int d, void* buf, size_t nbytes, int64_t offset)
@@ -785,9 +832,14 @@ int KYTY_SYSV_ABI KernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleI
 	return OK;
 }
 
-static void KYTY_SYSV_ABI KernelDebugRaiseExceptionOnReleaseMode(int /*c1*/, int /*c2*/)
+[[noreturn]] static void TerminateCallingGuestThreadForDebugRaise(uint64_t error, uint64_t argument, uint64_t return_address);
+
+[[noreturn]] static void KYTY_SYSV_ABI KernelDebugRaiseExceptionOnReleaseMode(int c1, int c2)
 {
 	PRINT_NAME();
+
+	TerminateCallingGuestThreadForDebugRaise(static_cast<uint32_t>(c1), static_cast<uint32_t>(c2),
+	                                        reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 }
 
 static void PrintGuestRaiseLocation(uint64_t return_address)
@@ -817,19 +869,28 @@ static void PrintGuestRaiseLocation(uint64_t return_address)
 	std::fflush(stderr);
 }
 
-static void KYTY_SYSV_ABI KernelDebugRaiseException(uint64_t c1, uint64_t c2)
+[[noreturn]] static void TerminateCallingGuestThreadForDebugRaise(uint64_t error, uint64_t argument, uint64_t return_address)
 {
-	PRINT_NAME();
 	// Always emit on stderr: Silent PrintfDirection would otherwise hide the
-	// codes, and returning here lands on the guest `ud2` after a noreturn call
-	// (SIGILL). Keep this a structured EXIT so the next frontier is the raise
-	// itself, not an opaque illegal-instruction trap.
-	const auto return_address = reinterpret_cast<uint64_t>(__builtin_return_address(0));
-	std::fprintf(stderr, "KernelDebugRaiseException: error=0x%016" PRIx64 " arg=0x%016" PRIx64 ", return addr=0x%016" PRIx64 "\n", c1, c2,
-	             return_address);
+	// codes. This guest API is noreturn, so returning would execute bytes that
+	// are not a continuation. Route termination through the normal guest
+	// pthread lifecycle to keep cleanup, join state, and thread ownership
+	// consistent.
+	std::fprintf(stderr,
+	             "KernelDebugRaiseException: error=0x%016" PRIx64 " arg=0x%016" PRIx64
+	             ", return addr=0x%016" PRIx64 "\n",
+	             error, argument, return_address);
 	std::fflush(stderr);
 	PrintGuestRaiseLocation(return_address);
-	EXIT("KernelDebugRaiseException: error=0x%016" PRIx64 " arg=0x%016" PRIx64 "\n", c1, c2);
+	LibKernel::PthreadExit(reinterpret_cast<void*>(error));
+	__builtin_unreachable();
+}
+
+[[noreturn]] static void KYTY_SYSV_ABI KernelDebugRaiseException(uint64_t c1, uint64_t c2)
+{
+	PRINT_NAME();
+
+	TerminateCallingGuestThreadForDebugRaise(c1, c2, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 }
 
 static bool is_allowed_exception_signal(int signum)
@@ -1336,6 +1397,11 @@ static int64_t KYTY_SYSV_ABI PosixFstat(int fd, FileSystem::FileStat* stat)
 	return POSIX_N_CALL(FileSystem::KernelFstat(fd, stat));
 }
 
+static int KYTY_SYSV_ABI PosixFcntl(int fd, int command, int64_t argument)
+{
+	return POSIX_CALL(FileSystem::KernelFcntl(fd, command, argument));
+}
+
 static int KYTY_SYSV_ABI PosixFtruncate(int fd, int64_t length)
 {
 	return POSIX_CALL(FileSystem::KernelFtruncate(fd, length));
@@ -1694,6 +1760,9 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("0TyVk4MSLt0", Posix::pthread_cond_init);
 	LIB_FUNC("RXXqi4CtF8w", Posix::pthread_cond_destroy);
 	LIB_FUNC("2MOy+rUfuhQ", Posix::pthread_cond_signal);
+	LIB_FUNC("mKoTx03HRWA", Posix::pthread_condattr_init);
+	LIB_FUNC("dJcuQVn6-Iw", Posix::pthread_condattr_destroy);
+	LIB_FUNC("EjllaAqAPZo", Posix::pthread_condattr_setclock);
 	LIB_FUNC("7H0iTOciTLo", Posix::pthread_mutex_lock);
 	LIB_FUNC("K-jXhbt2gn4", Posix::pthread_mutex_trylock);
 	LIB_FUNC("2Z+PpY6CaJg", Posix::pthread_mutex_unlock);
@@ -1746,6 +1815,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	// Posix contract directly instead of relying on cross-library NID matching.
 	LIB_FUNC("Oy6IpwgtYOk", LibKernel::lseek);
 	LIB_FUNC("mqQMh1zPPT8", LibKernel::PosixFstat);
+	LIB_FUNC("8nY19bKoiZk", LibKernel::PosixFcntl);
 	LIB_FUNC("ih4CD9-gghM", LibKernel::PosixFtruncate);
 	LIB_FUNC("VAzswvTOCzI", LibKernel::PosixUnlink);
 	LIB_FUNC("FN4gaPmuFV8", LibKernel::write);
@@ -1877,6 +1947,10 @@ LIB_DEFINE(InitLibKernel_1_Equeue)
 	LIB_FUNC("23CPPI1tyBY", EventQueue::KernelGetEventFilter);
 	LIB_FUNC("Q0qr9AyqJSk", EventQueue::KernelGetEventFflags);
 	LIB_FUNC("Uu-iDFC9aUc", EventQueue::KernelGetEventError);
+	LIB_FUNC("VHCS3rCd0PM", EventQueue::KernelAddReadEvent);
+	LIB_FUNC("JxJ4tfgKlXA", EventQueue::KernelDeleteReadEvent);
+	LIB_FUNC("R-tyYMpYaxY", EventQueue::KernelAddWriteEvent);
+	LIB_FUNC("cBGTk8S92XM", EventQueue::KernelDeleteWriteEvent);
 	LIB_FUNC("4R6-OvI2cEA", EventQueue::KernelAddUserEvent);
 	LIB_FUNC("WDszmSbWuDk", EventQueue::KernelAddUserEventEdge);
 	LIB_FUNC("F6e0kwo4cnk", EventQueue::KernelTriggerUserEvent);
@@ -2063,6 +2137,7 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("RpQJJVKTiFM", LibKernel::KernelGetModuleInfoForUnwind);
 	LIB_FUNC("kUpgrXIrz7Q", LibKernel::KernelGetModuleInfo);
 	LIB_FUNC("IuxnUuXk6Bg", LibKernel::KernelGetModuleList);
+	LIB_FUNC("uvT2iYBBnkY", LibKernel::KernelSync);
 	LIB_FUNC("Hc4CaR6JBL0", LibKernel::SyncOnAddress::KernelSyncOnAddressWait);
 	LIB_FUNC("q2y-wDIVWZA", LibKernel::SyncOnAddress::KernelSyncOnAddressWake);
 	LIB_FUNC("Fjc4-n1+y2g", LibKernel::elf_phdr_match_addr);
@@ -2078,6 +2153,7 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("kOcnerypnQA", LibKernel::KernelGettimezone);
 	LIB_FUNC("0NTHN1NKONI", LibKernel::KernelConvertLocaltimeToUtc);
 	LIB_FUNC("-o5uEDpN+oY", LibKernel::KernelConvertUtcToLocaltime);
+	LIB_FUNC("n88vx3C5nW8", Posix::gettimeofday);
 	// sceKernelMapNamedFlexibleMemoryInternal uses the same out-pointer ABI as
 	// the public named-flexible mapper.
 	LIB_FUNC("4h6F1LLbTiw", Memory::KernelMapNamedFlexibleMemory);

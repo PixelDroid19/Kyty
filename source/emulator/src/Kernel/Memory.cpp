@@ -1316,7 +1316,8 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr_in_out, uint64_t len, in
 	constexpr uint64_t kGuestPage      = 0x4000;
 	constexpr int      kFixed          = 0x10;
 	constexpr int      kNoOverwrite    = 0x80;
-	constexpr int      kSupportedFlags = kFixed | kNoOverwrite;
+	constexpr int      kNoCoalesce     = 0x400000;
+	constexpr int      kSupportedFlags = kFixed | kNoOverwrite | kNoCoalesce;
 
 	if (addr_in_out == nullptr || len == 0 || (len & (kGuestPage - 1)) != 0 || (flags & ~kSupportedFlags) != 0)
 	{
