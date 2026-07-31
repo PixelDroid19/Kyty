@@ -17,6 +17,7 @@
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
+#include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Profiler.h"
 
@@ -367,6 +368,7 @@ static Vector<ShaderDebugPrintfCmds>*                  g_debug_printfs    = null
 static std::unordered_map<uint64_t, ShaderMappedData>* g_shader_map       = nullptr;
 static std::mutex                                      g_shader_map_mutex;
 static std::unordered_map<uint64_t, int32_t>*          g_vertex_offset_sgpr_map = nullptr;
+static std::unordered_map<uint64_t, uint64_t>*         g_shader_continuations  = nullptr;
 
 void ShaderInit()
 {
@@ -374,6 +376,7 @@ void ShaderInit()
 
 	g_shader_map             = new std::unordered_map<uint64_t, ShaderMappedData>();
 	g_vertex_offset_sgpr_map = new std::unordered_map<uint64_t, int32_t>();
+	g_shader_continuations   = new std::unordered_map<uint64_t, uint64_t>();
 }
 
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
@@ -382,6 +385,118 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
 
 	std::scoped_lock lock(g_shader_map_mutex);
 	g_shader_map->insert_or_assign(addr, data);
+}
+
+void ShaderRegisterContinuation(uint64_t front_code_addr, uint64_t back_code_addr)
+{
+	EXIT_IF(g_shader_continuations == nullptr);
+	if (front_code_addr == 0 || back_code_addr == 0 || front_code_addr == back_code_addr)
+	{
+		return;
+	}
+	std::scoped_lock lock(g_shader_map_mutex);
+	g_shader_continuations->insert_or_assign(front_code_addr, back_code_addr);
+}
+
+uint64_t ShaderLookupContinuation(uint64_t front_code_addr)
+{
+	EXIT_IF(g_shader_continuations == nullptr);
+	if (front_code_addr == 0)
+	{
+		return 0;
+	}
+	std::scoped_lock lock(g_shader_map_mutex);
+	if (auto it = g_shader_continuations->find(front_code_addr); it != g_shader_continuations->end())
+	{
+		return it->second;
+	}
+	return 0;
+}
+
+// Linearize a Gen5 fused front→back chain: append the back half after the
+// front's instructions and rewrite terminal s_setpc into a static branch so
+// the SPIR-V CFG reaches position/param exports in the back half.
+static void ShaderAppendContinuation(ShaderCode* code, uint64_t back_code_addr)
+{
+	EXIT_IF(code == nullptr || back_code_addr == 0);
+	if (!code->HasAnyOf({ShaderInstructionType::SSetpcB64}))
+	{
+		return;
+	}
+
+	const auto* back_src = reinterpret_cast<const uint32_t*>(back_code_addr);
+	if (back_src == nullptr)
+	{
+		return;
+	}
+
+	ShaderCode back;
+	back.SetType(code->GetType());
+	ShaderParse(back_src, &back);
+	if (back.GetInstructions().IsEmpty())
+	{
+		return;
+	}
+
+	uint32_t front_max_pc = 0;
+	for (const auto& inst: code->GetInstructions())
+	{
+		if (inst.pc >= front_max_pc)
+		{
+			front_max_pc = inst.pc;
+		}
+	}
+	// Place the back half after the front's last instruction dword so PCs stay
+	// unique. Relative branches inside the back half remain valid because every
+	// back PC is shifted by the same constant.
+	const uint32_t pc_offset       = front_max_pc + 16u;
+	const uint32_t back_entry_pc   = back.GetInstructions().At(0).pc + pc_offset;
+
+	for (auto& inst: back.GetInstructions())
+	{
+		inst.pc += pc_offset;
+		code->GetInstructions().Add(inst);
+	}
+	for (const auto& label: back.GetLabels())
+	{
+		code->GetLabels().Add(ShaderLabel(label.GetDst() + pc_offset, label.GetSrc() + pc_offset));
+	}
+	for (const auto& label: back.GetIndirectLabels())
+	{
+		code->GetIndirectLabels().Add(ShaderLabel(label.GetDst() + pc_offset, label.GetSrc() + pc_offset));
+	}
+
+	// Rewrite every s_setpc to a static branch into the back entry. Internal
+	// getpc+add setpcs that already target a PC inside the front half would
+	// need per-site resolution; fused halves always jump to the back entry.
+	for (auto& inst: code->GetInstructions())
+	{
+		if (inst.type != ShaderInstructionType::SSetpcB64)
+		{
+			continue;
+		}
+		const int32_t rel = static_cast<int32_t>(back_entry_pc) - static_cast<int32_t>(inst.pc) - 4;
+		inst.type                    = ShaderInstructionType::SBranch;
+		inst.format                  = ShaderInstructionFormat::Label;
+		inst.src_num                 = 1;
+		inst.src[0]                  = {};
+		inst.src[0].type             = ShaderOperandType::IntegerInlineConstant;
+		inst.src[0].size             = 0;
+		inst.src[0].constant.i       = rel;
+		inst.dst                     = {};
+		code->GetLabels().Add(ShaderLabel(back_entry_pc, inst.pc));
+	}
+
+	static uint32_t logs = 0;
+	if (logs < 16u)
+	{
+		++logs;
+		std::fprintf(stderr,
+		             "KYTY_SHADER: linearized front→back continuation front_max_pc=0x%08" PRIx32
+		             " back=0x%012" PRIx64 " entry_pc=0x%08" PRIx32 " insts=%u\n",
+		             front_max_pc, back_code_addr, back_entry_pc,
+		             static_cast<uint32_t>(back.GetInstructions().Size()));
+	}
 }
 
 static bool ShaderGetMappedData(uint64_t addr, ShaderMappedData* data)
@@ -1113,8 +1228,23 @@ static void vs_check(const HW::VertexShaderInfo& vs, const HW::ShaderRegisters& 
 	EXIT_NOT_IMPLEMENTED(sh.GetGsInstPrimsInSubgrp() > 0x00000040);
 	EXIT_NOT_IMPLEMENTED(sh.m_geMaxOutputPerSubgroup > 0x00000040);
 	EXIT_NOT_IMPLEMENTED(sh.m_vgtEsgsRingItemsize != 0x00000000 && sh.m_vgtEsgsRingItemsize != 0x00000004);
-	EXIT_NOT_IMPLEMENTED(sh.m_vgtGsMaxVertOut != 0x00000000);
-	EXIT_NOT_IMPLEMENTED(sh.m_vgtGsOutPrimType != 0x00000000);
+	// Gen5 NGG may program GS max-vert-out / out-prim-type for the hardware
+// passthrough path while the host still runs a single vertex stage. Accept the
+// documented zero/default and the small set of GS output primitive encodings.
+const auto is_known_gs_out_prim_type = [](uint32_t value) {
+	switch (value)
+	{
+		case 0x0u: // points
+		case 0x1u: // lines
+		case 0x2u: // triangles
+		case 0x3u: // rectangle / 2d
+		case 0x4u: // rect list
+			return true;
+		default: return false;
+	}
+};
+EXIT_NOT_IMPLEMENTED(sh.m_vgtGsMaxVertOut != 0x00000000 && sh.m_vgtGsMaxVertOut > 0x00000003u);
+EXIT_NOT_IMPLEMENTED(!is_known_gs_out_prim_type(sh.m_vgtGsOutPrimType));
 }
 
 static void ps_check(const HW::PsStageRegisters& ps, const HW::ShaderRegisters& sh)
@@ -1961,6 +2091,29 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	KYTY_PROFILER_FUNCTION();
 
 	int binding_index = 0;
+	bind->textures2D.textures2d_sampled_uint_num       = 0;
+	bind->textures2D.textures2d_array_sampled_uint_num = 0;
+	bind->textures2D.textures3d_sampled_uint_num       = 0;
+	if (Config::IsNextGen())
+	{
+		for (int i = 0; i < bind->textures2D.textures_num; ++i)
+		{
+			const auto& descriptor = bind->textures2D.desc[i];
+			if (descriptor.usage != ShaderTextureUsage::ReadOnly ||
+			    VulkanGen5ImageNumericType(descriptor.texture.Format()) != GuestImageNumericType::UnsignedInteger)
+			{
+				continue;
+			}
+			switch (ShaderGen5SampledTextureShapeForType(descriptor.texture.Type()))
+			{
+				case ShaderGen5SampledTextureShape::TwoDimensional: bind->textures2D.textures2d_sampled_uint_num++; break;
+				case ShaderGen5SampledTextureShape::TwoDimensionalArray:
+					bind->textures2D.textures2d_array_sampled_uint_num++;
+					break;
+				case ShaderGen5SampledTextureShape::ThreeDimensional: bind->textures2D.textures3d_sampled_uint_num++; break;
+			}
+		}
+	}
 
 	bind->push_constant_size = 0;
 
@@ -1978,6 +2131,9 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 		// aggregate sampled count while each shader can use a different subset.
 		bind->textures2D.binding_sampled_array_index = binding_index++;
 		bind->textures2D.binding_sampled_3d_index = binding_index++;
+		bind->textures2D.binding_sampled_uint_index = binding_index++;
+		bind->textures2D.binding_sampled_array_uint_index = binding_index++;
+		bind->textures2D.binding_sampled_3d_uint_index = binding_index++;
 
 		bind->push_constant_size += bind->textures2D.textures_num * 32;
 	}
@@ -4434,6 +4590,12 @@ static bool ShaderProbeMatches(const ShaderCode& code)
 		return false;
 	}
 
+	// Dump every matching stage when ID is "all" (bounded diagnostic only).
+	if (std::strcmp(value, "all") == 0)
+	{
+		return true;
+	}
+
 	char*      end    = nullptr;
 	const auto parsed = std::strtoull(value, &end, 16);
 	if (end == value || *end != '\0')
@@ -4569,6 +4731,15 @@ ShaderCode ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegis
 		{
 			DebugStatsScopedTimer timer(RecordShaderPipelineMissParse);
 			ShaderParse(src, &code);
+		}
+
+		if (gs_instead_of_vs)
+		{
+			const uint64_t continuation = ShaderLookupContinuation(shader_addr);
+			if (continuation != 0)
+			{
+				ShaderAppendContinuation(&code, continuation);
+			}
 		}
 
 		if (g_debug_printfs != nullptr)
@@ -4727,7 +4898,9 @@ Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInpu
 	}
 
 	log.DumpOptimizedShader(ret);
-	ShaderProbeWrite("ps", code, nullptr, &ret);
+	// Keep the recompiled text alongside the binary so CFG investigations can
+	// compare both stages without a second run.
+	ShaderProbeWrite("ps", code, &source, &ret);
 
 	return ret;
 }

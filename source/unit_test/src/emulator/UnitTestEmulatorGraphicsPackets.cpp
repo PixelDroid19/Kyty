@@ -121,15 +121,15 @@ TEST(EmulatorGraphicsPackets, AcceptsObservedFullTargetBarrierInvalidations)
 	EXPECT_FALSE(GraphicsAgcFullTargetBarrierGcrSupported(0u));
 }
 
-TEST(EmulatorGraphicsPackets, RejectsNonDwordStrideRawStorageEvenWithAlignedRange)
+TEST(EmulatorGraphicsPackets, AcceptsNonZeroStrideRawStorage)
 {
 	ShaderBufferResource resource {};
 	resource.fields[1] = 1u << 16u;
 	resource.fields[2] = 24576u;
 	resource.fields[3] = (5u << 12u) | DstSel(4, 0, 0, 0);
 
-	EXPECT_FALSE(ShaderRawStorageDescriptorSupported(resource));
-	EXPECT_FALSE(ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw));
+	EXPECT_TRUE(ShaderRawStorageDescriptorSupported(resource));
+	EXPECT_TRUE(ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw));
 
 	resource.fields[1] = 4u << 16u;
 	resource.fields[2] = 24577u;
@@ -881,6 +881,9 @@ TEST(EmulatorGraphicsPackets, UsesForwardConditionalExitAsBackwardLoopMerge)
 
 	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
 
+	EXPECT_NE(source.FindIndex("OpCapability GroupNonUniformVote"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpGroupNonUniformAny %bool %uint_3 %cc_lane_b_2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLogicalNot %bool %cc_any_2"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpLoopMerge %label_0014_0008 %loop_continue_0010 None"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%loop_merge_0010 = OpLabel"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpBranchConditional %cc_b_2 %label_0014_0008 %t230_2"), Core::STRING8_INVALID_INDEX);

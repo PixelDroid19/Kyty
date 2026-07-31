@@ -1178,10 +1178,16 @@ struct ShaderTextureResources
 	int                     textures2d_sampled_num   = 0;
 	int                     textures2d_array_sampled_num = 0;
 	int                     textures3d_sampled_num   = 0;
+	int                     textures2d_sampled_uint_num = 0;
+	int                     textures2d_array_sampled_uint_num = 0;
+	int                     textures3d_sampled_uint_num = 0;
 	int                     textures2d_storage_num   = 0;
 	int                     binding_sampled_index    = 0;
 	int                     binding_sampled_array_index = -1;
 	int                     binding_sampled_3d_index = -1;
+	int                     binding_sampled_uint_index = -1;
+	int                     binding_sampled_array_uint_index = -1;
+	int                     binding_sampled_3d_uint_index = -1;
 	int                     binding_storage_index    = 0;
 };
 
@@ -1477,6 +1483,11 @@ struct ShaderMappedData
 
 void ShaderInit();
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
+// Gen5 fused GS front→back: terminal s_setpc in the front half transfers to a
+// separately allocated back half. Record the relationship at fuse time so the
+// recompiler can linearize the chain.
+void     ShaderRegisterContinuation(uint64_t front_code_addr, uint64_t back_code_addr);
+uint64_t ShaderLookupContinuation(uint64_t front_code_addr);
 
 void                  ShaderCalcBindingIndices(ShaderBindResources* bind);
 [[nodiscard]] int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base, uint32_t user_data_count);
