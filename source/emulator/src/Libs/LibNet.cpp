@@ -11,6 +11,8 @@
 #include <cstddef>
 #include <map>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -37,6 +39,7 @@ namespace LibNet {
 LIB_VERSION("Net", 1, "Net", 1, 1);
 
 static thread_local int g_net_errno = 0;
+alignas(16) static constexpr uint8_t g_in6addr_any[16] {};
 
 namespace Net = Network::Net;
 
@@ -172,6 +175,7 @@ LIB_DEFINE(InitNet_1_Net)
 	LIB_FUNC("Nd91WaWmG2w", LibNet::NetResolverStartNtoa);
 	LIB_FUNC("Apb4YDxKsRI", LibNet::NetResolverStartAton);
 	LIB_FUNC("hLuXdjHnhiI", LibNet::NetGetSockInfo);
+	LIB_OBJECT("ZRAJo-A-ukc", LibNet::g_in6addr_any);
 }
 
 } // namespace LibNet
@@ -595,8 +599,70 @@ namespace LibHttp2 {
 
 LIB_VERSION("Http2", 1, "Http2", 1, 1);
 
-// Gen5 sceHttp2Init (NID 3JCe3lCbQ8A). Returns a positive context id; no real HTTP yet.
-static int g_http2_next_ctx = 1;
+namespace {
+
+constexpr int HTTP2_ERROR_INVALID_ID   = static_cast<int>(0x817b1100u);
+constexpr int HTTP2_ERROR_BEFORE_SEND  = static_cast<int>(0x817b1065u);
+constexpr int HTTP2_ERROR_TIMEOUT      = static_cast<int>(0x817b1068u);
+constexpr int HTTP2_ERROR_NULL_POINTER = static_cast<int>(0x817b1225u);
+
+struct Http2Context
+{
+	int    libnet_mem_id {};
+	int    libssl_ctx_id {};
+	size_t pool_size {};
+	int    max_concurrent_requests {};
+};
+
+struct Http2Template
+{
+	int         context_id {};
+	std::string user_agent;
+	int         http_version {};
+	bool        auto_proxy_configuration {};
+};
+
+struct Http2Request
+{
+	int         template_id {};
+	std::string method;
+	std::string url;
+	uint64_t    content_length {};
+	int         send_result = HTTP2_ERROR_BEFORE_SEND;
+	int         async_result = HTTP2_ERROR_BEFORE_SEND;
+	int         async_event {};
+	struct Header
+	{
+		std::string name;
+		std::string value;
+		uint32_t    mode {};
+	};
+	std::vector<Header> headers;
+};
+
+struct Http2AsyncResult
+{
+	int      event_type {};
+	int      request_id {};
+	int      result {};
+	uint8_t  reserved0[4] {};
+	uint64_t reserved1 {};
+};
+
+struct Http2Registry
+{
+	std::mutex                   mutex;
+	int                          next_context_id  = 1;
+	int                          next_template_id = 1;
+	int                          next_request_id  = 1;
+	std::map<int, Http2Context>  contexts;
+	std::map<int, Http2Template> templates;
+	std::map<int, Http2Request>  requests;
+};
+
+Http2Registry g_http2_registry;
+
+} // namespace
 
 static int KYTY_SYSV_ABI Http2Init(int libnet_mem_id, int libssl_ctx_id, size_t pool_size, int max_concurrent_request)
 {
@@ -605,12 +671,201 @@ static int KYTY_SYSV_ABI Http2Init(int libnet_mem_id, int libssl_ctx_id, size_t 
 	printf("\t libssl_ctx_id          = %d\n", libssl_ctx_id);
 	printf("\t pool_size              = %" PRIu64 "\n", static_cast<uint64_t>(pool_size));
 	printf("\t max_concurrent_request = %d\n", max_concurrent_request);
-	return g_http2_next_ctx++;
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	const int       context_id = g_http2_registry.next_context_id++;
+	g_http2_registry.contexts.emplace(
+	    context_id, Http2Context {
+	                    .libnet_mem_id            = libnet_mem_id,
+	                    .libssl_ctx_id            = libssl_ctx_id,
+	                    .pool_size                = pool_size,
+	                    .max_concurrent_requests = max_concurrent_request,
+	                });
+	return context_id;
+}
+
+static int KYTY_SYSV_ABI Http2CreateTemplate(int lib_http2_context_id, const char* user_agent, int http_version,
+                                             int is_auto_proxy_configuration)
+{
+	PRINT_NAME();
+	printf("\t lib_http2_context_id       = %d\n", lib_http2_context_id);
+	printf("\t user_agent                 = %s\n", user_agent != nullptr ? user_agent : "(null)");
+	printf("\t http_version               = %d\n", http_version);
+	printf("\t auto_proxy_configuration   = %d\n", is_auto_proxy_configuration);
+
+	if (user_agent == nullptr)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	if (g_http2_registry.contexts.find(lib_http2_context_id) == g_http2_registry.contexts.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+
+	const int template_id = g_http2_registry.next_template_id++;
+	g_http2_registry.templates.emplace(
+	    template_id, Http2Template {
+	                     .context_id               = lib_http2_context_id,
+	                     .user_agent               = user_agent,
+	                     .http_version             = http_version,
+	                     .auto_proxy_configuration = is_auto_proxy_configuration != 0,
+	                 });
+	return template_id;
+}
+
+static int KYTY_SYSV_ABI Http2CreateRequestWithUrl(int template_id, const char* method, const char* url, uint64_t content_length)
+{
+	PRINT_NAME();
+	printf("\t template_id    = %d\n", template_id);
+	printf("\t method         = %s\n", method != nullptr ? method : "(null)");
+	printf("\t url            = %s\n", url != nullptr ? url : "(null)");
+	printf("\t content_length = %" PRIu64 "\n", content_length);
+
+	if (method == nullptr || url == nullptr)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	if (g_http2_registry.templates.find(template_id) == g_http2_registry.templates.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+
+	const int request_id = g_http2_registry.next_request_id++;
+	g_http2_registry.requests.emplace(
+	    request_id, Http2Request {.template_id = template_id, .method = method, .url = url, .content_length = content_length});
+	return request_id;
+}
+
+static int KYTY_SYSV_ABI Http2AddRequestHeader(int request_id, const char* name, const char* value, uint32_t mode)
+{
+	PRINT_NAME();
+	printf("\t request_id = %d\n", request_id);
+	printf("\t name       = %s\n", name != nullptr ? name : "(null)");
+	printf("\t value      = %s\n", value != nullptr ? value : "(null)");
+	printf("\t mode       = %" PRIu32 "\n", mode);
+
+	if (name == nullptr || value == nullptr)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto            request = g_http2_registry.requests.find(request_id);
+	if (request == g_http2_registry.requests.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+
+	request->second.headers.push_back(Http2Request::Header {.name = name, .value = value, .mode = mode});
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2SetRequestContentLength(int request_id, uint64_t content_length)
+{
+	PRINT_NAME();
+	printf("\t request_id     = %d\n", request_id);
+	printf("\t content_length = %" PRIu64 "\n", content_length);
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto            request = g_http2_registry.requests.find(request_id);
+	if (request == g_http2_registry.requests.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+
+	request->second.content_length = content_length;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2SendRequest(int request_id, const void* post_data, size_t size)
+{
+	PRINT_NAME();
+	printf("\t request_id = %d\n", request_id);
+	printf("\t post_data  = %p\n", post_data);
+	printf("\t size       = %" PRIu64 "\n", static_cast<uint64_t>(size));
+
+	if (post_data == nullptr && size != 0u)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto            request = g_http2_registry.requests.find(request_id);
+	if (request == g_http2_registry.requests.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+
+	request->second.send_result = HTTP2_ERROR_TIMEOUT;
+	return request->second.send_result;
+}
+
+static int KYTY_SYSV_ABI Http2SendRequestAsync(int request_id, const void* post_data, size_t size, void* kqueue_option,
+	                                              void* option)
+{
+	PRINT_NAME();
+	printf("\t request_id    = %d\n", request_id);
+	printf("\t post_data     = %p\n", post_data);
+	printf("\t size          = %" PRIu64 "\n", static_cast<uint64_t>(size));
+	printf("\t kqueue_option = %p\n", kqueue_option);
+	printf("\t option        = %p\n", option);
+
+	if (post_data == nullptr && size != 0u)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto            request = g_http2_registry.requests.find(request_id);
+	if (request == g_http2_registry.requests.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+
+	request->second.send_result  = HTTP2_ERROR_TIMEOUT;
+	request->second.async_result = HTTP2_ERROR_TIMEOUT;
+	request->second.async_event  = 0;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2WaitAsync(int request_id, Http2AsyncResult* result, uint32_t* timeout, void* option)
+{
+	PRINT_NAME();
+	printf("\t request_id = %d\n", request_id);
+	printf("\t result     = %p\n", static_cast<void*>(result));
+	printf("\t timeout    = %p\n", static_cast<void*>(timeout));
+	printf("\t option     = %p\n", option);
+
+	if (result == nullptr)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto            request = g_http2_registry.requests.find(request_id);
+	if (request == g_http2_registry.requests.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+
+	*result = {.event_type = request->second.async_event, .request_id = request_id, .result = request->second.async_result};
+	return 0;
 }
 
 LIB_DEFINE(InitNet_1_Http2)
 {
 	LIB_FUNC("3JCe3lCbQ8A", LibHttp2::Http2Init);
+	LIB_FUNC("+wCt7fCijgk", LibHttp2::Http2CreateTemplate);
+	LIB_FUNC("mmyOCxQMVYQ", LibHttp2::Http2CreateRequestWithUrl);
+	LIB_FUNC("nrPfOE8TQu0", LibHttp2::Http2AddRequestHeader);
+	LIB_FUNC("FSAFOzi0FpM", LibHttp2::Http2SetRequestContentLength);
+	LIB_FUNC("rbqZig38AT8", LibHttp2::Http2SendRequest);
+	LIB_FUNC("A+NVAFu4eCg", LibHttp2::Http2SendRequestAsync);
+	LIB_FUNC("MOp-AUhdfi8", LibHttp2::Http2WaitAsync);
 }
 
 } // namespace LibHttp2

@@ -8,6 +8,8 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Loader/SystemContent.h"
 
+#include <cstring>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs {
@@ -39,6 +41,14 @@ struct AppContentAddcontInfo
 	NpUnifiedEntitlementLabel entitlement_label;
 	uint32_t                  status;
 };
+
+struct AppContentMountPoint
+{
+	char data[16];
+};
+
+static constexpr int      APP_CONTENT_ERROR_PARAMETER = static_cast<int>(0x80d90002u);
+static constexpr uint64_t TEMPORARY_DATA_QUOTA_KB     = 1024ULL * 1024ULL;
 
 int KYTY_SYSV_ABI AppContentInitialize(const AppContentInitParam* init_param, AppContentBootParam* boot_param)
 {
@@ -96,20 +106,39 @@ int KYTY_SYSV_ABI AppContentAppParamGetInt(uint32_t param_id, int32_t* value)
 	return OK;
 }
 
-int KYTY_SYSV_ABI AppContentTemporaryDataMount2(const void* /*param*/)
+int KYTY_SYSV_ABI AppContentTemporaryDataMount2(const void* /*param*/, AppContentMountPoint* mount_point)
 {
 	PRINT_NAME();
+	if (mount_point == nullptr)
+	{
+		return APP_CONTENT_ERROR_PARAMETER;
+	}
+	static constexpr char mount_name[] = "/temp0";
+	std::memcpy(mount_point->data, mount_name, sizeof(mount_name));
 	return OK;
 }
 
-int KYTY_SYSV_ABI AppContentDownloadDataGetAvailableSpaceKb(uint64_t* available_kb)
+int KYTY_SYSV_ABI AppContentTemporaryDataGetAvailableSpaceKb(const AppContentMountPoint* mount_point, uint64_t* available_kb)
+{
+	PRINT_NAME();
+	static constexpr char mount_name[] = "/temp0";
+	if (mount_point == nullptr || available_kb == nullptr ||
+	    std::memcmp(mount_point->data, mount_name, sizeof(mount_name)) != 0)
+	{
+		return APP_CONTENT_ERROR_PARAMETER;
+	}
+	*available_kb = TEMPORARY_DATA_QUOTA_KB;
+	return OK;
+}
+
+int KYTY_SYSV_ABI AppContentDownloadDataGetAvailableSpaceKb(const void* /*param*/, uint64_t* available_kb)
 {
 	PRINT_NAME();
 	if (available_kb == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return APP_CONTENT_ERROR_PARAMETER;
 	}
-	*available_kb = 1024ULL * 1024ULL;
+	*available_kb = TEMPORARY_DATA_QUOTA_KB;
 	return OK;
 }
 
@@ -121,6 +150,7 @@ LIB_DEFINE(InitAppContent_1)
 	LIB_FUNC("xnd8BJzAxmk", AppContent::AppContentGetAddcontInfoList);
 	LIB_FUNC("99b82IKXpH4", AppContent::AppContentAppParamGetInt);
 	LIB_FUNC("buYbeLOGWmA", AppContent::AppContentTemporaryDataMount2);
+	LIB_FUNC("SaKib2Ug0yI", AppContent::AppContentTemporaryDataGetAvailableSpaceKb);
 	LIB_FUNC("Gl6w5i0JokY", AppContent::AppContentDownloadDataGetAvailableSpaceKb);
 }
 

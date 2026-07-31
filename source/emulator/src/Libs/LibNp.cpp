@@ -288,6 +288,21 @@ int KYTY_SYSV_ABI Initialize(const void* init_parameters, void* boot_parameters)
 	return OK;
 }
 
+int KYTY_SYSV_ABI GetSkuFlag(SkuFlag* sku_flag)
+{
+	if (!g_entitlement_initialized.load(std::memory_order_acquire))
+	{
+		return ERROR_NOT_INITIALIZED;
+	}
+	if (sku_flag == nullptr)
+	{
+		return ERROR_PARAMETER;
+	}
+
+	*sku_flag = SkuFlag::Full;
+	return OK;
+}
+
 int KYTY_SYSV_ABI GetAddcontEntitlementInfo(ServiceLabel /*service_label*/, const UnifiedEntitlementLabel* entitlement_label,
                                             AddcontEntitlementInfo* info)
 {
@@ -329,6 +344,7 @@ int KYTY_SYSV_ABI GetAddcontEntitlementInfoList(ServiceLabel /*service_label*/, 
 LIB_DEFINE(InitNpEntitlementAccess_1)
 {
 	LIB_FUNC("jO8DM8oyego", Initialize);
+	LIB_FUNC("lPDO62PpJIA", GetSkuFlag);
 	// sceNpEntitlementAccessGetAddcontEntitlementInfo
 	LIB_FUNC("xddD23+8TfQ", GetAddcontEntitlementInfo);
 	LIB_FUNC("TFyU+KFBv54", GetAddcontEntitlementInfoList);

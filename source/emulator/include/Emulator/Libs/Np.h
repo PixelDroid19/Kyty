@@ -91,7 +91,14 @@ constexpr uint32_t DOWNLOAD_STATUS_DOWNLOADING        = 2;
 constexpr uint32_t DOWNLOAD_STATUS_DOWNLOAD_SUSPENDED = 3;
 constexpr uint32_t DOWNLOAD_STATUS_INSTALLED          = 4;
 
+enum class SkuFlag: uint32_t
+{
+	Full = 3,
+};
+
 int KYTY_SYSV_ABI Initialize(const void* init_parameters, void* boot_parameters);
+
+int KYTY_SYSV_ABI GetSkuFlag(SkuFlag* sku_flag);
 
 // sceNpEntitlementAccessGetAddcontEntitlementInfo (NID xddD23+8TfQ).
 // SysV: rdi=serviceLabel, rsi=label*, rdx=info*.
