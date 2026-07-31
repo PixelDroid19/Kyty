@@ -2702,11 +2702,33 @@ constexpr std::uint32_t kCxxIosBoolAlpha  = 0x8000;
 constexpr std::int32_t  kCxxNumPutMaxWidth = 1 << 20;
 constexpr std::int32_t  kCxxNumPutMaxPrecision = 512;
 
-// std::setw(int) returns the ABI's four-byte formatting wrapper. The stream
-// insertion overload owns applying the value to ios_base::width.
-static KYTY_SYSV_ABI int c_setw(int width)
+// std::setw(int) returns the ABI's two-register smanip {apply, arg} (rax:rdx).
+// Observed guest use after PLT resolution:
+//   call setw(N) → mov %edx,%esi → call *%rax with rdi already adjusted to the
+//   ios_base subobject. Returning only N in eax made call *%rax jump to a
+//   near-null address (RIP=N) and FatalFault with rc=139.
+struct CxxIosSmanipInt
 {
-	return width;
+	void (*apply)(CxxIosBaseLayout* ios, int arg);
+	int arg;
+};
+
+static_assert(sizeof(CxxIosSmanipInt) == 16);
+static_assert(offsetof(CxxIosSmanipInt, apply) == 0);
+static_assert(offsetof(CxxIosSmanipInt, arg) == 8);
+
+static KYTY_SYSV_ABI void c_setw_apply(CxxIosBaseLayout* ios, int width)
+{
+	if (ios == nullptr)
+	{
+		return;
+	}
+	ios->width = width;
+}
+
+static KYTY_SYSV_ABI CxxIosSmanipInt c_setw(int width)
+{
+	return CxxIosSmanipInt {&c_setw_apply, width};
 }
 
 static KYTY_SYSV_ABI void c_facet_dtor(CxxFacetBase* /*self*/) {}
