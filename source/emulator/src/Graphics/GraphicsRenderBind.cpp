@@ -36,6 +36,7 @@
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <cstring>
 #include <cstdio>
@@ -1028,6 +1029,19 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			         ? VulkanImage::VIEW_3D
 			         : (depth_texture ? (arrayed_2d ? VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY : VulkanImage::VIEW_DEPTH_TEXTURE)
 			                          : (arrayed_2d ? VulkanImage::VIEW_ARRAY : view_type)));
+			if (std::getenv("KYTY_DUMP_VIDEO_BIND") != nullptr && gen5 && (fmt == 1u || fmt == 14u) && *sampled_index < 8)
+			{
+				static std::atomic_uint bind_dump_count[2] {{0}, {0}};
+				const unsigned         fmt_index = fmt == 14u ? 1u : 0u;
+				const auto             dump_index = bind_dump_count[fmt_index].fetch_add(1, std::memory_order_relaxed);
+				if (dump_index < 24u)
+				{
+					const uint32_t descriptor_index = static_cast<uint32_t>(*sampled_index) | descriptor_tag;
+					std::fprintf(stderr, "KYTY_DUMP_VIDEO_BIND index=%u fmt=%u addr=0x%012" PRIx64 " sampled_index=%d descriptor=0x%08x image=%p id=%" PRIu64 " format=%d view=%d swizzle=0x%03x extent=%ux%u type=%d\n",
+					             dump_index, fmt, static_cast<uint64_t>(addr), *sampled_index, descriptor_index, static_cast<void*>(tex), tex->memory.unique_id,
+					             static_cast<int>(tex->format), sampled_views[*sampled_index], view_swizzle, width, height, static_cast<int>(tex->type));
+				}
+			}
 			if (*sampled_index == 0)
 			{
 				if (three_dimensional)
