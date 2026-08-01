@@ -31,7 +31,9 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <string>
 #include <utility>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -161,14 +163,57 @@ bool LoaderDecodeEhFrameHeader(const uint8_t* header, size_t header_size, uint64
 
 #pragma pack(1)
 
+// Guest command lines are short switch lists (engines read a handful of
+// `-flag` entries), so a fixed inline vector keeps the entry frame a plain
+// stack object while still bounding what a host configuration can inject.
+constexpr int kGuestArgvMax = 16;
+
 struct EntryParams
 {
 	int         argc;
 	uint32_t    pad;
-	const char* argv[3];
+	const char* argv[kGuestArgvMax];
 };
 
 #pragma pack()
+
+// Extra guest command-line switches, whitespace separated, from
+// KYTY_GUEST_ARGS. Engines change their threading and backend selection from
+// argv, so the host must be able to supply the same switches a real launcher
+// would. Storage is static because the guest keeps the pointers for its whole
+// lifetime.
+static const std::vector<std::string>& GuestExtraArgs()
+{
+	static const std::vector<std::string> args = []()
+	{
+		std::vector<std::string> parsed;
+		const char*              spec = std::getenv("KYTY_GUEST_ARGS");
+		if (spec == nullptr)
+		{
+			return parsed;
+		}
+		std::string current;
+		for (const char* c = spec;; ++c)
+		{
+			if (*c == '\0' || *c == ' ' || *c == '\t')
+			{
+				if (!current.empty())
+				{
+					parsed.push_back(current);
+					current.clear();
+				}
+				if (*c == '\0')
+				{
+					break;
+				}
+				continue;
+			}
+			current.push_back(*c);
+		}
+		return parsed;
+	}();
+	return args;
+}
 
 using atexit_func_t          = KYTY_SYSV_ABI void (*)();
 using entry_func_t           = KYTY_SYSV_ABI void (*)(EntryParams* params, atexit_func_t atexit_func);
@@ -1485,6 +1530,16 @@ void RuntimeLinker::Execute()
 		std::memset(p, 0, sizeof(EntryParams));
 		p->argc    = 1;
 		p->argv[0] = "KytyEmu";
+		for (const auto& guest_arg: GuestExtraArgs())
+		{
+			if (p->argc >= kGuestArgvMax - 1)
+			{
+				printf(FG_BRIGHT_YELLOW "guest argv truncated at %d entries" DEFAULT "\n", kGuestArgvMax - 1);
+				break;
+			}
+			p->argv[p->argc++] = guest_arg.c_str();
+			printf("guest argv[%d] = %s\n", p->argc - 1, guest_arg.c_str());
+		}
 		printf("stack_addr = %" PRIx64 "\n", reinterpret_cast<uint64_t>(p));
 
 		Core::mem_guest_thread_enter();

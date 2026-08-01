@@ -79,6 +79,55 @@ static String GetSandboxRoot()
 	return g_sandbox_root;
 }
 
+// ---------------------------------------------------------------------------
+// Opt-in guest file operation trace
+// ---------------------------------------------------------------------------
+// KYTY_FS_TRACE=<substring> emits one stderr line per guest file operation whose
+// guest path contains the substring ("*" matches every path). A guest that
+// retries a failing load spins without bound, so the line count is capped by
+// KYTY_FS_TRACE_LIMIT (default 100000) to keep host disk use bounded.
+
+static const char* FsTraceFilter()
+{
+	static const char* filter = std::getenv("KYTY_FS_TRACE");
+	return (filter != nullptr && filter[0] != '\0') ? filter : nullptr;
+}
+
+static void FsTrace(const char* op, const char* guest_path, int64_t argument, int64_t result)
+{
+	const char* filter = FsTraceFilter();
+	if (filter == nullptr || guest_path == nullptr)
+	{
+		return;
+	}
+	if (std::strcmp(filter, "*") != 0 && std::strstr(guest_path, filter) == nullptr)
+	{
+		return;
+	}
+
+	static std::atomic_uint64_t emitted {0};
+	static const uint64_t       limit = []
+	{
+		const char* spec = std::getenv("KYTY_FS_TRACE_LIMIT");
+		const auto  parsed = (spec != nullptr) ? std::strtoull(spec, nullptr, 10) : 0;
+		return parsed != 0 ? parsed : uint64_t {100000};
+	}();
+
+	const auto index = emitted.fetch_add(1, std::memory_order_relaxed);
+	if (index >= limit)
+	{
+		if (index == limit)
+		{
+			std::fprintf(stderr, "KYTY_FS_TRACE: line limit reached; further tracing suppressed\n");
+			std::fflush(stderr);
+		}
+		return;
+	}
+
+	std::fprintf(stderr, "KYTY_FS_TRACE: %-6s arg=%" PRId64 " result=%" PRId64 " path=%s\n", op, argument, result, guest_path);
+	std::fflush(stderr);
+}
+
 // Create all intermediate directories for a host path (like mkdir -p).
 static bool CreateDirectoryRecursive(const String& dir_path)
 {
@@ -511,10 +560,8 @@ String GetRealFilename(const String& mounted_file_name)
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
+static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_t mode)
 {
-	PRINT_NAME();
-
 	EXIT_IF(g_mount_points == nullptr || g_files == nullptr);
 
 	if (path == nullptr)
@@ -684,6 +731,15 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 	return descriptor;
 }
 
+int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
+{
+	PRINT_NAME();
+
+	const int result = KernelOpenResolved(path, flags, mode);
+	FsTrace("open", path, flags, result);
+	return result;
+}
+
 int KYTY_SYSV_ABI KernelClose(int d)
 {
 	PRINT_NAME();
@@ -719,6 +775,8 @@ int KYTY_SYSV_ABI KernelClose(int d)
 	file->opened = false;
 
 	printf("\tClose: " FG_WHITE BOLD "%s" DEFAULT "\n", file->real_name.C_Str());
+
+	FsTrace("close", file->name.C_Str(), d, OK);
 
 	g_files->DeleteDescriptor(d);
 
@@ -781,6 +839,8 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 	}
 
 	printf("\tRead %u bytes from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, file->real_name.C_Str());
+
+	FsTrace("read", file->name.C_Str(), static_cast<int64_t>(nbytes), bytes_read);
 
 	return bytes_read;
 }
@@ -886,6 +946,8 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	}
 
 	printf("\tRead %u bytes (pos = %" PRId64 ") from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, offset, file->real_name.C_Str());
+
+	FsTrace("pread", file->name.C_Str(), offset, bytes_read);
 
 	return bytes_read;
 }
