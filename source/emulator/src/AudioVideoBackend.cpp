@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <deque>
 #include <condition_variable>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -18,8 +20,10 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
@@ -36,6 +40,12 @@ constexpr uint32_t kOutputChannels   = 2;
 constexpr size_t   kVideoQueueCapacity = 6;
 constexpr size_t   kAudioQueueCapacity = 32;
 constexpr size_t   kAudioWakeVideoBudget = 8;
+
+bool SoftwareDecodeAllowed()
+{
+	const char* value = std::getenv("KYTY_AVPLAYER_ALLOW_SOFTWARE");
+	return value == nullptr || value[0] == '\0' || std::strcmp(value, "0") != 0;
+}
 
 uint64_t TimestampMilliseconds(int64_t timestamp, AVRational time_base, uint64_t fallback)
 {
@@ -67,6 +77,48 @@ const char* ErrorText(int error, char* buffer, size_t buffer_size)
 
 } // namespace
 
+struct VideoFormatSelection
+{
+	AVPixelFormat format          = AV_PIX_FMT_NONE;
+	bool          require_hardware = false;
+};
+
+static AVPixelFormat SelectVideoFormat(AVCodecContext* context, const AVPixelFormat* formats)
+{
+	if (context == nullptr || formats == nullptr)
+	{
+		return AV_PIX_FMT_NONE;
+	}
+	auto* selection = static_cast<VideoFormatSelection*>(context->opaque);
+	if (selection == nullptr)
+	{
+		return AV_PIX_FMT_NONE;
+	}
+	if (selection->format != AV_PIX_FMT_NONE)
+	{
+		for (const AVPixelFormat* format = formats; *format != AV_PIX_FMT_NONE; ++format)
+		{
+			if (*format == selection->format)
+			{
+				return *format;
+			}
+		}
+	}
+	if (selection->require_hardware)
+	{
+		return AV_PIX_FMT_NONE;
+	}
+	for (const AVPixelFormat* format = formats; *format != AV_PIX_FMT_NONE; ++format)
+	{
+		const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(*format);
+		if (descriptor != nullptr && (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL) == 0)
+		{
+			return *format;
+		}
+	}
+	return AV_PIX_FMT_NONE;
+}
+
 struct Decoder::State
 {
 	Status     status = Status::Unavailable;
@@ -78,10 +130,14 @@ struct Decoder::State
 	AVCodecContext*  audio  = nullptr;
 	AVPacket*        packet = nullptr;
 	AVFrame*         video_frame = nullptr;
+	AVFrame*         transferred_video_frame = nullptr;
 	AVFrame*         audio_frame = nullptr;
+	AVBufferRef*     hardware_device = nullptr;
 	SwsContext*      scaler = nullptr;
 	SwrContext*      resampler = nullptr;
 	AVChannelLayout  output_layout {};
+	VideoFormatSelection video_format_selection {};
+	AVPixelFormat    hardware_video_format = AV_PIX_FMT_NONE;
 
 	int video_stream = -1;
 	int audio_stream = -1;
@@ -156,6 +212,10 @@ static void FreeState(Decoder::State* state)
 	{
 		av_frame_free(&state->video_frame);
 	}
+	if (state->transferred_video_frame != nullptr)
+	{
+		av_frame_free(&state->transferred_video_frame);
+	}
 	if (state->audio_frame != nullptr)
 	{
 		av_frame_free(&state->audio_frame);
@@ -171,6 +231,10 @@ static void FreeState(Decoder::State* state)
 	if (state->audio != nullptr)
 	{
 		avcodec_free_context(&state->audio);
+	}
+	if (state->hardware_device != nullptr)
+	{
+		av_buffer_unref(&state->hardware_device);
 	}
 	if (state->format != nullptr)
 	{
@@ -214,7 +278,7 @@ static bool ConfigureAudio(Decoder::State* state)
 }
 
 static bool OpenCodec(AVFormatContext* format, int stream_index, AVCodecContext** context, const AVCodec** codec,
-                      Decoder::State* state)
+                      Decoder::State* state, bool video_codec)
 {
 	if (format == nullptr || context == nullptr || codec == nullptr || state == nullptr || stream_index < 0)
 	{
@@ -228,13 +292,79 @@ static bool OpenCodec(AVFormatContext* format, int stream_index, AVCodecContext*
 		SetFfmpegError(state, Status::OpenFailed, result, "find media stream");
 		return false;
 	}
+	if (video_codec)
+	{
+		state->video_format_selection = VideoFormatSelection {};
+		state->video_format_selection.require_hardware = !SoftwareDecodeAllowed();
+		for (int index = 0;; ++index)
+		{
+			const AVCodecHWConfig* config = avcodec_get_hw_config(*codec, index);
+			if (config == nullptr)
+			{
+				break;
+			}
+			if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0 &&
+			    config->device_type == AV_HWDEVICE_TYPE_VAAPI)
+			{
+				state->video_format_selection.format = config->pix_fmt;
+				break;
+			}
+		}
+		if (state->video_format_selection.format == AV_PIX_FMT_NONE && state->video_format_selection.require_hardware)
+		{
+			SetError(state, Status::OpenFailed, "video codec has no VA-API hardware configuration");
+			return false;
+		}
+		if (state->video_format_selection.format != AV_PIX_FMT_NONE)
+		{
+			const char* device = std::getenv("KYTY_AVPLAYER_VAAPI_DEVICE");
+			if (device != nullptr && device[0] == '\0')
+			{
+				device = nullptr;
+			}
+			const int device_result = av_hwdevice_ctx_create(&state->hardware_device, AV_HWDEVICE_TYPE_VAAPI, device, nullptr, 0);
+			if (device_result < 0)
+			{
+				if (state->video_format_selection.require_hardware)
+				{
+					SetFfmpegError(state, Status::OpenFailed, device_result, "create VA-API device");
+					return false;
+				}
+				state->video_format_selection.format = AV_PIX_FMT_NONE;
+			}
+		}
+		if (std::getenv("KYTY_DUMP_AVPLAYER") != nullptr)
+		{
+			std::fprintf(stderr, "KYTY_DUMP_AVPLAYER video_decode=%s format=%s software_allowed=%d\n",
+			             state->hardware_device != nullptr ? "vaapi" : "software",
+			             state->video_format_selection.format == AV_PIX_FMT_NONE
+			                 ? "software"
+			                 : av_get_pix_fmt_name(state->video_format_selection.format),
+			             state->video_format_selection.require_hardware ? 0 : 1);
+		}
+	}
 	*context = avcodec_alloc_context3(*codec);
 	if (*context == nullptr)
 	{
 		SetError(state, Status::OpenFailed, "allocate codec context");
 		return false;
 	}
-	if (avcodec_parameters_to_context(*context, stream->codecpar) < 0 || avcodec_open2(*context, *codec, nullptr) < 0)
+	if (avcodec_parameters_to_context(*context, stream->codecpar) < 0)
+	{
+		SetError(state, Status::OpenFailed, "open media codec");
+		return false;
+	}
+	if (video_codec)
+	{
+		(*context)->opaque = &state->video_format_selection;
+		(*context)->get_format = SelectVideoFormat;
+		if (state->hardware_device != nullptr)
+		{
+			(*context)->hw_device_ctx = av_buffer_ref(state->hardware_device);
+			state->hardware_video_format = state->video_format_selection.format;
+		}
+	}
+	if (avcodec_open2(*context, *codec, nullptr) < 0)
 	{
 		SetError(state, Status::OpenFailed, "open media codec");
 		return false;
@@ -249,6 +379,22 @@ static bool ConvertVideo(Decoder::State* state)
 	{
 		SetError(state, Status::DecodeFailed, "invalid decoded video frame");
 		return false;
+	}
+	if (state->hardware_device != nullptr && source->format == state->hardware_video_format)
+	{
+		if (state->transferred_video_frame == nullptr)
+		{
+			SetError(state, Status::DecodeFailed, "missing VA-API transfer frame");
+			return false;
+		}
+		av_frame_unref(state->transferred_video_frame);
+		const int transfer = av_hwframe_transfer_data(state->transferred_video_frame, source, 0);
+		if (transfer < 0)
+		{
+			SetFfmpegError(state, Status::DecodeFailed, transfer, "transfer VA-API video frame");
+			return false;
+		}
+		source = state->transferred_video_frame;
 	}
 	const uint32_t width  = static_cast<uint32_t>(state->info.video_width);
 	const uint32_t height = static_cast<uint32_t>(state->info.video_height);
@@ -274,28 +420,47 @@ static bool ConvertVideo(Decoder::State* state)
 	                                            state->format->streams[state->video_stream]->time_base,
 	                                            state->next_video_timestamp);
 	frame.data.resize(luma_bytes + static_cast<size_t>(width) * chroma_height);
-	state->scaler = sws_getCachedContext(state->scaler,
-	                                      source->width,
-	                                      source->height,
-	                                      static_cast<AVPixelFormat>(source->format),
-	                                      static_cast<int>(width),
-	                                      static_cast<int>(height),
-	                                      AV_PIX_FMT_NV12,
-	                                      SWS_BILINEAR,
-	                                      nullptr,
-	                                      nullptr,
-	                                      nullptr);
-	if (state->scaler == nullptr)
+	bool copied_nv12 = source->format == AV_PIX_FMT_NV12 && source->width == static_cast<int>(width) &&
+	                   source->height == static_cast<int>(height) && source->data[0] != nullptr && source->data[1] != nullptr &&
+	                   source->linesize[0] >= static_cast<int>(width) && source->linesize[1] >= static_cast<int>(width);
+	if (copied_nv12)
 	{
-		SetError(state, Status::DecodeFailed, "initialize video scaler");
-		return false;
+		for (uint32_t row = 0; row < height; ++row)
+		{
+			std::memcpy(frame.data.data() + static_cast<size_t>(row) * width,
+			            source->data[0] + static_cast<size_t>(row) * source->linesize[0], width);
+		}
+		for (size_t row = 0; row < chroma_height; ++row)
+		{
+			std::memcpy(frame.data.data() + luma_bytes + row * width,
+			            source->data[1] + row * static_cast<size_t>(source->linesize[1]), width);
+		}
 	}
-	uint8_t* destination[4] = {frame.data.data(), frame.data.data() + luma_bytes, nullptr, nullptr};
-	int destination_pitch[4] = {static_cast<int>(width), static_cast<int>(width), 0, 0};
-	if (sws_scale(state->scaler, source->data, source->linesize, 0, source->height, destination, destination_pitch) <= 0)
+	else
 	{
-		SetError(state, Status::DecodeFailed, "convert video frame to NV12");
-		return false;
+		state->scaler = sws_getCachedContext(state->scaler,
+		                                      source->width,
+		                                      source->height,
+		                                      static_cast<AVPixelFormat>(source->format),
+		                                      static_cast<int>(width),
+		                                      static_cast<int>(height),
+		                                      AV_PIX_FMT_NV12,
+		                                      SWS_BILINEAR,
+		                                      nullptr,
+		                                      nullptr,
+		                                      nullptr);
+		if (state->scaler == nullptr)
+		{
+			SetError(state, Status::DecodeFailed, "initialize video scaler");
+			return false;
+		}
+		uint8_t* destination[4] = {frame.data.data(), frame.data.data() + luma_bytes, nullptr, nullptr};
+		int destination_pitch[4] = {static_cast<int>(width), static_cast<int>(width), 0, 0};
+		if (sws_scale(state->scaler, source->data, source->linesize, 0, source->height, destination, destination_pitch) <= 0)
+		{
+			SetError(state, Status::DecodeFailed, "convert video frame to NV12");
+			return false;
+		}
 	}
 	state->next_video_timestamp = frame.timestamp_ms +
 	                              (state->info.video_frame_rate > 0.0
@@ -594,11 +759,11 @@ std::unique_ptr<Decoder> Decoder::Open(const char* host_path, std::string* error
 		}
 		else
 		{
-			if (state->video_stream >= 0 && !OpenCodec(state->format, state->video_stream, &state->video, &video_codec, state))
+			if (state->video_stream >= 0 && !OpenCodec(state->format, state->video_stream, &state->video, &video_codec, state, true))
 			{
 				state->video_stream = -1;
 			}
-			if (state->audio_stream >= 0 && !OpenCodec(state->format, state->audio_stream, &state->audio, &audio_codec, state))
+			if (state->audio_stream >= 0 && !OpenCodec(state->format, state->audio_stream, &state->audio, &audio_codec, state, false))
 			{
 				state->audio_stream = -1;
 			}
@@ -620,8 +785,10 @@ std::unique_ptr<Decoder> Decoder::Open(const char* host_path, std::string* error
 			{
 				state->packet      = av_packet_alloc();
 				state->video_frame = state->video != nullptr ? av_frame_alloc() : nullptr;
+				state->transferred_video_frame = state->video != nullptr && state->hardware_device != nullptr ? av_frame_alloc() : nullptr;
 				state->audio_frame = state->audio != nullptr ? av_frame_alloc() : nullptr;
 				if (state->packet == nullptr || (state->video != nullptr && state->video_frame == nullptr) ||
+				    (state->hardware_device != nullptr && state->transferred_video_frame == nullptr) ||
 				    (state->audio != nullptr && state->audio_frame == nullptr))
 				{
 					SetError(state, Status::OpenFailed, "allocate media decode buffers");
