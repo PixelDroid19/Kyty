@@ -959,8 +959,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VDot2cF32F16_VdstVsrc0Vsrc1Vsrc2)
 	const auto& inst = code.GetInstructions().At(index);
 
 	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
-	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
-	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
 	for (int source = 0; source < 3; ++source)
 	{
 		EXIT_NOT_IMPLEMENTED(inst.src[source].negate || inst.src[source].absolute || inst.src[source].swizzle != 6u);
@@ -1002,6 +1000,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VDot2cF32F16_VdstVsrc0Vsrc1Vsrc2)
                OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
          %tl1_<index> = OpLabel
                OpStore %<dst> %t_<index>
+              <multiply>
+              <clamp>
                OpBranch %tl2_<index>
          %tl2_<index> = OpLabel
 )";
@@ -1010,6 +1010,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VDot2cF32F16_VdstVsrc0Vsrc1Vsrc2)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<load2>", load2)
+	                   .ReplaceStr("<multiply>", (inst.dst.multiplier != 1.0f
+	                                                  ? String8(MULTIPLY).ReplaceStr("<mul>", spirv->GetConstantFloat(inst.dst.multiplier))
+	                                                  : ""))
+	                   .ReplaceStr("<clamp>", (inst.dst.clamp ? CLAMP : ""))
 	                   .ReplaceStr("<index>", index_str);
 
 	return true;
