@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -2519,6 +2520,7 @@ struct AvPlayerInternal
 	size_t               video_frame_bytes      = 0;
 	int32_t              requested_framebuffers = 0;
 	String               host_filename;
+	mutable std::shared_mutex decoder_mutex;
 	std::unique_ptr<AudioVideoBackend::Decoder> decoder;
 	uint64_t             last_media_time_ms    = 0;
 	uint64_t             media_duration_ms     = 0;
@@ -2534,6 +2536,43 @@ static void rgb_to_yuv(float r, float g, float b, uint8_t* y, uint8_t* u, uint8_
 	*y     = (yf < 0 ? 0 : (yf > 255 ? 255 : yf));
 	*u     = (uf < 0 ? 0 : (uf > 255 ? 255 : uf));
 	*v     = (vf < 0 ? 0 : (vf > 255 ? 255 : vf));
+}
+
+void ConvertNv12ToRgba32(const uint8_t* nv12_data, uint32_t width, uint32_t height, uint8_t* rgba_dst)
+{
+	if (nv12_data == nullptr || rgba_dst == nullptr || width == 0 || height == 0)
+	{
+		return;
+	}
+	const uint8_t* y_plane  = nv12_data;
+	const uint8_t* uv_plane = nv12_data + (static_cast<size_t>(width) * height);
+
+	for (uint32_t y = 0; y < height; ++y)
+	{
+		for (uint32_t x = 0; x < width; ++x)
+		{
+			const uint32_t y_idx  = y * width + x;
+			const uint32_t uv_idx = (y / 2) * width + (x & ~1u);
+
+			const float y_val = static_cast<float>(y_plane[y_idx]);
+			const float u_val = static_cast<float>(uv_plane[uv_idx]);
+			const float v_val = static_cast<float>(uv_plane[uv_idx + 1]);
+
+			const float c = y_val - 16.0f;
+			const float d = u_val - 128.0f;
+			const float e = v_val - 128.0f;
+
+			int r = static_cast<int>(1.164f * c + 1.596f * e);
+			int g = static_cast<int>(1.164f * c - 0.392f * d - 0.813f * e);
+			int b = static_cast<int>(1.164f * c + 2.017f * d);
+
+			const uint32_t rgba_idx = y_idx * 4;
+			rgba_dst[rgba_idx + 0]  = static_cast<uint8_t>(std::clamp(r, 0, 255));
+			rgba_dst[rgba_idx + 1]  = static_cast<uint8_t>(std::clamp(g, 0, 255));
+			rgba_dst[rgba_idx + 2]  = static_cast<uint8_t>(std::clamp(b, 0, 255));
+			rgba_dst[rgba_idx + 3]  = 255;
+		}
+	}
 }
 
 static void draw_synthetic_frame(uint32_t width, uint32_t height, void* data, float l)
@@ -2628,26 +2667,31 @@ static void unregister_video_frame(uint8_t* frame)
 	Graphics::GuestTextureLayoutUnregister(reinterpret_cast<uint64_t>(frame));
 }
 
+static void release_video_frames(const AvPlayerMemAllocator& mem, std::vector<AvPlayerInternal::VideoFrameBuffer>& frames)
+{
+	for (const auto& frame: frames)
+	{
+		if (frame.data == nullptr)
+		{
+			continue;
+		}
+		unregister_video_frame(frame.data);
+		if (frame.guest_owned && mem.deallocate_texture != nullptr)
+		{
+			Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(mem.deallocate_texture), reinterpret_cast<uint64_t>(mem.object_pointer),
+			                          reinterpret_cast<uint64_t>(frame.data), 0);
+		}
+	}
+	frames.clear();
+}
+
 static void release_synthetic_video(AvPlayerInternal* r)
 {
 	if (r == nullptr)
 	{
 		return;
 	}
-	for (const auto& frame: r->video_frames)
-	{
-		if (frame.data != nullptr)
-		{
-			unregister_video_frame(frame.data);
-			if (frame.guest_owned && r->mem.deallocate_texture != nullptr)
-			{
-				Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(r->mem.deallocate_texture),
-				                          reinterpret_cast<uint64_t>(r->mem.object_pointer),
-				                          reinterpret_cast<uint64_t>(frame.data), 0);
-			}
-		}
-	}
-	r->video_frames.clear();
+	release_video_frames(r->mem, r->video_frames);
 	r->synthetic_storage.clear();
 	r->synthetic_storage_data = nullptr;
 	r->video_frame_bytes = 0;
@@ -2723,22 +2767,36 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 
 static void delete_synthetic_video(AvPlayerInternal* r)
 {
-	if (r != nullptr)
+	if (r == nullptr)
 	{
-		r->decoder.reset();
+		return;
 	}
-	release_synthetic_video(r);
-	r->audio_storage.clear();
-	r->synthetic_width        = 0;
-	r->synthetic_height       = 0;
-	r->synthetic_frame_rate   = 0.0f;
-	r->synthetic_frame_count  = 0;
-	r->synthetic_obtained_num = 0;
-		r->host_filename         = String();
-	r->last_media_time_ms    = 0;
-	r->media_duration_ms     = 0;
-	r->media_audio_channels  = 0;
-	r->media_audio_rate      = 0;
+	std::unique_lock<std::shared_mutex> decoder_lock(r->decoder_mutex);
+	std::vector<AvPlayerInternal::VideoFrameBuffer> frames;
+	std::vector<uint8_t>                         storage;
+	AvPlayerMemAllocator                          mem;
+	{
+		Core::LockGuard lock(r->mutex);
+		r->decoder.reset();
+		mem = r->mem;
+		frames.swap(r->video_frames);
+		storage.swap(r->synthetic_storage);
+		r->synthetic_storage_data = nullptr;
+		r->audio_storage.clear();
+		r->synthetic_width        = 0;
+		r->synthetic_height       = 0;
+		r->synthetic_frame_rate   = 0.0f;
+		r->synthetic_frame_count  = 0;
+		r->synthetic_obtained_num = 0;
+		r->next_video_frame       = 0;
+		r->video_frame_bytes      = 0;
+		r->host_filename          = String();
+		r->last_media_time_ms     = 0;
+		r->media_duration_ms      = 0;
+		r->media_audio_channels   = 0;
+		r->media_audio_rate       = 0;
+	}
+	release_video_frames(mem, frames);
 }
 
 static void fill_video_ex(const AvPlayerInternal* r, AvPlayerVideoEx* video)
@@ -2885,10 +2943,16 @@ static void emit_event(AvPlayerInternal* h, int32_t event_id, void* data = nullp
 	}
 	if (callback != nullptr)
 	{
-		Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(callback),
-		                          reinterpret_cast<uint64_t>(obj_ptr),
-		                          static_cast<uint64_t>(event_id),
-		                          reinterpret_cast<uint64_t>(data));
+		const uint64_t result = Loader::GuestCall::Invoke4(reinterpret_cast<uint64_t>(callback),
+		                                                   reinterpret_cast<uint64_t>(obj_ptr),
+		                                                   static_cast<uint64_t>(event_id),
+		                                                   0,
+		                                                   reinterpret_cast<uint64_t>(data));
+		if (avplayer_dump_enabled())
+		{
+			std::fprintf(stderr, "KYTY_DUMP_AVPLAYER event handle=%p id=0x%x callback=%p data=%p result=0x%" PRIx64 "\n",
+			             static_cast<void*>(h), event_id, reinterpret_cast<void*>(callback), data, result);
+		}
 	}
 }
 
@@ -2926,15 +2990,16 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 	{
 		return false;
 	}
-	uint8_t* frame        = nullptr;
-	uint64_t timestamp    = 0;
-	uint32_t width        = 0;
-	uint32_t height       = 0;
-	float    frame_rate   = 0.0f;
-	uint32_t frame_index  = 0;
-	uint32_t frame_count  = 0;
-	bool     is_real      = false;
-	AudioVideoBackend::Decoder* decoder = nullptr;
+	std::shared_lock<std::shared_mutex> decoder_lock(r->decoder_mutex);
+	uint8_t*                             frame       = nullptr;
+	uint64_t                             timestamp   = 0;
+	uint32_t                             width       = 0;
+	uint32_t                             height      = 0;
+	float                                frame_rate  = 0.0f;
+	uint32_t                             frame_index = 0;
+	uint32_t                             frame_count = 0;
+	size_t                               frame_bytes = 0;
+	AudioVideoBackend::Decoder*           decoder    = nullptr;
 
 	{
 		Core::LockGuard lock(r->mutex);
@@ -2949,8 +3014,8 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		frame_rate  = r->synthetic_frame_rate;
 		frame_index = r->synthetic_obtained_num;
 		frame_count = r->synthetic_frame_count;
+		frame_bytes = r->video_frame_bytes;
 		decoder     = r->decoder.get();
-		is_real     = decoder != nullptr;
 	}
 
 	if (frame == nullptr)
@@ -2958,10 +3023,11 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		return false;
 	}
 
+	const bool is_real = decoder != nullptr;
 	if (is_real)
 	{
 		AudioVideoBackend::VideoFrame decoded;
-		if (decoder == nullptr || !decoder->ReadVideoFrame(&decoded) || decoded.data.empty() || decoded.data.size() > r->video_frame_bytes)
+		if (!decoder->ReadVideoFrame(&decoded) || decoded.data.empty() || decoded.data.size() > frame_bytes)
 		{
 			return false;
 		}
@@ -2972,10 +3038,8 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		r->last_media_time_ms = timestamp;
 	} else
 	{
-		Core::LockGuard lock(r->mutex);
-		r->synthetic_obtained_num++;
-		float pos   = (frame_count != 0 ? static_cast<float>(frame_index) / static_cast<float>(frame_count) : 0.0f);
-		float level = 1.0f;
+		const float pos = (frame_count != 0 ? static_cast<float>(frame_index) / static_cast<float>(frame_count) : 0.0f);
+		float       level = 1.0f;
 
 		if (pos < 0.2f)
 		{
@@ -2986,6 +3050,8 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		}
 
 		draw_synthetic_frame(width, height, frame, level * 0.7f);
+		Core::LockGuard lock(r->mutex);
+		r->synthetic_obtained_num++;
 	}
 
 	std::memset(info, 0, sizeof(*info));
@@ -3439,26 +3505,52 @@ Bool KYTY_SYSV_ABI AvPlayerGetAudioData(AvPlayerInternal* h, AvPlayerFrameInfo* 
 	{
 		return 0;
 	}
-	Core::LockGuard lock(h->mutex);
-	if (!h->playing || h->paused)
+	std::shared_lock<std::shared_mutex> decoder_lock(h->decoder_mutex);
+	AudioVideoBackend::Decoder*          decoder = nullptr;
+	uint64_t                             timestamp = 0;
+	uint64_t                             start_time = 0;
+	uint32_t                             channels = 2;
+	uint32_t                             rate = 48000;
 	{
-		return 0;
-	}
-	uint64_t timestamp = current_time_ms(h);
-	uint32_t channels  = h->media_audio_channels != 0 ? h->media_audio_channels : 2;
-	uint32_t rate      = h->media_audio_rate != 0 ? h->media_audio_rate : 48000;
-	if (h->decoder != nullptr)
-	{
-		AudioVideoBackend::AudioFrame decoded;
-		if (!h->decoder->ReadAudioFrame(&decoded) || decoded.data.empty())
+		Core::LockGuard lock(h->mutex);
+		if (!h->playing || h->paused)
 		{
 			return 0;
 		}
+		start_time = h->start_time_ms;
+		timestamp  = current_time_ms(h);
+		channels   = h->media_audio_channels != 0 ? h->media_audio_channels : channels;
+		rate       = h->media_audio_rate != 0 ? h->media_audio_rate : rate;
+		decoder    = h->decoder.get();
+	}
+
+	if (decoder != nullptr)
+	{
+		AudioVideoBackend::AudioFrame decoded;
+		if (!decoder->ReadAudioFrame(&decoded) || decoded.data.empty())
+		{
+			return 0;
+		}
+		Core::LockGuard lock(h->mutex);
 		h->audio_storage = std::move(decoded.data);
-		timestamp        = h->start_time_ms + decoded.timestamp_ms;
+		timestamp        = start_time + decoded.timestamp_ms;
 		channels         = decoded.channels;
 		rate             = decoded.sample_rate;
+	} else
+	{
+		Core::LockGuard lock(h->mutex);
+		if (h->audio_storage.empty())
+		{
+			return 0;
+		}
+		std::memset(audio_info, 0, sizeof(*audio_info));
+		audio_info->data       = h->audio_storage.data();
+		audio_info->time_stamp = timestamp;
+		fill_audio(&audio_info->details.audio, static_cast<uint32_t>(h->audio_storage.size() * sizeof(int16_t)), channels, rate);
+		return 1;
 	}
+
+	Core::LockGuard lock(h->mutex);
 	if (h->audio_storage.empty())
 	{
 		return 0;

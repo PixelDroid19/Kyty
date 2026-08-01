@@ -395,6 +395,7 @@ uint64_t KYTY_SYSV_ABI          AvPlayerCurrentTime(AvPlayerInternal* h);
 int KYTY_SYSV_ABI               AvPlayerJumpToTime(AvPlayerInternal* h, uint64_t time_ms);
 int KYTY_SYSV_ABI               AvPlayerClose(AvPlayerInternal* h);
 int KYTY_SYSV_ABI               AvPlayerSetLogCallback(void* callback, void* user_data);
+void                            ConvertNv12ToRgba32(const uint8_t* nv12_data, uint32_t width, uint32_t height, uint8_t* rgba_dst);
 
 } // namespace AvPlayer
 

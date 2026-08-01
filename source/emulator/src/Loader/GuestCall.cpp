@@ -45,6 +45,32 @@ uint64_t KYTY_SYSV_ABI Invoke(uint64_t target, uint64_t arg0, uint64_t arg1, uin
 	return result;
 }
 
+uint64_t KYTY_SYSV_ABI Invoke4(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
+{
+	uint64_t result = 0;
+
+	asm volatile("movq %[target], %%rax\n\t"
+	             "movq %[arg0], %%rdi\n\t"
+	             "movq %[arg1], %%rsi\n\t"
+	             "movq %[arg2], %%rdx\n\t"
+	             "movq %[arg3], %%rcx\n\t"
+	             "pushq %%rbp\n\t"
+	             "subq $24, %%rsp\n\t"
+	             "xorq %%r8, %%r8\n\t"
+	             "movq %%r8, 0(%%rsp)\n\t"
+	             "movq %%r8, 8(%%rsp)\n\t"
+	             "movq %%rsp, %%rbp\n\t"
+	             "call *%%rax\n\t"
+	             "addq $24, %%rsp\n\t"
+	             "popq %%rbp\n\t"
+	             : "=&a"(result)
+	             : [target] "m"(target), [arg0] "m"(arg0), [arg1] "m"(arg1), [arg2] "m"(arg2), [arg3] "m"(arg3)
+	             : "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11", "st", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6",
+	               "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
+
+	return result;
+}
+
 uint64_t KYTY_SYSV_ABI InvokeOnStack(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2, void* stack_top)
 {
 	EXIT_IF(target == 0 || stack_top == nullptr);
