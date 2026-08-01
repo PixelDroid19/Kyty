@@ -515,7 +515,10 @@ bool Elf64::IsSelf() const
 		return false;
 	}
 
-	return m_self->file_size != 0 && m_self->file_size <= m_f->Size() && m_self->size1 >= m_self->size2;
+	// The dwords at header offsets 0x0C/0x0E are SDK version fields, not a
+	// size pair. Comparing them as sizes rejects valid metadata produced by
+	// newer SDKs; the file-size and segment-table bounds are the sanity checks.
+	return m_self->file_size != 0 && m_self->file_size <= m_f->Size();
 }
 
 bool Elf64::IsValid() const
