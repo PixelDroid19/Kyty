@@ -18,6 +18,8 @@ int KYTY_SYSV_ABI CreateContext(int32_t* context);
 int KYTY_SYSV_ABI CreateHandle(int32_t* handle, int32_t* alternate_handle);
 int KYTY_SYSV_ABI RegisterContext();
 int KYTY_SYSV_ABI CreateEvent(const char* name, uint64_t options, Event** event, EventPropertyObject** properties);
+int KYTY_SYSV_ABI CreateEventPropertyObject(EventPropertyObject** properties);
+int KYTY_SYSV_ABI DestroyEventPropertyObject(EventPropertyObject* properties);
 int KYTY_SYSV_ABI EventPropertyObjectSetInt32(EventPropertyObject* properties, const char* name, int32_t value);
 int KYTY_SYSV_ABI EventPropertyObjectSetString(EventPropertyObject* properties, const char* name, const char* value);
 // sceNpUniversalDataSystemEventPropertyObjectSetArray — NID Wxbg5x3pTXA.

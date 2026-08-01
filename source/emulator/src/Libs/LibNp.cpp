@@ -6,6 +6,8 @@
 
 #include <atomic>
 #include <cstring>
+#include <mutex>
+#include <unordered_set>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -22,7 +24,8 @@ static constexpr uint64_t event_array_magic      = 0x4b59545955445341ull; // "KY
 
 struct EventPropertyObject
 {
-	uint64_t magic = event_properties_magic;
+	uint64_t magic     = event_properties_magic;
+	bool     standalone = false;
 };
 
 // Opaque array node for ObjectSetArray / CreateEventPropertyArray.
@@ -37,6 +40,43 @@ struct Event
 	uint64_t            magic = event_magic;
 	EventPropertyObject properties;
 };
+
+static std::mutex                    g_objects_mutex;
+static std::unordered_set<const void*> g_live_objects;
+static std::unordered_set<EventPropertyObject*> g_properties;
+static std::unordered_set<EventPropertyObject*> g_standalone_properties;
+static std::unordered_set<EventPropertyArray*> g_arrays;
+static std::unordered_set<Event*>              g_events;
+
+static bool IsLivePropertyObject(const EventPropertyObject* object)
+{
+	if (object == nullptr)
+	{
+		return false;
+	}
+	std::lock_guard lock(g_objects_mutex);
+	return g_properties.find(const_cast<EventPropertyObject*>(object)) != g_properties.end();
+}
+
+static bool IsLiveArray(const EventPropertyArray* array)
+{
+	if (array == nullptr)
+	{
+		return false;
+	}
+	std::lock_guard lock(g_objects_mutex);
+	return g_arrays.find(const_cast<EventPropertyArray*>(array)) != g_arrays.end();
+}
+
+static bool IsLiveEvent(const Event* event)
+{
+	if (event == nullptr)
+	{
+		return false;
+	}
+	std::lock_guard lock(g_objects_mutex);
+	return g_events.find(const_cast<Event*>(event)) != g_events.end();
+}
 
 int KYTY_SYSV_ABI Initialize(const void* parameters)
 {
@@ -77,21 +117,66 @@ int KYTY_SYSV_ABI CreateEvent(const char* name, uint64_t /*options*/, Event** ev
 	}
 
 	auto* local_event = new Event;
-	*event            = local_event;
-	*properties       = &local_event->properties;
+	{
+		std::lock_guard lock(g_objects_mutex);
+		g_events.insert(local_event);
+		g_live_objects.insert(local_event);
+		g_properties.insert(&local_event->properties);
+		g_live_objects.insert(&local_event->properties);
+	}
+	*event      = local_event;
+	*properties = &local_event->properties;
+	return OK;
+}
+
+int KYTY_SYSV_ABI CreateEventPropertyObject(EventPropertyObject** properties)
+{
+	if (properties == nullptr)
+	{
+		return error_invalid_argument;
+	}
+
+	auto* object       = new EventPropertyObject;
+	object->standalone = true;
+	{
+		std::lock_guard lock(g_objects_mutex);
+		g_properties.insert(object);
+		g_live_objects.insert(object);
+		g_standalone_properties.insert(object);
+	}
+	*properties       = object;
+	return OK;
+}
+
+int KYTY_SYSV_ABI DestroyEventPropertyObject(EventPropertyObject* properties)
+{
+	if (properties == nullptr)
+	{
+		return error_invalid_argument;
+	}
+
+	{
+		std::lock_guard lock(g_objects_mutex);
+		if (g_standalone_properties.erase(properties) == 0 || g_properties.erase(properties) == 0 || g_live_objects.erase(properties) == 0)
+		{
+			return error_invalid_argument;
+		}
+	}
+
+	delete properties;
 	return OK;
 }
 
 int KYTY_SYSV_ABI EventPropertyObjectSetInt32(EventPropertyObject* properties, const char* name, int32_t /*value*/)
 {
-	return (properties != nullptr && properties->magic == event_properties_magic && name != nullptr && name[0] != '\0'
+	return (IsLivePropertyObject(properties) && name != nullptr && name[0] != '\0'
 	            ? OK
 	            : error_invalid_argument);
 }
 
 int KYTY_SYSV_ABI EventPropertyObjectSetString(EventPropertyObject* properties, const char* name, const char* value)
 {
-	return (properties != nullptr && properties->magic == event_properties_magic && name != nullptr && name[0] != '\0' && value != nullptr
+	return (IsLivePropertyObject(properties) && name != nullptr && name[0] != '\0' && value != nullptr
 	            ? OK
 	            : error_invalid_argument);
 }
@@ -101,7 +186,7 @@ int KYTY_SYSV_ABI EventPropertyObjectSetString(EventPropertyObject* properties, 
 int KYTY_SYSV_ABI EventPropertyObjectSetArray(EventPropertyObject* properties, const char* key, const EventPropertyArray* value,
                                               EventPropertyArray** value_ptr)
 {
-	if (properties == nullptr || properties->magic != event_properties_magic || key == nullptr || key[0] == '\0')
+	if (!IsLivePropertyObject(properties) || key == nullptr || key[0] == '\0')
 	{
 		return error_invalid_argument;
 	}
@@ -109,10 +194,20 @@ int KYTY_SYSV_ABI EventPropertyObjectSetArray(EventPropertyObject* properties, c
 	{
 		if (value != nullptr)
 		{
+			if (!IsLiveArray(value))
+			{
+				return error_invalid_argument;
+			}
 			*value_ptr = const_cast<EventPropertyArray*>(value);
 		} else
 		{
-			*value_ptr = new EventPropertyArray;
+			auto* array = new EventPropertyArray;
+			{
+				std::lock_guard lock(g_objects_mutex);
+				g_arrays.insert(array);
+				g_live_objects.insert(array);
+			}
+			*value_ptr = array;
 		}
 	}
 	return OK;
@@ -125,59 +220,76 @@ int KYTY_SYSV_ABI CreateEventPropertyArray(EventPropertyArray** new_array)
 		return error_invalid_argument;
 	}
 	*new_array = new EventPropertyArray;
+	{
+		std::lock_guard lock(g_objects_mutex);
+		g_arrays.insert(*new_array);
+		g_live_objects.insert(*new_array);
+	}
 	return OK;
 }
 
 int KYTY_SYSV_ABI DestroyEventPropertyArray(EventPropertyArray* array)
 {
-	if (array == nullptr || array->magic != event_array_magic)
+	if (array == nullptr)
 	{
 		return error_invalid_argument;
 	}
-	array->magic = 0;
+	{
+		std::lock_guard lock(g_objects_mutex);
+		if (g_arrays.erase(array) == 0 || g_live_objects.erase(array) == 0)
+		{
+			return error_invalid_argument;
+		}
+	}
 	delete array;
 	return OK;
 }
 
 int KYTY_SYSV_ABI EventPropertyArraySetString(EventPropertyArray* array, const char* value)
 {
-	return (array != nullptr && array->magic == event_array_magic && value != nullptr ? OK : error_invalid_argument);
+	return (IsLiveArray(array) && value != nullptr ? OK : error_invalid_argument);
 }
 
 int KYTY_SYSV_ABI EventPropertyArraySetInt32(EventPropertyArray* array, int32_t /*value*/)
 {
-	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+	return (IsLiveArray(array) ? OK : error_invalid_argument);
 }
 
 int KYTY_SYSV_ABI EventPropertyArraySetUInt32(EventPropertyArray* array, uint32_t /*value*/)
 {
-	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+	return (IsLiveArray(array) ? OK : error_invalid_argument);
 }
 
 int KYTY_SYSV_ABI EventPropertyArraySetInt64(EventPropertyArray* array, int64_t /*value*/)
 {
-	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+	return (IsLiveArray(array) ? OK : error_invalid_argument);
 }
 
 int KYTY_SYSV_ABI EventPropertyArraySetUInt64(EventPropertyArray* array, uint64_t /*value*/)
 {
-	return (array != nullptr && array->magic == event_array_magic ? OK : error_invalid_argument);
+	return (IsLiveArray(array) ? OK : error_invalid_argument);
 }
 
 int KYTY_SYSV_ABI PostEvent(int32_t /*context*/, int32_t /*handle*/, Event* event, uint32_t /*options*/)
 {
-	return (event != nullptr && event->magic == event_magic ? OK : error_invalid_argument);
+	return (IsLiveEvent(event) ? OK : error_invalid_argument);
 }
 
 int KYTY_SYSV_ABI DestroyEvent(Event* event)
 {
-	if (event == nullptr || event->magic != event_magic)
+	if (event == nullptr)
 	{
 		return error_invalid_argument;
 	}
 
-	event->magic            = 0;
-	event->properties.magic = 0;
+	{
+		std::lock_guard lock(g_objects_mutex);
+		if (g_events.erase(event) == 0 || g_live_objects.erase(event) == 0 || g_properties.erase(&event->properties) == 0 ||
+		    g_live_objects.erase(&event->properties) == 0)
+		{
+			return error_invalid_argument;
+		}
+	}
 	delete event;
 	return OK;
 }
@@ -191,6 +303,8 @@ LIB_DEFINE(InitNpUniversalDataSystem_1)
 	LIB_FUNC("hT0IAEvN+M0", CreateHandle);
 	LIB_FUNC("tpFJ8LIKvPw", RegisterContext);
 	LIB_FUNC("p+GcLqwpL9M", CreateEvent);
+	LIB_FUNC("s6W4Zl4Slgk", CreateEventPropertyObject);
+	LIB_FUNC("kKUH0Viib3c", DestroyEventPropertyObject);
 	LIB_FUNC("YE4dbtbz6OE", EventPropertyObjectSetInt32);
 	LIB_FUNC("MfDb+4Nln64", EventPropertyObjectSetString);
 	// Gen5 analytics arrays (Astro after PlayGo).

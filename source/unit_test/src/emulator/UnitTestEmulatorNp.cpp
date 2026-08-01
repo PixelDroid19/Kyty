@@ -238,6 +238,43 @@ TEST(EmulatorNp, OwnsLocalUniversalDataEvents)
 	EXPECT_EQ(EventPropertyObjectSetString(properties, "state", "ready"), 0);
 	EXPECT_EQ(PostEvent(1, 1, event, 0), 0);
 	EXPECT_EQ(DestroyEvent(event), 0);
+	EXPECT_LT(PostEvent(1, 1, event, 0), 0);
+}
+
+TEST(EmulatorNp, ResolvesAndOwnsStandaloneUniversalDataProperties)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNpUniversalDataSystem_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.library              = U"NpUniversalDataSystem";
+	query.library_version      = 1;
+	query.module               = U"NpUniversalDataSystem";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+
+	query.name               = U"s6W4Zl4Slgk";
+	const auto* create_record = symbols.Find(query);
+	ASSERT_NE(create_record, nullptr);
+	using CreateProperties = KYTY_SYSV_ABI int (*)(NpUniversalDataSystem::EventPropertyObject** properties);
+	auto* create_properties = reinterpret_cast<CreateProperties>(create_record->vaddr);
+
+	NpUniversalDataSystem::EventPropertyObject* properties = nullptr;
+	EXPECT_LT(create_properties(nullptr), 0);
+	EXPECT_EQ(create_properties(&properties), 0);
+	ASSERT_NE(properties, nullptr);
+	EXPECT_EQ(NpUniversalDataSystem::EventPropertyObjectSetString(properties, "state", "ready"), 0);
+
+	query.name                = U"kKUH0Viib3c";
+	const auto* destroy_record = symbols.Find(query);
+	ASSERT_NE(destroy_record, nullptr);
+	using DestroyProperties = KYTY_SYSV_ABI int (*)(NpUniversalDataSystem::EventPropertyObject* properties);
+	auto* destroy_properties = reinterpret_cast<DestroyProperties>(destroy_record->vaddr);
+	EXPECT_LT(destroy_properties(nullptr), 0);
+	EXPECT_EQ(destroy_properties(properties), 0);
+	EXPECT_LT(destroy_properties(properties), 0);
+	EXPECT_LT(NpUniversalDataSystem::EventPropertyObjectSetString(properties, "state", "stale"), 0);
 }
 
 // Astro after PlayGo: ObjectSetArray with null value allocates array via value_ptr.
@@ -258,6 +295,7 @@ TEST(EmulatorNp, ObjectSetArrayAllocatesWhenValueNull)
 	EXPECT_EQ(EventPropertyArraySetInt32(array, 1), 0);
 	EXPECT_EQ(EventPropertyArraySetUInt64(array, 42ull), 0);
 	EXPECT_EQ(DestroyEventPropertyArray(array), 0);
+	EXPECT_LT(EventPropertyArraySetString(array, "stale"), 0);
 	EXPECT_EQ(DestroyEvent(event), 0);
 
 	EventPropertyArray* created = nullptr;
