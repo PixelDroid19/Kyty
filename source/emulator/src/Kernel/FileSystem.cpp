@@ -1933,9 +1933,33 @@ String PreferHostOdCompanionAsset(const String& guest_path, const String& reques
 	return requested_host_path;
 }
 
+static String PreferHostPatchFile(const String& guest_path, const String& requested_host_path)
+{
+	const String guest = guest_path.FixFilenameSlash();
+	if (!guest.StartsWith(U"/app0/") || g_mount_points == nullptr)
+	{
+		return requested_host_path;
+	}
+	const String rest       = guest.RemoveFirst(6); // strip "/app0/"
+	const String patch_guest = U"/app0_patch/" + rest;
+	const String patch_host  = g_mount_points->GetRealFilename(patch_guest);
+	if (!patch_host.IsEmpty() && patch_host != patch_guest && Core::File::IsFileExisting(patch_host))
+	{
+		printf("\t host app0_patch override: %s -> %s\n", guest.C_Str(), patch_host.C_Str());
+		return patch_host;
+	}
+	return requested_host_path;
+}
+
 // Map guest path → existing host file (extension aliases, app0 data/, OD companions, fonts).
 static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name)
 {
+	const String patched = PreferHostPatchFile(guest_path, real_file_name);
+	if (Core::File::IsFileExisting(patched) && patched != real_file_name)
+	{
+		RememberOdHostPath(guest_path, patched);
+		return patched;
+	}
 	if (Core::File::IsFileExisting(real_file_name))
 	{
 		RememberOdHostPath(guest_path, real_file_name);

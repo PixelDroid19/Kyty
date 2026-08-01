@@ -898,6 +898,48 @@ TEST(EmulatorKernelProcess, HostApp0DataSegmentMapsPreinUnderData)
 	Core::File::DeleteDirectories(root);
 }
 
+TEST(EmulatorKernelProcess, HostApp0PatchOverlayOverridesApp0)
+{
+	EnsureFileSystemSubsystem();
+
+	const String app0_root  = U"/tmp/kyty_app0_patch_test_app0/";
+	const String patch_root = U"/tmp/kyty_app0_patch_test_patch/";
+	Core::File::DeleteDirectories(app0_root);
+	Core::File::DeleteDirectories(patch_root);
+	ASSERT_TRUE(Core::File::CreateDirectories(app0_root + U"media/"));
+	ASSERT_TRUE(Core::File::CreateDirectories(patch_root + U"media/"));
+
+	const String app0_file  = app0_root + U"media/intro.mp4";
+	const String patch_file = patch_root + U"media/intro.mp4";
+	{
+		Core::File f;
+		ASSERT_TRUE(f.Create(app0_file));
+		f.Write(U"base_v1");
+		f.Close();
+	}
+	{
+		Core::File f;
+		ASSERT_TRUE(f.Create(patch_file));
+		f.Write(U"patch_v2");
+		f.Close();
+	}
+
+	LibKernel::FileSystem::Mount(app0_root, U"/app0/");
+	LibKernel::FileSystem::Mount(patch_root, U"/app0_patch/");
+
+	const int fd = LibKernel::FileSystem::KernelOpen("/app0/media/intro.mp4", 0, 0);
+	EXPECT_GE(fd, 0);
+	if (fd >= 0)
+	{
+		LibKernel::FileSystem::KernelClose(fd);
+	}
+
+	LibKernel::FileSystem::Umount(U"/app0/");
+	LibKernel::FileSystem::Umount(U"/app0_patch/");
+	Core::File::DeleteDirectories(app0_root);
+	Core::File::DeleteDirectories(patch_root);
+}
+
 // PreferPackageFontHostPath substitutes a sibling OTF when the requested file is missing.
 TEST(EmulatorKernelProcess, PackageFontHostPathPicksSibling)
 {
