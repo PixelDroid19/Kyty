@@ -3438,9 +3438,9 @@ TEST(EmulatorGraphicsPackets, MapsPixelInputsFromVertexOutputSuperset)
 
 	ShaderRegister regs[32] {};
 	ASSERT_TRUE(Gen5::GraphicsBuildInterpolantMapping(regs, outputs, 2, inputs, 1));
-	EXPECT_EQ(regs[0].offset, Pm4::SPI_PS_INPUT_CNTL_0);
+	EXPECT_EQ(regs[0].offset, Pm4::CX_PS_SHADER_USAGE_BASE);
 	EXPECT_EQ(regs[0].value, 5u | 0x400u);
-	EXPECT_EQ(regs[1].offset, Pm4::SPI_PS_INPUT_CNTL_0 + 1);
+	EXPECT_EQ(regs[1].offset, Pm4::CX_PS_SHADER_USAGE_BASE + 1);
 	EXPECT_EQ(regs[1].value, 0u);
 
 	inputs[0].semantic      = 17;
