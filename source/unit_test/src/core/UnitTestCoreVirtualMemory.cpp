@@ -288,6 +288,7 @@ TEST(CoreVirtualMemory, PosixFatalReportCapturesSignalContext)
 	const std::string json((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
 	EXPECT_EQ(json.find("\"rsp\":\"0x0000000000000000\""), std::string::npos);
 	EXPECT_EQ(json.find("\"rip\":\"0x0000000000000000\""), std::string::npos);
+	EXPECT_EQ(json.find("\"stack\":[]"), std::string::npos);
 	(void)std::remove(report_path);
 #endif
 }

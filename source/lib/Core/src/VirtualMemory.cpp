@@ -1138,6 +1138,15 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 	einfo.r13               = uc_get_r13(uc);
 	einfo.r14               = uc_get_r14(uc);
 	einfo.r15               = uc_get_r15(uc);
+	if (einfo.rsp >= 0x10000u)
+	{
+		const auto* stack = reinterpret_cast<const uint64_t*>(einfo.rsp);
+		for (uint32_t i = 0; i < 16u; ++i)
+		{
+			einfo.stack[i] = stack[i];
+		}
+		einfo.stack_count = 16;
+	}
 
 	einfo.access_violation_vaddr = reinterpret_cast<uint64_t>(info->si_addr);
 
