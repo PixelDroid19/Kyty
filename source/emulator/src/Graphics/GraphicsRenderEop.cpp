@@ -28,14 +28,19 @@ namespace Kyty::Libs::Graphics {
 
 // EOP labels, eq events, GDS clear/read, memory free/flush
 
-static void ValidateTransientLabelDestination(const void* dst_gpu_addr, uint64_t size)
+static bool ValidateTransientLabelDestination(const void* dst_gpu_addr, uint64_t size)
 {
-	EXIT_IF(dst_gpu_addr == nullptr);
+	if (dst_gpu_addr == nullptr)
+	{
+		return false;
+	}
 	const auto status = GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(dst_gpu_addr), size);
 	if (status != GpuMemoryRangeValidationStatus::Valid)
 	{
-		printf("WARNING: EOP destination range invalid (continuing)\n");
+		printf("WARNING: EOP destination range invalid (write skipped)\n");
+		return false;
 	}
+	return true;
 }
 
 static void RecordTransientLabel32(CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value, uint32_t dst_word_count,
@@ -69,7 +74,10 @@ static void RecordTransientLabel64(CommandBuffer* buffer, uint64_t* dst_gpu_addr
 void GraphicsRenderWriteAtEndOfPipe32(uint64_t /*submit_id*/, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
+	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	{
+		return;
+	}
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 	RecordTransientLabel32(buffer, dst_gpu_addr, value, 1u, nullptr, nullptr, nullptr);
@@ -80,7 +88,10 @@ void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t /*submit_id*/, CommandBuffer* 
 {
 	EXIT_IF(g_render_ctx == nullptr);
 	const uint64_t write_size = std::max<uint64_t>(sizeof(*dst_gpu_addr), static_cast<uint64_t>(dw_num) * sizeof(*dst_gpu_addr));
-	ValidateTransientLabelDestination(dst_gpu_addr, write_size);
+	if (!ValidateTransientLabelDestination(dst_gpu_addr, write_size))
+	{
+		return;
+	}
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
@@ -103,7 +114,10 @@ void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t /*submit_id*/, CommandBuffer* 
 void GraphicsRenderWriteAtEndOfPipe64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
+	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	{
+		return;
+	}
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 	RecordTransientLabel64(buffer, dst_gpu_addr, value, nullptr, nullptr, nullptr);
@@ -112,7 +126,10 @@ void GraphicsRenderWriteAtEndOfPipe64(uint64_t /*submit_id*/, CommandBuffer* buf
 void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
+	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	{
+		return;
+	}
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
@@ -135,7 +152,10 @@ void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandB
 void GraphicsRenderWriteAtEndOfPipeWithWriteBack64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
+	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	{
+		return;
+	}
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
@@ -155,7 +175,10 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t /*submit_id
                                                             uint64_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
+	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	{
+		return;
+	}
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
@@ -180,7 +203,10 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t /*submit_id
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
+	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	{
+		return;
+	}
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
@@ -198,7 +224,10 @@ void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t /*submit_id*/, Comma
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t /*submit_id*/, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
+	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	{
+		return;
+	}
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
@@ -217,7 +246,10 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(uint64_t /*submi
                                                                 uint32_t value, int handle, int index, int flip_mode, int64_t flip_arg)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
+	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	{
+		return;
+	}
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
@@ -253,7 +285,10 @@ void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t /*submit_id*/, CommandBuf
                                               int handle, int index, int flip_mode, int64_t flip_arg)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr));
+	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	{
+		return;
+	}
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 

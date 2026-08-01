@@ -1425,7 +1425,9 @@ void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline)
 		const bool unrestricted = g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported;
 		const auto depth_range =
 		    State::ResolveViewportDepth(pipeline->dynamic_params->viewport_scale[2], pipeline->dynamic_params->viewport_offset[2],
-		                                pipeline->static_params->dx_clip_space, unrestricted);
+		                                pipeline->static_params->dx_clip_space, unrestricted,
+		                                pipeline->dynamic_params->viewport_depth_clamp[0],
+		                                pipeline->dynamic_params->viewport_depth_clamp[1]);
 		const auto xy = State::ResolveViewportXy(pipeline->dynamic_params->viewport_scale[0], pipeline->dynamic_params->viewport_offset[0],
 		                                         pipeline->dynamic_params->viewport_scale[1], pipeline->dynamic_params->viewport_offset[1]);
 		VkViewport viewport {};

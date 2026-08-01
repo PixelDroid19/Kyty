@@ -62,7 +62,7 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 			default: break;
 		}
 	}
-	if (format == 0xcu && channel_type == 0x7u && channel_order == 0x2u)
+	if (format == 0xcu && channel_type == 0x7u && (channel_order == 0x1u || channel_order == 0x2u))
 	{
 		return {RenderTextureFormat::R16G16B16A16Sfloat, 8};
 	}

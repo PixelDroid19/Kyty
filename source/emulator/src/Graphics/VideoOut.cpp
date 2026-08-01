@@ -425,8 +425,19 @@ static void calc_buffer_size(const VideoOutBufferAttribute* attribute, const Vid
 		EXIT_NOT_IMPLEMENTED(attribute2->option != 0 && attribute2->option != 8);
 		EXIT_NOT_IMPLEMENTED(attribute2->aspect_ratio != 0);
 		// Gen5 PIXEL_FORMAT2: 8:8:8:8 sRGB and 10:10:10:2 (B/R channel order variants).
-		EXIT_NOT_IMPLEMENTED(attribute2->pixel_format != 0x8000000000000000ULL && attribute2->pixel_format != 0x8000000022000000ULL &&
-		                     attribute2->pixel_format != 0x8100000000000000ULL && attribute2->pixel_format != 0x8100000022000000ULL);
+		if (attribute2->pixel_format != 0x8000000000000000ULL && attribute2->pixel_format != 0x8000000022000000ULL &&
+		    attribute2->pixel_format != 0x8100000000000000ULL && attribute2->pixel_format != 0x8100000022000000ULL &&
+		    attribute2->pixel_format != 0xc001000600000000ULL)
+		{
+			if (FILE* f = fopen("/tmp/kyty_videoout_fmt.log", "a"))
+			{
+				fprintf(f, "VIDEOOUT_FMT: pixel_format=0x%016llx option=%u aspect=%u tiling=%u w=%u h=%u\n",
+				        (unsigned long long)attribute2->pixel_format, (unsigned)attribute2->option,
+				        (unsigned)attribute2->aspect_ratio, (unsigned)attribute2->tiling_mode, (unsigned)width, (unsigned)height);
+				fclose(f);
+			}
+			EXIT_NOT_IMPLEMENTED(true);
+		}
 	} else
 	{
 		EXIT_NOT_IMPLEMENTED(attribute->option != 0);
@@ -436,6 +447,19 @@ static void calc_buffer_size(const VideoOutBufferAttribute* attribute, const Vid
 
 	Graphics::TileSizeAlign size32 {};
 	Graphics::TileGetVideoOutSize(width, height, pitch, tile, neo, &size32);
+
+	// 16:16:16:16 float display buffers are 8 bpp; the tiling tables assume
+	// 4 bpp. Use the exact 1920x1080 tiled size (matches the render-target
+	// tiling the game draws into); doubling the 4bpp table size inflates the
+	// range past adjacent buffers and breaks registration overlap checks.
+	const bool hdr_display = (attribute2 != nullptr && attribute2->pixel_format == 0xc001000600000000ULL);
+	if (hdr_display && width == 1920 && height == 1080)
+	{
+		size32.size = 16711680;
+	} else if (hdr_display)
+	{
+		size32.size *= 2;
+	}
 
 	*out_size  = size32.size;
 	*out_align = size32.align;
@@ -648,6 +672,17 @@ SubmitFlipStatus VideoOutContext::SubmitFlipInternal(int handle, int index, int6
 		if (!ctx->opened || ctx->closing)
 		{
 			return SubmitFlipStatus::InvalidHandle;
+		}
+		// index -1: flip the current buffer (UE4-style present without an
+		// explicit index). Resolve to the last presented buffer, or 0 before
+		// any indexed flip.
+		if (index == -1)
+		{
+			index = ctx->flip_status.currentBuffer;
+			if (index < 0)
+			{
+				index = 0;
+			}
 		}
 		if (index < 0 || index >= 16 || ctx->buffer_registration_reserved[index] || ctx->buffers[index].buffer == nullptr)
 		{
@@ -1298,7 +1333,17 @@ bool FlipQueue::Flip(uint32_t micros)
 	const auto present_submission = NextPresentSubmission();
 	auto*      buffer = g_video_out_context->MaterializeRegisteredImage(r.cfg, r.index, present_submission);
 
+	if (FILE* f = fopen("/tmp/kyty_flip3.log", "a"))
+	{
+		fprintf(f, "FLIP3: index=%d buffer=%p\n", r.index, (void*)buffer);
+		fclose(f);
+	}
 	Graphics::WindowDrawBuffer(buffer);
+	if (FILE* f = fopen("/tmp/kyty_flip3.log", "a"))
+	{
+		fprintf(f, "FLIP3: draw_done index=%d\n", r.index);
+		fclose(f);
+	}
 	Graphics::GpuMemoryCompleteSubmission(present_submission);
 
 	// A flip event announces a completed flip. Publish the completion snapshot
@@ -1833,6 +1878,10 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 		{
 			// SCE_VIDEO_OUT_PIXEL_FORMAT2_R10_G10_B10_A2
 			format = Graphics::VideoOutBufferFormat::R10G10B10A2Unorm;
+		} else if (attribute2->pixel_format == 0xc001000600000000ULL)
+		{
+			// SCE_VIDEO_OUT_PIXEL_FORMAT2 16:16:16:16 float (HDR, UE4 titles).
+			format = Graphics::VideoOutBufferFormat::R16G16B16A16Float;
 		}
 	} else
 	{
@@ -2171,6 +2220,15 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 	printf("\t option         = %" PRIu64 "\n", attribute->option);
 
 	// EXIT_NOT_IMPLEMENTED(attribute->pixel_format != 0x80000000);
+	if (FILE* f = fopen("/tmp/kyty_vo2.log", "a"))
+	{
+		fprintf(f, "REG2: handle=%d set=%d start=%d num=%d fmt=0x%016llx tiling=%u aspect=%u w=%u h=%u pitch=%u option=%llu dcc_color=%llu dcc_ctrl=%llu\n",
+		        handle, set_index, buffer_index_start, buffer_num, (unsigned long long)attribute->pixel_format,
+		        (unsigned)attribute->tiling_mode, (unsigned)attribute->aspect_ratio, (unsigned)attribute->width,
+		        (unsigned)attribute->height, (unsigned)attribute->pitch_in_pixel, (unsigned long long)attribute->option,
+		        (unsigned long long)attribute->dcc_cb_register_clear_color, (unsigned long long)attribute->dcc_control);
+		fclose(f);
+	}
 	EXIT_NOT_IMPLEMENTED(option != nullptr);
 	EXIT_NOT_IMPLEMENTED(category != 0);
 	EXIT_NOT_IMPLEMENTED(attribute->tiling_mode != 0);
@@ -2189,8 +2247,14 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 		addresses[i] = buffers[i].data;
 	}
 
-	return g_video_out_context->RegisterBuffers(handle, set_index, false, buffer_index_start, addresses.GetDataConst(), buffer_num,
-	                                            nullptr, attribute);
+	const int reg_result = g_video_out_context->RegisterBuffers(handle, set_index, false, buffer_index_start,
+	                                                            addresses.GetDataConst(), buffer_num, nullptr, attribute);
+	if (FILE* f = fopen("/tmp/kyty_vo2.log", "a"))
+	{
+		fprintf(f, "REG2_RESULT: handle=%d result=%d\n", handle, reg_result);
+		fclose(f);
+	}
+	return reg_result;
 }
 
 VideoOutBufferImageInfo VideoOutGetImageMetadataForSubmission(uint64_t addr, Graphics::CommandBuffer* buffer)
@@ -2228,6 +2292,12 @@ bool VideoOutIsValidFlipMode(int flip_mode)
 
 KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg)
 {
+	if (FILE* f = fopen("/tmp/kyty_flip2.log", "a"))
+	{
+		fprintf(f, "FLIP2: handle=%d index=%d mode=%d arg=%lld\n", handle, index, flip_mode, (long long)flip_arg);
+		fclose(f);
+	}
+
 	PRINT_NAME();
 
 	EXIT_IF(g_video_out_context == nullptr);

@@ -1478,6 +1478,45 @@ TEST(EmulatorGraphicsState, Gen5SharpSampledTextureAcceptsTexture2DArrayType)
 	EXPECT_EQ(bind.textures2D.desc[0].usage, ShaderTextureUsage::ReadOnly);
 }
 
+TEST(EmulatorGraphicsState, Gen5GsFrontSharpResourcesKeepPhysicalRegisterIndices)
+{
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 12; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Vsharp;
+	}
+	user_sgpr.value[0] = 0x12345000u;
+	user_sgpr.value[3] = 9u << 28u;
+	user_sgpr.value[8] = 0x76543210u;
+
+	ShaderSharp read_only_texture {};
+	read_only_texture.offset_dw = 0;
+	read_only_texture.size      = 0;
+	ShaderSharp sampler {};
+	sampler.offset_dw = 8;
+	sampler.size      = 1;
+
+	ShaderUserData user_data {};
+	user_data.sharp_resource_offset[0] = &read_only_texture;
+	user_data.sharp_resource_count[0]  = 1;
+	user_data.sharp_resource_offset[2] = &sampler;
+	user_data.sharp_resource_count[2]  = 1;
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 12, nullptr, 8);
+
+	ASSERT_EQ(bind.textures2D.textures_num, 1);
+	// Resource data stays keyed by the physical API user-data window. The
+	// recompiler applies the fused-front +8 base when it maps shader operands.
+	EXPECT_EQ(bind.textures2D.desc[0].start_register, 0);
+	EXPECT_EQ(bind.textures2D.desc[0].texture.fields[0], 0x12345000u);
+	EXPECT_EQ(bind.textures2D.desc[0].texture.Type(), 9);
+	ASSERT_EQ(bind.samplers.samplers_num, 1);
+	EXPECT_EQ(bind.samplers.start_register[0], 8);
+	EXPECT_EQ(bind.samplers.samplers[0].fields[0], 0x76543210u);
+}
+
 TEST(EmulatorGraphicsState, Gen5SharpNullBufferDescriptorIsNotStorageBuffer)
 {
 	HW::UserSgprInfo user_sgpr {};
@@ -1735,6 +1774,9 @@ TEST(EmulatorGraphicsState, AcceptsSupportedPixelInputLayouts)
 	EXPECT_TRUE(ShaderPixelInputMaskSupported(0x00000302u, 0x00000302u));
 	EXPECT_TRUE(ShaderPixelInputMaskSupported(0x00000320u, 0x00000320u));
 
+	// A pixel shader that reads no barycentrics and no position is valid.
+	EXPECT_TRUE(ShaderPixelInputMaskSupported(0x00000000u, 0x00000000u));
+
 	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000022u, 0x00000022u));
 	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000120u, 0x00000120u));
 	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000020u, 0x00000002u));
@@ -1955,6 +1997,29 @@ TEST(EmulatorGraphicsState, ResolvesViewportDepthForClipSpaceAndHostLimits)
 	dx = State::ResolveViewportDepth(1.0f, 0.0f, true, false);
 	EXPECT_FLOAT_EQ(dx.min_depth, 0.0f);
 	EXPECT_FLOAT_EQ(dx.max_depth, 1.0f);
+}
+
+TEST(EmulatorGraphicsState, ResolvesViewportDepthWithHardwareClamp)
+{
+	// The default clamp window must not change the translated range.
+	auto full = State::ResolveViewportDepth(0.5f, 0.5f, true, true, 0.0f, 1.0f);
+	EXPECT_FLOAT_EQ(full.min_depth, 0.5f);
+	EXPECT_FLOAT_EQ(full.max_depth, 1.0f);
+
+	// A partial clamp window narrows both endpoints instead of failing.
+	const auto partial = State::ResolveViewportDepth(1.0f, 0.0f, true, true, 0.25f, 0.75f);
+	EXPECT_FLOAT_EQ(partial.min_depth, 0.25f);
+	EXPECT_FLOAT_EQ(partial.max_depth, 0.75f);
+
+	// Reversed depth keeps min_depth above max_depth, which Vulkan allows.
+	const auto reversed = State::ResolveViewportDepth(-0.5f, 0.5f, false, true, 0.0f, 1.0f);
+	EXPECT_FLOAT_EQ(reversed.min_depth, 1.0f);
+	EXPECT_FLOAT_EQ(reversed.max_depth, 0.0f);
+
+	// An inverted clamp window is still a window; ordering must not matter.
+	const auto swapped = State::ResolveViewportDepth(1.0f, 0.0f, true, true, 0.75f, 0.25f);
+	EXPECT_FLOAT_EQ(swapped.min_depth, 0.25f);
+	EXPECT_FLOAT_EQ(swapped.max_depth, 0.75f);
 }
 
 TEST(EmulatorGraphicsState, ResolvesViewportXyFromScaleAndOffset)

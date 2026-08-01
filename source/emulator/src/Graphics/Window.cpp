@@ -29,6 +29,7 @@
 #include "Emulator/Graphics/VulkanQueueIdentity.h"
 #include "Emulator/Graphics/WindowControls.h"
 #include "Emulator/Loader/SystemContent.h"
+#include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
 #include "KytyBuildInfo.h"
@@ -47,6 +48,7 @@
 #include "SDL_video.h"
 #include "SDL_vulkan.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -70,6 +72,56 @@ namespace Kyty::Libs::Graphics {
 
 constexpr float FPS_AVERAGE_FRAMES = 5.0f;
 constexpr float FPS_UPDATE_TIME    = 0.25f;
+
+// Lock-free mirror of the presented-frame counter. Submission-thread tooling
+// needs the frame index without touching window state owned by the UI thread.
+static std::atomic<int> g_presented_frame_num {0};
+
+void WindowPublishPresentedFrameNum(int frame_num)
+{
+	g_presented_frame_num.store(frame_num, std::memory_order_relaxed);
+}
+
+int WindowGetPresentedFrameNum()
+{
+	return g_presented_frame_num.load(std::memory_order_relaxed);
+}
+
+// KYTY_HLE_TRACE_FRAMES=first-last turns the HLE call log on for a bounded
+// presented-frame window. Tracing a full boot costs about 40x of the frame
+// budget, so a late phase is unreachable without a window.
+static void MaybeToggleFrameWindowHleTrace(int frame_num)
+{
+	static const char* spec = std::getenv("KYTY_HLE_TRACE_FRAMES");
+	if (spec == nullptr || spec[0] == '\0')
+	{
+		return;
+	}
+	static int  first  = 0;
+	static int  last   = 0;
+	static bool parsed = false;
+	if (!parsed)
+	{
+		parsed = true;
+		if (std::sscanf(spec, "%d-%d", &first, &last) != 2)
+		{
+			first = last = 0;
+		}
+	}
+	if (first <= 0 || last < first)
+	{
+		return;
+	}
+	if (frame_num == first)
+	{
+		const char* path = std::getenv("KYTY_HLE_TRACE_FILE");
+		Log::SetDirection(Log::Direction::File);
+		Log::SetOutputFile(String::FromUtf8(path != nullptr && path[0] != '\0' ? path : "/tmp/kyty-hle-trace.log"));
+	} else if (frame_num == last + 1)
+	{
+		Log::SetDirection(Log::Direction::Silent);
+	}
+}
 
 struct EventKeyboard
 {
@@ -572,7 +624,8 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		std::filesystem::remove(ctx->native_capture.trigger_file, error);
 	}
 
-	if (image->format != VK_FORMAT_B8G8R8A8_SRGB && image->format != VK_FORMAT_R8G8B8A8_SRGB)
+	const bool hdr_capture = (image->format == VK_FORMAT_R16G16B16A16_SFLOAT);
+	if (image->format != VK_FORMAT_B8G8R8A8_SRGB && image->format != VK_FORMAT_R8G8B8A8_SRGB && !hdr_capture)
 	{
 		if (milestone == NativeCaptureMilestone::FirstPresent)
 		{
@@ -590,7 +643,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 
 	const uint64_t width  = image->extent.width;
 	const uint64_t height = image->extent.height;
-	if (width == 0 || height == 0 || width > UINT64_MAX / height || width * height > UINT64_MAX / 4)
+	if (width == 0 || height == 0 || width > UINT64_MAX / height || width * height > UINT64_MAX / 8)
 	{
 		if (milestone == NativeCaptureMilestone::FirstPresent)
 		{
@@ -605,10 +658,61 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		return;
 	}
 
-	const uint64_t       size = width * height * 4;
+	// HDR (16:16:16:16 float) sources are read back as floats and converted to
+	// RGBA8 with a saturating clamp for the PNG; no tone mapping.
+	const uint64_t       bpp  = hdr_capture ? 8u : 4u;
+	const uint64_t       size = width * height * bpp;
 	std::vector<uint8_t> pixels(size);
 	UtilFillBuffer(&ctx->graphic_ctx, pixels.data(), size, static_cast<uint32_t>(width), image,
 	               static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+	if (hdr_capture)
+	{
+		// R16G16B16A16_SFLOAT is stored as half floats (2 bytes/component).
+		const auto half_to_float = [](uint16_t h) -> float
+		{
+			const uint32_t sign = (h >> 15u) & 1u;
+			const uint32_t exp  = (h >> 10u) & 0x1fu;
+			const uint32_t mant = h & 0x3ffu;
+			uint32_t       bits = 0;
+			if (exp == 0u)
+			{
+				if (mant == 0u)
+				{
+					bits = sign << 31u;
+				} else
+				{
+					uint32_t m   = mant;
+					int      e   = -14;
+					while ((m & 0x400u) == 0u)
+					{
+						m <<= 1u;
+						e--;
+					}
+					bits = (sign << 31u) | (static_cast<uint32_t>(e + 127) << 23u) | ((m & 0x3ffu) << 13u);
+				}
+			} else if (exp == 0x1fu)
+			{
+				bits = (sign << 31u) | (0xffu << 23u) | (mant << 13u);
+			} else
+			{
+				bits = (sign << 31u) | ((exp - 15u + 127u) << 23u) | (mant << 13u);
+			}
+			float value = 0.0f;
+			std::memcpy(&value, &bits, sizeof(value));
+			return value;
+		};
+		std::vector<uint8_t> converted(width * height * 4);
+		const uint16_t*      src = reinterpret_cast<const uint16_t*>(pixels.data());
+		for (uint64_t p = 0; p < width * height; p++)
+		{
+			for (int c = 0; c < 4; c++)
+			{
+				const float v = std::clamp(half_to_float(src[p * 4 + c]), 0.0f, 1.0f);
+				converted[p * 4 + c] = static_cast<uint8_t>(v * 255.0f + 0.5f);
+			}
+		}
+		pixels = std::move(converted);
+	}
 	if (milestone == NativeCaptureMilestone::FirstPresent)
 	{
 		const uint64_t now_ms = WindowSteadyMs();
@@ -784,6 +888,8 @@ static void CalcFrameTime(GameApi* game, double game_time_s)
 	game->m_current_time_seconds  = game_time_s;
 
 	game->m_frame_num++;
+	WindowPublishPresentedFrameNum(game->m_frame_num);
+	MaybeToggleFrameWindowHleTrace(game->m_frame_num);
 	// Agent observation at the real frame producer (not status poll).
 	if (game->m_frame_num == 1)
 	{
@@ -3399,35 +3505,89 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 			// Bypass unique-id dedup by using frame-specific prefix paths via direct readback.
 			const uint32_t w = blt_src_image->extent.width;
 			const uint32_t h = blt_src_image->extent.height;
+			const bool hdr_present = (blt_src_image->format == VK_FORMAT_R16G16B16A16_SFLOAT);
 			if (w > 0 && h > 0 && w <= 8192 && h <= 8192 &&
 			    (blt_src_image->format == VK_FORMAT_R8G8B8A8_SRGB || blt_src_image->format == VK_FORMAT_R8G8B8A8_UNORM ||
-			     blt_src_image->format == VK_FORMAT_B8G8R8A8_SRGB || blt_src_image->format == VK_FORMAT_B8G8R8A8_UNORM))
+			     blt_src_image->format == VK_FORMAT_B8G8R8A8_SRGB || blt_src_image->format == VK_FORMAT_B8G8R8A8_UNORM || hdr_present))
 			{
 				static std::set<int> dumped_frames;
 				if (dumped_frames.insert(frame).second)
 				{
-					const uint64_t       bytes = static_cast<uint64_t>(w) * h * 4u;
+					const uint64_t       bpp   = hdr_present ? 8u : 4u;
+					const uint64_t       bytes = static_cast<uint64_t>(w) * h * bpp;
 					std::vector<uint8_t> pixels(static_cast<size_t>(bytes));
 					UtilFillBuffer(&g_window_ctx->graphic_ctx, pixels.data(), bytes, w, blt_src_image,
 					               static_cast<uint64_t>(blt_src_image->layout));
 					char path[192];
 					std::snprintf(path, sizeof(path), "%s-present-%ux%u.png", prefix, w, h);
-					std::vector<uint8_t> rgba(static_cast<size_t>(bytes));
-					const bool bgra = blt_src_image->format == VK_FORMAT_B8G8R8A8_SRGB || blt_src_image->format == VK_FORMAT_B8G8R8A8_UNORM;
-					for (uint64_t pixel = 0; pixel < static_cast<uint64_t>(w) * h; pixel++)
+					if (hdr_present)
 					{
-						const auto src = pixel * 4u;
-						rgba[src + 0u] = bgra ? pixels[src + 2u] : pixels[src + 0u];
-						rgba[src + 1u] = pixels[src + 1u];
-						rgba[src + 2u] = bgra ? pixels[src + 0u] : pixels[src + 2u];
-						rgba[src + 3u] = pixels[src + 3u];
-					}
-					if (UtilWriteRgba8Png(path, rgba.data(), w, h, w))
+						const auto half_to_float = [](uint16_t hv) -> float
+						{
+							const uint32_t sign = (hv >> 15u) & 1u;
+							const uint32_t exp  = (hv >> 10u) & 0x1fu;
+							const uint32_t mant = hv & 0x3ffu;
+							uint32_t       bits = 0;
+							if (exp == 0u)
+							{
+								if (mant == 0u)
+								{
+									bits = sign << 31u;
+								} else
+								{
+									uint32_t m = mant;
+									int      e = -14;
+									while ((m & 0x400u) == 0u)
+									{
+										m <<= 1u;
+										e--;
+									}
+									bits = (sign << 31u) | (static_cast<uint32_t>(e + 127) << 23u) | ((m & 0x3ffu) << 13u);
+								}
+							} else if (exp == 0x1fu)
+							{
+								bits = (sign << 31u) | (0xffu << 23u) | (mant << 13u);
+							} else
+							{
+								bits = (sign << 31u) | ((exp - 15u + 127u) << 23u) | (mant << 13u);
+							}
+							float value = 0.0f;
+							std::memcpy(&value, &bits, sizeof(value));
+							return value;
+						};
+						const uint16_t* src_h = reinterpret_cast<const uint16_t*>(pixels.data());
+						std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4u);
+						for (uint64_t pixel = 0; pixel < static_cast<uint64_t>(w) * h; pixel++)
+						{
+							for (int c = 0; c < 4; c++)
+							{
+								const float v = std::clamp(half_to_float(src_h[pixel * 4u + c]), 0.0f, 1.0f);
+								rgba[pixel * 4u + c] = static_cast<uint8_t>(v * 255.0f + 0.5f);
+							}
+						}
+						if (UtilWriteRgba8Png(path, rgba.data(), w, h, w))
+						{
+							std::fprintf(stderr, "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
+						}
+					} else
 					{
-						std::fprintf(stderr, "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
-						char rt_prefix[128];
-						std::snprintf(rt_prefix, sizeof(rt_prefix), "/tmp/kyty-dump-rt-at-f%d", frame);
-						GraphicsDumpRememberedRts(&g_window_ctx->graphic_ctx, rt_prefix);
+						std::vector<uint8_t> rgba(static_cast<size_t>(bytes));
+						const bool bgra = blt_src_image->format == VK_FORMAT_B8G8R8A8_SRGB || blt_src_image->format == VK_FORMAT_B8G8R8A8_UNORM;
+						for (uint64_t pixel = 0; pixel < static_cast<uint64_t>(w) * h; pixel++)
+						{
+							const auto src = pixel * 4u;
+							rgba[src + 0u] = bgra ? pixels[src + 2u] : pixels[src + 0u];
+							rgba[src + 1u] = pixels[src + 1u];
+							rgba[src + 2u] = bgra ? pixels[src + 0u] : pixels[src + 2u];
+							rgba[src + 3u] = pixels[src + 3u];
+						}
+						if (UtilWriteRgba8Png(path, rgba.data(), w, h, w))
+						{
+							std::fprintf(stderr, "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
+							char rt_prefix[128];
+							std::snprintf(rt_prefix, sizeof(rt_prefix), "/tmp/kyty-dump-rt-at-f%d", frame);
+							GraphicsDumpRememberedRts(&g_window_ctx->graphic_ctx, rt_prefix);
+						}
 					}
 				}
 			}

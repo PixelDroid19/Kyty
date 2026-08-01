@@ -141,9 +141,10 @@ struct PipelineDynamicParameters
 	float line_width         = 1.0f;
 	bool  color_write_enable = true;
 
-	float viewport_scale[3]  = {};
-	float viewport_offset[3] = {};
-	int   scissor_ltrb[4]    = {0};
+	float viewport_scale[3]       = {};
+	float viewport_offset[3]      = {};
+	float viewport_depth_clamp[2] = {0.0f, 1.0f};
+	int   scissor_ltrb[4]         = {0};
 
 	float blend_color_red   = 0.0f;
 	float blend_color_green = 0.0f;
@@ -683,6 +684,7 @@ void                            MaybeDumpUiDraw(const RenderColorInfo& color, co
                                                 const ShaderPixelInputInfo& ps_input, const HW::Context& hw, const HW::UserConfig& ucfg,
                                                 uint32_t index_count, uint32_t index_type_and_size, bool indexed, uint32_t flags = 0);
 void                            MaybeDumpColorTargets(GraphicContext* ctx, const RenderColorInfo& color);
+bool                            DumpDrawFrameSelected();
 
 // --- HwCheck ---
 void hw_check(const HW::Context& hw, bool allow_depth_stencil_copy = false);

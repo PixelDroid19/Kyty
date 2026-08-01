@@ -138,6 +138,11 @@ void SetBlendControl(HW::Context& context, uint32_t slot, uint32_t value);
 // AMD VTE window Z: OpenGL clip ([-W,+W]) uses zoffset±zscale; DX clip ([0,+W]) uses [zoffset, zoffset+zscale].
 // Without VK_EXT_depth_range_unrestricted, clamp to [0,1] and pair with negativeOneToOne for OpenGL clip.
 [[nodiscard]] ViewportDepthRange ResolveViewportDepth(float zscale, float zoffset, bool dx_clip_space, bool depth_range_unrestricted);
+// PA_SC_VPORT_ZMIN/ZMAX form the hardware depth clamp applied after the window
+// transform; engines that render with a reversed or partial depth range program
+// values other than [0,1].
+[[nodiscard]] ViewportDepthRange ResolveViewportDepth(float zscale, float zoffset, bool dx_clip_space, bool depth_range_unrestricted,
+                                                      float clamp_min, float clamp_max);
 
 [[nodiscard]] DepthClearActions ResolveDepthClearActions(bool register_depth_clear, bool htile_meta_clear);
 

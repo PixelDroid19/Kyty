@@ -227,6 +227,21 @@ ViewportDepthRange ResolveViewportDepth(float zscale, float zoffset, bool dx_cli
 	return range;
 }
 
+ViewportDepthRange ResolveViewportDepth(float zscale, float zoffset, bool dx_clip_space, bool depth_range_unrestricted, float clamp_min,
+                                        float clamp_max)
+{
+	auto range = ResolveViewportDepth(zscale, zoffset, dx_clip_space, depth_range_unrestricted);
+
+	// PA_SC_VPORT_ZMIN/ZMAX clamp the transformed depth. The window transform is
+	// monotonic, so clamping both endpoints of the Vulkan range reproduces it,
+	// including a reversed range where min_depth > max_depth.
+	const float clamp_low  = std::min(clamp_min, clamp_max);
+	const float clamp_high = std::max(clamp_min, clamp_max);
+	range.min_depth        = std::clamp(range.min_depth, clamp_low, clamp_high);
+	range.max_depth        = std::clamp(range.max_depth, clamp_low, clamp_high);
+	return range;
+}
+
 DepthClearActions ResolveDepthClearActions(bool register_depth_clear, bool htile_meta_clear)
 {
 	DepthClearActions actions {};

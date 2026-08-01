@@ -522,13 +522,20 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		attachment.base_addr             = rt.base.addr;
 	} else
 	{
-		EXIT_NOT_IMPLEMENTED(!(rt.info.format == 0xa && (rt.info.channel_type == 0x6 || rt.info.channel_type == 0x0) &&
-		                       (rt.info.channel_order == 0x0 || rt.info.channel_order == 0x1)));
+		// Display buffers can also be HDR 16:16:16:16 float (0xC, UE4 titles).
+		EXIT_NOT_IMPLEMENTED(!((rt.info.format == 0xa && (rt.info.channel_type == 0x6 || rt.info.channel_type == 0x0) &&
+		                        (rt.info.channel_order == 0x0 || rt.info.channel_order == 0x1)) ||
+		                       (rt.info.format == 0xc && rt.info.channel_type == 0x7 &&
+		                        (rt.info.channel_order == 0x0 || rt.info.channel_order == 0x1 || rt.info.channel_order == 0x2))));
 
 		// Display buffer (single swapchain target only).
 		EXIT_NOT_IMPLEMENTED(r->targets_num != 1);
 		EXIT_NOT_IMPLEMENTED(attachment.samples != VK_SAMPLE_COUNT_1_BIT);
-		EXIT_NOT_IMPLEMENTED(video_image.buffer_size != attachment.size);
+		// HDR display: the render-target tiling (tile 0x1b) and the display
+		// tiling (doubled 4bpp table) sizes legitimately differ; the display
+		// buffer is the authoritative backing, so only the pitch must match.
+		const bool hdr_display = (render_format.format == RenderTextureFormat::R16G16B16A16Sfloat);
+		EXIT_NOT_IMPLEMENTED(!hdr_display && video_image.buffer_size != attachment.size);
 		EXIT_NOT_IMPLEMENTED(video_image.buffer_pitch != attachment.pitch);
 		attachment.type                 = RenderColorType::DisplayBuffer;
 		attachment.base_addr            = rt.base.addr;

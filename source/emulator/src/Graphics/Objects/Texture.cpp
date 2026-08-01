@@ -154,6 +154,41 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		EXIT_NOT_IMPLEMENTED(
 		    !Gen5DetileStandard4KBTextureMipChain(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, mip_layout));
 
+		const char* block_dump_spec   = std::getenv("KYTY_DUMP_TILED_BLOCKS");
+		uint32_t    block_dump_width  = 0;
+		uint32_t    block_dump_height = 0;
+		const bool  block_dump_matches = ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt)) &&
+		                                 block_dump_spec != nullptr &&
+		                                 (std::sscanf(block_dump_spec, "%ux%u", &block_dump_width, &block_dump_height) != 2 ||
+		                                  (block_dump_width == width && block_dump_height == height));
+		if (block_dump_matches)
+		{
+			const auto& level = mip_layout.level[0];
+			EXIT_NOT_IMPLEMENTED(static_cast<uint64_t>(level.linear_offset) + level.linear_size > linear.size());
+			const auto* bytes = linear.data() + level.linear_offset;
+			uint64_t    hash  = 1469598103934665603ull;
+			for (uint32_t i = 0; i < level.linear_size; ++i)
+			{
+				hash = (hash ^ bytes[i]) * 1099511628211ull;
+			}
+			static std::set<uint64_t> dumped_mip_blocks;
+			const uint64_t dump_key = *vaddr ^ (static_cast<uint64_t>(width) << 32u) ^ height ^ hash;
+			if (dumped_mip_blocks.size() < 32u && dumped_mip_blocks.insert(dump_key).second)
+			{
+				char path[192];
+				std::snprintf(path, sizeof(path), "/tmp/kyty-bc-mip0-%ux%u-%012" PRIx64 "-%016" PRIx64 ".bin",
+				              static_cast<uint32_t>(width), static_cast<uint32_t>(height), *vaddr, hash);
+				if (FILE* file = std::fopen(path, "wb"); file != nullptr)
+				{
+					const size_t written = std::fwrite(bytes, 1, level.linear_size, file);
+					std::fclose(file);
+					std::fprintf(stderr,
+					             "KYTY_DUMP_TILED_BLOCKS_FILE path=%s bytes=%zu complete=%u level=0 elem=%ux%u hash=%016" PRIx64 "\n",
+					             path, written, written == level.linear_size ? 1u : 0u, level.element_width, level.element_height, hash);
+				}
+			}
+		}
+
 		Vector<BufferImageCopy> regions(static_cast<int>(levels));
 		for (uint32_t level = 0; level < levels; level++)
 		{
@@ -381,7 +416,14 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			std::vector<uint8_t> temp_buf(static_cast<size_t>(linear_bytes));
 			TileConvertStandard4KBToLinear(temp_buf.data(), reinterpret_cast<void*>(*vaddr), element_width, element_height, element_pitch,
 			                               bytes_per_element);
-			if (block_compressed && std::getenv("KYTY_DUMP_TILED_BLOCKS") != nullptr)
+			const char* block_dump_spec = std::getenv("KYTY_DUMP_TILED_BLOCKS");
+			uint32_t    block_dump_width = 0;
+			uint32_t    block_dump_height = 0;
+			const bool  block_dump_matches =
+			    block_compressed && block_dump_spec != nullptr &&
+			    (std::sscanf(block_dump_spec, "%ux%u", &block_dump_width, &block_dump_height) != 2 ||
+			     (block_dump_width == width && block_dump_height == height));
+			if (block_dump_matches)
 			{
 				const auto* guest           = reinterpret_cast<const uint8_t*>(*vaddr);
 				uint64_t    raw_nonzero     = 0;
@@ -410,6 +452,22 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 					std::fprintf(stderr, "%02x", temp_buf[i]);
 				}
 				std::fprintf(stderr, "\n");
+
+				static std::set<uint64_t> dumped_blocks;
+				const uint64_t dump_key = *vaddr ^ (static_cast<uint64_t>(width) << 32u) ^ height ^ detiled_hash;
+				if (dumped_blocks.size() < 32u && dumped_blocks.insert(dump_key).second)
+				{
+					char path[192];
+					std::snprintf(path, sizeof(path), "/tmp/kyty-bc-blocks-%ux%u-%012" PRIx64 "-%016" PRIx64 ".bin",
+					              static_cast<uint32_t>(width), static_cast<uint32_t>(height), *vaddr, detiled_hash);
+					if (FILE* file = std::fopen(path, "wb"); file != nullptr)
+					{
+						const size_t written = std::fwrite(temp_buf.data(), 1, static_cast<size_t>(linear_bytes), file);
+						std::fclose(file);
+						std::fprintf(stderr, "KYTY_DUMP_TILED_BLOCKS_FILE path=%s bytes=%zu complete=%u\n", path, written,
+						             written == linear_bytes ? 1u : 0u);
+					}
+				}
 			}
 			regions[0].offset = 0;
 			regions[0].width  = width;

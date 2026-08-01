@@ -127,6 +127,17 @@ void require_publication_success(GpuSubmissionPublicationResult result, const ch
 	}
 }
 
+void trace_aa_register_write(const char* path, const char* name, uint32_t value)
+{
+	if (std::getenv("KYTY_DUMP_AA_REGS") == nullptr)
+	{
+		return;
+	}
+	static std::atomic_uint64_t sequence {0};
+	const auto                  current = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+	std::fprintf(stderr, "KYTY_AA_REG seq=%" PRIu64 " path=%s reg=%s value=0x%08" PRIx32 "\n", current, path, name, value);
+}
+
 } // namespace
 
 class CommandProcessor
@@ -1036,7 +1047,14 @@ void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_
 
 void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll)
 {
-	EXIT_NOT_IMPLEMENTED(addr == nullptr);
+	if (addr == nullptr)
+	{
+		// Guest WAIT_REG_MEM against memory address 0: nothing in the emulated
+		// GPU writes there, so the condition can never change. Titles use it as
+		// an unconditional marker; complete the wait instead of aborting.
+		printf("WARNING: WaitRegMem32 on address 0 completed immediately (guest marker)\n");
+		return;
+	}
 	(void)poll;
 
 	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitRegMem);
@@ -1610,7 +1628,12 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 				// Type0/Type1 single-body form: always one body dword.
 				// Classical GCN COUNT is ignored until multi-reg bodies are
 				// evidenced with a bounded size that matches the stream.
-				EXIT_NOT_IMPLEMENTED(dw < 1);
+				if (dw < 1)
+				{
+					// Trailing Type0/1 header with no body at the end of the
+					// buffer: padding, nothing to apply.
+					continue;
+				}
 				cmd += 1;
 				dw -= 1;
 				continue;
@@ -1630,7 +1653,11 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 			EXIT_NOT_IMPLEMENTED(remaining_including_header < special_packet_dwords);
 		} else if (KYTY_PM4_LEN(cmd_id) > remaining_including_header)
 		{
-			EXIT_NOT_IMPLEMENTED(dw < 1);
+			if (dw < 1)
+			{
+				// Oversized packet at the very end of the buffer: padding.
+				continue;
+			}
 			cmd += 1;
 			dw -= 1;
 			continue;
@@ -2380,6 +2407,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_aa_config)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0016900);
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SC_AA_CONFIG);
 
+	trace_aa_register_write("direct", "PA_SC_AA_CONFIG", buffer[0]);
 	HW::AaConfig r;
 
 	r.msaa_num_samples      = KYTY_PM4_GET(buffer[0], PA_SC_AA_CONFIG, MSAA_NUM_SAMPLES);
@@ -2489,6 +2517,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_color_control)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0016900);
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::CB_COLOR_CONTROL);
 
+	trace_aa_register_write("direct", "CB_COLOR_CONTROL", buffer[0]);
 	HW::ColorControl r;
 
 	r.mode = KYTY_PM4_GET(buffer[0], CB_COLOR_CONTROL, MODE);
@@ -2610,6 +2639,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_eqaa_control)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_EQAA);
 
+	trace_aa_register_write("direct", "DB_EQAA", buffer[0]);
 	HW::EqaaControl r;
 
 	r.max_anchor_samples         = KYTY_PM4_GET(buffer[0], DB_EQAA, MAX_ANCHOR_SAMPLES);
@@ -2792,6 +2822,10 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_render_target)
 	attrib.fmask_tile_mode         = KYTY_PM4_GET(buffer[5], CB_COLOR0_ATTRIB, FMASK_TILE_MODE_INDEX);
 	attrib.num_samples             = KYTY_PM4_GET(buffer[5], CB_COLOR0_ATTRIB, NUM_SAMPLES);
 	attrib.num_fragments           = KYTY_PM4_GET(buffer[5], CB_COLOR0_ATTRIB, NUM_FRAGMENTS);
+	if (slot == 0)
+	{
+		trace_aa_register_write("direct", "CB_COLOR0_ATTRIB", buffer[5]);
+	}
 
 	//	dcc.max_uncompressed_block_size = (buffer[6] >> 2u) & 0x3u;
 	//	dcc.max_compressed_block_size   = (buffer[6] >> 5u) & 0x3u;
@@ -2874,6 +2908,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_scan_mode_control)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0016900);
 	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SC_MODE_CNTL_0);
 
+	trace_aa_register_write("direct", "PA_SC_MODE_CNTL_0", buffer[0]);
 	HW::ScanModeControl r;
 
 	r.msaa_enable          = KYTY_PM4_GET(buffer[0], PA_SC_MODE_CNTL_0, MSAA_ENABLE) != 0;
@@ -3880,7 +3915,6 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_indirect)
 }
 
 // Gen5 IT_CLEAR_STATE from GraphicsDcbResetQueue: header + 4-bit state body.
-// Same hardware effect as the custom R_DRAW_RESET path: reset CP draw state.
 KYTY_CP_OP_PARSER(cp_op_clear_state)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -3888,7 +3922,11 @@ KYTY_CP_OP_PARSER(cp_op_clear_state)
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0001200);
 	EXIT_NOT_IMPLEMENTED((buffer[0] & ~0xfu) != 0);
 
-	cp->Reset();
+	// This packet executes inside CommandProcessor::Run. Calling Reset here
+	// would wait on the command buffer currently being decoded and recursively
+	// re-enter the same packet. CLEAR_STATE restores context-register defaults;
+	// shader and UCONFIG state belong to separate register files.
+	cp->GetCtx()->Reset();
 
 	return 1;
 }
@@ -4096,7 +4134,12 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 	uint32_t indirect_num_regs = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(indirect_num_regs == 0);
+	if (indirect_num_regs == 0)
+	{
+		// Empty indirect register block: valid no-op marker emitted by some
+		// titles between passes. Nothing to apply.
+		return 3;
+	}
 
 	static const bool dump_ps_input_writes = std::getenv("KYTY_DUMP_PS_INPUT_WRITES") != nullptr;
 	for (uint32_t i = 0; i < indirect_num_regs; i++, indirect_buffer += 2)
@@ -4196,7 +4239,11 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 	uint32_t indirect_num_regs = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(indirect_num_regs == 0);
+	if (indirect_num_regs == 0)
+	{
+		// Empty indirect SH register block: valid no-op marker.
+		return 3;
+	}
 
 	for (uint32_t i = 0; i < indirect_num_regs; i++, indirect_buffer += 2)
 	{
@@ -4484,6 +4531,31 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 		{
 			printf("WARNING: unsupported ReleaseMem data_sel (continuing)\n");
 		}
+	}
+
+	const uint64_t destination_size = event_write_source == 1u ? 4u : ((event_write_source == 2u || event_write_source == 4u) ? 8u : 0u);
+	if (destination_size != 0u &&
+	    GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(dst_gpu_addr), destination_size) !=
+	        GpuMemoryRangeValidationStatus::Valid)
+	{
+		static std::atomic<uint32_t> invalid_destination_logs {0};
+		if (invalid_destination_logs.fetch_add(1, std::memory_order_relaxed) < 32u)
+		{
+			const uint32_t packet_dw = custom ? (cmd_id == 0xc0061060 ? 8u : 7u) : KYTY_PM4_LEN(cmd_id);
+			std::fprintf(stderr,
+			             "KYTY_RELEASE_MEM_INVALID cmd=0x%08" PRIx32 " addr=0x%016" PRIx64 " bytes=%" PRIu64
+			             " source=%" PRIu32 " value=0x%016" PRIx64 " packet=0x%08" PRIx32,
+			             cmd_id, reinterpret_cast<uint64_t>(dst_gpu_addr), destination_size, event_write_source, value, cmd_id);
+			for (uint32_t i = 0; i + 1u < packet_dw; i++)
+			{
+				std::fprintf(stderr, ",0x%08" PRIx32, buffer[i]);
+			}
+			std::fprintf(stderr, "\n");
+			std::fflush(stderr);
+		}
+		// The destination comes directly from guest PM4. Never enqueue an EOP
+		// label that can later dereference an unmapped host address.
+		return (cmd_id == 0xc0061060) ? 7 : 6;
 	}
 
 	cp->WriteAtEndOfPipe64(cache_policy, event_write_dest, eop_event_type, cache_action, event_index, event_write_source, dst_gpu_addr,
@@ -4859,6 +4931,10 @@ static void graphics_init_jmp_tables_cx_indirect()
 		g_hw_ctx_indirect_func[cmd_offset] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 		{
 			uint32_t        slot = (cmd_offset - Pm4::CB_COLOR0_ATTRIB) / 15;
+			if (slot == 0)
+			{
+				trace_aa_register_write("indirect", "CB_COLOR0_ATTRIB", value);
+			}
 			HW::ColorAttrib attrib;
 			attrib.force_dest_alpha_to_one = KYTY_PM4_GET(value, CB_COLOR0_ATTRIB, FORCE_DST_ALPHA_1) != 0;
 			attrib.tile_mode               = KYTY_PM4_GET(value, CB_COLOR0_ATTRIB, TILE_MODE_INDEX);
@@ -5099,6 +5175,7 @@ static void graphics_init_jmp_tables_cx_indirect()
 	};
 	g_hw_ctx_indirect_func[Pm4::CB_COLOR_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 	{
+		trace_aa_register_write("indirect", "CB_COLOR_CONTROL", value);
 		HW::ColorControl r;
 		r.mode = KYTY_PM4_GET(value, CB_COLOR_CONTROL, MODE);
 		r.op   = KYTY_PM4_GET(value, CB_COLOR_CONTROL, ROP3);
@@ -5111,6 +5188,7 @@ static void graphics_init_jmp_tables_cx_indirect()
 	};
 	g_hw_ctx_indirect_func[Pm4::PA_SC_AA_CONFIG] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 	{
+		trace_aa_register_write("indirect", "PA_SC_AA_CONFIG", value);
 		HW::AaConfig r;
 		r.msaa_num_samples      = KYTY_PM4_GET(value, PA_SC_AA_CONFIG, MSAA_NUM_SAMPLES);
 		r.aa_mask_centroid_dtmn = KYTY_PM4_GET(value, PA_SC_AA_CONFIG, AA_MASK_CENTROID_DTMN) != 0;
@@ -5120,6 +5198,7 @@ static void graphics_init_jmp_tables_cx_indirect()
 	};
 	g_hw_ctx_indirect_func[Pm4::DB_EQAA] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 	{
+		trace_aa_register_write("indirect", "DB_EQAA", value);
 		HW::EqaaControl r;
 		r.max_anchor_samples         = KYTY_PM4_GET(value, DB_EQAA, MAX_ANCHOR_SAMPLES);
 		r.ps_iter_samples            = KYTY_PM4_GET(value, DB_EQAA, PS_ITER_SAMPLES);
@@ -5433,6 +5512,7 @@ static void graphics_init_jmp_tables_cx_indirect()
 
 	g_hw_ctx_indirect_func[Pm4::PA_SC_MODE_CNTL_0] = [](KYTY_HW_CTX_INDIRECT_ARGS)
 	{
+		trace_aa_register_write("indirect", "PA_SC_MODE_CNTL_0", value);
 		HW::ScanModeControl r;
 		r.msaa_enable          = KYTY_PM4_GET(value, PA_SC_MODE_CNTL_0, MSAA_ENABLE) != 0;
 		r.vport_scissor_enable = KYTY_PM4_GET(value, PA_SC_MODE_CNTL_0, VPORT_SCISSOR_ENABLE) != 0;

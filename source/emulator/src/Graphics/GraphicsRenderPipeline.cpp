@@ -318,7 +318,32 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 
 	VulkanVertexInputLayout input_layout {};
-	EXIT_NOT_IMPLEMENTED(!VulkanBuildVertexInputLayout(*vs_input_info, &input_layout));
+	if (!VulkanBuildVertexInputLayout(*vs_input_info, &input_layout))
+	{
+		if (FILE* f = fopen("/tmp/kyty_vil.log", "a"))
+		{
+			fprintf(f, "VIL FAIL: resources=%d buffers=%d\n", vs_input_info->resources_num, vs_input_info->buffers_num);
+			for (int bi = 0; bi < vs_input_info->buffers_num; bi++)
+			{
+				const auto& b = vs_input_info->buffers[bi];
+				fprintf(f, "  buf[%d] addr=0x%llx stride=%u records=%u attr_num=%d\n", bi, (unsigned long long)b.addr, b.stride,
+				        b.num_records, b.attr_num);
+				for (int ai = 0; ai < b.attr_num && ai < 16; ai++)
+				{
+					fprintf(f, "    attr[%d] resource=%d offset=%u\n", ai, b.attr_indices[ai], b.attr_offsets[ai]);
+				}
+			}
+			for (int ri = 0; ri < vs_input_info->resources_num; ri++)
+			{
+				const auto& r = vs_input_info->resources[ri];
+				fprintf(f, "  res[%d] format=%u dfmt=%u nfmt=%u records=%llu stride=%u addtid=%d swizzle=%d\n", ri,
+				        (unsigned)r.Format(), (unsigned)r.Dfmt(), (unsigned)r.Nfmt(), (unsigned long long)r.NumRecords(),
+				        (unsigned)r.Stride(), r.AddTid() ? 1 : 0, r.SwizzleEnabled() ? 1 : 0);
+			}
+			fclose(f);
+		}
+		EXIT_NOT_IMPLEMENTED(!VulkanBuildVertexInputLayout(*vs_input_info, &input_layout));
+	}
 
 	VkPipelineVertexInputStateCreateInfo vertex_input_info {};
 	vertex_input_info.sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -344,7 +369,9 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	if (!dynamic_params->vk_dynamic_state_viewport)
 	{
 		const auto depth_range = State::ResolveViewportDepth(dynamic_params->viewport_scale[2], dynamic_params->viewport_offset[2],
-		                                                     static_params->dx_clip_space, unrestricted);
+		                                                     static_params->dx_clip_space, unrestricted,
+		                                                     dynamic_params->viewport_depth_clamp[0],
+		                                                     dynamic_params->viewport_depth_clamp[1]);
 		const auto xy          = State::ResolveViewportXy(dynamic_params->viewport_scale[0], dynamic_params->viewport_offset[0],
 		                                                  dynamic_params->viewport_scale[1], dynamic_params->viewport_offset[1]);
 		viewport.x             = xy.x;
@@ -846,7 +873,8 @@ bool PipelineDynamicParameters::operator==(const PipelineDynamicParameters& othe
 	{
 		if (viewport_scale[0] != other.viewport_scale[0] || viewport_scale[1] != other.viewport_scale[1] ||
 		    viewport_scale[2] != other.viewport_scale[2] || viewport_offset[0] != other.viewport_offset[0] ||
-		    viewport_offset[1] != other.viewport_offset[1] || viewport_offset[2] != other.viewport_offset[2])
+		    viewport_offset[1] != other.viewport_offset[1] || viewport_offset[2] != other.viewport_offset[2] ||
+		    viewport_depth_clamp[0] != other.viewport_depth_clamp[0] || viewport_depth_clamp[1] != other.viewport_depth_clamp[1])
 		{
 			return false;
 		}
@@ -1045,7 +1073,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.dynamic_params->viewport_offset[0] = vp.viewports[0].xoffset;
 	p.dynamic_params->viewport_offset[1] = vp.viewports[0].yoffset;
 	p.dynamic_params->viewport_offset[2] = vp.viewports[0].zoffset;
-	p.static_params->dx_clip_space       = ctx->GetClipControl().dx_clip_space;
+	p.dynamic_params->viewport_depth_clamp[0] = vp.viewports[0].zmin;
+	p.dynamic_params->viewport_depth_clamp[1] = vp.viewports[0].zmax;
+	p.static_params->dx_clip_space            = ctx->GetClipControl().dx_clip_space;
 	p.dynamic_params->scissor_ltrb[0]    = scissor.left;
 	p.dynamic_params->scissor_ltrb[1]    = scissor.top;
 	p.dynamic_params->scissor_ltrb[2]    = scissor.right;

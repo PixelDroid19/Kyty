@@ -21,6 +21,9 @@ enum class VideoOutBufferFormat : uint64_t
 	// Gen5 SCE_VIDEO_OUT_PIXEL_FORMAT2_* 10:10:10:2 (still 32 bpp, same pitch/size).
 	R10G10B10A2Unorm,
 	B10G10R10A2Unorm,
+	// Gen5 SCE_VIDEO_OUT_PIXEL_FORMAT2 16:16:16:16 float (HDR presentation,
+	// e.g. UE4 titles). 64 bpp.
+	R16G16B16A16Float,
 };
 
 // Tiled display buffers are GPU-owned; CPU upload on Update would LOAD stale

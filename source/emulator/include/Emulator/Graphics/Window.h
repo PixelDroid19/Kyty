@@ -55,6 +55,9 @@ void WindowDrawBuffer(VideoOutVulkanImage* image);
 // Realtime agent / tooling seam. Capture still happens on the present path;
 // these helpers only request and observe host-side VideoOut readback.
 bool WindowGetPresentStats(WindowPresentStats* out);
+// Lock-free presented-frame counter for submission-thread diagnostics.
+void WindowPublishPresentedFrameNum(int frame_num);
+int  WindowGetPresentedFrameNum();
 bool WindowRequestNativeCapture(uint64_t* out_request_id, WindowNativeCaptureResult* error_out);
 bool WindowWaitNativeCapture(uint64_t request_id, uint32_t timeout_ms, WindowNativeCaptureResult* out);
 

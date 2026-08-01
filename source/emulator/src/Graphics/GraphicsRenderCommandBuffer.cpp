@@ -437,14 +437,23 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	EXIT_NOT_IMPLEMENTED(!with_depth && !with_color);
 
 	auto* depth_image = (with_depth ? depth->vulkan_buffer : nullptr);
-	const bool custom_depth_locations = (depth_image != nullptr && depth_image->sample_locations_compatible);
+	// Custom sample locations apply only when the draw actually carries them.
+	// A multisampled depth image reused by a 1x draw (or a copy whose guest
+	// state did not program AA) has no location state; render it with the
+	// driver default positions instead of rejecting the pass.
+	const bool custom_depth_locations =
+	    (sample_locations != nullptr && VulkanSampleLocationsEnabled(*sample_locations) && depth_image != nullptr &&
+	     depth_image->sample_locations_compatible && depth_image->samples != VK_SAMPLE_COUNT_1_BIT);
 	if (custom_depth_locations)
 	{
 		EXIT_NOT_IMPLEMENTED(sample_locations == nullptr || !VulkanSampleLocationsEnabled(*sample_locations));
 		EXIT_NOT_IMPLEMENTED(sample_locations->sample_count != depth_image->samples);
 	} else if (sample_locations != nullptr && VulkanSampleLocationsEnabled(*sample_locations) && with_depth)
 	{
-		EXIT_NOT_IMPLEMENTED(!depth_image->sample_locations_compatible);
+		// MSAA draw against a depth image that was not created
+		// SAMPLE_LOCATIONS_COMPATIBLE: drop the custom locations for this pass
+		// (default sample positions) instead of rejecting the draw. Possible
+		// edge artifacts on the depth test; visual output is preserved.
 	}
 
 	const uint32_t color_count = (with_color ? color->targets_num : (with_depth ? 1u : 0u));

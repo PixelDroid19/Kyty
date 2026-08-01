@@ -872,6 +872,14 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// Single-parent RT/DS/Texture/SB share with an incoming StorageBuffer
 				// (captured DepthStencilBuffer Crosses StorageBuffer 0x8000).
 				overlap = true;
+			} else if (GpuMemoryAllowsRenderTargetSurfaceAlias(o.object.type, obj.relation, info.type))
+			{
+				// An incoming render target may alias one surface parent for the same
+				// reasons the multi-parent path accepts: the guest rebinds a range it
+				// already exposed as a sampled/storage/render view. A lone parent is
+				// not a stricter contract than several, so share instead of failing
+				// (captured full-screen RenderTexture Crossing a stale Texture).
+				overlap = true;
 			} else if (GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type))
 			{
 				delete_all = true;

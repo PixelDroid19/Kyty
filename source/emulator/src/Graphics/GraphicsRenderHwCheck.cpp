@@ -657,10 +657,31 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 	const auto& eqaa      = hw.GetEqaaControl();
 	const auto& scan_mode = hw.GetScanModeControl();
 
-	EXIT_NOT_IMPLEMENTED(!scan_mode.msaa_enable);
-	EXIT_NOT_IMPLEMENTED(cf.msaa_num_samples == 0);
-	EXIT_NOT_IMPLEMENTED(decode_guest_sample_count(cf.msaa_num_samples) != attachment_samples);
-	EXIT_NOT_IMPLEMENTED(cf.msaa_exposed_samples != cf.msaa_num_samples);
+	if (!scan_mode.msaa_enable)
+	{
+		const auto& color_control  = hw.GetColorControl();
+		const auto& render_control = hw.GetRenderControl();
+		const auto& depth_control  = hw.GetDepthControl();
+		std::fprintf(stderr,
+		             "KYTY_AA_CONTRACT attachment_samples=%u msaa_enable=0 color_mode=%u color_op=0x%02x "
+		             "aa_samples=%u exposed_samples=%u depth_test=%u stencil_test=%u depth_copy=%u stencil_copy=%u\n",
+		             static_cast<uint32_t>(attachment_samples), static_cast<uint32_t>(color_control.mode), color_control.op,
+		             cf.msaa_num_samples, cf.msaa_exposed_samples, depth_control.z_enable ? 1u : 0u,
+		             depth_control.stencil_enable ? 1u : 0u, render_control.depth_copy ? 1u : 0u,
+		             render_control.stencil_copy ? 1u : 0u);
+	}
+	// Vulkan requires the pipeline sample count to match the bound attachments.
+	// MSAA_ENABLE does not change the color-buffer allocation, so keep deriving
+	// rasterization samples from the attachment and use the EQAA state below to
+	// decide whether fragment shading is per-sample.
+	// Titles may leave PA_SC_AA_CONFIG at the default 0 while the color
+	// buffers carry a sample count; the hardware derives MSAA from the CB.
+	// Fall back to the attachment count in that case instead of rejecting.
+	const VkSampleCountFlagBits msaa_num_samples =
+	    (cf.msaa_num_samples == 0 ? attachment_samples
+	                              : static_cast<VkSampleCountFlagBits>(decode_guest_sample_count(cf.msaa_num_samples)));
+	EXIT_NOT_IMPLEMENTED(msaa_num_samples != attachment_samples);
+	EXIT_NOT_IMPLEMENTED(cf.msaa_exposed_samples != 0 && cf.msaa_exposed_samples != cf.msaa_num_samples);
 	EXIT_NOT_IMPLEMENTED(cf.aa_mask_centroid_dtmn);
 
 	EXIT_NOT_IMPLEMENTED(eqaa.max_anchor_samples != cf.msaa_num_samples);
@@ -732,8 +753,9 @@ static void vp_check(const HW::ScreenViewport& vp, const HW::ScanModeControl& sm
 	// EXIT_NOT_IMPLEMENTED(smc.vport_scissor_enable);
 	EXIT_NOT_IMPLEMENTED(smc.line_stipple_enable);
 
-	EXIT_NOT_IMPLEMENTED(vp.viewports[0].zmin > 0.000000);
-	EXIT_NOT_IMPLEMENTED(vp.viewports[0].zmax != 1.000000);
+	// zmin/zmax are the hardware depth clamp. ResolveViewportDepth folds them
+	// into the Vulkan viewport depth range, so any window is translatable.
+	EXIT_NOT_IMPLEMENTED(!std::isfinite(vp.viewports[0].zmin) || !std::isfinite(vp.viewports[0].zmax));
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].xscale != 960.000000);
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].xoffset != 960.000000);
 	// EXIT_NOT_IMPLEMENTED(vp.viewports[0].yscale != -540.000000);

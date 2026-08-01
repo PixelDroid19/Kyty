@@ -8,6 +8,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -25,6 +26,7 @@
 #include <cinttypes>
 #include <cstring>
 #include <cstdio>
+#include <limits>
 #include <cstdlib>
 #include <cstdarg>
 #include <set>
@@ -107,7 +109,18 @@ VkSampleCountFlagBits resolve_render_attachment_sample_count(const RenderColorIn
 			EXIT_NOT_IMPLEMENTED(color.attachment[slot].samples != samples);
 		}
 	}
-	EXIT_NOT_IMPLEMENTED(with_color && with_depth && samples != depth.samples);
+	if (with_color && with_depth && samples != depth.samples)
+	{
+		std::fprintf(stderr,
+		             "KYTY_ATTACHMENT_SAMPLE_MISMATCH color_addr=0x%012" PRIx64 " color=%ux%u format=%u samples=%u "
+		             "depth_addr=0x%012" PRIx64 " depth=%ux%u format=%u samples=%u depth_test=%u depth_write=%u\n",
+		             first_color->base_addr, first_color->width, first_color->height,
+		             static_cast<uint32_t>(first_color->render_texture_format), static_cast<uint32_t>(samples), depth.depth_buffer_vaddr,
+		             depth.width, depth.height, static_cast<uint32_t>(depth.format), static_cast<uint32_t>(depth.samples),
+		             depth.depth_test_enable ? 1u : 0u, depth.depth_write_enable ? 1u : 0u);
+		std::fflush(stderr);
+		EXIT_NOT_IMPLEMENTED(samples != depth.samples);
+	}
 	return samples;
 }
 
@@ -316,6 +329,31 @@ void FormatTextureList(const ShaderTextureResources& textures, char* buffer, siz
 	}
 }
 
+// KYTY_DUMP_DRAW_FRAME=min[-max] restricts draw dumps to a presented-frame
+// window. Without it the bounded dump budget is spent on the first boot draws
+// and never reaches a later phase of the title.
+bool DumpDrawFrameSelected()
+{
+	static const char* spec = std::getenv("KYTY_DUMP_DRAW_FRAME");
+	if (spec == nullptr || spec[0] == '\0')
+	{
+		return true;
+	}
+	static int  first  = 0;
+	static int  last   = 0;
+	static bool parsed = false;
+	if (!parsed)
+	{
+		parsed = true;
+		if (std::sscanf(spec, "%d-%d", &first, &last) != 2)
+		{
+			last = std::numeric_limits<int>::max();
+		}
+	}
+	const int frame = WindowGetPresentedFrameNum();
+	return frame >= first && frame <= last;
+}
+
 // Opt-in: KYTY_DUMP_DRAW=1 logs unique draws into 1280x720 color targets that
 // sample a 980x347 texture. Captures VS fmt/stride, prim, viewport.
 void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& vs_input, const ShaderPixelInputInfo& ps_input,
@@ -323,7 +361,7 @@ void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& 
                             bool indexed, uint32_t flags)
 {
 	static const char* enabled = std::getenv("KYTY_DUMP_DRAW");
-	if (enabled == nullptr || enabled[0] == '\0')
+	if (enabled == nullptr || enabled[0] == '\0' || !DumpDrawFrameSelected())
 	{
 		return;
 	}
@@ -438,16 +476,17 @@ void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& 
 		const auto&    resource = ps_buffers.buffers[bi];
 		const uint64_t address  = Config::IsNextGen() ? resource.Base48() : resource.Base44();
 		const uint64_t size     = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
-		const auto*    words    = reinterpret_cast<const uint32_t*>(address);
+		const uint64_t readable = address != 0 ? GpuMemoryGetAllocatedRangePrefix(address, std::min<uint64_t>(size, 56u * sizeof(uint32_t))) : 0;
+		const auto*    words    = reinterpret_cast<const uint32_t*>(static_cast<uintptr_t>(address));
 		std::fprintf(stderr, "KYTY_DUMP_DRAW_PS_BUFFER slot=%d reg=%d usage=%u addr=0x%012" PRIx64
-		                     " stride=%u records=%u bytes=%" PRIu64,
+		                     " stride=%u records=%u bytes=%" PRIu64 " readable=%" PRIu64,
 		             ps_buffers.slots[bi], ps_buffers.start_register[bi], static_cast<unsigned>(ps_buffers.usages[bi]), address,
-		             resource.Stride(), resource.NumRecords(), size);
-		if (address != 0 && size >= 5u * sizeof(uint32_t))
+		             resource.Stride(), resource.NumRecords(), size, readable);
+		if (readable >= 5u * sizeof(uint32_t))
 		{
 			std::fprintf(stderr, " words=%08x,%08x,%08x,%08x,%08x", words[0], words[1], words[2], words[3], words[4]);
 		}
-		if (address != 0 && size >= 56u * sizeof(uint32_t))
+		if (readable >= 56u * sizeof(uint32_t))
 		{
 			std::fprintf(stderr, " words48_55=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x", words[48], words[49], words[50],
 			             words[51], words[52], words[53], words[54], words[55]);
@@ -462,7 +501,10 @@ void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& 
 		if (b.addr != 0 && b.stride >= 4 && b.stride <= 256)
 		{
 			const uint32_t floats_per = b.stride / 4u;
-			const uint32_t vert_n     = std::min(index_count == 0 ? 6u : index_count, 8u);
+			const uint32_t requested_n = std::min(index_count == 0 ? 6u : index_count, 8u);
+			const uint64_t requested_bytes = static_cast<uint64_t>(b.stride) * requested_n;
+			const uint64_t readable_bytes = GpuMemoryGetAllocatedRangePrefix(b.addr, requested_bytes);
+			const uint32_t vert_n = static_cast<uint32_t>(readable_bytes / b.stride);
 			std::fprintf(stderr, "KYTY_DUMP_DRAW_VERT stride=%u floats=%u verts=%u", b.stride, floats_per, vert_n);
 			for (int ai = 0; ai < b.attr_num && ai < 8; ai++)
 			{

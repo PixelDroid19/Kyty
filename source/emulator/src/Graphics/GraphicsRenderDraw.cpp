@@ -13,6 +13,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
+#include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
@@ -36,6 +37,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
+#include <set>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -79,7 +82,7 @@ static const char* shader_disable_reason(HW::Shader* sh_ctx)
 
 static void MaybeDumpAutoDrawSkip(const char* reason, uint32_t index_count, uint64_t draw_modifier)
 {
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr)
+	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
@@ -95,7 +98,7 @@ static void MaybeDumpAutoDrawSkip(const char* reason, uint32_t index_count, uint
 
 static void MaybeDumpIndexDrawSkip(const char* reason, uint32_t index_count, uint64_t draw_modifier, uint32_t type)
 {
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr)
+	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
@@ -109,13 +112,236 @@ static void MaybeDumpIndexDrawSkip(const char* reason, uint32_t index_count, uin
 	             draw_modifier, type);
 }
 
+static bool PixelShaderSnapshotSelected(uint64_t shader_id)
+{
+	static const char* selector = std::getenv("KYTY_DUMP_PS_ID");
+	static uint64_t    selected = 0;
+	static bool        parsed   = false;
+	if (!parsed)
+	{
+		parsed = true;
+		if (selector != nullptr && selector[0] != '\0')
+		{
+			char* end = nullptr;
+			selected  = std::strtoull(selector, &end, 16);
+			if (end == selector || *end != '\0')
+			{
+				selected = 0;
+			}
+		}
+	}
+	return selected != 0 && shader_id == selected && DumpDrawFrameSelected();
+}
+
+static uint64_t PixelShaderSnapshotHash(const ShaderPixelInputInfo& input)
+{
+	uint64_t hash = 1469598103934665603ull;
+	const auto append = [&hash](const void* data, size_t size) {
+		const auto* bytes = static_cast<const uint8_t*>(data);
+		for (size_t i = 0; i < size; ++i)
+		{
+			hash ^= bytes[i];
+			hash *= 1099511628211ull;
+		}
+	};
+
+	const auto& buffers = input.bind.storage_buffers;
+	append(&buffers.buffers_num, sizeof(buffers.buffers_num));
+	for (int i = 0; i < buffers.buffers_num; ++i)
+	{
+		const auto& resource = buffers.buffers[i];
+		append(resource.fields, sizeof(resource.fields));
+		append(&buffers.slots[i], sizeof(buffers.slots[i]));
+		append(&buffers.start_register[i], sizeof(buffers.start_register[i]));
+		const uint64_t address   = Config::IsNextGen() ? resource.Base48() : resource.Base44();
+		const uint64_t declared  = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
+		const uint64_t requested = std::min<uint64_t>(declared, 64u);
+		const uint64_t readable  = address != 0 && requested != 0 ? GpuMemoryGetAllocatedRangePrefix(address, requested) : 0;
+		if (readable != 0)
+		{
+			append(reinterpret_cast<const void*>(static_cast<uintptr_t>(address)), static_cast<size_t>(readable));
+		}
+	}
+
+	const auto& textures = input.bind.textures2D;
+	append(&textures.textures_num, sizeof(textures.textures_num));
+	for (int i = 0; i < textures.textures_num; ++i)
+	{
+		append(textures.desc[i].texture.fields, sizeof(textures.desc[i].texture.fields));
+	}
+	const auto& samplers = input.bind.samplers;
+	append(&samplers.samplers_num, sizeof(samplers.samplers_num));
+	for (int i = 0; i < samplers.samplers_num; ++i)
+	{
+		append(samplers.samplers[i].fields, sizeof(samplers.samplers[i].fields));
+	}
+	return hash;
+}
+
+static void MaybeDumpPixelShaderTextureBytes(uint64_t shader_id, int index, const ShaderTextureResource& resource)
+{
+	if (std::getenv("KYTY_DUMP_PS_BYTES") == nullptr || !Config::IsNextGen() || resource.TileMode() != 5u)
+	{
+		return;
+	}
+
+	const uint32_t width  = static_cast<uint32_t>(resource.Width5()) + 1u;
+	const uint32_t height = static_cast<uint32_t>(resource.Height5()) + 1u;
+	const uint32_t levels = static_cast<uint32_t>(resource.MaxMip()) + 1u;
+	Gen5TextureMipLayout layout {};
+	if (!Gen5GetStandard4KBTextureMipLayout(resource.Format(), width, height, width, levels, &layout))
+	{
+		return;
+	}
+	const uint32_t base_level = resource.BaseLevel();
+	if (base_level >= layout.levels)
+	{
+		return;
+	}
+	const auto&    level       = layout.level[base_level];
+	const uint64_t address     = resource.Base40();
+	const uint64_t source_addr = address + level.tiled_offset;
+	const uint64_t readable    = GpuMemoryGetAllocatedRangePrefix(source_addr, level.tiled_size);
+	if (readable != level.tiled_size)
+	{
+		return;
+	}
+
+	static std::set<uint64_t> dumped;
+	const uint64_t key = shader_id ^ (static_cast<uint64_t>(index) << 56u) ^ source_addr;
+	if (dumped.size() >= 16u || !dumped.insert(key).second)
+	{
+		return;
+	}
+
+	char file_path[192];
+	std::snprintf(file_path, sizeof(file_path), "/tmp/kyty-ps-bytes-%d-%ux%u-%012" PRIx64 ".bin", index, width, height,
+	              source_addr);
+	if (FILE* file = std::fopen(file_path, "wb"); file != nullptr)
+	{
+		const size_t written = std::fwrite(reinterpret_cast<const void*>(static_cast<uintptr_t>(source_addr)), 1,
+		                                   static_cast<size_t>(level.tiled_size), file);
+		std::fclose(file);
+		std::fprintf(stderr,
+		             "KYTY_DUMP_PS_BYTES index=%d path=%s allocation=0x%012" PRIx64 " level=%u offset=%u bytes=%u complete=%u\n",
+		             index, file_path, address, base_level, level.tiled_offset, level.tiled_size,
+		             written == level.tiled_size ? 1u : 0u);
+	}
+}
+
+static void MaybeDumpPixelShaderSnapshot(const char* path, const HW::Shader& sh, const ShaderPixelInputInfo& input,
+	                                      uint32_t count, uint32_t primitive_type)
+{
+	const auto& ps = sh.GetPs();
+	if (!PixelShaderSnapshotSelected(ps.ps_regs.chksum))
+	{
+		return;
+	}
+
+	static std::set<uint64_t> seen;
+	static uint32_t           logs  = 0;
+	uint32_t                  limit = 128u;
+	if (const char* env_limit = std::getenv("KYTY_DUMP_PS_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
+	{
+		const auto parsed = std::strtoul(env_limit, nullptr, 10);
+		if (parsed > 0u && parsed <= 4096u)
+		{
+			limit = static_cast<uint32_t>(parsed);
+		}
+	}
+	const uint64_t snapshot_hash = PixelShaderSnapshotHash(input);
+	if (logs >= limit || !seen.insert(snapshot_hash).second)
+	{
+		return;
+	}
+	++logs;
+
+	std::fprintf(stderr,
+	             "KYTY_DUMP_PS_SNAPSHOT path=%s ordinal=%u hash=0x%016" PRIx64 " count=%u prim=%u addr=0x%012" PRIx64
+	             " id=0x%016" PRIx64 " buffers=%d textures=%d\n",
+	             path, logs, snapshot_hash, count, primitive_type, ps.ps_regs.data_addr, ps.ps_regs.chksum,
+	             input.bind.storage_buffers.buffers_num, input.bind.textures2D.textures_num);
+
+	const auto& buffers = input.bind.storage_buffers;
+	for (int i = 0; i < buffers.buffers_num; ++i)
+	{
+		const auto& resource  = buffers.buffers[i];
+		const uint64_t address = Config::IsNextGen() ? resource.Base48() : resource.Base44();
+		const uint64_t declared = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
+		const uint64_t requested = std::min<uint64_t>(declared, 64u);
+		const uint64_t readable = address != 0 && requested != 0 ? GpuMemoryGetAllocatedRangePrefix(address, requested) : 0;
+		std::fprintf(stderr,
+		             "KYTY_DUMP_PS_BUFFER index=%d slot=%d reg=%d usage=%u access=%u source=%u desc=%08x,%08x,%08x,%08x"
+		             " addr=0x%012" PRIx64 " stride=%u records=%u bytes=%" PRIu64 " readable=%" PRIu64 " words=",
+		             i, buffers.slots[i], buffers.start_register[i], static_cast<unsigned>(buffers.usages[i]),
+		             static_cast<unsigned>(buffers.accesses[i]), static_cast<unsigned>(buffers.sources[i]), resource.fields[0],
+		             resource.fields[1], resource.fields[2], resource.fields[3], address, resource.Stride(), resource.NumRecords(),
+		             declared, readable);
+		const auto* words = reinterpret_cast<const uint32_t*>(static_cast<uintptr_t>(address));
+		for (uint64_t word = 0; word < readable / sizeof(uint32_t); ++word)
+		{
+			std::fprintf(stderr, "%s%08x", word == 0 ? "" : ",", words[word]);
+		}
+		std::fprintf(stderr, "\n");
+	}
+
+	const auto& textures = input.bind.textures2D;
+	for (int i = 0; i < textures.textures_num; ++i)
+	{
+		const auto& descriptor = textures.desc[i];
+		const auto& resource   = descriptor.texture;
+		std::fprintf(stderr,
+		             "KYTY_DUMP_PS_TEXTURE index=%d slot=%d reg=%d usage=%u desc=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x"
+		             " addr=0x%012" PRIx64 " size=%ux%u format=%u type=%u tile=%u\n",
+		             i, descriptor.slot, descriptor.start_register, static_cast<unsigned>(descriptor.usage), resource.fields[0],
+		             resource.fields[1], resource.fields[2], resource.fields[3], resource.fields[4], resource.fields[5],
+		             resource.fields[6], resource.fields[7], resource.Base40(), static_cast<uint32_t>(resource.Width5()) + 1u,
+		             static_cast<uint32_t>(resource.Height5()) + 1u, resource.Format(), resource.Type(), resource.TileMode());
+		MaybeDumpPixelShaderTextureBytes(ps.ps_regs.chksum, i, resource);
+	}
+
+	const auto& samplers = input.bind.samplers;
+	for (int i = 0; i < samplers.samplers_num; ++i)
+	{
+		const auto& resource = samplers.samplers[i];
+		std::fprintf(stderr,
+		             "KYTY_DUMP_PS_SAMPLER index=%d slot=%d reg=%d desc=%08x,%08x,%08x,%08x force_degamma=%u skip_degamma=%u"
+		             " min=%u max=%u lod_bias=%u mag=%u min_filter=%u mip=%u\n",
+		             i, samplers.slots[i], samplers.start_register[i], resource.fields[0], resource.fields[1], resource.fields[2],
+		             resource.fields[3], resource.ForceDegamma() ? 1u : 0u, resource.SkipDegamma() ? 1u : 0u, resource.MinLod(),
+		             resource.MaxLod(), resource.LodBias(), resource.XyMagFilter(), resource.XyMinFilter(), resource.MipFilter());
+	}
+}
+
 static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDepthInfo& depth, const HW::Context& hw,
                                     const HW::Shader& sh,
                                     const ShaderVertexInputInfo& vs_input, const ShaderPixelInputInfo& ps_input, uint32_t index_count,
                                     uint32_t index_type_and_size, uint64_t draw_modifier, uint32_t packet_type,
                                     uint32_t primitive_type)
 {
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr)
+	MaybeDumpPixelShaderSnapshot("index", sh, ps_input, index_count, primitive_type);
+	if (std::getenv("KYTY_DUMP_DRAW2") != nullptr)
+	{
+		static uint32_t draw2_logs = 0;
+		if (draw2_logs < 5000)
+		{
+			draw2_logs++;
+			if (FILE* f = fopen("/tmp/kyty_draws2.log", "a"))
+			{
+				const auto& vp = hw.GetScreenViewport().viewports[0];
+				const auto  sc = State::ResolveScissor(hw.GetScreenViewport(), hw.GetScanModeControl(), 0);
+				fprintf(f,
+				        "DRAW2: cb=0x%012llx db=0x%012llx idx=%u ps=%08x vs=%08x vp=%.1f,%.1f,%.1fx%.1f "
+				        "sc=%d,%d-%d,%d targets=%u\n",
+				        (unsigned long long)color.attachment[0].base_addr, (unsigned long long)depth.depth_buffer_vaddr,
+				        index_count, (unsigned)(sh.GetPs().ps_regs.chksum & 0xffffffffu),
+				        (unsigned)(sh.GetVs().gs_regs.chksum & 0xffffffffu), vp.xscale, vp.xoffset, vp.yscale, vp.yoffset,
+				        sc.left, sc.top, sc.right, sc.bottom, color.targets_num);
+				fclose(f);
+			}
+		}
+	}
+	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
@@ -189,7 +415,8 @@ static void MaybeDumpAutoDrawReady(const RenderColorInfo& color, const RenderDep
                                    const HW::Shader& sh, const ShaderVertexInputInfo& vs_input,
                                    const ShaderPixelInputInfo& ps_input, uint32_t index_count, uint32_t primitive_type)
 {
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr)
+	MaybeDumpPixelShaderSnapshot("auto", sh, ps_input, index_count, primitive_type);
+	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
@@ -588,6 +815,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	ShaderVertexInputInfo vs_input_info;
 	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info);
+	if (!vs_input_info.input_resources_valid)
+	{
+		MaybeDumpIndexDrawSkip("invalid-vs-resources", index_count, draw_modifier, type);
+		return;
+	}
 
 	PrimitiveDrawPlan primitive_plan {};
 	EXIT_NOT_IMPLEMENTED(!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true,
@@ -783,7 +1015,8 @@ void GraphicsRenderDepthStencilCopySetDrawArea(const HW::Context& context, bool 
 	                                                 screen_viewport.viewports[0].yscale, screen_viewport.viewports[0].yoffset);
 	const auto guest_depth = State::ResolveViewportDepth(
 	    screen_viewport.viewports[0].zscale, screen_viewport.viewports[0].zoffset, context.GetClipControl().dx_clip_space,
-	    g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported);
+	    g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported, screen_viewport.viewports[0].zmin,
+	    screen_viewport.viewports[0].zmax);
 	const auto guest_scissor = State::ResolveScissor(screen_viewport, context.GetScanModeControl(), 0);
 
 	RenderResolutionTransform transform {};
@@ -995,6 +1228,10 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		const auto& vertex_shader_info = sh_ctx->GetVs();
 		const auto& shader_registers   = ctx->GetShaderRegisters();
 		ShaderGetInputInfoVS(&vertex_shader_info, &shader_registers, &guest_vertex_input);
+		if (!guest_vertex_input.input_resources_valid)
+		{
+			return;
+		}
 		guest_vertex_id = ShaderGetIdVS(&vertex_shader_info, &guest_vertex_input);
 
 		auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
@@ -1309,10 +1546,19 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	ShaderVertexInputInfo vs_input_info;
 	ShaderGetInputInfoVS(&vertex_shader_info, &shader_regs, &vs_input_info);
+	if (!vs_input_info.input_resources_valid)
+	{
+		MaybeDumpAutoDrawSkip("invalid-vs-resources", index_count, draw_modifier);
+		return;
+	}
 
 	PrimitiveDrawPlan primitive_plan {};
-	EXIT_NOT_IMPLEMENTED(!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false,
-	                                                       &primitive_plan));
+	if (!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, &primitive_plan))
+	{
+		std::fprintf(stderr, "Unsupported auto-draw primitive: type=%u count=%u vertex_buffers=%d\n", ucfg->GetPrimType(),
+		             index_count, vs_input_info.buffers_num);
+		EXIT_NOT_IMPLEMENTED(true);
+	}
 	MaybeDumpPrimitiveDrawPlan("auto", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
