@@ -5,7 +5,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <deque>
+#include <condition_variable>
 #include <limits>
+#include <mutex>
+#include <thread>
 #include <utility>
 
 #if defined(KYTY_HAVE_FFMPEG)
@@ -30,7 +33,9 @@ namespace {
 
 constexpr uint32_t kOutputSampleRate = 48000;
 constexpr uint32_t kOutputChannels   = 2;
-constexpr size_t   kMaxQueuedFrames  = 8;
+constexpr size_t   kVideoQueueCapacity = 6;
+constexpr size_t   kAudioQueueCapacity = 32;
+constexpr size_t   kAudioWakeVideoBudget = 8;
 
 uint64_t TimestampMilliseconds(int64_t timestamp, AVRational time_base, uint64_t fallback)
 {
@@ -87,6 +92,14 @@ struct Decoder::State
 
 	uint64_t next_video_timestamp = 0;
 	uint64_t next_audio_timestamp = 0;
+
+	mutable std::mutex mutex;
+	std::condition_variable condition;
+	std::thread worker;
+	bool stop_requested = false;
+	bool decode_done     = false;
+	bool audio_waiting   = false;
+	size_t audio_video_budget = 0;
 	std::deque<VideoFrame> video_queue;
 	std::deque<AudioFrame> audio_queue;
 };
@@ -97,8 +110,13 @@ static void SetError(Decoder::State* state, Status status, const char* message)
 	{
 		return;
 	}
-	state->status = status;
-	state->error  = message != nullptr ? message : "FFmpeg operation failed";
+	{
+		std::lock_guard<std::mutex> lock(state->mutex);
+		state->status = status;
+		state->error  = message != nullptr ? message : "FFmpeg operation failed";
+		state->decode_done = true;
+	}
+	state->condition.notify_all();
 }
 
 static void SetFfmpegError(Decoder::State* state, Status status, int error, const char* operation)
@@ -115,6 +133,15 @@ static void FreeState(Decoder::State* state)
 	if (state == nullptr)
 	{
 		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(state->mutex);
+		state->stop_requested = true;
+	}
+	state->condition.notify_all();
+	if (state->worker.joinable())
+	{
+		state->worker.join();
 	}
 	if (state->resampler != nullptr)
 	{
@@ -275,11 +302,31 @@ static bool ConvertVideo(Decoder::State* state)
 	                                   ? static_cast<uint64_t>(1000.0 / state->info.video_frame_rate + 0.5)
 
                                    : 0);
-	if (state->video_queue.size() >= kMaxQueuedFrames)
 	{
-		state->video_queue.pop_front();
+		std::unique_lock<std::mutex> lock(state->mutex);
+		if (state->stop_requested)
+		{
+			return false;
+		}
+		state->condition.wait(lock, [state] {
+			return state->stop_requested || state->video_queue.size() < kVideoQueueCapacity ||
+			       (state->audio_waiting && state->audio_video_budget != 0);
+		});
+		if (state->stop_requested)
+		{
+			return false;
+		}
+		if (state->video_queue.size() >= kVideoQueueCapacity)
+		{
+			state->video_queue.pop_front();
+			if (state->audio_waiting && state->audio_video_budget != 0)
+			{
+				--state->audio_video_budget;
+			}
+		}
+		state->video_queue.push_back(std::move(frame));
 	}
-	state->video_queue.push_back(std::move(frame));
+	state->condition.notify_all();
 	return true;
 }
 
@@ -323,11 +370,13 @@ static bool ConvertAudio(Decoder::State* state)
 	                              static_cast<uint64_t>(static_cast<double>(converted) * 1000.0 / kOutputSampleRate + 0.5);
 	if (!frame.data.empty())
 	{
-		if (state->audio_queue.size() >= kMaxQueuedFrames)
+		std::lock_guard<std::mutex> lock(state->mutex);
+		if (state->audio_queue.size() >= kAudioQueueCapacity)
 		{
 			state->audio_queue.pop_front();
 		}
 		state->audio_queue.push_back(std::move(frame));
+		state->condition.notify_all();
 	}
 	return true;
 }
@@ -460,6 +509,33 @@ static bool Pump(Decoder::State* state)
 	return DrainVideo(state) && DrainAudio(state);
 }
 
+static void DecodeLoop(Decoder::State* state)
+{
+	if (state == nullptr)
+	{
+		return;
+	}
+	for (;;)
+	{
+		{
+			std::lock_guard<std::mutex> lock(state->mutex);
+			if (state->stop_requested || state->demux_eof)
+			{
+				break;
+			}
+		}
+		if (!Pump(state))
+		{
+			break;
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(state->mutex);
+		state->decode_done = true;
+	}
+	state->condition.notify_all();
+}
+
 #endif
 
 bool Decoder::IsAvailable()
@@ -576,6 +652,7 @@ std::unique_ptr<Decoder> Decoder::Open(const char* host_path, std::string* error
 						state->info.duration_ms = static_cast<uint64_t>(state->format->duration * 1000 / AV_TIME_BASE);
 					}
 					state->status = Status::Ok;
+					state->worker = std::thread(DecodeLoop, state);
 				}
 			}
 		}
@@ -599,18 +676,29 @@ const StreamInfo& Decoder::GetStreamInfo() const
 
 Status Decoder::LastStatus() const
 {
+	std::lock_guard<std::mutex> lock(state_->mutex);
 	return state_->status;
 }
 
 const char* Decoder::LastError() const
 {
+	std::lock_guard<std::mutex> lock(state_->mutex);
 	return state_->error.c_str();
 }
 
 bool Decoder::EndOfStream() const
 {
 #if defined(KYTY_HAVE_FFMPEG)
-	return state_->demux_eof && state_->video_queue.empty() && state_->audio_queue.empty() && state_->video_eof && state_->audio_eof;
+	std::lock_guard<std::mutex> lock(state_->mutex);
+	if (state_->video != nullptr)
+	{
+		return state_->decode_done && state_->video_queue.empty();
+	}
+	if (state_->audio != nullptr)
+	{
+		return state_->decode_done && state_->audio_queue.empty();
+	}
+	return true;
 #else
 	return true;
 #endif
@@ -626,27 +714,22 @@ bool Decoder::ReadVideoFrame(VideoFrame* frame)
 #if !defined(KYTY_HAVE_FFMPEG)
 	return false;
 #else
+	std::unique_lock<std::mutex> lock(state_->mutex);
 	if (state_->status != Status::Ok || state_->video == nullptr)
 	{
 		return false;
 	}
-	while (state_->video_queue.empty() && !state_->video_eof && state_->status == Status::Ok)
-	{
-		if (!Pump(state_.get()))
-		{
-			break;
-		}
-	}
+	state_->condition.wait(lock, [this] {
+		return !state_->video_queue.empty() || state_->decode_done || state_->stop_requested || state_->status != Status::Ok;
+	});
 	if (state_->video_queue.empty())
 	{
-		if (state_->demux_eof)
-		{
-			state_->video_eof = true;
-		}
 		return false;
 	}
 	*frame = std::move(state_->video_queue.front());
 	state_->video_queue.pop_front();
+	lock.unlock();
+	state_->condition.notify_all();
 	return true;
 #endif
 }
@@ -661,27 +744,35 @@ bool Decoder::ReadAudioFrame(AudioFrame* frame)
 #if !defined(KYTY_HAVE_FFMPEG)
 	return false;
 #else
+	std::unique_lock<std::mutex> lock(state_->mutex);
 	if (state_->status != Status::Ok || state_->audio == nullptr)
 	{
 		return false;
 	}
-	while (state_->audio_queue.empty() && !state_->audio_eof && state_->status == Status::Ok)
+	const bool waiting_for_audio = state_->audio_queue.empty() && !state_->decode_done && !state_->stop_requested;
+	if (waiting_for_audio)
 	{
-		if (!Pump(state_.get()))
-		{
-			break;
-		}
+		state_->audio_waiting      = true;
+		state_->audio_video_budget = kAudioWakeVideoBudget;
+		state_->condition.notify_all();
+	}
+	state_->condition.wait(lock, [this] {
+		return !state_->audio_queue.empty() || state_->decode_done || state_->stop_requested || state_->status != Status::Ok;
+	});
+	if (waiting_for_audio)
+	{
+		state_->audio_waiting      = false;
+		state_->audio_video_budget = 0;
+		state_->condition.notify_all();
 	}
 	if (state_->audio_queue.empty())
 	{
-		if (state_->demux_eof)
-		{
-			state_->audio_eof = true;
-		}
 		return false;
 	}
 	*frame = std::move(state_->audio_queue.front());
 	state_->audio_queue.pop_front();
+	lock.unlock();
+	state_->condition.notify_all();
 	return true;
 #endif
 }
@@ -693,6 +784,7 @@ void Decoder::Close()
 #endif
 	if (state_ != nullptr)
 	{
+		std::lock_guard<std::mutex> lock(state_->mutex);
 		state_->status = Status::Closed;
 	}
 }

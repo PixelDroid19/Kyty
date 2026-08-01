@@ -8,7 +8,9 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <chrono>
 #include <memory>
+#include <thread>
 
 UT_BEGIN(EmulatorAudio);
 
@@ -46,6 +48,49 @@ TEST(EmulatorAudio, DecodesConfiguredAvPlayerMedia)
 		EXPECT_EQ(audio.sample_rate, stream.audio_sample_rate);
 		EXPECT_FALSE(audio.data.empty());
 	}
+}
+
+TEST(EmulatorAudio, VideoEndOfStreamDoesNotWaitForPendingAudio)
+{
+	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");
+	if (media_path == nullptr || media_path[0] == '\0' || !AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP();
+	}
+
+	std::string error;
+	auto decoder = AudioVideoBackend::Decoder::Open(media_path, &error);
+	ASSERT_NE(decoder, nullptr) << error;
+	ASSERT_TRUE(decoder->GetStreamInfo().has_video);
+
+	AudioVideoBackend::VideoFrame video;
+	size_t frames = 0;
+	while (decoder->ReadVideoFrame(&video))
+	{
+		++frames;
+	}
+
+	EXPECT_GT(frames, 0u);
+	EXPECT_EQ(decoder->LastStatus(), AudioVideoBackend::Status::Ok);
+	EXPECT_TRUE(decoder->EndOfStream());
+}
+
+TEST(EmulatorAudio, BoundsDecodeAheadWhenVideoConsumerIsPaused)
+{
+	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");
+	if (media_path == nullptr || media_path[0] == '\0' || !AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP();
+	}
+
+	std::string error;
+	auto decoder = AudioVideoBackend::Decoder::Open(media_path, &error);
+	ASSERT_NE(decoder, nullptr) << error;
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(250));
+	AudioVideoBackend::VideoFrame video;
+	ASSERT_TRUE(decoder->ReadVideoFrame(&video));
+	EXPECT_LT(video.timestamp_ms, 1000u);
 }
 
 TEST(EmulatorAudio, AvPlayerUsesConfiguredMediaBackend)
