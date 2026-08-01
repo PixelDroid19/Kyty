@@ -197,7 +197,8 @@ uint32_t GraphicsEncodeDispatch(uint32_t* cmd, uint32_t capacity_dw, uint32_t gr
 // immediately preceding ReleaseMem receives the real Label* via EopPatch.
 // If wait body address is null and the previous packet is R_RELEASE_MEM with a
 // non-null address, return that address; otherwise nullptr.
-uint64_t* GraphicsResolveWaitMemAddressFromPrecedingRelease(const uint32_t* wait_body);
+uint64_t* GraphicsResolveWaitMemAddressFromPrecedingRelease(const uint32_t* wait_body, const uint32_t* stream_begin,
+                                                            const uint32_t* stream_end);
 
 uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, uint32_t offset, const uint32_t* values,
                                                            uint32_t num_values);

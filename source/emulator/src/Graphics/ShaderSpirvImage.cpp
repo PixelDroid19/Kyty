@@ -159,7 +159,8 @@ bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst)
 		return true;
 	}
 	if ((inst.type == ShaderInstructionType::ImageLoad || inst.type == ShaderInstructionType::ImageStore) &&
-	    inst.format == ShaderInstructionFormat::VdataVaddr3StDmask)
+	    (inst.format == ShaderInstructionFormat::VdataVaddr3StDmask ||
+	     inst.format == ShaderInstructionFormat::Vdata4Vaddr3StDmaskF))
 	{
 		return true;
 	}
@@ -2083,6 +2084,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_VdataVaddr3StDmask)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	const uint8_t dmask   = inst.format == ShaderInstructionFormat::Vdata4Vaddr3StDmaskF ? 0xfu : inst.mimg_dmask;
 	if (bind_info == nullptr)
 	{
 		return false;
@@ -2103,12 +2105,12 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_VdataVaddr3StDmask)
 	const auto descriptor = operand_variable_to_str(inst.src[1], 0);
 	EXIT_NOT_IMPLEMENTED(x.type != SpirvType::Float || y.type != SpirvType::Float || z.type != SpirvType::Float ||
 	                     descriptor.type != SpirvType::Uint);
-	EXIT_NOT_IMPLEMENTED(inst.mimg_dmask == 0);
+	EXIT_NOT_IMPLEMENTED(dmask == 0);
 
 	int destination_count = 0;
 	for (uint32_t component = 0; component < 4; component++)
 	{
-		destination_count += static_cast<int>((inst.mimg_dmask >> component) & 1u);
+		destination_count += static_cast<int>((dmask >> component) & 1u);
 	}
 	EXIT_NOT_IMPLEMENTED(destination_count != inst.dst.size);
 
@@ -2273,7 +2275,7 @@ OpBranch %image_load_merge_<index>
 	int        destination     = 0;
 	for (uint32_t component = 0; component < 4; component++)
 	{
-		if ((inst.mimg_dmask & (1u << component)) == 0)
+		if ((dmask & (1u << component)) == 0)
 		{
 			continue;
 		}
@@ -2298,6 +2300,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	const uint8_t dmask   = inst.format == ShaderInstructionFormat::Vdata4Vaddr3StDmaskF ? 0xfu : inst.mimg_dmask;
 
 	if (bind_info != nullptr && bind_info->textures2D.textures2d_storage_num > 0)
 	{
@@ -2321,7 +2324,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 		int     source_component = 0;
 		for (uint32_t component = 0; component < 4; component++)
 		{
-			if ((inst.mimg_dmask & (1u << component)) == 0)
+			if ((dmask & (1u << component)) == 0)
 			{
 				component_values += String8::FromPrintf(" %%%s", zero_component.c_str());
 				continue;

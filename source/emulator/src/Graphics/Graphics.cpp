@@ -2471,30 +2471,54 @@ int KYTY_SYSV_ABI GraphicsSuspendPoint()
 	return OK;
 }
 
-uint64_t* GraphicsResolveWaitMemAddressFromPrecedingRelease(const uint32_t* wait_body)
+uint64_t* GraphicsResolveWaitMemAddressFromPrecedingRelease(const uint32_t* wait_body, const uint32_t* stream_begin,
+                                                           const uint32_t* stream_end)
 {
-	if (wait_body == nullptr)
+	if (wait_body == nullptr || stream_begin == nullptr || stream_end == nullptr)
 	{
 		return nullptr;
 	}
 
-	// wait_body[0] is the first body dword after the WaitMem64 header.
-	// Contiguous post-Play fence layout (dwords):
-	//   [rel_hdr][a][gcr|ds][addr_lo][addr_hi][data_lo][data_hi][wait_hdr][addr...]
-	// so the ReleaseMem header sits 8 dwords before wait_body[0].
-	const uint32_t* release = wait_body - 8;
-	if (release[0] != KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_RELEASE_MEM))
+	const uintptr_t begin = reinterpret_cast<uintptr_t>(stream_begin);
+	const uintptr_t end   = reinterpret_cast<uintptr_t>(stream_end);
+	const uintptr_t wait  = reinterpret_cast<uintptr_t>(wait_body);
+	if (begin >= end || wait < begin + sizeof(uint32_t) || wait + 8u * sizeof(uint32_t) > end)
+	{
+		return nullptr;
+	}
+	const auto* wait_header = reinterpret_cast<const uint32_t*>(wait - sizeof(uint32_t));
+	if (*wait_header != KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64))
 	{
 		return nullptr;
 	}
 
-	const uint64_t addr = release[3] | (static_cast<uint64_t>(release[4]) << 32u);
-	if (addr == 0)
+	// Custom ReleaseMem packets have either seven or eight dwords in the stream.
+	// The WaitMem body starts after its header, so try both complete layouts while
+	// keeping every candidate inside the validated command range.
+	for (const uint32_t release_dwords: {8u, 9u})
 	{
-		return nullptr;
+		if (wait < begin + static_cast<uintptr_t>(release_dwords) * sizeof(uint32_t))
+		{
+			continue;
+		}
+		const auto* release = reinterpret_cast<const uint32_t*>(wait - static_cast<uintptr_t>(release_dwords) * sizeof(uint32_t));
+		const uint32_t expected_header = KYTY_PM4(release_dwords - 1u, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+		if (release[0] != expected_header)
+		{
+			continue;
+		}
+
+		const uint64_t addr = release[3] | (static_cast<uint64_t>(release[4]) << 32u);
+		// Address 1 is the no-destination marker used by cache/event-only
+		// ReleaseMem packets. Never expose it as a host pointer for WaitMem.
+		if (addr == 0 || addr == 1)
+		{
+			return nullptr;
+		}
+		return reinterpret_cast<uint64_t*>(addr);
 	}
 
-	return reinterpret_cast<uint64_t*>(addr);
+	return nullptr;
 }
 
 int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, uint64_t address)

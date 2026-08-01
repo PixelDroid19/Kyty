@@ -11,6 +11,7 @@
 #include "Emulator/Graphics/Gen5TextureArrayLayout.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
+#include "Emulator/Graphics/GuestTextureLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -513,6 +514,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		auto       nfmt          = (gen5 ? 0 : r.Nfmt());
 		auto       fmt           = (gen5 ? r.Format() : 0);
 		uint32_t   swizzle       = r.DstSelXYZW();
+		uint32_t   view_swizzle  = swizzle;
 		const bool force_degamma = gen5 && !textures.desc[i].textures2d_without_sampler && ShouldForceGen5Degamma(samplers, index_sampled);
 
 		const bool check_depth_texture = (!gen5 && tile == 2u) || (gen5 && tile == 24u);
@@ -564,12 +566,34 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			TileGetTextureSize(dfmt, nfmt, width, height, pitch, levels, tile, neo, &size, nullptr, nullptr);
 		}
 
+		if (gen5 && tile == 0u && levels == 1u && !three_dimensional && !arrayed_2d)
+		{
+			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(fmt);
+			const uint64_t visible_row_bytes = static_cast<uint64_t>(width) * bytes_per_element;
+			if (visible_row_bytes <= UINT32_MAX)
+			{
+				const uint64_t footprint = GuestTextureLayoutGetLinearFootprint(addr, static_cast<uint32_t>(visible_row_bytes), height);
+				if (footprint != 0u && footprint <= UINT32_MAX)
+				{
+					size.size = static_cast<uint32_t>(footprint);
+					// A registered tight single-channel linear surface is a native R8
+					// image. Broadcast its red plane through the view so shaders see
+					// the same value in every component, matching the hardware T#
+					// result for narrow sampled resources.
+					if (fmt == 1u && bytes_per_element == 1u && swizzle == DstSel(0, 0, 0, 4))
+					{
+						view_swizzle = DstSel(4, 4, 4, 4);
+					}
+				}
+			}
+		}
+
 		EXIT_NOT_IMPLEMENTED(size.size == 0);
 		EXIT_NOT_IMPLEMENTED((addr & (static_cast<uint64_t>(size.align) - 1u)) != 0);
 
 		// Opt-in catalog (KYTY_SAMPLE_BIND_CATALOG=/abs/path): unique sample binds
 		// for residual investigation. No guest-visible side effects when unset.
-		const auto catalog_sample = [gen5, fmt, tile, width, height, pitch, addr, swizzle, force_degamma, &r](const char* path)
+		const auto catalog_sample = [gen5, fmt, tile, width, height, pitch, addr, swizzle, view_swizzle, force_degamma, &r](const char* path)
 		{
 			static const char* catalog_path = std::getenv("KYTY_SAMPLE_BIND_CATALOG");
 			if (catalog_path == nullptr || catalog_path[0] == '\0' || !gen5)
@@ -580,8 +604,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			static std::set<std::string> catalog_seen;
 			char                         line[320];
 			std::snprintf(line, sizeof(line),
-			              "fmt=%u tile=%u %ux%u pitch=%u swizzle=0x%03x degamma=%u word4=0x%08x path=%s addr=0x%012" PRIx64 "\n",
-			              fmt, tile, width, height, pitch, swizzle, force_degamma ? 1u : 0u, r.fields[4], path,
+			              "fmt=%u tile=%u %ux%u pitch=%u swizzle=0x%03x view_swizzle=0x%03x degamma=%u word4=0x%08x path=%s addr=0x%012" PRIx64 "\n",
+			              fmt, tile, width, height, pitch, swizzle, view_swizzle, force_degamma ? 1u : 0u, r.fields[4], path,
 			              static_cast<uint64_t>(addr));
 			std::lock_guard<std::mutex> lock(catalog_mu);
 			if (!catalog_seen.insert(line).second)
@@ -902,7 +926,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
 				}
 				const bool    skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
-				TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
+					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, view_swizzle,
 				                                  force_degamma, skip_guest, r.Type(), depth, base_array);
 				tex = static_cast<TextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));

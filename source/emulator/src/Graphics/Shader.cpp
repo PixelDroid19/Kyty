@@ -1794,6 +1794,16 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 		EXIT_NOT_IMPLEMENTED(index >= ShaderVertexInputInfo::RES_MAX);
 
 		const auto* sharp = &buffer[index * 4];
+		static uint32_t vertex_attr_logs = 0;
+		if (vertex_attr_logs < 32u)
+		{
+			++vertex_attr_logs;
+			std::fprintf(stderr,
+			             "KYTY_VERTEX_ATTR semantic=%u raw=0x%08" PRIx32 " index=%zu format=0x%03" PRIx32 " offset=0x%03" PRIx32
+			             " attrib=%p buffer=%p sharp=%p words=%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 "\n",
+			             in.semantic, attrib[in.semantic], index, format, offset, static_cast<const void*>(attrib), static_cast<const void*>(buffer),
+			             static_cast<const void*>(sharp), sharp[0], sharp[1], sharp[2], sharp[3]);
+		}
 
 		EXIT_NOT_IMPLEMENTED(info->resources_num >= ShaderVertexInputInfo::RES_MAX);
 

@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdarg>
 #include <utility>
 #include <vector>
 
@@ -66,6 +67,149 @@ bool EopTraceEnabled()
 	static const bool enabled = (std::getenv("KYTY_EOP_TRACE") != nullptr);
 	return enabled;
 }
+
+namespace
+{
+struct VideoOutLogState
+{
+	Core::Mutex mutex;
+	uint64_t    lines_written = 0;
+	uint64_t    dropped_lines = 0;
+	uint32_t    rotations_done = 0;
+};
+
+struct VideoOutLogConfig
+{
+	uint64_t log_lines = 0;
+	uint32_t max_rotations = 2;
+};
+
+VideoOutLogConfig LoadVideoOutLogConfig()
+{
+	VideoOutLogConfig cfg{};
+	const auto* env = std::getenv("KYTY_VIDEOOUT_LOG");
+	if (env == nullptr || std::strlen(env) == 0)
+	{
+		return cfg;
+	}
+
+	if (std::strcmp(env, "0") == 0 || std::strcmp(env, "off") == 0 || std::strcmp(env, "false") == 0)
+	{
+		return cfg;
+	}
+
+	char*      end = nullptr;
+	const auto parsed = std::strtoull(env, &end, 10);
+	if (env != end && *end == '\0')
+	{
+		cfg.log_lines = parsed == 0 ? 0 : parsed;
+		return cfg;
+	}
+
+	cfg.log_lines     = 2048;
+	cfg.max_rotations = 2;
+	return cfg;
+}
+
+VideoOutLogConfig& LogConfig()
+{
+	static VideoOutLogConfig cfg = LoadVideoOutLogConfig();
+	return cfg;
+}
+
+bool IsVideoOutLoggingEnabled()
+{
+	return LogConfig().log_lines > 0;
+}
+
+VideoOutLogState& StateForPath(const char* path)
+{
+	static VideoOutLogState flip3_state;
+	static VideoOutLogState flip2_state;
+	static VideoOutLogState fmt_state;
+	static VideoOutLogState vo2_state;
+
+	if (std::strcmp(path, "/tmp/kyty_flip3.log") == 0)
+	{
+		return flip3_state;
+	}
+	if (std::strcmp(path, "/tmp/kyty_flip2.log") == 0)
+	{
+		return flip2_state;
+	}
+	if (std::strcmp(path, "/tmp/kyty_videoout_fmt.log") == 0)
+	{
+		return fmt_state;
+	}
+	if (std::strcmp(path, "/tmp/kyty_vo2.log") == 0)
+	{
+		return vo2_state;
+	}
+	static VideoOutLogState fallback;
+	return fallback;
+}
+
+void RotateLogFile(const char* path, VideoOutLogConfig& cfg, VideoOutLogState& state)
+{
+	const uint32_t max_backups = cfg.max_rotations;
+	for (uint32_t i = max_backups; i > 0; --i)
+	{
+		char from[256];
+		char to[256];
+		if (i == 1)
+		{
+			std::snprintf(from, sizeof(from), "%s.1", path);
+			std::remove(from);
+		} else
+		{
+			std::snprintf(from, sizeof(from), "%s.%u", path, i - 1);
+			std::snprintf(to, sizeof(to), "%s.%u", path, i);
+			std::rename(from, to);
+		}
+	}
+
+	char primary_backup[256];
+	std::snprintf(primary_backup, sizeof(primary_backup), "%s.1", path);
+	std::rename(path, primary_backup);
+	state.rotations_done++;
+	state.lines_written = 0;
+	state.dropped_lines = 0;
+}
+
+void VideoOutAppendLog(const char* path, const char* format, ...)
+{
+	if (!IsVideoOutLoggingEnabled())
+	{
+		return;
+	}
+
+	auto& cfg = LogConfig();
+	auto& state = StateForPath(path);
+	Core::LockGuard lock(state.mutex);
+
+	if (state.lines_written >= cfg.log_lines)
+	{
+		if (state.rotations_done < cfg.max_rotations)
+		{
+			RotateLogFile(path, cfg, state);
+		} else
+		{
+			++state.dropped_lines;
+			return;
+		}
+	}
+
+	if (FILE* f = fopen(path, "a"))
+	{
+		va_list args;
+		va_start(args, format);
+		std::vfprintf(f, format, args);
+		va_end(args);
+		fclose(f);
+		++state.lines_written;
+	}
+}
+} // namespace
 
 bool VideoOutRangesOverlap(uint64_t lhs_address, uint64_t lhs_size, uint64_t rhs_address, uint64_t rhs_size)
 {
@@ -429,13 +573,10 @@ static void calc_buffer_size(const VideoOutBufferAttribute* attribute, const Vid
 		    attribute2->pixel_format != 0x8100000000000000ULL && attribute2->pixel_format != 0x8100000022000000ULL &&
 		    attribute2->pixel_format != 0xc001000600000000ULL)
 		{
-			if (FILE* f = fopen("/tmp/kyty_videoout_fmt.log", "a"))
-			{
-				fprintf(f, "VIDEOOUT_FMT: pixel_format=0x%016llx option=%u aspect=%u tiling=%u w=%u h=%u\n",
-				        (unsigned long long)attribute2->pixel_format, (unsigned)attribute2->option,
-				        (unsigned)attribute2->aspect_ratio, (unsigned)attribute2->tiling_mode, (unsigned)width, (unsigned)height);
-				fclose(f);
-			}
+			VideoOutAppendLog("/tmp/kyty_videoout_fmt.log",
+			                 "VIDEOOUT_FMT: pixel_format=0x%016llx option=%u aspect=%u tiling=%u w=%u h=%u\n",
+			                 (unsigned long long)attribute2->pixel_format, (unsigned)attribute2->option,
+			                 (unsigned)attribute2->aspect_ratio, (unsigned)attribute2->tiling_mode, (unsigned)width, (unsigned)height);
 			EXIT_NOT_IMPLEMENTED(true);
 		}
 	} else
@@ -1333,17 +1474,8 @@ bool FlipQueue::Flip(uint32_t micros)
 	const auto present_submission = NextPresentSubmission();
 	auto*      buffer = g_video_out_context->MaterializeRegisteredImage(r.cfg, r.index, present_submission);
 
-	if (FILE* f = fopen("/tmp/kyty_flip3.log", "a"))
-	{
-		fprintf(f, "FLIP3: index=%d buffer=%p\n", r.index, (void*)buffer);
-		fclose(f);
-	}
 	Graphics::WindowDrawBuffer(buffer);
-	if (FILE* f = fopen("/tmp/kyty_flip3.log", "a"))
-	{
-		fprintf(f, "FLIP3: draw_done index=%d\n", r.index);
-		fclose(f);
-	}
+	VideoOutAppendLog("/tmp/kyty_flip3.log", "FLIP3: index=%d buffer=%p draw_done=1\n", r.index, (void*)buffer);
 	Graphics::GpuMemoryCompleteSubmission(present_submission);
 
 	// A flip event announces a completed flip. Publish the completion snapshot
@@ -2220,15 +2352,11 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 	printf("\t option         = %" PRIu64 "\n", attribute->option);
 
 	// EXIT_NOT_IMPLEMENTED(attribute->pixel_format != 0x80000000);
-	if (FILE* f = fopen("/tmp/kyty_vo2.log", "a"))
-	{
-		fprintf(f, "REG2: handle=%d set=%d start=%d num=%d fmt=0x%016llx tiling=%u aspect=%u w=%u h=%u pitch=%u option=%llu dcc_color=%llu dcc_ctrl=%llu\n",
-		        handle, set_index, buffer_index_start, buffer_num, (unsigned long long)attribute->pixel_format,
-		        (unsigned)attribute->tiling_mode, (unsigned)attribute->aspect_ratio, (unsigned)attribute->width,
-		        (unsigned)attribute->height, (unsigned)attribute->pitch_in_pixel, (unsigned long long)attribute->option,
-		        (unsigned long long)attribute->dcc_cb_register_clear_color, (unsigned long long)attribute->dcc_control);
-		fclose(f);
-	}
+	VideoOutAppendLog("/tmp/kyty_vo2.log", "REG2: handle=%d set=%d start=%d num=%d fmt=0x%016llx tiling=%u aspect=%u w=%u h=%u pitch=%u option=%llu dcc_color=%llu dcc_ctrl=%llu\n",
+	                 handle, set_index, buffer_index_start, buffer_num, (unsigned long long)attribute->pixel_format,
+	                 (unsigned)attribute->tiling_mode, (unsigned)attribute->aspect_ratio, (unsigned)attribute->width,
+	                 (unsigned)attribute->height, (unsigned)attribute->pitch_in_pixel, (unsigned long long)attribute->option,
+	                 (unsigned long long)attribute->dcc_cb_register_clear_color, (unsigned long long)attribute->dcc_control);
 	EXIT_NOT_IMPLEMENTED(option != nullptr);
 	EXIT_NOT_IMPLEMENTED(category != 0);
 	EXIT_NOT_IMPLEMENTED(attribute->tiling_mode != 0);
@@ -2249,11 +2377,7 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 
 	const int reg_result = g_video_out_context->RegisterBuffers(handle, set_index, false, buffer_index_start,
 	                                                            addresses.GetDataConst(), buffer_num, nullptr, attribute);
-	if (FILE* f = fopen("/tmp/kyty_vo2.log", "a"))
-	{
-		fprintf(f, "REG2_RESULT: handle=%d result=%d\n", handle, reg_result);
-		fclose(f);
-	}
+	VideoOutAppendLog("/tmp/kyty_vo2.log", "REG2_RESULT: handle=%d result=%d\n", handle, reg_result);
 	return reg_result;
 }
 
@@ -2292,11 +2416,8 @@ bool VideoOutIsValidFlipMode(int flip_mode)
 
 KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg)
 {
-	if (FILE* f = fopen("/tmp/kyty_flip2.log", "a"))
-	{
-		fprintf(f, "FLIP2: handle=%d index=%d mode=%d arg=%lld\n", handle, index, flip_mode, (long long)flip_arg);
-		fclose(f);
-	}
+	VideoOutAppendLog("/tmp/kyty_flip2.log", "FLIP2: handle=%d index=%d mode=%d arg=%lld\n", handle, index, flip_mode,
+	                 (long long)flip_arg);
 
 	PRINT_NAME();
 

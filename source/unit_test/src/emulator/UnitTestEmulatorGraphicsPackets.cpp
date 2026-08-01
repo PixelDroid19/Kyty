@@ -3,6 +3,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
+#include "Emulator/Graphics/GuestTextureLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRun.h"
@@ -1681,15 +1682,42 @@ TEST(EmulatorGraphicsPackets, ResolvesNullWaitMemAddressFromPrecedingRelease)
 	stream[14] = 3u;
 	stream[15] = 10u;
 
-	uint64_t* resolved = Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 8);
+	uint64_t* resolved = Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 8, stream, stream + 16);
 	ASSERT_NE(resolved, nullptr);
 	EXPECT_EQ(reinterpret_cast<uint64_t>(resolved), 0x00000001268815d0ull);
 
 	// Non-contiguous / wrong previous packet → no invent.
-	EXPECT_EQ(Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 1), nullptr);
+	EXPECT_EQ(Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 1, stream, stream + 16), nullptr);
 	stream[3] = 0;
 	stream[4] = 0;
-	EXPECT_EQ(Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 8), nullptr);
+	EXPECT_EQ(Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 8, stream, stream + 16), nullptr);
+
+	// Address 1 is the no-destination marker used by cache/event-only
+	// ReleaseMem packets. It must not escape as a host pointer for WaitMem.
+	stream[3] = 1u;
+	stream[4] = 0u;
+	EXPECT_EQ(Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream + 8, stream, stream + 16), nullptr);
+
+	uint32_t stream8[17] = {};
+	stream8[0]             = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	stream8[1]             = 0x14u;
+	stream8[2]             = 0x02020000u;
+	stream8[3]             = 0x268815d0u;
+	stream8[4]             = 0x00000001u;
+	stream8[5]             = 1u;
+	stream8[6]             = 0u;
+	stream8[7]             = 0u;
+	stream8[8]             = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	stream8[9]             = 0u;
+	stream8[10]            = 0u;
+	stream8[11]            = 0xffffffffu;
+	stream8[12]            = 0u;
+	stream8[13]            = 1u;
+	stream8[14]            = 0u;
+	stream8[15]            = 3u;
+	stream8[16]            = 10u;
+	EXPECT_EQ(Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(stream8 + 9, stream8, stream8 + 17),
+	           reinterpret_cast<uint64_t*>(0x00000001268815d0ull));
 }
 
 // Encoder accepts data_sel=1 (32-bit immediate). Packet layout stores data_sel
@@ -2908,18 +2936,20 @@ TEST(EmulatorGraphicsPackets, MaterializesArrayedGen5ImageLoadAndStoreCoordinate
 	input.threads_num[2]                            = 1;
 	input.bind.push_constant_size                   = 64;
 	input.bind.textures2D.textures_num              = 2;
-	input.bind.textures2D.textures2d_sampled_num    = 1;
+	input.bind.textures2D.textures2d_array_sampled_num = 1;
 	input.bind.textures2D.textures2d_storage_num    = 1;
 	input.bind.textures2D.desc[0].start_register    = 0;
+	input.bind.textures2D.desc[0].usage             = ShaderTextureUsage::ReadOnly;
 	input.bind.textures2D.desc[0].texture.fields[1] = 20u << 20u;
 	input.bind.textures2D.desc[0].texture.fields[3] = 13u << 28u;
 	input.bind.textures2D.desc[1].start_register    = 0;
+	input.bind.textures2D.desc[1].usage             = ShaderTextureUsage::ReadWrite;
 	input.bind.textures2D.desc[1].texture.fields[1] = 20u << 20u;
 	input.bind.textures2D.desc[1].texture.fields[3] = 13u << 28u;
 
 	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
 
-	EXPECT_NE(source.FindIndex("%ImageS = OpTypeImage %uint 2D 0 1 0 1 Unknown"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%ImageSA = OpTypeImage %uint 2D 0 1 0 1 Unknown"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%ImageL = OpTypeImage %uint 2D 0 1 0 2 R32ui"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpCompositeConstruct %v3uint"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpImageFetch %v4uint"), Core::STRING8_INVALID_INDEX);
@@ -4588,6 +4618,24 @@ TEST(EmulatorGraphicsPackets, SizesGen5Standard4Kb8BitVideoTextures)
 	EXPECT_EQ(size.align, 4096u);
 	EXPECT_EQ(padded.width, 2048u);
 	EXPECT_EQ(padded.height, 1088u);
+}
+
+TEST(EmulatorGraphicsPackets, BoundsRegisteredLinearVideoPlaneFootprints)
+{
+	constexpr uint64_t base         = 0x60000000u;
+	constexpr uint32_t row_bytes    = 1920u;
+	constexpr uint32_t luma_height  = 1080u;
+	constexpr uint32_t chroma_height = 540u;
+	constexpr uint64_t luma_size    = static_cast<uint64_t>(row_bytes) * luma_height;
+	constexpr uint64_t chroma_size  = static_cast<uint64_t>(row_bytes) * chroma_height;
+
+	GuestTextureLayoutRegisterLinear(base, static_cast<size_t>(luma_size + chroma_size), row_bytes);
+
+	EXPECT_EQ(GuestTextureLayoutGetLinearFootprint(base, row_bytes, luma_height), luma_size);
+	EXPECT_EQ(GuestTextureLayoutGetLinearFootprint(base + luma_size, row_bytes, chroma_height), chroma_size);
+	EXPECT_EQ(GuestTextureLayoutGetLinearFootprint(base + luma_size, row_bytes, 576u), 0u);
+
+	GuestTextureLayoutUnregister(base);
 }
 
 TEST(EmulatorGraphicsPackets, MatchesAddrLibStandard4Kb128BitSwizzleEquation)

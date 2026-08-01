@@ -47,6 +47,18 @@
 
 namespace Kyty::Libs::Graphics {
 
+namespace {
+
+std::atomic_uint32_t g_vertex_input_layout_log_count {0};
+
+bool VertexInputLayoutLogEnabled()
+{
+	const char* value = std::getenv("KYTY_VIL_LOG");
+	return value != nullptr && std::strcmp(value, "0") != 0 && std::strcmp(value, "off") != 0 && std::strcmp(value, "false") != 0;
+}
+
+} // namespace
+
 // SamplerCache::GetSamplerId, PipelineCache, CreatePipelineInternal
 
 uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
@@ -320,27 +332,36 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	VulkanVertexInputLayout input_layout {};
 	if (!VulkanBuildVertexInputLayout(*vs_input_info, &input_layout))
 	{
-		if (FILE* f = fopen("/tmp/kyty_vil.log", "a"))
+		const bool log_vil_failure = VertexInputLayoutLogEnabled() &&
+		                             g_vertex_input_layout_log_count.fetch_add(1, std::memory_order_relaxed) < 32u;
+		if (log_vil_failure)
 		{
-			fprintf(f, "VIL FAIL: resources=%d buffers=%d\n", vs_input_info->resources_num, vs_input_info->buffers_num);
-			for (int bi = 0; bi < vs_input_info->buffers_num; bi++)
+			if (FILE* f = fopen("/tmp/kyty_vil.log", "a"))
 			{
-				const auto& b = vs_input_info->buffers[bi];
-				fprintf(f, "  buf[%d] addr=0x%llx stride=%u records=%u attr_num=%d\n", bi, (unsigned long long)b.addr, b.stride,
-				        b.num_records, b.attr_num);
-				for (int ai = 0; ai < b.attr_num && ai < 16; ai++)
+				fprintf(f, "VIL FAIL: resources=%d buffers=%d\n", vs_input_info->resources_num, vs_input_info->buffers_num);
+				for (int bi = 0; bi < vs_input_info->buffers_num; bi++)
 				{
-					fprintf(f, "    attr[%d] resource=%d offset=%u\n", ai, b.attr_indices[ai], b.attr_offsets[ai]);
+					const auto& b = vs_input_info->buffers[bi];
+					fprintf(f, "  buf[%d] addr=0x%llx stride=%u records=%u attr_num=%d\n", bi, (unsigned long long)b.addr, b.stride,
+					        b.num_records, b.attr_num);
+					for (int ai = 0; ai < b.attr_num && ai < 16; ai++)
+					{
+						fprintf(f, "    attr[%d] resource=%d offset=%u\n", ai, b.attr_indices[ai], b.attr_offsets[ai]);
+					}
 				}
+				for (int ri = 0; ri < vs_input_info->resources_num; ri++)
+				{
+					const auto& r = vs_input_info->resources[ri];
+					fprintf(f,
+					        "  res[%d] fields=%08x,%08x,%08x,%08x format=%u dfmt=%u nfmt=%u records=%llu stride=%u addtid=%d swizzle=%d "
+					        "dst=%d/%d dsel=%u,%u,%u,%u\n",
+					        ri, r.fields[0], r.fields[1], r.fields[2], r.fields[3], (unsigned)r.Format(), (unsigned)r.Dfmt(), (unsigned)r.Nfmt(),
+					        (unsigned long long)r.NumRecords(), (unsigned)r.Stride(), r.AddTid() ? 1 : 0, r.SwizzleEnabled() ? 1 : 0,
+					        vs_input_info->resources_dst[ri].register_start, vs_input_info->resources_dst[ri].registers_num, r.DstSelX(), r.DstSelY(),
+					        r.DstSelZ(), r.DstSelW());
+				}
+				fclose(f);
 			}
-			for (int ri = 0; ri < vs_input_info->resources_num; ri++)
-			{
-				const auto& r = vs_input_info->resources[ri];
-				fprintf(f, "  res[%d] format=%u dfmt=%u nfmt=%u records=%llu stride=%u addtid=%d swizzle=%d\n", ri,
-				        (unsigned)r.Format(), (unsigned)r.Dfmt(), (unsigned)r.Nfmt(), (unsigned long long)r.NumRecords(),
-				        (unsigned)r.Stride(), r.AddTid() ? 1 : 0, r.SwizzleEnabled() ? 1 : 0);
-			}
-			fclose(f);
 		}
 		EXIT_NOT_IMPLEMENTED(!VulkanBuildVertexInputLayout(*vs_input_info, &input_layout));
 	}

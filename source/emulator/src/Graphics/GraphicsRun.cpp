@@ -138,6 +138,39 @@ void trace_aa_register_write(const char* path, const char* name, uint32_t value)
 	std::fprintf(stderr, "KYTY_AA_REG seq=%" PRIu64 " path=%s reg=%s value=0x%08" PRIx32 "\n", current, path, name, value);
 }
 
+bool WaitTraceEnabled()
+{
+	static const bool enabled = (std::getenv("KYTY_WAIT_TRACE") != nullptr);
+	return enabled;
+}
+
+void TraceWait(const char* stage, int queue, uint64_t address, uint64_t value, uint64_t reference, uint64_t mask, uint64_t sequence,
+               uint64_t elapsed_ns = 0)
+{
+	if (!WaitTraceEnabled())
+	{
+		return;
+	}
+	const bool important_begin = std::strcmp(stage, "wait32_buffer_begin") == 0 ||
+	                             std::strcmp(stage, "wait64_begin") == 0 ||
+	                             std::strcmp(stage, "wait64_producer_begin") == 0 ||
+	                             std::strcmp(stage, "wait64_buffer_begin") == 0;
+	const bool important_end = elapsed_ns >= 5'000'000u;
+	if (!important_begin && !important_end)
+	{
+		return;
+	}
+	static std::atomic_uint32_t count {0};
+	if (count.fetch_add(1, std::memory_order_relaxed) >= 8192u)
+	{
+		return;
+	}
+	std::fprintf(stderr,
+	             "KYTY_WAIT_TRACE stage=%s queue=%d addr=0x%016" PRIx64 " value=0x%016" PRIx64 " ref=0x%016" PRIx64
+	             " mask=0x%016" PRIx64 " submission=%" PRIu64 " elapsed_ns=%" PRIu64 "\n",
+	             stage, queue, address, value, reference, mask, sequence, elapsed_ns);
+}
+
 } // namespace
 
 class CommandProcessor
@@ -167,6 +200,7 @@ public:
 	void               BufferInit();
 	SubmissionId       BufferFlush();
 	void               BufferWait();
+	void               PumpCompletedSubmissions();
 	void               SubmitAndWait();
 	void               WaitSubmission(SubmissionId submission);
 	[[nodiscard]] bool OwnsSubmissionQueue(SubmissionId submission) const
@@ -233,6 +267,8 @@ public:
 	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom, bool matching_wait_mem64);
 
 	void Run(uint32_t* data, uint32_t num_dw);
+	[[nodiscard]] const uint32_t* GetActiveRunBegin() const { return m_active_run_begin; }
+	[[nodiscard]] const uint32_t* GetActiveRunEnd() const { return m_active_run_end; }
 
 	[[nodiscard]] const FlipInfo& GetFlip() const { return m_flip; }
 	void                          SetFlip(const FlipInfo& flip)
@@ -291,6 +327,8 @@ private:
 	bool     m_flip_issued                = false;
 	bool     m_completion_callback_issued = false;
 	uint64_t m_sumbit_id                  = 0;
+	const uint32_t* m_active_run_begin    = nullptr;
+	const uint32_t* m_active_run_end      = nullptr;
 };
 
 class GraphicsRing
@@ -882,7 +920,11 @@ void CommandProcessor::WaitUntilPublishedUnlessReentrant(SubmissionId submission
 	{
 		return;
 	}
+	const auto started = std::chrono::steady_clock::now();
+	TraceWait("publication_begin", m_queue, 0, 0, 0, 0, submission.sequence);
 	require_publication_success(m_publication_gate.WaitUntilPublished(submission), "WaitUntilPublished", m_queue, submission);
+	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count();
+	TraceWait("publication_end", m_queue, 0, 0, 0, 0, submission.sequence, static_cast<uint64_t>(elapsed));
 }
 
 void CommandProcessor::WaitSubmission(SubmissionId submission)
@@ -959,6 +1001,18 @@ void CommandProcessor::BufferWait()
 
 	PublishCompletedSubmissions();
 	WaitUntilPublishedUnlessReentrant(latest_completed);
+}
+
+void CommandProcessor::PumpCompletedSubmissions()
+{
+	BufferInit();
+
+	SubmissionId latest_completed;
+	{
+		Core::LockGuard lock(m_mutex);
+		TryCompleteSubmittedLocked(&latest_completed);
+	}
+	PublishCompletedSubmissions();
 }
 
 void CommandProcessor::SubmitAndWait()
@@ -1051,15 +1105,20 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	{
 		// Guest WAIT_REG_MEM against memory address 0: nothing in the emulated
 		// GPU writes there, so the condition can never change. Titles use it as
-		// an unconditional marker; complete the wait instead of aborting.
+		// an unconditional marker; submit the preceding callback-only ReleaseMem
+		// before continuing instead of dereferencing address 0/1.
 		printf("WARNING: WaitRegMem32 on address 0 completed immediately (guest marker)\n");
+		BufferFlush();
 		return;
 	}
 	(void)poll;
 
 	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitRegMem);
+	const auto                  wait_started = std::chrono::steady_clock::now();
+	TraceWait("wait32_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 	if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 	{
+		TraceWait("wait32_satisfied", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 		return;
 	}
 
@@ -1067,15 +1126,26 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	const auto           producer = m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(addr), 4, ref, mask, &dependency);
 	EXIT_NOT_IMPLEMENTED(producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
 	                     producer != GpuSubmissionResult::ProducerNotFound);
+	// Submit the command buffer before either producer-backed or externally
+	// signalled waits so pending EOP labels become visible to the poller.
 	BufferFlush();
 	if (producer == GpuSubmissionResult::Success || producer == GpuSubmissionResult::ProducerValueMismatch)
 	{
+		TraceWait("wait32_producer_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, dependency.producer.sequence);
 		g_gpu->WaitSubmission(dependency.producer);
+		const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_started).count();
+		TraceWait("wait32_producer_end", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, dependency.producer.sequence,
+		          static_cast<uint64_t>(elapsed));
 	} else
 	{
-		// With no evidenced producer, preserve the old conservative ordering
-		// contract before falling back to bounded guest-memory polling.
-		BufferWait();
+		// A missing producer can be an externally signalled guest label. Drain
+		// only fences that are already complete; waiting every submitted slot can
+		// serialize three ten-second fence waits and freeze the command processor.
+		TraceWait("wait32_buffer_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
+		PumpCompletedSubmissions();
+		const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_started).count();
+		TraceWait("wait32_buffer_end", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id,
+		          static_cast<uint64_t>(elapsed));
 	}
 
 	// Unbounded polls freeze loading screens while the window still flips.
@@ -1085,10 +1155,14 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	{
 		if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 		{
+			const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_started).count();
+			TraceWait("wait32_poll_satisfied", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id,
+			          static_cast<uint64_t>(elapsed));
 			return;
 		}
 		if ((i % 1000) == 0)
 		{
+			PumpCompletedSubmissions();
 			LabelDrainCompleted();
 		}
 		Core::Thread::SleepMicro(10);
@@ -1104,14 +1178,24 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 
 void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll)
 {
-	// Null address is rejected: post-Play null fences must be bound at encode
-	// (ReleaseMem data_sel=1 + WaitRegMem size=0) or patched by the guest.
-	EXIT_NOT_IMPLEMENTED(addr == nullptr);
+	if (addr == nullptr)
+	{
+		// A null address is the encoded form of a guest marker when the preceding
+		// ReleaseMem has no destination. There is no memory location to poll, so
+		// preserve packet ordering by submitting the callback-only packet and
+		// continue without dereferencing address 0/1.
+		printf("WARNING: WaitRegMem64 on address 0 completed immediately (guest marker)\n");
+		BufferFlush();
+		return;
+	}
 	(void)poll;
 
 	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitRegMem);
+	const auto                  wait_started = std::chrono::steady_clock::now();
+	TraceWait("wait64_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 	if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 	{
+		TraceWait("wait64_satisfied", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 		return;
 	}
 
@@ -1119,13 +1203,23 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	const auto           producer = m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(addr), 8, ref, mask, &dependency);
 	EXIT_NOT_IMPLEMENTED(producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
 	                     producer != GpuSubmissionResult::ProducerNotFound);
+	// Submit the command buffer before either producer-backed or externally
+	// signalled waits so pending EOP labels become visible to the poller.
 	BufferFlush();
 	if (producer == GpuSubmissionResult::Success || producer == GpuSubmissionResult::ProducerValueMismatch)
 	{
+		TraceWait("wait64_producer_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, dependency.producer.sequence);
 		g_gpu->WaitSubmission(dependency.producer);
+		const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_started).count();
+		TraceWait("wait64_producer_end", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, dependency.producer.sequence,
+		          static_cast<uint64_t>(elapsed));
 	} else
 	{
-		BufferWait();
+		TraceWait("wait64_buffer_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
+		PumpCompletedSubmissions();
+		const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_started).count();
+		TraceWait("wait64_buffer_end", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id,
+		          static_cast<uint64_t>(elapsed));
 	}
 
 	// Only record waits that actually block — satisfied fences are noise and
@@ -1146,10 +1240,14 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	{
 		if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 		{
+			const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_started).count();
+			TraceWait("wait64_poll_satisfied", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id,
+			          static_cast<uint64_t>(elapsed));
 			return;
 		}
 		if ((i % 1000) == 0)
 		{
+			PumpCompletedSubmissions();
 			LabelDrainCompleted();
 		}
 		Core::Thread::SleepMicro(10);
@@ -1576,6 +1674,10 @@ bool ComputeRing::IsActive()
 void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 {
 	KYTY_PROFILER_BLOCK("CommandProcessor::Run");
+	const uint32_t* const previous_run_begin = m_active_run_begin;
+	const uint32_t* const previous_run_end   = m_active_run_end;
+	m_active_run_begin                       = data;
+	m_active_run_end                         = data != nullptr ? data + num_dw : nullptr;
 
 	if (num_dw > 0)
 	{
@@ -1703,6 +1805,9 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw)
 		cmd += s;
 		dw -= s;
 	}
+
+	m_active_run_begin = previous_run_begin;
+	m_active_run_end   = previous_run_end;
 }
 
 void CommandProcessor::SetIndexType(uint32_t index_type_and_size)
@@ -2149,10 +2254,14 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 		printf("WARNING: unknown event type (continuing)\n");
 	}
 
-	if (producer_size != 0)
+	const bool valid_producer_destination =
+		producer_size != 0 && dst_gpu_addr != nullptr &&
+		GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(dst_gpu_addr), producer_size) ==
+			GpuMemoryRangeValidationStatus::Valid;
+	if (valid_producer_destination)
 	{
 		require_submission_success(m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer),
-		                                                               reinterpret_cast<uint64_t>(dst_gpu_addr), producer_size, value),
+	                                                               reinterpret_cast<uint64_t>(dst_gpu_addr), producer_size, value),
 		                           "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
 	}
 	if (with_interrupt)
@@ -4154,7 +4263,15 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 		}
 		if (!GraphicsNormalizeIndirectRegisterPair(Pm4::CX_NUM, cmd_offset, value))
 		{
-			printf("WARNING: unsupported/unknown indirect register (continuing)\n");
+			static std::atomic_uint32_t dropped_out_of_range {0};
+			if (dropped_out_of_range.fetch_add(1, std::memory_order_relaxed) < 4u)
+			{
+				std::fprintf(stderr,
+				             "WARNING: dropping out-of-range indirect cx register pair=%" PRIu32 " offset=0x%08" PRIx32
+				             " value=0x%08" PRIx32 "\n",
+				             i, raw_cmd_offset, indirect_buffer[1]);
+			}
+			continue;
 		}
 		if (dump_ps_input_writes && cmd_offset >= Pm4::SPI_PS_INPUT_CNTL_0 && cmd_offset <= Pm4::SPI_PS_INPUT_CNTL_31)
 		{
@@ -4194,7 +4311,11 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 	uint32_t indirect_num_regs = buffer[0];
 
 	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(indirect_num_regs == 0);
+	if (indirect_num_regs == 0)
+	{
+		// Empty indirect register block: valid no-op marker emitted between shader passes.
+		return 3;
+	}
 
 	for (uint32_t i = 0; i < indirect_num_regs; i++, indirect_buffer += 2)
 	{
@@ -4538,6 +4659,7 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 	    GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(dst_gpu_addr), destination_size) !=
 	        GpuMemoryRangeValidationStatus::Valid)
 	{
+		const bool no_destination_sentinel = reinterpret_cast<uint64_t>(dst_gpu_addr) == 1u;
 		static std::atomic<uint32_t> invalid_destination_logs {0};
 		if (invalid_destination_logs.fetch_add(1, std::memory_order_relaxed) < 32u)
 		{
@@ -4553,9 +4675,17 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 			std::fprintf(stderr, "\n");
 			std::fflush(stderr);
 		}
-		// The destination comes directly from guest PM4. Never enqueue an EOP
-		// label that can later dereference an unmapped host address.
-		return (cmd_id == 0xc0061060) ? 7 : 6;
+		if (!no_destination_sentinel)
+		{
+			// The destination comes directly from guest PM4. Never enqueue an EOP
+			// label that can later dereference an unmapped host address.
+			return (cmd_id == 0xc0061060) ? 7 : 6;
+		}
+
+		// Address 1 is the guest's no-destination marker for cache/writeback
+		// ReleaseMem packets. Keep the submission barrier and interrupt callback,
+		// but represent the absent guest store with a null transient label target.
+		dst_gpu_addr = nullptr;
 	}
 
 	cp->WriteAtEndOfPipe64(cache_policy, event_write_dest, eop_event_type, cache_action, event_index, event_write_source, dst_gpu_addr,
@@ -4729,7 +4859,13 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_64)
 	// ReleaseMem is EopPatched to the real Label*. Inherit that address.
 	if (addr == nullptr)
 	{
-		addr = Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(buffer);
+		addr = Gen5::GraphicsResolveWaitMemAddressFromPrecedingRelease(buffer, cp->GetActiveRunBegin(), cp->GetActiveRunEnd());
+	}
+	if (addr != nullptr &&
+	    GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(addr), sizeof(uint64_t)) != GpuMemoryRangeValidationStatus::Valid)
+	{
+		printf("WARNING: WaitRegMem64 resolved an unallocated address (continuing)\n");
+		addr = nullptr;
 	}
 
 	if (addr == nullptr)

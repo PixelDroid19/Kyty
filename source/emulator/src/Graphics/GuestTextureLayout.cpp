@@ -53,4 +53,28 @@ uint32_t GuestTextureLayoutGetLinearRowPitch(uint64_t address, uint32_t visible_
 	return (address < layout.end && layout.row_pitch_bytes == visible_row_bytes ? layout.row_pitch_bytes : 0);
 }
 
+uint64_t GuestTextureLayoutGetLinearFootprint(uint64_t address, uint32_t visible_row_bytes, uint32_t visible_height)
+{
+	if (address == 0 || visible_row_bytes == 0 || visible_height == 0)
+	{
+		return 0;
+	}
+
+	std::lock_guard lock(g_guest_texture_layout_mutex);
+	auto it = g_guest_texture_layouts.upper_bound(address);
+	if (it == g_guest_texture_layouts.begin())
+	{
+		return 0;
+	}
+	--it;
+	const auto& layout = it->second;
+	if (address >= layout.end || layout.row_pitch_bytes != visible_row_bytes)
+	{
+		return 0;
+	}
+
+	const uint64_t footprint = static_cast<uint64_t>(layout.row_pitch_bytes) * visible_height;
+	return (footprint <= layout.end - address ? footprint : 0);
+}
+
 } // namespace Kyty::Libs::Graphics

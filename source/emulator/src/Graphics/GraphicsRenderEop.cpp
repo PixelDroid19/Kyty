@@ -152,7 +152,7 @@ void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandB
 void GraphicsRenderWriteAtEndOfPipeWithWriteBack64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	if (dst_gpu_addr != nullptr && !ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
 	{
 		return;
 	}
@@ -175,7 +175,9 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t /*submit_id
                                                             uint64_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	// A null target is valid for callback-only cache/interrupt packets. Any
+	// non-null target still has to be a registered guest allocation.
+	if (dst_gpu_addr != nullptr && !ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
 	{
 		return;
 	}
@@ -203,7 +205,7 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t /*submit_id
 void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
+	if (dst_gpu_addr != nullptr && !ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
 	{
 		return;
 	}
