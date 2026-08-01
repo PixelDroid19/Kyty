@@ -954,6 +954,133 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_VDot2cF32F16_VdstVsrc0Vsrc1Vsrc2)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+	for (int source = 0; source < 3; ++source)
+	{
+		EXIT_NOT_IMPLEMENTED(inst.src[source].negate || inst.src[source].absolute || inst.src[source].swizzle != 6u);
+	}
+
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8       load0;
+	String8       load1;
+	String8       load2;
+	if (!operand_load_int(spirv, inst.src[0], "t0_<index>", index_str, &load0) ||
+	    !operand_load_int(spirv, inst.src[1], "t1_<index>", index_str, &load1) ||
+	    !operand_load_float(spirv, inst.src[2], "t2_<index>", index_str, &load2))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+              <load0>
+              <load1>
+              <load2>
+        %u0_<index> = OpBitcast %uint %t0_<index>
+        %u1_<index> = OpBitcast %uint %t1_<index>
+        %h0_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %u0_<index>
+        %h1_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %u1_<index>
+        %h00_<index> = OpCompositeExtract %float %h0_<index> 0
+        %h01_<index> = OpCompositeExtract %float %h0_<index> 1
+        %h10_<index> = OpCompositeExtract %float %h1_<index> 0
+        %h11_<index> = OpCompositeExtract %float %h1_<index> 1
+        %p0_<index> = OpFMul %float %h00_<index> %h10_<index>
+        %p1_<index> = OpFMul %float %h01_<index> %h11_<index>
+        %sum_<index> = OpFAdd %float %p0_<index> %p1_<index>
+        %t_<index> = OpFAdd %float %sum_<index> %t2_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+               OpSelectionMerge %tl2_<index> None
+               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
+         %tl1_<index> = OpLabel
+               OpStore %<dst> %t_<index>
+               OpBranch %tl2_<index>
+         %tl2_<index> = OpLabel
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<load2>", load2)
+	                   .ReplaceStr("<index>", index_str);
+
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_VDot4cI32I8_VdstVsrc0Vsrc1Vsrc2)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+	for (int source = 0; source < 3; ++source)
+	{
+		EXIT_NOT_IMPLEMENTED(inst.src[source].negate || inst.src[source].absolute || inst.src[source].swizzle != 6u);
+	}
+
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8       load0;
+	String8       load1;
+	String8       load2;
+	if (!operand_load_int(spirv, inst.src[0], "t0_<index>", index_str, &load0) ||
+	    !operand_load_int(spirv, inst.src[1], "t1_<index>", index_str, &load1) ||
+	    !operand_load_int(spirv, inst.src[2], "t2_<index>", index_str, &load2))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+              <load0>
+              <load1>
+              <load2>
+        %i00_<index> = OpBitFieldSExtract %int %t0_<index> %int_0 %int_8
+        %i01_<index> = OpBitFieldSExtract %int %t0_<index> %int_8 %int_8
+        %i02_<index> = OpBitFieldSExtract %int %t0_<index> %int_16 %int_8
+        %i03_<index> = OpBitFieldSExtract %int %t0_<index> %int_24 %int_8
+        %i10_<index> = OpBitFieldSExtract %int %t1_<index> %int_0 %int_8
+        %i11_<index> = OpBitFieldSExtract %int %t1_<index> %int_8 %int_8
+        %i12_<index> = OpBitFieldSExtract %int %t1_<index> %int_16 %int_8
+        %i13_<index> = OpBitFieldSExtract %int %t1_<index> %int_24 %int_8
+        %p0_<index> = OpIMul %int %i00_<index> %i10_<index>
+        %p1_<index> = OpIMul %int %i01_<index> %i11_<index>
+        %p2_<index> = OpIMul %int %i02_<index> %i12_<index>
+        %p3_<index> = OpIMul %int %i03_<index> %i13_<index>
+        %s0_<index> = OpIAdd %int %p0_<index> %p1_<index>
+        %s1_<index> = OpIAdd %int %p2_<index> %p3_<index>
+        %sum_<index> = OpIAdd %int %s0_<index> %s1_<index>
+        %t_<index> = OpIAdd %int %sum_<index> %t2_<index>
+        %tf_<index> = OpBitcast %float %t_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+               OpSelectionMerge %tl2_<index> None
+               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
+         %tl1_<index> = OpLabel
+               OpStore %<dst> %tf_<index>
+               OpBranch %tl2_<index>
+         %tl2_<index> = OpLabel
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<load2>", load2)
+	                   .ReplaceStr("<index>", index_str);
+
+	return true;
+}
+
 // v_cubetc_f32 calculates the T coordinate for cube-map lookup. The major
 // axis selection and signs follow the GCN cube-coordinate contract; it is not
 // interchangeable with a plain component move.

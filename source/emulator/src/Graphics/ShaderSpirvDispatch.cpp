@@ -340,6 +340,8 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2,  ShaderInstructionType::VMadF32,    ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {"%t_<index> = OpExtInst %float %GLSL_std_450 Fma %t0_<index> %t1_<index> %t2_<index>"}},
     {Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2,  ShaderInstructionType::VFmaF32,    ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {"%t_<index> = OpExtInst %float %GLSL_std_450 Fma %t0_<index> %t1_<index> %t2_<index>"}},
     {Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2,  ShaderInstructionType::VFmaMixF32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {"%t_<index> = OpExtInst %float %GLSL_std_450 Fma %t0_<index> %t1_<index> %t2_<index>"}},
+    {Recompile_VDot2cF32F16_VdstVsrc0Vsrc1Vsrc2, ShaderInstructionType::VDot2cF32F16, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {""}},
+    {Recompile_VDot4cI32I8_VdstVsrc0Vsrc1Vsrc2,  ShaderInstructionType::VDot4cI32I8,  ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {""}},
 	{Recompile_VCubetcF32_VdstVsrc0Vsrc1Vsrc2,   ShaderInstructionType::VCubetcF32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {""}},
 	{Recompile_VCubescF32_VdstVsrc0Vsrc1Vsrc2,   ShaderInstructionType::VCubescF32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {""}},
 	{Recompile_VCubeIdF32_VdstVsrc0Vsrc1Vsrc2,   ShaderInstructionType::VCubeIdF32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {""}},

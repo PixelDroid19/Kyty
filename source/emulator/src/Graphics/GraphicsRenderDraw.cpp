@@ -469,10 +469,12 @@ bool GraphicsResolvePrimitiveDrawPlan(uint32_t primitive_type, uint32_t guest_co
 			if (!indexed && guest_count == 3 && vertex_buffers_num == 0)
 			{
 				resolved.draw_count = 4;
-			} else if (!indexed)
-			{
-				return false;
 			}
+			// RectList normally arrives as a procedural three-vertex draw, but
+			// titles may bind vertex buffers while retaining the same primitive
+			// type.  Vulkan has no RectList topology, so preserve the submitted
+			// vertex count and render it as a regular triangle strip when the
+			// fourth corner cannot be synthesized safely.
 			break;
 		case 19:
 			resolved.topology    = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;

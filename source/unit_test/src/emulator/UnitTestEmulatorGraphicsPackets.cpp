@@ -229,6 +229,30 @@ TEST(EmulatorGraphicsPackets, ParsesGen5FmaakF32Literal)
 	EXPECT_EQ(instruction.src[2].constant.u, literal);
 }
 
+TEST(EmulatorGraphicsPackets, ParsesRdna2VDotOpcodes)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+
+	// VOP2 0x02: v_dot2c_f32_f16 v5, v1, v2
+	const uint32_t vop2_dot2 = (0x02u << 25u) | (5u << 17u) | (2u << 9u) | 1u;
+	const uint32_t shader[]  = {vop2_dot2, 0xbf810000u};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_GE(code.GetInstructions().Size(), 1u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::VDot2cF32F16);
+	EXPECT_EQ(inst.dst.register_id, 5);
+	EXPECT_EQ(inst.src_num, 3);
+	EXPECT_EQ(inst.src[2].register_id, 5); // destination accumulator
+}
+
 TEST(EmulatorGraphicsPackets, ParsesGen5CubetcF32)
 {
 	const uint32_t word0    = (0x35u << 26u) | (0x146u << 16u) | 3u;

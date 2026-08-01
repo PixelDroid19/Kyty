@@ -240,6 +240,9 @@ enum class ShaderInstructionType : uint32_t
 	// VOP3P v_fma_mix_f32: mixed-precision FMA used by Unity HDR/URP shaders.
 	// Computes fma(a,b,c) with per-operand f16↔f32 conversion via op_sel_hi.
 	VFmaMixF32,
+	// RDNA2 dot-product with accumulation in destination register
+	VDot2cF32F16,
+	VDot4cI32I8,
 	VFractF32,
 	VInterpMovF32,
 	VInterpP1F32,

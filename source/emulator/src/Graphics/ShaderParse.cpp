@@ -1279,7 +1279,10 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x02:
 			if (next_gen)
 			{
-				KYTY_UNKNOWN_OP();
+				inst.type              = ShaderInstructionType::VDot2cF32F16;
+				inst.format            = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+				inst.src_num           = 3;
+				inst.src[2]            = inst.dst;
 			} else
 			{
 				KYTY_NI("v_writelane_b32");
@@ -1305,7 +1308,10 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x0D:
 			if (next_gen)
 			{
-				KYTY_UNKNOWN_OP();
+				inst.type              = ShaderInstructionType::VDot4cI32I8;
+				inst.format            = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+				inst.src_num           = 3;
+				inst.src[2]            = inst.dst;
 			} else
 			{
 				KYTY_NI("v_min_legacy_f32")
@@ -2244,8 +2250,9 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			break;
 		case 0x311: KYTY_NI("v_pack_b32_f16"); break;
 		case 0x312: KYTY_NI("v_cvt_pknorm_i16_f16"); break;
-		case 0x313: KYTY_NI("v_cvt_pknorm_u16_f16"); break;
+		case 0x313: inst.type = ShaderInstructionType::VDot2cF32F16; break;
 		case 0x314: KYTY_NI("v_lshlrev_b16"); break;
+		case 0x316: inst.type = ShaderInstructionType::VDot4cI32I8; break;
 		// VOP3P mixed-precision FMA (RDNA2). For now, map all three variants
 		// to a full-precision f32 FMA — this is correct for _MIX_F32 and a
 		// safe over-precision approximation for the f16 narrowing variants
