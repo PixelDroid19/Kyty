@@ -27,6 +27,11 @@ static uint32_t null_mrt_target(ShaderInstructionFormat::Format format)
 }
 
 // Null MRT done exports are no-ops unless they form the captured discard tail:
+// SPI_SHADER_COL_FORMAT ZERO: the hardware drops every export to that target,
+// so the recompiled shader must not store a color for it. The matching
+// CB_SHADER_MASK nibble already clears the Vulkan color write mask.
+constexpr uint8_t kColorExportModeZero = 0;
+
 // exec=0; EXP MRTn null/done; endpgm. The target number does not change the
 // discard semantics.
 KYTY_RECOMPILER_FUNC(Recompile_Exp_MrtNullDone)
@@ -80,6 +85,10 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 		mrt = *p - '0';
 	}
 	EXIT_NOT_IMPLEMENTED(mrt < 0 || mrt > 7);
+	if (info->target_output_mode[mrt] == kColorExportModeZero)
+	{
+		return true;
+	}
 	EXIT_NOT_IMPLEMENTED(info->target_output_mode[mrt] != 4);
 
 	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.src[0]));
@@ -138,8 +147,9 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
          %t5_<index> = OpCompositeExtract %float %t3_<index> 1
          <load_src1>
 		 %t8_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t7_<index>
-		 %t9_<index> = OpCompositeExtract %float %t8_<index> 0
-		 %t10_<index> = OpCompositeExtract %float %t8_<index> 1
+         %t9_<index> = OpCompositeExtract %float %t8_<index> 0
+         %t10_<index> = OpCompositeExtract %float %t8_<index> 1
+		 <tap_load>
 		 <export_value>
 		       OpStore %<mrt> %t11_<index>
                OpBranch %exp_merge_<index>
@@ -156,15 +166,30 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 	{
 		source_names[component] = (inst.exp_enable_mask & (1u << component)) != 0 ? enabled_names[component] : disabled_names[component];
 	}
-	const String8      export_value =
-	    String8::FromPrintf("%%t11_<index> = OpCompositeConstruct %%v4float %%%s_<index> %%%s_<index> %%%s_<index> %%%s_<index>",
-	                        source_names[component0], source_names[component1], source_names[component2], source_names[component3]);
+	uint32_t tap_pc = 0;
+	int      tap_register = 0;
+	const bool fragment_tap = FragmentTapSelection(code, &tap_pc, &tap_register);
+	const String8 tap_load = fragment_tap
+	                             ? String8("%fs_tap_out_0_<index> = OpLoad %float %fs_tap_0\n"
+	                                       "         %fs_tap_out_1_<index> = OpLoad %float %fs_tap_1\n"
+	                                       "         %fs_tap_out_2_<index> = OpLoad %float %fs_tap_2\n"
+	                                       "         %fs_tap_out_3_<index> = OpLoad %float %fs_tap_3")
+	                                   .ReplaceStr("<index>", index_str)
+	                             : String8();
+	const String8 export_value =
+	    fragment_tap
+	        ? String8("%t11_<index> = OpCompositeConstruct %v4float %fs_tap_out_0_<index> %fs_tap_out_1_<index> "
+	                  "%fs_tap_out_2_<index> %fs_tap_out_3_<index>")
+	              .ReplaceStr("<index>", index_str)
+	        : String8::FromPrintf("%%t11_<index> = OpCompositeConstruct %%v4float %%%s_<index> %%%s_<index> %%%s_<index> %%%s_<index>",
+	                              source_names[component0], source_names[component1], source_names[component2], source_names[component3]);
 
 	*dst_source += String8(text)
 	                   .ReplaceStr("<export_value>", export_value)
 	                   .ReplaceStr("<index>", index_str)
 	                   .ReplaceStr("<load_src0>", load_src0)
 	                   .ReplaceStr("<load_src1>", load_src1)
+	                   .ReplaceStr("<tap_load>", tap_load)
 	                   .ReplaceStr("<src0>", src0_value.value)
 	                   .ReplaceStr("<src1>", src1_value.value)
 	                   .ReplaceStr("<mrt>", param[0]);
@@ -192,6 +217,10 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3)
 		mrt = *p - '0';
 	}
 	EXIT_NOT_IMPLEMENTED(mrt < 0 || mrt > 7);
+	if (info->target_output_mode[mrt] == kColorExportModeZero)
+	{
+		return true;
+	}
 	EXIT_NOT_IMPLEMENTED(info->target_output_mode[mrt] != 9);
 
 	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.src[0]));
@@ -479,7 +508,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U32_SmaskVsrc0Vsrc1)
 }
 
 static void append_cmpx_result(String8* dst_source, const String8& load0, const String8& load1, const String8& predicate,
-                               const String8& dst0, const String8& dst1, const String8& index_str)
+                               const String8& index_str)
 {
 	static const char* text = R"(
           <load0>
@@ -488,15 +517,11 @@ static void append_cmpx_result(String8* dst_source, const String8& load0, const 
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
           %texec_<index> = OpLoad %uint %exec_lo
           %tmasked_<index> = OpBitwiseAnd %uint %t3_<index> %texec_<index>
-          OpStore %<dst0> %tmasked_<index>
-          OpStore %<dst1> %uint_0
           OpStore %exec_lo %tmasked_<index>
           OpStore %exec_hi %uint_0
           <execz>
 )";
 	*dst_source += String8(text)
-	                   .ReplaceStr("<dst0>", dst0)
-	                   .ReplaceStr("<dst1>", dst1)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<predicate>", predicate)
@@ -514,15 +539,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
-
-	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
-
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
-
-	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
-
 	if (!operand_load_int(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
 		return false;
@@ -533,7 +549,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1)
 	}
 
 	// TODO() check VSKIP
-	append_cmpx_result(dst_source, load0, load1, param[0], dst_value0.value, dst_value1.value, index_str);
+	append_cmpx_result(dst_source, load0, load1, param[0], index_str);
 
 	return true;
 }
@@ -548,15 +564,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
-
-	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
-
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
-
-	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
-
 	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
 		return false;
@@ -567,7 +574,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1)
 	}
 
 	// TODO() check VSKIP
-	append_cmpx_result(dst_source, load0, load1, param[0], dst_value0.value, dst_value1.value, index_str);
+	append_cmpx_result(dst_source, load0, load1, param[0], index_str);
 
 	return true;
 }
@@ -582,13 +589,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_F32_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
-
-	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
-
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
-
 	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
 		return false;
@@ -599,7 +599,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_F32_SmaskVsrc0Vsrc1)
 	}
 
 	// TODO() check VSKIP
-	append_cmpx_result(dst_source, load0, load1, param[0], dst_value0.value, dst_value1.value, index_str);
+	append_cmpx_result(dst_source, load0, load1, param[0], index_str);
 
 	return true;
 }

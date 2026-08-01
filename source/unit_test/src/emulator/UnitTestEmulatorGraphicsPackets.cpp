@@ -2677,6 +2677,59 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleLzDmaskF)
 	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 4);
 }
 
+TEST(EmulatorGraphicsPackets, ResolvesGsFrontImageSampleLzFromPhysicalUserData)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction sample {};
+	sample.type               = ShaderInstructionType::ImageSampleLz;
+	sample.format             = ShaderInstructionFormat::Vdata1Vaddr3StSsDmask8;
+	sample.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 3, .size = 1};
+	sample.src[0]             = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 3};
+	sample.src[1]             = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 8};
+	sample.src[2]             = {.type = ShaderOperandType::Sgpr, .register_id = 16, .size = 4};
+	sample.src_num            = 3;
+	sample.mimg_dimension     = 1;
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderInstruction nop {};
+	nop.type   = ShaderInstructionType::VNop;
+	nop.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	code.GetInstructions().Add(sample);
+	code.GetInstructions().Add(nop);
+	code.GetInstructions().Add(end);
+
+	ShaderVertexInputInfo input {};
+	input.gs_prolog                                      = true;
+	input.bind.push_constant_size                        = 48;
+	input.bind.textures2D.textures_num                   = 1;
+	input.bind.textures2D.textures2d_sampled_num         = 1;
+	input.bind.textures2D.desc[0].start_register         = 0;
+	input.bind.textures2D.desc[0].usage                  = ShaderTextureUsage::ReadOnly;
+	input.bind.textures2D.desc[0].texture.fields[1]      = 1u << 20u;
+	input.bind.textures2D.desc[0].texture.fields[3]      = (9u << 28u) | DstSel(4, 4, 4, 4);
+	input.bind.samplers.samplers_num                     = 1;
+	input.bind.samplers.start_register[0]                = 8;
+
+	const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+
+	// The descriptors are read from physical user-data slots 0/8, then loaded
+	// into shader s8/s16. ImageSampleLz must resolve that shader-space operand.
+	EXPECT_NE(source.FindIndex("OpStore %s8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %s16"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpImageSampleExplicitLod"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorGraphicsPackets, ParsesImageSampleLWithExplicitLod)
 {
 	const uint32_t word0    = (0x3cu << 26u) | (0x24u << 18u) | (0xfu << 8u);
@@ -3436,6 +3489,125 @@ TEST(EmulatorGraphicsPackets, ExpTarget0x25IsParam5)
 	EXPECT_EQ(0x20 + 5, 0x25);
 }
 
+TEST(EmulatorGraphicsPackets, VertexExportsDeclareParametersUsedByTheShader)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction export_param {};
+	export_param.type    = ShaderInstructionType::Exp;
+	export_param.format  = ShaderInstructionFormat::Param3Vsrc0Vsrc1Vsrc2Vsrc3;
+	export_param.src_num = 4;
+	for (int component = 0; component < 4; component++)
+	{
+		export_param.src[component].type        = ShaderOperandType::Vgpr;
+		export_param.src[component].register_id = component;
+		export_param.src[component].size        = 1;
+	}
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	code.GetInstructions().Add(export_param);
+
+	ShaderVertexInputInfo input {};
+	input.export_count = 3;
+
+	const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpEntryPoint Vertex %main \"main\" %param0 %param1 %param2 %param3"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpDecorate %param3 Location 3"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%param3 = OpVariable %_ptr_Output_v4float Output"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %param3"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, PixelInterpolationDeclaresParametersUsedByTheShader)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction interpolate {};
+	interpolate.type                       = ShaderInstructionType::VInterpP2F32;
+	interpolate.format                     = ShaderInstructionFormat::VdstVsrcAttrChan;
+	interpolate.dst.type                   = ShaderOperandType::Vgpr;
+	interpolate.dst.register_id            = 2;
+	interpolate.dst.size                   = 1;
+	interpolate.src[0].type                = ShaderOperandType::Vgpr;
+	interpolate.src[0].register_id         = 1;
+	interpolate.src[0].size                = 1;
+	interpolate.src[1].type                = ShaderOperandType::IntegerInlineConstant;
+	interpolate.src[1].constant.u          = 0;
+	interpolate.src[2].type                = ShaderOperandType::IntegerInlineConstant;
+	interpolate.src[2].constant.u          = 0;
+	interpolate.src_num                    = 3;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(interpolate);
+
+	ShaderPixelInputInfo input {};
+	input.input_num            = 0;
+	input.system_input_enable  = 1u << 1u;
+	input.system_input_address = 1u << 1u;
+	input.target_output_mode[0] = 4;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpEntryPoint Fragment %main \"main\" %outColor %attr0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpDecorate %attr0 Location 0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%attr0 = OpVariable %_ptr_Input_v4float Input"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_Input_float %attr0 %uint_0"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, PixelInterpolationWithoutSystemCoordinatesUsesDefaultSmooth)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction interpolate {};
+	interpolate.type                       = ShaderInstructionType::VInterpP2F32;
+	interpolate.format                     = ShaderInstructionFormat::VdstVsrcAttrChan;
+	interpolate.dst.type                   = ShaderOperandType::Vgpr;
+	interpolate.dst.register_id            = 6;
+	interpolate.dst.size                   = 1;
+	interpolate.src[0].type                = ShaderOperandType::Vgpr;
+	interpolate.src[0].register_id         = 1;
+	interpolate.src[0].size                = 1;
+	interpolate.src[1].type                = ShaderOperandType::IntegerInlineConstant;
+	interpolate.src[1].constant.u          = 0;
+	interpolate.src[2].type                = ShaderOperandType::IntegerInlineConstant;
+	interpolate.src[2].constant.u          = 0;
+	interpolate.src_num                    = 3;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(interpolate);
+
+	ShaderPixelInputInfo input {};
+	input.input_num             = 1;
+	input.target_output_mode[0] = 4;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpDecorate %attr0 Location 0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpDecorate %attr0 Flat"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpDecorate %attr0 Centroid"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpDecorate %attr0 NoPerspective"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_Input_float %attr0 %uint_0"), Core::STRING8_INVALID_INDEX);
+}
+
 // VOP1 SDWA: src0 encoding 249 + control dword. Captured after Param6 as
 // "unknown operand: 249" until VOP1 shares VOP2's SDWA decode for src0.
 TEST(EmulatorGraphicsPackets, ParsesVop1SdwaSrc0)
@@ -3806,6 +3978,60 @@ TEST(EmulatorGraphicsPackets, CompressedMrtExportIsGuardedByExecMask)
 	EXPECT_NE(source.FindIndex("OpKill"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%exp_store_0 = OpLabel"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpStore %outColor"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, VcmpxPreservesVccAndOnlyNarrowsExec)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderOperand vcc {};
+	vcc.type = ShaderOperandType::VccLo;
+	vcc.size = 2;
+
+	ShaderOperand zero {};
+	zero.type       = ShaderOperandType::FloatInlineConstant;
+	zero.constant.f = 0.0f;
+
+	ShaderOperand one {};
+	one.type       = ShaderOperandType::FloatInlineConstant;
+	one.constant.f = 1.0f;
+
+	ShaderInstruction compare;
+	compare.pc      = 0;
+	compare.type    = ShaderInstructionType::VCmpxGtF32;
+	compare.format  = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
+	compare.dst     = vcc;
+	compare.src[0]  = zero;
+	compare.src[1]  = one;
+	compare.src_num = 2;
+
+	ShaderInstruction end;
+	end.pc     = 8;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderInstruction nop;
+	nop.pc     = 4;
+	nop.type   = ShaderInstructionType::VNop;
+	nop.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(compare);
+	code.GetInstructions().Add(nop);
+	code.GetInstructions().Add(end);
+
+	ShaderPixelInputInfo input {};
+	const auto           source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpStore %exec_lo %tmasked_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %exec_hi %uint_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpStore %vcc_lo %tmasked_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpStore %vcc_hi %uint_0"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, NullMrt3ExportAfterExecZeroKillsFragment)

@@ -29,6 +29,9 @@
 #include "Kyty/Core/String8.h"
 #include "Kyty/Core/Vector.h"
 
+#include <set>
+#include <string>
+
 #include "Emulator/Graphics/Shader.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -217,6 +220,14 @@ private:
 
 	String8                       m_source;
 	ShaderCode                    m_code;
+	// A guest join PC shared by several instructions materializes the same
+	// sc_join block once per WriteLabel call. Emitting the label a second time
+	// creates a duplicate SPIR-V Id that drivers reject during module creation.
+	// Emit each sc_join name once; later
+	// writers keep their guest body labels, which are reachable only through
+	// the already-emitted join (discard tails are dead code after the first
+	// OpKill anyway).
+	std::set<std::string>         m_emitted_sc_joins;
 	Vector<Constant>              m_constants;
 	Vector<Variable>              m_variables;
 	const ShaderVertexInputInfo*  m_vs_input_info = nullptr;
@@ -247,6 +258,7 @@ bool operand_is_constant(ShaderOperand op);
 bool operand_is_variable(ShaderOperand op);
 bool operand_covers_vgpr(ShaderOperand op, int reg);
 bool instruction_writes_vgpr(const ShaderInstruction& inst, int reg);
+bool FragmentTapSelection(const ShaderCode& code, uint32_t* pc, int* first_register);
 String8 packed_half_shadow_to_str(ShaderOperand op);
 SpirvValue operand_variable_to_str(ShaderOperand op);
 SpirvValue operand_variable_to_str(ShaderOperand op, int shift);

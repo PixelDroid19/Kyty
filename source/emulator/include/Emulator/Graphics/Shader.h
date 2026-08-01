@@ -1303,6 +1303,7 @@ struct ShaderVertexInputInfo
 	bool     fetch_embedded             = false;
 	bool     fetch_inline               = false;
 	bool     gs_prolog                  = false;
+	bool     input_resources_valid      = true;
 };
 
 struct ShaderComputeInputInfo

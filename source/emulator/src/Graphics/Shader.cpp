@@ -1306,6 +1306,14 @@ bool ShaderPixelInputMaskSupported(uint32_t enable_mask, uint32_t address_mask)
 	{
 		return false;
 	}
+	// An all-zero mask is a pixel shader that reads no barycentrics and no
+	// position: it exports a constant, discards, or samples with shader-supplied
+	// coordinates only. It has no interpolation instructions to translate, so
+	// there is nothing to reject.
+	if (enable_mask == 0)
+	{
+		return true;
+	}
 	const uint32_t interpolation = enable_mask & kInterpolation;
 	const uint32_t position      = enable_mask & kPositionXy;
 	return interpolation != 0 && (position == 0 || position == kPositionXy);
@@ -3876,7 +3884,11 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 		info->gs_prolog = true;
 
-		ShaderParseUsage2(data.user_data, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num));
+		// The fused ES-to-GS front reserves s0..s7 for NGG system state. API
+		// user-data index zero is therefore addressed as s8 by the shader.
+		constexpr int kGen5GsFrontUserDataBase = 8;
+		ShaderParseUsage2(data.user_data, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr,
+		                  kGen5GsFrontUserDataBase);
 	} else
 	{
 		EXIT_NOT_IMPLEMENTED(gs_instead_of_vs);
@@ -3914,7 +3926,21 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		    reinterpret_cast<const uint32_t*>(static_cast<uint64_t>(user_sgpr.value[usage.vertex_buffer_reg]) |
 		                                      (static_cast<uint64_t>(user_sgpr.value[usage.vertex_buffer_reg + 1]) << 32u));
 
-		EXIT_NOT_IMPLEMENTED(attrib == nullptr || buffer == nullptr);
+		if (attrib == nullptr || buffer == nullptr)
+		{
+			static uint32_t logs = 0;
+			if (logs < 16u)
+			{
+				++logs;
+				std::fprintf(stderr,
+				             "SHADER_VERTEX_RESOURCE_REJECT shader=0x%016" PRIx64 " user_sgprs=%u attrib_reg=%d attrib=0x%016" PRIx64
+				             " buffer_reg=%d buffer=0x%016" PRIx64 "\n",
+				             shader_addr, user_sgpr_num, usage.vertex_attrib_reg, reinterpret_cast<uint64_t>(attrib),
+				             usage.vertex_buffer_reg, reinterpret_cast<uint64_t>(buffer));
+			}
+			info->input_resources_valid = false;
+			return;
+		}
 
 		EXIT_NOT_IMPLEMENTED(data.input_semantics == nullptr || data.num_input_semantics == 0);
 
@@ -4002,7 +4028,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	ps_info->ps_early_z           = (sh->db_shader_control.shader_z_behavior == 1);
 	ps_info->ps_execute_on_noop   = sh->db_shader_control.shader_execute_on_noop;
 
-	for (uint32_t i = 0; i < ps_info->input_num; i++)
+	for (uint32_t i = 0; i < 32u; i++)
 	{
 		ps_info->interpolator_settings[i] =
 		    ShaderResolvePixelInterpolatorSetting(sh->ps_interpolator_settings[i], sh->ps_interpolator_written_mask, i);
@@ -5405,7 +5431,7 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 		ret.ids.Add(input_info->target_output_order[i]);
 	}
 
-	for (uint32_t i = 0; i < input_info->input_num; i++)
+	for (uint32_t i = 0; i < 32u; i++)
 	{
 		ret.ids.Add(input_info->interpolator_settings[i]);
 	}

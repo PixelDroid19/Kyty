@@ -63,7 +63,7 @@ struct ImageSampleLzPlan
 	uint32_t                      coordinate_num;
 };
 
-static int FindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind)
+static int FindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
 {
 	EXIT_NOT_IMPLEMENTED(inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8);
 	const int texture_register = inst.src[1].register_id;
@@ -71,7 +71,7 @@ static int FindImageSampledTextureDescriptor(const ShaderInstruction& inst, cons
 	{
 		const auto& descriptor = bind.textures2D.desc[i];
 		if (descriptor.usage == ShaderTextureUsage::ReadOnly && !descriptor.dynamic_sload &&
-		    descriptor.start_register == texture_register)
+		    descriptor.start_register + user_data_register_base == texture_register)
 		{
 			return i;
 		}
@@ -93,9 +93,9 @@ static int FindImageSampledTextureDescriptor(const ShaderInstruction& inst, cons
 	return -1;
 }
 
-static ImageSampleLzPlan PlanImageSampleLz(const ShaderInstruction& inst, const ShaderBindResources& bind)
+static ImageSampleLzPlan PlanImageSampleLz(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
 {
-	const int descriptor_index = FindImageSampledTextureDescriptor(inst, bind);
+	const int descriptor_index = FindImageSampledTextureDescriptor(inst, bind, user_data_register_base);
 	if (descriptor_index >= 0)
 	{
 		const auto shape = ShaderGen5SampledTextureShapeForType(bind.textures2D.desc[descriptor_index].texture.Type());
@@ -959,7 +959,9 @@ static bool RecompileImageSampleLzScalar(uint32_t component, KYTY_RECOMPILER_ARG
 		return false;
 	}
 
-	const auto plan = PlanImageSampleLz(inst, *bind_info);
+	const auto* vs_info = spirv->GetVsInputInfo();
+	const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
+	const auto  plan = PlanImageSampleLz(inst, *bind_info, user_data_register_base);
 	const auto shape = plan.shape;
 	const int sampled_num =
 	    (shape == ShaderGen5SampledTextureShape::TwoDimensional ? bind_info->textures2D.textures2d_sampled_num :

@@ -13,6 +13,78 @@
 
 namespace Kyty::Libs::Graphics {
 
+bool FragmentTapSelection(const ShaderCode& code, uint32_t* pc, int* first_register)
+{
+	if (pc == nullptr || first_register == nullptr || code.GetType() != ShaderType::Pixel)
+	{
+		return false;
+	}
+	const char* selector = std::getenv("KYTY_FS_TAP");
+	if (selector == nullptr || selector[0] == '\0')
+	{
+		return false;
+	}
+	char*          id_end = nullptr;
+	const uint64_t id     = std::strtoull(selector, &id_end, 16);
+	if (id_end == selector || *id_end != ':')
+	{
+		return false;
+	}
+	char*          pc_end = nullptr;
+	const uint64_t parsed_pc = std::strtoull(id_end + 1, &pc_end, 0);
+	if (pc_end == id_end + 1 || *pc_end != '\0' || parsed_pc > UINT32_MAX)
+	{
+		return false;
+	}
+	const uint64_t code_id = (static_cast<uint64_t>(code.GetHash0()) << 32u) | code.GetCrc32();
+	if (id != code_id)
+	{
+		return false;
+	}
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.pc == parsed_pc && inst.dst.type == ShaderOperandType::Vgpr && inst.dst.size > 0)
+		{
+			static bool logged = false;
+			if (!logged)
+			{
+				logged = true;
+				std::fprintf(stderr, "KYTY_FS_TAP_SELECTED id=0x%016" PRIx64 " pc=%u vgpr=%d\n", code_id,
+				             static_cast<uint32_t>(parsed_pc), inst.dst.register_id);
+			}
+			*pc             = static_cast<uint32_t>(parsed_pc);
+			*first_register = inst.dst.register_id;
+			return true;
+		}
+	}
+	return false;
+}
+
+static int ResolveVertexParameterCount(const ShaderCode& code, const ShaderVertexInputInfo* input_info)
+{
+	int count = input_info != nullptr ? input_info->export_count : 0;
+	for (const auto& inst: code.GetInstructions())
+	{
+		int required = 0;
+		switch (inst.format)
+		{
+			case ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3: required = 1; break;
+			case ShaderInstructionFormat::Param1Vsrc0Vsrc1Vsrc2Vsrc3: required = 2; break;
+			case ShaderInstructionFormat::Param2Vsrc0Vsrc1Vsrc2Vsrc3: required = 3; break;
+			case ShaderInstructionFormat::Param3Vsrc0Vsrc1Vsrc2Vsrc3: required = 4; break;
+			case ShaderInstructionFormat::Param4Vsrc0Vsrc1Vsrc2Vsrc3: required = 5; break;
+			case ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3: required = 6; break;
+			case ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3: required = 7; break;
+			default: break;
+		}
+		if (required > count)
+		{
+			count = required;
+		}
+	}
+	return count;
+}
+
 void Spirv::GenerateSource()
 {
 	m_source.Clear();
@@ -34,7 +106,16 @@ void Spirv::GenerateSource()
 	}
 	if (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr)
 	{
-		EXIT_NOT_IMPLEMENTED(!ResolvePixelInterpolationModes());
+		if (!ResolvePixelInterpolationModes())
+		{
+			const uint64_t code_id = (static_cast<uint64_t>(m_code.GetHash0()) << 32u) | m_code.GetCrc32();
+			std::fprintf(stderr,
+			             "SHADER_INTERPOLATION_REJECT_ID id=0x%016" PRIx64 " input_num=%u ena=0x%08" PRIx32
+			             " addr=0x%08" PRIx32 "\n",
+			             code_id, m_ps_input_info->input_num, m_ps_input_info->system_input_enable,
+			             m_ps_input_info->system_input_address);
+			EXIT_NOT_IMPLEMENTED(true);
+		}
 	}
 
 	WriteHeader();
@@ -264,10 +345,10 @@ void Spirv::WriteHeader()
 				{
 					vars.Add(String8::FromPrintf("%%attr%d", i));
 				}
-				for (int i = 0; i < m_vs_input_info->export_count; i++)
-				{
-					vars.Add(String8::FromPrintf("%%param%d", i));
-				}
+			}
+			for (int i = 0; i < ResolveVertexParameterCount(m_code, m_vs_input_info); i++)
+			{
+				vars.Add(String8::FromPrintf("%%param%d", i));
 			}
 			vars.Add("%gl_VertexIndex");
 			vars.Add("%gl_InstanceIndex");
@@ -412,10 +493,10 @@ void Spirv::WriteAnnotations()
 				{
 					vars.Add(String8::FromPrintf("OpDecorate %%attr%d Location %d", i, i));
 				}
-				for (int i = 0; i < m_vs_input_info->export_count; i++)
-				{
-					vars.Add(String8::FromPrintf("OpDecorate %%param%d Location %d", i, i));
-				}
+			}
+			for (int i = 0; i < ResolveVertexParameterCount(m_code, m_vs_input_info); i++)
+			{
+				vars.Add(String8::FromPrintf("OpDecorate %%param%d Location %d", i, i));
 			}
 			m_source += String8(vertex_annotations).ReplaceStr("<Variables>", vars.Concat("\n" + String8(' ', 15)));
 			break;
@@ -1035,10 +1116,10 @@ void Spirv::WriteGlobalVariables()
 							break;
 					}
 				}
-				for (int i = 0; i < m_vs_input_info->export_count; i++)
-				{
-					vars.Add(String8::FromPrintf("%%param%d = OpVariable %%_ptr_Output_v4float Output", i));
-				}
+			}
+			for (int i = 0; i < ResolveVertexParameterCount(m_code, m_vs_input_info); i++)
+			{
+				vars.Add(String8::FromPrintf("%%param%d = OpVariable %%_ptr_Output_v4float Output", i));
 			}
 			m_source += String8(vertex_variables).ReplaceStr("<Variables>", vars.Concat("\n" + String8(' ', 15)));
 			break;
@@ -1109,6 +1190,16 @@ void Spirv::WriteLocalVariables()
 	{
 		m_source += String8::FromPrintf("%%v%d_packed_half = OpVariable %%_ptr_Function_uint Function\n", reg);
 	}
+	uint32_t tap_pc = 0;
+	int      tap_register = 0;
+	const bool fragment_tap = FragmentTapSelection(m_code, &tap_pc, &tap_register);
+	if (fragment_tap)
+	{
+		for (uint32_t component = 0; component < 4u; component++)
+		{
+			m_source += String8::FromPrintf("%%fs_tap_%u = OpVariable %%_ptr_Function_float Function\n", component);
+		}
+	}
 
 	static const char* common_vars = R"(
              %temp_float = OpVariable %_ptr_Function_float Function
@@ -1130,6 +1221,13 @@ void Spirv::WriteLocalVariables()
 )";
 
 	m_source += common_vars;
+	if (fragment_tap)
+	{
+		for (uint32_t component = 0; component < 4u; component++)
+		{
+			m_source += String8::FromPrintf("               OpStore %%fs_tap_%u %%float_0_000000\n", component);
+		}
+	}
 	for (auto reg: packed_half_regs)
 	{
 		m_source += String8::FromPrintf("               OpStore %%v%d_packed_half %%uint_0\n", reg);
@@ -1685,6 +1783,18 @@ void Spirv::WriteInstructions()
 
 		m_source += String8::FromPrintf("; %s\n", src.c_str());
 		m_source += String8::FromPrintf("%s\n", dst.c_str());
+
+		uint32_t tap_pc = 0;
+		int      tap_register = 0;
+		if (FragmentTapSelection(m_code, &tap_pc, &tap_register) && inst.pc == tap_pc)
+		{
+			for (uint32_t component = 0; component < 4u; component++)
+			{
+				m_source += String8::FromPrintf("%%fs_tap_value_%u = OpLoad %%float %%v%d\n", component,
+				                                tap_register + static_cast<int>(component));
+				m_source += String8::FromPrintf("               OpStore %%fs_tap_%u %%fs_tap_value_%u\n", component, component);
+			}
+		}
 
 		if (need_debug && Recompile_Inject_Debug(index, m_code, &dst_debug, this, nullptr, SccCheck::None))
 		{

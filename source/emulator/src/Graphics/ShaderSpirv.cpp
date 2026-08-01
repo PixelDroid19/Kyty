@@ -22,9 +22,41 @@ KYTY_HASH_DEFINE_EQUALS(Kyty::Libs::Graphics::ShaderInstructionTypeFormat)
 
 namespace Kyty::Libs::Graphics {
 
+static uint32_t ResolvePixelParameterCount(const ShaderCode& code, uint32_t register_count)
+{
+	uint32_t count = register_count;
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.type != ShaderInstructionType::VInterpP1F32 && inst.type != ShaderInstructionType::VInterpP2F32 &&
+		    inst.type != ShaderInstructionType::VInterpMovF32)
+		{
+			continue;
+		}
+		if (inst.src[1].type != ShaderOperandType::LiteralConstant && inst.src[1].type != ShaderOperandType::IntegerInlineConstant &&
+		    inst.src[1].type != ShaderOperandType::FloatInlineConstant)
+		{
+			continue;
+		}
+		const uint32_t input = inst.src[1].constant.u;
+		if (input < 32u && input + 1u > count)
+		{
+			count = input + 1u;
+		}
+	}
+	return count;
+}
+
 String8 SpirvGenerateSource(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info, const ShaderPixelInputInfo* ps_input_info,
                             const ShaderComputeInputInfo* cs_input_info)
 {
+	ShaderPixelInputInfo resolved_ps_input {};
+	if (ps_input_info != nullptr)
+	{
+		resolved_ps_input           = *ps_input_info;
+		resolved_ps_input.input_num = ResolvePixelParameterCount(code, ps_input_info->input_num);
+		ps_input_info               = &resolved_ps_input;
+	}
+
 	Spirv spirv;
 	spirv.SetCode(code);
 	spirv.SetVsInputInfo(vs_input_info);

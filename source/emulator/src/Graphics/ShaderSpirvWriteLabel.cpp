@@ -232,6 +232,18 @@ void Spirv::WriteLabel(int index)
 			// Consume skip flag from phase1/owner entry.
 			skip_branch_to_next = false;
 
+			// A join PC shared by several instructions emits the same sc_join
+			// block once per WriteLabel. The first emission materialized the
+			// block; a second OpLabel with the same name duplicates the SPIR-V
+			// Id and makes the module invalid (drivers fail the pipeline).
+			// Later bodies stay reachable through the already-emitted join and
+			// their guest body labels; discard tails are dead code after the
+			// first OpKill anyway.
+			if (!m_emitted_sc_joins.insert(std::string(name.GetDataConst())).second)
+			{
+				continue;
+			}
+
 			m_source += String8::FromPrintf("       %%%s = OpLabel\n", name.c_str());
 			if (!next.IsEmpty())
 			{

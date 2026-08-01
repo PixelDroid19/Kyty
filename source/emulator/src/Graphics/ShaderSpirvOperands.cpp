@@ -6,7 +6,6 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 
-#include <cstdlib>
 #include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
@@ -87,13 +86,11 @@ PixelInterpolationMode Spirv::GetPixelInterpolationMode(uint32_t input) const
 static bool pixel_interpolation_rejected(const char* reason, const ShaderPixelInputInfo& info, uint32_t instruction_index,
                                          const ShaderInstruction& instruction, int coordinate_source)
 {
-	if (std::getenv("KYTY_SHADER_INTERPOLATION_TRACE") != nullptr)
-	{
-		fprintf(stderr,
-		        "SHADER_INTERPOLATION_REJECT reason=%s index=%u p2_source=%d input=%u ena=0x%08x addr=0x%08x coordinate_source=%d\n",
-		        reason, instruction_index, instruction.src[0].register_id, instruction.src[1].constant.u, info.system_input_enable,
-		        info.system_input_address, coordinate_source);
-	}
+	fprintf(stderr,
+	        "SHADER_INTERPOLATION_REJECT reason=%s index=%u p2_source=%d input=%u input_num=%u ena=0x%08x addr=0x%08x "
+	        "coordinate_source=%d\n",
+	        reason, instruction_index, instruction.src[0].register_id, instruction.src[1].constant.u, info.input_num,
+	        info.system_input_enable, info.system_input_address, coordinate_source);
 	return false;
 }
 
@@ -133,6 +130,15 @@ bool Spirv::ResolvePixelInterpolationModes()
 		}
 		if (interpolator.source == ShaderPixelInterpolatorSource::Default || interpolator.flat)
 		{
+			continue;
+		}
+		constexpr uint32_t kInterpolationSystemInputs = 0x7fu;
+		if ((m_ps_input_info->system_input_enable & kInterpolationSystemInputs) == 0u &&
+		    (m_ps_input_info->system_input_address & kInterpolationSystemInputs) == 0u)
+		{
+			// With no explicit barycentric system VGPRs, VINTRP uses the
+			// rasterizer's ordinary perspective interpolation. SPIR-V's default
+			// Smooth decoration is the direct representation of that path.
 			continue;
 		}
 
