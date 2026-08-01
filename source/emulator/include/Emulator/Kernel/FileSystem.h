@@ -46,6 +46,7 @@ KYTY_SUBSYSTEM_DEFINE(FileSystem);
 
 void   Mount(const String& folder, const String& point);
 void   Umount(const String& folder_or_point);
+bool   IsMounted();
 String GetRealFilename(const String& mounted_file_name);
 
 // Score a same-directory package font candidate against a missing request.

@@ -552,6 +552,11 @@ void Umount(const String& folder_or_point)
 	g_mount_points->Umount(folder_or_point);
 }
 
+bool IsMounted()
+{
+	return g_mount_points != nullptr;
+}
+
 String GetRealFilename(const String& mounted_file_name)
 {
 	EXIT_IF(g_mount_points == nullptr);

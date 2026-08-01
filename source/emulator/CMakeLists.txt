@@ -138,7 +138,20 @@ if (MSVC AND CLANG)
 	)
 endif()
 
-#target_include_directories(emulator_obj PRIVATE ${inc_headers})
+# FFmpeg is optional at configure time. The AvPlayer keeps its synthetic
+# diagnostic stream when the host does not provide the demux/codec libraries.
+if (LINUX)
+	find_package(PkgConfig QUIET)
+	if (PkgConfig_FOUND)
+		pkg_check_modules(KYTY_FFMPEG QUIET IMPORTED_TARGET
+			libavformat libavcodec libavutil libswscale libswresample)
+	endif()
+	if (KYTY_FFMPEG_FOUND)
+		target_link_libraries(emulator PkgConfig::KYTY_FFMPEG)
+		target_compile_definitions(emulator PRIVATE KYTY_HAVE_FFMPEG=1)
+	endif()
+endif()
+
 target_include_directories(emulator PRIVATE ${inc_headers})
 
 list(APPEND check_headers

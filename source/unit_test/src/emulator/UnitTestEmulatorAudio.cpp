@@ -1,16 +1,84 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Audio.h"
+#include "Emulator/AudioVideoBackend.h"
 #include "Emulator/AudioPcm.h"
 #include "Emulator/Config.h"
 #include "Emulator/Log.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <memory>
 
 UT_BEGIN(EmulatorAudio);
 
 using namespace Libs::Audio;
+
+TEST(EmulatorAudio, DecodesConfiguredAvPlayerMedia)
+{
+	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");
+	if (media_path == nullptr || media_path[0] == '\0' || !AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP();
+	}
+
+	std::string error;
+	auto decoder = AudioVideoBackend::Decoder::Open(media_path, &error);
+	ASSERT_NE(decoder, nullptr) << error;
+	const auto& stream = decoder->GetStreamInfo();
+	ASSERT_TRUE(stream.has_video);
+	EXPECT_GT(stream.video_width, 0u);
+	EXPECT_GT(stream.video_height, 0u);
+
+	AudioVideoBackend::VideoFrame video;
+	ASSERT_TRUE(decoder->ReadVideoFrame(&video));
+	EXPECT_EQ(video.width, stream.video_width);
+	EXPECT_EQ(video.height, stream.video_height);
+	EXPECT_EQ(video.pitch, stream.video_pitch);
+	EXPECT_EQ(video.data.size(), static_cast<size_t>(video.width) * video.height +
+	                                    static_cast<size_t>(video.pitch) * ((video.height + 1u) / 2u));
+
+	if (stream.has_audio)
+	{
+		AudioVideoBackend::AudioFrame audio;
+		ASSERT_TRUE(decoder->ReadAudioFrame(&audio));
+		EXPECT_EQ(audio.channels, stream.audio_channels);
+		EXPECT_EQ(audio.sample_rate, stream.audio_sample_rate);
+		EXPECT_FALSE(audio.data.empty());
+	}
+}
+
+TEST(EmulatorAudio, AvPlayerUsesConfiguredMediaBackend)
+{
+	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");
+	if (media_path == nullptr || media_path[0] == '\0' || !AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP();
+	}
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	AvPlayer::AvPlayerInitDataEx init {};
+	init.this_size = sizeof(init);
+	AvPlayer::AvPlayerInternal* handle = nullptr;
+	ASSERT_EQ(AvPlayer::AvPlayerInitEx(&init, &handle), 0);
+	ASSERT_NE(handle, nullptr);
+	ASSERT_EQ(AvPlayer::AvPlayerAddSource(handle, media_path), 0);
+	AvPlayer::AvPlayerStreamInfoEx stream {};
+	ASSERT_EQ(AvPlayer::AvPlayerGetStreamInfoEx(handle, 0, &stream), 0);
+	EXPECT_GT(stream.details.video.width, 0u);
+	EXPECT_GT(stream.details.video.height, 0u);
+	ASSERT_EQ(AvPlayer::AvPlayerStart(handle), 0);
+	AvPlayer::AvPlayerFrameInfoEx frame {};
+	ASSERT_EQ(AvPlayer::AvPlayerGetVideoDataEx(handle, &frame), 1);
+	ASSERT_NE(frame.data, nullptr);
+	EXPECT_EQ(frame.details.video.width, stream.details.video.width);
+	EXPECT_EQ(frame.details.video.height, stream.details.video.height);
+	ASSERT_EQ(AvPlayer::AvPlayerClose(handle), 0);
+}
 
 TEST(EmulatorAudio, AppliesGuestChannelVolumesWithoutChangingLayout)
 {
@@ -594,6 +662,94 @@ TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
 
 	sys_storage.release();
 	rack_storage.release();
+}
+
+TEST(EmulatorAudio, AvPlayerInitExReturnsZeroAndPopulatesHandle)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	AvPlayer::AvPlayerInitDataEx init_ex {};
+	init_ex.this_size                     = sizeof(init_ex);
+	init_ex.num_output_video_framebuffers = 2;
+
+	AvPlayer::AvPlayerInternal* handle = nullptr;
+	ASSERT_EQ(AvPlayer::AvPlayerInitEx(&init_ex, &handle), 0);
+	ASSERT_NE(handle, nullptr);
+	EXPECT_EQ(AvPlayer::AvPlayerClose(handle), 0);
+}
+
+static int g_avplayer_test_ready_events = 0;
+static int g_avplayer_test_stop_events  = 0;
+
+static void KYTY_SYSV_ABI avplayer_test_event_cb(void* obj_ptr, uint32_t event_id, int32_t source_id, void* data)
+{
+	(void)obj_ptr;
+	(void)source_id;
+	(void)data;
+	if (event_id == 0x02)
+	{
+		g_avplayer_test_ready_events++;
+	} else if (event_id == 0x01)
+	{
+		g_avplayer_test_stop_events++;
+	}
+}
+
+TEST(EmulatorAudio, AvPlayerSanitizesFileUriAndFiresEvents)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	g_avplayer_test_ready_events = 0;
+	g_avplayer_test_stop_events  = 0;
+
+	AvPlayer::AvPlayerInitDataEx init_ex {};
+	init_ex.this_size                     = sizeof(init_ex);
+	init_ex.event_replacement.event_callback = avplayer_test_event_cb;
+	init_ex.num_output_video_framebuffers = 2;
+
+	AvPlayer::AvPlayerInternal* handle = nullptr;
+	ASSERT_EQ(AvPlayer::AvPlayerInitEx(&init_ex, &handle), 0);
+	ASSERT_NE(handle, nullptr);
+
+	AvPlayer::AvPlayerSourceDetails details {};
+	const char* url = "file:///app0/media/intro%20cutscene.mp4";
+	details.uri.name   = url;
+	details.uri.length = static_cast<uint32_t>(std::strlen(url));
+	details.source_type = AvPlayer::AvPlayerSourceFileMp4;
+
+	ASSERT_EQ(AvPlayer::AvPlayerAddSourceEx(handle, AvPlayer::AvPlayerUriTypeSource, &details), 0);
+	EXPECT_EQ(g_avplayer_test_ready_events, 1);
+	EXPECT_EQ(AvPlayer::AvPlayerStreamCount(handle), 2);
+
+	AvPlayer::AvPlayerStreamInfoEx video_stream {};
+	ASSERT_EQ(AvPlayer::AvPlayerGetStreamInfoEx(handle, 0, &video_stream), 0);
+	EXPECT_EQ(video_stream.type, AvPlayer::AvPlayerStreamVideo);
+	EXPECT_EQ(video_stream.details.video.width, 1920u);
+	EXPECT_EQ(video_stream.details.video.height, 1080u);
+
+	ASSERT_EQ(AvPlayer::AvPlayerStart(handle), 0);
+	EXPECT_EQ(AvPlayer::AvPlayerIsActive(handle), 1);
+
+	AvPlayer::AvPlayerFrameInfoEx frame {};
+	uint32_t frame_count = 0;
+	while (AvPlayer::AvPlayerGetVideoDataEx(handle, &frame) != 0)
+	{
+		frame_count++;
+	}
+
+	EXPECT_EQ(frame_count, 90u);
+	EXPECT_EQ(AvPlayer::AvPlayerIsActive(handle), 0);
+	EXPECT_EQ(g_avplayer_test_stop_events, 1);
+
+	EXPECT_EQ(AvPlayer::AvPlayerClose(handle), 0);
 }
 
 UT_END();

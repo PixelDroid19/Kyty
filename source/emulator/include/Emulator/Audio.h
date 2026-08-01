@@ -138,16 +138,233 @@ const char* KYTY_SYSV_ABI AjmStrError(int error);
 
 namespace AvPlayer {
 
-struct AvPlayerInitData;
-struct AvPlayerInitDataEx;
-struct AvPlayerFrameInfo;
-struct AvPlayerFrameInfoEx;
-struct AvPlayerSourceDetails;
-struct AvPlayerStreamInfo;
-struct AvPlayerStreamInfoEx;
-struct AvPlayerInternal;
-
 using Bool = uint8_t;
+
+using AvPlayerAllocate          = KYTY_SYSV_ABI void* (*)(void*, uint32_t, uint32_t);
+using AvPlayerDeallocate        = KYTY_SYSV_ABI void (*)(void*, void*);
+using AvPlayerAllocateTexture   = KYTY_SYSV_ABI void* (*)(void*, uint32_t, uint32_t);
+using AvPlayerDeallocateTexture = KYTY_SYSV_ABI void (*)(void*, void*);
+using AvPlayerOpenFile          = KYTY_SYSV_ABI int (*)(void*, const char*);
+using AvPlayerCloseFile         = KYTY_SYSV_ABI int (*)(void*);
+using AvPlayerReadOffsetFile    = KYTY_SYSV_ABI int (*)(void*, uint8_t*, uint64_t, uint32_t);
+using AvPlayerSizeFile          = KYTY_SYSV_ABI uint64_t (*)(void*);
+using AvPlayerEventCallback     = KYTY_SYSV_ABI void (*)(void*, uint32_t, int32_t, void*);
+
+enum AvPlayerUriType : uint32_t
+{
+	AvPlayerUriTypeSource = 0,
+};
+
+enum AvPlayerStreamType : uint32_t
+{
+	AvPlayerStreamUnknown   = 0,
+	AvPlayerStreamVideo     = 1,
+	AvPlayerStreamAudio     = 2,
+	AvPlayerStreamTimedText = 3,
+};
+
+enum AvPlayerSourceType : uint32_t
+{
+	AvPlayerSourceUnknown  = 0,
+	AvPlayerSourceFileMp4  = 1,
+	AvPlayerSourceFileWebm = 2,
+	AvPlayerSourceHls      = 8,
+};
+
+struct AvPlayerMemAllocator
+{
+	void*                     object_pointer     = nullptr;
+	AvPlayerAllocate          allocate           = nullptr;
+	AvPlayerDeallocate        deallocate         = nullptr;
+	AvPlayerAllocateTexture   allocate_texture   = nullptr;
+	AvPlayerDeallocateTexture deallocate_texture = nullptr;
+};
+
+struct AvPlayerFileReplacement
+{
+	void*                  object_pointer = nullptr;
+	AvPlayerOpenFile       open           = nullptr;
+	AvPlayerCloseFile      close          = nullptr;
+	AvPlayerReadOffsetFile read_offset    = nullptr;
+	AvPlayerSizeFile       size           = nullptr;
+};
+
+struct AvPlayerEventReplacement
+{
+	void*                 object_pointer = nullptr;
+	AvPlayerEventCallback event_callback = nullptr;
+};
+
+struct AvPlayerInitData
+{
+	AvPlayerMemAllocator     memory_replacement;
+	AvPlayerFileReplacement  file_replacement;
+	AvPlayerEventReplacement event_replacement;
+	uint32_t                 debug_level                   = 0;
+	uint32_t                 base_priority                 = 0;
+	int32_t                  num_output_video_framebuffers = 0;
+	Bool                     auto_start                    = 0;
+	uint8_t                  reserved[3]                   = {};
+	const char*              default_language              = nullptr;
+};
+
+struct AvPlayerThreadInfo
+{
+	uint32_t priority     = 0;
+	uint32_t stack_size   = 0;
+	uint64_t affinity     = 0;
+	uint8_t  reserved[32] = {};
+};
+
+struct AvPlayerInitDataEx
+{
+	size_t                   this_size = 0;
+	AvPlayerMemAllocator     memory_replacement;
+	AvPlayerFileReplacement  file_replacement;
+	AvPlayerEventReplacement event_replacement;
+	const char*              default_language = nullptr;
+	uint32_t                 debug_level      = 0;
+	Bool                     auto_start       = 0;
+	uint8_t                  reserved[3]      = {};
+	AvPlayerThreadInfo       audio_decoder;
+	AvPlayerThreadInfo       video_decoder;
+	AvPlayerThreadInfo       demuxer;
+	AvPlayerThreadInfo       event;
+	AvPlayerThreadInfo       call_queue;
+	AvPlayerThreadInfo       http_command_processor;
+	AvPlayerThreadInfo       http_segment_manager;
+	AvPlayerThreadInfo       http_streamlist;
+	AvPlayerThreadInfo       file_streaming;
+	int32_t                  num_output_video_framebuffers = 0;
+	uint8_t                  reserved2[4]                  = {};
+};
+
+struct AvPlayerUri
+{
+	const char* name   = nullptr;
+	uint32_t    length = 0;
+};
+
+struct AvPlayerSourceDetails
+{
+	AvPlayerUri        uri;
+	uint8_t            reserved1[64] = {};
+	AvPlayerSourceType source_type   = AvPlayerSourceUnknown;
+	uint8_t            reserved2[44] = {};
+};
+
+struct AvPlayerAudioEx
+{
+	uint16_t channel_count;
+	uint8_t  reserved[2];
+	uint32_t sample_rate;
+	uint32_t size;
+	uint8_t  language_code[4];
+	uint8_t  reserved1[64];
+};
+
+struct AvPlayerAudio
+{
+	uint16_t channel_count;
+	uint8_t  reserved[2];
+	uint32_t sample_rate;
+	uint32_t size;
+	uint8_t  language_code[4];
+};
+
+struct AvPlayerVideoEx
+{
+	uint32_t width;
+	uint32_t height;
+	float    aspect_ratio;
+	uint8_t  language_code[4];
+	uint8_t  reserved[4];
+	uint32_t crop_left_offset;
+	uint32_t crop_right_offset;
+	uint32_t crop_top_offset;
+	uint32_t crop_bottom_offset;
+	uint32_t pitch;
+	uint8_t  luma_bit_depth;
+	uint8_t  chroma_bit_depth;
+	Bool     video_full_tange_flag;
+	uint8_t  reserved1[5];
+	double   framerate;
+	uint32_t colour_primaries;
+	uint32_t transfer_characteristics;
+	uint8_t  reserved2[16];
+};
+
+struct AvPlayerVideo
+{
+	uint32_t width;
+	uint32_t height;
+	float    aspect_ratio;
+	uint8_t  language_code[4];
+};
+
+struct AvPlayerTimedTextEx
+{
+	uint8_t language_code[4];
+	uint8_t reserved[12];
+	uint8_t reserved1[64];
+};
+
+struct AvPlayerTimedText
+{
+	uint8_t language_code[4];
+	uint8_t reserved[12];
+};
+
+union AvPlayerStreamDetailsEx
+{
+	AvPlayerAudioEx     audio;
+	AvPlayerVideoEx     video;
+	AvPlayerTimedTextEx subs;
+	uint8_t             reserved1[80];
+};
+
+union AvPlayerStreamDetails
+{
+	AvPlayerAudio     audio;
+	AvPlayerVideo     video;
+	AvPlayerTimedText subs;
+	uint8_t           reserved[16];
+};
+
+struct AvPlayerFrameInfo
+{
+	void*                 data;
+	uint8_t               reserved[4];
+	uint64_t              time_stamp;
+	AvPlayerStreamDetails details;
+};
+
+struct AvPlayerFrameInfoEx
+{
+	void*                   data;
+	uint8_t                 reserved[4];
+	uint64_t                time_stamp;
+	AvPlayerStreamDetailsEx details;
+};
+
+struct AvPlayerStreamInfo
+{
+	AvPlayerStreamType    type;
+	uint8_t               reserved[4];
+	AvPlayerStreamDetails details;
+	uint64_t              duration;
+};
+
+struct AvPlayerStreamInfoEx
+{
+	size_t                  this_size;
+	AvPlayerStreamType      type;
+	uint8_t                 reserved[4];
+	AvPlayerStreamDetailsEx details;
+	uint64_t                duration;
+};
+
+struct AvPlayerInternal;
 
 AvPlayerInternal* KYTY_SYSV_ABI AvPlayerInit(AvPlayerInitData* init);
 int KYTY_SYSV_ABI               AvPlayerInitEx(const AvPlayerInitDataEx* init, AvPlayerInternal** handle);
