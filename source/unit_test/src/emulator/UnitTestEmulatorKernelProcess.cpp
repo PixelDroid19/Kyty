@@ -186,6 +186,23 @@ TEST(EmulatorKernelProcess, PthreadPriorityRoundTripsGuestValue)
 	EXPECT_EQ(priority, 260);
 }
 
+TEST(EmulatorKernelProcess, PthreadNullNameUsesEmptyString)
+{
+	EnsureKernelProcessSubsystems();
+
+	std::atomic_bool   release = false;
+	LibKernel::Pthread thread  = nullptr;
+	ASSERT_EQ(LibKernel::PthreadCreate(&thread, nullptr, HoldPthreadUntilReleased, &release, nullptr), OK);
+	ASSERT_NE(thread, nullptr);
+
+	char name[32] = {};
+	EXPECT_EQ(LibKernel::PthreadGetname(thread, name), OK);
+	EXPECT_STREQ(name, "");
+
+	release.store(true, std::memory_order_release);
+	EXPECT_EQ(LibKernel::PthreadJoin(thread, nullptr), OK);
+}
+
 TEST(EmulatorKernelProcess, NormalPthreadMutexNestedLockCompletes)
 {
 	EnsureKernelProcessSubsystems();

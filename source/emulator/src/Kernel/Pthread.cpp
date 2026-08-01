@@ -3200,7 +3200,7 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 	{
 		EXIT_IF((*thread)->free);
 
-		(*thread)->name        = name;
+		(*thread)->name        = name != nullptr ? name : "";
 		(*thread)->entry       = entry;
 		(*thread)->arg         = arg;
 		(*thread)->almost_done = false;
