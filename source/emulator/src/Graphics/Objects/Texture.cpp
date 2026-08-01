@@ -299,6 +299,71 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		}
 	}
 
+	// Gen5 linear resources are already in the format consumed by Vulkan. The
+	// video path uses this mode for both the luma (R8) and interleaved chroma
+	// (R8G8) planes; leaving it without an upload creates a valid image backed
+	// only by its allocation clear value, which appears as a solid blue frame.
+	if (fmt != 0u && tile == 0u && levels == 1u)
+	{
+		if (!skip_guest)
+		{
+			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
+			uint32_t       upload_pitch      = static_cast<uint32_t>(pitch);
+			if (bytes_per_element != 0u && width <= std::numeric_limits<uint32_t>::max() / bytes_per_element)
+			{
+				const uint32_t row_bytes = static_cast<uint32_t>(width) * bytes_per_element;
+				if (const uint32_t registered_pitch = GuestTextureLayoutGetLinearRowPitch(*vaddr, row_bytes);
+				    registered_pitch != 0u && registered_pitch % bytes_per_element == 0u)
+				{
+					upload_pitch = registered_pitch / bytes_per_element;
+				}
+			}
+			regions[0].offset = 0;
+			regions[0].width  = static_cast<uint32_t>(width);
+			regions[0].height = static_cast<uint32_t>(height);
+			regions[0].pitch  = upload_pitch;
+			if (std::getenv("KYTY_DUMP_VIDEO_UPLOAD") != nullptr)
+			{
+				static std::atomic_uint dump_count {0};
+				const auto           index = dump_count.fetch_add(1, std::memory_order_relaxed);
+				if (index < 32u)
+				{
+					const auto* bytes = reinterpret_cast<const uint8_t*>(*vaddr);
+					std::fprintf(stderr, "KYTY_DUMP_VIDEO_UPLOAD index=%u fmt=%u size=%ux%u pitch=%u upload_pitch=%u addr=0x%012" PRIx64
+					             " bytes=%" PRIu64 " first=%02x%02x%02x%02x\n",
+					             index, static_cast<unsigned>(fmt), static_cast<unsigned>(width), static_cast<unsigned>(height),
+					             static_cast<unsigned>(pitch), static_cast<unsigned>(upload_pitch), static_cast<uint64_t>(*vaddr),
+					             static_cast<uint64_t>(*size), bytes[0], bytes[1], bytes[2], bytes[3]);
+				}
+			}
+			UtilFillImage(ctx, vk_obj, reinterpret_cast<const void*>(*vaddr), *size, regions, static_cast<uint64_t>(vk_layout));
+			if (std::getenv("KYTY_DUMP_VIDEO_READBACK") != nullptr)
+			{
+				static std::atomic_uint readback_count {0};
+				const auto             index = readback_count.fetch_add(1, std::memory_order_relaxed);
+				if (index < 4u)
+				{
+					std::vector<uint8_t> readback(static_cast<size_t>(*size));
+					UtilFillBuffer(ctx, readback.data(), *size, static_cast<uint32_t>(width), vk_obj, static_cast<uint64_t>(vk_layout));
+					uint64_t hash = 1469598103934665603ull;
+					uint8_t  minimum = 255u;
+					uint8_t  maximum = 0u;
+					for (uint8_t value: readback)
+					{
+						hash = (hash ^ value) * 1099511628211ull;
+						minimum = std::min(minimum, value);
+						maximum = std::max(maximum, value);
+					}
+					std::fprintf(stderr, "KYTY_DUMP_VIDEO_READBACK index=%u fmt=%u bytes=%zu first=%02x%02x%02x%02x min=%u max=%u hash=%016" PRIx64 "\n",
+					             index, static_cast<unsigned>(fmt), readback.size(), readback.size() > 0 ? readback[0] : 0u,
+					             readback.size() > 1 ? readback[1] : 0u, readback.size() > 2 ? readback[2] : 0u,
+					             readback.size() > 3 ? readback[3] : 0u, static_cast<unsigned>(minimum), static_cast<unsigned>(maximum), hash);
+				}
+			}
+		}
+		return;
+	}
+
 	if (fmt == 0)
 	{
 		if (tile == 13)
