@@ -105,6 +105,7 @@ TEST(AgentTools, EventMatchUsesExactOptionalCode)
 	event.kind = EventKind::Error;
 	std::snprintf(event.code, sizeof(event.code), "%s", "device_lost");
 	EXPECT_TRUE(EventMatches(event, EventKind::Error, nullptr));
+	EXPECT_TRUE(EventMatches(event, EventKind::Error, ""));
 	EXPECT_TRUE(EventMatches(event, EventKind::Error, "device_lost"));
 	EXPECT_FALSE(EventMatches(event, EventKind::Warn, "device_lost"));
 	EXPECT_FALSE(EventMatches(event, EventKind::Error, "device"));

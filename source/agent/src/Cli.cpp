@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <thread>
 
@@ -33,6 +34,7 @@ void PrintUsage()
 	                     "  kyty_agent --endpoint ENDPOINT perf-snapshot [--reset]\n"
 	                     "  kyty_agent --endpoint ENDPOINT sync-waits|threads|last-error\n"
 	                     "  kyty_agent --endpoint ENDPOINT events [--last N] [--after-seq N]\n"
+	                     "  kyty_agent --endpoint ENDPOINT snapshot [--events N] [--after-seq N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT capture [--timeout-ms N] [--no-score]\n"
 	                     "  kyty_agent --endpoint ENDPOINT score [--path ABS.png]\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad down|up|tap BUTTON\n"
@@ -42,7 +44,7 @@ void PrintUsage()
 	                     "  kyty_agent --endpoint ENDPOINT wait-present (--min N|--delta N) [--timeout-ms N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT wait-frame (--min N|--delta N) [--timeout-ms N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT wait-phase WANT [--min-fps N] [--stable-ms N] [--timeout-ms N]\n"
-	                     "  kyty_agent --endpoint ENDPOINT wait-event --kind KIND [--timeout-ms N]\n"
+	                     "  kyty_agent --endpoint ENDPOINT wait-event --kind KIND [--code CODE] [--after-seq N] [--timeout-ms N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT watch [--window-ms N|--seconds N] [--present-stall-ms N] [--frame-stall-ms N] "
 	                     "[--min-fps N] [--no-capture]\n"
 	                     "\n"
@@ -207,6 +209,30 @@ const char* RequireArg(int argc, char** argv, int* index, const char* flag)
 	}
 	++(*index);
 	return argv[*index];
+}
+
+bool ParseDecimalUnsigned(const char* text, uint64_t* out)
+{
+	if (text == nullptr || text[0] == '\0' || out == nullptr)
+	{
+		return false;
+	}
+	uint64_t value = 0;
+	for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p != '\0'; ++p)
+	{
+		if (*p < static_cast<unsigned char>('0') || *p > static_cast<unsigned char>('9'))
+		{
+			return false;
+		}
+		const uint64_t digit = static_cast<uint64_t>(*p - static_cast<unsigned char>('0'));
+		if (value > (std::numeric_limits<uint64_t>::max() - digit) / 10u)
+		{
+			return false;
+		}
+		value = value * 10u + digit;
+	}
+	*out = value;
+	return true;
 }
 
 struct WatchOptions
@@ -449,6 +475,41 @@ int Main(int argc, char** argv)
 		char req[256];
 		std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"events\",\"args\":{\"last\":%llu,\"after_seq\":%llu}}",
 		              static_cast<unsigned long long>(last), static_cast<unsigned long long>(after_seq));
+		return Call(endpoint, req);
+	}
+	if (std::strcmp(cmd, "snapshot") == 0)
+	{
+		uint64_t events_last      = 50;
+		uint64_t events_after_seq = 0;
+		for (; i < argc; ++i)
+		{
+			if (std::strcmp(argv[i], "--events") == 0)
+			{
+				const char* value = RequireArg(argc, argv, &i, "--events");
+				if (value == nullptr || !ParseDecimalUnsigned(value, &events_last) || events_last < 1 || events_last > 128)
+				{
+					std::fprintf(stderr, "kyty_agent: --events must be a decimal unsigned integer in [1,128]\n");
+					return 125;
+				}
+				continue;
+			}
+			if (std::strcmp(argv[i], "--after-seq") == 0)
+			{
+				const char* value = RequireArg(argc, argv, &i, "--after-seq");
+				if (value == nullptr || !ParseDecimalUnsigned(value, &events_after_seq))
+				{
+					std::fprintf(stderr, "kyty_agent: --after-seq must be a decimal unsigned integer\n");
+					return 125;
+				}
+				continue;
+			}
+			std::fprintf(stderr, "kyty_agent: unknown snapshot flag %s\n", argv[i]);
+			return 125;
+		}
+		char req[256];
+		std::snprintf(req, sizeof(req),
+		              "{\"id\":1,\"tool\":\"debug_snapshot\",\"args\":{\"events_last\":%llu,\"events_after_seq\":%llu}}",
+		              static_cast<unsigned long long>(events_last), static_cast<unsigned long long>(events_after_seq));
 		return Call(endpoint, req);
 	}
 	if (std::strcmp(cmd, "capture") == 0)
@@ -773,7 +834,10 @@ int Main(int argc, char** argv)
 	if (std::strcmp(cmd, "wait-event") == 0)
 	{
 		const char* kind       = nullptr;
+		const char* code       = nullptr;
+		uint64_t    after_seq  = 0;
 		uint64_t    timeout_ms = 5000;
+		bool        have_after_seq = false;
 		for (; i < argc; ++i)
 		{
 			if (std::strcmp(argv[i], "--kind") == 0)
@@ -785,14 +849,35 @@ int Main(int argc, char** argv)
 				}
 				continue;
 			}
+			if (std::strcmp(argv[i], "--code") == 0)
+			{
+				code = RequireArg(argc, argv, &i, "--code");
+				if (code == nullptr || code[0] == '\0' || std::strlen(code) > 31u)
+				{
+					std::fprintf(stderr, "kyty_agent: --code must contain 1-31 bytes\n");
+					return 125;
+				}
+				continue;
+			}
+			if (std::strcmp(argv[i], "--after-seq") == 0)
+			{
+				const char* value = RequireArg(argc, argv, &i, "--after-seq");
+				if (value == nullptr || !ParseDecimalUnsigned(value, &after_seq))
+				{
+					std::fprintf(stderr, "kyty_agent: --after-seq must be a decimal unsigned integer\n");
+					return 125;
+				}
+				have_after_seq = true;
+				continue;
+			}
 			if (std::strcmp(argv[i], "--timeout-ms") == 0)
 			{
 				const char* v = RequireArg(argc, argv, &i, "--timeout-ms");
-				if (v == nullptr)
+				if (v == nullptr || !ParseDecimalUnsigned(v, &timeout_ms))
 				{
+					std::fprintf(stderr, "kyty_agent: --timeout-ms must be a decimal unsigned integer\n");
 					return 125;
 				}
-				timeout_ms = std::strtoull(v, nullptr, 10);
 				continue;
 			}
 			std::fprintf(stderr, "kyty_agent: unknown wait-event flag %s\n", argv[i]);
@@ -803,9 +888,23 @@ int Main(int argc, char** argv)
 			std::fprintf(stderr, "kyty_agent: wait-event requires --kind\n");
 			return 125;
 		}
-		char req[256];
-		std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"wait_event\",\"args\":{\"kind\":\"%s\",\"timeout_ms\":%llu}}",
-		              JsonEscape(kind).c_str(), static_cast<unsigned long long>(timeout_ms));
+		std::string req = "{\"id\":1,\"tool\":\"wait_event\",\"args\":{\"kind\":\"";
+		req += JsonEscape(kind);
+		req += '"';
+		if (code != nullptr)
+		{
+			req += ",\"code\":\"";
+			req += JsonEscape(code);
+			req += '"';
+		}
+		if (have_after_seq)
+		{
+			req += ",\"after_seq\":";
+			req += std::to_string(after_seq);
+		}
+		req += ",\"timeout_ms\":";
+		req += std::to_string(timeout_ms);
+		req += "}}";
 		return Call(endpoint, req);
 	}
 	if (std::strcmp(cmd, "watch") == 0)

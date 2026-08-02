@@ -3,6 +3,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Agent/AgentLifecycle.h"
+#include "Emulator/Agent/DebugSnapshot.h"
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Agent/FrameScore.h"
 #include "Emulator/Agent/Protocol.h"
@@ -51,7 +52,7 @@ uint64_t SteadyMs()
 
 std::string HelpResult()
 {
-	char buf[2048];
+	char buf[3072];
 	std::snprintf(buf, sizeof(buf),
 	              "{\"protocol_version\":%u,\"diagnostic_input\":true,\"schema\":\"agent_tools\","
 	              "\"tools\":["
@@ -70,10 +71,16 @@ std::string HelpResult()
 	              "{\"tool\":\"wait_present\",\"args\":{\"min\":1,\"delta\":20,\"timeout_ms\":15000}},"
 	              "{\"tool\":\"wait_frame\",\"args\":{\"min\":1,\"delta\":20,\"timeout_ms\":15000}},"
 	              "{\"tool\":\"wait_phase\",\"args\":{\"want\":\"interactive\",\"min_fps\":5,\"stable_ms\":400,\"timeout_ms\":45000}},"
-	              "{\"tool\":\"wait_event\",\"args\":{\"kind\":\"error\",\"timeout_ms\":5000}},"
+	              "{\"tool\":\"debug_snapshot\",\"args\":{\"events_last\":50,\"events_after_seq\":0}},"
+	              "{\"tool\":\"wait_event\",\"args\":{\"kind\":\"error\",\"code\":\"device_lost\",\"after_seq\":0,\"timeout_ms\":5000}},"
 	              "{\"tool\":\"watch\",\"args\":{\"window_ms\":10000,\"present_stall_ms\":5000,\"frame_stall_ms\":5000,\"min_fps\":2.0,"
 	              "\"capture\":true}}"
-	              "]}",
+	              "],"
+	              "\"capabilities\":{\"transport\":\"local_only\",\"bounded_responses\":true,\"debug_snapshot\":true,"
+	              "\"event_sequence_filter\":true,\"event_code_filter\":true,\"controller_input\":true,"
+	              "\"live_execution_control\":false,\"guest_memory_access\":false,\"host_path_access\":false,"
+	              "\"host_command_execution\":false}"
+	              "}",
 	              Kyty::Agent::kProtocolVersion);
 	return std::string(buf);
 }
@@ -427,6 +434,35 @@ std::string HandleStatus(const Request& req)
 std::string HandleDiagnostics(const Request& req)
 {
 	return FormatOk(req.id, DiagnosticsResult());
+}
+
+std::string HandleDebugSnapshot(const Request& req)
+{
+	uint32_t events_last      = 50;
+	uint64_t events_after_seq = 0;
+	(void)ArgsGetU32(req.args_json, "events_last", &events_last);
+	(void)ArgsGetU64(req.args_json, "events_after_seq", &events_after_seq);
+	if (events_last == 0 || events_last > 128)
+	{
+		events_last = 50;
+	}
+
+	DebugSnapshotParts parts {};
+	parts.event_seq_start  = EventRing::Instance().NextSeq();
+	parts.status_json      = StatusResult();
+	parts.diagnostics_json = DiagnosticsResult();
+	parts.threads_json     = ThreadsResult();
+	parts.sync_waits_json  = SyncWaitsResult();
+	parts.events_json      = EventsResult(events_last, events_after_seq);
+	parts.last_error_json  = LastErrorResult();
+	parts.event_seq_end    = EventRing::Instance().NextSeq();
+
+	const std::string result = BuildDebugSnapshotResult(parts);
+	if (result.empty())
+	{
+		return FormatErr(req.id, "response_too_large", "debug snapshot exceeds response limit");
+	}
+	return FormatOk(req.id, result);
 }
 
 std::string HandlePerfSnapshot(const Request& req)
@@ -826,6 +862,9 @@ std::string HandleWaitPhase(const Request& req)
 std::string HandleWaitEvent(const Request& req)
 {
 	std::string kind_name;
+	std::string code_filter_value;
+	const bool  code_present = req.args_json.find("\"code\"") != std::string::npos;
+	const char* code_filter  = nullptr;
 	uint32_t    timeout_ms = 5000;
 	uint64_t    after_seq  = EventRing::Instance().NextSeq();
 	if (!ArgsGetString(req.args_json, "kind", &kind_name))
@@ -834,6 +873,14 @@ std::string HandleWaitEvent(const Request& req)
 	}
 	(void)ArgsGetU32(req.args_json, "timeout_ms", &timeout_ms);
 	(void)ArgsGetU64(req.args_json, "after_seq", &after_seq);
+	if (code_present)
+	{
+		if (!ArgsGetString(req.args_json, "code", &code_filter_value) || code_filter_value.empty() || code_filter_value.size() > 31)
+		{
+			return FormatErr(req.id, "invalid_args", "code must be 1-31 bytes");
+		}
+		code_filter = code_filter_value.c_str();
+	}
 	EventKind kind {};
 	if (!EventKindFromName(kind_name.c_str(), &kind))
 	{
@@ -847,7 +894,7 @@ std::string HandleWaitEvent(const Request& req)
 		for (uint32_t i = 0; i < count; ++i)
 		{
 			// CopySince returns newest-first; scan for match.
-			if (records[i].kind == kind)
+			if (EventMatches(records[i], kind, code_filter))
 			{
 				char buf[512];
 				std::snprintf(buf, sizeof(buf), "{\"event\":{\"seq\":%llu,\"t_ms\":%llu,\"kind\":%s,\"code\":%s,\"message\":%s}}",
@@ -940,6 +987,7 @@ std::string HandleUnknown(const Request& req)
 static constexpr HandlerEntry kHandlers[] = {
     {Tool::Help, HandleHelp},           {Tool::Ping, HandlePing},
     {Tool::Status, HandleStatus},       {Tool::Diagnostics, HandleDiagnostics},
+    {Tool::DebugSnapshot, HandleDebugSnapshot},
     {Tool::PerfSnapshot, HandlePerfSnapshot},
     {Tool::SyncWaits, HandleSyncWaits}, {Tool::Threads, HandleThreads},
     {Tool::Events, HandleEvents},       {Tool::LastError, HandleLastError},
