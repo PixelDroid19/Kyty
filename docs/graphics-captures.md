@@ -131,3 +131,33 @@ and input traces to be added without rewriting the runner.
 For the **clear packing**, **sample→RenderTexture alias**, and **WaitRegMem /
 Label fence** contracts that implementers must preserve when changing Gen5
 color paths, see `docs/graphics-rt-clear-and-sample-alias.md`.
+
+## Diagnosing diagonal primitive corruption
+
+A transient half-screen triangle can originate before a color resolve. Capture
+both the multisampled source attachment and the presented image around the same
+frame, then inspect the primitive state of the draw that wrote the source. If
+the source already contains the diagonal, changing resolve synchronization or
+discarding the frame only hides the producer error.
+
+For Gen5 indirect register arrays, preserve the register class declared by the
+packet. `R_UC_REGS_INDIRECT` must try the UCONFIG dispatch table before the
+compatibility paths for context or shader registers. The numeric register
+spaces overlap; in particular, a UCONFIG offset can share a number with a
+compute user-data register. Dispatching by number before class can consume a
+valid `VGT_PRIMITIVE_TYPE` write as shader data and leave the topology at zero.
+Zero is not a triangle-list fallback, so it must not be translated into a
+drawable Vulkan topology.
+
+To reproduce and verify this class of fault without changing guest behavior:
+
+1. Capture a bounded consecutive VideoOut window containing the transition.
+2. Capture the corresponding source render target when the diagonal appears.
+3. Confirm that the indirect UCONFIG array contains a valid primitive value and
+   that the draw uses that same value.
+4. Repeat the same window after the fix and compare every frame, not only the
+   final present.
+
+Keep these captures in an ignored local directory. A correct result preserves
+the intended full-frame transition and removes the diagonal at its producer;
+it does not skip the draw, the resolve, or the present.
