@@ -81,6 +81,21 @@ TEST(AgentTools, ProtocolParsesRequestAndFormatsResponse)
 	EXPECT_NE(err.find("timeout"), std::string::npos);
 }
 
+TEST(AgentTools, ProtocolRejectsNonIntegerAndOverflowArguments)
+{
+	uint64_t value = 0;
+	EXPECT_FALSE(ArgsGetU64(R"({"value":-1})", "value", &value));
+	EXPECT_FALSE(ArgsGetU64(R"({"value":+1})", "value", &value));
+	EXPECT_FALSE(ArgsGetU64(R"({"value":1x})", "value", &value));
+	EXPECT_FALSE(ArgsGetU64(R"({"value":1.5})", "value", &value));
+	EXPECT_FALSE(ArgsGetU64(R"({"value":1e3})", "value", &value));
+	EXPECT_FALSE(ArgsGetU64(R"({"value":18446744073709551616})", "value", &value));
+	EXPECT_TRUE(ArgsGetU64(R"({"value":18446744073709551615})", "value", &value));
+	EXPECT_EQ(value, std::numeric_limits<uint64_t>::max());
+	uint32_t small = 0;
+	EXPECT_FALSE(ArgsGetU32(R"({"value":4294967296})", "value", &small));
+}
+
 TEST(AgentTools, DebugSnapshotComposesStableBoundedSections)
 {
 	DebugSnapshotParts parts {};

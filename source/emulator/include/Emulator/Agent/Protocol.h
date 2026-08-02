@@ -75,6 +75,7 @@ std::string FormatOk(uint64_t id, const std::string& result_json_object);
 std::string FormatErr(uint64_t id, const char* code, const char* message);
 
 // Extract helpers from a flat args object (string/number/bool only).
+bool ArgsHasKey(const std::string& args_json, const char* key);
 bool ArgsGetString(const std::string& args_json, const char* key, std::string* out);
 bool ArgsGetU64(const std::string& args_json, const char* key, uint64_t* out);
 bool ArgsGetU32(const std::string& args_json, const char* key, uint32_t* out);

@@ -440,8 +440,14 @@ std::string HandleDebugSnapshot(const Request& req)
 {
 	uint32_t events_last      = 50;
 	uint64_t events_after_seq = 0;
-	(void)ArgsGetU32(req.args_json, "events_last", &events_last);
-	(void)ArgsGetU64(req.args_json, "events_after_seq", &events_after_seq);
+	if (ArgsHasKey(req.args_json, "events_last") && !ArgsGetU32(req.args_json, "events_last", &events_last))
+	{
+		return FormatErr(req.id, "invalid_args", "events_last must be an unsigned integer");
+	}
+	if (ArgsHasKey(req.args_json, "events_after_seq") && !ArgsGetU64(req.args_json, "events_after_seq", &events_after_seq))
+	{
+		return FormatErr(req.id, "invalid_args", "events_after_seq must be an unsigned integer");
+	}
 	if (events_last == 0 || events_last > 128)
 	{
 		events_last = 50;
@@ -863,7 +869,7 @@ std::string HandleWaitEvent(const Request& req)
 {
 	std::string kind_name;
 	std::string code_filter_value;
-	const bool  code_present = req.args_json.find("\"code\"") != std::string::npos;
+	const bool  code_present = ArgsHasKey(req.args_json, "code");
 	const char* code_filter  = nullptr;
 	uint32_t    timeout_ms = 5000;
 	uint64_t    after_seq  = EventRing::Instance().NextSeq();
@@ -871,8 +877,14 @@ std::string HandleWaitEvent(const Request& req)
 	{
 		return FormatErr(req.id, "invalid_args", "kind is required");
 	}
-	(void)ArgsGetU32(req.args_json, "timeout_ms", &timeout_ms);
-	(void)ArgsGetU64(req.args_json, "after_seq", &after_seq);
+	if (ArgsHasKey(req.args_json, "timeout_ms") && !ArgsGetU32(req.args_json, "timeout_ms", &timeout_ms))
+	{
+		return FormatErr(req.id, "invalid_args", "timeout_ms must be an unsigned integer");
+	}
+	if (ArgsHasKey(req.args_json, "after_seq") && !ArgsGetU64(req.args_json, "after_seq", &after_seq))
+	{
+		return FormatErr(req.id, "invalid_args", "after_seq must be an unsigned integer");
+	}
 	if (code_present)
 	{
 		if (!ArgsGetString(req.args_json, "code", &code_filter_value) || code_filter_value.empty() || code_filter_value.size() > 31)

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -178,20 +179,22 @@ const char* SkipWs(const char* p)
 	return p;
 }
 
+bool ParseStringValue(const char* p, std::string* out, const char** end);
+
 bool MatchKey(const char* p, const char* key, const char** after_colon)
 {
 	p = SkipWs(p);
-	if (p == nullptr || *p != '"')
+	if (p == nullptr || key == nullptr || after_colon == nullptr || *p != '"')
 	{
 		return false;
 	}
-	++p;
-	const size_t key_len = std::strlen(key);
-	if (std::strncmp(p, key, key_len) != 0 || p[key_len] != '"')
+	std::string parsed_key;
+	const char* key_end = nullptr;
+	if (!ParseStringValue(p, &parsed_key, &key_end) || parsed_key != key)
 	{
 		return false;
 	}
-	p = SkipWs(p + key_len + 1);
+	p = SkipWs(key_end);
 	if (*p != ':')
 	{
 		return false;
@@ -200,59 +203,165 @@ bool MatchKey(const char* p, const char* key, const char** after_colon)
 	return true;
 }
 
+bool ParseHex4(const char* p, uint32_t* out)
+{
+	if (p == nullptr || out == nullptr)
+	{
+		return false;
+	}
+	uint32_t value = 0;
+	for (uint32_t i = 0; i < 4; ++i)
+	{
+		if (p[i] == '\0')
+		{
+			return false;
+		}
+		const unsigned char ch = static_cast<unsigned char>(p[i]);
+		uint32_t            digit = 0;
+		if (ch >= '0' && ch <= '9')
+		{
+			digit = ch - '0';
+		} else if (ch >= 'a' && ch <= 'f')
+		{
+			digit = ch - 'a' + 10u;
+		} else if (ch >= 'A' && ch <= 'F')
+		{
+			digit = ch - 'A' + 10u;
+		} else
+		{
+			return false;
+		}
+		value = (value << 4u) | digit;
+	}
+	*out = value;
+	return true;
+}
+
+void AppendUtf8(std::string* out, uint32_t code_point)
+{
+	if (code_point <= 0x7fu)
+	{
+		out->push_back(static_cast<char>(code_point));
+	} else if (code_point <= 0x7ffu)
+	{
+		out->push_back(static_cast<char>(0xc0u | (code_point >> 6u)));
+		out->push_back(static_cast<char>(0x80u | (code_point & 0x3fu)));
+	} else if (code_point <= 0xffffu)
+	{
+		out->push_back(static_cast<char>(0xe0u | (code_point >> 12u)));
+		out->push_back(static_cast<char>(0x80u | ((code_point >> 6u) & 0x3fu)));
+		out->push_back(static_cast<char>(0x80u | (code_point & 0x3fu)));
+	} else
+	{
+		out->push_back(static_cast<char>(0xf0u | (code_point >> 18u)));
+		out->push_back(static_cast<char>(0x80u | ((code_point >> 12u) & 0x3fu)));
+		out->push_back(static_cast<char>(0x80u | ((code_point >> 6u) & 0x3fu)));
+		out->push_back(static_cast<char>(0x80u | (code_point & 0x3fu)));
+	}
+}
+
+bool ParseUnicodeEscape(const char** cursor, std::string* out)
+{
+	const char* p = *cursor;
+	uint32_t    code_point = 0;
+	if (!ParseHex4(p, &code_point))
+	{
+		return false;
+	}
+	p += 4;
+	if (code_point >= 0xd800u && code_point <= 0xdbffu)
+	{
+		uint32_t low = 0;
+		if (p[0] != '\\' || p[1] != 'u' || !ParseHex4(p + 2, &low) || low < 0xdc00u || low > 0xdfffu)
+		{
+			return false;
+		}
+		code_point = 0x10000u + ((code_point - 0xd800u) << 10u) + (low - 0xdc00u);
+		p += 6;
+	} else if (code_point >= 0xdc00u && code_point <= 0xdfffu)
+	{
+		return false;
+	}
+	AppendUtf8(out, code_point);
+	*cursor = p;
+	return true;
+}
+
 bool ParseStringValue(const char* p, std::string* out, const char** end)
 {
 	p = SkipWs(p);
-	if (p == nullptr || *p != '"')
+	if (p == nullptr || out == nullptr || end == nullptr || *p != '"')
 	{
 		return false;
 	}
 	++p;
 	std::string value;
-	while (*p != '\0' && *p != '"')
+	while (*p != '\0')
 	{
-		if (*p == '\\' && p[1] != '\0')
+		if (*p == '"')
 		{
-			++p;
-			switch (*p)
-			{
-				case '"':
-				case '\\':
-				case '/': value.push_back(*p); break;
-				case 'n': value.push_back('\n'); break;
-				case 't': value.push_back('\t'); break;
-				default: value.push_back(*p); break;
-			}
-		} else
+			*out = value;
+			*end = p + 1;
+			return true;
+		}
+		if (static_cast<unsigned char>(*p) < 0x20u)
 		{
-			value.push_back(*p);
+			return false;
+		}
+		if (*p != '\\')
+		{
+			value.push_back(*p++);
+			continue;
 		}
 		++p;
+		switch (*p)
+		{
+			case '"': value.push_back('"'); ++p; break;
+			case '\\': value.push_back('\\'); ++p; break;
+			case '/': value.push_back('/'); ++p; break;
+			case 'b': value.push_back('\b'); ++p; break;
+			case 'f': value.push_back('\f'); ++p; break;
+			case 'n': value.push_back('\n'); ++p; break;
+			case 'r': value.push_back('\r'); ++p; break;
+			case 't': value.push_back('\t'); ++p; break;
+			case 'u':
+				++p;
+				if (!ParseUnicodeEscape(&p, &value))
+				{
+					return false;
+				}
+				break;
+			default: return false;
+		}
 	}
-	if (*p != '"')
-	{
-		return false;
-	}
-	*out = value;
-	*end = p + 1;
-	return true;
+	return false;
 }
 
 bool ParseU64Value(const char* p, uint64_t* out, const char** end)
 {
 	p = SkipWs(p);
-	if (p == nullptr || !std::isdigit(static_cast<unsigned char>(*p)))
+	if (p == nullptr || out == nullptr || end == nullptr || !std::isdigit(static_cast<unsigned char>(*p)))
 	{
 		return false;
 	}
-	char*      parse_end = nullptr;
-	const auto value     = std::strtoull(p, &parse_end, 10);
-	if (parse_end == p)
+	uint64_t value = 0;
+	while (std::isdigit(static_cast<unsigned char>(*p)))
+	{
+		const uint64_t digit = static_cast<uint64_t>(*p - '0');
+		if (value > (std::numeric_limits<uint64_t>::max() - digit) / 10u)
+		{
+			return false;
+		}
+		value = value * 10u + digit;
+		++p;
+	}
+	const char* delimiter = SkipWs(p);
+	if (*delimiter != ',' && *delimiter != '}' && *delimiter != ']')
 	{
 		return false;
 	}
 	*out = value;
-	*end = parse_end;
+	*end = p;
 	return true;
 }
 
@@ -1135,6 +1244,12 @@ bool ArgsGetString(const std::string& args_json, const char* key, std::string* o
 		return false;
 	}
 	return true;
+}
+
+bool ArgsHasKey(const std::string& args_json, const char* key)
+{
+	const char* value = nullptr;
+	return FindObjectField(args_json.c_str(), key, &value);
 }
 
 bool ArgsGetU64(const std::string& args_json, const char* key, uint64_t* out)
