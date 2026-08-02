@@ -1,4 +1,5 @@
 #include "Emulator/Audio.h"
+#include "Emulator/AudioHost.h"
 #include "Emulator/AudioVideoBackend.h"
 
 #include "Kyty/Core/Common.h"
@@ -7,7 +8,6 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 
-#include "Emulator/AudioPcm.h"
 #include "Emulator/Graphics/GuestTextureLayout.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Memory.h"
@@ -17,14 +17,11 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/GuestCall.h"
 
-#include "SDL.h"
-
 #include <algorithm>
 #include <atomic>
-#include <chrono>
-#include <climits>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -35,580 +32,36 @@
 
 namespace Kyty::Libs::Audio {
 
-class Audio
-{
-public:
-	enum class Format
-	{
-		Unknown,
-		Signed16bitMono,
-		Signed16bitStereo,
-		Signed16bit8Ch,
-		FloatMono,
-		FloatStereo,
-		Float8Ch,
-		Signed16bit8ChStd,
-		Float8ChStd,
-	};
-
-	class Id
-	{
-	public:
-		explicit Id(int id): m_id(id - 1) {}
-		[[nodiscard]] int  ToInt() const { return m_id + 1; }
-		[[nodiscard]] bool IsValid() const { return m_id >= 0; }
-
-		friend class Audio;
-
-	private:
-		Id() = default;
-		static Id Invalid() { return {}; }
-		static Id Create(int audio_id)
-		{
-			Id r;
-			r.m_id = audio_id;
-			return r;
-		}
-		[[nodiscard]] int GetId() const { return m_id; }
-
-		int m_id = -1;
-	};
-
-	struct OutputParam
-	{
-		Id          handle;
-		const void* data = nullptr;
-	};
-
-	Audio() = default;
-	~Audio();
-
-	KYTY_CLASS_NO_COPY(Audio);
-
-	Id   AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format);
-	bool AudioOutClose(Id handle);
-	bool AudioOutValid(Id handle);
-	bool AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume);
-	bool AudioOutOutputs(OutputParam* params, uint32_t num, uint32_t* samples_num);
-	bool AudioOutGetStatus(Id handle, int* type, int* channels_num);
-	void SetHostPaused(bool paused);
-
-	Id       AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format);
-	bool     AudioInValid(Id handle);
-	uint32_t AudioInInput(Id handle, void* dest);
-
-	static constexpr int OUT_PORTS_MAX = 32;
-	static constexpr int IN_PORTS_MAX  = 8;
-
-private:
-	struct PortOut
-	{
-		bool                 used                 = false;
-		int                  type                 = 0;
-		uint32_t             samples_num          = 0;
-		uint32_t             freq                 = 0;
-		Format               format               = Format::Unknown;
-		uint64_t             last_output_time     = 0;
-		int                  channels_num         = 0;
-		int                  volume[8]            = {};
-		uint32_t             device_id            = 0;
-		SDL_AudioStream*     conversion_stream    = nullptr;
-		AudioPcmFormat       pcm_format           = AudioPcmFormat::Signed16;
-		size_t               queue_capacity       = 0;
-		bool                 queue_error_logged   = false;
-		bool                 queue_overrun_logged = false;
-		std::vector<uint8_t> volume_buffer;
-		std::vector<uint8_t> device_buffer;
-	};
-
-	static void CloseOutputPort(PortOut* port);
-
-	struct PortIn
-	{
-		bool     used            = false;
-		uint32_t type            = 0;
-		uint32_t samples_num     = 0;
-		uint32_t freq            = 0;
-		Format   format          = Format::Unknown;
-		uint64_t last_input_time = 0;
-	};
-
-	Core::Mutex   m_mutex;
-	Core::CondVar m_host_pause_changed;
-	bool          m_host_paused = false;
-	PortOut       m_out_ports[OUT_PORTS_MAX];
-	PortIn        m_in_ports[IN_PORTS_MAX];
-};
-
-static Audio* g_audio = nullptr;
-
-static int InitHostAudio()
-{
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-	if (SDL_getenv("SDL_AUDIODRIVER") == nullptr)
-	{
-		for (int i = 0; i < SDL_GetNumAudioDrivers(); i++)
-		{
-			if (strcmp(SDL_GetAudioDriver(i), "pipewire") == 0)
-			{
-				if (SDL_AudioInit("pipewire") == 0)
-				{
-					return 0;
-				}
-				SDL_AudioQuit();
-				break;
-			}
-		}
-	}
-#endif
-	return SDL_InitSubSystem(SDL_INIT_AUDIO);
-}
+static std::shared_ptr<HostAudio> g_host_audio;
 
 KYTY_SUBSYSTEM_INIT(Audio)
 {
-	EXIT_IF(g_audio != nullptr);
-	if (InitHostAudio() < 0)
+	EXIT_IF(std::atomic_load(&g_host_audio) != nullptr);
+	std::string error;
+	auto        audio = HostAudio::Create(&error);
+	if (audio == nullptr)
 	{
-		KYTY_SUBSYSTEM_FAIL("%s\n", SDL_GetError());
+		KYTY_SUBSYSTEM_FAIL("%s\n", error.c_str());
 	}
-
-	g_audio = new Audio;
+	std::atomic_store(&g_host_audio, std::move(audio));
 }
 
 KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Audio)
 {
-	delete g_audio;
-	g_audio = nullptr;
-	SDL_QuitSubSystem(SDL_INIT_AUDIO);
+	auto audio = std::atomic_exchange(&g_host_audio, std::shared_ptr<HostAudio> {});
+	if (audio != nullptr)
+	{
+		audio->Shutdown();
+	}
 }
 
 KYTY_SUBSYSTEM_DESTROY(Audio)
 {
-	delete g_audio;
-	g_audio = nullptr;
-	SDL_QuitSubSystem(SDL_INIT_AUDIO);
-}
-
-constexpr uint32_t HOST_AUDIO_TARGET_QUEUE_MS = 60;
-constexpr uint32_t HOST_AUDIO_MAXIMUM_WAIT_MS = 250;
-
-void Audio::CloseOutputPort(PortOut* port)
-{
-	EXIT_IF(port == nullptr);
-	if (port->conversion_stream != nullptr)
+	auto audio = std::atomic_exchange(&g_host_audio, std::shared_ptr<HostAudio> {});
+	if (audio != nullptr)
 	{
-		SDL_FreeAudioStream(port->conversion_stream);
-		port->conversion_stream = nullptr;
+		audio->Shutdown();
 	}
-	if (port->device_id != 0)
-	{
-		SDL_ClearQueuedAudio(port->device_id);
-		SDL_CloseAudioDevice(port->device_id);
-		port->device_id = 0;
-	}
-	*port = PortOut {};
-}
-
-Audio::~Audio()
-{
-	for (auto& port: m_out_ports)
-	{
-		CloseOutputPort(&port);
-	}
-}
-
-Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format)
-{
-	Core::LockGuard lock(m_mutex);
-
-	for (int id = 0; id < OUT_PORTS_MAX; id++)
-	{
-		if (!m_out_ports[id].used)
-		{
-			auto& port = m_out_ports[id];
-
-			port.used             = true;
-			port.type             = type;
-			port.samples_num      = samples_num;
-			port.freq             = freq;
-			port.format           = format;
-			port.last_output_time = 0;
-
-			switch (format)
-			{
-				case Format::Signed16bitMono:
-				case Format::FloatMono: port.channels_num = 1; break;
-				case Format::Signed16bitStereo:
-				case Format::FloatStereo: port.channels_num = 2; break;
-				case Format::Signed16bit8Ch:
-				case Format::Float8Ch:
-				case Format::Signed16bit8ChStd:
-				case Format::Float8ChStd: port.channels_num = 8; break;
-				default: EXIT("unknown format");
-			}
-
-			for (int i = 0; i < port.channels_num; i++)
-			{
-				port.volume[i] = 32768;
-			}
-
-			if (type == 0 || type == 1)
-			{
-				SDL_AudioSpec desired {};
-				SDL_AudioSpec obtained {};
-				port.pcm_format  = (format == Format::Signed16bitMono || format == Format::Signed16bitStereo ||
-				                    format == Format::Signed16bit8Ch || format == Format::Signed16bit8ChStd)
-				                       ? AudioPcmFormat::Signed16
-				                       : AudioPcmFormat::Float32;
-				desired.freq     = static_cast<int>(freq);
-				desired.format   = port.pcm_format == AudioPcmFormat::Signed16 ? AUDIO_S16SYS : AUDIO_F32SYS;
-				desired.channels = static_cast<uint8_t>(port.channels_num);
-				desired.samples  = static_cast<uint16_t>(samples_num);
-				desired.callback = nullptr;
-				constexpr int allowed_changes =
-				    SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
-				port.device_id = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, allowed_changes);
-				if (port.device_id == 0 || obtained.format != desired.format)
-				{
-					CloseOutputPort(&port);
-					return Id::Invalid();
-				}
-
-				port.queue_capacity = AudioPcmQueueBytes(static_cast<uint32_t>(obtained.freq), obtained.channels, port.pcm_format,
-				                                         HOST_AUDIO_TARGET_QUEUE_MS);
-				if (port.queue_capacity == 0)
-				{
-					CloseOutputPort(&port);
-					return Id::Invalid();
-				}
-
-				if (obtained.freq != desired.freq || obtained.format != desired.format || obtained.channels != desired.channels)
-				{
-					port.conversion_stream = SDL_NewAudioStream(desired.format, desired.channels, desired.freq, obtained.format,
-					                                            obtained.channels, obtained.freq);
-					if (port.conversion_stream == nullptr)
-					{
-						CloseOutputPort(&port);
-						return Id::Invalid();
-					}
-					std::fprintf(stderr, "Kyty audio conversion: %d Hz/%u ch/0x%x -> %d Hz/%u ch/0x%x\n", desired.freq, desired.channels,
-					             desired.format, obtained.freq, obtained.channels, obtained.format);
-				}
-				SDL_PauseAudioDevice(port.device_id, m_host_paused ? 1 : 0);
-			}
-
-			return Id::Create(id);
-		}
-	}
-
-	return Id::Invalid();
-}
-
-bool Audio::AudioOutClose(Id handle)
-{
-	Core::LockGuard lock(m_mutex);
-
-	if (AudioOutValid(handle))
-	{
-		auto& port = m_out_ports[handle.GetId()];
-		CloseOutputPort(&port);
-		return true;
-	}
-
-	return false;
-}
-
-bool Audio::AudioOutValid(Id handle)
-{
-	Core::LockGuard lock(m_mutex);
-
-	return (handle.GetId() >= 0 && handle.GetId() < OUT_PORTS_MAX && m_out_ports[handle.GetId()].used);
-}
-
-bool Audio::AudioOutGetStatus(Id handle, int* type, int* channels_num)
-{
-	Core::LockGuard lock(m_mutex);
-
-	if (AudioOutValid(handle))
-	{
-		auto& port = m_out_ports[handle.GetId()];
-
-		*type         = port.type;
-		*channels_num = port.channels_num;
-
-		return true;
-	}
-
-	return false;
-}
-
-bool Audio::AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume)
-{
-	Core::LockGuard lock(m_mutex);
-
-	if (AudioOutValid(handle))
-	{
-		auto& port = m_out_ports[handle.GetId()];
-
-		for (int i = 0; i < port.channels_num; i++, bitflag >>= 1u)
-		{
-			auto bit = bitflag & 0x1u;
-
-			if (bit == 1)
-			{
-				int src_index = i;
-				if (port.format == Format::Float8ChStd || port.format == Format::Signed16bit8ChStd)
-				{
-					switch (i)
-					{
-						case 4: src_index = 6; break;
-						case 5: src_index = 7; break;
-						case 6: src_index = 4; break;
-						case 7: src_index = 5; break;
-						default:;
-					}
-				}
-				port.volume[i] = volume[src_index];
-
-				printf("\t port.volume[%d] = volume[%d] (%d)\n", i, src_index, volume[src_index]);
-			}
-		}
-
-		return true;
-	}
-
-	return false;
-}
-
-void Audio::SetHostPaused(bool paused)
-{
-	Core::LockGuard lock(m_mutex);
-	if (m_host_paused == paused)
-	{
-		return;
-	}
-
-	// Close the producer gate before pausing devices. On resume, start devices
-	// before releasing producers so the first grain cannot queue behind a
-	// device that is still paused.
-	if (paused)
-	{
-		m_host_paused = true;
-	}
-	for (auto& port: m_out_ports)
-	{
-		if (port.device_id != 0)
-		{
-			SDL_PauseAudioDevice(port.device_id, paused ? 1 : 0);
-		}
-	}
-	if (!paused)
-	{
-		m_host_paused = false;
-		m_host_pause_changed.SignalAll();
-	}
-}
-
-bool Audio::AudioOutOutputs(OutputParam* params, uint32_t num, uint32_t* samples_num)
-{
-	Core::LockGuard lock(m_mutex);
-	while (m_host_paused)
-	{
-		m_host_pause_changed.Wait(&m_mutex);
-	}
-
-	EXIT_NOT_IMPLEMENTED(num == 0);
-	EXIT_IF(samples_num == nullptr);
-	for (uint32_t i = 0; i < num; i++)
-	{
-		const int id = params[i].handle.GetId();
-		if (id < 0 || id >= OUT_PORTS_MAX || !m_out_ports[id].used)
-		{
-			return false;
-		}
-	}
-
-	const auto& first_port = m_out_ports[params[0].handle.GetId()];
-	*samples_num           = first_port.samples_num;
-
-	uint64_t block_time   = (params->data != nullptr ? (1000000 * first_port.samples_num) / first_port.freq : 0);
-	uint64_t current_time = LibKernel::KernelGetProcessTime();
-
-	uint64_t max_wait_time = 0;
-
-	for (uint32_t i = 0; i < num; i++)
-	{
-		uint64_t next_time = m_out_ports[params[i].handle.GetId()].last_output_time + block_time;
-		uint64_t wait_time = (next_time > current_time ? next_time - current_time : 0);
-		max_wait_time      = (wait_time > max_wait_time ? wait_time : max_wait_time);
-	}
-
-	bool queued_to_device = false;
-	for (uint32_t i = 0; i < num; i++)
-	{
-		auto& port = m_out_ports[params[i].handle.GetId()];
-		if (params[i].data == nullptr || port.device_id == 0)
-		{
-			continue;
-		}
-		if (!AudioPcmApplyChannelVolumes(params[i].data, port.samples_num, static_cast<uint32_t>(port.channels_num), port.pcm_format,
-		                                 port.volume, &port.volume_buffer) ||
-		    port.volume_buffer.size() > static_cast<size_t>(INT_MAX))
-		{
-			return false;
-		}
-
-		const auto queue_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(HOST_AUDIO_MAXIMUM_WAIT_MS);
-		while (static_cast<size_t>(SDL_GetQueuedAudioSize(port.device_id)) >= port.queue_capacity)
-		{
-			if (std::chrono::steady_clock::now() >= queue_deadline)
-			{
-				if (!port.queue_overrun_logged)
-				{
-					std::fprintf(stderr, "Kyty audio queue remained above %zu bytes for %u ms; accepting one grain\n", port.queue_capacity,
-					             HOST_AUDIO_MAXIMUM_WAIT_MS);
-					port.queue_overrun_logged = true;
-				}
-				break;
-			}
-			Core::Thread::SleepMicro(1000);
-		}
-
-		const void* queue_data = port.volume_buffer.data();
-		size_t      queue_size = port.volume_buffer.size();
-		if (port.conversion_stream != nullptr)
-		{
-			if (SDL_AudioStreamPut(port.conversion_stream, queue_data, static_cast<int>(queue_size)) != 0)
-			{
-				if (!port.queue_error_logged)
-				{
-					std::fprintf(stderr, "Kyty audio conversion input failed: %s\n", SDL_GetError());
-					port.queue_error_logged = true;
-				}
-				continue;
-			}
-			const int available = SDL_AudioStreamAvailable(port.conversion_stream);
-			if (available < 0)
-			{
-				if (!port.queue_error_logged)
-				{
-					std::fprintf(stderr, "Kyty audio conversion query failed: %s\n", SDL_GetError());
-					port.queue_error_logged = true;
-				}
-				continue;
-			}
-			if (available == 0)
-			{
-				queued_to_device = true;
-				continue;
-			}
-			port.device_buffer.resize(static_cast<size_t>(available));
-			const int converted = SDL_AudioStreamGet(port.conversion_stream, port.device_buffer.data(), available);
-			if (converted < 0)
-			{
-				if (!port.queue_error_logged)
-				{
-					std::fprintf(stderr, "Kyty audio conversion output failed: %s\n", SDL_GetError());
-					port.queue_error_logged = true;
-				}
-				continue;
-			}
-			queue_data = port.device_buffer.data();
-			queue_size = static_cast<size_t>(converted);
-		}
-
-		if (queue_size != 0 && SDL_QueueAudio(port.device_id, queue_data, static_cast<uint32_t>(queue_size)) != 0)
-		{
-			if (!port.queue_error_logged)
-			{
-				std::fprintf(stderr, "Kyty audio queue failed: %s\n", SDL_GetError());
-				port.queue_error_logged = true;
-			}
-			// SDL can invalidate a device during host shutdown or after an
-			// external device loss. Stop retrying the dead handle on every guest
-			// audio grain; the port remains valid but falls back to silent output.
-			const auto failed_device = port.device_id;
-			port.device_id         = 0;
-			port.queue_capacity    = 0;
-			SDL_CloseAudioDevice(failed_device);
-			continue;
-		}
-		queued_to_device = true;
-	}
-
-	if (!queued_to_device)
-	{
-		Core::Thread::SleepMicro(max_wait_time);
-	}
-
-	for (uint32_t i = 0; i < num; i++)
-	{
-		const int id = params[i].handle.GetId();
-		if (id >= 0 && id < OUT_PORTS_MAX && m_out_ports[id].used)
-		{
-			m_out_ports[id].last_output_time = LibKernel::KernelGetProcessTime();
-		}
-	}
-
-	return true;
-}
-
-Audio::Id Audio::AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format)
-{
-	Core::LockGuard lock(m_mutex);
-
-	for (int id = 0; id < IN_PORTS_MAX; id++)
-	{
-		if (!m_in_ports[id].used)
-		{
-			auto& port = m_in_ports[id];
-
-			port.used        = true;
-			port.type        = type;
-			port.samples_num = samples_num;
-			port.freq        = freq;
-			port.format      = format;
-
-			switch (format)
-			{
-				case Format::Signed16bitMono:
-				case Format::Signed16bitStereo: break;
-				default: EXIT("unknown format");
-			}
-
-			return Id::Create(id);
-		}
-	}
-
-	return Id::Invalid();
-}
-
-bool Audio::AudioInValid(Id handle)
-{
-	Core::LockGuard lock(m_mutex);
-
-	return (handle.GetId() >= 0 && handle.GetId() < IN_PORTS_MAX && m_in_ports[handle.GetId()].used);
-}
-
-uint32_t Audio::AudioInInput(Id handle, void* dest)
-{
-	EXIT_NOT_IMPLEMENTED(!AudioInValid(handle));
-	EXIT_NOT_IMPLEMENTED(dest == nullptr);
-
-	const auto& port = m_in_ports[handle.GetId()];
-
-	uint64_t block_time   = (1000000 * port.samples_num) / port.freq;
-	uint64_t current_time = LibKernel::KernelGetProcessTime();
-
-	uint64_t next_time = m_in_ports[handle.GetId()].last_input_time + block_time;
-	uint64_t wait_time = (next_time > current_time ? next_time - current_time : 0);
-
-	// TODO(): Audio input is not yet implemented, so simulate audio delay
-	Core::Thread::SleepMicro(wait_time);
-
-	m_in_ports[handle.GetId()].last_input_time = LibKernel::KernelGetProcessTime();
-
-	return port.samples_num;
 }
 
 namespace AudioOut {
@@ -617,9 +70,10 @@ LIB_NAME("AudioOut", "AudioOut");
 
 void AudioOutSetHostPaused(bool paused)
 {
-	if (g_audio != nullptr)
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio != nullptr)
 	{
-		g_audio->SetHostPaused(paused);
+		audio->SetHostPaused(paused);
 	}
 }
 
@@ -663,28 +117,31 @@ int KYTY_SYSV_ABI AudioOutOpen(int user_id, int type, int index, uint32_t len, u
 	EXIT_NOT_IMPLEMENTED(type != 0 && type != 1 && type != 3 && type != 4 && type != 10 && type != 126);
 	EXIT_NOT_IMPLEMENTED(index != 0);
 
-	Audio::Format format = Audio::Format::Unknown;
+	HostAudio::Format format = HostAudio::Format::Unknown;
 
 	switch (param)
 	{
-		case 0: format = Audio::Format::Signed16bitMono; break;
-		case 1: format = Audio::Format::Signed16bitStereo; break;
-		case 2: format = Audio::Format::Signed16bit8Ch; break;
-		case 3: format = Audio::Format::FloatMono; break;
-		case 4: format = Audio::Format::FloatStereo; break;
-		case 5: format = Audio::Format::Float8Ch; break;
-		case 6: format = Audio::Format::Signed16bit8ChStd; break;
-		case 7: format = Audio::Format::Float8ChStd; break;
+		case 0: format = HostAudio::Format::Signed16bitMono; break;
+		case 1: format = HostAudio::Format::Signed16bitStereo; break;
+		case 2: format = HostAudio::Format::Signed16bit8Ch; break;
+		case 3: format = HostAudio::Format::FloatMono; break;
+		case 4: format = HostAudio::Format::FloatStereo; break;
+		case 5: format = HostAudio::Format::Float8Ch; break;
+		case 6: format = HostAudio::Format::Signed16bit8ChStd; break;
+		case 7: format = HostAudio::Format::Float8ChStd; break;
 		default:;
 	}
 
 	printf("\t param   = %u (%s)\n", param, Core::EnumName(format).C_Str());
 
-	EXIT_NOT_IMPLEMENTED(format == Audio::Format::Unknown);
+	EXIT_NOT_IMPLEMENTED(format == HostAudio::Format::Unknown);
 
-	EXIT_IF(g_audio == nullptr);
-
-	auto id = g_audio->AudioOutOpen(type, len, freq, format);
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr)
+	{
+		return AUDIO_OUT_ERROR_PORT_FULL;
+	}
+	auto id = audio->AudioOutOpen(type, len, freq, format);
 
 	if (!id.IsValid())
 	{
@@ -698,7 +155,8 @@ int KYTY_SYSV_ABI AudioOutClose(int handle)
 {
 	PRINT_NAME();
 
-	if (!g_audio->AudioOutClose(Audio::Id(handle)))
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr || !audio->AudioOutClose(HostAudio::Id(handle)))
 	{
 		return AUDIO_OUT_ERROR_INVALID_PORT;
 	}
@@ -713,7 +171,8 @@ int KYTY_SYSV_ABI AudioOutGetPortState(int handle, AudioOutPortState* state)
 	int type         = 0;
 	int channels_num = 0;
 
-	if (!g_audio->AudioOutGetStatus(Audio::Id(handle), &type, &channels_num))
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr || !audio->AudioOutGetStatus(HostAudio::Id(handle), &type, &channels_num))
 	{
 		return AUDIO_OUT_ERROR_INVALID_PORT;
 	}
@@ -759,10 +218,10 @@ int KYTY_SYSV_ABI AudioOutSetVolume(int handle, uint32_t flag, int* vol)
 	printf("\t handle = %d\n", handle);
 	printf("\t flag   = %u\n", flag);
 
-	EXIT_IF(g_audio == nullptr);
 	EXIT_NOT_IMPLEMENTED(vol == nullptr);
 
-	if (!g_audio->AudioOutSetVolume(Audio::Id(handle), flag, vol))
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr || !audio->AudioOutSetVolume(HostAudio::Id(handle), flag, vol))
 	{
 		return AUDIO_OUT_ERROR_INVALID_PORT;
 	}
@@ -773,26 +232,31 @@ int KYTY_SYSV_ABI AudioOutSetVolume(int handle, uint32_t flag, int* vol)
 int KYTY_SYSV_ABI AudioOutOutputs(AudioOutOutputParam* param, uint32_t num)
 {
 	PRINT_NAME();
+	if (param == nullptr || num == 0 || num > HostAudio::OUT_PORTS_MAX)
+	{
+		return AUDIO_OUT_ERROR_INVALID_PORT;
+	}
 
 	for (uint32_t i = 0; i < num; i++)
 	{
 		printf("\t handle[%u] = %d\n", i, param[i].handle);
 	}
 
-	EXIT_NOT_IMPLEMENTED(param == nullptr);
-
-	Audio::OutputParam params[Audio::OUT_PORTS_MAX];
-
-	EXIT_IF(g_audio == nullptr);
+	HostAudio::OutputParam params[HostAudio::OUT_PORTS_MAX];
+	auto                   audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr)
+	{
+		return AUDIO_OUT_ERROR_INVALID_PORT;
+	}
 
 	for (uint32_t i = 0; i < num; i++)
 	{
-		params[i].handle = Audio::Id(param[i].handle);
+		params[i].handle = HostAudio::Id(param[i].handle);
 		params[i].data   = param[i].ptr;
 	}
 
 	uint32_t samples_num = 0;
-	return g_audio->AudioOutOutputs(params, num, &samples_num) ? static_cast<int>(samples_num) : AUDIO_OUT_ERROR_INVALID_PORT;
+	return audio->AudioOutOutputs(params, num, &samples_num) ? static_cast<int>(samples_num) : AUDIO_OUT_ERROR_INVALID_PORT;
 }
 
 int KYTY_SYSV_ABI AudioOutOutput(int handle, const void* ptr)
@@ -803,15 +267,18 @@ int KYTY_SYSV_ABI AudioOutOutput(int handle, const void* ptr)
 
 	// EXIT_NOT_IMPLEMENTED(ptr == nullptr);
 
-	Audio::OutputParam params[1];
+	HostAudio::OutputParam params[1];
+	auto                   audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr)
+	{
+		return AUDIO_OUT_ERROR_INVALID_PORT;
+	}
 
-	EXIT_IF(g_audio == nullptr);
-
-	params[0].handle = Audio::Id(handle);
+	params[0].handle = HostAudio::Id(handle);
 	params[0].data   = ptr;
 
 	uint32_t samples_num = 0;
-	return g_audio->AudioOutOutputs(params, 1, &samples_num) ? static_cast<int>(samples_num) : AUDIO_OUT_ERROR_INVALID_PORT;
+	return audio->AudioOutOutputs(params, 1, &samples_num) ? static_cast<int>(samples_num) : AUDIO_OUT_ERROR_INVALID_PORT;
 }
 
 } // namespace AudioOut
@@ -1206,22 +673,25 @@ int KYTY_SYSV_ABI AudioInOpen(int user_id, uint32_t type, uint32_t index, uint32
 	EXIT_NOT_IMPLEMENTED(type != 1);
 	EXIT_NOT_IMPLEMENTED(index != 0);
 
-	Audio::Format format = Audio::Format::Unknown;
+	HostAudio::Format format = HostAudio::Format::Unknown;
 
 	switch (param)
 	{
-		case 0: format = Audio::Format::Signed16bitMono; break;
-		case 2: format = Audio::Format::Signed16bitStereo; break;
+		case 0: format = HostAudio::Format::Signed16bitMono; break;
+		case 2: format = HostAudio::Format::Signed16bitStereo; break;
 		default:;
 	}
 
 	printf("\t param   = %u (%s)\n", param, Core::EnumName(format).C_Str());
 
-	EXIT_NOT_IMPLEMENTED(format == Audio::Format::Unknown);
+	EXIT_NOT_IMPLEMENTED(format == HostAudio::Format::Unknown);
 
-	EXIT_IF(g_audio == nullptr);
-
-	auto id = g_audio->AudioInOpen(type, len, freq, format);
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr)
+	{
+		return AUDIO_IN_ERROR_PORT_FULL;
+	}
+	auto id = audio->AudioInOpen(type, len, freq, format);
 
 	if (!id.IsValid())
 	{
@@ -1237,14 +707,13 @@ int KYTY_SYSV_ABI AudioInInput(int handle, void* dest)
 
 	EXIT_NOT_IMPLEMENTED(dest == nullptr);
 
-	EXIT_IF(g_audio == nullptr);
-
-	if (!g_audio->AudioInValid(Audio::Id(handle)))
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr || !audio->AudioInValid(HostAudio::Id(handle)))
 	{
 		return AUDIO_IN_ERROR_INVALID_HANDLE;
 	}
 
-	return static_cast<int>(g_audio->AudioInInput(Audio::Id(handle), dest));
+	return static_cast<int>(audio->AudioInInput(HostAudio::Id(handle), dest));
 }
 
 } // namespace AudioIn

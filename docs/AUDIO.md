@@ -1,9 +1,9 @@
 # Audio runtime
 
-Kyty keeps guest audio generation separate from host delivery. NGS2 decodes
-and mixes voice data; AudioOut owns guest-visible ports, timing and per-channel
-volume; SDL converts and queues PCM for the selected host device. No PCM cache
-is written to disk.
+Kyty keeps guest audio generation separate from host delivery. `Audio.cpp`
+owns the guest-visible ABI and services. `AudioHost.cpp` owns SDL devices,
+PCM conversion, port synchronization and real-time pacing. NGS2 remains
+responsible for voice decoding and mixing. No PCM cache is written to disk.
 
 ## AudioOut host path
 
@@ -24,12 +24,16 @@ buffer size. One `SDL_AudioStream` per port converts the guest stream to that
 actual device contract. A different sample format is rejected at open time;
 it is not reinterpreted.
 
-The host queue is bounded by time, not by a guest-specific number of grains:
+Each successful output advances one grain on a monotonic per-port clock. PCM
+is converted and copied into SDL while the port lifecycle lock is held, then
+the producer sleeps outside that lock until the grain deadline. If a producer
+falls more than four grains behind, the deadline is resynchronized instead of
+trying to replay an obsolete backlog. This prevents both multi-grain bursts
+and long queue-capacity stalls.
 
-- target queued duration: 60 ms;
-- maximum producer wait while saturated: 250 ms;
-- queue errors are reported once per port instead of being converted to fake
-  success with discarded state.
+Queue or conversion failures are returned to the guest-facing service and
+reported once per port. They do not silently destroy the SDL device or switch
+the port to synthetic silence.
 
 MAIN and BGM ports own SDL devices. Other guest port types retain timing but do
 not invent a host sink.
@@ -40,7 +44,9 @@ not invent a host sink.
 producer gate before pausing each SDL device. Resume starts devices before
 waking producers, preventing a resumed grain from racing a still-paused sink.
 Port close clears queued audio and releases both the conversion stream and SDL
-device.
+device. Shutdown first removes the shared host backend from the guest call
+path, then waits for any in-flight SDL copy before closing devices. Calls that
+already acquired the backend keep its lifetime valid until they return.
 
 ## NGS2 CustomSampler
 
@@ -60,10 +66,18 @@ behavior for them.
 ## Verification
 
 ```bash
-cmake --build _build_linux --target fc_script -j4
-_build_linux/fc_script scripts/run_unit_tests.lua \
-  --gtest_filter='EmulatorAudio.*'
+cmake -S source -B _build_linux -DBUILD_TESTING=ON
+cmake --build _build_linux --target kyty_audio_host_integration -j4
+SDL_AUDIODRIVER=disk \
+SDL_DISKAUDIOFILE=/tmp/kyty-audio-host-integration.raw \
+  _build_linux/integration_test/kyty_audio_host_integration
 ```
+
+The integration opens production SDL output ports, submits twelve 10 ms PCM
+grains, checks elapsed monotonic time, and closes a real device concurrently
+with an in-flight producer. It then verifies that the closed port rejects the
+next grain. The disk driver makes this contract deterministic without needing
+speakers; the generated file is disposable.
 
 For runtime evidence, use a Release build, silent HLE function logging and a
 clean host audio session. Record device format, channels, sample rate,
@@ -72,8 +86,14 @@ proves device creation, not sound generation.
 
 ## Failure diagnosis
 
-- `audio queue failed: Invalid audio device ID` after an earlier fatal error is
-  usually shutdown damage; diagnose the first failure.
+- `Invalid audio device ID` at shutdown means an output thread reached SDL
+  after its port was closed. The shared backend handoff and lifecycle lock are
+  the regression boundary; do not suppress the message or keep using the dead
+  numeric ID.
+- Audio that repeats a short block and then pauses indicates burst delivery.
+  Measure elapsed time across consecutive AudioOut grains: twelve 480-frame
+  grains at 48 kHz must take approximately 120 ms, not complete immediately
+  and not wait on a 60 ms queue threshold.
 - A host backend assertion can originate below Kyty. On Linux, PipeWire is
   preferred when SDL compiled it and initialization succeeds; an explicit
   `SDL_AUDIODRIVER` remains authoritative.

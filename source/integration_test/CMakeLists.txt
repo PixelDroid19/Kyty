@@ -444,6 +444,31 @@ add_test(
 	NAME KytyAgentTransport.NativeRoundTrip
 	COMMAND $<TARGET_FILE:kyty_agent_transport_integration>
 )
+
+add_executable(kyty_audio_host_integration
+	src/AudioHostIntegration.cpp
+)
+
+target_link_libraries(kyty_audio_host_integration
+	PRIVATE
+		emulator
+)
+
+target_include_directories(kyty_audio_host_integration
+	PRIVATE
+		"${CMAKE_SOURCE_DIR}/include"
+		"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+
+add_test(
+	NAME KytyAudioHostIntegration.PacingAndLifecycle
+	COMMAND $<TARGET_FILE:kyty_audio_host_integration>
+)
+set_tests_properties(KytyAudioHostIntegration.PacingAndLifecycle PROPERTIES
+	ENVIRONMENT "SDL_AUDIODRIVER=disk;SDL_DISKAUDIOFILE=/tmp/kyty-audio-host-integration.raw"
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 30
+)
 set_tests_properties(KytyAgentTransport.NativeRoundTrip PROPERTIES
 	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 15
@@ -462,6 +487,7 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_loader_integration
 	kyty_agent_protocol_integration
 	kyty_agent_transport_integration
+	kyty_audio_host_integration
 )
 
 add_test(
