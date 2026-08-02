@@ -2640,7 +2640,27 @@ static bool get_video_frame_bytes(uint32_t width, uint32_t height, size_t* out)
 
 static bool avplayer_dump_enabled()
 {
-	return std::getenv("KYTY_DUMP_AVPLAYER") != nullptr;
+	const char* value = std::getenv("KYTY_DUMP_AVPLAYER");
+	return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+static bool avplayer_dump_video_enabled()
+{
+	if (!avplayer_dump_enabled())
+	{
+		return false;
+	}
+	static std::atomic_uint32_t count {0};
+	const uint32_t ordinal = count.fetch_add(1, std::memory_order_relaxed);
+	if (ordinal < 128)
+	{
+		return true;
+	}
+	if (ordinal == 128)
+	{
+		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER further video frames suppressed\n");
+	}
+	return false;
 }
 
 static void avplayer_dump_call(const char* name, const AvPlayerInternal* player)
@@ -3069,7 +3089,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 	info->details.video.video_full_tange_flag = 0;
 	info->details.video.framerate             = static_cast<double>(frame_rate);
 
-	if (avplayer_dump_enabled())
+	if (avplayer_dump_video_enabled())
 	{
 		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER video handle=%p frame=%u data=%p time=%" PRIu64 " size=%ux%u real=%d\n",
 		             static_cast<void*>(r), frame_index + 1, info->data, info->time_stamp, width, height, is_real ? 1 : 0);
