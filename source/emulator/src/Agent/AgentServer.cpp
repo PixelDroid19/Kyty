@@ -1012,18 +1012,6 @@ static constexpr HandlerEntry kHandlers[] = {
     {Tool::Unknown, HandleUnknown},
 };
 
-std::string Dispatch(const Request& req)
-{
-	for (const auto& entry: kHandlers)
-	{
-		if (entry.tool == req.kind)
-		{
-			return entry.handler(req);
-		}
-	}
-	return HandleUnknown(req);
-}
-
 bool WriteAll(Kyty::Agent::LocalTransport::Connection* connection, const std::string& line)
 {
 	std::string payload = line;
@@ -1069,7 +1057,7 @@ void HandleClient(Kyty::Agent::LocalTransport::Connection* connection)
 			}
 			continue;
 		}
-		const std::string response = Dispatch(req);
+		const std::string response = Internal::DispatchRequest(req);
 		if (!WriteAll(connection, response))
 		{
 			break;
@@ -1105,6 +1093,22 @@ void ServerThread(void* /*arg*/)
 }
 
 } // namespace
+
+namespace Internal {
+
+std::string DispatchRequest(const Request& req)
+{
+	for (const auto& entry: kHandlers)
+	{
+		if (entry.tool == req.kind)
+		{
+			return entry.handler(req);
+		}
+	}
+	return HandleUnknown(req);
+}
+
+} // namespace Internal
 
 bool StartFromEnv()
 {

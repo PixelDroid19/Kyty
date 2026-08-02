@@ -431,6 +431,13 @@ target_link_libraries(kyty_agent_transport_integration
 	PRIVATE
 		kyty_agent_cli
 		kyty_agent_transport
+		emulator
+)
+
+target_include_directories(kyty_agent_transport_integration
+	PRIVATE
+		"${CMAKE_SOURCE_DIR}/include"
+		"${CMAKE_SOURCE_DIR}/emulator/include"
 )
 
 add_test(

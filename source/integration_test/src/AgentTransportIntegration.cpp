@@ -1,6 +1,9 @@
 #include "Kyty/Agent/Cli.h"
 #include "Kyty/Agent/LocalTransport.h"
 
+#include "Emulator/Agent/AgentServer.h"
+#include "Emulator/Agent/Protocol.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -173,27 +176,35 @@ void RunCliDebugSnapshotWorkflow(const std::string& endpoint)
 				break;
 			}
 
-			std::string response;
-			if (step == 0)
+			Kyty::Emulator::Agent::Request   parsed_request {};
+			Kyty::Emulator::Agent::ErrorInfo parse_error {};
+			const bool                       parsed = Kyty::Emulator::Agent::ParseRequestLine(request.c_str(), &parsed_request, &parse_error);
+			std::string                     response;
+			if (!parsed)
 			{
-				workflow_ok = workflow_ok && request.find("\"tool\":\"help\"") != std::string::npos;
-				response =
-				    "{\"id\":1,\"ok\":true,\"protocol_version\":6,\"result\":{\"schema\":\"agent_tools\","
-				    "\"capabilities\":{\"debug_snapshot\":true}}}\n";
-				workflow_ok = workflow_ok && response.find("\"debug_snapshot\":true") != std::string::npos;
+				workflow_ok = false;
+				response     = Kyty::Emulator::Agent::FormatErr(0, parse_error.code.c_str(), parse_error.message.c_str());
 			} else
 			{
-				workflow_ok = workflow_ok && request.find("\"tool\":\"debug_snapshot\"") != std::string::npos &&
-				              request.find("\"events_last\":100") != std::string::npos;
-				response =
-				    "{\"id\":1,\"ok\":true,\"protocol_version\":6,\"result\":{\"protocol_version\":6,"
-				    "\"schema\":\"debug_snapshot\",\"event_seq_start\":8,\"event_seq_end\":8,"
-				    "\"stable\":true,\"status\":null,\"diagnostics\":null,\"threads\":null,"
-				    "\"sync_waits\":null,\"events\":null,\"last_error\":null}}\n";
-				const char* required[] = {"\"schema\":\"debug_snapshot\"", "\"event_seq_start\":", "\"event_seq_end\":"};
-				for (const char* field: required)
+				response = Kyty::Emulator::Agent::Internal::DispatchRequest(parsed_request);
+				if (step == 0)
 				{
-					workflow_ok = workflow_ok && response.find(field) != std::string::npos;
+					workflow_ok = workflow_ok && parsed_request.kind == Kyty::Emulator::Agent::Tool::Help &&
+					              parsed_request.tool == "help" && parsed_request.args_json == "{}";
+					workflow_ok = workflow_ok && response.find("\"capabilities\":") != std::string::npos &&
+					              response.find("\"debug_snapshot\":true") != std::string::npos;
+				} else
+				{
+					uint32_t events_last = 0;
+					workflow_ok = workflow_ok && parsed_request.kind == Kyty::Emulator::Agent::Tool::DebugSnapshot &&
+					              parsed_request.tool == "debug_snapshot" &&
+					              Kyty::Emulator::Agent::ArgsGetU32(parsed_request.args_json, "events_last", &events_last) &&
+					              events_last == 100;
+					const char* required[] = {"\"schema\":\"debug_snapshot\"", "\"event_seq_start\":", "\"event_seq_end\":"};
+					for (const char* field: required)
+					{
+						workflow_ok = workflow_ok && response.find(field) != std::string::npos;
+					}
 				}
 			}
 			const bool write_ok = Transport::WriteAll(&connection, response.data(), response.size()) == Transport::Result::Ok;
