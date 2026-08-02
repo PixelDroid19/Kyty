@@ -1456,6 +1456,84 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadfirstlaneB32_SVdstSVsrc0)
 	return true;
 }
 
+// v_readlane_b32 ignores EXEC and reads the requested physical wave lane.
+KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
+
+	String8 index_str = String8::FromPrintf("%u", index);
+	String8 load0;
+	String8 load1;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0) ||
+	    !operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+        <load0>
+        <load1>
+        %readlane_<index> = OpGroupNonUniformShuffle %uint %uint_3 %t0_<index> %t1_<index>
+               OpStore %<dst> %readlane_<index>
+)";
+
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+
+	return true;
+}
+
+// v_writelane_b32 updates only the invocation whose physical wave lane matches the selector.
+KYTY_RECOMPILER_FUNC(Recompile_VWritelaneB32_SVdstSVsrc0SVsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	String8 index_str = String8::FromPrintf("%u", index);
+	String8 load0;
+	String8 load1;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0) ||
+	    !operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+        <load0>
+        <load1>
+        %writelane_id_<index> = OpLoad %uint %gl_SubgroupInvocationID
+        %writelane_match_<index> = OpIEqual %bool %writelane_id_<index> %t1_<index>
+        %writelane_value_<index> = OpBitcast %float %t0_<index>
+        %writelane_old_<index> = OpLoad %float %<dst>
+        %writelane_result_<index> = OpSelect %float %writelane_match_<index> %writelane_value_<index> %writelane_old_<index>
+               OpStore %<dst> %writelane_result_<index>
+)";
+
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VMovB32_SVdstSVsrc0)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -1895,6 +1973,50 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32_XXX_SVdstSVsrc0)
     <load0>
     <param0>
     <param1>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<param0>", param[0])
+	                   .ReplaceStr("<param1>", (param[1] == nullptr ? "" : param[1]))
+	                   .ReplaceStr("<index>", index_str);
+
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_VCvtOffF32I4_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	String8 load0;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+    <param0>
+    <param1>
+    %ti_<index> = OpBitcast %int %t0_<index>
+    %tn_<index> = OpBitFieldSExtract %int %ti_<index> %int_0 %int_4
+    %tf_<index> = OpConvertSToF %float %tn_<index>
+    %t_<index> = OpFMul %float %tf_<index> %float_0_062500
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0

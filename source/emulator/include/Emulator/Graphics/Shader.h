@@ -231,6 +231,8 @@ enum class ShaderInstructionType : uint32_t
 	VCvtF32Ubyte2,
 	VCvtF32Ubyte3,
 	VCvtFlrI32F32,
+	// Convert the signed low four-bit offset to a normalized float.
+	VCvtOffF32I4,
 	VCvtI32F32,
 	VCvtPkrtzF16F32,
 	VCvtU32F32,
@@ -294,6 +296,9 @@ enum class ShaderInstructionType : uint32_t
 	VRcpF32,
 	// VOP1/VOP3: copy the first guest-EXEC-active lane of a VGPR into an SGPR.
 	VReadfirstlaneB32,
+	// VOP3: exchange a 32-bit value between a VGPR lane and an SGPR.
+	VReadlaneB32,
+	VWritelaneB32,
 	VRndneF32,
 	VRsqF32,
 	VSadU32,

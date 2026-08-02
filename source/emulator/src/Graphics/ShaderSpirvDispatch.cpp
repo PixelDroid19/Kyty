@@ -226,6 +226,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     // (uint) so the shared template can OpBitcast %float %t2 for VGPR storage.
     {Recompile_VCvt_XXX_F32_SVdstSVsrc0,       ShaderInstructionType::VCvtI32F32,          ShaderInstructionFormat::SVdstSVsrc0, {"%t1_<index> = OpExtInst %float %GLSL_std_450 Trunc %t0_<index>", "%ti_<index> = OpConvertFToS %int %t1_<index>", "%t2_<index> = OpBitcast %uint %ti_<index>"}},
     {Recompile_VCvt_XXX_F32_SVdstSVsrc0,       ShaderInstructionType::VCvtFlrI32F32,       ShaderInstructionFormat::SVdstSVsrc0, {"%t1_<index> = OpExtInst %float %GLSL_std_450 Floor %t0_<index>", "%ti_<index> = OpConvertFToS %int %t1_<index>", "%t2_<index> = OpBitcast %uint %ti_<index>"}},
+    {Recompile_VCvtOffF32I4_SVdstSVsrc0,        ShaderInstructionType::VCvtOffF32I4,       ShaderInstructionFormat::SVdstSVsrc0, {""}},
     {Recompile_VCvtF32_XXX_SVdstSVsrc0,        ShaderInstructionType::VCvtF32F16,          ShaderInstructionFormat::SVdstSVsrc0, {"%ts_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>", "%t_<index> = OpCompositeExtract %float %ts_<index> 0"}},
     {Recompile_VCvtF32_XXX_SVdstSVsrc0,        ShaderInstructionType::VCvtF32I32,          ShaderInstructionFormat::SVdstSVsrc0, {"%ti_<index> = OpBitcast %int %t0_<index>", "%t_<index> = OpConvertSToF %float %ti_<index>"}},
     {Recompile_VCvtF32_XXX_SVdstSVsrc0,        ShaderInstructionType::VCvtF32U32,          ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpConvertUToF %float %t0_<index>"}},
@@ -235,6 +236,8 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VCvtF32_XXX_SVdstSVsrc0,        ShaderInstructionType::VCvtF32Ubyte3,       ShaderInstructionFormat::SVdstSVsrc0, {"%tb_<index> = OpBitFieldUExtract %uint %t0_<index> %uint_24 %uint_8", "%t_<index> = OpConvertUToF %float %tb_<index>"}},
     {Recompile_VMovB32_SVdstSVsrc0,            ShaderInstructionType::VMovB32,             ShaderInstructionFormat::SVdstSVsrc0, {""}},
     {Recompile_VReadfirstlaneB32_SVdstSVsrc0,  ShaderInstructionType::VReadfirstlaneB32,   ShaderInstructionFormat::SVdstSVsrc0, {""}},
+    {Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1,  ShaderInstructionType::VReadlaneB32,      ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
+    {Recompile_VWritelaneB32_SVdstSVsrc0SVsrc1, ShaderInstructionType::VWritelaneB32,     ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
     {Recompile_VNop,                           ShaderInstructionType::VNop,                ShaderInstructionFormat::Empty,       {""}},
 
     {Recompile_SSaveexecB64_Sdst2Ssrc02,       ShaderInstructionType::SAndSaveexecB64,     ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::ExecNonZero},

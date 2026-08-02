@@ -194,6 +194,11 @@ static bool spirv_uses_readfirstlane(const ShaderCode& code)
 	return code.HasAnyOf({ShaderInstructionType::VReadfirstlaneB32});
 }
 
+static bool spirv_uses_lane_exchange(const ShaderCode& code)
+{
+	return code.HasAnyOf({ShaderInstructionType::VReadlaneB32, ShaderInstructionType::VWritelaneB32});
+}
+
 static bool spirv_uses_wave_branch_vote(const ShaderCode& code)
 {
 	return code.HasAnyOf({ShaderInstructionType::SCbranchExecz, ShaderInstructionType::SCbranchVccz,
@@ -202,7 +207,8 @@ static bool spirv_uses_wave_branch_vote(const ShaderCode& code)
 
 static bool spirv_uses_subgroup_invocation(const ShaderCode& code)
 {
-	return spirv_uses_dpp(code) || spirv_uses_buffer_descriptor_addressing(code) || spirv_uses_readfirstlane(code);
+	return spirv_uses_dpp(code) || spirv_uses_buffer_descriptor_addressing(code) || spirv_uses_readfirstlane(code) ||
+	       spirv_uses_lane_exchange(code);
 }
 
 void Spirv::WriteHeader()
@@ -238,7 +244,7 @@ void Spirv::WriteHeader()
 	if (spirv_uses_subgroup_invocation(m_code) || spirv_uses_wave_branch_vote(m_code))
 	{
 		capabilities.Add("OpCapability GroupNonUniform");
-		if (spirv_uses_dpp(m_code))
+		if (spirv_uses_dpp(m_code) || spirv_uses_lane_exchange(m_code))
 		{
 			capabilities.Add("OpCapability GroupNonUniformShuffle");
 		}
@@ -1974,6 +1980,7 @@ void Spirv::FindConstants()
 	AddConstantFloat(3.0f);
 	AddConstantFloat(4.0f);
 	AddConstantFloat(5.0f);
+	AddConstantFloat(0.0625f);
 	AddConstantUint(0x1fffffffu);
 	AddConstantUint(0x20000000u);
 	AddConstantUint(0x40000000u);

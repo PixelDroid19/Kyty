@@ -1068,7 +1068,7 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x0b: inst.type = ShaderInstructionType::VCvtF32F16; break;
 		case 0x0C: KYTY_NI("v_cvt_rpi_i32_f32"); break;
 		case 0x0D: inst.type = ShaderInstructionType::VCvtFlrI32F32; break;
-		case 0x0E: KYTY_NI("v_cvt_off_f32_i4"); break;
+		case 0x0E: inst.type = ShaderInstructionType::VCvtOffF32I4; break;
 		case 0x0F: KYTY_NI("v_cvt_f32_f64"); break;
 		case 0x10: KYTY_NI("v_cvt_f64_f32"); break;
 		case 0x11: inst.type = ShaderInstructionType::VCvtF32Ubyte0; break;
@@ -2290,6 +2290,19 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x35A: KYTY_NI("v_interp_p2_f16"); break;
 		case 0x35E: KYTY_NI("v_mad_i16"); break;
 		case 0x35F: KYTY_NI("v_div_fixup_f16"); break;
+		case 0x360:
+			// v_readlane_b32 writes the SGPR encoded in VDST, not a VGPR.
+			inst.type    = ShaderInstructionType::VReadlaneB32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src_num = 2;
+			inst.dst     = operand_parse(vdst);
+			break;
+		case 0x361:
+			// v_writelane_b32 writes one lane of the VGPR encoded in VDST.
+			inst.type    = ShaderInstructionType::VWritelaneB32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src_num = 2;
+			break;
 		case 0x364:
 			inst.type    = ShaderInstructionType::VBcntU32B32;
 			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
@@ -2335,7 +2348,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x18B: KYTY_NI("v_cvt_f32_f16"); break;
 		case 0x18C: KYTY_NI("v_cvt_rpi_i32_f32"); break;
 		case 0x18D: inst.type = ShaderInstructionType::VCvtFlrI32F32; break;
-		case 0x18E: KYTY_NI("v_cvt_off_f32_i4"); break;
+		case 0x18E: inst.type = ShaderInstructionType::VCvtOffF32I4; break;
 		case 0x18F: KYTY_NI("v_cvt_f32_f64"); break;
 		case 0x190: KYTY_NI("v_cvt_f64_f32"); break;
 		case 0x191: KYTY_NI("v_cvt_f32_ubyte0"); break;
