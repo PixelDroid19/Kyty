@@ -25,6 +25,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/DevTools/Runtime.h
 	include/Emulator/DevTools/RuntimeSubsystem.h
 	src/Agent/EventRing.cpp
+	src/Agent/DebugSnapshot.cpp
 	src/Agent/Protocol.cpp
 	src/Agent/StallWatch.cpp
 	src/Agent/FrameScore.cpp
@@ -103,6 +104,7 @@ target_sources(emulator PRIVATE
 	src/Validation/DomainValidators.cpp
 	include/Emulator/Validation/DomainValidators.h
 	include/Emulator/Agent/EventRing.h
+	include/Emulator/Agent/DebugSnapshot.h
 	include/Emulator/Agent/Protocol.h
 	include/Emulator/Agent/StallWatch.h
 	include/Emulator/Agent/FrameScore.h

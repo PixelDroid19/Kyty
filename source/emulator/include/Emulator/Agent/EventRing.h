@@ -77,6 +77,7 @@ private:
 
 const char* EventKindName(EventKind kind);
 bool        EventKindFromName(const char* name, EventKind* out);
+bool        EventMatches(const EventRecord& event, EventKind kind, const char* code);
 
 } // namespace Kyty::Emulator::Agent
 

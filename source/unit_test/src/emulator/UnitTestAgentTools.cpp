@@ -1,4 +1,5 @@
 #include "Emulator/Agent/EventRing.h"
+#include "Emulator/Agent/DebugSnapshot.h"
 #include "Emulator/Agent/FrameScore.h"
 #include "Emulator/Agent/Protocol.h"
 #include "Emulator/Agent/StallWatch.h"
@@ -77,6 +78,35 @@ TEST(AgentTools, ProtocolParsesRequestAndFormatsResponse)
 	const std::string err = FormatErr(7, "timeout", "wait timed out");
 	EXPECT_NE(err.find("\"ok\":false"), std::string::npos);
 	EXPECT_NE(err.find("timeout"), std::string::npos);
+}
+
+TEST(AgentTools, DebugSnapshotComposesStableBoundedSections)
+{
+	DebugSnapshotParts parts {};
+	parts.event_seq_start  = 41;
+	parts.event_seq_end    = 41;
+	parts.status_json      = R"({"schema":"runtime_status"})";
+	parts.diagnostics_json = R"({"schema":"runtime_diagnostics"})";
+	parts.threads_json     = R"({"available":true})";
+	parts.sync_waits_json  = R"({"enabled":true})";
+	parts.events_json      = R"({"schema":"event_history","events":[]})";
+	parts.last_error_json  = R"({"event":null})";
+	const std::string json = BuildDebugSnapshotResult(parts);
+	EXPECT_NE(json.find(R"("schema":"debug_snapshot")"), std::string::npos);
+	EXPECT_NE(json.find(R"("stable":true)"), std::string::npos);
+	EXPECT_NE(json.find(R"("event_seq_start":41)"), std::string::npos);
+	EXPECT_LE(json.size() + 1, Kyty::Agent::kResponseLineMax);
+}
+
+TEST(AgentTools, EventMatchUsesExactOptionalCode)
+{
+	EventRecord event {};
+	event.kind = EventKind::Error;
+	std::snprintf(event.code, sizeof(event.code), "%s", "device_lost");
+	EXPECT_TRUE(EventMatches(event, EventKind::Error, nullptr));
+	EXPECT_TRUE(EventMatches(event, EventKind::Error, "device_lost"));
+	EXPECT_FALSE(EventMatches(event, EventKind::Warn, "device_lost"));
+	EXPECT_FALSE(EventMatches(event, EventKind::Error, "device"));
 }
 
 TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)

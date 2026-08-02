@@ -97,6 +97,15 @@ bool EventKindFromName(const char* name, EventKind* out)
 	return false;
 }
 
+bool EventMatches(const EventRecord& event, EventKind kind, const char* code)
+{
+	if (event.kind != kind)
+	{
+		return false;
+	}
+	return code == nullptr || code[0] == '\0' || std::strcmp(event.code, code) == 0;
+}
+
 void EventRing::Push(EventKind kind, const char* code, const char* message)
 {
 	std::lock_guard<std::mutex> lock(m_mutex);

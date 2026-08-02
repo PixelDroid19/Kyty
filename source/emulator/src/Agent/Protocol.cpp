@@ -140,6 +140,7 @@ Tool ParseTool(const char* name) noexcept
 	    {"ping", Tool::Ping},
 	    {"status", Tool::Status},
 	    {"diagnostics", Tool::Diagnostics},
+	    {"debug_snapshot", Tool::DebugSnapshot},
 	    {"perf_snapshot", Tool::PerfSnapshot},
 	    {"sync_waits", Tool::SyncWaits},
 	    {"threads", Tool::Threads},

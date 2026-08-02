@@ -29,6 +29,7 @@ enum class Tool
 	Ping,
 	Status,
 	Diagnostics,
+	DebugSnapshot,
 	PerfSnapshot,
 	SyncWaits,
 	Threads,
