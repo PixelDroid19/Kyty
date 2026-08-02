@@ -39,3 +39,7 @@ __pycache__/
 *.pyc
 _scratch_cache_runtime/
 *_scratch_*/
+
+# Local bounded runtime captures and diagnostic transcripts
+frame_*.bmp
+_kyty.txt
