@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -107,6 +108,41 @@ TEST(AgentTools, EventMatchUsesExactOptionalCode)
 	EXPECT_TRUE(EventMatches(event, EventKind::Error, "device_lost"));
 	EXPECT_FALSE(EventMatches(event, EventKind::Warn, "device_lost"));
 	EXPECT_FALSE(EventMatches(event, EventKind::Error, "device"));
+}
+
+TEST(AgentTools, DebugSnapshotBoundsCompleteWireEnvelope)
+{
+	DebugSnapshotParts parts {};
+	const uint64_t   max_id = std::numeric_limits<uint64_t>::max();
+	const std::string baseline = BuildDebugSnapshotResult(parts);
+	ASSERT_FALSE(baseline.empty());
+	const size_t baseline_wire_size = FormatOk(max_id, baseline).size() + 1;
+	ASSERT_LE(baseline_wire_size, Kyty::Agent::kResponseLineMax);
+
+	const size_t padding = Kyty::Agent::kResponseLineMax - baseline_wire_size;
+	parts.status_json = "null" + std::string(padding, ' ');
+	const std::string at_limit = BuildDebugSnapshotResult(parts);
+	ASSERT_FALSE(at_limit.empty());
+	EXPECT_EQ(FormatOk(max_id, at_limit).size() + 1, Kyty::Agent::kResponseLineMax);
+
+	parts.status_json.push_back(' ');
+	EXPECT_TRUE(BuildDebugSnapshotResult(parts).empty());
+}
+
+TEST(AgentTools, DebugSnapshotMarksUnstableAndEmptySectionsNull)
+{
+	DebugSnapshotParts parts {};
+	parts.event_seq_start = 7;
+	parts.event_seq_end   = 8;
+	const std::string json = BuildDebugSnapshotResult(parts);
+	EXPECT_NE(json.find(R"("stable":false)"), std::string::npos);
+	EXPECT_NE(json.find(R"("status":null)"), std::string::npos);
+	EXPECT_NE(json.find(R"("diagnostics":null)"), std::string::npos);
+	EXPECT_NE(json.find(R"("threads":null)"), std::string::npos);
+	EXPECT_NE(json.find(R"("sync_waits":null)"), std::string::npos);
+	EXPECT_NE(json.find(R"("events":null)"), std::string::npos);
+	EXPECT_NE(json.find(R"("last_error":null)"), std::string::npos);
+	EXPECT_EQ(ParseTool("debug_snapshot"), Tool::DebugSnapshot);
 }
 
 TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)

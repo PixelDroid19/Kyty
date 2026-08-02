@@ -126,7 +126,7 @@ void RunCliWaitReady(const std::string& endpoint)
 			if (result == Transport::Result::Ok && !request.empty())
 			{
 				const std::string response =
-				    "{\"id\":1,\"ok\":true,\"protocol_version\":5,\"result\":{\"alive\":true}}\n";
+				    "{\"id\":1,\"ok\":true,\"protocol_version\":6,\"result\":{\"alive\":true}}\n";
 				server_ok = request.find("\"tool\":\"ping\"") != std::string::npos &&
 				            Transport::WriteAll(&connection, response.data(), response.size()) == Transport::Result::Ok;
 				Transport::Close(&connection);

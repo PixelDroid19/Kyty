@@ -2,6 +2,8 @@
 
 #include "Kyty/Agent/WireContract.h"
 
+#include <limits>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Emulator::Agent {
@@ -38,8 +40,13 @@ std::string BuildDebugSnapshotResult(const DebugSnapshotParts& parts)
 	AppendComponent(&out, "last_error", parts.last_error_json);
 	out += '}';
 
-	// The transport appends one newline to every response line.
-	if (out.size() + 1 > Kyty::Agent::kResponseLineMax)
+	// FormatOk adds this envelope prefix, a closing brace, and the transport
+	// appends one newline. Reserve the worst request id so the complete wire
+	// line remains bounded regardless of the caller's id.
+	const std::string envelope_prefix =
+	    "{\"id\":" + std::to_string(std::numeric_limits<uint64_t>::max()) +
+	    ",\"ok\":true,\"protocol_version\":" + std::to_string(Kyty::Agent::kProtocolVersion) + ",\"result\":";
+	if (envelope_prefix.size() + out.size() + 2 > Kyty::Agent::kResponseLineMax)
 	{
 		return {};
 	}

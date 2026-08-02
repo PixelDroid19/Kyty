@@ -126,8 +126,8 @@ int ScenarioProtocolVersionConsistent()
 	const auto bring_pos = diag_body.find("\"bring_up\"");
 	const auto ring_pos  = diag_body.find("\"event_ring\"");
 	Expect(bring_pos != std::string::npos && ring_pos != std::string::npos && ring_pos > bring_pos, "event_ring after bring_up");
-	Expect(Kyty::Agent::kProtocolVersion == 5u, "live constant is 5");
-	Expect(ParseTool("perf_snapshot") == Tool::PerfSnapshot, "perf_snapshot is part of protocol v5");
+	Expect(Kyty::Agent::kProtocolVersion == 6u, "live constant is 6");
+	Expect(ParseTool("perf_snapshot") == Tool::PerfSnapshot, "perf_snapshot is part of protocol v6");
 	std::printf("PROTOCOL_VERSION=%u\n", Kyty::Agent::kProtocolVersion);
 	return 0;
 }
