@@ -20,6 +20,7 @@
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
@@ -46,6 +47,28 @@ uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_
 	if (size == 0 || buf == nullptr)
 	{
 		return 0;
+	}
+	if (std::getenv("KYTY_DUMP_HASH_RANGE") != nullptr)
+	{
+		static std::atomic_uint dump_count {0};
+		const unsigned         ordinal = dump_count.fetch_add(1, std::memory_order_relaxed);
+		if (ordinal < 128u)
+		{
+			LibKernel::Memory::KernelMappedRange mapped {};
+			const bool mapped_range = LibKernel::Memory::KernelQueryMappedRange(reinterpret_cast<uint64_t>(buf), size, &mapped);
+			void*      protection_start = nullptr;
+			void*      protection_end   = nullptr;
+			int        protection       = 0;
+			const int  protection_result = LibKernel::Memory::KernelQueryMemoryProtection(const_cast<uint8_t*>(buf), &protection_start,
+			                                                                               &protection_end, &protection);
+			std::fprintf(stderr,
+			             "KYTY_DUMP_HASH_RANGE ordinal=%u type=%u buf=0x%012" PRIx64 " size=0x%012" PRIx64
+			             " mapped=%u base=0x%012" PRIx64 " map_size=0x%012" PRIx64 " protection_result=%d start=0x%012" PRIx64
+			             " end=0x%012" PRIx64 " prot=0x%x\n",
+			             ordinal, static_cast<unsigned>(type), reinterpret_cast<uint64_t>(buf), size, mapped_range ? 1u : 0u,
+			             mapped.base, mapped.size, protection_result, reinterpret_cast<uint64_t>(protection_start),
+			             reinterpret_cast<uint64_t>(protection_end), protection);
+		}
 	}
 	const auto start   = std::chrono::steady_clock::now();
 	const auto result  = XXH3_64bits(buf, size);
@@ -326,23 +349,35 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 	// Drop bidirectional alias links before recycling the slot. Multi-parent
 	// reclaim (VB/Texture delete_all) otherwise leaves free object_ids in peer
 	// others lists; WriteBack then EXIT_IF(parent.free) on those dangling links
-	// (captured dual-strict after GPU-owned RT WriteBack skip).
-	for (const auto& other: h.others)
+	// (captured dual-strict after GPU-owned RT WriteBack skip). Treat the link
+	// list as untrusted state: an object can be recycled while a cached overlap
+	// entry still refers to the old slot, so never index the object table before
+	// validating the id. Remove malformed reverse links as well, otherwise the
+	// next reclaim would walk the same stale id again.
+	const uint32_t object_count = heap.objects.Size();
+	for (uint32_t oi = 0; oi < h.others.Size(); oi++)
 	{
+		const auto& other = h.others.At(oi);
+		if (other.object_id < 0 || static_cast<uint32_t>(other.object_id) >= object_count)
+		{
+			continue;
+		}
+
 		auto& peer = heap.objects[other.object_id];
 		if (peer.free)
 		{
 			continue;
 		}
-		Vector<OverlappedBlock> keep;
-		for (const auto& e: peer.others)
+
+		for (uint32_t pi = peer.others.Size(); pi > 0;)
 		{
-			if (e.object_id != object_id)
+			--pi;
+			const auto& link = peer.others.At(pi);
+			if (link.object_id == object_id || link.object_id < 0 || static_cast<uint32_t>(link.object_id) >= object_count)
 			{
-				keep.Add(e);
+				peer.others.RemoveAt(pi);
 			}
 		}
-		peer.others = keep;
 	}
 	h.others.Clear();
 
