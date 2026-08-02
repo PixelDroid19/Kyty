@@ -3,10 +3,12 @@
 // lifecycle event emission + sanitize. No second debug framework.
 
 #include "Kyty/Agent/Json.h"
+#include "Kyty/Agent/WireContract.h"
 #include "Kyty/Core/BringUp.h"
 #include "Kyty/Core/DbgAssert.h"
 
 #include "Emulator/Agent/AgentLifecycle.h"
+#include "Emulator/Agent/DebugSnapshot.h"
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Agent/Protocol.h"
 #include "Emulator/Agent/StallWatch.h"
@@ -16,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 
 using namespace Kyty;
@@ -128,7 +131,59 @@ int ScenarioProtocolVersionConsistent()
 	Expect(bring_pos != std::string::npos && ring_pos != std::string::npos && ring_pos > bring_pos, "event_ring after bring_up");
 	Expect(Kyty::Agent::kProtocolVersion == 6u, "live constant is 6");
 	Expect(ParseTool("perf_snapshot") == Tool::PerfSnapshot, "perf_snapshot is part of protocol v6");
+	Expect(ParseTool("debug_snapshot") == Tool::DebugSnapshot, "debug_snapshot is part of protocol v6");
 	std::printf("PROTOCOL_VERSION=%u\n", Kyty::Agent::kProtocolVersion);
+	return 0;
+}
+
+int ScenarioDebugSnapshotBounded()
+{
+	DebugSnapshotParts parts {};
+	parts.event_seq_start  = 41;
+	parts.event_seq_end    = 41;
+	parts.status_json      = R"({"schema":"runtime_status"})";
+	parts.diagnostics_json = R"({"schema":"runtime_diagnostics"})";
+	parts.threads_json     = R"({"schema":"thread_snapshot"})";
+	parts.sync_waits_json  = R"({"schema":"sync_wait_snapshot"})";
+	parts.events_json      = R"({"schema":"event_history"})";
+	parts.last_error_json  = R"({"schema":"last_error"})";
+
+	const std::string baseline = BuildDebugSnapshotResult(parts);
+	Expect(!baseline.empty(), "baseline debug snapshot builds");
+	const uint64_t   max_id          = std::numeric_limits<uint64_t>::max();
+	const size_t     baseline_wire   = FormatOk(max_id, baseline).size() + 1;
+	Expect(baseline_wire <= Kyty::Agent::kResponseLineMax, "baseline debug snapshot fits wire bound");
+
+	// Keep every component a valid JSON value while exercising the largest
+	// complete response that the native wire contract permits.
+	const size_t extra = Kyty::Agent::kResponseLineMax - baseline_wire;
+	std::string* components[] = {&parts.status_json, &parts.diagnostics_json, &parts.threads_json,
+	                             &parts.sync_waits_json, &parts.events_json, &parts.last_error_json};
+	size_t remaining = extra;
+	for (size_t i = 0; i < sizeof(components) / sizeof(components[0]); ++i)
+	{
+		const size_t share = remaining / (sizeof(components) / sizeof(components[0]) - i);
+		components[i]->append(share, ' ');
+		remaining -= share;
+	}
+	Expect(remaining == 0, "component padding distributed");
+
+	const std::string bounded = BuildDebugSnapshotResult(parts);
+	Expect(!bounded.empty(), "maximum bounded debug snapshot builds");
+	Expect(HasProtocolVersion(bounded), "snapshot result protocol_version");
+	Expect(bounded.find("\"schema\":\"debug_snapshot\"") != std::string::npos, "snapshot schema");
+	Expect(bounded.find("\"event_seq_start\":41") != std::string::npos, "snapshot event_seq_start");
+	Expect(bounded.find("\"event_seq_end\":41") != std::string::npos, "snapshot event_seq_end");
+	Expect(bounded.find("\"stable\":true") != std::string::npos, "snapshot stable");
+	const char* section_names[] = {"status", "diagnostics", "threads", "sync_waits", "events", "last_error"};
+	for (const char* section: section_names)
+	{
+		const std::string needle = std::string("\"") + section + "\":";
+		Expect(bounded.find(needle) != std::string::npos, "snapshot section name");
+	}
+	Expect(bounded.size() + 1 <= Kyty::Agent::kResponseLineMax, "snapshot result body bound");
+	Expect(FormatOk(max_id, bounded).size() + 1 <= Kyty::Agent::kResponseLineMax, "snapshot wire bound");
+	std::printf("DEBUG_SNAPSHOT bytes=%zu stable=1\n", bounded.size());
 	return 0;
 }
 
@@ -368,6 +423,10 @@ int main(int argc, char** argv)
 	if (scenario == "protocol_version_consistent")
 	{
 		return ScenarioProtocolVersionConsistent();
+	}
+	if (scenario == "debug_snapshot_bounded")
+	{
+		return ScenarioDebugSnapshotBounded();
 	}
 	if (scenario == "malformed_fail_closed")
 	{

@@ -415,6 +415,7 @@ function(add_kyty_agent_protocol_case name scenario expected_exit)
 endfunction()
 
 add_kyty_agent_protocol_case(ProtocolVersionConsistent protocol_version_consistent 0)
+add_kyty_agent_protocol_case(DebugSnapshotBounded debug_snapshot_bounded 0)
 add_kyty_agent_protocol_case(MalformedFailClosed malformed_fail_closed 0)
 add_kyty_agent_protocol_case(JsonEscapingComplete json_escaping_complete 0)
 add_kyty_agent_protocol_case(DiagnosticsResponseBounded diagnostics_response_bounded 0)

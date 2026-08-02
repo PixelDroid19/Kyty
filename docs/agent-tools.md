@@ -53,6 +53,18 @@ kyty_agent capture --timeout-ms 10000
 kyty_agent score --path C:\absolute\capture.png
 ```
 
+For a bounded point-in-time diagnostic followed by an exact event wait, use
+the snapshot's `event_seq_end` as the cursor for the next request:
+
+```text
+kyty_agent snapshot --events 100
+kyty_agent wait-event --kind error --after-seq <event_seq_end> --code device_lost --timeout-ms 10000
+```
+
+`stable:false` means the event sequence changed while the snapshot sections
+were being assembled. The snapshot is observational and bounded; it is not a
+compatibility claim or proof that a workload rendered correctly.
+
 `capture` writes an emulator-native PNG readback, not a desktop screenshot.
 Start the emulator with `KYTY_NATIVE_CAPTURE_DIR` set to an absolute or
 process-relative output directory. `KYTY_NATIVE_CAPTURE_MAX_EDGE` bounds the
