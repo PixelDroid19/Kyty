@@ -237,8 +237,12 @@ bool ParseHex4(const char* p, uint32_t* out)
 	return true;
 }
 
-void AppendUtf8(std::string* out, uint32_t code_point)
+bool AppendUtf8(std::string* out, uint32_t code_point)
 {
+	if (out == nullptr || code_point == 0)
+	{
+		return false;
+	}
 	if (code_point <= 0x7fu)
 	{
 		out->push_back(static_cast<char>(code_point));
@@ -258,6 +262,7 @@ void AppendUtf8(std::string* out, uint32_t code_point)
 		out->push_back(static_cast<char>(0x80u | ((code_point >> 6u) & 0x3fu)));
 		out->push_back(static_cast<char>(0x80u | (code_point & 0x3fu)));
 	}
+	return true;
 }
 
 bool ParseUnicodeEscape(const char** cursor, std::string* out)
@@ -282,7 +287,10 @@ bool ParseUnicodeEscape(const char** cursor, std::string* out)
 	{
 		return false;
 	}
-	AppendUtf8(out, code_point);
+	if (!AppendUtf8(out, code_point))
+	{
+		return false;
+	}
 	*cursor = p;
 	return true;
 }

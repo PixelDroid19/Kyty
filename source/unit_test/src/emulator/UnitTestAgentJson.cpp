@@ -28,4 +28,20 @@ TEST(AgentJson, FindsOnlyTopLevelSemanticArgumentKeys)
 	EXPECT_FALSE(ArgsHasKey(R"({"message":"code"})", "code"));
 }
 
+TEST(AgentJson, RejectsEmbeddedNulInProtocolStrings)
+{
+	using Kyty::Emulator::Agent::ArgsGetString;
+	using Kyty::Emulator::Agent::ErrorInfo;
+	using Kyty::Emulator::Agent::ParseRequestLine;
+	using Kyty::Emulator::Agent::Request;
+
+	std::string value;
+	EXPECT_FALSE(ArgsGetString(R"({"code":"\u0000x"})", "code", &value));
+	EXPECT_FALSE(ArgsGetString(R"({"kind":"error\u0000junk"})", "kind", &value));
+
+	Request   request {};
+	ErrorInfo error {};
+	EXPECT_FALSE(ParseRequestLine(R"({"id":1,"tool":"status\u0000junk","args":{}})", &request, &error));
+}
+
 UT_END();
