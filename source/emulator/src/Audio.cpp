@@ -9,6 +9,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Graphics/GuestTextureLayout.h"
+#include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
@@ -1962,6 +1963,7 @@ struct AvPlayerStartInfoEx
 struct AvPlayerInternal
 {
 	String               filename;
+	std::atomic_bool     closing {false};
 	bool                 loop = false;
 	bool                 auto_start = false;
 	bool                 playing = false;
@@ -2146,6 +2148,24 @@ static void avplayer_dump_call(const char* name, const AvPlayerInternal* player)
 	}
 }
 
+static void avplayer_dump_lifetime(const char* event, const AvPlayerInternal* player)
+{
+	if (!avplayer_dump_enabled() || event == nullptr)
+	{
+		return;
+	}
+	static std::atomic_uint32_t count {0};
+	const uint32_t index = count.fetch_add(1, std::memory_order_relaxed);
+	if (index < 128)
+	{
+		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER lifetime=%s handle=%p index=%u\n", event,
+		             static_cast<const void*>(player), index);
+	} else if (index == 128)
+	{
+		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER further lifetime events suppressed\n");
+	}
+}
+
 static void register_video_frame(uint8_t* frame, size_t bytes, uint32_t pitch)
 {
 	Graphics::GuestTextureLayoutRegisterLinear(reinterpret_cast<uint64_t>(frame), bytes, pitch);
@@ -2201,6 +2221,10 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 	}
 
 	release_synthetic_video(r);
+	if (r->closing.load(std::memory_order_acquire))
+	{
+		return false;
+	}
 
 	if (r->mem.allocate_texture != nullptr)
 	{
@@ -2223,6 +2247,11 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 			}
 			r->video_frames.push_back(AvPlayerInternal::VideoFrameBuffer {frame, true});
 			register_video_frame(frame, size, luma_width);
+			if (r->closing.load(std::memory_order_acquire))
+			{
+				release_synthetic_video(r);
+				return false;
+			}
 		}
 	} else
 	{
@@ -2236,6 +2265,11 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 		r->synthetic_storage_data  = reinterpret_cast<uint8_t*>(aligned_address);
 		r->video_frames.push_back(AvPlayerInternal::VideoFrameBuffer {r->synthetic_storage_data, false});
 		register_video_frame(r->synthetic_storage_data, size, luma_width);
+		if (r->closing.load(std::memory_order_acquire))
+		{
+			release_synthetic_video(r);
+			return false;
+		}
 	}
 
 	r->synthetic_width        = luma_width;
@@ -2260,30 +2294,32 @@ static void delete_synthetic_video(AvPlayerInternal* r)
 	{
 		return;
 	}
-	std::unique_lock<std::shared_mutex> decoder_lock(r->decoder_mutex);
 	std::vector<AvPlayerInternal::VideoFrameBuffer> frames;
 	std::vector<uint8_t>                         storage;
 	AvPlayerMemAllocator                          mem;
 	{
-		Core::LockGuard lock(r->mutex);
-		r->decoder.reset();
-		mem = r->mem;
-		frames.swap(r->video_frames);
-		storage.swap(r->synthetic_storage);
-		r->synthetic_storage_data = nullptr;
-		r->audio_storage.clear();
-		r->synthetic_width        = 0;
-		r->synthetic_height       = 0;
-		r->synthetic_frame_rate   = 0.0f;
-		r->synthetic_frame_count  = 0;
-		r->synthetic_obtained_num = 0;
-		r->next_video_frame       = 0;
-		r->video_frame_bytes      = 0;
-		r->host_filename          = String();
-		r->last_media_time_ms     = 0;
-		r->media_duration_ms      = 0;
-		r->media_audio_channels   = 0;
-		r->media_audio_rate       = 0;
+		std::unique_lock<std::shared_mutex> decoder_lock(r->decoder_mutex);
+		{
+			Core::LockGuard lock(r->mutex);
+			r->decoder.reset();
+			mem = r->mem;
+			frames.swap(r->video_frames);
+			storage.swap(r->synthetic_storage);
+			r->synthetic_storage_data = nullptr;
+			r->audio_storage.clear();
+			r->synthetic_width        = 0;
+			r->synthetic_height       = 0;
+			r->synthetic_frame_rate   = 0.0f;
+			r->synthetic_frame_count  = 0;
+			r->synthetic_obtained_num = 0;
+			r->next_video_frame       = 0;
+			r->video_frame_bytes      = 0;
+			r->host_filename          = String();
+			r->last_media_time_ms     = 0;
+			r->media_duration_ms      = 0;
+			r->media_audio_channels   = 0;
+			r->media_audio_rate       = 0;
+		}
 	}
 	release_video_frames(mem, frames);
 }
@@ -2424,7 +2460,7 @@ static void emit_event(AvPlayerInternal* h, int32_t event_id, void* data = nullp
 {
 	AvPlayerEventCallback callback = nullptr;
 	void*                 obj_ptr  = nullptr;
-	if (h != nullptr)
+	if (h != nullptr && !h->closing.load(std::memory_order_acquire))
 	{
 		Core::LockGuard lock(h->mutex);
 		callback = h->event.event_callback;
@@ -2496,7 +2532,6 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		{
 			return false;
 		}
-		frame       = r->video_frames[r->next_video_frame++ % r->video_frames.size()].data;
 		timestamp   = current_time_ms(r);
 		width       = r->synthetic_width;
 		height      = r->synthetic_height;
@@ -2507,19 +2542,24 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		decoder     = r->decoder.get();
 	}
 
-	if (frame == nullptr)
-	{
-		return false;
-	}
-
 	const bool is_real = decoder != nullptr;
 	if (is_real)
 	{
 		AudioVideoBackend::VideoFrame decoded;
-		if (!decoder->ReadVideoFrame(&decoded) || decoded.data.empty() || decoded.data.size() > frame_bytes)
+		if (!decoder->TryReadVideoFrame(&decoded) || decoded.width != width || decoded.height != height || decoded.pitch != width ||
+		    decoded.data.size() != frame_bytes)
 		{
 			return false;
 		}
+		{
+			Core::LockGuard lock(r->mutex);
+			frame = r->video_frames[r->next_video_frame++ % r->video_frames.size()].data;
+		}
+		if (frame == nullptr)
+		{
+			return false;
+		}
+		Graphics::GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(frame), decoded.data.size());
 		std::memcpy(frame, decoded.data.data(), decoded.data.size());
 		timestamp = decoded.timestamp_ms;
 		Core::LockGuard lock(r->mutex);
@@ -2527,6 +2567,14 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		r->last_media_time_ms = timestamp;
 	} else
 	{
+		{
+			Core::LockGuard lock(r->mutex);
+			frame = r->video_frames[r->next_video_frame++ % r->video_frames.size()].data;
+		}
+		if (frame == nullptr)
+		{
+			return false;
+		}
 		const float pos = (frame_count != 0 ? static_cast<float>(frame_index) / static_cast<float>(frame_count) : 0.0f);
 		float       level = 1.0f;
 
@@ -2538,6 +2586,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 			level = 1.0f - (1.0f - pos * (1.0f / 0.5f)) * (1.0f - pos * (1.0f / 0.5f));
 		}
 
+		Graphics::GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(frame), frame_bytes);
 		draw_synthetic_frame(width, height, frame, level * 0.7f);
 		Core::LockGuard lock(r->mutex);
 		r->synthetic_obtained_num++;
@@ -2566,10 +2615,98 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 	return true;
 }
 
-static AvPlayerInternal* create_player(const AvPlayerMemAllocator& mem, const AvPlayerEventReplacement& event, bool auto_start,
-                                       int32_t requested_framebuffers)
+using AvPlayerRef = std::shared_ptr<AvPlayerInternal>;
+
+static std::mutex                                      g_avplayer_registry_mutex;
+static std::unordered_map<AvPlayerInternal*, AvPlayerRef> g_avplayer_registry;
+
+static void finalize_player(AvPlayerInternal* player)
 {
-	auto* r                   = new AvPlayerInternal;
+	if (player == nullptr)
+	{
+		return;
+	}
+	player->closing.store(true, std::memory_order_release);
+	avplayer_dump_lifetime("finalize-begin", player);
+	delete_synthetic_video(player);
+	avplayer_dump_lifetime("finalize-end", player);
+	delete player;
+}
+
+static AvPlayerInternal* register_player(AvPlayerRef player)
+{
+	if (!player)
+	{
+		return nullptr;
+	}
+	AvPlayerInternal* raw = player.get();
+	{
+		std::lock_guard<std::mutex> lock(g_avplayer_registry_mutex);
+		g_avplayer_registry.emplace(raw, std::move(player));
+	}
+	avplayer_dump_lifetime("register", raw);
+	return raw;
+}
+
+static AvPlayerRef acquire_player(AvPlayerInternal* handle)
+{
+	if (handle == nullptr)
+	{
+		avplayer_dump_lifetime("reject", handle);
+		return {};
+	}
+	AvPlayerRef player;
+	{
+		std::lock_guard<std::mutex> lock(g_avplayer_registry_mutex);
+		auto                        it = g_avplayer_registry.find(handle);
+		if (it != g_avplayer_registry.end())
+		{
+			player = it->second;
+		}
+	}
+	if (!player)
+	{
+		avplayer_dump_lifetime("reject", handle);
+		return {};
+	}
+	return player;
+}
+
+static AvPlayerRef remove_player(AvPlayerInternal* handle)
+{
+	if (handle == nullptr)
+	{
+		avplayer_dump_lifetime("reject", handle);
+		return {};
+	}
+	AvPlayerRef player;
+	bool        rejected = false;
+	{
+		std::lock_guard<std::mutex> lock(g_avplayer_registry_mutex);
+		auto                        it = g_avplayer_registry.find(handle);
+		if (it == g_avplayer_registry.end())
+		{
+			rejected = true;
+		} else
+		{
+			player = std::move(it->second);
+			g_avplayer_registry.erase(it);
+		}
+	}
+	if (rejected)
+	{
+		avplayer_dump_lifetime("reject", handle);
+		return {};
+	}
+	player->closing.store(true, std::memory_order_release);
+	avplayer_dump_lifetime("close-remove", handle);
+	return player;
+}
+
+static AvPlayerRef create_player(const AvPlayerMemAllocator& mem, const AvPlayerEventReplacement& event, bool auto_start,
+	                             int32_t requested_framebuffers)
+{
+	AvPlayerRef r(new AvPlayerInternal, finalize_player);
 	r->mem                    = mem;
 	r->event                  = event;
 	r->auto_start             = auto_start;
@@ -2591,8 +2728,8 @@ AvPlayerInternal* KYTY_SYSV_ABI AvPlayerInit(AvPlayerInitData* init)
 	{
 		return nullptr;
 	}
-	return create_player(init->memory_replacement, init->event_replacement, init->auto_start != 0,
-	                     init->num_output_video_framebuffers);
+	return register_player(create_player(init->memory_replacement, init->event_replacement, init->auto_start != 0,
+	                                     init->num_output_video_framebuffers));
 }
 
 int KYTY_SYSV_ABI AvPlayerInitEx(const AvPlayerInitDataEx* init, AvPlayerInternal** handle)
@@ -2602,8 +2739,8 @@ int KYTY_SYSV_ABI AvPlayerInitEx(const AvPlayerInitDataEx* init, AvPlayerInterna
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
-	*handle = create_player(init->memory_replacement, init->event_replacement, init->auto_start != 0,
-	                        init->num_output_video_framebuffers);
+	*handle = register_player(create_player(init->memory_replacement, init->event_replacement, init->auto_start != 0,
+	                                        init->num_output_video_framebuffers));
 	return *handle == nullptr ? AVPLAYER_ERROR_OPERATION_FAILED : 0;
 }
 
@@ -2611,12 +2748,19 @@ int KYTY_SYSV_ABI AvPlayerPostInit(AvPlayerInternal* h, const void* post_init)
 {
 	PRINT_NAME();
 	(void)post_init;
-	return h == nullptr ? AVPLAYER_ERROR_INVALID_PARAMS : 0;
+	auto player = acquire_player(h);
+	return player == nullptr ? AVPLAYER_ERROR_INVALID_PARAMS : 0;
 }
+
+static int start_player(AvPlayerInternal* h);
 
 static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t length = 0)
 {
 	if (h == nullptr || raw_filename == nullptr)
+	{
+		return AVPLAYER_ERROR_INVALID_PARAMS;
+	}
+	if (h->closing.load(std::memory_order_acquire))
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
@@ -2638,6 +2782,15 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 	}
 	std::string decoder_error;
 	auto decoder = AudioVideoBackend::Decoder::Open(host_filename.C_Str(), &decoder_error);
+	if (decoder == nullptr || !decoder->GetStreamInfo().has_video)
+	{
+		if (avplayer_dump_enabled())
+		{
+			std::fprintf(stderr, "KYTY_DUMP_AVPLAYER backend=error path=%s reason=%s\n", host_filename.C_Str(),
+			             decoder_error.empty() ? "media has no supported video stream" : decoder_error.c_str());
+		}
+		return AVPLAYER_ERROR_OPERATION_FAILED;
+	}
 	bool auto_start = false;
 	{
 		Core::LockGuard lock(h->mutex);
@@ -2651,7 +2804,7 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 		h->playing                = false;
 		h->paused                 = false;
 		h->stop_fired             = false;
-		if (decoder != nullptr && decoder->GetStreamInfo().has_video)
+		if (decoder != nullptr)
 		{
 			h->decoder = std::move(decoder);
 			const auto& stream_info = h->decoder->GetStreamInfo();
@@ -2672,16 +2825,6 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 				             h->synthetic_frame_rate, h->media_duration_ms, h->media_audio_channels, h->media_audio_rate);
 			}
 		}
-		else if (avplayer_dump_enabled())
-		{
-			std::fprintf(stderr, "KYTY_DUMP_AVPLAYER backend=fallback path=%s reason=%s\n", host_filename.C_Str(),
-			             decoder_error.empty() ? "unsupported media" : decoder_error.c_str());
-		}
-		if (h->decoder == nullptr)
-		{
-			h->media_audio_channels = 2;
-			h->media_audio_rate     = 48000;
-		}
 		auto_start                = h->auto_start;
 	}
 
@@ -2689,14 +2832,22 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 	{
 		return AVPLAYER_ERROR_OPERATION_FAILED;
 	}
+	if (h->closing.load(std::memory_order_acquire))
+	{
+		return AVPLAYER_ERROR_OPERATION_FAILED;
+	}
 	emit_event(h, AVPLAYER_EVENT_STATE_READY);
+	if (h->closing.load(std::memory_order_acquire))
+	{
+		return AVPLAYER_ERROR_OPERATION_FAILED;
+	}
 	if (avplayer_dump_enabled())
 	{
 		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER source handle=%p auto_start=%d\n", static_cast<void*>(h), auto_start ? 1 : 0);
 	}
 	if (auto_start)
 	{
-		return AvPlayerStart(h);
+		return start_player(h);
 	}
 	return 0;
 }
@@ -2704,7 +2855,8 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 int KYTY_SYSV_ABI AvPlayerAddSource(AvPlayerInternal* h, const char* filename)
 {
 	PRINT_NAME();
-	return add_source(h, filename);
+	auto player = acquire_player(h);
+	return player == nullptr ? AVPLAYER_ERROR_INVALID_PARAMS : add_source(player.get(), filename);
 }
 
 int KYTY_SYSV_ABI AvPlayerAddSourceEx(AvPlayerInternal* h, uint32_t uri_type, const AvPlayerSourceDetails* source_details)
@@ -2714,17 +2866,12 @@ int KYTY_SYSV_ABI AvPlayerAddSourceEx(AvPlayerInternal* h, uint32_t uri_type, co
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
-	return add_source(h, source_details->uri.name, source_details->uri.length);
+	auto player = acquire_player(h);
+	return player == nullptr ? AVPLAYER_ERROR_INVALID_PARAMS : add_source(player.get(), source_details->uri.name, source_details->uri.length);
 }
 
-int KYTY_SYSV_ABI AvPlayerStreamCount(AvPlayerInternal* h)
+static int stream_count(AvPlayerInternal* h)
 {
-	PRINT_NAME();
-	avplayer_dump_call("stream_count", h);
-	if (h == nullptr)
-	{
-		return AVPLAYER_ERROR_INVALID_PARAMS;
-	}
 	if (h->filename.IsEmpty())
 	{
 		return 0;
@@ -2732,14 +2879,24 @@ int KYTY_SYSV_ABI AvPlayerStreamCount(AvPlayerInternal* h)
 	return h->media_audio_channels != 0 ? 2 : 1;
 }
 
+int KYTY_SYSV_ABI AvPlayerStreamCount(AvPlayerInternal* h)
+{
+	PRINT_NAME();
+	avplayer_dump_call("stream_count", h);
+	auto player = acquire_player(h);
+	return player == nullptr ? AVPLAYER_ERROR_INVALID_PARAMS : stream_count(player.get());
+}
+
 int KYTY_SYSV_ABI AvPlayerGetStreamInfo(AvPlayerInternal* h, uint32_t stream_id, AvPlayerStreamInfo* info)
 {
 	PRINT_NAME();
 	avplayer_dump_call("stream_info", h);
-	if (h == nullptr || info == nullptr || stream_id >= static_cast<uint32_t>(AvPlayerStreamCount(h)))
+	auto player = acquire_player(h);
+	if (player == nullptr || info == nullptr || stream_id >= static_cast<uint32_t>(stream_count(player.get())))
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
+	h = player.get();
 	std::memset(info, 0, sizeof(*info));
 	info->type     = (stream_id == 0 ? AvPlayerStreamVideo : AvPlayerStreamAudio);
 	info->duration = h->media_duration_ms != 0
@@ -2767,10 +2924,12 @@ int KYTY_SYSV_ABI AvPlayerGetStreamInfoEx(AvPlayerInternal* h, uint32_t stream_i
 {
 	PRINT_NAME();
 	avplayer_dump_call("stream_info_ex", h);
-	if (h == nullptr || info == nullptr || stream_id >= static_cast<uint32_t>(AvPlayerStreamCount(h)))
+	auto player = acquire_player(h);
+	if (player == nullptr || info == nullptr || stream_id >= static_cast<uint32_t>(stream_count(player.get())))
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
+	h = player.get();
 	std::memset(info, 0, sizeof(*info));
 	info->this_size = sizeof(*info);
 	info->type      = (stream_id == 0 ? AvPlayerStreamVideo : AvPlayerStreamAudio);
@@ -2793,25 +2952,27 @@ int KYTY_SYSV_ABI AvPlayerGetStreamInfoEx(AvPlayerInternal* h, uint32_t stream_i
 int KYTY_SYSV_ABI AvPlayerEnableStream(AvPlayerInternal* h, uint32_t stream_id)
 {
 	PRINT_NAME();
-	return h == nullptr || stream_id > 1 ? AVPLAYER_ERROR_INVALID_PARAMS : 0;
+	auto player = acquire_player(h);
+	return player == nullptr || stream_id > 1 ? AVPLAYER_ERROR_INVALID_PARAMS : 0;
 }
 
 int KYTY_SYSV_ABI AvPlayerDisableStream(AvPlayerInternal* h, uint32_t stream_id)
 {
 	PRINT_NAME();
-	return h == nullptr || stream_id > 1 ? AVPLAYER_ERROR_INVALID_PARAMS : 0;
+	auto player = acquire_player(h);
+	return player == nullptr || stream_id > 1 ? AVPLAYER_ERROR_INVALID_PARAMS : 0;
 }
 
 int KYTY_SYSV_ABI AvPlayerChangeStream(AvPlayerInternal* h, uint32_t old_stream_id, uint32_t new_stream_id)
 {
 	PRINT_NAME();
-	return h == nullptr || old_stream_id > 1 || new_stream_id > 1 ? AVPLAYER_ERROR_INVALID_PARAMS : 0;
+	auto player = acquire_player(h);
+	return player == nullptr || old_stream_id > 1 || new_stream_id > 1 ? AVPLAYER_ERROR_INVALID_PARAMS : 0;
 }
 
-int KYTY_SYSV_ABI AvPlayerStart(AvPlayerInternal* h)
+static int start_player(AvPlayerInternal* h)
 {
-	PRINT_NAME();
-	if (h == nullptr)
+	if (h->closing.load(std::memory_order_acquire))
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
@@ -2831,14 +2992,23 @@ int KYTY_SYSV_ABI AvPlayerStart(AvPlayerInternal* h)
 	return 0;
 }
 
+int KYTY_SYSV_ABI AvPlayerStart(AvPlayerInternal* h)
+{
+	PRINT_NAME();
+	auto player = acquire_player(h);
+	return player == nullptr ? AVPLAYER_ERROR_INVALID_PARAMS : start_player(player.get());
+}
+
 int KYTY_SYSV_ABI AvPlayerStartEx(AvPlayerInternal* h, const void* start_info_ex)
 {
 	PRINT_NAME();
 	avplayer_dump_call("start_ex_call", h);
-	if (h == nullptr)
+	auto player = acquire_player(h);
+	if (player == nullptr)
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
+	h = player.get();
 	const auto* info = static_cast<const AvPlayerStartInfoEx*>(start_info_ex);
 	{
 		Core::LockGuard lock(h->mutex);
@@ -2860,10 +3030,12 @@ int KYTY_SYSV_ABI AvPlayerStartEx(AvPlayerInternal* h, const void* start_info_ex
 int KYTY_SYSV_ABI AvPlayerStop(AvPlayerInternal* h)
 {
 	PRINT_NAME();
-	if (h == nullptr)
+	auto player = acquire_player(h);
+	if (player == nullptr)
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
+	h = player.get();
 	{
 		Core::LockGuard lock(h->mutex);
 		h->playing    = false;
@@ -2877,10 +3049,12 @@ int KYTY_SYSV_ABI AvPlayerStop(AvPlayerInternal* h)
 int KYTY_SYSV_ABI AvPlayerPause(AvPlayerInternal* h)
 {
 	PRINT_NAME();
-	if (h == nullptr)
+	auto player = acquire_player(h);
+	if (player == nullptr)
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
+	h = player.get();
 	{
 		Core::LockGuard lock(h->mutex);
 		h->paused = true;
@@ -2892,10 +3066,12 @@ int KYTY_SYSV_ABI AvPlayerPause(AvPlayerInternal* h)
 int KYTY_SYSV_ABI AvPlayerResume(AvPlayerInternal* h)
 {
 	PRINT_NAME();
-	if (h == nullptr)
+	auto player = acquire_player(h);
+	if (player == nullptr)
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
+	h = player.get();
 	{
 		Core::LockGuard lock(h->mutex);
 		h->paused = false;
@@ -2907,10 +3083,12 @@ int KYTY_SYSV_ABI AvPlayerResume(AvPlayerInternal* h)
 int KYTY_SYSV_ABI AvPlayerSetLooping(AvPlayerInternal* h, Bool loop)
 {
 	PRINT_NAME();
-	if (h == nullptr)
+	auto player = acquire_player(h);
+	if (player == nullptr)
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
+	h = player.get();
 	Core::LockGuard lock(h->mutex);
 	h->loop = (loop != 0);
 	return 0;
@@ -2919,7 +3097,8 @@ int KYTY_SYSV_ABI AvPlayerSetLooping(AvPlayerInternal* h, Bool loop)
 int KYTY_SYSV_ABI AvPlayerSetAvSyncMode(AvPlayerInternal* h, uint32_t sync_mode)
 {
 	PRINT_NAME();
-	return h == nullptr || sync_mode > 1 ? AVPLAYER_ERROR_INVALID_PARAMS : 0;
+	auto player = acquire_player(h);
+	return player == nullptr || sync_mode > 1 ? AVPLAYER_ERROR_INVALID_PARAMS : 0;
 }
 
 int KYTY_SYSV_ABI AvPlayerSetAvailableBandwidth(AvPlayerInternal* h, uint32_t start_bandwidth, uint32_t minimum_bandwidth,
@@ -2927,7 +3106,8 @@ int KYTY_SYSV_ABI AvPlayerSetAvailableBandwidth(AvPlayerInternal* h, uint32_t st
 {
 	PRINT_NAME();
 	(void)start_bandwidth;
-	return h == nullptr || (minimum_bandwidth != 0 && maximum_bandwidth != 0 && minimum_bandwidth > maximum_bandwidth)
+	auto player = acquire_player(h);
+	return player == nullptr || (minimum_bandwidth != 0 && maximum_bandwidth != 0 && minimum_bandwidth > maximum_bandwidth)
 	           ? AVPLAYER_ERROR_INVALID_PARAMS
 	           : 0;
 }
@@ -2935,7 +3115,8 @@ int KYTY_SYSV_ABI AvPlayerSetAvailableBandwidth(AvPlayerInternal* h, uint32_t st
 int KYTY_SYSV_ABI AvPlayerSetTrickSpeed(AvPlayerInternal* h, int32_t trick_speed)
 {
 	PRINT_NAME();
-	if (h == nullptr)
+	auto player = acquire_player(h);
+	if (player == nullptr)
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
@@ -2947,15 +3128,18 @@ int KYTY_SYSV_ABI AvPlayerSetTrickSpeed(AvPlayerInternal* h, int32_t trick_speed
 	return 0;
 }
 
+static Bool get_video_data_ex(AvPlayerInternal* h, AvPlayerFrameInfoEx* video_info);
+
 Bool KYTY_SYSV_ABI AvPlayerGetVideoData(AvPlayerInternal* h, AvPlayerFrameInfo* video_info)
 {
 	PRINT_NAME();
-	if (h == nullptr || video_info == nullptr)
+	auto player = acquire_player(h);
+	if (player == nullptr || video_info == nullptr)
 	{
 		return 0;
 	}
 	AvPlayerFrameInfoEx ex {};
-	Bool                ok = AvPlayerGetVideoDataEx(h, &ex);
+	Bool                ok = get_video_data_ex(player.get(), &ex);
 	if (ok == 0)
 	{
 		return 0;
@@ -2970,11 +3154,9 @@ Bool KYTY_SYSV_ABI AvPlayerGetVideoData(AvPlayerInternal* h, AvPlayerFrameInfo* 
 	return 1;
 }
 
-Bool KYTY_SYSV_ABI AvPlayerGetVideoDataEx(AvPlayerInternal* h, AvPlayerFrameInfoEx* video_info)
+static Bool get_video_data_ex(AvPlayerInternal* h, AvPlayerFrameInfoEx* video_info)
 {
-	PRINT_NAME();
-	avplayer_dump_call("video_call", h);
-	if (h == nullptr || video_info == nullptr)
+	if (video_info == nullptr)
 	{
 		return 0;
 	}
@@ -2986,14 +3168,24 @@ Bool KYTY_SYSV_ABI AvPlayerGetVideoDataEx(AvPlayerInternal* h, AvPlayerFrameInfo
 	return 0;
 }
 
+Bool KYTY_SYSV_ABI AvPlayerGetVideoDataEx(AvPlayerInternal* h, AvPlayerFrameInfoEx* video_info)
+{
+	PRINT_NAME();
+	avplayer_dump_call("video_call", h);
+	auto player = acquire_player(h);
+	return player == nullptr ? 0 : get_video_data_ex(player.get(), video_info);
+}
+
 Bool KYTY_SYSV_ABI AvPlayerGetAudioData(AvPlayerInternal* h, AvPlayerFrameInfo* audio_info)
 {
 	PRINT_NAME();
 	avplayer_dump_call("audio_call", h);
-	if (h == nullptr || audio_info == nullptr)
+	auto player = acquire_player(h);
+	if (player == nullptr || audio_info == nullptr)
 	{
 		return 0;
 	}
+	h = player.get();
 	std::shared_lock<std::shared_mutex> decoder_lock(h->decoder_mutex);
 	AudioVideoBackend::Decoder*          decoder = nullptr;
 	uint64_t                             timestamp = 0;
@@ -3016,7 +3208,7 @@ Bool KYTY_SYSV_ABI AvPlayerGetAudioData(AvPlayerInternal* h, AvPlayerFrameInfo* 
 	if (decoder != nullptr)
 	{
 		AudioVideoBackend::AudioFrame decoded;
-		if (!decoder->ReadAudioFrame(&decoded) || decoded.data.empty())
+		if (!decoder->TryReadAudioFrame(&decoded) || decoded.data.empty())
 		{
 			return 0;
 		}
@@ -3054,10 +3246,12 @@ Bool KYTY_SYSV_ABI AvPlayerGetAudioData(AvPlayerInternal* h, AvPlayerFrameInfo* 
 Bool KYTY_SYSV_ABI AvPlayerIsActive(AvPlayerInternal* h)
 {
 	PRINT_NAME();
-	if (h == nullptr)
+	auto player = acquire_player(h);
+	if (player == nullptr)
 	{
 		return 0;
 	}
+	h = player.get();
 	{
 		Core::LockGuard lock(h->mutex);
 		if (h->playing && (h->paused || synthetic_is_playing(h)))
@@ -3072,10 +3266,12 @@ Bool KYTY_SYSV_ABI AvPlayerIsActive(AvPlayerInternal* h)
 uint64_t KYTY_SYSV_ABI AvPlayerCurrentTime(AvPlayerInternal* h)
 {
 	PRINT_NAME();
-	if (h == nullptr)
+	auto player = acquire_player(h);
+	if (player == nullptr)
 	{
 		return 0;
 	}
+	h = player.get();
 	Core::LockGuard lock(h->mutex);
 	return current_time_ms(h);
 }
@@ -3083,10 +3279,12 @@ uint64_t KYTY_SYSV_ABI AvPlayerCurrentTime(AvPlayerInternal* h)
 int KYTY_SYSV_ABI AvPlayerJumpToTime(AvPlayerInternal* h, uint64_t time_ms)
 {
 	PRINT_NAME();
-	if (h == nullptr)
+	auto player = acquire_player(h);
+	if (player == nullptr)
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
+	h = player.get();
 	{
 		Core::LockGuard lock(h->mutex);
 		h->start_time_ms     = time_ms;
@@ -3102,12 +3300,11 @@ int KYTY_SYSV_ABI AvPlayerJumpToTime(AvPlayerInternal* h, uint64_t time_ms)
 int KYTY_SYSV_ABI AvPlayerClose(AvPlayerInternal* h)
 {
 	PRINT_NAME();
-	if (h == nullptr)
+	auto player = remove_player(h);
+	if (player == nullptr)
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
-	delete_synthetic_video(h);
-	delete h;
 	return 0;
 }
 

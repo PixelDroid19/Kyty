@@ -73,6 +73,11 @@ public:
 
 	bool ReadVideoFrame(VideoFrame* frame);
 	bool ReadAudioFrame(AudioFrame* frame);
+	// Non-blocking pulls used by the guest-facing AvPlayer ABI. A false result
+	// means that no decoded frame is ready yet; it is not an end-of-stream
+	// indication. EndOfStream() remains the authoritative completion query.
+	bool TryReadVideoFrame(VideoFrame* frame);
+	bool TryReadAudioFrame(AudioFrame* frame);
 	void Close();
 
 private:

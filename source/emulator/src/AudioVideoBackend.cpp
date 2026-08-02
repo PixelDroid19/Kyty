@@ -39,7 +39,6 @@ constexpr uint32_t kOutputSampleRate = 48000;
 constexpr uint32_t kOutputChannels   = 2;
 constexpr size_t   kVideoQueueCapacity = 6;
 constexpr size_t   kAudioQueueCapacity = 32;
-constexpr size_t   kAudioWakeVideoBudget = 8;
 
 bool SoftwareDecodeAllowed()
 {
@@ -154,8 +153,6 @@ struct Decoder::State
 	std::thread worker;
 	bool stop_requested = false;
 	bool decode_done     = false;
-	bool audio_waiting   = false;
-	size_t audio_video_budget = 0;
 	std::deque<VideoFrame> video_queue;
 	std::deque<AudioFrame> audio_queue;
 };
@@ -474,20 +471,11 @@ static bool ConvertVideo(Decoder::State* state)
 			return false;
 		}
 		state->condition.wait(lock, [state] {
-			return state->stop_requested || state->video_queue.size() < kVideoQueueCapacity ||
-			       (state->audio_waiting && state->audio_video_budget != 0);
+			return state->stop_requested || state->video_queue.size() < kVideoQueueCapacity;
 		});
 		if (state->stop_requested)
 		{
 			return false;
-		}
-		if (state->video_queue.size() >= kVideoQueueCapacity)
-		{
-			state->video_queue.pop_front();
-			if (state->audio_waiting && state->audio_video_budget != 0)
-			{
-				--state->audio_video_budget;
-			}
 		}
 		state->video_queue.push_back(std::move(frame));
 	}
@@ -535,12 +523,14 @@ static bool ConvertAudio(Decoder::State* state)
 	                              static_cast<uint64_t>(static_cast<double>(converted) * 1000.0 / kOutputSampleRate + 0.5);
 	if (!frame.data.empty())
 	{
-		std::lock_guard<std::mutex> lock(state->mutex);
-		if (state->audio_queue.size() >= kAudioQueueCapacity)
 		{
-			state->audio_queue.pop_front();
+			std::lock_guard<std::mutex> lock(state->mutex);
+			if (state->audio_queue.size() >= kAudioQueueCapacity)
+			{
+				state->audio_queue.pop_front();
+			}
+			state->audio_queue.push_back(std::move(frame));
 		}
-		state->audio_queue.push_back(std::move(frame));
 		state->condition.notify_all();
 	}
 	return true;
@@ -916,22 +906,9 @@ bool Decoder::ReadAudioFrame(AudioFrame* frame)
 	{
 		return false;
 	}
-	const bool waiting_for_audio = state_->audio_queue.empty() && !state_->decode_done && !state_->stop_requested;
-	if (waiting_for_audio)
-	{
-		state_->audio_waiting      = true;
-		state_->audio_video_budget = kAudioWakeVideoBudget;
-		state_->condition.notify_all();
-	}
 	state_->condition.wait(lock, [this] {
 		return !state_->audio_queue.empty() || state_->decode_done || state_->stop_requested || state_->status != Status::Ok;
 	});
-	if (waiting_for_audio)
-	{
-		state_->audio_waiting      = false;
-		state_->audio_video_budget = 0;
-		state_->condition.notify_all();
-	}
 	if (state_->audio_queue.empty())
 	{
 		return false;
@@ -939,6 +916,52 @@ bool Decoder::ReadAudioFrame(AudioFrame* frame)
 	*frame = std::move(state_->audio_queue.front());
 	state_->audio_queue.pop_front();
 	lock.unlock();
+	state_->condition.notify_all();
+	return true;
+#endif
+}
+
+bool Decoder::TryReadVideoFrame(VideoFrame* frame)
+{
+	if (frame == nullptr)
+	{
+		return false;
+	}
+	frame->data.clear();
+#if !defined(KYTY_HAVE_FFMPEG)
+	return false;
+#else
+	std::lock_guard<std::mutex> lock(state_->mutex);
+	if (state_->status != Status::Ok || state_->video == nullptr || state_->video_queue.empty())
+	{
+		return false;
+	}
+	*frame = std::move(state_->video_queue.front());
+	state_->video_queue.pop_front();
+	state_->condition.notify_all();
+	return true;
+#endif
+}
+
+bool Decoder::TryReadAudioFrame(AudioFrame* frame)
+{
+	if (frame == nullptr)
+	{
+		return false;
+	}
+	frame->data.clear();
+#if !defined(KYTY_HAVE_FFMPEG)
+	return false;
+#else
+	{
+		std::lock_guard<std::mutex> lock(state_->mutex);
+		if (state_->status != Status::Ok || state_->audio == nullptr || state_->audio_queue.empty())
+		{
+			return false;
+		}
+		*frame = std::move(state_->audio_queue.front());
+		state_->audio_queue.pop_front();
+	}
 	state_->condition.notify_all();
 	return true;
 #endif
