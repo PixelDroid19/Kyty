@@ -50,7 +50,7 @@ kyty_agent events --last 100
 kyty_agent last-error
 kyty_agent watch --seconds 15
 kyty_agent capture --timeout-ms 10000
-kyty_agent score --path C:\absolute\capture.png
+kyty_agent score
 ```
 
 For a bounded point-in-time diagnostic followed by an exact event wait, use
@@ -70,6 +70,12 @@ Start the emulator with `KYTY_NATIVE_CAPTURE_DIR` set to an absolute or
 process-relative output directory. `KYTY_NATIVE_CAPTURE_MAX_EDGE` bounds the
 longest written edge and `KYTY_NATIVE_CAPTURE_KEEP` bounds retained PNG/JSON
 pairs.
+
+`score` only analyzes the most recent native capture; it does not accept a
+caller-supplied path.
+
+`wait_event` returns `event_cursor_lost` when `--after-seq` predates the
+bounded retained event history; reacquire a fresh snapshot before waiting.
 
 Controller automation is explicitly diagnostic input:
 

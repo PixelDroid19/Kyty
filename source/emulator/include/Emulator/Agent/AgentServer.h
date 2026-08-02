@@ -18,6 +18,9 @@ namespace Internal {
 // Read-only production dispatcher seam for process-isolated integration. It
 // shares the realtime server's handlers without adding a second CLI surface.
 [[nodiscard]] std::string DispatchRequest(const Request& req);
+// Parses one transport line after rejecting raw NUL bytes, then dispatches it
+// through the same production handler table used by the realtime server.
+[[nodiscard]] std::string DispatchLine(const std::string& line);
 
 } // namespace Internal
 

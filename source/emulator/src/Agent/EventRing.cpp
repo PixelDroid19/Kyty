@@ -182,6 +182,36 @@ uint32_t EventRing::CopySince(uint64_t after_seq, EventRecord* out, uint32_t max
 	return written;
 }
 
+EventRingCopyResult EventRing::CopySinceOldest(uint64_t after_seq, EventRecord* out, uint32_t max_out) const
+{
+	EventRingCopyResult result {};
+	if (out == nullptr || max_out == 0)
+	{
+		return result;
+	}
+
+	std::lock_guard<std::mutex> lock(m_mutex);
+	const uint64_t              available = m_count < kAgentEventRingCapacity ? m_count : kAgentEventRingCapacity;
+	if (available == 0)
+	{
+		return result;
+	}
+
+	const uint64_t oldest_seq = m_seq - available + 1;
+	result.cursor_lost        = after_seq < oldest_seq - 1;
+	for (uint64_t logical = 0; logical < available && result.count < max_out; ++logical)
+	{
+		const uint64_t index = (m_count < kAgentEventRingCapacity) ? logical : ((m_count - available + logical) % kAgentEventRingCapacity);
+		const auto&    rec   = m_records[index];
+		if (rec.seq <= after_seq)
+		{
+			continue;
+		}
+		out[result.count++] = rec;
+	}
+	return result;
+}
+
 bool EventRing::LastOfKind(EventKind kind, EventRecord* out) const
 {
 	if (out == nullptr)

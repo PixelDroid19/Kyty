@@ -1,4 +1,5 @@
 #include "Emulator/Agent/EventRing.h"
+#include "Emulator/Agent/AgentServer.h"
 #include "Emulator/Agent/DebugSnapshot.h"
 #include "Emulator/Agent/FrameScore.h"
 #include "Emulator/Agent/Protocol.h"
@@ -94,6 +95,55 @@ TEST(AgentTools, ProtocolRejectsNonIntegerAndOverflowArguments)
 	EXPECT_EQ(value, std::numeric_limits<uint64_t>::max());
 	uint32_t small = 0;
 	EXPECT_FALSE(ArgsGetU32(R"({"value":4294967296})", "value", &small));
+}
+
+TEST(AgentTools, WaitEventScansAllRetainedHistoryForEarliestMatch)
+{
+	EventRing::Instance().ResetForTests();
+	EventRing::Instance().Push(EventKind::Error, "device_lost", "matching event");
+	for (uint32_t i = 0; i < 17; ++i)
+	{
+		EventRing::Instance().Push(EventKind::Info, "other", "newer non-match");
+	}
+
+	Request request {};
+	request.id        = 1;
+	request.kind      = Tool::WaitEvent;
+	request.tool      = "wait_event";
+	request.args_json = R"({"kind":"error","code":"device_lost","after_seq":0,"timeout_ms":0})";
+	const std::string response = Internal::DispatchRequest(request);
+	EXPECT_NE(response.find(R"("ok":true)"), std::string::npos);
+	EXPECT_NE(response.find(R"("seq":1)"), std::string::npos);
+}
+
+TEST(AgentTools, ScoreRejectsCallerPathBeforeFilesystemAccess)
+{
+	Request request {};
+	request.id        = 2;
+	request.kind      = Tool::Score;
+	request.tool      = "score";
+	request.args_json = R"({"path":"/tmp/kyty-agent-score-must-not-be-opened.png"})";
+	const std::string response = Internal::DispatchRequest(request);
+	EXPECT_NE(response.find(R"("ok":false)"), std::string::npos);
+	EXPECT_NE(response.find(R"("code":"invalid_args")"), std::string::npos);
+}
+
+TEST(AgentTools, WaitEventReportsCursorLossAfterRingOverflow)
+{
+	EventRing::Instance().ResetForTests();
+	for (uint32_t i = 0; i < kAgentEventRingCapacity + 1; ++i)
+	{
+		EventRing::Instance().Push(EventKind::Info, "other", "retained history");
+	}
+
+	Request request {};
+	request.id        = 3;
+	request.kind      = Tool::WaitEvent;
+	request.tool      = "wait_event";
+	request.args_json = R"({"kind":"error","after_seq":0,"timeout_ms":0})";
+	const std::string response = Internal::DispatchRequest(request);
+	EXPECT_NE(response.find(R"("ok":false)"), std::string::npos);
+	EXPECT_NE(response.find(R"("code":"event_cursor_lost")"), std::string::npos);
 }
 
 TEST(AgentTools, DebugSnapshotComposesStableBoundedSections)

@@ -36,7 +36,7 @@ void PrintUsage()
 	                     "  kyty_agent --endpoint ENDPOINT events [--last N] [--after-seq N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT snapshot [--events N] [--after-seq N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT capture [--timeout-ms N] [--no-score]\n"
-	                     "  kyty_agent --endpoint ENDPOINT score [--path ABS.png]\n"
+	                     "  kyty_agent --endpoint ENDPOINT score\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad down|up|tap BUTTON\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad hold BUTTON --delta N [--timeout-ms N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad axis AXIS VALUE|clear\n"
@@ -543,26 +543,10 @@ int Main(int argc, char** argv)
 	}
 	if (std::strcmp(cmd, "score") == 0)
 	{
-		const char* path = nullptr;
-		for (; i < argc; ++i)
+		if (i != argc)
 		{
-			if (std::strcmp(argv[i], "--path") == 0)
-			{
-				path = RequireArg(argc, argv, &i, "--path");
-				if (path == nullptr)
-				{
-					return 125;
-				}
-				continue;
-			}
-			std::fprintf(stderr, "kyty_agent: unknown score flag %s\n", argv[i]);
+			std::fprintf(stderr, "kyty_agent: score does not accept arguments; capture first\n");
 			return 125;
-		}
-		if (path != nullptr)
-		{
-			char req[1024];
-			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"score\",\"args\":{\"path\":\"%s\"}}", JsonEscape(path).c_str());
-			return Call(endpoint, req);
 		}
 		return Call(endpoint, "{\"id\":1,\"tool\":\"score\",\"args\":{}}");
 	}

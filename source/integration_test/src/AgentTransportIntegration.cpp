@@ -176,35 +176,30 @@ void RunCliDebugSnapshotWorkflow(const std::string& endpoint)
 				break;
 			}
 
+			const std::string response = Kyty::Emulator::Agent::Internal::DispatchLine(request);
 			Kyty::Emulator::Agent::Request   parsed_request {};
 			Kyty::Emulator::Agent::ErrorInfo parse_error {};
 			const bool                       parsed = Kyty::Emulator::Agent::ParseRequestLine(request.c_str(), &parsed_request, &parse_error);
-			std::string                     response;
 			if (!parsed)
 			{
 				workflow_ok = false;
-				response     = Kyty::Emulator::Agent::FormatErr(0, parse_error.code.c_str(), parse_error.message.c_str());
+			} else if (step == 0)
+			{
+				workflow_ok = workflow_ok && parsed_request.kind == Kyty::Emulator::Agent::Tool::Help &&
+				              parsed_request.tool == "help" && parsed_request.args_json == "{}";
+				workflow_ok = workflow_ok && response.find("\"capabilities\":") != std::string::npos &&
+				              response.find("\"debug_snapshot\":true") != std::string::npos;
 			} else
 			{
-				response = Kyty::Emulator::Agent::Internal::DispatchRequest(parsed_request);
-				if (step == 0)
+				uint32_t events_last = 0;
+				workflow_ok = workflow_ok && parsed_request.kind == Kyty::Emulator::Agent::Tool::DebugSnapshot &&
+				              parsed_request.tool == "debug_snapshot" &&
+				              Kyty::Emulator::Agent::ArgsGetU32(parsed_request.args_json, "events_last", &events_last) &&
+				              events_last == 100;
+				const char* required[] = {"\"schema\":\"debug_snapshot\"", "\"event_seq_start\":", "\"event_seq_end\":"};
+				for (const char* field: required)
 				{
-					workflow_ok = workflow_ok && parsed_request.kind == Kyty::Emulator::Agent::Tool::Help &&
-					              parsed_request.tool == "help" && parsed_request.args_json == "{}";
-					workflow_ok = workflow_ok && response.find("\"capabilities\":") != std::string::npos &&
-					              response.find("\"debug_snapshot\":true") != std::string::npos;
-				} else
-				{
-					uint32_t events_last = 0;
-					workflow_ok = workflow_ok && parsed_request.kind == Kyty::Emulator::Agent::Tool::DebugSnapshot &&
-					              parsed_request.tool == "debug_snapshot" &&
-					              Kyty::Emulator::Agent::ArgsGetU32(parsed_request.args_json, "events_last", &events_last) &&
-					              events_last == 100;
-					const char* required[] = {"\"schema\":\"debug_snapshot\"", "\"event_seq_start\":", "\"event_seq_end\":"};
-					for (const char* field: required)
-					{
-						workflow_ok = workflow_ok && response.find(field) != std::string::npos;
-					}
+					workflow_ok = workflow_ok && response.find(field) != std::string::npos;
 				}
 			}
 			const bool write_ok = Transport::WriteAll(&connection, response.data(), response.size()) == Transport::Result::Ok;
@@ -233,6 +228,58 @@ void RunCliDebugSnapshotWorkflow(const std::string& endpoint)
 	Transport::Close(&listener);
 }
 
+void RunRawNulLine(const std::string& endpoint)
+{
+	Transport::Listener listener {};
+	Expect(Transport::Listen(&listener, endpoint.c_str()) == Transport::Result::Ok, "listen raw nul");
+
+	std::atomic<bool> server_ok {false};
+	std::thread server([&]() {
+		Transport::Connection connection {};
+		if (Transport::Accept(&listener, &connection) != Transport::Result::Ok)
+		{
+			return;
+		}
+		std::string request;
+		if (Transport::ReadLine(&connection, &request, 4096) != Transport::Result::Ok)
+		{
+			Transport::Close(&connection);
+			return;
+		}
+		const std::string response = Kyty::Emulator::Agent::Internal::DispatchLine(request);
+		const bool        wrote    = [&]() {
+			const std::string payload = response + "\n";
+			return Transport::WriteAll(&connection, payload.data(), payload.size()) == Transport::Result::Ok;
+		}();
+		server_ok = request.find('\0') != std::string::npos && response.find(R"("ok":false)") != std::string::npos &&
+		            response.find(R"("code":"malformed")") != std::string::npos && wrote;
+		Transport::Close(&connection);
+	});
+
+	Transport::Connection client {};
+	for (uint32_t attempt = 0; attempt < 100; ++attempt)
+	{
+		if (Transport::Connect(endpoint.c_str(), &client) == Transport::Result::Ok)
+		{
+			break;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	Expect(client.native != 0, "connect raw nul");
+	std::string payload = R"({"id":1,"tool":"help","args":{}})";
+	payload.push_back('\0');
+	payload += "arbitrary-suffix\n";
+	Expect(Transport::WriteAll(&client, payload.data(), payload.size()) == Transport::Result::Ok, "write raw nul");
+	std::string response;
+	Expect(Transport::ReadLine(&client, &response, 4096) == Transport::Result::Ok, "read raw nul response");
+	Expect(response.find(R"("ok":false)") != std::string::npos, "raw nul response rejected");
+	Expect(response.find(R"("code":"malformed")") != std::string::npos, "raw nul malformed code");
+	Transport::Close(&client);
+	server.join();
+	Expect(server_ok.load(), "raw nul server validation");
+	Transport::Close(&listener);
+}
+
 } // namespace
 
 int main()
@@ -243,6 +290,7 @@ int main()
 	RunInterrupt(UniqueEndpoint("interrupt"));
 	RunCliWaitReady(UniqueEndpoint("wait-ready"));
 	RunCliDebugSnapshotWorkflow(UniqueEndpoint("debug-snapshot"));
+	RunRawNulLine(UniqueEndpoint("raw-nul"));
 	std::puts("agent transport integration passed");
 	return 0;
 }

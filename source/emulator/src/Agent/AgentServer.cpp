@@ -62,7 +62,7 @@ std::string HelpResult()
 	              "{\"tool\":\"events\",\"args\":{\"last\":50,\"after_seq\":0}},"
 	              "{\"tool\":\"last_error\"},"
 	              "{\"tool\":\"capture\",\"args\":{\"timeout_ms\":10000,\"score\":true}},"
-	              "{\"tool\":\"score\",\"args\":{\"path\":\"/abs/last.png\"}},"
+	              "{\"tool\":\"score\"},"
 	              "{\"tool\":\"pad_down\",\"args\":{\"button\":\"cross\"}},"
 	              "{\"tool\":\"pad_up\",\"args\":{\"button\":\"cross\"}},"
 	              "{\"tool\":\"pad_tap\",\"args\":{\"button\":\"cross\"}},"
@@ -660,18 +660,14 @@ std::string HandleCapture(const Request& req)
 
 std::string HandleScore(const Request& req)
 {
-	std::string path;
-	if (!ArgsGetString(req.args_json, "path", &path) || path.empty())
+	if (ArgsHasKey(req.args_json, "path"))
 	{
-		path = g_last_capture_path;
+		return FormatErr(req.id, "invalid_args", "score path is not accepted; use the last native capture");
 	}
+	const std::string& path = g_last_capture_path;
 	if (path.empty())
 	{
-		return FormatErr(req.id, "not_ready", "no capture path; pass path or capture first");
-	}
-	if (path[0] != '/')
-	{
-		return FormatErr(req.id, "invalid_args", "score path must be absolute");
+		return FormatErr(req.id, "not_ready", "no native capture is available; capture first");
 	}
 	FrameScoreMetrics metrics {};
 	if (!ScoreNativePng(path.c_str(), &metrics))
@@ -901,11 +897,14 @@ std::string HandleWaitEvent(const Request& req)
 	const uint64_t deadline = SteadyMs() + timeout_ms;
 	while (!g_stop.load())
 	{
-		EventRecord    records[16] {};
-		const uint32_t count = EventRing::Instance().CopySince(after_seq, records, 16);
-		for (uint32_t i = 0; i < count; ++i)
+		EventRecord                  records[kAgentEventRingCapacity] {};
+		const EventRingCopyResult    copied = EventRing::Instance().CopySinceOldest(after_seq, records, kAgentEventRingCapacity);
+		if (copied.cursor_lost)
 		{
-			// CopySince returns newest-first; scan for match.
+			return FormatErr(req.id, "event_cursor_lost", "event history no longer retains the requested cursor");
+		}
+		for (uint32_t i = 0; i < copied.count; ++i)
+		{
 			if (EventMatches(records[i], kind, code_filter))
 			{
 				char buf[512];
@@ -916,9 +915,9 @@ std::string HandleWaitEvent(const Request& req)
 				return FormatOk(req.id, buf);
 			}
 		}
-		if (count > 0)
+		if (copied.count > 0)
 		{
-			after_seq = records[0].seq;
+			after_seq = records[copied.count - 1].seq;
 		}
 		if (SteadyMs() >= deadline)
 		{
@@ -1047,17 +1046,7 @@ void HandleClient(Kyty::Agent::LocalTransport::Connection* connection)
 		{
 			continue;
 		}
-		Request   req {};
-		ErrorInfo error {};
-		if (!ParseRequestLine(line.c_str(), &req, &error))
-		{
-			if (!WriteAll(connection, FormatErr(0, error.code.c_str(), error.message.c_str())))
-			{
-				break;
-			}
-			continue;
-		}
-		const std::string response = Internal::DispatchRequest(req);
+		const std::string response = Internal::DispatchLine(line);
 		if (!WriteAll(connection, response))
 		{
 			break;
@@ -1106,6 +1095,21 @@ std::string DispatchRequest(const Request& req)
 		}
 	}
 	return HandleUnknown(req);
+}
+
+std::string DispatchLine(const std::string& line)
+{
+	if (line.find('\0') != std::string::npos)
+	{
+		return FormatErr(0, "malformed", "request contains NUL");
+	}
+	Request   req {};
+	ErrorInfo error {};
+	if (!ParseRequestLine(line.c_str(), &req, &error))
+	{
+		return FormatErr(0, error.code.c_str(), error.message.c_str());
+	}
+	return DispatchRequest(req);
 }
 
 } // namespace Internal

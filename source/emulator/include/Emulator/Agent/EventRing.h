@@ -46,6 +46,12 @@ struct EventRingStats
 	bool     overflowed   = false;
 };
 
+struct EventRingCopyResult
+{
+	uint32_t count        = 0;
+	bool     cursor_lost  = false;
+};
+
 class EventRing
 {
 public:
@@ -57,6 +63,9 @@ public:
 	[[nodiscard]] EventRingStats GetStats() const;
 	// Copies up to max_out newest-first events with seq > after_seq. Returns count.
 	uint32_t CopySince(uint64_t after_seq, EventRecord* out, uint32_t max_out) const;
+	// Copies retained events oldest-first under one lock and reports when the
+	// requested cursor predates the retained history.
+	[[nodiscard]] EventRingCopyResult CopySinceOldest(uint64_t after_seq, EventRecord* out, uint32_t max_out) const;
 	[[nodiscard]] bool LastOfKind(EventKind kind, EventRecord* out) const;
 	[[nodiscard]] bool LastError(EventRecord* out) const;
 
