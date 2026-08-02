@@ -100,6 +100,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("u2T2DiA5hRI", Gen5::GraphicsDcbStallCommandBufferParser);
 	LIB_FUNC("+u6dKSLWM2o", Gen5::GraphicsDcbStallCommandBufferParserGetSize);
 	LIB_FUNC("D9sr1xGUriE", Gen5::GraphicsCreatePrimState);
+	LIB_FUNC("pdEV7bI6COI", Gen5::GraphicsCreateInterpolantMapping);
 	LIB_FUNC("HV4j+E0MBHE", Gen5::GraphicsCreateInterpolantMapping);
 	LIB_FUNC("V++UgBtQhn0", Gen5::GraphicsGetDataPacketPayloadAddress);
 	LIB_FUNC("h9z6+0hEydk", Gen5::GraphicsSuspendPoint);
@@ -153,6 +154,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("1rZSWUv1IRc", Gen5::GraphicsDcbCopyData);
 	LIB_FUNC("qzMN2XKGA4k", Gen5::GraphicsAcbCopyData);
 	LIB_FUNC("+kSrjIVxKFE", Gen5::GraphicsDcbPushMarker);
+	LIB_FUNC("QhCbS4X9Rl8", Gen5::GraphicsDcbPushMarker);
 	LIB_FUNC("H7uZqCoNuWk", Gen5::GraphicsDcbPopMarker);
 	LIB_FUNC("cpCILPya5Zk", Gen5::GraphicsAcbPushMarker);
 	LIB_FUNC("6mFxkVqdmbQ", Gen5::GraphicsAcbPopMarker);

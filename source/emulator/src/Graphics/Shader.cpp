@@ -93,6 +93,13 @@ bool ShaderGen5SBufferDescriptorAlwaysOutOfBounds(const ShaderBufferResource& re
 	return resource.NumRecords() == 0u;
 }
 
+bool ShaderGen5SampledTextureMetadataRequiresDcc(const ShaderTextureResource& resource)
+{
+	const bool compression_metadata = resource.MetaPipeAligned() || resource.WriteCompress() || resource.MetaCompress() ||
+	                                  resource.DccAlphaPos() || resource.DccColorTransf();
+	return resource.MetaAddr() != 0u && compression_metadata;
+}
+
 bool ShaderStorageDescriptorSwizzleAllowed(bool gen5, const ShaderBufferResource& resource)
 {
 	// The GFX10 buffer-address swizzle is defined only for a descriptor with a
@@ -205,6 +212,8 @@ void ExcludeUnusedMetadataStorage(ShaderStorageResources* resources)
 			resources->raw_vmem_oob_guarded[active_count]        = resources->raw_vmem_oob_guarded[source];
 			resources->raw_smem_use[active_count]                = resources->raw_smem_use[source];
 			resources->raw_tbuffer_use[active_count]             = resources->raw_tbuffer_use[source];
+			resources->raw_smem_required_bytes[active_count]     = resources->raw_smem_required_bytes[source];
+			resources->raw_smem_dynamic_offset[active_count]     = resources->raw_smem_dynamic_offset[source];
 			resources->dynamic_sload[active_count]               = resources->dynamic_sload[source];
 			resources->slots[active_count]                   = resources->slots[source];
 			resources->start_register[active_count]          = resources->start_register[source];
@@ -1772,6 +1781,7 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 		info->fetch_attrib_data[i] = attrib[i];
 	}
 	info->fetch_attrib_data_num = static_cast<int>(max_semantic);
+	static const bool vertex_attr_trace = std::getenv("KYTY_VERTEX_ATTR_TRACE") != nullptr;
 
 	for (uint32_t i = 0; i < num_input_semantics; i++)
 	{
@@ -1782,7 +1792,10 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 		uint32_t reg  = in.hardware_mapping;
 		uint32_t size = in.size_in_elements;
 
-		printf("reg = %u, size = %u, va[%u] = 0x%08" PRIx32 "\n", reg, size, i, attrib[in.semantic]);
+		if (vertex_attr_trace)
+		{
+			printf("reg = %u, size = %u, va[%u] = 0x%08" PRIx32 "\n", reg, size, i, attrib[in.semantic]);
+		}
 
 		size_t   index       = attrib[in.semantic] & 0x1fu;
 		uint32_t format      = (attrib[in.semantic] >> 5u) & 0x1ffu;
@@ -1794,15 +1807,18 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 		EXIT_NOT_IMPLEMENTED(index >= ShaderVertexInputInfo::RES_MAX);
 
 		const auto* sharp = &buffer[index * 4];
-		static uint32_t vertex_attr_logs = 0;
-		if (vertex_attr_logs < 32u)
+		if (vertex_attr_trace)
 		{
-			++vertex_attr_logs;
-			std::fprintf(stderr,
-			             "KYTY_VERTEX_ATTR semantic=%u raw=0x%08" PRIx32 " index=%zu format=0x%03" PRIx32 " offset=0x%03" PRIx32
-			             " attrib=%p buffer=%p sharp=%p words=%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 "\n",
-			             in.semantic, attrib[in.semantic], index, format, offset, static_cast<const void*>(attrib), static_cast<const void*>(buffer),
-			             static_cast<const void*>(sharp), sharp[0], sharp[1], sharp[2], sharp[3]);
+			static std::atomic_uint32_t vertex_attr_logs {0};
+			const auto                  vertex_attr_log = vertex_attr_logs.fetch_add(1, std::memory_order_relaxed);
+			if (vertex_attr_log < 32u)
+			{
+				std::fprintf(stderr,
+				             "KYTY_VERTEX_ATTR semantic=%u raw=0x%08" PRIx32 " index=%zu format=0x%03" PRIx32 " offset=0x%03" PRIx32
+				             " attrib=%p buffer=%p sharp=%p words=%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 "\n",
+				             in.semantic, attrib[in.semantic], index, format, offset, static_cast<const void*>(attrib),
+				             static_cast<const void*>(buffer), static_cast<const void*>(sharp), sharp[0], sharp[1], sharp[2], sharp[3]);
+			}
 		}
 
 		EXIT_NOT_IMPLEMENTED(info->resources_num >= ShaderVertexInputInfo::RES_MAX);
@@ -2435,24 +2451,24 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 	constexpr uint8_t descriptor_live_mask = (1u << descriptor_registers) - 1u;
 	const auto         live_descriptor_words = ShaderGetMetadataSgprLiveness(code, start_register, descriptor_registers);
 
-	bool raw                     = false;
-	bool typed                   = false;
-	bool decoded_unknown         = false;
-	bool indirect_descriptor_use = false;
-	bool guarded_raw_vmem = false;
-	bool raw_smem_use     = false;
-	bool raw_tbuffer_use  = false;
+	bool     raw                     = false;
+	bool     typed                   = false;
+	bool     decoded_unknown         = false;
+	bool     indirect_descriptor_use = false;
+	bool     guarded_raw_vmem        = false;
+	bool     raw_smem_use            = false;
+	bool     raw_tbuffer_use         = false;
+	uint64_t raw_smem_required_bytes = 0;
+	bool     raw_smem_dynamic_offset = false;
 
 	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
 	{
-		const auto& inst = code.GetInstructions().At(index);
+		const auto&   inst       = code.GetInstructions().At(index);
 		const uint8_t live_words = live_descriptor_words[index];
 
-		decoded_unknown = decoded_unknown || inst.type == ShaderInstructionType::Unknown;
+		decoded_unknown            = decoded_unknown || inst.type == ShaderInstructionType::Unknown;
 		auto reads_live_descriptor = [&](const ShaderOperand& operand)
-		{
-			return (ShaderOperandSgprRangeMask(operand, start_register, descriptor_registers) & live_words) != 0;
-		};
+		{ return (ShaderOperandSgprRangeMask(operand, start_register, descriptor_registers) & live_words) != 0; };
 
 		bool candidate_raw         = false;
 		bool candidate_typed       = false;
@@ -2502,10 +2518,9 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 		}
 		if (!candidate_raw && !candidate_typed)
 		{
-			const bool exact_image_resource = (ShaderInstructionReadsImageResource(inst.type) ||
-			                                   ShaderInstructionWritesImageResource(inst.type)) &&
-			                                  inst.src_num >= 2 && inst.src[1].type == ShaderOperandType::Sgpr &&
-			                                  inst.src[1].register_id == start_register && inst.src[1].size == 8;
+			const bool exact_image_resource =
+			    (ShaderInstructionReadsImageResource(inst.type) || ShaderInstructionWritesImageResource(inst.type)) && inst.src_num >= 2 &&
+			    inst.src[1].type == ShaderOperandType::Sgpr && inst.src[1].register_id == start_register && inst.src[1].size == 8;
 			for (int operand = 0; operand < inst.src_num; ++operand)
 			{
 				if (exact_image_resource && operand == 1)
@@ -2535,26 +2550,55 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 			}
 			if (matches)
 			{
-				raw   = raw || candidate_raw;
-				typed = typed || candidate_typed;
+				raw              = raw || candidate_raw;
+				typed            = typed || candidate_typed;
 				guarded_raw_vmem = guarded_raw_vmem || candidate_raw_vmem;
 				raw_smem_use     = raw_smem_use || candidate_raw_smem;
 				raw_tbuffer_use  = raw_tbuffer_use || candidate_raw_tbuffer;
+				if (candidate_raw_smem)
+				{
+					const bool constant_offset = inst.src_num >= 2 && (inst.src[1].type == ShaderOperandType::LiteralConstant ||
+					                                                   inst.src[1].type == ShaderOperandType::IntegerInlineConstant);
+					if (!constant_offset || inst.dst.size <= 0)
+					{
+						raw_smem_dynamic_offset = true;
+					} else
+					{
+						const int64_t  byte_offset = static_cast<int64_t>(inst.src[1].constant.i) + inst.smem_imm_offset;
+						const uint64_t byte_count  = static_cast<uint64_t>(inst.dst.size) * sizeof(uint32_t);
+						if (byte_offset < 0 || static_cast<uint64_t>(byte_offset) > UINT64_MAX - byte_count)
+						{
+							raw_smem_dynamic_offset = true;
+						} else
+						{
+							raw_smem_required_bytes = std::max(raw_smem_required_bytes, static_cast<uint64_t>(byte_offset) + byte_count);
+						}
+					}
+				}
 			}
 		}
-
 	}
 
 	if (raw && typed)
 	{
-		return {ShaderStorageAccess::Mixed, decoded_unknown, indirect_descriptor_use, guarded_raw_vmem, raw_smem_use, raw_tbuffer_use};
+		return {ShaderStorageAccess::Mixed, decoded_unknown,        indirect_descriptor_use,
+		        guarded_raw_vmem,           raw_smem_use,           raw_tbuffer_use,
+		        raw_smem_required_bytes,    raw_smem_dynamic_offset};
 	}
 	if (typed)
 	{
-		return {ShaderStorageAccess::Typed, decoded_unknown, indirect_descriptor_use, guarded_raw_vmem, raw_smem_use, raw_tbuffer_use};
+		return {ShaderStorageAccess::Typed, decoded_unknown,        indirect_descriptor_use,
+		        guarded_raw_vmem,           raw_smem_use,           raw_tbuffer_use,
+		        raw_smem_required_bytes,    raw_smem_dynamic_offset};
 	}
-	return {raw ? ShaderStorageAccess::Raw : ShaderStorageAccess::Unknown, decoded_unknown, indirect_descriptor_use, guarded_raw_vmem,
-	        raw_smem_use, raw_tbuffer_use};
+	return {raw ? ShaderStorageAccess::Raw : ShaderStorageAccess::Unknown,
+	        decoded_unknown,
+	        indirect_descriptor_use,
+	        guarded_raw_vmem,
+	        raw_smem_use,
+	        raw_tbuffer_use,
+	        raw_smem_required_bytes,
+	        raw_smem_dynamic_offset};
 }
 
 struct ShaderDirectImageUse
@@ -2756,6 +2800,17 @@ static bool Gen5HasEudPointer(const ShaderUserData* user_data)
 {
 	return user_data != nullptr && user_data->eud_size_dw != 0 && user_data->srt_size_dw == 0 &&
 	       user_data->direct_resource_count > k_gen5_eud_direct_type && user_data->direct_resource_offset[k_gen5_eud_direct_type] != 0xffff;
+}
+
+static void ShaderReportMissingGen5EudPointer(const ShaderUserData* user_data, int reg, int user_sgpr_num)
+{
+	static std::atomic_uint32_t reports {0};
+	if (reports.fetch_add(1, std::memory_order_relaxed) >= 8u)
+	{
+		return;
+	}
+	std::fprintf(stderr, "KYTY_SHADER_EUD_NULL reg=%d user_sgpr=%d eud_dw=%u direct_count=%u\n", reg, user_sgpr_num,
+	             user_data != nullptr ? user_data->eud_size_dw : 0u, user_data != nullptr ? user_data->direct_resource_count : 0u);
 }
 
 // The EUD sharp namespace begins at ABI slot 0x20. Wider user-SGPR windows can
@@ -3380,7 +3435,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	}
 	EXIT_NOT_IMPLEMENTED(user_data->srt_size_dw > user_sgpr_num);
 
-	uint32_t* extended_buffer = nullptr;
+	uint32_t* extended_buffer    = nullptr;
+	bool       eud_pointer_valid = false;
 
 	bool direct_sgprs[HW::UserSgprInfo::SGPRS_MAX];
 	for (int i = 0; i < HW::UserSgprInfo::SGPRS_MAX; i++)
@@ -3436,9 +3492,16 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					bind->extended.start_register = reg;
 					bind->extended.data.fields[0] = user_sgpr.value[reg];
 					bind->extended.data.fields[1] = user_sgpr.value[reg + 1];
-					EXIT_NOT_IMPLEMENTED(bind->extended.data.Base() == 0);
-					extended_buffer       = reinterpret_cast<uint32_t*>(static_cast<uintptr_t>(bind->extended.data.Base()));
-					info->extended_buffer = true;
+					const uint64_t eud_base = bind->extended.data.Base();
+					if (eud_base != 0)
+					{
+						extended_buffer    = reinterpret_cast<uint32_t*>(static_cast<uintptr_t>(eud_base));
+						eud_pointer_valid = true;
+					} else
+					{
+						ShaderReportMissingGen5EudPointer(user_data, reg, user_sgpr_num);
+					}
+					info->extended_buffer = eud_pointer_valid;
 					direct_sgprs[reg]     = false;
 					direct_sgprs[reg + 1] = false;
 					break;
@@ -3519,6 +3582,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			// clear flag is 8-dw T# when dword3 type nibble is 1D (8) or 2D (9).
 			const auto sharp_size  = user_data->sharp_resource_offset[0][slot].size;
 			const int  off         = user_data->sharp_resource_offset[0][slot].offset_dw;
+			if (!eud_pointer_valid && Gen5SharpNeedsEud(off, 4, user_sgpr_num))
+			{
+				continue;
+			}
 			const bool use_texture = Gen5SharpUseTextureDescriptor(sharp_size != 0, off, user_sgpr_num, user_sgpr, extended_buffer);
 			if (use_texture)
 			{
@@ -3527,7 +3594,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				int             api    = off;
 				if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
 				{
-					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+					if (extended_buffer == nullptr)
+					{
+						continue;
+					}
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
 					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
@@ -3541,7 +3611,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				int             api    = off;
 				if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
 				{
-					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+					if (extended_buffer == nullptr)
+					{
+						continue;
+					}
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
 					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
@@ -3568,6 +3641,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 
 			const auto sharp_size  = user_data->sharp_resource_offset[1][slot].size;
 			const int  off         = user_data->sharp_resource_offset[1][slot].offset_dw;
+			if (!eud_pointer_valid && Gen5SharpNeedsEud(off, 4, user_sgpr_num))
+			{
+				continue;
+			}
 			const bool use_texture = Gen5SharpUseTextureDescriptor(sharp_size != 0, off, user_sgpr_num, user_sgpr, extended_buffer);
 			if (use_texture)
 			{
@@ -3576,7 +3653,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				int             api    = off;
 				if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
 				{
-					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+					if (extended_buffer == nullptr)
+					{
+						continue;
+					}
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
 					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
@@ -3590,7 +3670,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				int             api    = off;
 				if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
 				{
-					EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+					if (extended_buffer == nullptr)
+					{
+						continue;
+					}
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
 					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
@@ -3616,11 +3699,18 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			EXIT_NOT_IMPLEMENTED(user_data->sharp_resource_offset[2][slot].size != 1);
 			const int       off    = user_data->sharp_resource_offset[2][slot].offset_dw;
 			constexpr int   dwords = 4;
+			if (!eud_pointer_valid && Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
+			{
+				continue;
+			}
 			const uint32_t* ebuf   = nullptr;
 			int             api    = off;
 			if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
 			{
-				EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+				if (extended_buffer == nullptr)
+				{
+					continue;
+				}
 				api  = Gen5EudApiIndex(off, user_sgpr_num);
 				ebuf = extended_buffer;
 				EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
@@ -3642,11 +3732,18 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			EXIT_NOT_IMPLEMENTED(user_data->sharp_resource_offset[3][slot].size != 1);
 			const int       off    = user_data->sharp_resource_offset[3][slot].offset_dw;
 			constexpr int   dwords = 4;
+			if (!eud_pointer_valid && Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
+			{
+				continue;
+			}
 			const uint32_t* ebuf   = nullptr;
 			int             api    = off;
 			if (Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
 			{
-				EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+				if (extended_buffer == nullptr)
+				{
+					continue;
+				}
 				api  = Gen5EudApiIndex(off, user_sgpr_num);
 				ebuf = extended_buffer;
 				EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
@@ -3743,6 +3840,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				exact_evidence.access = ShaderStorageAccess::Mixed;
 			}
 			exact_evidence.raw_smem_use = true;
+			exact_evidence.raw_smem_dynamic_offset = true;
 		}
 		const auto exact = exact_evidence.access;
 		ShaderStorageUseEvidence unbased_evidence {};
@@ -3761,9 +3859,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		bind->storage_buffers.decoded_unknown[i]         = exact_evidence.decoded_unknown;
 		bind->storage_buffers.indirect_descriptor_use[i] = exact_evidence.indirect_descriptor_use;
 		const auto& matched_evidence = evidence.exact_match ? exact_evidence : unbased_evidence;
-		bind->storage_buffers.raw_vmem_oob_guarded[i] = matched_evidence.raw_vmem_oob_guarded;
-		bind->storage_buffers.raw_smem_use[i]         = matched_evidence.raw_smem_use;
-		bind->storage_buffers.raw_tbuffer_use[i]      = matched_evidence.raw_tbuffer_use;
+		bind->storage_buffers.raw_vmem_oob_guarded[i]    = matched_evidence.raw_vmem_oob_guarded;
+		bind->storage_buffers.raw_smem_use[i]            = matched_evidence.raw_smem_use;
+		bind->storage_buffers.raw_tbuffer_use[i]         = matched_evidence.raw_tbuffer_use;
+		bind->storage_buffers.raw_smem_required_bytes[i] = matched_evidence.raw_smem_required_bytes;
+		bind->storage_buffers.raw_smem_dynamic_offset[i] = matched_evidence.raw_smem_dynamic_offset;
 
 		if (evidence.access == ShaderStorageAccess::Raw && matched_evidence.raw_smem_use &&
 		    ShaderGen5SBufferDescriptorAlwaysOutOfBounds(bind->storage_buffers.buffers[i]))

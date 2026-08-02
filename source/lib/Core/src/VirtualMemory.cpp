@@ -1637,6 +1637,11 @@ bool Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode)
 	return sys_virtual_protect(address, size, mode, old_mode);
 }
 
+bool IsRangeReadable(uint64_t address, uint64_t size)
+{
+	return sys_virtual_is_range_readable(address, size);
+}
+
 ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor,
 	                                         void* context) noexcept
 {

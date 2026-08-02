@@ -47,7 +47,11 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_MrtNullDone)
 		{
 			const auto* info   = spirv->GetPsInputInfo();
 			const auto  target = null_mrt_target(inst.format);
-			EXIT_NOT_IMPLEMENTED(info == nullptr || !info->ps_pixel_kill_enable);
+			// The null export is the guest's inactive-execution tail. Its
+			// presence is authoritative for this shader; DB_SHADER_CONTROL's
+			// KILL_ENABLE bit is a pipeline scheduling hint and is not a reason
+			// to drop the guest's execution-mask semantics.
+			EXIT_NOT_IMPLEMENTED(info == nullptr);
 			EXIT_NOT_IMPLEMENTED(info->target_output_mode[target] != 4);
 			*dst_source += "        OpKill\n";
 			return true;

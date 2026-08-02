@@ -1282,8 +1282,33 @@ bool sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mo
 	return false;
 }
 
-VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(
-	uint64_t address, uint64_t size, VirtualMemory::CapturedProtectionVisitor visitor, void* context) noexcept
+bool sys_virtual_is_range_readable(uint64_t address, uint64_t size)
+{
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	if (!get_host_page_range(static_cast<uintptr_t>(address), size, &page_start, &page_end))
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	for (uintptr_t page = page_start; page < page_end;)
+	{
+		const auto* protection = find_protection_range(page);
+		if (protection == nullptr || (protection->protect & PROT_READ) == 0)
+		{
+			pthread_mutex_unlock(&g_virtual_mutex);
+			return false;
+		}
+		page = std::min(protection->end_page, page_end);
+	}
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
+}
+
+VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint64_t address, uint64_t size,
+                                                                           VirtualMemory::CapturedProtectionVisitor visitor,
+                                                                           void*                                    context) noexcept
 {
 	using Status = VirtualMemory::ProtectionChangeStatus;
 	VirtualMemory::ProtectionChangeResult result {};

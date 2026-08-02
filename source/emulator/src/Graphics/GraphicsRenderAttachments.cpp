@@ -143,6 +143,69 @@ void GraphicsRenderDepthStencilBarrier(VkCommandBuffer vk_buffer, VulkanImage* i
 	}
 }
 
+void GraphicsRenderStorageImageBarrier(VkCommandBuffer vk_buffer, VulkanImage* image)
+{
+	EXIT_IF(image == nullptr);
+
+	VkPipelineStageFlags src_stage  = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+	VkAccessFlags        src_access = 0;
+	switch (image->layout)
+	{
+		case VK_IMAGE_LAYOUT_UNDEFINED: break;
+		case VK_IMAGE_LAYOUT_PREINITIALIZED:
+			src_stage  = VK_PIPELINE_STAGE_HOST_BIT;
+			src_access = VK_ACCESS_HOST_WRITE_BIT;
+			break;
+		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+			src_stage  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+			src_access = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+			break;
+		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+			src_stage  = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+			             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			src_access = VK_ACCESS_SHADER_READ_BIT;
+			break;
+		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+			src_stage  = VK_PIPELINE_STAGE_TRANSFER_BIT;
+			src_access = VK_ACCESS_TRANSFER_READ_BIT;
+			break;
+		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+			src_stage  = VK_PIPELINE_STAGE_TRANSFER_BIT;
+			src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+			break;
+		case VK_IMAGE_LAYOUT_GENERAL:
+			src_stage  = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+			             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			src_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+			break;
+		default:
+			src_stage  = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+			src_access = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+			break;
+	}
+
+	VkImageMemoryBarrier image_memory_barrier {};
+	image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	image_memory_barrier.pNext                           = nullptr;
+	image_memory_barrier.srcAccessMask                   = src_access;
+	image_memory_barrier.dstAccessMask                   = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	image_memory_barrier.oldLayout                       = image->layout;
+	image_memory_barrier.newLayout                       = VK_IMAGE_LAYOUT_GENERAL;
+	image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	image_memory_barrier.image                           = image->image;
+	image_memory_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+	image_memory_barrier.subresourceRange.baseMipLevel   = 0;
+	image_memory_barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
+	image_memory_barrier.subresourceRange.baseArrayLayer = 0;
+	image_memory_barrier.subresourceRange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
+
+	const VkPipelineStageFlags dst_stage =
+	    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+	vkCmdPipelineBarrier(vk_buffer, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+	image->layout = image_memory_barrier.newLayout;
+}
+
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size)
 {
 	EXIT_IF(buffer == nullptr);
@@ -692,8 +755,49 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 
 	RenderColorInfo source {};
 	RenderColorInfo destination {};
-	EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, hw.GetRenderTarget(0), &source));
-	EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, hw.GetRenderTarget(1), &destination));
+	const auto& source_rt      = hw.GetRenderTarget(0);
+	const auto& destination_rt = hw.GetRenderTarget(1);
+	// MODE=RESOLVE is a fixed-function color0->color1 operation. The guest can
+	// leave one side unbound while reusing the same control state for a later
+	// pass; hardware treats that packet as having no color work. Do not turn the
+	// missing destination into a host-fatal assertion before the normal draw
+	// stream has a chance to continue.
+	if (source_rt.base.addr == 0 || destination_rt.base.addr == 0)
+	{
+		if (std::getenv("KYTY_DUMP_COLOR_RESOLVE") != nullptr)
+		{
+			static uint32_t skipped_logs = 0;
+			if (skipped_logs < 32u)
+			{
+				++skipped_logs;
+				std::fprintf(stderr,
+				             "KYTY_COLOR_RESOLVE_SKIP source=0x%012" PRIx64 " destination=0x%012" PRIx64
+				             " mode=%u op=0x%x\n",
+				             source_rt.base.addr, destination_rt.base.addr, static_cast<uint32_t>(hw.GetColorControl().mode),
+				             hw.GetColorControl().op);
+			}
+		}
+		return true;
+	}
+	EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, source_rt, &source));
+	EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, destination_rt, &destination));
+	if (std::getenv("KYTY_DUMP_COLOR_RESOLVE") != nullptr)
+	{
+		static uint32_t describe_logs = 0;
+		if (describe_logs < 32u)
+		{
+			++describe_logs;
+			const auto& src = source.attachment[0];
+			const auto& dst = destination.attachment[0];
+			std::fprintf(stderr,
+			             "KYTY_COLOR_RESOLVE_DESC src_type=%u src=0x%012" PRIx64 ":%ux%u:p%u:s%u:f%u "
+			             "dst_type=%u dst=0x%012" PRIx64 ":%ux%u:p%u:s%u:f%u\n",
+			             static_cast<uint32_t>(src.type), src.base_addr, src.width, src.height, src.pitch,
+			             static_cast<uint32_t>(src.samples), static_cast<uint32_t>(src.render_texture_format),
+			             static_cast<uint32_t>(dst.type), dst.base_addr, dst.width, dst.height, dst.pitch,
+			             static_cast<uint32_t>(dst.samples), static_cast<uint32_t>(dst.render_texture_format));
+		}
+	}
 	EXIT_NOT_IMPLEMENTED(source.attachment[0].type != RenderColorType::RenderTexture ||
 	                     destination.attachment[0].type != RenderColorType::RenderTexture);
 

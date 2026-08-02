@@ -320,8 +320,10 @@ void FormatTextureList(const ShaderTextureResources& textures, char* buffer, siz
 		const uint32_t th = static_cast<uint32_t>(r.Height5()) + 1u;
 		const uint32_t tf = r.Format();
 		const uint32_t tt = r.TileMode();
-		AppendFormatted(buffer, buffer_size, &tex_len, "%s0x%" PRIx64 ":%ux%u:fmt%u:tile%u", (tex_len ? "," : ""),
-		                Config::IsNextGen() ? r.Base40() : r.Base38(), tw, th, tf, tt);
+		AppendFormatted(buffer, buffer_size, &tex_len,
+		                "%s0x%" PRIx64 ":%ux%u:fmt%u:tile%u:type%u:depth%u:base%u", (tex_len ? "," : ""),
+		                Config::IsNextGen() ? r.Base40() : r.Base38(), tw, th, tf, tt, static_cast<uint32_t>(r.Type()),
+		                static_cast<uint32_t>(r.Depth()) + 1u, static_cast<uint32_t>(r.BaseArray5()));
 		if (tex_len + 8 >= buffer_size)
 		{
 			break;
@@ -482,9 +484,13 @@ void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& 
 		                     " stride=%u records=%u bytes=%" PRIu64 " readable=%" PRIu64,
 		             ps_buffers.slots[bi], ps_buffers.start_register[bi], static_cast<unsigned>(ps_buffers.usages[bi]), address,
 		             resource.Stride(), resource.NumRecords(), size, readable);
-		if (readable >= 5u * sizeof(uint32_t))
+		if (readable >= 4u * sizeof(uint32_t))
 		{
-			std::fprintf(stderr, " words=%08x,%08x,%08x,%08x,%08x", words[0], words[1], words[2], words[3], words[4]);
+			std::fprintf(stderr, " words=%08x,%08x,%08x,%08x", words[0], words[1], words[2], words[3]);
+			if (readable >= 5u * sizeof(uint32_t))
+			{
+				std::fprintf(stderr, ",%08x", words[4]);
+			}
 		}
 		if (readable >= 56u * sizeof(uint32_t))
 		{

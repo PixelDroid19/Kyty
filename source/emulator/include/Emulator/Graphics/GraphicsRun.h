@@ -57,22 +57,6 @@ bool GraphicsDecodeComputeResourceLimits(HW::CsStageRegisters* regs, uint32_t cm
 bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords,
                                                 const uint32_t* next_packet, uint32_t next_packet_dwords);
 
-constexpr bool GraphicsNormalizeIndirectRegisterPair(uint32_t register_limit, uint32_t& offset, uint32_t& value)
-{
-	if (offset < register_limit)
-	{
-		return true;
-	}
-	if (value < register_limit)
-	{
-		const uint32_t original_offset = offset;
-		offset                         = value;
-		value                          = original_offset;
-		return true;
-	}
-	return false;
-}
-
 constexpr uint32_t GraphicsDecodeIndirectCxRegisterOffset(uint32_t raw_offset)
 {
 	constexpr uint32_t selector_mask = 0x70000000u;

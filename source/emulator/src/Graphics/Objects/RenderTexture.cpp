@@ -274,6 +274,18 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	const auto capability            = EvaluateVulkanResolutionAttachment(ctx, capability_request);
 	EXIT_NOT_IMPLEMENTED(capability.status != VulkanRenderResolutionCapabilityStatus::Success ||
 	                     capability.decision.status != RenderResolutionImageCapabilityStatus::Supported);
+	VkImageUsageFlags vk_usage = capability_request.usage;
+	if (samples == VK_SAMPLE_COUNT_1_BIT)
+	{
+		auto storage_request = capability_request;
+		storage_request.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+		const auto storage_capability = EvaluateVulkanResolutionAttachment(ctx, storage_request);
+		if (storage_capability.status == VulkanRenderResolutionCapabilityStatus::Success &&
+		    storage_capability.decision.status == RenderResolutionImageCapabilityStatus::Supported)
+		{
+			vk_usage = storage_request.usage;
+		}
+	}
 
 	auto* vk_obj = new RenderTextureVulkanImage;
 	vk_obj->SetNativeExtent(width, height);
@@ -293,8 +305,7 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	image_descriptor.extent = {vk_obj->extent.width, vk_obj->extent.height, 1};
 	image_descriptor.format = vk_obj->format;
 	image_descriptor.samples = vk_obj->samples;
-	image_descriptor.usage  = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-	                                                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+	image_descriptor.usage  = vk_usage;
 	const auto image_info   = VulkanBuildImageCreateInfo(image_descriptor);
 	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem));
 	return vk_obj;

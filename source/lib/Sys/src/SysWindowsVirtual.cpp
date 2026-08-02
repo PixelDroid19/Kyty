@@ -783,6 +783,43 @@ bool sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mo
 	return true;
 }
 
+bool sys_virtual_is_range_readable(uint64_t address, uint64_t size)
+{
+	if (size == 0 || address > std::numeric_limits<uint64_t>::max() - size)
+	{
+		return false;
+	}
+
+	const uint64_t end = address + size;
+	for (uint64_t cursor = address; cursor < end;)
+	{
+		MEMORY_BASIC_INFORMATION info {};
+		if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(cursor)), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT ||
+		    (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
+		{
+			return false;
+		}
+		const DWORD access = info.Protect & 0xffu;
+		if (!(access == PAGE_READONLY || access == PAGE_READWRITE || access == PAGE_WRITECOPY || access == PAGE_EXECUTE_READ ||
+		      access == PAGE_EXECUTE_READWRITE || access == PAGE_EXECUTE_WRITECOPY))
+		{
+			return false;
+		}
+		const uint64_t region_start = reinterpret_cast<uint64_t>(info.BaseAddress);
+		if (info.RegionSize == 0 || region_start > std::numeric_limits<uint64_t>::max() - info.RegionSize)
+		{
+			return false;
+		}
+		const uint64_t next = std::min(end, region_start + info.RegionSize);
+		if (next <= cursor)
+		{
+			return false;
+		}
+		cursor = next;
+	}
+	return true;
+}
+
 static bool remove_write_protection(DWORD original, DWORD* target) noexcept
 {
 	const DWORD modifiers = original & ~0xffu;

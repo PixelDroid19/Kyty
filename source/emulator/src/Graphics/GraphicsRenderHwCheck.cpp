@@ -469,7 +469,7 @@ static void rc_check(const HW::RenderControl& c, bool allow_depth_stencil_copy)
 {
 	// EXIT_NOT_IMPLEMENTED(c.depth_clear_enable != false);
 	// EXIT_NOT_IMPLEMENTED(c.stencil_clear_enable != false);
-	// Resummarization only changes Prospero's hierarchical depth metadata.
+	// Resummarization only changes hierarchical depth metadata.
 	// Vulkan maintains that implementation detail for the depth attachment, so
 	// the regular attachment path preserves the logical depth/stencil contents.
 	// EXIT_NOT_IMPLEMENTED(c.stencil_compress_disable != false);
@@ -680,17 +680,47 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 	const VkSampleCountFlagBits msaa_num_samples =
 	    (cf.msaa_num_samples == 0 ? attachment_samples
 	                              : static_cast<VkSampleCountFlagBits>(decode_guest_sample_count(cf.msaa_num_samples)));
+	const auto encode_sample_count = [](VkSampleCountFlagBits samples) -> uint32_t {
+		switch (samples)
+		{
+			case VK_SAMPLE_COUNT_1_BIT: return 0;
+			case VK_SAMPLE_COUNT_2_BIT: return 1;
+			case VK_SAMPLE_COUNT_4_BIT: return 2;
+			case VK_SAMPLE_COUNT_8_BIT: return 3;
+			case VK_SAMPLE_COUNT_16_BIT: return 4;
+			case VK_SAMPLE_COUNT_32_BIT: return 5;
+			case VK_SAMPLE_COUNT_64_BIT: return 6;
+			default: return 0;
+		}
+	};
+	// PA_SC_AA_CONFIG may still contain the single-sample default while the
+	// attachment and DB_EQAA already describe the active multisample target.
+	// Compare EQAA against the effective attachment encoding in that case.
+	const uint32_t effective_guest_samples =
+	    cf.msaa_num_samples != 0 ? cf.msaa_num_samples : encode_sample_count(attachment_samples);
 	EXIT_NOT_IMPLEMENTED(msaa_num_samples != attachment_samples);
-	EXIT_NOT_IMPLEMENTED(cf.msaa_exposed_samples != 0 && cf.msaa_exposed_samples != cf.msaa_num_samples);
+	EXIT_NOT_IMPLEMENTED(cf.msaa_exposed_samples != 0 && cf.msaa_exposed_samples != effective_guest_samples);
 	EXIT_NOT_IMPLEMENTED(cf.aa_mask_centroid_dtmn);
 
-	EXIT_NOT_IMPLEMENTED(eqaa.max_anchor_samples != cf.msaa_num_samples);
-	EXIT_NOT_IMPLEMENTED(eqaa.ps_iter_samples != cf.msaa_num_samples);
-	EXIT_NOT_IMPLEMENTED(eqaa.mask_export_num_samples != 0);
-	EXIT_NOT_IMPLEMENTED(eqaa.alpha_to_mask_num_samples != cf.msaa_num_samples);
-	EXIT_NOT_IMPLEMENTED(eqaa.high_quality_intersections);
-	EXIT_NOT_IMPLEMENTED(eqaa.incoherent_eqaa_reads);
-	EXIT_NOT_IMPLEMENTED(eqaa.interpolate_comp_z);
+	// EQAA controls remain latched while a title switches between MSAA targets.
+	// Vulkan exposes the raster sample count and optional sample shading, while
+	// the remaining EQAA quality controls have no independent pipeline state.
+	// Preserve the values for sample-shading selection in the pipeline and let
+	// the rasterizer use the effective attachment count instead of rejecting a
+	// valid draw because an EQAA field describes a lower anchor/iteration count.
+	if (scan_mode.msaa_enable && std::getenv("KYTY_DUMP_AA_REGS") != nullptr)
+	{
+		static bool dumped_eqaa_mapping = false;
+		if (!dumped_eqaa_mapping)
+		{
+			std::fprintf(stderr,
+			             "KYTY_AA_MAPPING attachment=%u effective_guest=%u max_anchor=%u ps_iter=%u mask_export=%u "
+			             "alpha_to_mask=%u\n",
+			             static_cast<uint32_t>(attachment_samples), effective_guest_samples, eqaa.max_anchor_samples,
+			             eqaa.ps_iter_samples, eqaa.mask_export_num_samples, eqaa.alpha_to_mask_num_samples);
+			dumped_eqaa_mapping = true;
+		}
+	}
 
 	auto* graphic_context = g_render_ctx->GetGraphicCtx();
 	EXIT_IF(graphic_context == nullptr);

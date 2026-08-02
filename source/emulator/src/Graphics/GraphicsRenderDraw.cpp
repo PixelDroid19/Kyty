@@ -33,6 +33,7 @@
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
+#include <atomic>
 #include <cinttypes>
 #include <cstring>
 #include <cstdio>
@@ -313,6 +314,56 @@ static void MaybeDumpPixelShaderSnapshot(const char* path, const HW::Shader& sh,
 	}
 }
 
+static void MaybeDumpVideoDrawReady(const char* path, const HW::Shader& sh, const ShaderPixelInputInfo& ps_input,
+                                    const RenderColorInfo& color, uint32_t count, uint32_t primitive_type)
+{
+	if (std::getenv("KYTY_DUMP_VIDEO_DRAW") == nullptr || !Config::IsNextGen())
+	{
+		return;
+	}
+
+	const auto& textures = ps_input.bind.textures2D;
+	bool       has_luma   = false;
+	bool       has_chroma = false;
+	for (int index = 0; index < textures.textures_num; ++index)
+	{
+		const auto& resource = textures.desc[index].texture;
+		const uint32_t width  = static_cast<uint32_t>(resource.Width5()) + 1u;
+		const uint32_t height = static_cast<uint32_t>(resource.Height5()) + 1u;
+		if (resource.TileMode() != 0u)
+		{
+			continue;
+		}
+		if (resource.Format() == 1u && width == 1920u && height == 1080u)
+		{
+			has_luma = true;
+		}
+		if (resource.Format() == 14u && width == 960u && height == 540u)
+		{
+			has_chroma = true;
+		}
+	}
+	if (!has_luma || !has_chroma)
+	{
+		return;
+	}
+
+	static std::atomic<uint32_t> logs {0};
+	const uint32_t ordinal = logs.fetch_add(1, std::memory_order_relaxed);
+	if (ordinal >= 128u)
+	{
+		return;
+	}
+	const auto& ps = sh.GetPs();
+	const auto& vs = sh.GetVs();
+	const auto* target = RenderColorFirstConfiguredAttachment(color);
+	std::fprintf(stderr,
+	             "KYTY_DUMP_VIDEO_DRAW path=%s ordinal=%u frame=%d count=%u prim=%u target=0x%012" PRIx64
+	             " vs_id=0x%016" PRIx64 " ps_id=0x%016" PRIx64 " ps_addr=0x%012" PRIx64 " textures=%d\n",
+	             path, ordinal, WindowGetPresentedFrameNum(), count, primitive_type, target != nullptr ? target->base_addr : 0u,
+	             vs.gs_regs.chksum, ps.ps_regs.chksum, ps.ps_regs.data_addr, textures.textures_num);
+}
+
 static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDepthInfo& depth, const HW::Context& hw,
                                     const HW::Shader& sh,
                                     const ShaderVertexInputInfo& vs_input, const ShaderPixelInputInfo& ps_input, uint32_t index_count,
@@ -320,6 +371,7 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
                                     uint32_t primitive_type)
 {
 	MaybeDumpPixelShaderSnapshot("index", sh, ps_input, index_count, primitive_type);
+	MaybeDumpVideoDrawReady("index", sh, ps_input, color, index_count, primitive_type);
 	if (std::getenv("KYTY_DUMP_DRAW2") != nullptr)
 	{
 		static uint32_t draw2_logs = 0;
@@ -416,6 +468,7 @@ static void MaybeDumpAutoDrawReady(const RenderColorInfo& color, const RenderDep
                                    const ShaderPixelInputInfo& ps_input, uint32_t index_count, uint32_t primitive_type)
 {
 	MaybeDumpPixelShaderSnapshot("auto", sh, ps_input, index_count, primitive_type);
+	MaybeDumpVideoDrawReady("auto", sh, ps_input, color, index_count, primitive_type);
 	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
@@ -824,8 +877,17 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	}
 
 	PrimitiveDrawPlan primitive_plan {};
-	EXIT_NOT_IMPLEMENTED(!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true,
-	                                                       &primitive_plan));
+	if (!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true, &primitive_plan))
+	{
+		static std::atomic_uint32_t unsupported_indexed_draws {0};
+		if (unsupported_indexed_draws.fetch_add(1, std::memory_order_relaxed) < 16u)
+		{
+			std::fprintf(stderr, "WARNING: skipping unsupported indexed primitive: type=%u count=%u vertex_buffers=%d\n",
+			             ucfg->GetPrimType(), index_count, vs_input_info.buffers_num);
+		}
+		MaybeDumpIndexDrawSkip("unsupported-primitive", index_count, draw_modifier, type);
+		return;
+	}
 	MaybeDumpPrimitiveDrawPlan("indexed", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
@@ -1557,9 +1619,14 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	PrimitiveDrawPlan primitive_plan {};
 	if (!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, &primitive_plan))
 	{
-		std::fprintf(stderr, "Unsupported auto-draw primitive: type=%u count=%u vertex_buffers=%d\n", ucfg->GetPrimType(),
-		             index_count, vs_input_info.buffers_num);
-		EXIT_NOT_IMPLEMENTED(true);
+		static std::atomic_uint32_t unsupported_auto_draws {0};
+		if (unsupported_auto_draws.fetch_add(1, std::memory_order_relaxed) < 16u)
+		{
+			std::fprintf(stderr, "WARNING: skipping unsupported auto-draw primitive: type=%u count=%u vertex_buffers=%d\n",
+			             ucfg->GetPrimType(), index_count, vs_input_info.buffers_num);
+		}
+		MaybeDumpAutoDrawSkip("unsupported-primitive", index_count, draw_modifier);
+		return;
 	}
 	MaybeDumpPrimitiveDrawPlan("auto", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, primitive_plan);
 
@@ -1736,6 +1803,14 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		}
 	}
 	static const char* dump_dispatch = std::getenv("KYTY_DUMP_DISPATCH");
+	const char*        dump_cs_addr  = std::getenv("KYTY_DUMP_CS_ADDR");
+	bool               selected_cs   = false;
+	if (dump_cs_addr != nullptr && dump_cs_addr[0] != '\0')
+	{
+		char*      end      = nullptr;
+		const auto selected = std::strtoull(dump_cs_addr, &end, 0);
+		selected_cs         = end != dump_cs_addr && *end == '\0' && selected == cs_regs.cs_regs.data_addr;
+	}
 	static uint32_t    dispatch_logs = 0;
 	uint32_t           dispatch_limit = 256u;
 	if (const char* env_limit = std::getenv("KYTY_DUMP_DISPATCH_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
@@ -1746,8 +1821,8 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 			dispatch_limit = static_cast<uint32_t>(parsed);
 		}
 	}
-	if (dump_dispatch != nullptr && dump_dispatch[0] != '\0' && dispatch_logs < dispatch_limit &&
-	    (GraphicsRunGetFrameNum() <= 5 || std::strcmp(dump_dispatch, "all") == 0))
+	if (((dump_dispatch != nullptr && dump_dispatch[0] != '\0') || selected_cs) && dispatch_logs < dispatch_limit &&
+	    (selected_cs || GraphicsRunGetFrameNum() <= 5 || std::strcmp(dump_dispatch, "all") == 0))
 	{
 		++dispatch_logs;
 		std::fprintf(stderr,

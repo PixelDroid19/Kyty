@@ -85,6 +85,25 @@ static int ResolveVertexParameterCount(const ShaderCode& code, const ShaderVerte
 	return count;
 }
 
+static bool ShaderCodeHasDiscardTail(const ShaderCode& code)
+{
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t index = 1; index + 1 < instructions.Size(); ++index)
+	{
+		const auto& previous = instructions.At(index - 1);
+		const auto& current  = instructions.At(index);
+		const auto& next     = instructions.At(index + 1);
+		if (previous.type == ShaderInstructionType::SMovB64 && previous.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
+		    previous.dst.type == ShaderOperandType::ExecLo && previous.src[0].type == ShaderOperandType::IntegerInlineConstant &&
+		    previous.src[0].constant.i == 0 && current.type == ShaderInstructionType::Exp && ShaderIsNullMrtDoneFormat(current.format) &&
+		    next.type == ShaderInstructionType::SEndpgm)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 void Spirv::GenerateSource()
 {
 	m_source.Clear();
@@ -329,7 +348,7 @@ void Spirv::WriteHeader()
 				// depth is committed after shader kill. Vulkan EarlyFragmentTests
 				// alone commits depth before OpKill, so use late tests for shaders
 				// that can discard.
-				if (m_ps_input_info->ps_early_z && !m_ps_input_info->ps_pixel_kill_enable)
+				if (m_ps_input_info->ps_early_z && !m_ps_input_info->ps_pixel_kill_enable && !ShaderCodeHasDiscardTail(m_code))
 				{
 					execution_modes.Add("OpExecutionMode %main EarlyFragmentTests\n");
 				}
@@ -1777,6 +1796,8 @@ void Spirv::WriteInstructions()
 
 		if (!ok)
 		{
+			std::fprintf(stderr, "SHADER_EMIT_MISSING full format=0x%016" PRIx64 " type=%u pc=0x%08" PRIx32 "\n",
+			             static_cast<uint64_t>(inst.format), static_cast<unsigned>(inst.type), inst.pc);
 			EXIT("shader emitter missing: stage=%u instruction=%u format=%u pc=0x%08" PRIx32 "\n",
 			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<unsigned>(inst.format), inst.pc);
 		}

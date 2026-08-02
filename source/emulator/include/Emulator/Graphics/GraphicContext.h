@@ -186,6 +186,7 @@ struct VulkanImage
 	VkExtent2D             extent               = {};
 	VkImage                image                = nullptr;
 	VkImageView            image_view[VIEW_MAX] = {};
+	VkImageUsageFlags      usage                = 0;
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkSampleCountFlagBits  samples               = VK_SAMPLE_COUNT_1_BIT;
 	Graphics::VulkanMemory memory;

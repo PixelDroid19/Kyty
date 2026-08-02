@@ -40,6 +40,7 @@ uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t addre
                                                    VirtualMemory::Mode mode, uint64_t alignment);
 bool     sys_virtual_free(uint64_t address);
 bool     sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode = nullptr);
+bool     sys_virtual_is_range_readable(uint64_t address, uint64_t size);
 VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint64_t address, uint64_t size,
 	                                                                      VirtualMemory::CapturedProtectionVisitor visitor,
 	                                                                      void* context) noexcept;

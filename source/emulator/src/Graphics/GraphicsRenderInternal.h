@@ -664,6 +664,7 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 // Internal image barriers (VkCommandBuffer overloads; public API uses CommandBuffer*).
 void GraphicsRenderRenderTextureBarrier(VkCommandBuffer vk_buffer, VulkanImage* image);
 void GraphicsRenderDepthStencilBarrier(VkCommandBuffer vk_buffer, VulkanImage* image);
+void GraphicsRenderStorageImageBarrier(VkCommandBuffer vk_buffer, VulkanImage* image);
 
 // --- Core (color / dump) ---
 

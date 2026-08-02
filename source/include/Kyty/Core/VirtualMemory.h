@@ -146,6 +146,9 @@ uint64_t MapSharedFixedOrRelocated(SharedBacking* backing, uint64_t address, uin
                                    uint64_t alignment);
 bool           Free(uint64_t address);
 bool           Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nullptr);
+// Returns true only when every byte belongs to a committed mapping whose host
+// protection permits reads. It does not probe memory or install a fault guard.
+bool           IsRangeReadable(uint64_t address, uint64_t size);
 enum class ProtectionChangeStatus : uint32_t
 {
 	Success,

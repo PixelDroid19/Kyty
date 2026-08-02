@@ -181,6 +181,7 @@ bool VulkanCreateDeviceImage(GraphicContext* context, const VkImageCreateInfo& i
 	}
 	VulkanBindImageMemory(context, image, memory);
 	image->memory = *memory;
+	image->usage  = image_info.usage;
 	return true;
 }
 

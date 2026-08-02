@@ -5,6 +5,7 @@
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Vector.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Config.h"
@@ -97,7 +98,7 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 }
 
 static Emulator::Agent::Lifecycle::StorageBindingProvenance DescribeStorageBinding(const ShaderStorageResources& storage_buffers,
-                                                                                     int index)
+                                                                                      int index)
 {
 	Emulator::Agent::Lifecycle::StorageBindingProvenance binding {};
 	switch (storage_buffers.accesses[index])
@@ -285,23 +286,54 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 				EXIT_NOT_IMPLEMENTED(true);
 			}
 
-			const uint64_t materialized_size = GpuMemoryGetAllocatedRangePrefix(addr, declared_size);
-			if (materialized_size != declared_size)
-			{
-				ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
-			}
-			EXIT_NOT_IMPLEMENTED(materialized_size == 0);
-
 			const bool read_only = ShaderStorageUsageIsReadOnly(storage_buffers.usages[i]);
 			EXIT_NOT_IMPLEMENTED(read_only && !(storage_buffers.usages[i] == ShaderStorageUsage::ReadOnly ||
 			                                    storage_buffers.usages[i] == ShaderStorageUsage::Constant));
+			const bool exact_static_smem = gen5 && storage_buffers.accesses[i] == ShaderStorageAccess::Raw &&
+			                               storage_buffers.exact_matches[i] && !storage_buffers.decoded_unknown[i] &&
+			                               !storage_buffers.indirect_descriptor_use[i] && storage_buffers.raw_smem_use[i] &&
+			                               !storage_buffers.raw_vmem_oob_guarded[i] && !storage_buffers.raw_tbuffer_use[i] &&
+			                               !storage_buffers.raw_smem_dynamic_offset[i] && storage_buffers.raw_smem_required_bytes[i] != 0;
+			const uint64_t requested_size =
+			    exact_static_smem ? std::min(declared_size, storage_buffers.raw_smem_required_bytes[i]) : declared_size;
+			const uint64_t materialized_size = GpuMemoryGetAllocatedRangePrefix(addr, requested_size);
 
-			StorageBufferGpuObject buf_info(stride, num_records, read_only);
-			buf = TryUploadTransientReadOnlyBuffer(buffer, addr, materialized_size, read_only, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-			if (buf == nullptr)
+			// Executable images are mapped by the loader rather than the GPU heap.
+			// A statically addressed scalar load can safely use a per-submit copy of
+			// only the dwords proven reachable by the shader.
+			if (materialized_size == 0 && exact_static_smem && read_only && requested_size <= 0x1000u &&
+			    Core::VirtualMemory::IsRangeReadable(addr, requested_size))
 			{
-				buf = static_cast<StorageVulkanBuffer*>(
-				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, materialized_size, buf_info));
+				buf =
+				    buffer->UploadTransientBuffer(reinterpret_cast<const void*>(addr), requested_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+			} else if (materialized_size == 0)
+			{
+				ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
+				EXIT_NOT_IMPLEMENTED(materialized_size == 0);
+
+				// Unsafe bring-up deliberately continues past the diagnostic below, so
+				// do not feed a zero-sized or unmapped range into GpuMemoryCreateObject.
+				// A zero-filled SSBO is the same safe carrier used for proven raw OOB
+				// accesses and keeps the command stream alive without dereferencing the
+				// invalid guest address. Strict mode still halts in EXIT_NOT_IMPLEMENTED.
+				static constexpr uint32_t kInvalidStorageDescriptorCarrier = 0;
+				buf = buffer->UploadTransientBuffer(&kInvalidStorageDescriptorCarrier, sizeof(kInvalidStorageDescriptorCarrier),
+				                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+			} else
+			{
+				if (materialized_size != requested_size)
+				{
+					ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
+				}
+				EXIT_NOT_IMPLEMENTED(materialized_size == 0);
+
+				StorageBufferGpuObject buf_info(stride, num_records, read_only);
+				buf = TryUploadTransientReadOnlyBuffer(buffer, addr, materialized_size, read_only, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+				if (buf == nullptr)
+				{
+					buf = static_cast<StorageVulkanBuffer*>(
+					    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, materialized_size, buf_info));
+				}
 			}
 		}
 
@@ -442,7 +474,26 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			EXIT_NOT_IMPLEMENTED(r.MetaCompress() != false);
 			EXIT_NOT_IMPLEMENTED(r.DccAlphaPos() != false);
 			EXIT_NOT_IMPLEMENTED(r.DccColorTransf() != false);
-			EXIT_NOT_IMPLEMENTED(r.MetaAddr() != 0);
+			if (std::getenv("KYTY_SAMPLE_BIND_METADATA_LOG") != nullptr)
+			{
+				static std::atomic_uint metadata_log_count {0};
+				const unsigned ordinal = metadata_log_count.fetch_add(1, std::memory_order_relaxed);
+				if (ordinal < 32u)
+				{
+					std::fprintf(stderr,
+					             "KYTY_SAMPLE_BIND_METADATA format=%u tile=%u extent=%ux%u base=0x%012" PRIx64
+					             " meta=0x%012" PRIx64 " pipe=%u write=%u compress=%u alpha=%u color=%u\n",
+					             static_cast<unsigned>(r.Format()), static_cast<unsigned>(r.TileMode()),
+					             static_cast<unsigned>(r.Width5() + 1u), static_cast<unsigned>(r.Height5() + 1u), r.Base40(),
+					             r.MetaAddr(), r.MetaPipeAligned() ? 1u : 0u, r.WriteCompress() ? 1u : 0u,
+					             r.MetaCompress() ? 1u : 0u, r.DccAlphaPos() ? 1u : 0u, r.DccColorTransf() ? 1u : 0u);
+				}
+				else if (ordinal == 32u)
+				{
+					std::fprintf(stderr, "KYTY_SAMPLE_BIND_METADATA further entries suppressed\n");
+				}
+			}
+			EXIT_NOT_IMPLEMENTED(ShaderGen5SampledTextureMetadataRequiresDcc(r));
 		} else
 		{
 			EXIT_NOT_IMPLEMENTED(r.Dfmt() != 1 && r.Dfmt() != 10 && r.Dfmt() != 37 && r.Dfmt() != 4 && r.Dfmt() != 35 && r.Dfmt() != 3 &&
@@ -580,8 +631,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					// A registered tight single-channel linear surface is a native R8
 					// image. Broadcast its red plane through the view so shaders see
 					// the same value in every component, matching the hardware T#
-					// result for narrow sampled resources.
-					if (fmt == 1u && bytes_per_element == 1u && swizzle == DstSel(0, 0, 0, 4))
+					// result for narrow sampled resources. The AvPlayer descriptor can
+					// carry any legal narrow DST_SEL; the registered layout is the
+					// provenance that distinguishes this path from ordinary textures.
+					if (fmt == 1u && bytes_per_element == 1u)
 					{
 						view_swizzle = DstSel(4, 4, 4, 4);
 					}
@@ -605,9 +658,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			static std::set<std::string> catalog_seen;
 			char                         line[320];
 			std::snprintf(line, sizeof(line),
-			              "fmt=%u tile=%u %ux%u pitch=%u swizzle=0x%03x view_swizzle=0x%03x degamma=%u word4=0x%08x path=%s addr=0x%012" PRIx64 "\n",
-			              fmt, tile, width, height, pitch, swizzle, view_swizzle, force_degamma ? 1u : 0u, r.fields[4], path,
-			              static_cast<uint64_t>(addr));
+			              "fmt=%u tile=%u %ux%u pitch=%u swizzle=0x%03x view_swizzle=0x%03x degamma=%u word4=0x%08x type=%u depth=%u base_array=%u path=%s addr=0x%012" PRIx64 "\n",
+			              fmt, tile, width, height, pitch, swizzle, view_swizzle, force_degamma ? 1u : 0u, r.fields[4],
+			              static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()) + 1u,
+			              static_cast<uint32_t>(r.BaseArray5()), path, static_cast<uint64_t>(addr));
 			std::lock_guard<std::mutex> lock(catalog_mu);
 			if (!catalog_seen.insert(line).second)
 			{
@@ -935,6 +989,28 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		}
 
 		EXIT_NOT_IMPLEMENTED(tex == nullptr);
+		if (const char* dump_texture_bind = std::getenv("KYTY_DUMP_TEXTURE_BIND"); dump_texture_bind != nullptr)
+		{
+			uint32_t selected_width  = 0;
+			uint32_t selected_height = 0;
+			if (std::sscanf(dump_texture_bind, "%ux%u", &selected_width, &selected_height) == 2 &&
+			    selected_width == static_cast<uint32_t>(width) && selected_height == static_cast<uint32_t>(height))
+			{
+				static std::atomic_uint texture_bind_logs {0};
+				const unsigned         ordinal = texture_bind_logs.fetch_add(1, std::memory_order_relaxed);
+				if (ordinal < 256u)
+				{
+					std::fprintf(stderr,
+					             "KYTY_DUMP_TEXTURE_BIND ordinal=%u index=%d guest_addr=0x%012" PRIx64
+					             " guest_format=%u tile=%u size=%ux%u usage=%u host_id=%" PRIu64
+					             " host_type=%u vk_format=%u vk_usage=0x%08x layout=%u\n",
+					             ordinal, i, static_cast<uint64_t>(addr), fmt, tile, width, height,
+					             static_cast<unsigned>(textures.desc[i].usage), tex->memory.unique_id,
+					             static_cast<uint32_t>(tex->type), static_cast<uint32_t>(tex->format),
+					             static_cast<uint32_t>(tex->usage), static_cast<uint32_t>(tex->layout));
+				}
+			}
+		}
 		if (fmt == 75u && width == 29u && height == 30u && tex->format == VK_FORMAT_R32G32B32A32_UINT)
 		{
 			if (textures.desc[i].textures2d_without_sampler)
@@ -1029,17 +1105,22 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			         ? VulkanImage::VIEW_3D
 			         : (depth_texture ? (arrayed_2d ? VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY : VulkanImage::VIEW_DEPTH_TEXTURE)
 			                          : (arrayed_2d ? VulkanImage::VIEW_ARRAY : view_type)));
-			if (std::getenv("KYTY_DUMP_VIDEO_BIND") != nullptr && gen5 && (fmt == 1u || fmt == 14u) && *sampled_index < 8)
+			if (std::getenv("KYTY_DUMP_VIDEO_BIND") != nullptr && gen5 && (fmt == 1u || fmt == 14u))
 			{
-				static std::atomic_uint bind_dump_count[2] {{0}, {0}};
-				const unsigned         fmt_index = fmt == 14u ? 1u : 0u;
-				const auto             dump_index = bind_dump_count[fmt_index].fetch_add(1, std::memory_order_relaxed);
-				if (dump_index < 24u)
+				const uint64_t bind_addr = static_cast<uint64_t>(addr);
+				const bool     video_va  = bind_addr >= 0x6c000000ull && bind_addr <= 0x6e000000ull;
+				if (video_va)
 				{
-					const uint32_t descriptor_index = static_cast<uint32_t>(*sampled_index) | descriptor_tag;
-					std::fprintf(stderr, "KYTY_DUMP_VIDEO_BIND index=%u fmt=%u addr=0x%012" PRIx64 " sampled_index=%d descriptor=0x%08x image=%p id=%" PRIu64 " format=%d view=%d swizzle=0x%03x extent=%ux%u type=%d\n",
-					             dump_index, fmt, static_cast<uint64_t>(addr), *sampled_index, descriptor_index, static_cast<void*>(tex), tex->memory.unique_id,
-					             static_cast<int>(tex->format), sampled_views[*sampled_index], view_swizzle, width, height, static_cast<int>(tex->type));
+					static std::atomic_uint bind_dump_count[2] {{0}, {0}};
+					const unsigned         fmt_index = fmt == 14u ? 1u : 0u;
+					const auto             dump_index = bind_dump_count[fmt_index].fetch_add(1, std::memory_order_relaxed);
+					if (dump_index < 1024u)
+					{
+						const uint32_t descriptor_index = static_cast<uint32_t>(*sampled_index) | descriptor_tag;
+						std::fprintf(stderr, "KYTY_DUMP_VIDEO_BIND index=%u fmt=%u addr=0x%012" PRIx64 " sampled_index=%d descriptor=0x%08x image=%p id=%" PRIu64 " format=%d view=%d swizzle=0x%03x extent=%ux%u type=%d\n",
+						             dump_index, fmt, bind_addr, *sampled_index, descriptor_index, static_cast<void*>(tex), tex->memory.unique_id,
+						             static_cast<int>(tex->format), sampled_views[*sampled_index], view_swizzle, width, height, static_cast<int>(tex->type));
+					}
 				}
 			}
 			if (*sampled_index == 0)
@@ -1183,7 +1264,7 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, uint64_t* sa
 		// image instruction selects comparison semantics.
 		// ForceUnormCoords is materialized in SamplerCache with Vulkan's
 		// unnormalized-coordinate restrictions.
-		EXIT_NOT_IMPLEMENTED(r.AnisoThreshold() != 0);
+		// Vulkan exposes no anisotropic threshold; preserve filter mapping and MaxAnisoRatio.
 		EXIT_NOT_IMPLEMENTED(!gen5 && r.McCoordTrunc() != false);
 		// ForceDegamma / SkipDegamma are resolved in ShouldForceGen5Degamma and
 		// VulkanResolveGuestImageFormat (RGBA8 → sRGB only when force && !skip).
@@ -1291,19 +1372,19 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		bool need_descriptor = false;
 
 		VulkanBuffer* storage_buffers[DescriptorCache::BUFFERS_MAX];
-		VulkanImage*  textures2d_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX];
+		VulkanImage*  textures2d_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX] = {};
 		int           textures2d_sampled_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
-		VulkanImage*  textures2d_array_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX];
+		VulkanImage*  textures2d_array_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX] = {};
 		int           textures2d_array_sampled_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
-		VulkanImage*  textures3d_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX];
+		VulkanImage*  textures3d_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX] = {};
 		int           textures3d_sampled_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
-		VulkanImage*  textures2d_sampled_uint[DescriptorCache::TEXTURES_SAMPLED_MAX];
+		VulkanImage*  textures2d_sampled_uint[DescriptorCache::TEXTURES_SAMPLED_MAX] = {};
 		int           textures2d_sampled_uint_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
-		VulkanImage*  textures2d_array_sampled_uint[DescriptorCache::TEXTURES_SAMPLED_MAX];
+		VulkanImage*  textures2d_array_sampled_uint[DescriptorCache::TEXTURES_SAMPLED_MAX] = {};
 		int           textures2d_array_sampled_uint_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
-		VulkanImage*  textures3d_sampled_uint[DescriptorCache::TEXTURES_SAMPLED_MAX];
+		VulkanImage*  textures3d_sampled_uint[DescriptorCache::TEXTURES_SAMPLED_MAX] = {};
 		int           textures3d_sampled_uint_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
-		VulkanImage*  textures2d_storage[DescriptorCache::TEXTURES_STORAGE_MAX];
+		VulkanImage*  textures2d_storage[DescriptorCache::TEXTURES_STORAGE_MAX] = {};
 		int           textures2d_storage_view[DescriptorCache::TEXTURES_STORAGE_MAX];
 		uint64_t      samplers[DescriptorCache::SAMPLERS_MAX];
 		uint32_t      sgprs[DescriptorCache::METADATA_DWORDS_MAX] = {};
@@ -1355,6 +1436,56 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 
 		if (bind.textures2D.textures_num > 0)
 		{
+			for (int i = 0; i < bind.textures2D.textures2d_storage_num; i++)
+			{
+				const auto* storage_image = textures2d_storage[i];
+				EXIT_IF(storage_image == nullptr);
+				if ((storage_image->usage & VK_IMAGE_USAGE_STORAGE_BIT) == 0)
+				{
+					EXIT("storage image binding requires VK_IMAGE_USAGE_STORAGE_BIT: index=%d image_id=%" PRIu64
+					     " type=%u format=%u usage=0x%08x layout=%u\n",
+					     i, storage_image->memory.unique_id, static_cast<uint32_t>(storage_image->type),
+					     static_cast<uint32_t>(storage_image->format), static_cast<uint32_t>(storage_image->usage),
+					     static_cast<uint32_t>(storage_image->layout));
+				}
+			}
+
+			const auto validate_sampled_storage_aliases = [](VulkanImage* const* sampled_images, int sampled_count,
+			                                                 VulkanImage* const* storage_images, int storage_count,
+			                                                 const char* sampled_kind)
+			{
+				for (int storage_index = 0; storage_index < storage_count; storage_index++)
+				{
+					const auto* storage_image = storage_images[storage_index];
+					for (int sampled_index = 0; sampled_index < sampled_count; sampled_index++)
+					{
+						const auto* sampled_image = sampled_images[sampled_index];
+						if (sampled_image == nullptr)
+						{
+							continue;
+						}
+						if (sampled_image == storage_image || sampled_image->image == storage_image->image)
+						{
+							EXIT("image cannot be sampled in SHADER_READ_ONLY and bound as storage in GENERAL in the same descriptor bind: "
+							     "storage_index=%d sampled_kind=%s sampled_index=%d image_id=%" PRIu64 "\n",
+							     storage_index, sampled_kind, sampled_index, storage_image->memory.unique_id);
+						}
+					}
+				}
+			};
+			validate_sampled_storage_aliases(textures2d_sampled, DescriptorCache::TEXTURES_SAMPLED_MAX, textures2d_storage,
+			                                    bind.textures2D.textures2d_storage_num, "2d");
+			validate_sampled_storage_aliases(textures2d_array_sampled, DescriptorCache::TEXTURES_SAMPLED_MAX, textures2d_storage,
+			                                    bind.textures2D.textures2d_storage_num, "2d_array");
+			validate_sampled_storage_aliases(textures3d_sampled, DescriptorCache::TEXTURES_SAMPLED_MAX, textures2d_storage,
+			                                    bind.textures2D.textures2d_storage_num, "3d");
+			validate_sampled_storage_aliases(textures2d_sampled_uint, DescriptorCache::TEXTURES_SAMPLED_MAX,
+			                                    textures2d_storage, bind.textures2D.textures2d_storage_num, "2d_uint");
+			validate_sampled_storage_aliases(textures2d_array_sampled_uint, DescriptorCache::TEXTURES_SAMPLED_MAX,
+			                                    textures2d_storage, bind.textures2D.textures2d_storage_num, "2d_array_uint");
+			validate_sampled_storage_aliases(textures3d_sampled_uint, DescriptorCache::TEXTURES_SAMPLED_MAX,
+			                                    textures2d_storage, bind.textures2D.textures2d_storage_num, "3d_uint");
+
 			const auto transition_sampled_images = [&vk_buffer](VulkanImage** images, int count)
 			{
 				for (int i = 0; i < count; i++)
@@ -1380,6 +1511,27 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			transition_sampled_images(textures2d_sampled_uint, bind.textures2D.textures2d_sampled_uint_num);
 			transition_sampled_images(textures2d_array_sampled_uint, bind.textures2D.textures2d_array_sampled_uint_num);
 			transition_sampled_images(textures3d_sampled_uint, bind.textures2D.textures3d_sampled_uint_num);
+			for (int i = 0; i < bind.textures2D.textures2d_storage_num; i++)
+			{
+				auto* storage_image = textures2d_storage[i];
+				const auto old_layout = storage_image->layout;
+				GraphicsRenderStorageImageBarrier(vk_buffer, storage_image);
+				if (std::getenv("KYTY_DUMP_STORAGE_IMAGE") != nullptr)
+				{
+					static std::atomic_uint storage_image_logs {0};
+					const unsigned         ordinal = storage_image_logs.fetch_add(1, std::memory_order_relaxed);
+					if (ordinal < 256u)
+					{
+						std::fprintf(stderr,
+						             "KYTY_DUMP_STORAGE_IMAGE ordinal=%u stage=%d index=%d host_id=%" PRIu64
+						             " host_type=%u vk_format=%u vk_usage=0x%08x old_layout=%u new_layout=%u\n",
+						             ordinal, static_cast<int>(stage), i, storage_image->memory.unique_id,
+						             static_cast<uint32_t>(storage_image->type), static_cast<uint32_t>(storage_image->format),
+						             static_cast<uint32_t>(storage_image->usage), static_cast<uint32_t>(old_layout),
+						             static_cast<uint32_t>(storage_image->layout));
+					}
+				}
+			}
 		}
 
 		if (need_descriptor)

@@ -908,6 +908,11 @@ struct ShaderTextureResource
 	}
 };
 
+// A Gen5 sampled descriptor may carry a metadata address even when compression
+// is disabled. Such an address is inert for the uncompressed sampling path;
+// only descriptors with compression metadata flags require DCC handling.
+[[nodiscard]] bool ShaderGen5SampledTextureMetadataRequiresDcc(const ShaderTextureResource& resource);
+
 struct ShaderSamplerResource
 {
 	uint32_t fields[4] = {0};
@@ -1045,12 +1050,14 @@ struct ShaderStorageAccessEvidence
 
 struct ShaderStorageUseEvidence
 {
-	ShaderStorageAccess access                      = ShaderStorageAccess::Unknown;
-	bool                decoded_unknown             = false;
-	bool                indirect_descriptor_use     = false;
-	bool                raw_vmem_oob_guarded        = false;
-	bool                raw_smem_use                = false;
-	bool                raw_tbuffer_use             = false;
+	ShaderStorageAccess access                  = ShaderStorageAccess::Unknown;
+	bool                decoded_unknown         = false;
+	bool                indirect_descriptor_use = false;
+	bool                raw_vmem_oob_guarded    = false;
+	bool                raw_smem_use            = false;
+	bool                raw_tbuffer_use         = false;
+	uint64_t            raw_smem_required_bytes = 0;
+	bool                raw_smem_dynamic_offset = false;
 };
 
 // Dynamic S_LOAD descriptors identify a physical binding without extending
@@ -1101,12 +1108,14 @@ struct ShaderStorageResources
 	bool                       indirect_descriptor_use[BUFFERS_MAX] = {};
 	// Every raw MUBUF consumer represented here is lowered with the explicit
 	// zero-record OOB guard before it can issue a storage-buffer access.
-	bool                       raw_vmem_oob_guarded[BUFFERS_MAX]        = {};
-	bool                       raw_smem_use[BUFFERS_MAX]                = {};
-	bool                       raw_tbuffer_use[BUFFERS_MAX]             = {};
+	bool     raw_vmem_oob_guarded[BUFFERS_MAX]    = {};
+	bool     raw_smem_use[BUFFERS_MAX]            = {};
+	bool     raw_tbuffer_use[BUFFERS_MAX]         = {};
+	uint64_t raw_smem_required_bytes[BUFFERS_MAX] = {};
+	bool     raw_smem_dynamic_offset[BUFFERS_MAX] = {};
 	// True only when this physical binding exists solely for a dynamic S_LOAD
 	// result and must therefore not be initialized at shader entry.
-	bool                       dynamic_sload[BUFFERS_MAX]                = {};
+	bool                       dynamic_sload[BUFFERS_MAX]           = {};
 	int                        slots[BUFFERS_MAX]                   = {0};
 	int                        start_register[BUFFERS_MAX]          = {0};
 	bool                       extended[BUFFERS_MAX]                = {};
