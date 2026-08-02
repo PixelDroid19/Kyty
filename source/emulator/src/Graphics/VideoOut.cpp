@@ -27,6 +27,7 @@
 #include "Emulator/Profiler.h"
 
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -375,11 +376,35 @@ struct VideoOutConfig
 	VideoOutFlipStatus               flip_status;
 	VideoOutVblankStatus             pre_vblank_status;
 	VideoOutVblankStatus             vblank_status;
+	uint64_t                         vblank_origin_ns = 0;
 	VideoOutBufferInfo               buffers[16];
 	bool                             buffer_registration_reserved[16] {};
 	Vector<VideoOutBufferSet>        buffers_sets;
 	int                              buffers_sets_seq = 0;
 };
+
+constexpr uint64_t VIDEO_OUT_VBLANK_PERIOD_NS = 16683350;
+
+[[nodiscard]] uint64_t SteadyClockNs()
+{
+	return static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+void FillMonotonicVblankStatus(VideoOutConfig* config, VideoOutVblankStatus* status)
+{
+	EXIT_IF(config == nullptr);
+	EXIT_IF(status == nullptr);
+
+	const uint64_t now_ns = SteadyClockNs();
+	if (config->vblank_origin_ns == 0 || now_ns < config->vblank_origin_ns)
+	{
+		config->vblank_origin_ns = now_ns;
+	}
+	status->count       = 1 + (now_ns - config->vblank_origin_ns) / VIDEO_OUT_VBLANK_PERIOD_NS;
+	status->processTime = LibKernel::KernelGetProcessTime();
+	status->tsc         = LibKernel::KernelReadTsc();
+}
 
 class FlipQueue
 {
@@ -660,6 +685,7 @@ int VideoOutContext::Open()
 	m_video_out_ctx[handle].flip_status.count         = 0;
 	m_video_out_ctx[handle].pre_vblank_status         = VideoOutVblankStatus();
 	m_video_out_ctx[handle].vblank_status             = VideoOutVblankStatus();
+	m_video_out_ctx[handle].vblank_origin_ns           = SteadyClockNs();
 
 	return handle;
 }
@@ -2624,6 +2650,7 @@ KYTY_SYSV_ABI int VideoOutGetVblankStatus(int handle, VideoOutVblankStatus* stat
 
 	ctx->mutex.Lock();
 	*status = ctx->vblank_status;
+	FillMonotonicVblankStatus(ctx, status);
 	ctx->mutex.Unlock();
 
 	printf("\t count = %" PRIu64 "\n", status->count);
