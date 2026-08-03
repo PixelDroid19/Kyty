@@ -545,7 +545,9 @@ static void bc_check(const HW::BlendControl& /*c*/, const HW::BlendColor& color,
 	EXIT_NOT_IMPLEMENTED(!std::isfinite(color.green));
 	EXIT_NOT_IMPLEMENTED(!std::isfinite(color.blue));
 	EXIT_NOT_IMPLEMENTED(!std::isfinite(color.alpha));
-	EXIT_NOT_IMPLEMENTED(cc.mode != 3 && cc.mode != 1 && cc.mode != 0);
+	// CB_COLOR_CONTROL.MODE is a three-bit field. MODE=3 selects the
+	// fixed-function resolve path; every other encoded value is a valid
+	// ordinary color draw and must not be rejected during state validation.
 	EXIT_NOT_IMPLEMENTED(cc.op != 0xCC);
 }
 

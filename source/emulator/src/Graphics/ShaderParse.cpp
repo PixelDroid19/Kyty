@@ -291,7 +291,15 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 		case 0x13: KYTY_NI("s_icache_inv"); break;
 		case 0x14: KYTY_NI("s_incperflevel"); break;
 		case 0x15: KYTY_NI("s_decperflevel"); break;
-		case 0x16: KYTY_NI("s_ttracedata"); break;
+		case 0x16:
+			// s_ttracedata only feeds the hardware thread-trace stream. It has no
+			// architectural effect on shader registers, memory, or control flow.
+			inst.type              = ShaderInstructionType::SInstPrefetch;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
+			inst.src_num           = 1;
+			break;
 		case 0x17: KYTY_NI("s_cbranch_cdbgsys"); break;
 		case 0x18: KYTY_NI("s_cbranch_cdbguser"); break;
 		case 0x19: KYTY_NI("s_cbranch_cdbgsys_or_user"); break;
