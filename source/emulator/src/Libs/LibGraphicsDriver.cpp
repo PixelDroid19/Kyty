@@ -125,7 +125,9 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("MWiElSNE8j8", Gen5::GraphicsDcbWaitUntilSafeForRendering);
 	LIB_FUNC("LFSPFmGc9Hg", Gen5::GraphicsDcbSetWorkloadsActive);
 	LIB_FUNC("hEK26Wdny6s", Gen5::GraphicsDcbSetWorkloadComplete);
+	LIB_FUNC("LHFXRrlTPD8", Gen5::GraphicsDcbSetCxRegisterDirect);
 	LIB_FUNC("pFLArOT53+w", Gen5::GraphicsDcbSetShRegisterDirect);
+	LIB_FUNC("w4-d0n60hdo", Gen5::GraphicsDcbSetUcRegisterDirect);
 	LIB_FUNC("ZvwO9euwYzc", Gen5::GraphicsDcbSetCxRegistersIndirect);
 	LIB_FUNC("-HOOCn0JY48", Gen5::GraphicsDcbSetShRegistersIndirect);
 	LIB_FUNC("hvUfkUIQcOE", Gen5::GraphicsDcbSetUcRegistersIndirect);

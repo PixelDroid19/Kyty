@@ -3317,6 +3317,44 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegisterDirect(CommandBuffer* buf, Shade
 	return cmd;
 }
 
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegisterDirect(CommandBuffer* buf, ShaderRegister reg)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+
+	buf->DbgDump();
+
+	auto* cmd = buf->AllocateDW(3);
+
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	cmd[0] = KYTY_PM4(3, Pm4::IT_SET_CONTEXT_REG, 0u);
+	cmd[1] = reg.offset;
+	cmd[2] = reg.value;
+
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegisterDirect(CommandBuffer* buf, ShaderRegister reg)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(buf == nullptr);
+
+	buf->DbgDump();
+
+	auto* cmd = buf->AllocateDW(3);
+
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+
+	cmd[0] = KYTY_PM4(3, Pm4::IT_SET_UCONFIG_REG, 0u);
+	cmd[1] = reg.offset;
+	cmd[2] = reg.value;
+
+	return cmd;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs)
 {
 	PRINT_NAME();
