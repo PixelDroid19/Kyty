@@ -89,6 +89,15 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	const bool three_dimensional = resource_type == 10u;
 	const bool arrayed_2d        = resource_type == 13u;
 	const bool depth64kb32       = fmt == 22u && tile == 24u;
+	const bool skip_seed         = params[StorageTextureObject::PARAM_SKIP_SEED] != 0;
+
+	// A write-only, fully covered dispatch does not observe the guest backing.
+	// Leave the image undefined; the compute descriptor bind transitions it
+	// directly to GENERAL before the first shader write.
+	if (skip_seed)
+	{
+		return;
+	}
 
 	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_GENERAL;
 
@@ -462,7 +471,7 @@ bool StorageTextureObject::Equal(const uint64_t* other) const
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
 	        NormalizeStorageTextureSwizzle(fmt, params[PARAM_SWIZZLE]) == NormalizeStorageTextureSwizzle(other_fmt, other[PARAM_SWIZZLE]) &&
 	        params[PARAM_RESOURCE_TYPE] == other[PARAM_RESOURCE_TYPE] && params[PARAM_DEPTH] == other[PARAM_DEPTH] &&
-	        params[PARAM_BASE_ARRAY] == other[PARAM_BASE_ARRAY]);
+	        params[PARAM_BASE_ARRAY] == other[PARAM_BASE_ARRAY] && params[PARAM_SKIP_SEED] == other[PARAM_SKIP_SEED]);
 }
 
 GpuObject::create_func_t StorageTextureObject::GetCreateFunc() const

@@ -375,11 +375,11 @@ static bool ShouldForceGen5Degamma(const ShaderSamplerResources& samplers, int s
 static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
                             const ShaderSamplerResources& samplers, VulkanImage** images_sampled, VulkanImage** images_storage,
                             int* images_sampled_view, VulkanImage** images_sampled_array, int* images_sampled_array_view,
-	                        VulkanImage** images_sampled_3d, int* images_sampled_3d_view, VulkanImage** images_sampled_uint,
-	                        int* images_sampled_uint_view, VulkanImage** images_sampled_array_uint,
-	                        int* images_sampled_array_uint_view, VulkanImage** images_sampled_3d_uint,
-	                        int* images_sampled_3d_uint_view,
-                            int* images_storage_view, uint32_t** sgprs)
+                            VulkanImage** images_sampled_3d, int* images_sampled_3d_view, VulkanImage** images_sampled_uint,
+                            int* images_sampled_uint_view, VulkanImage** images_sampled_array_uint,
+                            int* images_sampled_array_uint_view, VulkanImage** images_sampled_3d_uint,
+                            int* images_sampled_3d_uint_view, int* images_storage_view, uint32_t storage_seed_skip_mask,
+                            uint32_t** sgprs)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -959,7 +959,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				EXIT_NOT_IMPLEMENTED(textures.desc[i].usage != ShaderTextureUsage::ReadWrite);
 
 				StorageTextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
-				                                         r.Type(), depth, base_array);
+				                                         r.Type(), depth, base_array,
+				                                         (storage_seed_skip_mask & (1u << static_cast<uint32_t>(i))) != 0);
 				tex = static_cast<StorageTextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 			} else
@@ -980,8 +981,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					const auto s_cover = FindStorageTexture(buffer, addr, size.size, false);
 					live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
 				}
-				const bool    skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
-					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, view_swizzle,
+				const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
+				TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, view_swizzle,
 				                                  force_degamma, skip_guest, r.Type(), depth, base_array);
 				tex = static_cast<TextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
@@ -1351,7 +1352,8 @@ static void PrepareDirectSgprs(const ShaderDirectSgprsResources& direct_sgprs, u
 }
 
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
-                            const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage)
+                     const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
+                     uint32_t storage_seed_skip_mask)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -1405,7 +1407,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			                textures2d_sampled_view, textures2d_array_sampled, textures2d_array_sampled_view, textures3d_sampled,
 			                textures3d_sampled_view, textures2d_sampled_uint, textures2d_sampled_uint_view,
 			                textures2d_array_sampled_uint, textures2d_array_sampled_uint_view, textures3d_sampled_uint,
-			                textures3d_sampled_uint_view, textures2d_storage_view, &sgprs_ptr);
+			                textures3d_sampled_uint_view, textures2d_storage_view, storage_seed_skip_mask, &sgprs_ptr);
 			need_descriptor = true;
 		}
 		if (bind.samplers.samplers_num > 0)

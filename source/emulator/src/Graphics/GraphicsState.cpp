@@ -28,56 +28,67 @@ ScissorRect ResolveScissor(const HW::ScreenViewport& viewport, const HW::ScanMod
 	EXIT_IF(viewport_id >= std::size(viewport.viewports));
 
 	ScissorRect resolved {};
-	bool        has_scissor = false;
-
-	const auto include = [&resolved, &has_scissor](const ScissorRect& scissor)
+	const auto combine = [&](bool apply_window_offset)
 	{
-		if (!IsActive(scissor))
+		bool has_scissor = false;
+		resolved         = {};
+
+		const auto include = [&resolved, &has_scissor](const ScissorRect& scissor)
 		{
-			return;
-		}
+			if (!IsActive(scissor))
+			{
+				return;
+			}
 
-		if (!has_scissor)
+			if (!has_scissor)
+			{
+				resolved    = scissor;
+				has_scissor = true;
+				return;
+			}
+
+			resolved.left   = std::max(resolved.left, scissor.left);
+			resolved.top    = std::max(resolved.top, scissor.top);
+			resolved.right  = std::min(resolved.right, scissor.right);
+			resolved.bottom = std::min(resolved.bottom, scissor.bottom);
+		};
+		const auto with_window_offset = [&viewport, apply_window_offset](ScissorRect scissor, bool enabled)
 		{
-			resolved    = scissor;
-			has_scissor = true;
-			return;
-		}
+			if (enabled && apply_window_offset)
+			{
+				scissor.left += viewport.window_offset_x;
+				scissor.top += viewport.window_offset_y;
+				scissor.right += viewport.window_offset_x;
+				scissor.bottom += viewport.window_offset_y;
+			}
+			return scissor;
+		};
 
-		resolved.left   = std::max(resolved.left, scissor.left);
-		resolved.top    = std::max(resolved.top, scissor.top);
-		resolved.right  = std::min(resolved.right, scissor.right);
-		resolved.bottom = std::min(resolved.bottom, scissor.bottom);
-	};
-	const auto with_window_offset = [&viewport](ScissorRect scissor, bool enabled)
-	{
-		if (enabled)
-		{
-			scissor.left += viewport.window_offset_x;
-			scissor.top += viewport.window_offset_y;
-			scissor.right += viewport.window_offset_x;
-			scissor.bottom += viewport.window_offset_y;
-		}
-		return scissor;
-	};
-
-	include({viewport.screen_scissor_left, viewport.screen_scissor_top, viewport.screen_scissor_right, viewport.screen_scissor_bottom});
-	include(with_window_offset(
-	    {viewport.generic_scissor_left, viewport.generic_scissor_top, viewport.generic_scissor_right, viewport.generic_scissor_bottom},
-	    viewport.generic_scissor_window_offset_enable));
-
-	if (mode.vport_scissor_enable)
-	{
-		const auto& vport = viewport.viewports[viewport_id];
+		include({viewport.screen_scissor_left, viewport.screen_scissor_top, viewport.screen_scissor_right, viewport.screen_scissor_bottom});
 		include(with_window_offset(
-		    {vport.viewport_scissor_left, vport.viewport_scissor_top, vport.viewport_scissor_right, vport.viewport_scissor_bottom},
-		    vport.viewport_scissor_window_offset_enable));
-	}
+		    {viewport.generic_scissor_left, viewport.generic_scissor_top, viewport.generic_scissor_right, viewport.generic_scissor_bottom},
+		    viewport.generic_scissor_window_offset_enable));
 
-	if (has_scissor)
+		if (mode.vport_scissor_enable)
+		{
+			const auto& vport = viewport.viewports[viewport_id];
+			include(with_window_offset(
+			    {vport.viewport_scissor_left, vport.viewport_scissor_top, vport.viewport_scissor_right, vport.viewport_scissor_bottom},
+			    vport.viewport_scissor_window_offset_enable));
+		}
+
+		if (has_scissor)
+		{
+			resolved.right  = std::max(resolved.left, resolved.right);
+			resolved.bottom = std::max(resolved.top, resolved.bottom);
+		}
+	};
+
+	combine(true);
+	if ((viewport.window_offset_x != 0 || viewport.window_offset_y != 0) &&
+	    (resolved.right <= resolved.left || resolved.bottom <= resolved.top))
 	{
-		resolved.right  = std::max(resolved.left, resolved.right);
-		resolved.bottom = std::max(resolved.top, resolved.bottom);
+		combine(false);
 	}
 
 	return resolved;

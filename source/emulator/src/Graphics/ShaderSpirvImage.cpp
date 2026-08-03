@@ -350,6 +350,97 @@ bool IsStorageImageInstruction(const ShaderInstruction& inst)
 	return inst.type == ShaderInstructionType::ImageStore || inst.type == ShaderInstructionType::ImageStoreMip;
 }
 
+String8 GuardImageDestinationStores(const String8& source, const ShaderInstruction& inst, uint32_t index)
+{
+	if (source.IsEmpty() || !IsImageInstruction(inst) || inst.dst.type != ShaderOperandType::Vgpr)
+	{
+		return source;
+	}
+
+	uint32_t destination_count = inst.dst.size > 0 ? static_cast<uint32_t>(inst.dst.size) : 1u;
+	if (inst.mimg_dmask != 0)
+	{
+		destination_count = 0;
+		for (uint32_t mask = inst.mimg_dmask; mask != 0; mask >>= 1u)
+		{
+			destination_count += mask & 1u;
+		}
+	}
+
+	std::set<std::string> destinations;
+	for (uint32_t offset = 0; offset < destination_count; ++offset)
+	{
+		destinations.emplace("v" + std::to_string(inst.dst.register_id + static_cast<int>(offset)));
+	}
+
+	const std::string input = source.c_str();
+	std::string       output;
+	output.reserve(input.size() + 256u);
+	bool     guarded = false;
+	uint32_t store_number = 0;
+	std::string line;
+	for (size_t begin = 0; begin < input.size();)
+	{
+		const size_t end = input.find('\n', begin);
+		line             = input.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+
+		bool replaced = false;
+		for (const auto& destination: destinations)
+		{
+			const std::string needle = "OpStore %" + destination + " ";
+			const size_t      store  = line.find(needle);
+			if (store == std::string::npos)
+			{
+				continue;
+			}
+
+			const std::string value = line.substr(store + needle.size());
+			const std::string old_id = "image_exec_old_" + std::to_string(index) + "_" + std::to_string(store_number);
+			const std::string new_id = "image_exec_value_" + std::to_string(index) + "_" + std::to_string(store_number);
+			const std::string indentation = line.substr(0, store);
+			output += indentation + "%" + old_id + " = OpLoad %float %" + destination + "\n";
+			output += indentation + "%" + new_id + " = OpSelect %float %image_exec_active_" + std::to_string(index) + " " + value +
+			          " %" + old_id + "\n";
+			output += indentation + "OpStore %" + destination + " %" + new_id + "\n";
+			guarded = true;
+			replaced = true;
+			++store_number;
+			break;
+		}
+
+		if (!replaced)
+		{
+			output += line;
+			output += '\n';
+		}
+		if (end == std::string::npos)
+		{
+			break;
+		}
+		begin = end + 1;
+	}
+
+	if (!guarded)
+	{
+		return source;
+	}
+
+	const std::string suffix = std::to_string(index);
+	const std::string prefix =
+	    "        %image_exec_lane_" + suffix + " = OpLoad %uint %gl_SubgroupInvocationID\n" +
+	    "        %image_exec_lane_lt32_" + suffix + " = OpULessThan %bool %image_exec_lane_" + suffix + " %uint_32\n" +
+	    "        %image_exec_lane_mod_" + suffix + " = OpBitwiseAnd %uint %image_exec_lane_" + suffix + " %uint_31\n" +
+	    "        %image_exec_word_lo_" + suffix + " = OpLoad %uint %exec_lo\n" +
+	    "        %image_exec_word_hi_" + suffix + " = OpLoad %uint %exec_hi\n" +
+	    "        %image_exec_word_" + suffix + " = OpSelect %uint %image_exec_lane_lt32_" + suffix +
+	    " %image_exec_word_lo_" + suffix + " %image_exec_word_hi_" + suffix + "\n" +
+	    "        %image_exec_bit_" + suffix + " = OpShiftLeftLogical %uint %uint_1 %image_exec_lane_mod_" + suffix + "\n" +
+	    "        %image_exec_masked_" + suffix + " = OpBitwiseAnd %uint %image_exec_word_" + suffix +
+	    " %image_exec_bit_" + suffix + "\n" +
+	    "        %image_exec_active_" + suffix + " = OpINotEqual %bool %image_exec_masked_" + suffix + " %uint_0\n";
+	return String8((prefix + output).c_str());
+}
+
 
 KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask1)
 {

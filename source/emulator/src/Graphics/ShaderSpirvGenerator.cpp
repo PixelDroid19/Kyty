@@ -184,6 +184,24 @@ static bool spirv_uses_buffer_descriptor_addressing(const ShaderCode& code)
 	                      ShaderInstructionType::TBufferLoadFormatXyzw});
 }
 
+static bool spirv_uses_mbcnt(const ShaderCode& code)
+{
+	return code.GetType() == ShaderType::Pixel &&
+	       code.HasAnyOf({ShaderInstructionType::VMbcntLoU32B32, ShaderInstructionType::VMbcntHiU32B32});
+}
+
+static bool spirv_uses_image_predication(const ShaderCode& code)
+{
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (IsImageInstruction(inst) && inst.dst.type == ShaderOperandType::Vgpr)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool spirv_uses_buffer_atomics(const ShaderCode& code)
 {
 	return Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd});
@@ -201,14 +219,26 @@ static bool spirv_uses_lane_exchange(const ShaderCode& code)
 
 static bool spirv_uses_wave_branch_vote(const ShaderCode& code)
 {
-	return code.HasAnyOf({ShaderInstructionType::SCbranchExecz, ShaderInstructionType::SCbranchVccz,
-	                      ShaderInstructionType::SCbranchVccnz});
+	if (code.HasAnyOf({ShaderInstructionType::SCbranchExecz}))
+	{
+		return true;
+	}
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); index++)
+	{
+		const auto type = code.GetInstructions().At(index).type;
+		if ((type == ShaderInstructionType::SCbranchVccz || type == ShaderInstructionType::SCbranchVccnz) &&
+		    !ShaderVccBranchIsWaveUniform(code, index))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 static bool spirv_uses_subgroup_invocation(const ShaderCode& code)
 {
 	return spirv_uses_dpp(code) || spirv_uses_buffer_descriptor_addressing(code) || spirv_uses_readfirstlane(code) ||
-	       spirv_uses_lane_exchange(code);
+	       spirv_uses_lane_exchange(code) || spirv_uses_mbcnt(code) || spirv_uses_image_predication(code);
 }
 
 void Spirv::WriteHeader()
@@ -255,6 +285,10 @@ void Spirv::WriteHeader()
 		if (spirv_uses_wave_branch_vote(m_code))
 		{
 			capabilities.Add("OpCapability GroupNonUniformVote");
+		}
+		if (spirv_uses_mbcnt(m_code))
+		{
+			capabilities.Add("OpCapability GroupNonUniformArithmetic");
 		}
 		if (spirv_uses_subgroup_invocation(m_code))
 		{
@@ -1215,6 +1249,21 @@ void Spirv::WriteLocalVariables()
 	{
 		m_source += String8::FromPrintf("%%v%d_packed_half = OpVariable %%_ptr_Function_uint Function\n", reg);
 	}
+	std::set<std::pair<int, int>> scalar_spill_slots;
+	for (const auto& inst: m_code.GetInstructions())
+	{
+		int register_id = 0;
+		int lane        = 0;
+		if (IsStaticScalarSpillWrite(inst, &register_id, &lane))
+		{
+			scalar_spill_slots.emplace(register_id, lane);
+		}
+	}
+	for (const auto& slot: scalar_spill_slots)
+	{
+		m_source += String8::FromPrintf("%%%s = OpVariable %%_ptr_Function_float Function\n",
+		                                ScalarSpillSlotName(slot.first, slot.second).c_str());
+	}
 	uint32_t tap_pc = 0;
 	int      tap_register = 0;
 	const bool fragment_tap = FragmentTapSelection(m_code, &tap_pc, &tap_register);
@@ -1807,6 +1856,10 @@ void Spirv::WriteInstructions()
 			EXIT("shader emitter missing: stage=%u instruction=%u format=%u pc=0x%08" PRIx32 "\n",
 			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<unsigned>(inst.format), inst.pc);
 		}
+		if (IsImageInstruction(inst))
+		{
+			dst = GuardImageDestinationStores(dst, inst, static_cast<uint32_t>(index));
+		}
 
 		m_source += String8::FromPrintf("; %s\n", src.c_str());
 		m_source += String8::FromPrintf("%s\n", dst.c_str());
@@ -2063,6 +2116,8 @@ void Spirv::FindConstants()
 		AddConstantInt(95);
 		AddConstantInt(119);
 		AddConstantUint(24);
+		AddConstantUint(1);
+		AddConstantUint(3);
 		AddConstantUint(31);
 		AddConstantUint(32);
 		AddConstantUint(63);

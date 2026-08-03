@@ -81,6 +81,72 @@ static const char* shader_disable_reason(HW::Shader* sh_ctx)
 	return nullptr;
 }
 
+static bool FragmentSubgroupSupported(const ShaderPixelInputInfo& ps_input)
+{
+	if (ps_input.required_subgroup_size == 0 || g_render_ctx == nullptr || g_render_ctx->GetGraphicCtx() == nullptr)
+	{
+		return true;
+	}
+
+	const auto* graphic_ctx = g_render_ctx->GetGraphicCtx();
+	const uint32_t max_size = graphic_ctx->subgroup_max_size != 0 ? graphic_ctx->subgroup_max_size : graphic_ctx->subgroup_size;
+	if (max_size == 0 || max_size >= ps_input.required_subgroup_size)
+	{
+		return true;
+	}
+
+	static std::atomic_uint32_t logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 16u)
+	{
+		std::fprintf(stderr, "KYTY_RENDER_SKIP_SUBGROUP required=%u max=%u\n", ps_input.required_subgroup_size, max_size);
+	}
+	return false;
+}
+
+static uint32_t ResolveStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, uint32_t groups_x, uint32_t groups_y,
+                                           uint32_t groups_z)
+{
+	if (!Config::IsNextGen() || input_info.storage_image_write_only_mask == 0u)
+	{
+		return 0u;
+	}
+
+	const uint64_t global_x = static_cast<uint64_t>(groups_x) * input_info.threads_num[0];
+	const uint64_t global_y = static_cast<uint64_t>(groups_y) * input_info.threads_num[1];
+	const uint64_t global_z = static_cast<uint64_t>(groups_z) * input_info.threads_num[2];
+	uint32_t       result   = 0u;
+	for (int i = 0; i < input_info.bind.textures2D.textures_num; ++i)
+	{
+		const auto& descriptor = input_info.bind.textures2D.desc[i];
+		if ((input_info.storage_image_write_only_mask & (1u << static_cast<uint32_t>(i))) == 0u ||
+		    !descriptor.textures2d_without_sampler)
+		{
+			continue;
+		}
+
+		const auto shape = ShaderGen5SampledTextureShapeForType(descriptor.texture.Type());
+		const uint64_t width  = static_cast<uint64_t>(descriptor.texture.Width5()) + 1u;
+		const uint64_t height = static_cast<uint64_t>(descriptor.texture.Height5()) + 1u;
+		const uint64_t depth  = shape == ShaderGen5SampledTextureShape::TwoDimensional ? 1u :
+		                       static_cast<uint64_t>(descriptor.texture.Depth()) + 1u;
+		if (global_x >= width && global_y >= height && global_z >= depth)
+		{
+			result |= 1u << static_cast<uint32_t>(i);
+		}
+	}
+	if (result != 0u)
+	{
+		static const bool dump = std::getenv("KYTY_DUMP_STORAGE_SEED_SKIP") != nullptr;
+		static std::atomic_uint32_t logged {0};
+		if (dump && logged.fetch_add(1, std::memory_order_relaxed) < 32u)
+		{
+			std::fprintf(stderr, "KYTY_STORAGE_SEED_SKIP mask=0x%08" PRIx32 " global=%" PRIu64 "x%" PRIu64 "x%" PRIu64 "\n",
+			             result, global_x, global_y, global_z);
+		}
+	}
+	return result;
+}
+
 static void MaybeDumpAutoDrawSkip(const char* reason, uint32_t index_count, uint64_t draw_modifier)
 {
 	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
@@ -668,39 +734,6 @@ static bool ShouldSkipUnsupportedGeShader(const HW::Context& ctx, const HW::User
 	return false;
 }
 
-// AUTO rect-list draws that export no VS interpolants while the PS reads
-// interpolants cannot produce defined coverage on the host path yet.
-static bool ShouldSkipAutoRectListWithoutVsParams(const HW::UserConfig& ucfg, const ShaderVertexInputInfo& vs_input,
-                                                  const ShaderPixelInputInfo& ps_input)
-{
-	if (!Config::IsNextGen())
-	{
-		return false;
-	}
-	const uint32_t prim = ucfg.GetPrimType();
-	if (prim != 7u && prim != 17u)
-	{
-		return false;
-	}
-	if (vs_input.buffers_num != 0 || vs_input.export_count != 0)
-	{
-		return false;
-	}
-	if (ps_input.input_num == 0)
-	{
-		return false;
-	}
-	static uint32_t logs = 0;
-	if (logs < 8u)
-	{
-		++logs;
-		std::fprintf(stderr,
-		             "KYTY_GRAPHICS: skip rect-list AUTO with no VS params (ps_inputs=%d export_count=%d)\n",
-		             ps_input.input_num, vs_input.export_count);
-	}
-	return true;
-}
-
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                              uint32_t type)
@@ -892,6 +925,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
+	if (!FragmentSubgroupSupported(ps_input_info))
+	{
+		MaybeDumpIndexDrawSkip("unsupported-fragment-subgroup", index_count, draw_modifier, type);
+		return;
+	}
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
 	const auto& materialization_resolution = !RenderColorHasActiveTarget(color_info) ? depth_only_resolution : resolution;
@@ -1114,7 +1152,7 @@ void GraphicsRenderDepthStencilCopySetDrawArea(const HW::Context& context, bool 
 
 void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* buffer, VulkanFramebuffer* framebuffer,
 	                                                   RenderColorInfo* color, RenderDepthInfo* depth,
-	                                                   const DepthStencilCopyRequest& request, bool guest_geometry,
+	                                                   const DepthStencilCopyRequest& request, bool guest_geometry, bool static_rect_list,
 	                                                   const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count,
 	                                                   VulkanBuffer* index_buffer, VkIndexType index_type, int32_t vertex_offset)
 {
@@ -1143,7 +1181,8 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 		}
 	} else
 	{
-		vkCmdDraw(vk_buffer, 3, 1, 0, 0);
+		const uint32_t vertex_count = static_rect_list ? 4u : 3u;
+		vkCmdDraw(vk_buffer, vertex_count, 1, 0, 0);
 	}
 	DebugStatsRecordDraw();
 	buffer->EndRenderPass();
@@ -1152,7 +1191,7 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 	uint64_t submit_id, CommandBuffer* buffer, const HW::Context& context, RenderDepthInfo* source_info,
 	const VulkanSampleLocationState& sample_locations, bool apply_clear,
-	bool effective_depth_write, bool guest_geometry, const DepthStencilCopyVertexStage* vertex_stage,
+	bool effective_depth_write, bool guest_geometry, bool static_rect_list, const DepthStencilCopyVertexStage* vertex_stage,
 	const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count, VulkanBuffer* index_buffer, VkIndexType index_type,
 	int32_t vertex_offset)
 {
@@ -1187,7 +1226,7 @@ void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 	request.vertex_stage = vertex_stage;
 	const auto source_guest = source->GetGuestExtent();
 	GraphicsRenderDepthStencilCopySetDrawArea(context, guest_geometry, source_guest, source->extent, &request);
-	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &no_color, &draw_depth, request, guest_geometry,
+	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &no_color, &draw_depth, request, guest_geometry, static_rect_list,
 	                                        guest_vertex_input, index_count, index_buffer, index_type, vertex_offset);
 
 	InvalidateMemoryObject(draw_depth);
@@ -1339,7 +1378,8 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	{
 		MaterializeRenderDepthInfo(submit_id, buffer, &depth_info, 0, 0, &sample_locations);
 		GraphicsRenderDepthStencilCopyWriteDepthStencil(
-		    submit_id, buffer, *ctx, &depth_info, sample_locations, true, effective_depth_write, guest_geometry, request_vertex_stage,
+		    submit_id, buffer, *ctx, &depth_info, sample_locations, true, effective_depth_write, guest_geometry, static_rect_list,
+		    request_vertex_stage,
 		    (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices, index_type, vertex_offset);
 		return;
 	}
@@ -1435,7 +1475,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	request.vertex_stage = request_vertex_stage;
 	GraphicsRenderDepthStencilCopySetDrawArea(*ctx, guest_geometry, target_guest, target->extent, &request);
 	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &color_info, depth_attachment, request,
-	                                        guest_geometry, (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices,
+	                                        guest_geometry, static_rect_list, (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices,
 	                                        index_type, vertex_offset);
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
@@ -1446,6 +1486,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		// depth/stencil side effects only after that sampled pass has completed.
 		GraphicsRenderDepthStencilCopyWriteDepthStencil(
 		    submit_id, buffer, *ctx, &source_setup, sample_locations, false, effective_depth_write, guest_geometry,
+		    static_rect_list,
 		    request_vertex_stage,
 		    (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices, index_type, vertex_offset);
 	} else if (source_modified)
@@ -1632,9 +1673,9 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info);
-	if (ShouldSkipAutoRectListWithoutVsParams(*ucfg, vs_input_info, ps_input_info))
+	if (!FragmentSubgroupSupported(ps_input_info))
 	{
-		MaybeDumpAutoDrawSkip("rect-list-no-vs-params", index_count, draw_modifier);
+		MaybeDumpAutoDrawSkip("unsupported-fragment-subgroup", index_count, draw_modifier);
 		return;
 	}
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
@@ -1881,8 +1922,9 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 
 	SetDynamicParams(vk_buffer, pipeline);
 
+	const uint32_t storage_seed_skip_mask = ResolveStorageSeedSkipMask(input_info, thread_group_x, thread_group_y, thread_group_z);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
-	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute);
+	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask);
 
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
 	DebugStatsRecordDispatch();

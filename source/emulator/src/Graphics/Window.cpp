@@ -3226,6 +3226,8 @@ static void VulkanCreate(WindowContext* ctx)
 			device_extensions.Add(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
 		}
 
+		ctx->graphic_ctx.subgroup_size_control_supported = has_ext(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+
 		ctx->graphic_ctx.sample_location_capabilities.extension_enabled = has_ext(VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME) ? 1u : 0u;
 		if (ctx->graphic_ctx.sample_location_capabilities.extension_enabled == 0)
 		{
@@ -3253,6 +3255,27 @@ static void VulkanCreate(WindowContext* ctx)
 
 	VkPhysicalDeviceProperties device_properties {};
 	vkGetPhysicalDeviceProperties(ctx->graphic_ctx.physical_device, &device_properties);
+	VkPhysicalDeviceSubgroupSizeControlPropertiesEXT subgroup_size_control {};
+	VkPhysicalDeviceSubgroupProperties subgroup_properties {};
+	VkPhysicalDeviceProperties2 physical_device_properties {};
+	subgroup_size_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT;
+	subgroup_properties.sType   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+	subgroup_properties.pNext   = ctx->graphic_ctx.subgroup_size_control_supported ? &subgroup_size_control : nullptr;
+	physical_device_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+	physical_device_properties.pNext = &subgroup_properties;
+	vkGetPhysicalDeviceProperties2(ctx->graphic_ctx.physical_device, &physical_device_properties);
+	ctx->graphic_ctx.subgroup_size       = subgroup_properties.subgroupSize;
+	ctx->graphic_ctx.subgroup_stages     = subgroup_properties.supportedStages;
+	ctx->graphic_ctx.subgroup_operations = subgroup_properties.supportedOperations;
+	if (ctx->graphic_ctx.subgroup_size_control_supported)
+	{
+		ctx->graphic_ctx.subgroup_min_size = subgroup_size_control.minSubgroupSize;
+		ctx->graphic_ctx.subgroup_max_size = subgroup_size_control.maxSubgroupSize;
+	} else
+	{
+		ctx->graphic_ctx.subgroup_min_size = subgroup_properties.subgroupSize;
+		ctx->graphic_ctx.subgroup_max_size = subgroup_properties.subgroupSize;
+	}
 	VkPhysicalDeviceFeatures device_features {};
 	vkGetPhysicalDeviceFeatures(ctx->graphic_ctx.physical_device, &device_features);
 	ctx->graphic_ctx.depth_bias_clamp_supported    = device_features.depthBiasClamp == VK_TRUE;

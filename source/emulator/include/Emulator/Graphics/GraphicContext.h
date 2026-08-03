@@ -116,6 +116,15 @@ struct GraphicContext
 	// before a graphics pipeline can request sample shading.
 	bool sample_rate_shading_supported = false;
 
+	// Vulkan subgroup limits used to validate shaders that require an exact guest
+	// wave width. A zero maximum means the physical-device query was unavailable.
+	uint32_t subgroup_size                  = 0;
+	uint32_t subgroup_min_size              = 0;
+	uint32_t subgroup_max_size              = 0;
+	VkShaderStageFlags subgroup_stages      = 0;
+	VkSubgroupFeatureFlags subgroup_operations = 0;
+	bool subgroup_size_control_supported    = false;
+
 	// VK_EXT_sample_locations is optional at device discovery time. A draw that
 	// programs custom guest locations is rejected when the selected host cannot
 	// represent the exact state.

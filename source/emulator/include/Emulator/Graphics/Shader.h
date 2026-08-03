@@ -714,6 +714,12 @@ private:
 	bool                      m_ps_embedded    = false;
 };
 
+// Returns true when a scalar VCC branch can be evaluated once per invocation
+// without a subgroup-wide vote.  The proof is intentionally conservative: only
+// scalar/constant compare operands are accepted, and any EXEC/VCC mutation
+// between the compare and branch invalidates it.
+[[nodiscard]] bool ShaderVccBranchIsWaveUniform(const ShaderCode& code, uint32_t instruction_index);
+
 struct ShaderId
 {
 	uint32_t         hash0 = 0;
@@ -1175,6 +1181,10 @@ struct ShaderTextureDescriptor
 	bool                  extended                   = false;
 	bool                  dynamic_sload              = false;
 	bool                  textures2d_without_sampler = false;
+	// Set only for a compute storage image whose shader has an image store and
+	// no image read for this descriptor. The dispatch still has to prove full
+	// coverage before the backing upload can be omitted.
+	bool                  storage_image_write_only   = false;
 };
 
 struct ShaderTextureResources
@@ -1330,6 +1340,7 @@ struct ShaderComputeInputInfo
 	bool                group_id[3]        = {false, false, false};
 	int                 thread_ids_num     = 0;
 	int                 workgroup_register = 0;
+	uint32_t            storage_image_write_only_mask = 0;
 	ShaderBindResources bind;
 };
 
@@ -1354,6 +1365,9 @@ struct ShaderPixelInputInfo
 	bool                   ps_pixel_kill_enable      = false;
 	bool                   ps_early_z                = false;
 	bool                   ps_execute_on_noop        = false;
+	// Non-zero when the translated fragment program uses guest-wave operations
+	// whose exact width must be available in the host Vulkan subgroup.
+	uint32_t               required_subgroup_size    = 0;
 	ShaderBindResources    bind;
 };
 

@@ -181,6 +181,16 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 
 	EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[0]));
 
+	const char* branch_param[2] = {param[0], param[1]};
+	if ((inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz) &&
+	    ShaderVccBranchIsWaveUniform(code, index))
+	{
+		branch_param[0] = inst.type == ShaderInstructionType::SCbranchVccz
+		                     ? "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpIEqual %bool %cc_u_<index> %uint_0"
+		                     : "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpINotEqual %bool %cc_u_<index> %uint_0";
+		branch_param[1] = "";
+	}
+
 	// TODO(): analyze control flow graph
 	auto label            = ShaderLabel(inst);
 	auto dst_block        = code.ReadBlock(label.GetDst());
@@ -211,8 +221,8 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 )";
 
 		*dst_source += String8(text_loop_continue)
-		                   .ReplaceStr("<param0>", param[0])
-		                   .ReplaceStr("<param1>", param[1])
+		                   .ReplaceStr("<param0>", branch_param[0])
+		                   .ReplaceStr("<param1>", branch_param[1])
 		                   .ReplaceStr("<continue>", continue_label)
 		                   .ReplaceStr("<merge>", merge_label)
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
@@ -405,8 +415,8 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	}
 
 	*dst_source += String8(text)
-	                   .ReplaceStr("<param0>", param[0])
-	                   .ReplaceStr("<param1>", param[1])
+	                   .ReplaceStr("<param0>", branch_param[0])
+	                   .ReplaceStr("<param1>", branch_param[1])
 	                   .ReplaceStr("<merge>", label_merge)
 	                   .ReplaceStr("<backedge>", String8::FromPrintf("%04" PRIx32, loop_backedge))
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))

@@ -1278,86 +1278,98 @@ KYTY_RECOMPILER_FUNC(Recompile_VCubeMaF32_VdstVsrc0Vsrc1Vsrc2)
 	return true;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_VMbcntHiU32B32_SVdstSVsrc0SVsrc1)
+static bool RecompileFragmentMbcnt(const ShaderInstruction& inst, uint32_t index, bool low_half, Spirv* spirv, String8* dst_source)
 {
-	const auto& inst = code.GetInstructions().At(index);
-
-	// if (inst.src[0].type == ShaderOperandType::ExecHi)
-	//{
-	String8 index_str = String8::FromPrintf("%u", index);
-
+	EXIT_IF(spirv == nullptr || dst_source == nullptr);
 	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
-	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
-	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp || inst.dst.multiplier != 1.0f);
 
-	auto dst_value = operand_variable_to_str(inst.dst);
-
+	const auto dst_value = operand_variable_to_str(inst.dst);
 	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
 
-	String8 load0;
-
-	if (!operand_load_float(spirv, inst.src[1], "t1_<index>", index_str, &load0))
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8      mask_load;
+	String8      accumulator_load;
+	if (!operand_load_uint(spirv, inst.src[0], "mbcnt_mask_<index>", index_str, &mask_load) ||
+	    !operand_load_uint(spirv, inst.src[1], "mbcnt_acc_<index>", index_str, &accumulator_load))
 	{
 		return false;
 	}
 
-	// TODO() check VSKIP
-
 	static const char* text = R"(
-	    <load0>
-        %exec_lo_u_<index> = OpLoad %uint %exec_lo
-        %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
-        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t1_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
-	)";
-	*dst_source += String8(text).ReplaceStr("<dst>", dst_value.value).ReplaceStr("<load0>", load0).ReplaceStr("<index>", index_str);
+        <mask_load>
+        <accumulator_load>
+        %mbcnt_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
+        %mbcnt_half_<index> = <half_test>
+        %mbcnt_lane_bit_<index> = <lane_bit>
+        %mbcnt_mask_bit_<index> = OpShiftLeftLogical %uint %uint_1 %mbcnt_lane_bit_<index>
+        %mbcnt_masked_<index> = OpBitwiseAnd %uint %mbcnt_mask_<index> %mbcnt_mask_bit_<index>
+        %mbcnt_source_active_<index> = OpINotEqual %bool %mbcnt_masked_<index> %uint_0
+        %mbcnt_selected_<index> = OpSelect %uint %mbcnt_source_active_<index> %uint_1 %uint_0
+        %mbcnt_prefix_<index> = OpGroupNonUniformIAdd %uint %uint_3 ExclusiveScan %mbcnt_selected_<index>
+        %mbcnt_result_<index> = OpIAdd %uint %mbcnt_acc_<index> %mbcnt_prefix_<index>
+        %mbcnt_result_float_<index> = OpBitcast %float %mbcnt_result_<index>
+        %mbcnt_exec_lane_lt32_<index> = OpULessThan %bool %mbcnt_lane_<index> %uint_32
+        %mbcnt_exec_lane_bit_<index> = OpBitwiseAnd %uint %mbcnt_lane_<index> %uint_31
+        %mbcnt_exec_word_lo_<index> = OpLoad %uint %exec_lo
+        %mbcnt_exec_word_hi_<index> = OpLoad %uint %exec_hi
+        %mbcnt_exec_word_<index> = OpSelect %uint %mbcnt_exec_lane_lt32_<index> %mbcnt_exec_word_lo_<index> %mbcnt_exec_word_hi_<index>
+        %mbcnt_exec_mask_<index> = OpShiftLeftLogical %uint %uint_1 %mbcnt_exec_lane_bit_<index>
+        %mbcnt_exec_masked_<index> = OpBitwiseAnd %uint %mbcnt_exec_word_<index> %mbcnt_exec_mask_<index>
+        %mbcnt_exec_active_<index> = OpINotEqual %bool %mbcnt_exec_masked_<index> %uint_0
+        %mbcnt_old_<index> = OpLoad %float %<dst>
+        %mbcnt_value_<index> = OpSelect %float %mbcnt_exec_active_<index> %mbcnt_result_float_<index> %mbcnt_old_<index>
+               OpStore %<dst> %mbcnt_value_<index>
+    )";
 
+	String8 half_test;
+	String8 lane_bit;
+	if (low_half)
+	{
+		half_test = String8("OpULessThan %bool %mbcnt_lane_<index> %uint_32");
+		lane_bit  = String8("OpBitwiseAnd %uint %mbcnt_lane_<index> %uint_31");
+	} else
+	{
+		half_test = String8("OpUGreaterThanEqual %bool %mbcnt_lane_<index> %uint_32");
+		lane_bit  = String8("OpBitwiseAnd %uint %mbcnt_lane_offset_<index> %uint_31");
+	}
+
+	String8 source = String8(text)
+	                    .ReplaceStr("<mask_load>", mask_load)
+	                    .ReplaceStr("<accumulator_load>", accumulator_load)
+	                    .ReplaceStr("<half_test>", half_test)
+	                    .ReplaceStr("<lane_bit>", lane_bit)
+	                    .ReplaceStr("<dst>", dst_value.value)
+	                    .ReplaceStr("<index>", index_str);
+	if (!low_half)
+	{
+		const String8 offset = String8("        %mbcnt_lane_offset_<index> = OpISub %uint %mbcnt_lane_<index> %uint_32\n")
+		                           .ReplaceStr("<index>", index_str);
+		source = offset + source;
+	}
+
+	*dst_source += source;
 	return true;
-	//}
+}
 
-	//	return false;
+KYTY_RECOMPILER_FUNC(Recompile_VMbcntHiU32B32_SVdstSVsrc0SVsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (code.GetType() != ShaderType::Pixel)
+	{
+		return false;
+	}
+	return RecompileFragmentMbcnt(inst, index, false, spirv, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VMbcntLoU32B32_SVdstSVsrc0SVsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
-
-	// if (inst.src[0].type == ShaderOperandType::ExecLo)
-	//{
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-
-	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
-
-	String8 load0;
-
-	if (!operand_load_float(spirv, inst.src[1], "t1_<index>", index_str, &load0))
+	if (code.GetType() != ShaderType::Pixel)
 	{
 		return false;
 	}
-
-	// TODO() check VSKIP
-
-	static const char* text = R"(
-	    <load0>
-        %exec_lo_u_<index> = OpLoad %uint %exec_lo
-        %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
-        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t1_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
-	)";
-	*dst_source += String8(text).ReplaceStr("<dst>", dst_value.value).ReplaceStr("<load0>", load0).ReplaceStr("<index>", index_str);
-
-	return true;
-	//}
-
-	// return false;
+	return RecompileFragmentMbcnt(inst, index, true, spirv, dst_source);
 }
 
 /* XXX: Bfrev, Not */
@@ -1468,6 +1480,25 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 	const auto dst_value = operand_variable_to_str(inst.dst);
 	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
 
+	int spill_register = 0;
+	int spill_lane     = 0;
+	if (IsStaticScalarSpillRead(inst, &spill_register, &spill_lane) &&
+	    HasLiveScalarSpill(code, index, spill_register, spill_lane))
+	{
+		const String8 slot       = ScalarSpillSlotName(spill_register, spill_lane);
+		const String8 index_str  = String8::FromPrintf("%u", index);
+		static const char* text = R"(
+        %readlane_spill_<index> = OpLoad %float %<slot>
+        %readlane_value_<index> = OpBitcast %uint %readlane_spill_<index>
+               OpStore %<dst> %readlane_value_<index>
+)";
+		*dst_source += String8(text)
+		                   .ReplaceStr("<dst>", dst_value.value)
+		                   .ReplaceStr("<slot>", slot)
+		                   .ReplaceStr("<index>", index_str);
+		return true;
+	}
+
 	String8 index_str = String8::FromPrintf("%u", index);
 	String8 load0;
 	String8 load1;
@@ -1512,6 +1543,24 @@ KYTY_RECOMPILER_FUNC(Recompile_VWritelaneB32_SVdstSVsrc0SVsrc1)
 	    !operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
 	{
 		return false;
+	}
+
+	int spill_register = 0;
+	int spill_lane     = 0;
+	if (IsStaticScalarSpillWrite(inst, &spill_register, &spill_lane) &&
+	    HasFutureScalarSpillRead(code, index, spill_register, spill_lane))
+	{
+		const String8 slot = ScalarSpillSlotName(spill_register, spill_lane);
+		static const char* text = R"(
+        <load0>
+        %writelane_spill_<index> = OpBitcast %float %t0_<index>
+               OpStore %<slot> %writelane_spill_<index>
+)";
+		*dst_source += String8(text)
+		                   .ReplaceStr("<load0>", load0)
+		                   .ReplaceStr("<slot>", slot)
+		                   .ReplaceStr("<index>", index_str);
+		return true;
 	}
 
 	static const char* text = R"(

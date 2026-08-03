@@ -718,7 +718,8 @@ void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision
 // --- Bind ---
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input);
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
-                     const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage);
+                     const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
+                     uint32_t storage_seed_skip_mask = 0);
 void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline);
 
 
