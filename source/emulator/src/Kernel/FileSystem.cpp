@@ -756,9 +756,11 @@ int KYTY_SYSV_ABI KernelClose(int d)
 			return KERNEL_ERROR_EBADF;
 		}
 
-		const auto descriptor_bit = static_cast<uint8_t>(1u << d);
-		const auto previous = g_standard_descriptors.fetch_and(static_cast<uint8_t>(~descriptor_bit), std::memory_order_acq_rel);
-		return (previous & descriptor_bit) != 0 ? OK : KERNEL_ERROR_EBADF;
+		// Guest file descriptors start at DESCRIPTOR_MIN.  Values below that
+		// range are reserved process descriptors and are also used by runtimes
+		// as invalid-handle sentinels.  Never let a guest close recycle one of
+		// the host's standard descriptors into a real file descriptor.
+		return OK;
 	}
 
 	EXIT_IF(g_files == nullptr);
