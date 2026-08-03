@@ -1969,6 +1969,7 @@ struct AvPlayerInternal
 	bool                 playing = false;
 	bool                 paused = false;
 	bool                 stop_fired = false;
+	bool                 source_failed = false;
 	uint64_t             start_time_ms = 0;
 	AvPlayerEventReplacement event;
 	AvPlayerMemAllocator mem;
@@ -2319,6 +2320,7 @@ static void delete_synthetic_video(AvPlayerInternal* r)
 			r->media_duration_ms      = 0;
 			r->media_audio_channels   = 0;
 			r->media_audio_rate       = 0;
+			r->source_failed          = false;
 		}
 	}
 	release_video_frames(mem, frames);
@@ -2428,6 +2430,10 @@ static String sanitize_avplayer_uri(const char* name, uint32_t length = 0)
 static bool synthetic_is_playing(const AvPlayerInternal* r)
 {
 	if (r == nullptr)
+	{
+		return false;
+	}
+	if (r->source_failed)
 	{
 		return false;
 	}
@@ -2789,7 +2795,37 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 			std::fprintf(stderr, "KYTY_DUMP_AVPLAYER backend=error path=%s reason=%s\n", host_filename.C_Str(),
 			             decoder_error.empty() ? "media has no supported video stream" : decoder_error.c_str());
 		}
-		return AVPLAYER_ERROR_OPERATION_FAILED;
+		bool auto_start = false;
+		{
+			Core::LockGuard lock(h->mutex);
+			h->filename               = clean_filename;
+			h->host_filename          = host_filename;
+			h->synthetic_width        = 1920;
+			h->synthetic_height       = 1080;
+			h->synthetic_frame_rate   = 30.0f;
+			h->synthetic_frame_count  = 0;
+			h->synthetic_obtained_num = 0;
+			h->last_media_time_ms     = 0;
+			h->media_duration_ms      = 0;
+			h->media_audio_channels   = 0;
+			h->media_audio_rate       = 0;
+			h->playing                = false;
+			h->paused                 = false;
+			h->stop_fired             = false;
+			h->source_failed          = true;
+			auto_start                = h->auto_start;
+		}
+		if (avplayer_dump_enabled())
+		{
+			std::fprintf(stderr, "KYTY_DUMP_AVPLAYER source handle=%p auto_start=%d empty=1\n", static_cast<void*>(h),
+			             auto_start ? 1 : 0);
+		}
+		emit_event(h, AVPLAYER_EVENT_STATE_READY);
+		if (h->closing.load(std::memory_order_acquire))
+		{
+			return AVPLAYER_ERROR_OPERATION_FAILED;
+		}
+		return auto_start ? start_player(h) : 0;
 	}
 	bool auto_start = false;
 	{
@@ -2801,6 +2837,7 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 		h->media_duration_ms      = 0;
 		h->media_audio_channels   = 0;
 		h->media_audio_rate       = 0;
+		h->source_failed          = false;
 		h->playing                = false;
 		h->paused                 = false;
 		h->stop_fired             = false;
