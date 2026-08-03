@@ -73,6 +73,15 @@ bool operand_covers_vgpr(ShaderOperand op, int reg)
 
 bool instruction_writes_vgpr(const ShaderInstruction& inst, int reg)
 {
+	// V_READFIRSTLANE and V_READLANE encode their scalar destination in the
+	// VDST field even though the field shares the vector operand encoding. They
+	// write an SGPR, never the VGPR with the same numeric index. Counting either
+	// instruction as a vector write corrupts scalar-spill lifetime tracking when
+	// the destination SGPR number aliases the spill VGPR.
+	if (inst.type == ShaderInstructionType::VReadfirstlaneB32 || inst.type == ShaderInstructionType::VReadlaneB32)
+	{
+		return false;
+	}
 	return operand_covers_vgpr(inst.dst, reg) || operand_covers_vgpr(inst.dst2, reg);
 }
 
