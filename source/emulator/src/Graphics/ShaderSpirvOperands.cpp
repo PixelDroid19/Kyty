@@ -82,6 +82,13 @@ bool instruction_writes_vgpr(const ShaderInstruction& inst, int reg)
 	{
 		return false;
 	}
+	// MIMG stores encode their source data in the same VDATA field used as a
+	// destination by loads and samples.  They consume the VGPR and do not start
+	// a new register lifetime.
+	if (IsStorageImageInstruction(inst))
+	{
+		return false;
+	}
 	return operand_covers_vgpr(inst.dst, reg) || operand_covers_vgpr(inst.dst2, reg);
 }
 
