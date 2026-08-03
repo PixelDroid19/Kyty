@@ -30,6 +30,7 @@
 #include <csignal>
 #include <fcntl.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/time.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -1140,12 +1141,24 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 	einfo.r15               = uc_get_r15(uc);
 	if (einfo.rsp >= 0x10000u)
 	{
-		const auto* stack = reinterpret_cast<const uint64_t*>(einfo.rsp);
-		for (uint32_t i = 0; i < 16u; ++i)
+		// The guest stack may point at an unmapped or partially-mapped region
+		// (the fault that brought us here can be a bad RSP, a recycled command
+		// buffer, or an unmapped page). Dereferencing it directly inside the
+		// signal handler would double-fault. Read it fault-safe instead so a
+		// capture attempt can never replace the original fault with a crash.
+		uint64_t buffer[16] = {};
+		struct iovec local  = {buffer, sizeof(buffer)};
+		struct iovec remote = {reinterpret_cast<void*>(einfo.rsp), sizeof(buffer)};
+		const ssize_t got = syscall(SYS_process_vm_readv, getpid(), &local, 1UL, &remote, 1UL, 0UL);
+		if (got > 0)
 		{
-			einfo.stack[i] = stack[i];
+			const auto count = static_cast<uint32_t>(static_cast<size_t>(got) / sizeof(uint64_t));
+			for (uint32_t i = 0; i < count; ++i)
+			{
+				einfo.stack[i] = buffer[i];
+			}
+			einfo.stack_count = count;
 		}
-		einfo.stack_count = 16;
 	}
 
 	einfo.access_violation_vaddr = reinterpret_cast<uint64_t>(info->si_addr);
@@ -1183,16 +1196,26 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 			const uint64_t rbp = uc_get_rbp(uc);
 			if (rbp >= 0x1000ull)
 			{
-				const auto* frame = reinterpret_cast<const uint64_t*>(rbp);
+				// Walk guest frame pointers fault-safely; an unmapped frame
+				// must not turn the diagnostic into a second fault.
+				uint64_t frame_addr = rbp;
 				for (int depth = 0; depth < 4; depth++)
 				{
-					const uint64_t next = frame[0];
-					sigsafe_fault("  frame", next, frame[1]);
-					if (next <= reinterpret_cast<uint64_t>(frame) || next - reinterpret_cast<uint64_t>(frame) > 0x10000ull)
+					uint64_t pair[2] = {};
+					struct iovec l   = {pair, sizeof(pair)};
+					struct iovec r   = {reinterpret_cast<void*>(frame_addr), sizeof(pair)};
+					const ssize_t got = syscall(SYS_process_vm_readv, getpid(), &l, 1UL, &r, 1UL, 0UL);
+					if (got != static_cast<ssize_t>(sizeof(pair)))
 					{
 						break;
 					}
-					frame = reinterpret_cast<const uint64_t*>(next);
+					const uint64_t next = pair[0];
+					sigsafe_fault("  frame", next, pair[1]);
+					if (next <= frame_addr || next - frame_addr > 0x10000ull)
+					{
+						break;
+					}
+					frame_addr = next;
 				}
 			}
 			sigsafe_fault("  tid", static_cast<uint64_t>(host_tid()), 0);

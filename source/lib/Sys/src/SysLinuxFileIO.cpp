@@ -285,13 +285,19 @@ void sys_file_close(sys_file_t* f)
 	if (f->type == SYS_FILE_FILE && f->f != nullptr)
 	{
 		result = fclose(f->f);
+		// Prevent a second close of the same handle (guest double-close or
+		// shutdown CloseAll after the guest already closed it) from calling
+		// fclose on a freed FILE* and aborting.
+		f->f = nullptr;
 	} else if (f->type == SYS_FILE_MEMORY_STAT)
 	{
 		delete f->buf;
+		f->buf = nullptr;
 	} else if (f->type == SYS_FILE_MEMORY_DYN)
 	{
 		Core::mem_free(f->buf->base);
 		delete f->buf;
+		f->buf = nullptr;
 	}
 
 	// f.type = SYS_FILE_ERROR;
