@@ -10,8 +10,18 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
-#include <cstring>
+#include <algorithm>
+#include <chrono>
+#include <cinttypes>
+#include <cmath>
+#include <cctype>
 #include <cstdlib>
+#include <fstream>
+#include <limits>
+#include <mutex>
+#include <string>
+#include <vector>
+#include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -169,6 +179,364 @@ struct AgentPadOverlay
 };
 
 static AgentPadOverlay g_agent_pad;
+
+struct PadScriptEntry
+{
+	double   start_seconds = 0.0;
+	double   end_seconds   = 0.0;
+	uint32_t buttons       = 0;
+	uint8_t  axis_mask     = 0;
+	int8_t   left_x        = 0;
+	int8_t   left_y        = 0;
+	int8_t   right_x       = 0;
+	int8_t   right_y       = 0;
+};
+
+struct PadScriptState
+{
+	uint32_t buttons   = 0;
+	uint8_t  axis_mask = 0;
+	int8_t   left_x    = 0;
+	int8_t   left_y    = 0;
+	int8_t   right_x   = 0;
+	int8_t   right_y   = 0;
+
+	bool operator==(const PadScriptState& other) const
+	{
+		return buttons == other.buttons && axis_mask == other.axis_mask && left_x == other.left_x && left_y == other.left_y &&
+		       right_x == other.right_x && right_y == other.right_y;
+	}
+};
+
+static std::string PadScriptTrim(std::string value)
+{
+	const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
+	value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+	value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+	return value;
+}
+
+static bool PadScriptParseNumber(const std::string& text, double* value)
+{
+	if (value == nullptr)
+	{
+		return false;
+	}
+	char* end = nullptr;
+	const double parsed = std::strtod(text.c_str(), &end);
+	if (end == text.c_str() || *end != '\0' || !std::isfinite(parsed) || parsed < 0.0)
+	{
+		return false;
+	}
+	*value = parsed;
+	return true;
+}
+
+static bool PadScriptParseActions(const std::string& text, PadScriptEntry* entry)
+{
+	if (entry == nullptr)
+	{
+		return false;
+	}
+
+	std::size_t begin = 0;
+	while (begin <= text.size())
+	{
+		const std::size_t end = text.find('+', begin);
+		std::string       token = PadScriptTrim(text.substr(begin, end == std::string::npos ? end : end - begin));
+		std::transform(token.begin(), token.end(), token.begin(), [](unsigned char c) {
+			return static_cast<char>(std::tolower(c));
+		});
+		if (token.empty())
+		{
+			return false;
+		}
+		int8_t* axis_value = nullptr;
+		uint8_t axis_bit   = 0;
+		if (token == "left-stick-left" || token == "left_stick_left")
+		{
+			axis_value = &entry->left_x;
+			axis_bit   = 1u << static_cast<uint8_t>(Axis::LeftX);
+			*axis_value = -1;
+		} else if (token == "left-stick-right" || token == "left_stick_right")
+		{
+			axis_value = &entry->left_x;
+			axis_bit   = 1u << static_cast<uint8_t>(Axis::LeftX);
+			*axis_value = 1;
+		} else if (token == "left-stick-up" || token == "left_stick_up")
+		{
+			axis_value = &entry->left_y;
+			axis_bit   = 1u << static_cast<uint8_t>(Axis::LeftY);
+			*axis_value = -1;
+		} else if (token == "left-stick-down" || token == "left_stick_down")
+		{
+			axis_value = &entry->left_y;
+			axis_bit   = 1u << static_cast<uint8_t>(Axis::LeftY);
+			*axis_value = 1;
+		} else if (token == "right-stick-left" || token == "right_stick_left")
+		{
+			axis_value = &entry->right_x;
+			axis_bit   = 1u << static_cast<uint8_t>(Axis::RightX);
+			*axis_value = -1;
+		} else if (token == "right-stick-right" || token == "right_stick_right")
+		{
+			axis_value = &entry->right_x;
+			axis_bit   = 1u << static_cast<uint8_t>(Axis::RightX);
+			*axis_value = 1;
+		} else if (token == "right-stick-up" || token == "right_stick_up")
+		{
+			axis_value = &entry->right_y;
+			axis_bit   = 1u << static_cast<uint8_t>(Axis::RightY);
+			*axis_value = -1;
+		} else if (token == "right-stick-down" || token == "right_stick_down")
+		{
+			axis_value = &entry->right_y;
+			axis_bit   = 1u << static_cast<uint8_t>(Axis::RightY);
+			*axis_value = 1;
+		}
+		if (axis_value != nullptr)
+		{
+			if ((entry->axis_mask & axis_bit) != 0)
+			{
+				return false;
+			}
+			entry->axis_mask |= axis_bit;
+		} else
+		{
+			uint32_t button = 0;
+			if (!AgentPadButtonFromName(token.c_str(), &button))
+			{
+				return false;
+			}
+			entry->buttons |= button;
+		}
+		if (end == std::string::npos)
+		{
+			break;
+		}
+		begin = end + 1;
+	}
+	return entry->buttons != 0 || entry->axis_mask != 0;
+}
+
+static bool PadScriptParseText(const std::string& text, std::vector<PadScriptEntry>* entries, std::string* error)
+{
+	if (entries == nullptr || error == nullptr)
+	{
+		return false;
+	}
+
+	entries->clear();
+	std::size_t line_start = 0;
+	std::size_t line_number = 0;
+	while (line_start <= text.size())
+	{
+		const std::size_t line_end = text.find('\n', line_start);
+		std::string       line = text.substr(line_start, line_end == std::string::npos ? line_end : line_end - line_start);
+		++line_number;
+		if (const auto comment = line.find('#'); comment != std::string::npos)
+		{
+			line.resize(comment);
+		}
+		line = PadScriptTrim(line);
+		if (!line.empty())
+		{
+			const std::size_t colon = line.find(':');
+			if (colon == std::string::npos)
+			{
+				*error = "line " + std::to_string(line_number) + " has no ':' separator";
+				return false;
+			}
+
+			std::string time_range = PadScriptTrim(line.substr(0, colon));
+			std::string button_text = PadScriptTrim(line.substr(colon + 1));
+			const std::size_t dash = time_range.find('-');
+			double            start = 0.0;
+			double            end   = 0.0;
+			if (dash == std::string::npos)
+			{
+				if (!PadScriptParseNumber(time_range, &start))
+				{
+					*error = "line " + std::to_string(line_number) + " has an invalid start time";
+					return false;
+				}
+				end = start + 0.300;
+			} else
+			{
+				if (!PadScriptParseNumber(PadScriptTrim(time_range.substr(0, dash)), &start) ||
+				    !PadScriptParseNumber(PadScriptTrim(time_range.substr(dash + 1)), &end) || end <= start)
+				{
+					*error = "line " + std::to_string(line_number) + " has an invalid time range";
+					return false;
+				}
+			}
+			if (end > 86400.0)
+			{
+				*error = "line " + std::to_string(line_number) + " exceeds the route time limit";
+				return false;
+			}
+
+			PadScriptEntry entry {};
+			entry.start_seconds = start;
+			entry.end_seconds   = end;
+			if (!PadScriptParseActions(button_text, &entry))
+			{
+				*error = "line " + std::to_string(line_number) + " has an unknown action";
+				return false;
+			}
+			if (entries->size() >= 4096)
+			{
+				*error = "route contains too many entries";
+				return false;
+			}
+			entries->push_back(entry);
+		}
+		if (line_end == std::string::npos)
+		{
+			break;
+		}
+		line_start = line_end + 1;
+	}
+
+	std::stable_sort(entries->begin(), entries->end(), [](const PadScriptEntry& lhs, const PadScriptEntry& rhs) {
+		return lhs.start_seconds < rhs.start_seconds;
+	});
+	return true;
+}
+
+class PadScriptRuntime
+{
+public:
+	bool Sample(PadScriptState* state)
+	{
+		if (state == nullptr)
+		{
+			return false;
+		}
+		std::lock_guard<std::mutex> lock(m_mutex);
+		LoadLocked();
+		if (!m_loaded)
+		{
+			return false;
+		}
+
+		const auto now = std::chrono::steady_clock::now();
+		if (!m_started)
+		{
+			m_started = true;
+			m_origin  = now;
+		}
+		const double elapsed = std::chrono::duration<double>(now - m_origin).count();
+		PadScriptState value {};
+		for (const auto& entry: m_entries)
+		{
+			if (elapsed >= entry.start_seconds && elapsed < entry.end_seconds)
+			{
+				value.buttons   |= entry.buttons;
+				value.axis_mask |= entry.axis_mask;
+				if ((entry.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftX))) != 0)
+				{
+					value.left_x = entry.left_x;
+				}
+				if ((entry.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftY))) != 0)
+				{
+					value.left_y = entry.left_y;
+				}
+				if ((entry.axis_mask & (1u << static_cast<uint8_t>(Axis::RightX))) != 0)
+				{
+					value.right_x = entry.right_x;
+				}
+				if ((entry.axis_mask & (1u << static_cast<uint8_t>(Axis::RightY))) != 0)
+				{
+					value.right_y = entry.right_y;
+				}
+			}
+		}
+		*state = value;
+		if (std::getenv("KYTY_PAD_SCRIPT_LOG") != nullptr && !(value == m_last_state))
+		{
+			std::fprintf(stderr, "KYTY_PAD_SCRIPT state=0x%08" PRIx32 " axes=0x%02" PRIx8 " elapsed=%.3f\n", value.buttons,
+			             value.axis_mask, elapsed);
+			m_last_state = value;
+		}
+		return true;
+	}
+
+private:
+	void LoadLocked()
+	{
+		if (m_initialized)
+		{
+			return;
+		}
+		m_initialized = true;
+
+		const char* env = std::getenv("KYTY_PAD_SCRIPT");
+		if (env == nullptr || env[0] == '\0')
+		{
+			return;
+		}
+
+		std::string source = env;
+		if (source.front() == '@')
+		{
+			source.erase(source.begin());
+		}
+		if (source.empty())
+		{
+			std::fprintf(stderr, "KYTY_PAD_SCRIPT ignored: route source is empty\n");
+			return;
+		}
+		std::string text;
+		if (source.find('/') != std::string::npos || source.find('\\') != std::string::npos || source.front() == '.')
+		{
+			std::ifstream file(source, std::ios::binary | std::ios::ate);
+			if (!file)
+			{
+				std::fprintf(stderr, "KYTY_PAD_SCRIPT cannot open route\n");
+				return;
+			}
+			const auto size = file.tellg();
+			if (size < 0 || static_cast<uint64_t>(size) > (1u << 20))
+			{
+				std::fprintf(stderr, "KYTY_PAD_SCRIPT route exceeds the size limit\n");
+				return;
+			}
+			text.resize(static_cast<std::size_t>(size));
+			file.seekg(0);
+			file.read(text.data(), static_cast<std::streamsize>(text.size()));
+			if (!file && !text.empty())
+			{
+				std::fprintf(stderr, "KYTY_PAD_SCRIPT route read failed\n");
+				return;
+			}
+		} else
+		{
+			std::replace(source.begin(), source.end(), ';', '\n');
+			text = source;
+		}
+
+		std::string error;
+		if (!PadScriptParseText(text, &m_entries, &error) || m_entries.empty())
+		{
+			std::fprintf(stderr, "KYTY_PAD_SCRIPT ignored: %s\n", error.empty() ? "route is empty" : error.c_str());
+			m_entries.clear();
+			return;
+		}
+		m_loaded = true;
+		std::fprintf(stderr, "KYTY_PAD_SCRIPT loaded entries=%zu\n", m_entries.size());
+	}
+
+	std::mutex                               m_mutex;
+	std::vector<PadScriptEntry>              m_entries;
+	std::chrono::steady_clock::time_point    m_origin{};
+	PadScriptState                            m_last_state {std::numeric_limits<uint32_t>::max(), 0, 0, 0, 0, 0};
+	bool                                     m_initialized = false;
+	bool                                     m_loaded      = false;
+	bool                                     m_started     = false;
+};
+
+static PadScriptRuntime g_pad_script;
 
 static void AgentPadApplyToButtonsAndAxes(bool advance_tap, uint32_t* buttons, uint8_t* left_x, uint8_t* left_y, uint8_t* right_x,
                                           uint8_t* right_y, uint8_t* l2, uint8_t* r2)
@@ -1065,13 +1433,25 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 		}
 	}
 
+	PadScriptState scripted {};
+	(void)g_pad_script.Sample(&scripted);
+	const auto script_axis = [](int8_t value) -> uint8_t { return value < 0 ? 0u : (value > 0 ? 255u : 128u); };
+
 	const uint64_t now_ts = LibKernel::KernelGetProcessTime();
 
-	data->buttons                = state.buttons | auto_buttons;
-	data->left_stick_x           = state.axes[static_cast<int>(Axis::LeftX)];
-	data->left_stick_y           = state.axes[static_cast<int>(Axis::LeftY)];
-	data->right_stick_x          = state.axes[static_cast<int>(Axis::RightX)];
-	data->right_stick_y          = state.axes[static_cast<int>(Axis::RightY)];
+	data->buttons                = state.buttons | auto_buttons | scripted.buttons;
+	data->left_stick_x           = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftX))) != 0
+	                                    ? script_axis(scripted.left_x)
+	                                    : state.axes[static_cast<int>(Axis::LeftX)];
+	data->left_stick_y           = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftY))) != 0
+	                                    ? script_axis(scripted.left_y)
+	                                    : state.axes[static_cast<int>(Axis::LeftY)];
+	data->right_stick_x          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightX))) != 0
+	                                    ? script_axis(scripted.right_x)
+	                                    : state.axes[static_cast<int>(Axis::RightX)];
+	data->right_stick_y          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightY))) != 0
+	                                    ? script_axis(scripted.right_y)
+	                                    : state.axes[static_cast<int>(Axis::RightY)];
 	data->analog_buttons_l2      = state.axes[static_cast<int>(Axis::TriggerLeft)];
 	data->analog_buttons_r2      = state.axes[static_cast<int>(Axis::TriggerRight)];
 	AgentPadApplyToButtonsAndAxes(true, &data->buttons, &data->left_stick_x, &data->left_stick_y, &data->right_stick_x,
@@ -1117,6 +1497,9 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 	ControllerState states[64];
 
 	int ret_num = g_controller->ReadStates(states, num, &connected, &connected_count);
+	PadScriptState scripted {};
+	const bool script_active = g_pad_script.Sample(&scripted);
+	const auto script_axis = [](int8_t value) -> uint8_t { return value < 0 ? 0u : (value > 0 ? 255u : 128u); };
 
 	if (!connected)
 	{
@@ -1125,11 +1508,19 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 
 	for (int i = 0; i < ret_num; i++)
 	{
-		data[i].buttons                = states[i].buttons;
-		data[i].left_stick_x           = states[i].axes[static_cast<int>(Axis::LeftX)];
-		data[i].left_stick_y           = states[i].axes[static_cast<int>(Axis::LeftY)];
-		data[i].right_stick_x          = states[i].axes[static_cast<int>(Axis::RightX)];
-		data[i].right_stick_y          = states[i].axes[static_cast<int>(Axis::RightY)];
+		data[i].buttons                = states[i].buttons | scripted.buttons;
+		data[i].left_stick_x           = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftX))) != 0
+		                                    ? script_axis(scripted.left_x)
+		                                    : states[i].axes[static_cast<int>(Axis::LeftX)];
+		data[i].left_stick_y           = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftY))) != 0
+		                                    ? script_axis(scripted.left_y)
+		                                    : states[i].axes[static_cast<int>(Axis::LeftY)];
+		data[i].right_stick_x          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightX))) != 0
+		                                    ? script_axis(scripted.right_x)
+		                                    : states[i].axes[static_cast<int>(Axis::RightX)];
+		data[i].right_stick_y          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightY))) != 0
+		                                    ? script_axis(scripted.right_y)
+		                                    : states[i].axes[static_cast<int>(Axis::RightY)];
 		data[i].analog_buttons_l2      = states[i].axes[static_cast<int>(Axis::TriggerLeft)];
 		data[i].analog_buttons_r2      = states[i].axes[static_cast<int>(Axis::TriggerRight)];
 		// Advance the tap FSM at most once per PadRead call (first sample only) so a
@@ -1153,9 +1544,9 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 		data[i].touch_data_touch1_x    = 0;
 		data[i].touch_data_touch1_y    = 0;
 		data[i].touch_data_touch1_id   = 2;
-		data[i].connected              = connected;
+		data[i].connected              = connected || script_active;
 		data[i].timestamp              = states[i].time;
-		data[i].connected_count        = connected_count;
+		data[i].connected_count        = (connected_count > 0 ? connected_count : (script_active ? 1 : 0));
 		data[i].device_unique_data_len = 0;
 	}
 
