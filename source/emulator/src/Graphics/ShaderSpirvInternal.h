@@ -284,6 +284,7 @@ String8 ScalarSpillSlotName(int register_id, int lane);
 bool HasLiveScalarSpill(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
 bool HasInvalidatedScalarSpill(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
 bool HasFutureScalarSpillRead(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
+bool UsesNativeLaneExchange(const ShaderCode& code);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
 const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFormat::Format format);

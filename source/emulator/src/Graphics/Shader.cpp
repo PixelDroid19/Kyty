@@ -15,6 +15,7 @@
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/RenderResolutionShaderUsageCache.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
+#include "ShaderSpirvInternal.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
@@ -314,8 +315,7 @@ bool ShaderVccBranchIsWaveUniform(const ShaderCode& code, uint32_t instruction_i
 
 static bool ShaderPixelUsesSubgroupSemantics(const ShaderCode& code)
 {
-	if (code.HasAnyOf({ShaderInstructionType::VReadfirstlaneB32, ShaderInstructionType::VReadlaneB32,
-	                   ShaderInstructionType::VWritelaneB32, ShaderInstructionType::VMbcntLoU32B32,
+	if (UsesNativeLaneExchange(code) || code.HasAnyOf({ShaderInstructionType::VMbcntLoU32B32,
 	                   ShaderInstructionType::VMbcntHiU32B32, ShaderInstructionType::SCbranchExecz}))
 	{
 		return true;

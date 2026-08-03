@@ -214,7 +214,7 @@ static bool spirv_uses_readfirstlane(const ShaderCode& code)
 
 static bool spirv_uses_lane_exchange(const ShaderCode& code)
 {
-	return code.HasAnyOf({ShaderInstructionType::VReadlaneB32, ShaderInstructionType::VWritelaneB32});
+	return UsesNativeLaneExchange(code);
 }
 
 static bool spirv_uses_wave_branch_vote(const ShaderCode& code)

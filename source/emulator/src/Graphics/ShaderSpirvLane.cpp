@@ -137,6 +137,44 @@ bool HasFutureScalarSpillRead(const ShaderCode& code, uint32_t instruction_index
 	return false;
 }
 
+bool UsesNativeLaneExchange(const ShaderCode& code)
+{
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		switch (inst.type)
+		{
+			case ShaderInstructionType::VReadfirstlaneB32:
+				return true;
+			case ShaderInstructionType::VReadlaneB32:
+			{
+				int register_id = 0;
+				int lane         = 0;
+				if (!IsStaticScalarSpillRead(inst, &register_id, &lane) ||
+				    !HasLiveScalarSpill(code, index, register_id, lane))
+				{
+					return true;
+				}
+				break;
+			}
+			case ShaderInstructionType::VWritelaneB32:
+			{
+				int register_id = 0;
+				int lane         = 0;
+				if (!IsStaticScalarSpillWrite(inst, &register_id, &lane) ||
+				    !HasFutureScalarSpillRead(code, index, register_id, lane))
+				{
+					return true;
+				}
+				break;
+			}
+			default: break;
+		}
+	}
+	return false;
+}
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED
