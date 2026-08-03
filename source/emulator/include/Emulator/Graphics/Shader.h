@@ -139,7 +139,6 @@ enum class ShaderInstructionType : uint32_t
 	SSwappcB64,
 	SSubI32,
 	SWaitcnt,
-	SWqmB32,
 	SWqmB64,
 	SXnorB64,
 	SXorB64,
@@ -1366,10 +1365,6 @@ struct ShaderPixelInputInfo
 	bool                   ps_pixel_kill_enable      = false;
 	bool                   ps_early_z                = false;
 	bool                   ps_execute_on_noop        = false;
-	// SPI_PS_IN_CONTROL.PS_W32_EN selects the complete guest fragment wave width.
-	// Keep it with the shader interface because it changes mask semantics and the
-	// Vulkan subgroup contract even when the program bytes are identical.
-	bool                   ps_wave32                 = false;
 	// Non-zero when the translated fragment program uses guest-wave operations
 	// whose exact width must be available in the host Vulkan subgroup.
 	uint32_t               required_subgroup_size    = 0;

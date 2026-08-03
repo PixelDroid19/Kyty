@@ -376,10 +376,7 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.dst.size    = 2;
 			inst.src[0].size = 2;
 			break;
-		case 0x09:
-			inst.type   = ShaderInstructionType::SWqmB32;
-			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
-			break;
+		case 0x09: KYTY_NI("s_wqm_b32"); break;
 		case 0x0a:
 			inst.type        = ShaderInstructionType::SWqmB64;
 			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;

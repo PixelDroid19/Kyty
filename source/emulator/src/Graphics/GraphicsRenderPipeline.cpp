@@ -319,27 +319,12 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	VkPipelineShaderStageCreateInfo frag_shader_stage_info {};
 	frag_shader_stage_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	frag_shader_stage_info.pNext               = nullptr;
 	frag_shader_stage_info.flags               = 0;
 	frag_shader_stage_info.stage               = VK_SHADER_STAGE_FRAGMENT_BIT;
 	frag_shader_stage_info.module              = frag_shader_module;
 	frag_shader_stage_info.pName               = "main";
 	frag_shader_stage_info.pSpecializationInfo = nullptr;
-
-	// Request the guest fragment wave width when Vulkan can honor it. The
-	// pipeline remains valid on devices without exact subgroup-size control;
-	// those devices execute the translated subgroup operations at their native
-	// width instead of dropping the draw during pipeline creation.
-	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup {};
-	const auto gctx_dev = g_render_ctx->GetGraphicCtx();
-	const uint32_t required_ps_size = ps_input_info != nullptr ? ps_input_info->required_subgroup_size : 0u;
-	if (required_ps_size != 0u && gctx_dev->subgroup_size_control_supported && required_ps_size >= gctx_dev->subgroup_min_size &&
-	    required_ps_size <= gctx_dev->subgroup_max_size)
-	{
-		required_subgroup.sType                = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT;
-		required_subgroup.pNext                = nullptr;
-		required_subgroup.requiredSubgroupSize = required_ps_size;
-		frag_shader_stage_info.pNext           = &required_subgroup;
-	}
 
 	VkPipelineShaderStageCreateInfo shader_stages[] = {vert_shader_stage_info, frag_shader_stage_info};
 
@@ -1339,10 +1324,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 
 	Core::LockGuard lock(m_mutex);
 
-	if (Config::GetPrintfDirection() != Log::Direction::Silent)
-	{
-		ShaderDbgDumpInputInfo(input_info);
-	}
+	ShaderDbgDumpInputInfo(input_info);
 
 	auto cs_id = ShaderGetIdCS(cs_regs, input_info);
 

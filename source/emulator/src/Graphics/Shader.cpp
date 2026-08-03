@@ -4431,7 +4431,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	ps_info->ps_pixel_kill_enable = sh->db_shader_control.shader_kill_enable;
 	ps_info->ps_early_z           = (sh->db_shader_control.shader_z_behavior == 1);
 	ps_info->ps_execute_on_noop   = sh->db_shader_control.shader_execute_on_noop;
-	ps_info->ps_wave32 = (sh->ps_in_control & (Pm4::SPI_PS_IN_CONTROL_PS_W32_EN_MASK << Pm4::SPI_PS_IN_CONTROL_PS_W32_EN_SHIFT)) != 0;
+	const bool ps_wave32 = (sh->ps_in_control & (Pm4::SPI_PS_IN_CONTROL_PS_W32_EN_MASK << Pm4::SPI_PS_IN_CONTROL_PS_W32_EN_SHIFT)) != 0;
 
 	for (uint32_t i = 0; i < 32u; i++)
 	{
@@ -4483,7 +4483,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		    });
 		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
 		ps_info->image_size_query          = analysis.usage.image_size_query;
-		ps_info->required_subgroup_size    = ShaderPixelRequiredSubgroupSize(*analysis.code, ps_info->ps_wave32);
+		ps_info->required_subgroup_size    = ShaderPixelRequiredSubgroupSize(*analysis.code, ps_wave32);
 		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr, analysis.code.get(), 0,
 		                  false);
 	} else
@@ -4848,7 +4848,6 @@ void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo* info)
 	printf("\t ps_pixel_kill_enable = %s\n", info->ps_pixel_kill_enable ? "true" : "false");
 	printf("\t ps_early_z           = %s\n", info->ps_early_z ? "true" : "false");
 	printf("\t ps_execute_on_noop   = %s\n", info->ps_execute_on_noop ? "true" : "false");
-	printf("\t ps_wave32            = %s\n", info->ps_wave32 ? "true" : "false");
 
 	for (uint32_t i = 0; i < info->input_num; i++)
 	{
@@ -5843,7 +5842,6 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pixel_kill_enable));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_early_z));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_execute_on_noop));
-	ret.ids.Add(static_cast<uint32_t>(input_info->ps_wave32));
 
 	// The export declarations and component order are part of the generated
 	// SPIR-V interface. They must distinguish pipelines that use the same guest

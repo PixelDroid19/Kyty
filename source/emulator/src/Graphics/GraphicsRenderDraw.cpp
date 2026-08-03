@@ -934,12 +934,6 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
 
-	if (pipeline == nullptr)
-	{
-		// Pipeline creation failed; there is no Vulkan object to bind.
-		return;
-	}
-
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
 
 	SetDynamicParams(vk_buffer, pipeline);
@@ -1681,12 +1675,6 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
-
-	if (pipeline == nullptr)
-	{
-		// Pipeline creation failed; there is no Vulkan object to bind.
-		return;
-	}
 
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
 

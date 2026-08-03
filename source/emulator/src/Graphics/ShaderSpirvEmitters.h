@@ -89,7 +89,6 @@ KYTY_RECOMPILER_FUNC(Recompile_SMovB64_Sdst2Ssrc02);
 KYTY_RECOMPILER_FUNC(Recompile_SUnaryB32_SVdstSVsrc0);
 KYTY_RECOMPILER_FUNC(Recompile_SNotB64_Sdst2Ssrc02);
 KYTY_RECOMPILER_FUNC(Recompile_SSwappcB64_Sdst2Ssrc02);
-KYTY_RECOMPILER_FUNC(Recompile_SWqmB32_SVdstSVsrc0);
 KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02);
 KYTY_RECOMPILER_FUNC(Recompile_Skip);
 KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatX_Vdata1VaddrSvSoffsIdxenFloat1);
