@@ -95,12 +95,24 @@ struct PadExtControllerInformation
 	uint8_t                  reserved[0x40 - 0x1F];
 };
 
-// ScePadDeviceClassExtendedInformation — 0x20 bytes; deviceClass int32 at +0x00.
+// ScePadDeviceClassExtendedInformation — 0x14 bytes.
 struct PadDeviceClassExtendedInformation
 {
 	int32_t device_class;
-	uint8_t reserved[0x20 - sizeof(int32_t)];
+	uint8_t reserved[4];
+	uint8_t class_data[12];
 };
+
+struct PadDeviceClassData
+{
+	int32_t device_class;
+	bool    data_valid;
+	uint8_t reserved[3];
+	uint8_t class_data[16];
+};
+
+static_assert(sizeof(PadDeviceClassExtendedInformation) == 0x14);
+static_assert(sizeof(PadDeviceClassData) == 0x18);
 
 struct PadVibrationParam
 {
@@ -1377,6 +1389,26 @@ int KYTY_SYSV_ABI PadDeviceClassGetExtendedInformation(int handle, void* info)
 	std::memset(out, 0, sizeof(*out));
 	out->device_class = 0;
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadDeviceClassParseData(int handle, const PadData* data, void* class_data)
+{
+	PRINT_NAME();
+
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	if (data == nullptr || class_data == nullptr)
+	{
+		return PAD_ERROR_INVALID_ARG;
+	}
+
+	auto* out = static_cast<PadDeviceClassData*>(class_data);
+	std::memset(out, 0, sizeof(*out));
+	out->device_class = 0;
+	out->data_valid   = data->connected;
 	return OK;
 }
 

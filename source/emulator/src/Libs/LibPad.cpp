@@ -26,6 +26,7 @@ LIB_DEFINE(InitPad_1)
 	LIB_FUNC("gjP9-KQzoUk", Controller::PadGetControllerInformation);
 	LIB_FUNC("hGbf2QTBmqc", Controller::PadGetExtControllerInformation);
 	LIB_FUNC("AcslpN1jHR8", Controller::PadDeviceClassGetExtendedInformation);
+	LIB_FUNC("IHPqcbc0zCA", Controller::PadDeviceClassParseData);
 	LIB_FUNC("YndgXqQVV7c", Controller::PadReadState);
 	LIB_FUNC("q1cHNfGycLI", Controller::PadRead);
 	LIB_FUNC("yFVnOdGxvZY", Controller::PadSetVibration);

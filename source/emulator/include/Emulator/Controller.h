@@ -97,6 +97,7 @@ int KYTY_SYSV_ABI PadResetOrientation(int handle);
 int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformation* info);
 int KYTY_SYSV_ABI PadGetExtControllerInformation(int handle, void* info);
 int KYTY_SYSV_ABI PadDeviceClassGetExtendedInformation(int handle, void* info);
+int KYTY_SYSV_ABI PadDeviceClassParseData(int handle, const PadData* data, void* class_data);
 int KYTY_SYSV_ABI PadReadState(int handle, PadData* data);
 int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num);
 int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param);
