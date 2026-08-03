@@ -73,6 +73,38 @@ bool HasLiveScalarSpill(const ShaderCode& code, uint32_t instruction_index, int 
 	return live;
 }
 
+bool HasInvalidatedScalarSpill(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane)
+{
+	bool live = false;
+	bool invalidated = false;
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instruction_index && index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		int         written_register = 0;
+		int         written_lane     = 0;
+		if (IsStaticScalarSpillWrite(inst, &written_register, &written_lane))
+		{
+			if (written_register == register_id && written_lane == lane)
+			{
+				live        = true;
+				invalidated = false;
+			}
+			continue;
+		}
+
+		if (instruction_writes_vgpr(inst, register_id))
+		{
+			if (live)
+			{
+				invalidated = true;
+			}
+			live = false;
+		}
+	}
+	return invalidated && !live;
+}
+
 bool HasFutureScalarSpillRead(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane)
 {
 	const auto& instructions = code.GetInstructions();

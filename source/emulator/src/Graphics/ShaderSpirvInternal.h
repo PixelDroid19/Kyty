@@ -282,6 +282,7 @@ bool IsStaticScalarSpillWrite(const ShaderInstruction& inst, int* register_id, i
 bool IsStaticScalarSpillRead(const ShaderInstruction& inst, int* register_id, int* lane);
 String8 ScalarSpillSlotName(int register_id, int lane);
 bool HasLiveScalarSpill(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
+bool HasInvalidatedScalarSpill(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
 bool HasFutureScalarSpillRead(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;

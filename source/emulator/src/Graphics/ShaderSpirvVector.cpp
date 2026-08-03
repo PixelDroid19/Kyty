@@ -1498,6 +1498,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 		                   .ReplaceStr("<index>", index_str);
 		return true;
 	}
+	if (IsStaticScalarSpillRead(inst, &spill_register, &spill_lane) &&
+	    HasInvalidatedScalarSpill(code, index, spill_register, spill_lane))
+	{
+		return false;
+	}
 
 	String8 index_str = String8::FromPrintf("%u", index);
 	String8 load0;
