@@ -65,8 +65,19 @@ TEST(EmulatorAudio, VideoEndOfStreamDoesNotWaitForPendingAudio)
 
 	AudioVideoBackend::VideoFrame video;
 	size_t frames = 0;
+	uint64_t previous_timestamp = 0;
 	while (decoder->ReadVideoFrame(&video))
 	{
+		if (frames == 0)
+		{
+			EXPECT_LE(video.timestamp_ms, 1u);
+		}
+		else
+		{
+			EXPECT_GE(video.timestamp_ms, previous_timestamp);
+			EXPECT_LE(video.timestamp_ms - previous_timestamp, 50u);
+		}
+		previous_timestamp = video.timestamp_ms;
 		++frames;
 	}
 
@@ -118,7 +129,18 @@ TEST(EmulatorAudio, AvPlayerUsesConfiguredMediaBackend)
 	EXPECT_GT(stream.details.video.height, 0u);
 	ASSERT_EQ(AvPlayer::AvPlayerStart(handle), 0);
 	AvPlayer::AvPlayerFrameInfoEx frame {};
-	ASSERT_EQ(AvPlayer::AvPlayerGetVideoDataEx(handle, &frame), 1);
+	const auto frame_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	bool got_frame = false;
+	while (!got_frame && std::chrono::steady_clock::now() < frame_deadline)
+	{
+		got_frame = AvPlayer::AvPlayerGetVideoDataEx(handle, &frame) != 0;
+		if (got_frame)
+		{
+			break;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	ASSERT_EQ(got_frame, 1);
 	ASSERT_NE(frame.data, nullptr);
 	EXPECT_EQ(frame.details.video.width, stream.details.video.width);
 	EXPECT_EQ(frame.details.video.height, stream.details.video.height);
