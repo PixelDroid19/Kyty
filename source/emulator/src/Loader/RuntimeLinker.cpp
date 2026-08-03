@@ -282,6 +282,40 @@ static uint64_t g_desired_base_addr = SYSTEM_RESERVED + CODE_BASE_OFFSET;
 static uint64_t g_invalid_memory    = 0;
 static uint64_t g_next_tls_module_id = 1;
 
+// Native service plugins validate this descriptor before registering their ABI.
+// Passing a null argument makes their module_start entry dereference address zero.
+struct NativeModuleStartParam
+{
+	uint32_t size;
+	uint32_t version;
+	uint64_t callback;
+};
+
+static const NativeModuleStartParam g_native_module_start_param {0x10u, 0x200u, 0};
+
+static bool NeedsNativeModuleStartParam(const Program* program)
+{
+	if (program == nullptr)
+	{
+		return false;
+	}
+
+	const String name = program->file_name.FilenameWithoutDirectory();
+	return name.EqualNoCase(U"PSN.prx") || name.EqualNoCase(U"PSNCore.prx") || name.EqualNoCase(U"PSNCommon.prx") ||
+	       name.EqualNoCase(U"SaveData.prx");
+}
+
+static void NormalizeModuleStartArguments(const Program* program, size_t* args, const void** argp)
+{
+	if (args == nullptr || argp == nullptr || *args != 0 || *argp != nullptr || !NeedsNativeModuleStartParam(program))
+	{
+		return;
+	}
+
+	*args = sizeof(g_native_module_start_param);
+	*argp = &g_native_module_start_param;
+}
+
 static Program* g_tls_main_program = nullptr;
 alignas(64) static uint8_t g_tls_reg_save_area[XSAVE_BUFFER_SIZE + sizeof(XSAVE_CHK_GUARD)];
 alignas(16) static uint8_t g_tls_host_stack[1024 * 1024];
@@ -2153,6 +2187,7 @@ int RuntimeLinker::StartModuleOnStack(Program* program, size_t args, const void*
 	EXIT_IF(!program->elf->IsShared());
 
 	EXIT_IF(!m_programs.Contains(program));
+	NormalizeModuleStartArguments(program, &args, &argp);
 
 	printf(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
 	printf(FG_BRIGHT_YELLOW "--- Start module: " BG_BLUE BOLD "%s" BG_DEFAULT NO_BOLD DEFAULT "\n", program->file_name.C_Str());

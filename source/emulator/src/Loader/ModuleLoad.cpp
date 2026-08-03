@@ -327,7 +327,13 @@ bool IsSupportedPackageSubdir(const char* relative_subdir)
 
 bool IsPrelinkedRuntimePlugin(const String& name)
 {
-	return name == U"libfmod.prx" || name == U"libfmodstudio.prx";
+	// Unity titles resolve optional native plugins through sceKernelLoadStartModule
+	// and il2cpp P/Invoke. Discover only known runtime plugins; modules a title does
+	// not ship remain absent and are not added to the load plan.
+	return name == U"libfmod.prx" || name == U"libfmodstudio.prx" || //
+	       name == U"AkSoundEngine.prx" || name == U"AkMotion.prx" || name == U"AkVorbisHwAccelerator.prx" || //
+	       name == U"PSN.prx" || name == U"PSNCore.prx" || name == U"PSNCommon.prx" || name == U"SaveData.prx" || //
+	       name == U"CommonDialog.prx";
 }
 
 DiscoveryResult DiscoverAdjacentCandidates(const String& package_root_host, String* out_host_paths, String* out_relative_keys,
