@@ -1910,7 +1910,7 @@ void Spirv::WriteFunctions()
 		m_source += FUNC_ABS_DIFF;
 	}
 
-	if (m_code.HasAnyOf({ShaderInstructionType::SWqmB64}))
+	if (m_code.HasAnyOf({ShaderInstructionType::SWqmB32, ShaderInstructionType::SWqmB64}))
 	{
 		m_source += FUNC_WQM;
 	}

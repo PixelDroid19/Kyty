@@ -13,6 +13,12 @@
 
 namespace Kyty::Libs::Graphics {
 
+static bool FragmentWave32(const Spirv* spirv)
+{
+	const auto* info = spirv != nullptr ? spirv->GetPsInputInfo() : nullptr;
+	return spirv != nullptr && spirv->GetCode().GetType() == ShaderType::Pixel && info != nullptr && info->ps_wave32;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B64_Sdst2Ssrc02Ssrc12)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -632,7 +638,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SMovB32_SVdstSVsrc0)
 	auto dst_value = operand_variable_to_str(inst.dst);
 
 	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
-	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst) && !FragmentWave32(spirv));
 
 	String8 load0;
 
@@ -856,6 +862,57 @@ KYTY_RECOMPILER_FUNC(Recompile_SSwappcB64_Sdst2Ssrc02)
 	}
 
 	return false;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_SWqmB32_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	EXIT_NOT_IMPLEMENTED(!FragmentWave32(spirv));
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst) && inst.dst.type != ShaderOperandType::ExecLo);
+
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
+
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8      load0;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+        <load0>
+        %wqm32_170_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_0 %uint_15
+        %wqm32_172_<index> = OpBitwiseOr %uint %uint_0 %wqm32_170_<index>
+        %wqm32_179_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_4 %uint_240
+        %wqm32_181_<index> = OpBitwiseOr %uint %wqm32_172_<index> %wqm32_179_<index>
+        %wqm32_188_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_8 %uint_0x00000f00
+        %wqm32_190_<index> = OpBitwiseOr %uint %wqm32_181_<index> %wqm32_188_<index>
+        %wqm32_197_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_12 %uint_0x0000f000
+        %wqm32_199_<index> = OpBitwiseOr %uint %wqm32_190_<index> %wqm32_197_<index>
+        %wqm32_206_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_16 %uint_0x000f0000
+        %wqm32_208_<index> = OpBitwiseOr %uint %wqm32_199_<index> %wqm32_206_<index>
+        %wqm32_215_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_20 %uint_0x00f00000
+        %wqm32_217_<index> = OpBitwiseOr %uint %wqm32_208_<index> %wqm32_215_<index>
+        %wqm32_224_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_24 %uint_0x0f000000
+        %wqm32_226_<index> = OpBitwiseOr %uint %wqm32_217_<index> %wqm32_224_<index>
+        %wqm32_233_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_28 %uint_0xf0000000
+        %wqm32_235_<index> = OpBitwiseOr %uint %wqm32_226_<index> %wqm32_233_<index>
+               OpStore %<dst> %wqm32_235_<index>
+        <execz>
+        <scc>
+)";
+
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<execz>", (operand_is_exec(inst.dst) ? EXECZ : ""))
+	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 1))
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+
+	return true;
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02)
