@@ -92,10 +92,10 @@
 300-302:triangle
 
 # Movement tutorial and a bounded continuation with periodic jumps.
-305-335:left-stick-right
-338-350:left-stick-down
-353-365:left-stick-down+cross
-368-529:left-stick-right
+305-335:right
+338-350:down
+353-365:down+cross
+368-529:right
 371-374:cross
 379-382:cross
 387-390:cross
