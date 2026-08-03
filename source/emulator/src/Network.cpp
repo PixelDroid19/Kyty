@@ -11,6 +11,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cinttypes>
 #include <cstring>
@@ -1322,11 +1323,52 @@ int KYTY_SYSV_ABI NetGetsockopt(int id, int level, int option, void* value, int*
 	return OK;
 }
 
-int KYTY_SYSV_ABI NetSelect(int nfds, void* /*readfds*/, void* /*writefds*/, void* /*exceptfds*/, void* /*timeout*/)
+int KYTY_SYSV_ABI NetSelect(int nfds, void* readfds, void* writefds, void* exceptfds, void* timeout)
 {
-	PRINT_NAME();
-	printf("\t nfds = %d\n", nfds);
-	return nfds < 0 ? NET_ERROR_EINVAL : nfds;
+	// select(0, nullptr, nullptr, nullptr, &timeout) is the POSIX sleep form.
+	// Returning immediately turns a timed wait into a hot loop in guest middleware.
+	if (nfds < 0)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	if (nfds != 0 || readfds != nullptr || writefds != nullptr || exceptfds != nullptr)
+	{
+		return NET_ERROR_EOPNOTSUPP;
+	}
+
+	if (timeout == nullptr)
+	{
+		// A null timeout blocks indefinitely. Use bounded sleeps so shutdown and signal
+		// delivery remain responsive without pretending a descriptor query succeeded.
+		for (;;)
+		{
+			Core::Thread::SleepMicro(1'000'000);
+		}
+	}
+
+	// PS5 timeval uses 64-bit time_t and suseconds_t on the x86-64 ABI.
+	const auto* tv             = static_cast<const int64_t*>(timeout);
+	const int64_t seconds      = tv[0];
+	const int64_t microseconds = tv[1];
+	if (seconds < 0 || microseconds < 0 || microseconds >= 1'000'000)
+	{
+		return NET_ERROR_EINVAL;
+	}
+
+	const uint64_t seconds_u      = static_cast<uint64_t>(seconds);
+	const uint64_t microseconds_u = static_cast<uint64_t>(microseconds);
+	if (seconds_u > (UINT64_MAX - microseconds_u) / 1'000'000ull)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	uint64_t remaining = seconds_u * 1'000'000ull + microseconds_u;
+	while (remaining != 0)
+	{
+		const uint32_t slice = static_cast<uint32_t>(std::min<uint64_t>(remaining, 1'000'000ull));
+		Core::Thread::SleepMicro(slice);
+		remaining -= slice;
+	}
+	return 0;
 }
 
 const char* KYTY_SYSV_ABI NetInetNtop(int af, const void* src, char* dst, int size)
