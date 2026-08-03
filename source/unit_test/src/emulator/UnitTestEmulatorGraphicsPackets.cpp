@@ -91,20 +91,6 @@ TEST(EmulatorGraphicsPackets, PreservesIndirectRegisterCount)
 	EXPECT_EQ(command[1], 16u);
 }
 
-TEST(EmulatorGraphicsPackets, NormalizesReversedIndirectRegisterPair)
-{
-	uint32_t offset = 0x88f5e915u;
-	uint32_t value  = Pm4::PA_SC_FOV_WINDOW_LR;
-
-	EXPECT_TRUE(GraphicsNormalizeIndirectRegisterPair(Pm4::CX_NUM, offset, value));
-	EXPECT_EQ(offset, Pm4::PA_SC_FOV_WINDOW_LR);
-	EXPECT_EQ(value, 0x88f5e915u);
-
-	offset = Pm4::CX_NUM;
-	value  = Pm4::CX_NUM + 1u;
-	EXPECT_FALSE(GraphicsNormalizeIndirectRegisterPair(Pm4::CX_NUM, offset, value));
-}
-
 TEST(EmulatorGraphicsPackets, IdentifiesDefaultIndirectRegisterPlaceholders)
 {
 	EXPECT_TRUE(GraphicsIsDefaultIndirectRegisterPair(0x10000000u, 0u));

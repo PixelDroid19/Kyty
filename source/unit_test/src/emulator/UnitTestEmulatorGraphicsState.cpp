@@ -1422,6 +1422,19 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	                                                                        &copy_height));
 }
 
+TEST(EmulatorGraphicsState, Gen5SampledTextureMetadataAddressMayBeInactive)
+{
+	ShaderTextureResource resource {};
+	resource.fields[6] = 0x12u << 24u;
+	resource.fields[7] = 0x3456u;
+
+	EXPECT_EQ(resource.MetaAddr(), 0x345612u);
+	EXPECT_FALSE(ShaderGen5SampledTextureMetadataRequiresDcc(resource));
+
+	resource.fields[6] |= 1u << 21u;
+	EXPECT_TRUE(ShaderGen5SampledTextureMetadataRequiresDcc(resource));
+}
+
 TEST(EmulatorGraphicsState, Gen5SharpSampledTextureAcceptsTexture2DType)
 {
 	HW::UserSgprInfo user_sgpr {};
