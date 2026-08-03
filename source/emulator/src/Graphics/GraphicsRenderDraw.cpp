@@ -81,28 +81,6 @@ static const char* shader_disable_reason(HW::Shader* sh_ctx)
 	return nullptr;
 }
 
-static bool FragmentSubgroupSupported(const ShaderPixelInputInfo& ps_input)
-{
-	if (ps_input.required_subgroup_size == 0 || g_render_ctx == nullptr || g_render_ctx->GetGraphicCtx() == nullptr)
-	{
-		return true;
-	}
-
-	const auto* graphic_ctx = g_render_ctx->GetGraphicCtx();
-	const uint32_t max_size = graphic_ctx->subgroup_max_size != 0 ? graphic_ctx->subgroup_max_size : graphic_ctx->subgroup_size;
-	if (max_size == 0 || max_size >= ps_input.required_subgroup_size)
-	{
-		return true;
-	}
-
-	static std::atomic_uint32_t logged {0};
-	if (logged.fetch_add(1, std::memory_order_relaxed) < 16u)
-	{
-		std::fprintf(stderr, "KYTY_RENDER_SKIP_SUBGROUP required=%u max=%u\n", ps_input.required_subgroup_size, max_size);
-	}
-	return false;
-}
-
 static uint32_t ResolveStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, uint32_t groups_x, uint32_t groups_y,
                                            uint32_t groups_z)
 {
@@ -925,11 +903,6 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
-	if (!FragmentSubgroupSupported(ps_input_info))
-	{
-		MaybeDumpIndexDrawSkip("unsupported-fragment-subgroup", index_count, draw_modifier, type);
-		return;
-	}
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
 	const auto& materialization_resolution = !RenderColorHasActiveTarget(color_info) ? depth_only_resolution : resolution;
@@ -1673,11 +1646,6 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info);
-	if (!FragmentSubgroupSupported(ps_input_info))
-	{
-		MaybeDumpAutoDrawSkip("unsupported-fragment-subgroup", index_count, draw_modifier);
-		return;
-	}
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
 	const auto& materialization_resolution = !RenderColorHasActiveTarget(color_info) ? depth_only_resolution : resolution;
