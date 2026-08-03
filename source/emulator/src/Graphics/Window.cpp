@@ -664,7 +664,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	const uint64_t       size = width * height * bpp;
 	std::vector<uint8_t> pixels(size);
 	UtilFillBuffer(&ctx->graphic_ctx, pixels.data(), size, static_cast<uint32_t>(width), image,
-	               static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+	               static_cast<uint64_t>(image->layout));
 	if (hdr_capture)
 	{
 		// R16G16B16A16_SFLOAT is stored as half floats (2 bytes/component).
