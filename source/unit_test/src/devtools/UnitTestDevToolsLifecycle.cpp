@@ -41,7 +41,17 @@ std::string FindDevToolsBinary()
 std::string FindWorkerBinary()
 {
 	char current[512] = {};
-	return QueryCurrentExecutablePath(current, sizeof(current)) ? std::string(current) : std::string();
+	if (!QueryCurrentExecutablePath(current, sizeof(current)))
+	{
+		return {};
+	}
+
+	// The handshake worker must be the script host. A standalone unit-test
+	// runner cannot act as its own worker or it would recursively launch the
+	// complete test suite through the supervisor.
+	const std::string executable(current);
+	const std::string suffix = "/fc_script";
+	return executable.size() >= suffix.size() && executable.compare(executable.size() - suffix.size(), suffix.size(), suffix) == 0 ? executable : std::string();
 }
 
 } // namespace

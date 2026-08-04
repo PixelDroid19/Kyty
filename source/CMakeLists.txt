@@ -236,6 +236,34 @@ if(BUILD_TESTING)
 	add_subdirectory(integration_test EXCLUDE_FROM_ALL)
 endif()
 
+if(KYTY_BUILD_UNIT_TESTS)
+	# Keep the emulator suites runnable without the fc_script executable. The
+	# runner owns only the minimal Core/Math/SDL/Threads bootstrap used by the
+	# existing script-host path and is exposed to CTest as a normal executable.
+	add_executable(kyty_unit_test
+		unit_test/src/UnitTestMain.cpp
+		3rdparty/gtest/src/gtest-all.cc
+	)
+	target_link_libraries(kyty_unit_test
+		PRIVATE
+		unit_test
+		core
+		sys
+		math
+		scripts
+		lua
+		SDL2-static
+		emulator
+	)
+	if(TARGET kyty_devtools_supervisor)
+		target_link_libraries(kyty_unit_test PRIVATE kyty_devtools_supervisor)
+	endif()
+	if(BUILD_TESTING)
+		add_test(NAME KytyUnitTest COMMAND kyty_unit_test)
+		set_tests_properties(KytyUnitTest PROPERTIES TIMEOUT 300)
+	endif()
+endif()
+
 # The process supervisor and worker transport are host-side concerns. Keep the
 # guest/runtime archive free of both dependencies so emulator consumers cannot
 # acquire process-control policy transitively.

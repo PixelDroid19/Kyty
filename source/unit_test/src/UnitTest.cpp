@@ -39,7 +39,25 @@ UT_LINK(EmulatorPad);
 UT_LINK(EmulatorLoaderTls);
 UT_LINK(EmulatorModuleLoad);
 UT_LINK(EmulatorApplicationHeap);
+UT_LINK(AgentJson);
 UT_LINK(AgentTools);
+UT_LINK(EmulatorExactStagingPool);
+UT_LINK(EmulatorFiber);
+UT_LINK(EmulatorGpuDeferredDeletionQueue);
+UT_LINK(EmulatorGpuMemoryFault);
+UT_LINK(EmulatorGpuMemoryRangeQueryCache);
+UT_LINK(EmulatorGpuSubmissionCoordinator);
+UT_LINK(EmulatorGpuSubmissionTracker);
+UT_LINK(EmulatorHostImageSurface);
+UT_LINK(EmulatorKernelGuestRuntime);
+UT_LINK(EmulatorLoaderModuleStart);
+UT_LINK(EmulatorLoaderUnwind);
+UT_LINK(EmulatorLog);
+UT_LINK(EmulatorModuleDiscovery);
+UT_LINK(EmulatorShaderTranslationCache);
+UT_LINK(EmulatorSymbolDatabase);
+UT_LINK(EmulatorVideoOutResolution);
+UT_LINK(EmulatorVulkanQueueIdentity);
 
 KYTY_SUBSYSTEM_INIT(UnitTest)
 {

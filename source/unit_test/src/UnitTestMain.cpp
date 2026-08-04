@@ -1,0 +1,54 @@
+#include "Kyty/Core/BringUp.h"
+#include "Kyty/Core/Core.h"
+#include "Kyty/Core/MemoryAlloc.h"
+#include "Kyty/Core/SDLSubsystem.h"
+#include "Kyty/Core/Subsystems.h"
+#include "Kyty/Core/Threads.h"
+#include "Kyty/Math/MathAll.h"
+#include "Kyty/Scripts/Scripts.h"
+#include "Kyty/UnitTest.h"
+
+#include "Emulator/Emulator.h"
+
+#include <cstdio>
+
+int main(int argc, char* argv[])
+{
+	Kyty::Core::BringUp::ConfigError bringup_error {};
+	if (!Kyty::Core::BringUp::InitializeFromEnvironment(&bringup_error))
+	{
+		std::fprintf(stderr, "KYTY_BRINGUP: invalid configuration: %s\n", bringup_error.message);
+		return 125;
+	}
+
+	Kyty::Core::mem_set_max_size(static_cast<size_t>(2048) * 1024 * 1024 - 1);
+
+	auto& subsystems = *Kyty::Core::SubsystemsList::Instance();
+	subsystems.SetArgs(argc, argv);
+
+	auto* core      = Kyty::Core::CoreSubsystem::Instance();
+	auto* scripts   = Kyty::Scripts::ScriptsSubsystem::Instance();
+	auto* math      = Kyty::Math::MathSubsystem::Instance();
+	auto* sdl       = Kyty::Core::SDLSubsystem::Instance();
+	auto* threads   = Kyty::Core::ThreadsSubsystem::Instance();
+	auto* emulator  = Kyty::Emulator::EmulatorSubsystem::Instance();
+	auto* unit_test = Kyty::UnitTest::UnitTestSubsystem::Instance();
+
+	subsystems.Add(core, {});
+	subsystems.Add(scripts, {core});
+	subsystems.Add(math, {core});
+	subsystems.Add(sdl, {core});
+	subsystems.Add(threads, {core, sdl});
+	subsystems.Add(emulator, {core, scripts});
+	subsystems.Add(unit_test, {core});
+
+	if (!subsystems.InitAll(false))
+	{
+		std::fprintf(stderr, "failed to initialize '%s': %s\n", subsystems.GetFailName(), subsystems.GetFailMsg());
+		return 125;
+	}
+
+	const bool passed = Kyty::UnitTest::unit_test_all();
+	subsystems.DestroyAll(false);
+	return passed ? 0 : 1;
+}
