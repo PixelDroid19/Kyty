@@ -208,6 +208,65 @@ static bool spirv_uses_buffer_atomics(const ShaderCode& code)
 	return Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd});
 }
 
+// FP64 (double) is used when the shader has f64 ALU or 64-bit float compares.
+static bool spirv_uses_f64(const ShaderCode& code)
+{
+	const auto& insts = code.GetInstructions();
+	for (uint32_t i = 0; i < insts.Size(); i++)
+	{
+		const auto type = static_cast<int>(insts.At(i).type);
+		if (type >= static_cast<int>(ShaderInstructionType::VCmpFF64) && type <= static_cast<int>(ShaderInstructionType::VCmpTruF64))
+		{
+			return true;
+		}
+	}
+	return code.HasAnyOf({ShaderInstructionType::VCvtF64F32, ShaderInstructionType::VCvtF32F64, ShaderInstructionType::VCvtI32F64,
+	                      ShaderInstructionType::VCvtU32F64, ShaderInstructionType::VCvtF64I32, ShaderInstructionType::VCvtF64U32,
+	                      ShaderInstructionType::VAddF64, ShaderInstructionType::VSubF64, ShaderInstructionType::VMulF64,
+	                      ShaderInstructionType::VSqrtF64, ShaderInstructionType::VMinF64,
+	                      ShaderInstructionType::VMaxF64, ShaderInstructionType::VFmaF64});
+}
+
+// FP16 (half) is used when the shader has f16 ALU or 16-bit float compares.
+static bool spirv_uses_f16(const ShaderCode& code)
+{
+	const auto& insts = code.GetInstructions();
+	for (uint32_t i = 0; i < insts.Size(); i++)
+	{
+		const auto type = static_cast<int>(insts.At(i).type);
+		if (type >= static_cast<int>(ShaderInstructionType::VCmpFF16) && type <= static_cast<int>(ShaderInstructionType::VCmpTruF16))
+		{
+			return true;
+		}
+	}
+	return code.HasAnyOf({ShaderInstructionType::VAddF16, ShaderInstructionType::VSubF16, ShaderInstructionType::VMulF16,
+	                      ShaderInstructionType::VMinF16, ShaderInstructionType::VMaxF16, ShaderInstructionType::VMadF16,
+	                      ShaderInstructionType::VFmaF16, ShaderInstructionType::VCvtF16F32, ShaderInstructionType::VCvtF32F16,
+	                      ShaderInstructionType::VTruncF16, ShaderInstructionType::VCeilF16, ShaderInstructionType::VFloorF16,
+	                      ShaderInstructionType::VRndneF16, ShaderInstructionType::VSqrtF16, ShaderInstructionType::VRcpF16,
+	                      ShaderInstructionType::VRsqF16, ShaderInstructionType::VLogF16, ShaderInstructionType::VExpF16,
+	                      ShaderInstructionType::VSinF16, ShaderInstructionType::VCosF16});
+}
+
+// 16-bit integer ALU (i16/u16) without native Int16 capability, operated in
+// 32-bit registers with truncation/extension.
+static bool spirv_uses_i16(const ShaderCode& code)
+{
+	const auto& insts = code.GetInstructions();
+	for (uint32_t i = 0; i < insts.Size(); i++)
+	{
+		const auto type = static_cast<int>(insts.At(i).type);
+		if ((type >= static_cast<int>(ShaderInstructionType::VCmpLtI16) && type <= static_cast<int>(ShaderInstructionType::VCmpGeI16)) ||
+		    (type >= static_cast<int>(ShaderInstructionType::VCmpLtU16) && type <= static_cast<int>(ShaderInstructionType::VCmpGeU16)))
+		{
+			return true;
+		}
+	}
+	return code.HasAnyOf({ShaderInstructionType::VAddI16, ShaderInstructionType::VSubI16, ShaderInstructionType::VMulI16,
+	                      ShaderInstructionType::VMadI16, ShaderInstructionType::VCvtI16F16, ShaderInstructionType::VCvtU16F16,
+	                      ShaderInstructionType::VCvtF16I16, ShaderInstructionType::VCvtF16U16});
+}
+
 static bool spirv_uses_readfirstlane(const ShaderCode& code)
 {
 	return code.HasAnyOf({ShaderInstructionType::VReadfirstlaneB32});
@@ -295,6 +354,19 @@ void Spirv::WriteHeader()
 		{
 			vars.Add("%gl_SubgroupInvocationID");
 		}
+	}
+
+	if (spirv_uses_f64(m_code))
+	{
+		capabilities.Add("OpCapability Float64");
+	}
+	if (spirv_uses_f16(m_code))
+	{
+		capabilities.Add("OpCapability Float16");
+	}
+	if (spirv_uses_i16(m_code))
+	{
+		capabilities.Add("OpCapability Int16");
 	}
 
 	if (m_bind != nullptr)
@@ -733,6 +805,10 @@ void Spirv::WriteTypes()
                           %int = OpTypeInt 32 1
                          %uint = OpTypeInt 32 0
                          %bool = OpTypeBool
+                       %double = OpTypeFloat 64
+                        %half = OpTypeFloat 16
+                       %short = OpTypeInt 16 1
+                      %ushort = OpTypeInt 16 0
                       %v2float = OpTypeVector %float 2
                       %v3float = OpTypeVector %float 3
                       %v4float = OpTypeVector %float 4

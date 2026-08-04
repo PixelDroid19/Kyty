@@ -338,10 +338,10 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x2f: inst.type = ShaderInstructionType::VCvtPkrtzF16F32; break;
 		case 0x30: KYTY_NI("v_cvt_pk_u16_u32"); break;
 		case 0x31: KYTY_NI("v_cvt_pk_i16_i32"); break;
-		case 0x32: KYTY_NI("v_add_f16"); break;
-		case 0x33: KYTY_NI("v_sub_f16"); break;
-		case 0x34: KYTY_NI("v_subrev_f16"); break;
-		case 0x35: KYTY_NI("v_mul_f16"); break;
+		case 0x32: inst.type = ShaderInstructionType::VAddF16; break;
+		case 0x33: inst.type = ShaderInstructionType::VSubF16; break;
+		case 0x34: inst.type = ShaderInstructionType::VSubrevF16; break;
+		case 0x35: inst.type = ShaderInstructionType::VMulF16; break;
 		case 0x36:
 			if (next_gen)
 			{
@@ -369,8 +369,8 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				KYTY_NI("v_madak_f16")
 			};
 			break;
-		case 0x39: KYTY_NI("v_max_f16"); break;
-		case 0x3A: KYTY_NI("v_min_f16"); break;
+		case 0x39: inst.type = ShaderInstructionType::VMaxF16; break;
+		case 0x3A: inst.type = ShaderInstructionType::VMinF16; break;
 		case 0x3B: KYTY_NI("v_ldexp_f16"); break;
 
 		default: KYTY_UNKNOWN_OP();
