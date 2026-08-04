@@ -2124,6 +2124,68 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx16_XXX_SmaskVsrc0Vsrc1)
 	return true;
 }
 
+/* Generalized packed-f16 3-operand ALU (mad/fma/min3/med3/max3): unpack all
+ * three operands, apply param[0], repack and store. */
+KYTY_RECOMPILER_FUNC(Recompile_VF16_3Src_VdstVsrc0Vsrc1Vsrc2)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+	String8 load1;
+	String8 load2;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[2], "t2_<index>", index_str, &load2))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+    <load1>
+    <load2>
+        %h0v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
+        %h1v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t1_<index>
+        %h2v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t2_<index>
+        %h0_<index> = OpCompositeExtract %float %h0v_<index> 0
+        %h1_<index> = OpCompositeExtract %float %h1v_<index> 0
+        %h2_<index> = OpCompositeExtract %float %h2v_<index> 0
+        <param0>
+        %hpackv_<index> = OpExtInst %v2float %GLSL_std_450 PackHalf2x16 %t_<index> %t_<index>
+        %hpack_<index> = OpCompositeExtract %uint %hpackv_<index> 0
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %hpack_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<load2>", load2)
+	                   .ReplaceStr("<param0>", param[0])
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VInterpP1F32_VdstVsrcAttrChan)
 {
 	return true;

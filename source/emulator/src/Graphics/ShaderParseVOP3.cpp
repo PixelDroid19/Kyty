@@ -750,7 +750,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x321: inst.type = ShaderInstructionType::VFmaMixF32; break; // v_fma_mixlo_f16 → Fma f32 (safe)
 		case 0x322: inst.type = ShaderInstructionType::VFmaMixF32; break; // v_fma_mixhi_f16 → Fma f32 (safe)
 		case 0x340: KYTY_NI("v_mad_u16"); break;
-		case 0x341: KYTY_NI("v_mad_f16"); break;
+		case 0x341: inst.type = ShaderInstructionType::VMadF16; break;
 		case 0x342: KYTY_NI("v_interp_p1ll_f16"); break;
 		case 0x343: KYTY_NI("v_interp_p1lv_f16"); break;
 		case 0x344: KYTY_NI("v_perm_b32"); break;
@@ -765,14 +765,14 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			break;
 		case 0x346: inst.type = ShaderInstructionType::VLshlAddU32; break;
 		case 0x347: inst.type = ShaderInstructionType::VAddLshlU32; break;
-		case 0x34B: KYTY_NI("v_fma_f16"); break;
-		case 0x351: KYTY_NI("v_min3_f16"); break;
+		case 0x34B: inst.type = ShaderInstructionType::VFmaF16; break;
+		case 0x351: inst.type = ShaderInstructionType::VMin3F16; break;
 		case 0x352: KYTY_NI("v_min3_i16"); break;
 		case 0x353: KYTY_NI("v_min3_u16"); break;
-		case 0x354: KYTY_NI("v_max3_f16"); break;
+		case 0x354: inst.type = ShaderInstructionType::VMax3F16; break;
 		case 0x355: KYTY_NI("v_max3_i16"); break;
 		case 0x356: KYTY_NI("v_max3_u16"); break;
-		case 0x357: KYTY_NI("v_med3_f16"); break;
+		case 0x357: inst.type = ShaderInstructionType::VMed3F16; break;
 		case 0x358: KYTY_NI("v_med3_i16"); break;
 		case 0x359: KYTY_NI("v_med3_u16"); break;
 		case 0x35A: KYTY_NI("v_interp_p2_f16"); break;
