@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import pathlib
 import sys
+import tempfile
+import unittest
 
 
 CHUNK_SIZE = 1024 * 1024
@@ -59,10 +61,76 @@ def verify(manifest: pathlib.Path) -> list[str]:
 	return errors
 
 
+class GraphicsTableCheckerTests(unittest.TestCase):
+	def write_table(self, root: pathlib.Path, name: str, contents: bytes = b"{ 1, 2, 3 }\n") -> str:
+		path = root / name
+		path.write_bytes(contents)
+		return digest(path)
+
+	def write_manifest(self, root: pathlib.Path, lines: list[str]) -> pathlib.Path:
+		manifest = root / "manifest.sha256"
+		manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+		return manifest
+
+	def test_accepts_matching_outputs(self) -> None:
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory)
+			checksum = self.write_table(root, "TileTextureInfo_test.inc")
+			manifest = self.write_manifest(root, [f"{checksum}  TileTextureInfo_test.inc"])
+			self.assertEqual(verify(manifest), [])
+
+	def test_rejects_checksum_mismatch(self) -> None:
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory)
+			self.write_table(root, "TileTextureInfo_test.inc")
+			manifest = self.write_manifest(root, [f"{'0' * 64}  TileTextureInfo_test.inc"])
+			self.assertEqual(len(verify(manifest)), 1)
+			self.assertIn("checksum mismatch", verify(manifest)[0])
+
+	def test_rejects_missing_and_unlisted_outputs(self) -> None:
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory)
+			checksum = self.write_table(root, "TileTextureInfo_actual.inc")
+			manifest = self.write_manifest(
+				root,
+				[
+					f"{checksum}  TileTextureInfo_actual.inc",
+					f"{'1' * 64}  TileTextureInfo_missing.inc",
+				],
+			)
+			errors = verify(manifest)
+			self.assertIn("missing generated table: TileTextureInfo_missing.inc", errors)
+
+			self.write_table(root, "TileTextureInfo_unlisted.inc")
+			self.assertIn("unlisted generated table: TileTextureInfo_unlisted.inc", verify(manifest))
+
+	def test_rejects_unsafe_and_duplicate_manifest_entries(self) -> None:
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory)
+			for contents, expected in (
+				(f"{'0' * 64}  ../TileTextureInfo_escape.inc\n", "unsafe table filename"),
+				(
+					f"{'0' * 64}  TileTextureInfo_test.inc\n{'1' * 64}  TileTextureInfo_test.inc\n",
+					"duplicate table filename",
+				),
+			):
+				manifest = root / "manifest.sha256"
+				manifest.write_text(contents, encoding="utf-8")
+				with self.assertRaisesRegex(ValueError, expected):
+					parse_manifest(manifest)
+
+
 def main() -> int:
 	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument("manifest", type=pathlib.Path)
+	parser.add_argument("manifest", type=pathlib.Path, nargs="?")
+	parser.add_argument("--self-test", action="store_true", help="run deterministic checker fixtures")
 	args = parser.parse_args()
+	if args.self_test:
+		suite = unittest.defaultTestLoader.loadTestsFromTestCase(GraphicsTableCheckerTests)
+		result = unittest.TextTestRunner(verbosity=2).run(suite)
+		return 0 if result.wasSuccessful() else 1
+	if args.manifest is None:
+		parser.error("the following arguments are required: manifest")
 	manifest = args.manifest.resolve()
 	try:
 		errors = verify(manifest)

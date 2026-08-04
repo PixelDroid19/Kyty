@@ -564,6 +564,12 @@ add_test(
 set_tests_properties(KytyGraphicsTables.Provenance PROPERTIES TIMEOUT 15)
 
 add_test(
+	NAME KytyGraphicsTables.SyntheticFixtures
+	COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../scripts/check_graphics_tables.py" --self-test
+)
+set_tests_properties(KytyGraphicsTables.SyntheticFixtures PROPERTIES TIMEOUT 15)
+
+add_test(
 	NAME KytyArchitectureBoundaryIntegration.Repository
 	COMMAND $<TARGET_FILE:kyty_architecture_boundary_integration>
 		"${Python3_EXECUTABLE}" "${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}" "${CMAKE_SOURCE_DIR}"

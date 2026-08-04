@@ -13,6 +13,12 @@ python3 scripts/check_graphics_tables.py \
   source/emulator/src/Graphics/Tables/manifest.sha256
 ```
 
+Run the deterministic checker fixtures with:
+
+```sh
+python3 scripts/check_graphics_tables.py --self-test
+```
+
 Changing a table requires a reviewed deterministic generator and versioned
 inputs to be added before updating the manifest. The check rejects missing,
 unlisted, or modified outputs, so `.inc` drift cannot pass silently.
