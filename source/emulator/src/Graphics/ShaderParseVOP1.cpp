@@ -90,26 +90,44 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 			inst.type = ShaderInstructionType::VReadfirstlaneB32;
 			inst.dst  = operand_parse(vdst);
 			break;
-		case 0x03: KYTY_NI("v_cvt_i32_f64"); break;
-		case 0x04: KYTY_NI("v_cvt_f64_i32"); break;
+		case 0x03:
+			inst.type = ShaderInstructionType::VCvtI32F64;
+			inst.src[0].size = 2;
+			break;
+		case 0x04:
+			inst.type = ShaderInstructionType::VCvtF64I32;
+			inst.dst.size = 2;
+			break;
 		case 0x05: inst.type = ShaderInstructionType::VCvtF32I32; break;
 		case 0x06: inst.type = ShaderInstructionType::VCvtF32U32; break;
 		case 0x07: inst.type = ShaderInstructionType::VCvtU32F32; break;
 		case 0x08: inst.type = ShaderInstructionType::VCvtI32F32; break;
 		case 0x09: KYTY_NI("v_mov_fed_b32"); break;
-		case 0x0A: KYTY_NI("v_cvt_f16_f32"); break;
+		case 0x0A: inst.type = ShaderInstructionType::VCvtF16F32; break;
 		case 0x0b: inst.type = ShaderInstructionType::VCvtF32F16; break;
 		case 0x0C: KYTY_NI("v_cvt_rpi_i32_f32"); break;
 		case 0x0D: inst.type = ShaderInstructionType::VCvtFlrI32F32; break;
 		case 0x0E: inst.type = ShaderInstructionType::VCvtOffF32I4; break;
-		case 0x0F: KYTY_NI("v_cvt_f32_f64"); break;
-		case 0x10: KYTY_NI("v_cvt_f64_f32"); break;
+		case 0x0F:
+			inst.type = ShaderInstructionType::VCvtF32F64;
+			inst.src[0].size = 2;
+			break;
+		case 0x10:
+			inst.type = ShaderInstructionType::VCvtF64F32;
+			inst.dst.size = 2;
+			break;
 		case 0x11: inst.type = ShaderInstructionType::VCvtF32Ubyte0; break;
 		case 0x12: inst.type = ShaderInstructionType::VCvtF32Ubyte1; break;
 		case 0x13: inst.type = ShaderInstructionType::VCvtF32Ubyte2; break;
 		case 0x14: inst.type = ShaderInstructionType::VCvtF32Ubyte3; break;
-		case 0x15: KYTY_NI("v_cvt_u32_f64"); break;
-		case 0x16: KYTY_NI("v_cvt_f64_u32"); break;
+		case 0x15:
+			inst.type = ShaderInstructionType::VCvtU32F64;
+			inst.src[0].size = 2;
+			break;
+		case 0x16:
+			inst.type = ShaderInstructionType::VCvtF64U32;
+			inst.dst.size = 2;
+			break;
 		case 0x17: KYTY_NI("v_trunc_f64"); break;
 		case 0x18: KYTY_NI("v_ceil_f64"); break;
 		case 0x19: KYTY_NI("v_rndne_f64"); break;

@@ -1072,6 +1072,343 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_XXX_SmaskVsrc0Vsrc1)
 	return true;
 }
 
+/* v_cvt_f32_f64: recombine the source register pair into a double, convert to
+ * float, store to the single f32 destination. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtF32F64_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0lo;
+	String8 load0hi;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0lo>
+    <load0hi>
+        %d0v_<index> = OpCompositeConstruct %v2uint %t0_lo_<index> %t0_hi_<index>
+        %d0u_<index> = OpBitcast %ulong %d0v_<index>
+        %d0_<index> = OpBitcast %double %d0u_<index>
+        %t_<index> = OpConvertFToF %float %d0_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0lo>", load0lo)
+	                   .ReplaceStr("<load0hi>", load0hi)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cvt_f64_f32: convert the f32 source to double and store across the
+ * destination register pair. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtF64F32_SVdst2SVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+	EXIT_NOT_IMPLEMENTED(inst.dst.size != 2);
+
+	auto dst_lo = operand_variable_to_str(inst.dst, 0);
+	auto dst_hi = operand_variable_to_str(inst.dst, 1);
+
+	EXIT_NOT_IMPLEMENTED(dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float);
+
+	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+        %d0_<index> = OpConvertFToF %double %t0_<index>
+        %du_<index> = OpBitcast %ulong %d0_<index>
+        %dv_<index> = OpBitcast %v2uint %du_<index>
+        %lo_<index> = OpCompositeExtract %uint %dv_<index> 0
+        %hi_<index> = OpCompositeExtract %uint %dv_<index> 1
+        %lo_f_<index> = OpBitcast %float %lo_<index>
+        %hi_f_<index> = OpBitcast %float %hi_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_lo_<index> = OpLoad %float %<dst_lo>
+        %tdst_hi_<index> = OpLoad %float %<dst_hi>
+        %tval_lo_<index> = OpSelect %float %exec_lo_b_<index> %lo_f_<index> %tdst_lo_<index>
+        %tval_hi_<index> = OpSelect %float %exec_lo_b_<index> %hi_f_<index> %tdst_hi_<index>
+               OpStore %<dst_lo> %tval_lo_<index>
+               OpStore %<dst_hi> %tval_hi_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<dst_lo>", dst_lo.value)
+	                   .ReplaceStr("<dst_hi>", dst_hi.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cvt_i32_f64: double source pair to signed int. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtI32F64_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0lo;
+	String8 load0hi;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0lo>
+    <load0hi>
+        %d0v_<index> = OpCompositeConstruct %v2uint %t0_lo_<index> %t0_hi_<index>
+        %d0u_<index> = OpBitcast %ulong %d0v_<index>
+        %d0_<index> = OpBitcast %double %d0u_<index>
+        %i_<index> = OpConvertFToS %int %d0_<index>
+        %t_<index> = OpBitcast %float %i_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0lo>", load0lo)
+	                   .ReplaceStr("<load0hi>", load0hi)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cvt_f64_i32: signed int source to double destination pair. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtF64I32_SVdst2SVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+	EXIT_NOT_IMPLEMENTED(inst.dst.size != 2);
+
+	auto dst_lo = operand_variable_to_str(inst.dst, 0);
+	auto dst_hi = operand_variable_to_str(inst.dst, 1);
+
+	EXIT_NOT_IMPLEMENTED(dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float);
+
+	if (!operand_load_int(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+        %d0_<index> = OpConvertSToF %double %t0_<index>
+        %du_<index> = OpBitcast %ulong %d0_<index>
+        %dv_<index> = OpBitcast %v2uint %du_<index>
+        %lo_<index> = OpCompositeExtract %uint %dv_<index> 0
+        %hi_<index> = OpCompositeExtract %uint %dv_<index> 1
+        %lo_f_<index> = OpBitcast %float %lo_<index>
+        %hi_f_<index> = OpBitcast %float %hi_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_lo_<index> = OpLoad %float %<dst_lo>
+        %tdst_hi_<index> = OpLoad %float %<dst_hi>
+        %tval_lo_<index> = OpSelect %float %exec_lo_b_<index> %lo_f_<index> %tdst_lo_<index>
+        %tval_hi_<index> = OpSelect %float %exec_lo_b_<index> %hi_f_<index> %tdst_hi_<index>
+               OpStore %<dst_lo> %tval_lo_<index>
+               OpStore %<dst_hi> %tval_hi_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<dst_lo>", dst_lo.value)
+	                   .ReplaceStr("<dst_hi>", dst_hi.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cvt_f16_f32: unpack the f16 source (low 16 bits of a uint32) to f32. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtF16F32_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+        %hv_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
+        %t_<index> = OpCompositeExtract %float %hv_<index> 0
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cvt_u32_f64: double source pair to unsigned int. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtU32F64_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0lo;
+	String8 load0hi;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0lo>
+    <load0hi>
+        %d0v_<index> = OpCompositeConstruct %v2uint %t0_lo_<index> %t0_hi_<index>
+        %d0u_<index> = OpBitcast %ulong %d0v_<index>
+        %d0_<index> = OpBitcast %double %d0u_<index>
+        %i_<index> = OpConvertFToU %uint %d0_<index>
+        %t_<index> = OpBitcast %float %i_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0lo>", load0lo)
+	                   .ReplaceStr("<load0hi>", load0hi)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cvt_f64_u32: unsigned int source to double destination pair. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtF64U32_SVdst2SVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+	EXIT_NOT_IMPLEMENTED(inst.dst.size != 2);
+
+	auto dst_lo = operand_variable_to_str(inst.dst, 0);
+	auto dst_hi = operand_variable_to_str(inst.dst, 1);
+
+	EXIT_NOT_IMPLEMENTED(dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+        %d0_<index> = OpConvertUToF %double %t0_<index>
+        %du_<index> = OpBitcast %ulong %d0_<index>
+        %dv_<index> = OpBitcast %v2uint %du_<index>
+        %lo_<index> = OpCompositeExtract %uint %dv_<index> 0
+        %hi_<index> = OpCompositeExtract %uint %dv_<index> 1
+        %lo_f_<index> = OpBitcast %float %lo_<index>
+        %hi_f_<index> = OpBitcast %float %hi_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_lo_<index> = OpLoad %float %<dst_lo>
+        %tdst_hi_<index> = OpLoad %float %<dst_hi>
+        %tval_lo_<index> = OpSelect %float %exec_lo_b_<index> %lo_f_<index> %tdst_lo_<index>
+        %tval_hi_<index> = OpSelect %float %exec_lo_b_<index> %hi_f_<index> %tdst_hi_<index>
+               OpStore %<dst_lo> %tval_lo_<index>
+               OpStore %<dst_hi> %tval_hi_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<dst_lo>", dst_lo.value)
+	                   .ReplaceStr("<dst_hi>", dst_hi.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VInterpP1F32_VdstVsrcAttrChan)
 {
 	return true;
