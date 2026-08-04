@@ -10,6 +10,11 @@ namespace Kyty::Libs::SaveData {
 std::string SaveDataNormalizeTitleId(const char* title_id)
 {
 	std::string result;
+	if (title_id == nullptr || title_id[0] == '\0')
+	{
+		return "UNKNOWN";
+	}
+
 	if (title_id != nullptr)
 	{
 		for (const char* cursor = title_id; *cursor != '\0' && result.size() < 64; ++cursor)

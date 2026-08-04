@@ -69,7 +69,7 @@ static std::filesystem::path ResolveSaveDataRoot(const char* title_id)
 	String metadata_version;
 	if (!Loader::SystemContentGetMetadata(&metadata_title, &metadata_version) || metadata_title.IsEmpty())
 	{
-		return {};
+		return SaveDataBuildTitleRoot(root.lexically_normal(), nullptr);
 	}
 
 	const auto title_utf8 = metadata_title.utf8_str();

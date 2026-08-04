@@ -12,7 +12,7 @@
 namespace Kyty::Libs::SaveData {
 
 // Convert a guest title identifier into one portable host path segment.
-// Missing identities are rejected so unrelated titles can never share storage.
+// Missing identities use the deterministic UNKNOWN bucket during early boot.
 [[nodiscard]] std::string SaveDataNormalizeTitleId(const char* title_id);
 
 // Validate a guest save-slot name without rewriting it. Invalid or nested host
@@ -20,7 +20,7 @@ namespace Kyty::Libs::SaveData {
 [[nodiscard]] bool SaveDataDirectoryNameValid(const char* directory_name);
 
 // Build the canonical per-title save root below an already-resolved user root.
-// An empty path reports a missing root or title identity.
+// A missing title identity uses UNKNOWN until SFO metadata is available.
 [[nodiscard]] std::filesystem::path SaveDataBuildTitleRoot(const std::filesystem::path& save_data_root, const char* title_id);
 
 // Build the canonical persistent path for one SaveDataMemory identity. Invalid
