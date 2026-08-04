@@ -4,7 +4,6 @@
 #include "Emulator/Kernel/Time.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 
 #include <cinttypes>
 #include <ctime>

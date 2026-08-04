@@ -7,6 +7,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Libs/HleSymbolRegistry.h"
 
 #include <initializer_list>
 
@@ -42,11 +43,16 @@ struct SymbolResolve
 	SymbolType type;
 };
 
-class SymbolDatabase
+class SymbolDatabase: public Libs::HleSymbolRegistry
 {
 public:
 	SymbolDatabase()          = default;
 	virtual ~SymbolDatabase() = default;
+
+	void AddHle(const Libs::HleSymbolResolve& s, uint64_t vaddr) override;
+	void AddHle(const Libs::HleSymbolResolve& s, uint64_t vaddr, const String& dbg_name) override;
+	void AddHleAliases(Libs::HleSymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr,
+	                  const String& dbg_name) override;
 
 	void Add(const SymbolResolve& s, uint64_t vaddr);
 	void Add(const SymbolResolve& s, uint64_t vaddr, const String& dbg_name);

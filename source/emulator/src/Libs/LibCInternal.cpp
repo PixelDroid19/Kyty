@@ -9,7 +9,6 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/Printf.h"
 #include "Emulator/Libs/VaContext.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 #include "LibCInternal.h"
 

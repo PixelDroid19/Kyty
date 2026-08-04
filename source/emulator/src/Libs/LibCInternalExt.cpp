@@ -3,7 +3,6 @@
 
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 #include "LibCInternal.h"
 
 #ifdef KYTY_EMU_ENABLED

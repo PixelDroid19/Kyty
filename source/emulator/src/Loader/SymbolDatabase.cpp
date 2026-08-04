@@ -14,6 +14,19 @@ namespace Kyty::Loader {
 
 namespace {
 
+SymbolResolve ToLoaderResolve(const ::Kyty::Libs::HleSymbolResolve& source)
+{
+	SymbolResolve target {};
+	target.name                 = source.name;
+	target.library              = source.library;
+	target.library_version      = source.library_version;
+	target.module               = source.module;
+	target.module_version_major = source.module_version_major;
+	target.module_version_minor = source.module_version_minor;
+	target.type                 = source.type == ::Kyty::Libs::HleSymbolType::Object ? SymbolType::Object : SymbolType::Func;
+	return target;
+}
+
 uint32_t RotateLeft(uint32_t value, uint32_t bits)
 {
 	return (value << bits) | (value >> (32u - bits));
@@ -189,6 +202,27 @@ void SymbolDatabase::AddAliases(SymbolResolve s, std::initializer_list<const cha
 		EXIT_IF(name == nullptr);
 		s.name = name;
 		Add(s, vaddr, dbg_name);
+	}
+}
+
+void SymbolDatabase::AddHle(const ::Kyty::Libs::HleSymbolResolve& s, uint64_t vaddr)
+{
+	AddHle(ToLoaderResolve(s), vaddr);
+}
+
+void SymbolDatabase::AddHle(const ::Kyty::Libs::HleSymbolResolve& s, uint64_t vaddr, const String& dbg_name)
+{
+	AddHle(ToLoaderResolve(s), vaddr, dbg_name);
+}
+
+void SymbolDatabase::AddHleAliases(::Kyty::Libs::HleSymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr,
+                                  const String& dbg_name)
+{
+	for (const auto* name: names)
+	{
+		EXIT_IF(name == nullptr);
+		s.name = name;
+		AddHle(ToLoaderResolve(s), vaddr, dbg_name);
 	}
 }
 

@@ -192,13 +192,13 @@ KYTY_SYSV_ABI void c_sincosf(float x, float* s, float* c);
 
 namespace LibcInternalExt {
 
-void InitLibcInternalExt_1(Loader::SymbolDatabase* s);
+void InitLibcInternalExt_1(HleSymbolRegistry* s);
 
 } // namespace LibcInternalExt
 
 namespace LibcInternal {
 
-void InitLibcInternal_1(Loader::SymbolDatabase* s);
+void InitLibcInternal_1(HleSymbolRegistry* s);
 
 int  KYTY_SYSV_ABI fflush(FILE* stream);
 void* KYTY_SYSV_ABI LibcMspaceCreate(const char* name, void* base, size_t capacity, uint32_t flag);

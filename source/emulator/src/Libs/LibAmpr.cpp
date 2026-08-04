@@ -4,7 +4,6 @@
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 
 #include "Kyty/Core/File.h"
 #include "Kyty/Core/Threads.h"

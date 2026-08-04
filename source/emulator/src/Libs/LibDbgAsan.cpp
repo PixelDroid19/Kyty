@@ -9,7 +9,6 @@
 #include "Emulator/Common.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 
 #include <algorithm>
 

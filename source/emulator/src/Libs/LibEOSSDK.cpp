@@ -1,6 +1,5 @@
 #include "Emulator/Common.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 
 #include "Kyty/Core/MemoryAlloc.h"
 #include "Kyty/Core/Threads.h"

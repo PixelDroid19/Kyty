@@ -5,7 +5,6 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/KernelModuleInfo.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 
 #include <mutex>
 #include <set>

@@ -1,7 +1,6 @@
 #include "Emulator/Common.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 
 #include <atomic>
 #include <cinttypes>

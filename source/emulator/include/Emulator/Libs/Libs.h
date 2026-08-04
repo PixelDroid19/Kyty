@@ -2,9 +2,10 @@
 #define EMULATOR_INCLUDE_EMULATOR_LIBS_LIBS_H_
 
 #include "Kyty/Core/String.h"
+#include "Kyty/Core/DateTime.h"
 
 #include "Emulator/Common.h"
-#include "Emulator/Loader/Timer.h" // IWYU pragma: keep
+#include "Emulator/Libs/HleSymbolRegistry.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -15,7 +16,7 @@
 #define PRINT_NAME_ENABLE(flag) PRINT_NAME_ENABLED = flag;
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_DEFINE(name) void name(Loader::SymbolDatabase* s)
+#define LIB_DEFINE(name) void name(::Kyty::Libs::HleSymbolRegistry* s)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_NAME(l, m)                                                                                                                     \
 	[[maybe_unused]] static thread_local bool PRINT_NAME_ENABLED = true;                                                                   \
@@ -46,7 +47,7 @@
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_ADD(n, f, t)                                                                                                                   \
 	{                                                                                                                                      \
-		Loader::SymbolResolve sr {};                                                                                                       \
+		::Kyty::Libs::HleSymbolResolve sr {};                                                                                               \
 		sr.name                  = n;                                                                                                      \
 		sr.library               = g_library;                                                                                              \
 		sr.library_version       = g_library_version;                                                                                      \
@@ -61,7 +62,7 @@
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_ADD_ALIASES(f, t, ...)                                                                                                         \
 	{                                                                                                                                      \
-		Loader::SymbolResolve sr {};                                                                                                       \
+		::Kyty::Libs::HleSymbolResolve sr {};                                                                                               \
 		sr.library              = g_library;                                                                                               \
 		sr.library_version      = g_library_version;                                                                                       \
 		sr.module               = g_module;                                                                                                \
@@ -73,13 +74,13 @@
 		s->AddHleAliases(sr, {__VA_ARGS__}, func, dbg_name);                                                                               \
 	}
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_OBJECT(n, f) LIB_ADD(n, f, Loader::SymbolType::Object)
+#define LIB_OBJECT(n, f) LIB_ADD(n, f, ::Kyty::Libs::HleSymbolType::Object)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_FUNC(n, f) LIB_ADD(n, f, Loader::SymbolType::Func)
+#define LIB_FUNC(n, f) LIB_ADD(n, f, ::Kyty::Libs::HleSymbolType::Func)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_OBJECT_ALIASES(f, ...) LIB_ADD_ALIASES(f, Loader::SymbolType::Object, __VA_ARGS__)
+#define LIB_OBJECT_ALIASES(f, ...) LIB_ADD_ALIASES(f, ::Kyty::Libs::HleSymbolType::Object, __VA_ARGS__)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_FUNC_ALIASES(f, ...) LIB_ADD_ALIASES(f, Loader::SymbolType::Func, __VA_ARGS__)
+#define LIB_FUNC_ALIASES(f, ...) LIB_ADD_ALIASES(f, ::Kyty::Libs::HleSymbolType::Func, __VA_ARGS__)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME()                                                                                                                       \
@@ -88,23 +89,17 @@
 		if (Kyty::Log::GetDirection() != Kyty::Log::Direction::Silent)                                                                     \
 		{                                                                                                                                  \
 			Kyty::printf(FG_CYAN "[%d][%s] %s::%s::%s()" DEFAULT "\n", Core::Thread::GetThreadIdUnique(),                                  \
-			             Loader::Timer::GetTime().ToString("HH24:MI:SS.FFF").C_Str(), g_library, g_module, __func__);                      \
+			             ::Kyty::Libs::GetTraceTime().ToString("HH24:MI:SS.FFF").C_Str(), g_library, g_module, __func__);                 \
 		}                                                                                                                                  \
 	}
 
-namespace Kyty {
+namespace Kyty::Libs {
 
-namespace Loader {
-class SymbolDatabase;
-} // namespace Loader
-
-namespace Libs {
-
-bool Init(const String& id, Loader::SymbolDatabase* s);
-void InitAll(Loader::SymbolDatabase* s);
+Core::Time GetTraceTime();
+bool Init(const String& id, HleSymbolRegistry* s);
+void InitAll(HleSymbolRegistry* s);
 
 } // namespace Libs
-} // namespace Kyty
 
 #endif // KYTY_EMU_ENABLED
 

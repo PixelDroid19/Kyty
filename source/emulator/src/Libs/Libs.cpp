@@ -1,4 +1,5 @@
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/Timer.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -8,6 +9,11 @@ LIB_DEFINE(InitVideoOut_1);
 } // namespace Kyty::Hle
 
 namespace Kyty::Libs {
+
+Core::Time GetTraceTime()
+{
+	return Loader::Timer::GetTime();
+}
 
 namespace LibcInternal {
 LIB_DEFINE(InitLibcInternal_1);
@@ -77,7 +83,7 @@ LIB_DEFINE(InitTextToSpeech2_1);
 LIB_DEFINE(InitWriteThrottling_1);
 LIB_DEFINE(InitEOSSDKPS5Shipping_1);
 
-bool Init(const String& id, Loader::SymbolDatabase* s)
+bool Init(const String& id, HleSymbolRegistry* s)
 {
 	LIB_CHECK(U"libAppContent_1", InitAppContent_1);
 	LIB_CHECK(U"libAudio_1", InitAudio_1);
@@ -139,7 +145,7 @@ bool Init(const String& id, Loader::SymbolDatabase* s)
 	return false;
 }
 
-void InitAll(Loader::SymbolDatabase* s)
+void InitAll(HleSymbolRegistry* s)
 {
 	LIB_LOAD(InitAudio_1);
 	LIB_LOAD(InitAppContent_1);

@@ -98,4 +98,41 @@ TEST(EmulatorSymbolDatabase, AddAliasesRegistersEveryNidWithOneHandler)
 	EXPECT_EQ(symbols.Find(Resolve(u"nid-a", Loader::SymbolType::Object)), nullptr);
 }
 
+TEST(EmulatorSymbolDatabase, NeutralHleRegistryPreservesCanonicalIdentity)
+{
+	Loader::SymbolDatabase symbols;
+	Libs::HleSymbolResolve export_symbol {};
+	export_symbol.name                 = U"neutral-nid";
+	export_symbol.library              = U"lib-neutral";
+	export_symbol.library_version      = 1;
+	export_symbol.module               = U"module-neutral";
+	export_symbol.module_version_major = 2;
+	export_symbol.module_version_minor = 3;
+	export_symbol.type                 = Libs::HleSymbolType::Func;
+
+	symbols.AddHle(export_symbol, 0x87654321, U"neutral_handler");
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"neutral-nid";
+	query.library              = U"lib-neutral";
+	query.library_version      = 1;
+	query.module               = U"module-neutral";
+	query.module_version_major = 2;
+	query.module_version_minor = 3;
+	query.type                 = Loader::SymbolType::Func;
+
+	const auto* record = symbols.Find(query);
+	ASSERT_NE(record, nullptr);
+	EXPECT_EQ(record->vaddr, 0x87654321u);
+	EXPECT_EQ(record->dbg_name, U"neutral_handler");
+
+	export_symbol.name = U"";
+	symbols.AddHleAliases(export_symbol, {"neutral-alias-a", "neutral-alias-b"}, 0x87654321, U"neutral_handler");
+
+	query.name = U"neutral-alias-a";
+	EXPECT_NE(symbols.Find(query), nullptr);
+	query.name = U"neutral-alias-b";
+	EXPECT_NE(symbols.Find(query), nullptr);
+}
+
 UT_END();

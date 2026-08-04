@@ -20,7 +20,6 @@
 #include "Emulator/Libs/ProcessEnvironment.h"
 #include "Emulator/Libs/Printf.h"
 #include "Emulator/Libs/VaContext.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Loader/RuntimeLinker.h"
 #include "Emulator/Loader/GuestCall.h"
 #include "Emulator/VideoFrameMemory.h"
