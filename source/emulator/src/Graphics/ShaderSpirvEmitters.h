@@ -26,6 +26,8 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds);
 KYTY_RECOMPILER_FUNC(Recompile_DsConsume_VdstGds);
 KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffset);
 KYTY_RECOMPILER_FUNC(Recompile_DsAddU32_VaddrVdataOffset);
+KYTY_RECOMPILER_FUNC(Recompile_DsAtomic_XXX_VaddrVdataOffset);
+KYTY_RECOMPILER_FUNC(Recompile_DsAtomicIncDec_VaddrOffset);
 KYTY_RECOMPILER_FUNC(Recompile_DsReadB32_VdstVaddrOffset);
 KYTY_RECOMPILER_FUNC(Recompile_DsRead2B32_Vdst2VaddrOffset01);
 KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty);

@@ -39,17 +39,105 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			inst.src_num   = 2;
 			inst.ds_offset = static_cast<uint16_t>(offset0);
 			break;
-		case 0x01: KYTY_NI("ds_sub_u32"); break;
+		case 0x01:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data1 != 0 || offset1 != 0 || vdst != 0);
+			inst.type      = ShaderInstructionType::DsSubU32;
+			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src_num   = 2;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
 		case 0x02: KYTY_NI("ds_rsub_u32"); break;
-		case 0x03: KYTY_NI("ds_inc_u32"); break;
-		case 0x04: KYTY_NI("ds_dec_u32"); break;
-		case 0x05: KYTY_NI("ds_min_i32"); break;
-		case 0x06: KYTY_NI("ds_max_i32"); break;
-		case 0x07: KYTY_NI("ds_min_u32"); break;
-		case 0x08: KYTY_NI("ds_max_u32"); break;
-		case 0x09: KYTY_NI("ds_and_b32"); break;
-		case 0x0A: KYTY_NI("ds_or_b32"); break;
-		case 0x0B: KYTY_NI("ds_xor_b32"); break;
+		case 0x03:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data0 != 0 || data1 != 0 || offset1 != 0 || vdst != 0);
+			inst.type      = ShaderInstructionType::DsIncU32;
+			inst.format    = ShaderInstructionFormat::VaddrOffset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src_num   = 1;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
+		case 0x04:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data0 != 0 || data1 != 0 || offset1 != 0 || vdst != 0);
+			inst.type      = ShaderInstructionType::DsDecU32;
+			inst.format    = ShaderInstructionFormat::VaddrOffset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src_num   = 1;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
+		case 0x05:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data1 != 0 || offset1 != 0 || vdst != 0);
+			inst.type      = ShaderInstructionType::DsMinI32;
+			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src_num   = 2;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
+		case 0x06:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data1 != 0 || offset1 != 0 || vdst != 0);
+			inst.type      = ShaderInstructionType::DsMaxI32;
+			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src_num   = 2;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
+		case 0x07:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data1 != 0 || offset1 != 0 || vdst != 0);
+			inst.type      = ShaderInstructionType::DsMinU32;
+			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src_num   = 2;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
+		case 0x08:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data1 != 0 || offset1 != 0 || vdst != 0);
+			inst.type      = ShaderInstructionType::DsMaxU32;
+			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src_num   = 2;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
+		case 0x09:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data1 != 0 || offset1 != 0 || vdst != 0);
+			inst.type      = ShaderInstructionType::DsAndB32;
+			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src_num   = 2;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
+		case 0x0A:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data1 != 0 || offset1 != 0 || vdst != 0);
+			inst.type      = ShaderInstructionType::DsOrB32;
+			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src_num   = 2;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
+		case 0x0B:
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			EXIT_NOT_IMPLEMENTED(data1 != 0 || offset1 != 0 || vdst != 0);
+			inst.type      = ShaderInstructionType::DsXorB32;
+			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src_num   = 2;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
 		case 0x0C: KYTY_NI("ds_mskor_b32"); break;
 		case 0x0D:
 			EXIT_NOT_IMPLEMENTED(gds != 0);

@@ -1713,6 +1713,89 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAddU32_VaddrVdataOffset)
 	return true;
 }
 
+/* Generalized LDS atomic with a data operand (sub/min/max/and/or/xor).
+ * param[0] selects the SPIR-V atomic opcode. */
+KYTY_RECOMPILER_FUNC(Recompile_DsAtomic_XXX_VaddrVdataOffset)
+{
+	const auto& inst       = code.GetInstructions().At(index);
+	const auto* input_info = spirv->GetCsInputInfo();
+
+	if (input_info == nullptr || input_info->lds_dwords == 0)
+	{
+		return false;
+	}
+
+	auto address = operand_variable_to_str(inst.src[0]);
+	auto data    = operand_variable_to_str(inst.src[1]);
+
+	EXIT_NOT_IMPLEMENTED(address.type != SpirvType::Float);
+	EXIT_NOT_IMPLEMENTED(data.type != SpirvType::Float);
+
+	const auto index_str  = String8::FromPrintf("%u", index);
+	const auto offset_str = spirv->GetConstantUint(inst.ds_offset);
+	const auto scope_str  = spirv->GetConstantUint(2u);
+	const auto semantics  = spirv->GetConstantUint(0x108u);
+
+	static const char* text = R"(
+        %lds_addr_f_<index> = OpLoad %float %<address>
+        %lds_addr_u_<index> = OpBitcast %uint %lds_addr_f_<index>
+        %lds_byte_addr_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset>
+        %lds_index_<index> = OpShiftRightLogical %uint %lds_byte_addr_<index> %uint_2
+        %lds_ptr_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index_<index>
+        %lds_data_f_<index> = OpLoad %float %<data>
+        %lds_data_u_<index> = OpBitcast %uint %lds_data_f_<index>
+        %lds_prior_<index> = <atomic_op> %uint %lds_ptr_<index> %<scope> %<semantics> %lds_data_u_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<index>", index_str)
+	                   .ReplaceStr("<address>", address.value)
+	                   .ReplaceStr("<data>", data.value)
+	                   .ReplaceStr("<offset>", offset_str)
+	                   .ReplaceStr("<scope>", scope_str)
+	                   .ReplaceStr("<semantics>", semantics)
+	                   .ReplaceStr("<atomic_op>", param[0]);
+	return true;
+}
+
+/* Generalized LDS atomic increment/decrement (no data operand).
+ * param[0] selects the SPIR-V atomic opcode. */
+KYTY_RECOMPILER_FUNC(Recompile_DsAtomicIncDec_VaddrOffset)
+{
+	const auto& inst       = code.GetInstructions().At(index);
+	const auto* input_info = spirv->GetCsInputInfo();
+
+	if (input_info == nullptr || input_info->lds_dwords == 0)
+	{
+		return false;
+	}
+
+	auto address = operand_variable_to_str(inst.src[0]);
+
+	EXIT_NOT_IMPLEMENTED(address.type != SpirvType::Float);
+
+	const auto index_str  = String8::FromPrintf("%u", index);
+	const auto offset_str = spirv->GetConstantUint(inst.ds_offset);
+	const auto scope_str  = spirv->GetConstantUint(2u);
+	const auto semantics  = spirv->GetConstantUint(0x108u);
+
+	static const char* text = R"(
+        %lds_addr_f_<index> = OpLoad %float %<address>
+        %lds_addr_u_<index> = OpBitcast %uint %lds_addr_f_<index>
+        %lds_byte_addr_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset>
+        %lds_index_<index> = OpShiftRightLogical %uint %lds_byte_addr_<index> %uint_2
+        %lds_ptr_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index_<index>
+        %lds_prior_<index> = <atomic_op> %uint %lds_ptr_<index> %<scope> %<semantics>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<index>", index_str)
+	                   .ReplaceStr("<address>", address.value)
+	                   .ReplaceStr("<offset>", offset_str)
+	                   .ReplaceStr("<scope>", scope_str)
+	                   .ReplaceStr("<semantics>", semantics)
+	                   .ReplaceStr("<atomic_op>", param[0]);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_DsReadB32_VdstVaddrOffset)
 {
 	const auto& inst       = code.GetInstructions().At(index);
