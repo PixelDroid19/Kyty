@@ -12,7 +12,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Kernel/Trace.h"
-#include "Emulator/Kernel/GuestRuntimePort.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/PresentationStats.h"
 #include "Emulator/Log.h"
 
@@ -53,6 +53,7 @@ namespace Kyty::Kernel {
 KERNEL_LIB_NAME();
 
 namespace PresentationStats = Kyty::Emulator::PresentationStats;
+namespace GuestRuntimePort  = ::Kyty::Emulator::GuestRuntimePort;
 
 constexpr int KEYS_MAX              = 256;
 constexpr int DESTRUCTOR_ITERATIONS = 4;

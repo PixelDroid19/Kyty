@@ -1,6 +1,6 @@
 #include "Kyty/UnitTest.h"
 
-#include "Emulator/Kernel/GuestRuntimePort.h"
+#include "Emulator/GuestRuntimePort.h"
 
 #include <cstdint>
 
@@ -27,17 +27,17 @@ uint64_t KYTY_SYSV_ABI TestInvokeOnStack(uint64_t target, uint64_t arg0, uint64_
 
 TEST(EmulatorKernelGuestRuntime, InstalledProviderForwardsOpaqueLookupAndCalls)
 {
-	Kyty::Kernel::GuestRuntimePort::Install({TestFindProgramByAddr, TestInvoke, TestInvokeOnStack});
+	Kyty::Emulator::GuestRuntimePort::Install({TestFindProgramByAddr, TestInvoke, nullptr, TestInvokeOnStack});
 
-	EXPECT_EQ(Kyty::Kernel::GuestRuntimePort::FindProgramByAddr(0x1234), reinterpret_cast<const void*>(static_cast<uintptr_t>(0x5678)));
-	EXPECT_EQ(Kyty::Kernel::GuestRuntimePort::FindProgramByAddr(0), nullptr);
-	EXPECT_EQ(Kyty::Kernel::GuestRuntimePort::Invoke(1, 2, 3, 4), 10u);
-	EXPECT_EQ(Kyty::Kernel::GuestRuntimePort::InvokeOnStack(1, 2, 3, 4, reinterpret_cast<void*>(static_cast<uintptr_t>(5))), 15u);
+	EXPECT_EQ(Kyty::Emulator::GuestRuntimePort::FindProgramByAddr(0x1234), reinterpret_cast<const void*>(static_cast<uintptr_t>(0x5678)));
+	EXPECT_EQ(Kyty::Emulator::GuestRuntimePort::FindProgramByAddr(0), nullptr);
+	EXPECT_EQ(Kyty::Emulator::GuestRuntimePort::Invoke(1, 2, 3, 4), 10u);
+	EXPECT_EQ(Kyty::Emulator::GuestRuntimePort::InvokeOnStack(1, 2, 3, 4, reinterpret_cast<void*>(static_cast<uintptr_t>(5))), 15u);
 
-	Kyty::Kernel::GuestRuntimePort::Install({});
-	EXPECT_EQ(Kyty::Kernel::GuestRuntimePort::FindProgramByAddr(0x1234), nullptr);
-	EXPECT_EQ(Kyty::Kernel::GuestRuntimePort::Invoke(1, 2, 3, 4), 0u);
-	EXPECT_EQ(Kyty::Kernel::GuestRuntimePort::InvokeOnStack(1, 2, 3, 4, reinterpret_cast<void*>(static_cast<uintptr_t>(5))), 0u);
+	Kyty::Emulator::GuestRuntimePort::Install({});
+	EXPECT_EQ(Kyty::Emulator::GuestRuntimePort::FindProgramByAddr(0x1234), nullptr);
+	EXPECT_EQ(Kyty::Emulator::GuestRuntimePort::Invoke(1, 2, 3, 4), 0u);
+	EXPECT_EQ(Kyty::Emulator::GuestRuntimePort::InvokeOnStack(1, 2, 3, 4, reinterpret_cast<void*>(static_cast<uintptr_t>(5))), 0u);
 }
 
 UT_END();

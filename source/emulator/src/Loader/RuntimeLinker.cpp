@@ -14,7 +14,7 @@
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Config.h"
 #include "Emulator/GpuMemoryFault.h"
-#include "Emulator/Kernel/GuestRuntimePort.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Loader/Elf.h"
@@ -48,7 +48,7 @@ namespace {
 
 std::atomic<RuntimeLinker*> g_guest_runtime_owner {nullptr};
 
-Kernel::GuestRuntimePort::ProgramHandle FindProgramByAddrForKernel(uint64_t vaddr)
+Emulator::GuestRuntimePort::ProgramHandle FindProgramByAddrForPort(uint64_t vaddr)
 {
 	auto* runtime = g_guest_runtime_owner.load(std::memory_order_acquire);
 	return runtime != nullptr ? runtime->FindProgramByAddr(vaddr) : nullptr;
@@ -1339,7 +1339,7 @@ RuntimeLinker::RuntimeLinker(): m_symbols(new SymbolDatabase)
 {
 	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
 	m_previous_guest_runtime_owner = g_guest_runtime_owner.exchange(this, std::memory_order_acq_rel);
-	Kernel::GuestRuntimePort::Install({FindProgramByAddrForKernel, GuestCall::Invoke, GuestCall::InvokeOnStack});
+	Emulator::GuestRuntimePort::Install({FindProgramByAddrForPort, GuestCall::Invoke, GuestCall::Invoke4, GuestCall::InvokeOnStack});
 }
 
 RuntimeLinker::~RuntimeLinker()
@@ -1350,7 +1350,7 @@ RuntimeLinker::~RuntimeLinker()
 	{
 		if (m_previous_guest_runtime_owner == nullptr)
 		{
-			Kernel::GuestRuntimePort::Install({});
+			Emulator::GuestRuntimePort::Install({});
 		}
 	}
 }

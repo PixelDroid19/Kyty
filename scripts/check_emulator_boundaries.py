@@ -30,6 +30,10 @@ AUDIO_SOURCE_FILES = (
     "emulator/src/AudioHost.cpp",
     "emulator/src/AudioPcm.cpp",
 )
+AUDIO_LOADER_INCLUDE_PREFIXES = (
+    "Emulator/Loader/",
+    "emulator/include/Emulator/Loader/",
+)
 KERNEL_SOURCE_FILES = (
 	"emulator/src/Kernel/AmprPort.cpp",
 	"emulator/src/Kernel/GuestRuntimePort.cpp",
@@ -229,6 +233,12 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
         return "Audio -> Graphics"
+    if relative_path in AUDIO_SOURCE_FILES and any(
+        canonical_path.startswith(prefix.casefold())
+        for canonical_path in canonical_paths
+        for prefix in AUDIO_LOADER_INCLUDE_PREFIXES
+    ):
+        return "Audio -> Loader"
     if relative_path in KERNEL_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
@@ -668,6 +678,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Kernel/FileSystem.cpp:1: forbidden include (Kernel -> Graphics): Emulator/Graphics/Objects/GpuMemory.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_forbidden_audio_loader_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/AudioAvPlayer.cpp", '#include "Emulator/Loader/GuestCall.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/AudioAvPlayer.cpp:1: forbidden include (Audio -> Loader): Emulator/Loader/GuestCall.h",
                     ),
                 ),
             )

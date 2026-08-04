@@ -12,7 +12,7 @@
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/GuestCall.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Log.h"
 
 #include <algorithm>
@@ -38,6 +38,7 @@
 namespace Kyty::Libs::Audio {
 
 namespace VideoFrameMemory = Kyty::Emulator::VideoFrameMemory;
+namespace GuestRuntimePort = ::Kyty::Emulator::GuestRuntimePort;
 // Kyty::Libs::AudioVideoBackend is the canonical host-side decoder namespace.
 // This local alias keeps the guest-facing implementation readable without changing its ABI.
 namespace AudioVideoBackend = ::Kyty::Libs::AudioVideoBackend;
@@ -316,7 +317,7 @@ static void release_video_frames(const AvPlayerMemAllocator& mem, std::vector<Av
 		unregister_video_frame(frame.data);
 		if (frame.guest_owned && mem.deallocate_texture != nullptr)
 		{
-			Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(mem.deallocate_texture), reinterpret_cast<uint64_t>(mem.object_pointer),
+			GuestRuntimePort::Invoke(reinterpret_cast<uint64_t>(mem.deallocate_texture), reinterpret_cast<uint64_t>(mem.object_pointer),
 			                          reinterpret_cast<uint64_t>(frame.data), 0);
 		}
 	}
@@ -366,7 +367,7 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 		for (int i = 0; i < count; i++)
 		{
 			auto* frame = static_cast<uint8_t*>(reinterpret_cast<void*>(
-			    Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(r->mem.allocate_texture),
+			    GuestRuntimePort::Invoke(reinterpret_cast<uint64_t>(r->mem.allocate_texture),
 			                              reinterpret_cast<uint64_t>(r->mem.object_pointer),
 			                              256, static_cast<uint32_t>(size))));
 			if (frame == nullptr)
@@ -602,7 +603,7 @@ static void emit_event(AvPlayerInternal* h, int32_t event_id, void* data = nullp
 	}
 	if (callback != nullptr)
 	{
-		const uint64_t result = Loader::GuestCall::Invoke4(reinterpret_cast<uint64_t>(callback),
+		const uint64_t result = GuestRuntimePort::Invoke4(reinterpret_cast<uint64_t>(callback),
 		                                                   reinterpret_cast<uint64_t>(obj_ptr),
 		                                                   static_cast<uint64_t>(event_id),
 		                                                   0,

@@ -55,7 +55,7 @@ target_sources(emulator PRIVATE
 	src/Kernel/Time.cpp
 	src/Kernel/TimePort.cpp
 	src/Kernel/AmprPort.cpp
-	src/Kernel/GuestRuntimePort.cpp
+	src/GuestRuntimePort.cpp
 	include/Emulator/Kernel/Errors.h
 	include/Emulator/Kernel/Trace.h
 	src/Libs/ProcessEnvironment.cpp

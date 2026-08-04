@@ -15,7 +15,6 @@
 #include "Emulator/Kernel/Semaphore.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/GuestCall.h"
 
 #include <algorithm>
 #include <atomic>
