@@ -3571,7 +3571,7 @@ static KYTY_SYSV_ABI int atexit(void (*func)())
 {
 	PRINT_NAME();
 
-	::printf("func = %" PRIx64 "\n", reinterpret_cast<uint64_t>(func));
+	Kyty::printf("func = %" PRIx64 "\n", reinterpret_cast<uint64_t>(func));
 
 	int ok = ::atexit(func);
 
@@ -3618,7 +3618,7 @@ static KYTY_SYSV_ABI void catchReturnFromMain(int status)
 {
 	PRINT_NAME();
 
-	::printf("return from main = %d\n", status);
+	Kyty::printf("return from main = %d\n", status);
 }
 
 static KYTY_SYSV_ABI int cxa_atexit(void (*func)(void*), void* arg, void* d)

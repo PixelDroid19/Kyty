@@ -950,7 +950,7 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 			continue;
 		}
 		const String host = String::FromUtf8(plan.entries[i].host_path);
-		std::printf("KYTY_LOADER: adjacent load %s\n", plan.entries[i].relative_key);
+		Kyty::printf("KYTY_LOADER: adjacent load %s\n", plan.entries[i].relative_key);
 		std::fflush(stdout);
 		Program* p = ProgramLoader::Load(rt, host);
 		if (p == nullptr)
@@ -1052,15 +1052,15 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const String& primary_host_path)
 			return;
 		}
 
-		std::printf("KYTY_LOADER: plan entries=%u adjacent=%u rejections=%u\n", plan.diag.entry_count, plan.diag.adjacent_count,
+		Kyty::printf("KYTY_LOADER: plan entries=%u adjacent=%u rejections=%u\n", plan.diag.entry_count, plan.diag.adjacent_count,
 		            plan.diag.rejection_count);
 		for (uint32_t i = 0; i < plan.diag.entry_count; ++i)
 		{
-			std::printf("KYTY_LOADER: plan[%u]=%s\n", i, plan.diag.entries[i]);
+			Kyty::printf("KYTY_LOADER: plan[%u]=%s\n", i, plan.diag.entries[i]);
 		}
 		for (uint32_t i = 0; i < plan.diag.rejection_count; ++i)
 		{
-			std::printf("KYTY_LOADER: reject[%u]=%s\n", i, plan.diag.rejections[i]);
+			Kyty::printf("KYTY_LOADER: reject[%u]=%s\n", i, plan.diag.rejections[i]);
 		}
 		std::fflush(stdout);
 	}

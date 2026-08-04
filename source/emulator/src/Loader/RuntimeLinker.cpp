@@ -2075,13 +2075,13 @@ void RuntimeLinker::StackTrace(uint64_t frame_ptr)
 
 	sys_stack_walk_x86(frame_ptr, stack, &depth);
 
-	std::printf("Stack trace [thread = %d]:\n", Core::Thread::GetThreadIdUnique());
+	Kyty::printf("Stack trace [thread = %d]:\n", Core::Thread::GetThreadIdUnique());
 
 	for (int i = 0; i < depth; i++)
 	{
 		auto  vaddr = reinterpret_cast<uint64_t>(stack[i]);
 		auto* p     = FindProgramByAddr(vaddr);
-		std::printf("[%d] %016" PRIx64 ", %s\n", i, vaddr, (p == nullptr ? "???" : p->file_name.FilenameWithoutDirectory().C_Str()));
+		Kyty::printf("[%d] %016" PRIx64 ", %s\n", i, vaddr, (p == nullptr ? "???" : p->file_name.FilenameWithoutDirectory().C_Str()));
 	}
 }
 
