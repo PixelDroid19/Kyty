@@ -8,7 +8,6 @@
 
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
-#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"

@@ -26,7 +26,7 @@
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/GpuMappingLifecycle.h"
 #include "Emulator/Kernel/Memory.h"
-#include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/TimePort.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
@@ -803,7 +803,7 @@ int KYTY_SYSV_ABI GraphicsInsertPopMarker(uint32_t* cmd, uint64_t size)
 
 uint64_t KYTY_SYSV_ABI GraphicsGetGpuCoreClockFrequency()
 {
-	return LibKernel::KernelGetTscFrequency();
+	return Kernel::TimePort::GetFrequency();
 }
 
 int KYTY_SYSV_ABI GraphicsIsUserPaEnabled()

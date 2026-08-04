@@ -76,6 +76,7 @@ GRAPHICS_DEBUG_OVERLAY_SOURCE = "emulator/src/Graphics/DebugOverlay.cpp"
 GRAPHICS_WINDOW_SOURCE = "emulator/src/Graphics/Window.cpp"
 GRAPHICS_RUN_SOURCE = "emulator/src/Graphics/GraphicsRun.cpp"
 GRAPHICS_TIME_PORT_SOURCE_FILES = (
+	"emulator/src/Graphics/Graphics.cpp",
 	"emulator/src/Graphics/GraphicsRenderContext.cpp",
 	"emulator/src/Graphics/GraphicsRenderEop.cpp",
 	"emulator/src/Graphics/VideoOut.cpp",
@@ -945,6 +946,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Graphics/VideoOut.cpp:1: forbidden include (Graphics -> Kernel time): Emulator/Kernel/Time.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_graphics_include_of_kernel_time_from_graphics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Graphics/Graphics.cpp", '#include "Emulator/Kernel/Time.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Graphics/Graphics.cpp:1: forbidden include (Graphics -> Kernel time): Emulator/Kernel/Time.h",
                     ),
                 ),
             )
