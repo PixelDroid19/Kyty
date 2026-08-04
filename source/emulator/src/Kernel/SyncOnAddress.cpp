@@ -1,7 +1,7 @@
 #include "Emulator/Kernel/SyncOnAddress.h"
 #include "Emulator/Kernel/Errors.h"
 
-#include "Emulator/Libs/Libs.h"
+#include "Emulator/Kernel/Trace.h"
 
 #include <algorithm>
 #include <chrono>
@@ -15,7 +15,7 @@
 
 namespace Kyty::Kernel::SyncOnAddress {
 
-LIB_NAME("libkernel", "libkernel");
+KERNEL_LIB_NAME();
 
 namespace {
 

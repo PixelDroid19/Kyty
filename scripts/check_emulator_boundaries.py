@@ -31,8 +31,13 @@ AUDIO_SOURCE_FILES = (
     "emulator/src/AudioPcm.cpp",
 )
 KERNEL_SOURCE_FILES = (
+    "emulator/src/Kernel/EventFlag.cpp",
+    "emulator/src/Kernel/EventQueue.cpp",
     "emulator/src/Kernel/FileSystem.cpp",
+    "emulator/src/Kernel/Memory.cpp",
     "emulator/src/Kernel/Pthread.cpp",
+    "emulator/src/Kernel/SyncOnAddress.cpp",
+    "emulator/src/Kernel/Time.cpp",
 )
 KERNEL_HOST_SOURCE_FILES = (
 	"emulator/src/Kernel/HostTime.cpp",
@@ -101,6 +106,10 @@ PROFILER_INCLUDE_PATHS = (
     "Emulator/Profiling.h",
     "emulator/include/Emulator/Profiler.h",
     "emulator/include/Emulator/Profiling.h",
+)
+KERNEL_GUEST_INCLUDE_PATHS = (
+    "Emulator/Libs/Errno.h",
+    "Emulator/Libs/Libs.h",
 )
 
 @dataclass(frozen=True)
@@ -215,6 +224,12 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
         return "Kernel -> Graphics"
+    if relative_path in KERNEL_SOURCE_FILES and any(
+        canonical_path == _canonical_include_path(guest_path)
+        for canonical_path in canonical_paths
+        for guest_path in KERNEL_GUEST_INCLUDE_PATHS
+    ):
+        return "Kernel -> Libs"
     if relative_path in KERNEL_HOST_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
@@ -638,6 +653,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Kernel/FileSystem.cpp:1: forbidden include (Kernel -> Graphics): Emulator/Graphics/Objects/GpuMemory.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_kernel_hle_registration_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Kernel/EventFlag.cpp", '#include "Emulator/Libs/Libs.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Kernel/EventFlag.cpp:1: forbidden include (Kernel -> Libs): Emulator/Libs/Libs.h",
                     ),
                 ),
             )

@@ -9,7 +9,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Libs/LibAmpr.h"
-#include "Emulator/Libs/Libs.h"
+#include "Emulator/Kernel/Trace.h"
 #include "Emulator/VideoFrameMemory.h"
 
 #include <atomic>
@@ -24,7 +24,7 @@
 
 namespace Kyty::Kernel::FileSystem {
 
-LIB_NAME("libkernel", "libkernel");
+KERNEL_LIB_NAME();
 
 static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name);
 

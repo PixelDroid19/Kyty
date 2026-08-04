@@ -5,7 +5,7 @@
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Timer.h"
 
-#include "Emulator/Libs/Libs.h"
+#include "Emulator/Kernel/Trace.h"
 #include "Emulator/Loader/Timer.h"
 
 #include <ctime>
@@ -15,7 +15,7 @@
 
 namespace Kyty::Kernel {
 
-LIB_NAME("libkernel", "libkernel");
+KERNEL_LIB_NAME();
 
 namespace HostTime = ::Kyty::Kernel::HostTime;
 

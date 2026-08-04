@@ -8,7 +8,7 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Timer.h"
 
-#include "Emulator/Libs/Libs.h"
+#include "Emulator/Kernel/Trace.h"
 #include "Emulator/Kernel/FileSystem.h"
 
 #include <limits>
@@ -18,7 +18,7 @@
 
 namespace Kyty::Kernel::EventQueue {
 
-LIB_NAME("libkernel", "libkernel");
+KERNEL_LIB_NAME();
 
 namespace {
 

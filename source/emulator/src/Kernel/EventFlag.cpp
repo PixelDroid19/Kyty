@@ -7,7 +7,7 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Timer.h"
 
-#include "Emulator/Libs/Libs.h"
+#include "Emulator/Kernel/Trace.h"
 
 #include <atomic>
 #include <cstdio>
@@ -18,7 +18,7 @@
 
 namespace Kyty::Kernel::EventFlag {
 
-LIB_NAME("libkernel", "libkernel");
+KERNEL_LIB_NAME();
 
 // Live EventFlag object registry. Guest may pass a garbage pointer when a
 // waiter races ahead of CreateEventFlag; never dereference unregistered

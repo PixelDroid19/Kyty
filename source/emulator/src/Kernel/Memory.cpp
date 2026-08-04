@@ -10,7 +10,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Kernel/Pthread.h"
-#include "Emulator/Libs/Libs.h"
+#include "Emulator/Kernel/Trace.h"
 
 #include <algorithm>
 #include <chrono>
@@ -25,9 +25,7 @@
 namespace Kyty::Kernel::Memory {
 
 namespace VirtualMemory = Core::VirtualMemory;
-namespace LibKernel    = ::Kyty::Libs::LibKernel;
-
-LIB_NAME("libkernel", "libkernel");
+KERNEL_LIB_NAME();
 
 static bool is_representable_range(uint64_t addr, uint64_t size)
 {
@@ -2122,7 +2120,7 @@ int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryIn
 	info->is_flexible  = is_flexible ? 1u : 0u;
 	info->is_direct    = is_direct ? 1u : 0u;
 	info->is_committed = is_reserved ? 0u : 1u;
-	info->is_stack     = LibKernel::PthreadQueryStack(addr, nullptr, nullptr) ? 1u : 0u;
+	info->is_stack     = PthreadQueryStack(addr, nullptr, nullptr) ? 1u : 0u;
 
 	printf("\t start = 0x%016" PRIx64 " end = 0x%016" PRIx64 " prot = 0x%x flex=%d direct=%d\n", static_cast<uint64_t>(info->start),
 	       static_cast<uint64_t>(info->end), info->protection, static_cast<int>(info->is_flexible), static_cast<int>(info->is_direct));
@@ -2143,7 +2141,7 @@ int KYTY_SYSV_ABI KernelIsStack(const void* addr, void** start, void** end)
 
 	void* stack_start = nullptr;
 	void* stack_end   = nullptr;
-	(void)LibKernel::PthreadQueryStack(addr, &stack_start, &stack_end);
+	(void)PthreadQueryStack(addr, &stack_start, &stack_end);
 	if (start != nullptr)
 	{
 		*start = stack_start;
