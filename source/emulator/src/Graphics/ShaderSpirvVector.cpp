@@ -2186,6 +2186,50 @@ KYTY_RECOMPILER_FUNC(Recompile_VF16_3Src_VdstVsrc0Vsrc1Vsrc2)
 	return true;
 }
 
+/* Generalized packed-f16 compare-to-exec: unpack both operands, compare as f32
+ * (param[0]) and update the EXEC mask like v_cmpx. */
+KYTY_RECOMPILER_FUNC(Recompile_VCmpxF16_XXX_SmaskVsrc0Vsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+	String8 load1;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+          <load0>
+          <load1>
+          %hc0v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
+          %hc1v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t1_<index>
+          %hc0_<index> = OpCompositeExtract %float %hc0v_<index> 0
+          %hc1_<index> = OpCompositeExtract %float %hc1v_<index> 0
+          %t2_<index> = <predicate> %bool %hc0_<index> %hc1_<index>
+          %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
+          %texec_<index> = OpLoad %uint %exec_lo
+          %tmasked_<index> = OpBitwiseAnd %uint %t3_<index> %texec_<index>
+          OpStore %exec_lo %tmasked_<index>
+          OpStore %exec_hi %uint_0
+          <execz>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<predicate>", param[0])
+	                   .ReplaceStr("<execz>", EXECZ)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VInterpP1F32_VdstVsrcAttrChan)
 {
 	return true;

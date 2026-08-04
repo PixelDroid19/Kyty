@@ -323,12 +323,12 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0xd6: inst.type = ShaderInstructionType::VCmpxGeU32; break;
 		case 0xD7: KYTY_NI("v_cmpx_t_u32"); break;
 		case 0xD8: KYTY_NI("v_cmpx_f_f16"); break;
-		case 0xD9: KYTY_NI("v_cmpx_lt_f16"); break;
-		case 0xDA: KYTY_NI("v_cmpx_eq_f16"); break;
-		case 0xDB: KYTY_NI("v_cmpx_le_f16"); break;
-		case 0xDC: KYTY_NI("v_cmpx_gt_f16"); break;
-		case 0xDD: KYTY_NI("v_cmpx_lg_f16"); break;
-		case 0xDE: KYTY_NI("v_cmpx_ge_f16"); break;
+		case 0xD9: inst.type = ShaderInstructionType::VCmpxLtF16; break;
+		case 0xDA: inst.type = ShaderInstructionType::VCmpxEqF16; break;
+		case 0xDB: inst.type = ShaderInstructionType::VCmpxLeF16; break;
+		case 0xDC: inst.type = ShaderInstructionType::VCmpxGtF16; break;
+		case 0xDD: inst.type = ShaderInstructionType::VCmpxLgF16; break;
+		case 0xDE: inst.type = ShaderInstructionType::VCmpxGeF16; break;
 		case 0xDF: KYTY_NI("v_cmpx_o_f16"); break;
 		case 0xE0: KYTY_NI("v_cmp_f_u64"); break;
 		case 0xE1: KYTY_NI("v_cmp_lt_u64"); break;
@@ -355,12 +355,12 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0xF6: KYTY_NI("v_cmpx_ge_u64"); break;
 		case 0xF7: KYTY_NI("v_cmpx_t_u64"); break;
 		case 0xF8: KYTY_NI("v_cmpx_u_f16"); break;
-		case 0xF9: KYTY_NI("v_cmpx_nge_f16"); break;
-		case 0xFA: KYTY_NI("v_cmpx_nlg_f16"); break;
-		case 0xFB: KYTY_NI("v_cmpx_ngt_f16"); break;
-		case 0xFC: KYTY_NI("v_cmpx_nle_f16"); break;
-		case 0xFD: KYTY_NI("v_cmpx_neq_f16"); break;
-		case 0xFE: KYTY_NI("v_cmpx_nlt_f16"); break;
+		case 0xF9: inst.type = ShaderInstructionType::VCmpxNgeF16; break;
+		case 0xFA: inst.type = ShaderInstructionType::VCmpxNlgF16; break;
+		case 0xFB: inst.type = ShaderInstructionType::VCmpxNgtF16; break;
+		case 0xFC: inst.type = ShaderInstructionType::VCmpxNleF16; break;
+		case 0xFD: inst.type = ShaderInstructionType::VCmpxNeqF16; break;
+		case 0xFE: inst.type = ShaderInstructionType::VCmpxNltF16; break;
 		case 0xFF: KYTY_NI("v_cmpx_tru_f16"); break;
 
 		/* VOP2 using VOP3 encoding */
