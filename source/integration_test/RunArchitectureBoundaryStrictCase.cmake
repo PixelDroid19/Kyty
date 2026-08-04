@@ -29,11 +29,25 @@ string(CONCAT expected_stdout
 )
 set(expected_stderr "architecture boundary integration failed: checker exited with 1\n")
 
-if(NOT "${actual_exit}" STREQUAL "1" OR NOT "${stdout}" STREQUAL "${expected_stdout}" OR NOT "${stderr}" STREQUAL "${expected_stderr}")
+string(LENGTH "${expected_stderr}" expected_stderr_length)
+string(LENGTH "${stderr}" actual_stderr_length)
+set(stderr_has_expected_wrapper_message FALSE)
+if(actual_stderr_length GREATER_EQUAL expected_stderr_length)
+	math(EXPR stderr_suffix_start "${actual_stderr_length} - ${expected_stderr_length}")
+	string(SUBSTRING "${stderr}" ${stderr_suffix_start} ${expected_stderr_length} stderr_suffix)
+	if("${stderr_suffix}" STREQUAL "${expected_stderr}")
+		set(stderr_has_expected_wrapper_message TRUE)
+	endif()
+endif()
+
+# A CMake test launcher may emit instrumentation text before the wrapper's
+# diagnostic. Require the wrapper message as the exact suffix while allowing
+# that launcher-owned prefix; exit code and checker stdout remain exact.
+if(NOT "${actual_exit}" STREQUAL "1" OR NOT "${stdout}" STREQUAL "${expected_stdout}" OR NOT stderr_has_expected_wrapper_message)
 	message(FATAL_ERROR
 		"strict boundary contract failed\n"
 		"expected exit: 1\nactual exit: ${actual_exit}\n"
 		"expected stdout:\n${expected_stdout}\nactual stdout:\n${stdout}\n"
-		"expected stderr:\n${expected_stderr}\nactual stderr:\n${stderr}"
+		"expected stderr suffix:\n${expected_stderr}\nactual stderr:\n${stderr}"
 	)
 endif()
