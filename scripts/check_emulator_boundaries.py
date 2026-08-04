@@ -37,6 +37,7 @@ KERNEL_SOURCE_FILES = (
 HOST_SOURCE_FILES = (
     "emulator/src/Host/CaptureImageCodec.cpp",
     "emulator/src/Host/Clock.cpp",
+    "emulator/src/Host/HostWindowSdl.cpp",
     "emulator/src/Host/ImageSurfaceSdl.cpp",
     "emulator/src/Host/Platform.cpp",
     "emulator/src/Host/Png.cpp",
@@ -624,6 +625,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Host/ImageSurfaceSdl.cpp:1: forbidden include (Host -> Graphics): Emulator/Graphics/Utils.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_forbidden_host_window_graphics_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Host/HostWindowSdl.cpp", '#include "Emulator/Graphics/Window.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Host/HostWindowSdl.cpp:1: forbidden include (Host -> Graphics): Emulator/Graphics/Window.h",
                     ),
                 ),
             )
