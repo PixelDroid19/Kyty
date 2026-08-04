@@ -134,6 +134,10 @@ project(Kyty${KYTY_PROJECT_NAME}${CMAKE_BUILD_TYPE}${KYTY_COMPILER} VERSION 0.2.
 include(src_script.cmake)
 include(CTest)
 
+if(BUILD_TESTING)
+	find_package(Python3 REQUIRED COMPONENTS Interpreter)
+endif()
+
 include_directories(	
 	3rdparty/gtest/include
 	3rdparty/gtest

@@ -492,6 +492,42 @@ set_tests_properties(KytyAgentTransport.NativeRoundTrip PROPERTIES
 	TIMEOUT 15
 )
 
+add_executable(kyty_architecture_boundary_integration
+	src/ArchitectureBoundaryIntegration.cpp
+)
+if(WIN32)
+	target_link_libraries(kyty_architecture_boundary_integration PRIVATE shell32)
+endif()
+
+set(KYTY_ARCHITECTURE_BOUNDARY_CHECKER "${CMAKE_SOURCE_DIR}/../scripts/check_emulator_boundaries.py")
+
+add_test(
+	NAME KytyArchitectureBoundaryChecker.SyntheticFixtures
+	COMMAND "${Python3_EXECUTABLE}" "${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}" --self-test
+)
+set_tests_properties(KytyArchitectureBoundaryChecker.SyntheticFixtures PROPERTIES TIMEOUT 15)
+
+add_test(
+	NAME KytyArchitectureBoundaryIntegration.Repository
+	COMMAND $<TARGET_FILE:kyty_architecture_boundary_integration>
+		"${Python3_EXECUTABLE}" "${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}" "${CMAKE_SOURCE_DIR}"
+)
+set_tests_properties(KytyArchitectureBoundaryIntegration.Repository PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 15
+)
+
+add_test(
+	NAME KytyArchitectureBoundaryIntegration.StrictBaseline
+	COMMAND $<TARGET_FILE:kyty_architecture_boundary_integration>
+		"${Python3_EXECUTABLE}" "${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}" "${CMAKE_SOURCE_DIR}" --strict
+)
+set_tests_properties(KytyArchitectureBoundaryIntegration.StrictBaseline PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 15
+	WILL_FAIL TRUE
+)
+
 set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_bringup_integration
 	kyty_domain_validation_integration
@@ -507,6 +543,7 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_agent_transport_integration
 	kyty_audio_pcm_integration
 	kyty_audio_host_integration
+	kyty_architecture_boundary_integration
 )
 
 add_test(
