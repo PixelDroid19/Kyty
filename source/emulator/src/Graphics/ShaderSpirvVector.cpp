@@ -608,6 +608,111 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_F32_SmaskVsrc0Vsrc1)
 	return true;
 }
 
+/* v_cmpx_f_f32: comparison is always false, so the execution mask is cleared. */
+KYTY_RECOMPILER_FUNC(Recompile_VCmpx_F_F32_SmaskVsrc0Vsrc1)
+{
+	static const char* text = R"(
+          OpStore %exec_lo %uint_0
+          OpStore %exec_hi %uint_0
+          <execz>
+)";
+	String8 index_str = String8::FromPrintf("%u", index);
+	*dst_source += String8(text).ReplaceStr("<execz>", EXECZ).ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cmpx_tru_f32: comparison is always true, so the execution mask is kept. */
+KYTY_RECOMPILER_FUNC(Recompile_VCmpx_Tru_F32_SmaskVsrc0Vsrc1)
+{
+	static const char* text = R"(
+          <execz>
+)";
+	String8 index_str = String8::FromPrintf("%u", index);
+	*dst_source += String8(text).ReplaceStr("<execz>", EXECZ).ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cmpx_o_f32: ordered — true when neither operand is NaN. */
+KYTY_RECOMPILER_FUNC(Recompile_VCmpx_O_F32_SmaskVsrc0Vsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+	String8 load1;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+	if (!operand_load_float(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+          <load0>
+          <load1>
+          %onan0_<index> = OpIsNan %bool %t0_<index>
+          %onan1_<index> = OpIsNan %bool %t1_<index>
+          %ounord_<index> = OpLogicalOr %bool %onan0_<index> %onan1_<index>
+          %oord_<index> = OpLogicalNot %bool %ounord_<index>
+          %osel_<index> = OpSelect %uint %oord_<index> %uint_1 %uint_0
+          %oexec_<index> = OpLoad %uint %exec_lo
+          %omasked_<index> = OpBitwiseAnd %uint %osel_<index> %oexec_<index>
+          OpStore %exec_lo %omasked_<index>
+          OpStore %exec_hi %uint_0
+          <execz>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<execz>", EXECZ)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cmpx_u_f32: unordered — true when either operand is NaN. */
+KYTY_RECOMPILER_FUNC(Recompile_VCmpx_U_F32_SmaskVsrc0Vsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+	String8 load1;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+	if (!operand_load_float(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+          <load0>
+          <load1>
+          %unan0_<index> = OpIsNan %bool %t0_<index>
+          %unan1_<index> = OpIsNan %bool %t1_<index>
+          %uunord_<index> = OpLogicalOr %bool %unan0_<index> %unan1_<index>
+          %usel_<index> = OpSelect %uint %uunord_<index> %uint_1 %uint_0
+          %uexec_<index> = OpLoad %uint %exec_lo
+          %umasked_<index> = OpBitwiseAnd %uint %usel_<index> %uexec_<index>
+          OpStore %exec_lo %umasked_<index>
+          OpStore %exec_hi %uint_0
+          <execz>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<execz>", EXECZ)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VCndmaskB32_VdstVsrc0Vsrc1Smask2)
 {
 	const auto& inst = code.GetInstructions().At(index);

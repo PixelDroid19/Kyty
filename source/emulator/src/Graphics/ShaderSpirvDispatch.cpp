@@ -320,6 +320,10 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxGtU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpUGreaterThan"}},
     {Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxLeU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpULessThanEqual"}},
     {Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxLtU32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpULessThan"}},
+    {Recompile_VCmpx_F_F32_SmaskVsrc0Vsrc1,   ShaderInstructionType::VCmpxFF32,    ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {""}},
+    {Recompile_VCmpx_Tru_F32_SmaskVsrc0Vsrc1, ShaderInstructionType::VCmpxTruF32,  ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {""}},
+    {Recompile_VCmpx_O_F32_SmaskVsrc0Vsrc1,   ShaderInstructionType::VCmpxOF32,    ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {""}},
+    {Recompile_VCmpx_U_F32_SmaskVsrc0Vsrc1,   ShaderInstructionType::VCmpxUF32,    ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {""}},
 
     {Recompile_SCmp_XXX_I32_Ssrc0Ssrc1,  ShaderInstructionType::SCmpEqI32,    ShaderInstructionFormat::Ssrc0Ssrc1,      {"OpIEqual"}},
     {Recompile_SCmp_XXX_I32_Ssrc0Ssrc1,  ShaderInstructionType::SCmpGeI32,    ShaderInstructionFormat::Ssrc0Ssrc1,      {"OpSGreaterThanEqual"}},
