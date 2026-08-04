@@ -1925,60 +1925,43 @@ KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callback, vo
 {
 	PRINT_NAME();
 
-	if (callback == nullptr)
+	if (flag == nullptr || callback == nullptr)
 	{
 		return 0;
 	}
 
-	constexpr uint32_t once_uninitialized = 0;
-	constexpr uint32_t once_complete      = 1;
-	constexpr uint32_t once_running       = 2;
+	// PS5 libc's once_flag follows the three-state ABI: zero has not started,
+	// one is executing, and two is permanently complete. The callback receives
+	// the once flag itself as its first argument.
+	constexpr int once_uninitialized = 0;
+	constexpr int once_running       = 1;
+	constexpr int once_complete      = 2;
 
-	if (flag == nullptr)
-	{
-		void* callback_result = nullptr;
-		return callback(nullptr, context, &callback_result) != 0 ? 1 : 0;
-	}
-
-	auto* once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
-	for (;;)
 	{
 		std::unique_lock lock(g_static_init_mutex);
-		uint32_t         value = once_flag->load(std::memory_order_acquire);
-		if (value == once_complete)
+		g_static_init_cv.wait(lock, [flag] {
+			return reinterpret_cast<std::atomic<uint32_t>*>(flag)->load(std::memory_order_acquire) != once_running;
+		});
+		auto* once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
+		if (once_flag->load(std::memory_order_acquire) == once_complete)
 		{
-			return 1;
-		}
-		if (value == once_running)
-		{
-			const auto owner = g_static_init_owner.find(flag);
-			if (owner != g_static_init_owner.end() && owner->second == std::this_thread::get_id())
-			{
-				printf(FG_BRIGHT_YELLOW "libc: recursive one-time initialization flag %p skipped by owner thread" DEFAULT "\n",
-				       static_cast<void*>(flag));
-				return 1;
-			}
-			g_static_init_cv.wait(lock);
-			continue;
-		}
-		if (value != once_uninitialized)
-		{
-			printf(FG_BRIGHT_YELLOW "libc: invalid one-time initialization flag %p state 0x%x" DEFAULT "\n", static_cast<void*>(flag), value);
 			return 0;
 		}
-
 		once_flag->store(once_running, std::memory_order_release);
 		static_init_claim_locked(flag);
-		lock.unlock();
-		void*     callback_result = nullptr;
-		const int result          = callback(flag, context, &callback_result);
-		lock.lock();
+	}
+
+	void*     callback_result = nullptr;
+	const int result          = callback(flag, context, &callback_result);
+
+	{
+		std::lock_guard lock(g_static_init_mutex);
+		auto*            once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
 		once_flag->store(result != 0 ? once_complete : once_uninitialized, std::memory_order_release);
 		g_static_init_owner.erase(flag);
-		lock.unlock();
-		g_static_init_cv.notify_all();
-		return result != 0 ? 1 : 0;
 	}
+	g_static_init_cv.notify_all();
+	return result != 0 ? 0 : LibKernel::KERNEL_ERROR_EAGAIN;
 }
 
 struct ThreadAtexitEntry
