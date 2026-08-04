@@ -25,17 +25,24 @@ TEST(EmulatorLoaderTls, SafeCallAlignsUnknownGuestStackBeforeHostCallback)
 	EXPECT_EQ(call.code[0x41], 0x89u);
 	EXPECT_EQ(call.code[0x42], 0xe3u);
 	EXPECT_EQ(call.code[0x43], 0x48u);
-	EXPECT_EQ(call.code[0x44], 0x83u);
-	EXPECT_EQ(call.code[0x45], 0xe4u);
-	EXPECT_EQ(call.code[0x46], 0xf0u);
-	EXPECT_EQ(call.code[0x47], 0x48u);
-	EXPECT_EQ(call.code[0x48], 0x83u);
-	EXPECT_EQ(call.code[0x49], 0xecu);
-	EXPECT_EQ(call.code[0x4a], 0x20u);
-	EXPECT_EQ(call.code[0x51], 0x48u);
-	EXPECT_EQ(call.code[0x52], 0x89u);
-	EXPECT_EQ(call.code[0x53], 0xdcu);
-	EXPECT_EQ(call.code[0x6a], 0x5bu);
+	EXPECT_EQ(call.code[0x44], 0xb8u);
+	EXPECT_EQ(call.code[0x4d], 0x48u);
+	EXPECT_EQ(call.code[0x4e], 0x89u);
+	EXPECT_EQ(call.code[0x4f], 0xc4u);
+	EXPECT_EQ(call.code[0x50], 0x48u);
+	EXPECT_EQ(call.code[0x51], 0x83u);
+	EXPECT_EQ(call.code[0x52], 0xe4u);
+	EXPECT_EQ(call.code[0x53], 0xf0u);
+	EXPECT_EQ(call.code[0x54], 0x48u);
+	EXPECT_EQ(call.code[0x55], 0x83u);
+	EXPECT_EQ(call.code[0x56], 0xecu);
+	EXPECT_EQ(call.code[0x57], 0x20u);
+	EXPECT_EQ(call.code[0x58], 0xffu);
+	EXPECT_EQ(call.code[0x59], 0xd1u);
+	EXPECT_EQ(call.code[0x5a], 0x48u);
+	EXPECT_EQ(call.code[0x5b], 0x89u);
+	EXPECT_EQ(call.code[0x5c], 0xdcu);
+	EXPECT_EQ(call.code[0x73], 0x5bu);
 }
 
 TEST(EmulatorLoaderTls, CallPltPreservesGuestArgumentsAcrossLazyResolution)
