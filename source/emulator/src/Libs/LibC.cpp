@@ -15,6 +15,7 @@
 #include "Emulator/Libs/CxxString.h"
 #include "Emulator/Libs/LibCTime.h"
 #include "Emulator/Libs/Libs.h"
+#include "LibCInternal.h"
 #include "Emulator/Libs/Memalign.h"
 #include "Emulator/Libs/ProcessEnvironment.h"
 #include "Emulator/Libs/Printf.h"
@@ -121,7 +122,7 @@ using Time::GuestToHostTm;
 // leave the mspace at BSS zero when this stays 0, so operator new
 // returns null → bad_alloc → terminate (DebugRaiseException 0xa0020008).
 // Keep both LibC and LibcInternal objects in sync.
-static uint32_t g_need_flag = 1;
+uint32_t g_need_flag = 1;
 
 using cxa_destructor_func_t = void (*)(void*);
 
@@ -155,20 +156,20 @@ static KYTY_SYSV_ABI void init_env(const ProcessEnvironment::InitParameters* par
 // _Cnd_init receives the address of that handle and owns its allocation; use
 // the same condition implementation as the public pthread ABI so both paths
 // share lifetime and error handling.
-static int c_thread_sync_result(int result);
+int c_thread_sync_result(int result);
 static LibKernel::KernelUseconds c_abstime_remaining_usec(const LibKernel::KernelTimespec* abstime);
 
-static KYTY_SYSV_ABI int c_cnd_init(LibKernel::PthreadCond* cond)
+KYTY_SYSV_ABI int c_cnd_init(LibKernel::PthreadCond* cond)
 {
 	return c_thread_sync_result(LibKernel::PthreadCondInit(cond, nullptr, nullptr));
 }
 
-static KYTY_SYSV_ABI int c_cnd_init_with_name(LibKernel::PthreadCond* cond, const char* name)
+KYTY_SYSV_ABI int c_cnd_init_with_name(LibKernel::PthreadCond* cond, const char* name)
 {
 	return c_thread_sync_result(LibKernel::PthreadCondInit(cond, nullptr, name));
 }
 
-static KYTY_SYSV_ABI int c_cnd_init_with_default_name_override(LibKernel::PthreadCond* cond, const char* name)
+KYTY_SYSV_ABI int c_cnd_init_with_default_name_override(LibKernel::PthreadCond* cond, const char* name)
 {
 	return c_cnd_init_with_name(cond, name);
 }
@@ -181,7 +182,7 @@ enum class CThreadResult : int
 	Error    = 4,
 };
 
-static int c_thread_sync_result(int result)
+int c_thread_sync_result(int result)
 {
 	switch (result)
 	{
@@ -192,28 +193,28 @@ static int c_thread_sync_result(int result)
 	}
 }
 
-static KYTY_SYSV_ABI int c_cnd_broadcast(LibKernel::PthreadCond* cond)
+KYTY_SYSV_ABI int c_cnd_broadcast(LibKernel::PthreadCond* cond)
 {
 	return c_thread_sync_result(LibKernel::PthreadCondBroadcast(cond));
 }
 
-static KYTY_SYSV_ABI int c_cnd_signal(LibKernel::PthreadCond* cond)
+KYTY_SYSV_ABI int c_cnd_signal(LibKernel::PthreadCond* cond)
 {
 	return c_thread_sync_result(LibKernel::PthreadCondSignal(cond));
 }
 
-static KYTY_SYSV_ABI int c_cnd_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI int c_cnd_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex)
 {
 	return c_thread_sync_result(LibKernel::PthreadCondWait(cond, mutex));
 }
 
-static KYTY_SYSV_ABI int c_cnd_timedwait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex,
+KYTY_SYSV_ABI int c_cnd_timedwait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex,
                                          const LibKernel::KernelTimespec* abstime)
 {
 	return c_thread_sync_result(LibKernel::PthreadCondTimedwaitAbsolute(cond, mutex, abstime));
 }
 
-static KYTY_SYSV_ABI void c_cnd_destroy(LibKernel::PthreadCond* cond)
+KYTY_SYSV_ABI void c_cnd_destroy(LibKernel::PthreadCond* cond)
 {
 	if (cond == nullptr)
 	{
@@ -328,7 +329,7 @@ static bool free_by_owner(void* ptr)
 // is published, so forwarding to a guest slot at that point would recurse into
 // an uninitialized allocator. mallinfo2 is used where glibc exposes it; the
 // ledger remains the portable lower-bound fallback on other hosts.
-static void collect_host_malloc_stats(Core::MSpaceSize* out)
+void collect_host_malloc_stats(Core::MSpaceSize* out)
 {
 	if (out == nullptr)
 	{
@@ -1487,7 +1488,7 @@ static KYTY_SYSV_ABI int c_vsprintf(char* s, const char* fmt, VaList* ap)
 {
 	return Format(s, C_UNBOUNDED_FORMAT, fmt, ap);
 }
-static KYTY_SYSV_ABI int c_vsnprintf(char* s, size_t n, const char* fmt, VaList* ap)
+KYTY_SYSV_ABI int c_vsnprintf(char* s, size_t n, const char* fmt, VaList* ap)
 {
 	return Format(s, n, fmt, ap);
 }
@@ -1920,7 +1921,7 @@ static KYTY_SYSV_ABI void c_cxa_guard_abort(uint64_t* g)
 
 using execute_once_callback_t = KYTY_SYSV_ABI int (*)(void*, void*, void**);
 
-static KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callback, void* context)
+KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callback, void* context)
 {
 	PRINT_NAME();
 
@@ -2013,7 +2014,7 @@ static void run_thread_atexit_destructors(void* guest_stack_top)
 	g_running_thread_atexit = false;
 }
 
-static KYTY_SYSV_ABI int c_cxa_thread_atexit(void (*dtor)(void*), void* obj, void* dso_handle)
+KYTY_SYSV_ABI int c_cxa_thread_atexit(void (*dtor)(void*), void* obj, void* dso_handle)
 {
 	if (dtor == nullptr)
 	{
@@ -2025,7 +2026,7 @@ static KYTY_SYSV_ABI int c_cxa_thread_atexit(void (*dtor)(void*), void* obj, voi
 	return 0;
 }
 
-static KYTY_SYSV_ABI int c_mtx_init(LibKernel::PthreadMutex* mutex, int type)
+KYTY_SYSV_ABI int c_mtx_init(LibKernel::PthreadMutex* mutex, int type)
 {
 	PRINT_NAME();
 
@@ -2058,7 +2059,7 @@ static KYTY_SYSV_ABI int c_mtx_init(LibKernel::PthreadMutex* mutex, int type)
 	return c_thread_sync_result(result);
 }
 
-static KYTY_SYSV_ABI int c_mtx_init_with_name(LibKernel::PthreadMutex* mutex, int type, const char* name)
+KYTY_SYSV_ABI int c_mtx_init_with_name(LibKernel::PthreadMutex* mutex, int type, const char* name)
 {
 	PRINT_NAME();
 
@@ -2091,14 +2092,14 @@ static KYTY_SYSV_ABI int c_mtx_init_with_name(LibKernel::PthreadMutex* mutex, in
 	return c_thread_sync_result(result);
 }
 
-static KYTY_SYSV_ABI int c_mtx_init_with_default_name_override(LibKernel::PthreadMutex* mutex, int type, const char* name)
+KYTY_SYSV_ABI int c_mtx_init_with_default_name_override(LibKernel::PthreadMutex* mutex, int type, const char* name)
 {
 	PRINT_NAME();
 
 	return c_mtx_init_with_name(mutex, type, name);
 }
 
-static KYTY_SYSV_ABI void c_mtx_destroy(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI void c_mtx_destroy(LibKernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
@@ -2114,14 +2115,14 @@ static KYTY_SYSV_ABI void c_mtx_destroy(LibKernel::PthreadMutex* mutex)
 	}
 }
 
-static KYTY_SYSV_ABI int c_mtx_lock(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI int c_mtx_lock(LibKernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
 	return c_thread_sync_result(LibKernel::PthreadMutexLock(mutex));
 }
 
-static KYTY_SYSV_ABI int c_mtx_trylock(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI int c_mtx_trylock(LibKernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
@@ -2151,21 +2152,21 @@ static LibKernel::KernelUseconds c_abstime_remaining_usec(const LibKernel::Kerne
 	return static_cast<LibKernel::KernelUseconds>(delta);
 }
 
-static KYTY_SYSV_ABI int c_mtx_timedlock(LibKernel::PthreadMutex* mutex, const LibKernel::KernelTimespec* abstime)
+KYTY_SYSV_ABI int c_mtx_timedlock(LibKernel::PthreadMutex* mutex, const LibKernel::KernelTimespec* abstime)
 {
 	PRINT_NAME();
 
 	return c_thread_sync_result(LibKernel::PthreadMutexTimedlock(mutex, c_abstime_remaining_usec(abstime)));
 }
 
-static KYTY_SYSV_ABI int c_mtx_unlock(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI int c_mtx_unlock(LibKernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
 	return c_thread_sync_result(LibKernel::PthreadMutexUnlock(mutex));
 }
 
-static KYTY_SYSV_ABI int c_mtx_current_owns(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI int c_mtx_current_owns(LibKernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
@@ -2189,14 +2190,14 @@ struct CndThreadExitEntry
 
 thread_local std::vector<CndThreadExitEntry> g_cnd_thread_exit_entries;
 
-static KYTY_SYSV_ABI void c_cnd_register_at_thread_exit(LibKernel::PthreadCond* condition,
+KYTY_SYSV_ABI void c_cnd_register_at_thread_exit(LibKernel::PthreadCond* condition,
                                                         LibKernel::PthreadMutex* mutex, int* completed)
 {
 	EXIT_IF(condition == nullptr || mutex == nullptr);
 	g_cnd_thread_exit_entries.push_back({condition, mutex, completed});
 }
 
-static KYTY_SYSV_ABI void c_cnd_unregister_at_thread_exit(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI void c_cnd_unregister_at_thread_exit(LibKernel::PthreadMutex* mutex)
 {
 	if (mutex == nullptr)
 	{
@@ -2209,7 +2210,7 @@ static KYTY_SYSV_ABI void c_cnd_unregister_at_thread_exit(LibKernel::PthreadMute
 	g_cnd_thread_exit_entries.erase(first_removed, g_cnd_thread_exit_entries.end());
 }
 
-static KYTY_SYSV_ABI void c_cnd_do_broadcast_at_thread_exit()
+KYTY_SYSV_ABI void c_cnd_do_broadcast_at_thread_exit()
 {
 	for (auto& entry: g_cnd_thread_exit_entries)
 	{
@@ -3621,7 +3622,7 @@ static KYTY_SYSV_ABI void catchReturnFromMain(int status)
 	Kyty::printf("return from main = %d\n", status);
 }
 
-static KYTY_SYSV_ABI int cxa_atexit(void (*func)(void*), void* arg, void* d)
+KYTY_SYSV_ABI int cxa_atexit(void (*func)(void*), void* arg, void* d)
 {
 	PRINT_NAME();
 
@@ -3656,311 +3657,6 @@ void KYTY_SYSV_ABI cxa_finalize(void* d)
 
 } // namespace LibC
 
-namespace LibcInternalExt {
-
-LIB_VERSION("LibcInternalExt", 1, "LibcInternal", 1, 1);
-
-static uint64_t g_mspace_atomic_id_mask = 0;
-static uint64_t g_mstate_table[64]      = {0};
-
-struct Info
-{
-	uint64_t  size;
-	uint32_t  unknown1;
-	uint32_t  unknown2;
-	uint64_t* mspace_atomic_id_mask;
-	uint64_t* mstate_table;
-};
-
-void KYTY_SYSV_ABI LibcHeapGetTraceInfo(Info* info)
-{
-	PRINT_NAME();
-
-	EXIT_NOT_IMPLEMENTED(info->size != 32);
-
-	info->mspace_atomic_id_mask = &g_mspace_atomic_id_mask;
-	info->mstate_table          = g_mstate_table;
-}
-
-LIB_DEFINE(InitLibcInternalExt_1)
-{
-	LIB_FUNC("NWtTN10cJzE", LibcInternalExt::LibcHeapGetTraceInfo);
-	LIB_FUNC("qBS714-Jr3g", LibC::c_cxa_thread_atexit);
-}
-
-} // namespace LibcInternalExt
-
-namespace LibcInternal {
-
-LIB_VERSION("LibcInternal", 1, "LibcInternal", 1, 1);
-
-// Same contract as LibC::g_need_flag — request CRT heap/TSD bootstrap.
-static uint32_t g_need_flag = 1;
-
-int KYTY_SYSV_ABI vprintf(const char* str, VaList* c)
-{
-	PRINT_NAME();
-
-	return GetVprintfFunc()(str, c);
-}
-
-static KYTY_SYSV_ABI int snprintf(VA_ARGS)
-{
-	VA_CONTEXT(ctx); // NOLINT(cppcoreguidelines-pro-type-member-init,hicpp-member-init)
-
-	PRINT_NAME();
-
-	return GetSnrintfCtxFunc()(&ctx);
-}
-
-int KYTY_SYSV_ABI fflush(FILE* stream)
-{
-	PRINT_NAME();
-
-	EXIT_NOT_IMPLEMENTED(stream != stdout && stream != stderr);
-
-	return ::fflush(stream);
-}
-
-void* KYTY_SYSV_ABI memset(void* s, int c, size_t n)
-{
-	PRINT_NAME();
-
-	return ::memset(s, c, n);
-}
-
-void* KYTY_SYSV_ABI LibcMspaceCreate(const char* name, void* base, size_t capacity, uint32_t flag)
-{
-	PRINT_NAME();
-
-	// Gen5 heap paths may omit a name; treat null as empty diagnostic tag.
-	const char* mspace_name = (name != nullptr ? name : "");
-
-	printf("\t name     = %s\n", mspace_name);
-	printf("\t base     = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
-	printf("\t capacity = %016" PRIx64 "\n", capacity);
-	printf("\t flag     = %u\n", flag);
-
-	EXIT_NOT_IMPLEMENTED(flag != 0 && flag != 1);
-	EXIT_NOT_IMPLEMENTED(base == nullptr);
-	EXIT_NOT_IMPLEMENTED(capacity == 0);
-
-	bool thread_safe = true;
-
-	if (flag == 1)
-	{
-		thread_safe = false;
-	}
-
-	auto* msp = Core::MSpaceCreate(mspace_name, base, capacity, thread_safe, nullptr);
-
-	EXIT_NOT_IMPLEMENTED(msp == nullptr);
-
-	return msp;
-}
-
-void* KYTY_SYSV_ABI LibcMspaceMalloc(void* msp, size_t size)
-{
-	PRINT_NAME();
-
-	printf("\t msp  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(msp));
-	printf("\t size = %016" PRIx64 "\n", size);
-
-	// Guest libc returns nullptr on failure (OOM / null mspace); do not EXIT —
-	// callers are expected to check the return. Strict abort here blocked the
-	// runtime before any presentation window after an early null msp malloc(0x28).
-	if (msp == nullptr)
-	{
-		printf("\t buf  = 0000000000000000 (null mspace)\n");
-		return nullptr;
-	}
-
-	auto* buf = Core::MSpaceMalloc(msp, size);
-
-	printf("\t buf  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
-
-	return buf;
-}
-
-void* KYTY_SYSV_ABI LibcMspaceMemalign(void* msp, size_t align, size_t size)
-{
-	PRINT_NAME();
-
-	if (msp == nullptr)
-	{
-		return nullptr;
-	}
-
-	return Core::MSpaceMemalign(msp, align, size);
-}
-
-size_t KYTY_SYSV_ABI LibcMspaceMallocUsableSize(const void* ptr)
-{
-	PRINT_NAME();
-
-	return Core::MSpaceMallocUsableSize(ptr);
-}
-
-// sceLibcMspaceCalloc — NID LYo3GhIlB38 (msp, nelem, size). Observed (msp, 1, 0x40).
-void* KYTY_SYSV_ABI LibcMspaceCalloc(void* msp, size_t nelem, size_t size)
-{
-	PRINT_NAME();
-	printf("\t msp   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(msp));
-	printf("\t nelem = 0x%016" PRIx64 "\n", static_cast<uint64_t>(nelem));
-	printf("\t size  = 0x%016" PRIx64 "\n", static_cast<uint64_t>(size));
-	if (msp == nullptr)
-	{
-		return nullptr;
-	}
-	return Core::MSpaceCalloc(msp, nelem, size);
-}
-
-// Gen5 sceLibcMspaceMallocStatsFast — NID k04jLXu3+Ic.
-// Guest structure is SceLibcMallocManagedSize (size/version 0x00010028):
-//   +0x00 u16 size=0x28, u16 version=1  (stored as u32 0x00010028)
-//   +0x04 u32 reserved
-//   +0x08 size_t maxSystemSize
-//   +0x10 size_t currentSystemSize   // Astro Onion pre-check: need <= this
-//   +0x18 size_t maxInuseSize
-//   +0x20 size_t currentInuseSize
-// Stack frame places the block at rbp-0x48 with the canary at rbp-0x20, so only
-// 0x28 bytes are writable before the canary.
-struct LibcMallocManagedSize
-{
-	uint32_t size_version;
-	uint32_t reserved;
-	uint64_t max_system_size;
-	uint64_t current_system_size;
-	uint64_t max_inuse_size;
-	uint64_t current_inuse_size;
-};
-static_assert(sizeof(LibcMallocManagedSize) == 0x28, "SceLibcMallocManagedSize");
-
-int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
-{
-	PRINT_NAME();
-	printf("\t msp   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(msp));
-	printf("\t stats = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(stats));
-	if (msp == nullptr || stats == nullptr)
-	{
-		return -1;
-	}
-
-	Core::MSpaceSize sizes {};
-	if (!Core::MSpaceMallocStatsFast(msp, &sizes))
-	{
-		return -1;
-	}
-
-	auto* out                = static_cast<LibcMallocManagedSize*>(stats);
-	out->size_version        = 0x00010028u;
-	out->reserved            = 0;
-	out->max_system_size     = sizes.max_system_size;
-	out->current_system_size = sizes.current_system_size;
-	out->max_inuse_size      = sizes.max_inuse_size;
-	out->current_inuse_size  = sizes.current_inuse_size;
-	printf("\t system = 0x%016" PRIx64 " inuse = 0x%016" PRIx64 "\n", out->current_system_size, out->current_inuse_size);
-	return 0;
-}
-
-// libc malloc_stats_fast — NID KuOuD58hqn4.  The public replacement-table
-// ABI is int(void*), unlike the internal mspace form above.  During bootstrap
-// there is no application-heap handle; report the host allocator snapshot.
-int KYTY_SYSV_ABI LibcMallocStatsFast(void* stats)
-{
-	PRINT_NAME();
-	if (stats == nullptr)
-	{
-		return -1;
-	}
-
-	if (LibKernel::ApplicationHeap::HasMallocStatsFast())
-	{
-		return LibKernel::ApplicationHeap::MallocStatsFast(stats);
-	}
-	if (LibKernel::ApplicationHeap::IsInitialized())
-	{
-		return -1;
-	}
-
-	Core::MSpaceSize sizes {};
-	LibC::collect_host_malloc_stats(&sizes);
-
-	auto* out                = static_cast<LibcMallocManagedSize*>(stats);
-	out->size_version        = 0x00010028u;
-	out->reserved            = 0;
-	out->max_system_size     = sizes.max_system_size;
-	out->current_system_size = sizes.current_system_size;
-	out->max_inuse_size      = sizes.max_inuse_size;
-	out->current_inuse_size  = sizes.current_inuse_size;
-	return 0;
-}
-
-void KYTY_SYSV_ABI LibcMspaceFree(void* msp, void* ptr)
-{
-	PRINT_NAME();
-
-	if (msp == nullptr || ptr == nullptr)
-	{
-		return;
-	}
-
-	Core::MSpaceFree(msp, ptr);
-}
-
-LIB_DEFINE(InitLibcInternal_1)
-{
-	LibcInternalExt::InitLibcInternalExt_1(s);
-
-	LIB_OBJECT("ZT4ODD2Ts9o", &LibcInternal::g_need_flag);
-	// stdin Object triad: guest import tables list 1TDo-ImqkJc immediately before
-	// the registered stdout NID 2sWzhYqFH4E and stderr H8AprKeZtNg (libc_v1).
-	LIB_OBJECT("1TDo-ImqkJc", stdin);
-	LIB_OBJECT("2sWzhYqFH4E", stdout);
-
-	LIB_FUNC("GMpvxPFW924", LibcInternal::vprintf);
-	LIB_FUNC("MUjC4lbHrK4", LibcInternal::fflush);
-	LIB_FUNC("8zTFvBIAIN8", LibcInternal::memset);
-	LIB_FUNC("eLdDw6l0-bU", LibcInternal::snprintf);
-	LIB_FUNC("Q2V+iqvjgC0", LibC::c_vsnprintf);
-
-	LIB_FUNC("tsvEmnenz48", LibC::cxa_atexit);
-	LIB_FUNC("H2e8t5ScQGc", LibC::cxa_finalize);
-	LIB_FUNC("DiGVep5yB5w", LibC::c_execute_once);
-	LIB_FUNC("YaHc3GS7y7g", LibC::c_mtx_init);
-	LIB_FUNC("tgioGpKtmbE", LibC::c_mtx_init_with_name);
-	LIB_FUNC("JHp7ogc1+HY", LibC::c_mtx_init_with_default_name_override);
-	LIB_FUNC("5Lf51jvohTQ", LibC::c_mtx_destroy);
-	LIB_FUNC("iS4aWbUonl0", LibC::c_mtx_lock);
-	LIB_FUNC("k6pGNMwJB08", LibC::c_mtx_trylock);
-	LIB_FUNC("hPzYSd5Nasc", LibC::c_mtx_timedlock);
-	LIB_FUNC("gTuXQwP9rrs", LibC::c_mtx_unlock);
-	LIB_FUNC("VYQwFs4CC4Y", LibC::c_mtx_current_owns);
-	LIB_FUNC("SreZybSRWpU", LibC::c_cnd_init);
-	LIB_FUNC("2B+V3qCqz4s", LibC::c_cnd_init_with_name);
-	LIB_FUNC("jBOZAv6CwkM", LibC::c_cnd_init_with_default_name_override);
-	LIB_FUNC("VsP3daJgmVA", LibC::c_cnd_broadcast);
-	LIB_FUNC("7yMFgcS8EPA", LibC::c_cnd_destroy);
-	LIB_FUNC("0uuqgRz9qfo", LibC::c_cnd_signal);
-	LIB_FUNC("McaImWKXong", LibC::c_cnd_timedwait);
-	LIB_FUNC("vEaqE-7IZYc", LibC::c_cnd_wait);
-	LIB_FUNC("DV2AdZFFEh8", LibC::c_cnd_register_at_thread_exit);
-	LIB_FUNC("wpuIiVoCWcM", LibC::c_cnd_unregister_at_thread_exit);
-	LIB_FUNC("vyLotuB6AS4", LibC::c_cnd_do_broadcast_at_thread_exit);
-	LIB_FUNC("+fAmL52-yfQ", LibC::c_cnd_register_at_thread_exit);
-	LIB_FUNC("SwcNvp-Af6c", LibC::c_cnd_unregister_at_thread_exit);
-	LIB_FUNC("2s6aLdPIA4I", LibC::c_cnd_do_broadcast_at_thread_exit);
-
-	LIB_FUNC("-hn1tcVHq5Q", LibcInternal::LibcMspaceCreate);
-	LIB_FUNC("OJjm-QOIHlI", LibcInternal::LibcMspaceMalloc);
-	LIB_FUNC("iF1iQHzxBJU", LibcInternal::LibcMspaceMemalign);
-	LIB_FUNC("fEoW6BJsPt4", LibcInternal::LibcMspaceMallocUsableSize);
-	LIB_FUNC("LYo3GhIlB38", LibcInternal::LibcMspaceCalloc);
-	LIB_FUNC("Vla-Z+eXlxo", LibcInternal::LibcMspaceFree);
-	LIB_FUNC("k04jLXu3+Ic", LibcInternal::LibcMspaceMallocStatsFast);
-}
-
-} // namespace LibcInternal
 
 LIB_USING(LibC);
 
