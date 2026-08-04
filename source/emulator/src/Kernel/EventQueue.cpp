@@ -1,4 +1,5 @@
 #include "Emulator/Kernel/EventQueue.h"
+#include "Emulator/Kernel/Errors.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -7,7 +8,6 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Timer.h"
 
-#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Kernel/FileSystem.h"
 
@@ -17,8 +17,6 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Kernel::EventQueue {
-
-using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 

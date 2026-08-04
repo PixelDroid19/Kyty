@@ -1,6 +1,6 @@
 #include "Emulator/Kernel/SyncOnAddress.h"
+#include "Emulator/Kernel/Errors.h"
 
-#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
 #include <algorithm>
@@ -14,8 +14,6 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Kernel::SyncOnAddress {
-
-using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 

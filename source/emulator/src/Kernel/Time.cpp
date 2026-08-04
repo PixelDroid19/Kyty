@@ -1,10 +1,10 @@
 #include "Emulator/Kernel/Time.h"
+#include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/HostTime.h"
 
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Timer.h"
 
-#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/Timer.h"
 
@@ -18,11 +18,6 @@ namespace Kyty::Kernel {
 LIB_NAME("libkernel", "libkernel");
 
 namespace HostTime = ::Kyty::Kernel::HostTime;
-
-// The errno table remains part of the HLE registration namespace for now. Keep
-// this dependency explicit while the time implementation moves into Kernel.
-using ::Kyty::Libs::LibKernel::KERNEL_ERROR_EFAULT;
-using ::Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL;
 
 static bool TimezoneFromUtc(int64_t utc_seconds, KernelTimezone* timezone, int32_t* dst_seconds)
 {

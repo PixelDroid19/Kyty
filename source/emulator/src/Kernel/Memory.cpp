@@ -1,4 +1,5 @@
 #include "Emulator/Kernel/Memory.h"
+#include "Emulator/Kernel/Errors.h"
 
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/MagicEnum.h"
@@ -9,7 +10,6 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Kernel/Pthread.h"
-#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
 #include <algorithm>
@@ -26,11 +26,6 @@ namespace Kyty::Kernel::Memory {
 
 namespace VirtualMemory = Core::VirtualMemory;
 namespace LibKernel    = ::Kyty::Libs::LibKernel;
-
-// Errno values and the pthread stack query are still exported by the
-// guest-facing registration namespace. Keep the bridge explicit while this
-// implementation is moved into Kernel.
-using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 

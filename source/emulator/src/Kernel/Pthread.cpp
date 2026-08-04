@@ -1,4 +1,5 @@
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/Errors.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DateTime.h"
@@ -11,7 +12,6 @@
 #include "Kyty/Core/Vector.h"
 #include "Kyty/Core/VirtualMemory.h"
 
-#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/RuntimeLinker.h"
@@ -50,10 +50,6 @@
 #endif
 
 namespace Kyty::Kernel {
-
-// Error constants remain owned by the guest-facing HLE table until that table
-// is split. Import them explicitly at this implementation boundary.
-using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 

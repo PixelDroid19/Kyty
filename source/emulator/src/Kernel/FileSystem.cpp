@@ -1,4 +1,5 @@
 #include "Emulator/Kernel/FileSystem.h"
+#include "Emulator/Kernel/Errors.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DateTime.h"
@@ -7,7 +8,6 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Vector.h"
 
-#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/LibAmpr.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/VideoFrameMemory.h"
@@ -23,8 +23,6 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Kernel::FileSystem {
-
-using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 

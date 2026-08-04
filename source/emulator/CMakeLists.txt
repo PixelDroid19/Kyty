@@ -51,6 +51,7 @@ target_sources(emulator PRIVATE
 	src/Agent/AgentSubsystem.cpp
 	src/Agent/AgentLifecycle.cpp
 	src/Kernel/Time.cpp
+	include/Emulator/Kernel/Errors.h
 	src/Libs/ProcessEnvironment.cpp
 	src/Graphics/PipelineCacheStore.cpp
 	src/Graphics/GpuDirtyPageTracker.cpp
