@@ -9,6 +9,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include <atomic>
+#include <ctime>
 #include <mutex>
 
 #ifdef KYTY_EMU_ENABLED
@@ -235,6 +236,22 @@ private:
 
 extern thread_local Pthread g_pthread_self;
 extern PThreadContext*      g_pthread_context;
+
+bool relative_usec_to_absolute_timespec(KernelClockid clock_id, KernelUseconds usec, timespec* deadline);
+bool guest_absolute_to_timespec(const KernelTimespec* abstime, timespec* deadline);
+void sec_to_timespec(KernelTimespec* ts, double sec);
+
+int  create_guest_stack(PthreadAttr attr);
+void free_guest_stack(PthreadAttr attr);
+int  pthread_attr_copy(PthreadAttr* dst, const PthreadAttr* src);
+void pthread_attr_dbg_print(const PthreadAttr* src);
+
+#ifdef __APPLE__
+void usec_to_timespec(struct timespec* ts, KernelUseconds usec);
+int  mutex_timedlock_poll(pthread_mutex_t* mutex, const timespec* t);
+int pthread_rwlock_timedrdlock(pthread_rwlock_t* lock, const timespec* t);
+int pthread_rwlock_timedwrlock(pthread_rwlock_t* lock, const timespec* t);
+#endif
 
 bool PthreadQueryStack(const void* addr, void** start, void** end);
 
