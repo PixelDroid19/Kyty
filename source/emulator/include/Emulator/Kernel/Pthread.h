@@ -5,6 +5,7 @@
 #include "Kyty/Core/Subsystems.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/Namespace.h"
 #include "Emulator/Kernel/Time.h"
 
 // IWYU pragma: no_include <pthread.h>
@@ -29,9 +30,7 @@ namespace Kyty::Loader {
 struct Program;
 } // namespace Kyty::Loader
 
-namespace Kyty::Libs {
-
-namespace LibKernel {
+namespace Kyty::Kernel {
 
 KYTY_SUBSYSTEM_DEFINE(Pthread);
 
@@ -219,9 +218,15 @@ bool PthreadGetThreadDiagnostics(PthreadThreadDiagnostics* out);
 // Opt-in KYTY_SLOT_TRACE dump of currently blocked CondWait guests.
 void SlotTraceDumpBlockedCondWaiters();
 
-} // namespace LibKernel
+} // namespace Kyty::Kernel
 
-namespace Posix {
+// Guest-facing HLE code keeps the historical LibKernel view while the
+// pthread implementation and ABI declarations live in the Kernel domain.
+namespace Kyty::Libs::LibKernel {
+using namespace ::Kyty::Kernel;
+} // namespace Kyty::Libs::LibKernel
+
+namespace Kyty::Libs::Posix {
 
 int KYTY_SYSV_ABI   getpid();
 // Gen5 Posix_v1 pthread_self — NID EotR8a3ASf4 (Astro after AudioOut2 residual).
@@ -320,9 +325,7 @@ int KYTY_SYSV_ABI                  pthread_attr_setinheritsched(LibKernel::Pthre
 int KYTY_SYSV_ABI                  pthread_attr_setguardsize(LibKernel::PthreadAttr* attr, size_t guard_size);
 int KYTY_SYSV_ABI                  pthread_attr_getguardsize(const LibKernel::PthreadAttr* attr, size_t* guard_size);
 
-} // namespace Posix
-
-} // namespace Kyty::Libs
+} // namespace Kyty::Libs::Posix
 
 #endif // KYTY_EMU_ENABLED
 

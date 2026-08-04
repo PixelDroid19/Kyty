@@ -49,9 +49,11 @@
 #endif
 #endif
 
-namespace Kyty::Libs {
+namespace Kyty::Kernel {
 
-namespace LibKernel {
+// Error constants remain owned by the guest-facing HLE table until that table
+// is split. Import them explicitly at this implementation boundary.
+using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 
@@ -3774,10 +3776,7 @@ void* KYTY_SYSV_ABI PthreadGetspecific(PthreadKey key)
 	return value;
 }
 
-} // namespace LibKernel
-
-
-} // namespace Kyty::Libs
+} // namespace Kyty::Kernel
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #pragma GCC diagnostic pop
