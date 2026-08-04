@@ -7,13 +7,11 @@
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Host/HostWindow.h"
+#include "Emulator/Host/HostGui.h"
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_vulkan.h"
-
-#include "SDL.h"
-#include "SDL_events.h"
 
 #include <cinttypes>
 #include <cstdio>
@@ -164,7 +162,7 @@ void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext
 	EXIT_IF(swapchain == nullptr);
 	EXIT_IF(g_initialized);
 
-	auto* native_window = static_cast<SDL_Window*>(window->GetNativeHandle());
+	void* native_window = window->GetNativeHandle();
 	EXIT_IF(native_window == nullptr);
 
 	g_visible = EnvHudEnabledByDefault();
@@ -193,7 +191,15 @@ void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext
 		return;
 	}
 
-	ImGui_ImplSDL2_InitForVulkan(native_window);
+	if (!::Kyty::Emulator::Host::HostGuiInit(native_window))
+	{
+		std::fprintf(stderr, "DebugOverlay: ImGui host GUI initialization failed\n");
+		DestroyFramebuffers(ctx->device);
+		vkDestroyRenderPass(ctx->device, g_render_pass, nullptr);
+		g_render_pass = VK_NULL_HANDLE;
+		ImGui::DestroyContext();
+		return;
+	}
 
 	ImGui_ImplVulkan_InitInfo init_info {};
 	init_info.Instance           = ctx->instance;
@@ -211,7 +217,7 @@ void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext
 	if (!ImGui_ImplVulkan_Init(&init_info))
 	{
 		std::fprintf(stderr, "DebugOverlay: ImGui_ImplVulkan_Init failed\n");
-		ImGui_ImplSDL2_Shutdown();
+		::Kyty::Emulator::Host::HostGuiShutdown();
 		DestroyFramebuffers(ctx->device);
 		vkDestroyRenderPass(ctx->device, g_render_pass, nullptr);
 		g_render_pass = VK_NULL_HANDLE;
@@ -232,7 +238,7 @@ void DebugOverlayShutdown(GraphicContext* ctx)
 
 	vkDeviceWaitIdle(ctx->device);
 	ImGui_ImplVulkan_Shutdown();
-	ImGui_ImplSDL2_Shutdown();
+	::Kyty::Emulator::Host::HostGuiShutdown();
 	ImGui::DestroyContext();
 
 	DestroyFramebuffers(ctx->device);
@@ -304,7 +310,7 @@ void DebugOverlayProcessEvent(const void* event)
 	{
 		return;
 	}
-	ImGui_ImplSDL2_ProcessEvent(static_cast<const SDL_Event*>(event));
+	::Kyty::Emulator::Host::HostGuiProcessEvent(event);
 }
 
 void DebugOverlayToggle()
@@ -346,7 +352,7 @@ bool DebugOverlayRecord(GraphicContext* ctx, VulkanSwapchain* swapchain, VkComma
 		Core::LockGuard queue_lock(*queue.mutex);
 		ImGui_ImplVulkan_NewFrame();
 	}
-	ImGui_ImplSDL2_NewFrame();
+	::Kyty::Emulator::Host::HostGuiNewFrame();
 	ImGui::NewFrame();
 	DrawHud(snap);
 	ImGui::Render();

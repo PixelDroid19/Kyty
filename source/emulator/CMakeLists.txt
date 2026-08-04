@@ -30,6 +30,8 @@ target_sources(emulator PRIVATE
 	include/Emulator/Host/HostWindow.h
 	src/Host/HostInputSdl.cpp
 	include/Emulator/Host/HostInput.h
+	src/Host/HostGuiSdl.cpp
+	include/Emulator/Host/HostGui.h
 	src/Host/CaptureImageCodec.cpp
 	include/Emulator/Host/CaptureImageCodec.h
 	src/Host/Png.cpp

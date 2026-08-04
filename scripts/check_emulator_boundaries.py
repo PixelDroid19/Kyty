@@ -58,6 +58,7 @@ LIBS_SOURCE_FILES = (
 GRAPHICS_IMAGE_SOURCE_FILES = (
     "emulator/src/Graphics/Image.cpp",
 )
+GRAPHICS_DEBUG_OVERLAY_SOURCE = "emulator/src/Graphics/DebugOverlay.cpp"
 GRAPHICS_WINDOW_SOURCE = "emulator/src/Graphics/Window.cpp"
 GRAPHICS_RUN_SOURCE = "emulator/src/Graphics/GraphicsRun.cpp"
 LOADER_SOURCE_FILES = (
@@ -72,6 +73,7 @@ ALLOWED_SOURCE_FILES = (
     *HOST_SOURCE_FILES,
     *LIBS_SOURCE_FILES,
     *GRAPHICS_IMAGE_SOURCE_FILES,
+    GRAPHICS_DEBUG_OVERLAY_SOURCE,
     GRAPHICS_WINDOW_SOURCE,
     *LOADER_SOURCE_FILES,
     GRAPHICS_RUN_SOURCE,
@@ -237,6 +239,10 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         _is_sdl_include(canonical_path) for canonical_path in canonical_paths
     ):
         return "Graphics Image -> SDL"
+    if relative_path == GRAPHICS_DEBUG_OVERLAY_SOURCE and any(
+        _is_sdl_include(canonical_path) for canonical_path in canonical_paths
+    ):
+        return "Graphics DebugOverlay -> SDL"
     if relative_path == GRAPHICS_WINDOW_SOURCE and any(
         _is_sdl_include(canonical_path) for canonical_path in canonical_paths
     ):
@@ -779,6 +785,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Graphics/Window.cpp:1: forbidden include (Graphics Window -> SDL): SDL_events.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_direct_sdl_include_from_graphics_debug_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, GRAPHICS_DEBUG_OVERLAY_SOURCE, '#include "SDL_events.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Graphics/DebugOverlay.cpp:1: forbidden include (Graphics DebugOverlay -> SDL): SDL_events.h",
                     ),
                 ),
             )
