@@ -13,6 +13,73 @@
 
 namespace Kyty::Libs::Graphics {
 
+void NativeCaptureState::Configure(uint64_t now_ms)
+{
+	const char* directory_value = std::getenv("KYTY_NATIVE_CAPTURE_DIR");
+	if (directory_value == nullptr || directory_value[0] == '\0')
+	{
+		return;
+	}
+
+	std::error_code error;
+	directory = std::filesystem::absolute(directory_value, error);
+	if (error)
+	{
+		directory = directory_value;
+	}
+
+	if (const char* trigger = std::getenv("KYTY_NATIVE_CAPTURE_TRIGGER"); trigger != nullptr && trigger[0] != '\0')
+	{
+		trigger_file = std::filesystem::absolute(trigger, error);
+		if (error)
+		{
+			trigger_file = trigger;
+		}
+	}
+
+	first_present           = NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_FIRST_PRESENT") || NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_NOW");
+	first_pending           = first_present;
+	first_probe_deadline_ms = now_ms + 30000;
+	every_present           = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_EVERY");
+	telemetry               = NativeCaptureEnvEnabled("KYTY_NATIVE_TELEMETRY");
+	// Default edge cap bounds disk/RAM for 4K VideoOut captures; set
+	// KYTY_NATIVE_CAPTURE_MAX_EDGE=0 for full-resolution dumps.
+	max_edge   = NativeCaptureResolveMaxEdge(std::getenv("KYTY_NATIVE_CAPTURE_MAX_EDGE"));
+	keep_files = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_KEEP");
+	if (keep_files == 0)
+	{
+		keep_files = 8;
+	}
+
+	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE_CONFIG enabled=1 first=%d every=%u trigger=%d max_edge=%u keep=%u\n", first_present ? 1 : 0,
+	             every_present, trigger_file.empty() ? 0 : 1, max_edge, keep_files);
+}
+
+void NativeCaptureState::RecordPresent(uint64_t now_ms)
+{
+	++present_count;
+	last_present_steady_ms = now_ms;
+}
+
+void NativeCaptureState::ObserveFrame(int frame, uint64_t now_ms)
+{
+	if (frame != last_seen_frame)
+	{
+		last_seen_frame      = frame;
+		last_frame_steady_ms = now_ms;
+	}
+}
+
+bool NativeCaptureState::TelemetryDue(double now_seconds, double interval_seconds)
+{
+	if (!telemetry || now_seconds - last_log_time < interval_seconds)
+	{
+		return false;
+	}
+	last_log_time = now_seconds;
+	return true;
+}
+
 bool NativeCaptureEnvEnabled(const char* name)
 {
 	const char* value = std::getenv(name);

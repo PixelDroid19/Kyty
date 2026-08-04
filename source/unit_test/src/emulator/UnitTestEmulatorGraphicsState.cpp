@@ -7,6 +7,7 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
+#include "Emulator/Graphics/NativeCapture.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
@@ -2714,6 +2715,30 @@ TEST(EmulatorGraphicsState, NativeCaptureRejectsBlackBootFrames)
 	}
 	EXPECT_TRUE(NativeCaptureFrameHasVisibleColor(visible.data(), visible.size()));
 	EXPECT_FALSE(NativeCaptureFrameHasVisibleColor(nullptr, 0));
+}
+
+TEST(EmulatorGraphicsState, NativeCaptureStateOwnsPresentationAccounting)
+{
+	using namespace Kyty::Libs::Graphics;
+
+	NativeCaptureState state;
+	state.telemetry = true;
+	EXPECT_FALSE(state.TelemetryDue(0.5, 1.0));
+	EXPECT_TRUE(state.TelemetryDue(1.0, 1.0));
+	EXPECT_FALSE(state.TelemetryDue(1.5, 1.0));
+
+	state.RecordPresent(42);
+	EXPECT_EQ(state.present_count, 1u);
+	EXPECT_EQ(state.last_present_steady_ms, 42u);
+
+	state.ObserveFrame(7, 51);
+	EXPECT_EQ(state.last_seen_frame, 7);
+	EXPECT_EQ(state.last_frame_steady_ms, 51u);
+	state.ObserveFrame(7, 99);
+	EXPECT_EQ(state.last_frame_steady_ms, 51u);
+	state.ObserveFrame(8, 100);
+	EXPECT_EQ(state.last_seen_frame, 8);
+	EXPECT_EQ(state.last_frame_steady_ms, 100u);
 }
 
 TEST(EmulatorGraphicsState, HostCaptureImageCodecNormalizesCaptureChannelLayouts)

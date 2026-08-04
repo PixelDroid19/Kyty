@@ -217,42 +217,7 @@ struct WindowContext
 	Core::Mutex   mutex;
 	bool          graphic_initialized = false;
 	Core::CondVar graphic_initialized_condvar;
-
-	struct NativeCapture
-	{
-		std::filesystem::path directory;
-		std::filesystem::path trigger_file;
-		bool                  first_present           = false;
-		uint32_t              every_present           = 0;
-		bool                  telemetry               = false;
-		uint32_t              max_edge                = 0;
-		uint32_t              keep_files              = 8;
-		bool                  first_pending           = false;
-		uint64_t              first_probe_after_ms    = 0;
-		uint64_t              first_probe_deadline_ms = 0;
-		bool                  manual_pending          = false;
-		uint64_t              sequence                = 0;
-		uint64_t              present_count           = 0;
-		double                last_log_time           = 0.0;
-		uint64_t              last_present_steady_ms  = 0;
-		uint64_t              last_frame_steady_ms    = 0;
-		int                   last_seen_frame         = -1;
-
-		Core::Mutex   result_mutex;
-		Core::CondVar result_cv;
-		uint64_t      request_id   = 0;
-		uint64_t      completed_id = 0;
-		bool          last_ok      = false;
-		std::string   last_path;
-		std::string   last_milestone;
-		std::string   last_format;
-		uint32_t      last_width   = 0;
-		uint32_t      last_height  = 0;
-		int           last_frame   = 0;
-		uint64_t      last_present = 0;
-		std::string   last_error_code;
-		std::string   last_error_message;
-	} native_capture;
+	NativeCaptureState native_capture;
 };
 
 static WindowContext* g_window_ctx = nullptr;
@@ -345,60 +310,6 @@ static bool ToggleHostFullscreen()
 	}
 	return g_window_ctx->host_window->ToggleFullscreen();
 }
-
-static void NativeCaptureConfigure(WindowContext* ctx)
-{
-	EXIT_IF(ctx == nullptr);
-
-	const char* directory = std::getenv("KYTY_NATIVE_CAPTURE_DIR");
-	if (directory == nullptr || directory[0] == '\0')
-	{
-		return;
-	}
-
-	std::error_code error;
-	ctx->native_capture.directory = std::filesystem::absolute(directory, error);
-	if (error)
-	{
-		ctx->native_capture.directory = directory;
-	}
-
-	if (const char* trigger = std::getenv("KYTY_NATIVE_CAPTURE_TRIGGER"); trigger != nullptr && trigger[0] != '\0')
-	{
-		ctx->native_capture.trigger_file = std::filesystem::absolute(trigger, error);
-		if (error)
-		{
-			ctx->native_capture.trigger_file = trigger;
-		}
-	}
-
-	ctx->native_capture.first_present =
-	    NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_FIRST_PRESENT") || NativeCaptureEnvEnabled("KYTY_NATIVE_CAPTURE_NOW");
-	ctx->native_capture.first_pending           = ctx->native_capture.first_present;
-	ctx->native_capture.first_probe_deadline_ms = WindowSteadyMs() + 30000;
-	ctx->native_capture.every_present           = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_EVERY");
-	ctx->native_capture.telemetry               = NativeCaptureEnvEnabled("KYTY_NATIVE_TELEMETRY");
-	// Default edge cap bounds disk/RAM for 4K VideoOut captures; set
-	// KYTY_NATIVE_CAPTURE_MAX_EDGE=0 for full-resolution dumps.
-	ctx->native_capture.max_edge   = NativeCaptureResolveMaxEdge(std::getenv("KYTY_NATIVE_CAPTURE_MAX_EDGE"));
-	ctx->native_capture.keep_files = NativeCaptureEnvPositive("KYTY_NATIVE_CAPTURE_KEEP");
-	if (ctx->native_capture.keep_files == 0)
-	{
-		ctx->native_capture.keep_files = 8;
-	}
-
-	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE_CONFIG enabled=1 first=%d every=%u trigger=%d max_edge=%u keep=%u\n",
-	             ctx->native_capture.first_present ? 1 : 0, ctx->native_capture.every_present,
-	             ctx->native_capture.trigger_file.empty() ? 0 : 1, ctx->native_capture.max_edge, ctx->native_capture.keep_files);
-}
-
-enum class NativeCaptureMilestone
-{
-	None,
-	FirstPresent,
-	Interval,
-	Manual,
-};
 
 static NativeCaptureMilestone NativeCaptureNext(WindowContext* ctx)
 {
@@ -2922,7 +2833,7 @@ void WindowInit(uint32_t width, uint32_t height)
 
 	g_window_ctx->graphic_ctx.screen_width  = width;
 	g_window_ctx->graphic_ctx.screen_height = height;
-	NativeCaptureConfigure(g_window_ctx);
+	g_window_ctx->native_capture.Configure(WindowSteadyMs());
 }
 
 void WindowWaitForGraphicInitialized()
@@ -3319,8 +3230,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	const auto present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - present_start).count();
 	DebugStatsRecordPresent(static_cast<uint64_t>(present_ns));
 
-	g_window_ctx->native_capture.present_count++;
-	g_window_ctx->native_capture.last_present_steady_ms = WindowSteadyMs();
+	g_window_ctx->native_capture.RecordPresent(WindowSteadyMs());
 	// Agent observation only — does not wake guest waits or change present path.
 	if (g_window_ctx->native_capture.present_count == 1)
 	{
@@ -3337,13 +3247,12 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	if (g_window_ctx->native_capture.telemetry)
 	{
 		const double t = g_window_ctx->game->m_current_time_seconds;
-		if (t - g_window_ctx->native_capture.last_log_time >= 1.0)
+		if (g_window_ctx->native_capture.TelemetryDue(t, 1.0))
 		{
 			std::fprintf(stderr, "KYTY_PRESENT_TELEMETRY frame=%d present=%llu fps=%.3f peak_rss_bytes=%llu size=%ux%u format=%s\n",
 			             g_window_ctx->game->m_frame_num, static_cast<unsigned long long>(g_window_ctx->native_capture.present_count),
 			             g_window_ctx->game->m_current_fps, static_cast<unsigned long long>(NativeCaptureHostPeakRssBytes()),
 			             image->extent.width, image->extent.height, NativeCaptureFormatName(image->format));
-			g_window_ctx->native_capture.last_log_time = t;
 		}
 	}
 
@@ -3377,11 +3286,7 @@ bool WindowGetPresentStats(WindowPresentStats* out)
 	{
 		out->frame = g_window_ctx->game->m_frame_num;
 		out->fps   = g_window_ctx->game->m_current_fps;
-		if (out->frame != g_window_ctx->native_capture.last_seen_frame)
-		{
-			g_window_ctx->native_capture.last_seen_frame      = out->frame;
-			g_window_ctx->native_capture.last_frame_steady_ms = now_ms;
-		}
+		g_window_ctx->native_capture.ObserveFrame(out->frame, now_ms);
 	}
 	if (g_window_ctx->native_capture.last_present_steady_ms != 0)
 	{
