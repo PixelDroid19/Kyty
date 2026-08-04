@@ -479,6 +479,72 @@ KYTY_RECOMPILER_FUNC(Recompile_SSaveexecB64_Sdst2Ssrc02)
                OpStore %exec_hi %t197_<index>
 )";
 			break;
+		case ShaderInstructionType::SOrSaveexecB64:
+			exec_update = R"(
+        %t194_<index> = OpBitwiseOr %uint %t0_<index> %t190_<index>
+               OpStore %exec_lo %t194_<index>
+        %t197_<index> = OpBitwiseOr %uint %t1_<index> %t191_<index>
+               OpStore %exec_hi %t197_<index>
+)";
+			break;
+		case ShaderInstructionType::SXorSaveexecB64:
+			exec_update = R"(
+        %t194_<index> = OpBitwiseXor %uint %t0_<index> %t190_<index>
+               OpStore %exec_lo %t194_<index>
+        %t197_<index> = OpBitwiseXor %uint %t1_<index> %t191_<index>
+               OpStore %exec_hi %t197_<index>
+)";
+			break;
+		case ShaderInstructionType::SAndn2SaveexecB64:
+			exec_update = R"(
+        %t193_<index> = OpNot %uint %t190_<index>
+        %t194_<index> = OpBitwiseAnd %uint %t0_<index> %t193_<index>
+               OpStore %exec_lo %t194_<index>
+        %t196_<index> = OpNot %uint %t191_<index>
+        %t197_<index> = OpBitwiseAnd %uint %t1_<index> %t196_<index>
+               OpStore %exec_hi %t197_<index>
+)";
+			break;
+		case ShaderInstructionType::SOrn2SaveexecB64:
+			exec_update = R"(
+        %t193_<index> = OpNot %uint %t190_<index>
+        %t194_<index> = OpBitwiseOr %uint %t0_<index> %t193_<index>
+               OpStore %exec_lo %t194_<index>
+        %t196_<index> = OpNot %uint %t191_<index>
+        %t197_<index> = OpBitwiseOr %uint %t1_<index> %t196_<index>
+               OpStore %exec_hi %t197_<index>
+)";
+			break;
+		case ShaderInstructionType::SNandSaveexecB64:
+			exec_update = R"(
+        %t192_<index> = OpBitwiseAnd %uint %t0_<index> %t190_<index>
+        %t194_<index> = OpNot %uint %t192_<index>
+               OpStore %exec_lo %t194_<index>
+        %t195_<index> = OpBitwiseAnd %uint %t1_<index> %t191_<index>
+        %t197_<index> = OpNot %uint %t195_<index>
+               OpStore %exec_hi %t197_<index>
+)";
+			break;
+		case ShaderInstructionType::SNorSaveexecB64:
+			exec_update = R"(
+        %t192_<index> = OpBitwiseOr %uint %t0_<index> %t190_<index>
+        %t194_<index> = OpNot %uint %t192_<index>
+               OpStore %exec_lo %t194_<index>
+        %t195_<index> = OpBitwiseOr %uint %t1_<index> %t191_<index>
+        %t197_<index> = OpNot %uint %t195_<index>
+               OpStore %exec_hi %t197_<index>
+)";
+			break;
+		case ShaderInstructionType::SXnorSaveexecB64:
+			exec_update = R"(
+        %t192_<index> = OpBitwiseXor %uint %t0_<index> %t190_<index>
+        %t194_<index> = OpNot %uint %t192_<index>
+               OpStore %exec_lo %t194_<index>
+        %t195_<index> = OpBitwiseXor %uint %t1_<index> %t191_<index>
+        %t197_<index> = OpNot %uint %t195_<index>
+               OpStore %exec_hi %t197_<index>
+)";
+			break;
 		default: return false;
 	}
 

@@ -242,6 +242,13 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 
     {Recompile_SSaveexecB64_Sdst2Ssrc02,       ShaderInstructionType::SAndSaveexecB64,     ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::ExecNonZero},
     {Recompile_SSaveexecB64_Sdst2Ssrc02,       ShaderInstructionType::SAndn1SaveexecB64,   ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::ExecNonZero},
+    {Recompile_SSaveexecB64_Sdst2Ssrc02,       ShaderInstructionType::SOrSaveexecB64,      ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::ExecNonZero},
+    {Recompile_SSaveexecB64_Sdst2Ssrc02,       ShaderInstructionType::SXorSaveexecB64,     ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::ExecNonZero},
+    {Recompile_SSaveexecB64_Sdst2Ssrc02,       ShaderInstructionType::SAndn2SaveexecB64,   ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::ExecNonZero},
+    {Recompile_SSaveexecB64_Sdst2Ssrc02,       ShaderInstructionType::SOrn2SaveexecB64,    ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::ExecNonZero},
+    {Recompile_SSaveexecB64_Sdst2Ssrc02,       ShaderInstructionType::SNandSaveexecB64,    ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::ExecNonZero},
+    {Recompile_SSaveexecB64_Sdst2Ssrc02,       ShaderInstructionType::SNorSaveexecB64,     ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::ExecNonZero},
+    {Recompile_SSaveexecB64_Sdst2Ssrc02,       ShaderInstructionType::SXnorSaveexecB64,    ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::ExecNonZero},
     {Recompile_SMovB64_Sdst2Ssrc02,            ShaderInstructionType::SMovB64,             ShaderInstructionFormat::Sdst2Ssrc02, {""}},
     {Recompile_SUnaryB32_SVdstSVsrc0,          ShaderInstructionType::SNotB32,             ShaderInstructionFormat::SVdstSVsrc0, {""}, SccCheck::NonZero},
     {Recompile_SUnaryB32_SVdstSVsrc0,          ShaderInstructionType::SBrevB32,            ShaderInstructionFormat::SVdstSVsrc0, {""}, SccCheck::NonZero},

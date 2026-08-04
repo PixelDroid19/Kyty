@@ -103,13 +103,48 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.dst.size    = 2;
 			inst.src[0].size = 2;
 			break;
-		case 0x25: KYTY_NI("s_or_saveexec_b64"); break;
-		case 0x26: KYTY_NI("s_xor_saveexec_b64"); break;
-		case 0x27: KYTY_NI("s_andn2_saveexec_b64"); break;
-		case 0x28: KYTY_NI("s_orn2_saveexec_b64"); break;
-		case 0x29: KYTY_NI("s_nand_saveexec_b64"); break;
-		case 0x2A: KYTY_NI("s_nor_saveexec_b64"); break;
-		case 0x2B: KYTY_NI("s_xnor_saveexec_b64"); break;
+		case 0x25:
+			inst.type        = ShaderInstructionType::SOrSaveexecB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
+		case 0x26:
+			inst.type        = ShaderInstructionType::SXorSaveexecB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
+		case 0x27:
+			inst.type        = ShaderInstructionType::SAndn2SaveexecB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
+		case 0x28:
+			inst.type        = ShaderInstructionType::SOrn2SaveexecB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
+		case 0x29:
+			inst.type        = ShaderInstructionType::SNandSaveexecB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
+		case 0x2A:
+			inst.type        = ShaderInstructionType::SNorSaveexecB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
+		case 0x2B:
+			inst.type        = ShaderInstructionType::SXnorSaveexecB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
 		case 0x2C: KYTY_NI("s_quadmask_b32"); break;
 		case 0x2D: KYTY_NI("s_quadmask_b64"); break;
 		case 0x2E: KYTY_NI("s_movrels_b32"); break;
