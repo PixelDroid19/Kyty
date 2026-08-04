@@ -958,6 +958,55 @@ KYTY_RECOMPILER_FUNC(Recompile_VF16_XXX_VdstVsrc0Vsrc1)
 	return true;
 }
 
+/* Generalized packed-f16 compare: unpack both operands, compare as f32
+ * (param[0]), and write the lane mask to the VCC pair. */
+KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+	String8 load1;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+
+	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
+
+	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+          <load0>
+          <load1>
+          %hc0v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
+          %hc1v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t1_<index>
+          %hc0_<index> = OpCompositeExtract %float %hc0v_<index> 0
+          %hc1_<index> = OpCompositeExtract %float %hc1v_<index> 0
+          %t2_<index> = <param> %bool %hc0_<index> %hc1_<index>
+          %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
+          OpStore %<dst0> %t3_<index>
+          OpStore %<dst1> %uint_0
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<dst0>", dst_value0.value)
+	                   .ReplaceStr("<dst1>", dst_value1.value)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<param>", param[0])
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VInterpP1F32_VdstVsrcAttrChan)
 {
 	return true;
