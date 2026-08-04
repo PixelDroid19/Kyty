@@ -59,7 +59,7 @@ Emulator::GuestRuntimePort::ProgramHandle FindProgramByAddrForPort(uint64_t vadd
 static bool IsHleOwnedRuntimeSymbol(const String& name)
 {
 	return name == U"J3edELK4FvM" || name == U"3GPpjQdAMTw" || name == U"9rAeANT2tyE" || name == U"2emaaluWzUw" ||
-	       name == U"DiGVep5yB5w";
+	       name == U"DiGVep5yB5w" || name == U"Ujf3KzMvRmI";
 }
 
 Vector<uint32_t> LoaderBuildModuleStartOrder(const Vector<ModuleStartDescriptor>& modules)

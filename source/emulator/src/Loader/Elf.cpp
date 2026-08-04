@@ -265,6 +265,22 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size)
 
 	if (m_self != nullptr)
 	{
+		if (m_self->segments_num == 0)
+		{
+			// Minimal SELF fixtures may carry an unsegmented ELF directly after
+			// the container header. In that form the embedded ELF offsets are
+			// relative to the payload start, so translate them once and keep the
+			// same checked bounds as a regular segment.
+			if (m_self->file_size > m_f->Size() || file_offset > m_f->Size() - m_self->file_size ||
+			    size > m_f->Size() - m_self->file_size - file_offset)
+			{
+				EXIT("SELF payload exceeds the file bounds\n");
+			}
+			m_f->Seek(m_self->file_size + file_offset);
+			m_f->Read(reinterpret_cast<void*>(static_cast<uintptr_t>(vaddr)), size);
+			return;
+		}
+
 		EXIT_IF(m_self_segments == nullptr);
 		EXIT_IF(m_phdr == nullptr);
 
@@ -510,7 +526,7 @@ bool Elf64::IsSelf() const
 	}
 
 	const uint64_t table_size = static_cast<uint64_t>(sizeof(SelfSegment)) * m_self->segments_num;
-	if (m_self->segments_num == 0 || m_f->Size() < sizeof(SelfHeader) + table_size + sizeof(Elf64_Ehdr))
+	if (m_f->Size() < sizeof(SelfHeader) + table_size + sizeof(Elf64_Ehdr))
 	{
 		return false;
 	}
@@ -624,23 +640,26 @@ void Elf64::Open(const String& file_name)
 		m_f->Seek(0);
 	} else
 	{
-		m_self_segments = load_self_segments(*m_f, m_self->segments_num);
-		EXIT_IF(m_self_segments == nullptr);
-
-		for (uint16_t i = 0; i < m_self->segments_num; i++)
+		if (m_self->segments_num != 0)
 		{
-			const auto& seg = m_self_segments[i];
-			if ((seg.type & 0x2u) != 0)
+			m_self_segments = load_self_segments(*m_f, m_self->segments_num);
+			EXIT_IF(m_self_segments == nullptr);
+
+			for (uint16_t i = 0; i < m_self->segments_num; i++)
 			{
-				EXIT("SELF segment %u is encrypted; provide an unencrypted executable\n", i);
-			}
-			if ((seg.type & 0x8u) != 0 || seg.compressed_size != seg.decompressed_size)
-			{
-				EXIT("SELF segment %u uses unsupported compression\n", i);
-			}
-			if (seg.offset > m_f->Size() || seg.compressed_size > m_f->Size() - seg.offset)
-			{
-				EXIT("SELF segment %u exceeds the file bounds\n", i);
+				const auto& seg = m_self_segments[i];
+				if ((seg.type & 0x2u) != 0)
+				{
+					EXIT("SELF segment %u is encrypted; provide an unencrypted executable\n", i);
+				}
+				if ((seg.type & 0x8u) != 0 || seg.compressed_size != seg.decompressed_size)
+				{
+					EXIT("SELF segment %u uses unsupported compression\n", i);
+				}
+				if (seg.offset > m_f->Size() || seg.compressed_size > m_f->Size() - seg.offset)
+				{
+					EXIT("SELF segment %u exceeds the file bounds\n", i);
+				}
 			}
 		}
 	}
