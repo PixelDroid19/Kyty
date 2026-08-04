@@ -1966,6 +1966,102 @@ KYTY_RECOMPILER_FUNC(Recompile_VFractF64_SVdst2SVsrc0)
 	return true;
 }
 
+/* Generalized packed-i16 compare: sign-extend both operands from the low 16
+ * bits, compare as i32 (param[0]) and write the VCC lane mask. */
+KYTY_RECOMPILER_FUNC(Recompile_VCmpI16_XXX_SmaskVsrc0Vsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+	String8 load1;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+
+	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
+
+	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+          <load0>
+          <load1>
+          %i0s_<index> = OpShiftLeftLogical %uint %t0_<index> %uint_16
+          %i0x_<index> = OpShiftRightArithmetic %uint %i0s_<index> %uint_16
+          %i1s_<index> = OpShiftLeftLogical %uint %t1_<index> %uint_16
+          %i1x_<index> = OpShiftRightArithmetic %uint %i1s_<index> %uint_16
+          %t2_<index> = <param> %bool %i0x_<index> %i1x_<index>
+          %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
+          OpStore %<dst0> %t3_<index>
+          OpStore %<dst1> %uint_0
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<dst0>", dst_value0.value)
+	                   .ReplaceStr("<dst1>", dst_value1.value)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<param>", param[0])
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* Generalized packed-u16 compare: zero-extend both operands from the low 16
+ * bits, compare as u32 (param[0]) and write the VCC lane mask. */
+KYTY_RECOMPILER_FUNC(Recompile_VCmpU16_XXX_SmaskVsrc0Vsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+	String8 load1;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+
+	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
+
+	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+          <load0>
+          <load1>
+          %i0x_<index> = OpBitwiseAnd %uint %t0_<index> %uint_0xffff
+          %i1x_<index> = OpBitwiseAnd %uint %t1_<index> %uint_0xffff
+          %t2_<index> = <param> %bool %i0x_<index> %i1x_<index>
+          %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
+          OpStore %<dst0> %t3_<index>
+          OpStore %<dst1> %uint_0
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<dst0>", dst_value0.value)
+	                   .ReplaceStr("<dst1>", dst_value1.value)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<param>", param[0])
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VInterpP1F32_VdstVsrcAttrChan)
 {
 	return true;
