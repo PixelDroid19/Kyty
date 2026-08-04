@@ -519,13 +519,20 @@ set_tests_properties(KytyArchitectureBoundaryIntegration.Repository PROPERTIES
 
 add_test(
 	NAME KytyArchitectureBoundaryIntegration.StrictBaseline
-	COMMAND $<TARGET_FILE:kyty_architecture_boundary_integration>
-		"${Python3_EXECUTABLE}" "${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}" "${CMAKE_SOURCE_DIR}" --strict
+	COMMAND "${CMAKE_COMMAND}"
+		"-DTEST_EXECUTABLE=$<TARGET_FILE:kyty_architecture_boundary_integration>"
+		"-DTEST_LAUNCHER=$<TARGET_PROPERTY:kyty_architecture_boundary_integration,TEST_LAUNCHER>"
+		"-DCROSSCOMPILING_EMULATOR=$<TARGET_PROPERTY:kyty_architecture_boundary_integration,CROSSCOMPILING_EMULATOR>"
+		"-DCROSSCOMPILING=${CMAKE_CROSSCOMPILING}"
+		"-DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
+		"-DCHECKER=${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}"
+		"-DSOURCE_ROOT=${CMAKE_SOURCE_DIR}"
+		-P "${CMAKE_CURRENT_SOURCE_DIR}/RunArchitectureBoundaryStrictCase.cmake"
 )
+
 set_tests_properties(KytyArchitectureBoundaryIntegration.StrictBaseline PROPERTIES
 	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 15
-	WILL_FAIL TRUE
 )
 
 set(KYTY_INTEGRATION_TEST_TARGETS

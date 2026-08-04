@@ -47,14 +47,14 @@ SOURCE_DEVTOOLS_INCLUDE_PREFIXES = (
     "lib/DevTools/include/Kyty/DevTools/",
 )
 
-# These are the two accepted baseline spellings from e5459171/250383af. They
-# are explicit debt, not a prefix exemption: canonical path aliases remain
-# violations. --strict makes both visible for the future extraction that
-# removes them.
-GRANDFATHERED_AUDIO_GRAPHICS_EDGES = frozenset(
+# These are the only two accepted baseline directives from e5459171/250383af.
+# Source path, physical line, and raw directive spelling must all match;
+# canonical aliases and formatting variants remain violations. --strict makes
+# both visible for the future extraction that removes them.
+GRANDFATHERED_AUDIO_GRAPHICS_DIRECTIVES = frozenset(
     {
-        ("emulator/src/Audio.cpp", "Emulator/Graphics/GuestTextureLayout.h"),
-        ("emulator/src/Audio.cpp", "Emulator/Graphics/Objects/GpuMemory.h"),
+        ("emulator/src/Audio.cpp", 11, '#include "Emulator/Graphics/GuestTextureLayout.h"'),
+        ("emulator/src/Audio.cpp", 12, '#include "Emulator/Graphics/Objects/GpuMemory.h"'),
     }
 )
 
@@ -71,6 +71,14 @@ class Violation:
             return f"{self.source_path}:{self.line_number}: {self.input_error or 'uncheckable nonliteral include'}"
         assert self.rule is not None
         return f"{self.source_path}:{self.line_number}: forbidden include ({self.rule}): {self.include_path}"
+
+
+@dataclass(frozen=True)
+class IncludeDirective:
+    line_number: int
+    include_path: Optional[str]
+    raw_physical_line: str
+    source_has_utf8_bom: bool
 
 
 def _resolve_source_root(source_root: Path) -> Tuple[Optional[Path], Optional[str]]:
@@ -112,7 +120,7 @@ def _read_allowlisted_source(root: Path, relative_path: str) -> Tuple[Optional[s
         return None, f"{relative_path}: source file exceeds {MAX_SOURCE_BYTES} byte limit"
 
     try:
-        return contents.decode("utf-8-sig"), None
+        return contents.decode("utf-8"), None
     except UnicodeDecodeError:
         return None, f"{relative_path}: source file is not valid UTF-8"
 
@@ -135,7 +143,7 @@ def _canonical_include_path(include_path: str) -> str:
 
 def _is_absolute_include_path(include_path: str) -> bool:
     normalized = include_path.replace("\\", "/")
-    return normalized.startswith("/") or (len(normalized) >= 3 and normalized[1] == ":" and normalized[2] == "/")
+    return normalized.startswith("/") or (len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":")
 
 
 def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
@@ -189,6 +197,30 @@ def _splice_escaped_newlines(contents: str) -> Tuple[str, List[int]]:
     return "".join(output), line_numbers
 
 
+def _physical_source_lines(contents: str) -> List[str]:
+    """Split source lines only on CR/LF, preserving all directive whitespace."""
+
+    lines: List[str] = []
+    start = 0
+    index = 0
+    while index < len(contents):
+        if contents[index] == "\r":
+            lines.append(contents[start:index])
+            index += 1
+            if index < len(contents) and contents[index] == "\n":
+                index += 1
+            start = index
+            continue
+        if contents[index] == "\n":
+            lines.append(contents[start:index])
+            index += 1
+            start = index
+            continue
+        index += 1
+    lines.append(contents[start:])
+    return lines
+
+
 def _skip_quoted_literal(contents: str, start: int) -> int:
     quote = contents[start]
     index = start + 1
@@ -234,11 +266,14 @@ def _consume_header_name(contents: str, start: int, terminator: str) -> Tuple[Op
     return None, index
 
 
-def _preprocessor_includes(contents: str) -> Iterable[Tuple[int, Optional[str]]]:
+def _preprocessor_includes(contents: str) -> Iterable[IncludeDirective]:
     """Return literal headers or fail-closed nonliteral includes from C++ text."""
 
-    spliced_contents, line_numbers = _splice_escaped_newlines(contents)
-    directives: List[Tuple[int, Optional[str]]] = []
+    physical_lines = _physical_source_lines(contents)
+    source_has_utf8_bom = contents.startswith("\ufeff")
+    scan_contents = contents[1:] if source_has_utf8_bom else contents
+    spliced_contents, line_numbers = _splice_escaped_newlines(scan_contents)
+    directives: List[IncludeDirective] = []
 
     prefix = 0
     after_hash = 1
@@ -274,6 +309,12 @@ def _preprocessor_includes(contents: str) -> Iterable[Tuple[int, Optional[str]]]
             index += 1
         reset_line()
 
+    def append_directive(include_path: Optional[str]) -> None:
+        raw_physical_line = ""
+        if 0 < directive_line <= len(physical_lines):
+            raw_physical_line = physical_lines[directive_line - 1]
+        directives.append(IncludeDirective(directive_line, include_path, raw_physical_line, source_has_utf8_bom))
+
     while index < len(spliced_contents):
         character = spliced_contents[index]
         if character in "\r\n":
@@ -303,24 +344,24 @@ def _preprocessor_includes(contents: str) -> Iterable[Tuple[int, Optional[str]]]
 
         if state == after_include and character == "<":
             include_path, index = _consume_header_name(spliced_contents, index, ">")
-            directives.append((directive_line, include_path))
+            append_directive(include_path)
             state = not_directive
             continue
         if state == after_include and character == '"':
             include_path, index = _consume_header_name(spliced_contents, index, '"')
-            directives.append((directive_line, include_path))
+            append_directive(include_path)
             state = not_directive
             continue
 
         if character == "R" and index + 1 < len(spliced_contents) and spliced_contents[index + 1] == '"':
             if state == after_include and include_separator_seen:
-                directives.append((directive_line, None))
+                append_directive(None)
             state = not_directive
             index = _skip_raw_string_literal(spliced_contents, index)
             continue
         if character in ('"', "'"):
             if state == after_include and include_separator_seen:
-                directives.append((directive_line, None))
+                append_directive(None)
             state = not_directive
             index = _skip_quoted_literal(spliced_contents, index)
             continue
@@ -357,7 +398,7 @@ def _preprocessor_includes(contents: str) -> Iterable[Tuple[int, Optional[str]]]
                 state = not_directive
         elif state == after_include:
             if include_separator_seen:
-                directives.append((directive_line, None))
+                append_directive(None)
             state = not_directive
         index += 1
 
@@ -389,7 +430,9 @@ def check_source_root(source_root: Path, strict: bool = False) -> CheckResult:
         if contents is None:
             continue
 
-        for line_number, include_path in _preprocessor_includes(contents):
+        for directive in _preprocessor_includes(contents):
+            line_number = directive.line_number
+            include_path = directive.include_path
             if include_path is None:
                 violations.append(Violation(relative_path, line_number, None, None))
                 continue
@@ -399,7 +442,11 @@ def check_source_root(source_root: Path, strict: bool = False) -> CheckResult:
             rule = _rule_for_include(relative_path, include_path)
             if rule is None:
                 continue
-            if not strict and (relative_path, include_path) in GRANDFATHERED_AUDIO_GRAPHICS_EDGES:
+            if not strict and (
+                relative_path,
+                directive.line_number,
+                directive.raw_physical_line,
+            ) in GRANDFATHERED_AUDIO_GRAPHICS_DIRECTIVES and not directive.source_has_utf8_bom:
                 continue
             violations.append(Violation(relative_path, line_number, rule, include_path))
 
@@ -628,6 +675,31 @@ class BoundaryCheckerTests(unittest.TestCase):
                 ),
             )
 
+    def test_rejects_drive_qualified_allowlisted_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root,
+                "emulator/src/Audio.cpp",
+                '#include "C:..\\..\\source\\emulator\\include\\Emulator\\Graphics\\GuestTextureLayout.h"\n',
+            )
+            self.write_fixture(
+                root,
+                "emulator/src/Loader/RuntimeLinker.cpp",
+                '#include "D:..\\..\\source\\devtools\\include\\Kyty\\DevTools\\Telemetry\\Progress.h"\n',
+            )
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Audio.cpp:1: uncheckable absolute include",
+                        "emulator/src/Loader/RuntimeLinker.cpp:1: uncheckable absolute include",
+                    ),
+                ),
+            )
+
     def test_rejects_nonliteral_allowlisted_include(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -684,7 +756,8 @@ class BoundaryCheckerTests(unittest.TestCase):
             self.write_fixture(
                 root,
                 "emulator/src/Audio.cpp",
-                '#include "Emulator/Graphics/GuestTextureLayout.h"\n'
+                "\n" * 10
+                + '#include "Emulator/Graphics/GuestTextureLayout.h"\n'
                 '#include "Emulator/Graphics/Objects/GpuMemory.h"\n',
             )
 
@@ -694,11 +767,57 @@ class BoundaryCheckerTests(unittest.TestCase):
                 CheckResult(
                     exit_code=1,
                     diagnostics=(
-                        "emulator/src/Audio.cpp:1: forbidden include (Audio -> Graphics): Emulator/Graphics/GuestTextureLayout.h",
-                        "emulator/src/Audio.cpp:2: forbidden include (Audio -> Graphics): Emulator/Graphics/Objects/GpuMemory.h",
+                        "emulator/src/Audio.cpp:11: forbidden include (Audio -> Graphics): Emulator/Graphics/GuestTextureLayout.h",
+                        "emulator/src/Audio.cpp:12: forbidden include (Audio -> Graphics): Emulator/Graphics/Objects/GpuMemory.h",
                     ),
                 ),
             )
+
+    def test_grandfather_requires_exact_baseline_directive_spelling(self) -> None:
+        header = "Emulator/Graphics/GuestTextureLayout.h"
+        variants = (
+            f"#include<{header}>\n",
+            f"# include \"{header}\"\n",
+            f"#include\\\n\"{header}\"\n",
+            f"#include \"{header}\" // retained debt\n",
+        )
+
+        for directive in variants:
+            with self.subTest(directive=directive), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.write_fixture(root, "emulator/src/Audio.cpp", "\n" * 10 + directive)
+
+                self.assertEqual(
+                    check_source_root(root),
+                    CheckResult(
+                        exit_code=1,
+                        diagnostics=(f"emulator/src/Audio.cpp:11: forbidden include (Audio -> Graphics): {header}",),
+                    ),
+                )
+
+    def test_grandfather_requires_exact_baseline_line_and_bom_free_text(self) -> None:
+        guest_texture = "Emulator/Graphics/GuestTextureLayout.h"
+        gpu_memory = "Emulator/Graphics/Objects/GpuMemory.h"
+        fixtures = (
+            (
+                "\n" * 9 + f'#include "{guest_texture}"\n' + f'#include "{gpu_memory}"\n',
+                (
+                    f"emulator/src/Audio.cpp:10: forbidden include (Audio -> Graphics): {guest_texture}",
+                    f"emulator/src/Audio.cpp:11: forbidden include (Audio -> Graphics): {gpu_memory}",
+                ),
+            ),
+            (
+                "\ufeff" + "\n" * 10 + f'#include "{guest_texture}"\n',
+                (f"emulator/src/Audio.cpp:11: forbidden include (Audio -> Graphics): {guest_texture}",),
+            ),
+        )
+
+        for contents, diagnostics in fixtures:
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.write_fixture(root, "emulator/src/Audio.cpp", contents)
+
+                self.assertEqual(check_source_root(root), CheckResult(exit_code=1, diagnostics=diagnostics))
 
 
 def parse_arguments(argv: Optional[Iterable[str]]) -> argparse.Namespace:
