@@ -1,0 +1,346 @@
+#include "ShaderParseInternal.h"
+
+#ifdef KYTY_EMU_ENABLED
+
+namespace Kyty::Libs::Graphics {
+
+KYTY_SHADER_PARSER(shader_parse_vopc)
+{
+	EXIT_IF(dst == nullptr);
+	EXIT_IF(src == nullptr);
+	EXIT_IF(buffer == nullptr || buffer < src);
+
+	KYTY_TYPE_STR("vopc");
+
+	uint32_t opcode = (buffer[0] >> 17u) & 0xffu;
+	uint32_t src0   = (buffer[0] >> 0u) & 0x1ffu;
+	uint32_t vsrc1  = (buffer[0] >> 9u) & 0xffu;
+	const bool sdwa = (src0 == 249u);
+	const bool dpp  = (src0 == 250u);
+
+	uint32_t size = ((sdwa || dpp) ? 2u : 1u);
+
+	src0               = ((sdwa || dpp) ? (buffer[1] >> 0u) & 0xffu : src0);
+	uint32_t sdst      = (sdwa ? (buffer[1] >> 8u) & 0x7fu : 0);
+	uint32_t sd        = (sdwa ? (buffer[1] >> 15u) & 0x1u : 0);
+	uint32_t src0_sel  = (sdwa ? (buffer[1] >> 16u) & 0x7u : 6);
+	uint32_t src0_sext = (sdwa ? (buffer[1] >> 19u) & 0x1u : 0);
+	uint32_t src0_neg  = (sdwa ? (buffer[1] >> 20u) & 0x1u : 0);
+	uint32_t src0_abs  = (sdwa ? (buffer[1] >> 21u) & 0x1u : 0);
+	uint32_t s0        = (sdwa ? (buffer[1] >> 23u) & 0x1u : 1);
+	uint32_t src1_sel  = (sdwa ? (buffer[1] >> 24u) & 0x7u : 6);
+	uint32_t src1_sext = (sdwa ? (buffer[1] >> 27u) & 0x1u : 0);
+	uint32_t src1_neg  = (sdwa ? (buffer[1] >> 28u) & 0x1u : 0);
+	uint32_t src1_abs  = (sdwa ? (buffer[1] >> 29u) & 0x1u : 0);
+	uint32_t s1        = (sdwa ? (buffer[1] >> 31u) & 0x1u : 0);
+
+	// SDWA SEL 0-6: BYTE_0..3, WORD_0..1, DWORD. Zero-extend only for now
+	// (src*_sext is a separate path).
+	EXIT_NOT_IMPLEMENTED(src0_sel > 6);
+	EXIT_NOT_IMPLEMENTED(src0_sext != 0);
+	EXIT_NOT_IMPLEMENTED(src1_sel > 6);
+	EXIT_NOT_IMPLEMENTED(src1_sext != 0);
+
+	ShaderInstruction inst;
+	inst.pc      = pc;
+	inst.src[0]  = operand_parse(src0 + ((dpp || s0 == 0) ? 256 : 0));
+	inst.src[1]  = operand_parse(vsrc1 + (s1 == 0 ? 256 : 0));
+	inst.src_num = 2;
+
+	if (inst.src[0].type == ShaderOperandType::LiteralConstant)
+	{
+		inst.src[0].constant.u = buffer[size];
+		size++;
+	}
+
+	inst.src[0].swizzle  = static_cast<uint8_t>(src0_sel);
+	inst.src[1].swizzle  = static_cast<uint8_t>(src1_sel);
+	inst.src[0].absolute = (src0_abs != 0);
+	inst.src[1].absolute = (src1_abs != 0);
+	inst.src[0].negate   = (src0_neg != 0);
+	inst.src[1].negate   = (src1_neg != 0);
+	inst.src[0].dpp                = dpp;
+	inst.src[0].dpp_ctrl           = static_cast<uint16_t>((buffer[1] >> 8u) & 0x1ffu);
+	inst.src[0].dpp_fetch_inactive = dpp && ((buffer[1] & (1u << 18u)) != 0);
+	inst.src[0].dpp_bound_ctrl     = dpp && ((buffer[1] & (1u << 19u)) != 0);
+	inst.src[0].dpp_bank_mask      = static_cast<uint8_t>((buffer[1] >> 24u) & 0xfu);
+	inst.src[0].dpp_row_mask       = static_cast<uint8_t>((buffer[1] >> 28u) & 0xfu);
+
+	inst.format = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
+	if (sd == 0)
+	{
+		inst.dst.type = ShaderOperandType::VccLo;
+	} else
+	{
+		inst.dst = operand_parse(sdst);
+	}
+	inst.dst.size = 2;
+
+	switch (opcode)
+	{
+		case 0x00: inst.type = ShaderInstructionType::VCmpFF32; break;
+		case 0x01: inst.type = ShaderInstructionType::VCmpLtF32; break;
+		case 0x02: inst.type = ShaderInstructionType::VCmpEqF32; break;
+		case 0x03: inst.type = ShaderInstructionType::VCmpLeF32; break;
+		case 0x04: inst.type = ShaderInstructionType::VCmpGtF32; break;
+		case 0x05: inst.type = ShaderInstructionType::VCmpLgF32; break;
+		case 0x06: inst.type = ShaderInstructionType::VCmpGeF32; break;
+		case 0x07: inst.type = ShaderInstructionType::VCmpOF32; break;
+		case 0x08: inst.type = ShaderInstructionType::VCmpUF32; break;
+		case 0x09: inst.type = ShaderInstructionType::VCmpNgeF32; break;
+		case 0x0a: inst.type = ShaderInstructionType::VCmpNlgF32; break;
+		case 0x0b: inst.type = ShaderInstructionType::VCmpNgtF32; break;
+		case 0x0c: inst.type = ShaderInstructionType::VCmpNleF32; break;
+		case 0x0d: inst.type = ShaderInstructionType::VCmpNeqF32; break;
+		case 0x0e: inst.type = ShaderInstructionType::VCmpNltF32; break;
+		case 0x0f: inst.type = ShaderInstructionType::VCmpTruF32; break;
+		case 0x10: KYTY_NI("v_cmpx_f_f32"); break;
+		case 0x11: inst.type = ShaderInstructionType::VCmpxLtF32; break;
+		case 0x12: inst.type = ShaderInstructionType::VCmpxEqF32; break;
+		case 0x13: inst.type = ShaderInstructionType::VCmpxLeF32; break;
+		case 0x14: inst.type = ShaderInstructionType::VCmpxGtF32; break;
+		case 0x15: inst.type = ShaderInstructionType::VCmpxLgF32; break;
+		case 0x16: inst.type = ShaderInstructionType::VCmpxGeF32; break;
+		case 0x17: KYTY_NI("v_cmpx_o_f32"); break;
+		case 0x18: KYTY_NI("v_cmpx_u_f32"); break;
+		case 0x19: inst.type = ShaderInstructionType::VCmpxNgeF32; break;
+		case 0x1A: inst.type = ShaderInstructionType::VCmpxNlgF32; break;
+		case 0x1B: inst.type = ShaderInstructionType::VCmpxNgtF32; break;
+		case 0x1C: inst.type = ShaderInstructionType::VCmpxNleF32; break;
+		case 0x1d: inst.type = ShaderInstructionType::VCmpxNeqF32; break;
+		case 0x1E: inst.type = ShaderInstructionType::VCmpxNltF32; break;
+		case 0x1F: KYTY_NI("v_cmpx_tru_f32"); break;
+		case 0x20: KYTY_NI("v_cmp_f_f64"); break;
+		case 0x21: KYTY_NI("v_cmp_lt_f64"); break;
+		case 0x22: KYTY_NI("v_cmp_eq_f64"); break;
+		case 0x23: KYTY_NI("v_cmp_le_f64"); break;
+		case 0x24: KYTY_NI("v_cmp_gt_f64"); break;
+		case 0x25: KYTY_NI("v_cmp_lg_f64"); break;
+		case 0x26: KYTY_NI("v_cmp_ge_f64"); break;
+		case 0x27: KYTY_NI("v_cmp_o_f64"); break;
+		case 0x28: KYTY_NI("v_cmp_u_f64"); break;
+		case 0x29: KYTY_NI("v_cmp_nge_f64"); break;
+		case 0x2A: KYTY_NI("v_cmp_nlg_f64"); break;
+		case 0x2B: KYTY_NI("v_cmp_ngt_f64"); break;
+		case 0x2C: KYTY_NI("v_cmp_nle_f64"); break;
+		case 0x2D: KYTY_NI("v_cmp_neq_f64"); break;
+		case 0x2E: KYTY_NI("v_cmp_nlt_f64"); break;
+		case 0x2F: KYTY_NI("v_cmp_tru_f64"); break;
+		case 0x30: KYTY_NI("v_cmpx_f_f64"); break;
+		case 0x31: KYTY_NI("v_cmpx_lt_f64"); break;
+		case 0x32: KYTY_NI("v_cmpx_eq_f64"); break;
+		case 0x33: KYTY_NI("v_cmpx_le_f64"); break;
+		case 0x34: KYTY_NI("v_cmpx_gt_f64"); break;
+		case 0x35: KYTY_NI("v_cmpx_lg_f64"); break;
+		case 0x36: KYTY_NI("v_cmpx_ge_f64"); break;
+		case 0x37: KYTY_NI("v_cmpx_o_f64"); break;
+		case 0x38: KYTY_NI("v_cmpx_u_f64"); break;
+		case 0x39: KYTY_NI("v_cmpx_nge_f64"); break;
+		case 0x3A: KYTY_NI("v_cmpx_nlg_f64"); break;
+		case 0x3B: KYTY_NI("v_cmpx_ngt_f64"); break;
+		case 0x3C: KYTY_NI("v_cmpx_nle_f64"); break;
+		case 0x3D: KYTY_NI("v_cmpx_neq_f64"); break;
+		case 0x3E: KYTY_NI("v_cmpx_nlt_f64"); break;
+		case 0x3F: KYTY_NI("v_cmpx_tru_f64"); break;
+		case 0x40: KYTY_NI("v_cmps_f_f32"); break;
+		case 0x41: KYTY_NI("v_cmps_lt_f32"); break;
+		case 0x42: KYTY_NI("v_cmps_eq_f32"); break;
+		case 0x43: KYTY_NI("v_cmps_le_f32"); break;
+		case 0x44: KYTY_NI("v_cmps_gt_f32"); break;
+		case 0x45: KYTY_NI("v_cmps_lg_f32"); break;
+		case 0x46: KYTY_NI("v_cmps_ge_f32"); break;
+		case 0x47: KYTY_NI("v_cmps_o_f32"); break;
+		case 0x48: KYTY_NI("v_cmps_u_f32"); break;
+		case 0x49: KYTY_NI("v_cmps_nge_f32"); break;
+		case 0x4A: KYTY_NI("v_cmps_nlg_f32"); break;
+		case 0x4B: KYTY_NI("v_cmps_ngt_f32"); break;
+		case 0x4C: KYTY_NI("v_cmps_nle_f32"); break;
+		case 0x4D: KYTY_NI("v_cmps_neq_f32"); break;
+		case 0x4E: KYTY_NI("v_cmps_nlt_f32"); break;
+		case 0x4F: KYTY_NI("v_cmps_tru_f32"); break;
+		case 0x50: KYTY_NI("v_cmpsx_f_f32"); break;
+		case 0x51: KYTY_NI("v_cmpsx_lt_f32"); break;
+		case 0x52: KYTY_NI("v_cmpsx_eq_f32"); break;
+		case 0x53: KYTY_NI("v_cmpsx_le_f32"); break;
+		case 0x54: KYTY_NI("v_cmpsx_gt_f32"); break;
+		case 0x55: KYTY_NI("v_cmpsx_lg_f32"); break;
+		case 0x56: KYTY_NI("v_cmpsx_ge_f32"); break;
+		case 0x57: KYTY_NI("v_cmpsx_o_f32"); break;
+		case 0x58: KYTY_NI("v_cmpsx_u_f32"); break;
+		case 0x59: KYTY_NI("v_cmpsx_nge_f32"); break;
+		case 0x5A: KYTY_NI("v_cmpsx_nlg_f32"); break;
+		case 0x5B: KYTY_NI("v_cmpsx_ngt_f32"); break;
+		case 0x5C: KYTY_NI("v_cmpsx_nle_f32"); break;
+		case 0x5D: KYTY_NI("v_cmpsx_neq_f32"); break;
+		case 0x5E: KYTY_NI("v_cmpsx_nlt_f32"); break;
+		case 0x5F: KYTY_NI("v_cmpsx_tru_f32"); break;
+		case 0x60: KYTY_NI("v_cmps_f_f64"); break;
+		case 0x61: KYTY_NI("v_cmps_lt_f64"); break;
+		case 0x62: KYTY_NI("v_cmps_eq_f64"); break;
+		case 0x63: KYTY_NI("v_cmps_le_f64"); break;
+		case 0x64: KYTY_NI("v_cmps_gt_f64"); break;
+		case 0x65: KYTY_NI("v_cmps_lg_f64"); break;
+		case 0x66: KYTY_NI("v_cmps_ge_f64"); break;
+		case 0x67: KYTY_NI("v_cmps_o_f64"); break;
+		case 0x68: KYTY_NI("v_cmps_u_f64"); break;
+		case 0x69: KYTY_NI("v_cmps_nge_f64"); break;
+		case 0x6A: KYTY_NI("v_cmps_nlg_f64"); break;
+		case 0x6B: KYTY_NI("v_cmps_ngt_f64"); break;
+		case 0x6C: KYTY_NI("v_cmps_nle_f64"); break;
+		case 0x6D: KYTY_NI("v_cmps_neq_f64"); break;
+		case 0x6E: KYTY_NI("v_cmps_nlt_f64"); break;
+		case 0x6F: KYTY_NI("v_cmps_tru_f64"); break;
+		case 0x70: KYTY_NI("v_cmpsx_f_f64"); break;
+		case 0x71: KYTY_NI("v_cmpsx_lt_f64"); break;
+		case 0x72: KYTY_NI("v_cmpsx_eq_f64"); break;
+		case 0x73: KYTY_NI("v_cmpsx_le_f64"); break;
+		case 0x74: KYTY_NI("v_cmpsx_gt_f64"); break;
+		case 0x75: KYTY_NI("v_cmpsx_lg_f64"); break;
+		case 0x76: KYTY_NI("v_cmpsx_ge_f64"); break;
+		case 0x77: KYTY_NI("v_cmpsx_o_f64"); break;
+		case 0x78: KYTY_NI("v_cmpsx_u_f64"); break;
+		case 0x79: KYTY_NI("v_cmpsx_nge_f64"); break;
+		case 0x7A: KYTY_NI("v_cmpsx_nlg_f64"); break;
+		case 0x7B: KYTY_NI("v_cmpsx_ngt_f64"); break;
+		case 0x7C: KYTY_NI("v_cmpsx_nle_f64"); break;
+		case 0x7D: KYTY_NI("v_cmpsx_neq_f64"); break;
+		case 0x7E: KYTY_NI("v_cmpsx_nlt_f64"); break;
+		case 0x7F: KYTY_NI("v_cmpsx_tru_f64"); break;
+		case 0x80: inst.type = ShaderInstructionType::VCmpFI32; break;
+		case 0x81: inst.type = ShaderInstructionType::VCmpLtI32; break;
+		case 0x82: inst.type = ShaderInstructionType::VCmpEqI32; break;
+		case 0x83: inst.type = ShaderInstructionType::VCmpLeI32; break;
+		case 0x84: inst.type = ShaderInstructionType::VCmpGtI32; break;
+		case 0x85: inst.type = ShaderInstructionType::VCmpNeI32; break;
+		case 0x86: inst.type = ShaderInstructionType::VCmpGeI32; break;
+		case 0x87: inst.type = ShaderInstructionType::VCmpTI32; break;
+		case 0x88: KYTY_NI("v_cmp_class_f32"); break;
+		case 0x89: KYTY_NI("v_cmp_lt_i16"); break;
+		case 0x8A: KYTY_NI("v_cmp_eq_i16"); break;
+		case 0x8B: KYTY_NI("v_cmp_le_i16"); break;
+		case 0x8C: KYTY_NI("v_cmp_gt_i16"); break;
+		case 0x8D: KYTY_NI("v_cmp_ne_i16"); break;
+		case 0x8E: KYTY_NI("v_cmp_ge_i16"); break;
+		case 0x8F: KYTY_NI("v_cmp_class_f16"); break;
+		case 0x90: KYTY_NI("v_cmpx_f_i32"); break;
+		case 0x91: inst.type = ShaderInstructionType::VCmpxLtI32; break;
+		case 0x92: inst.type = ShaderInstructionType::VCmpxEqI32; break;
+		case 0x93: inst.type = ShaderInstructionType::VCmpxLeI32; break;
+		case 0x94: inst.type = ShaderInstructionType::VCmpxGtI32; break;
+		case 0x95: inst.type = ShaderInstructionType::VCmpxNeI32; break;
+		case 0x96: inst.type = ShaderInstructionType::VCmpxGeI32; break;
+		case 0x97: KYTY_NI("v_cmpx_t_i32"); break;
+		case 0x98: KYTY_NI("v_cmpx_class_f32"); break;
+		case 0x99: KYTY_NI("v_cmpx_lt_i16"); break;
+		case 0x9A: KYTY_NI("v_cmpx_eq_i16"); break;
+		case 0x9B: KYTY_NI("v_cmpx_le_i16"); break;
+		case 0x9C: KYTY_NI("v_cmpx_gt_i16"); break;
+		case 0x9D: KYTY_NI("v_cmpx_ne_i16"); break;
+		case 0x9E: KYTY_NI("v_cmpx_ge_i16"); break;
+		case 0x9F: KYTY_NI("v_cmpx_class_f16"); break;
+		case 0xA0: KYTY_NI("v_cmp_f_i64"); break;
+		case 0xA1: KYTY_NI("v_cmp_lt_i64"); break;
+		case 0xA2: KYTY_NI("v_cmp_eq_i64"); break;
+		case 0xA3: KYTY_NI("v_cmp_le_i64"); break;
+		case 0xA4: KYTY_NI("v_cmp_gt_i64"); break;
+		case 0xA5: KYTY_NI("v_cmp_ne_i64"); break;
+		case 0xA6: KYTY_NI("v_cmp_ge_i64"); break;
+		case 0xA7: KYTY_NI("v_cmp_t_i64"); break;
+		case 0xA8: KYTY_NI("v_cmp_class_f64"); break;
+		case 0xA9: KYTY_NI("v_cmp_lt_u16"); break;
+		case 0xAA: KYTY_NI("v_cmp_eq_u16"); break;
+		case 0xAB: KYTY_NI("v_cmp_le_u16"); break;
+		case 0xAC: KYTY_NI("v_cmp_gt_u16"); break;
+		case 0xAD: KYTY_NI("v_cmp_ne_u16"); break;
+		case 0xAE: KYTY_NI("v_cmp_ge_u16"); break;
+		case 0xB0: KYTY_NI("v_cmpx_f_i64"); break;
+		case 0xB1: KYTY_NI("v_cmpx_lt_i64"); break;
+		case 0xB2: KYTY_NI("v_cmpx_eq_i64"); break;
+		case 0xB3: KYTY_NI("v_cmpx_le_i64"); break;
+		case 0xB4: KYTY_NI("v_cmpx_gt_i64"); break;
+		case 0xB5: KYTY_NI("v_cmpx_ne_i64"); break;
+		case 0xB6: KYTY_NI("v_cmpx_ge_i64"); break;
+		case 0xB7: KYTY_NI("v_cmpx_t_i64"); break;
+		case 0xB8: KYTY_NI("v_cmpx_class_f64"); break;
+		case 0xB9: KYTY_NI("v_cmpx_lt_u16"); break;
+		case 0xBA: KYTY_NI("v_cmpx_eq_u16"); break;
+		case 0xBB: KYTY_NI("v_cmpx_le_u16"); break;
+		case 0xBC: KYTY_NI("v_cmpx_gt_u16"); break;
+		case 0xBD: KYTY_NI("v_cmpx_ne_u16"); break;
+		case 0xBE: KYTY_NI("v_cmpx_ge_u16"); break;
+		case 0xc0: inst.type = ShaderInstructionType::VCmpFU32; break;
+		case 0xc1: inst.type = ShaderInstructionType::VCmpLtU32; break;
+		case 0xc2: inst.type = ShaderInstructionType::VCmpEqU32; break;
+		case 0xc3: inst.type = ShaderInstructionType::VCmpLeU32; break;
+		case 0xc4: inst.type = ShaderInstructionType::VCmpGtU32; break;
+		case 0xc5: inst.type = ShaderInstructionType::VCmpNeU32; break;
+		case 0xc6: inst.type = ShaderInstructionType::VCmpGeU32; break;
+		case 0xc7: inst.type = ShaderInstructionType::VCmpTU32; break;
+		case 0xC8: KYTY_NI("v_cmp_f_f16"); break;
+		case 0xC9: KYTY_NI("v_cmp_lt_f16"); break;
+		case 0xCA: KYTY_NI("v_cmp_eq_f16"); break;
+		case 0xCB: KYTY_NI("v_cmp_le_f16"); break;
+		case 0xCC: KYTY_NI("v_cmp_gt_f16"); break;
+		case 0xCD: KYTY_NI("v_cmp_lg_f16"); break;
+		case 0xCE: KYTY_NI("v_cmp_ge_f16"); break;
+		case 0xCF: KYTY_NI("v_cmp_o_f16"); break;
+		case 0xD0: KYTY_NI("v_cmpx_f_u32"); break;
+		case 0xD1: inst.type = ShaderInstructionType::VCmpxLtU32; break;
+		case 0xd2: inst.type = ShaderInstructionType::VCmpxEqU32; break;
+		case 0xD3: inst.type = ShaderInstructionType::VCmpxLeU32; break;
+		case 0xd4: inst.type = ShaderInstructionType::VCmpxGtU32; break;
+		case 0xd5: inst.type = ShaderInstructionType::VCmpxNeU32; break;
+		case 0xd6: inst.type = ShaderInstructionType::VCmpxGeU32; break;
+		case 0xD7: KYTY_NI("v_cmpx_t_u32"); break;
+		case 0xD8: KYTY_NI("v_cmpx_f_f16"); break;
+		case 0xD9: KYTY_NI("v_cmpx_lt_f16"); break;
+		case 0xDA: KYTY_NI("v_cmpx_eq_f16"); break;
+		case 0xDB: KYTY_NI("v_cmpx_le_f16"); break;
+		case 0xDC: KYTY_NI("v_cmpx_gt_f16"); break;
+		case 0xDD: KYTY_NI("v_cmpx_lg_f16"); break;
+		case 0xDE: KYTY_NI("v_cmpx_ge_f16"); break;
+		case 0xDF: KYTY_NI("v_cmpx_o_f16"); break;
+		case 0xE0: KYTY_NI("v_cmp_f_u64"); break;
+		case 0xE1: KYTY_NI("v_cmp_lt_u64"); break;
+		case 0xE2: KYTY_NI("v_cmp_eq_u64"); break;
+		case 0xE3: KYTY_NI("v_cmp_le_u64"); break;
+		case 0xE4: KYTY_NI("v_cmp_gt_u64"); break;
+		case 0xE5: KYTY_NI("v_cmp_ne_u64"); break;
+		case 0xE6: KYTY_NI("v_cmp_ge_u64"); break;
+		case 0xE7: KYTY_NI("v_cmp_t_u64"); break;
+		case 0xE8: KYTY_NI("v_cmp_u_f16"); break;
+		case 0xE9: KYTY_NI("v_cmp_nge_f16"); break;
+		case 0xEA: KYTY_NI("v_cmp_nlg_f16"); break;
+		case 0xEB: KYTY_NI("v_cmp_ngt_f16"); break;
+		case 0xEC: KYTY_NI("v_cmp_nle_f16"); break;
+		case 0xED: KYTY_NI("v_cmp_neq_f16"); break;
+		case 0xEE: KYTY_NI("v_cmp_nlt_f16"); break;
+		case 0xEF: KYTY_NI("v_cmp_tru_f16"); break;
+		case 0xF0: KYTY_NI("v_cmpx_f_u64"); break;
+		case 0xF1: KYTY_NI("v_cmpx_lt_u64"); break;
+		case 0xF2: KYTY_NI("v_cmpx_eq_u64"); break;
+		case 0xF3: KYTY_NI("v_cmpx_le_u64"); break;
+		case 0xF4: KYTY_NI("v_cmpx_gt_u64"); break;
+		case 0xF5: KYTY_NI("v_cmpx_ne_u64"); break;
+		case 0xF6: KYTY_NI("v_cmpx_ge_u64"); break;
+		case 0xF7: KYTY_NI("v_cmpx_t_u64"); break;
+		case 0xF8: KYTY_NI("v_cmpx_u_f16"); break;
+		case 0xF9: KYTY_NI("v_cmpx_nge_f16"); break;
+		case 0xFA: KYTY_NI("v_cmpx_nlg_f16"); break;
+		case 0xFB: KYTY_NI("v_cmpx_ngt_f16"); break;
+		case 0xFC: KYTY_NI("v_cmpx_nle_f16"); break;
+		case 0xFD: KYTY_NI("v_cmpx_neq_f16"); break;
+		case 0xFE: KYTY_NI("v_cmpx_nlt_f16"); break;
+		case 0xFF: KYTY_NI("v_cmpx_tru_f16"); break;
+
+		default: KYTY_UNKNOWN_OP();
+	}
+	dst->GetInstructions().Add(inst);
+
+	return size;
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+} // namespace Kyty::Libs::Graphics
+
+#endif // KYTY_EMU_ENABLED

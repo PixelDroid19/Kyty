@@ -1,0 +1,141 @@
+#include "ShaderParseInternal.h"
+
+#ifdef KYTY_EMU_ENABLED
+
+namespace Kyty::Libs::Graphics {
+
+KYTY_SHADER_PARSER(shader_parse_sop1)
+{
+	EXIT_IF(dst == nullptr);
+	EXIT_IF(src == nullptr);
+	EXIT_IF(buffer == nullptr || buffer < src);
+
+	KYTY_TYPE_STR("sop1");
+
+	uint32_t opcode = (buffer[0] >> 8u) & 0xffu;
+	uint32_t ssrc0  = (buffer[0] >> 0u) & 0xffu;
+	uint32_t sdst   = (buffer[0] >> 16u) & 0x7fu;
+
+	ShaderInstruction inst;
+	inst.pc      = pc;
+	inst.src[0]  = operand_parse(ssrc0);
+	inst.src_num = 1;
+	inst.dst     = operand_parse(sdst);
+
+	uint32_t size = 1;
+
+	if (inst.src[0].type == ShaderOperandType::LiteralConstant)
+	{
+		inst.src[0].constant.u = buffer[size];
+		size++;
+	}
+
+	switch (opcode)
+	{
+		case 0x03:
+			inst.type   = ShaderInstructionType::SMovB32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
+			break;
+		case 0x04:
+			inst.type        = ShaderInstructionType::SMovB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
+		case 0x05: KYTY_NI("s_cmov_b32"); break;
+		case 0x06: KYTY_NI("s_cmov_b64"); break;
+		case 0x07:
+			inst.type   = ShaderInstructionType::SNotB32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
+			break;
+		case 0x08:
+			inst.type        = ShaderInstructionType::SNotB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
+		case 0x09: KYTY_NI("s_wqm_b32"); break;
+		case 0x0a:
+			inst.type        = ShaderInstructionType::SWqmB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
+		case 0x0B:
+			inst.type   = ShaderInstructionType::SBrevB32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
+			break;
+		case 0x0C: KYTY_NI("s_brev_b64"); break;
+		case 0x0D: KYTY_NI("s_bcnt0_i32_b32"); break;
+		case 0x0E: KYTY_NI("s_bcnt0_i32_b64"); break;
+		case 0x0F: KYTY_NI("s_bcnt1_i32_b32"); break;
+		case 0x10: KYTY_NI("s_bcnt1_i32_b64"); break;
+		case 0x11: KYTY_NI("s_ff0_i32_b32"); break;
+		case 0x12: KYTY_NI("s_ff0_i32_b64"); break;
+		case 0x13: KYTY_NI("s_ff1_i32_b32"); break;
+		case 0x14: KYTY_NI("s_ff1_i32_b64"); break;
+		case 0x15: KYTY_NI("s_flbit_i32_b32"); break;
+		case 0x16: KYTY_NI("s_flbit_i32_b64"); break;
+		case 0x17: KYTY_NI("s_flbit_i32"); break;
+		case 0x18: KYTY_NI("s_flbit_i32_i64"); break;
+		case 0x19: KYTY_NI("s_sext_i32_i8"); break;
+		case 0x1A: KYTY_NI("s_sext_i32_i16"); break;
+		case 0x1B: KYTY_NI("s_bitset0_b32"); break;
+		case 0x1C: KYTY_NI("s_bitset0_b64"); break;
+		case 0x1D: KYTY_NI("s_bitset1_b32"); break;
+		case 0x1E: KYTY_NI("s_bitset1_b64"); break;
+		case 0x1F: KYTY_NI("s_getpc_b64"); break;
+		case 0x20:
+			inst.type        = ShaderInstructionType::SSetpcB64;
+			inst.format      = ShaderInstructionFormat::Saddr;
+			inst.src[0].size = 2;
+			break;
+		case 0x21:
+			inst.type        = ShaderInstructionType::SSwappcB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.src[0].size = 2;
+			inst.dst.size    = 2;
+			break;
+		case 0x22: KYTY_NI("s_rfe_b64"); break;
+		case 0x24:
+			inst.type        = ShaderInstructionType::SAndSaveexecB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
+		case 0x25: KYTY_NI("s_or_saveexec_b64"); break;
+		case 0x26: KYTY_NI("s_xor_saveexec_b64"); break;
+		case 0x27: KYTY_NI("s_andn2_saveexec_b64"); break;
+		case 0x28: KYTY_NI("s_orn2_saveexec_b64"); break;
+		case 0x29: KYTY_NI("s_nand_saveexec_b64"); break;
+		case 0x2A: KYTY_NI("s_nor_saveexec_b64"); break;
+		case 0x2B: KYTY_NI("s_xnor_saveexec_b64"); break;
+		case 0x2C: KYTY_NI("s_quadmask_b32"); break;
+		case 0x2D: KYTY_NI("s_quadmask_b64"); break;
+		case 0x2E: KYTY_NI("s_movrels_b32"); break;
+		case 0x2F: KYTY_NI("s_movrels_b64"); break;
+		case 0x30: KYTY_NI("s_movreld_b32"); break;
+		case 0x31: KYTY_NI("s_movreld_b64"); break;
+		case 0x32: KYTY_NI("s_cbranch_join"); break;
+		case 0x33: KYTY_NI("s_mov_regrd_b32"); break;
+		case 0x34: KYTY_NI("s_abs_i32"); break;
+		case 0x35: KYTY_NI("s_mov_fed_b32"); break;
+		case 0x37:
+			inst.type        = ShaderInstructionType::SAndn1SaveexecB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			break;
+
+		default: KYTY_UNKNOWN_OP();
+	}
+
+	dst->GetInstructions().Add(inst);
+
+	return size;
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+} // namespace Kyty::Libs::Graphics
+
+#endif // KYTY_EMU_ENABLED
