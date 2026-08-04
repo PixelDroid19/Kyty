@@ -13,6 +13,18 @@ uint64_t NowMicroseconds()
 	    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+uint64_t NextPeriodicIntervalMicroseconds(uint32_t samples, uint32_t frequency, uint64_t* remainder)
+{
+	if (samples == 0 || frequency == 0 || remainder == nullptr)
+	{
+		return 0;
+	}
+	*remainder %= frequency;
+	const uint64_t numerator = 1'000'000ull * samples + *remainder;
+	*remainder               = numerator % frequency;
+	return numerator / frequency;
+}
+
 void SleepUntil(uint64_t deadline_microseconds)
 {
 	constexpr uint64_t max_sleep_microseconds = std::numeric_limits<uint32_t>::max();

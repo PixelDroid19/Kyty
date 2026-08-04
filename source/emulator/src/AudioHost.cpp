@@ -63,18 +63,20 @@ public:
 		AudioPcmFormat       pcm_format         = AudioPcmFormat::Signed16;
 		bool                 queue_error_logged = false;
 		uint64_t             next_deadline      = 0;
+		uint64_t             period_remainder   = 0;
 		std::vector<uint8_t> volume_buffer;
 		std::vector<uint8_t> device_buffer;
 	};
 
 	struct PortIn
 	{
-		bool     used            = false;
-		uint32_t type            = 0;
-		uint32_t samples_num     = 0;
-		uint32_t freq            = 0;
-		Format   format          = Format::Unknown;
-		uint64_t last_input_time = 0;
+		bool     used             = false;
+		uint32_t type             = 0;
+		uint32_t samples_num      = 0;
+		uint32_t freq             = 0;
+		Format   format           = Format::Unknown;
+		uint64_t last_input_time  = 0;
+		uint64_t period_remainder = 0;
 	};
 
 	static bool IsValid(const PortOut* ports, Id handle)
@@ -305,7 +307,11 @@ void HostAudio::SetHostPaused(bool paused)
 		if (port.device_id != 0)
 		{
 			SDL_PauseAudioDevice(port.device_id, paused ? 1 : 0);
-			port.next_deadline = {};
+		}
+		if (port.used)
+		{
+			port.next_deadline    = 0;
+			port.period_remainder = 0;
 		}
 	}
 	if (!paused)
@@ -342,13 +348,15 @@ bool HostAudio::AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_
 
 	for (uint32_t i = 0; i < num; i++)
 	{
-		auto&          port  = m_impl->out_ports[params[i].handle.GetId()];
-		const uint64_t grain = (1'000'000ull * port.samples_num) / port.freq;
-		if (port.next_deadline == 0 || now > port.next_deadline + grain * 4)
+		auto&          port          = m_impl->out_ports[params[i].handle.GetId()];
+		const uint64_t resync_window = (4'000'000ull * port.samples_num) / port.freq;
+		if (port.next_deadline == 0 || (now > port.next_deadline && now - port.next_deadline > resync_window))
 		{
-			port.next_deadline = now;
+			port.next_deadline    = now;
+			port.period_remainder = 0;
 		}
-		port.next_deadline += grain;
+		port.next_deadline +=
+		    Kyty::Emulator::HostClock::NextPeriodicIntervalMicroseconds(port.samples_num, port.freq, &port.period_remainder);
 		wake_deadline = std::max(wake_deadline, port.next_deadline);
 
 		if (params[i].data == nullptr || port.device_id == 0)
@@ -453,12 +461,20 @@ uint32_t HostAudio::AudioInInput(Id handle, void* dest)
 		{
 			return 0;
 		}
-		auto& port           = m_impl->in_ports[handle.GetId()];
-		samples              = port.samples_num;
-		freq                 = port.freq;
-		const uint64_t now   = Kyty::Emulator::HostClock::NowMicroseconds();
-		const uint64_t next  = port.last_input_time + (1000000 * samples) / freq;
-		deadline             = next > now ? next : now;
+		auto& port         = m_impl->in_ports[handle.GetId()];
+		samples            = port.samples_num;
+		freq               = port.freq;
+		const uint64_t now = Kyty::Emulator::HostClock::NowMicroseconds();
+		const uint64_t next =
+		    port.last_input_time + Kyty::Emulator::HostClock::NextPeriodicIntervalMicroseconds(samples, freq, &port.period_remainder);
+		if (next < now)
+		{
+			deadline              = now;
+			port.period_remainder = 0;
+		} else
+		{
+			deadline = next;
+		}
 		port.last_input_time = deadline;
 	}
 	Kyty::Emulator::HostClock::SleepUntil(deadline);
