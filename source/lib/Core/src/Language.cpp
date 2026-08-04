@@ -4,6 +4,8 @@
 #include "Kyty/Core/Hashmap.h"
 #include "Kyty/Core/Vector.h"
 
+#include <memory>
+
 namespace Kyty::Core {
 
 static const char32_t* g_list_numeric       = U"0123456789";
@@ -51,19 +53,61 @@ static const char32_t* g_short_day_russian[] = {U"Пнд", U"Втн", U"Срд",
 
 static const char32_t* g_day_russian[] = {U"Понедельник", U"Вторник", U"Среда", U"Четверг", U"Пятница", U"Суббота", U"Воскресенье"};
 
-Hashmap<String, LanguageId>* g_lang_map = nullptr;
+namespace {
+
+class LanguageState
+{
+public:
+	void Init()
+	{
+		if (m_map != nullptr)
+		{
+			return;
+		}
+
+		auto map = std::make_unique<Hashmap<String, LanguageId>>();
+		map->Put(U"de", LanguageId::German);
+		map->Put(U"en", LanguageId::English);
+		map->Put(U"fr", LanguageId::French);
+		map->Put(U"it", LanguageId::Italian);
+		map->Put(U"pt", LanguageId::Portuguese);
+		map->Put(U"ru", LanguageId::Russian);
+		map->Put(U"es", LanguageId::Spanish);
+
+		m_map = std::move(map);
+	}
+
+	void Shutdown()
+	{
+		m_map.reset();
+	}
+
+	[[nodiscard]] Hashmap<String, LanguageId>* Map() const
+	{
+		EXIT_IF(m_map == nullptr);
+		return m_map.get();
+	}
+
+private:
+	std::unique_ptr<Hashmap<String, LanguageId>> m_map;
+};
+
+LanguageState& GetLanguageState()
+{
+	static LanguageState state;
+	return state;
+}
+
+} // namespace
 
 void Language::Init()
 {
-	g_lang_map = new Hashmap<String, LanguageId>;
+	GetLanguageState().Init();
+}
 
-	g_lang_map->Put(U"de", LanguageId::German);
-	g_lang_map->Put(U"en", LanguageId::English);
-	g_lang_map->Put(U"fr", LanguageId::French);
-	g_lang_map->Put(U"it", LanguageId::Italian);
-	g_lang_map->Put(U"pt", LanguageId::Portuguese);
-	g_lang_map->Put(U"ru", LanguageId::Russian);
-	g_lang_map->Put(U"es", LanguageId::Spanish);
+void Language::Shutdown()
+{
+	GetLanguageState().Shutdown();
 }
 
 
@@ -303,16 +347,17 @@ String Language::GetNameOfDay(int day, LanguageId lang_id)
 
 LanguageId Language::GetId(const String& id)
 {
-	return g_lang_map->Get(id, LanguageId::Unknown);
+	return GetLanguageState().Map()->Get(id, LanguageId::Unknown);
 }
 
 StringList Language::GetLanguages()
 {
 	StringList ret;
+	auto*      map = GetLanguageState().Map();
 
-	FOR_HASH (*g_lang_map)
+	FOR_HASH (*map)
 	{
-		ret.Add(g_lang_map->Key());
+		ret.Add(map->Key());
 	}
 
 	return ret;

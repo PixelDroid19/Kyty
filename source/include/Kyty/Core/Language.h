@@ -26,6 +26,7 @@ enum class LanguageId
 
 namespace Language {
 void Init();
+void Shutdown();
 
 StringList GetLanguages();
 LanguageId GetId(const String& id);

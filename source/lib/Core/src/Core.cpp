@@ -41,6 +41,7 @@ KYTY_SUBSYSTEM_INIT(Core)
 		std::_Exit(kConfigurationErrorExitCode);
 	}
 
+	// Core setup order is memory -> file -> debug -> language -> database -> virtual memory.
 	core_memory_init();
 	core_file_init();
 	core_debug_init(parent->GetArgv()[0]);
@@ -49,8 +50,16 @@ KYTY_SUBSYSTEM_INIT(Core)
 	VirtualMemory::Init();
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Core) {}
+KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Core)
+{
+	// SubsystemsList invokes Core after dependents, while the Core allocator is still available.
+	Language::Shutdown();
+}
 
-KYTY_SUBSYSTEM_DESTROY(Core) {}
+KYTY_SUBSYSTEM_DESTROY(Core)
+{
+	// Keep normal teardown aligned with the fatal-shutdown ownership boundary.
+	Language::Shutdown();
+}
 
 } // namespace Kyty::Core
