@@ -1,5 +1,5 @@
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/Timer.h"
+#include "Emulator/Kernel/TimePort.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -12,7 +12,7 @@ namespace Kyty::Libs {
 
 Core::Time GetTraceTime()
 {
-	return Loader::Timer::GetTime();
+	return Kernel::TimePort::GetTime();
 }
 
 namespace LibcInternal {
