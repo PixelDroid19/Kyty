@@ -24,6 +24,7 @@
 #include "Emulator/Libs/KernelModuleInfo.h"
 #include "Emulator/Libs/LibraryRegistration.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Libs/PosixSemaphore.h"
 #include "Emulator/Loader/Elf.h"
 #include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/RuntimeLinker.h"

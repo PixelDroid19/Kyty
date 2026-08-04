@@ -37,6 +37,7 @@ KERNEL_SOURCE_FILES = (
     "emulator/src/Kernel/FileSystem.cpp",
     "emulator/src/Kernel/Memory.cpp",
     "emulator/src/Kernel/Pthread.cpp",
+    "emulator/src/Kernel/Semaphore.cpp",
     "emulator/src/Kernel/SyncOnAddress.cpp",
     "emulator/src/Kernel/Time.cpp",
 )

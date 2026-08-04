@@ -9,6 +9,7 @@
 #include "Emulator/PresentationStats.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Libs/PosixSemaphore.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 #include "Kyty/UnitTest.h"
