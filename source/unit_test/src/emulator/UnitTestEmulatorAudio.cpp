@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <memory>
+#include <string>
 #include <thread>
 
 UT_BEGIN(EmulatorAudio);
@@ -777,6 +778,12 @@ static void KYTY_SYSV_ABI avplayer_test_event_cb(void* obj_ptr, uint32_t event_i
 
 TEST(EmulatorAudio, AvPlayerSanitizesFileUriAndFiresEvents)
 {
+	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");
+	if (media_path == nullptr || media_path[0] == '\0' || !::Kyty::Libs::AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP();
+	}
+
 	if (!Config::IsInitialized())
 	{
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
@@ -796,9 +803,19 @@ TEST(EmulatorAudio, AvPlayerSanitizesFileUriAndFiresEvents)
 	ASSERT_NE(handle, nullptr);
 
 	AvPlayer::AvPlayerSourceDetails details {};
-	const char* url = "file:///app0/media/intro%20cutscene.mp4";
-	details.uri.name   = url;
-	details.uri.length = static_cast<uint32_t>(std::strlen(url));
+	std::string encoded_url = "file://";
+	for (const char character: std::string(media_path))
+	{
+		if (character == ' ')
+		{
+			encoded_url += "%20";
+		} else
+		{
+			encoded_url += character;
+		}
+	}
+	details.uri.name   = encoded_url.c_str();
+	details.uri.length = static_cast<uint32_t>(encoded_url.size());
 	details.source_type = AvPlayer::AvPlayerSourceFileMp4;
 
 	ASSERT_EQ(AvPlayer::AvPlayerAddSourceEx(handle, AvPlayer::AvPlayerUriTypeSource, &details), 0);
