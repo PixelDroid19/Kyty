@@ -5,6 +5,7 @@ namespace Kyty::UnitTest {
 UT_LINK(CoreCharString);
 UT_LINK(CoreCharString8);
 UT_LINK(CoreLanguage);
+UT_LINK(CoreSubsystems);
 UT_LINK(CoreMSpace);
 UT_LINK(CoreDateTime);
 UT_LINK(CoreMemoryAlloc);

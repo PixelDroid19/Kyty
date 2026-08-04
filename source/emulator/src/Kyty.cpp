@@ -104,7 +104,11 @@ static void Init(const Scripts::ScriptVar& cfg)
 	auto* timer       = Loader::Timer::TimerSubsystem::Instance();
 
 	slist->Add(config, {core, scripts});
-	slist->InitAll(true);
+	if (!slist->InitAll(true))
+	{
+		EXIT("Failed to initialize '%s' subsystem: %s\n", slist->GetFailName(), slist->GetFailMsg());
+		return;
+	}
 
 	Config::Load(cfg);
 
@@ -121,7 +125,11 @@ static void Init(const Scripts::ScriptVar& cfg)
 	slist->Add(runtime, {core});
 	slist->Add(timer, {core, log});
 
-	slist->InitAll(true);
+	if (!slist->InitAll(true))
+	{
+		EXIT("Failed to initialize '%s' subsystem: %s\n", slist->GetFailName(), slist->GetFailMsg());
+		return;
+	}
 }
 
 KYTY_SCRIPT_FUNC(kyty_load_cfg_func)

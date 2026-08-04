@@ -4,10 +4,13 @@
 #include "Kyty/Core/SafeDelete.h"
 #include "Kyty/Sys/SysStdio.h"
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <string>
+#include <vector>
 
 namespace Kyty::Core {
 
@@ -96,6 +99,8 @@ public:
 
 		for (auto* dep: deps)
 		{
+			EXIT_IF(!dep);
+
 			const char* str = dep->Id();
 
 			auto* l     = new DepsListStruct;
@@ -110,12 +115,32 @@ public:
 
 	bool InitAll(bool print_msg)
 	{
+		fail_msg = nullptr;
+		fail_name = nullptr;
+		dependency_error.clear();
+
+		// Resolve the complete pending graph before calling guest-facing Init
+		// hooks. A malformed graph must have no partial lifecycle side effects.
+		if (!ValidateDependencyGraph())
+		{
+			return false;
+		}
+
 		for (;;)
 		{
 			SubsListStruct* n = FindNextToInitialize();
 
 			if (n == nullptr)
 			{
+				// A non-empty remainder means that the dependency graph is not
+				// satisfiable. Historically this path returned success, leaving a
+				// partially initialized process with no actionable diagnostic.
+				SubsListStruct* blocked = FindFirstUninitialized();
+				if (blocked != nullptr)
+				{
+					SetDependencyFailure(blocked);
+					return false;
+				}
 				break;
 			}
 
@@ -265,6 +290,141 @@ public:
 		return nullptr;
 	}
 
+	[[nodiscard]] SubsListStruct* FindFirstUninitialized() const
+	{
+		SubsListStruct* n = list;
+
+		while (n != nullptr)
+		{
+			if (!n->initialized)
+			{
+				return n;
+			}
+
+			n = n->next;
+		}
+
+		return nullptr;
+	}
+
+	void SetDependencyFailure(SubsListStruct* blocked)
+	{
+		EXIT_IF(!blocked);
+
+		// Prefer the concrete missing edge even when the first blocked node is
+		// only transitively dependent on it. This keeps diagnostics deterministic
+		// for graphs such as consumer -> producer -> missing.
+		for (SubsListStruct* node = list; node != nullptr; node = node->next)
+		{
+			if (node->initialized)
+			{
+				continue;
+			}
+
+			for (const DepsListStruct* dep = node->deps; dep != nullptr; dep = dep->next)
+			{
+				if (FindByName(dep->dep_name) == nullptr)
+				{
+					dependency_error = "missing dependency '";
+					dependency_error += dep->dep_name;
+					dependency_error += "' required by '";
+					dependency_error += node->name;
+					dependency_error += "'";
+					fail_name = node->name;
+					fail_msg  = dependency_error.c_str();
+					return;
+				}
+			}
+		}
+
+		dependency_error = "dependency cycle or blocked dependency at '";
+		dependency_error += blocked->name;
+		dependency_error += "'";
+		fail_name = blocked->name;
+		fail_msg  = dependency_error.c_str();
+	}
+
+	[[nodiscard]] bool ValidateDependencyGraph()
+	{
+		SubsListStruct* first_uninitialized = FindFirstUninitialized();
+		if (first_uninitialized == nullptr)
+		{
+			return true;
+		}
+
+		// Report a missing edge before looking for cycles so transitive failures
+		// are not misclassified as a cycle.
+		for (SubsListStruct* node = list; node != nullptr; node = node->next)
+		{
+			if (node->initialized)
+			{
+				continue;
+			}
+
+			for (const DepsListStruct* dep = node->deps; dep != nullptr; dep = dep->next)
+			{
+				if (FindByName(dep->dep_name) == nullptr)
+				{
+					SetDependencyFailure(node);
+					return false;
+				}
+			}
+		}
+
+		size_t pending_count = 0;
+		for (SubsListStruct* node = list; node != nullptr; node = node->next)
+		{
+			if (!node->initialized)
+			{
+				pending_count++;
+			}
+		}
+
+		std::vector<SubsListStruct*> planned;
+		for (;;)
+		{
+			bool progress = false;
+			for (SubsListStruct* node = list; node != nullptr; node = node->next)
+			{
+				if (node->initialized || std::find(planned.begin(), planned.end(), node) != planned.end())
+				{
+					continue;
+				}
+
+				bool dependencies_ready = true;
+				for (const DepsListStruct* dep = node->deps; dep != nullptr; dep = dep->next)
+				{
+					const SubsListStruct* dependency = FindByName(dep->dep_name);
+					if (dependency == nullptr ||
+					    (!dependency->initialized && std::find(planned.begin(), planned.end(), dependency) == planned.end()))
+					{
+						dependencies_ready = false;
+						break;
+					}
+				}
+
+				if (dependencies_ready)
+				{
+					planned.push_back(node);
+					progress = true;
+				}
+			}
+
+			if (!progress)
+			{
+				break;
+			}
+		}
+
+		if (planned.size() != pending_count)
+		{
+			SetDependencyFailure(first_uninitialized);
+			return false;
+		}
+
+		return true;
+	}
+
 	KYTY_CLASS_NO_COPY(SubsystemsListPrivate);
 
 	SubsListStruct* list      = nullptr;
@@ -273,6 +433,7 @@ public:
 	char**          m_argv    = nullptr;
 	const char*     fail_msg  = nullptr;
 	const char*     fail_name = nullptr;
+	std::string     dependency_error;
 	SubsystemsList* parent;
 };
 
