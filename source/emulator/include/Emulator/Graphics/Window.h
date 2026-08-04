@@ -4,6 +4,7 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/PresentationStats.h"
 
 #include <cstdint>
 #include <string>
@@ -17,17 +18,7 @@ namespace Kyty::Libs::Graphics {
 struct GraphicContext;
 struct VideoOutVulkanImage;
 
-struct WindowPresentStats
-{
-	int      frame           = 0;
-	uint64_t present         = 0;
-	double   fps             = 0.0;
-	bool     capture_ready   = false;
-	bool     capture_dir_set = false;
-	bool     graphic_ready   = false;
-	uint64_t ms_since_present = 0; // host steady-clock since last present++
-	uint64_t ms_since_frame   = 0; // host steady-clock since last frame++
-};
+using WindowPresentStats = Kyty::Emulator::PresentationStats::Snapshot;
 
 struct WindowNativeCaptureResult
 {

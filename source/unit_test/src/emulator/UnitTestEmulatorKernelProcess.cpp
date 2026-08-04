@@ -6,6 +6,7 @@
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Semaphore.h"
 #include "Emulator/Config.h"
+#include "Emulator/PresentationStats.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
@@ -81,6 +82,43 @@ private:
 	std::string m_value;
 };
 
+struct PresentationStatsPortTestState
+{
+	Emulator::PresentationStats::Port* port      = nullptr;
+	uint32_t                            query_count = 0;
+	bool                                reentered   = false;
+
+	static bool Query(void* context, Emulator::PresentationStats::Snapshot* out)
+	{
+		if (context == nullptr || out == nullptr)
+		{
+			return false;
+		}
+
+		auto* state = static_cast<PresentationStatsPortTestState*>(context);
+		state->query_count += 1;
+		if (!state->reentered)
+		{
+			state->reentered = true;
+			Emulator::PresentationStats::Snapshot nested {};
+			if (state->port == nullptr || !state->port->Query(&nested) || nested.present != 77u)
+			{
+				return false;
+			}
+		}
+
+		out->frame            = 42;
+		out->present          = 77;
+		out->fps              = 59.94;
+		out->capture_ready    = true;
+		out->capture_dir_set  = true;
+		out->graphic_ready    = true;
+		out->ms_since_present = 13;
+		out->ms_since_frame   = 5;
+		return true;
+	}
+};
+
 void EnsureKernelProcessSubsystems()
 {
 	if (!Config::IsInitialized())
@@ -136,6 +174,44 @@ Kyty::Loader::SymbolResolve PosixNativeFunc(const char16_t* nid)
 }
 
 } // namespace
+
+TEST(EmulatorKernelProcess, PresentationStatsPortRejectsMissingOrIncompleteCallbacks)
+{
+	Emulator::PresentationStats::Port     port;
+	Emulator::PresentationStats::Snapshot stats {};
+	Emulator::PresentationStats::Callbacks callbacks {};
+
+	EXPECT_FALSE(port.Query(nullptr));
+	EXPECT_FALSE(port.Query(&stats));
+	EXPECT_FALSE(port.Install(callbacks));
+
+	callbacks.query = PresentationStatsPortTestState::Query;
+	EXPECT_TRUE(port.Install(callbacks));
+	EXPECT_FALSE(port.Install(callbacks));
+}
+
+TEST(EmulatorKernelProcess, PresentationStatsPortForwardsSnapshotOutsideRegistryLock)
+{
+	Emulator::PresentationStats::Port     port;
+	PresentationStatsPortTestState        state {};
+	Emulator::PresentationStats::Callbacks callbacks {};
+	state.port         = &port;
+	callbacks.context  = &state;
+	callbacks.query    = PresentationStatsPortTestState::Query;
+	ASSERT_TRUE(port.Install(callbacks));
+
+	Emulator::PresentationStats::Snapshot stats {};
+	ASSERT_TRUE(port.Query(&stats));
+	EXPECT_EQ(state.query_count, 2u);
+	EXPECT_EQ(stats.frame, 42);
+	EXPECT_EQ(stats.present, 77u);
+	EXPECT_DOUBLE_EQ(stats.fps, 59.94);
+	EXPECT_TRUE(stats.capture_ready);
+	EXPECT_TRUE(stats.capture_dir_set);
+	EXPECT_TRUE(stats.graphic_ready);
+	EXPECT_EQ(stats.ms_since_present, 13u);
+	EXPECT_EQ(stats.ms_since_frame, 5u);
+}
 
 TEST(EmulatorKernelProcess, GuestProcessIdIsStable)
 {

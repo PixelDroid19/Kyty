@@ -11,11 +11,11 @@
 #include "Kyty/Core/Vector.h"
 #include "Kyty/Core/VirtualMemory.h"
 
-#include "Emulator/Graphics/Window.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Loader/RuntimeLinker.h"
 #include "Emulator/Loader/GuestCall.h"
+#include "Emulator/Loader/RuntimeLinker.h"
+#include "Emulator/PresentationStats.h"
 
 #include <atomic>
 #include <cerrno>
@@ -54,6 +54,8 @@ namespace Kyty::Libs {
 namespace LibKernel {
 
 LIB_NAME("libkernel", "libkernel");
+
+namespace PresentationStats = Kyty::Emulator::PresentationStats;
 
 constexpr int KEYS_MAX              = 256;
 constexpr int DESTRUCTOR_ITERATIONS = 4;
@@ -2423,14 +2425,14 @@ static void slot_trace_note_signal(uint64_t cond_addr, uint64_t return_addr)
 	}
 }
 
-static bool slot_trace_cond_active(Graphics::WindowPresentStats* stats_out)
+static bool slot_trace_cond_active(PresentationStats::Snapshot* stats_out)
 {
 	if (!slot_trace_env())
 	{
 		return false;
 	}
-	Graphics::WindowPresentStats stats {};
-	if (!Graphics::WindowGetPresentStats(&stats) || stats.present < 2200ull)
+	PresentationStats::Snapshot stats {};
+	if (!PresentationStats::GetPort().Query(&stats) || stats.present < 2200ull)
 	{
 		return false;
 	}
@@ -2612,7 +2614,7 @@ void SlotTraceDumpBlockedCondWaiters()
 
 static void slot_trace_cond_event(const char* kind, PthreadCond* guest_cond, PthreadMutex* guest_mutex, uint64_t ret)
 {
-	Graphics::WindowPresentStats stats {};
+	PresentationStats::Snapshot stats {};
 	if (!slot_trace_cond_active(&stats))
 	{
 		return;
@@ -3639,8 +3641,8 @@ int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rm
 	// Opt-in via KYTY_SLOT_TRACE=1. Do not invent EventFlag wakes.
 	if (std::getenv("KYTY_SLOT_TRACE") != nullptr && nanos >= 1000000ull)
 	{
-		Graphics::WindowPresentStats stats {};
-		if (Graphics::WindowGetPresentStats(&stats) && stats.present >= 2200ull)
+		PresentationStats::Snapshot stats {};
+		if (PresentationStats::GetPort().Query(&stats) && stats.present >= 2200ull)
 		{
 			static std::atomic<uint32_t> ns_logs {0};
 			const uint32_t               n = ns_logs.fetch_add(1);

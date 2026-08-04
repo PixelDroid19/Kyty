@@ -26,6 +26,7 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/PresentationStats.h"
 #include "Emulator/VideoFrameMemory.h"
 
 #include <algorithm>
@@ -84,6 +85,12 @@ bool GraphicsReleaseGpuMappingRange(void* context, uint64_t vaddr, uint64_t size
 	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingRelease, &transaction);
 }
 
+bool GraphicsQueryPresentationStats(void* context, Kyty::Emulator::PresentationStats::Snapshot* out)
+{
+	(void)context;
+	return WindowGetPresentStats(out);
+}
+
 } // namespace
 
 KYTY_SUBSYSTEM_INIT(Graphics)
@@ -112,6 +119,8 @@ KYTY_SUBSYSTEM_INIT(Graphics)
 	    GuestTextureLayoutUnregister,
 	    [](uint64_t base, uint64_t size) { (void)GpuMemoryNotifyHostWrite(base, size); }};
 	EXIT_IF(!Kyty::Emulator::VideoFrameMemory::InstallCallbacks(video_frame_memory_callbacks));
+	const Kyty::Emulator::PresentationStats::Callbacks presentation_stats_callbacks {nullptr, GraphicsQueryPresentationStats};
+	EXIT_IF(!Kyty::Emulator::PresentationStats::GetPort().Install(presentation_stats_callbacks));
 	// These adapters are process-lifetime functions. Keep them installed so
 	// Audio can unregister frames during teardown without depending on a
 	// graphics-shutdown ordering edge.

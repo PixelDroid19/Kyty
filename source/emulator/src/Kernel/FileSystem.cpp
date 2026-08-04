@@ -10,7 +10,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/LibAmpr.h"
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/VideoFrameMemory.h"
 
 #include <atomic>
 #include <cstdlib>
@@ -23,8 +23,6 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::LibKernel::FileSystem {
-
-using Kyty::Libs::Graphics::GpuMemoryNotifyHostWrite;
 
 LIB_NAME("libkernel", "libkernel");
 
@@ -837,7 +835,7 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
 
 	file->mutex.Unlock();
-	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
+	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
 
 	if (is_invalid)
 	{
@@ -944,7 +942,7 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	file->f.Seek(pos);
 
 	file->mutex.Unlock();
-	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
+	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
 
 	if (is_invalid)
 	{
