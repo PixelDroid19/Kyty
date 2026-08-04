@@ -8,7 +8,6 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 
-#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/AsyncJob.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
