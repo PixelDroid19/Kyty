@@ -4,10 +4,11 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/Namespace.h"
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel {
+namespace Kyty::Kernel {
 
 struct KernelTimespec
 {
@@ -62,7 +63,7 @@ uint64_t KYTY_SYSV_ABI KernelGetProcessTime();
 uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounter();
 uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounterFrequency();
 
-} // namespace Kyty::Libs::LibKernel
+} // namespace Kyty::Kernel
 
 #endif // KYTY_EMU_ENABLED
 
