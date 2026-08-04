@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cwchar>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -75,6 +76,50 @@ int    KYTY_SYSV_ABI c_ferror(FILE* stream);
 int    KYTY_SYSV_ABI c_fileno(FILE* stream);
 int    KYTY_SYSV_ABI c_fputc(int character, FILE* stream);
 int    KYTY_SYSV_ABI c_remove(const char* path);
+
+// Memory, string and guest UTF-16 shims. Their implementations live in
+// LibCString.cpp so the main libc registration unit does not own the entire
+// byte/string ABI surface.
+void*              KYTY_SYSV_ABI c_memcpy(void* dst, const void* src, size_t size);
+int                KYTY_SYSV_ABI c_memcpy_s(void* dst, size_t dst_size, const void* src, size_t size);
+int                KYTY_SYSV_ABI c_memmove_s(void* dst, size_t dst_size, const void* src, size_t size);
+void*              KYTY_SYSV_ABI c_memmove(void* dst, const void* src, size_t size);
+void*              KYTY_SYSV_ABI c_memset(void* dst, int value, size_t size);
+int                KYTY_SYSV_ABI c_memset_s(void* dst, size_t dst_size, int value, size_t size);
+int                KYTY_SYSV_ABI c_memcmp(const void* lhs, const void* rhs, size_t size);
+void*              KYTY_SYSV_ABI c_memchr(const void* data, int value, size_t size);
+size_t             KYTY_SYSV_ABI c_strlen(const char* value);
+size_t             KYTY_SYSV_ABI c_wcslen(const uint16_t* value);
+uint16_t*          KYTY_SYSV_ABI c_wcsncpy(uint16_t* dst, const uint16_t* src, size_t count);
+int                KYTY_SYSV_ABI c_Iswctype(uint32_t character, int character_class);
+int                KYTY_SYSV_ABI c_Wctombx(char* dst, uint32_t character, std::mbstate_t* state, const void* cvtvec);
+int                KYTY_SYSV_ABI c_Mbtowcx(uint16_t* dst, const char* src, size_t count, std::mbstate_t* state, const void* cvtvec);
+char*              KYTY_SYSV_ABI c_strcpy(char* dst, const char* src);
+wchar_t*           KYTY_SYSV_ABI c_wmemchr(const wchar_t* src, wchar_t value, size_t count);
+int                KYTY_SYSV_ABI c_wmemcmp(const wchar_t* lhs, const wchar_t* rhs, size_t count);
+int                KYTY_SYSV_ABI c_wmemcmp16(const char16_t* lhs, const char16_t* rhs, size_t count);
+char16_t*          KYTY_SYSV_ABI c_wmemcpy16(char16_t* dst, const char16_t* src, size_t count);
+wchar_t*           KYTY_SYSV_ABI c_wmemcpy(wchar_t* dst, const wchar_t* src, size_t count);
+wchar_t*           KYTY_SYSV_ABI c_wmemmove(wchar_t* dst, const wchar_t* src, size_t count);
+wchar_t*           KYTY_SYSV_ABI c_wmemset(wchar_t* dst, wchar_t value, size_t count);
+int                KYTY_SYSV_ABI c_strcpy_s(char* dst, size_t dst_size, const char* src);
+char*              KYTY_SYSV_ABI c_strncpy(char* dst, const char* src, size_t count);
+int                KYTY_SYSV_ABI c_strcmp(const char* lhs, const char* rhs);
+int                KYTY_SYSV_ABI c_strncmp(const char* lhs, const char* rhs, size_t count);
+int                KYTY_SYSV_ABI c_strcasecmp(const char* lhs, const char* rhs);
+int                KYTY_SYSV_ABI c_strncasecmp(const char* lhs, const char* rhs, size_t count);
+char*              KYTY_SYSV_ABI c_strcat(char* dst, const char* src);
+char*              KYTY_SYSV_ABI c_strncat(char* dst, const char* src, size_t count);
+char*              KYTY_SYSV_ABI c_strpbrk(const char* value, const char* accept);
+char*              KYTY_SYSV_ABI c_strchr(const char* value, int character);
+char*              KYTY_SYSV_ABI c_strrchr(const char* value, int character);
+char*              KYTY_SYSV_ABI c_strstr(const char* value, const char* needle);
+char*              KYTY_SYSV_ABI c_getenv(const char* name);
+char*              KYTY_SYSV_ABI c_setlocale(int category, const char* locale);
+unsigned __int128  KYTY_SYSV_ABI c_udivti3(unsigned __int128 numerator, unsigned __int128 denominator);
+uint16_t*          KYTY_SYSV_ABI c_wcsstr(const uint16_t* value, const uint16_t* needle);
+int                KYTY_SYSV_ABI c_wcsncmp(const uint16_t* lhs, const uint16_t* rhs, size_t count);
+size_t             KYTY_SYSV_ABI c_strnlen(const char* value, size_t count);
 
 // Math (double) family — pure wrappers over the host libm, defined in
 // LibCMath.cpp.
