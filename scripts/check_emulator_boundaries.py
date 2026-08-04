@@ -47,6 +47,7 @@ HOST_SOURCE_FILES = (
 )
 LIBS_SOURCE_FILES = (
     "emulator/src/Libs/LibC.cpp",
+    "emulator/src/Libs/LibCTime.cpp",
     "emulator/src/Libs/LibSaveData.cpp",
 )
 GRAPHICS_IMAGE_SOURCE_FILES = (

@@ -25,6 +25,7 @@ UT_LINK(EmulatorGraphicsDirtyTracking);
 UT_LINK(EmulatorKernelMemory);
 UT_LINK(EmulatorKernelTime);
 UT_LINK(EmulatorGuestMemory);
+UT_LINK(EmulatorLibCTime);
 UT_LINK(EmulatorGraphicsPackets);
 UT_LINK(EmulatorKernelProcess);
 UT_LINK(EmulatorNp);

@@ -13,6 +13,7 @@
 #include "Emulator/Libs/CxaDynamicCast.h"
 #include "Emulator/Libs/CxxLocale.h"
 #include "Emulator/Libs/CxxString.h"
+#include "Emulator/Libs/LibCTime.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/Memalign.h"
 #include "Emulator/Libs/ProcessEnvironment.h"
@@ -110,6 +111,9 @@ namespace Kyty::Libs {
 namespace LibC {
 
 LIB_VERSION("libc", 1, "libc", 1, 1);
+
+using Time::GuestTm;
+using Time::GuestToHostTm;
 
 // Gen5 libc/libSceLibcInternal "need" flag: non-zero asks the guest CRT to run
 // heap/TSD bootstrap. Zero claims "already initialized" and skips that path.
@@ -1621,144 +1625,6 @@ static KYTY_SYSV_ABI void c_abort()
 {
 	printf("libc::abort() called by guest\n");
 	::abort();
-}
-
-// --- time --------------------------------------------------------------------
-struct GuestTm
-{
-	int32_t sec;
-	int32_t min;
-	int32_t hour;
-	int32_t mday;
-	int32_t mon;
-	int32_t year;
-	int32_t wday;
-	int32_t yday;
-	int32_t isdst;
-};
-
-static_assert(sizeof(GuestTm) == 36);
-
-static void HostToGuestTm(const struct tm& host, GuestTm* guest)
-{
-	EXIT_IF(guest == nullptr);
-	guest->sec   = host.tm_sec;
-	guest->min   = host.tm_min;
-	guest->hour  = host.tm_hour;
-	guest->mday  = host.tm_mday;
-	guest->mon   = host.tm_mon;
-	guest->year  = host.tm_year;
-	guest->wday  = host.tm_wday;
-	guest->yday  = host.tm_yday;
-	guest->isdst = host.tm_isdst;
-}
-
-static struct tm GuestToHostTm(const GuestTm& guest)
-{
-	struct tm host {};
-	host.tm_sec   = guest.sec;
-	host.tm_min   = guest.min;
-	host.tm_hour  = guest.hour;
-	host.tm_mday  = guest.mday;
-	host.tm_mon   = guest.mon;
-	host.tm_year  = guest.year;
-	host.tm_wday  = guest.wday;
-	host.tm_yday  = guest.yday;
-	host.tm_isdst = guest.isdst;
-	return host;
-}
-
-static bool HostGmtime(time_t value, struct tm* output)
-{
-	EXIT_IF(output == nullptr);
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	return ::gmtime_s(output, &value) == 0;
-#else
-	return ::gmtime_r(&value, output) != nullptr;
-#endif
-}
-
-static bool HostLocaltime(time_t value, struct tm* output)
-{
-	EXIT_IF(output == nullptr);
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	return ::localtime_s(output, &value) == 0;
-#else
-	return ::localtime_r(&value, output) != nullptr;
-#endif
-}
-
-static GuestTm* ConvertTime(const int64_t* value, GuestTm* output, bool utc)
-{
-	if (value == nullptr || output == nullptr)
-	{
-		return nullptr;
-	}
-	const time_t host_value = static_cast<time_t>(*value);
-	struct tm    host {};
-	if (!(utc ? HostGmtime(host_value, &host) : HostLocaltime(host_value, &host)))
-	{
-		return nullptr;
-	}
-	HostToGuestTm(host, output);
-	return output;
-}
-
-static KYTY_SYSV_ABI int64_t c_time(int64_t* t)
-{
-	time_t r = ::time(nullptr);
-	if (t) *t = r;
-	return r;
-}
-static KYTY_SYSV_ABI int64_t c_mktime(GuestTm* tmv)
-{
-	if (tmv == nullptr)
-	{
-		return -1;
-	}
-	struct tm host   = GuestToHostTm(*tmv);
-	const auto value = ::mktime(&host);
-	if (value != static_cast<time_t>(-1))
-	{
-		HostToGuestTm(host, tmv);
-	}
-	return static_cast<int64_t>(value);
-}
-static KYTY_SYSV_ABI GuestTm* c_gmtime(const int64_t* t)
-{
-	static thread_local GuestTm result {};
-	return ConvertTime(t, &result, true);
-}
-static KYTY_SYSV_ABI GuestTm* c_gmtime_s(const int64_t* t, GuestTm* result)
-{
-	return ConvertTime(t, result, true);
-}
-static KYTY_SYSV_ABI GuestTm* c_localtime(const int64_t* t)
-{
-	static thread_local GuestTm result {};
-	return ConvertTime(t, &result, false);
-}
-static KYTY_SYSV_ABI GuestTm* c_localtime_s(const int64_t* t, GuestTm* result)
-{
-	return ConvertTime(t, result, false);
-}
-static KYTY_SYSV_ABI size_t c_strftime(char* s, size_t n, const char* f, const GuestTm* tmv)
-{
-	if (tmv == nullptr)
-	{
-		return 0;
-	}
-	const struct tm host = GuestToHostTm(*tmv);
-	return ::strftime(s, n, f, &host);
-}
-static KYTY_SYSV_ABI char* c_asctime(const GuestTm* tmv)
-{
-	if (tmv == nullptr)
-	{
-		return nullptr;
-	}
-	const struct tm host = GuestToHostTm(*tmv);
-	return ::asctime(&host);
 }
 
 // --- math (double) -----------------------------------------------------------
@@ -4461,15 +4327,15 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("oVkZ8W8-Q8A", LibC::c_strtok);
 
 	// time
-	LIB_FUNC("wLlFkwG9UcQ", LibC::c_time);
+	LIB_FUNC("wLlFkwG9UcQ", LibC::Time::c_time);
 	LIB_FUNC("QZP6I9ZZxpE", LibC::c_clock);
-	LIB_FUNC("n7AepwR0s34", LibC::c_mktime);
-	LIB_FUNC("1mecP7RgI2A", LibC::c_gmtime);
-	LIB_FUNC("5bBacGLyLOs", LibC::c_gmtime_s);
-	LIB_FUNC("efhK-YSUYYQ", LibC::c_localtime);
-	LIB_FUNC("fiiNDnNBKVY", LibC::c_localtime_s);
-	LIB_FUNC("Av3zjWi64Kw", LibC::c_strftime);
-	LIB_FUNC("jT3xiGpA3B4", LibC::c_asctime);
+	LIB_FUNC("n7AepwR0s34", LibC::Time::c_mktime);
+	LIB_FUNC("1mecP7RgI2A", LibC::Time::c_gmtime);
+	LIB_FUNC("5bBacGLyLOs", LibC::Time::c_gmtime_s);
+	LIB_FUNC("efhK-YSUYYQ", LibC::Time::c_localtime);
+	LIB_FUNC("fiiNDnNBKVY", LibC::Time::c_localtime_s);
+	LIB_FUNC("Av3zjWi64Kw", LibC::Time::c_strftime);
+	LIB_FUNC("jT3xiGpA3B4", LibC::Time::c_asctime);
 
 	// math (double)
 	LIB_FUNC("H8ya2H00jbI", LibC::c_sin);
