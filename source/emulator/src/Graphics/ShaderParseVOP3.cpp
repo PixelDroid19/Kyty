@@ -546,17 +546,17 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 				KYTY_UNKNOWN_OP();
 			} else
 			{
-				KYTY_NI("v_cvt_pknorm_i16_f32")
+				inst.type = ShaderInstructionType::VCvtPknormI16F32;
 			};
 			break;
-		case 0x12E: KYTY_NI("v_cvt_pknorm_u16_f32"); break;
+		case 0x12E: inst.type = ShaderInstructionType::VCvtPknormU16F32; break;
 		case 0x12f: inst.type = ShaderInstructionType::VCvtPkrtzF16F32; break;
-		case 0x130: KYTY_NI("v_cvt_pk_u16_u32"); break;
-		case 0x131: KYTY_NI("v_cvt_pk_i16_i32"); break;
-		case 0x132: KYTY_NI("v_add_f16"); break;
-		case 0x133: KYTY_NI("v_sub_f16"); break;
-		case 0x134: KYTY_NI("v_subrev_f16"); break;
-		case 0x135: KYTY_NI("v_mul_f16"); break;
+		case 0x130: inst.type = ShaderInstructionType::VCvtPkU16U32; break;
+		case 0x131: inst.type = ShaderInstructionType::VCvtPkI16I32; break;
+		case 0x132: inst.type = ShaderInstructionType::VAddF16; break;
+		case 0x133: inst.type = ShaderInstructionType::VSubF16; break;
+		case 0x134: inst.type = ShaderInstructionType::VSubrevF16; break;
+		case 0x135: inst.type = ShaderInstructionType::VMulF16; break;
 		case 0x136:
 			if (next_gen)
 			{
