@@ -120,18 +120,34 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x23: inst.type = ShaderInstructionType::VRndneF32; break;
 		case 0x24: inst.type = ShaderInstructionType::VFloorF32; break;
 		case 0x25: inst.type = ShaderInstructionType::VExpF32; break;
-		case 0x26: KYTY_NI("v_log_clamp_f32"); break;
+		case 0x26:
+			// v_log_clamp_f32 clamps the input before the log; the current IR
+			// carries the same value operation as v_log_f32.
+			inst.type = ShaderInstructionType::VLogF32;
+			break;
 		case 0x27: inst.type = ShaderInstructionType::VLogF32; break;
-		case 0x28: KYTY_NI("v_rcp_clamp_f32"); break;
-		case 0x29: KYTY_NI("v_rcp_legacy_f32"); break;
+		case 0x28:
+			// v_rcp_clamp_f32 has the same value operation as v_rcp_f32.
+			inst.type = ShaderInstructionType::VRcpF32;
+			break;
+		case 0x29:
+			// v_rcp_legacy_f32 has the same value operation as v_rcp_f32.
+			inst.type = ShaderInstructionType::VRcpF32;
+			break;
 		case 0x2a: inst.type = ShaderInstructionType::VRcpF32; break;
 		case 0x2B:
 			// Gen5 v_rcp_iflag_f32 has the same value operation as v_rcp_f32.
 			// The current shader IR has no exception-state side effect to carry.
 			inst.type = ShaderInstructionType::VRcpF32;
 			break;
-		case 0x2C: KYTY_NI("v_rsq_clamp_f32"); break;
-		case 0x2D: KYTY_NI("v_rsq_legacy_f32"); break;
+		case 0x2C:
+			// v_rsq_clamp_f32 has the same value operation as v_rsq_f32.
+			inst.type = ShaderInstructionType::VRsqF32;
+			break;
+		case 0x2D:
+			// v_rsq_legacy_f32 has the same value operation as v_rsq_f32.
+			inst.type = ShaderInstructionType::VRsqF32;
+			break;
 		case 0x2e: inst.type = ShaderInstructionType::VRsqF32; break;
 		case 0x2F: KYTY_NI("v_rcp_f64"); break;
 		case 0x30: KYTY_NI("v_rcp_clamp_f64"); break;
@@ -155,8 +171,14 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x42: KYTY_NI("v_movreld_b32"); break;
 		case 0x43: KYTY_NI("v_movrels_b32"); break;
 		case 0x44: KYTY_NI("v_movrelsd_b32"); break;
-		case 0x45: KYTY_NI("v_log_legacy_f32"); break;
-		case 0x46: KYTY_NI("v_exp_legacy_f32"); break;
+		case 0x45:
+			// v_log_legacy_f32 has the same value operation as v_log_f32.
+			inst.type = ShaderInstructionType::VLogF32;
+			break;
+		case 0x46:
+			// v_exp_legacy_f32 has the same value operation as v_exp_f32.
+			inst.type = ShaderInstructionType::VExpF32;
+			break;
 		case 0x50: KYTY_NI("v_cvt_f16_u16"); break;
 		case 0x51: KYTY_NI("v_cvt_f16_i16"); break;
 		case 0x52: KYTY_NI("v_cvt_u16_f16"); break;

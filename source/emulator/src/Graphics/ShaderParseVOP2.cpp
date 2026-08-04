@@ -144,7 +144,10 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				KYTY_NI("v_mac_legacy_f32")
 			};
 			break;
-		case 0x07: KYTY_NI("v_mul_legacy_f32"); break;
+		case 0x07:
+			// v_mul_legacy_f32 has the same value operation as v_mul_f32.
+			inst.type = ShaderInstructionType::VMulF32;
+			break;
 		case 0x08: inst.type = ShaderInstructionType::VMulF32; break;
 		case 0x09: KYTY_NI("v_mul_i32_i24"); break;
 		case 0x0A: KYTY_NI("v_mul_hi_i32_i24"); break;
@@ -156,12 +159,16 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				inst.format            = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
 				inst.src_num           = 3;
 				inst.src[2]            = inst.dst;
-			} else
+			} 			else
 			{
-				KYTY_NI("v_min_legacy_f32")
+				// v_min_legacy_f32 has the same value operation as v_min_f32.
+				inst.type = ShaderInstructionType::VMinF32;
 			};
 			break;
-		case 0x0E: KYTY_NI("v_max_legacy_f32"); break;
+		case 0x0E:
+			// v_max_legacy_f32 has the same value operation as v_max_f32.
+			inst.type = ShaderInstructionType::VMaxF32;
+			break;
 		case 0x0b: inst.type = ShaderInstructionType::VMulU32U24; break;
 		case 0x0f: inst.type = ShaderInstructionType::VMinF32; break;
 		case 0x10: inst.type = ShaderInstructionType::VMaxF32; break;
