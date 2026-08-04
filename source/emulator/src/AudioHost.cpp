@@ -1,21 +1,18 @@
 #include "Emulator/AudioHost.h"
 
 #include "Kyty/Core/DbgAssert.h"
-#include "Kyty/Core/Threads.h"
 
 #include "Emulator/AudioPcm.h"
-#include "Emulator/Kernel/Time.h"
+#include "Emulator/Host/Clock.h"
 
 #include "SDL.h"
 
 #include <algorithm>
-#include <chrono>
 #include <climits>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -54,20 +51,20 @@ class HostAudio::Impl
 public:
 	struct PortOut
 	{
-		bool                                  used               = false;
-		int                                   type               = 0;
-		uint32_t                              samples_num        = 0;
-		uint32_t                              freq               = 0;
-		Format                                format             = Format::Unknown;
-		int                                   channels_num       = 0;
-		int                                   volume[8]          = {};
-		SDL_AudioDeviceID                     device_id          = 0;
-		SDL_AudioStream*                      conversion_stream  = nullptr;
-		AudioPcmFormat                        pcm_format         = AudioPcmFormat::Signed16;
-		bool                                  queue_error_logged = false;
-		std::chrono::steady_clock::time_point next_deadline {};
-		std::vector<uint8_t>                  volume_buffer;
-		std::vector<uint8_t>                  device_buffer;
+		bool                 used               = false;
+		int                  type               = 0;
+		uint32_t             samples_num        = 0;
+		uint32_t             freq               = 0;
+		Format               format             = Format::Unknown;
+		int                  channels_num       = 0;
+		int                  volume[8]          = {};
+		SDL_AudioDeviceID    device_id          = 0;
+		SDL_AudioStream*     conversion_stream  = nullptr;
+		AudioPcmFormat       pcm_format         = AudioPcmFormat::Signed16;
+		bool                 queue_error_logged = false;
+		uint64_t             next_deadline      = 0;
+		std::vector<uint8_t> volume_buffer;
+		std::vector<uint8_t> device_buffer;
 	};
 
 	struct PortIn
@@ -338,17 +335,16 @@ bool HostAudio::AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_
 		}
 	}
 
-	*samples_num             = m_impl->out_ports[params[0].handle.GetId()].samples_num;
-	const auto now           = std::chrono::steady_clock::now();
-	auto       wake_deadline = now;
-	bool       all_queues_ok = true;
+	*samples_num                 = m_impl->out_ports[params[0].handle.GetId()].samples_num;
+	const uint64_t now           = Kyty::Emulator::HostClock::NowMicroseconds();
+	uint64_t       wake_deadline = now;
+	bool           all_queues_ok = true;
 
 	for (uint32_t i = 0; i < num; i++)
 	{
-		auto&      port  = m_impl->out_ports[params[i].handle.GetId()];
-		const auto grain = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-		    std::chrono::duration<double>(static_cast<double>(port.samples_num) / static_cast<double>(port.freq)));
-		if (port.next_deadline.time_since_epoch().count() == 0 || now > port.next_deadline + grain * 4)
+		auto&          port  = m_impl->out_ports[params[i].handle.GetId()];
+		const uint64_t grain = (1'000'000ull * port.samples_num) / port.freq;
+		if (port.next_deadline == 0 || now > port.next_deadline + grain * 4)
 		{
 			port.next_deadline = now;
 		}
@@ -409,7 +405,7 @@ bool HostAudio::AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_
 	}
 
 	lock.unlock();
-	std::this_thread::sleep_until(wake_deadline);
+	Kyty::Emulator::HostClock::SleepUntil(wake_deadline);
 	return all_queues_ok;
 }
 
@@ -448,9 +444,9 @@ uint32_t HostAudio::AudioInInput(Id handle, void* dest)
 	{
 		return 0;
 	}
-	uint32_t samples = 0;
-	uint32_t freq    = 0;
-	uint64_t wait    = 0;
+	uint32_t samples  = 0;
+	uint32_t freq     = 0;
+	uint64_t deadline = 0;
 	{
 		std::lock_guard lock(m_impl->mutex);
 		if (m_impl->shutting_down || !Impl::IsValid(m_impl->in_ports, handle))
@@ -460,12 +456,12 @@ uint32_t HostAudio::AudioInInput(Id handle, void* dest)
 		auto& port           = m_impl->in_ports[handle.GetId()];
 		samples              = port.samples_num;
 		freq                 = port.freq;
-		const uint64_t now   = LibKernel::KernelGetProcessTime();
+		const uint64_t now   = Kyty::Emulator::HostClock::NowMicroseconds();
 		const uint64_t next  = port.last_input_time + (1000000 * samples) / freq;
-		wait                 = next > now ? next - now : 0;
-		port.last_input_time = now + wait;
+		deadline             = next > now ? next : now;
+		port.last_input_time = deadline;
 	}
-	Core::Thread::SleepMicro(wait);
+	Kyty::Emulator::HostClock::SleepUntil(deadline);
 	return samples;
 }
 

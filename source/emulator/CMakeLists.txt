@@ -21,6 +21,8 @@ target_sources(emulator PRIVATE
 	$<TARGET_OBJECTS:imgui_sdl_backend_obj>
 	src/Loader/GuestCall.cpp
 	include/Emulator/Loader/GuestCall.h
+	src/Host/Clock.cpp
+	include/Emulator/Host/Clock.h
 	src/DevTools/Runtime.cpp
 	src/DevTools/RuntimeSubsystem.cpp
 	include/Emulator/DevTools/Runtime.h

@@ -3,6 +3,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/AudioHost.h"
+#include "Emulator/Host/Clock.h"
 
 #include <atomic>
 #include <chrono>
@@ -14,6 +15,7 @@
 #include <vector>
 
 using Kyty::Libs::Audio::HostAudio;
+namespace HostClock = Kyty::Emulator::HostClock;
 
 namespace {
 
@@ -35,6 +37,20 @@ std::shared_ptr<HostAudio> CreateAudio()
 		std::fprintf(stderr, "audio host integration failed to initialize SDL: %s\n", error.c_str());
 	}
 	return audio;
+}
+
+bool HostClockContract()
+{
+	constexpr uint64_t sleep_microseconds       = 2'000;
+	constexpr uint64_t max_elapsed_microseconds = 100'000;
+	const uint64_t     first                    = HostClock::NowMicroseconds();
+	const uint64_t     second                   = HostClock::NowMicroseconds();
+	const uint64_t     deadline                 = second + sleep_microseconds;
+	HostClock::SleepUntil(deadline);
+	const uint64_t after = HostClock::NowMicroseconds();
+	return Check(second >= first, "host clock moved backwards") &&
+	       Check(after >= deadline, "host clock sleep returned before its deadline") &&
+	       Check(after - first < max_elapsed_microseconds, "host clock sleep exceeded its bounded duration");
 }
 
 bool GrainPacing()
@@ -121,7 +137,7 @@ int main(int argc, char** argv)
 		std::fprintf(stderr, "audio host integration failed to initialize host subsystems\n");
 		return 125;
 	}
-	if (!GrainPacing() || !CloseWhileProducerSleeps())
+	if (!HostClockContract() || !GrainPacing() || !CloseWhileProducerSleeps())
 	{
 		std::remove(output_path);
 		return 1;
