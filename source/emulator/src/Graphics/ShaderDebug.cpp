@@ -5,9 +5,10 @@
 #include "Kyty/Core/MagicEnum.h"
 #include "Kyty/Core/String8.h"
 
+#include "Emulator/Log.h"
+
 #include <algorithm>
 #include <cinttypes>
-#include <cstdio>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -316,7 +317,7 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::DmaskF: s = "dmask:0xf"; break;
 			case ShaderInstructionFormat::Gds: s = "gds"; break;
 			case ShaderInstructionFormat::MimgDmask: s = String8::FromPrintf("dmask:0x%x", inst.mimg_dmask); break;
-			default: printf("WARNING: unknown shader code %u (continuing)\n", static_cast<uint32_t>(fu)); break;
+			default: KYTY_LOG_DEBUG("WARNING: unknown shader code %u (continuing)\n", static_cast<uint32_t>(fu)); break;
 		}
 		switch (fu)
 		{
@@ -393,158 +394,158 @@ String8 ShaderCode::DbgDump() const
 }
 void vs_print(const char* func, const HW::VertexShaderInfo& vs, const HW::ShaderRegisters& sh)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t vs.data_addr                 = 0x%016" PRIx64 "\n", vs.vs_regs.data_addr);
-	printf("\t es.data_addr                 = 0x%016" PRIx64 "\n", vs.es_regs.data_addr);
-	printf("\t gs.data_addr                 = 0x%016" PRIx64 "\n", vs.gs_regs.data_addr);
+	KYTY_LOG_DEBUG("\t vs.data_addr                 = 0x%016" PRIx64 "\n", vs.vs_regs.data_addr);
+	KYTY_LOG_DEBUG("\t es.data_addr                 = 0x%016" PRIx64 "\n", vs.es_regs.data_addr);
+	KYTY_LOG_DEBUG("\t gs.data_addr                 = 0x%016" PRIx64 "\n", vs.gs_regs.data_addr);
 
 	if (vs.vs_regs.data_addr != 0)
 	{
-		printf("\t vs.vgprs                     = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc1.vgprs);
-		printf("\t vs.sgprs                     = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc1.sgprs);
-		printf("\t vs.priority                  = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc1.priority);
-		printf("\t vs.float_mode                = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc1.float_mode);
-		printf("\t vs.dx10_clamp                = %s\n", vs.vs_regs.rsrc1.dx10_clamp ? "true" : "false");
-		printf("\t vs.ieee_mode                 = %s\n", vs.vs_regs.rsrc1.ieee_mode ? "true" : "false");
-		printf("\t vs.vgpr_component_count      = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc1.vgpr_component_count);
-		printf("\t vs.cu_group_enable           = %s\n", vs.vs_regs.rsrc1.cu_group_enable ? "true" : "false");
-		printf("\t vs.require_forward_progress  = %s\n", vs.vs_regs.rsrc1.require_forward_progress ? "true" : "false");
-		printf("\t vs.fp16_overflow             = %s\n", vs.vs_regs.rsrc1.fp16_overflow ? "true" : "false");
-		printf("\t vs.scratch_en                = %s\n", vs.vs_regs.rsrc2.scratch_en ? "true" : "false");
-		printf("\t vs.user_sgpr                 = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc2.user_sgpr);
-		printf("\t vs.offchip_lds               = %s\n", vs.vs_regs.rsrc2.offchip_lds ? "true" : "false");
-		printf("\t vs.streamout_enabled         = %s\n", vs.vs_regs.rsrc2.streamout_enabled ? "true" : "false");
-		printf("\t vs.shared_vgprs              = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc2.shared_vgprs);
+		KYTY_LOG_DEBUG("\t vs.vgprs                     = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc1.vgprs);
+		KYTY_LOG_DEBUG("\t vs.sgprs                     = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc1.sgprs);
+		KYTY_LOG_DEBUG("\t vs.priority                  = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc1.priority);
+		KYTY_LOG_DEBUG("\t vs.float_mode                = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc1.float_mode);
+		KYTY_LOG_DEBUG("\t vs.dx10_clamp                = %s\n", vs.vs_regs.rsrc1.dx10_clamp ? "true" : "false");
+		KYTY_LOG_DEBUG("\t vs.ieee_mode                 = %s\n", vs.vs_regs.rsrc1.ieee_mode ? "true" : "false");
+		KYTY_LOG_DEBUG("\t vs.vgpr_component_count      = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc1.vgpr_component_count);
+		KYTY_LOG_DEBUG("\t vs.cu_group_enable           = %s\n", vs.vs_regs.rsrc1.cu_group_enable ? "true" : "false");
+		KYTY_LOG_DEBUG("\t vs.require_forward_progress  = %s\n", vs.vs_regs.rsrc1.require_forward_progress ? "true" : "false");
+		KYTY_LOG_DEBUG("\t vs.fp16_overflow             = %s\n", vs.vs_regs.rsrc1.fp16_overflow ? "true" : "false");
+		KYTY_LOG_DEBUG("\t vs.scratch_en                = %s\n", vs.vs_regs.rsrc2.scratch_en ? "true" : "false");
+		KYTY_LOG_DEBUG("\t vs.user_sgpr                 = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc2.user_sgpr);
+		KYTY_LOG_DEBUG("\t vs.offchip_lds               = %s\n", vs.vs_regs.rsrc2.offchip_lds ? "true" : "false");
+		KYTY_LOG_DEBUG("\t vs.streamout_enabled         = %s\n", vs.vs_regs.rsrc2.streamout_enabled ? "true" : "false");
+		KYTY_LOG_DEBUG("\t vs.shared_vgprs              = 0x%02" PRIx8 "\n", vs.vs_regs.rsrc2.shared_vgprs);
 	}
 
 	if (vs.gs_regs.data_addr != 0 || vs.es_regs.data_addr != 0)
 	{
-		printf("\t chksum                       = 0x%016" PRIx64 "\n", vs.gs_regs.chksum);
-		printf("\t gs.vgprs                     = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc1.vgprs);
-		printf("\t gs.sgprs                     = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc1.sgprs);
-		printf("\t gs.priority                  = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc1.priority);
-		printf("\t gs.float_mode                = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc1.float_mode);
-		printf("\t gs.dx10_clamp                = %s\n", vs.gs_regs.rsrc1.dx10_clamp ? "true" : "false");
-		printf("\t gs.ieee_mode                 = %s\n", vs.gs_regs.rsrc1.ieee_mode ? "true" : "false");
-		printf("\t gs.debug_mode                = %s\n", vs.gs_regs.rsrc1.debug_mode ? "true" : "false");
-		printf("\t gs.lds_configuration         = %s\n", vs.gs_regs.rsrc1.lds_configuration ? "true" : "false");
-		printf("\t gs.cu_group_enable           = %s\n", vs.gs_regs.rsrc1.cu_group_enable ? "true" : "false");
-		printf("\t gs.require_forward_progress  = %s\n", vs.gs_regs.rsrc1.require_forward_progress ? "true" : "false");
-		printf("\t gs.fp16_overflow             = %s\n", vs.gs_regs.rsrc1.fp16_overflow ? "true" : "false");
-		printf("\t gs.gs_vgpr_component_count   = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc1.gs_vgpr_component_count);
-		printf("\t gs.scratch_en                = %s\n", vs.gs_regs.rsrc2.scratch_en ? "true" : "false");
-		printf("\t gs.user_sgpr                 = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc2.user_sgpr);
-		printf("\t gs.offchip_lds               = %s\n", vs.gs_regs.rsrc2.offchip_lds ? "true" : "false");
-		printf("\t gs.shared_vgprs              = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc2.shared_vgprs);
-		printf("\t gs.es_vgpr_component_count   = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc2.es_vgpr_component_count);
-		printf("\t gs.lds_size                  = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc2.lds_size);
+		KYTY_LOG_DEBUG("\t chksum                       = 0x%016" PRIx64 "\n", vs.gs_regs.chksum);
+		KYTY_LOG_DEBUG("\t gs.vgprs                     = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc1.vgprs);
+		KYTY_LOG_DEBUG("\t gs.sgprs                     = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc1.sgprs);
+		KYTY_LOG_DEBUG("\t gs.priority                  = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc1.priority);
+		KYTY_LOG_DEBUG("\t gs.float_mode                = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc1.float_mode);
+		KYTY_LOG_DEBUG("\t gs.dx10_clamp                = %s\n", vs.gs_regs.rsrc1.dx10_clamp ? "true" : "false");
+		KYTY_LOG_DEBUG("\t gs.ieee_mode                 = %s\n", vs.gs_regs.rsrc1.ieee_mode ? "true" : "false");
+		KYTY_LOG_DEBUG("\t gs.debug_mode                = %s\n", vs.gs_regs.rsrc1.debug_mode ? "true" : "false");
+		KYTY_LOG_DEBUG("\t gs.lds_configuration         = %s\n", vs.gs_regs.rsrc1.lds_configuration ? "true" : "false");
+		KYTY_LOG_DEBUG("\t gs.cu_group_enable           = %s\n", vs.gs_regs.rsrc1.cu_group_enable ? "true" : "false");
+		KYTY_LOG_DEBUG("\t gs.require_forward_progress  = %s\n", vs.gs_regs.rsrc1.require_forward_progress ? "true" : "false");
+		KYTY_LOG_DEBUG("\t gs.fp16_overflow             = %s\n", vs.gs_regs.rsrc1.fp16_overflow ? "true" : "false");
+		KYTY_LOG_DEBUG("\t gs.gs_vgpr_component_count   = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc1.gs_vgpr_component_count);
+		KYTY_LOG_DEBUG("\t gs.scratch_en                = %s\n", vs.gs_regs.rsrc2.scratch_en ? "true" : "false");
+		KYTY_LOG_DEBUG("\t gs.user_sgpr                 = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc2.user_sgpr);
+		KYTY_LOG_DEBUG("\t gs.offchip_lds               = %s\n", vs.gs_regs.rsrc2.offchip_lds ? "true" : "false");
+		KYTY_LOG_DEBUG("\t gs.shared_vgprs              = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc2.shared_vgprs);
+		KYTY_LOG_DEBUG("\t gs.es_vgpr_component_count   = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc2.es_vgpr_component_count);
+		KYTY_LOG_DEBUG("\t gs.lds_size                  = 0x%02" PRIx8 "\n", vs.gs_regs.rsrc2.lds_size);
 	}
 
-	printf("\t m_spiVsOutConfig          = 0x%08" PRIx32 "\n", sh.m_spiVsOutConfig);
-	printf("\t m_spiShaderPosFormat      = 0x%08" PRIx32 "\n", sh.m_spiShaderPosFormat);
-	printf("\t m_paClVsOutCntl           = 0x%08" PRIx32 "\n", sh.m_paClVsOutCntl);
-	printf("\t m_spiShaderIdxFormat      = 0x%08" PRIx32 "\n", sh.m_spiShaderIdxFormat);
-	printf("\t m_geNggSubgrpCntl         = 0x%08" PRIx32 "\n", sh.m_geNggSubgrpCntl);
-	printf("\t m_vgtGsInstanceCnt        = 0x%08" PRIx32 "\n", sh.m_vgtGsInstanceCnt);
-	printf("\t GetEsVertsPerSubgrp()     = 0x%08" PRIx32 "\n", sh.GetEsVertsPerSubgrp());
-	printf("\t GetGsPrimsPerSubgrp()     = 0x%08" PRIx32 "\n", sh.GetGsPrimsPerSubgrp());
-	printf("\t GetGsInstPrimsInSubgrp()  = 0x%08" PRIx32 "\n", sh.GetGsInstPrimsInSubgrp());
-	printf("\t m_geMaxOutputPerSubgroup  = 0x%08" PRIx32 "\n", sh.m_geMaxOutputPerSubgroup);
-	printf("\t m_vgtEsgsRingItemsize     = 0x%08" PRIx32 "\n", sh.m_vgtEsgsRingItemsize);
-	printf("\t m_vgtGsMaxVertOut         = 0x%08" PRIx32 "\n", sh.m_vgtGsMaxVertOut);
-	printf("\t m_vgtGsOutPrimType        = 0x%08" PRIx32 "\n", sh.m_vgtGsOutPrimType);
+	KYTY_LOG_DEBUG("\t m_spiVsOutConfig          = 0x%08" PRIx32 "\n", sh.m_spiVsOutConfig);
+	KYTY_LOG_DEBUG("\t m_spiShaderPosFormat      = 0x%08" PRIx32 "\n", sh.m_spiShaderPosFormat);
+	KYTY_LOG_DEBUG("\t m_paClVsOutCntl           = 0x%08" PRIx32 "\n", sh.m_paClVsOutCntl);
+	KYTY_LOG_DEBUG("\t m_spiShaderIdxFormat      = 0x%08" PRIx32 "\n", sh.m_spiShaderIdxFormat);
+	KYTY_LOG_DEBUG("\t m_geNggSubgrpCntl         = 0x%08" PRIx32 "\n", sh.m_geNggSubgrpCntl);
+	KYTY_LOG_DEBUG("\t m_vgtGsInstanceCnt        = 0x%08" PRIx32 "\n", sh.m_vgtGsInstanceCnt);
+	KYTY_LOG_DEBUG("\t GetEsVertsPerSubgrp()     = 0x%08" PRIx32 "\n", sh.GetEsVertsPerSubgrp());
+	KYTY_LOG_DEBUG("\t GetGsPrimsPerSubgrp()     = 0x%08" PRIx32 "\n", sh.GetGsPrimsPerSubgrp());
+	KYTY_LOG_DEBUG("\t GetGsInstPrimsInSubgrp()  = 0x%08" PRIx32 "\n", sh.GetGsInstPrimsInSubgrp());
+	KYTY_LOG_DEBUG("\t m_geMaxOutputPerSubgroup  = 0x%08" PRIx32 "\n", sh.m_geMaxOutputPerSubgroup);
+	KYTY_LOG_DEBUG("\t m_vgtEsgsRingItemsize     = 0x%08" PRIx32 "\n", sh.m_vgtEsgsRingItemsize);
+	KYTY_LOG_DEBUG("\t m_vgtGsMaxVertOut         = 0x%08" PRIx32 "\n", sh.m_vgtGsMaxVertOut);
+	KYTY_LOG_DEBUG("\t m_vgtGsOutPrimType        = 0x%08" PRIx32 "\n", sh.m_vgtGsOutPrimType);
 }
 
 void ps_print(const char* func, const HW::PsStageRegisters& ps, const HW::ShaderRegisters& sh)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t data_addr                   = 0x%016" PRIx64 "\n", ps.data_addr);
-	printf("\t chksum                      = 0x%016" PRIx64 "\n", ps.chksum);
-	printf("\t conservative_z_export_value = 0x%08" PRIx32 "\n", sh.db_shader_control.conservative_z_export_value);
-	printf("\t shader_z_behavior           = 0x%08" PRIx32 "\n", sh.db_shader_control.shader_z_behavior);
-	printf("\t shader_kill_enable          = %s\n", sh.db_shader_control.shader_kill_enable ? "true" : "false");
-	printf("\t shader_z_export_enable      = %s\n", sh.db_shader_control.shader_z_export_enable ? "true" : "false");
-	printf("\t shader_execute_on_noop      = %s\n", sh.db_shader_control.shader_execute_on_noop ? "true" : "false");
-	printf("\t vgprs                       = 0x%02" PRIx8 "\n", ps.rsrc1.vgprs);
-	printf("\t sgprs                       = 0x%02" PRIx8 "\n", ps.rsrc1.sgprs);
-	printf("\t priority                    = 0x%02" PRIx8 "\n", ps.rsrc1.priority);
-	printf("\t float_mode                  = 0x%02" PRIx8 "\n", ps.rsrc1.float_mode);
-	printf("\t dx10_clamp                  = %s\n", ps.rsrc1.dx10_clamp ? "true" : "false");
-	printf("\t debug_mode                  = %s\n", ps.rsrc1.debug_mode ? "true" : "false");
-	printf("\t ieee_mode                   = %s\n", ps.rsrc1.ieee_mode ? "true" : "false");
-	printf("\t cu_group_disable            = %s\n", ps.rsrc1.cu_group_disable ? "true" : "false");
-	printf("\t require_forward_progress    = %s\n", ps.rsrc1.require_forward_progress ? "true" : "false");
-	printf("\t fp16_overflow               = %s\n", ps.rsrc1.fp16_overflow ? "true" : "false");
-	printf("\t scratch_en                  = %s\n", ps.rsrc2.scratch_en ? "true" : "false");
-	printf("\t user_sgpr                   = 0x%02" PRIx8 "\n", ps.rsrc2.user_sgpr);
-	printf("\t wave_cnt_en                 = %s\n", ps.rsrc2.wave_cnt_en ? "true" : "false");
-	printf("\t extra_lds_size              = 0x%02" PRIx8 "\n", ps.rsrc2.extra_lds_size);
-	printf("\t raster_ordered_shading      = %s\n", ps.rsrc2.raster_ordered_shading ? "true" : "false");
-	printf("\t shared_vgprs                = 0x%02" PRIx8 "\n", ps.rsrc2.shared_vgprs);
+	KYTY_LOG_DEBUG("\t data_addr                   = 0x%016" PRIx64 "\n", ps.data_addr);
+	KYTY_LOG_DEBUG("\t chksum                      = 0x%016" PRIx64 "\n", ps.chksum);
+	KYTY_LOG_DEBUG("\t conservative_z_export_value = 0x%08" PRIx32 "\n", sh.db_shader_control.conservative_z_export_value);
+	KYTY_LOG_DEBUG("\t shader_z_behavior           = 0x%08" PRIx32 "\n", sh.db_shader_control.shader_z_behavior);
+	KYTY_LOG_DEBUG("\t shader_kill_enable          = %s\n", sh.db_shader_control.shader_kill_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t shader_z_export_enable      = %s\n", sh.db_shader_control.shader_z_export_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t shader_execute_on_noop      = %s\n", sh.db_shader_control.shader_execute_on_noop ? "true" : "false");
+	KYTY_LOG_DEBUG("\t vgprs                       = 0x%02" PRIx8 "\n", ps.rsrc1.vgprs);
+	KYTY_LOG_DEBUG("\t sgprs                       = 0x%02" PRIx8 "\n", ps.rsrc1.sgprs);
+	KYTY_LOG_DEBUG("\t priority                    = 0x%02" PRIx8 "\n", ps.rsrc1.priority);
+	KYTY_LOG_DEBUG("\t float_mode                  = 0x%02" PRIx8 "\n", ps.rsrc1.float_mode);
+	KYTY_LOG_DEBUG("\t dx10_clamp                  = %s\n", ps.rsrc1.dx10_clamp ? "true" : "false");
+	KYTY_LOG_DEBUG("\t debug_mode                  = %s\n", ps.rsrc1.debug_mode ? "true" : "false");
+	KYTY_LOG_DEBUG("\t ieee_mode                   = %s\n", ps.rsrc1.ieee_mode ? "true" : "false");
+	KYTY_LOG_DEBUG("\t cu_group_disable            = %s\n", ps.rsrc1.cu_group_disable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t require_forward_progress    = %s\n", ps.rsrc1.require_forward_progress ? "true" : "false");
+	KYTY_LOG_DEBUG("\t fp16_overflow               = %s\n", ps.rsrc1.fp16_overflow ? "true" : "false");
+	KYTY_LOG_DEBUG("\t scratch_en                  = %s\n", ps.rsrc2.scratch_en ? "true" : "false");
+	KYTY_LOG_DEBUG("\t user_sgpr                   = 0x%02" PRIx8 "\n", ps.rsrc2.user_sgpr);
+	KYTY_LOG_DEBUG("\t wave_cnt_en                 = %s\n", ps.rsrc2.wave_cnt_en ? "true" : "false");
+	KYTY_LOG_DEBUG("\t extra_lds_size              = 0x%02" PRIx8 "\n", ps.rsrc2.extra_lds_size);
+	KYTY_LOG_DEBUG("\t raster_ordered_shading      = %s\n", ps.rsrc2.raster_ordered_shading ? "true" : "false");
+	KYTY_LOG_DEBUG("\t shared_vgprs                = 0x%02" PRIx8 "\n", ps.rsrc2.shared_vgprs);
 
-	printf("\t shader_z_format             = 0x%08" PRIx32 "\n", sh.shader_z_format);
-	printf("\t target_output_mode[0]       = 0x%02" PRIx8 "\n", sh.target_output_mode[0]);
-	printf("\t ps_input_ena                = 0x%08" PRIx32 "\n", sh.ps_input_ena);
-	printf("\t ps_input_addr               = 0x%08" PRIx32 "\n", sh.ps_input_addr);
-	printf("\t ps_in_control               = 0x%08" PRIx32 "\n", sh.ps_in_control);
-	printf("\t baryc_cntl                  = 0x%08" PRIx32 "\n", sh.baryc_cntl);
-	printf("\t m_cbShaderMask              = 0x%08" PRIx32 "\n", sh.m_cbShaderMask);
+	KYTY_LOG_DEBUG("\t shader_z_format             = 0x%08" PRIx32 "\n", sh.shader_z_format);
+	KYTY_LOG_DEBUG("\t target_output_mode[0]       = 0x%02" PRIx8 "\n", sh.target_output_mode[0]);
+	KYTY_LOG_DEBUG("\t ps_input_ena                = 0x%08" PRIx32 "\n", sh.ps_input_ena);
+	KYTY_LOG_DEBUG("\t ps_input_addr               = 0x%08" PRIx32 "\n", sh.ps_input_addr);
+	KYTY_LOG_DEBUG("\t ps_in_control               = 0x%08" PRIx32 "\n", sh.ps_in_control);
+	KYTY_LOG_DEBUG("\t baryc_cntl                  = 0x%08" PRIx32 "\n", sh.baryc_cntl);
+	KYTY_LOG_DEBUG("\t m_cbShaderMask              = 0x%08" PRIx32 "\n", sh.m_cbShaderMask);
 
-	printf("\t m_paScShaderControl         = 0x%08" PRIx32 "\n", sh.m_paScShaderControl);
+	KYTY_LOG_DEBUG("\t m_paScShaderControl         = 0x%08" PRIx32 "\n", sh.m_paScShaderControl);
 }
 
 void cs_print(const char* func, const HW::CsStageRegisters& cs, const HW::ShaderRegisters& /*sh*/)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	//	printf("\t GetGpuAddress()        = 0x%016" PRIx64 "\n", cs.GetGpuAddress());
-	//	printf("\t m_computePgmLo         = 0x%08" PRIx32 "\n", cs.m_computePgmLo);
-	//	printf("\t m_computePgmHi         = 0x%08" PRIx32 "\n", cs.m_computePgmHi);
-	//	printf("\t m_computePgmRsrc1      = 0x%08" PRIx32 "\n", cs.m_computePgmRsrc1);
-	//	printf("\t m_computePgmRsrc2      = 0x%08" PRIx32 "\n", cs.m_computePgmRsrc2);
-	//	printf("\t m_computeNumThreadX    = 0x%08" PRIx32 "\n", cs.m_computeNumThreadX);
-	//	printf("\t m_computeNumThreadY    = 0x%08" PRIx32 "\n", cs.m_computeNumThreadY);
-	//	printf("\t m_computeNumThreadZ    = 0x%08" PRIx32 "\n", cs.m_computeNumThreadZ);
-	printf("\t data_addr      = 0x%016" PRIx64 "\n", cs.data_addr);
-	printf("\t num_thread_x   = 0x%08" PRIx32 "\n", cs.num_thread_x);
-	printf("\t num_thread_y   = 0x%08" PRIx32 "\n", cs.num_thread_y);
-	printf("\t num_thread_z   = 0x%08" PRIx32 "\n", cs.num_thread_z);
-	printf("\t vgprs          = 0x%02" PRIx8 "\n", cs.vgprs);
-	printf("\t sgprs          = 0x%02" PRIx8 "\n", cs.sgprs);
-	printf("\t bulky          = 0x%02" PRIx8 "\n", cs.bulky);
-	printf("\t scratch_en     = 0x%02" PRIx8 "\n", cs.scratch_en);
-	printf("\t user_sgpr      = 0x%02" PRIx8 "\n", cs.user_sgpr);
-	printf("\t tgid_x_en      = 0x%02" PRIx8 "\n", cs.tgid_x_en);
-	printf("\t tgid_y_en      = 0x%02" PRIx8 "\n", cs.tgid_y_en);
-	printf("\t tgid_z_en      = 0x%02" PRIx8 "\n", cs.tgid_z_en);
-	printf("\t tg_size_en     = 0x%02" PRIx8 "\n", cs.tg_size_en);
-	printf("\t tidig_comp_cnt = 0x%02" PRIx8 "\n", cs.tidig_comp_cnt);
-	printf("\t lds_size       = 0x%03" PRIx16 "\n", cs.lds_size);
+	//	KYTY_LOG_DEBUG("\t GetGpuAddress()        = 0x%016" PRIx64 "\n", cs.GetGpuAddress());
+	//	KYTY_LOG_DEBUG("\t m_computePgmLo         = 0x%08" PRIx32 "\n", cs.m_computePgmLo);
+	//	KYTY_LOG_DEBUG("\t m_computePgmHi         = 0x%08" PRIx32 "\n", cs.m_computePgmHi);
+	//	KYTY_LOG_DEBUG("\t m_computePgmRsrc1      = 0x%08" PRIx32 "\n", cs.m_computePgmRsrc1);
+	//	KYTY_LOG_DEBUG("\t m_computePgmRsrc2      = 0x%08" PRIx32 "\n", cs.m_computePgmRsrc2);
+	//	KYTY_LOG_DEBUG("\t m_computeNumThreadX    = 0x%08" PRIx32 "\n", cs.m_computeNumThreadX);
+	//	KYTY_LOG_DEBUG("\t m_computeNumThreadY    = 0x%08" PRIx32 "\n", cs.m_computeNumThreadY);
+	//	KYTY_LOG_DEBUG("\t m_computeNumThreadZ    = 0x%08" PRIx32 "\n", cs.m_computeNumThreadZ);
+	KYTY_LOG_DEBUG("\t data_addr      = 0x%016" PRIx64 "\n", cs.data_addr);
+	KYTY_LOG_DEBUG("\t num_thread_x   = 0x%08" PRIx32 "\n", cs.num_thread_x);
+	KYTY_LOG_DEBUG("\t num_thread_y   = 0x%08" PRIx32 "\n", cs.num_thread_y);
+	KYTY_LOG_DEBUG("\t num_thread_z   = 0x%08" PRIx32 "\n", cs.num_thread_z);
+	KYTY_LOG_DEBUG("\t vgprs          = 0x%02" PRIx8 "\n", cs.vgprs);
+	KYTY_LOG_DEBUG("\t sgprs          = 0x%02" PRIx8 "\n", cs.sgprs);
+	KYTY_LOG_DEBUG("\t bulky          = 0x%02" PRIx8 "\n", cs.bulky);
+	KYTY_LOG_DEBUG("\t scratch_en     = 0x%02" PRIx8 "\n", cs.scratch_en);
+	KYTY_LOG_DEBUG("\t user_sgpr      = 0x%02" PRIx8 "\n", cs.user_sgpr);
+	KYTY_LOG_DEBUG("\t tgid_x_en      = 0x%02" PRIx8 "\n", cs.tgid_x_en);
+	KYTY_LOG_DEBUG("\t tgid_y_en      = 0x%02" PRIx8 "\n", cs.tgid_y_en);
+	KYTY_LOG_DEBUG("\t tgid_z_en      = 0x%02" PRIx8 "\n", cs.tgid_z_en);
+	KYTY_LOG_DEBUG("\t tg_size_en     = 0x%02" PRIx8 "\n", cs.tg_size_en);
+	KYTY_LOG_DEBUG("\t tidig_comp_cnt = 0x%02" PRIx8 "\n", cs.tidig_comp_cnt);
+	KYTY_LOG_DEBUG("\t lds_size       = 0x%03" PRIx16 "\n", cs.lds_size);
 }
 
 void bi_print(const char* func, const ShaderBinaryInfo& bi)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t signature                  = %.7s\n", bi.signature);
-	printf("\t version                    = 0x%02" PRIx8 "\n", bi.version);
-	printf("\t pssl_or_cg                 = 0x%08" PRIx32 "\n", static_cast<uint32_t>(bi.pssl_or_cg));
-	printf("\t cached                     = 0x%08" PRIx32 "\n", static_cast<uint32_t>(bi.cached));
-	printf("\t type                       = 0x%08" PRIx32 "\n", static_cast<uint32_t>(bi.type));
-	printf("\t source_type                = 0x%08" PRIx32 "\n", static_cast<uint32_t>(bi.source_type));
-	printf("\t length                     = 0x%08" PRIx32 "\n", static_cast<uint32_t>(bi.length));
-	printf("\t chunk_usage_base_offset_dw = 0x%02" PRIx8 "\n", bi.chunk_usage_base_offset_dw);
-	printf("\t num_input_usage_slots      = 0x%02" PRIx8 "\n", bi.num_input_usage_slots);
-	printf("\t is_srt                     = 0x%02" PRIx8 "\n", bi.is_srt);
-	printf("\t is_srt_used_info_valid     = 0x%02" PRIx8 "\n", bi.is_srt_used_info_valid);
-	printf("\t is_extended_usage_info     = 0x%02" PRIx8 "\n", bi.is_extended_usage_info);
-	printf("\t reserved2                  = 0x%02" PRIx8 "\n", bi.reserved2);
-	printf("\t reserved3                  = 0x%02" PRIx8 "\n", bi.reserved3);
-	printf("\t hash0                      = 0x%08" PRIx32 "\n", bi.hash0);
-	printf("\t hash1                      = 0x%08" PRIx32 "\n", bi.hash1);
-	printf("\t crc32                      = 0x%08" PRIx32 "\n", bi.crc32);
+	KYTY_LOG_DEBUG("\t signature                  = %.7s\n", bi.signature);
+	KYTY_LOG_DEBUG("\t version                    = 0x%02" PRIx8 "\n", bi.version);
+	KYTY_LOG_DEBUG("\t pssl_or_cg                 = 0x%08" PRIx32 "\n", static_cast<uint32_t>(bi.pssl_or_cg));
+	KYTY_LOG_DEBUG("\t cached                     = 0x%08" PRIx32 "\n", static_cast<uint32_t>(bi.cached));
+	KYTY_LOG_DEBUG("\t type                       = 0x%08" PRIx32 "\n", static_cast<uint32_t>(bi.type));
+	KYTY_LOG_DEBUG("\t source_type                = 0x%08" PRIx32 "\n", static_cast<uint32_t>(bi.source_type));
+	KYTY_LOG_DEBUG("\t length                     = 0x%08" PRIx32 "\n", static_cast<uint32_t>(bi.length));
+	KYTY_LOG_DEBUG("\t chunk_usage_base_offset_dw = 0x%02" PRIx8 "\n", bi.chunk_usage_base_offset_dw);
+	KYTY_LOG_DEBUG("\t num_input_usage_slots      = 0x%02" PRIx8 "\n", bi.num_input_usage_slots);
+	KYTY_LOG_DEBUG("\t is_srt                     = 0x%02" PRIx8 "\n", bi.is_srt);
+	KYTY_LOG_DEBUG("\t is_srt_used_info_valid     = 0x%02" PRIx8 "\n", bi.is_srt_used_info_valid);
+	KYTY_LOG_DEBUG("\t is_extended_usage_info     = 0x%02" PRIx8 "\n", bi.is_extended_usage_info);
+	KYTY_LOG_DEBUG("\t reserved2                  = 0x%02" PRIx8 "\n", bi.reserved2);
+	KYTY_LOG_DEBUG("\t reserved3                  = 0x%02" PRIx8 "\n", bi.reserved3);
+	KYTY_LOG_DEBUG("\t hash0                      = 0x%08" PRIx32 "\n", bi.hash0);
+	KYTY_LOG_DEBUG("\t hash1                      = 0x%08" PRIx32 "\n", bi.hash1);
+	KYTY_LOG_DEBUG("\t crc32                      = 0x%08" PRIx32 "\n", bi.crc32);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)

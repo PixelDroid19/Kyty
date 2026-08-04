@@ -863,7 +863,7 @@ static void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch,
 
 	KYTY_PROFILER_END_BLOCK;
 
-	// printf("%s", code.DbgDump().c_str());
+	// KYTY_LOG_DEBUG("%s", code.DbgDump().c_str());
 
 	KYTY_PROFILER_BLOCK("ShaderParseFetch::check_insts");
 
@@ -975,7 +975,7 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 
 		if (vertex_attr_trace)
 		{
-			printf("reg = %u, size = %u, va[%u] = 0x%08" PRIx32 "\n", reg, size, i, attrib[in.semantic]);
+			KYTY_LOG_DEBUG("reg = %u, size = %u, va[%u] = 0x%08" PRIx32 "\n", reg, size, i, attrib[in.semantic]);
 		}
 
 		size_t   index       = attrib[in.semantic] & 0x1fu;
@@ -1293,7 +1293,7 @@ static void ShaderGetDirectSgpr(ShaderDirectSgprsResources* info, int start_inde
 	auto type = user_sgpr.type[start_index];
 	if (!ShaderCanBindDirectSgpr(user_data, start_index, type))
 	{
-		printf("WARNING: unsupported direct user SGPR (continuing)\n");
+		KYTY_LOG_DEBUG("WARNING: unsupported direct user SGPR (continuing)\n");
 	}
 
 	info->sgprs[index].field = user_sgpr.value[start_index];
@@ -1553,7 +1553,7 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 				direct_sgprs[usage.start_register + 1] = false;
 				break;
 
-			default: printf("WARNING: unknown usage type in shader (continuing)\n"); break;
+			default: KYTY_LOG_DEBUG("WARNING: unknown usage type in shader (continuing)\n"); break;
 		}
 	}
 
@@ -3055,23 +3055,23 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void ShaderDbgDumpResources(const ShaderBindResources& bind)
 {
-	printf("\t descriptor_set_slot            = %u\n", bind.descriptor_set_slot);
-	printf("\t push_constant_offset           = %u\n", bind.push_constant_offset);
-	printf("\t push_constant_size             = %u\n", bind.push_constant_size);
-	printf("\t storage_buffers.buffers_num    = %d\n", bind.storage_buffers.buffers_num);
-	printf("\t storage_buffers.binding_index  = %d\n", bind.storage_buffers.binding_index);
-	printf("\t textures.textures_num          = %d\n", bind.textures2D.textures_num);
-	printf("\t textures.binding_sampled_index = %d\n", bind.textures2D.binding_sampled_index);
-	printf("\t textures.binding_storage_index = %d\n", bind.textures2D.binding_storage_index);
-	printf("\t samplers.samplers_num          = %d\n", bind.samplers.samplers_num);
-	printf("\t samplers.binding_index         = %d\n", bind.samplers.binding_index);
-	printf("\t gds_pointers.pointers_num      = %d\n", bind.gds_pointers.pointers_num);
-	printf("\t gds_pointers.binding_index     = %d\n", bind.gds_pointers.binding_index);
-	printf("\t direct_sgprs.sgprs_num         = %d\n", bind.direct_sgprs.sgprs_num);
-	printf("\t extended.used                  = %s\n", (bind.extended.used ? "true" : "false"));
-	printf("\t extended.slot                  = %d\n", bind.extended.slot);
-	printf("\t extended.start_register        = %d\n", bind.extended.start_register);
-	printf("\t extended.data.Base             = %" PRIx64 "\n", bind.extended.data.Base());
+	KYTY_LOG_DEBUG("\t descriptor_set_slot            = %u\n", bind.descriptor_set_slot);
+	KYTY_LOG_DEBUG("\t push_constant_offset           = %u\n", bind.push_constant_offset);
+	KYTY_LOG_DEBUG("\t push_constant_size             = %u\n", bind.push_constant_size);
+	KYTY_LOG_DEBUG("\t storage_buffers.buffers_num    = %d\n", bind.storage_buffers.buffers_num);
+	KYTY_LOG_DEBUG("\t storage_buffers.binding_index  = %d\n", bind.storage_buffers.binding_index);
+	KYTY_LOG_DEBUG("\t textures.textures_num          = %d\n", bind.textures2D.textures_num);
+	KYTY_LOG_DEBUG("\t textures.binding_sampled_index = %d\n", bind.textures2D.binding_sampled_index);
+	KYTY_LOG_DEBUG("\t textures.binding_storage_index = %d\n", bind.textures2D.binding_storage_index);
+	KYTY_LOG_DEBUG("\t samplers.samplers_num          = %d\n", bind.samplers.samplers_num);
+	KYTY_LOG_DEBUG("\t samplers.binding_index         = %d\n", bind.samplers.binding_index);
+	KYTY_LOG_DEBUG("\t gds_pointers.pointers_num      = %d\n", bind.gds_pointers.pointers_num);
+	KYTY_LOG_DEBUG("\t gds_pointers.binding_index     = %d\n", bind.gds_pointers.binding_index);
+	KYTY_LOG_DEBUG("\t direct_sgprs.sgprs_num         = %d\n", bind.direct_sgprs.sgprs_num);
+	KYTY_LOG_DEBUG("\t extended.used                  = %s\n", (bind.extended.used ? "true" : "false"));
+	KYTY_LOG_DEBUG("\t extended.slot                  = %d\n", bind.extended.slot);
+	KYTY_LOG_DEBUG("\t extended.start_register        = %d\n", bind.extended.start_register);
+	KYTY_LOG_DEBUG("\t extended.data.Base             = %" PRIx64 "\n", bind.extended.data.Base());
 
 	bool gen5 = Config::IsNextGen();
 
@@ -3079,38 +3079,38 @@ static void ShaderDbgDumpResources(const ShaderBindResources& bind)
 	{
 		const auto& r = bind.storage_buffers.buffers[i];
 
-		printf("\t StorageBuffer %d\n", i);
+		KYTY_LOG_DEBUG("\t StorageBuffer %d\n", i);
 
-		printf("\t\t fields           = %08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "\n", r.fields[3], r.fields[2], r.fields[1],
+		KYTY_LOG_DEBUG("\t\t fields           = %08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "\n", r.fields[3], r.fields[2], r.fields[1],
 		       r.fields[0]);
-		printf("\t\t Base()           = %" PRIx64 "\n", gen5 ? r.Base48() : r.Base44());
-		printf("\t\t Stride()         = %" PRIu16 "\n", r.Stride());
-		printf("\t\t SwizzleEnabled() = %s\n", r.SwizzleEnabled() ? "true" : "false");
-		printf("\t\t NumRecords()     = %" PRIu32 "\n", r.NumRecords());
-		printf("\t\t DstSelX()        = %" PRIu8 "\n", r.DstSelX());
-		printf("\t\t DstSelY()        = %" PRIu8 "\n", r.DstSelY());
-		printf("\t\t DstSelZ()        = %" PRIu8 "\n", r.DstSelZ());
-		printf("\t\t DstSelW()        = %" PRIu8 "\n", r.DstSelW());
+		KYTY_LOG_DEBUG("\t\t Base()           = %" PRIx64 "\n", gen5 ? r.Base48() : r.Base44());
+		KYTY_LOG_DEBUG("\t\t Stride()         = %" PRIu16 "\n", r.Stride());
+		KYTY_LOG_DEBUG("\t\t SwizzleEnabled() = %s\n", r.SwizzleEnabled() ? "true" : "false");
+		KYTY_LOG_DEBUG("\t\t NumRecords()     = %" PRIu32 "\n", r.NumRecords());
+		KYTY_LOG_DEBUG("\t\t DstSelX()        = %" PRIu8 "\n", r.DstSelX());
+		KYTY_LOG_DEBUG("\t\t DstSelY()        = %" PRIu8 "\n", r.DstSelY());
+		KYTY_LOG_DEBUG("\t\t DstSelZ()        = %" PRIu8 "\n", r.DstSelZ());
+		KYTY_LOG_DEBUG("\t\t DstSelW()        = %" PRIu8 "\n", r.DstSelW());
 		if (!gen5)
 		{
-			printf("\t\t Nfmt()           = %" PRIu8 "\n", r.Nfmt());
-			printf("\t\t Dfmt()           = %" PRIu8 "\n", r.Dfmt());
-			printf("\t\t MemoryType()     = 0x%02" PRIx8 "\n", r.MemoryType());
+			KYTY_LOG_DEBUG("\t\t Nfmt()           = %" PRIu8 "\n", r.Nfmt());
+			KYTY_LOG_DEBUG("\t\t Dfmt()           = %" PRIu8 "\n", r.Dfmt());
+			KYTY_LOG_DEBUG("\t\t MemoryType()     = 0x%02" PRIx8 "\n", r.MemoryType());
 		} else
 		{
-			printf("\t\t Format()         = %" PRIu8 "\n", r.Format());
-			printf("\t\t OutOfBounds()    = %" PRIu8 "\n", r.OutOfBounds());
+			KYTY_LOG_DEBUG("\t\t Format()         = %" PRIu8 "\n", r.Format());
+			KYTY_LOG_DEBUG("\t\t OutOfBounds()    = %" PRIu8 "\n", r.OutOfBounds());
 		}
-		printf("\t\t AddTid()         = %s\n", r.AddTid() ? "true" : "false");
-		printf("\t\t slot             = %d\n", bind.storage_buffers.slots[i]);
-		printf("\t\t start_register   = %d\n", bind.storage_buffers.start_register[i]);
-		printf("\t\t extended         = %s\n", (bind.storage_buffers.extended[i] ? "true" : "false"));
-		printf("\t\t dynamic_sload    = %s\n", (bind.storage_buffers.dynamic_sload[i] ? "true" : "false"));
-		printf("\t\t usage            = %s\n", Core::EnumName8(bind.storage_buffers.usages[i]).c_str());
+		KYTY_LOG_DEBUG("\t\t AddTid()         = %s\n", r.AddTid() ? "true" : "false");
+		KYTY_LOG_DEBUG("\t\t slot             = %d\n", bind.storage_buffers.slots[i]);
+		KYTY_LOG_DEBUG("\t\t start_register   = %d\n", bind.storage_buffers.start_register[i]);
+		KYTY_LOG_DEBUG("\t\t extended         = %s\n", (bind.storage_buffers.extended[i] ? "true" : "false"));
+		KYTY_LOG_DEBUG("\t\t dynamic_sload    = %s\n", (bind.storage_buffers.dynamic_sload[i] ? "true" : "false"));
+		KYTY_LOG_DEBUG("\t\t usage            = %s\n", Core::EnumName8(bind.storage_buffers.usages[i]).c_str());
 	}
 	for (int mapping = 0; mapping < bind.dynamic_sloads.mappings_num; ++mapping)
 	{
-		printf("\t DynamicSLoad %d: kind=%u resource=%d dst=%d pc=%08" PRIx32 " offset_dw=%d dwords=%d last_consumer=%08" PRIx32 "\n",
+		KYTY_LOG_DEBUG("\t DynamicSLoad %d: kind=%u resource=%d dst=%d pc=%08" PRIx32 " offset_dw=%d dwords=%d last_consumer=%08" PRIx32 "\n",
 		       mapping, static_cast<unsigned>(bind.dynamic_sloads.kind[mapping]), bind.dynamic_sloads.resource_index[mapping],
 		       bind.dynamic_sloads.destination_register[mapping], bind.dynamic_sloads.instruction_pc[mapping],
 		       bind.dynamic_sloads.offset_dw[mapping], bind.dynamic_sloads.dword_count[mapping],
@@ -3121,138 +3121,138 @@ static void ShaderDbgDumpResources(const ShaderBindResources& bind)
 	{
 		const auto& r = bind.textures2D.desc[i].texture;
 
-		printf("\t Texture %d\n", i);
+		KYTY_LOG_DEBUG("\t Texture %d\n", i);
 
-		printf("\t\t fields = %08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "\n",
+		KYTY_LOG_DEBUG("\t\t fields = %08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "\n",
 		       r.fields[7], r.fields[6], r.fields[5], r.fields[4], r.fields[3], r.fields[2], r.fields[1], r.fields[0]);
-		printf("\t\t Base()          = %016" PRIx64 "\n", gen5 ? r.Base40() : r.Base38());
-		printf("\t\t MinLod()        = %" PRIu16 "\n", r.MinLod());
+		KYTY_LOG_DEBUG("\t\t Base()          = %016" PRIx64 "\n", gen5 ? r.Base40() : r.Base38());
+		KYTY_LOG_DEBUG("\t\t MinLod()        = %" PRIu16 "\n", r.MinLod());
 		if (gen5)
 		{
-			printf("\t\t Format()        = %" PRIu16 "\n", r.Format());
-			printf("\t\t BCSwizzle()     = %" PRIu8 "\n", r.BCSwizzle());
-			printf("\t\t BaseArray5()    = %" PRIu16 "\n", r.BaseArray5());
-			printf("\t\t ArrayPitch()    = %" PRIu8 "\n", r.ArrayPitch());
-			printf("\t\t MaxMip()        = %" PRIu8 "\n", r.MaxMip());
-			printf("\t\t MinLodWarn5()   = %" PRIu16 "\n", r.MinLodWarn5());
-			printf("\t\t PerfMod5()      = %" PRIu8 "\n", r.PerfMod5());
-			printf("\t\t CornerSample()  = %s\n", r.CornerSample() ? "true" : "false");
-			printf("\t\t MipStatsCntEn() = %s\n", r.MipStatsCntEn() ? "true" : "false");
-			printf("\t\t PrtDefColor()   = %s\n", r.PrtDefColor() ? "true" : "false");
-			printf("\t\t MipStatsCntId() = %" PRIu8 "\n", r.MipStatsCntId());
-			printf("\t\t MsaaDepth()     = %s\n", r.MsaaDepth() ? "true" : "false");
-			printf("\t\t MaxUncBlkSize() = %" PRIu8 "\n", r.MaxUncompBlkSize());
-			printf("\t\t MaxCompBlkSize()= %" PRIu8 "\n", r.MaxCompBlkSize());
-			printf("\t\t MetaPipeAlign() = %s\n", r.MetaPipeAligned() ? "true" : "false");
-			printf("\t\t WriteCompress() = %s\n", r.WriteCompress() ? "true" : "false");
-			printf("\t\t MetaCompress()  = %s\n", r.MetaCompress() ? "true" : "false");
-			printf("\t\t DccAlphaPos()   = %s\n", r.DccAlphaPos() ? "true" : "false");
-			printf("\t\t DccColorTransf()= %s\n", r.DccColorTransf() ? "true" : "false");
-			printf("\t\t MetaAddr()      = %" PRIx64 "\n", r.MetaAddr());
+			KYTY_LOG_DEBUG("\t\t Format()        = %" PRIu16 "\n", r.Format());
+			KYTY_LOG_DEBUG("\t\t BCSwizzle()     = %" PRIu8 "\n", r.BCSwizzle());
+			KYTY_LOG_DEBUG("\t\t BaseArray5()    = %" PRIu16 "\n", r.BaseArray5());
+			KYTY_LOG_DEBUG("\t\t ArrayPitch()    = %" PRIu8 "\n", r.ArrayPitch());
+			KYTY_LOG_DEBUG("\t\t MaxMip()        = %" PRIu8 "\n", r.MaxMip());
+			KYTY_LOG_DEBUG("\t\t MinLodWarn5()   = %" PRIu16 "\n", r.MinLodWarn5());
+			KYTY_LOG_DEBUG("\t\t PerfMod5()      = %" PRIu8 "\n", r.PerfMod5());
+			KYTY_LOG_DEBUG("\t\t CornerSample()  = %s\n", r.CornerSample() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t MipStatsCntEn() = %s\n", r.MipStatsCntEn() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t PrtDefColor()   = %s\n", r.PrtDefColor() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t MipStatsCntId() = %" PRIu8 "\n", r.MipStatsCntId());
+			KYTY_LOG_DEBUG("\t\t MsaaDepth()     = %s\n", r.MsaaDepth() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t MaxUncBlkSize() = %" PRIu8 "\n", r.MaxUncompBlkSize());
+			KYTY_LOG_DEBUG("\t\t MaxCompBlkSize()= %" PRIu8 "\n", r.MaxCompBlkSize());
+			KYTY_LOG_DEBUG("\t\t MetaPipeAlign() = %s\n", r.MetaPipeAligned() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t WriteCompress() = %s\n", r.WriteCompress() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t MetaCompress()  = %s\n", r.MetaCompress() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t DccAlphaPos()   = %s\n", r.DccAlphaPos() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t DccColorTransf()= %s\n", r.DccColorTransf() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t MetaAddr()      = %" PRIx64 "\n", r.MetaAddr());
 
 		} else
 		{
-			printf("\t\t Dfmt()          = %" PRIu8 "\n", r.Dfmt());
-			printf("\t\t Nfmt()          = %" PRIu8 "\n", r.Nfmt());
-			printf("\t\t PerfMod()       = %" PRIu8 "\n", r.PerfMod());
-			printf("\t\t Interlaced()    = %s\n", r.Interlaced() ? "true" : "false");
-			printf("\t\t MemoryType()    = 0x%02" PRIx8 "\n", r.MemoryType());
-			printf("\t\t Pow2Pad()       = %s\n", r.Pow2Pad() ? "true" : "false");
-			printf("\t\t Pitch()         = %" PRIu16 "\n", r.Pitch());
-			printf("\t\t BaseArray()     = %" PRIu16 "\n", r.BaseArray());
-			printf("\t\t LastArray()     = %" PRIu16 "\n", r.LastArray());
-			printf("\t\t MinLodWarn()    = %" PRIu16 "\n", r.MinLodWarn());
-			printf("\t\t LodHdwCntEn()   = %s\n", r.LodHdwCntEn() ? "true" : "false");
-			printf("\t\t CounterBankId() = %" PRIu8 "\n", r.CounterBankId());
+			KYTY_LOG_DEBUG("\t\t Dfmt()          = %" PRIu8 "\n", r.Dfmt());
+			KYTY_LOG_DEBUG("\t\t Nfmt()          = %" PRIu8 "\n", r.Nfmt());
+			KYTY_LOG_DEBUG("\t\t PerfMod()       = %" PRIu8 "\n", r.PerfMod());
+			KYTY_LOG_DEBUG("\t\t Interlaced()    = %s\n", r.Interlaced() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t MemoryType()    = 0x%02" PRIx8 "\n", r.MemoryType());
+			KYTY_LOG_DEBUG("\t\t Pow2Pad()       = %s\n", r.Pow2Pad() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t Pitch()         = %" PRIu16 "\n", r.Pitch());
+			KYTY_LOG_DEBUG("\t\t BaseArray()     = %" PRIu16 "\n", r.BaseArray());
+			KYTY_LOG_DEBUG("\t\t LastArray()     = %" PRIu16 "\n", r.LastArray());
+			KYTY_LOG_DEBUG("\t\t MinLodWarn()    = %" PRIu16 "\n", r.MinLodWarn());
+			KYTY_LOG_DEBUG("\t\t LodHdwCntEn()   = %s\n", r.LodHdwCntEn() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t CounterBankId() = %" PRIu8 "\n", r.CounterBankId());
 		}
-		printf("\t\t Width()         = %" PRIu16 "\n", gen5 ? r.Width5() : r.Width4());
-		printf("\t\t Height()        = %" PRIu16 "\n", gen5 ? r.Height5() : r.Height4());
-		printf("\t\t DstSelX()       = %" PRIu8 "\n", r.DstSelX());
-		printf("\t\t DstSelY()       = %" PRIu8 "\n", r.DstSelY());
-		printf("\t\t DstSelZ()       = %" PRIu8 "\n", r.DstSelZ());
-		printf("\t\t DstSelW()       = %" PRIu8 "\n", r.DstSelW());
-		printf("\t\t BaseLevel()     = %" PRIu8 "\n", r.BaseLevel());
-		printf("\t\t LastLevel()     = %" PRIu8 "\n", r.LastLevel());
-		printf("\t\t TileMode()      = %" PRIu8 "\n", r.TileMode());
-		printf("\t\t Type()          = %" PRIu8 "\n", r.Type());
-		printf("\t\t Depth()         = %" PRIu16 "\n", r.Depth());
-		printf("\t\t slot            = %d\n", bind.textures2D.desc[i].slot);
-		printf("\t\t start_register  = %d\n", bind.textures2D.desc[i].start_register);
-		printf("\t\t extended        = %s\n", (bind.textures2D.desc[i].extended ? "true" : "false"));
-		printf("\t\t usage           = %s\n", Core::EnumName8(bind.textures2D.desc[i].usage).c_str());
+		KYTY_LOG_DEBUG("\t\t Width()         = %" PRIu16 "\n", gen5 ? r.Width5() : r.Width4());
+		KYTY_LOG_DEBUG("\t\t Height()        = %" PRIu16 "\n", gen5 ? r.Height5() : r.Height4());
+		KYTY_LOG_DEBUG("\t\t DstSelX()       = %" PRIu8 "\n", r.DstSelX());
+		KYTY_LOG_DEBUG("\t\t DstSelY()       = %" PRIu8 "\n", r.DstSelY());
+		KYTY_LOG_DEBUG("\t\t DstSelZ()       = %" PRIu8 "\n", r.DstSelZ());
+		KYTY_LOG_DEBUG("\t\t DstSelW()       = %" PRIu8 "\n", r.DstSelW());
+		KYTY_LOG_DEBUG("\t\t BaseLevel()     = %" PRIu8 "\n", r.BaseLevel());
+		KYTY_LOG_DEBUG("\t\t LastLevel()     = %" PRIu8 "\n", r.LastLevel());
+		KYTY_LOG_DEBUG("\t\t TileMode()      = %" PRIu8 "\n", r.TileMode());
+		KYTY_LOG_DEBUG("\t\t Type()          = %" PRIu8 "\n", r.Type());
+		KYTY_LOG_DEBUG("\t\t Depth()         = %" PRIu16 "\n", r.Depth());
+		KYTY_LOG_DEBUG("\t\t slot            = %d\n", bind.textures2D.desc[i].slot);
+		KYTY_LOG_DEBUG("\t\t start_register  = %d\n", bind.textures2D.desc[i].start_register);
+		KYTY_LOG_DEBUG("\t\t extended        = %s\n", (bind.textures2D.desc[i].extended ? "true" : "false"));
+		KYTY_LOG_DEBUG("\t\t usage           = %s\n", Core::EnumName8(bind.textures2D.desc[i].usage).c_str());
 	}
 
 	for (int i = 0; i < bind.samplers.samplers_num; i++)
 	{
 		const auto& r = bind.samplers.samplers[i];
 
-		printf("\t Sampler %d\n", i);
+		KYTY_LOG_DEBUG("\t Sampler %d\n", i);
 
-		printf("\t\t fields = %08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "\n", r.fields[3], r.fields[2], r.fields[1], r.fields[0]);
+		KYTY_LOG_DEBUG("\t\t fields = %08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "\n", r.fields[3], r.fields[2], r.fields[1], r.fields[0]);
 
-		printf("\t\t ClampX()           = %" PRIu8 "\n", r.ClampX());
-		printf("\t\t ClampY()           = %" PRIu8 "\n", r.ClampY());
-		printf("\t\t ClampZ()           = %" PRIu8 "\n", r.ClampZ());
-		printf("\t\t MaxAnisoRatio()    = %" PRIu8 "\n", r.MaxAnisoRatio());
-		printf("\t\t DepthCompareFunc() = %" PRIu8 "\n", r.DepthCompareFunc());
-		printf("\t\t ForceUnormCoords() = %s\n", r.ForceUnormCoords() ? "true" : "false");
-		printf("\t\t AnisoThreshold()   = %" PRIu8 "\n", r.AnisoThreshold());
+		KYTY_LOG_DEBUG("\t\t ClampX()           = %" PRIu8 "\n", r.ClampX());
+		KYTY_LOG_DEBUG("\t\t ClampY()           = %" PRIu8 "\n", r.ClampY());
+		KYTY_LOG_DEBUG("\t\t ClampZ()           = %" PRIu8 "\n", r.ClampZ());
+		KYTY_LOG_DEBUG("\t\t MaxAnisoRatio()    = %" PRIu8 "\n", r.MaxAnisoRatio());
+		KYTY_LOG_DEBUG("\t\t DepthCompareFunc() = %" PRIu8 "\n", r.DepthCompareFunc());
+		KYTY_LOG_DEBUG("\t\t ForceUnormCoords() = %s\n", r.ForceUnormCoords() ? "true" : "false");
+		KYTY_LOG_DEBUG("\t\t AnisoThreshold()   = %" PRIu8 "\n", r.AnisoThreshold());
 		if (!gen5)
 		{
-			printf("\t\t McCoordTrunc()     = %s\n", r.McCoordTrunc() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t McCoordTrunc()     = %s\n", r.McCoordTrunc() ? "true" : "false");
 		} else
 		{
-			printf("\t\t SkipDegamma()      = %s\n", r.SkipDegamma() ? "true" : "false");
-			printf("\t\t PointPreclamp()    = %s\n", r.PointPreclamp() ? "true" : "false");
-			printf("\t\t AnisoOverride()    = %s\n", r.AnisoOverride() ? "true" : "false");
-			printf("\t\t BlendZeroPrt()     = %s\n", r.BlendZeroPrt() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t SkipDegamma()      = %s\n", r.SkipDegamma() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t PointPreclamp()    = %s\n", r.PointPreclamp() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t AnisoOverride()    = %s\n", r.AnisoOverride() ? "true" : "false");
+			KYTY_LOG_DEBUG("\t\t BlendZeroPrt()     = %s\n", r.BlendZeroPrt() ? "true" : "false");
 		}
-		printf("\t\t ForceDegamma()     = %s\n", r.ForceDegamma() ? "true" : "false");
-		printf("\t\t AnisoBias()        = %" PRIu8 "\n", r.AnisoBias());
-		printf("\t\t TruncCoord()       = %s\n", r.TruncCoord() ? "true" : "false");
-		printf("\t\t DisableCubeWrap()  = %s\n", r.DisableCubeWrap() ? "true" : "false");
-		printf("\t\t FilterMode()       = %" PRIu8 "\n", r.FilterMode());
-		printf("\t\t MinLod()           = %" PRIu16 "\n", r.MinLod());
-		printf("\t\t MaxLod()           = %" PRIu16 "\n", r.MaxLod());
-		printf("\t\t PerfMip()          = %" PRIu8 "\n", r.PerfMip());
-		printf("\t\t PerfZ()            = %" PRIu8 "\n", r.PerfZ());
-		printf("\t\t LodBias()          = %" PRIu16 "\n", r.LodBias());
-		printf("\t\t LodBiasSec()       = %" PRIu8 "\n", r.LodBiasSec());
-		printf("\t\t XyMagFilter()      = %" PRIu8 "\n", r.XyMagFilter());
-		printf("\t\t XyMinFilter()      = %" PRIu8 "\n", r.XyMinFilter());
-		printf("\t\t ZFilter()          = %" PRIu8 "\n", r.ZFilter());
-		printf("\t\t MipFilter()        = %" PRIu8 "\n", r.MipFilter());
-		printf("\t\t BorderColorPtr()   = %" PRIu16 "\n", r.BorderColorPtr());
-		printf("\t\t BorderColorType()  = %" PRIu8 "\n", r.BorderColorType());
-		printf("\t\t slot               = %d\n", bind.samplers.slots[i]);
-		printf("\t\t start_register     = %d\n", bind.samplers.start_register[i]);
-		printf("\t\t extended           = %s\n", (bind.samplers.extended[i] ? "true" : "false"));
+		KYTY_LOG_DEBUG("\t\t ForceDegamma()     = %s\n", r.ForceDegamma() ? "true" : "false");
+		KYTY_LOG_DEBUG("\t\t AnisoBias()        = %" PRIu8 "\n", r.AnisoBias());
+		KYTY_LOG_DEBUG("\t\t TruncCoord()       = %s\n", r.TruncCoord() ? "true" : "false");
+		KYTY_LOG_DEBUG("\t\t DisableCubeWrap()  = %s\n", r.DisableCubeWrap() ? "true" : "false");
+		KYTY_LOG_DEBUG("\t\t FilterMode()       = %" PRIu8 "\n", r.FilterMode());
+		KYTY_LOG_DEBUG("\t\t MinLod()           = %" PRIu16 "\n", r.MinLod());
+		KYTY_LOG_DEBUG("\t\t MaxLod()           = %" PRIu16 "\n", r.MaxLod());
+		KYTY_LOG_DEBUG("\t\t PerfMip()          = %" PRIu8 "\n", r.PerfMip());
+		KYTY_LOG_DEBUG("\t\t PerfZ()            = %" PRIu8 "\n", r.PerfZ());
+		KYTY_LOG_DEBUG("\t\t LodBias()          = %" PRIu16 "\n", r.LodBias());
+		KYTY_LOG_DEBUG("\t\t LodBiasSec()       = %" PRIu8 "\n", r.LodBiasSec());
+		KYTY_LOG_DEBUG("\t\t XyMagFilter()      = %" PRIu8 "\n", r.XyMagFilter());
+		KYTY_LOG_DEBUG("\t\t XyMinFilter()      = %" PRIu8 "\n", r.XyMinFilter());
+		KYTY_LOG_DEBUG("\t\t ZFilter()          = %" PRIu8 "\n", r.ZFilter());
+		KYTY_LOG_DEBUG("\t\t MipFilter()        = %" PRIu8 "\n", r.MipFilter());
+		KYTY_LOG_DEBUG("\t\t BorderColorPtr()   = %" PRIu16 "\n", r.BorderColorPtr());
+		KYTY_LOG_DEBUG("\t\t BorderColorType()  = %" PRIu8 "\n", r.BorderColorType());
+		KYTY_LOG_DEBUG("\t\t slot               = %d\n", bind.samplers.slots[i]);
+		KYTY_LOG_DEBUG("\t\t start_register     = %d\n", bind.samplers.start_register[i]);
+		KYTY_LOG_DEBUG("\t\t extended           = %s\n", (bind.samplers.extended[i] ? "true" : "false"));
 	}
 
 	for (int i = 0; i < bind.gds_pointers.pointers_num; i++)
 	{
 		const auto& r = bind.gds_pointers.pointers[i];
 
-		printf("\t Gds Pointer %d\n", i);
+		KYTY_LOG_DEBUG("\t Gds Pointer %d\n", i);
 
-		printf("\t\t field = %08" PRIx32 "\n", r.field);
+		KYTY_LOG_DEBUG("\t\t field = %08" PRIx32 "\n", r.field);
 
-		printf("\t\t Base()         = %" PRIu16 "\n", r.Base());
-		printf("\t\t Size()         = %" PRIu16 "\n", r.Size());
-		printf("\t\t slot           = %d\n", bind.gds_pointers.slots[i]);
-		printf("\t\t start_register = %d\n", bind.gds_pointers.start_register[i]);
-		printf("\t\t extended       = %s\n", (bind.gds_pointers.extended[i] ? "true" : "false"));
+		KYTY_LOG_DEBUG("\t\t Base()         = %" PRIu16 "\n", r.Base());
+		KYTY_LOG_DEBUG("\t\t Size()         = %" PRIu16 "\n", r.Size());
+		KYTY_LOG_DEBUG("\t\t slot           = %d\n", bind.gds_pointers.slots[i]);
+		KYTY_LOG_DEBUG("\t\t start_register = %d\n", bind.gds_pointers.start_register[i]);
+		KYTY_LOG_DEBUG("\t\t extended       = %s\n", (bind.gds_pointers.extended[i] ? "true" : "false"));
 	}
 
 	for (int i = 0; i < bind.direct_sgprs.sgprs_num; i++)
 	{
 		const auto& r = bind.direct_sgprs.sgprs[i];
 
-		printf("\t Direct Sgprs %d\n", i);
+		KYTY_LOG_DEBUG("\t Direct Sgprs %d\n", i);
 
-		printf("\t\t field = %08" PRIx32 "\n", r.field);
+		KYTY_LOG_DEBUG("\t\t field = %08" PRIx32 "\n", r.field);
 
-		printf("\t\t start_register = %d\n", bind.direct_sgprs.start_register[i]);
+		KYTY_LOG_DEBUG("\t\t start_register = %d\n", bind.direct_sgprs.start_register[i]);
 	}
 }
 
@@ -3260,60 +3260,60 @@ void ShaderDbgDumpInputInfo(const ShaderVertexInputInfo* info)
 {
 	KYTY_PROFILER_BLOCK("ShaderDbgDumpInputInfo(Vs)");
 
-	printf("ShaderDbgDumpInputInfo()\n");
+	KYTY_LOG_DEBUG("ShaderDbgDumpInputInfo()\n");
 
-	printf("\t fetch_external = %s\n", info->fetch_external ? "true" : "false");
-	printf("\t fetch_embedded = %s\n", info->fetch_embedded ? "true" : "false");
-	printf("\t fetch_inline   = %s\n", info->fetch_inline ? "true" : "false");
-	printf("\t export_count   = %d\n", info->export_count);
+	KYTY_LOG_DEBUG("\t fetch_external = %s\n", info->fetch_external ? "true" : "false");
+	KYTY_LOG_DEBUG("\t fetch_embedded = %s\n", info->fetch_embedded ? "true" : "false");
+	KYTY_LOG_DEBUG("\t fetch_inline   = %s\n", info->fetch_inline ? "true" : "false");
+	KYTY_LOG_DEBUG("\t export_count   = %d\n", info->export_count);
 
 	bool gen5 = Config::IsNextGen();
 
 	for (int i = 0; i < info->resources_num; i++)
 	{
-		printf("\t input %d\n", i);
+		KYTY_LOG_DEBUG("\t input %d\n", i);
 
 		const auto& r  = info->resources[i];
 		const auto& rd = info->resources_dst[i];
 
-		printf("\t\t register_start   = %d\n", rd.register_start);
-		printf("\t\t registers_num    = %d\n", rd.registers_num);
-		printf("\t\t fields           = %08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "\n", r.fields[3], r.fields[2], r.fields[1],
+		KYTY_LOG_DEBUG("\t\t register_start   = %d\n", rd.register_start);
+		KYTY_LOG_DEBUG("\t\t registers_num    = %d\n", rd.registers_num);
+		KYTY_LOG_DEBUG("\t\t fields           = %08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "\n", r.fields[3], r.fields[2], r.fields[1],
 		       r.fields[0]);
-		printf("\t\t Base()           = %" PRIx64 "\n", gen5 ? r.Base48() : r.Base44());
-		printf("\t\t Stride()         = %" PRIu16 "\n", r.Stride());
-		printf("\t\t SwizzleEnabled() = %s\n", r.SwizzleEnabled() ? "true" : "false");
-		printf("\t\t NumRecords()     = %" PRIu32 "\n", r.NumRecords());
-		printf("\t\t DstSelX()        = %" PRIu8 "\n", r.DstSelX());
-		printf("\t\t DstSelY()        = %" PRIu8 "\n", r.DstSelY());
-		printf("\t\t DstSelZ()        = %" PRIu8 "\n", r.DstSelZ());
-		printf("\t\t DstSelW()        = %" PRIu8 "\n", r.DstSelW());
+		KYTY_LOG_DEBUG("\t\t Base()           = %" PRIx64 "\n", gen5 ? r.Base48() : r.Base44());
+		KYTY_LOG_DEBUG("\t\t Stride()         = %" PRIu16 "\n", r.Stride());
+		KYTY_LOG_DEBUG("\t\t SwizzleEnabled() = %s\n", r.SwizzleEnabled() ? "true" : "false");
+		KYTY_LOG_DEBUG("\t\t NumRecords()     = %" PRIu32 "\n", r.NumRecords());
+		KYTY_LOG_DEBUG("\t\t DstSelX()        = %" PRIu8 "\n", r.DstSelX());
+		KYTY_LOG_DEBUG("\t\t DstSelY()        = %" PRIu8 "\n", r.DstSelY());
+		KYTY_LOG_DEBUG("\t\t DstSelZ()        = %" PRIu8 "\n", r.DstSelZ());
+		KYTY_LOG_DEBUG("\t\t DstSelW()        = %" PRIu8 "\n", r.DstSelW());
 		if (!gen5)
 		{
-			printf("\t\t Nfmt()           = %" PRIu8 "\n", r.Nfmt());
-			printf("\t\t Dfmt()           = %" PRIu8 "\n", r.Dfmt());
-			printf("\t\t MemoryType()     = 0x%02" PRIx8 "\n", r.MemoryType());
+			KYTY_LOG_DEBUG("\t\t Nfmt()           = %" PRIu8 "\n", r.Nfmt());
+			KYTY_LOG_DEBUG("\t\t Dfmt()           = %" PRIu8 "\n", r.Dfmt());
+			KYTY_LOG_DEBUG("\t\t MemoryType()     = 0x%02" PRIx8 "\n", r.MemoryType());
 		} else
 		{
-			printf("\t\t Format()         = %" PRIu8 "\n", r.Format());
-			printf("\t\t OutOfBounds()    = %" PRIu8 "\n", r.OutOfBounds());
+			KYTY_LOG_DEBUG("\t\t Format()         = %" PRIu8 "\n", r.Format());
+			KYTY_LOG_DEBUG("\t\t OutOfBounds()    = %" PRIu8 "\n", r.OutOfBounds());
 		}
-		printf("\t\t AddTid()         = %s\n", r.AddTid() ? "true" : "false");
+		KYTY_LOG_DEBUG("\t\t AddTid()         = %s\n", r.AddTid() ? "true" : "false");
 	}
 
 	for (int i = 0; i < info->buffers_num; i++)
 	{
-		printf("\t buffer %d\n", i);
+		KYTY_LOG_DEBUG("\t buffer %d\n", i);
 
 		const auto& r = info->buffers[i];
-		printf("\t\t addr        = %" PRIx64 "\n", r.addr);
-		printf("\t\t stride      = %" PRIu32 "\n", r.stride);
-		printf("\t\t num_records = %" PRIu32 "\n", r.num_records);
-		printf("\t\t attr_num    = %" PRId32 "\n", r.attr_num);
+		KYTY_LOG_DEBUG("\t\t addr        = %" PRIx64 "\n", r.addr);
+		KYTY_LOG_DEBUG("\t\t stride      = %" PRIu32 "\n", r.stride);
+		KYTY_LOG_DEBUG("\t\t num_records = %" PRIu32 "\n", r.num_records);
+		KYTY_LOG_DEBUG("\t\t attr_num    = %" PRId32 "\n", r.attr_num);
 		for (int j = 0; j < r.attr_num; j++)
 		{
-			printf("\t\t attr_indices[%d]  = %d\n", j, r.attr_indices[j]);
-			printf("\t\t attr_offsets[%d]  = %u\n", j, r.attr_offsets[j]);
+			KYTY_LOG_DEBUG("\t\t attr_indices[%d]  = %d\n", j, r.attr_indices[j]);
+			KYTY_LOG_DEBUG("\t\t attr_offsets[%d]  = %u\n", j, r.attr_offsets[j]);
 		}
 	}
 
@@ -3324,17 +3324,17 @@ void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo* info)
 {
 	KYTY_PROFILER_BLOCK("ShaderDbgDumpInputInfo(Ps)");
 
-	printf("ShaderDbgDumpInputInfo()\n");
+	KYTY_LOG_DEBUG("ShaderDbgDumpInputInfo()\n");
 
-	printf("\t input_num            = %u\n", info->input_num);
-	printf("\t ps_pos_xy            = %s\n", info->ps_pos_xy ? "true" : "false");
-	printf("\t ps_pixel_kill_enable = %s\n", info->ps_pixel_kill_enable ? "true" : "false");
-	printf("\t ps_early_z           = %s\n", info->ps_early_z ? "true" : "false");
-	printf("\t ps_execute_on_noop   = %s\n", info->ps_execute_on_noop ? "true" : "false");
+	KYTY_LOG_DEBUG("\t input_num            = %u\n", info->input_num);
+	KYTY_LOG_DEBUG("\t ps_pos_xy            = %s\n", info->ps_pos_xy ? "true" : "false");
+	KYTY_LOG_DEBUG("\t ps_pixel_kill_enable = %s\n", info->ps_pixel_kill_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t ps_early_z           = %s\n", info->ps_early_z ? "true" : "false");
+	KYTY_LOG_DEBUG("\t ps_execute_on_noop   = %s\n", info->ps_execute_on_noop ? "true" : "false");
 
 	for (uint32_t i = 0; i < info->input_num; i++)
 	{
-		printf("\t interpolator_settings[%u] = %u\n", i, info->interpolator_settings[i]);
+		KYTY_LOG_DEBUG("\t interpolator_settings[%u] = %u\n", i, info->interpolator_settings[i]);
 	}
 
 	ShaderDbgDumpResources(info->bind);
@@ -3342,12 +3342,12 @@ void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo* info)
 
 void ShaderDbgDumpInputInfo(const ShaderComputeInputInfo* info)
 {
-	printf("ShaderDbgDumpInputInfo()\n");
+	KYTY_LOG_DEBUG("ShaderDbgDumpInputInfo()\n");
 
-	printf("\t workgroup_register = %d\n", info->workgroup_register);
-	printf("\t thread_ids_num     = %d\n", info->thread_ids_num);
-	printf("\t threads_num        = {%u, %u, %u}\n", info->threads_num[0], info->threads_num[1], info->threads_num[2]);
-	printf("\t threadgroup_id     = {%s, %s, %s}\n", info->group_id[0] ? "true" : "false", info->group_id[1] ? "true" : "false",
+	KYTY_LOG_DEBUG("\t workgroup_register = %d\n", info->workgroup_register);
+	KYTY_LOG_DEBUG("\t thread_ids_num     = %d\n", info->thread_ids_num);
+	KYTY_LOG_DEBUG("\t threads_num        = {%u, %u, %u}\n", info->threads_num[0], info->threads_num[1], info->threads_num[2]);
+	KYTY_LOG_DEBUG("\t threadgroup_id     = {%s, %s, %s}\n", info->group_id[0] ? "true" : "false", info->group_id[1] ? "true" : "false",
 	       info->group_id[2] ? "true" : "false");
 
 	ShaderDbgDumpResources(info->bind);
@@ -3374,7 +3374,7 @@ public:
 				m_file.Create(m_file_name);
 				if (m_file.IsInvalid())
 				{
-					printf(FG_BRIGHT_RED "Can't create file: %s\n" FG_DEFAULT, m_file_name.C_Str());
+					KYTY_LOG_DEBUG(FG_BRIGHT_RED "Can't create file: %s\n" FG_DEFAULT, m_file_name.C_Str());
 					m_enabled = false;
 				}
 				m_enabled = true;
@@ -3400,12 +3400,12 @@ public:
 		{
 			if (m_console)
 			{
-				printf("--------- Original Shader ---------\n");
-				printf("crc32 = %08" PRIx32 "\n", code.GetCrc32());
-				printf("hash0 = %08" PRIx32 "\n", code.GetHash0());
-				printf("---------\n");
-				printf("%s", code.DbgDump().c_str());
-				printf("---------\n");
+				KYTY_LOG_DEBUG("--------- Original Shader ---------\n");
+				KYTY_LOG_DEBUG("crc32 = %08" PRIx32 "\n", code.GetCrc32());
+				KYTY_LOG_DEBUG("hash0 = %08" PRIx32 "\n", code.GetHash0());
+				KYTY_LOG_DEBUG("---------\n");
+				KYTY_LOG_DEBUG("%s", code.DbgDump().c_str());
+				KYTY_LOG_DEBUG("---------\n");
 			} else if (!m_file.IsInvalid())
 			{
 				m_file.Printf("--------- Original Shader ---------\n");
@@ -3424,9 +3424,9 @@ public:
 		{
 			if (m_console)
 			{
-				printf("--------- Recompiled Shader ---------\n");
-				printf("%s\n", source.c_str());
-				printf("---------\n");
+				KYTY_LOG_DEBUG("--------- Recompiled Shader ---------\n");
+				KYTY_LOG_DEBUG("%s\n", source.c_str());
+				KYTY_LOG_DEBUG("---------\n");
 			} else if (!m_file.IsInvalid())
 			{
 				m_file.Printf("--------- Recompiled Shader ---------\n");
@@ -3443,13 +3443,13 @@ public:
 			String8 text;
 			if (!ShaderToolchain::Disassemble(bin.GetDataConst(), bin.Size(), &text))
 			{
-				printf("WARNING: SpirvDisassemble failed (continuing)\n");
+				KYTY_LOG_DEBUG("WARNING: SpirvDisassemble failed (continuing)\n");
 			}
 			if (m_console)
 			{
-				printf("--------- Optimized Shader ---------\n");
-				printf("%s\n", text.c_str());
-				printf("---------\n");
+				KYTY_LOG_DEBUG("--------- Optimized Shader ---------\n");
+				KYTY_LOG_DEBUG("%s\n", text.c_str());
+				KYTY_LOG_DEBUG("---------\n");
 			} else if (!m_file.IsInvalid())
 			{
 				m_file.Printf("--------- Optimized Shader ---------\n");
@@ -3466,13 +3466,13 @@ public:
 			String8 text;
 			if (!ShaderToolchain::ToGlsl(bin.GetDataConst(), bin.Size(), &text))
 			{
-				printf("WARNING: SpirvToGlsl failed (continuing)\n");
+				KYTY_LOG_DEBUG("WARNING: SpirvToGlsl failed (continuing)\n");
 			}
 			if (m_console)
 			{
-				printf("--------- Glsl Shader ---------\n");
-				printf("%s\n", text.c_str());
-				printf("---------\n");
+				KYTY_LOG_DEBUG("--------- Glsl Shader ---------\n");
+				KYTY_LOG_DEBUG("%s\n", text.c_str());
+				KYTY_LOG_DEBUG("---------\n");
 			} else if (!m_file.IsInvalid())
 			{
 				m_file.Printf("--------- Glsl Shader ---------\n");
@@ -3491,7 +3491,7 @@ public:
 			file.Create(file_name);
 			if (file.IsInvalid())
 			{
-				printf(FG_BRIGHT_RED "Can't create file: %s\n" FG_DEFAULT, file_name.C_Str());
+				KYTY_LOG_DEBUG(FG_BRIGHT_RED "Can't create file: %s\n" FG_DEFAULT, file_name.C_Str());
 			} else
 			{
 				file.Write(bin.GetDataConst(), bin.Size() * 4);
@@ -4402,7 +4402,7 @@ bool ShaderIsDisabled(uint64_t addr)
 
 	bool disabled = (g_disabled_shaders != nullptr && g_disabled_shaders->Contains(id));
 
-	printf("Shader 0x%016" PRIx64 ": id = 0x%016" PRIx64 " - %s\n", addr, id, (disabled ? "disabled" : "enabled"));
+	KYTY_LOG_DEBUG("Shader 0x%016" PRIx64 ": id = 0x%016" PRIx64 " - %s\n", addr, id, (disabled ? "disabled" : "enabled"));
 
 	return disabled;
 }
@@ -4411,7 +4411,7 @@ bool ShaderIsDisabled2(uint64_t addr, uint64_t chksum)
 {
 	bool disabled = (g_disabled_shaders != nullptr && g_disabled_shaders->Contains(chksum));
 
-	printf("Shader 0x%016" PRIx64 ": id = 0x%016" PRIx64 " - %s\n", addr, chksum, (disabled ? "disabled" : "enabled"));
+	KYTY_LOG_DEBUG("Shader 0x%016" PRIx64 ": id = 0x%016" PRIx64 " - %s\n", addr, chksum, (disabled ? "disabled" : "enabled"));
 
 	return disabled;
 }
