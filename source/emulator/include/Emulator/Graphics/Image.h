@@ -10,6 +10,10 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+namespace Kyty::Emulator::Host {
+class HostImageSurface;
+}
+
 namespace Kyty::Libs::Graphics {
 
 enum class ImageOrder
@@ -23,8 +27,6 @@ enum class ImageOrder
 	Abgr,
 	Alpha
 };
-
-class ImagePrivate;
 
 class Image
 {
@@ -69,6 +71,8 @@ public:
 	KYTY_CLASS_NO_COPY(Image);
 
 private:
+	void LoadHostSurface(::Kyty::Emulator::Host::HostImageSurface* surface);
+
 	String        m_name;
 	uint32_t      m_width          = 0;
 	uint32_t      m_height         = 0;
@@ -76,7 +80,7 @@ private:
 	int           m_bits_per_pixel = 0;
 	ImageOrder    m_order          = ImageOrder::Unknown;
 	void*         m_pixels         = nullptr;
-	ImagePrivate* m_image          = nullptr;
+	::Kyty::Emulator::Host::HostImageSurface* m_image = nullptr;
 };
 
 } // namespace Kyty::Libs::Graphics
