@@ -294,6 +294,10 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         _is_sdl_include(canonical_path) for canonical_path in canonical_paths
     ):
         return "Graphics Window -> SDL"
+    if relative_path == GRAPHICS_WINDOW_SOURCE and any(
+        canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in KERNEL_LOADER_INCLUDE_PREFIXES
+    ):
+        return "Graphics Window -> Loader"
     if relative_path == GRAPHICS_RUN_SOURCE and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in AGENT_INCLUDE_PREFIXES
     ):
@@ -881,6 +885,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Graphics/Window.cpp:1: forbidden include (Graphics Window -> SDL): SDL_events.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_loader_include_from_graphics_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, GRAPHICS_WINDOW_SOURCE, '#include "Emulator/Loader/SystemContent.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Graphics/Window.cpp:1: forbidden include (Graphics Window -> Loader): Emulator/Loader/SystemContent.h",
                     ),
                 ),
             )

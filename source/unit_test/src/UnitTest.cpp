@@ -56,6 +56,7 @@ UT_LINK(EmulatorLog);
 UT_LINK(EmulatorModuleDiscovery);
 UT_LINK(EmulatorShaderTranslationCache);
 UT_LINK(EmulatorSymbolDatabase);
+UT_LINK(EmulatorSystemContentPort);
 UT_LINK(EmulatorVideoOutResolution);
 UT_LINK(EmulatorVulkanQueueIdentity);
 

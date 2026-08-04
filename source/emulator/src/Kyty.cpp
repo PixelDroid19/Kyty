@@ -29,6 +29,7 @@
 #include "Emulator/Loader/Timer.h"
 #include "Emulator/Network.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/SystemContentPort.h"
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <cstdlib>
@@ -39,6 +40,11 @@ namespace Kyty::Emulator {
 #ifdef KYTY_EMU_ENABLED
 
 namespace LuaFunc {
+
+static bool get_system_content_param_string(const char* name, char* value, size_t value_size)
+{
+	return Loader::SystemContentParamSfoGetString(name, value, value_size);
+}
 
 static void load_symbols(const String& id, Loader::RuntimeLinker* rt)
 {
@@ -81,6 +87,8 @@ static void kyty_close()
 static void Init(const Scripts::ScriptVar& cfg)
 {
 	EXIT_IF(!Core::Thread::IsMainThread());
+
+	SystemContentPort::Install({Loader::SystemContentGetMetadata, Loader::SystemContentGetIconPath, get_system_content_param_string});
 
 	auto* slist = Core::SubsystemsList::Instance();
 

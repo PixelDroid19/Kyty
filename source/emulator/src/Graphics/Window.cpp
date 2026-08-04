@@ -32,9 +32,9 @@
 #include "Emulator/Host/HostInput.h"
 #include "Emulator/Host/HostVulkanWindow.h"
 #include "Emulator/Host/HostWindow.h"
-#include "Emulator/Loader/SystemContent.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/SystemContentPort.h"
 
 #include "KytyBuildInfo.h"
 
@@ -484,7 +484,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 
 	Core::String title_id;
 	Core::String app_ver;
-	Loader::SystemContentGetMetadata(&title_id, &app_ver);
+	::Kyty::Emulator::SystemContentPort::GetMetadata(&title_id, &app_ver);
 	const auto title_name   = NativeCaptureSanitizeName(title_id.C_Str(), "unknown-title");
 	const auto version_name = NativeCaptureSanitizeName(app_ver.C_Str(), "unknown-version");
 	const auto revision     = NativeCaptureSanitizeName(BuildInfo::Revision, "unknown-revision");
@@ -2915,7 +2915,7 @@ void WindowUpdateIcon()
 	if (icon == nullptr)
 	{
 		String icon_path;
-		if (!Loader::SystemContentGetIconPath(&icon_path))
+		if (!::Kyty::Emulator::SystemContentPort::GetIconPath(&icon_path))
 		{
 			return;
 		}
@@ -2938,9 +2938,9 @@ void WindowUpdateTitle()
 	static char title[128];
 	static char title_id[12];
 	static char app_ver[8];
-	static bool has_title    = Loader::SystemContentParamSfoGetString("TITLE", title, sizeof(title));
-	static bool has_title_id = Loader::SystemContentParamSfoGetString("TITLE_ID", title_id, sizeof(title_id));
-	static bool has_app_ver  = Loader::SystemContentParamSfoGetString("APP_VER", app_ver, sizeof(app_ver));
+	static bool has_title    = ::Kyty::Emulator::SystemContentPort::GetParamString("TITLE", title, sizeof(title));
+	static bool has_title_id = ::Kyty::Emulator::SystemContentPort::GetParamString("TITLE_ID", title_id, sizeof(title_id));
+	static bool has_app_ver  = ::Kyty::Emulator::SystemContentPort::GetParamString("APP_VER", app_ver, sizeof(app_ver));
 
 	const int    frame_num = g_window_ctx->game->m_frame_num;
 	const double fps_now   = g_window_ctx->game->m_current_fps;
