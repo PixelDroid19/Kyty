@@ -6,7 +6,6 @@
 #include "SDL_error.h"
 #include "SDL_surface.h"
 #include "SDL_video.h"
-#include "SDL_vulkan.h"
 
 #include <chrono>
 #include <climits>
@@ -87,41 +86,6 @@ HostWindow* HostWindow::Create(uint32_t width, uint32_t height)
 void* HostWindow::GetNativeHandle() const
 {
 	return m_window;
-}
-
-bool HostWindow::GetVulkanInstanceExtensions(std::vector<const char*>* extensions) const
-{
-	if (m_window == nullptr || extensions == nullptr)
-	{
-		return false;
-	}
-
-	uint32_t count = 0;
-	if (SDL_Vulkan_GetInstanceExtensions(static_cast<SDL_Window*>(m_window), &count, nullptr) == SDL_FALSE || count == 0)
-	{
-		return false;
-	}
-
-	extensions->assign(count, nullptr);
-	if (SDL_Vulkan_GetInstanceExtensions(static_cast<SDL_Window*>(m_window), &count, extensions->data()) == SDL_FALSE || count == 0 ||
-	    count != extensions->size())
-	{
-		extensions->clear();
-		return false;
-	}
-
-	return true;
-}
-
-bool HostWindow::CreateVulkanSurface(VkInstance instance, VkSurfaceKHR* surface) const
-{
-	if (m_window == nullptr || instance == VK_NULL_HANDLE || surface == nullptr)
-	{
-		return false;
-	}
-
-	*surface = VK_NULL_HANDLE;
-	return SDL_Vulkan_CreateSurface(static_cast<SDL_Window*>(m_window), instance, surface) == SDL_TRUE;
 }
 
 void HostWindow::SetIcon(void* native_surface)

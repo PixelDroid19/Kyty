@@ -51,6 +51,7 @@ HOST_SOURCE_FILES = (
     "emulator/src/Host/Clock.cpp",
     "emulator/src/Host/HostInputSdl.cpp",
     "emulator/src/Host/HostWindowSdl.cpp",
+    "emulator/src/Host/HostVulkanWindowSdl.cpp",
     "emulator/src/Host/ImageSurfaceSdl.cpp",
     "emulator/src/Host/Platform.cpp",
     "emulator/src/Host/Png.cpp",

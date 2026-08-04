@@ -4,8 +4,6 @@
 #include "Kyty/Core/Common.h"
 
 #include <cstdint>
-#include <vector>
-#include <vulkan/vulkan_core.h>
 
 namespace Kyty::Emulator::Host {
 
@@ -19,9 +17,6 @@ public:
 	~HostWindow();
 
 	[[nodiscard]] void* GetNativeHandle() const;
-
-	[[nodiscard]] bool GetVulkanInstanceExtensions(std::vector<const char*>* extensions) const;
-	[[nodiscard]] bool CreateVulkanSurface(VkInstance instance, VkSurfaceKHR* surface) const;
 
 	void SetIcon(void* native_surface);
 	void SetTitle(const char* title);

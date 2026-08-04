@@ -30,6 +30,7 @@
 #include "Emulator/Graphics/WindowControls.h"
 #include "Emulator/Host/CaptureImageCodec.h"
 #include "Emulator/Host/HostInput.h"
+#include "Emulator/Host/HostVulkanWindow.h"
 #include "Emulator/Host/HostWindow.h"
 #include "Emulator/Loader/SystemContent.h"
 #include "Emulator/Log.h"
@@ -2092,7 +2093,7 @@ static void VulkanGetExtensions(const ::Kyty::Emulator::Host::HostWindow* window
 	uint32_t available_layers_count     = 0;
 	std::vector<const char*> host_extensions;
 
-	const bool host_result = window->GetVulkanInstanceExtensions(&host_extensions);
+	const bool host_result = ::Kyty::Emulator::Host::HostVulkanWindow::GetInstanceExtensions(window, &host_extensions);
 
 	EXIT_NOT_IMPLEMENTED(!host_result);
 	EXIT_NOT_IMPLEMENTED(host_extensions.empty() || host_extensions.size() > UINT32_MAX);
@@ -2663,7 +2664,7 @@ static void VulkanCreate(WindowContext* ctx)
 		}
 	}
 
-	if (!ctx->host_window->CreateVulkanSurface(ctx->graphic_ctx.instance, &ctx->surface))
+	if (!::Kyty::Emulator::Host::HostVulkanWindow::CreateSurface(ctx->host_window, ctx->graphic_ctx.instance, &ctx->surface))
 	{
 		EXIT("Could not create a Vulkan surface");
 	}
