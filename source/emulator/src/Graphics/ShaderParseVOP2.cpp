@@ -117,7 +117,11 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				inst.src_num     = 3;
 			} else
 			{
-				KYTY_NI("v_readlane_b32");
+				// v_readlane_b32 writes the SGPR encoded in VDST, not a VGPR.
+				inst.type    = ShaderInstructionType::VReadlaneB32;
+				inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+				inst.src_num = 2;
+				inst.dst     = operand_parse(vdst);
 			};
 			break;
 		case 0x02:
@@ -129,7 +133,10 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				inst.src[2]            = inst.dst;
 			} else
 			{
-				KYTY_NI("v_writelane_b32");
+				// v_writelane_b32 writes one lane of the VGPR encoded in VDST.
+				inst.type    = ShaderInstructionType::VWritelaneB32;
+				inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+				inst.src_num = 2;
 			};
 			break;
 		case 0x03: inst.type = ShaderInstructionType::VAddF32; break;

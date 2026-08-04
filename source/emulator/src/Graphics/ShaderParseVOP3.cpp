@@ -378,9 +378,13 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 				inst.format      = ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2;
 				inst.src_num     = 3;
 				inst.src[2].size = 2;
-			} else
+			} 			else
 			{
-				KYTY_NI("v_readlane_b32");
+				// v_readlane_b32 writes the SGPR encoded in VDST, not a VGPR.
+				inst.type    = ShaderInstructionType::VReadlaneB32;
+				inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+				inst.src_num = 2;
+				inst.dst     = operand_parse(vdst);
 			};
 			break;
 		case 0x102:
@@ -389,7 +393,10 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 				KYTY_UNKNOWN_OP();
 			} else
 			{
-				KYTY_NI("v_writelane_b32");
+				// v_writelane_b32 writes one lane of the VGPR encoded in VDST.
+				inst.type    = ShaderInstructionType::VWritelaneB32;
+				inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+				inst.src_num = 2;
 			};
 			break;
 		case 0x103: inst.type = ShaderInstructionType::VAddF32; break;
@@ -445,8 +452,8 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			};
 			break;
 		case 0x11f: inst.type = ShaderInstructionType::VMacF32; break;
-		case 0x120: KYTY_NI("v_madmk_f32"); break;
-		case 0x121: KYTY_NI("v_madak_f32"); break;
+		case 0x120: inst.type = ShaderInstructionType::VMadmkF32; break;
+		case 0x121: inst.type = ShaderInstructionType::VMadakF32; break;
 		case 0x122: inst.type = ShaderInstructionType::VBcntU32B32; break;
 		case 0x123: inst.type = ShaderInstructionType::VMbcntLoU32B32; break;
 		case 0x124: inst.type = ShaderInstructionType::VMbcntHiU32B32; break;
@@ -586,9 +593,10 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			if (next_gen)
 			{
 				KYTY_UNKNOWN_OP();
-			} else
+			} 			else
 			{
-				KYTY_NI("v_mad_legacy_f32")
+				// v_mad_legacy_f32 has the same value operation as v_mad_f32.
+				inst.type = ShaderInstructionType::VMadF32;
 			};
 			break;
 		case 0x141: inst.type = ShaderInstructionType::VMadF32; break;
