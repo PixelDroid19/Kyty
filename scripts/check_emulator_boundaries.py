@@ -41,6 +41,10 @@ SOURCE_DEVTOOLS_INCLUDE_PREFIXES = (
     "devtools/include/Kyty/DevTools/",
     "lib/DevTools/include/Kyty/DevTools/",
 )
+PROFILER_INCLUDE_PATHS = (
+    "Emulator/Profiler.h",
+    "emulator/include/Emulator/Profiler.h",
+)
 
 @dataclass(frozen=True)
 class Violation:
@@ -146,6 +150,12 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in devtools_prefixes
     ):
         return "RuntimeLinker -> DevTools"
+    if relative_path == RUNTIME_LINKER_SOURCE and any(
+        canonical_path == _canonical_include_path(profiler_path)
+        for canonical_path in canonical_paths
+        for profiler_path in PROFILER_INCLUDE_PATHS
+    ):
+        return "RuntimeLinker -> Profiler"
     return None
 
 
@@ -502,6 +512,20 @@ class BoundaryCheckerTests(unittest.TestCase):
                 result.diagnostics,
                 ("emulator/src/AudioHost.cpp:1: forbidden include (Audio -> Graphics): Emulator/Graphics/Graphics.h",),
             )
+
+    def test_rejects_runtime_linker_profiler_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Loader/RuntimeLinker.cpp", '#include "Emulator/Profiler.h"\n')
+
+            expected = CheckResult(
+                exit_code=1,
+                diagnostics=(
+                    "emulator/src/Loader/RuntimeLinker.cpp:1: forbidden include (RuntimeLinker -> Profiler): Emulator/Profiler.h",
+                ),
+            )
+            self.assertEqual(check_source_root(root), expected)
+            self.assertEqual(check_source_root(root, strict=True), expected)
 
     def test_rejects_forbidden_include_with_preprocessor_whitespace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

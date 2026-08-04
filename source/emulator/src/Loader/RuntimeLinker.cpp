@@ -23,7 +23,7 @@
 #include "Emulator/Loader/MissingImport.h"
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/SymbolDatabase.h"
-#include "Emulator/Profiler.h"
+#include "Emulator/Profiling.h"
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <cstdio>

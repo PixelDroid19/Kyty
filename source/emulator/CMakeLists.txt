@@ -19,6 +19,7 @@ endif()
 add_library(emulator STATIC ${emulator_src})
 target_sources(emulator PRIVATE
 	$<TARGET_OBJECTS:imgui_sdl_backend_obj>
+	include/Emulator/Profiling.h
 	src/Loader/GuestCall.cpp
 	include/Emulator/Loader/GuestCall.h
 	src/Host/Clock.cpp
