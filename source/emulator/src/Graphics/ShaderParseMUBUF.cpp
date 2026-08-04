@@ -180,7 +180,11 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
 			inst.src[1].size = 4;
 			break;
-		case 0x33: KYTY_NI("buffer_atomic_sub"); break;
+		case 0x33:
+			inst.type        = ShaderInstructionType::BufferAtomicSub;
+			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			break;
 		case 0x34:
 			if (next_gen)
 			{
@@ -190,13 +194,41 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 				KYTY_NI("buffer_atomic_rsub")
 			};
 			break;
-		case 0x35: KYTY_NI("buffer_atomic_smin"); break;
-		case 0x36: KYTY_NI("buffer_atomic_umin"); break;
-		case 0x37: KYTY_NI("buffer_atomic_smax"); break;
-		case 0x38: KYTY_NI("buffer_atomic_umax"); break;
-		case 0x39: KYTY_NI("buffer_atomic_and"); break;
-		case 0x3A: KYTY_NI("buffer_atomic_or"); break;
-		case 0x3B: KYTY_NI("buffer_atomic_xor"); break;
+		case 0x35:
+			inst.type        = ShaderInstructionType::BufferAtomicSmin;
+			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			break;
+		case 0x36:
+			inst.type        = ShaderInstructionType::BufferAtomicUmin;
+			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			break;
+		case 0x37:
+			inst.type        = ShaderInstructionType::BufferAtomicSmax;
+			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			break;
+		case 0x38:
+			inst.type        = ShaderInstructionType::BufferAtomicUmax;
+			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			break;
+		case 0x39:
+			inst.type        = ShaderInstructionType::BufferAtomicAnd;
+			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			break;
+		case 0x3A:
+			inst.type        = ShaderInstructionType::BufferAtomicOr;
+			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			break;
+		case 0x3B:
+			inst.type        = ShaderInstructionType::BufferAtomicXor;
+			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
+			break;
 		case 0x3C: KYTY_NI("buffer_atomic_inc"); break;
 		case 0x3D: KYTY_NI("buffer_atomic_dec"); break;
 		case 0x3E: KYTY_NI("buffer_atomic_fcmpswap"); break;

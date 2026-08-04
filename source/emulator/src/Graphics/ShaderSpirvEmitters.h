@@ -8,6 +8,7 @@
 namespace Kyty::Libs::Graphics {
 
 KYTY_RECOMPILER_FUNC(Recompile_BufferAtomicAdd_Vdata1VaddrSvSoffsIdxen);
+KYTY_RECOMPILER_FUNC(Recompile_BufferAtomic_XXX_Vdata1VaddrSvSoffsIdxen);
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadUbyte_Vdata1VaddrSvSoffsIdxen);
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword);
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx2_Vdata2VaddrSvSoffsIdxen);

@@ -398,6 +398,79 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferAtomicAdd_Vdata1VaddrSvSoffsIdxen)
 	return true;
 }
 
+/* Generalized Gen5 buffer atomic with a single data operand
+ * (sub/smin/umin/smax/umax/and/or/xor). param[0] selects the SPIR-V atomic
+ * opcode. Modeled on buffer_atomic_add. */
+KYTY_RECOMPILER_FUNC(Recompile_BufferAtomic_XXX_Vdata1VaddrSvSoffsIdxen)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+	if (!Config::IsNextGen() || bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0)
+	{
+		return false;
+	}
+
+	const auto value = operand_variable_to_str(inst.dst);
+	if (value.type != SpirvType::Float)
+	{
+		return false;
+	}
+
+	BufferAddressSetup address_setup;
+	if (!emit_buffer_address_setup(spirv, inst, static_cast<int>(index), 0, BufferAddressRangeCheck::RawZeroRecord,
+	                               &address_setup) ||
+	    address_setup.access_enabled.IsEmpty())
+	{
+		return false;
+	}
+
+	const auto tag        = String8::FromPrintf("%u_0", index);
+	const auto scope      = spirv->GetConstantUint(SPIRV_SCOPE_DEVICE);
+	const auto semantics  = spirv->GetConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
+	if (scope == "unknown_uint_constant" || semantics == "unknown_uint_constant")
+	{
+		return false;
+	}
+
+	String8 return_value;
+	if (inst.buffer_return_old_value)
+	{
+		return_value = String8(R"(
+        %gen5_atomic_prior_f_<tag> = OpBitcast %float %gen5_atomic_prior_<tag>
+               OpStore %<value> %gen5_atomic_prior_f_<tag>
+)")
+		                   .ReplaceStr("<tag>", tag)
+		                   .ReplaceStr("<value>", value.value);
+	}
+
+	*dst_source += String8(R"(
+<address_setup>
+        %gen5_atomic_exec_<tag> = OpLoad %uint %exec_lo
+        %gen5_atomic_active_<tag> = OpINotEqual %bool %gen5_atomic_exec_<tag> %uint_0
+        %gen5_atomic_enabled_<tag> = OpLogicalAnd %bool %gen5_atomic_active_<tag> <access_enabled>
+               OpSelectionMerge %gen5_atomic_merge_<tag> None
+               OpBranchConditional %gen5_atomic_enabled_<tag> %gen5_atomic_then_<tag> %gen5_atomic_merge_<tag>
+        %gen5_atomic_then_<tag> = OpLabel
+        %gen5_atomic_word_<tag> = OpShiftRightLogical %uint %buf_addr_<tag> %uint_2
+        %gen5_atomic_ptr_<tag> = OpAccessChain %_ptr_StorageBuffer_uint %buf_uint %buf_addr_desc0_<tag> %int_0 %gen5_atomic_word_<tag>
+        %gen5_atomic_value_f_<tag> = OpLoad %float %<value>
+        %gen5_atomic_value_<tag> = OpBitcast %uint %gen5_atomic_value_f_<tag>
+        %gen5_atomic_prior_<tag> = <atomic_op> %uint %gen5_atomic_ptr_<tag> %<scope> %uint_0 %gen5_atomic_value_<tag>
+               OpMemoryBarrier %<scope> %<semantics>
+<return_value>               OpBranch %gen5_atomic_merge_<tag>
+        %gen5_atomic_merge_<tag> = OpLabel
+)")
+	                   .ReplaceStr("<address_setup>", address_setup.source)
+	                   .ReplaceStr("<access_enabled>", address_setup.access_enabled)
+	                   .ReplaceStr("<tag>", tag)
+	                   .ReplaceStr("<scope>", scope)
+	                   .ReplaceStr("<semantics>", semantics)
+	                   .ReplaceStr("<value>", value.value)
+	                   .ReplaceStr("<return_value>", return_value)
+	                   .ReplaceStr("<atomic_op>", param[0]);
+	return true;
+}
+
 static bool emit_gen5_tbuffer_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index,
 	                                  const char* function_name, int format, uint32_t components, String8* dst_source)
 {
