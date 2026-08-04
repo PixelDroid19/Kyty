@@ -60,6 +60,22 @@ int  cxa_atexit(void (*func)(void*), void* arg, void* d);
 void cxa_finalize(void* d);
 int  KYTY_SYSV_ABI c_cxa_thread_atexit(void (*dtor)(void*), void* obj, void* dso_handle);
 
+// stdio guest shims — host FILE* remains opaque to the guest and mounted paths
+// are translated by the isolated implementation in LibCStdIo.cpp.
+FILE*  KYTY_SYSV_ABI c_fopen(const char* path, const char* mode);
+int    KYTY_SYSV_ABI c_fclose(FILE* stream);
+size_t KYTY_SYSV_ABI c_fread(void* ptr, size_t size, size_t count, FILE* stream);
+char*  KYTY_SYSV_ABI c_fgets(char* buffer, int size, FILE* stream);
+size_t KYTY_SYSV_ABI c_fwrite(const void* ptr, size_t size, size_t count, FILE* stream);
+int    KYTY_SYSV_ABI c_setvbuf(FILE* stream, char* buffer, int mode, size_t size);
+int    KYTY_SYSV_ABI c_fseek(FILE* stream, long offset, int origin);
+long   KYTY_SYSV_ABI c_ftell(FILE* stream);
+int    KYTY_SYSV_ABI c_feof(FILE* stream);
+int    KYTY_SYSV_ABI c_ferror(FILE* stream);
+int    KYTY_SYSV_ABI c_fileno(FILE* stream);
+int    KYTY_SYSV_ABI c_fputc(int character, FILE* stream);
+int    KYTY_SYSV_ABI c_remove(const char* path);
+
 // Math (double) family — pure wrappers over the host libm, defined in
 // LibCMath.cpp.
 KYTY_SYSV_ABI double c_sin(double x);
