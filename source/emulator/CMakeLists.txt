@@ -1,6 +1,7 @@
 file(GLOB emulator_src CONFIGURE_DEPENDS
 	src/*.cpp
 	src/Libs/*.cpp
+	src/Hle/*.cpp
 	src/Graphics/*.cpp
 	src/Graphics/Objects/*.cpp
 	src/Kernel/*.cpp

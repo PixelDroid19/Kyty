@@ -5,7 +5,9 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs {
+namespace Kyty::Hle {
+
+namespace Graphics = ::Kyty::Libs::Graphics;
 
 namespace LibGen4 {
 
@@ -204,6 +206,6 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LibAgcDriver::InitGraphicsDriver_1(s);
 }
 
-} // namespace Kyty::Libs
+} // namespace Kyty::Hle
 
 #endif // KYTY_EMU_ENABLED

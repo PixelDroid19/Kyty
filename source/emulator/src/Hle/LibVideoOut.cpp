@@ -5,7 +5,9 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs {
+namespace Kyty::Hle {
+
+namespace VideoOut = ::Kyty::Libs::VideoOut;
 
 static void InitVideoOutCommon(Loader::SymbolDatabase* symbols, int module_version_major, int module_version_minor)
 {
@@ -85,6 +87,6 @@ LIB_DEFINE(InitVideoOut_1)
 	LibGen5::InitVideoOut_1(s);
 }
 
-} // namespace Kyty::Libs
+} // namespace Kyty::Hle
 
 #endif // KYTY_EMU_ENABLED
