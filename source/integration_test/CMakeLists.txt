@@ -499,6 +499,13 @@ if(WIN32)
 	target_link_libraries(kyty_architecture_boundary_integration PRIVATE shell32)
 endif()
 
+add_executable(kyty_architecture_boundary_test_launcher
+	src/ArchitectureBoundaryTestLauncher.cpp
+)
+if(WIN32)
+	target_link_libraries(kyty_architecture_boundary_test_launcher PRIVATE shell32)
+endif()
+
 set(KYTY_ARCHITECTURE_BOUNDARY_CHECKER "${CMAKE_SOURCE_DIR}/../scripts/check_emulator_boundaries.py")
 
 add_test(
@@ -517,22 +524,39 @@ set_tests_properties(KytyArchitectureBoundaryIntegration.Repository PROPERTIES
 	TIMEOUT 15
 )
 
-add_test(
-	NAME KytyArchitectureBoundaryIntegration.StrictBaseline
-	COMMAND "${CMAKE_COMMAND}"
-		"-DTEST_EXECUTABLE=$<TARGET_FILE:kyty_architecture_boundary_integration>"
-		"-DTEST_LAUNCHER=$<TARGET_PROPERTY:kyty_architecture_boundary_integration,TEST_LAUNCHER>"
-		"-DCROSSCOMPILING_EMULATOR=$<TARGET_PROPERTY:kyty_architecture_boundary_integration,CROSSCOMPILING_EMULATOR>"
-		"-DCROSSCOMPILING=${CMAKE_CROSSCOMPILING}"
-		"-DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
-		"-DCHECKER=${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}"
-		"-DSOURCE_ROOT=${CMAKE_SOURCE_DIR}"
-		-P "${CMAKE_CURRENT_SOURCE_DIR}/RunArchitectureBoundaryStrictCase.cmake"
+function(add_kyty_architecture_boundary_strict_case name)
+	add_test(
+		NAME "KytyArchitectureBoundaryIntegration.${name}"
+		COMMAND "${CMAKE_COMMAND}"
+			"-DTEST_EXECUTABLE=$<TARGET_FILE:kyty_architecture_boundary_integration>"
+			"-DCROSSCOMPILING_EMULATOR=$<TARGET_PROPERTY:kyty_architecture_boundary_integration,CROSSCOMPILING_EMULATOR>"
+			"-DCROSSCOMPILING=${CMAKE_CROSSCOMPILING}"
+			"-DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
+			"-DCHECKER=${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}"
+			"-DSOURCE_ROOT=${CMAKE_SOURCE_DIR}"
+			${ARGN}
+			-P "${CMAKE_CURRENT_SOURCE_DIR}/RunArchitectureBoundaryStrictCase.cmake"
+	)
+	set_tests_properties("KytyArchitectureBoundaryIntegration.${name}" PROPERTIES
+		FIXTURES_REQUIRED KytyIntegrationBinaries
+		TIMEOUT 15
+	)
+endfunction()
+
+# This target emits a known prefix, so the suffix-only TEST_LAUNCHER contract
+# is exercised rather than merely configured.
+add_kyty_architecture_boundary_strict_case(StrictBaseline
+	"-DTEST_LAUNCHER=$<TARGET_FILE:kyty_architecture_boundary_test_launcher>"
+	-DVERIFY_TEST_LAUNCHER_PREFIX=ON
 )
 
-set_tests_properties(KytyArchitectureBoundaryIntegration.StrictBaseline PROPERTIES
-	FIXTURES_REQUIRED KytyIntegrationBinaries
-	TIMEOUT 15
+# Keep the normal no-launcher stream exact.
+add_kyty_architecture_boundary_strict_case(StrictBaselineWithoutLauncher)
+
+# The same extra stderr is rejected when it is not owned by TEST_LAUNCHER.
+add_kyty_architecture_boundary_strict_case(StrictBaselineRejectsUnexpectedStderr
+	"-DTEST_COMMAND_PREFIX=$<TARGET_FILE:kyty_architecture_boundary_test_launcher>"
+	-DEXPECT_EXTRA_STDERR_REJECTION=ON
 )
 
 set(KYTY_INTEGRATION_TEST_TARGETS
@@ -551,6 +575,7 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_audio_pcm_integration
 	kyty_audio_host_integration
 	kyty_architecture_boundary_integration
+	kyty_architecture_boundary_test_launcher
 )
 
 add_test(
