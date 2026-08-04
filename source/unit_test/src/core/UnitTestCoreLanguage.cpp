@@ -7,6 +7,15 @@ namespace Language = Core::Language;
 
 namespace {
 
+class LanguageRegistryRestore final
+{
+public:
+	~LanguageRegistryRestore()
+	{
+		Language::Init();
+	}
+};
+
 void ExpectRegistryContents()
 {
 	EXPECT_EQ(Language::GetId(U"de"), Core::LanguageId::German);
@@ -21,6 +30,9 @@ void ExpectRegistryContents()
 
 TEST(CoreLanguage, ShutdownClearsRegistryAcrossRestarts)
 {
+	LanguageRegistryRestore restore;
+
+	// Repeated calls intentionally verify that both lifecycle operations are idempotent.
 	Language::Shutdown();
 	Language::Shutdown();
 	Language::Init();
