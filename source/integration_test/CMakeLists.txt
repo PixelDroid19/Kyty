@@ -505,6 +505,9 @@ add_executable(kyty_architecture_boundary_test_launcher
 if(WIN32)
 	target_link_libraries(kyty_architecture_boundary_test_launcher PRIVATE shell32)
 endif()
+# Keep this in the integration fixture for every toolchain. It is executed
+# only natively below: TEST_LAUNCHER is a host-side command, while this target
+# is built for the configured target architecture.
 
 set(KYTY_ARCHITECTURE_BOUNDARY_CHECKER "${CMAKE_SOURCE_DIR}/../scripts/check_emulator_boundaries.py")
 
@@ -543,21 +546,27 @@ function(add_kyty_architecture_boundary_strict_case name)
 	)
 endfunction()
 
-# This target emits a known prefix, so the suffix-only TEST_LAUNCHER contract
-# is exercised rather than merely configured.
-add_kyty_architecture_boundary_strict_case(StrictBaseline
-	"-DTEST_LAUNCHER=$<TARGET_FILE:kyty_architecture_boundary_test_launcher>"
-	-DVERIFY_TEST_LAUNCHER_PREFIX=ON
-)
+# TEST_LAUNCHER must run before CROSSCOMPILING_EMULATOR. Do not register a
+# target-architecture launcher as that host-side command in a cross build.
+if(NOT CMAKE_CROSSCOMPILING)
+	# This target emits a known prefix, so the suffix-only TEST_LAUNCHER contract
+	# is exercised rather than merely configured.
+	add_kyty_architecture_boundary_strict_case(StrictBaseline
+		"-DTEST_LAUNCHER=$<TARGET_FILE:kyty_architecture_boundary_test_launcher>"
+		-DVERIFY_TEST_LAUNCHER_PREFIX=ON
+	)
+endif()
 
 # Keep the normal no-launcher stream exact.
 add_kyty_architecture_boundary_strict_case(StrictBaselineWithoutLauncher)
 
-# The same extra stderr is rejected when it is not owned by TEST_LAUNCHER.
-add_kyty_architecture_boundary_strict_case(StrictBaselineRejectsUnexpectedStderr
-	"-DTEST_COMMAND_PREFIX=$<TARGET_FILE:kyty_architecture_boundary_test_launcher>"
-	-DEXPECT_EXTRA_STDERR_REJECTION=ON
-)
+if(NOT CMAKE_CROSSCOMPILING)
+	# The same extra stderr is rejected when it is not owned by TEST_LAUNCHER.
+	add_kyty_architecture_boundary_strict_case(StrictBaselineRejectsUnexpectedStderr
+		"-DTEST_COMMAND_PREFIX=$<TARGET_FILE:kyty_architecture_boundary_test_launcher>"
+		-DEXPECT_EXTRA_STDERR_REJECTION=ON
+	)
+endif()
 
 set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_bringup_integration
