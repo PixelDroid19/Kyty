@@ -7,8 +7,10 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/GpuMemoryFault.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/RenderResolutionCoordinator.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -108,6 +110,11 @@ KYTY_SUBSYSTEM_INIT(Graphics)
 	GraphicsRenderInit();
 	GraphicsRunInit();
 	GpuMemoryInit();
+	const Kyty::Emulator::GpuMemoryFault::Callbacks gpu_memory_fault_callbacks {
+	    GpuMemoryCheckAccessViolation,
+	    GpuDirtyPageTrackerNotifyFaultHandlerInstalled,
+	};
+	EXIT_IF(!Kyty::Emulator::GpuMemoryFault::GetPort().Install(gpu_memory_fault_callbacks));
 	const LibKernel::Memory::GpuMappingLifecycleCallbacks gpu_mapping_lifecycle_callbacks {
 	    nullptr,
 	    GraphicsRegisterGpuMappingRange,

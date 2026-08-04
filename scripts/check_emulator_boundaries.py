@@ -159,6 +159,15 @@ def _is_absolute_include_path(include_path: str) -> bool:
     return normalized.startswith("/") or (len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":")
 
 
+def _is_sdl_include(canonical_path: str) -> bool:
+    basename = canonical_path.rsplit("/", 1)[-1]
+    return (
+        basename == "sdl.h"
+        or basename.startswith("sdl_")
+        or any(segment in ("sdl", "sdl2") for segment in canonical_path.split("/"))
+    )
+
+
 def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
     canonical_paths = [_canonical_include_path(include_path)]
     if not _is_absolute_include_path(include_path):
@@ -183,18 +192,14 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
     ):
         return "Libs -> Graphics"
     if relative_path in LIBS_SOURCE_FILES and any(
-        canonical_path == SDL_INCLUDE_PREFIX.casefold()
-        or canonical_path.startswith(
-            (SDL_INCLUDE_PREFIX + ".").casefold(),
-        )
-        or canonical_path.startswith(
-            (SDL_INCLUDE_PREFIX + "_").casefold(),
-        )
-        or canonical_path.startswith((SDL_INCLUDE_PREFIX + "2/").casefold())
-        for canonical_path in canonical_paths
+        _is_sdl_include(canonical_path) for canonical_path in canonical_paths
     ):
         return "Libs -> SDL"
     if relative_path in LOADER_SOURCE_FILES and any(
+        canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
+    ):
+        return "Loader -> Graphics"
+    if relative_path == RUNTIME_LINKER_SOURCE and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
         return "Loader -> Graphics"
@@ -614,14 +619,26 @@ class BoundaryCheckerTests(unittest.TestCase):
     def test_rejects_direct_sdl_include_from_libs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self.write_fixture(root, "emulator/src/Libs/LibSaveData.cpp", '#include "SDL_filesystem.h"\n')
+            self.write_fixture(
+                root,
+                "emulator/src/Libs/LibSaveData.cpp",
+                '#include "SDL.h"\n#include "SDL_filesystem.h"\n#include <SDL_stdinc.h>\n'
+                '#include <SDL2/begin_code.h>\n'
+                '#include "../../../3rdparty/sdl2/sdl2/include/SDL.h"\n'
+                '#include "../../../3rdparty/sdl2/sdl2/include/SDL_filesystem.h"\n',
+            )
 
             self.assertEqual(
                 check_source_root(root),
                 CheckResult(
                     exit_code=1,
                     diagnostics=(
-                        "emulator/src/Libs/LibSaveData.cpp:1: forbidden include (Libs -> SDL): SDL_filesystem.h",
+                        "emulator/src/Libs/LibSaveData.cpp:1: forbidden include (Libs -> SDL): SDL.h",
+                        "emulator/src/Libs/LibSaveData.cpp:2: forbidden include (Libs -> SDL): SDL_filesystem.h",
+                        "emulator/src/Libs/LibSaveData.cpp:3: forbidden include (Libs -> SDL): SDL_stdinc.h",
+                        "emulator/src/Libs/LibSaveData.cpp:4: forbidden include (Libs -> SDL): SDL2/begin_code.h",
+                        "emulator/src/Libs/LibSaveData.cpp:5: forbidden include (Libs -> SDL): ../../../3rdparty/sdl2/sdl2/include/SDL.h",
+                        "emulator/src/Libs/LibSaveData.cpp:6: forbidden include (Libs -> SDL): ../../../3rdparty/sdl2/sdl2/include/SDL_filesystem.h",
                     ),
                 ),
             )
@@ -650,6 +667,20 @@ class BoundaryCheckerTests(unittest.TestCase):
                 exit_code=1,
                 diagnostics=(
                     "emulator/src/Loader/RuntimeLinker.cpp:1: forbidden include (RuntimeLinker -> Profiler): Emulator/Profiler.h",
+                ),
+            )
+            self.assertEqual(check_source_root(root), expected)
+            self.assertEqual(check_source_root(root, strict=True), expected)
+
+    def test_rejects_runtime_linker_graphics_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Loader/RuntimeLinker.cpp", '#include "Emulator/Graphics/Objects/GpuMemory.h"\n')
+
+            expected = CheckResult(
+                exit_code=1,
+                diagnostics=(
+                    "emulator/src/Loader/RuntimeLinker.cpp:1: forbidden include (Loader -> Graphics): Emulator/Graphics/Objects/GpuMemory.h",
                 ),
             )
             self.assertEqual(check_source_root(root), expected)

@@ -13,8 +13,7 @@
 
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Config.h"
-#include "Emulator/Graphics/GpuDirtyPageTracker.h"
-#include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/GpuMemoryFault.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Loader/Elf.h"
@@ -522,7 +521,7 @@ static void kyty_exception_handler(const Core::VirtualMemory::ExceptionHandler::
 		// Attempt GPU watch handling for any access violation before treating it
 		// as fatal; this preserves write handling when the signal classification
 		// can only be inferred from the faulting context.
-		if (Libs::Graphics::GpuMemoryCheckAccessViolation(info->access_violation_vaddr))
+		if (Kyty::Emulator::GpuMemoryFault::GetPort().HandleAccessViolation(info->access_violation_vaddr))
 		{
 			return;
 		}
@@ -2396,7 +2395,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 		// if (Libs::Graphics::GpuMemoryWatcherEnabled())
 		{
 			Core::VirtualMemory::ExceptionHandler::InstallVectored(kyty_exception_handler);
-			Libs::Graphics::GpuDirtyPageTrackerNotifyFaultHandlerInstalled();
+			Kyty::Emulator::GpuMemoryFault::GetPort().NotifyFaultHandlerInstalled();
 		}
 	}
 
