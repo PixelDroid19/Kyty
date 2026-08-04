@@ -66,6 +66,10 @@ void vs_check(const HW::VertexShaderInfo& vs, const HW::ShaderRegisters& sh);
 void ps_check(const HW::PsStageRegisters& ps, const HW::ShaderRegisters& sh);
 void cs_check(const HW::CsStageRegisters& cs, const HW::ShaderRegisters& sh);
 
+// Diagnostic counters recorded by the shader analysis paths.
+void RecordShaderInputAnalysis(uint64_t elapsed_ns);
+void RecordShaderPipelineMissParse(uint64_t elapsed_ns);
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

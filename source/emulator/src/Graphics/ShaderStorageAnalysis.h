@@ -5,6 +5,8 @@
 
 #include "Emulator/Graphics/HardwareContext.h"
 
+#include "ShaderDebugInternal.h"
+
 namespace Kyty::Libs::Graphics {
 
 [[nodiscard]] bool ShaderOperandOverlapsSgprRange(const ShaderOperand& operand, int start_register, int registers_num);
@@ -36,6 +38,17 @@ bool ShaderIsDynamicScalarStorageConsumer(const ShaderBindResources& bind, const
 bool ShaderStorageResourceHasDynamicSLoad(const ShaderBindResources& bind, int storage_index);
 void ShaderPruneUnusedMetadataStorage(const ShaderCode& code, ShaderStorageResources* resources, int user_sgpr_num,
                                       int user_data_register_base);
+
+// Vertex input decode helpers, shared by the usage-parse paths.
+const ShaderBinaryInfo* GetBinaryInfo(const uint32_t* code);
+ShaderUsageInfo GetUsageSlots(const uint32_t* code);
+void ShaderDetectBuffers(ShaderVertexInputInfo* info, bool ps5);
+void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const uint32_t* buffer, uint32_t user_sgpr_num);
+void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_semantics, uint32_t num_input_semantics,
+                       const uint32_t* attrib, const uint32_t* buffer);
+bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, int start_index, int slot, ShaderStorageUsage usage,
+                            const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer,
+                            ShaderStorageBindingSource source = ShaderStorageBindingSource::DirectResource);
 
 } // namespace Kyty::Libs::Graphics
 
