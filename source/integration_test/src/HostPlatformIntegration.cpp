@@ -46,6 +46,12 @@ bool PeakRssBytesIsCallable()
 {
 	const uint64_t peak_rss_bytes = Host::PeakRssBytes();
 	std::printf("host platform integration peak_rss_bytes=%llu\n", static_cast<unsigned long long>(peak_rss_bytes));
+#if defined(_WIN32)
+	if (!Check(peak_rss_bytes > 0, "Windows peak RSS query returned zero"))
+	{
+		return false;
+	}
+#endif
 	return true;
 }
 

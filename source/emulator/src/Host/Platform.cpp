@@ -3,7 +3,11 @@
 #include <chrono>
 #include <ctime>
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <psapi.h>
+#else
 #include <sys/resource.h>
 #endif
 
@@ -29,7 +33,12 @@ std::string UtcTimestamp()
 uint64_t PeakRssBytes()
 {
 #if defined(_WIN32)
-	return 0;
+	PROCESS_MEMORY_COUNTERS counters {};
+	if (!GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)))
+	{
+		return 0;
+	}
+	return static_cast<uint64_t>(counters.PeakWorkingSetSize);
 #else
 	struct rusage usage {};
 	if (getrusage(RUSAGE_SELF, &usage) != 0)

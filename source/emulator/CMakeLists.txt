@@ -143,6 +143,10 @@ target_link_libraries(emulator
 		kyty_audio_pcm
 )
 
+if(MSVC OR MINGW)
+	target_link_libraries(emulator PRIVATE psapi)
+endif()
+
 target_include_directories(emulator PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 get_property(inc_headers TARGET emulator PROPERTY INCLUDE_DIRECTORIES)
