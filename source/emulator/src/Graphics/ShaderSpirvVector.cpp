@@ -1007,6 +1007,71 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1)
 	return true;
 }
 
+/* Generalized f64 compare: operands are register pairs. Recombine each pair
+ * into a double, compare (param[0]) and write the VCC lane mask. */
+KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_XXX_SmaskVsrc0Vsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0lo;
+	String8 load0hi;
+	String8 load1lo;
+	String8 load1hi;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+
+	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
+
+	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[1], "t1_lo_<index>", index_str, &load1lo, 0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[1], "t1_hi_<index>", index_str, &load1hi, 1))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+          <load0lo>
+          <load0hi>
+          <load1lo>
+          <load1hi>
+          %d0v_<index> = OpCompositeConstruct %v2uint %t0_lo_<index> %t0_hi_<index>
+          %d0u_<index> = OpBitcast %ulong %d0v_<index>
+          %d0_<index> = OpBitcast %double %d0u_<index>
+          %d1v_<index> = OpCompositeConstruct %v2uint %t1_lo_<index> %t1_hi_<index>
+          %d1u_<index> = OpBitcast %ulong %d1v_<index>
+          %d1_<index> = OpBitcast %double %d1u_<index>
+          %t2_<index> = <param> %bool %d0_<index> %d1_<index>
+          %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
+          OpStore %<dst0> %t3_<index>
+          OpStore %<dst1> %uint_0
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<dst0>", dst_value0.value)
+	                   .ReplaceStr("<dst1>", dst_value1.value)
+	                   .ReplaceStr("<load0lo>", load0lo)
+	                   .ReplaceStr("<load0hi>", load0hi)
+	                   .ReplaceStr("<load1lo>", load1lo)
+	                   .ReplaceStr("<load1hi>", load1hi)
+	                   .ReplaceStr("<param>", param[0])
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VInterpP1F32_VdstVsrcAttrChan)
 {
 	return true;

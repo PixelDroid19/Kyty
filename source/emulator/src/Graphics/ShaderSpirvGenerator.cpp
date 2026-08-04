@@ -211,41 +211,33 @@ static bool spirv_uses_buffer_atomics(const ShaderCode& code)
 // FP64 (double) is used when the shader has f64 ALU or 64-bit float compares.
 static bool spirv_uses_f64(const ShaderCode& code)
 {
-	const auto& insts = code.GetInstructions();
-	for (uint32_t i = 0; i < insts.Size(); i++)
-	{
-		const auto type = static_cast<int>(insts.At(i).type);
-		if (type >= static_cast<int>(ShaderInstructionType::VCmpFF64) && type <= static_cast<int>(ShaderInstructionType::VCmpTruF64))
-		{
-			return true;
-		}
-	}
-	return code.HasAnyOf({ShaderInstructionType::VCvtF64F32, ShaderInstructionType::VCvtF32F64, ShaderInstructionType::VCvtI32F64,
-	                      ShaderInstructionType::VCvtU32F64, ShaderInstructionType::VCvtF64I32, ShaderInstructionType::VCvtF64U32,
-	                      ShaderInstructionType::VAddF64, ShaderInstructionType::VSubF64, ShaderInstructionType::VMulF64,
-	                      ShaderInstructionType::VSqrtF64, ShaderInstructionType::VMinF64,
+	return code.HasAnyOf({ShaderInstructionType::VCmpFF64, ShaderInstructionType::VCmpLtF64, ShaderInstructionType::VCmpEqF64,
+	                      ShaderInstructionType::VCmpLeF64, ShaderInstructionType::VCmpGtF64, ShaderInstructionType::VCmpLgF64,
+	                      ShaderInstructionType::VCmpGeF64, ShaderInstructionType::VCmpTruF64, ShaderInstructionType::VCmpNgeF64,
+	                      ShaderInstructionType::VCmpNlgF64, ShaderInstructionType::VCmpNgtF64, ShaderInstructionType::VCmpNleF64,
+	                      ShaderInstructionType::VCmpNeqF64, ShaderInstructionType::VCmpNltF64, ShaderInstructionType::VCmpOF64,
+	                      ShaderInstructionType::VCmpUF64, ShaderInstructionType::VCvtF64F32, ShaderInstructionType::VCvtF32F64,
+	                      ShaderInstructionType::VCvtI32F64, ShaderInstructionType::VCvtU32F64, ShaderInstructionType::VCvtF64I32,
+	                      ShaderInstructionType::VCvtF64U32, ShaderInstructionType::VAddF64, ShaderInstructionType::VSubF64,
+	                      ShaderInstructionType::VMulF64, ShaderInstructionType::VSqrtF64, ShaderInstructionType::VMinF64,
 	                      ShaderInstructionType::VMaxF64, ShaderInstructionType::VFmaF64});
 }
 
 // FP16 (half) is used when the shader has f16 ALU or 16-bit float compares.
 static bool spirv_uses_f16(const ShaderCode& code)
 {
-	const auto& insts = code.GetInstructions();
-	for (uint32_t i = 0; i < insts.Size(); i++)
-	{
-		const auto type = static_cast<int>(insts.At(i).type);
-		if (type >= static_cast<int>(ShaderInstructionType::VCmpFF16) && type <= static_cast<int>(ShaderInstructionType::VCmpTruF16))
-		{
-			return true;
-		}
-	}
-	return code.HasAnyOf({ShaderInstructionType::VAddF16, ShaderInstructionType::VSubF16, ShaderInstructionType::VMulF16,
-	                      ShaderInstructionType::VMinF16, ShaderInstructionType::VMaxF16, ShaderInstructionType::VMadF16,
-	                      ShaderInstructionType::VFmaF16, ShaderInstructionType::VCvtF16F32, ShaderInstructionType::VCvtF32F16,
-	                      ShaderInstructionType::VTruncF16, ShaderInstructionType::VCeilF16, ShaderInstructionType::VFloorF16,
-	                      ShaderInstructionType::VRndneF16, ShaderInstructionType::VSqrtF16, ShaderInstructionType::VRcpF16,
-	                      ShaderInstructionType::VRsqF16, ShaderInstructionType::VLogF16, ShaderInstructionType::VExpF16,
-	                      ShaderInstructionType::VSinF16, ShaderInstructionType::VCosF16});
+	return code.HasAnyOf({ShaderInstructionType::VCmpFF16, ShaderInstructionType::VCmpLtF16, ShaderInstructionType::VCmpEqF16,
+	                      ShaderInstructionType::VCmpLeF16, ShaderInstructionType::VCmpGtF16, ShaderInstructionType::VCmpLgF16,
+	                      ShaderInstructionType::VCmpGeF16, ShaderInstructionType::VCmpTruF16, ShaderInstructionType::VCmpNgeF16,
+	                      ShaderInstructionType::VCmpNlgF16, ShaderInstructionType::VCmpNgtF16, ShaderInstructionType::VCmpNleF16,
+	                      ShaderInstructionType::VCmpNeqF16, ShaderInstructionType::VCmpNltF16, ShaderInstructionType::VCmpOF16,
+	                      ShaderInstructionType::VCmpUF16, ShaderInstructionType::VAddF16, ShaderInstructionType::VSubF16,
+	                      ShaderInstructionType::VMulF16, ShaderInstructionType::VMinF16, ShaderInstructionType::VMaxF16,
+	                      ShaderInstructionType::VMadF16, ShaderInstructionType::VFmaF16, ShaderInstructionType::VCvtF16F32,
+	                      ShaderInstructionType::VCvtF32F16, ShaderInstructionType::VTruncF16, ShaderInstructionType::VCeilF16,
+	                      ShaderInstructionType::VFloorF16, ShaderInstructionType::VRndneF16, ShaderInstructionType::VSqrtF16,
+	                      ShaderInstructionType::VRcpF16, ShaderInstructionType::VRsqF16, ShaderInstructionType::VLogF16,
+	                      ShaderInstructionType::VExpF16, ShaderInstructionType::VSinF16, ShaderInstructionType::VCosF16});
 }
 
 // 16-bit integer ALU (i16/u16) without native Int16 capability, operated in
@@ -809,6 +801,8 @@ void Spirv::WriteTypes()
                         %half = OpTypeFloat 16
                        %short = OpTypeInt 16 1
                       %ushort = OpTypeInt 16 0
+                       %ulong = OpTypeInt 64 0
+                       %slong = OpTypeInt 64 1
                       %v2float = OpTypeVector %float 2
                       %v3float = OpTypeVector %float 3
                       %v4float = OpTypeVector %float 4
