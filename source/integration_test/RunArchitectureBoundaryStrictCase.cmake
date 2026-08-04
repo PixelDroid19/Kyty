@@ -32,17 +32,27 @@ set(expected_stderr "architecture boundary integration failed: checker exited wi
 string(LENGTH "${expected_stderr}" expected_stderr_length)
 string(LENGTH "${stderr}" actual_stderr_length)
 set(stderr_has_expected_wrapper_message FALSE)
-if(actual_stderr_length GREATER_EQUAL expected_stderr_length)
-	math(EXPR stderr_suffix_start "${actual_stderr_length} - ${expected_stderr_length}")
-	string(SUBSTRING "${stderr}" ${stderr_suffix_start} ${expected_stderr_length} stderr_suffix)
-	if("${stderr_suffix}" STREQUAL "${expected_stderr}")
+
+if(DEFINED TEST_LAUNCHER AND NOT "${TEST_LAUNCHER}" STREQUAL "")
+	# A configured CMake test launcher may emit instrumentation text before the
+	# wrapper diagnostic. Keep the wrapper message as the exact suffix while
+	# allowing that launcher-owned prefix.
+	if(actual_stderr_length GREATER_EQUAL expected_stderr_length)
+		math(EXPR stderr_suffix_start "${actual_stderr_length} - ${expected_stderr_length}")
+		string(SUBSTRING "${stderr}" ${stderr_suffix_start} ${expected_stderr_length} stderr_suffix)
+		if("${stderr_suffix}" STREQUAL "${expected_stderr}")
+			set(stderr_has_expected_wrapper_message TRUE)
+		endif()
+	endif()
+else()
+	# In the normal build there is no launcher-owned output; keep this stream
+	# exact so checker warnings, tracebacks, and wrapper failures cannot hide.
+	if("${stderr}" STREQUAL "${expected_stderr}")
 		set(stderr_has_expected_wrapper_message TRUE)
 	endif()
 endif()
 
-# A CMake test launcher may emit instrumentation text before the wrapper's
-# diagnostic. Require the wrapper message as the exact suffix while allowing
-# that launcher-owned prefix; exit code and checker stdout remain exact.
+# Exit code and checker stdout remain exact in both modes.
 if(NOT "${actual_exit}" STREQUAL "1" OR NOT "${stdout}" STREQUAL "${expected_stdout}" OR NOT stderr_has_expected_wrapper_message)
 	message(FATAL_ERROR
 		"strict boundary contract failed\n"
