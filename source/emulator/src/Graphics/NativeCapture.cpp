@@ -1,21 +1,16 @@
 #include "Emulator/Graphics/NativeCapture.h"
 
 #include "Emulator/Graphics/Utils.h"
+#include "Emulator/Host/Platform.h"
 
 #include "SDL_surface.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <system_error>
 #include <vector>
-
-#if !defined(_WIN32)
-#include <sys/resource.h>
-#endif
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -67,19 +62,7 @@ std::string NativeCaptureSanitizeName(std::string value, const char* default_nam
 
 std::string NativeCaptureUtcStamp()
 {
-	const auto now = std::chrono::system_clock::now();
-	const auto tt  = std::chrono::system_clock::to_time_t(now);
-
-	std::tm utc {};
-#if defined(_WIN32)
-	gmtime_s(&utc, &tt);
-#else
-	gmtime_r(&tt, &utc);
-#endif
-
-	char stamp[32] {};
-	std::strftime(stamp, sizeof(stamp), "%Y%m%dT%H%M%SZ", &utc);
-	return stamp;
+	return Kyty::Emulator::Host::UtcTimestamp();
 }
 
 const char* NativeCaptureFormatName(VkFormat format)
@@ -94,20 +77,7 @@ const char* NativeCaptureFormatName(VkFormat format)
 
 uint64_t NativeCaptureHostPeakRssBytes()
 {
-#if defined(_WIN32)
-	return 0;
-#else
-	struct rusage usage {};
-	if (getrusage(RUSAGE_SELF, &usage) != 0)
-	{
-		return 0;
-	}
-#if defined(__APPLE__)
-	return static_cast<uint64_t>(usage.ru_maxrss);
-#else
-	return static_cast<uint64_t>(usage.ru_maxrss) * 1024u;
-#endif
-#endif
+	return Kyty::Emulator::Host::PeakRssBytes();
 }
 
 bool NativeCaptureSaveSdlSurfacePng(SDL_Surface* surface, const std::filesystem::path& path)

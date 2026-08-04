@@ -23,6 +23,8 @@ target_sources(emulator PRIVATE
 	include/Emulator/Loader/GuestCall.h
 	src/Host/Clock.cpp
 	include/Emulator/Host/Clock.h
+	src/Host/Platform.cpp
+	include/Emulator/Host/Platform.h
 	src/DevTools/Runtime.cpp
 	src/DevTools/RuntimeSubsystem.cpp
 	include/Emulator/DevTools/Runtime.h

@@ -487,6 +487,31 @@ set_tests_properties(KytyAudioHostIntegration.PacingAndLifecycle PROPERTIES
 	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 30
 )
+
+add_executable(kyty_host_platform_integration
+	src/HostPlatformIntegration.cpp
+)
+
+target_link_libraries(kyty_host_platform_integration
+	PRIVATE
+		emulator
+)
+
+target_include_directories(kyty_host_platform_integration
+	PRIVATE
+		"${CMAKE_SOURCE_DIR}/include"
+		"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+
+add_test(
+	NAME KytyHostPlatformIntegration.CaptureQueries
+	COMMAND $<TARGET_FILE:kyty_host_platform_integration>
+)
+set_tests_properties(KytyHostPlatformIntegration.CaptureQueries PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 15
+)
+
 set_tests_properties(KytyAgentTransport.NativeRoundTrip PROPERTIES
 	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 15
