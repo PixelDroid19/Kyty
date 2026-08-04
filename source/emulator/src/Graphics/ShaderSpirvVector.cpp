@@ -1310,6 +1310,220 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF16F32_SVdstSVsrc0)
 	return true;
 }
 
+/* Generalized f16 unary math (trunc/ceil/floor/rndne/rcp/sqrt): unpack to
+ * f32, apply param[0], repack and store with EXEC predication. */
+KYTY_RECOMPILER_FUNC(Recompile_VF16_Unary_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+        %hv_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
+        %h0_<index> = OpCompositeExtract %float %hv_<index> 0
+        <param0>
+        %hpackv_<index> = OpExtInst %v2float %GLSL_std_450 PackHalf2x16 %t_<index> %t_<index>
+        %hpack_<index> = OpCompositeExtract %uint %hpackv_<index> 0
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %hpack_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<param0>", param[0])
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cvt_f16_i16: sign-extend the i16 source (low 16 bits), convert to f32 and
+ * pack as f16 into the destination. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtF16I16_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+        %i16_<index> = OpBitcast %int %t0_<index>
+        %i16s_<index> = OpShiftLeftLogical %int %i16_<index> %int_16
+        %i16x_<index> = OpShiftRightArithmetic %int %i16s_<index> %int_16
+        %f_<index> = OpConvertSToF %float %i16x_<index>
+        %hpackv_<index> = OpExtInst %v2float %GLSL_std_450 PackHalf2x16 %f_<index> %f_<index>
+        %hpack_<index> = OpCompositeExtract %uint %hpackv_<index> 0
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %hpack_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cvt_f16_u16: zero-extend the u16 source, convert to f32, pack as f16. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtF16U16_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+        %u16_<index> = OpBitwiseAnd %uint %t0_<index> %uint_0xffff
+        %f_<index> = OpConvertUToF %float %u16_<index>
+        %hpackv_<index> = OpExtInst %v2float %GLSL_std_450 PackHalf2x16 %f_<index> %f_<index>
+        %hpack_<index> = OpCompositeExtract %uint %hpackv_<index> 0
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %hpack_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cvt_i16_f16: unpack the f16 source and store the signed 16-bit truncation
+ * in the low bits of the destination. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtI16F16_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+        %hv_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
+        %h0_<index> = OpCompositeExtract %float %hv_<index> 0
+        %i_<index> = OpConvertFToS %int %h0_<index>
+        %u_<index> = OpBitcast %uint %i_<index>
+        %masked_<index> = OpBitwiseAnd %uint %u_<index> %uint_0xffff
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %masked_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+/* v_cvt_u16_f16: unpack the f16 source and store the unsigned 16-bit
+ * truncation in the low bits of the destination. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtU16F16_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+        %hv_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
+        %h0_<index> = OpCompositeExtract %float %hv_<index> 0
+        %u_<index> = OpConvertFToU %uint %h0_<index>
+        %masked_<index> = OpBitwiseAnd %uint %u_<index> %uint_0xffff
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %masked_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 /* v_cvt_u32_f64: double source pair to unsigned int. */
 KYTY_RECOMPILER_FUNC(Recompile_VCvtU32F64_SVdstSVsrc0)
 {
