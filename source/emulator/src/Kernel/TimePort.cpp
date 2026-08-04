@@ -55,6 +55,11 @@ double GetTimeMs() noexcept
 	return g_get_time_ms.load(std::memory_order_acquire)();
 }
 
+uint64_t GetProcessTimeUs() noexcept
+{
+	return static_cast<uint64_t>(GetTimeMs() * 1000.0);
+}
+
 Core::Time GetTime() noexcept
 {
 	return Core::Time(static_cast<int>(GetTimeMs()));

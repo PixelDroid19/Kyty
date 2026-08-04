@@ -29,6 +29,7 @@ struct Provider
 void Install(const Provider& provider) noexcept;
 
 [[nodiscard]] double     GetTimeMs() noexcept;
+[[nodiscard]] uint64_t   GetProcessTimeUs() noexcept;
 [[nodiscard]] Core::Time GetTime() noexcept;
 [[nodiscard]] uint64_t   GetCounter() noexcept;
 [[nodiscard]] uint64_t   GetFrequency() noexcept;

@@ -404,7 +404,7 @@ void FillMonotonicVblankStatus(VideoOutConfig* config, VideoOutVblankStatus* sta
 		config->vblank_origin_ns = now_ns;
 	}
 	status->count       = 1 + (now_ns - config->vblank_origin_ns) / VIDEO_OUT_VBLANK_PERIOD_NS;
-	status->processTime = LibKernel::KernelGetProcessTime();
+	status->processTime = Kernel::TimePort::GetProcessTimeUs();
 	status->tsc         = Kernel::TimePort::GetCounter();
 }
 
@@ -924,7 +924,7 @@ void VideoOutContext::VblankBegin()
 		{
 			Core::LockGuard config_lock(ctx->mutex);
 			ctx->pre_vblank_status.count++;
-			ctx->pre_vblank_status.processTime = LibKernel::KernelGetProcessTime();
+			ctx->pre_vblank_status.processTime = Kernel::TimePort::GetProcessTimeUs();
 			ctx->pre_vblank_status.tsc         = Kernel::TimePort::GetCounter();
 			count                              = ctx->pre_vblank_status.count;
 		}
@@ -958,7 +958,7 @@ void VideoOutContext::VblankEnd()
 		{
 			Core::LockGuard config_lock(ctx->mutex);
 			ctx->vblank_status.count++;
-			ctx->vblank_status.processTime = LibKernel::KernelGetProcessTime();
+			ctx->vblank_status.processTime = Kernel::TimePort::GetProcessTimeUs();
 			ctx->vblank_status.tsc         = Kernel::TimePort::GetCounter();
 			count                          = ctx->vblank_status.count;
 			queues.reserve(ctx->vblank_events.Size());
@@ -1512,7 +1512,7 @@ bool FlipQueue::Flip(uint32_t micros)
 	// completion and can permanently drain a frame-pacing token.
 	m_mutex.Lock();
 	r.cfg->flip_status.count++;
-	r.cfg->flip_status.processTime              = LibKernel::KernelGetProcessTime();
+	r.cfg->flip_status.processTime              = Kernel::TimePort::GetProcessTimeUs();
 	r.cfg->flip_status.processTimeCounter       = Kernel::TimePort::GetCounter();
 	r.cfg->flip_status.submitProcessTimeCounter = r.submit_tsc;
 	r.cfg->flip_status.flipArg                   = r.flip_arg;

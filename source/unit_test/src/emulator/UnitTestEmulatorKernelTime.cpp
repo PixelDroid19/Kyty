@@ -52,6 +52,7 @@ TEST(EmulatorKernelTime, TimePortUsesInstalledProviderAndRestoresFallback)
 	Kyty::Kernel::TimePort::Install({TestTimeMs, TestCounter, TestFrequency});
 
 	EXPECT_DOUBLE_EQ(Kyty::Kernel::TimePort::GetTimeMs(), 12.5);
+	EXPECT_EQ(Kyty::Kernel::TimePort::GetProcessTimeUs(), 12500u);
 	EXPECT_EQ(Kyty::Kernel::TimePort::GetCounter(), 0x1234u);
 	EXPECT_EQ(Kyty::Kernel::TimePort::GetFrequency(), 1000000u);
 
