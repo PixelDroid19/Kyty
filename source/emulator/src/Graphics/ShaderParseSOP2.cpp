@@ -64,10 +64,10 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 		case 0x03: inst.type = ShaderInstructionType::SSubI32; break;
 		case 0x04: inst.type = ShaderInstructionType::SAddcU32; break;
 		case 0x05: KYTY_NI("s_subb_u32"); break;
-		case 0x06: KYTY_NI("s_min_i32"); break;
-		case 0x07: KYTY_NI("s_min_u32"); break;
-		case 0x08: KYTY_NI("s_max_i32"); break;
-		case 0x09: KYTY_NI("s_max_u32"); break;
+		case 0x06: inst.type = ShaderInstructionType::SMinI32; break;
+		case 0x07: inst.type = ShaderInstructionType::SMinU32; break;
+		case 0x08: inst.type = ShaderInstructionType::SMaxI32; break;
+		case 0x09: inst.type = ShaderInstructionType::SMaxU32; break;
 		case 0x0a: inst.type = ShaderInstructionType::SCselectB32; break;
 		case 0x0b:
 			inst.type        = ShaderInstructionType::SCselectB64;
@@ -92,7 +92,7 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			inst.src[0].size = 2;
 			inst.src[1].size = 2;
 			break;
-		case 0x12: KYTY_NI("s_xor_b32"); break;
+		case 0x12: inst.type = ShaderInstructionType::SXorB32; break;
 		case 0x13:
 			inst.type        = ShaderInstructionType::SXorB64;
 			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
@@ -100,7 +100,7 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			inst.src[0].size = 2;
 			inst.src[1].size = 2;
 			break;
-		case 0x14: KYTY_NI("s_andn2_b32"); break;
+		case 0x14: inst.type = ShaderInstructionType::SAndn2B32; break;
 		case 0x15:
 			inst.type        = ShaderInstructionType::SAndn2B64;
 			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
@@ -108,7 +108,7 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			inst.src[0].size = 2;
 			inst.src[1].size = 2;
 			break;
-		case 0x16: KYTY_NI("s_orn2_b32"); break;
+		case 0x16: inst.type = ShaderInstructionType::SOrn2B32; break;
 		case 0x17:
 			inst.type        = ShaderInstructionType::SOrn2B64;
 			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
@@ -116,7 +116,7 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			inst.src[0].size = 2;
 			inst.src[1].size = 2;
 			break;
-		case 0x18: KYTY_NI("s_nand_b32"); break;
+		case 0x18: inst.type = ShaderInstructionType::SNandB32; break;
 		case 0x19:
 			inst.type        = ShaderInstructionType::SNandB64;
 			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
@@ -124,7 +124,7 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			inst.src[0].size = 2;
 			inst.src[1].size = 2;
 			break;
-		case 0x1A: KYTY_NI("s_nor_b32"); break;
+		case 0x1A: inst.type = ShaderInstructionType::SNorB32; break;
 		case 0x1b:
 			inst.type        = ShaderInstructionType::SNorB64;
 			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
@@ -132,7 +132,7 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			inst.src[0].size = 2;
 			inst.src[1].size = 2;
 			break;
-		case 0x1C: KYTY_NI("s_xnor_b32"); break;
+		case 0x1C: inst.type = ShaderInstructionType::SXnorB32; break;
 		case 0x1d:
 			inst.type        = ShaderInstructionType::SXnorB64;
 			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
@@ -154,7 +154,7 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			inst.dst.size    = 2;
 			inst.src[0].size = 2;
 			break;
-		case 0x22: KYTY_NI("s_ashr_i32"); break;
+		case 0x22: inst.type = ShaderInstructionType::SAshrI32; break;
 		case 0x23: KYTY_NI("s_ashr_i64"); break;
 		case 0x24: inst.type = ShaderInstructionType::SBfmB32; break;
 		case 0x25: KYTY_NI("s_bfm_b64"); break;
