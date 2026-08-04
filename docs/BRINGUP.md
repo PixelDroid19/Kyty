@@ -135,7 +135,11 @@ strict post-Play (or earlier) blocker is open. Delivery order below is absolute.
 5. **Use Silent vs Console deliberately.** `PrintfDirection = Silent` is for
    wall-clock and long runs; it hides HLE prints. For encode/patch sequences,
    use Console or temporary `stderr` probes that do not depend on Printf, then
-   **delete probes before commit**.
+   **delete probes before commit**. To surface the diagnostic dumps (shader
+   dumps, command-processor traces) that are compiled as `KYTY_LOG_DEBUG`, set
+   `PrintfLevel = Debug` in the config; `Error`/`Warn`/`Info`/`Debug` mirror the
+   severity gates used by other emulators. The gate is a single relaxed atomic
+   read, so a level that does not pass costs nothing.
 6. **Compare working vs failing forms.** Same export with non-null address
    earlier in the run is ABI evidence; a post-Play null pair is a different
    contract to explain, not a free pass to invent addresses.

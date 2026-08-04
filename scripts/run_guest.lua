@@ -72,6 +72,7 @@ local cfg = {
 	-- and grow multi‑hundred‑MB logs on a full title boot. Dumps and verbose
 	-- logging stay opt-in so end users are not surprised by disk/RAM pressure.
 	PrintfDirection = env_or('KYTY_PRINTF_DIRECTION', 'Silent');
+	PrintfLevel = env_or('KYTY_PRINTF_LEVEL', 'Info');
 	PrintfOutputFolder = env_or('KYTY_PRINTF_OUTPUT_FOLDER', '_Logs');
 	ProfilerDirection = env_or('KYTY_PROFILER_DIRECTION', 'None');
 	PipelineDumpEnabled = env_bool('KYTY_PIPELINE_DUMP', false);

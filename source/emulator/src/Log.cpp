@@ -134,6 +134,12 @@ KYTY_SUBSYSTEM_INIT(Log)
 		SetOutputFile(Config::GetPrintfOutputFile());
 	}
 
+	// Severity gate drives which levels reach the output. Default Info keeps
+	// today's behavior; set PrintfLevel = Debug in the config to surface the
+	// KYTY_LOG_DEBUG diagnostics (shader dumps, command processor traces) in
+	// the console, mirroring verbose modes in other emulators.
+	SetMinLevel(Config::GetPrintfLevel());
+
 	g_thread_local_files = new Vector<Core::File*>;
 }
 

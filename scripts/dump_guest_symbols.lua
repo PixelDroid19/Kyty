@@ -42,6 +42,7 @@ kyty_init({
 	CommandBufferDumpEnabled = false;
 	CommandBufferDumpFolder = '_Buffers';
 	PrintfDirection = 'Silent';
+	PrintfLevel = 'Info';
 	PrintfOutputFolder = '_Logs';
 	ProfilerDirection = 'None';
 	PipelineDumpEnabled = false;

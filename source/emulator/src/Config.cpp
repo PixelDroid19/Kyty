@@ -29,6 +29,7 @@ struct Config
 	bool                   command_buffer_dump_enabled = false;
 	String                 command_buffer_dump_folder  = U"_Buffers";
 	Log::Direction         printf_direction            = Log::Direction::Silent;
+	Log::Level             printf_level                = Log::Level::Info;
 	String                 printf_output_file          = U"_kyty.txt";
 	String                 printf_output_folder        = U"_Logs";
 	ProfilerDirection      profiler_direction          = ProfilerDirection::None;
@@ -127,6 +128,7 @@ void Load(const Scripts::ScriptVar& cfg)
 	LoadBool(g_config->command_buffer_dump_enabled, cfg, U"CommandBufferDumpEnabled");
 	LoadStr(g_config->command_buffer_dump_folder, cfg, U"CommandBufferDumpFolder");
 	LoadEnum(g_config->printf_direction, cfg, U"PrintfDirection");
+	LoadEnum(g_config->printf_level, cfg, U"PrintfLevel");
 	LoadStr(g_config->printf_output_file, cfg, U"PrintfOutputFile");
 	LoadStr(g_config->printf_output_folder, cfg, U"PrintfOutputFolder");
 	LoadEnum(g_config->profiler_direction, cfg, U"ProfilerDirection");
@@ -209,6 +211,11 @@ String GetCommandBufferDumpFolder()
 Log::Direction GetPrintfDirection()
 {
 	return g_config->printf_direction;
+}
+
+Log::Level GetPrintfLevel()
+{
+	return g_config->printf_level;
 }
 
 String GetPrintfOutputFile()

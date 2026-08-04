@@ -192,7 +192,7 @@ bool HostWindow::ToggleFullscreen()
 	const uint32_t flags  = target ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0u;
 	if (SDL_SetWindowFullscreen(static_cast<SDL_Window*>(m_window), flags) != 0)
 	{
-		std::fprintf(stderr, "Kyty window fullscreen toggle failed: %s\n", SDL_GetError());
+		KYTY_LOG_WARN("Kyty window fullscreen toggle failed: %s\n", SDL_GetError());
 		return false;
 	}
 

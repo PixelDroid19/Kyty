@@ -109,8 +109,8 @@ void emu_printf(const char* format, ...) KYTY_FORMAT_PRINTF(1, 2);
 
 } // namespace Kyty
 
-// Convenience wrappers for the level-aware logger. The gate is checked before
-// the variadic call so non-emitting levels never pay for argument setup.
+// Convenience wrappers for the level-aware logger. The implementation checks
+// the gate before formatting, so non-emitting levels avoid String/lock work.
 #define KYTY_LOG_ERROR(...) ::Kyty::Log::log_printf(::Kyty::Log::Level::Error, __VA_ARGS__)
 #define KYTY_LOG_WARN(...)  ::Kyty::Log::log_printf(::Kyty::Log::Level::Warn, __VA_ARGS__)
 #define KYTY_LOG_INFO(...)  ::Kyty::Log::log_printf(::Kyty::Log::Level::Info, __VA_ARGS__)

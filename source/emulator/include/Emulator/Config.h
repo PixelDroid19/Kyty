@@ -84,6 +84,7 @@ bool   CommandBufferDumpEnabled();
 String GetCommandBufferDumpFolder();
 
 Log::Direction GetPrintfDirection();
+Log::Level     GetPrintfLevel();
 String         GetPrintfOutputFile();
 String         GetPrintfOutputFolder();
 

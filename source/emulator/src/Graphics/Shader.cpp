@@ -22,6 +22,7 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -783,7 +784,7 @@ static void ShaderAppendContinuation(ShaderCode* code, uint64_t back_code_addr)
 	if (logs < 16u)
 	{
 		++logs;
-		std::fprintf(stderr,
+		KYTY_LOG_DEBUG(
 		             "KYTY_SHADER: linearized front→back continuation front_max_pc=0x%08" PRIx32
 		             " back=0x%012" PRIx64 " entry_pc=0x%08" PRIx32 " insts=%u\n",
 		             front_max_pc, back_code_addr, back_entry_pc,
@@ -812,7 +813,7 @@ static bool ShaderGetMappedData(uint64_t addr, ShaderMappedData* data)
 	}
 	if (best == nullptr)
 	{
-		std::fprintf(stderr, "KYTY_SHADER_MAP_MISS addr=0x%016" PRIx64 " entries=%zu\n", addr, g_shader_map->size());
+		KYTY_LOG_DEBUG( "KYTY_SHADER_MAP_MISS addr=0x%016" PRIx64 " entries=%zu\n", addr, g_shader_map->size());
 		int shown = 0;
 		for (const auto& [base, mapped]: *g_shader_map)
 		{
@@ -820,7 +821,7 @@ static bool ShaderGetMappedData(uint64_t addr, ShaderMappedData* data)
 			{
 				break;
 			}
-			std::fprintf(stderr, "  map base=0x%016" PRIx64 " size=0x%08" PRIx32 " user=%p\n", base, mapped.code_size_bytes,
+			KYTY_LOG_DEBUG( "  map base=0x%016" PRIx64 " size=0x%08" PRIx32 " user=%p\n", base, mapped.code_size_bytes,
 			             static_cast<void*>(mapped.user_data));
 		}
 		return false;
@@ -1588,7 +1589,7 @@ static void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic*
 			const auto                  vertex_attr_log = vertex_attr_logs.fetch_add(1, std::memory_order_relaxed);
 			if (vertex_attr_log < 32u)
 			{
-				std::fprintf(stderr,
+				KYTY_LOG_DEBUG(
 				             "KYTY_VERTEX_ATTR semantic=%u raw=0x%08" PRIx32 " index=%zu format=0x%03" PRIx32 " offset=0x%03" PRIx32
 				             " attrib=%p buffer=%p sharp=%p words=%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 "\n",
 				             in.semantic, attrib[in.semantic], index, format, offset, static_cast<const void*>(attrib),
@@ -2180,7 +2181,7 @@ static void ShaderReportMissingGen5EudPointer(const ShaderUserData* user_data, i
 	{
 		return;
 	}
-	std::fprintf(stderr, "KYTY_SHADER_EUD_NULL reg=%d user_sgpr=%d eud_dw=%u direct_count=%u\n", reg, user_sgpr_num,
+	KYTY_LOG_DEBUG( "KYTY_SHADER_EUD_NULL reg=%d user_sgpr=%d eud_dw=%u direct_count=%u\n", reg, user_sgpr_num,
 	             user_data != nullptr ? user_data->eud_size_dw : 0u, user_data != nullptr ? user_data->direct_resource_count : 0u);
 }
 
@@ -3413,7 +3414,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			if (logs < 16u)
 			{
 				++logs;
-				std::fprintf(stderr,
+				KYTY_LOG_DEBUG(
 				             "SHADER_VERTEX_RESOURCE_REJECT shader=0x%016" PRIx64 " user_sgprs=%u attrib_reg=%d attrib=0x%016" PRIx64
 				             " buffer_reg=%d buffer=0x%016" PRIx64 "\n",
 				             shader_addr, user_sgpr_num, usage.vertex_attrib_reg, reinterpret_cast<uint64_t>(attrib),
@@ -4124,7 +4125,7 @@ static bool ShaderProbeMatches(const ShaderCode& code)
 	const auto parsed = std::strtoull(value, &end, 16);
 	if (end == value || *end != '\0')
 	{
-		std::fprintf(stderr, "WARNING: invalid KYTY_SHADER_PROBE_ID value: %s\n", value);
+		KYTY_LOG_WARN("WARNING: invalid KYTY_SHADER_PROBE_ID value: %s\n", value);
 		return false;
 	}
 
@@ -4158,7 +4159,7 @@ static void ShaderProbeWrite(const char* stage, const ShaderCode& code, const St
 	file.Create(file_name);
 	if (file.IsInvalid())
 	{
-		std::fprintf(stderr, "WARNING: shader probe could not create %s\n", file_name.C_Str());
+		KYTY_LOG_WARN("WARNING: shader probe could not create %s\n", file_name.C_Str());
 		return;
 	}
 
@@ -4190,7 +4191,7 @@ static void ShaderProbeWrite(const char* stage, const ShaderCode& code, const St
 	}
 
 	file.Close();
-	std::fprintf(stderr, "KYTY_SHADER_PROBE wrote %s\n", file_name.C_Str());
+	KYTY_LOG_DEBUG( "KYTY_SHADER_PROBE wrote %s\n", file_name.C_Str());
 }
 
 ShaderCode ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh)
@@ -4308,7 +4309,7 @@ Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInp
 	spirv_ok         = ShaderToolchain::Run(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
-		std::fprintf(stderr, "WARNING: vertex SpirvRun failed: %s\n", err_msg.c_str());
+		KYTY_LOG_WARN("WARNING: vertex SpirvRun failed: %s\n", err_msg.c_str());
 		return {};
 	}
 
@@ -4417,7 +4418,7 @@ Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInpu
 	spirv_ok         = ShaderToolchain::Run(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
-		std::fprintf(stderr, "WARNING: pixel SpirvRun failed: %s\n", err_msg.c_str());
+		KYTY_LOG_WARN("WARNING: pixel SpirvRun failed: %s\n", err_msg.c_str());
 		return {};
 	}
 
@@ -4513,7 +4514,7 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 	spirv_ok         = ShaderToolchain::Run(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
-		std::fprintf(stderr, "WARNING: compute SpirvRun failed: id=%016" PRIx64 " %s\n", ShaderCodeId(code), err_msg.c_str());
+		KYTY_LOG_WARN("WARNING: compute SpirvRun failed: id=%016" PRIx64 " %s\n", ShaderCodeId(code), err_msg.c_str());
 		return {};
 	}
 
