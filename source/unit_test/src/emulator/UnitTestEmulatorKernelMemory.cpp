@@ -1,6 +1,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Kernel/EventFlag.h"
+#include "Emulator/Kernel/GpuMappingLifecycle.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/SyncOnAddress.h"
@@ -88,6 +89,123 @@ TEST(EmulatorKernelMemory, GpuUnmapGateKeepsAdmissionsClosedThroughHostUnmap)
 	submitter.join();
 	EXPECT_TRUE(admission_entered.load());
 	EXPECT_FALSE(host_mapping_live);
+}
+
+namespace {
+
+struct GpuMappingLifecycleTestState
+{
+	enum class Event : uint8_t
+	{
+		Register,
+		Release,
+		Complete,
+	};
+
+	std::array<Event, 3> events {};
+	uint32_t             event_count    = 0;
+	uint64_t             register_vaddr = 0;
+	uint64_t             register_size  = 0;
+	uint64_t             release_vaddr  = 0;
+	uint64_t             release_size   = 0;
+	GpuMappingLifecyclePort* lifecycle = nullptr;
+
+	void Record(Event event)
+	{
+		ASSERT_LT(event_count, events.size());
+		events[event_count++] = event;
+	}
+
+	static void RegisterRange(void* context, uint64_t vaddr, uint64_t size)
+	{
+		auto* state            = static_cast<GpuMappingLifecycleTestState*>(context);
+		state->register_vaddr  = vaddr;
+		state->register_size   = size;
+		state->Record(Event::Register);
+	}
+
+	static bool ReleaseRange(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion, void* data)
+	{
+		auto* state           = static_cast<GpuMappingLifecycleTestState*>(context);
+		state->release_vaddr  = vaddr;
+		state->release_size   = size;
+		state->Record(Event::Release);
+		return completion(data);
+	}
+
+	static bool Complete(void* data)
+	{
+		auto* state = static_cast<GpuMappingLifecycleTestState*>(data);
+		state->Record(Event::Complete);
+		return true;
+	}
+
+	static bool ReentrantReleaseRange(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion, void* data)
+	{
+		auto* state          = static_cast<GpuMappingLifecycleTestState*>(context);
+		state->release_vaddr = vaddr;
+		state->release_size  = size;
+		state->Record(Event::Release);
+		if (!state->lifecycle->RegisterRange(vaddr + size, size))
+		{
+			return false;
+		}
+		return completion(data);
+	}
+};
+
+} // namespace
+
+// This catches a lifecycle port that bypasses the adapter, allows a partial
+// bundle, or completes the kernel unmap before the adapter has quiesced it.
+TEST(EmulatorKernelMemory, GpuMappingLifecyclePortForwardsReleaseCompletionInAdapterOrder)
+{
+	GpuMappingLifecyclePort      lifecycle;
+	GpuMappingLifecycleCallbacks partial {};
+	partial.register_range = GpuMappingLifecycleTestState::RegisterRange;
+	EXPECT_FALSE(lifecycle.Install(partial));
+	EXPECT_FALSE(lifecycle.IsInstalled());
+	EXPECT_FALSE(lifecycle.RegisterRange(0x100000u, 0x4000u));
+	EXPECT_FALSE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, nullptr));
+
+	GpuMappingLifecycleTestState state {};
+	GpuMappingLifecycleCallbacks callbacks {};
+	callbacks.context        = &state;
+	callbacks.register_range = GpuMappingLifecycleTestState::RegisterRange;
+	callbacks.release_range  = GpuMappingLifecycleTestState::ReleaseRange;
+	ASSERT_TRUE(lifecycle.Install(callbacks));
+
+	ASSERT_TRUE(lifecycle.RegisterRange(0x100000u, 0x4000u));
+	ASSERT_TRUE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, &state));
+
+	EXPECT_EQ(state.register_vaddr, 0x100000u);
+	EXPECT_EQ(state.register_size, 0x4000u);
+	EXPECT_EQ(state.release_vaddr, 0x100000u);
+	EXPECT_EQ(state.release_size, 0x4000u);
+	ASSERT_EQ(state.event_count, 3u);
+	EXPECT_EQ(state.events[0], GpuMappingLifecycleTestState::Event::Register);
+	EXPECT_EQ(state.events[1], GpuMappingLifecycleTestState::Event::Release);
+	EXPECT_EQ(state.events[2], GpuMappingLifecycleTestState::Event::Complete);
+
+	EXPECT_FALSE(lifecycle.Install(callbacks));
+}
+
+TEST(EmulatorKernelMemory, GpuMappingLifecyclePortAllowsAdapterReentrancy)
+{
+	GpuMappingLifecyclePort      lifecycle;
+	GpuMappingLifecycleTestState state {};
+	state.lifecycle = &lifecycle;
+	GpuMappingLifecycleCallbacks callbacks {};
+	callbacks.context        = &state;
+	callbacks.register_range = GpuMappingLifecycleTestState::RegisterRange;
+	callbacks.release_range  = GpuMappingLifecycleTestState::ReentrantReleaseRange;
+	ASSERT_TRUE(lifecycle.Install(callbacks));
+
+	ASSERT_TRUE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, &state));
+	ASSERT_EQ(state.event_count, 3u);
+	EXPECT_EQ(state.events[0], GpuMappingLifecycleTestState::Event::Release);
+	EXPECT_EQ(state.events[1], GpuMappingLifecycleTestState::Event::Register);
+	EXPECT_EQ(state.events[2], GpuMappingLifecycleTestState::Event::Complete);
 }
 
 TEST(EmulatorKernelMemory, CheckedReleaseReportsGuestErrors)
@@ -563,48 +681,48 @@ TEST(EmulatorKernelMemory, MprotectUpdatesTrackedProtectionSlices)
 // The pure decoder is the shipped decision path used by KernelMprotect.
 TEST(EmulatorKernelMemory, DecodesGen5MprotectProtectionFamily)
 {
-	Core::VirtualMemory::Mode     mode {};
-	Graphics::GpuMemoryMode       gpu {};
+	Core::VirtualMemory::Mode       mode {};
+	KernelGpuMappingAccessMode      gpu {};
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x0, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::NoAccess);
-	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::NoAccess);
+	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::NoAccess);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x03, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
-	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::NoAccess);
+	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::NoAccess);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x11, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::Read);
-	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::Read);
+	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::Read);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x12, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
-	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::Read);
+	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::Read);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0xC2, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
-	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::ReadWrite);
+	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::ReadWrite);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0xF3, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
-	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::ReadWrite);
+	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::ReadWrite);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x3F2, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
-	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::ReadWrite);
+	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::ReadWrite);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x3F3, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
-	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::ReadWrite);
+	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::ReadWrite);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x42, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
-	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::Read);
+	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::Read);
 
 	ASSERT_TRUE(KernelDecodeMprotectProt(0x82, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
-	EXPECT_EQ(gpu, Graphics::GpuMemoryMode::Write);
+	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::Write);
 
 	EXPECT_FALSE(KernelDecodeMprotectProt(0x99, &mode, &gpu));
 }
@@ -613,12 +731,12 @@ TEST(EmulatorKernelMemory, GpuVisibleMprotectMarksContainingMappingUntilUnmap)
 {
 	constexpr uint64_t       mapping_base = 0x100000u;
 	constexpr uint64_t       mapping_size = 0x10000u;
-	Graphics::GpuMemoryMode cleanup_mode = Graphics::GpuMemoryMode::NoAccess;
+	KernelGpuMappingAccessMode cleanup_mode = KernelGpuMappingAccessMode::NoAccess;
 
 	for (const auto requested:
-	     {Graphics::GpuMemoryMode::Read, Graphics::GpuMemoryMode::Write, Graphics::GpuMemoryMode::ReadWrite})
+	     {KernelGpuMappingAccessMode::Read, KernelGpuMappingAccessMode::Write, KernelGpuMappingAccessMode::ReadWrite})
 	{
-		auto fresh_mode = Graphics::GpuMemoryMode::NoAccess;
+		auto fresh_mode = KernelGpuMappingAccessMode::NoAccess;
 		EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base + 0x1000u, 0x1000u, requested,
 		                                      &fresh_mode),
 		          KernelGpuMappingPromotionStatus::Promoted);
@@ -626,26 +744,26 @@ TEST(EmulatorKernelMemory, GpuVisibleMprotectMarksContainingMappingUntilUnmap)
 	}
 
 	EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base + 0x2000u, 0x3000u,
-	                                      Graphics::GpuMemoryMode::Read, &cleanup_mode),
+	                                      KernelGpuMappingAccessMode::Read, &cleanup_mode),
 	          KernelGpuMappingPromotionStatus::Promoted);
-	EXPECT_EQ(cleanup_mode, Graphics::GpuMemoryMode::Read);
+	EXPECT_EQ(cleanup_mode, KernelGpuMappingAccessMode::Read);
 
 	EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base + 0x2000u, 0x3000u,
-	                                      Graphics::GpuMemoryMode::NoAccess, &cleanup_mode),
+	                                      KernelGpuMappingAccessMode::NoAccess, &cleanup_mode),
 	          KernelGpuMappingPromotionStatus::Retained);
-	EXPECT_EQ(cleanup_mode, Graphics::GpuMemoryMode::Read);
+	EXPECT_EQ(cleanup_mode, KernelGpuMappingAccessMode::Read);
 
 	EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base + 0xf000u, 0x2000u,
-	                                      Graphics::GpuMemoryMode::Write, &cleanup_mode),
+	                                      KernelGpuMappingAccessMode::Write, &cleanup_mode),
 	          KernelGpuMappingPromotionStatus::NotContained);
-	EXPECT_EQ(cleanup_mode, Graphics::GpuMemoryMode::Read);
+	EXPECT_EQ(cleanup_mode, KernelGpuMappingAccessMode::Read);
 	EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base - 1u, 1u,
-	                                      Graphics::GpuMemoryMode::Write, &cleanup_mode),
+	                                      KernelGpuMappingAccessMode::Write, &cleanup_mode),
 	          KernelGpuMappingPromotionStatus::NotContained);
-	EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base, 0u, Graphics::GpuMemoryMode::Write,
+	EXPECT_EQ(KernelPromoteGpuMappingRange(mapping_base, mapping_size, mapping_base, 0u, KernelGpuMappingAccessMode::Write,
 	                                      &cleanup_mode),
 	          KernelGpuMappingPromotionStatus::InvalidArgument);
-	EXPECT_EQ(KernelPromoteGpuMappingRange(UINT64_MAX - 3u, 8u, mapping_base, 4u, Graphics::GpuMemoryMode::Write,
+	EXPECT_EQ(KernelPromoteGpuMappingRange(UINT64_MAX - 3u, 8u, mapping_base, 4u, KernelGpuMappingAccessMode::Write,
 	                                      &cleanup_mode),
 	          KernelGpuMappingPromotionStatus::InvalidArgument);
 

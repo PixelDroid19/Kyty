@@ -8,10 +8,6 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
-#include "Emulator/Graphics/GraphicsRun.h"
-#include "Emulator/Graphics/Objects/GpuMemory.h"
-#include "Emulator/Graphics/VideoOut.h"
-#include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -112,8 +108,8 @@ static bool apply_protection_blocks(std::vector<MemoryProtectionBlock>* blocks, 
 }
 
 KernelGpuMappingPromotionStatus KernelPromoteGpuMappingRange(uint64_t mapping_addr, uint64_t mapping_size, uint64_t protected_addr,
-                                                             uint64_t protected_size, Graphics::GpuMemoryMode requested_mode,
-                                                             Graphics::GpuMemoryMode* cleanup_mode)
+                                                             uint64_t protected_size, KernelGpuMappingAccessMode requested_mode,
+                                                             KernelGpuMappingAccessMode* cleanup_mode)
 {
 	if (cleanup_mode == nullptr || !is_representable_range(mapping_addr, mapping_size) ||
 	    !is_representable_range(protected_addr, protected_size))
@@ -124,7 +120,7 @@ KernelGpuMappingPromotionStatus KernelPromoteGpuMappingRange(uint64_t mapping_ad
 	{
 		return KernelGpuMappingPromotionStatus::NotContained;
 	}
-	if (requested_mode != Graphics::GpuMemoryMode::NoAccess && *cleanup_mode == Graphics::GpuMemoryMode::NoAccess)
+	if (requested_mode != KernelGpuMappingAccessMode::NoAccess && *cleanup_mode == KernelGpuMappingAccessMode::NoAccess)
 	{
 		*cleanup_mode = requested_mode;
 		return KernelGpuMappingPromotionStatus::Promoted;
@@ -152,7 +148,7 @@ public:
 		int                 memory_type;
 		// Monotonic lifetime marker consumed by ClaimUnmap. It records that
 		// cleanup is required, not the mapping's latest protection.
-		Graphics::GpuMemoryMode gpu_cleanup_mode;
+		KernelGpuMappingAccessMode gpu_cleanup_mode;
 		bool                    unmap_pending     = false;
 		bool                    physical_released = false;
 	};
@@ -189,14 +185,14 @@ public:
 	bool     Release(uint64_t start, size_t len);
 	bool     FindMappingsForPhysicalRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings);
 	bool     CanReplaceReleasedMapping(uint64_t vaddr, uint64_t size, uint64_t new_phys_addr, uint64_t new_phys_size);
-	uint64_t Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode,
+	uint64_t Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, KernelGpuMappingAccessMode gpu_mode,
 	             uint64_t alignment, bool fixed, bool replace_owned_reservation, bool* physical_range_valid);
-	bool     ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
+	bool     ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
 	bool     CompleteUnmap(uint64_t vaddr, uint64_t size);
 	bool     ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode);
-	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode, uint64_t* mapping_addr,
+	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode, uint64_t* mapping_addr,
 	                                                uint64_t* mapping_size);
-	bool     Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode,
+	bool     Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, KernelGpuMappingAccessMode* gpu_mode,
 	              uint64_t* phys_addr = nullptr, int* memory_type = nullptr);
 	bool     Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
 	uint64_t TotalAllocatedBytes();
@@ -226,7 +222,7 @@ public:
 		uint64_t                map_size;
 		int                     prot;
 		VirtualMemory::Mode     mode;
-		Graphics::GpuMemoryMode gpu_cleanup_mode;
+		KernelGpuMappingAccessMode gpu_cleanup_mode;
 		bool                    unmap_pending = false;
 	};
 
@@ -244,13 +240,13 @@ public:
 	static uint64_t Size() { return static_cast<uint64_t>(448) * 1024 * 1024; }
 	uint64_t        Available();
 
-	bool                            Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode);
-	bool                            ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode);
+	bool                            Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mode mode, KernelGpuMappingAccessMode gpu_mode);
+	bool                            ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
 	bool                            CompleteUnmap(uint64_t vaddr, uint64_t size);
 	bool                            ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode);
-	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode, uint64_t* mapping_addr,
+	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode, uint64_t* mapping_addr,
 	                                                uint64_t* mapping_size);
-	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode);
+	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, KernelGpuMappingAccessMode* gpu_mode);
 
 	[[nodiscard]] Core::Mutex&                  GetMutex() { return m_mutex; }
 	[[nodiscard]] const Vector<AllocatedBlock>& GetBlocks() const { return m_allocated; }
@@ -765,7 +761,7 @@ bool PhysicalMemory::FindLargestAvailableSpan(uint64_t search_start, uint64_t se
 }
 
 uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode,
-                             Graphics::GpuMemoryMode gpu_mode, uint64_t alignment, bool fixed, bool replace_owned_reservation,
+                             KernelGpuMappingAccessMode gpu_mode, uint64_t alignment, bool fixed, bool replace_owned_reservation,
                              bool* physical_range_valid)
 {
 	EXIT_IF(physical_range_valid == nullptr);
@@ -825,7 +821,7 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 	return map_vaddr;
 }
 
-bool PhysicalMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode)
+bool PhysicalMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode)
 {
 	EXIT_IF(gpu_mode == nullptr);
 
@@ -844,7 +840,7 @@ bool PhysicalMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemo
 	return false;
 }
 
-KernelGpuMappingPromotionStatus PhysicalMemory::PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode,
+KernelGpuMappingPromotionStatus PhysicalMemory::PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode,
                                                                 uint64_t* mapping_addr, uint64_t* mapping_size)
 {
 	if (mapping_addr == nullptr || mapping_size == nullptr || !is_representable_range(vaddr, size))
@@ -969,7 +965,7 @@ bool PhysicalMemory::Find(uint64_t phys_addr, bool next, AllocatedBlock* out)
 }
 
 bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode,
-                          Graphics::GpuMemoryMode* gpu_mode, uint64_t* phys_addr, int* memory_type)
+                          KernelGpuMappingAccessMode* gpu_mode, uint64_t* phys_addr, int* memory_type)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -1017,7 +1013,7 @@ bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 	                   });
 }
 
-bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mode mode, Graphics::GpuMemoryMode gpu_mode)
+bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mode mode, KernelGpuMappingAccessMode gpu_mode)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -1035,7 +1031,7 @@ bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mo
 	return true;
 }
 
-bool FlexibleMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode* gpu_mode)
+bool FlexibleMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode)
 {
 	EXIT_IF(gpu_mode == nullptr);
 
@@ -1054,7 +1050,7 @@ bool FlexibleMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, Graphics::GpuMemo
 	return false;
 }
 
-KernelGpuMappingPromotionStatus FlexibleMemory::PromoteGpuRange(uint64_t vaddr, uint64_t size, Graphics::GpuMemoryMode gpu_mode,
+KernelGpuMappingPromotionStatus FlexibleMemory::PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode,
                                                                 uint64_t* mapping_addr, uint64_t* mapping_size)
 {
 	if (mapping_addr == nullptr || mapping_size == nullptr || !is_representable_range(vaddr, size))
@@ -1122,7 +1118,7 @@ bool FlexibleMemory::ApplyProtection(uint64_t vaddr, uint64_t size, int prot, Vi
 }
 
 bool FlexibleMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode,
-                          Graphics::GpuMemoryMode* gpu_mode)
+                          KernelGpuMappingAccessMode* gpu_mode)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -1189,8 +1185,8 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 		return KERNEL_ERROR_ENOMEM;
 	}
 
-	VirtualMemory::Mode     mode     = VirtualMemory::Mode::NoAccess;
-	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+	VirtualMemory::Mode          mode     = VirtualMemory::Mode::NoAccess;
+	KernelGpuMappingAccessMode gpu_mode = KernelGpuMappingAccessMode::NoAccess;
 
 	if (!KernelDecodeMprotectProt(prot, &mode, &gpu_mode))
 	{
@@ -1204,6 +1200,10 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	    (fixed && (in_addr == 0 || page_size == 0 || (in_addr & (page_size - 1)) != 0)))
 	{
 		return KERNEL_ERROR_EINVAL;
+	}
+	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess && !GetGpuMappingLifecyclePort().IsInstalled())
+	{
+		return KERNEL_ERROR_EBUSY;
 	}
 	const auto start_us =
 	    trace_flex ? std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() : 0;
@@ -1270,14 +1270,14 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	printf("\t name     = %s\n", name != nullptr ? name : "");
 	printf("\t gpu_mode = %s\n", Core::EnumName(gpu_mode).C_Str());
 
-	if (gpu_mode != Graphics::GpuMemoryMode::NoAccess)
+	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess)
 	{
 		if (trace_flex)
 		{
-			printf("[FlexMap] calling GpuMemorySetAllocatedRange addr=0x%016" PRIx64 " size=%" PRIu64 "\n", out_addr,
+			printf("[FlexMap] registering GPU mapping range addr=0x%016" PRIx64 " size=%" PRIu64 "\n", out_addr,
 			       static_cast<uint64_t>(len));
 		}
-		Graphics::GpuMemorySetAllocatedRange(out_addr, len);
+		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len));
 	}
 
 	if (g_alloc_callback != nullptr)
@@ -1391,10 +1391,10 @@ enum class PendingUnmapOwner : uint8_t
 
 struct PendingUnmap
 {
-	PendingUnmapOwner       owner    = PendingUnmapOwner::Physical;
-	uint64_t                vaddr    = 0;
-	uint64_t                size     = 0;
-	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+	PendingUnmapOwner          owner    = PendingUnmapOwner::Physical;
+	uint64_t                   vaddr    = 0;
+	uint64_t                   size     = 0;
+	KernelGpuMappingAccessMode gpu_mode = KernelGpuMappingAccessMode::NoAccess;
 };
 
 static bool complete_mapping_unmap(const PendingUnmap& pending)
@@ -1408,23 +1408,11 @@ static bool complete_mapping_unmap(const PendingUnmap& pending)
 	return false;
 }
 
-static bool complete_gpu_mapping_unmap(void* data)
+static bool complete_pending_mapping_unmap(void* data)
 {
 	EXIT_IF(data == nullptr);
 
-	// GraphicsRun owns the GPU admission gate and has already drained every
-	// guest queue. VideoOut closes host-buffer admission and drains accepted
-	// presentation work before the mapping is detached and released.
-	return VideoOut::VideoOutRunBufferUnmapTransaction(
-	    static_cast<const PendingUnmap*>(data)->vaddr, static_cast<const PendingUnmap*>(data)->size,
-	    [](void* action_data)
-	    {
-		    EXIT_IF(action_data == nullptr);
-		    const auto& pending = *static_cast<const PendingUnmap*>(action_data);
-		    Graphics::GpuMemoryFreeMappedRangeQuiesced(Graphics::WindowGetGraphicContext(), pending.vaddr, pending.size);
-		    return complete_mapping_unmap(pending);
-	    },
-	    data);
+	return complete_mapping_unmap(*static_cast<const PendingUnmap*>(data));
 }
 
 int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
@@ -1459,9 +1447,9 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 	bool result = false;
 	if (mapping_claimed)
 	{
-		result = pending.gpu_mode == Graphics::GpuMemoryMode::NoAccess
+		result = pending.gpu_mode == KernelGpuMappingAccessMode::NoAccess
 		             ? complete_mapping_unmap(pending)
-		             : Graphics::GraphicsRunWithQuiescedSubmissions(complete_gpu_mapping_unmap, &pending);
+		             : GetGpuMappingLifecyclePort().ReleaseRange(pending.vaddr, pending.size, complete_pending_mapping_unmap, &pending);
 	} else if (g_reserved_memory != nullptr)
 	{
 		// Reserved NoAccess ranges never enter the GPU lifetime graph.
@@ -1674,8 +1662,8 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 	bool fixed = (flags & 0x10) != 0;
 	printf("\t flags        = 0x%x (fixed=%d)\n", flags, fixed ? 1 : 0);
 
-	VirtualMemory::Mode     mode     = VirtualMemory::Mode::NoAccess;
-	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+	VirtualMemory::Mode          mode     = VirtualMemory::Mode::NoAccess;
+	KernelGpuMappingAccessMode gpu_mode = KernelGpuMappingAccessMode::NoAccess;
 
 	if (!KernelDecodeMprotectProt(prot, &mode, &gpu_mode))
 	{
@@ -1690,6 +1678,10 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		{
 			return KERNEL_ERROR_EINVAL;
 		}
+	}
+	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess && !GetGpuMappingLifecyclePort().IsInstalled())
+	{
+		return KERNEL_ERROR_EBUSY;
 	}
 
 	if (fixed && g_physical_memory->CanReplaceReleasedMapping(in_addr, len, static_cast<uint64_t>(direct_memory_start), len))
@@ -1762,9 +1754,9 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		return fixed ? KERNEL_ERROR_EBUSY : KERNEL_ERROR_ENOMEM;
 	}
 
-	if (gpu_mode != Graphics::GpuMemoryMode::NoAccess)
+	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess)
 	{
-		Graphics::GpuMemorySetAllocatedRange(out_addr, len);
+		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len));
 	}
 
 	if (g_alloc_callback != nullptr)
@@ -1866,10 +1858,10 @@ bool KernelQueryMappedRange(uint64_t vaddr, uint64_t size, KernelMappedRange* ou
 	}
 
 	*out = {};
-	uint64_t            base = 0;
-	size_t              mapped_size = 0;
-	int                 protection = 0;
-	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+	uint64_t                   base        = 0;
+	size_t                     mapped_size = 0;
+	int                        protection  = 0;
+	KernelGpuMappingAccessMode gpu_mode     = KernelGpuMappingAccessMode::NoAccess;
 	if (g_physical_memory->Find(vaddr, &base, &mapped_size, &protection, nullptr, &gpu_mode))
 	{
 		if (vaddr - base > mapped_size || size > mapped_size - (vaddr - base))
@@ -2162,7 +2154,7 @@ int KYTY_SYSV_ABI KernelIsStack(const void* addr, void** start, void** end)
 	return OK;
 }
 
-bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode)
+bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, KernelGpuMappingAccessMode* gpu_mode)
 {
 	EXIT_IF(mode == nullptr || gpu_mode == nullptr);
 
@@ -2172,45 +2164,45 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 	{
 		case 0x0:
 			*mode     = VirtualMemory::Mode::NoAccess;
-			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			*gpu_mode = KernelGpuMappingAccessMode::NoAccess;
 			return true;
 		case 0x1:
 			*mode     = VirtualMemory::Mode::Read;
-			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			*gpu_mode = KernelGpuMappingAccessMode::NoAccess;
 			return true;
 		case 0x2:
 		case 0x3:
 			*mode     = VirtualMemory::Mode::ReadWrite;
-			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			*gpu_mode = KernelGpuMappingAccessMode::NoAccess;
 			return true;
 		case 0x4:
 			*mode     = VirtualMemory::Mode::Execute;
-			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			*gpu_mode = KernelGpuMappingAccessMode::NoAccess;
 			return true;
 		case 0x5:
 			*mode     = VirtualMemory::Mode::ExecuteRead;
-			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			*gpu_mode = KernelGpuMappingAccessMode::NoAccess;
 			return true;
 		case 0x6:
 		case 0x7:
 			*mode     = VirtualMemory::Mode::ExecuteReadWrite;
-			*gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+			*gpu_mode = KernelGpuMappingAccessMode::NoAccess;
 			return true;
 		case 0x11:
 			*mode     = VirtualMemory::Mode::Read;
-			*gpu_mode = Graphics::GpuMemoryMode::Read;
+			*gpu_mode = KernelGpuMappingAccessMode::Read;
 			return true;
 		case 0x12:
 			*mode     = VirtualMemory::Mode::ReadWrite;
-			*gpu_mode = Graphics::GpuMemoryMode::Read;
+			*gpu_mode = KernelGpuMappingAccessMode::Read;
 			return true;
 		case 0x42:
 			*mode     = VirtualMemory::Mode::ReadWrite;
-			*gpu_mode = Graphics::GpuMemoryMode::Read;
+			*gpu_mode = KernelGpuMappingAccessMode::Read;
 			return true;
 		case 0x82:
 			*mode     = VirtualMemory::Mode::ReadWrite;
-			*gpu_mode = Graphics::GpuMemoryMode::Write;
+			*gpu_mode = KernelGpuMappingAccessMode::Write;
 			return true;
 		case 0xC2:
 		case 0x32:
@@ -2220,7 +2212,7 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphic
 		case 0x3F2:
 		case 0x3F3:
 			*mode     = VirtualMemory::Mode::ReadWrite;
-			*gpu_mode = Graphics::GpuMemoryMode::ReadWrite;
+			*gpu_mode = KernelGpuMappingAccessMode::ReadWrite;
 			return true;
 		default: return false;
 	}
@@ -2236,8 +2228,8 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 	printf("\t len  = 0x%016" PRIx64 "\n", static_cast<uint64_t>(len));
 	printf("\t prot = 0x%x\n", prot);
 
-	VirtualMemory::Mode     mode     = VirtualMemory::Mode::NoAccess;
-	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+	VirtualMemory::Mode          mode     = VirtualMemory::Mode::NoAccess;
+	KernelGpuMappingAccessMode gpu_mode = KernelGpuMappingAccessMode::NoAccess;
 
 	if (!KernelDecodeMprotectProt(prot, &mode, &gpu_mode))
 	{
@@ -2257,6 +2249,10 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 	}
 	const uint64_t aligned_end = (range_end + kGuestPage - 1) & ~(kGuestPage - 1);
 	const uint64_t aligned_len = aligned_end - aligned_vaddr;
+	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess && !GetGpuMappingLifecyclePort().IsInstalled())
+	{
+		return KERNEL_ERROR_EBUSY;
+	}
 
 	VirtualMemory::Mode old_mode {};
 	const bool          ok = VirtualMemory::Protect(aligned_vaddr, aligned_len, mode, &old_mode);
@@ -2270,7 +2266,7 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 		(void)g_flexible_memory->ApplyProtection(aligned_vaddr, aligned_len, prot, mode);
 	}
 
-	if (gpu_mode != Graphics::GpuMemoryMode::NoAccess)
+	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess)
 	{
 		uint64_t mapping_addr = 0;
 		uint64_t mapping_size = 0;
@@ -2286,12 +2282,12 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 		}
 		if (registration_action == KernelGpuMappingRegistrationAction::RegisterOwnerMapping)
 		{
-			Graphics::GpuMemorySetAllocatedRange(mapping_addr, mapping_size);
+			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(mapping_addr, mapping_size));
 		} else if (registration_action == KernelGpuMappingRegistrationAction::RegisterProtectedRange)
 		{
 			// Preserve the pre-lifecycle behavior for valid external regions
 			// that are not owned by PhysicalMemory or FlexibleMemory.
-			Graphics::GpuMemorySetAllocatedRange(aligned_vaddr, aligned_len);
+			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(aligned_vaddr, aligned_len));
 		}
 	}
 

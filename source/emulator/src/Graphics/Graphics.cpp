@@ -21,6 +21,7 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/GpuMappingLifecycle.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
@@ -37,6 +38,54 @@
 
 namespace Kyty::Libs::Graphics {
 
+namespace {
+
+struct GpuMappingReleaseTransaction
+{
+	uint64_t                         vaddr           = 0;
+	uint64_t                         size            = 0;
+	LibKernel::Memory::KernelGpuMappingCompletion completion = nullptr;
+	void*                            completion_data = nullptr;
+};
+
+void GraphicsRegisterGpuMappingRange(void* context, uint64_t vaddr, uint64_t size)
+{
+	(void)context;
+	GpuMemorySetAllocatedRange(vaddr, size);
+}
+
+bool GraphicsCompleteGpuMappingRelease(void* data)
+{
+	EXIT_IF(data == nullptr);
+
+	auto* transaction = static_cast<GpuMappingReleaseTransaction*>(data);
+	return VideoOut::VideoOutRunBufferUnmapTransaction(
+	    transaction->vaddr, transaction->size,
+	    [](void* action_data)
+	    {
+		    EXIT_IF(action_data == nullptr);
+		    auto* transaction = static_cast<GpuMappingReleaseTransaction*>(action_data);
+		    GpuMemoryFreeMappedRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
+		    return transaction->completion(transaction->completion_data);
+	    },
+	    transaction);
+}
+
+bool GraphicsReleaseGpuMappingRange(void* context, uint64_t vaddr, uint64_t size,
+	                                LibKernel::Memory::KernelGpuMappingCompletion completion, void* completion_data)
+{
+	(void)context;
+	if (vaddr == 0 || size == 0 || vaddr > std::numeric_limits<uint64_t>::max() - size || completion == nullptr)
+	{
+		return false;
+	}
+
+	GpuMappingReleaseTransaction transaction {vaddr, size, completion, completion_data};
+	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingRelease, &transaction);
+}
+
+} // namespace
+
 KYTY_SUBSYSTEM_INIT(Graphics)
 {
 	auto width  = Config::GetScreenWidth();
@@ -52,6 +101,12 @@ KYTY_SUBSYSTEM_INIT(Graphics)
 	GraphicsRenderInit();
 	GraphicsRunInit();
 	GpuMemoryInit();
+	const LibKernel::Memory::GpuMappingLifecycleCallbacks gpu_mapping_lifecycle_callbacks {
+	    nullptr,
+	    GraphicsRegisterGpuMappingRange,
+	    GraphicsReleaseGpuMappingRange,
+	};
+	EXIT_IF(!LibKernel::Memory::GetGpuMappingLifecyclePort().Install(gpu_mapping_lifecycle_callbacks));
 	const Kyty::Emulator::VideoFrameMemory::Callbacks video_frame_memory_callbacks {
 	    GuestTextureLayoutRegisterLinear,
 	    GuestTextureLayoutUnregister,

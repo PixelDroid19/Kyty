@@ -3,6 +3,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Kernel/GpuMappingLifecycle.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -110,6 +111,74 @@ int ReserveVirtualRangeContract()
 	return 0;
 }
 
+struct GpuMappingPortProbe
+{
+	uint64_t register_vaddr = 0;
+	uint64_t register_size  = 0;
+	uint64_t release_vaddr  = 0;
+	uint64_t release_size   = 0;
+	uint32_t register_count = 0;
+	uint32_t release_count  = 0;
+
+	static void RegisterRange(void* context, uint64_t vaddr, uint64_t size)
+	{
+		auto* probe            = static_cast<GpuMappingPortProbe*>(context);
+		probe->register_vaddr  = vaddr;
+		probe->register_size   = size;
+		probe->register_count += 1;
+	}
+
+	static bool ReleaseRange(void* context, uint64_t vaddr, uint64_t size,
+	                         Libs::LibKernel::Memory::KernelGpuMappingCompletion completion, void* completion_data)
+	{
+		auto* probe           = static_cast<GpuMappingPortProbe*>(context);
+		probe->release_vaddr  = vaddr;
+		probe->release_size   = size;
+		probe->release_count += 1;
+		return completion(completion_data);
+	}
+};
+
+int GpuMappingLifecycleContract()
+{
+	using namespace Libs::LibKernel::Memory;
+
+	constexpr size_t kSize = 0x4000;
+	auto&            port  = GetGpuMappingLifecyclePort();
+
+	size_t available_before = 0;
+	Expect(KernelAvailableFlexibleMemorySize(&available_before) == 0, "must query flexible availability before GPU map");
+	void* missing_port_mapping = nullptr;
+	Expect(KernelMapNamedFlexibleMemory(&missing_port_mapping, kSize, 0x11, 0, "gpu-port-missing") ==
+	           Libs::LibKernel::KERNEL_ERROR_EBUSY,
+	       "GPU-visible map must reject an uninstalled lifecycle port before allocation");
+	Expect(missing_port_mapping == nullptr, "rejected GPU-visible map must not publish a mapping");
+	size_t available_after = 0;
+	Expect(KernelAvailableFlexibleMemorySize(&available_after) == 0, "must query flexible availability after rejected GPU map");
+	Expect(available_after == available_before, "rejected GPU-visible map must not consume flexible memory");
+
+	GpuMappingPortProbe          probe {};
+	GpuMappingLifecycleCallbacks callbacks {};
+	callbacks.context        = &probe;
+	callbacks.register_range = GpuMappingPortProbe::RegisterRange;
+	callbacks.release_range  = GpuMappingPortProbe::ReleaseRange;
+	Expect(port.Install(callbacks), "complete GPU mapping lifecycle port must install");
+
+	void* mapping = nullptr;
+	Expect(KernelMapNamedFlexibleMemory(&mapping, kSize, 0x11, 0, "gpu-port-fake") == 0,
+	       "GPU-visible map must succeed with a complete lifecycle port");
+	Expect(mapping != nullptr, "GPU-visible map must publish an address");
+	Expect(probe.register_count == 1, "GPU-visible map must register exactly once through the lifecycle port");
+	Expect(probe.register_vaddr == reinterpret_cast<uint64_t>(mapping) && probe.register_size == kSize,
+	       "GPU-visible map must register its exact range");
+	Expect(KernelMunmap(reinterpret_cast<uint64_t>(mapping), kSize) == 0,
+	       "GPU-visible map must release through the installed lifecycle port");
+	Expect(probe.release_count == 1, "GPU-visible unmap must release exactly once through the lifecycle port");
+	Expect(probe.release_vaddr == reinterpret_cast<uint64_t>(mapping) && probe.release_size == kSize,
+	       "GPU-visible unmap must release its exact range");
+	return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -119,5 +188,10 @@ int main(int argc, char** argv)
 	{
 		return init_rc;
 	}
-	return ReserveVirtualRangeContract();
+	const int reserve_rc = ReserveVirtualRangeContract();
+	if (reserve_rc != 0)
+	{
+		return reserve_rc;
+	}
+	return GpuMappingLifecycleContract();
 }

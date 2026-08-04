@@ -6,7 +6,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Common.h"
-#include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Kernel/GpuMappingLifecycle.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -19,8 +19,8 @@ using callback_func_t = void (*)(uintptr_t addr, size_t size);
 void RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func);
 
 // Decode Orbis/PS5 mprotect/mmap protection bits into host VirtualMemory mode
-// and GpuMemoryMode. Returns false for unsupported prot values.
-bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, Graphics::GpuMemoryMode* gpu_mode);
+// and KernelGpuMappingAccessMode. Returns false for unsupported prot values.
+bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, KernelGpuMappingAccessMode* gpu_mode);
 
 enum class KernelGpuMappingPromotionStatus : uint8_t
 {
@@ -54,7 +54,7 @@ struct KernelMappedRange
 	uint64_t                base     = 0;
 	uint64_t                size     = 0;
 	int                     protection = 0;
-	Graphics::GpuMemoryMode gpu_mode = Graphics::GpuMemoryMode::NoAccess;
+	KernelGpuMappingAccessMode gpu_mode = KernelGpuMappingAccessMode::NoAccess;
 };
 
 constexpr KernelGpuMappingRegistrationAction KernelGpuMappingRegistrationActionFor(KernelGpuMappingPromotionStatus status)
@@ -74,7 +74,7 @@ constexpr KernelGpuMappingRegistrationAction KernelGpuMappingRegistrationActionF
 // NoAccess protection changes never demote this lifetime obligation.
 [[nodiscard]] KernelGpuMappingPromotionStatus KernelPromoteGpuMappingRange(
     uint64_t mapping_addr, uint64_t mapping_size, uint64_t protected_addr, uint64_t protected_size,
-    Graphics::GpuMemoryMode requested_mode, Graphics::GpuMemoryMode* cleanup_mode);
+    KernelGpuMappingAccessMode requested_mode, KernelGpuMappingAccessMode* cleanup_mode);
 
 int KYTY_SYSV_ABI    KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags, const char* name);
 int KYTY_SYSV_ABI    KernelMapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags);
