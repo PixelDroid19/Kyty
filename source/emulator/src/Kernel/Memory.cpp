@@ -22,9 +22,15 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::Memory {
+namespace Kyty::Kernel::Memory {
 
 namespace VirtualMemory = Core::VirtualMemory;
+namespace LibKernel    = ::Kyty::Libs::LibKernel;
+
+// Errno values and the pthread stack query are still exported by the
+// guest-facing registration namespace. Keep the bridge explicit while this
+// implementation is moved into Kernel.
+using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 
@@ -2296,6 +2302,6 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 	return OK;
 }
 
-} // namespace Kyty::Libs::LibKernel::Memory
+} // namespace Kyty::Kernel::Memory
 
 #endif // KYTY_EMU_ENABLED

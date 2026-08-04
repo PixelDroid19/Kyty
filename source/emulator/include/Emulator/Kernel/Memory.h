@@ -10,7 +10,7 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::Memory {
+namespace Kyty::Kernel::Memory {
 
 KYTY_SUBSYSTEM_DEFINE(Memory);
 
@@ -134,7 +134,7 @@ static_assert(sizeof(VirtualQueryInfo) == 72, "VirtualQueryInfo size");
 int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size);
 int KYTY_SYSV_ABI KernelIsStack(const void* addr, void** start, void** end);
 
-} // namespace Kyty::Libs::LibKernel::Memory
+} // namespace Kyty::Kernel::Memory
 
 #endif // KYTY_EMU_ENABLED
 

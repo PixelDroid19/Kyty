@@ -4,7 +4,7 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::Memory {
+namespace Kyty::Kernel::Memory {
 
 namespace {
 
@@ -83,6 +83,6 @@ GpuMappingLifecyclePort& GetGpuMappingLifecyclePort()
 	return port;
 }
 
-} // namespace Kyty::Libs::LibKernel::Memory
+} // namespace Kyty::Kernel::Memory
 
 #endif // KYTY_EMU_ENABLED

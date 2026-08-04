@@ -4,13 +4,14 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/Namespace.h"
 
 #include <cstdint>
 #include <mutex>
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::Memory {
+namespace Kyty::Kernel::Memory {
 
 // Kernel-owned mapping access state. Graphics translates the lifecycle events
 // rather than exposing its internal GpuMemoryMode through Kernel memory APIs.
@@ -55,7 +56,7 @@ private:
 
 GpuMappingLifecyclePort& GetGpuMappingLifecyclePort();
 
-} // namespace Kyty::Libs::LibKernel::Memory
+} // namespace Kyty::Kernel::Memory
 
 #endif // KYTY_EMU_ENABLED
 
