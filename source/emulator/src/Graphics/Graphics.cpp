@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/RenderResolutionCoordinator.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/GuestTextureLayout.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Pm4.h"
@@ -24,6 +25,7 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/VideoFrameMemory.h"
 
 #include <algorithm>
 #include <atomic>
@@ -50,6 +52,14 @@ KYTY_SUBSYSTEM_INIT(Graphics)
 	GraphicsRenderInit();
 	GraphicsRunInit();
 	GpuMemoryInit();
+	const Kyty::Emulator::VideoFrameMemory::Callbacks video_frame_memory_callbacks {
+	    GuestTextureLayoutRegisterLinear,
+	    GuestTextureLayoutUnregister,
+	    [](uint64_t base, uint64_t size) { (void)GpuMemoryNotifyHostWrite(base, size); }};
+	EXIT_IF(!Kyty::Emulator::VideoFrameMemory::InstallCallbacks(video_frame_memory_callbacks));
+	// These adapters are process-lifetime functions. Keep them installed so
+	// Audio can unregister frames during teardown without depending on a
+	// graphics-shutdown ordering edge.
 	LabelInit();
 	TileInit();
 	IndexBufferInit();

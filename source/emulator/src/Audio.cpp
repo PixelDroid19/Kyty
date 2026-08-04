@@ -1,6 +1,7 @@
 #include "Emulator/Audio.h"
 #include "Emulator/AudioHost.h"
 #include "Emulator/AudioVideoBackend.h"
+#include "Emulator/VideoFrameMemory.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -8,8 +9,6 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 
-#include "Emulator/Graphics/GuestTextureLayout.h"
-#include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
@@ -32,6 +31,8 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Audio {
+
+namespace VideoFrameMemory = Kyty::Emulator::VideoFrameMemory;
 
 static std::shared_ptr<HostAudio> g_host_audio;
 
@@ -2169,12 +2170,12 @@ static void avplayer_dump_lifetime(const char* event, const AvPlayerInternal* pl
 
 static void register_video_frame(uint8_t* frame, size_t bytes, uint32_t pitch)
 {
-	Graphics::GuestTextureLayoutRegisterLinear(reinterpret_cast<uint64_t>(frame), bytes, pitch);
+	VideoFrameMemory::RegisterLinearFrame(reinterpret_cast<uint64_t>(frame), bytes, pitch);
 }
 
 static void unregister_video_frame(uint8_t* frame)
 {
-	Graphics::GuestTextureLayoutUnregister(reinterpret_cast<uint64_t>(frame));
+	VideoFrameMemory::UnregisterFrame(reinterpret_cast<uint64_t>(frame));
 }
 
 static void release_video_frames(const AvPlayerMemAllocator& mem, std::vector<AvPlayerInternal::VideoFrameBuffer>& frames)
@@ -2565,7 +2566,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		{
 			return false;
 		}
-		Graphics::GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(frame), decoded.data.size());
+		VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(frame), decoded.data.size());
 		std::memcpy(frame, decoded.data.data(), decoded.data.size());
 		timestamp = decoded.timestamp_ms;
 		Core::LockGuard lock(r->mutex);
@@ -2592,7 +2593,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 			level = 1.0f - (1.0f - pos * (1.0f / 0.5f)) * (1.0f - pos * (1.0f / 0.5f));
 		}
 
-		Graphics::GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(frame), frame_bytes);
+		VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(frame), frame_bytes);
 		draw_synthetic_frame(width, height, frame, level * 0.7f);
 		Core::LockGuard lock(r->mutex);
 		r->synthetic_obtained_num++;

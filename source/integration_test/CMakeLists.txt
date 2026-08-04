@@ -488,6 +488,30 @@ set_tests_properties(KytyAudioHostIntegration.PacingAndLifecycle PROPERTIES
 	TIMEOUT 30
 )
 
+add_executable(kyty_audio_video_memory_integration
+	src/AudioVideoMemoryIntegration.cpp
+)
+
+target_link_libraries(kyty_audio_video_memory_integration
+	PRIVATE
+		emulator
+)
+
+target_include_directories(kyty_audio_video_memory_integration
+	PRIVATE
+		"${CMAKE_SOURCE_DIR}/include"
+		"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+
+add_test(
+	NAME KytyAudioVideoMemoryIntegration.CallbackContract
+	COMMAND $<TARGET_FILE:kyty_audio_video_memory_integration>
+)
+set_tests_properties(KytyAudioVideoMemoryIntegration.CallbackContract PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 15
+)
+
 add_executable(kyty_host_platform_integration
 	src/HostPlatformIntegration.cpp
 )
@@ -608,6 +632,7 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_agent_transport_integration
 	kyty_audio_pcm_integration
 	kyty_audio_host_integration
+	kyty_audio_video_memory_integration
 	kyty_host_platform_integration
 	kyty_architecture_boundary_integration
 	kyty_architecture_boundary_test_launcher

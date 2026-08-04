@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Check the small, explicit emulator dependency-direction contract.
-
-The normal policy carries two accepted Audio.cpp baseline edges temporarily.
-Use --strict to audit those edges as ordinary violations before the owning
-Audio/Graphics seam is extracted.
-"""
+"""Check the small, explicit emulator dependency-direction contract."""
 
 from __future__ import annotations
 
@@ -45,17 +40,6 @@ SOURCE_DEVTOOLS_INCLUDE_PREFIXES = (
     "emulator/include/Emulator/DevTools/",
     "devtools/include/Kyty/DevTools/",
     "lib/DevTools/include/Kyty/DevTools/",
-)
-
-# These are the only two accepted baseline directives from e5459171/250383af.
-# Source path, physical line, and raw directive spelling must all match;
-# canonical aliases and formatting variants remain violations. --strict makes
-# both visible for the future extraction that removes them.
-GRANDFATHERED_AUDIO_GRAPHICS_DIRECTIVES = frozenset(
-    {
-        ("emulator/src/Audio.cpp", 11, '#include "Emulator/Graphics/GuestTextureLayout.h"'),
-        ("emulator/src/Audio.cpp", 12, '#include "Emulator/Graphics/Objects/GpuMemory.h"'),
-    }
 )
 
 @dataclass(frozen=True)
@@ -442,12 +426,6 @@ def check_source_root(source_root: Path, strict: bool = False) -> CheckResult:
             rule = _rule_for_include(relative_path, include_path)
             if rule is None:
                 continue
-            if not strict and (
-                relative_path,
-                directive.line_number,
-                directive.raw_physical_line,
-            ) in GRANDFATHERED_AUDIO_GRAPHICS_DIRECTIVES and not directive.source_has_utf8_bom:
-                continue
             violations.append(Violation(relative_path, line_number, rule, include_path))
 
     ordered_input_diagnostics = [diagnostic for _, diagnostic in sorted(input_diagnostics)]
@@ -750,7 +728,7 @@ class BoundaryCheckerTests(unittest.TestCase):
                 ),
             )
 
-    def test_strict_mode_exposes_the_explicit_audio_baseline_debt(self) -> None:
+    def test_normal_and_strict_modes_reject_audio_graphics_includes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.write_fixture(
@@ -761,69 +739,20 @@ class BoundaryCheckerTests(unittest.TestCase):
                 '#include "Emulator/Graphics/Objects/GpuMemory.h"\n',
             )
 
-            self.assertEqual(check_source_root(root), CheckResult(exit_code=0, diagnostics=()))
-            self.assertEqual(
-                check_source_root(root, strict=True),
-                CheckResult(
-                    exit_code=1,
-                    diagnostics=(
-                        "emulator/src/Audio.cpp:11: forbidden include (Audio -> Graphics): Emulator/Graphics/GuestTextureLayout.h",
-                        "emulator/src/Audio.cpp:12: forbidden include (Audio -> Graphics): Emulator/Graphics/Objects/GpuMemory.h",
-                    ),
+            expected = CheckResult(
+                exit_code=1,
+                diagnostics=(
+                    "emulator/src/Audio.cpp:11: forbidden include (Audio -> Graphics): Emulator/Graphics/GuestTextureLayout.h",
+                    "emulator/src/Audio.cpp:12: forbidden include (Audio -> Graphics): Emulator/Graphics/Objects/GpuMemory.h",
                 ),
             )
-
-    def test_grandfather_requires_exact_baseline_directive_spelling(self) -> None:
-        header = "Emulator/Graphics/GuestTextureLayout.h"
-        variants = (
-            f"#include<{header}>\n",
-            f"# include \"{header}\"\n",
-            f"#include\\\n\"{header}\"\n",
-            f"#include \"{header}\" // retained debt\n",
-        )
-
-        for directive in variants:
-            with self.subTest(directive=directive), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                self.write_fixture(root, "emulator/src/Audio.cpp", "\n" * 10 + directive)
-
-                self.assertEqual(
-                    check_source_root(root),
-                    CheckResult(
-                        exit_code=1,
-                        diagnostics=(f"emulator/src/Audio.cpp:11: forbidden include (Audio -> Graphics): {header}",),
-                    ),
-                )
-
-    def test_grandfather_requires_exact_baseline_line_and_bom_free_text(self) -> None:
-        guest_texture = "Emulator/Graphics/GuestTextureLayout.h"
-        gpu_memory = "Emulator/Graphics/Objects/GpuMemory.h"
-        fixtures = (
-            (
-                "\n" * 9 + f'#include "{guest_texture}"\n' + f'#include "{gpu_memory}"\n',
-                (
-                    f"emulator/src/Audio.cpp:10: forbidden include (Audio -> Graphics): {guest_texture}",
-                    f"emulator/src/Audio.cpp:11: forbidden include (Audio -> Graphics): {gpu_memory}",
-                ),
-            ),
-            (
-                "\ufeff" + "\n" * 10 + f'#include "{guest_texture}"\n',
-                (f"emulator/src/Audio.cpp:11: forbidden include (Audio -> Graphics): {guest_texture}",),
-            ),
-        )
-
-        for contents, diagnostics in fixtures:
-            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                self.write_fixture(root, "emulator/src/Audio.cpp", contents)
-
-                self.assertEqual(check_source_root(root), CheckResult(exit_code=1, diagnostics=diagnostics))
-
+            self.assertEqual(check_source_root(root), expected)
+            self.assertEqual(check_source_root(root, strict=True), expected)
 
 def parse_arguments(argv: Optional[Iterable[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source_root", nargs="?", type=Path, help="path to the source root")
-    parser.add_argument("--strict", action="store_true", help="also reject the explicit accepted Audio.cpp baseline edges")
+    parser.add_argument("--strict", action="store_true", help="compatibility spelling; the normal policy already rejects every guarded edge")
     parser.add_argument("--self-test", action="store_true", help="run checker fixture tests")
     arguments = parser.parse_args(argv)
     if arguments.self_test:
