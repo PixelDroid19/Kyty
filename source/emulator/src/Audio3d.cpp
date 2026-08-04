@@ -6,6 +6,7 @@
 #include "Emulator/Kernel/Semaphore.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -183,13 +184,13 @@ int KYTY_SYSV_ABI Audio3dPortOpen(int user_id, const Audio3dOpenParameters* para
 		default: return AUDIO3D_ERROR_INVALID_PARAMETER;
 	}
 
-	printf("\t user_id     = %d\n", user_id);
-	printf("\t granularity = %u\n", effective.granularity);
-	printf("\t rate        = %u\n", effective.rate);
-	printf("\t max_objects = %u\n", effective.max_objects);
-	printf("\t queue_depth = %u\n", effective.queue_depth);
-	printf("\t buffer_mode = %u\n", effective.buffer_mode);
-	printf("\t num_beds    = %u\n", effective.num_beds);
+	KYTY_LOG_DEBUG("\t user_id     = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t granularity = %u\n", effective.granularity);
+	KYTY_LOG_DEBUG("\t rate        = %u\n", effective.rate);
+	KYTY_LOG_DEBUG("\t max_objects = %u\n", effective.max_objects);
+	KYTY_LOG_DEBUG("\t queue_depth = %u\n", effective.queue_depth);
+	KYTY_LOG_DEBUG("\t buffer_mode = %u\n", effective.buffer_mode);
+	KYTY_LOG_DEBUG("\t num_beds    = %u\n", effective.num_beds);
 
 	if ((user_id != 255 && user_id != 1) || effective.rate != 0 || effective.granularity < 0x100 || (effective.granularity & 0xffu) != 0 ||
 	    effective.max_objects == 0 || effective.queue_depth == 0 || effective.buffer_mode > 2)
@@ -250,24 +251,24 @@ int KYTY_SYSV_ABI Audio3dPortSetAttribute(uint32_t port_id, uint32_t attribute_i
 	EXIT_NOT_IMPLEMENTED(!g_ports[port_id].used);
 	EXIT_NOT_IMPLEMENTED(attribute == nullptr);
 
-	printf("\t attribute_id = 0x%" PRIx32 "\n", attribute_id);
+	KYTY_LOG_DEBUG("\t attribute_id = 0x%" PRIx32 "\n", attribute_id);
 
 	switch (attribute_id)
 	{
 		case 0x10001:
 			EXIT_NOT_IMPLEMENTED(attribute_size != 4);
 			g_ports[port_id].late_reverb_level = *static_cast<const float*>(attribute);
-			printf("\t late_reverb_level = %f\n", g_ports[port_id].late_reverb_level);
+			KYTY_LOG_DEBUG("\t late_reverb_level = %f\n", g_ports[port_id].late_reverb_level);
 			break;
 		case 0x10002:
 			EXIT_NOT_IMPLEMENTED(attribute_size != 4);
 			g_ports[port_id].downmix_spread_radius = *static_cast<const float*>(attribute);
-			printf("\t downmix_spread_radius = %f\n", g_ports[port_id].downmix_spread_radius);
+			KYTY_LOG_DEBUG("\t downmix_spread_radius = %f\n", g_ports[port_id].downmix_spread_radius);
 			break;
 		case 0x10003:
 			EXIT_NOT_IMPLEMENTED(attribute_size != 4);
 			g_ports[port_id].downmix_spread_height_aware = *static_cast<const int*>(attribute);
-			printf("\t downmix_spread_height_aware = %d\n", g_ports[port_id].downmix_spread_height_aware);
+			KYTY_LOG_DEBUG("\t downmix_spread_height_aware = %d\n", g_ports[port_id].downmix_spread_height_aware);
 			break;
 		default: EXIT("unknown attribute: 0x%" PRIx32 "\n", attribute_id);
 	}
@@ -306,7 +307,7 @@ int KYTY_SYSV_ABI Audio3dPortGetQueueLevel(uint32_t port_id, uint32_t* queue_lev
 
 	EXIT_IF(empty_num > port->params.queue_depth);
 
-	printf("\t queue_available = %u\n", empty_num);
+	KYTY_LOG_DEBUG("\t queue_available = %u\n", empty_num);
 
 	if (queue_level != nullptr)
 	{
@@ -441,7 +442,7 @@ int KYTY_SYSV_ABI Audio3dPortAdvance(uint32_t port_id)
 
 		port->data_index = next_index;
 
-		printf("\t %u -> %u\n", current_index, next_index);
+		KYTY_LOG_DEBUG("\t %u -> %u\n", current_index, next_index);
 	}
 	port->data_mutex->Unlock();
 
@@ -459,7 +460,7 @@ int KYTY_SYSV_ABI Audio3dPortPush(uint32_t port_id, uint32_t blocking)
 
 	EXIT_NOT_IMPLEMENTED(blocking != 1);
 
-	printf("\t blocking = %u\n", blocking);
+	KYTY_LOG_DEBUG("\t blocking = %u\n", blocking);
 
 	int          data_num   = 0;
 	Audio3dData* first_data = nullptr;
@@ -481,7 +482,7 @@ int KYTY_SYSV_ABI Audio3dPortPush(uint32_t port_id, uint32_t blocking)
 	}
 	port->data_mutex->Unlock();
 
-	printf("\t push num = %d\n", data_num);
+	KYTY_LOG_DEBUG("\t push num = %d\n", data_num);
 
 	if (data_num > 0)
 	{

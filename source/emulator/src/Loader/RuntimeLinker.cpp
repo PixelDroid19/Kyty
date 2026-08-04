@@ -624,7 +624,7 @@ static void KYTY_SYSV_ABI ProgramExitHandler()
 {
 	Core::Singleton<RuntimeLinker>::Instance()->StopAllModules();
 
-	printf("exit!!!\n");
+	KYTY_LOG_DEBUG("exit!!!\n");
 }
 
 template <class T>
@@ -846,7 +846,7 @@ static void relocate(uint32_t index, Elf64_Rela* r, Program* program, bool jmpre
 			                                  ri.value == 0 ? FG_BRIGHT_RED : FG_BRIGHT_GREEN, ri.value, DEFAULT, ri.name.C_Str(),
 			                                  Core::EnumName(ri.type).C_Str(), Core::EnumName(ri.bind).C_Str(), ri.dbg_name.C_Str());
 
-			printf("Relocate: %s\n", dbg_str.C_Str());
+			KYTY_LOG_DEBUG("Relocate: %s\n", dbg_str.C_Str());
 		}
 	}
 }
@@ -1169,7 +1169,7 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size)
 		const uint64_t tls_sites = LoaderPatchTlsFsBaseLoads(reinterpret_cast<uint8_t*>(address), size, program->tls.handler_vaddr);
 		if (tls_sites != 0)
 		{
-			printf("Patch tls at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, tls_sites);
+			KYTY_LOG_DEBUG("Patch tls at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, tls_sites);
 		}
 	}
 }
@@ -1408,7 +1408,7 @@ Program* RuntimeLinker::LoadProgram(const String& elf_name)
 
 	static int32_t id_seq = 0;
 
-	printf("Loading: %s\n", elf_name_utf8.GetData());
+	KYTY_LOG_DEBUG("Loading: %s\n", elf_name_utf8.GetData());
 
 	auto* program = new Program;
 
@@ -1557,9 +1557,9 @@ void RuntimeLinker::Execute()
 		}
 	}
 
-	printf(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
-	printf(FG_BRIGHT_YELLOW "--- Execute: " BOLD BG_BLUE "%s" BG_DEFAULT NO_BOLD DEFAULT "\n", "Main");
-	printf(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
+	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
+	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "--- Execute: " BOLD BG_BLUE "%s" BG_DEFAULT NO_BOLD DEFAULT "\n", "Main");
+	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	// Reserve some stack. There may be jumps over guard page. To prevent segfault we need to expand committed area.
@@ -1586,13 +1586,13 @@ void RuntimeLinker::Execute()
 		{
 			if (p->argc >= kGuestArgvMax - 1)
 			{
-				printf(FG_BRIGHT_YELLOW "guest argv truncated at %d entries" DEFAULT "\n", kGuestArgvMax - 1);
+				KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "guest argv truncated at %d entries" DEFAULT "\n", kGuestArgvMax - 1);
 				break;
 			}
 			p->argv[p->argc++] = guest_arg.c_str();
-			printf("guest argv[%d] = %s\n", p->argc - 1, guest_arg.c_str());
+			KYTY_LOG_DEBUG("guest argv[%d] = %s\n", p->argc - 1, guest_arg.c_str());
 		}
-		printf("stack_addr = %" PRIx64 "\n", reinterpret_cast<uint64_t>(p));
+		KYTY_LOG_DEBUG("stack_addr = %" PRIx64 "\n", reinterpret_cast<uint64_t>(p));
 
 		Core::mem_guest_thread_enter();
 		run_entry(entry, p, ProgramExitHandler, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(p) - 0x1000u));
@@ -1731,7 +1731,7 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 		case Emulator::Validation::ImportResolutionOutcome::DiagnosticFunctionStub:
 			out_info->name     = canonical_name;
 			out_info->dbg_name = U"kyty_missing_func_stub";
-			printf(FG_BRIGHT_YELLOW "STUB (missing): %s [%s]" DEFAULT "\n", identity.name.C_Str(), identity.library.C_Str());
+			KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "STUB (missing): %s [%s]" DEFAULT "\n", identity.name.C_Str(), identity.library.C_Str());
 			out_info->vaddr = MissingImport::AssignFuncStubOrAbort(identity);
 			EXIT_IF(out_info->vaddr == 0);
 			return;
@@ -2094,13 +2094,13 @@ void RuntimeLinker::StackTrace(uint64_t frame_ptr)
 
 	sys_stack_walk_x86(frame_ptr, stack, &depth);
 
-	Kyty::printf("Stack trace [thread = %d]:\n", Core::Thread::GetThreadIdUnique());
+	KYTY_LOG_DEBUG("Stack trace [thread = %d]:\n", Core::Thread::GetThreadIdUnique());
 
 	for (int i = 0; i < depth; i++)
 	{
 		auto  vaddr = reinterpret_cast<uint64_t>(stack[i]);
 		auto* p     = FindProgramByAddr(vaddr);
-		Kyty::printf("[%d] %016" PRIx64 ", %s\n", i, vaddr, (p == nullptr ? "???" : p->file_name.FilenameWithoutDirectory().C_Str()));
+		KYTY_LOG_DEBUG("[%d] %016" PRIx64 ", %s\n", i, vaddr, (p == nullptr ? "???" : p->file_name.FilenameWithoutDirectory().C_Str()));
 	}
 }
 
@@ -2207,9 +2207,9 @@ int RuntimeLinker::StartModuleOnStack(Program* program, size_t args, const void*
 	EXIT_IF(!m_programs.Contains(program));
 	NormalizeModuleStartArguments(program, &args, &argp);
 
-	printf(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
-	printf(FG_BRIGHT_YELLOW "--- Start module: " BG_BLUE BOLD "%s" BG_DEFAULT NO_BOLD DEFAULT "\n", program->file_name.C_Str());
-	printf(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
+	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
+	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "--- Start module: " BG_BLUE BOLD "%s" BG_DEFAULT NO_BOLD DEFAULT "\n", program->file_name.C_Str());
+	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
 
 	// Shared objects follow the ELF constructor order: DT_INIT first, then
 	// DT_INIT_ARRAY. Several Unity modules populate native registration tables
@@ -2237,9 +2237,9 @@ int RuntimeLinker::StopModule(Program* program, size_t args, const void* argp, m
 
 	EXIT_IF(!m_programs.Contains(program));
 
-	printf(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
-	printf(FG_BRIGHT_YELLOW "--- Stop module: " BG_BLUE BOLD "%s" BG_DEFAULT NO_BOLD DEFAULT "\n", program->file_name.C_Str());
-	printf(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
+	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
+	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "--- Stop module: " BG_BLUE BOLD "%s" BG_DEFAULT NO_BOLD DEFAULT "\n", program->file_name.C_Str());
+	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
 
 	int result = run_ini_fini(program->dynamic_info->fini_vaddr + program->base_vaddr, args, argp, func, nullptr);
 
@@ -2389,13 +2389,13 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 	EXIT_IF(program->base_vaddr == 0);
 	EXIT_IF(program->base_size_aligned < program->base_size);
 
-	printf("base_vaddr             = 0x%016" PRIx64 "\n", program->base_vaddr);
-	printf("base_size              = 0x%016" PRIx64 "\n", program->base_size);
-	printf("base_size_aligned      = 0x%016" PRIx64 "\n", program->base_size_aligned);
-	printf("exception_handler_size = 0x%016" PRIx64 "\n", exception_handler_size);
+	KYTY_LOG_DEBUG("base_vaddr             = 0x%016" PRIx64 "\n", program->base_vaddr);
+	KYTY_LOG_DEBUG("base_size              = 0x%016" PRIx64 "\n", program->base_size);
+	KYTY_LOG_DEBUG("base_size_aligned      = 0x%016" PRIx64 "\n", program->base_size_aligned);
+	KYTY_LOG_DEBUG("exception_handler_size = 0x%016" PRIx64 "\n", exception_handler_size);
 	if (!is_shared)
 	{
-		printf("tls_handler_size       = 0x%016" PRIx64 "\n", tls_handler_size);
+		KYTY_LOG_DEBUG("tls_handler_size       = 0x%016" PRIx64 "\n", tls_handler_size);
 	}
 
 	program->exception_handler = new Core::VirtualMemory::ExceptionHandler;
@@ -2429,10 +2429,10 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 			uint64_t segment_memory_size = get_aligned_size(phdr + i);
 			auto     mode                = get_mode(phdr[i].p_flags);
 
-			printf("[%d] addr        = 0x%016" PRIx64 "\n", i, segment_addr);
-			printf("[%d] file_size   = %" PRIu64 "\n", i, segment_file_size);
-			printf("[%d] memory_size = %" PRIu64 "\n", i, segment_memory_size);
-			printf("[%d] mode        = %s\n", i, Core::EnumName(mode).C_Str());
+			KYTY_LOG_DEBUG("[%d] addr        = 0x%016" PRIx64 "\n", i, segment_addr);
+			KYTY_LOG_DEBUG("[%d] file_size   = %" PRIu64 "\n", i, segment_file_size);
+			KYTY_LOG_DEBUG("[%d] memory_size = %" PRIu64 "\n", i, segment_memory_size);
+			KYTY_LOG_DEBUG("[%d] mode        = %s\n", i, Core::EnumName(mode).C_Str());
 
 			program->elf->LoadSegment(segment_addr, phdr[i].p_offset, segment_file_size);
 
@@ -2482,11 +2482,11 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 			program->tls.module_id     = g_next_tls_module_id++;
 			program->rt->m_static_tls_size = program->tls.static_offset;
 
-			printf("tls addr = 0x%016" PRIx64 "\n", program->tls.image_vaddr);
-			printf("tls init   = %" PRIu64 "\n", program->tls.init_size);
-			printf("tls size   = %" PRIu64 "\n", program->tls.image_size);
-			printf("tls module = %" PRIu64 "\n", program->tls.module_id);
-			printf("tls offset = %" PRIu64 "\n", program->tls.static_offset);
+			KYTY_LOG_DEBUG("tls addr = 0x%016" PRIx64 "\n", program->tls.image_vaddr);
+			KYTY_LOG_DEBUG("tls init   = %" PRIu64 "\n", program->tls.init_size);
+			KYTY_LOG_DEBUG("tls size   = %" PRIu64 "\n", program->tls.image_size);
+			KYTY_LOG_DEBUG("tls module = %" PRIu64 "\n", program->tls.module_id);
+			KYTY_LOG_DEBUG("tls offset = %" PRIu64 "\n", program->tls.static_offset);
 		}
 
 		if (phdr[i].p_type == PT_OS_PROCPARAM)
@@ -2503,7 +2503,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 		SetupTlsHandler(program);
 	}
 
-	printf("entry = 0x%016" PRIx64 "\n", program->elf->GetEntry() + program->base_vaddr);
+	KYTY_LOG_DEBUG("entry = 0x%016" PRIx64 "\n", program->elf->GetEntry() + program->base_vaddr);
 }
 
 void RuntimeLinker::DeleteProgram(Program* p)
@@ -2682,7 +2682,7 @@ void RuntimeLinker::Relocate(Program* program)
 		EXIT_NOT_IMPLEMENTED(g_invalid_memory == 0);
 	}
 
-	printf("--- Relocate program: " FG_WHITE BOLD "%s" DEFAULT " ---\n", program->file_name.C_Str());
+	KYTY_LOG_DEBUG("--- Relocate program: " FG_WHITE BOLD "%s" DEFAULT " ---\n", program->file_name.C_Str());
 
 	EXIT_NOT_IMPLEMENTED(program->dynamic_info->symbol_table_entry_size != sizeof(Elf64_Sym));
 	EXIT_NOT_IMPLEMENTED(program->dynamic_info->rela_table_entry_size != sizeof(Elf64_Rela));

@@ -15,6 +15,7 @@
 #include "Emulator/Kernel/Semaphore.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -109,11 +110,11 @@ int KYTY_SYSV_ABI AudioOutOpen(int user_id, int type, int index, uint32_t len, u
 {
 	PRINT_NAME();
 
-	printf("\t user_id = %d\n", user_id);
-	printf("\t type    = %d\n", type);
-	printf("\t index   = %d\n", index);
-	printf("\t len     = %u\n", len);
-	printf("\t freq    = %u\n", freq);
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t type    = %d\n", type);
+	KYTY_LOG_DEBUG("\t index   = %d\n", index);
+	KYTY_LOG_DEBUG("\t len     = %u\n", len);
+	KYTY_LOG_DEBUG("\t freq    = %u\n", freq);
 
 	EXIT_NOT_IMPLEMENTED(user_id != 255 && user_id != 1);
 	// Port types observed on Gen5 titles: 0 MAIN, 1 BGM, 3 PERSONAL, 4 PADSPK,
@@ -136,7 +137,7 @@ int KYTY_SYSV_ABI AudioOutOpen(int user_id, int type, int index, uint32_t len, u
 		default:;
 	}
 
-	printf("\t param   = %u (%s)\n", param, Core::EnumName(format).C_Str());
+	KYTY_LOG_DEBUG("\t param   = %u (%s)\n", param, Core::EnumName(format).C_Str());
 
 	EXIT_NOT_IMPLEMENTED(format == HostAudio::Format::Unknown);
 
@@ -209,8 +210,8 @@ int KYTY_SYSV_ABI AudioOutGetPortState(int handle, AudioOutPortState* state)
 		default: EXIT("unknown port type: %d\n", type);
 	}
 
-	printf("\t output  = %" PRIu16 "\n", state->output);
-	printf("\t channel = %" PRIu8 "\n", state->channel);
+	KYTY_LOG_DEBUG("\t output  = %" PRIu16 "\n", state->output);
+	KYTY_LOG_DEBUG("\t channel = %" PRIu8 "\n", state->channel);
 
 	return OK;
 }
@@ -219,8 +220,8 @@ int KYTY_SYSV_ABI AudioOutSetVolume(int handle, uint32_t flag, int* vol)
 {
 	PRINT_NAME();
 
-	printf("\t handle = %d\n", handle);
-	printf("\t flag   = %u\n", flag);
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
+	KYTY_LOG_DEBUG("\t flag   = %u\n", flag);
 
 	EXIT_NOT_IMPLEMENTED(vol == nullptr);
 
@@ -243,7 +244,7 @@ int KYTY_SYSV_ABI AudioOutOutputs(AudioOutOutputParam* param, uint32_t num)
 
 	for (uint32_t i = 0; i < num; i++)
 	{
-		printf("\t handle[%u] = %d\n", i, param[i].handle);
+		KYTY_LOG_DEBUG("\t handle[%u] = %d\n", i, param[i].handle);
 	}
 
 	HostAudio::OutputParam params[HostAudio::OUT_PORTS_MAX];
@@ -267,7 +268,7 @@ int KYTY_SYSV_ABI AudioOutOutput(int handle, const void* ptr)
 {
 	PRINT_NAME();
 
-	printf("\t handle = %d\n", handle);
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
 
 	// EXIT_NOT_IMPLEMENTED(ptr == nullptr);
 
@@ -388,7 +389,7 @@ int KYTY_SYSV_ABI AudioOut2Initialize()
 int KYTY_SYSV_ABI AudioOut2ContextResetParam(void* param)
 {
 	PRINT_NAME();
-	printf("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	KYTY_LOG_DEBUG("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 	if (param == nullptr)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -396,7 +397,7 @@ int KYTY_SYSV_ABI AudioOut2ContextResetParam(void* param)
 	// Peek leading size-like field if present (common SCE param header).
 	uint64_t leading = 0;
 	std::memcpy(&leading, param, sizeof(leading));
-	printf("\t leading = 0x%016" PRIx64 "\n", leading);
+	KYTY_LOG_DEBUG("\t leading = 0x%016" PRIx64 "\n", leading);
 	return OK;
 }
 
@@ -404,8 +405,8 @@ int KYTY_SYSV_ABI AudioOut2ContextResetParam(void* param)
 int KYTY_SYSV_ABI AudioOut2ContextQueryMemory(const void* param, uint64_t* size_out)
 {
 	PRINT_NAME();
-	printf("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
-	printf("\t size_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(size_out));
+	KYTY_LOG_DEBUG("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	KYTY_LOG_DEBUG("\t size_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(size_out));
 	if (size_out == nullptr)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -418,17 +419,17 @@ int KYTY_SYSV_ABI AudioOut2ContextQueryMemory(const void* param, uint64_t* size_
 int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64_t size, int32_t* handle_out)
 {
 	PRINT_NAME();
-	printf("\t param      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
-	printf("\t buffer     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
-	printf("\t size       = 0x%016" PRIx64 "\n", size);
-	printf("\t handle_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handle_out));
+	KYTY_LOG_DEBUG("\t param      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	KYTY_LOG_DEBUG("\t buffer     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
+	KYTY_LOG_DEBUG("\t size       = 0x%016" PRIx64 "\n", size);
+	KYTY_LOG_DEBUG("\t handle_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handle_out));
 	if (handle_out == nullptr)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	if (!g_audio_out2_ready)
 	{
-		printf("\t note: ContextCreate before Initialize\n");
+		KYTY_LOG_DEBUG("\t note: ContextCreate before Initialize\n");
 	}
 	const int32_t id = AllocContext();
 	if (id == 0)
@@ -438,7 +439,7 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64
 	g_contexts[id - 1].buffer = buffer;
 	g_contexts[id - 1].size   = size;
 	*handle_out               = id;
-	printf("\t handle     = %d\n", id);
+	KYTY_LOG_DEBUG("\t handle     = %d\n", id);
 	return OK;
 }
 
@@ -446,7 +447,7 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64
 int KYTY_SYSV_ABI AudioOut2ContextDestroy(int32_t handle)
 {
 	PRINT_NAME();
-	printf("\t handle = %d\n", handle);
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
 	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -459,7 +460,7 @@ int KYTY_SYSV_ABI AudioOut2ContextDestroy(int32_t handle)
 int KYTY_SYSV_ABI AudioOut2ContextAdvance(int32_t handle)
 {
 	PRINT_NAME();
-	printf("\t handle = %d\n", handle);
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
 	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -475,8 +476,8 @@ int KYTY_SYSV_ABI AudioOut2ContextAdvance(int32_t handle)
 int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, const void* data)
 {
 	PRINT_NAME();
-	printf("\t handle = %d\n", handle);
-	printf("\t data   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(data));
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
+	KYTY_LOG_DEBUG("\t data   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(data));
 	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -492,9 +493,9 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, const void* data)
 int KYTY_SYSV_ABI AudioOut2ContextGetQueueLevel(int32_t handle, uint32_t* used, uint32_t* available)
 {
 	PRINT_NAME();
-	printf("\t handle    = %d\n", handle);
-	printf("\t used      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(used));
-	printf("\t available = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(available));
+	KYTY_LOG_DEBUG("\t handle    = %d\n", handle);
+	KYTY_LOG_DEBUG("\t used      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(used));
+	KYTY_LOG_DEBUG("\t available = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(available));
 	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -515,9 +516,9 @@ int KYTY_SYSV_ABI AudioOut2ContextGetQueueLevel(int32_t handle, uint32_t* used, 
 int KYTY_SYSV_ABI AudioOut2PortCreate(int32_t context, const void* param, int32_t* port_out)
 {
 	PRINT_NAME();
-	printf("\t context  = %d\n", context);
-	printf("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
-	printf("\t port_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(port_out));
+	KYTY_LOG_DEBUG("\t context  = %d\n", context);
+	KYTY_LOG_DEBUG("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	KYTY_LOG_DEBUG("\t port_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(port_out));
 	if (port_out == nullptr)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -526,7 +527,7 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(int32_t context, const void* param, int32_
 	{
 		// Some titles create a port before a host-tracked context handle is
 		// established; still allocate so boot can continue with evidence.
-		printf("\t note: PortCreate with unknown context\n");
+		KYTY_LOG_DEBUG("\t note: PortCreate with unknown context\n");
 	}
 	const int32_t id = AllocPort(context);
 	if (id == 0)
@@ -534,7 +535,7 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(int32_t context, const void* param, int32_
 		return LibKernel::KERNEL_ERROR_ENOMEM;
 	}
 	*port_out = id;
-	printf("\t port     = %d\n", id);
+	KYTY_LOG_DEBUG("\t port     = %d\n", id);
 	return OK;
 }
 
@@ -542,7 +543,7 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(int32_t context, const void* param, int32_
 int KYTY_SYSV_ABI AudioOut2PortDestroy(int32_t port)
 {
 	PRINT_NAME();
-	printf("\t port = %d\n", port);
+	KYTY_LOG_DEBUG("\t port = %d\n", port);
 	if (port < 1 || port > kMaxPorts || !g_ports[port - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -557,8 +558,8 @@ int KYTY_SYSV_ABI AudioOut2PortDestroy(int32_t port)
 int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr)
 {
 	PRINT_NAME();
-	printf("\t port = %d\n", port);
-	printf("\t attr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(attr));
+	KYTY_LOG_DEBUG("\t port = %d\n", port);
+	KYTY_LOG_DEBUG("\t attr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(attr));
 	if (port < 1 || port > kMaxPorts || !g_ports[port - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -591,8 +592,8 @@ int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr)
 int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out)
 {
 	PRINT_NAME();
-	printf("\t port      = %d\n", port);
-	printf("\t state_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(state_out));
+	KYTY_LOG_DEBUG("\t port      = %d\n", port);
+	KYTY_LOG_DEBUG("\t state_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(state_out));
 	if (port < 1 || port > kMaxPorts || !g_ports[port - 1].used || state_out == nullptr)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -620,9 +621,9 @@ int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out)
 int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* user_out)
 {
 	PRINT_NAME();
-	printf("\t user_id  = %d\n", user_id);
-	printf("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
-	printf("\t user_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user_out));
+	KYTY_LOG_DEBUG("\t user_id  = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	KYTY_LOG_DEBUG("\t user_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user_out));
 	if (user_out == nullptr)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -640,7 +641,7 @@ int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* u
 		return LibKernel::KERNEL_ERROR_ENOMEM;
 	}
 	*user_out = id;
-	printf("\t user     = %d\n", id);
+	KYTY_LOG_DEBUG("\t user     = %d\n", id);
 	return OK;
 }
 
@@ -648,7 +649,7 @@ int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* u
 int KYTY_SYSV_ABI AudioOut2UserDestroy(int32_t user)
 {
 	PRINT_NAME();
-	printf("\t user = %d\n", user);
+	KYTY_LOG_DEBUG("\t user = %d\n", user);
 	if (user < 1 || user > kMaxUsers || !g_users[user - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -667,11 +668,11 @@ int KYTY_SYSV_ABI AudioInOpen(int user_id, uint32_t type, uint32_t index, uint32
 {
 	PRINT_NAME();
 
-	printf("\t user_id = %d\n", user_id);
-	printf("\t type    = %u\n", type);
-	printf("\t index   = %d\n", index);
-	printf("\t len     = %u\n", len);
-	printf("\t freq    = %u\n", freq);
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t type    = %u\n", type);
+	KYTY_LOG_DEBUG("\t index   = %d\n", index);
+	KYTY_LOG_DEBUG("\t len     = %u\n", len);
+	KYTY_LOG_DEBUG("\t freq    = %u\n", freq);
 
 	EXIT_NOT_IMPLEMENTED(user_id != 255 && user_id != 1);
 	EXIT_NOT_IMPLEMENTED(type != 1);
@@ -686,7 +687,7 @@ int KYTY_SYSV_ABI AudioInOpen(int user_id, uint32_t type, uint32_t index, uint32
 		default:;
 	}
 
-	printf("\t param   = %u (%s)\n", param, Core::EnumName(format).C_Str());
+	KYTY_LOG_DEBUG("\t param   = %u (%s)\n", param, Core::EnumName(format).C_Str());
 
 	EXIT_NOT_IMPLEMENTED(format == HostAudio::Format::Unknown);
 
@@ -730,9 +731,9 @@ int KYTY_SYSV_ABI VoiceQoSInit(void* mem_block, uint32_t mem_size, int32_t app_t
 {
 	PRINT_NAME();
 
-	printf("\t mem_block = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(mem_block));
-	printf("\t mem_size = %" PRIu32 "\n", mem_size);
-	printf("\t app_type = %" PRId32 "\n", app_type);
+	KYTY_LOG_DEBUG("\t mem_block = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(mem_block));
+	KYTY_LOG_DEBUG("\t mem_size = %" PRIu32 "\n", mem_size);
+	KYTY_LOG_DEBUG("\t app_type = %" PRId32 "\n", app_type);
 
 	return OK;
 }
@@ -1161,7 +1162,7 @@ int KYTY_SYSV_ABI AjmInitialize(int64_t reserved, uint32_t* context)
 int KYTY_SYSV_ABI AjmFinalize(uint32_t context)
 {
 	PRINT_NAME();
-	printf("\t context = %u\n", context);
+	KYTY_LOG_DEBUG("\t context = %u\n", context);
 
 	std::scoped_lock lock(g_ajm_mutex);
 	if (g_ajm_contexts.erase(context) == 0)
@@ -1191,18 +1192,18 @@ int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t re
 		return AJM_ERROR_CODEC_ALREADY_REGISTERED;
 	}
 
-	printf("\t codec = %u\n", codec);
+	KYTY_LOG_DEBUG("\t codec = %u\n", codec);
 
 	switch (codec)
 	{
-		case 1: printf("\t %s\n", "ATRAC9 decoder"); break;
-		case 2: printf("\t %s\n", "MPEG4-AAC decoder"); break;
-		case 0: printf("\t %s\n", "MP3 decoder"); break;
-		case 4: printf("\t %s\n", "CELP8 encoder"); break;
-		case 3: printf("\t %s\n", "CELP8 decoder"); break;
-		case 13: printf("\t %s\n", "CELP16 encoder"); break;
-		case 12: printf("\t %s\n", "CELP16 decoder"); break;
-		default: printf("\t codec %u\n", codec); break;
+		case 1: KYTY_LOG_DEBUG("\t %s\n", "ATRAC9 decoder"); break;
+		case 2: KYTY_LOG_DEBUG("\t %s\n", "MPEG4-AAC decoder"); break;
+		case 0: KYTY_LOG_DEBUG("\t %s\n", "MP3 decoder"); break;
+		case 4: KYTY_LOG_DEBUG("\t %s\n", "CELP8 encoder"); break;
+		case 3: KYTY_LOG_DEBUG("\t %s\n", "CELP8 decoder"); break;
+		case 13: KYTY_LOG_DEBUG("\t %s\n", "CELP16 encoder"); break;
+		case 12: KYTY_LOG_DEBUG("\t %s\n", "CELP16 decoder"); break;
+		default: KYTY_LOG_DEBUG("\t codec %u\n", codec); break;
 	}
 
 	return OK;
@@ -1211,8 +1212,8 @@ int KYTY_SYSV_ABI AjmModuleRegister(uint32_t context, uint32_t codec, int64_t re
 int KYTY_SYSV_ABI AjmModuleUnregister(uint32_t context, uint32_t codec)
 {
 	PRINT_NAME();
-	printf("\t context = %u\n", context);
-	printf("\t codec   = %u\n", codec);
+	KYTY_LOG_DEBUG("\t context = %u\n", context);
+	KYTY_LOG_DEBUG("\t codec   = %u\n", codec);
 
 	std::scoped_lock lock(g_ajm_mutex);
 	auto             context_it = g_ajm_contexts.find(context);
@@ -1302,10 +1303,10 @@ int KYTY_SYSV_ABI AjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t f
 	state.next_instance_slot = slot;
 	*instance                = instance_id;
 
-	printf("\t context  = %u\n", context);
-	printf("\t codec    = %u\n", codec);
-	printf("\t flags    = 0x%016" PRIx64 "\n", flags);
-	printf("\t instance = 0x%08" PRIx32 "\n", instance_id);
+	KYTY_LOG_DEBUG("\t context  = %u\n", context);
+	KYTY_LOG_DEBUG("\t codec    = %u\n", codec);
+	KYTY_LOG_DEBUG("\t flags    = 0x%016" PRIx64 "\n", flags);
+	KYTY_LOG_DEBUG("\t instance = 0x%08" PRIx32 "\n", instance_id);
 
 	return OK;
 }
@@ -1333,8 +1334,8 @@ int KYTY_SYSV_ABI AjmInstanceDestroy(uint32_t context, uint32_t instance)
 		jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [instance](const auto& job) { return job.instance == instance; }), jobs.end());
 	}
 
-	printf("\t context  = %u\n", context);
-	printf("\t instance = 0x%08" PRIx32 "\n", instance);
+	KYTY_LOG_DEBUG("\t context  = %u\n", context);
+	KYTY_LOG_DEBUG("\t instance = 0x%08" PRIx32 "\n", instance);
 	return OK;
 }
 
@@ -1628,9 +1629,9 @@ int KYTY_SYSV_ABI AjmBatchJobSetResampleParameters(void* batch, uint32_t instanc
 		std::memset(result, 0, AJM_SIDEBAND_RESULT_SIZE);
 	}
 
-	printf("\t instance = 0x%08" PRIx32 "\n", instance);
-	printf("\t ratio    = %f\n", static_cast<double>(ratio));
-	printf("\t flags    = 0x%08" PRIx32 "\n", flags);
+	KYTY_LOG_DEBUG("\t instance = 0x%08" PRIx32 "\n", instance);
+	KYTY_LOG_DEBUG("\t ratio    = %f\n", static_cast<double>(ratio));
+	KYTY_LOG_DEBUG("\t flags    = 0x%08" PRIx32 "\n", flags);
 	return OK;
 }
 
@@ -1647,10 +1648,10 @@ int KYTY_SYSV_ABI AjmBatchJobSetResampleParametersEx(void* batch, uint32_t insta
 		std::memset(result, 0, AJM_SIDEBAND_RESULT_SIZE);
 	}
 
-	printf("\t instance                = 0x%08" PRIx32 "\n", instance);
-	printf("\t ratio_start             = %f\n", static_cast<double>(ratio_start));
-	printf("\t ratio_change_per_sample = %f\n", static_cast<double>(ratio_change_per_sample));
-	printf("\t flags                   = 0x%08" PRIx32 "\n", flags);
+	KYTY_LOG_DEBUG("\t instance                = 0x%08" PRIx32 "\n", instance);
+	KYTY_LOG_DEBUG("\t ratio_start             = %f\n", static_cast<double>(ratio_start));
+	KYTY_LOG_DEBUG("\t ratio_change_per_sample = %f\n", static_cast<double>(ratio_change_per_sample));
+	KYTY_LOG_DEBUG("\t flags                   = 0x%08" PRIx32 "\n", flags);
 	return OK;
 }
 
@@ -1911,7 +1912,7 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 const char* KYTY_SYSV_ABI AjmStrError(int error)
 {
 	PRINT_NAME();
-	printf("\t error = %d\n", error);
+	KYTY_LOG_DEBUG("\t error = %d\n", error);
 	return "AJM";
 }
 
