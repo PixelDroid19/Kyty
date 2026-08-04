@@ -209,10 +209,10 @@ if(KYTY_BUILD_DEVTOOLS)
 	add_subdirectory(devtools)
 endif()
 add_subdirectory(agent)
-# Process-isolated BringUp policy harness — only when tests are enabled so
-# production-only configures do not force-link the integration executable.
+# Process-isolated BringUp policy harness — excluded from the default build;
+# its CTest fixture explicitly requests every required integration executable.
 if(BUILD_TESTING)
-	add_subdirectory(integration_test)
+	add_subdirectory(integration_test EXCLUDE_FROM_ALL)
 endif()
 
 # The emulator may consume the portable diagnostics core, but the process
