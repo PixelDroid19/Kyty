@@ -34,6 +34,9 @@ KERNEL_SOURCE_FILES = (
     "emulator/src/Kernel/FileSystem.cpp",
     "emulator/src/Kernel/Pthread.cpp",
 )
+KERNEL_HOST_SOURCE_FILES = (
+    "emulator/src/Kernel/HostTime.cpp",
+)
 HOST_SOURCE_FILES = (
     "emulator/src/Host/CaptureImageCodec.cpp",
     "emulator/src/Host/Clock.cpp",
@@ -56,6 +59,7 @@ RUNTIME_LINKER_SOURCE = "emulator/src/Loader/RuntimeLinker.cpp"
 ALLOWED_SOURCE_FILES = (
     *AUDIO_SOURCE_FILES,
     *KERNEL_SOURCE_FILES,
+    *KERNEL_HOST_SOURCE_FILES,
     *HOST_SOURCE_FILES,
     *LIBS_SOURCE_FILES,
     *GRAPHICS_IMAGE_SOURCE_FILES,
@@ -192,6 +196,10 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
         return "Kernel -> Graphics"
+    if relative_path in KERNEL_HOST_SOURCE_FILES and any(
+        canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
+    ):
+        return "Kernel host -> Graphics"
     if relative_path in HOST_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
@@ -610,6 +618,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Host/CaptureImageCodec.cpp:1: forbidden include (Host -> Graphics): Emulator/Graphics/Utils.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_forbidden_kernel_host_graphics_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Kernel/HostTime.cpp", '#include "Emulator/Graphics/Window.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Kernel/HostTime.cpp:1: forbidden include (Kernel host -> Graphics): Emulator/Graphics/Window.h",
                     ),
                 ),
             )
