@@ -348,8 +348,8 @@ void VerifyRawGen5StorageDescriptorContract()
 	Expect(!ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Unknown), "unknown access remains strict");
 
 	resource.fields[1] = 126u << 16u;
-	Expect(ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw),
-	       "raw access accepts a byte-addressed stride that is not dword-aligned");
+	Expect(!ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw),
+	       "raw access rejects a byte-addressed stride that is not dword-aligned");
 }
 
 ShaderCode ParseUnsignedExecLessThan(bool vop3)
