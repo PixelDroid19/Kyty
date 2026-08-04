@@ -31,6 +31,22 @@ using execute_once_callback_t = KYTY_SYSV_ABI int (*)(void*, void*, void**);
 int  c_thread_sync_result(int result);
 void collect_host_malloc_stats(Core::MSpaceSize* out);
 
+// Host/application-heap allocation shims. Their ownership ledger lives in
+// LibCAlloc.cpp so allocation policy is isolated from the ABI registration
+// unit and can be validated independently.
+void* KYTY_SYSV_ABI c_malloc(size_t size);
+char* KYTY_SYSV_ABI c_strdup(const char* source);
+void* KYTY_SYSV_ABI c_calloc(size_t count, size_t size);
+void* KYTY_SYSV_ABI c_memalign(size_t alignment, size_t size);
+void* KYTY_SYSV_ABI c_realloc(void* ptr, size_t size);
+void  KYTY_SYSV_ABI c_free(void* ptr);
+void* KYTY_SYSV_ABI c_aligned_alloc(size_t alignment, size_t size);
+int   KYTY_SYSV_ABI c_posix_memalign(void** memptr, size_t alignment, size_t size);
+
+// Shared by the C++ new/delete adapters that remain in LibC.cpp.
+void* allocate_with_owner(size_t size);
+bool  free_by_owner(void* ptr);
+
 int  KYTY_SYSV_ABI c_cnd_init(LibKernel::PthreadCond* cond);
 int  KYTY_SYSV_ABI c_cnd_init_with_name(LibKernel::PthreadCond* cond, const char* name);
 int  KYTY_SYSV_ABI c_cnd_init_with_default_name_override(LibKernel::PthreadCond* cond, const char* name);
