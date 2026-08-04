@@ -105,7 +105,7 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x09: KYTY_NI("v_mov_fed_b32"); break;
 		case 0x0A: inst.type = ShaderInstructionType::VCvtF16F32; break;
 		case 0x0b: inst.type = ShaderInstructionType::VCvtF32F16; break;
-		case 0x0C: KYTY_NI("v_cvt_rpi_i32_f32"); break;
+		case 0x0C: inst.type = ShaderInstructionType::VCvtRpiI32F32; break;
 		case 0x0D: inst.type = ShaderInstructionType::VCvtFlrI32F32; break;
 		case 0x0E: inst.type = ShaderInstructionType::VCvtOffF32I4; break;
 		case 0x0F:
@@ -128,10 +128,30 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 			inst.type = ShaderInstructionType::VCvtF64U32;
 			inst.dst.size = 2;
 			break;
-		case 0x17: KYTY_NI("v_trunc_f64"); break;
-		case 0x18: KYTY_NI("v_ceil_f64"); break;
-		case 0x19: KYTY_NI("v_rndne_f64"); break;
-		case 0x1A: KYTY_NI("v_floor_f64"); break;
+		case 0x17: {
+			inst.type      = ShaderInstructionType::VTruncF64;
+			inst.src[0].size = 2;
+			inst.dst.size    = 2;
+			break;
+		}
+		case 0x18: {
+			inst.type      = ShaderInstructionType::VCeilF64;
+			inst.src[0].size = 2;
+			inst.dst.size    = 2;
+			break;
+		}
+		case 0x19: {
+			inst.type      = ShaderInstructionType::VRndneF64;
+			inst.src[0].size = 2;
+			inst.dst.size    = 2;
+			break;
+		}
+		case 0x1A: {
+			inst.type      = ShaderInstructionType::VFloorF64;
+			inst.src[0].size = 2;
+			inst.dst.size    = 2;
+			break;
+		}
 		case 0x20: inst.type = ShaderInstructionType::VFractF32; break;
 		case 0x21: inst.type = ShaderInstructionType::VTruncF32; break;
 		case 0x22: inst.type = ShaderInstructionType::VCeilF32; break;
@@ -169,10 +189,20 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x2e: inst.type = ShaderInstructionType::VRsqF32; break;
 		case 0x2F: KYTY_NI("v_rcp_f64"); break;
 		case 0x30: KYTY_NI("v_rcp_clamp_f64"); break;
-		case 0x31: KYTY_NI("v_rsq_f64"); break;
+		case 0x31: {
+			inst.type      = ShaderInstructionType::VRsqF64;
+			inst.src[0].size = 2;
+			inst.dst.size    = 2;
+			break;
+		}
 		case 0x32: KYTY_NI("v_rsq_clamp_f64"); break;
 		case 0x33: inst.type = ShaderInstructionType::VSqrtF32; break;
-		case 0x34: KYTY_NI("v_sqrt_f64"); break;
+		case 0x34: {
+			inst.type      = ShaderInstructionType::VSqrtF64;
+			inst.src[0].size = 2;
+			inst.dst.size    = 2;
+			break;
+		}
 		case 0x35: inst.type = ShaderInstructionType::VSinF32; break;
 		case 0x36: inst.type = ShaderInstructionType::VCosF32; break;
 		case 0x37: inst.type = ShaderInstructionType::VNotB32; break;
@@ -182,7 +212,12 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x3B: KYTY_NI("v_ffbh_i32"); break;
 		case 0x3C: KYTY_NI("v_frexp_exp_i32_f64"); break;
 		case 0x3D: KYTY_NI("v_frexp_mant_f64"); break;
-		case 0x3E: KYTY_NI("v_fract_f64"); break;
+		case 0x3E: {
+			inst.type      = ShaderInstructionType::VFractF64;
+			inst.src[0].size = 2;
+			inst.dst.size    = 2;
+			break;
+		}
 		case 0x3F: KYTY_NI("v_frexp_exp_i32_f32"); break;
 		case 0x40: KYTY_NI("v_frexp_mant_f32"); break;
 		case 0x41: KYTY_NI("v_clrexcp"); break;
