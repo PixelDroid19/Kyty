@@ -1,13 +1,12 @@
 #include "Emulator/Kernel/Time.h"
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/HostTime.h"
+#include "Emulator/Kernel/TimePort.h"
 
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Timer.h"
 
 #include "Emulator/Kernel/Trace.h"
-#include "Emulator/Loader/Timer.h"
-
 #include <ctime>
 #include <limits>
 
@@ -263,17 +262,17 @@ uint64_t KYTY_SYSV_ABI KernelReadTsc()
 
 uint64_t KYTY_SYSV_ABI KernelGetProcessTime()
 {
-	return static_cast<uint64_t>(Loader::Timer::GetTimeMs() * 1000.0);
+	return static_cast<uint64_t>(TimePort::GetTimeMs() * 1000.0);
 }
 
 uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounter()
 {
-	return Loader::Timer::GetCounter();
+	return TimePort::GetCounter();
 }
 
 uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounterFrequency()
 {
-	return Loader::Timer::GetFrequency();
+	return TimePort::GetFrequency();
 }
 
 } // namespace Kyty::Kernel

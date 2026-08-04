@@ -53,6 +53,7 @@ target_sources(emulator PRIVATE
 	src/Agent/AgentSubsystem.cpp
 	src/Agent/AgentLifecycle.cpp
 	src/Kernel/Time.cpp
+	src/Kernel/TimePort.cpp
 	include/Emulator/Kernel/Errors.h
 	include/Emulator/Kernel/Trace.h
 	src/Libs/ProcessEnvironment.cpp
@@ -134,6 +135,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Agent/AgentSubsystem.h
 	include/Emulator/Agent/AgentLifecycle.h
 	include/Emulator/Kernel/Time.h
+	include/Emulator/Kernel/TimePort.h
 )
 add_dependencies(emulator KytyBuildInfo)
 

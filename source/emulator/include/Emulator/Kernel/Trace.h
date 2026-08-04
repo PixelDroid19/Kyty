@@ -2,7 +2,7 @@
 #define EMULATOR_INCLUDE_EMULATOR_KERNEL_TRACE_H_
 
 #include "Emulator/Common.h"
-#include "Emulator/Loader/Timer.h"
+#include "Emulator/Kernel/TimePort.h"
 #include "Emulator/Log.h"
 
 #include "Kyty/Core/Threads.h"
@@ -26,7 +26,7 @@
 		if (Kyty::Log::GetDirection() != Kyty::Log::Direction::Silent)                                                                       \
 		{                                                                                                                                     \
 			Kyty::printf(FG_CYAN "[%d][%s] %s::%s::%s()" DEFAULT "\n", Core::Thread::GetThreadIdUnique(),                                  \
-			             Loader::Timer::GetTime().ToString("HH24:MI:SS.FFF").C_Str(), g_kernel_library, g_kernel_module, __func__);       \
+			             ::Kyty::Kernel::TimePort::GetTime().ToString("HH24:MI:SS.FFF").C_Str(), g_kernel_library, g_kernel_module, __func__); \
 		}                                                                                                                                     \
 	}
 

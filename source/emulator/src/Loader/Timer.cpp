@@ -4,6 +4,7 @@
 #include "Kyty/Core/Subsystems.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/TimePort.h"
 #include "Emulator/Loader/Timer.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -15,6 +16,7 @@ static Core::Timer g_timer;
 KYTY_SUBSYSTEM_INIT(Timer)
 {
 	Start();
+	Kernel::TimePort::Install({&GetTimeMs, &GetCounter, &GetFrequency});
 }
 
 KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Timer) {}
