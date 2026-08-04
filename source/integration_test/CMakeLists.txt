@@ -445,6 +445,24 @@ add_test(
 	COMMAND $<TARGET_FILE:kyty_agent_transport_integration>
 )
 
+add_executable(kyty_audio_pcm_integration
+	src/AudioPcmIntegration.cpp
+)
+
+target_link_libraries(kyty_audio_pcm_integration
+	PRIVATE
+		kyty_audio_pcm
+)
+
+add_test(
+	NAME KytyAudioPcmIntegration.Contract
+	COMMAND $<TARGET_FILE:kyty_audio_pcm_integration>
+)
+set_tests_properties(KytyAudioPcmIntegration.Contract PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 15
+)
+
 add_executable(kyty_audio_host_integration
 	src/AudioHostIntegration.cpp
 )
@@ -487,6 +505,7 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_loader_integration
 	kyty_agent_protocol_integration
 	kyty_agent_transport_integration
+	kyty_audio_pcm_integration
 	kyty_audio_host_integration
 )
 

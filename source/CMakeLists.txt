@@ -192,6 +192,7 @@ config_compiler_and_linker()
   
 add_subdirectory(3rdparty)
 add_subdirectory(agent_transport)
+add_subdirectory(audio_pcm)
 add_subdirectory(emulator)
 if(KYTY_BUILD_UNIT_TESTS)
 	add_subdirectory(unit_test)

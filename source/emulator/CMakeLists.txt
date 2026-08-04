@@ -8,6 +8,7 @@ file(GLOB emulator_src
 	src/Loader/*.cpp
 	include/*.h
 )
+list(REMOVE_ITEM emulator_src "${CMAKE_CURRENT_SOURCE_DIR}/src/AudioPcm.cpp")
 
 if (MSVC AND CLANG)
 	set_source_files_properties(${emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
@@ -115,7 +116,24 @@ target_sources(emulator PRIVATE
 )
 add_dependencies(emulator KytyBuildInfo)
 
-target_link_libraries(emulator core math scripts lua unit_test kyty_agent_transport kyty_devtools_core vulkan-1 spirv-tools-opt spirv-tools easy_profiler imgui SDL2-static)
+target_link_libraries(emulator
+	PUBLIC
+		core
+		math
+		scripts
+		lua
+		unit_test
+		kyty_agent_transport
+		kyty_devtools_core
+		vulkan-1
+		spirv-tools-opt
+		spirv-tools
+		easy_profiler
+		imgui
+		SDL2-static
+	PRIVATE
+		kyty_audio_pcm
+)
 
 target_include_directories(emulator PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -134,7 +152,7 @@ list(APPEND inc_headers
 )
 
 if (MSVC AND CLANG)
-	target_link_libraries(emulator winpthread)
+	target_link_libraries(emulator PRIVATE winpthread)
 	list(APPEND inc_headers 
 		${CMAKE_SOURCE_DIR}/3rdparty/winpthread/include
 	)
@@ -149,7 +167,7 @@ if (LINUX)
 			libavformat libavcodec libavutil libswscale libswresample)
 	endif()
 	if (KYTY_FFMPEG_FOUND)
-		target_link_libraries(emulator PkgConfig::KYTY_FFMPEG)
+		target_link_libraries(emulator PRIVATE PkgConfig::KYTY_FFMPEG)
 		target_compile_definitions(emulator PRIVATE KYTY_HAVE_FFMPEG=1)
 	endif()
 endif()

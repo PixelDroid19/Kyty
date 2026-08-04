@@ -4,8 +4,6 @@
 #include <cstring>
 #include <limits>
 
-#ifdef KYTY_EMU_ENABLED
-
 namespace Kyty::Libs::Audio {
 
 size_t AudioPcmQueueBytes(uint32_t frequency, uint32_t channels, AudioPcmFormat format, uint32_t target_milliseconds)
@@ -69,5 +67,3 @@ bool AudioPcmApplyChannelVolumes(const void* source, uint32_t frames, uint32_t c
 }
 
 } // namespace Kyty::Libs::Audio
-
-#endif

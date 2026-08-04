@@ -1,13 +1,9 @@
 #ifndef EMULATOR_INCLUDE_EMULATOR_AUDIOPCM_H_
 #define EMULATOR_INCLUDE_EMULATOR_AUDIOPCM_H_
 
-#include "Emulator/Common.h"
-
 #include <cstddef>
 #include <cstdint>
 #include <vector>
-
-#ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Audio {
 
@@ -32,7 +28,5 @@ enum class AudioPcmFormat
                                                const int* volumes, std::vector<uint8_t>* output);
 
 } // namespace Kyty::Libs::Audio
-
-#endif // KYTY_EMU_ENABLED
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_AUDIOPCM_H_ */
