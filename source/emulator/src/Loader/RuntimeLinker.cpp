@@ -18,11 +18,11 @@
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Loader/Elf.h"
 #include "Emulator/Loader/GuestCall.h"
+#include "Emulator/Loader/Instrumentation.h"
 #include "Emulator/Loader/Jit.h"
 #include "Emulator/Loader/MissingImport.h"
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/SymbolDatabase.h"
-#include "Emulator/Profiling.h"
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <cstdio>
@@ -664,7 +664,7 @@ uint64_t LoaderTlsRelocationValue(uint32_t relocation_type, uint64_t module_id, 
 
 static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	// KYTY_PROFILER_BLOCK("1");
 
@@ -760,7 +760,7 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program)
 
 static void relocate(uint32_t index, Elf64_Rela* r, Program* program, bool jmprela_table)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	auto ri = GetRelocationInfo(r, program);
 	if (jmprela_table && IsTracedPltRelocation(index))
@@ -840,7 +840,7 @@ static void relocate(uint32_t index, Elf64_Rela* r, Program* program, bool jmpre
 
 static void relocate_all(Elf64_Rela* records, uint64_t size, Program* program, bool jmprela_table)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	uint32_t index = 0;
 	for (auto* r = records; reinterpret_cast<uint8_t*>(r) < reinterpret_cast<uint8_t*>(records) + size; r++, index++)
@@ -1198,7 +1198,7 @@ uint64_t RuntimeLinker::GetProcParam()
 
 void RuntimeLinker::DbgDump(const String& folder)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
 
@@ -1253,7 +1253,7 @@ void RuntimeLinker::DbgDump(const String& folder)
 
 void RuntimeLinker::DbgDumpSymbols(const String& folder)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
 
@@ -1355,7 +1355,7 @@ Program* RuntimeLinker::FindProgramByFile(const String& elf_name)
 
 Program* RuntimeLinker::LoadProgram(const String& elf_name)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	Core::LockGuard lock(m_mutex);
 
@@ -1477,7 +1477,7 @@ void RuntimeLinker::SaveProgram(Program* program, const String& elf_name)
 
 void RuntimeLinker::Execute()
 {
-	KYTY_PROFILER_THREAD("Thread_Main");
+	KYTY_LOADER_PROFILE_THREAD("Thread_Main");
 
 	if (!ModuleLifecycleCoordinator::PrepareProvidersForExecution(this))
 	{
@@ -1627,7 +1627,7 @@ bool RuntimeLinker::IsRelocationInProgress() const
 
 void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* program, SymbolRecord* out_info, bool* bind_self)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	Core::LockGuard lock(m_mutex);
 
@@ -2336,7 +2336,7 @@ static uint64_t calc_base_size(const Elf64_Ehdr* ehdr, const Elf64_Phdr* phdr)
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void RuntimeLinker::LoadProgramToMemory(Program* program)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	EXIT_IF(program == nullptr || program->base_vaddr != 0 || program->base_size != 0 || program->elf == nullptr ||
 	        program->exception_handler != nullptr);
@@ -2510,7 +2510,7 @@ void RuntimeLinker::DeleteProgram(Program* p)
 
 void RuntimeLinker::ParseProgramDynamicInfo(Program* program)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->elf == nullptr);
@@ -2613,7 +2613,7 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program)
 
 static void InstallRelocateHandler(Program* program)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	uint64_t pltgot_vaddr = program->dynamic_info->pltgot_vaddr + program->base_vaddr;
 	uint64_t pltgot_size  = static_cast<uint64_t>(3) * 8;
@@ -2649,7 +2649,7 @@ static void InstallRelocateHandler(Program* program)
 
 void RuntimeLinker::Relocate(Program* program)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	EXIT_IF(program == nullptr);
 	if (program->rt != nullptr)
@@ -2742,7 +2742,7 @@ const LibraryId* RuntimeLinker::FindLibrary(const Program& program, const String
 
 void RuntimeLinker::CreateSymbolDatabase(Program* program)
 {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_LOADER_PROFILE_FUNCTION();
 
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->export_symbols != nullptr);

@@ -82,7 +82,9 @@ SOURCE_DEVTOOLS_INCLUDE_PREFIXES = (
 )
 PROFILER_INCLUDE_PATHS = (
     "Emulator/Profiler.h",
+    "Emulator/Profiling.h",
     "emulator/include/Emulator/Profiler.h",
+    "emulator/include/Emulator/Profiling.h",
 )
 
 @dataclass(frozen=True)
@@ -756,18 +758,20 @@ class BoundaryCheckerTests(unittest.TestCase):
             )
 
     def test_rejects_runtime_linker_profiler_include(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.write_fixture(root, "emulator/src/Loader/RuntimeLinker.cpp", '#include "Emulator/Profiler.h"\n')
+        for include_path in ("Emulator/Profiler.h", "Emulator/Profiling.h"):
+            with self.subTest(include_path=include_path):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.write_fixture(root, "emulator/src/Loader/RuntimeLinker.cpp", f'#include "{include_path}"\n')
 
-            expected = CheckResult(
-                exit_code=1,
-                diagnostics=(
-                    "emulator/src/Loader/RuntimeLinker.cpp:1: forbidden include (RuntimeLinker -> Profiler): Emulator/Profiler.h",
-                ),
-            )
-            self.assertEqual(check_source_root(root), expected)
-            self.assertEqual(check_source_root(root, strict=True), expected)
+                    expected = CheckResult(
+                        exit_code=1,
+                        diagnostics=(
+                            f"emulator/src/Loader/RuntimeLinker.cpp:1: forbidden include (RuntimeLinker -> Profiler): {include_path}",
+                        ),
+                    )
+                    self.assertEqual(check_source_root(root), expected)
+                    self.assertEqual(check_source_root(root, strict=True), expected)
 
     def test_rejects_runtime_linker_graphics_include(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
