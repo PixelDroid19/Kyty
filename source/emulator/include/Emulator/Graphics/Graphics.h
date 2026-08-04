@@ -49,8 +49,8 @@ int KYTY_SYSV_ABI      GraphicsSubmitAndFlipCommandBuffers(uint32_t count, void*
 int KYTY_SYSV_ABI      GraphicsSubmitDone();
 int KYTY_SYSV_ABI      GraphicsAreSubmitsAllowed();
 void KYTY_SYSV_ABI     GraphicsFlushMemory();
-int KYTY_SYSV_ABI      GraphicsAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata);
-int KYTY_SYSV_ABI      GraphicsDeleteEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id);
+int KYTY_SYSV_ABI      GraphicsAddEqEvent(::Kyty::Kernel::EventQueue::KernelEqueue eq, int id, void* udata);
+int KYTY_SYSV_ABI      GraphicsDeleteEqEvent(::Kyty::Kernel::EventQueue::KernelEqueue eq, int id);
 uint32_t KYTY_SYSV_ABI GraphicsDrawInitDefaultHardwareState(uint32_t* cmd, uint64_t size);
 uint32_t KYTY_SYSV_ABI GraphicsDrawInitDefaultHardwareState175(uint32_t* cmd, uint64_t size);
 uint32_t KYTY_SYSV_ABI GraphicsDrawInitDefaultHardwareState200(uint32_t* cmd, uint64_t size);

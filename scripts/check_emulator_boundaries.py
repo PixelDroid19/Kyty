@@ -81,6 +81,9 @@ GRAPHICS_TIME_PORT_SOURCE_FILES = (
 	"emulator/src/Graphics/GraphicsRenderEop.cpp",
 	"emulator/src/Graphics/VideoOut.cpp",
 )
+GRAPHICS_ERROR_SOURCE_FILES = (
+    "emulator/src/Graphics/Graphics.cpp",
+)
 LOADER_SOURCE_FILES = (
     "emulator/src/Loader/SystemContent.cpp",
 )
@@ -307,6 +310,10 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path == _canonical_include_path(KERNEL_TIME_INCLUDE) for canonical_path in canonical_paths
     ):
         return "Graphics -> Kernel time"
+    if relative_path in GRAPHICS_ERROR_SOURCE_FILES and any(
+        canonical_path == _canonical_include_path("Emulator/Libs/Errno.h") for canonical_path in canonical_paths
+    ):
+        return "Graphics -> Libs errno"
     if relative_path in LOADER_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
@@ -961,6 +968,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Graphics/Graphics.cpp:1: forbidden include (Graphics -> Kernel time): Emulator/Kernel/Time.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_libs_errno_include_from_graphics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Graphics/Graphics.cpp", '#include "Emulator/Libs/Errno.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Graphics/Graphics.cpp:1: forbidden include (Graphics -> Libs errno): Emulator/Libs/Errno.h",
                     ),
                 ),
             )

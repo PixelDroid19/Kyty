@@ -24,10 +24,10 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/GpuMappingLifecycle.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/TimePort.h"
-#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
 #include "Emulator/PresentationStats.h"
@@ -42,6 +42,8 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+using ::Kyty::Kernel::OK;
 
 namespace {
 
@@ -684,25 +686,25 @@ void KYTY_SYSV_ABI GraphicsFlushMemory()
 	GpuMemoryFlushAll(WindowGetGraphicContext());
 }
 
-int KYTY_SYSV_ABI GraphicsAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata)
+int KYTY_SYSV_ABI GraphicsAddEqEvent(::Kyty::Kernel::EventQueue::KernelEqueue eq, int id, void* udata)
 {
 	PRINT_NAME();
 
 	if (eq == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EBADF;
+		return Kernel::KERNEL_ERROR_EBADF;
 	}
 
 	return GraphicsRenderAddEqEvent(eq, id, udata);
 }
 
-int KYTY_SYSV_ABI GraphicsDeleteEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id)
+int KYTY_SYSV_ABI GraphicsDeleteEqEvent(::Kyty::Kernel::EventQueue::KernelEqueue eq, int id)
 {
 	PRINT_NAME();
 
 	if (eq == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EBADF;
+		return Kernel::KERNEL_ERROR_EBADF;
 	}
 
 	return GraphicsRenderDeleteEqEvent(eq, id);
