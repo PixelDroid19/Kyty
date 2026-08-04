@@ -29,6 +29,7 @@
 #include "Emulator/Graphics/VulkanQueueIdentity.h"
 #include "Emulator/Graphics/WindowControls.h"
 #include "Emulator/Host/CaptureImageCodec.h"
+#include "Emulator/Host/HostWindow.h"
 #include "Emulator/Loader/SystemContent.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
@@ -43,11 +44,9 @@
 #include "SDL_keycode.h"
 #include "SDL_mouse.h"
 #include "SDL_stdinc.h"
-#include "SDL_surface.h"
 #include "SDL_thread.h"
 #include "SDL_touch.h"
 #include "SDL_video.h"
-#include "SDL_vulkan.h"
 
 #include <atomic>
 #include <chrono>
@@ -298,18 +297,13 @@ struct SurfaceCapabilities
 
 struct WindowContext
 {
-	GraphicContext       graphic_ctx;
-	VulkanSwapchain*     swapchain               = nullptr;
-	SDL_Window*          window                  = nullptr;
-	bool                 window_hidden           = true;
-	bool                 fullscreen_requested    = false;
-	bool                 window_minimized        = false;
-	bool                 cursor_visible          = true;
-	uint64_t             cursor_hide_deadline_ms = 0;
-	VkSurfaceKHR         surface                 = nullptr;
-	SurfaceCapabilities* surface_capabilities    = nullptr;
-	GameApi*             game                    = nullptr;
-	HostWindowControls   controls;
+	GraphicContext                    graphic_ctx;
+	VulkanSwapchain*                  swapchain               = nullptr;
+	::Kyty::Emulator::Host::HostWindow* host_window            = nullptr;
+	VkSurfaceKHR                      surface                 = nullptr;
+	SurfaceCapabilities*              surface_capabilities    = nullptr;
+	GameApi*                          game                    = nullptr;
+	HostWindowControls                controls;
 
 	char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = {0};
 	char processor_name[64]                            = {0};
@@ -419,59 +413,31 @@ static bool DumpVideoOutFrameSelected(int frame)
 	return false;
 }
 
-constexpr uint64_t HOST_CURSOR_HIDE_DELAY_MS = 2000;
-
 static void SetHostCursorVisible(bool visible)
 {
-	if (g_window_ctx == nullptr || g_window_ctx->cursor_visible == visible)
+	if (g_window_ctx == nullptr || g_window_ctx->host_window == nullptr)
 	{
 		return;
 	}
-	SDL_ShowCursor(visible ? SDL_ENABLE : SDL_DISABLE);
-	g_window_ctx->cursor_visible = visible;
+	g_window_ctx->host_window->SetCursorVisible(visible);
 }
 
 static void UpdateHostCursorPolicy(bool temporary_visibility = false)
 {
-	if (g_window_ctx == nullptr)
+	if (g_window_ctx == nullptr || g_window_ctx->host_window == nullptr)
 	{
 		return;
 	}
-	if (!g_window_ctx->fullscreen_requested)
-	{
-		g_window_ctx->cursor_hide_deadline_ms = 0;
-		SetHostCursorVisible(true);
-		return;
-	}
-	if (temporary_visibility)
-	{
-		SetHostCursorVisible(true);
-		g_window_ctx->cursor_hide_deadline_ms = WindowSteadyMs() + HOST_CURSOR_HIDE_DELAY_MS;
-		return;
-	}
-	if (g_window_ctx->cursor_hide_deadline_ms == 0 || WindowSteadyMs() >= g_window_ctx->cursor_hide_deadline_ms)
-	{
-		g_window_ctx->cursor_hide_deadline_ms = 0;
-		SetHostCursorVisible(false);
-	}
+	g_window_ctx->host_window->UpdateCursorPolicy(temporary_visibility);
 }
 
 static bool ToggleHostFullscreen()
 {
-	if (g_window_ctx == nullptr || g_window_ctx->window == nullptr)
+	if (g_window_ctx == nullptr || g_window_ctx->host_window == nullptr)
 	{
 		return false;
 	}
-	const bool     target = !g_window_ctx->fullscreen_requested;
-	const uint32_t flags  = target ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0u;
-	if (SDL_SetWindowFullscreen(g_window_ctx->window, flags) != 0)
-	{
-		std::fprintf(stderr, "Kyty window fullscreen toggle failed: %s\n", SDL_GetError());
-		return false;
-	}
-	g_window_ctx->fullscreen_requested = target;
-	UpdateHostCursorPolicy();
-	return true;
+	return g_window_ctx->host_window->ToggleFullscreen();
 }
 
 static void NativeCaptureConfigure(WindowContext* ctx)
@@ -791,12 +757,6 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	}
 }
 
-constexpr const char* KYTY_SDL_WINDOW_CAPTION = "Game";
-// constexpr uint32_t    KYTY_SDL_WINDOW_FLAGS       = (static_cast<uint32_t>(SDL_WINDOW_HIDDEN) |
-// static_cast<uint32_t>(SDL_WINDOW_OPENGL));
-constexpr uint32_t KYTY_SDL_WINDOW_FLAGS       = (static_cast<uint32_t>(SDL_WINDOW_HIDDEN) | static_cast<uint32_t>(SDL_WINDOW_VULKAN));
-constexpr int      KYTY_SDL_WINDOWPOS_CENTERED = SDL_WINDOWPOS_CENTERED; /*NOLINT(hicpp-signed-bitwise)*/
-
 static int game_sdl_event_filter(void* /*userdata*/, SDL_Event* /*event*/)
 {
 	//	game_api_private_t *p = (game_api_private_t*)userdata;
@@ -924,7 +884,7 @@ bool game_init(GameApi* game, const Core::Timer& timer, void* data)
 	game->m_screen_width  = ctx->screen_width;
 	game->m_screen_height = ctx->screen_height;
 
-	// SDL_ShowWindow(ctx->window);
+	// The first presentation shows the host window.
 
 	CalcFrameTime(game, timer.GetTimeS());
 
@@ -1279,7 +1239,8 @@ bool game_need_exit(GameApi* game)
 
 bool game_is_paused(GameApi* game)
 {
-	return game->m_game_is_paused || (g_window_ctx != nullptr && g_window_ctx->window_minimized);
+	return game->m_game_is_paused ||
+	       (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr && g_window_ctx->host_window->IsMinimized());
 }
 
 void game_event_resize(GameApi* game, uint32_t new_width, uint32_t new_height)
@@ -1332,18 +1293,18 @@ static void process_window_event(GameApi* game, SDL_WindowEvent window)
 
 		case SDL_WINDOWEVENT_MINIMIZED:
 			printf("Window %" PRIu32 " minimized\n", window.windowID);
-			if (g_window_ctx != nullptr)
+			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
-				g_window_ctx->window_minimized = true;
+				g_window_ctx->host_window->SetMinimized(true);
 				SetHostCursorVisible(true);
 			}
 			break;
 		case SDL_WINDOWEVENT_MAXIMIZED: printf("Window %" PRIu32 " maximized\n", window.windowID); break;
 		case SDL_WINDOWEVENT_RESTORED:
 			printf("Window %" PRIu32 " restored\n", window.windowID);
-			if (g_window_ctx != nullptr)
+			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
-				g_window_ctx->window_minimized = false;
+				g_window_ctx->host_window->SetMinimized(false);
 				UpdateHostCursorPolicy();
 			}
 			break;
@@ -1351,8 +1312,9 @@ static void process_window_event(GameApi* game, SDL_WindowEvent window)
 		case SDL_WINDOWEVENT_LEAVE: printf("Mouse left window %" PRIu32 "\n", window.windowID); break;
 		case SDL_WINDOWEVENT_FOCUS_GAINED:
 			printf("Window %" PRIu32 " gained keyboard focus\n", window.windowID);
-			if (g_window_ctx != nullptr)
+			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
+				g_window_ctx->host_window->SetFocused(true);
 				g_window_ctx->controls.SetFocused(true);
 				const uint8_t* keyboard = SDL_GetKeyboardState(nullptr);
 				g_window_ctx->controls.ReconcileEnter(keyboard[SDL_SCANCODE_RETURN] != 0 || keyboard[SDL_SCANCODE_KP_ENTER] != 0);
@@ -1361,8 +1323,9 @@ static void process_window_event(GameApi* game, SDL_WindowEvent window)
 			break;
 		case SDL_WINDOWEVENT_FOCUS_LOST:
 			printf("Window %" PRIu32 " lost keyboard focus\n", window.windowID);
-			if (g_window_ctx != nullptr)
+			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
+				g_window_ctx->host_window->SetFocused(false);
 				g_window_ctx->controls.SetFocused(false);
 				SetHostCursorVisible(true);
 			}
@@ -1880,38 +1843,12 @@ void game_main_loop(GameApi* game, void* data)
 static void WindowCreate(WindowContext* ctx)
 {
 	EXIT_IF(ctx == nullptr);
-	EXIT_IF(ctx->window != nullptr);
+	EXIT_IF(ctx->host_window != nullptr);
 	EXIT_IF(ctx->graphic_ctx.screen_width == 0);
 	EXIT_IF(ctx->graphic_ctx.screen_height == 0);
 
-	int width  = static_cast<int>(ctx->graphic_ctx.screen_width);
-	int height = static_cast<int>(ctx->graphic_ctx.screen_height);
-
-	if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0)
-	{
-		EXIT("%s\n", SDL_GetError());
-	}
-
-	// SDL_JoystickEventState(SDL_ENABLE);
-	// SDL_JoystickOpen(device_index)
-
-	printf("WindowCreate(): width = %d, height = %d\n", width, height);
-
-	ctx->window = SDL_CreateWindow(KYTY_SDL_WINDOW_CAPTION, KYTY_SDL_WINDOWPOS_CENTERED, KYTY_SDL_WINDOWPOS_CENTERED, width, height,
-	                               KYTY_SDL_WINDOW_FLAGS);
-
-	ctx->window_hidden = true;
-
-	if (ctx->window == nullptr)
-	{
-		EXIT("%s\n", SDL_GetError());
-	}
-
-	SDL_SetWindowResizable(ctx->window, SDL_TRUE);
-	const uint32_t window_flags = SDL_GetWindowFlags(ctx->window);
-	ctx->fullscreen_requested   = (window_flags & SDL_WINDOW_FULLSCREEN) != 0u;
-	ctx->window_minimized       = (window_flags & SDL_WINDOW_MINIMIZED) != 0u;
-	ctx->controls.SetFocused((window_flags & SDL_WINDOW_INPUT_FOCUS) != 0u);
+	ctx->host_window = ::Kyty::Emulator::Host::HostWindow::Create(ctx->graphic_ctx.screen_width, ctx->graphic_ctx.screen_height);
+	ctx->controls.SetFocused(ctx->host_window->IsFocused());
 }
 
 static void VulkanGetSurfaceCapabilities(VkPhysicalDevice physical_device, VkSurfaceKHR surface, SurfaceCapabilities* r)
@@ -2493,28 +2430,26 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	return device;
 }
 
-static void VulkanGetExtensions(SDL_Window* window, VulkanExtensions* r)
+static void VulkanGetExtensions(const ::Kyty::Emulator::Host::HostWindow* window, VulkanExtensions* r)
 {
 	EXIT_IF(window == nullptr);
 	EXIT_IF(r == nullptr);
 
-	uint32_t required_extensions_count  = 0;
 	uint32_t available_extensions_count = 0;
 	uint32_t available_layers_count     = 0;
+	std::vector<const char*> host_extensions;
 
-	auto sdl_result = SDL_Vulkan_GetInstanceExtensions(window, &required_extensions_count, nullptr);
+	const bool host_result = window->GetVulkanInstanceExtensions(&host_extensions);
 
-	EXIT_NOT_IMPLEMENTED(sdl_result == SDL_FALSE);
-	EXIT_NOT_IMPLEMENTED(required_extensions_count == 0);
+	EXIT_NOT_IMPLEMENTED(!host_result);
+	EXIT_NOT_IMPLEMENTED(host_extensions.empty() || host_extensions.size() > UINT32_MAX);
 
-	r->required_extensions = Vector<const char*>(required_extensions_count, false); // @suppress("Ambiguous problem")
+	r->required_extensions = Vector<const char*>(static_cast<uint32_t>(host_extensions.size()), false); // @suppress("Ambiguous problem")
 	r->required_extensions.Memset(0);
-
-	sdl_result = SDL_Vulkan_GetInstanceExtensions(window, &required_extensions_count, r->required_extensions.GetData());
-
-	EXIT_NOT_IMPLEMENTED(sdl_result == SDL_FALSE);
-	EXIT_NOT_IMPLEMENTED(required_extensions_count == 0);
-	EXIT_NOT_IMPLEMENTED(required_extensions_count != r->required_extensions.Size());
+	for (uint32_t i = 0; i < r->required_extensions.Size(); i++)
+	{
+		r->required_extensions[i] = host_extensions[i];
+	}
 
 	vkEnumerateInstanceExtensionProperties(nullptr, &available_extensions_count, nullptr);
 
@@ -2913,7 +2848,7 @@ static VulkanSwapchain* VulkanCreateSwapchain(GraphicContext* ctx, uint32_t imag
 	return s;
 }
 
-// Rebuild swapchain after surface state changes (e.g. first SDL_ShowWindow on
+// Rebuild swapchain after surface state changes (e.g. first host-window show on
 // X11/Mesa). Presentation semaphores follow swapchain-image ownership.
 static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uint32_t image_count)
 {
@@ -2987,14 +2922,14 @@ static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uin
 
 static void VulkanCreate(WindowContext* ctx)
 {
-	EXIT_IF(ctx->window == nullptr);
+	EXIT_IF(ctx->host_window == nullptr);
 	EXIT_IF(ctx->graphic_ctx.instance != nullptr);
 	EXIT_IF(ctx->graphic_ctx.physical_device != nullptr);
 	EXIT_IF(ctx->graphic_ctx.device != nullptr);
 	EXIT_IF(ctx->surface_capabilities != nullptr);
 
 	VulkanExtensions r;
-	VulkanGetExtensions(ctx->window, &r);
+	VulkanGetExtensions(ctx->host_window, &r);
 
 	VkApplicationInfo app_info {};
 	app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -3075,7 +3010,7 @@ static void VulkanCreate(WindowContext* ctx)
 		}
 	}
 
-	if (SDL_Vulkan_CreateSurface(ctx->window, ctx->graphic_ctx.instance, &ctx->surface) == SDL_FALSE)
+	if (!ctx->host_window->CreateVulkanSurface(ctx->graphic_ctx.instance, &ctx->surface))
 	{
 		EXIT("Could not create a Vulkan surface");
 	}
@@ -3233,7 +3168,7 @@ static void VulkanCreate(WindowContext* ctx)
 	VulkanCreateQueues(&ctx->graphic_ctx, queues);
 
 	ctx->swapchain = VulkanCreateSwapchain(&ctx->graphic_ctx, 2);
-	DebugOverlayInit(ctx->window, &ctx->graphic_ctx, ctx->swapchain);
+	DebugOverlayInit(ctx->host_window, &ctx->graphic_ctx, ctx->swapchain);
 }
 
 void WindowInit(uint32_t width, uint32_t height)
@@ -3320,6 +3255,7 @@ GraphicContext* WindowGetGraphicContext()
 void WindowUpdateIcon()
 {
 	EXIT_IF(g_window_ctx == nullptr);
+	EXIT_IF(g_window_ctx->host_window == nullptr);
 
 	static Image* icon = nullptr;
 	if (icon == nullptr)
@@ -3335,7 +3271,7 @@ void WindowUpdateIcon()
 
 	if (icon != nullptr)
 	{
-		SDL_SetWindowIcon(g_window_ctx->window, static_cast<SDL_Surface*>(icon->GetSdlSurface()));
+		g_window_ctx->host_window->SetIcon(icon->GetSdlSurface());
 	}
 }
 
@@ -3343,6 +3279,7 @@ void WindowUpdateTitle()
 {
 	EXIT_IF(g_window_ctx == nullptr);
 	EXIT_IF(g_window_ctx->game == nullptr);
+	EXIT_IF(g_window_ctx->host_window == nullptr);
 
 	static char title[128];
 	static char title_id[12];
@@ -3368,7 +3305,7 @@ void WindowUpdateTitle()
 		}
 	}
 
-	// Throttle title updates: X11/Wayland SDL_SetWindowTitle is a round-trip and
+	// Throttle title updates: X11/Wayland host title updates are round trips and
 	// was invoked every present. Match the FPS EMA window (~4 Hz).
 	static double s_last_title_time = -1.0;
 	if (s_last_title_time >= 0.0 && (t - s_last_title_time) < FPS_UPDATE_TIME)
@@ -3381,7 +3318,7 @@ void WindowUpdateTitle()
 	                              (has_title_id ? title_id : ""), (has_title_id ? ", " : ""), (has_app_ver ? app_ver : ""),
 	                              (has_app_ver ? ", " : ""), g_window_ctx->device_name, g_window_ctx->processor_name, frame_num, fps_now);
 
-	SDL_SetWindowTitle(g_window_ctx->window, fps.C_Str());
+	g_window_ctx->host_window->SetTitle(fps.C_Str());
 }
 
 void WindowDrawBuffer(VideoOutVulkanImage* image)
@@ -3391,18 +3328,15 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	EXIT_IF(image == nullptr);
 	EXIT_IF(g_window_ctx == nullptr);
 	EXIT_IF(g_window_ctx->swapchain == nullptr);
+	EXIT_IF(g_window_ctx->host_window == nullptr);
 
 	bool just_shown = false;
-	if (g_window_ctx->window_hidden)
+	if (g_window_ctx->host_window->IsHidden())
 	{
 		WindowUpdateIcon();
 
-		SDL_ShowWindow(g_window_ctx->window);
-		// Drain SDL events so the surface size/visibility settle before acquire.
-		SDL_PumpEvents();
-
-		g_window_ctx->window_hidden = false;
-		just_shown                  = true;
+		// Drain host events so the surface size/visibility settle before acquire.
+		just_shown = g_window_ctx->host_window->ShowAndPumpEvents();
 	}
 
 	// First present after ShowWindow often returns OUT_OF_DATE/SUBOPTIMAL on

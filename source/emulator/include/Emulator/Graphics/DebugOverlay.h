@@ -7,8 +7,9 @@
 
 #include <vulkan/vulkan_core.h>
 
-struct SDL_Window;
-union SDL_Event;
+namespace Kyty::Emulator::Host {
+class HostWindow;
+}
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -18,10 +19,10 @@ struct GraphicContext;
 struct VulkanSwapchain;
 
 // In-window diagnostic HUD (ImGui). Read-only; never changes guest GPU state.
-void DebugOverlayInit(SDL_Window* window, GraphicContext* ctx, VulkanSwapchain* swapchain);
+void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext* ctx, VulkanSwapchain* swapchain);
 void DebugOverlayShutdown(GraphicContext* ctx);
 void DebugOverlayOnSwapchainRecreated(GraphicContext* ctx, VulkanSwapchain* swapchain);
-void DebugOverlayProcessEvent(const SDL_Event* event);
+void DebugOverlayProcessEvent(const void* event);
 void DebugOverlayToggle();
 [[nodiscard]] bool DebugOverlayIsVisible();
 

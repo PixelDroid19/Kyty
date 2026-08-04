@@ -6,6 +6,7 @@
 
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Host/HostWindow.h"
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -156,12 +157,15 @@ void DrawHud(const DebugStatsSnapshot& snap)
 
 } // namespace
 
-void DebugOverlayInit(SDL_Window* window, GraphicContext* ctx, VulkanSwapchain* swapchain)
+void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext* ctx, VulkanSwapchain* swapchain)
 {
 	EXIT_IF(window == nullptr);
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(swapchain == nullptr);
 	EXIT_IF(g_initialized);
+
+	auto* native_window = static_cast<SDL_Window*>(window->GetNativeHandle());
+	EXIT_IF(native_window == nullptr);
 
 	g_visible = EnvHudEnabledByDefault();
 	DebugStatsInit();
@@ -189,7 +193,7 @@ void DebugOverlayInit(SDL_Window* window, GraphicContext* ctx, VulkanSwapchain* 
 		return;
 	}
 
-	ImGui_ImplSDL2_InitForVulkan(window);
+	ImGui_ImplSDL2_InitForVulkan(native_window);
 
 	ImGui_ImplVulkan_InitInfo init_info {};
 	init_info.Instance           = ctx->instance;
@@ -294,13 +298,13 @@ void DebugOverlayOnSwapchainRecreated(GraphicContext* ctx, VulkanSwapchain* swap
 	}
 }
 
-void DebugOverlayProcessEvent(const SDL_Event* event)
+void DebugOverlayProcessEvent(const void* event)
 {
 	if (!g_initialized || event == nullptr)
 	{
 		return;
 	}
-	ImGui_ImplSDL2_ProcessEvent(event);
+	ImGui_ImplSDL2_ProcessEvent(static_cast<const SDL_Event*>(event));
 }
 
 void DebugOverlayToggle()
