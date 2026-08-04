@@ -351,6 +351,10 @@ void Spirv::WriteHeader()
 	if (spirv_uses_f64(m_code))
 	{
 		capabilities.Add("OpCapability Float64");
+		// The f64 lowering uses a 64-bit integer bitcast as its transport type.
+		// Keep Int64 paired with Float64 so validators see the capability required
+		// by the generated OpBitcast instructions.
+		capabilities.Add("OpCapability Int64");
 	}
 	if (spirv_uses_f16(m_code))
 	{
@@ -797,12 +801,6 @@ void Spirv::WriteTypes()
                           %int = OpTypeInt 32 1
                          %uint = OpTypeInt 32 0
                          %bool = OpTypeBool
-                       %double = OpTypeFloat 64
-                        %half = OpTypeFloat 16
-                       %short = OpTypeInt 16 1
-                      %ushort = OpTypeInt 16 0
-                       %ulong = OpTypeInt 64 0
-                       %slong = OpTypeInt 64 1
                       %v2float = OpTypeVector %float 2
                       %v3float = OpTypeVector %float 3
                       %v4float = OpTypeVector %float 4
@@ -873,6 +871,28 @@ void Spirv::WriteTypes()
 static const char* compute_types = R"(
 )";
 
+	// Optional scalar types must be emitted only when the shader uses them.
+	// Keeping unused OpTypeFloat 64/OpTypeFloat 16 declarations in every module
+	// forces capabilities that ordinary shaders do not declare (and validators
+	// correctly reject the resulting module).
+	String8 optional_types;
+	if (spirv_uses_f64(m_code))
+	{
+		optional_types += "\n %double = OpTypeFloat 64\n";
+	}
+	if (spirv_uses_f16(m_code))
+	{
+		optional_types += "\n  %half = OpTypeFloat 16\n";
+	}
+	if (spirv_uses_i16(m_code))
+	{
+		optional_types += "\n %short = OpTypeInt 16 1\n %ushort = OpTypeInt 16 0\n";
+	}
+	if (spirv_uses_f64(m_code))
+	{
+		optional_types += "\n %ulong = OpTypeInt 64 0\n %slong = OpTypeInt 64 1\n";
+	}
+	m_source += optional_types;
 	m_source += types;
 
 	switch (m_code.GetType())
