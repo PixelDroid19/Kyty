@@ -30,7 +30,7 @@ extern "C" {
 }
 #endif
 
-namespace Kyty::Libs::AudioVideoBackend {
+namespace Kyty::Emulator::AudioVideoBackend {
 
 #if defined(KYTY_HAVE_FFMPEG)
 
@@ -980,4 +980,4 @@ void Decoder::Close()
 	}
 }
 
-} // namespace Kyty::Libs::AudioVideoBackend
+} // namespace Kyty::Emulator::AudioVideoBackend

@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace Kyty::Libs::AudioVideoBackend {
+namespace Kyty::Emulator::AudioVideoBackend {
 
 enum class Status : uint8_t
 {
@@ -86,6 +86,12 @@ private:
 	std::unique_ptr<State> state_;
 };
 
-} // namespace Kyty::Libs::AudioVideoBackend
+} // namespace Kyty::Emulator::AudioVideoBackend
+
+// Compatibility view for existing guest-facing HLE code. The decoder is a
+// host runtime service, not an Audio library implementation.
+namespace Kyty::Libs {
+namespace AudioVideoBackend = ::Kyty::Emulator::AudioVideoBackend;
+}
 
 #endif // EMULATOR_INCLUDE_EMULATOR_AUDIO_VIDEO_BACKEND_H_

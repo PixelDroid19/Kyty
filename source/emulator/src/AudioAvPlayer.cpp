@@ -39,9 +39,9 @@ namespace Kyty::Libs::Audio {
 
 namespace VideoFrameMemory = Kyty::Emulator::VideoFrameMemory;
 namespace GuestRuntimePort = ::Kyty::Emulator::GuestRuntimePort;
-// Kyty::Libs::AudioVideoBackend is the canonical host-side decoder namespace.
-// This local alias keeps the guest-facing implementation readable without changing its ABI.
-namespace AudioVideoBackend = ::Kyty::Libs::AudioVideoBackend;
+// Keep the guest-facing implementation readable while the decoder remains a
+// neutral host runtime service.
+namespace AudioVideoBackend = ::Kyty::Emulator::AudioVideoBackend;
 
 namespace AvPlayer {
 
