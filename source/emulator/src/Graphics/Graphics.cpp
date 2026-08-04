@@ -7,6 +7,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/GuestMemory.h"
 #include "Emulator/GpuMemoryFault.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
@@ -93,6 +94,35 @@ bool GraphicsQueryPresentationStats(void* context, Kyty::Emulator::PresentationS
 	return WindowGetPresentStats(out);
 }
 
+bool GraphicsQueryMappedRange(uint64_t address, uint64_t size, Kyty::Emulator::GuestMemory::MappedRange* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+
+	LibKernel::Memory::KernelMappedRange mapped {};
+	if (!LibKernel::Memory::KernelQueryMappedRange(address, size, &mapped))
+	{
+		return false;
+	}
+
+	switch (mapped.kind)
+	{
+		case LibKernel::Memory::KernelMappedRangeKind::None: out->kind = Kyty::Emulator::GuestMemory::MappedRangeKind::None; break;
+		case LibKernel::Memory::KernelMappedRangeKind::Physical: out->kind = Kyty::Emulator::GuestMemory::MappedRangeKind::Physical; break;
+		case LibKernel::Memory::KernelMappedRangeKind::Flexible: out->kind = Kyty::Emulator::GuestMemory::MappedRangeKind::Flexible; break;
+	}
+	out->base = mapped.base;
+	out->size = mapped.size;
+	return true;
+}
+
+int GraphicsQueryProtection(void* address, void** start, void** end, int* protection)
+{
+	return LibKernel::Memory::KernelQueryMemoryProtection(address, start, end, protection);
+}
+
 } // namespace
 
 KYTY_SUBSYSTEM_INIT(Graphics)
@@ -121,6 +151,8 @@ KYTY_SUBSYSTEM_INIT(Graphics)
 	    GraphicsReleaseGpuMappingRange,
 	};
 	EXIT_IF(!LibKernel::Memory::GetGpuMappingLifecyclePort().Install(gpu_mapping_lifecycle_callbacks));
+	const Kyty::Emulator::GuestMemory::Callbacks guest_memory_callbacks {GraphicsQueryMappedRange, GraphicsQueryProtection};
+	EXIT_IF(!Kyty::Emulator::GuestMemory::GetPort().Install(guest_memory_callbacks));
 	const Kyty::Emulator::VideoFrameMemory::Callbacks video_frame_memory_callbacks {
 	    GuestTextureLayoutRegisterLinear,
 	    GuestTextureLayoutUnregister,
@@ -2426,7 +2458,7 @@ static bool IsReadableGuestRange(const void* address, size_t bytes)
 
 	void* start = nullptr;
 	void* end   = nullptr;
-	if (LibKernel::Memory::KernelQueryMemoryProtection(const_cast<void*>(address), &start, &end, nullptr) != OK)
+	if (Kyty::Emulator::GuestMemory::GetPort().QueryProtection(const_cast<void*>(address), &start, &end, nullptr) != OK)
 	{
 		return false;
 	}

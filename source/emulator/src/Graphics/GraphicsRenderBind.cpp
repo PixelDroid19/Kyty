@@ -32,7 +32,7 @@
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Graphics/VulkanVertexInputLayout.h"
 #include "Emulator/Graphics/Window.h"
-#include "Emulator/Kernel/Memory.h"
+#include "Emulator/GuestMemory.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
@@ -147,13 +147,13 @@ static Emulator::Agent::Lifecycle::StorageBindingProvenance DescribeStorageBindi
 }
 
 static Emulator::Agent::Lifecycle::StorageRangeBacking DescribeStorageRangeBacking(
-	LibKernel::Memory::KernelMappedRangeKind kind)
+	Emulator::GuestMemory::MappedRangeKind kind)
 {
 	switch (kind)
 	{
-		case LibKernel::Memory::KernelMappedRangeKind::None: return Emulator::Agent::Lifecycle::StorageRangeBacking::None;
-		case LibKernel::Memory::KernelMappedRangeKind::Physical: return Emulator::Agent::Lifecycle::StorageRangeBacking::Physical;
-		case LibKernel::Memory::KernelMappedRangeKind::Flexible: return Emulator::Agent::Lifecycle::StorageRangeBacking::Flexible;
+		case Emulator::GuestMemory::MappedRangeKind::None: return Emulator::Agent::Lifecycle::StorageRangeBacking::None;
+		case Emulator::GuestMemory::MappedRangeKind::Physical: return Emulator::Agent::Lifecycle::StorageRangeBacking::Physical;
+		case Emulator::GuestMemory::MappedRangeKind::Flexible: return Emulator::Agent::Lifecycle::StorageRangeBacking::Flexible;
 	}
 	return Emulator::Agent::Lifecycle::StorageRangeBacking::None;
 }
@@ -161,8 +161,8 @@ static Emulator::Agent::Lifecycle::StorageRangeBacking DescribeStorageRangeBacki
 static void ReportStorageRange(const ShaderStorageResources& storage_buffers, int index, const ShaderBufferResource& resource,
 	                           uint64_t base, uint64_t declared_size, uint64_t materialized_size)
 {
-	LibKernel::Memory::KernelMappedRange mapped_range {};
-	const bool has_mapped_range = declared_size != 0 && LibKernel::Memory::KernelQueryMappedRange(base, declared_size, &mapped_range);
+	Emulator::GuestMemory::MappedRange mapped_range {};
+	const bool has_mapped_range = declared_size != 0 && Emulator::GuestMemory::GetPort().QueryMappedRange(base, declared_size, &mapped_range);
 
 	Emulator::Agent::Lifecycle::StorageRangeContext context {};
 	context.binding           = DescribeStorageBinding(storage_buffers, index);

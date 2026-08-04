@@ -20,7 +20,7 @@
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Window.h"
-#include "Emulator/Kernel/Memory.h"
+#include "Emulator/GuestMemory.h"
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
@@ -54,13 +54,13 @@ uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_
 		const unsigned         ordinal = dump_count.fetch_add(1, std::memory_order_relaxed);
 		if (ordinal < 128u)
 		{
-			LibKernel::Memory::KernelMappedRange mapped {};
-			const bool mapped_range = LibKernel::Memory::KernelQueryMappedRange(reinterpret_cast<uint64_t>(buf), size, &mapped);
+			Emulator::GuestMemory::MappedRange mapped {};
+			const bool mapped_range = Emulator::GuestMemory::GetPort().QueryMappedRange(reinterpret_cast<uint64_t>(buf), size, &mapped);
 			void*      protection_start = nullptr;
 			void*      protection_end   = nullptr;
 			int        protection       = 0;
-			const int  protection_result = LibKernel::Memory::KernelQueryMemoryProtection(const_cast<uint8_t*>(buf), &protection_start,
-			                                                                               &protection_end, &protection);
+			const int  protection_result = Emulator::GuestMemory::GetPort().QueryProtection(const_cast<uint8_t*>(buf), &protection_start,
+			                                                                                &protection_end, &protection);
 			std::fprintf(stderr,
 			             "KYTY_DUMP_HASH_RANGE ordinal=%u type=%u buf=0x%012" PRIx64 " size=0x%012" PRIx64
 			             " mapped=%u base=0x%012" PRIx64 " map_size=0x%012" PRIx64 " protection_result=%d start=0x%012" PRIx64
