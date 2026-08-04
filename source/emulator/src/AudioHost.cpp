@@ -153,7 +153,7 @@ void HostAudio::Shutdown()
 HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format)
 {
 	std::lock_guard lock(m_impl->mutex);
-	if (m_impl->shutting_down || samples_num == 0 || freq == 0)
+	if (m_impl->shutting_down || !Kyty::Emulator::HostClock::IsPeriodicIntervalValid(samples_num, freq))
 	{
 		return Id::Invalid();
 	}
@@ -420,7 +420,7 @@ bool HostAudio::AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_
 HostAudio::Id HostAudio::AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format)
 {
 	std::lock_guard lock(m_impl->mutex);
-	if (m_impl->shutting_down || samples_num == 0 || freq == 0)
+	if (m_impl->shutting_down || !Kyty::Emulator::HostClock::IsPeriodicIntervalValid(samples_num, freq))
 	{
 		return Id::Invalid();
 	}

@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -55,18 +56,32 @@ bool HostClockContract()
 
 bool PeriodicIntervalContract()
 {
-	constexpr uint32_t samples   = 256;
-	constexpr uint32_t frequency = 44'100;
-	constexpr uint32_t intervals = 441;
-	uint64_t           remainder = 0;
-	uint64_t           total     = 0;
+	constexpr uint32_t samples           = 256;
+	constexpr uint32_t frequency         = 44'100;
+	constexpr uint32_t intervals         = 441;
+	uint64_t           remainder         = 0;
+	uint64_t           invalid_remainder = 17;
+	uint64_t           total             = 0;
 	for (uint32_t i = 0; i < intervals; i++)
 	{
 		total += HostClock::NextPeriodicIntervalMicroseconds(samples, frequency, &remainder);
 	}
 	constexpr uint64_t expected = (1'000'000ull * samples * intervals) / frequency;
-	return Check(total == expected, "fractional periodic intervals accumulated drift") &&
-	       Check(remainder == 0, "fractional periodic interval retained an unexpected remainder");
+	return Check(HostClock::IsPeriodicIntervalValid(1, 1), "maximum periodic interval was rejected") &&
+	       Check(HostClock::IsPeriodicIntervalValid(4'800, 48'000), "known 48 kHz interval was rejected") &&
+	       Check(HostClock::IsPeriodicIntervalValid(samples, frequency), "known 44.1 kHz interval was rejected") &&
+	       Check(!HostClock::IsPeriodicIntervalValid(0, frequency), "zero-sample interval was accepted") &&
+	       Check(!HostClock::IsPeriodicIntervalValid(samples, 0), "zero-frequency interval was accepted") &&
+	       Check(!HostClock::IsPeriodicIntervalValid(std::numeric_limits<uint32_t>::max(), 1), "unbounded interval was accepted") &&
+	       Check(total == expected, "fractional periodic intervals accumulated drift") &&
+	       Check(remainder == 0, "fractional periodic interval retained an unexpected remainder") &&
+	       Check(HostClock::NextPeriodicIntervalMicroseconds(0, frequency, &invalid_remainder) == 0,
+	             "zero-sample periodic interval was accepted") &&
+	       Check(HostClock::NextPeriodicIntervalMicroseconds(samples, 0, &invalid_remainder) == 0,
+	             "zero-frequency periodic interval was accepted") &&
+	       Check(HostClock::NextPeriodicIntervalMicroseconds(samples, frequency, nullptr) == 0,
+	             "null periodic interval remainder was accepted") &&
+	       Check(invalid_remainder == 17, "invalid periodic interval modified its remainder");
 }
 
 bool GrainPacing()
@@ -100,7 +115,39 @@ bool GrainPacing()
 	       Check(audio->AudioOutClose(port), "could not close the pacing port");
 }
 
-bool InputPacing()
+bool FractionalOutputPacing()
+{
+	auto audio = CreateAudio();
+	if (audio == nullptr)
+	{
+		return false;
+	}
+	constexpr uint32_t samples = 256;
+	auto               port    = audio->AudioOutOpen(0, samples, 44'100, HostAudio::Format::Signed16bitStereo);
+	if (!Check(port.IsValid(), "could not open the fractional pacing port"))
+	{
+		return false;
+	}
+	std::vector<int16_t>   pcm(samples * 2, 0);
+	HostAudio::OutputParam param {port, pcm.data()};
+	const auto             start = std::chrono::steady_clock::now();
+	// Multiple fractional AudioOut calls consume the per-port carry in production.
+	for (int i = 0; i < 3; i++)
+	{
+		uint32_t written = 0;
+		if (!Check(audio->AudioOutOutputs(&param, 1, &written), "fractional grain output failed") ||
+		    !Check(written == samples, "fractional grain returned the wrong sample count"))
+		{
+			return false;
+		}
+	}
+	const auto elapsed = std::chrono::steady_clock::now() - start;
+	return Check(elapsed >= std::chrono::milliseconds(12), "fractional output grains were delivered in a burst") &&
+	       Check(elapsed < std::chrono::milliseconds(100), "fractional output pacing accumulated excessive delay") &&
+	       Check(audio->AudioOutClose(port), "could not close the fractional pacing port");
+}
+
+bool FractionalInputPacing()
 {
 	auto audio = CreateAudio();
 	if (audio == nullptr)
@@ -114,14 +161,36 @@ bool InputPacing()
 		return false;
 	}
 	std::vector<int16_t> pcm(samples * 2, 0);
-	const auto           start   = std::chrono::steady_clock::now();
-	const uint32_t       first   = audio->AudioInInput(port, pcm.data());
-	const uint32_t       second  = audio->AudioInInput(port, pcm.data());
-	const auto           elapsed = std::chrono::steady_clock::now() - start;
+	const auto           start = std::chrono::steady_clock::now();
+	// Keep two production AudioIn calls on the fractional host pacing path.
+	const uint32_t first   = audio->AudioInInput(port, pcm.data());
+	const uint32_t second  = audio->AudioInInput(port, pcm.data());
+	const auto     elapsed = std::chrono::steady_clock::now() - start;
 	return Check(first == samples, "first input grain returned the wrong sample count") &&
 	       Check(second == samples, "second input grain returned the wrong sample count") &&
 	       Check(elapsed >= std::chrono::milliseconds(3), "input grains were delivered in a burst") &&
 	       Check(elapsed < std::chrono::milliseconds(100), "input grain pacing accumulated excessive delay");
+}
+
+bool RejectsInvalidPacing()
+{
+	auto audio = CreateAudio();
+	if (audio == nullptr)
+	{
+		return false;
+	}
+	constexpr uint32_t extreme     = std::numeric_limits<uint32_t>::max();
+	const auto         start       = std::chrono::steady_clock::now();
+	const auto         zero_output = audio->AudioOutOpen(0, 0, 48'000, HostAudio::Format::Signed16bitStereo);
+	const auto         zero_input  = audio->AudioInOpen(0, 48'000, 0, HostAudio::Format::Signed16bitStereo);
+	const auto         output      = audio->AudioOutOpen(0, extreme, 1, HostAudio::Format::Signed16bitStereo);
+	const auto         input       = audio->AudioInOpen(0, extreme, 1, HostAudio::Format::Signed16bitStereo);
+	const auto         elapsed     = std::chrono::steady_clock::now() - start;
+	return Check(!zero_output.IsValid(), "zero-sample output pacing port was accepted") &&
+	       Check(!zero_input.IsValid(), "zero-frequency input pacing port was accepted") &&
+	       Check(!output.IsValid(), "unbounded output pacing port was accepted") &&
+	       Check(!input.IsValid(), "unbounded input pacing port was accepted") &&
+	       Check(elapsed < std::chrono::milliseconds(100), "unbounded pacing ports were not rejected quickly");
 }
 
 bool CloseWhileProducerSleeps()
@@ -177,7 +246,8 @@ int main(int argc, char** argv)
 		std::fprintf(stderr, "audio host integration failed to initialize host subsystems\n");
 		return 125;
 	}
-	if (!HostClockContract() || !PeriodicIntervalContract() || !GrainPacing() || !InputPacing() || !CloseWhileProducerSleeps())
+	if (!HostClockContract() || !PeriodicIntervalContract() || !GrainPacing() || !FractionalOutputPacing() || !FractionalInputPacing() ||
+	    !RejectsInvalidPacing() || !CloseWhileProducerSleeps())
 	{
 		std::remove(output_path);
 		return 1;

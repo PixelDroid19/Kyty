@@ -13,6 +13,15 @@ uint64_t NowMicroseconds()
 	    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+bool IsPeriodicIntervalValid(uint32_t samples, uint32_t frequency)
+{
+	if (samples == 0 || frequency == 0)
+	{
+		return false;
+	}
+	return 1'000'000ull * samples <= kMaxPeriodicIntervalMicroseconds * frequency;
+}
+
 uint64_t NextPeriodicIntervalMicroseconds(uint32_t samples, uint32_t frequency, uint64_t* remainder)
 {
 	if (samples == 0 || frequency == 0 || remainder == nullptr)
