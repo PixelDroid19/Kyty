@@ -60,6 +60,57 @@ int  cxa_atexit(void (*func)(void*), void* arg, void* d);
 void cxa_finalize(void* d);
 int  KYTY_SYSV_ABI c_cxa_thread_atexit(void (*dtor)(void*), void* obj, void* dso_handle);
 
+// Math (double) family — pure wrappers over the host libm, defined in
+// LibCMath.cpp.
+KYTY_SYSV_ABI double c_sin(double x);
+KYTY_SYSV_ABI double c_cos(double x);
+KYTY_SYSV_ABI double c_tan(double x);
+KYTY_SYSV_ABI double c_asin(double x);
+KYTY_SYSV_ABI double c_acos(double x);
+KYTY_SYSV_ABI double c_atan(double x);
+KYTY_SYSV_ABI double c_atan2(double y, double x);
+KYTY_SYSV_ABI double c_exp(double x);
+KYTY_SYSV_ABI double c_log(double x);
+KYTY_SYSV_ABI double c_pow(double x, double y);
+KYTY_SYSV_ABI double c_powidf2(double x, int y);
+KYTY_SYSV_ABI double c_fmod(double x, double y);
+KYTY_SYSV_ABI double c_ceil(double x);
+KYTY_SYSV_ABI double c_floor(double x);
+KYTY_SYSV_ABI double c_round(double x);
+KYTY_SYSV_ABI double c_sqrt(double x);
+KYTY_SYSV_ABI double c_fabs(double x);
+KYTY_SYSV_ABI double c_modf(double x, double* ip);
+KYTY_SYSV_ABI double c_ldexp(double x, int e);
+KYTY_SYSV_ABI double c_frexp(double x, int* e);
+KYTY_SYSV_ABI void c_sincos(double x, double* s, double* c);
+KYTY_SYSV_ABI float c_powf(float x, float y);
+KYTY_SYSV_ABI int c_isnanf(float x);
+KYTY_SYSV_ABI int c_isfinite(double x);
+KYTY_SYSV_ABI int c_isnan(double x);
+KYTY_SYSV_ABI int c_isinf(double x);
+KYTY_SYSV_ABI float c_sinf(float x);
+KYTY_SYSV_ABI float c_cosf(float x);
+KYTY_SYSV_ABI float c_tanf(float x);
+KYTY_SYSV_ABI float c_atanf(float x);
+KYTY_SYSV_ABI float c_asinf(float x);
+KYTY_SYSV_ABI float c_acosf(float x);
+KYTY_SYSV_ABI float c_atan2f(float y, float x);
+KYTY_SYSV_ABI float c_fmodf(float x, float y);
+KYTY_SYSV_ABI float c_hypotf(float x, float y);
+KYTY_SYSV_ABI float c_truncf(float x);
+KYTY_SYSV_ABI float c_roundf(float x);
+KYTY_SYSV_ABI float c_log10f(float x);
+KYTY_SYSV_ABI float c_logf(float x);
+KYTY_SYSV_ABI float c_sqrtf(float x);
+KYTY_SYSV_ABI float c_fabsf(float x);
+KYTY_SYSV_ABI float c_floorf(float x);
+KYTY_SYSV_ABI float c_ceilf(float x);
+KYTY_SYSV_ABI float c_log2f(float x);
+KYTY_SYSV_ABI float c_exp2f(float x);
+KYTY_SYSV_ABI float c_expf(float x);
+KYTY_SYSV_ABI float c_ldexpf(float x, int e);
+KYTY_SYSV_ABI void c_sincosf(float x, float* s, float* c);
+
 } // namespace LibC
 
 namespace LibcInternalExt {
