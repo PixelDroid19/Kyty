@@ -33,6 +33,9 @@
 namespace Kyty::Libs::Audio {
 
 namespace VideoFrameMemory = Kyty::Emulator::VideoFrameMemory;
+// Kyty::Libs::AudioVideoBackend is the canonical host-side decoder namespace.
+// This local alias keeps the guest-facing implementation readable without changing its ABI.
+namespace AudioVideoBackend = ::Kyty::Libs::AudioVideoBackend;
 
 static std::shared_ptr<HostAudio> g_host_audio;
 

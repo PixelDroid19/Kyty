@@ -16,23 +16,32 @@ UT_BEGIN(EmulatorAudio);
 
 using namespace Libs::Audio;
 
+TEST(EmulatorAudio, OpensDecoderThroughCanonicalNamespaceWithoutPrivateMedia)
+{
+	std::string error;
+	auto decoder = ::Kyty::Libs::AudioVideoBackend::Decoder::Open("", &error);
+
+	EXPECT_EQ(decoder, nullptr);
+	EXPECT_FALSE(error.empty());
+}
+
 TEST(EmulatorAudio, DecodesConfiguredAvPlayerMedia)
 {
 	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");
-	if (media_path == nullptr || media_path[0] == '\0' || !AudioVideoBackend::Decoder::IsAvailable())
+	if (media_path == nullptr || media_path[0] == '\0' || !::Kyty::Libs::AudioVideoBackend::Decoder::IsAvailable())
 	{
 		GTEST_SKIP();
 	}
 
 	std::string error;
-	auto decoder = AudioVideoBackend::Decoder::Open(media_path, &error);
+	auto decoder = ::Kyty::Libs::AudioVideoBackend::Decoder::Open(media_path, &error);
 	ASSERT_NE(decoder, nullptr) << error;
 	const auto& stream = decoder->GetStreamInfo();
 	ASSERT_TRUE(stream.has_video);
 	EXPECT_GT(stream.video_width, 0u);
 	EXPECT_GT(stream.video_height, 0u);
 
-	AudioVideoBackend::VideoFrame video;
+	::Kyty::Libs::AudioVideoBackend::VideoFrame video;
 	ASSERT_TRUE(decoder->ReadVideoFrame(&video));
 	EXPECT_EQ(video.width, stream.video_width);
 	EXPECT_EQ(video.height, stream.video_height);
@@ -42,7 +51,7 @@ TEST(EmulatorAudio, DecodesConfiguredAvPlayerMedia)
 
 	if (stream.has_audio)
 	{
-		AudioVideoBackend::AudioFrame audio;
+		::Kyty::Libs::AudioVideoBackend::AudioFrame audio;
 		ASSERT_TRUE(decoder->ReadAudioFrame(&audio));
 		EXPECT_EQ(audio.channels, stream.audio_channels);
 		EXPECT_EQ(audio.sample_rate, stream.audio_sample_rate);
@@ -53,17 +62,17 @@ TEST(EmulatorAudio, DecodesConfiguredAvPlayerMedia)
 TEST(EmulatorAudio, VideoEndOfStreamDoesNotWaitForPendingAudio)
 {
 	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");
-	if (media_path == nullptr || media_path[0] == '\0' || !AudioVideoBackend::Decoder::IsAvailable())
+	if (media_path == nullptr || media_path[0] == '\0' || !::Kyty::Libs::AudioVideoBackend::Decoder::IsAvailable())
 	{
 		GTEST_SKIP();
 	}
 
 	std::string error;
-	auto decoder = AudioVideoBackend::Decoder::Open(media_path, &error);
+	auto decoder = ::Kyty::Libs::AudioVideoBackend::Decoder::Open(media_path, &error);
 	ASSERT_NE(decoder, nullptr) << error;
 	ASSERT_TRUE(decoder->GetStreamInfo().has_video);
 
-	AudioVideoBackend::VideoFrame video;
+	::Kyty::Libs::AudioVideoBackend::VideoFrame video;
 	size_t frames = 0;
 	uint64_t previous_timestamp = 0;
 	while (decoder->ReadVideoFrame(&video))
@@ -82,24 +91,24 @@ TEST(EmulatorAudio, VideoEndOfStreamDoesNotWaitForPendingAudio)
 	}
 
 	EXPECT_GT(frames, 0u);
-	EXPECT_EQ(decoder->LastStatus(), AudioVideoBackend::Status::Ok);
+	EXPECT_EQ(decoder->LastStatus(), ::Kyty::Libs::AudioVideoBackend::Status::Ok);
 	EXPECT_TRUE(decoder->EndOfStream());
 }
 
 TEST(EmulatorAudio, BoundsDecodeAheadWhenVideoConsumerIsPaused)
 {
 	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");
-	if (media_path == nullptr || media_path[0] == '\0' || !AudioVideoBackend::Decoder::IsAvailable())
+	if (media_path == nullptr || media_path[0] == '\0' || !::Kyty::Libs::AudioVideoBackend::Decoder::IsAvailable())
 	{
 		GTEST_SKIP();
 	}
 
 	std::string error;
-	auto decoder = AudioVideoBackend::Decoder::Open(media_path, &error);
+	auto decoder = ::Kyty::Libs::AudioVideoBackend::Decoder::Open(media_path, &error);
 	ASSERT_NE(decoder, nullptr) << error;
 
 	std::this_thread::sleep_for(std::chrono::milliseconds(250));
-	AudioVideoBackend::VideoFrame video;
+	::Kyty::Libs::AudioVideoBackend::VideoFrame video;
 	ASSERT_TRUE(decoder->ReadVideoFrame(&video));
 	EXPECT_LT(video.timestamp_ms, 1000u);
 }
@@ -107,7 +116,7 @@ TEST(EmulatorAudio, BoundsDecodeAheadWhenVideoConsumerIsPaused)
 TEST(EmulatorAudio, AvPlayerUsesConfiguredMediaBackend)
 {
 	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");
-	if (media_path == nullptr || media_path[0] == '\0' || !AudioVideoBackend::Decoder::IsAvailable())
+	if (media_path == nullptr || media_path[0] == '\0' || !::Kyty::Libs::AudioVideoBackend::Decoder::IsAvailable())
 	{
 		GTEST_SKIP();
 	}

@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace Kyty::Libs::Audio::AudioVideoBackend {
+namespace Kyty::Libs::AudioVideoBackend {
 
 enum class Status : uint8_t
 {
@@ -86,6 +86,6 @@ private:
 	std::unique_ptr<State> state_;
 };
 
-} // namespace Kyty::Libs::Audio::AudioVideoBackend
+} // namespace Kyty::Libs::AudioVideoBackend
 
 #endif // EMULATOR_INCLUDE_EMULATOR_AUDIO_VIDEO_BACKEND_H_
