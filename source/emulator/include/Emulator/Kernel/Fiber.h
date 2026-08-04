@@ -4,10 +4,11 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/Namespace.h"
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::Fiber {
+namespace Kyty::Kernel::Fiber {
 
 // Guest Fiber errors (SCE_FIBER_ERROR_*).
 constexpr int32_t FIBER_ERROR_NULL       = static_cast<int32_t>(0x80590001u);
@@ -116,6 +117,12 @@ bool FiberObjectIsValid(const FiberObject* fiber);
 int32_t FiberValidateInitializeArgs(const FiberObject* fiber, const char* name, FiberEntry entry, void* addr_context,
                                     uint64_t size_context, const FiberOptParam* opt_param);
 
+} // namespace Kyty::Kernel::Fiber
+
+// Guest-facing code historically imported Fiber through Libs. Keep that view
+// while the implementation and ABI declarations live in the Kernel domain.
+namespace Kyty::Libs::Fiber {
+using namespace ::Kyty::Kernel::Fiber;
 } // namespace Kyty::Libs::Fiber
 
 #endif // KYTY_EMU_ENABLED
