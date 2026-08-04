@@ -10,6 +10,8 @@
 
 //#define KYTY_LOG_ENABLED
 
+#include <atomic> // IWYU pragma: keep
+
 #define CSI               "\x1b["    // NOLINT
 #define DEFAULT           CSI "0m"   // NOLINT // Returns all attributes to the default state prior to modification
 #define BOLD              CSI "1m"   // NOLINT // Applies brightness/intensity flag to foreground color
@@ -69,6 +71,18 @@ enum class Direction
 	Directory
 };
 
+// Severity levels gate log emission before any formatting happens. The gate is
+// a single relaxed atomic read, so a log call that does not pass costs the same
+// as one branch -- the slow path (String::Printf + color strip + mutex) only
+// runs when the message is actually emitted.
+enum class Level : int
+{
+	Debug = 0,
+	Info  = 1,
+	Warn  = 2,
+	Error = 3
+};
+
 Direction GetDirection();
 void      SetDirection(Direction dir);
 void      SetOutputFile(const String& file_name, Core::File::Encoding enc = Core::File::Encoding::Utf8);
@@ -76,11 +90,44 @@ void      SetOutputFile(const String& file_name, Core::File::Encoding enc = Core
 bool   IsColoredPrintf();
 String RemoveColors(const String& str);
 
+// Minimum severity that gets emitted. Defaults to Info; debug output is opt-in.
+Level GetMinLevel();
+void  SetMinLevel(Level level);
+
+// Cheap pre-format gate: true iff `level` is at or above the current minimum.
+// Safe to call from any thread and from hot paths.
+[[nodiscard]] bool ShouldLog(Level level);
+
+// Level-aware logger. Formats and emits only when `ShouldLog(level)` holds.
+// `format` may contain the ANSI color macros defined above.
+void log_printf(Level level, const char* format, ...) KYTY_FORMAT_PRINTF(2, 3);
+
 } // namespace Log
 
 void printf(const char* format, ...) KYTY_FORMAT_PRINTF(1, 2);
 void emu_printf(const char* format, ...) KYTY_FORMAT_PRINTF(1, 2);
 
 } // namespace Kyty
+
+// Convenience wrappers for the level-aware logger. The gate is checked before
+// the variadic call so non-emitting levels never pay for argument setup.
+#define KYTY_LOG_ERROR(...) ::Kyty::Log::log_printf(::Kyty::Log::Level::Error, __VA_ARGS__)
+#define KYTY_LOG_WARN(...)  ::Kyty::Log::log_printf(::Kyty::Log::Level::Warn, __VA_ARGS__)
+#define KYTY_LOG_INFO(...)  ::Kyty::Log::log_printf(::Kyty::Log::Level::Info, __VA_ARGS__)
+#define KYTY_LOG_DEBUG(...) ::Kyty::Log::log_printf(::Kyty::Log::Level::Debug, __VA_ARGS__)
+
+// Rate-limited variant (prosper-style log-once): emits at most `max_count`
+// times per call site, then goes silent. The counter is a function-local
+// static, so each macro invocation site has its own budget. Signed counter
+// keeps the gate correct past zero (no unsigned wrap re-emitting).
+#define KYTY_LOG_LIMIT(level, max_count, ...)                                                                          \
+	do                                                                                                                 \
+	{                                                                                                                  \
+		static ::std::atomic_int kyty_log_remaining {(max_count)};                                                     \
+		if (::Kyty::Log::ShouldLog(level) && kyty_log_remaining.fetch_sub(1, ::std::memory_order_relaxed) > 0)         \
+		{                                                                                                              \
+			::Kyty::Log::log_printf(level, __VA_ARGS__);                                                               \
+		}                                                                                                              \
+	} while (0)
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_LOG_H_ */

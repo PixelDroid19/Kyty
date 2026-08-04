@@ -32,6 +32,9 @@ static Core::File*              g_file               = nullptr;
 static bool                     g_colored_printf     = false;
 static thread_local Core::File* g_thread_local_file  = nullptr;
 static Vector<Core::File*>*     g_thread_local_files = nullptr;
+// Minimum severity that is emitted. Stored as an int so the hot-path gate is a
+// single relaxed atomic read; default Info keeps normal output and makes debug opt-in.
+static std::atomic_int          g_min_level {static_cast<int>(Level::Info)};
 // Cap File-mode logs so a long boot cannot fill the host disk. After the
 // limit, further printf/emu_printf lines are dropped (direction stays File).
 static constexpr uint64_t       g_file_log_max_bytes = 32ull * 1024ull * 1024ull;
@@ -252,39 +255,18 @@ void CreateThreadLocalFile()
 
 } // namespace Log
 
-void emu_printf(const char* format, ...)
+namespace {
+
+// Shared emission path. All formatting and output routing happens here, and
+// only when the severity gate + direction gate both pass.
+void Emit(Log::Level level, const char* format, va_list args)
 {
 	EXIT_IF(!Log::g_log_initialized);
 
-	EXIT_IF(Log::g_mutex == nullptr);
-
-	Log::g_mutex->Lock();
+	if (!Log::ShouldLog(level))
 	{
-		va_list args {};
-		va_start(args, format);
-		String s;
-		s.Printf(format, args);
-		va_end(args);
-
-		if (!Log::g_colored_printf)
-		{
-			s = Log::RemoveColors(s);
-		}
-
-		::printf("%s", s.C_Str());
-
-		if (Log::g_dir == Log::Direction::File && Log::g_file != nullptr &&
-		    Log::FileLogAllowsWrite(static_cast<uint64_t>(s.Size())))
-		{
-			Log::g_file->Write(s);
-		}
+		return;
 	}
-	Log::g_mutex->Unlock();
-}
-
-void printf(const char* format, ...)
-{
-	EXIT_IF(!Log::g_log_initialized);
 
 	if (Log::g_dir == Log::Direction::Silent)
 	{
@@ -293,11 +275,8 @@ void printf(const char* format, ...)
 
 	EXIT_IF(Log::g_mutex == nullptr);
 
-	va_list args {};
-	va_start(args, format);
 	String s;
 	s.Printf(format, args);
-	va_end(args);
 
 	if (!Log::g_colored_printf)
 	{
@@ -329,6 +308,51 @@ void printf(const char* format, ...)
 		}
 	}
 }
+
+} // namespace
+
+void emu_printf(const char* format, ...)
+{
+	va_list args {};
+	va_start(args, format);
+	Emit(Log::Level::Info, format, args);
+	va_end(args);
+}
+
+void printf(const char* format, ...)
+{
+	va_list args {};
+	va_start(args, format);
+	Emit(Log::Level::Info, format, args);
+	va_end(args);
+}
+
+namespace Log {
+
+Level GetMinLevel()
+{
+	return static_cast<Level>(g_min_level.load(std::memory_order_relaxed));
+}
+
+void SetMinLevel(Level level)
+{
+	g_min_level.store(static_cast<int>(level), std::memory_order_relaxed);
+}
+
+bool ShouldLog(Level level)
+{
+	return static_cast<int>(level) >= g_min_level.load(std::memory_order_relaxed);
+}
+
+void log_printf(Level level, const char* format, ...)
+{
+	va_list args {};
+	va_start(args, format);
+	Emit(level, format, args);
+	va_end(args);
+}
+
+} // namespace Log
 
 } // namespace Kyty
 
