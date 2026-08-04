@@ -903,16 +903,29 @@ TEST(EmulatorGraphicsPackets, UsesForwardConditionalExitAsBackwardLoopMerge)
 TEST(EmulatorGraphicsPackets, PreservesComputeResourceLimitsSchedulingState)
 {
 	HW::CsStageRegisters regs {};
+	const uint32_t       initial_value[]     = {0x00008000};
+	const uint32_t       replacement_value[] = {0xa5c35a3cu};
+
+	ASSERT_TRUE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, initial_value, 1));
+	EXPECT_EQ(regs.resource_limits, 0x00008000u);
+
+	ASSERT_TRUE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, replacement_value, 1));
+	EXPECT_EQ(regs.resource_limits, 0xa5c35a3cu);
+}
+
+TEST(EmulatorGraphicsPackets, RejectsMalformedComputeResourceLimitsWithoutMutatingState)
+{
+	HW::CsStageRegisters regs {};
 	const uint32_t       observed_value[] = {0x00008000};
 
-	ASSERT_TRUE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, observed_value, 1));
+	regs.SetResourceLimits(0x5aa53cc3u);
 
-	EXPECT_EQ(regs.resource_limits, 0x00008000u);
 	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(nullptr, Pm4::COMPUTE_RESOURCE_LIMITS, observed_value, 1));
 	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_PGM_RSRC2, observed_value, 1));
 	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, nullptr, 1));
 	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, observed_value, 0));
 	EXPECT_FALSE(GraphicsDecodeComputeResourceLimits(&regs, Pm4::COMPUTE_RESOURCE_LIMITS, observed_value, 2));
+	EXPECT_EQ(regs.resource_limits, 0x5aa53cc3u);
 }
 
 TEST(EmulatorGraphicsPackets, AcceptsComputeShaderWithoutWorkgroupId)

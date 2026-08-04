@@ -1,5 +1,7 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 
+#include "GraphicsComputeRegisters.h"
+
 #include "Kyty/Core/BringUp.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/LinkList.h"
@@ -3462,39 +3464,6 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_z)
 	cp->GetCtx()->SetViewportZ(param, *reinterpret_cast<const float*>(buffer), *reinterpret_cast<const float*>(buffer + 1));
 
 	return 2;
-}
-
-// Shared decoders for the compute program resource registers, used both by the
-// packed shader-setup packet and by the individual COMPUTE_PGM_RSRC* registers a
-// guest-built command buffer writes.
-static void decode_compute_pgm_rsrc1(HW::CsStageRegisters& r, uint32_t value)
-{
-	r.vgprs = (value >> Pm4::COMPUTE_PGM_RSRC1_VGPRS_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_VGPRS_MASK;
-	r.sgprs = (value >> Pm4::COMPUTE_PGM_RSRC1_SGPRS_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_SGPRS_MASK;
-	r.bulky = (value >> Pm4::COMPUTE_PGM_RSRC1_BULKY_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_BULKY_MASK;
-}
-
-static void decode_compute_pgm_rsrc2(HW::CsStageRegisters& r, uint32_t value)
-{
-	r.scratch_en     = (value >> Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_MASK;
-	r.user_sgpr      = (value >> Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_MASK;
-	r.tgid_x_en      = (value >> Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_MASK;
-	r.tgid_y_en      = (value >> Pm4::COMPUTE_PGM_RSRC2_TGID_Y_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TGID_Y_EN_MASK;
-	r.tgid_z_en      = (value >> Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_MASK;
-	r.tg_size_en     = (value >> Pm4::COMPUTE_PGM_RSRC2_TG_SIZE_EN_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TG_SIZE_EN_MASK;
-	r.tidig_comp_cnt = (value >> Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_MASK;
-	r.lds_size       = (value >> Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_SHIFT) & Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_MASK;
-}
-
-bool GraphicsDecodeComputeResourceLimits(HW::CsStageRegisters* regs, uint32_t cmd_offset, const uint32_t* values, uint32_t value_count)
-{
-	if (regs == nullptr || values == nullptr || cmd_offset != Pm4::COMPUTE_RESOURCE_LIMITS || value_count != 1)
-	{
-		return false;
-	}
-
-	regs->SetResourceLimits(values[0]);
-	return true;
 }
 
 KYTY_HW_SH_PARSER(hw_sh_set_cs_shader)
