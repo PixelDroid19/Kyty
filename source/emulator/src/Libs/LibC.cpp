@@ -2818,8 +2818,6 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("P8F2oavZXtY", LibC::c_ios_base_dtor);
 	// std::ios_base::failure::~failure() [complete object] — N2f485TmJms.
 	LIB_FUNC("N2f485TmJms", LibC::c_ios_base_failure_dtor);
-	// std::bad_cast::~bad_cast() [complete object] — 47RvLSo2HN8.
-	LIB_FUNC("47RvLSo2HN8", LibC::c_bad_cast_dtor);
 	LIB_FUNC("YxwfcCH5Q0I", LibC::c_generic_category);
 	LIB_FUNC("aotaAaQK6yc", LibC::c_system_category);
 	LIB_FUNC("g8Jw7V6mn8k", LibC::c_error_category_dtor);
