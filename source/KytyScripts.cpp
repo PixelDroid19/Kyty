@@ -103,6 +103,21 @@ static void run_script(const String& lua_file_name, const StringList& args)
 	}
 }
 
+KYTY_SCRIPT_FUNC(kyty_run_tests)
+{
+	if (!UnitTest::unit_test_all())
+	{
+		EXIT("test failed\n");
+	}
+
+	return 0;
+}
+
+static void register_unit_test_script()
+{
+	RegisterFunc("kyty_run_tests", kyty_run_tests, []() {});
+}
+
 int main(int argc, char* argv[])
 {
 #ifdef __APPLE__
@@ -166,6 +181,7 @@ int main(int argc, char* argv[])
 		printf("Failed to initialize '%s' subsystem: %s\n", slist.GetFailName(), slist.GetFailMsg());
 	} else
 	{
+		register_unit_test_script();
 		if (argc >= 2)
 		{
 			StringList args;

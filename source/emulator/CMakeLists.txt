@@ -135,12 +135,11 @@ add_dependencies(emulator KytyBuildInfo)
 
 target_link_libraries(emulator
 	PUBLIC
-		core
-		math
-		scripts
-		lua
-		unit_test
-		kyty_agent_transport
+	core
+	math
+	scripts
+	lua
+	kyty_agent_transport
 		kyty_devtools_core
 		vulkan-1
 		spirv-tools-opt

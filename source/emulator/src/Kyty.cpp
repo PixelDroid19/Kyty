@@ -9,7 +9,6 @@
 #include "Kyty/Core/Vector.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Scripts/Scripts.h"
-#include "Kyty/UnitTest.h"
 
 #include "Emulator/Agent/AgentSubsystem.h"
 #include "Emulator/Audio.h"
@@ -486,16 +485,6 @@ KYTY_SCRIPT_FUNC(kyty_shader_printf)
 	return 0;
 }
 
-KYTY_SCRIPT_FUNC(kyty_run_tests)
-{
-	if (!UnitTest::unit_test_all())
-	{
-		EXIT("test failed\n");
-	}
-
-	return 0;
-}
-
 void kyty_help() {}
 
 } // namespace LuaFunc
@@ -516,7 +505,6 @@ void kyty_reg()
 	Scripts::RegisterFunc("kyty_mount", LuaFunc::kyty_mount_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_shader_disable", LuaFunc::kyty_shader_disable, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_shader_printf", LuaFunc::kyty_shader_printf, LuaFunc::kyty_help);
-	Scripts::RegisterFunc("kyty_run_tests", LuaFunc::kyty_run_tests, LuaFunc::kyty_help);
 }
 
 #else
