@@ -1,5 +1,6 @@
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Errors.h"
+#include "Emulator/Kernel/AmprPort.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DateTime.h"
@@ -8,7 +9,6 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Vector.h"
 
-#include "Emulator/Libs/LibAmpr.h"
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/VideoFrameMemory.h"
 #include "Emulator/Log.h"
@@ -2272,7 +2272,7 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBuffer(void* cmd, uint64_t arg1, void* a
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	return ::Kyty::Libs::Ampr::SubmitCommandBuffer(cmd, static_cast<uintptr_t>(arg3));
+	return ::Kyty::Kernel::AmprPort::SubmitCommandBuffer(cmd, static_cast<uintptr_t>(arg3));
 }
 
 static uint32_t AprAllocateSubmissionId(uint64_t cmd)

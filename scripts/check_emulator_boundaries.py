@@ -31,6 +31,7 @@ AUDIO_SOURCE_FILES = (
     "emulator/src/AudioPcm.cpp",
 )
 KERNEL_SOURCE_FILES = (
+    "emulator/src/Kernel/AmprPort.cpp",
     "emulator/src/Kernel/EventFlag.cpp",
     "emulator/src/Kernel/EventQueue.cpp",
     "emulator/src/Kernel/Fiber.cpp",

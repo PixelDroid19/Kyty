@@ -1,8 +1,8 @@
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/AmprPort.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Errno.h"
-#include "Emulator/Libs/LibAmpr.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
@@ -801,6 +801,8 @@ static KYTY_SYSV_ABI int AmmWaitCommandBufferCompletion(void* cmd_obj)
 
 LIB_DEFINE(InitAmpr_1)
 {
+	::Kyty::Kernel::AmprPort::Install(&Ampr::SubmitCommandBuffer);
+
 	// Measure APIs — NIDs from libSceAmpr stubs.
 	LIB_FUNC("vWU-odnS+fU", Ampr::MeasureCommandSizeReadFile);
 	LIB_FUNC("sSAUCCU1dv4", Ampr::MeasureCommandSizeWriteKernelEventQueue0400);
