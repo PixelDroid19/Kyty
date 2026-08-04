@@ -12,8 +12,6 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-struct SDL_Surface;
-
 namespace Kyty::Libs::Graphics {
 
 struct NativeCaptureMetadata
@@ -41,7 +39,6 @@ struct NativeCaptureMetadata
 [[nodiscard]] const char* NativeCaptureFormatName(VkFormat format);
 [[nodiscard]] uint64_t    NativeCaptureHostPeakRssBytes();
 
-[[nodiscard]] bool NativeCaptureSaveSdlSurfacePng(SDL_Surface* surface, const std::filesystem::path& path);
 [[nodiscard]] bool NativeCaptureWriteMetadata(const std::filesystem::path& image_path, const NativeCaptureMetadata& metadata);
 void               NativeCapturePruneDirectory(const std::filesystem::path& directory, uint32_t keep_files);
 

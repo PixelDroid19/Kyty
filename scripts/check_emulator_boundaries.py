@@ -31,8 +31,14 @@ KERNEL_SOURCE_FILES = (
     "emulator/src/Kernel/FileSystem.cpp",
     "emulator/src/Kernel/Pthread.cpp",
 )
+HOST_SOURCE_FILES = (
+    "emulator/src/Host/CaptureImageCodec.cpp",
+    "emulator/src/Host/Clock.cpp",
+    "emulator/src/Host/Platform.cpp",
+    "emulator/src/Host/Png.cpp",
+)
 RUNTIME_LINKER_SOURCE = "emulator/src/Loader/RuntimeLinker.cpp"
-ALLOWED_SOURCE_FILES = (*AUDIO_SOURCE_FILES, *KERNEL_SOURCE_FILES, RUNTIME_LINKER_SOURCE)
+ALLOWED_SOURCE_FILES = (*AUDIO_SOURCE_FILES, *KERNEL_SOURCE_FILES, *HOST_SOURCE_FILES, RUNTIME_LINKER_SOURCE)
 
 GRAPHICS_INCLUDE_PREFIX = "Emulator/Graphics/"
 SOURCE_GRAPHICS_INCLUDE_PREFIX = "emulator/include/Emulator/Graphics/"
@@ -153,6 +159,10 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
         return "Kernel -> Graphics"
+    if relative_path in HOST_SOURCE_FILES and any(
+        canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
+    ):
+        return "Host -> Graphics"
     devtools_prefixes = DEVTOOLS_INCLUDE_PREFIXES + SOURCE_DEVTOOLS_INCLUDE_PREFIXES
     if relative_path == RUNTIME_LINKER_SOURCE and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in devtools_prefixes
@@ -532,6 +542,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Kernel/FileSystem.cpp:1: forbidden include (Kernel -> Graphics): Emulator/Graphics/Objects/GpuMemory.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_forbidden_host_graphics_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Host/CaptureImageCodec.cpp", '#include "Emulator/Graphics/Utils.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Host/CaptureImageCodec.cpp:1: forbidden include (Host -> Graphics): Emulator/Graphics/Utils.h",
                     ),
                 ),
             )

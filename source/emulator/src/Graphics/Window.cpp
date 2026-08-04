@@ -28,6 +28,7 @@
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VulkanQueueIdentity.h"
 #include "Emulator/Graphics/WindowControls.h"
+#include "Emulator/Host/CaptureImageCodec.h"
 #include "Emulator/Loader/SystemContent.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
@@ -660,56 +661,29 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 
 	// HDR (16:16:16:16 float) sources are read back as floats and converted to
 	// RGBA8 with a saturating clamp for the PNG; no tone mapping.
-	const uint64_t       bpp  = hdr_capture ? 8u : 4u;
-	const uint64_t       size = width * height * bpp;
+	const uint64_t bpp  = hdr_capture ? 8u : 4u;
+	const uint64_t size = width * height * bpp;
 	std::vector<uint8_t> pixels(size);
 	UtilFillBuffer(&ctx->graphic_ctx, pixels.data(), size, static_cast<uint32_t>(width), image,
 	               static_cast<uint64_t>(image->layout));
+	const auto capture_pixel_format = hdr_capture ? Emulator::Host::HostCaptureImagePixelFormat::Rgba16G16B16A16Sfloat
+	                                              : (image->format == VK_FORMAT_B8G8R8A8_SRGB
+	                                                     ? Emulator::Host::HostCaptureImagePixelFormat::Bgra8
+	                                                     : Emulator::Host::HostCaptureImagePixelFormat::Rgba8);
 	if (hdr_capture)
 	{
-		// R16G16B16A16_SFLOAT is stored as half floats (2 bytes/component).
-		const auto half_to_float = [](uint16_t h) -> float
+		std::vector<uint8_t> converted;
+		if (!Emulator::Host::HostCaptureImageCodecNormalizeRgba8(
+		        {pixels.data(), {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}, width * bpp, capture_pixel_format}, &converted))
 		{
-			const uint32_t sign = (h >> 15u) & 1u;
-			const uint32_t exp  = (h >> 10u) & 0x1fu;
-			const uint32_t mant = h & 0x3ffu;
-			uint32_t       bits = 0;
-			if (exp == 0u)
+			std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=convert_image frame=%d recoverable=0\n", frame);
+			if (agent_waiting)
 			{
-				if (mant == 0u)
-				{
-					bits = sign << 31u;
-				} else
-				{
-					uint32_t m   = mant;
-					int      e   = -14;
-					while ((m & 0x400u) == 0u)
-					{
-						m <<= 1u;
-						e--;
-					}
-					bits = (sign << 31u) | (static_cast<uint32_t>(e + 127) << 23u) | ((m & 0x3ffu) << 13u);
-				}
-			} else if (exp == 0x1fu)
-			{
-				bits = (sign << 31u) | (0xffu << 23u) | (mant << 13u);
-			} else
-			{
-				bits = (sign << 31u) | ((exp - 15u + 127u) << 23u) | (mant << 13u);
+				NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
+				                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame, "convert_image",
+				                           "failed to normalize native capture image");
 			}
-			float value = 0.0f;
-			std::memcpy(&value, &bits, sizeof(value));
-			return value;
-		};
-		std::vector<uint8_t> converted(width * height * 4);
-		const uint16_t*      src = reinterpret_cast<const uint16_t*>(pixels.data());
-		for (uint64_t p = 0; p < width * height; p++)
-		{
-			for (int c = 0; c < 4; c++)
-			{
-				const float v = std::clamp(half_to_float(src[p * 4 + c]), 0.0f, 1.0f);
-				converted[p * 4 + c] = static_cast<uint8_t>(v * 255.0f + 0.5f);
-			}
+			return;
 		}
 		pixels = std::move(converted);
 	}
@@ -749,69 +723,31 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		return;
 	}
 
-	const auto     image_path = ctx->native_capture.directory / filename;
-	const uint32_t r_mask     = image->format == VK_FORMAT_B8G8R8A8_SRGB ? 0x00FF0000u : 0x000000FFu;
-	const uint32_t g_mask     = 0x0000FF00u;
-	const uint32_t b_mask     = image->format == VK_FORMAT_B8G8R8A8_SRGB ? 0x000000FFu : 0x00FF0000u;
-	const uint32_t a_mask     = 0xFF000000u;
-	auto*          surface    = SDL_CreateRGBSurfaceFrom(pixels.data(), static_cast<int>(width), static_cast<int>(height), 32,
-	                                                     static_cast<int>(width * 4), r_mask, g_mask, b_mask, a_mask);
-	if (surface == nullptr)
+	const auto image_path = ctx->native_capture.directory / filename;
+	const auto codec_result = Emulator::Host::HostCaptureImageCodecWritePng(
+	    {pixels.data(), {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}, width * 4u,
+	     hdr_capture ? Emulator::Host::HostCaptureImagePixelFormat::Rgba8 : capture_pixel_format},
+	    ctx->native_capture.max_edge, image_path);
+	if (codec_result.downscale_fallback)
 	{
-		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=create_surface frame=%d recoverable=0\n", frame);
+		std::fprintf(stderr, "KYTY_CAPTURE_WARN subsystem=frame_capture operation=downscale frame=%d kept_full=1\n", frame);
+	}
+	if (!codec_result.success)
+	{
+		const bool create_surface = codec_result.error == Emulator::Host::HostCaptureImageCodecError::CreateSurface;
+		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=%s frame=%d recoverable=0\n",
+		             create_surface ? "create_surface" : "save_image", frame);
 		if (agent_waiting)
 		{
 			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
-			                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame, "create_surface",
-			                           "SDL_CreateRGBSurfaceFrom failed");
+			                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame,
+			                           create_surface ? "create_surface" : "save_image",
+			                           create_surface ? "SDL_CreateRGBSurfaceFrom failed" : "failed to write native capture PNG");
 		}
 		return;
 	}
-
-	SDL_Surface* save_surface = surface;
-	SDL_Surface* scaled       = nullptr;
-	uint32_t     out_width    = static_cast<uint32_t>(width);
-	uint32_t     out_height   = static_cast<uint32_t>(height);
-	if (ctx->native_capture.max_edge > 0 && (out_width > ctx->native_capture.max_edge || out_height > ctx->native_capture.max_edge))
-	{
-		const double scale =
-		    static_cast<double>(ctx->native_capture.max_edge) / static_cast<double>(out_width > out_height ? out_width : out_height);
-		out_width  = std::max(1u, static_cast<uint32_t>(static_cast<double>(out_width) * scale + 0.5));
-		out_height = std::max(1u, static_cast<uint32_t>(static_cast<double>(out_height) * scale + 0.5));
-		scaled     = SDL_CreateRGBSurface(0, static_cast<int>(out_width), static_cast<int>(out_height), 32, r_mask, g_mask, b_mask, a_mask);
-		if (scaled != nullptr && SDL_BlitScaled(surface, nullptr, scaled, nullptr) == 0)
-		{
-			save_surface = scaled;
-		} else
-		{
-			if (scaled != nullptr)
-			{
-				SDL_FreeSurface(scaled);
-				scaled = nullptr;
-			}
-			out_width  = static_cast<uint32_t>(width);
-			out_height = static_cast<uint32_t>(height);
-			std::fprintf(stderr, "KYTY_CAPTURE_WARN subsystem=frame_capture operation=downscale frame=%d kept_full=1\n", frame);
-		}
-	}
-
-	const bool save_result = NativeCaptureSaveSdlSurfacePng(save_surface, image_path);
-	if (scaled != nullptr)
-	{
-		SDL_FreeSurface(scaled);
-	}
-	SDL_FreeSurface(surface);
-	if (!save_result)
-	{
-		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=save_image frame=%d recoverable=0\n", frame);
-		if (agent_waiting)
-		{
-			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
-			                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame, "save_image",
-			                           "failed to write native capture PNG");
-		}
-		return;
-	}
+	const uint32_t out_width  = codec_result.output_extent.width;
+	const uint32_t out_height = codec_result.output_extent.height;
 
 	NativeCapturePruneDirectory(ctx->native_capture.directory, ctx->native_capture.keep_files);
 

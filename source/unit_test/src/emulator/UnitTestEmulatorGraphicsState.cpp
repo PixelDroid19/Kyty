@@ -31,11 +31,13 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/WindowControls.h"
+#include "Emulator/Host/CaptureImageCodec.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -2712,6 +2714,78 @@ TEST(EmulatorGraphicsState, NativeCaptureRejectsBlackBootFrames)
 	}
 	EXPECT_TRUE(NativeCaptureFrameHasVisibleColor(visible.data(), visible.size()));
 	EXPECT_FALSE(NativeCaptureFrameHasVisibleColor(nullptr, 0));
+}
+
+TEST(EmulatorGraphicsState, HostCaptureImageCodecNormalizesCaptureChannelLayouts)
+{
+	using namespace Kyty::Emulator::Host;
+
+	std::vector<uint8_t> rgba;
+	const uint8_t         rgba_source[] = {1, 2, 3, 4};
+	EXPECT_TRUE(HostCaptureImageCodecNormalizeRgba8(
+	    {rgba_source, {1, 1}, 4, HostCaptureImagePixelFormat::Rgba8}, &rgba));
+	EXPECT_EQ(rgba, (std::vector<uint8_t> {1, 2, 3, 4}));
+
+	const uint8_t bgra_source[] = {3, 2, 1, 4, 0, 0, 0, 0, 30, 20, 10, 40};
+	EXPECT_TRUE(HostCaptureImageCodecNormalizeRgba8(
+	    {bgra_source, {1, 2}, 8, HostCaptureImagePixelFormat::Bgra8}, &rgba));
+	EXPECT_EQ(rgba, (std::vector<uint8_t> {1, 2, 3, 4, 10, 20, 30, 40}));
+
+	const std::array<uint16_t, 4> half_source = {0xbc00u, 0x3800u, 0x3c00u, 0x4000u};
+	EXPECT_TRUE(HostCaptureImageCodecNormalizeRgba8(
+	    {reinterpret_cast<const uint8_t*>(half_source.data()), {1, 1}, static_cast<uint32_t>(sizeof(half_source)),
+	     HostCaptureImagePixelFormat::Rgba16G16B16A16Sfloat},
+	    &rgba));
+	EXPECT_EQ(rgba, (std::vector<uint8_t> {0, 128, 255, 255}));
+}
+
+TEST(EmulatorGraphicsState, HostCaptureImageCodecAppliesCaptureMaxEdgeRounding)
+{
+	using namespace Kyty::Emulator::Host;
+
+	EXPECT_EQ(HostCaptureImageCodecScaleToMaxEdge({3840, 2160}, 1280).width, 1280u);
+	EXPECT_EQ(HostCaptureImageCodecScaleToMaxEdge({3840, 2160}, 1280).height, 720u);
+	EXPECT_EQ(HostCaptureImageCodecScaleToMaxEdge({2560, 1440}, 0).width, 2560u);
+	EXPECT_EQ(HostCaptureImageCodecScaleToMaxEdge({2560, 1440}, 0).height, 1440u);
+	EXPECT_EQ(HostCaptureImageCodecScaleToMaxEdge({1, 8192}, 1280).width, 1u);
+	EXPECT_EQ(HostCaptureImageCodecScaleToMaxEdge({1, 8192}, 1280).height, 1280u);
+}
+
+TEST(EmulatorGraphicsState, HostCaptureImageCodecWritesScaledPngAndReportsInputErrors)
+{
+	using namespace Kyty::Emulator::Host;
+
+	const uint8_t pixels[] = {
+	    1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255,
+	    13, 14, 15, 255, 16, 17, 18, 255, 19, 20, 21, 255, 22, 23, 24, 255,
+	};
+	const HostCaptureImageView source = {pixels, {4, 2}, 16, HostCaptureImagePixelFormat::Rgba8};
+	const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+	const auto path  = std::filesystem::temp_directory_path() / ("kyty-host-capture-codec-" + std::to_string(nonce) + ".png");
+
+	const auto written = HostCaptureImageCodecWritePng(source, 2, path);
+	EXPECT_TRUE(written.success);
+	EXPECT_EQ(written.error, HostCaptureImageCodecError::None);
+	EXPECT_EQ(written.output_extent.width, 2u);
+	EXPECT_EQ(written.output_extent.height, 1u);
+	EXPECT_FALSE(written.downscale_fallback);
+
+	std::ifstream file(path, std::ios::binary);
+	uint8_t       signature[8] {};
+	if (file.is_open())
+	{
+		file.read(reinterpret_cast<char*>(signature), sizeof(signature));
+	}
+	const uint8_t expected_signature[8] = {0x89u, 'P', 'N', 'G', '\r', '\n', 0x1au, '\n'};
+	EXPECT_EQ(std::memcmp(signature, expected_signature, sizeof(signature)), 0);
+	file.close();
+	std::error_code remove_error;
+	std::filesystem::remove(path, remove_error);
+
+	const HostCaptureImageView invalid = {pixels, {4, 2}, 0, HostCaptureImagePixelFormat::Rgba8};
+	const auto invalid_result = HostCaptureImageCodecWritePng(invalid, 0, path);
+	EXPECT_FALSE(invalid_result.success);
+	EXPECT_EQ(invalid_result.error, HostCaptureImageCodecError::InvalidInput);
 }
 
 // Pipeline cache must recycle slots instead of EXIT when variants exceed the cap.

@@ -3,12 +3,9 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Host/Platform.h"
 
-#include "SDL_surface.h"
-
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <system_error>
 #include <vector>
 
@@ -78,41 +75,6 @@ const char* NativeCaptureFormatName(VkFormat format)
 uint64_t NativeCaptureHostPeakRssBytes()
 {
 	return Kyty::Emulator::Host::PeakRssBytes();
-}
-
-bool NativeCaptureSaveSdlSurfacePng(SDL_Surface* surface, const std::filesystem::path& path)
-{
-	if (surface == nullptr || surface->format == nullptr || surface->w <= 0 || surface->h <= 0 || surface->format->BytesPerPixel != 4)
-	{
-		return false;
-	}
-
-	const bool must_lock = SDL_MUSTLOCK(surface);
-	if (must_lock && SDL_LockSurface(surface) != 0)
-	{
-		return false;
-	}
-
-	const uint32_t       width  = static_cast<uint32_t>(surface->w);
-	const uint32_t       height = static_cast<uint32_t>(surface->h);
-	std::vector<uint8_t> rgba(static_cast<uint64_t>(width) * height * 4u);
-	for (uint32_t y = 0; y < height; y++)
-	{
-		const auto* src_row = static_cast<const uint8_t*>(surface->pixels) + static_cast<size_t>(y) * surface->pitch;
-		auto*       dst_row = rgba.data() + static_cast<uint64_t>(y) * width * 4u;
-		for (uint32_t x = 0; x < width; x++)
-		{
-			uint32_t pixel = 0;
-			std::memcpy(&pixel, src_row + static_cast<size_t>(x) * 4u, sizeof(pixel));
-			SDL_GetRGBA(pixel, surface->format, dst_row + x * 4u, dst_row + x * 4u + 1u, dst_row + x * 4u + 2u, dst_row + x * 4u + 3u);
-		}
-	}
-
-	if (must_lock)
-	{
-		SDL_UnlockSurface(surface);
-	}
-	return UtilWriteRgba8Png(path.string().c_str(), rgba.data(), width, height, width);
 }
 
 bool NativeCaptureWriteMetadata(const std::filesystem::path& image_path, const NativeCaptureMetadata& metadata)
