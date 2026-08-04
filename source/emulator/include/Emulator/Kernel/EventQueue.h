@@ -5,11 +5,14 @@
 #include "Kyty/Core/LinkList.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/Namespace.h"
 #include "Emulator/Kernel/Pthread.h"
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::EventQueue {
+namespace Kyty::Kernel::EventQueue {
+
+using ::Kyty::Libs::LibKernel::KernelUseconds;
 
 constexpr int16_t KERNEL_EVFILT_TIMER     = -7;
 constexpr int16_t KERNEL_EVFILT_READ      = -1;
@@ -136,7 +139,7 @@ uintptr_t KYTY_SYSV_ABI KernelGetEventId(const KernelEvent* ev);
 void* KYTY_SYSV_ABI     KernelGetEventUserData(const KernelEvent* ev);
 int KYTY_SYSV_ABI       KernelGetEventError(const KernelEvent* ev);
 
-} // namespace Kyty::Libs::LibKernel::EventQueue
+} // namespace Kyty::Kernel::EventQueue
 
 #endif // KYTY_EMU_ENABLED
 

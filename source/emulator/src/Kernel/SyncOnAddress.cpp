@@ -13,7 +13,9 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::SyncOnAddress {
+namespace Kyty::Kernel::SyncOnAddress {
+
+using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 
@@ -163,6 +165,6 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWake(uint64_t address, int64_t wake_count)
 	return WakeRegisteredWaiters(address, wake_count);
 }
 
-} // namespace Kyty::Libs::LibKernel::SyncOnAddress
+} // namespace Kyty::Kernel::SyncOnAddress
 
 #endif // KYTY_EMU_ENABLED

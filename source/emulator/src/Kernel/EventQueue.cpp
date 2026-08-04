@@ -16,7 +16,9 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::EventQueue {
+namespace Kyty::Kernel::EventQueue {
+
+using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 
@@ -866,6 +868,6 @@ int KYTY_SYSV_ABI KernelGetEventError(const KernelEvent* ev)
 	return 0;
 }
 
-} // namespace Kyty::Libs::LibKernel::EventQueue
+} // namespace Kyty::Kernel::EventQueue
 
 #endif // KYTY_EMU_ENABLED

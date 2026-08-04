@@ -4,11 +4,14 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/Namespace.h"
 #include "Emulator/Kernel/Pthread.h"
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::EventFlag {
+namespace Kyty::Kernel::EventFlag {
+
+using ::Kyty::Libs::LibKernel::KernelUseconds;
 
 class KernelEventFlagPrivate;
 
@@ -23,7 +26,7 @@ int KYTY_SYSV_ABI KernelSetEventFlag(KernelEventFlag ef, uint64_t bit_pattern);
 int KYTY_SYSV_ABI KernelClearEventFlag(KernelEventFlag ef, uint64_t bit_pattern);
 int KYTY_SYSV_ABI KernelCancelEventFlag(KernelEventFlag ef, uint64_t set_pattern, int* num_wait_threads);
 
-} // namespace Kyty::Libs::LibKernel::EventFlag
+} // namespace Kyty::Kernel::EventFlag
 
 #endif // KYTY_EMU_ENABLED
 

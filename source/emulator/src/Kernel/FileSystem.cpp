@@ -22,7 +22,9 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::FileSystem {
+namespace Kyty::Kernel::FileSystem {
+
+using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 
@@ -2273,7 +2275,7 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBuffer(void* cmd, uint64_t arg1, void* a
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	return Ampr::SubmitCommandBuffer(cmd, static_cast<uintptr_t>(arg3));
+	return ::Kyty::Libs::Ampr::SubmitCommandBuffer(cmd, static_cast<uintptr_t>(arg3));
 }
 
 static uint32_t AprAllocateSubmissionId(uint64_t cmd)
@@ -2411,6 +2413,6 @@ int KYTY_SYSV_ABI KernelPoll(KernelPollFd* fds, uint32_t count, int /*timeout*/)
 	return ready;
 }
 
-} // namespace Kyty::Libs::LibKernel::FileSystem
+} // namespace Kyty::Kernel::FileSystem
 
 #endif // KYTY_EMU_ENABLED

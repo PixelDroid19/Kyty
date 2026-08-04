@@ -16,7 +16,9 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::EventFlag {
+namespace Kyty::Kernel::EventFlag {
+
+using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 
@@ -520,6 +522,6 @@ int KYTY_SYSV_ABI KernelCancelEventFlag(KernelEventFlag ef, uint64_t set_pattern
 	return OK;
 }
 
-} // namespace Kyty::Libs::LibKernel::EventFlag
+} // namespace Kyty::Kernel::EventFlag
 
 #endif // KYTY_EMU_ENABLED

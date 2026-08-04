@@ -4,12 +4,15 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/Namespace.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Time.h"
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::Semaphore {
+namespace Kyty::Kernel::Semaphore {
+
+using ::Kyty::Libs::LibKernel::KernelUseconds;
 
 class KernelSemaPrivate;
 
@@ -22,7 +25,7 @@ int KYTY_SYSV_ABI KernelPollSema(KernelSema sem, int need);
 int KYTY_SYSV_ABI KernelSignalSema(KernelSema sem, int count);
 int KYTY_SYSV_ABI KernelCancelSema(KernelSema sem, int count, int* threads);
 
-} // namespace Kyty::Libs::LibKernel::Semaphore
+} // namespace Kyty::Kernel::Semaphore
 
 namespace Kyty::Libs::Posix {
 

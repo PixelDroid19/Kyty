@@ -6,11 +6,12 @@
 #include "Kyty/Core/Subsystems.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/Namespace.h"
 #include "Emulator/Kernel/Pthread.h"
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::FileSystem {
+namespace Kyty::Kernel::FileSystem {
 
 struct FileStat
 {
@@ -161,7 +162,7 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetId(void* cmd, uint64_t arg1,
 int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetResult(void* cmd, uint64_t arg1, void* result, uint32_t* out_submission_id);
 int KYTY_SYSV_ABI KernelAprWaitCommandBuffer(uint32_t submission_id);
 
-} // namespace Kyty::Libs::LibKernel::FileSystem
+} // namespace Kyty::Kernel::FileSystem
 
 #endif // KYTY_EMU_ENABLED
 

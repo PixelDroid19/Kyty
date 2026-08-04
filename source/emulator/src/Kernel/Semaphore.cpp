@@ -21,7 +21,9 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::LibKernel::Semaphore {
+namespace Kyty::Kernel::Semaphore {
+
+using namespace ::Kyty::Libs::LibKernel;
 
 LIB_NAME("libkernel", "libkernel");
 
@@ -522,7 +524,7 @@ int KYTY_SYSV_ABI KernelCancelSema(KernelSema sem, int count, int* threads)
 	return ret;
 }
 
-} // namespace Kyty::Libs::LibKernel::Semaphore
+} // namespace Kyty::Kernel::Semaphore
 
 // Gen5 Posix semaphore exports (libkernel Posix_v1). Guest object is 16 bytes:
 // magic, nameid, has_waiters, count, flags. Host private state tracks waiters.
