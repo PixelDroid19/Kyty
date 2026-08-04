@@ -40,10 +40,6 @@ target_sources(emulator PRIVATE
 	include/Emulator/Host/Png.h
 	src/Host/Platform.cpp
 	include/Emulator/Host/Platform.h
-	src/DevTools/Runtime.cpp
-	src/DevTools/RuntimeSubsystem.cpp
-	include/Emulator/DevTools/Runtime.h
-	include/Emulator/DevTools/RuntimeSubsystem.h
 	src/Agent/EventRing.cpp
 	src/Agent/DebugSnapshot.cpp
 	src/Agent/Protocol.cpp
@@ -147,15 +143,13 @@ target_link_libraries(emulator
 	core
 	math
 	scripts
-	lua
 	kyty_agent_transport
-		kyty_devtools_core
-		vulkan-1
-		spirv-tools-opt
-		spirv-tools
-		easy_profiler
-		imgui
-		SDL2-static
+	vulkan-1
+	spirv-tools-opt
+	spirv-tools
+	easy_profiler
+	imgui
+	SDL2-static
 	PRIVATE
 		kyty_audio_pcm
 )

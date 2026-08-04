@@ -209,6 +209,23 @@ if(KYTY_BUILD_LAUNCHER AND NOT ${KYTY_PROJECT_NAME} MATCHES "Build_Tools" AND NO
 	add_subdirectory(launcher)
 endif()
 add_subdirectory(lib)
+
+# Worker bootstrap/telemetry belongs to the script host, not the emulator
+# archive. Keeping this bridge in its own target prevents guest/runtime users
+# of `emulator` from inheriting the DevTools transport implementation.
+add_library(kyty_runtime_devtools STATIC
+	emulator/src/DevTools/Runtime.cpp
+	emulator/src/DevTools/RuntimeSubsystem.cpp
+)
+target_include_directories(kyty_runtime_devtools PUBLIC
+	"${CMAKE_SOURCE_DIR}/emulator/include"
+	"${CMAKE_SOURCE_DIR}/lib/DevTools/include"
+)
+target_link_libraries(kyty_runtime_devtools PUBLIC core kyty_devtools_core)
+if (NOT MSVC)
+	target_compile_options(kyty_runtime_devtools PRIVATE -fno-exceptions)
+endif()
+
 if(KYTY_BUILD_DEVTOOLS)
 	add_subdirectory(devtools)
 endif()
@@ -219,16 +236,19 @@ if(BUILD_TESTING)
 	add_subdirectory(integration_test EXCLUDE_FROM_ALL)
 endif()
 
-# The emulator may consume the portable diagnostics core, but the process
-# supervisor is a launcher-side concern. Keep tests and emulator free of that
-# dependency so guest/runtime code cannot acquire platform process-control
-# policy transitively.
+# The process supervisor and worker transport are host-side concerns. Keep the
+# guest/runtime archive free of both dependencies so emulator consumers cannot
+# acquire process-control policy transitively.
 foreach(_kyty_runtime_target emulator unit_test)
 	get_target_property(_kyty_runtime_links ${_kyty_runtime_target} LINK_LIBRARIES)
 	if(_kyty_runtime_links AND "kyty_devtools_supervisor" IN_LIST _kyty_runtime_links)
 		message(FATAL_ERROR "${_kyty_runtime_target} must not link kyty_devtools_supervisor")
 	endif()
 endforeach()
+get_target_property(_kyty_emulator_links emulator LINK_LIBRARIES)
+if(_kyty_emulator_links AND "kyty_devtools_core" IN_LIST _kyty_emulator_links)
+	message(FATAL_ERROR "emulator must not link kyty_devtools_core; use kyty_runtime_devtools from the host")
+endif()
 
 add_executable(fc_script ${KYTY_SCRIPT_SRC}) 
 
@@ -256,6 +276,7 @@ target_link_libraries(fc_script scripts)
 target_link_libraries(fc_script lua)
 target_link_libraries(fc_script SDL2-static)
 target_link_libraries(fc_script emulator)
+target_link_libraries(fc_script kyty_runtime_devtools)
 if(TARGET kyty_devtools_supervisor)
 	target_link_libraries(fc_script kyty_devtools_supervisor)
 endif()
