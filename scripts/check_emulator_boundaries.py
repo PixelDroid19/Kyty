@@ -31,7 +31,8 @@ AUDIO_SOURCE_FILES = (
     "emulator/src/AudioPcm.cpp",
 )
 KERNEL_SOURCE_FILES = (
-    "emulator/src/Kernel/AmprPort.cpp",
+	"emulator/src/Kernel/AmprPort.cpp",
+	"emulator/src/Kernel/GuestRuntimePort.cpp",
     "emulator/src/Kernel/EventFlag.cpp",
     "emulator/src/Kernel/EventQueue.cpp",
     "emulator/src/Kernel/Fiber.cpp",
@@ -114,6 +115,10 @@ PROFILER_INCLUDE_PATHS = (
 KERNEL_GUEST_INCLUDE_PATHS = (
     "Emulator/Libs/Errno.h",
     "Emulator/Libs/Libs.h",
+)
+KERNEL_LOADER_INCLUDE_PREFIXES = (
+    "Emulator/Loader/",
+    "emulator/include/Emulator/Loader/",
 )
 
 @dataclass(frozen=True)
@@ -234,6 +239,12 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         for guest_path in KERNEL_GUEST_INCLUDE_PATHS
     ):
         return "Kernel -> Libs"
+    if relative_path in KERNEL_SOURCE_FILES and any(
+        canonical_path.startswith(prefix.casefold())
+        for canonical_path in canonical_paths
+        for prefix in KERNEL_LOADER_INCLUDE_PREFIXES
+    ):
+        return "Kernel -> Loader"
     if relative_path in KERNEL_HOST_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
@@ -672,6 +683,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Kernel/EventFlag.cpp:1: forbidden include (Kernel -> Libs): Emulator/Libs/Libs.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_kernel_loader_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Kernel/Pthread.cpp", '#include "Emulator/Loader/GuestCall.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Kernel/Pthread.cpp:1: forbidden include (Kernel -> Loader): Emulator/Loader/GuestCall.h",
                     ),
                 ),
             )

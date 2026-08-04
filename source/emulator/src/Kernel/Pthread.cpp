@@ -5,7 +5,6 @@
 #include "Kyty/Core/DateTime.h"
 #include "Kyty/Core/MemoryAlloc.h"
 #include "Kyty/Core/DbgAssert.h"
-#include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Timer.h"
@@ -13,8 +12,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Kernel/Trace.h"
-#include "Emulator/Loader/GuestCall.h"
-#include "Emulator/Loader/RuntimeLinker.h"
+#include "Emulator/Kernel/GuestRuntimePort.h"
 #include "Emulator/PresentationStats.h"
 #include "Emulator/Log.h"
 
@@ -161,7 +159,7 @@ struct PthreadStaticObject
 
 	Type             type;
 	uint64_t         vaddr;
-	Loader::Program* program;
+	const void* program;
 };
 
 class PthreadStaticObjects
@@ -173,7 +171,7 @@ public:
 	KYTY_CLASS_NO_COPY(PthreadStaticObjects);
 
 	void* CreateObject(void* addr, PthreadStaticObject::Type type);
-	void  DeleteObjects(Loader::Program* program);
+	void  DeleteObjects(const void* program);
 
 private:
 	Vector<PthreadStaticObject*> m_objects;
@@ -293,7 +291,7 @@ static void FreeDetachedThreads(void* /*arg*/)
 	}
 }
 
-void PthreadDeleteStaticObjects(Loader::Program* program)
+void PthreadDeleteStaticObjects(const void* program)
 {
 	EXIT_IF(g_pthread_context == nullptr);
 
@@ -650,9 +648,8 @@ void* PthreadStaticObjects::CreateObject(void* addr, PthreadStaticObject::Type t
 		return addr;
 	}
 
-	auto* rt      = Core::Singleton<Loader::RuntimeLinker>::Instance();
 	auto  vaddr   = reinterpret_cast<uint64_t>(addr);
-	auto* program = rt->FindProgramByAddr(vaddr);
+	auto* program = GuestRuntimePort::FindProgramByAddr(vaddr);
 
 	EXIT_NOT_IMPLEMENTED(program == nullptr);
 
@@ -687,7 +684,7 @@ void* PthreadStaticObjects::CreateObject(void* addr, PthreadStaticObject::Type t
 	return addr;
 }
 
-void PthreadStaticObjects::DeleteObjects(Loader::Program* program)
+void PthreadStaticObjects::DeleteObjects(const void* program)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -2984,7 +2981,7 @@ int KYTY_SYSV_ABI PthreadOnce(int* once_control, void (*init_routine)(void))
 
 	if (should_call)
 	{
-		Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(init_routine), 0, 0, 0);
+		(void)GuestRuntimePort::Invoke(reinterpret_cast<uint64_t>(init_routine), 0, 0, 0);
 
 		g_pthread_once_mutex.Lock();
 		*once_control = kPthreadOnceDone;
@@ -3153,7 +3150,7 @@ static void* run_thread(void* arg)
 	EXIT_IF(thread->attr == nullptr || thread->attr->stack_addr == nullptr || thread->attr->stack_size == 0);
 	auto* stack_top = reinterpret_cast<void*>((reinterpret_cast<uintptr_t>(thread->attr->stack_addr) + thread->attr->stack_size) &
 	                                          ~static_cast<uintptr_t>(0xf));
-	ret = reinterpret_cast<void*>(Loader::GuestCall::InvokeOnStack(reinterpret_cast<uint64_t>(thread->entry),
+	ret = reinterpret_cast<void*>(GuestRuntimePort::InvokeOnStack(reinterpret_cast<uint64_t>(thread->entry),
 	                                                               reinterpret_cast<uint64_t>(thread->arg), 0, 0, stack_top));
 
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)

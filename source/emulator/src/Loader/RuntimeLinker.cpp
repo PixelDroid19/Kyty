@@ -14,6 +14,7 @@
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Config.h"
 #include "Emulator/GpuMemoryFault.h"
+#include "Emulator/Kernel/GuestRuntimePort.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Loader/Elf.h"
@@ -42,6 +43,18 @@ void SetProgName(const String& name);
 } // namespace Kyty::Libs::LibKernel
 
 namespace Kyty::Loader {
+
+namespace {
+
+std::atomic<RuntimeLinker*> g_guest_runtime_owner {nullptr};
+
+Kernel::GuestRuntimePort::ProgramHandle FindProgramByAddrForKernel(uint64_t vaddr)
+{
+	auto* runtime = g_guest_runtime_owner.load(std::memory_order_acquire);
+	return runtime != nullptr ? runtime->FindProgramByAddr(vaddr) : nullptr;
+}
+
+} // namespace
 
 static bool IsHleOwnedRuntimeSymbol(const String& name)
 {
@@ -1325,11 +1338,21 @@ void RuntimeLinker::UnloadProgram(Program* program)
 RuntimeLinker::RuntimeLinker(): m_symbols(new SymbolDatabase)
 {
 	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+	m_previous_guest_runtime_owner = g_guest_runtime_owner.exchange(this, std::memory_order_acq_rel);
+	Kernel::GuestRuntimePort::Install({FindProgramByAddrForKernel, GuestCall::Invoke, GuestCall::InvokeOnStack});
 }
 
 RuntimeLinker::~RuntimeLinker()
 {
 	Clear();
+	RuntimeLinker* expected = this;
+	if (g_guest_runtime_owner.compare_exchange_strong(expected, m_previous_guest_runtime_owner, std::memory_order_acq_rel))
+	{
+		if (m_previous_guest_runtime_owner == nullptr)
+		{
+			Kernel::GuestRuntimePort::Install({});
+		}
+	}
 }
 
 bool RuntimeLinker::HasProgramFile(const String& elf_name)

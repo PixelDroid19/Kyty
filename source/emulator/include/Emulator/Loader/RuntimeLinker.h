@@ -298,6 +298,7 @@ private:
 	Core::Hashmap<int, StaticTlsAllocation*> m_static_tlss;
 	Core::Mutex                            m_static_tls_mutex;
 	Core::Mutex                            m_mutex;
+	RuntimeLinker*                         m_previous_guest_runtime_owner = nullptr;
 };
 
 // Rewrite PS5 TLS-call sites that encode three 0x66 prefixes before E8

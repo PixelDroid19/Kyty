@@ -26,10 +26,6 @@ extern "C" {
 struct sched_param;
 }
 
-namespace Kyty::Loader {
-struct Program;
-} // namespace Kyty::Loader
-
 namespace Kyty::Kernel {
 
 KYTY_SUBSYSTEM_DEFINE(Pthread);
@@ -63,7 +59,7 @@ using pthread_key_destructor_func_t = KYTY_SYSV_ABI void (*)(void*);
 
 void PthreadInitSelfForMainThread();
 void* PthreadCreateMainGuestStack();
-void PthreadDeleteStaticObjects(Loader::Program* program);
+void PthreadDeleteStaticObjects(const void* program);
 [[nodiscard]] bool PthreadIsInitialized();
 bool PthreadQueryStack(const void* addr, void** start, void** end);
 
