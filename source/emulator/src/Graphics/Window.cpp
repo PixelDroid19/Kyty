@@ -3321,7 +3321,17 @@ void WindowUpdateIcon()
 {
 	EXIT_IF(g_window_ctx == nullptr);
 
-	static Image* icon = Loader::SystemContentGetIcon();
+	static Image* icon = nullptr;
+	if (icon == nullptr)
+	{
+		String icon_path;
+		if (!Loader::SystemContentGetIconPath(&icon_path))
+		{
+			return;
+		}
+		icon = new Image(icon_path);
+		icon->Load();
+	}
 
 	if (icon != nullptr)
 	{

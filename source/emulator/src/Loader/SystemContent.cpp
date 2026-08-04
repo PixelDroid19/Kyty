@@ -8,8 +8,6 @@
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/Threads.h"
 
-#include "Emulator/Graphics/Image.h"
-
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Loader {
@@ -86,7 +84,6 @@ struct SystemContent
 	String                 playgo_path;
 	PlayGo                 playgo;
 	String                 icon_path;
-	Libs::Graphics::Image* icon = nullptr;
 };
 
 Psf::~Psf()
@@ -371,15 +368,9 @@ void SystemContentLoadParamSfo(const String& file_name)
 	sc->psf.DbgPrint();
 
 	sc->icon_path = file_name.DirectoryWithoutFilename() + U"icon0.png";
-	delete sc->icon;
-
-	if (Core::File::IsFileExisting(sc->icon_path))
+	if (!Core::File::IsFileExisting(sc->icon_path))
 	{
-		sc->icon = new Libs::Graphics::Image(sc->icon_path);
-		sc->icon->Load();
-	} else
-	{
-		sc->icon = nullptr;
+		sc->icon_path = String();
 	}
 
 	sc->playgo_path = file_name.DirectoryWithoutFilename() + U"playgo-chunk.dat";
@@ -483,11 +474,16 @@ bool SystemContentGetMetadata(String* title_id, String* app_version)
 	return !title_id->IsEmpty() || !app_version->IsEmpty();
 }
 
-Libs::Graphics::Image* SystemContentGetIcon()
+bool SystemContentGetIconPath(String* path)
 {
-	auto* sc = Core::Singleton<SystemContent>::Instance();
+	if (path == nullptr)
+	{
+		return false;
+	}
 
-	return sc->icon;
+	auto* sc = Core::Singleton<SystemContent>::Instance();
+	*path = sc->icon_path;
+	return !path->IsEmpty();
 }
 
 bool SystemContentGetChunksNum(uint32_t* num)

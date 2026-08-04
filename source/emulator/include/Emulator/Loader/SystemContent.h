@@ -8,10 +8,6 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::Graphics {
-class Image;
-} // namespace Kyty::Libs::Graphics
-
 namespace Kyty::Loader {
 
 void                   SystemContentLoadParamSfo(const String& file_name);
@@ -20,7 +16,7 @@ bool                   SystemContentParamSfoGetInt(const char* name, int32_t* va
 bool                   SystemContentParamSfoGetString(const char* name, String* value);
 bool                   SystemContentParamSfoGetString(const char* name, char* value, size_t value_size);
 bool                   SystemContentGetMetadata(String* title_id, String* app_version);
-Libs::Graphics::Image* SystemContentGetIcon();
+bool                   SystemContentGetIconPath(String* path);
 bool                   SystemContentGetChunksNum(uint32_t* num);
 
 } // namespace Kyty::Loader
