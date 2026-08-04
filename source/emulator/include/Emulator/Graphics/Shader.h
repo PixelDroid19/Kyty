@@ -1103,6 +1103,14 @@ enum class ShaderTextureUsage
 	ReadWrite,
 };
 
+struct ShaderDirectImageUse
+{
+	ShaderTextureUsage texture          = ShaderTextureUsage::Unknown;
+	int                sampler_register = -1;
+	bool               reads            = false;
+	bool               writes           = false;
+};
+
 struct ShaderStorageResources
 {
 	static constexpr int BUFFERS_MAX = 16;
@@ -1170,6 +1178,7 @@ struct ShaderZeroSBufferResources
                                                                              ShaderStorageAccess unbased_match, bool decoded_unknown,
                                                                              bool indirect_descriptor_use);
 [[nodiscard]] ShaderStorageUseEvidence    AnalyzeShaderStorageUse(const ShaderCode& code, int start_register);
+[[nodiscard]] ShaderDirectImageUse         AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register);
 void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
 
 struct ShaderTextureDescriptor
