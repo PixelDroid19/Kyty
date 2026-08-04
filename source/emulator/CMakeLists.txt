@@ -1,5 +1,4 @@
-file(GLOB emulator_src
-	src/*.cpp
+file(GLOB emulator_src CONFIGURE_DEPENDS
 	src/*.cpp
 	src/Libs/*.cpp
 	src/Graphics/*.cpp

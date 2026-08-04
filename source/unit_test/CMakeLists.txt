@@ -1,4 +1,4 @@
-file(GLOB unit_test_src
+file(GLOB unit_test_src CONFIGURE_DEPENDS
     "include/*.h"
     "src/*.cpp"
     "src/core/*.cpp"
