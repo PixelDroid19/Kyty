@@ -28,6 +28,8 @@ target_sources(emulator PRIVATE
 	include/Emulator/Host/ImageSurface.h
 	src/Host/HostWindowSdl.cpp
 	include/Emulator/Host/HostWindow.h
+	src/Host/HostInputSdl.cpp
+	include/Emulator/Host/HostInput.h
 	src/Host/CaptureImageCodec.cpp
 	include/Emulator/Host/CaptureImageCodec.h
 	src/Host/Png.cpp

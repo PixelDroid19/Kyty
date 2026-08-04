@@ -29,24 +29,13 @@
 #include "Emulator/Graphics/VulkanQueueIdentity.h"
 #include "Emulator/Graphics/WindowControls.h"
 #include "Emulator/Host/CaptureImageCodec.h"
+#include "Emulator/Host/HostInput.h"
 #include "Emulator/Host/HostWindow.h"
 #include "Emulator/Loader/SystemContent.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
 #include "KytyBuildInfo.h"
-#include "SDL.h"
-#include "SDL_error.h"
-#include "SDL_events.h"
-#include "SDL_gamecontroller.h"
-#include "SDL_joystick.h"
-#include "SDL_keyboard.h"
-#include "SDL_keycode.h"
-#include "SDL_mouse.h"
-#include "SDL_stdinc.h"
-#include "SDL_thread.h"
-#include "SDL_touch.h"
-#include "SDL_video.h"
 
 #include <atomic>
 #include <chrono>
@@ -123,94 +112,11 @@ static void MaybeToggleFrameWindowHleTrace(int frame_num)
 	}
 }
 
-struct EventKeyboard
-{
-	bool     down;
-	bool     up;
-	bool     pressed;
-	bool     released;
-	bool     repeat;
-	int      scan_code;
-	int      key_code;
-	uint16_t mod;
-	double   timestamp_seconds;
-};
-
-struct EventMouse
-{
-	bool   down;
-	bool   up;
-	bool   left;
-	bool   middle;
-	bool   right;
-	bool   x1;
-	bool   x2;
-	bool   touch;
-	bool   pressed;
-	bool   released;
-	int    num_of_clicks;
-	bool   wheel;
-	int    x;
-	int    y;
-	bool   motion;
-	int    motion_x;
-	int    motion_y;
-	double timestamp_seconds;
-};
-
-struct EventFinger
-{
-	bool   down;
-	bool   up;
-	bool   motion;
-	int    touch_id;
-	int    finger_id;
-	float  x;
-	float  y;
-	float  dx;
-	float  dy;
-	float  pressure;
-	double timestamp_seconds;
-};
-
-struct EventController
-{
-	int    id;
-	int    button;
-	int    axis_id;
-	int    axis_value;
-	bool   down;
-	bool   up;
-	bool   added;
-	bool   removed;
-	bool   remapped;
-	bool   axis;
-	bool   pressed;
-	bool   released;
-	double timestamp_seconds;
-};
-
-enum class DisplayOrientation
-{
-	Unknown,          /* The display orientation can't be determined */
-	Landscape,        /* The display is in landscape mode, with the right side up, relative to portrait mode */
-	LandscapeFlipped, /* The display is in landscape mode, with the left side up, relative to portrait mode */
-	Portrait,         /* The display is in portrait mode */
-	PortraitFlipped,  /* The display is in portrait mode, upside down */
-
-	DisplayEventOrientation = 0xF0
-};
-
-struct EventDisplay
-{
-	DisplayOrientation orientation;
-};
-
-constexpr uint32_t KYTY_SDL_BUTTON_LMASK  = SDL_BUTTON_LMASK;  // NOLINT(hicpp-signed-bitwise)
-constexpr uint32_t KYTY_SDL_BUTTON_MMASK  = SDL_BUTTON_MMASK;  // NOLINT(hicpp-signed-bitwise)
-constexpr uint32_t KYTY_SDL_BUTTON_RMASK  = SDL_BUTTON_RMASK;  // NOLINT(hicpp-signed-bitwise)
-constexpr uint32_t KYTY_SDL_BUTTON_X1MASK = SDL_BUTTON_X1MASK; // NOLINT(hicpp-signed-bitwise)
-constexpr uint32_t KYTY_SDL_BUTTON_X2MASK = SDL_BUTTON_X2MASK; // NOLINT(hicpp-signed-bitwise)
+using EventKeyboard   = ::Kyty::Emulator::Host::KeyboardEvent;
+using EventMouse      = ::Kyty::Emulator::Host::MouseEvent;
+using EventFinger     = ::Kyty::Emulator::Host::FingerEvent;
+using EventController = ::Kyty::Emulator::Host::ControllerEvent;
+using EventDisplay    = ::Kyty::Emulator::Host::DisplayEventData;
 
 // struct GraphicContext;
 
@@ -757,27 +663,6 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	}
 }
 
-static int game_sdl_event_filter(void* /*userdata*/, SDL_Event* /*event*/)
-{
-	//	game_api_private_t *p = (game_api_private_t*)userdata;
-	//
-	//	if (event->type == SDL_WINDOWEVENT)
-	//	{
-	//		if (event->window.event == SDL_WINDOWEVENT_RESIZED || event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
-	//		{
-	//			p->mutex.Lock();
-	//			{
-	//				//p->resize_events_num++;
-	//				//printf("game_sdl_event_filter\n");
-	//				p->skip_frames++;
-	//			}
-	//			p->mutex.Unlock();
-	//		}
-	//	}
-
-	return 0;
-}
-
 static void CalcFrameTime(GameApi* game, double game_time_s)
 {
 	game->m_previous_time_seconds = game->m_current_time_seconds;
@@ -877,9 +762,7 @@ bool game_init(GameApi* game, const Core::Timer& timer, void* data)
 	pdata->ctx  = ctx;
 
 	game->data1 = pdata;
-	game->data2 = new SDL_Event;
-
-	SDL_AddEventWatch(game_sdl_event_filter, game->data1);
+	game->data2 = ::Kyty::Emulator::Host::HostInput::Create();
 
 	game->m_screen_width  = ctx->screen_width;
 	game->m_screen_height = ctx->screen_height;
@@ -903,7 +786,7 @@ bool game_close(GameApi* game)
 	EXIT_IF(!game->data1 || !game->data2);
 
 	delete (static_cast<GameApiPrivateStruct*>(game->data1));
-	delete (static_cast<SDL_Event*>(game->data2));
+	delete (static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2));
 
 	return Close(game);
 }
@@ -979,11 +862,11 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 	HostWindowKey host_key {};
 	host_key.pressed = key->down;
 	host_key.repeat  = key->repeat;
-	host_key.escape  = key->key_code == SDLK_ESCAPE;
-	host_key.pause   = key->key_code == SDLK_F9;
-	host_key.f11     = key->key_code == SDLK_F11;
-	host_key.enter   = key->key_code == SDLK_RETURN || key->key_code == SDLK_KP_ENTER;
-	host_key.alt     = (key->mod & KMOD_ALT) != 0;
+	host_key.escape  = ::Kyty::Emulator::Host::HostInput::IsEscapeKey(key->key_code);
+	host_key.pause   = ::Kyty::Emulator::Host::HostInput::IsPauseKey(key->key_code);
+	host_key.f11     = ::Kyty::Emulator::Host::HostInput::IsF11Key(key->key_code);
+	host_key.enter   = ::Kyty::Emulator::Host::HostInput::IsEnterKey(key->key_code);
+	host_key.alt     = ::Kyty::Emulator::Host::HostInput::HasAltModifier(key->mod);
 
 	const bool enter_allowed_before = g_window_ctx == nullptr || g_window_ctx->controls.GuestEnterAllowed();
 	const auto host_command         = g_window_ctx == nullptr ? HostWindowCommand::None : g_window_ctx->controls.HandleKey(host_key);
@@ -1005,24 +888,20 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 		const bool down = key->down;
 		ApplyKeyboardLeftStickControllerAxes(ApplyKeyboardLeftStickKey(g_keyboard_left_stick, key->key_code, down));
 		uint32_t button = 0;
-		switch (key->key_code)
+		switch (::Kyty::Emulator::Host::HostInput::ClassifyKeyboardAction(key->key_code))
 		{
-			case SDLK_RETURN:
-			case SDLK_SPACE:
-			case SDLK_z: button = Controller::PAD_BUTTON_CROSS; break;
-			case SDLK_ESCAPE:
-			case SDLK_x: button = Controller::PAD_BUTTON_CIRCLE; break;
-			case SDLK_c: button = Controller::PAD_BUTTON_SQUARE; break;
-			case SDLK_v: button = Controller::PAD_BUTTON_TRIANGLE; break;
-			case SDLK_UP: button = Controller::PAD_BUTTON_UP; break;
-			case SDLK_DOWN: button = Controller::PAD_BUTTON_DOWN; break;
-			case SDLK_LEFT: button = Controller::PAD_BUTTON_LEFT; break;
-			case SDLK_RIGHT: button = Controller::PAD_BUTTON_RIGHT; break;
-			case SDLK_q: button = Controller::PAD_BUTTON_L1; break;
-			case SDLK_e: button = Controller::PAD_BUTTON_R1; break;
-			case SDLK_TAB:
-			case SDLK_BACKSPACE: button = Controller::PAD_BUTTON_OPTIONS; break;
-			default: break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Cross: button = Controller::PAD_BUTTON_CROSS; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Circle: button = Controller::PAD_BUTTON_CIRCLE; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Square: button = Controller::PAD_BUTTON_SQUARE; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Triangle: button = Controller::PAD_BUTTON_TRIANGLE; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Up: button = Controller::PAD_BUTTON_UP; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Down: button = Controller::PAD_BUTTON_DOWN; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Left: button = Controller::PAD_BUTTON_LEFT; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Right: button = Controller::PAD_BUTTON_RIGHT; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::L1: button = Controller::PAD_BUTTON_L1; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::R1: button = Controller::PAD_BUTTON_R1; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Options: button = Controller::PAD_BUTTON_OPTIONS; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::None: break;
 		}
 		if (button != 0)
 		{
@@ -1032,7 +911,7 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS || KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	// Host debug HUD toggle (does not map to guest pad).
-	if (key->down && !key->repeat && key->key_code == SDLK_F1)
+	if (key->down && !key->repeat && ::Kyty::Emulator::Host::HostInput::IsF1Key(key->key_code))
 	{
 		DebugOverlayToggle();
 	}
@@ -1098,13 +977,14 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 		printf("Controller %s: %d, time = %.04f\n", (f->added ? "added" : "removed"), f->id, f->timestamp_seconds);
 	} else if (f->axis)
 	{
-		printf("Controller axis: %d, axis = %d, value = %d, time = %.04f\n", f->id, f->axis_id, f->axis_value, f->timestamp_seconds);
+		printf("Controller axis: %d, axis = %d, value = %d, time = %.04f\n", f->id, static_cast<int>(f->axis_id), f->axis_value,
+		       f->timestamp_seconds);
 	} else
 	{
 		printf("Controller button: "
 		       "%d, %s%s, %s%s, button = %d, time = %.04f\n",
 		       f->id, (f->down ? "down" : ""), (f->up ? "up" : ""), (f->pressed ? "pressed" : ""), (f->released ? "released" : ""),
-		       f->button, f->timestamp_seconds);
+		       static_cast<int>(f->button), f->timestamp_seconds);
 	}
 #endif
 	if (f->remapped)
@@ -1116,22 +996,23 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 
 	if (f->added)
 	{
-		auto* pad = SDL_GameControllerOpen(f->id);
-		if (pad == nullptr)
+		auto* input = static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2);
+		int   id    = 0;
+		if (input == nullptr || !input->OpenController(f->id, &id))
 		{
-			std::fprintf(stderr, "Kyty controller open failed for device %d: %s\n", f->id, SDL_GetError());
+			std::fprintf(stderr, "Kyty controller open failed for device %d: %s\n", f->id,
+			             input == nullptr ? "host input unavailable" : input->LastError());
 			return;
 		}
-		int id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad));
 		Controller::ControllerConnect(id);
 	}
 
 	if (f->removed)
 	{
 		Controller::ControllerDisconnect(f->id);
-		if (auto* pad = SDL_GameControllerFromInstanceID(f->id); pad != nullptr)
+		if (auto* input = static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2); input != nullptr)
 		{
-			SDL_GameControllerClose(pad);
+			input->CloseController(f->id);
 		}
 	}
 
@@ -1140,21 +1021,22 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 		uint32_t button = 0;
 		switch (f->button)
 		{
-			case SDL_CONTROLLER_BUTTON_A: button = Controller::PAD_BUTTON_CROSS; break;
-			case SDL_CONTROLLER_BUTTON_B: button = Controller::PAD_BUTTON_CIRCLE; break;
-			case SDL_CONTROLLER_BUTTON_X: button = Controller::PAD_BUTTON_SQUARE; break;
-			case SDL_CONTROLLER_BUTTON_Y: button = Controller::PAD_BUTTON_TRIANGLE; break;
-			case SDL_CONTROLLER_BUTTON_BACK: button = Controller::PAD_BUTTON_TOUCH_PAD; break;
-			case SDL_CONTROLLER_BUTTON_GUIDE: break;
-			case SDL_CONTROLLER_BUTTON_START: button = Controller::PAD_BUTTON_OPTIONS; break;
-			case SDL_CONTROLLER_BUTTON_LEFTSTICK: button = Controller::PAD_BUTTON_L3; break;
-			case SDL_CONTROLLER_BUTTON_RIGHTSTICK: button = Controller::PAD_BUTTON_R3; break;
-			case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: button = Controller::PAD_BUTTON_L1; break;
-			case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: button = Controller::PAD_BUTTON_R1; break;
-			case SDL_CONTROLLER_BUTTON_DPAD_UP: button = Controller::PAD_BUTTON_UP; break;
-			case SDL_CONTROLLER_BUTTON_DPAD_DOWN: button = Controller::PAD_BUTTON_DOWN; break;
-			case SDL_CONTROLLER_BUTTON_DPAD_LEFT: button = Controller::PAD_BUTTON_LEFT; break;
-			case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: button = Controller::PAD_BUTTON_RIGHT; break;
+			case ::Kyty::Emulator::Host::ControllerButton::A: button = Controller::PAD_BUTTON_CROSS; break;
+			case ::Kyty::Emulator::Host::ControllerButton::B: button = Controller::PAD_BUTTON_CIRCLE; break;
+			case ::Kyty::Emulator::Host::ControllerButton::X: button = Controller::PAD_BUTTON_SQUARE; break;
+			case ::Kyty::Emulator::Host::ControllerButton::Y: button = Controller::PAD_BUTTON_TRIANGLE; break;
+			case ::Kyty::Emulator::Host::ControllerButton::Back: button = Controller::PAD_BUTTON_TOUCH_PAD; break;
+			case ::Kyty::Emulator::Host::ControllerButton::Guide: break;
+			case ::Kyty::Emulator::Host::ControllerButton::Start: button = Controller::PAD_BUTTON_OPTIONS; break;
+			case ::Kyty::Emulator::Host::ControllerButton::LeftStick: button = Controller::PAD_BUTTON_L3; break;
+			case ::Kyty::Emulator::Host::ControllerButton::RightStick: button = Controller::PAD_BUTTON_R3; break;
+			case ::Kyty::Emulator::Host::ControllerButton::LeftShoulder: button = Controller::PAD_BUTTON_L1; break;
+			case ::Kyty::Emulator::Host::ControllerButton::RightShoulder: button = Controller::PAD_BUTTON_R1; break;
+			case ::Kyty::Emulator::Host::ControllerButton::DpadUp: button = Controller::PAD_BUTTON_UP; break;
+			case ::Kyty::Emulator::Host::ControllerButton::DpadDown: button = Controller::PAD_BUTTON_DOWN; break;
+			case ::Kyty::Emulator::Host::ControllerButton::DpadLeft: button = Controller::PAD_BUTTON_LEFT; break;
+			case ::Kyty::Emulator::Host::ControllerButton::DpadRight: button = Controller::PAD_BUTTON_RIGHT; break;
+			case ::Kyty::Emulator::Host::ControllerButton::Invalid: break;
 			default: break;
 		}
 		if (button != 0)
@@ -1165,24 +1047,18 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 
 	if (f->axis)
 	{
-		int value = -1;
-		if (f->axis_id == SDL_CONTROLLER_AXIS_TRIGGERLEFT || f->axis_id == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
-		{
-			value = Controller::controller_get_axis(0, SDL_JOYSTICK_AXIS_MAX, f->axis_value);
-		} else
-		{
-			value = Controller::controller_get_axis(SDL_JOYSTICK_AXIS_MIN, SDL_JOYSTICK_AXIS_MAX, f->axis_value);
-		}
+		const int value = ::Kyty::Emulator::Host::HostInput::NormalizeAxis(f->axis_id, f->axis_value);
 
 		Controller::Axis axis = Controller::Axis::AxisMax;
 		switch (f->axis_id)
 		{
-			case SDL_CONTROLLER_AXIS_LEFTX: axis = Controller::Axis::LeftX; break;
-			case SDL_CONTROLLER_AXIS_LEFTY: axis = Controller::Axis::LeftY; break;
-			case SDL_CONTROLLER_AXIS_RIGHTX: axis = Controller::Axis::RightX; break;
-			case SDL_CONTROLLER_AXIS_RIGHTY: axis = Controller::Axis::RightY; break;
-			case SDL_CONTROLLER_AXIS_TRIGGERLEFT: axis = Controller::Axis::TriggerLeft; break;
-			case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: axis = Controller::Axis::TriggerRight; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::LeftX: axis = Controller::Axis::LeftX; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::LeftY: axis = Controller::Axis::LeftY; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::RightX: axis = Controller::Axis::RightX; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::RightY: axis = Controller::Axis::RightY; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::TriggerLeft: axis = Controller::Axis::TriggerLeft; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::TriggerRight: axis = Controller::Axis::TriggerRight; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::Invalid: break;
 		}
 
 		if (axis != Controller::Axis::AxisMax)
@@ -1266,23 +1142,23 @@ void game_event_resize(GameApi* game, uint32_t new_width, uint32_t new_height)
 	p->mutex.Unlock();
 }
 
-static void process_window_event(GameApi* game, SDL_WindowEvent window)
+static void process_window_event(GameApi* game, const ::Kyty::Emulator::Host::WindowEventData& window)
 {
 	switch (window.event)
 	{
-		case SDL_WINDOWEVENT_SHOWN: printf("Window %" PRIu32 " shown\n", window.windowID); break;
+		case ::Kyty::Emulator::Host::WindowEvent::Shown: printf("Window %" PRIu32 " shown\n", window.window_id); break;
 
-		case SDL_WINDOWEVENT_HIDDEN: printf("Window %" PRIu32 " hidden\n", window.windowID); break;
+		case ::Kyty::Emulator::Host::WindowEvent::Hidden: printf("Window %" PRIu32 " hidden\n", window.window_id); break;
 
-		case SDL_WINDOWEVENT_EXPOSED: printf("Window %" PRIu32 " exposed\n", window.windowID); break;
+		case ::Kyty::Emulator::Host::WindowEvent::Exposed: printf("Window %" PRIu32 " exposed\n", window.window_id); break;
 
-		case SDL_WINDOWEVENT_MOVED:
-			printf("Window %" PRIu32 " moved to %" PRId32 ",%" PRId32 "\n", window.windowID, window.data1, window.data2);
+		case ::Kyty::Emulator::Host::WindowEvent::Moved:
+			printf("Window %" PRIu32 " moved to %" PRId32 ",%" PRId32 "\n", window.window_id, window.data1, window.data2);
 			break;
 
-		case SDL_WINDOWEVENT_RESIZED:
-		case SDL_WINDOWEVENT_SIZE_CHANGED:
-			printf("Window %" PRIu32 " drawable size changed to %" PRId32 "x%" PRId32 "\n", window.windowID, window.data1, window.data2);
+		case ::Kyty::Emulator::Host::WindowEvent::Resized:
+		case ::Kyty::Emulator::Host::WindowEvent::SizeChanged:
+			printf("Window %" PRIu32 " drawable size changed to %" PRId32 "x%" PRId32 "\n", window.window_id, window.data1, window.data2);
 			if (game->event_resize != nullptr && window.data1 > 0 && window.data2 > 0 &&
 			    (game->m_screen_width != static_cast<uint32_t>(window.data1) ||
 			     game->m_screen_height != static_cast<uint32_t>(window.data2)))
@@ -1291,38 +1167,38 @@ static void process_window_event(GameApi* game, SDL_WindowEvent window)
 			}
 			break;
 
-		case SDL_WINDOWEVENT_MINIMIZED:
-			printf("Window %" PRIu32 " minimized\n", window.windowID);
+		case ::Kyty::Emulator::Host::WindowEvent::Minimized:
+			printf("Window %" PRIu32 " minimized\n", window.window_id);
 			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
 				g_window_ctx->host_window->SetMinimized(true);
 				SetHostCursorVisible(true);
 			}
 			break;
-		case SDL_WINDOWEVENT_MAXIMIZED: printf("Window %" PRIu32 " maximized\n", window.windowID); break;
-		case SDL_WINDOWEVENT_RESTORED:
-			printf("Window %" PRIu32 " restored\n", window.windowID);
+		case ::Kyty::Emulator::Host::WindowEvent::Maximized: printf("Window %" PRIu32 " maximized\n", window.window_id); break;
+		case ::Kyty::Emulator::Host::WindowEvent::Restored:
+			printf("Window %" PRIu32 " restored\n", window.window_id);
 			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
 				g_window_ctx->host_window->SetMinimized(false);
 				UpdateHostCursorPolicy();
 			}
 			break;
-		case SDL_WINDOWEVENT_ENTER: printf("Mouse entered window %" PRIu32 "\n", window.windowID); break;
-		case SDL_WINDOWEVENT_LEAVE: printf("Mouse left window %" PRIu32 "\n", window.windowID); break;
-		case SDL_WINDOWEVENT_FOCUS_GAINED:
-			printf("Window %" PRIu32 " gained keyboard focus\n", window.windowID);
+		case ::Kyty::Emulator::Host::WindowEvent::Enter: printf("Mouse entered window %" PRIu32 "\n", window.window_id); break;
+		case ::Kyty::Emulator::Host::WindowEvent::Leave: printf("Mouse left window %" PRIu32 "\n", window.window_id); break;
+		case ::Kyty::Emulator::Host::WindowEvent::FocusGained:
+			printf("Window %" PRIu32 " gained keyboard focus\n", window.window_id);
 			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
 				g_window_ctx->host_window->SetFocused(true);
 				g_window_ctx->controls.SetFocused(true);
-				const uint8_t* keyboard = SDL_GetKeyboardState(nullptr);
-				g_window_ctx->controls.ReconcileEnter(keyboard[SDL_SCANCODE_RETURN] != 0 || keyboard[SDL_SCANCODE_KP_ENTER] != 0);
+				const auto* input = game == nullptr ? nullptr : static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2);
+				g_window_ctx->controls.ReconcileEnter(input != nullptr && input->EnterPressed());
 				UpdateHostCursorPolicy();
 			}
 			break;
-		case SDL_WINDOWEVENT_FOCUS_LOST:
-			printf("Window %" PRIu32 " lost keyboard focus\n", window.windowID);
+		case ::Kyty::Emulator::Host::WindowEvent::FocusLost:
+			printf("Window %" PRIu32 " lost keyboard focus\n", window.window_id);
 			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
 				g_window_ctx->host_window->SetFocused(false);
@@ -1331,63 +1207,43 @@ static void process_window_event(GameApi* game, SDL_WindowEvent window)
 			}
 			ApplyKeyboardLeftStickControllerAxes(ResetKeyboardLeftStick(g_keyboard_left_stick));
 			break;
-		case SDL_WINDOWEVENT_CLOSE:
-			printf("Window %" PRIu32 " closed\n", window.windowID);
+		case ::Kyty::Emulator::Host::WindowEvent::Close:
+			printf("Window %" PRIu32 " closed\n", window.window_id);
 			game->m_game_need_exit = true;
 			break;
-		default: printf("Window %" PRIu32 " got unknown event %" PRIu8 "\n", window.windowID, window.event); break;
+		default:
+			printf("Window %" PRIu32 " got unknown event %" PRIu8 "\n", window.window_id,
+			       static_cast<uint8_t>(window.event));
+			break;
 	}
 }
 
-static void process_display_event(GameApi* game, SDL_DisplayEvent display)
+static void process_display_event(GameApi* game, const ::Kyty::Emulator::Host::DisplayEventData& display)
 {
-	bool sdl = false;
-
-	switch (display.event)
+	if (!display.native_orientation &&
+	    display.orientation_value != static_cast<int32_t>(::Kyty::Emulator::Host::DisplayOrientation::DisplayEventOrientation))
 	{
-		case SDL_DISPLAYEVENT_ORIENTATION: sdl = true; // @suppress("No break at end of case")
-		case static_cast<Uint8>(DisplayOrientation::DisplayEventOrientation):
-		{
-			printf("Display %" PRIu32 "[%s] changed orientation to %d - ", display.display, sdl ? "SDL" : "Kyty",
-			       static_cast<int>(display.data1));
+		printf("Display %" PRIu32 " got unknown orientation event 0x%" PRIx32 "\n", display.display,
+		       static_cast<uint32_t>(display.orientation_value));
+		return;
+	}
 
-			EventDisplay d {};
-			d.orientation = DisplayOrientation::Unknown;
+	printf("Display %" PRIu32 "[%s] changed orientation to %" PRId32 " - ", display.display,
+	       display.native_orientation ? "SDL" : "Kyty", display.orientation_value);
+	switch (display.orientation)
+	{
+		case ::Kyty::Emulator::Host::DisplayOrientation::Unknown: printf("UNKNOWN\n"); break;
+		case ::Kyty::Emulator::Host::DisplayOrientation::Landscape: printf("LANDSCAPE\n"); break;
+		case ::Kyty::Emulator::Host::DisplayOrientation::LandscapeFlipped: printf("LANDSCAPE_FLIPPED\n"); break;
+		case ::Kyty::Emulator::Host::DisplayOrientation::Portrait: printf("PORTRAIT\n"); break;
+		case ::Kyty::Emulator::Host::DisplayOrientation::PortraitFlipped: printf("PORTRAIT_FLIPPED\n"); break;
+		default: printf("???\n"); break;
+	}
 
-			switch (display.data1)
-			{
-				case SDL_ORIENTATION_UNKNOWN: printf("UNKNOWN\n"); break;
-				case SDL_ORIENTATION_LANDSCAPE:
-					printf("LANDSCAPE\n");
-					d.orientation = DisplayOrientation::Landscape;
-					break;
-				case SDL_ORIENTATION_LANDSCAPE_FLIPPED:
-					printf("LANDSCAPE_FLIPPED\n");
-					d.orientation = DisplayOrientation::LandscapeFlipped;
-					break;
-				case SDL_ORIENTATION_PORTRAIT:
-					printf("PORTRAIT\n");
-					d.orientation = DisplayOrientation::Portrait;
-					break;
-				case SDL_ORIENTATION_PORTRAIT_FLIPPED:
-					d.orientation = DisplayOrientation::PortraitFlipped;
-					printf("PORTRAIT_FLIPPED\n");
-					break;
-				default: printf("???\n");
-			}
-
-			if (!sdl)
-			{
-				if (game->event_display != nullptr)
-				{
-					//				dbg_check();
-					game->event_display(game, &d);
-				}
-			}
-
-			break;
-		}
-		default: printf("Display %" PRIu32 " got unknown event 0x%" PRIx8 "\n", display.display, display.event); break;
+	if (!display.native_orientation && game->event_display != nullptr)
+	{
+		EventDisplay d = display;
+		game->event_display(game, &d);
 	}
 }
 
@@ -1395,104 +1251,95 @@ int game_poll_event(GameApi* game)
 {
 	EXIT_IF(!game);
 
-	auto* event = static_cast<SDL_Event*>(game->data2);
+	auto* event = static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2);
 
 	EXIT_IF(!event);
 
-	// SDL_JoystickUpdate();
-
-	return SDL_PollEvent(event);
+	return event->Poll();
 }
 
 int game_wait_event(GameApi* game)
 {
 	EXIT_IF(!game);
 
-	auto* event = static_cast<SDL_Event*>(game->data2);
+	auto* event = static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2);
 
 	EXIT_IF(!event);
 
-	return SDL_WaitEvent(event);
+	return event->Wait();
 }
 
 void game_process_event(GameApi* game, double time_s)
 {
 	EXIT_IF(!game);
 
-	auto* event = static_cast<SDL_Event*>(game->data2);
+	auto* input = static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2);
 
-	EXIT_IF(!event);
+	EXIT_IF(input == nullptr);
 
-	DebugOverlayProcessEvent(event);
+	const auto* event = input->GetEvent();
+	EXIT_IF(event == nullptr);
+
+	DebugOverlayProcessEvent(input->GetNativeEvent());
 
 	// printf("Event: 0x%04" PRIx32 "\n", event.type);
 
-	EXIT_IF(SDL_GetEventState(SDL_DISPLAYEVENT) != SDL_ENABLE);
+	EXIT_IF(!input->DisplayEventsEnabled());
 
 	switch (event->type)
 	{
-		case SDL_QUIT:
+		case ::Kyty::Emulator::Host::InputEventType::Quit:
 			if (game->event_quit != nullptr)
 			{
 				game->event_quit(game);
 			}
 			break;
 
-		case SDL_APP_TERMINATING:
+		case ::Kyty::Emulator::Host::InputEventType::Terminate:
 			if (game->event_terminate != nullptr)
 			{
 				game->event_terminate(game);
 			}
 			break;
 
-		case SDL_APP_LOWMEMORY:
+		case ::Kyty::Emulator::Host::InputEventType::LowMemory:
 			if (game->event_low_memory != nullptr)
 			{
 				game->event_low_memory(game);
 			}
 			break;
 
-		case SDL_APP_WILLENTERBACKGROUND:
+		case ::Kyty::Emulator::Host::InputEventType::WillEnterBackground:
 			if (game->event_will_enter_background != nullptr)
 			{
 				game->event_will_enter_background(game);
 			}
 			break;
 
-		case SDL_APP_DIDENTERBACKGROUND:
+		case ::Kyty::Emulator::Host::InputEventType::DidEnterBackground:
 			if (game->event_did_enter_background != nullptr)
 			{
 				game->event_did_enter_background(game);
 			}
 			break;
 
-		case SDL_APP_WILLENTERFOREGROUND:
+		case ::Kyty::Emulator::Host::InputEventType::WillEnterForeground:
 			if (game->event_will_enter_foreground != nullptr)
 			{
 				game->event_will_enter_foreground(game);
 			}
 			break;
 
-		case SDL_APP_DIDENTERFOREGROUND:
+		case ::Kyty::Emulator::Host::InputEventType::DidEnterForeground:
 			if (game->event_did_enter_foreground != nullptr)
 			{
 				game->event_did_enter_foreground(game);
 			}
 			break;
 
-		case SDL_KEYDOWN:
-		case SDL_KEYUP:
+		case ::Kyty::Emulator::Host::InputEventType::Keyboard:
 		{
-			EventKeyboard key {};
-
-			key.down              = (event->type == SDL_KEYDOWN);
-			key.up                = (event->type == SDL_KEYUP);
-			key.pressed           = (event->key.state == SDL_PRESSED);
-			key.released          = (event->key.state == SDL_RELEASED);
-			key.repeat            = (event->key.repeat != 0u);
-			key.scan_code         = event->key.keysym.scancode;
-			key.key_code          = event->key.keysym.sym;
-			key.mod               = event->key.keysym.mod;
+			EventKeyboard key      = event->keyboard;
 			key.timestamp_seconds = time_s;
 
 			if (game->event_keyboard != nullptr)
@@ -1503,34 +1350,16 @@ void game_process_event(GameApi* game, double time_s)
 			break;
 		}
 
-		case SDL_WINDOWEVENT: process_window_event(game, event->window); break;
+		case ::Kyty::Emulator::Host::InputEventType::Window: process_window_event(game, event->window); break;
 
-		case SDL_DISPLAYEVENT: process_display_event(game, event->display); break;
+		case ::Kyty::Emulator::Host::InputEventType::Display: process_display_event(game, event->display); break;
 
-		case SDL_MOUSEBUTTONDOWN:
-		case SDL_MOUSEBUTTONUP:
+		case ::Kyty::Emulator::Host::InputEventType::MouseButton:
 		{
-			EventMouse mb {};
+			EventMouse mb = event->mouse;
 
 			// printf("event.button.which = %" PRIu32"\n", event.button.which);
 
-			mb.down              = (event->button.type == SDL_MOUSEBUTTONDOWN);
-			mb.up                = (event->button.type == SDL_MOUSEBUTTONUP);
-			mb.left              = (event->button.button == SDL_BUTTON_LEFT);
-			mb.middle            = (event->button.button == SDL_BUTTON_MIDDLE);
-			mb.right             = (event->button.button == SDL_BUTTON_RIGHT);
-			mb.x1                = (event->button.button == SDL_BUTTON_X1);
-			mb.x2                = (event->button.button == SDL_BUTTON_X2);
-			mb.touch             = (event->button.which == SDL_TOUCH_MOUSEID);
-			mb.pressed           = (event->button.state == SDL_PRESSED);
-			mb.released          = (event->button.state == SDL_RELEASED);
-			mb.num_of_clicks     = event->button.clicks;
-			mb.wheel             = false;
-			mb.x                 = event->button.x;
-			mb.y                 = event->button.y;
-			mb.motion            = false;
-			mb.motion_x          = 0;
-			mb.motion_y          = 0;
 			mb.timestamp_seconds = time_s;
 
 			if (game->event_mouse != nullptr)
@@ -1541,27 +1370,10 @@ void game_process_event(GameApi* game, double time_s)
 			break;
 		}
 
-		case SDL_MOUSEWHEEL:
+		case ::Kyty::Emulator::Host::InputEventType::MouseWheel:
 		{
-			EventMouse mb {};
+			EventMouse mb = event->mouse;
 
-			mb.down              = false;
-			mb.up                = false;
-			mb.left              = false;
-			mb.middle            = false;
-			mb.right             = false;
-			mb.x1                = false;
-			mb.x2                = false;
-			mb.touch             = (event->wheel.which == SDL_TOUCH_MOUSEID);
-			mb.pressed           = false;
-			mb.released          = false;
-			mb.num_of_clicks     = 0;
-			mb.wheel             = true;
-			mb.x                 = event->wheel.x;
-			mb.y                 = event->wheel.y;
-			mb.motion            = false;
-			mb.motion_x          = 0;
-			mb.motion_y          = 0;
 			mb.timestamp_seconds = time_s;
 
 			if (game->event_mouse != nullptr)
@@ -1572,27 +1384,10 @@ void game_process_event(GameApi* game, double time_s)
 			break;
 		}
 
-		case SDL_MOUSEMOTION:
+		case ::Kyty::Emulator::Host::InputEventType::MouseMotion:
 		{
-			EventMouse mb {};
+			EventMouse mb = event->mouse;
 
-			mb.down              = false;
-			mb.up                = false;
-			mb.left              = ((event->motion.state & KYTY_SDL_BUTTON_LMASK) != 0u);
-			mb.middle            = ((event->motion.state & KYTY_SDL_BUTTON_MMASK) != 0u);
-			mb.right             = ((event->motion.state & KYTY_SDL_BUTTON_RMASK) != 0u);
-			mb.x1                = ((event->motion.state & KYTY_SDL_BUTTON_X1MASK) != 0u);
-			mb.x2                = ((event->motion.state & KYTY_SDL_BUTTON_X2MASK) != 0u);
-			mb.touch             = (event->motion.which == SDL_TOUCH_MOUSEID);
-			mb.pressed           = false;
-			mb.released          = false;
-			mb.num_of_clicks     = 0;
-			mb.wheel             = false;
-			mb.x                 = event->motion.x;
-			mb.y                 = event->motion.y;
-			mb.motion            = true;
-			mb.motion_x          = event->motion.xrel;
-			mb.motion_y          = event->motion.yrel;
 			mb.timestamp_seconds = time_s;
 
 			if (game->event_mouse != nullptr)
@@ -1603,22 +1398,9 @@ void game_process_event(GameApi* game, double time_s)
 			break;
 		}
 
-		case SDL_FINGERMOTION:
-		case SDL_FINGERDOWN:
-		case SDL_FINGERUP:
+		case ::Kyty::Emulator::Host::InputEventType::Finger:
 		{
-			EventFinger f {};
-
-			f.down              = (event->tfinger.type == SDL_FINGERDOWN);
-			f.up                = (event->tfinger.type == SDL_FINGERUP);
-			f.motion            = (event->tfinger.type == SDL_FINGERMOTION);
-			f.finger_id         = static_cast<int>(event->tfinger.fingerId);
-			f.touch_id          = static_cast<int>(event->tfinger.touchId);
-			f.x                 = event->tfinger.x;
-			f.y                 = event->tfinger.y;
-			f.dx                = event->tfinger.dx;
-			f.dy                = event->tfinger.dy;
-			f.pressure          = event->tfinger.pressure;
+			EventFinger f       = event->finger;
 			f.timestamp_seconds = time_s;
 
 			if (game->event_finger != nullptr)
@@ -1641,22 +1423,9 @@ void game_process_event(GameApi* game, double time_s)
 			//			break;
 			//		}
 
-		case SDL_CONTROLLERAXISMOTION:
+		case ::Kyty::Emulator::Host::InputEventType::ControllerAxis:
 		{
-			EventController c {};
-
-			c.id                = event->caxis.which;
-			c.button            = SDL_CONTROLLER_BUTTON_INVALID;
-			c.axis_id           = event->caxis.axis;
-			c.axis_value        = event->caxis.value;
-			c.down              = false;
-			c.up                = false;
-			c.added             = false;
-			c.removed           = false;
-			c.remapped          = false;
-			c.axis              = true;
-			c.pressed           = false;
-			c.released          = false;
+			EventController c = event->controller;
 			c.timestamp_seconds = time_s;
 
 			if (game->event_controller != nullptr)
@@ -1667,23 +1436,9 @@ void game_process_event(GameApi* game, double time_s)
 			break;
 		}
 
-		case SDL_CONTROLLERBUTTONDOWN:
-		case SDL_CONTROLLERBUTTONUP:
+		case ::Kyty::Emulator::Host::InputEventType::ControllerButton:
 		{
-			EventController c {};
-
-			c.id                = event->cbutton.which;
-			c.button            = event->cbutton.button;
-			c.axis_id           = SDL_CONTROLLER_AXIS_INVALID;
-			c.axis_value        = 0;
-			c.down              = (event->cbutton.type == SDL_CONTROLLERBUTTONDOWN);
-			c.up                = (event->cbutton.type == SDL_CONTROLLERBUTTONUP);
-			c.added             = false;
-			c.removed           = false;
-			c.remapped          = false;
-			c.axis              = false;
-			c.pressed           = (event->cbutton.state == SDL_PRESSED);
-			c.released          = (event->cbutton.state == SDL_RELEASED);
+			EventController c = event->controller;
 			c.timestamp_seconds = time_s;
 
 			if (game->event_controller != nullptr)
@@ -1694,24 +1449,9 @@ void game_process_event(GameApi* game, double time_s)
 			break;
 		}
 
-		case SDL_CONTROLLERDEVICEADDED:
-		case SDL_CONTROLLERDEVICEREMOVED:
-		case SDL_CONTROLLERDEVICEREMAPPED:
+		case ::Kyty::Emulator::Host::InputEventType::ControllerDevice:
 		{
-			EventController c {};
-
-			c.id                = event->cdevice.which;
-			c.button            = SDL_CONTROLLER_BUTTON_INVALID;
-			c.axis_id           = SDL_CONTROLLER_AXIS_INVALID;
-			c.axis_value        = 0;
-			c.down              = false;
-			c.up                = false;
-			c.added             = (event->cdevice.type == SDL_CONTROLLERDEVICEADDED);
-			c.removed           = (event->cdevice.type == SDL_CONTROLLERDEVICEREMOVED);
-			c.remapped          = (event->cdevice.type == SDL_CONTROLLERDEVICEREMAPPED);
-			c.axis              = false;
-			c.pressed           = false;
-			c.released          = false;
+			EventController c = event->controller;
 			c.timestamp_seconds = time_s;
 
 			if (game->event_controller != nullptr)
@@ -1721,6 +1461,8 @@ void game_process_event(GameApi* game, double time_s)
 
 			break;
 		}
+
+		case ::Kyty::Emulator::Host::InputEventType::None: break;
 	}
 }
 
