@@ -1489,7 +1489,8 @@ TEST(EmulatorGraphicsState, Gen5SharpSampledTextureAcceptsTexture2DArrayType)
 	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 8);
 
 	ASSERT_EQ(bind.textures2D.textures_num, 1);
-	EXPECT_EQ(bind.textures2D.textures2d_sampled_num, 1);
+	EXPECT_EQ(bind.textures2D.textures2d_sampled_num, 0);
+	EXPECT_EQ(bind.textures2D.textures2d_array_sampled_num, 1);
 	EXPECT_EQ(bind.textures2D.desc[0].texture.Type(), 13);
 	EXPECT_EQ(bind.textures2D.desc[0].usage, ShaderTextureUsage::ReadOnly);
 }
