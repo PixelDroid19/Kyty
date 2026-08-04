@@ -75,6 +75,11 @@ GRAPHICS_IMAGE_SOURCE_FILES = (
 GRAPHICS_DEBUG_OVERLAY_SOURCE = "emulator/src/Graphics/DebugOverlay.cpp"
 GRAPHICS_WINDOW_SOURCE = "emulator/src/Graphics/Window.cpp"
 GRAPHICS_RUN_SOURCE = "emulator/src/Graphics/GraphicsRun.cpp"
+GRAPHICS_TIME_PORT_SOURCE_FILES = (
+	"emulator/src/Graphics/GraphicsRenderContext.cpp",
+	"emulator/src/Graphics/GraphicsRenderEop.cpp",
+	"emulator/src/Graphics/VideoOut.cpp",
+)
 LOADER_SOURCE_FILES = (
     "emulator/src/Loader/SystemContent.cpp",
 )
@@ -91,6 +96,7 @@ ALLOWED_SOURCE_FILES = (
     GRAPHICS_WINDOW_SOURCE,
     *LOADER_SOURCE_FILES,
     GRAPHICS_RUN_SOURCE,
+    *GRAPHICS_TIME_PORT_SOURCE_FILES,
     RUNTIME_LINKER_SOURCE,
 )
 
@@ -124,6 +130,7 @@ KERNEL_LOADER_INCLUDE_PREFIXES = (
     "Emulator/Loader/",
     "emulator/include/Emulator/Loader/",
 )
+KERNEL_TIME_INCLUDE = "Emulator/Kernel/Time.h"
 
 @dataclass(frozen=True)
 class Violation:
@@ -291,6 +298,10 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in AGENT_INCLUDE_PREFIXES
     ):
         return "GraphicsRun -> Agent"
+    if relative_path in GRAPHICS_TIME_PORT_SOURCE_FILES and any(
+        canonical_path == _canonical_include_path(KERNEL_TIME_INCLUDE) for canonical_path in canonical_paths
+    ):
+        return "Graphics -> Kernel time"
     if relative_path in LOADER_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
@@ -900,6 +911,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Graphics/GraphicsRun.cpp:1: forbidden include (GraphicsRun -> Agent): Emulator/Agent/EventRing.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_graphics_include_of_kernel_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Graphics/VideoOut.cpp", '#include "Emulator/Kernel/Time.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Graphics/VideoOut.cpp:1: forbidden include (Graphics -> Kernel time): Emulator/Kernel/Time.h",
                     ),
                 ),
             )

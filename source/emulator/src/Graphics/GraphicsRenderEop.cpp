@@ -13,7 +13,7 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Kernel/EventQueue.h"
-#include "Emulator/Kernel/Time.h"
+#include "Emulator/Kernel/TimePort.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
@@ -141,7 +141,7 @@ void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandB
 	    {
 		    auto* dst_gpu_addr = reinterpret_cast<uint64_t*>(args[0]);
 		    EXIT_IF(dst_gpu_addr == nullptr);
-		    *dst_gpu_addr = LibKernel::KernelReadTsc();
+		    *dst_gpu_addr = Kernel::TimePort::GetCounter();
 		    printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n" FG_DEFAULT,
 		           reinterpret_cast<uint64_t>(dst_gpu_addr), *dst_gpu_addr);
 		    return false;

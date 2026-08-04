@@ -22,6 +22,7 @@
 #include "Emulator/Graphics/VideoOutMaterializationGate.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/TimePort.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Profiler.h"
@@ -404,7 +405,7 @@ void FillMonotonicVblankStatus(VideoOutConfig* config, VideoOutVblankStatus* sta
 	}
 	status->count       = 1 + (now_ns - config->vblank_origin_ns) / VIDEO_OUT_VBLANK_PERIOD_NS;
 	status->processTime = LibKernel::KernelGetProcessTime();
-	status->tsc         = LibKernel::KernelReadTsc();
+	status->tsc         = Kernel::TimePort::GetCounter();
 }
 
 class FlipQueue
@@ -924,7 +925,7 @@ void VideoOutContext::VblankBegin()
 			Core::LockGuard config_lock(ctx->mutex);
 			ctx->pre_vblank_status.count++;
 			ctx->pre_vblank_status.processTime = LibKernel::KernelGetProcessTime();
-			ctx->pre_vblank_status.tsc         = LibKernel::KernelReadTsc();
+			ctx->pre_vblank_status.tsc         = Kernel::TimePort::GetCounter();
 			count                              = ctx->pre_vblank_status.count;
 		}
 		(void)count;
@@ -958,7 +959,7 @@ void VideoOutContext::VblankEnd()
 			Core::LockGuard config_lock(ctx->mutex);
 			ctx->vblank_status.count++;
 			ctx->vblank_status.processTime = LibKernel::KernelGetProcessTime();
-			ctx->vblank_status.tsc         = LibKernel::KernelReadTsc();
+			ctx->vblank_status.tsc         = Kernel::TimePort::GetCounter();
 			count                          = ctx->vblank_status.count;
 			queues.reserve(ctx->vblank_events.Size());
 			for (auto* binding: ctx->vblank_events)
@@ -1448,7 +1449,7 @@ void FlipQueue::Enqueue(VideoOutConfig* cfg, int index, int64_t flip_arg, bool a
 	r.cfg        = cfg;
 	r.index      = index;
 	r.flip_arg   = flip_arg;
-	r.submit_tsc = LibKernel::KernelReadTsc();
+	r.submit_tsc = Kernel::TimePort::GetCounter();
 
 	m_requests.Add(r);
 	if (accept_lifecycle)
@@ -1512,7 +1513,7 @@ bool FlipQueue::Flip(uint32_t micros)
 	m_mutex.Lock();
 	r.cfg->flip_status.count++;
 	r.cfg->flip_status.processTime              = LibKernel::KernelGetProcessTime();
-	r.cfg->flip_status.processTimeCounter       = LibKernel::KernelReadTsc();
+	r.cfg->flip_status.processTimeCounter       = Kernel::TimePort::GetCounter();
 	r.cfg->flip_status.submitProcessTimeCounter = r.submit_tsc;
 	r.cfg->flip_status.flipArg                   = r.flip_arg;
 	r.cfg->flip_status.currentBuffer             = r.index;
@@ -1747,7 +1748,7 @@ static intptr_t make_video_out_event_data(intptr_t current_data, void* trigger_d
 		counter++;
 	}
 
-	const auto timestamp = LibKernel::KernelReadTsc() & 0xfffu;
+	const auto timestamp = Kernel::TimePort::GetCounter() & 0xfffu;
 	const auto payload   = static_cast<uint64_t>(reinterpret_cast<intptr_t>(trigger_data));
 	return static_cast<intptr_t>(timestamp | (counter << 12u) | ((payload & 0x0000ffffffffffffULL) << 16u));
 }

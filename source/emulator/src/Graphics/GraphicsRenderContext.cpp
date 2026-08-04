@@ -19,7 +19,7 @@
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/EventQueue.h"
-#include "Emulator/Kernel/Time.h"
+#include "Emulator/Kernel/TimePort.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
@@ -203,7 +203,7 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal)
 		void* trigger_data = nullptr;
 		if (signal == CompletionSignal::EndOfPipe)
 		{
-			trigger_data = reinterpret_cast<void*>(LibKernel::KernelReadTsc());
+		trigger_data = reinterpret_cast<void*>(Kernel::TimePort::GetCounter());
 		}
 		const auto result = LibKernel::EventQueue::KernelTriggerEvent(trigger.pin, static_cast<uintptr_t>(trigger.id),
 		                                                              LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
