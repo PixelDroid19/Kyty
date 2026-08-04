@@ -608,6 +608,7 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_agent_transport_integration
 	kyty_audio_pcm_integration
 	kyty_audio_host_integration
+	kyty_host_platform_integration
 	kyty_architecture_boundary_integration
 	kyty_architecture_boundary_test_launcher
 )
