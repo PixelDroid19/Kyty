@@ -8,6 +8,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Host/HostWindow.h"
 #include "Emulator/Host/HostGui.h"
+#include "Emulator/Log.h"
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -178,13 +179,13 @@ void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext
 
 	if (!CreateRenderPass(ctx->device, swapchain->swapchain_format))
 	{
-		std::fprintf(stderr, "DebugOverlay: failed to create render pass\n");
+		KYTY_LOG_WARN("DebugOverlay: failed to create render pass\n");
 		ImGui::DestroyContext();
 		return;
 	}
 	if (!CreateFramebuffers(ctx->device, swapchain))
 	{
-		std::fprintf(stderr, "DebugOverlay: failed to create framebuffers\n");
+		KYTY_LOG_WARN("DebugOverlay: failed to create framebuffers\n");
 		vkDestroyRenderPass(ctx->device, g_render_pass, nullptr);
 		g_render_pass = VK_NULL_HANDLE;
 		ImGui::DestroyContext();
@@ -193,7 +194,7 @@ void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext
 
 	if (!::Kyty::Emulator::Host::HostGuiInit(native_window))
 	{
-		std::fprintf(stderr, "DebugOverlay: ImGui host GUI initialization failed\n");
+		KYTY_LOG_WARN("DebugOverlay: ImGui host GUI initialization failed\n");
 		DestroyFramebuffers(ctx->device);
 		vkDestroyRenderPass(ctx->device, g_render_pass, nullptr);
 		g_render_pass = VK_NULL_HANDLE;
@@ -216,7 +217,7 @@ void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext
 
 	if (!ImGui_ImplVulkan_Init(&init_info))
 	{
-		std::fprintf(stderr, "DebugOverlay: ImGui_ImplVulkan_Init failed\n");
+		KYTY_LOG_WARN("DebugOverlay: ImGui_ImplVulkan_Init failed\n");
 		::Kyty::Emulator::Host::HostGuiShutdown();
 		DestroyFramebuffers(ctx->device);
 		vkDestroyRenderPass(ctx->device, g_render_pass, nullptr);

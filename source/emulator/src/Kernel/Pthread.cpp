@@ -16,6 +16,7 @@
 #include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/RuntimeLinker.h"
 #include "Emulator/PresentationStats.h"
+#include "Emulator/Log.h"
 
 #include <atomic>
 #include <cerrno>
@@ -2580,7 +2581,7 @@ void SlotTraceDumpBlockedCondWaiters()
 	{
 		return;
 	}
-	std::fprintf(stderr, "COND_BLOCKED tracked=0x%016" PRIx64 " wait_reg=%u sig_total_trk=%u sig_after_stall=%u\n",
+	KYTY_LOG_DEBUG( "COND_BLOCKED tracked=0x%016" PRIx64 " wait_reg=%u sig_total_trk=%u sig_after_stall=%u\n",
 	             g_slot_trace_tracked_cond.load(), g_slot_trace_wait_for_tracked.load(), g_slot_trace_sig_for_tracked.load(),
 	             g_slot_trace_sig_after_stall.load());
 	for (uint32_t i = 0; i < kSlotTraceWaiterSlots; i++)
@@ -2589,7 +2590,7 @@ void SlotTraceDumpBlockedCondWaiters()
 		{
 			continue;
 		}
-		std::fprintf(stderr,
+		KYTY_LOG_DEBUG(
 		             "COND_BLOCKED[%u] cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64 " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64
 		             " ret=0x%016" PRIx64 "\n",
 		             i, g_slot_trace_waiters[i].cond.load(), g_slot_trace_waiters[i].cond_h.load(),
@@ -2603,11 +2604,10 @@ void SlotTraceDumpBlockedCondWaiters()
 		{
 			continue;
 		}
-		std::fprintf(stderr, "COND_SIGCNT cond=0x%016" PRIx64 " total=%u after_stall=%u last_ret=0x%016" PRIx64 "\n", c,
+		KYTY_LOG_DEBUG( "COND_SIGCNT cond=0x%016" PRIx64 " total=%u after_stall=%u last_ret=0x%016" PRIx64 "\n", c,
 		             g_slot_trace_sigs[i].count.load(), g_slot_trace_sigs[i].after_stall.load(),
 		             g_slot_trace_sigs[i].last_return_addr.load(std::memory_order_relaxed));
 	}
-	std::fflush(stderr);
 }
 
 static void slot_trace_cond_event(const char* kind, PthreadCond* guest_cond, PthreadMutex* guest_mutex, uint64_t ret)
@@ -2664,13 +2664,12 @@ static void slot_trace_cond_event(const char* kind, PthreadCond* guest_cond, Pth
 		}
 	}
 
-	std::fprintf(stderr,
+	KYTY_LOG_DEBUG(
 	             "COND_TRACE %s n=%u present=%llu ms_p=%llu ret=0x%016" PRIx64 " cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64
 	             " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64 " tracked=0x%016" PRIx64 " sig_trk=%u sig_stall=%u\n",
 	             kind, seq, static_cast<unsigned long long>(stats.present), static_cast<unsigned long long>(stats.ms_since_present), ret,
 	             cond_addr, cond_h, mutex_addr, mutex_h, g_slot_trace_tracked_cond.load(), g_slot_trace_sig_for_tracked.load(),
 	             g_slot_trace_sig_after_stall.load());
-	std::fflush(stderr);
 }
 
 int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
@@ -3649,7 +3648,7 @@ int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rm
 				const auto         ret        = reinterpret_cast<uint64_t>(__builtin_return_address(0));
 				constexpr uint64_t kSlotTable  = 0x901c434c8ull;
 				constexpr uint64_t kSlotStride = 0x20ull;
-				std::fprintf(stderr, "SLOT_TRACE ns=%" PRIu64 " ret=0x%016" PRIx64 " n=%u present=%llu\n", nanos, ret, n,
+				KYTY_LOG_DEBUG( "SLOT_TRACE ns=%" PRIu64 " ret=0x%016" PRIx64 " n=%u present=%llu\n", nanos, ret, n,
 				             static_cast<unsigned long long>(stats.present));
 				for (uint32_t i = 8; i <= 11; i++)
 				{
@@ -3666,11 +3665,10 @@ int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rm
 						s1            = o[1];
 						fn            = *reinterpret_cast<const volatile uint64_t*>(obj + 0x10);
 					}
-					std::fprintf(stderr,
+					KYTY_LOG_DEBUG(
 					             "SLOT[%u] typ=0x%" PRIx64 " obj=0x%016" PRIx64 " state=%u/%u fn=0x%016" PRIx64 "\n", i, typ, obj, s0,
 					             s1, fn);
 				}
-				std::fflush(stderr);
 			}
 		}
 	}

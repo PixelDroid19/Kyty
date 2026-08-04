@@ -9,6 +9,7 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <chrono>
@@ -467,7 +468,7 @@ public:
 		*state = value;
 		if (std::getenv("KYTY_PAD_SCRIPT_LOG") != nullptr && !(value == m_last_state))
 		{
-			std::fprintf(stderr, "KYTY_PAD_SCRIPT state=0x%08" PRIx32 " axes=0x%02" PRIx8 " elapsed=%.3f\n", value.buttons,
+			KYTY_LOG_DEBUG( "KYTY_PAD_SCRIPT state=0x%08" PRIx32 " axes=0x%02" PRIx8 " elapsed=%.3f\n", value.buttons,
 			             value.axis_mask, elapsed);
 			m_last_state = value;
 		}
@@ -496,7 +497,7 @@ private:
 		}
 		if (source.empty())
 		{
-			std::fprintf(stderr, "KYTY_PAD_SCRIPT ignored: route source is empty\n");
+			KYTY_LOG_DEBUG( "KYTY_PAD_SCRIPT ignored: route source is empty\n");
 			return;
 		}
 		std::string text;
@@ -505,13 +506,13 @@ private:
 			std::ifstream file(source, std::ios::binary | std::ios::ate);
 			if (!file)
 			{
-				std::fprintf(stderr, "KYTY_PAD_SCRIPT cannot open route\n");
+				KYTY_LOG_DEBUG( "KYTY_PAD_SCRIPT cannot open route\n");
 				return;
 			}
 			const auto size = file.tellg();
 			if (size < 0 || static_cast<uint64_t>(size) > (1u << 20))
 			{
-				std::fprintf(stderr, "KYTY_PAD_SCRIPT route exceeds the size limit\n");
+				KYTY_LOG_DEBUG( "KYTY_PAD_SCRIPT route exceeds the size limit\n");
 				return;
 			}
 			text.resize(static_cast<std::size_t>(size));
@@ -519,7 +520,7 @@ private:
 			file.read(text.data(), static_cast<std::streamsize>(text.size()));
 			if (!file && !text.empty())
 			{
-				std::fprintf(stderr, "KYTY_PAD_SCRIPT route read failed\n");
+				KYTY_LOG_DEBUG( "KYTY_PAD_SCRIPT route read failed\n");
 				return;
 			}
 		} else
@@ -531,12 +532,12 @@ private:
 		std::string error;
 		if (!PadScriptParseText(text, &m_entries, &error) || m_entries.empty())
 		{
-			std::fprintf(stderr, "KYTY_PAD_SCRIPT ignored: %s\n", error.empty() ? "route is empty" : error.c_str());
+			KYTY_LOG_DEBUG( "KYTY_PAD_SCRIPT ignored: %s\n", error.empty() ? "route is empty" : error.c_str());
 			m_entries.clear();
 			return;
 		}
 		m_loaded = true;
-		std::fprintf(stderr, "KYTY_PAD_SCRIPT loaded entries=%zu\n", m_entries.size());
+		KYTY_LOG_DEBUG( "KYTY_PAD_SCRIPT loaded entries=%zu\n", m_entries.size());
 	}
 
 	std::mutex                               m_mutex;

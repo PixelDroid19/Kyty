@@ -416,7 +416,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		{
 			ctx->native_capture.first_pending = false;
 		}
-		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=readback frame=%d format=%s recoverable=0\n", frame,
+		KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=readback frame=%d format=%s recoverable=0\n", frame,
 		             NativeCaptureFormatName(image->format));
 		if (agent_waiting)
 		{
@@ -434,7 +434,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		{
 			ctx->native_capture.first_pending = false;
 		}
-		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=validate_extent frame=%d recoverable=0\n", frame);
+		KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=validate_extent frame=%d recoverable=0\n", frame);
 		if (agent_waiting)
 		{
 			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
@@ -460,7 +460,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		if (!Emulator::Host::HostCaptureImageCodecNormalizeRgba8(
 		        {pixels.data(), {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}, width * bpp, capture_pixel_format}, &converted))
 		{
-			std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=convert_image frame=%d recoverable=0\n", frame);
+			KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=convert_image frame=%d recoverable=0\n", frame);
 			if (agent_waiting)
 			{
 				NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
@@ -497,7 +497,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	std::filesystem::create_directories(ctx->native_capture.directory, error);
 	if (error)
 	{
-		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=create_directory frame=%d recoverable=0\n", frame);
+		KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=create_directory frame=%d recoverable=0\n", frame);
 		if (agent_waiting)
 		{
 			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
@@ -514,12 +514,12 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	    ctx->native_capture.max_edge, image_path);
 	if (codec_result.downscale_fallback)
 	{
-		std::fprintf(stderr, "KYTY_CAPTURE_WARN subsystem=frame_capture operation=downscale frame=%d kept_full=1\n", frame);
+		KYTY_LOG_WARN("KYTY_CAPTURE_WARN subsystem=frame_capture operation=downscale frame=%d kept_full=1\n", frame);
 	}
 	if (!codec_result.success)
 	{
 		const bool create_surface = codec_result.error == Emulator::Host::HostCaptureImageCodecError::CreateSurface;
-		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=%s frame=%d recoverable=0\n",
+		KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=%s frame=%d recoverable=0\n",
 		             create_surface ? "create_surface" : "save_image", frame);
 		if (agent_waiting)
 		{
@@ -553,7 +553,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	metadata.host_peak_rss_bytes = NativeCaptureHostPeakRssBytes();
 	if (!NativeCaptureWriteMetadata(image_path, metadata))
 	{
-		std::fprintf(stderr, "KYTY_CAPTURE_ERROR subsystem=frame_capture operation=save_metadata frame=%d recoverable=0\n", frame);
+		KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=save_metadata frame=%d recoverable=0\n", frame);
 		if (agent_waiting)
 		{
 			NativeCapturePublishResult(ctx, false, image_path.string().c_str(), NativeCaptureMilestoneName(milestone),
@@ -563,7 +563,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		return;
 	}
 
-	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE milestone=%s frame=%d present=%llu file=%s format=%s size=%ux%u source=%llux%llu\n",
+	KYTY_LOG_DEBUG( "KYTY_NATIVE_CAPTURE milestone=%s frame=%d present=%llu file=%s format=%s size=%ux%u source=%llux%llu\n",
 	             NativeCaptureMilestoneName(milestone), frame, static_cast<unsigned long long>(ctx->native_capture.present_count),
 	             image_path.string().c_str(), NativeCaptureFormatName(image->format), out_width, out_height,
 	             static_cast<unsigned long long>(width), static_cast<unsigned long long>(height));
@@ -761,7 +761,7 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 {
 	if (NativeCaptureEnvEnabled("KYTY_INPUT_LOG") && key != nullptr && (key->down || key->up))
 	{
-		std::fprintf(stderr, "KYTY_INPUT_EDGE key=%d down=%d up=%d pressed=%d released=%d\n", key->key_code, key->down ? 1 : 0,
+		KYTY_LOG_DEBUG( "KYTY_INPUT_EDGE key=%d down=%d up=%d pressed=%d released=%d\n", key->key_code, key->down ? 1 : 0,
 		             key->up ? 1 : 0, key->pressed ? 1 : 0, key->released ? 1 : 0);
 	}
 
@@ -912,7 +912,7 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 		int   id    = 0;
 		if (input == nullptr || !input->OpenController(f->id, &id))
 		{
-			std::fprintf(stderr, "Kyty controller open failed for device %d: %s\n", f->id,
+			KYTY_LOG_WARN("Kyty controller open failed for device %d: %s\n", f->id,
 			             input == nullptr ? "host input unavailable" : input->LastError());
 			return;
 		}
@@ -2954,7 +2954,7 @@ void WindowUpdateTitle()
 		static double s_last_log_time = 0.0;
 		if (t - s_last_log_time >= 1.0)
 		{
-			std::fprintf(stderr, "KYTY_FPS_LOG frame=%d fps=%.3f t=%.3f\n", frame_num, fps_now, t);
+			KYTY_LOG_DEBUG( "KYTY_FPS_LOG frame=%d fps=%.3f t=%.3f\n", frame_num, fps_now, t);
 			s_last_log_time = t;
 		}
 	}
@@ -3124,7 +3124,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 						}
 						if (UtilWriteRgba8Png(path, rgba.data(), w, h, w))
 						{
-							std::fprintf(stderr, "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
+							KYTY_LOG_DEBUG( "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
 						}
 					} else
 					{
@@ -3140,7 +3140,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 						}
 						if (UtilWriteRgba8Png(path, rgba.data(), w, h, w))
 						{
-							std::fprintf(stderr, "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
+							KYTY_LOG_DEBUG( "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
 							char rt_prefix[128];
 							std::snprintf(rt_prefix, sizeof(rt_prefix), "/tmp/kyty-dump-rt-at-f%d", frame);
 							GraphicsDumpRememberedRts(&g_window_ctx->graphic_ctx, rt_prefix);
@@ -3250,7 +3250,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 		const double t = g_window_ctx->game->m_current_time_seconds;
 		if (g_window_ctx->native_capture.TelemetryDue(t, 1.0))
 		{
-			std::fprintf(stderr, "KYTY_PRESENT_TELEMETRY frame=%d present=%llu fps=%.3f peak_rss_bytes=%llu size=%ux%u format=%s\n",
+			KYTY_LOG_DEBUG( "KYTY_PRESENT_TELEMETRY frame=%d present=%llu fps=%.3f peak_rss_bytes=%llu size=%ux%u format=%s\n",
 			             g_window_ctx->game->m_frame_num, static_cast<unsigned long long>(g_window_ctx->native_capture.present_count),
 			             g_window_ctx->game->m_current_fps, static_cast<unsigned long long>(NativeCaptureHostPeakRssBytes()),
 			             image->extent.width, image->extent.height, NativeCaptureFormatName(image->format));

@@ -465,7 +465,7 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	EXIT_NOT_IMPLEMENTED(r->vulkan_buffer == nullptr);
 	if (sample_locations_compatible && !r->vulkan_buffer->sample_locations_compatible)
 	{
-		std::fprintf(stderr, "KYTY_GRAPHICS: depth image was created without custom sample-location compatibility\n");
+		KYTY_LOG_DEBUG( "KYTY_GRAPHICS: depth image was created without custom sample-location compatibility\n");
 		EXIT_NOT_IMPLEMENTED(!r->vulkan_buffer->sample_locations_compatible);
 	}
 
@@ -770,7 +770,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 			if (skipped_logs < 32u)
 			{
 				++skipped_logs;
-				std::fprintf(stderr,
+				KYTY_LOG_DEBUG(
 				             "KYTY_COLOR_RESOLVE_SKIP source=0x%012" PRIx64 " destination=0x%012" PRIx64
 				             " mode=%u op=0x%x\n",
 				             source_rt.base.addr, destination_rt.base.addr, static_cast<uint32_t>(hw.GetColorControl().mode),
@@ -789,7 +789,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 			++describe_logs;
 			const auto& src = source.attachment[0];
 			const auto& dst = destination.attachment[0];
-			std::fprintf(stderr,
+			KYTY_LOG_DEBUG(
 			             "KYTY_COLOR_RESOLVE_DESC src_type=%u src=0x%012" PRIx64 ":%ux%u:p%u:s%u:f%u "
 			             "dst_type=%u dst=0x%012" PRIx64 ":%ux%u:p%u:s%u:f%u\n",
 			             static_cast<uint32_t>(src.type), src.base_addr, src.width, src.height, src.pitch,
@@ -813,7 +813,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 		if (logs < 32u)
 		{
 			++logs;
-			std::fprintf(stderr,
+			KYTY_LOG_DEBUG(
 			             "KYTY_DUMP_COLOR_RESOLVE src_id=%" PRIu64 " dst_id=%" PRIu64
 			             " src=0x%012" PRIx64 ":%ux%u/%ux%u:s%u:f%u dst=0x%012" PRIx64 ":%ux%u/%ux%u:s%u:f%u op=0x%x\n",
 			             src->memory.unique_id, dst->memory.unique_id, source.attachment[0].base_addr, src->GetGuestExtent().width,
@@ -973,8 +973,7 @@ RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffer* buff
 	                                                              GpuMemoryObjectType::DepthStencilBuffer, true, false);
 	if (existing_depth.Size() > 1)
 	{
-		std::fprintf(stderr, "Depth-only display selection found %u exact depth objects\n", existing_depth.Size());
-		std::fflush(stderr);
+		KYTY_LOG_DEBUG( "Depth-only display selection found %u exact depth objects\n", existing_depth.Size());
 		decision.classification = ResolutionClassification::Unsupported;
 		decision.reason         = RenderResolutionPlanReason::MismatchedHostExtent;
 		return decision;

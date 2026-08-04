@@ -13,6 +13,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/GuestCall.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -257,7 +258,7 @@ static bool avplayer_dump_video_enabled()
 	}
 	if (ordinal == 128)
 	{
-		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER further video frames suppressed\n");
+		KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER further video frames suppressed\n");
 	}
 	return false;
 }
@@ -272,7 +273,7 @@ static void avplayer_dump_call(const char* name, const AvPlayerInternal* player)
 	const uint32_t index = count.fetch_add(1, std::memory_order_relaxed);
 	if (index < 128)
 	{
-		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER call=%s handle=%p index=%u\n", name, static_cast<const void*>(player), index);
+		KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER call=%s handle=%p index=%u\n", name, static_cast<const void*>(player), index);
 	}
 }
 
@@ -286,11 +287,11 @@ static void avplayer_dump_lifetime(const char* event, const AvPlayerInternal* pl
 	const uint32_t index = count.fetch_add(1, std::memory_order_relaxed);
 	if (index < 128)
 	{
-		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER lifetime=%s handle=%p index=%u\n", event,
+		KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER lifetime=%s handle=%p index=%u\n", event,
 		             static_cast<const void*>(player), index);
 	} else if (index == 128)
 	{
-		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER further lifetime events suppressed\n");
+		KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER further lifetime events suppressed\n");
 	}
 }
 
@@ -410,7 +411,7 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 	r->audio_storage.assign(2 * 1024, 0);
 	if (avplayer_dump_enabled())
 	{
-		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER create frames=%zu size=%zu pitch=%u allocator=%d real=%d\n", r->video_frames.size(), size,
+		KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER create frames=%zu size=%zu pitch=%u allocator=%d real=%d\n", r->video_frames.size(), size,
 		             luma_width, r->mem.allocate_texture != nullptr ? 1 : 0, r->decoder != nullptr ? 1 : 0);
 	}
 	return true;
@@ -608,7 +609,7 @@ static void emit_event(AvPlayerInternal* h, int32_t event_id, void* data = nullp
 		                                                   reinterpret_cast<uint64_t>(data));
 		if (avplayer_dump_enabled())
 		{
-			std::fprintf(stderr, "KYTY_DUMP_AVPLAYER event handle=%p id=0x%x callback=%p data=%p result=0x%" PRIx64 "\n",
+			KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER event handle=%p id=0x%x callback=%p data=%p result=0x%" PRIx64 "\n",
 			             static_cast<void*>(h), event_id, reinterpret_cast<void*>(callback), data, result);
 		}
 	}
@@ -742,7 +743,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 
 	if (avplayer_dump_video_enabled())
 	{
-		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER video handle=%p frame=%u data=%p time=%" PRIu64 " size=%ux%u real=%d\n",
+		KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER video handle=%p frame=%u data=%p time=%" PRIu64 " size=%ux%u real=%d\n",
 		             static_cast<void*>(r), frame_index + 1, info->data, info->time_stamp, width, height, is_real ? 1 : 0);
 	}
 	return true;
@@ -919,7 +920,7 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 	{
 		if (avplayer_dump_enabled())
 		{
-			std::fprintf(stderr, "KYTY_DUMP_AVPLAYER backend=error path=%s reason=%s\n", host_filename.C_Str(),
+			KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER backend=error path=%s reason=%s\n", host_filename.C_Str(),
 			             decoder_error.empty() ? "media has no supported video stream" : decoder_error.c_str());
 		}
 		bool auto_start = false;
@@ -944,7 +945,7 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 		}
 		if (avplayer_dump_enabled())
 		{
-			std::fprintf(stderr, "KYTY_DUMP_AVPLAYER source handle=%p auto_start=%d empty=1\n", static_cast<void*>(h),
+			KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER source handle=%p auto_start=%d empty=1\n", static_cast<void*>(h),
 			             auto_start ? 1 : 0);
 		}
 		emit_event(h, AVPLAYER_EVENT_STATE_READY);
@@ -984,7 +985,7 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 			h->synthetic_frame_count = static_cast<uint32_t>(std::clamp(estimated_frames, 1.0, static_cast<double>(UINT32_MAX)));
 			if (avplayer_dump_enabled())
 			{
-				std::fprintf(stderr, "KYTY_DUMP_AVPLAYER backend=%s path=%s %ux%u fps=%.3f duration=%" PRIu64 " audio=%u/%u\n",
+				KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER backend=%s path=%s %ux%u fps=%.3f duration=%" PRIu64 " audio=%u/%u\n",
 				             AudioVideoBackend::Decoder::BackendName(), host_filename.C_Str(), h->synthetic_width, h->synthetic_height,
 				             h->synthetic_frame_rate, h->media_duration_ms, h->media_audio_channels, h->media_audio_rate);
 			}
@@ -1007,7 +1008,7 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 	}
 	if (avplayer_dump_enabled())
 	{
-		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER source handle=%p auto_start=%d\n", static_cast<void*>(h), auto_start ? 1 : 0);
+		KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER source handle=%p auto_start=%d\n", static_cast<void*>(h), auto_start ? 1 : 0);
 	}
 	if (auto_start)
 	{
@@ -1151,7 +1152,7 @@ static int start_player(AvPlayerInternal* h)
 	emit_event(h, AVPLAYER_EVENT_STATE_PLAY);
 	if (avplayer_dump_enabled())
 	{
-		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER start handle=%p\n", static_cast<void*>(h));
+		KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER start handle=%p\n", static_cast<void*>(h));
 	}
 	return 0;
 }
@@ -1186,7 +1187,7 @@ int KYTY_SYSV_ABI AvPlayerStartEx(AvPlayerInternal* h, const void* start_info_ex
 	emit_event(h, AVPLAYER_EVENT_STATE_PLAY);
 	if (avplayer_dump_enabled())
 	{
-		std::fprintf(stderr, "KYTY_DUMP_AVPLAYER start_ex handle=%p time=%" PRIu64 "\n", static_cast<void*>(h), h->start_time_ms);
+		KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER start_ex handle=%p time=%" PRIu64 "\n", static_cast<void*>(h), h->start_time_ms);
 	}
 	return 0;
 }

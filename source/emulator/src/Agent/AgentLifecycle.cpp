@@ -1,4 +1,5 @@
 #include "Emulator/Agent/AgentLifecycle.h"
+#include "Emulator/Log.h"
 
 #include "Kyty/Core/BringUp.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -308,8 +309,7 @@ void EmitStorageFrontierFatal(const StorageFrontierContext& context)
 	char msg[kAgentEventMessageMax] {};
 	FormatStorageFrontier(context, msg, sizeof(msg));
 	EmitStorageFrontier(context);
-	std::fprintf(stderr, "KYTY_AGENT_FRONTIER code=%s %s\n", kCodeGraphicsStorageFrontier, msg);
-	std::fflush(stderr);
+	KYTY_LOG_DEBUG( "KYTY_AGENT_FRONTIER code=%s %s\n", kCodeGraphicsStorageFrontier, msg);
 }
 
 static void FormatStorageRange(const StorageRangeContext& context, char* message, size_t message_size)
@@ -345,8 +345,7 @@ void EmitStorageRangeFatal(const StorageRangeContext& context)
 	char msg[kAgentEventMessageMax] {};
 	FormatStorageRange(context, msg, sizeof(msg));
 	EmitStorageRange(context);
-	std::fprintf(stderr, "KYTY_AGENT_FRONTIER code=%s %s\n", kCodeGraphicsStorageRange, msg);
-	std::fflush(stderr);
+	KYTY_LOG_DEBUG( "KYTY_AGENT_FRONTIER code=%s %s\n", kCodeGraphicsStorageRange, msg);
 }
 
 void EmitFirstFrame(int frame)

@@ -480,7 +480,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				const unsigned ordinal = metadata_log_count.fetch_add(1, std::memory_order_relaxed);
 				if (ordinal < 32u)
 				{
-					std::fprintf(stderr,
+					KYTY_LOG_DEBUG(
 					             "KYTY_SAMPLE_BIND_METADATA format=%u tile=%u extent=%ux%u base=0x%012" PRIx64
 					             " meta=0x%012" PRIx64 " pipe=%u write=%u compress=%u alpha=%u color=%u\n",
 					             static_cast<unsigned>(r.Format()), static_cast<unsigned>(r.TileMode()),
@@ -490,7 +490,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				}
 				else if (ordinal == 32u)
 				{
-					std::fprintf(stderr, "KYTY_SAMPLE_BIND_METADATA further entries suppressed\n");
+					KYTY_LOG_DEBUG( "KYTY_SAMPLE_BIND_METADATA further entries suppressed\n");
 				}
 			}
 			EXIT_NOT_IMPLEMENTED(ShaderGen5SampledTextureMetadataRequiresDcc(r));
@@ -1001,7 +1001,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				const unsigned         ordinal = texture_bind_logs.fetch_add(1, std::memory_order_relaxed);
 				if (ordinal < 256u)
 				{
-					std::fprintf(stderr,
+					KYTY_LOG_DEBUG(
 					             "KYTY_DUMP_TEXTURE_BIND ordinal=%u index=%d guest_addr=0x%012" PRIx64
 					             " guest_format=%u tile=%u size=%ux%u usage=%u host_id=%" PRIu64
 					             " host_type=%u vk_format=%u vk_usage=0x%08x layout=%u\n",
@@ -1118,7 +1118,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					if (dump_index < 1024u)
 					{
 						const uint32_t descriptor_index = static_cast<uint32_t>(*sampled_index) | descriptor_tag;
-						std::fprintf(stderr, "KYTY_DUMP_VIDEO_BIND index=%u fmt=%u addr=0x%012" PRIx64 " sampled_index=%d descriptor=0x%08x image=%p id=%" PRIu64 " format=%d view=%d swizzle=0x%03x extent=%ux%u type=%d\n",
+						KYTY_LOG_DEBUG( "KYTY_DUMP_VIDEO_BIND index=%u fmt=%u addr=0x%012" PRIx64 " sampled_index=%d descriptor=0x%08x image=%p id=%" PRIu64 " format=%d view=%d swizzle=0x%03x extent=%ux%u type=%d\n",
 						             dump_index, fmt, bind_addr, *sampled_index, descriptor_index, static_cast<void*>(tex), tex->memory.unique_id,
 						             static_cast<int>(tex->format), sampled_views[*sampled_index], view_swizzle, width, height, static_cast<int>(tex->type));
 					}
@@ -1191,7 +1191,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (bound_dump_spec != nullptr && std::sscanf(bound_dump_spec, "%ux%u", &bound_dump_width, &bound_dump_height) == 2 &&
 		    bound_dump_width == static_cast<uint32_t>(width) && bound_dump_height == static_cast<uint32_t>(height))
 		{
-			std::fprintf(stderr,
+			KYTY_LOG_DEBUG(
 			             "KYTY_DUMP_BOUND_SAMPLE addr=0x%012" PRIx64 " id=%" PRIu64 " type=%u format=%u layout=%u "
 			             "index=%d descriptor=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
 			             static_cast<uint64_t>(addr), tex->memory.unique_id, static_cast<unsigned>(tex->type),
@@ -1524,7 +1524,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 					const unsigned         ordinal = storage_image_logs.fetch_add(1, std::memory_order_relaxed);
 					if (ordinal < 256u)
 					{
-						std::fprintf(stderr,
+						KYTY_LOG_DEBUG(
 						             "KYTY_DUMP_STORAGE_IMAGE ordinal=%u stage=%d index=%d host_id=%" PRIu64
 						             " host_type=%u vk_format=%u vk_usage=0x%08x old_layout=%u new_layout=%u\n",
 						             ordinal, static_cast<int>(stage), i, storage_image->memory.unique_id,

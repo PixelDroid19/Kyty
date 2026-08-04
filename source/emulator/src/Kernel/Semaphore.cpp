@@ -9,6 +9,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Kernel/Time.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -147,10 +148,9 @@ static void sema_trace(const char* operation, KernelSema sem, const KernelSemaPr
 		return;
 	}
 
-	std::fprintf(stderr, "SEMA_TRACE %s n=%u handle=%p name=%s value=%d result=%d caller=0x%016llx\n", operation, index,
+	KYTY_LOG_DEBUG( "SEMA_TRACE %s n=%u handle=%p name=%s value=%d result=%d caller=0x%016llx\n", operation, index,
 	             reinterpret_cast<void*>(sem), (object != nullptr ? object->GetName().C_Str() : "<null>"), value, result,
 	             static_cast<unsigned long long>(caller));
-	std::fflush(stderr);
 }
 
 KernelSemaPrivate::~KernelSemaPrivate()

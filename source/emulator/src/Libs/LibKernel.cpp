@@ -29,6 +29,7 @@
 #include "Emulator/Loader/RuntimeLinker.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Network.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <array>
@@ -821,12 +822,11 @@ int KYTY_SYSV_ABI KernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleI
 
 	if (unwind_trace_enabled())
 	{
-		std::fprintf(stderr,
+		KYTY_LOG_DEBUG(
 		             "GetModuleInfoForUnwind: addr=0x%016" PRIx64 " flags=%d name=%s "
 		             "eh_hdr=0x%016" PRIx64 " eh=0x%016" PRIx64 " eh_sz=0x%016" PRIx64 " seg0=0x%016" PRIx64 " seg0_sz=0x%016" PRIx64 "\n",
 		             addr, flags, info->name, info->eh_frame_hdr_addr, info->eh_frame_addr, info->eh_frame_size, info->seg0_addr,
 		             info->seg0_size);
-		std::fflush(stderr);
 	}
 
 	return OK;
@@ -859,14 +859,12 @@ static void PrintGuestRaiseLocation(uint64_t return_address)
 		}
 
 		const auto name = module.file_name.FilenameWithoutDirectory();
-		std::fprintf(stderr, "KernelDebugRaiseException: module=%s offset=0x%016" PRIx64 "\n", name.C_Str(),
+		KYTY_LOG_DEBUG( "KernelDebugRaiseException: module=%s offset=0x%016" PRIx64 "\n", name.C_Str(),
 		             return_address - module.base_vaddr);
-		std::fflush(stderr);
 		return;
 	}
 
-	std::fprintf(stderr, "KernelDebugRaiseException: module=unknown return_addr=0x%016" PRIx64 "\n", return_address);
-	std::fflush(stderr);
+	KYTY_LOG_DEBUG( "KernelDebugRaiseException: module=unknown return_addr=0x%016" PRIx64 "\n", return_address);
 }
 
 [[noreturn]] static void TerminateCallingGuestThreadForDebugRaise(uint64_t error, uint64_t argument, uint64_t return_address)
@@ -876,11 +874,10 @@ static void PrintGuestRaiseLocation(uint64_t return_address)
 	// are not a continuation. Route termination through the normal guest
 	// pthread lifecycle to keep cleanup, join state, and thread ownership
 	// consistent.
-	std::fprintf(stderr,
+	KYTY_LOG_DEBUG(
 	             "KernelDebugRaiseException: error=0x%016" PRIx64 " arg=0x%016" PRIx64
 	             ", return addr=0x%016" PRIx64 "\n",
 	             error, argument, return_address);
-	std::fflush(stderr);
 	PrintGuestRaiseLocation(return_address);
 	LibKernel::PthreadExit(reinterpret_cast<void*>(error));
 	__builtin_unreachable();
@@ -1003,10 +1000,9 @@ static void HostContextTrace(const char* stage, uint64_t trace_id, const void* r
 		return;
 	}
 
-	std::fprintf(stderr, "CONTEXT_TRACE stage=%s id=%llu request=%p target=%p handler=0x%016llx result=0x%016llx\n", stage,
+	KYTY_LOG_DEBUG( "CONTEXT_TRACE stage=%s id=%llu request=%p target=%p handler=0x%016llx result=0x%016llx\n", stage,
 	             static_cast<unsigned long long>(trace_id), request, target, static_cast<unsigned long long>(handler),
 	             static_cast<unsigned long long>(result));
-	std::fflush(stderr);
 }
 
 static void ReclaimCompletedHostContextRequests()

@@ -13,6 +13,7 @@
 #include "Emulator/Loader/RuntimeLinker.h"
 #include "Emulator/Loader/SystemContent.h"
 #include "Emulator/Validation/DomainValidators.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -202,13 +203,12 @@ void ReportLazyProviderEvent(const char* event, const String& requested_module, 
 {
 	if (entry == nullptr)
 	{
-		std::fprintf(stderr, "KYTY_LOADER: lazy_provider event=%s module=%s\n", event, requested_module.C_Str());
+		KYTY_LOG_DEBUG( "KYTY_LOADER: lazy_provider event=%s module=%s\n", event, requested_module.C_Str());
 	} else
 	{
-		std::fprintf(stderr, "KYTY_LOADER: lazy_provider event=%s module=%s candidate=%s\n", event, requested_module.C_Str(),
+		KYTY_LOG_DEBUG( "KYTY_LOADER: lazy_provider event=%s module=%s candidate=%s\n", event, requested_module.C_Str(),
 		             entry->relative_key);
 	}
-	std::fflush(stderr);
 }
 
 GuestPlatform MetadataPlatform()
@@ -871,8 +871,7 @@ int CommitAdjacentBatchOrRollback(RuntimeLinker* rt, Program** batch, uint32_t b
 	(void)ScanNewProgramConflicts(rt, newly->unique_id, diag, &inter_module);
 	if (inter_module)
 	{
-		std::fprintf(stderr, "KYTY_LOADER: inter-module export conflict; rolling back adjacent batch (%u)\n", batch_count);
-		std::fflush(stderr);
+		KYTY_LOG_WARN("KYTY_LOADER: inter-module export conflict; rolling back adjacent batch (%u)\n", batch_count);
 		PushRejection(diag, "apply_aborted_export_conflict");
 		RollbackAdjacentBatch(rt, batch, batch_count);
 		diag->applied_count = 0;
@@ -913,11 +912,10 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 		GuestPlatform observed_platform = GuestPlatform::Unknown;
 		if (!ProbeSharedElf(package_root, host, &observed_platform))
 		{
-			std::fprintf(stderr,
+			KYTY_LOG_WARN(
 			             "KYTY_LOADER: adjacent plan re-validation failed for %s; "
 			             "no adjacent modules loaded\n",
 			             plan.entries[i].relative_key);
-			std::fflush(stderr);
 			PushRejection(&diag, "apply_aborted_revalidation");
 			PublishDiagnostics(diag);
 			return 0;
@@ -928,11 +926,10 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 		if ((planned_platform != GuestPlatform::Unknown && observed_platform != planned_platform) ||
 		    (session_platform != GuestPlatform::Unknown && observed_platform != session_platform))
 		{
-			std::fprintf(stderr,
+			KYTY_LOG_WARN(
 			             "KYTY_LOADER: adjacent plan platform mismatch for %s; planned=%s observed=%s session=%s\n",
 			             plan.entries[i].relative_key, GuestPlatformName(planned_platform), GuestPlatformName(observed_platform),
 			             GuestPlatformName(session_platform));
-			std::fflush(stderr);
 			PushRejection(&diag, "apply_aborted_platform_mismatch");
 			PublishDiagnostics(diag);
 			return 0;
@@ -955,8 +952,7 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 		Program* p = ProgramLoader::Load(rt, host);
 		if (p == nullptr)
 		{
-			std::fprintf(stderr, "KYTY_LOADER: LoadProgram failed for %s; rolling back adjacent batch\n", plan.entries[i].relative_key);
-			std::fflush(stderr);
+			KYTY_LOG_ERROR("KYTY_LOADER: LoadProgram failed for %s; rolling back adjacent batch\n", plan.entries[i].relative_key);
 			PushRejection(&diag, "apply_aborted_load_failed");
 			RollbackAdjacentBatch(rt, batch, batch_count);
 			diag.applied_count = 0;
@@ -1031,8 +1027,7 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const String& primary_host_path)
 
 	if (!plan.valid)
 	{
-		std::fprintf(stderr, "KYTY_LOADER: adjacent discovery plan invalid: %s\n", plan.error);
-		std::fflush(stderr);
+		KYTY_LOG_WARN("KYTY_LOADER: adjacent discovery plan invalid: %s\n", plan.error);
 		return;
 	}
 
@@ -1047,8 +1042,7 @@ void AfterPrimaryLoaded(RuntimeLinker* rt, const String& primary_host_path)
 		                                            "adjacent_module_discovery", __FILE__, __LINE__);
 		if (decision != Core::BringUp::Decision::Continue)
 		{
-			std::fprintf(stderr, "KYTY_LOADER: adjacent discovery policy Halt; plan not applied\n");
-			std::fflush(stderr);
+			KYTY_LOG_WARN("KYTY_LOADER: adjacent discovery policy Halt; plan not applied\n");
 			return;
 		}
 

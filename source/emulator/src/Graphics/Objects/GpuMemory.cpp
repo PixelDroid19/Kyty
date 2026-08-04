@@ -22,6 +22,7 @@
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/GuestMemory.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -61,7 +62,7 @@ uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_
 			int        protection       = 0;
 			const int  protection_result = Emulator::GuestMemory::GetPort().QueryProtection(const_cast<uint8_t*>(buf), &protection_start,
 			                                                                                &protection_end, &protection);
-			std::fprintf(stderr,
+			KYTY_LOG_DEBUG(
 			             "KYTY_DUMP_HASH_RANGE ordinal=%u type=%u buf=0x%012" PRIx64 " size=0x%012" PRIx64
 			             " mapped=%u base=0x%012" PRIx64 " map_size=0x%012" PRIx64 " protection_result=%d start=0x%012" PRIx64
 			             " end=0x%012" PRIx64 " prot=0x%x\n",
@@ -273,21 +274,20 @@ void GpuMemory::RequireDetachable(GraphicContext* ctx, int heap_id, int object_i
 			return;
 		}
 
-		std::fprintf(stderr,
+		KYTY_LOG_DEBUG(
 		             "GpuMemory detach blocked: operation=%s incoming=%s type=%s heap=%d id=%d generation=%" PRIu64
 		             " ranges=%d dependencies=%zu\n",
 		             operation, Core::EnumName(incoming_type).C_Str(), Core::EnumName(object.object.type).C_Str(), heap_id, object_id,
 		             object.backing_generation, h.block.vaddr_num, dependencies.size());
 		for (int vi = 0; vi < h.block.vaddr_num; vi++)
 		{
-			std::fprintf(stderr, "  range[%d]=0x%016" PRIx64 "+0x%016" PRIx64 "\n", vi, h.block.vaddr[vi], h.block.size[vi]);
+			KYTY_LOG_DEBUG( "  range[%d]=0x%016" PRIx64 "+0x%016" PRIx64 "\n", vi, h.block.vaddr[vi], h.block.size[vi]);
 		}
 		for (const auto& dependency: dependencies)
 		{
-			std::fprintf(stderr, "  dependency queue=%" PRIu32 " sequence=%" PRIu64 " complete=%d\n", dependency.queue.Value(),
+			KYTY_LOG_DEBUG( "  dependency queue=%" PRIu32 " sequence=%" PRIu64 " complete=%d\n", dependency.queue.Value(),
 			             dependency.sequence, m_deferred_deletions.AreDependenciesComplete({dependency}) ? 1 : 0);
 		}
-		std::fflush(stderr);
 		EXIT("GpuMemory cannot detach an in-use write-back object before its completion callback\n");
 	}
 }

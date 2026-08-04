@@ -10,6 +10,7 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/LabelSubmissionTracker.h"
 #include "Emulator/Graphics/Utils.h"
+#include "Emulator/Log.h"
 
 #include <atomic>
 #include <cinttypes>
@@ -258,7 +259,7 @@ void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 					flip_only++;
 				}
 			}
-			std::fprintf(stderr,
+			KYTY_LOG_DEBUG(
 			             "EOP_FIRE labels=%u interrupt_cbs=%u fence32=%u fence64=%u flip_only=%u\n",
 			             static_cast<unsigned>(fired_labels.Size()), interrupt_cbs, fence32, fence64, flip_only);
 			// Last few fires before a present cliff: dump published fence words.
@@ -273,12 +274,12 @@ void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 					const auto& label = fired_labels.At(i);
 					if (label.dst_gpu_addr64 != nullptr)
 					{
-						std::fprintf(stderr, "EOP_FENCE64 addr=0x%016" PRIx64 " val=0x%016" PRIx64 "\n",
+						KYTY_LOG_DEBUG( "EOP_FENCE64 addr=0x%016" PRIx64 " val=0x%016" PRIx64 "\n",
 						             reinterpret_cast<uint64_t>(label.dst_gpu_addr64), *label.dst_gpu_addr64);
 					}
 					if (label.dst_gpu_addr32 != nullptr)
 					{
-						std::fprintf(stderr, "EOP_FENCE32 addr=0x%016" PRIx64 " val=0x%08" PRIx32 "\n",
+						KYTY_LOG_DEBUG( "EOP_FENCE32 addr=0x%016" PRIx64 " val=0x%08" PRIx32 "\n",
 						             reinterpret_cast<uint64_t>(label.dst_gpu_addr32), *label.dst_gpu_addr32);
 					}
 				}
@@ -476,7 +477,7 @@ GpuWritebackResult LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_
 				static std::atomic<uint32_t> clobber_logs {0};
 				if (clobber_logs.fetch_add(1) < 32u)
 				{
-					std::fprintf(stderr, "EOP_HOLE_PROTECT addr=0x%016" PRIx64 " keep=0x%016" PRIx64 " would_clobber=0\n", a, before);
+					KYTY_LOG_DEBUG( "EOP_HOLE_PROTECT addr=0x%016" PRIx64 " keep=0x%016" PRIx64 " would_clobber=0\n", a, before);
 				}
 			}
 		}

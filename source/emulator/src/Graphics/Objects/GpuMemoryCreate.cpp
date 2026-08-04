@@ -21,6 +21,7 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1337,21 +1338,20 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					// Typed dump: create_all_the_same fails on mixed parent types
 					// even when every relation is the same (observed multi-parent
 					// StorageBuffer with two Contains parents of different kinds).
-					std::fprintf(stderr, "GpuMemory !create_all_the_same: new type=%s parents=%u\n", Core::EnumName(info.type).C_Str(),
+					KYTY_LOG_DEBUG( "GpuMemory !create_all_the_same: new type=%s parents=%u\n", Core::EnumName(info.type).C_Str(),
 					             static_cast<unsigned>(others.Size()));
 					for (int vi = 0; vi < vaddr_num; vi++)
 					{
-						std::fprintf(stderr, "  new range[%d]: vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", vi, vaddr[vi], size[vi]);
+						KYTY_LOG_DEBUG( "  new range[%d]: vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", vi, vaddr[vi], size[vi]);
 					}
 					for (const auto& d: others)
 					{
 						const auto& oh = heap.objects[d.object_id];
 						const auto& oi = oh.info;
-						std::fprintf(stderr, "  parent id=%d type=%s rel=%s read_only=%d vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
+						KYTY_LOG_DEBUG( "  parent id=%d type=%s rel=%s read_only=%d vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 						             d.object_id, Core::EnumName(oi.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
 						             oi.read_only ? 1 : 0, oh.block.vaddr[0], oh.block.size[0]);
 					}
-					std::fflush(stderr);
 					EXIT("%s\n", create_dbg_exit(U"!create_all_the_same", vaddr, size, vaddr_num, others, info.type).C_Str());
 				}
 

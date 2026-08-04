@@ -98,7 +98,7 @@ void* RenderContext::BeginEopEqRegistration(LibKernel::EventQueue::KernelEqueueI
 
 	if (EopTraceEnabled())
 	{
-		std::fprintf(stderr, "EOP_BEGIN eq=%p id=0x%x count=%u\n", static_cast<void*>(identity.eq), id,
+		KYTY_LOG_DEBUG( "EOP_BEGIN eq=%p id=0x%x count=%u\n", static_cast<void*>(identity.eq), id,
 		             static_cast<unsigned>(m_eop_eqs.Size()));
 	}
 	return registration;
@@ -122,7 +122,7 @@ void RenderContext::PublishEopEqRegistration(void* registration_ptr)
 
 	if (EopTraceEnabled())
 	{
-		std::fprintf(stderr, "EOP_PUBLISH eq=%p id=0x%x deleted=%d\n", static_cast<void*>(registration->identity.eq), registration->id,
+		KYTY_LOG_DEBUG( "EOP_PUBLISH eq=%p id=0x%x deleted=%d\n", static_cast<void*>(registration->identity.eq), registration->id,
 		             registration->deleted ? 1 : 0);
 	}
 	delete release;
@@ -157,7 +157,7 @@ void RenderContext::DeleteEopEqRegistration(void* registration_ptr, LibKernel::E
 
 	if (EopTraceEnabled())
 	{
-		std::fprintf(stderr, "EOP_DEL eq=%p id=0x%x\n", static_cast<void*>(eq), id);
+		KYTY_LOG_DEBUG( "EOP_DEL eq=%p id=0x%x\n", static_cast<void*>(eq), id);
 	}
 	delete release;
 }
@@ -218,7 +218,7 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal)
 		if (n < 64u)
 		{
 			const char* signal_name = (signal == CompletionSignal::EndOfPipe ? "EOP_TRIGGER" : "QUEUED_GRAPHICS_INTERRUPT");
-			std::fprintf(stderr, "%s live=%u\n", signal_name, static_cast<unsigned>(triggers.size()));
+			KYTY_LOG_DEBUG( "%s live=%u\n", signal_name, static_cast<unsigned>(triggers.size()));
 		}
 	}
 }

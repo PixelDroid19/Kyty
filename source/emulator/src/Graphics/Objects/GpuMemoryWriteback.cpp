@@ -21,6 +21,7 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -141,16 +142,15 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	uint32_t invalidate_count = 0;
 	if (!GpuMemoryWriteBackClassifyParents(parent_rels.GetData(), parent_count, &recompute_self, &equals_count, &invalidate_count))
 	{
-		std::fprintf(stderr, "GpuMemory WriteBack unsupported parent relation in alias topology:\n");
-		std::fprintf(stderr, "\t self: heap=%d id=%d type=%s others=%u\n", heap_id, object_id, Core::EnumName(o.object.type).C_Str(),
+		KYTY_LOG_DEBUG( "GpuMemory WriteBack unsupported parent relation in alias topology:\n");
+		KYTY_LOG_DEBUG( "\t self: heap=%d id=%d type=%s others=%u\n", heap_id, object_id, Core::EnumName(o.object.type).C_Str(),
 		             static_cast<unsigned>(h.others.Size()));
 		for (uint32_t oi = 0; oi < h.others.Size(); oi++)
 		{
 			const auto& other = h.others.At(static_cast<int>(oi));
-			std::fprintf(stderr, "\t other[%u]: id=%d relation=%s type=%s\n", oi, other.object_id, Core::EnumName(other.relation).C_Str(),
+			KYTY_LOG_DEBUG( "\t other[%u]: id=%d relation=%s type=%s\n", oi, other.object_id, Core::EnumName(other.relation).C_Str(),
 			             Core::EnumName(heap.objects[other.object_id].info.object.type).C_Str());
 		}
-		std::fflush(stderr);
 		EXIT("WriteBack unsupported parent relation\n");
 	}
 

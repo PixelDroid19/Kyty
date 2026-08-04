@@ -4,6 +4,7 @@
 
 #include "Emulator/AudioPcm.h"
 #include "Emulator/Host/Clock.h"
+#include "Emulator/Log.h"
 
 #include "SDL.h"
 
@@ -215,7 +216,7 @@ HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t f
 					Impl::CloseOutputPort(&port);
 					return Id::Invalid();
 				}
-				std::fprintf(stderr, "Kyty audio conversion: %d Hz/%u ch/0x%x -> %d Hz/%u ch/0x%x\n", desired.freq, desired.channels,
+				KYTY_LOG_DEBUG( "Kyty audio conversion: %d Hz/%u ch/0x%x -> %d Hz/%u ch/0x%x\n", desired.freq, desired.channels,
 				             desired.format, obtained.freq, obtained.channels, obtained.format);
 			}
 			SDL_PauseAudioDevice(port.device_id, m_impl->host_paused ? 1 : 0);
@@ -406,7 +407,7 @@ bool HostAudio::AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_
 		}
 		if (!queue_ok && !port.queue_error_logged)
 		{
-			std::fprintf(stderr, "Kyty audio output failed: %s\n", SDL_GetError());
+			KYTY_LOG_ERROR("Kyty audio output failed: %s\n", SDL_GetError());
 			port.queue_error_logged = true;
 		}
 		all_queues_ok = all_queues_ok && queue_ok;

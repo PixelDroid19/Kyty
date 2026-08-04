@@ -11,6 +11,7 @@
 #include "Emulator/Libs/LibAmpr.h"
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/VideoFrameMemory.h"
+#include "Emulator/Log.h"
 
 #include <atomic>
 #include <cstdlib>
@@ -116,14 +117,12 @@ static void FsTrace(const char* op, const char* guest_path, int64_t argument, in
 	{
 		if (index == limit)
 		{
-			std::fprintf(stderr, "KYTY_FS_TRACE: line limit reached; further tracing suppressed\n");
-			std::fflush(stderr);
+			KYTY_LOG_DEBUG( "KYTY_FS_TRACE: line limit reached; further tracing suppressed\n");
 		}
 		return;
 	}
 
-	std::fprintf(stderr, "KYTY_FS_TRACE: %-6s arg=%" PRId64 " result=%" PRId64 " path=%s\n", op, argument, result, guest_path);
-	std::fflush(stderr);
+	KYTY_LOG_DEBUG( "KYTY_FS_TRACE: %-6s arg=%" PRId64 " result=%" PRId64 " path=%s\n", op, argument, result, guest_path);
 }
 
 // Create all intermediate directories for a host path (like mkdir -p).

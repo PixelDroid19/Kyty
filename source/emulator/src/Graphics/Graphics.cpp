@@ -29,6 +29,7 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 #include "Emulator/PresentationStats.h"
 #include "Emulator/VideoFrameMemory.h"
 
@@ -188,7 +189,7 @@ void GraphicsDbgDumpDcb(const char* type, uint32_t num_dw, uint32_t* cmd_buffer)
 		f.Create(file_name);
 		if (f.IsInvalid())
 		{
-			printf(FG_BRIGHT_RED "Can't create file: %s\n" FG_DEFAULT, file_name.C_Str());
+			KYTY_LOG_WARN(FG_BRIGHT_RED "Can't create file: %s\n" FG_DEFAULT, file_name.C_Str());
 			return;
 		}
 		Pm4::DumpPm4PacketStream(&f, cmd_buffer, 0, num_dw);
@@ -206,17 +207,17 @@ int KYTY_SYSV_ABI GraphicsSetVsShader(uint32_t* cmd, uint64_t size, const uint32
 
 	EXIT_NOT_IMPLEMENTED(size < sizeof(HW::VsStageRegisters) / 4 + 2);
 
-	printf("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size            = %" PRIu64 "\n", size);
-	printf("\t shader_modifier = %" PRIu32 "\n", shader_modifier);
+			KYTY_LOG_DEBUG("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size            = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t shader_modifier = %" PRIu32 "\n", shader_modifier);
 
-	printf("\t m_spiShaderPgmLoVs    = %08" PRIx32 "\n", vs_regs[0]);
-	printf("\t m_spiShaderPgmHiVs    = %08" PRIx32 "\n", vs_regs[1]);
-	printf("\t m_spiShaderPgmRsrc1Vs = %08" PRIx32 "\n", vs_regs[2]);
-	printf("\t m_spiShaderPgmRsrc2Vs = %08" PRIx32 "\n", vs_regs[3]);
-	printf("\t m_spiVsOutConfig      = %08" PRIx32 "\n", vs_regs[4]);
-	printf("\t m_spiShaderPosFormat  = %08" PRIx32 "\n", vs_regs[5]);
-	printf("\t m_paClVsOutCntl       = %08" PRIx32 "\n", vs_regs[6]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmLoVs    = %08" PRIx32 "\n", vs_regs[0]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmHiVs    = %08" PRIx32 "\n", vs_regs[1]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc1Vs = %08" PRIx32 "\n", vs_regs[2]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc2Vs = %08" PRIx32 "\n", vs_regs[3]);
+			KYTY_LOG_DEBUG("\t m_spiVsOutConfig      = %08" PRIx32 "\n", vs_regs[4]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPosFormat  = %08" PRIx32 "\n", vs_regs[5]);
+			KYTY_LOG_DEBUG("\t m_paClVsOutCntl       = %08" PRIx32 "\n", vs_regs[6]);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_VS);
 	cmd[1] = shader_modifier;
@@ -231,17 +232,17 @@ int KYTY_SYSV_ABI GraphicsUpdateVsShader(uint32_t* cmd, uint64_t size, const uin
 
 	EXIT_NOT_IMPLEMENTED(size < sizeof(HW::VsStageRegisters) / 4 + 2);
 
-	printf("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size            = %" PRIu64 "\n", size);
-	printf("\t shader_modifier = %" PRIu32 "\n", shader_modifier);
+			KYTY_LOG_DEBUG("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size            = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t shader_modifier = %" PRIu32 "\n", shader_modifier);
 
-	printf("\t m_spiShaderPgmLoVs    = %08" PRIx32 "\n", vs_regs[0]);
-	printf("\t m_spiShaderPgmHiVs    = %08" PRIx32 "\n", vs_regs[1]);
-	printf("\t m_spiShaderPgmRsrc1Vs = %08" PRIx32 "\n", vs_regs[2]);
-	printf("\t m_spiShaderPgmRsrc2Vs = %08" PRIx32 "\n", vs_regs[3]);
-	printf("\t m_spiVsOutConfig      = %08" PRIx32 "\n", vs_regs[4]);
-	printf("\t m_spiShaderPosFormat  = %08" PRIx32 "\n", vs_regs[5]);
-	printf("\t m_paClVsOutCntl       = %08" PRIx32 "\n", vs_regs[6]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmLoVs    = %08" PRIx32 "\n", vs_regs[0]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmHiVs    = %08" PRIx32 "\n", vs_regs[1]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc1Vs = %08" PRIx32 "\n", vs_regs[2]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc2Vs = %08" PRIx32 "\n", vs_regs[3]);
+			KYTY_LOG_DEBUG("\t m_spiVsOutConfig      = %08" PRIx32 "\n", vs_regs[4]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPosFormat  = %08" PRIx32 "\n", vs_regs[5]);
+			KYTY_LOG_DEBUG("\t m_paClVsOutCntl       = %08" PRIx32 "\n", vs_regs[6]);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_VS_UPDATE);
 	cmd[1] = shader_modifier;
@@ -256,10 +257,10 @@ int KYTY_SYSV_ABI GraphicsSetEmbeddedVsShader(uint32_t* cmd, uint64_t size, uint
 
 	EXIT_NOT_IMPLEMENTED(size < 3);
 
-	printf("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size            = %" PRIu64 "\n", size);
-	printf("\t id              = %" PRIu32 "\n", id);
-	printf("\t shader_modifier = %" PRIu32 "\n", shader_modifier);
+			KYTY_LOG_DEBUG("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size            = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t id              = %" PRIu32 "\n", id);
+			KYTY_LOG_DEBUG("\t shader_modifier = %" PRIu32 "\n", shader_modifier);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_VS_EMBEDDED);
 	cmd[1] = shader_modifier;
@@ -276,9 +277,9 @@ int KYTY_SYSV_ABI GraphicsSetPsShader(uint32_t* cmd, uint64_t size, const uint32
 	{
 		EXIT_NOT_IMPLEMENTED(size < 1 + 1);
 
-		printf("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-		printf("\t size            = %" PRIu64 "\n", size);
-		printf("\t embedded_id     = %d\n", 0);
+			KYTY_LOG_DEBUG("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size            = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t embedded_id     = %d\n", 0);
 
 		cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_PS_EMBEDDED);
 		cmd[1] = 0;
@@ -286,21 +287,21 @@ int KYTY_SYSV_ABI GraphicsSetPsShader(uint32_t* cmd, uint64_t size, const uint32
 	{
 		EXIT_NOT_IMPLEMENTED(size < 12 + 1);
 
-		printf("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-		printf("\t size            = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size            = %" PRIu64 "\n", size);
 
-		printf("\t m_spiShaderPgmLoPs    = %08" PRIx32 "\n", ps_regs[0]);
-		printf("\t m_spiShaderPgmHiPs    = %08" PRIx32 "\n", ps_regs[1]);
-		printf("\t m_spiShaderPgmRsrc1Ps = %08" PRIx32 "\n", ps_regs[2]);
-		printf("\t m_spiShaderPgmRsrc2Ps = %08" PRIx32 "\n", ps_regs[3]);
-		printf("\t m_spiShaderZFormat    = %08" PRIx32 "\n", ps_regs[4]);
-		printf("\t m_spiShaderColFormat  = %08" PRIx32 "\n", ps_regs[5]);
-		printf("\t m_spiPsInputEna       = %08" PRIx32 "\n", ps_regs[6]);
-		printf("\t m_spiPsInputAddr      = %08" PRIx32 "\n", ps_regs[7]);
-		printf("\t m_spiPsInControl      = %08" PRIx32 "\n", ps_regs[8]);
-		printf("\t m_spiBarycCntl        = %08" PRIx32 "\n", ps_regs[9]);
-		printf("\t m_dbShaderControl     = %08" PRIx32 "\n", ps_regs[10]);
-		printf("\t m_cbShaderMask        = %08" PRIx32 "\n", ps_regs[11]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmLoPs    = %08" PRIx32 "\n", ps_regs[0]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmHiPs    = %08" PRIx32 "\n", ps_regs[1]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc1Ps = %08" PRIx32 "\n", ps_regs[2]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc2Ps = %08" PRIx32 "\n", ps_regs[3]);
+			KYTY_LOG_DEBUG("\t m_spiShaderZFormat    = %08" PRIx32 "\n", ps_regs[4]);
+			KYTY_LOG_DEBUG("\t m_spiShaderColFormat  = %08" PRIx32 "\n", ps_regs[5]);
+			KYTY_LOG_DEBUG("\t m_spiPsInputEna       = %08" PRIx32 "\n", ps_regs[6]);
+			KYTY_LOG_DEBUG("\t m_spiPsInputAddr      = %08" PRIx32 "\n", ps_regs[7]);
+			KYTY_LOG_DEBUG("\t m_spiPsInControl      = %08" PRIx32 "\n", ps_regs[8]);
+			KYTY_LOG_DEBUG("\t m_spiBarycCntl        = %08" PRIx32 "\n", ps_regs[9]);
+			KYTY_LOG_DEBUG("\t m_dbShaderControl     = %08" PRIx32 "\n", ps_regs[10]);
+			KYTY_LOG_DEBUG("\t m_cbShaderMask        = %08" PRIx32 "\n", ps_regs[11]);
 
 		cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_PS);
 		memcpy(&cmd[1], ps_regs, static_cast<size_t>(12) * 4);
@@ -317,9 +318,9 @@ int KYTY_SYSV_ABI GraphicsSetPsShader350(uint32_t* cmd, uint64_t size, const uin
 	{
 		EXIT_NOT_IMPLEMENTED(size < 1 + 1);
 
-		printf("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-		printf("\t size            = %" PRIu64 "\n", size);
-		printf("\t embedded_id     = %d\n", 0);
+			KYTY_LOG_DEBUG("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size            = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t embedded_id     = %d\n", 0);
 
 		cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_PS_EMBEDDED);
 		cmd[1] = 0;
@@ -327,21 +328,21 @@ int KYTY_SYSV_ABI GraphicsSetPsShader350(uint32_t* cmd, uint64_t size, const uin
 	{
 		EXIT_NOT_IMPLEMENTED(size < 12 + 1);
 
-		printf("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-		printf("\t size            = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size            = %" PRIu64 "\n", size);
 
-		printf("\t m_spiShaderPgmLoPs    = %08" PRIx32 "\n", ps_regs[0]);
-		printf("\t m_spiShaderPgmHiPs    = %08" PRIx32 "\n", ps_regs[1]);
-		printf("\t m_spiShaderPgmRsrc1Ps = %08" PRIx32 "\n", ps_regs[2]);
-		printf("\t m_spiShaderPgmRsrc2Ps = %08" PRIx32 "\n", ps_regs[3]);
-		printf("\t m_spiShaderZFormat    = %08" PRIx32 "\n", ps_regs[4]);
-		printf("\t m_spiShaderColFormat  = %08" PRIx32 "\n", ps_regs[5]);
-		printf("\t m_spiPsInputEna       = %08" PRIx32 "\n", ps_regs[6]);
-		printf("\t m_spiPsInputAddr      = %08" PRIx32 "\n", ps_regs[7]);
-		printf("\t m_spiPsInControl      = %08" PRIx32 "\n", ps_regs[8]);
-		printf("\t m_spiBarycCntl        = %08" PRIx32 "\n", ps_regs[9]);
-		printf("\t m_dbShaderControl     = %08" PRIx32 "\n", ps_regs[10]);
-		printf("\t m_cbShaderMask        = %08" PRIx32 "\n", ps_regs[11]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmLoPs    = %08" PRIx32 "\n", ps_regs[0]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmHiPs    = %08" PRIx32 "\n", ps_regs[1]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc1Ps = %08" PRIx32 "\n", ps_regs[2]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc2Ps = %08" PRIx32 "\n", ps_regs[3]);
+			KYTY_LOG_DEBUG("\t m_spiShaderZFormat    = %08" PRIx32 "\n", ps_regs[4]);
+			KYTY_LOG_DEBUG("\t m_spiShaderColFormat  = %08" PRIx32 "\n", ps_regs[5]);
+			KYTY_LOG_DEBUG("\t m_spiPsInputEna       = %08" PRIx32 "\n", ps_regs[6]);
+			KYTY_LOG_DEBUG("\t m_spiPsInputAddr      = %08" PRIx32 "\n", ps_regs[7]);
+			KYTY_LOG_DEBUG("\t m_spiPsInControl      = %08" PRIx32 "\n", ps_regs[8]);
+			KYTY_LOG_DEBUG("\t m_spiBarycCntl        = %08" PRIx32 "\n", ps_regs[9]);
+			KYTY_LOG_DEBUG("\t m_dbShaderControl     = %08" PRIx32 "\n", ps_regs[10]);
+			KYTY_LOG_DEBUG("\t m_cbShaderMask        = %08" PRIx32 "\n", ps_regs[11]);
 
 		cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_PS);
 		memcpy(&cmd[1], ps_regs, static_cast<size_t>(12) * 4);
@@ -359,21 +360,21 @@ int KYTY_SYSV_ABI GraphicsUpdatePsShader(uint32_t* cmd, uint64_t size, const uin
 	EXIT_NOT_IMPLEMENTED(ps_regs == nullptr);
 	EXIT_NOT_IMPLEMENTED(size < 12 + 1);
 
-	printf("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size            = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size            = %" PRIu64 "\n", size);
 
-	printf("\t m_spiShaderPgmLoPs    = %08" PRIx32 "\n", ps_regs[0]);
-	printf("\t m_spiShaderPgmHiPs    = %08" PRIx32 "\n", ps_regs[1]);
-	printf("\t m_spiShaderPgmRsrc1Ps = %08" PRIx32 "\n", ps_regs[2]);
-	printf("\t m_spiShaderPgmRsrc2Ps = %08" PRIx32 "\n", ps_regs[3]);
-	printf("\t m_spiShaderZFormat    = %08" PRIx32 "\n", ps_regs[4]);
-	printf("\t m_spiShaderColFormat  = %08" PRIx32 "\n", ps_regs[5]);
-	printf("\t m_spiPsInputEna       = %08" PRIx32 "\n", ps_regs[6]);
-	printf("\t m_spiPsInputAddr      = %08" PRIx32 "\n", ps_regs[7]);
-	printf("\t m_spiPsInControl      = %08" PRIx32 "\n", ps_regs[8]);
-	printf("\t m_spiBarycCntl        = %08" PRIx32 "\n", ps_regs[9]);
-	printf("\t m_dbShaderControl     = %08" PRIx32 "\n", ps_regs[10]);
-	printf("\t m_cbShaderMask        = %08" PRIx32 "\n", ps_regs[11]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmLoPs    = %08" PRIx32 "\n", ps_regs[0]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmHiPs    = %08" PRIx32 "\n", ps_regs[1]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc1Ps = %08" PRIx32 "\n", ps_regs[2]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc2Ps = %08" PRIx32 "\n", ps_regs[3]);
+			KYTY_LOG_DEBUG("\t m_spiShaderZFormat    = %08" PRIx32 "\n", ps_regs[4]);
+			KYTY_LOG_DEBUG("\t m_spiShaderColFormat  = %08" PRIx32 "\n", ps_regs[5]);
+			KYTY_LOG_DEBUG("\t m_spiPsInputEna       = %08" PRIx32 "\n", ps_regs[6]);
+			KYTY_LOG_DEBUG("\t m_spiPsInputAddr      = %08" PRIx32 "\n", ps_regs[7]);
+			KYTY_LOG_DEBUG("\t m_spiPsInControl      = %08" PRIx32 "\n", ps_regs[8]);
+			KYTY_LOG_DEBUG("\t m_spiBarycCntl        = %08" PRIx32 "\n", ps_regs[9]);
+			KYTY_LOG_DEBUG("\t m_dbShaderControl     = %08" PRIx32 "\n", ps_regs[10]);
+			KYTY_LOG_DEBUG("\t m_cbShaderMask        = %08" PRIx32 "\n", ps_regs[11]);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_PS_UPDATE);
 	memcpy(&cmd[1], ps_regs, static_cast<size_t>(12) * 4);
@@ -388,21 +389,21 @@ int KYTY_SYSV_ABI GraphicsUpdatePsShader350(uint32_t* cmd, uint64_t size, const 
 	EXIT_NOT_IMPLEMENTED(ps_regs == nullptr);
 	EXIT_NOT_IMPLEMENTED(size < 12 + 1);
 
-	printf("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size            = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size            = %" PRIu64 "\n", size);
 
-	printf("\t m_spiShaderPgmLoPs    = %08" PRIx32 "\n", ps_regs[0]);
-	printf("\t m_spiShaderPgmHiPs    = %08" PRIx32 "\n", ps_regs[1]);
-	printf("\t m_spiShaderPgmRsrc1Ps = %08" PRIx32 "\n", ps_regs[2]);
-	printf("\t m_spiShaderPgmRsrc2Ps = %08" PRIx32 "\n", ps_regs[3]);
-	printf("\t m_spiShaderZFormat    = %08" PRIx32 "\n", ps_regs[4]);
-	printf("\t m_spiShaderColFormat  = %08" PRIx32 "\n", ps_regs[5]);
-	printf("\t m_spiPsInputEna       = %08" PRIx32 "\n", ps_regs[6]);
-	printf("\t m_spiPsInputAddr      = %08" PRIx32 "\n", ps_regs[7]);
-	printf("\t m_spiPsInControl      = %08" PRIx32 "\n", ps_regs[8]);
-	printf("\t m_spiBarycCntl        = %08" PRIx32 "\n", ps_regs[9]);
-	printf("\t m_dbShaderControl     = %08" PRIx32 "\n", ps_regs[10]);
-	printf("\t m_cbShaderMask        = %08" PRIx32 "\n", ps_regs[11]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmLoPs    = %08" PRIx32 "\n", ps_regs[0]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmHiPs    = %08" PRIx32 "\n", ps_regs[1]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc1Ps = %08" PRIx32 "\n", ps_regs[2]);
+			KYTY_LOG_DEBUG("\t m_spiShaderPgmRsrc2Ps = %08" PRIx32 "\n", ps_regs[3]);
+			KYTY_LOG_DEBUG("\t m_spiShaderZFormat    = %08" PRIx32 "\n", ps_regs[4]);
+			KYTY_LOG_DEBUG("\t m_spiShaderColFormat  = %08" PRIx32 "\n", ps_regs[5]);
+			KYTY_LOG_DEBUG("\t m_spiPsInputEna       = %08" PRIx32 "\n", ps_regs[6]);
+			KYTY_LOG_DEBUG("\t m_spiPsInputAddr      = %08" PRIx32 "\n", ps_regs[7]);
+			KYTY_LOG_DEBUG("\t m_spiPsInControl      = %08" PRIx32 "\n", ps_regs[8]);
+			KYTY_LOG_DEBUG("\t m_spiBarycCntl        = %08" PRIx32 "\n", ps_regs[9]);
+			KYTY_LOG_DEBUG("\t m_dbShaderControl     = %08" PRIx32 "\n", ps_regs[10]);
+			KYTY_LOG_DEBUG("\t m_cbShaderMask        = %08" PRIx32 "\n", ps_regs[11]);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_PS_UPDATE);
 	memcpy(&cmd[1], ps_regs, static_cast<size_t>(12) * 4);
@@ -416,17 +417,17 @@ int KYTY_SYSV_ABI GraphicsSetCsShaderWithModifier(uint32_t* cmd, uint64_t size, 
 
 	EXIT_NOT_IMPLEMENTED(size < 7 + 2);
 
-	printf("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size            = %" PRIu64 "\n", size);
-	printf("\t shader_modifier = %" PRIu32 "\n", shader_modifier);
+			KYTY_LOG_DEBUG("\t cmd_buffer      = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size            = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t shader_modifier = %" PRIu32 "\n", shader_modifier);
 
-	printf("\t m_computePgmLo      = %08" PRIx32 "\n", cs_regs[0]);
-	printf("\t m_computePgmHi      = %08" PRIx32 "\n", cs_regs[1]);
-	printf("\t m_computePgmRsrc1   = %08" PRIx32 "\n", cs_regs[2]);
-	printf("\t m_computePgmRsrc2   = %08" PRIx32 "\n", cs_regs[3]);
-	printf("\t m_computeNumThreadX = %08" PRIx32 "\n", cs_regs[4]);
-	printf("\t m_computeNumThreadY = %08" PRIx32 "\n", cs_regs[5]);
-	printf("\t m_computeNumThreadZ = %08" PRIx32 "\n", cs_regs[6]);
+			KYTY_LOG_DEBUG("\t m_computePgmLo      = %08" PRIx32 "\n", cs_regs[0]);
+			KYTY_LOG_DEBUG("\t m_computePgmHi      = %08" PRIx32 "\n", cs_regs[1]);
+			KYTY_LOG_DEBUG("\t m_computePgmRsrc1   = %08" PRIx32 "\n", cs_regs[2]);
+			KYTY_LOG_DEBUG("\t m_computePgmRsrc2   = %08" PRIx32 "\n", cs_regs[3]);
+			KYTY_LOG_DEBUG("\t m_computeNumThreadX = %08" PRIx32 "\n", cs_regs[4]);
+			KYTY_LOG_DEBUG("\t m_computeNumThreadY = %08" PRIx32 "\n", cs_regs[5]);
+			KYTY_LOG_DEBUG("\t m_computeNumThreadZ = %08" PRIx32 "\n", cs_regs[6]);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_CS);
 	cmd[1] = shader_modifier;
@@ -442,12 +443,12 @@ int KYTY_SYSV_ABI GraphicsDrawIndex(uint32_t* cmd, uint64_t size, uint32_t index
 
 	EXIT_NOT_IMPLEMENTED(size < 6);
 
-	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size        = %" PRIu64 "\n", size);
-	printf("\t index_count = %" PRIu32 "\n", index_count);
-	printf("\t index_addr  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
-	printf("\t flags       = %08" PRIx32 "\n", flags);
-	printf("\t type        = %" PRIu32 "\n", type);
+			KYTY_LOG_DEBUG("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size        = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t index_count = %" PRIu32 "\n", index_count);
+			KYTY_LOG_DEBUG("\t index_addr  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
+			KYTY_LOG_DEBUG("\t flags       = %08" PRIx32 "\n", flags);
+			KYTY_LOG_DEBUG("\t type        = %" PRIu32 "\n", type);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_DRAW_INDEX);
 	cmd[1] = index_count;
@@ -465,10 +466,10 @@ int KYTY_SYSV_ABI GraphicsDrawIndexAuto(uint32_t* cmd, uint64_t size, uint32_t i
 
 	EXIT_NOT_IMPLEMENTED(size < 3);
 
-	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size        = %" PRIu64 "\n", size);
-	printf("\t index_count = %" PRIu32 "\n", index_count);
-	printf("\t flags       = %08" PRIx32 "\n", flags);
+			KYTY_LOG_DEBUG("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size        = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t index_count = %" PRIu32 "\n", index_count);
+			KYTY_LOG_DEBUG("\t flags       = %08" PRIx32 "\n", flags);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_DRAW_INDEX_AUTO);
 	cmd[1] = index_count;
@@ -486,11 +487,11 @@ int KYTY_SYSV_ABI GraphicsDrawIndexOffset(uint32_t* cmd, uint64_t size, uint32_t
 		return -1;
 	}
 
-	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size        = %" PRIu64 "\n", size);
-	printf("\t index_offset = %" PRIu32 "\n", index_offset);
-	printf("\t index_count = %" PRIu32 "\n", index_count);
-	printf("\t flags       = %08" PRIx32 "\n", flags);
+			KYTY_LOG_DEBUG("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size        = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t index_offset = %" PRIu32 "\n", index_offset);
+			KYTY_LOG_DEBUG("\t index_count = %" PRIu32 "\n", index_count);
+			KYTY_LOG_DEBUG("\t flags       = %08" PRIx32 "\n", flags);
 
 	cmd[0] = KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u) | (flags & 1u);
 	cmd[1] = index_count;
@@ -511,10 +512,10 @@ int KYTY_SYSV_ABI GraphicsInsertWaitFlipDone(uint32_t* cmd, uint64_t size, uint3
 
 	EXIT_NOT_IMPLEMENTED(size < 3);
 
-	printf("\t cmd_buffer           = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size                 = %" PRIu64 "\n", size);
-	printf("\t video_out_handle     = %" PRIu32 "\n", video_out_handle);
-	printf("\t display_buffer_index = %" PRIu32 "\n", display_buffer_index);
+			KYTY_LOG_DEBUG("\t cmd_buffer           = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size                 = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t video_out_handle     = %" PRIu32 "\n", video_out_handle);
+			KYTY_LOG_DEBUG("\t display_buffer_index = %" PRIu32 "\n", display_buffer_index);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE);
 	cmd[1] = video_out_handle;
@@ -530,12 +531,12 @@ int KYTY_SYSV_ABI GraphicsDispatchDirect(uint32_t* cmd, uint64_t size, uint32_t 
 
 	EXIT_NOT_IMPLEMENTED(size < 5);
 
-	printf("\t cmd_buffer     = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size           = %" PRIu64 "\n", size);
-	printf("\t thread_group_x = %" PRIu32 "\n", thread_group_x);
-	printf("\t thread_group_y = %" PRIu32 "\n", thread_group_y);
-	printf("\t thread_group_z = %" PRIu32 "\n", thread_group_z);
-	printf("\t mode           = %" PRIu32 "\n", mode);
+			KYTY_LOG_DEBUG("\t cmd_buffer     = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size           = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t thread_group_x = %" PRIu32 "\n", thread_group_x);
+			KYTY_LOG_DEBUG("\t thread_group_y = %" PRIu32 "\n", thread_group_y);
+			KYTY_LOG_DEBUG("\t thread_group_z = %" PRIu32 "\n", thread_group_z);
+			KYTY_LOG_DEBUG("\t mode           = %" PRIu32 "\n", mode);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_DISPATCH_DIRECT);
 	cmd[1] = thread_group_x;
@@ -552,8 +553,8 @@ uint32_t KYTY_SYSV_ABI GraphicsDrawInitDefaultHardwareState(uint32_t* cmd, uint6
 
 	EXIT_NOT_IMPLEMENTED(size < 2);
 
-	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size        = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size        = %" PRIu64 "\n", size);
 
 	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_DRAW_RESET);
 
@@ -566,8 +567,8 @@ uint32_t KYTY_SYSV_ABI GraphicsDrawInitDefaultHardwareState175(uint32_t* cmd, ui
 
 	EXIT_NOT_IMPLEMENTED(size < 2);
 
-	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size        = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size        = %" PRIu64 "\n", size);
 
 	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_DRAW_RESET);
 
@@ -580,8 +581,8 @@ uint32_t KYTY_SYSV_ABI GraphicsDrawInitDefaultHardwareState200(uint32_t* cmd, ui
 
 	EXIT_NOT_IMPLEMENTED(size < 2);
 
-	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size        = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size        = %" PRIu64 "\n", size);
 
 	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_DRAW_RESET);
 
@@ -594,8 +595,8 @@ uint32_t KYTY_SYSV_ABI GraphicsDrawInitDefaultHardwareState350(uint32_t* cmd, ui
 
 	EXIT_NOT_IMPLEMENTED(size < 2);
 
-	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size        = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size        = %" PRIu64 "\n", size);
 
 	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_DRAW_RESET);
 
@@ -608,8 +609,8 @@ uint32_t KYTY_SYSV_ABI GraphicsDispatchInitDefaultHardwareState(uint32_t* cmd, u
 
 	EXIT_NOT_IMPLEMENTED(size < 2);
 
-	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size        = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size        = %" PRIu64 "\n", size);
 
 	cmd[0] = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_DISPATCH_RESET);
 
@@ -652,10 +653,10 @@ int KYTY_SYSV_ABI GraphicsSubmitAndFlipCommandBuffers(uint32_t count, void* dcb_
 	GraphicsDbgDumpDcb("d", dcb_size, dcb);
 	GraphicsDbgDumpDcb("c", ccb_size, ccb);
 
-	printf("\t handle    = %" PRId32 "\n", handle);
-	printf("\t index     = %" PRId32 "\n", index);
-	printf("\t flip_mode = %" PRId32 "\n", flip_mode);
-	printf("\t flip_arg  = %" PRId64 "\n", flip_arg);
+			KYTY_LOG_DEBUG("\t handle    = %" PRId32 "\n", handle);
+			KYTY_LOG_DEBUG("\t index     = %" PRId32 "\n", index);
+			KYTY_LOG_DEBUG("\t flip_mode = %" PRId32 "\n", flip_mode);
+			KYTY_LOG_DEBUG("\t flip_arg  = %" PRId64 "\n", flip_arg);
 
 	GraphicsRunSubmitAndFlip(dcb, dcb_size, ccb, ccb_size, handle, index, flip_mode, flip_arg);
 
@@ -712,15 +713,15 @@ uint32_t KYTY_SYSV_ABI GraphicsMapComputeQueue(uint32_t pipe_id, uint32_t queue_
 {
 	PRINT_NAME();
 
-	printf("\t pipe_id       = %" PRIu32 "\n", pipe_id);
-	printf("\t queue_id      = %" PRIu32 "\n", queue_id);
-	printf("\t ring_addr     = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(ring_addr));
-	printf("\t ring_size_dw  = %" PRIu32 "\n", ring_size_dw);
-	printf("\t read_ptr_addr = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(read_ptr_addr));
+			KYTY_LOG_DEBUG("\t pipe_id       = %" PRIu32 "\n", pipe_id);
+			KYTY_LOG_DEBUG("\t queue_id      = %" PRIu32 "\n", queue_id);
+			KYTY_LOG_DEBUG("\t ring_addr     = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(ring_addr));
+			KYTY_LOG_DEBUG("\t ring_size_dw  = %" PRIu32 "\n", ring_size_dw);
+			KYTY_LOG_DEBUG("\t read_ptr_addr = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(read_ptr_addr));
 
 	uint32_t id = GraphicsRunMapComputeQueue(pipe_id, queue_id, ring_addr, ring_size_dw, read_ptr_addr);
 
-	printf("\t queue         = %" PRIu32 "\n", id);
+			KYTY_LOG_DEBUG("\t queue         = %" PRIu32 "\n", id);
 
 	return id;
 }
@@ -729,7 +730,7 @@ void KYTY_SYSV_ABI GraphicsUnmapComputeQueue(uint32_t id)
 {
 	PRINT_NAME();
 
-	printf("\t id = %" PRIu32 "\n", id);
+			KYTY_LOG_DEBUG("\t id = %" PRIu32 "\n", id);
 
 	GraphicsRunUnmapComputeQueue(id);
 }
@@ -740,12 +741,12 @@ int KYTY_SYSV_ABI GraphicsComputeWaitOnAddress(uint32_t* cmd, uint64_t size, uin
 
 	EXIT_NOT_IMPLEMENTED(size < 6);
 
-	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size        = %" PRIu64 "\n", size);
-	printf("\t gpu_addr    = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(gpu_addr));
-	printf("\t mask        = %08" PRIx32 "\n", mask);
-	printf("\t func        = %" PRIu32 "\n", func);
-	printf("\t ref         = %08" PRIx32 "\n", ref);
+			KYTY_LOG_DEBUG("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size        = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t gpu_addr    = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(gpu_addr));
+			KYTY_LOG_DEBUG("\t mask        = %08" PRIx32 "\n", mask);
+			KYTY_LOG_DEBUG("\t func        = %" PRIu32 "\n", func);
+			KYTY_LOG_DEBUG("\t ref         = %08" PRIx32 "\n", ref);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_WAIT_MEM_32);
 	cmd[1] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(gpu_addr) & 0xffffffffu);
@@ -761,8 +762,8 @@ void KYTY_SYSV_ABI GraphicsDingDong(uint32_t ring_id, uint32_t offset_dw)
 {
 	PRINT_NAME();
 
-	printf("\t ring_id   = %" PRIu32 "\n", ring_id);
-	printf("\t offset_dw = %" PRIu32 "\n", offset_dw);
+			KYTY_LOG_DEBUG("\t ring_id   = %" PRIu32 "\n", ring_id);
+			KYTY_LOG_DEBUG("\t offset_dw = %" PRIu32 "\n", offset_dw);
 
 	GraphicsRunDingDong(ring_id, offset_dw);
 }
@@ -775,9 +776,9 @@ int KYTY_SYSV_ABI GraphicsInsertPushMarker(uint32_t* cmd, uint64_t size, const c
 
 	EXIT_NOT_IMPLEMENTED(size * 4 < len + 1);
 
-	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size        = %" PRIu64 "\n", size);
-	printf("\t str         = %s\n", str);
+			KYTY_LOG_DEBUG("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size        = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t str         = %s\n", str);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_PUSH_MARKER);
 
@@ -792,8 +793,8 @@ int KYTY_SYSV_ABI GraphicsInsertPopMarker(uint32_t* cmd, uint64_t size)
 
 	EXIT_NOT_IMPLEMENTED(size < 2);
 
-	printf("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t size        = %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t cmd_buffer  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t size        = %" PRIu64 "\n", size);
 
 	cmd[0] = KYTY_PM4(size, Pm4::IT_NOP, Pm4::R_POP_MARKER);
 
@@ -820,7 +821,7 @@ void* KYTY_SYSV_ABI GraphicsGetTheTessellationFactorRingBufferBaseAddress()
 	EXIT_NOT_IMPLEMENTED(!again);
 	Core::VirtualMemory::Free(addr);
 
-	printf("\t addr = %016" PRIx64 "\n", addr);
+			KYTY_LOG_DEBUG("\t addr = %016" PRIx64 "\n", addr);
 
 	return reinterpret_cast<void*>(addr);
 }
@@ -832,11 +833,11 @@ int KYTY_SYSV_ABI GraphicsRegisterOwner(uint32_t* owner_handle, const char* name
 	EXIT_NOT_IMPLEMENTED(owner_handle == nullptr);
 	EXIT_NOT_IMPLEMENTED(name == nullptr);
 
-	printf("\t RegisterOwner: %s\n", name);
+			KYTY_LOG_DEBUG("\t RegisterOwner: %s\n", name);
 
 	GpuMemoryRegisterOwner(owner_handle, name);
 
-	printf("\t handler: %" PRIu32 "\n", *owner_handle);
+			KYTY_LOG_DEBUG("\t handler: %" PRIu32 "\n", *owner_handle);
 
 	return OK;
 }
@@ -850,18 +851,18 @@ int KYTY_SYSV_ABI GraphicsRegisterResource(uint32_t* resource_handle, uint32_t o
 	EXIT_NOT_IMPLEMENTED(memory == nullptr);
 	EXIT_NOT_IMPLEMENTED(name == nullptr);
 
-	printf("\t RegisterResource: %s\n", name);
-	printf("\t owner_handle:     %" PRIu32 "\n", owner_handle);
-	printf("\t addr:             %016" PRIx64 "\n", reinterpret_cast<uint64_t>(memory));
-	printf("\t size:             %" PRIu64 "\n", size);
-	printf("\t type:             %" PRIu32 "\n", type);
-	printf("\t user_data:        %" PRIu64 "\n", user_data);
+			KYTY_LOG_DEBUG("\t RegisterResource: %s\n", name);
+			KYTY_LOG_DEBUG("\t owner_handle:     %" PRIu32 "\n", owner_handle);
+			KYTY_LOG_DEBUG("\t addr:             %016" PRIx64 "\n", reinterpret_cast<uint64_t>(memory));
+			KYTY_LOG_DEBUG("\t size:             %" PRIu64 "\n", size);
+			KYTY_LOG_DEBUG("\t type:             %" PRIu32 "\n", type);
+			KYTY_LOG_DEBUG("\t user_data:        %" PRIu64 "\n", user_data);
 
 	uint32_t rhandle = 0;
 
 	GpuMemoryRegisterResource(&rhandle, owner_handle, memory, size, name, type, user_data);
 
-	printf("\t handler: %" PRIu32 "\n", rhandle);
+			KYTY_LOG_DEBUG("\t handler: %" PRIu32 "\n", rhandle);
 
 	if (resource_handle != nullptr)
 	{
@@ -875,7 +876,7 @@ int KYTY_SYSV_ABI GraphicsUnregisterAllResourcesForOwner(uint32_t owner_handle)
 {
 	PRINT_NAME();
 
-	printf("\t owner_handle:     %" PRIu32 "\n", owner_handle);
+			KYTY_LOG_DEBUG("\t owner_handle:     %" PRIu32 "\n", owner_handle);
 
 	GpuMemoryUnregisterAllResourcesForOwner(owner_handle);
 
@@ -886,7 +887,7 @@ int KYTY_SYSV_ABI GraphicsUnregisterOwnerAndResources(uint32_t owner_handle)
 {
 	PRINT_NAME();
 
-	printf("\t owner_handle:     %" PRIu32 "\n", owner_handle);
+			KYTY_LOG_DEBUG("\t owner_handle:     %" PRIu32 "\n", owner_handle);
 
 	GpuMemoryUnregisterOwnerAndResources(owner_handle);
 
@@ -897,7 +898,7 @@ int KYTY_SYSV_ABI GraphicsUnregisterResource(uint32_t resource_handle)
 {
 	PRINT_NAME();
 
-	printf("\t resource_handle:     %" PRIu32 "\n", resource_handle);
+			KYTY_LOG_DEBUG("\t resource_handle:     %" PRIu32 "\n", resource_handle);
 
 	GpuMemoryUnregisterResource(resource_handle);
 
@@ -941,13 +942,13 @@ struct CommandBuffer
 
 	void DbgDump() const
 	{
-		printf("\t bottom      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(bottom));
-		printf("\t top         = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(top));
-		printf("\t cursor_up   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cursor_up));
-		printf("\t cursor_down = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cursor_down));
-		printf("\t callback    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(callback));
-		printf("\t user_data   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user_data));
-		printf("\t reserved_dw = %" PRIu32 "\n", reserved_dw);
+			KYTY_LOG_DEBUG("\t bottom      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(bottom));
+			KYTY_LOG_DEBUG("\t top         = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(top));
+			KYTY_LOG_DEBUG("\t cursor_up   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cursor_up));
+			KYTY_LOG_DEBUG("\t cursor_down = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cursor_down));
+			KYTY_LOG_DEBUG("\t callback    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(callback));
+			KYTY_LOG_DEBUG("\t user_data   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user_data));
+			KYTY_LOG_DEBUG("\t reserved_dw = %" PRIu32 "\n", reserved_dw);
 	}
 
 	[[nodiscard]] KYTY_SYSV_ABI uint32_t GetAvailableSizeDW() const
@@ -1708,8 +1709,8 @@ int KYTY_SYSV_ABI GraphicsInit(uint32_t* state, uint32_t ver)
 {
 	PRINT_NAME();
 
-	printf("\t state = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(state));
-	printf("\t ver   = %u\n", ver);
+			KYTY_LOG_DEBUG("\t state = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(state));
+			KYTY_LOG_DEBUG("\t ver   = %u\n", ver);
 
 	// Null state is accepted (return OK) so titles that probe early do not hard
 	// abort; non-null must receive version + feature-flag words.
@@ -1721,7 +1722,7 @@ int KYTY_SYSV_ABI GraphicsInit(uint32_t* state, uint32_t ver)
 	// those register defaults while their version-specific tables are modeled.
 	if (ver != 8)
 	{
-		printf("\t WARNING: AGC ver %u != 8, using ver-8 register defaults\n", ver);
+			KYTY_LOG_WARN("\t WARNING: AGC ver %u != 8, using ver-8 register defaults\n", ver);
 	}
 	EXIT_IF(!GraphicsInitWriteGuestState(state, ver));
 
@@ -1732,7 +1733,7 @@ void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2(uint32_t ver)
 {
 	PRINT_NAME();
 
-	if (ver != 8) { printf("\t WARNING: AGC ver %u != 8\n", ver); }
+	if (ver != 8) { KYTY_LOG_WARN("\t WARNING: AGC ver %u != 8\n", ver); }
 	EXIT_NOT_IMPLEMENTED(offsetof(RegisterDefaults, count) != 0x38);
 
 	return &g_reg_defaults1;
@@ -1742,7 +1743,7 @@ void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2Internal(uint32_t ver)
 {
 	PRINT_NAME();
 
-	if (ver != 8) { printf("\t WARNING: AGC ver %u != 8\n", ver); }
+	if (ver != 8) { KYTY_LOG_WARN("\t WARNING: AGC ver %u != 8\n", ver); }
 	EXIT_NOT_IMPLEMENTED(offsetof(RegisterDefaults, count) != 0x38);
 
 	return &g_reg_defaults2;
@@ -1750,107 +1751,107 @@ void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2Internal(uint32_t ver)
 
 static void dbg_dump_shader(const Shader* h)
 {
-	printf("\t file_header  = 0x%08" PRIx32 "\n", h->file_header);
-	printf("\t version      = 0x%08" PRIx32 "\n", h->version);
-	printf("\t user_data    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->user_data));
+			KYTY_LOG_DEBUG("\t file_header  = 0x%08" PRIx32 "\n", h->file_header);
+			KYTY_LOG_DEBUG("\t version      = 0x%08" PRIx32 "\n", h->version);
+			KYTY_LOG_DEBUG("\t user_data    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->user_data));
 	if (h->user_data != nullptr)
 	{
-		printf("\t\t direct_resource_count    = 0x%04" PRIx16 "\n", h->user_data->direct_resource_count);
-		printf("\t\t direct_resource_offset   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->user_data->direct_resource_offset));
+			KYTY_LOG_DEBUG("\t\t direct_resource_count    = 0x%04" PRIx16 "\n", h->user_data->direct_resource_count);
+			KYTY_LOG_DEBUG("\t\t direct_resource_offset   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->user_data->direct_resource_offset));
 		for (int i = 0; i < static_cast<int>(h->user_data->direct_resource_count); i++)
 		{
-			printf("\t\t\t offset[%02d] = %04" PRIx16 "\n", i, h->user_data->direct_resource_offset[i]);
+			KYTY_LOG_DEBUG("\t\t\t offset[%02d] = %04" PRIx16 "\n", i, h->user_data->direct_resource_offset[i]);
 		}
 		for (int imm = 0; imm < 4; imm++)
 		{
-			printf("\t\t sharp_resource_count  [%d] = 0x%04" PRIx16 "\n", imm, h->user_data->sharp_resource_count[imm]);
-			printf("\t\t sharp_resource_offset [%d] = 0x%016" PRIx64 "\n", imm,
+			KYTY_LOG_DEBUG("\t\t sharp_resource_count  [%d] = 0x%04" PRIx16 "\n", imm, h->user_data->sharp_resource_count[imm]);
+			KYTY_LOG_DEBUG("\t\t sharp_resource_offset [%d] = 0x%016" PRIx64 "\n", imm,
 			       reinterpret_cast<uint64_t>(h->user_data->sharp_resource_offset[imm]));
 			for (int i = 0; i < static_cast<int>(h->user_data->sharp_resource_count[imm]); i++)
 			{
-				printf("\t\t\t offset_dw[%d] = %04" PRIx16 ", size = %" PRIu16 "\n", i,
+			KYTY_LOG_DEBUG("\t\t\t offset_dw[%d] = %04" PRIx16 ", size = %" PRIu16 "\n", i,
 				       h->user_data->sharp_resource_offset[imm][i].offset_dw, h->user_data->sharp_resource_offset[imm][i].size);
 			}
 		}
-		printf("\t\t eud_size_dw    = 0x%04" PRIx16 "\n", h->user_data->eud_size_dw);
-		printf("\t\t srt_size_dw    = 0x%04" PRIx16 "\n", h->user_data->srt_size_dw);
+			KYTY_LOG_DEBUG("\t\t eud_size_dw    = 0x%04" PRIx16 "\n", h->user_data->eud_size_dw);
+			KYTY_LOG_DEBUG("\t\t srt_size_dw    = 0x%04" PRIx16 "\n", h->user_data->srt_size_dw);
 	}
-	printf("\t code             = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->code));
-	printf("\t num_cx_registers = 0x%02" PRIx8 "\n", h->num_cx_registers);
-	printf("\t cx_registers     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->cx_registers));
+			KYTY_LOG_DEBUG("\t code             = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->code));
+			KYTY_LOG_DEBUG("\t num_cx_registers = 0x%02" PRIx8 "\n", h->num_cx_registers);
+			KYTY_LOG_DEBUG("\t cx_registers     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->cx_registers));
 	for (int i = 0; i < static_cast<int>(h->num_cx_registers); i++)
 	{
-		printf("\t\t cx[%d]: offset = %08" PRIx32 ", value = %08" PRIx32 "\n", i, h->cx_registers[i].offset, h->cx_registers[i].value);
+			KYTY_LOG_DEBUG("\t\t cx[%d]: offset = %08" PRIx32 ", value = %08" PRIx32 "\n", i, h->cx_registers[i].offset, h->cx_registers[i].value);
 	}
-	printf("\t num_sh_registers = 0x%02" PRIx8 "\n", h->num_sh_registers);
-	printf("\t sh_registers     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->sh_registers));
+			KYTY_LOG_DEBUG("\t num_sh_registers = 0x%02" PRIx8 "\n", h->num_sh_registers);
+			KYTY_LOG_DEBUG("\t sh_registers     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->sh_registers));
 	for (int i = 0; i < static_cast<int>(h->num_sh_registers); i++)
 	{
-		printf("\t\t sh[%d]: offset = %08" PRIx32 ", value = %08" PRIx32 "\n", i, h->sh_registers[i].offset, h->sh_registers[i].value);
+			KYTY_LOG_DEBUG("\t\t sh[%d]: offset = %08" PRIx32 ", value = %08" PRIx32 "\n", i, h->sh_registers[i].offset, h->sh_registers[i].value);
 	}
-	printf("\t specials                          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->specials));
-	printf("\t\t ge_cntl:              offset = %08" PRIx32 ", value = %08" PRIx32 "\n", h->specials->ge_cntl.offset,
+			KYTY_LOG_DEBUG("\t specials                          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->specials));
+			KYTY_LOG_DEBUG("\t\t ge_cntl:              offset = %08" PRIx32 ", value = %08" PRIx32 "\n", h->specials->ge_cntl.offset,
 	       h->specials->ge_cntl.value);
-	printf("\t\t vgt_shader_stages_en: offset = %08" PRIx32 ", value = %08" PRIx32 "\n", h->specials->vgt_shader_stages_en.offset,
+			KYTY_LOG_DEBUG("\t\t vgt_shader_stages_en: offset = %08" PRIx32 ", value = %08" PRIx32 "\n", h->specials->vgt_shader_stages_en.offset,
 	       h->specials->vgt_shader_stages_en.value);
-	printf("\t\t vgt_gs_out_prim_type: offset = %08" PRIx32 ", value = %08" PRIx32 "\n", h->specials->vgt_gs_out_prim_type.offset,
+			KYTY_LOG_DEBUG("\t\t vgt_gs_out_prim_type: offset = %08" PRIx32 ", value = %08" PRIx32 "\n", h->specials->vgt_gs_out_prim_type.offset,
 	       h->specials->vgt_gs_out_prim_type.value);
-	printf("\t\t ge_user_vgpr_en:      offset = %08" PRIx32 ", value = %08" PRIx32 "\n", h->specials->ge_user_vgpr_en.offset,
+			KYTY_LOG_DEBUG("\t\t ge_user_vgpr_en:      offset = %08" PRIx32 ", value = %08" PRIx32 "\n", h->specials->ge_user_vgpr_en.offset,
 	       h->specials->ge_user_vgpr_en.value);
-	printf("\t\t dispatch_modifier = %08" PRIx32 "\n", h->specials->dispatch_modifier);
-	printf("\t\t user_data_range: start = %08" PRIx32 ", end = %08" PRIx32 "\n", h->specials->user_data_range.start,
+			KYTY_LOG_DEBUG("\t\t dispatch_modifier = %08" PRIx32 "\n", h->specials->dispatch_modifier);
+			KYTY_LOG_DEBUG("\t\t user_data_range: start = %08" PRIx32 ", end = %08" PRIx32 "\n", h->specials->user_data_range.start,
 	       h->specials->user_data_range.end);
-	printf("\t\t draw_modifier: enbl_start_vertex_offset   = %08" PRIx32 "\n", h->specials->draw_modifier.enbl_start_vertex_offset);
-	printf("\t\t draw_modifier: enbl_start_index_offset    = %08" PRIx32 "\n", h->specials->draw_modifier.enbl_start_index_offset);
-	printf("\t\t draw_modifier: enbl_start_instance_offset = %08" PRIx32 "\n", h->specials->draw_modifier.enbl_start_instance_offset);
-	printf("\t\t draw_modifier: enbl_draw_index            = %08" PRIx32 "\n", h->specials->draw_modifier.enbl_draw_index);
-	printf("\t\t draw_modifier: enbl_user_vgprs            = %08" PRIx32 "\n", h->specials->draw_modifier.enbl_user_vgprs);
-	printf("\t\t draw_modifier: render_target_slice_offset = %08" PRIx32 "\n", h->specials->draw_modifier.render_target_slice_offset);
-	printf("\t\t draw_modifier: fuse_draws                 = %08" PRIx32 "\n", h->specials->draw_modifier.fuse_draws);
-	printf("\t\t draw_modifier: compiler_flags             = %08" PRIx32 "\n", h->specials->draw_modifier.compiler_flags);
-	printf("\t\t draw_modifier: is_default                 = %08" PRIx32 "\n", h->specials->draw_modifier.is_default);
-	printf("\t\t draw_modifier: reserved                   = %08" PRIx32 "\n", h->specials->draw_modifier.reserved);
-	printf("\t num_input_semantics               = 0x%08" PRIx32 "\n", h->num_input_semantics);
-	printf("\t input_semantics                   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->input_semantics));
+			KYTY_LOG_DEBUG("\t\t draw_modifier: enbl_start_vertex_offset   = %08" PRIx32 "\n", h->specials->draw_modifier.enbl_start_vertex_offset);
+			KYTY_LOG_DEBUG("\t\t draw_modifier: enbl_start_index_offset    = %08" PRIx32 "\n", h->specials->draw_modifier.enbl_start_index_offset);
+			KYTY_LOG_DEBUG("\t\t draw_modifier: enbl_start_instance_offset = %08" PRIx32 "\n", h->specials->draw_modifier.enbl_start_instance_offset);
+			KYTY_LOG_DEBUG("\t\t draw_modifier: enbl_draw_index            = %08" PRIx32 "\n", h->specials->draw_modifier.enbl_draw_index);
+			KYTY_LOG_DEBUG("\t\t draw_modifier: enbl_user_vgprs            = %08" PRIx32 "\n", h->specials->draw_modifier.enbl_user_vgprs);
+			KYTY_LOG_DEBUG("\t\t draw_modifier: render_target_slice_offset = %08" PRIx32 "\n", h->specials->draw_modifier.render_target_slice_offset);
+			KYTY_LOG_DEBUG("\t\t draw_modifier: fuse_draws                 = %08" PRIx32 "\n", h->specials->draw_modifier.fuse_draws);
+			KYTY_LOG_DEBUG("\t\t draw_modifier: compiler_flags             = %08" PRIx32 "\n", h->specials->draw_modifier.compiler_flags);
+			KYTY_LOG_DEBUG("\t\t draw_modifier: is_default                 = %08" PRIx32 "\n", h->specials->draw_modifier.is_default);
+			KYTY_LOG_DEBUG("\t\t draw_modifier: reserved                   = %08" PRIx32 "\n", h->specials->draw_modifier.reserved);
+			KYTY_LOG_DEBUG("\t num_input_semantics               = 0x%08" PRIx32 "\n", h->num_input_semantics);
+			KYTY_LOG_DEBUG("\t input_semantics                   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->input_semantics));
 	for (int i = 0; i < static_cast<int>(h->num_input_semantics); i++)
 	{
-		printf("\t\t input_semantics[%d]: semantic         = %08" PRIx32 "\n", i, h->input_semantics[i].semantic);
-		printf("\t\t input_semantics[%d]: hardware_mapping = %08" PRIx32 "\n", i, h->input_semantics[i].hardware_mapping);
-		printf("\t\t input_semantics[%d]: size_in_elements = %08" PRIx32 "\n", i, h->input_semantics[i].size_in_elements);
-		printf("\t\t input_semantics[%d]: is_f16           = %08" PRIx32 "\n", i, h->input_semantics[i].is_f16);
-		printf("\t\t input_semantics[%d]: is_flat_shaded   = %08" PRIx32 "\n", i, h->input_semantics[i].is_flat_shaded);
-		printf("\t\t input_semantics[%d]: is_linear        = %08" PRIx32 "\n", i, h->input_semantics[i].is_linear);
-		printf("\t\t input_semantics[%d]: is_custom        = %08" PRIx32 "\n", i, h->input_semantics[i].is_custom);
-		printf("\t\t input_semantics[%d]: static_vb_index  = %08" PRIx32 "\n", i, h->input_semantics[i].static_vb_index);
-		printf("\t\t input_semantics[%d]: static_attribute = %08" PRIx32 "\n", i, h->input_semantics[i].static_attribute);
-		printf("\t\t input_semantics[%d]: reserved         = %08" PRIx32 "\n", i, h->input_semantics[i].reserved);
-		printf("\t\t input_semantics[%d]: default_value    = %08" PRIx32 "\n", i, h->input_semantics[i].default_value);
-		printf("\t\t input_semantics[%d]: default_value_hi = %08" PRIx32 "\n", i, h->input_semantics[i].default_value_hi);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: semantic         = %08" PRIx32 "\n", i, h->input_semantics[i].semantic);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: hardware_mapping = %08" PRIx32 "\n", i, h->input_semantics[i].hardware_mapping);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: size_in_elements = %08" PRIx32 "\n", i, h->input_semantics[i].size_in_elements);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: is_f16           = %08" PRIx32 "\n", i, h->input_semantics[i].is_f16);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: is_flat_shaded   = %08" PRIx32 "\n", i, h->input_semantics[i].is_flat_shaded);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: is_linear        = %08" PRIx32 "\n", i, h->input_semantics[i].is_linear);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: is_custom        = %08" PRIx32 "\n", i, h->input_semantics[i].is_custom);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: static_vb_index  = %08" PRIx32 "\n", i, h->input_semantics[i].static_vb_index);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: static_attribute = %08" PRIx32 "\n", i, h->input_semantics[i].static_attribute);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: reserved         = %08" PRIx32 "\n", i, h->input_semantics[i].reserved);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: default_value    = %08" PRIx32 "\n", i, h->input_semantics[i].default_value);
+			KYTY_LOG_DEBUG("\t\t input_semantics[%d]: default_value_hi = %08" PRIx32 "\n", i, h->input_semantics[i].default_value_hi);
 	}
-	printf("\t num_output_semantics              = 0x%04" PRIx16 "\n", h->num_output_semantics);
-	printf("\t output_semantics                  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->output_semantics));
+			KYTY_LOG_DEBUG("\t num_output_semantics              = 0x%04" PRIx16 "\n", h->num_output_semantics);
+			KYTY_LOG_DEBUG("\t output_semantics                  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(h->output_semantics));
 	for (int i = 0; i < static_cast<int>(h->num_output_semantics); i++)
 	{
-		printf("\t\t output_semantics[%d]: semantic         = %08" PRIx32 "\n", i, h->output_semantics[i].semantic);
-		printf("\t\t output_semantics[%d]: hardware_mapping = %08" PRIx32 "\n", i, h->output_semantics[i].hardware_mapping);
-		printf("\t\t output_semantics[%d]: size_in_elements = %08" PRIx32 "\n", i, h->output_semantics[i].size_in_elements);
-		printf("\t\t output_semantics[%d]: is_f16           = %08" PRIx32 "\n", i, h->output_semantics[i].is_f16);
-		printf("\t\t output_semantics[%d]: is_flat_shaded   = %08" PRIx32 "\n", i, h->output_semantics[i].is_flat_shaded);
-		printf("\t\t output_semantics[%d]: is_linear        = %08" PRIx32 "\n", i, h->output_semantics[i].is_linear);
-		printf("\t\t output_semantics[%d]: is_custom        = %08" PRIx32 "\n", i, h->output_semantics[i].is_custom);
-		printf("\t\t output_semantics[%d]: static_vb_index  = %08" PRIx32 "\n", i, h->output_semantics[i].static_vb_index);
-		printf("\t\t output_semantics[%d]: static_attribute = %08" PRIx32 "\n", i, h->output_semantics[i].static_attribute);
-		printf("\t\t output_semantics[%d]: reserved         = %08" PRIx32 "\n", i, h->output_semantics[i].reserved);
-		printf("\t\t output_semantics[%d]: default_value    = %08" PRIx32 "\n", i, h->output_semantics[i].default_value);
-		printf("\t\t output_semantics[%d]: default_value_hi = %08" PRIx32 "\n", i, h->output_semantics[i].default_value_hi);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: semantic         = %08" PRIx32 "\n", i, h->output_semantics[i].semantic);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: hardware_mapping = %08" PRIx32 "\n", i, h->output_semantics[i].hardware_mapping);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: size_in_elements = %08" PRIx32 "\n", i, h->output_semantics[i].size_in_elements);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: is_f16           = %08" PRIx32 "\n", i, h->output_semantics[i].is_f16);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: is_flat_shaded   = %08" PRIx32 "\n", i, h->output_semantics[i].is_flat_shaded);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: is_linear        = %08" PRIx32 "\n", i, h->output_semantics[i].is_linear);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: is_custom        = %08" PRIx32 "\n", i, h->output_semantics[i].is_custom);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: static_vb_index  = %08" PRIx32 "\n", i, h->output_semantics[i].static_vb_index);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: static_attribute = %08" PRIx32 "\n", i, h->output_semantics[i].static_attribute);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: reserved         = %08" PRIx32 "\n", i, h->output_semantics[i].reserved);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: default_value    = %08" PRIx32 "\n", i, h->output_semantics[i].default_value);
+			KYTY_LOG_DEBUG("\t\t output_semantics[%d]: default_value_hi = %08" PRIx32 "\n", i, h->output_semantics[i].default_value_hi);
 	}
-	printf("\t header_size                       = 0x%08" PRIx32 "\n", h->header_size);
-	printf("\t shader_size                       = 0x%08" PRIx32 "\n", h->shader_size);
-	printf("\t embedded_constant_buffer_size_dqw = 0x%08" PRIx32 "\n", h->embedded_constant_buffer_size_dqw);
-	printf("\t target                            = 0x%08" PRIx32 "\n", h->target);
-	printf("\t scratch_size_dw_per_thread        = 0x%04" PRIx16 "\n", h->scratch_size_dw_per_thread);
-	printf("\t special_sizes_bytes               = 0x%04" PRIx16 "\n", h->special_sizes_bytes);
-	printf("\t type                              = 0x%02" PRIx8 "\n", h->type);
+			KYTY_LOG_DEBUG("\t header_size                       = 0x%08" PRIx32 "\n", h->header_size);
+			KYTY_LOG_DEBUG("\t shader_size                       = 0x%08" PRIx32 "\n", h->shader_size);
+			KYTY_LOG_DEBUG("\t embedded_constant_buffer_size_dqw = 0x%08" PRIx32 "\n", h->embedded_constant_buffer_size_dqw);
+			KYTY_LOG_DEBUG("\t target                            = 0x%08" PRIx32 "\n", h->target);
+			KYTY_LOG_DEBUG("\t scratch_size_dw_per_thread        = 0x%04" PRIx16 "\n", h->scratch_size_dw_per_thread);
+			KYTY_LOG_DEBUG("\t special_sizes_bytes               = 0x%04" PRIx16 "\n", h->special_sizes_bytes);
+			KYTY_LOG_DEBUG("\t type                              = 0x%02" PRIx8 "\n", h->type);
 }
 
 int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatile void* code)
@@ -1861,8 +1862,8 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 	EXIT_NOT_IMPLEMENTED(header == nullptr);
 	EXIT_NOT_IMPLEMENTED(code == nullptr);
 
-	printf("\t header = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(header));
-	printf("\t code   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(code));
+			KYTY_LOG_DEBUG("\t header = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(header));
+			KYTY_LOG_DEBUG("\t code   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(code));
 
 	auto* h = static_cast<Shader*>(header);
 
@@ -1899,7 +1900,7 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 
 	auto base = reinterpret_cast<uint64_t>(code);
 
-	printf("\t base   = 0x%016" PRIx64 "\n", base);
+			KYTY_LOG_DEBUG("\t base   = 0x%016" PRIx64 "\n", base);
 
 	ShaderMappedData map;
 	map.user_data           = h->user_data;
@@ -1938,7 +1939,7 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 		case kShaderBinaryHsFront:
 		case kShaderBinaryFs: needs_pgm = false; break;
 		default:
-			printf("\t SHADER DIAG: unknown type=%u num_sh_registers=%u\n", h->type, h->num_sh_registers);
+			KYTY_LOG_DEBUG("\t SHADER DIAG: unknown type=%u num_sh_registers=%u\n", h->type, h->num_sh_registers);
 			EXIT("invalid shader\n");
 	}
 
@@ -1976,11 +1977,11 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 		}
 		if (!patched)
 		{
-			printf("\t SHADER DIAG: type=%u num_sh_registers=%u missing PGM_LO=0x%x\n", h->type, h->num_sh_registers,
+			KYTY_LOG_WARN("\t SHADER DIAG: type=%u num_sh_registers=%u missing PGM_LO=0x%x\n", h->type, h->num_sh_registers,
 			       lo_offset);
 			for (uint32_t i = 0; i < h->num_sh_registers && i < 8; i++)
 			{
-				printf("\t   sh_reg[%u] offset=0x%x value=0x%x\n", i, h->sh_registers[i].offset, h->sh_registers[i].value);
+			KYTY_LOG_DEBUG("\t   sh_reg[%u] offset=0x%x value=0x%x\n", i, h->sh_registers[i].offset, h->sh_registers[i].value);
 			}
 			EXIT("invalid shader\n");
 		}
@@ -2036,9 +2037,9 @@ int KYTY_SYSV_ABI GraphicsUnknownGetFusedShaderSize(SizeAlign* dst, const Shader
 {
 	PRINT_NAME();
 
-	printf("\t dst   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst));
-	printf("\t front = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(front));
-	printf("\t back  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(back));
+			KYTY_LOG_DEBUG("\t dst   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst));
+			KYTY_LOG_DEBUG("\t front = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(front));
+			KYTY_LOG_DEBUG("\t back  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(back));
 
 	EXIT_NOT_IMPLEMENTED(dst == nullptr);
 	EXIT_NOT_IMPLEMENTED(front == nullptr);
@@ -2063,10 +2064,10 @@ int KYTY_SYSV_ABI GraphicsUnknownFuseShaderHalves(Shader* fused_result, const Sh
 {
 	PRINT_NAME();
 
-	printf("\t fused_result = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(fused_result));
-	printf("\t front        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(front));
-	printf("\t back         = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(back));
-	printf("\t scratch_mem  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(scratch_mem));
+			KYTY_LOG_DEBUG("\t fused_result = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(fused_result));
+			KYTY_LOG_DEBUG("\t front        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(front));
+			KYTY_LOG_DEBUG("\t back         = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(back));
+			KYTY_LOG_DEBUG("\t scratch_mem  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(scratch_mem));
 
 	EXIT_NOT_IMPLEMENTED(fused_result == nullptr);
 	EXIT_NOT_IMPLEMENTED(front == nullptr);
@@ -2141,8 +2142,8 @@ int KYTY_SYSV_ABI GraphicsSetCxRegIndirectPatchSetAddress(uint32_t* cmd, const v
 {
 	PRINT_NAME();
 
-	printf("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t regs = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
+			KYTY_LOG_DEBUG("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t regs = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 	EXIT_NOT_IMPLEMENTED(regs == nullptr);
@@ -2159,8 +2160,8 @@ int KYTY_SYSV_ABI GraphicsSetShRegIndirectPatchSetAddress(uint32_t* cmd, const v
 {
 	PRINT_NAME();
 
-	printf("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t regs = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
+			KYTY_LOG_DEBUG("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t regs = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 	EXIT_NOT_IMPLEMENTED(regs == nullptr);
@@ -2177,8 +2178,8 @@ int KYTY_SYSV_ABI GraphicsSetUcRegIndirectPatchSetAddress(uint32_t* cmd, const v
 {
 	PRINT_NAME();
 
-	printf("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t regs = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
+			KYTY_LOG_DEBUG("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t regs = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 	EXIT_NOT_IMPLEMENTED(regs == nullptr);
@@ -2195,8 +2196,8 @@ int KYTY_SYSV_ABI GraphicsSetCxRegIndirectPatchAddRegisters(uint32_t* cmd, uint3
 {
 	PRINT_NAME();
 
-	printf("\t cmd      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t num_regs = %" PRIu32 "\n", num_regs);
+			KYTY_LOG_DEBUG("\t cmd      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t num_regs = %" PRIu32 "\n", num_regs);
 
 	if (cmd == nullptr)
 	{
@@ -2216,8 +2217,8 @@ int KYTY_SYSV_ABI GraphicsSetShRegIndirectPatchAddRegisters(uint32_t* cmd, uint3
 {
 	PRINT_NAME();
 
-	printf("\t cmd      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t num_regs = %" PRIu32 "\n", num_regs);
+			KYTY_LOG_DEBUG("\t cmd      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t num_regs = %" PRIu32 "\n", num_regs);
 
 	if (cmd == nullptr)
 	{
@@ -2237,8 +2238,8 @@ int KYTY_SYSV_ABI GraphicsSetUcRegIndirectPatchAddRegisters(uint32_t* cmd, uint3
 {
 	PRINT_NAME();
 
-	printf("\t cmd      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t num_regs = %" PRIu32 "\n", num_regs);
+			KYTY_LOG_DEBUG("\t cmd      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t num_regs = %" PRIu32 "\n", num_regs);
 
 	if (cmd == nullptr)
 	{
@@ -2259,11 +2260,11 @@ int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegiste
 {
 	PRINT_NAME();
 
-	printf("\t cx_regs   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cx_regs));
-	printf("\t uc_regs   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(uc_regs));
-	printf("\t hs        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(hs));
-	printf("\t gs        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(gs));
-	printf("\t prim_type = %" PRIu32 "\n", prim_type);
+			KYTY_LOG_DEBUG("\t cx_regs   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cx_regs));
+			KYTY_LOG_DEBUG("\t uc_regs   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(uc_regs));
+			KYTY_LOG_DEBUG("\t hs        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(hs));
+			KYTY_LOG_DEBUG("\t gs        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(gs));
+			KYTY_LOG_DEBUG("\t prim_type = %" PRIu32 "\n", prim_type);
 
 	EXIT_NOT_IMPLEMENTED(hs != nullptr);
 	EXIT_NOT_IMPLEMENTED(gs == nullptr);
@@ -2499,9 +2500,9 @@ int KYTY_SYSV_ABI GraphicsCreateInterpolantMapping(ShaderRegister* regs, const S
 {
 	PRINT_NAME();
 
-	printf("\t regs = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
-	printf("\t gs   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(gs));
-	printf("\t ps   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ps));
+			KYTY_LOG_DEBUG("\t regs = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
+			KYTY_LOG_DEBUG("\t gs   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(gs));
+			KYTY_LOG_DEBUG("\t ps   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ps));
 
 	EXIT_NOT_IMPLEMENTED(regs == nullptr);
 	EXIT_NOT_IMPLEMENTED(ps != nullptr && ps->num_input_semantics != 0 && ps->input_semantics == nullptr);
@@ -2541,9 +2542,9 @@ int KYTY_SYSV_ABI GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t*
 {
 	PRINT_NAME();
 
-	printf("\t addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(addr));
-	printf("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t type = %d\n", type);
+			KYTY_LOG_DEBUG("\t addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(addr));
+			KYTY_LOG_DEBUG("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t type = %d\n", type);
 
 	EXIT_NOT_IMPLEMENTED(addr == nullptr);
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -2553,7 +2554,7 @@ int KYTY_SYSV_ABI GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t*
 
 	const uint32_t header = cmd[0];
 	const uint32_t r      = KYTY_PM4_R(header);
-	printf("\t header = 0x%08" PRIx32 " r = 0x%02" PRIx32 "\n", header, r);
+			KYTY_LOG_DEBUG("\t header = 0x%08" PRIx32 " r = 0x%02" PRIx32 "\n", header, r);
 
 	// WaitMem stores the 64-bit address in the first body dwords (cmd+1).
 	// ReleaseMem stores action/gcr then address at cmd+3 (matches EopPatch).
@@ -2662,8 +2663,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbNop(CommandBuffer* buf, uint32_t num_dw)
 {
 	PRINT_NAME();
 
-	printf("\t buf    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
-	printf("\t num_dw = %" PRIu32 "\n", num_dw);
+			KYTY_LOG_DEBUG("\t buf    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
+			KYTY_LOG_DEBUG("\t num_dw = %" PRIu32 "\n", num_dw);
 
 	if (buf == nullptr || num_dw < 2u || num_dw > 0x4001u)
 	{
@@ -2752,14 +2753,14 @@ uint64_t KYTY_SYSV_ABI GraphicsGetIsTrinityMode()
 int KYTY_SYSV_ABI GraphicsDebugRaiseException(uint32_t exception_id)
 {
 	PRINT_NAME();
-	printf("\t exception_id = 0x%08" PRIx32 "\n", exception_id);
+			KYTY_LOG_DEBUG("\t exception_id = 0x%08" PRIx32 "\n", exception_id);
 	return OK;
 }
 
 int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64_t address_or_offset)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), address_or_offset);
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), address_or_offset);
 
 	if (cmd == nullptr)
 	{
@@ -2785,7 +2786,7 @@ uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 {
 	PRINT_NAME();
 
-	printf("\t cmd = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
 
 	if (cmd == nullptr)
 	{
@@ -2793,7 +2794,7 @@ uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 	}
 
 	const uint32_t header = cmd[0];
-	printf("\t header = 0x%08" PRIx32 "\n", header);
+			KYTY_LOG_DEBUG("\t header = 0x%08" PRIx32 "\n", header);
 
 	if ((header >> 30u) != 3u)
 	{
@@ -2801,7 +2802,7 @@ uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 	}
 
 	const uint32_t size_dw = KYTY_PM4_LEN(header);
-	printf("\t size_dw = %" PRIu32 "\n", size_dw);
+			KYTY_LOG_DEBUG("\t size_dw = %" PRIu32 "\n", size_dw);
 	return size_dw;
 }
 
@@ -2810,7 +2811,7 @@ uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetDstAddressOrOffset(uint32_t* cmd, uint64_t destination_address)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " dst = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), destination_address);
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " dst = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), destination_address);
 
 	if (cmd == nullptr || !GraphicsIsCustomDmaDataPacket(cmd[0]))
 	{
@@ -2825,7 +2826,7 @@ int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetDstAddressOrOffset(uint32_t* cmd, ui
 int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(uint32_t* cmd, uint64_t source_value)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " src = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), source_value);
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " src = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), source_value);
 
 	if (cmd == nullptr || !GraphicsIsCustomDmaDataPacket(cmd[0]))
 	{
@@ -2841,7 +2842,7 @@ int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(uint32
 int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t address)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), address);
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), address);
 
 	if (cmd == nullptr)
 	{
@@ -2876,7 +2877,7 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t addr
 int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchCompareFunction(uint32_t* cmd, uint32_t compare_function)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " compare_function = %" PRIu32 "\n", reinterpret_cast<uint64_t>(cmd), compare_function);
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " compare_function = %" PRIu32 "\n", reinterpret_cast<uint64_t>(cmd), compare_function);
 
 	if (cmd == nullptr || compare_function > 7u)
 	{
@@ -2901,7 +2902,7 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchCompareFunction(uint32_t* cmd, uint3
 int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchReference(uint32_t* cmd, uint64_t reference)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " reference = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), reference);
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " reference = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), reference);
 
 	if (cmd == nullptr)
 	{
@@ -2928,7 +2929,7 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchReference(uint32_t* cmd, uint64_t re
 int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchMask(uint32_t* cmd, uint64_t mask)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " mask = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), mask);
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " mask = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), mask);
 
 	if (cmd == nullptr)
 	{
@@ -2955,7 +2956,7 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchMask(uint32_t* cmd, uint64_t mask)
 int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchGcrCntl(uint32_t* cmd, uint32_t gcr_cntl)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " gcr_cntl = 0x%04" PRIx32 "\n", reinterpret_cast<uint64_t>(cmd), gcr_cntl & 0xffffu);
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " gcr_cntl = 0x%04" PRIx32 "\n", reinterpret_cast<uint64_t>(cmd), gcr_cntl & 0xffffu);
 
 	if (cmd == nullptr || !GraphicsIsAgcReleaseMemPacket(cmd[0]))
 	{
@@ -2970,7 +2971,7 @@ int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchGcrCntl(uint32_t* cmd, uin
 int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchData(uint32_t* cmd, uint64_t data)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " data = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), data);
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " data = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), data);
 
 	if (cmd == nullptr || !GraphicsIsAgcReleaseMemPacket(cmd[0]))
 	{
@@ -2986,7 +2987,7 @@ int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchData(uint32_t* cmd, uint64
 int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchType(uint32_t* cmd, uint32_t data_selection)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " data_selection = %" PRIu32 "\n", reinterpret_cast<uint64_t>(cmd), data_selection);
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " data_selection = %" PRIu32 "\n", reinterpret_cast<uint64_t>(cmd), data_selection);
 
 	if (cmd == nullptr || data_selection > 3u || !GraphicsIsAgcReleaseMemPacket(cmd[0]))
 	{
@@ -3032,7 +3033,7 @@ static int GraphicsWriteDataPatchControlByte(uint32_t* cmd, uint32_t value, uint
 int KYTY_SYSV_ABI GraphicsWriteDataPatchSetCachePolicy(uint32_t* cmd, uintptr_t arg1)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " arg1 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd),
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " arg1 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd),
 	       static_cast<uint64_t>(arg1));
 
 	uint32_t* packet = nullptr;
@@ -3048,7 +3049,7 @@ int KYTY_SYSV_ABI GraphicsWriteDataPatchSetCachePolicy(uint32_t* cmd, uintptr_t 
 int KYTY_SYSV_ABI GraphicsWriteDataPatchSetDst(uint32_t* cmd, uintptr_t arg1)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " arg1 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd),
+			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " arg1 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd),
 	       static_cast<uint64_t>(arg1));
 
 	uint32_t* packet = nullptr;
@@ -3084,10 +3085,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, u
 {
 	PRINT_NAME();
 
-	printf("\t buf        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
-	printf("\t offset     = %" PRIx32 "\n", offset);
-	printf("\t values     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(values));
-	printf("\t num_values = %" PRIu32 "\n", num_values);
+			KYTY_LOG_DEBUG("\t buf        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
+			KYTY_LOG_DEBUG("\t offset     = %" PRIx32 "\n", offset);
+			KYTY_LOG_DEBUG("\t values     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(values));
+			KYTY_LOG_DEBUG("\t num_values = %" PRIu32 "\n", num_values);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED(num_values == 0);
@@ -3122,9 +3123,9 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegistersDirect(CommandBuffer* buf, const
 {
 	PRINT_NAME();
 
-	printf("\t buf      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
-	printf("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
-	printf("\t num_regs = %" PRIu32 "\n", num_regs);
+			KYTY_LOG_DEBUG("\t buf      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buf));
+			KYTY_LOG_DEBUG("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
+			KYTY_LOG_DEBUG("\t num_regs = %" PRIu32 "\n", num_regs);
 
 	if (buf == nullptr || regs == nullptr || num_regs == 0 || num_regs > 4096)
 	{
@@ -3183,17 +3184,17 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 {
 	PRINT_NAME();
 
-	printf("\t action           = 0x%02" PRIx8 "\n", action);
-	printf("\t gcr_cntl         = 0x%04" PRIx16 "\n", gcr_cntl);
-	printf("\t dst              = %" PRIu8 "\n", dst);
-	printf("\t cache_policy     = 0x%02" PRIx8 "\n", cache_policy);
-	printf("\t address          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
-	printf("\t data_sel         = 0x%02" PRIx8 "\n", data_sel);
-	printf("\t data             = 0x%016" PRIx64 "\n", data);
-	printf("\t gds_offset       = %" PRIu16 "\n", gds_offset);
-	printf("\t gds_size         = %" PRIu16 "\n", gds_size);
-	printf("\t interrupt        = 0x%02" PRIx8 "\n", interrupt);
-	printf("\t interrupt_ctx_id = %" PRIu32 "\n", interrupt_ctx_id);
+			KYTY_LOG_DEBUG("\t action           = 0x%02" PRIx8 "\n", action);
+			KYTY_LOG_DEBUG("\t gcr_cntl         = 0x%04" PRIx16 "\n", gcr_cntl);
+			KYTY_LOG_DEBUG("\t dst              = %" PRIu8 "\n", dst);
+			KYTY_LOG_DEBUG("\t cache_policy     = 0x%02" PRIx8 "\n", cache_policy);
+			KYTY_LOG_DEBUG("\t address          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
+			KYTY_LOG_DEBUG("\t data_sel         = 0x%02" PRIx8 "\n", data_sel);
+			KYTY_LOG_DEBUG("\t data             = 0x%016" PRIx64 "\n", data);
+			KYTY_LOG_DEBUG("\t gds_offset       = %" PRIu16 "\n", gds_offset);
+			KYTY_LOG_DEBUG("\t gds_size         = %" PRIu16 "\n", gds_size);
+			KYTY_LOG_DEBUG("\t interrupt        = 0x%02" PRIx8 "\n", interrupt);
+			KYTY_LOG_DEBUG("\t interrupt_ctx_id = %" PRIu32 "\n", interrupt_ctx_id);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	// dst: 0 = memory, 1 = TC_L2 (Gen5 AGC).
@@ -3236,8 +3237,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbResetQueue(CommandBuffer* buf, uint32_t op, u
 {
 	PRINT_NAME();
 
-	printf("\t op    = 0x%08" PRIx32 "\n", op);
-	printf("\t state = 0x%08" PRIx32 "\n", state);
+			KYTY_LOG_DEBUG("\t op    = 0x%08" PRIx32 "\n", op);
+			KYTY_LOG_DEBUG("\t state = 0x%08" PRIx32 "\n", state);
 
 	// Gen5 sce::Agc::DrawCommandBuffer::resetQueue: 12-bit op mask and a small
 	// state selector. Emit IT_CLEAR_STATE with the low 4 bits of state.
@@ -3260,8 +3261,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitUntilSafeForRendering(CommandBuffer* buf,
 {
 	PRINT_NAME();
 
-	printf("\t video_out_handle     = %" PRIu32 "\n", video_out_handle);
-	printf("\t display_buffer_index = %" PRIu32 "\n", display_buffer_index);
+			KYTY_LOG_DEBUG("\t video_out_handle     = %" PRIu32 "\n", video_out_handle);
+			KYTY_LOG_DEBUG("\t display_buffer_index = %" PRIu32 "\n", display_buffer_index);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 
@@ -3286,8 +3287,8 @@ int KYTY_SYSV_ABI GraphicsDriverRegisterWorkloadStream(uint32_t stream_id, const
 {
 	PRINT_NAME();
 
-	printf("\t stream_id = %" PRIu32 "\n", stream_id);
-	printf("\t stream    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(stream));
+			KYTY_LOG_DEBUG("\t stream_id = %" PRIu32 "\n", stream_id);
+			KYTY_LOG_DEBUG("\t stream    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(stream));
 
 	if (stream_id < WORKLOAD_STREAM_MIN_ID || stream_id > WORKLOAD_STREAM_MAX_ID)
 	{
@@ -3319,9 +3320,9 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetWorkloadsActive(CommandBuffer* buf, uint32
 {
 	PRINT_NAME();
 
-	printf("\t stream_id      = %" PRIu32 "\n", stream_id);
-	printf("\t workload_ids   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(workload_ids));
-	printf("\t workload_count = %" PRIu32 "\n", workload_count);
+			KYTY_LOG_DEBUG("\t stream_id      = %" PRIu32 "\n", stream_id);
+			KYTY_LOG_DEBUG("\t workload_ids   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(workload_ids));
+			KYTY_LOG_DEBUG("\t workload_count = %" PRIu32 "\n", workload_count);
 
 	if (buf == nullptr || workload_ids == nullptr || workload_count == 0 || workload_count > WORKLOAD_ACTIVE_COUNT_MAX ||
 	    stream_id < WORKLOAD_STREAM_MIN_ID || stream_id > WORKLOAD_STREAM_MAX_ID)
@@ -3375,8 +3376,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetWorkloadComplete(CommandBuffer* buf, uint3
 {
 	PRINT_NAME();
 
-	printf("\t stream_id   = %" PRIu32 "\n", stream_id);
-	printf("\t workload_id = %" PRIu32 "\n", workload_id);
+			KYTY_LOG_DEBUG("\t stream_id   = %" PRIu32 "\n", stream_id);
+			KYTY_LOG_DEBUG("\t workload_id = %" PRIu32 "\n", workload_id);
 
 	if (buf == nullptr || stream_id < WORKLOAD_STREAM_MIN_ID || stream_id > WORKLOAD_STREAM_MAX_ID || workload_id > WORKLOAD_ID_MAX)
 	{
@@ -3472,8 +3473,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirect(CommandBuffer* buf, co
 {
 	PRINT_NAME();
 
-	printf("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
-	printf("\t num_regs = %" PRIu32 "\n", num_regs);
+			KYTY_LOG_DEBUG("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
+			KYTY_LOG_DEBUG("\t num_regs = %" PRIu32 "\n", num_regs);
 
 	if (buf == nullptr)
 	{
@@ -3500,8 +3501,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirect(CommandBuffer* buf, co
 {
 	PRINT_NAME();
 
-	printf("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
-	printf("\t num_regs = %" PRIu32 "\n", num_regs);
+			KYTY_LOG_DEBUG("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
+			KYTY_LOG_DEBUG("\t num_regs = %" PRIu32 "\n", num_regs);
 
 	if (buf == nullptr)
 	{
@@ -3528,8 +3529,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirect(CommandBuffer* buf, co
 {
 	PRINT_NAME();
 
-	printf("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
-	printf("\t num_regs = %" PRIu32 "\n", num_regs);
+			KYTY_LOG_DEBUG("\t regs     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(regs));
+			KYTY_LOG_DEBUG("\t num_regs = %" PRIu32 "\n", num_regs);
 
 	if (buf == nullptr)
 	{
@@ -3556,8 +3557,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t inde
 {
 	PRINT_NAME();
 
-	printf("\t index_size   = 0x%" PRIx8 "\n", index_size);
-	printf("\t cache_policy = 0x%" PRIx8 "\n", cache_policy);
+			KYTY_LOG_DEBUG("\t index_size   = 0x%" PRIx8 "\n", index_size);
+			KYTY_LOG_DEBUG("\t cache_policy = 0x%" PRIx8 "\n", cache_policy);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED(cache_policy != 0);
@@ -3586,8 +3587,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 {
 	PRINT_NAME();
 
-	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
-	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+			KYTY_LOG_DEBUG("\t index_count = 0x%" PRIx32 "\n", index_count);
+			KYTY_LOG_DEBUG("\t modifier    = 0x%016" PRIx64 "\n", modifier);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED(!draw_index_auto_modifier_supported(modifier));
@@ -3614,9 +3615,9 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoWithBase(CommandBuffer* buf, uin
 {
 	PRINT_NAME();
 
-	printf("\t base_vertex = 0x%" PRIx32 "\n", base_vertex);
-	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
-	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+			KYTY_LOG_DEBUG("\t base_vertex = 0x%" PRIx32 "\n", base_vertex);
+			KYTY_LOG_DEBUG("\t index_count = 0x%" PRIx32 "\n", index_count);
+			KYTY_LOG_DEBUG("\t modifier    = 0x%016" PRIx64 "\n", modifier);
 
 	// Not registered under B+aG9DUnTKA (that NID is sceAgcDcbDrawIndexOffset).
 	// Keep helper for a future evidenced Auto-with-base NID; base_vertex==0 only.
@@ -3631,9 +3632,9 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t 
 {
 	PRINT_NAME();
 
-	printf("\t index_offset = 0x%" PRIx32 "\n", index_offset);
-	printf("\t index_count  = 0x%" PRIx32 "\n", index_count);
-	printf("\t flags        = 0x%" PRIx32 "\n", flags);
+			KYTY_LOG_DEBUG("\t index_offset = 0x%" PRIx32 "\n", index_offset);
+			KYTY_LOG_DEBUG("\t index_count  = 0x%" PRIx32 "\n", index_count);
+			KYTY_LOG_DEBUG("\t flags        = 0x%" PRIx32 "\n", flags);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 
@@ -3656,9 +3657,9 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_
 {
 	PRINT_NAME();
 
-	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
-	printf("\t index_addr  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
-	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+			KYTY_LOG_DEBUG("\t index_count = 0x%" PRIx32 "\n", index_count);
+			KYTY_LOG_DEBUG("\t index_addr  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
+			KYTY_LOG_DEBUG("\t modifier    = 0x%016" PRIx64 "\n", modifier);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED(!draw_index_auto_modifier_supported(modifier));
@@ -3686,8 +3687,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_
 {
 	PRINT_NAME();
 
-	printf("\t event_type = 0x%02" PRIx8 "\n", event_type);
-	printf("\t address    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
+			KYTY_LOG_DEBUG("\t event_type = 0x%02" PRIx8 "\n", event_type);
+			KYTY_LOG_DEBUG("\t address    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED(address != nullptr);
@@ -3728,13 +3729,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t destinati
 {
 	// sceAgcDcbDmaData / sceAgcAcbDmaData custom R_DMA_DATA packet layout.
 	PRINT_NAME();
-	printf("\t destination              = 0x%02" PRIx8 "\n", destination);
-	printf("\t destination_cache_policy = 0x%02" PRIx8 "\n", destination_cache_policy);
-	printf("\t source                   = 0x%02" PRIx8 "\n", source);
-	printf("\t destination_address      = 0x%016" PRIx64 "\n", destination_address);
-	printf("\t source_cache_policy      = 0x%02" PRIx8 "\n", source_cache_policy);
-	printf("\t source_address           = 0x%016" PRIx64 "\n", source_address);
-	printf("\t byte_count               = %" PRIu32 "\n", byte_count);
+			KYTY_LOG_DEBUG("\t destination              = 0x%02" PRIx8 "\n", destination);
+			KYTY_LOG_DEBUG("\t destination_cache_policy = 0x%02" PRIx8 "\n", destination_cache_policy);
+			KYTY_LOG_DEBUG("\t source                   = 0x%02" PRIx8 "\n", source);
+			KYTY_LOG_DEBUG("\t destination_address      = 0x%016" PRIx64 "\n", destination_address);
+			KYTY_LOG_DEBUG("\t source_cache_policy      = 0x%02" PRIx8 "\n", source_cache_policy);
+			KYTY_LOG_DEBUG("\t source_address           = 0x%016" PRIx64 "\n", source_address);
+			KYTY_LOG_DEBUG("\t byte_count               = %" PRIu32 "\n", byte_count);
 
 	if (buf == nullptr || byte_count == 0 || (byte_count & 3u) != 0)
 	{
@@ -3763,12 +3764,12 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
 {
 	PRINT_NAME();
 
-	printf("\t engine      = 0x%02" PRIx8 "\n", engine);
-	printf("\t cb_db_op    = 0x%08" PRIx32 "\n", cb_db_op);
-	printf("\t gcr_cntl    = 0x%08" PRIx32 "\n", gcr_cntl);
-	printf("\t base        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
-	printf("\t size_bytes  = 0x%016" PRIx64 "\n", size_bytes);
-	printf("\t poll_cycles = %" PRIu32 "\n", poll_cycles);
+			KYTY_LOG_DEBUG("\t engine      = 0x%02" PRIx8 "\n", engine);
+			KYTY_LOG_DEBUG("\t cb_db_op    = 0x%08" PRIx32 "\n", cb_db_op);
+			KYTY_LOG_DEBUG("\t gcr_cntl    = 0x%08" PRIx32 "\n", gcr_cntl);
+			KYTY_LOG_DEBUG("\t base        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
+			KYTY_LOG_DEBUG("\t size_bytes  = 0x%016" PRIx64 "\n", size_bytes);
+			KYTY_LOG_DEBUG("\t poll_cycles = %" PRIu32 "\n", poll_cycles);
 
 	bool no_size = (static_cast<int64_t>(size_bytes) == -1);
 	auto vaddr   = reinterpret_cast<uint64_t>(base);
@@ -3779,12 +3780,12 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
 	// acceptable for our coherency model — warn instead of aborting.
 	if (!no_size && (size_bytes & 0xffu) != 0)
 	{
-		printf("\t WARNING: ACQUIRE_MEM size 0x%" PRIx64 " not 256B-aligned\n", size_bytes);
+			KYTY_LOG_DEBUG("\t WARNING: ACQUIRE_MEM size 0x%" PRIx64 " not 256B-aligned\n", size_bytes);
 	}
 	EXIT_NOT_IMPLEMENTED(!no_size && (size_bytes >> 40u) != 0);
 	if ((vaddr & 0xffu) != 0)
 	{
-		printf("\t WARNING: ACQUIRE_MEM base 0x%" PRIx64 " not 256B-aligned\n", vaddr);
+			KYTY_LOG_DEBUG("\t WARNING: ACQUIRE_MEM base 0x%" PRIx64 " not 256B-aligned\n", vaddr);
 	}
 	EXIT_NOT_IMPLEMENTED((vaddr >> 40u) != 0);
 	EXIT_NOT_IMPLEMENTED(engine > 1);
@@ -3833,8 +3834,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetBaseIndirectArgs(CommandBuffer* buf, uint3
 {
 	PRINT_NAME();
 
-	printf("\t base_index = %" PRIu32 "\n", base_index);
-	printf("\t address    = 0x%016" PRIx64 "\n", address);
+			KYTY_LOG_DEBUG("\t base_index = %" PRIu32 "\n", base_index);
+			KYTY_LOG_DEBUG("\t address    = 0x%016" PRIx64 "\n", address);
 
 	if (buf == nullptr)
 	{
@@ -3860,8 +3861,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t
 {
 	PRINT_NAME();
 
-	printf("\t data_offset = %" PRIu32 "\n", data_offset);
-	printf("\t modifier    = 0x%08" PRIx32 "\n", modifier);
+			KYTY_LOG_DEBUG("\t data_offset = %" PRIu32 "\n", data_offset);
+			KYTY_LOG_DEBUG("\t modifier    = 0x%08" PRIx32 "\n", modifier);
 
 	if (buf == nullptr)
 	{
@@ -3936,8 +3937,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_
 {
 	PRINT_NAME();
 
-	printf("\t data_offset = 0x%" PRIx32 "\n", data_offset_in_bytes);
-	printf("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+			KYTY_LOG_DEBUG("\t data_offset = 0x%" PRIx32 "\n", data_offset_in_bytes);
+			KYTY_LOG_DEBUG("\t modifier    = 0x%016" PRIx64 "\n", modifier);
 
 	if (buf == nullptr)
 	{
@@ -3966,13 +3967,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, ui
 {
 	PRINT_NAME();
 
-	printf("\t dst               = 0x%02" PRIx8 "\n", dst);
-	printf("\t cache_policy      = 0x%02" PRIx8 "\n", cache_policy);
-	printf("\t address_or_offset = 0x%016" PRIx64 "\n", address_or_offset);
-	printf("\t data              = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(data));
-	printf("\t num_dwords        = %" PRIu32 "\n", num_dwords);
-	printf("\t increment         = 0x%02" PRIx8 "\n", increment);
-	printf("\t write_confirm     = 0x%02" PRIx8 "\n", write_confirm);
+			KYTY_LOG_DEBUG("\t dst               = 0x%02" PRIx8 "\n", dst);
+			KYTY_LOG_DEBUG("\t cache_policy      = 0x%02" PRIx8 "\n", cache_policy);
+			KYTY_LOG_DEBUG("\t address_or_offset = 0x%016" PRIx64 "\n", address_or_offset);
+			KYTY_LOG_DEBUG("\t data              = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(data));
+			KYTY_LOG_DEBUG("\t num_dwords        = %" PRIu32 "\n", num_dwords);
+			KYTY_LOG_DEBUG("\t increment         = 0x%02" PRIx8 "\n", increment);
+			KYTY_LOG_DEBUG("\t write_confirm     = 0x%02" PRIx8 "\n", write_confirm);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED((4 + num_dwords - 2u) > 0x3fffu);
@@ -4002,14 +4003,14 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 {
 	PRINT_NAME();
 
-	printf("\t size             = 0x%02" PRIx8 "\n", size);
-	printf("\t compare_function = 0x%02" PRIx8 "\n", compare_function);
-	printf("\t op               = 0x%02" PRIx8 "\n", op);
-	printf("\t cache_policy     = 0x%02" PRIx8 "\n", cache_policy);
-	printf("\t address          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
-	printf("\t reference        = 0x%016" PRIx64 "\n", reference);
-	printf("\t mask             = 0x%016" PRIx64 "\n", mask);
-	printf("\t poll_cycles      = %" PRIu32 "\n", poll_cycles);
+			KYTY_LOG_DEBUG("\t size             = 0x%02" PRIx8 "\n", size);
+			KYTY_LOG_DEBUG("\t compare_function = 0x%02" PRIx8 "\n", compare_function);
+			KYTY_LOG_DEBUG("\t op               = 0x%02" PRIx8 "\n", op);
+			KYTY_LOG_DEBUG("\t cache_policy     = 0x%02" PRIx8 "\n", cache_policy);
+			KYTY_LOG_DEBUG("\t address          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
+			KYTY_LOG_DEBUG("\t reference        = 0x%016" PRIx64 "\n", reference);
+			KYTY_LOG_DEBUG("\t mask             = 0x%016" PRIx64 "\n", mask);
+			KYTY_LOG_DEBUG("\t poll_cycles      = %" PRIu32 "\n", poll_cycles);
 
 	if (buf == nullptr || size > 1 || compare_function > 7 || op > 4 || cache_policy > 3)
 	{
@@ -4083,7 +4084,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbAcquireMem(CommandBuffer* buf, uint32_t gcr_c
 uint32_t* KYTY_SYSV_ABI GraphicsAcbResetQueue(CommandBuffer* buf, uint32_t op)
 {
 	PRINT_NAME();
-	printf("\t op = 0x%08" PRIx32 "\n", op);
+			KYTY_LOG_DEBUG("\t op = 0x%08" PRIx32 "\n", op);
 
 	if (buf == nullptr || (op & ~0x1c2u) != 0)
 	{
@@ -4106,7 +4107,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbCopyData(CommandBuffer* buf, uint8_t dst, uin
                                             uint8_t write_confirm)
 {
 	PRINT_NAME();
-	printf("\t dst=0x%02" PRIx8 " src=0x%02" PRIx8 " dst_addr=0x%016" PRIx64 " src=0x%016" PRIx64 " item=%u conf=%u\n", dst, src,
+			KYTY_LOG_DEBUG("\t dst=0x%02" PRIx8 " src=0x%02" PRIx8 " dst_addr=0x%016" PRIx64 " src=0x%016" PRIx64 " item=%u conf=%u\n", dst, src,
 	       dst_address, src_address_or_immediate, item_size, write_confirm);
 
 	if (buf == nullptr)
@@ -4198,7 +4199,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbPopMarker(CommandBuffer* buf)
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t index_addr)
 {
 	PRINT_NAME();
-	printf("\t index_addr = 0x%016" PRIx64 "\n", index_addr);
+			KYTY_LOG_DEBUG("\t index_addr = 0x%016" PRIx64 "\n", index_addr);
 
 	if (buf == nullptr || (index_addr & 1u) != 0)
 	{
@@ -4220,7 +4221,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t i
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count)
 {
 	PRINT_NAME();
-	printf("\t index_count = 0x%" PRIx32 "\n", index_count);
+			KYTY_LOG_DEBUG("\t index_count = 0x%" PRIx32 "\n", index_count);
 
 	if (buf == nullptr)
 	{
@@ -4241,7 +4242,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t in
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances)
 {
 	PRINT_NAME();
-	printf("\t num_instances = 0x%" PRIx32 "\n", num_instances);
+			KYTY_LOG_DEBUG("\t num_instances = 0x%" PRIx32 "\n", num_instances);
 
 	if (buf == nullptr)
 	{
@@ -4264,7 +4265,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbGetLodStats(CommandBuffer* buf, uint8_t cache
                                                uint8_t report_and_reset, uint32_t reporting_interval_in_100k_clocks)
 {
 	PRINT_NAME();
-	printf("\t buffer = 0x%016" PRIx64 " size = %" PRIu32 "\n", reinterpret_cast<uint64_t>(buffer), buffer_size_in_bytes);
+			KYTY_LOG_DEBUG("\t buffer = 0x%016" PRIx64 " size = %" PRIu32 "\n", reinterpret_cast<uint64_t>(buffer), buffer_size_in_bytes);
 
 	if (buf == nullptr)
 	{
@@ -4294,10 +4295,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_ou
 {
 	PRINT_NAME();
 
-	printf("\t video_out_handle     = %" PRIu32 "\n", video_out_handle);
-	printf("\t display_buffer_index = %" PRId32 "\n", display_buffer_index);
-	printf("\t flip_mode            = %" PRIu32 "\n", flip_mode);
-	printf("\t flip_arg             = %" PRId64 "\n", flip_arg);
+			KYTY_LOG_DEBUG("\t video_out_handle     = %" PRIu32 "\n", video_out_handle);
+			KYTY_LOG_DEBUG("\t display_buffer_index = %" PRId32 "\n", display_buffer_index);
+			KYTY_LOG_DEBUG("\t flip_mode            = %" PRIu32 "\n", flip_mode);
+			KYTY_LOG_DEBUG("\t flip_arg             = %" PRId64 "\n", flip_arg);
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 
@@ -4483,8 +4484,8 @@ int KYTY_SYSV_ABI GraphicsDriverSetTFRing(const volatile void* base, uint32_t si
 	PRINT_NAME();
 	g_tf_ring_base.store(reinterpret_cast<uint64_t>(base), std::memory_order_release);
 	g_tf_ring_size.store(size, std::memory_order_release);
-	printf("\t base = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
-	printf("\t size = 0x%08" PRIx32 "\n", size);
+			KYTY_LOG_DEBUG("\t base = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
+			KYTY_LOG_DEBUG("\t size = 0x%08" PRIx32 "\n", size);
 	return OK;
 }
 
@@ -4494,9 +4495,9 @@ int KYTY_SYSV_ABI GraphicsDriverSetHsOffchipParam(uint64_t value0, uint64_t valu
 	g_hs_offchip_value0.store(value0, std::memory_order_release);
 	g_hs_offchip_value1.store(value1, std::memory_order_release);
 	g_hs_offchip_value2.store(value2, std::memory_order_release);
-	printf("\t value0 = 0x%016" PRIx64 "\n", value0);
-	printf("\t value1 = 0x%016" PRIx64 "\n", value1);
-	printf("\t value2 = 0x%016" PRIx64 "\n", value2);
+			KYTY_LOG_DEBUG("\t value0 = 0x%016" PRIx64 "\n", value0);
+			KYTY_LOG_DEBUG("\t value1 = 0x%016" PRIx64 "\n", value1);
+			KYTY_LOG_DEBUG("\t value2 = 0x%016" PRIx64 "\n", value2);
 	return OK;
 }
 
@@ -4525,8 +4526,8 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitDcb(const Packet* packet)
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
-	printf("\t addr   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet->addr));
-	printf("\t dw_num = 0x%08" PRIx32 "\n", packet->dw_num);
+			KYTY_LOG_DEBUG("\t addr   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet->addr));
+			KYTY_LOG_DEBUG("\t dw_num = 0x%08" PRIx32 "\n", packet->dw_num);
 
 	return SubmitDcbBuffer(packet->addr, packet->dw_num);
 }
@@ -4559,16 +4560,16 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs, 
 int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
 {
 	PRINT_NAME();
-	printf("\t queue  = 0x%08" PRIx32 "\n", queue);
-	printf("\t packet = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet));
+			KYTY_LOG_DEBUG("\t queue  = 0x%08" PRIx32 "\n", queue);
+			KYTY_LOG_DEBUG("\t packet = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet));
 
 	if (packet == nullptr)
 	{
 		return OK;
 	}
 
-	printf("\t acb    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet->addr));
-	printf("\t dw_num = 0x%08" PRIx32 "\n", packet->dw_num);
+			KYTY_LOG_DEBUG("\t acb    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet->addr));
+			KYTY_LOG_DEBUG("\t dw_num = 0x%08" PRIx32 "\n", packet->dw_num);
 
 	// Queue-indexed compute submit is not fully modeled yet. Execute the ACB
 	// through the existing command processor so WaitRegMem/ReleaseMem packets

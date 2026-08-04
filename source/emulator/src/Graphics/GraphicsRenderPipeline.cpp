@@ -702,13 +702,13 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 							std::fwrite(words.GetDataConst(), sizeof(uint32_t), static_cast<size_t>(words.Size()), f);
 						}
 						std::fclose(f);
-						std::fprintf(stderr, "KYTY_PIPELINE_FAIL_DUMP wrote %s words=%u\n", path,
+						KYTY_LOG_DEBUG( "KYTY_PIPELINE_FAIL_DUMP wrote %s words=%u\n", path,
 						             static_cast<unsigned>(words.Size()));
 					}
 				};
 				write_spv("fail_vs", vs_shader);
 				write_spv("fail_ps", ps_shader);
-				std::fprintf(stderr,
+				KYTY_LOG_DEBUG(
 				             "KYTY_PIPELINE_FAIL_DUMP result=%d vs_words=%u ps_words=%u stages=%u color_targets=%u depth=%d\n",
 				             static_cast<int>(create_result), static_cast<unsigned>(vs_shader.Size()),
 				             static_cast<unsigned>(ps_shader.Size()), has_fragment_stage ? 2u : 1u,
@@ -824,7 +824,7 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 						std::fwrite(cs_shader.GetDataConst(), sizeof(uint32_t), static_cast<size_t>(cs_shader.Size()), f);
 					}
 					std::fclose(f);
-					std::fprintf(stderr, "KYTY_PIPELINE_FAIL_DUMP wrote %s words=%u result=%d\n", path,
+					KYTY_LOG_DEBUG( "KYTY_PIPELINE_FAIL_DUMP wrote %s words=%u result=%d\n", path,
 					             static_cast<unsigned>(cs_shader.Size()), static_cast<int>(create_result));
 				}
 			}
@@ -1256,7 +1256,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	EXIT_IF(vs_translation.binary.IsEmpty());
 	if (ps_input_info->stage_enabled && ps_translation.binary.IsEmpty())
 	{
-		std::fprintf(stderr,
+		KYTY_LOG_DEBUG(
 		             "Pixel shader translation returned no binary: addr=0x%016" PRIx64 " checksum=0x%016" PRIx64 " hash=0x%08" PRIx32
 		             " crc=0x%08" PRIx32 " ids=%u cache_hit=%u\n",
 		             ps_regs.ps_regs.data_addr, ps_regs.ps_regs.chksum, ps_id.hash0, ps_id.crc32, static_cast<uint32_t>(ps_id.ids.Size()),

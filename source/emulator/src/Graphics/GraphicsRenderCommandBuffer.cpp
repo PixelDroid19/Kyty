@@ -280,9 +280,8 @@ void CommandBuffer::Execute()
 		// Bounded submit ring for DEVICE_LOST triage (slot that later fails wait).
 		if (const char* submit_log = std::getenv("KYTY_SUBMIT_LOG"); submit_log != nullptr && submit_log[0] != '\0')
 		{
-			std::fprintf(stderr, "KYTY_SUBMIT slot=%" PRIu32 " queue=%d fence=%p frame=%d\n", m_index, m_queue, static_cast<void*>(fence),
+			KYTY_LOG_DEBUG( "KYTY_SUBMIT slot=%" PRIu32 " queue=%d fence=%p frame=%d\n", m_index, m_queue, static_cast<void*>(fence),
 			             GraphicsRunGetFrameNum());
-			std::fflush(stderr);
 		}
 		auto result = vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence);
 		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
@@ -391,9 +390,8 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 		if (wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT)
 		{
 			// Bounded diagnostic: classify device-lost vs other fence failures.
-			std::fprintf(stderr, "ERROR: vkWaitForFences wait_result=%d slot=%" PRIu32 " after %" PRId64 "ns\n",
+			KYTY_LOG_ERROR("ERROR: vkWaitForFences wait_result=%d slot=%" PRIu32 " after %" PRId64 "ns\n",
 			             static_cast<int>(wait_result), m_index, static_cast<int64_t>(wait_ns));
-			std::fflush(stderr);
 		}
 		EXIT_NOT_IMPLEMENTED(wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT);
 		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));

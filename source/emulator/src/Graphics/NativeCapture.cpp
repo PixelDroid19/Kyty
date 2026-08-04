@@ -2,6 +2,7 @@
 
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Host/Platform.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -51,7 +52,7 @@ void NativeCaptureState::Configure(uint64_t now_ms)
 		keep_files = 8;
 	}
 
-	std::fprintf(stderr, "KYTY_NATIVE_CAPTURE_CONFIG enabled=1 first=%d every=%u trigger=%d max_edge=%u keep=%u\n", first_present ? 1 : 0,
+	KYTY_LOG_DEBUG( "KYTY_NATIVE_CAPTURE_CONFIG enabled=1 first=%d every=%u trigger=%d max_edge=%u keep=%u\n", first_present ? 1 : 0,
 	             every_present, trigger_file.empty() ? 0 : 1, max_edge, keep_files);
 }
 

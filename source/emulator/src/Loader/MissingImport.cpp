@@ -6,6 +6,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Agent/AgentLifecycle.h"
+#include "Emulator/Log.h"
 
 #include <atomic>
 #include <cstdio>
@@ -156,22 +157,20 @@ public:
 		const bool allow_new = policy.feature_enabled && policy.report == Core::BringUp::Decision::Continue;
 		if (!allow_new)
 		{
-			std::fprintf(stderr,
+			KYTY_LOG_ERROR(
 			             "KYTY_BRINGUP: missing Func import policy halt on NEW slot "
 			             "(no zero vaddr): %s\n",
 			             identity.canonical.C_Str());
-			std::fflush(stderr);
 			EXIT("=== Missing Func import policy halt (no zero vaddr) ===\n%s\n", identity.canonical.C_Str());
 		}
 
 		if (m_used_slots >= StubAllocator::Capacity())
 		{
 			++m_table_overflows;
-			std::fprintf(stderr,
+			KYTY_LOG_ERROR(
 			             "KYTY_BRINGUP: missing-import stub capacity exhausted (%u); "
 			             "typed fatal unsupported (no silent fallback)\n",
 			             StubAllocator::Capacity());
-			std::fflush(stderr);
 			EXIT("missing-import stub capacity exhausted\n");
 		}
 

@@ -664,7 +664,7 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 		const auto& color_control  = hw.GetColorControl();
 		const auto& render_control = hw.GetRenderControl();
 		const auto& depth_control  = hw.GetDepthControl();
-		std::fprintf(stderr,
+		KYTY_LOG_DEBUG(
 		             "KYTY_AA_CONTRACT attachment_samples=%u msaa_enable=0 color_mode=%u color_op=0x%02x "
 		             "aa_samples=%u exposed_samples=%u depth_test=%u stencil_test=%u depth_copy=%u stencil_copy=%u\n",
 		             static_cast<uint32_t>(attachment_samples), static_cast<uint32_t>(color_control.mode), color_control.op,
@@ -715,7 +715,7 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 		static bool dumped_eqaa_mapping = false;
 		if (!dumped_eqaa_mapping)
 		{
-			std::fprintf(stderr,
+			KYTY_LOG_DEBUG(
 			             "KYTY_AA_MAPPING attachment=%u effective_guest=%u max_anchor=%u ps_iter=%u mask_export=%u "
 			             "alpha_to_mask=%u\n",
 			             static_cast<uint32_t>(attachment_samples), effective_guest_samples, eqaa.max_anchor_samples,
@@ -730,7 +730,7 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 	                                                                    graphic_context->sample_location_capabilities, sample_locations);
 	if (sample_location_status != VulkanSampleLocationStatus::Success)
 	{
-		std::fprintf(stderr, "KYTY_GRAPHICS: sample locations cannot be represented: %s\n",
+		KYTY_LOG_WARN("KYTY_GRAPHICS: sample locations cannot be represented: %s\n",
 		             VulkanSampleLocationStatusName(sample_location_status));
 		EXIT_NOT_IMPLEMENTED(sample_location_status != VulkanSampleLocationStatus::Success);
 	}

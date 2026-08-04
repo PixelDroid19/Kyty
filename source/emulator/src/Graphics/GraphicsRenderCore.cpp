@@ -21,6 +21,7 @@
 #include "Emulator/Graphics/VulkanVertexInputLayout.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -111,14 +112,13 @@ VkSampleCountFlagBits resolve_render_attachment_sample_count(const RenderColorIn
 	}
 	if (with_color && with_depth && samples != depth.samples)
 	{
-		std::fprintf(stderr,
+		KYTY_LOG_DEBUG(
 		             "KYTY_ATTACHMENT_SAMPLE_MISMATCH color_addr=0x%012" PRIx64 " color=%ux%u format=%u samples=%u "
 		             "depth_addr=0x%012" PRIx64 " depth=%ux%u format=%u samples=%u depth_test=%u depth_write=%u\n",
 		             first_color->base_addr, first_color->width, first_color->height,
 		             static_cast<uint32_t>(first_color->render_texture_format), static_cast<uint32_t>(samples), depth.depth_buffer_vaddr,
 		             depth.width, depth.height, static_cast<uint32_t>(depth.format), static_cast<uint32_t>(depth.samples),
 		             depth.depth_test_enable ? 1u : 0u, depth.depth_write_enable ? 1u : 0u);
-		std::fflush(stderr);
 		EXIT_NOT_IMPLEMENTED(samples != depth.samples);
 	}
 	return samples;
@@ -155,10 +155,9 @@ void SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* de
 	const auto ch = color_img->extent.height;
 	if ((dw < cw || dh < ch) && (dw <= 1u || dh <= 1u))
 	{
-		std::fprintf(stderr,
+		KYTY_LOG_DEBUG(
 		             "KYTY_GRAPHICS: sanitizing undersized depth %ux%u against color %ux%u (disabling depth attachment)\n", dw, dh, cw,
 		             ch);
-		std::fflush(stderr);
 		depth->format             = VK_FORMAT_UNDEFINED;
 		depth->vulkan_buffer      = nullptr;
 		depth->depth_test_enable  = false;
@@ -471,7 +470,7 @@ void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& 
 		return;
 	}
 
-	std::fprintf(stderr, "KYTY_DUMP_DRAW %s", line);
+	KYTY_LOG_DEBUG( "KYTY_DUMP_DRAW %s", line);
 	const auto& ps_buffers = ps_input.bind.storage_buffers;
 	for (int bi = 0; bi < ps_buffers.buffers_num; ++bi)
 	{
@@ -480,24 +479,24 @@ void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& 
 		const uint64_t size     = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
 		const uint64_t readable = address != 0 ? GpuMemoryGetAllocatedRangePrefix(address, std::min<uint64_t>(size, 56u * sizeof(uint32_t))) : 0;
 		const auto*    words    = reinterpret_cast<const uint32_t*>(static_cast<uintptr_t>(address));
-		std::fprintf(stderr, "KYTY_DUMP_DRAW_PS_BUFFER slot=%d reg=%d usage=%u addr=0x%012" PRIx64
+		KYTY_LOG_DEBUG( "KYTY_DUMP_DRAW_PS_BUFFER slot=%d reg=%d usage=%u addr=0x%012" PRIx64
 		                     " stride=%u records=%u bytes=%" PRIu64 " readable=%" PRIu64,
 		             ps_buffers.slots[bi], ps_buffers.start_register[bi], static_cast<unsigned>(ps_buffers.usages[bi]), address,
 		             resource.Stride(), resource.NumRecords(), size, readable);
 		if (readable >= 4u * sizeof(uint32_t))
 		{
-			std::fprintf(stderr, " words=%08x,%08x,%08x,%08x", words[0], words[1], words[2], words[3]);
+			KYTY_LOG_DEBUG( " words=%08x,%08x,%08x,%08x", words[0], words[1], words[2], words[3]);
 			if (readable >= 5u * sizeof(uint32_t))
 			{
-				std::fprintf(stderr, ",%08x", words[4]);
+				KYTY_LOG_DEBUG( ",%08x", words[4]);
 			}
 		}
 		if (readable >= 56u * sizeof(uint32_t))
 		{
-			std::fprintf(stderr, " words48_55=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x", words[48], words[49], words[50],
+			KYTY_LOG_DEBUG( " words48_55=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x", words[48], words[49], words[50],
 			             words[51], words[52], words[53], words[54], words[55]);
 		}
-		std::fprintf(stderr, "\n");
+		KYTY_LOG_DEBUG( "\n");
 	}
 
 	// First vertex records as floats (cheap evidence for stride/fmt / shear).
@@ -511,25 +510,25 @@ void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& 
 			const uint64_t requested_bytes = static_cast<uint64_t>(b.stride) * requested_n;
 			const uint64_t readable_bytes = GpuMemoryGetAllocatedRangePrefix(b.addr, requested_bytes);
 			const uint32_t vert_n = static_cast<uint32_t>(readable_bytes / b.stride);
-			std::fprintf(stderr, "KYTY_DUMP_DRAW_VERT stride=%u floats=%u verts=%u", b.stride, floats_per, vert_n);
+			KYTY_LOG_DEBUG( "KYTY_DUMP_DRAW_VERT stride=%u floats=%u verts=%u", b.stride, floats_per, vert_n);
 			for (int ai = 0; ai < b.attr_num && ai < 8; ai++)
 			{
 				const int     idx = b.attr_indices[ai];
 				const uint8_t fmt = vs_input.resources[idx].Format();
-				std::fprintf(stderr, " dst%d={reg=%d,n=%d,fmt=%u,off=%u}", ai, vs_input.resources_dst[idx].register_start,
+				KYTY_LOG_DEBUG( " dst%d={reg=%d,n=%d,fmt=%u,off=%u}", ai, vs_input.resources_dst[idx].register_start,
 				             vs_input.resources_dst[idx].registers_num, fmt, b.attr_offsets[ai]);
 			}
-			std::fprintf(stderr, "\n");
+			KYTY_LOG_DEBUG( "\n");
 			const auto* base = reinterpret_cast<const float*>(static_cast<uintptr_t>(b.addr));
 			for (uint32_t v = 0; v < vert_n; v++)
 			{
 				const float* f = base + static_cast<size_t>(v) * floats_per;
-				std::fprintf(stderr, "KYTY_DUMP_DRAW_VERT[%u]", v);
+				KYTY_LOG_DEBUG( "KYTY_DUMP_DRAW_VERT[%u]", v);
 				for (uint32_t i = 0; i < floats_per && i < 16u; i++)
 				{
-					std::fprintf(stderr, " %g", static_cast<double>(f[i]));
+					KYTY_LOG_DEBUG( " %g", static_cast<double>(f[i]));
 				}
-				std::fprintf(stderr, "\n");
+				KYTY_LOG_DEBUG( "\n");
 			}
 		}
 	}

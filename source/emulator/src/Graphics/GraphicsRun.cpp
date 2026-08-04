@@ -24,6 +24,7 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
 #include "GraphicsRunTrace.h"
@@ -1284,7 +1285,7 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	// Non-custom IT_WRITE_DATA: historical control word.
 	if (!custom && write_control != 0x04100500)
 	{
-		printf("WARNING: WriteData not supported (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: WriteData not supported (continuing)\n");
 	}
 
 	// Custom R_WRITE_DATA control = dst | cache_policy<<8 | increment<<16 |
@@ -1301,7 +1302,7 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 		const uint32_t write_confirm = (write_control >> 24u) & 0xffu;
 		if (dst_sel != 4u || increment != 0u || write_confirm != 1u || (cache_policy != 0u && cache_policy != 2u))
 		{
-			printf("WARNING: WriteData not supported (continuing)\n");
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: WriteData not supported (continuing)\n");
 		}
 	}
 
@@ -1568,15 +1569,12 @@ static void WaitForSuspendedRuns(CommandProcessor* cp, CommandProcessor::Suspend
 		}
 		if (std::getenv("KYTY_WAIT_TRACE") != nullptr)
 		{
-			static std::atomic_uint32_t pending_logs {0};
-			if (pending_logs.fetch_add(1, std::memory_order_relaxed) < 8u)
-			{
-				const auto& suspended = first != nullptr ? *first : *second;
-				std::fprintf(stderr, "KYTY_PENDING_WAIT addr=0x%016" PRIx64 " value=0x%016" PRIx64
-				             " ref=0x%016" PRIx64 " mask=0x%016" PRIx64 " func=%" PRIu32 " size=%" PRIu32 "\n",
-				             reinterpret_cast<uint64_t>(suspended.address), ReadSuspendedRunValue(suspended), suspended.reference,
-				             suspended.mask, suspended.function, suspended.size);
-			}
+			const auto& suspended = first != nullptr ? *first : *second;
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+			               "KYTY_PENDING_WAIT addr=0x%016" PRIx64 " value=0x%016" PRIx64
+			               " ref=0x%016" PRIx64 " mask=0x%016" PRIx64 " func=%" PRIu32 " size=%" PRIu32 "\n",
+			               reinterpret_cast<uint64_t>(suspended.address), ReadSuspendedRunValue(suspended), suspended.reference,
+			               suspended.mask, suspended.function, suspended.size);
 		}
 
 		// Completion callbacks for an already submitted command buffer are
@@ -1991,11 +1989,11 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			}
 			{
 				const uint32_t at = num_dw - dw - 1u;
-				std::fprintf(stderr, "unknown PM4 packet type %u (cmd_id=0x%08" PRIx32 ") at dw=0x%05" PRIx32 " num_dw=0x%05" PRIx32 "\n",
-				             pkt_type, cmd_id, at, num_dw);
-				std::fflush(stderr);
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+				               "unknown PM4 packet type %u (cmd_id=0x%08" PRIx32 ") at dw=0x%05" PRIx32 " num_dw=0x%05" PRIx32 "\n",
+				               pkt_type, cmd_id, at, num_dw);
 			}
-			printf("WARNING: unknown PM4 packet type (continuing)\n");
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown PM4 packet type (continuing)\n");
 		}
 
 		const uint32_t special_packet_dwords = Pm4::Pm4SpecialType3PacketDwords(cmd_id);
@@ -2031,7 +2029,8 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 				continue;
 			}
 			const uint32_t at = num_dw - dw - 1u;
-			std::fprintf(stderr, "unknown op at dw=0x%05" PRIx32 " cmd_id=0x%08" PRIx32 " num_dw=0x%05" PRIx32 "\n", at, cmd_id, num_dw);
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+			               "unknown op at dw=0x%05" PRIx32 " cmd_id=0x%08" PRIx32 " num_dw=0x%05" PRIx32 "\n", at, cmd_id, num_dw);
 			uint32_t begin = 0;
 			uint32_t end   = (num_dw < 32u) ? num_dw : 32u;
 			if (at >= 32u)
@@ -2041,10 +2040,9 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			}
 			for (uint32_t i = begin; i < end; i++)
 			{
-				std::fprintf(stderr, "\t %05" PRIx32 "%s 0x%08" PRIx32 "\n", i, (i == at) ? " <<<" : "    ", data[i]);
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "\t %05" PRIx32 "%s 0x%08" PRIx32 "\n", i, (i == at) ? " <<<" : "    ", data[i]);
 			}
-			std::fflush(stderr);
-			printf("WARNING: unknown PM4 op (continuing)\n");
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown PM4 op (continuing)\n");
 		}
 
 		auto s = pfunc(this, cmd_id, cmd, dw + 1, num_dw);
@@ -2123,12 +2121,7 @@ void CommandProcessor::SetIndirectArgsBaseAddress(uint32_t base_index, uint64_t 
 
 	if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
 	{
-		static uint32_t logs = 0;
-		if (logs < 64u)
-		{
-			++logs;
-			std::fprintf(stderr, "KYTY_DUMP_INDIRECT set_base index=%u addr=0x%012" PRIx64 "\n", base_index, address);
-		}
+		KYTY_LOG_LIMIT(Log::Level::Debug, 64, "KYTY_DUMP_INDIRECT set_base index=%u addr=0x%012" PRIx64 "\n", base_index, address);
 	}
 }
 
@@ -2158,7 +2151,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 		if (logs < 48u)
 		{
 			++logs;
-			std::fprintf(stderr,
+			KYTY_LOG_DEBUG(
 			             "KYTY_DUMP_DRAW_INDEX count=%u modifier=0x%016" PRIx64 " type=%u index_addr=0x%012" PRIx64
 			             " index_base=0x%012" PRIx64 " index_buf_size=%u index_type=%u\n",
 			             index_count, draw_modifier, type, reinterpret_cast<uint64_t>(index_addr), m_index_base_addr,
@@ -2183,7 +2176,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 	{
 		case 0: index_bytes = 2; break;
 		case 1: index_bytes = 4; break;
-		default: printf("WARNING: unknown index_type_and_size %u (continuing)\n", m_index_type_and_size); break;
+		default: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown index_type_and_size %u (continuing)\n", m_index_type_and_size); break;
 	}
 
 	auto* index_addr = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(index_offset) * index_bytes);
@@ -2219,7 +2212,7 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 			if (logs < 64u)
 			{
 				++logs;
-				std::fprintf(stderr,
+				KYTY_LOG_DEBUG(
 				             "KYTY_DUMP_INDIRECT draw_index_skip offset=0x%08" PRIx32 " count=%u instances=%u base=0x%012" PRIx64
 				             "\n",
 				             data_offset, args.index_count_per_instance, args.instance_count, m_draw_indirect_args_base_addr);
@@ -2248,7 +2241,7 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		if (logs < 64u)
 		{
 			++logs;
-			std::fprintf(stderr,
+			KYTY_LOG_DEBUG(
 			             "KYTY_DUMP_INDIRECT draw_index offset=0x%08" PRIx32 " count=%u instances=%u start_index=%u base_vertex=%u "
 			             "first_instance=%u initiator=0x%08" PRIx32 "\n",
 			             data_offset, index_count, args.instance_count, args.start_index_location, args.base_vertex_location,
@@ -2294,7 +2287,7 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
 			if (logs < 64u)
 			{
 				++logs;
-				std::fprintf(stderr,
+				KYTY_LOG_DEBUG(
 				             "KYTY_DUMP_INDIRECT dispatch_skip offset=0x%08" PRIx32 " dims=%ux%ux%u base=0x%012" PRIx64 "\n",
 				             data_offset, args.thread_group_x, args.thread_group_y, args.thread_group_z,
 				             m_dispatch_indirect_args_base_addr);
@@ -2309,7 +2302,7 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
 		if (logs < 64u)
 		{
 			++logs;
-			std::fprintf(stderr, "KYTY_DUMP_INDIRECT dispatch offset=0x%08" PRIx32 " dims=%ux%ux%u mode=0x%08" PRIx32 "\n",
+			KYTY_LOG_DEBUG( "KYTY_DUMP_INDIRECT dispatch offset=0x%08" PRIx32 " dims=%ux%ux%u mode=0x%08" PRIx32 "\n",
 			             data_offset, args.thread_group_x, args.thread_group_y, args.thread_group_z, mode);
 		}
 	}
@@ -2330,30 +2323,30 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifie
 		if (auto_logs < 48u)
 		{
 			++auto_logs;
-			std::fprintf(stderr,
+			KYTY_LOG_DEBUG(
 			             "KYTY_DUMP_DRAW_AUTO count=%u modifier=0x%016" PRIx64 " index_base=0x%012" PRIx64
 			             " index_buf_size=%u index_type=%u",
 			             index_count, draw_modifier, m_index_base_addr, m_index_buffer_size, m_index_type_and_size);
 			if (m_index_base_addr != 0 && index_count > 0 && index_count <= 64)
 			{
-				std::fprintf(stderr, " idx=");
+				KYTY_LOG_DEBUG( " idx=");
 				if (m_index_type_and_size == 0)
 				{
 					const auto* idx = reinterpret_cast<const uint16_t*>(static_cast<uintptr_t>(m_index_base_addr));
 					for (uint32_t i = 0; i < index_count; i++)
 					{
-						std::fprintf(stderr, "%s%u", (i ? "," : ""), static_cast<unsigned>(idx[i]));
+						KYTY_LOG_DEBUG( "%s%u", (i ? "," : ""), static_cast<unsigned>(idx[i]));
 					}
 				} else if (m_index_type_and_size == 1)
 				{
 					const auto* idx = reinterpret_cast<const uint32_t*>(static_cast<uintptr_t>(m_index_base_addr));
 					for (uint32_t i = 0; i < index_count; i++)
 					{
-						std::fprintf(stderr, "%s%u", (i ? "," : ""), idx[i]);
+						KYTY_LOG_DEBUG( "%s%u", (i ? "," : ""), idx[i]);
 					}
 				}
 			}
-			std::fprintf(stderr, "\n");
+			KYTY_LOG_DEBUG( "\n");
 		}
 	}
 
@@ -2398,16 +2391,19 @@ void CommandProcessor::WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
-	printf("CommandProcessor::WriteAtEndOfPipe32()\n");
-	printf("\t cache_policy        = 0x%08" PRIx32 "\n", cache_policy);
-	printf("\t event_write_dest    = 0x%08" PRIx32 "\n", event_write_dest);
-	printf("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
-	printf("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
-	printf("\t event_index         = 0x%08" PRIx32 "\n", event_index);
-	printf("\t event_write_source  = 0x%08" PRIx32 "\n", event_write_source);
-	printf("\t interrupt_selector  = 0x%08" PRIx32 "\n", interrupt_selector);
-	printf("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
-	printf("\t value               = 0x%08" PRIx32 "\n", value);
+	if (Log::ShouldLog(Log::Level::Debug))
+	{
+		printf("CommandProcessor::WriteAtEndOfPipe32()\n");
+		printf("\t cache_policy        = 0x%08" PRIx32 "\n", cache_policy);
+		printf("\t event_write_dest    = 0x%08" PRIx32 "\n", event_write_dest);
+		printf("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
+		printf("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
+		printf("\t event_index         = 0x%08" PRIx32 "\n", event_index);
+		printf("\t event_write_source  = 0x%08" PRIx32 "\n", event_write_source);
+		printf("\t interrupt_selector  = 0x%08" PRIx32 "\n", interrupt_selector);
+		printf("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
+		printf("\t value               = 0x%08" PRIx32 "\n", value);
+	}
 
 	EXIT_NOT_IMPLEMENTED(cache_policy != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(event_write_dest != 0x00000000);
@@ -2425,7 +2421,7 @@ void CommandProcessor::WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_
 		                                    value >> 16u);
 	} else
 	{
-		printf("WARNING: unknown event type (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown event type (continuing)\n");
 	}
 }
 
@@ -2437,16 +2433,19 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
-	printf("CommandProcessor::WriteAtEndOfPipe64()\n");
-	printf("\t cache_policy        = 0x%08" PRIx32 "\n", cache_policy);
-	printf("\t event_write_dest    = 0x%08" PRIx32 "\n", event_write_dest);
-	printf("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
-	printf("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
-	printf("\t event_index         = 0x%08" PRIx32 "\n", event_index);
-	printf("\t event_write_source  = 0x%08" PRIx32 "\n", event_write_source);
-	printf("\t interrupt_selector  = 0x%08" PRIx32 "\n", interrupt_selector);
-	printf("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
-	printf("\t value               = 0x%016" PRIx64 "\n", value);
+	if (Log::ShouldLog(Log::Level::Debug))
+	{
+		printf("CommandProcessor::WriteAtEndOfPipe64()\n");
+		printf("\t cache_policy        = 0x%08" PRIx32 "\n", cache_policy);
+		printf("\t event_write_dest    = 0x%08" PRIx32 "\n", event_write_dest);
+		printf("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
+		printf("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
+		printf("\t event_index         = 0x%08" PRIx32 "\n", event_index);
+		printf("\t event_write_source  = 0x%08" PRIx32 "\n", event_write_source);
+		printf("\t interrupt_selector  = 0x%08" PRIx32 "\n", interrupt_selector);
+		printf("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
+		printf("\t value               = 0x%016" PRIx64 "\n", value);
+	}
 
 	EXIT_NOT_IMPLEMENTED(cache_policy != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(event_write_dest != 0x00000000);
@@ -2462,7 +2461,7 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 		case 0x00:
 		case 0x03: with_interrupt = false; break;
 		case 0x02: with_interrupt = true; break;
-		default: printf("WARNING: unknown interrupt_selector (continuing)\n"); break;
+		default: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown interrupt_selector (continuing)\n"); break;
 	}
 
 	if (dst_gpu_addr == nullptr)
@@ -2474,7 +2473,7 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 			GraphicsRenderMemoryBarrier(m_buffer[m_current_buffer]);
 			return;
 		}
-		printf("WARNING: unsupported ReleaseMem null destination (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported ReleaseMem null destination (continuing)\n");
 	}
 
 	if (eop_event_type == 0x04 && cache_action == 0x00 && event_index == 0x05 && source64 && !with_interrupt)
@@ -2530,7 +2529,7 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 		producer_size = 8;
 	} else
 	{
-		printf("WARNING: unknown event type (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown event type (continuing)\n");
 	}
 
 	const bool valid_producer_destination =
@@ -2580,9 +2579,12 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index)
 {
 	Core::LockGuard lock(m_mutex);
 
-	printf("CommandProcessor::TriggerEvent()\n");
-	printf("\t event_type  = 0x%08" PRIx32 "\n", event_type);
-	printf("\t event_index = 0x%08" PRIx32 "\n", event_index);
+	if (Log::ShouldLog(Log::Level::Debug))
+	{
+		printf("CommandProcessor::TriggerEvent()\n");
+		printf("\t event_type  = 0x%08" PRIx32 "\n", event_type);
+		printf("\t event_index = 0x%08" PRIx32 "\n", event_index);
+	}
 
 	if ((event_type == 0x00000016 || event_type == 0x00000031) && event_index == 0x00000007)
 	{
@@ -2608,7 +2610,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index)
 		MemoryBarrier();
 	} else
 	{
-		printf("WARNING: unknown event type (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown event type (continuing)\n");
 	}
 }
 
@@ -2618,7 +2620,10 @@ void CommandProcessor::Flip()
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
-	printf("CommandProcessor::Flip()\n");
+	if (Log::ShouldLog(Log::Level::Debug))
+	{
+		printf("CommandProcessor::Flip()\n");
+	}
 
 	GraphicsRenderWriteAtEndOfPipeOnlyFlip(m_sumbit_id, m_buffer[m_current_buffer], m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                       m_flip.flip_arg);
@@ -2632,9 +2637,12 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value)
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
-	printf("CommandProcessor::Flip()\n");
-	printf("\t dst_gpu_addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
-	printf("\t value        = 0x%08" PRIx32 "\n", value);
+	if (Log::ShouldLog(Log::Level::Debug))
+	{
+		printf("CommandProcessor::Flip()\n");
+		printf("\t dst_gpu_addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
+		printf("\t value        = 0x%08" PRIx32 "\n", value);
+	}
 
 	GraphicsRenderWriteAtEndOfPipeWithFlip32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value,
 	                                         m_flip.handle, m_flip.index, m_flip.flip_mode, m_flip.flip_arg);
@@ -2648,11 +2656,14 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
-	printf("CommandProcessor::FlipWithInterrupt()\n");
-	printf("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
-	printf("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
-	printf("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
-	printf("\t value               = 0x%08" PRIx32 "\n", value);
+	if (Log::ShouldLog(Log::Level::Debug))
+	{
+		printf("CommandProcessor::FlipWithInterrupt()\n");
+		printf("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
+		printf("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
+		printf("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
+		printf("\t value               = 0x%08" PRIx32 "\n", value);
+	}
 
 	if (eop_event_type == 0x00000004 && cache_action == 0x00000038)
 	{
@@ -2663,7 +2674,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 		m_completion_callback_issued = true;
 	} else
 	{
-		printf("WARNING: unknown event type (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown event type (continuing)\n");
 	}
 }
 
@@ -3150,7 +3161,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_ps_input)
 	{
 		if (dump_ps_input_writes)
 		{
-			std::fprintf(stderr, "KYTY_PS_INPUT_WRITE direct slot=%u value=0x%08" PRIx32 " count=%u\n", i, buffer[i], count);
+			KYTY_LOG_DEBUG( "KYTY_PS_INPUT_WRITE direct slot=%u value=0x%08" PRIx32 " count=%u\n", i, buffer[i], count);
 		}
 		cp->GetCtx()->SetPsInputSettings(i, buffer[i]);
 	}
@@ -3395,7 +3406,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_scale_offset)
 			case 3: cp->GetCtx()->SetViewportYOffset(viewport, value); break;
 			case 4: cp->GetCtx()->SetViewportZScale(viewport, value); break;
 			case 5: cp->GetCtx()->SetViewportZOffset(viewport, value); break;
-			default: printf("WARNING: invalid viewport component (continuing)\n"); break;
+			default: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid viewport component (continuing)\n"); break;
 		}
 	}
 
@@ -3485,7 +3496,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_rsrc)
 			case Pm4::COMPUTE_SHADER_CHKSUM_HI:
 				r.chksum = (r.chksum & 0x00000000ffffffffull) | (static_cast<uint64_t>(buffer[i]) << 32u);
 				break;
-			default: printf("WARNING: unexpected compute rsrc register (continuing)\n"); break;
+			default: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unexpected compute rsrc register (continuing)\n"); break;
 		}
 	}
 
@@ -3507,7 +3518,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_num_thread)
 			case Pm4::COMPUTE_NUM_THREAD_X: cp->GetShCtx()->SetCsNumThreadX(value); break;
 			case Pm4::COMPUTE_NUM_THREAD_Y: cp->GetShCtx()->SetCsNumThreadY(value); break;
 			case Pm4::COMPUTE_NUM_THREAD_Z: cp->GetShCtx()->SetCsNumThreadZ(value); break;
-			default: printf("WARNING: unexpected compute thread register (continuing)\n"); break;
+			default: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unexpected compute thread register (continuing)\n"); break;
 		}
 	}
 
@@ -3950,7 +3961,7 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			// 0x8000 cache-control qualifier on this full-target barrier.
 			if (!GraphicsAgcFullTargetBarrierGcrSupported(gcr_cntl))
 			{
-				printf("WARNING: unsupported full-target barrier (continuing)\n");
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported full-target barrier (continuing)\n");
 			}
 			// AGC size_bytes == -1 encodes as size_lo == 0 (full range). The base
 			// dword is still written from the guest pointer (observed post-Play
@@ -3958,7 +3969,7 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			// ranged barrier, which is not yet supported for this cache action.
 			if (size_lo != 0)
 			{
-				printf("WARNING: unsupported full-target barrier (continuing)\n");
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported full-target barrier (continuing)\n");
 			}
 
 			EXIT_IF(target_mask != 0x00007fc0);
@@ -4010,7 +4021,7 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			cp->MemoryBarrier();
 			break;
 
-		default: printf("WARNING: unknown barrier (continuing)\n");
+		default: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown barrier (continuing)\n");
 	}
 
 	if (stall_mode == 0)
@@ -4087,7 +4098,7 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 		cp->ReadGds(addr, src / 4, size / 4);
 	} else
 	{
-		printf("WARNING: unknown DMA (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown DMA (continuing)\n");
 	}
 
 	return 6;
@@ -4183,7 +4194,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 			return 9;
 		}
 
-		printf("WARNING: invalid draw_index (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid draw_index (continuing)\n");
 	}
 
 	EXIT_NOT_IMPLEMENTED(true);
@@ -4530,7 +4541,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 			static std::atomic_uint32_t dropped_out_of_range {0};
 			if (dropped_out_of_range.fetch_add(1, std::memory_order_relaxed) < 4u)
 			{
-				std::fprintf(stderr,
+				KYTY_LOG_DEBUG(
 				             "WARNING: dropping out-of-range indirect cx register pair=%" PRIu32 " offset=0x%08" PRIx32
 				             " value=0x%08" PRIx32 "\n",
 				             i, raw_cmd_offset, indirect_buffer[1]);
@@ -4539,7 +4550,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 		}
 		if (dump_ps_input_writes && cmd_offset >= Pm4::SPI_PS_INPUT_CNTL_0 && cmd_offset <= Pm4::SPI_PS_INPUT_CNTL_31)
 		{
-			std::fprintf(stderr, "KYTY_PS_INPUT_WRITE indirect pair=%u slot=%u value=0x%08" PRIx32 " count=%u base=%p\n", i,
+			KYTY_LOG_DEBUG( "KYTY_PS_INPUT_WRITE indirect pair=%u slot=%u value=0x%08" PRIx32 " count=%u base=%p\n", i,
 			             cmd_offset - Pm4::SPI_PS_INPUT_CNTL_0, value, indirect_num_regs, static_cast<void*>(indirect_buffer - i * 2u));
 		}
 
@@ -4593,7 +4604,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 			static std::atomic_uint32_t dropped_out_of_range {0};
 			if (dropped_out_of_range.fetch_add(1, std::memory_order_relaxed) < 4u)
 			{
-				std::fprintf(stderr,
+				KYTY_LOG_DEBUG(
 				             "WARNING: dropping out-of-range indirect sh register pair=%" PRIu32 " offset=0x%08" PRIx32
 				             " value=0x%08" PRIx32 "\n",
 				             i, cmd_offset, value);
@@ -4651,7 +4662,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 			static std::atomic_uint32_t dropped_out_of_range {0};
 			if (dropped_out_of_range.fetch_add(1, std::memory_order_relaxed) < 4u)
 			{
-				std::fprintf(stderr,
+				KYTY_LOG_DEBUG(
 				             "WARNING: dropping out-of-range indirect uc register pair=%" PRIu32 " offset=0x%08" PRIx32
 				             " value=0x%08" PRIx32 "\n",
 				             i, cmd_offset, value);
@@ -4716,7 +4727,7 @@ KYTY_CP_OP_PARSER(cp_op_marker)
 			cp->FlipWithInterrupt(eop_event_type, cache_action, addr, value);
 			break;
 		}
-		default: printf("WARNING: unknown marker (continuing)\n"); break;
+		default: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown marker (continuing)\n"); break;
 	}
 
 	return len_dw + 1;
@@ -4753,7 +4764,7 @@ KYTY_CP_OP_PARSER(cp_op_nop)
 		return cp_op(cp, cmd_id, buffer, dw, num_dw);
 	}
 
-	printf("WARNING: unknown custom code (continuing)\n");
+	KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown custom code (continuing)\n");
 
 	return 0;
 }
@@ -4775,7 +4786,7 @@ KYTY_CP_OP_PARSER(cp_op_pop_marker)
 
 	auto dw_num = (cmd_id >> 16u) & 0x3fffu;
 
-	printf("Pop marker\n");
+	KYTY_LOG_DEBUG("Pop marker\n");
 
 	cp->PopMarker();
 
@@ -4790,7 +4801,7 @@ KYTY_CP_OP_PARSER(cp_op_push_marker)
 
 	const char* str = reinterpret_cast<const char*>(buffer);
 
-	printf("Push marker: %s\n", str);
+	KYTY_LOG_DEBUG("Push marker: %s\n", str);
 
 	cp->PushMarker(str);
 
@@ -4917,7 +4928,7 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 			event_write_source = 4;
 		} else
 		{
-			printf("WARNING: unsupported ReleaseMem data_sel (continuing)\n");
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported ReleaseMem data_sel (continuing)\n");
 		}
 	}
 
@@ -4927,20 +4938,21 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 	        GpuMemoryRangeValidationStatus::Valid)
 	{
 		const bool no_destination_sentinel = reinterpret_cast<uint64_t>(dst_gpu_addr) == 1u;
-		static std::atomic<uint32_t> invalid_destination_logs {0};
-		if (invalid_destination_logs.fetch_add(1, std::memory_order_relaxed) < 32u)
+		if (Log::ShouldLog(Log::Level::Warn))
 		{
-			const uint32_t packet_dw = custom ? (cmd_id == 0xc0061060 ? 8u : 7u) : KYTY_PM4_LEN(cmd_id);
-			std::fprintf(stderr,
-			             "KYTY_RELEASE_MEM_INVALID cmd=0x%08" PRIx32 " addr=0x%016" PRIx64 " bytes=%" PRIu64
-			             " source=%" PRIu32 " value=0x%016" PRIx64 " packet=0x%08" PRIx32,
-			             cmd_id, reinterpret_cast<uint64_t>(dst_gpu_addr), destination_size, event_write_source, value, cmd_id);
-			for (uint32_t i = 0; i + 1u < packet_dw; i++)
+			static std::atomic<uint32_t> invalid_destination_logs {0};
+			if (invalid_destination_logs.fetch_add(1, std::memory_order_relaxed) < 32u)
 			{
-				std::fprintf(stderr, ",0x%08" PRIx32, buffer[i]);
+				const uint32_t packet_dw = custom ? (cmd_id == 0xc0061060 ? 8u : 7u) : KYTY_PM4_LEN(cmd_id);
+				KYTY_LOG_WARN("KYTY_RELEASE_MEM_INVALID cmd=0x%08" PRIx32 " addr=0x%016" PRIx64 " bytes=%" PRIu64
+				              " source=%" PRIu32 " value=0x%016" PRIx64 " packet=0x%08" PRIx32,
+				              cmd_id, reinterpret_cast<uint64_t>(dst_gpu_addr), destination_size, event_write_source, value, cmd_id);
+				for (uint32_t i = 0; i + 1u < packet_dw; i++)
+				{
+					KYTY_LOG_WARN(",0x%08" PRIx32, buffer[i]);
+				}
+				KYTY_LOG_WARN("\n");
 			}
-			std::fprintf(stderr, "\n");
-			std::fflush(stderr);
 		}
 		if (!no_destination_sentinel)
 		{
@@ -4982,11 +4994,7 @@ KYTY_CP_OP_PARSER(cp_op_get_lod_stats)
 
 	// This query packet has no guest-visible producer in the current renderer.
 	// Consume its payload so following PM4 packets remain aligned.
-	static std::atomic_bool warned {false};
-	if (!warned.exchange(true))
-	{
-		std::fprintf(stderr, "WARNING: ignoring unsupported IT_GET_LOD_STATS\n");
-	}
+	KYTY_LOG_LIMIT(Log::Level::Warn, 1, "WARNING: ignoring unsupported IT_GET_LOD_STATS\n");
 	return 1;
 }
 
@@ -5002,7 +5010,7 @@ KYTY_CP_OP_PARSER(cp_op_set_context_reg)
 
 	if (pfunc == nullptr)
 	{
-		printf("WARNING: unknown register write (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown register write (continuing)\n");
 	}
 
 	auto s = pfunc(cp, cmd_id, cmd_offset, buffer + 1, dw);
@@ -5024,7 +5032,7 @@ KYTY_CP_OP_PARSER(cp_op_set_shader_reg)
 
 	if (pfunc == nullptr)
 	{
-		printf("WARNING: unknown register write (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown register write (continuing)\n");
 	}
 
 	auto s = pfunc(cp, cmd_id, cmd_offset, buffer + 1, dw);
@@ -5044,7 +5052,7 @@ KYTY_CP_OP_PARSER(cp_op_set_uconfig_reg)
 
 	if (pfunc == nullptr)
 	{
-		printf("WARNING: unknown register write (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown register write (continuing)\n");
 	}
 
 	auto s = pfunc(cp, cmd_id, cmd_offset, buffer + 1, dw);
@@ -5102,7 +5110,7 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_32)
 		used = 13;
 	} else
 	{
-		printf("WARNING: unknown WaitRegMem32 packet (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown WaitRegMem32 packet (continuing)\n");
 	}
 
 	cp->WaitRegMem32(func, addr, ref, mask, poll);
@@ -5131,13 +5139,13 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_64)
 	if (addr != nullptr &&
 	    GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(addr), sizeof(uint64_t)) != GpuMemoryRangeValidationStatus::Valid)
 	{
-		printf("WARNING: WaitRegMem64 resolved an unallocated address (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: WaitRegMem64 resolved an unallocated address (continuing)\n");
 		addr = nullptr;
 	}
 
 	if (addr == nullptr)
 	{
-		printf("WARNING: WaitRegMem64 null addr (continuing)\n");
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: WaitRegMem64 null addr (continuing)\n");
 	}
 
 	cp->WaitRegMem64(func, addr, ref, mask, poll);

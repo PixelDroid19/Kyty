@@ -5,6 +5,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
+#include "Emulator/Log.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -555,7 +556,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask2)
 
 	if (bind_info != nullptr)
 	{
-		std::fprintf(stderr,
+		KYTY_LOG_DEBUG(
 		             "ImageSample binding unavailable: sampled=%d textures=%d samplers=%d texture_sgpr=%d sampler_sgpr=%d\\n",
 		             bind_info->textures2D.textures2d_sampled_num, bind_info->textures2D.textures_num,
 		             bind_info->samplers.samplers_num, inst.src[1].register_id, inst.src[2].register_id);
@@ -1433,7 +1434,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF)
 
 	if (bind_info != nullptr)
 	{
-		std::fprintf(stderr,
+		KYTY_LOG_DEBUG(
 		             "ImageSample RGBA binding unavailable: sampled=%d textures=%d samplers=%d texture_sgpr=%d sampler_sgpr=%d\\n",
 		             bind_info->textures2D.textures2d_sampled_num, bind_info->textures2D.textures_num,
 		             bind_info->samplers.samplers_num, inst.src[1].register_id, inst.src[2].register_id);

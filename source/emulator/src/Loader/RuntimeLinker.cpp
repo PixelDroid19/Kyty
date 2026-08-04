@@ -24,6 +24,7 @@
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Validation/DomainValidators.h"
+#include "Emulator/Log.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -257,8 +258,7 @@ static void EmitTracedPltRelocation(uint64_t index, const RelocationInfo& ri)
 	const auto clean_name = Log::IsColoredPrintf() ? ri.name : Log::RemoveColors(ri.name);
 	const auto message    = String::FromPrintf("index=%" PRIu64 " import=%s", index, clean_name.C_Str());
 	Emulator::Agent::Lifecycle::Emit(Emulator::Agent::EventKind::Info, "lazy_plt_trace", message.C_Str());
-	std::fprintf(stderr, "KYTY_LAZY_PLT_TRACE %s\n", message.C_Str());
-	std::fflush(stderr);
+	KYTY_LOG_DEBUG( "KYTY_LAZY_PLT_TRACE %s\n", message.C_Str());
 }
 
 // The structure will be passed via the stack
@@ -872,9 +872,8 @@ static KYTY_SYSV_ABI uint64_t ResolveLazyPlt(void* program_ptr, uint64_t rel_ind
 	{
 		const auto clean_name = Log::IsColoredPrintf() ? ri.name : Log::RemoveColors(ri.name);
 		const auto requester = Log::IsColoredPrintf() ? program->file_name : Log::RemoveColors(program->file_name);
-		std::fprintf(stderr, "KYTY_LOADER: lazy_plt unresolved=%u value=%u requester=%s rel_index=%" PRIu64 " import=%s\n",
+		KYTY_LOG_DEBUG( "KYTY_LOADER: lazy_plt unresolved=%u value=%u requester=%s rel_index=%" PRIu64 " import=%s\n",
 		             ri.resolved ? 0u : 1u, ri.value != 0 ? 1u : 0u, requester.C_Str(), rel_index, clean_name.C_Str());
-		std::fflush(stderr);
 		EXIT("can't resolve lazy PLT import: %s\n", clean_name.C_Str());
 	}
 	// PatchReplace reports whether the slot changed. A relocation that already
@@ -1142,15 +1141,13 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size)
 		const uint64_t rex_sites = LoaderRewriteTlsGdCallRexPrefix(start_ptr, size);
 		if (rex_sites != 0)
 		{
-			std::fprintf(stderr, "Patch tls GD call REX.W at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, rex_sites);
-			printf("Patch tls GD call REX.W at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, rex_sites);
+			KYTY_LOG_DEBUG( "Patch tls GD call REX.W at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, rex_sites);
 		}
 
 		const uint64_t null_rdi_sites = LoaderPatchNullRdiSanitizers(start_ptr, size);
 		if (null_rdi_sites != 0)
 		{
-			std::fprintf(stderr, "Patch null rdi sanitizer at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, null_rdi_sites);
-			printf("Patch null rdi sanitizer at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, null_rdi_sites);
+			KYTY_LOG_DEBUG( "Patch null rdi sanitizer at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, null_rdi_sites);
 		}
 	}
 
@@ -1532,8 +1529,7 @@ void RuntimeLinker::Execute()
 			}
 			if (total_sites != 0)
 			{
-				std::fprintf(stderr, "Patch tls GD call REX.W on main image: %" PRIu64 " site(s)\n", total_sites);
-				printf("Patch tls GD call REX.W on main image: %" PRIu64 " site(s)\n", total_sites);
+				KYTY_LOG_DEBUG( "Patch tls GD call REX.W on main image: %" PRIu64 " site(s)\n", total_sites);
 			}
 		}
 	}

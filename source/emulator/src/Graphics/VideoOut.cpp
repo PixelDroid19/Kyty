@@ -25,6 +25,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/Log.h"
 
 #include <atomic>
 #include <chrono>
@@ -1550,7 +1551,7 @@ bool FlipQueue::Flip(uint32_t micros)
 		const uint32_t               n = flip_logs.fetch_add(1);
 		if (n < 32u)
 		{
-			std::fprintf(stderr, "FLIP_TRIGGER index=%d arg=%" PRId64 " eqs=%u\n", r.index, r.flip_arg, flip_triggered);
+			KYTY_LOG_DEBUG( "FLIP_TRIGGER index=%d arg=%" PRId64 " eqs=%u\n", r.index, r.flip_arg, flip_triggered);
 		}
 	}
 
@@ -1923,7 +1924,7 @@ KYTY_SYSV_ABI int VideoOutAddFlipEvent(EventQueue::KernelEqueue eq, int handle, 
 
 	if (EopTraceEnabled())
 	{
-		std::fprintf(stderr, "FLIP_ADD handle=%d eq=%p count=%u\n", handle, static_cast<void*>(eq), flip_eq_count);
+		KYTY_LOG_DEBUG( "FLIP_ADD handle=%d eq=%p count=%u\n", handle, static_cast<void*>(eq), flip_eq_count);
 	}
 
 	return result;

@@ -19,6 +19,7 @@
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/Log.h"
 
 #include <atomic>
 #include <cstdio>
@@ -62,10 +63,9 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 			const auto ch = color_img->extent.height;
 			if ((dw < cw || dh < ch) && (dw <= 1u || dh <= 1u))
 			{
-				std::fprintf(stderr,
+				KYTY_LOG_DEBUG(
 				             "KYTY_GRAPHICS: detaching undersized depth %ux%u from color %ux%u (guest depth size likely unset)\n", dw, dh,
 				             cw, ch);
-				std::fflush(stderr);
 				with_depth = false;
 			}
 		}

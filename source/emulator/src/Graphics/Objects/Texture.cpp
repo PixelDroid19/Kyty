@@ -17,6 +17,7 @@
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/Log.h"
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -182,7 +183,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				{
 					const size_t written = std::fwrite(bytes, 1, level.linear_size, file);
 					std::fclose(file);
-					std::fprintf(stderr,
+					KYTY_LOG_DEBUG(
 					             "KYTY_DUMP_TILED_BLOCKS_FILE path=%s bytes=%zu complete=%u level=0 elem=%ux%u hash=%016" PRIx64 "\n",
 					             path, written, written == level.linear_size ? 1u : 0u, level.element_width, level.element_height, hash);
 				}
@@ -329,7 +330,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				if (index < 32u)
 				{
 					const auto* bytes = reinterpret_cast<const uint8_t*>(*vaddr);
-					std::fprintf(stderr, "KYTY_DUMP_VIDEO_UPLOAD index=%u fmt=%u size=%ux%u pitch=%u upload_pitch=%u addr=0x%012" PRIx64
+					KYTY_LOG_DEBUG( "KYTY_DUMP_VIDEO_UPLOAD index=%u fmt=%u size=%ux%u pitch=%u upload_pitch=%u addr=0x%012" PRIx64
 					             " bytes=%" PRIu64 " first=%02x%02x%02x%02x\n",
 					             index, static_cast<unsigned>(fmt), static_cast<unsigned>(width), static_cast<unsigned>(height),
 					             static_cast<unsigned>(pitch), static_cast<unsigned>(upload_pitch), static_cast<uint64_t>(*vaddr),
@@ -354,7 +355,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 						minimum = std::min(minimum, value);
 						maximum = std::max(maximum, value);
 					}
-					std::fprintf(stderr, "KYTY_DUMP_VIDEO_READBACK index=%u fmt=%u bytes=%zu first=%02x%02x%02x%02x min=%u max=%u hash=%016" PRIx64 "\n",
+					KYTY_LOG_DEBUG( "KYTY_DUMP_VIDEO_READBACK index=%u fmt=%u bytes=%zu first=%02x%02x%02x%02x min=%u max=%u hash=%016" PRIx64 "\n",
 					             index, static_cast<unsigned>(fmt), readback.size(), readback.size() > 0 ? readback[0] : 0u,
 					             readback.size() > 1 ? readback[1] : 0u, readback.size() > 2 ? readback[2] : 0u,
 					             readback.size() > 3 ? readback[3] : 0u, static_cast<unsigned>(minimum), static_cast<unsigned>(maximum), hash);
@@ -502,21 +503,21 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 					raw_hash     = (raw_hash ^ guest[i]) * 1099511628211ull;
 					detiled_hash = (detiled_hash ^ temp_buf[i]) * 1099511628211ull;
 				}
-				std::fprintf(stderr,
+				KYTY_LOG_DEBUG(
 				             "KYTY_DUMP_TILED_BLOCKS addr=0x%012" PRIx64 " size=%" PRIu64 " elem=%ux%u pitch=%u raw_nonzero=%" PRIu64
 				             " detiled_nonzero=%" PRIu64 " raw_hash=%016" PRIx64 " detiled_hash=%016" PRIx64 " raw=",
 				             *vaddr, linear_bytes, element_width, element_height, element_pitch, raw_nonzero, detiled_nonzero, raw_hash,
 				             detiled_hash);
 				for (uint32_t i = 0; i < 64u && i < linear_bytes; ++i)
 				{
-					std::fprintf(stderr, "%02x", guest[i]);
+					KYTY_LOG_DEBUG( "%02x", guest[i]);
 				}
-				std::fprintf(stderr, " detiled=");
+				KYTY_LOG_DEBUG( " detiled=");
 				for (uint32_t i = 0; i < 64u && i < linear_bytes; ++i)
 				{
-					std::fprintf(stderr, "%02x", temp_buf[i]);
+					KYTY_LOG_DEBUG( "%02x", temp_buf[i]);
 				}
-				std::fprintf(stderr, "\n");
+				KYTY_LOG_DEBUG( "\n");
 
 				static std::set<uint64_t> dumped_blocks;
 				const uint64_t dump_key = *vaddr ^ (static_cast<uint64_t>(width) << 32u) ^ height ^ detiled_hash;
@@ -529,7 +530,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 					{
 						const size_t written = std::fwrite(temp_buf.data(), 1, static_cast<size_t>(linear_bytes), file);
 						std::fclose(file);
-						std::fprintf(stderr, "KYTY_DUMP_TILED_BLOCKS_FILE path=%s bytes=%zu complete=%u\n", path, written,
+						KYTY_LOG_DEBUG( "KYTY_DUMP_TILED_BLOCKS_FILE path=%s bytes=%zu complete=%u\n", path, written,
 						             written == linear_bytes ? 1u : 0u);
 					}
 				}
@@ -641,7 +642,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 						{
 							colors.insert(pixels[pixel]);
 						}
-						std::fprintf(stderr,
+						KYTY_LOG_DEBUG(
 						             "KYTY_DUMP_TILED_SAMPLE guest=0x%016" PRIx64 " size=%ux%u pitch=%u first=0x%08x "
 						             "colors=%zu%s raw0=0x%08x raw1=0x%08x\n",
 						             static_cast<uint64_t>(*vaddr), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
@@ -701,7 +702,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 		const auto              current = dump_count.fetch_add(1, std::memory_order_relaxed);
 		if (current < 8u)
 		{
-			std::fprintf(stderr, "KYTY_DUMP_TILED_SAMPLE update2 size=%ux%u fmt=%u levels=%u scenario=%u parents=%u\n",
+			KYTY_LOG_DEBUG( "KYTY_DUMP_TILED_SAMPLE update2 size=%ux%u fmt=%u levels=%u scenario=%u parents=%u\n",
 			             static_cast<unsigned>(width), static_cast<unsigned>(height), static_cast<unsigned>(fmt),
 			             static_cast<unsigned>(levels), static_cast<unsigned>(scenario), static_cast<unsigned>(objects.Size()));
 			for (uint32_t i = 0; i < objects.Size(); ++i)
@@ -713,14 +714,13 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 				                         ? static_cast<const VulkanImage*>(static_cast<const StorageTextureVulkanImage*>(parent.obj))
 				                         : nullptr;
 				const auto  extent = image != nullptr ? image->GetGuestExtent() : VkExtent2D {};
-				std::fprintf(stderr, "  parent[%u] type=%u obj=%p extent=%ux%u format=%u layout=%u guest_size=%" PRIu64 "\n",
+				KYTY_LOG_DEBUG( "  parent[%u] type=%u obj=%p extent=%ux%u format=%u layout=%u guest_size=%" PRIu64 "\n",
 				             static_cast<unsigned>(i), static_cast<unsigned>(parent.type), parent.obj, static_cast<unsigned>(extent.width),
 				             static_cast<unsigned>(extent.height),
 				             static_cast<unsigned>(image != nullptr ? image->format : VK_FORMAT_UNDEFINED),
 				             static_cast<unsigned>(image != nullptr ? image->layout : VK_IMAGE_LAYOUT_UNDEFINED),
 				             image != nullptr ? image->guest_size : 0u);
 			}
-			std::fflush(stderr);
 		}
 	}
 
@@ -779,7 +779,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 					nonzero += (value != 0u ? 1u : 0u);
 					hash = (hash ^ value) * 1099511628211ull;
 				}
-				std::fprintf(stderr, "KYTY_DUMP_BLOCK_STORAGE extent=%ux%u bytes=%" PRIu64 " nonzero=%" PRIu64 " hash=%016" PRIx64 "\n",
+				KYTY_LOG_DEBUG( "KYTY_DUMP_BLOCK_STORAGE extent=%ux%u bytes=%" PRIu64 " nonzero=%" PRIu64 " hash=%016" PRIx64 "\n",
 				             block_copy_width, block_copy_height, bytes, nonzero, hash);
 				static std::atomic_bool dds_dumped {false};
 				if (block_copy_width == 29u && block_copy_height == 30u && !dds_dumped.exchange(true))

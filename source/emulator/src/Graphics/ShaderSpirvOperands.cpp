@@ -5,6 +5,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
+#include "Emulator/Log.h"
 
 #include <cstring>
 
@@ -102,7 +103,7 @@ PixelInterpolationMode Spirv::GetPixelInterpolationMode(uint32_t input) const
 static bool pixel_interpolation_rejected(const char* reason, const ShaderPixelInputInfo& info, uint32_t instruction_index,
                                          const ShaderInstruction& instruction, int coordinate_source)
 {
-	fprintf(stderr,
+	KYTY_LOG_DEBUG(
 	        "SHADER_INTERPOLATION_REJECT reason=%s index=%u p2_source=%d input=%u input_num=%u ena=0x%08x addr=0x%08x "
 	        "coordinate_source=%d\n",
 	        reason, instruction_index, instruction.src[0].register_id, instruction.src[1].constant.u, info.input_num,

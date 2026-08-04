@@ -16,6 +16,7 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/RuntimeLinker.h"
+#include "Emulator/Log.h"
 
 #include "Kyty/Agent/LocalTransport.h"
 #include "KytyBuildInfo.h"
@@ -1128,7 +1129,7 @@ bool StartFromEnv()
 	}
 	if (!Kyty::Agent::LocalTransport::IsValidEndpoint(endpoint))
 	{
-		std::fprintf(stderr, "KYTY_AGENT_ENDPOINT is not a valid %s endpoint\n",
+		KYTY_LOG_WARN("KYTY_AGENT_ENDPOINT is not a valid %s endpoint\n",
 		             Kyty::Agent::LocalTransport::EndpointKind());
 		EventRing::Instance().Push(EventKind::Error, "invalid_endpoint", Kyty::Agent::LocalTransport::EndpointKind());
 		return false;
@@ -1139,7 +1140,7 @@ bool StartFromEnv()
 	const auto listen_result = Kyty::Agent::LocalTransport::Listen(&g_listener, endpoint);
 	if (listen_result != Kyty::Agent::LocalTransport::Result::Ok)
 	{
-		std::fprintf(stderr, "KYTY_AGENT failed to listen on %s: %s\n", endpoint,
+		KYTY_LOG_ERROR("KYTY_AGENT failed to listen on %s: %s\n", endpoint,
 		             Kyty::Agent::LocalTransport::ResultName(listen_result));
 		EventRing::Instance().Push(EventKind::Error, "listen_failed", Kyty::Agent::LocalTransport::ResultName(listen_result));
 		return false;
@@ -1148,7 +1149,7 @@ bool StartFromEnv()
 	g_thread = new Core::Thread(ServerThread, nullptr);
 	g_active.store(true);
 	EventRing::Instance().Push(EventKind::Info, "agent_start", Kyty::Agent::LocalTransport::EndpointKind());
-	std::fprintf(stderr, "KYTY_AGENT listening on %s\n", endpoint);
+	KYTY_LOG_DEBUG( "KYTY_AGENT listening on %s\n", endpoint);
 	return true;
 }
 

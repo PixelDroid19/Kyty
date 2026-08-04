@@ -9,6 +9,7 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Host/Png.h"
 #include "Emulator/Profiler.h"
+#include "Emulator/Log.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -511,7 +512,7 @@ bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const 
 	{
 		return false;
 	}
-	std::fprintf(stderr, "KYTY_DUMP_VK_IMAGE wrote %s layout=%u fmt=%d\n", path, static_cast<unsigned>(image->layout),
+	KYTY_LOG_DEBUG( "KYTY_DUMP_VK_IMAGE wrote %s layout=%u fmt=%d\n", path, static_cast<unsigned>(image->layout),
 	             static_cast<int>(image->format));
 	return true;
 }

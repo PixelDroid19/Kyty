@@ -8,6 +8,7 @@
 #include "Kyty/Core/Timer.h"
 
 #include "Emulator/Kernel/Trace.h"
+#include "Emulator/Log.h"
 
 #include <atomic>
 #include <cstdio>
@@ -398,7 +399,7 @@ int KYTY_SYSV_ABI KernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, 
 		const uint32_t               n = wait_logs.fetch_add(1);
 		if (n < 64u)
 		{
-			std::fprintf(stderr,
+			KYTY_LOG_DEBUG(
 			             "EVENTFLAG_WAIT name=%s want=0x%016" PRIx64 " have=0x%016" PRIx64 " mode=0x%x timeout=%s\n",
 			             ef->GetName().C_Str(), bit_pattern, ef->GetBits(), wait_mode, timeout == nullptr ? "inf" : "finite");
 		}
@@ -483,7 +484,7 @@ int KYTY_SYSV_ABI KernelSetEventFlag(KernelEventFlag ef, uint64_t bit_pattern)
 		const uint32_t               n = set_logs.fetch_add(1);
 		if (n < 128u)
 		{
-			std::fprintf(stderr, "EVENTFLAG_SET name=%s bits=0x%016" PRIx64 "\n", ef->GetName().C_Str(), bit_pattern);
+			KYTY_LOG_DEBUG( "EVENTFLAG_SET name=%s bits=0x%016" PRIx64 "\n", ef->GetName().C_Str(), bit_pattern);
 		}
 	}
 

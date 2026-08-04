@@ -5,6 +5,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
+#include "Emulator/Log.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -49,7 +50,7 @@ bool FragmentTapSelection(const ShaderCode& code, uint32_t* pc, int* first_regis
 			if (!logged)
 			{
 				logged = true;
-				std::fprintf(stderr, "KYTY_FS_TAP_SELECTED id=0x%016" PRIx64 " pc=%u vgpr=%d\n", code_id,
+				KYTY_LOG_DEBUG( "KYTY_FS_TAP_SELECTED id=0x%016" PRIx64 " pc=%u vgpr=%d\n", code_id,
 				             static_cast<uint32_t>(parsed_pc), inst.dst.register_id);
 			}
 			*pc             = static_cast<uint32_t>(parsed_pc);
@@ -128,7 +129,7 @@ void Spirv::GenerateSource()
 		if (!ResolvePixelInterpolationModes())
 		{
 			const uint64_t code_id = (static_cast<uint64_t>(m_code.GetHash0()) << 32u) | m_code.GetCrc32();
-			std::fprintf(stderr,
+			KYTY_LOG_DEBUG(
 			             "SHADER_INTERPOLATION_REJECT_ID id=0x%016" PRIx64 " input_num=%u ena=0x%08" PRIx32
 			             " addr=0x%08" PRIx32 "\n",
 			             code_id, m_ps_input_info->input_num, m_ps_input_info->system_input_enable,
@@ -1851,7 +1852,7 @@ void Spirv::WriteInstructions()
 
 		if (!ok)
 		{
-			std::fprintf(stderr, "SHADER_EMIT_MISSING full format=0x%016" PRIx64 " type=%u pc=0x%08" PRIx32 "\n",
+			KYTY_LOG_DEBUG( "SHADER_EMIT_MISSING full format=0x%016" PRIx64 " type=%u pc=0x%08" PRIx32 "\n",
 			             static_cast<uint64_t>(inst.format), static_cast<unsigned>(inst.type), inst.pc);
 			EXIT("shader emitter missing: stage=%u instruction=%u format=%u pc=0x%08" PRIx32 "\n",
 			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<unsigned>(inst.format), inst.pc);

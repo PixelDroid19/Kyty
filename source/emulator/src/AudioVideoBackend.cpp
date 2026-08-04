@@ -1,4 +1,5 @@
 #include "Emulator/AudioVideoBackend.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <cmath>
@@ -332,7 +333,7 @@ static bool OpenCodec(AVFormatContext* format, int stream_index, AVCodecContext*
 		}
 		if (std::getenv("KYTY_DUMP_AVPLAYER") != nullptr)
 		{
-			std::fprintf(stderr, "KYTY_DUMP_AVPLAYER video_decode=%s format=%s software_allowed=%d\n",
+			KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER video_decode=%s format=%s software_allowed=%d\n",
 			             state->hardware_device != nullptr ? "vaapi" : "software",
 			             state->video_format_selection.format == AV_PIX_FMT_NONE
 			                 ? "software"
