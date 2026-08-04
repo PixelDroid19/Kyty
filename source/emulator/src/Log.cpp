@@ -267,7 +267,13 @@ namespace {
 // only when the severity gate + direction gate both pass.
 void Emit(Log::Level level, const char* format, va_list args)
 {
-	EXIT_IF(!Log::g_log_initialized);
+	// HLE and loader paths can report an error while the subsystem graph is
+	// still being assembled. Logging must not turn that diagnostic path into a
+	// process abort; the message is intentionally dropped until a sink exists.
+	if (!Log::g_log_initialized)
+	{
+		return;
+	}
 
 	if (!Log::ShouldLog(level))
 	{
