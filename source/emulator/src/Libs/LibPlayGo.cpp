@@ -27,6 +27,40 @@ struct PlayGoInitParams
 	uint32_t    reserved;
 };
 
+// Optional-chunk queries (scePlayGo*OptionalChunk) select a bitfield family.
+// type 0 = language mask, 1 = scenario mask. Values match the guest ABI.
+static constexpr int32_t  PLAYGO_OPTIONAL_TYPE_LANGUAGE = 0;
+static constexpr int32_t  PLAYGO_OPTIONAL_TYPE_SCENARIO = 1;
+static constexpr uint64_t PLAYGO_LANGUAGE_MASK_ALL      = 0xffffffffffffffffull;
+static constexpr uint64_t PLAYGO_SCENARIO_MASK_ALL      = 0x1full;
+
+union PlayGoOptionalChunk
+{
+	uint64_t bitmask;
+	uint64_t languages;
+	uint64_t scenarios;
+};
+
+static int PlayGoValidateHandle(int handle)
+{
+	return (handle == 1 ? OK : PLAYGO_ERROR_BAD_HANDLE);
+}
+
+static int PlayGoValidateOptionalType(int32_t type)
+{
+	return (type == PLAYGO_OPTIONAL_TYPE_LANGUAGE || type == PLAYGO_OPTIONAL_TYPE_SCENARIO
+	            ? OK
+	            : PLAYGO_ERROR_INVALID_ARGUMENT);
+}
+
+static void PlayGoSetOptionalChunk(int32_t type, PlayGoOptionalChunk* option)
+{
+	EXIT_IF(option == nullptr);
+
+	option->bitmask = (type == PLAYGO_OPTIONAL_TYPE_LANGUAGE ? PLAYGO_LANGUAGE_MASK_ALL
+	                                                         : PLAYGO_SCENARIO_MASK_ALL);
+}
+
 int KYTY_SYSV_ABI PlayGoInitialize(const PlayGoInitParams* init)
 {
 	PRINT_NAME();
@@ -261,6 +295,68 @@ static int KYTY_SYSV_ABI PlayGoGetEta(int handle, const uint16_t* chunk_ids, uin
 	return OK;
 }
 
+// scePlayGoGetOptionalChunk — NID g4AZyxpSAlA
+static int KYTY_SYSV_ABI PlayGoGetOptionalChunk(int handle, int32_t type, PlayGoOptionalChunk* option)
+{
+	PRINT_NAME();
+
+	if (auto ret = PlayGoValidateHandle(handle); ret != OK)
+	{
+		return ret;
+	}
+	if (option == nullptr)
+	{
+		return PLAYGO_ERROR_BAD_POINTER;
+	}
+	if (auto ret = PlayGoValidateOptionalType(type); ret != OK)
+	{
+		return ret;
+	}
+
+	PlayGoSetOptionalChunk(type, option);
+
+	return OK;
+}
+
+// scePlayGoPrefetchOptionalChunk — NID HVAa744ecdw
+static int KYTY_SYSV_ABI PlayGoPrefetchOptionalChunk(int handle, int32_t type, const PlayGoOptionalChunk* option)
+{
+	PRINT_NAME();
+
+	if (auto ret = PlayGoValidateHandle(handle); ret != OK)
+	{
+		return ret;
+	}
+	if (option == nullptr)
+	{
+		return PLAYGO_ERROR_BAD_POINTER;
+	}
+	if (auto ret = PlayGoValidateOptionalType(type); ret != OK)
+	{
+		return ret;
+	}
+
+	return OK;
+}
+
+// scePlayGoGetInstallChunkId — NID 8-e7E989rCU
+// (handle, out_chunk_id_list, number_of_entries, out_entries)
+static int KYTY_SYSV_ABI PlayGoGetInstallChunkId(int handle, uint16_t* out_chunk_id_list,
+                                                 uint32_t number_of_entries, uint32_t* out_entries)
+{
+	PRINT_NAME();
+
+	return PlayGoGetChunkId(handle, out_chunk_id_list, number_of_entries, out_entries);
+}
+
+// scePlayGoGetSupportedOptionalChunk — NID IfiN+-oeVWI
+static int KYTY_SYSV_ABI PlayGoGetSupportedOptionalChunk(int handle, int32_t type, PlayGoOptionalChunk* option)
+{
+	PRINT_NAME();
+
+	return PlayGoGetOptionalChunk(handle, type, option);
+}
+
 } // namespace PlayGo
 
 LIB_DEFINE(InitPlayGo_1)
@@ -280,6 +376,10 @@ LIB_DEFINE(InitPlayGo_1)
 	LIB_FUNC("gUPGiOQ1tmQ", PlayGo::PlayGoSetToDoList);
 	LIB_FUNC("rvBSfTimejE", PlayGo::PlayGoGetInstallSpeed);
 	LIB_FUNC("v6EZ-YWRdMs", PlayGo::PlayGoGetEta);
+	LIB_FUNC("g4AZyxpSAlA", PlayGo::PlayGoGetOptionalChunk);
+	LIB_FUNC("HVAa744ecdw", PlayGo::PlayGoPrefetchOptionalChunk);
+	LIB_FUNC("8-e7E989rCU", PlayGo::PlayGoGetInstallChunkId);
+	LIB_FUNC("IfiN+-oeVWI", PlayGo::PlayGoGetSupportedOptionalChunk);
 }
 
 } // namespace Kyty::Libs
