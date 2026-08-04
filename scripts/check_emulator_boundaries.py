@@ -39,6 +39,7 @@ HOST_SOURCE_FILES = (
 )
 LIBS_SOURCE_FILES = (
     "emulator/src/Libs/LibC.cpp",
+    "emulator/src/Libs/LibSaveData.cpp",
 )
 LOADER_SOURCE_FILES = (
     "emulator/src/Loader/SystemContent.cpp",
@@ -55,6 +56,7 @@ ALLOWED_SOURCE_FILES = (
 
 GRAPHICS_INCLUDE_PREFIX = "Emulator/Graphics/"
 SOURCE_GRAPHICS_INCLUDE_PREFIX = "emulator/include/Emulator/Graphics/"
+SDL_INCLUDE_PREFIX = "SDL"
 DEVTOOLS_INCLUDE_PREFIXES = (
     "Emulator/DevTools/",
     "Kyty/DevTools/",
@@ -180,6 +182,18 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
         return "Libs -> Graphics"
+    if relative_path in LIBS_SOURCE_FILES and any(
+        canonical_path == SDL_INCLUDE_PREFIX.casefold()
+        or canonical_path.startswith(
+            (SDL_INCLUDE_PREFIX + ".").casefold(),
+        )
+        or canonical_path.startswith(
+            (SDL_INCLUDE_PREFIX + "_").casefold(),
+        )
+        or canonical_path.startswith((SDL_INCLUDE_PREFIX + "2/").casefold())
+        for canonical_path in canonical_paths
+    ):
+        return "Libs -> SDL"
     if relative_path in LOADER_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
@@ -593,6 +607,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Libs/LibC.cpp:1: forbidden include (Libs -> Graphics): Emulator/Graphics/Objects/GpuMemory.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_direct_sdl_include_from_libs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Libs/LibSaveData.cpp", '#include "SDL_filesystem.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Libs/LibSaveData.cpp:1: forbidden include (Libs -> SDL): SDL_filesystem.h",
                     ),
                 ),
             )

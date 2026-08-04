@@ -4,6 +4,7 @@
 #include "Kyty/Core/String.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Host/Platform.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/LibraryRegistration.h"
@@ -14,9 +15,6 @@
 #include "Emulator/Libs/SaveDataPaths.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Loader/SystemContent.h"
-
-#include "SDL_filesystem.h"
-#include "SDL_stdinc.h"
 
 #include <atomic>
 #include <cstddef>
@@ -55,14 +53,12 @@ static std::filesystem::path ResolveSaveDataRoot(const char* title_id)
 		}
 	} else
 	{
-		char* base_path = SDL_GetBasePath();
-		if (base_path == nullptr || base_path[0] == '\0')
+		const auto base_path = Kyty::Emulator::Host::ApplicationBasePath();
+		if (base_path.empty())
 		{
-			SDL_free(base_path);
 			return {};
 		}
 		root = std::filesystem::u8path(base_path) / "user" / "savedata";
-		SDL_free(base_path);
 	}
 
 	if (title_id != nullptr && title_id[0] != '\0')

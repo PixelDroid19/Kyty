@@ -55,11 +55,18 @@ bool PeakRssBytesIsCallable()
 	return true;
 }
 
+bool ApplicationBasePathIsCallable()
+{
+	const std::string base_path = Host::ApplicationBasePath();
+	std::printf("host platform integration base_path=%s\n", base_path.c_str());
+	return true;
+}
+
 } // namespace
 
 int main()
 {
-	if (!UtcTimestampHasCaptureFileShape() || !PeakRssBytesIsCallable())
+	if (!UtcTimestampHasCaptureFileShape() || !PeakRssBytesIsCallable() || !ApplicationBasePathIsCallable())
 	{
 		return 1;
 	}

@@ -1,5 +1,8 @@
 #include "Emulator/Host/Platform.h"
 
+#include "SDL_filesystem.h"
+#include "SDL_stdinc.h"
+
 #include <chrono>
 #include <ctime>
 
@@ -28,6 +31,20 @@ std::string UtcTimestamp()
 	char stamp[32] {};
 	std::strftime(stamp, sizeof(stamp), "%Y%m%dT%H%M%SZ", &utc);
 	return stamp;
+}
+
+std::string ApplicationBasePath()
+{
+	char* base_path = SDL_GetBasePath();
+	if (base_path == nullptr || base_path[0] == '\0')
+	{
+		SDL_free(base_path);
+		return {};
+	}
+
+	std::string result(base_path);
+	SDL_free(base_path);
+	return result;
 }
 
 uint64_t PeakRssBytes()

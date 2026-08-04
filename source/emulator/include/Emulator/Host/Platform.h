@@ -7,6 +7,7 @@
 namespace Kyty::Emulator::Host {
 
 [[nodiscard]] std::string UtcTimestamp();
+[[nodiscard]] std::string ApplicationBasePath();
 [[nodiscard]] uint64_t    PeakRssBytes();
 
 } // namespace Kyty::Emulator::Host
