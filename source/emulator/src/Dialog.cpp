@@ -4,6 +4,7 @@
 
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 
 #include <atomic>
 
@@ -167,14 +168,14 @@ int KYTY_SYSV_ABI SaveDataDialogOpen(const SaveDataDialogParam* param)
 	// Reject clearly invalid envelopes; deeper mode payload decoding is deferred.
 	if (param->base_size != 0x30 || param->mode == 0)
 	{
-		printf("\t base_size = 0x%016" PRIx64 " mode = %u (rejected)\n", param->base_size, param->mode);
+		KYTY_LOG_DEBUG("\t base_size = 0x%016" PRIx64 " mode = %u (rejected)\n", param->base_size, param->mode);
 		return CommonDialog::ERROR_PARAM_INVALID;
 	}
 
-	printf("\t base_size = 0x%016" PRIx64 "\n", param->base_size);
-	printf("\t size      = %u\n", param->size);
-	printf("\t mode      = %u\n", param->mode);
-	printf("\t disp_type = %u\n", param->disp_type);
+	KYTY_LOG_DEBUG("\t base_size = 0x%016" PRIx64 "\n", param->base_size);
+	KYTY_LOG_DEBUG("\t size      = %u\n", param->size);
+	KYTY_LOG_DEBUG("\t mode      = %u\n", param->mode);
+	KYTY_LOG_DEBUG("\t disp_type = %u\n", param->disp_type);
 
 	// Host has no SCE dialog compositor. Complete immediately so polling loops
 	// that wait for FINISHED can proceed; guest-visible status is FINISHED.
@@ -242,8 +243,8 @@ int KYTY_SYSV_ABI SaveDataDialogIsReadyToDisplay(int* ready)
 int KYTY_SYSV_ABI SaveDataDialogProgressBarInc(int target, uint32_t delta)
 {
 	PRINT_NAME();
-	printf("\t target = %d\n", target);
-	printf("\t delta  = %u\n", delta);
+	KYTY_LOG_DEBUG("\t target = %d\n", target);
+	KYTY_LOG_DEBUG("\t delta  = %u\n", delta);
 	return OK;
 }
 
@@ -251,8 +252,8 @@ int KYTY_SYSV_ABI SaveDataDialogProgressBarSetValue(int target, uint32_t rate)
 {
 	PRINT_NAME();
 
-	printf("\t target = %d\n", target);
-	printf("\t rate   = %u\n", rate);
+	KYTY_LOG_DEBUG("\t target = %d\n", target);
+	KYTY_LOG_DEBUG("\t rate   = %u\n", rate);
 
 	const int status = g_status.load(std::memory_order_acquire);
 	if (status != CommonDialog::STATUS_RUNNING && status != CommonDialog::STATUS_FINISHED)
@@ -307,13 +308,13 @@ int KYTY_SYSV_ABI MsgDialogOpen(const MsgDialogParam* param)
 
 	if (param->base_size != 0x30)
 	{
-		printf("\t base_size = 0x%016" PRIx64 " (rejected)\n", param->base_size);
+		KYTY_LOG_DEBUG("\t base_size = 0x%016" PRIx64 " (rejected)\n", param->base_size);
 		return CommonDialog::ERROR_PARAM_INVALID;
 	}
 
-	printf("\t base_size = 0x%016" PRIx64 "\n", param->base_size);
-	printf("\t size      = %u\n", param->size);
-	printf("\t mode      = %u\n", param->mode);
+	KYTY_LOG_DEBUG("\t base_size = 0x%016" PRIx64 "\n", param->base_size);
+	KYTY_LOG_DEBUG("\t size      = %u\n", param->size);
+	KYTY_LOG_DEBUG("\t mode      = %u\n", param->mode);
 
 	g_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
 	return OK;
@@ -380,24 +381,24 @@ int KYTY_SYSV_ABI MsgDialogTerminate()
 int KYTY_SYSV_ABI MsgDialogProgressBarInc(int target, uint32_t delta)
 {
 	PRINT_NAME();
-	printf("\t target = %d\n", target);
-	printf("\t delta  = %u\n", delta);
+	KYTY_LOG_DEBUG("\t target = %d\n", target);
+	KYTY_LOG_DEBUG("\t delta  = %u\n", delta);
 	return OK;
 }
 
 int KYTY_SYSV_ABI MsgDialogProgressBarSetMsg(int target, const char* msg)
 {
 	PRINT_NAME();
-	printf("\t target = %d\n", target);
-	printf("\t msg    = %s\n", msg != nullptr ? msg : "(null)");
+	KYTY_LOG_DEBUG("\t target = %d\n", target);
+	KYTY_LOG_DEBUG("\t msg    = %s\n", msg != nullptr ? msg : "(null)");
 	return OK;
 }
 
 int KYTY_SYSV_ABI MsgDialogProgressBarSetValue(int target, uint32_t value)
 {
 	PRINT_NAME();
-	printf("\t target = %d\n", target);
-	printf("\t value  = %u\n", value);
+	KYTY_LOG_DEBUG("\t target = %d\n", target);
+	KYTY_LOG_DEBUG("\t value  = %u\n", value);
 	return OK;
 }
 

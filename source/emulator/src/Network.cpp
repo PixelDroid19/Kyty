@@ -10,6 +10,7 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -814,9 +815,9 @@ int KYTY_SYSV_ABI NetPoolCreate(const char* name, int size, int flags)
 {
 	PRINT_NAME();
 
-	printf("\t name = %s\n", name);
-	printf("\t size = %d\n", size);
-	printf("\t flags = %d\n", flags);
+	KYTY_LOG_DEBUG("\t name = %s\n", name);
+	KYTY_LOG_DEBUG("\t size = %d\n", size);
+	KYTY_LOG_DEBUG("\t flags = %d\n", flags);
 
 	EXIT_IF(g_net == nullptr);
 
@@ -856,7 +857,7 @@ int KYTY_SYSV_ABI NetInetPton(int af, const char* src, void* dst)
 	EXIT_NOT_IMPLEMENTED(dst == nullptr);
 	EXIT_NOT_IMPLEMENTED(strcmp(src, "127.0.0.1") != 0);
 
-	printf("\t src = %.16s\n", src);
+	KYTY_LOG_DEBUG("\t src = %.16s\n", src);
 
 	*static_cast<uint32_t*>(dst) = 0x7f000001;
 
@@ -1036,8 +1037,8 @@ static bool GuestToHostSockaddrIn(const void* addr, int len, sockaddr_in* out)
 int KYTY_SYSV_ABI NetSocket(const char* name, int family, int type, int protocol)
 {
 	PRINT_NAME();
-	printf("\t name = %s\n", name != nullptr ? name : "(null)");
-	printf("\t family = %d type = %d protocol = %d\n", family, type, protocol);
+	KYTY_LOG_DEBUG("\t name = %s\n", name != nullptr ? name : "(null)");
+	KYTY_LOG_DEBUG("\t family = %d type = %d protocol = %d\n", family, type, protocol);
 
 	SocketState state {};
 #if KYTY_NET_HOST_POSIX
@@ -1067,7 +1068,7 @@ int KYTY_SYSV_ABI NetSocket(const char* name, int family, int type, int protocol
 int KYTY_SYSV_ABI NetSocketClose(int id)
 {
 	PRINT_NAME();
-	printf("\t id = %d\n", id);
+	KYTY_LOG_DEBUG("\t id = %d\n", id);
 	const auto it = g_sockets.find(id);
 	if (it == g_sockets.end())
 	{
@@ -1086,7 +1087,7 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
 {
 	PRINT_NAME();
-	printf("\t id = %d\n", id);
+	KYTY_LOG_DEBUG("\t id = %d\n", id);
 	const auto it = g_sockets.find(id);
 	if (it == g_sockets.end())
 	{
@@ -1118,7 +1119,7 @@ int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
 int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len)
 {
 	PRINT_NAME();
-	printf("\t id = %d\n", id);
+	KYTY_LOG_DEBUG("\t id = %d\n", id);
 	const auto it = g_sockets.find(id);
 	if (it == g_sockets.end())
 	{
@@ -1150,7 +1151,7 @@ int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len)
 int KYTY_SYSV_ABI NetListen(int id, int backlog)
 {
 	PRINT_NAME();
-	printf("\t id = %d backlog = %d\n", id, backlog);
+	KYTY_LOG_DEBUG("\t id = %d backlog = %d\n", id, backlog);
 	const auto it = g_sockets.find(id);
 	if (it == g_sockets.end())
 	{
@@ -1170,7 +1171,7 @@ int KYTY_SYSV_ABI NetListen(int id, int backlog)
 int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len)
 {
 	PRINT_NAME();
-	printf("\t id = %d\n", id);
+	KYTY_LOG_DEBUG("\t id = %d\n", id);
 	const auto it = g_sockets.find(id);
 	if (it == g_sockets.end())
 	{
@@ -1207,7 +1208,7 @@ int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len)
 int64_t KYTY_SYSV_ABI NetSend(int id, const void* buf, uint64_t len, int flags)
 {
 	PRINT_NAME();
-	printf("\t id = %d len = %" PRIu64 " flags = %d\n", id, len, flags);
+	KYTY_LOG_DEBUG("\t id = %d len = %" PRIu64 " flags = %d\n", id, len, flags);
 	const auto it = g_sockets.find(id);
 	if (it == g_sockets.end())
 	{
@@ -1237,7 +1238,7 @@ int64_t KYTY_SYSV_ABI NetSend(int id, const void* buf, uint64_t len, int flags)
 int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags)
 {
 	PRINT_NAME();
-	printf("\t id = %d len = %" PRIu64 " flags = %d\n", id, len, flags);
+	KYTY_LOG_DEBUG("\t id = %d len = %" PRIu64 " flags = %d\n", id, len, flags);
 	const auto it = g_sockets.find(id);
 	if (it == g_sockets.end())
 	{
@@ -1267,7 +1268,7 @@ int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags)
 int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len)
 {
 	PRINT_NAME();
-	printf("\t id = %d\n", id);
+	KYTY_LOG_DEBUG("\t id = %d\n", id);
 	const auto it = g_sockets.find(id);
 	if (it == g_sockets.end() || !it->second.bound)
 	{
@@ -1296,7 +1297,7 @@ int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len)
 int KYTY_SYSV_ABI NetGetsockopt(int id, int level, int option, void* value, int* value_len)
 {
 	PRINT_NAME();
-	printf("\t id = %d level = %d option = %d\n", id, level, option);
+	KYTY_LOG_DEBUG("\t id = %d level = %d option = %d\n", id, level, option);
 	const auto it = g_sockets.find(id);
 	if (it == g_sockets.end())
 	{
@@ -1390,7 +1391,7 @@ const char* KYTY_SYSV_ABI NetInetNtop(int af, const void* src, char* dst, int si
 int KYTY_SYSV_ABI NetSetsockopt(int id, int level, int option, const void* /*value*/, int /*value_len*/)
 {
 	PRINT_NAME();
-	printf("\t id = %d level = %d option = %d\n", id, level, option);
+	KYTY_LOG_DEBUG("\t id = %d level = %d option = %d\n", id, level, option);
 	return (g_sockets.find(id) != g_sockets.end() ? OK : NET_ERROR_EBADF);
 }
 
@@ -1425,7 +1426,7 @@ uint16_t KYTY_SYSV_ABI NetNtohs(uint16_t netshort)
 int KYTY_SYSV_ABI NetResolverCreate(const char* name, int memid, int flags)
 {
 	PRINT_NAME();
-	printf("\t name = %s memid = %d flags = %d\n", name != nullptr ? name : "(null)", memid, flags);
+	KYTY_LOG_DEBUG("\t name = %s memid = %d flags = %d\n", name != nullptr ? name : "(null)", memid, flags);
 	static std::atomic<int> next_resolver {1};
 	return next_resolver.fetch_add(1, std::memory_order_relaxed);
 }
@@ -1433,14 +1434,14 @@ int KYTY_SYSV_ABI NetResolverCreate(const char* name, int memid, int flags)
 int KYTY_SYSV_ABI NetResolverDestroy(int rid)
 {
 	PRINT_NAME();
-	printf("\t rid = %d\n", rid);
+	KYTY_LOG_DEBUG("\t rid = %d\n", rid);
 	return OK;
 }
 
 int KYTY_SYSV_ABI NetResolverGetError(int rid, int* result)
 {
 	PRINT_NAME();
-	printf("\t rid = %d\n", rid);
+	KYTY_LOG_DEBUG("\t rid = %d\n", rid);
 	if (result == nullptr)
 	{
 		return NET_ERROR_EINVAL;
@@ -1459,7 +1460,7 @@ int KYTY_SYSV_ABI SslInit(uint64_t pool_size)
 {
 	PRINT_NAME();
 
-	printf("\t size = %" PRIu64 "\n", pool_size);
+	KYTY_LOG_DEBUG("\t size = %" PRIu64 "\n", pool_size);
 
 	EXIT_IF(g_net == nullptr);
 
@@ -1493,7 +1494,7 @@ int KYTY_SYSV_ABI SslClose(int ssl_id)
 {
 	PRINT_NAME();
 
-	printf("\t ssl_id = %d\n", ssl_id);
+	KYTY_LOG_DEBUG("\t ssl_id = %d\n", ssl_id);
 
 	return OK;
 }
@@ -1515,9 +1516,9 @@ int KYTY_SYSV_ABI HttpInit(int memid, int ssl_ctx_id, uint64_t pool_size)
 {
 	PRINT_NAME();
 
-	printf("\t memid      = %d\n", memid);
-	printf("\t ssl_ctx_id = %d\n", ssl_ctx_id);
-	printf("\t size       = %" PRIu64 "\n", pool_size);
+	KYTY_LOG_DEBUG("\t memid      = %d\n", memid);
+	KYTY_LOG_DEBUG("\t ssl_ctx_id = %d\n", ssl_ctx_id);
+	KYTY_LOG_DEBUG("\t size       = %" PRIu64 "\n", pool_size);
 
 	EXIT_IF(g_net == nullptr);
 
@@ -1551,10 +1552,10 @@ int KYTY_SYSV_ABI HttpCreateTemplate(int http_ctx_id, const char* user_agent, in
 {
 	PRINT_NAME();
 
-	printf("\t http_ctx_id        = %d\n", http_ctx_id);
-	printf("\t user_agent         = %s\n", user_agent);
-	printf("\t http_ver           = %d\n", http_ver);
-	printf("\t is_auto_proxy_conf = %d\n", is_auto_proxy_conf);
+	KYTY_LOG_DEBUG("\t http_ctx_id        = %d\n", http_ctx_id);
+	KYTY_LOG_DEBUG("\t user_agent         = %s\n", user_agent);
+	KYTY_LOG_DEBUG("\t http_ver           = %d\n", http_ver);
+	KYTY_LOG_DEBUG("\t is_auto_proxy_conf = %d\n", is_auto_proxy_conf);
 
 	EXIT_IF(g_net == nullptr);
 
@@ -1586,8 +1587,8 @@ int KYTY_SYSV_ABI HttpSetNonblock(int id, int enable)
 {
 	PRINT_NAME();
 
-	printf("\t id     = %d\n", id);
-	printf("\t enable = %d\n", enable);
+	KYTY_LOG_DEBUG("\t id     = %d\n", id);
+	KYTY_LOG_DEBUG("\t enable = %d\n", enable);
 
 	if (!g_net->HttpSetNonblock(Network::Id(id), enable != 0))
 	{
@@ -1601,7 +1602,7 @@ int KYTY_SYSV_ABI HttpsSetSslCallback(int id, HttpsCallback cbfunc, void* user_a
 {
 	PRINT_NAME();
 
-	printf("\t id     = %d\n", id);
+	KYTY_LOG_DEBUG("\t id     = %d\n", id);
 
 	if (!g_net->HttpsSetSslCallback(Network::Id(id), cbfunc, user_arg))
 	{
@@ -1615,8 +1616,8 @@ int KYTY_SYSV_ABI HttpsDisableOption(int id, uint32_t ssl_flags)
 {
 	PRINT_NAME();
 
-	printf("\t id        = %d\n", id);
-	printf("\t ssl_flags = %u\n", ssl_flags);
+	KYTY_LOG_DEBUG("\t id        = %d\n", id);
+	KYTY_LOG_DEBUG("\t ssl_flags = %u\n", ssl_flags);
 
 	if (!g_net->HttpsDisableOption(Network::Id(id), ssl_flags))
 	{
@@ -1630,8 +1631,8 @@ int KYTY_SYSV_ABI HttpSetResolveTimeOut(int id, uint32_t usec)
 {
 	PRINT_NAME();
 
-	printf("\t id   = %d\n", id);
-	printf("\t usec = %u\n", usec);
+	KYTY_LOG_DEBUG("\t id   = %d\n", id);
+	KYTY_LOG_DEBUG("\t usec = %u\n", usec);
 
 	if (!g_net->HttpSetResolveTimeOut(Network::Id(id), usec))
 	{
@@ -1645,8 +1646,8 @@ int KYTY_SYSV_ABI HttpSetResolveRetry(int id, int32_t retry)
 {
 	PRINT_NAME();
 
-	printf("\t id    = %d\n", id);
-	printf("\t retry = %d\n", retry);
+	KYTY_LOG_DEBUG("\t id    = %d\n", id);
+	KYTY_LOG_DEBUG("\t retry = %d\n", retry);
 
 	if (!g_net->HttpSetResolveRetry(Network::Id(id), retry))
 	{
@@ -1660,8 +1661,8 @@ int KYTY_SYSV_ABI HttpSetConnectTimeOut(int id, uint32_t usec)
 {
 	PRINT_NAME();
 
-	printf("\t id   = %d\n", id);
-	printf("\t usec = %u\n", usec);
+	KYTY_LOG_DEBUG("\t id   = %d\n", id);
+	KYTY_LOG_DEBUG("\t usec = %u\n", usec);
 
 	if (!g_net->HttpSetConnectTimeOut(Network::Id(id), usec))
 	{
@@ -1675,8 +1676,8 @@ int KYTY_SYSV_ABI HttpSetSendTimeOut(int id, uint32_t usec)
 {
 	PRINT_NAME();
 
-	printf("\t id   = %d\n", id);
-	printf("\t usec = %u\n", usec);
+	KYTY_LOG_DEBUG("\t id   = %d\n", id);
+	KYTY_LOG_DEBUG("\t usec = %u\n", usec);
 
 	if (!g_net->HttpSetSendTimeOut(Network::Id(id), usec))
 	{
@@ -1690,8 +1691,8 @@ int KYTY_SYSV_ABI HttpSetRecvTimeOut(int id, uint32_t usec)
 {
 	PRINT_NAME();
 
-	printf("\t id   = %d\n", id);
-	printf("\t usec = %u\n", usec);
+	KYTY_LOG_DEBUG("\t id   = %d\n", id);
+	KYTY_LOG_DEBUG("\t usec = %u\n", usec);
 
 	if (!g_net->HttpSetRecvTimeOut(Network::Id(id), usec))
 	{
@@ -1705,8 +1706,8 @@ int KYTY_SYSV_ABI HttpSetAutoRedirect(int id, int enable)
 {
 	PRINT_NAME();
 
-	printf("\t id     = %d\n", id);
-	printf("\t enable = %d\n", enable);
+	KYTY_LOG_DEBUG("\t id     = %d\n", id);
+	KYTY_LOG_DEBUG("\t enable = %d\n", enable);
 
 	if (!g_net->HttpSetAutoRedirect(Network::Id(id), enable))
 	{
@@ -1720,8 +1721,8 @@ int KYTY_SYSV_ABI HttpSetAuthEnabled(int id, int enable)
 {
 	PRINT_NAME();
 
-	printf("\t id     = %d\n", id);
-	printf("\t enable = %d\n", enable);
+	KYTY_LOG_DEBUG("\t id     = %d\n", id);
+	KYTY_LOG_DEBUG("\t enable = %d\n", enable);
 
 	if (!g_net->HttpSetAuthEnabled(Network::Id(id), enable))
 	{
@@ -1735,10 +1736,10 @@ int KYTY_SYSV_ABI HttpAddRequestHeader(int id, const char* name, const char* val
 {
 	PRINT_NAME();
 
-	printf("\t id    = %d\n", id);
-	printf("\t name  = %s\n", name);
-	printf("\t value = %s\n", value);
-	printf("\t mode  = %u\n", mode);
+	KYTY_LOG_DEBUG("\t id    = %d\n", id);
+	KYTY_LOG_DEBUG("\t name  = %s\n", name);
+	KYTY_LOG_DEBUG("\t value = %s\n", value);
+	KYTY_LOG_DEBUG("\t mode  = %u\n", mode);
 
 	EXIT_NOT_IMPLEMENTED(mode != 0 && mode != 1);
 
@@ -1754,7 +1755,7 @@ int KYTY_SYSV_ABI HttpCreateEpoll(int http_ctx_id, HttpEpollHandle* eh)
 {
 	PRINT_NAME();
 
-	printf("\t http_ctx_id = %d\n", http_ctx_id);
+	KYTY_LOG_DEBUG("\t http_ctx_id = %d\n", http_ctx_id);
 
 	EXIT_IF(g_net == nullptr);
 
@@ -1773,7 +1774,7 @@ int KYTY_SYSV_ABI HttpDestroyEpoll(int http_ctx_id, HttpEpollHandle eh)
 {
 	PRINT_NAME();
 
-	printf("\t http_ctx_id = %d\n", http_ctx_id);
+	KYTY_LOG_DEBUG("\t http_ctx_id = %d\n", http_ctx_id);
 
 	EXIT_IF(g_net == nullptr);
 
@@ -1790,7 +1791,7 @@ int KYTY_SYSV_ABI HttpSetEpoll(int id, HttpEpollHandle eh, void* user_arg)
 {
 	PRINT_NAME();
 
-	printf("\t id = %d\n", id);
+	KYTY_LOG_DEBUG("\t id = %d\n", id);
 
 	EXIT_NOT_IMPLEMENTED(eh == nullptr);
 
@@ -1806,7 +1807,7 @@ int KYTY_SYSV_ABI HttpUnsetEpoll(int id)
 {
 	PRINT_NAME();
 
-	printf("\t id = %d\n", id);
+	KYTY_LOG_DEBUG("\t id = %d\n", id);
 
 	EXIT_NOT_IMPLEMENTED(!g_net->HttpValidRequest(Network::Id(id)));
 
@@ -1817,7 +1818,7 @@ int KYTY_SYSV_ABI HttpSendRequest(int request_id, const void* /*post_data*/, siz
 {
 	PRINT_NAME();
 
-	printf("\t request_id = %d\n", request_id);
+	KYTY_LOG_DEBUG("\t request_id = %d\n", request_id);
 
 	return HTTP_ERROR_TIMEOUT;
 }
@@ -1826,9 +1827,9 @@ int KYTY_SYSV_ABI HttpCreateConnectionWithURL(int tmpl_id, const char* url, int 
 {
 	PRINT_NAME();
 
-	printf("\t tmpl_id           = %d\n", tmpl_id);
-	printf("\t url               = %s\n", url);
-	printf("\t enable_keep_alive = %d\n", enable_keep_alive);
+	KYTY_LOG_DEBUG("\t tmpl_id           = %d\n", tmpl_id);
+	KYTY_LOG_DEBUG("\t url               = %s\n", url);
+	KYTY_LOG_DEBUG("\t enable_keep_alive = %d\n", enable_keep_alive);
 
 	EXIT_IF(g_net == nullptr);
 
@@ -1846,7 +1847,7 @@ int KYTY_SYSV_ABI HttpDeleteConnection(int conn_id)
 {
 	PRINT_NAME();
 
-	printf("\t conn_id = %d\n", conn_id);
+	KYTY_LOG_DEBUG("\t conn_id = %d\n", conn_id);
 
 	EXIT_IF(g_net == nullptr);
 
@@ -1862,10 +1863,10 @@ int KYTY_SYSV_ABI HttpCreateRequestWithURL2(int conn_id, const char* method, con
 {
 	PRINT_NAME();
 
-	printf("\t conn_id        = %d\n", conn_id);
-	printf("\t url            = %s\n", url);
-	printf("\t method         = %s\n", method);
-	printf("\t content_length = %" PRIu64 "\n", content_length);
+	KYTY_LOG_DEBUG("\t conn_id        = %d\n", conn_id);
+	KYTY_LOG_DEBUG("\t url            = %s\n", url);
+	KYTY_LOG_DEBUG("\t method         = %s\n", method);
+	KYTY_LOG_DEBUG("\t content_length = %" PRIu64 "\n", content_length);
 
 	EXIT_IF(g_net == nullptr);
 
@@ -1883,7 +1884,7 @@ int KYTY_SYSV_ABI HttpDeleteRequest(int req_id)
 {
 	PRINT_NAME();
 
-	printf("\t req_id = %d\n", req_id);
+	KYTY_LOG_DEBUG("\t req_id = %d\n", req_id);
 
 	EXIT_IF(g_net == nullptr);
 
@@ -2006,7 +2007,7 @@ int KYTY_SYSV_ABI NetCtlGetInfo(int code, NetCtlInfo* info)
 
 	EXIT_NOT_IMPLEMENTED(info == nullptr);
 
-	printf("\t code = %d\n", code);
+	KYTY_LOG_DEBUG("\t code = %d\n", code);
 
 	switch (code)
 	{
@@ -2095,8 +2096,8 @@ int KYTY_SYSV_ABI NpSetNpTitleId(const NpTitleId* title_id, const NpTitleSecret*
 	EXIT_NOT_IMPLEMENTED(title_id == nullptr);
 	EXIT_NOT_IMPLEMENTED(title_secret == nullptr);
 
-	printf("\t title_id = %.12s\n", title_id->id);
-	printf("\t title_secret = %s\n", String::HexFromBin(Core::ByteBuffer(title_secret->data, 128)).C_Str());
+	KYTY_LOG_DEBUG("\t title_id = %.12s\n", title_id->id);
+	KYTY_LOG_DEBUG("\t title_secret = %s\n", String::HexFromBin(Core::ByteBuffer(title_secret->data, 128)).C_Str());
 
 	return OK;
 }
@@ -2108,13 +2109,13 @@ int KYTY_SYSV_ABI NpSetContentRestriction(const NpContentRestriction* restrictio
 	EXIT_NOT_IMPLEMENTED(restriction == nullptr);
 	EXIT_NOT_IMPLEMENTED(restriction->size != sizeof(NpContentRestriction));
 
-	printf("\t default_age_restriction = %" PRIi8 "\n", restriction->default_age_restriction);
-	printf("\t age_restriction_count   = %" PRIi32 "\n", restriction->age_restriction_count);
+	KYTY_LOG_DEBUG("\t default_age_restriction = %" PRIi8 "\n", restriction->default_age_restriction);
+	KYTY_LOG_DEBUG("\t age_restriction_count   = %" PRIi32 "\n", restriction->age_restriction_count);
 
 	for (int i = 0; i < restriction->age_restriction_count; i++)
 	{
-		printf("\t age_restriction[%d].age = %" PRIi8 "\n", i, restriction->age_restriction[i].age);
-		printf("\t age_restriction[%d].country_code.data = %.2s\n", i, restriction->age_restriction[i].country_code.data);
+		KYTY_LOG_DEBUG("\t age_restriction[%d].age = %" PRIi8 "\n", i, restriction->age_restriction[i].age);
+		KYTY_LOG_DEBUG("\t age_restriction[%d].country_code.data = %.2s\n", i, restriction->age_restriction[i].country_code.data);
 	}
 
 	return OK;
@@ -2150,7 +2151,7 @@ int KYTY_SYSV_ABI NpGetNpId(int user_id, NpId* np_id)
 {
 	PRINT_NAME();
 
-	printf("\t user_id = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 
 	EXIT_NOT_IMPLEMENTED(np_id == nullptr);
 
@@ -2167,7 +2168,7 @@ int KYTY_SYSV_ABI NpGetOnlineId(int user_id, NpOnlineId* online_id)
 {
 	PRINT_NAME();
 
-	printf("\t user_id = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 
 	EXIT_NOT_IMPLEMENTED(online_id == nullptr);
 
@@ -2186,9 +2187,9 @@ int KYTY_SYSV_ABI NpCreateAsyncRequest(const NpCreateAsyncRequestParameter* para
 
 	EXIT_NOT_IMPLEMENTED(param == nullptr);
 
-	printf("\t size              = %" PRIu64 "\n", param->size);
-	printf("\t cpu_affinity_mask = %" PRIu64 "\n", param->cpu_affinity_mask);
-	printf("\t thread_priority   = %d\n", param->thread_priority);
+	KYTY_LOG_DEBUG("\t size              = %" PRIu64 "\n", param->size);
+	KYTY_LOG_DEBUG("\t cpu_affinity_mask = %" PRIu64 "\n", param->cpu_affinity_mask);
+	KYTY_LOG_DEBUG("\t thread_priority   = %d\n", param->thread_priority);
 
 	static std::atomic_int id = 0;
 
@@ -2203,7 +2204,7 @@ int KYTY_SYSV_ABI NpDeleteRequest(int req_id)
 
 	EXIT_NOT_IMPLEMENTED(req_id != 1);
 
-	printf("\t req_id = %d\n", req_id);
+	KYTY_LOG_DEBUG("\t req_id = %d\n", req_id);
 
 	return OK;
 }
@@ -2216,8 +2217,8 @@ int KYTY_SYSV_ABI NpCheckNpAvailability(int req_id, const char* user, void* resu
 	EXIT_NOT_IMPLEMENTED(user == nullptr);
 	EXIT_NOT_IMPLEMENTED(result != nullptr);
 
-	printf("\t req_id = %d\n", req_id);
-	printf("\t user   = %s\n", user);
+	KYTY_LOG_DEBUG("\t req_id = %d\n", req_id);
+	KYTY_LOG_DEBUG("\t user   = %s\n", user);
 
 	return OK;
 }
@@ -2229,7 +2230,7 @@ int KYTY_SYSV_ABI NpPollAsync(int req_id, int* result)
 	EXIT_NOT_IMPLEMENTED(req_id != 1);
 	EXIT_NOT_IMPLEMENTED(result == nullptr);
 
-	printf("\t req_id = %d\n", req_id);
+	KYTY_LOG_DEBUG("\t req_id = %d\n", req_id);
 
 	*result = 0;
 
@@ -2242,7 +2243,7 @@ int KYTY_SYSV_ABI NpGetState(int user_id, uint32_t* state)
 
 	EXIT_NOT_IMPLEMENTED(state == nullptr);
 
-	printf("\t user_id = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 
 	*state = 1; // Signed out
 
@@ -2300,8 +2301,8 @@ int KYTY_SYSV_ABI NpTrophyCreateContext(int* context, int user_id, uint32_t serv
 
 	*context = 1;
 
-	printf("\t user_id       = %d\n", user_id);
-	printf("\t service_label = %u\n", service_label);
+	KYTY_LOG_DEBUG("\t user_id       = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t service_label = %u\n", service_label);
 
 	return OK;
 }
@@ -2314,8 +2315,8 @@ int KYTY_SYSV_ABI NpTrophyRegisterContext(int context, int handle, uint64_t opti
 	EXIT_NOT_IMPLEMENTED(context != 1);
 	EXIT_NOT_IMPLEMENTED(handle != 1);
 
-	printf("\t context = %d\n", context);
-	printf("\t handle  = %d\n", handle);
+	KYTY_LOG_DEBUG("\t context = %d\n", context);
+	KYTY_LOG_DEBUG("\t handle  = %d\n", handle);
 
 	return OK;
 }
@@ -2326,7 +2327,7 @@ int KYTY_SYSV_ABI NpTrophyDestroyHandle(int handle)
 
 	EXIT_NOT_IMPLEMENTED(handle != 1);
 
-	printf("\t handle  = %d\n", handle);
+	KYTY_LOG_DEBUG("\t handle  = %d\n", handle);
 
 	return OK;
 }
@@ -2340,8 +2341,8 @@ int KYTY_SYSV_ABI NpTrophyGetTrophyUnlockState(int context, int handle, NpTrophy
 	EXIT_NOT_IMPLEMENTED(context != 1);
 	EXIT_NOT_IMPLEMENTED(handle != 1);
 
-	printf("\t context = %d\n", context);
-	printf("\t handle  = %d\n", handle);
+	KYTY_LOG_DEBUG("\t context = %d\n", context);
+	KYTY_LOG_DEBUG("\t handle  = %d\n", handle);
 
 	flags->flag_bits[0] = 0;
 	flags->flag_bits[1] = 0;
@@ -2365,8 +2366,8 @@ int KYTY_SYSV_ABI NpWebApiInitialize(int http_ctx_id, size_t pool_size)
 
 	EXIT_IF(g_net == nullptr);
 
-	printf("\t http_ctx_id = %d\n", http_ctx_id);
-	printf("\t pool_size   = %" PRIu64 "\n", pool_size);
+	KYTY_LOG_DEBUG("\t http_ctx_id = %d\n", http_ctx_id);
+	KYTY_LOG_DEBUG("\t pool_size   = %" PRIu64 "\n", pool_size);
 
 	EXIT_NOT_IMPLEMENTED(!g_net->HttpValid(Network::Id(http_ctx_id)));
 
@@ -2379,7 +2380,7 @@ int KYTY_SYSV_ABI NpWebApiTerminate(int lib_ctx_id)
 {
 	PRINT_NAME();
 
-	printf("\t lib_ctx_id = %d\n", lib_ctx_id);
+	KYTY_LOG_DEBUG("\t lib_ctx_id = %d\n", lib_ctx_id);
 
 	return OK;
 }

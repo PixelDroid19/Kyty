@@ -6,6 +6,7 @@
 
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 
 #include <cmath>
 #include <cinttypes>
@@ -638,9 +639,9 @@ int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption
 	option = Ngs2ResolveRackOption(rack_id, option, &default_mastering);
 	EXIT_NOT_IMPLEMENTED(option == nullptr);
 
-	printf("\t rack_id    = 0x%" PRIx32 "\n", rack_id);
+	KYTY_LOG_DEBUG("\t rack_id    = 0x%" PRIx32 "\n", rack_id);
 	const uint32_t max_voices = Ngs2GetRackMaxVoices(rack_id, option);
-	printf("\t max_voices = %u\n", max_voices);
+	KYTY_LOG_DEBUG("\t max_voices = %u\n", max_voices);
 
 	buffer_info->host_buffer_size = sizeof(Ngs2RackInternal) + sizeof(Ngs2VoiceInternal) * max_voices;
 
@@ -659,14 +660,14 @@ int KYTY_SYSV_ABI Ngs2SystemCreateWithAllocator(const Ngs2SystemOption* option, 
 
 	EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2SystemOption));
 
-	printf("\t name              = %.16s\n", option->name);
-	printf("\t flags             = %u\n", option->flags);
-	printf("\t max_grain_samples = %u\n", option->max_grain_samples);
-	printf("\t num_grain_samples = %u\n", option->num_grain_samples);
-	printf("\t sample_rate       = %u\n", option->sample_rate);
-	printf("\t alloc_handler     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->alloc_handler));
-	printf("\t free_handler      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->free_handler));
-	printf("\t user_data         = 0x%016" PRIx64 "\n", static_cast<uint64_t>(allocator->user_data));
+	KYTY_LOG_DEBUG("\t name              = %.16s\n", option->name);
+	KYTY_LOG_DEBUG("\t flags             = %u\n", option->flags);
+	KYTY_LOG_DEBUG("\t max_grain_samples = %u\n", option->max_grain_samples);
+	KYTY_LOG_DEBUG("\t num_grain_samples = %u\n", option->num_grain_samples);
+	KYTY_LOG_DEBUG("\t sample_rate       = %u\n", option->sample_rate);
+	KYTY_LOG_DEBUG("\t alloc_handler     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->alloc_handler));
+	KYTY_LOG_DEBUG("\t free_handler      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->free_handler));
+	KYTY_LOG_DEBUG("\t user_data         = 0x%016" PRIx64 "\n", static_cast<uint64_t>(allocator->user_data));
 
 	Ngs2ContextBufferInfo buf {};
 	buf.host_buffer      = nullptr;
@@ -708,17 +709,17 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 
 	EXIT_NOT_IMPLEMENTED(option->size < sizeof(Ngs2RackOption));
 
-	printf("\t rack_id                = 0x%" PRIx32 "\n", rack_id);
-	printf("\t option_size            = 0x%016" PRIx64 "\n", static_cast<uint64_t>(option->size));
-	printf("\t name                   = %.16s\n", option->name);
-	printf("\t flags                  = %u\n", option->flags);
-	printf("\t max_grain_samples      = %u\n", option->max_grain_samples);
-	printf("\t max_voices             = %u\n", option->max_voices);
-	printf("\t max_input_delay_blocks = %u\n", option->max_input_delay_blocks);
-	printf("\t max_matrices           = %u\n", option->max_matrices);
-	printf("\t max_ports              = %u\n", option->max_ports);
-	printf("\t host_buffer            = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer_info->host_buffer));
-	printf("\t host_buffer_size      = 0x%016" PRIx64 "\n", static_cast<uint64_t>(buffer_info->host_buffer_size));
+	KYTY_LOG_DEBUG("\t rack_id                = 0x%" PRIx32 "\n", rack_id);
+	KYTY_LOG_DEBUG("\t option_size            = 0x%016" PRIx64 "\n", static_cast<uint64_t>(option->size));
+	KYTY_LOG_DEBUG("\t name                   = %.16s\n", option->name);
+	KYTY_LOG_DEBUG("\t flags                  = %u\n", option->flags);
+	KYTY_LOG_DEBUG("\t max_grain_samples      = %u\n", option->max_grain_samples);
+	KYTY_LOG_DEBUG("\t max_voices             = %u\n", option->max_voices);
+	KYTY_LOG_DEBUG("\t max_input_delay_blocks = %u\n", option->max_input_delay_blocks);
+	KYTY_LOG_DEBUG("\t max_matrices           = %u\n", option->max_matrices);
+	KYTY_LOG_DEBUG("\t max_ports              = %u\n", option->max_ports);
+	KYTY_LOG_DEBUG("\t host_buffer            = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer_info->host_buffer));
+	KYTY_LOG_DEBUG("\t host_buffer_size      = 0x%016" PRIx64 "\n", static_cast<uint64_t>(buffer_info->host_buffer_size));
 
 	auto* ngs    = reinterpret_cast<Ngs2Internal*>(system_handle);
 	auto* rack   = static_cast<Ngs2RackInternal*>(buffer_info->host_buffer);
@@ -766,7 +767,7 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 		default: EXIT("unknown rack_id: 0x%" PRIx32 "\n", rack_id);
 	}
 
-	printf("\t type                   = %s\n", Core::EnumName(rack->type).C_Str());
+	KYTY_LOG_DEBUG("\t type                   = %s\n", Core::EnumName(rack->type).C_Str());
 
 	rack->allocator                = Ngs2BufferAllocator();
 	rack->ngs                      = ngs;
@@ -801,17 +802,17 @@ int KYTY_SYSV_ABI Ngs2RackCreateWithAllocator(uintptr_t system_handle, uint32_t 
 
 	EXIT_NOT_IMPLEMENTED(option->size < sizeof(Ngs2RackOption));
 
-	printf("\t rack_id                = 0x%" PRIx32 "\n", rack_id);
-	printf("\t name                   = %.16s\n", option->name);
-	printf("\t flags                  = %u\n", option->flags);
-	printf("\t max_grain_samples      = %u\n", option->max_grain_samples);
-	printf("\t max_voices             = %u\n", option->max_voices);
-	printf("\t max_input_delay_blocks = %u\n", option->max_input_delay_blocks);
-	printf("\t max_matrices           = %u\n", option->max_matrices);
-	printf("\t max_ports              = %u\n", option->max_ports);
-	printf("\t alloc_handler          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->alloc_handler));
-	printf("\t free_handler           = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->free_handler));
-	printf("\t user_data              = 0x%016" PRIx64 "\n", static_cast<uint64_t>(allocator->user_data));
+	KYTY_LOG_DEBUG("\t rack_id                = 0x%" PRIx32 "\n", rack_id);
+	KYTY_LOG_DEBUG("\t name                   = %.16s\n", option->name);
+	KYTY_LOG_DEBUG("\t flags                  = %u\n", option->flags);
+	KYTY_LOG_DEBUG("\t max_grain_samples      = %u\n", option->max_grain_samples);
+	KYTY_LOG_DEBUG("\t max_voices             = %u\n", option->max_voices);
+	KYTY_LOG_DEBUG("\t max_input_delay_blocks = %u\n", option->max_input_delay_blocks);
+	KYTY_LOG_DEBUG("\t max_matrices           = %u\n", option->max_matrices);
+	KYTY_LOG_DEBUG("\t max_ports              = %u\n", option->max_ports);
+	KYTY_LOG_DEBUG("\t alloc_handler          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->alloc_handler));
+	KYTY_LOG_DEBUG("\t free_handler           = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->free_handler));
+	KYTY_LOG_DEBUG("\t user_data              = 0x%016" PRIx64 "\n", static_cast<uint64_t>(allocator->user_data));
 
 	Ngs2ContextBufferInfo buf {};
 	buf.host_buffer      = nullptr;
@@ -996,13 +997,13 @@ int KYTY_SYSV_ABI Ngs2RackGetVoiceHandle(uintptr_t rack_handle, uint32_t voice_i
 		return static_cast<int32_t>(0x804a0261u);
 	}
 
-	printf("\t voice_id = %u\n", voice_id);
+	KYTY_LOG_DEBUG("\t voice_id = %u\n", voice_id);
 
 	auto* rack   = reinterpret_cast<Ngs2RackInternal*>(rack_handle);
 	auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack_handle + sizeof(Ngs2RackInternal));
 
 	const uint32_t max_voices = rack->option.common.max_voices;
-	printf("\t max_voices = %u\n", max_voices);
+	KYTY_LOG_DEBUG("\t max_voices = %u\n", max_voices);
 
 	// Ordinary invalid index is a guest error, not an emulator invariant break.
 	// Captured: reverb rack 0x2001 extended option size 0xb8 → max_voices 16 at
@@ -1036,9 +1037,9 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 
 	for (;;)
 	{
-		printf("\t id   = 0x%08" PRIx32 "\n", param->id);
-		printf("\t size = %" PRIu16 "\n", param->size);
-		printf("\t next = %" PRId16 "\n", param->next);
+		KYTY_LOG_DEBUG("\t id   = 0x%08" PRIx32 "\n", param->id);
+		KYTY_LOG_DEBUG("\t size = %" PRIu16 "\n", param->size);
+		KYTY_LOG_DEBUG("\t next = %" PRId16 "\n", param->next);
 
 		auto rack_id = param->id >> 16u;
 
@@ -1055,17 +1056,17 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 					{
 						EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2VoicePortMatrixParam));
 						const auto* pm = reinterpret_cast<const Ngs2VoicePortMatrixParam*>(param);
-						printf("\t port      = %u\n", pm->port);
-						printf("\t matrix_id = %d\n", pm->matrix_id);
+						KYTY_LOG_DEBUG("\t port      = %u\n", pm->port);
+						KYTY_LOG_DEBUG("\t matrix_id = %d\n", pm->matrix_id);
 						break;
 					}
 					case 0x0005:
 					{
 						EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2VoicePatchParam));
 						const auto* patch = reinterpret_cast<const Ngs2VoicePatchParam*>(param);
-						printf("\t connect->port          = %u\n", patch->port);
-						printf("\t connect->dest_input_id = %u\n", patch->dest_input_id);
-						printf("\t connect->dest_handle   = 0x%016" PRIx64 "\n", patch->dest_handle);
+						KYTY_LOG_DEBUG("\t connect->port          = %u\n", patch->port);
+						KYTY_LOG_DEBUG("\t connect->dest_input_id = %u\n", patch->dest_input_id);
+						KYTY_LOG_DEBUG("\t connect->dest_handle   = 0x%016" PRIx64 "\n", patch->dest_handle);
 						break;
 					}
 					case 0x0006:
@@ -1082,16 +1083,16 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 							case 5: voice->event = Ngs2VoicePlayEvent::Resume; break;
 							default: EXIT("unknown event_id: 0x%08" PRIx32 "\n", event->event_id);
 						}
-						printf("\t event = %u\n", event->event_id);
+						KYTY_LOG_DEBUG("\t event = %u\n", event->event_id);
 						break;
 					}
 					case 0x0007:
 					{
 						EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2VoiceCallbackParam));
 						const auto* cb = reinterpret_cast<const Ngs2VoiceCallbackParam*>(param);
-						printf("\t callback_handler = 0x%016" PRIx64 "\n", static_cast<uint64_t>(cb->callback_handler));
-						printf("\t callback_data    = 0x%016" PRIx64 "\n", static_cast<uint64_t>(cb->callback_data));
-						printf("\t flags            = 0x%08" PRIx32 "\n", cb->flags);
+						KYTY_LOG_DEBUG("\t callback_handler = 0x%016" PRIx64 "\n", static_cast<uint64_t>(cb->callback_handler));
+						KYTY_LOG_DEBUG("\t callback_data    = 0x%016" PRIx64 "\n", static_cast<uint64_t>(cb->callback_data));
+						KYTY_LOG_DEBUG("\t flags            = 0x%08" PRIx32 "\n", cb->flags);
 						break;
 					}
 					default: EXIT("unknown id: 0x%04" PRIx32 "\n", cid);
@@ -1226,7 +1227,7 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 		}
 	}
 
-	printf("\t command = {%08" PRIx32 ", %08" PRIx32 ", %08" PRIx32 "}\n", voice->last_command[0], voice->last_command[1],
+	KYTY_LOG_DEBUG("\t command = {%08" PRIx32 ", %08" PRIx32 ", %08" PRIx32 "}\n", voice->last_command[0], voice->last_command[1],
 	       voice->last_command[2]);
 	return OK;
 }
@@ -1332,7 +1333,7 @@ int KYTY_SYSV_ABI Ngs2GeomCalcListener(const void* listener_param, void* out_wor
 {
 	PRINT_NAME();
 
-	printf("\t flags = %u\n", flags);
+	KYTY_LOG_DEBUG("\t flags = %u\n", flags);
 	if (out_work != nullptr)
 	{
 		auto* w = static_cast<Ngs2GeomListenerWork*>(out_work);
@@ -1356,7 +1357,7 @@ int KYTY_SYSV_ABI Ngs2GeomApply(const void* listener_work, const void* source_pa
 {
 	PRINT_NAME();
 
-	printf("\t flags = %u\n", flags);
+	KYTY_LOG_DEBUG("\t flags = %u\n", flags);
 	(void)listener_work;
 	(void)source_param;
 	if (out_attrib != nullptr)
@@ -1397,7 +1398,7 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 			sampler->decoded_data_size       = 0;
 			sampler->user_data               = 0;
 			sampler->waveform_data           = nullptr;
-			printf("\t state_flags = %u\n", sampler->voice_state.state_flags);
+			KYTY_LOG_DEBUG("\t state_flags = %u\n", sampler->voice_state.state_flags);
 			break;
 		}
 		default: EXIT("unknown type: %s\n", Core::EnumName(voice->rack->type).C_Str());
@@ -1418,7 +1419,7 @@ int KYTY_SYSV_ABI Ngs2VoiceGetStateFlags(uintptr_t voice_handle, uint32_t* state
 	Core::LockGuard lock(voice->rack->ngs->mutex);
 
 	*state_flags = Ngs2GetVoiceStateFlags(voice);
-	printf("\t state_flags = %u\n", *state_flags);
+	KYTY_LOG_DEBUG("\t state_flags = %u\n", *state_flags);
 
 	return OK;
 }
