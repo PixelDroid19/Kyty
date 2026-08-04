@@ -35,7 +35,11 @@ KERNEL_SOURCE_FILES = (
     "emulator/src/Kernel/Pthread.cpp",
 )
 KERNEL_HOST_SOURCE_FILES = (
-    "emulator/src/Kernel/HostTime.cpp",
+	"emulator/src/Kernel/HostTime.cpp",
+)
+HLE_SOURCE_FILES = (
+	"emulator/src/Hle/LibGraphicsDriver.cpp",
+	"emulator/src/Hle/LibVideoOut.cpp",
 )
 HOST_SOURCE_FILES = (
     "emulator/src/Host/CaptureImageCodec.cpp",
@@ -62,6 +66,7 @@ ALLOWED_SOURCE_FILES = (
     *AUDIO_SOURCE_FILES,
     *KERNEL_SOURCE_FILES,
     *KERNEL_HOST_SOURCE_FILES,
+    *HLE_SOURCE_FILES,
     *HOST_SOURCE_FILES,
     *LIBS_SOURCE_FILES,
     *GRAPHICS_IMAGE_SOURCE_FILES,
@@ -209,6 +214,10 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
         return "Kernel host -> Graphics"
+    if relative_path in HLE_SOURCE_FILES and any(
+        canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
+    ):
+        return "Hle -> Graphics"
     if relative_path in HOST_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
@@ -616,6 +625,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Kernel/FileSystem.cpp:1: forbidden include (Kernel -> Graphics): Emulator/Graphics/Objects/GpuMemory.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_forbidden_hle_graphics_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Hle/LibGraphicsDriver.cpp", '#include "Emulator/Graphics/Graphics.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Hle/LibGraphicsDriver.cpp:1: forbidden include (Hle -> Graphics): Emulator/Graphics/Graphics.h",
                     ),
                 ),
             )
