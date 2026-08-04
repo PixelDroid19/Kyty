@@ -170,7 +170,15 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 // reinterprets float bits as 8-bit channels → residual cyan/hot prop boxes.
 [[nodiscard]] inline bool Gen5SampleMayCopyFromSurfaceParent(uint32_t sample_ufmt, VkFormat surface_vk)
 {
-	return VulkanGen5SampleFormatMatches(static_cast<uint16_t>(sample_ufmt), surface_vk);
+	// Keep the two formats with known render-target alias hazards strict. Other
+	// ufmts have no complete surface-family catalogue yet; rejecting every
+	// parent for them would regress the legacy copy path, so retain its
+	// permissive fallback until those families are described explicitly.
+	if (sample_ufmt == 56u || sample_ufmt == 71u)
+	{
+		return VulkanGen5SampleFormatMatches(static_cast<uint16_t>(sample_ufmt), surface_vk);
+	}
+	return true;
 }
 
 // A blit source cannot be read before its first-use contents are established.

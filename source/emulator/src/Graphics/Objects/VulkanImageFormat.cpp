@@ -47,7 +47,7 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
     Gen5ImageFormat {36, VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
                      VK_FORMAT_B10G11R11_UFLOAT_PACK32,
                      GuestImageNumericType::FloatingPoint},
-    Gen5ImageFormat {56, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, GuestImageNumericType::FloatingPoint},
+    Gen5ImageFormat {56, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {62, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {65, VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {66, VK_FORMAT_R16G16B16A16_SNORM, VK_FORMAT_R16G16B16A16_SNORM, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
@@ -136,7 +136,11 @@ bool VulkanGen5SampleFormatMatches(uint16_t fmt, VkFormat format)
 	{
 		if (entry.fmt == fmt)
 		{
-			return format == entry.sampled || format == entry.sampled_degamma;
+			if (format == entry.sampled || format == entry.sampled_degamma)
+			{
+				return true;
+			}
+			break;
 		}
 	}
 	for (const auto& alias: GEN5_SAMPLED_FORMAT_ALIASES)

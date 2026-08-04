@@ -141,7 +141,7 @@ StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target,
 	// base address.
 	if (!plane_declared)
 	{
-		return StencilPlaneValidation::Inactive;
+		return depth_control.stencil_enable ? StencilPlaneValidation::MissingReadBase : StencilPlaneValidation::Inactive;
 	}
 	const bool needs_read  = depth_control.stencil_enable || decompress || render_control.resummarize_enable ||
 	                         render_control.stencil_copy || sample_selection;

@@ -34,6 +34,12 @@ bool ShaderPixelInputMaskSupported(uint32_t enable_mask, uint32_t address_mask)
 	}
 	const uint32_t interpolation = enable_mask & kInterpolation;
 	const uint32_t position      = enable_mask & kPositionXy;
+	const uint32_t perspective   = enable_mask & (kPerspectiveCenter | kPerspectiveCentroid);
+	const uint32_t linear        = enable_mask & (kLinearCenter | kLinearCentroid);
+	if (perspective != 0 && linear != 0)
+	{
+		return false;
+	}
 	return interpolation != 0 && (position == 0 || position == kPositionXy);
 }
 

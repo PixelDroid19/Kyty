@@ -21,10 +21,10 @@ bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 
 bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource)
 {
-	// Raw BUFFER_* instructions use the descriptor stride as a byte count and do
-	// not consume typed-format metadata. DWORD operations align their final
-	// address in the instruction lowering, not in the descriptor contract.
-	return resource.Stride() != 0;
+	// Raw BUFFER_* instructions use the descriptor stride as a byte count. The
+	// address equation operates on DWORDs, so a non-zero but byte-misaligned
+	// stride cannot describe a valid raw record.
+	return resource.Stride() != 0 && (resource.Stride() & 3u) == 0u;
 }
 
 bool ShaderGen5RawDescriptorAlwaysOutOfBounds(const ShaderBufferResource& resource)
@@ -189,11 +189,16 @@ uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t outpu
 	EXIT_NOT_IMPLEMENTED(channel_order > 3);
 	EXIT_NOT_IMPLEMENTED(output_component > 3);
 
-	// The render-target VkFormat owns storage component order. Shader exports
-	// stay in logical RGBA order; reordering here double-applies COMP_SWAP for
-	// BGRA targets and corrupts render-to-texture feedback passes.
-	(void)channel_order;
-	return output_component;
+	// CB_COLORn_INFO.COMP_SWAP selects the component order consumed by the
+	// export instruction. Keep the mapping in one place so the SPIR-V emitter
+	// and Vulkan attachment format cannot silently disagree.
+	constexpr uint8_t kSourceComponents[4][4] = {
+	    {0, 1, 2, 3}, // RGBA
+	    {2, 1, 0, 3}, // BGRA
+	    {3, 2, 1, 0}, // ABGR
+	    {3, 0, 1, 2}, // ARGB
+	};
+	return kSourceComponents[channel_order][output_component];
 }
 
 uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
