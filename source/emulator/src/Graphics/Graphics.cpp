@@ -2673,8 +2673,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbNop(CommandBuffer* buf, uint32_t num_dw)
 		return nullptr;
 	}
 
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(num_dw);
+		auto* cmd = buf->AllocateDW(num_dw);
 	if (cmd == nullptr)
 	{
 		return nullptr;
@@ -3097,8 +3096,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, u
 	EXIT_NOT_IMPLEMENTED(offset == 0);
 	EXIT_NOT_IMPLEMENTED(offset > 0x3ffu);
 
-	buf->DbgDump();
-
+	
 	auto* marker = buf->AllocateDW(2);
 	marker[0]    = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO);
 	marker[1]    = 0x6875000d;
@@ -3217,8 +3215,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 	EXIT_NOT_IMPLEMENTED(interrupt > 3);
 	EXIT_NOT_IMPLEMENTED((interrupt_ctx_id & ~0x07ffffffu) != 0);
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(8);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3247,8 +3244,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbResetQueue(CommandBuffer* buf, uint32_t op, u
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED((op & ~0xfffu) != 0);
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(2);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3268,8 +3264,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitUntilSafeForRendering(CommandBuffer* buf,
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(7);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3357,8 +3352,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetWorkloadsActive(CommandBuffer* buf, uint32
 		}
 	}
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(WORKLOAD_ACTIVE_PACKET_SIZE_DW);
 	if (cmd == nullptr)
 	{
@@ -3394,8 +3388,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetWorkloadComplete(CommandBuffer* buf, uint3
 		}
 	}
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(WORKLOAD_COMPLETE_PACKET_SIZE_DW);
 	if (cmd == nullptr)
 	{
@@ -3420,8 +3413,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegisterDirect(CommandBuffer* buf, Shade
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(3);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3439,8 +3431,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegisterDirect(CommandBuffer* buf, Shade
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(3);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3458,8 +3449,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegisterDirect(CommandBuffer* buf, Shade
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(3);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3483,8 +3473,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirect(CommandBuffer* buf, co
 		return nullptr;
 	}
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(4);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3511,8 +3500,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirect(CommandBuffer* buf, co
 		return nullptr;
 	}
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(4);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3539,8 +3527,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirect(CommandBuffer* buf, co
 		return nullptr;
 	}
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(4);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3565,8 +3552,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t inde
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED(cache_policy != 0);
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(2);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3595,8 +3581,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED(!draw_index_auto_modifier_supported(modifier));
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(7);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3640,8 +3625,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t 
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(5);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3666,8 +3650,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 	EXIT_NOT_IMPLEMENTED(!draw_index_auto_modifier_supported(modifier));
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(7);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3696,8 +3679,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_
 	EXIT_NOT_IMPLEMENTED(address != nullptr);
 	EXIT_NOT_IMPLEMENTED(event_type > 0x3fu);
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(2);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3715,8 +3697,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf)
 	// GNM/AGC stallCommandBufferParser: fixed EVENT_WRITE CS partial flush (0x07).
 	PRINT_NAME();
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(2);
+		auto* cmd = buf->AllocateDW(2);
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 	constexpr uint32_t kCsPartialFlush = 0x07u;
 	cmd[0]                             = KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u);
@@ -3744,8 +3725,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t destinati
 		return nullptr;
 	}
 
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(8);
+		auto* cmd = buf->AllocateDW(8);
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
 	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA);
@@ -3792,8 +3772,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
 	EXIT_NOT_IMPLEMENTED((vaddr >> 40u) != 0);
 	EXIT_NOT_IMPLEMENTED(engine > 1);
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(8);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -3821,8 +3800,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbType2Pad(CommandBuffer* buf)
 		return nullptr;
 	}
 
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(1);
+		auto* cmd = buf->AllocateDW(1);
 	if (cmd == nullptr)
 	{
 		return nullptr;
@@ -3844,8 +3822,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetBaseIndirectArgs(CommandBuffer* buf, uint3
 		return nullptr;
 	}
 
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(4);
+		auto* cmd = buf->AllocateDW(4);
 	if (cmd == nullptr)
 	{
 		return nullptr;
@@ -3871,8 +3848,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t
 		return nullptr;
 	}
 
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(3);
+		auto* cmd = buf->AllocateDW(3);
 	if (cmd == nullptr)
 	{
 		return nullptr;
@@ -3947,8 +3923,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_
 		return nullptr;
 	}
 
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(5);
+		auto* cmd = buf->AllocateDW(5);
 	if (cmd == nullptr)
 	{
 		return nullptr;
@@ -3983,8 +3958,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, ui
 	// address_or_offset may be 0: Gen5 reserves the packet then patches the
 	// destination with GraphicsWriteDataPatchSetAddressOrOffset before submit.
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(4 + num_dwords);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
@@ -4019,8 +3993,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 		return nullptr;
 	}
 
-	buf->DbgDump();
-
+	
 	const uint32_t packet_dwords = (size == 0 ? 7u : 9u);
 	auto*          cmd           = buf->AllocateDW(packet_dwords);
 
@@ -4093,8 +4066,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbResetQueue(CommandBuffer* buf, uint32_t op)
 		return nullptr;
 	}
 
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(2);
+		auto* cmd = buf->AllocateDW(2);
 	if (cmd == nullptr)
 	{
 		return nullptr;
@@ -4208,8 +4180,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t i
 		return nullptr;
 	}
 
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(3);
+		auto* cmd = buf->AllocateDW(3);
 	if (cmd == nullptr)
 	{
 		return nullptr;
@@ -4230,8 +4201,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t in
 		return nullptr;
 	}
 
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(2);
+		auto* cmd = buf->AllocateDW(2);
 	if (cmd == nullptr)
 	{
 		return nullptr;
@@ -4251,8 +4221,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t 
 		return nullptr;
 	}
 
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(2);
+		auto* cmd = buf->AllocateDW(2);
 	if (cmd == nullptr)
 	{
 		return nullptr;
@@ -4274,8 +4243,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbGetLodStats(CommandBuffer* buf, uint8_t cache
 		return nullptr;
 	}
 
-	buf->DbgDump();
-	auto* cmd = buf->AllocateDW(5);
+		auto* cmd = buf->AllocateDW(5);
 	if (cmd == nullptr)
 	{
 		return nullptr;
@@ -4304,8 +4272,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_ou
 
 	EXIT_NOT_IMPLEMENTED(buf == nullptr);
 
-	buf->DbgDump();
-
+	
 	auto* cmd = buf->AllocateDW(6);
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);

@@ -118,12 +118,42 @@ void emu_printf(const char* format, ...) KYTY_FORMAT_PRINTF(1, 2);
 
 } // namespace Kyty
 
-// Convenience wrappers for the level-aware logger. The implementation checks
-// the gate before formatting, so non-emitting levels avoid String/lock work.
-#define KYTY_LOG_ERROR(...) ::Kyty::Log::log_printf(::Kyty::Log::Level::Error, __VA_ARGS__)
-#define KYTY_LOG_WARN(...)  ::Kyty::Log::log_printf(::Kyty::Log::Level::Warn, __VA_ARGS__)
-#define KYTY_LOG_INFO(...)  ::Kyty::Log::log_printf(::Kyty::Log::Level::Info, __VA_ARGS__)
-#define KYTY_LOG_DEBUG(...) ::Kyty::Log::log_printf(::Kyty::Log::Level::Debug, __VA_ARGS__)
+// Convenience wrappers for the level-aware logger. The gate runs at the call
+// site: when the level is below the configured minimum neither the arguments
+// nor the call are evaluated, so disabled levels cost nothing and never push
+// a frame on the guest stack (HLE exports run on guest threads).
+#define KYTY_LOG_ERROR(...)                                                                                            \
+	do                                                                                                                 \
+	{                                                                                                                  \
+		if (::Kyty::Log::ShouldLog(::Kyty::Log::Level::Error))                                                         \
+		{                                                                                                              \
+			::Kyty::Log::log_printf(::Kyty::Log::Level::Error, __VA_ARGS__);                                           \
+		}                                                                                                              \
+	} while (0)
+#define KYTY_LOG_WARN(...)                                                                                             \
+	do                                                                                                                 \
+	{                                                                                                                  \
+		if (::Kyty::Log::ShouldLog(::Kyty::Log::Level::Warn))                                                          \
+		{                                                                                                              \
+			::Kyty::Log::log_printf(::Kyty::Log::Level::Warn, __VA_ARGS__);                                            \
+		}                                                                                                              \
+	} while (0)
+#define KYTY_LOG_INFO(...)                                                                                             \
+	do                                                                                                                 \
+	{                                                                                                                  \
+		if (::Kyty::Log::ShouldLog(::Kyty::Log::Level::Info))                                                          \
+		{                                                                                                              \
+			::Kyty::Log::log_printf(::Kyty::Log::Level::Info, __VA_ARGS__);                                            \
+		}                                                                                                              \
+	} while (0)
+#define KYTY_LOG_DEBUG(...)                                                                                            \
+	do                                                                                                                 \
+	{                                                                                                                  \
+		if (::Kyty::Log::ShouldLog(::Kyty::Log::Level::Debug))                                                         \
+		{                                                                                                              \
+			::Kyty::Log::log_printf(::Kyty::Log::Level::Debug, __VA_ARGS__);                                           \
+		}                                                                                                              \
+	} while (0)
 
 // Rate-limited variant (prosper-style log-once): emits at most `max_count`
 // times per call site, then goes silent. The counter is a function-local
