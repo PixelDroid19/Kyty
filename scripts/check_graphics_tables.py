@@ -61,6 +61,16 @@ def verify(manifest: pathlib.Path) -> list[str]:
 	return errors
 
 
+def write_manifest(manifest: pathlib.Path) -> int:
+	"""Write a deterministic digest lock for the checked-in table outputs."""
+	table_root = manifest.parent
+	tables = sorted(path for path in table_root.glob(f"*{TABLE_SUFFIX}") if path.is_file())
+	if not tables:
+		raise ValueError(f"no generated tables found in {table_root}")
+	manifest.write_text("".join(f"{digest(path)}  {path.name}\n" for path in tables), encoding="utf-8")
+	return len(tables)
+
+
 class GraphicsTableCheckerTests(unittest.TestCase):
 	def write_table(self, root: pathlib.Path, name: str, contents: bytes = b"{ 1, 2, 3 }\n") -> str:
 		path = root / name
@@ -119,11 +129,28 @@ class GraphicsTableCheckerTests(unittest.TestCase):
 				with self.assertRaisesRegex(ValueError, expected):
 					parse_manifest(manifest)
 
+	def test_writes_sorted_manifest(self) -> None:
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory)
+			self.write_table(root, "TileTextureInfo_z.inc", b"z\n")
+			self.write_table(root, "TileTextureInfo_a.inc", b"a\n")
+			manifest = root / "manifest.sha256"
+
+			self.assertEqual(write_manifest(manifest), 2)
+			self.assertEqual(
+				manifest.read_text(encoding="utf-8").splitlines(),
+				[
+					f"{digest(root / 'TileTextureInfo_a.inc')}  TileTextureInfo_a.inc",
+					f"{digest(root / 'TileTextureInfo_z.inc')}  TileTextureInfo_z.inc",
+				],
+			)
+
 
 def main() -> int:
 	parser = argparse.ArgumentParser(description=__doc__)
 	parser.add_argument("manifest", type=pathlib.Path, nargs="?")
 	parser.add_argument("--self-test", action="store_true", help="run deterministic checker fixtures")
+	parser.add_argument("--write-manifest", action="store_true", help="write a deterministic digest lock for the table outputs")
 	args = parser.parse_args()
 	if args.self_test:
 		suite = unittest.defaultTestLoader.loadTestsFromTestCase(GraphicsTableCheckerTests)
@@ -133,6 +160,10 @@ def main() -> int:
 		parser.error("the following arguments are required: manifest")
 	manifest = args.manifest.resolve()
 	try:
+		if args.write_manifest:
+			count = write_manifest(manifest)
+			print(f"graphics table provenance manifest written: {count} tables")
+			return 0
 		errors = verify(manifest)
 	except ValueError as error:
 		print(f"graphics table provenance failed: {error}", file=sys.stderr)

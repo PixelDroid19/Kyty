@@ -19,6 +19,14 @@ Run the deterministic checker fixtures with:
 python3 scripts/check_graphics_tables.py --self-test
 ```
 
+When a reviewed table change is intentional, regenerate only the provenance
+lock from the checked-in outputs with:
+
+```sh
+python3 scripts/check_graphics_tables.py --write-manifest \
+  source/emulator/src/Graphics/Tables/manifest.sha256
+```
+
 Changing a table requires a reviewed deterministic generator and versioned
 inputs to be added before updating the manifest. The check rejects missing,
 unlisted, or modified outputs, so `.inc` drift cannot pass silently.
