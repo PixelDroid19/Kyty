@@ -574,9 +574,9 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 	auto       flags_u       = static_cast<uint32_t>(flags);
 	const auto status_flags  = flags_u;
 
-	printf("\t path = %s\n", path);
-	printf("\t flags = %08" PRIx32 "\n", flags_u);
-	printf("\t mode = %04" PRIx16 "\n", mode);
+	KYTY_LOG_DEBUG("\t path = %s\n", path);
+	KYTY_LOG_DEBUG("\t flags = %08" PRIx32 "\n", flags_u);
+	KYTY_LOG_DEBUG("\t mode = %04" PRIx16 "\n", mode);
 
 	bool nonblock  = (flags_u & 0x0004u) != 0;
 	bool append    = (flags_u & 0x0008u) != 0;
@@ -668,12 +668,12 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 		file->dents_index = 0;
 		file->directory   = true;
 
-		printf("\tOpen dir: " FG_WHITE BOLD "%s" DEFAULT ", entries = %" PRIu32 ", " FG_GREEN "[ok]" FG_DEFAULT "\n",
+		KYTY_LOG_DEBUG("\tOpen dir: " FG_WHITE BOLD "%s" DEFAULT ", entries = %" PRIu32 ", " FG_GREEN "[ok]" FG_DEFAULT "\n",
 		       file->real_name.C_Str(), file->dents.Size());
 
 		for (const auto& f: file->dents)
 		{
-			printf("\t\t%s %s\n", f.is_file ? "[file]" : "[dir ]", f.name.C_Str());
+			KYTY_LOG_DEBUG("\t\t%s %s\n", f.is_file ? "[file]" : "[dir ]", f.name.C_Str());
 		}
 	} else
 	{
@@ -696,7 +696,7 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 			}
 			result = file->f.Create(file->real_name);
 
-			printf("\tCreate: " FG_WHITE BOLD "%s" DEFAULT ", %s\n", file->real_name.C_Str(),
+			KYTY_LOG_DEBUG("\tCreate: " FG_WHITE BOLD "%s" DEFAULT ", %s\n", file->real_name.C_Str(),
 			       (result ? FG_GREEN "[ok]" FG_DEFAULT : FG_RED "[fail]" FG_DEFAULT));
 
 			if (result && !trunc)
@@ -708,7 +708,7 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 		{
 			result = file->f.Open(file->real_name, rw_mode);
 
-			printf("\tOpen: " FG_WHITE BOLD "%s" DEFAULT ", %s\n", file->real_name.C_Str(),
+			KYTY_LOG_DEBUG("\tOpen: " FG_WHITE BOLD "%s" DEFAULT ", %s\n", file->real_name.C_Str(),
 			       (result ? FG_GREEN "[ok]" FG_DEFAULT : FG_RED "[fail]" FG_DEFAULT));
 		}
 
@@ -778,7 +778,7 @@ int KYTY_SYSV_ABI KernelClose(int d)
 
 	file->opened = false;
 
-	printf("\tClose: " FG_WHITE BOLD "%s" DEFAULT "\n", file->real_name.C_Str());
+	KYTY_LOG_DEBUG("\tClose: " FG_WHITE BOLD "%s" DEFAULT "\n", file->real_name.C_Str());
 
 	FsTrace("close", file->name.C_Str(), d, OK);
 
@@ -838,11 +838,11 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 
 	if (is_invalid)
 	{
-		printf("\tfile is invalid\n");
+		KYTY_LOG_DEBUG("\tfile is invalid\n");
 		return KERNEL_ERROR_EIO;
 	}
 
-	printf("\tRead %u bytes from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, file->real_name.C_Str());
+	KYTY_LOG_DEBUG("\tRead %u bytes from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, file->real_name.C_Str());
 
 	FsTrace("read", file->name.C_Str(), static_cast<int64_t>(nbytes), bytes_read);
 
@@ -888,11 +888,11 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes)
 
 	if (is_invalid)
 	{
-		printf("\tfile is invalid\n");
+		KYTY_LOG_DEBUG("\tfile is invalid\n");
 		return KERNEL_ERROR_EIO;
 	}
 
-	printf("\tWrite %u bytes to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, file->real_name.C_Str());
+	KYTY_LOG_DEBUG("\tWrite %u bytes to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, file->real_name.C_Str());
 
 	return bytes_written;
 }
@@ -945,11 +945,11 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 
 	if (is_invalid)
 	{
-		printf("\tfile is invalid\n");
+		KYTY_LOG_DEBUG("\tfile is invalid\n");
 		return KERNEL_ERROR_EIO;
 	}
 
-	printf("\tRead %u bytes (pos = %" PRId64 ") from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, offset, file->real_name.C_Str());
+	KYTY_LOG_DEBUG("\tRead %u bytes (pos = %" PRId64 ") from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, offset, file->real_name.C_Str());
 
 	FsTrace("pread", file->name.C_Str(), offset, bytes_read);
 
@@ -1003,11 +1003,11 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 
 	if (is_invalid)
 	{
-		printf("\tfile is invalid\n");
+		KYTY_LOG_DEBUG("\tfile is invalid\n");
 		return KERNEL_ERROR_EIO;
 	}
 
-	printf("\tWrite %u bytes (pos = %" PRId64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, offset, file->real_name.C_Str());
+	KYTY_LOG_DEBUG("\tWrite %u bytes (pos = %" PRId64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, offset, file->real_name.C_Str());
 
 	return bytes_written;
 }
@@ -1066,11 +1066,11 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence)
 
 	if (is_invalid)
 	{
-		printf("\tfile is invalid\n");
+		KYTY_LOG_DEBUG("\tfile is invalid\n");
 		return KERNEL_ERROR_EIO;
 	}
 
-	printf("\tLseek (pos = %" PRId64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", offset, file->real_name.C_Str());
+	KYTY_LOG_DEBUG("\tLseek (pos = %" PRId64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", offset, file->real_name.C_Str());
 
 	return pos;
 }
@@ -1086,7 +1086,7 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	printf("\t KernelStat: %s\n", path);
+	KYTY_LOG_DEBUG("\t KernelStat: %s\n", path);
 
 	String path_s         = String::FromUtf8(path);
 	auto   real_file_name = ResolveGuestDeviceFilename(path_s, ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s)));
@@ -1097,7 +1097,7 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 
 	if (!is_dir && !is_file)
 	{
-		printf("\t file not found\n");
+		KYTY_LOG_DEBUG("\t file not found\n");
 		return KERNEL_ERROR_ENOENT;
 	}
 
@@ -1202,7 +1202,7 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 
 	EXIT_IF(!file->opened);
 
-	printf("\tKernelFstat: %s\n", file->real_name.C_Str());
+	KYTY_LOG_DEBUG("\tKernelFstat: %s\n", file->real_name.C_Str());
 
 	memset(sb, 0, sizeof(FileStat));
 
@@ -1224,7 +1224,7 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 
 		if (is_invalid)
 		{
-			printf("\tfile is invalid\n");
+			KYTY_LOG_DEBUG("\tfile is invalid\n");
 			return KERNEL_ERROR_EIO;
 		}
 
@@ -1416,7 +1416,7 @@ int KYTY_SYSV_ABI KernelUnlink(const char* path)
 		return KERNEL_ERROR_EIO;
 	}
 
-	printf("\tKernelUnlink: %s\n", path);
+	KYTY_LOG_DEBUG("\tKernelUnlink: %s\n", path);
 
 	return OK;
 }
@@ -1448,7 +1448,7 @@ int KYTY_SYSV_ABI KernelRename(const char* from, const char* to)
 		return KERNEL_ERROR_EIO;
 	}
 
-	printf("\tKernelRename: %s -> %s\n", from, to);
+	KYTY_LOG_DEBUG("\tKernelRename: %s -> %s\n", from, to);
 	return OK;
 }
 
@@ -1483,9 +1483,9 @@ int KYTY_SYSV_ABI KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* ba
 	EXIT_IF(!file->opened);
 	Core::LockGuard lock(file->mutex);
 
-	printf("\t dir    = %s\n", file->real_name.C_Str());
-	printf("\t nbytes = %d\n", nbytes);
-	printf("\t index = %d\n", file->dents_index);
+	KYTY_LOG_DEBUG("\t dir    = %s\n", file->real_name.C_Str());
+	KYTY_LOG_DEBUG("\t nbytes = %d\n", nbytes);
+	KYTY_LOG_DEBUG("\t index = %d\n", file->dents_index);
 
 	const uint32_t entry_count = file->dents.Size() + 2;
 	if (file->dents_index > entry_count)
@@ -1530,7 +1530,7 @@ int KYTY_SYSV_ABI KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* ba
 		*reinterpret_cast<uint8_t*>(record + 7)  = static_cast<uint8_t>(name_size);
 		std::memcpy(record + 8, name_utf8.GetDataConst(), name_size + 1);
 
-		printf("\t name  = %s\n", name_utf8.GetDataConst());
+		KYTY_LOG_DEBUG("\t name  = %s\n", name_utf8.GetDataConst());
 		written += record_size;
 		file->dents_index++;
 	}
@@ -1556,8 +1556,8 @@ int KYTY_SYSV_ABI KernelMkdir(const char* path, uint16_t mode)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	printf("\t path = %s\n", path);
-	printf("\t mode = %04" PRIx16 "\n", mode);
+	KYTY_LOG_DEBUG("\t path = %s\n", path);
+	KYTY_LOG_DEBUG("\t mode = %04" PRIx16 "\n", mode);
 
 	String real_name = g_mount_points->GetRealDirectory(String::FromUtf8(path));
 
@@ -1588,7 +1588,7 @@ int KYTY_SYSV_ABI KernelRmdir(const char* path)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-	printf("\t path = %s\n", path);
+	KYTY_LOG_DEBUG("\t path = %s\n", path);
 	const String real_name = g_mount_points->GetRealDirectory(String::FromUtf8(path));
 	if (!Core::File::IsDirectoryExisting(real_name))
 	{
@@ -1749,7 +1749,7 @@ String PreferPackageFontHostPath(const String& requested_host_path)
 	}
 	if (best_score >= 0 && !best_path.IsEmpty() && Core::File::IsFileExisting(best_path))
 	{
-		printf("\t package font fallback: %s -> %s (score=%d)\n", requested_host_path.C_Str(), best_path.C_Str(), best_score);
+		KYTY_LOG_DEBUG("\t package font fallback: %s -> %s (score=%d)\n", requested_host_path.C_Str(), best_path.C_Str(), best_score);
 		return best_path;
 	}
 	return requested_host_path;
@@ -1769,7 +1769,7 @@ String PreferHostExtensionAlias(const String& requested_host_path)
 		const String alias = requested_host_path + U"b";
 		if (Core::File::IsFileExisting(alias))
 		{
-			printf("\t host extension alias: %s -> %s\n", requested_host_path.C_Str(), alias.C_Str());
+			KYTY_LOG_DEBUG("\t host extension alias: %s -> %s\n", requested_host_path.C_Str(), alias.C_Str());
 			return alias;
 		}
 	}
@@ -1829,13 +1829,13 @@ String PreferHostApp0DataSegment(const String& guest_path, const String& request
 
 	if (Core::File::IsFileExisting(alt_host))
 	{
-		printf("\t host app0 data segment: %s -> %s\n", guest.C_Str(), alt_host.C_Str());
+		KYTY_LOG_DEBUG("\t host app0 data segment: %s -> %s\n", guest.C_Str(), alt_host.C_Str());
 		return alt_host;
 	}
 	const String alt_aliased = PreferHostExtensionAlias(alt_host);
 	if (Core::File::IsFileExisting(alt_aliased))
 	{
-		printf("\t host app0 data segment+ext: %s -> %s\n", guest.C_Str(), alt_aliased.C_Str());
+		KYTY_LOG_DEBUG("\t host app0 data segment+ext: %s -> %s\n", guest.C_Str(), alt_aliased.C_Str());
 		return alt_aliased;
 	}
 	return requested_host_path;
@@ -1926,7 +1926,7 @@ String PreferHostOdCompanionAsset(const String& guest_path, const String& reques
 
 	if (Core::File::IsFileExisting(candidate))
 	{
-		printf("\t host OD companion: %s -> %s (from %s)\n", guest.C_Str(), candidate.C_Str(), last_od.C_Str());
+		KYTY_LOG_DEBUG("\t host OD companion: %s -> %s (from %s)\n", guest.C_Str(), candidate.C_Str(), last_od.C_Str());
 		return candidate;
 	}
 	return requested_host_path;
@@ -1944,7 +1944,7 @@ static String PreferHostPatchFile(const String& guest_path, const String& reques
 	const String patch_host  = g_mount_points->GetRealFilename(patch_guest);
 	if (!patch_host.IsEmpty() && patch_host != patch_guest && Core::File::IsFileExisting(patch_host))
 	{
-		printf("\t host app0_patch override: %s -> %s\n", guest.C_Str(), patch_host.C_Str());
+		KYTY_LOG_DEBUG("\t host app0_patch override: %s -> %s\n", guest.C_Str(), patch_host.C_Str());
 		return patch_host;
 	}
 	return requested_host_path;
@@ -2009,10 +2009,10 @@ int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* 
 
 	EXIT_IF(g_mount_points == nullptr);
 
-	printf("\t paths = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(paths));
-	printf("\t count = %" PRIu64 "\n", count);
-	printf("\t ids   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ids));
-	printf("\t sizes = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(sizes));
+	KYTY_LOG_DEBUG("\t paths = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(paths));
+	KYTY_LOG_DEBUG("\t count = %" PRIu64 "\n", count);
+	KYTY_LOG_DEBUG("\t ids   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ids));
+	KYTY_LOG_DEBUG("\t sizes = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(sizes));
 
 	// sizes is optional (ResolveFilepathsToIds variants pass null).
 	if (paths == nullptr || count == 0 || count > 1024)
@@ -2028,13 +2028,13 @@ int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* 
 			return KERNEL_ERROR_EFAULT;
 		}
 
-		printf("\t [%llu] path = %s\n", static_cast<unsigned long long>(i), guest_path);
+		KYTY_LOG_DEBUG("\t [%llu] path = %s\n", static_cast<unsigned long long>(i), guest_path);
 
 		const String path_s         = String::FromUtf8(guest_path);
 		const auto   real_file_name = ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s));
 		if (!Core::File::IsFileExisting(real_file_name))
 		{
-			printf("\t file not found: %s\n", real_file_name.C_Str());
+			KYTY_LOG_DEBUG("\t file not found: %s\n", real_file_name.C_Str());
 			return KERNEL_ERROR_ENOENT;
 		}
 
@@ -2052,7 +2052,7 @@ int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* 
 			Core::LockGuard lock(g_apr_mutex);
 			g_apr_id_to_host[file_id] = real_file_name;
 		}
-		printf("\t [%llu] id = 0x%08" PRIx32 " size = %" PRIu64 "\n", static_cast<unsigned long long>(i), file_id, file_size);
+		KYTY_LOG_DEBUG("\t [%llu] id = 0x%08" PRIx32 " size = %" PRIu64 "\n", static_cast<unsigned long long>(i), file_id, file_size);
 	}
 
 	return OK;
@@ -2211,8 +2211,8 @@ int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach(co
 int KYTY_SYSV_ABI KernelAprGetFileSize(uint32_t file_id, uint64_t* size)
 {
 	PRINT_NAME();
-	printf("\t file_id = 0x%08" PRIx32 "\n", file_id);
-	printf("\t size    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(size));
+	KYTY_LOG_DEBUG("\t file_id = 0x%08" PRIx32 "\n", file_id);
+	KYTY_LOG_DEBUG("\t size    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(size));
 	if (size == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
@@ -2233,8 +2233,8 @@ int KYTY_SYSV_ABI KernelAprGetFileSize(uint32_t file_id, uint64_t* size)
 int KYTY_SYSV_ABI KernelAprGetFileStat(uint32_t file_id, FileStat* st)
 {
 	PRINT_NAME();
-	printf("\t file_id = 0x%08" PRIx32 "\n", file_id);
-	printf("\t st      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(st));
+	KYTY_LOG_DEBUG("\t file_id = 0x%08" PRIx32 "\n", file_id);
+	KYTY_LOG_DEBUG("\t st      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(st));
 	if (st == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
@@ -2261,11 +2261,11 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBuffer(void* cmd, uint64_t arg1, void* a
 {
 	PRINT_NAME();
 
-	printf("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
-	printf("\t arg1 = 0x%016" PRIx64 "\n", arg1);
-	printf("\t arg2 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg2));
-	printf("\t arg3 = 0x%016" PRIx64 "\n", arg3);
-	printf("\t arg4 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg4));
+	KYTY_LOG_DEBUG("\t cmd  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd));
+	KYTY_LOG_DEBUG("\t arg1 = 0x%016" PRIx64 "\n", arg1);
+	KYTY_LOG_DEBUG("\t arg2 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg2));
+	KYTY_LOG_DEBUG("\t arg3 = 0x%016" PRIx64 "\n", arg3);
+	KYTY_LOG_DEBUG("\t arg4 = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg4));
 
 	if (cmd == nullptr)
 	{
@@ -2290,7 +2290,7 @@ static uint32_t AprAllocateSubmissionId(uint64_t cmd)
 int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetId(void* cmd, uint64_t arg1, uint32_t* out_submission_id)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " out_id = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd),
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " out_id = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd),
 	       reinterpret_cast<uint64_t>(out_submission_id));
 	if (cmd == nullptr || out_submission_id == nullptr)
 	{
@@ -2308,7 +2308,7 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetId(void* cmd, uint64_t arg1,
 int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetResult(void* cmd, uint64_t arg1, void* result, uint32_t* out_submission_id)
 {
 	PRINT_NAME();
-	printf("\t cmd = 0x%016" PRIx64 " result = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), reinterpret_cast<uint64_t>(result));
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " result = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), reinterpret_cast<uint64_t>(result));
 	if (cmd == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
@@ -2334,7 +2334,7 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetResult(void* cmd, uint64_t a
 int KYTY_SYSV_ABI KernelAprWaitCommandBuffer(uint32_t submission_id)
 {
 	PRINT_NAME();
-	printf("\t submission_id = 0x%08" PRIx32 "\n", submission_id);
+	KYTY_LOG_DEBUG("\t submission_id = 0x%08" PRIx32 "\n", submission_id);
 	Core::LockGuard lock(g_apr_mutex);
 	auto            it = g_apr_submissions.find(submission_id);
 	if (it == g_apr_submissions.end())
@@ -2360,7 +2360,7 @@ int KYTY_SYSV_ABI KernelDup(int old_d)
 
 	EXIT_IF(g_files == nullptr);
 
-	printf("\t old_d = %d\n", old_d);
+	KYTY_LOG_DEBUG("\t old_d = %d\n", old_d);
 
 	const int new_d = g_files->DupDescriptor(old_d);
 	if (new_d < 0)
@@ -2368,7 +2368,7 @@ int KYTY_SYSV_ABI KernelDup(int old_d)
 		return new_d;
 	}
 
-	printf("\t new_d = %d\n", new_d);
+	KYTY_LOG_DEBUG("\t new_d = %d\n", new_d);
 	return new_d;
 }
 
@@ -2378,8 +2378,8 @@ int KYTY_SYSV_ABI KernelDup2(int old_d, int new_d)
 
 	EXIT_IF(g_files == nullptr);
 
-	printf("\t old_d = %d\n", old_d);
-	printf("\t new_d = %d\n", new_d);
+	KYTY_LOG_DEBUG("\t old_d = %d\n", old_d);
+	KYTY_LOG_DEBUG("\t new_d = %d\n", new_d);
 
 	return g_files->Dup2Descriptor(old_d, new_d);
 }
@@ -2393,7 +2393,7 @@ int KYTY_SYSV_ABI KernelPoll(KernelPollFd* fds, uint32_t count, int /*timeout*/)
 		return 0;
 	}
 
-	printf("\t count = %" PRIu32 "\n", count);
+	KYTY_LOG_DEBUG("\t count = %" PRIu32 "\n", count);
 
 	int ready = 0;
 	for (uint32_t i = 0; i < count && i < 4096; i++)
@@ -2406,7 +2406,7 @@ int KYTY_SYSV_ABI KernelPoll(KernelPollFd* fds, uint32_t count, int /*timeout*/)
 		}
 	}
 
-	printf("\t ready = %d\n", ready);
+	KYTY_LOG_DEBUG("\t ready = %d\n", ready);
 	return ready;
 }
 
