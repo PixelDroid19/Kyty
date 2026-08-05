@@ -1,5 +1,4 @@
 #include "Emulator/Libs/Libs.h"
-#include "Emulator/Kernel/TimePort.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -9,11 +8,6 @@ LIB_DEFINE(InitVideoOut_1);
 } // namespace Kyty::Hle
 
 namespace Kyty::Libs {
-
-Core::Time GetTraceTime()
-{
-	return Kernel::TimePort::GetTime();
-}
 
 namespace LibcInternal {
 LIB_DEFINE(InitLibcInternal_1);

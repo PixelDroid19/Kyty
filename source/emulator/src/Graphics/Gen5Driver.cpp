@@ -9,7 +9,7 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Kernel/Errors.h"
-#include "Emulator/Libs/Libs.h"
+#include "Emulator/Hle/Registration.h"
 #include "Emulator/Log.h"
 
 #include <atomic>

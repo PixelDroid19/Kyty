@@ -24,7 +24,7 @@
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/TimePort.h"
-#include "Emulator/Libs/Libs.h"
+#include "Emulator/Hle/Registration.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/Log.h"
 

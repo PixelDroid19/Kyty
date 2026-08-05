@@ -1,6 +1,6 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Graphics.h"
-#include "Emulator/Libs/Libs.h"
+#include "Emulator/Hle/Registration.h"
 
 #ifdef KYTY_EMU_ENABLED
 

@@ -28,7 +28,7 @@
 #include "Emulator/Kernel/GpuMappingLifecycle.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/TimePort.h"
-#include "Emulator/Libs/Libs.h"
+#include "Emulator/Hle/Registration.h"
 #include "Emulator/Log.h"
 #include "Emulator/PresentationStats.h"
 #include "Emulator/VideoFrameMemory.h"
