@@ -5,10 +5,16 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+namespace Kyty::Hle {
+
+class HleSymbolRegistry;
+
+} // namespace Kyty::Hle
+
 namespace Kyty::Libs {
 
-bool Init(const String& id, HleSymbolRegistry* s);
-void InitAll(HleSymbolRegistry* s);
+bool Init(const String& id, ::Kyty::Hle::HleSymbolRegistry* s);
+void InitAll(::Kyty::Hle::HleSymbolRegistry* s);
 
 } // namespace Libs
 

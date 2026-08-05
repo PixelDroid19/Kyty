@@ -152,6 +152,12 @@ KERNEL_TIME_INCLUDE = "Emulator/Kernel/Time.h"
 KERNEL_IMPLEMENTATION_ROOT = "emulator/src/Kernel"
 KERNEL_NAMESPACE_PATTERN = re.compile(r"\bnamespace\s+Kyty::Kernel(?:\s*::|\s*\{)")
 LEGACY_KERNEL_NAMESPACE_PATTERN = re.compile(r"\bnamespace\s+Kyty::Libs(?:\s*::|\s*\{)")
+LEGACY_HLE_SYMBOL_HEADER_CANONICAL = "emulator/libs/hlesymbolregistry.h"
+LEGACY_HLE_ALIAS_PATTERNS = (
+    re.compile(r"\bLibs::HleSymbolRegistry\b"),
+    re.compile(r"\bLibs::HleSymbolResolve\b"),
+    re.compile(r"\bLibs::HleSymbolType\b"),
+)
 
 @dataclass(frozen=True)
 class Violation:
@@ -160,8 +166,11 @@ class Violation:
     rule: Optional[str]
     include_path: Optional[str]
     input_error: Optional[str] = None
+    message: Optional[str] = None
 
     def diagnostic(self) -> str:
+        if self.message is not None:
+            return f"{self.source_path}:{self.line_number}: {self.message}"
         if self.include_path is None:
             return f"{self.source_path}:{self.line_number}: {self.input_error or 'uncheckable nonliteral include'}"
         assert self.rule is not None
@@ -257,6 +266,10 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_paths.append(_canonical_include_path(source_parent + "/" + include_path))
 
     graphics_prefixes = (GRAPHICS_INCLUDE_PREFIX, SOURCE_GRAPHICS_INCLUDE_PREFIX)
+    if any(
+        canonical_path.startswith(LEGACY_HLE_SYMBOL_HEADER_CANONICAL) for canonical_path in canonical_paths
+    ):
+        return "legacy HleSymbolRegistry header"
     if relative_path in AUDIO_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
@@ -679,6 +692,13 @@ def check_source_root(source_root: Path, strict: bool = False) -> CheckResult:
                 continue
             violations.append(Violation(relative_path, line_number, rule, include_path))
 
+        for pattern in LEGACY_HLE_ALIAS_PATTERNS:
+            for match in pattern.finditer(contents):
+                line_number = contents.count("\n", 0, match.start()) + 1
+                violations.append(
+                    Violation(relative_path, line_number, "legacy Libs HLE alias", None, message=f"legacy Libs HLE alias: {match.group(0)}")
+                )
+
     ordered_input_diagnostics = [diagnostic for _, diagnostic in sorted(input_diagnostics)]
     ordered_violations = sorted(
         violations,
@@ -841,6 +861,46 @@ class BoundaryCheckerTests(unittest.TestCase):
                     diagnostics=(
                         "emulator/src/Host/CaptureImageCodec.cpp:1: forbidden include (Host -> Graphics): Emulator/Graphics/Utils.h",
                     ),
+                ),
+            )
+
+    def test_rejects_legacy_hle_symbol_header_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root, "emulator/src/Hle/LibGraphicsDriver.cpp", '#include "Emulator/Libs/HleSymbolRegistry.h"\n'
+            )
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Hle/LibGraphicsDriver.cpp:1: forbidden include (legacy HleSymbolRegistry header): "
+                        "Emulator/Libs/HleSymbolRegistry.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_legacy_libs_hle_alias_symbols(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root,
+                "emulator/src/Hle/LibGraphicsDriver.cpp",
+                "void Register(::Kyty::Libs::HleSymbolRegistry* symbols)\n{\n"
+                "    Libs::HleSymbolResolve s {};\n    s.type = Libs::HleSymbolType::Func;\n}\n",
+            )
+
+            result = check_source_root(root)
+
+            self.assertEqual(result.exit_code, 1)
+            self.assertEqual(
+                result.diagnostics,
+                (
+                    "emulator/src/Hle/LibGraphicsDriver.cpp:1: legacy Libs HLE alias: Libs::HleSymbolRegistry",
+                    "emulator/src/Hle/LibGraphicsDriver.cpp:3: legacy Libs HLE alias: Libs::HleSymbolResolve",
+                    "emulator/src/Hle/LibGraphicsDriver.cpp:4: legacy Libs HLE alias: Libs::HleSymbolType",
                 ),
             )
 

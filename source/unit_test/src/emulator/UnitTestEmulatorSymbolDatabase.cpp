@@ -101,14 +101,14 @@ TEST(EmulatorSymbolDatabase, AddAliasesRegistersEveryNidWithOneHandler)
 TEST(EmulatorSymbolDatabase, NeutralHleRegistryPreservesCanonicalIdentity)
 {
 	Loader::SymbolDatabase symbols;
-	Libs::HleSymbolResolve export_symbol {};
+	Kyty::Hle::HleSymbolResolve export_symbol {};
 	export_symbol.name                 = U"neutral-nid";
 	export_symbol.library              = U"lib-neutral";
 	export_symbol.library_version      = 1;
 	export_symbol.module               = U"module-neutral";
 	export_symbol.module_version_major = 2;
 	export_symbol.module_version_minor = 3;
-	export_symbol.type                 = Libs::HleSymbolType::Func;
+	export_symbol.type                 = Kyty::Hle::HleSymbolType::Func;
 
 	symbols.AddHle(export_symbol, 0x87654321, U"neutral_handler");
 

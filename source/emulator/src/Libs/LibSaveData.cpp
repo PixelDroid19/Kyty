@@ -1001,7 +1001,7 @@ constexpr LibraryIdentity SAVE_DATA_NATIVE = {"SaveData_native", 1, "SaveData_na
 // This is the single canonical export list shared by SaveData and
 // SaveData_native. Native-only exports are registered separately below so an
 // exact lookup never succeeds through a compatibility alias or fallback.
-void RegisterSaveDataFunctions(HleSymbolRegistry* symbols, const LibraryIdentity& identity)
+void RegisterSaveDataFunctions(::Kyty::Hle::HleSymbolRegistry* symbols, const LibraryIdentity& identity)
 {
 	using namespace SaveData;
 	RegisterLibraryFunction(symbols, identity, "ZkZhskCPXFw", SaveDataInitialize, U"SaveData::SaveDataInitialize");
@@ -1035,7 +1035,7 @@ void RegisterSaveDataFunctions(HleSymbolRegistry* symbols, const LibraryIdentity
 	RegisterLibraryFunction(symbols, identity, "RjMlsR8EXrw", SaveDataTransferringMount, U"SaveData::SaveDataTransferringMount");
 }
 
-void RegisterNativeSaveDataFunctions(HleSymbolRegistry* symbols)
+void RegisterNativeSaveDataFunctions(::Kyty::Hle::HleSymbolRegistry* symbols)
 {
 	RegisterSaveDataFunctions(symbols, SAVE_DATA_NATIVE);
 	RegisterLibraryFunction(symbols, SAVE_DATA_NATIVE, "sDCBrmc61XU", SaveData::SaveDataPrepare, U"SaveData::SaveDataPrepare");

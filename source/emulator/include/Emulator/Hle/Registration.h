@@ -7,7 +7,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Common.h"
-#include "Emulator/Libs/HleSymbolRegistry.h"
+#include "Emulator/Hle/SymbolRegistry.h"
 #include "Emulator/Log.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -28,7 +28,7 @@ Core::Time GetTraceTime();
 #define PRINT_NAME_ENABLE(flag) PRINT_NAME_ENABLED = flag;
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_DEFINE(name) void name(::Kyty::Libs::HleSymbolRegistry* s)
+#define LIB_DEFINE(name) void name(::Kyty::Hle::HleSymbolRegistry* s)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_NAME(l, m)                                                                                                                     \
@@ -65,7 +65,7 @@ Core::Time GetTraceTime();
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_ADD(n, f, t)                                                                                                                   \
 	{                                                                                                                                         \
-		::Kyty::Libs::HleSymbolResolve sr {};                                                                                                  \
+		::Kyty::Hle::HleSymbolResolve sr {};                                                                                                    \
 		sr.name                  = n;                                                                                                          \
 		sr.library               = g_library;                                                                                                  \
 		sr.library_version       = g_library_version;                                                                                          \
@@ -81,7 +81,7 @@ Core::Time GetTraceTime();
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_ADD_ALIASES(f, t, ...)                                                                                                         \
 	{                                                                                                                                         \
-		::Kyty::Libs::HleSymbolResolve sr {};                                                                                                  \
+		::Kyty::Hle::HleSymbolResolve sr {};                                                                                                    \
 		sr.library              = g_library;                                                                                                   \
 		sr.library_version      = g_library_version;                                                                                           \
 		sr.module                = g_module;                                                                                                    \
@@ -94,16 +94,16 @@ Core::Time GetTraceTime();
 	}
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_OBJECT(n, f) LIB_ADD(n, f, ::Kyty::Libs::HleSymbolType::Object)
+#define LIB_OBJECT(n, f) LIB_ADD(n, f, ::Kyty::Hle::HleSymbolType::Object)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_FUNC(n, f) LIB_ADD(n, f, ::Kyty::Libs::HleSymbolType::Func)
+#define LIB_FUNC(n, f) LIB_ADD(n, f, ::Kyty::Hle::HleSymbolType::Func)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_OBJECT_ALIASES(f, ...) LIB_ADD_ALIASES(f, ::Kyty::Libs::HleSymbolType::Object, __VA_ARGS__)
+#define LIB_OBJECT_ALIASES(f, ...) LIB_ADD_ALIASES(f, ::Kyty::Hle::HleSymbolType::Object, __VA_ARGS__)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_FUNC_ALIASES(f, ...) LIB_ADD_ALIASES(f, ::Kyty::Libs::HleSymbolType::Func, __VA_ARGS__)
+#define LIB_FUNC_ALIASES(f, ...) LIB_ADD_ALIASES(f, ::Kyty::Hle::HleSymbolType::Func, __VA_ARGS__)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME()                                                                                                                       \

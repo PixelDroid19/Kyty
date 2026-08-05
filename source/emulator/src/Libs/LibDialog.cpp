@@ -59,7 +59,7 @@ constexpr LibraryIdentity SAVE_DATA_DIALOG_NATIVE = {"SaveDataDialog.native", 1,
 constexpr LibraryIdentity MSG_DIALOG              = {"MsgDialog", 1, "MsgDialog", 1, 1};
 constexpr LibraryIdentity MSG_DIALOG_NATIVE       = {"MsgDialog.native", 1, "MsgDialog", 1, 1};
 
-void RegisterSaveDataDialogFunctions(HleSymbolRegistry* symbols, const LibraryIdentity& identity)
+void RegisterSaveDataDialogFunctions(::Kyty::Hle::HleSymbolRegistry* symbols, const LibraryIdentity& identity)
 {
 	using namespace Dialog::SaveDataDialog;
 	RegisterLibraryFunction(symbols, identity, "s9e3+YpRnzw", SaveDataDialogInitialize,
@@ -79,7 +79,7 @@ void RegisterSaveDataDialogFunctions(HleSymbolRegistry* symbols, const LibraryId
 	                        U"Dialog::SaveDataDialog::SaveDataDialogProgressBarSetValue");
 }
 
-void RegisterMsgDialogFunctions(HleSymbolRegistry* symbols, const LibraryIdentity& identity)
+void RegisterMsgDialogFunctions(::Kyty::Hle::HleSymbolRegistry* symbols, const LibraryIdentity& identity)
 {
 	using namespace Dialog::MsgDialog;
 	RegisterLibraryFunction(symbols, identity, "lDqxaY1UbEo", MsgDialogInitialize, U"Dialog::MsgDialog::MsgDialogInitialize");

@@ -77,7 +77,7 @@ LIB_DEFINE(InitTextToSpeech2_1);
 LIB_DEFINE(InitWriteThrottling_1);
 LIB_DEFINE(InitEOSSDKPS5Shipping_1);
 
-bool Init(const String& id, HleSymbolRegistry* s)
+bool Init(const String& id, ::Kyty::Hle::HleSymbolRegistry* s)
 {
 	LIB_CHECK(U"libAppContent_1", InitAppContent_1);
 	LIB_CHECK(U"libAudio_1", InitAudio_1);
@@ -139,7 +139,7 @@ bool Init(const String& id, HleSymbolRegistry* s)
 	return false;
 }
 
-void InitAll(HleSymbolRegistry* s)
+void InitAll(::Kyty::Hle::HleSymbolRegistry* s)
 {
 	LIB_LOAD(InitAudio_1);
 	LIB_LOAD(InitAppContent_1);

@@ -14,7 +14,7 @@ namespace Kyty::Loader {
 
 namespace {
 
-SymbolResolve ToLoaderResolve(const ::Kyty::Libs::HleSymbolResolve& source)
+SymbolResolve ToLoaderResolve(const ::Kyty::Hle::HleSymbolResolve& source)
 {
 	SymbolResolve target {};
 	target.name                 = source.name;
@@ -23,7 +23,7 @@ SymbolResolve ToLoaderResolve(const ::Kyty::Libs::HleSymbolResolve& source)
 	target.module               = source.module;
 	target.module_version_major = source.module_version_major;
 	target.module_version_minor = source.module_version_minor;
-	target.type                 = source.type == ::Kyty::Libs::HleSymbolType::Object ? SymbolType::Object : SymbolType::Func;
+	target.type                 = source.type == ::Kyty::Hle::HleSymbolType::Object ? SymbolType::Object : SymbolType::Func;
 	return target;
 }
 
@@ -205,17 +205,17 @@ void SymbolDatabase::AddAliases(SymbolResolve s, std::initializer_list<const cha
 	}
 }
 
-void SymbolDatabase::AddHle(const ::Kyty::Libs::HleSymbolResolve& s, uint64_t vaddr)
+void SymbolDatabase::AddHle(const ::Kyty::Hle::HleSymbolResolve& s, uint64_t vaddr)
 {
 	AddHle(ToLoaderResolve(s), vaddr);
 }
 
-void SymbolDatabase::AddHle(const ::Kyty::Libs::HleSymbolResolve& s, uint64_t vaddr, const String& dbg_name)
+void SymbolDatabase::AddHle(const ::Kyty::Hle::HleSymbolResolve& s, uint64_t vaddr, const String& dbg_name)
 {
 	AddHle(ToLoaderResolve(s), vaddr, dbg_name);
 }
 
-void SymbolDatabase::AddHleAliases(::Kyty::Libs::HleSymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr,
+void SymbolDatabase::AddHleAliases(::Kyty::Hle::HleSymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr,
                                   const String& dbg_name)
 {
 	for (const auto* name: names)

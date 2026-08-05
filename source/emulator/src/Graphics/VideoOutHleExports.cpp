@@ -1,6 +1,6 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/VideoOut.h"
-#include "Emulator/Libs/HleSymbolRegistry.h"
+#include "Emulator/Hle/SymbolRegistry.h"
 #include "Emulator/Hle/Registration.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -9,17 +9,17 @@ namespace Kyty::Hle::VideoOutRegistration {
 
 namespace VideoOut = ::Kyty::Libs::VideoOut;
 
-static void InitVideoOutCommon(Libs::HleSymbolRegistry* symbols, int module_version_major, int module_version_minor)
+static void InitVideoOutCommon(::Kyty::Hle::HleSymbolRegistry* symbols, int module_version_major, int module_version_minor)
 {
 	auto add = [symbols, module_version_major, module_version_minor](const char* nid, uint64_t function, const char32_t* debug_name) {
-		Libs::HleSymbolResolve symbol {};
+		::Kyty::Hle::HleSymbolResolve symbol {};
 		symbol.name                 = String::FromUtf8(nid);
 		symbol.library              = U"VideoOut";
 		symbol.library_version      = 1;
 		symbol.module               = U"VideoOut";
 		symbol.module_version_major = module_version_major;
 		symbol.module_version_minor = module_version_minor;
-		symbol.type                 = Libs::HleSymbolType::Func;
+		symbol.type                 = ::Kyty::Hle::HleSymbolType::Func;
 		symbols->AddHle(symbol, function, String(debug_name));
 	};
 
