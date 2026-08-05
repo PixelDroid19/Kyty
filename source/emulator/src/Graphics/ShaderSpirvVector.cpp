@@ -2230,6 +2230,75 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpxF16_XXX_SmaskVsrc0Vsrc1)
 	return true;
 }
 
+/* Generalized packed 16-bit integer ALU: extend both operands (signed when
+ * param[1]=="s"), apply param[0] in 32 bits, truncate the result to the low
+ * 16 bits and store. */
+KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+	String8 load1;
+
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	EXIT_NOT_IMPLEMENTED(inst.dst.clamp);
+	EXIT_NOT_IMPLEMENTED(inst.dst.multiplier != 1.0f);
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+	if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+
+	const bool is_signed = (param[1] != nullptr && strcmp(param[1], "s") == 0);
+	String8 extend;
+	if (is_signed)
+	{
+		extend = R"(
+        %i0s_<index> = OpShiftLeftLogical %uint %t0_<index> %uint_16
+        %i0x_<index> = OpShiftRightArithmetic %uint %i0s_<index> %uint_16
+        %i1s_<index> = OpShiftLeftLogical %uint %t1_<index> %uint_16
+        %i1x_<index> = OpShiftRightArithmetic %uint %i1s_<index> %uint_16
+)";
+	} else
+	{
+		extend = R"(
+        %i0x_<index> = OpBitwiseAnd %uint %t0_<index> %uint_0xffff
+        %i1x_<index> = OpBitwiseAnd %uint %t1_<index> %uint_0xffff
+)";
+	}
+
+	static const char* text = R"(
+    <load0>
+    <load1>
+    <extend>
+        <param0>
+        %masked_<index> = OpBitwiseAnd %uint %t_<index> %uint_0xffff
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %masked_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<extend>", extend)
+	                   .ReplaceStr("<param0>", param[0])
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VInterpP1F32_VdstVsrcAttrChan)
 {
 	return true;
