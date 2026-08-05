@@ -3,6 +3,8 @@
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/File.h"
 
+#include "Emulator/Log.h"
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Loader {
@@ -552,67 +554,67 @@ bool Elf64::IsValid() const
 	if (m_ehdr->e_ident[EI_MAG0] != '\x7f' || m_ehdr->e_ident[EI_MAG1] != 'E' || m_ehdr->e_ident[EI_MAG2] != 'L' ||
 	    m_ehdr->e_ident[EI_MAG3] != 'F')
 	{
-		printf("Not an ELF file\n");
+		KYTY_LOG_DEBUG("Not an ELF file\n");
 		return false;
 	}
 
 	if (m_ehdr->e_ident[EI_CLASS] != ELFCLASS64)
 	{
-		printf("ehdr->e_ident[EI_CLASS] (0x%x) != ELFCLASS64\n", m_ehdr->e_ident[EI_CLASS]);
+		KYTY_LOG_DEBUG("ehdr->e_ident[EI_CLASS] (0x%x) != ELFCLASS64\n", m_ehdr->e_ident[EI_CLASS]);
 		return false;
 	}
 
 	if (m_ehdr->e_ident[EI_DATA] != ELFDATA2LSB)
 	{
-		printf("ehdr->e_ident[EI_DATA] (0x%x) != ELFDATA2LSB\n", m_ehdr->e_ident[EI_DATA]);
+		KYTY_LOG_DEBUG("ehdr->e_ident[EI_DATA] (0x%x) != ELFDATA2LSB\n", m_ehdr->e_ident[EI_DATA]);
 		return false;
 	}
 
 	if (m_ehdr->e_ident[EI_VERSION] != EV_CURRENT)
 	{
-		printf("ehdr->e_ident[EI_VERSION] != EV_CURRENT\n");
+		KYTY_LOG_DEBUG("ehdr->e_ident[EI_VERSION] != EV_CURRENT\n");
 		return false;
 	}
 
 	if (m_ehdr->e_ident[EI_OSABI] != ELFOSABI_FREEBSD)
 	{
-		printf("ehdr->e_ident[EI_OSABI] (0x%x) != ELFOSABI_FREEBSD\n", m_ehdr->e_ident[EI_OSABI]);
+		KYTY_LOG_DEBUG("ehdr->e_ident[EI_OSABI] (0x%x) != ELFOSABI_FREEBSD\n", m_ehdr->e_ident[EI_OSABI]);
 		return false;
 	}
 
 	if (m_ehdr->e_ident[EI_ABIVERSION] != 0 && m_ehdr->e_ident[EI_ABIVERSION] != 2)
 	{
-		printf("ehdr->e_ident[EI_ABIVERSION] (0x%x) != (0 or 2)\n", m_ehdr->e_ident[EI_ABIVERSION]);
+		KYTY_LOG_DEBUG("ehdr->e_ident[EI_ABIVERSION] (0x%x) != (0 or 2)\n", m_ehdr->e_ident[EI_ABIVERSION]);
 		return false;
 	}
 
 	if (m_ehdr->e_type != ET_DYNEXEC && m_ehdr->e_type != ET_DYNAMIC)
 	{
-		printf("ehdr->e_type (%04x) != ET_DYNEXEC && m_ehdr->e_type != ET_DYNAMIC\n", m_ehdr->e_type);
+		KYTY_LOG_DEBUG("ehdr->e_type (%04x) != ET_DYNEXEC && m_ehdr->e_type != ET_DYNAMIC\n", m_ehdr->e_type);
 		return false;
 	}
 
 	if (m_ehdr->e_machine != EM_X86_64)
 	{
-		printf("ehdr->e_machine (%04x) != EM_X86_64\n", m_ehdr->e_machine);
+		KYTY_LOG_DEBUG("ehdr->e_machine (%04x) != EM_X86_64\n", m_ehdr->e_machine);
 		return false;
 	}
 
 	if (m_ehdr->e_version != EV_CURRENT)
 	{
-		printf("ehdr->e_version != EV_CURRENT\n");
+		KYTY_LOG_DEBUG("ehdr->e_version != EV_CURRENT\n");
 		return false;
 	}
 
 	if (m_ehdr->e_phentsize != sizeof(Elf64_Phdr))
 	{
-		printf("ehdr->e_phentsize != sizeof(Elf64_Phdr)\n");
+		KYTY_LOG_DEBUG("ehdr->e_phentsize != sizeof(Elf64_Phdr)\n");
 		return false;
 	}
 
 	if (m_ehdr->e_shentsize > 0 && m_ehdr->e_shentsize != sizeof(Elf64_Shdr))
 	{
-		printf("ehdr->e_shentsize (%d) != sizeof(Elf64_Shdr)\n", m_ehdr->e_shentsize);
+		KYTY_LOG_DEBUG("ehdr->e_shentsize (%d) != sizeof(Elf64_Shdr)\n", m_ehdr->e_shentsize);
 		return false;
 	}
 

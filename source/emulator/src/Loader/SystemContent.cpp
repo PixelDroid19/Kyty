@@ -8,6 +8,8 @@
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/Threads.h"
 
+#include "Emulator/Log.h"
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Loader {
@@ -101,7 +103,7 @@ void Psf::Open(const String& file_name)
 
 	if (m_f.IsInvalid())
 	{
-		printf("Can't open %s\n", file_name.C_Str());
+		KYTY_LOG_DEBUG("Can't open %s\n", file_name.C_Str());
 		return;
 	}
 
@@ -113,7 +115,7 @@ void Psf::Open(const String& file_name)
 
 	if (magic1 != 0x46535000 && magic2 != 0x00000101)
 	{
-		printf("invalid file: magic1 = %08" PRIx32 ", magic2 = %08" PRIx32 "\n", magic1, magic2);
+		KYTY_LOG_DEBUG("invalid file: magic1 = %08" PRIx32 ", magic2 = %08" PRIx32 "\n", magic1, magic2);
 		return;
 	}
 
@@ -141,7 +143,7 @@ void Psf::Open(const String& file_name)
 
 		if (m_params[i].type != 0x0204 && m_params[i].type != 0x0404)
 		{
-			printf("unknown type %02" PRIx16 "\n", m_params[i].type);
+			KYTY_LOG_DEBUG("unknown type %02" PRIx16 "\n", m_params[i].type);
 			return;
 		}
 	}
@@ -182,7 +184,7 @@ void Psf::DbgPrint()
 	{
 		for (uint32_t i = 0; i < m_params_num; i++)
 		{
-			printf("%s, ", m_name_tbl + m_params[i].name_offset);
+			KYTY_LOG_DEBUG("%s, ", m_name_tbl + m_params[i].name_offset);
 
 			switch (m_params[i].type)
 			{
@@ -191,7 +193,7 @@ void Psf::DbgPrint()
 					m_f.Seek(m_value_tbl_offset + m_params[i].value_offset);
 					auto buf = m_f.Read(m_params[i].size1);
 					auto str = String::FromUtf8(reinterpret_cast<const char*>(buf.GetDataConst())).ReplaceChar(U'\n', U',');
-					printf("string = %s\n", str.C_Str());
+					KYTY_LOG_DEBUG("string = %s\n", str.C_Str());
 					break;
 				}
 				case 0x0404:
@@ -199,7 +201,7 @@ void Psf::DbgPrint()
 					uint32_t value = 0;
 					m_f.Seek(m_value_tbl_offset + m_params[i].value_offset);
 					m_f.Read(&value, 4);
-					printf("int = 0x%08" PRIx32 "\n", value);
+					KYTY_LOG_DEBUG("int = 0x%08" PRIx32 "\n", value);
 					break;
 				}
 				default: EXIT("unknown type %02" PRIx16 "\n", m_params[i].type);
@@ -288,7 +290,7 @@ void PlayGo::Open(const String& file_name)
 
 	if (m_f.IsInvalid())
 	{
-		printf("Can't open %s\n", file_name.C_Str());
+		KYTY_LOG_DEBUG("Can't open %s\n", file_name.C_Str());
 		return;
 	}
 
@@ -298,7 +300,7 @@ void PlayGo::Open(const String& file_name)
 
 	if (magic1 != 0x6f676c70)
 	{
-		printf("invalid file: magic1 = %08" PRIx32 "\n", magic1);
+		KYTY_LOG_DEBUG("invalid file: magic1 = %08" PRIx32 "\n", magic1);
 		return;
 	}
 
@@ -344,7 +346,7 @@ void PlayGo::DbgPrint()
 
 	if (m_opened)
 	{
-		printf("PlayGo: chunks num = %" PRIu16 "\n", m_chunks_num);
+		KYTY_LOG_DEBUG("PlayGo: chunks num = %" PRIu16 "\n", m_chunks_num);
 	}
 }
 
@@ -393,7 +395,7 @@ bool SystemContentLoadParamJson(const String& file_name)
 	const auto* json     = Core::Json::Create(contents);
 	if (json == nullptr || !json->IsObject())
 	{
-		printf("invalid content metadata: %s\n", file_name.C_Str());
+		KYTY_LOG_DEBUG("invalid content metadata: %s\n", file_name.C_Str());
 		delete json;
 		return false;
 	}
@@ -404,7 +406,7 @@ bool SystemContentLoadParamJson(const String& file_name)
 
 	if (title_id.IsEmpty() && app_version.IsEmpty())
 	{
-		printf("content metadata has no title or version: %s\n", file_name.C_Str());
+		KYTY_LOG_DEBUG("content metadata has no title or version: %s\n", file_name.C_Str());
 		return false;
 	}
 
