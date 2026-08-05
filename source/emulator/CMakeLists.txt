@@ -46,9 +46,17 @@ get_target_property(_kernel_sources kyty_kernel SOURCES)
 if(NOT _kernel_sources)
 	message(FATAL_ERROR "kyty_kernel target has no implementation sources")
 endif()
+get_target_property(_kernel_links kyty_kernel LINK_LIBRARIES)
+if(_kernel_links AND "scripts" IN_LIST _kernel_links)
+	message(FATAL_ERROR "kyty_kernel must not inherit the script host archive")
+endif()
 get_target_property(_hle_sources kyty_hle SOURCES)
 if(NOT _hle_sources)
 	message(FATAL_ERROR "kyty_hle target has no implementation sources")
+endif()
+get_target_property(_hle_links kyty_hle LINK_LIBRARIES)
+if(_hle_links AND "scripts" IN_LIST _hle_links)
+	message(FATAL_ERROR "kyty_hle must not link the script host archive directly")
 endif()
 
 target_sources(emulator PRIVATE
@@ -194,7 +202,7 @@ target_include_directories(kyty_kernel PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
 	"${CMAKE_SOURCE_DIR}/include"
 )
-target_link_libraries(kyty_kernel PUBLIC core math sys scripts)
+target_link_libraries(kyty_kernel PUBLIC core math sys)
 
 target_include_directories(kyty_hle PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"

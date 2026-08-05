@@ -1,10 +1,17 @@
-file(GLOB scripts_src
-    "src/*.cpp"
+file(GLOB scripts_src CONFIGURE_DEPENDS
+	"src/*.cpp"
 )
 
-#add_library(scripts_obj OBJECT ${scripts_src})
-#add_library(scripts STATIC $<TARGET_OBJECTS:scripts_obj>)
-add_library(scripts OBJECT ${scripts_src})
+# Keep the script host in its own archive.  Embedding these objects into every
+# consumer (the former OBJECT target) made BuildTools/Lua implementation leak
+# into the kernel and emulator archives and forced unrelated linkers to own the
+# scripting lifecycle.
+add_library(scripts STATIC ${scripts_src})
+
+get_target_property(_scripts_type scripts TYPE)
+if(NOT _scripts_type STREQUAL "STATIC_LIBRARY")
+	message(FATAL_ERROR "scripts must remain an isolated static archive")
+endif()
 
 target_link_libraries(scripts core lua)
 
@@ -27,5 +34,3 @@ list(APPEND check_headers
 clang_tidy_check(scripts "" "${check_headers}" "${inc_headers}")
 
 include_what_you_use(scripts "${inc_headers}")
-
-
