@@ -54,7 +54,7 @@ public:
 	}
 	[[nodiscard]] ImageOrder  GetOrder() const { return m_order; }
 	[[nodiscard]] const void* GetData() const { return m_pixels; }
-	[[nodiscard]] void*       GetSdlSurface() const;
+	[[nodiscard]] const ::Kyty::Emulator::Host::HostImageSurface* GetHostSurface() const { return m_image; }
 
 	void DbgPrint() const;
 	bool DbgEqual(const ImageAsset* img) const;

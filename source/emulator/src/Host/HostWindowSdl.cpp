@@ -1,4 +1,5 @@
 #include "Emulator/Host/HostWindow.h"
+#include "Emulator/Host/ImageSurface.h"
 #include "Emulator/Log.h"
 
 #include "Kyty/Core/DbgAssert.h"
@@ -89,10 +90,10 @@ void* HostWindow::GetNativeHandle() const
 	return m_window;
 }
 
-void HostWindow::SetIcon(void* native_surface)
+void HostWindow::SetIcon(const HostImageSurface* surface)
 {
-	EXIT_IF(m_window == nullptr || native_surface == nullptr);
-	SDL_SetWindowIcon(static_cast<SDL_Window*>(m_window), static_cast<SDL_Surface*>(native_surface));
+	EXIT_IF(m_window == nullptr || surface == nullptr || surface->GetNativeHandle() == nullptr);
+	SDL_SetWindowIcon(static_cast<SDL_Window*>(m_window), static_cast<SDL_Surface*>(surface->GetNativeHandle()));
 }
 
 void HostWindow::SetTitle(const char* title)

@@ -7,6 +7,8 @@
 
 namespace Kyty::Emulator::Host {
 
+class HostImageSurface;
+
 // Owns the native host window and its SDL lifecycle. The native handle stays
 // opaque so Graphics can use host-window behavior without depending on SDL's
 // window types.
@@ -18,7 +20,7 @@ public:
 
 	[[nodiscard]] void* GetNativeHandle() const;
 
-	void SetIcon(void* native_surface);
+	void SetIcon(const HostImageSurface* surface);
 	void SetTitle(const char* title);
 	[[nodiscard]] bool ShowAndPumpEvents();
 

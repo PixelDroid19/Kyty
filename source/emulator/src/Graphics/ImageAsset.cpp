@@ -243,12 +243,6 @@ bool ImageAsset::BlitTo(ImageAsset* image, const Math::Rect& source, const Math:
 	return m_image->BlitTo(image->m_image, ToHostRect(source), ToHostRect(destination));
 }
 
-void* ImageAsset::GetSdlSurface() const
-{
-	EXIT_IF(m_image == nullptr);
-	return m_image->GetNativeHandle();
-}
-
 Math::Size ImageAsset::GetSize(const String& name)
 {
 	if (!name.EndsWith(U".png", String::Case::Insensitive))

@@ -2928,7 +2928,7 @@ void WindowUpdateIcon()
 
 	if (icon != nullptr)
 	{
-		g_window_ctx->host_window->SetIcon(icon->GetSdlSurface());
+		g_window_ctx->host_window->SetIcon(icon->GetHostSurface());
 	}
 }
 
