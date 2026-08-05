@@ -11,6 +11,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Trace.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1208,7 +1209,7 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	    trace_flex ? std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() : 0;
 	if (trace_flex)
 	{
-		printf("[FlexMap] request in_addr=0x%016" PRIx64 " len=%" PRIu64 " prot=0x%x flags=0x%x name=%s\n", in_addr,
+		KYTY_LOG_DEBUG("[FlexMap] request in_addr=0x%016" PRIx64 " len=%" PRIu64 " prot=0x%x flags=0x%x name=%s\n", in_addr,
 		       static_cast<uint64_t>(len), prot, flags, name != nullptr ? name : "");
 	}
 	uint64_t out_addr             = 0;
@@ -1236,7 +1237,7 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	{
 		const auto now_us =
 		    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-		printf("[FlexMap] after_alloc out_addr=0x%016" PRIx64 " elapsed_us=%" PRIu64 "\n", out_addr, now_us - start_us);
+		KYTY_LOG_DEBUG("[FlexMap] after_alloc out_addr=0x%016" PRIx64 " elapsed_us=%" PRIu64 "\n", out_addr, now_us - start_us);
 	}
 
 	if (out_addr == 0)
@@ -1246,7 +1247,7 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 
 	if (!g_flexible_memory->Map(out_addr, len, prot, mode, gpu_mode))
 	{
-		printf(FG_RED "\t [Fail]\n" FG_DEFAULT);
+		KYTY_LOG_DEBUG(FG_RED "\t [Fail]\n" FG_DEFAULT);
 		VirtualMemory::Free(out_addr);
 		if (consumed_reservation)
 		{
@@ -1259,21 +1260,21 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	{
 		const auto now_us =
 		    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-		printf("[FlexMap] after_flex_map elapsed_us=%" PRIu64 "\n", now_us - start_us);
+		KYTY_LOG_DEBUG("[FlexMap] after_flex_map elapsed_us=%" PRIu64 "\n", now_us - start_us);
 	}
 
-	printf("\t in_addr  = 0x%016" PRIx64 "\n", in_addr);
-	printf("\t out_addr = 0x%016" PRIx64 "\n", out_addr);
-	printf("\t size     = %" PRIu64 "\n", len);
-	printf("\t mode     = %s\n", Core::EnumName(mode).C_Str());
-	printf("\t name     = %s\n", name != nullptr ? name : "");
-	printf("\t gpu_mode = %s\n", Core::EnumName(gpu_mode).C_Str());
+	KYTY_LOG_DEBUG("\t in_addr  = 0x%016" PRIx64 "\n", in_addr);
+	KYTY_LOG_DEBUG("\t out_addr = 0x%016" PRIx64 "\n", out_addr);
+	KYTY_LOG_DEBUG("\t size     = %" PRIu64 "\n", len);
+	KYTY_LOG_DEBUG("\t mode     = %s\n", Core::EnumName(mode).C_Str());
+	KYTY_LOG_DEBUG("\t name     = %s\n", name != nullptr ? name : "");
+	KYTY_LOG_DEBUG("\t gpu_mode = %s\n", Core::EnumName(gpu_mode).C_Str());
 
 	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess)
 	{
 		if (trace_flex)
 		{
-			printf("[FlexMap] registering GPU mapping range addr=0x%016" PRIx64 " size=%" PRIu64 "\n", out_addr,
+			KYTY_LOG_DEBUG("[FlexMap] registering GPU mapping range addr=0x%016" PRIx64 " size=%" PRIu64 "\n", out_addr,
 			       static_cast<uint64_t>(len));
 		}
 		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len));
@@ -1283,21 +1284,21 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	{
 		if (trace_flex)
 		{
-			printf("[FlexMap] callback begin\n");
+			KYTY_LOG_DEBUG("[FlexMap] callback begin\n");
 		}
 		g_alloc_callback(out_addr, len);
 		if (trace_flex)
 		{
 			const auto now_us =
 			    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-			printf("[FlexMap] callback_done elapsed_us=%" PRIu64 "\n", now_us - start_us);
+			KYTY_LOG_DEBUG("[FlexMap] callback_done elapsed_us=%" PRIu64 "\n", now_us - start_us);
 		}
 	}
 	if (trace_flex)
 	{
 		const auto now_us =
 		    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-		printf("[FlexMap] done total_us=%" PRIu64 "\n", now_us - start_us);
+		KYTY_LOG_DEBUG("[FlexMap] done total_us=%" PRIu64 "\n", now_us - start_us);
 	}
 
 	return OK;
@@ -1374,11 +1375,11 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr_in_out, uint64_t len, in
 	VirtualMemory::RegisterDemandRange(reserved_addr, len);
 
 	*addr_in_out = reinterpret_cast<void*>(reserved_addr);
-	printf("\t in_addr  = 0x%016" PRIx64 "\n", requested_addr);
-	printf("\t out_addr = 0x%016" PRIx64 "\n", reserved_addr);
-	printf("\t len      = 0x%016" PRIx64 "\n", len);
-	printf("\t flags    = 0x%08x\n", flags);
-	printf("\t align    = 0x%016" PRIx64 "\n", alignment);
+	KYTY_LOG_DEBUG("\t in_addr  = 0x%016" PRIx64 "\n", requested_addr);
+	KYTY_LOG_DEBUG("\t out_addr = 0x%016" PRIx64 "\n", reserved_addr);
+	KYTY_LOG_DEBUG("\t len      = 0x%016" PRIx64 "\n", len);
+	KYTY_LOG_DEBUG("\t flags    = 0x%08x\n", flags);
+	KYTY_LOG_DEBUG("\t align    = 0x%016" PRIx64 "\n", alignment);
 	return OK;
 }
 
@@ -1418,8 +1419,8 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 {
 	PRINT_NAME();
 
-	printf("\t start = 0x%016" PRIx64 "\n", vaddr);
-	printf("\t len   = 0x%016" PRIx64 "\n", len);
+	KYTY_LOG_DEBUG("\t start = 0x%016" PRIx64 "\n", vaddr);
+	KYTY_LOG_DEBUG("\t len   = 0x%016" PRIx64 "\n", len);
 
 	EXIT_IF(g_physical_memory == nullptr);
 	EXIT_IF(g_flexible_memory == nullptr);
@@ -1481,9 +1482,9 @@ int KYTY_SYSV_ABI KernelDirectMemoryQuery(int64_t offset, int flags, void* info,
 
 	EXIT_IF(g_physical_memory == nullptr);
 
-	printf("\t offset    = 0x%016" PRIx64 "\n", offset);
-	printf("\t flags     = 0x%08" PRIx32 "\n", flags);
-	printf("\t info_size = 0x%016" PRIx64 "\n", info_size);
+	KYTY_LOG_DEBUG("\t offset    = 0x%016" PRIx64 "\n", offset);
+	KYTY_LOG_DEBUG("\t flags     = 0x%08" PRIx32 "\n", flags);
+	KYTY_LOG_DEBUG("\t info_size = 0x%016" PRIx64 "\n", info_size);
 
 	struct QueryInfo
 	{
@@ -1500,7 +1501,7 @@ int KYTY_SYSV_ABI KernelDirectMemoryQuery(int64_t offset, int flags, void* info,
 	PhysicalMemory::AllocatedBlock block {};
 	if (!g_physical_memory->Find(offset, flags != 0, &block))
 	{
-		printf(FG_RED "\t[Fail]\n" FG_DEFAULT);
+		KYTY_LOG_DEBUG(FG_RED "\t[Fail]\n" FG_DEFAULT);
 		return KERNEL_ERROR_EACCES;
 	}
 
@@ -1510,10 +1511,10 @@ int KYTY_SYSV_ABI KernelDirectMemoryQuery(int64_t offset, int flags, void* info,
 	query_info->end         = static_cast<int64_t>(block.start_addr + block.size);
 	query_info->memory_type = block.memory_type;
 
-	printf("\t start       = %016" PRIx64 "\n", query_info->start);
-	printf("\t end         = %016" PRIx64 "\n", query_info->end);
-	printf("\t memory_type = %d\n", query_info->memory_type);
-	printf(FG_GREEN "\t[Ok]\n" FG_DEFAULT);
+	KYTY_LOG_DEBUG("\t start       = %016" PRIx64 "\n", query_info->start);
+	KYTY_LOG_DEBUG("\t end         = %016" PRIx64 "\n", query_info->end);
+	KYTY_LOG_DEBUG("\t memory_type = %d\n", query_info->memory_type);
+	KYTY_LOG_DEBUG(FG_GREEN "\t[Ok]\n" FG_DEFAULT);
 
 	return OK;
 }
@@ -1525,11 +1526,11 @@ int KYTY_SYSV_ABI KernelAllocateDirectMemory(int64_t search_start, int64_t searc
 
 	EXIT_IF(g_physical_memory == nullptr);
 
-	printf("\t search_start = 0x%016" PRIx64 "\n", search_start);
-	printf("\t search_end   = 0x%016" PRIx64 "\n", search_end);
-	printf("\t len          = 0x%016" PRIx64 "\n", len);
-	printf("\t alignment    = 0x%016" PRIx64 "\n", alignment);
-	printf("\t memory_type  = %d\n", memory_type);
+	KYTY_LOG_DEBUG("\t search_start = 0x%016" PRIx64 "\n", search_start);
+	KYTY_LOG_DEBUG("\t search_end   = 0x%016" PRIx64 "\n", search_end);
+	KYTY_LOG_DEBUG("\t len          = 0x%016" PRIx64 "\n", len);
+	KYTY_LOG_DEBUG("\t alignment    = 0x%016" PRIx64 "\n", alignment);
+	KYTY_LOG_DEBUG("\t memory_type  = %d\n", memory_type);
 
 	if (search_start < 0 || search_end <= search_start || len == 0 || phys_addr_out == nullptr)
 	{
@@ -1539,14 +1540,14 @@ int KYTY_SYSV_ABI KernelAllocateDirectMemory(int64_t search_start, int64_t searc
 	uint64_t addr = 0;
 	if (!g_physical_memory->Alloc(search_start, search_end, len, alignment, &addr, memory_type))
 	{
-		printf(FG_RED "\t[Fail]\n" FG_DEFAULT);
+		KYTY_LOG_DEBUG(FG_RED "\t[Fail]\n" FG_DEFAULT);
 		return KERNEL_ERROR_EAGAIN;
 	}
 
 	*phys_addr_out = static_cast<int64_t>(addr);
 
-	printf("\tphys_addr    = %016" PRIx64 "\n", addr);
-	printf(FG_GREEN "\t[Ok]\n" FG_DEFAULT);
+	KYTY_LOG_DEBUG("\tphys_addr    = %016" PRIx64 "\n", addr);
+	KYTY_LOG_DEBUG(FG_GREEN "\t[Ok]\n" FG_DEFAULT);
 
 	return OK;
 }
@@ -1557,9 +1558,9 @@ int KYTY_SYSV_ABI KernelAllocateMainDirectMemory(size_t len, size_t alignment, i
 
 	EXIT_IF(g_physical_memory == nullptr);
 
-	printf("\t len          = 0x%016" PRIx64 "\n", len);
-	printf("\t alignment    = 0x%016" PRIx64 "\n", alignment);
-	printf("\t memory_type  = %d\n", memory_type);
+	KYTY_LOG_DEBUG("\t len          = 0x%016" PRIx64 "\n", len);
+	KYTY_LOG_DEBUG("\t alignment    = 0x%016" PRIx64 "\n", alignment);
+	KYTY_LOG_DEBUG("\t memory_type  = %d\n", memory_type);
 
 	if (len == 0 || phys_addr_out == nullptr)
 	{
@@ -1569,14 +1570,14 @@ int KYTY_SYSV_ABI KernelAllocateMainDirectMemory(size_t len, size_t alignment, i
 	uint64_t addr = 0;
 	if (!g_physical_memory->Alloc(0, UINT64_MAX, len, alignment, &addr, memory_type))
 	{
-		printf(FG_RED "\t[Fail]\n" FG_DEFAULT);
+		KYTY_LOG_DEBUG(FG_RED "\t[Fail]\n" FG_DEFAULT);
 		return KERNEL_ERROR_EAGAIN;
 	}
 
 	*phys_addr_out = static_cast<int64_t>(addr);
 
-	printf("\tphys_addr    = %016" PRIx64 "\n", addr);
-	printf(FG_GREEN "\t[Ok]\n" FG_DEFAULT);
+	KYTY_LOG_DEBUG("\tphys_addr    = %016" PRIx64 "\n", addr);
+	KYTY_LOG_DEBUG(FG_GREEN "\t[Ok]\n" FG_DEFAULT);
 
 	return OK;
 }
@@ -1621,8 +1622,8 @@ int KYTY_SYSV_ABI KernelReleaseDirectMemory(int64_t start, size_t len)
 {
 	PRINT_NAME();
 
-	printf("\t start = 0x%016" PRIx64 "\n", start);
-	printf("\t len   = 0x%016" PRIx64 "\n", len);
+	KYTY_LOG_DEBUG("\t start = 0x%016" PRIx64 "\n", start);
+	KYTY_LOG_DEBUG("\t len   = 0x%016" PRIx64 "\n", len);
 
 	return release_direct_memory(start, len);
 }
@@ -1631,8 +1632,8 @@ int KYTY_SYSV_ABI KernelCheckedReleaseDirectMemory(int64_t start, size_t len)
 {
 	PRINT_NAME();
 
-	printf("\t start = 0x%016" PRIx64 "\n", start);
-	printf("\t len   = 0x%016" PRIx64 "\n", len);
+	KYTY_LOG_DEBUG("\t start = 0x%016" PRIx64 "\n", start);
+	KYTY_LOG_DEBUG("\t len   = 0x%016" PRIx64 "\n", len);
 
 	return release_direct_memory(start, len);
 }
@@ -1659,7 +1660,7 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 	// The fixed-address request is bit 0x10; accept any other flag bits rather than
 	// bailing (PS5 titles pass e.g. 0x11 = fixed + no-overwrite).
 	bool fixed = (flags & 0x10) != 0;
-	printf("\t flags        = 0x%x (fixed=%d)\n", flags, fixed ? 1 : 0);
+	KYTY_LOG_DEBUG("\t flags        = 0x%x (fixed=%d)\n", flags, fixed ? 1 : 0);
 
 	VirtualMemory::Mode          mode     = VirtualMemory::Mode::NoAccess;
 	KernelGpuMappingAccessMode gpu_mode = KernelGpuMappingAccessMode::NoAccess;
@@ -1735,12 +1736,12 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 
 	*addr = reinterpret_cast<void*>(out_addr);
 
-	printf("\t in_addr  = 0x%016" PRIx64 "\n", in_addr);
-	printf("\t out_addr = 0x%016" PRIx64 "\n", out_addr);
-	printf("\t size     = 0x%016" PRIx64 "\n", len);
-	printf("\t mode     = %s\n", Core::EnumName(mode).C_Str());
-	printf("\t align    = 0x%016" PRIx64 "\n", alignment);
-	printf("\t gpu_mode = %s\n", Core::EnumName(gpu_mode).C_Str());
+	KYTY_LOG_DEBUG("\t in_addr  = 0x%016" PRIx64 "\n", in_addr);
+	KYTY_LOG_DEBUG("\t out_addr = 0x%016" PRIx64 "\n", out_addr);
+	KYTY_LOG_DEBUG("\t size     = 0x%016" PRIx64 "\n", len);
+	KYTY_LOG_DEBUG("\t mode     = %s\n", Core::EnumName(mode).C_Str());
+	KYTY_LOG_DEBUG("\t align    = 0x%016" PRIx64 "\n", alignment);
+	KYTY_LOG_DEBUG("\t gpu_mode = %s\n", Core::EnumName(gpu_mode).C_Str());
 
 	if (!physical_range_valid)
 	{
@@ -1749,7 +1750,7 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 
 	if (out_addr == 0)
 	{
-		printf(FG_RED "\t [Fail]\n" FG_DEFAULT);
+		KYTY_LOG_DEBUG(FG_RED "\t [Fail]\n" FG_DEFAULT);
 		return fixed ? KERNEL_ERROR_EBUSY : KERNEL_ERROR_ENOMEM;
 	}
 
@@ -1763,7 +1764,7 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		g_alloc_callback(out_addr, len);
 	}
 
-	printf(FG_GREEN "\t [Ok]\n" FG_DEFAULT);
+	KYTY_LOG_DEBUG(FG_GREEN "\t [Ok]\n" FG_DEFAULT);
 
 	return OK;
 }
@@ -1773,7 +1774,7 @@ int KYTY_SYSV_ABI KernelMapNamedDirectMemory(void** addr, size_t len, int prot, 
 {
 	PRINT_NAME();
 
-	printf("\t name = %s\n", name);
+	KYTY_LOG_DEBUG("\t name = %s\n", name);
 
 	return KernelMapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment);
 }
@@ -1782,7 +1783,7 @@ int KYTY_SYSV_ABI KernelMapDirectMemory2(void** addr, size_t len, int type, int 
                                          size_t alignment)
 {
 	PRINT_NAME();
-	printf("\t type = %d\n", type);
+	KYTY_LOG_DEBUG("\t type = %d\n", type);
 	// Type is guest memory-class metadata; mapping rights come from prot/flags.
 	return KernelMapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment);
 }
@@ -1790,7 +1791,7 @@ int KYTY_SYSV_ABI KernelMapDirectMemory2(void** addr, size_t len, int type, int 
 int KYTY_SYSV_ABI KernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name)
 {
 	PRINT_NAME();
-	printf("\t addr = 0x%016" PRIx64 " len = 0x%016" PRIx64 " name = %s\n", reinterpret_cast<uint64_t>(addr), len,
+	KYTY_LOG_DEBUG("\t addr = 0x%016" PRIx64 " len = 0x%016" PRIx64 " name = %s\n", reinterpret_cast<uint64_t>(addr), len,
 	       name != nullptr ? name : "(null)");
 	// Name tags are diagnostic for guests; host maps are not renamed.
 	(void)addr;
@@ -1801,7 +1802,7 @@ int KYTY_SYSV_ABI KernelSetVirtualRangeName(const void* addr, uint64_t len, cons
 int KYTY_SYSV_ABI KernelClearVirtualRangeName(const void* addr, uint64_t len)
 {
 	PRINT_NAME();
-	printf("\t addr = 0x%016" PRIx64 " len = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(addr), len);
+	KYTY_LOG_DEBUG("\t addr = 0x%016" PRIx64 " len = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(addr), len);
 	// Pair of SetVirtualRangeName: clearing a name is success when maps exist.
 	(void)addr;
 	(void)len;
@@ -1939,7 +1940,7 @@ int KYTY_SYSV_ABI KernelAvailableDirectMemorySize(int64_t arg0, int64_t arg1, ui
 	}
 
 	*out_size_address = total_available;
-	printf("\t *size = 0x%016" PRIx64 "\n", total_available);
+	KYTY_LOG_DEBUG("\t *size = 0x%016" PRIx64 "\n", total_available);
 	return OK;
 }
 
@@ -1971,7 +1972,7 @@ int KYTY_SYSV_ABI KernelBatchMap2(void* entries, int entry_count, int* processed
 {
 	PRINT_NAME();
 
-	printf("\t entries = %p entry_count = %d flags = 0x%x\n", entries, entry_count, flags);
+	KYTY_LOG_DEBUG("\t entries = %p entry_count = %d flags = 0x%x\n", entries, entry_count, flags);
 
 	if (entries == nullptr || entry_count <= 0)
 	{
@@ -2044,7 +2045,7 @@ int KYTY_SYSV_ABI KernelAvailableFlexibleMemorySize(size_t* size)
 
 	*size = g_flexible_memory->Available();
 
-	printf("\t *size = 0x%016" PRIx64 "\n", *size);
+	KYTY_LOG_DEBUG("\t *size = 0x%016" PRIx64 "\n", *size);
 
 	return OK;
 }
@@ -2063,7 +2064,7 @@ int KYTY_SYSV_ABI KernelConfiguredFlexibleMemorySize(uint64_t* size)
 		return rc;
 	}
 	*size = available;
-	printf("\t *size = 0x%016" PRIx64 "\n", *size);
+	KYTY_LOG_DEBUG("\t *size = 0x%016" PRIx64 "\n", *size);
 	return OK;
 }
 
@@ -2072,7 +2073,7 @@ int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryIn
 	PRINT_NAME();
 
 	const uint64_t vaddr = reinterpret_cast<uint64_t>(addr);
-	printf("\t addr = 0x%016" PRIx64 " flags = 0x%08x info_size = 0x%016" PRIx64 "\n", vaddr, flags, info_size);
+	KYTY_LOG_DEBUG("\t addr = 0x%016" PRIx64 " flags = 0x%08x info_size = 0x%016" PRIx64 "\n", vaddr, flags, info_size);
 
 	if (info == nullptr || info_size != sizeof(VirtualQueryInfo) || (flags != 0 && flags != 1))
 	{
@@ -2122,7 +2123,7 @@ int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryIn
 	info->is_committed = is_reserved ? 0u : 1u;
 	info->is_stack     = PthreadQueryStack(addr, nullptr, nullptr) ? 1u : 0u;
 
-	printf("\t start = 0x%016" PRIx64 " end = 0x%016" PRIx64 " prot = 0x%x flex=%d direct=%d\n", static_cast<uint64_t>(info->start),
+	KYTY_LOG_DEBUG("\t start = 0x%016" PRIx64 " end = 0x%016" PRIx64 " prot = 0x%x flex=%d direct=%d\n", static_cast<uint64_t>(info->start),
 	       static_cast<uint64_t>(info->end), info->protection, static_cast<int>(info->is_flexible), static_cast<int>(info->is_direct));
 
 	return OK;
@@ -2223,9 +2224,9 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 
 	const auto vaddr = reinterpret_cast<uint64_t>(addr);
 
-	printf("\t addr = 0x%016" PRIx64 "\n", vaddr);
-	printf("\t len  = 0x%016" PRIx64 "\n", static_cast<uint64_t>(len));
-	printf("\t prot = 0x%x\n", prot);
+	KYTY_LOG_DEBUG("\t addr = 0x%016" PRIx64 "\n", vaddr);
+	KYTY_LOG_DEBUG("\t len  = 0x%016" PRIx64 "\n", static_cast<uint64_t>(len));
+	KYTY_LOG_DEBUG("\t prot = 0x%x\n", prot);
 
 	VirtualMemory::Mode          mode     = VirtualMemory::Mode::NoAccess;
 	KernelGpuMappingAccessMode gpu_mode = KernelGpuMappingAccessMode::NoAccess;
@@ -2290,7 +2291,7 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 		}
 	}
 
-	printf("\t prot: %s -> %s\n", Core::EnumName(old_mode).C_Str(), Core::EnumName(mode).C_Str());
+	KYTY_LOG_DEBUG("\t prot: %s -> %s\n", Core::EnumName(old_mode).C_Str(), Core::EnumName(mode).C_Str());
 
 	return OK;
 }
