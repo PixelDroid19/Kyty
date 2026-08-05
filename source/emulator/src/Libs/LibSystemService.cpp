@@ -143,7 +143,7 @@ static int KYTY_SYSV_ABI SystemServiceParamGetInt(int param_id, int* value)
 		default: EXIT("unknown param_id: %d\n", param_id);
 	}
 
-	printf(" %d = %d\n", param_id, v);
+	KYTY_LOG_DEBUG(" %d = %d\n", param_id, v);
 
 	*value = v;
 

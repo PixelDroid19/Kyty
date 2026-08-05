@@ -23,8 +23,8 @@ namespace Ime {
 static int KYTY_SYSV_ABI ImeKeyboardOpen(int user_id, const void* param)
 {
 	PRINT_NAME();
-	printf("\t user_id = %d\n", user_id);
-	printf("\t param   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t param   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 	return OK;
 }
 
@@ -32,7 +32,7 @@ static int KYTY_SYSV_ABI ImeKeyboardOpen(int user_id, const void* param)
 static int KYTY_SYSV_ABI ImeKeyboardClose(int user_id)
 {
 	PRINT_NAME();
-	printf("\t user_id = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 	return OK;
 }
 
@@ -40,8 +40,8 @@ static int KYTY_SYSV_ABI ImeKeyboardClose(int user_id)
 static int KYTY_SYSV_ABI ImeKeyboardGetResourceId(int user_id, void* resource_id_array)
 {
 	PRINT_NAME();
-	printf("\t user_id           = %d\n", user_id);
-	printf("\t resource_id_array = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(resource_id_array));
+	KYTY_LOG_DEBUG("\t user_id           = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t resource_id_array = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(resource_id_array));
 	return OK;
 }
 
@@ -49,8 +49,8 @@ static int KYTY_SYSV_ABI ImeKeyboardGetResourceId(int user_id, void* resource_id
 static int KYTY_SYSV_ABI ImeKeyboardGetInfo(uint32_t resource_id, void* info)
 {
 	PRINT_NAME();
-	printf("\t resource_id = 0x%08" PRIx32 "\n", resource_id);
-	printf("\t info        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
+	KYTY_LOG_DEBUG("\t resource_id = 0x%08" PRIx32 "\n", resource_id);
+	KYTY_LOG_DEBUG("\t info        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
 	return OK;
 }
 
@@ -58,8 +58,8 @@ static int KYTY_SYSV_ABI ImeKeyboardGetInfo(uint32_t resource_id, void* info)
 static int KYTY_SYSV_ABI ImeKeyboardSetMode(int user_id, uint32_t mode)
 {
 	PRINT_NAME();
-	printf("\t user_id = %d\n", user_id);
-	printf("\t mode    = 0x%08" PRIx32 "\n", mode);
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t mode    = 0x%08" PRIx32 "\n", mode);
 	return OK;
 }
 
@@ -67,7 +67,7 @@ static int KYTY_SYSV_ABI ImeKeyboardSetMode(int user_id, uint32_t mode)
 static int KYTY_SYSV_ABI ImeUpdate(void* handler)
 {
 	PRINT_NAME();
-	printf("\t handler = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handler));
+	KYTY_LOG_DEBUG("\t handler = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handler));
 	return OK;
 }
 

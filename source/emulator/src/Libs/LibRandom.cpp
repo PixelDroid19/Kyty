@@ -22,7 +22,7 @@ constexpr int MAX_RANDOM_BYTES     = 64;
 static int KYTY_SYSV_ABI RandomGetRandomNumber(void* destination, size_t size)
 {
 	PRINT_NAME();
-	printf("\t destination = 0x%016" PRIx64 " size = %" PRIu64 "\n", reinterpret_cast<uint64_t>(destination),
+	KYTY_LOG_DEBUG("\t destination = 0x%016" PRIx64 " size = %" PRIu64 "\n", reinterpret_cast<uint64_t>(destination),
 	       static_cast<uint64_t>(size));
 
 	if ((destination == nullptr && size != 0) || size > MAX_RANDOM_BYTES)

@@ -495,7 +495,7 @@ static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
 static KYTY_SYSV_ABI int GetAccountIdA(int32_t user_id, uint64_t* account_id)
 {
 	PRINT_NAME();
-	printf("\t user_id = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 	if (account_id == nullptr)
 	{
 		return kNpErrorInvalidArgument;

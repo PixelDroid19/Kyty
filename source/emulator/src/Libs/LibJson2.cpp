@@ -77,7 +77,7 @@ static void* KYTY_SYSV_ABI JsonMemAllocatorCtor(void* self)
 static void KYTY_SYSV_ABI JsonMemAllocatorDtor(void* self)
 {
 	PRINT_NAME();
-	printf("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+	KYTY_LOG_DEBUG("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
 }
 
 static JsonInitParameter2* KYTY_SYSV_ABI JsonInitParameter2Ctor(JsonInitParameter2* self)
@@ -127,29 +127,29 @@ static void* KYTY_SYSV_ABI JsonInitializerCtor(void* self)
 static int KYTY_SYSV_ABI JsonInitializerInitialize(void* self, const JsonInitParameter2* init_param)
 {
 	PRINT_NAME();
-	printf("\t self       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
-	printf("\t init_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param));
+	KYTY_LOG_DEBUG("\t self       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+	KYTY_LOG_DEBUG("\t init_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param));
 	return OK;
 }
 
 static int KYTY_SYSV_ABI JsonInitializerInitializeV1(void* self, const void* init_param)
 {
 	PRINT_NAME();
-	printf("\t self       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
-	printf("\t init_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param));
+	KYTY_LOG_DEBUG("\t self       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+	KYTY_LOG_DEBUG("\t init_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param));
 	return OK;
 }
 
 static void KYTY_SYSV_ABI JsonInitializerTerminate(void* self)
 {
 	PRINT_NAME();
-	printf("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+	KYTY_LOG_DEBUG("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
 }
 
 static void KYTY_SYSV_ABI JsonInitializerDtor(void* self)
 {
 	PRINT_NAME();
-	printf("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+	KYTY_LOG_DEBUG("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
 }
 
 static void* KYTY_SYSV_ABI JsonValueCtor(void* self)
@@ -162,7 +162,7 @@ static void* KYTY_SYSV_ABI JsonValueCtor(void* self)
 static void KYTY_SYSV_ABI JsonValueDtor(void* self)
 {
 	PRINT_NAME();
-	printf("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+	KYTY_LOG_DEBUG("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
 }
 
 static void* KYTY_SYSV_ABI JsonObjectCtor(void* self)
@@ -178,7 +178,7 @@ static void* KYTY_SYSV_ABI JsonObjectCtor(void* self)
 static void KYTY_SYSV_ABI JsonObjectDtor(void* self)
 {
 	PRINT_NAME();
-	printf("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+	KYTY_LOG_DEBUG("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
 }
 
 struct JsonString
@@ -331,8 +331,8 @@ static void KYTY_SYSV_ABI JsonValueSetType(JsonValue* self, uint32_t type)
 static void KYTY_SYSV_ABI JsonInitializerSetGlobalNullAccessCallback(void* cb, void* user)
 {
 	PRINT_NAME();
-	printf("\t cb   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cb));
-	printf("\t user = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user));
+	KYTY_LOG_DEBUG("\t cb   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cb));
+	KYTY_LOG_DEBUG("\t user = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user));
 }
 
 } // namespace Json2

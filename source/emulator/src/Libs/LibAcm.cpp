@@ -24,9 +24,9 @@ namespace Acm {
 static int KYTY_SYSV_ABI AcmContextCreate(void* ctx, uint64_t size, uint64_t type_or_flags)
 {
 	PRINT_NAME();
-	printf("\t ctx           = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ctx));
-	printf("\t size          = 0x%016" PRIx64 "\n", size);
-	printf("\t type_or_flags = 0x%016" PRIx64 "\n", type_or_flags);
+	KYTY_LOG_DEBUG("\t ctx           = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ctx));
+	KYTY_LOG_DEBUG("\t size          = 0x%016" PRIx64 "\n", size);
+	KYTY_LOG_DEBUG("\t type_or_flags = 0x%016" PRIx64 "\n", type_or_flags);
 
 	if (ctx == nullptr)
 	{

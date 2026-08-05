@@ -102,8 +102,8 @@ static KYTY_SYSV_ABI int UserServicePlatformPrivacyWs1Stub(uint64_t a0, uint64_t
                                                            uint64_t a4, uint64_t a5)
 {
 	PRINT_NAME();
-	printf("\t a0=0x%016" PRIx64 " a1=0x%016" PRIx64 " a2=0x%016" PRIx64 "\n", a0, a1, a2);
-	printf("\t a3=0x%016" PRIx64 " a4=0x%016" PRIx64 " a5=0x%016" PRIx64 "\n", a3, a4, a5);
+	KYTY_LOG_DEBUG("\t a0=0x%016" PRIx64 " a1=0x%016" PRIx64 " a2=0x%016" PRIx64 "\n", a0, a1, a2);
+	KYTY_LOG_DEBUG("\t a3=0x%016" PRIx64 " a4=0x%016" PRIx64 " a5=0x%016" PRIx64 "\n", a3, a4, a5);
 	return OK;
 }
 
@@ -125,7 +125,7 @@ struct UserServiceGamePresets
 static KYTY_SYSV_ABI int UserServiceGetGamePresets(int user_id, UserServiceGamePresets* presets)
 {
 	PRINT_NAME();
-	printf("\t user_id = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 	if (presets == nullptr)
 	{
 		return USER_SERVICE_ERROR_INVALID_ARGUMENT;

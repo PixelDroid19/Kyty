@@ -68,8 +68,8 @@ int KYTY_SYSV_ABI AppContentGetAddcontInfoList(uint32_t service_label, AppConten
 
 	EXIT_NOT_IMPLEMENTED(hit_num == nullptr);
 
-	printf("\t service_label = %u\n", service_label);
-	printf("\t list_num      = %u\n", list_num);
+	KYTY_LOG_DEBUG("\t service_label = %u\n", service_label);
+	KYTY_LOG_DEBUG("\t list_num      = %u\n", list_num);
 
 	*hit_num = 0;
 
@@ -85,7 +85,7 @@ int KYTY_SYSV_ABI AppContentAppParamGetInt(uint32_t param_id, int32_t* value)
 	*value     = 0;
 	bool found = false;
 
-	printf("\t param_id = %u\n", param_id);
+	KYTY_LOG_DEBUG("\t param_id = %u\n", param_id);
 
 	switch (param_id)
 	{
@@ -100,7 +100,7 @@ int KYTY_SYSV_ABI AppContentAppParamGetInt(uint32_t param_id, int32_t* value)
 		default: EXIT("unknown param_id: %u\n", param_id);
 	}
 
-	printf("\t value    = %d [%s]\n", *value, found ? "found" : "not found");
+	KYTY_LOG_DEBUG("\t value    = %d [%s]\n", *value, found ? "found" : "not found");
 
 	return OK;
 }

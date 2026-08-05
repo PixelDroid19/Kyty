@@ -44,10 +44,10 @@ static int KYTY_SYSV_ABI MouseInit()
 static int KYTY_SYSV_ABI MouseOpen(int user_id, int32_t type, int32_t index, const void* param)
 {
 	PRINT_NAME();
-	printf("\t user_id = %d\n", user_id);
-	printf("\t type    = %" PRId32 "\n", type);
-	printf("\t index   = %" PRId32 "\n", index);
-	printf("\t param   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t type    = %" PRId32 "\n", type);
+	KYTY_LOG_DEBUG("\t index   = %" PRId32 "\n", index);
+	KYTY_LOG_DEBUG("\t param   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 	if (type != 0 || index < 0 || index >= 2)
 	{
 		return MOUSE_ERROR_INVALID_ARG;
@@ -59,7 +59,7 @@ static int KYTY_SYSV_ABI MouseOpen(int user_id, int32_t type, int32_t index, con
 static int KYTY_SYSV_ABI MouseClose(int32_t handle)
 {
 	PRINT_NAME();
-	printf("\t handle = %" PRId32 "\n", handle);
+	KYTY_LOG_DEBUG("\t handle = %" PRId32 "\n", handle);
 	if (handle <= 0)
 	{
 		return MOUSE_ERROR_INVALID_HANDLE;
@@ -71,9 +71,9 @@ static int KYTY_SYSV_ABI MouseClose(int32_t handle)
 static int KYTY_SYSV_ABI MouseRead(int32_t handle, MouseData* data, int32_t num)
 {
 	PRINT_NAME();
-	printf("\t handle = %" PRId32 "\n", handle);
-	printf("\t data   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(data));
-	printf("\t num    = %" PRId32 "\n", num);
+	KYTY_LOG_DEBUG("\t handle = %" PRId32 "\n", handle);
+	KYTY_LOG_DEBUG("\t data   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(data));
+	KYTY_LOG_DEBUG("\t num    = %" PRId32 "\n", num);
 	if (handle <= 0)
 	{
 		return MOUSE_ERROR_INVALID_HANDLE;

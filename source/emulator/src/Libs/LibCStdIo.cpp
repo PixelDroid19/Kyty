@@ -22,7 +22,7 @@ KYTY_SYSV_ABI FILE* c_fopen(const char* path, const char* mode)
 	String host = LibKernel::FileSystem::GetRealFilename(String::FromUtf8(path));
 	String use  = host.IsEmpty() ? String::FromUtf8(path) : host;
 	FILE*  f    = ::fopen(use.C_Str(), mode);
-	printf("\t fopen('%s' -> '%s', '%s') = %p\n", path, use.C_Str(), mode, static_cast<void*>(f));
+	KYTY_LOG_DEBUG("\t fopen('%s' -> '%s', '%s') = %p\n", path, use.C_Str(), mode, static_cast<void*>(f));
 	return f;
 }
 

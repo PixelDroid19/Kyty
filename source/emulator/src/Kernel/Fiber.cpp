@@ -353,7 +353,7 @@ int32_t KYTY_SYSV_ABI FiberInitialize(FiberObject* fiber, const char* name, Fibe
 		*static_cast<uint64_t*>(addr_context) = FIBER_STACK_MAGIC;
 	}
 
-	printf("\t fiber init: %s, entry = 0x%016" PRIx64 ", context = 0x%016" PRIx64 ", size = %" PRIu64 "\n", fiber->name,
+	KYTY_LOG_DEBUG("\t fiber init: %s, entry = 0x%016" PRIx64 ", context = 0x%016" PRIx64 ", size = %" PRIu64 "\n", fiber->name,
 	       reinterpret_cast<uint64_t>(entry), reinterpret_cast<uint64_t>(addr_context), size_context);
 
 	return OK;
@@ -574,7 +574,7 @@ int32_t KYTY_SYSV_ABI FiberGetInfo(FiberObject* fiber, FiberInfo* fiber_info)
 int32_t KYTY_SYSV_ABI FiberStartContextSizeCheck(uint32_t flags)
 {
 	PRINT_NAME();
-	printf("\t flags = 0x%08" PRIx32 "\n", flags);
+	KYTY_LOG_DEBUG("\t flags = 0x%08" PRIx32 "\n", flags);
 	return OK;
 }
 

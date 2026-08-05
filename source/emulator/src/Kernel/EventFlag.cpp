@@ -338,8 +338,8 @@ int KYTY_SYSV_ABI KernelCreateEventFlag(KernelEventFlag* ef, const char* name, u
 	*ef = new KernelEventFlagPrivate(String::FromUtf8(name), single, fifo, init_pattern);
 	EventFlagRegister(*ef);
 
-	printf("\tEventFlag create: %s\n", name);
-	printf("\tEventFlag ptr    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(*ef));
+	KYTY_LOG_DEBUG("\tEventFlag create: %s\n", name);
+	KYTY_LOG_DEBUG("\tEventFlag ptr    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(*ef));
 
 	return OK;
 }
@@ -366,7 +366,7 @@ int KYTY_SYSV_ABI KernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, 
 
 	if (!EventFlagIsLive(ef))
 	{
-		printf("\tEventFlag wait: invalid handle 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ef));
+		KYTY_LOG_DEBUG("\tEventFlag wait: invalid handle 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ef));
 		return KERNEL_ERROR_ESRCH;
 	}
 

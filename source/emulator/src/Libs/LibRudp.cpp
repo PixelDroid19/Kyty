@@ -27,8 +27,8 @@ static bool             g_initialized   = false;
 static int KYTY_SYSV_ABI RudpInit(void* mem_pool, int mem_pool_size)
 {
 	PRINT_NAME();
-	printf("\t mem_pool      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(mem_pool));
-	printf("\t mem_pool_size = %d\n", mem_pool_size);
+	KYTY_LOG_DEBUG("\t mem_pool      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(mem_pool));
+	KYTY_LOG_DEBUG("\t mem_pool_size = %d\n", mem_pool_size);
 	g_initialized = true;
 	return OK;
 }
@@ -36,16 +36,16 @@ static int KYTY_SYSV_ABI RudpInit(void* mem_pool, int mem_pool_size)
 static int KYTY_SYSV_ABI RudpEnableInternalIOThread(uint32_t stack_size, uint32_t priority)
 {
 	PRINT_NAME();
-	printf("\t stack_size = %" PRIu32 "\n", stack_size);
-	printf("\t priority   = %" PRIu32 "\n", priority);
+	KYTY_LOG_DEBUG("\t stack_size = %" PRIu32 "\n", stack_size);
+	KYTY_LOG_DEBUG("\t priority   = %" PRIu32 "\n", priority);
 	return OK;
 }
 
 static int KYTY_SYSV_ABI RudpSetEventHandler(RudpEventHandler handler, void* arg)
 {
 	PRINT_NAME();
-	printf("\t handler = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handler));
-	printf("\t arg     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg));
+	KYTY_LOG_DEBUG("\t handler = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handler));
+	KYTY_LOG_DEBUG("\t arg     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(arg));
 	g_event_handler = handler;
 	g_event_arg     = arg;
 	return OK;

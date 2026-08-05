@@ -12,7 +12,7 @@ namespace Ces {
 static KYTY_SYSV_ABI void* CesUcsProfileInitSjis1997Cp932(void* sheet)
 {
 	PRINT_NAME();
-	printf("\t sheet               = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(sheet));
+	KYTY_LOG_DEBUG("\t sheet               = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(sheet));
 	return sheet;
 }
 

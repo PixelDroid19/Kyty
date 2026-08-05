@@ -35,15 +35,15 @@ static bool g_initialized = false;
 static int KYTY_SYSV_ABI ContentExportInit2(const ContentExportInitParam2* init_param)
 {
 	PRINT_NAME();
-	printf("\t init_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param));
+	KYTY_LOG_DEBUG("\t init_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param));
 	if (init_param == nullptr)
 	{
 		return CONTENT_EXPORT_ERROR_INVALID_PARAM;
 	}
-	printf("\t malloc_func = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param->malloc_func));
-	printf("\t free_func   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param->free_func));
-	printf("\t user_data   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param->user_data));
-	printf("\t buffer_size = 0x%016" PRIx64 "\n", static_cast<uint64_t>(init_param->buffer_size));
+	KYTY_LOG_DEBUG("\t malloc_func = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param->malloc_func));
+	KYTY_LOG_DEBUG("\t free_func   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param->free_func));
+	KYTY_LOG_DEBUG("\t user_data   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(init_param->user_data));
+	KYTY_LOG_DEBUG("\t buffer_size = 0x%016" PRIx64 "\n", static_cast<uint64_t>(init_param->buffer_size));
 	g_initialized = true;
 	return OK;
 }

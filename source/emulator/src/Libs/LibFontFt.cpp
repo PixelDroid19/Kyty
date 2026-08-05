@@ -28,7 +28,7 @@ struct SelectionState
 static void* KYTY_SYSV_ABI FontSelectLibraryFt(int value)
 {
 	PRINT_NAME();
-	printf("\t value = %d\n", value);
+	KYTY_LOG_DEBUG("\t value = %d\n", value);
 	static SelectionState s_selection {};
 	s_selection.value = value;
 	s_selection.kind  = 0;
@@ -39,7 +39,7 @@ static void* KYTY_SYSV_ABI FontSelectLibraryFt(int value)
 static void* KYTY_SYSV_ABI FontSelectRendererFt(int value)
 {
 	PRINT_NAME();
-	printf("\t value = %d\n", value);
+	KYTY_LOG_DEBUG("\t value = %d\n", value);
 	static SelectionState s_selection {};
 	s_selection.value = value;
 	s_selection.kind  = 1;
