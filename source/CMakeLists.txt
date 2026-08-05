@@ -141,7 +141,6 @@ endif()
 include_directories(	
 	3rdparty/gtest/include
 	3rdparty/gtest
-	3rdparty/lua/include
 	3rdparty/rijndael/source
 	3rdparty/miniz
 	3rdparty/magic_enum/include

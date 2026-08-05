@@ -8,7 +8,9 @@ add_library(scripts OBJECT ${scripts_src})
 
 target_link_libraries(scripts core lua)
 
-#target_include_directories(scripts PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(scripts PUBLIC
+	"${CMAKE_SOURCE_DIR}/3rdparty/lua/include"
+)
 
 get_property(inc_headers TARGET scripts PROPERTY INCLUDE_DIRECTORIES)
 
@@ -25,6 +27,5 @@ list(APPEND check_headers
 clang_tidy_check(scripts "" "${check_headers}" "${inc_headers}")
 
 include_what_you_use(scripts "${inc_headers}")
-
 
 
