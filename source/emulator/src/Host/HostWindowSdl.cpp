@@ -67,7 +67,7 @@ HostWindow* HostWindow::Create(uint32_t width, uint32_t height)
 	}
 	const uint32_t initialized_subsystems = SDL_WasInit(requested_subsystems) & ~previously_initialized;
 
-	Kyty::printf("WindowCreate(): width = %d, height = %d\n", static_cast<int>(width), static_cast<int>(height));
+	KYTY_LOG_DEBUG("WindowCreate(): width = %d, height = %d\n", static_cast<int>(width), static_cast<int>(height));
 
 	auto* window = SDL_CreateWindow(kWindowCaption, kWindowPositionCentered, kWindowPositionCentered, static_cast<int>(width),
 	                                static_cast<int>(height), kWindowFlags);

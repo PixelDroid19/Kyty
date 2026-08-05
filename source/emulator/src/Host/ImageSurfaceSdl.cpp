@@ -4,6 +4,8 @@
 #include "Kyty/Core/File.h"
 #include "Kyty/Core/SafeDelete.h"
 
+#include "Emulator/Log.h"
+
 #include "SDL_blendmode.h"
 #include "SDL_error.h"
 #include "SDL_pixels.h"
@@ -353,7 +355,7 @@ bool HostImageSurface::BlitTo(HostImageSurface* destination, const HostImageSurf
 
 	if (result != 0)
 	{
-		printf("Blit failed: %s\n", SDL_GetError());
+		KYTY_LOG_DEBUG("Blit failed: %s\n", SDL_GetError());
 		return false;
 	}
 
@@ -389,51 +391,51 @@ void HostImageSurface::DbgPrint(const String& name) const
 	EXIT_IF(m_surface == nullptr || m_surface->sdl == nullptr || m_surface->sdl->format == nullptr);
 
 	const SDL_Surface* sdl = m_surface->sdl;
-	printf("------\n");
-	printf("%s:\n", name.utf8_str().GetData());
-	printf("width = %d\n", sdl->w);
-	printf("height = %d\n", sdl->h);
-	printf("pitch = %d\n", sdl->pitch);
-	printf("type = %d\n", static_cast<int>(KYTY_SDL_PIXELTYPE(sdl->format->format)));
+	KYTY_LOG_DEBUG("------\n");
+	KYTY_LOG_DEBUG("%s:\n", name.utf8_str().GetData());
+	KYTY_LOG_DEBUG("width = %d\n", sdl->w);
+	KYTY_LOG_DEBUG("height = %d\n", sdl->h);
+	KYTY_LOG_DEBUG("pitch = %d\n", sdl->pitch);
+	KYTY_LOG_DEBUG("type = %d\n", static_cast<int>(KYTY_SDL_PIXELTYPE(sdl->format->format)));
 
 	if (m_surface->metadata.bits_per_pixel == 8)
 	{
-		printf("order = alpha\n");
+		KYTY_LOG_DEBUG("order = alpha\n");
 	} else if (SDL_ISPIXELFORMAT_PACKED(sdl->format->format)) // NOLINT(hicpp-signed-bitwise)
 	{
 		switch (KYTY_SDL_PIXELORDER(sdl->format->format))
 		{
-			case SDL_PACKEDORDER_NONE: printf("order = SDL_PACKEDORDER_NONE\n"); break;
-			case SDL_PACKEDORDER_XRGB: printf("order = SDL_PACKEDORDER_XRGB\n"); break;
-			case SDL_PACKEDORDER_RGBX: printf("order = SDL_PACKEDORDER_RGBX\n"); break;
-			case SDL_PACKEDORDER_ARGB: printf("order = SDL_PACKEDORDER_ARGB\n"); break;
-			case SDL_PACKEDORDER_RGBA: printf("order = SDL_PACKEDORDER_RGBA\n"); break;
-			case SDL_PACKEDORDER_XBGR: printf("order = SDL_PACKEDORDER_XBGR\n"); break;
-			case SDL_PACKEDORDER_BGRX: printf("order = SDL_PACKEDORDER_BGRX\n"); break;
-			case SDL_PACKEDORDER_ABGR: printf("order = SDL_PACKEDORDER_ABGR\n"); break;
-			case SDL_PACKEDORDER_BGRA: printf("order = SDL_PACKEDORDER_BGRA\n"); break;
-			default: printf("order = <packed_invalid>\n");
+			case SDL_PACKEDORDER_NONE: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_NONE\n"); break;
+			case SDL_PACKEDORDER_XRGB: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_XRGB\n"); break;
+			case SDL_PACKEDORDER_RGBX: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_RGBX\n"); break;
+			case SDL_PACKEDORDER_ARGB: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_ARGB\n"); break;
+			case SDL_PACKEDORDER_RGBA: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_RGBA\n"); break;
+			case SDL_PACKEDORDER_XBGR: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_XBGR\n"); break;
+			case SDL_PACKEDORDER_BGRX: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_BGRX\n"); break;
+			case SDL_PACKEDORDER_ABGR: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_ABGR\n"); break;
+			case SDL_PACKEDORDER_BGRA: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_BGRA\n"); break;
+			default: KYTY_LOG_DEBUG("order = <packed_invalid>\n");
 		}
 	} else if (SDL_ISPIXELFORMAT_ARRAY(sdl->format->format)) // NOLINT(hicpp-signed-bitwise)
 	{
 		switch (KYTY_SDL_PIXELORDER(sdl->format->format))
 		{
-			case SDL_ARRAYORDER_NONE: printf("order = SDL_ARRAYORDER_NONE\n"); break;
-			case SDL_ARRAYORDER_RGB: printf("order = SDL_ARRAYORDER_RGB\n"); break;
-			case SDL_ARRAYORDER_RGBA: printf("order = SDL_ARRAYORDER_RGBA\n"); break;
-			case SDL_ARRAYORDER_ARGB: printf("order = SDL_ARRAYORDER_ARGB\n"); break;
-			case SDL_ARRAYORDER_BGR: printf("order = SDL_ARRAYORDER_BGR\n"); break;
-			case SDL_ARRAYORDER_BGRA: printf("order = SDL_ARRAYORDER_BGRA\n"); break;
-			case SDL_ARRAYORDER_ABGR: printf("order = SDL_ARRAYORDER_ABGR\n"); break;
-			default: printf("order = <array_invalid>\n");
+			case SDL_ARRAYORDER_NONE: KYTY_LOG_DEBUG("order = SDL_ARRAYORDER_NONE\n"); break;
+			case SDL_ARRAYORDER_RGB: KYTY_LOG_DEBUG("order = SDL_ARRAYORDER_RGB\n"); break;
+			case SDL_ARRAYORDER_RGBA: KYTY_LOG_DEBUG("order = SDL_ARRAYORDER_RGBA\n"); break;
+			case SDL_ARRAYORDER_ARGB: KYTY_LOG_DEBUG("order = SDL_ARRAYORDER_ARGB\n"); break;
+			case SDL_ARRAYORDER_BGR: KYTY_LOG_DEBUG("order = SDL_ARRAYORDER_BGR\n"); break;
+			case SDL_ARRAYORDER_BGRA: KYTY_LOG_DEBUG("order = SDL_ARRAYORDER_BGRA\n"); break;
+			case SDL_ARRAYORDER_ABGR: KYTY_LOG_DEBUG("order = SDL_ARRAYORDER_ABGR\n"); break;
+			default: KYTY_LOG_DEBUG("order = <array_invalid>\n");
 		}
 	}
 
-	printf("layout = %d\n", static_cast<int>(KYTY_SDL_PIXELLAYOUT(sdl->format->format)));
-	printf("bits_per_pixel = %d\n", static_cast<int>(KYTY_SDL_BITSPERPIXEL(sdl->format->format)));
-	printf("bytes_per_pixel = %d\n", static_cast<int>(SDL_BYTESPERPIXEL(sdl->format->format))); // NOLINT(hicpp-signed-bitwise)
-	printf("bits_per_pixel = %d\n", static_cast<int>(sdl->format->BitsPerPixel));
-	printf("bytes_per_pixel = %d\n", static_cast<int>(sdl->format->BytesPerPixel));
+	KYTY_LOG_DEBUG("layout = %d\n", static_cast<int>(KYTY_SDL_PIXELLAYOUT(sdl->format->format)));
+	KYTY_LOG_DEBUG("bits_per_pixel = %d\n", static_cast<int>(KYTY_SDL_BITSPERPIXEL(sdl->format->format)));
+	KYTY_LOG_DEBUG("bytes_per_pixel = %d\n", static_cast<int>(SDL_BYTESPERPIXEL(sdl->format->format))); // NOLINT(hicpp-signed-bitwise)
+	KYTY_LOG_DEBUG("bits_per_pixel = %d\n", static_cast<int>(sdl->format->BitsPerPixel));
+	KYTY_LOG_DEBUG("bytes_per_pixel = %d\n", static_cast<int>(sdl->format->BytesPerPixel));
 }
 
 } // namespace Kyty::Emulator::Host
