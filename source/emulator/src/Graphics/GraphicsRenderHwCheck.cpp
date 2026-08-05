@@ -24,7 +24,6 @@
 
 #include <cinttypes>
 #include <cmath>
-#include <cstdio>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -36,17 +35,17 @@ namespace Kyty::Libs::Graphics {
 
 void uc_print(const char* func, const HW::UserConfig& uc)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
 	const auto& ge_cntl = uc.GetGeControl();
 	const auto& user_en = uc.GetGeUserVgprEn();
 
-	printf("\t GetPrimType()         = 0x%08" PRIx32 "\n", uc.GetPrimType());
-	printf("\t primitive_group_size  = 0x%04" PRIx16 "\n", ge_cntl.primitive_group_size);
-	printf("\t vertex_group_size     = 0x%04" PRIx16 "\n", ge_cntl.vertex_group_size);
-	printf("\t en_user_vgpr1         = %s\n", user_en.vgpr1 ? "true" : "false");
-	printf("\t en_user_vgpr2         = %s\n", user_en.vgpr2 ? "true" : "false");
-	printf("\t en_user_vgpr3         = %s\n", user_en.vgpr3 ? "true" : "false");
+	KYTY_LOG_DEBUG("\t GetPrimType()         = 0x%08" PRIx32 "\n", uc.GetPrimType());
+	KYTY_LOG_DEBUG("\t primitive_group_size  = 0x%04" PRIx16 "\n", ge_cntl.primitive_group_size);
+	KYTY_LOG_DEBUG("\t vertex_group_size     = 0x%04" PRIx16 "\n", ge_cntl.vertex_group_size);
+	KYTY_LOG_DEBUG("\t en_user_vgpr1         = %s\n", user_en.vgpr1 ? "true" : "false");
+	KYTY_LOG_DEBUG("\t en_user_vgpr2         = %s\n", user_en.vgpr2 ? "true" : "false");
+	KYTY_LOG_DEBUG("\t en_user_vgpr3         = %s\n", user_en.vgpr3 ? "true" : "false");
 }
 
 void uc_check(const HW::UserConfig& uc)
@@ -66,7 +65,7 @@ void uc_check(const HW::UserConfig& uc)
 
 void sh_print(const char* func, const HW::Shader& /*uc*/)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 }
 
 void sh_check(const HW::Shader& /*uc*/) {}
@@ -239,56 +238,56 @@ static void rt_check(const HW::RenderTarget& rt)
 
 static void z_print(const char* func, const HW::DepthRenderTarget& z)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t z_info.format                         = 0x%08" PRIx32 "\n", z.z_info.format);
-	printf("\t z_info.tile_mode_index                = 0x%08" PRIx32 "\n", z.z_info.tile_mode_index);
-	printf("\t z_info.num_samples                    = 0x%08" PRIx32 "\n", z.z_info.num_samples);
-	printf("\t z_info.tile_surface_enable            = %s\n", z.z_info.tile_surface_enable ? "true" : "false");
-	printf("\t z_info.expclear_enabled               = %s\n", z.z_info.expclear_enabled ? "true" : "false");
-	printf("\t z_info.zrange_precision               = 0x%08" PRIx32 "\n", z.z_info.zrange_precision);
-	printf("\t z_info.embedded_sample_locations      = %s\n", z.z_info.embedded_sample_locations ? "true" : "false");
-	printf("\t z_info.partially_resident             = %s\n", z.z_info.partially_resident ? "true" : "false");
-	printf("\t z_info.num_mip_levels                 = 0x%02" PRIx8 "\n", z.z_info.num_mip_levels);
-	printf("\t z_info.plane_compression              = 0x%02" PRIx8 "\n", z.z_info.plane_compression);
-	printf("\t stencil_info.format                   = 0x%08" PRIx32 "\n", z.stencil_info.format);
-	printf("\t stencil_info.tile_stencil_disable     = %s\n", z.stencil_info.tile_stencil_disable ? "true" : "false");
-	printf("\t stencil_info.expclear_enabled         = %s\n", z.stencil_info.expclear_enabled ? "true" : "false");
-	printf("\t stencil_info.tile_mode_index          = 0x%08" PRIx32 "\n", z.stencil_info.tile_mode_index);
-	printf("\t stencil_info.tile_split               = 0x%08" PRIx32 "\n", z.stencil_info.tile_split);
-	printf("\t stencil_info.texture_compatible_stencil = %s\n", z.stencil_info.texture_compatible_stencil ? "true" : "false");
-	printf("\t stencil_info.partially_resident       = %s\n", z.stencil_info.partially_resident ? "true" : "false");
-	printf("\t depth_info.addr5_swizzle_mask         = 0x%08" PRIx32 "\n", z.depth_info.addr5_swizzle_mask);
-	printf("\t depth_info.array_mode                 = 0x%08" PRIx32 "\n", z.depth_info.array_mode);
-	printf("\t depth_info.pipe_config                = 0x%08" PRIx32 "\n", z.depth_info.pipe_config);
-	printf("\t depth_info.bank_width                 = 0x%08" PRIx32 "\n", z.depth_info.bank_width);
-	printf("\t depth_info.bank_height                = 0x%08" PRIx32 "\n", z.depth_info.bank_height);
-	printf("\t depth_info.macro_tile_aspect          = 0x%08" PRIx32 "\n", z.depth_info.macro_tile_aspect);
-	printf("\t depth_info.num_banks                  = 0x%08" PRIx32 "\n", z.depth_info.num_banks);
-	printf("\t depth_view.slice_start                = 0x%08" PRIx32 "\n", z.depth_view.slice_start);
-	printf("\t depth_view.slice_max                  = 0x%08" PRIx32 "\n", z.depth_view.slice_max);
-	printf("\t depth_view.current_mip_level          = 0x%02" PRIx8 "\n", z.depth_view.current_mip_level);
-	printf("\t depth_view.depth_write_disable        = %s\n", z.depth_view.depth_write_disable ? "true" : "false");
-	printf("\t depth_view.stencil_write_disable      = %s\n", z.depth_view.stencil_write_disable ? "true" : "false");
-	printf("\t htile_surface.linear                  = 0x%08" PRIx32 "\n", z.htile_surface.linear);
-	printf("\t htile_surface.full_cache              = 0x%08" PRIx32 "\n", z.htile_surface.full_cache);
-	printf("\t htile_surface.htile_uses_preload_win  = 0x%08" PRIx32 "\n", z.htile_surface.htile_uses_preload_win);
-	printf("\t htile_surface.preload                 = 0x%08" PRIx32 "\n", z.htile_surface.preload);
-	printf("\t htile_surface.prefetch_width          = 0x%08" PRIx32 "\n", z.htile_surface.prefetch_width);
-	printf("\t htile_surface.prefetch_height         = 0x%08" PRIx32 "\n", z.htile_surface.prefetch_height);
-	printf("\t htile_surface.dst_outside_zero_to_one = 0x%08" PRIx32 "\n", z.htile_surface.dst_outside_zero_to_one);
-	printf("\t z_read_base_addr                      = 0x%016" PRIx64 "\n", z.z_read_base_addr);
-	printf("\t stencil_read_base_addr                = 0x%016" PRIx64 "\n", z.stencil_read_base_addr);
-	printf("\t z_write_base_addr                     = 0x%016" PRIx64 "\n", z.z_write_base_addr);
-	printf("\t stencil_write_base_addr               = 0x%016" PRIx64 "\n", z.stencil_write_base_addr);
-	printf("\t pitch_div8_minus1                     = 0x%08" PRIx32 "\n", z.pitch_div8_minus1);
-	printf("\t height_div8_minus1                    = 0x%08" PRIx32 "\n", z.height_div8_minus1);
-	printf("\t slice_div64_minus1                    = 0x%08" PRIx32 "\n", z.slice_div64_minus1);
-	printf("\t htile_data_base_addr                  = 0x%016" PRIx64 "\n", z.htile_data_base_addr);
-	printf("\t width                                 = 0x%08" PRIx32 "\n", z.width);
-	printf("\t height                                = 0x%08" PRIx32 "\n", z.height);
-	printf("\t size.x_max                            = 0x%04" PRIx16 "\n", z.size.x_max);
-	printf("\t size.y_max                            = 0x%04" PRIx16 "\n", z.size.y_max);
+	KYTY_LOG_DEBUG("\t z_info.format                         = 0x%08" PRIx32 "\n", z.z_info.format);
+	KYTY_LOG_DEBUG("\t z_info.tile_mode_index                = 0x%08" PRIx32 "\n", z.z_info.tile_mode_index);
+	KYTY_LOG_DEBUG("\t z_info.num_samples                    = 0x%08" PRIx32 "\n", z.z_info.num_samples);
+	KYTY_LOG_DEBUG("\t z_info.tile_surface_enable            = %s\n", z.z_info.tile_surface_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t z_info.expclear_enabled               = %s\n", z.z_info.expclear_enabled ? "true" : "false");
+	KYTY_LOG_DEBUG("\t z_info.zrange_precision               = 0x%08" PRIx32 "\n", z.z_info.zrange_precision);
+	KYTY_LOG_DEBUG("\t z_info.embedded_sample_locations      = %s\n", z.z_info.embedded_sample_locations ? "true" : "false");
+	KYTY_LOG_DEBUG("\t z_info.partially_resident             = %s\n", z.z_info.partially_resident ? "true" : "false");
+	KYTY_LOG_DEBUG("\t z_info.num_mip_levels                 = 0x%02" PRIx8 "\n", z.z_info.num_mip_levels);
+	KYTY_LOG_DEBUG("\t z_info.plane_compression              = 0x%02" PRIx8 "\n", z.z_info.plane_compression);
+	KYTY_LOG_DEBUG("\t stencil_info.format                   = 0x%08" PRIx32 "\n", z.stencil_info.format);
+	KYTY_LOG_DEBUG("\t stencil_info.tile_stencil_disable     = %s\n", z.stencil_info.tile_stencil_disable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t stencil_info.expclear_enabled         = %s\n", z.stencil_info.expclear_enabled ? "true" : "false");
+	KYTY_LOG_DEBUG("\t stencil_info.tile_mode_index          = 0x%08" PRIx32 "\n", z.stencil_info.tile_mode_index);
+	KYTY_LOG_DEBUG("\t stencil_info.tile_split               = 0x%08" PRIx32 "\n", z.stencil_info.tile_split);
+	KYTY_LOG_DEBUG("\t stencil_info.texture_compatible_stencil = %s\n", z.stencil_info.texture_compatible_stencil ? "true" : "false");
+	KYTY_LOG_DEBUG("\t stencil_info.partially_resident       = %s\n", z.stencil_info.partially_resident ? "true" : "false");
+	KYTY_LOG_DEBUG("\t depth_info.addr5_swizzle_mask         = 0x%08" PRIx32 "\n", z.depth_info.addr5_swizzle_mask);
+	KYTY_LOG_DEBUG("\t depth_info.array_mode                 = 0x%08" PRIx32 "\n", z.depth_info.array_mode);
+	KYTY_LOG_DEBUG("\t depth_info.pipe_config                = 0x%08" PRIx32 "\n", z.depth_info.pipe_config);
+	KYTY_LOG_DEBUG("\t depth_info.bank_width                 = 0x%08" PRIx32 "\n", z.depth_info.bank_width);
+	KYTY_LOG_DEBUG("\t depth_info.bank_height                = 0x%08" PRIx32 "\n", z.depth_info.bank_height);
+	KYTY_LOG_DEBUG("\t depth_info.macro_tile_aspect          = 0x%08" PRIx32 "\n", z.depth_info.macro_tile_aspect);
+	KYTY_LOG_DEBUG("\t depth_info.num_banks                  = 0x%08" PRIx32 "\n", z.depth_info.num_banks);
+	KYTY_LOG_DEBUG("\t depth_view.slice_start                = 0x%08" PRIx32 "\n", z.depth_view.slice_start);
+	KYTY_LOG_DEBUG("\t depth_view.slice_max                  = 0x%08" PRIx32 "\n", z.depth_view.slice_max);
+	KYTY_LOG_DEBUG("\t depth_view.current_mip_level          = 0x%02" PRIx8 "\n", z.depth_view.current_mip_level);
+	KYTY_LOG_DEBUG("\t depth_view.depth_write_disable        = %s\n", z.depth_view.depth_write_disable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t depth_view.stencil_write_disable      = %s\n", z.depth_view.stencil_write_disable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t htile_surface.linear                  = 0x%08" PRIx32 "\n", z.htile_surface.linear);
+	KYTY_LOG_DEBUG("\t htile_surface.full_cache              = 0x%08" PRIx32 "\n", z.htile_surface.full_cache);
+	KYTY_LOG_DEBUG("\t htile_surface.htile_uses_preload_win  = 0x%08" PRIx32 "\n", z.htile_surface.htile_uses_preload_win);
+	KYTY_LOG_DEBUG("\t htile_surface.preload                 = 0x%08" PRIx32 "\n", z.htile_surface.preload);
+	KYTY_LOG_DEBUG("\t htile_surface.prefetch_width          = 0x%08" PRIx32 "\n", z.htile_surface.prefetch_width);
+	KYTY_LOG_DEBUG("\t htile_surface.prefetch_height         = 0x%08" PRIx32 "\n", z.htile_surface.prefetch_height);
+	KYTY_LOG_DEBUG("\t htile_surface.dst_outside_zero_to_one = 0x%08" PRIx32 "\n", z.htile_surface.dst_outside_zero_to_one);
+	KYTY_LOG_DEBUG("\t z_read_base_addr                      = 0x%016" PRIx64 "\n", z.z_read_base_addr);
+	KYTY_LOG_DEBUG("\t stencil_read_base_addr                = 0x%016" PRIx64 "\n", z.stencil_read_base_addr);
+	KYTY_LOG_DEBUG("\t z_write_base_addr                     = 0x%016" PRIx64 "\n", z.z_write_base_addr);
+	KYTY_LOG_DEBUG("\t stencil_write_base_addr               = 0x%016" PRIx64 "\n", z.stencil_write_base_addr);
+	KYTY_LOG_DEBUG("\t pitch_div8_minus1                     = 0x%08" PRIx32 "\n", z.pitch_div8_minus1);
+	KYTY_LOG_DEBUG("\t height_div8_minus1                    = 0x%08" PRIx32 "\n", z.height_div8_minus1);
+	KYTY_LOG_DEBUG("\t slice_div64_minus1                    = 0x%08" PRIx32 "\n", z.slice_div64_minus1);
+	KYTY_LOG_DEBUG("\t htile_data_base_addr                  = 0x%016" PRIx64 "\n", z.htile_data_base_addr);
+	KYTY_LOG_DEBUG("\t width                                 = 0x%08" PRIx32 "\n", z.width);
+	KYTY_LOG_DEBUG("\t height                                = 0x%08" PRIx32 "\n", z.height);
+	KYTY_LOG_DEBUG("\t size.x_max                            = 0x%04" PRIx16 "\n", z.size.x_max);
+	KYTY_LOG_DEBUG("\t size.y_max                            = 0x%04" PRIx16 "\n", z.size.y_max);
 }
 
 static void validate_depth_plane(const HW::DepthRenderTarget& z)
@@ -417,20 +416,20 @@ static void z_check(const HW::DepthRenderTarget& target, const HW::RenderControl
 
 static void clip_print(const char* func, const HW::ClipControl& c)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t user_clip_planes                    = 0x%02" PRIx8 "\n", c.user_clip_planes);
-	printf("\t user_clip_plane_mode                = 0x%02" PRIx8 "\n", c.user_clip_plane_mode);
-	printf("\t dx_clip_space                       = %s\n", c.dx_clip_space ? "true" : "false");
-	printf("\t vertex_kill_any                     = %s\n", c.vertex_kill_any ? "true" : "false");
-	printf("\t min_z_clip_disable                  = %s\n", c.min_z_clip_disable ? "true" : "false");
-	printf("\t max_z_clip_disable                  = %s\n", c.max_z_clip_disable ? "true" : "false");
-	printf("\t user_clip_plane_negate_y            = %s\n", c.user_clip_plane_negate_y ? "true" : "false");
-	printf("\t clip_disable                        = %s\n", c.clip_disable ? "true" : "false");
-	printf("\t user_clip_plane_cull_only           = %s\n", c.user_clip_plane_cull_only ? "true" : "false");
-	printf("\t cull_on_clipping_error_disable      = %s\n", c.cull_on_clipping_error_disable ? "true" : "false");
-	printf("\t linear_attribute_clip_enable        = %s\n", c.linear_attribute_clip_enable ? "true" : "false");
-	printf("\t force_viewport_index_from_vs_enable = %s\n", c.force_viewport_index_from_vs_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t user_clip_planes                    = 0x%02" PRIx8 "\n", c.user_clip_planes);
+	KYTY_LOG_DEBUG("\t user_clip_plane_mode                = 0x%02" PRIx8 "\n", c.user_clip_plane_mode);
+	KYTY_LOG_DEBUG("\t dx_clip_space                       = %s\n", c.dx_clip_space ? "true" : "false");
+	KYTY_LOG_DEBUG("\t vertex_kill_any                     = %s\n", c.vertex_kill_any ? "true" : "false");
+	KYTY_LOG_DEBUG("\t min_z_clip_disable                  = %s\n", c.min_z_clip_disable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t max_z_clip_disable                  = %s\n", c.max_z_clip_disable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t user_clip_plane_negate_y            = %s\n", c.user_clip_plane_negate_y ? "true" : "false");
+	KYTY_LOG_DEBUG("\t clip_disable                        = %s\n", c.clip_disable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t user_clip_plane_cull_only           = %s\n", c.user_clip_plane_cull_only ? "true" : "false");
+	KYTY_LOG_DEBUG("\t cull_on_clipping_error_disable      = %s\n", c.cull_on_clipping_error_disable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t linear_attribute_clip_enable        = %s\n", c.linear_attribute_clip_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t force_viewport_index_from_vs_enable = %s\n", c.force_viewport_index_from_vs_enable ? "true" : "false");
 }
 
 static void clip_check(const HW::ClipControl& c)
@@ -452,17 +451,17 @@ static void clip_check(const HW::ClipControl& c)
 
 static void rc_print(const char* func, const HW::RenderControl& c)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t depth_clear_enable       = %s\n", c.depth_clear_enable ? "true" : "false");
-	printf("\t stencil_clear_enable     = %s\n", c.stencil_clear_enable ? "true" : "false");
-	printf("\t depth_copy               = %s\n", c.depth_copy ? "true" : "false");
-	printf("\t stencil_copy             = %s\n", c.stencil_copy ? "true" : "false");
-	printf("\t resummarize_enable       = %s\n", c.resummarize_enable ? "true" : "false");
-	printf("\t stencil_compress_disable = %s\n", c.stencil_compress_disable ? "true" : "false");
-	printf("\t depth_compress_disable   = %s\n", c.depth_compress_disable ? "true" : "false");
-	printf("\t copy_centroid            = %s\n", c.copy_centroid ? "true" : "false");
-	printf("\t copy_sample              = %" PRIu8 "\n", c.copy_sample);
+	KYTY_LOG_DEBUG("\t depth_clear_enable       = %s\n", c.depth_clear_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t stencil_clear_enable     = %s\n", c.stencil_clear_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t depth_copy               = %s\n", c.depth_copy ? "true" : "false");
+	KYTY_LOG_DEBUG("\t stencil_copy             = %s\n", c.stencil_copy ? "true" : "false");
+	KYTY_LOG_DEBUG("\t resummarize_enable       = %s\n", c.resummarize_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t stencil_compress_disable = %s\n", c.stencil_compress_disable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t depth_compress_disable   = %s\n", c.depth_compress_disable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t copy_centroid            = %s\n", c.copy_centroid ? "true" : "false");
+	KYTY_LOG_DEBUG("\t copy_sample              = %" PRIu8 "\n", c.copy_sample);
 }
 
 static void rc_check(const HW::RenderControl& c, bool allow_depth_stencil_copy)
@@ -479,19 +478,19 @@ static void rc_check(const HW::RenderControl& c, bool allow_depth_stencil_copy)
 
 static void mc_print(const char* func, const HW::ModeControl& c)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t cull_front               = %s\n", c.cull_front ? "true" : "false");
-	printf("\t cull_back                = %s\n", c.cull_back ? "true" : "false");
-	printf("\t face                     = %s\n", c.face ? "true" : "false");
-	printf("\t poly_mode                = %" PRIu8 "\n", c.poly_mode);
-	printf("\t polymode_front_ptype     = %" PRIu8 "\n", c.polymode_front_ptype);
-	printf("\t polymode_back_ptype      = %" PRIu8 "\n", c.polymode_back_ptype);
-	printf("\t poly_offset_front_enable = %s\n", c.poly_offset_front_enable ? "true" : "false");
-	printf("\t poly_offset_back_enable  = %s\n", c.poly_offset_back_enable ? "true" : "false");
-	printf("\t vtx_window_offset_enable = %s\n", c.vtx_window_offset_enable ? "true" : "false");
-	printf("\t provoking_vtx_last       = %s\n", c.provoking_vtx_last ? "true" : "false");
-	printf("\t persp_corr_dis           = %s\n", c.persp_corr_dis ? "true" : "false");
+	KYTY_LOG_DEBUG("\t cull_front               = %s\n", c.cull_front ? "true" : "false");
+	KYTY_LOG_DEBUG("\t cull_back                = %s\n", c.cull_back ? "true" : "false");
+	KYTY_LOG_DEBUG("\t face                     = %s\n", c.face ? "true" : "false");
+	KYTY_LOG_DEBUG("\t poly_mode                = %" PRIu8 "\n", c.poly_mode);
+	KYTY_LOG_DEBUG("\t polymode_front_ptype     = %" PRIu8 "\n", c.polymode_front_ptype);
+	KYTY_LOG_DEBUG("\t polymode_back_ptype      = %" PRIu8 "\n", c.polymode_back_ptype);
+	KYTY_LOG_DEBUG("\t poly_offset_front_enable = %s\n", c.poly_offset_front_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t poly_offset_back_enable  = %s\n", c.poly_offset_back_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t vtx_window_offset_enable = %s\n", c.vtx_window_offset_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t provoking_vtx_last       = %s\n", c.provoking_vtx_last ? "true" : "false");
+	KYTY_LOG_DEBUG("\t persp_corr_dis           = %s\n", c.persp_corr_dis ? "true" : "false");
 }
 
 static void mc_check(const HW::ModeControl& c)
@@ -511,22 +510,22 @@ static void mc_check(const HW::ModeControl& c)
 
 static void bc_print(const char* func, const HW::BlendControl& c, const HW::BlendColor& color, const HW::ColorControl& cc)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t color_srcblend       = %" PRIu8 "\n", c.color_srcblend);
-	printf("\t color_comb_fcn       = %" PRIu8 "\n", c.color_comb_fcn);
-	printf("\t color_destblend      = %" PRIu8 "\n", c.color_destblend);
-	printf("\t alpha_srcblend       = %" PRIu8 "\n", c.alpha_srcblend);
-	printf("\t alpha_comb_fcn       = %" PRIu8 "\n", c.alpha_comb_fcn);
-	printf("\t alpha_destblend      = %" PRIu8 "\n", c.alpha_destblend);
-	printf("\t separate_alpha_blend = %s\n", c.separate_alpha_blend ? "true" : "false");
-	printf("\t enable               = %s\n", c.enable ? "true" : "false");
-	printf("\t red                  = %f\n", color.red);
-	printf("\t green                = %f\n", color.green);
-	printf("\t blue                 = %f\n", color.blue);
-	printf("\t alpha                = %f\n", color.alpha);
-	printf("\t cc.mode              = %" PRIu8 "\n", cc.mode);
-	printf("\t cc.op                = %" PRIu8 "\n", cc.op);
+	KYTY_LOG_DEBUG("\t color_srcblend       = %" PRIu8 "\n", c.color_srcblend);
+	KYTY_LOG_DEBUG("\t color_comb_fcn       = %" PRIu8 "\n", c.color_comb_fcn);
+	KYTY_LOG_DEBUG("\t color_destblend      = %" PRIu8 "\n", c.color_destblend);
+	KYTY_LOG_DEBUG("\t alpha_srcblend       = %" PRIu8 "\n", c.alpha_srcblend);
+	KYTY_LOG_DEBUG("\t alpha_comb_fcn       = %" PRIu8 "\n", c.alpha_comb_fcn);
+	KYTY_LOG_DEBUG("\t alpha_destblend      = %" PRIu8 "\n", c.alpha_destblend);
+	KYTY_LOG_DEBUG("\t separate_alpha_blend = %s\n", c.separate_alpha_blend ? "true" : "false");
+	KYTY_LOG_DEBUG("\t enable               = %s\n", c.enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t red                  = %f\n", color.red);
+	KYTY_LOG_DEBUG("\t green                = %f\n", color.green);
+	KYTY_LOG_DEBUG("\t blue                 = %f\n", color.blue);
+	KYTY_LOG_DEBUG("\t alpha                = %f\n", color.alpha);
+	KYTY_LOG_DEBUG("\t cc.mode              = %" PRIu8 "\n", cc.mode);
+	KYTY_LOG_DEBUG("\t cc.op                = %" PRIu8 "\n", cc.op);
 }
 
 static void bc_check(const HW::BlendControl& /*c*/, const HW::BlendColor& color, const HW::ColorControl& cc)
@@ -553,32 +552,32 @@ static void bc_check(const HW::BlendControl& /*c*/, const HW::BlendColor& color,
 
 static void d_print(const char* func, const HW::DepthControl& c, const HW::StencilControl& s, const HW::StencilMask& sm)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t stencil_enable       = %s\n", c.stencil_enable ? "true" : "false");
-	printf("\t z_enable             = %s\n", c.z_enable ? "true" : "false");
-	printf("\t z_write_enable       = %s\n", c.z_write_enable ? "true" : "false");
-	printf("\t depth_bounds_enable  = %s\n", c.depth_bounds_enable ? "true" : "false");
-	printf("\t zfunc                = %" PRIu8 "\n", c.zfunc);
-	printf("\t backface_enable      = %s\n", c.backface_enable ? "true" : "false");
-	printf("\t stencilfunc          = %" PRIu8 "\n", c.stencilfunc);
-	printf("\t stencilfunc_bf       = %" PRIu8 "\n", c.stencilfunc_bf);
-	printf("\t color_writes_on_depth_fail_enable  = %s\n", c.color_writes_on_depth_fail_enable ? "true" : "false");
-	printf("\t color_writes_on_depth_pass_disable = %s\n", c.color_writes_on_depth_pass_disable ? "true" : "false");
-	printf("\t stencil_fail         = %" PRIu8 "\n", s.stencil_fail);
-	printf("\t stencil_zpass        = %" PRIu8 "\n", s.stencil_zpass);
-	printf("\t stencil_zfail        = %" PRIu8 "\n", s.stencil_zfail);
-	printf("\t stencil_fail_bf      = %" PRIu8 "\n", s.stencil_fail_bf);
-	printf("\t stencil_zpass_bf     = %" PRIu8 "\n", s.stencil_zpass_bf);
-	printf("\t stencil_zfail_bf     = %" PRIu8 "\n", s.stencil_zfail_bf);
-	printf("\t stencil_testval      = %" PRIu8 "\n", sm.stencil_testval);
-	printf("\t stencil_mask         = %" PRIu8 "\n", sm.stencil_mask);
-	printf("\t stencil_writemask    = %" PRIu8 "\n", sm.stencil_writemask);
-	printf("\t stencil_opval        = %" PRIu8 "\n", sm.stencil_opval);
-	printf("\t stencil_testval_bf   = %" PRIu8 "\n", sm.stencil_testval_bf);
-	printf("\t stencil_mask_bf      = %" PRIu8 "\n", sm.stencil_mask_bf);
-	printf("\t stencil_writemask_bf = %" PRIu8 "\n", sm.stencil_writemask_bf);
-	printf("\t stencil_opval_bf     = %" PRIu8 "\n", sm.stencil_opval_bf);
+	KYTY_LOG_DEBUG("\t stencil_enable       = %s\n", c.stencil_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t z_enable             = %s\n", c.z_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t z_write_enable       = %s\n", c.z_write_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t depth_bounds_enable  = %s\n", c.depth_bounds_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t zfunc                = %" PRIu8 "\n", c.zfunc);
+	KYTY_LOG_DEBUG("\t backface_enable      = %s\n", c.backface_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t stencilfunc          = %" PRIu8 "\n", c.stencilfunc);
+	KYTY_LOG_DEBUG("\t stencilfunc_bf       = %" PRIu8 "\n", c.stencilfunc_bf);
+	KYTY_LOG_DEBUG("\t color_writes_on_depth_fail_enable  = %s\n", c.color_writes_on_depth_fail_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t color_writes_on_depth_pass_disable = %s\n", c.color_writes_on_depth_pass_disable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t stencil_fail         = %" PRIu8 "\n", s.stencil_fail);
+	KYTY_LOG_DEBUG("\t stencil_zpass        = %" PRIu8 "\n", s.stencil_zpass);
+	KYTY_LOG_DEBUG("\t stencil_zfail        = %" PRIu8 "\n", s.stencil_zfail);
+	KYTY_LOG_DEBUG("\t stencil_fail_bf      = %" PRIu8 "\n", s.stencil_fail_bf);
+	KYTY_LOG_DEBUG("\t stencil_zpass_bf     = %" PRIu8 "\n", s.stencil_zpass_bf);
+	KYTY_LOG_DEBUG("\t stencil_zfail_bf     = %" PRIu8 "\n", s.stencil_zfail_bf);
+	KYTY_LOG_DEBUG("\t stencil_testval      = %" PRIu8 "\n", sm.stencil_testval);
+	KYTY_LOG_DEBUG("\t stencil_mask         = %" PRIu8 "\n", sm.stencil_mask);
+	KYTY_LOG_DEBUG("\t stencil_writemask    = %" PRIu8 "\n", sm.stencil_writemask);
+	KYTY_LOG_DEBUG("\t stencil_opval        = %" PRIu8 "\n", sm.stencil_opval);
+	KYTY_LOG_DEBUG("\t stencil_testval_bf   = %" PRIu8 "\n", sm.stencil_testval_bf);
+	KYTY_LOG_DEBUG("\t stencil_mask_bf      = %" PRIu8 "\n", sm.stencil_mask_bf);
+	KYTY_LOG_DEBUG("\t stencil_writemask_bf = %" PRIu8 "\n", sm.stencil_writemask_bf);
+	KYTY_LOG_DEBUG("\t stencil_opval_bf     = %" PRIu8 "\n", sm.stencil_opval_bf);
 }
 
 static void d_check(const HW::DepthControl& c, const HW::StencilControl& s, const HW::StencilMask& /*sm*/)
@@ -612,31 +611,31 @@ static void d_check(const HW::DepthControl& c, const HW::StencilControl& s, cons
 
 static void eqaa_print(const char* func, const HW::EqaaControl& c)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t max_anchor_samples         = %" PRIu8 "\n", c.max_anchor_samples);
-	printf("\t ps_iter_samples            = %" PRIu8 "\n", c.ps_iter_samples);
-	printf("\t mask_export_num_samples    = %" PRIu8 "\n", c.mask_export_num_samples);
-	printf("\t alpha_to_mask_num_samples  = %" PRIu8 "\n", c.alpha_to_mask_num_samples);
-	printf("\t high_quality_intersections = %s\n", c.high_quality_intersections ? "true" : "false");
-	printf("\t incoherent_eqaa_reads      = %s\n", c.incoherent_eqaa_reads ? "true" : "false");
-	printf("\t interpolate_comp_z         = %s\n", c.interpolate_comp_z ? "true" : "false");
-	printf("\t static_anchor_associations = %s\n", c.static_anchor_associations ? "true" : "false");
+	KYTY_LOG_DEBUG("\t max_anchor_samples         = %" PRIu8 "\n", c.max_anchor_samples);
+	KYTY_LOG_DEBUG("\t ps_iter_samples            = %" PRIu8 "\n", c.ps_iter_samples);
+	KYTY_LOG_DEBUG("\t mask_export_num_samples    = %" PRIu8 "\n", c.mask_export_num_samples);
+	KYTY_LOG_DEBUG("\t alpha_to_mask_num_samples  = %" PRIu8 "\n", c.alpha_to_mask_num_samples);
+	KYTY_LOG_DEBUG("\t high_quality_intersections = %s\n", c.high_quality_intersections ? "true" : "false");
+	KYTY_LOG_DEBUG("\t incoherent_eqaa_reads      = %s\n", c.incoherent_eqaa_reads ? "true" : "false");
+	KYTY_LOG_DEBUG("\t interpolate_comp_z         = %s\n", c.interpolate_comp_z ? "true" : "false");
+	KYTY_LOG_DEBUG("\t static_anchor_associations = %s\n", c.static_anchor_associations ? "true" : "false");
 }
 
 static void aa_print(const char* func, const HW::AaSampleControl& c, const HW::AaConfig& cf)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t centroid_priority = %016" PRIx64 "\n", c.centroid_priority);
+	KYTY_LOG_DEBUG("\t centroid_priority = %016" PRIx64 "\n", c.centroid_priority);
 	for (int i = 0; i < 16; i++)
 	{
-		printf("\t locations[%d] = %08" PRIx32 "\n", i, c.locations[i]);
+		KYTY_LOG_DEBUG("\t locations[%d] = %08" PRIx32 "\n", i, c.locations[i]);
 	}
-	printf("\t msaa_num_samples      = %" PRIu8 "\n", cf.msaa_num_samples);
-	printf("\t aa_mask_centroid_dtmn = %s\n", cf.aa_mask_centroid_dtmn ? "true" : "false");
-	printf("\t max_sample_dist       = %" PRIu8 "\n", cf.max_sample_dist);
-	printf("\t msaa_exposed_samples  = %" PRIu8 "\n", cf.msaa_exposed_samples);
+	KYTY_LOG_DEBUG("\t msaa_num_samples      = %" PRIu8 "\n", cf.msaa_num_samples);
+	KYTY_LOG_DEBUG("\t aa_mask_centroid_dtmn = %s\n", cf.aa_mask_centroid_dtmn ? "true" : "false");
+	KYTY_LOG_DEBUG("\t max_sample_dist       = %" PRIu8 "\n", cf.max_sample_dist);
+	KYTY_LOG_DEBUG("\t msaa_exposed_samples  = %" PRIu8 "\n", cf.msaa_exposed_samples);
 }
 
 // AA/EQAA registers remain programmed across draws. Validate their host mapping
@@ -738,40 +737,40 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 
 static void vp_print(const char* func, const HW::ScreenViewport& vp, const HW::ScanModeControl& smc)
 {
-	printf("%s\n", func);
+	KYTY_LOG_DEBUG("%s\n", func);
 
-	printf("\t msaa_enable                    = %s\n", smc.msaa_enable ? "true" : "false");
-	printf("\t vport_scissor_enable           = %s\n", smc.vport_scissor_enable ? "true" : "false");
-	printf("\t line_stipple_enable            = %s\n", smc.line_stipple_enable ? "true" : "false");
-	printf("\t vp[0].zmin                     = %f\n", vp.viewports[0].zmin);
-	printf("\t vp[0].zmax                     = %f\n", vp.viewports[0].zmax);
-	printf("\t vp[0].xscale                   = %f\n", vp.viewports[0].xscale);
-	printf("\t vp[0].xoffset                  = %f\n", vp.viewports[0].xoffset);
-	printf("\t vp[0].yscale                   = %f\n", vp.viewports[0].yscale);
-	printf("\t vp[0].yoffset                  = %f\n", vp.viewports[0].yoffset);
-	printf("\t vp[0].zscale                   = %f\n", vp.viewports[0].zscale);
-	printf("\t vp[0].zoffset                  = %f\n", vp.viewports[0].zoffset);
-	printf("\t vp[0].viewport_scissor_left    = %d\n", vp.viewports[0].viewport_scissor_left);
-	printf("\t vp[0].viewport_scissor_top     = %d\n", vp.viewports[0].viewport_scissor_top);
-	printf("\t vp[0].viewport_scissor_right   = %d\n", vp.viewports[0].viewport_scissor_right);
-	printf("\t vp[0].viewport_scissor_bottom  = %d\n", vp.viewports[0].viewport_scissor_bottom);
-	printf("\t transform_control              = 0x%08" PRIx32 "\n", vp.transform_control);
-	printf("\t screen_scissor_left            = %d\n", vp.screen_scissor_left);
-	printf("\t screen_scissor_top             = %d\n", vp.screen_scissor_top);
-	printf("\t screen_scissor_right           = %d\n", vp.screen_scissor_right);
-	printf("\t screen_scissor_bottom          = %d\n", vp.screen_scissor_bottom);
-	printf("\t generic_scissor_left           = %d\n", vp.generic_scissor_left);
-	printf("\t generic_scissor_top            = %d\n", vp.generic_scissor_top);
-	printf("\t generic_scissor_right          = %d\n", vp.generic_scissor_right);
-	printf("\t generic_scissor_bottom         = %d\n", vp.generic_scissor_bottom);
-	printf("\t hw_offset_x                    = %u\n", vp.hw_offset_x);
-	printf("\t hw_offset_y                    = %u\n", vp.hw_offset_y);
-	printf("\t guard_band_horz_clip           = %f\n", vp.guard_band_horz_clip);
-	printf("\t guard_band_vert_clip           = %f\n", vp.guard_band_vert_clip);
-	printf("\t guard_band_horz_discard        = %f\n", vp.guard_band_horz_discard);
-	printf("\t guard_band_vert_discard        = %f\n", vp.guard_band_vert_discard);
-	printf("\t generic_scissor_window_offset_enable               = %s\n", vp.generic_scissor_window_offset_enable ? "true" : "false");
-	printf("\t viewports[0].viewport_scissor_window_offset_enable = %s\n",
+	KYTY_LOG_DEBUG("\t msaa_enable                    = %s\n", smc.msaa_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t vport_scissor_enable           = %s\n", smc.vport_scissor_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t line_stipple_enable            = %s\n", smc.line_stipple_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t vp[0].zmin                     = %f\n", vp.viewports[0].zmin);
+	KYTY_LOG_DEBUG("\t vp[0].zmax                     = %f\n", vp.viewports[0].zmax);
+	KYTY_LOG_DEBUG("\t vp[0].xscale                   = %f\n", vp.viewports[0].xscale);
+	KYTY_LOG_DEBUG("\t vp[0].xoffset                  = %f\n", vp.viewports[0].xoffset);
+	KYTY_LOG_DEBUG("\t vp[0].yscale                   = %f\n", vp.viewports[0].yscale);
+	KYTY_LOG_DEBUG("\t vp[0].yoffset                  = %f\n", vp.viewports[0].yoffset);
+	KYTY_LOG_DEBUG("\t vp[0].zscale                   = %f\n", vp.viewports[0].zscale);
+	KYTY_LOG_DEBUG("\t vp[0].zoffset                  = %f\n", vp.viewports[0].zoffset);
+	KYTY_LOG_DEBUG("\t vp[0].viewport_scissor_left    = %d\n", vp.viewports[0].viewport_scissor_left);
+	KYTY_LOG_DEBUG("\t vp[0].viewport_scissor_top     = %d\n", vp.viewports[0].viewport_scissor_top);
+	KYTY_LOG_DEBUG("\t vp[0].viewport_scissor_right   = %d\n", vp.viewports[0].viewport_scissor_right);
+	KYTY_LOG_DEBUG("\t vp[0].viewport_scissor_bottom  = %d\n", vp.viewports[0].viewport_scissor_bottom);
+	KYTY_LOG_DEBUG("\t transform_control              = 0x%08" PRIx32 "\n", vp.transform_control);
+	KYTY_LOG_DEBUG("\t screen_scissor_left            = %d\n", vp.screen_scissor_left);
+	KYTY_LOG_DEBUG("\t screen_scissor_top             = %d\n", vp.screen_scissor_top);
+	KYTY_LOG_DEBUG("\t screen_scissor_right           = %d\n", vp.screen_scissor_right);
+	KYTY_LOG_DEBUG("\t screen_scissor_bottom          = %d\n", vp.screen_scissor_bottom);
+	KYTY_LOG_DEBUG("\t generic_scissor_left           = %d\n", vp.generic_scissor_left);
+	KYTY_LOG_DEBUG("\t generic_scissor_top            = %d\n", vp.generic_scissor_top);
+	KYTY_LOG_DEBUG("\t generic_scissor_right          = %d\n", vp.generic_scissor_right);
+	KYTY_LOG_DEBUG("\t generic_scissor_bottom         = %d\n", vp.generic_scissor_bottom);
+	KYTY_LOG_DEBUG("\t hw_offset_x                    = %u\n", vp.hw_offset_x);
+	KYTY_LOG_DEBUG("\t hw_offset_y                    = %u\n", vp.hw_offset_y);
+	KYTY_LOG_DEBUG("\t guard_band_horz_clip           = %f\n", vp.guard_band_horz_clip);
+	KYTY_LOG_DEBUG("\t guard_band_vert_clip           = %f\n", vp.guard_band_vert_clip);
+	KYTY_LOG_DEBUG("\t guard_band_horz_discard        = %f\n", vp.guard_band_horz_discard);
+	KYTY_LOG_DEBUG("\t guard_band_vert_discard        = %f\n", vp.guard_band_vert_discard);
+	KYTY_LOG_DEBUG("\t generic_scissor_window_offset_enable               = %s\n", vp.generic_scissor_window_offset_enable ? "true" : "false");
+	KYTY_LOG_DEBUG("\t viewports[0].viewport_scissor_window_offset_enable = %s\n",
 	       vp.viewports[0].viewport_scissor_window_offset_enable ? "true" : "false");
 }
 
@@ -865,13 +864,13 @@ void hw_print(const HW::Context& hw)
 
 	if (Kyty::Log::GetDirection() != Kyty::Log::Direction::Silent)
 	{
-		printf("Context\n");
-		printf("\t GetRenderTargetMask()   = 0x%08" PRIx32 "\n", hw.GetRenderTargetMask());
-		printf("\t GetDepthClearValue()    = %f\n", hw.GetDepthClearValue());
-		printf("\t GetStencilClearValue()  = %" PRIu8 "\n", hw.GetStencilClearValue());
-		printf("\t GetLineWidth()          = %f\n", hw.GetLineWidth());
+		KYTY_LOG_DEBUG("Context\n");
+		KYTY_LOG_DEBUG("\t GetRenderTargetMask()   = 0x%08" PRIx32 "\n", hw.GetRenderTargetMask());
+		KYTY_LOG_DEBUG("\t GetDepthClearValue()    = %f\n", hw.GetDepthClearValue());
+		KYTY_LOG_DEBUG("\t GetStencilClearValue()  = %" PRIu8 "\n", hw.GetStencilClearValue());
+		KYTY_LOG_DEBUG("\t GetLineWidth()          = %f\n", hw.GetLineWidth());
 
-		printf("%s", rt_print("RenderTraget:", rt).Concat(U"").C_Str());
+		KYTY_LOG_DEBUG("%s", rt_print("RenderTraget:", rt).Concat(U"").C_Str());
 
 		z_print("DepthRenderTraget:", z);
 		vp_print("ScreenViewport:", vp, smc);
