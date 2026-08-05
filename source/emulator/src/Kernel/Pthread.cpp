@@ -332,7 +332,7 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 	// handle (observed poison 0xcccccccc00007fff) and SIGSEGV'd in Mutex::Lock.
 	// unique_id may still be -1 in the create log until the child runs.
 
-	printf("\tthread create: %s, id = %d, %d\n", (*thread)->name.C_Str(), (*thread)->unique_id, result);
+	KYTY_LOG_DEBUG("\tthread create: %s, id = %d, %d\n", (*thread)->name.C_Str(), (*thread)->unique_id, result);
 
 	pthread_attr_dbg_print(attr);
 
@@ -363,7 +363,7 @@ int KYTY_SYSV_ABI PthreadDetach(Pthread thread)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	printf("\tthread detach: %s, %d\n", thread->name.C_Str(), 0);
+	KYTY_LOG_DEBUG("\tthread detach: %s, %d\n", thread->name.C_Str(), 0);
 
 	thread->detached = true;
 
@@ -383,7 +383,7 @@ int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void** value)
 
 	if (PRINT_NAME_ENABLED)
 	{
-		printf("\tthread join: %s, %d\n", thread->name.C_Str(), result);
+		KYTY_LOG_DEBUG("\tthread join: %s, %d\n", thread->name.C_Str(), result);
 	}
 
 	int id = thread->unique_id;
@@ -429,7 +429,7 @@ int KYTY_SYSV_ABI PthreadCancel(Pthread thread)
 
 	int result = pthread_cancel(thread->p);
 
-	printf("\tthread cancel: %s, %d\n", thread->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\tthread cancel: %s, %d\n", thread->name.C_Str(), result);
 
 	switch (result)
 	{
@@ -468,7 +468,7 @@ int KYTY_SYSV_ABI PthreadSetcancelstate(int state, int* old_state)
 
 	int result = pthread_setcancelstate(pstate, old_state);
 
-	printf("\tthread setcancelstate: %d\n", result);
+	KYTY_LOG_DEBUG("\tthread setcancelstate: %d\n", result);
 
 	switch (*old_state)
 	{
@@ -499,7 +499,7 @@ int KYTY_SYSV_ABI PthreadSetcanceltype(int type, int* old_type)
 
 	int result = pthread_setcanceltype(ptype, old_type);
 
-	printf("\tthread setcanceltype: %d\n", result);
+	KYTY_LOG_DEBUG("\tthread setcanceltype: %d\n", result);
 
 	switch (*old_type)
 	{
@@ -528,7 +528,7 @@ int KYTY_SYSV_ABI PthreadGetprio(Pthread thread, int* prio)
 
 	*prio = thread->guest_priority.load(std::memory_order_relaxed);
 
-	printf("\t PthreadGetprio: %d, %d\n", thread->unique_id, *prio);
+	KYTY_LOG_DEBUG("\t PthreadGetprio: %d, %d\n", thread->unique_id, *prio);
 
 	return OK;
 }
@@ -544,7 +544,7 @@ int KYTY_SYSV_ABI PthreadSetprio(Pthread thread, int prio)
 
 	thread->guest_priority.store(prio, std::memory_order_relaxed);
 
-	printf("\t PthreadSetprio: %d, %d\n", thread->unique_id, prio);
+	KYTY_LOG_DEBUG("\t PthreadSetprio: %d, %d\n", thread->unique_id, prio);
 
 	return OK;
 }
@@ -602,7 +602,7 @@ int KYTY_SYSV_ABI PthreadRename(Pthread thread, const char* name)
 	if (name != nullptr)
 	{
 		thread->name = String::FromUtf8(name);
-		printf("\t PthreadRename: %s\n", name);
+		KYTY_LOG_DEBUG("\t PthreadRename: %s\n", name);
 	}
 
 	return OK;
@@ -702,12 +702,12 @@ int KYTY_SYSV_ABI KernelUsleep(KernelUseconds microseconds)
 unsigned int KYTY_SYSV_ABI KernelSleep(unsigned int seconds)
 {
 	PRINT_NAME();
-	printf("\tsleep: %u\n", seconds);
+	KYTY_LOG_DEBUG("\tsleep: %u\n", seconds);
 	Core::Timer t;
 	t.Start();
 	Core::Thread::Sleep(seconds);
 	double ts = t.GetTimeS();
-	printf("\tactual: %g seconds\n", ts);
+	KYTY_LOG_DEBUG("\tactual: %g seconds\n", ts);
 	return OK;
 }
 
@@ -768,13 +768,13 @@ int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rm
 		}
 	}
 
-	printf("\tnanosleep: %" PRIu64 "\n", nanos);
+	KYTY_LOG_DEBUG("\tnanosleep: %" PRIu64 "\n", nanos);
 
 	Core::Timer t;
 	t.Start();
 	Core::Thread::SleepNano(nanos);
 	double ts = t.GetTimeS();
-	printf("\tactual: %g nanoseconds\n", ts * 1000000000.0);
+	KYTY_LOG_DEBUG("\tactual: %g nanoseconds\n", ts * 1000000000.0);
 
 	if (rmtp != nullptr)
 	{
@@ -800,8 +800,8 @@ int KYTY_SYSV_ABI PthreadKeyCreate(PthreadKey* key, pthread_key_destructor_func_
 		return KERNEL_ERROR_EAGAIN;
 	}
 
-	printf("\t destructor = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(destructor));
-	printf("\t key        = %d\n", *key);
+	KYTY_LOG_DEBUG("\t destructor = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(destructor));
+	KYTY_LOG_DEBUG("\t key        = %d\n", *key);
 
 	return OK;
 }
@@ -810,7 +810,7 @@ int KYTY_SYSV_ABI PthreadKeyDelete(PthreadKey key)
 {
 	PRINT_NAME();
 
-	printf("\t key = %d\n", key);
+	KYTY_LOG_DEBUG("\t key = %d\n", key);
 
 	EXIT_IF(g_pthread_context == nullptr || g_pthread_context->GetPthreadKeys() == nullptr);
 
@@ -828,9 +828,9 @@ int KYTY_SYSV_ABI PthreadSetspecific(PthreadKey key, void* value)
 
 	int thread_id = Core::Thread::GetThreadIdUnique();
 
-	printf("\t key       = %d\n", key);
-	printf("\t thread_id = %d\n", thread_id);
-	printf("\t value     = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(value));
+	KYTY_LOG_DEBUG("\t key       = %d\n", key);
+	KYTY_LOG_DEBUG("\t thread_id = %d\n", thread_id);
+	KYTY_LOG_DEBUG("\t value     = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(value));
 
 	EXIT_IF(g_pthread_context == nullptr || g_pthread_context->GetPthreadKeys() == nullptr);
 
@@ -848,8 +848,8 @@ void* KYTY_SYSV_ABI PthreadGetspecific(PthreadKey key)
 
 	int thread_id = Core::Thread::GetThreadIdUnique();
 
-	printf("\t key       = %d\n", key);
-	printf("\t thread_id = %d\n", thread_id);
+	KYTY_LOG_DEBUG("\t key       = %d\n", key);
+	KYTY_LOG_DEBUG("\t thread_id = %d\n", thread_id);
 
 	EXIT_IF(g_pthread_context == nullptr || g_pthread_context->GetPthreadKeys() == nullptr);
 
@@ -860,7 +860,7 @@ void* KYTY_SYSV_ABI PthreadGetspecific(PthreadKey key)
 		return nullptr;
 	}
 
-	printf("\t value     = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(value));
+	KYTY_LOG_DEBUG("\t value     = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(value));
 
 	return value;
 }

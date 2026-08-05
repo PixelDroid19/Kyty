@@ -2,6 +2,7 @@
 
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/Trace.h"
+#include "Emulator/Log.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -25,7 +26,7 @@ int KYTY_SYSV_ABI PthreadRwlockDestroy(PthreadRwlock* rwlock)
 
 	int result = pthread_rwlock_destroy(&(*rwlock)->p);
 
-	printf("\trwlock destroy: %s, %d\n", (*rwlock)->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\trwlock destroy: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
 	delete *rwlock;
 	*rwlock = nullptr;
@@ -59,7 +60,7 @@ int KYTY_SYSV_ABI PthreadRwlockInit(PthreadRwlock* rwlock, const PthreadRwlockat
 
 	int result = pthread_rwlock_init(&(*rwlock)->p, &(*attr)->p);
 
-	printf("\trwlock init: %s, %d\n", (*rwlock)->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\trwlock init: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
 	switch (result)
 	{
@@ -98,7 +99,7 @@ int KYTY_SYSV_ABI PthreadRwlockRdlock(PthreadRwlock* rwlock)
 
 	int result = pthread_rwlock_rdlock(&(*rwlock)->p);
 
-	// printf("\trwlock rdlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\trwlock rdlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
 	switch (result)
 	{
@@ -139,7 +140,7 @@ int KYTY_SYSV_ABI PthreadRwlockTimedrdlock(PthreadRwlock* rwlock, KernelUseconds
 	const int result = pthread_rwlock_timedrdlock(&(*rwlock)->p, &deadline);
 #endif
 
-	// printf("\trwlock timedrdlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\trwlock timedrdlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
 	switch (result)
 	{
@@ -181,7 +182,7 @@ int KYTY_SYSV_ABI PthreadRwlockTimedwrlock(PthreadRwlock* rwlock, KernelUseconds
 	const int result = pthread_rwlock_timedwrlock(&(*rwlock)->p, &deadline);
 #endif
 
-	// printf("\trwlock timedwrlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\trwlock timedwrlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
 	switch (result)
 	{
@@ -212,7 +213,7 @@ int KYTY_SYSV_ABI PthreadRwlockTryrdlock(PthreadRwlock* rwlock)
 
 	int result = pthread_rwlock_tryrdlock(&(*rwlock)->p);
 
-	// printf("\trwlock tryrdlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\trwlock tryrdlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
 	switch (result)
 	{
@@ -243,7 +244,7 @@ int KYTY_SYSV_ABI PthreadRwlockTrywrlock(PthreadRwlock* rwlock)
 
 	int result = pthread_rwlock_trywrlock(&(*rwlock)->p);
 
-	// printf("\trwlock trywrlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\trwlock trywrlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
 	switch (result)
 	{
@@ -282,7 +283,7 @@ int KYTY_SYSV_ABI PthreadRwlockUnlock(PthreadRwlock* rwlock)
 
 	int result = pthread_rwlock_unlock(&(*rwlock)->p);
 
-	// printf("\trwlock unlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\trwlock unlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
 	switch (result)
 	{
@@ -321,7 +322,7 @@ int KYTY_SYSV_ABI PthreadRwlockWrlock(PthreadRwlock* rwlock)
 
 	int result = pthread_rwlock_wrlock(&(*rwlock)->p);
 
-	// printf("\trwlock wrlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\trwlock wrlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
 	switch (result)
 	{

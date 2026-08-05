@@ -473,7 +473,7 @@ int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 
 	int result = pthread_cond_broadcast(&(*cond)->p);
 
-	printf("\tcond broadcast: %s, %d\n", (*cond)->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\tcond broadcast: %s, %d\n", (*cond)->name.C_Str(), result);
 
 	if (result == 0)
 	{
@@ -495,7 +495,7 @@ int KYTY_SYSV_ABI PthreadCondDestroy(PthreadCond* cond)
 
 	int result = pthread_cond_destroy(&(*cond)->p);
 
-	printf("\tcond destroy: %s, %d\n", (*cond)->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\tcond destroy: %s, %d\n", (*cond)->name.C_Str(), result);
 
 	delete *cond;
 	*cond = nullptr;
@@ -532,7 +532,7 @@ int KYTY_SYSV_ABI PthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr
 
 	int result = pthread_cond_init(&(*cond)->p, &(*attr)->p);
 
-	printf("\tcond init: %s, %d\n", (*cond)->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\tcond init: %s, %d\n", (*cond)->name.C_Str(), result);
 
 	switch (result)
 	{
@@ -568,7 +568,7 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 
 	int result = pthread_cond_signal(&(*cond)->p);
 
-	// printf("\tcond signal: %s, %d\n", (*cond)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\tcond signal: %s, %d\n", (*cond)->name.C_Str(), result);
 
 	if (result == 0)
 	{
@@ -592,7 +592,7 @@ int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread)
 
 	KYTY_NOT_IMPLEMENTED;
 
-	// printf("\tcond signalto: %s, %d\n", (*cond)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\tcond signalto: %s, %d\n", (*cond)->name.C_Str(), result);
 
 	if (result == 0)
 	{
@@ -818,7 +818,7 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 
 	slot_trace_unregister_waiter(waiter_slot);
 
-	// printf("\tcond wait: %s, %d\n", (*cond)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\tcond wait: %s, %d\n", (*cond)->name.C_Str(), result);
 
 	switch (result)
 	{

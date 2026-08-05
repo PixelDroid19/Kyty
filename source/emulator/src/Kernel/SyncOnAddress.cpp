@@ -2,6 +2,7 @@
 #include "Emulator/Kernel/Errors.h"
 
 #include "Emulator/Kernel/Trace.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 #include <chrono>
@@ -117,7 +118,7 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWait(uint64_t address, uint32_t expected_va
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	printf("\t address = 0x%016" PRIx64 " expected = 0x%08" PRIx32 " timeout = %p flags = 0x%08" PRIx32 "\n", address,
+	KYTY_LOG_DEBUG("\t address = 0x%016" PRIx64 " expected = 0x%08" PRIx32 " timeout = %p flags = 0x%08" PRIx32 "\n", address,
 	       expected_value, static_cast<const void*>(timeout), flags);
 
 	const uint32_t timeout_us = timeout != nullptr ? __atomic_load_n(timeout, __ATOMIC_ACQUIRE) : 0u;
@@ -159,7 +160,7 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWake(uint64_t address, int64_t wake_count)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	printf("\t address = 0x%016" PRIx64 " wake_count = %" PRId64 "\n", address, wake_count);
+	KYTY_LOG_DEBUG("\t address = 0x%016" PRIx64 " wake_count = %" PRId64 "\n", address, wake_count);
 	return WakeRegisteredWaiters(address, wake_count);
 }
 

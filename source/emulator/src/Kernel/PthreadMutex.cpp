@@ -5,6 +5,7 @@
 
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/Trace.h"
+#include "Emulator/Log.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -139,7 +140,7 @@ int KYTY_SYSV_ABI PthreadMutexInit(PthreadMutex* mutex, const PthreadMutexattr* 
 
 	if (name != nullptr)
 	{
-		printf("\tmutex init: %s, %d\n", (*mutex)->name.C_Str(), result);
+		KYTY_LOG_DEBUG("\tmutex init: %s, %d\n", (*mutex)->name.C_Str(), result);
 	}
 
 	switch (result)
@@ -163,7 +164,7 @@ int KYTY_SYSV_ABI PthreadMutexDestroy(PthreadMutex* mutex)
 
 	int result = pthread_mutex_destroy(&(*mutex)->p);
 
-	printf("\tmutex destroy: %s, %d\n", (*mutex)->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\tmutex destroy: %s, %d\n", (*mutex)->name.C_Str(), result);
 
 	delete *mutex;
 	*mutex = nullptr;
@@ -223,7 +224,7 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex)
 		private_mutex->recursion_count = 1;
 	}
 
-	// printf("\tmutex lock: %s, %d\n", (*mutex)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\tmutex lock: %s, %d\n", (*mutex)->name.C_Str(), result);
 
 	switch (result)
 	{
@@ -274,7 +275,7 @@ int KYTY_SYSV_ABI PthreadMutexTrylock(PthreadMutex* mutex)
 		private_mutex->recursion_count = 1;
 	}
 
-	// printf("\tmutex trylock: %s, %d\n", (*mutex)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\tmutex trylock: %s, %d\n", (*mutex)->name.C_Str(), result);
 
 	switch (result)
 	{
@@ -380,7 +381,7 @@ int KYTY_SYSV_ABI PthreadMutexUnlock(PthreadMutex* mutex)
 		private_mutex->recursion_count = 0;
 	}
 
-	// printf("\tmutex unlock: %s, %d\n", (*mutex)->name.C_Str(), result);
+	// KYTY_LOG_DEBUG("\tmutex unlock: %s, %d\n", (*mutex)->name.C_Str(), result);
 
 	switch (result)
 	{

@@ -6,6 +6,7 @@
 
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/Trace.h"
+#include "Emulator/Log.h"
 
 #include <cinttypes>
 #include <cstdio>
@@ -164,14 +165,14 @@ void pthread_attr_dbg_print(const PthreadAttr* src)
 	PthreadAttrGetstackaddr(src, &stack_addr);
 	PthreadAttrGetstacksize(src, &stack_size);
 
-	printf("\tcpu_mask       = 0x%" PRIx64 "\n", mask);
-	printf("\tdetach_state   = %d\n", state);
-	printf("\tguard_size     = %" PRIu64 "\n", guard_size);
-	printf("\tinherit_sched  = %d\n", inherit_sched);
-	printf("\tsched_priority = %d\n", param.sched_priority);
-	printf("\tpolicy         = %d\n", policy);
-	printf("\tstack_addr     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(stack_addr));
-	printf("\tstack_size    = %" PRIu64 "\n", static_cast<uint64_t>(stack_size));
+	KYTY_LOG_DEBUG("\tcpu_mask       = 0x%" PRIx64 "\n", mask);
+	KYTY_LOG_DEBUG("\tdetach_state   = %d\n", state);
+	KYTY_LOG_DEBUG("\tguard_size     = %" PRIu64 "\n", guard_size);
+	KYTY_LOG_DEBUG("\tinherit_sched  = %d\n", inherit_sched);
+	KYTY_LOG_DEBUG("\tsched_priority = %d\n", param.sched_priority);
+	KYTY_LOG_DEBUG("\tpolicy         = %d\n", policy);
+	KYTY_LOG_DEBUG("\tstack_addr     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(stack_addr));
+	KYTY_LOG_DEBUG("\tstack_size    = %" PRIu64 "\n", static_cast<uint64_t>(stack_size));
 }
 
 int KYTY_SYSV_ABI PthreadAttrInit(PthreadAttr* attr)
