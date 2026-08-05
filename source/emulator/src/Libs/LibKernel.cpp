@@ -160,9 +160,9 @@ static KYTY_SYSV_ABI int sigprocmask(int /*how*/, const void* /*set*/, void* /*o
 {
 	// PRINT_NAME();
 
-	// printf("\t how = %d\n", how);
-	// printf("\t set = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(set));
-	// printf("\t oset = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(oset));
+	// KYTY_LOG_DEBUG("\t how = %d\n", how);
+	// KYTY_LOG_DEBUG("\t set = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(set));
+	// KYTY_LOG_DEBUG("\t oset = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(oset));
 
 	return 0;
 }
@@ -174,7 +174,7 @@ static KYTY_SYSV_ABI KernelModule KernelLoadStartModule(const char* module_file_
 
 	// EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
 
-	printf("\tmodule_file_name = %s\n", (module_file_name != nullptr ? module_file_name : "<null>"));
+	KYTY_LOG_DEBUG("\tmodule_file_name = %s\n", (module_file_name != nullptr ? module_file_name : "<null>"));
 
 	if (module_file_name == nullptr || module_file_name[0] == '\0' || flags != 0 || opt != nullptr)
 	{
@@ -215,7 +215,7 @@ static KYTY_SYSV_ABI KernelModule KernelLoadStartModule(const char* module_file_
 
 	int result = rt->StartModule(program, args, argp, nullptr);
 
-	printf("\tmodule_start() result = %d\n", result);
+	KYTY_LOG_DEBUG("\tmodule_start() result = %d\n", result);
 
 	EXIT_NOT_IMPLEMENTED(result < 0);
 
@@ -245,7 +245,7 @@ static int KYTY_SYSV_ABI KernelStopUnloadModule(KernelModule handle, size_t args
 
 	if (g_get_thread_atexit_count_func != nullptr && g_get_thread_atexit_count_func(program->unique_id) > 0)
 	{
-		printf("KernelStopUnloadModule: cannot unload %s\n", program->file_name.C_Str());
+		KYTY_LOG_DEBUG("KernelStopUnloadModule: cannot unload %s\n", program->file_name.C_Str());
 		if (g_thread_atexit_report_func != nullptr)
 		{
 			g_thread_atexit_report_func(program->unique_id);
@@ -255,7 +255,7 @@ static int KYTY_SYSV_ABI KernelStopUnloadModule(KernelModule handle, size_t args
 
 	int result = rt->StopModule(program, args, argp, nullptr);
 
-	printf("\tmodule_stop() result = %d\n", result);
+	KYTY_LOG_DEBUG("\tmodule_stop() result = %d\n", result);
 
 	EXIT_NOT_IMPLEMENTED(result < 0);
 
@@ -296,8 +296,8 @@ static void KYTY_SYSV_ABI KernelSync()
 static int KYTY_SYSV_ABI KernelDlsym(KernelModule handle, const char* symbol, void** address)
 {
 	PRINT_NAME();
-	printf("\t handle = %d\n", handle);
-	printf("\t symbol = %s\n", symbol != nullptr ? symbol : "(null)");
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
+	KYTY_LOG_DEBUG("\t symbol = %s\n", symbol != nullptr ? symbol : "(null)");
 
 	if (address == nullptr || symbol == nullptr)
 	{
@@ -335,7 +335,7 @@ static void KYTY_SYSV_ABI KernelRtldSetApplicationHeapAPI(void* api[])
 
 	for (int i = 0; i < 10; i++)
 	{
-		printf("\tapi[%d] = 0x%016" PRIx64 "\n", i, reinterpret_cast<uint64_t>(api[i]));
+		KYTY_LOG_DEBUG("\tapi[%d] = 0x%016" PRIx64 "\n", i, reinterpret_cast<uint64_t>(api[i]));
 	}
 
 	ApplicationHeap::RegisterApi(api);
@@ -500,8 +500,8 @@ static int KYTY_SYSV_ABI KernelGetModuleInfo(KernelModule handle, void* out_info
 {
 	PRINT_NAME();
 
-	printf("\t handle = %" PRId32 "\n", handle);
-	printf("\t out_info = %p\n", out_info);
+	KYTY_LOG_DEBUG("\t handle = %" PRId32 "\n", handle);
+	KYTY_LOG_DEBUG("\t out_info = %p\n", out_info);
 
 	if (out_info == nullptr)
 	{
@@ -534,7 +534,7 @@ static int KYTY_SYSV_ABI KernelGetModuleList(int32_t* handles, uint64_t capacity
 {
 	PRINT_NAME();
 
-	printf("\t handles = %p capacity = %" PRIu64 " out_count = %p\n", static_cast<void*>(handles), capacity, static_cast<void*>(out_count));
+	KYTY_LOG_DEBUG("\t handles = %p capacity = %" PRIu64 " out_count = %p\n", static_cast<void*>(handles), capacity, static_cast<void*>(out_count));
 
 	if (out_count == nullptr)
 	{
@@ -569,8 +569,8 @@ static int KYTY_SYSV_ABI KernelGetModuleInfoFromAddr(uint64_t addr, int n, Modul
 {
 	PRINT_NAME();
 
-	printf("\taddr = %016" PRIx64 "\n", addr);
-	printf("\tn = %d\n", n);
+	KYTY_LOG_DEBUG("\taddr = %016" PRIx64 "\n", addr);
+	KYTY_LOG_DEBUG("\tn = %d\n", n);
 
 	EXIT_NOT_IMPLEMENTED(n != 2);
 	EXIT_NOT_IMPLEMENTED(r == nullptr);
@@ -581,14 +581,14 @@ static int KYTY_SYSV_ABI KernelGetModuleInfoFromAddr(uint64_t addr, int n, Modul
 
 	if (p == nullptr)
 	{
-		printf("\thandle: not found\n");
+		KYTY_LOG_DEBUG("\thandle: not found\n");
 		r->handle = 0;
 		return -1;
 	}
 
 	r->handle = p->unique_id;
 
-	printf("\thandle: %d\n", r->handle);
+	KYTY_LOG_DEBUG("\thandle: %d\n", r->handle);
 
 	return 0;
 }
@@ -684,7 +684,7 @@ int KYTY_SYSV_ABI KernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleI
 {
 	PRINT_NAME();
 
-	printf("\t addr = 0x%016" PRIx64 " flags = %d info = %p\n", addr, flags, static_cast<void*>(info));
+	KYTY_LOG_DEBUG("\t addr = 0x%016" PRIx64 " flags = %d info = %p\n", addr, flags, static_cast<void*>(info));
 
 	if (flags < 0 || flags >= 3)
 	{
@@ -1256,9 +1256,9 @@ static KYTY_SYSV_ABI int elf_phdr_match_addr(ModuleInfo* m, uint64_t dtor_vaddr)
 	auto* p      = rt->FindProgramByAddr(dtor_vaddr);
 	int   result = (p != nullptr && p->unique_id == m->handle) ? 1 : 0;
 
-	printf("\thandle     = %" PRId32 "\n", m->handle);
-	printf("\tdtor_vaddr = %016" PRIx64 "\n", dtor_vaddr);
-	printf("\tmatch      = %s\n", result == 1 ? "true" : "false");
+	KYTY_LOG_DEBUG("\thandle     = %" PRId32 "\n", m->handle);
+	KYTY_LOG_DEBUG("\tdtor_vaddr = %016" PRIx64 "\n", dtor_vaddr);
+	KYTY_LOG_DEBUG("\tmatch      = %s\n", result == 1 ? "true" : "false");
 
 	return result;
 }
@@ -1347,7 +1347,7 @@ void KYTY_SYSV_ABI KernelSetGPO(uint32_t bits)
 {
 	PRINT_NAME();
 
-	printf("\t bits = %08" PRIx32 "\n", bits);
+	KYTY_LOG_DEBUG("\t bits = %08" PRIx32 "\n", bits);
 }
 
 // sceKernelGetGPI — NID 4oXYe9Xmk0Q.
@@ -1371,7 +1371,7 @@ static int KYTY_SYSV_ABI KernelIsTrinityMode()
 static int KYTY_SYSV_ABI KernelFsync(int fd)
 {
 	PRINT_NAME();
-	printf("\t fd = %d\n", fd);
+	KYTY_LOG_DEBUG("\t fd = %d\n", fd);
 	if (fd < 0)
 	{
 		return KERNEL_ERROR_EBADF;
@@ -1517,12 +1517,12 @@ static int KYTY_SYSV_ABI PosixGetsockopt(int id, int level, int option, void* va
 static int64_t KYTY_SYSV_ABI PosixRecvfrom(int socket, void* buffer, uint64_t length, int flags, void* address, uint32_t* address_len)
 {
 	PRINT_NAME();
-	printf("\t socket      = %d\n", socket);
-	printf("\t buffer      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
-	printf("\t length      = %" PRIu64 "\n", length);
-	printf("\t flags       = %d\n", flags);
-	printf("\t address     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
-	printf("\t address_len = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address_len));
+	KYTY_LOG_DEBUG("\t socket      = %d\n", socket);
+	KYTY_LOG_DEBUG("\t buffer      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
+	KYTY_LOG_DEBUG("\t length      = %" PRIu64 "\n", length);
+	KYTY_LOG_DEBUG("\t flags       = %d\n", flags);
+	KYTY_LOG_DEBUG("\t address     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
+	KYTY_LOG_DEBUG("\t address_len = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address_len));
 	*Posix::GetErrorAddr() = Posix::POSIX_ENOSYS;
 	return -1;
 }
@@ -1530,9 +1530,9 @@ static int64_t KYTY_SYSV_ABI PosixRecvfrom(int socket, void* buffer, uint64_t le
 static int KYTY_SYSV_ABI PosixSendmsg(int socket, const void* message, int flags)
 {
 	PRINT_NAME();
-	printf("\t socket  = %d\n", socket);
-	printf("\t message = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(message));
-	printf("\t flags   = %d\n", flags);
+	KYTY_LOG_DEBUG("\t socket  = %d\n", socket);
+	KYTY_LOG_DEBUG("\t message = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(message));
+	KYTY_LOG_DEBUG("\t flags   = %d\n", flags);
 	*Posix::GetErrorAddr() = Posix::POSIX_ENOSYS;
 	return -1;
 }
@@ -1540,9 +1540,9 @@ static int KYTY_SYSV_ABI PosixSendmsg(int socket, const void* message, int flags
 static int64_t KYTY_SYSV_ABI PosixRecvmsg(int socket, void* message, int flags)
 {
 	PRINT_NAME();
-	printf("\t socket  = %d\n", socket);
-	printf("\t message = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(message));
-	printf("\t flags   = %d\n", flags);
+	KYTY_LOG_DEBUG("\t socket  = %d\n", socket);
+	KYTY_LOG_DEBUG("\t message = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(message));
+	KYTY_LOG_DEBUG("\t flags   = %d\n", flags);
 	*Posix::GetErrorAddr() = Posix::POSIX_ENOSYS;
 	return -1;
 }
@@ -1702,7 +1702,7 @@ int KYTY_SYSV_ABI flock(int descriptor, int operation)
 uint64_t KYTY_SYSV_ABI cfwBSQyr5Ys(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6)
 {
 	PRINT_NAME();
-	printf("\t a1=0x%016" PRIx64 " a2=0x%016" PRIx64 " a3=0x%016" PRIx64 "\n"
+	KYTY_LOG_DEBUG("\t a1=0x%016" PRIx64 " a2=0x%016" PRIx64 " a3=0x%016" PRIx64 "\n"
 	       "\t a4=0x%016" PRIx64 " a5=0x%016" PRIx64 " a6=0x%016" PRIx64 "\n",
 	       a1, a2, a3, a4, a5, a6);
 	return 0;

@@ -1547,7 +1547,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			break;
 		}
 
-		// printf("\t %05" PRIx32 ": %u\n", num_dw - dw - 1, s);
+		// KYTY_LOG_DEBUG("\t %05" PRIx32 ": %u\n", num_dw - dw - 1, s);
 
 		cmd += s;
 		dw -= s;
@@ -1876,16 +1876,16 @@ void CommandProcessor::WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_
 
 	if (Log::ShouldLog(Log::Level::Debug))
 	{
-		printf("CommandProcessor::WriteAtEndOfPipe32()\n");
-		printf("\t cache_policy        = 0x%08" PRIx32 "\n", cache_policy);
-		printf("\t event_write_dest    = 0x%08" PRIx32 "\n", event_write_dest);
-		printf("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
-		printf("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
-		printf("\t event_index         = 0x%08" PRIx32 "\n", event_index);
-		printf("\t event_write_source  = 0x%08" PRIx32 "\n", event_write_source);
-		printf("\t interrupt_selector  = 0x%08" PRIx32 "\n", interrupt_selector);
-		printf("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
-		printf("\t value               = 0x%08" PRIx32 "\n", value);
+		KYTY_LOG_DEBUG("CommandProcessor::WriteAtEndOfPipe32()\n");
+		KYTY_LOG_DEBUG("\t cache_policy        = 0x%08" PRIx32 "\n", cache_policy);
+		KYTY_LOG_DEBUG("\t event_write_dest    = 0x%08" PRIx32 "\n", event_write_dest);
+		KYTY_LOG_DEBUG("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
+		KYTY_LOG_DEBUG("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
+		KYTY_LOG_DEBUG("\t event_index         = 0x%08" PRIx32 "\n", event_index);
+		KYTY_LOG_DEBUG("\t event_write_source  = 0x%08" PRIx32 "\n", event_write_source);
+		KYTY_LOG_DEBUG("\t interrupt_selector  = 0x%08" PRIx32 "\n", interrupt_selector);
+		KYTY_LOG_DEBUG("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
+		KYTY_LOG_DEBUG("\t value               = 0x%08" PRIx32 "\n", value);
 	}
 
 	EXIT_NOT_IMPLEMENTED(cache_policy != 0x00000000);
@@ -1918,16 +1918,16 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 
 	if (Log::ShouldLog(Log::Level::Debug))
 	{
-		printf("CommandProcessor::WriteAtEndOfPipe64()\n");
-		printf("\t cache_policy        = 0x%08" PRIx32 "\n", cache_policy);
-		printf("\t event_write_dest    = 0x%08" PRIx32 "\n", event_write_dest);
-		printf("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
-		printf("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
-		printf("\t event_index         = 0x%08" PRIx32 "\n", event_index);
-		printf("\t event_write_source  = 0x%08" PRIx32 "\n", event_write_source);
-		printf("\t interrupt_selector  = 0x%08" PRIx32 "\n", interrupt_selector);
-		printf("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
-		printf("\t value               = 0x%016" PRIx64 "\n", value);
+		KYTY_LOG_DEBUG("CommandProcessor::WriteAtEndOfPipe64()\n");
+		KYTY_LOG_DEBUG("\t cache_policy        = 0x%08" PRIx32 "\n", cache_policy);
+		KYTY_LOG_DEBUG("\t event_write_dest    = 0x%08" PRIx32 "\n", event_write_dest);
+		KYTY_LOG_DEBUG("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
+		KYTY_LOG_DEBUG("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
+		KYTY_LOG_DEBUG("\t event_index         = 0x%08" PRIx32 "\n", event_index);
+		KYTY_LOG_DEBUG("\t event_write_source  = 0x%08" PRIx32 "\n", event_write_source);
+		KYTY_LOG_DEBUG("\t interrupt_selector  = 0x%08" PRIx32 "\n", interrupt_selector);
+		KYTY_LOG_DEBUG("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
+		KYTY_LOG_DEBUG("\t value               = 0x%016" PRIx64 "\n", value);
 	}
 
 	EXIT_NOT_IMPLEMENTED(cache_policy != 0x00000000);
@@ -2064,9 +2064,9 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index)
 
 	if (Log::ShouldLog(Log::Level::Debug))
 	{
-		printf("CommandProcessor::TriggerEvent()\n");
-		printf("\t event_type  = 0x%08" PRIx32 "\n", event_type);
-		printf("\t event_index = 0x%08" PRIx32 "\n", event_index);
+		KYTY_LOG_DEBUG("CommandProcessor::TriggerEvent()\n");
+		KYTY_LOG_DEBUG("\t event_type  = 0x%08" PRIx32 "\n", event_type);
+		KYTY_LOG_DEBUG("\t event_index = 0x%08" PRIx32 "\n", event_index);
 	}
 
 	if ((event_type == 0x00000016 || event_type == 0x00000031) && event_index == 0x00000007)
@@ -2105,7 +2105,7 @@ void CommandProcessor::Flip()
 
 	if (Log::ShouldLog(Log::Level::Debug))
 	{
-		printf("CommandProcessor::Flip()\n");
+		KYTY_LOG_DEBUG("CommandProcessor::Flip()\n");
 	}
 
 	GraphicsRenderWriteAtEndOfPipeOnlyFlip(m_sumbit_id, m_buffer[m_current_buffer], m_flip.handle, m_flip.index, m_flip.flip_mode,
@@ -2122,9 +2122,9 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value)
 
 	if (Log::ShouldLog(Log::Level::Debug))
 	{
-		printf("CommandProcessor::Flip()\n");
-		printf("\t dst_gpu_addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
-		printf("\t value        = 0x%08" PRIx32 "\n", value);
+		KYTY_LOG_DEBUG("CommandProcessor::Flip()\n");
+		KYTY_LOG_DEBUG("\t dst_gpu_addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
+		KYTY_LOG_DEBUG("\t value        = 0x%08" PRIx32 "\n", value);
 	}
 
 	GraphicsRenderWriteAtEndOfPipeWithFlip32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value,
@@ -2141,11 +2141,11 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 
 	if (Log::ShouldLog(Log::Level::Debug))
 	{
-		printf("CommandProcessor::FlipWithInterrupt()\n");
-		printf("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
-		printf("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
-		printf("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
-		printf("\t value               = 0x%08" PRIx32 "\n", value);
+		KYTY_LOG_DEBUG("CommandProcessor::FlipWithInterrupt()\n");
+		KYTY_LOG_DEBUG("\t eop_event_type      = 0x%08" PRIx32 "\n", eop_event_type);
+		KYTY_LOG_DEBUG("\t cache_action        = 0x%08" PRIx32 "\n", cache_action);
+		KYTY_LOG_DEBUG("\t dst_gpu_addr        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dst_gpu_addr));
+		KYTY_LOG_DEBUG("\t value               = 0x%08" PRIx32 "\n", value);
 	}
 
 	if (eop_event_type == 0x00000004 && cache_action == 0x00000038)
