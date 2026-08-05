@@ -2,7 +2,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
-#include "Emulator/Graphics/KeyboardInput.h"
+#include "Emulator/Host/KeyboardInput.h"
 #include "Emulator/Log.h"
 
 #include <array>
@@ -86,7 +86,7 @@ TEST(EmulatorPad, KeyboardButtonsRemainVisibleWithPhysicalController)
 // neutralize to 128; reset returns neutral. Key codes match SDL letter values.
 TEST(EmulatorPad, KeyboardMovementKeyPressReleaseMapsLeftStick)
 {
-	using namespace Kyty::Libs::Graphics;
+	using namespace Kyty::Emulator::Host;
 
 	KeyboardLeftStickState state {};
 

@@ -1,5 +1,5 @@
-#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_KEYBOARDINPUT_H_
-#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_KEYBOARDINPUT_H_
+#ifndef EMULATOR_INCLUDE_EMULATOR_HOST_KEYBOARDINPUT_H_
+#define EMULATOR_INCLUDE_EMULATOR_HOST_KEYBOARDINPUT_H_
 
 #include "Kyty/Core/Common.h"
 
@@ -7,10 +7,11 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Libs::Graphics {
+namespace Kyty::Emulator::Host {
 
 // Pure keyboard → left-stick state for real press/release mapping.
-// SDL event decoding stays in Window.cpp; this module owns only the axes contract.
+// SDL event decoding stays in the graphics window; this module owns only the
+// neutral axes contract and lives in Host because it maps host key events.
 // Header-only so unit tests resolve symbols without circular static-lib order issues.
 
 struct KeyboardLeftStickState
@@ -84,8 +85,8 @@ inline constexpr int kKeyboardLeftStickKeyDown  = 's';
 	return update;
 }
 
-} // namespace Kyty::Libs::Graphics
+} // namespace Kyty::Emulator::Host
 
 #endif // KYTY_EMU_ENABLED
 
-#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_KEYBOARDINPUT_H_ */
+#endif /* EMULATOR_INCLUDE_EMULATOR_HOST_KEYBOARDINPUT_H_ */

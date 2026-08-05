@@ -21,7 +21,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/ImageAsset.h"
-#include "Emulator/Graphics/KeyboardInput.h"
+#include "Emulator/Host/KeyboardInput.h"
 #include "Emulator/Graphics/NativeCapture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/PresentationScaler.h"
@@ -746,9 +746,9 @@ void game_event_terminate(GameApi* game)
 	game->m_game_need_exit = true;
 }
 
-static KeyboardLeftStickState g_keyboard_left_stick;
+static ::Kyty::Emulator::Host::KeyboardLeftStickState g_keyboard_left_stick;
 
-static void ApplyKeyboardLeftStickControllerAxes(const KeyboardLeftStickUpdate& update)
+static void ApplyKeyboardLeftStickControllerAxes(const ::Kyty::Emulator::Host::KeyboardLeftStickUpdate& update)
 {
 	if (!update.changed)
 	{
@@ -799,7 +799,7 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 	if (!key->repeat && (key->down || key->up) && !suppress_guest_enter)
 	{
 		const bool down = key->down;
-		ApplyKeyboardLeftStickControllerAxes(ApplyKeyboardLeftStickKey(g_keyboard_left_stick, key->key_code, down));
+		ApplyKeyboardLeftStickControllerAxes(::Kyty::Emulator::Host::ApplyKeyboardLeftStickKey(g_keyboard_left_stick, key->key_code, down));
 		uint32_t button = 0;
 		switch (::Kyty::Emulator::Host::HostInput::ClassifyKeyboardAction(key->key_code))
 		{
@@ -1118,7 +1118,7 @@ static void process_window_event(GameApi* game, const ::Kyty::Emulator::Host::Wi
 				g_window_ctx->controls.SetFocused(false);
 				SetHostCursorVisible(true);
 			}
-			ApplyKeyboardLeftStickControllerAxes(ResetKeyboardLeftStick(g_keyboard_left_stick));
+			ApplyKeyboardLeftStickControllerAxes(::Kyty::Emulator::Host::ResetKeyboardLeftStick(g_keyboard_left_stick));
 			break;
 		case ::Kyty::Emulator::Host::WindowEvent::Close:
 			KYTY_LOG_DEBUG("Window %" PRIu32 " closed\n", window.window_id);
