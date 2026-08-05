@@ -2,6 +2,7 @@
 #include "Kyty/Core/String.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Log.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
@@ -42,13 +43,13 @@ static int KYTY_SYSV_ABI FontMemoryInit(FontMemory* font_memory, void* address, 
                                         void* destroy_callback, void* destroy_object)
 {
 	PRINT_NAME();
-	printf("\t font_memory      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_memory));
-	printf("\t address          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
-	printf("\t size_byte        = 0x%" PRIx32 "\n", size_byte);
-	printf("\t mem_interface    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(mem_interface));
-	printf("\t mspace_object    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(mspace_object));
-	printf("\t destroy_callback = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(destroy_callback));
-	printf("\t destroy_object   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(destroy_object));
+	KYTY_LOG_DEBUG("\t font_memory      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_memory));
+	KYTY_LOG_DEBUG("\t address          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
+	KYTY_LOG_DEBUG("\t size_byte        = 0x%" PRIx32 "\n", size_byte);
+	KYTY_LOG_DEBUG("\t mem_interface    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(mem_interface));
+	KYTY_LOG_DEBUG("\t mspace_object    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(mspace_object));
+	KYTY_LOG_DEBUG("\t destroy_callback = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(destroy_callback));
+	KYTY_LOG_DEBUG("\t destroy_object   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(destroy_object));
 
 	if (font_memory == nullptr)
 	{
@@ -91,10 +92,10 @@ static int KYTY_SYSV_ABI FontCreateLibraryWithEdition(const FontMemory* memory, 
                                                       uint64_t edition, void** library)
 {
 	PRINT_NAME();
-	printf("\t memory    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(memory));
-	printf("\t selection = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(selection));
-	printf("\t edition   = 0x%016" PRIx64 "\n", edition);
-	printf("\t library   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
+	KYTY_LOG_DEBUG("\t memory    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(memory));
+	KYTY_LOG_DEBUG("\t selection = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(selection));
+	KYTY_LOG_DEBUG("\t edition   = 0x%016" PRIx64 "\n", edition);
+	KYTY_LOG_DEBUG("\t library   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
 	if (library == nullptr)
 	{
 		return -1;
@@ -129,14 +130,14 @@ static int KYTY_SYSV_ABI FontDestroyLibrary(void** library)
 static int KYTY_SYSV_ABI FontSupportSystemFonts(void* library)
 {
 	PRINT_NAME();
-	printf("\t library = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
+	KYTY_LOG_DEBUG("\t library = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
 	return OK;
 }
 
 static int KYTY_SYSV_ABI FontSupportExternalFonts(void* library)
 {
 	PRINT_NAME();
-	printf("\t library = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
+	KYTY_LOG_DEBUG("\t library = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
 	return OK;
 }
 
@@ -145,9 +146,9 @@ static int KYTY_SYSV_ABI FontSupportExternalFonts(void* library)
 static int KYTY_SYSV_ABI FontAttachDeviceCacheBuffer(void* library, void* buffer, uint32_t size)
 {
 	PRINT_NAME();
-	printf("\t library = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
-	printf("\t buffer  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
-	printf("\t size    = 0x%" PRIx32 "\n", size);
+	KYTY_LOG_DEBUG("\t library = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
+	KYTY_LOG_DEBUG("\t buffer  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
+	KYTY_LOG_DEBUG("\t size    = 0x%" PRIx32 "\n", size);
 	return OK;
 }
 
@@ -224,11 +225,11 @@ static int KYTY_SYSV_ABI FontOpenFontSet(void* library, uint32_t font_set_type, 
                                          const void* detail, void** font_out)
 {
 	PRINT_NAME();
-	printf("\t library       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
-	printf("\t font_set_type = 0x%" PRIx32 "\n", font_set_type);
-	printf("\t open_mode     = 0x%" PRIx32 "\n", open_mode);
-	printf("\t detail        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(detail));
-	printf("\t font_out      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_out));
+	KYTY_LOG_DEBUG("\t library       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
+	KYTY_LOG_DEBUG("\t font_set_type = 0x%" PRIx32 "\n", font_set_type);
+	KYTY_LOG_DEBUG("\t open_mode     = 0x%" PRIx32 "\n", open_mode);
+	KYTY_LOG_DEBUG("\t detail        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(detail));
+	KYTY_LOG_DEBUG("\t font_out      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_out));
 	return OpenFontHandle(library, detail, 0, font_set_type, open_mode, font_out);
 }
 
@@ -239,11 +240,11 @@ static int KYTY_SYSV_ABI FontOpenFontMemory(void* library, const void* font_addr
                                             const void* detail, void** font_out)
 {
 	PRINT_NAME();
-	printf("\t library      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
-	printf("\t font_address = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_address));
-	printf("\t font_size    = 0x%" PRIx32 "\n", font_size);
-	printf("\t detail       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(detail));
-	printf("\t font_out     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_out));
+	KYTY_LOG_DEBUG("\t library      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(library));
+	KYTY_LOG_DEBUG("\t font_address = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_address));
+	KYTY_LOG_DEBUG("\t font_size    = 0x%" PRIx32 "\n", font_size);
+	KYTY_LOG_DEBUG("\t detail       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(detail));
+	KYTY_LOG_DEBUG("\t font_out     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_out));
 	(void)detail;
 	return OpenFontHandle(library, font_address, font_size, 0, 0, font_out);
 }
@@ -252,9 +253,9 @@ static int KYTY_SYSV_ABI FontOpenFontMemory(void* library, const void* font_addr
 static int KYTY_SYSV_ABI FontOpenFontInstance(void* font_handle, void* setup_font, void** font_out)
 {
 	PRINT_NAME();
-	printf("\t font_handle = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_handle));
-	printf("\t setup_font  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(setup_font));
-	printf("\t font_out    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_out));
+	KYTY_LOG_DEBUG("\t font_handle = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_handle));
+	KYTY_LOG_DEBUG("\t setup_font  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(setup_font));
+	KYTY_LOG_DEBUG("\t font_out    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_out));
 	if (font_handle == nullptr)
 	{
 		return OpenFontHandle(nullptr, setup_font, 0, 0, 0, font_out);
@@ -278,10 +279,10 @@ static int KYTY_SYSV_ABI FontCreateRendererWithEdition(const FontMemory* memory,
                                                        uint64_t edition, void** renderer)
 {
 	PRINT_NAME();
-	printf("\t memory    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(memory));
-	printf("\t selection = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(selection));
-	printf("\t edition   = 0x%016" PRIx64 "\n", edition);
-	printf("\t renderer  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(renderer));
+	KYTY_LOG_DEBUG("\t memory    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(memory));
+	KYTY_LOG_DEBUG("\t selection = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(selection));
+	KYTY_LOG_DEBUG("\t edition   = 0x%016" PRIx64 "\n", edition);
+	KYTY_LOG_DEBUG("\t renderer  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(renderer));
 	if (renderer == nullptr)
 	{
 		return -1;
@@ -316,8 +317,8 @@ static int KYTY_SYSV_ABI FontBindRenderer(void* font_handle, void* renderer)
 		return -1;
 	}
 	font->renderer = renderer;
-	printf("\t handle   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_handle));
-	printf("\t renderer = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(renderer));
+	KYTY_LOG_DEBUG("\t handle   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_handle));
+	KYTY_LOG_DEBUG("\t renderer = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(renderer));
 	return OK;
 }
 
@@ -356,7 +357,7 @@ static int KYTY_SYSV_ABI FontSetScalePixel(void* font_handle, float w, float h)
 	}
 	font->scale_w = w;
 	font->scale_h = h;
-	printf("\t handle = 0x%016" PRIx64 " w=%f h=%f\n", reinterpret_cast<uint64_t>(font_handle),
+	KYTY_LOG_DEBUG("\t handle = 0x%016" PRIx64 " w=%f h=%f\n", reinterpret_cast<uint64_t>(font_handle),
 	       static_cast<double>(w), static_cast<double>(h));
 	return OK;
 }
@@ -434,7 +435,7 @@ static int KYTY_SYSV_ABI FontGetHorizontalLayout(void* font_handle, FontHorizont
 	layout->base_line_y   = height * 0.75f;
 	layout->line_height   = height;
 	layout->effect_height = height;
-	printf("\t handle = 0x%016" PRIx64 " layout=%p h=%f\n", reinterpret_cast<uint64_t>(font_handle),
+	KYTY_LOG_DEBUG("\t handle = 0x%016" PRIx64 " layout=%p h=%f\n", reinterpret_cast<uint64_t>(font_handle),
 	       static_cast<void*>(layout), static_cast<double>(height));
 	return OK;
 }
@@ -517,7 +518,7 @@ static int KYTY_SYSV_ABI FontGetRenderCharGlyphMetrics(void* font_handle, uint32
                                                        FontGlyphMetrics* metrics)
 {
 	PRINT_NAME();
-	printf("\t handle = 0x%016" PRIx64 " code=0x%" PRIx32 " metrics=0x%016" PRIx64 "\n",
+	KYTY_LOG_DEBUG("\t handle = 0x%016" PRIx64 " code=0x%" PRIx32 " metrics=0x%016" PRIx64 "\n",
 	       reinterpret_cast<uint64_t>(font_handle), code, reinterpret_cast<uint64_t>(metrics));
 	FillSyntheticGlyphMetrics(static_cast<const FontHandleState*>(font_handle), metrics);
 	return OK;
@@ -569,7 +570,7 @@ static void KYTY_SYSV_ABI FontRenderSurfaceInit(FontRenderSurface* surf, void* b
 	surf->scissor.y0      = 0;
 	surf->scissor.x1      = static_cast<uint32_t>(surf->width);
 	surf->scissor.y1      = static_cast<uint32_t>(surf->height);
-	printf("\t surf=%p buf=%p pitch=%d px=%d %dx%d\n", static_cast<void*>(surf), buffer,
+	KYTY_LOG_DEBUG("\t surf=%p buf=%p pitch=%d px=%d %dx%d\n", static_cast<void*>(surf), buffer,
 	       buf_width_byte, pixel_size_byte, width, height);
 }
 
@@ -612,7 +613,7 @@ static int KYTY_SYSV_ABI FontGenerateCharGlyph(void* font_handle, uint32_t code,
 	glyph->attribute  = attribute;
 	FillSyntheticGlyphMetrics(glyph->font, &glyph->metrics);
 	*glyph_out = glyph;
-	printf("\t handle=0x%016" PRIx64 " code=0x%" PRIx32 " glyph=%p\n",
+	KYTY_LOG_DEBUG("\t handle=0x%016" PRIx64 " code=0x%" PRIx32 " glyph=%p\n",
 	       reinterpret_cast<uint64_t>(font_handle), code, static_cast<void*>(glyph));
 	return OK;
 }
@@ -795,7 +796,7 @@ static int KYTY_SYSV_ABI FontRenderCharGlyphImageHorizontal(void* font_handle, u
 	const float top_y = y - draw_metrics->horizontal.bearing_y;
 	DrawGlyphToSurface(font->trans_image, surf, top_x, top_y);
 
-	printf("\t handle=0x%016" PRIx64 " code=0x%" PRIx32 " surf=%p x=%f y=%f\n",
+	KYTY_LOG_DEBUG("\t handle=0x%016" PRIx64 " code=0x%" PRIx32 " surf=%p x=%f y=%f\n",
 	       reinterpret_cast<uint64_t>(font_handle), code, static_cast<void*>(surf),
 	       static_cast<double>(x), static_cast<double>(y));
 	return OK;

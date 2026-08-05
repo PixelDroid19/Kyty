@@ -4,6 +4,7 @@
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 
 #include "Kyty/Core/File.h"
 #include "Kyty/Core/Threads.h"
@@ -133,7 +134,7 @@ static bool EnsureStreamSpace(CommandBufferState* st, uint64_t record_size)
 	}
 	if (st->write_offset + record_size > st->size)
 	{
-		printf("\t command stream wrap (offset 0x%" PRIx64 " size 0x%" PRIx64 " record 0x%" PRIx64 ")\n", st->write_offset, st->size,
+		KYTY_LOG_DEBUG("\t command stream wrap (offset 0x%" PRIx64 " size 0x%" PRIx64 " record 0x%" PRIx64 ")\n", st->write_offset, st->size,
 		       record_size);
 		st->write_offset = 0;
 	}
@@ -211,9 +212,9 @@ static KYTY_SYSV_ABI uint64_t CommandBufferConstructor(void* cmd_obj, void* buff
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
 	const uint64_t buf = reinterpret_cast<uint64_t>(buffer);
-	printf("\t cmd    = 0x%016" PRIx64 "\n", cmd);
-	printf("\t buffer = 0x%016" PRIx64 "\n", buf);
-	printf("\t size   = 0x%016" PRIx64 "\n", size);
+	KYTY_LOG_DEBUG("\t cmd    = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t buffer = 0x%016" PRIx64 "\n", buf);
+	KYTY_LOG_DEBUG("\t size   = 0x%016" PRIx64 "\n", size);
 	if (cmd == 0)
 	{
 		return 0;
@@ -232,9 +233,9 @@ static KYTY_SYSV_ABI uint64_t AprCommandBufferConstructor(void* cmd_obj, uint64_
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd  = 0x%016" PRIx64 "\n", cmd);
-	printf("\t aux0 = 0x%016" PRIx64 "\n", aux0);
-	printf("\t aux1 = 0x%016" PRIx64 "\n", aux1);
+	KYTY_LOG_DEBUG("\t cmd  = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t aux0 = 0x%016" PRIx64 "\n", aux0);
+	KYTY_LOG_DEBUG("\t aux1 = 0x%016" PRIx64 "\n", aux1);
 	if (cmd == 0)
 	{
 		return 0;
@@ -267,7 +268,7 @@ static KYTY_SYSV_ABI int CommandBufferDestructor(void* cmd_obj)
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 "\n", cmd);
 	if (cmd == 0)
 	{
 		return OK;
@@ -283,7 +284,7 @@ static KYTY_SYSV_ABI int AprCommandBufferDestructor(void* cmd_obj)
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 "\n", cmd);
 	if (cmd == 0)
 	{
 		return OK;
@@ -299,9 +300,9 @@ static KYTY_SYSV_ABI int CommandBufferSetBuffer(void* cmd_obj, void* buffer, uin
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
 	const uint64_t buf = reinterpret_cast<uint64_t>(buffer);
-	printf("\t cmd    = 0x%016" PRIx64 "\n", cmd);
-	printf("\t buffer = 0x%016" PRIx64 "\n", buf);
-	printf("\t size   = 0x%016" PRIx64 "\n", size);
+	KYTY_LOG_DEBUG("\t cmd    = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t buffer = 0x%016" PRIx64 "\n", buf);
+	KYTY_LOG_DEBUG("\t size   = 0x%016" PRIx64 "\n", size);
 	if (cmd == 0)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -319,7 +320,7 @@ static KYTY_SYSV_ABI int CommandBufferReset(void* cmd_obj)
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 "\n", cmd);
 	if (cmd == 0)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -342,7 +343,7 @@ static KYTY_SYSV_ABI uint64_t CommandBufferClearBuffer(void* cmd_obj)
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 "\n", cmd);
 	if (cmd == 0)
 	{
 		return 0;
@@ -369,7 +370,7 @@ static KYTY_SYSV_ABI uint64_t CommandBufferGetSize(void* cmd_obj)
 	{
 		return 0;
 	}
-	printf("\t cmd  = 0x%016" PRIx64 " size = 0x%016" PRIx64 "\n", cmd, st.size);
+	KYTY_LOG_DEBUG("\t cmd  = 0x%016" PRIx64 " size = 0x%016" PRIx64 "\n", cmd, st.size);
 	return st.size;
 }
 
@@ -382,7 +383,7 @@ static KYTY_SYSV_ABI uint64_t CommandBufferGetCurrentOffset(void* cmd_obj)
 	{
 		return 0;
 	}
-	printf("\t cmd = 0x%016" PRIx64 " offset = 0x%016" PRIx64 "\n", cmd, st.write_offset);
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " offset = 0x%016" PRIx64 "\n", cmd, st.write_offset);
 	return st.write_offset;
 }
 
@@ -392,7 +393,7 @@ static KYTY_SYSV_ABI uint64_t CommandBufferGetNumCommands(void* cmd_obj)
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 "\n", cmd);
 	if (cmd == 0)
 	{
 		return 0;
@@ -408,11 +409,11 @@ static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd         = 0x%016" PRIx64 "\n", cmd);
-	printf("\t file_id     = 0x%08" PRIx32 "\n", file_id);
-	printf("\t dest        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dest));
-	printf("\t size        = 0x%016" PRIx64 "\n", size);
-	printf("\t file_offset = 0x%016" PRIx64 "\n", file_offset);
+	KYTY_LOG_DEBUG("\t cmd         = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t file_id     = 0x%08" PRIx32 "\n", file_id);
+	KYTY_LOG_DEBUG("\t dest        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(dest));
+	KYTY_LOG_DEBUG("\t size        = 0x%016" PRIx64 "\n", size);
+	KYTY_LOG_DEBUG("\t file_offset = 0x%016" PRIx64 "\n", file_offset);
 
 	if (cmd == 0 || (dest == nullptr && size != 0))
 	{
@@ -422,7 +423,7 @@ static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/
 	Core::String host_path;
 	if (!LibKernel::FileSystem::AprTryGetHostPath(file_id, &host_path))
 	{
-		printf("\t unknown APR file id\n");
+		KYTY_LOG_DEBUG("\t unknown APR file id\n");
 		return LibKernel::KERNEL_ERROR_ENOENT;
 	}
 
@@ -431,7 +432,7 @@ static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/
 		Core::File f;
 		if (!f.Open(host_path, Core::File::Mode::Read))
 		{
-			printf("\t open failed: %s\n", host_path.C_Str());
+			KYTY_LOG_DEBUG("\t open failed: %s\n", host_path.C_Str());
 			return LibKernel::KERNEL_ERROR_ENOENT;
 		}
 		if (!f.Seek(file_offset))
@@ -442,7 +443,7 @@ static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/
 		f.Read(dest, static_cast<uint32_t>(size > UINT32_MAX ? UINT32_MAX : size), &read_n);
 		if (static_cast<uint64_t>(read_n) != size)
 		{
-			printf("\t short read: got %" PRIu32 " want %" PRIu64 "\n", read_n, size);
+			KYTY_LOG_DEBUG("\t short read: got %" PRIu32 " want %" PRIu64 "\n", read_n, size);
 			return LibKernel::KERNEL_ERROR_EIO;
 		}
 	}
@@ -456,7 +457,7 @@ static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/
 	// guest builder (Astro AprFile.cpp asserts ret == 0 → int $0x41).
 	if (!EnsureStreamSpace(&st, kReadFileRecordSize))
 	{
-		printf("\t command stream too small for records (read applied)\n");
+		KYTY_LOG_DEBUG("\t command stream too small for records (read applied)\n");
 		return OK;
 	}
 	if (st.data != 0)
@@ -481,9 +482,9 @@ static KYTY_SYSV_ABI int CommandBufferWriteAddressOnCompletion(void* cmd_obj, ui
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd     = 0x%016" PRIx64 "\n", cmd);
-	printf("\t address = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
-	printf("\t value   = 0x%016" PRIx64 "\n", value);
+	KYTY_LOG_DEBUG("\t cmd     = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t address = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
+	KYTY_LOG_DEBUG("\t value   = 0x%016" PRIx64 "\n", value);
 
 	if (cmd == 0 || address == nullptr)
 	{
@@ -499,7 +500,7 @@ static KYTY_SYSV_ABI int CommandBufferWriteAddressOnCompletion(void* cmd_obj, ui
 	}
 	if (!EnsureStreamSpace(&st, kWriteAddressRecordSize))
 	{
-		printf("\t command stream too small for records (store applied)\n");
+		KYTY_LOG_DEBUG("\t command stream too small for records (store applied)\n");
 		return OK;
 	}
 	if (st.data != 0)
@@ -520,11 +521,11 @@ static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cm
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd              = 0x%016" PRIx64 "\n", cmd);
-	printf("\t equeue           = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(equeue));
-	printf("\t ident            = 0x%016" PRIx64 "\n", ident);
-	printf("\t completion_token = 0x%016" PRIx64 "\n", completion_token);
-	printf("\t user_data        = 0x%016" PRIx64 "\n", user_data);
+	KYTY_LOG_DEBUG("\t cmd              = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t equeue           = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(equeue));
+	KYTY_LOG_DEBUG("\t ident            = 0x%016" PRIx64 "\n", ident);
+	KYTY_LOG_DEBUG("\t completion_token = 0x%016" PRIx64 "\n", completion_token);
+	KYTY_LOG_DEBUG("\t user_data        = 0x%016" PRIx64 "\n", user_data);
 
 	if (cmd == 0)
 	{
@@ -551,7 +552,7 @@ static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cm
 	}
 	else
 	{
-		printf("\t command stream too small for equeue completion record\n");
+		KYTY_LOG_DEBUG("\t command stream too small for equeue completion record\n");
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
@@ -771,7 +772,7 @@ static KYTY_SYSV_ABI int AmmSubmitCommandBuffer(void* cmd_obj)
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 "\n", cmd);
 	if (cmd == 0)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -788,7 +789,7 @@ static KYTY_SYSV_ABI int AmmWaitCommandBufferCompletion(void* cmd_obj)
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	printf("\t cmd = 0x%016" PRIx64 "\n", cmd);
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 "\n", cmd);
 	if (cmd == 0)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
