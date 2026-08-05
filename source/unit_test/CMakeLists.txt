@@ -10,6 +10,9 @@ file(GLOB unit_test_src CONFIGURE_DEPENDS
 # source glob is active so the enabled and disabled subsystem definitions
 # cannot be linked together.
 list(FILTER unit_test_src EXCLUDE REGEX "/UnitTestDisabled\\.cpp$")
+# The standalone runner owns main(); keep it out of the static archive so
+# fc_script (which also defines main) can link unit_test without a clash.
+list(FILTER unit_test_src EXCLUDE REGEX "/UnitTestMain\\.cpp$")
 
 # DevTools tests are listed explicitly (no recursive glob expansion for new modules).
 list(APPEND unit_test_src
