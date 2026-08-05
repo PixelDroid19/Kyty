@@ -70,7 +70,7 @@ LIBS_SOURCE_FILES = (
     "emulator/src/Libs/LibSaveData.cpp",
 )
 GRAPHICS_IMAGE_SOURCE_FILES = (
-    "emulator/src/Graphics/Image.cpp",
+    "emulator/src/Graphics/ImageAsset.cpp",
 )
 GRAPHICS_DEBUG_OVERLAY_SOURCE = "emulator/src/Graphics/DebugOverlay.cpp"
 GRAPHICS_WINDOW_SOURCE = "emulator/src/Graphics/Window.cpp"
@@ -886,14 +886,14 @@ class BoundaryCheckerTests(unittest.TestCase):
     def test_rejects_direct_sdl_include_from_graphics_image(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self.write_fixture(root, "emulator/src/Graphics/Image.cpp", '#include "SDL_image.h"\n')
+            self.write_fixture(root, "emulator/src/Graphics/ImageAsset.cpp", '#include "SDL_image.h"\n')
 
             self.assertEqual(
                 check_source_root(root),
                 CheckResult(
                     exit_code=1,
                     diagnostics=(
-                        "emulator/src/Graphics/Image.cpp:1: forbidden include (Graphics Image -> SDL): SDL_image.h",
+                        "emulator/src/Graphics/ImageAsset.cpp:1: forbidden include (Graphics Image -> SDL): SDL_image.h",
                     ),
                 ),
             )
