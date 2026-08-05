@@ -554,6 +554,20 @@ add_test(
 )
 set_tests_properties(KytyGraphicsTables.SyntheticFixtures PROPERTIES TIMEOUT 15)
 
+set(KYTY_GRAPHICS_TABLES_GENERATOR "${CMAKE_SOURCE_DIR}/../scripts/generate_graphics_tables.py")
+
+add_test(
+	NAME KytyGraphicsTables.Regeneration
+	COMMAND "${Python3_EXECUTABLE}" "${KYTY_GRAPHICS_TABLES_GENERATOR}" --self-test
+)
+set_tests_properties(KytyGraphicsTables.Regeneration PROPERTIES TIMEOUT 15)
+
+add_test(
+	NAME KytyGraphicsTables.DerivedOutputsMatch
+	COMMAND "${Python3_EXECUTABLE}" "${KYTY_GRAPHICS_TABLES_GENERATOR}" --check
+)
+set_tests_properties(KytyGraphicsTables.DerivedOutputsMatch PROPERTIES TIMEOUT 15)
+
 add_test(
 	NAME KytyArchitectureBoundaryIntegration.Repository
 	COMMAND $<TARGET_FILE:kyty_architecture_boundary_integration>
