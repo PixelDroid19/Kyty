@@ -8,8 +8,7 @@ add_executable(kyty_bringup_integration
 target_link_libraries(kyty_bringup_integration
 	PRIVATE
 		core
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_bringup_integration
 	PRIVATE
@@ -71,8 +70,7 @@ add_executable(kyty_domain_validation_integration
 target_link_libraries(kyty_domain_validation_integration
 	PRIVATE
 		core
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_domain_validation_integration
 	PRIVATE
@@ -87,8 +85,7 @@ add_executable(kyty_kernel_memory_integration
 target_link_libraries(kyty_kernel_memory_integration
 	PRIVATE
 		core
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_kernel_memory_integration
 	PRIVATE
@@ -112,8 +109,7 @@ add_executable(kyty_graphics_diagnostics_integration
 target_link_libraries(kyty_graphics_diagnostics_integration
 	PRIVATE
 		core
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_graphics_diagnostics_integration
 	PRIVATE
@@ -137,8 +133,7 @@ add_executable(kyty_libc_wide_integration
 target_link_libraries(kyty_libc_wide_integration
 	PRIVATE
 		core
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_libc_wide_integration
 	PRIVATE
@@ -161,8 +156,7 @@ add_executable(kyty_libc_time_integration
 
 target_link_libraries(kyty_libc_time_integration
 	PRIVATE
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_libc_time_integration
 	PRIVATE
@@ -185,8 +179,7 @@ add_executable(kyty_libc_locale_integration
 
 target_link_libraries(kyty_libc_locale_integration
 	PRIVATE
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_libc_locale_integration
 	PRIVATE
@@ -232,8 +225,7 @@ add_executable(kyty_guest_stack_frame_integration
 
 target_link_libraries(kyty_guest_stack_frame_integration
 	PRIVATE
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_guest_stack_frame_integration
 	PRIVATE
@@ -255,8 +247,7 @@ add_executable(kyty_libc_allocator_integration
 
 target_link_libraries(kyty_libc_allocator_integration
 	PRIVATE
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_libc_allocator_integration
 	PRIVATE
@@ -337,8 +328,7 @@ add_executable(kyty_loader_integration
 target_link_libraries(kyty_loader_integration
 	PRIVATE
 		core
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_loader_integration
 	PRIVATE
@@ -389,8 +379,7 @@ add_executable(kyty_agent_protocol_integration
 target_link_libraries(kyty_agent_protocol_integration
 	PRIVATE
 		core
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_agent_protocol_integration
 	PRIVATE
@@ -431,8 +420,7 @@ target_link_libraries(kyty_agent_transport_integration
 	PRIVATE
 		kyty_agent_cli
 		kyty_agent_transport
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_agent_transport_integration
 	PRIVATE
@@ -469,8 +457,7 @@ add_executable(kyty_audio_host_integration
 
 target_link_libraries(kyty_audio_host_integration
 	PRIVATE
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_audio_host_integration
 	PRIVATE
@@ -494,8 +481,7 @@ add_executable(kyty_audio_video_memory_integration
 
 target_link_libraries(kyty_audio_video_memory_integration
 	PRIVATE
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_audio_video_memory_integration
 	PRIVATE
@@ -518,8 +504,7 @@ add_executable(kyty_host_platform_integration
 
 target_link_libraries(kyty_host_platform_integration
 	PRIVATE
-		emulator
-)
+		"$<LINK_GROUP:RESCAN,emulator,kyty_hle,kyty_kernel>")
 
 target_include_directories(kyty_host_platform_integration
 	PRIVATE

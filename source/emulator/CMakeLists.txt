@@ -14,18 +14,21 @@ file(GLOB emulator_src CONFIGURE_DEPENDS
 # boundary prevents new Kernel sources from silently becoming part of the
 # graphics/audio/loader monolith.
 file(GLOB kernel_src CONFIGURE_DEPENDS src/Kernel/*.cpp)
+file(GLOB hle_src CONFIGURE_DEPENDS src/Libs/*.cpp)
 list(REMOVE_ITEM emulator_src ${kernel_src})
+list(REMOVE_ITEM emulator_src ${hle_src})
 list(REMOVE_ITEM emulator_src "${CMAKE_CURRENT_SOURCE_DIR}/src/AudioVideoBackend.cpp")
 list(REMOVE_ITEM emulator_src "${CMAKE_CURRENT_SOURCE_DIR}/src/AudioPcm.cpp")
 
 if (MSVC AND CLANG)
-	set_source_files_properties(${emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
+	set_source_files_properties(${emulator_src} ${hle_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
 endif()
 
 #add_library(emulator_obj OBJECT ${emulator_src})
 #add_library(emulator STATIC $<TARGET_OBJECTS:emulator_obj>)
 add_library(emulator STATIC ${emulator_src})
 add_library(kyty_kernel STATIC ${kernel_src})
+add_library(kyty_hle STATIC ${hle_src})
 add_library(kyty_audio_video_backend STATIC src/AudioVideoBackend.cpp)
 
 # Fail at configure time if a future glob or explicit source entry collapses
@@ -35,10 +38,17 @@ foreach(_emulator_source IN LISTS _emulator_sources)
 	if(_emulator_source MATCHES "(^|/)src/Kernel/")
 		message(FATAL_ERROR "Kernel source leaked into emulator target: ${_emulator_source}")
 	endif()
+	if(_emulator_source MATCHES "(^|/)src/Libs/")
+		message(FATAL_ERROR "HLE source leaked into emulator target: ${_emulator_source}")
+	endif()
 endforeach()
 get_target_property(_kernel_sources kyty_kernel SOURCES)
 if(NOT _kernel_sources)
 	message(FATAL_ERROR "kyty_kernel target has no implementation sources")
+endif()
+get_target_property(_hle_sources kyty_hle SOURCES)
+if(NOT _hle_sources)
+	message(FATAL_ERROR "kyty_hle target has no implementation sources")
 endif()
 
 target_sources(emulator PRIVATE
@@ -75,7 +85,6 @@ target_sources(emulator PRIVATE
 	src/GuestRuntimePort.cpp
 	include/Emulator/Kernel/Errors.h
 	include/Emulator/Kernel/Trace.h
-	src/Libs/ProcessEnvironment.cpp
 	src/Graphics/PipelineCacheStore.cpp
 	src/Graphics/GpuDirtyPageTracker.cpp
 	src/Graphics/CommandProcessorSubmissionSlots.cpp
@@ -162,6 +171,7 @@ add_dependencies(emulator KytyBuildInfo)
 target_link_libraries(emulator
 	PUBLIC
 	kyty_kernel
+	kyty_hle
 	kyty_audio_video_backend
 	core
 	math
@@ -185,6 +195,12 @@ target_include_directories(kyty_kernel PUBLIC
 	"${CMAKE_SOURCE_DIR}/include"
 )
 target_link_libraries(kyty_kernel PUBLIC core math sys scripts)
+
+target_include_directories(kyty_hle PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(kyty_hle PUBLIC core math sys kyty_kernel)
 
 target_include_directories(kyty_audio_video_backend PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -236,6 +252,7 @@ if (LINUX)
 endif()
 
 target_include_directories(emulator PRIVATE ${inc_headers})
+target_include_directories(kyty_hle PRIVATE ${inc_headers})
 
 list(APPEND check_headers
 	${CMAKE_CURRENT_SOURCE_DIR}/include
