@@ -15,6 +15,9 @@
 #include "Emulator/Common.h"
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
+#include "Emulator/Libs/ApplicationHeap.h"
+#include "Emulator/Ports/AudioPausePort.h"
+#include "Emulator/Ports/ControllerInputPort.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Window.h"
@@ -78,6 +81,7 @@ static void kyty_close()
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
 
 	rt->Clear();
+	Libs::LibKernel::ApplicationHeap::Reset();
 
 	KYTY_LOG_INFO("done!\n");
 
@@ -136,6 +140,14 @@ static void Init(const Scripts::ScriptVar& cfg)
 		EXIT("Failed to initialize '%s' subsystem: %s\n", slist->GetFailName(), slist->GetFailMsg());
 		return;
 	}
+
+	// Composition root wiring: the HLE implementations of the host-facing
+	// input and audio-pause bridges are installed here, after their
+	// subsystems exist and before any window can forward events.
+	::Kyty::Emulator::Ports::ControllerInputPort::Install(
+	    {&Libs::Controller::ControllerConnect, &Libs::Controller::ControllerDisconnect, &Libs::Controller::ControllerButton,
+	     &Libs::Controller::ControllerAxis});
+	::Kyty::Emulator::Ports::AudioPausePort::Install(&Libs::Audio::AudioOut::AudioOutSetHostPaused);
 }
 
 KYTY_SCRIPT_FUNC(kyty_load_cfg_func)

@@ -14,22 +14,29 @@ list(FILTER unit_test_src EXCLUDE REGEX "/UnitTestDisabled\\.cpp$")
 # fc_script (which also defines main) can link unit_test without a clash.
 list(FILTER unit_test_src EXCLUDE REGEX "/UnitTestMain\\.cpp$")
 
-# DevTools tests are listed explicitly (no recursive glob expansion for new modules).
-list(APPEND unit_test_src
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsEventRing.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsProgress.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsClassifier.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsProtocol.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsExportCatalog.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorGraphicsDirtyTracking.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorExactStagingPool.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorVideoOutResolution.cpp"
-)
+# DevTools tests are listed explicitly (no recursive glob expansion for new
+# modules). They exercise the process-isolated supervisor and its transport,
+# which only exist when KYTY_BUILD_DEVTOOLS is enabled; the tooling-off build
+# must not link the empty kyty_devtools_core archive.
+if(KYTY_BUILD_DEVTOOLS)
+	list(APPEND unit_test_src
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsEventRing.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsProgress.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsClassifier.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsProtocol.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsExportCatalog.cpp"
+	)
+endif()
+	list(APPEND unit_test_src
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorGraphicsDirtyTracking.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorExactStagingPool.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorVideoOutResolution.cpp"
+	)
 
-# These suites exercise POSIX process, descriptor and environment primitives.
-# Their Windows counterparts need a dedicated port; do not make unrelated
-# emulator tests depend on unavailable sys/wait.h, pipe or O_CLOEXEC APIs.
-if(NOT WIN32)
+# These suites exercise POSIX process, descriptor and environment primitives
+# and the process-isolated supervisor. Their Windows counterparts need a
+# dedicated port; the supervisor suites also require KYTY_BUILD_DEVTOOLS.
+if(NOT WIN32 AND KYTY_BUILD_DEVTOOLS)
 	list(APPEND unit_test_src
 		"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsSupervisor.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsBundle.cpp"
@@ -44,6 +51,10 @@ endif()
 add_library(unit_test STATIC ${unit_test_src})
 
 target_link_libraries(unit_test core)
+if(KYTY_BUILD_DEVTOOLS)
+	target_link_libraries(unit_test kyty_devtools_core)
+	target_compile_definitions(unit_test PRIVATE KYTY_HAVE_DEVTOOLS_TESTS=1)
+endif()
 target_link_libraries(unit_test math)
 target_link_libraries(unit_test kyty_devtools_core)
 target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/devtools/include")

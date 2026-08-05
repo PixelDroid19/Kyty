@@ -1,6 +1,5 @@
 file(GLOB emulator_src CONFIGURE_DEPENDS
 	src/*.cpp
-	src/Libs/*.cpp
 	src/Hle/*.cpp
 	src/Graphics/*.cpp
 	src/Graphics/Objects/*.cpp
@@ -9,30 +8,109 @@ file(GLOB emulator_src CONFIGURE_DEPENDS
 	include/*.h
 )
 
-# Keep the guest-kernel implementation in its own archive.  The public HLE
-# adapters still link it through the emulator target, but the CMake ownership
-# boundary prevents new Kernel sources from silently becoming part of the
-# graphics/audio/loader monolith.
+# Every domain implementation lives in its own static archive; the emulator
+# target is the composition root (host entry points, agent server, profiler
+# wrapper) plus the interface headers. The archive boundaries below are the
+# CMake-side projection of the domain boundaries enforced by
+# scripts/check_emulator_boundaries.py.
 file(GLOB kernel_src CONFIGURE_DEPENDS src/Kernel/*.cpp)
 file(GLOB hle_src CONFIGURE_DEPENDS src/Libs/*.cpp)
-list(REMOVE_ITEM emulator_src ${kernel_src})
-list(REMOVE_ITEM emulator_src ${hle_src})
-list(REMOVE_ITEM emulator_src "${CMAKE_CURRENT_SOURCE_DIR}/src/AudioVideoBackend.cpp")
-list(REMOVE_ITEM emulator_src "${CMAKE_CURRENT_SOURCE_DIR}/src/AudioPcm.cpp")
+file(GLOB loader_src CONFIGURE_DEPENDS src/Loader/*.cpp)
+file(GLOB host_src CONFIGURE_DEPENDS src/Host/*.cpp)
+file(GLOB graphics_src CONFIGURE_DEPENDS src/Graphics/*.cpp src/Graphics/Objects/*.cpp)
+file(GLOB diagnostics_src CONFIGURE_DEPENDS src/Agent/EventRing.cpp src/Agent/AgentLifecycle.cpp)
+file(GLOB hle_domain_src CONFIGURE_DEPENDS
+	src/Network.cpp
+	src/NetworkHttpUri.cpp
+	src/Audio.cpp
+	src/Audio3d.cpp
+	src/AudioAjm.cpp
+	src/AudioAvPlayer.cpp
+	src/AudioHost.cpp
+	src/AudioNgs2.cpp
+	src/Dialog.cpp
+	src/Controller.cpp
+)
+file(GLOB runtime_core_src CONFIGURE_DEPENDS
+	src/Log.cpp
+	src/Config.cpp
+	src/GuestRuntimePort.cpp
+	src/GuestMemory.cpp
+	src/GpuMemoryFault.cpp
+	src/AtomicFile.cpp
+	src/Validation/DomainValidators.cpp
+	src/SystemContentPort.cpp
+	src/PresentationStats.cpp
+	src/VideoFrameMemory.cpp
+	src/Ports/*.cpp
+)
+
+list(REMOVE_ITEM emulator_src
+	${kernel_src}
+	${hle_src}
+	${loader_src}
+	${host_src}
+	${graphics_src}
+	${hle_domain_src}
+	${runtime_core_src}
+	${diagnostics_src}
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Hle/LibGraphicsDriver.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Hle/LibVideoOut.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Hle/Registration.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/AudioVideoBackend.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/AudioPcm.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/SystemContentPort.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/VideoFrameMemory.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/PresentationStats.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Profiler.cpp"
+)
 
 if (MSVC AND CLANG)
-	set_source_files_properties(${emulator_src} ${hle_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
+	set_source_files_properties(${emulator_src} ${hle_src} ${hle_domain_src} ${runtime_core_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
 endif()
 
-#add_library(emulator_obj OBJECT ${emulator_src})
-#add_library(emulator STATIC $<TARGET_OBJECTS:emulator_obj>)
-add_library(emulator STATIC ${emulator_src})
+add_library(kyty_runtime_core STATIC ${runtime_core_src})
 add_library(kyty_kernel STATIC ${kernel_src})
-add_library(kyty_hle STATIC ${hle_src})
+add_library(kyty_diagnostics STATIC ${diagnostics_src})
+add_library(kyty_loader STATIC ${loader_src})
+add_library(kyty_host STATIC ${host_src})
+add_library(kyty_graphics STATIC
+	${graphics_src}
+	src/Hle/LibGraphicsDriver.cpp
+	src/Hle/LibVideoOut.cpp
+	src/Hle/Registration.cpp
+)
+add_library(kyty_hle STATIC ${hle_src} ${hle_domain_src})
 add_library(kyty_audio_video_backend STATIC src/AudioVideoBackend.cpp)
+add_library(emulator STATIC ${emulator_src} src/Profiler.cpp)
+
+target_sources(kyty_host PRIVATE
+	$<TARGET_OBJECTS:imgui_sdl_backend_obj>
+)
+target_sources(emulator PRIVATE
+	include/Emulator/Profiling.h
+	src/Agent/DebugSnapshot.cpp
+	src/Agent/Protocol.cpp
+	src/Agent/StallWatch.cpp
+	src/Agent/FrameScore.cpp
+	src/Agent/AgentServer.cpp
+	src/Agent/AgentSubsystem.cpp
+	include/Emulator/Kernel/Errors.h
+	include/Emulator/Kernel/Trace.h
+	include/Emulator/Agent/EventRing.h
+	include/Emulator/Agent/DebugSnapshot.h
+	include/Emulator/Agent/Protocol.h
+	include/Emulator/Agent/StallWatch.h
+	include/Emulator/Agent/FrameScore.h
+	include/Emulator/Agent/AgentServer.h
+	include/Emulator/Agent/AgentSubsystem.h
+	include/Emulator/Agent/AgentLifecycle.h
+	include/Emulator/Libs/ProcessEnvironment.h
+)
+add_dependencies(emulator KytyBuildInfo)
 
 # Fail at configure time if a future glob or explicit source entry collapses
-# the kernel back into the emulator archive.
+# a domain back into the wrong archive.
 get_target_property(_emulator_sources emulator SOURCES)
 foreach(_emulator_source IN LISTS _emulator_sources)
 	if(_emulator_source MATCHES "(^|/)src/Kernel/")
@@ -40,6 +118,15 @@ foreach(_emulator_source IN LISTS _emulator_sources)
 	endif()
 	if(_emulator_source MATCHES "(^|/)src/Libs/")
 		message(FATAL_ERROR "HLE source leaked into emulator target: ${_emulator_source}")
+	endif()
+	if(_emulator_source MATCHES "(^|/)src/Graphics/")
+		message(FATAL_ERROR "Graphics source leaked into emulator target: ${_emulator_source}")
+	endif()
+	if(_emulator_source MATCHES "(^|/)src/Loader/")
+		message(FATAL_ERROR "Loader source leaked into emulator target: ${_emulator_source}")
+	endif()
+	if(_emulator_source MATCHES "(^|/)src/Host/")
+		message(FATAL_ERROR "Host source leaked into emulator target: ${_emulator_source}")
 	endif()
 endforeach()
 get_target_property(_kernel_sources kyty_kernel SOURCES)
@@ -50,6 +137,9 @@ get_target_property(_kernel_links kyty_kernel LINK_LIBRARIES)
 if(_kernel_links AND "scripts" IN_LIST _kernel_links)
 	message(FATAL_ERROR "kyty_kernel must not inherit the script host archive")
 endif()
+if(_kernel_links AND "kyty_hle" IN_LIST _kernel_links)
+	message(FATAL_ERROR "kyty_kernel must not link the HLE archive")
+endif()
 get_target_property(_hle_sources kyty_hle SOURCES)
 if(NOT _hle_sources)
 	message(FATAL_ERROR "kyty_hle target has no implementation sources")
@@ -58,128 +148,102 @@ get_target_property(_hle_links kyty_hle LINK_LIBRARIES)
 if(_hle_links AND "scripts" IN_LIST _hle_links)
 	message(FATAL_ERROR "kyty_hle must not link the script host archive directly")
 endif()
+get_target_property(_loader_sources kyty_loader SOURCES)
+if(NOT _loader_sources)
+	message(FATAL_ERROR "kyty_loader target has no implementation sources")
+endif()
+get_target_property(_loader_links kyty_loader LINK_LIBRARIES)
+if(_loader_links AND "kyty_hle" IN_LIST _loader_links)
+	message(FATAL_ERROR "kyty_loader must not link the HLE archive")
+endif()
+get_target_property(_graphics_sources kyty_graphics SOURCES)
+if(NOT _graphics_sources)
+	message(FATAL_ERROR "kyty_graphics target has no implementation sources")
+endif()
+get_target_property(_graphics_links kyty_graphics LINK_LIBRARIES)
+if(_graphics_links AND "kyty_hle" IN_LIST _graphics_links)
+	message(FATAL_ERROR "kyty_graphics must not link the HLE archive")
+endif()
+get_target_property(_host_links kyty_host LINK_LIBRARIES)
+if(_host_links AND "kyty_graphics" IN_LIST _host_links)
+	message(FATAL_ERROR "kyty_host must not link the graphics archive")
+endif()
+if(_host_links AND "kyty_hle" IN_LIST _host_links)
+	message(FATAL_ERROR "kyty_host must not link the HLE archive")
+endif()
+get_target_property(_core_links kyty_runtime_core LINK_LIBRARIES)
+if(_core_links AND "kyty_kernel" IN_LIST _core_links)
+	message(FATAL_ERROR "kyty_runtime_core must not link the kernel archive")
+endif()
+if(_core_links AND "kyty_hle" IN_LIST _core_links)
+	message(FATAL_ERROR "kyty_runtime_core must not link the HLE archive")
+endif()
 
-target_sources(emulator PRIVATE
-	$<TARGET_OBJECTS:imgui_sdl_backend_obj>
-	include/Emulator/Profiling.h
-	src/Loader/GuestCall.cpp
-	include/Emulator/Loader/GuestCall.h
-	src/Host/Clock.cpp
-	include/Emulator/Host/Clock.h
-	src/Host/ImageSurfaceSdl.cpp
-	include/Emulator/Host/ImageSurface.h
-	src/Host/HostWindowSdl.cpp
-	include/Emulator/Host/HostWindow.h
-	src/Host/HostVulkanWindowSdl.cpp
-	include/Emulator/Host/HostVulkanWindow.h
-	src/Host/HostInputSdl.cpp
-	include/Emulator/Host/HostInput.h
-	src/Host/HostGuiSdl.cpp
-	include/Emulator/Host/HostGui.h
-	src/Host/CaptureImageCodec.cpp
-	include/Emulator/Host/CaptureImageCodec.h
-	src/Host/Png.cpp
-	include/Emulator/Host/Png.h
-	src/Host/Platform.cpp
-	include/Emulator/Host/Platform.h
-	src/Agent/EventRing.cpp
-	src/Agent/DebugSnapshot.cpp
-	src/Agent/Protocol.cpp
-	src/Agent/StallWatch.cpp
-	src/Agent/FrameScore.cpp
-	src/Agent/AgentServer.cpp
-	src/Agent/AgentSubsystem.cpp
-	src/Agent/AgentLifecycle.cpp
-	src/GuestRuntimePort.cpp
-	include/Emulator/Kernel/Errors.h
-	include/Emulator/Kernel/Trace.h
-	src/Graphics/PipelineCacheStore.cpp
-	src/Graphics/GpuDirtyPageTracker.cpp
-	src/Graphics/CommandProcessorSubmissionSlots.cpp
-	src/Graphics/Objects/ExactStagingPool.cpp
-	src/Graphics/Objects/GpuWritebackPageCache.cpp
-	src/Graphics/Objects/LabelSubmissionTracker.cpp
-	src/Graphics/GpuSubmissionTracker.cpp
-	src/Graphics/GpuSubmissionCoordinator.cpp
-	src/Graphics/GpuSubmissionPublicationGate.cpp
-	src/Graphics/GpuDeferredDeletionQueue.cpp
-	src/Graphics/ShaderTranslationCache.cpp
-	src/Graphics/SpirvBinaryCacheStore.cpp
-	src/Graphics/RenderResolutionShaderUsageCache.cpp
-	src/Graphics/RenderResolutionPolicy.cpp
-	src/Graphics/RenderResolutionCoordinator.cpp
-	src/Graphics/RenderResolutionPlanner.cpp
-	src/Graphics/RenderResolutionAlias.cpp
-	src/Graphics/VideoOutFlipLifecycleGate.cpp
-	src/Graphics/VideoOutFlipQueueAdmissionGate.cpp
-	src/Graphics/VideoOutHostAccessGate.cpp
-	src/Graphics/VideoOutMaterializationGate.cpp
-	src/Graphics/RenderResolutionImageCapability.cpp
-	src/Graphics/RenderResolutionTransform.cpp
-	src/Graphics/VulkanRenderResolutionCapability.cpp
-	src/Graphics/VulkanQueueIdentity.cpp
-	src/Graphics/RenderResolutionShaderScale.cpp
-	src/Graphics/PresentationScaler.cpp
-	src/Graphics/SampleLocations.cpp
-	src/Graphics/VulkanVertexInputLayout.cpp
-	src/Graphics/DepthStencilCopy.cpp
-	src/Graphics/GuestTextureLayout.cpp
-	src/Graphics/Gen5TextureArrayLayout.cpp
-	src/Graphics/NativeCapture.cpp
-	include/Emulator/Graphics/PipelineCacheStore.h
-	include/Emulator/Graphics/GpuDirtyPageTracker.h
-	include/Emulator/Graphics/CommandProcessorSubmissionSlots.h
-	include/Emulator/Graphics/Objects/ExactStagingPool.h
-	include/Emulator/Graphics/Objects/GpuWritebackPageCache.h
-	include/Emulator/Graphics/Objects/LabelSubmissionTracker.h
-	include/Emulator/Graphics/GpuSubmissionTracker.h
-	include/Emulator/Graphics/GpuSubmissionCoordinator.h
-	include/Emulator/Graphics/GpuSubmissionPublicationGate.h
-	include/Emulator/Graphics/GpuDeferredDeletionQueue.h
-	include/Emulator/Graphics/ShaderTranslationCache.h
-	include/Emulator/Graphics/SpirvBinaryCacheStore.h
-	include/Emulator/Graphics/RenderResolutionShaderUsageCache.h
-	include/Emulator/Graphics/RenderResolutionPolicy.h
-	include/Emulator/Graphics/RenderResolutionCoordinator.h
-	include/Emulator/Graphics/RenderResolutionPlanner.h
-	include/Emulator/Graphics/RenderResolutionAlias.h
-	include/Emulator/Graphics/VideoOutFlipLifecycleGate.h
-	include/Emulator/Graphics/VideoOutFlipQueueAdmissionGate.h
-	include/Emulator/Graphics/VideoOutHostAccessGate.h
-	include/Emulator/Graphics/VideoOutMaterializationGate.h
-	include/Emulator/Graphics/RenderResolutionImageCapability.h
-	include/Emulator/Graphics/RenderResolutionTransform.h
-	include/Emulator/Graphics/VulkanRenderResolutionCapability.h
-	include/Emulator/Graphics/VulkanQueueIdentity.h
-	include/Emulator/Graphics/RenderResolutionShaderScale.h
-	include/Emulator/Graphics/PresentationScaler.h
-	include/Emulator/Graphics/SampleLocations.h
-	include/Emulator/Graphics/VulkanVertexInputLayout.h
-	include/Emulator/Graphics/DepthStencilCopy.h
-	include/Emulator/Graphics/GuestTextureLayout.h
-	include/Emulator/Graphics/Gen5TextureArrayLayout.h
-	include/Emulator/Graphics/NativeCapture.h
-	include/Emulator/Libs/ProcessEnvironment.h
-	src/Validation/DomainValidators.cpp
-	include/Emulator/Validation/DomainValidators.h
-	include/Emulator/Agent/EventRing.h
-	include/Emulator/Agent/DebugSnapshot.h
-	include/Emulator/Agent/Protocol.h
-	include/Emulator/Agent/StallWatch.h
-	include/Emulator/Agent/FrameScore.h
-	include/Emulator/Agent/AgentServer.h
-	include/Emulator/Agent/AgentSubsystem.h
-	include/Emulator/Agent/AgentLifecycle.h
-	include/Emulator/Kernel/Time.h
-	include/Emulator/Kernel/TimePort.h
-	include/Emulator/Kernel/AmprPort.h
+target_include_directories(kyty_runtime_core PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
 )
-add_dependencies(emulator KytyBuildInfo)
+target_link_libraries(kyty_runtime_core PUBLIC core math sys)
+
+target_include_directories(kyty_kernel PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(kyty_kernel PUBLIC core math sys kyty_runtime_core)
+
+target_include_directories(kyty_diagnostics PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(kyty_diagnostics PUBLIC core sys kyty_runtime_core)
+
+target_include_directories(kyty_loader PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(kyty_loader PUBLIC core math sys kyty_runtime_core kyty_kernel kyty_diagnostics easy_profiler)
+
+target_include_directories(kyty_host PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(kyty_host PUBLIC core sys kyty_runtime_core SDL2-static vulkan-1 imgui)
+
+target_include_directories(kyty_graphics PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(kyty_graphics PUBLIC core math sys kyty_runtime_core kyty_kernel kyty_host kyty_diagnostics
+	vulkan-1 spirv-tools-opt spirv-tools easy_profiler imgui SDL2-static)
+
+target_include_directories(kyty_hle PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(kyty_hle PUBLIC core math sys kyty_runtime_core kyty_kernel kyty_loader kyty_graphics
+	kyty_host kyty_diagnostics kyty_audio_video_backend kyty_audio_pcm)
+
+target_include_directories(kyty_audio_video_backend PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(kyty_audio_video_backend PUBLIC core)
+
+if(MSVC OR MINGW)
+	target_link_libraries(emulator PRIVATE psapi)
+endif()
+
+target_include_directories(emulator PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 target_link_libraries(emulator
 	PUBLIC
-	kyty_kernel
 	kyty_hle
+	kyty_loader
+	kyty_graphics
+	kyty_host
+	kyty_kernel
+	kyty_runtime_core
+	kyty_diagnostics
 	kyty_audio_video_backend
 	core
 	math
@@ -198,30 +262,6 @@ target_link_libraries(emulator
 		kyty_audio_pcm
 )
 
-target_include_directories(kyty_kernel PUBLIC
-	"${CMAKE_CURRENT_SOURCE_DIR}/include"
-	"${CMAKE_SOURCE_DIR}/include"
-)
-target_link_libraries(kyty_kernel PUBLIC core math sys)
-
-target_include_directories(kyty_hle PUBLIC
-	"${CMAKE_CURRENT_SOURCE_DIR}/include"
-	"${CMAKE_SOURCE_DIR}/include"
-)
-target_link_libraries(kyty_hle PUBLIC core math sys kyty_kernel)
-
-target_include_directories(kyty_audio_video_backend PUBLIC
-	"${CMAKE_CURRENT_SOURCE_DIR}/include"
-	"${CMAKE_SOURCE_DIR}/include"
-)
-target_link_libraries(kyty_audio_video_backend PUBLIC core)
-
-if(MSVC OR MINGW)
-	target_link_libraries(emulator PRIVATE psapi)
-endif()
-
-target_include_directories(emulator PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-
 get_property(inc_headers TARGET emulator PROPERTY INCLUDE_DIRECTORIES)
 
 list(APPEND inc_headers
@@ -235,6 +275,12 @@ list(APPEND inc_headers
 	${CMAKE_SOURCE_DIR}/3rdparty/stb
 	${CMAKE_SOURCE_DIR}/3rdparty/miniz/src
 )
+
+target_include_directories(emulator PRIVATE ${inc_headers})
+target_include_directories(kyty_graphics PRIVATE ${inc_headers})
+target_include_directories(kyty_host PRIVATE ${inc_headers})
+target_include_directories(kyty_hle PRIVATE ${inc_headers})
+target_include_directories(kyty_loader PRIVATE ${inc_headers})
 
 if (MSVC AND CLANG)
 	target_link_libraries(emulator PRIVATE winpthread)
@@ -252,15 +298,10 @@ if (LINUX)
 			libavformat libavcodec libavutil libswscale libswresample)
 	endif()
 	if (KYTY_FFMPEG_FOUND)
-		target_link_libraries(emulator PRIVATE PkgConfig::KYTY_FFMPEG)
 		target_link_libraries(kyty_audio_video_backend PRIVATE PkgConfig::KYTY_FFMPEG)
-		target_compile_definitions(emulator PRIVATE KYTY_HAVE_FFMPEG=1)
 		target_compile_definitions(kyty_audio_video_backend PRIVATE KYTY_HAVE_FFMPEG=1)
 	endif()
 endif()
-
-target_include_directories(emulator PRIVATE ${inc_headers})
-target_include_directories(kyty_hle PRIVATE ${inc_headers})
 
 list(APPEND check_headers
 	${CMAKE_CURRENT_SOURCE_DIR}/include

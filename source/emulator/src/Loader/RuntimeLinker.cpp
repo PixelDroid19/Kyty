@@ -16,8 +16,8 @@
 #include "Emulator/GpuMemoryFault.h"
 #include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/Pthread.h"
-#include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Loader/Elf.h"
+#include "Emulator/Loader/GuestProgramName.h"
 #include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/Instrumentation.h"
 #include "Emulator/Loader/Jit.h"
@@ -37,10 +37,6 @@
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
-
-namespace Kyty::Libs::LibKernel {
-void SetProgName(const String& name);
-} // namespace Kyty::Libs::LibKernel
 
 namespace Kyty::Loader {
 
@@ -1446,7 +1442,7 @@ Program* RuntimeLinker::LoadProgram(const String& elf_name)
 	if (!program->elf->IsShared())
 	{
 		program->fail_if_global_not_resolved = false;
-		Libs::LibKernel::SetProgName(elf_name.FilenameWithoutDirectory());
+		SetGuestProgramName(elf_name.FilenameWithoutDirectory());
 	}
 
 	if (/*elf_name.FilenameWithoutExtension().EndsWith(U"libc") || elf_name.FilenameWithoutExtension().EndsWith(U"Fios2") ||
@@ -1635,7 +1631,6 @@ void RuntimeLinker::Clear()
 	m_static_tls_size  = 0;
 	g_next_tls_module_id = 1;
 	g_tls_main_program = nullptr;
-	Kyty::Libs::LibKernel::ApplicationHeap::Reset();
 	Config::ResetGuestPlatform();
 }
 

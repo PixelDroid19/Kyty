@@ -24,6 +24,7 @@
 #include "Emulator/Libs/KernelModuleInfo.h"
 #include "Emulator/Libs/LibraryRegistration.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/GuestProgramName.h"
 #include "Emulator/Libs/PosixSemaphore.h"
 #include "Emulator/Loader/Elf.h"
 #include "Emulator/Loader/GuestCall.h"
@@ -128,19 +129,10 @@ struct ModuleInfo
 
 #pragma pack()
 
-constexpr size_t PROGNAME_MAX_SIZE = 511;
-
-static uint64_t    g_stack_chk_guard                     = 0xDeadBeef5533CCAA;
-static char        g_progname_buf[PROGNAME_MAX_SIZE + 1] = {0};
-static const char* g_progname                            = g_progname_buf;
+static uint64_t g_stack_chk_guard                     = 0xDeadBeef5533CCAA;
 
 static get_thread_atexit_count_func_t g_get_thread_atexit_count_func = nullptr;
 static thread_atexit_report_func_t    g_thread_atexit_report_func    = nullptr;
-
-void SetProgName(const String& name)
-{
-	strncpy(g_progname_buf, name.C_Str(), PROGNAME_MAX_SIZE);
-}
 
 static KYTY_SYSV_ABI int* get_error_addr()
 {
@@ -2111,7 +2103,7 @@ LIB_DEFINE(InitLibKernel_1)
 	RegisterLibraryFunction(s, libkernel_unity, "il03nluKfMk", &LibKernel::KernelRaiseException, U"LibKernel::KernelRaiseException");
 
 	LIB_OBJECT("f7uOxY9mM1U", &LibKernel::g_stack_chk_guard);
-	LIB_OBJECT("djxxOmW6-aw", &LibKernel::g_progname);
+	LIB_OBJECT("djxxOmW6-aw", &::Kyty::Loader::g_progname);
 
 	LIB_FUNC("1jfXLRVzisc", Kernel::KernelUsleep);
 	LIB_FUNC("-ZR+hG7aDHw", Kernel::KernelSleep);

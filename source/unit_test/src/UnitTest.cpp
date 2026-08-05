@@ -10,6 +10,7 @@ UT_LINK(CoreMSpace);
 UT_LINK(CoreDateTime);
 UT_LINK(CoreMemoryAlloc);
 UT_LINK(CoreVirtualMemory);
+#if defined(KYTY_HAVE_DEVTOOLS_TESTS)
 UT_LINK(DevToolsEventRing);
 UT_LINK(DevToolsProgress);
 UT_LINK(DevToolsClassifier);
@@ -20,6 +21,7 @@ UT_LINK(DevToolsBundle);
 UT_LINK(DevToolsLifecycle);
 #endif
 UT_LINK(DevToolsExportCatalog);
+#endif
 UT_LINK(EmulatorGraphicsState);
 UT_LINK(EmulatorGraphicsDirtyTracking);
 UT_LINK(EmulatorKernelMemory);

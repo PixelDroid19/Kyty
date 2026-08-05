@@ -5,43 +5,34 @@
 #include "Kyty/Core/Subsystems.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Ports/ControllerInputPort.h"
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Controller {
 
-constexpr int CONTROLLER_KEYBOARD_ID = -1;
+// The guest pad ABI constants and axis ids live in the neutral input port;
+// this HLE layer imports them so guest-facing code keeps the short names.
+using ::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_L3;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_R3;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_OPTIONS;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_UP;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_RIGHT;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_DOWN;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_LEFT;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_L2;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_R2;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_L1;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_R1;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_TRIANGLE;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_CIRCLE;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_CROSS;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_SQUARE;
+using ::Kyty::Emulator::Ports::PAD_BUTTON_TOUCH_PAD;
+using ::Kyty::Emulator::Ports::Axis;
 
 KYTY_SUBSYSTEM_DEFINE(Controller);
-
-constexpr uint32_t PAD_BUTTON_L3        = 0x00000002;
-constexpr uint32_t PAD_BUTTON_R3        = 0x00000004;
-constexpr uint32_t PAD_BUTTON_OPTIONS   = 0x00000008;
-constexpr uint32_t PAD_BUTTON_UP        = 0x00000010;
-constexpr uint32_t PAD_BUTTON_RIGHT     = 0x00000020;
-constexpr uint32_t PAD_BUTTON_DOWN      = 0x00000040;
-constexpr uint32_t PAD_BUTTON_LEFT      = 0x00000080;
-constexpr uint32_t PAD_BUTTON_L2        = 0x00000100;
-constexpr uint32_t PAD_BUTTON_R2        = 0x00000200;
-constexpr uint32_t PAD_BUTTON_L1        = 0x00000400;
-constexpr uint32_t PAD_BUTTON_R1        = 0x00000800;
-constexpr uint32_t PAD_BUTTON_TRIANGLE  = 0x00001000;
-constexpr uint32_t PAD_BUTTON_CIRCLE    = 0x00002000;
-constexpr uint32_t PAD_BUTTON_CROSS     = 0x00004000;
-constexpr uint32_t PAD_BUTTON_SQUARE    = 0x00008000;
-constexpr uint32_t PAD_BUTTON_TOUCH_PAD = 0x00100000;
-
-enum class Axis
-{
-	LeftX        = 0,
-	LeftY        = 1,
-	RightX       = 2,
-	RightY       = 3,
-	TriggerLeft  = 4,
-	TriggerRight = 5,
-
-	AxisMax
-};
 
 struct PadControllerInformation;
 struct PadData;

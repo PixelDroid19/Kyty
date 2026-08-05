@@ -14,7 +14,8 @@
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Audio.h"
 #include "Emulator/Config.h"
-#include "Emulator/Controller.h"
+#include "Emulator/Ports/AudioPausePort.h"
+#include "Emulator/Ports/ControllerInputPort.h"
 #include "Emulator/Graphics/DebugOverlay.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -627,7 +628,7 @@ static void SetPause(GameApi* game, bool flag)
 {
 	KYTY_LOG_DEBUG("Pause: %s\n", flag ? "true" : "false");
 
-	Audio::AudioOut::AudioOutSetHostPaused(flag);
+	::Kyty::Emulator::Ports::AudioPausePort::SetHostPaused(flag);
 	game->m_game_is_paused = flag;
 }
 
@@ -753,8 +754,8 @@ static void ApplyKeyboardLeftStickControllerAxes(const KeyboardLeftStickUpdate& 
 	{
 		return;
 	}
-	Controller::ControllerAxis(Controller::CONTROLLER_KEYBOARD_ID, Controller::Axis::LeftX, update.axes.x);
-	Controller::ControllerAxis(Controller::CONTROLLER_KEYBOARD_ID, Controller::Axis::LeftY, update.axes.y);
+	::Kyty::Emulator::Ports::ControllerInputPort::Axis(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, ::Kyty::Emulator::Ports::Axis::LeftX, update.axes.x);
+	::Kyty::Emulator::Ports::ControllerInputPort::Axis(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, ::Kyty::Emulator::Ports::Axis::LeftY, update.axes.y);
 }
 
 void game_event_keyboard(GameApi* game, const EventKeyboard* key)
@@ -802,22 +803,22 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 		uint32_t button = 0;
 		switch (::Kyty::Emulator::Host::HostInput::ClassifyKeyboardAction(key->key_code))
 		{
-			case ::Kyty::Emulator::Host::KeyboardAction::Cross: button = Controller::PAD_BUTTON_CROSS; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Circle: button = Controller::PAD_BUTTON_CIRCLE; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Square: button = Controller::PAD_BUTTON_SQUARE; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Triangle: button = Controller::PAD_BUTTON_TRIANGLE; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Up: button = Controller::PAD_BUTTON_UP; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Down: button = Controller::PAD_BUTTON_DOWN; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Left: button = Controller::PAD_BUTTON_LEFT; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Right: button = Controller::PAD_BUTTON_RIGHT; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::L1: button = Controller::PAD_BUTTON_L1; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::R1: button = Controller::PAD_BUTTON_R1; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Options: button = Controller::PAD_BUTTON_OPTIONS; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Cross: button = ::Kyty::Emulator::Ports::PAD_BUTTON_CROSS; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Circle: button = ::Kyty::Emulator::Ports::PAD_BUTTON_CIRCLE; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Square: button = ::Kyty::Emulator::Ports::PAD_BUTTON_SQUARE; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Triangle: button = ::Kyty::Emulator::Ports::PAD_BUTTON_TRIANGLE; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Up: button = ::Kyty::Emulator::Ports::PAD_BUTTON_UP; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Down: button = ::Kyty::Emulator::Ports::PAD_BUTTON_DOWN; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Left: button = ::Kyty::Emulator::Ports::PAD_BUTTON_LEFT; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Right: button = ::Kyty::Emulator::Ports::PAD_BUTTON_RIGHT; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::L1: button = ::Kyty::Emulator::Ports::PAD_BUTTON_L1; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::R1: button = ::Kyty::Emulator::Ports::PAD_BUTTON_R1; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::Options: button = ::Kyty::Emulator::Ports::PAD_BUTTON_OPTIONS; break;
 			case ::Kyty::Emulator::Host::KeyboardAction::None: break;
 		}
 		if (button != 0)
 		{
-			Controller::ControllerButton(Controller::CONTROLLER_KEYBOARD_ID, button, down);
+			::Kyty::Emulator::Ports::ControllerInputPort::Button(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, button, down);
 		}
 	}
 
@@ -916,12 +917,12 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 			             input == nullptr ? "host input unavailable" : input->LastError());
 			return;
 		}
-		Controller::ControllerConnect(id);
+		::Kyty::Emulator::Ports::ControllerInputPort::Connect(id);
 	}
 
 	if (f->removed)
 	{
-		Controller::ControllerDisconnect(f->id);
+		::Kyty::Emulator::Ports::ControllerInputPort::Disconnect(f->id);
 		if (auto* input = static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2); input != nullptr)
 		{
 			input->CloseController(f->id);
@@ -933,27 +934,27 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 		uint32_t button = 0;
 		switch (f->button)
 		{
-			case ::Kyty::Emulator::Host::ControllerButton::A: button = Controller::PAD_BUTTON_CROSS; break;
-			case ::Kyty::Emulator::Host::ControllerButton::B: button = Controller::PAD_BUTTON_CIRCLE; break;
-			case ::Kyty::Emulator::Host::ControllerButton::X: button = Controller::PAD_BUTTON_SQUARE; break;
-			case ::Kyty::Emulator::Host::ControllerButton::Y: button = Controller::PAD_BUTTON_TRIANGLE; break;
-			case ::Kyty::Emulator::Host::ControllerButton::Back: button = Controller::PAD_BUTTON_TOUCH_PAD; break;
+			case ::Kyty::Emulator::Host::ControllerButton::A: button = ::Kyty::Emulator::Ports::PAD_BUTTON_CROSS; break;
+			case ::Kyty::Emulator::Host::ControllerButton::B: button = ::Kyty::Emulator::Ports::PAD_BUTTON_CIRCLE; break;
+			case ::Kyty::Emulator::Host::ControllerButton::X: button = ::Kyty::Emulator::Ports::PAD_BUTTON_SQUARE; break;
+			case ::Kyty::Emulator::Host::ControllerButton::Y: button = ::Kyty::Emulator::Ports::PAD_BUTTON_TRIANGLE; break;
+			case ::Kyty::Emulator::Host::ControllerButton::Back: button = ::Kyty::Emulator::Ports::PAD_BUTTON_TOUCH_PAD; break;
 			case ::Kyty::Emulator::Host::ControllerButton::Guide: break;
-			case ::Kyty::Emulator::Host::ControllerButton::Start: button = Controller::PAD_BUTTON_OPTIONS; break;
-			case ::Kyty::Emulator::Host::ControllerButton::LeftStick: button = Controller::PAD_BUTTON_L3; break;
-			case ::Kyty::Emulator::Host::ControllerButton::RightStick: button = Controller::PAD_BUTTON_R3; break;
-			case ::Kyty::Emulator::Host::ControllerButton::LeftShoulder: button = Controller::PAD_BUTTON_L1; break;
-			case ::Kyty::Emulator::Host::ControllerButton::RightShoulder: button = Controller::PAD_BUTTON_R1; break;
-			case ::Kyty::Emulator::Host::ControllerButton::DpadUp: button = Controller::PAD_BUTTON_UP; break;
-			case ::Kyty::Emulator::Host::ControllerButton::DpadDown: button = Controller::PAD_BUTTON_DOWN; break;
-			case ::Kyty::Emulator::Host::ControllerButton::DpadLeft: button = Controller::PAD_BUTTON_LEFT; break;
-			case ::Kyty::Emulator::Host::ControllerButton::DpadRight: button = Controller::PAD_BUTTON_RIGHT; break;
+			case ::Kyty::Emulator::Host::ControllerButton::Start: button = ::Kyty::Emulator::Ports::PAD_BUTTON_OPTIONS; break;
+			case ::Kyty::Emulator::Host::ControllerButton::LeftStick: button = ::Kyty::Emulator::Ports::PAD_BUTTON_L3; break;
+			case ::Kyty::Emulator::Host::ControllerButton::RightStick: button = ::Kyty::Emulator::Ports::PAD_BUTTON_R3; break;
+			case ::Kyty::Emulator::Host::ControllerButton::LeftShoulder: button = ::Kyty::Emulator::Ports::PAD_BUTTON_L1; break;
+			case ::Kyty::Emulator::Host::ControllerButton::RightShoulder: button = ::Kyty::Emulator::Ports::PAD_BUTTON_R1; break;
+			case ::Kyty::Emulator::Host::ControllerButton::DpadUp: button = ::Kyty::Emulator::Ports::PAD_BUTTON_UP; break;
+			case ::Kyty::Emulator::Host::ControllerButton::DpadDown: button = ::Kyty::Emulator::Ports::PAD_BUTTON_DOWN; break;
+			case ::Kyty::Emulator::Host::ControllerButton::DpadLeft: button = ::Kyty::Emulator::Ports::PAD_BUTTON_LEFT; break;
+			case ::Kyty::Emulator::Host::ControllerButton::DpadRight: button = ::Kyty::Emulator::Ports::PAD_BUTTON_RIGHT; break;
 			case ::Kyty::Emulator::Host::ControllerButton::Invalid: break;
 			default: break;
 		}
 		if (button != 0)
 		{
-			Controller::ControllerButton(f->id, button, f->down);
+			::Kyty::Emulator::Ports::ControllerInputPort::Button(f->id, button, f->down);
 		}
 	}
 
@@ -961,21 +962,21 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 	{
 		const int value = ::Kyty::Emulator::Host::HostInput::NormalizeAxis(f->axis_id, f->axis_value);
 
-		Controller::Axis axis = Controller::Axis::AxisMax;
+		::Kyty::Emulator::Ports::Axis axis = ::Kyty::Emulator::Ports::Axis::AxisMax;
 		switch (f->axis_id)
 		{
-			case ::Kyty::Emulator::Host::ControllerAxis::LeftX: axis = Controller::Axis::LeftX; break;
-			case ::Kyty::Emulator::Host::ControllerAxis::LeftY: axis = Controller::Axis::LeftY; break;
-			case ::Kyty::Emulator::Host::ControllerAxis::RightX: axis = Controller::Axis::RightX; break;
-			case ::Kyty::Emulator::Host::ControllerAxis::RightY: axis = Controller::Axis::RightY; break;
-			case ::Kyty::Emulator::Host::ControllerAxis::TriggerLeft: axis = Controller::Axis::TriggerLeft; break;
-			case ::Kyty::Emulator::Host::ControllerAxis::TriggerRight: axis = Controller::Axis::TriggerRight; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::LeftX: axis = ::Kyty::Emulator::Ports::Axis::LeftX; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::LeftY: axis = ::Kyty::Emulator::Ports::Axis::LeftY; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::RightX: axis = ::Kyty::Emulator::Ports::Axis::RightX; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::RightY: axis = ::Kyty::Emulator::Ports::Axis::RightY; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::TriggerLeft: axis = ::Kyty::Emulator::Ports::Axis::TriggerLeft; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::TriggerRight: axis = ::Kyty::Emulator::Ports::Axis::TriggerRight; break;
 			case ::Kyty::Emulator::Host::ControllerAxis::Invalid: break;
 		}
 
-		if (axis != Controller::Axis::AxisMax)
+		if (axis != ::Kyty::Emulator::Ports::Axis::AxisMax)
 		{
-			Controller::ControllerAxis(f->id, axis, value);
+			::Kyty::Emulator::Ports::ControllerInputPort::Axis(f->id, axis, value);
 		}
 	}
 }
