@@ -31,6 +31,13 @@ static void EnsureMemorySubsystemInitialized()
 	{
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
+	// Keep this fixture independent from UnitTestMain's global registration
+	// order. Kernel memory queries need a concrete guest platform, while a
+	// filtered test invocation may not have run the emulator bootstrap first.
+	if (Config::GetGuestPlatform() == GuestPlatform::Unknown)
+	{
+		ASSERT_TRUE(Config::SetGuestPlatform(GuestPlatform::Ps4));
+	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	static bool memory_inited = false;
 	if (!memory_inited)
