@@ -129,7 +129,11 @@ static void Init(const Scripts::ScriptVar& cfg)
 
 	SystemContentPort::Install({Loader::SystemContentGetMetadata, Loader::SystemContentGetIconPath, get_system_content_param_string});
 
-	auto* slist = Core::SubsystemsList::Instance();
+	// The CLI main owns the lifecycle graph and installs it as the active
+	// list before running the guest script; the composition root must use
+	// that list, not the legacy singleton.
+	auto* slist = Core::SubsystemsList::Active();
+	EXIT_IF(slist == nullptr);
 
 	auto* audio       = Libs::Audio::AudioSubsystem::Instance();
 	auto* agent       = Emulator::Agent::AgentToolsSubsystem::Instance();
