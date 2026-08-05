@@ -937,7 +937,7 @@ TEST(EmulatorGraphicsPackets, AcceptsComputeShaderWithoutWorkgroupId)
 	Config::SetNextGen(true);
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	static const uint32_t shader[] = {0xbf810000u}; // s_endpgm
+	static const uint32_t shader[] = {(0x17Fu << 23u) | (0x01u << 16u)}; // s_endpgm
 	HW::ComputeShaderInfo regs {};
 	regs.cs_regs.data_addr = reinterpret_cast<uint64_t>(shader);
 	regs.cs_regs.tgid_x_en = 0;
@@ -3887,6 +3887,152 @@ TEST(EmulatorGraphicsPackets, ParsesGen5SNotB64)
 	EXPECT_EQ(inst.src[0].size, 2);
 	EXPECT_EQ(inst.dst.register_id, 0);
 	EXPECT_EQ(inst.src[0].register_id, 2);
+}
+
+// SOPC group ([31:23]=0x17E): s_cmp_eq_i32 s3, s2 → op 0x00, ssrc1=2, ssrc0=3.
+TEST(EmulatorGraphicsPackets, ParsesGen5SopcCompareEqualI32)
+{
+	const uint32_t word0    = (0x17Eu << 23u) | (0x00u << 16u) | (2u << 8u) | 3u;
+	const uint32_t shader[] = {word0, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::SCmpEqI32);
+	EXPECT_EQ(inst.format, ShaderInstructionFormat::Ssrc0Ssrc1);
+	EXPECT_EQ(inst.src[0].register_id, 3);
+	EXPECT_EQ(inst.src[1].register_id, 2);
+}
+
+// SOPK group ([31:23]=0x60..0x7C): s_movk_i32 s4, 0x1234 → sdst=4, sign-extended imm.
+TEST(EmulatorGraphicsPackets, ParsesGen5SopkMovkI32)
+{
+	const uint32_t word0    = (0x160u << 23u) | (4u << 16u) | 0x1234u;
+	const uint32_t shader[] = {word0, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::SMovkI32);
+	EXPECT_EQ(inst.dst.register_id, 4);
+	EXPECT_EQ(inst.src[0].constant.i, 0x1234);
+}
+
+// SOPP group ([31:23]=0x17F): s_endpgm is op 0x01; the parser emits the
+// terminator instruction itself.
+TEST(EmulatorGraphicsPackets, ParsesGen5SoppEndProgram)
+{
+	const uint32_t shader[] = {(0x17Fu << 23u) | (0x01u << 16u)};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 1u);
+	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::SEndpgm);
+}
+
+// VOPC group ([31:25]=0x3E): v_cmp_eq_f32 v2, v1 → op 0x02, vsrc1=1, src0=2.
+TEST(EmulatorGraphicsPackets, ParsesGen5VopcCompareEqualF32)
+{
+	const uint32_t word0    = (0x3Eu << 25u) | (0x02u << 17u) | (1u << 9u) | 2u;
+	const uint32_t shader[] = {word0, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::VCmpEqF32);
+	EXPECT_EQ(inst.src[0].register_id, 2);
+	EXPECT_EQ(inst.src[1].register_id, 1);
+}
+
+// EXP group ([31:26]=0x3E): full-float export of four channels to MRT0,
+// which requires the historical done=1 gate.
+TEST(EmulatorGraphicsPackets, ParsesGen5ExportQuad)
+{
+	const uint32_t word0    = (0x3Eu << 26u) | (1u << 11u) | (0x00u << 4u) | 0xFu;
+	const uint32_t word1    = 1u | (2u << 8u) | (3u << 16u) | (4u << 24u);
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::Exp);
+	EXPECT_EQ(inst.src_num, 4u);
+}
+
+// DS group ([31:26]=0x36): ds_add_u32 v2, v3, offset 0x10 → op 0x00.
+TEST(EmulatorGraphicsPackets, ParsesGen5DsAddU32)
+{
+	const uint32_t word0    = (0x36u << 26u) | (0x00u << 18u) | 0x10u;
+	const uint32_t word1    = 2u | (3u << 8u);
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::DsAddU32);
+	EXPECT_EQ(inst.format, ShaderInstructionFormat::VaddrVdataOffset);
+	EXPECT_EQ(inst.src[0].register_id, 2);
+	EXPECT_EQ(inst.src[1].register_id, 3);
+	EXPECT_EQ(inst.ds_offset, 0x10u);
 }
 
 // VOP1 SDWA with src0_sel=BYTE_0 (0). Observed Gen5 path after PlayGo/Resident Load.
