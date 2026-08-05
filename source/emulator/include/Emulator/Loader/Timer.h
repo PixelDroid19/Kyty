@@ -11,7 +11,16 @@
 
 namespace Kyty::Loader::Timer {
 
-KYTY_SUBSYSTEM_DEFINE(Timer);
+class TimerSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<TimerSubsystem>::Instance(); }
+	const char*       Id() override { return "Timer"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 void       Start();
 double     GetTimeMs();

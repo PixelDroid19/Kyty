@@ -3,13 +3,13 @@
 
 namespace Kyty::Math {
 
-KYTY_SUBSYSTEM_INIT(Math)
+void MathSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	Rand::Init();
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Math) {}
+void MathSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(Math) {}
+void MathSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 } // namespace Kyty::Math

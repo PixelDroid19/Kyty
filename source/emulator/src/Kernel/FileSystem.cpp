@@ -508,7 +508,7 @@ String MountPoints::GetRealDirectory(const String& mounted_directory)
 		return MapToSandbox(mounted_directory);
 }
 
-KYTY_SUBSYSTEM_INIT(FileSystem)
+void FileSystemSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	g_mount_points = new MountPoints;
 	g_files        = new FileDescriptors;
@@ -519,7 +519,7 @@ KYTY_SUBSYSTEM_INIT(FileSystem)
 	GetSandboxRoot();
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(FileSystem)
+void FileSystemSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	if (g_files != nullptr)
 	{
@@ -527,7 +527,7 @@ KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(FileSystem)
 	}
 }
 
-KYTY_SUBSYSTEM_DESTROY(FileSystem)
+void FileSystemSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	if (g_files != nullptr)
 	{

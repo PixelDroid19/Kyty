@@ -7,7 +7,7 @@
 
 namespace Kyty::Emulator::Agent {
 
-KYTY_SUBSYSTEM_INIT(AgentTools)
+void AgentToolsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	// Install lifecycle hooks even when the socket is unset (events still accumulate
 	// for later diagnostics if a client attaches; observation never mutates guest).
@@ -18,16 +18,17 @@ KYTY_SUBSYSTEM_INIT(AgentTools)
 
 	if (!StartFromEnv())
 	{
-		KYTY_SUBSYSTEM_FAIL("agent tools failed to start from KYTY_AGENT_ENDPOINT");
+		this->Fail("agent tools failed to start from KYTY_AGENT_ENDPOINT");
+		return;
 	}
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(AgentTools)
+void AgentToolsSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	Stop();
 }
 
-KYTY_SUBSYSTEM_DESTROY(AgentTools)
+void AgentToolsSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	Stop();
 }

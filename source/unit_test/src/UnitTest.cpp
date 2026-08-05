@@ -63,14 +63,14 @@ UT_LINK(EmulatorSystemContentPort);
 UT_LINK(EmulatorVideoOutResolution);
 UT_LINK(EmulatorVulkanQueueIdentity);
 
-KYTY_SUBSYSTEM_INIT(UnitTest)
+void UnitTestSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
-	testing::InitGoogleTest(KYTY_SUBSYSTEM_ARGC, KYTY_SUBSYSTEM_ARGV);
+	testing::InitGoogleTest(parent->GetArgc(), parent->GetArgv());
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(UnitTest) {}
+void UnitTestSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(UnitTest) {}
+void UnitTestSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 bool unit_test_all()
 {

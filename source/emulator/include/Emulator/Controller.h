@@ -32,7 +32,16 @@ using ::Kyty::Emulator::Ports::PAD_BUTTON_SQUARE;
 using ::Kyty::Emulator::Ports::PAD_BUTTON_TOUCH_PAD;
 using ::Kyty::Emulator::Ports::Axis;
 
-KYTY_SUBSYSTEM_DEFINE(Controller);
+class ControllerSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<ControllerSubsystem>::Instance(); }
+	const char*       Id() override { return "Controller"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 struct PadControllerInformation;
 struct PadData;

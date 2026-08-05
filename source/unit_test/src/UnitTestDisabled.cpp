@@ -2,9 +2,9 @@
 
 namespace Kyty::UnitTest {
 
-KYTY_SUBSYSTEM_INIT(UnitTest) {}
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(UnitTest) {}
-KYTY_SUBSYSTEM_DESTROY(UnitTest) {}
+void UnitTestSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent) {}
+void UnitTestSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
+void UnitTestSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 bool unit_test_all()
 {

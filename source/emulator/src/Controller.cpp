@@ -879,16 +879,16 @@ void AgentPadApplyReadStateSample(uint32_t* buttons)
 	AgentPadApplyToButtonsAndAxes(true, buttons, &unused, &unused, &unused, &unused, &unused, &unused);
 }
 
-KYTY_SUBSYSTEM_INIT(Controller)
+void ControllerSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	EXIT_IF(g_controller != nullptr);
 
 	g_controller = new GameController;
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Controller) {}
+void ControllerSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(Controller) {}
+void ControllerSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 void GameController::Connect(int id)
 {

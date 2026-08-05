@@ -5,7 +5,16 @@
 
 namespace Kyty::BuildTools {
 
-KYTY_SUBSYSTEM_DEFINE(BuildTools);
+class BuildToolsSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<BuildToolsSubsystem>::Instance(); }
+	const char*       Id() override { return "BuildTools"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 } // namespace Kyty::BuildTools
 

@@ -276,7 +276,7 @@ static thread_id_t      g_main_thread;
 static int              g_main_thread_int;
 static std::atomic<int> g_thread_counter = 0;
 
-KYTY_SUBSYSTEM_INIT(Threads)
+void ThreadsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 #ifdef KYTY_SDL_THREADS
 	g_main_thread = SDL_ThreadID();
@@ -287,9 +287,9 @@ KYTY_SUBSYSTEM_INIT(Threads)
 	g_wait_for_graph  = new WaitForGraph;
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Threads) {}
+void ThreadsSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(Threads) {}
+void ThreadsSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 void WaitForGraph::DbgDump(const Vector<Cycle>& list)
 {

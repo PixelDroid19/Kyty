@@ -110,7 +110,7 @@ void PthreadInitSelfForMainThread()
 }
 
 
-KYTY_SUBSYSTEM_INIT(Pthread)
+void PthreadSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	PRINT_NAME_ENABLE(false);
 
@@ -143,9 +143,9 @@ KYTY_SUBSYSTEM_INIT(Pthread)
 	thread.Detach();
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Pthread) {}
+void PthreadSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(Pthread) {}
+void PthreadSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 
 Pthread KYTY_SYSV_ABI PthreadSelf()

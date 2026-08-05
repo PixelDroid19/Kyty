@@ -22,7 +22,16 @@ struct SizeAlign
 	size_t   m_align = 0;
 };
 
-KYTY_SUBSYSTEM_DEFINE(Graphics);
+class GraphicsSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<GraphicsSubsystem>::Instance(); }
+	const char*       Id() override { return "Graphics"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 void GraphicsDbgDumpDcb(const char* type, uint32_t num_dw, uint32_t* cmd_buffer);
 

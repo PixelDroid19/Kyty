@@ -3,20 +3,21 @@
 
 namespace Kyty::Emulator::DevTools {
 
-KYTY_SUBSYSTEM_INIT(RuntimeDiagnostics)
+void RuntimeDiagnosticsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	if (!Initialize())
 	{
-		KYTY_SUBSYSTEM_FAIL("runtime diagnostics was not prepared before emulator initialization");
+		this->Fail("runtime diagnostics was not prepared before emulator initialization");
+		return;
 	}
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(RuntimeDiagnostics)
+void RuntimeDiagnosticsSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	(void)Shutdown();
 }
 
-KYTY_SUBSYSTEM_DESTROY(RuntimeDiagnostics)
+void RuntimeDiagnosticsSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	(void)Shutdown();
 }

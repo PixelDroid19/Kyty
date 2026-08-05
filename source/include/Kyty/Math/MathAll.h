@@ -59,7 +59,16 @@ constexpr float SQRT2      = 1.41421356237309504880f; /* sqrt(2) */
 constexpr float SQRT1_2    = 0.70710678118654752440f; /* 1/sqrt(2) */
 } // namespace Float
 
-KYTY_SUBSYSTEM_DEFINE(Math);
+class MathSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<MathSubsystem>::Instance(); }
+	const char*       Id() override { return "Math"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 inline vec3& xyz(vec4& v) // NOLINT(google-runtime-references)
 {

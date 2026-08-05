@@ -321,13 +321,13 @@ void Init()
 	Scripts::RegisterFunc("db_key", BuildTools::db_key_func, BuildTools::db_key_help);
 }
 
-KYTY_SUBSYSTEM_INIT(BuildTools)
+void BuildToolsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	BuildTools::Init();
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(BuildTools) {}
+void BuildToolsSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(BuildTools) {}
+void BuildToolsSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 } // namespace Kyty::BuildTools

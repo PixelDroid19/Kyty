@@ -14,7 +14,16 @@ namespace Kyty::Config {
 
 class ConfigSource;
 
-KYTY_SUBSYSTEM_DEFINE(Config);
+class ConfigSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<ConfigSubsystem>::Instance(); }
+	const char*       Id() override { return "Config"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 enum class ShaderOptimizationType
 {

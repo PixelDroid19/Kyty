@@ -29,7 +29,7 @@ constexpr int kConfigurationErrorExitCode = 125;
 
 } // namespace
 
-KYTY_SUBSYSTEM_INIT(Core)
+void CoreSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	// Fail-closed bring-up policy before guest/HLE work. Invalid KYTY_BRINGUP_*
 	// aborts here — never convert a configuration error into silent strict.
@@ -50,13 +50,13 @@ KYTY_SUBSYSTEM_INIT(Core)
 	VirtualMemory::Init();
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Core)
+void CoreSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	// SubsystemsList invokes Core after dependents, while the Core allocator is still available.
 	Language::Shutdown();
 }
 
-KYTY_SUBSYSTEM_DESTROY(Core)
+void CoreSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	// Keep normal teardown aligned with the fatal-shutdown ownership boundary.
 	Language::Shutdown();

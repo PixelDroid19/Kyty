@@ -61,7 +61,16 @@ namespace Kyty {
 
 namespace Log {
 
-KYTY_SUBSYSTEM_DEFINE(Log);
+class LogSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<LogSubsystem>::Instance(); }
+	const char*       Id() override { return "Log"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 enum class Direction
 {

@@ -452,7 +452,7 @@ static ReservedMemory* g_reserved_memory = nullptr;
 static callback_func_t g_alloc_callback  = nullptr;
 static callback_func_t g_free_callback   = nullptr;
 
-KYTY_SUBSYSTEM_INIT(Memory)
+void MemorySubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	// CoreSubsystem owns process-wide virtual-memory initialization. Memory has
 	// Core as an explicit dependency and must not install platform handlers twice.
@@ -461,9 +461,9 @@ KYTY_SUBSYSTEM_INIT(Memory)
 	g_reserved_memory = new ReservedMemory;
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Memory) {}
+void MemorySubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(Memory)
+void MemorySubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	delete g_flexible_memory;
 	g_flexible_memory = nullptr;

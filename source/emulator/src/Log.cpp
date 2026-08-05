@@ -119,7 +119,7 @@ static void Close()
 	}
 }
 
-KYTY_SUBSYSTEM_INIT(Log)
+void LogSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	if (!g_log_initialized)
 	{
@@ -143,12 +143,12 @@ KYTY_SUBSYSTEM_INIT(Log)
 	g_thread_local_files = new Vector<Core::File*>;
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Log)
+void LogSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	Close();
 }
 
-KYTY_SUBSYSTEM_DESTROY(Log)
+void LogSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	Close();
 }

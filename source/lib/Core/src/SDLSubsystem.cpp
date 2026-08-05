@@ -134,11 +134,12 @@ static void sdl_host_free(void* memory)
 #endif
 }
 
-KYTY_SUBSYSTEM_INIT(SDL)
+void SDLSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	if (SDL_SetMemoryFunctions(sdl_host_malloc, sdl_host_calloc, sdl_host_realloc, sdl_host_free) != 0)
 	{
-		KYTY_SUBSYSTEM_FAIL("%s\n", SDL_GetError());
+		this->Fail("%s\n", SDL_GetError());
+		return;
 	}
 	SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, "0");
 
@@ -148,13 +149,14 @@ KYTY_SUBSYSTEM_INIT(SDL)
 
 	if (SDL_Init(0) < 0)
 	{
-		KYTY_SUBSYSTEM_FAIL("%s\n", SDL_GetError());
+		this->Fail("%s\n", SDL_GetError());
+		return;
 	}
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(SDL) {}
+void SDLSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(SDL)
+void SDLSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	SDL_Quit();
 }

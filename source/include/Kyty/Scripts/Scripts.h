@@ -18,7 +18,16 @@ namespace Kyty::Scripts {
 
 using LuaState = void;
 
-KYTY_SUBSYSTEM_DEFINE(Scripts);
+class ScriptsSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<ScriptsSubsystem>::Instance(); }
+	const char*       Id() override { return "Scripts"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 enum class ScriptError
 {

@@ -5,7 +5,16 @@
 
 namespace Kyty::Core {
 
-KYTY_SUBSYSTEM_DEFINE(Core);
+class CoreSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<CoreSubsystem>::Instance(); }
+	const char*       Id() override { return "Core"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 } // namespace Kyty::Core
 

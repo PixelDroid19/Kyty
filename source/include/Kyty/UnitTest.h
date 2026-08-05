@@ -15,7 +15,16 @@ namespace Kyty::UnitTest {
 
 bool unit_test_all();
 
-KYTY_SUBSYSTEM_DEFINE(UnitTest);
+class UnitTestSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<UnitTestSubsystem>::Instance(); }
+	const char*       Id() override { return "UnitTest"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 #define UT_MEM_CHECK_INIT() int test_ms = Core::mem_new_state();
 

@@ -5,7 +5,16 @@
 
 namespace Kyty::Emulator::Agent {
 
-KYTY_SUBSYSTEM_DEFINE(AgentTools);
+class AgentToolsSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<AgentToolsSubsystem>::Instance(); }
+	const char*       Id() override { return "AgentTools"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 } // namespace Kyty::Emulator::Agent
 

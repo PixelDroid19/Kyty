@@ -5,7 +5,16 @@
 
 namespace Kyty::Emulator::DevTools {
 
-KYTY_SUBSYSTEM_DEFINE(RuntimeDiagnostics);
+class RuntimeDiagnosticsSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<RuntimeDiagnosticsSubsystem>::Instance(); }
+	const char*       Id() override { return "RuntimeDiagnostics"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 } // namespace Kyty::Emulator::DevTools
 

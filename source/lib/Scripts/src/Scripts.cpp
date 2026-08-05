@@ -80,7 +80,7 @@ static void lua_init()
 	}
 }
 
-KYTY_SUBSYSTEM_INIT(Scripts)
+void ScriptsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	g_lua_state = nullptr;
 	g_lua_error = nullptr;
@@ -89,15 +89,16 @@ KYTY_SUBSYSTEM_INIT(Scripts)
 	if (RunString(U"_script_check_a = _script_check_b") != ScriptError::Ok || RunString(U"_a _b _c _d") != ScriptError::SyntaxError ||
 	    RunString(U"_script_check_a = _script_check_b[1]") != ScriptError::RunError)
 	{
-		KYTY_SUBSYSTEM_FAIL("Can't run Lua scripts");
+		this->Fail("Can't run Lua scripts");
+		return;
 	}
 
 	ResetErrMsg();
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Scripts) {}
+void ScriptsSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(Scripts)
+void ScriptsSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	// lua_close(g_lua_state);
 }

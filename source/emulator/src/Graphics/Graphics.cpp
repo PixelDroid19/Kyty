@@ -128,7 +128,7 @@ int GraphicsQueryProtection(void* address, void** start, void** end, int* protec
 
 } // namespace
 
-KYTY_SUBSYSTEM_INIT(Graphics)
+void GraphicsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	auto width  = Config::GetScreenWidth();
 	auto height = Config::GetScreenHeight();
@@ -172,9 +172,9 @@ KYTY_SUBSYSTEM_INIT(Graphics)
 	ShaderInit();
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Graphics) {}
+void GraphicsSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(Graphics) {}
+void GraphicsSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 void GraphicsDbgDumpDcb(const char* type, uint32_t num_dw, uint32_t* cmd_buffer)
 {

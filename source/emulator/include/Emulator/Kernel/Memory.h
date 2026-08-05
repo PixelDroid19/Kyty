@@ -12,7 +12,16 @@
 
 namespace Kyty::Kernel::Memory {
 
-KYTY_SUBSYSTEM_DEFINE(Memory);
+class MemorySubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<MemorySubsystem>::Instance(); }
+	const char*       Id() override { return "Memory"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 using callback_func_t = void (*)(uintptr_t addr, size_t size);
 

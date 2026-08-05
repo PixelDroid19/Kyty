@@ -41,16 +41,16 @@ struct Config
 
 static Config* g_config = nullptr;
 
-KYTY_SUBSYSTEM_INIT(Config)
+void ConfigSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	EXIT_IF(g_config != nullptr);
 
 	g_config = new Config;
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Config) {}
+void ConfigSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(Config) {}
+void ConfigSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 template <class T>
 void LoadInt(T& dst, const ConfigSource& cfg, const String& key)

@@ -11,7 +11,16 @@
 
 namespace Kyty::Profiler {
 
-KYTY_SUBSYSTEM_DEFINE(Profiler);
+class ProfilerSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<ProfilerSubsystem>::Instance(); }
+	const char*       Id() override { return "Profiler"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 } // namespace Kyty::Profiler
 

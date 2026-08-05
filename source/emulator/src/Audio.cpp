@@ -39,19 +39,20 @@ namespace AudioVideoBackend = ::Kyty::Emulator::AudioVideoBackend;
 
 static std::shared_ptr<HostAudio> g_host_audio;
 
-KYTY_SUBSYSTEM_INIT(Audio)
+void AudioSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	EXIT_IF(std::atomic_load(&g_host_audio) != nullptr);
 	std::string error;
 	auto        audio = HostAudio::Create(&error);
 	if (audio == nullptr)
 	{
-		KYTY_SUBSYSTEM_FAIL("%s\n", error.c_str());
+		this->Fail("%s\n", error.c_str());
+		return;
 	}
 	std::atomic_store(&g_host_audio, std::move(audio));
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Audio)
+void AudioSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	auto audio = std::atomic_exchange(&g_host_audio, std::shared_ptr<HostAudio> {});
 	if (audio != nullptr)
@@ -60,7 +61,7 @@ KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Audio)
 	}
 }
 
-KYTY_SUBSYSTEM_DESTROY(Audio)
+void AudioSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	auto audio = std::atomic_exchange(&g_host_audio, std::shared_ptr<HostAudio> {});
 	if (audio != nullptr)

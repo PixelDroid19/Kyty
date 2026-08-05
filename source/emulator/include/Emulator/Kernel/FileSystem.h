@@ -42,7 +42,16 @@ struct KernelPollFd
 	int16_t  revents;
 };
 
-KYTY_SUBSYSTEM_DEFINE(FileSystem);
+class FileSystemSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<FileSystemSubsystem>::Instance(); }
+	const char*       Id() override { return "FileSystem"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 void   Mount(const String& folder, const String& point);
 void   Umount(const String& folder_or_point);

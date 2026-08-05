@@ -5,7 +5,16 @@
 
 namespace Kyty::Emulator {
 
-KYTY_SUBSYSTEM_DEFINE(Emulator);
+class EmulatorSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<EmulatorSubsystem>::Instance(); }
+	const char*       Id() override { return "Emulator"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 } // namespace Kyty::Emulator
 

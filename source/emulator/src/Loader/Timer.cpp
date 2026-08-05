@@ -13,15 +13,15 @@ namespace Kyty::Loader::Timer {
 
 static Core::Timer g_timer;
 
-KYTY_SUBSYSTEM_INIT(Timer)
+void TimerSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	Start();
 	Kernel::TimePort::Install({&GetTimeMs, &GetCounter, &GetFrequency});
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Timer) {}
+void TimerSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(Timer) {}
+void TimerSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 void Start()
 {

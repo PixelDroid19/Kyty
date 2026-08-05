@@ -27,7 +27,16 @@ struct sched_param;
 
 namespace Kyty::Kernel {
 
-KYTY_SUBSYSTEM_DEFINE(Pthread);
+class PthreadSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<PthreadSubsystem>::Instance(); }
+	const char*       Id() override { return "Pthread"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 struct PthreadAttrPrivate;
 struct PthreadPrivate;

@@ -9,10 +9,10 @@ namespace Kyty::Emulator {
 // The Lua bridge lives in the fc_script CLI layer (KytyEmulator.cpp), which
 // registers its kyty_* functions after the subsystem graph is initialized.
 
-KYTY_SUBSYSTEM_INIT(Emulator) {}
+void EmulatorSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Emulator) {}
+void EmulatorSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(Emulator) {}
+void EmulatorSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 } // namespace Kyty::Emulator

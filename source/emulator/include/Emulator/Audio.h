@@ -10,7 +10,16 @@
 
 namespace Kyty::Libs::Audio {
 
-KYTY_SUBSYSTEM_DEFINE(Audio);
+class AudioSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<AudioSubsystem>::Instance(); }
+	const char*       Id() override { return "Audio"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 namespace AudioOut {
 

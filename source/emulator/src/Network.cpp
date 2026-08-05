@@ -206,16 +206,16 @@ private:
 
 static Network* g_net = nullptr;
 
-KYTY_SUBSYSTEM_INIT(Network)
+void NetworkSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	EXIT_IF(g_net != nullptr);
 
 	g_net = new Network;
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Network) {}
+void NetworkSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}
 
-KYTY_SUBSYSTEM_DESTROY(Network) {}
+void NetworkSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent) {}
 
 int Network::PoolCreate(const char* name, int size)
 {

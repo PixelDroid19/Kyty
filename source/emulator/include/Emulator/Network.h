@@ -10,7 +10,16 @@
 
 namespace Kyty::Libs::Network {
 
-KYTY_SUBSYSTEM_DEFINE(Network);
+class NetworkSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<NetworkSubsystem>::Instance(); }
+	const char*       Id() override { return "Network"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 namespace Net {
 

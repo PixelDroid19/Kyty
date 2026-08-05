@@ -6,7 +6,16 @@
 
 namespace Kyty::Core {
 
-KYTY_SUBSYSTEM_DEFINE(Threads);
+class ThreadsSubsystem: public Core::Subsystem
+{
+public:
+	static Subsystem* Instance() { return Core::Singleton<ThreadsSubsystem>::Instance(); }
+	const char*       Id() override { return "Threads"; }
+	void              Init(Core::SubsystemsList* parent) override;
+	void              Destroy(Core::SubsystemsList* parent) override;
+	void              UnexpectedShutdown(Core::SubsystemsList* parent) override;
+};
+
 
 using thread_func_t = void (*)(void*);
 

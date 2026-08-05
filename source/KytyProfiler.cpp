@@ -20,7 +20,7 @@ void Close()
 	}
 }
 
-KYTY_SUBSYSTEM_INIT(Profiler)
+void ProfilerSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	switch (Config::GetProfilerDirection())
 	{
@@ -35,12 +35,12 @@ KYTY_SUBSYSTEM_INIT(Profiler)
 	}
 }
 
-KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Profiler)
+void ProfilerSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	Close();
 }
 
-KYTY_SUBSYSTEM_DESTROY(Profiler)
+void ProfilerSubsystem::Destroy([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	Close();
 }
