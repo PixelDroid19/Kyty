@@ -243,7 +243,7 @@ void GpuMemory::DbgDbSave(const String& file_name)
 		Core::Database::Connection db;
 		if (!db.Create(file_name) && !db.Open(file_name, Core::Database::Connection::Mode::ReadWrite))
 		{
-			printf("Can't open file: %s\n", file_name.C_Str());
+			KYTY_LOG_DEBUG("Can't open file: %s\n", file_name.C_Str());
 			return;
 		}
 		m_db.CopyTo(&db);

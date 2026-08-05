@@ -318,11 +318,11 @@ void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* 
 	const auto image_info           = VulkanBuildImageCreateInfo(image_descriptor);
 	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImage(ctx, image_info, vk_obj, &vk_obj->memory));
 
-	printf("VideoOutBufferObject::Materialize()\n");
-	printf("\t memory size = %" PRIu64 "\n", vk_obj->memory.requirements.size);
-	printf("\t width       = %" PRIu32 "\n", vk_obj->extent.width);
-	printf("\t height      = %" PRIu32 "\n", vk_obj->extent.height);
-	printf("\t guest size  = %" PRIu64 "\n", vk_obj->guest_size);
+	KYTY_LOG_DEBUG("VideoOutBufferObject::Materialize()\n");
+	KYTY_LOG_DEBUG("\t memory size = %" PRIu64 "\n", vk_obj->memory.requirements.size);
+	KYTY_LOG_DEBUG("\t width       = %" PRIu32 "\n", vk_obj->extent.width);
+	KYTY_LOG_DEBUG("\t height      = %" PRIu32 "\n", vk_obj->extent.height);
+	KYTY_LOG_DEBUG("\t guest size  = %" PRIu64 "\n", vk_obj->guest_size);
 
 	upload_guest_contents(ctx, vk_obj);
 

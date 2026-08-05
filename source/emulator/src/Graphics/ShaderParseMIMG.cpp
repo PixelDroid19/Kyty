@@ -414,7 +414,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 
 	if (inst.format == ShaderInstructionFormat::Unknown)
 	{
-		printf("%s", dst->DbgDump().c_str());
+		KYTY_LOG_DEBUG("%s", dst->DbgDump().c_str());
 		EXIT("unknown mimg format for opcode: 0x%02" PRIx32 " at addr 0x%08" PRIx32 ", dmask: 0x%" PRIx32 "\n", opcode, pc, dmask);
 	}
 

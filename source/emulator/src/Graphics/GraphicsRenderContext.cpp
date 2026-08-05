@@ -76,7 +76,7 @@ void GraphicsRenderCreateContext()
 
 		if (!initial_data.empty() && Config::GetPrintfDirection() != Log::Direction::Silent)
 		{
-			printf("Loaded Vulkan pipeline cache: %zu bytes\n", initial_data.size());
+			KYTY_LOG_DEBUG("Loaded Vulkan pipeline cache: %zu bytes\n", initial_data.size());
 		}
 	}
 }

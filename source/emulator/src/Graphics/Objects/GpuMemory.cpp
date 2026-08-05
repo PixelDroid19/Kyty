@@ -194,9 +194,9 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool un
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	m_mutex.Lock();
 
-	printf("Release gpu objects:\n");
-	printf("\t gpu_vaddr = 0x%016" PRIx64 "\n", vaddr);
-	printf("\t size   = 0x%016" PRIx64 "\n", size);
+	KYTY_LOG_DEBUG("Release gpu objects:\n");
+	KYTY_LOG_DEBUG("\t gpu_vaddr = 0x%016" PRIx64 "\n", vaddr);
+	KYTY_LOG_DEBUG("\t size   = 0x%016" PRIx64 "\n", size);
 
 	int heap_id = GetHeapId(vaddr, size);
 
@@ -334,7 +334,7 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 		{
 			for (int vi = 0; vi < block.vaddr_num; vi++)
 			{
-				printf("Delete: type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 "\n", Core::EnumName(o.object.type).C_Str(),
+				KYTY_LOG_DEBUG("Delete: type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 "\n", Core::EnumName(o.object.type).C_Str(),
 				       block.vaddr[vi], block.size[vi]);
 			}
 		}

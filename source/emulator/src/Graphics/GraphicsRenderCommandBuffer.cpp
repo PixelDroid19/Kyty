@@ -384,7 +384,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 		const auto wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
 		if (wait_result == VK_TIMEOUT)
 		{
-			printf("WARNING: vkWaitForFences timeout on slot %" PRIu32 " after %" PRId64 "ns (fence may still signal)\n", m_index,
+			KYTY_LOG_DEBUG("WARNING: vkWaitForFences timeout on slot %" PRIu32 " after %" PRId64 "ns (fence may still signal)\n", m_index,
 			       static_cast<int64_t>(wait_ns));
 		}
 		if (wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT)

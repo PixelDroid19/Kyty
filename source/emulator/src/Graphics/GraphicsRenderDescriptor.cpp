@@ -238,7 +238,7 @@ VkDescriptorSetLayout DescriptorCache::GetOrCreateLayout(Stage stage, int storag
 			                                           [gds_buffers_num][vsharp_uniform_buffer ? 1 : 0];
 			vk_stage = VK_SHADER_STAGE_COMPUTE_BIT;
 			break;
-		default: printf("WARNING: unknown shader stage (continuing)\n"); break;
+		default: KYTY_LOG_DEBUG("WARNING: unknown shader stage (continuing)\n"); break;
 	}
 
 	if (*layout == nullptr)
@@ -1246,7 +1246,7 @@ static bool get_stencil_op(VkStencilOp* f, uint32_t* ref, uint8_t op, uint8_t te
 		case 0x0d:                                                /* Nand           */
 		case 0x0e:                                                /* Nor            */
 		case 0x0f:                                                /* Xnor           */
-		default: printf("WARNING: invalid PM4 op (continuing)\n"); break;
+		default: KYTY_LOG_DEBUG("WARNING: invalid PM4 op (continuing)\n"); break;
 	}
 	*f   = vk;
 	*ref = r;

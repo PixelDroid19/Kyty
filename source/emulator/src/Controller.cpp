@@ -1265,7 +1265,7 @@ int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable)
 
 	EXIT_NOT_IMPLEMENTED(handle != 1);
 
-	printf("\t enable = %s\n", (enable ? "true" : "false"));
+	KYTY_LOG_DEBUG("\t enable = %s\n", (enable ? "true" : "false"));
 
 	return OK;
 }
@@ -1279,7 +1279,7 @@ int KYTY_SYSV_ABI PadSetTiltCorrectionState(int handle, bool enable)
 		return PAD_ERROR_INVALID_HANDLE;
 	}
 
-	printf("\t enable = %s\n", (enable ? "true" : "false"));
+	KYTY_LOG_DEBUG("\t enable = %s\n", (enable ? "true" : "false"));
 
 	return OK;
 }
@@ -1293,7 +1293,7 @@ int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable)
 		return PAD_ERROR_INVALID_HANDLE;
 	}
 
-	printf("\t enable = %s\n", (enable ? "true" : "false"));
+	KYTY_LOG_DEBUG("\t enable = %s\n", (enable ? "true" : "false"));
 
 	return OK;
 }
@@ -1595,7 +1595,7 @@ int KYTY_SYSV_ABI PadSetVibrationMode(int handle, int mode)
 		return PAD_ERROR_INVALID_HANDLE;
 	}
 
-	printf("\t mode = %d\n", mode);
+	KYTY_LOG_DEBUG("\t mode = %d\n", mode);
 
 	return OK;
 }
@@ -1618,7 +1618,7 @@ int KYTY_SYSV_ABI PadSetTriggerEffect(int handle, const void* param)
 int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInformation* info)
 {
 	PRINT_NAME();
-	printf("\t handle = %d\n", handle);
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
 	if (info == nullptr)
 	{
 		return PAD_ERROR_INVALID_ARG;
@@ -1635,8 +1635,8 @@ int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param)
 
 	EXIT_NOT_IMPLEMENTED(handle != 1);
 
-	printf("\t large_motor = %d\n", static_cast<int>(param->large_motor));
-	printf("\t small_motor = %d\n", static_cast<int>(param->small_motor));
+	KYTY_LOG_DEBUG("\t large_motor = %d\n", static_cast<int>(param->large_motor));
+	KYTY_LOG_DEBUG("\t small_motor = %d\n", static_cast<int>(param->small_motor));
 
 	return OK;
 }

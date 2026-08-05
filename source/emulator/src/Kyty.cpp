@@ -70,7 +70,7 @@ static void print_system_info()
 {
 	Core::SystemInfo info = Core::GetSystemInfo();
 
-	printf("ProcessorName = %s\n", info.ProcessorName.C_Str());
+	KYTY_LOG_INFO("ProcessorName = %s\n", info.ProcessorName.C_Str());
 }
 
 static void kyty_close()
@@ -79,7 +79,7 @@ static void kyty_close()
 
 	rt->Clear();
 
-	printf("done!\n");
+	KYTY_LOG_INFO("done!\n");
 
 	if (auto* subsystems = Core::SubsystemsList::Active(); subsystems != nullptr)
 	{

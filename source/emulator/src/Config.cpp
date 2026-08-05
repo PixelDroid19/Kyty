@@ -258,12 +258,12 @@ bool SetGuestPlatform(GuestPlatform platform)
 	EXIT_IF(g_config == nullptr);
 	if (platform == GuestPlatform::Unknown)
 	{
-		printf("guest platform cannot be set to unknown\n");
+		KYTY_LOG_WARN("guest platform cannot be set to unknown\n");
 		return false;
 	}
 	if (g_config->guest_platform != GuestPlatform::Unknown && g_config->guest_platform != platform)
 	{
-		printf("guest platform conflict: established=%s requested=%s\n", GuestPlatformName(g_config->guest_platform),
+		KYTY_LOG_WARN("guest platform conflict: established=%s requested=%s\n", GuestPlatformName(g_config->guest_platform),
 		       GuestPlatformName(platform));
 		return false;
 	}

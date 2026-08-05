@@ -149,7 +149,7 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 
 	if (inst.format == ShaderInstructionFormat::Unknown)
 	{
-		printf("%s", dst->DbgDump().c_str());
+		KYTY_LOG_DEBUG("%s", dst->DbgDump().c_str());
 		EXIT("%s\n"
 		     "unknown exp target: 0x%02" PRIx32 " done=%u compr=%u vm=%u en=0x%x at addr 0x%08" PRIx32 " (hash0 = 0x%08" PRIx32
 		     ", crc32 = 0x%08" PRIx32 ")\n",

@@ -406,7 +406,7 @@ ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int sta
 		{
 			if (result.sampler_register >= 0 && result.sampler_register != inst.src[2].register_id)
 			{
-				printf("WARNING: direct image resource uses multiple sampler ranges (continuing)\n");
+				KYTY_LOG_DEBUG("WARNING: direct image resource uses multiple sampler ranges (continuing)\n");
 			}
 			result.sampler_register = inst.src[2].register_id;
 		}

@@ -37,7 +37,7 @@ static bool ValidateTransientLabelDestination(const void* dst_gpu_addr, uint64_t
 	const auto status = GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(dst_gpu_addr), size);
 	if (status != GpuMemoryRangeValidationStatus::Valid)
 	{
-		printf("WARNING: EOP destination range invalid (write skipped)\n");
+		KYTY_LOG_DEBUG("WARNING: EOP destination range invalid (write skipped)\n");
 		return false;
 	}
 	return true;
@@ -142,7 +142,7 @@ void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandB
 		    auto* dst_gpu_addr = reinterpret_cast<uint64_t*>(args[0]);
 		    EXIT_IF(dst_gpu_addr == nullptr);
 		    *dst_gpu_addr = Kernel::TimePort::GetCounter();
-		    printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n" FG_DEFAULT,
+		    KYTY_LOG_DEBUG(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n" FG_DEFAULT,
 		           reinterpret_cast<uint64_t>(dst_gpu_addr), *dst_gpu_addr);
 		    return false;
 	    },

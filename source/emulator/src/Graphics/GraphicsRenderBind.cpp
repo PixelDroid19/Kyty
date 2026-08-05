@@ -233,7 +233,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 				Emulator::Agent::Lifecycle::EmitStorageFrontierFatal(context);
 				/* [gen5-nonfatal] EXIT("unsupported Gen5 storage buffer format: index=%d start=%d usage=%u stride=%u dstsel=0x%03" PRIx32
 				 */
-				printf("WARNING: unsupported Gen5 storage buffer format: index=%d start=%d usage=%u stride=%u dstsel=0x%03" PRIx32
+				KYTY_LOG_DEBUG("WARNING: unsupported Gen5 storage buffer format: index=%d start=%d usage=%u stride=%u dstsel=0x%03" PRIx32
 				       " (continuing)\n",
 				       i, storage_buffers.start_register[i], static_cast<uint32_t>(storage_buffers.usages[i]),
 				       static_cast<uint32_t>(r.Stride()), r.DstSelXYZW());
@@ -752,7 +752,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				if (swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7) && swizzle != DstSel(7, 6, 5, 4))
 				{
 					/* [gen5-nonfatal] EXIT("unsupported render texture sampled swizzle: swizzle=0x%03" PRIx32 */
-					printf("WARNING: unsupported render texture sampled swizzle (continuing)\n");
+					KYTY_LOG_DEBUG("WARNING: unsupported render texture sampled swizzle (continuing)\n");
 				}
 				// Multiple non-exact RT aliases are expected under Gen5 nested /
 				// same-base parents. Prefer the tightest cover using guest allocation
@@ -926,7 +926,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				if (backing == State::Gen5SampleBacking::Unsupported)
 				{
 					/* [gen5-nonfatal] EXIT("Gen5 sampled texture has no exact render-target backing and no guest-memory upload: " */
-					printf("WARNING: Gen5 sampled texture has no exact render-target backing and no guest-memory upload:  (continuing)\n");
+					KYTY_LOG_DEBUG("WARNING: Gen5 sampled texture has no exact render-target backing and no guest-memory upload:  (continuing)\n");
 				}
 			}
 			if (!render_texture && !depth_texture && tex == nullptr && !textures.desc[i].textures2d_without_sampler)
@@ -1570,7 +1570,7 @@ static void VulkanCmdSetColorWriteEnableEXT(GraphicContext* ctx, VkCommandBuffer
 		func(command_buffer, attachment_count, p_color_write_enables);
 	} else
 	{
-		printf("WARNING: vkCmdSetColorWriteEnableEXT not present, skipping\n");
+		KYTY_LOG_DEBUG("WARNING: vkCmdSetColorWriteEnableEXT not present, skipping\n");
 	}
 }
 

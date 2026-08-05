@@ -94,7 +94,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
 			case 4:
 				aniso_ratio = 16.0f;
 				break;
-				printf("WARNING: unknown aniso ratio (continuing)\n");
+				KYTY_LOG_DEBUG("WARNING: unknown aniso ratio (continuing)\n");
 		}
 	}
 
@@ -131,7 +131,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
 		case 2:
 			border = VK_BORDER_COLOR_INT_OPAQUE_WHITE;
 			break;
-			printf("WARNING: unknown border color (continuing)\n");
+			KYTY_LOG_DEBUG("WARNING: unknown border color (continuing)\n");
 	}
 
 	sampler_info.sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -196,7 +196,7 @@ static VkBlendFactor get_blend_factor(uint32_t factor)
 		case /* InverseSrc1Alpha */ 0x00000012: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
 		case /* ConstantAlpha */ 0x00000013: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
 		case /* OneMinusConstantAlpha */ 0x00000014: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
-		default: printf("WARNING: unknown blend factor %u (continuing)\n", factor); break;
+		default: KYTY_LOG_DEBUG("WARNING: unknown blend factor %u (continuing)\n", factor); break;
 	}
 	return VK_BLEND_FACTOR_ZERO;
 }
@@ -227,7 +227,7 @@ static VkBlendOp get_blend_op(uint32_t op)
 		case /* Min */ 0x00000002: return VK_BLEND_OP_MIN;
 		case /* Max */ 0x00000003: return VK_BLEND_OP_MAX;
 		case /* ReverseSubtract */ 0x00000004: return VK_BLEND_OP_REVERSE_SUBTRACT;
-		default: printf("WARNING: unknown blend operation %u (continuing)\n", op); break;
+		default: KYTY_LOG_DEBUG("WARNING: unknown blend operation %u (continuing)\n", op); break;
 	}
 	return VK_BLEND_OP_ADD;
 }
@@ -1027,7 +1027,7 @@ void PipelineCache::SaveDriverCacheIfDue()
 		m_driver_cache_dirty = false;
 		if (Config::GetPrintfDirection() != Log::Direction::Silent)
 		{
-			printf("Saved Vulkan pipeline cache: %zu bytes\n", attempted_size);
+			KYTY_LOG_DEBUG("Saved Vulkan pipeline cache: %zu bytes\n", attempted_size);
 		}
 	} else if (save_result == PipelineCacheStoreSaveResult::BudgetExceeded)
 	{
@@ -1463,7 +1463,7 @@ void PipelineCache::DumpPipeline(const char* action, uint32_t id)
 		f.Create(file_name);
 		if (f.IsInvalid())
 		{
-			printf(FG_BRIGHT_RED "Can't create file: %s\n" FG_DEFAULT, file_name.C_Str());
+			KYTY_LOG_DEBUG(FG_BRIGHT_RED "Can't create file: %s\n" FG_DEFAULT, file_name.C_Str());
 			return;
 		}
 		Pipeline& p = m_pipelines[id];

@@ -321,11 +321,11 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	const auto width  = params[RenderTextureObject::PARAM_WIDTH];
 	const auto height = params[RenderTextureObject::PARAM_HEIGHT];
 
-	printf("RenderTextureObject::Create()\n");
-	printf("\t mem->requirements.size = %" PRIu64 "\n", mem->requirements.size);
-	printf("\t width                  = %" PRIu64 "\n", width);
-	printf("\t height                 = %" PRIu64 "\n", height);
-	printf("\t size                   = %" PRIu64 "\n", *size);
+	KYTY_LOG_DEBUG("RenderTextureObject::Create()\n");
+	KYTY_LOG_DEBUG("\t mem->requirements.size = %" PRIu64 "\n", mem->requirements.size);
+	KYTY_LOG_DEBUG("\t width                  = %" PRIu64 "\n", width);
+	KYTY_LOG_DEBUG("\t height                 = %" PRIu64 "\n", height);
+	KYTY_LOG_DEBUG("\t size                   = %" PRIu64 "\n", *size);
 
 	// EXIT_NOT_IMPLEMENTED(mem->requirements.size > *size);
 
@@ -346,11 +346,11 @@ static void* create2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint
 	const auto width  = params[RenderTextureObject::PARAM_WIDTH];
 	const auto height = params[RenderTextureObject::PARAM_HEIGHT];
 
-	printf("RenderTextureObject::CreateFromObjects()\n");
-	printf("\t mem->requirements.size = %" PRIu64 "\n", mem->requirements.size);
-	printf("\t width                  = %" PRIu64 "\n", width);
-	printf("\t height                 = %" PRIu64 "\n", height);
-	// printf("\t size                   = %" PRIu64 "\n", *size);
+	KYTY_LOG_DEBUG("RenderTextureObject::CreateFromObjects()\n");
+	KYTY_LOG_DEBUG("\t mem->requirements.size = %" PRIu64 "\n", mem->requirements.size);
+	KYTY_LOG_DEBUG("\t width                  = %" PRIu64 "\n", width);
+	KYTY_LOG_DEBUG("\t height                 = %" PRIu64 "\n", height);
+	// KYTY_LOG_DEBUG("\t size                   = %" PRIu64 "\n", *size);
 
 	// EXIT_NOT_IMPLEMENTED(mem->requirements.size > *size);
 

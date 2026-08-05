@@ -498,7 +498,7 @@ void Spirv::WriteHeader()
 			vars.Add("%gl_WorkGroupID");
 			header_str = String8(header).ReplaceStr("<Type>", "GLCompute");
 			break;
-		default: printf("WARNING: unknown shader type (continuing)\n"); return;
+		default: KYTY_LOG_DEBUG("WARNING: unknown shader type (continuing)\n"); return;
 	}
 
 	m_source += header_str.ReplaceStr("<Variables>", vars.Concat(' '))
@@ -631,7 +631,7 @@ void Spirv::WriteAnnotations()
 		case ShaderType::Compute:
 			m_source += String8(compute_annotations).ReplaceStr("<Variables>", vars.Concat("\n" + String8(' ', 15)));
 			break;
-		default: printf("WARNING: unknown shader type (continuing)\n"); return;
+		default: KYTY_LOG_DEBUG("WARNING: unknown shader type (continuing)\n"); return;
 	}
 
 	static const char* storage_buffers_annotations = R"(
@@ -900,7 +900,7 @@ static const char* compute_types = R"(
 		case ShaderType::Vertex: m_source += vertex_types; break;
 		case ShaderType::Pixel: m_source += pixel_types; break;
 		case ShaderType::Compute: m_source += compute_types; break;
-		default: printf("WARNING: unknown shader type (continuing)\n"); return;
+		default: KYTY_LOG_DEBUG("WARNING: unknown shader type (continuing)\n"); return;
 	}
 
 	if (m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
@@ -1262,7 +1262,7 @@ void Spirv::WriteGlobalVariables()
 						case 3: vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_v3float Input", i)); break;
 						case 4: vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_v4float Input", i)); break;
 						default:
-							printf("WARNING: invalid registers_num %d in shader (continuing)\n", m_vs_input_info->resources_dst[i].registers_num);
+							KYTY_LOG_DEBUG("WARNING: invalid registers_num %d in shader (continuing)\n", m_vs_input_info->resources_dst[i].registers_num);
 							break;
 					}
 				}
@@ -1282,7 +1282,7 @@ void Spirv::WriteGlobalVariables()
 			}
 			m_source += String8(compute_variables).ReplaceStr("<Variables>", vars.Concat("\n" + String8(' ', 15)));
 			break;
-		default: printf("WARNING: unknown shader type (continuing)\n"); return;
+		default: KYTY_LOG_DEBUG("WARNING: unknown shader type (continuing)\n"); return;
 	}
 }
 
@@ -1706,12 +1706,12 @@ void Spirv::WriteLocalVariables()
 		{
 			// TODO() load pointer
 
-			printf("Extended mapping: ");
+			KYTY_LOG_DEBUG("Extended mapping: ");
 			for (auto& m: m_extended_mapping)
 			{
-				printf("{%d, %d} ", m[0], m[1]);
+				KYTY_LOG_DEBUG("{%d, %d} ", m[0], m[1]);
 			}
-			printf("\n");
+			KYTY_LOG_DEBUG("\n");
 		}
 	}
 
@@ -1860,7 +1860,7 @@ void Spirv::DetectFetch()
 					}
 					if (resource < 0)
 					{
-						printf("WARNING: vertex fetch semantic missing input resource (continuing)\n");
+						KYTY_LOG_DEBUG("WARNING: vertex fetch semantic missing input resource (continuing)\n");
 					}
 
 					load_instructions.Add({inst, resource});
@@ -1879,7 +1879,7 @@ void Spirv::DetectFetch()
 		{
 			const auto& p = load_instructions.At(index);
 
-			printf("load vertex: pc = 0x%08" PRIx32 ", size = %d, attrib_id = %d\n", p.first.pc, p.first.dst.size, p.second);
+			KYTY_LOG_DEBUG("load vertex: pc = 0x%08" PRIx32 ", size = %d, attrib_id = %d\n", p.first.pc, p.first.dst.size, p.second);
 
 			EXIT_IF(inst.type != p.first.type);
 			EXIT_IF(inst.format != p.first.format);

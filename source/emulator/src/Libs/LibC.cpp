@@ -852,7 +852,7 @@ static KYTY_SYSV_ABI void c_qsort(void* base, size_t n, size_t sz, int(KYTY_SYSV
 }
 static KYTY_SYSV_ABI void c_abort()
 {
-	printf("libc::abort() called by guest\n");
+	KYTY_LOG_ERROR("libc::abort() called by guest\n");
 	::abort();
 }
 
@@ -904,7 +904,7 @@ static KYTY_SYSV_ABI int c_cxa_guard_acquire(uint64_t* g)
 		const auto owner = g_static_init_owner.find(g);
 		if (owner != g_static_init_owner.end() && owner->second == std::this_thread::get_id())
 		{
-			printf(FG_BRIGHT_YELLOW "libc: recursive static initialization guard %p skipped by owner thread" DEFAULT "\n",
+			KYTY_LOG_WARN(FG_BRIGHT_YELLOW "libc: recursive static initialization guard %p skipped by owner thread" DEFAULT "\n",
 			       static_cast<void*>(g));
 			return 0;
 		}
@@ -1253,15 +1253,15 @@ static KYTY_SYSV_ABI int64_t c_xtime_get_ticks()
 
 static KYTY_SYSV_ABI void c_Xout_of_range(const char* msg)
 {
-	printf("std::out_of_range warning: %s\n", msg != nullptr ? msg : "");
+	KYTY_LOG_WARN("std::out_of_range warning: %s\n", msg != nullptr ? msg : "");
 }
 static KYTY_SYSV_ABI void c_Xlength_error(const char* msg)
 {
-	printf("std::length_error warning: %s\n", msg != nullptr ? msg : "");
+	KYTY_LOG_WARN("std::length_error warning: %s\n", msg != nullptr ? msg : "");
 }
 static KYTY_SYSV_ABI void c_Xregex_error(int error_type)
 {
-	printf("std::regex_error warning: error_type=%d\n", error_type);
+	KYTY_LOG_WARN("std::regex_error warning: error_type=%d\n", error_type);
 }
 
 // The guest C++ runtime calls this after a synchronization primitive reports
@@ -2578,7 +2578,7 @@ static KYTY_SYSV_ABI int atexit(void (*func)())
 {
 	PRINT_NAME();
 
-	Kyty::printf("func = %" PRIx64 "\n", reinterpret_cast<uint64_t>(func));
+	KYTY_LOG_DEBUG("func = %" PRIx64 "\n", reinterpret_cast<uint64_t>(func));
 
 	int ok = ::atexit(func);
 
@@ -2625,7 +2625,7 @@ static KYTY_SYSV_ABI void catchReturnFromMain(int status)
 {
 	PRINT_NAME();
 
-	Kyty::printf("return from main = %d\n", status);
+	KYTY_LOG_DEBUG("return from main = %d\n", status);
 }
 
 KYTY_SYSV_ABI int cxa_atexit(void (*func)(void*), void* arg, void* d)

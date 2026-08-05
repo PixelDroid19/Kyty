@@ -212,7 +212,7 @@ void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 		{
 			*label.dst_gpu_addr64 = label.value64;
 
-			printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%016" PRIx64 "\n" FG_DEFAULT,
+			KYTY_LOG_DEBUG(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%016" PRIx64 "\n" FG_DEFAULT,
 			       reinterpret_cast<uint64_t>(label.dst_gpu_addr64), label.value64);
 		}
 
@@ -220,7 +220,7 @@ void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 		{
 			*label.dst_gpu_addr32 = label.value32;
 
-			printf(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%08" PRIx32 "\n" FG_DEFAULT,
+			KYTY_LOG_DEBUG(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%08" PRIx32 "\n" FG_DEFAULT,
 			       reinterpret_cast<uint64_t>(label.dst_gpu_addr32), label.value32);
 		}
 	}

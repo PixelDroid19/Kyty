@@ -1777,7 +1777,7 @@ void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t h
 	const bool             dynamic_micro_tiled = tile == 13 && GetMicroTiledFormatLayout(dfmt, nfmt, &dynamic_micro_format);
 	if (tile != 31 && tile != 8 && infos == nullptr && !dynamic_display_thin && !dynamic_micro_tiled)
 	{
-		printf("WARNING: TileGetTextureSize unknown tile=%u dfmt=%u nfmt=%u %ux%u; estimating\n", tile, dfmt, nfmt, width, height);
+		KYTY_LOG_DEBUG("WARNING: TileGetTextureSize unknown tile=%u dfmt=%u nfmt=%u %ux%u; estimating\n", tile, dfmt, nfmt, width, height);
 	}
 
 	EXIT_IF(levels == 0 || levels > 16);
@@ -1889,7 +1889,7 @@ void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t h
 		// Unknown format: estimate a conservative size so the game continues.
 		const uint32_t bpp       = (dfmt == 10 && nfmt == 9) ? 4u : ((dfmt == 3 && nfmt == 0) ? 2u : 1u);
 		const uint64_t estimated = static_cast<uint64_t>(pitch) * height * bpp;
-		printf("WARNING: TileGetTextureSize unknown dfmt=%u nfmt=%u tile=%u %ux%u; estimating %llu bytes\n", dfmt, nfmt, tile, width,
+		KYTY_LOG_DEBUG("WARNING: TileGetTextureSize unknown dfmt=%u nfmt=%u tile=%u %ux%u; estimating %llu bytes\n", dfmt, nfmt, tile, width,
 		       height, (unsigned long long)estimated);
 		if (total_size != nullptr)
 		{

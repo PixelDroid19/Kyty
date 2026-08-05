@@ -284,7 +284,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 		{
 			case 0: r->format = VK_FORMAT_UNDEFINED; break;
 			case 1:
-				printf("WARNING: VK_FORMAT_S8_UINT not supported, using D32_SFLOAT\n");
+				KYTY_LOG_DEBUG("WARNING: VK_FORMAT_S8_UINT not supported, using D32_SFLOAT\n");
 				r->format = VK_FORMAT_D32_SFLOAT;
 				break;
 			case 2: r->format = VK_FORMAT_D16_UNORM; break;
@@ -292,7 +292,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 			case 6: r->format = VK_FORMAT_D32_SFLOAT; break;
 			case 7: r->format = VK_FORMAT_D32_SFLOAT_S8_UINT; break;
 			default:
-				printf("WARNING: unknown z/stencil format, using D32_SFLOAT\n");
+				KYTY_LOG_DEBUG("WARNING: unknown z/stencil format, using D32_SFLOAT\n");
 				r->format = VK_FORMAT_D32_SFLOAT;
 				break;
 		}

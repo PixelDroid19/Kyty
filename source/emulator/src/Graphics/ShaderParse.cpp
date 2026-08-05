@@ -56,7 +56,7 @@ KYTY_SHADER_PARSER(shader_parse)
 				case 0x3e: ptr += shader_parse_exp(pc, src, ptr, dst, next_gen); break;
 				default:
 				{
-					printf("%s", dst->DbgDump().c_str());
+					KYTY_LOG_DEBUG("%s", dst->DbgDump().c_str());
 					EXIT("unknown code 0x%08" PRIx32 " at addr 0x%08" PRIx32 "\n", ptr[0], pc);
 				}
 			}

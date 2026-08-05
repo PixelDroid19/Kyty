@@ -906,7 +906,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SSwappcB64_Sdst2Ssrc02)
 				)";
 					break;
 				default:
-					printf("WARNING: invalid registers_num %d in shader (continuing)\n", r.registers_num);
+					KYTY_LOG_DEBUG("WARNING: invalid registers_num %d in shader (continuing)\n", r.registers_num);
 					break;
 			}
 

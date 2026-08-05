@@ -25,11 +25,11 @@
 
 #define KYTY_TYPE_STR(s) [[maybe_unused]] static const char* type_str = s;
 #define KYTY_NI(i)                                                                                                                         \
-	printf("%s", dst->DbgDump().c_str());                                                                                                  \
+	KYTY_LOG_DEBUG("%s", dst->DbgDump().c_str());                                                                                                  \
 	EXIT("unknown %s instruction %s, opcode = 0x%" PRIx32 " at addr 0x%08" PRIx32 " (hash0 = 0x%08" PRIx32 ", crc32 = 0x%08" PRIx32 ")\n", \
 	     type_str, i, opcode, pc, dst->GetHash0(), dst->GetCrc32());
 #define KYTY_UNKNOWN_OP()                                                                                                                  \
-	printf("%s", dst->DbgDump().c_str());                                                                                                  \
+	KYTY_LOG_DEBUG("%s", dst->DbgDump().c_str());                                                                                                  \
 	EXIT("unknown %s opcode: 0x%" PRIx32 " at addr 0x%08" PRIx32 " (hash0 = 0x%08" PRIx32 ", crc32 = 0x%08" PRIx32 ")\n", type_str,        \
 	     opcode, pc, dst->GetHash0(), dst->GetCrc32());
 

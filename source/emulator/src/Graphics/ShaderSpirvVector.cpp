@@ -21,7 +21,7 @@ static uint32_t null_mrt_target(ShaderInstructionFormat::Format format)
 		case ShaderInstructionFormat::Mrt1OffOffComprVmDone: return 1;
 		case ShaderInstructionFormat::Mrt2OffOffComprVmDone: return 2;
 		case ShaderInstructionFormat::Mrt3OffOffComprVmDone: return 3;
-		printf("WARNING: not a null MRT done format (continuing)\n");
+		KYTY_LOG_DEBUG("WARNING: not a null MRT done format (continuing)\n");
 	}
 	return 0;
 }
@@ -3987,7 +3987,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Fetch)
 
 		if (inst.dst.size < 1 || inst.dst.size > 4 || r.registers_num < inst.dst.size || r.registers_num > 4)
 		{
-			printf("WARNING: invalid embedded fetch width in shader (continuing)\n");
+			KYTY_LOG_DEBUG("WARNING: invalid embedded fetch width in shader (continuing)\n");
 		}
 
 		if (r.registers_num > inst.dst.size)
@@ -4043,7 +4043,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Fetch)
 				)";
 				break;
 			default:
-				printf("WARNING: invalid registers_num %d in shader (continuing)\n", r.registers_num);
+				KYTY_LOG_DEBUG("WARNING: invalid registers_num %d in shader (continuing)\n", r.registers_num);
 				break;
 		}
 

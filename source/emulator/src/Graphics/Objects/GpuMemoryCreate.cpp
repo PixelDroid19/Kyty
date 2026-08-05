@@ -198,7 +198,7 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			}
 			if (changed)
 			{
-				printf("Update (CPU -> GPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 "\n",
+				KYTY_LOG_DEBUG("Update (CPU -> GPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 "\n",
 				       Core::EnumName(o.object.type).C_Str(), h.block.vaddr[vi], h.block.size[vi]);
 				need_update = true;
 			}
@@ -548,7 +548,7 @@ String GpuMemory::create_dbg_exit(const String& msg, const uint64_t* vaddr, cons
 	DbgDbDump();
 	DbgDbSave(U"_gpu_memory.db");
 	auto str = list.Concat(U'\n');
-	printf("%s\n", str.C_Str());
+	KYTY_LOG_DEBUG("%s\n", str.C_Str());
 	return str;
 }
 

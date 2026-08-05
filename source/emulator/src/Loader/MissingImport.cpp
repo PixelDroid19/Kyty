@@ -73,7 +73,7 @@ static KYTY_SYSV_ABI int64_t stub_impl()
 	bool expected = false;
 	if (meta.first_hit.compare_exchange_strong(expected, true, std::memory_order_relaxed))
 	{
-		Kyty::printf(FG_BRIGHT_RED "CALLED missing stub: %s [%s]" DEFAULT "\n", meta.name, meta.library);
+		KYTY_LOG_ERROR(FG_BRIGHT_RED "CALLED missing stub: %s [%s]" DEFAULT "\n", meta.name, meta.library);
 		std::fflush(stdout);
 	}
 	return kyty_missing_func_return_zero();

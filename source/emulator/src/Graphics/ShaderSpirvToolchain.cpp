@@ -39,7 +39,7 @@ static bool SpirvDisassemble(const uint32_t* src_binary, size_t src_binary_size,
 		{
 			*dst_disassembly = disassembly.c_str();
 
-			printf("Disassemble failed\n");
+			KYTY_LOG_DEBUG("Disassemble failed\n");
 			return false;
 		}
 
@@ -75,10 +75,10 @@ static bool SpirvCompile(const String8& src, Vector<uint32_t>* dst, String8* err
 	auto print_msg_to_stderr = [&error_position, &error_msg](spv_message_level_t /* level */, const char* /*source*/,
 	                                                         [[maybe_unused]] const spv_position_t& position, const char* m)
 	{
-		// printf("%s\n", source);
+		// KYTY_LOG_DEBUG("%s\n", source);
 		error_msg = String8::FromPrintf("%d: %d (%d) %s", static_cast<int>(position.line), static_cast<int>(position.column),
 		                                static_cast<int>(position.index), m);
-		printf(FG_BRIGHT_RED "error: %s\n" FG_DEFAULT, error_msg.c_str());
+		KYTY_LOG_DEBUG(FG_BRIGHT_RED "error: %s\n" FG_DEFAULT, error_msg.c_str());
 		error_position = position;
 	};
 	core.SetMessageConsumer(print_msg_to_stderr);
@@ -89,7 +89,7 @@ static bool SpirvCompile(const String8& src, Vector<uint32_t>* dst, String8* err
 	std::vector<uint32_t> spirv;
 	if (!core.Assemble(src.GetDataConst(), src.Size(), &spirv))
 	{
-		printf("Assemble failed at:\n%s\n", src.Mid(src.FindIndex('\n', error_position.index - 100), 200).c_str());
+		KYTY_LOG_DEBUG("Assemble failed at:\n%s\n", src.Mid(src.FindIndex('\n', error_position.index - 100), 200).c_str());
 		*err_msg = String8::FromPrintf("Assemble failed: %s\n%s\n", error_msg.c_str(),
 		                              src.Mid(src.FindIndex('\n', error_position.index - 100), 200).c_str());
 		return false;
@@ -99,8 +99,8 @@ static bool SpirvCompile(const String8& src, Vector<uint32_t>* dst, String8* err
 	{
 		String8 disassembly;
 		SpirvDisassemble(spirv.data(), spirv.size(), &disassembly);
-		printf("%s\n", disassembly.c_str());
-		printf("Validate failed\n");
+		KYTY_LOG_DEBUG("%s\n", disassembly.c_str());
+		KYTY_LOG_DEBUG("Validate failed\n");
 		*err_msg = String8::FromPrintf("%s\n\nValidate failed:\n%s\n", Log::RemoveColors(String::FromUtf8(disassembly.c_str())).C_Str(),
 		                               error_msg.c_str());
 		return false;
@@ -119,7 +119,7 @@ static bool SpirvCompile(const String8& src, Vector<uint32_t>* dst, String8* err
 		// Keep the assembled module when the optimizer rejects structured CFG
 		// that the driver may still accept. Prefer optimized output when Run
 		// succeeds; never invent a replacement module.
-		printf("WARNING: Optimize failed, using unoptimized SPIR-V: %s\n", error_msg.c_str());
+		KYTY_LOG_DEBUG("WARNING: Optimize failed, using unoptimized SPIR-V: %s\n", error_msg.c_str());
 		error_msg.Clear();
 	}
 
