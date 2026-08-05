@@ -1,4 +1,4 @@
-#include "Emulator/Graphics/Image.h"
+#include "Emulator/Graphics/ImageAsset.h"
 
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/File.h"
@@ -47,9 +47,9 @@ bool RectIsInside(uint32_t width, uint32_t height, const Math::Rect& rect)
 
 } // namespace
 
-Image::Image(const String& name): m_name(name) {}
+ImageAsset::ImageAsset(const String& name): m_name(name) {}
 
-Image::~Image()
+ImageAsset::~ImageAsset()
 {
 	if (m_image != nullptr)
 	{
@@ -57,7 +57,7 @@ Image::~Image()
 	}
 }
 
-void Image::LoadHostSurface(::Kyty::Emulator::Host::HostImageSurface* surface)
+void ImageAsset::LoadHostSurface(::Kyty::Emulator::Host::HostImageSurface* surface)
 {
 	EXIT_IF(surface == nullptr);
 
@@ -72,13 +72,13 @@ void Image::LoadHostSurface(::Kyty::Emulator::Host::HostImageSurface* surface)
 	m_pixels              = m_image->GetPixels();
 }
 
-void Image::Load(const String& file_name)
+void ImageAsset::Load(const String& file_name)
 {
 	m_name = file_name;
 	Load();
 }
 
-void Image::Load()
+void ImageAsset::Load()
 {
 	if (m_image != nullptr)
 	{
@@ -106,18 +106,18 @@ void Image::Load()
 	}
 }
 
-void Image::LoadSdl(void* surface)
+void ImageAsset::LoadSdl(void* surface)
 {
 	LoadHostSurface(::Kyty::Emulator::Host::HostImageSurface::FromNative(surface));
 }
 
-void Image::DbgPrint() const
+void ImageAsset::DbgPrint() const
 {
 	EXIT_IF(m_image == nullptr);
 	m_image->DbgPrint(m_name);
 }
 
-bool Image::DbgEqual(const Image* img) const
+bool ImageAsset::DbgEqual(const ImageAsset* img) const
 {
 	if (m_width != img->m_width || m_height != img->m_height || m_pitch != img->m_pitch || m_bits_per_pixel != img->m_bits_per_pixel ||
 	    m_order != img->m_order)
@@ -139,7 +139,7 @@ bool Image::DbgEqual(const Image* img) const
 	return true;
 }
 
-void Image::Save(const String& file_name) const
+void ImageAsset::Save(const String& file_name) const
 {
 	EXIT_IF(m_image == nullptr);
 
@@ -156,9 +156,9 @@ void Image::Save(const String& file_name) const
 	}
 }
 
-Image* Image::Clone() const
+ImageAsset* ImageAsset::Clone() const
 {
-	auto* image = new Image(m_name);
+	auto* image = new ImageAsset(m_name);
 	if (m_image != nullptr)
 	{
 		image->LoadHostSurface(m_image->Clone());
@@ -166,14 +166,14 @@ Image* Image::Clone() const
 	return image;
 }
 
-Image* Image::Create(const String& name, uint32_t width, uint32_t height, int bits_per_pixel)
+ImageAsset* ImageAsset::Create(const String& name, uint32_t width, uint32_t height, int bits_per_pixel)
 {
-	auto* image = new Image(name);
+	auto* image = new ImageAsset(name);
 	image->LoadHostSurface(::Kyty::Emulator::Host::HostImageSurface::Create(width, height, bits_per_pixel));
 	return image;
 }
 
-rgba32_t Image::GetPixel(uint32_t x, uint32_t y) const
+rgba32_t ImageAsset::GetPixel(uint32_t x, uint32_t y) const
 {
 	if (m_order == ImageOrder::Rgb && m_bits_per_pixel == 24)
 	{
@@ -191,7 +191,7 @@ rgba32_t Image::GetPixel(uint32_t x, uint32_t y) const
 	return 0;
 }
 
-void Image::SetPixel(uint32_t x, uint32_t y, rgba32_t color)
+void ImageAsset::SetPixel(uint32_t x, uint32_t y, rgba32_t color)
 {
 	if (m_order == ImageOrder::Rgb && m_bits_per_pixel == 24)
 	{
@@ -212,7 +212,7 @@ void Image::SetPixel(uint32_t x, uint32_t y, rgba32_t color)
 	}
 }
 
-rgba32_t Image::GetAvgPixel(uint32_t x, uint32_t y, uint32_t width, uint32_t height) const
+rgba32_t ImageAsset::GetAvgPixel(uint32_t x, uint32_t y, uint32_t width, uint32_t height) const
 {
 	EXIT_IF(x >= m_width);
 	EXIT_IF(y >= m_height);
@@ -235,7 +235,7 @@ rgba32_t Image::GetAvgPixel(uint32_t x, uint32_t y, uint32_t width, uint32_t hei
 	return Color(sum).ToRgba32();
 }
 
-bool Image::BlitTo(Image* image, const Math::Rect& source, const Math::Rect& destination) const
+bool ImageAsset::BlitTo(ImageAsset* image, const Math::Rect& source, const Math::Rect& destination) const
 {
 	EXIT_IF(image == nullptr || m_image == nullptr || image->m_image == nullptr);
 	EXIT_IF(!RectIsInside(m_width, m_height, source) || !RectIsInside(image->m_width, image->m_height, destination));
@@ -243,13 +243,13 @@ bool Image::BlitTo(Image* image, const Math::Rect& source, const Math::Rect& des
 	return m_image->BlitTo(image->m_image, ToHostRect(source), ToHostRect(destination));
 }
 
-void* Image::GetSdlSurface() const
+void* ImageAsset::GetSdlSurface() const
 {
 	EXIT_IF(m_image == nullptr);
 	return m_image->GetNativeHandle();
 }
 
-Math::Size Image::GetSize(const String& name)
+Math::Size ImageAsset::GetSize(const String& name)
 {
 	if (!name.EndsWith(U".png", String::Case::Insensitive))
 	{

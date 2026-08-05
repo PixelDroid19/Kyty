@@ -19,7 +19,7 @@
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
-#include "Emulator/Graphics/Image.h"
+#include "Emulator/Graphics/ImageAsset.h"
 #include "Emulator/Graphics/KeyboardInput.h"
 #include "Emulator/Graphics/NativeCapture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
@@ -2911,7 +2911,7 @@ void WindowUpdateIcon()
 	EXIT_IF(g_window_ctx == nullptr);
 	EXIT_IF(g_window_ctx->host_window == nullptr);
 
-	static Image* icon = nullptr;
+	static ImageAsset* icon = nullptr;
 	if (icon == nullptr)
 	{
 		String icon_path;
@@ -2919,7 +2919,7 @@ void WindowUpdateIcon()
 		{
 			return;
 		}
-		icon = new Image(icon_path);
+		icon = new ImageAsset(icon_path);
 		icon->Load();
 	}
 

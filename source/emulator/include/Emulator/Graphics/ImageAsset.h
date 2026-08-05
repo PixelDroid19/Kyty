@@ -1,5 +1,5 @@
-#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_IMAGE_H_
-#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_IMAGE_H_
+#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_IMAGE_ASSET_H_
+#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_IMAGE_ASSET_H_
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/String.h"
@@ -28,13 +28,13 @@ enum class ImageOrder
 	Alpha
 };
 
-class Image
+class ImageAsset
 {
 public:
-	explicit Image(const String& name);
-	virtual ~Image();
+	explicit ImageAsset(const String& name);
+	virtual ~ImageAsset();
 
-	[[nodiscard]] Image* Clone() const;
+	[[nodiscard]] ImageAsset* Clone() const;
 
 	void LoadSdl(void* sdl);
 	void Load();
@@ -57,18 +57,18 @@ public:
 	[[nodiscard]] void*       GetSdlSurface() const;
 
 	void DbgPrint() const;
-	bool DbgEqual(const Image* img) const;
+	bool DbgEqual(const ImageAsset* img) const;
 
-	static Image*     Create(const String& name, uint32_t width, uint32_t height, int bits_per_pixel);
+	static ImageAsset*     Create(const String& name, uint32_t width, uint32_t height, int bits_per_pixel);
 	static Math::Size GetSize(const String& name);
 
-	bool BlitTo(Image* img, const Math::Rect& src, const Math::Rect& dst) const;
+	bool BlitTo(ImageAsset* img, const Math::Rect& src, const Math::Rect& dst) const;
 
 	[[nodiscard]] rgba32_t GetPixel(uint32_t x, uint32_t y) const;
 	[[nodiscard]] rgba32_t GetAvgPixel(uint32_t x, uint32_t y, uint32_t width, uint32_t height) const;
 	void                   SetPixel(uint32_t x, uint32_t y, rgba32_t color);
 
-	KYTY_CLASS_NO_COPY(Image);
+	KYTY_CLASS_NO_COPY(ImageAsset);
 
 private:
 	void LoadHostSurface(::Kyty::Emulator::Host::HostImageSurface* surface);
@@ -83,8 +83,13 @@ private:
 	::Kyty::Emulator::Host::HostImageSurface* m_image = nullptr;
 };
 
+// Source compatibility for out-of-tree graphics callers. New code should use
+// ImageAsset so the distinction from VulkanImage and HostImageSurface is
+// explicit at the call site.
+using Image = ImageAsset;
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED
 
-#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_IMAGE_H_ */
+#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_IMAGE_ASSET_H_ */
