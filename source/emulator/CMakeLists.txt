@@ -15,6 +15,7 @@ file(GLOB emulator_src CONFIGURE_DEPENDS
 # graphics/audio/loader monolith.
 file(GLOB kernel_src CONFIGURE_DEPENDS src/Kernel/*.cpp)
 list(REMOVE_ITEM emulator_src ${kernel_src})
+list(REMOVE_ITEM emulator_src "${CMAKE_CURRENT_SOURCE_DIR}/src/AudioVideoBackend.cpp")
 list(REMOVE_ITEM emulator_src "${CMAKE_CURRENT_SOURCE_DIR}/src/AudioPcm.cpp")
 
 if (MSVC AND CLANG)
@@ -25,6 +26,7 @@ endif()
 #add_library(emulator STATIC $<TARGET_OBJECTS:emulator_obj>)
 add_library(emulator STATIC ${emulator_src})
 add_library(kyty_kernel STATIC ${kernel_src})
+add_library(kyty_audio_video_backend STATIC src/AudioVideoBackend.cpp)
 
 # Fail at configure time if a future glob or explicit source entry collapses
 # the kernel back into the emulator archive.
@@ -160,6 +162,7 @@ add_dependencies(emulator KytyBuildInfo)
 target_link_libraries(emulator
 	PUBLIC
 	kyty_kernel
+	kyty_audio_video_backend
 	core
 	math
 	scripts
@@ -182,6 +185,12 @@ target_include_directories(kyty_kernel PUBLIC
 	"${CMAKE_SOURCE_DIR}/include"
 )
 target_link_libraries(kyty_kernel PUBLIC core math sys scripts)
+
+target_include_directories(kyty_audio_video_backend PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(kyty_audio_video_backend PUBLIC core)
 
 if(MSVC OR MINGW)
 	target_link_libraries(emulator PRIVATE psapi)
@@ -220,7 +229,9 @@ if (LINUX)
 	endif()
 	if (KYTY_FFMPEG_FOUND)
 		target_link_libraries(emulator PRIVATE PkgConfig::KYTY_FFMPEG)
+		target_link_libraries(kyty_audio_video_backend PRIVATE PkgConfig::KYTY_FFMPEG)
 		target_compile_definitions(emulator PRIVATE KYTY_HAVE_FFMPEG=1)
+		target_compile_definitions(kyty_audio_video_backend PRIVATE KYTY_HAVE_FFMPEG=1)
 	endif()
 endif()
 
