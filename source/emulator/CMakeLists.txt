@@ -143,7 +143,6 @@ target_link_libraries(emulator
 	core
 	math
 	scripts
-	kyty_agent_transport
 	vulkan-1
 	spirv-tools-opt
 	spirv-tools
@@ -151,6 +150,10 @@ target_link_libraries(emulator
 	imgui
 	SDL2-static
 	PRIVATE
+		# The runtime agent owns its local transport. Keep it out of the
+		# emulator's transitive link interface; host executables that expose
+		# the agent endpoint opt in explicitly below.
+		kyty_agent_transport
 		kyty_audio_pcm
 )
 

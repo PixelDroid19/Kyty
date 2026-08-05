@@ -259,6 +259,7 @@ if(KYTY_BUILD_UNIT_TESTS)
 		lua
 		SDL2-static
 		emulator
+		kyty_agent_transport
 	)
 	if(TARGET kyty_devtools_supervisor)
 		target_link_libraries(kyty_unit_test PRIVATE kyty_devtools_supervisor)
@@ -309,6 +310,7 @@ target_link_libraries(fc_script scripts)
 target_link_libraries(fc_script lua)
 target_link_libraries(fc_script SDL2-static)
 target_link_libraries(fc_script emulator)
+target_link_libraries(fc_script kyty_agent_transport)
 target_link_libraries(fc_script kyty_runtime_devtools)
 if(TARGET kyty_devtools_supervisor)
 	target_link_libraries(fc_script kyty_devtools_supervisor)
