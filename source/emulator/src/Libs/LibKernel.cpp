@@ -185,7 +185,7 @@ static KYTY_SYSV_ABI KernelModule KernelLoadStartModule(const char* module_file_
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	const auto module_path = FileSystem::GetRealFilename(String::FromUtf8(module_file_name));
+	const auto module_path = Kernel::FileSystem::GetRealFilename(String::FromUtf8(module_file_name));
 	if (!Core::File::IsFileExisting(module_path))
 	{
 		if (res != nullptr)
@@ -356,10 +356,10 @@ static int64_t KYTY_SYSV_ABI write(int d, const char* str, int64_t size)
 
 	if (d > 2)
 	{
-		return POSIX_N_CALL(FileSystem::KernelWrite(d, str, static_cast<size_t>(size)));
+		return POSIX_N_CALL(Kernel::FileSystem::KernelWrite(d, str, static_cast<size_t>(size)));
 	}
 
-	if (d == 0 || !FileSystem::KernelIsStandardDescriptorOpen(d))
+	if (d == 0 || !Kernel::FileSystem::KernelIsStandardDescriptorOpen(d))
 	{
 		return POSIX_N_CALL(KERNEL_ERROR_EBADF);
 	}
@@ -384,17 +384,17 @@ static int64_t KYTY_SYSV_ABI write(int d, const char* str, int64_t size)
 
 static int KYTY_SYSV_ABI open(const char* path, int flags, int mode)
 {
-	return POSIX_N_CALL(FileSystem::KernelOpen(path, flags, mode));
+	return POSIX_N_CALL(Kernel::FileSystem::KernelOpen(path, flags, mode));
 }
 
 static int KYTY_SYSV_ABI close(int d)
 {
-	return POSIX_CALL(FileSystem::KernelClose(d));
+	return POSIX_CALL(Kernel::FileSystem::KernelClose(d));
 }
 
 static int64_t KYTY_SYSV_ABI lseek(int d, int64_t offset, int whence)
 {
-	return POSIX_N_CALL(FileSystem::KernelLseek(d, offset, whence));
+	return POSIX_N_CALL(Kernel::FileSystem::KernelLseek(d, offset, whence));
 }
 
 static int64_t KYTY_SYSV_ABI read(int d, void* buf, uint64_t nbytes)
@@ -407,10 +407,10 @@ static int64_t KYTY_SYSV_ABI read(int d, void* buf, uint64_t nbytes)
 
 	if (d > 2)
 	{
-		return POSIX_N_CALL(FileSystem::KernelRead(d, buf, nbytes));
+		return POSIX_N_CALL(Kernel::FileSystem::KernelRead(d, buf, nbytes));
 	}
 
-	if (d != 0 || !FileSystem::KernelIsStandardDescriptorOpen(d))
+	if (d != 0 || !Kernel::FileSystem::KernelIsStandardDescriptorOpen(d))
 	{
 		return POSIX_N_CALL(KERNEL_ERROR_EBADF);
 	}
@@ -433,27 +433,27 @@ static int64_t KYTY_SYSV_ABI read(int d, void* buf, uint64_t nbytes)
 
 static int64_t KYTY_SYSV_ABI pread(int d, void* buf, size_t nbytes, int64_t offset)
 {
-	return POSIX_N_CALL(FileSystem::KernelPread(d, buf, nbytes, offset));
+	return POSIX_N_CALL(Kernel::FileSystem::KernelPread(d, buf, nbytes, offset));
 }
 
 static int64_t KYTY_SYSV_ABI pwrite(int d, const void* buf, size_t nbytes, int64_t offset)
 {
-	return POSIX_N_CALL(FileSystem::KernelPwrite(d, buf, nbytes, offset));
+	return POSIX_N_CALL(Kernel::FileSystem::KernelPwrite(d, buf, nbytes, offset));
 }
 
 static int KYTY_SYSV_ABI dup(int old_d)
 {
-	return POSIX_N_CALL(FileSystem::KernelDup(old_d));
+	return POSIX_N_CALL(Kernel::FileSystem::KernelDup(old_d));
 }
 
 static int KYTY_SYSV_ABI dup2(int old_d, int new_d)
 {
-	return POSIX_N_CALL(FileSystem::KernelDup2(old_d, new_d));
+	return POSIX_N_CALL(Kernel::FileSystem::KernelDup2(old_d, new_d));
 }
 
-static int KYTY_SYSV_ABI poll(FileSystem::KernelPollFd* fds, uint32_t count, int timeout)
+static int KYTY_SYSV_ABI poll(Kernel::FileSystem::KernelPollFd* fds, uint32_t count, int timeout)
 {
-	return POSIX_N_CALL(FileSystem::KernelPoll(fds, count, timeout));
+	return POSIX_N_CALL(Kernel::FileSystem::KernelPoll(fds, count, timeout));
 }
 
 namespace {
@@ -880,7 +880,7 @@ static void PrintGuestRaiseLocation(uint64_t return_address)
 	             ", return addr=0x%016" PRIx64 "\n",
 	             error, argument, return_address);
 	PrintGuestRaiseLocation(return_address);
-	LibKernel::PthreadExit(reinterpret_cast<void*>(error));
+	Kernel::PthreadExit(reinterpret_cast<void*>(error));
 	__builtin_unreachable();
 }
 
@@ -1163,7 +1163,7 @@ static int KYTY_SYSV_ABI KernelInstallExceptionHandler(int signum, void* handler
 	return OK;
 }
 
-int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum)
+int KYTY_SYSV_ABI KernelRaiseException(Kernel::Pthread thread, int signum)
 {
 	if (thread == nullptr || signum != 30)
 	{
@@ -1336,11 +1336,11 @@ int KYTY_SYSV_ABI KernelIsNeoMode()
 	return (Config::IsNeo() ? 1 : 0);
 }
 
-int KYTY_SYSV_ABI clock_gettime(int clock_id, LibKernel::KernelTimespec* time)
+int KYTY_SYSV_ABI clock_gettime(int clock_id, Kernel::KernelTimespec* time)
 {
 	PRINT_NAME();
 
-	return POSIX_CALL(LibKernel::KernelClockGettime(clock_id, time));
+	return POSIX_CALL(Kernel::KernelClockGettime(clock_id, time));
 }
 
 void KYTY_SYSV_ABI KernelSetGPO(uint32_t bits)
@@ -1357,7 +1357,7 @@ void KYTY_SYSV_ABI KernelSetGPO(uint32_t bits)
 static int KYTY_SYSV_ABI KernelGetGPI()
 {
 	PRINT_NAME();
-	return KernelRetailGetGpiResult();
+	return Kernel::KernelRetailGetGpiResult();
 }
 
 // sceKernelIsTrinityMode — NID tU5e3f9gSiU. Base PS5 mode reports 0.
@@ -1389,30 +1389,30 @@ static int KYTY_SYSV_ABI PosixFdatasync(int fd)
 	return POSIX_CALL(KernelFsync(fd));
 }
 
-static int64_t KYTY_SYSV_ABI PosixFstat(int fd, FileSystem::FileStat* stat)
+static int64_t KYTY_SYSV_ABI PosixFstat(int fd, Kernel::FileSystem::FileStat* stat)
 {
-	return POSIX_N_CALL(FileSystem::KernelFstat(fd, stat));
+	return POSIX_N_CALL(Kernel::FileSystem::KernelFstat(fd, stat));
 }
 
 static int KYTY_SYSV_ABI PosixFcntl(int fd, int command, int64_t argument)
 {
-	return POSIX_CALL(FileSystem::KernelFcntl(fd, command, argument));
+	return POSIX_CALL(Kernel::FileSystem::KernelFcntl(fd, command, argument));
 }
 
 static int KYTY_SYSV_ABI PosixFtruncate(int fd, int64_t length)
 {
-	return POSIX_CALL(FileSystem::KernelFtruncate(fd, length));
+	return POSIX_CALL(Kernel::FileSystem::KernelFtruncate(fd, length));
 }
 
 static int KYTY_SYSV_ABI PosixUnlink(const char* path)
 {
-	return POSIX_N_CALL(FileSystem::KernelUnlink(path));
+	return POSIX_N_CALL(Kernel::FileSystem::KernelUnlink(path));
 }
 
 static int KYTY_SYSV_ABI PosixRename(const char* from, const char* to)
 {
 	PRINT_NAME();
-	return POSIX_CALL(LibKernel::FileSystem::KernelRename(from, to));
+	return POSIX_CALL(Kernel::FileSystem::KernelRename(from, to));
 }
 
 static int KYTY_SYSV_ABI PosixInetPton(int af, const char* src, void* dst)
@@ -1585,23 +1585,23 @@ int KYTY_SYSV_ABI getpid()
 
 // Gen5 Posix_v1 pthread_self — NID EotR8a3ASf4. Same guest thread object as
 // scePthreadSelf; Astro stores the returned pthread_t into audio context state.
-LibKernel::Pthread KYTY_SYSV_ABI pthread_self()
+Kernel::Pthread KYTY_SYSV_ABI pthread_self()
 {
-	return LibKernel::PthreadSelf();
+	return Kernel::PthreadSelf();
 }
 
-int KYTY_SYSV_ABI clock_gettime(int clock_id, LibKernel::KernelTimespec* time)
+int KYTY_SYSV_ABI clock_gettime(int clock_id, Kernel::KernelTimespec* time)
 {
 	PRINT_NAME();
 
-	return POSIX_CALL(LibKernel::KernelClockGettime(clock_id, time));
+	return POSIX_CALL(Kernel::KernelClockGettime(clock_id, time));
 }
 
-int KYTY_SYSV_ABI clock_getres(int clock_id, LibKernel::KernelTimespec* res)
+int KYTY_SYSV_ABI clock_getres(int clock_id, Kernel::KernelTimespec* res)
 {
 	PRINT_NAME();
 
-	return POSIX_CALL(LibKernel::KernelClockGetres(clock_id, res));
+	return POSIX_CALL(Kernel::KernelClockGetres(clock_id, res));
 }
 
 int KYTY_SYSV_ABI getpagesize()
@@ -1618,13 +1618,13 @@ struct KernelTimezone
 	int32_t tz_dsttime;
 };
 
-int KYTY_SYSV_ABI gettimeofday(LibKernel::KernelTimeval* time, KernelTimezone* timezone)
+int KYTY_SYSV_ABI gettimeofday(Kernel::KernelTimeval* time, KernelTimezone* timezone)
 {
 	PRINT_NAME();
 
 	if (time != nullptr)
 	{
-		const int status = POSIX_CALL(LibKernel::KernelGettimeofday(time));
+		const int status = POSIX_CALL(Kernel::KernelGettimeofday(time));
 		if (status != 0)
 		{
 			return status;
@@ -1640,11 +1640,11 @@ int KYTY_SYSV_ABI gettimeofday(LibKernel::KernelTimeval* time, KernelTimezone* t
 	return 0;
 }
 
-int KYTY_SYSV_ABI nanosleep(const LibKernel::KernelTimespec* rqtp, LibKernel::KernelTimespec* rmtp)
+int KYTY_SYSV_ABI nanosleep(const Kernel::KernelTimespec* rqtp, Kernel::KernelTimespec* rmtp)
 {
 	PRINT_NAME();
 
-	return POSIX_CALL(LibKernel::KernelNanosleep(rqtp, rmtp));
+	return POSIX_CALL(Kernel::KernelNanosleep(rqtp, rmtp));
 }
 
 // Gen5 Posix_v1 usleep — NID QcteRwbsnV0 (Astro after Setschedparam; rdi=µs).
@@ -1652,21 +1652,21 @@ int KYTY_SYSV_ABI usleep(unsigned int microseconds)
 {
 	PRINT_NAME();
 
-	return POSIX_CALL(LibKernel::KernelUsleep(microseconds));
+	return POSIX_CALL(Kernel::KernelUsleep(microseconds));
 }
 
-int KYTY_SYSV_ABI stat(const char* path, LibKernel::FileSystem::FileStat* sb)
+int KYTY_SYSV_ABI stat(const char* path, Kernel::FileSystem::FileStat* sb)
 {
 	PRINT_NAME();
 
-	return POSIX_CALL(LibKernel::FileSystem::KernelStat(path, sb));
+	return POSIX_CALL(Kernel::FileSystem::KernelStat(path, sb));
 }
 
 int KYTY_SYSV_ABI mkdir(const char* path, uint16_t mode)
 {
 	PRINT_NAME();
 
-	return POSIX_CALL(LibKernel::FileSystem::KernelMkdir(path, mode));
+	return POSIX_CALL(Kernel::FileSystem::KernelMkdir(path, mode));
 }
 
 int KYTY_SYSV_ABI flock(int descriptor, int operation)
@@ -1686,8 +1686,8 @@ int KYTY_SYSV_ABI flock(int descriptor, int operation)
 	// Guest file descriptors are emulator-managed handles, so validating the
 	// descriptor is sufficient for this single-process runtime. The lock has no
 	// additional host-visible effect until multi-process guest execution exists.
-	LibKernel::FileSystem::FileStat stat {};
-	const int                       result = LibKernel::FileSystem::KernelFstat(descriptor, &stat);
+	Kernel::FileSystem::FileStat stat {};
+	const int                       result = Kernel::FileSystem::KernelFstat(descriptor, &stat);
 	if (result != OK)
 	{
 		*GetErrorAddr() = LibKernel::KernelToPosix(result);
@@ -1856,12 +1856,12 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 
 } // namespace Posix
 
-namespace FileSystem    = LibKernel::FileSystem;
-namespace Memory        = LibKernel::Memory;
-namespace SyncOnAddress = LibKernel::SyncOnAddress;
-namespace EventQueue    = LibKernel::EventQueue;
-namespace EventFlag     = LibKernel::EventFlag;
-namespace Semaphore     = LibKernel::Semaphore;
+namespace FileSystem    = Kernel::FileSystem;
+namespace Memory        = Kernel::Memory;
+namespace SyncOnAddress = Kernel::SyncOnAddress;
+namespace EventQueue    = Kernel::EventQueue;
+namespace EventFlag     = Kernel::EventFlag;
+namespace Semaphore     = Kernel::Semaphore;
 
 LIB_DEFINE(InitLibKernel_1_FS)
 {
@@ -1981,95 +1981,95 @@ LIB_DEFINE(InitLibKernel_1_Semaphore)
 
 LIB_DEFINE(InitLibKernel_1_Pthread)
 {
-	LIB_FUNC("9UK1vLZQft4", LibKernel::PthreadMutexLock);
-	LIB_FUNC("tn3VlD0hG60", LibKernel::PthreadMutexUnlock);
-	LIB_FUNC("2Of0f+3mhhE", LibKernel::PthreadMutexDestroy);
-	LIB_FUNC("cmo1RIYva9o", LibKernel::PthreadMutexInit);
-	LIB_FUNC("upoVrzMHFeE", LibKernel::PthreadMutexTrylock);
-	LIB_FUNC("smWEktiyyG0", LibKernel::PthreadMutexattrDestroy);
-	LIB_FUNC("F8bUHwAG284", LibKernel::PthreadMutexattrInit);
-	LIB_FUNC("iMp8QpE+XO4", LibKernel::PthreadMutexattrSettype);
-	LIB_FUNC("1FGvU0i9saQ", LibKernel::PthreadMutexattrSetprotocol);
+	LIB_FUNC("9UK1vLZQft4", Kernel::PthreadMutexLock);
+	LIB_FUNC("tn3VlD0hG60", Kernel::PthreadMutexUnlock);
+	LIB_FUNC("2Of0f+3mhhE", Kernel::PthreadMutexDestroy);
+	LIB_FUNC("cmo1RIYva9o", Kernel::PthreadMutexInit);
+	LIB_FUNC("upoVrzMHFeE", Kernel::PthreadMutexTrylock);
+	LIB_FUNC("smWEktiyyG0", Kernel::PthreadMutexattrDestroy);
+	LIB_FUNC("F8bUHwAG284", Kernel::PthreadMutexattrInit);
+	LIB_FUNC("iMp8QpE+XO4", Kernel::PthreadMutexattrSettype);
+	LIB_FUNC("1FGvU0i9saQ", Kernel::PthreadMutexattrSetprotocol);
 
-	LIB_FUNC("aI+OeCz8xrQ", LibKernel::PthreadSelf);
-	LIB_FUNC("6UgtwV+0zb4", LibKernel::PthreadCreate);
-	LIB_FUNC("3PtV6p3QNX4", LibKernel::PthreadEqual);
-	LIB_FUNC("onNY9Byn-W8", LibKernel::PthreadJoin);
-	LIB_FUNC("3kg7rT0NQIs", LibKernel::PthreadExit);
-	LIB_FUNC("4qGrR6eoP9Y", LibKernel::PthreadDetach);
-	LIB_FUNC("How7B8Oet6k", LibKernel::PthreadGetname);
-	LIB_FUNC("GBUY7ywdULE", LibKernel::PthreadRename);
-	LIB_FUNC("rcrVFJsQWRY", LibKernel::PthreadGetaffinity);
-	LIB_FUNC("P41kTWUS3EI", LibKernel::PthreadGetschedparam);
-	LIB_FUNC("oIRFTjoILbg", LibKernel::PthreadSetschedparam);
-	LIB_FUNC("bt3CTBKmGyI", LibKernel::PthreadSetaffinity);
-	LIB_FUNC("1tKyG7RlMJo", LibKernel::PthreadGetprio);
-	LIB_FUNC("W0Hpm2X0uPE", LibKernel::PthreadSetprio);
-	LIB_FUNC("T72hz6ffq08", LibKernel::PthreadYield);
-	LIB_FUNC("EI-5-jlq2dE", LibKernel::PthreadGetthreadid);
+	LIB_FUNC("aI+OeCz8xrQ", Kernel::PthreadSelf);
+	LIB_FUNC("6UgtwV+0zb4", Kernel::PthreadCreate);
+	LIB_FUNC("3PtV6p3QNX4", Kernel::PthreadEqual);
+	LIB_FUNC("onNY9Byn-W8", Kernel::PthreadJoin);
+	LIB_FUNC("3kg7rT0NQIs", Kernel::PthreadExit);
+	LIB_FUNC("4qGrR6eoP9Y", Kernel::PthreadDetach);
+	LIB_FUNC("How7B8Oet6k", Kernel::PthreadGetname);
+	LIB_FUNC("GBUY7ywdULE", Kernel::PthreadRename);
+	LIB_FUNC("rcrVFJsQWRY", Kernel::PthreadGetaffinity);
+	LIB_FUNC("P41kTWUS3EI", Kernel::PthreadGetschedparam);
+	LIB_FUNC("oIRFTjoILbg", Kernel::PthreadSetschedparam);
+	LIB_FUNC("bt3CTBKmGyI", Kernel::PthreadSetaffinity);
+	LIB_FUNC("1tKyG7RlMJo", Kernel::PthreadGetprio);
+	LIB_FUNC("W0Hpm2X0uPE", Kernel::PthreadSetprio);
+	LIB_FUNC("T72hz6ffq08", Kernel::PthreadYield);
+	LIB_FUNC("EI-5-jlq2dE", Kernel::PthreadGetthreadid);
 
-	LIB_FUNC("62KCwEMmzcM", LibKernel::PthreadAttrDestroy);
-	LIB_FUNC("x1X76arYMxU", LibKernel::PthreadAttrGet);
-	LIB_FUNC("8+s5BzZjxSg", LibKernel::PthreadAttrGetaffinity);
-	LIB_FUNC("nsYoNRywwNg", LibKernel::PthreadAttrInit);
-	LIB_FUNC("JaRMy+QcpeU", LibKernel::PthreadAttrGetdetachstate);
-	LIB_FUNC("FXPWHNk8Of0", LibKernel::PthreadAttrGetschedparam);
-	LIB_FUNC("Ru36fiTtJzA", LibKernel::PthreadAttrGetstackaddr);
-	LIB_FUNC("-fA+7ZlGDQs", LibKernel::PthreadAttrGetstacksize);
+	LIB_FUNC("62KCwEMmzcM", Kernel::PthreadAttrDestroy);
+	LIB_FUNC("x1X76arYMxU", Kernel::PthreadAttrGet);
+	LIB_FUNC("8+s5BzZjxSg", Kernel::PthreadAttrGetaffinity);
+	LIB_FUNC("nsYoNRywwNg", Kernel::PthreadAttrInit);
+	LIB_FUNC("JaRMy+QcpeU", Kernel::PthreadAttrGetdetachstate);
+	LIB_FUNC("FXPWHNk8Of0", Kernel::PthreadAttrGetschedparam);
+	LIB_FUNC("Ru36fiTtJzA", Kernel::PthreadAttrGetstackaddr);
+	LIB_FUNC("-fA+7ZlGDQs", Kernel::PthreadAttrGetstacksize);
 	// Captured post-TLS REX fix on Gen5 eboot: worker thread after Attr set/get
 	// stack fields calls a 3-arg PLT (attr, void**, size_t*) matching
 	// PthreadAttrGetstack; import NID -quPa4SEJUw (strict Unpatched otherwise).
-	LIB_FUNC("-quPa4SEJUw", LibKernel::PthreadAttrGetstack);
-	LIB_FUNC("txHtngJ+eyc", LibKernel::PthreadAttrGetguardsize);
-	LIB_FUNC("UTXzJbWhhTE", LibKernel::PthreadAttrSetstacksize);
+	LIB_FUNC("-quPa4SEJUw", Kernel::PthreadAttrGetstack);
+	LIB_FUNC("txHtngJ+eyc", Kernel::PthreadAttrGetguardsize);
+	LIB_FUNC("UTXzJbWhhTE", Kernel::PthreadAttrSetstacksize);
 	// Gen5 NID (stack addr+size in one call).
-	LIB_FUNC("Bvn74vj6oLo", LibKernel::PthreadAttrSetstack);
-	LIB_FUNC("-Wreprtu0Qs", LibKernel::PthreadAttrSetdetachstate);
-	LIB_FUNC("El+cQ20DynU", LibKernel::PthreadAttrSetguardsize);
-	LIB_FUNC("eXbUSpEaTsA", LibKernel::PthreadAttrSetinheritsched);
-	LIB_FUNC("DzES9hQF4f4", LibKernel::PthreadAttrSetschedparam);
-	LIB_FUNC("4+h9EzwKF4I", LibKernel::PthreadAttrSetschedpolicy);
-	LIB_FUNC("3qxgM4ezETA", LibKernel::PthreadAttrSetaffinity);
+	LIB_FUNC("Bvn74vj6oLo", Kernel::PthreadAttrSetstack);
+	LIB_FUNC("-Wreprtu0Qs", Kernel::PthreadAttrSetdetachstate);
+	LIB_FUNC("El+cQ20DynU", Kernel::PthreadAttrSetguardsize);
+	LIB_FUNC("eXbUSpEaTsA", Kernel::PthreadAttrSetinheritsched);
+	LIB_FUNC("DzES9hQF4f4", Kernel::PthreadAttrSetschedparam);
+	LIB_FUNC("4+h9EzwKF4I", Kernel::PthreadAttrSetschedpolicy);
+	LIB_FUNC("3qxgM4ezETA", Kernel::PthreadAttrSetaffinity);
 
-	LIB_FUNC("6ULAa0fq4jA", LibKernel::PthreadRwlockInit);
-	LIB_FUNC("BB+kb08Tl9A", LibKernel::PthreadRwlockDestroy);
-	LIB_FUNC("Ox9i0c7L5w0", LibKernel::PthreadRwlockRdlock);
+	LIB_FUNC("6ULAa0fq4jA", Kernel::PthreadRwlockInit);
+	LIB_FUNC("BB+kb08Tl9A", Kernel::PthreadRwlockDestroy);
+	LIB_FUNC("Ox9i0c7L5w0", Kernel::PthreadRwlockRdlock);
 	// These NIDs are also imported with the libkernel identity. Register the
 	// established Posix ABI explicitly instead of weakening exact resolution.
 	LIB_FUNC("iGjsr1WAtI0", Posix::pthread_rwlock_rdlock);
 	LIB_FUNC("EgmLo6EWgso", Posix::pthread_rwlock_unlock);
-	LIB_FUNC("+L98PIbGttk", LibKernel::PthreadRwlockUnlock);
-	LIB_FUNC("mqdNorrB+gI", LibKernel::PthreadRwlockWrlock);
+	LIB_FUNC("+L98PIbGttk", Kernel::PthreadRwlockUnlock);
+	LIB_FUNC("mqdNorrB+gI", Kernel::PthreadRwlockWrlock);
 	// Gen5 rwlock / attr NIDs observed as strict Unpatched imports.
-	LIB_FUNC("bIHoZCTomsI", LibKernel::PthreadRwlockTrywrlock);
+	LIB_FUNC("bIHoZCTomsI", Kernel::PthreadRwlockTrywrlock);
 	// Gen5 scePthreadRwlockTryrdlock — NID XD3mDeybCnk.
-	LIB_FUNC("XD3mDeybCnk", LibKernel::PthreadRwlockTryrdlock);
+	LIB_FUNC("XD3mDeybCnk", Kernel::PthreadRwlockTryrdlock);
 	// Orbis timedrd/wr NIDs (iPtZRWICjrM / adh--6nIqTk) stay unregistered until
 	// usec-vs-abstime ABI is evidenced; Kyty Timed* helpers currently take usec.
-	LIB_FUNC("i2ifZ3fS2fo", LibKernel::PthreadRwlockattrDestroy);
-	LIB_FUNC("yOfGg-I1ZII", LibKernel::PthreadRwlockattrInit);
-	LIB_FUNC("LcOZBHGqbFk", LibKernel::PthreadRwlockattrGetpshared);
-	LIB_FUNC("Kyls1ChFyrc", LibKernel::PthreadRwlockattrGettype);
-	LIB_FUNC("-ZvQH18j10c", LibKernel::PthreadRwlockattrSetpshared);
-	LIB_FUNC("h-OifiouBd8", LibKernel::PthreadRwlockattrSettype);
+	LIB_FUNC("i2ifZ3fS2fo", Kernel::PthreadRwlockattrDestroy);
+	LIB_FUNC("yOfGg-I1ZII", Kernel::PthreadRwlockattrInit);
+	LIB_FUNC("LcOZBHGqbFk", Kernel::PthreadRwlockattrGetpshared);
+	LIB_FUNC("Kyls1ChFyrc", Kernel::PthreadRwlockattrGettype);
+	LIB_FUNC("-ZvQH18j10c", Kernel::PthreadRwlockattrSetpshared);
+	LIB_FUNC("h-OifiouBd8", Kernel::PthreadRwlockattrSettype);
 
-	LIB_FUNC("2Tb92quprl0", LibKernel::PthreadCondInit);
-	LIB_FUNC("g+PZd2hiacg", LibKernel::PthreadCondDestroy);
-	LIB_FUNC("WKAXJ4XBPQ4", LibKernel::PthreadCondWait);
-	LIB_FUNC("JGgj7Uvrl+A", LibKernel::PthreadCondBroadcast);
-	LIB_FUNC("kDh-NfxgMtE", LibKernel::PthreadCondSignal);
-	LIB_FUNC("o69RpYO-Mu0", LibKernel::PthreadCondSignalto);
-	LIB_FUNC("BmMjYxmew1w", LibKernel::PthreadCondTimedwait);
-	LIB_FUNC("14bOACANTBo", LibKernel::PthreadOnce);
-	LIB_FUNC("m5-2bsNfv7s", LibKernel::PthreadCondattrInit);
-	LIB_FUNC("waPcxYiR3WA", LibKernel::PthreadCondattrDestroy);
+	LIB_FUNC("2Tb92quprl0", Kernel::PthreadCondInit);
+	LIB_FUNC("g+PZd2hiacg", Kernel::PthreadCondDestroy);
+	LIB_FUNC("WKAXJ4XBPQ4", Kernel::PthreadCondWait);
+	LIB_FUNC("JGgj7Uvrl+A", Kernel::PthreadCondBroadcast);
+	LIB_FUNC("kDh-NfxgMtE", Kernel::PthreadCondSignal);
+	LIB_FUNC("o69RpYO-Mu0", Kernel::PthreadCondSignalto);
+	LIB_FUNC("BmMjYxmew1w", Kernel::PthreadCondTimedwait);
+	LIB_FUNC("14bOACANTBo", Kernel::PthreadOnce);
+	LIB_FUNC("m5-2bsNfv7s", Kernel::PthreadCondattrInit);
+	LIB_FUNC("waPcxYiR3WA", Kernel::PthreadCondattrDestroy);
 
 	// Gen5 TLS key + timed mutex NIDs.
-	LIB_FUNC("geDaqgH9lTg", LibKernel::PthreadKeyCreate);
-	LIB_FUNC("PrdHuuDekhY", LibKernel::PthreadKeyDelete);
-	LIB_FUNC("+BzXYkqYeLE", LibKernel::PthreadSetspecific);
-	LIB_FUNC("eoht7mQOCmo", LibKernel::PthreadGetspecific);
-	LIB_FUNC("IafI2PxcPnQ", LibKernel::PthreadMutexTimedlock);
+	LIB_FUNC("geDaqgH9lTg", Kernel::PthreadKeyCreate);
+	LIB_FUNC("PrdHuuDekhY", Kernel::PthreadKeyDelete);
+	LIB_FUNC("+BzXYkqYeLE", Kernel::PthreadSetspecific);
+	LIB_FUNC("eoht7mQOCmo", Kernel::PthreadGetspecific);
+	LIB_FUNC("IafI2PxcPnQ", Kernel::PthreadMutexTimedlock);
 
 	// Gen5 scePthreadSem* aliases the Posix semaphore ABI.
 	LIB_FUNC("GEnUkDZoUwY", LibKernel::PthreadSemInit);
@@ -2078,13 +2078,13 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("aishVAiFaYM", Posix::sem_post);
 	LIB_FUNC("Vwc+L05e6oE", Posix::sem_destroy);
 
-	LIB_FUNC("QBi7HCK03hw", LibKernel::KernelClockGettime);
-	LIB_FUNC("ejekcaNQNq0", LibKernel::KernelGettimeofday);
-	LIB_FUNC("-2IRUCO--PM", LibKernel::KernelReadTsc);
-	LIB_FUNC("1j3S3n-tTW4", LibKernel::KernelGetTscFrequency);
-	LIB_FUNC("4J2sUJmuHZQ", LibKernel::KernelGetProcessTime);
-	LIB_FUNC("BNowx2l588E", LibKernel::KernelGetProcessTimeCounterFrequency);
-	LIB_FUNC("fgxnMeTNUtY", LibKernel::KernelGetProcessTimeCounter);
+	LIB_FUNC("QBi7HCK03hw", Kernel::KernelClockGettime);
+	LIB_FUNC("ejekcaNQNq0", Kernel::KernelGettimeofday);
+	LIB_FUNC("-2IRUCO--PM", Kernel::KernelReadTsc);
+	LIB_FUNC("1j3S3n-tTW4", Kernel::KernelGetTscFrequency);
+	LIB_FUNC("4J2sUJmuHZQ", Kernel::KernelGetProcessTime);
+	LIB_FUNC("BNowx2l588E", Kernel::KernelGetProcessTimeCounterFrequency);
+	LIB_FUNC("fgxnMeTNUtY", Kernel::KernelGetProcessTimeCounter);
 
 	LIB_FUNC("7H0iTOciTLo", Posix::pthread_mutex_lock);
 	LIB_FUNC("2Z+PpY6CaJg", Posix::pthread_mutex_unlock);
@@ -2113,10 +2113,10 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_OBJECT("f7uOxY9mM1U", &LibKernel::g_stack_chk_guard);
 	LIB_OBJECT("djxxOmW6-aw", &LibKernel::g_progname);
 
-	LIB_FUNC("1jfXLRVzisc", LibKernel::KernelUsleep);
-	LIB_FUNC("-ZR+hG7aDHw", LibKernel::KernelSleep);
+	LIB_FUNC("1jfXLRVzisc", Kernel::KernelUsleep);
+	LIB_FUNC("-ZR+hG7aDHw", Kernel::KernelSleep);
 	// sceKernelNanosleep (NID verified against the public PS5 stub name).
-	LIB_FUNC("QvsZxomvUHs", LibKernel::KernelNanosleep);
+	LIB_FUNC("QvsZxomvUHs", Kernel::KernelNanosleep);
 	LIB_FUNC("6c3rCVE-fTU", LibKernel::open);
 	LIB_FUNC("6xVpy0Fdq+I", LibKernel::sigprocmask);
 	LIB_FUNC("6Z83sYWFlA8", LibKernel::exit);
@@ -2135,8 +2135,8 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("kUpgrXIrz7Q", LibKernel::KernelGetModuleInfo);
 	LIB_FUNC("IuxnUuXk6Bg", LibKernel::KernelGetModuleList);
 	LIB_FUNC("uvT2iYBBnkY", LibKernel::KernelSync);
-	LIB_FUNC("Hc4CaR6JBL0", LibKernel::SyncOnAddress::KernelSyncOnAddressWait);
-	LIB_FUNC("q2y-wDIVWZA", LibKernel::SyncOnAddress::KernelSyncOnAddressWake);
+	LIB_FUNC("Hc4CaR6JBL0", Kernel::SyncOnAddress::KernelSyncOnAddressWait);
+	LIB_FUNC("q2y-wDIVWZA", Kernel::SyncOnAddress::KernelSyncOnAddressWake);
 	LIB_FUNC("Fjc4-n1+y2g", LibKernel::elf_phdr_match_addr);
 	LIB_FUNC("FxVZqBAA7ks", LibKernel::write);
 	LIB_FUNC("kbw4UHHSYy0", LibKernel::pthread_cxa_finalize);
@@ -2147,9 +2147,9 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("crb5j7mkk1c", LibKernel::KernelIsSignalReturn);
 	LIB_FUNC("WkwEd3N7w0Y", LibKernel::KernelInstallExceptionHandler);
 	LIB_FUNC("jh+8XiK4LeE", LibKernel::KernelIsAddressSanitizerEnabled);
-	LIB_FUNC("kOcnerypnQA", LibKernel::KernelGettimezone);
-	LIB_FUNC("0NTHN1NKONI", LibKernel::KernelConvertLocaltimeToUtc);
-	LIB_FUNC("-o5uEDpN+oY", LibKernel::KernelConvertUtcToLocaltime);
+	LIB_FUNC("kOcnerypnQA", Kernel::KernelGettimezone);
+	LIB_FUNC("0NTHN1NKONI", Kernel::KernelConvertLocaltimeToUtc);
+	LIB_FUNC("-o5uEDpN+oY", Kernel::KernelConvertUtcToLocaltime);
 	LIB_FUNC("n88vx3C5nW8", Posix::gettimeofday);
 	// sceKernelMapNamedFlexibleMemoryInternal uses the same out-pointer ABI as
 	// the public named-flexible mapper.
@@ -2159,7 +2159,7 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("pB-yGZ2nQ9o", LibKernel::KernelSetThreadAtexitCount);
 	LIB_FUNC("py6L8jiVAN8", LibKernel::KernelGetSanitizerMallocReplaceExternal);
 	LIB_FUNC("QKd0qM58Qes", LibKernel::KernelStopUnloadModule);
-	LIB_FUNC("rNhWz+lvOMU", LibKernel::KernelSetThreadDtors);
+	LIB_FUNC("rNhWz+lvOMU", Kernel::KernelSetThreadDtors);
 	LIB_FUNC("Tz4RNUCBbGI", LibKernel::KernelRtldThreadAtexitIncrement);
 	LIB_FUNC("vNe1w4diLCs", LibKernel::tls_get_addr);
 	LIB_FUNC("WhCc1w3EhSI", LibKernel::KernelSetThreadAtexitReport);

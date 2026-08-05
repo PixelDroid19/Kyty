@@ -156,19 +156,19 @@ static KYTY_SYSV_ABI void init_env(const ProcessEnvironment::InitParameters* par
 // the same condition implementation as the public pthread ABI so both paths
 // share lifetime and error handling.
 int c_thread_sync_result(int result);
-static LibKernel::KernelUseconds c_abstime_remaining_usec(const LibKernel::KernelTimespec* abstime);
+static Kernel::KernelUseconds c_abstime_remaining_usec(const Kernel::KernelTimespec* abstime);
 
-KYTY_SYSV_ABI int c_cnd_init(LibKernel::PthreadCond* cond)
+KYTY_SYSV_ABI int c_cnd_init(Kernel::PthreadCond* cond)
 {
-	return c_thread_sync_result(LibKernel::PthreadCondInit(cond, nullptr, nullptr));
+	return c_thread_sync_result(Kernel::PthreadCondInit(cond, nullptr, nullptr));
 }
 
-KYTY_SYSV_ABI int c_cnd_init_with_name(LibKernel::PthreadCond* cond, const char* name)
+KYTY_SYSV_ABI int c_cnd_init_with_name(Kernel::PthreadCond* cond, const char* name)
 {
-	return c_thread_sync_result(LibKernel::PthreadCondInit(cond, nullptr, name));
+	return c_thread_sync_result(Kernel::PthreadCondInit(cond, nullptr, name));
 }
 
-KYTY_SYSV_ABI int c_cnd_init_with_default_name_override(LibKernel::PthreadCond* cond, const char* name)
+KYTY_SYSV_ABI int c_cnd_init_with_default_name_override(Kernel::PthreadCond* cond, const char* name)
 {
 	return c_cnd_init_with_name(cond, name);
 }
@@ -192,28 +192,28 @@ int c_thread_sync_result(int result)
 	}
 }
 
-KYTY_SYSV_ABI int c_cnd_broadcast(LibKernel::PthreadCond* cond)
+KYTY_SYSV_ABI int c_cnd_broadcast(Kernel::PthreadCond* cond)
 {
-	return c_thread_sync_result(LibKernel::PthreadCondBroadcast(cond));
+	return c_thread_sync_result(Kernel::PthreadCondBroadcast(cond));
 }
 
-KYTY_SYSV_ABI int c_cnd_signal(LibKernel::PthreadCond* cond)
+KYTY_SYSV_ABI int c_cnd_signal(Kernel::PthreadCond* cond)
 {
-	return c_thread_sync_result(LibKernel::PthreadCondSignal(cond));
+	return c_thread_sync_result(Kernel::PthreadCondSignal(cond));
 }
 
-KYTY_SYSV_ABI int c_cnd_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI int c_cnd_wait(Kernel::PthreadCond* cond, Kernel::PthreadMutex* mutex)
 {
-	return c_thread_sync_result(LibKernel::PthreadCondWait(cond, mutex));
+	return c_thread_sync_result(Kernel::PthreadCondWait(cond, mutex));
 }
 
-KYTY_SYSV_ABI int c_cnd_timedwait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex,
-                                         const LibKernel::KernelTimespec* abstime)
+KYTY_SYSV_ABI int c_cnd_timedwait(Kernel::PthreadCond* cond, Kernel::PthreadMutex* mutex,
+                                         const Kernel::KernelTimespec* abstime)
 {
-	return c_thread_sync_result(LibKernel::PthreadCondTimedwaitAbsolute(cond, mutex, abstime));
+	return c_thread_sync_result(Kernel::PthreadCondTimedwaitAbsolute(cond, mutex, abstime));
 }
 
-KYTY_SYSV_ABI void c_cnd_destroy(LibKernel::PthreadCond* cond)
+KYTY_SYSV_ABI void c_cnd_destroy(Kernel::PthreadCond* cond)
 {
 	if (cond == nullptr)
 	{
@@ -223,17 +223,17 @@ KYTY_SYSV_ABI void c_cnd_destroy(LibKernel::PthreadCond* cond)
 	auto* private_cond = *cond;
 	if (private_cond != nullptr && reinterpret_cast<uintptr_t>(private_cond) >= 0x100000)
 	{
-		(void)LibKernel::PthreadCondDestroy(cond);
+		(void)Kernel::PthreadCondDestroy(cond);
 	}
 }
 
-static KYTY_SYSV_ABI int c_pthread_equal(LibKernel::Pthread thread1, LibKernel::Pthread thread2)
+static KYTY_SYSV_ABI int c_pthread_equal(Kernel::Pthread thread1, Kernel::Pthread thread2)
 {
-	return LibKernel::PthreadEqual(thread1, thread2);
+	return Kernel::PthreadEqual(thread1, thread2);
 }
-static KYTY_SYSV_ABI int c_fstat(int fd, LibKernel::FileSystem::FileStat* sb)
+static KYTY_SYSV_ABI int c_fstat(int fd, Kernel::FileSystem::FileStat* sb)
 {
-	return LibKernel::FileSystem::KernelFstat(fd, sb);
+	return Kernel::FileSystem::KernelFstat(fd, sb);
 }
 static KYTY_SYSV_ABI int c_wcscmp(const wchar_t* s1, const wchar_t* s2)
 {
@@ -362,10 +362,10 @@ static KYTY_SYSV_ABI uint32_t c_thread_hardware_concurrency()
 	return kGuestHardwareThreads;
 }
 
-static KYTY_SYSV_ABI int c_thread_join(LibKernel::Pthread thread, int* result)
+static KYTY_SYSV_ABI int c_thread_join(Kernel::Pthread thread, int* result)
 {
 	void* joined_value = nullptr;
-	if (LibKernel::PthreadJoin(thread, &joined_value) != OK)
+	if (Kernel::PthreadJoin(thread, &joined_value) != OK)
 	{
 		return static_cast<int>(CThreadResult::Error);
 	}
@@ -379,7 +379,7 @@ static KYTY_SYSV_ABI int c_thread_join(LibKernel::Pthread thread, int* result)
 
 static KYTY_SYSV_ABI void c_thread_yield()
 {
-	LibKernel::PthreadYield();
+	Kernel::PthreadYield();
 }
 
 // --- Additional string / memory ---------------------------------------------
@@ -1027,12 +1027,12 @@ KYTY_SYSV_ABI int c_cxa_thread_atexit(void (*dtor)(void*), void* obj, void* dso_
 		return -1;
 	}
 
-	std::call_once(g_thread_atexit_hook_once, [] { LibKernel::PthreadSetHostThreadDtors(run_thread_atexit_destructors); });
+	std::call_once(g_thread_atexit_hook_once, [] { Kernel::PthreadSetHostThreadDtors(run_thread_atexit_destructors); });
 	g_thread_atexit_entries.push_back({dtor, obj, dso_handle});
 	return 0;
 }
 
-KYTY_SYSV_ABI int c_mtx_init(LibKernel::PthreadMutex* mutex, int type)
+KYTY_SYSV_ABI int c_mtx_init(Kernel::PthreadMutex* mutex, int type)
 {
 	PRINT_NAME();
 
@@ -1044,28 +1044,28 @@ KYTY_SYSV_ABI int c_mtx_init(LibKernel::PthreadMutex* mutex, int type)
 	constexpr int mtx_recursive = 0x100;
 	if ((type & mtx_recursive) == 0)
 	{
-		return c_thread_sync_result(LibKernel::PthreadMutexInit(mutex, nullptr, nullptr));
+		return c_thread_sync_result(Kernel::PthreadMutexInit(mutex, nullptr, nullptr));
 	}
 
-	LibKernel::PthreadMutexattr attr = nullptr;
-	int result                       = LibKernel::PthreadMutexattrInit(&attr);
+	Kernel::PthreadMutexattr attr = nullptr;
+	int result                       = Kernel::PthreadMutexattrInit(&attr);
 	if (result == OK)
 	{
-		result = LibKernel::PthreadMutexattrSettype(&attr, 2);
+		result = Kernel::PthreadMutexattrSettype(&attr, 2);
 	}
 	if (result == OK)
 	{
-		result = LibKernel::PthreadMutexInit(mutex, &attr, nullptr);
+		result = Kernel::PthreadMutexInit(mutex, &attr, nullptr);
 	}
 	if (attr != nullptr)
 	{
-		(void)LibKernel::PthreadMutexattrDestroy(&attr);
+		(void)Kernel::PthreadMutexattrDestroy(&attr);
 	}
 
 	return c_thread_sync_result(result);
 }
 
-KYTY_SYSV_ABI int c_mtx_init_with_name(LibKernel::PthreadMutex* mutex, int type, const char* name)
+KYTY_SYSV_ABI int c_mtx_init_with_name(Kernel::PthreadMutex* mutex, int type, const char* name)
 {
 	PRINT_NAME();
 
@@ -1077,35 +1077,35 @@ KYTY_SYSV_ABI int c_mtx_init_with_name(LibKernel::PthreadMutex* mutex, int type,
 	constexpr int mtx_recursive = 0x100;
 	if ((type & mtx_recursive) == 0)
 	{
-		return c_thread_sync_result(LibKernel::PthreadMutexInit(mutex, nullptr, name));
+		return c_thread_sync_result(Kernel::PthreadMutexInit(mutex, nullptr, name));
 	}
 
-	LibKernel::PthreadMutexattr attr = nullptr;
-	int result                       = LibKernel::PthreadMutexattrInit(&attr);
+	Kernel::PthreadMutexattr attr = nullptr;
+	int result                       = Kernel::PthreadMutexattrInit(&attr);
 	if (result == OK)
 	{
-		result = LibKernel::PthreadMutexattrSettype(&attr, 2);
+		result = Kernel::PthreadMutexattrSettype(&attr, 2);
 	}
 	if (result == OK)
 	{
-		result = LibKernel::PthreadMutexInit(mutex, &attr, name);
+		result = Kernel::PthreadMutexInit(mutex, &attr, name);
 	}
 	if (attr != nullptr)
 	{
-		(void)LibKernel::PthreadMutexattrDestroy(&attr);
+		(void)Kernel::PthreadMutexattrDestroy(&attr);
 	}
 
 	return c_thread_sync_result(result);
 }
 
-KYTY_SYSV_ABI int c_mtx_init_with_default_name_override(LibKernel::PthreadMutex* mutex, int type, const char* name)
+KYTY_SYSV_ABI int c_mtx_init_with_default_name_override(Kernel::PthreadMutex* mutex, int type, const char* name)
 {
 	PRINT_NAME();
 
 	return c_mtx_init_with_name(mutex, type, name);
 }
 
-KYTY_SYSV_ABI void c_mtx_destroy(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI void c_mtx_destroy(Kernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
@@ -1117,28 +1117,28 @@ KYTY_SYSV_ABI void c_mtx_destroy(LibKernel::PthreadMutex* mutex)
 	auto* private_mutex = *mutex;
 	if (private_mutex != nullptr && reinterpret_cast<uintptr_t>(private_mutex) >= 0x100000)
 	{
-		(void)LibKernel::PthreadMutexDestroy(mutex);
+		(void)Kernel::PthreadMutexDestroy(mutex);
 	}
 }
 
-KYTY_SYSV_ABI int c_mtx_lock(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI int c_mtx_lock(Kernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
-	return c_thread_sync_result(LibKernel::PthreadMutexLock(mutex));
+	return c_thread_sync_result(Kernel::PthreadMutexLock(mutex));
 }
 
-KYTY_SYSV_ABI int c_mtx_trylock(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI int c_mtx_trylock(Kernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
-	return c_thread_sync_result(LibKernel::PthreadMutexTrylock(mutex));
+	return c_thread_sync_result(Kernel::PthreadMutexTrylock(mutex));
 }
 
-static LibKernel::KernelUseconds c_abstime_remaining_usec(const LibKernel::KernelTimespec* abstime)
+static Kernel::KernelUseconds c_abstime_remaining_usec(const Kernel::KernelTimespec* abstime)
 {
-	LibKernel::KernelTimespec now {};
-	if (abstime == nullptr || LibKernel::KernelClockGettime(0, &now) != OK)
+	Kernel::KernelTimespec now {};
+	if (abstime == nullptr || Kernel::KernelClockGettime(0, &now) != OK)
 	{
 		return 0;
 	}
@@ -1155,28 +1155,28 @@ static LibKernel::KernelUseconds c_abstime_remaining_usec(const LibKernel::Kerne
 	{
 		return UINT32_MAX;
 	}
-	return static_cast<LibKernel::KernelUseconds>(delta);
+	return static_cast<Kernel::KernelUseconds>(delta);
 }
 
-KYTY_SYSV_ABI int c_mtx_timedlock(LibKernel::PthreadMutex* mutex, const LibKernel::KernelTimespec* abstime)
+KYTY_SYSV_ABI int c_mtx_timedlock(Kernel::PthreadMutex* mutex, const Kernel::KernelTimespec* abstime)
 {
 	PRINT_NAME();
 
-	return c_thread_sync_result(LibKernel::PthreadMutexTimedlock(mutex, c_abstime_remaining_usec(abstime)));
+	return c_thread_sync_result(Kernel::PthreadMutexTimedlock(mutex, c_abstime_remaining_usec(abstime)));
 }
 
-KYTY_SYSV_ABI int c_mtx_unlock(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI int c_mtx_unlock(Kernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
-	return c_thread_sync_result(LibKernel::PthreadMutexUnlock(mutex));
+	return c_thread_sync_result(Kernel::PthreadMutexUnlock(mutex));
 }
 
-KYTY_SYSV_ABI int c_mtx_current_owns(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI int c_mtx_current_owns(Kernel::PthreadMutex* mutex)
 {
 	PRINT_NAME();
 
-	return LibKernel::PthreadMutexCurrentOwns(mutex) ? 1 : 0;
+	return Kernel::PthreadMutexCurrentOwns(mutex) ? 1 : 0;
 }
 
 static void c_thread_require(int result, const char* operation)
@@ -1189,21 +1189,21 @@ static void c_thread_require(int result, const char* operation)
 
 struct CndThreadExitEntry
 {
-	LibKernel::PthreadCond*  condition;
-	LibKernel::PthreadMutex* mutex;
+	Kernel::PthreadCond*  condition;
+	Kernel::PthreadMutex* mutex;
 	int*                     completed;
 };
 
 thread_local std::vector<CndThreadExitEntry> g_cnd_thread_exit_entries;
 
-KYTY_SYSV_ABI void c_cnd_register_at_thread_exit(LibKernel::PthreadCond* condition,
-                                                        LibKernel::PthreadMutex* mutex, int* completed)
+KYTY_SYSV_ABI void c_cnd_register_at_thread_exit(Kernel::PthreadCond* condition,
+                                                        Kernel::PthreadMutex* mutex, int* completed)
 {
 	EXIT_IF(condition == nullptr || mutex == nullptr);
 	g_cnd_thread_exit_entries.push_back({condition, mutex, completed});
 }
 
-KYTY_SYSV_ABI void c_cnd_unregister_at_thread_exit(LibKernel::PthreadMutex* mutex)
+KYTY_SYSV_ABI void c_cnd_unregister_at_thread_exit(Kernel::PthreadMutex* mutex)
 {
 	if (mutex == nullptr)
 	{
@@ -1238,8 +1238,8 @@ KYTY_SYSV_ABI void c_cnd_do_broadcast_at_thread_exit()
 
 static KYTY_SYSV_ABI int64_t c_xtime_get_ticks()
 {
-	LibKernel::KernelTimespec now {};
-	if (LibKernel::KernelClockGettime(0, &now) != OK)
+	Kernel::KernelTimespec now {};
+	if (Kernel::KernelClockGettime(0, &now) != OK)
 	{
 		return 0;
 	}
@@ -2045,8 +2045,8 @@ static void* g_time_put_char_vtable[] = {
 struct alignas(8) CxxThreadPad
 {
 	void**                  vtable;
-	LibKernel::PthreadCond  condition;
-	LibKernel::PthreadMutex mutex;
+	Kernel::PthreadCond  condition;
+	Kernel::PthreadMutex mutex;
 	bool                    launched;
 	std::uint8_t            padding[7] {};
 };
@@ -2132,12 +2132,12 @@ static KYTY_SYSV_ABI void* c_thread_pad_call_func(void* argument)
 	return nullptr;
 }
 
-static void c_thread_pad_launch(CxxThreadPad* self, LibKernel::Pthread* thread, const LibKernel::PthreadAttr* attr,
+static void c_thread_pad_launch(CxxThreadPad* self, Kernel::Pthread* thread, const Kernel::PthreadAttr* attr,
                                 const char* name)
 {
 	EXIT_IF(self == nullptr || thread == nullptr);
 
-	const int result = LibKernel::PthreadCreate(thread, attr, c_thread_pad_call_func, self, name != nullptr ? name : "");
+	const int result = Kernel::PthreadCreate(thread, attr, c_thread_pad_call_func, self, name != nullptr ? name : "");
 	if (result != OK)
 	{
 		EXIT("std::_Pad thread creation failed with kernel result 0x%x\n", static_cast<unsigned int>(result));
@@ -2149,24 +2149,24 @@ static void c_thread_pad_launch(CxxThreadPad* self, LibKernel::Pthread* thread, 
 	}
 }
 
-static KYTY_SYSV_ABI void c_thread_pad_launch(CxxThreadPad* self, LibKernel::Pthread* thread)
+static KYTY_SYSV_ABI void c_thread_pad_launch(CxxThreadPad* self, Kernel::Pthread* thread)
 {
 	c_thread_pad_launch(self, thread, nullptr, "");
 }
 
-static KYTY_SYSV_ABI void c_thread_pad_named_launch(CxxThreadPad* self, const char* name, LibKernel::Pthread* thread)
+static KYTY_SYSV_ABI void c_thread_pad_named_launch(CxxThreadPad* self, const char* name, Kernel::Pthread* thread)
 {
 	c_thread_pad_launch(self, thread, nullptr, name);
 }
 
-static KYTY_SYSV_ABI void c_thread_pad_attr_launch(CxxThreadPad* self, const LibKernel::PthreadAttr* attr,
-                                                   LibKernel::Pthread* thread)
+static KYTY_SYSV_ABI void c_thread_pad_attr_launch(CxxThreadPad* self, const Kernel::PthreadAttr* attr,
+                                                   Kernel::Pthread* thread)
 {
 	c_thread_pad_launch(self, thread, attr, "");
 }
 
 static KYTY_SYSV_ABI void c_thread_pad_named_attr_launch(CxxThreadPad* self, const char* name,
-                                                         const LibKernel::PthreadAttr* attr, LibKernel::Pthread* thread)
+                                                         const Kernel::PthreadAttr* attr, Kernel::Pthread* thread)
 {
 	c_thread_pad_launch(self, thread, attr, name);
 }
@@ -2930,7 +2930,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("0AgCOypbQ90", LibC::c_atomic_compare_exchange_weak_4);
 	LIB_FUNC("iPBqs+YUUFw", LibC::c_atomic_fetch_add_4);
 	LIB_FUNC("2HnmKiLmV6s", LibC::c_atomic_fetch_sub_4);
-	LIB_FUNC("np6xXcXEnXE", LibKernel::PthreadGetthreadid);
+	LIB_FUNC("np6xXcXEnXE", Kernel::PthreadGetthreadid);
 	LIB_FUNC("CHrhwd8QSBs", LibC::c_thread_hardware_concurrency);
 	LIB_FUNC("YvmY5Jf0VYU", LibC::c_thread_join);
 	LIB_FUNC("exNzzCAQuWM", LibC::c_thread_yield);
@@ -2938,7 +2938,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("uhnb6dnXOnc", LibC::c_thread_pad_named_ctor);
 	LIB_FUNC("gjLRZgfb3i0", LibC::c_thread_pad_dtor);
 	LIB_FUNC("XyJPhPqpzMw", LibC::c_thread_pad_dtor);
-	LIB_FUNC("xZqiZvmcp9k", static_cast<void (*)(LibC::CxxThreadPad*, LibKernel::Pthread*)>(LibC::c_thread_pad_launch));
+	LIB_FUNC("xZqiZvmcp9k", static_cast<void (*)(LibC::CxxThreadPad*, Kernel::Pthread*)>(LibC::c_thread_pad_launch));
 	LIB_FUNC("PBbZjsL6nfc", LibC::c_thread_pad_named_launch);
 	LIB_FUNC("fLBZMOQh-3Y", LibC::c_thread_pad_attr_launch);
 	LIB_FUNC("H7-7Z3ixv-w", LibC::c_thread_pad_named_attr_launch);

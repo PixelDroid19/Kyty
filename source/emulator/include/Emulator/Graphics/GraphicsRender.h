@@ -145,8 +145,8 @@ void DeleteDescriptor(TextureVulkanImage* image);
 void DeleteDescriptor(StorageTextureVulkanImage* image);
 void DeleteDescriptor(RenderTextureVulkanImage* image);
 
-int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata);
-int GraphicsRenderDeleteEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id);
+int GraphicsRenderAddEqEvent(Kernel::EventQueue::KernelEqueue eq, int id, void* udata);
+int GraphicsRenderDeleteEqEvent(Kernel::EventQueue::KernelEqueue eq, int id);
 
 void GraphicsRenderClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value);
 void GraphicsRenderReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size);

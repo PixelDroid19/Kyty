@@ -23,7 +23,7 @@
 UT_BEGIN(EmulatorKernelMemory);
 
 using namespace Libs;
-using namespace Libs::LibKernel::Memory;
+using namespace Kernel::Memory;
 
 static void EnsureMemorySubsystemInitialized()
 {
@@ -913,11 +913,11 @@ TEST(EmulatorKernelMemory, ResolvesKernelNanosleepExport)
 	const auto* rec = symbols.Find(query);
 	ASSERT_NE(rec, nullptr);
 
-	using nanosleep_fn_t = int (*)(const LibKernel::KernelTimespec*, LibKernel::KernelTimespec*);
+	using nanosleep_fn_t = int (*)(const Kernel::KernelTimespec*, Kernel::KernelTimespec*);
 	auto* nanosleep      = reinterpret_cast<nanosleep_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(nanosleep, nullptr);
 	EXPECT_EQ(nanosleep(nullptr, nullptr), LibKernel::KERNEL_ERROR_EFAULT);
-	LibKernel::KernelTimespec invalid {-1, 0};
+	Kernel::KernelTimespec invalid {-1, 0};
 	EXPECT_EQ(nanosleep(&invalid, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
@@ -1052,8 +1052,8 @@ TEST(EmulatorKernelMemory, ResolvesLibcExpfWithFloatResult)
 
 TEST(EmulatorKernelMemory, CondWaitDiagnosticsStayInactiveWithoutOptIn)
 {
-	LibKernel::PthreadCondWaitDiagnostics diagnostics {};
-	EXPECT_FALSE(LibKernel::PthreadGetCondWaitDiagnostics(&diagnostics));
+	Kernel::PthreadCondWaitDiagnostics diagnostics {};
+	EXPECT_FALSE(Kernel::PthreadGetCondWaitDiagnostics(&diagnostics));
 	EXPECT_FALSE(diagnostics.enabled);
 	EXPECT_EQ(diagnostics.blocked_count, 0u);
 	EXPECT_EQ(diagnostics.blocked[0].signal_count, 0u);
@@ -1061,9 +1061,9 @@ TEST(EmulatorKernelMemory, CondWaitDiagnosticsStayInactiveWithoutOptIn)
 
 TEST(EmulatorKernelMemory, ThreadDiagnosticsAreUnavailableWithoutPthreadContext)
 {
-	LibKernel::PthreadThreadDiagnostics diagnostics {};
+	Kernel::PthreadThreadDiagnostics diagnostics {};
 
-	EXPECT_FALSE(LibKernel::PthreadGetThreadDiagnostics(&diagnostics));
+	EXPECT_FALSE(Kernel::PthreadGetThreadDiagnostics(&diagnostics));
 	EXPECT_FALSE(diagnostics.available);
 	EXPECT_EQ(diagnostics.allocated_count, 0u);
 	EXPECT_EQ(diagnostics.thread_count, 0u);
@@ -1071,7 +1071,7 @@ TEST(EmulatorKernelMemory, ThreadDiagnosticsAreUnavailableWithoutPthreadContext)
 
 TEST(EmulatorKernelMemory, SyncOnAddressReturnsImmediatelyWhenValueDiffers)
 {
-	using namespace LibKernel::SyncOnAddress;
+	using namespace Kernel::SyncOnAddress;
 	EnsureMemorySubsystemInitialized();
 
 	uint32_t value   = 1;
@@ -1081,7 +1081,7 @@ TEST(EmulatorKernelMemory, SyncOnAddressReturnsImmediatelyWhenValueDiffers)
 
 TEST(EmulatorKernelMemory, SyncOnAddressReturnsKernelTimeoutWhenValueDoesNotChange)
 {
-	using namespace LibKernel::SyncOnAddress;
+	using namespace Kernel::SyncOnAddress;
 	EnsureMemorySubsystemInitialized();
 
 	uint32_t value   = 0;
@@ -1091,7 +1091,7 @@ TEST(EmulatorKernelMemory, SyncOnAddressReturnsKernelTimeoutWhenValueDoesNotChan
 
 TEST(EmulatorKernelMemory, SyncOnAddressRejectsUnsupportedFlagsAndUnalignedAddress)
 {
-	using namespace LibKernel::SyncOnAddress;
+	using namespace Kernel::SyncOnAddress;
 	EnsureMemorySubsystemInitialized();
 
 	uint32_t value   = 0;
@@ -1102,7 +1102,7 @@ TEST(EmulatorKernelMemory, SyncOnAddressRejectsUnsupportedFlagsAndUnalignedAddre
 
 TEST(EmulatorKernelMemory, SyncOnAddressWakeReleasesMatchingWaiter)
 {
-	using namespace LibKernel::SyncOnAddress;
+	using namespace Kernel::SyncOnAddress;
 	EnsureMemorySubsystemInitialized();
 
 	uint32_t        value   = 0;
@@ -1141,7 +1141,7 @@ TEST(EmulatorKernelMemory, EventFlagRejectsUnregisteredHandles)
 		threads_inited = true;
 	}
 
-	using namespace LibKernel::EventFlag;
+	using namespace Kernel::EventFlag;
 
 	// Poison pointer observed on Linux vibration wait before CreateEventFlag.
 	auto* poison = reinterpret_cast<KernelEventFlag>(static_cast<uintptr_t>(0xcccccccc00007fffULL));
@@ -1155,7 +1155,7 @@ TEST(EmulatorKernelMemory, EventFlagRejectsUnregisteredHandles)
 	ASSERT_NE(ef, nullptr);
 
 	// Timeout=0 poll-style wait on empty bits returns TimedOut path.
-	LibKernel::KernelUseconds zero = 0;
+	Kernel::KernelUseconds zero = 0;
 	EXPECT_EQ(KernelWaitEventFlag(ef, 1, 0x01, nullptr, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
 	EXPECT_EQ(KernelSetEventFlag(ef, 1), OK);
 	zero = 0;

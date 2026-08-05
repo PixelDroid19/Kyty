@@ -334,8 +334,8 @@ std::string LastErrorResult()
 
 std::string SyncWaitsResult()
 {
-	Libs::LibKernel::PthreadCondWaitDiagnostics diagnostics {};
-	const bool                                  available = Libs::LibKernel::PthreadGetCondWaitDiagnostics(&diagnostics);
+	Kernel::PthreadCondWaitDiagnostics diagnostics {};
+	const bool                                  available = Kernel::PthreadGetCondWaitDiagnostics(&diagnostics);
 	std::string                                 out       = "{\"enabled\":";
 	out += (available && diagnostics.enabled) ? "true" : "false";
 	char summary[384];
@@ -367,8 +367,8 @@ std::string SyncWaitsResult()
 
 std::string ThreadsResult()
 {
-	Libs::LibKernel::PthreadThreadDiagnostics diagnostics {};
-	const bool                                available = Libs::LibKernel::PthreadGetThreadDiagnostics(&diagnostics);
+	Kernel::PthreadThreadDiagnostics diagnostics {};
+	const bool                                available = Kernel::PthreadGetThreadDiagnostics(&diagnostics);
 	std::string                               out       = "{\"available\":";
 	out += (available && diagnostics.available) ? "true" : "false";
 	char summary[192];

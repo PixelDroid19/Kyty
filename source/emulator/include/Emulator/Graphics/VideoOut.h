@@ -106,12 +106,12 @@ KYTY_SYSV_ABI void VideoOutSetBufferAttribute2(VideoOutBufferAttribute2* attribu
                                                uint32_t width, uint32_t height, uint64_t option, uint32_t dcc_control,
                                                uint64_t dcc_cb_register_clear_color);
 KYTY_SYSV_ABI int  VideoOutSetFlipRate(int handle, int rate);
-KYTY_SYSV_ABI int  VideoOutAddFlipEvent(LibKernel::EventQueue::KernelEqueue eq, int handle, void* udata);
-KYTY_SYSV_ABI int  VideoOutAddVblankEvent(LibKernel::EventQueue::KernelEqueue eq, int handle, void* udata);
-KYTY_SYSV_ABI int  VideoOutDeleteVblankEvent(LibKernel::EventQueue::KernelEqueue eq, int handle);
-KYTY_SYSV_ABI int  VideoOutDeleteFlipEvent(LibKernel::EventQueue::KernelEqueue eq, int handle);
-KYTY_SYSV_ABI int  VideoOutGetEventId(const LibKernel::EventQueue::KernelEvent* ev);
-KYTY_SYSV_ABI int  VideoOutGetEventData(const LibKernel::EventQueue::KernelEvent* ev, uint64_t* data);
+KYTY_SYSV_ABI int  VideoOutAddFlipEvent(Kernel::EventQueue::KernelEqueue eq, int handle, void* udata);
+KYTY_SYSV_ABI int  VideoOutAddVblankEvent(Kernel::EventQueue::KernelEqueue eq, int handle, void* udata);
+KYTY_SYSV_ABI int  VideoOutDeleteVblankEvent(Kernel::EventQueue::KernelEqueue eq, int handle);
+KYTY_SYSV_ABI int  VideoOutDeleteFlipEvent(Kernel::EventQueue::KernelEqueue eq, int handle);
+KYTY_SYSV_ABI int  VideoOutGetEventId(const Kernel::EventQueue::KernelEvent* ev);
+KYTY_SYSV_ABI int  VideoOutGetEventData(const Kernel::EventQueue::KernelEvent* ev, uint64_t* data);
 KYTY_SYSV_ABI int  VideoOutConfigureOutput(int handle);
 KYTY_SYSV_ABI int  VideoOutInitializeOutputOptions(void* options);
 KYTY_SYSV_ABI int  VideoOutIsOutputSupported(int handle, uint64_t mode, const void* options, const void* reserved_pointer,

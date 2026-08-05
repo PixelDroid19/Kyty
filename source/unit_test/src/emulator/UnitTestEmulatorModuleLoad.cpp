@@ -227,7 +227,7 @@ void EnsureFileSystemSubsystem()
 			Kyty::Config::ConfigSubsystem::Instance()->Init(Kyty::Core::SubsystemsList::Instance());
 		}
 		Kyty::Log::LogSubsystem::Instance()->Init(Kyty::Core::SubsystemsList::Instance());
-		Kyty::Libs::LibKernel::FileSystem::FileSystemSubsystem::Instance()->Init(Kyty::Core::SubsystemsList::Instance());
+		Kyty::Kernel::FileSystem::FileSystemSubsystem::Instance()->Init(Kyty::Core::SubsystemsList::Instance());
 		initialized = true;
 	}
 }
@@ -380,10 +380,10 @@ TEST(EmulatorModuleLoad, OpenCreateWithoutTruncatePreservesExistingFile)
 	const std::vector<uint8_t> original {'k', 'e', 'e', 'p'};
 	ASSERT_TRUE(WriteBinary(temp.root + U"existing.bin", original));
 
-	Kyty::Libs::LibKernel::FileSystem::Mount(temp.root, U"/create-test/");
-	const int fd = Kyty::Libs::LibKernel::FileSystem::KernelOpen("/create-test/existing.bin", 0x0201, 0600);
+	Kyty::Kernel::FileSystem::Mount(temp.root, U"/create-test/");
+	const int fd = Kyty::Kernel::FileSystem::KernelOpen("/create-test/existing.bin", 0x0201, 0600);
 	ASSERT_GE(fd, 0);
-	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelClose(fd), ::OK);
+	EXPECT_EQ(Kyty::Kernel::FileSystem::KernelClose(fd), ::OK);
 
 	Kyty::Core::File file;
 	ASSERT_TRUE(file.Open(temp.root + U"existing.bin", Kyty::Core::File::Mode::Read));
@@ -391,7 +391,7 @@ TEST(EmulatorModuleLoad, OpenCreateWithoutTruncatePreservesExistingFile)
 	file.Close();
 	ASSERT_EQ(bytes.Size(), original.size());
 	EXPECT_EQ(std::memcmp(bytes.GetDataConst(), original.data(), original.size()), 0);
-	Kyty::Libs::LibKernel::FileSystem::Umount(U"/create-test/");
+	Kyty::Kernel::FileSystem::Umount(U"/create-test/");
 }
 
 TEST(EmulatorModuleLoad, OpenCreateWithoutTruncateCreatesMissingFile)
@@ -400,13 +400,13 @@ TEST(EmulatorModuleLoad, OpenCreateWithoutTruncateCreatesMissingFile)
 	const TempPackageRoot temp(U"/tmp/kyty_open_create_missing_test/");
 	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
 
-	Kyty::Libs::LibKernel::FileSystem::Mount(temp.root, U"/create-test/");
-	const int fd = Kyty::Libs::LibKernel::FileSystem::KernelOpen("/create-test/new.bin", 0x0202, 0600);
+	Kyty::Kernel::FileSystem::Mount(temp.root, U"/create-test/");
+	const int fd = Kyty::Kernel::FileSystem::KernelOpen("/create-test/new.bin", 0x0202, 0600);
 	ASSERT_GE(fd, 0);
 	constexpr uint8_t value[] = {0x11, 0x22, 0x33};
-	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelWrite(fd, value, sizeof(value)), static_cast<int64_t>(sizeof(value)));
-	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelClose(fd), ::OK);
-	Kyty::Libs::LibKernel::FileSystem::Umount(U"/create-test/");
+	EXPECT_EQ(Kyty::Kernel::FileSystem::KernelWrite(fd, value, sizeof(value)), static_cast<int64_t>(sizeof(value)));
+	EXPECT_EQ(Kyty::Kernel::FileSystem::KernelClose(fd), ::OK);
+	Kyty::Kernel::FileSystem::Umount(U"/create-test/");
 
 	EXPECT_EQ(Kyty::Core::File::Size(temp.root + U"new.bin"), sizeof(value));
 }
@@ -418,14 +418,14 @@ TEST(EmulatorModuleLoad, FtruncateChangesLengthAndPreservesOffset)
 	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
 	ASSERT_TRUE(WriteBinary(temp.root + U"data.bin", std::vector<uint8_t> {'a', 'b', 'c', 'd'}));
 
-	Kyty::Libs::LibKernel::FileSystem::Mount(temp.root, U"/truncate-test/");
-	const int fd = Kyty::Libs::LibKernel::FileSystem::KernelOpen("/truncate-test/data.bin", 0x0002, 0600);
+	Kyty::Kernel::FileSystem::Mount(temp.root, U"/truncate-test/");
+	const int fd = Kyty::Kernel::FileSystem::KernelOpen("/truncate-test/data.bin", 0x0002, 0600);
 	ASSERT_GE(fd, 0);
-	ASSERT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelLseek(fd, 3, 0), 3);
-	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelFtruncate(fd, 2), ::OK);
-	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelLseek(fd, 0, 1), 3);
-	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelClose(fd), ::OK);
-	Kyty::Libs::LibKernel::FileSystem::Umount(U"/truncate-test/");
+	ASSERT_EQ(Kyty::Kernel::FileSystem::KernelLseek(fd, 3, 0), 3);
+	EXPECT_EQ(Kyty::Kernel::FileSystem::KernelFtruncate(fd, 2), ::OK);
+	EXPECT_EQ(Kyty::Kernel::FileSystem::KernelLseek(fd, 0, 1), 3);
+	EXPECT_EQ(Kyty::Kernel::FileSystem::KernelClose(fd), ::OK);
+	Kyty::Kernel::FileSystem::Umount(U"/truncate-test/");
 
 	EXPECT_EQ(Kyty::Core::File::Size(temp.root + U"data.bin"), 2u);
 }
@@ -433,8 +433,8 @@ TEST(EmulatorModuleLoad, FtruncateChangesLengthAndPreservesOffset)
 TEST(EmulatorModuleLoad, FtruncateRejectsInvalidArguments)
 {
 	EnsureFileSystemSubsystem();
-	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelFtruncate(-1, 0), Kyty::Libs::LibKernel::KERNEL_ERROR_EBADF);
-	EXPECT_EQ(Kyty::Libs::LibKernel::FileSystem::KernelFtruncate(3, -1), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kyty::Kernel::FileSystem::KernelFtruncate(-1, 0), Kyty::Libs::LibKernel::KERNEL_ERROR_EBADF);
+	EXPECT_EQ(Kyty::Kernel::FileSystem::KernelFtruncate(3, -1), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
 }
 
 TEST(EmulatorModuleLoad, RecognizesAlternateGen5SelfSignature)
@@ -949,7 +949,7 @@ TEST(EmulatorModuleLoad, LibkernelRegistersEventFlagClear)
 
 TEST(EmulatorModuleLoad, PosixFlockAcceptsManagedFileDescriptor)
 {
-	using namespace Kyty::Libs::LibKernel;
+	using namespace Kyty::Kernel;
 	using FlockFn = int(KYTY_SYSV_ABI*)(int, int);
 
 	EnsureFileSystemSubsystem();
@@ -977,7 +977,7 @@ TEST(EmulatorModuleLoad, PosixFlockAcceptsManagedFileDescriptor)
 
 TEST(EmulatorModuleLoad, LibkernelReadAliasReadsRegularFileDescriptor)
 {
-	using namespace Kyty::Libs::LibKernel;
+	using namespace Kyty::Kernel;
 	using ReadFn = int64_t(KYTY_SYSV_ABI*)(int, void*, uint64_t);
 
 	EnsureFileSystemSubsystem();
@@ -1008,3 +1008,4 @@ TEST(EmulatorModuleLoad, LibkernelReadAliasReadsRegularFileDescriptor)
 UT_END();
 
 #endif // KYTY_EMU_ENABLED
+

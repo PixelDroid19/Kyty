@@ -6,7 +6,6 @@
 #include "Kyty/Core/Subsystems.h"
 
 #include "Emulator/Common.h"
-#include "Emulator/Kernel/Namespace.h"
 #include "Emulator/Kernel/Pthread.h"
 
 #ifdef KYTY_EMU_ENABLED

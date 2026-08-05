@@ -83,11 +83,6 @@ private:
 	::Kyty::Emulator::Host::HostImageSurface* m_image = nullptr;
 };
 
-// Source compatibility for out-of-tree graphics callers. New code should use
-// ImageAsset so the distinction from VulkanImage and HostImageSurface is
-// explicit at the call site.
-using Image = ImageAsset;
-
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

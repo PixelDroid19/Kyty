@@ -26,7 +26,7 @@ namespace Audio3d {
 
 LIB_NAME("Audio3d", "Audio3d");
 
-namespace Semaphore = LibKernel::Semaphore;
+namespace Semaphore = Kernel::Semaphore;
 
 struct Audio3dOpenParameters
 {

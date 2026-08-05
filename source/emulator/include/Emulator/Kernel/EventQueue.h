@@ -5,14 +5,12 @@
 #include "Kyty/Core/LinkList.h"
 
 #include "Emulator/Common.h"
-#include "Emulator/Kernel/Namespace.h"
 #include "Emulator/Kernel/Pthread.h"
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Kernel::EventQueue {
 
-using ::Kyty::Libs::LibKernel::KernelUseconds;
 
 constexpr int16_t KERNEL_EVFILT_TIMER     = -7;
 constexpr int16_t KERNEL_EVFILT_READ      = -1;

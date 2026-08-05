@@ -139,7 +139,7 @@ void EnsureFileSystemSubsystem()
 	if (!initialized)
 	{
 		EnsureLogSubsystem();
-		Libs::LibKernel::FileSystem::FileSystemSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		Kernel::FileSystem::FileSystemSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 		initialized = true;
 	}
 }

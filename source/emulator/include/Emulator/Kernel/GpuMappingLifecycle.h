@@ -4,7 +4,6 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
-#include "Emulator/Kernel/Namespace.h"
 
 #include <cstdint>
 #include <mutex>

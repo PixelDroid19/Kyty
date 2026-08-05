@@ -4,14 +4,12 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
-#include "Emulator/Kernel/Namespace.h"
 #include "Emulator/Kernel/Pthread.h"
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Kernel::EventFlag {
 
-using ::Kyty::Libs::LibKernel::KernelUseconds;
 
 class KernelEventFlagPrivate;
 

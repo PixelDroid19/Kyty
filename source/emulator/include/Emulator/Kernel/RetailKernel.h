@@ -2,7 +2,6 @@
 #define EMULATOR_INCLUDE_EMULATOR_KERNEL_RETAILKERNEL_H_
 
 #include "Emulator/Common.h"
-#include "Emulator/Kernel/Namespace.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -17,10 +16,6 @@ namespace Kyty::Kernel {
 }
 
 } // namespace Kyty::Kernel
-
-namespace Kyty::Libs::LibKernel {
-using namespace ::Kyty::Kernel;
-} // namespace Kyty::Libs::LibKernel
 
 #endif // KYTY_EMU_ENABLED
 

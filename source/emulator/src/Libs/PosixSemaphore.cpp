@@ -1,6 +1,5 @@
 #include "Emulator/Libs/PosixSemaphore.h"
 
-#include "Emulator/Kernel/Namespace.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"

@@ -200,12 +200,12 @@ static int MountSaveDataDirectory(const char* directory_name, const String& moun
 
 	const auto   mount_point_utf8 = SaveDataMountCoordinator::MountPoint(acquisition.slot);
 	const String mount_point      = String::FromUtf8(mount_point_utf8.c_str());
-	LibKernel::FileSystem::Mount(mount_dir, mount_point);
+	Kernel::FileSystem::Mount(mount_dir, mount_point);
 	std::memset(mount_result, 0, sizeof(*mount_result));
 	const int written = std::snprintf(mount_result->mount_point.data, sizeof(mount_result->mount_point.data), "%s", mount_point.C_Str());
 	if (written < 0 || written >= static_cast<int>(sizeof(mount_result->mount_point.data)))
 	{
-		LibKernel::FileSystem::Umount(mount_point);
+		Kernel::FileSystem::Umount(mount_point);
 		return SAVE_DATA_ERROR_INTERNAL;
 	}
 
@@ -517,7 +517,7 @@ static int UnmountSaveDataPoint(const SaveDataMountPoint* mount_point)
 		return SAVE_DATA_ERROR_NOT_MOUNTED;
 	}
 
-	LibKernel::FileSystem::Umount(String::FromUtf8(mount_point->data));
+	Kernel::FileSystem::Umount(String::FromUtf8(mount_point->data));
 	g_mount_coordinator.Release(*slot);
 	return OK;
 }

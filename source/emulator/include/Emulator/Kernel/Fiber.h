@@ -4,7 +4,6 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
-#include "Emulator/Kernel/Namespace.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -118,12 +117,6 @@ int32_t FiberValidateInitializeArgs(const FiberObject* fiber, const char* name, 
                                     uint64_t size_context, const FiberOptParam* opt_param);
 
 } // namespace Kyty::Kernel::Fiber
-
-// Guest-facing code historically imported Fiber through Libs. Keep that view
-// while the implementation and ABI declarations live in the Kernel domain.
-namespace Kyty::Libs::Fiber {
-using namespace ::Kyty::Kernel::Fiber;
-} // namespace Kyty::Libs::Fiber
 
 #endif // KYTY_EMU_ENABLED
 

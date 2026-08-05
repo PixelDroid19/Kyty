@@ -19,7 +19,7 @@ static KYTY_SYSV_ABI int RequestThreadContext(void* thread)
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t thread = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(thread));
 
-	return LibKernel::KernelRaiseException(static_cast<LibKernel::Pthread>(thread), 30);
+	return LibKernel::KernelRaiseException(static_cast<Kernel::Pthread>(thread), 30);
 }
 
 } // namespace Ps5Util

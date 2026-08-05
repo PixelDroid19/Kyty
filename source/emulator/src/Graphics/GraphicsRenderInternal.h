@@ -482,10 +482,10 @@ public:
 		}
 	}
 
-	void*        BeginEopEqRegistration(LibKernel::EventQueue::KernelEqueueIdentity identity, int id);
+	void*        BeginEopEqRegistration(Kernel::EventQueue::KernelEqueueIdentity identity, int id);
 	void         PublishEopEqRegistration(void* registration);
 	void         CancelEopEqRegistration(void* registration);
-	void         DeleteEopEqRegistration(void* registration, LibKernel::EventQueue::KernelEqueue eq, int id);
+	void         DeleteEopEqRegistration(void* registration, Kernel::EventQueue::KernelEqueue eq, int id);
 	void         TriggerEopEvent();
 	void         TriggerQueuedGraphicsInterrupt();
 	Core::Mutex& GetEopRegistrationMutex() { return m_eop_registration_mutex; }
@@ -493,7 +493,7 @@ public:
 private:
 	struct EopEqRegistration
 	{
-		LibKernel::EventQueue::KernelEqueueIdentity identity {};
+		Kernel::EventQueue::KernelEqueueIdentity identity {};
 		int                                         id        = GRAPHICS_EVENT_EOP;
 		bool                                        published = false;
 		bool                                        deleted   = false;

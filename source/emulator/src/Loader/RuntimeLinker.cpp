@@ -1504,8 +1504,8 @@ void RuntimeLinker::Execute()
 		EXIT("initial module dependency closure failed\n");
 	}
 
-	Libs::LibKernel::PthreadInitSelfForMainThread();
-	void* main_stack_top = Libs::LibKernel::PthreadCreateMainGuestStack();
+	Kernel::PthreadInitSelfForMainThread();
+	void* main_stack_top = Kernel::PthreadCreateMainGuestStack();
 	if (main_stack_top == nullptr)
 	{
 		EXIT("failed to allocate main guest stack\n");
@@ -2243,7 +2243,7 @@ int RuntimeLinker::StopModule(Program* program, size_t args, const void* argp, m
 
 	int result = run_ini_fini(program->dynamic_info->fini_vaddr + program->base_vaddr, args, argp, func, nullptr);
 
-	Libs::LibKernel::PthreadDeleteStaticObjects(program);
+	Kernel::PthreadDeleteStaticObjects(program);
 
 	return result;
 }

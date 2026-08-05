@@ -538,15 +538,15 @@ static String sanitize_avplayer_uri(const char* name, uint32_t length = 0)
 		return guest_path;
 	}
 
-	if (LibKernel::FileSystem::IsMounted())
+	if (Kernel::FileSystem::IsMounted())
 	{
-		String real_path = LibKernel::FileSystem::GetRealFilename(guest_path);
+		String real_path = Kernel::FileSystem::GetRealFilename(guest_path);
 		if (!real_path.IsEmpty() && Core::File::IsFileExisting(real_path))
 		{
 			return real_path;
 		}
 
-		String resolved_path = LibKernel::FileSystem::PreferHostApp0DataSegment(guest_path, real_path);
+		String resolved_path = Kernel::FileSystem::PreferHostApp0DataSegment(guest_path, real_path);
 		if (!resolved_path.IsEmpty() && Core::File::IsFileExisting(resolved_path))
 		{
 			return resolved_path;
@@ -907,9 +907,9 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 	delete_synthetic_video(h);
 
 	String host_filename = clean_filename;
-	if (!Core::File::IsFileExisting(clean_filename) && LibKernel::FileSystem::IsMounted())
+	if (!Core::File::IsFileExisting(clean_filename) && Kernel::FileSystem::IsMounted())
 	{
-		String mounted_filename = LibKernel::FileSystem::GetRealFilename(clean_filename);
+		String mounted_filename = Kernel::FileSystem::GetRealFilename(clean_filename);
 		if (!mounted_filename.IsEmpty())
 		{
 			host_filename = mounted_filename;

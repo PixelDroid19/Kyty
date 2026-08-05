@@ -72,7 +72,7 @@ int InitializeHostThread(int argc, char** argv)
 		return 125;
 	}
 
-	Libs::LibKernel::PthreadInitSelfForMainThread();
+	Kernel::PthreadInitSelfForMainThread();
 	return 0;
 }
 

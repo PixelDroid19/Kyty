@@ -12,7 +12,7 @@
 UT_BEGIN(EmulatorFiber);
 
 using namespace Libs;
-using namespace Libs::Fiber;
+using namespace Kyty::Kernel::Fiber;
 
 namespace {
 

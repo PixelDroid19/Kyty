@@ -47,6 +47,22 @@ KERNEL_SOURCE_FILES = (
     "emulator/src/Kernel/Semaphore.cpp",
     "emulator/src/Kernel/SyncOnAddress.cpp",
     "emulator/src/Kernel/Time.cpp",
+    "emulator/include/Emulator/Kernel/AmprPort.h",
+    "emulator/include/Emulator/Kernel/Errors.h",
+    "emulator/include/Emulator/Kernel/EventFlag.h",
+    "emulator/include/Emulator/Kernel/EventQueue.h",
+    "emulator/include/Emulator/Kernel/Fiber.h",
+    "emulator/include/Emulator/Kernel/FileSystem.h",
+    "emulator/include/Emulator/Kernel/GpuMappingLifecycle.h",
+    "emulator/include/Emulator/Kernel/HostTime.h",
+    "emulator/include/Emulator/Kernel/Memory.h",
+    "emulator/include/Emulator/Kernel/Pthread.h",
+    "emulator/include/Emulator/Kernel/RetailKernel.h",
+    "emulator/include/Emulator/Kernel/Semaphore.h",
+    "emulator/include/Emulator/Kernel/SyncOnAddress.h",
+    "emulator/include/Emulator/Kernel/Time.h",
+    "emulator/include/Emulator/Kernel/TimePort.h",
+    "emulator/include/Emulator/Kernel/Trace.h",
 )
 KERNEL_HOST_SOURCE_FILES = (
 	"emulator/src/Kernel/HostTime.cpp",
@@ -158,6 +174,19 @@ LEGACY_HLE_ALIAS_PATTERNS = (
     re.compile(r"\bLibs::HleSymbolResolve\b"),
     re.compile(r"\bLibs::HleSymbolType\b"),
 )
+# The LibKernel/Fiber compatibility views inside the Kernel headers re-exported
+# the Kernel domain through Kyty::Libs. They were removed; a block that
+# re-opens Kyty::Libs::LibKernel just to re-export Kernel names would silently
+# recreate the alias layer.
+LEGACY_LIBKERNEL_VIEW_PATTERN = re.compile(
+    r"\bnamespace\s+Kyty::Libs::LibKernel\s*\{(?:[^{}]|\{[^{}]*\})*?using\s+namespace\s+::?Kyty::Kernel"
+)
+LEGACY_FIBER_VIEW_PATTERN = re.compile(r"\bnamespace\s+Kyty::Libs::Fiber\s*\{")
+LEGACY_KERNEL_IMPORT_PATTERN = re.compile(
+    r"\busing\s+(?:::)?(?:Kyty::)?Libs::LibKernel::[A-Za-z_]\w*\s*;"
+)
+LEGACY_NAMESPACE_HEADER_CANONICAL = "emulator/kernel/namespace.h"
+LEGACY_IMAGE_ALIAS_PATTERN = re.compile(r"\busing\s+Image\s*=\s*ImageAsset\s*;")
 
 @dataclass(frozen=True)
 class Violation:
@@ -270,6 +299,10 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path.startswith(LEGACY_HLE_SYMBOL_HEADER_CANONICAL) for canonical_path in canonical_paths
     ):
         return "legacy HleSymbolRegistry header"
+    if any(
+        canonical_path.startswith(LEGACY_NAMESPACE_HEADER_CANONICAL) for canonical_path in canonical_paths
+    ):
+        return "legacy Kernel Namespace header"
     if relative_path in AUDIO_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
@@ -699,6 +732,18 @@ def check_source_root(source_root: Path, strict: bool = False) -> CheckResult:
                     Violation(relative_path, line_number, "legacy Libs HLE alias", None, message=f"legacy Libs HLE alias: {match.group(0)}")
                 )
 
+        for pattern, label in (
+            (LEGACY_LIBKERNEL_VIEW_PATTERN, "legacy LibKernel namespace view"),
+            (LEGACY_FIBER_VIEW_PATTERN, "legacy Fiber namespace view"),
+            (LEGACY_KERNEL_IMPORT_PATTERN, "legacy LibKernel import"),
+            (LEGACY_IMAGE_ALIAS_PATTERN, "legacy Image alias"),
+        ):
+            for match in pattern.finditer(contents):
+                line_number = contents.count("\n", 0, match.start()) + 1
+                violations.append(
+                    Violation(relative_path, line_number, label, None, message=f"{label}: {match.group(0).strip()}")
+                )
+
     ordered_input_diagnostics = [diagnostic for _, diagnostic in sorted(input_diagnostics)]
     ordered_violations = sorted(
         violations,
@@ -901,6 +946,105 @@ class BoundaryCheckerTests(unittest.TestCase):
                     "emulator/src/Hle/LibGraphicsDriver.cpp:1: legacy Libs HLE alias: Libs::HleSymbolRegistry",
                     "emulator/src/Hle/LibGraphicsDriver.cpp:3: legacy Libs HLE alias: Libs::HleSymbolResolve",
                     "emulator/src/Hle/LibGraphicsDriver.cpp:4: legacy Libs HLE alias: Libs::HleSymbolType",
+                ),
+            )
+
+    def test_rejects_legacy_kernel_namespace_view(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root,
+                "emulator/src/Hle/LibGraphicsDriver.cpp",
+                "namespace Kyty::Libs::LibKernel {\nusing namespace ::Kyty::Kernel;\n} // namespace Kyty::Libs::LibKernel\n",
+            )
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Hle/LibGraphicsDriver.cpp:1: legacy LibKernel namespace view: "
+                        "namespace Kyty::Libs::LibKernel {\nusing namespace ::Kyty::Kernel",
+                    ),
+                ),
+            )
+
+    def test_rejects_legacy_fiber_view(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root,
+                "emulator/src/Hle/LibGraphicsDriver.cpp",
+                "namespace Kyty::Libs::Fiber {\nusing namespace ::Kyty::Kernel::Fiber;\n}\n",
+            )
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Hle/LibGraphicsDriver.cpp:1: legacy Fiber namespace view: "
+                        "namespace Kyty::Libs::Fiber {",
+                    ),
+                ),
+            )
+
+    def test_rejects_legacy_libkernel_import_in_kernel_header(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root,
+                "emulator/include/Emulator/Kernel/EventQueue.h",
+                "namespace Kyty::Kernel::EventQueue {\n"
+                "using ::Kyty::Libs::LibKernel::KernelUseconds;\n"
+                "void Wait(const KernelUseconds* t);\n}\n",
+            )
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/include/Emulator/Kernel/EventQueue.h:2: legacy LibKernel import: "
+                        "using ::Kyty::Libs::LibKernel::KernelUseconds;",
+                    ),
+                ),
+            )
+
+    def test_rejects_legacy_kernel_namespace_header_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root, "emulator/src/Hle/LibGraphicsDriver.cpp", '#include "Emulator/Kernel/Namespace.h"\n'
+            )
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Hle/LibGraphicsDriver.cpp:1: forbidden include (legacy Kernel Namespace header): "
+                        "Emulator/Kernel/Namespace.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_legacy_image_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root,
+                "emulator/src/Hle/LibGraphicsDriver.cpp",
+                "namespace Kyty::Libs::Graphics {\nusing Image = ImageAsset;\n}\n",
+            )
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Hle/LibGraphicsDriver.cpp:2: legacy Image alias: using Image = ImageAsset;",
+                    ),
                 ),
             )
 

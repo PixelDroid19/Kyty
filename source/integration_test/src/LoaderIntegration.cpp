@@ -104,7 +104,7 @@ int InitializeHostThread(int argc, char** argv)
 		std::fprintf(stderr, "host subsystem init failed: %s\n", subsystems->GetFailMsg());
 		return 125;
 	}
-	Libs::LibKernel::PthreadInitSelfForMainThread();
+	Kernel::PthreadInitSelfForMainThread();
 	return 0;
 }
 

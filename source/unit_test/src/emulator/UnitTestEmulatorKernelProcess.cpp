@@ -29,7 +29,7 @@
 UT_BEGIN(EmulatorKernelProcess);
 
 using namespace Libs;
-using namespace Libs::LibKernel::EventQueue;
+using namespace Kernel::EventQueue;
 
 namespace {
 
@@ -127,9 +127,9 @@ void EnsureKernelProcessSubsystems()
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 		Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
-	if (!LibKernel::PthreadIsInitialized())
+	if (!Kernel::PthreadIsInitialized())
 	{
-		LibKernel::PthreadSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		Kernel::PthreadSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
 }
 
@@ -139,7 +139,7 @@ void EnsureFileSystemSubsystem()
 	if (!initialized)
 	{
 		EnsureKernelProcessSubsystems();
-		LibKernel::FileSystem::FileSystemSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		Kernel::FileSystem::FileSystemSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 		initialized = true;
 	}
 }
@@ -225,22 +225,22 @@ TEST(EmulatorKernelProcess, DeleteSemaphoreWakesBlockedWaiter)
 {
 	EnsureKernelProcessSubsystems();
 
-	LibKernel::Semaphore::KernelSema sem = nullptr;
-	ASSERT_EQ(LibKernel::Semaphore::KernelCreateSema(&sem, "delete-wait-test", 1, 0, 1, nullptr), OK);
+	Kernel::Semaphore::KernelSema sem = nullptr;
+	ASSERT_EQ(Kernel::Semaphore::KernelCreateSema(&sem, "delete-wait-test", 1, 0, 1, nullptr), OK);
 	ASSERT_NE(sem, nullptr);
 
-	auto waiter1 = std::async(std::launch::async, [sem] { return LibKernel::Semaphore::KernelWaitSema(sem, 1, nullptr); });
-	auto waiter2 = std::async(std::launch::async, [sem] { return LibKernel::Semaphore::KernelWaitSema(sem, 1, nullptr); });
+	auto waiter1 = std::async(std::launch::async, [sem] { return Kernel::Semaphore::KernelWaitSema(sem, 1, nullptr); });
+	auto waiter2 = std::async(std::launch::async, [sem] { return Kernel::Semaphore::KernelWaitSema(sem, 1, nullptr); });
 	ASSERT_EQ(waiter1.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
 	ASSERT_EQ(waiter2.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
-	ASSERT_EQ(LibKernel::Semaphore::KernelDeleteSema(sem), OK);
+	ASSERT_EQ(Kernel::Semaphore::KernelDeleteSema(sem), OK);
 	ASSERT_EQ(waiter1.wait_for(std::chrono::seconds(1)), std::future_status::ready);
 	ASSERT_EQ(waiter2.wait_for(std::chrono::seconds(1)), std::future_status::ready);
 	EXPECT_EQ(waiter1.get(), LibKernel::KERNEL_ERROR_EACCES);
 	EXPECT_EQ(waiter2.get(), LibKernel::KERNEL_ERROR_EACCES);
-	EXPECT_EQ(LibKernel::Semaphore::KernelWaitSema(sem, 1, nullptr), LibKernel::KERNEL_ERROR_ESRCH);
-	EXPECT_EQ(LibKernel::Semaphore::KernelSignalSema(sem, 1), LibKernel::KERNEL_ERROR_ESRCH);
-	EXPECT_EQ(LibKernel::Semaphore::KernelDeleteSema(sem), LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(Kernel::Semaphore::KernelWaitSema(sem, 1, nullptr), LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(Kernel::Semaphore::KernelSignalSema(sem, 1), LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(Kernel::Semaphore::KernelDeleteSema(sem), LibKernel::KERNEL_ERROR_ESRCH);
 }
 
 TEST(EmulatorKernelProcess, PthreadPriorityRoundTripsGuestValue)
@@ -248,16 +248,16 @@ TEST(EmulatorKernelProcess, PthreadPriorityRoundTripsGuestValue)
 	EnsureKernelProcessSubsystems();
 
 	std::atomic_bool             release = false;
-	LibKernel::Pthread           thread  = nullptr;
-	ASSERT_EQ(LibKernel::PthreadCreate(&thread, nullptr, HoldPthreadUntilReleased, &release, "priority-test"), OK);
+	Kernel::Pthread           thread  = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, HoldPthreadUntilReleased, &release, "priority-test"), OK);
 	ASSERT_NE(thread, nullptr);
 
-	const int set_result = LibKernel::PthreadSetprio(thread, 260);
+	const int set_result = Kernel::PthreadSetprio(thread, 260);
 	int       priority   = -1;
-	const int get_result = LibKernel::PthreadGetprio(thread, &priority);
+	const int get_result = Kernel::PthreadGetprio(thread, &priority);
 
 	release.store(true, std::memory_order_release);
-	ASSERT_EQ(LibKernel::PthreadJoin(thread, nullptr), OK);
+	ASSERT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
 	EXPECT_EQ(set_result, OK);
 	EXPECT_EQ(get_result, OK);
 	EXPECT_EQ(priority, 260);
@@ -268,16 +268,16 @@ TEST(EmulatorKernelProcess, PthreadNullNameUsesEmptyString)
 	EnsureKernelProcessSubsystems();
 
 	std::atomic_bool   release = false;
-	LibKernel::Pthread thread  = nullptr;
-	ASSERT_EQ(LibKernel::PthreadCreate(&thread, nullptr, HoldPthreadUntilReleased, &release, nullptr), OK);
+	Kernel::Pthread thread  = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, HoldPthreadUntilReleased, &release, nullptr), OK);
 	ASSERT_NE(thread, nullptr);
 
 	char name[32] = {};
-	EXPECT_EQ(LibKernel::PthreadGetname(thread, name), OK);
+	EXPECT_EQ(Kernel::PthreadGetname(thread, name), OK);
 	EXPECT_STREQ(name, "");
 
 	release.store(true, std::memory_order_release);
-	EXPECT_EQ(LibKernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
 }
 
 TEST(EmulatorKernelProcess, NormalPthreadMutexNestedLockCompletes)
@@ -289,19 +289,19 @@ TEST(EmulatorKernelProcess, NormalPthreadMutexNestedLockCompletes)
 	    {
 		    ::alarm(1);
 
-		    LibKernel::PthreadMutexattr attr = nullptr;
-		    LibKernel::PthreadMutex     mutex = nullptr;
-		    if (LibKernel::PthreadMutexattrInit(&attr) != OK ||
-		        LibKernel::PthreadMutexattrSettype(&attr, 3) != OK ||
-		        LibKernel::PthreadMutexInit(&mutex, &attr, nullptr) != OK ||
-		        LibKernel::PthreadMutexLock(&mutex) != OK || LibKernel::PthreadMutexLock(&mutex) != OK ||
-		        LibKernel::PthreadMutexUnlock(&mutex) != OK || LibKernel::PthreadMutexUnlock(&mutex) != OK)
+		    Kernel::PthreadMutexattr attr = nullptr;
+		    Kernel::PthreadMutex     mutex = nullptr;
+		    if (Kernel::PthreadMutexattrInit(&attr) != OK ||
+		        Kernel::PthreadMutexattrSettype(&attr, 3) != OK ||
+		        Kernel::PthreadMutexInit(&mutex, &attr, nullptr) != OK ||
+		        Kernel::PthreadMutexLock(&mutex) != OK || Kernel::PthreadMutexLock(&mutex) != OK ||
+		        Kernel::PthreadMutexUnlock(&mutex) != OK || Kernel::PthreadMutexUnlock(&mutex) != OK)
 		    {
 			    std::_Exit(1);
 		    }
 
-		    (void)LibKernel::PthreadMutexDestroy(&mutex);
-		    (void)LibKernel::PthreadMutexattrDestroy(&attr);
+		    (void)Kernel::PthreadMutexDestroy(&mutex);
+		    (void)Kernel::PthreadMutexattrDestroy(&attr);
 		    std::_Exit(0);
 	    },
 	    ::testing::ExitedWithCode(0), "");
@@ -319,28 +319,28 @@ TEST(EmulatorKernelProcess, PthreadCondWaitReleasesRecursiveMutex)
 	    {
 		    ::alarm(2);
 
-		    LibKernel::PthreadMutexattr attr  = nullptr;
-		    LibKernel::PthreadMutex     mutex = nullptr;
-		    LibKernel::PthreadCond      cond   = nullptr;
+		    Kernel::PthreadMutexattr attr  = nullptr;
+		    Kernel::PthreadMutex     mutex = nullptr;
+		    Kernel::PthreadCond      cond   = nullptr;
 		    std::atomic_bool            worker_started {false};
 		    std::atomic_bool            predicate {false};
 
-		    if (LibKernel::PthreadMutexattrInit(&attr) != OK ||
-		        LibKernel::PthreadMutexattrSettype(&attr, 2) != OK ||
-		        LibKernel::PthreadMutexInit(&mutex, &attr, nullptr) != OK ||
-		        LibKernel::PthreadCondInit(&cond, nullptr, nullptr) != OK || LibKernel::PthreadMutexLock(&mutex) != OK)
+		    if (Kernel::PthreadMutexattrInit(&attr) != OK ||
+		        Kernel::PthreadMutexattrSettype(&attr, 2) != OK ||
+		        Kernel::PthreadMutexInit(&mutex, &attr, nullptr) != OK ||
+		        Kernel::PthreadCondInit(&cond, nullptr, nullptr) != OK || Kernel::PthreadMutexLock(&mutex) != OK)
 		    {
 			    std::_Exit(1);
 		    }
 
 		    std::thread worker([&] {
 			    worker_started.store(true, std::memory_order_release);
-			    if (LibKernel::PthreadMutexLock(&mutex) != OK)
+			    if (Kernel::PthreadMutexLock(&mutex) != OK)
 			    {
 				    std::_Exit(2);
 			    }
 			    predicate.store(true, std::memory_order_release);
-			    if (LibKernel::PthreadCondSignal(&cond) != OK || LibKernel::PthreadMutexUnlock(&mutex) != OK)
+			    if (Kernel::PthreadCondSignal(&cond) != OK || Kernel::PthreadMutexUnlock(&mutex) != OK)
 			    {
 				    std::_Exit(3);
 			    }
@@ -352,20 +352,20 @@ TEST(EmulatorKernelProcess, PthreadCondWaitReleasesRecursiveMutex)
 		    }
 		    while (!predicate.load(std::memory_order_acquire))
 		    {
-			    if (LibKernel::PthreadCondWait(&cond, &mutex) != OK)
+			    if (Kernel::PthreadCondWait(&cond, &mutex) != OK)
 			    {
 				    std::_Exit(4);
 			    }
 		    }
 
-		    if (LibKernel::PthreadMutexUnlock(&mutex) != OK)
+		    if (Kernel::PthreadMutexUnlock(&mutex) != OK)
 		    {
 			    std::_Exit(5);
 		    }
 		    worker.join();
-		    (void)LibKernel::PthreadCondDestroy(&cond);
-		    (void)LibKernel::PthreadMutexDestroy(&mutex);
-		    (void)LibKernel::PthreadMutexattrDestroy(&attr);
+		    (void)Kernel::PthreadCondDestroy(&cond);
+		    (void)Kernel::PthreadMutexDestroy(&mutex);
+		    (void)Kernel::PthreadMutexattrDestroy(&attr);
 		    std::_Exit(0);
 	    },
 	    ::testing::ExitedWithCode(0), "");
@@ -396,25 +396,25 @@ TEST(EmulatorKernelProcess, FileSystemRejectsUntrackedDescriptorWithoutAborting)
 {
 	EnsureFileSystemSubsystem();
 
-	LibKernel::FileSystem::FileStat stat {};
-	EXPECT_EQ(LibKernel::FileSystem::KernelFstat(0x7fffffff, &stat), LibKernel::KERNEL_ERROR_EBADF);
+	Kernel::FileSystem::FileStat stat {};
+	EXPECT_EQ(Kernel::FileSystem::KernelFstat(0x7fffffff, &stat), LibKernel::KERNEL_ERROR_EBADF);
 }
 
 // Retail non-devkit sceKernelGetGPI (NID 4oXYe9Xmk0Q) returns 0 without GPI state.
 TEST(EmulatorKernelProcess, RetailGetGpiReturnsZero)
 {
-	EXPECT_EQ(LibKernel::KernelRetailGetGpiResult(), 0);
+	EXPECT_EQ(Kernel::KernelRetailGetGpiResult(), 0);
 }
 
 TEST(EmulatorKernelProcess, GettimeofdayAdvancesWithinOneSecond)
 {
 	EnsureKernelProcessSubsystems();
-	LibKernel::KernelTimeval before {};
-	LibKernel::KernelTimeval after {};
+	Kernel::KernelTimeval before {};
+	Kernel::KernelTimeval after {};
 
-	ASSERT_EQ(LibKernel::KernelGettimeofday(&before), 0);
-	ASSERT_EQ(LibKernel::KernelUsleep(5'000), 0);
-	ASSERT_EQ(LibKernel::KernelGettimeofday(&after), 0);
+	ASSERT_EQ(Kernel::KernelGettimeofday(&before), 0);
+	ASSERT_EQ(Kernel::KernelUsleep(5'000), 0);
+	ASSERT_EQ(Kernel::KernelGettimeofday(&after), 0);
 
 	const int64_t elapsed_us = (after.tv_sec - before.tv_sec) * 1'000'000 + (after.tv_usec - before.tv_usec);
 	EXPECT_GE(elapsed_us, 1'000);
@@ -432,13 +432,13 @@ TEST(EmulatorKernelProcess, ConvertUtcToLocaltimeWritesUtcTimezoneOutputs)
 	const auto* rec = symbols.Find(KernelNativeFunc(u"-o5uEDpN+oY"));
 	ASSERT_NE(rec, nullptr);
 
-	using convert_utc_to_localtime_fn_t = int (*)(int64_t, int64_t*, LibKernel::KernelTimesec*, uint64_t*);
+	using convert_utc_to_localtime_fn_t = int (*)(int64_t, int64_t*, Kernel::KernelTimesec*, uint64_t*);
 	auto* convert_utc_to_localtime = reinterpret_cast<convert_utc_to_localtime_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(convert_utc_to_localtime, nullptr);
 
 	constexpr int64_t kUtcSeconds = 1234567890;
 	int64_t           local_time  = -1;
-	LibKernel::KernelTimesec timesec {-1, 0xffffffffu, 0xffffffffu};
+	Kernel::KernelTimesec timesec {-1, 0xffffffffu, 0xffffffffu};
 	uint64_t          dst_seconds = UINT64_MAX;
 
 	EXPECT_EQ(convert_utc_to_localtime(kUtcSeconds, nullptr, &timesec, &dst_seconds), LibKernel::KERNEL_ERROR_EINVAL);
@@ -461,14 +461,14 @@ TEST(EmulatorKernelProcess, ConvertLocaltimeToUtcResolvesNidAndWritesTimezoneOut
 	const auto* rec = symbols.Find(KernelNativeFunc(u"0NTHN1NKONI"));
 	ASSERT_NE(rec, nullptr);
 
-	using convert_localtime_to_utc_fn_t = int (*)(int64_t, int64_t, int64_t*, LibKernel::KernelTimezone*, int32_t*);
+	using convert_localtime_to_utc_fn_t = int (*)(int64_t, int64_t, int64_t*, Kernel::KernelTimezone*, int32_t*);
 	auto* convert_localtime_to_utc = reinterpret_cast<convert_localtime_to_utc_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(convert_localtime_to_utc, nullptr);
 
 	constexpr int64_t kLocalSeconds = 1234567890;
 	int64_t           utc_time      = -1;
 	int32_t           dst_seconds   = -1;
-	LibKernel::KernelTimezone timezone {-1, -1};
+	Kernel::KernelTimezone timezone {-1, -1};
 
 	EXPECT_EQ(convert_localtime_to_utc(kLocalSeconds, 0, &utc_time, nullptr, &dst_seconds), LibKernel::KERNEL_ERROR_EINVAL);
 	ASSERT_EQ(convert_localtime_to_utc(kLocalSeconds, 0, &utc_time, &timezone, &dst_seconds), OK);
@@ -489,18 +489,18 @@ TEST(EmulatorKernelProcess, ConvertLocaltimeToUtcSeparatesStandardOffsetFromDst)
 	constexpr int64_t kUtcSeconds   = 1719849600;
 	int64_t           utc_time      = -1;
 	int32_t           dst_seconds   = -1;
-	LibKernel::KernelTimezone timezone {-1, -1};
+	Kernel::KernelTimezone timezone {-1, -1};
 
-	ASSERT_EQ(LibKernel::KernelConvertLocaltimeToUtc(kLocalSeconds, 0, &utc_time, &timezone, &dst_seconds), OK);
+	ASSERT_EQ(Kernel::KernelConvertLocaltimeToUtc(kLocalSeconds, 0, &utc_time, &timezone, &dst_seconds), OK);
 	EXPECT_EQ(utc_time, kUtcSeconds);
 	EXPECT_EQ(timezone.tz_minuteswest, 300);
 	EXPECT_EQ(timezone.tz_dsttime, 4);
 	EXPECT_EQ(dst_seconds, 3600);
 
 	int64_t                 local_time = -1;
-	LibKernel::KernelTimesec timesec {};
+	Kernel::KernelTimesec timesec {};
 	uint64_t                utc_dst_seconds = 0;
-	ASSERT_EQ(LibKernel::KernelConvertUtcToLocaltime(kUtcSeconds, &local_time, &timesec, &utc_dst_seconds), OK);
+	ASSERT_EQ(Kernel::KernelConvertUtcToLocaltime(kUtcSeconds, &local_time, &timesec, &utc_dst_seconds), OK);
 	EXPECT_EQ(local_time, kLocalSeconds);
 	EXPECT_EQ(timesec.offset_seconds, static_cast<uint32_t>(-18000));
 	EXPECT_EQ(timesec.dst_seconds, 3600u);
@@ -522,7 +522,7 @@ TEST(EmulatorKernelProcess, AddAmprEventRegistersAndTriggers)
 
 	KernelEvent ev {};
 	int         out  = 0;
-	LibKernel::KernelUseconds zero = 0;
+	Kernel::KernelUseconds zero = 0;
 	EXPECT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
 
 	ASSERT_EQ(KernelTriggerEvent(eq, 2, KERNEL_EVFILT_AMPR, reinterpret_cast<void*>(static_cast<uintptr_t>(0x42))), OK);
@@ -622,7 +622,7 @@ TEST(EmulatorKernelProcess, WaitEqueueRejectsNullResultCount)
 	ASSERT_EQ(KernelCreateEqueue(&eq, "null-result-count"), OK);
 
 	KernelEvent             event {};
-	LibKernel::KernelUseconds zero = 0;
+	Kernel::KernelUseconds zero = 0;
 	EXPECT_EQ(KernelWaitEqueue(eq, &event, 1, nullptr, &zero), LibKernel::KERNEL_ERROR_EFAULT);
 	EXPECT_EQ(KernelDeleteEqueue(eq), OK);
 }
@@ -764,8 +764,8 @@ TEST(EmulatorKernelProcess, AprSubmitCommandBufferRejectsNullAndAckNonNull)
 	EnsureKernelProcessSubsystems();
 
 	uint64_t fake_cmd = 0x1111;
-	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(nullptr, 1, nullptr, 2, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(&fake_cmd, 1, &fake_cmd, 2, &fake_cmd), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(nullptr, 1, nullptr, 2, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(&fake_cmd, 1, &fake_cmd, 2, &fake_cmd), OK);
 }
 
 TEST(EmulatorKernelProcess, AprSubmitUsesSubmitIdentForDeferredCompletion)
@@ -814,10 +814,10 @@ TEST(EmulatorKernelProcess, AprSubmitUsesSubmitIdentForDeferredCompletion)
 
 	KernelEvent ev {};
 	int         out  = 0;
-	LibKernel::KernelUseconds zero = 0;
+	Kernel::KernelUseconds zero = 0;
 	EXPECT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
 
-	ASSERT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr), OK);
+	ASSERT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr), OK);
 	ASSERT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), OK);
 	EXPECT_EQ(out, 1);
 	EXPECT_EQ(ev.ident, static_cast<uintptr_t>(2));
@@ -827,13 +827,13 @@ TEST(EmulatorKernelProcess, AprSubmitUsesSubmitIdentForDeferredCompletion)
 
 	ASSERT_EQ(add_event(cmd, eq, /*builder_ident=*/0, /*completion_token=*/0x43, /*user_data=*/0), OK);
 	ASSERT_EQ(reset(cmd), OK);
-	ASSERT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr), OK);
+	ASSERT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr), OK);
 	out = 0;
 	EXPECT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
 
 	ASSERT_EQ(add_event(cmd, eq, /*builder_ident=*/0, /*completion_token=*/0x44, /*user_data=*/0), OK);
 	ASSERT_EQ(KernelDeleteEqueue(eq), OK);
-	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr),
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr),
 	          LibKernel::KERNEL_ERROR_EBADF);
 	EXPECT_EQ(reset(cmd), OK);
 }
@@ -844,20 +844,20 @@ TEST(EmulatorKernelProcess, AprSubmitGetIdAndWaitRoundTrip)
 
 	uint64_t fake_cmd = 0x2222;
 	uint32_t sub_id   = 0;
-	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(nullptr, 1, &sub_id), LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(&fake_cmd, 1, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(LibKernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(&fake_cmd, 1, &sub_id), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(nullptr, 1, &sub_id), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(&fake_cmd, 1, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(&fake_cmd, 1, &sub_id), OK);
 	EXPECT_NE(sub_id, 0u);
-	EXPECT_EQ(LibKernel::FileSystem::KernelAprWaitCommandBuffer(sub_id), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprWaitCommandBuffer(sub_id), OK);
 	// Second wait on completed id is soft-OK (eager builders).
-	EXPECT_EQ(LibKernel::FileSystem::KernelAprWaitCommandBuffer(sub_id), OK);
-	EXPECT_EQ(LibKernel::FileSystem::KernelAprWaitCommandBuffer(0), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprWaitCommandBuffer(sub_id), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprWaitCommandBuffer(0), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
 // Gen5 NID IafI2PxcPnQ — null mutex is EINVAL at the HLE boundary.
 TEST(EmulatorKernelProcess, PthreadMutexTimedlockRejectsNull)
 {
-	EXPECT_EQ(LibKernel::PthreadMutexTimedlock(nullptr, 1000), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::PthreadMutexTimedlock(nullptr, 1000), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
 // ForEach with results[] continues after per-path errors and returns success count.
@@ -869,7 +869,7 @@ TEST(EmulatorKernelProcess, AprResolveForEachReportsPerPathResults)
 	uint32_t    ids[2]   = {0, 0};
 	int32_t     results[2] = {0, 0};
 	// Null path list entry → EFAULT per entry; with results[] returns 0 successes.
-	const int rc = LibKernel::FileSystem::KernelAprResolveFilepathsToIdsForEach(paths, 2, ids, results);
+	const int rc = Kernel::FileSystem::KernelAprResolveFilepathsToIdsForEach(paths, 2, ids, results);
 	EXPECT_EQ(rc, 0);
 	EXPECT_EQ(results[0], LibKernel::KERNEL_ERROR_EFAULT);
 	EXPECT_EQ(results[1], LibKernel::KERNEL_ERROR_EFAULT);
@@ -881,7 +881,7 @@ TEST(EmulatorKernelProcess, AprResolveForEachReportsPerPathResults)
 // prefers same-family and close weight (Heavy → Heavy/Bold, Medium → Bold).
 TEST(EmulatorKernelProcess, PackageFontFallbackScoresWeightAndFamily)
 {
-	using LibKernel::FileSystem::ScorePackageFontFallback;
+	using Kernel::FileSystem::ScorePackageFontFallback;
 
 	EXPECT_GT(ScorePackageFontFallback(U"SIE-ShinGoPr6N-Heavy.otf", U"Cobe-Heavy.otf"),
 	          ScorePackageFontFallback(U"SIE-ShinGoPr6N-Heavy.otf", U"FuturaStd-Bold.otf"));
@@ -913,9 +913,9 @@ TEST(EmulatorKernelProcess, HostExtensionAliasMapsOdxToOdxb)
 	ASSERT_TRUE(Core::File::IsFileExisting(odxb));
 	ASSERT_FALSE(Core::File::IsFileExisting(odx));
 
-	EXPECT_EQ(LibKernel::FileSystem::PreferHostExtensionAlias(odx), odxb);
-	EXPECT_EQ(LibKernel::FileSystem::PreferHostExtensionAlias(odxb), odxb);
-	EXPECT_EQ(LibKernel::FileSystem::PreferHostExtensionAlias(dir + U"missing.odx"), dir + U"missing.odx");
+	EXPECT_EQ(Kernel::FileSystem::PreferHostExtensionAlias(odx), odxb);
+	EXPECT_EQ(Kernel::FileSystem::PreferHostExtensionAlias(odxb), odxb);
+	EXPECT_EQ(Kernel::FileSystem::PreferHostExtensionAlias(dir + U"missing.odx"), dir + U"missing.odx");
 
 	Core::File::DeleteDirectories(dir);
 }
@@ -961,15 +961,15 @@ TEST(EmulatorKernelProcess, HostApp0DataSegmentMapsPreinUnderData)
 	const String host_wrong  = root + U"prein/effects/odx/ui_effect_temp_1.odxb";
 	ASSERT_FALSE(Core::File::IsFileExisting(host_wrong));
 
-	EXPECT_EQ(LibKernel::FileSystem::PreferHostApp0DataSegment(guest_wrong, host_wrong), real_odxb);
+	EXPECT_EQ(Kernel::FileSystem::PreferHostApp0DataSegment(guest_wrong, host_wrong), real_odxb);
 
 	// Combined with extension alias: guest .odx under wrong root → data/ + .odxb.
 	const String guest_odx = U"/app0/prein/effects/odx/ui_effect_temp_1.odx";
 	const String host_odx  = root + U"prein/effects/odx/ui_effect_temp_1.odx";
-	EXPECT_EQ(LibKernel::FileSystem::PreferHostApp0DataSegment(guest_odx, host_odx), real_odxb);
+	EXPECT_EQ(Kernel::FileSystem::PreferHostApp0DataSegment(guest_odx, host_odx), real_odxb);
 
 	// Correct /app0/data/... guest is not rewritten.
-	EXPECT_EQ(LibKernel::FileSystem::PreferHostApp0DataSegment(U"/app0/data/prein/effects/odx/ui_effect_temp_1.odxb", real_odxb),
+	EXPECT_EQ(Kernel::FileSystem::PreferHostApp0DataSegment(U"/app0/data/prein/effects/odx/ui_effect_temp_1.odxb", real_odxb),
 	          real_odxb);
 
 	Core::File::DeleteDirectories(root);
@@ -1001,18 +1001,18 @@ TEST(EmulatorKernelProcess, HostApp0PatchOverlayOverridesApp0)
 		f.Close();
 	}
 
-	LibKernel::FileSystem::Mount(app0_root, U"/app0/");
-	LibKernel::FileSystem::Mount(patch_root, U"/app0_patch/");
+	Kernel::FileSystem::Mount(app0_root, U"/app0/");
+	Kernel::FileSystem::Mount(patch_root, U"/app0_patch/");
 
-	const int fd = LibKernel::FileSystem::KernelOpen("/app0/media/intro.mp4", 0, 0);
+	const int fd = Kernel::FileSystem::KernelOpen("/app0/media/intro.mp4", 0, 0);
 	EXPECT_GE(fd, 0);
 	if (fd >= 0)
 	{
-		LibKernel::FileSystem::KernelClose(fd);
+		Kernel::FileSystem::KernelClose(fd);
 	}
 
-	LibKernel::FileSystem::Umount(U"/app0/");
-	LibKernel::FileSystem::Umount(U"/app0_patch/");
+	Kernel::FileSystem::Umount(U"/app0/");
+	Kernel::FileSystem::Umount(U"/app0_patch/");
 	Core::File::DeleteDirectories(app0_root);
 	Core::File::DeleteDirectories(patch_root);
 }
@@ -1037,12 +1037,12 @@ TEST(EmulatorKernelProcess, PackageFontHostPathPicksSibling)
 	ASSERT_TRUE(Core::File::IsFileExisting(present));
 	ASSERT_FALSE(Core::File::IsFileExisting(missing));
 
-	const String chosen = LibKernel::FileSystem::PreferPackageFontHostPath(missing);
+	const String chosen = Kernel::FileSystem::PreferPackageFontHostPath(missing);
 	EXPECT_EQ(chosen, present);
 	// Exact hit is unchanged.
-	EXPECT_EQ(LibKernel::FileSystem::PreferPackageFontHostPath(present), present);
+	EXPECT_EQ(Kernel::FileSystem::PreferPackageFontHostPath(present), present);
 	// Non-font missing path is unchanged.
-	EXPECT_EQ(LibKernel::FileSystem::PreferPackageFontHostPath(dir + U"missing.bin"), dir + U"missing.bin");
+	EXPECT_EQ(Kernel::FileSystem::PreferPackageFontHostPath(dir + U"missing.bin"), dir + U"missing.bin");
 
 	Core::File::DeleteDirectories(dir);
 }
@@ -1074,10 +1074,10 @@ TEST(EmulatorKernelProcess, HostOdCompanionMapsBareExtensionsFromLastOdxb)
 	const String bare_jxm  = root + U".jxm";
 	const String bare_skel = root + U".skel";
 	const String bare_anim = root + U".anim";
-	EXPECT_EQ(LibKernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.jxm", bare_jxm, odxb), jxm);
-	EXPECT_EQ(LibKernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.skel", bare_skel, odxb), skel);
-	EXPECT_EQ(LibKernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.anim", bare_anim, odxb), anim);
-	EXPECT_EQ(LibKernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.jxm", bare_jxm, U""), bare_jxm);
+	EXPECT_EQ(Kernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.jxm", bare_jxm, odxb), jxm);
+	EXPECT_EQ(Kernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.skel", bare_skel, odxb), skel);
+	EXPECT_EQ(Kernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.anim", bare_anim, odxb), anim);
+	EXPECT_EQ(Kernel::FileSystem::PreferHostOdCompanionAsset(U"/app0/.jxm", bare_jxm, U""), bare_jxm);
 
 	Core::File::DeleteDirectories(root);
 }
@@ -1087,7 +1087,7 @@ TEST(EmulatorKernelProcess, PosixPthreadAttrInitAndSetstacksize)
 {
 	EnsureKernelProcessSubsystems();
 
-	LibKernel::PthreadAttr attr = nullptr;
+	Kernel::PthreadAttr attr = nullptr;
 	EXPECT_EQ(Posix::pthread_attr_init(&attr), OK);
 	ASSERT_NE(attr, nullptr);
 	EXPECT_EQ(Posix::pthread_attr_setstacksize(&attr, 0x400000), OK);
@@ -1101,7 +1101,7 @@ TEST(EmulatorKernelProcess, PosixPthreadAttrInitAndSetstacksize)
 	EXPECT_EQ(Posix::pthread_attr_destroy(&attr), OK);
 }
 
-// Gen5 Posix_v1 pthread_detach rejects null thread like LibKernel::PthreadDetach.
+// Gen5 Posix_v1 pthread_detach rejects null thread like Kernel::PthreadDetach.
 TEST(EmulatorKernelProcess, PosixPthreadDetachRejectsNull)
 {
 	EXPECT_NE(Posix::pthread_detach(nullptr), OK);
@@ -1110,30 +1110,30 @@ TEST(EmulatorKernelProcess, PosixPthreadDetachRejectsNull)
 TEST(EmulatorKernelProcess, PosixPthreadCondInitUsesGuestConditionLayout)
 {
 	EnsureKernelProcessSubsystems();
-	LibKernel::PthreadCondattr attr = nullptr;
-	ASSERT_EQ(LibKernel::PthreadCondattrInit(&attr), OK);
-	LibKernel::PthreadCond cond = nullptr;
+	Kernel::PthreadCondattr attr = nullptr;
+	ASSERT_EQ(Kernel::PthreadCondattrInit(&attr), OK);
+	Kernel::PthreadCond cond = nullptr;
 	EXPECT_EQ(Posix::pthread_cond_init(&cond, &attr), OK);
 	ASSERT_NE(cond, nullptr);
 	EXPECT_EQ(Posix::pthread_cond_destroy(&cond), OK);
-	EXPECT_EQ(LibKernel::PthreadCondattrDestroy(&attr), OK);
+	EXPECT_EQ(Kernel::PthreadCondattrDestroy(&attr), OK);
 }
 
 // Gen5 memory helpers: null size rejects; range name is success no-op.
 TEST(EmulatorKernelProcess, ConfiguredFlexibleAndRangeNameBoundaries)
 {
-	EXPECT_EQ(LibKernel::Memory::KernelConfiguredFlexibleMemorySize(nullptr), LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(LibKernel::Memory::KernelSetVirtualRangeName(nullptr, 0, "test"), OK);
+	EXPECT_EQ(Kernel::Memory::KernelConfiguredFlexibleMemorySize(nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::Memory::KernelSetVirtualRangeName(nullptr, 0, "test"), OK);
 }
 
 // Gen5 VirtualQuery: reject bad info_size/flags; unmapped addr returns EACCES.
 TEST(EmulatorKernelProcess, VirtualQueryRejectsBadArgs)
 {
-	static_assert(sizeof(LibKernel::Memory::VirtualQueryInfo) == 72);
-	LibKernel::Memory::VirtualQueryInfo info {};
-	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 0, nullptr, sizeof(info)), LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 0, &info, 8), LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(LibKernel::Memory::KernelVirtualQuery(nullptr, 2, &info, sizeof(info)), LibKernel::KERNEL_ERROR_EINVAL);
+	static_assert(sizeof(Kernel::Memory::VirtualQueryInfo) == 72);
+	Kernel::Memory::VirtualQueryInfo info {};
+	EXPECT_EQ(Kernel::Memory::KernelVirtualQuery(nullptr, 0, nullptr, sizeof(info)), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::Memory::KernelVirtualQuery(nullptr, 0, &info, 8), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::Memory::KernelVirtualQuery(nullptr, 2, &info, sizeof(info)), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
 // Gen5 TLS setspecific/getspecific NIDs used after KeyCreate.
@@ -1168,12 +1168,13 @@ TEST(EmulatorKernelProcess, ResolvesGen5PthreadAndPosixConditionNids)
 
 TEST(EmulatorKernelProcess, ClearVirtualRangeNameSucceeds)
 {
-	EXPECT_EQ(LibKernel::Memory::KernelClearVirtualRangeName(nullptr, 0), OK);
+	EXPECT_EQ(Kernel::Memory::KernelClearVirtualRangeName(nullptr, 0), OK);
 }
 
 TEST(EmulatorKernelProcess, GuestEntropyDeviceIsReadOnly)
 {
 	using namespace LibKernel;
+	using namespace Kernel;
 
 	EnsureFileSystemSubsystem();
 

@@ -153,7 +153,7 @@ static void KYTY_SYSV_ABI asan_init()
 	AllocShadow(s.reserved_addr, reinterpret_cast<uintptr_t>(&s));
 #endif
 
-	LibKernel::Memory::RegisterCallbacks(KernelAlloc, KernelFree);
+	Kernel::Memory::RegisterCallbacks(KernelAlloc, KernelFree);
 }
 
 static void KYTY_SYSV_ABI asan_version_mismatch_check_v8()

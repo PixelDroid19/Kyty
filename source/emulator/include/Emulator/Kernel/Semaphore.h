@@ -4,7 +4,6 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
-#include "Emulator/Kernel/Namespace.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Time.h"
 
@@ -12,7 +11,6 @@
 
 namespace Kyty::Kernel::Semaphore {
 
-using ::Kyty::Libs::LibKernel::KernelUseconds;
 
 class KernelSemaPrivate;
 

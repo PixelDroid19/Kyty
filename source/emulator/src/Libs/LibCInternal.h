@@ -47,29 +47,29 @@ int   KYTY_SYSV_ABI c_posix_memalign(void** memptr, size_t alignment, size_t siz
 void* allocate_with_owner(size_t size);
 bool  free_by_owner(void* ptr);
 
-int  KYTY_SYSV_ABI c_cnd_init(LibKernel::PthreadCond* cond);
-int  KYTY_SYSV_ABI c_cnd_init_with_name(LibKernel::PthreadCond* cond, const char* name);
-int  KYTY_SYSV_ABI c_cnd_init_with_default_name_override(LibKernel::PthreadCond* cond, const char* name);
-int  KYTY_SYSV_ABI c_cnd_broadcast(LibKernel::PthreadCond* cond);
-int  KYTY_SYSV_ABI c_cnd_signal(LibKernel::PthreadCond* cond);
-int  KYTY_SYSV_ABI c_cnd_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex);
-int  KYTY_SYSV_ABI c_cnd_timedwait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex,
-                                   const LibKernel::KernelTimespec* abstime);
-void KYTY_SYSV_ABI c_cnd_destroy(LibKernel::PthreadCond* cond);
-void KYTY_SYSV_ABI c_cnd_register_at_thread_exit(LibKernel::PthreadCond* condition,
-                                                 LibKernel::PthreadMutex* mutex, int* completed);
-void KYTY_SYSV_ABI c_cnd_unregister_at_thread_exit(LibKernel::PthreadMutex* mutex);
+int  KYTY_SYSV_ABI c_cnd_init(Kernel::PthreadCond* cond);
+int  KYTY_SYSV_ABI c_cnd_init_with_name(Kernel::PthreadCond* cond, const char* name);
+int  KYTY_SYSV_ABI c_cnd_init_with_default_name_override(Kernel::PthreadCond* cond, const char* name);
+int  KYTY_SYSV_ABI c_cnd_broadcast(Kernel::PthreadCond* cond);
+int  KYTY_SYSV_ABI c_cnd_signal(Kernel::PthreadCond* cond);
+int  KYTY_SYSV_ABI c_cnd_wait(Kernel::PthreadCond* cond, Kernel::PthreadMutex* mutex);
+int  KYTY_SYSV_ABI c_cnd_timedwait(Kernel::PthreadCond* cond, Kernel::PthreadMutex* mutex,
+                                   const Kernel::KernelTimespec* abstime);
+void KYTY_SYSV_ABI c_cnd_destroy(Kernel::PthreadCond* cond);
+void KYTY_SYSV_ABI c_cnd_register_at_thread_exit(Kernel::PthreadCond* condition,
+                                                 Kernel::PthreadMutex* mutex, int* completed);
+void KYTY_SYSV_ABI c_cnd_unregister_at_thread_exit(Kernel::PthreadMutex* mutex);
 void KYTY_SYSV_ABI c_cnd_do_broadcast_at_thread_exit();
 
-int  KYTY_SYSV_ABI c_mtx_init(LibKernel::PthreadMutex* mutex, int type);
-int  KYTY_SYSV_ABI c_mtx_init_with_name(LibKernel::PthreadMutex* mutex, int type, const char* name);
-int  KYTY_SYSV_ABI c_mtx_init_with_default_name_override(LibKernel::PthreadMutex* mutex, int type, const char* name);
-void KYTY_SYSV_ABI c_mtx_destroy(LibKernel::PthreadMutex* mutex);
-int  KYTY_SYSV_ABI c_mtx_lock(LibKernel::PthreadMutex* mutex);
-int  KYTY_SYSV_ABI c_mtx_trylock(LibKernel::PthreadMutex* mutex);
-int  KYTY_SYSV_ABI c_mtx_timedlock(LibKernel::PthreadMutex* mutex, const LibKernel::KernelTimespec* abstime);
-int  KYTY_SYSV_ABI c_mtx_unlock(LibKernel::PthreadMutex* mutex);
-int  KYTY_SYSV_ABI c_mtx_current_owns(LibKernel::PthreadMutex* mutex);
+int  KYTY_SYSV_ABI c_mtx_init(Kernel::PthreadMutex* mutex, int type);
+int  KYTY_SYSV_ABI c_mtx_init_with_name(Kernel::PthreadMutex* mutex, int type, const char* name);
+int  KYTY_SYSV_ABI c_mtx_init_with_default_name_override(Kernel::PthreadMutex* mutex, int type, const char* name);
+void KYTY_SYSV_ABI c_mtx_destroy(Kernel::PthreadMutex* mutex);
+int  KYTY_SYSV_ABI c_mtx_lock(Kernel::PthreadMutex* mutex);
+int  KYTY_SYSV_ABI c_mtx_trylock(Kernel::PthreadMutex* mutex);
+int  KYTY_SYSV_ABI c_mtx_timedlock(Kernel::PthreadMutex* mutex, const Kernel::KernelTimespec* abstime);
+int  KYTY_SYSV_ABI c_mtx_unlock(Kernel::PthreadMutex* mutex);
+int  KYTY_SYSV_ABI c_mtx_current_owns(Kernel::PthreadMutex* mutex);
 
 int  KYTY_SYSV_ABI c_execute_once(int* flag, execute_once_callback_t callback, void* context);
 int  KYTY_SYSV_ABI c_vsnprintf(char* s, size_t n, const char* fmt, VaList* ap);

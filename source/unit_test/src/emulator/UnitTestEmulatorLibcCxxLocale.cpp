@@ -38,9 +38,9 @@ void EnsureLog()
 
 void EnsurePthread()
 {
-	if (!Libs::LibKernel::PthreadIsInitialized())
+	if (!Kernel::PthreadIsInitialized())
 	{
-		Libs::LibKernel::PthreadSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		Kernel::PthreadSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
 }
 
@@ -149,18 +149,18 @@ TEST(EmulatorLibcCxxLocale, MtxInitUsesGuestPthreadStorage)
 	ASSERT_NE(unlock_rec, nullptr);
 	ASSERT_NE(unlock_rec->vaddr, 0u);
 
-	using MtxInit = KYTY_SYSV_ABI int (*)(Libs::LibKernel::PthreadMutex* mutex, int type);
-	using MtxLock = KYTY_SYSV_ABI int (*)(Libs::LibKernel::PthreadMutex* mutex);
+	using MtxInit = KYTY_SYSV_ABI int (*)(Kernel::PthreadMutex* mutex, int type);
+	using MtxLock = KYTY_SYSV_ABI int (*)(Kernel::PthreadMutex* mutex);
 	auto* mtx_init = reinterpret_cast<MtxInit>(rec->vaddr);
 	auto* mtx_lock = reinterpret_cast<MtxLock>(lock_rec->vaddr);
 	auto* mtx_unlock = reinterpret_cast<MtxLock>(unlock_rec->vaddr);
 
-	Libs::LibKernel::PthreadMutex mutex = nullptr;
+	Kernel::PthreadMutex mutex = nullptr;
 	EXPECT_EQ(mtx_init(&mutex, 2), 0);
 	ASSERT_NE(mutex, nullptr);
 	EXPECT_EQ(mtx_lock(&mutex), 0);
 	EXPECT_EQ(mtx_unlock(&mutex), 0);
-	EXPECT_EQ(Libs::LibKernel::PthreadMutexDestroy(&mutex), OK);
+	EXPECT_EQ(Kernel::PthreadMutexDestroy(&mutex), OK);
 }
 
 TEST(EmulatorLibcCxxLocale, CndBroadcastUsesGuestPthreadStorage)
@@ -178,15 +178,15 @@ TEST(EmulatorLibcCxxLocale, CndBroadcastUsesGuestPthreadStorage)
 	ASSERT_NE(broadcast_rec, nullptr);
 	ASSERT_NE(broadcast_rec->vaddr, 0u);
 
-	using CndOperation = KYTY_SYSV_ABI int (*)(Libs::LibKernel::PthreadCond* cond);
+	using CndOperation = KYTY_SYSV_ABI int (*)(Kernel::PthreadCond* cond);
 	auto* cnd_init      = reinterpret_cast<CndOperation>(init_rec->vaddr);
 	auto* cnd_broadcast = reinterpret_cast<CndOperation>(broadcast_rec->vaddr);
 
-	Libs::LibKernel::PthreadCond cond = nullptr;
+	Kernel::PthreadCond cond = nullptr;
 	EXPECT_EQ(cnd_init(&cond), 0);
 	ASSERT_NE(cond, nullptr);
 	EXPECT_EQ(cnd_broadcast(&cond), 0);
-	EXPECT_EQ(Libs::LibKernel::PthreadCondDestroy(&cond), OK);
+	EXPECT_EQ(Kernel::PthreadCondDestroy(&cond), OK);
 }
 
 TEST(EmulatorLibcCxxLocale, FlushesCapturedStandardErrorStream)

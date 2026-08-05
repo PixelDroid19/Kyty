@@ -41,7 +41,7 @@ int InitializeMemory(int argc, char** argv)
 	auto* config  = Config::ConfigSubsystem::Instance();
 	auto* threads = Core::ThreadsSubsystem::Instance();
 	auto* log     = Log::LogSubsystem::Instance();
-	auto* memory  = Libs::LibKernel::Memory::MemorySubsystem::Instance();
+	auto* memory  = Kernel::Memory::MemorySubsystem::Instance();
 
 	subsystems->Add(core, {});
 	subsystems->Add(config, {core});
@@ -73,40 +73,40 @@ int ReserveVirtualRangeContract()
 	reserve_symbol.type                 = Loader::SymbolType::Func;
 	const auto* record                  = symbols.Find(reserve_symbol);
 	Expect(record != nullptr, "7oxv3PPCumo must resolve through the libkernel HLE registry");
-	Expect(record->vaddr == reinterpret_cast<uint64_t>(&Libs::LibKernel::Memory::KernelReserveVirtualRange),
+	Expect(record->vaddr == reinterpret_cast<uint64_t>(&Kernel::Memory::KernelReserveVirtualRange),
 	       "7oxv3PPCumo must resolve to KernelReserveVirtualRange");
 
-	Expect(Libs::LibKernel::Memory::KernelReserveVirtualRange(nullptr, kGuestPage, 0, 0) == Libs::LibKernel::KERNEL_ERROR_EINVAL,
+	Expect(Kernel::Memory::KernelReserveVirtualRange(nullptr, kGuestPage, 0, 0) == Libs::LibKernel::KERNEL_ERROR_EINVAL,
 	       "null address pointer must be rejected");
 
 	void* addr = nullptr;
-	Expect(Libs::LibKernel::Memory::KernelReserveVirtualRange(&addr, kGuestPage - 1, 0, 0) == Libs::LibKernel::KERNEL_ERROR_EINVAL,
+	Expect(Kernel::Memory::KernelReserveVirtualRange(&addr, kGuestPage - 1, 0, 0) == Libs::LibKernel::KERNEL_ERROR_EINVAL,
 	       "length must be guest-page aligned");
-	Expect(Libs::LibKernel::Memory::KernelReserveVirtualRange(&addr, kGuestPage, 0, 0x6000) == Libs::LibKernel::KERNEL_ERROR_EINVAL,
+	Expect(Kernel::Memory::KernelReserveVirtualRange(&addr, kGuestPage, 0, 0x6000) == Libs::LibKernel::KERNEL_ERROR_EINVAL,
 	       "alignment must be a guest-page-sized power of two");
 
-	Expect(Libs::LibKernel::Memory::KernelReserveVirtualRange(&addr, kGuestPage * 2, 0, kGuestPage * 2) == 0,
+	Expect(Kernel::Memory::KernelReserveVirtualRange(&addr, kGuestPage * 2, 0, kGuestPage * 2) == 0,
 	       "valid reservation must succeed");
 	Expect(addr != nullptr, "successful reservation must publish an address");
 	Expect((reinterpret_cast<uintptr_t>(addr) & (kGuestPage * 2 - 1)) == 0, "reservation must honor alignment");
-	Expect(Libs::LibKernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(addr), kGuestPage * 2) == 0,
+	Expect(Kernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(addr), kGuestPage * 2) == 0,
 	       "reserved range must be releasable through KernelMunmap");
 
 	void* fixed_addr = addr;
-	Expect(Libs::LibKernel::Memory::KernelReserveVirtualRange(&fixed_addr, kGuestPage * 2, 0x10 | 0x80, kGuestPage * 2) == 0,
+	Expect(Kernel::Memory::KernelReserveVirtualRange(&fixed_addr, kGuestPage * 2, 0x10 | 0x80, kGuestPage * 2) == 0,
 	       "fixed no-overwrite reservation must succeed at a free aligned address");
 	Expect(fixed_addr == addr, "fixed reservation must preserve the requested address");
 	void* duplicate_addr = fixed_addr;
-	Expect(Libs::LibKernel::Memory::KernelReserveVirtualRange(&duplicate_addr, kGuestPage * 2, 0x10 | 0x80, kGuestPage * 2) ==
+	Expect(Kernel::Memory::KernelReserveVirtualRange(&duplicate_addr, kGuestPage * 2, 0x10 | 0x80, kGuestPage * 2) ==
 	           Libs::LibKernel::KERNEL_ERROR_EBUSY,
 	       "fixed no-overwrite reservation must reject an occupied range");
-	Expect(Libs::LibKernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(fixed_addr), kGuestPage * 2) == 0,
+	Expect(Kernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(fixed_addr), kGuestPage * 2) == 0,
 	       "fixed reservation must be releasable");
 
 	void* large_addr = nullptr;
-	Expect(Libs::LibKernel::Memory::KernelReserveVirtualRange(&large_addr, UINT64_C(0x8000000000), 0, UINT64_C(0x200000)) == 0,
+	Expect(Kernel::Memory::KernelReserveVirtualRange(&large_addr, UINT64_C(0x8000000000), 0, UINT64_C(0x200000)) == 0,
 	       "observed 512 GiB reservation contract must fit the guest virtual window");
-	Expect(Libs::LibKernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(large_addr), UINT64_C(0x8000000000)) == 0,
+	Expect(Kernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(large_addr), UINT64_C(0x8000000000)) == 0,
 	       "large reservation must be releasable");
 	return 0;
 }
@@ -129,7 +129,7 @@ struct GpuMappingPortProbe
 	}
 
 	static bool ReleaseRange(void* context, uint64_t vaddr, uint64_t size,
-	                         Libs::LibKernel::Memory::KernelGpuMappingCompletion completion, void* completion_data)
+	                         Kernel::Memory::KernelGpuMappingCompletion completion, void* completion_data)
 	{
 		auto* probe           = static_cast<GpuMappingPortProbe*>(context);
 		probe->release_vaddr  = vaddr;
@@ -141,7 +141,7 @@ struct GpuMappingPortProbe
 
 int GpuMappingLifecycleContract()
 {
-	using namespace Libs::LibKernel::Memory;
+	using namespace Kernel::Memory;
 
 	constexpr size_t kSize = 0x4000;
 	auto&            port  = GetGpuMappingLifecyclePort();

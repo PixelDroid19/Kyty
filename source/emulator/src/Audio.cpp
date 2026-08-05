@@ -601,7 +601,7 @@ int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out)
 	constexpr size_t kPortStateSize = 0x20;
 	void*            start          = nullptr;
 	void*            end            = nullptr;
-	if (LibKernel::Memory::KernelQueryMemoryProtection(state_out, &start, &end, nullptr) != OK ||
+	if (Kernel::Memory::KernelQueryMemoryProtection(state_out, &start, &end, nullptr) != OK ||
 	    reinterpret_cast<uintptr_t>(state_out) > reinterpret_cast<uintptr_t>(end) - kPortStateSize + 1)
 	{
 		return LibKernel::KERNEL_ERROR_EFAULT;
@@ -630,7 +630,7 @@ int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* u
 	}
 	void* output_start = nullptr;
 	void* output_end   = nullptr;
-	if (LibKernel::Memory::KernelQueryMemoryProtection(user_out, &output_start, &output_end, nullptr) != OK ||
+	if (Kernel::Memory::KernelQueryMemoryProtection(user_out, &output_start, &output_end, nullptr) != OK ||
 	    reinterpret_cast<uintptr_t>(user_out) > reinterpret_cast<uintptr_t>(output_end) - sizeof(*user_out) + 1)
 	{
 		return LibKernel::KERNEL_ERROR_EFAULT;

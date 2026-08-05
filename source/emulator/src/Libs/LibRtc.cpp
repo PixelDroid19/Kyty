@@ -447,8 +447,8 @@ static int KYTY_SYSV_ABI RtcGetCurrentTick(uint64_t* tick)
 		return RTC_ERROR_INVALID_POINTER;
 	}
 
-	LibKernel::KernelTimeval tv {};
-	if (LibKernel::KernelGettimeofday(&tv) != OK)
+	Kernel::KernelTimeval tv {};
+	if (Kernel::KernelGettimeofday(&tv) != OK)
 	{
 		return RTC_ERROR_INVALID_POINTER;
 	}
@@ -493,8 +493,8 @@ static int KYTY_SYSV_ABI RtcGetCurrentClock(RtcDateTime* time, int time_zone_min
 		return RTC_ERROR_INVALID_POINTER;
 	}
 
-	LibKernel::KernelTimeval tv {};
-	if (LibKernel::KernelGettimeofday(&tv) != OK)
+	Kernel::KernelTimeval tv {};
+	if (Kernel::KernelGettimeofday(&tv) != OK)
 	{
 		return RTC_ERROR_INVALID_POINTER;
 	}
@@ -513,8 +513,8 @@ static int KYTY_SYSV_ABI RtcGetCurrentClockLocalTime(RtcDateTime* time)
 		return RTC_ERROR_INVALID_POINTER;
 	}
 
-	LibKernel::KernelTimeval tv {};
-	if (LibKernel::KernelGettimeofday(&tv) != OK)
+	Kernel::KernelTimeval tv {};
+	if (Kernel::KernelGettimeofday(&tv) != OK)
 	{
 		return RTC_ERROR_INVALID_POINTER;
 	}

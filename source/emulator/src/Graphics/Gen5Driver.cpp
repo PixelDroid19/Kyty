@@ -284,7 +284,7 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
 	return Kernel::OK;
 }
 
-int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata)
+int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(Kernel::EventQueue::KernelEqueue eq, int id, void* udata)
 {
 	PRINT_NAME();
 	if (eq == nullptr)

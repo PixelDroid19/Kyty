@@ -87,7 +87,7 @@ static bool EopTraceEnabled()
 	return enabled;
 }
 
-void* RenderContext::BeginEopEqRegistration(LibKernel::EventQueue::KernelEqueueIdentity identity, int id)
+void* RenderContext::BeginEopEqRegistration(Kernel::EventQueue::KernelEqueueIdentity identity, int id)
 {
 	Core::LockGuard lock(m_eop_mutex);
 
@@ -138,7 +138,7 @@ void RenderContext::CancelEopEqRegistration(void* registration_ptr)
 	delete registration;
 }
 
-void RenderContext::DeleteEopEqRegistration(void* registration_ptr, LibKernel::EventQueue::KernelEqueue eq, int id)
+void RenderContext::DeleteEopEqRegistration(void* registration_ptr, Kernel::EventQueue::KernelEqueue eq, int id)
 {
 	auto*              registration = static_cast<EopEqRegistration*>(registration_ptr);
 	EopEqRegistration* release      = nullptr;
@@ -176,7 +176,7 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal)
 {
 	struct PendingTrigger
 	{
-		LibKernel::EventQueue::KernelEqueuePin pin;
+		Kernel::EventQueue::KernelEqueuePin pin;
 		int                                    id = GRAPHICS_EVENT_EOP;
 	};
 	std::vector<PendingTrigger> triggers;
@@ -189,7 +189,7 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal)
 			                                                                    : entry->id == GRAPHICS_EVENT_QUEUED_GRAPHICS_INTERRUPT);
 			if (selected && entry->published && !entry->deleted)
 			{
-				auto pin = LibKernel::EventQueue::KernelAcquireEqueue(entry->identity);
+				auto pin = Kernel::EventQueue::KernelAcquireEqueue(entry->identity);
 				if (pin)
 				{
 					triggers.push_back(PendingTrigger {std::move(pin), entry->id});
@@ -205,8 +205,8 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal)
 		{
 		trigger_data = reinterpret_cast<void*>(Kernel::TimePort::GetCounter());
 		}
-		const auto result = LibKernel::EventQueue::KernelTriggerEvent(trigger.pin, static_cast<uintptr_t>(trigger.id),
-		                                                              LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
+		const auto result = Kernel::EventQueue::KernelTriggerEvent(trigger.pin, static_cast<uintptr_t>(trigger.id),
+		                                                              Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
 		                                                              trigger_data);
 		EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
 	}

@@ -100,13 +100,13 @@ static void Init(const Scripts::ScriptVar& cfg)
 	auto* config      = Config::ConfigSubsystem::Instance();
 	auto* controller  = Libs::Controller::ControllerSubsystem::Instance();
 	auto* core        = Core::CoreSubsystem::Instance();
-	auto* file_system = Libs::LibKernel::FileSystem::FileSystemSubsystem::Instance();
+	auto* file_system = Kernel::FileSystem::FileSystemSubsystem::Instance();
 	auto* graphics    = Libs::Graphics::GraphicsSubsystem::Instance();
 	auto* log         = Log::LogSubsystem::Instance();
-	auto* memory      = Libs::LibKernel::Memory::MemorySubsystem::Instance();
+	auto* memory      = Kernel::Memory::MemorySubsystem::Instance();
 	auto* network     = Libs::Network::NetworkSubsystem::Instance();
 	auto* profiler    = Profiler::ProfilerSubsystem::Instance();
-	auto* pthread     = Libs::LibKernel::PthreadSubsystem::Instance();
+	auto* pthread     = Kernel::PthreadSubsystem::Instance();
 	auto* scripts     = Scripts::ScriptsSubsystem::Instance();
 	auto* timer       = Loader::Timer::TimerSubsystem::Instance();
 
@@ -182,7 +182,7 @@ KYTY_SCRIPT_FUNC(kyty_load_elf_func)
 
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
 
-	const auto real_path = Libs::LibKernel::FileSystem::GetRealFilename(elf.ToString());
+	const auto real_path = Kernel::FileSystem::GetRealFilename(elf.ToString());
 	auto*      program   = Loader::ProgramLoader::Load(rt, real_path);
 
 	// Thin orchestration: after the primary executable is loaded, the lifecycle
@@ -206,7 +206,7 @@ KYTY_SCRIPT_FUNC(kyty_load_elf_func)
 	{
 		auto save_name = Scripts::ArgGetVar(2).ToString();
 
-		rt->SaveProgram(program, Libs::LibKernel::FileSystem::GetRealFilename(save_name));
+		rt->SaveProgram(program, Kernel::FileSystem::GetRealFilename(save_name));
 	}
 
 	return 0;
@@ -223,7 +223,7 @@ KYTY_SCRIPT_FUNC(kyty_save_main_elf_func)
 
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
 
-	rt->SaveMainProgram(Libs::LibKernel::FileSystem::GetRealFilename(elf.ToString()));
+	rt->SaveMainProgram(Kernel::FileSystem::GetRealFilename(elf.ToString()));
 
 	return 0;
 }
@@ -397,7 +397,7 @@ KYTY_SCRIPT_FUNC(kyty_mount_func)
 		EXIT("game-run validation failed: %s (%s)\n", validated.error.reason, validated.error.code);
 	}
 
-	Libs::LibKernel::FileSystem::Mount(folder_s, point_s);
+	Kernel::FileSystem::Mount(folder_s, point_s);
 
 	return 0;
 }

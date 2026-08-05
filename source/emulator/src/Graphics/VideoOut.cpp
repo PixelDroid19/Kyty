@@ -61,7 +61,7 @@ const char* VideoOutRegisteredHostExtentStatusName(VideoOutRegisteredHostExtentS
 	return "unknown";
 }
 
-namespace EventQueue = LibKernel::EventQueue;
+namespace EventQueue = Kernel::EventQueue;
 
 namespace {
 
@@ -1731,7 +1731,7 @@ KYTY_SYSV_ABI int VideoOutSetFlipRate(int handle, int rate)
 	return Kernel::OK;
 }
 
-static void flip_event_reset_func(LibKernel::EventQueue::KernelEqueueEvent* event)
+static void flip_event_reset_func(Kernel::EventQueue::KernelEqueueEvent* event)
 {
 	EXIT_IF(event == nullptr);
 	event->triggered    = false;
@@ -1753,7 +1753,7 @@ static intptr_t make_video_out_event_data(intptr_t current_data, void* trigger_d
 	return static_cast<intptr_t>(timestamp | (counter << 12u) | ((payload & 0x0000ffffffffffffULL) << 16u));
 }
 
-static void flip_event_delete_func(EventQueue::KernelEqueue eq, LibKernel::EventQueue::KernelEqueueEvent* event)
+static void flip_event_delete_func(EventQueue::KernelEqueue eq, Kernel::EventQueue::KernelEqueueEvent* event)
 {
 	EXIT_IF(event == nullptr);
 	EXIT_IF(event->filter.data == nullptr);
@@ -1784,7 +1784,7 @@ static void flip_event_delete_func(EventQueue::KernelEqueue eq, LibKernel::Event
 	delete release;
 }
 
-static void flip_event_trigger_func(LibKernel::EventQueue::KernelEqueueEvent* event, void* trigger_data)
+static void flip_event_trigger_func(Kernel::EventQueue::KernelEqueueEvent* event, void* trigger_data)
 {
 	EXIT_IF(event == nullptr);
 
@@ -1803,7 +1803,7 @@ static void flip_event_trigger_func(LibKernel::EventQueue::KernelEqueueEvent* ev
 	event->triggered = true;
 }
 
-static void vblank_event_reset_func(LibKernel::EventQueue::KernelEqueueEvent* event)
+static void vblank_event_reset_func(Kernel::EventQueue::KernelEqueueEvent* event)
 {
 	EXIT_IF(event == nullptr);
 	event->triggered    = false;
@@ -1811,7 +1811,7 @@ static void vblank_event_reset_func(LibKernel::EventQueue::KernelEqueueEvent* ev
 	event->event.data   = 0;
 }
 
-static void vblank_event_delete_func(EventQueue::KernelEqueue eq, LibKernel::EventQueue::KernelEqueueEvent* event)
+static void vblank_event_delete_func(EventQueue::KernelEqueue eq, Kernel::EventQueue::KernelEqueueEvent* event)
 {
 	EXIT_IF(event == nullptr);
 	EXIT_IF(event->filter.data == nullptr);
@@ -1842,7 +1842,7 @@ static void vblank_event_delete_func(EventQueue::KernelEqueue eq, LibKernel::Eve
 	delete release;
 }
 
-static void vblank_event_trigger_func(LibKernel::EventQueue::KernelEqueueEvent* event, void* trigger_data)
+static void vblank_event_trigger_func(Kernel::EventQueue::KernelEqueueEvent* event, void* trigger_data)
 {
 	EXIT_IF(event == nullptr);
 
@@ -1931,7 +1931,7 @@ KYTY_SYSV_ABI int VideoOutAddFlipEvent(EventQueue::KernelEqueue eq, int handle, 
 	return result;
 }
 
-KYTY_SYSV_ABI int VideoOutAddVblankEvent(LibKernel::EventQueue::KernelEqueue eq, int handle, void* udata)
+KYTY_SYSV_ABI int VideoOutAddVblankEvent(Kernel::EventQueue::KernelEqueue eq, int handle, void* udata)
 {
 	PRINT_NAME();
 
@@ -2686,7 +2686,7 @@ constexpr uint64_t kVideoOutOutputModeDefault   = 1;
 constexpr uint64_t kVideoOutOutputMode119_88Hz  = 0xF;
 constexpr size_t   kVideoOutOutputOptionsSize   = 0x40;
 
-bool IsValidVideoOutEvent(const LibKernel::EventQueue::KernelEvent* ev)
+bool IsValidVideoOutEvent(const Kernel::EventQueue::KernelEvent* ev)
 {
 	return ev != nullptr && ev->filter == EventQueue::KERNEL_EVFILT_VIDEO_OUT &&
 	       (ev->ident == VIDEO_OUT_EVENT_FLIP || ev->ident == VIDEO_OUT_EVENT_VBLANK);
@@ -2694,7 +2694,7 @@ bool IsValidVideoOutEvent(const LibKernel::EventQueue::KernelEvent* ev)
 
 } // namespace
 
-KYTY_SYSV_ABI int VideoOutDeleteVblankEvent(LibKernel::EventQueue::KernelEqueue eq, int handle)
+KYTY_SYSV_ABI int VideoOutDeleteVblankEvent(Kernel::EventQueue::KernelEqueue eq, int handle)
 {
 	PRINT_NAME();
 
@@ -2732,7 +2732,7 @@ KYTY_SYSV_ABI int VideoOutDeleteVblankEvent(LibKernel::EventQueue::KernelEqueue 
 	return Kernel::OK;
 }
 
-KYTY_SYSV_ABI int VideoOutDeleteFlipEvent(LibKernel::EventQueue::KernelEqueue eq, int handle)
+KYTY_SYSV_ABI int VideoOutDeleteFlipEvent(Kernel::EventQueue::KernelEqueue eq, int handle)
 {
 	PRINT_NAME();
 
@@ -2770,7 +2770,7 @@ KYTY_SYSV_ABI int VideoOutDeleteFlipEvent(LibKernel::EventQueue::KernelEqueue eq
 	return Kernel::OK;
 }
 
-KYTY_SYSV_ABI int VideoOutGetEventId(const LibKernel::EventQueue::KernelEvent* ev)
+KYTY_SYSV_ABI int VideoOutGetEventId(const Kernel::EventQueue::KernelEvent* ev)
 {
 	PRINT_NAME();
 
@@ -2787,7 +2787,7 @@ KYTY_SYSV_ABI int VideoOutGetEventId(const LibKernel::EventQueue::KernelEvent* e
 	return static_cast<int>(ev->ident);
 }
 
-KYTY_SYSV_ABI int VideoOutGetEventData(const LibKernel::EventQueue::KernelEvent* ev, uint64_t* data)
+KYTY_SYSV_ABI int VideoOutGetEventData(const Kernel::EventQueue::KernelEvent* ev, uint64_t* data)
 {
 	PRINT_NAME();
 
@@ -2943,8 +2943,8 @@ KYTY_SYSV_ABI int VideoOutWaitVblank(int handle)
 		start_count = ctx->vblank_status.count;
 	}
 
-	constexpr LibKernel::KernelUseconds frame_us = 16667;
-	for (LibKernel::KernelUseconds waited = 0; waited <= frame_us; waited += 1000)
+	constexpr Kernel::KernelUseconds frame_us = 16667;
+	for (Kernel::KernelUseconds waited = 0; waited <= frame_us; waited += 1000)
 	{
 		{
 			Core::LockGuard config_lock(ctx->mutex);
@@ -2953,7 +2953,7 @@ KYTY_SYSV_ABI int VideoOutWaitVblank(int handle)
 				return Kernel::OK;
 			}
 		}
-		LibKernel::KernelUsleep(1000);
+		Kernel::KernelUsleep(1000);
 	}
 
 	return Kernel::OK;

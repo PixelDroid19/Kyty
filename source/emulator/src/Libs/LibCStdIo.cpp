@@ -19,7 +19,7 @@ KYTY_SYSV_ABI FILE* c_fopen(const char* path, const char* mode)
 		return nullptr;
 	}
 	// Translate mounted guest paths (e.g. /app0/...) to real host paths.
-	String host = LibKernel::FileSystem::GetRealFilename(String::FromUtf8(path));
+	String host = Kernel::FileSystem::GetRealFilename(String::FromUtf8(path));
 	String use  = host.IsEmpty() ? String::FromUtf8(path) : host;
 	FILE*  f    = ::fopen(use.C_Str(), mode);
 	KYTY_LOG_DEBUG("\t fopen('%s' -> '%s', '%s') = %p\n", path, use.C_Str(), mode, static_cast<void*>(f));
@@ -116,7 +116,7 @@ KYTY_SYSV_ABI int c_fputc(int ch, FILE* f)
 
 KYTY_SYSV_ABI int c_remove(const char* p)
 {
-	String host = LibKernel::FileSystem::GetRealFilename(String::FromUtf8(p));
+	String host = Kernel::FileSystem::GetRealFilename(String::FromUtf8(p));
 	return ::remove((host.IsEmpty() ? String::FromUtf8(p) : host).C_Str());
 }
 

@@ -992,7 +992,7 @@ void GameController::Button(int id, uint32_t button, bool down)
 	{
 		auto state = GetLastState();
 
-		state.time = LibKernel::KernelGetProcessTime();
+		state.time = Kernel::KernelGetProcessTime();
 
 		if (down)
 		{
@@ -1014,7 +1014,7 @@ void GameController::Axis(int id, Controller::Axis axis, int value)
 	{
 		auto state = GetLastState();
 
-		state.time = LibKernel::KernelGetProcessTime();
+		state.time = Kernel::KernelGetProcessTime();
 
 		int axis_id = static_cast<int>(axis);
 
@@ -1439,7 +1439,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	if (const char* auto_cross = std::getenv("KYTY_AUTO_CROSS"); auto_cross != nullptr && auto_cross[0] == '1')
 	{
 		static uint64_t first_read = 0;
-		const uint64_t  now        = LibKernel::KernelGetProcessTime();
+		const uint64_t  now        = Kernel::KernelGetProcessTime();
 		if (first_read == 0)
 		{
 			first_read = now;
@@ -1470,7 +1470,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	(void)g_pad_script.Sample(&scripted);
 	const auto script_axis = [](int8_t value) -> uint8_t { return value < 0 ? 0u : (value > 0 ? 255u : 128u); };
 
-	const uint64_t now_ts = LibKernel::KernelGetProcessTime();
+	const uint64_t now_ts = Kernel::KernelGetProcessTime();
 
 	data->buttons                = state.buttons | auto_buttons | scripted.buttons;
 	data->left_stick_x           = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftX))) != 0

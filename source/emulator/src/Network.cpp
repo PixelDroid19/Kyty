@@ -2077,7 +2077,7 @@ struct NpId
 struct NpCreateAsyncRequestParameter
 {
 	size_t                   size;
-	LibKernel::KernelCpumask cpu_affinity_mask;
+	Kernel::KernelCpumask cpu_affinity_mask;
 	int                      thread_priority;
 	uint8_t                  padding[4];
 };

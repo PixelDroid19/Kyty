@@ -377,7 +377,7 @@ void GraphicsRenderPrepareWriteBack(CommandBuffer* buffer)
 	    nullptr, nullptr);
 }
 
-static void eop_event_reset_func(LibKernel::EventQueue::KernelEqueueEvent* event)
+static void eop_event_reset_func(Kernel::EventQueue::KernelEqueueEvent* event)
 {
 	EXIT_IF(event == nullptr);
 	event->triggered    = false;
@@ -385,11 +385,11 @@ static void eop_event_reset_func(LibKernel::EventQueue::KernelEqueueEvent* event
 	event->event.data   = 0;
 }
 
-static void eop_event_delete_func(LibKernel::EventQueue::KernelEqueue eq, LibKernel::EventQueue::KernelEqueueEvent* event)
+static void eop_event_delete_func(Kernel::EventQueue::KernelEqueue eq, Kernel::EventQueue::KernelEqueueEvent* event)
 {
 	EXIT_IF(event == nullptr);
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_NOT_IMPLEMENTED(event->event.filter != LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
+	EXIT_NOT_IMPLEMENTED(event->event.filter != Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
 	// Only EOP-class ids are tracked for TriggerEopEvent; other graphics ids
 	// are passive registrations until a producer is wired.
 	if (IsGraphicsEopEventId(static_cast<int>(event->event.ident)))
@@ -399,7 +399,7 @@ static void eop_event_delete_func(LibKernel::EventQueue::KernelEqueue eq, LibKer
 	}
 }
 
-static void eop_event_trigger_func(LibKernel::EventQueue::KernelEqueueEvent* event, void* trigger_data)
+static void eop_event_trigger_func(Kernel::EventQueue::KernelEqueueEvent* event, void* trigger_data)
 {
 	EXIT_IF(event == nullptr);
 	event->triggered = true;
@@ -407,10 +407,10 @@ static void eop_event_trigger_func(LibKernel::EventQueue::KernelEqueueEvent* eve
 	event->event.data = reinterpret_cast<intptr_t>(trigger_data);
 }
 
-int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata)
+int GraphicsRenderAddEqEvent(Kernel::EventQueue::KernelEqueue eq, int id, void* udata)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	auto eq_pin = LibKernel::EventQueue::KernelAcquireEqueue(eq);
+	auto eq_pin = Kernel::EventQueue::KernelAcquireEqueue(eq);
 	if (!eq_pin)
 	{
 		return Kernel::KERNEL_ERROR_EBADF;
@@ -420,10 +420,10 @@ int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, voi
 	// Gen5 registers multiple graphics event idents (0 = queued interrupt,
 	// 0x40 = EOP, 0x48 and others observed at device init). Accept any id on the
 	// graphics filter; only EOP-class ids are added to the end-of-pipe list.
-	LibKernel::EventQueue::KernelEqueueEvent event;
+	Kernel::EventQueue::KernelEqueueEvent event;
 	event.triggered                = false;
 	event.event.ident              = static_cast<uintptr_t>(id);
-	event.event.filter             = LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS;
+	event.event.filter             = Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS;
 	event.event.udata              = udata;
 	event.event.fflags             = 0;
 	event.event.data               = id;
@@ -437,7 +437,7 @@ int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, voi
 		event.filter.data = registration;
 	}
 
-	const int result = LibKernel::EventQueue::KernelAddEvent(eq_pin, event);
+	const int result = Kernel::EventQueue::KernelAddEvent(eq_pin, event);
 	if (registration != nullptr)
 	{
 		if (result == Kernel::OK)
@@ -451,11 +451,11 @@ int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, voi
 	return result;
 }
 
-int GraphicsRenderDeleteEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id)
+int GraphicsRenderDeleteEqEvent(Kernel::EventQueue::KernelEqueue eq, int id)
 {
 	EXIT_IF(g_render_ctx == nullptr);
 
-	return LibKernel::EventQueue::KernelDeleteEvent(eq, static_cast<uintptr_t>(id), LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
+	return Kernel::EventQueue::KernelDeleteEvent(eq, static_cast<uintptr_t>(id), Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
 }
 
 void GraphicsRenderClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value)

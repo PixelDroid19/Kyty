@@ -50,7 +50,7 @@ struct CommandBufferState
 
 struct PendingEqueueCompletion
 {
-	LibKernel::EventQueue::KernelEqueueIdentity equeue_identity {};
+	Kernel::EventQueue::KernelEqueueIdentity equeue_identity {};
 	uintptr_t                                   ident            = 0;
 	uintptr_t                                   completion_token = 0;
 };
@@ -421,7 +421,7 @@ static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/
 	}
 
 	Core::String host_path;
-	if (!LibKernel::FileSystem::AprTryGetHostPath(file_id, &host_path))
+	if (!Kernel::FileSystem::AprTryGetHostPath(file_id, &host_path))
 	{
 		KYTY_LOG_DEBUG("\t unknown APR file id\n");
 		return LibKernel::KERNEL_ERROR_ENOENT;
@@ -559,7 +559,7 @@ static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cm
 	if (equeue != nullptr)
 	{
 		auto equeue_pin =
-		    LibKernel::EventQueue::KernelAcquireEqueue(static_cast<LibKernel::EventQueue::KernelEqueue>(equeue));
+		    Kernel::EventQueue::KernelAcquireEqueue(static_cast<Kernel::EventQueue::KernelEqueue>(equeue));
 		if (!equeue_pin)
 		{
 			return LibKernel::KERNEL_ERROR_EBADF;
@@ -602,7 +602,7 @@ int SubmitCommandBuffer(void* cmd_obj, uintptr_t submit_ident)
 			queued.insert(queued.begin(), pending.begin() + static_cast<ptrdiff_t>(i), pending.end());
 			return LibKernel::KERNEL_ERROR_EINVAL;
 		}
-		auto equeue_pin = LibKernel::EventQueue::KernelAcquireEqueue(completion.equeue_identity);
+		auto equeue_pin = Kernel::EventQueue::KernelAcquireEqueue(completion.equeue_identity);
 		if (!equeue_pin)
 		{
 			Core::LockGuard lock(g_ampr_mutex);
@@ -610,8 +610,8 @@ int SubmitCommandBuffer(void* cmd_obj, uintptr_t submit_ident)
 			queued.insert(queued.begin(), pending.begin() + static_cast<ptrdiff_t>(i), pending.end());
 			return LibKernel::KERNEL_ERROR_EBADF;
 		}
-		const int rc = LibKernel::EventQueue::KernelTriggerEvent(
-		    equeue_pin, ident, LibKernel::EventQueue::KERNEL_EVFILT_AMPR,
+		const int rc = Kernel::EventQueue::KernelTriggerEvent(
+		    equeue_pin, ident, Kernel::EventQueue::KERNEL_EVFILT_AMPR,
 		    reinterpret_cast<void*>(completion.completion_token));
 		if (rc != OK)
 		{
