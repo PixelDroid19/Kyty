@@ -4,7 +4,9 @@
 #include "SDL_stdinc.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <ctime>
+#include <system_error>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -45,6 +47,34 @@ std::string ApplicationBasePath()
 	std::string result(base_path);
 	SDL_free(base_path);
 	return result;
+}
+
+std::filesystem::path DefaultCacheDirectory()
+{
+#if defined(_WIN32)
+	if (const char* local_app_data = std::getenv("LOCALAPPDATA"); local_app_data != nullptr && local_app_data[0] != '\0')
+	{
+		return std::filesystem::path(local_app_data) / "Kyty" / "Cache";
+	}
+#elif defined(__APPLE__)
+	if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0')
+	{
+		return std::filesystem::path(home) / "Library" / "Caches" / "Kyty";
+	}
+#else
+	if (const char* xdg_cache = std::getenv("XDG_CACHE_HOME"); xdg_cache != nullptr && xdg_cache[0] != '\0')
+	{
+		return std::filesystem::path(xdg_cache) / "kyty";
+	}
+	if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0')
+	{
+		return std::filesystem::path(home) / ".cache" / "kyty";
+	}
+#endif
+
+	std::error_code error;
+	const auto      temp = std::filesystem::temp_directory_path(error);
+	return error ? std::filesystem::path() : temp / "kyty";
 }
 
 uint64_t PeakRssBytes()

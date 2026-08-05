@@ -4,6 +4,7 @@
 
 #include "Emulator/AtomicFile.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
+#include "Emulator/Host/Platform.h"
 
 #define XXH_INLINE_ALL
 #include <algorithm>
@@ -679,29 +680,7 @@ std::filesystem::path SpirvBinaryCacheDefaultRoot()
 	{
 		return std::filesystem::path(explicit_path);
 	}
-#ifdef _WIN32
-	if (const char* root = std::getenv("LOCALAPPDATA"); root != nullptr && root[0] != '\0')
-	{
-		return std::filesystem::path(root) / "Kyty" / "Cache" / "spirv-v1";
-	}
-#elif defined(__APPLE__)
-	if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0')
-	{
-		return std::filesystem::path(home) / "Library" / "Caches" / "Kyty" / "spirv-v1";
-	}
-#else
-	if (const char* root = std::getenv("XDG_CACHE_HOME"); root != nullptr && root[0] != '\0')
-	{
-		return std::filesystem::path(root) / "kyty" / "spirv-v1";
-	}
-	if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0')
-	{
-		return std::filesystem::path(home) / ".cache" / "kyty" / "spirv-v1";
-	}
-#endif
-	std::error_code error;
-	const auto      temp = std::filesystem::temp_directory_path(error);
-	return error ? std::filesystem::path() : temp / "kyty" / "spirv-v1";
+	return Kyty::Emulator::Host::DefaultCacheDirectory() / "spirv-v1";
 }
 
 SpirvBinaryCacheStore& SpirvBinaryCacheDefaultStore()
