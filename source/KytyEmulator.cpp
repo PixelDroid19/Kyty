@@ -13,6 +13,7 @@
 #include "Emulator/Agent/AgentSubsystem.h"
 #include "Emulator/Audio.h"
 #include "Emulator/Common.h"
+#include "Emulator/ConfigSource.h"
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
 #include "Emulator/Libs/ApplicationHeap.h"
@@ -43,6 +44,37 @@ namespace Kyty::Emulator {
 #ifdef KYTY_EMU_ENABLED
 
 namespace LuaFunc {
+
+// The CLI's Lua host adapts its script value to the neutral configuration
+// source; the runtime never depends on the script engine.
+class LuaConfigSource final: public Config::ConfigSource
+{
+public:
+	explicit LuaConfigSource(const Scripts::ScriptVar& cfg): m_cfg(cfg) {}
+
+	[[nodiscard]] bool Has(const String& key) const override
+	{
+		return !m_cfg.At(key).IsNil();
+	}
+
+	[[nodiscard]] int64_t GetInteger(const String& key) const override
+	{
+		return m_cfg.At(key).ToInteger();
+	}
+
+	[[nodiscard]] bool GetBool(const String& key) const override
+	{
+		return m_cfg.At(key).ToBool();
+	}
+
+	[[nodiscard]] String GetString(const String& key) const override
+	{
+		return m_cfg.At(key).ToString();
+	}
+
+private:
+	const Scripts::ScriptVar& m_cfg;
+};
 
 static bool get_system_content_param_string(const char* name, char* value, size_t value_size)
 {
@@ -121,7 +153,7 @@ static void Init(const Scripts::ScriptVar& cfg)
 		return;
 	}
 
-	Config::Load(cfg);
+	Config::Load(LuaConfigSource(cfg));
 
 	slist->Add(audio, {core, log, pthread, memory});
 	slist->Add(agent, {core, controller, graphics});
@@ -159,7 +191,7 @@ KYTY_SCRIPT_FUNC(kyty_load_cfg_func)
 
 	Scripts::ScriptVar cfg = Scripts::ArgGetVar(0);
 
-	Config::Load(cfg);
+	Config::Load(LuaConfigSource(cfg));
 
 	return 0;
 }

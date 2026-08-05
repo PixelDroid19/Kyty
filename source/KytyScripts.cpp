@@ -17,6 +17,12 @@
 #include "Emulator/Emulator.h"
 #include "Emulator/DevTools/Runtime.h"
 
+#if KYTY_PROJECT != KYTY_PROJECT_BUILD_TOOLS
+namespace Kyty::Emulator {
+void kyty_reg();
+} // namespace Kyty::Emulator
+#endif
+
 #include "KytyBuildInfo.h"
 
 #include <cstdlib>
@@ -187,6 +193,11 @@ int main(int argc, char* argv[])
 	} else
 	{
 		register_unit_test_script();
+#if KYTY_PROJECT != KYTY_PROJECT_BUILD_TOOLS
+		// The emulator's Lua bridge (kyty_init, kyty_load_elf, ...) belongs to
+		// this CLI executable, not to the runtime archive.
+		Kyty::Emulator::kyty_reg();
+#endif
 		if (argc >= 2)
 		{
 			StringList args;

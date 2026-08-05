@@ -10,11 +10,9 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-namespace Kyty::Scripts {
-class ScriptVar;
-} // namespace Kyty::Scripts
-
 namespace Kyty::Config {
+
+class ConfigSource;
 
 KYTY_SUBSYSTEM_DEFINE(Config);
 
@@ -52,7 +50,7 @@ enum class PresentationFilter
 	Nearest
 };
 
-void Load(const Scripts::ScriptVar& cfg);
+void Load(const ConfigSource& cfg);
 
 // The primary guest executable establishes this once per runtime session.
 // A different platform is rejected so PS4 cannot remain an implicit default.

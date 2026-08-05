@@ -1,8 +1,8 @@
 #include "Emulator/Config.h"
+#include "Emulator/ConfigSource.h"
 
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/MagicEnum.h"
-#include "Kyty/Scripts/Scripts.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -53,41 +53,37 @@ KYTY_SUBSYSTEM_UNEXPECTED_SHUTDOWN(Config) {}
 KYTY_SUBSYSTEM_DESTROY(Config) {}
 
 template <class T>
-void LoadInt(T& dst, const Scripts::ScriptVar& cfg, const String& key)
+void LoadInt(T& dst, const ConfigSource& cfg, const String& key)
 {
-	auto var = cfg.At(key);
-	if (!var.IsNil())
+	if (cfg.Has(key))
 	{
-		dst = static_cast<T>(var.ToInteger());
+		dst = static_cast<T>(cfg.GetInteger(key));
 	}
 }
 
-void LoadBool(bool& dst, const Scripts::ScriptVar& cfg, const String& key)
+void LoadBool(bool& dst, const ConfigSource& cfg, const String& key)
 {
-	auto var = cfg.At(key);
-	if (!var.IsNil())
+	if (cfg.Has(key))
 	{
-		dst = var.ToBool();
-	}
-}
-
-template <class T>
-void LoadEnum(T& dst, const Scripts::ScriptVar& cfg, const String& key)
-{
-	auto var = cfg.At(key);
-	if (!var.IsNil())
-	{
-		dst = Core::EnumValue(var.ToString(), dst);
+		dst = cfg.GetBool(key);
 	}
 }
 
 template <class T>
-void LoadStrictEnum(T& dst, const Scripts::ScriptVar& cfg, const String& key)
+void LoadEnum(T& dst, const ConfigSource& cfg, const String& key)
 {
-	auto var = cfg.At(key);
-	if (!var.IsNil())
+	if (cfg.Has(key))
 	{
-		const auto text  = var.ToString();
+		dst = Core::EnumValue(cfg.GetString(key), dst);
+	}
+}
+
+template <class T>
+void LoadStrictEnum(T& dst, const ConfigSource& cfg, const String& key)
+{
+	if (cfg.Has(key))
+	{
+		const auto text  = cfg.GetString(key);
 		const auto value = Core::EnumValue(text, dst);
 		if (Core::EnumName(value) != text)
 		{
@@ -97,16 +93,15 @@ void LoadStrictEnum(T& dst, const Scripts::ScriptVar& cfg, const String& key)
 	}
 }
 
-void LoadStr(String& dst, const Scripts::ScriptVar& cfg, const String& key)
+void LoadStr(String& dst, const ConfigSource& cfg, const String& key)
 {
-	auto var = cfg.At(key);
-	if (!var.IsNil())
+	if (cfg.Has(key))
 	{
-		dst = var.ToString();
+		dst = cfg.GetString(key);
 	}
 }
 
-void Load(const Scripts::ScriptVar& cfg)
+void Load(const ConfigSource& cfg)
 {
 	LoadInt(g_config->screen_width, cfg, U"ScreenWidth");
 	LoadInt(g_config->screen_height, cfg, U"ScreenHeight");

@@ -62,6 +62,7 @@ list(REMOVE_ITEM emulator_src
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/SystemContentPort.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/VideoFrameMemory.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/PresentationStats.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Kyty.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/Profiler.cpp"
 )
 
@@ -82,7 +83,7 @@ add_library(kyty_graphics STATIC
 )
 add_library(kyty_hle STATIC ${hle_src} ${hle_domain_src})
 add_library(kyty_audio_video_backend STATIC src/AudioVideoBackend.cpp)
-add_library(emulator STATIC ${emulator_src} src/Profiler.cpp)
+add_library(emulator STATIC ${emulator_src})
 
 target_sources(kyty_host PRIVATE
 	$<TARGET_OBJECTS:imgui_sdl_backend_obj>
@@ -247,7 +248,6 @@ target_link_libraries(emulator
 	kyty_audio_video_backend
 	core
 	math
-	scripts
 	vulkan-1
 	spirv-tools-opt
 	spirv-tools

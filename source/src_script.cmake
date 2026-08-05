@@ -1,5 +1,7 @@
 set(KYTY_SCRIPT_SRC
 	KytyScripts.cpp
+	KytyEmulator.cpp
+	KytyProfiler.cpp
 )
 
 if(KYTY_BUILD_UNIT_TESTS)
